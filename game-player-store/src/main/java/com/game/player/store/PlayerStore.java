@@ -384,7 +384,7 @@ public class PlayerStore {
                     throw new IllegalStateException("完整场景准入未写入唯一行");
             } else if (!"OPEN".equals(admission.status()) || admission.protocolVersion() != 1 || admission.saveSeq() != 1
                     || !source.equals(admission.sourceInstance())
-                    || !Arrays.equals(originalBytes, mapper.selectFinalAdmissionProto(playerId, expectedEpoch))) return Optional.empty();
+                    || !Arrays.equals(originalBytes, mapper.selectFinalAdmissionProto(playerId, expectedEpoch).orElse(null))) return Optional.empty();
             return Optional.of(new SceneLoad(row, loadState(playerId)));
         }, Optional.empty());
     }
@@ -749,7 +749,7 @@ public class PlayerStore {
             FinalSaveRow admission = mapper.selectFinalSave(playerId, epoch);
             if (admission != null && (!"OPEN".equals(admission.status()) || admission.protocolVersion() != 1
                     || admission.saveSeq() != 1 || !original.getSceneInstanceId().equals(admission.sourceInstance())
-                    || !Arrays.equals(originalBytes, mapper.selectFinalAdmissionProto(playerId, epoch)))) return false;
+                    || !Arrays.equals(originalBytes, mapper.selectFinalAdmissionProto(playerId, epoch).orElse(null)))) return false;
             return mapper.releaseOwner(playerId, epoch, clockMs.getAsLong()) == 1;
         }, false);
     }

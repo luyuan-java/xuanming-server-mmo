@@ -2455,3 +2455,5 @@ home与物理机房是两条轴：票的zone固定首次SQL player.zone_id，Tea
 Java Team 的 4/5 分别对应已确证原 F 的正常结束/失败取消，角色投影只有 state=2 才算共同终局；父记录已终局而角色仍 ACTIVE、缺父及未知状态继续阻塞。Trial 同样要求父 CLOSED3 与角色 CLOSED2 成对终局。Go 版内部状态数字不同，按实际语义对齐。
 
 补充真实 TiDB 回归源码覆盖过期/孤儿/未知大厅阻 Join、Watch、首次 Team launch，己方原大厅范围与持久原件例外，首次邀请反向互斥，以及父终局/角色 ACTIVE 不得放行。未运行生成、编译或测试，等待主控统一验证。
+
+本轮真库使用root确认的owned Docker TiDB端口 `127.0.0.1:24000`。Match两组原生夹具从 `MATCH_IT_TIDB` 读取显式数值loopback端口、校验范围1..65535，先执行 `TIDB_VERSION()` 再创建随机自有库；不默认连4000，不创建新映射或触碰未知服务。非法地址应失败，不能被条件注解静默跳过。

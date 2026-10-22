@@ -1816,12 +1816,14 @@ class PlayerStoreSqlTest {
         CountDownLatch release = new CountDownLatch(1);
         // 「实例 A」：在自己的事务里拿到账号锁后停住，再插第 5 个并提交。
         CompletableFuture<Void> first = CompletableFuture.runAsync(() -> tx.executeWithoutResult(status -> {
+            store.lockRoutes(List.of(3000L), List.of(1));
             assertThat(mapper.lockAccount(ACCOUNT)).isEqualTo(ACCOUNT);
             locked.countDown();
             await(release);
             PlayerRow row = new PlayerRow();
             row.setPlayerId(3000);
             row.setAccount(ACCOUNT);
+            row.setZoneId(1);
             row.setName("第五个");
             row.setCreatedAt(CLOCK.get());
             row.setUpdatedAt(CLOCK.get());
@@ -1833,10 +1835,11 @@ class PlayerStoreSqlTest {
         PlayerRow sixth = new PlayerRow();
         sixth.setPlayerId(3001);
         sixth.setAccount(ACCOUNT);
+        sixth.setZoneId(1);
         CompletableFuture<PlayerStore.CreateOutcome> second =
                 CompletableFuture.supplyAsync(() -> store.createPlayerWithinCap(sixth, 5, List.of("第六个")));
         Thread.sleep(300);
-        assertThat(second).as("B 在账号行锁上等待 A").isNotDone();
+        assertThat(second).as("B 在同一提交围栏内等待 A；H2使用更强的meta排他锁").isNotDone();
 
         release.countDown();
         first.get(10, TimeUnit.SECONDS);
@@ -1851,6 +1854,7 @@ class PlayerStoreSqlTest {
         PlayerRow row = new PlayerRow();
         row.setPlayerId(9);
         row.setAccount("robot_nobody");
+        row.setZoneId(1);
         assertThat(store.createPlayerWithinCap(row, 5, List.of("无主")).status())
                 .isEqualTo(PlayerStore.CreateStatus.ACCOUNT_MISSING);
         assertThat(store.countPlayers("robot_nobody")).isZero();

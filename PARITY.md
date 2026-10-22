@@ -345,3 +345,5 @@ P0-b主仓账号角色SQL权威45路径已落候选，包括所有现有登录/�
 - 2026-10-21 Match源码收口：全球Watch永久UUID/history/head及固定Add/Remove正证明；Join/挑战/活动原观战退出与pending0、独立有界恢复；Team首Match固定profile/F及Team/Trial入场同P互斥；PVE完整queue unit装箱、F5整队重排/整单取消；Team typed原policy与原SQLhome资格在LIMIT前及提交点复核。Match/评级/来源归档/投榜、Commerce/Listing/Friend写基座补metaS；Trade生产home读真实SQL，相关原生夹具复用唯一M16资源。详见docs/porting/match-spec.md末节与忽略目录内精确manifest。只报告源码/静态状态，未gen/build/test/真库/双区验收；Inbox scene原入场身份另由专属批继续，不把本条等同全部任务完成。
 
 - 2026-10-21 Inbox源码收口：原入箱同P捕获account/revision，终态2/3/4/5永久保留唯一收据，旧UUID跨换主/签发窗不复活；消费整请求scene签名与既有final_save完整admission原件同P核验，空流/无流不跳过，旧空raw不补。普通/强制作废核原owner，强制证明同P读取真实player_state。原生回归覆盖完整字段、签名、P等待换主、旧owner/unknown及永久收据，到账链真实SQL夹具改正式完整load与固定原件。详见reliable-player-inbox设计末节/M18与对应源码manifest；本条仍无编译、测试、实际DDL或双区运行证据。
+
+- 2026-10-21 Chat源码续批：Java game-chat与Go Chat同批改SQL-only Send/Pull，完整原Session账号/修订沿现meta/route/P验证，永久成功UUID与正文同TX提交，固定DB秒限速；限速拒绝不占号。私聊保双方角色号历史，合法换主/ABA新会话不丢历史，对端删除不阻己方Pull；旧owner与旧UUID跨owner均拒绝。SQL直接有界强读、TTL连续窗口、单一不可变policy、缺表/形状/策略分叉拒启；Redis不承担正式真相或历史选择。新增H2行为与显式owned TiDB回归源码，未执行编译/测试/DDL/原生专项，不以旧30模块或H2结果替代本批验证。两版内部SQL表与policy字节各自独立，不混部，仅客户端合同对齐。

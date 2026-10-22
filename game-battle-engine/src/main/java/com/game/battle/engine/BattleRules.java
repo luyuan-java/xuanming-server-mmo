@@ -43,10 +43,14 @@ public final class BattleRules {
     }
 
     /**
-     * 技能能否在回合制战斗里施放（黑名单）：skill_type 的任一位号是被动(0)、持续施法(2)、开关(3) 就不能；
-     * 空列表与其余位号都能。开局过滤玩家技能、提交期校验、6.3 scene 出快照都用它。
+     * 技能能否在回合制战斗里施放（黑名单）：非空 passive_stat 或 skill_type 的任一位号是被动(0)、持续施法(2)、开关(3) 就不能；
+     * 空列表且没有被动属性的旧技能仍能施放。开局过滤玩家技能、提交期校验、6.3 scene 出快照都用它。
      */
     public static boolean isTurnBattleCastableSkill(SkillTable skillRow) {
+        // 职业被动的位号 0 会被导表器当空槽省略；与 C++ 同样以正式 passive_stat 判定，不读展示分类。
+        if (!skillRow.getPassiveStat().isEmpty()) {
+            return false;
+        }
         for (int skillTypeBit : skillRow.getSkillTypeList()) {
             if (skillTypeBit == BattleConstants.SKILL_TYPE_BIT_PASSIVE
                     || skillTypeBit == BattleConstants.SKILL_TYPE_BIT_TOGGLE

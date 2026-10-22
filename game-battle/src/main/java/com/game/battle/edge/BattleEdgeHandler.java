@@ -74,6 +74,8 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
     /** null = 还没建连，或被并发上限拒掉（从未分配会话）。 */
     private DirectSession session;
     private BattleTicketPayload verifiedPayload;
+    /** 本次read内，原连接已核槽的成功业务请求触发正常摘槽；只允许后续140回空态，绝不再访问房间。 */
+    private boolean terminalStateReplyThisRead;
     private com.game.proto.match.NetworkProbeGrant probeGrant;
     private com.google.protobuf.ByteString probeNonce;
     private int probeSamples,probeMaxRtt;
@@ -98,6 +100,7 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
 
     /** 一次读到的字节已经解码、分发完（{@link EdgeInboundGuard}）：房间在这次读里发起的优雅关闭从这里生效，下一次读到的字节作废。 */
     void afterInboundRead() {
+        terminalStateReplyThisRead = false;
         DirectSession s = session;
         if (s != null) {
             s.applyRequestedClose();
@@ -343,7 +346,8 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
             s.forceClose(Disconnect.REQUEST_BEFORE_VERIFY);
             return;
         }
-        if(!rooms.currentDirect(verifiedPayload,s)){
+        boolean terminalStateReply = terminalStateReplyThisRead && s.roomRequestedTerminalClose();
+        if(!terminalStateReply && !rooms.currentDirect(verifiedPayload,s)){
             s.forceClose(Disconnect.REPLACED);
             return;
         }
@@ -365,6 +369,10 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
             rejectRequest(s, request, null, TIP_INVALID_PARAMETER, RequestResult.NOT_ALLOWED, EdgeRejectReason.MESSAGE_ID_NOT_ALLOWED);
             return;
         }
+        if (terminalStateReply && upstream != Upstream.GET_BATTLE_STATE) {
+            s.forceClose(Disconnect.REPLACED);
+            return;
+        }
         // ④ 请求体解析 → 交给房间 → 处理器返回之后写应答
         long playerId = s.playerId();
         ByteString body = request.getBody();
@@ -382,7 +390,8 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
                 case GET_BATTLE_STATE -> {
                     GetBattleStateRequest req = GetBattleStateRequest.parseFrom(body);
                     if(req.getBattleId()!=s.battleId()){s.forceClose(Disconnect.REPLACED);return;}
-                    BattleStateS2C resp = rooms.getState(playerId, req);
+                    // 原请求已正常终结且本次read尚未结束：回复空态，不读取后来同player的新连接/观战操作。
+                    BattleStateS2C resp = terminalStateReply ? BattleStateS2C.getDefaultInstance() : rooms.getState(playerId, req);
                     response = resp;
                     businessError = false;
                 }
@@ -407,6 +416,9 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
             return;
         }
         metrics.clientRequest(upstream, businessError ? RequestResult.BUSINESS_ERROR : RequestResult.OK);
+        if (!businessError && s.roomRequestedTerminalClose()) {
+            terminalStateReplyThisRead = true;
+        }
         // R2：处理器里推出的帧已经先写；房间若在处理器里优雅关闭了这条连接，FIN 排在这条应答之后（R3）
         s.writeDirect(BattleFrames.reply(request, response));
     }

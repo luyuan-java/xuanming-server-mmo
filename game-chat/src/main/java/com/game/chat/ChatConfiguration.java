@@ -2,12 +2,11 @@ package com.game.chat;
 
 import com.game.chat.metrics.ChatMetrics;
 import com.game.chat.service.ChatService;
-import com.game.chat.store.RedissonChatStore;
+import com.game.chat.store.JdbcChatStore;
 import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.RedisKeys;
 import io.micrometer.core.instrument.MeterRegistry;
-import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
@@ -30,10 +29,9 @@ public class ChatConfiguration {
     }
 
     @Bean
-    public ChatService chatService(RedissonClient redis, RedisKeys keys, ChatMetrics metrics, ChatProperties props) {
-        return new ChatService(new RedissonChatStore(redis), metrics, props.maxContentBytes(), props.rateLimitPerSecond(),
-                props.historyMaxEntries(), props.historyTtl(), props.historyDefaultLimit(), props.historyMaxLimit(),
-                props.requestIdTtl(), System::currentTimeMillis, keys, props.sensitiveWords());
+    @org.springframework.context.annotation.DependsOn("chatSqlReady")
+    public ChatService chatService(JdbcChatStore store, RedisKeys keys, ChatMetrics metrics, ChatProperties props) {
+        return new ChatService(store, metrics, props, keys);
     }
 
     @Bean

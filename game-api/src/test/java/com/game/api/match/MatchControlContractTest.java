@@ -50,13 +50,15 @@ class MatchControlContractTest {
     }
 
     @Test
-    void 建票应答的缺省值不是全员建成() {
+    void 建票应答的缺省值不是全员建成() throws Exception {
         assertThat(TeamTicketsReply.getDefaultInstance().getStatus()).isEqualTo(TeamTicketsStatus.TEAM_TICKETS_UNSPECIFIED);
         assertThat(TeamTicketsStatus.TEAM_TICKETS_UNSPECIFIED.getNumber()).isZero();
         assertThat(TeamTicketsStatus.TEAM_TICKETS_CREATED.getNumber()).isEqualTo(1);
         assertThat(TeamTicketsStatus.TEAM_TICKETS_FAILED.getNumber()).isEqualTo(2);
         assertThat(TeamTicketsStatus.TEAM_TICKETS_EXPIRED.getNumber()).isEqualTo(3);
-        assertThat(Arrays.stream(TeamTicketsStatus.values()).filter(v -> v != TeamTicketsStatus.UNRECOGNIZED)).hasSize(4);
+        assertThat(TeamTicketsStatus.TEAM_TICKETS_QUEUED.getNumber()).isEqualTo(4);
+        assertThat(Arrays.stream(TeamTicketsStatus.values()).filter(v -> v != TeamTicketsStatus.UNRECOGNIZED)).hasSize(5);
+        assertThat(TeamTicketsReply.parseFrom(new byte[] {0x08, 0x04}).getStatus()).isEqualTo(TeamTicketsStatus.TEAM_TICKETS_QUEUED);
     }
 
     @Test

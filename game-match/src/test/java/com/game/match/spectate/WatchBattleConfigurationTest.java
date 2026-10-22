@@ -17,6 +17,7 @@ import com.game.match.placement.PlacementDialer;
 import com.game.match.placement.PlacementStore;
 import com.game.match.port.PlayerStatusReader;
 import com.game.match.proto.BattlePlacement;
+import com.game.match.rating.RatingTestDatabase;
 import com.game.match.testing.FakeBattleNode;
 import com.game.match.testing.FakePlacementDialer;
 import com.game.match.testing.FakePlayerStatus;
@@ -33,10 +34,12 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -76,6 +79,7 @@ class WatchBattleConfigurationTest {
     private ApplicationContextRunner runner(Duration requestBudget, MatchProperties.Spectate spectateProps) {
         return new ApplicationContextRunner()
                 .withUserConfiguration(WatchBattleConfiguration.class)
+                .withBean(DataSource.class, () -> RatingTestDatabase.h2WithProfiles(Map.of(PLAYER, "公开观众1001")))
                 .withBean(MatchProperties.class,
                         () -> new MatchProperties(null, requestBudget, null, null, null, null, null, null, null, null, null, null, spectateProps))
                 .withBean(MatchMetrics.class, () -> metrics)
@@ -192,7 +196,7 @@ class WatchBattleConfigurationTest {
             assertThat(battle.addObservers).singleElement().satisfies(add -> {
                 assertThat(add.getBattleId()).isEqualTo(X);
                 assertThat(add.getObserverPlayerId()).isEqualTo(PLAYER);
-                assertThat(add.getObserverName()).isEqualTo("acc-1001");
+                assertThat(add.getObserverName()).isEqualTo("公开观众1001").isNotEqualTo(SESSION.getAccount());
                 assertThat(add.getRouting().getGateInstanceId()).isEqualTo("gate-inst-1");
             });
             assertThat(placementDialer.dials).singleElement().satisfies(dialed -> {

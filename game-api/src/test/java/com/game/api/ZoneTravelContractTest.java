@@ -107,7 +107,14 @@ class ZoneTravelContractTest {
                 .setAccount("a").setPlayerId(5).build().toByteArray());
         assertThat(old.getTicketPlayerId()).isZero();
         assertThat(old.getTicketTargetZoneId()).isZero();
-        assertThat(SessionContext.getDescriptor().getFields()).hasSize(9);
+        assertThat(old.getOwnerRevision()).isZero();
+        assertThat(SessionContext.getDescriptor().getFields()).hasSize(10);
+        FieldDescriptor revision = SessionContext.getDescriptor().findFieldByNumber(10);
+        assertThat(revision.getName()).isEqualTo("owner_revision");
+        assertThat(revision.getType()).isEqualTo(FieldDescriptor.Type.UINT64);
+        out.writeUInt64(10, 17);
+        out.flush();
+        assertThat(context.toBuilder().setOwnerRevision(17).build().toByteArray()).isEqualTo(expected.toByteArray());
     }
 
     @Test

@@ -3,7 +3,7 @@
 # 秘密只从环境变量注入，不写进本文件：
 #   GAME_DUBBO_SECRET        Dubbo 调用方鉴权密钥（必填，与 game-gate 一致；缺失即拒绝启动）
 #
-# ⚠ 历史 LIST 是这类数据的唯一副本：生产 Redis 须 maxmemory-policy=noeviction（同基线 ChatRedis 要求）。
+# 正式聊天读写只认SQL原件；Redis历史列表不再承担聊天真相或强读选择。
 spring:
   application:
     name: game-chat
@@ -12,6 +12,21 @@ spring:
     keep-alive: true
   lifecycle:
     timeout-per-shutdown-phase: 20s
+  # 与玩家归属/路由在同一SQL域；先显式安装db/chat-authority.sql及既有player/route迁移。
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    url: jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?useUnicode=true&characterEncoding=UTF-8
+    username: ${GAME_MYSQL_USERNAME:root}
+    password: ${GAME_MYSQL_PASSWORD:}
+    druid:
+      initial-size: 0
+      max-active: 8
+      max-wait: 1000
+      connect-timeout: 3000
+      socket-timeout: 5000
+  sql:
+    init:
+      mode: never
 
 # 管理端点：http://127.0.0.1:18108/actuator/health 与 /actuator/prometheus。
 server:
@@ -33,14 +48,15 @@ management:
       application: ${spring.application.name}
 
 game:
-  # 按方法热关停（运维止血阀）：每秒全量读 Redis 哈希 game:killswitch；失联超过 60 s 整体放行（fail-open）
+  # 可选Redis热关停默认关闭，避免SQL聊天被Redis启动可用性绑定；需要时由部署显式开启。
   killswitch:
-    enabled: true
+    enabled: false
   advertise-host: 127.0.0.1
   redis:
     address: redis://127.0.0.1:6379
     database: 12
   chat:
+    require-tidb: true
     # 缺省值同 mmorpg go/chat（etc/chat.yaml）。
     max-content-bytes: 512
     rate-limit-per-second: 5

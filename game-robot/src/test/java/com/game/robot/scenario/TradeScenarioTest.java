@@ -202,7 +202,9 @@ class TradeScenarioTest {
                         "CreatePlayerTrade", "ConfirmPlayerTrade", "CreateConsignment", "BuyConsignment", "CancelConsignment",
                         "PlaceMarketOrder", "CancelMarketOrder", "ListMarketOrders", "GetMarketDepth",
                         "CreateAuctionLot", "PlaceAuctionBid", "GetAuctionLot", "CancelAuctionLot",
-                        "BrowseCommerceOffers", "ListTradeMarkets");
+                        "BrowseCommerceOffers", "ListTradeMarkets",
+                        "CreateRmbConsignment", "GetRmbConsignment", "ListRmbConsignments", "BuyRmbConsignment", "CancelRmbConsignment",
+                        "GetRmbOrder", "ListRmbOrders", "CancelRmbOrder", "ListSellerIncomes", "CreateWithdrawal", "GetWithdrawal");
         for (MessageMethod method : jubaozhai) {
             assertThat(method.clientService()).as(method.key()).isTrue();
             Descriptors.FieldDescriptor field = method.responsePrototype().getDescriptorForType().findFieldByName("error_message");

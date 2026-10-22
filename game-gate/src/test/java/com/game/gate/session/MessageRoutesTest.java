@@ -192,10 +192,16 @@ class MessageRoutesTest {
     }
 
     @Test
-    void 聚宝斋4个号路由到trade域_都回包_热关停键与基线同名_199不在白名单() {
+    void 聚宝斋全部35个号路由到trade域_都回包_热关停键与基线同名_199不在白名单() {
         // trade-spec §0.2 / §5.2 / §9.4：ClientPlayerJubaozhai 标了 OptionIsClientProtocolService、没标 OptionIsPlayerService，
-        // 196 / 197 / 198 / 200 整体转给 game-trade；应答都是带 error_message 的业务应答 → 一律回包
-        List<String> methods = List.of("BrowseListings", "GetListingDetail", "SetFavorite", "GetMyShelf","ListOfficialSkus","CreateOfficialOrder","GetCommerceOrder","CancelCommerceOrder","ListCommerceOrders","CreatePlayerTrade","ConfirmPlayerTrade","CreateConsignment","BuyConsignment","CancelConsignment","PlaceMarketOrder","CancelMarketOrder","ListMarketOrders","GetMarketDepth","ListTradeMarkets","CreateAuctionLot","PlaceAuctionBid","GetAuctionLot","CancelAuctionLot","BrowseCommerceOffers");
+        // 普通交易及RMB寄售/订单/收入/提现共35条整体转给game-trade；应答都带error_message → 一律回包。
+        List<String> methods = List.of("BrowseListings", "GetListingDetail", "SetFavorite", "GetMyShelf",
+                "ListOfficialSkus", "CreateOfficialOrder", "GetCommerceOrder", "CancelCommerceOrder", "ListCommerceOrders",
+                "CreatePlayerTrade", "ConfirmPlayerTrade", "CreateConsignment", "BuyConsignment", "CancelConsignment",
+                "PlaceMarketOrder", "CancelMarketOrder", "ListMarketOrders", "GetMarketDepth", "ListTradeMarkets",
+                "CreateAuctionLot", "PlaceAuctionBid", "GetAuctionLot", "CancelAuctionLot", "BrowseCommerceOffers",
+                "CreateRmbConsignment", "GetRmbConsignment", "ListRmbConsignments", "BuyRmbConsignment", "CancelRmbConsignment",
+                "GetRmbOrder", "ListRmbOrders", "CancelRmbOrder", "ListSellerIncomes", "CreateWithdrawal", "GetWithdrawal");
         List<MessageMethod> jubaozhai = registry.all().stream()
                 .filter(m -> m.serviceName().equals("ClientPlayerJubaozhai")).toList();
         assertThat(jubaozhai).as("契约里 ClientPlayerJubaozhai 的方法").extracting(MessageMethod::methodName)

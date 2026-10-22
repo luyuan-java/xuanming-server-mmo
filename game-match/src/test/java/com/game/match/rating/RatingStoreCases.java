@@ -157,6 +157,8 @@ abstract class RatingStoreCases {
         apply(event(9001, MatchModes.ONE_V_ONE, A_WIN, List.of(12002L), List.of(12001L)));
 
         assertThat(ds.calls).extracting(call -> kind(call.sql())).containsExactly(
+                "SELECT generation,writable,fence_shards FROM route_meta WHERE id=1"
+                        + (db.isMysql() ? " LOCK IN SHARE MODE" : " FOR UPDATE"),
                 "插标记", "补行", "补行", "加锁读", "加锁读", "写分", "写分", "回填增量");
         assertThat(ds.params(ENSURE_ROW, 1)).as("补行按玩家号升序，与名单顺序无关").containsExactly(12001L, 12002L);
         assertThat(ds.params(LOCK_ROW, 1)).as("加锁同样升序").containsExactly(12001L, 12002L);

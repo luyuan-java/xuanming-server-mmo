@@ -84,6 +84,12 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- 原生SQL夹具用Spring标准脚本执行器安装唯一route DDL；版本沿根BOM，不影响生产依赖。 -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jdbc</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

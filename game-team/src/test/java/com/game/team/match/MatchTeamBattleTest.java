@@ -239,6 +239,19 @@ class MatchTeamBattleTest {
     }
 
     @Test
+    void 建票已持久排队_返回Queued保留等待语义() {
+        match.ticketsReply = request -> done(TeamTicketsReply.newBuilder()
+                .setStatus(TeamTicketsStatus.TEAM_TICKETS_QUEUED).build());
+
+        Tickets result = battle.createTeamTickets(9, 77, ROSTER, Map.of(A, 3, B, 3, C, 3), ticketIds(), budget());
+
+        assertThat(result).isEqualTo(new Tickets.Queued());
+        assertThat(match.tickets).hasSize(1);
+        assertThat(match.gathers).isEmpty();
+        assertThat(match.releases).isEmpty();
+    }
+
+    @Test
     void 退票_调通回true_对端报错回false不抛() {
         assertThat(battle.releaseTeamTickets(ticketIds(), budget())).isTrue();
         assertThat(match.releases.get(0).request().getTicketIdsMap()).isEqualTo(ticketIds());

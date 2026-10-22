@@ -4,6 +4,10 @@ import com.game.chat.metrics.ChatMetrics;
 import com.game.chat.metrics.ChatMetrics.Channel;
 import com.game.chat.metrics.ChatMetrics.Outcome;
 import com.game.chat.store.ChatStore;
+import com.game.chat.store.JdbcChatStore;
+import com.game.chat.ChatProperties;
+import com.game.api.proto.SessionContext;
+import com.game.common.deadline.Deadline;
 import com.game.common.text.GoSpaces;
 import com.game.discovery.RedisKeys;
 import com.game.proto.TipInfoMessage;
@@ -32,9 +36,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 聊天业务（mmorpg go/chat internal/logic/chat_logic.go，v1：世界频道 + 私聊，PARITY「聊天」行）。
+ * 世界频道与私聊：生产完整Session入口用SQL永久收据、固定秒限速及直接SQL强读历史。
  *
- * <p>发言顺序是刻意的：先做全部纯校验（身份 → 频道 → 内容 → request_id），再按 幂等 → 限速 → 写入 碰 Redis：
+ * <p>SQL提交前以同meta/route/P核原账号与修订；永久UUID先于限速，限速拒绝不落收据。
+ * 私聊历史仍按双方角色号保留，合法换主不丢角色历史；旧账号会话不能借角色号读写。
+ * SQL工作在本模块有界池执行，正文不进日志。以下Redis流程仅保留给既有v1纯逻辑夹具，生产不装配：
  * <ul>
  *   <li>纯校验在前：被拒的请求不消耗限速额度、不占幂等键；</li>
  *   <li>幂等在限速之前：首发已写入（键为 done）的重发无论当前是否超速都回成功（同一请求同一结果）；</li>
@@ -65,6 +71,7 @@ public final class ChatService {
     static final int STORAGE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
 
     private final ChatStore store;
+    private final JdbcChatStore authority;
     private final ChatMetrics metrics;
     private final int maxContentBytes;
     private final int rateLimitPerSecond;
@@ -93,6 +100,23 @@ public final class ChatService {
                 int historyMaxEntries, Duration historyTtl, int historyDefaultLimit, int historyMaxLimit,
                 Duration requestIdTtl, LongSupplier clockMs, RedisKeys keys, List<String> sensitiveWords,
                 LongSupplier nanoClock) {
+        this(store, metrics, maxContentBytes, rateLimitPerSecond, historyMaxEntries, historyTtl, historyDefaultLimit,
+                historyMaxLimit, requestIdTtl, clockMs, keys, sensitiveWords, nanoClock, null);
+    }
+
+    /** 正式入口只用SQL权威；旧Redis接缝保留给窗口/纯校验夹具，不装配为生产数据源。 */
+    public ChatService(JdbcChatStore authority, ChatMetrics metrics, ChatProperties rules, RedisKeys keys) {
+        this(null, metrics, rules.maxContentBytes(), rules.rateLimitPerSecond(), rules.historyMaxEntries(),
+                rules.historyTtl(), rules.historyDefaultLimit(), rules.historyMaxLimit(), rules.requestIdTtl(),
+                System::currentTimeMillis, keys, rules.sensitiveWords(), System::nanoTime,
+                Objects.requireNonNull(authority));
+    }
+
+    private ChatService(ChatStore store, ChatMetrics metrics, int maxContentBytes, int rateLimitPerSecond,
+                int historyMaxEntries, Duration historyTtl, int historyDefaultLimit, int historyMaxLimit,
+                Duration requestIdTtl, LongSupplier clockMs, RedisKeys keys, List<String> sensitiveWords,
+                LongSupplier nanoClock, JdbcChatStore authority) {
+        this.authority = authority;
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
         this.store = store;
         this.metrics = metrics;
@@ -144,36 +168,14 @@ public final class ChatService {
      * @param budgetMs 整请求预算（毫秒）
      */
     public CompletionStage<SendChatResponse> send(long sender, SendChatRequest request, long budgetMs) {
-        ChatMessage msg = request.getMessage();
-        Channel label = channelLabel(msg.getChannelValue());
-        if (sender == 0) {
-            return sendRejected(label, INVALID_PARAMETER, Outcome.NO_SESSION);
-        }
-        if (!request.hasMessage()) {
-            return sendRejected(label, INVALID_PARAMETER, Outcome.BAD_REQUEST);
-        }
-        Resolved resolved = resolveLogKey(keys, msg.getChannelValue(), sender, msg.getTargetPlayerId());
-        if (resolved.key() == null) {
-            return sendRejected(label, resolved.tip(), resolved.outcome());
-        }
-        long target = msg.getChannelValue() == ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE_VALUE ? msg.getTargetPlayerId() : 0;
-        // 按原始字节数限长（存储与带宽按字节算），trim 后不能为空
-        if (msg.getContentBytes().size() > maxContentBytes) {
-            return sendRejected(label, MESSAGE_TOO_LONG, Outcome.TOO_LONG);
-        }
-        String content = GoSpaces.trim(msg.getContent());
-        if (content.isEmpty()) {
-            return sendRejected(label, MESSAGE_TOO_LONG, Outcome.TOO_LONG);
-        }
-        // 先限制原始字节再屏蔽，不能靠中文替换为 * 绕过消息大小门禁；只存屏蔽后的正文。
-        content = contentFilter.mask(content);
+        if (authority != null) return sendRejected(channelLabel(request.getMessage().getChannelValue()), INVALID_PARAMETER, Outcome.NO_SESSION);
+        PreparedSend prepared = prepare(sender, request);
+        Channel label = channelLabel(request.getMessage().getChannelValue());
+        if (prepared.tip() != 0) return sendRejected(label, prepared.tip(), prepared.outcome());
+        ChatMessage message = prepared.request().getMessage();
+        Resolved resolved = resolveLogKey(keys, message.getChannelValue(), sender, message.getTargetPlayerId());
+        byte[] stored = message.toBuilder().setSendTimeMs(clockMs.getAsLong()).build().toByteArray();
         String requestId = request.getRequestId();
-        if (requestId.getBytes(StandardCharsets.UTF_8).length > MAX_REQUEST_ID_BYTES) {
-            return sendRejected(label, INVALID_PARAMETER, Outcome.BAD_REQUEST);
-        }
-        byte[] stored = ChatMessage.newBuilder()
-                .setSenderPlayerId(sender).setTargetPlayerId(target).setChannelValue(msg.getChannelValue())
-                .setContent(content).setSendTimeMs(clockMs.getAsLong()).build().toByteArray();
         long deadline = nanoClock.getAsLong() + TimeUnit.MILLISECONDS.toNanos(budgetMs);
 
         if (requestId.isEmpty()) {
@@ -192,6 +194,64 @@ public final class ChatService {
                     }
                     return rateLimitAndWrite(sender, label, resolved.key(), stored, claimKey, claimValue, deadline);
                 }).thenCompose(stage -> stage);
+    }
+
+    private record PreparedSend(SendChatRequest request, int tip, Outcome outcome) { }
+
+    /** SQL与既有逻辑夹具共用同一纯校验/屏蔽/规范化，不把调用方声明的sender/time写入原件。 */
+    private PreparedSend prepare(long sender, SendChatRequest request) {
+        ChatMessage msg = request.getMessage();
+        if (sender == 0) {
+            return new PreparedSend(null, INVALID_PARAMETER, Outcome.NO_SESSION);
+        }
+        if (!request.hasMessage()) {
+            return new PreparedSend(null, INVALID_PARAMETER, Outcome.BAD_REQUEST);
+        }
+        Resolved resolved = resolveLogKey(keys, msg.getChannelValue(), sender, msg.getTargetPlayerId());
+        if (resolved.key() == null) {
+            return new PreparedSend(null, resolved.tip(), resolved.outcome());
+        }
+        long target = msg.getChannelValue() == ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE_VALUE ? msg.getTargetPlayerId() : 0;
+        // 按原始字节数限长（存储与带宽按字节算），trim 后不能为空
+        if (msg.getContentBytes().size() > maxContentBytes) {
+            return new PreparedSend(null, MESSAGE_TOO_LONG, Outcome.TOO_LONG);
+        }
+        String content = GoSpaces.trim(msg.getContent());
+        if (content.isEmpty()) {
+            return new PreparedSend(null, MESSAGE_TOO_LONG, Outcome.TOO_LONG);
+        }
+        // 先限制原始字节再屏蔽，不能靠中文替换为 * 绕过消息大小门禁；只存屏蔽后的正文。
+        content = contentFilter.mask(content);
+        String requestId = request.getRequestId();
+        if (requestId.getBytes(StandardCharsets.UTF_8).length > MAX_REQUEST_ID_BYTES) {
+            return new PreparedSend(null, INVALID_PARAMETER, Outcome.BAD_REQUEST);
+        }
+        ChatMessage normalized = ChatMessage.newBuilder()
+                .setSenderPlayerId(sender).setTargetPlayerId(target).setChannelValue(msg.getChannelValue())
+                .setContent(content).build();
+        return new PreparedSend(request.toBuilder().setMessage(normalized).build(), 0, null);
+    }
+
+    public CompletionStage<SendChatResponse> send(SessionContext original, SendChatRequest request, long budgetMs) {
+        Channel label = channelLabel(request.getMessage().getChannelValue());
+        long sender = original == null ? 0 : original.getPlayerId();
+        PreparedSend prepared = prepare(sender, request);
+        if (prepared.tip() != 0) return sendRejected(label, prepared.tip(), prepared.outcome());
+        if (authority == null) return sendRejected(label, STORAGE, Outcome.STORAGE_ERROR);
+        return authority.send(original, prepared.request(), Deadline.after(budgetMs)).handle((sent, error) -> {
+            if (error != null) {
+                boolean denied = denied(error);
+                metrics.send(label, denied ? Outcome.NO_SESSION : Outcome.STORAGE_ERROR);
+                return reject(SendChatResponse.newBuilder(), denied ? INVALID_PARAMETER : STORAGE);
+            }
+            metrics.send(label, sent.tip() != 0 ? Outcome.RATE_LIMITED : sent.duplicate() ? Outcome.DUPLICATE : Outcome.OK);
+            return sent.tip() == 0 ? SendChatResponse.getDefaultInstance() : reject(SendChatResponse.newBuilder(), sent.tip());
+        });
+    }
+
+    private static boolean denied(Throwable error) {
+        for (Throwable next = error; next != null; next = next.getCause()) if (next instanceof SecurityException) return true;
+        return false;
     }
 
     private CompletionStage<SendChatResponse> rateLimitAndWrite(long sender, Channel label, String logKey, byte[] stored,
@@ -292,6 +352,7 @@ public final class ChatService {
     /** 拉某频道最近 N 条（快照式，新在前；无游标）。私聊键由（会话里的自己, peer）决定：看不到第三者之间的记录。 */
     public CompletionStage<PullChatHistoryResponse> pull(long self, PullChatHistoryRequest request, long budgetMs) {
         Channel label = channelLabel(request.getChannelValue());
+        if (authority != null) return pullRejected(label, INVALID_PARAMETER, Outcome.NO_SESSION);
         if (self == 0) {
             return pullRejected(label, INVALID_PARAMETER, Outcome.NO_SESSION);
         }
@@ -323,12 +384,32 @@ public final class ChatService {
         });
     }
 
+    public CompletionStage<PullChatHistoryResponse> pull(SessionContext original, PullChatHistoryRequest request, long budgetMs) {
+        Channel label = channelLabel(request.getChannelValue());
+        long self = original == null ? 0 : original.getPlayerId();
+        if (self == 0) return pullRejected(label, INVALID_PARAMETER, Outcome.NO_SESSION);
+        Resolved resolved = resolveLogKey(keys, request.getChannelValue(), self, request.getPeerPlayerId());
+        if (resolved.key() == null) return pullRejected(label, resolved.tip(), resolved.outcome());
+        if (authority == null) return pullRejected(label, STORAGE, Outcome.STORAGE_ERROR);
+        long peer = request.getChannel() == ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE ? request.getPeerPlayerId() : 0;
+        return authority.pull(original, peer, clampLimit(request.getLimit()), Deadline.after(budgetMs)).handle((messages, error) -> {
+            if (error != null) {
+                boolean denied = denied(error);
+                metrics.pull(label, denied ? Outcome.NO_SESSION : Outcome.STORAGE_ERROR);
+                return reject(PullChatHistoryResponse.newBuilder(), denied ? INVALID_PARAMETER : STORAGE);
+            }
+            metrics.pull(label, Outcome.OK);
+            return PullChatHistoryResponse.newBuilder().addAllMessages(messages).build();
+        });
+    }
+
     int clampLimit(int requested) {
         if (requested == 0) {
-            return historyDefaultLimit;
+            return Math.min(historyDefaultLimit, ChatProperties.MAX_PULL_MESSAGES);
         }
-        if (Integer.toUnsignedLong(requested) > historyMaxLimit) {
-            return historyMaxLimit;
+        int bounded = Math.min(historyMaxLimit, ChatProperties.MAX_PULL_MESSAGES);
+        if (Integer.toUnsignedLong(requested) > bounded) {
+            return bounded;
         }
         return requested;
     }

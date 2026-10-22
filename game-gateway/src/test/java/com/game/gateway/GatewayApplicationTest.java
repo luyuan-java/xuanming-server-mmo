@@ -13,14 +13,22 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.List;
+import java.util.UUID;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.server.LocalManagementPort;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -42,6 +50,25 @@ import org.springframework.test.web.servlet.MockMvc;
         "spring.datasource.url=jdbc:h2:mem:gwapp;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
         "spring.datasource.username=sa", "spring.datasource.password="})
 class GatewayApplicationTest {
+
+    /** 与 GatewayStoreSqlTest 同形：只给本测试内存库登记显式路由原件，生产缺件仍拒绝启动。 */
+    @TestConfiguration(proxyBeanMethods = false)
+    @Order(Ordered.HIGHEST_PRECEDENCE)
+    static class RouteFixture implements ApplicationRunner {
+        private final DataSource dataSource;
+
+        RouteFixture(DataSource dataSource) {
+            this.dataSource = dataSource;
+        }
+
+        @Override
+        public void run(ApplicationArguments args) throws Exception {
+            try (var connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,zone_id INT UNSIGNED NOT NULL)");
+                com.game.common.player.RouteAuthorityInitializer.initialize(connection, UUID.randomUUID().toString(), List.of(1));
+            }
+        }
+    }
 
     @MockitoBean
     private RedissonClient redisson;

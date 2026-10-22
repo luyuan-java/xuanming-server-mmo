@@ -880,8 +880,10 @@ class ClientDispatcherTest {
         assertThat(queued.getMessageId()).isEqualTo(FRIEND_MSG);
         assertThat(queued.getBody()).isEqualTo(ByteString.copyFromUtf8("queued"));
         assertThat(queued.getSession().getPlayerId()).as("发出时只降不升，解绑后不再以旧角色执行").isZero();
-        assertThat(queued.getSession()).as("除 player_id 降为 0，其余入队会话字段全部保留")
-                .isEqualTo(first.getSession().toBuilder().setPlayerId(0).build());
+        assertThat(first.getSession().getOwnerRevision()).as("入队角色的原修订保留在已发出的请求中").isEqualTo(1);
+        assertThat(queued.getSession().getOwnerRevision()).as("解绑同时撤下角色专属修订，不能借旧修订补权").isZero();
+        assertThat(queued.getSession()).as("角色与其修订降为 0，其余入队会话字段全部保留")
+                .isEqualTo(first.getSession().toBuilder().setPlayerId(0).clearOwnerRevision().build());
     }
 
     @Test

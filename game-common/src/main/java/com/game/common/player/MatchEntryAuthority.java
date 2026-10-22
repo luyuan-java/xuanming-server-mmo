@@ -39,9 +39,9 @@ public final class MatchEntryAuthority {
     }
     private static boolean launchOccupied(Connection c,long player,String ownTeam,long ownTrial,int timeout)throws SQLException{
         // Java 4/5分别是已核原F结束/失败，且Team同tx把role置2；父终局但role仍ACTIVE不是完整释放证明。
-        if(exists(c,timeout,"SELECT 1 FROM team_launch_role r LEFT JOIN team_launch l ON l.request_id=r.request_id WHERE r.player_id=? AND (l.request_id IS NULL OR l.state IS NULL OR r.state IS NULL OR NOT (r.state=2 AND l.state IN(4,5) OR r.state=1 AND l.state IN(1,2,3) AND r.request_id=?)) LIMIT 1",PlayerRouteAuthority.u64(player),ownTeam))return true;
+        if(exists(c,timeout,"SELECT 1 FROM team_launch_role r LEFT JOIN team_launch l ON l.request_id=r.request_id WHERE r.player_id=? AND (l.request_id IS NULL OR l.state IS NULL OR r.state IS NULL OR NOT (r.state=2 AND l.state IN(4,5) OR r.state=1 AND l.state IN(1,2,3) AND r.request_id<>'' AND r.request_id=?)) LIMIT 1",PlayerRouteAuthority.u64(player),ownTeam))return true;
         // Trial角色只有已知CLOSED才释放；原己方PREPARED在Match消费时另核完整原件/摘要/ACTIVE投影。
-        return exists(c,timeout,"SELECT 1 FROM guild_trial_launch_role r LEFT JOIN guild_trial_launch l ON l.request_id=r.request_id WHERE r.player_id=? AND (l.request_id IS NULL OR l.state IS NULL OR r.state IS NULL OR NOT (r.state=2 AND l.state=3 OR r.state=1 AND r.request_id=? AND l.state=1)) LIMIT 1",PlayerRouteAuthority.u64(player),PlayerRouteAuthority.u64(ownTrial));
+        return exists(c,timeout,"SELECT 1 FROM guild_trial_launch_role r LEFT JOIN guild_trial_launch l ON l.request_id=r.request_id WHERE r.player_id=? AND (l.request_id IS NULL OR l.state IS NULL OR r.state IS NULL OR NOT (r.state=2 AND l.state=3 OR r.state=1 AND r.request_id<>0 AND r.request_id=? AND l.state=1)) LIMIT 1",PlayerRouteAuthority.u64(player),PlayerRouteAuthority.u64(ownTrial));
     }
 
     private static GuildTrialLaunchOriginal persistedTrial(Connection c,long request,int timeout)throws SQLException{

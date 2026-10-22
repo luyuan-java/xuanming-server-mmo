@@ -185,15 +185,17 @@ class InboxServiceLifecycleTest {
 
     @Test
     void 只有旧加载结果没有完整准入时不发Fetch或Ack() {
+        var legacyInbox = new InboxService(counted, transport, clock,
+                new InboxService.Settings(true, 30), () -> 9, () -> 500);
         var legacy = new SceneWorld(new FakeSceneTables(), Contracts.IDS, new RecordingSink(), repository,
                 new AtomicLong(9500)::incrementAndGet, clock, SceneMetrics.noop(), PlayerInitializer.NONE,
                 PlayerSnapshots.NONE, PlayerLocations.NONE, TeamFollow.NONE, CrossNodeSwitch.DISABLED,
-                SceneInstances.DISABLED, BattleHooks.NONE, ZoneTravel.DISABLED, inbox);
-        inbox.attach(legacy);
+                SceneInstances.DISABLED, BattleHooks.NONE, ZoneTravel.DISABLED, legacyInbox);
+        legacyInbox.attach(legacy);
         Scene target = legacy.createScene(1);
         repository.put(new PlayerData(8, 1, 1, 1, "", 1, 1, new Vec3(180, 200, 0)));
         legacy.onPlayerEnter(1, SceneWorldTest.enterFrame(12, 8, target.sceneId(), 1));
-        repository.completeAll(); inbox.tick();
+        repository.completeAll(); legacyInbox.tick();
         assertThat(transport.fetches).isEmpty();
         assertThat(transport.acks).isEmpty();
         assertThat(legacy.playerById(8).inboxRuntime().domain(DOMAIN).deferReason())

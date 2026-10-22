@@ -390,7 +390,11 @@ public final class TeamPushes {
             log.warn("[team] 推送批预算已用完，跳过 kind={} player={}", kind, Long.toUnsignedString(playerId));
             return;
         }
-        if(message instanceof TeamSnapshotS2C snapshot)message=snapshot.toBuilder().setView(store.projectMatchView(snapshot.getView(),deadline)).build();
+        if (message instanceof TeamSnapshotS2C snapshot) {
+            message = snapshot.toBuilder()
+                    .setTeam(store.projectMatchView(snapshot.getTeam(), deadline))
+                    .build();
+        }
         MessageContent content = MessageContent.newBuilder().setMessageId(messageIdOf(kind))
                 .setSerializedMessage(message.toByteString()).build();
         PlayerPushes.Outcome outcome;

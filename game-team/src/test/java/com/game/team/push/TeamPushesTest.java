@@ -1,6 +1,9 @@
 package com.game.team.push;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
@@ -13,6 +16,7 @@ import com.game.proto.team.TeamEventType;
 import com.game.proto.team.TeamInviteS2C;
 import com.game.proto.team.TeamMatchState;
 import com.game.proto.team.TeamSnapshotS2C;
+import com.game.proto.team.TeamView;
 import com.game.team.metrics.TeamMetrics;
 import com.game.team.proto.TeamApplicationRecord;
 import com.game.team.proto.TeamInviteRecord;
@@ -158,6 +162,39 @@ class TeamPushesTest {
     }
 
     // ================================================================ 收件人矩阵
+
+    @Test
+    void 快照推送使用当前匹配投影且保留原提交和接收者视图() {
+        TeamStore store = mock(TeamStore.class);
+        List<TeamView> projected = new ArrayList<>();
+        when(store.projectMatchView(any(), any())).thenAnswer(invocation -> {
+            TeamView view = invocation.getArgument(0);
+            projected.add(view);
+            return view.toBuilder().setMatchState(TeamMatchState.TEAM_MATCH_STATE_QUEUED)
+                    .setMatchTargetSize(5).setMatchQueuedAtMs(NOW).setMatchBattleConfigId(21)
+                    .setMatchFillSupported(true).build();
+        });
+        TeamPushes pipeline = new TeamPushes(store, (ids, d) -> Map.of(A, display(true), B, display(true)),
+                recording(PlayerPushes.Outcome.SENT), Runnable::run, metrics, Duration.ofSeconds(3),
+                new TeamPushes.MessageIds(SNAPSHOT, INVITE, EVENT));
+        CommitResult changed = commit(decision(record(A, A, B), List.of(), List.of(A, B), List.of(),
+                TeamChangeReason.TEAM_CHANGE_REASON_APPLICATION_CHANGED, X, false, List.of(), 0, 0));
+
+        pipeline.publish(X, List.of(changed));
+
+        assertThat(projected).hasSize(1);
+        assertThat(sent).hasSize(1);
+        assertThat(sent.getFirst().playerId()).isEqualTo(A);
+        TeamSnapshotS2C snapshot = sent.getFirst().snapshot();
+        assertThat(snapshot.getReason()).isEqualTo(TeamChangeReason.TEAM_CHANGE_REASON_APPLICATION_CHANGED);
+        assertThat(snapshot.getActorId()).isEqualTo(X);
+        assertThat(snapshot.hasTip()).isFalse();
+        assertThat(snapshot.getTeam()).isEqualTo(projected.getFirst().toBuilder()
+                .setMatchState(TeamMatchState.TEAM_MATCH_STATE_QUEUED).setMatchTargetSize(5)
+                .setMatchQueuedAtMs(NOW).setMatchBattleConfigId(21).setMatchFillSupported(true).build());
+        assertThat(snapshot.getTeam().getMembershipEpoch()).isEqualTo(100);
+        assertThat(snapshot.getTeam().getVersion()).isEqualTo(7);
+    }
 
     @Test
     void 建队不推() {

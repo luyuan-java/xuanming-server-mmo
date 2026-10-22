@@ -115,7 +115,7 @@ final class LocalPlayerImporter {
                 throw new Refused("本地角色存在交易锁、账号归属修订损坏或修订耗尽，禁止覆盖");
             }
             if (com.game.player.store.RolePendingFence.blocked(connection,plan.playerId())||com.game.player.store.RolePendingFence.economicBlocked(connection,plan.playerId()))
-                throw new Refused("本地角色仍有历练ACTIVE、待发奖、未终局帮会/邮件资产或匹配在途，禁止覆盖");
+                throw new Refused("本地角色仍有历练ACTIVE、待发奖、未终局交易/帮会/邮件资产或匹配在途，禁止覆盖");
             if (hasBlockingFinalSave(plan.playerId())) {
                 throw new Refused("本地玩家存在未完成或无效的最终存盘，必须先恢复待办再导入");
             }

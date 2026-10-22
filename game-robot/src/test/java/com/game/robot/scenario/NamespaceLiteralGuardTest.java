@@ -30,7 +30,7 @@ import org.junit.jupiter.api.Test;
  *       别处一律构造器注入；</li>
  *   <li>R4：旧的进程级全局机制（静态 get / set、NamespaceHolder、EnvironmentPostProcessor / FailureAnalyzer、spring.factories、
  *       {@code @Tag("namespace")} 与 surefire 钉值）不回来；根 pom 的 surefire 排除会改变部署行为的环境变量（测试与开发者 shell 隔离，不是钉值）；</li>
- *   <li>R5：13 个进程的 JDBC URL 按缺省命名空间解析后与以前逐字节相同（金样），别处的 yaml 不引用 {@code ${game.namespace}}，nacos profile 不配
+ *   <li>R5：15 个SQL进程的 JDBC URL 按缺省命名空间解析后与正式配置逐字节相同（金样），别处的 yaml 不引用 {@code ${game.namespace}}，nacos profile 不配
  *       registry 的 namespace（缺省行为不变：由部署显式给，{@code GAME_NACOS_ADDR} 带 {@code ?namespace=} 或 {@code dubbo.registry.parameters.namespace}）；各 Spring Boot 进程都直接依赖 game-discovery；</li>
  *   <li>R6：compose 预建哪个库由独立的 {@code GAME_MYSQL_INIT_DATABASE} 决定（没设取 game，空值 = 不预建），不读进程租户 {@code GAME_NAMESPACE}。</li>
  * </ul>
@@ -330,8 +330,9 @@ class NamespaceLiteralGuardTest {
 
     // ================================================================ R5：yaml 与模块依赖
 
-    /** JDBC 完整模板金样：原 8 条不变，帮会已切 TiDB host/port，新补邮件、商城、排行榜与收件箱；只替换库名占位符。 */
+    /** JDBC 完整模板金样：保留原参数，登记新增SQL Chat/SceneManager及Team明确TiDB端点；只替换库名占位符。 */
     private static final Map<String, String> GOLDEN_JDBC_URLS = Map.ofEntries(
+            Map.entry("game-chat", "jdbc:mysql://127.0.0.1:3306/game?useUnicode=true&characterEncoding=UTF-8"),
             Map.entry("game-data", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000"
                     + "&socketTimeout=30000&useAffectedRows=true"),
             Map.entry("game-friend", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
@@ -360,13 +361,35 @@ class NamespaceLiteralGuardTest {
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
             Map.entry("game-scene", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
                     + "&connectTimeout=3000&socketTimeout=10000"),
-            Map.entry("game-team", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000"
+            Map.entry("game-scene-manager", "jdbc:mysql://127.0.0.1:4000/game?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8"
+                    + "&connectTimeout=3000&socketTimeout=5000"),
+            Map.entry("game-team", "jdbc:mysql://127.0.0.1:4000/game?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000"
                     + "&socketTimeout=4000"),
             Map.entry("game-trade", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=2"));
 
     private static final Pattern JDBC_URL_LINE = Pattern.compile("^\\s+url:\\s+\"?(jdbc:mysql://[^\"\\s]+)\"?\\s*$");
+
+    /** 只识别已登记的完整URL覆盖入口；其它包装仍无法通过完整进程集合与elsewhere守卫。 */
+    private static String jdbcDefaultLine(String line) {
+        String prefix = "\"${GAME_MYSQL_URL:";
+        if (line.stripLeading().startsWith("url: " + prefix) && line.endsWith("}\"")) {
+            String unwrapped = line.replace(prefix, "\"");
+            return unwrapped.substring(0, unwrapped.length() - 2) + "\"";
+        }
+        return line;
+    }
+
+    @Test
+    void R5_只解已登记的完整URL覆盖_保留库名变量_未知覆盖不被当成JDBC模板() {
+        String direct = "    url: \"jdbc:mysql://127.0.0.1:4000/${game.namespace:game}?useSSL=false\"";
+        assertThat(jdbcDefaultLine("    url: \"${GAME_MYSQL_URL:jdbc:mysql://127.0.0.1:4000/${game.namespace:game}?useSSL=false}\""))
+                .isEqualTo(direct);
+        assertThat(JDBC_URL_LINE.matcher(jdbcDefaultLine(direct)).matches()).isTrue();
+        assertThat(JDBC_URL_LINE.matcher(jdbcDefaultLine("    url: \"${UNKNOWN_SQL_URL:jdbc:mysql://127.0.0.1:4000/${game.namespace:game}?useSSL=false}\"")).matches())
+                .as("未知包装不能静默绕过已登记SQL进程集合").isFalse();
+    }
 
     /** 各模块 src/main/resources 下的 application*.yaml / .yml（相对仓库根的路径 → 内容）。 */
     private static Map<String, String> applicationYamls() throws IOException {
@@ -386,13 +409,13 @@ class NamespaceLiteralGuardTest {
     }
 
     @Test
-    void R5_十三个进程的JDBC_URL库名用命名空间占位符_缺省解析后与以前逐字节相同_别处yaml不引用命名空间() throws IOException {
+    void R5_十五个SQL进程的JDBC_URL库名用命名空间占位符_缺省解析与正式金样逐字节相同_别处yaml不引用命名空间() throws IOException {
         Map<String, String> found = new TreeMap<>();
         List<String> elsewhere = new ArrayList<>();
         applicationYamls().forEach((file, text) -> {
             assertThat(text).as("%s 不把库名写死成 game", file).doesNotContain("3306/game?");
             for (String line : text.split("\n", -1)) {
-                Matcher m = JDBC_URL_LINE.matcher(line);
+                Matcher m = JDBC_URL_LINE.matcher(jdbcDefaultLine(line));
                 if (file.endsWith("/application.yaml") && m.matches() && !found.containsKey(module(file))) {
                     found.put(module(file), m.group(1));
                 } else if (line.contains("${game.namespace")) {
@@ -402,13 +425,13 @@ class NamespaceLiteralGuardTest {
         });
         assertThat(found.keySet()).containsExactlyInAnyOrderElementsOf(GOLDEN_JDBC_URLS.keySet());
         found.forEach((module, raw) -> {
-            // 全模板逐字节钉住主机/端口/参数；已切 TiDB 的服务保留环境变量，旧 8 条金样不改。
+            // 全模板逐字节钉住主机/端口/参数；已切 TiDB 的服务保留环境变量及显式URL覆盖入口。
             assertThat(raw).as(module)
                     .isEqualTo(GOLDEN_JDBC_URLS.get(module).replace("/game?", "/${game.namespace:game}?"));
             assertThat(raw.replace("${game.namespace:game}", "game")).as("%s 缺省解析后与以前逐字节相同", module)
                     .isEqualTo(GOLDEN_JDBC_URLS.get(module));
         });
-        assertThat(elsewhere).as("除 13 条 JDBC URL 之外 yaml 不引用 game.namespace：缺省值只在代码里（KafkaNames / RedisKeys）一个出处").isEmpty();
+        assertThat(elsewhere).as("除15条已登记JDBC URL之外yaml不引用game.namespace：缺省值只在代码里一个出处").isEmpty();
     }
 
     @Test

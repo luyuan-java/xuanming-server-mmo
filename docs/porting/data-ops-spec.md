@@ -394,6 +394,8 @@ ALTER TABLE player_snapshot
 
 不发明新协议：game-data 只是归属协议里的又一个写者（`architecture.md:649-667`）。
 
+2026-10-21 事务接缝补充：普通 `releaseOwnership` 要在同库事务里先持路由锁、再核原纪元和最终存盘，再释放。`AdminOwnership.release` 与 `releaseMany` 使用构造时提供的同源事务模板包裹该调用；不能依赖调用方恰好拿到 Spring 代理。带截止的 `claimOwnership` 和历史恢复仍由 `PlayerStore` 自己建立事务，不能套进释放模板。直接构造 `PlayerStore` 的 SQL 夹具也须按普通写接口合同显式包事务；不删除生产路由锁或把释放失败视作成功。
+
 | 步骤 | 做法 | 为什么成立 |
 |---|---|---|
 | 取得 | `PlayerStore.claimOwnership(p)`，在 game-data 自己的事务模板里调（夺权与读回 epoch 同一事务，不依赖 `@Transactional` 代理）；SQL 条件 `owner_released = 1 OR owner_lease_until < now`（5.2 工作区 `PlayerMapper.java:53-58`） | 夺权本身是原子判定，没有「先查在线、再动手」的 TOCTOU。在线、交出在途（5.2 持有 E+1）都夺不到，基线的冻结闸（`player_rollback_handler.cpp:57-67`）自动满足。**基线的战斗闸（`:68-80`）不由夺权覆盖**：本稿初版以「回合制战斗必在线、所以夺不到」为前提，批次 6.3 落地后不成立——Java 断线即写回并释放、战斗在 game-battle 继续，`ifOnline=reject` 也能夺到「战斗锁仍在」的离线玩家；`kick` 走的顶号通路不看是否在战斗，在线战斗中的玩家同样会被踢下线。裁决（2026-10-05，批次 6.3，已落地）：夺权成功之后另查战斗锁（`BattleLockGate`），锁在的玩家不写、明细 `in_battle`；读不到锁的同样不写（fail-closed），明细是单独的 `battle_lock_unknown`（§13.3） |

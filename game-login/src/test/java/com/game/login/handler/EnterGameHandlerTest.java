@@ -134,7 +134,7 @@ class EnterGameHandlerTest {
         assertThat(response.getForceRenameRequired()).isFalse();
         assertThat(reply.directives()).hasSize(1);
         assertThat(reply.directives().get(0).getEnterScene()).isEqualTo(EnterScene.newBuilder()
-                .setPlayerId(PLAYER).setSceneNodeId(4).setSceneId(99_000_001L).setOwnerEpoch(5).build());
+                .setPlayerId(PLAYER).setSceneNodeId(4).setSceneId(99_000_001L).setOwnerEpoch(5).setOwnerRevision(1).build());
 
         ArgumentCaptor<AssignSceneRequest> request = ArgumentCaptor.forClass(AssignSceneRequest.class);
         verify(scenes).assign(request.capture());

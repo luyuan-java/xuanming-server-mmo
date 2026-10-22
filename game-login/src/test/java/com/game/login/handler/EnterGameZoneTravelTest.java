@@ -209,7 +209,7 @@ class EnterGameZoneTravelTest {
         assertThat(response.hasErrorMessage()).isFalse();
         assertThat(response.getPlayerId()).isEqualTo(PLAYER);
         assertThat(reply.directives()).containsExactly(SessionDirective.newBuilder().setEnterScene(EnterScene.newBuilder()
-                .setPlayerId(PLAYER).setSceneNodeId(4).setSceneId(99_000_001L).setOwnerEpoch(epoch)).build());
+                .setPlayerId(PLAYER).setSceneNodeId(4).setSceneId(99_000_001L).setOwnerEpoch(epoch).setOwnerRevision(1)).build());
     }
 
     private List<AssignSceneRequest> assignRequests(int times) {
@@ -338,7 +338,7 @@ class EnterGameZoneTravelTest {
 
         pending.complete(ASSIGNED);
         assertEntered(first.get(5, TimeUnit.SECONDS), 5);
-        assertThat(events).as("只有在途的那一次与撞 2005 的那一次续过设备").containsExactly("renew", "find", "fence:1", "renew");
+        assertThat(events).as("只有在途的那一次与撞 2005 的那一次续过设备").containsExactly("renew", "find", "fence:1", "fence:7", "renew");
         assertThat(ticketRejected()).isEqualTo(1);
     }
 
@@ -347,7 +347,7 @@ class EnterGameZoneTravelTest {
         assertEntered(enter(PINNED, PLAYER), 5);
         assertThat(ticketRejected()).isZero();
         assertOnlyRoute(EnterRoute.FIRST);
-        assertThat(events).containsExactly("renew", "find", "fence:1", "assign:7");
+        assertThat(events).containsExactly("renew", "find", "fence:1", "fence:7", "assign:7");
     }
 
     @Test
@@ -378,7 +378,7 @@ class EnterGameZoneTravelTest {
         assertThat(claims("claimed")).isEqualTo(1);
         assertThat(meters.get("game.login.owner.takeover.requests").counter().count()).isZero();
         assertOnlyRoute(EnterRoute.AWAITING);
-        assertThat(events).as("待落点不带实例，夺权后不复查").containsExactly("renew", "find", "fence:1", "assign:7");
+        assertThat(events).as("待落点不带实例，夺权后不复查").containsExactly("renew", "find", "fence:1", "fence:7", "assign:7");
         verify(scenes, never()).redirectToZone(any());
     }
 
@@ -540,7 +540,7 @@ class EnterGameZoneTravelTest {
 
         assertThat(assignRequests(1)).as("回落是本 zone 首登：不带别的 zone 记录里的任何东西")
                 .containsExactly(AssignSceneRequest.newBuilder().setZoneId(G).setPlayerId(PLAYER).build());
-        assertThat(events).containsExactly("renew", "find", "redirect:8", "fence:1", "assign:7");
+        assertThat(events).containsExactly("renew", "find", "redirect:8", "fence:1", "fence:7", "assign:7");
         verify(store, times(1)).claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class));
         assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
         assertThat(redirectCalls(callResult)).isEqualTo(1);
@@ -603,7 +603,7 @@ class EnterGameZoneTravelTest {
 
         // 工作线程：定结局（计回落）→ 围栏 → 发起分配；分配的应答再投递回工作线程。
         workers.runNext();
-        assertThat(events).containsExactly("renew", "find", "redirect:8", "fence:1", "assign:7");
+        assertThat(events).containsExactly("renew", "find", "redirect:8", "fence:1", "fence:7", "assign:7");
         assertOnlyRoute(EnterRoute.REDIRECT_FALLBACK);
         verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
         assertThat(result).isNotDone();
@@ -734,7 +734,7 @@ class EnterGameZoneTravelTest {
 
         assertError(enter(NORMAL, PLAYER), SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
 
-        assertThat(events).as("回落照样过围栏，但不再发起分配").containsExactly("renew", "find", "redirect:8", "fence:1");
+        assertThat(events).as("回落照样核归属区与目标区围栏，但不再发起分配").containsExactly("renew", "find", "redirect:8", "fence:1", "fence:7");
         verify(scenes, never()).assign(any());
         verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
         assertThat(assigns("error")).as("按调用超时计").isEqualTo(1);
@@ -786,9 +786,9 @@ class EnterGameZoneTravelTest {
     // ================================================================ 合服围栏检查点 F2
 
     @Test
-    void 合服围栏在分配之前被问一次_判的是角色的归属区而不是入口zone() throws Exception {
+    void 合服围栏在分配之前核对角色归属区和入口区() throws Exception {
         assertEntered(enter(NORMAL, PLAYER), 5);
-        assertThat(events).containsExactly("renew", "find", "fence:1", "assign:7");
+        assertThat(events).containsExactly("renew", "find", "fence:1", "fence:7", "assign:7");
     }
 
     @Test

@@ -1792,3 +1792,5 @@ message BattleNodeInfo {
 
 
 2026-10-21补充：forceClose排队期间，每条直连业务分发和重复握手仍核原票据、固定实例、原DirectLink引用及当前observer operation；请求battle必须等于握手绑定battle。旧连接、旧op与被顶替的同op连接均不能读取或Stop同player的新槽。新增真房间回归源码；未gen/build/test。
+
+2026-10-21终局同读回包补充：只有本次read内、原DirectLink仍持当前槽时成功处理的业务请求触发`BATTLE_CLOSED`优雅摘槽，才为同一连接的后续140返回默认空状态。此回包不调用房间查询、不读取后来同player的新槽；165/149本次应答及140空态仍在FIN前写出。该资格在本次read结束即清除，停机、错误、接管及一般已关闭连接不能获得资格；其它业务仍须当前槽与原op逐包授权。回归保留原165/149+140顺序及真实loopback，并新增新槽不受访问/摘除、跨battle四上行拒绝、停机不授空态资格源码；本补丁尚未运行。

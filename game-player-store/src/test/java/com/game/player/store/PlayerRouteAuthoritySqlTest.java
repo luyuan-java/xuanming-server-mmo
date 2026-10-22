@@ -65,6 +65,8 @@ class PlayerRouteAuthoritySqlTest {
     @Test void 全员跨zone反向输入及uint64高半区P并发不死锁()throws Exception{
         try(var f=new PlayerTradeStoreTest.Fixture()){
             long high=Long.MIN_VALUE+7;f.player(1,"seller");
+            // H2的BIGINT UNSIGNED仍只有有符号64位；本例单独扩夹具列，保留真实高半区契约且不跳过。
+            if(f.endpoint==null)f.sql.execute("ALTER TABLE player ALTER COLUMN player_id DECIMAL(20,0)");
             // 直接以uint64 JDBC绑定造高半区P，验证本路由锁接缝，不借MyBatis有符号Long映射假造覆盖。
             f.sql.update("INSERT INTO player(player_id,account,zone_id,name,name_key,class_id,gender,created_at,updated_at) VALUES(?,'buyer',2,'高号','高号',1,1,1,1)",PlayerRouteAuthority.u64(high));
             var barrier=new CyclicBarrier(2);try(var threads=Executors.newFixedThreadPool(2)){

@@ -26,7 +26,7 @@ import org.slf4j.LoggerFactory;
  *
  * <p>与好友的准入不同（同基线）：chat 的会话拦截器对坏头 / player_id = 0 放行到逻辑层，由逻辑层回 in-band 1005，所以这里不拦会话。
  * 请求体解析失败回信封 1003（基线 gRPC 反序列化错误经路由服翻成 1003）；不认识的号 → 1013（契约里没有）/ 1006（有、不归 chat）。
- * 处理全程异步（只发 Redis 异步命令），不占 Dubbo 线程、不需要工作线程池；返回的 future 永不异常完成。
+ * 完整原Session传入SQL权威；阻塞工作由聊天有界池承载，不占Dubbo线程。
  */
 public final class ChatDispatcher {
 
@@ -68,16 +68,15 @@ public final class ChatDispatcher {
     public CompletableFuture<ClientReply> dispatch(ClientCall call) {
         Timer.Sample sample = metrics.startTimer();
         int messageId = call.getMessageId();
-        long me = call.hasSession() ? call.getSession().getPlayerId() : 0;
         try {
             if (messageId == sendId) {
                 SendChatRequest request = SendChatRequest.parseFrom(call.getBody());
-                return service.send(me, request, budgetMillis).toCompletableFuture()
+                return service.send(call.getSession(), request, budgetMillis).toCompletableFuture()
                         .handle((response, error) -> finish(sample, SEND, response, error));
             }
             if (messageId == pullId) {
                 PullChatHistoryRequest request = PullChatHistoryRequest.parseFrom(call.getBody());
-                return service.pull(me, request, budgetMillis).toCompletableFuture()
+                return service.pull(call.getSession(), request, budgetMillis).toCompletableFuture()
                         .handle((response, error) -> finish(sample, PULL, response, error));
             }
         } catch (InvalidProtocolBufferException e) {

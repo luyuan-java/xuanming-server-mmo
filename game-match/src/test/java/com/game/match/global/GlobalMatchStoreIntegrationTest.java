@@ -11,15 +11,20 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 /** 每个测试自建随机库，只连接本机专用 TiDB；不清理共享 Redis/业务库。 */
-@EnabledIfEnvironmentVariable(named="MATCH_IT_TIDB",matches="127\\.0\\.0\\.1:4000")
+@EnabledIfEnvironmentVariable(named="MATCH_IT_TIDB",matches=".+")
 class GlobalMatchStoreIntegrationTest {
     private DruidDataSource data;
     private String database;
+    private String jdbcRoot;
+    private boolean databaseCreated;
     private GlobalMatchStore store;
     @BeforeEach void open()throws Exception{
+        jdbcRoot=com.game.match.rating.RatingTestDatabase.tidbRoot(System.getenv("MATCH_IT_TIDB"));
         database="jmatchit_"+UUID.randomUUID().toString().replace("-","");
-        try(var c=DriverManager.getConnection("jdbc:mysql://127.0.0.1:4000/","root","");var s=c.createStatement()){s.execute("CREATE DATABASE `"+database+"`");}
-        data=new DruidDataSource();data.setUrl("jdbc:mysql://127.0.0.1:4000/"+database+"?useSSL=false&socketTimeout=4000&connectTimeout=3000");
+        try(var c=DriverManager.getConnection(jdbcRoot+"?connectTimeout=3000&socketTimeout=4000","root","");var s=c.createStatement()){
+            com.game.match.rating.RatingTestDatabase.requireTiDb(c);s.execute("CREATE DATABASE `"+database+"`");databaseCreated=true;
+        }
+        data=new DruidDataSource();data.setUrl(jdbcRoot+database+"?useSSL=false&socketTimeout=4000&connectTimeout=3000");
         data.setUsername("root");data.setPassword("");data.setMaxActive(8);data.setMaxWait(3000);
         data.setConnectionInitSqls(List.of("SET SESSION tidb_snapshot='',tidb_read_staleness=0,tidb_low_resolution_tso=OFF,tidb_read_consistency='strict',tidb_replica_read='leader',tidb_txn_mode='pessimistic',transaction_isolation='READ-COMMITTED'"));
         try(var c=data.getConnection();var q=c.createStatement()){
@@ -39,7 +44,7 @@ class GlobalMatchStoreIntegrationTest {
         }
         store=new GlobalMatchStore(data,new GlobalMatchProperties(true,true,30,180,120,GlobalRegionPolicyTest.CONFIG.probeSecret()));
     }
-    @AfterEach void close()throws Exception{if(data!=null)data.close();if(database!=null)try(var c=DriverManager.getConnection("jdbc:mysql://127.0.0.1:4000/","root","");var s=c.createStatement()){s.execute("DROP DATABASE `"+database+"`");}}
+    @AfterEach void close()throws Exception{if(data!=null)data.close();if(databaseCreated)try(var c=DriverManager.getConnection(jdbcRoot+"?connectTimeout=3000&socketTimeout=4000","root","");var s=c.createStatement()){com.game.match.rating.RatingTestDatabase.requireTiDb(c);s.execute("DROP DATABASE `"+database+"`");}}
 
     private void execute(String sql,Object...args)throws Exception{
         try(var c=data.getConnection();var q=c.prepareStatement(sql)){for(int i=0;i<args.length;i++)q.setObject(i+1,args[i]);q.executeUpdate();}
@@ -84,6 +89,12 @@ class GlobalMatchStoreIntegrationTest {
         execute("UPDATE team_launch SET state=5");assertFalse(entryOccupied(1,"",0));
         execute("UPDATE team_launch SET state=99");assertTrue(entryOccupied(1,"",0));
         execute("DELETE FROM team_launch");assertTrue(entryOccupied(1,"",0));
+    }
+    @Test void noOwnIntentSentinelCannotAuthorizeBlankOrZeroActiveLaunch()throws Exception{
+        seedPlayer(1);execute("INSERT INTO team_launch(request_id,state) VALUES('',1)");execute("INSERT INTO team_launch_role(player_id,request_id,state) VALUES(1,'',1)");
+        assertTrue(entryOccupied(1,"",0));execute("DELETE FROM team_launch_role");execute("DELETE FROM team_launch");
+        execute("INSERT INTO guild_trial_launch(request_id,state) VALUES(0,1)");execute("INSERT INTO guild_trial_launch_role(player_id,request_id,account,owner_revision,state) VALUES(1,0,'account-1',1,1)");
+        assertTrue(entryOccupied(1,"",0));
     }
     private GlobalTicketRow join(long player)throws Exception{
         return join(player,1,Map.of(1,30));

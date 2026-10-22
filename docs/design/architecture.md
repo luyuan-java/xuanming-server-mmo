@@ -47,7 +47,7 @@ Java 代码不得依赖这套目录，具体做法：
 | `game-gateway` | 进程（Spring Boot Web + Dubbo 调用方） | 区服列表（区服目录 + 健康探测）、分配 gate 并签发 gate 令牌（区服准入）、HTTP 登录与刷新令牌（经 Dubbo 调 game-login）、登录公告 |
 | `game-login` | 进程（Spring Boot + Dubbo） | 登录（含 access / refresh 令牌、设备数上限）、建角（归属区取会话 zone）、进游戏（批次 5.4 起含持票者校验、按票据与位置记录定去向、登录期重定向 GO-5，§8.2）、离开 / 断线 |
 | `game-friend` | 进程（Spring Boot + Dubbo） | 好友：申请 / 同意 / 拒绝 / 删除 / 列表 / 黑名单与好友事件推送（Dubbo group `friend`，端口 20883；四张表经 game-pbmysql，§4.13） |
-| `game-chat` | 进程（Spring Boot + Dubbo） | 聊天 v1：世界频道与私聊的发言（校验、幂等、限速、落历史）与拉取历史（Dubbo group `chat`，端口 20884；数据只在 Redis，§4.14） |
+| `game-chat` | 进程（Spring Boot + Dubbo） | 世界频道与私聊的SQL权威发言、永久成功收据、原会话授权与强读历史（Dubbo group `chat`，端口 20884；§4.14；本批源码待编译/真库验证） |
 | `game-team` | 进程（Spring Boot + Dubbo） | 组队：建队 / 申请 / 邀请 / 离队 / 踢人 / 转让 / 解散、队伍快照与邀请推送（Dubbo group `team`，端口 20885；权威数据只在 Redis，§4.16）；批次 6.4 起整队开战（211）持开战锁与编排，预检 / 建票 / 开局经 Dubbo 调 game-match 的 `MatchTeamService`（§4.24） |
 | `game-guild` | 进程（Spring Boot + Dubbo） | 帮会核心：建 / 查 / 退 / 解散 / 公告 / 任免 / 踢人 / 转让 / 申请审批 / 推送 220 / 排行（Dubbo group `guild`，端口 20886；四张表经 game-pbmysql，快照缓存与排行在 Redis，§4.17） |
 | `game-trade` | 进程（Spring Boot + Dubbo） | 聚宝斋只读面：浏览 196 / 详情 197 / 收藏 198 / 货架 200 + dev 播种（Dubbo group `trade`，端口 20887，管理端口 18111；两张表经 game-pbmysql，§4.20） |
@@ -582,6 +582,12 @@ mmorpg：`go/friend`（go-zero gRPC，经 client_rpc_router 转发）。Java 版
   逐行按主键自动提交删（WHERE 复核条件），存在 `updated_ms = 0` 的终态行时只数不删；首轮随机抖动、固定延迟不叠轮、单轮预算 min(间隔, 30 s)。
 
 ### 4.14 聊天服务（game-chat）
+
+**2026-10-21 全服权威收口（源码待编译、测试）**：以下原 Redis v1 行为保留为历史说明；生产 Send/Pull 改为与玩家归属相同的 TiDB 域，不能从 Redis 列表选消息再查 SQL。派发保留 SessionContext 原 account/player_id/owner_revision，在4线程、128项队列的有界工作池中复用 AuthorityJdbc 与 PlayerSessionAuthority，按 meta→route→调用者 P 核原身份并持锁到SQL提交。私聊目标保留原合同，只校验非零且不是自己，不新增目标存在/冻结资格；Pull仅核调用者，因此对端删除不抹除己方历史。无SQL、未知归属、冻结或 A→B→A 旧会话均拒绝。
+
+`chat_send_authority` 保存既有规范化 SendChatRequest、已盖数据库时间的 ChatMessage 原 PB BLOB、调用者原账号/修订、摘要、stream、决定与接纳时间；主键为 `(player_id,request_id)`。只保存已接受状态1/结果0；非空客户端请求号的原身份、正文和结果永久保留，重放先于限速，改正文/目标或跨owner不能复用。限速拒绝不写收据、不占UUID，下一固定秒同号可重试。空号由服务端给该次意图分配内部随机号，保原有无幂等语义；客户端没有稳定号时不能声称返回丢失可精确重试。SQL同P计算数据库固定秒限速并原子提交正文和结果，不建Redis outbox或后台双写。世界stream为新版全服常量，私聊stream仍按双方无符号pid规范化；归属修订只作授权证据，不切断角色历史，合法新主可继续读该角色既有历史。
+
+Pull持原身份锁后直接SQL按 `(stream_key,state,accepted_ms,player_id,request_id)` 索引倒序最多读min(客户端limit,HistoryMaxEntries,200)条，以同事务DB毫秒为截点；HistoryMaxLimit配置201拒绝，200合法，历史容量仍可配置。最近消息距今达到TTL则为空；遇相邻时间差达到TTL就截断旧窗口，再按客户端limit返回，防旧窗口过期后被新消息复活。永久收据及原正文带来显式存储容量成本，本批不以TTL删除收据或让旧UUID重做。所有副本启动登记并核相同的实际内容/敏感词/限速/历史/预算策略全文原件；缺表、缺唯一主键/索引、规则不一致或有历史却缺policy均拒启。正式DDL为 `game-chat/src/main/resources/db/chat-authority.sql`，由部署显式安装，应用 `spring.sql.init.mode=never`；角色/route事实仍只复用原正规迁移与显式初始化。`game.chat.require-tidb`默认true且prod不可关闭，沿既有StrongTiDbConnectionPolicy逐物理会话核悲观RC/leader/strict及无snapshot/staleness。Redis可以丢失，正式读写不依赖它；Chat默认关闭Redis热关停，部署显式启用该运维能力才建立Redis启动依赖。
 
 mmorpg：`go/chat`（v1：世界频道 + 私聊）。Java 版是独立进程 game-chat（Dubbo group `chat`，端口 20884），gate 经同一套按会话的后端队列转发：
 

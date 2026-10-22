@@ -287,14 +287,19 @@ class BattleSnapshotsTest {
     }
 
     /**
-     * 正式技能表（14 行）：3（持续施法）、4（开关）、6 与 12（含开关位）不能在回合制里施放，其余 10 个能；
+     * 正式技能表（46 行）：旧14行中的3/4/6/12不能施放；四职业各8行中的前5行主动、后3行被动。
      * {@link SceneBattleTables#from} 对每一行的判定与引擎的 {@code BattleRules.isTurnBattleCastableSkill} 相同。
      */
     @Test
     void 正式技能表_可施放集合与引擎判据一致_快照只带能施放的() {
         SceneBattleTables real = SceneBattleTables.from(BattleFixture.CONFIG);
         List<Integer> all = BattleFixture.CONFIG.skill().all().stream().map(SkillTable::getId).sorted().toList();
-        assertThat(all).as("正式技能表的行（变了就要重看下面的期望）").containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14);
+        assertThat(all).as("正式技能表的行（变了就要重看下面的期望）").containsExactly(
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+                1101, 1102, 1103, 1104, 1105, 1106, 1107, 1108,
+                1201, 1202, 1203, 1204, 1205, 1206, 1207, 1208,
+                1301, 1302, 1303, 1304, 1305, 1306, 1307, 1308,
+                1401, 1402, 1403, 1404, 1405, 1406, 1407, 1408);
         for (SkillTable row : BattleFixture.CONFIG.skill().all()) {
             assertThat(real.skillExists(row.getId())).isTrue();
             assertThat(real.castable(row.getId())).as("技能 %s skill_type=%s", row.getId(), row.getSkillTypeList())
@@ -307,7 +312,10 @@ class BattleSnapshotsTest {
         ScenePlayer everything = player(3, 37, all, PlayerState.getDefaultInstance());
         BattlePlayerSnapshot snapshot = BattleSnapshots.build(everything, real, List.of(), ROUTING);
 
-        assertThat(snapshot.getSkillTableIdsList()).containsExactly(1, 2, 5, 7, 8, 9, 10, 11, 13, 14);
+        assertThat(snapshot.getSkillTableIdsList()).containsExactly(
+                1, 2, 5, 7, 8, 9, 10, 11, 13, 14,
+                1101, 1102, 1103, 1104, 1105, 1201, 1202, 1203, 1204, 1205,
+                1301, 1302, 1303, 1304, 1305, 1401, 1402, 1403, 1404, 1405);
     }
 
     // ------------------------------------------------------------------ 道具

@@ -592,18 +592,36 @@ class BattleEdgeHandlerTest {
     }
 
     @Test
-    void 身份只来自票据_player_id取会话里绑定的_battle_id按请求体原样交给房间() {
+    void 身份只来自票据_player_id取会话里绑定的_battle_id必须与原票相同() {
         EmbeddedChannel ch = verifiedParticipant();
-        ch.writeInbound(buf(request(1, SUBMIT, SubmitBattleActionRequest.newBuilder().setBattleId(999).build())));
+        ch.writeInbound(buf(request(1, SUBMIT, SubmitBattleActionRequest.newBuilder().setBattleId(BATTLE).build())));
         ch.writeInbound(buf(request(2, SET_AUTO, SetAutoBattleRequest.newBuilder().setBattleId(BATTLE).setEnabled(true).build())));
         rooms.onGetState = (pid, req) -> BattleStateS2C.getDefaultInstance();
         ch.writeInbound(buf(getState(3)));
 
-        assertThat(rooms.events).containsSubsequence("submit:" + PLAYER + ":999", "setAuto:" + PLAYER + ":true",
+        assertThat(rooms.events).containsSubsequence("submit:" + PLAYER + ":" + BATTLE, "setAuto:" + PLAYER + ":true",
                 "getState:" + PLAYER + ":" + BATTLE);
         List<Message> out = drain(ch);
         assertThat(((MessageContent) out.get(2)).toByteString()).as("非成员拿到的默认状态是 0 字节体")
                 .isEqualTo(MessageContent.newBuilder().setId(3).setMessageId(GET_STATE).build().toByteString());
+    }
+
+    @Test
+    void 四条业务请求都不能借原票访问另一battle() {
+        List<ClientRequest> wrongBattle = List.of(
+                request(1, SUBMIT, SubmitBattleActionRequest.newBuilder().setBattleId(999).build()),
+                request(2, SET_AUTO, SetAutoBattleRequest.newBuilder().setBattleId(999).setEnabled(true).build()),
+                request(3, GET_STATE, GetBattleStateRequest.newBuilder().setBattleId(999).build()),
+                request(4, STOP_WATCH, StopWatchBattleRequest.newBuilder().setBattleId(999).build()));
+        for (ClientRequest request : wrongBattle) {
+            EmbeddedChannel ch = verifiedParticipant();
+            rooms.events.clear();
+            ch.writeInbound(buf(request));
+            assertThat(ch.isOpen()).as("消息号 %s", request.getMessageId()).isFalse();
+            assertThat(drain(ch)).isEmpty();
+            assertThat(rooms.events).noneMatch(e -> e.startsWith("submit:") || e.startsWith("setAuto:")
+                    || e.startsWith("getState:") || e.startsWith("stopWatch:"));
+        }
     }
 
     // ---------------------------------------------------------------- 线上顺序（§5.8 O2 / O3 / O8；R2 / R3）
@@ -627,8 +645,8 @@ class BattleEdgeHandlerTest {
         ch.writeInbound(buf(request(9, SUBMIT, SubmitBattleActionRequest.newBuilder().setBattleId(BATTLE).build()), getState(10)));
 
         assertThat(wire.events).containsExactly("push:139", "push:150", "reply:149", "reply:140", "fin-marker", "close");
-        assertThat(rooms.events).containsSubsequence("submit:" + PLAYER + ":" + BATTLE, "getState:" + PLAYER + ":" + BATTLE,
-                "detach:" + PLAYER + ":false");
+        assertThat(rooms.events).containsSubsequence("submit:" + PLAYER + ":" + BATTLE, "detach:" + PLAYER + ":false");
+        assertThat(rooms.events).as("终局后140由原连接回空态，不能读取任何新槽").noneMatch(e -> e.startsWith("getState:"));
         assertThat(ch.isOpen()).isFalse();
         assertThat(count("game.battle.disconnects", "reason", "battle_closed")).isEqualTo(1);
     }
@@ -651,8 +669,50 @@ class BattleEdgeHandlerTest {
         ch.writeInbound(buf(request(6, STOP_WATCH, StopWatchBattleRequest.newBuilder().setBattleId(BATTLE).build()), getState(7)));
 
         assertThat(wire.events).containsExactly("reply:165", "reply:140", "fin-marker", "close");
-        assertThat(rooms.events).containsSubsequence("stopWatch:" + OBSERVER, "getState:" + OBSERVER + ":" + BATTLE);
+        assertThat(rooms.events).contains("stopWatch:" + OBSERVER);
+        assertThat(rooms.events).as("退出后的140不能访问后来观战操作").noneMatch(e -> e.startsWith("getState:"));
         assertThat(ch.isOpen()).isFalse();
+    }
+
+    @Test
+    void 原观战退出后同读140只回空态_不读不摘后来同player的新槽() throws Exception {
+        rooms.add(BATTLE, OBSERVER, eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER);
+        EmbeddedChannel ch = open();
+        ch.writeInbound(buf(observer(tickets, BATTLE, OBSERVER)));
+        drain(ch);
+        EdgeTestKit.WireRecorder wire = record(ch);
+        DirectLink replacement = org.mockito.Mockito.mock(DirectLink.class);
+        rooms.onStopWatch = (pid, req) -> {
+            rooms.closeSlot(pid, Disconnect.BATTLE_CLOSED);
+            rooms.slots.put(pid, replacement);
+            return StopWatchBattleResponse.getDefaultInstance();
+        };
+        rooms.onGetState = (pid, req) -> { throw new AssertionError("旧连接不能读取新观战槽"); };
+
+        ch.writeInbound(buf(request(6, STOP_WATCH, StopWatchBattleRequest.newBuilder().setBattleId(BATTLE).build()), getState(7)));
+
+        assertThat(wire.events).containsExactly("reply:165", "reply:140", "fin-marker", "close");
+        List<Message> out = drain(ch);
+        assertThat(BattleStateS2C.parseFrom(((MessageContent) out.get(1)).getSerializedMessage()))
+                .isEqualTo(BattleStateS2C.getDefaultInstance());
+        assertThat(rooms.link(OBSERVER)).isSameAs(replacement);
+        org.mockito.Mockito.verifyNoInteractions(replacement);
+    }
+
+    @Test
+    void 一般停机优雅关闭不授予后续140的终局回包资格() {
+        EmbeddedChannel ch = verifiedParticipant();
+        EdgeTestKit.WireRecorder wire = record(ch);
+        rooms.onSubmit = (pid, req) -> {
+            rooms.closeSlot(pid, Disconnect.SHUTDOWN);
+            return SubmitBattleActionResponse.getDefaultInstance();
+        };
+
+        ch.writeInbound(buf(request(9, SUBMIT, SubmitBattleActionRequest.newBuilder().setBattleId(BATTLE).build()), getState(10)));
+
+        // 停机仍按原优雅关闭协议发FIN；它只是不授予同读140空态的额外资格。
+        assertThat(wire.events).containsExactly("reply:149", "fin-marker", "close");
+        assertThat(rooms.events).noneMatch(e -> e.startsWith("getState:"));
     }
 
     @Test

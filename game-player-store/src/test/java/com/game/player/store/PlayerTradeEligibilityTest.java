@@ -10,7 +10,7 @@ class PlayerTradeEligibilityTest {
     @Test void 缺资格验证器拒绝_有帮派或未终局合同也拒绝_清理后才可冻结() throws Exception {
         try (var f = new PlayerTradeStoreTest.Fixture()) {
             f.player(1, "seller");
-            f.sql.execute("CREATE TABLE trade_commerce(commerce_id BIGINT PRIMARY KEY,seller_player_id BIGINT NOT NULL,buyer_player_id BIGINT NOT NULL,status INT NOT NULL)");
+            // 复用Fixture统一的跨域投影DDL，不重复建trade_commerce掩盖资格断言。
             f.sql.execute("CREATE TABLE guild_player_state(player_id BIGINT PRIMARY KEY)");
             f.sql.execute("CREATE TABLE guild_member(player_id BIGINT PRIMARY KEY,guild_id BIGINT NOT NULL)");
             var request = new FreezeRequest(101, 1, "seller", 1); var timeout = Duration.ofSeconds(5);
@@ -33,7 +33,6 @@ class PlayerTradeEligibilityTest {
     @Test void 关闭离帮规则仍不允许未决买家资产_本角色寄售行不自阻塞() throws Exception {
         try (var f = new PlayerTradeStoreTest.Fixture()) {
             f.player(1, "seller");
-            f.sql.execute("CREATE TABLE trade_commerce(commerce_id BIGINT PRIMARY KEY,seller_player_id BIGINT NOT NULL,buyer_player_id BIGINT NOT NULL,status INT NOT NULL)");
             var eligibility = new PlayerStoreAutoConfiguration().playerTradeFreezeEligibility(false);
             var store = new PlayerTradeStore(f.source, f.manager, f.clock::get, 5, null, eligibility);
             var request = new FreezeRequest(101, 1, "seller", 1); var timeout = Duration.ofSeconds(5);

@@ -58,7 +58,7 @@ class TravelConfigurationTest {
         @Override @org.springframework.context.annotation.Bean public org.springframework.beans.factory.InitializingBean routeSqlAuthority(javax.sql.DataSource source){return ()->{};}
     }
     private static javax.sql.DataSource routeDataSource(){
-        var source=mock(com.alibaba.druid.pool.DruidDataSource.class);var connection=mock(java.sql.Connection.class);var metadata=mock(java.sql.DatabaseMetaData.class);
+        var source=mock(com.alibaba.druid.pool.DruidDataSource.class);var connection=mock(com.alibaba.druid.pool.DruidPooledConnection.class);var metadata=mock(java.sql.DatabaseMetaData.class);
         try{org.mockito.Mockito.when(source.getConnection()).thenReturn(connection);org.mockito.Mockito.when(connection.getMetaData()).thenReturn(metadata);org.mockito.Mockito.when(metadata.getDatabaseProductName()).thenReturn("H2");}catch(java.sql.SQLException failure){throw new AssertionError(failure);}return source;
     }
 

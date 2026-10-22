@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -45,7 +46,16 @@ class CatalogAdminHttpTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired ObjectMapper json;
     @Autowired MallProperties properties;
+    @Autowired CatalogAdminStore catalogAdminStore;
+    @Autowired RmbConsignmentStore consignmentStore;
     final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+
+    @Test
+    void 两个正式Repository可被代理_保留持久化异常转换() {
+        assertTrue(AopUtils.isCglibProxy(catalogAdminStore));
+        assertTrue(AopUtils.isCglibProxy(consignmentStore));
+        assertNotNull(catalogAdminStore.list(new DeliveryApi.SkuPage(0, 1)));
+    }
 
     @Test
     void 独立管理签名经真实双前缀入口_命令重放冻结订单与越权拒绝() throws Exception {

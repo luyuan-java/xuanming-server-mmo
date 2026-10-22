@@ -27,7 +27,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 /** 只拥有寄售关联与人民币结算；OMS订单由MallOrderStore创建、支付和取消。 */
 @Repository
 @DependsOn("mallSchemaReady")
-public final class RmbConsignmentStore {
+public class RmbConsignmentStore {
     /** 验证适配器自己的真实持久出款事实；缺实现时不能把调用方声明当渠道证明。 */
     public interface PayoutEvidenceVerifier {
         void verify(JdbcTemplate transaction, RmbConsignmentApi.WithdrawalReceipt receipt);
@@ -64,12 +64,12 @@ public final class RmbConsignmentStore {
             || input.priceFen() < 1 || input.priceFen() > MallOrderStore.MAX_AMOUNT_MINOR || input.title() == null
             || input.title().isBlank() || input.title().length() > 128) { throw invalid(); }
         if (input.assetKind().equals("CURRENCY")) {
-            if (input.assetCurrencyType() == null || !rules.getCurrencies().contains(input.assetCurrencyType())) { throw invalid(); }
+            if (input.assetCurrencyType() == null || !rules.currencies().contains(input.assetCurrencyType())) { throw invalid(); }
         } else if (input.assetCurrencyType() != null) { throw invalid(); }
         String digest = digest(input);
         long now = clock.millis();
-        long notice = Math.addExact(now, rules.getNoticeMs());
-        long end = Math.addExact(notice, rules.getSaleMs());
+        long notice = Math.addExact(now, rules.noticeMs());
+        long end = Math.addExact(notice, rules.saleMs());
         try {
             return Objects.requireNonNull(tx.execute(status -> {
                 // listing主键和唯一托管引用共同串行化首次登记，不接管不同资产的旧listing。
@@ -78,8 +78,8 @@ public final class RmbConsignmentStore {
                     + "notice_end_ms,sale_end_ms,state,created_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'LISTED',?)"
                     + " ON DUPLICATE KEY UPDATE listing_id=listing_id", input.listingId(), input.sellerPlayerId(),
                     bytes(input.sellerAccount()), input.marketZone(), input.assetKind(), input.assetCurrencyType(),
-                    input.escrowReference(), input.escrowProof(), digest, input.title(), input.priceFen(), rules.getFeeBps(),
-                    rules.getCoolingMs(), notice, end, now);
+                    input.escrowReference(), input.escrowProof(), digest, input.title(), input.priceFen(), rules.feeBps(),
+                    rules.coolingMs(), notice, end, now);
                 var rows = listing(input.listingId(), true);
                 if (rows.isEmpty() || !rows.getFirst().digest().equals(digest)) {
                     throw new MallException(409, "寄售编号或托管引用已用于不同条款");

@@ -24,7 +24,8 @@ class ConfigSceneTablesTest {
 
     @Test
     void 新号技能是Class表全表去重并集_与职业无关() {
-        assertThat(tables.initialSkills()).containsExactly(1, 2, 13);
+        // Class.xlsx 四职业各有主动/被动初始技能；其余职业的重复普攻仍只保留一次，顺序来自正式表。
+        assertThat(tables.initialSkills()).containsExactly(1101, 1106, 1201, 1206, 1301, 1306, 1401, 1406, 1);
     }
 
     @Test

@@ -548,7 +548,8 @@ class CrossZoneGatherTest {
         assertThat(SpectateRules.summaryOf(placement).getPlayerNamesList()).containsExactly("角色1001@z1", "角色1002@z1");
 
         // 163 的真流程：C 从 zone 2 的 1 号 gate 发来（会话上下文由那台 gate 填），指定观战这一场
-        WatchBattleService watches = new WatchBattleService(spectate, rig.f.placements, rig.f.players, rig.f.tickets, dialer, rig.f.metrics);
+        WatchBattleService watches = new WatchBattleService(spectate, rig.f.placements, rig.f.players, rig.f.tickets, dialer, rig.f.metrics)
+                .withPublicNames((player, deadline) -> player == C ? "跨区观众C" : "");
         SessionContext fromZone2 = SessionContext.newBuilder().setPlayerId(C).setAccount("account-c").setZoneId(2).setGateNodeId(1)
                 .setGateInstanceId("gate-z2-inst").setSessionId(SAME_SESSION).build();
 
@@ -566,7 +567,7 @@ class CrossZoneGatherTest {
         assertThat(add.placement().getBattleInstanceId()).isEqualTo(TARGET_A.instanceId());
         assertThat(add.request().getBattleId()).isEqualTo(battleId);
         assertThat(add.request().getObserverPlayerId()).isEqualTo(C);
-        assertThat(add.request().getObserverName()).isEqualTo("account-c");
+        assertThat(add.request().getObserverName()).isEqualTo("跨区观众C").isNotEqualTo(fromZone2.getAccount());
         assertThat(add.request().getRouting()).isEqualTo(BattleRouting.newBuilder().setSessionId(SAME_SESSION).setGateNodeId(1)
                 .setGateInstanceId("gate-z2-inst").setZoneId(2).build());
         assertThat(add.request().getRouting()).as("就是在线目录换算出来的 gate 部分")

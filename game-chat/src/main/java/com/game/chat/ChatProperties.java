@@ -14,7 +14,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param historyTtl          历史的过期（缺省 7 天，每次写入续期）
  * @param historyDefaultLimit 拉取时 limit = 0 的取值（缺省 20）
  * @param historyMaxLimit     拉取上限（缺省 50；不得小于缺省值）
- * @param requestIdTtl        发言幂等键的过期（缺省 60 s）
+ * @param requestIdTtl        v1 Redis夹具的幂等键过期（缺省60s）；正式SQL成功收据永久，不使用此TTL
  * @param requestBudget       整请求预算（缺省 3500 ms，须先于 gate 调后端的 5 s Dubbo 超时）
  * @param sensitiveWords      按配置顺序屏蔽的字面词表，大小写敏感；缺省空表
  */
@@ -31,6 +31,8 @@ public record ChatProperties(
         List<String> sensitiveWords) {
 
     public static final Duration MAX_REQUEST_BUDGET = Duration.ofMillis(4000);
+    /** 单次读窗硬预算；历史容量可配置，不能使一轮SQL读取无界。 */
+    public static final int MAX_PULL_MESSAGES = 200;
 
     public ChatProperties {
         // 在任何外部连接装配前拒绝无界或非法词表，并保留调用方不可修改的配置快照。
@@ -42,6 +44,9 @@ public record ChatProperties(
         historyTtl = seconds(historyTtl, Duration.ofDays(7), "history-ttl");
         historyDefaultLimit = positiveOr(historyDefaultLimit, 20, "history-default-limit");
         historyMaxLimit = positiveOr(historyMaxLimit, 50, "history-max-limit");
+        if (historyMaxLimit > MAX_PULL_MESSAGES) {
+            throw new IllegalArgumentException("game.chat.history-max-limit 不能大于 " + MAX_PULL_MESSAGES);
+        }
         if (historyDefaultLimit > historyMaxLimit) {
             throw new IllegalArgumentException("game.chat.history-default-limit（" + historyDefaultLimit
                     + "）不能大于 history-max-limit（" + historyMaxLimit + "）");

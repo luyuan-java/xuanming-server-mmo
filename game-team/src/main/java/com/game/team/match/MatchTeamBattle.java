@@ -152,6 +152,7 @@ public final class MatchTeamBattle implements TeamBattlePort {
         }
         return switch (reply.getStatus()) {
             case TEAM_TICKETS_CREATED -> new Tickets.Created();
+            case TEAM_TICKETS_QUEUED -> new Tickets.Queued();
             case TEAM_TICKETS_FAILED -> reply.getFailedPlayerId() != 0
                     ? new Tickets.Failed(reply.getFailedPlayerId())
                     : new Tickets.Unknown("game-match 回 FAILED 但没有 failed_player_id");

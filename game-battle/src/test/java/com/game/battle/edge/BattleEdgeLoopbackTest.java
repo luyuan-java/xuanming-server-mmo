@@ -139,7 +139,8 @@ class BattleEdgeLoopbackTest {
             assertThat(client.readEof()).isTrue();
         }
         await(() -> edge.connectionCount() == 0);
-        assertThat(rooms.events).containsSubsequence("submit:" + PLAYER + ":" + BATTLE, "getState:" + PLAYER + ":" + BATTLE);
+        assertThat(rooms.events).contains("submit:" + PLAYER + ":" + BATTLE);
+        assertThat(rooms.events).as("终局后140只回原连接空态，不调用房间读取新槽").noneMatch(e -> e.startsWith("getState:"));
     }
 
     @Test

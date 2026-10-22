@@ -73,7 +73,7 @@ public final class ChallengeService {
     private final Supplier<String> nonces;
     private com.game.match.global.GlobalMatchService global;
     private java.util.function.BiFunction<Long,Deadline,String> publicNames=(player,deadline)->"";
-    public ChallengeService withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;global.challengeNotifications(result->{
+    public ChallengeService withGlobal(com.game.match.global.GlobalMatchService global){this.global=Objects.requireNonNull(global,"global");global.challengeNotifications(result->{
         if(result.getState()==2){pushResult(result.getChallengerId(),result.getChallengeId(),true,result.getTargetId());pushResult(result.getTargetId(),result.getChallengeId(),true,result.getTargetId());}
         else if(result.getState()==3)pushResult(result.getChallengerId(),result.getChallengeId(),false,result.getTargetId());
     });return this;}

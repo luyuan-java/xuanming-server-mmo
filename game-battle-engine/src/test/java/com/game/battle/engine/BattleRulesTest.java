@@ -126,6 +126,27 @@ class BattleRulesTest {
     }
 
     @Test
+    void 职业被动位号零被省略_仍按正式被动属性禁止施放() {
+        SkillTable passive = SkillTable.newBuilder().setId(1106).setClassId(1)
+                .setPassiveStat("defense").build();
+
+        assertThat(passive.getSkillTypeList()).isEmpty();
+        assertThat(BattleRules.isTurnBattleCastableSkill(passive)).isFalse();
+        assertThat(BattleRules.isTurnBattleCastableSkill(passive.toBuilder().addSkillType(1).build()))
+                .as("被动属性不能被普通施放位号覆盖").isFalse();
+        assertThat(BattleRules.isTurnBattleCastableSkill(passive.toBuilder().setPassivePercent(0).build()))
+                .as("幅度为零的被动也没有施放动作").isFalse();
+    }
+
+    @Test
+    void 展示分类不替代施放语义_旧空类型技能仍可施放() {
+        SkillTable displayOnly = skillWithTypes().toBuilder().setCategory("被动").build();
+
+        assertThat(displayOnly.getPassiveStat()).isEmpty();
+        assertThat(BattleRules.isTurnBattleCastableSkill(displayOnly)).isTrue();
+    }
+
+    @Test
     void 目标模式含位号2才是AOE() {
         assertThat(BattleRules.isAreaSkill(skillWithTargeting(1, 2))).as("真表技能 1").isTrue();
         assertThat(BattleRules.isAreaSkill(skillWithTargeting(2, 2))).as("真表技能 2").isTrue();

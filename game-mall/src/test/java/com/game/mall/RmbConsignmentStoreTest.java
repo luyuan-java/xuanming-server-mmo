@@ -31,6 +31,25 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 /** 原OMS接口与独立随机库；回执是trade SQL终局夹具，不代表真实scene、外部支付或玩家过户验收。 */
 class RmbConsignmentStoreTest {
+    @Test void 首次登记使用全部绑定规则而不是默认条款() {
+        try (var f = new Fixture()) {
+            var configured = new RmbConsignmentStore(f.db.jdbc, f.db.manager, f.clock,
+                    new RmbConsignmentProperties(2_000L, 3_000L, 4_000L, 1_250, Set.of(1)),
+                    (RmbConsignmentStore.PayoutEvidenceVerifier) null);
+            var excluded = new RmbConsignmentApi.Escrow("1002", "11", "seller", 1,
+                    "CURRENCY", 0, "91002", "a".repeat(64), 101, "配置关闭金币");
+            rejects(400, () -> configured.register(excluded));
+            var allowed = new RmbConsignmentApi.Escrow("1003", "11", "seller", 1,
+                    "CURRENCY", 1, "91003", "b".repeat(64), 101, "配置允许非绑定钻石");
+            var listing = configured.register(allowed);
+            assertEquals(f.clock.millis() + 2_000, listing.noticeEndMs());
+            assertEquals(f.clock.millis() + 5_000, listing.saleEndMs());
+            assertEquals(4_000, listing.coolingMs());
+            assertEquals(1_250, listing.feeBps());
+            assertEquals(1, f.db.count("commerce_consignment"));
+        }
+    }
+
     @Test void 登记重放冻结条款_同账号自购与请求换角色拒绝_原账号保留订单权() {
         try (var f = new Fixture()) {
             var original = f.register("1001", 101);
@@ -293,7 +312,10 @@ class RmbConsignmentStoreTest {
         }
         var defaults = new RmbConsignmentProperties();
         assertEquals(172_800_000, defaults.noticeMs().longValue());
+        assertEquals(604_800_000, defaults.saleMs().longValue());
         assertEquals(259_200_000, defaults.coolingMs().longValue());
+        assertEquals(500, defaults.feeBps().intValue());
+        assertEquals(Set.of(0), defaults.currencies());
     }
 
     private record Outcome(int status, RmbConsignmentApi.Withdrawal withdrawal) {}

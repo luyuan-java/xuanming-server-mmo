@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 import com.game.common.deadline.Deadline;
 import com.game.friend.store.FriendStore.RejectResult;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -42,18 +43,25 @@ class JdbcFriendStoreBudgetTest {
     private static final FriendLimits LIMITS = new FriendLimits(200, 50, 200, 200);
     /** 宽裕到被选中语句之前的几步一定在截止之前完成；被选中的语句会把它等完。 */
     private static final long BUDGET_MS = 500;
+    private static final String LOCK_ROUTE_META = "SELECT generation,writable,fence_shards FROM route_meta WHERE id=1 LOCK IN SHARE MODE";
 
     private final Map<String, List<Object[]>> queryRows = new HashMap<>();
+    private final List<String> queries = new CopyOnWriteArrayList<>();
     private final List<String> updates = new CopyOnWriteArrayList<>();
     private final Map<String, AtomicInteger> updateCounts = new ConcurrentHashMap<>();
     private final AtomicInteger commits = new AtomicInteger();
     private final AtomicInteger rollbacks = new AtomicInteger();
+    private final AtomicInteger capacityCommits = new AtomicInteger();
+    private final AtomicInteger capacityRollbacks = new AtomicInteger();
+    private final AtomicInteger stalledWrites = new AtomicInteger();
+    private final AtomicBoolean stallStartedBeforeDeadline = new AtomicBoolean();
     /** 第 {@link #stallOccurrence} 次执行 {@link #stallSql} 时，等到 {@link #stallUntil} 过期才返回。 */
     private volatile String stallSql;
     private volatile int stallOccurrence;
     private volatile Deadline stallUntil;
 
     private JdbcFriendStore store;
+    private DatabaseMetaData metadata;
 
     @BeforeEach
     void setUp() throws SQLException {
@@ -61,6 +69,10 @@ class JdbcFriendStoreBudgetTest {
         mock(Connection.class);
         mock(PreparedStatement.class);
         mock(ResultSet.class);
+        metadata = mock(DatabaseMetaData.class);
+        when(metadata.getDatabaseProductName()).thenReturn("MySQL");
+        // 系统写入口仍实际读取并校验正式meta；不绕过生产围栏，也不把未知SQL默认为可写。
+        queryRows.put(LOCK_ROUTE_META, List.<Object[]>of(new Object[] {"7425c34c-87c2-46c9-95a4-8af56755c014", "1", 64}));
         DataSource dataSource = mock(DataSource.class);
         when(dataSource.getConnection()).thenAnswer(ignored -> connection());
         store = new JdbcFriendStore(dataSource, LIMITS, () -> 1_000L, 3, JdbcFriendStore.Events.NONE, () -> 99L);
@@ -76,6 +88,7 @@ class JdbcFriendStoreBudgetTest {
         assertThatThrownBy(() -> original.addRequest(23, 11, Deadline.after(30_000))).isInstanceOf(SecurityException.class);
         assertThatThrownBy(() -> original.friends(23, 100, Deadline.after(30_000))).isInstanceOf(SecurityException.class);
         assertThat(updates).isEmpty();
+        assertThat(queries).isEmpty();
         assertThat(commits).hasValue(0);
     }
 
@@ -87,6 +100,8 @@ class JdbcFriendStoreBudgetTest {
 
         assertThat(outcome.result()).isEqualTo(RejectResult.OK);
         assertThat(outcome.changed()).isTrue();
+        assertThat(updates).containsExactly(JdbcFriendStore.UPDATE_REQUEST_GENERATION_STATUS);
+        assertThat(queries).containsExactly(JdbcFriendStore.FIND_REQUEST, LOCK_ROUTE_META);
         assertThat(commits).as("桩确实记得到 COMMIT（下面「不提交」的断言不是空转）").hasValue(1);
         assertThat(rollbacks).hasValue(0);
     }
@@ -100,6 +115,8 @@ class JdbcFriendStoreBudgetTest {
         assertThatThrownBy(() -> store.reject(5, 22, 0, deadline)).isInstanceOf(FriendStoreException.class);
 
         assertThat(updates).as("语句在截止之前发出（测的是提交点）").containsExactly(JdbcFriendStore.UPDATE_REQUEST_GENERATION_STATUS);
+        assertThat(queries).containsExactly(JdbcFriendStore.FIND_REQUEST, LOCK_ROUTE_META);
+        assertDeadlineExpiredInWrite();
         // 以前是自动提交：语句返回即已提交，客户端收到 1003 / gate 已放行下一条之后申请才变成已拒绝
         assertThat(commits).as("截止之后不发 COMMIT").hasValue(0);
         assertThat(rollbacks).hasValue(1);
@@ -113,6 +130,8 @@ class JdbcFriendStoreBudgetTest {
         assertThatThrownBy(() -> store.unblock(22, 33, deadline)).isInstanceOf(FriendStoreException.class);
 
         assertThat(updates).containsExactly(JdbcFriendStore.DELETE_BLOCK);
+        assertThat(queries).containsExactly(LOCK_ROUTE_META);
+        assertDeadlineExpiredInWrite();
         assertThat(commits).as("截止之后不发 COMMIT").hasValue(0);
         assertThat(rollbacks).hasValue(1);
     }
@@ -130,11 +149,24 @@ class JdbcFriendStoreBudgetTest {
 
         assertThat(updates).as("体内的写都在截止之前发出").containsExactly(JdbcFriendStore.ENSURE_CAPACITY, JdbcFriendStore.ENSURE_CAPACITY,
                 JdbcFriendStore.DELETE_EDGE, JdbcFriendStore.DECREMENT_COUNT, JdbcFriendStore.DELETE_EDGE, JdbcFriendStore.DECREMENT_COUNT);
-        assertThat(commits).as("截止之后不发 COMMIT").hasValue(0);
+        assertThat(queries).containsExactly(JdbcFriendStore.EDGE_EXISTS_EITHER,
+                LOCK_ROUTE_META, JdbcFriendStore.COUNT_FRIENDS, LOCK_ROUTE_META, JdbcFriendStore.COUNT_FRIENDS,
+                LOCK_ROUTE_META, JdbcFriendStore.LOCK_CAPACITY, JdbcFriendStore.LOCK_CAPACITY);
+        assertDeadlineExpiredInWrite();
+        // 补容量是先行独立提交；不能把它们混进之后越过截止的好友事务，也不能漏记这些真实提交。
+        assertThat(capacityCommits).hasValue(2);
+        assertThat(capacityRollbacks).hasValue(1);
+        assertThat(commits).as("好友事务截止之后不发 COMMIT").hasValue(0);
         assertThat(rollbacks).hasValue(1);
     }
 
     // ================================================================ 记录型 JDBC 桩
+
+    private void assertDeadlineExpiredInWrite() {
+        assertThat(stalledWrites).as("指定业务写确实执行一次，不能由路由预检错误提前结束").hasValue(1);
+        assertThat(stallStartedBeforeDeadline).as("业务写在截止前开始").isTrue();
+        assertThat(stallUntil.expired()).as("正是指定业务写等到请求截止").isTrue();
+    }
 
     private void stall(String sql, int occurrence, Deadline until) {
         stallSql = sql;
@@ -144,6 +176,8 @@ class JdbcFriendStoreBudgetTest {
 
     private Connection connection() throws SQLException {
         Connection c = mock(Connection.class);
+        List<String> connectionWrites = new CopyOnWriteArrayList<>();
+        when(c.getMetaData()).thenReturn(metadata);
         AtomicBoolean autoCommit = new AtomicBoolean(true);
         AtomicInteger isolation = new AtomicInteger(Connection.TRANSACTION_READ_COMMITTED);
         when(c.getAutoCommit()).thenAnswer(ignored -> autoCommit.get());
@@ -157,21 +191,33 @@ class JdbcFriendStoreBudgetTest {
             return null;
         }).when(c).setTransactionIsolation(anyInt());
         doAnswer(ignored -> {
-            commits.incrementAndGet();
+            if (capacityOnly(connectionWrites)) capacityCommits.incrementAndGet();
+            else commits.incrementAndGet();
             return null;
         }).when(c).commit();
         doAnswer(ignored -> {
-            rollbacks.incrementAndGet();
+            if (capacityOnly(connectionWrites)) capacityRollbacks.incrementAndGet();
+            else rollbacks.incrementAndGet();
             return null;
         }).when(c).rollback();
-        when(c.prepareStatement(anyString())).thenAnswer(call -> statement(call.getArgument(0)));
+        when(c.prepareStatement(anyString())).thenAnswer(call -> statement(call.getArgument(0), connectionWrites));
         return c;
     }
 
-    private PreparedStatement statement(String sql) throws SQLException {
+    private static boolean capacityOnly(List<String> connectionWrites) {
+        return !connectionWrites.isEmpty() && connectionWrites.stream().allMatch(JdbcFriendStore.ENSURE_CAPACITY::equals);
+    }
+
+    private PreparedStatement statement(String sql, List<String> connectionWrites) throws SQLException {
         PreparedStatement ps = mock(PreparedStatement.class);
-        when(ps.executeQuery()).thenAnswer(ignored -> resultSet(queryRows.getOrDefault(sql, List.of())));
-        when(ps.executeUpdate()).thenAnswer(ignored -> update(sql));
+        when(ps.executeQuery()).thenAnswer(ignored -> {
+            queries.add(sql);
+            return resultSet(queryRows.getOrDefault(sql, List.of()));
+        });
+        when(ps.executeUpdate()).thenAnswer(ignored -> {
+            connectionWrites.add(sql);
+            return update(sql);
+        });
         return ps;
     }
 
@@ -180,6 +226,8 @@ class JdbcFriendStoreBudgetTest {
         updates.add(sql);
         Deadline until = stallUntil;
         if (sql.equals(stallSql) && occurrence == stallOccurrence) {
+            stalledWrites.incrementAndGet();
+            stallStartedBeforeDeadline.set(!until.expired());
             // 模拟语句在锁等待里跑过请求截止：返回时截止一定已过
             while (!until.expired()) {
                 LockSupport.parkNanos(Math.max(1, until.remainingNanos()));
@@ -193,6 +241,7 @@ class JdbcFriendStoreBudgetTest {
         AtomicInteger cursor = new AtomicInteger(-1);
         when(rs.next()).thenAnswer(ignored -> cursor.incrementAndGet() < rows.size());
         when(rs.getObject(anyInt())).thenAnswer(call -> rows.get(cursor.get())[call.<Integer>getArgument(0) - 1]);
+        when(rs.getString(anyInt())).thenAnswer(call -> (String) rows.get(cursor.get())[call.<Integer>getArgument(0) - 1]);
         when(rs.getLong(anyInt())).thenAnswer(call -> ((Number) rows.get(cursor.get())[call.<Integer>getArgument(0) - 1]).longValue());
         when(rs.getInt(anyInt())).thenAnswer(call -> ((Number) rows.get(cursor.get())[call.<Integer>getArgument(0) - 1]).intValue());
         return rs;

@@ -62,7 +62,8 @@ class WatchBattleHandlerTest {
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> false));
     private final AtomicInteger nonceSeq = new AtomicInteger();
     private final WatchBattleService service = new WatchBattleService(spectate, placements, players, tickets, observers, metrics, () -> 0.0,
-            () -> String.format("%016x", nonceSeq.incrementAndGet()), Runnable::run);
+            () -> String.format("%016x", nonceSeq.incrementAndGet()), Runnable::run)
+            .withPublicNames((player, deadline) -> "公开观众" + player);
     /** 共用的工作池：163 一次都不该投到它上面。 */
     private final List<Runnable> sharedPool = new CopyOnWriteArrayList<>();
     private final Executor workers = sharedPool::add;
@@ -358,7 +359,7 @@ class WatchBattleHandlerTest {
         assertThat(WatchBattleResponse.parseFrom(reply.getBody()).getBattleId()).isEqualTo(X);
         assertThat(observers.adds()).singleElement().satisfies(add -> {
             assertThat(add.observerId()).as(":739").isEqualTo(1001);
-            assertThat(add.request().getObserverName()).isEqualTo("acc-1001");
+            assertThat(add.request().getObserverName()).isEqualTo("公开观众1001").isNotEqualTo(session(1001).getAccount());
         });
         assertThat(spectate.markOf(1001)).isPresent();
         assertThat(spectate.markOf(2002)).isEmpty();

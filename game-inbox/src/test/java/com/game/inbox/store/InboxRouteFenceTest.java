@@ -22,9 +22,21 @@ import com.game.discovery.sql.StrongTiDbConnectionPolicy;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
-/** 默认H2；真库须显式inbox.it.tidb=127.0.0.1:4000，require=1时缺配置直接失败。 */
+/** 默认H2；本轮真库显式inbox.it.tidb=127.0.0.1:24000，require=1时缺配置直接失败。 */
 final class InboxRouteFenceTest {
     private static final PlayerInboxDomain DOMAIN=PlayerInboxDomain.forNumber(1);
+    static void requireEndpoint(String endpoint) {
+        if(endpoint==null||!endpoint.matches("127\\.0\\.0\\.1:[1-9][0-9]{0,4}")
+                ||Integer.parseInt(endpoint.substring(endpoint.indexOf(':')+1))>65535)
+            throw new IllegalArgumentException("收件箱夹具只允许root显式授权的数值loopback TiDB端口");
+    }
+    @Test void 真库端口只取显式合法loopback_不默认或改映射() {
+        assertDoesNotThrow(()->requireEndpoint("127.0.0.1:24000"));
+        assertDoesNotThrow(()->requireEndpoint("127.0.0.1:65535"));
+        for(String bad:List.of("", "127.0.0.1", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:024000",
+                "localhost:24000", "192.168.1.2:24000", "127.0.0.1:24000/game", "127.0.0.1:24000?x=y"))
+            assertThrows(IllegalArgumentException.class,()->requireEndpoint(bad));
+    }
     static final class Fixture implements AutoCloseable {
         final DataSource source;
         DruidDataSource nativePool;
@@ -41,10 +53,11 @@ final class InboxRouteFenceTest {
                 memory.setURL("jdbc:h2:mem:inbox_route_"+UUID.randomUUID()+";MODE=MySQL;DB_CLOSE_DELAY=-1");
                 source=memory;
             } else {
-                if(!endpoint.equals("127.0.0.1:4000")) throw new IllegalArgumentException("收件箱夹具只允许本任务隔离TiDB入口");
+                requireEndpoint(endpoint);
                 database="inbox_route_it_"+UUID.randomUUID().toString().replace("-", "");
                 String password=System.getenv().getOrDefault("GAME_TEST_MYSQL_PASSWORD", "");
-                admin=DriverManager.getConnection("jdbc:mysql://"+endpoint+"/", "root", password);
+                admin=DriverManager.getConnection("jdbc:mysql://"+endpoint+"/?connectTimeout=3000&socketTimeout=4000", "root", password);
+                boolean created=false;
                 try(var statement=admin.createStatement()) {
                     statement.setQueryTimeout(3);
                     try(var rows=statement.executeQuery("SELECT VERSION(),@@version_comment")) {
@@ -52,8 +65,9 @@ final class InboxRouteFenceTest {
                         assertTrue((rows.getString(1)+rows.getString(2)).toLowerCase(java.util.Locale.ROOT).contains("tidb"));
                     }
                     statement.execute("CREATE DATABASE `"+database+"`");
+                    created=true;
                 } catch(Exception | AssertionError failure) {
-                    try(var cleanup=admin.createStatement()){cleanup.setQueryTimeout(3);cleanup.execute("DROP DATABASE IF EXISTS `"+database+"`");}
+                    try(var cleanup=admin.createStatement()){if(created){cleanup.setQueryTimeout(3);cleanup.execute("DROP DATABASE IF EXISTS `"+database+"`");}}
                     catch(Exception cleanup){failure.addSuppressed(cleanup);}
                     finally {try {admin.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}}
                     throw failure;

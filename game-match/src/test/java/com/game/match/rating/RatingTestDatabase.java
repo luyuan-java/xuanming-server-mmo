@@ -11,6 +11,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
@@ -56,6 +57,25 @@ public final class RatingTestDatabase implements AutoCloseable {
         return MYSQL_URL != null && !MYSQL_URL.isBlank();
     }
 
+    /** 只接root显式传入的数值loopback端口；不猜4000、不接受URL参数或远端。 */
+    public static String tidbRoot(String endpoint) {
+        if (endpoint == null || !endpoint.matches("127\\.0\\.0\\.1:[1-9][0-9]{0,4}")
+                || Integer.parseInt(endpoint.substring(endpoint.indexOf(':') + 1)) > 65535)
+            throw new IllegalArgumentException("MATCH_IT_TIDB必须为已授权127.0.0.1数值端口");
+        return "jdbc:mysql://" + endpoint + "/";
+    }
+
+    /** 创建随机库前核真实TiDB，避免在误指MySQL或其它端口上写入。 */
+    public static void requireTiDb(Connection connection) throws SQLException {
+        try (var statement = connection.createStatement()) {
+            statement.setQueryTimeout(3);
+            try (var rows = statement.executeQuery("SELECT TIDB_VERSION()")) {
+                if (!rows.next() || rows.getString(1) == null || rows.getString(1).isBlank())
+                    throw new SQLException("匹配集成夹具需要真实TiDB");
+            }
+        }
+    }
+
     /** 一个全新的 H2 内存库，两张表已建好。 */
     public static RatingTestDatabase h2() {
         DataSource ds = h2DataSource("game-match-rating-" + UUID.randomUUID());
@@ -65,6 +85,14 @@ public final class RatingTestDatabase implements AutoCloseable {
             throw new IllegalStateException("H2 建评分表失败", e);
         }
         return new RatingTestDatabase(ds, null);
+    }
+
+    /** 组件装配共用正规评分/路由夹具，并显式登记SQL公开角色名；账号不充当展示名。 */
+    public static DataSource h2WithProfiles(Map<Long, String> names) {
+        var db = h2();
+        names.forEach((player, name) -> db.update("INSERT INTO player (player_id, name) VALUES (?, ?)",
+                PbMysql.uint64(player), name));
+        return db.dataSource;
     }
 
     /** H2 内存库的数据源（MySQL 兼容模式；库随 JVM 存活；表要另外建，见 {@link #H2_SCHEMA}）。 */
@@ -127,7 +155,9 @@ public final class RatingTestDatabase implements AutoCloseable {
 
     static void initializeRouteAuthority(DataSource source)throws SQLException {
         try(var c=source.getConnection();var statement=c.createStatement()){
-            statement.execute("CREATE TABLE IF NOT EXISTS player(player_id BIGINT PRIMARY KEY,zone_id INT NOT NULL DEFAULT 1)");
+            statement.execute("CREATE TABLE IF NOT EXISTS player(player_id BIGINT PRIMARY KEY,zone_id INT NOT NULL DEFAULT 1,"
+                    + "name VARCHAR(128) NOT NULL DEFAULT '',level INT NOT NULL DEFAULT 1,class_id INT NOT NULL DEFAULT 0,"
+                    + "gender INT NOT NULL DEFAULT 0,appearance_id VARCHAR(128) NOT NULL DEFAULT '')");
             var resource=new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql");
             String sql;try(var input=resource.getInputStream()){sql=new String(input.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}
             if("H2".equals(c.getMetaData().getDatabaseProductName()))sql=sql.replaceAll("(?i)ENGINE\\s*=\\s*InnoDB[^;]*","");

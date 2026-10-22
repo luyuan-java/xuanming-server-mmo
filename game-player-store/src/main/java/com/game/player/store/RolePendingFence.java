@@ -1,6 +1,7 @@
 package com.game.player.store;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.math.BigInteger;
 import com.game.common.deadline.Deadline;
@@ -14,15 +15,37 @@ import org.springframework.jdbc.core.JdbcTemplate;
  */
 public final class RolePendingFence {
     private RolePendingFence() {}
-    private static boolean exists(Connection connection, Deadline budget, String query, long... players) throws SQLException {
+    private static PreparedStatement prepare(Connection connection, Deadline budget, String query) throws SQLException {
         if (budget == null || budget.expired() || Thread.currentThread().isInterrupted()) throw new java.sql.SQLTimeoutException("跨域挂起核验已超过原请求预算");
-        try (var statement = connection.prepareStatement(query)) {
+        var statement = connection.prepareStatement(query);
+        try {
             statement.setQueryTimeout((int)Math.max(1, Math.min(3, (budget.remainingMillis()+999)/1000)));
-            for (int index=0;index<players.length;index++) {
-                long player=players[index];
-                statement.setObject(index+1,player < 0 ? new BigInteger(Long.toUnsignedString(player)) : player);
+            return statement;
+        } catch (SQLException | RuntimeException failure) {
+            try { statement.close(); } catch (SQLException closeFailure) { failure.addSuppressed(closeFailure); }
+            throw failure;
+        }
+    }
+    private static boolean exists(Connection connection, Deadline budget, String query, long... values) throws SQLException {
+        try (var statement = prepare(connection,budget,query)) {
+            for (int index=0;index<values.length;index++) {
+                long value=values[index];
+                statement.setObject(index+1,value < 0 ? new BigInteger(Long.toUnsignedString(value)) : value);
             }
             try (var rows = statement.executeQuery()) { return rows.next(); }
+        }
+    }
+    /** 同事务DB毫秒时钟：保留TiDB原精度；十进制系数避免H2整数乘法溢出，无本机时钟回退。 */
+    private static long databaseNowMs(Connection connection, Deadline budget) throws SQLException {
+        try (var statement=prepare(connection,budget,"SELECT UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000.000");var rows=statement.executeQuery()) {
+            if (!rows.next()) throw new SQLException("跨域挂起核验缺少数据库时钟");
+            var value=rows.getBigDecimal(1);
+            if (value==null) throw new SQLException("跨域挂起核验数据库时钟为空");
+            final long now;
+            try { now=value.longValueExact(); } catch (ArithmeticException malformed) { throw new SQLException("跨域挂起核验数据库时钟不是有效毫秒",malformed); }
+            if (now<=0 || rows.next()) throw new SQLException("跨域挂起核验数据库时钟原件无效");
+            if (budget.expired() || Thread.currentThread().isInterrupted()) throw new java.sql.SQLTimeoutException("跨域挂起核验数据库时钟超过原请求预算");
+            return now;
         }
     }
     public static boolean blocked(Connection connection, long player) throws SQLException {
@@ -30,10 +53,11 @@ public final class RolePendingFence {
     }
     public static boolean blocked(Connection connection, long player, Deadline budget) throws SQLException {
         if (player == 0 || connection.getAutoCommit()) throw new SQLException("跨域资产围栏必须位于已锁P的事务");
-        return exists(connection,budget,"SELECT player_id FROM team_member_authority WHERE player_id=? AND (team_id<>0 OR team_id IS NULL) LIMIT 1",player)
-            || exists(connection,budget,"SELECT player_id FROM team_launch_role WHERE player_id=? AND (state<>2 OR state IS NULL) LIMIT 1",player)
-            || exists(connection,budget,"SELECT invitee_id FROM team_invite_authority WHERE (invitee_id=? OR initiator_player_id=?) AND (expires_ms>CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED) OR expires_ms IS NULL) LIMIT 1",player,player)
-            || exists(connection,budget,"SELECT player_id FROM team_application_authority WHERE (player_id=? OR recipient_player_id=?) AND (expires_ms>CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED) OR expires_ms IS NULL) LIMIT 1",player,player)
+        if (exists(connection,budget,"SELECT player_id FROM team_member_authority WHERE player_id=? AND (team_id<>0 OR team_id IS NULL) LIMIT 1",player)
+            || exists(connection,budget,"SELECT player_id FROM team_launch_role WHERE player_id=? AND (state<>2 OR state IS NULL) LIMIT 1",player)) return true;
+        long nowMs=databaseNowMs(connection,budget);
+        return exists(connection,budget,"SELECT invitee_id FROM team_invite_authority WHERE (invitee_id=? OR initiator_player_id=?) AND (expires_ms>? OR expires_ms IS NULL) LIMIT 1",player,player,nowMs)
+            || exists(connection,budget,"SELECT player_id FROM team_application_authority WHERE (player_id=? OR recipient_player_id=?) AND (expires_ms>? OR expires_ms IS NULL) LIMIT 1",player,player,nowMs)
             || exists(connection,budget,"SELECT request_id FROM guild_trial_launch_role WHERE player_id=? AND (state<>2 OR state IS NULL) LIMIT 1",player)
             // 私有同意直到大厅明确终局才释放；本域旧lobby时钟不充当角色过户的安全证明。
             || exists(connection,budget,"SELECT s.player_id FROM guild_activity_slot s LEFT JOIN guild_trial_lobby l ON l.lobby_id=s.lobby_id WHERE s.player_id=? AND (s.lobby_id IS NULL OR s.lobby_id<>0) AND "
@@ -47,7 +71,7 @@ public final class RolePendingFence {
             || exists(connection,budget,"SELECT player_id FROM match_global_watching WHERE player_id=? AND (state<>5 OR state IS NULL) LIMIT 1",player)
             // 邀请接受与global票在同一P事务交接；精确过期PENDING、ACCEPTED/DECLINED才没有独立邀请待办。
             || exists(connection,budget,"SELECT challenger_id FROM match_global_challenge WHERE (challenger_id=? OR target_id=?) AND "
-                    + "((state=1 AND expires_ms>CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)) OR state NOT IN(1,2,3) OR state IS NULL OR (state=1 AND expires_ms IS NULL)) LIMIT 1",player,player);
+                    + "((state=1 AND expires_ms>?) OR state NOT IN(1,2,3) OR state IS NULL OR (state=1 AND expires_ms IS NULL)) LIMIT 1",player,player,nowMs);
     }
     public static boolean blocked(JdbcTemplate sql, long player) {
         return Boolean.TRUE.equals(sql.execute((ConnectionCallback<Boolean>)connection -> blocked(connection,player)));

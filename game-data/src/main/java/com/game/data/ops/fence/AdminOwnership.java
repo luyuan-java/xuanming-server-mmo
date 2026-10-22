@@ -94,6 +94,8 @@ public final class AdminOwnership {
     }
 
     private final PlayerStore store;
+    /** 只包裹普通释放；带截止的夺权仍由 PlayerStore 自己管理事务。 */
+    private final TransactionTemplate releaseTransactions;
     private final TakeoverRequests takeovers;
     private final LocationTombstones tombstones;
     private final DataMetrics metrics;
@@ -106,7 +108,8 @@ public final class AdminOwnership {
                           LocationTombstones tombstones, DataMetrics metrics) {
         this.store = store;
         // 保留既有装配签名；带时限夺权必须使用 PlayerStore 自有事务，不能再由此模板包裹。
-        java.util.Objects.requireNonNull(tx.getTransactionManager(), "运维事务管理器");
+        this.releaseTransactions = new TransactionTemplate(
+                java.util.Objects.requireNonNull(tx.getTransactionManager(), "运维事务管理器"), tx);
         this.takeovers = takeovers;
         this.tombstones = tombstones;
         this.metrics = metrics;
@@ -270,7 +273,7 @@ public final class AdminOwnership {
         }
         tombstone(playerId, epoch);
         try {
-            if (!store.releaseOwnership(playerId, epoch)) {
+            if (!Boolean.TRUE.equals(releaseTransactions.execute(status -> store.releaseOwnership(playerId, epoch)))) {
                 log.warn("运维释放归属没改到行（epoch 已变或已释放） player={} epoch={}", Long.toUnsignedString(playerId),
                         Long.toUnsignedString(epoch));
             }
@@ -345,7 +348,7 @@ public final class AdminOwnership {
         }
         toRelease.forEach((playerId, epoch) -> {
             try {
-                if (!store.releaseOwnership(playerId, epoch)) {
+                if (!Boolean.TRUE.equals(releaseTransactions.execute(status -> store.releaseOwnership(playerId, epoch)))) {
                     log.warn("运维释放归属没改到行（epoch 已变或已释放） player={} epoch={}", Long.toUnsignedString(playerId),
                             Long.toUnsignedString(epoch));
                 }

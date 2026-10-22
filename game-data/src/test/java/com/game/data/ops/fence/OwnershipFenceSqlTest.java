@@ -234,7 +234,8 @@ class OwnershipFenceSqlTest {
         Boolean releasedSaved = db.tx().execute(s -> store.saveStateAndRelease(zombie, PlayerState.getDefaultInstance()));
         assertThat(heldSaved).isFalse();
         assertThat(releasedSaved).isFalse();
-        assertThat(store.releaseOwnership(P, 0)).isFalse();
+        Boolean staleRelease = db.tx().execute(status -> store.releaseOwnership(P, 0));
+        assertThat(staleRelease).isFalse();
         assertThat(store.renewOwnerLeases(List.of(new OwnerLease(P, 0)))).containsExactly(new OwnerLease(P, 0));
         assertThat(store.handOffOwnership(zombie, PlayerState.getDefaultInstance(),
                 System.currentTimeMillis() + 30_000, System.currentTimeMillis(), Duration.ofSeconds(2)))
@@ -265,7 +266,8 @@ class OwnershipFenceSqlTest {
         Boolean releasedSaved = db.tx().execute(s -> store.saveStateAndRelease(zombie, PlayerState.getDefaultInstance()));
         assertThat(heldSaved).isFalse();
         assertThat(releasedSaved).isFalse();
-        assertThat(store.releaseOwnership(P, auditedOldUpperBound)).isFalse();
+        Boolean staleRelease = db.tx().execute(status -> store.releaseOwnership(P, auditedOldUpperBound));
+        assertThat(staleRelease).isFalse();
         assertThat(store.renewOwnerLeases(List.of(new OwnerLease(P, auditedOldUpperBound))))
                 .containsExactly(new OwnerLease(P, auditedOldUpperBound));
         assertThat(store.handOffOwnership(zombie, PlayerState.getDefaultInstance(),

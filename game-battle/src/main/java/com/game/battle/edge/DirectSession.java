@@ -140,6 +140,11 @@ final class DirectSession implements DirectLink {
         return s == State.PENDING || s == State.VERIFIED;
     }
 
+    /** 仅房间正常终局/退出观战请求的优雅关闭；替换、错误和一般关闭不能授予空状态回包资格。 */
+    boolean roomRequestedTerminalClose() {
+        return state == State.VERIFIED && closeRequested && disconnectReason == Disconnect.BATTLE_CLOSED;
+    }
+
     /** 服务端已发起关闭（含房间发起、还没生效的优雅关闭）、连接还没断（停机排空等的就是这些）。任何线程可读。 */
     boolean isClosing() {
         State s = state;

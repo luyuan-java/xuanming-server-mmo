@@ -1,6 +1,7 @@
 package com.game.player.store;
 
 import java.util.List;
+import java.util.Optional;
 import org.apache.ibatis.annotations.Arg;
 import org.apache.ibatis.annotations.ConstructorArgs;
 import org.apache.ibatis.annotations.Delete;
@@ -212,7 +213,8 @@ public interface PlayerMapper {
                                      @Param("source") String source,@Param("admission") byte[] admission,@Param("now") long now);
 
     @Select("SELECT admission_proto FROM player_final_save WHERE player_id=#{playerId} AND owner_epoch=#{epoch} FOR UPDATE")
-    byte[] selectFinalAdmissionProto(@Param("playerId") long playerId,@Param("epoch") long epoch);
+    // Optional明确这是单行BLOB，避免Mapper把byte[]当作多行byte结果集。
+    Optional<byte[]> selectFinalAdmissionProto(@Param("playerId") long playerId,@Param("epoch") long epoch);
 
     @Insert("""
             INSERT INTO player_final_save (player_id,owner_epoch,save_seq,protocol_version,source_instance,status,

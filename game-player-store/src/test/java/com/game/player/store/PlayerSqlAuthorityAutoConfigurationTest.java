@@ -138,7 +138,9 @@ public class PlayerSqlAuthorityAutoConfigurationTest {
             }
             assertThat(constraint).isNotNull().matches("[A-Za-z0-9_]+");
             try (var statement = connection.createStatement()) {
-                statement.execute("ALTER TABLE player_trade_transfer DROP CONSTRAINT " + constraint);
+                String quote=connection.getMetaData().getIdentifierQuoteString().trim();
+                assertThat(quote).isNotEmpty();
+                statement.execute("ALTER TABLE player_trade_transfer DROP CONSTRAINT " + quote + constraint + quote);
             }
             assertThatThrownBy(() -> PlayerSqlAuthorityAutoConfiguration.verifyTradeSchema(connection))
                     .isInstanceOf(IllegalStateException.class).hasMessageContaining("主键");

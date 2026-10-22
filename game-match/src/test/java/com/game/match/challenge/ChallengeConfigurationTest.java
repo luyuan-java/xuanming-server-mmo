@@ -12,8 +12,11 @@ import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.dispatch.MatchMethods;
 import com.game.match.id.MatchIds;
+import com.game.match.global.GlobalMatchConfiguration;
+import com.game.match.global.GlobalMatchService;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MetricLabels;
+import com.game.match.rating.RatingTestDatabase;
 import com.game.match.testing.FakeGatherLauncher;
 import com.game.match.testing.FakePlayerStatus;
 import com.game.match.testing.LeaseOnlyRedis;
@@ -31,6 +34,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -117,7 +121,9 @@ class ChallengeConfigurationTest {
     }
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
-            .withUserConfiguration(Collaborators.class, ChallengeConfiguration.class);
+            .withUserConfiguration(Collaborators.class, ChallengeConfiguration.class)
+            .withPropertyValues("game.run-mode=test")
+            .withBean(DataSource.class, () -> RatingTestDatabase.h2WithProfiles(Map.of(A, "公开角色1001", B, "公开角色1002")));
 
     private static SessionContext session(long playerId) {
         return SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId("gate-inst").setSessionId(9).setZoneId(1)
@@ -139,11 +145,27 @@ class ChallengeConfigurationTest {
         runner.run(context -> {
             assertThat(context).hasNotFailed();
             assertThat(context).hasSingleBean(ChallengeService.class).hasSingleBean(MatchPushExecutor.class);
+            assertThat(context).doesNotHaveBean(GlobalMatchService.class);
             assertThat(context.getBean(ChallengeStore.class)).as("测试里用 @Primary 换掉了 Redis 实现").isInstanceOf(InMemoryChallengeStore.class);
             assertThat(context.getBeansOfType(ChallengeStore.class).values()).hasAtLeastOneElementOfType(RedissonChallengeStore.class);
             assertThat(handlers(context)).containsOnlyKeys(MatchMethods.CHALLENGE_PLAYER, MatchMethods.RESPOND_CHALLENGE);
             assertThat(handlers(context).values()).allSatisfy(handler -> assertThat(handler.inline()).as("要读写 Redis：进工作池").isFalse());
         });
+    }
+
+    @Test
+    void 生产缺少全球SQL权威仍由正式门禁拒启_不是空服务引用异常() {
+        runner.withUserConfiguration(GlobalMatchConfiguration.class)
+                .withPropertyValues("game.run-mode=prod", "game.match.global.enabled=false", "game.match.global.require-ti-db=true")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    Throwable cause = context.getStartupFailure();
+                    while (cause.getCause() != null) {
+                        cause = cause.getCause();
+                    }
+                    assertThat(cause).isInstanceOf(IllegalStateException.class)
+                            .hasMessageContaining("生产匹配必须启用全球 SQL 权威与 TiDB 强读");
+                });
     }
 
     @Test
@@ -166,6 +188,7 @@ class ChallengeConfigurationTest {
             ChallengeInviteS2C inviteBody = ChallengeInviteS2C.parseFrom(invite.body());
             assertThat(inviteBody.getChallengeId()).isEqualTo(challengeId);
             assertThat(inviteBody.getChallengerId()).isEqualTo(A);
+            assertThat(inviteBody.getChallengerName()).isEqualTo("公开角色1001").isNotEqualTo(session(A).getAccount());
             assertThat(inviteBody.getBattleConfigId()).isEqualTo(3);
             assertThat(inviteBody.getExpiresAtMs()).as("game.match.challenge-ttl = 45 s（缺省是 60 s）").isEqualTo(clock.peekMs() + 45_000);
 
