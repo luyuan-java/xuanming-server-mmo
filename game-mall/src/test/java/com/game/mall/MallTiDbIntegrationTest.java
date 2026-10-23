@@ -39,7 +39,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 @EnabledIfSystemProperty(named = "game.mall.tidb-test", matches = "true")
 class MallTiDbIntegrationTest {
     static final String DATABASE = "mallit" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
-    static final String ADMIN_URL = "jdbc:mysql://127.0.0.1:4000/?connectTimeout=3000&socketTimeout=6000";
+    static final String JDBC_BASE = "jdbc:mysql://127.0.0.1:" + tiDbTestPort() + "/";
+    static final String ADMIN_URL = JDBC_BASE + "?connectTimeout=3000&socketTimeout=6000";
     static ConfigurableApplicationContext context;
     static HikariDataSource pool;
     static JdbcTemplate jdbc;
@@ -47,6 +48,13 @@ class MallTiDbIntegrationTest {
     static MallOrderStore second;
     static boolean created;
 
+    /** 只配置本机TiDB测试端口，非法数值必须在连接前失败。 */
+    private static int tiDbTestPort() {
+        int port = Integer.parseInt(System.getProperty("game.it.tidb.port", "4000"));
+        if (port < 1 || port > 65535)
+            throw new IllegalArgumentException("game.it.tidb.port必须在1..65535");
+        return port;
+    }
     @BeforeAll
     static void start() throws Exception {
         assertThat(DATABASE).matches("mallit[a-z0-9]{20}");
@@ -55,7 +63,7 @@ class MallTiDbIntegrationTest {
             created = true;
         }
         try {
-            DriverManagerDataSource migration = new DriverManagerDataSource("jdbc:mysql://127.0.0.1:4000/" + DATABASE
+            DriverManagerDataSource migration = new DriverManagerDataSource(JDBC_BASE + DATABASE
                     + "?connectTimeout=3000&socketTimeout=6000", "root", "");
             new ResourceDatabasePopulator(new ClassPathResource("db/migration/V1__official_sku.sql")).execute(migration);
             SpringApplication app = new SpringApplication(MallApplication.class);
@@ -64,7 +72,7 @@ class MallTiDbIntegrationTest {
                     "--game.mall.allowed-payment-channels=test-channel",
                     "--game.mall.gateway-secret=" + MallTestDatabase.GATEWAY_KEY,
                     "--game.mall.payment-secret=" + MallTestDatabase.PAYMENT_KEY,
-                    "--spring.datasource.url=jdbc:mysql://127.0.0.1:4000/" + DATABASE,
+                    "--spring.datasource.url=" + JDBC_BASE + DATABASE,
                     "--spring.datasource.username=root", "--spring.datasource.password=", "--spring.sql.init.mode=never");
             assertThat(context.getBean(GameNamespace.class).value()).isEqualTo(DATABASE);
             pool = context.getBean(HikariDataSource.class);
@@ -94,7 +102,7 @@ class MallTiDbIntegrationTest {
     void 真TiDB装配核对namespace与每物理连接强读事务() throws Exception {
         DataSourceProperties properties = new DataSourceProperties();
         String snapshot = currentSnapshot();
-        properties.setUrl("jdbc:mysql://127.0.0.1:4000/" + DATABASE + "?sessionVariables=" + URLEncoder.encode(
+        properties.setUrl(JDBC_BASE + DATABASE + "?sessionVariables=" + URLEncoder.encode(
                 "tidb_read_consistency='weak',tidb_snapshot='" + snapshot + "'", StandardCharsets.UTF_8));
         properties.setUsername(pool.getUsername());
         properties.setPassword(pool.getPassword());

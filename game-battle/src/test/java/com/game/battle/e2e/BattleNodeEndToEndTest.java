@@ -485,16 +485,25 @@ class BattleNodeEndToEndTest {
             BattleStateS2C stateA = BattleStateS2C.parseFrom(ca.expect("reply:" + GET_BATTLE_STATE).content().getSerializedMessage());
             assertThat(stateA.getBattleId()).isEqualTo(battleId);
             assertThat(stateA.getSelfItemsList()).isEmpty();
-            // 140 查别的房间（非成员）→ 默认状态（0 字节，battle_id = 0），不回错误码
+            // 直连只授权原票绑定的房间；跨 battle 的 140 必须无业务帧关闭，不能套用房间层的空态语义。
             ca.request(GET_BATTLE_STATE, GetBattleStateRequest.newBuilder().setBattleId(battleId + 1_000_000).build());
-            Frame foreign = ca.expect("reply:" + GET_BATTLE_STATE);
-            assertThat(foreign.content().getSerializedMessage()).isEmpty();
-
-            // O6：Destroy → 参战者什么帧都收不到（没有 150、没有终局 139），只看到 FIN
-            battle.destroyBattle(DestroyBattleRequest.newBuilder().setBattleId(battleId).setReason("e2e_rollback").build())
-                    .get(10, TimeUnit.SECONDS);
             assertThat(ca.expectClosed(Duration.ofSeconds(3))).isEqualTo("fin");
-            assertThat(cb.expectClosed(Duration.ofSeconds(3))).isEqualTo("fin");
+
+            // 越权请求不改房间和票据；用同一原票重连，再保留 O6 对两个活直连的完整检验。
+            try (DirectClient reconnected = DirectClient.connectWith(assignedA)) {
+                reconnected.expect("verify-ok:" + battleId);
+                reconnected.request(GET_BATTLE_STATE, GetBattleStateRequest.newBuilder().setBattleId(battleId).build());
+                BattleStateS2C restored = BattleStateS2C.parseFrom(
+                        reconnected.expect("reply:" + GET_BATTLE_STATE).content().getSerializedMessage());
+                assertThat(restored.getBattleId()).isEqualTo(battleId);
+                assertThat(restored.getSelfItemsList()).isEmpty();
+
+                // O6：Destroy → 参战者什么帧都收不到（没有 150、没有终局 139），只看到 FIN
+                battle.destroyBattle(DestroyBattleRequest.newBuilder().setBattleId(battleId).setReason("e2e_rollback").build())
+                        .get(10, TimeUnit.SECONDS);
+                assertThat(reconnected.expectClosed(Duration.ofSeconds(3))).isEqualTo("fin");
+                assertThat(cb.expectClosed(Duration.ofSeconds(3))).isEqualTo("fin");
+            }
         }
         // Destroy 不结算、不发结果事件；之后补签 1005；重复 Destroy 幂等
         assertThat(count(meters, "game.battle.scene.events", "kind", "settlement", "result", "sent")).isEqualTo(settlementsBefore);

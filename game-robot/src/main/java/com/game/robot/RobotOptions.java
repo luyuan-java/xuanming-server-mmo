@@ -49,11 +49,11 @@ import java.util.regex.Pattern;
  * 开发口令只从环境变量 {@value #PASSWORD_ENV} 读（不进命令行、不进 shell 历史、不打印）。
  *
  * @param visitZoneId     另一个区。battle-cross-zone：B、C 登录的区（A 登录 {@code zoneId}）；travel 三个子命令：要去的访客区（从 {@code zoneId} 出发）——
- *                        这四个子命令要求它与 {@code zoneId} 不同。team / guild 的跨区步骤里另一个号从它登录、reconnect 的跨区重连经它的入口
+ *                        这四个子命令要求它与 {@code zoneId} 不同。team / guild / trade 的跨区步骤里另一个号从它登录、reconnect 的跨区重连经它的入口
  *                        （见 {@code crossZone}）
- * @param crossZone       team / guild / reconnect：跨区步骤跑不跑（{@code --cross-zone auto|require|skip}，批次 5.4 裁决 J6）；
- *                        {@code require} 时这三个子命令也要求 {@code visitZoneId} 与 {@code zoneId} 不同。trade 的跨区步骤还没有接入：
- *                        trade 配 {@code require} 是参数错误（不然「该跑的没跑」会是假绿），auto / skip 下照常只写观察记录
+ * @param crossZone       team / guild / reconnect / trade：跨区步骤跑不跑（{@code --cross-zone auto|require|skip}）；
+ *                        {@code require} 时要求 {@code visitZoneId} 与 {@code zoneId} 不同，且访客区实际开放；
+ *                        trade 在保留三个同区账号基线后，另用 D 验证跨区市场、详情与收藏
  * @param teamCrossZoneAllowed team 的跨区步骤按哪一支跑（{@code --team-cross-zone allow|deny}，须与 game-team 的
  *                        {@code game.team.allow-cross-zone} 一致）：false = X1（4020），true = X2（跨区同队、别区成员不跟随换图）
  * @param runTag          移动 / 货币 / 属性场景的账号标签：账号为 {@code 前缀 + mv + 标签 + _a / _b}、{@code 前缀 + cur / at + 标签}；
@@ -179,13 +179,13 @@ public record RobotOptions(
         ZONE("zone", "GAME_ROBOT_ZONE", "1", "区号（assign-gate 的 zone_id，≥ 1）"),
         VISIT_ZONE("visit-zone", "GAME_ROBOT_VISIT_ZONE", "2",
                 "另一个区（≥ 1）：battle-cross-zone 里 B 与观众 C 登录的区（A 登录 --zone）；travel / travel-abandon / travel-long 里要去的访客区"
-                        + "（从 --zone 出发）——这四个子命令要求它与 --zone 不同。team / guild 的跨区步骤里另一个号从它登录、reconnect 的跨区重连经它的入口"
+                        + "（从 --zone 出发）——这四个子命令要求它与 --zone 不同。team / guild / trade 的跨区步骤里另一个号从它登录、reconnect 的跨区重连经它的入口"
                         + "（见 --cross-zone）；别的子命令不看它"),
         CROSS_ZONE("cross-zone", "GAME_ROBOT_CROSS_ZONE", "auto",
-                "team / guild / reconnect：跨区步骤（另一个号经 --visit-zone 登录，reconnect 是经 --visit-zone 的入口重连）跑不跑："
+                "team / guild / reconnect / trade：跨区步骤（另一个号经 --visit-zone 登录，reconnect 是经 --visit-zone 的入口重连）跑不跑："
                         + "auto（--visit-zone 与 --zone 不同、且在区服列表里是 OPEN 才跑，"
                         + "否则跳过并写明原因）/ require（跑不了即失败，验收用；两个区相同是参数错误）/ skip（不跑）；跑没跑写进报告与结果行。"
-                        + "trade 的跨区步骤还没接入：trade 配 require 是参数错误，auto / skip 下只写观察记录"),
+                        + "trade 保留 A/B/C 同区基线，再用 D 验证跨区市场、详情和收藏"),
         TEAM_CROSS_ZONE("team-cross-zone", "GAME_ROBOT_TEAM_CROSS_ZONE", "deny",
                 "team 的跨区步骤按哪一支跑，须与 game-team 的 game.team.allow-cross-zone 一致：deny（game-team 缺省：X1 别区的 C 申请 A 的队、"
                         + "A 邀请 C 都回 4020）/ allow（X2：C 跨区入队，A 换图时同区的 B 跟进、别区的 C 不跟随）"),
@@ -325,11 +325,7 @@ public record RobotOptions(
         if (crossZone == null) {
             throw new UsageException("--cross-zone 只能是 auto / require / skip：" + crossZoneText);
         }
-        // require 是「跨区步骤必须跑」：trade 的还没接入、两个区相同，都不可能跑，在建任何连接之前就说清楚
-        // （auto 下同样的情形是跳过，不是错误）。trade 不拦就是假绿：结论照样通过，该跑的跨区步骤一步没跑
-        if (crossZone == CrossZoneGate.Mode.REQUIRE && scenario == Scenario.TRADE) {
-            throw new UsageException("trade 的跨区步骤还没有接入，--cross-zone require 跑不了（用 auto 或 skip；跨区可见性由 game-trade 的服务单测与 MySQL 测试覆盖）");
-        }
+        // require 必须真正执行跨区步骤；相同区号在建任何连接之前就拒绝。
         if (crossZone == CrossZoneGate.Mode.REQUIRE && hasCrossZoneSteps(scenario) && visitZone == zone) {
             throw new UsageException(subcommand(scenario) + " --cross-zone require 要两个不同的区：--visit-zone 与 --zone 都是 " + zone);
         }
@@ -501,8 +497,8 @@ public record RobotOptions(
                 + "寄售 / 公示页签与本轮种子逐字段一致 → 单区范围断言（zone_filter 在 zone 下被忽略、global 下生效）→ 页长 50 回显 20、"
                 + "超末页钳到末页 → 拍卖 20003 → 详情（不存在 20000、卖家看已结束的、买家 20000）→ 收藏 / 只看收藏 / 取消 → 货架；"
                 + "另钉参数非法 1005、LIKE 通配按字面量、按编号搜索。需要 dev 运行模式与运维令牌；--trade-scope 须与 game-trade 一致；"
-                + "跨区步骤（zone 范围：C 改经 --visit-zone 登录、归属区是 --visit-zone，C 的种子落在 --visit-zone 的市场，本区的 B 看不到 C）"
-                + "还没有接入（auto / skip 下只写观察记录；--cross-zone require 是参数错误）\n");
+                + "跨区步骤另建 D 经 --visit-zone 登录并核归属：zone 范围互不可见且 zone_filter 不能扩大范围；global 范围两区互见、"
+                + "zone_filter 精确过滤，跨区详情与收藏一致；--cross-zone require 跑不了即失败，结果 TRADE_SMOKE_OK / TRADE_SMOKE_FAIL 带 cross_zone 字段\n");
         out.append("  cross-node 跨节点换图（三个新号；需要 GAME_SCENE_NODES=2 起两个 scene 节点、per-node 覆盖、每图每节点一个频道）：落位到同图"
                 + "两个频道（同场景就登出等 6 s 重登，有上限）→ A 63 {scene_id = B 的场景} 应答 {0}、79 / 新实体号的 21 / 含 B 的 47、"
                 + "B 收 A 的 21、留在原场景的 C 收 A 旧实体的 51 → 目标节点上移动（B 收 66）与 77 → 断开重连回原实例原位 → 63 换回 → "
@@ -647,9 +643,9 @@ public record RobotOptions(
         return scenario == Scenario.TRAVEL || scenario == Scenario.TRAVEL_ABANDON || scenario == Scenario.TRAVEL_LONG;
     }
 
-    /** 带可选跨区步骤的子命令（由 {@code --cross-zone} 决定跑不跑）。trade 的跨区步骤还没接入，不在其中（它配 require 另行报错）。 */
+    /** 带可选跨区步骤的子命令；require 不能退化为单区通过。 */
     static boolean hasCrossZoneSteps(Scenario scenario) {
-        return scenario == Scenario.TEAM || scenario == Scenario.GUILD || scenario == Scenario.RECONNECT;
+        return scenario == Scenario.TEAM || scenario == Scenario.GUILD || scenario == Scenario.RECONNECT || scenario == Scenario.TRADE;
     }
 
     private static Opt byArg(String name) throws UsageException {

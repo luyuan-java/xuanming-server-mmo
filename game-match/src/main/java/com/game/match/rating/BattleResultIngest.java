@@ -235,7 +235,9 @@ public final class BattleResultIngest implements ResultConsumerControl {
             while (!stopped(signal)) {
                 BattleResultConsumer current;
                 try {
-                    current = new BattleResultConsumer(consumerFactory.get(), topic, handler, metrics, pollTimeout, RETRY_INITIAL, RETRY_MAX);
+                    current = new BattleResultConsumer(consumerFactory.get(), topic, handler, metrics, pollTimeout, RETRY_INITIAL, RETRY_MAX,
+                            settings.requireDurability() ? BattleResultConsumer.FailurePolicy.SQL_CONFIRMED
+                                    : BattleResultConsumer.FailurePolicy.LEGACY_REJECT_POISON);
                 } catch (RuntimeException e) {
                     log.error("[rating] 创建对局结果的 KafkaConsumer 失败，{} 后重试", restartDelay, e);
                     if (awaitStop(signal, restartDelay)) {

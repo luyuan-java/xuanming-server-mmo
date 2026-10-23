@@ -249,15 +249,19 @@ public final class RobotMain {
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                 } else if (options.scenario() == RobotOptions.Scenario.TRADE) {
-                    TradeScenario scenario = new TradeScenario(flow, registry, new TradeAdminClient(options.tradeAdminUrl(),
-                            AdminClient.resolveToken(env.get("GAME_ADMIN_TOKEN")), options.requestTimeout()),
-                            options.accountPrefix(), options.runTag(), options.zoneId(), options.tradeScope(),
-                            options.requestTimeout());
-                    title = "game-robot trade：" + scenario.accountA() + " 等（期望范围 "
-                            + TradeScenario.scopeName(options.tradeScope().getNumber()) + "），" + target
-                            + " trade-admin=" + options.tradeAdminUrl();
-                    out.println("== " + title + " 开始 ==");
-                    report = scenario.run();
+                    try (RobotClient visitClient = clientFor(options, options.visitZoneId(), ids, redirectToGateId)) {
+                        TradeScenario scenario = new TradeScenario(flow, visitFor(options, visitClient), registry,
+                                new TradeAdminClient(options.tradeAdminUrl(), AdminClient.resolveToken(env.get("GAME_ADMIN_TOKEN")),
+                                        options.requestTimeout()), options.accountPrefix(), options.runTag(), options.zoneId(),
+                                options.tradeScope(), options.requestTimeout());
+                        title = "game-robot trade：" + scenario.accountA() + " 等（期望范围 "
+                                + TradeScenario.scopeName(options.tradeScope().getNumber()) + "），" + target
+                                + " trade-admin=" + options.tradeAdminUrl() + " cross-zone=" + options.crossZone().wire()
+                                + " visit-zone=" + options.visitZoneId();
+                        out.println("== " + title + " 开始 ==");
+                        report = scenario.run();
+                        resultLine = scenario.resultLine();
+                    }
                 } else if (options.scenario() == RobotOptions.Scenario.FRIEND) {
                     FriendScenario scenario = new FriendScenario(flow, registry, options.accountPrefix(), options.runTag(),
                             options.requestTimeout());
@@ -440,7 +444,7 @@ public final class RobotMain {
     }
 
     /**
-     * team / guild / reconnect 的跨区步骤用的另一个区（批次 5.4）：开关、区服列表、{@code --visit-zone} 的客户端与登录流程。
+     * team / guild / reconnect / trade 的跨区步骤用的另一个区：开关、区服列表、{@code --visit-zone} 的客户端与登录流程。
      * 等 79 的上限同 travel（跨区重连要跟随 124）。
      */
     private static CrossZoneGate.Visit visitFor(RobotOptions options, RobotClient visitClient) {

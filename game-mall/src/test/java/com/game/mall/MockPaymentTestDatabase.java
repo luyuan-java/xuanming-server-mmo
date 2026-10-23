@@ -20,7 +20,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 
-/** 每例自有随机库；显式game.it.mysql只接受本机无库名4000端点，绝不借用已有共享表。 */
+/** 每例自有随机库；显式game.it.mysql只接受本机无库名TiDB端点（默认4000），绝不借用已有共享表。 */
 final class MockPaymentTestDatabase implements AutoCloseable {
     final DataSource source;
     final JdbcTemplate jdbc;
@@ -40,8 +40,12 @@ final class MockPaymentTestDatabase implements AutoCloseable {
             jdbcUrl = "jdbc:h2:mem:mallmock_" + UUID.randomUUID() + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=4000";
             var h2 = new JdbcDataSource(); h2.setURL(jdbcUrl); h2.setUser("sa"); source = h2;
         } else {
-            if (!endpoint.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):4000/?")) {
-                throw new IllegalArgumentException("mock真TiDB测试仅接受loopback:4000且不得指定已有数据库");
+            int tidbPort = Integer.parseInt(System.getProperty("game.it.tidb.port", "4000"));
+            if (tidbPort < 1 || tidbPort > 65535) {
+                throw new IllegalArgumentException("game.it.tidb.port必须在1..65535");
+            }
+            if (!endpoint.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):" + tidbPort + "/?")) {
+                throw new IllegalArgumentException("mock真TiDB测试仅接受指定loopback端口且不得指定已有数据库");
             }
             database = "mallmock" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
             jdbcUrl = endpoint.replaceAll("/$", "") + "/" + database;

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.robot.scenario.ExpectJump;
+import com.game.robot.scenario.CrossZoneGate;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -413,8 +414,8 @@ class RobotOptionsTest {
     }
 
     @Test
-    void cross_zone_require而两个区相同_team_guild_reconnect是参数错误_auto与skip照常_别的子命令不管() {
-        for (String sub : List.of("team", "guild", "reconnect")) {
+    void cross_zone_require而两个区相同_已接跨区场景都是参数错误_auto与skip照常() {
+        for (String sub : List.of("team", "guild", "reconnect", "trade")) {
             assertThat(catchUsage(List.of(sub, "--cross-zone", "require", "--zone", "2"))).as(sub)
                     .isEqualTo(sub + " --cross-zone require 要两个不同的区：--visit-zone 与 --zone 都是 2");
             assertThat(catchUsage(List.of(sub, "--cross-zone", "require", "--zone", "2", "--visit-zone", "1"))).as(sub + " 两个区不同").isNull();
@@ -427,19 +428,15 @@ class RobotOptionsTest {
     }
 
     @Test
-    void trade的跨区步骤没接入_配require是参数错误_不然会假绿_auto与skip照常() {
-        String notWired = "trade 的跨区步骤还没有接入，--cross-zone require 跑不了";
-        assertThat(catchUsage(List.of("trade", "--cross-zone", "require"))).startsWith(notWired);
-        assertThat(catchUsage(List.of("trade", "--cross-zone", "require", "--zone", "2", "--visit-zone", "1"))).as("两个区不同也一样")
-                .startsWith(notWired);
+    void trade跨区require接入真实流程_命令行和环境同一合同() throws Exception {
+        assertThat(catchUsage(List.of("trade", "--cross-zone", "require"))).isNull();
+        assertThat(catchUsage(List.of("trade", "--cross-zone", "require", "--zone", "2", "--visit-zone", "1"))).isNull();
         Map<String, String> env = Map.of(RobotOptions.PASSWORD_ENV, "p", "GAME_ROBOT_CROSS_ZONE", "require");
-        assertThatThrownBy(() -> RobotOptions.parse(List.of("trade"), env, NOW)).isInstanceOf(UsageException.class)
-                .hasMessageStartingWith(notWired);
-        assertThat(catchUsage(List.of("trade", "--zone", "2"))).as("auto").isNull();
-        assertThat(catchUsage(List.of("trade", "--zone", "2", "--cross-zone", "skip"))).as("skip").isNull();
-        assertThat(RobotOptions.hasCrossZoneSteps(RobotOptions.Scenario.TRADE)).isFalse();
+        RobotOptions options = RobotOptions.parse(List.of("trade"), env, NOW);
+        assertThat(options.crossZone()).isEqualTo(CrossZoneGate.Mode.REQUIRE);
+        assertThat(RobotOptions.hasCrossZoneSteps(RobotOptions.Scenario.TRADE)).isTrue();
         assertThat(RobotOptions.usage().lines().filter(l -> l.startsWith("  trade ")).findFirst().orElseThrow())
-                .contains("--cross-zone require 是参数错误");
+                .contains("D 经 --visit-zone", "require 跑不了即失败", "TRADE_SMOKE_OK", "cross_zone");
     }
 
     @Test

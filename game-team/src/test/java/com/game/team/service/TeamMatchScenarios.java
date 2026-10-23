@@ -11,7 +11,6 @@ import static com.game.team.service.TeamMatchFixture.byReason;
 import static com.game.team.service.TeamMatchFixture.deadline;
 import static com.game.team.service.TeamMatchFixture.u;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.game.api.proto.TeamGatherReply;
 import com.game.api.proto.TeamMatchCheckReply;
@@ -67,7 +66,7 @@ import org.junit.jupiter.api.Test;
  *
  * <p>同一批用例跑在两种存储后端上（子类给后端）：{@code TeamServiceTest} 用内存替身（缺省档）、{@code TeamMatchRedisIntegrationTest}
  * 用真 Redis。game-match 是 {@link FakeMatchTeamService}，经真的 {@link MatchTeamBattle} 适配——所以应答枚举的翻译、
- * 每跳预算与超时的下传也在被测范围里。要拨 Redis 时钟的用例（开战锁自然过期）在真 Redis 上跳过。
+ * 每跳预算与超时的下传也在被测范围里。开战锁自然过期用例在内存后端拨钟，在真 Redis 上按实际 TIME 有界等待。
  *
  * <p>与基线的差别（都是跨进程带来的，match-spec M20）：预检整个在 game-match（这里是替身的简化模型）；多了「调不通 / 应答不可信 →
  * 4030」「建票结果不明 → 先退票」「gather 结果不明 → 不退票」三个故障面；gather 是异步的，结果到达之前 211 已经回了 STARTING。
@@ -542,17 +541,28 @@ abstract class TeamMatchScenarios {
     // ================================================================ #18 / #30：锁自然过期后 EndMatch 不写；之后能再次开战（:371-395）
 
     @Test
-    void 开战锁自然过期后_EndMatch不写只推当前视图_之后能再次开战() {
-        assumeTrue(fx.backend.advance(0), "要拨 Redis 时钟：只在内存后端上跑");
+    void 开战锁自然过期后_EndMatch不写只推当前视图_之后能再次开战() throws InterruptedException {
         long[] t = fx.team(2);
         long tid = t[0];
-        // gather 途中 Redis 时钟越过锁截止：EndMatch 发现锁已自然过期 → 停止、不写，仍推一次当前视图
-        fx.match.gatherReply = r -> {
-            fx.backend.advance(LOCK_SECONDS * 1000L);
-            return done(gathered(true, 7003));
-        };
-
-        requireOk(fx.start(t[1], tid));
+        // 先收到 STARTING，再让同一次 gather 在原锁自然过期后返回；不改锁截止、不删锁、不写终态。
+        CompletableFuture<TeamGatherReply> expiredGather = new CompletableFuture<>();
+        fx.match.gatherReply = r -> expiredGather;
+        try {
+            requireOk(fx.start(t[1], tid));
+            long expiresAtMs = fx.record(tid).getMatchLockExpireAtMs();
+            if (!fx.backend.advance(LOCK_SECONDS * 1000L)) {
+                // 真 Redis 只读原 TIME；单调总预算 84 秒，原锁仍为 83 秒，原 gather 兜底和既有 fork 时限不变。
+                Deadline expiryBudget = Deadline.after(LOCK_SECONDS * 1000L + 1000L);
+                while (Long.compareUnsigned(fx.store.read(t[1], tid, expiryBudget).nowMs(), expiresAtMs) < 0) {
+                    assertThat(expiryBudget.expired()).as("原开战锁须在有界等待内按 Redis TIME 自然过期").isFalse();
+                    TimeUnit.MILLISECONDS.sleep(25);
+                }
+            }
+            assertThat(expiredGather.complete(gathered(true, 7003))).as("原 gather 在兜底超时前实际完成").isTrue();
+        } finally {
+            // 失败或中断时也结束本夹具的 future，避免清理自有键后留下迟到收尾。
+            expiredGather.completeExceptionally(new IllegalStateException("自然过期测试夹具退出"));
+        }
 
         assertThat(fx.record(tid).getMatchLockToken()).as("锁已过期的记录不写（token 残留但按时钟无效）").isNotEmpty();
         long verAfter = fx.versionOf(tid);

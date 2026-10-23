@@ -82,8 +82,8 @@ class TeamSqlAuthorityTiDbTest {
     }
     @Test void 私有Trial大厅即使TTL已过也阻首次Team开局_终局后才可提交原launch(){
         player(1);bound(1,"CreateTeam",id(CreateTeamRequest.getDefaultInstance())).mutate(Bind.create(1,10),Op.create(1,10,1),SessionLoader.NONE,RuleConfig.DEFAULT,budget());
-        var request=id(StartTeamMatchRequest.newBuilder().setExpectedTeamId(10).setBattleConfigId(7).setTargetSize(5).build());
-        var start=bound(1,"StartTeamMatch",request);var snap=start.read(1,10,budget()).snapshot();
+        var request=id(StartTeamMatchRequest.newBuilder().setExpectedTeamId(10).setBattleConfigId(7).setTargetTeamSize(5).build());
+        var start=bound(1,"StartTeamMatch",request);var snap=start.read(1,10,budget());
         sqlRun("INSERT INTO guild_activity_slot VALUES(1,91,1)");sqlRun("INSERT INTO guild_trial_lobby(lobby_id,state,guild_id,activity_id) VALUES(91,1,11,3)");
         assertThrows(RuntimeException.class,()->start.commitMatchLock(snap,1,UUID.randomUUID().toString(),List.of(1L),snap.nowMs()+30_000,SessionLoader.NONE,budget(),Map.of(1L,1),30));
         assertEquals(0,count("team_launch"));assertEquals(0,count("team_launch_role"));assertTrue(store.read(1,10,budget()).record().getMatchLockToken().isEmpty());
@@ -147,7 +147,7 @@ class TeamSqlAuthorityTiDbTest {
         assertNotNull(start.commitMatchLock(snap,1,token,List.of(1L),snap.nowMs()+30_000,SessionLoader.NONE,budget(),Map.of(1L,1),30).commit());
         var leave=id(LeaveTeamRequest.newBuilder().setExpectedTeamId(10).build());assertEquals(Outcome.COMMITTED,bound(1,"LeaveTeam",leave).mutate(Bind.caller(1,10),Op.leave(1),SessionLoader.NONE,RuleConfig.DEFAULT,budget()).outcome());
         assertEquals(0,store.readFree(1,budget()).snapshot().playerTeamId());assertEquals(1,count("match_global_queue_unit"));assertEquals(1,count("match_global_join_intent"));
-        sql.read(budget(),c->{assertEquals(4,c.one("SELECT state FROM match_global_queue_unit",r->r.getInt(1)));assertEquals(1,c.one("SELECT cancelled FROM match_global_direct_intent",r->r.getInt(1)));assertEquals(5,c.one("SELECT state FROM team_launch",r->r.getInt(1)));assertEquals(2,c.one("SELECT state FROM team_launch_role",r->r.getInt(1)));return null;});
+        sql.read(budget(),c->{assertEquals(4,c.<Integer>one("SELECT state FROM match_global_queue_unit",r->r.getInt(1)).intValue());assertEquals(1,c.<Integer>one("SELECT cancelled FROM match_global_direct_intent",r->r.getInt(1)).intValue());assertEquals(5,c.<Integer>one("SELECT state FROM team_launch",r->r.getInt(1)).intValue());assertEquals(2,c.<Integer>one("SELECT state FROM team_launch_role",r->r.getInt(1)).intValue());return null;});
         assertEquals(Outcome.COMMITTED,bound(1,"LeaveTeam",leave).replay(budget()).outcome());assertEquals(1,count("match_global_queue_unit"));
     }
     @Test void 队伍已被装箱则名册变化不能拆队_原SQL策略不允许后启动者覆盖()throws Exception{
@@ -173,7 +173,7 @@ class TeamSqlAuthorityTiDbTest {
         sqlRun("INSERT INTO match_global_watching VALUES(1,?,?,7,1,?)",operation,actor(1).getAccount(),new byte[0]);sqlRun("INSERT INTO match_global_watch_head VALUES(1,?)",operation);sqlRun("INSERT INTO match_global_watch_request VALUES(1,?,?,7,0,?)",operation,actor(1).getAccount(),new byte[0]);
         var request=id(StartTeamMatchRequest.newBuilder().setExpectedTeamId(10).setBattleConfigId(7).setTargetTeamSize(3).build());var start=bound(1,"StartTeamMatch",request);var snap=start.read(1,10,budget());String token=UUID.randomUUID().toString();
         var committed=start.commitMatchLock(snap,1,token,List.of(1L),snap.nowMs()+30_000,SessionLoader.NONE,budget(),Map.of(1L,1),30);assertNotNull(committed.commit());var bytes=start.launchOriginal(budget());var original=com.game.proto.team.TeamLaunchOriginal.parseFrom(bytes);assertEquals(1,original.getObserverExitsCount());assertEquals(operation,original.getObserverExits(0).getHeadRequestId());assertFalse(original.getObserverExits(0).hasAdd());
-        sql.read(budget(),c->{assertEquals(1,c.one("SELECT cancelled FROM match_global_watch_request WHERE player_id=1",r->r.getInt(1)));assertEquals(5,c.one("SELECT state FROM match_global_watching WHERE player_id=1",r->r.getInt(1)));return null;});
+        sql.read(budget(),c->{assertEquals(1,c.<Integer>one("SELECT cancelled FROM match_global_watch_request WHERE player_id=1",r->r.getInt(1)).intValue());assertEquals(5,c.<Integer>one("SELECT state FROM match_global_watching WHERE player_id=1",r->r.getInt(1)).intValue());return null;});
         sqlRun("UPDATE match_global_watch_head SET request_id=? WHERE player_id=1",UUID.randomUUID().toString());
         assertNotNull(start.resumeLaunch(budget()));assertEquals(bytes,start.launchOriginal(budget()));assertNotNull(start.commitMatchLock(snap,1,token,List.of(1L),snap.nowMs()+30_000,SessionLoader.NONE,budget(),Map.of(1L,1),30).commit());assertEquals(bytes,start.launchOriginal(budget()));
     }

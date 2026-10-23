@@ -608,36 +608,44 @@ public final class TeamService {
         }
         // 回调在 Dubbo 的线程上触发（stage 已完成时就在本线程上）：只定性、计数与投递，清锁（阻塞、最坏锁时长 + 3.2 s）在 team-match-end 上。
         // 计数放在投递之前：执行器已满放弃收尾时，这次 211 仍然恰好计一次
-        gather.whenComplete((result, error) -> inBackground("gather结局核验",teamId,() -> {
-            final boolean ok;
-            if(battle.durableIntents()){
-                try{var finalIntent=battle.queryIntent(original,request.getRequestId(),request.toByteString(),Deadline.after(3000));
-                    if(finalIntent.getState()!=4&&finalIntent.getState()!=5){log.info("原队伍成局仍在恢复，保留业务开战锁和原意图");return;}
-                    ok=finalIntent.getState()==4;
-                }catch(RuntimeException pending){log.warn("队伍原成局结局未知，不提前推送开战失败");return;}
-            }else ok=error==null&&result!=null&&result.ok();
-            if (error != null || result == null) {
-                // game-match 中途退出、网络分区或调用超时：结果不明。不退票——gather 可能仍在跑，票据由它收尾或按 matched TTL 自愈
-                metrics.match(MatchOutcome.GATHER_UNKNOWN);
-                if (stopping.getAsBoolean()) {
-                    // 本进程正在停机：这次「结果不明」多半是自己的 Dubbo 引用被销毁造成的，game-match 那边的 gather 照常在跑。
-                    // 此刻清锁并推 MATCH_FAILED，成员会先收到「开战失败」、随后又被 177 / 143 拉进战斗；所以什么都不做，
-                    // 锁靠自然过期——与进程崩溃时一致（match-spec §7.5）。正常到达的结果（下面两个分支）在停机中照常收尾
-                    log.warn("[team] 停机中整队 gather 结果不明：不清锁、不推送（锁靠自然过期，game-match 照样把 gather 跑完）team={}: {}",
-                            u(teamId), String.valueOf(error));
-                    return;
-                }
-                log.error("[team] 整队 gather 结果不明（按失败收尾，不退票）team={}: {}", u(teamId), String.valueOf(error));
-            } else if (ok) {
-                metrics.match(MatchOutcome.SUCCESS);
-                log.info("[team] 整队开战成功 team={} battle={}", u(teamId), u(result.battleId()));
-            } else {
-                metrics.match(MatchOutcome.GATHER_FAILED);
-                log.info("[team] 整队 gather 失败 team={} outcome={}", u(teamId), result.outcome());
+        gather.whenComplete((result, error) -> {
+            boolean durable = battle.durableIntents();
+            // 非持久端口的结局已由回调给定，收尾执行器拒绝也必须恰好计一次；持久端口仍先异步核验权威意图。
+            if (!durable) {
+                metrics.match(error != null || result == null ? MatchOutcome.GATHER_UNKNOWN
+                        : result.ok() ? MatchOutcome.SUCCESS : MatchOutcome.GATHER_FAILED);
             }
-            // gather 失败拿不到要告诉玩家的具体原因：tip 留空
-            finishMatch(teamId, token, lockTtlSeconds, ok, roster, null);
-        }));
+            inBackground("gather结局核验", teamId, () -> {
+                final boolean ok;
+                if(durable){
+                    try{var finalIntent=battle.queryIntent(original,request.getRequestId(),request.toByteString(),Deadline.after(3000));
+                        if(finalIntent.getState()!=4&&finalIntent.getState()!=5){log.info("原队伍成局仍在恢复，保留业务开战锁和原意图");return;}
+                        ok=finalIntent.getState()==4;
+                    }catch(RuntimeException pending){log.warn("队伍原成局结局未知，不提前推送开战失败");return;}
+                }else ok=error==null&&result!=null&&result.ok();
+                if (error != null || result == null) {
+                    // game-match 中途退出、网络分区或调用超时：结果不明。不退票——gather 可能仍在跑，票据由它收尾或按 matched TTL 自愈
+                    if (durable) metrics.match(MatchOutcome.GATHER_UNKNOWN);
+                    if (stopping.getAsBoolean()) {
+                        // 本进程正在停机：这次「结果不明」多半是自己的 Dubbo 引用被销毁造成的，game-match 那边的 gather 照常在跑。
+                        // 此刻清锁并推 MATCH_FAILED，成员会先收到「开战失败」、随后又被 177 / 143 拉进战斗；所以什么都不做，
+                        // 锁靠自然过期——与进程崩溃时一致（match-spec §7.5）。正常到达的结果（下面两个分支）在停机中照常收尾
+                        log.warn("[team] 停机中整队 gather 结果不明：不清锁、不推送（锁靠自然过期，game-match 照样把 gather 跑完）team={}: {}",
+                                u(teamId), String.valueOf(error));
+                        return;
+                    }
+                    log.error("[team] 整队 gather 结果不明（按失败收尾，不退票）team={}: {}", u(teamId), String.valueOf(error));
+                } else if (ok) {
+                    if (durable) metrics.match(MatchOutcome.SUCCESS);
+                    log.info("[team] 整队开战成功 team={} battle={}", u(teamId), u(result.battleId()));
+                } else {
+                    if (durable) metrics.match(MatchOutcome.GATHER_FAILED);
+                    log.info("[team] 整队 gather 失败 team={} outcome={}", u(teamId), result.outcome());
+                }
+                // gather 失败拿不到要告诉玩家的具体原因：tip 留空
+                finishMatch(teamId, token, lockTtlSeconds, ok, roster, null);
+            });
+        });
         return resp;
     }
 

@@ -42,7 +42,7 @@ import java.util.Set;
  * 聚宝斋只读面端到端（对应 mmorpg robot/trade_smoke_scenario.go，三个同区机器人 A（卖家）/ B（买家）/ C（卖家兼买家）经 gate → game-trade；
  * trade-spec §4.9、§4.10、§9.6）。基线第 0–9 步照跑（Go :195-526）：
  * <ol>
- *   <li>第 0 步 A / B / C 进场。C 与 A 同区（跨区步骤还没有接入，相当于基线 {@code cross_zone = false}，Go :190-193）；</li>
+ *   <li>第 0 步 A / B / C 同区进场，保留原只读基线；可选跨区步骤另建 D，不改变基线分页与货架断言；</li>
  *   <li>第 1 步 经 game-trade 播种接口（{@link TradeAdminClient}，T5；基线 gRPC 直连 TradeAdmin）造 A 寄售、C 寄售、A 公示三条武器（子类 1）种子，
  *       标题带本轮 nonce；断言 {@code market_zone} = 卖家归属区 = 本区（Go :234-279）；</li>
  *   <li>第 2 步 A 经 gate 发 199 {@code TradeAdmin.SeedListing} → gate 按不认识的号丢弃：没有任何回包；只发一次（非法包阈值 50），
@@ -58,8 +58,8 @@ import java.util.Set;
  * 用编号纯数字搜索命中；已结束种子（公示 0、寄售 1 ms）卖家详情 ENDED、买家 20000、货架可见、寄售列表看不到；公示中的商品可收藏；
  * page / page_size 为 0 回显 1 / 20；拒绝应答只带 error_message（收藏另带 listing_id）、成功应答不设 error_message、tip 不带 parameters（§0.3）。
  *
- * <p>跨区步骤（C 在别区：zone 下互不可见、zone_filter 不能扩大范围；global 下 zone_filter = zone_b 只剩 C；C 看 A 的详情）还没有接入（批次 5.4 只解锁了 team / guild / reconnect 的），
- * 现在跳过并记观察（T10、Q3）。账号是 run-tag 新号（基线固定 robot_9401–9403）。限频：196 / 197 / 200 每秒 10 条、198 每秒 5 条
+ * <p>跨区步骤在原九步后另用 D 和独立搜索标记验证：zone 下互不可见且过滤不能扩大范围，global 下互见并按区精确过滤；
+ * 详情与收藏保持相同可见性规则。require 必须真实执行，auto/skip 明示未执行。账号是 run-tag 新号。限频：196 / 197 / 200 每秒 10 条、198 每秒 5 条
  * （messagelimiter.json:183-206），同一机器人相邻请求隔 {@link #REQUEST_SPACING}，任意 1 s 内同号至多 4 条。
  * 「不存在」的编号用 {@code Long.MAX_VALUE}（雪花号恒 &lt; 2^63 且远小于它，Go :109-111）。
  */
@@ -113,6 +113,9 @@ public final class TradeScenario {
     private final String accountA;
     private final String accountB;
     private final String accountC;
+    private final String accountD;
+    private final CrossZoneGate.Visit visit;
+    private CrossZoneGate.Decision crossZoneDecision = new CrossZoneGate.Skip("旧单区构造入口");
     private final int zoneId;
     private final MarketScope expectScope;
     private final Duration requestTimeout;
@@ -132,11 +135,18 @@ public final class TradeScenario {
      */
     public TradeScenario(PlayerFlow flow, MessageIdRegistry registry, TradeAdminClient admin, String accountPrefix,
                          String runTag, int zoneId, MarketScope expectScope, Duration requestTimeout) {
+        this(flow, null, registry, admin, accountPrefix, runTag, zoneId, expectScope, requestTimeout);
+    }
+
+    public TradeScenario(PlayerFlow flow, CrossZoneGate.Visit visit, MessageIdRegistry registry, TradeAdminClient admin,
+                         String accountPrefix, String runTag, int zoneId, MarketScope expectScope, Duration requestTimeout) {
         this.flow = flow;
+        this.visit = visit;
         this.admin = admin;
         this.accountA = accountName(accountPrefix, runTag, "a");
         this.accountB = accountName(accountPrefix, runTag, "b");
         this.accountC = accountName(accountPrefix, runTag, "c");
+        this.accountD = accountName(accountPrefix, runTag, "d");
         this.zoneId = zoneId;
         this.expectScope = expectScope;
         this.requestTimeout = requestTimeout;
@@ -167,7 +177,24 @@ public final class TradeScenario {
         return report;
     }
 
+    public String resultLine() {
+        return (report.passed() ? "TRADE_SMOKE_OK" : "TRADE_SMOKE_FAIL") + " zone_a=" + zoneId
+                + " zone_b=" + (visit == null ? zoneId : visit.visitZone()) + " " + crossZoneDecision.field()
+                + " checks=" + report.items().size() + " failures=" + report.failures();
+    }
+
     private void runChecks() throws RobotException {
+        // 在建角、播种等副作用前确认 require 可以执行；读不到区服列表也不能当作跳过。
+        if (visit != null) {
+            crossZoneDecision = new CrossZoneGate.Fail("跨区前置未完成");
+            crossZoneDecision = visit.resolve();
+            if (crossZoneDecision instanceof CrossZoneGate.Fail) {
+                must(false, "跨区前置", crossZoneDecision.reason());
+            }
+        }
+        if (!crossZoneDecision.runs()) {
+            report.note(crossZoneDecision.reason());
+        }
         // ---- 第 0 步：进场（单 zone：C 与 A 同区） ----
         Bot a = enter("A", accountA);
         Bot b = enter("B", accountB);
@@ -232,8 +259,7 @@ public final class TradeScenario {
             report.check(find(own.getListingsList(), listingA) != null && find(own.getListingsList(), listingC) != null,
                     "第 3 步 global 范围：zone_filter=本区 → 仍看到 A、C", describe(own), REF);
         }
-        report.note("跨区步骤（C 在别区：zone 下 B 看不到 C、C 看不到 A、zone_filter=zone_b 不能扩大范围；global 下 zone_filter=zone_b 只剩 C；"
-                + "详情 C 看 A zone 下 20000 / global 下受理）：还没有接入（批次 5.4 只解锁了 team / guild / reconnect 的跨区步骤），跳过（T10 / Q3）；由 game-trade 服务单测与 MySQL 测试覆盖");
+        // 跨区商品在原九步完成后才播种，不污染本轮两条寄售和三条货架的基线。
 
         // ---- 第 4 步：公示页签 ----
         report.check(find(bOnSale.getListingsList(), listingNotice) == null && find(bOnSale.getListingsList(), listingEnded) == null,
@@ -378,12 +404,87 @@ public final class TradeScenario {
         ListingSummary cOwn = find(cShelf.getListingsList(), listingC);
         report.check(cOwn != null && cOwn.getIsMine() && cShelf.getTotalCount() == 1,
                 "第 9 步 C 的货架只有自己的 C（is_mine = true）", describe(cShelf), REF);
+        runCrossZoneChecks(a, b);
+    }
+
+    private void runCrossZoneChecks(Bot a, Bot b) throws RobotException {
+        if (!crossZoneDecision.runs()) {
+            return;
+        }
+        must(a.player.homeZoneId() == zoneId && b.player.homeZoneId() == zoneId,
+                "跨区本区角色归属", "A=" + a.player.homeZoneId() + " B=" + b.player.homeZoneId() + "，期望 " + zoneId);
+        EnteredPlayer entered = visit.flow().enter(accountD, new Timings());
+        connections.add(entered.connection());
+        Bot d = new Bot("D", entered, requestTimeout, sendTip);
+        must(entered.homeZoneId() == visit.visitZone() && d.id() != a.id() && d.id() != b.id(),
+                "跨区访客角色归属", "D=" + uid(d.id()) + "@" + entered.homeZoneId() + "，期望 " + visit.visitZone());
+        String marker = nonce();
+        SeedListingRequest homeSeed = seedRequest(a.id(), marker + "-HOME", 0, SALE_DURATION_MS);
+        SeedListingRequest awaySeed = seedRequest(d.id(), marker + "-VISIT", 0, SALE_DURATION_MS);
+        long home = seed("跨区本区种子", homeSeed, zoneId);
+        long away = seed("跨区访客种子", awaySeed, visit.visitZone());
+        must(home != away, "跨区种子身份不同", uid(home) + " / " + uid(away));
+        boolean global = expectScope == MarketScope.MARKET_SCOPE_GLOBAL;
+        crossVisibility(b, onSale(marker), home, away, true, global, "本区浏览两区商品");
+        crossVisibility(d, onSale(marker), home, away, global, true, "访客浏览两区商品");
+        crossVisibility(b, onSale(marker).setZoneFilter(visit.visitZone()), home, away, !global, global,
+                "本区按访客区过滤：zone 不能扩大范围，global 精确选择访客");
+        crossVisibility(b, onSale(marker).setZoneFilter(zoneId), home, away, true, false, "本区按本区过滤");
+        crossVisibility(d, onSale(marker).setZoneFilter(zoneId), home, away, global, !global,
+                "访客按本区过滤：zone 不能扩大范围，global 精确选择本区");
+        crossVisibility(d, onSale(marker).setZoneFilter(visit.visitZone()), home, away, false, true, "访客按自己区过滤");
+        GetListingDetailResponse foreign = expect(b, detail, detailOf(away), GetListingDetailResponse.parser(),
+                global ? 0 : TIP_NOT_FOUND, "本区查询访客详情");
+        GetListingDetailResponse reverse = expect(d, detail, detailOf(home), GetListingDetailResponse.parser(),
+                global ? 0 : TIP_NOT_FOUND, "访客查询本区详情");
+        if (global) {
+            report.check(detailProblem(foreign, awaySeed, ListingPhase.LISTING_PHASE_ON_SALE, false, visit.visitZone()).isEmpty(),
+                    "跨区详情保留访客归属", orOk(detailProblem(foreign, awaySeed, ListingPhase.LISTING_PHASE_ON_SALE, false, visit.visitZone())), REF);
+            report.check(detailProblem(reverse, homeSeed, ListingPhase.LISTING_PHASE_ON_SALE, false, zoneId).isEmpty(),
+                    "反向详情保留本区归属", orOk(detailProblem(reverse, homeSeed, ListingPhase.LISTING_PHASE_ON_SALE, false, zoneId)), REF);
+        }
+        SetFavoriteResponse favoriteReply = expect(b, favorite, favoriteOf(away, true), SetFavoriteResponse.parser(),
+                global ? 0 : TIP_NOT_FOUND, "跨区收藏遵守市场范围", "listing_id");
+        report.check(favoriteReply.getListingId() == away && favoriteReply.getFavorite() == global,
+                "跨区收藏回显原编号与实际状态", describe(favoriteReply), REF);
+        if (global) {
+            crossVisibility(b, onSale(marker).setFavoritesOnly(true), home, away, false, true, "跨区收藏只返回原件");
+            expect(b, favorite, favoriteOf(away, false), SetFavoriteResponse.parser(), 0, "取消跨区收藏");
+            crossVisibility(b, onSale(marker).setFavoritesOnly(true), home, away, false, false, "取消后跨区收藏为空");
+        }
+        report.note("跨区真实角色 D=" + uid(d.id()) + " zone=" + visit.visitZone() + " listing=" + uid(away));
+    }
+
+    private void crossVisibility(Bot bot, BrowseListingsRequest.Builder request, long home, long away,
+                                 boolean wantHome, boolean wantAway, String name) throws RobotException {
+        BrowseListingsResponse response = browse(bot, request, "跨区：" + name);
+        String problem = visibilityProblem(response, home, away, wantHome, wantAway);
+        report.check(problem.isEmpty(), "跨区：" + name + " 的精确可见集合", problem.isEmpty() ? describe(response) : problem, REF);
+    }
+
+    static String visibilityProblem(BrowseListingsResponse response, long home, long away, boolean wantHome, boolean wantAway) {
+        int expected = (wantHome ? 1 : 0) + (wantAway ? 1 : 0);
+        if (home == 0 || away == 0 || home == away || tipOf(response) != 0) {
+            return "商品原件或应答不是有效成功值";
+        }
+        if (response.getListingsCount() != expected || Integer.toUnsignedLong(response.getTotalCount()) != expected) {
+            return "可见数量不符：期望 " + expected + "，实际 " + describe(response);
+        }
+        if ((find(response.getListingsList(), home) != null) != wantHome
+                || (find(response.getListingsList(), away) != null) != wantAway) {
+            return "可见集合不符：home=" + wantHome + " visit=" + wantAway + "，实际 " + describe(response);
+        }
+        return "";
     }
 
     // ================================================================ 播种与请求构造
 
     /** 播一条种子：受理、编号非 0 是后续步骤的前提（不满足即中止）；market_zone 必须是卖家归属区 = 本区。 */
     private long seed(String label, SeedListingRequest request) throws RobotException {
+        return seed(label, request, zoneId);
+    }
+
+    private long seed(String label, SeedListingRequest request, int expectedZone) throws RobotException {
         SeedListingResponse response;
         try {
             response = admin.seedListing(request);
@@ -394,8 +495,8 @@ public final class TradeScenario {
         int tip = errorOf(response).getId();
         must(tip == 0 && response.getListingId() != 0, "第 1 步 经 game-trade 播种接口造「" + label + "」：受理且 listing_id ≠ 0",
                 describeTip(errorOf(response)) + seedHint(tip) + " listing_id=" + uid(response.getListingId()));
-        report.check(response.getMarketZone() == zoneId, "第 1 步「" + label + "」market_zone = 卖家归属区 = 本区（服务端按卖家查，请求里没有这个字段）",
-                "market_zone=" + Integer.toUnsignedString(response.getMarketZone()) + "，期望 " + Integer.toUnsignedString(zoneId), REF);
+        report.check(response.getMarketZone() == expectedZone, "第 1 步「" + label + "」market_zone = 卖家实际归属区（服务端按卖家查）",
+                "market_zone=" + Integer.toUnsignedString(response.getMarketZone()) + "，期望 " + Integer.toUnsignedString(expectedZone), REF);
         return response.getListingId();
     }
 

@@ -67,7 +67,7 @@ class FriendConnectionPolicyTest {
     @EnabledIfSystemProperty(named = "game.it.tidb", matches = ".+")
     void 真实Spring池覆盖弱读和历史URL_三个物理连接淘汰后仍遵守策略() throws Exception {
         String base = System.getProperty("game.it.tidb").split("\\?", 2)[0];
-        if (!base.equals("jdbc:mysql://127.0.0.1:4000/test")) {
+        if (!base.equals("jdbc:mysql://127.0.0.1:" + tiDbTestPort() + "/test")) {
             throw new IllegalArgumentException("好友强读测试只允许本机隔离TiDB的test库");
         }
         String historical;
@@ -155,6 +155,13 @@ class FriendConnectionPolicyTest {
         return ids;
     }
 
+    /** 只配置本机TiDB测试端口，非法数值必须在连接前失败。 */
+    private static int tiDbTestPort() {
+        int port = Integer.parseInt(System.getProperty("game.it.tidb.port", "4000"));
+        if (port < 1 || port > 65535)
+            throw new IllegalArgumentException("game.it.tidb.port必须在1..65535");
+        return port;
+    }
     private static String user() { return System.getProperty("game.it.mysql.user", "root"); }
     private static String password() { return System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""); }
 

@@ -180,6 +180,62 @@ class BattleResultIngestTest {
     }
 
     @Test
+    void 全球模式损坏消息不提交原位点_监督重启仍不处理后续消息() {
+        verifyDamagedPayloadPolicy(true);
+    }
+
+    @Test
+    void 显式旧兼容模式跳过损坏消息_继续处理后续消息并逐条提交() {
+        verifyDamagedPayloadPolicy(false);
+    }
+
+    private void verifyDamagedPayloadPolicy(boolean global) {
+        TopicPartition tp = new TopicPartition(TOPIC, 0);
+        List<Long> committed = new CopyOnWriteArrayList<>();
+        admin.partitions.put(TOPIC, 3);
+        admin.replicas.put(TOPIC, 3);
+        admin.configs.put(TOPIC, new HashMap<>(Map.of("min.insync.replicas", "2", "unclean.leader.election.enable", "false")));
+        Supplier<Consumer<String, byte[]>> factory = () -> {
+            MockConsumer<String, byte[]> consumer = new MockConsumer<>(OffsetResetStrategy.EARLIEST) {
+                @Override
+                public synchronized void commitSync(Map<TopicPartition, org.apache.kafka.clients.consumer.OffsetAndMetadata> offsets) {
+                    super.commitSync(offsets);
+                    committed.add(offsets.get(tp).offset());
+                }
+            };
+            consumer.schedulePollTask(() -> {
+                consumer.rebalance(List.of(tp));
+                consumer.updateBeginningOffsets(Map.of(tp, 0L));
+                consumer.addRecord(new ConsumerRecord<>(TOPIC, 0, 0, "bad", new byte[] {(byte) 0xFF}));
+                consumer.addRecord(new ConsumerRecord<>(TOPIC, 0, 1, "9001", result(9001)));
+            });
+            consumers.add(consumer);
+            return consumer;
+        };
+        ingest = new BattleResultIngest(new BattleResultIngest.Settings(true, GENERATION, (short) 3, Duration.ofSeconds(1), global),
+                new BattleResultTopics(KAFKA_NAMES), adminFactory(), factory, handled::add, metrics,
+                Duration.ofMillis(30), Duration.ofMillis(30), Duration.ofMillis(10));
+        ingest.start();
+        try {
+            if (global) {
+                await().atMost(WAIT).until(() -> consumers.size() >= 2);
+                assertThat(consumers.get(0).closed()).isTrue();
+                assertThat(committed).as("全球损坏原件未经 SQL 确认不能提交").isEmpty();
+                assertThat(handled).as("坏原件之后的消息也不能越过未提交位点").isEmpty();
+            } else {
+                await().atMost(WAIT).untilAsserted(() -> assertThat(committed).containsExactly(1L, 2L));
+                assertThat(handled).extracting(BattleResultEvent::getBattleId).containsExactly(9001L);
+                assertThat(consumers).as("旧兼容跳过毒丸后无需监督重建").hasSize(1);
+                assertThat(ingest.consuming()).isTrue();
+            }
+        } finally {
+            ingest.stop();
+        }
+        assertThat(ingest.isRunning()).isFalse();
+        assertThat(ingest.consuming()).isFalse();
+        assertThat(consumers).allMatch(MockConsumer::closed);
+    }
+    @Test
     void topic名带代次() {
         assertThat(ingest(true, consumerFactory()).topic()).isEqualTo(TOPIC);
     }

@@ -277,8 +277,8 @@ class CommerceRuntimeTest {
     void 真TiDB和HTTP后页创建合同不被离线首页挡住_多worker重启保持原seq() throws Exception {
         String url = System.getProperty("game.it.mysql");
         org.junit.jupiter.api.Assumptions.assumeTrue(url != null, "未配置隔离TiDB，未运行真实分页合同回归");
-        if (!url.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):4000"))
-            throw new IllegalArgumentException("仅允许本机4000端口TiDB随机库");
+        if (!url.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):" + CommerceTiDbTest.tiDbTestPort()))
+            throw new IllegalArgumentException("仅允许本机game.it.tidb.port指定端口TiDB随机库");
         String database = "trade_mall_page_it_" + UUID.randomUUID().toString().replace("-", "");
         boolean created = false;
         var json = new com.fasterxml.jackson.databind.ObjectMapper();

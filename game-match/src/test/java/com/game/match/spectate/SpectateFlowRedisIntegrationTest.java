@@ -116,7 +116,8 @@ class SpectateFlowRedisIntegrationTest {
     /** 真存储 + 真落点存储 + 真票据存储（它就是票据的只读口）；nonce 是生产的随机 nonce；复查的两次读在调用线程上依次做。 */
     private WatchBattleService service(PlayerStatusReader statusReader) {
         return new WatchBattleService(fx.store, fx.placements, statusReader, fx.tickets.store, observers, metrics,
-                () -> randoms.isEmpty() ? 0.0 : randoms.poll(), SpectateRules::newNonce, Runnable::run);
+                () -> randoms.isEmpty() ? 0.0 : randoms.poll(), SpectateRules::newNonce, Runnable::run)
+                .withPublicNames((player, deadline) -> "公开观众" + id(player));
     }
 
     private static Deadline d() {
@@ -240,7 +241,7 @@ class SpectateFlowRedisIntegrationTest {
             assertThat(add.placement()).as("从真 Redis 读回的落点与写入的逐字段相同").isEqualTo(placement);
             assertThat(add.request().getBattleId()).isEqualTo(x);
             assertThat(add.request().getObserverPlayerId()).isEqualTo(viewer);
-            assertThat(add.request().getObserverName()).isEqualTo("acc-" + id(viewer));
+            assertThat(add.request().getObserverName()).isEqualTo("公开观众" + id(viewer)).isNotEqualTo(session(viewer).getAccount());
             assertThat(add.request().getRouting().getZoneId()).isEqualTo(2);
             assertThat(add.request().getRouting().getGateNodeId()).isEqualTo(1);
             assertThat(add.request().getRouting().getGateInstanceId()).isEqualTo("gate-inst-z2");

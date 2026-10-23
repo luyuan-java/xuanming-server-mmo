@@ -232,7 +232,7 @@ final class TeamServiceFixture {
             long tid = nextTid.incrementAndGet();
             tids.add(tid);
             return tid;
-        }, new MatchTeamBattle(match), Runnable::run, teamPushes, metrics, RuleConfig.DEFAULT, () -> false);
+        }, new MatchTeamBattle(match, MatchTeamBattle.IntentMode.LEGACY_COMPATIBILITY), Runnable::run, teamPushes, metrics, RuleConfig.DEFAULT, () -> false);
         this.dispatcher = new TeamDispatcher(REGISTRY, service, Runnable::run, metrics, 3500);
     }
 

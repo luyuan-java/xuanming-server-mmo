@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
-/** 每例自有随机库；显式game.it.mysql时沿用Fixture的loopback:4000随机TiDB库，未配置时只证明H2契约。 */
+/** 每例自有随机库；显式game.it.mysql时沿用Fixture指定的loopback随机TiDB库，未配置时只证明H2契约。 */
 class MockPaymentStoreTest {
     private static final Clock CLOCK = Clock.fixed(Instant.ofEpochMilli(1_760_000_000_000L), ZoneOffset.UTC);
 
@@ -268,6 +268,24 @@ class MockPaymentStoreTest {
                 assertEquals(0, result.failed()); assertEquals(0, result.scanFailures()); assertFalse(result.busy());
             }
             assertTrue(results.stream().mapToInt(MockPaymentApi.Reconcile::succeeded).sum() >= 1);
+            assertEquals(2, f.count("commerce_mock_transaction"));
+            assertEquals(1, f.count("commerce_refund_receipt"));
+            assertEquals("REFUNDED", f.store.get("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1")).state());
+            assertEquals(5, f.value("pms_sku_stock", "stock"));
+        }
+    }
+
+    @Test void 退款与原付款幂等重放并发只形成一笔原件与原回执() throws Exception {
+        try (var f = fixture()) {
+            f.sku(1, 5, 100);
+            var order = create(f, 1, "parallel-refund-replay-order");
+            f.store.cancel("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1"));
+            worker(f).pay(new MockPaymentApi.Pay(order.orderId(), "parallel-refund-replay-request"));
+            var results = parallel(() -> worker(f).reconcile(),
+                () -> worker(f).pay(new MockPaymentApi.Pay(order.orderId(), "parallel-refund-replay-request")));
+            var result = (MockPaymentApi.Reconcile) results.getFirst();
+            assertEquals(0, result.failed()); assertEquals(0, result.scanFailures()); assertFalse(result.busy());
+            assertTrue(result.succeeded() >= 1);
             assertEquals(2, f.count("commerce_mock_transaction"));
             assertEquals(1, f.count("commerce_refund_receipt"));
             assertEquals("REFUNDED", f.store.get("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1")).state());

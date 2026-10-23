@@ -102,12 +102,18 @@ public final class BattleResultConsumer implements Runnable {
 
     public BattleResultConsumer(Consumer<String, byte[]> consumer, String topic, Handler handler, MatchMetrics metrics,
                                 Duration pollTimeout, Duration retryInitial, Duration retryMax) {
+        this(consumer, topic, handler, metrics, pollTimeout, retryInitial, retryMax, FailurePolicy.SQL_CONFIRMED);
+    }
+
+    /** 仅装配层显式选择旧兼容策略；公开入口仍默认等 SQL 确认后才推进位点。 */
+    BattleResultConsumer(Consumer<String, byte[]> consumer, String topic, Handler handler, MatchMetrics metrics,
+                         Duration pollTimeout, Duration retryInitial, Duration retryMax, FailurePolicy policy) {
         this(consumer, topic, handler, metrics, pollTimeout, retryInitial, retryMax, (delay, pollWhilePaused) -> {
             long until = System.nanoTime() + delay.toNanos();
             do {
                 pollWhilePaused.run();
             } while (System.nanoTime() < until);
-        },FailurePolicy.SQL_CONFIRMED);
+        },policy);
     }
 
     BattleResultConsumer(Consumer<String, byte[]> consumer, String topic, Handler handler, MatchMetrics metrics,

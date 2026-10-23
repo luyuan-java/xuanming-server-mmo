@@ -19,12 +19,19 @@ class CommerceTiDbTest {
     private Connection admin;
     private String database;
     private CommerceEngine e;
+    /** 只配置本机TiDB测试端口，非法数值必须在连接前失败。 */
+    static int tiDbTestPort() {
+        int port = Integer.parseInt(System.getProperty("game.it.tidb.port", "4000"));
+        if (port < 1 || port > 65535)
+            throw new IllegalArgumentException("game.it.tidb.port必须在1..65535");
+        return port;
+    }
     @BeforeEach
     void start() throws Exception {
         String url = System.getProperty("game.it.mysql");
         Assumptions.assumeTrue(url != null, "未配置隔离TiDB");
-        if (!url.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):4000"))
-            throw new IllegalArgumentException("仅允许本机4000端口TiDB随机库");
+        if (!url.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):" + tiDbTestPort()))
+            throw new IllegalArgumentException("仅允许本机game.it.tidb.port指定端口TiDB随机库");
         admin = DriverManager.getConnection(url + "/", "root", "");
         database = "trade_it_" + UUID.randomUUID().toString().replace("-", "");
         try (var q = admin.createStatement()) {

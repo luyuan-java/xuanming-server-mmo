@@ -280,6 +280,81 @@ class TradeScenarioTest {
         assertThat(TradeScenario.Bot.envelopeHint(1008)).contains("限频");
     }
 
+    @Test
+    void 跨区集合必须精确匹配_不把错区或缺失原件算通过() {
+        ListingSummary home = ListingSummary.newBuilder().setListingId(11).build();
+        ListingSummary away = ListingSummary.newBuilder().setListingId(BIG).build();
+        BrowseListingsResponse both = BrowseListingsResponse.newBuilder().setTotalCount(2).addListings(home).addListings(away).build();
+        BrowseListingsResponse homeOnly = BrowseListingsResponse.newBuilder().setTotalCount(1).addListings(home).build();
+        BrowseListingsResponse awayOnly = BrowseListingsResponse.newBuilder().setTotalCount(1).addListings(away).build();
+        assertThat(TradeScenario.visibilityProblem(both, 11, BIG, true, true)).isEmpty();
+        assertThat(TradeScenario.visibilityProblem(homeOnly, 11, BIG, true, false)).isEmpty();
+        assertThat(TradeScenario.visibilityProblem(awayOnly, 11, BIG, false, true)).isEmpty();
+        assertThat(TradeScenario.visibilityProblem(BrowseListingsResponse.getDefaultInstance(), 11, BIG, false, false)).isEmpty();
+        assertThat(TradeScenario.visibilityProblem(both, 11, BIG, true, false)).contains("数量不符");
+        assertThat(TradeScenario.visibilityProblem(homeOnly, 11, BIG, false, true)).contains("集合不符");
+        assertThat(TradeScenario.visibilityProblem(awayOnly, 11, BIG, true, false)).contains("集合不符");
+        assertThat(TradeScenario.visibilityProblem(homeOnly.toBuilder().setTotalCount(2).build(), 11, BIG, true, false)).contains("数量不符");
+        assertThat(TradeScenario.visibilityProblem(both.toBuilder().setListings(1, home).build(), 11, BIG, true, true)).contains("集合不符");
+        assertThat(TradeScenario.visibilityProblem(both, BIG, BIG, true, true)).contains("不是有效成功值");
+        assertThat(TradeScenario.visibilityProblem(homeOnly.toBuilder().setErrorMessage(tip(TIP_NOT_FOUND)).build(), 11, BIG, true, false))
+                .contains("不是有效成功值");
+    }
+
+    @Test
+    void require相同区号在建角与播种前失败_不调用缺失的登录依赖() throws Exception {
+        CrossZoneGate.Visit visit = new CrossZoneGate.Visit(CrossZoneGate.Mode.REQUIRE, null, null, null, 1, 1);
+        TradeScenario scenario = new TradeScenario(null, visit, MessageIdRegistry.loadFromClasspath(), null, "dev_", "xz1", 1,
+                MarketScope.MARKET_SCOPE_GLOBAL, Duration.ofSeconds(1));
+        CheckReport report = scenario.run();
+        assertThat(report.passed()).isFalse();
+        assertThat(report.items().getFirst().name()).isEqualTo("跨区前置");
+        assertThat(report.items().getFirst().detail()).contains("没有第二个区");
+        assertThat(report.items()).noneMatch(i -> i.name().contains("播种"));
+        assertThat(scenario.resultLine()).startsWith("TRADE_SMOKE_FAIL").contains("cross_zone=fail");
+    }
+
+    @Test
+    void 未运行的旧单区构造不能产出成功结果行() throws Exception {
+        TradeScenario scenario = new TradeScenario(null, MessageIdRegistry.loadFromClasspath(), null, "dev_", "xz2", 1,
+                MarketScope.MARKET_SCOPE_ZONE, Duration.ofSeconds(1));
+        assertThat(scenario.resultLine()).startsWith("TRADE_SMOKE_FAIL").contains("cross_zone=skip", "checks=0");
+    }
+
+    @Test
+    void 区服列表真实HTTP503不能当作跨区跳过_在建角播种前失败() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/server-list", exchange -> {
+            calls.incrementAndGet();
+            try {
+                exchange.sendResponseHeaders(503, -1);
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+        try {
+            com.game.robot.client.GatewayHttp gateway = new com.game.robot.client.GatewayHttp(
+                    "http://127.0.0.1:" + server.getAddress().getPort(), Duration.ofSeconds(2));
+            CrossZoneGate.Visit visit = new CrossZoneGate.Visit(CrossZoneGate.Mode.REQUIRE, gateway, null, null, 1, 2);
+            TradeScenario scenario = new TradeScenario(null, visit, MessageIdRegistry.loadFromClasspath(), null, "dev_", "xz3", 1,
+                    MarketScope.MARKET_SCOPE_GLOBAL, Duration.ofSeconds(2));
+            CheckReport report = scenario.run();
+            assertThat(calls.get()).as("真实HTTP区服列表请求恰好一次").isEqualTo(1);
+            assertThat(report.passed()).isFalse();
+            assertThat(report.items()).singleElement().satisfies(item -> {
+                assertThat(item.name()).isEqualTo("流程中断");
+                assertThat(item.detail()).contains("/api/server-list 返回 HTTP 503");
+            });
+            assertThat(report.items()).noneMatch(item -> item.name().contains("播种"));
+            assertThat(scenario.resultLine()).startsWith("TRADE_SMOKE_FAIL").contains("cross_zone=fail");
+        } finally {
+            server.stop(0);
+        }
+    }
+
     // ================================================================ 夹具
 
     private static final int TIP_NOT_FOUND = TradeErrorTip.trade_error.kTradeListingNotFound_VALUE;

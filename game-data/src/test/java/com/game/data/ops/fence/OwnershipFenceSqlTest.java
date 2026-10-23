@@ -1,10 +1,10 @@
 package com.game.data.ops.fence;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.AdditionalAnswers.delegatesTo;
-import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 
 import com.game.data.metrics.DataMetrics;
 import com.game.data.ops.fence.AdminOwnership.Claim;
@@ -12,7 +12,6 @@ import com.game.data.testing.DataSqlFixture;
 import com.game.player.store.OwnerState;
 import com.game.player.store.OwnerLease;
 import com.game.player.store.PlayerRow;
-import com.game.player.store.PlayerMapper;
 import com.game.player.store.PlayerStore;
 import com.game.player.store.PlayerStore.ClaimResult;
 import com.game.player.store.PlayerStore.HandOffResult;
@@ -165,17 +164,13 @@ class OwnershipFenceSqlTest {
         CountDownLatch locked = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         CountDownLatch claiming = new CountDownLatch(1);
-        // 只观察真实 SQL 的进入时刻，不替换结果。此处已进入 withinDeadline，主线程才开始计持锁故障时间。
-        PlayerMapper observed = mock(PlayerMapper.class, delegatesTo(db.playerMapper));
+        // 路由围栏会先于 Mapper 获取同一个玩家行锁；在真实路由入口观察，继续执行全部生产 SQL。
+        // 此处已进入 withinDeadline，后续持锁时长仍按原预算注入，不替换路由权威或提交结果。
+        store = spy(new PlayerStore(db.playerMapper, System::currentTimeMillis, db.transactionManager));
         doAnswer(invocation -> {
             claiming.countDown();
-            return db.playerMapper.claimOwnerEpoch(invocation.getArgument(0), invocation.getArgument(1), invocation.getArgument(2));
-        }).when(observed).claimOwnerEpoch(anyLong(), anyLong(), anyLong());
-        doAnswer(invocation -> {
-            claiming.countDown();
-            return db.playerMapper.selectOwnerForUpdate(invocation.getArgument(0));
-        }).when(observed).selectOwnerForUpdate(anyLong());
-        store = new PlayerStore(observed, System::currentTimeMillis, db.transactionManager);
+            return invocation.callRealMethod();
+        }).when(store).lockRoutes(anyCollection(), anyList());
         ownership = new AdminOwnership(store, db.tx(), (p, e) -> calls.add("takeover:" + p + ":" + e),
                 (p, e) -> CompletableFuture.completedFuture(true), new DataMetrics(new SimpleMeterRegistry()));
         try (var executor = Executors.newFixedThreadPool(2)) {
