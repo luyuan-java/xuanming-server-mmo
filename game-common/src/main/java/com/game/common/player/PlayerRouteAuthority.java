@@ -89,8 +89,17 @@ public final class PlayerRouteAuthority {
             }
         }
     }
-    // H2夹具没有共享锁语法，使用更强的排他锁；生产TiDB门禁仍独立拒绝H2，不能据此声称真库并发通过。
-    private static String sharedLock(Connection connection)throws SQLException{return "H2".equals(connection.getMetaData().getDatabaseProductName())?" FOR UPDATE":" LOCK IN SHARE MODE";}
+    // TiDB没有真实行共享锁，显式取排他锁；不能启用noop丢掉提交围栏。
+    // 因此TiDB同一meta的写事务会串行；保锁序和超时，吞吐须另外测量，不能声称水平扩容不受影响。
+    private static String sharedLock(Connection connection)throws SQLException{
+        var metadata=connection.getMetaData();String product=metadata.getDatabaseProductName();
+        if("H2".equals(product))return " FOR UPDATE";
+        String version=metadata.getDatabaseProductVersion();
+        if(version==null||version.isBlank())throw new SQLException("无法确认路由围栏数据库版本");
+        if("TiDB".equalsIgnoreCase(product))return " FOR UPDATE";
+        if(!"MySQL".equalsIgnoreCase(product))throw new SQLException("路由围栏不支持未知数据库产品");
+        return version.toLowerCase(java.util.Locale.ROOT).contains("tidb")?" FOR UPDATE":" LOCK IN SHARE MODE";
+    }
     /** 纯预检读侧；提交仍必须调用lock，缺片/未知状态均封锁。 */
     public static boolean fenced(Connection connection,int zone,int timeout)throws SQLException{
         requireMeta(connection,timeout,false);if(zone==0)return true;

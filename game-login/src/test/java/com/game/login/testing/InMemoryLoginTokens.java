@@ -21,37 +21,60 @@ public final class InMemoryLoginTokens implements LoginTokens {
     public boolean broken;
     public int issued;
     private int seq;
+    private final Map<String, String> familyAccounts = new HashMap<>();
+    private final Map<String, String> familyHeads = new HashMap<>();
 
-    @Override
-    public synchronized TokenPair issue(String account, String authType, String deviceId) {
-        check();
-        TokenData data = new TokenData(account, authType, deviceId, 1000);
+    private String nextFamily() {
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                java.nio.ByteBuffer.allocate(16).putLong(0).putLong(seq + 1L).array());
+    }
+
+    private boolean familyValid(TokenData data) {
+        if (data.familyId() == null) return false;
+        if (data.familyId().isEmpty()) return true;
+        TokenData head = refresh.get(familyHeads.get(data.familyId()));
+        return data.account().equals(familyAccounts.get(data.familyId())) && head != null
+                && data.account().equals(head.account()) && data.familyId().equals(head.familyId());
+    }
+
+    private TokenPair issueFamily(String account, String authType, String deviceId, String familyId) {
+        TokenData data = new TokenData(account, authType, deviceId, 1000, familyId);
         String a = "access-" + (++seq);
         String r = "refresh-" + seq;
         access.put(a, data);
         refresh.put(r, data);
+        familyAccounts.put(familyId, account);
+        familyHeads.put(familyId, r);
         issued++;
         return new TokenPair(a, r, 1000 + 7200, 1000 + 720 * 3600);
     }
 
     @Override
+    public synchronized TokenPair issue(String account, String authType, String deviceId) {
+        check();
+        return issueFamily(account, authType, deviceId, nextFamily());
+    }
+
+    @Override
     public synchronized Optional<TokenData> validateAccess(String accessToken) {
         check();
-        return Optional.ofNullable(access.get(accessToken));
+        return Optional.ofNullable(access.get(accessToken)).filter(this::familyValid);
     }
 
     @Override
     public synchronized Optional<TokenPair> refresh(String refreshToken, BooleanSupplier pastDeadline) {
         check();
         TokenData data = refresh.get(refreshToken);
-        if (data == null) {
+        if (data == null || !familyValid(data)
+                || (!data.familyId().isEmpty() && !refreshToken.equals(familyHeads.get(data.familyId())))) {
             return Optional.empty();
         }
         if (pastDeadline.getAsBoolean()) {
             throw new LoginTokens.RotationAbandoned("请求截止已过，没有轮换（测试）");
         }
         refresh.remove(refreshToken);
-        return Optional.of(issue(data.account(), data.authType(), data.deviceId()));
+        return Optional.of(issueFamily(data.account(), data.authType(), data.deviceId(),
+                data.familyId().isEmpty() ? nextFamily() : data.familyId()));
     }
 
     private void check() {

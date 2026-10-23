@@ -31,4 +31,55 @@ class PlayerSessionAuthorityTest {
         routes.verify(()->PlayerRouteAuthority.lock(connection,java.util.List.of(1L),2),times(2));
         }
     }
+
+    @Test void 路由提交锁方言_TiDB和H2显式排他_MySQL保真实共享() throws Exception {
+        for (var database : java.util.List.of(
+                new String[]{"MySQL", "8.0.11-TiDB-v8.5.2", " FOR UPDATE"},
+                new String[]{"TiDB", "v8.5.2", " FOR UPDATE"},
+                new String[]{"H2", "2.3.232", " FOR UPDATE"},
+                new String[]{"MySQL", "8.4.13", " LOCK IN SHARE MODE"})) {
+            var fixture = routeMetadata(database[0], database[1]);
+            PlayerRouteAuthority.requireMeta(fixture.connection(), 2, true);
+            verify(fixture.connection()).prepareStatement(
+                    "SELECT generation,writable,fence_shards FROM route_meta WHERE id=1" + database[2]);
+            verify(fixture.statement()).setQueryTimeout(2);
+        }
+    }
+
+    @Test void 未知产品或版本与元数据故障在路由SQL前拒绝_不猜共享或启用noop() throws Exception {
+        for (var database : java.util.List.of(
+                new String[]{"unknown", "8.5.2"},
+                new String[]{"MySQL", null}, new String[]{"MySQL", " "},
+                new String[]{null, "8.4.13"})) {
+            var fixture = routeMetadata(database[0], database[1]);
+            assertThrows(SQLException.class, () -> PlayerRouteAuthority.requireMeta(fixture.connection(), 2, true));
+            verify(fixture.connection(), never()).prepareStatement(anyString());
+        }
+        var fixture = routeMetadata("MySQL", "8.4.13");
+        when(fixture.connection().getMetaData().getDatabaseProductVersion()).thenThrow(new SQLException("元数据读取失败"));
+        assertThrows(SQLException.class, () -> PlayerRouteAuthority.requireMeta(fixture.connection(), 2, true));
+        verify(fixture.connection(), never()).prepareStatement(anyString());
+    }
+
+    @Test void 启动只读meta校验不误取事务锁_保留原无锁读契约() throws Exception {
+        var fixture = routeMetadata("unknown", null);
+        PlayerRouteAuthority.requireMeta(fixture.connection(), 3, false);
+        verify(fixture.connection()).prepareStatement("SELECT generation,writable,fence_shards FROM route_meta WHERE id=1");
+        verify(fixture.connection(), never()).getMetaData();
+        verify(fixture.statement()).setQueryTimeout(3);
+    }
+
+    private record RouteMetadata(Connection connection, PreparedStatement statement) {}
+    private static RouteMetadata routeMetadata(String product, String version) throws Exception {
+        var connection = mock(Connection.class); var metadata = mock(DatabaseMetaData.class);
+        var statement = mock(PreparedStatement.class); var rows = mock(ResultSet.class);
+        when(connection.getMetaData()).thenReturn(metadata);
+        when(metadata.getDatabaseProductName()).thenReturn(product);
+        when(metadata.getDatabaseProductVersion()).thenReturn(version);
+        when(connection.prepareStatement(anyString())).thenReturn(statement);
+        when(statement.executeQuery()).thenReturn(rows); when(rows.next()).thenReturn(true);
+        when(rows.getString(1)).thenReturn("e0bded15-6e55-438c-b067-55ac20decc4e");
+        when(rows.getString(2)).thenReturn("1"); when(rows.getInt(3)).thenReturn(PlayerRouteAuthority.FENCE_SHARDS);
+        return new RouteMetadata(connection, statement);
+    }
 }

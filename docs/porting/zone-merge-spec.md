@@ -913,3 +913,9 @@ verify 在 Tomcat 线程上同步执行，几条按清单 join 的 SQL（50 万�
 6. 未写任何实体时可 `abort --run <原UUID> --hash <当前原hash> --operator <审批者>`，再按相同hash显式release。已写实体禁止abort；只能续跑原run。撤销是新freeze，加 `--original-run <原已完成并释放的正向UUID>`、交换source/target、expected填原迁入人数，再走同一计划审批流程；原字节或任何原owner/E已变则保留冻结拒绝，不能force。
 
 生产Guild快照/映射与区榜读SQL原件，Redis继续作为投影，不要求合区期间改一份跨副本缓存真相；Gateway目录写持meta/zone前缀，退役源不能被启动seed或普通admin重开。Login同时核真实home和入口zone，避免旧源session在合区后绕过退役标记。新增回归源码为ZoneMergeSqlAuthorityTiDbTest，含正反迁移、失败留冻、P7未知/manual、完整字节CAS、ABA与meta共享锁并发；尚未执行。
+
+### 2026-10-23 真实 TiDB 共享锁兼容与容量边界
+
+原 Chat 三项 owned TiDB 回归在业务断言前全部收到 `LOCK IN SHARE MODE` 不支持错误，原生退出 1（原件 FD483EFC…07D8），不能以 H2 绿替代。TiDB 官方说明其默认没有真实行共享锁；8.3 起可把共享锁请求提升为 `FOR UPDATE` 排他锁，`noop` 则不提供锁保护。本实现不修改数据库变量：JDBC 明确识别 TiDB 产品／版本后直接使用 `FOR UPDATE`，MySQL 保原真实共享锁，H2 保既有排他锁，未知产品、版本缺失或元数据读取失败在锁查询前拒绝。出处：[TiDB 悲观事务文档](https://docs.pingcap.com/tidb/stable/pessimistic-transaction/)。
+
+meta→zone／64 片→P 无符号升序及原事务截止预算不变。TiDB 对单例 `route_meta` 的排他锁意味着同一库的权威写事务在此前缀串行；跨副本并不消除这一热点，不能声称横向吞吐不变或无限容量。优先维持维护冻结与领域提交的原子范围，后续只按实际锁等待、业务耗时和受控容量证据评估，不为通过测试取消围栏或隐式缩小维护范围。此次追加仅登记实现及边界；原 Chat3 和 Data17 的真实 meta／zone 阻写回归将在修后按原断言验证，既有嵌入 common 的 JAR 在实际重建前均不冒新修复产物。

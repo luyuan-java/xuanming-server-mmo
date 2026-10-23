@@ -15,8 +15,14 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RBucket;
+import org.redisson.api.RScript;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.StringCodec;
 
@@ -78,8 +84,8 @@ class RedisLoginTokensTest {
         assertThat(RedisLoginTokens.decode("{bad")).isEmpty();
         assertThat(RedisLoginTokens.decode("{\"auth_type\":\"password\"}")).isEmpty();
         assertThat(RedisLoginTokens.decode("{\"account\":\"robot_1\",\"extra\":1}"))
-                .contains(new TokenData("robot_1", "", "", 0));
-        TokenData data = new TokenData("robot_1", "password", "", 7);
+                .contains(new TokenData("robot_1", "", "", 0, ""));
+        TokenData data = new TokenData("robot_1", "password", "", 7, "f".repeat(21) + "A");
         assertThat(RedisLoginTokens.decode(RedisLoginTokens.encode(data))).contains(data);
     }
 
@@ -92,7 +98,7 @@ class RedisLoginTokensTest {
         RBucket<String> oldBucket = mock(RBucket.class);
         String old = "o".repeat(43);
         when(redis.<String>getBucket(REDIS_KEYS.loginRefreshToken(old), StringCodec.INSTANCE)).thenReturn(oldBucket);
-        when(oldBucket.get()).thenReturn(RedisLoginTokens.encode(new TokenData("robot_1", "password", "", 7)));
+        when(oldBucket.get()).thenReturn("{\"account\":\"robot_1\",\"auth_type\":\"password\",\"created_at\":7}");
         RedisLoginTokens tokens = new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(2),
                 Duration.ofHours(720), Duration.ofSeconds(30), new SecureRandom());
         List<String> checks = new ArrayList<>();
@@ -114,5 +120,75 @@ class RedisLoginTokensTest {
                 new IllegalStateException("Command: (GET), params: [game:login:access:SECRETTOKEN]"));
         assertThat(e.getMessage()).isEqualTo("令牌存储校验失败: IllegalStateException").doesNotContain("SECRET");
         assertThat(e.getCause()).isNull();
+    }
+
+    @Test
+    void 家族记录已失效_access仍有令牌值也必须拒绝() {
+        RedissonClient redis = mock(RedissonClient.class);
+        @SuppressWarnings("unchecked") RBucket<String> bucket = mock(RBucket.class);
+        RScript script = mock(RScript.class);
+        String access = "a".repeat(43), familyId = "f".repeat(21) + "A";
+        when(redis.<String>getBucket(REDIS_KEYS.loginAccessToken(access), StringCodec.INSTANCE)).thenReturn(bucket);
+        when(bucket.get()).thenReturn("{\"account\":\"robot_1\",\"family_id\":\"" + familyId + "\"}");
+        when(redis.getScript(StringCodec.INSTANCE)).thenReturn(script);
+        when(script.<Long>eval(any(RScript.Mode.class), anyString(), any(RScript.ReturnType.class), anyList(), any(Object[].class)))
+                .thenReturn(0L);
+        RedisLoginTokens tokens = new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(2),
+                Duration.ofHours(720), Duration.ofSeconds(30), new SecureRandom());
+        assertThat(tokens.validateAccess(access)).as("家族缺失不能仅凭旧access记录放行").isEmpty();
+    }
+
+    @Test
+    void 显式损坏家族不能降级为旧JSON_只有真正缺字段兼容() {
+        for (String value : List.of("null", "\"\"", "7", "\"bad\"", "\"" + "f".repeat(22) + "\"")) {
+            assertThat(RedisLoginTokens.decode("{\"account\":\"robot_1\",\"family_id\":" + value + "}"))
+                    .as("显式损坏的family字段").isEmpty();
+        }
+        assertThat(RedisLoginTokens.decode("{\"account\":\"robot_1\"}").orElseThrow().familyId()).isEmpty();
+    }
+
+    @Test
+    void 原子校验只接受明确成功_存储异常仍不泄漏() {
+        // 真实account/head/TTL与并发原件由同类真Redis回归验证；此处只验证原子读边界的拒绝/异常映射。
+        RedissonClient redis = mock(RedissonClient.class);
+        @SuppressWarnings("unchecked") RBucket<String> bucket = mock(RBucket.class);
+        RScript script = mock(RScript.class);
+        String access = "a".repeat(43), familyId = "f".repeat(21) + "A";
+        when(redis.<String>getBucket(REDIS_KEYS.loginAccessToken(access), StringCodec.INSTANCE)).thenReturn(bucket);
+        when(bucket.get()).thenReturn(RedisLoginTokens.encode(new TokenData("robot_1", "password", "", 7, familyId)));
+        when(redis.getScript(StringCodec.INSTANCE)).thenReturn(script);
+        when(script.<Long>eval(any(RScript.Mode.class), anyString(), any(RScript.ReturnType.class), anyList(), any(Object[].class)))
+                .thenReturn(0L).thenReturn(null).thenReturn(-1L).thenReturn(1L)
+                .thenThrow(new IllegalStateException("SECRET"));
+        RedisLoginTokens tokens = new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(2),
+                Duration.ofHours(720), Duration.ofSeconds(30), new SecureRandom());
+        assertThat(tokens.validateAccess(access)).isEmpty();
+        assertThat(tokens.validateAccess(access)).isEmpty();
+        assertThat(tokens.validateAccess(access)).isEmpty();
+        assertThat(tokens.validateAccess(access)).isPresent();
+        assertThatThrownBy(() -> tokens.validateAccess(access)).isInstanceOf(TokenStoreException.class)
+                .hasMessageNotContaining("SECRET").hasNoCause();
+    }
+
+    @Test
+    void 零或负TTL在接触Redis之前拒绝() {
+        RedissonClient redis = mock(RedissonClient.class);
+        for (Duration bad : List.of(Duration.ZERO, Duration.ofMillis(-1))) {
+            assertThatThrownBy(() -> new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), bad,
+                    Duration.ofHours(1), Duration.ZERO, new SecureRandom())).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(1),
+                    bad, Duration.ZERO, new SecureRandom())).isInstanceOf(IllegalArgumentException.class);
+        }
+        verifyNoInteractions(redis);
+    }
+
+    @Test
+    void 签发脚本存储失败不返回令牌_异常不带原始参数() {
+        RedissonClient redis = mock(RedissonClient.class);
+        when(redis.getScript(StringCodec.INSTANCE)).thenThrow(new IllegalStateException("SECRET TOKEN"));
+        RedisLoginTokens tokens = new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(2),
+                Duration.ofHours(720), Duration.ZERO, new SecureRandom());
+        assertThatThrownBy(() -> tokens.issue("robot_1", "password", "")).isInstanceOf(TokenStoreException.class)
+                .hasMessageNotContaining("SECRET").hasMessageNotContaining("TOKEN").hasNoCause();
     }
 }
