@@ -65,11 +65,11 @@ class BundleAnalyzerTest {
     }
 
     @Test
-    void 已释放且没有玩法数据_初始状态_有流水则告警() {
+    void 已释放但缺失玩法数据_不能当新号_有流水则告警() {
         PlayerBundle.Analysis a = analyze(player(3, 1, 0), PlayerBundle.State.absent(), new PlayerBundle.TxlogCounts(2, null),
                 null, null, null);
 
-        assertThat(a.persistence()).contains("从未写过玩法数据");
+        assertThat(a.persistence()).contains("存档缺失").contains("禁止按初始状态");
         assertThat(a.warnings()).anyMatch(w -> w.contains("没有 player_state 行却有 2 条资产流水"));
     }
 

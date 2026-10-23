@@ -49,7 +49,7 @@ class PlayerRouteAuthoritySqlTest {
     }
     @Test void 恢复必须独立双上界_原账号修订与旧会话同时失效_不改home及存档()throws Exception{
         try(var f=new PlayerTradeStoreTest.Fixture()){
-            f.player(1,"seller");f.sql.update("INSERT INTO player_state(player_id,data,saved_epoch,updated_at) VALUES(?,?,0,1)",1,new byte[]{8,1});
+            f.player(1,"seller");assertEquals(1,f.sql.update("UPDATE player_state SET data=?,saved_epoch=0,updated_at=1 WHERE player_id=?",new byte[]{8,1},1));
             assertThrows(IllegalArgumentException.class,()->f.players.recoverOwnershipAfterRestore(1,12,BUDGET));
             assertEquals(new PlayerStore.ClaimResult.Claimed(13),f.players.recoverOwnershipAfterRestore(1,12,8,BUDGET));assertEquals(9,f.row(1).getOwnerRevision());assertEquals(7,f.row(1).getZoneId());
             assertArrayEquals(new byte[]{8,1},f.sql.queryForObject("SELECT data FROM player_state WHERE player_id=1",byte[].class));

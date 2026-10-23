@@ -90,7 +90,7 @@ final class BundleAnalyzer {
                     + (HELD_LEASE_EXPIRED.equals(ownership) ? "（写者失联——「东西丢了」的首要嫌疑）" : ""));
         }
         if (counts != null && !stateFound && counts.total() > 0) {
-            warnings.add("没有 player_state 行却有 " + counts.total() + " 条资产流水：资产变动从未落盘");
+            warnings.add("没有 player_state 行却有 " + counts.total() + " 条资产流水：存档缺失，不能推断从未落盘");
         }
         describeBattle(battleLock, settlements, warnings);
         return new PlayerBundle.Analysis(ownership, online, persistence, leaseRemaining, List.copyOf(warnings));
@@ -98,7 +98,7 @@ final class BundleAnalyzer {
 
     private static String releasedPersistence(boolean stateFound, long savedEpoch, long ownerEpoch, PlayerBundle.State state) {
         if (!stateFound) {
-            return "从未写过玩法数据（新号或从未进过场景）：各玩法取初始状态";
+            return "player_state 存档缺失，无法区分历史损坏与旧数据，禁止按初始状态加载或导入";
         }
         if (savedEpoch == ownerEpoch) {
             return "最终写回已落库：epoch " + Long.toUnsignedString(ownerEpoch) + " 的写者写回并释放（player_state.updated_at="
@@ -111,7 +111,7 @@ final class BundleAnalyzer {
 
     private static String heldPersistence(boolean stateFound, long savedEpoch, long ownerEpoch, PlayerBundle.State state, long nowMs) {
         if (!stateFound) {
-            return "库里没有玩法数据（这一代还没存过盘，之前也没有）";
+            return "player_state 存档缺失，不能判定历史存盘内容，禁止按初始状态加载或导入";
         }
         String age = "，距导出 " + (nowMs - state.updatedAt()) + " ms";
         if (savedEpoch == ownerEpoch) {

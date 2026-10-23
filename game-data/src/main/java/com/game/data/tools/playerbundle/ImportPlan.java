@@ -15,7 +15,7 @@ import java.util.List;
  * 加载读两者）。账号行由导入补建（同登录时的 {@code ensureAccount}），口令不导入：本地用 dev 口令规则登录。归属三列不照搬线上值，
  * 由 {@link LocalPlayerImporter} 在本地重铸。
  *
- * @param stateBytes 玩法数据原字节；null = 线上没有 {@code player_state} 行（本地也要删掉，否则残留的旧数据会被加载）
+ * @param stateBytes 存在性明确且哈希匹配的玩法数据原字节；不得为 null，合法空 protobuf 仍可导入
  * @param baseEpoch  线上的 {@code owner_epoch}（本地重铸的 epoch 取它与本地值的较大者 + 1）
  * @param notes      预览里要提示的事项
  */
@@ -86,7 +86,7 @@ record ImportPlan(long playerId, String account, long zoneId, String name, Strin
                         + "否则先检出与线上一致的版本");
             }
         } else {
-            notes.add("线上没有 player_state 行：本地同号的玩法数据会被删掉，进场按初始状态");
+            throw new IllegalArgumentException("来源缺少 player_state，不能证明是初始存档，拒绝导入");
         }
         if (bundle.serverRevision() == null) {
             notes.add("导出包没有记录线上版本：确认本地检出与线上一致");

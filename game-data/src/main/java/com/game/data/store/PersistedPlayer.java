@@ -2,7 +2,7 @@ package com.game.data.store;
 
 /**
  * 一名玩家的已落盘数据（{@link PersistedPlayerMapper#find}）。没有 {@code player_state} 行时 {@link #hasState()} 为 false
- * （从未写过 = 各玩法取初始状态，读到空字节）。号与 epoch 都小于 2^63（Java 版发出的号），按有符号 long 存。
+ * （只作存在性观察，不能当作新号默认内容）。缺失或损坏存档不得用作快照／回档素材。号与 epoch 都小于 2^63，按有符号 long 存。
  */
 public class PersistedPlayer {
 
@@ -26,19 +26,28 @@ public class PersistedPlayer {
         return stateUpdatedAt != null;
     }
 
-    /** 玩法数据原字节；没有这一行为空数组（= 默认 PlayerState）。 */
+    private void requireState() {
+        if (stateData == null || stateSavedEpoch == null || stateUpdatedAt == null) {
+            throw new IllegalStateException("player_state 缺行或存盘元数据损坏，拒绝生成快照或回档素材");
+        }
+    }
+
+    /** 真实存档原字节；合法空数组可以读取，缺失不能补成空数组。 */
     public byte[] stateBytes() {
-        return stateData == null ? new byte[0] : stateData;
+        requireState();
+        return stateData;
     }
 
-    /** 已落盘内容的时刻：player_state.updated_at，没有这一行时取 player.updated_at（data-ops-spec §3.2）。 */
+    /** 已落盘内容的真实时刻；缺失不能拿目录时刻替代。 */
     public long persistedAtMs() {
-        return stateUpdatedAt != null ? stateUpdatedAt : updatedAt;
+        requireState();
+        return stateUpdatedAt;
     }
 
-    /** 写入这份玩法数据的 epoch；没有这一行为 0（内容不来自任何一次写回）。 */
+    /** 写入真实存档的 epoch；建角初始存档为 0，缺失不是 0。 */
     public long savedEpoch() {
-        return stateSavedEpoch != null ? stateSavedEpoch : 0;
+        requireState();
+        return stateSavedEpoch;
     }
 
     /**

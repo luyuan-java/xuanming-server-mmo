@@ -100,12 +100,14 @@ final class LocalPlayerImporter {
     }
 
     /**
-     * 第一段（一个事务）：加锁复核准入 → 补账号行 → 写玩家行（新 epoch、未释放、占位租约）→ 写或删玩法数据。失败回滚、什么也没写。
+     * 第一段（一个事务）：加锁复核准入 → 补账号行 → 写玩家行（新 epoch、未释放、占位租约）→ 写入已核原字节。失败回滚、什么也没写。
      *
      * @return 本次重铸的 epoch
      * @throws Refused 加锁复核时不准导入（已回滚）
      */
     long stage(ImportPlan plan, boolean replace, long nowMs) throws SQLException, Refused {
+        // 不能绕过 ImportPlan.from，直接构造缺失原件的计划再进入数据库事务。
+        if (plan.stateBytes() == null) throw new Refused("导入计划缺少 player_state 原字节");
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
@@ -267,13 +269,7 @@ final class LocalPlayerImporter {
     }
 
     private void writeState(ImportPlan plan, long epoch, long nowMs) throws SQLException {
-        if (plan.stateBytes() == null) {
-            try (PreparedStatement ps = connection.prepareStatement("DELETE FROM player_state WHERE player_id = ?")) {
-                bindU64(ps, 1, plan.playerId());
-                ps.executeUpdate();
-            }
-            return;
-        }
+        if (plan.stateBytes() == null) throw new SQLException("导入原件不能为空");
         try (PreparedStatement ps = connection.prepareStatement("""
                 INSERT INTO player_state (player_id, data, saved_epoch, updated_at) VALUES (?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE data = VALUES(data), saved_epoch = VALUES(saved_epoch), updated_at = VALUES(updated_at)""")) {

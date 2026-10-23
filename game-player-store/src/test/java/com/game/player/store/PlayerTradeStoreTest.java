@@ -70,7 +70,7 @@ class PlayerTradeStoreTest {
         try (var f = new Fixture()) {
             f.player(1, "seller");
             byte[] bytes = PlayerState.newBuilder().setFacing(com.game.player.store.state.Facing.newBuilder().setX(0.25)).build().toByteArray();
-            f.sql.update("INSERT INTO player_state(player_id,data,saved_epoch,updated_at) VALUES(?,?,0,1000)", 1, bytes);
+            assertEquals(1, f.sql.update("UPDATE player_state SET data=?,saved_epoch=0,updated_at=1000 WHERE player_id=?", bytes, 1));
             var before = f.sql.queryForMap("SELECT zone_id,name,name_key,class_id,gender,appearance_id,level,scene_config_id,pos_x,pos_y,pos_z,owner_epoch FROM player WHERE player_id=1");
             var store = f.trade(5, true);
             var request = freeze(101, 1, "seller", 1);

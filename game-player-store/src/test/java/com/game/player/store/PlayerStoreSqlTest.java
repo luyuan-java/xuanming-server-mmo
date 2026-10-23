@@ -165,6 +165,8 @@ class PlayerStoreSqlTest {
     @Test
     void 持久交易锁阻止新加载准入和所有夺权_不留下OPEN或改变玩法字节() {
         long p = newPlayer(9002, "交易加载闸");
+        var initialState = jdbc().queryForMap("SELECT data,saved_epoch,updated_at FROM player_state WHERE player_id=?", p);
+        assertThat((byte[]) initialState.get("data")).isNotNull().isEmpty();
         assertThat(store.claimOwnership(p, ACCOUNT, 1, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Claimed(1));
         jdbc().update("UPDATE player SET trade_listing_id=101 WHERE player_id=?", p);
         CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis() * 2);
@@ -172,7 +174,13 @@ class PlayerStoreSqlTest {
         assertThat(store.recoverOwnershipAfterRestore(p, 5, 1, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Held(1));
         assertThat(store.loadForScene(p, 1, FINAL_SOURCE, Duration.ofSeconds(3))).isEmpty();
         assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_final_save WHERE player_id=?", Long.class, p)).isZero();
-        assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_state WHERE player_id=?", Long.class, p)).isZero();
+        assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_state WHERE player_id=?", Long.class, p)).isEqualTo(1);
+        assertThat(jdbc().queryForObject("SELECT data FROM player_state WHERE player_id=?", byte[].class, p))
+                .isEqualTo((byte[]) initialState.get("data"));
+        assertThat(jdbc().queryForObject("SELECT saved_epoch FROM player_state WHERE player_id=?", Long.class, p))
+                .isEqualTo(((Number) initialState.get("saved_epoch")).longValue());
+        assertThat(jdbc().queryForObject("SELECT updated_at FROM player_state WHERE player_id=?", Long.class, p))
+                .isEqualTo(((Number) initialState.get("updated_at")).longValue());
         assertThat(store.findPlayer(p).orElseThrow().getTradeListingId()).isEqualTo(101);
     }
 
@@ -926,6 +934,40 @@ class PlayerStoreSqlTest {
         new JdbcTemplate(context.getBean(DataSource.class)).update("UPDATE player SET level = 4294967295 WHERE player_id = ?", p);
 
         assertThat(store.findPlayer(p).orElseThrow().getLevel()).isEqualTo(4294967295L);
+    }
+
+    @Test
+    void 建角提交即有非null空protobuf初始存档() {
+        long p = newPlayer(88001, "初始存档");
+        assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_state WHERE player_id=?", Long.class, p)).isEqualTo(1L);
+        assertThat(jdbc().queryForObject("SELECT data FROM player_state WHERE player_id=?", byte[].class, p)).isEmpty();
+        assertThat(jdbc().queryForObject("SELECT saved_epoch FROM player_state WHERE player_id=?", Long.class, p)).isZero();
+        assertThat(store.loadState(p)).isEqualTo(PlayerState.getDefaultInstance());
+    }
+
+    @Test
+    void 历史存档单行丢失_加载拒绝且不补写() {
+        long p = newPlayer(88002, "历史存档");
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
+        assertThat(store.saveStateHeld(save(p, 1, 2, 7), facing(0.5))).isTrue();
+        jdbc().update("DELETE FROM player_state WHERE player_id=?", p);
+        var directory = jdbc().queryForMap("SELECT * FROM player WHERE player_id=?", p);
+        assertThatThrownBy(() -> store.loadState(p)).isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_state WHERE player_id=?", Long.class, p)).isZero();
+        assertThat(jdbc().queryForMap("SELECT * FROM player WHERE player_id=?", p)).isEqualTo(directory);
+    }
+
+    @Test
+    void 初始存档冲突_目录插入同事务回滚且孤儿原件不变() {
+        long p = 88003;
+        byte[] original = facing(0.75).toByteArray();
+        jdbc().update("INSERT INTO player_state(player_id,data,saved_epoch,updated_at) VALUES(?,?,7,123)", p, original);
+        PlayerRow row = new PlayerRow();row.setPlayerId(p);row.setAccount(ACCOUNT);row.setZoneId(1);
+        assertThatThrownBy(() -> store.createPlayerWithinCap(row, 5, List.of("孤儿冲突"))).isInstanceOf(RuntimeException.class);
+        assertThat(store.findPlayer(p)).isEmpty();
+        assertThat(jdbc().queryForObject("SELECT data FROM player_state WHERE player_id=?", byte[].class, p)).isEqualTo(original);
+        assertThat(jdbc().queryForObject("SELECT saved_epoch FROM player_state WHERE player_id=?", Long.class, p)).isEqualTo(7L);
+        assertThat(jdbc().queryForObject("SELECT updated_at FROM player_state WHERE player_id=?", Long.class, p)).isEqualTo(123L);
     }
 
     @Test

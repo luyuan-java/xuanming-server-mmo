@@ -82,6 +82,8 @@
 
 ---
 
+> 2026-10-23 存档存在性安全收口：正常建角同事务插入非 null 空 protobuf 初始 `player_state`（epoch 0）；目录不再合法地单独存在。生产加载、运维快照／回档素材与正式导入遇到缺行或 null 必须拒绝，禁止读取补空。合法空字节仍表示初始状态。历史缺失只能以独立可信原件恢复或在获准的本任务上线前验收库重建；不得由等级、owner_epoch 或 updated_at 推断新号。完整合同见 `docs/design/player-bundle-debug.md` §0.1。
+
 ## 1 基线数据通路（流水 / 快照）
 
 ### 1.1 全景
@@ -290,7 +292,7 @@ ALTER TABLE player_snapshot
 **`time_ms` 的含义 = 内容所代表的时刻**（Java 独有的明确定义，修正一稿「拍摄时刻」的说法）：
 
 - scene 的 LOGIN / LOGOUT：内容就是拍摄那一刻的内存 / 写回状态，`time_ms` = 拍摄时刻（现状不变）。
-- game-data 直写：内容取**已落盘**的状态，`time_ms` = `player_state.updated_at`（没有这一行时取 `player.updated_at`），拍摄时刻记在 `ingested_at`。
+- game-data 直写：内容取**已落盘**的状态，`time_ms` = `player_state.updated_at`（缺行或 null 拒绝，不能用目录时刻伪造初始快照），拍摄时刻记在 `ingested_at`。
   理由：在线玩家已落盘状态最多落后一个存盘周期（缺省 300 s，`architecture.md:670`）。若按拍摄时刻记，这份快照被选作回档源时，帮会检查的起点
   `since = time_ms − 余量`（余量缺省也是 300 s）会晚于内容的真实时刻，漏掉这段时间里终结的帮会操作，即回档复制资产（fail-open）。
 - `owner_epoch` 取 `player_state.saved_epoch`（写入这份内容的 epoch）；`zone_id` 取 `player.zone_id`（直写没有 scene，用归属区）。

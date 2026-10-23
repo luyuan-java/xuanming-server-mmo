@@ -45,7 +45,22 @@ class RestoreBuilderTest {
         p.setPosX(7);
         p.setStateData(state);
         p.setStateUpdatedAt(2000L);
+        p.setStateSavedEpoch(0L);
         return p;
+    }
+
+    @Test
+    void 缺失存档或元数据不能构造回档素材_合法空protobuf可读取() {
+        PersistedPlayer p = new PersistedPlayer();
+        assertThatThrownBy(p::stateBytes).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(p::savedEpoch).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(p::persistedAtMs).isInstanceOf(IllegalStateException.class);
+        p.setStateData(new byte[0]);p.setStateSavedEpoch(0L);p.setStateUpdatedAt(2000L);
+        assertThat(p.stateBytes()).isEmpty();assertThat(p.savedEpoch()).isZero();assertThat(p.persistedAtMs()).isEqualTo(2000L);
+        p.setStateSavedEpoch(null);
+        assertThatThrownBy(p::stateBytes).isInstanceOf(IllegalStateException.class);
+        p.setStateSavedEpoch(0L);p.setStateData(null);
+        assertThatThrownBy(p::stateBytes).isInstanceOf(IllegalStateException.class);
     }
 
     /** 带一个本版本不认识的字段（字段号 99）的玩家状态。 */

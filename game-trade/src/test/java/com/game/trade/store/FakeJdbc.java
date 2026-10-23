@@ -71,7 +71,9 @@ final class FakeJdbc implements ConnectionSource {
             case "commit" -> {commits++;yield null;}
             case "rollback" -> {rollbacks++;yield null;}
             case "getMetaData" -> proxy(java.sql.DatabaseMetaData.class,(metadata,method,args)->{
-                if(method.getName().equals("getDatabaseProductName"))return "MySQL";throw new UnsupportedOperationException(method.getName());});
+                if(method.getName().equals("getDatabaseProductName"))return "MySQL";
+                if(method.getName().equals("getDatabaseProductVersion"))return "8.4.13";
+                throw new UnsupportedOperationException(method.getName());});
             case "close" -> {
                 closed++;
                 yield null;

@@ -69,6 +69,14 @@ public interface PlayerMapper {
             """)
     int insertPlayer(@Param("row") PlayerRow row, @Param("nameKey") String nameKey);
 
+    /** 建角专用的严格 INSERT；与目录行同事务，冲突必须回滚，不能 upsert 覆盖孤儿存档。 */
+    @Insert("""
+            INSERT INTO player_state (player_id, data, saved_epoch, updated_at)
+            VALUES (#{playerId}, #{data}, 0, #{updatedAt})
+            """)
+    int insertInitialState(@Param("playerId") long playerId, @Param("data") byte[] data,
+                           @Param("updatedAt") long updatedAt);
+
     /**
      * 夺权：只有上一个写者已释放（{@code owner_released = 1}）或它的租约已过期时才把 epoch 加一、标记为被持有并给新租约；
      * 否则影响 0 行。与随后的 {@link #selectOwnerEpoch} 必须在同一事务里（行锁保证读到的是本次自增的值）。

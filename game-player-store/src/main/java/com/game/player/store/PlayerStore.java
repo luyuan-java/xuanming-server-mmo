@@ -180,7 +180,6 @@ public class PlayerStore {
         row.setUpdatedAt(now);
         try {
             mapper.insertPlayer(row, nameKey(row.getName()));
-            return CreateResult.CREATED;
         } catch (DuplicateKeyException e) {
             String key = duplicatedKeyName(e);
             if (NAME_KEY_INDEX.equals(key)) {
@@ -190,6 +189,10 @@ public class PlayerStore {
             throw new IllegalStateException("建角撞到名字以外的唯一约束 key=" + key
                     + " player_id=" + Long.toUnsignedString(row.getPlayerId()), e);
         }
+        if (mapper.insertInitialState(row.getPlayerId(), PlayerState.getDefaultInstance().toByteArray(), now) != 1) {
+            throw new IllegalStateException("建角初始存档必须恰好插入一行");
+        }
+        return CreateResult.CREATED;
     }
 
     /** {@link #createPlayerWithinCap} 的结果。 */
@@ -704,7 +707,7 @@ public class PlayerStore {
     }
 
     /**
-     * 读玩家玩法数据。从未写过返回默认实例（各玩法都取初始状态）。
+     * 读玩家玩法数据。建角已同事务写入合法空 protobuf；缺行或 null 是存档损坏，禁止读取补空。
      *
      * @throws IllegalStateException 存量字节解析失败（损坏）：调用方按加载失败处理，不让玩家带着丢了玩法数据的状态进场
      */
@@ -712,7 +715,7 @@ public class PlayerStore {
         PlayerStateRow row = mapper.selectState(playerId);
         byte[] data = row == null ? null : row.getData();
         if (data == null) {
-            return PlayerState.getDefaultInstance();
+            throw new IllegalStateException("player_state 缺行或数据为 null，拒绝作为初始状态加载");
         }
         try {
             return PlayerState.parseFrom(data);

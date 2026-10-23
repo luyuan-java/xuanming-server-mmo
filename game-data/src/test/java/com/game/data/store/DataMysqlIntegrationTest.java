@@ -24,6 +24,8 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -36,6 +38,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 
@@ -115,8 +118,27 @@ class DataMysqlIntegrationTest {
             jdbc.batchUpdate("INSERT INTO player (player_id, account, zone_id, name, name_key, class_id, gender, created_at, "
                     + "updated_at) VALUES (?, ?, ?, ?, ?, 1, 1, 1, 1)", rows);
             jdbc.execute("ANALYZE TABLE player");
-            assertThat(key(jdbc, "SELECT player_id, zone_id, created_at FROM player WHERE zone_id = 3 AND player_id > 0 "
-                    + "ORDER BY player_id LIMIT 500")).isEqualTo("idx_player_zone");
+            String sql = "SELECT player_id, zone_id, created_at FROM player WHERE zone_id = 3 AND player_id > 0 "
+                    + "ORDER BY player_id LIMIT 500";
+            List<List<Long>> originalExpected = new ArrayList<>();
+            for (int i = 1; i <= 3000; i++) {
+                if (1 + i % 20 == 3) originalExpected.add(List.of((long) i, 3L, 1L));
+            }
+            assertThat(jdbc.query(sql, (row, ignored) -> List.of(row.getLong("player_id"), row.getLong("zone_id"),
+                    row.getLong("created_at")))).hasSize(150).containsExactlyElementsOf(originalExpected);
+
+            // 原20区分布已观察到合法全表扫描；精确索引选择另用明确高选择性，不推断容量或吞吐。
+            jdbc.update("UPDATE player SET zone_id = 1 + MOD(player_id, 200)");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM player", Long.class)).isEqualTo(3000);
+            jdbc.execute("ANALYZE TABLE player");
+            List<List<Long>> selectiveExpected = new ArrayList<>();
+            for (int i = 1; i <= 3000; i++) {
+                if (1 + i % 200 == 3) selectiveExpected.add(List.of((long) i, 3L, 1L));
+            }
+            assertThat(selectiveExpected).isNotEmpty().hasSize(15);
+            assertThat(key(jdbc, sql)).isEqualTo("idx_player_zone");
+            assertThat(jdbc.query(sql, (row, ignored) -> List.of(row.getLong("player_id"), row.getLong("zone_id"),
+                    row.getLong("created_at")))).hasSize(15).containsExactlyElementsOf(selectiveExpected);
         } finally {
             drop(migrated);
             drop(fresh);
@@ -164,8 +186,39 @@ class DataMysqlIntegrationTest {
         }
     }
 
+    private static boolean isTiDb(Connection connection) throws SQLException {
+        var metadata = connection.getMetaData();
+        String product = metadata.getDatabaseProductName();
+        String version = metadata.getDatabaseProductVersion();
+        if (version == null || version.isBlank()) throw new SQLException("无法识别真实数据库版本");
+        if ("TiDB".equalsIgnoreCase(product)) return true;
+        if (!"MySQL".equalsIgnoreCase(product)) throw new SQLException("只接受已识别的 MySQL 或 TiDB");
+        return version.toLowerCase(Locale.ROOT).contains("tidb");
+    }
+
     private static String key(JdbcTemplate jdbc, String sql) {
-        return jdbc.queryForObject("EXPLAIN " + sql, (rs, n) -> rs.getString("key"));
+        return jdbc.execute((ConnectionCallback<String>) connection -> {
+            boolean tidb = isTiDb(connection);
+            try (var statement = connection.createStatement(); var rows = statement.executeQuery("EXPLAIN " + sql)) {
+                if (!tidb) {
+                    if (!rows.next()) throw new SQLException("MySQL EXPLAIN 缺少结果");
+                    String key = rows.getString("key");
+                    if (rows.next()) throw new SQLException("MySQL EXPLAIN 并非唯一查询计划行");
+                    return key;
+                }
+                // TiDB 的计划是多行；保留真实优化器选择，不用 FORCE INDEX 伪造预期。
+                var indexes = new LinkedHashSet<String>();
+                var pattern = java.util.regex.Pattern.compile("index:([A-Za-z0-9_]+)\\(");
+                while (rows.next()) {
+                    String access = rows.getString("access object");
+                    if (access == null) continue;
+                    var matches = pattern.matcher(access);
+                    while (matches.find()) indexes.add(matches.group(1));
+                }
+                if (indexes.size() != 1) throw new SQLException("TiDB EXPLAIN 必须恰好选择一个具名索引");
+                return indexes.iterator().next();
+            }
+        });
     }
 
     @Test
@@ -186,24 +239,42 @@ class DataMysqlIntegrationTest {
     // ------------------------------------------------------------------ 批次 7.2b（§12.3；审计 OPS-12 第 4 条）
 
     /**
-     * 这条 MySQL 连接上打开着的 InnoDB 事务已经改了多少行；这条连接上没有读写事务为 null。
-     * {@code INNODB_TRX} 读的是一份至多 0.1 s 刷新一次的缓存：先等过这段时间，否则紧挨着的第二次读拿到的还是上一次的数。
+     * 精确观察当前会话事务的写入量：MySQL 是修改行数，TiDB 是内存写入 key 数，二者不混称。
+     * 只比较首次正数及第二次严格增加；最终仍须共同回滚。MySQL 原缓存等待保留。
      */
-    private static Long rowsModifiedOn(JdbcTemplate jdbc, long connectionId) {
-        try {
-            Thread.sleep(300);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(e);
-        }
-        List<Long> rows = jdbc.queryForList("SELECT trx_rows_modified FROM information_schema.INNODB_TRX "
-                + "WHERE trx_mysql_thread_id = ?", Long.class, connectionId);
-        return rows.isEmpty() ? null : rows.get(0);
+    private static Long transactionWriteUnitsOn(JdbcTemplate jdbc, long connectionId) {
+        return jdbc.execute((ConnectionCallback<Long>) connection -> {
+            boolean tidb = isTiDb(connection);
+            if (!tidb) {
+                try {
+                    Thread.sleep(300);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            }
+            String sql = tidb
+                    ? "SELECT MEM_BUFFER_KEYS FROM information_schema.TIDB_TRX WHERE SESSION_ID = ?"
+                    : "SELECT trx_rows_modified FROM information_schema.INNODB_TRX WHERE trx_mysql_thread_id = ?";
+            try (var statement = connection.prepareStatement(sql)) {
+                statement.setLong(1, connectionId);
+                try (var rows = statement.executeQuery()) {
+                    if (!rows.next()) {
+                        if (tidb) throw new SQLException("TiDB 缺少指定会话的真实事务");
+                        return null;
+                    }
+                    long units = rows.getLong(1);
+                    boolean missing = rows.wasNull();
+                    if (tidb && (missing || rows.next())) throw new SQLException("TiDB 指定会话事务计数必须唯一且非空");
+                    return missing ? null : units;
+                }
+            }
+        });
     }
 
     /**
      * 「MyBatis 与 pbmysql 同连接」：一个 Spring 事务里两边各写一行，都记在事务绑定的那条连接（{@code CONNECTION_ID()}）的同一个 InnoDB 事务上
-     * （{@code INNODB_TRX.trx_rows_modified} 两次都涨）；pbmysql 要是自取连接，它那一行不会算进这个事务。回滚后两行都不在。
+     * （MySQL 的 {@code INNODB_TRX.trx_rows_modified} 或 TiDB 的 {@code TIDB_TRX.MEM_BUFFER_KEYS} 两次都涨）；pbmysql 要是自取连接，它那一行不会算进这个事务。回滚后两行都不在。
      */
     @Test
     void 一个事务里MyBatis与pbmysql的写记在同一条MySQL连接的同一个事务上_一起回滚() throws Exception {
@@ -218,10 +289,10 @@ class DataMysqlIntegrationTest {
                 long connection = jdbc.queryForObject("SELECT CONNECTION_ID()", Long.class);
                 seen[0] = connection;
                 assertThat(db.snapshots.insertDirect(snapshot, 2, "ops", "同连接")).isEqualTo(1); // MyBatis
-                Long afterMyBatis = rowsModifiedOn(jdbc, connection);
+                Long afterMyBatis = transactionWriteUnitsOn(jdbc, connection);
                 assertThat(afterMyBatis).as("MyBatis 的写在这条连接的事务上").isNotNull().isPositive();
                 jobs.insertPlayer(detail);                                                         // pbmysql
-                Long afterPbmysql = rowsModifiedOn(jdbc, connection);
+                Long afterPbmysql = transactionWriteUnitsOn(jdbc, connection);
                 assertThat(afterPbmysql).as("pbmysql 的写也记在同一个事务上").isGreaterThan(afterMyBatis);
                 seen[1] = afterMyBatis;
                 seen[2] = afterPbmysql;

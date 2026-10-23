@@ -21,6 +21,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.mockito.InOrder;
 import org.springframework.dao.DuplicateKeyException;
 
@@ -29,6 +30,27 @@ class PlayerStoreTest {
 
     private final PlayerMapper mapper = mock(PlayerMapper.class);
     private final PlayerStore store = new PlayerStore(mapper, () -> 1_000L);
+
+    @BeforeEach
+    void 初始存档插入默认成功() {
+        when(mapper.insertInitialState(anyLong(), any(), anyLong())).thenReturn(1);
+    }
+
+    @Test
+    void 初始存档没有插入一行时拒绝建角() {
+        when(mapper.insertInitialState(anyLong(), any(), anyLong())).thenReturn(0);
+        assertThatThrownBy(() -> store.createPlayer(row(7, "Alice"))).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void 缺失或null存档拒绝_合法空protobuf仍可读() {
+        assertThatThrownBy(() -> store.loadState(7)).isInstanceOf(IllegalStateException.class);
+        PlayerStateRow state = new PlayerStateRow();
+        when(mapper.selectState(7)).thenReturn(state);
+        assertThatThrownBy(() -> store.loadState(7)).isInstanceOf(IllegalStateException.class);
+        state.setData(new byte[0]);
+        assertThat(store.loadState(7)).isEqualTo(PlayerState.getDefaultInstance());
+    }
 
     private static PlayerRow row(long playerId, String name) {
         PlayerRow row = new PlayerRow();
@@ -61,7 +83,9 @@ class PlayerStoreTest {
 
         assertThat(store.createPlayer(row)).isEqualTo(CreateResult.CREATED);
 
-        verify(mapper).insertPlayer(row, "alice");
+        InOrder writes = inOrder(mapper);
+        writes.verify(mapper).insertPlayer(row, "alice");
+        writes.verify(mapper).insertInitialState(eq(7L), eq(new byte[0]), eq(1_000L));
         assertThat(row.getCreatedAt()).isEqualTo(1_000L);
         assertThat(row.getUpdatedAt()).isEqualTo(1_000L);
     }

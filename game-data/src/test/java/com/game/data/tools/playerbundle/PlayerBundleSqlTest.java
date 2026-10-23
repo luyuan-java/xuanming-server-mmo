@@ -1,6 +1,7 @@
 package com.game.data.tools.playerbundle;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.game.common.NamespaceDatabaseCheck;
@@ -530,7 +531,25 @@ class PlayerBundleSqlTest {
     }
 
     @Test
-    void 线上没有玩法数据_本地同号的旧玩法数据被删掉(@TempDir Path dir) throws Exception {
+    void 直接构造null存档导入计划_首个数据库动作前拒绝() {
+        ImportPlan plan = new ImportPlan(PLAYER, "dev_absent", 1, "缺失", "缺失", 1, 1, "", 1, 1,
+                0, 0, 0, 1, null, 0, List.of());
+        assertThatThrownBy(() -> new LocalPlayerImporter(null).stage(plan, false, NOW))
+                .isInstanceOf(LocalPlayerImporter.Refused.class).hasMessageContaining("缺少 player_state");
+    }
+
+    @Test
+    void 明确存在的空protobuf初始存档_仍可正式导入(@TempDir Path dir) throws Exception {
+        source.jdbc().update("UPDATE player_state SET data=? WHERE player_id=?", new byte[0], PLAYER);
+        Path file = exported(dir);
+        assertThat(importLocal(file, new FakeRedis("local-run"), "--execute")).as(err()).isEqualTo(0);
+        assertThat(target.jdbc().queryForObject("SELECT COUNT(*) FROM player_state WHERE player_id=?", Long.class, PLAYER))
+                .isEqualTo(1L);
+        assertThat(target.playerStore(() -> NOW).loadState(PLAYER).toByteArray()).isEmpty();
+    }
+
+    @Test
+    void 来源缺失玩法数据_拒绝导入且本地原件不变(@TempDir Path dir) throws Exception {
         try (Connection c = source.dataSource.getConnection(); Statement st = c.createStatement()) {
             st.executeUpdate("DELETE FROM player_state WHERE player_id = 900001");
         }
@@ -541,9 +560,10 @@ class PlayerBundleSqlTest {
             ps.executeUpdate();
         }
 
-        assertThat(importLocal(file, new FakeRedis("local-run"), "--execute")).as(err()).isEqualTo(0);
-
-        assertThat(target.playerStore(() -> NOW).loadState(PLAYER)).isEqualTo(PlayerState.getDefaultInstance());
+        assertThat(importLocal(file, new FakeRedis("local-run"), "--execute")).as(err()).isEqualTo(2);
+        assertThat(err()).contains("来源缺少 player_state");
+        assertThat(target.playerStore(() -> NOW).findPlayer(PLAYER)).isEmpty();
+        assertThat(target.playerStore(() -> NOW).loadState(PLAYER).toByteArray()).isEqualTo(state.toByteArray());
     }
 
     @Test

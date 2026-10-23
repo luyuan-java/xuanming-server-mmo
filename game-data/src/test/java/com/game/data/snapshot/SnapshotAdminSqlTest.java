@@ -112,15 +112,15 @@ class SnapshotAdminSqlTest {
     }
 
     @Test
-    void 没有player_state行_内容时刻取player的updated_at_epoch为0_持有归属时标online() {
+    void 缺失player_state行_拒绝快照且不补初始状态() {
         db.insertPlayer(PLAYER, 2, 1, 0, 4, false, NOW + 30_000, 1_000, 8_000);
 
-        Map<String, Object> body = service.create(new CreateRequest(PLAYER, SnapshotCauses.PRE_MAINTENANCE, "", "维护"),
-                "ops", "key-2").body();
-
-        assertThat(body).containsEntry("timeMs", 8_000L).containsEntry("savedEpoch", "0").containsEntry("hasState", false)
-                .containsEntry("online", true).containsEntry("ownerReleased", false).containsKey("onlineCaveat")
-                .containsEntry("stateBytes", 0).containsEntry("cause", "PRE_MAINTENANCE");
+        db.jdbc().update("DELETE FROM player_state WHERE player_id=?", PLAYER);
+        assertThatThrownBy(() -> service.create(new CreateRequest(PLAYER, SnapshotCauses.PRE_MAINTENANCE, "", "维护"),
+                "ops", "key-2")).isInstanceOf(IllegalStateException.class);
+        assertThat(db.count("player_snapshot")).isZero();
+        assertThat(db.count("ops_job")).isZero();
+        assertThat(db.jdbc().queryForObject("SELECT COUNT(*) FROM player_state WHERE player_id=?", Long.class, PLAYER)).isZero();
     }
 
     @Test

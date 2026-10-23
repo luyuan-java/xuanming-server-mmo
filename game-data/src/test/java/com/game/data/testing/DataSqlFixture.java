@@ -187,14 +187,17 @@ public final class DataSqlFixture implements AutoCloseable {
         return new JdbcTemplate(dataSource);
     }
 
-    /** 造一名玩家（player 行；列值显式给出）。 */
+    /** 造一名玩家和非null空protobuf初始存档；与正常建角一样同事务存在。 */
     public void insertPlayer(long playerId, int zoneId, int level, int sceneConfigId, long ownerEpoch, boolean released,
                              long leaseUntil, long createdAt, long updatedAt) {
+        tx().executeWithoutResult(status -> {
         jdbc().update("INSERT INTO player (player_id, account, zone_id, name, name_key, class_id, gender, level, "
                         + "scene_config_id, pos_x, pos_y, pos_z, owner_epoch, owner_released, owner_lease_until, created_at, "
                         + "updated_at) VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?, 1.5, 2.5, -3.5, ?, ?, ?, ?, ?)",
                 playerId, "acc" + playerId, zoneId, "name" + playerId, "name" + playerId, level, sceneConfigId, ownerEpoch,
                 released ? 1 : 0, leaseUntil, createdAt, updatedAt);
+        jdbc().update("INSERT INTO player_state(player_id,data,saved_epoch,updated_at) VALUES(?,?,0,?)", playerId, new byte[0], updatedAt);
+        });
     }
 
     public void putState(long playerId, byte[] data, long savedEpoch, long updatedAt) {

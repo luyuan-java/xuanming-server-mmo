@@ -300,15 +300,22 @@ public final class GuildEconomyService {
      *   <li>前置之前先查（{@code replay}）：首次已提交就直接按它答复——哪怕玩家此后已离帮、帮会已解散、资产通道已关，那笔指令也确实发生了；</li>
      *   <li>预留事务在锁住本人成员行之后复核（CLIENT_REQUEST_REPLAYED → {@link Attempt#raced}）：首次与重发并发在途时，成员行把两者排成一列；</li>
      *   <li>本次没写成指令（业务拒绝或 raced）就再查一次：首次恰在第 1 道之后提交时，重发会被预判（帮贡不足、次数已满……）挡在事务之外，
-     *       以首次结果为准。raced 而事后查不到（查询失败）按故障抛（信封 1003，客户端带同一个键重发），绝不重新执行。</li>
+     *       以首次结果为准。raced 而事后查不到按故障抛（信封 1003，客户端带同一个键重发），绝不重新执行。这一查失败了也按故障抛、不回那个
+     *       业务拒绝：客户端把没有订单视图的业务拒绝当作原请求未执行、作废原键（mmorpg 05-economy.md §5.44），首次若其实已提交，玩家就被告知「没扣」。</li>
      * </ol>
-     * {@code replay} 返回 null = 没有可用的去重记录（含查询失败：交给事务里的第 2 道兜底，不会因此重复执行）。全部在 guild-worker 上调用。
+     * {@code replay} 返回 null = 确知没有去重记录；抛 {@link ClientRequestLookupException} = 查询失败，不知道首次是否已提交。
+     * 第 1 道查询失败照样放行到 {@code once}：写入路径有事务里的第 2 道兜底，不会因此重复执行。全部在 guild-worker 上调用。
      */
     private <T> CompletableFuture<T> withClientRequest(EconomyRpc rpc, long key, Supplier<Answer<T>> replay,
                                                        Supplier<Attempt<T>> once) {
         try {
             if (key != 0) {
-                Answer<T> first = replay.get();
+                Answer<T> first;
+                try {
+                    first = replay.get();
+                } catch (ClientRequestLookupException e) {
+                    first = null;
+                }
                 if (first != null) {
                     return done(rpc, first.response(), first.result());
                 }
@@ -318,7 +325,12 @@ public final class GuildEconomyService {
                 return attempt.written();
             }
             if (key != 0) {
-                Answer<T> first = replay.get();
+                Answer<T> first;
+                try {
+                    first = replay.get();
+                } catch (ClientRequestLookupException e) {
+                    throw new GuildFaultException("guild client request outcome unavailable, retry with the same key");
+                }
                 if (first != null) {
                     return done(rpc, first.response(), first.result());
                 }
@@ -335,15 +347,23 @@ public final class GuildEconomyService {
     }
 
     /**
-     * 查 (me, key) 的去重记录（基线 clientRequestHit）。查询失败只记日志、回空：预留事务在成员行锁之下还会复核（第 2 道），放行不会重复执行。
+     * 查 (me, key) 的去重记录（基线 clientRequestHit）。空 = 确知没有记录。查询失败记日志后抛 {@link ClientRequestLookupException}，
+     * 能不能就此放行由 {@link #withClientRequest} 按所在的那一道决定。
      */
     private Optional<EconomyStore.ClientRequestHit> clientRequestHit(long me, long key, Deadline deadline) {
         try {
             return store.clientRequest(me, key, deadline);
         } catch (RuntimeException e) {
-            log.error("[GuildEconomy] read client request failed, leaving it to the transaction recheck (player={} client_request_id={}): {}",
+            log.error("[GuildEconomy] read client request failed (player={} client_request_id={}): {}",
                     Long.toUnsignedString(me), Long.toUnsignedString(key), e.toString());
-            return Optional.empty();
+            throw new ClientRequestLookupException(e);
+        }
+    }
+
+    /** 查重失败：不知道首次是否已提交。只在本类内流转（{@link #clientRequestHit} 抛、{@link #withClientRequest} 接）。 */
+    private static final class ClientRequestLookupException extends RuntimeException {
+        ClientRequestLookupException(RuntimeException cause) {
+            super(cause);
         }
     }
 

@@ -71,6 +71,7 @@ class JdbcFriendStoreBudgetTest {
         mock(ResultSet.class);
         metadata = mock(DatabaseMetaData.class);
         when(metadata.getDatabaseProductName()).thenReturn("MySQL");
+        when(metadata.getDatabaseProductVersion()).thenReturn("8.4.13");
         // 系统写入口仍实际读取并校验正式meta；不绕过生产围栏，也不把未知SQL默认为可写。
         queryRows.put(LOCK_ROUTE_META, List.<Object[]>of(new Object[] {"7425c34c-87c2-46c9-95a4-8af56755c014", "1", 64}));
         DataSource dataSource = mock(DataSource.class);

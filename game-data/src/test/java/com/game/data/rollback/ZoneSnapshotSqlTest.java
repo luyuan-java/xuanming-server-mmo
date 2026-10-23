@@ -93,7 +93,7 @@ class ZoneSnapshotSqlTest {
         return jobId(service.submit(body(zones, null, "维护窗口"), OPERATOR, key));
     }
 
-    /** 一个区里批量造 {@code count} 个离线玩家（没有 player_state 行），玩家号从 {@code firstId} 起每次加 {@code step}。一个事务里批量插。 */
+    /** 一个区里批量造 {@code count} 个离线玩家（具备非null空protobuf初始存档），玩家号从 {@code firstId} 起每次加 {@code step}。一个事务里批量插。 */
     private List<Long> bulkPlayers(int zone, long firstId, int count, int step) {
         long now = System.currentTimeMillis();
         List<Long> ids = new ArrayList<>(count);
@@ -103,10 +103,14 @@ class ZoneSnapshotSqlTest {
             ids.add(id);
             rows.add(new Object[] {id, "acc" + id, zone, "name" + id, "name" + id, now - 86_400_000L, now - 1000});
         }
-        h.db.tx().executeWithoutResult(status -> h.db.jdbc().batchUpdate(
+        h.db.tx().executeWithoutResult(status -> {
+        h.db.jdbc().batchUpdate(
                 "INSERT INTO player (player_id, account, zone_id, name, name_key, class_id, gender, level, scene_config_id, "
                         + "pos_x, pos_y, pos_z, owner_epoch, owner_released, owner_lease_until, created_at, updated_at) "
-                        + "VALUES (?, ?, ?, ?, ?, 1, 1, 7, 1001, 1.5, 2.5, -3.5, 0, 1, 0, ?, ?)", rows));
+                        + "VALUES (?, ?, ?, ?, ?, 1, 1, 7, 1001, 1.5, 2.5, -3.5, 0, 1, 0, ?, ?)", rows);
+        h.db.jdbc().batchUpdate("INSERT INTO player_state(player_id,data,saved_epoch,updated_at) VALUES(?,?,0,?)",
+                ids.stream().map(id -> new Object[] {id, new byte[0], now - 1000}).toList());
+        });
         return ids;
     }
 
@@ -268,7 +272,7 @@ class ZoneSnapshotSqlTest {
                 .toByteArray();
         h.player(11, 1, STATE.toByteArray(), offlineSavedAt, 3, false);   // 离线：最终写回是 epoch 3 写的
         h.player(12, 1, onlineState, onlineSavedAt, 6, true);            // 在线：scene 持有 epoch 6，库里是它上次存盘的内容
-        h.player(13, 1, null, 0, 0, false);                               // 建了角没进过场景：没有 player_state 行
+        h.player(13, 1, null, 0, 0, false);                               // 建了角没进过场景：有空protobuf初始存档
         h.player(21, 2, STATE.toByteArray(), now - 1000, 2, false);       // 别的区
         long neverEnteredUpdatedAt = h.db.jdbc().queryForObject("SELECT updated_at FROM player WHERE player_id = 13",
                 Long.class);
@@ -316,7 +320,7 @@ class ZoneSnapshotSqlTest {
         assertThat(online.getNote()).isEqualTo(note);
 
         PlayerSnapshotEntry neverEntered = onlySnapshotOf(13);
-        assertThat(neverEntered.getTimeMs()).as("没有 player_state 行：取 player.updated_at").isEqualTo(neverEnteredUpdatedAt);
+        assertThat(neverEntered.getTimeMs()).as("初始存档自身的持久化时刻").isEqualTo(neverEnteredUpdatedAt);
         assertThat(neverEntered.getOwnerEpoch()).as("内容不来自任何一次写回").isZero();
         assertThat(neverEntered.getPlayerState()).isEmpty();
 

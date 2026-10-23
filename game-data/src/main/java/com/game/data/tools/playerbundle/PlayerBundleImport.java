@@ -199,7 +199,7 @@ public final class PlayerBundleImport {
         if (bundle.analysis() != null) {
             out.println("  线上判读：  " + bundle.analysis().ownership() + "；" + bundle.analysis().persistence());
         }
-        out.println("  玩法数据：  " + (plan.stateBytes() == null ? "无（删本地同号的玩法数据）" : plan.stateBytes().length + " 字节"));
+        out.println("  玩法数据：  " + (plan.stateBytes().length + " 字节"));
         out.println("  本地账号：  " + plan.account());
         out.println("  写目标：    库 " + LocalTargets.describeJdbc(url) + "；Redis " + LocalTargets.describeRedis(args.redis()) + " DB "
                 + args.redisDatabase() + "（只删 " + String.join("、", cleanup) + "）");

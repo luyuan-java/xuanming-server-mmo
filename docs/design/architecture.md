@@ -2242,3 +2242,11 @@ TX1 接管凭据不是资产到账证明。既有 AssetOpService 与 PersistedAs
 统一37路径已由root正规git apply，check/apply均0；逐37最终字节SHA与已审候选相同，未修改InboxHooks接口，保留并行CLI/收件箱源。实际应用原件为C++/Go仓 `build/verification/java-canonical-37-apply-20261019T090438788234Z/root-canonical-application.json`，SHA `F03743014BE227D961CAD7F37DCA29470A2BDA42B5A238614ECFB7CEAB1930D7`。当前是工作树已实现、验收未完成；没有提交、部署、启动服务或执行M14真实库迁移。
 
 后续直接为当前Java完整源建立新快照（含并行新增代码），先生成含新Mapper公开准入规则的当前Store Jar，再按实际依赖编译受影响模块并运行CLI全16/Hook5和当前155真TiDB。旧JG2464、D136 Store Jar及其26通过/13模块成功仅绑定旧输入，不能冒当前World合并与新CLI已运行；不强制先重复旧快照六模块再重测新代码。最后验收真实宿主故障，任何编译/枚举/H2结果均不替代它。
+
+## 全类型节点弹性与渐进发布需求（2026-10-23，仅文档）
+
+负责人要求所有实际部署节点具备平滑停机／缩容、水平扩展与灰度／金丝雀发布能力，本次明确先不改代码。统一需求、语义、现状差距与验收清单保存在相邻 C++/Go 仓的 [节点生命周期与发布需求](../../../xuanming-server-mmo-cpp/docs/design/node-lifecycle-elasticity-release-20261023.md)，本版按自己的 Netty、Dubbo 和存储协议实现，同一目标不要求照抄内部实现。
+
+当前 Java `0.1.0-SNAPSHOT` 尚未完成全类型验收：`GateNode.stop()` 关闭全部会话，`SceneNode.release()` 关闭链路并最终写回，`BattleNode.release()` 关闭准入并作废房间；Gate 的 deadline 排空标记不能证明零连接。跨节点疏散、正式 K8s 发布编排仍有待做项（`docs/porting/roadmap.md` 5.5、7.6），已有多副本、注册发现与幂等不等于已有稳定业务分组、版本兼容闸和金丝雀观察／中止闭环。
+
+后续须按各类型状态所有者明确“停新工作→完成或交接存量→证据确认排空→退出”，并分别验证计划维护、异常宕机和新旧版本并存。物理 TCP 不断与客户端自动恢复分别约定体验预算；超时不能伪报排空。当前只是需求记录，未修改代码或部署配置、未执行构建或测试，`PARITY.md` 按待实现／待整体验收登记。

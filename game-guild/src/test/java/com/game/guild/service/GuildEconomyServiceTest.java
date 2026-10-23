@@ -693,6 +693,24 @@ class GuildEconomyServiceTest {
     }
 
     @Test
+    void 幂等键_没写成指令而第三道查重失败_按故障抛_不回业务拒绝() {
+        // 客户端把没有订单视图的业务拒绝当作原请求未执行、作废原键（mmorpg 05-economy.md §5.44）；查不了首次结果时不能这样答
+        f.economyStore.clientRequestFailure = new Deadline.DependencyException("mysql down");
+        f.economyStore.donate = in -> TxOutcome.reject(GuildReject.DONATE_LIMIT);
+        assertThatThrownBy(() -> donateWithKey(1)).as("事务拒绝").isInstanceOf(GuildFaultException.class);
+
+        noMint();
+        assertThatThrownBy(() -> economy.donateToGuild(ME, DonateToGuildRequest.newBuilder().setDonateId(1).setClientRequestId(KEY)
+                .setExpectedGuildId(G + 1).build(), d()).join()).as("前置拒绝（已不在原帮）").isInstanceOf(GuildFaultException.class);
+
+        assertThat(f.economyStore.donations).as("只有事务拒绝那一次预留过").hasSize(1);
+        assertThat(channel.ops).isEmpty();
+        assertThat(economyCount("donate", "error")).isEqualTo(2);
+        assertThat(economyCount("donate", "limit")).isZero();
+        assertThat(economyCount("donate", "not_member")).isZero();
+    }
+
+    @Test
     void 兑换_幂等重发回首次那单_count为0与1是同一请求_余额直读() {
         noMint();
         GuildAssetOpRow first = GuildAssetOpRow.newBuilder().setOpId(FIRST_OP).setPlayerId(ME).setGuildId(G)
