@@ -146,6 +146,8 @@ class NacosRegistryNamespaceTest {
         Files.writeString(argFile, "-cp \"" + System.getProperty("java.class.path").replace("\\", "\\\\") + "\"\n", StandardCharsets.UTF_8);
         List<String> command = new ArrayList<>();
         command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+        command.addAll(List.of("-Xmx128m", "-XX:MaxMetaspaceSize=128m", "-XX:MaxDirectMemorySize=32m",
+                "-XX:ActiveProcessorCount=2"));
         command.add("@" + argFile);
         command.addAll(List.of(jvmArgs));
         command.add(DubboRegistryEnvProbe.class.getName());
