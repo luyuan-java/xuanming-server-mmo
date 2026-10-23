@@ -445,6 +445,15 @@ public final class RedisKeys {
         return prefix + "login:refresh-rotated:" + token;
     }
 
+    /**
+     * refresh 令牌家族记录：{@code game:login:refresh-family:{family_id}}，HASH {account, head, prev, created_at, rotated_at}，
+     * TTL = 家族头的 refresh 有效期（与头同一步写入、同一刻过期）。记录不在 = 家族已吊销或已结束：该家族的 refresh 不能轮换、
+     * access 不能登录（基线 {@code refresh_family:{family_id}}）。家族号是 22 字符的 base64url（不含 {@code :}）。
+     */
+    public String loginRefreshFamily(String familyId) {
+        return prefix + "login:refresh-family:" + familyId;
+    }
+
     /** 账号的活跃 refresh token 集合：{@code game:login:account-refresh:{account}}，ZSET，成员是 token、分数是它的过期 Unix 秒。 */
     public String loginAccountRefresh(String account) {
         return prefix + "login:account-refresh:" + account;

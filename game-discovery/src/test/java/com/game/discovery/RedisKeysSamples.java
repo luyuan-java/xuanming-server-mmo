@@ -90,6 +90,7 @@ final class RedisKeysSamples {
                 new Sample("loginPasswordFailure", k -> k.loginPasswordFailure("known", "0".repeat(64)), "game:login:password-failure-v1:{known:" + "0".repeat(64) + "}"),
                 new Sample("loginRefreshToken", k -> k.loginRefreshToken("tok"), "game:login:refresh:tok"),
                 new Sample("loginRefreshRotated", k -> k.loginRefreshRotated("tok"), "game:login:refresh-rotated:tok"),
+                new Sample("loginRefreshFamily", k -> k.loginRefreshFamily("fam"), "game:login:refresh-family:fam"),
                 new Sample("loginAccountRefresh", k -> k.loginAccountRefresh("acc"), "game:login:account-refresh:acc"),
                 new Sample("loginDevices", k -> k.loginDevices("acc"), "game:login:devices:acc"),
                 new Sample("loginDeviceSession", k -> k.loginDeviceSession("s1"), "game:login:device-session:s1"),
