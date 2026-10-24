@@ -21,7 +21,7 @@ public final class CreationLedger {
         if(!marked(r))return !config.enabled();
         entries.entrySet().removeIf(e->e.getValue().expiry()<now&&!liveRoom.test(e.getKey()));
         if(!config.enabled()||r.getRequiredPhysicalRegion()!=config.physicalRegion()||!r.getTargetInstanceId().equals(identity.instanceId())
-                ||r.getAdmitBeforeMs()<=now||r.getBattleId()==0)return false;
+                ||r.getAdmitBeforeMs()<=now||r.getBattleId()==0||r.getOutcomeProtocolVersion()>1)return false;
         var old=entries.get(r.getBattleId());
         return old==null||(!old.aborted()&&exists&&old.operation().equals(r.getPlacementOperationId())
                 &&Arrays.equals(old.canonical(),NetworkProbes.bytes(r)));
@@ -43,12 +43,19 @@ public final class CreationLedger {
     }
     public QueryBattleCreationResponse query(QueryBattleCreationRequest r,boolean exists) {
         var state=BattleCreationState.BATTLE_CREATION_UNKNOWN;
+        var response=QueryBattleCreationResponse.newBuilder();
         if(config.enabled()&&!r.getPlacementOperationId().isEmpty()&&r.getTargetInstanceId().equals(identity.instanceId())) {
+            response.setTargetInstanceId(identity.instanceId()).setSupportedOutcomeProtocolVersion(1);
             var old=entries.get(r.getBattleId());
             if(old==null)state=BattleCreationState.BATTLE_CREATION_ABSENT;
-            else if(old.operation().equals(r.getPlacementOperationId()))state=old.aborted()?BattleCreationState.BATTLE_CREATION_ABORTED:
-                    exists?BattleCreationState.BATTLE_CREATION_PRESENT:BattleCreationState.BATTLE_CREATION_ABSENT;
+            else if(old.operation().equals(r.getPlacementOperationId())) {
+                state=old.aborted()?BattleCreationState.BATTLE_CREATION_ABORTED:
+                        exists?BattleCreationState.BATTLE_CREATION_PRESENT:BattleCreationState.BATTLE_CREATION_ABSENT;
+                if(old.canonical().length>0)try {
+                    response.setAdoptedOutcomeProtocolVersion(CreateBattleRequest.parseFrom(old.canonical()).getOutcomeProtocolVersion());
+                } catch(com.google.protobuf.InvalidProtocolBufferException corrupt) { throw new IllegalStateException("原建房账本损坏",corrupt); }
+            }
         }
-        return QueryBattleCreationResponse.newBuilder().setState(state).build();
+        return response.setState(state).build();
     }
 }

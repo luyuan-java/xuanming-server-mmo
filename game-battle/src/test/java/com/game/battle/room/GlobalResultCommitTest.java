@@ -14,6 +14,8 @@ import com.game.proto.eBattleActivityKind;
 import com.game.proto.eBattleOutcome;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.eBattleTicketRole;
+import com.game.proto.CreateBattleRequest;
+import com.game.proto.match.BattleOutcomeDecision;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -24,6 +26,10 @@ class GlobalResultCommitTest {
     private final List<BattleResultEvent> events = new ArrayList<>();
     private final List<CompletableFuture<Void>> acknowledgements = new ArrayList<>();
     private final List<com.google.protobuf.ByteString> originals=new ArrayList<>();
+    private final List<CompletableFuture<BattleOutcomeDecision>> sqlDecisions = new ArrayList<>();
+    private final List<CreateBattleRequest> sqlCreates = new ArrayList<>();
+    private final List<BattleResultEvent> sqlEvents = new ArrayList<>();
+    private final List<com.google.protobuf.ByteString> sqlOriginals = new ArrayList<>();
 
     GlobalResultCommitTest() {
         h.results = new BattleResultSink() {
@@ -38,6 +44,11 @@ class GlobalResultCommitTest {
             }
             public CompletableFuture<Void> publishConfirmed(BattleResultEvent event,com.google.protobuf.ByteString original,Channel channel) {
                 originals.add(original);return publishConfirmed(event,channel);
+            }
+            public CompletableFuture<BattleOutcomeDecision> commitOutcome(CreateBattleRequest create, BattleResultEvent event,
+                                                                          com.google.protobuf.ByteString original) {
+                sqlCreates.add(create); sqlEvents.add(event); sqlOriginals.add(original);
+                var decision = new CompletableFuture<BattleOutcomeDecision>(); sqlDecisions.add(decision); return decision;
             }
         };
     }
@@ -98,5 +109,98 @@ class GlobalResultCommitTest {
         assertThat(h.service().room(42004)).isNotNull();assertThat(h.log).isEmpty();
         assertThat(events.get(0).getOutcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_DRAW);
         acknowledgements.get(0).complete(null);h.scheduler.runPending();assertThat(h.service().room(42004)).isNull();
+    }
+
+    private CreateBattleRequest.Builder v1(long battleId) {
+        return h.pve(battleId, A).setPlacementOperationId("902df74e-3843-48e0-bd72-05ed824a4f12")
+                .setTargetInstanceId(RoomHarness.INSTANCE).setOutcomeProtocolVersion(1);
+    }
+
+    private void resolveV1(long battleId) {
+        h.service().submit(A, SubmitBattleActionRequest.newBuilder().setBattleId(battleId)
+                .setAction(RoomHarness.skill(FakeBattleData.SKILL_NUKE, MONSTER)).build());
+    }
+
+    @Test void v1SQLCOMPLETE前所有公开面保持非终态_COMPLETE后不走旧个人直投或Kafka出口() {
+        var original = v1(42101).build();
+        var response = h.create(original.toBuilder());
+        assertThat(response.getAdoptedOutcomeProtocolVersion()).isEqualTo(1);
+        assertThat(response.getTargetInstanceId()).isEqualTo(RoomHarness.INSTANCE);
+        var direct = h.connect(42101, A, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT); h.log.clear();
+        resolveV1(42101);
+        assertThat(sqlCreates).containsExactly(original);
+        assertThat(sqlEvents).hasSize(1);
+        assertThat(h.service().getState(A, GetBattleStateRequest.newBuilder().setBattleId(42101).build()).getOutcome())
+                .isEqualTo(eBattleOutcome.BATTLE_OUTCOME_ONGOING);
+        var observer = h.addObserver(com.game.proto.AddObserverRequest.newBuilder().setBattleId(42101)
+                .setObserverPlayerId(RoomHarness.B).setRouting(RoomHarness.observerRouting(RoomHarness.B, 222)).build());
+        assertThat(observer.hasErrorMessage()).isFalse();
+        var viewer = h.connect(42101, RoomHarness.B, eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER);
+        assertThat(h.service().getState(RoomHarness.B, GetBattleStateRequest.newBuilder().setBattleId(42101).build()).getOutcome())
+                .isEqualTo(eBattleOutcome.BATTLE_OUTCOME_ONGOING);
+        assertThat(direct.messageIds()).doesNotContain(139, 150);
+        assertThat(viewer.messageIds()).doesNotContain(139, 150);
+        assertThat(h.settlementsOut()).isEmpty(); assertThat(events).isEmpty();
+        sqlDecisions.getFirst().complete(BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE); h.scheduler.runPending();
+        assertThat(h.service().room(42101)).isNull();
+        assertThat(direct.messageIds()).contains(139).doesNotContain(150);
+        assertThat(h.settlementsOut()).isEmpty();
+        assertThat(events).as("全局Kafka由Match同一SQL来源重发").isEmpty();
+        assertThat(h.outs(RoomHarness.Kind.ACTIVITY_RESULT)).isEmpty();
+    }
+
+    @Test void v1提交失败重发完全相同来源_ABORT不发终局或个人效果() {
+        h.create(v1(42102));
+        var direct = h.connect(42102, A, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT); h.log.clear(); resolveV1(42102);
+        sqlDecisions.getFirst().completeExceptionally(new IllegalStateException("SQL结局未知")); h.scheduler.runPending();
+        h.scheduler.advance(1000);
+        assertThat(sqlCreates).hasSize(2); assertThat(sqlCreates.get(1)).isSameAs(sqlCreates.getFirst());
+        assertThat(sqlOriginals.get(1)).isSameAs(sqlOriginals.getFirst());
+        assertThat(sqlEvents.get(1)).isSameAs(sqlEvents.getFirst());
+        assertThat(direct.messageIds()).doesNotContain(139, 150); assertThat(h.settlementsOut()).isEmpty();
+        sqlDecisions.get(1).complete(BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_ABORT); h.scheduler.runPending();
+        assertThat(h.service().room(42102)).isNull();
+        assertThat(direct.messageIds()).doesNotContain(139, 150); assertThat(h.settlementsOut()).isEmpty(); assertThat(events).isEmpty();
+    }
+
+    @Test void v1待提交Destroy和停机不提前泄露终局_迟到COMPLETE不回旧个人出口() {
+        h.create(v1(42103)); h.connect(42103, A, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT); h.log.clear(); resolveV1(42103);
+        h.service().destroyBattle(DestroyBattleRequest.newBuilder().setBattleId(42103).build());
+        assertThat(h.service().room(42103)).isNotNull(); assertThat(h.log).isEmpty();
+        h.service().abortAll("停机");
+        sqlDecisions.getFirst().complete(BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE); h.scheduler.runPending();
+        assertThat(h.service().room(42103)).isNull(); assertThat(h.outs(RoomHarness.Kind.FRAME)).isEmpty();
+        assertThat(h.settlementsOut()).isEmpty(); assertThat(events).isEmpty();
+    }
+
+    @Test void v1截止DRAW也必须等SQLCOMPLETE_旧端口默认实现拒绝而不是假确认() {
+        h.create(v1(42104).setDeadlineMs(h.now() + 1)); h.connect(42104, A, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT); h.log.clear();
+        h.scheduler.advance(1);
+        assertThat(sqlEvents.getFirst().getOutcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_DRAW);
+        assertThat(h.log).isEmpty(); assertThat(h.service().room(42104)).isNotNull();
+        BattleResultSink unsupported = (event, channel) -> { };
+        assertThat(unsupported.commitOutcome(sqlCreates.getFirst(), sqlEvents.getFirst(), sqlOriginals.getFirst())).isCompletedExceptionally();
+        sqlDecisions.getFirst().complete(BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE); h.scheduler.runPending();
+        assertThat(h.service().room(42104)).isNull(); assertThat(h.settlementsOut()).isEmpty();
+    }
+
+    @Test void 能力支持与真实adopted回执分开_旧房间不能被support1追认() {
+        var ledger = new com.game.battle.rpc.CreationLedger(new com.game.battle.GlobalBattleProperties(true, 1, RoomHarness.SECRET), h.identity);
+        var query = com.game.proto.QueryBattleCreationRequest.newBuilder().setBattleId(42105)
+                .setPlacementOperationId("902df74e-3843-48e0-bd72-05ed824a4f12").setTargetInstanceId(RoomHarness.INSTANCE).build();
+        var absent = ledger.query(query, false);
+        assertThat(absent.getState()).isEqualTo(com.game.proto.BattleCreationState.BATTLE_CREATION_ABSENT);
+        assertThat(absent.getTargetInstanceId()).isEqualTo(RoomHarness.INSTANCE);
+        assertThat(absent.getSupportedOutcomeProtocolVersion()).isEqualTo(1);
+        assertThat(absent.getAdoptedOutcomeProtocolVersion()).isZero();
+        ledger.created(v1(42105).setOutcomeProtocolVersion(0).build());
+        var old = ledger.query(query, true);
+        assertThat(old.getState()).isEqualTo(com.game.proto.BattleCreationState.BATTLE_CREATION_PRESENT);
+        assertThat(old.getSupportedOutcomeProtocolVersion()).isEqualTo(1); assertThat(old.getAdoptedOutcomeProtocolVersion()).isZero();
+        ledger.created(v1(42105).build());
+        assertThat(ledger.query(query, true).getAdoptedOutcomeProtocolVersion()).isEqualTo(1);
+        var wrong = ledger.query(query.toBuilder().setTargetInstanceId("另一个执行实例").build(), true);
+        assertThat(wrong.getState()).isEqualTo(com.game.proto.BattleCreationState.BATTLE_CREATION_UNKNOWN);
+        assertThat(wrong.getSupportedOutcomeProtocolVersion()).isZero();
     }
 }

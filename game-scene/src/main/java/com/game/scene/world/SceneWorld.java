@@ -2831,6 +2831,25 @@ public final class SceneWorld {
         }
     }
 
+    /** 新终局的同步效果与故障隔离共用准入：旧SQL快照必须先排空，原对象/归属代不得被替换。 */
+    public boolean canApplyBattleInbox(ScenePlayer expected,long ownerEpoch) {
+        return expected!=null&&playersById.get(expected.playerId())==expected&&expected.ownerEpoch()==ownerEpoch
+                &&!expected.frozen()&&!expected.progressSaveInFlight();
+    }
+
+    /** 新终局执行发生普通异常时隔离原实体，不作正常退出/最终存盘、不ACK部分效果。 */
+    public void discardUnpersistedBattleEffect(ScenePlayer expected,long ownerEpoch,RuntimeException failure) {
+        ScenePlayer current=playersById.get(expected.playerId());
+        if(current!=expected||expected.ownerEpoch()!=ownerEpoch)return;
+        if(!canApplyBattleInbox(expected,ownerEpoch))
+            throw new IllegalStateException("交出或旧存盘在途不得进入Battle效果执行及隔离移除",failure);
+        // 逻辑线程不交错：本次效果尚未返回给Inbox，尚未记水位/调用requestPersist。
+        // 首副作用前已经排除旧progressSave；本同步调用链不启动玩家存盘，不留下同E迟到写槽。
+        log.error("战斗Inbox执行异常，原实体不存盘移除；待从SQL完整快照重载，类别={}",failure.getClass().getSimpleName());
+        removePlayer(expected,false);
+        kick(expected,SERVICE_UNAVAILABLE,"战斗来源执行异常，原实例已不存盘隔离");
+    }
+
     // ------------------------------------------------------------------ 周期存盘
 
     /**

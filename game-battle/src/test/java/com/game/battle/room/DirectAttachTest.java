@@ -79,7 +79,7 @@ class DirectAttachTest {
     }
 
     @Test
-    void 观众挂接后推161_观众数正确_参战者不推() {
+    void 观众挂接后推161_观众数只数有活直连的观众_参战者不推() {
         h.create(h.pvp(7004, A, B));
         observe(7004, C);
         observe(7004, RoomHarness.D);
@@ -91,7 +91,7 @@ class DirectAttachTest {
         assertThat(a.frames).as("参战者由客户端自己发 140 补拉").isEmpty();
         assertThat(c.messageIds()).containsExactly(161);
         SpectateStateS2C first = c.parsed(161, SpectateStateS2C.parser()).get(0);
-        assertThat(first.getObserverCount()).isEqualTo(2);
+        assertThat(first.getObserverCount()).as("D 已登记但还没建直连，不算在场").isEqualTo(1);
         assertThat(first.getState().getBattleId()).isEqualTo(7004);
         assertThat(first.getState().getActionDeadlineMs()).isEqualTo(h.service().room(7004).actionDeadlineMs);
         assertThat(first.getState().getActorsList()).allSatisfy(x -> assertThat(x.getSkillCooldownRoundsMap()).isEmpty());
@@ -100,6 +100,16 @@ class DirectAttachTest {
         h.service().onDirectVerified(7004, C, PARTICIPANT);
         h.service().onDirectVerified(404, C, OBSERVER);
         assertThat(c.messageIds()).hasSize(1);
+
+        FakeLink d = h.connect(7004, RoomHarness.D, OBSERVER);
+        assertThat(d.parsed(161, SpectateStateS2C.parser()).get(0).getObserverCount()).as("两名观众都有活直连").isEqualTo(2);
+        d.live = false;
+        h.service().detachDirect(7004, RoomHarness.D, d);
+        h.clearLog();
+        assertThat(h.addObserver(AddObserverRequest.newBuilder().setBattleId(7004).setObserverPlayerId(C)
+                .setRouting(RoomHarness.observerRouting(C, 900)).build()).hasErrorMessage()).as("C 幂等重试：补推 161").isFalse();
+        assertThat(c.parsed(161, SpectateStateS2C.parser()).get(1).getObserverCount()).as("D 断线在宽限里：仍登记但不算在场").isEqualTo(1);
+        assertThat(h.service().room(7004).isObserver(RoomHarness.D)).isTrue();
     }
 
     @Test

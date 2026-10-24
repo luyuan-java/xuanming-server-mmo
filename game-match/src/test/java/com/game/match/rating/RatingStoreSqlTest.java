@@ -55,10 +55,25 @@ class RatingStoreSqlTest extends RatingStoreCases {
     private static final long LOCK_WAIT_POLL_MS = 150;
 
     private static RatingTestDatabase shared;
+    private static boolean tidb;
+    // TiDB_TRX 的 LockWaiting 也可能只是正在取锁；必须与 TiKV 实际等待边联合，不能仅凭状态猜已阻塞。
+    private static final String TIDB_LOCK_WAITERS = "SELECT COUNT(*) FROM information_schema.data_lock_waits w"
+            + " JOIN information_schema.tidb_trx t ON t.id = w.trx_id"
+            + " WHERE t.state = 'LockWaiting' AND t.db = DATABASE()";
 
     @BeforeAll
-    static void createDatabase() {
+    static void createDatabase() throws SQLException {
         shared = RatingTestDatabase.mysql(LOCK_WAIT_SECONDS);
+        try (Connection connection = shared.dataSource.getConnection()) {
+            var metadata = connection.getMetaData();
+            String product = metadata.getDatabaseProductName();
+            String version = metadata.getDatabaseProductVersion();
+            if (product == null || version == null || product.isBlank() || version.isBlank()
+                    || (!product.equalsIgnoreCase("MySQL") && !product.equalsIgnoreCase("TiDB"))) {
+                throw new SQLException("真实锁观察器无法识别数据库产品");
+            }
+            tidb = product.equalsIgnoreCase("TiDB") || version.toLowerCase(java.util.Locale.ROOT).contains("tidb");
+        }
     }
 
     @AfterAll
@@ -93,7 +108,7 @@ class RatingStoreSqlTest extends RatingStoreCases {
     private void awaitLockWaiter(Future<Result> expectedWaiter) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
         while (System.nanoTime() < deadline) {
-            long waiters = db.query(LOCK_WAITERS, rs -> {
+            long waiters = db.query(tidb ? TIDB_LOCK_WAITERS : LOCK_WAITERS, rs -> {
                 rs.next();
                 return rs.getLong(1);
             });
@@ -110,6 +125,13 @@ class RatingStoreSqlTest extends RatingStoreCases {
                 fail("预期会等行锁的入账没有等锁就结束了: " + ending);
             }
             Thread.sleep(LOCK_WAIT_POLL_MS);
+        }
+        if (tidb) {
+            fail("8 s 内没有看到本库实际行锁等待；tidb_trx="
+                    + dump("SELECT id, state, session_id FROM information_schema.tidb_trx WHERE db = DATABASE()")
+                    + " wait_edges=" + dump("SELECT w.trx_id, w.current_holding_trx_id, w.key_info"
+                            + " FROM information_schema.data_lock_waits w JOIN information_schema.tidb_trx t ON t.id = w.trx_id"
+                            + " WHERE t.db = DATABASE()"));
         }
         fail("8 s 内没有看到等行锁的事务；innodb_trx=" + dump("SELECT trx_state, trx_mysql_thread_id, trx_query FROM information_schema.innodb_trx")
                 + " processlist=" + dump("SELECT id, db, command, state, info FROM information_schema.processlist"));
@@ -136,7 +158,8 @@ class RatingStoreSqlTest extends RatingStoreCases {
     @Test
     void 生产的建表路径_列类型与索引都在_再同步一次不改任何东西() throws Exception {
         List<String> columns = db.query("SELECT CONCAT(table_name, '.', column_name, ' ', column_type) FROM information_schema.columns"
-                + " WHERE table_schema = DATABASE() ORDER BY table_name, ordinal_position", rs -> {
+                + " WHERE table_schema = DATABASE() AND table_name IN ('match_rating', 'match_rating_applied')"
+                + " ORDER BY table_name, ordinal_position", rs -> {
             List<String> out = new ArrayList<>();
             while (rs.next()) {
                 out.add(rs.getString(1));
@@ -144,7 +167,8 @@ class RatingStoreSqlTest extends RatingStoreCases {
             return out;
         });
         List<String> indexes = db.query("SELECT CONCAT(table_name, '.', index_name, '(', column_name, ')') FROM information_schema.statistics"
-                + " WHERE table_schema = DATABASE() ORDER BY table_name, index_name", rs -> {
+                + " WHERE table_schema = DATABASE() AND table_name IN ('match_rating', 'match_rating_applied')"
+                + " ORDER BY table_name, index_name", rs -> {
             List<String> out = new ArrayList<>();
             while (rs.next()) {
                 out.add(rs.getString(1));

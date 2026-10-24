@@ -62,6 +62,7 @@ import org.slf4j.LoggerFactory;
  *   <tr><td>15</td><td>成功</td><td>{@code {battle_id}}，不带 {@code error_message}</td><td>ok</td></tr>
  *   <tr><td>16</td><td>battle 回「房间不存在」（1004）或直拨判死：在建房窗口内 → 不剔除；窗口外 → 按 attempt 守护剔除，随机 → 下一轮</td>
  *       <td>16018「该战斗不存在或已结束」</td><td>not_found</td></tr>
+ *   <tr><td>17a</td><td>battle 回观众席已满（满员专用码）：回滚标记，随机也不换场</td><td>满员码「观战人数已满」</td><td>full</td></tr>
  *   <tr><td>17</td><td>battle 的其它拒绝、没送达、结局不明（随机也不换场，BW6）</td><td>16018「该战斗当前无法观战」</td><td>rejected</td></tr>
  *   <tr><td>18</td><td>随机两轮都没成</td><td>16017「当前没有可观战的战斗」</td><td>no_battle</td></tr>
  *   <tr><td>J</td><td>剩余预算不够发下一跳（换场前不足 2.2 s：旧标记原样保留；登记前不足 1 s：回滚刚抢到的标记，重看同一场时保留它）</td>
@@ -126,7 +127,10 @@ public final class WatchBattleService {
     private java.util.function.BiFunction<Long,Deadline,String> publicNames=(player,deadline)->"";
     public WatchBattleService withPublicNames(java.util.function.BiFunction<Long,Deadline,String> names){publicNames=Objects.requireNonNull(names);return this;}
     public WatchBattleResponse watch(SessionContext session,com.game.proto.match.WatchBattleRequest request,Deadline deadline){
-        if(global!=null){var reply=global.watch(session,request,deadline);count(reply.getErrorMessage().getId()==0?WatchOutcome.OK:WatchOutcome.INTERNAL);return reply;}
+        if(global!=null){
+            // 全球路径自己给出出口：业务拒绝各记各的 outcome，重放已存回执与首答一致
+            var verdict=global.watch(session,request,deadline);count(verdict.outcome());return verdict.response();
+        }
         return watch(session,request.getBattleId(),deadline);
     }
 
@@ -379,8 +383,14 @@ public final class WatchBattleService {
                 }
                 case Outcome.Replied replied when replied.tipId() == MatchTips.BATTLE_ROOM_NOT_FOUND -> deadNode = false;
                 case Outcome.Dead dead -> deadNode = true;
+                case Outcome.Replied replied when replied.tipId() == MatchTips.SPECTATE_FULL -> {
+                    // 第 17a 行：观众席已满，明确拒绝（battle 留了墓碑，同一次登记不会迟到翻成准入）：回滚标记；随机模式也不换场
+                    releaseMark(playerId, player, mark, d, pending);
+                    log.info("[spectate] battle 观众席已满 player={} battle_id={} node={}", player, battle, node(placement));
+                    return rejected(WatchOutcome.FULL, MatchTip.WATCH_FULL);
+                }
                 case Outcome.Replied replied -> {
-                    // 观众已满 / 是参战者 / 签不出票：明确拒绝，回滚标记；随机模式也不换场（BW6）
+                    // 是参战者 / 签不出票：明确拒绝，回滚标记；随机模式也不换场（BW6）
                     releaseMark(playerId, player, mark, d, pending);
                     log.info("[spectate] battle 拒绝观战 player={} battle_id={} node={} tip_id={}", player, battle, node(placement),
                             Integer.toUnsignedString(replied.tipId()));

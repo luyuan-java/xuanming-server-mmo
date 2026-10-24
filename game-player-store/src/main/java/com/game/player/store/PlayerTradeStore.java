@@ -410,6 +410,12 @@ public final class PlayerTradeStore {
     }
 
     private static boolean verifiedDrain(JdbcTemplate sql, FreezeReceipt receipt) {
+        return verifiedDrain(sql,receipt,true);
+    }
+    private static boolean verifiedCurrentDrain(JdbcTemplate sql,FreezeReceipt receipt) {
+        return verifiedDrain(sql,receipt,false);
+    }
+    private static boolean verifiedDrain(JdbcTemplate sql,FreezeReceipt receipt,boolean requireClosedOthers) {
         var rows = sql.queryForList("SELECT * FROM player_trade_drain WHERE listing_id=?", receipt.listingId());
         if (rows.size() != 1) return false;
         var proof = rows.getFirst();
@@ -418,7 +424,7 @@ public final class PlayerTradeStore {
         var owners = sql.queryForList("SELECT owner_epoch,owner_released FROM player WHERE player_id=?", receipt.playerId());
         if (owners.size() != 1 || ((Number) owners.getFirst().get("owner_epoch")).longValue() != receipt.ownerEpoch()
                 || ((Number) owners.getFirst().get("owner_released")).intValue() != 1) return false;
-        if (!closedOtherAdmissions(sql, receipt)) return false;
+        if (requireClosedOthers && !closedOtherAdmissions(sql, receipt)) return false;
         var finalRows = sql.queryForList("SELECT * FROM player_final_save WHERE player_id=? AND owner_epoch=?", receipt.playerId(), receipt.ownerEpoch());
         String mode = (String) proof.get("proof_mode");
         if ("SQL_NO_ADMISSION".equals(mode)) {
@@ -472,5 +478,246 @@ public final class PlayerTradeStore {
             com.game.player.store.state.PlayerState.parseFrom(data);
             return MessageDigest.isEqual(expected, PlayerStore.finalSaveDigest(snapshot, data)) ? snapshot : null;
         } catch (IllegalArgumentException | NullPointerException | com.google.protobuf.InvalidProtocolBufferException corrupt) { return null; }
+    }    /** 受控维护计划只含原件及摘要；不是调用方自报的已排空/已到账证明。 */
+    public record RecoveryRequest(String recoveryId,FreezeRequest freeze,long oldEpoch,String sourceInstance) {}
+    public record RecoveryPlan(RecoveryRequest request,String database,long currentEpoch,String admissionHex,
+            String proofMode,boolean sealUnusedEpoch,int remainingAdmissions,String remainingAdmissionsDigest,
+            String routeGeneration,String routeDigest,String listingDigest,String playerDigest,String stateDigest,
+            String finalDigest,String drainDigest,String oldRowDigest,String requestDigest) {}
+    public record RecoveryReceipt(String recoveryId,String requestDigest,String status,String proofMode,
+                                  int otherOpenAdmissions,boolean unadmittedEpochSealed) {}
+    private static final String RECOVERED_OPEN="RETIRED_BY_SQL_SUCCESSOR";
+
+    /** 默认纯计划：同原路由/P锁读取真实SQL，不改OPEN、待投、角色数据或交易终局。 */
+    public RecoveryPlan planOpenRecovery(RecoveryRequest request,Duration timeout) {
+        validateRecoveryRequest(request);
+        return transaction(timeout,()->{
+            routeLock(request.freeze().playerId());lockAccounts(request.freeze().sellerAccount());
+            return recoveryPlanLocked(request);
+        });
     }
+
+    /** 唯一提交点：先重核完整计划，再同事务写永久原件收据并退休这一条精确OPEN；不伪造APPLIED。 */
+    public RecoveryReceipt applyOpenRecovery(RecoveryPlan approved,Duration timeout) {
+        validateRecoveryPlan(approved);
+        return transaction(timeout,()->{
+            // 永久收据只读重放不借当前角色/下一代身份；提交未知也必须用同一完整计划重查。
+            var replay=readRecovery(approved,false);if(replay!=null)return replay;
+            var request=approved.request();
+            routeLock(request.freeze().playerId());lockAccounts(request.freeze().sellerAccount());
+            var repeated=readRecovery(approved,true);if(repeated!=null)return repeated;
+            var actual=recoveryPlanLocked(request);
+            if(!approved.equals(actual))throw fail(Code.CONFLICT,"恢复计划原件已改变，原OPEN与所有待办保持不变");
+            byte[] encoded=recoveryBytes(approved);
+            int inserted=sql.update("INSERT INTO player_trade_admission_recovery(recovery_id,listing_id,player_id,old_epoch,proof_mode,request_digest,plan_bytes,status,created_ms) VALUES(?,?,?,?,?,?,?,?,?)",
+                    ascii(request.recoveryId()),request.freeze().listingId(),request.freeze().playerId(),request.oldEpoch(),
+                    approved.proofMode(),java.util.HexFormat.of().parseHex(approved.requestDigest()),encoded,RECOVERED_OPEN,millis.getAsLong());
+            if(inserted!=1)throw fail(Code.CONFLICT,"永久恢复原件未精确插入");
+            if(sql.update("DELETE FROM player_final_save WHERE player_id=? AND owner_epoch=? AND "+PlayerMapper.EXACT_OPEN
+                    +" AND save_seq=1 AND protocol_version=1 AND source_instance=? AND admission_proto=?",
+                    request.freeze().playerId(),request.oldEpoch(),request.sourceInstance(),
+                    java.util.HexFormat.of().parseHex(approved.admissionHex()))!=1)
+                throw fail(Code.CONFLICT,"原OPEN退休CAS失败，回滚永久收据");
+            if(approved.sealUnusedEpoch()) {
+                // 计划已固定这是最后一条旧OPEN；复用正式无准入封闭，不造ACK/APPLIED或新归属。
+                var current=freeze(request.freeze().listingId()).receipt();
+                if(!sealUnadmitted(current) || !verifiedDrain(sql,current))
+                    throw fail(Code.CONFLICT,"原未使用E没有完成SQL_NO_ADMISSION封闭，回滚退休与永久收据");
+            }
+            return Objects.requireNonNull(readRecovery(approved,true));
+        });
+    }
+
+    private RecoveryPlan recoveryPlanLocked(RecoveryRequest request) {
+        var wanted=request.freeze();var listing=freeze(wanted.listingId());
+        match(listing,wanted,digest("freeze",wanted.listingId(),wanted.playerId(),wanted.ownerRevision(),wanted.sellerAccount()));
+        if(terminal(listing.receipt().status()))throw fail(Code.CONFLICT,"终局交易不能补原OPEN恢复");
+        var current=bound(listing.receipt());
+        if(current.epoch()<=request.oldEpoch())throw fail(Code.NOT_READY,"没有真实更高SQL归属代");
+        if(RolePendingFence.blocked(sql,wanted.playerId()) || RolePendingFence.economicBlocked(sql,wanted.playerId(),wanted.listingId()))
+            throw fail(Code.NOT_READY,"角色仍有待投或未终局资产，恢复不改原待办");
+        if(!sql.queryForList("SELECT owner_epoch FROM player_final_save WHERE player_id=? AND (owner_epoch>? OR "
+                +PlayerMapper.BLOCKING_FINAL_STATUS+") ORDER BY owner_epoch LIMIT 1 FOR UPDATE",wanted.playerId(),current.epoch()).isEmpty())
+            throw fail(Code.NOT_READY,"存在PENDING、未知或超前最终写，禁止退休OPEN");
+        var currentFinal=sql.queryForList("SELECT owner_epoch FROM player_final_save WHERE player_id=? AND owner_epoch=? FOR UPDATE",wanted.playerId(),current.epoch());
+        var proofs=sql.queryForList("SELECT proof_mode FROM player_trade_drain WHERE listing_id=? FOR UPDATE",wanted.listingId());
+        String mode;
+        if(currentFinal.isEmpty()) {
+            // load两重载都先在同P写OPEN才返回快照。冻结已持P并阻新load；无行证明本E没有已登记RAM。
+            if(!proofs.isEmpty())throw fail(Code.NOT_READY,"无准入E出现既有排空原件，禁止维护追认");
+            requireActualStoredState(wanted.playerId(),current.epoch());
+            mode="SQL_NO_ADMISSION";
+        } else {
+            if(!current.released()||proofs.size()!=1||!"SCENE_ACK".equals(proofs.getFirst().get("proof_mode"))
+                    ||!verifiedCurrentDrain(sql,listing.receipt()))
+                throw fail(Code.NOT_READY,"已准入更高代缺少原SCENE_ACK与实际两SQL完整APPLIED");
+            mode="SCENE_ACK";
+        }
+        String remainingQuery="SELECT * FROM player_final_save WHERE player_id=? AND owner_epoch<>? AND owner_epoch<>? AND NOT "
+                +PlayerMapper.EXACT_APPLIED+" ORDER BY owner_epoch FOR UPDATE";
+        long remaining=sql.queryForObject("SELECT COUNT(*) FROM player_final_save WHERE player_id=? AND owner_epoch<>? AND owner_epoch<>? AND NOT "
+                +PlayerMapper.EXACT_APPLIED,Long.class,wanted.playerId(),current.epoch(),request.oldEpoch());
+        if(remaining<0||remaining>Integer.MAX_VALUE)throw fail(Code.CORRUPT,"剩余旧准入数量越界");
+        String remainingDigest=rawRows(false,remainingQuery,wanted.playerId(),current.epoch(),request.oldEpoch());
+        boolean sealUnused=mode.equals("SQL_NO_ADMISSION")&&remaining==0;
+        var old=sql.queryForList("SELECT * FROM player_final_save WHERE player_id=? AND owner_epoch=? AND "+PlayerMapper.EXACT_OPEN+" FOR UPDATE",
+                wanted.playerId(),request.oldEpoch());
+        if(old.size()!=1)throw fail(Code.NOT_READY,"指定旧OPEN缺失或已变化；ABSENT不是恢复成功");
+        var original=old.getFirst();
+        if(!request.sourceInstance().equals(original.get("source_instance"))
+                ||((Number)original.get("save_seq")).longValue()!=1||((Number)original.get("protocol_version")).intValue()!=1
+                ||original.get("data")!=null||original.get("payload_digest")!=null||original.get("applied_at")!=null
+                ||original.get("level")!=null||original.get("scene_config_id")!=null||original.get("pos_x")!=null
+                ||original.get("pos_y")!=null||original.get("pos_z")!=null
+                ||!(original.get("admission_proto") instanceof byte[] admission))
+            throw fail(Code.NOT_READY,"旧OPEN来源、协议或完整入场原件不符");
+        try {
+            var identity=com.game.proto.common.base.RoleAdmissionIdentity.parseFrom(admission);
+            if(identity.getPlayerId()!=wanted.playerId()||identity.getOwnerEpoch()!=request.oldEpoch()
+                    ||identity.getOwnerRevision()!=wanted.ownerRevision()||!identity.getSceneInstanceId().equals(request.sourceInstance())
+                    ||!Arrays.equals(admission,com.game.common.player.SceneAdmissionAuthority.original(identity)))
+                throw fail(Code.CORRUPT,"旧完整入场身份不是原角色/来源/归属代");
+        } catch(com.google.protobuf.InvalidProtocolBufferException | SecurityException invalid){throw fail(Code.CORRUPT,"旧入场原件无法解析或不完整");}
+        var connection=org.springframework.jdbc.datasource.DataSourceUtils.getConnection(source);
+        try {
+            String catalog=connection.getCatalog();if(catalog==null||catalog.isBlank())throw fail(Code.NOT_READY,"无法确定真实业务库");
+            long zone=sql.queryForObject("SELECT zone_id FROM player WHERE player_id=?",Long.class,wanted.playerId());
+            String generation=sql.queryForObject("SELECT generation FROM route_meta WHERE id=1",String.class);
+            String route=digestHex("recovery-route",rawRows("SELECT * FROM route_meta WHERE id=1"),
+                    rawRows("SELECT * FROM zone_merge_fence WHERE zone_id=? ORDER BY shard",zone));
+            var plan=new RecoveryPlan(request,catalog,current.epoch(),java.util.HexFormat.of().formatHex(admission),mode,sealUnused,(int)remaining,remainingDigest,generation,route,
+                    rawRows("SELECT * FROM player_trade_freeze WHERE listing_id=?",wanted.listingId()),
+                    rawRows("SELECT * FROM player WHERE player_id=? FOR UPDATE",wanted.playerId()),
+                    rawRows("SELECT * FROM player_state WHERE player_id=? FOR UPDATE",wanted.playerId()),
+                    rawRows(false,"SELECT * FROM player_final_save WHERE player_id=? AND owner_epoch=? FOR UPDATE",wanted.playerId(),current.epoch()),
+                    rawRows(false,"SELECT * FROM player_trade_drain WHERE listing_id=? FOR UPDATE",wanted.listingId()),
+                    rawRows("SELECT * FROM player_final_save WHERE player_id=? AND owner_epoch=? FOR UPDATE",wanted.playerId(),request.oldEpoch()),"");
+            return recoveryDigest(plan);
+        } catch(SQLException failure){throw fail(Code.NOT_READY,"真实恢复数据库身份不可读");}
+        finally{org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(connection,source);}
+    }
+
+    /** 原SQL存档是唯一初始基底；维护不补空、不改savedE、不借RAM快照。 */
+    private void requireActualStoredState(long player,long currentEpoch) {
+        var states=sql.queryForList("SELECT data,saved_epoch FROM player_state WHERE player_id=? FOR UPDATE",player);
+        if(states.size()!=1||!(states.getFirst().get("data") instanceof byte[] bytes)||bytes.length>16_777_215
+                ||!(states.getFirst().get("saved_epoch") instanceof Number epoch)||epoch.longValue()<0||epoch.longValue()>currentEpoch)
+            throw fail(Code.NOT_READY,"原player_state缺失、NULL或存档代次不合法，禁止无准入封闭");
+        try{com.game.player.store.state.PlayerState.parseFrom(bytes);}
+        catch(com.google.protobuf.InvalidProtocolBufferException invalid){throw fail(Code.NOT_READY,"原player_state不是合法protobuf，维护不补初始数据");}
+    }
+
+    private static void validateRecoveryRequest(RecoveryRequest request) {
+        if(request==null||request.freeze()==null)throw fail(Code.INVALID,"恢复缺少原冻结请求");
+        validate(request.freeze());
+        if(request.oldEpoch()<=0||request.sourceInstance()==null||!request.sourceInstance().matches("[A-Za-z0-9_-]{1,64}"))
+            throw fail(Code.INVALID,"原OPEN代次或来源无效");
+        try{if(!UUID.fromString(request.recoveryId()).toString().equals(request.recoveryId()))throw new IllegalArgumentException();}
+        catch(RuntimeException invalid){throw fail(Code.INVALID,"恢复操作必须使用固定规范UUID");}
+    }
+    private static void validateRecoveryPlan(RecoveryPlan plan) {
+        if(plan==null)throw fail(Code.INVALID,"恢复计划缺失");validateRecoveryRequest(plan.request());
+        if(plan.database()==null||plan.database().isBlank()||plan.currentEpoch()<=plan.request().oldEpoch()
+                ||plan.admissionHex()==null||plan.admissionHex().isEmpty()||plan.admissionHex().length()>2*com.game.common.player.SceneAdmissionAuthority.MAX_ORIGINAL_BYTES
+                ||!plan.admissionHex().matches("[0-9a-f]+")||(plan.admissionHex().length()&1)!=0
+                ||plan.routeGeneration()==null||plan.routeGeneration().isBlank()
+                ||!("SCENE_ACK".equals(plan.proofMode())||"SQL_NO_ADMISSION".equals(plan.proofMode()))
+                ||plan.remainingAdmissions()<0||plan.sealUnusedEpoch()!=(plan.proofMode().equals("SQL_NO_ADMISSION")&&plan.remainingAdmissions()==0))
+            throw fail(Code.INVALID,"恢复计划范围或完整原件不合法");
+        for(String digest:new String[]{plan.remainingAdmissionsDigest(),plan.routeDigest(),plan.listingDigest(),plan.playerDigest(),plan.stateDigest(),plan.finalDigest(),plan.drainDigest(),plan.oldRowDigest(),plan.requestDigest()})
+            if(digest==null||!digest.matches("[0-9a-f]{64}"))throw fail(Code.INVALID,"恢复计划摘要不合法");
+        if(!recoveryDigest(plan).requestDigest().equals(plan.requestDigest()))throw fail(Code.CONFLICT,"恢复计划完整摘要不符");
+    }
+    private static RecoveryPlan recoveryDigest(RecoveryPlan p) {
+        String digest=hexSha(recoveryBytes(p));
+        return new RecoveryPlan(p.request(),p.database(),p.currentEpoch(),p.admissionHex(),p.proofMode(),p.sealUnusedEpoch(),p.remainingAdmissions(),p.remainingAdmissionsDigest(),p.routeGeneration(),p.routeDigest(),
+                p.listingDigest(),p.playerDigest(),p.stateDigest(),p.finalDigest(),p.drainDigest(),p.oldRowDigest(),digest);
+    }
+    private static byte[] recoveryBytes(RecoveryPlan p) {
+        try {
+            var bytes=new ByteArrayOutputStream();var out=new DataOutputStream(bytes);var r=p.request();var f=r.freeze();
+            out.writeUTF("player-trade-open-retirement/v2");
+            out.writeUTF(r.recoveryId());out.writeLong(f.listingId());out.writeLong(f.playerId());out.writeUTF(f.sellerAccount());
+            out.writeLong(f.ownerRevision());out.writeLong(r.oldEpoch());out.writeUTF(r.sourceInstance());out.writeUTF(p.database());
+            out.writeLong(p.currentEpoch());out.writeUTF(p.admissionHex());out.writeUTF(p.proofMode());out.writeBoolean(p.sealUnusedEpoch());
+            out.writeInt(p.remainingAdmissions());out.writeUTF(p.remainingAdmissionsDigest());out.writeUTF(p.routeGeneration());out.writeUTF(p.routeDigest());
+            out.writeUTF(p.listingDigest());out.writeUTF(p.playerDigest());out.writeUTF(p.stateDigest());out.writeUTF(p.finalDigest());
+            out.writeUTF(p.drainDigest());out.writeUTF(p.oldRowDigest());return bytes.toByteArray();
+        } catch(java.io.IOException invalid){throw fail(Code.INVALID,"恢复计划不能按固定类型编码");}
+    }
+    private RecoveryReceipt readRecovery(RecoveryPlan plan,boolean lock) {
+        var rows=sql.queryForList("SELECT * FROM player_trade_admission_recovery WHERE recovery_id=?"+(lock?" FOR UPDATE":""),ascii(plan.request().recoveryId()));
+        if(rows.isEmpty())return null;if(rows.size()!=1)throw fail(Code.CORRUPT,"永久恢复原件不唯一");
+        var row=rows.getFirst();
+        if(((Number)row.get("listing_id")).longValue()!=plan.request().freeze().listingId()
+                ||((Number)row.get("player_id")).longValue()!=plan.request().freeze().playerId()
+                ||((Number)row.get("old_epoch")).longValue()!=plan.request().oldEpoch()
+                ||((Number)row.get("created_ms")).longValue()<=0
+                ||!RECOVERED_OPEN.equals(row.get("status"))||!plan.proofMode().equals(row.get("proof_mode"))||!(row.get("plan_bytes") instanceof byte[] original)
+                ||!Arrays.equals(original,recoveryBytes(plan))||!(row.get("request_digest") instanceof byte[] digest)
+                ||!MessageDigest.isEqual(digest,java.util.HexFormat.of().parseHex(plan.requestDigest())))
+            throw fail(Code.CONFLICT,"恢复UUID已绑定另一原件或永久收据损坏");
+        return new RecoveryReceipt(plan.request().recoveryId(),plan.requestDigest(),RECOVERED_OPEN,plan.proofMode(),plan.remainingAdmissions(),plan.sealUnusedEpoch());
+    }
+    /** 全列类型化摘要；二进制保原字节，标量按JDBC类型规范编码；保持NULL/列名/行边界与16MiB上限。 */
+    private String rawRows(String query,Object... arguments) { return rawRows(true,query,arguments); }
+    private String rawRows(boolean requireRows,String query,Object... arguments) {
+        return sql.query(query,rs->{
+            try {
+                var bytes=new ByteArrayOutputStream();var encoded=new DataOutputStream(bytes);encoded.writeUTF("player-trade-recovery-sql/v2");
+                var metadata=rs.getMetaData();var columns=new java.util.TreeMap<String,Integer>();
+                for(int i=1;i<=metadata.getColumnCount();i++)if(columns.put(metadata.getColumnName(i).toLowerCase(java.util.Locale.ROOT),i)!=null)
+                    throw fail(Code.CORRUPT,"SQL证明重复列");
+                int count=0;
+                while(rs.next()) {
+                    encoded.writeByte(1);count++;
+                    for(var column:columns.entrySet()) {
+                        int type=metadata.getColumnType(column.getValue());
+                        encoded.writeUTF(column.getKey());encoded.writeInt(type);
+                        byte[] value=recoverySqlValue(rs,column.getValue(),type);
+                        encoded.writeBoolean(value!=null);if(value!=null){encoded.writeInt(value.length);encoded.write(value);}
+                        if(bytes.size()>16*1024*1024)throw fail(Code.CORRUPT,"恢复SQL证明超过16MiB");
+                    }
+                }
+                if(requireRows&&count==0)throw fail(Code.NOT_READY,"恢复实际SQL证明缺行");encoded.writeByte(0);return hexSha(bytes.toByteArray());
+            }catch(java.io.IOException impossible){throw new IllegalStateException(impossible);}
+        },arguments);
+    }
+    /** 仅支持恢复所读取正式表的JDBC类型；未知类型拒绝，不能退为驱动自选的二进制转换。 */
+    private static byte[] recoverySqlValue(ResultSet row,int column,int type) throws SQLException {
+        return switch(type) {
+            case java.sql.Types.BINARY,java.sql.Types.VARBINARY,java.sql.Types.LONGVARBINARY,java.sql.Types.BLOB -> row.getBytes(column);
+            case java.sql.Types.CHAR,java.sql.Types.VARCHAR,java.sql.Types.LONGVARCHAR,
+                 java.sql.Types.NCHAR,java.sql.Types.NVARCHAR,java.sql.Types.LONGNVARCHAR,
+                 java.sql.Types.CLOB,java.sql.Types.NCLOB -> {
+                String value=row.getString(column);yield value==null?null:utf8(value);
+            }
+            case java.sql.Types.TINYINT,java.sql.Types.SMALLINT,java.sql.Types.INTEGER,java.sql.Types.BIGINT -> {
+                var value=row.getBigDecimal(column);
+                try{yield value==null?null:utf8(value.toBigIntegerExact().toString());}
+                catch(ArithmeticException invalid){throw fail(Code.CORRUPT,"SQL整数证明不是精确整数");}
+            }
+            case java.sql.Types.NUMERIC,java.sql.Types.DECIMAL -> {
+                var value=row.getBigDecimal(column);yield value==null?null:utf8(value.toPlainString());
+            }
+            case java.sql.Types.REAL,java.sql.Types.FLOAT,java.sql.Types.DOUBLE -> {
+                double value=row.getDouble(column);boolean missing=row.wasNull();
+                if(!missing&&!Double.isFinite(value))throw fail(Code.CORRUPT,"SQL浮点证明不是有限值");
+                yield missing?null:ByteBuffer.allocate(Long.BYTES).putLong(Double.doubleToRawLongBits(value)).array();
+            }
+            case java.sql.Types.BOOLEAN,java.sql.Types.BIT -> {
+                if(type==java.sql.Types.BIT&&row.getMetaData().getPrecision(column)!=1)
+                    throw fail(Code.CORRUPT,"SQL位证明不是单一布尔值");
+                boolean value=row.getBoolean(column);yield row.wasNull()?null:new byte[]{(byte)(value?1:0)};
+            }
+            default -> throw fail(Code.CORRUPT,"恢复SQL证明含未支持的JDBC类型");
+        };
+    }
+    private static String hexSha(byte[] raw) {
+        try{return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(raw));}
+        catch(java.security.NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
+    }
+    private static String digestHex(String kind,Object... fields){return java.util.HexFormat.of().formatHex(digest(kind,fields));}
+
+
 }

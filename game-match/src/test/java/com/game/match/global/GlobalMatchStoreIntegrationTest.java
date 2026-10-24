@@ -120,8 +120,10 @@ class GlobalMatchStoreIntegrationTest {
     @Test void immutableIntentAndAbortCannotBecomeReady()throws Exception{
         var a=join(1);var b=join(2);store.claim(List.of(a,b),formation(100),false);var f=store.acquireWork(100);
         assertFalse(store.cancel(1,a.getTicket()));assertEquals(2,store.ticket(1).getState());
-        assertArrayEquals(new byte[]{1,2},store.saveIntent(f,new byte[]{1,2}).getCreateRequest().toByteArray());
-        assertArrayEquals(new byte[]{1,2},store.saveIntent(f,new byte[]{8,9}).getCreateRequest().toByteArray());
+        byte[] originalCreate=com.game.proto.CreateBattleRequest.newBuilder().setBattleId(100).setSeed(1).build().toByteArray();
+        byte[] changedCreate=com.game.proto.CreateBattleRequest.newBuilder().setBattleId(100).setSeed(2).build().toByteArray();
+        assertArrayEquals(originalCreate,store.saveIntent(f,originalCreate).getCreateRequest().toByteArray());
+        assertArrayEquals(originalCreate,store.saveIntent(f,changedCreate).getCreateRequest().toByteArray());
         store.unknown(f);assertEquals(3,store.formation(100).getState());assertEquals(2,store.ticket(1).getState());
         store.finish(f,false);assertThrows(RuntimeException.class,()->store.finish(f,true));assertEquals(5,store.formation(100).getState());assertEquals(4,store.ticket(1).getState());
     }

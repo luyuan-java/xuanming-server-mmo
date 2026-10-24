@@ -25,6 +25,17 @@ public interface BattleResultSink {
     /** 与完整来源协议约定一致，预留 Kafka 记录头开销。 */
     int MAX_SOURCE_BYTES = 960 * 1024;
 
+    /** 新终局在任何个人副作用前提交Match SQL；默认实现无此能力必须失败关闭。 */
+    default java.util.concurrent.CompletableFuture<com.game.proto.match.BattleOutcomeDecision> commitOutcome(
+            com.game.proto.CreateBattleRequest creation, BattleResultEvent event, com.google.protobuf.ByteString original) {
+        return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("结果端口未装配Match永久终局"));
+    }
+
+    /** 已验证签名的持久ABORT，不是超时、RPC故障或Kafka失败。 */
+    final class OutcomeAborted extends RuntimeException {
+        public OutcomeAborted(){super("Match永久ABORT已提交，不许可个人奖励");}
+    }
+
     /** 已固定的原始来源；重投必须使用相同字节，兼容实现仍只接不可变事件。 */
     default java.util.concurrent.CompletableFuture<Void> publishConfirmed(BattleResultEvent event,
             com.google.protobuf.ByteString original, Channel channel) {

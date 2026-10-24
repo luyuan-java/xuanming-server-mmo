@@ -329,9 +329,6 @@ public class SceneNode implements SmartLifecycle {
         // 关闭消费也装配真实服务：目录公布的是生效开关，PENDING 留在独立收件箱；运输失败不产生 SQL 持久确认。
         DubboInboxTransport inboxClient = DubboInboxTransport.direct(settings.inbox().url(), logic);
         inboxTransport = inboxClient;
-        InboxService inbox = new InboxService(InboxConsumers.gmSanction(currency), inboxClient, SceneClock.SYSTEM,
-                new InboxService.Settings(settings.inbox().consumerEnabled(), settings.inbox().periodicFetchMinutes()),
-                () -> nodeId, () -> ThreadLocalRandom.current().nextInt(1001));
         BagService bags = new BagService(bagTables, itemGuids(sceneGuids), assetAudit, anomalies, metrics);
         startGainBlockSync(currency, bags, settings);
         AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency, metrics);
@@ -376,6 +373,9 @@ public class SceneNode implements SmartLifecycle {
                 battleTables, petService, player -> battleRouting(gateLinks, player, zoneId, nodeId), teamFollow, battleMetrics,
                 SceneClock.SYSTEM, logic, registry.requireId("BattleClientPlayer", "NotifyBattleReconnect"),
                 registry.requireId("BattleClientPlayer", "NotifyBattleEnd"));
+        InboxService inbox = new InboxService(InboxConsumers.withBattle(currency,battle), inboxClient, SceneClock.SYSTEM,
+                new InboxService.Settings(settings.inbox().consumerEnabled(), settings.inbox().periodicFetchMinutes()),
+                () -> nodeId, () -> ThreadLocalRandom.current().nextInt(1001));
         // 进场景前的规整：先背包（坏档拒绝进场），再属性、宝宝（同基线加载顺序），最后重建任务索引
         SceneWorld sceneWorld = new SceneWorld(tables, ids, gateLinks, repository, snowflake::nextId,
                 SceneClock.SYSTEM, metrics, player -> {
@@ -396,6 +396,7 @@ public class SceneNode implements SmartLifecycle {
         battleService = battle;
         links = gateLinks;
         world = sceneWorld;
+        battle.withInboxFailureHandler((player,failure)->sceneWorld.discardUnpersistedBattleEffect(player,player.ownerEpoch(),failure));
         repository.onFinalApplied(sceneWorld::onFinalApplied);
         repository.startFinalRecovery(scheduler);
         TradeFreezeRecovery tradeFreezes = new TradeFreezeRecovery(playerTrades, instanceId, storageExecutor, logic,

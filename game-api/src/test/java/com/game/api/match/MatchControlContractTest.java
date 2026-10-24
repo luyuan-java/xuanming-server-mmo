@@ -159,15 +159,19 @@ class MatchControlContractTest {
         Method method = MatchInternalService.class.getDeclaredMethod("startActivityBattle", StartActivityBattleRequest.class);
         assertThat(method.getReturnType()).isEqualTo(CompletableFuture.class);
         assertThat(MatchInternalService.class.getDeclaredMethods()).extracting(Method::getName)
-            .containsExactlyInAnyOrder("startActivityBattle","cancelActivityBattle");
+            .containsExactlyInAnyOrder("startActivityBattle","cancelActivityBattle","commitBattleOutcome");
         Method cancel=MatchInternalService.class.getDeclaredMethod("cancelActivityBattle",com.game.proto.match.CancelActivityBattleRequest.class);
         assertThat(cancel.getGenericReturnType().getTypeName()).contains(com.game.proto.match.CancelActivityBattleResponse.class.getName());
+        Method commit=MatchInternalService.class.getDeclaredMethod("commitBattleOutcome",com.game.proto.match.CommitBattleOutcomeRequest.class);
+        assertThat(commit.getGenericReturnType().getTypeName()).contains(com.game.proto.match.CommitBattleOutcomeResponse.class.getName());
         MatchInternalService service = request -> CompletableFuture.completedFuture(StartActivityBattleResponse.newBuilder()
                 .setReject(ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE).setOffenderPlayerId(request.getMemberPlayerIds(0)).build());
         assertThat(service.startActivityBattle(StartActivityBattleRequest.newBuilder().addMemberPlayerIds(5).build()).get(1, TimeUnit.SECONDS)
                 .getOffenderPlayerId()).isEqualTo(5);
         org.junit.jupiter.api.Assertions.assertThrows(java.util.concurrent.ExecutionException.class,
             () -> service.cancelActivityBattle(com.game.proto.match.CancelActivityBattleRequest.getDefaultInstance()).get(1,TimeUnit.SECONDS));
+        org.junit.jupiter.api.Assertions.assertThrows(java.util.concurrent.ExecutionException.class,
+            () -> service.commitBattleOutcome(com.game.proto.match.CommitBattleOutcomeRequest.getDefaultInstance()).get(1,TimeUnit.SECONDS));
     }
 
     @Test

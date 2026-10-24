@@ -78,6 +78,61 @@ public class RatingConfiguration {
         return new BattleCompletionStore(source);
     }
 
+    @Bean(destroyMethod="destroy")
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
+    public org.apache.dubbo.config.ReferenceConfig<com.game.api.PlayerInboxService> matchBattleInboxClient(
+            @org.springframework.beans.factory.annotation.Value("${game.dubbo.inbox-url:}")String url) {
+        if(url==null||url.isBlank())throw new IllegalStateException("永久终局恢复需要显式Inbox内部RPC地址");
+        var reference=new org.apache.dubbo.config.ReferenceConfig<com.game.api.PlayerInboxService>();
+        reference.setInterface(com.game.api.PlayerInboxService.class);reference.setGroup(com.game.api.DubboGroups.INBOX);
+        reference.setUrl(url);reference.setRetries(0);reference.setTimeout(3000);reference.setCheck(false);return reference;
+    }
+
+    @Bean(destroyMethod="close")
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
+    public OutcomePublisher battleOutcomePublisher(MatchProperties props,KafkaNames names,MatchInstance instance) {
+        return new OutcomePublisher(props,names,instance.id());
+    }
+
+    @Bean(initMethod="start",destroyMethod="close")
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
+    public BattleCompletionReplay battleCompletionReplay(BattleCompletionStore source,com.game.match.global.GlobalMatchStore formations,OutcomePublisher publisher,
+            @org.springframework.beans.factory.annotation.Qualifier("matchBattleInboxClient")
+            org.apache.dubbo.config.ReferenceConfig<com.game.api.PlayerInboxService> inbox) {
+        return new BattleCompletionReplay(source,formations,inbox.get(),publisher,
+                System.getenv(com.game.api.PlayerInboxService.BATTLE_SECRET_ENV),System::currentTimeMillis);
+    }
+
+    /** COMPLETE同TX留下的全局去向，和个人Inbox投递独立；仅原字节的RF3/all ACK后标记已投。 */
+    static final class OutcomePublisher implements BattleCompletionReplay.Results,AutoCloseable {
+        private final org.apache.kafka.clients.producer.Producer<String,byte[]> producer;
+        private final String topic;
+        OutcomePublisher(MatchProperties props,KafkaNames names,String instance) {
+            var kafka=props.kafka();var topics=new BattleResultTopics(names);
+            String client=names.matchRatingClientId(instance)+"-terminal";
+            try(var admin=new KafkaTopicAdmin(kafka.bootstrapServers(),client+"-admin")) {
+                topics.ensureDurable(admin,kafka.topicGeneration(),com.game.audit.AuditTopicInitializer.Mode.CREATE_AND_VERIFY,
+                        kafka.replicationFactor(),kafka.initTimeout());
+            }
+            this.topic=topics.name(kafka.topicGeneration());
+            var config=new java.util.Properties();
+            config.put("bootstrap.servers",kafka.bootstrapServers());config.put("client.id",client);
+            config.put("key.serializer",org.apache.kafka.common.serialization.StringSerializer.class.getName());
+            config.put("value.serializer",org.apache.kafka.common.serialization.ByteArraySerializer.class.getName());
+            config.put("acks","all");config.put("enable.idempotence","true");config.put("max.in.flight.requests.per.connection","1");
+            config.put("max.block.ms","3000");config.put("request.timeout.ms","3000");config.put("delivery.timeout.ms","10000");
+            this.producer=new org.apache.kafka.clients.producer.KafkaProducer<>(config);
+        }
+        @Override public java.util.concurrent.CompletableFuture<Void> publish(com.game.proto.contracts.kafka.BattleResultEvent event,
+                com.google.protobuf.ByteString original) {
+            var result=new java.util.concurrent.CompletableFuture<Void>();
+            try{producer.send(new org.apache.kafka.clients.producer.ProducerRecord<>(topic,BattleResultTopics.key(event.getBattleId()),
+                    original.toByteArray()),(metadata,error)->{if(error==null)result.complete(null);else result.completeExceptionally(error);});}
+            catch(RuntimeException failure){result.completeExceptionally(failure);}return result;
+        }
+        @Override public void close(){producer.close(java.time.Duration.ofSeconds(5));}
+    }
+
     /**
      * 对局结果的消费：全球模式下关闭评分仍持续归档来源；显式旧兼容模式关闭评分才停止消费。
      * 只建对象、不启动：它实现 {@code lifecycle.ResultConsumerControl}，启停由 {@code MatchLifecycle} 调它的 {@code start()} / {@code stop()}

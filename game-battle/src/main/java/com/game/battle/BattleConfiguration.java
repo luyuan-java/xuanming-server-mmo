@@ -264,17 +264,65 @@ public class BattleConfiguration {
     /**
      * battle 节点（{@code SmartLifecycle}：Spring 在全部 bean 建好之后启动它）。{@code battleDubboCallAuth} 只为保证 Dubbo 密钥门禁先过。
      */
+    @Bean(destroyMethod="destroy")
+    @ConditionalOnMissingBean(name="battleOutcomeClient")
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="game.battle.global-match.enabled",havingValue="true")
+    public org.apache.dubbo.config.ReferenceConfig<com.game.api.MatchInternalService> battleOutcomeClient(
+            @Value("${game.dubbo.match-url:}")String url) {
+        if(url==null||url.isBlank())throw new IllegalStateException("新终局需要显式Match内部RPC地址");
+        var reference=new org.apache.dubbo.config.ReferenceConfig<com.game.api.MatchInternalService>();
+        reference.setInterface(com.game.api.MatchInternalService.class);reference.setGroup(com.game.api.DubboGroups.MATCH);
+        reference.setUrl(url);reference.setRetries(0);reference.setTimeout(3000);reference.setCheck(false);return reference;
+    }
+
     @Bean
     public BattleNode battleNode(BattleProperties props, RunMode battleRunMode, @Value("${game.advertise-host}") String advertiseHost,
                                  BattleTables battleTables, BattleTickets battleTickets, LobbyAnnouncer lobby,
                                  SceneBattleEvents sceneEvents, SettlementSink settlements, ActivityResultSink activityResults,
                                  BattleResultSink results, AdmissionGate battleAdmissionGate, BattleMetrics battleMetrics,
-                                 BattleInfrastructure battleInfrastructure, DubboCallAuth battleDubboCallAuth,GlobalBattleProperties global) {
+                                 BattleInfrastructure battleInfrastructure, DubboCallAuth battleDubboCallAuth,GlobalBattleProperties global,
+                                 @org.springframework.beans.factory.annotation.Qualifier("battleOutcomeClient")
+                                 ObjectProvider<org.apache.dubbo.config.ReferenceConfig<com.game.api.MatchInternalService>> outcomeClient,
+                                 @Value("${MMORPG_MATCH_OUTCOME_SECRET_BATTLE:}") String outcomeSecret) {
         props.requireAllowedIn(battleRunMode);
         if(battleRunMode==RunMode.PROD&&!global.enabled())throw new IllegalStateException("生产 battle 必须启用全球机房与探测门禁");
+        if(global.enabled())results=new SignedOutcomeSink(results,outcomeClient.getObject().get(),
+                outcomeSecret);
         return new BattleNode(props, battleRunMode, advertiseHost, battleTables, battleTickets,
                 new OutboundPorts(lobby, sceneEvents, settlements, activityResults, results), battleAdmissionGate, battleMetrics,
                 BattleClock.SYSTEM, battleInfrastructure).withGlobal(global);
+    }
+
+    /** 仅装配协议转换；旧Kafka发布保留，新版只有验证过的SQL回执可越过终局闸。 */
+    static final class SignedOutcomeSink implements BattleResultSink {
+        private final BattleResultSink legacy;
+        private final com.game.api.MatchInternalService match;
+        private final String secret;
+        private final com.game.discovery.serviceauth.ServiceCallSignatures replies;
+        SignedOutcomeSink(BattleResultSink legacy,com.game.api.MatchInternalService match,String secret) {
+            this.legacy=legacy;this.match=match;this.secret=secret;
+            this.replies=new com.game.discovery.serviceauth.ServiceCallSignatures(java.util.Map.of("match",secret),System::currentTimeMillis);
+        }
+        @Override public void publish(com.game.proto.contracts.kafka.BattleResultEvent event,Channel channel){legacy.publish(event,channel);}
+        @Override public java.util.concurrent.CompletableFuture<Void> publishConfirmed(com.game.proto.contracts.kafka.BattleResultEvent event,
+                com.google.protobuf.ByteString original,Channel channel){return legacy.publishConfirmed(event,original,channel);}
+        @Override public java.util.concurrent.CompletableFuture<com.game.proto.match.BattleOutcomeDecision> commitOutcome(
+                com.game.proto.CreateBattleRequest creation,com.game.proto.contracts.kafka.BattleResultEvent event,com.google.protobuf.ByteString original) {
+            if(creation.getOutcomeProtocolVersion()!=1||creation.getBattleId()!=event.getBattleId())
+                return java.util.concurrent.CompletableFuture.failedFuture(new SecurityException("终局原建房身份不同"));
+            var request=com.game.proto.match.CommitBattleOutcomeRequest.newBuilder().setBattleId(creation.getBattleId())
+                    .setPlacementOperationId(creation.getPlacementOperationId()).setTargetInstanceId(creation.getTargetInstanceId())
+                    .setRawResultPayload(original).build();
+            var signed=com.game.discovery.serviceauth.ServiceCallSignatures.sign(com.game.api.MatchInternalService.OUTCOME_METHOD,
+                    request,"battle",secret,System.currentTimeMillis());
+            return match.commitBattleOutcome(signed).thenApply(response->{
+                if(!"match".equals(replies.verify(com.game.api.MatchInternalService.OUTCOME_METHOD+"/reply",response))
+                        ||!response.getRequestDigest().equals(com.game.discovery.serviceauth.ServiceCallSignatures.digest(request))
+                        ||response.getDecisionValue()!=1&&response.getDecisionValue()!=2)
+                    throw new SecurityException("Match终局回执未知或未绑定原全文");
+                return response.getDecision();
+            });
+        }
     }
 
     // ---------------------------------------------------------------- dev / test 管理接口（§7.12）

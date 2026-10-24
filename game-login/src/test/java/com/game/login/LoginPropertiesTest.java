@@ -26,6 +26,21 @@ class LoginPropertiesTest {
         assertThat(props.maxDevicesPerAccount()).isEqualTo(3);
         assertThat(props.deviceSessionTtl()).isEqualTo(Duration.ofMinutes(30));
         assertThat(props.refreshReuseGrace()).as("基线 TokenConfig.RefreshReuseGrace").isEqualTo(Duration.ofSeconds(30));
+        assertThat(props.refreshReuseRevoke()).as("基线 TokenConfig.RefreshReuseRevoke：窗口外重用即吊销").isTrue();
+    }
+
+    @Test
+    void 重用吊销开关可关成只观测() {
+        assertThat(new LoginProperties(null, null, null, null, null, null, null, null, null, null, null, null, null, false)
+                .refreshReuseRevoke()).isFalse();
+    }
+
+    @Test
+    void refresh有效期不得短于access() {
+        assertThatThrownBy(() -> new LoginProperties(null, null, null, null, null, null, null, null, Duration.ofHours(2),
+                Duration.ofHours(1), null, null)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(new LoginProperties(null, null, null, null, null, null, null, null, Duration.ofHours(2), Duration.ofHours(2),
+                null, null).refreshTokenTtl()).isEqualTo(Duration.ofHours(2));
     }
 
     @Test

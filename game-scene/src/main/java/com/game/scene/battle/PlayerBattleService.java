@@ -140,6 +140,27 @@ public final class PlayerBattleService implements BattleHooks {
     private final int battleEndId;
     /** 装配时绑定一次（世界由同一个组合根建，钩子先于世界存在）。 */
     private SceneWorld world;
+    private java.util.function.BiConsumer<ScenePlayer,RuntimeException> inboxFailure;
+    /** 仅通知缓存，不参与授权/去重；永久依据仍为Inbox SQL原收据和存档域水位。 */
+    private final Map<ScenePlayer,BattleSettlementData> inboxNotifications=new java.util.WeakHashMap<>();
+
+    public PlayerBattleService withInboxFailureHandler(java.util.function.BiConsumer<ScenePlayer,RuntimeException> failure) {
+        this.inboxFailure=Objects.requireNonNull(failure);return this;
+    }
+
+    public BattleSettlementService.Result applyInbox(ScenePlayer player,BattleSettlementData settlement) {
+        if(world==null||inboxFailure==null||world.playerById(player.playerId())!=player)
+            return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_FROZEN);
+        try{
+            var result=settlements.applyInbox(world,player,settlement);
+            if(result.outcome()==Outcome.APPLIED)inboxNotifications.put(player,settlement);
+            return result;
+        }catch(RuntimeException failure){
+            // 禁止正常离场保存部分效果；在同逻辑任务内废黜该实例，从SQL原快照重载后重投。
+            inboxFailure.accept(player,failure);
+            return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+        }
+    }
 
     /**
      * @param logic           投递回场景逻辑线程（停服后可能拒绝，拒绝时丢弃这次结果）
@@ -439,6 +460,10 @@ public final class PlayerBattleService implements BattleHooks {
                     metrics.confirm(error != null ? Confirm.ERROR : fields == null ? Confirm.OFFLINE_MISS : Confirm.OFFLINE_EXTENDED));
             return;
         }
+        if(inboxPersistedApplied(player,battleId)){
+            onLogic(locks.deleteIfMatch(playerId,battleId),(ignored,error)->logScriptError("已持久Inbox结算清旧确认锁",playerId,battleId,error));
+            return;
+        }
         if (player.frozen()) {
             // 交出在途：只续锁、不挂冻结；目标节点进场恢复时据锁重建 FIGHTING 并推 144（两种冻结互斥）
             onLogic(locks.confirm(playerId, battleId, deadline, ttl), (fields, error) ->
@@ -515,6 +540,10 @@ public final class PlayerBattleService implements BattleHooks {
      */
     private void onLateConfirm(ScenePlayer player, long battleId, long deadline, Map<String, String> fields, Throwable error) {
         long playerId = player.playerId();
+        if(inboxPersistedApplied(player,battleId)){
+            onLogic(locks.deleteIfMatch(playerId,battleId),(ignored,failed)->logScriptError("已持久Inbox结算清迟到确认锁",playerId,battleId,failed));
+            return;
+        }
         if (error != null) {
             metrics.confirm(Confirm.ERROR);
             metrics.rebuild(RebuildReason.LATE_CONFIRM, RebuildResult.ERROR);
@@ -676,6 +705,7 @@ public final class PlayerBattleService implements BattleHooks {
             battle.setRecovery(Recovery.READY);
             metrics.recovery(SceneBattleMetrics.Recovery.READY);
         }
+        finishPersistedInbox(player);
     }
 
     /**
@@ -735,6 +765,9 @@ public final class PlayerBattleService implements BattleHooks {
                     // 延后或还没轮到 → skipped_pending
                     metrics.rebuild(RebuildReason.LOGIN, corruptIds.contains(lockBattle) ? RebuildResult.SKIPPED_CORRUPT
                             : concluded.contains(lockBattle) ? RebuildResult.LEDGER_HIT : RebuildResult.SKIPPED_PENDING);
+                } else if(inboxPersistedApplied(player,lockBattle)){
+                    onLogic(locks.deleteIfMatch(playerId,lockBattle),(ignored,error)->logScriptError("登录清已持久Inbox旧战斗锁",playerId,lockBattle,error));
+                    handled.add(lockBattle);
                 } else if ((ledger.invalidReason() == null && ledger.has(lockBattle)) || player.battle().writtenOff(lockBattle)) {
                     // 已应用待销账；或本实例已为它发出过销账（这份快照早于那次销账，锁其实已放）：不重建，再推一次销账
                     metrics.rebuild(RebuildReason.LOGIN, RebuildResult.LEDGER_HIT);
@@ -1125,6 +1158,7 @@ public final class PlayerBattleService implements BattleHooks {
 
     @Override
     public void onPersisted(SceneWorld w, ScenePlayer player) {
+        finishPersistedInbox(player);
         BattleLedger ledger = player.battleLedger();
         if (ledger.invalidReason() != null || ledger.size() == 0) {
             return;
@@ -1141,6 +1175,35 @@ public final class PlayerBattleService implements BattleHooks {
             // 还有不 durable 的（在这次快照之后才登记的）：再压一次；只在 SAVED 时链式重存，FAILED 交给 reaper
             world.requestSave(player);
         }
+    }
+
+    private void finishPersistedInbox(ScenePlayer player) {
+        var saved=player.persistedState();
+        if(saved==null||!saved.hasInboxLedger()||world.playerById(player.playerId())!=player||player.frozen())return;
+        int domain=com.game.proto.player_inbox.PlayerInboxDomain.PLAYER_INBOX_DOMAIN_SCENE_BATTLE_SETTLEMENT_VALUE;
+        for(var cursor:saved.getInboxLedger().getCursorsList())if(cursor.getDomain()==domain){
+            for(var decision:cursor.getRecentList()){
+                if(decision.getMsgType()!=com.game.proto.player_inbox.PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT_VALUE
+                        ||decision.getOutcome()!=com.game.proto.player_inbox.PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED_VALUE)continue;
+                var freeze=player.battle().freeze();
+                if(freeze!=null&&freeze.battleId()==decision.getRequestId())clearFreeze(player,LockAction.DELETE_IF_MATCH);
+                var notification=inboxNotifications.get(player);
+                if(notification!=null&&notification.getBattleId()==decision.getRequestId()){
+                    inboxNotifications.remove(player);
+                    world.sendTo(player,push(battleEndId,BattleEndS2C.newBuilder().setBattleId(notification.getBattleId())
+                            .setOutcome(notification.getOutcome()).setSettlement(notification).build()));
+                }
+            }
+        }
+    }
+    private static boolean inboxPersistedApplied(ScenePlayer player,long battleId) {
+        var state=player.persistedState();if(state==null||!state.hasInboxLedger())return false;
+        for(var cursor:state.getInboxLedger().getCursorsList())
+            if(cursor.getDomain()==com.game.proto.player_inbox.PlayerInboxDomain.PLAYER_INBOX_DOMAIN_SCENE_BATTLE_SETTLEMENT_VALUE)
+                for(var row:cursor.getRecentList())if(row.getRequestId()==battleId
+                        &&row.getMsgType()==com.game.proto.player_inbox.PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT_VALUE
+                        &&row.getOutcome()==com.game.proto.player_inbox.PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED_VALUE)return true;
+        return false;
     }
 
     // ================================================================== 解冻与工具

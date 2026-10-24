@@ -103,6 +103,9 @@ public final class InboxAdminStore {
      */
     public VoidPlayerInboxItemResponse voidItem(Deadline budget, VoidParams p) throws SQLException {
         VoidPlayerInboxItemResponse.Builder resp = VoidPlayerInboxItemResponse.newBuilder();
+        // 战斗奖励的永久来源没有通用VOID/强制VOID出口；故障保留原件待恢复。
+        if (p.domain() == PlayerInboxDomain.PLAYER_INBOX_DOMAIN_SCENE_BATTLE_SETTLEMENT)
+            return resp.setErrorMessage(tip(InboxTips.ITEM_STATE_CONFLICT)).build();
         if (registry.domain(p.domain()).isEmpty() || p.playerId() == 0 || p.seq() == 0 || p.reason() == null
                 || p.reason() == PlayerInboxVoidReason.PLAYER_INBOX_VOID_UNSPECIFIED || p.reason() == PlayerInboxVoidReason.UNRECOGNIZED
                 || p.mode() == null || p.mode() == PlayerInboxVoidMode.UNRECOGNIZED) {

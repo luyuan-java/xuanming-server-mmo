@@ -30,6 +30,9 @@ import org.springframework.boot.context.properties.bind.ConstructorBinding;
  * @param refreshReuseGrace     旧 refresh token 被轮换后仍可重放的宽限窗口（基线 TokenConfig.RefreshReuseGrace，缺省 30s）：
  *                              窗口内同一旧 token 再来，返回同一对新令牌；0 = 严格一次性；上限
  *                              {@link RedisLoginTokens#MAX_REFRESH_REUSE_GRACE}，越界拒绝启动
+ * @param refreshReuseRevoke    窗口外重放已轮换的旧 refresh 时吊销它所在的令牌家族（基线 TokenConfig.RefreshReuseRevoke，缺省 true）；
+ *                              false = 只观测（照常检测、记日志，不吊销）。refresh 有效期不得短于 access：家族记录跟着 refresh 走，
+ *                              家族结束后它签出的 access 会被提前判无效
  */
 @ConfigurationProperties("game.login")
 public record LoginProperties(
@@ -45,7 +48,8 @@ public record LoginProperties(
         Duration refreshTokenTtl,
         Integer maxDevicesPerAccount,
         Duration deviceSessionTtl,
-        Duration refreshReuseGrace) {
+        Duration refreshReuseGrace,
+        Boolean refreshReuseRevoke) {
 
     public static final String MODE_DEV = "dev";
     public static final String MODE_PROD = "prod";
@@ -75,6 +79,10 @@ public record LoginProperties(
         enterGameBudget = positiveOr(enterGameBudget, EnterGameHandler.DEFAULT_ENTER_BUDGET, "enter-game-budget");
         accessTokenTtl = positiveOr(accessTokenTtl, Duration.ofHours(2), "access-token-ttl");
         refreshTokenTtl = positiveOr(refreshTokenTtl, Duration.ofHours(720), "refresh-token-ttl");
+        if (refreshTokenTtl.compareTo(accessTokenTtl) < 0) {
+            throw new IllegalArgumentException("game.login.refresh-token-ttl 不得短于 access-token-ttl: "
+                    + refreshTokenTtl + " < " + accessTokenTtl);
+        }
         maxDevicesPerAccount = positiveOr(maxDevicesPerAccount, 3, "max-devices-per-account");
         deviceSessionTtl = positiveOr(deviceSessionTtl, Duration.ofMinutes(30), "device-session-ttl");
         if (refreshReuseGrace == null) {
@@ -83,15 +91,28 @@ public record LoginProperties(
             throw new IllegalArgumentException("game.login.refresh-reuse-grace 必须在 [0, "
                     + RedisLoginTokens.MAX_REFRESH_REUSE_GRACE + "] 内: " + refreshReuseGrace);
         }
+        if (refreshReuseRevoke == null) {
+            refreshReuseRevoke = Boolean.TRUE;
+        }
     }
 
-    /** 保留现有显式构造调用（重放宽限窗口取缺省）；生产 Spring 只绑定完整构造器。 */
+    /** 保留现有显式构造调用（宽限窗口与重用吊销取缺省）；生产 Spring 只绑定完整构造器。 */
     public LoginProperties(String mode, List<String> devAccountPrefixes, Integer maxPlayersPerAccount, Integer workerThreads,
                            Integer workerQueueCapacity, Duration sceneAssignTimeout, Duration ownerClaimWait,
                            Duration enterGameBudget, Duration accessTokenTtl, Duration refreshTokenTtl,
                            Integer maxDevicesPerAccount, Duration deviceSessionTtl) {
         this(mode, devAccountPrefixes, maxPlayersPerAccount, workerThreads, workerQueueCapacity, sceneAssignTimeout,
                 ownerClaimWait, enterGameBudget, accessTokenTtl, refreshTokenTtl, maxDevicesPerAccount, deviceSessionTtl, null);
+    }
+
+    /** 保留现有显式构造调用（重用吊销取缺省）。 */
+    public LoginProperties(String mode, List<String> devAccountPrefixes, Integer maxPlayersPerAccount, Integer workerThreads,
+                           Integer workerQueueCapacity, Duration sceneAssignTimeout, Duration ownerClaimWait,
+                           Duration enterGameBudget, Duration accessTokenTtl, Duration refreshTokenTtl,
+                           Integer maxDevicesPerAccount, Duration deviceSessionTtl, Duration refreshReuseGrace) {
+        this(mode, devAccountPrefixes, maxPlayersPerAccount, workerThreads, workerQueueCapacity, sceneAssignTimeout,
+                ownerClaimWait, enterGameBudget, accessTokenTtl, refreshTokenTtl, maxDevicesPerAccount, deviceSessionTtl,
+                refreshReuseGrace, null);
     }
 
     public boolean devMode() {

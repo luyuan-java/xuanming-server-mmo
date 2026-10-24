@@ -61,6 +61,7 @@ final class SpectateSteps {
     /** 16018 有两种文案：{@link #TEXT_NOT_FOUND} 与 {@link #TEXT_NOT_WATCHABLE}。 */
     static final int TIP_NOT_WATCHABLE = MatchErrorTip.match_error.kMatchBattleNotWatchable_VALUE;
     static final int TIP_OFFLINE = MatchErrorTip.match_error.kMatchSpectateOffline_VALUE;
+    static final int TIP_FULL = MatchErrorTip.match_error.kMatchSpectateFull_VALUE;
 
     // ---- parameters[0]（逐字节；半角逗号） ----
     static final String TEXT_QUEUED = "匹配中无法观战";
@@ -70,6 +71,7 @@ final class SpectateSteps {
     static final String TEXT_NOT_FOUND = "该战斗不存在或已结束";
     static final String TEXT_NOT_WATCHABLE = "该战斗当前无法观战";
     static final String TEXT_OFFLINE = "会话不在线,无法观战";
+    static final String TEXT_FULL = "观战人数已满";
 
     /** 164 的条数：{@code limit = 0} → 20，超过 50 → 50（spectate-spec §3.3）。 */
     static final int LIST_DEFAULT = 20;

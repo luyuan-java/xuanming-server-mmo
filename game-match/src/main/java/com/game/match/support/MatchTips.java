@@ -54,6 +54,8 @@ public final class MatchTips {
     public static final int BATTLE_NOT_WATCHABLE = MatchErrorTip.match_error.kMatchBattleNotWatchable_VALUE;
     /** 16019：在线目录里没有条目。 */
     public static final int SPECTATE_OFFLINE = MatchErrorTip.match_error.kMatchSpectateOffline_VALUE;
+    /** 观众席已满：battle 在 {@code addObserver} 里直接回这个码，163 原样映射给客户端「观战人数已满」（随机模式也不换场）。码由导表器发号。 */
+    public static final int SPECTATE_FULL = MatchErrorTip.match_error.kMatchSpectateFull_VALUE;
 
     // ---- 通用段 ----
 
@@ -63,7 +65,7 @@ public final class MatchTips {
     public static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
     /**
      * battle 在 {@code addObserver} 里回的「房间不存在」（1004）：163 判「这一场已收尾 / 还没建好」的<b>唯一</b>信号
-     * （spectate-spec §7.1 第 1 条）；battle 的其它拒绝码（1005 是参战者 / 参数、1008 观众已满、1003 签不出票）一律按「当前无法观战」。
+     * （spectate-spec §7.1 第 1 条）；观众已满另有专用码 {@link #SPECTATE_FULL}；battle 的其它拒绝码（1005 是参战者 / 参数、1003 签不出票）一律按「当前无法观战」。
      * 只用来<b>解读 battle 的应答</b>，game-match 自己不把它发给客户端。
      */
     public static final int BATTLE_ROOM_NOT_FOUND = CommonErrorTip.common_error.kEntityIsNull_VALUE;

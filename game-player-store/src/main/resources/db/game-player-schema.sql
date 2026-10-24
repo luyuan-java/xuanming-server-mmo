@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS player_trade_transfer (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
 
 -- 玩家在线状态（各玩法的数据），protobuf game.storage.PlayerState。与 player 行在同一事务里、同一 owner_epoch 围栏下写入：
--- 先带围栏更新 player 行（行锁串行同一玩家的写者），成功才 upsert 本表。没有这一行 = 从未写过 = 各玩法都取初始状态。
+-- 创建角色同P事务严格插入非NULL初始protobuf；读取缺行或NULL拒绝，合法空bytes仍为初始状态，禁止读时补行。
 CREATE TABLE IF NOT EXISTS player_state (
     player_id    BIGINT UNSIGNED NOT NULL,
     data         MEDIUMBLOB      NOT NULL COMMENT 'game.storage.PlayerState 序列化字节',
@@ -119,4 +119,20 @@ CREATE TABLE IF NOT EXISTS player_final_save (
     PRIMARY KEY (player_id, owner_epoch),
     KEY idx_final_save_due (status, next_attempt_at, player_id, owner_epoch),
     KEY idx_final_save_retired (status, created_at, player_id, owner_epoch)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+
+-- M19：旧OPEN维护退休的永久SQL原件，不是APPLIED证明，不按TTL清理。
+CREATE TABLE IF NOT EXISTS player_trade_admission_recovery (
+    recovery_id VARBINARY(36) NOT NULL,
+    listing_id BIGINT NOT NULL,
+    player_id BIGINT UNSIGNED NOT NULL,
+    old_epoch BIGINT UNSIGNED NOT NULL,
+    proof_mode VARCHAR(32) NOT NULL,
+    request_digest BINARY(32) NOT NULL,
+    plan_bytes MEDIUMBLOB NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    created_ms BIGINT NOT NULL,
+    PRIMARY KEY (recovery_id),
+    UNIQUE KEY uk_trade_admission_recovery_epoch (player_id, old_epoch)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;

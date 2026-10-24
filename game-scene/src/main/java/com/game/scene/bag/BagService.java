@@ -66,16 +66,22 @@ public final class BagService {
         public int tip() { return tip; }
         public java.util.List<com.game.player.store.state.BagItemState> instances() { return instances; }
         public void commit(AssetAudit.Reason reason, long correlationId) {
+            commit(reason,reason,correlationId);
+        }
+        public void commitBattle(long battleId) {
+            commit(AssetAudit.Reason.ITEM_DESTROY,AssetAudit.Reason.ITEM_AWARD,battleId);
+        }
+        private void commit(AssetAudit.Reason removedReason,AssetAudit.Reason gainedReason,long correlationId) {
             if (tip != 0 || committed || !writable(player)) throw new IllegalStateException("资产背包候选不能提交");
             player.bags().commitPrepared(candidate);
             committed = true;
             for (var item : removed) {
-                try { audit.itemDestroyed(player.playerId(), item.guid(), item.configId(), item.count(), reason, correlationId, ""); }
+                try { audit.itemDestroyed(player.playerId(), item.guid(), item.configId(), item.count(), removedReason, correlationId, ""); }
                 catch (RuntimeException failure) { transferAuditFailure(correlationId, failure); }
             }
             for (var item : gained) {
                 try {
-                    audit.itemGained(player.playerId(), item.guids().getFirst(), item.configId(), item.count(), reason, correlationId, "");
+                    audit.itemGained(player.playerId(), item.guids().getFirst(), item.configId(), item.count(), gainedReason, correlationId, "");
                     anomalies.itemGained(player, item.configId(), item.count());
                 } catch (RuntimeException failure) { transferAuditFailure(correlationId, failure); }
             }
@@ -139,6 +145,28 @@ public final class BagService {
 
     private PreparedTransfer failedTransfer(ScenePlayer player, int tip) {
         return new PreparedTransfer(player, null, java.util.List.of(), java.util.List.of(), java.util.List.of(), tip);
+    }
+
+    /** 消耗、主包掉落和临时格溢出一起规划；包满/封禁/铸号失败时原玩家零改动。 */
+    public PreparedTransfer prepareBattle(ScenePlayer player,Map<Integer,Long> consumed,Map<Integer,Long> gained) {
+        if(!writable(player))return failedTransfer(player,REFUSED);
+        var candidate=com.game.scene.player.PlayerBags.restore(player.bags().toState());candidate.normalize(tables);
+        var inventory=candidate.bag(BagType.INVENTORY);
+        var removed=new java.util.ArrayList<Bag.Drawn>();var written=new java.util.ArrayList<Bag.Written>();
+        for(var entry:consumed.entrySet())removed.addAll(inventory.drainClamped(entry.getKey(),entry.getValue()));
+        for(var entry:new TreeMap<>(gained).entrySet()) {
+            if(globalBlocks.blocksItem(entry.getKey()))return failedTransfer(player,REFUSED);
+            long before=inventory.total(entry.getKey());
+            var first=inventory.add(Map.of(entry.getKey(),entry.getValue()),tables,guids);written.addAll(first.written());
+            long credited=inventory.total(entry.getKey())-before;
+            long remaining=entry.getValue()-credited;
+            if(remaining<0)throw new IllegalStateException("战斗背包候选数量超过原件");
+            if(remaining>0){
+                var overflow=candidate.bag(BagType.TEMPORARY).add(Map.of(entry.getKey(),remaining),tables,guids);
+                if(!overflow.ok())return failedTransfer(player,overflow.tip());written.addAll(overflow.written());
+            }else if(!first.ok())return failedTransfer(player,first.tip());
+        }
+        return new PreparedTransfer(player,candidate,java.util.List.of(),removed,written,0);
     }
 
     private static void transferAuditFailure(long correlationId, RuntimeException failure) {

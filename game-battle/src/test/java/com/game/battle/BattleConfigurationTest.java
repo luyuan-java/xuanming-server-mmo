@@ -64,6 +64,17 @@ class BattleConfigurationTest {
 
     static final String SECRET = "battle-ticket-secret-for-context-tests-0123456789";
     static final String GATE_SECRET = "gate-token-secret-for-context-tests-0123456789";
+    static final String OUTCOME_SECRET = "outcome-secret-for-context-tests-0123456789";
+
+    /** 只替换远程边界；未声明的终局提交保持默认失败，不连接真实Match。 */
+    @SuppressWarnings("unchecked")
+    private static org.apache.dubbo.config.ReferenceConfig<com.game.api.MatchInternalService> fakeOutcomeClient() {
+        var reference=(org.apache.dubbo.config.ReferenceConfig<com.game.api.MatchInternalService>) mock(org.apache.dubbo.config.ReferenceConfig.class);
+        com.game.api.MatchInternalService service=request -> java.util.concurrent.CompletableFuture.failedFuture(
+                new UnsupportedOperationException("上下文夹具不连接真实Match"));
+        org.mockito.Mockito.when(reference.get()).thenReturn(service);
+        return reference;
+    }
 
     private final FakeBattleInfrastructure infra = new FakeBattleInfrastructure();
     private final FakeResultKafka kafka = new FakeResultKafka();
@@ -75,6 +86,7 @@ class BattleConfigurationTest {
             .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
             .withBean(BattleInfrastructure.class, () -> infra)
+            .withBean("battleOutcomeClient", org.apache.dubbo.config.ReferenceConfig.class, BattleConfigurationTest::fakeOutcomeClient)
             .withPropertyValues(
                     "game.advertise-host=127.0.0.1",
                     "game.table-dir=../config-data/tables",
@@ -82,6 +94,7 @@ class BattleConfigurationTest {
                     "game.battle.result.replication-factor=3",
                     "game.battle.global-match.physical-region=1",
                     "game.battle.global-match.probe-secret=fixture-only-global-probe-key-00000000000000",
+                    com.game.api.MatchInternalService.OUTCOME_SECRET_ENV + "=" + OUTCOME_SECRET,
                     "GAME_DUBBO_SECRET=dubbo-secret-for-context-tests",
                     "GAME_ADMIN_TOKEN=",
                     "game.run-mode=prod",
@@ -94,6 +107,7 @@ class BattleConfigurationTest {
             .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withBean(RedissonClient.class, () -> mock(RedissonClient.class))
             .withBean(BattleInfrastructure.class, () -> infra)
+            .withBean("battleOutcomeClient", org.apache.dubbo.config.ReferenceConfig.class, BattleConfigurationTest::fakeOutcomeClient)
             .withBean(KafkaBattleResultSink.Clients.class, () -> kafka)
             .withPropertyValues(
                     "game.advertise-host=127.0.0.1",
@@ -102,6 +116,7 @@ class BattleConfigurationTest {
                     "game.battle.result.replication-factor=3",
                     "game.battle.global-match.physical-region=1",
                     "game.battle.global-match.probe-secret=fixture-only-global-probe-key-00000000000000",
+                    com.game.api.MatchInternalService.OUTCOME_SECRET_ENV + "=" + OUTCOME_SECRET,
                     "GAME_DUBBO_SECRET=dubbo-secret-for-context-tests",
                     "GAME_ADMIN_TOKEN=",
                     BattleConfiguration.GATE_SECRET_ENV + "=" + GATE_SECRET);
@@ -116,6 +131,10 @@ class BattleConfigurationTest {
 
     @Test
     void 配置齐全_装配完整_节点按生命周期启动并开闸() {
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> new BattleConfiguration().battleOutcomeClient(""));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> new BattleConfiguration.SignedOutcomeSink(mock(BattleResultSink.class), mock(com.game.api.MatchInternalService.class), ""));
         prod(SECRET).run(ctx -> {
             assertThat(ctx).hasNotFailed()
                     .hasSingleBean(BattleNode.class)
@@ -280,7 +299,14 @@ class BattleConfigurationTest {
             assertThat(ctx.getBean(SceneBattleEvents.class)).isSameAs(transport.sceneEvents());
             assertThat(ctx.getBean(ActivityResultSink.class)).isSameAs(transport.activityResults());
             assertThat(ctx.getBean(BattleResultSink.class)).isInstanceOf(KafkaBattleResultSink.class);
-            assertThat(infra.roomDeps.results()).as("房间拿到的普通结果端口就是这个 bean").isSameAs(ctx.getBean(BattleResultSink.class));
+            assertThat(infra.roomDeps.results()).isInstanceOf(BattleConfiguration.SignedOutcomeSink.class);
+            BattleResultEvent forwarded = result(77002);
+            infra.roomDeps.results().publish(forwarded);
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(kafka.sent()).singleElement().satisfies(sent -> {
+                assertThat(sent.key()).isEqualTo("77002");
+                assertThat(sent.value()).containsExactly(forwarded.toByteArray());
+                assertThat(results(ctx.getBean(MeterRegistry.class), "plain", "sent")).isEqualTo(1);
+            }));
             assertThat(infra.roomDeps.settlements()).as("房间拿到的就是这个 bean").isSameAs(ctx.getBean(SettlementSink.class));
             assertThat(infra.roomDeps.activityResults()).isSameAs(transport.activityResults());
             assertThat(infra.roomDeps.sceneEvents()).isSameAs(transport.sceneEvents());
@@ -522,12 +548,17 @@ class BattleConfigurationTest {
 
     @Test
     void 测试自己提供结果发布端口时_缺省的Kafka实现让位_不碰Kafka() {
-        BattleResultSink own = new LoggingBattleResultSink(new com.game.battle.metrics.BattleMetrics(new SimpleMeterRegistry()));
+        SimpleMeterRegistry ownMeters = new SimpleMeterRegistry();
+        BattleResultSink own = org.mockito.Mockito.spy(new LoggingBattleResultSink(new com.game.battle.metrics.BattleMetrics(ownMeters)));
 
         prod(SECRET).withBean(BattleResultSink.class, () -> own).run(ctx -> {
             assertThat(ctx).hasNotFailed().doesNotHaveBean(KafkaBattleResultSink.class);
             assertThat(ctx.getBean(BattleResultSink.class)).isSameAs(own);
-            assertThat(infra.roomDeps.results()).isSameAs(own);
+            assertThat(infra.roomDeps.results()).isInstanceOf(BattleConfiguration.SignedOutcomeSink.class);
+            BattleResultEvent forwarded = result(77202);
+            infra.roomDeps.results().publish(forwarded);
+            org.mockito.Mockito.verify(own).publish(forwarded, BattleResultSink.Channel.PLAIN);
+            assertThat(results(ownMeters, "plain", "logged")).isEqualTo(1);
         });
 
         assertThat(kafka.adminsOpened()).isZero();

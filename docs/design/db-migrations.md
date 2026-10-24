@@ -480,3 +480,16 @@ Redisson 客户端创建时的日志带 `key_prefix=<ns>:`。
 正式game-player-schema.sql在既有player_final_save增加admission_proto MEDIUMBLOB NULL，由完整loadForScene(RoleAdmissionIdentity,expectedAccount,timeout)首次同P登记确定性PB；源实例、原account/revision/E与全部入场字段固定。不存在才插入；旧OPEN缺raw、原件不同或非OPEN均拒绝，不能UPDATE补当前身份。旧四参load仅存量测试兼容，不作为生产Inbox消费准入。PlayerSqlAuthorityAutoConfiguration只读核新列类型/容量/可空性，缺列拒启。已有数据库需停新入口、正常排空原scene、审核备份与独立权威水位，再由正式schema迁移流程加列；CREATE IF NOT EXISTS不能代替已有表扩列，也未在本批执行实际迁移。
 
 共享player_inbox_item原owner_account/revision列24/25经正规PB登记同步。已有PENDING无原owner或状态未知的开发/试验行必须人工审核终结/迁移，Inbox启动与运行均拒绝静默补权。终态2/3/4/5永久保留原unique receipt，终态清理不再调度，旧保留期配置不授权物删。Fetch/Ack整请求scene签名与同P完整SQL准入原件双重核验，空流/无流也不能跳过。Native/导入/恢复与合区消费同shard/pid完整终态集合；真正权威SQL全域PITR仍须外部不可回退审计上界与恢复门禁，不能用一并回退的admission/收据自证真相。
+
+
+### M19：旧OPEN维护退休的永久原件（2026-10-23，实现候选，未运行迁移）
+
+唯一DDL为`game-player-store/src/main/resources/db/game-player-schema.sql`新增`player_trade_admission_recovery`：恢复UUID主键、原角色/oldE唯一、完整v2 typed计划bytes、明确proof_mode、SHA-256、固定RETIRED_BY_SQL_SUCCESSOR与创建时间，全部NOT NULL。不存在TTL、覆盖更新或终态物删。PlayerSqlAuthorityAutoConfiguration按真实元数据核类型、宽度、主键与唯一索引，缺表或旧形状拒启动；CREATE IF NOT EXISTS不能代替已有表结构审计。
+
+升级须先排空并停止全部旧player writer/claim/维护工具，备份player/player_state/final_save/trade四类原件，按唯一DDL加表并核元数据，再启统一新版本。本功能不自动迁移、PITR补权或删除PENDING，不在SQL事务内调用Redis网络。工具默认计划、显式apply固定计划SHA及本地实例；route/P锁下重核更高E的真实SCENE_ACK和双SQL APPLIED，永久收据与精确旧OPEN删除在同一事务。仅提供高E、租约/7天到期、外部JSON或ABSENT均不得当恢复成功。
+
+提交UNKNOWN保留同一计划，重查永久SQL原件；回滚代码前必须保留此表及全部恢复收据，旧工具不得绕过新准入门禁。本次尚未执行DDL、真实库恢复或迁移，编译/H2与真TiDB、迟到旧写并发证据分别登记，不能相互替代。
+
+SQL_NO_ADMISSION维护分支另核当前E从未load（current final实际空）、非NULL真实player_state与全部待投守卫；计划固定剩余旧准入原件集/数量及最后一条标志。较早退休不释放当前E，最后一条复用sealUnadmitted在同事务形成真实无准入封闭，不能用它冒已准入Scene的ACK或APPLIED。该分支与原SCENE_ACK分支都需真实TiDB与并发回归，当前尚未运行。
+
+SQL行证明的编码域现为`player-trade-recovery-sql/v2`：列名、JDBC类型、NULL与长度/行边界固定；binary保原bytes，整数按BigDecimal精确读取，有限double保IEEE位，未知类型拒绝。仅行摘要格式变化，`recoveryBytes`和永久恢复收据协议不变。升级前已生成但未提交的旧计划必须重新plan，实际SQL摘要不等时拒绝apply；已提交的原计划仍先核永久原件/原plan_bytes后只读幂等返回，不重算当前身份或丢弃历史收据。原Q47 H2暴露的DOUBLE转BINARY错误保留；修后H2与真TiDB证据仍须分别实际执行。

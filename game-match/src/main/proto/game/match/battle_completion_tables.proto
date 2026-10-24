@@ -17,9 +17,24 @@ message BattleCompletionRow {
   uint32 source_partition = 6;
   uint64 source_offset = 7;
   uint32 player_count = 8;
+  // 0尚无终局、1COMPLETE、2ABORT；只与原formation同一事务竞争，永久保留。
+  uint32 terminal_decision = 9;
+  string placement_operation_id = 10;
+  string target_instance_id = 11;
+  uint32 outcome_protocol_version = 12;
+  uint32 preflight_supported_version = 13;
+  string preflight_instance_id = 14;
+  uint32 adopted_outcome_protocol_version = 15;
+  bool result_published = 16;
+  uint64 retry_ms = 17;
+  uint64 issued_at_ms = 18;
+  // 0仅前置围栏、1真实Kafka来源、2Battle Commit RPC；RPC不能伪造Kafka位点。
+  uint32 source_kind = 19;
+  // 未见Create/PRESENT回执与真实同UUID adopted=0必须分开；观察一旦写入不能改口。
+  bool adopted_outcome_observed = 20;
 }
 
-// 仅归档，不注册补发、销账或自动应用任务；旧 R07 仍是唯一应用来源。
+// 同COMPLETE原子持久的个人原件与Inbox待投状态；旧无owner行仍只作历史归档。
 message BattlePlayerCompletionRow {
   option (proto2mysql.table_name) = "match_battle_player_completion";
   option (proto2mysql.primary_key) = "battle_id,player_id";
@@ -27,4 +42,10 @@ message BattlePlayerCompletionRow {
   uint64 player_id = 2;
   bytes original = 3;
   bytes original_digest = 4;
+  string owner_account = 5;
+  uint64 owner_revision = 6;
+  uint64 issued_at_ms = 7;
+  uint64 inbox_seq = 8;
+  bool applied = 9;
+  uint64 retry_ms = 10;
 }

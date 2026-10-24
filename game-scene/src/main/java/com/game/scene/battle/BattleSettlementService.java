@@ -106,6 +106,48 @@ public final class BattleSettlementService {
         }
     }
 
+    /** 新Inbox路径不使用会裁剪的BattleLedger；效果与永久Inbox水位由同一逻辑任务/SQL存盘提交。 */
+    public Result applyInbox(SceneWorld world,ScenePlayer player,BattleSettlementData settlement) {
+        // 旧在线快照必须先完成：本段到Inbox记水位/requestPersist均在同一逻辑调用栈内，
+        // Pet/Mission/Bag/流水只同步改内存或提交不可变流水，不会启动玩家存盘。
+        // 因此异常隔离时没有可能迟到覆盖同E新实体的旧PlayerSave。
+        if(settlement.getPlayerId()!=player.playerId()||settlement.getBattleId()==0||world==null||!world.canApplyBattleInbox(player,player.ownerEpoch())
+                ||player.inBattle()&&player.battle().freeze().battleId()!=settlement.getBattleId())
+            return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_FROZEN);
+        if(player.battle().applying())throw new IllegalStateException("战斗Inbox结算重入");
+        player.battle().setApplying(true);
+        try{
+            long now=currency.nowSeconds(),gold=settlement.getGoldGain();
+            if(gold<0||gold>0&&currency.checkAdd(player,Wallet.GOLD,gold,now)!=0)
+                return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_CURRENCY);
+            // 正式面板只在pool和table均存在时给出正maxHealth；缺组件/来源pet不再owned不能静默跳过。
+            var known=pets.buildList(player).getPetsList();
+            java.util.Set<Long> seen=new java.util.HashSet<>();
+            for(var entry:settlement.getPetsList())if(!seen.add(entry.getPetId())||player.pets().find(entry.getPetId())==null
+                    ||known.stream().noneMatch(p->p.getPetId()==entry.getPetId()&&p.getDerived().getMaxHealth()>0))
+                return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+            Map<Integer,Long> consumed=new TreeMap<>(Integer::compareUnsigned),gained=new TreeMap<>(Integer::compareUnsigned);
+            for(var item:settlement.getItemsConsumedList()){
+                if(item.getItemTableId()==0||item.getCount()==0)continue;
+                if(!tables.battleUsable(item.getItemTableId()))return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+                consumed.merge(item.getItemTableId(),clampCount(item.getCount()),(a,b)->Math.min(a+b,UINT32_MAX));
+            }
+            for(var item:settlement.getItemsGainedList())if(item.getItemTableId()!=0&&item.getCount()!=0)
+                gained.merge(item.getItemTableId(),clampCount(item.getCount()),(a,b)->Math.min(a+b,UINT32_MAX));
+            var bag=bags.prepareBattle(player,consumed,gained);
+            if(bag.tip()!=0)return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+            // 正常业务拒绝已全部预检。普通异常交给组合根不存盘隔离，绝不逐步catch后登记APPLIED。
+            if(gold>0&&!currency.add(player,Wallet.GOLD,gold,AssetAudit.Reason.BATTLE_REWARD,settlement.getBattleId(),now).ok())
+                throw new IllegalStateException("战斗金币预检与同任务提交不一致");
+            bag.commitBattle(settlement.getBattleId());applyVitals(player,settlement);
+            pets.applyBattleSettlement(player,settlement.getPetsList());
+            for(var defeat:settlement.getDefeatedMonstersList())missions.onMonsterKilled(player,defeat.getMonsterConfigId(),defeat.getCount());
+            // 自动领奖失败的claimable仍在同份玩家状态，不删资格；经验产品边界仍不冒已到账。
+            if(settlement.getExpGain()!=0)metrics.expIgnored();
+            return Result.APPLIED;
+        }finally{player.battle().setApplying(false);}
+    }
+
     private Result applyOnce(SceneWorld world, ScenePlayer player, BattleSettlementData settlement) {
         long battleId = settlement.getBattleId();
         long playerId = player.playerId();

@@ -34,6 +34,15 @@ final class RoomConstants {
     /** 每房观众上限（基线 {@code kMaxObserversPerRoom}，{@code room.cpp:64}）：约束单房间出站扇出，防观战成为放大器。 */
     static final int MAX_OBSERVERS_PER_ROOM = 20;
 
+    /**
+     * 观众登记后建直连的宽限：到期仍没有直连就回收座位，掉线观众不能长期占满 {@link #MAX_OBSERVERS_PER_ROOM}。
+     * <b>联动</b>：与 C++ 版同值；AddObserver 幂等重试与补签票都不延长它。
+     */
+    static final long OBSERVER_ATTACH_GRACE_MS = 30_000;
+
+    /** 观众直连断开后的重连宽限：宽限内重连照常观战，到期仍未重连就回收座位（与 C++ 版同值）。 */
+    static final long OBSERVER_RECONNECT_GRACE_MS = 30_000;
+
     private RoomConstants() {
     }
 }

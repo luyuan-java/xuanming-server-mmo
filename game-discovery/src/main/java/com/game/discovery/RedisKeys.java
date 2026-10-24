@@ -420,11 +420,12 @@ public final class RedisKeys {
     }
 
     /**
-     * 登录 access token：{@code game:login:access:{token}}，值为令牌数据 JSON（账号、认证方式、设备号、签发秒），TTL = access 有效期。
-     * 令牌是 43 字符的 base64url（不含 {@code :}）；不分 zone（同一账号在哪个区都能用）。
+     * 登录 access token：{@code game:login:access:{<family>}:<token>}，值为令牌数据 JSON（账号、认证方式、设备号、签发秒、家族号），
+     * TTL = access 有效期。令牌是 43 字符的 base64url（不含 {@code :}），前 16 字节即家族号；家族号（22 字符 base64url，不含花括号）
+     * 作 hash tag，一个令牌家族的全部键同在一个 Cluster slot（基线 {@code access_token:{<fid>}:<token>}）。不分 zone。
      */
-    public String loginAccessToken(String token) {
-        return prefix + "login:access:" + token;
+    public String loginAccessToken(String familyId, String token) {
+        return prefix + "login:access:{" + familyId + "}:" + token;
     }
 
     /** 口令失败配额 v1：域为 known / unknown，身份仅传原值 UTF-8 的完整 SHA-256，单键单槽。 */
@@ -432,29 +433,35 @@ public final class RedisKeys {
         return prefix + "login:password-failure-v1:{" + domain + ":" + digest + "}";
     }
 
-    /** 登录 refresh token：{@code game:login:refresh:{token}}，值同 access，TTL = refresh 有效期；一次性（轮换时原子作废）。 */
-    public String loginRefreshToken(String token) {
-        return prefix + "login:refresh:" + token;
-    }
-
     /**
-     * refresh 轮换记录：{@code game:login:refresh-rotated:{旧 token}}，值为那次轮换换出的一对（JSON），TTL = 重放宽限窗口
-     * （≤ 60s）。窗口内同一旧 token 再来、且新 refresh 仍未用过时据此返回同一对（基线 {@code refresh_rotated:{token}}）。
+     * 登录 refresh token：{@code game:login:refresh:{<family>}:<token>}，值同 access，TTL = refresh 有效期；一次性（轮换时原子作废）。
+     * 与同家族的其余键同 slot（见 {@link #loginAccessToken}）。
      */
-    public String loginRefreshRotated(String token) {
-        return prefix + "login:refresh-rotated:" + token;
+    public String loginRefreshToken(String familyId, String token) {
+        return prefix + "login:refresh:{" + familyId + "}:" + token;
     }
 
     /**
-     * refresh 令牌家族记录：{@code game:login:refresh-family:{family_id}}，HASH {account, head, prev, created_at, rotated_at}，
+     * refresh 轮换记录：{@code game:login:refresh-rotated:{<family>}:<旧 token>}，值为那次轮换换出的一对（JSON），TTL = 重放宽限窗口
+     * （≤ 60s）。窗口内同一旧 token 再来、且新 refresh 仍未用过、家族仍在时据此返回同一对（基线 {@code refresh_rotated:{<fid>}:<token>}）。
+     */
+    public String loginRefreshRotated(String familyId, String token) {
+        return prefix + "login:refresh-rotated:{" + familyId + "}:" + token;
+    }
+
+    /**
+     * refresh 令牌家族记录：{@code game:login:refresh-family:{<family>}}，HASH {account, head, prev, created_at, rotated_at}，
      * TTL = 家族头的 refresh 有效期（与头同一步写入、同一刻过期）。记录不在 = 家族已吊销或已结束：该家族的 refresh 不能轮换、
-     * access 不能登录（基线 {@code refresh_family:{family_id}}）。家族号是 22 字符的 base64url（不含 {@code :}）。
+     * access 不能登录（基线 {@code refresh_family:{<fid>}}）。
      */
     public String loginRefreshFamily(String familyId) {
-        return prefix + "login:refresh-family:" + familyId;
+        return prefix + "login:refresh-family:{" + familyId + "}";
     }
 
-    /** 账号的活跃 refresh token 集合：{@code game:login:account-refresh:{account}}，ZSET，成员是 token、分数是它的过期 Unix 秒。 */
+    /**
+     * 账号的令牌家族索引：{@code game:login:account-refresh:<account>}，ZSET，成员是家族号、分数是家族的过期 Unix 秒。
+     * 只做单键操作（不进任何多键脚本），用于每账号家族数封顶与吊销全部；家族本身的有效性只看家族记录。
+     */
     public String loginAccountRefresh(String account) {
         return prefix + "login:account-refresh:" + account;
     }

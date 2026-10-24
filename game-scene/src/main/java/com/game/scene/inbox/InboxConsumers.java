@@ -96,6 +96,30 @@ public final class InboxConsumers {
         return new InboxConsumers(table);
     }
 
+    /** 保留GM域并加入Battle域；坏来源或暂态失败只能DEFER，不能消费成REJECTED。 */
+    public static InboxConsumers withBattle(CurrencyService currency,com.game.scene.battle.PlayerBattleService battle) {
+        var table=new EnumMap<PlayerInboxMessageType,Executor>(PlayerInboxMessageType.class);
+        table.putAll(gmSanction(currency).executors);
+        table.put(PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT,(player,payload)->{
+            try{
+                var settlement=com.game.proto.BattleSettlementData.parseFrom(payload);
+                if(unknown(settlement))return new Deferred(PAYLOAD_INVALID);
+                var result=battle.applyInbox(player,settlement);
+                return result.outcome()==com.game.scene.battle.BattleSettlementService.Outcome.APPLIED?new Applied():new Deferred(PAYLOAD_INVALID);
+            }catch(InvalidProtocolBufferException invalid){return new Deferred(PAYLOAD_INVALID);}
+        });
+        return new InboxConsumers(table);
+    }
+    private static boolean unknown(com.google.protobuf.Message message) {
+        if(!message.getUnknownFields().asMap().isEmpty())return true;
+        for(var entry:message.getAllFields().entrySet()) {
+            if(entry.getKey().getJavaType()!=com.google.protobuf.Descriptors.FieldDescriptor.JavaType.MESSAGE)continue;
+            if(entry.getKey().isRepeated()){
+                for(Object child:(List<?>)entry.getValue())if(unknown((com.google.protobuf.Message)child))return true;
+            }else if(unknown((com.google.protobuf.Message)entry.getValue()))return true;
+        }return false;
+    }
+
     /** 任意执行器表（单测用）。 */
     public static InboxConsumers of(Map<PlayerInboxMessageType, Executor> executors) {
         return new InboxConsumers(executors);

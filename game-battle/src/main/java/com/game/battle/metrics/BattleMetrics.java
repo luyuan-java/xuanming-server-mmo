@@ -40,7 +40,7 @@ import java.util.function.Supplier;
  * <p><b>谁计什么</b>（每个事件恰好由一处计）：
  * <ul>
  *   <li>房间（{@code com.game.battle.room} / {@code push} / {@code ticket}）：{@link #roomCreate}（除 NOT_ALLOCATABLE）、{@link #roomEnd}、
- *       {@link #fingerprintMismatch}、{@link #round}、{@link #roundResolve}、{@link #push}、{@link #ticket}；大厅回落的结局由
+ *       {@link #fingerprintMismatch}、{@link #round}、{@link #roundResolve}、{@link #push}、{@link #ticket}、{@link #observerReclaimed}；大厅回落的结局由
  *       {@code PresenceLobbyAnnouncer} 计 {@link #lobbyPushOutcome}；</li>
  *   <li>直连面（{@code com.game.battle.edge}）：{@link #handshake}、{@link #clientRequest}、{@link #invalidFrame}、{@link #disconnect}
  *       （含房间经 {@code DirectLink.closeGracefully / closeNow} 传入的原因，由直连面在真正关闭时计一次）；</li>
@@ -60,6 +60,7 @@ public final class BattleMetrics {
     static final String FINGERPRINT_MISMATCH = "game.battle.fingerprint.mismatch";
     static final String ROUNDS = "game.battle.rounds";
     static final String ROUND_RESOLVE = "game.battle.round.resolve";
+    static final String OBSERVER_RECLAIMED = "game.battle.observer.reclaimed";
     static final String DIRECT_CONNECTIONS = "game.battle.direct.connections";
     static final String HANDSHAKES = "game.battle.handshakes";
     static final String CLIENT_REQUESTS = "game.battle.client.requests";
@@ -132,6 +133,14 @@ public final class BattleMetrics {
         ALL_READY,
         /** 162 开自动造成「未就绪 → 就绪」翻转。 */
         AUTO_FLIP
+    }
+
+    /** 观众席回收的起因（{@code game_battle_observer_reclaimed_total{reason}}），每名被回收的观众恰好计一次。 */
+    public enum ObserverReclaim {
+        /** 登记后宽限内一直没建起直连。 */
+        ATTACH_TIMEOUT,
+        /** 直连断开后宽限内没有重连。 */
+        RECONNECT_TIMEOUT
     }
 
     /** 握手结局（{@code game_battle_handshakes_total{result}}），每个握手包恰好计一次；取值即基线采样日志的 reason。 */
@@ -344,6 +353,7 @@ public final class BattleMetrics {
     private final Map<FingerprintMode, Counter> fingerprintMismatches;
     private final Map<RoundTrigger, Counter> rounds;
     private final Timer roundResolve;
+    private final Map<ObserverReclaim, Counter> observerReclaims;
     private final Map<HandshakeResult, Counter> handshakes;
     private final Map<String, Map<RequestResult, Counter>> clientRequests;
     private final Map<ClientFrameException.Reason, Counter> invalidFrames;
@@ -378,6 +388,8 @@ public final class BattleMetrics {
         this.rounds = counters(RoundTrigger.class, ROUNDS, "回合结算次数（按触发方式）", "trigger", BattleMetrics::lower);
         this.roundResolve = Timer.builder(ROUND_RESOLVE).description("逻辑线程上一次「结算 + 广播」的耗时")
                 .serviceLevelObjectives(ROUND_BUCKETS).register(registry);
+        this.observerReclaims = counters(ObserverReclaim.class, OBSERVER_RECLAIMED, "观众席宽限到期回收（登记后未建直连 / 断线未重连）", "reason",
+                BattleMetrics::lower);
 
         Gauge.builder(DIRECT_CONNECTIONS, () -> directConnectionCount.getAsInt()).description("直连数（含未握手）").register(registry);
         this.handshakes = counters(HandshakeResult.class, HANDSHAKES, "握手结局（每个握手包恰好计一次）", "result", BattleMetrics::lower);
@@ -501,6 +513,11 @@ public final class BattleMetrics {
     /** 一次「结算 + 广播」的耗时（纳秒，单调时钟）。 */
     public void roundResolve(long nanos) {
         roundResolve.record(Math.max(0, nanos), TimeUnit.NANOSECONDS);
+    }
+
+    /** 一名观众的座位因宽限到期被回收。 */
+    public void observerReclaimed(ObserverReclaim reason) {
+        observerReclaims.get(reason).increment();
     }
 
     // ---------------------------------------------------------------- 直连面

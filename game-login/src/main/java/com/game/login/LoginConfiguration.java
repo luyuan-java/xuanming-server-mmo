@@ -110,7 +110,7 @@ public class LoginConfiguration {
     @Bean
     public LoginTokens loginTokens(RedissonClient redis, RedisKeys redisKeys, LoginProperties props) {
         return new RedisLoginTokens(redis, redisKeys, Clock.systemUTC(), props.accessTokenTtl(), props.refreshTokenTtl(),
-                props.refreshReuseGrace(), new SecureRandom());
+                props.refreshReuseGrace(), props.refreshReuseRevoke(), new SecureRandom());
     }
 
     /** 每账号设备数上限（Redis）。 */

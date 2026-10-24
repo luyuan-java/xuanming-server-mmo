@@ -73,7 +73,25 @@ public final class InboxRegistry {
             PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_UNBLOCK_CURRENCY_GAIN,
             new PayloadRule(GmCurrencyGainPayload.getDefaultInstance(), InboxRegistry::validateGain),
             PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_ATTACH_CURRENCY_DEBT,
-            new PayloadRule(GmCurrencyDebtPayload.getDefaultInstance(), InboxRegistry::validateDebt));
+            new PayloadRule(GmCurrencyDebtPayload.getDefaultInstance(), InboxRegistry::validateDebt),
+            PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT,
+            new PayloadRule(com.game.proto.BattleSettlementData.getDefaultInstance(), message -> {
+                var value = (com.game.proto.BattleSettlementData) message;
+                return hasUnknownField(message) || value.getPlayerId() == 0 || value.getBattleId() == 0
+                        || value.getOutcomeValue() < 1 || value.getOutcomeValue() > 3 ? "战斗结算身份或终局无效" : null;
+            }));
+
+    /** 新资产语义可能藏在宠物/物品等子消息里；旧执行器不得忽略后仍登记APPLIED。 */
+    private static boolean hasUnknownField(Message message) {
+        if (!message.getUnknownFields().asMap().isEmpty()) return true;
+        for (var entry : message.getAllFields().entrySet()) {
+            if (entry.getKey().getJavaType() != com.google.protobuf.Descriptors.FieldDescriptor.JavaType.MESSAGE) continue;
+            if (entry.getKey().isRepeated()) {
+                for (Object child : (List<?>) entry.getValue()) if (hasUnknownField((Message) child)) return true;
+            } else if (hasUnknownField((Message) entry.getValue())) return true;
+        }
+        return false;
+    }
 
     /**
      * v1 不许进入箱白名单的类型及原因（用户 2026-10-16 拍板，mmorpg 交接 §6 M2 / M3；PARITY 第 ⑪ 条）。挂欠款会把同币种的新单合并进旧欠款、

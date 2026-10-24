@@ -43,6 +43,8 @@ final class BattleRoom {
     final Map<Long, String> observerNames = new HashMap<>();
     /** 原观战操作号；新操作不得覆盖仍在房内的旧操作。 */
     final Map<Long,String> observerOperations=new HashMap<>();
+    /** observer_id → 观众席宽限计时器（登记后待建直连 / 断线待重连）；建起直连时撤销，摘除时只经 {@code cancelObserverOperation} 一处撤销。 */
+    final Map<Long, Cancellable> observerGrace = new HashMap<>();
     /** player_id → 已验证直连，参战与观战共用一个槽（单槽互斥）。 */
     final NavigableMap<Long, DirectLink> directByPlayer = new TreeMap<>(Long::compareUnsigned);
 
@@ -59,6 +61,8 @@ final class BattleRoom {
     /** 从表里移除之前置位：迟到的计时器回调据此识别出房间已死（§11 N14，配合对象身份比较）。 */
     boolean closed;
     boolean requiresResultConfirmation;
+    /** 原建房完整正文，包含不可替换的operation/instance和实际采用的终局协议。 */
+    com.game.proto.CreateBattleRequest originalCreate=com.game.proto.CreateBattleRequest.getDefaultInstance();
     PendingCompletion pendingCompletion;
 
     /** 原结果不可改；仅逻辑线程更新尝试状态，未知不构成终局。 */

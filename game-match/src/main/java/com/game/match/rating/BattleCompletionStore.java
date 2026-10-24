@@ -98,12 +98,87 @@ public final class BattleCompletionStore {
         }
     }
 
+    /** 游标只用于公平扫描，不授予写权限；每次确认仍锁定原件。失败成员不会挡住后续成员。 */
+    public java.util.List<BattleCompletionRow> pendingResults(long after) {
+        try(Connection c=source.getConnection()) {
+            return db.findAll(c,BattleCompletionRow.class,
+                    "terminal_decision=1 AND result_published=0 AND battle_id>? ORDER BY battle_id LIMIT 16",PbMysql.uint64(after));
+        } catch(SQLException failure) { throw new IllegalStateException("全局结果待投来源读取失败",failure); }
+    }
+    public java.util.List<BattlePlayerCompletionRow> pendingPlayers(long battle,long player) {
+        try(Connection c=source.getConnection()) {
+            return db.findAll(c,BattlePlayerCompletionRow.class,
+                    "applied=0 AND owner_revision>0 AND (battle_id>? OR (battle_id=? AND player_id>?)) ORDER BY battle_id,player_id LIMIT 16",
+                    PbMysql.uint64(battle),PbMysql.uint64(battle),PbMysql.uint64(player));
+        } catch(SQLException failure) { throw new IllegalStateException("个人永久来源待投读取失败",failure); }
+    }
+    public void resultPublished(BattleCompletionRow expected) {
+        try(Connection c=source.getConnection()) {
+            c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);c.setAutoCommit(false);
+            try {
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,3,true);
+                var row=db.findOneByPkForUpdate(c,BattleCompletionRow.newBuilder().setBattleId(expected.getBattleId()).build()).orElseThrow();
+                if(row.getTerminalDecision()!=1||!row.getOriginal().equals(expected.getOriginal())
+                        ||!row.getOriginalDigest().equals(expected.getOriginalDigest()))throw new SQLException("全局结果确认原件不同");
+                db.updateByPk(c,row.toBuilder().setResultPublished(true).build());c.commit();
+            } catch(Exception failure) { try{c.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure; }
+        } catch(SQLException failure) { throw new IllegalStateException("全局结果已投回执提交未知，须原字节重放",failure); }
+    }
+    public void inboxReceipt(BattlePlayerCompletionRow expected,long seq,boolean applied) {
+        if(seq==0||expected.getInboxSeq()!=0&&expected.getInboxSeq()!=seq)throw new SecurityException("个人永久seq被替换");
+        try(Connection c=source.getConnection()) {
+            c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);c.setAutoCommit(false);
+            try {
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,3,true);
+                com.game.common.player.PlayerSessionAuthority.lock(c,expected.getPlayerId(),expected.getOwnerAccount(),expected.getOwnerRevision(),3);
+                var key=BattlePlayerCompletionRow.newBuilder().setBattleId(expected.getBattleId()).setPlayerId(expected.getPlayerId()).build();
+                var row=db.findOneByPkForUpdate(c,key).orElseThrow();
+                if(!row.getOriginal().equals(expected.getOriginal())||!row.getOriginalDigest().equals(expected.getOriginalDigest())
+                        ||!row.getOwnerAccount().equals(expected.getOwnerAccount())||row.getOwnerRevision()!=expected.getOwnerRevision()
+                        ||row.getIssuedAtMs()!=expected.getIssuedAtMs()||row.getInboxSeq()!=0&&row.getInboxSeq()!=seq)
+                    throw new SQLException("个人待投原件或永久seq不同");
+                db.updateByPk(c,row.toBuilder().setInboxSeq(seq).setApplied(row.getApplied()||applied).build());c.commit();
+            } catch(Exception failure) { try{c.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure; }
+        } catch(SQLException failure) { throw new IllegalStateException("个人Inbox回执提交未知，保留来源重读",failure); }
+    }
+
     private static Map<Long,BattleSettlementData> validate(BattleResultConsumer.Received received) {
-        BattleResultEvent event=received.event();
-        if(received.original().isEmpty()||received.original().size()>MAX_SOURCE_BYTES)
+        return validateOriginal(received.event(), received.original());
+    }
+
+    /** 只有新执行来源递归拒绝未知资产字段；旧Kafka归档仍逐字保存原件。 */
+    public static Map<Long,BattleSettlementData> validateTerminal(ByteString original) {
+        final BattleResultEvent event;
+        try { event=BattleResultEvent.parseFrom(original); }
+        catch(InvalidProtocolBufferException bad) { throw new IllegalArgumentException("终局原件损坏",bad); }
+        if(event.getSettlementFormatVersion()!=1 || unknown(event))throw new IllegalArgumentException("终局版本或嵌套资产语义未知");
+        var values=validateOriginal(event,original);
+        for(var value:values.values())if(value.getSerializedSize()>16*1024)throw new IllegalArgumentException("个人终局超过Inbox固定16KiB上限");
+        java.util.Set<Long> fled=new java.util.TreeSet<>(Long::compareUnsigned),dead=new java.util.TreeSet<>(Long::compareUnsigned);
+        for(var value:values.values()) {
+            if(value.getFled())fled.add(value.getPlayerId());
+            if(value.getIsDead())dead.add(value.getPlayerId());
+        }
+        if(!event.getFledPlayerIdsList().equals(new java.util.ArrayList<>(fled))
+                ||!event.getDeadPlayerIdsList().equals(new java.util.ArrayList<>(dead)))
+            throw new IllegalArgumentException("全局逃跑/阵亡名单与逐人原件不同或非唯一升序");
+        return values;
+    }
+    private static boolean unknown(com.google.protobuf.Message message) {
+        if(!message.getUnknownFields().asMap().isEmpty())return true;
+        for(var field:message.getAllFields().entrySet()) {
+            if(field.getKey().getJavaType()!=com.google.protobuf.Descriptors.FieldDescriptor.JavaType.MESSAGE)continue;
+            if(field.getKey().isRepeated()) {
+                for(Object value:(java.util.List<?>)field.getValue())if(unknown((com.google.protobuf.Message)value))return true;
+            } else if(unknown((com.google.protobuf.Message)field.getValue()))return true;
+        }
+        return false;
+    }
+    private static Map<Long,BattleSettlementData> validateOriginal(BattleResultEvent event,ByteString original) {
+        if(original.isEmpty()||original.size()>MAX_SOURCE_BYTES)
             throw new IllegalArgumentException("完成来源原件为空或过大");
         try {
-            if(!BattleResultEvent.parseFrom(received.original()).equals(event))throw new IllegalArgumentException("完成来源与解析事件不一致");
+            if(!BattleResultEvent.parseFrom(original).equals(event))throw new IllegalArgumentException("完成来源与解析事件不一致");
         } catch(InvalidProtocolBufferException malformed) { throw new IllegalArgumentException("完成来源原件损坏",malformed); }
         int version=event.getSettlementFormatVersion();
         if(version==0) {
@@ -132,7 +207,7 @@ public final class BattleCompletionStore {
         return out;
     }
 
-    private static ByteString digest(ByteString original) {
+    public static ByteString digest(ByteString original) {
         try { return ByteString.copyFrom(MessageDigest.getInstance("SHA-256").digest(original.toByteArray())); }
         catch(NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }

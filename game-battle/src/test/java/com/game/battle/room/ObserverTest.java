@@ -52,7 +52,7 @@ class ObserverTest {
     }
 
     @Test
-    void 新观众签票登记推177_满20回1008且排在幂等之后() throws Exception {
+    void 新观众签票登记推177_满20回观战人数已满码且排在幂等之后() throws Exception {
         h.create(h.pvp(9002, A, B));
         h.clearLog();
 
@@ -66,7 +66,8 @@ class ObserverTest {
             assertThat(add(9002, observer).hasErrorMessage()).isFalse();
         }
         assertThat(h.service().room(9002).routingByObserver).hasSize(20);
-        assertThat(add(9002, 7000).getErrorMessage().getId()).isEqualTo(1008);
+        assertThat(add(9002, 7000).getErrorMessage().getId()).as("满员专用码（match 段，导表发号），不再借通用限流码 1008")
+                .isEqualTo(BattleRoomServiceImpl.SPECTATE_FULL).isNotEqualTo(1008);
         assertThat(add(9002, C).hasErrorMessage()).as("已登记的观众幂等重试不受上限影响").isFalse();
         assertThat(h.counter("game.battle.tickets", "path", "observer", "result", "ok")).isEqualTo(21);
     }

@@ -9,6 +9,7 @@ import com.game.proto.match.ChallengePlayerResponse;
 import com.game.proto.match.JoinQueueResponse;
 import com.game.proto.match.RespondChallengeResponse;
 import com.game.proto.match.WatchBattleResponse;
+import com.game.table.MatchErrorTip;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.EnumSet;
@@ -54,6 +55,8 @@ class MatchTipsTest {
         EXPECTED.put(MatchTip.WATCH_NOT_FOUND, new Object[] {16018, "该战斗不存在或已结束"});
         EXPECTED.put(MatchTip.WATCH_NOT_WATCHABLE, new Object[] {16018, "该战斗当前无法观战"});
         EXPECTED.put(MatchTip.WATCH_OFFLINE, new Object[] {16019, "会话不在线,无法观战"});
+        // 满员码由导表器在 match_error 段发号，这里不手抄数字（数值落点由下面「码取自导表生成的枚举」一条守住）
+        EXPECTED.put(MatchTip.WATCH_FULL, new Object[] {MatchErrorTip.match_error.kMatchSpectateFull_VALUE, "观战人数已满"});
     }
 
     @Test
@@ -144,6 +147,13 @@ class MatchTipsTest {
         assertThat(MatchTips.BATTLE_NOT_WATCHABLE).isEqualTo(16018);
         assertThat(MatchTips.SPECTATE_OFFLINE).isEqualTo(16019);
         assertThat(MatchTips.BATTLE_ROOM_NOT_FOUND).as("battle 回的「房间不存在」：只用来解读 addObserver 的应答").isEqualTo(1004);
+        assertThat(MatchTips.SPECTATE_FULL).as("满员码取自导表生成的枚举").isEqualTo(MatchErrorTip.match_error.kMatchSpectateFull_VALUE);
+        assertThat(MatchTips.SPECTATE_FULL).as("满员码落在 match_error 段（base=16000 width=1000）").isBetween(MatchTips.IN_BATTLE, MatchTips.IN_BATTLE + 999)
+                .as("不与已有的匹配码撞号").isNotIn(MatchTips.IN_BATTLE, MatchTips.ALREADY_QUEUED, MatchTips.MODE_NOT_OPEN, MatchTips.TEAM_SIZE_NOT_CONFIGURED,
+                        MatchTips.INTERNAL, MatchTips.CHALLENGE_SELF, MatchTips.CHALLENGE_TARGET_OFFLINE, MatchTips.CHALLENGE_TARGET_BUSY,
+                        MatchTips.CHALLENGE_SELF_BUSY, MatchTips.CHALLENGE_PENDING, MatchTips.CHALLENGE_EXPIRED, MatchTips.CHALLENGE_NOT_TARGET,
+                        MatchTips.NOT_IN_SCENE, MatchTips.SPECTATE_WHILE_QUEUED, MatchTips.SPECTATE_WHILE_IN_BATTLE, MatchTips.ALREADY_WATCHING,
+                        MatchTips.NO_WATCHABLE_BATTLE, MatchTips.BATTLE_NOT_WATCHABLE, MatchTips.SPECTATE_OFFLINE);
     }
 
     @Test
@@ -157,21 +167,23 @@ class MatchTipsTest {
 
     // ---------------------------------------------------------------- 163 观战（spectate-spec §3.1、§3.2）
 
-    /** 规格 §3.2 的全表，按那一段的原文顺序另抄一份：9 条 parameters[0]，逗号都是半角。 */
+    /** 规格 §3.2 的全表，按那一段的原文顺序另抄一份：9 条 parameters[0]，再加满员 1 条，逗号都是半角。 */
     private static final String[] WATCH_TEXTS = {
             "缺少玩家身份", "服务器繁忙,请稍后再试", "匹配中无法观战", "战斗尚未结束,无法观战", "会话不在线,无法观战",
-            "已在观战另一场战斗", "当前没有可观战的战斗", "该战斗不存在或已结束", "该战斗当前无法观战"};
+            "已在观战另一场战斗", "当前没有可观战的战斗", "该战斗不存在或已结束", "该战斗当前无法观战", "观战人数已满"};
 
     @Test
-    void 观战的9条文案_与规格全表逐字节相同_六个码与两条16004一条不少() {
+    void 观战的10条文案_与规格全表逐字节相同_七个码与两条16004一条不少() {
         Map<String, Integer> watchTips = new LinkedHashMap<>();
         for (MatchTip tip : new MatchTip[] {MatchTip.NO_IDENTITY, MatchTip.BUSY, MatchTip.WATCH_QUEUED, MatchTip.WATCH_IN_BATTLE,
-                MatchTip.WATCH_OFFLINE, MatchTip.WATCH_ALREADY, MatchTip.WATCH_NO_BATTLE, MatchTip.WATCH_NOT_FOUND, MatchTip.WATCH_NOT_WATCHABLE}) {
+                MatchTip.WATCH_OFFLINE, MatchTip.WATCH_ALREADY, MatchTip.WATCH_NO_BATTLE, MatchTip.WATCH_NOT_FOUND, MatchTip.WATCH_NOT_WATCHABLE,
+                MatchTip.WATCH_FULL}) {
             watchTips.put(tip.text(), tip.code());
         }
 
         assertThat(watchTips.keySet()).as("163 会发出的全部 parameters[0]，按规格的顺序").containsExactly(WATCH_TEXTS);
-        assertThat(watchTips.values()).containsExactly(16004, 16004, 16014, 16015, 16019, 16016, 16017, 16018, 16018);
+        assertThat(watchTips.values()).containsExactly(16004, 16004, 16014, 16015, 16019, 16016, 16017, 16018, 16018, MatchTips.SPECTATE_FULL);
+        assertThat(hex(MatchTip.WATCH_FULL.text())).as("「观战人数已满」").isEqualTo("e8a782e68898e4babae695b0e5b7b2e6bba1");
         for (String text : WATCH_TEXTS) {
             assertThat(text).doesNotContain("，");
         }
@@ -276,7 +288,7 @@ class MatchTipsTest {
         wire.write(inner.toByteArray());
         assertThat(queued.toByteArray()).isEqualTo(wire.toByteArray());
         for (MatchTip tip : new MatchTip[] {MatchTip.WATCH_IN_BATTLE, MatchTip.WATCH_ALREADY, MatchTip.WATCH_NO_BATTLE, MatchTip.WATCH_NOT_FOUND,
-                MatchTip.WATCH_NOT_WATCHABLE, MatchTip.WATCH_OFFLINE, MatchTip.NO_IDENTITY}) {
+                MatchTip.WATCH_NOT_WATCHABLE, MatchTip.WATCH_OFFLINE, MatchTip.WATCH_FULL, MatchTip.NO_IDENTITY}) {
             WatchBattleResponse rejected = MatchTips.watchRejected(tip);
             assertThat(rejected.getErrorMessage()).as(tip.name()).isEqualTo(tip.proto());
             assertThat(rejected.getBattleId()).as(tip.name()).isZero();

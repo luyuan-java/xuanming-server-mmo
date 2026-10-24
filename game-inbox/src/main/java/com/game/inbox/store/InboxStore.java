@@ -181,9 +181,61 @@ public final class InboxStore {
         return result;
     }
 
+    /** 专用Match边界，不借GM签发窗；签名仍有五分钟传输窗，业务issuedAt永久固定。 */
+    public com.game.proto.player_inbox.BattleSettlementInboxResponse battleSettlement(Deadline budget,
+            com.game.proto.player_inbox.BattleSettlementInboxRequest request, boolean enqueue) throws SQLException {
+        var type = PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT;
+        var producer = PlayerInboxProducerKind.PLAYER_INBOX_PRODUCER_MATCH;
+        var domain = PlayerInboxDomain.PLAYER_INBOX_DOMAIN_SCENE_BATTLE_SETTLEMENT;
+        byte[] payload = request.getSettlementPayload().toByteArray();
+        var response = com.game.proto.player_inbox.BattleSettlementInboxResponse.newBuilder()
+                .setPlayerId(request.getPlayerId()).setBattleId(request.getBattleId())
+                .setRequestDigest(ServiceCallSignatures.digest(request));
+        if (request.getPlayerId() == 0 || request.getBattleId() == 0 || request.getExpectedOwnerAccount().isBlank()
+                || request.getExpectedOwnerRevision() == 0 || request.getIssuedAtMs() <= 0
+                || request.getIssuedAtMs() > nowMs.getAsLong() + 300_000) throw new SecurityException("战斗来源原身份或时间无效");
+        var validation = registry.validatePayload(type, Set.of(type), payload);
+        if (validation.tip() != 0) throw new IllegalArgumentException("战斗来源载荷不符合已登记规格");
+        com.game.proto.BattleSettlementData settlement;
+        try { settlement = com.game.proto.BattleSettlementData.parseFrom(payload); }
+        catch (com.google.protobuf.InvalidProtocolBufferException invalid) { throw new IllegalArgumentException("战斗来源载荷损坏", invalid); }
+        if (settlement.getBattleId() != request.getBattleId() || settlement.getPlayerId() != request.getPlayerId())
+            throw new SecurityException("战斗来源正文身份不符");
+        byte[] digest = InboxRules.contentSha256(type, request.getIssuedAtMs(), payload);
+        int shard = InboxShards.rowShard(request.getPlayerId());
+        if (enqueue) {
+            var gated = gate.check();
+            if (gated.verdict() != ConsumerGate.Verdict.OPEN) throw new SQLException("战斗来源消费端尚未就绪");
+            ensureStream(budget, shard, request.getPlayerId(), domain, nowMs.getAsLong());
+        }
+        return jdbc.tx(budget, s -> {
+            // 所有新写与身份复核同一个P锁；旧收据也必须逐字匹配其原归属。
+            InboxSql.Owner owner = InboxSql.lockPlayer(s, budget, request.getPlayerId());
+            var existing = readItemByRequest(s, shard, request.getPlayerId(), producer, request.getBattleId());
+            if (existing != null) {
+                if (existing.getMsgType() != type.getNumber() || existing.getOwnerRevision() != request.getExpectedOwnerRevision()
+                        || !existing.getOwnerAccount().equals(request.getExpectedOwnerAccount())
+                        || !InboxRules.sameContent(existing.getContentSha256(), digest)
+                        || existing.getState() != PENDING && existing.getState() != PlayerInboxItemState.PLAYER_INBOX_ITEM_APPLIED_VALUE)
+                    throw new SecurityException("战斗永久收据原件或状态冲突");
+                return response.setSeq(existing.getSeq()).setStateValue(existing.getState())
+                        .setContentSha256(com.google.protobuf.ByteString.copyFrom(digest)).build();
+            }
+            if (!enqueue) return response.build();
+            if (!owner.account().equals(request.getExpectedOwnerAccount()) || owner.revision() != request.getExpectedOwnerRevision()
+                    || owner.released()) throw new SecurityException("战斗来源不能借当前目录替换原归属");
+            var params = new EnqueueParams(request.getPlayerId(), type, producer, request.getBattleId(),
+                    request.getIssuedAtMs(), payload, "match", "永久战斗终局", null);
+            var result = enqueueLocked(s, shard, domain, registry.domain(domain).orElseThrow(), digest, params, owner);
+            return response.setErrorMessage(tip(result.tip())).setSeq(result.seq()).setState(result.state())
+                    .setContentSha256(com.google.protobuf.ByteString.copyFrom(digest)).build();
+        });
+    }
+
     private EnqueueResult doEnqueue(Deadline budget, EnqueueParams p) throws SQLException {
         // 1. 注册表与字段校验（与时间无关）
-        if (p.playerId() == 0 || p.requestId() == 0 || p.issuedAtMs() == 0 || !validProducer(p.producer()) || p.payload() == null) {
+        if (p.playerId() == 0 || p.requestId() == 0 || p.issuedAtMs() == 0 || !validProducer(p.producer())
+                || p.producer() != PlayerInboxProducerKind.PLAYER_INBOX_PRODUCER_GM || p.payload() == null) {
             return EnqueueResult.reject(InboxTips.INVALID_PARAMETER);
         }
         InboxRegistry.Validation validation = registry.validatePayload(p.type(), allowed, p.payload());
@@ -557,7 +609,11 @@ public final class InboxStore {
         int finalized = 0;
         List<PlayerInboxAckItem> results = new ArrayList<>(req.getDecisionsCount());
         for (PlayerInboxDecisionReport report : req.getDecisionsList()) {
-            InboxRules.AckDecision decision = InboxRules.decideAck(rows.get(report.getSeq()), report);
+            var original = rows.get(report.getSeq());
+            if (original != null && original.getMsgType() == PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT_VALUE
+                    && report.getOutcome() != com.game.proto.player_inbox.PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED)
+                throw new SQLException("战斗来源只能由真实SQL落盘的APPLIED终结");
+            InboxRules.AckDecision decision = InboxRules.decideAck(original, report);
             if (decision.finalizes()) {
                 requireOne(s.update("UPDATE " + ITEM_TABLE + " SET `state` = ?, `finalized_by` = ?, `decided_epoch` = ?, `outcome_reason` = ?,"
                                 + " `updated_ms` = ? WHERE " + ITEM_PK + " AND `state` = ?", decision.state().getNumber(),

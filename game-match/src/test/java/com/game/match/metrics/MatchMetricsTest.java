@@ -313,11 +313,11 @@ class MatchMetricsTest {
     @Test
     void 观战_各计数的标签取值与规格表逐个相同_启动即预建为0() {
         List<String> outcomes = List.of("ok", "internal", "queued", "in_battle", "already_watching", "offline", "no_battle", "not_found", "rejected",
-                "overloaded");
+                "full", "overloaded");
         for (String outcome : outcomes) {
             assertThat(count("game.match.watch.battle", "outcome", outcome)).as(outcome).isZero();
         }
-        assertThat(meters.find("game.match.watch.battle").counters()).as("163 的出口恰好十种").hasSize(outcomes.size());
+        assertThat(meters.find("game.match.watch.battle").counters()).as("163 的出口恰好十一种").hasSize(outcomes.size());
 
         for (String result : List.of("ok", "error", "overloaded")) {
             assertThat(count("game.match.list.watchable", "result", result)).as(result).isZero();

@@ -35,6 +35,8 @@ public final class GlobalMatchStore {
         db.register(GlobalJoinIntentRow.getDefaultInstance());
         db.register(GlobalDirectIntentRow.getDefaultInstance());
         db.register(GlobalFormationRow.getDefaultInstance());
+        db.register(com.game.match.completion.pb.BattleCompletionRow.getDefaultInstance());
+        db.register(com.game.match.completion.pb.BattlePlayerCompletionRow.getDefaultInstance());
         db.register(GlobalRankSourceRow.getDefaultInstance());
         db.register(GlobalRankOutboxRow.getDefaultInstance());
         db.register(GlobalTicketRegionRow.getDefaultInstance());
@@ -713,6 +715,10 @@ public final class GlobalMatchStore {
     }
     public void checkWork(GlobalFormationRow work){tx(c->{var f=db.findOneByPk(c,GlobalFormationRow.newBuilder().setBattleId(work.getBattleId()).build()).orElseThrow();requireWork(c,f,work);return null;});}
     public GlobalFormationRow saveIntent(GlobalFormationRow formation, byte[] request) {
+        try {
+            if(com.game.proto.CreateBattleRequest.parseFrom(request).getOutcomeProtocolVersion()!=0)
+                throw new SecurityException("v1建房必须绑定真实Create前能力，不能走旧兼容入口");
+        } catch(com.google.protobuf.InvalidProtocolBufferException bad) { throw new IllegalArgumentException("建房原件损坏",bad); }
         return tx(c -> {
             var old = db.findOneByPkForUpdate(c,GlobalFormationRow.newBuilder().setBattleId(formation.getBattleId()).build()).orElseThrow();
             requireWork(c,old,formation);
@@ -725,6 +731,205 @@ public final class GlobalMatchStore {
             return old;
         });
     }
+
+    /** 原能力与完整v1正文在同一SQL提交，且早于任何Create。adopted是另一次真实回执，不用支持能力冒充。 */
+    public GlobalFormationRow saveIntent(GlobalFormationRow formation,byte[] request,
+            com.game.proto.QueryBattleCreationResponse preflight) {
+        return tx(c->{
+            var old=db.findOneByPkForUpdate(c,GlobalFormationRow.newBuilder().setBattleId(formation.getBattleId()).build()).orElseThrow();
+            requireWork(c,old,formation);
+            var create=com.game.proto.CreateBattleRequest.parseFrom(request);
+            validateCreateBinding(old,create);
+            if(create.getOutcomeProtocolVersion()!=1||preflight==null||preflight.getSupportedOutcomeProtocolVersion()!=1
+                    ||!preflight.getTargetInstanceId().equals(old.getInstanceId())
+                    ||preflight.getState()!=com.game.proto.BattleCreationState.BATTLE_CREATION_ABSENT
+                    ||create.getBattleId()!=old.getBattleId()||!create.getPlacementOperationId().equals(old.getOperationId())
+                    ||!create.getTargetInstanceId().equals(old.getInstanceId())||create.getDeadlineMs()!=old.getDeadlineMs())
+                throw new SecurityException("建房前能力、UUID或固定v1正文不同");
+            if(old.getState()!=1)throw new IllegalStateException("原建房意图已经提交，不能替换前置能力");
+            var terminal=com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(old.getBattleId())
+                    .setFormatVersion(1).setPlacementOperationId(old.getOperationId()).setTargetInstanceId(old.getInstanceId())
+                    .setOutcomeProtocolVersion(1).setPreflightSupportedVersion(1).setPreflightInstanceId(preflight.getTargetInstanceId()).build();
+            db.insert(c,terminal);
+            var saved=old.toBuilder().setCreateRequest(ByteString.copyFrom(request)).clearPrepared()
+                    .addAllPrepared(formation.getPreparedList()).setState(2).build();
+            db.updateByPk(c,saved);return saved;
+        });
+    }
+
+    public com.game.match.completion.pb.BattleCompletionRow terminal(long battle) {
+        return tx(c->db.findOneByPk(c,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build()).orElse(null));
+    }
+    public void adopted(GlobalFormationRow formation,int version,String instance) {
+        tx(c->{
+            var f=db.findOneByPkForUpdate(c,GlobalFormationRow.newBuilder().setBattleId(formation.getBattleId()).build()).orElseThrow();
+            var key=com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(f.getBattleId()).build();
+            var t=db.findOneByPkForUpdate(c,key).orElseThrow();
+            if(!instance.equals(f.getInstanceId())||t.getOutcomeProtocolVersion()!=1
+                    ||!t.getPreflightInstanceId().equals(instance)||t.getPreflightSupportedVersion()!=1)
+                throw new SecurityException("执行端回执原UUID或前置原件不同");
+            if(t.getAdoptedOutcomeObserved()&&t.getAdoptedOutcomeProtocolVersion()!=version)
+                throw new SecurityException("执行端实际adopted观察冲突，不得覆盖原回执");
+            db.updateByPk(c,t.toBuilder().setAdoptedOutcomeObserved(true).setAdoptedOutcomeProtocolVersion(version).build());return null;
+        });
+        // 真实0先提交观察再拒绝，不让异常回滚把它伪装成“从未见到回包”。
+        if(version!=1)throw new SecurityException("执行端未实际采用原v1协议");
+    }
+
+    /** 同unsigned全员P、原票、formation锁提交唯一终局；RPC原件没有Kafka位点。 */
+    public com.game.match.completion.pb.BattleCompletionRow commitOutcome(com.game.proto.match.CommitBattleOutcomeRequest request) {
+        return commitOutcome(request,Deadline.after(3000));
+    }
+    public com.game.match.completion.pb.BattleCompletionRow commitOutcome(com.game.proto.match.CommitBattleOutcomeRequest request,Deadline deadline) {
+        var settlements=com.game.match.rating.BattleCompletionStore.validateTerminal(request.getRawResultPayload());
+        return tx(deadline,c->{
+            // 永久终局不可回退：晚到的原回包不再依赖当前owner/下一局票据，也不改变它们。
+            var known=db.findOneByPk(c,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(request.getBattleId()).build());
+            if(known.isPresent()&&known.get().getTerminalDecision()!=0) {
+                var terminal=known.get();
+                if(terminal.getOutcomeProtocolVersion()!=1||terminal.getPreflightSupportedVersion()!=1
+                        ||terminal.getAdoptedOutcomeObserved()&&terminal.getAdoptedOutcomeProtocolVersion()!=1
+                        ||terminal.getTerminalDecision()!=1&&terminal.getTerminalDecision()!=2
+                        ||!terminal.getPlacementOperationId().equals(request.getPlacementOperationId())
+                        ||!terminal.getTargetInstanceId().equals(request.getTargetInstanceId()))throw new SecurityException("终局重放原局身份不同");
+                if(terminal.getTerminalDecision()==1&&(!terminal.getOriginal().equals(request.getRawResultPayload())
+                        ||!terminal.getOriginalDigest().equals(com.game.match.rating.BattleCompletionStore.digest(request.getRawResultPayload()))))
+                    throw new SecurityException("终局重放不是原字节");
+                return terminal;
+            }
+            var seen=db.findOneByPk(c,GlobalFormationRow.newBuilder().setBattleId(request.getBattleId()).build()).orElseThrow();
+            List<GlobalTicketRow> original=new ArrayList<>();
+            for(var member:seen.getMembersList())original.add(db.findOneByPk(c,GlobalTicketRow.newBuilder().setPlayerId(member.getPlayerId()).build()).orElseThrow());
+            owners(c,original);
+            if(seen.getState()<4)units.beforeFinish(c,original);
+            Map<Long,GlobalTicketRow> tickets=new HashMap<>();for(var t:original.stream().sorted((a,b)->Long.compareUnsigned(a.getPlayerId(),b.getPlayerId())).toList())tickets.put(t.getPlayerId(),locked(c,t.getPlayerId()));
+            var f=db.findOneByPkForUpdate(c,GlobalFormationRow.newBuilder().setBattleId(seen.getBattleId()).build()).orElseThrow();
+            var t=db.findOneByPkForUpdate(c,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(f.getBattleId()).build()).orElseThrow();
+            if(!f.getOperationId().equals(request.getPlacementOperationId())||!f.getInstanceId().equals(request.getTargetInstanceId())
+                    ||t.getOutcomeProtocolVersion()!=1||t.getPreflightSupportedVersion()!=1||!t.getPreflightInstanceId().equals(f.getInstanceId())
+                    ||t.getAdoptedOutcomeObserved()&&t.getAdoptedOutcomeProtocolVersion()!=1)
+                throw new SecurityException("终局原operation/实例/前置围栏不符");
+            if(t.getTerminalDecision()==2)return t;
+            if(t.getTerminalDecision()==1) {
+                if(!t.getOriginal().equals(request.getRawResultPayload())||!t.getOriginalDigest().equals(com.game.match.rating.BattleCompletionStore.digest(request.getRawResultPayload())))
+                    throw new SecurityException("终局重放不是原字节");
+                return t;
+            }
+            if(f.getState()==5||f.getCreateRequest().isEmpty())throw new SecurityException("原成局不允许完成");
+            var create=com.game.proto.CreateBattleRequest.parseFrom(f.getCreateRequest());
+            validateCreateBinding(f,create);
+            var event=com.game.proto.contracts.kafka.BattleResultEvent.parseFrom(request.getRawResultPayload());
+            if(create.getOutcomeProtocolVersion()!=1||event.getBattleId()!=f.getBattleId()||event.getMatchMode()!=f.getMode()
+                    ||event.getBattleConfigId()!=f.getConfigId()||!event.getActivityContext().equals(create.getActivityContext())
+                    ||event.getFinishedAtMs()<create.getCreatedAtMs()||settlements.size()!=f.getMembersCount())throw new SecurityException("终局与固定建房原件不同");
+            var teams=new HashMap<Long,Integer>();for(var member:create.getPlayersList())teams.put(member.getPlayerId(),member.getTeamIndex());
+            long stamp=now(c);
+            List<GlobalTicketRow> completedTickets=new ArrayList<>();
+            for(var member:f.getMembersList()) {
+                var ticket=tickets.get(member.getPlayerId());var value=settlements.get(member.getPlayerId());
+                if(ticket==null||ticket.getFormationId()!=f.getBattleId()||!ticket.getTicket().equals(member.getTicket())
+                        ||value==null||!Objects.equals(teams.get(member.getPlayerId()),value.getPlayerTeamIndex()))
+                    throw new SecurityException("终局全员来源或原票身份不同");
+                var raw=ByteString.copyFrom(com.game.common.token.NetworkProbes.bytes(value));
+                db.insert(c,com.game.match.completion.pb.BattlePlayerCompletionRow.newBuilder().setBattleId(f.getBattleId()).setPlayerId(member.getPlayerId())
+                        .setOriginal(raw).setOriginalDigest(com.game.match.rating.BattleCompletionStore.digest(raw))
+                        .setOwnerAccount(ticket.getOwnerAccount()).setOwnerRevision(ticket.getOwnerRevision()).setIssuedAtMs(stamp).build());
+                var completedTicket=ticket.toBuilder().setState(3).build();
+                db.updateByPk(c,completedTicket);completedTickets.add(completedTicket);
+            }
+            var completed=t.toBuilder().setTerminalDecision(1).setOriginal(request.getRawResultPayload())
+                    .setOriginalDigest(com.game.match.rating.BattleCompletionStore.digest(request.getRawResultPayload()))
+                    .setPlayerCount(settlements.size()).setIssuedAtMs(stamp).setSourceKind(2).setRetryMs(stamp).build();
+            if(f.getState()<4)units.finished(c,f,completedTickets,true,stamp);
+            db.updateByPk(c,completed);db.updateByPk(c,f.toBuilder().setState(4).build());return completed;
+        });
+    }
+
+    /** Create提交与COMPLETE提交都核同一持久原件，不能让出站前校验替代终局事务校验。 */
+    private static void validateCreateBinding(GlobalFormationRow formation,com.game.proto.CreateBattleRequest create)throws Exception {
+        if(create.getBattleId()!=formation.getBattleId()||create.getBattleConfigId()!=formation.getConfigId()
+                ||create.getMatchMode()!=formation.getMode()||!create.getPlacementOperationId().equals(formation.getOperationId())
+                ||!create.getTargetInstanceId().equals(formation.getInstanceId())||create.getRequiredPhysicalRegion()!=formation.getRegion()
+                ||create.getCreatedAtMs()<=0||create.getCreatedAtMs()<formation.getCreatedMs()
+                ||create.getDeadlineMs()!=formation.getDeadlineMs()||create.getDeadlineMs()<=create.getCreatedAtMs()
+                ||create.getPlayersCount()!=formation.getMembersCount()||create.getPlayersCount()==0
+                ||!create.getActivityContext().equals(com.game.proto.BattleActivityContext.parseFrom(formation.getActivityContext())))
+            throw new SecurityException("固定Create范围、时间或完整人数不同");
+        Set<Long> unique=new HashSet<>();int teamA=0,teamB=0;
+        var mode=com.game.proto.match.MatchMode.forNumber(formation.getMode());
+        if(mode==null||mode==com.game.proto.match.MatchMode.MATCH_MODE_UNSPECIFIED
+                ||mode==com.game.proto.match.MatchMode.MATCH_MODE_3V3)throw new SecurityException("固定Create模式不支持");
+        for(int i=0;i<create.getPlayersCount();i++) {
+            var player=create.getPlayers(i);
+            if(player.getPlayerId()==0||!unique.add(player.getPlayerId())||player.getPlayerId()!=formation.getMembers(i).getPlayerId())
+                throw new SecurityException("固定Create完整成员/顺序与formation不同");
+            int team=player.getTeamIndex();
+            if(mode==com.game.proto.match.MatchMode.MATCH_MODE_1V1||mode==com.game.proto.match.MatchMode.MATCH_MODE_PVP_CHALLENGE) {
+                if(create.getPlayersCount()!=2||team!=i)throw new SecurityException("固定单挑队伍不同");
+            } else if(mode!=com.game.proto.match.MatchMode.MATCH_MODE_5V5&&team!=0)throw new SecurityException("固定PVE队伍不同");
+            if(team==0)teamA++;else if(team==1)teamB++;else throw new SecurityException("固定Create队号非法");
+        }
+        if(mode==com.game.proto.match.MatchMode.MATCH_MODE_5V5&&(teamA!=5||teamB!=5)
+                ||mode==com.game.proto.match.MatchMode.MATCH_MODE_PVE_SOLO&&create.getPlayersCount()!=1)
+            throw new SecurityException("固定Create模式人数不符");
+    }
+
+    /** 一轮固定上界，持续新成局不能让失败旧项永远等不到下一轮；候选不授予写权限。 */
+    public record TerminalDeadlineBatch(long upperBattle,List<Long> battles) {}
+    public TerminalDeadlineBatch terminalDeadlineCandidates(long afterBattle,long upperBattle) {
+        return tx(c->{
+            long stamp=now(c),upper=upperBattle;
+            String candidates=" FROM match_global_formation f JOIN match_battle_completion t ON t.battle_id=f.battle_id "
+                    +"WHERE f.state IN (2,3,4) AND f.deadline_ms<=? AND t.terminal_decision=0";
+            if(upper==0)try(var query=c.prepareStatement("SELECT f.battle_id"+candidates+" ORDER BY f.battle_id DESC LIMIT 1")) {
+                query.setQueryTimeout(3);query.setLong(1,stamp);
+                try(var rows=query.executeQuery()){if(rows.next())upper=Long.parseUnsignedLong(rows.getString(1));}
+            }
+            if(upper==0)return new TerminalDeadlineBatch(0,List.of());
+            List<Long> result=new ArrayList<>();
+            try(var query=c.prepareStatement("SELECT f.battle_id"+candidates
+                    +" AND f.battle_id>? AND f.battle_id<=? ORDER BY f.battle_id LIMIT 16")) {
+                query.setQueryTimeout(3);query.setLong(1,stamp);query.setObject(2,PbMysql.uint64(afterBattle));query.setObject(3,PbMysql.uint64(upper));
+                try(var rows=query.executeQuery()){while(rows.next())result.add(Long.parseUnsignedLong(rows.getString(1)));}
+            }
+            return new TerminalDeadlineBatch(upper,List.copyOf(result));
+        });
+    }
+
+    /** 截止只允许竞争持久ABORT；历史0和无Create前能力的行仍UNKNOWN。 */
+    public int resolveTerminalAfterDeadline(long battle) {
+        return tx(c->{
+            var known=db.findOneByPk(c,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+            if(known.isPresent()&&known.get().getAdoptedOutcomeObserved()&&known.get().getAdoptedOutcomeProtocolVersion()!=1)
+                throw new SecurityException("真实adopted非v1，不能由前置能力追认中止");
+            if(known.isPresent()&&known.get().getTerminalDecision()!=0)return known.get().getTerminalDecision();
+            var seen=db.findOneByPk(c,GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElseThrow();
+            List<GlobalTicketRow> original=new ArrayList<>();for(var member:seen.getMembersList())original.add(db.findOneByPk(c,GlobalTicketRow.newBuilder().setPlayerId(member.getPlayerId()).build()).orElseThrow());
+            owners(c,original);if(seen.getState()<4)units.beforeFinish(c,original);
+            for(var p:original.stream().sorted((a,b)->Long.compareUnsigned(a.getPlayerId(),b.getPlayerId())).toList())locked(c,p.getPlayerId());
+            var f=db.findOneByPkForUpdate(c,GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElseThrow();
+            var maybe=db.findOneByPkForUpdate(c,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+            if(maybe.isEmpty())return 0;var t=maybe.get();if(t.getTerminalDecision()!=0)return t.getTerminalDecision();
+            if(t.getAdoptedOutcomeObserved()&&t.getAdoptedOutcomeProtocolVersion()!=1)
+                throw new SecurityException("真实adopted非v1，不能中止");
+            if(t.getOutcomeProtocolVersion()!=1||t.getPreflightSupportedVersion()!=1||!t.getPreflightInstanceId().equals(f.getInstanceId())
+                    ||!t.getPlacementOperationId().equals(f.getOperationId())||!t.getTargetInstanceId().equals(f.getInstanceId())
+                    ||f.getState()<2||f.getState()>4||f.getCreateRequest().isEmpty()||now(c)<f.getDeadlineMs())return 0;
+            var create=com.game.proto.CreateBattleRequest.parseFrom(f.getCreateRequest());
+            if(create.getOutcomeProtocolVersion()!=1)return 0;
+            validateCreateBinding(f,create);
+            db.updateByPk(c,t.toBuilder().setTerminalDecision(2).build());
+            db.updateByPk(c,f.toBuilder().setState(5).build());
+            List<GlobalTicketRow> abortedTickets=new ArrayList<>();
+            for(var member:f.getMembersList()) {
+                var p=locked(c,member.getPlayerId());if(p.getFormationId()!=battle||!p.getTicket().equals(member.getTicket()))throw new SecurityException("中止原票已变更");
+                var aborted=p.toBuilder().setState(4).build();db.updateByPk(c,aborted);abortedTickets.add(aborted);
+            }
+            if(f.getState()<4)units.finished(c,f,abortedTickets,false,now(c));
+            return 2;
+        });
+    }
+
     public void prepared(GlobalFormationRow work, GlobalPreparedEndpoint endpoint) {
         long battle=work.getBattleId();
         tx(c -> {
@@ -747,12 +952,42 @@ public final class GlobalMatchStore {
     public void finish(GlobalFormationRow work, boolean success) {
         long battle=work.getBattleId();
         tx(c -> {
+            // COMPLETE可能早于Create回包。只读同一永久原件即可幂等返回，不能再锁/改已结束unit或下一局票据。
+            var committed=db.findOneByPk(c,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+            if(committed.isPresent()&&committed.get().getAdoptedOutcomeObserved()&&committed.get().getAdoptedOutcomeProtocolVersion()!=1)
+                throw new SecurityException("真实adopted非v1，不能完成或中止");
+            if(committed.isPresent()&&committed.get().getTerminalDecision()!=0) {
+                if(committed.get().getOutcomeProtocolVersion()!=1||committed.get().getPreflightSupportedVersion()!=1
+                        ||committed.get().getTerminalDecision()!=1&&committed.get().getTerminalDecision()!=2)
+                    throw new SecurityException("终局裁决不明，不能由迟到finish追认");
+                var original=db.findOneByPk(c,GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElseThrow();
+                if(!original.getOperationId().equals(work.getOperationId())||!original.getInstanceId().equals(work.getInstanceId())
+                        ||!committed.get().getPlacementOperationId().equals(work.getOperationId())
+                        ||!committed.get().getTargetInstanceId().equals(work.getInstanceId()))throw new SecurityException("迟到finish原局身份不同");
+                if(success!=(committed.get().getTerminalDecision()==1))throw new IllegalStateException("迟到finish与永久SQL终局相反");
+                return null;
+            }
             List<GlobalTicketRow> originals=new ArrayList<>();
             for(var member:work.getMembersList())originals.add(db.findOneByPk(c,GlobalTicketRow.newBuilder().setPlayerId(member.getPlayerId()).build()).orElseThrow());
             owners(c,originals);
             var originalUnits=units.beforeFinish(c,originals);
             Map<Long,GlobalTicketRow> lockedTickets=new HashMap<>();for(var original:originals.stream().sorted((a,b)->Long.compareUnsigned(a.getPlayerId(),b.getPlayerId())).toList())lockedTickets.put(original.getPlayerId(),locked(c,original.getPlayerId()));
             var f = db.findOneByPkForUpdate(c,GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElseThrow();
+            var terminal=db.findOneByPkForUpdate(c,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+            if(terminal.isPresent()&&terminal.get().getOutcomeProtocolVersion()==1
+                    &&(terminal.get().getAdoptedOutcomeObserved()&&terminal.get().getAdoptedOutcomeProtocolVersion()!=1
+                        ||success&&!terminal.get().getAdoptedOutcomeObserved()&&terminal.get().getTerminalDecision()!=1))
+                throw new SecurityException("新终局缺少实际adopted或存在真实不兼容回执");
+            if(terminal.isPresent()&&terminal.get().getTerminalDecision()!=0) {
+                if(!terminal.get().getPlacementOperationId().equals(work.getOperationId())
+                        ||!terminal.get().getTargetInstanceId().equals(work.getInstanceId())
+                        ||terminal.get().getTerminalDecision()!=1&&terminal.get().getTerminalDecision()!=2)
+                    throw new SecurityException("并发终局不是原finish所属原件");
+                if(success!=(terminal.get().getTerminalDecision()==1))throw new IllegalStateException("迟到finish与永久SQL终局相反");
+                return null;
+            }
+            if(!success&&terminal.isPresent()&&terminal.get().getOutcomeProtocolVersion()==1)
+                throw new IllegalStateException("已有v1 Create但尚无SQL ABORT，保留原票且禁止重排");
             requireWork(c,f,work);
             long stamp=now(c);List<GlobalTicketRow> after=new ArrayList<>();
             for (var m : f.getMembersList().stream().sorted((a,b) -> Long.compareUnsigned(a.getPlayerId(),b.getPlayerId())).toList()) {
@@ -770,7 +1005,13 @@ public final class GlobalMatchStore {
     }
     public void releaseReady(long player, String ticket, long battle) {
         tx(c -> { var original=db.findOneByPk(c,GlobalTicketRow.newBuilder().setPlayerId(player).build()).orElseThrow();
-            owner(c,player,original.getOwnerAccount(),original.getOwnerRevision());var row=locked(c,player); if(row.getState()==3 && row.getFormationId()==battle && row.getTicket().equals(ticket))
+            owner(c,player,original.getOwnerAccount(),original.getOwnerRevision());var row=locked(c,player);
+            var terminal=db.findOneByPk(c,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+            if(terminal.isPresent()&&terminal.get().getOutcomeProtocolVersion()==1&&terminal.get().getTerminalDecision()!=2) {
+                var personal=db.findOneByPk(c,com.game.match.completion.pb.BattlePlayerCompletionRow.newBuilder().setBattleId(battle).setPlayerId(player).build());
+                if(terminal.get().getTerminalDecision()!=1||personal.isEmpty()||!personal.get().getApplied())throw new IllegalStateException("Inbox未实际APPLIED，保留ready占用");
+            }
+            if(row.getState()==3 && row.getFormationId()==battle && row.getTicket().equals(ticket))
             db.updateByPk(c,row.toBuilder().setState(4).build()); return null; });
     }
 }

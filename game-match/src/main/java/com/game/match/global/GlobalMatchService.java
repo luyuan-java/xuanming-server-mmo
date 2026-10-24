@@ -215,6 +215,13 @@ public final class GlobalMatchService implements AutoCloseable {
         if(ticket.getState()!=3)return false;
         var f=store.formation(ticket.getFormationId());if(f==null)return false;
         if(f.getMembersList().stream().noneMatch(m->m.getPlayerId()==ticket.getPlayerId()&&m.getTicket().equals(ticket.getTicket())))return false;
+        var terminal=store.terminal(f.getBattleId());
+        if(terminal!=null&&terminal.getOutcomeProtocolVersion()==1) {
+            try {
+                // releaseReady在同P锁内核此人的永久Inbox APPLIED，不能因房间消失释放全员。
+                store.releaseReady(ticket.getPlayerId(),ticket.getTicket(),f.getBattleId());return true;
+            } catch(RuntimeException pending) { return false; }
+        }
         try {var state=query(f).getState();
             if(state==BattleCreationState.BATTLE_CREATION_ABSENT) {
                 // 单次ABSENT不能排除在途Create；先给同原operation落取消墓碑，再只认ABORTED正证明。
@@ -442,27 +449,40 @@ public final class GlobalMatchService implements AutoCloseable {
             var request=CreateBattleRequest.newBuilder().setBattleId(f.getBattleId()).setBattleConfigId(f.getConfigId()).setMatchMode(f.getMode())
                     .setCreatedAtMs(store.now()).setDeadlineMs(f.getDeadlineMs()).setSeed(seeds.nextLong()).addAllPlayers(snapshots)
                     .setTableFingerprint(fingerprint.passThrough()).setRequiredPhysicalRegion(f.getRegion()).setPlacementOperationId(f.getOperationId())
-                    .setTargetInstanceId(f.getInstanceId()).setAdmitBeforeMs(Math.min(f.getCreatedMs()+120_000,f.getRetryMs()-1000));
+                    .setTargetInstanceId(f.getInstanceId()).setAdmitBeforeMs(Math.min(f.getCreatedMs()+120_000,f.getRetryMs()-1000))
+                    .setOutcomeProtocolVersion(1);
             if(!f.getActivityContext().isEmpty())request.setActivityContext(BattleActivityContext.parseFrom(f.getActivityContext()));
-            f=store.saveIntent(f,NetworkProbes.bytes(request.build()));
+            var preflight=query(f);
+            f=store.saveIntent(f,NetworkProbes.bytes(request.build()),preflight);
             return create(f);
         }catch(Exception e){try{store.unknown(f);}catch(RuntimeException stale){log.debug("全球工作租约已转移");}log.error("全球备战/建房等待恢复",e);return GatherResult.failed(GatherOutcome.CREATE_FAILED_ROOM_ALIVE,f.getBattleId());}
     }
     private GatherResult create(GlobalFormationRow f)throws Exception {
         var request=CreateBattleRequest.parseFrom(f.getCreateRequest());
+        var known=store.terminal(f.getBattleId());
+        if(known!=null&&known.getAdoptedOutcomeObserved()&&known.getAdoptedOutcomeProtocolVersion()!=1)
+            throw new SecurityException("执行端已明确未采用v1，禁止继续Create");
         store.checkWork(f);
         var result=invoke(f,s->s.createBattle(request));
         if(result.getAdmission()==BattleAdmission.BATTLE_ADMISSION_ADMITTED
                 &&CreateBattleResponse.parseFrom(result.getResponse()).getErrorMessage().getId()==0) {
+            if(request.getOutcomeProtocolVersion()==1) {
+                var actual=CreateBattleResponse.parseFrom(result.getResponse());
+                store.adopted(f,actual.getAdoptedOutcomeProtocolVersion(),actual.getTargetInstanceId());
+            }
             store.finish(f,true);project(f,request);return GatherResult.success(f.getBattleId());
         }
         // 拒绝也写入精确实例墓碑，防并发恢复中已经在途的同操作创建迟到复活。
         abort(f);return GatherResult.failed(GatherOutcome.CREATE_REJECTED,f.getBattleId());
     }
     private void recover(GlobalFormationRow f)throws Exception {
-        var state=query(f).getState();
+        var actual=query(f);var state=actual.getState();
         switch(state) {
-            case BATTLE_CREATION_PRESENT -> {store.finish(f,true);project(f,CreateBattleRequest.parseFrom(f.getCreateRequest()));}
+            case BATTLE_CREATION_PRESENT -> {
+                if(CreateBattleRequest.parseFrom(f.getCreateRequest()).getOutcomeProtocolVersion()==1)
+                    store.adopted(f,actual.getAdoptedOutcomeProtocolVersion(),actual.getTargetInstanceId());
+                store.finish(f,true);project(f,CreateBattleRequest.parseFrom(f.getCreateRequest()));
+            }
             case BATTLE_CREATION_ABORTED -> abort(f);
             case BATTLE_CREATION_ABSENT -> {if(!f.getCreateRequest().isEmpty()&&store.now()<CreateBattleRequest.parseFrom(f.getCreateRequest()).getAdmitBeforeMs())create(f);else abort(f);}
             default -> {try{store.unknown(f);}catch(RuntimeException stale){log.debug("全球工作租约已转移");}}
@@ -472,8 +492,12 @@ public final class GlobalMatchService implements AutoCloseable {
         store.checkWork(f);
         invoke(f,s->s.destroyBattle(DestroyBattleRequest.newBuilder().setBattleId(f.getBattleId()).setPlacementOperationId(f.getOperationId())
                 .setTargetInstanceId(f.getInstanceId()).setReason("global_match_abort_if_absent").build()));
-        var state=query(f).getState();
-        if(state==BattleCreationState.BATTLE_CREATION_PRESENT){store.finish(f,true);return;}
+        var actual=query(f);var state=actual.getState();
+        if(state==BattleCreationState.BATTLE_CREATION_PRESENT){
+            if(CreateBattleRequest.parseFrom(f.getCreateRequest()).getOutcomeProtocolVersion()==1)
+                store.adopted(f,actual.getAdoptedOutcomeProtocolVersion(),actual.getTargetInstanceId());
+            store.finish(f,true);return;
+        }
         if(state!=BattleCreationState.BATTLE_CREATION_ABORTED)throw new IllegalStateException("撤销尚未由固定执行端确认");
         store.checkWork(f);
         var latest=store.formation(f.getBattleId());

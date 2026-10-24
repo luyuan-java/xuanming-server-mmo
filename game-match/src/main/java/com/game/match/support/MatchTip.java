@@ -11,7 +11,7 @@ import java.util.Objects;
  * 同一个码在不同发生点文案不同（16004 有三种、16010 有两种、16012 有两种、16018 有两种），所以按「发生点」列常量，不按码列。
  *
  * <p>码一律取自 {@link MatchTips}（其值来自导表生成的枚举），不手写数字。永不发出的码（16005 / 16006）不在这里。
- * 163 观战的六个码（16014–16019）与它的 9 条文案（其中两条 16004 与别的号共用）见文件末尾一段（spectate-spec §3.2）。
+ * 163 观战的七个码（16014–16019 与满员码）与它的 10 条文案（其中两条 16004 与别的号共用）见文件末尾一段（spectate-spec §3.2）。
  */
 public enum MatchTip {
 
@@ -68,7 +68,7 @@ public enum MatchTip {
     /** 其余传输失败（超时、连上后断开、同实例、目录缺席或读失败）：客户端退避后再补签。 */
     REISSUE_BATTLE_UNAVAILABLE(MatchTips.SERVICE_UNAVAILABLE, "战斗服务暂不可用"),
 
-    // ---- 163 WatchBattle（批次 6.5；spectate-spec §3.1 的判定顺序、§3.2 的 9 条文案。身份缺失 / 依赖故障 / 过载两条 16004 复用上面的
+    // ---- 163 WatchBattle（批次 6.5；spectate-spec §3.1 的判定顺序、§3.2 的 9 条文案 + 满员 1 条。身份缺失 / 依赖故障 / 过载两条 16004 复用上面的
     //      NO_IDENTITY 与 BUSY） ----
 
     /** 第 3、14 行与抢标记回「有票」：持票（任意状态，含开局后 60 s 的 ready 残留，BW1）；登记成功后的复查命中票据或战斗锁（含读锁出错，BW2）也回它。 */
@@ -81,8 +81,10 @@ public enum MatchTip {
     WATCH_NO_BATTLE(MatchTips.NO_WATCHABLE_BATTLE, "当前没有可观战的战斗"),
     /** 第 12、16 行：落点记录不存在；battle 回「房间不存在」（1004）或节点已判死。码与 {@link #WATCH_NOT_WATCHABLE} 相同（16018），文案不同。 */
     WATCH_NOT_FOUND(MatchTips.BATTLE_NOT_WATCHABLE, "该战斗不存在或已结束"),
-    /** 第 17 行：battle 的其它拒绝（观众已满、是参战者、签不出票）与传输失败；随机模式也不换场（BW6）。 */
+    /** 第 17 行：battle 的其它拒绝（是参战者、签不出票）与传输失败；随机模式也不换场（BW6）。 */
     WATCH_NOT_WATCHABLE(MatchTips.BATTLE_NOT_WATCHABLE, "该战斗当前无法观战"),
+    /** 第 17a 行：battle 回观众席已满（专用码，battle 与 163 共用）；回滚标记，随机模式也不换场。 */
+    WATCH_FULL(MatchTips.SPECTATE_FULL, "观战人数已满"),
     /** 第 9 行：在线目录里没有这名玩家的条目（没进游戏、断线、离场）。 */
     WATCH_OFFLINE(MatchTips.SPECTATE_OFFLINE, "会话不在线,无法观战");
 

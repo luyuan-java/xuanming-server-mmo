@@ -119,6 +119,44 @@ public class PlayerSqlAuthorityAutoConfiguration {
                     throw new IllegalStateException("M15缺少有界排空扫描或旧E封闭索引");
             }
         }
+        verifyAdmissionRecoverySchema(connection);
+    }
+
+    /** M19永久原件表不允许缺表、可空或以非唯一索引替代身份约束。 */
+    static void verifyAdmissionRecoverySchema(java.sql.Connection connection) throws java.sql.SQLException {
+        try (var statement=connection.prepareStatement("SELECT recovery_id,listing_id,player_id,old_epoch,proof_mode,request_digest,plan_bytes,status,created_ms FROM player_trade_admission_recovery WHERE 1=0");
+             var rows=statement.executeQuery()) {
+            var fields=rows.getMetaData();
+            for(int i=1;i<=fields.getColumnCount();i++) {
+                String name=fields.getColumnName(i).toLowerCase(java.util.Locale.ROOT);int type=fields.getColumnType(i);
+                if(fields.isNullable(i)!=java.sql.ResultSetMetaData.columnNoNulls)throw new IllegalStateException("M19永久恢复原件列不能可空");
+                boolean valid=switch(name) {
+                    case "recovery_id" -> type==java.sql.Types.VARBINARY && fields.getPrecision(i)==36;
+                    case "request_digest" -> type==java.sql.Types.BINARY && fields.getPrecision(i)==32;
+                    case "plan_bytes" -> (type==java.sql.Types.LONGVARBINARY || type==java.sql.Types.BLOB) && fields.getPrecision(i)>=16_777_215;
+                    case "status","proof_mode" -> type==java.sql.Types.VARCHAR && fields.getPrecision(i)>=32;
+                    default -> type==java.sql.Types.BIGINT;
+                };
+                if(!valid)throw new IllegalStateException("M19永久恢复原件列类型或容量错误");
+            }
+        }
+        var metadata=connection.getMetaData();String table=metadata.storesUpperCaseIdentifiers()?"PLAYER_TRADE_ADMISSION_RECOVERY":"player_trade_admission_recovery";
+        String schema;try{schema=connection.getSchema();}catch(java.sql.SQLFeatureNotSupportedException unsupported){schema=null;}
+        var primary=new java.util.TreeMap<Short,String>();
+        try(var keys=metadata.getPrimaryKeys(connection.getCatalog(),schema,table)) {
+            while(keys.next())primary.put(keys.getShort("KEY_SEQ"),keys.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT));
+        }
+        if(!java.util.List.copyOf(primary.values()).equals(java.util.List.of("recovery_id")))throw new IllegalStateException("M19恢复UUID必须为唯一主键");
+        var unique=new java.util.HashMap<String,java.util.SortedMap<Short,String>>();
+        try(var indexes=metadata.getIndexInfo(connection.getCatalog(),schema,table,true,false)) {
+            while(indexes.next()) {
+                String name=indexes.getString("INDEX_NAME"),column=indexes.getString("COLUMN_NAME");
+                if(name!=null && column!=null && !indexes.getBoolean("NON_UNIQUE"))
+                    unique.computeIfAbsent(name,ignored->new java.util.TreeMap<>()).put(indexes.getShort("ORDINAL_POSITION"),column.toLowerCase(java.util.Locale.ROOT));
+            }
+        }
+        if(unique.values().stream().noneMatch(index->java.util.List.copyOf(index.values()).equals(java.util.List.of("player_id","old_epoch"))))
+            throw new IllegalStateException("M19每个原角色代必须只有一份永久恢复原件");
     }
 
     /** Mapper自动配置被game-data排除也必须执行；缺表或旧结构不能静默回退。 */

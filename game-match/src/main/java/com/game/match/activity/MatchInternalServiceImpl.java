@@ -42,18 +42,62 @@ public class MatchInternalServiceImpl implements MatchInternalService {
     public static final String CANCEL_METHOD = "/match.MatchInternal/CancelActivityBattle";
     private final String cancellationSecret;
     private final ServiceCallSignatures cancellations;
+    private final com.game.match.global.GlobalMatchStore outcomes;
+    private final String outcomeSecret;
+    private final ServiceCallSignatures outcomeSignatures;
 
     @org.springframework.beans.factory.annotation.Autowired
+    public MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchStore> outcomes,
+            org.springframework.core.env.Environment environment) {
+        this(service,workers,props,environment.getProperty("MMORPG_MATCH_INTERNAL_SECRET_GUILD"),outcomes.getIfAvailable(),
+                environment.getProperty(MatchInternalService.OUTCOME_SECRET_ENV));
+    }
     public MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props) {
-        this(service,workers,props,System.getenv("MMORPG_MATCH_INTERNAL_SECRET_GUILD"));
+        this(service,workers,props,System.getenv("MMORPG_MATCH_INTERNAL_SECRET_GUILD"),null,System.getenv(MatchInternalService.OUTCOME_SECRET_ENV));
     }
     MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props, String cancellationSecret) {
+        this(service,workers,props,cancellationSecret,null,null);
+    }
+    private MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props, String cancellationSecret,
+            com.game.match.global.GlobalMatchStore outcomes,String outcomeSecret) {
         this.service = Objects.requireNonNull(service, "service");
         this.workers = Objects.requireNonNull(workers, "workers");
         this.budgetMs = props.requestBudget().toMillis();
         this.cancellationSecret = cancellationSecret;
         this.cancellations = cancellationSecret == null || cancellationSecret.isBlank() ? null
             : new ServiceCallSignatures(Map.of("guild",cancellationSecret),System::currentTimeMillis);
+        this.outcomes=outcomes;
+        this.outcomeSecret=outcomeSecret;
+        this.outcomeSignatures=outcomeSecret==null||outcomeSecret.isBlank()?null
+                :new ServiceCallSignatures(Map.of("battle",outcomeSecret),System::currentTimeMillis);
+    }
+
+    @Override public CompletableFuture<com.game.proto.match.CommitBattleOutcomeResponse> commitBattleOutcome(
+            com.game.proto.match.CommitBattleOutcomeRequest request) {
+        Deadline deadline=MatchRpcAttachments.deadlineFromCall(budgetMs);
+        CompletableFuture<com.game.proto.match.CommitBattleOutcomeResponse> reply=new CompletableFuture<>();
+        try {
+            authorizeOutcome(request);
+            workers.execute(()->{
+                try {
+                    authorizeOutcome(request);
+                    if(deadline.expired())throw new IllegalStateException("终局提交在工作队列到期");
+                    var actual=outcomes.commitOutcome(request,deadline);
+                    var response=com.game.proto.match.CommitBattleOutcomeResponse.newBuilder().setDecisionValue(actual.getTerminalDecision())
+                            .setRequestDigest(ServiceCallSignatures.digest(request)).build();
+                    reply.complete(ServiceCallSignatures.sign(MatchInternalService.OUTCOME_METHOD+"/reply",response,
+                            "match",outcomeSecret,System.currentTimeMillis()));
+                }catch(RuntimeException failure){reply.completeExceptionally(failure);}
+                catch(Error failure){reply.completeExceptionally(failure);throw failure;}
+            });
+        }catch(RuntimeException failure){reply.completeExceptionally(failure);}
+        return reply;
+    }
+    private void authorizeOutcome(com.game.proto.match.CommitBattleOutcomeRequest request) {
+        if(outcomes==null||outcomeSignatures==null||request==null
+                ||!"battle".equals(outcomeSignatures.verify(MatchInternalService.OUTCOME_METHOD,request)))
+            throw new SecurityException("Battle终局原件未配置或调用方签名不符");
     }
 
     @Override public CompletableFuture<CancelActivityBattleResponse> cancelActivityBattle(CancelActivityBattleRequest request) {
@@ -66,6 +110,17 @@ public class MatchInternalServiceImpl implements MatchInternalService {
                     authorizeCancellation(request);
                     if(deadline.expired())throw new IllegalStateException("活动取消在队列中到期，原件仍待恢复");
                     var decision=service.cancel(request,deadline);
+                    if(decision.getBattleId()!=0&&outcomes!=null) {
+                        var formation=outcomes.formation(decision.getBattleId());
+                        if(formation==null)throw new IllegalStateException("活动成局原件缺失，不能确认取消");
+                        // 持久Create始终先于实际出站。state5且没有Create是安全的开房前取消，保旧合同。
+                        int terminal=formation.getState()==5&&formation.getCreateRequest().isEmpty()?0
+                                :outcomes.resolveTerminalAfterDeadline(decision.getBattleId());
+                        formation=outcomes.formation(decision.getBattleId());
+                        if(formation.getState()==5&&!formation.getCreateRequest().isEmpty()&&terminal!=2)
+                            throw new IllegalStateException("已有Create原件但无权威ABORT，不能签安全取消");
+                        decision=decision.toBuilder().setTerminalDecisionValue(terminal).setFormationState(formation.getState()).build();
+                    }else if(decision.getRequestCancelled())decision=decision.toBuilder().setTerminalDecisionValue(2).build();
                     reply.complete(ServiceCallSignatures.sign(CANCEL_METHOD+"/reply",decision,"match",cancellationSecret,System.currentTimeMillis()));
                 } catch(RuntimeException failure) { reply.completeExceptionally(failure); }
                 catch(Error failure) { reply.completeExceptionally(failure); throw failure; }

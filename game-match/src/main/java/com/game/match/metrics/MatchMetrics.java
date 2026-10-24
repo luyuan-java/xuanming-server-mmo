@@ -255,10 +255,12 @@ public final class MatchMetrics {
      *   <li>{@code ALREADY_WATCHING}：<b>只计 16016</b>（并发抢占）。入口处对旧标记的懒清退不计它，另计
      *       {@code spectate_evictions{reason="rewatch"}}（W14；基线把两者混在一起）；</li>
      *   <li>{@code NO_BATTLE}：16017；{@code NOT_FOUND}：16018「不存在或已结束」；{@code REJECTED}：16018「当前无法观战」；</li>
+     *   <li>{@code FULL}：battle 回观众席已满（满员专用码「观战人数已满」）；</li>
      *   <li>{@code OVERLOADED}：在途已满（在处理器的 {@code onOverload()} 里记；这时没有进过处理流程）。Java 新增。</li>
      * </ul>
+     * 本地与全球两条路径口径相同；全球路径重放已存回执时按回执的 tip 反查，与首答记同一个出口。
      */
-    public enum WatchOutcome { OK, INTERNAL, QUEUED, IN_BATTLE, ALREADY_WATCHING, OFFLINE, NO_BATTLE, NOT_FOUND, REJECTED, OVERLOADED }
+    public enum WatchOutcome { OK, INTERNAL, QUEUED, IN_BATTLE, ALREADY_WATCHING, OFFLINE, NO_BATTLE, NOT_FOUND, REJECTED, FULL, OVERLOADED }
 
     /**
      * 164 的出口（{@code game_match_list_watchable_total{result}}）：{@code OK} = 回了列表（含空列表、含批读落点整批失败后变短的列表）；

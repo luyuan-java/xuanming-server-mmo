@@ -6,6 +6,7 @@ import com.game.battle.engine.TurnBattleEngine;
 import com.game.battle.metrics.BattleMetrics;
 import com.game.battle.metrics.BattleMetrics.CreateResult;
 import com.game.battle.metrics.BattleMetrics.Disconnect;
+import com.game.battle.metrics.BattleMetrics.ObserverReclaim;
 import com.game.battle.metrics.BattleMetrics.RoomEnd;
 import com.game.battle.metrics.BattleMetrics.RoundTrigger;
 import com.game.battle.metrics.BattleMetrics.SceneEventKind;
@@ -45,6 +46,7 @@ import com.game.proto.eBattleOutcome;
 import com.game.proto.eBattleTicketRole;
 import com.game.proto.eSpectateEndReason;
 import com.game.table.CommonErrorTip.common_error;
+import com.game.table.MatchErrorTip;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -54,6 +56,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 import java.lang.ref.WeakReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,7 +84,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     static final int ENTITY_IS_NULL = common_error.kEntityIsNull_VALUE;
     static final int INVALID_PARAMETER = common_error.kInvalidParameter_VALUE;
     static final int FEATURE_UNAVAILABLE = common_error.kFeatureUnavailable_VALUE;
-    static final int RATE_LIMIT_EXCEEDED = common_error.kRateLimitExceeded_VALUE;
+    /** 观众席已满：直接回 match 段的满员码，match 原样映射给客户端「观战人数已满」（不再借通用限流码 1008）。 */
+    static final int SPECTATE_FULL = MatchErrorTip.match_error.kMatchSpectateFull_VALUE;
     static final int PLAYER_NOT_FOUND_IN_SESSION = common_error.kPlayerNotFoundInSession_VALUE;
 
     /** 一回合结算之后房间的去向（R8）。 */
@@ -153,7 +157,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         if (rooms.find(battleId) != null) {
             metrics.roomCreate(CreateResult.IDEMPOTENT);
             log.info("CreateBattle 幂等命中 battle_id={} origin={}", Long.toUnsignedString(battleId), origin);
-            return response.build();
+            return response.setAdoptedOutcomeProtocolVersion(rooms.find(battleId).originalCreate.getOutcomeProtocolVersion())
+                    .setTargetInstanceId(deps.identity().instanceId()).build();
         }
         // 1–2 参数与路由 fail-closed
         String invalid = invalidReason(request);
@@ -189,6 +194,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         // 5 抄参战名单（无符号升序）
         BattleRoom room = new BattleRoom(battleId, request.getMatchMode(), request.getBattleConfigId(), request.getActivityContext(),
                 origin, engine, deadlineMs);
+        room.originalCreate=request;
         room.requiresResultConfirmation = !request.getPlacementOperationId().isEmpty() && origin.publishesResult();
         for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
             room.routingByPlayer.put(snapshot.getPlayerId(), snapshot.getRouting());
@@ -236,7 +242,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 Long.toUnsignedString(battleId), request.getPlayersCount(), Integer.toUnsignedString(request.getBattleConfigId()),
                 request.getMatchMode(), Long.toUnsignedString(deadlineMs), origin, request.getActivityContext().getKindValue(),
                 request.getActivityContext().getActivityId());
-        return response.build();
+        return response.setAdoptedOutcomeProtocolVersion(room.originalCreate.getOutcomeProtocolVersion())
+                .setTargetInstanceId(deps.identity().instanceId()).build();
     }
 
     /**
@@ -244,6 +251,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
      * 或 {@code scene_instance_id} 为空（出站防僵尸过滤会被关掉，打完也送不回结果）。通过返回 null，否则返回日志用的原因。
      */
     static String invalidReason(CreateBattleRequest request) {
+        if(request.getOutcomeProtocolVersion()>1||request.getOutcomeProtocolVersion()==1
+                &&(request.getPlacementOperationId().isBlank()||request.getTargetInstanceId().isBlank()))
+            return "终局协议版本未知或缺少固定原身份";
         if (request.getBattleId() == 0 || request.getPlayersCount() == 0) {
             return "battle_id 为 0 或没有玩家: players=" + request.getPlayersCount();
         }
@@ -375,12 +385,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             return addExistingObserver(room, observerId, existing, request, response);
         }
 
-        // 满员判定排在幂等之后（room.cpp:865-871）
+        // 满员判定排在幂等之后（room.cpp:865-871）。拒绝即终态：墓碑保留，同 op 迟到的 Add 不能在有空位之后翻成准入
         if (room.routingByObserver.size() >= RoomConstants.MAX_OBSERVERS_PER_ROOM) {
             observerOperations.cancelKnown(request.getSpectatorOperationId());
             log.info("AddObserver 观众已满 battle_id={} observer={} cap={}", Long.toUnsignedString(battleId),
                     Long.toUnsignedString(observerId), RoomConstants.MAX_OBSERVERS_PER_ROOM);
-            return response.setErrorMessage(tip(RATE_LIMIT_EXCEEDED)).build();
+            return response.setErrorMessage(tip(SPECTATE_FULL)).build();
         }
         // fail-closed：登记之前签票，签不出不登记
         Optional<BattleAssignedS2C> assigned = issuer.issue(battleId, observerId, room.deadlineMs,
@@ -393,6 +403,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         room.observerOperations.put(observerId,request.getSpectatorOperationId());
         room.routingByObserver.put(observerId, request.getRouting());
         room.observerNames.put(observerId, request.getObserverName());
+        // 登记即起算宽限：到期仍没建起直连就回收座位（幂等重试与补签票都不延长它）
+        armObserverGrace(room, observerId, RoomConstants.OBSERVER_ATTACH_GRACE_MS, ObserverReclaim.ATTACH_TIMEOUT);
         // 只推落点分配；观战首帧随直连握手下发（此刻观众一定还没有直连）
         pushAssignment(room, observerId, assigned.get());
         log.info("AddObserver 成功 battle_id={} observer={} name={} observers={}", Long.toUnsignedString(battleId),
@@ -456,11 +468,56 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         return proof;
     }
 
+    /** 观众摘除的唯一收口（Remove / StopWatch / 幂等签票失败 / 宽限回收 / 房间收尾全经这里）：先撤宽限计时器，再写墓碑。 */
     private void cancelObserverOperation(BattleRoom room,long player){
+        cancelObserverGrace(room,player);
         String operation=room.observerOperations.get(player);
         if(operation==null||!observerOperations.cancelKnown(operation))throw new IllegalStateException("房内观众缺少原操作，拒绝无证明清退");
         // 墓碑先写，随后才摘槽；已过截止仍能清理当前同操作。
         room.observerOperations.remove(player);observerOperations.detached(operation);
+    }
+
+    // ===================================================================================== 观众席宽限（登记后未建直连 / 断线未重连）
+
+    /**
+     * 给观众挂一只宽限计时器（先撤旧的）：到期时仍是同一间房、同一个原操作、且仍没有直连，就回收这个座位。
+     * 回调只捕获房间对象与原操作号，执行时按 N14 比对身份；撤销只在逻辑线程上做，撤销后保证不再执行。
+     */
+    private void armObserverGrace(BattleRoom room, long observerId, long graceMs, ObserverReclaim reason) {
+        cancelObserverGrace(room, observerId);
+        String operation = room.observerOperations.get(observerId);
+        if (operation == null) {
+            return; // 名单里的观众必有原操作；没有就不挂（摘除路径会抛错暴露）
+        }
+        try {
+            room.observerGrace.put(observerId, scheduler.after(graceMs, () -> onObserverGraceExpired(room, observerId, operation, reason)));
+        } catch (RejectedExecutionException closed) {
+            // 逻辑线程已关闭：房间随停机整批作废，不再需要回收
+            log.warn("逻辑线程已关闭，观众宽限计时器未挂 battle_id={} observer={} reason={}", Long.toUnsignedString(room.battleId),
+                    Long.toUnsignedString(observerId), reason);
+        }
+    }
+
+    private void cancelObserverGrace(BattleRoom room, long observerId) {
+        Cancellable grace = room.observerGrace.remove(observerId);
+        if (grace != null) {
+            grace.cancel();
+        }
+    }
+
+    private void onObserverGraceExpired(BattleRoom room, long observerId, String operation, ObserverReclaim reason) {
+        // 房间已换对象或进入收尾、观众已换成新操作、或宽限内已建起直连：都不回收
+        if (!isCurrent(room) || !operation.equals(room.observerOperations.get(observerId)) || room.directOf(observerId) != null) {
+            return;
+        }
+        // 复用 StopWatch 的摘除顺序：墓碑先写 → 摘名单 → 关直连（此刻本就没有）。不推 166：没有直连，战斗帧也不经 gate 回落
+        cancelObserverOperation(room, observerId);
+        room.routingByObserver.remove(observerId);
+        room.observerNames.remove(observerId);
+        closeDirectOf(room, observerId, Disconnect.BATTLE_CLOSED);
+        metrics.observerReclaimed(reason);
+        log.info("观众宽限到期，回收座位 battle_id={} observer={} reason={} observers={}", Long.toUnsignedString(room.battleId),
+                Long.toUnsignedString(observerId), reason, room.routingByObserver.size());
     }
 
     // ===================================================================================== 直连面
@@ -517,6 +574,10 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                     Long.toUnsignedString(playerId), old.peer(), link.peer());
             old.closeNow(Disconnect.REPLACED);
         }
+        if (role == eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER) {
+            // 观众已建起直连：撤掉登记 / 断线宽限
+            cancelObserverGrace(room, playerId);
+        }
         return OptionalInt.of(routing.getSessionId());
     }
 
@@ -545,6 +606,10 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         // 只摘「仍指向自己」的槽（引用相等）
         if (link != null && room.directByPlayer.get(playerId) == link) {
             room.directByPlayer.remove(playerId);
+            if (room.isObserver(playerId)) {
+                // 观众断线：宽限内重连照常观战，到期仍未重连就回收座位
+                armObserverGrace(room, playerId, RoomConstants.OBSERVER_RECONNECT_GRACE_MS, ObserverReclaim.RECONNECT_TIMEOUT);
+            }
         }
     }
 
@@ -798,9 +863,15 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         pending.inFlight=true;
         CompletableFuture<Void> acknowledged;
         try{
-            acknowledged=pending.original.size()>com.game.battle.port.BattleResultSink.MAX_SOURCE_BYTES
-                    ?CompletableFuture.failedFuture(new IllegalArgumentException("完成来源超过共同字节上限"))
-                    :deps.results().publishConfirmed(pending.event,pending.original,BattleResultAssembler.isActivity(room.activityContext)
+            if(pending.original.size()>com.game.battle.port.BattleResultSink.MAX_SOURCE_BYTES)
+                acknowledged=CompletableFuture.failedFuture(new IllegalArgumentException("完成来源超过共同字节上限"));
+            else if(room.originalCreate.getOutcomeProtocolVersion()==1)
+                acknowledged=deps.results().commitOutcome(room.originalCreate,pending.event,pending.original).thenCompose(decision->switch(decision){
+                    case BATTLE_OUTCOME_DECISION_COMPLETE -> CompletableFuture.completedFuture(null);
+                    case BATTLE_OUTCOME_DECISION_ABORT -> CompletableFuture.failedFuture(new com.game.battle.port.BattleResultSink.OutcomeAborted());
+                    default -> CompletableFuture.failedFuture(new IllegalStateException("Match没有确认唯一终局"));
+                });
+            else acknowledged=deps.results().publishConfirmed(pending.event,pending.original,BattleResultAssembler.isActivity(room.activityContext)
                     ?com.game.battle.port.BattleResultSink.Channel.ACTIVITY:com.game.battle.port.BattleResultSink.Channel.PLAIN);
             if(acknowledged==null)acknowledged=CompletableFuture.failedFuture(new IllegalStateException("结果端口没有确认句柄"));
         }catch(RuntimeException error){acknowledged=CompletableFuture.failedFuture(error);}
@@ -818,6 +889,13 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         scheduler.assertInLoop();
         if(!isCurrent(room)||room.pendingCompletion!=pending)return;
         pending.inFlight=false;
+        Throwable actual=error;
+        while(actual instanceof java.util.concurrent.CompletionException&&actual.getCause()!=null)actual=actual.getCause();
+        if(actual instanceof com.game.battle.port.BattleResultSink.OutcomeAborted){
+            // SQL围栏已胜出。不得个人直投、公开奖励或重算结果；房间可以安全摘除。
+            notifySpectateEndAndClose(room,eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED,eBattleOutcome.BATTLE_OUTCOME_ONGOING,Disconnect.BATTLE_CLOSED);
+            closeDirectConnections(room,Disconnect.BATTLE_CLOSED);eraseRoom(room,pending.endReason);return;
+        }
         if(error!=null){
             int delaySeconds=Math.min(30,1<<Math.min(pending.failures,5));
             if(pending.failures<Integer.MAX_VALUE)pending.failures++;
@@ -852,8 +930,10 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                             .findFirst().orElseThrow(() -> new IllegalStateException("已提交原件缺少玩家结算"));
             settlements.add(settlement);
             BattleEndS2C end = BattleEndS2C.newBuilder().setBattleId(room.battleId).setOutcome(outcome).setSettlement(settlement).build();
-            outbound.pushBattleFrame(room.battleId, playerId, room.directOf(playerId), Notify.BATTLE_END, outbound.frame(Notify.BATTLE_END, end));
-            dispatchSettlement(room, playerId, entry.getValue(), settlement);
+            if(room.originalCreate.getOutcomeProtocolVersion()!=1){
+                outbound.pushBattleFrame(room.battleId, playerId, room.directOf(playerId), Notify.BATTLE_END, outbound.frame(Notify.BATTLE_END, end));
+                dispatchSettlement(room, playerId, entry.getValue(), settlement);
+            }
         }
         notifySpectateEndAndClose(room, spectateReason, outcome, Disconnect.BATTLE_CLOSED);
         // 终局包已全部写出：关直连（应答 → FIN 由直连面保证，R3）
@@ -861,7 +941,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         BattleResultEvent event = committedEvent!=null?committedEvent:BattleResultAssembler.assemble(room.battleId, room.matchMode, room.battleConfigId, room.activityContext,
                 outcome, settlements, clock.epochMillis());
         if(committedEvent==null)dispatchResult(room,event);
-        else if(BattleResultAssembler.isActivity(room.activityContext)){
+        else if(room.originalCreate.getOutcomeProtocolVersion()!=1&&BattleResultAssembler.isActivity(room.activityContext)){
             try{deps.activityResults().dispatchCommitted(event);}catch(RuntimeException failure){log.error("已提交结果的兼容补拉投影失败",failure);}
         }
         log.info("战斗结束 battle_id={} outcome={} players={} teams={} total_rounds={} fled={} dead={} origin={} activity_kind={}",
@@ -928,11 +1008,23 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 .build();
     }
 
-    /** 161 观战快照（全员冷却清空、无道具、action_deadline_ms = 房间值、观众数 = 当前观众数）。 */
+    /** 161 观战快照（全员冷却清空、无道具、action_deadline_ms = 房间值、观众数 = 有活直连的观众数）。 */
     private void pushSpectateState(BattleRoom room, long observerId) {
         ViewerState view = BattleViews.forObserver(fullState(room));
         outbound.pushBattleFrame(room.battleId, observerId, room.directOf(observerId), Notify.SPECTATE_STATE,
-                outbound.frame(Notify.SPECTATE_STATE, view.toSpectateState(room.routingByObserver.size())));
+                outbound.frame(Notify.SPECTATE_STATE, view.toSpectateState(liveObserverCount(room))));
+    }
+
+    /** 在场观众数：只数有活直连的观众；登记了还没连上、或已断线在宽限里的不算（他们收不到任何战斗帧）。 */
+    private static int liveObserverCount(BattleRoom room) {
+        int live = 0;
+        for (long observerId : room.routingByObserver.keySet()) {
+            DirectLink link = room.directOf(observerId);
+            if (link != null && link.isLive()) {
+                live++;
+            }
+        }
+        return live;
     }
 
     /** 177 落点分配（大厅公告：有活直连直写，否则经 gate 回落）。 */

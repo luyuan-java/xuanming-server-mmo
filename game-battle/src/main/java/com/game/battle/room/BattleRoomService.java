@@ -43,7 +43,7 @@ import java.util.OptionalInt;
  * 一律 {@code BATTLE_CLOSED}（{@link DirectLink#closeGracefully}）。
  *
  * <p><b>指标</b>：房间实现负责计 {@code room_creates}（除 {@code NOT_ALLOCATABLE}，那是控制面计的）、{@code room_ends}、{@code fingerprint_mismatch}、
- * {@code rounds}、{@code round_resolve}、{@code pushes}、{@code tickets}；{@link #roomCount()} 由装配方绑定到 {@code BattleMetrics#bindRooms}。
+ * {@code rounds}、{@code round_resolve}、{@code pushes}、{@code tickets}、{@code observer_reclaimed}；{@link #roomCount()} 由装配方绑定到 {@code BattleMetrics#bindRooms}。
  */
 public interface BattleRoomService {
     /** 每次直连上行重核原连接和原操作；关闭排队尚未执行也不能使用被替换的槽。 */
@@ -82,7 +82,11 @@ public interface BattleRoomService {
     /** 补签票据（§2.6）：player 为 0 / 房间不在 / 非成员 → 1005；参战者优先；签不出 → 1003 且不带 assignment。 */
     IssueBattleTicketResponse issueBattleTicket(IssueBattleTicketRequest request);
 
-    /** 登记观众（§5.5，Q1 放进 6.2）：判定顺序 1004 → 1005 → 1005 → 幂等重签 / 重推 → 1008（满 20）→ 新观众签票、登记、推 177。 */
+    /**
+     * 登记观众（§5.5，Q1 放进 6.2）：判定顺序 1004 → 1005 → 1005 → 幂等重签 / 重推 → 满员码 {@code MatchErrorTip.kMatchSpectateFull}
+     * （满 20；拒绝留墓碑，同一原操作迟到的 Add 有空位后也不准入）→ 新观众签票、登记、推 177。
+     * 新登记起算 {@code RoomConstants.OBSERVER_ATTACH_GRACE_MS}：到期仍未建直连即回收座位（不推 166）；幂等重试与补签票不延长。
+     */
     AddObserverResponse addObserver(AddObserverRequest request);
 
     /** 原UUID/固定实例取消：先写管理器墓碑，再清原操作槽；房间不存在也留墓碑，未知不回成功证明。 */
@@ -100,13 +104,16 @@ public interface BattleRoomService {
     OptionalInt attachDirect(long battleId, long playerId, eBattleTicketRole role, DirectLink link);
 
     /**
-     * 握手成功、应答已写出之后调用（R1、O2）：只对观众推 161 {@code SpectateStateS2C} 首帧（观众数 = 当前观众数），参战者什么也不推。
+     * 握手成功、应答已写出之后调用（R1、O2）：只对观众推 161 {@code SpectateStateS2C} 首帧（观众数 = 有活直连的观众数，登记了未连上、
+     * 断线在宽限里的不算），参战者什么也不推。
      */
     void onDirectVerified(long battleId, long playerId, eBattleTicketRole role);
 
     /**
      * 已验证的直连断开（直连面的 {@code channelInactive}）：只在槽里仍是<b>同一个</b> {@code link}（引用相等）时摘除；
-     * 房间已不在或槽里已是别的连接时什么也不做（R7）。
+     * 房间已不在或槽里已是别的连接时什么也不做（R7）。摘掉的是观众的槽、且他仍在观众名单上时，起算
+     * {@code RoomConstants.OBSERVER_RECONNECT_GRACE_MS} 的重连宽限：宽限内重连由 {@link #attachDirect} 撤销计时器；到期仍未重连即回收座位
+     * （墓碑先写，不推 166，计 {@code observer_reclaimed}）。
      */
     void detachDirect(long battleId, long playerId, DirectLink link);
 

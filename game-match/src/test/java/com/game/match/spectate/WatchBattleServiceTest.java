@@ -13,6 +13,7 @@ import com.game.match.metrics.MetricLabels;
 import com.game.match.port.PlayerStatusReader;
 import com.game.match.proto.BattlePlacement;
 import com.game.match.spectate.ObserverDialer.Outcome;
+import com.game.match.support.MatchTips;
 import com.game.match.testing.FakeObserverDialer;
 import com.game.match.testing.FakeObserverDialer.Call;
 import com.game.match.testing.FakeObserverDialer.Kind;
@@ -80,6 +81,7 @@ class WatchBattleServiceTest {
     private static final String NO_BATTLE = "当前没有可观战的战斗";
     private static final String NOT_FOUND = "该战斗不存在或已结束";
     private static final String NOT_WATCHABLE = "该战斗当前无法观战";
+    private static final String FULL = "观战人数已满";
 
     private final List<String> events = new CopyOnWriteArrayList<>();
     private final ManualRedisClock clock = new ManualRedisClock();
@@ -1703,8 +1705,41 @@ class WatchBattleServiceTest {
     }
 
     static Stream<Arguments> battle的其它拒绝码() {
-        // 1005 观众是参战者 / 参数；1008 观众已满；1003 签不出票；外加一个没见过的码：只有 1004 是「房间不在」
+        // 1005 观众是参战者 / 参数；1003 签不出票；1008 通用限流（满员已改回专用码，1008 不再表示满员）；外加一个没见过的码。
+        // 只有 1004 是「房间不在」，满员专用码另见第 17a 行
         return Stream.of(Arguments.of(1005), Arguments.of(1008), Arguments.of(1003), Arguments.of(9999));
+    }
+
+    @Test
+    void 第17a行_battle回满员码_观战人数已满_回滚标记_outcome_full_随机模式也不换场() {
+        online();
+        open(X, -1_000);
+        open(Y);
+        observers.nextAdd(new Outcome.Replied(MatchTips.SPECTATE_FULL));
+
+        WatchBattleResponse response = watch(0);
+
+        assertRejected(response, MatchTips.SPECTATE_FULL, FULL);
+        assertThat(observers.adds()).as("满员不换场：换一场只会把同一批观众挤向别的房间").extracting(Call::battleId).containsExactly(X);
+        assertThat(spectate.calls).as("回滚带的是本次的值").contains("release(1001," + markValue(X, 1) + ")");
+        assertThat(spectate.markOf(PLAYER)).as("battle 明确没有登记：标记回滚").isEmpty();
+        assertThat(spectate.watchable()).as("满员不是收尾：索引不动").hasSize(2);
+        assertThat(spectate.calls).noneMatch(call -> call.startsWith("evict"));
+        assertThat(callKinds()).as("不补发 RemoveObserver").containsExactly(Kind.ADD);
+        assertThat(outcomes()).isEqualTo(Map.of("full", 1.0));
+    }
+
+    @Test
+    void 第17a行_指定场满员_同样回观战人数已满() {
+        online();
+        open(X);
+        observers.nextAdd(new Outcome.Replied(MatchTips.SPECTATE_FULL));
+
+        WatchBattleResponse response = watch(X);
+
+        assertRejected(response, MatchTips.SPECTATE_FULL, FULL);
+        assertThat(spectate.markOf(PLAYER)).isEmpty();
+        assertThat(outcomes()).isEqualTo(Map.of("full", 1.0));
     }
 
     // ================================================================ 第 18 行与随机选场

@@ -34,13 +34,50 @@ public final class PlayerInboxProvider implements PlayerInboxService, AutoClosea
     private final InboxStore store;
     private final long budgetMs;
     private final ThreadPoolExecutor workers;
+    private final String battleSecret;
+    private final com.game.discovery.serviceauth.ServiceCallSignatures battleSignatures;
 
     public PlayerInboxProvider(InboxStore store, InboxProperties properties) {
         this.store = store;
+        this.battleSecret = System.getenv(PlayerInboxService.BATTLE_SECRET_ENV);
+        this.battleSignatures = battleSecret == null || battleSecret.isBlank() ? null
+                : new com.game.discovery.serviceauth.ServiceCallSignatures(java.util.Map.of("match", battleSecret), System::currentTimeMillis);
         this.budgetMs = properties.requestBudget().toMillis();
         this.workers = new ThreadPoolExecutor(properties.workerThreads(), properties.workerThreads(), 0, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(properties.workerQueueCapacity()), Thread.ofPlatform().name("inbox-rpc-", 0).daemon(true).factory(),
                 new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    @Override
+    public CompletableFuture<com.game.proto.player_inbox.BattleSettlementInboxResponse> enqueueBattleSettlement(
+            com.game.proto.player_inbox.BattleSettlementInboxRequest request) {
+        return battleCall(request, true);
+    }
+
+    @Override
+    public CompletableFuture<com.game.proto.player_inbox.BattleSettlementInboxResponse> lookupBattleSettlement(
+            com.game.proto.player_inbox.BattleSettlementInboxRequest request) {
+        return battleCall(request, false);
+    }
+
+    private CompletableFuture<com.game.proto.player_inbox.BattleSettlementInboxResponse> battleCall(
+            com.game.proto.player_inbox.BattleSettlementInboxRequest request, boolean enqueue) {
+        String method = enqueue ? PlayerInboxService.BATTLE_ENQUEUE_METHOD : PlayerInboxService.BATTLE_LOOKUP_METHOD;
+        CompletableFuture<com.game.proto.player_inbox.BattleSettlementInboxResponse> result = new CompletableFuture<>();
+        try {
+            if (battleSignatures == null || !"match".equals(battleSignatures.verify(method, request)))
+                throw new SecurityException("Match永久来源身份未配置或不符");
+            workers.execute(() -> {
+                try {
+                    if (!"match".equals(battleSignatures.verify(method, request))) throw new SecurityException("Match来源已失效");
+                    var actual = store.battleSettlement(Deadline.after(budgetMs), request, enqueue);
+                    result.complete(com.game.discovery.serviceauth.ServiceCallSignatures.sign(method + "/reply", actual,
+                            "inbox", battleSecret, System.currentTimeMillis()));
+                } catch (Exception failure) { result.completeExceptionally(failure); }
+                catch (Error failure) { result.completeExceptionally(failure); throw failure; }
+            });
+        } catch (RuntimeException failure) { result.completeExceptionally(failure); }
+        return result;
     }
 
     @Override

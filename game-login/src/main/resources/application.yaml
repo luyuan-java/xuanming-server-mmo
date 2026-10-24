@@ -109,6 +109,10 @@ game:
     # 旧 refresh 被轮换后仍可重放的宽限窗口（基线 TokenConfig.RefreshReuseGrace）：窗口内同一旧 refresh 再来、且新 refresh 还没用过，
     # 返回同一对新令牌（回包丢失后的重试不必重新登录）。0 = 严格一次性；上限 60s，越界拒绝启动。
     refresh-reuse-grace: 30s
+    # 窗口外重放已轮换的旧 refresh 视为泄漏信号，吊销它所在的令牌家族（那次登录的整条令牌线，含 access；同账号其他登录不受影响）。
+    # false = 只观测：照常检测、记日志，不吊销。不要与 refresh-reuse-grace: 0 同时开：那样同一请求并发两次就会触发吊销。
+    # 基线 TokenConfig.RefreshReuseRevoke；见 mmorpg docs/design/dual-token-authentication.md「令牌家族、重用检测与家族吊销」。
+    refresh-reuse-revoke: true
     # 每账号处于「已登录（TCP Login）、未进游戏」窗口的连接上限（基线 3，超出回 2024），与一次登记的有效期（没注销干净的按它自愈）。
     max-devices-per-account: 3
     device-session-ttl: 30m

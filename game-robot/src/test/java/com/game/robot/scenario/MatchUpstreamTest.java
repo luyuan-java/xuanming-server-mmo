@@ -124,7 +124,7 @@ class MatchUpstreamTest {
         robot.put("CHALLENGE_EXPIRED", BattleSmokeChecks.TEXT_CHALLENGE_EXPIRED);
         robot.put("CHALLENGE_NOT_TARGET", BattleSmokeChecks.TEXT_CHALLENGE_NOT_TARGET);
         robot.put("REISSUE_BATTLE_GONE", BattleSmokeChecks.TEXT_BATTLE_GONE);
-        // 163 观战的七条（批次 6.5，spectate-spec §3.2；两条 16004 复用别的号的 NO_IDENTITY / BUSY，robot 不断言它们）
+        // 保留规格原七条，另核本轮正式导表的满员文案；不把其他复用号当观战专用码。
         robot.put("WATCH_QUEUED", SpectateSteps.TEXT_QUEUED);
         robot.put("WATCH_IN_BATTLE", SpectateSteps.TEXT_IN_BATTLE);
         robot.put("WATCH_ALREADY", SpectateSteps.TEXT_ALREADY_WATCHING);
@@ -132,12 +132,14 @@ class MatchUpstreamTest {
         robot.put("WATCH_NOT_FOUND", SpectateSteps.TEXT_NOT_FOUND);
         robot.put("WATCH_NOT_WATCHABLE", SpectateSteps.TEXT_NOT_WATCHABLE);
         robot.put("WATCH_OFFLINE", SpectateSteps.TEXT_OFFLINE);
+        robot.put("WATCH_FULL", SpectateSteps.TEXT_FULL);
         assertThat(upstream).containsAllEntriesOf(robot);
+        assertThat(SpectateSteps.TIP_FULL).isEqualTo(com.game.table.MatchErrorTip.match_error.kMatchSpectateFull_VALUE);
         // 6.4 的临时应答（1006）随 M22 关闭删除：MatchTip 里不再有它，robot 的场景也不再断言它
         assertThat(upstream).doesNotContainKey("FEATURE_UNAVAILABLE");
         assertThat(upstream.keySet().stream().filter(k -> k.startsWith("WATCH_"))).as("MatchTip 加了新的观战文案就同步 SpectateSteps 与本测试")
                 .containsExactlyInAnyOrder("WATCH_QUEUED", "WATCH_IN_BATTLE", "WATCH_ALREADY", "WATCH_NO_BATTLE", "WATCH_NOT_FOUND",
-                        "WATCH_NOT_WATCHABLE", "WATCH_OFFLINE");
+                        "WATCH_NOT_WATCHABLE", "WATCH_OFFLINE", "WATCH_FULL");
     }
 
     @Test
@@ -145,7 +147,7 @@ class MatchUpstreamTest {
         String tips = file("game-match/src/main/java/com/game/match/support/MatchTips.java");
         // robot 与 game-match 各自从导表生成的枚举取值；这里只钉「取的是同一个枚举常量」，数值由 SpectateStepsTest 钉
         for (String constant : List.of("kMatchSpectateWhileQueued_VALUE", "kMatchSpectateWhileInBattle_VALUE", "kMatchAlreadyWatching_VALUE",
-                "kMatchNoWatchableBattle_VALUE", "kMatchBattleNotWatchable_VALUE", "kMatchSpectateOffline_VALUE")) {
+                "kMatchNoWatchableBattle_VALUE", "kMatchBattleNotWatchable_VALUE", "kMatchSpectateOffline_VALUE", "kMatchSpectateFull_VALUE")) {
             assertThat(tips).as("MatchTips 用到 %s", constant).contains("MatchErrorTip.match_error." + constant);
         }
     }

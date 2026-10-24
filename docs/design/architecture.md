@@ -2250,3 +2250,16 @@ TX1 接管凭据不是资产到账证明。既有 AssetOpService 与 PersistedAs
 当前 Java `0.1.0-SNAPSHOT` 尚未完成全类型验收：`GateNode.stop()` 关闭全部会话，`SceneNode.release()` 关闭链路并最终写回，`BattleNode.release()` 关闭准入并作废房间；Gate 的 deadline 排空标记不能证明零连接。跨节点疏散、正式 K8s 发布编排仍有待做项（`docs/porting/roadmap.md` 5.5、7.6），已有多副本、注册发现与幂等不等于已有稳定业务分组、版本兼容闸和金丝雀观察／中止闭环。
 
 后续须按各类型状态所有者明确“停新工作→完成或交接存量→证据确认排空→退出”，并分别验证计划维护、异常宕机和新旧版本并存。物理 TCP 不断与客户端自动恢复分别约定体验预算；超时不能伪报排空。当前只是需求记录，未修改代码或部署配置、未执行构建或测试，`PARITY.md` 按待实现／待整体验收登记。
+
+
+## 旧Scene OPEN的受控SQL退休（2026-10-23，实现候选，待运行验收）
+
+Java的准入身份是`player_final_save(player_id, owner_epoch)`中的完整原`RoleAdmissionIdentity`，不是可自行推进E的Redis holder。普通claim先持route/P锁并帮助完成原PENDING；旧最终登记也在同P锁核当前E。因此永久更高SQL E会拒绝旧E的新写。只有“E更高”仍不证明当前快照完整、待投已结束或交易已排空，维护工具不能只增E后删除OPEN，更不能将退休命名为EXACT_APPLIED。主Go/C++同admission可推进E的B5反例不能用Java这一保证替代；两版分别保存各自真实围栏原件。
+
+`PlayerTradeStore.planOpenRecovery`默认只读计划；显式`applyOpenRecovery`复用原route→P→账号→listing→最终写锁序，重核原listing/player/account/revision、指定oldE/source及完整准入PB。当前E须严格高于oldE，并区分两种真实原件：已有当前准入时，必须已经释放，且原SCENE_ACK与当前APPLIED摘要、player标量及player_state原bytes/saved_epoch一致；仅claim未load时，允许released=false，但当前final必须实际不存在、真实player_state必须非NULL可解析且saved_epoch不超当前E、当前排空原件也为空。load两重载都在同P登记OPEN后才返回快照；若load先获P，当前OPEN会让该分支拒绝；若冻结先获P，迟到load被交易锁拒绝。任一PENDING/未知/超前最终意图、未终局资产或待投都拒绝，不改原待办。不得把租约过期、7天阈值、外部JSON自报成功或旧行ABSENT当本次排空证明；SQL_NO_ADMISSION只能由上述当前无准入原件在提交点复核形成，不得代替已有OPEN的Scene ACK。
+
+计划固定实际数据库、route generation及全zone围栏、listing/P/state/当前final/drain/旧OPEN的全列摘要，并固定除当前E与指定oldE外全部未APPLIED准入的原件集摘要、数量及last语义。提交重读必须逐项等同；同一SQL事务插入永久`player_trade_admission_recovery`原件再CAS删除唯一指定OPEN，任何失败一起回滚。状态固定为`RETIRED_BY_SQL_SUCCESSOR`，不更新玩家快照、不生成Scene ACK、不推进交易终局。SQL_NO_ADMISSION分支的较早退休不释放当前E；最后一条按固定计划复用sealUnadmitted，同事务写真实无准入封闭/释放与永久收据。永久原件显式保存proof_mode及v2 typed计划，返回的otherOpenAdmissions/unadmittedEpochSealed保持原操作结局，后续全排空不能重写较早收据。恢复UUID及(player_id,oldE)唯一，完整typed计划永久存SQL；重试或提交UNKNOWN只按同一原件读取永久收据，不能在行已消失时重新认定成功。收据形成后即使角色已换代/过户仍能只读认重，不能借新归属重写旧记录。
+
+CLI `RecoverTradeAdmission`默认plan，apply要求完整计划文件与SHA、显式目标实例/数据库。沿用`GameNamespaceBinder`、`NamespaceDatabaseCheck`、`LocalTargets`及实际实例身份读取，连接与凭证只来自环境；计划/结果使用已有仓外原子不覆盖私有输出。每物理TiDB连接装配现强读策略；SQL事务内不访问Redis、远程Scene或文件。跨SQL/Redis不宣称ACID，也不恢复未登记RAM。原7天有界清理只删除已被更高E围栏的旧OPEN/APPLIED、永不删除PENDING；与本显式维护收据不同，不能拿既有清理的ABSENT补出恢复成功。
+
+本节记录授权实现合同，不代表已构建、迁移、真TiDB或进程故障验证。部署须停旧写者并通过M19表形状门禁；计划漂移、缺行、失联及提交结果不明均保留原失败/原计划，禁止自动清锁或重生成更宽松计划。
