@@ -16,9 +16,24 @@ import org.junit.jupiter.api.Test;
 class PlayerTradeDrainSqlTest {
     private static final Duration BUDGET = Duration.ofSeconds(5);
     private static final String SOURCE = "scene-original";
+    private static final String MAINTENANCE_NONCE="1234567890abcdef1234567890abcdef";
+    private static final String MAINTENANCE_INSTANCE="fixture-maintenance-instance";
+    private static final String MAINTENANCE_ADDRESS="maintenance-db.example:3306";
+    private static PlayerTradeStore.RecoveryTarget target(PlayerTradeStoreTest.Fixture f) {
+        return new PlayerTradeStore.RecoveryTarget(MAINTENANCE_NONCE,7,f.database,MAINTENANCE_ADDRESS,MAINTENANCE_INSTANCE);
+    }
+    private static void maintenance(PlayerTradeStoreTest.Fixture f) {
+        f.sql.execute("CREATE TABLE maintenance_recovery_target(purpose VARBINARY(16) NOT NULL,zone_id INT UNSIGNED NOT NULL,schema_name VARBINARY(64) NOT NULL,target_nonce VARBINARY(32) NOT NULL,physical_addr VARBINARY(255) NOT NULL,PRIMARY KEY(purpose,zone_id,schema_name))");
+        f.sql.update("INSERT INTO maintenance_recovery_target VALUES(?,?,?,?,?)",ascii("admission"),7,ascii(f.database),
+                ascii(MAINTENANCE_NONCE),ascii(MAINTENANCE_ADDRESS));
+    }
+    private static byte[] ascii(String value){return value.getBytes(java.nio.charset.StandardCharsets.US_ASCII);}
+    private static PlayerTradeStore maintenanceStore(PlayerTradeStoreTest.Fixture f,PlayerTradeStore.RecoveryTarget target,
+                                                    PlayerTradeStore.RecoveryInstanceIdentity identity) {
+        return new PlayerTradeStore(f.source,f.manager,f.clock::get,5,PlayerTradeStore.sqlFreezeVerifier(),(sql,request)->{},target,identity);
+    }
     private static PlayerTradeStore trades(PlayerTradeStoreTest.Fixture f) {
-        return new PlayerTradeStore(f.source, f.manager, f.clock::get, 5, PlayerTradeStore.sqlFreezeVerifier(),
-            (sql, request) -> {});
+        return maintenanceStore(f,target(f),connection->MAINTENANCE_INSTANCE);
     }
     private static void refuses(Code code, org.junit.jupiter.api.function.Executable work) {
         assertEquals(code, assertThrows(Failure.class, work).code());
@@ -128,6 +143,7 @@ class PlayerTradeDrainSqlTest {
                 .setSceneId(41).setZoneId(7).setSessionId(2).setLoginGeneration(3).build();
     }
     private static RecoverySetup recovery(PlayerTradeStoreTest.Fixture f,boolean complete) {
+        maintenance(f);
         f.player(1,"seller");assertEquals(new PlayerStore.ClaimResult.Claimed(1),f.players.claimOwnership(1,BUDGET));
         assertTrue(f.players.loadForScene(identity(1,"old-source"),"seller",BUDGET).isPresent());
         f.clock.addAndGet(PlayerStore.OWNER_LEASE.toMillis()*2);
@@ -259,6 +275,7 @@ class PlayerTradeDrainSqlTest {
     private record UnusedEpoch(PlayerTradeStore store,FreezeRequest freeze,long currentEpoch,
                                java.util.List<PlayerTradeStore.RecoveryRequest> requests) {}
     private static UnusedEpoch unusedEpoch(PlayerTradeStoreTest.Fixture f,int oldCount,boolean freezeNow) {
+        maintenance(f);
         f.player(1,"seller");assertEquals(new PlayerStore.ClaimResult.Claimed(1),f.players.claimOwnership(1,BUDGET));
         var requests=new java.util.ArrayList<PlayerTradeStore.RecoveryRequest>();var freeze=new FreezeRequest(101,1,"seller",1);
         for(long epoch=1;epoch<=oldCount;epoch++) {
@@ -369,4 +386,61 @@ class PlayerTradeDrainSqlTest {
         }
     }
 
+    @Test void 默认Store恢复拒无独立目标_普通冻结操作不要求维护标记() throws Exception {
+        try(var f=new PlayerTradeStoreTest.Fixture()) {
+            var r=recovery(f,true);
+            var ordinary=new PlayerTradeStore(f.source,f.manager,f.clock::get,5,PlayerTradeStore.sqlFreezeVerifier(),(sql,request)->{});
+            refuses(Code.NOT_READY,()->ordinary.planOpenRecovery(r.request(),BUDGET));notRecovered(f);
+            var plan=r.store().planOpenRecovery(r.request(),BUDGET);
+            refuses(Code.NOT_READY,()->ordinary.applyOpenRecovery(plan,BUDGET));notRecovered(f);
+            f.sql.execute("DROP TABLE maintenance_recovery_target");
+            f.player(2,"other");
+            assertNotNull(ordinary.beginFreeze(new FreezeRequest(102,2,"other",1),BUDGET));
+            assertEquals(102,f.row(2).getTradeListingId(),"普通交易不借维护目标获得或失去权限");
+        }
+    }
+
+    @Test void 专用标记必须同nonce目的区库地址与实例_仅debug标记零效果() throws Exception {
+        try(var f=new PlayerTradeStoreTest.Fixture()) {
+            var r=recovery(f,true);var correct=target(f);
+            for(var wrong:java.util.List.of(
+                    new PlayerTradeStore.RecoveryTarget("b".repeat(32),7,f.database,MAINTENANCE_ADDRESS,MAINTENANCE_INSTANCE),
+                    new PlayerTradeStore.RecoveryTarget(MAINTENANCE_NONCE,9,f.database,MAINTENANCE_ADDRESS,MAINTENANCE_INSTANCE),
+                    new PlayerTradeStore.RecoveryTarget(MAINTENANCE_NONCE,7,"wrong_schema",MAINTENANCE_ADDRESS,MAINTENANCE_INSTANCE),
+                    new PlayerTradeStore.RecoveryTarget(MAINTENANCE_NONCE,7,f.database,"another-db.example:3306",MAINTENANCE_INSTANCE),
+                    new PlayerTradeStore.RecoveryTarget(MAINTENANCE_NONCE,7,f.database,MAINTENANCE_ADDRESS,"wrong-instance"))) {
+                var store=maintenanceStore(f,wrong,connection->MAINTENANCE_INSTANCE);
+                refuses(Code.CONFLICT,()->store.planOpenRecovery(r.request(),BUDGET));notRecovered(f);
+            }
+            f.sql.update("UPDATE maintenance_recovery_target SET purpose=?",ascii("promotion"));
+            refuses(Code.CONFLICT,()->r.store().planOpenRecovery(r.request(),BUDGET));notRecovered(f);
+            f.sql.update("UPDATE maintenance_recovery_target SET purpose=?,schema_name=?",ascii("admission"),ascii("another_schema"));
+            refuses(Code.CONFLICT,()->r.store().planOpenRecovery(r.request(),BUDGET));notRecovered(f);
+            f.sql.execute("DROP TABLE maintenance_recovery_target");
+            f.sql.execute("CREATE TABLE debug_import_local_target(target_nonce VARBINARY(32))");
+            f.sql.update("INSERT INTO debug_import_local_target VALUES(?)",ascii(correct.nonce()));
+            refuses(Code.NOT_READY,()->r.store().planOpenRecovery(r.request(),BUDGET));notRecovered(f);
+        }
+    }
+
+    @Test void 永久标记无TTL_提交与原收据重放均锁内复核_换标记不丢原件() throws Exception {
+        try(var f=new PlayerTradeStoreTest.Fixture()) {
+            var r=recovery(f,true);var plan=r.store().planOpenRecovery(r.request(),BUDGET);
+            f.sql.update("UPDATE maintenance_recovery_target SET target_nonce=?",ascii("c".repeat(32)));
+            refuses(Code.CONFLICT,()->r.store().applyOpenRecovery(plan,BUDGET));notRecovered(f);
+            f.sql.update("UPDATE maintenance_recovery_target SET target_nonce=?",ascii(MAINTENANCE_NONCE));
+            f.clock.addAndGet(java.time.Duration.ofDays(30).toMillis());
+            var receipt=r.store().applyOpenRecovery(plan,BUDGET);
+            assertEquals(0,oldOpen(f));assertEquals(1,f.count("player_trade_admission_recovery"));
+            byte[] original=f.sql.queryForObject("SELECT plan_bytes FROM player_trade_admission_recovery",byte[].class);
+            f.sql.update("DELETE FROM maintenance_recovery_target");
+            refuses(Code.CONFLICT,()->trades(f).applyOpenRecovery(plan,BUDGET));
+            assertArrayEquals(original,f.sql.queryForObject("SELECT plan_bytes FROM player_trade_admission_recovery",byte[].class));
+            f.sql.update("INSERT INTO maintenance_recovery_target VALUES(?,?,?,?,?)",ascii("admission"),7,ascii(f.database),ascii(MAINTENANCE_NONCE),ascii(MAINTENANCE_ADDRESS));
+            assertEquals(receipt,trades(f).applyOpenRecovery(plan,BUDGET));
+            for(String nonce:java.util.List.of("0".repeat(32),"A".repeat(32),"short")) {
+                refuses(Code.INVALID,()->maintenanceStore(f,new PlayerTradeStore.RecoveryTarget(nonce,7,f.database,MAINTENANCE_ADDRESS,MAINTENANCE_INSTANCE),connection->MAINTENANCE_INSTANCE));
+            }
+        }
+    }
 }

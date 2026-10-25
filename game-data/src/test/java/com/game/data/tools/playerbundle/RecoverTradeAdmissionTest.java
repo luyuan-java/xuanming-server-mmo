@@ -26,23 +26,28 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-/** CLI本地/命名空间/目标与计划原件门禁；成功路径仍调用正式SQL Store。 */
+/** CLI专用维护目标/命名空间/计划原件门禁；成功路径仍调用正式SQL Store。 */
 class RecoverTradeAdmissionTest {
     private static final String ID="10000000-0000-0000-0000-000000000001";
     private static final String INSTANCE="fixture-tidb-instance";
+    private static final String NONCE="1234567890abcdef1234567890abcdef";
     private static final Duration BUDGET=Duration.ofSeconds(5);
     private final ByteArrayOutputStream out=new ByteArrayOutputStream(),err=new ByteArrayOutputStream();
     private static List<String> plan(Path out,String database) {
         return List.of("--out",out.toString(),"--expect-database",database,"--expect-instance",INSTANCE,
+                "--maintenance-target-nonce",NONCE,"--zone-id","7",
                 "--recovery-id",ID,"--listing-id","101","--player-id","1","--seller-account","seller",
                 "--owner-revision","1","--old-epoch","1","--source-instance","old-source");
     }
     private static List<String> apply(Path out,Path plan,String sha,String database) {
         return List.of("--apply","--out",out.toString(),"--plan",plan.toString(),"--plan-sha256",sha,
-                "--expect-database",database,"--expect-instance",INSTANCE);
+                "--expect-database",database,"--expect-instance",INSTANCE,"--maintenance-target-nonce",NONCE,"--zone-id","7");
     }
     private static Map<String,String> env() {
-        return Map.of("GAME_TRADE_RECOVERY_JDBC","jdbc:mysql://127.0.0.1:24000/game","GAME_MYSQL_USER","fixture",
+        return env("game");
+    }
+    private static Map<String,String> env(String database) {
+        return Map.of("GAME_TRADE_RECOVERY_JDBC","jdbc:mysql://127.0.0.1:24000/"+database,"GAME_MYSQL_USER","fixture",
                 "GAME_MYSQL_PASSWORD","must-not-appear-in-output","GAME_NAMESPACE","game");
     }
     private int run(List<String> args,Map<String,String> env,RecoverTradeAdmission.Connections connection) {
@@ -62,7 +67,7 @@ class RecoverTradeAdmissionTest {
         }
     }
 
-    @Test void 非本机目标与输出覆盖在打开SQL前拒绝_不输出秘密(@TempDir Path dir) throws Exception {
+    @Test void URL凭据参数与输出覆盖在打开SQL前拒绝_不输出秘密(@TempDir Path dir) throws Exception {
         var opens=new AtomicInteger();var connections=new RecoverTradeAdmission.Connections() {
             public DataSource open(String url,String user,String password) { opens.incrementAndGet();throw new AssertionError("不应连接"); }
         };
@@ -85,6 +90,11 @@ class RecoverTradeAdmissionTest {
     }
     private static void setup(DataSqlFixture f) { setup(f,true); }
     private static void setup(DataSqlFixture f,boolean admitted) {
+        var targetSql=new JdbcTemplate(f.dataSource);
+        targetSql.execute("CREATE TABLE maintenance_recovery_target(purpose VARBINARY(16) NOT NULL,zone_id INT UNSIGNED NOT NULL,schema_name VARBINARY(64) NOT NULL,target_nonce VARBINARY(32) NOT NULL,physical_addr VARBINARY(255) NOT NULL,PRIMARY KEY(purpose,zone_id,schema_name))");
+        targetSql.update("INSERT INTO maintenance_recovery_target VALUES(?,?,?,?,?)","admission".getBytes(java.nio.charset.StandardCharsets.US_ASCII),7,
+                f.database.getBytes(java.nio.charset.StandardCharsets.US_ASCII),NONCE.getBytes(java.nio.charset.StandardCharsets.US_ASCII),
+                "127.0.0.1:24000".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
         var clock=new AtomicLong(1_000_000);var players=f.playerStore(clock::get);
         players.ensureAccount("seller");var row=new PlayerRow();row.setPlayerId(1);row.setAccount("seller");row.setZoneId(7);row.setClassId(1);
         assertEquals(PlayerStore.CreateStatus.CREATED,players.createPlayerWithinCap(row,5,List.of("旧OPEN角色"),BUDGET).status());
@@ -118,14 +128,14 @@ class RecoverTradeAdmissionTest {
     @Test void 正式Store默认计划零写_显式apply永久收据_同计划可重查(@TempDir Path dir) throws Exception {
         try(var f=DataSqlFixture.create()) {
             setup(f);var sql=new JdbcTemplate(f.dataSource);var closed=new AtomicInteger();var c=connection(f,INSTANCE,closed);
-            Path p=dir.resolve("plan.json");assertEquals(0,run(plan(p,f.database),env(),c));
+            Path p=dir.resolve("plan.json");assertEquals(0,run(plan(p,f.database),env(f.database),c));
             assertEquals(0,sql.queryForObject("SELECT COUNT(*) FROM player_trade_admission_recovery",Integer.class));
             assertEquals(1,sql.queryForObject("SELECT COUNT(*) FROM player_final_save WHERE owner_epoch=1",Integer.class));
             String digest=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(p)));
-            assertEquals(0,run(apply(dir.resolve("applied.json"),p,digest,f.database),env(),c));
+            assertEquals(0,run(apply(dir.resolve("applied.json"),p,digest,f.database),env(f.database),c));
             assertEquals(0,sql.queryForObject("SELECT COUNT(*) FROM player_final_save WHERE owner_epoch=1",Integer.class));
             assertEquals(1,sql.queryForObject("SELECT COUNT(*) FROM player_trade_admission_recovery",Integer.class));
-            assertEquals(0,run(apply(dir.resolve("replayed.json"),p,digest,f.database),env(),c));
+            assertEquals(0,run(apply(dir.resolve("replayed.json"),p,digest,f.database),env(f.database),c));
             var json=new ObjectMapper().readTree(Files.readAllBytes(dir.resolve("replayed.json")));
             assertEquals("RETIRED_BY_SQL_SUCCESSOR",json.path("receipt").path("status").asText());
             assertEquals(3,closed.get());assertFalse(out.toString().contains("must-not-appear"));assertFalse(Files.readString(p).contains("password"));
@@ -135,10 +145,10 @@ class RecoverTradeAdmissionTest {
     @Test void 错实例_错库_篡改计划SHA均不退休原OPEN(@TempDir Path dir) throws Exception {
         try(var f=DataSqlFixture.create()) {
             setup(f);var sql=new JdbcTemplate(f.dataSource);var closed=new AtomicInteger();Path p=dir.resolve("plan.json");
-            assertEquals(1,run(plan(dir.resolve("wrong-instance"),f.database),env(),connection(f,"wrong-instance",closed)));
-            assertEquals(1,run(plan(dir.resolve("wrong-database"),"wrong_database"),env(),connection(f,INSTANCE,closed)));
-            assertEquals(0,run(plan(p,f.database),env(),connection(f,INSTANCE,closed)));
-            assertEquals(1,run(apply(dir.resolve("result.json"),p,"0".repeat(64),f.database),env(),connection(f,INSTANCE,closed)));
+            assertEquals(1,run(plan(dir.resolve("wrong-instance"),f.database),env(f.database),connection(f,"wrong-instance",closed)));
+            assertEquals(1,run(plan(dir.resolve("wrong-database"),"wrong_database"),env(f.database),connection(f,INSTANCE,closed)));
+            assertEquals(0,run(plan(p,f.database),env(f.database),connection(f,INSTANCE,closed)));
+            assertEquals(1,run(apply(dir.resolve("result.json"),p,"0".repeat(64),f.database),env(f.database),connection(f,INSTANCE,closed)));
             assertEquals(0,sql.queryForObject("SELECT COUNT(*) FROM player_trade_admission_recovery",Integer.class));
             assertEquals(1,sql.queryForObject("SELECT COUNT(*) FROM player_final_save WHERE owner_epoch=1",Integer.class));
             assertEquals(101L,sql.queryForObject("SELECT trade_listing_id FROM player WHERE player_id=1",Long.class).longValue());
@@ -151,7 +161,7 @@ class RecoverTradeAdmissionTest {
             setup(f,false);var sql=new JdbcTemplate(f.dataSource);var c=connection(f,INSTANCE,new AtomicInteger());
             byte[] state=sql.queryForObject("SELECT data FROM player_state WHERE player_id=1",byte[].class);
             long saved=sql.queryForObject("SELECT saved_epoch FROM player_state WHERE player_id=1",Long.class);
-            Path plan=dir.resolve("unadmitted-plan.json");assertEquals(0,run(plan(plan,f.database),env(),c));
+            Path plan=dir.resolve("unadmitted-plan.json");assertEquals(0,run(plan(plan,f.database),env(f.database),c));
             var body=new ObjectMapper().readTree(Files.readAllBytes(plan));
             assertEquals("SQL_NO_ADMISSION",body.path("original").path("proofMode").asText());
             assertTrue(body.path("original").path("sealUnusedEpoch").asBoolean());
@@ -159,7 +169,7 @@ class RecoverTradeAdmissionTest {
             assertEquals(0,sql.queryForObject("SELECT owner_released FROM player WHERE player_id=1",Integer.class));
             assertEquals(0,sql.queryForObject("SELECT COUNT(*) FROM player_trade_drain",Integer.class));
             String hash=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(plan)));
-            Path result=dir.resolve("unadmitted-result.json");assertEquals(0,run(apply(result,plan,hash,f.database),env(),c));
+            Path result=dir.resolve("unadmitted-result.json");assertEquals(0,run(apply(result,plan,hash,f.database),env(f.database),c));
             var receipt=new ObjectMapper().readTree(Files.readAllBytes(result)).path("receipt");
             assertEquals("SQL_NO_ADMISSION",receipt.path("proofMode").asText());assertTrue(receipt.path("unadmittedEpochSealed").asBoolean());
             assertEquals("SQL_NO_ADMISSION",sql.queryForObject("SELECT proof_mode FROM player_trade_admission_recovery",String.class));
@@ -171,4 +181,55 @@ class RecoverTradeAdmissionTest {
         }
     }
 
+    @Test void 非回环精确维护目标可计划_改nonce与namespace均在首效果前拒绝(@TempDir Path dir) throws Exception {
+        try(var f=DataSqlFixture.create()) {
+            setup(f);var sql=new JdbcTemplate(f.dataSource);
+            String address="maintenance-db.example:3306";
+            sql.update("UPDATE maintenance_recovery_target SET physical_addr=?",address.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            var remote=new java.util.HashMap<>(env(f.database));remote.put("GAME_TRADE_RECOVERY_JDBC","jdbc:mysql://"+address+"/"+f.database);
+            var c=connection(f,INSTANCE,new AtomicInteger());Path p=dir.resolve("remote-plan.json");
+            assertEquals(0,run(plan(p,f.database),remote,c));
+            var body=new ObjectMapper().readTree(Files.readAllBytes(p));
+            assertEquals("player-trade-open-recovery-plan-v3",body.path("schema").asText());
+            assertEquals(address,body.path("target").path("physicalAddress").asText());
+            assertEquals(NONCE,body.path("target").path("nonce").asText());
+            String hash=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(p)));
+            var changed=new ArrayList<>(apply(dir.resolve("wrong-nonce"),p,hash,f.database));changed.set(changed.indexOf(NONCE),"b".repeat(32));
+            assertEquals(1,run(changed,remote,c));
+            var otherNamespace=new java.util.HashMap<>(remote);otherNamespace.put("GAME_NAMESPACE","another");
+            assertEquals(1,run(apply(dir.resolve("wrong-namespace"),p,hash,f.database),otherNamespace,c));
+            assertEquals(0,sql.queryForObject("SELECT COUNT(*) FROM player_trade_admission_recovery",Integer.class));
+            assertEquals(1,sql.queryForObject("SELECT COUNT(*) FROM player_final_save WHERE owner_epoch=1",Integer.class));
+            assertFalse(err.toString().contains("must-not-appear"));
+        }
+    }
+
+    @Test void 只有debug标记不授维护权_事务连接换实例拒绝_旧计划不能绕过新闸(@TempDir Path dir) throws Exception {
+        try(var f=DataSqlFixture.create()) {
+            setup(f);var sql=new JdbcTemplate(f.dataSource);Path p=dir.resolve("plan.json");
+            sql.execute("DROP TABLE maintenance_recovery_target");
+            sql.execute("CREATE TABLE debug_import_local_target(marker VARBINARY(32))");
+            sql.update("INSERT INTO debug_import_local_target VALUES(?)",NONCE.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            assertEquals(1,run(plan(p,f.database),env(f.database),connection(f,INSTANCE,new AtomicInteger())));
+            assertFalse(Files.exists(p));
+            assertEquals(1,sql.queryForObject("SELECT COUNT(*) FROM player_final_save WHERE owner_epoch=1",Integer.class));
+        }
+        try(var f=DataSqlFixture.create()) {
+            setup(f);var reads=new AtomicInteger();var c=new RecoverTradeAdmission.Connections() {
+                public DataSource open(String url,String user,String password){return f.dataSource;}
+                public String identity(java.sql.Connection ignored){return reads.incrementAndGet()==1?INSTANCE:"different-instance";}
+                public void verify(java.sql.Connection ignored){}
+                public void close(DataSource ignored){}
+            };
+            assertEquals(1,run(plan(dir.resolve("changed-instance"),f.database),env(f.database),c));
+            assertEquals(2,reads.get(),"初始探针不能替代恢复事务内的同连接实例核验");
+            assertEquals(0,new JdbcTemplate(f.dataSource).queryForObject("SELECT COUNT(*) FROM player_trade_admission_recovery",Integer.class));
+        }
+        for(String url:List.of("jdbc:mysql://maintenance-db.example/game","jdbc:mysql://maintenance-db.example:03306/game",
+                "jdbc:mysql://maintenance-db.example:3306/game?useSSL=false","jdbc:mysql://a:3306,b:3306/game",
+                "jdbc:mysql://user:pass@maintenance-db.example:3306/game")) {
+            assertNull(RecoverTradeAdmission.recoveryJdbcAddress(url,"game"));
+        }
+        assertEquals("[2001:db8::1]:3306",RecoverTradeAdmission.recoveryJdbcAddress("jdbc:mysql://[2001:db8::1]:3306/game","game"));
+    }
 }

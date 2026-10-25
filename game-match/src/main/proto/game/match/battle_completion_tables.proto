@@ -38,6 +38,8 @@ message BattleCompletionRow {
 message BattlePlayerCompletionRow {
   option (proto2mysql.table_name) = "match_battle_player_completion";
   option (proto2mysql.primary_key) = "battle_id,player_id";
+  // 仅追加索引；retry_ms为到期时间，首投/永久seq查询各有独立扫描份额。
+  option (proto2mysql.index) = "applied,retry_ms,battle_id,player_id;applied,inbox_seq,retry_ms,battle_id,player_id";
   uint64 battle_id = 1;
   uint64 player_id = 2;
   bytes original = 3;

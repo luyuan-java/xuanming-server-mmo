@@ -150,7 +150,18 @@ public final class BagService {
     /** 消耗、主包掉落和临时格溢出一起规划；包满/封禁/铸号失败时原玩家零改动。 */
     public PreparedTransfer prepareBattle(ScenePlayer player,Map<Integer,Long> consumed,Map<Integer,Long> gained) {
         if(!writable(player))return failedTransfer(player,REFUSED);
-        var candidate=com.game.scene.player.PlayerBags.restore(player.bags().toState());candidate.normalize(tables);
+        var snapshot=player.bags().toState();
+        if(!snapshot.getUnknownFields().asMap().isEmpty())return failedTransfer(player,Bag.INVALID_PARAM);
+        for(var request:consumed.entrySet()){
+            var spec=tables.item(request.getKey());
+            if(request.getKey()==0||request.getValue()<=0||spec==null||spec.maxStack()==0||tables.hasUnknownItemSchema(request.getKey()))
+                return failedTransfer(player,Bag.INVALID_PARAM);
+        }
+        // 不把未来版本实例当普通数量扣减；无关opaque实例仍由原候选逐字保留。
+        for(var item:snapshot.getItemsList())if(consumed.containsKey(item.getConfigId())
+                &&(!item.getUnknownFields().asMap().isEmpty()||item.getItemUuid()==0||item.getItemUuid()==-1L||item.getStackSize()==0))
+            return failedTransfer(player,Bag.INVALID_PARAM);
+        var candidate=com.game.scene.player.PlayerBags.restore(snapshot);candidate.normalize(tables);
         var inventory=candidate.bag(BagType.INVENTORY);
         var removed=new java.util.ArrayList<Bag.Drawn>();var written=new java.util.ArrayList<Bag.Written>();
         for(var entry:consumed.entrySet())removed.addAll(inventory.drainClamped(entry.getKey(),entry.getValue()));

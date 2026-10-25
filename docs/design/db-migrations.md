@@ -493,3 +493,24 @@ Redisson 客户端创建时的日志带 `key_prefix=<ns>:`。
 SQL_NO_ADMISSION维护分支另核当前E从未load（current final实际空）、非NULL真实player_state与全部待投守卫；计划固定剩余旧准入原件集/数量及最后一条标志。较早退休不释放当前E，最后一条复用sealUnadmitted在同事务形成真实无准入封闭，不能用它冒已准入Scene的ACK或APPLIED。该分支与原SCENE_ACK分支都需真实TiDB与并发回归，当前尚未运行。
 
 SQL行证明的编码域现为`player-trade-recovery-sql/v2`：列名、JDBC类型、NULL与长度/行边界固定；binary保原bytes，整数按BigDecimal精确读取，有限double保IEEE位，未知类型拒绝。仅行摘要格式变化，`recoveryBytes`和永久恢复收据协议不变。升级前已生成但未提交的旧计划必须重新plan，实际SQL摘要不等时拒绝apply；已提交的原计划仍先核永久原件/原plan_bytes后只读幂等返回，不重算当前身份或丢弃历史收据。原Q47 H2暴露的DOUBLE转BINARY错误保留；修后H2与真TiDB证据仍须分别实际执行。
+
+### M20：旧OPEN正式维护目标（2026-10-24，已授权，待构建与真实验收）
+
+RecoverTradeAdmission 的维护权限来自有权运维者显式执行及只覆盖审定范围的受限凭据。SHA固定计划完整性，不认证操作人。此入口独立于开发导入：不再把loopback视为维护资格，也不改变LocalTargets、InstanceIdentity或其他debug_import工具的限制。原命名空间与 --expect-database 检查、--expect-instance 真实MySQL/TiDB身份、强会话、默认只计划和显式 --apply --plan --plan-sha256 保留。URL只接受单主机、显式规范端口及单一库名的纯 jdbc:mysql://host:port/schema，拒user-info、query、fragment、多目标及凭据；账号密码仍只取环境，诊断不输出连接串或异常正文。
+
+本工具只验证运维预置的永久表，不建表、不插入、不覆盖、不续期。Java同一权威库保存路由、角色和最终存盘，只核这一实际库；与Go正式维护合同使用相同DDL，部署时由权限独立的运维账号预置：
+
+    CREATE TABLE maintenance_recovery_target (
+      purpose VARBINARY(16) NOT NULL,
+      zone_id INT UNSIGNED NOT NULL,
+      schema_name VARBINARY(64) NOT NULL,
+      target_nonce VARBINARY(32) NOT NULL,
+      physical_addr VARBINARY(255) NOT NULL,
+      PRIMARY KEY (purpose, zone_id, schema_name)
+    );
+
+表必须是无TTL的永久目标表；维护账号只读并持行锁，不拥有其DDL或写权限。purpose本入口固定为admission，zone_id必须等于原完整入场身份及计划时真实角色的区号，schema_name逐字等实际DATABASE。--maintenance-target-nonce 为独立非全零32位小写hex，--zone-id 显式固定原区号；physical_addr逐字等本次纯JDBC配置的无凭据host:port，不解析DNS、不据端口/名字/debug标记推导资格。nonce无TTL，时间推移不撤销或放宽维护目标；撤销须由运维改变或移除原标记。此合同不新造TiDB跨版本TTL元数据探针，也不涉及Redis/PTTL。
+
+外层计划升为 player-trade-open-recovery-plan-v3，固定命名空间、实例、库、nonce、zone和物理地址；旧外层v2计划须重新生成。领域RecoveryPlan、player-trade-open-retirement/v2编码、原请求摘要、永久恢复表和原plan_bytes不变。每次plan、apply及永久收据重放，都先在实际SQL事务的同一连接重核强会话/库/实例，按purpose,zone_id,schema_name用FOR UPDATE锁住专用标记，随后保持原route→P→账号→listing/最终写锁序；提交或回滚前不能替换目标。只有debug标记、缺行、错scope/nonce/地址/实例均在领域副作用前拒绝。普通游戏Store构造和交易API不新增维护前提，只有恢复方法默认拒未配置独立目标；永久收据重放仍不查新玩家身份来改绑原请求。
+
+本次不自动建库/迁移、不授予任意PITR能力、不制造SCENE_ACK/APPLIED、不删除pending或交易终局。H2/真实TiDB、正式main身份与A/B流程分别记实际证据；源码与夹具修改不是运行通过。

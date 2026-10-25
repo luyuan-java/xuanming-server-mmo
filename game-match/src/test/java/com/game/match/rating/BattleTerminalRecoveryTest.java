@@ -55,7 +55,7 @@ class BattleTerminalRecoveryTest {
             assertTrue(f.store.pendingResults(0).isEmpty());
             assertEquals(2, f.store.pendingPlayers(0, 0).size());
             assertTrue(f.store.pendingPlayers(0, 0).stream().allMatch(row -> row.getInboxSeq() != 0 && !row.getApplied()));
-            inbox.applied = true;
+            inbox.applied = true;f.makeDue();
             replay.round(); // 当前页结束，游标回头；不依赖进程内持久游标。
             replay.round();
             assertEquals(2, inbox.lookedUp.size()); assertEquals(2, inbox.enqueued.size());
@@ -72,7 +72,7 @@ class BattleTerminalRecoveryTest {
             assertEquals(0, rows.stream().filter(row -> row.getPlayerId() == 1).findFirst().orElseThrow().getInboxSeq());
             assertTrue(rows.stream().filter(row -> row.getPlayerId() == 2).findFirst().orElseThrow().getInboxSeq() > 0);
         }
-        inbox.unavailable = 0; inbox.applied = true;
+        inbox.unavailable = 0; inbox.applied = true;f.makeDue();
         try (var restarted = new BattleCompletionReplay(f.store, noDeadlines(), inbox, (event, raw) -> CompletableFuture.completedFuture(null), SECRET, () -> 1_000_001)) {
             restarted.round();
             assertEquals(1, inbox.lookedUp.size());
@@ -82,6 +82,40 @@ class BattleTerminalRecoveryTest {
         }
     }
 
+    @Test void 首投和等待APPLIED各保留八个份额_固定上界后再回头()throws Exception {
+        try(var f=new Memory(true)){for(int i=0;i<10;i++)f.seed(1000+i);
+        try(var c=f.data.getConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET inbox_seq=10+player_id WHERE battle_id>=1005");}
+        var inbox=new Inbox();
+        try(var replay=new BattleCompletionReplay(f.store,noDeadlines(),inbox,(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000)){
+            replay.round();assertEquals(8,inbox.enqueued.size());assertEquals(8,inbox.lookedUp.size());
+            // 连续新首投不挤占等待APPLIED的份额，也不扩大已固定的旧轮上界。
+            f.seed(1010);replay.round();assertEquals(10,inbox.enqueued.size());assertEquals(10,inbox.lookedUp.size());
+            replay.round();assertEquals(10,inbox.enqueued.size());
+            replay.round();assertEquals(12,inbox.enqueued.size());assertEquals(10,inbox.lookedUp.size());
+            assertTrue(inbox.enqueued.stream().allMatch(r->r.getBattleId()<1005||r.getBattleId()==1010));
+            assertTrue(inbox.lookedUp.stream().allMatch(r->r.getBattleId()>=1005&&r.getBattleId()<1010));
+        }
+        }
+    }
+
+    @Test void 同一原件投递代次仅一CAS领取_到期前零RPC_永久seq后只Lookup()throws Exception {
+        try(var f=new Memory(true)){f.seed(1020);var original=f.store.pendingPlayers(0,0).getFirst();
+        assertTrue(f.store.claimInboxAttempt(original));assertFalse(f.store.claimInboxAttempt(original));
+        var claimed=f.store.pendingPlayers(0,0).getFirst();assertTrue(claimed.getRetryMs()>0);
+        assertFalse(f.store.claimInboxAttempt(claimed));
+        f.store.inboxReceipt(original,10+original.getPlayerId(),false);
+        var known=f.store.pendingPlayers(0,0).getFirst();assertEquals(claimed.getRetryMs(),known.getRetryMs());
+        assertEquals(original.getOriginal(),known.getOriginal());assertEquals(original.getOwnerAccount(),known.getOwnerAccount());
+        assertFalse(f.store.claimInboxAttempt(original));
+        try(var c=f.data.getConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET applied=1 WHERE player_id=2");}
+        var inbox=new Inbox();inbox.applied=true;
+        try(var replay=new BattleCompletionReplay(f.store,noDeadlines(),inbox,(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000)){
+            replay.round();assertTrue(inbox.enqueued.isEmpty());assertTrue(inbox.lookedUp.isEmpty());
+            f.makeDue();replay.round();assertTrue(inbox.enqueued.isEmpty());assertEquals(1,inbox.lookedUp.size());
+            assertEquals(known.getInboxSeq(),10+inbox.lookedUp.getFirst().getPlayerId());assertTrue(f.store.pendingPlayers(0,0).isEmpty());
+        }
+        }
+    }
     @Test void Inbox回复必须绑定方法原全文永久seq及内容_APPLIED不能由布尔摘要代替() throws Exception {
         var f = new Memory(); f.seed(804); var inbox = new Inbox();
         var request = BattleSettlementInboxRequest.newBuilder().setPlayerId(1).setBattleId(804).setExpectedOwnerAccount("account-1")
@@ -178,20 +212,47 @@ class BattleTerminalRecoveryTest {
         public CompletableFuture<FetchPlayerInboxResponse> fetchItems(FetchPlayerInboxRequest request) { return CompletableFuture.failedFuture(new AssertionError("不使用Scene入口")); }
         public CompletableFuture<AckPlayerInboxResponse> ackItems(AckPlayerInboxRequest request) { return CompletableFuture.failedFuture(new AssertionError("不冒SceneACK")); }
     }
-    private static final class Memory {
-        final DataSource data = RatingTestDatabase.h2DataSource("terminal-" + UUID.randomUUID());
-        final BattleCompletionStore store = new BattleCompletionStore(data);
-        Memory() throws Exception {
-            try (var c = data.getConnection(); var sql = c.createStatement()) {
-                for (var table : BattleCompletionStore.registry().tables()) sql.execute(RatingTestDatabase.h2Ddl(table.createTableSql()));
+    private final class Memory implements AutoCloseable {
+        final DataSource data;
+        final java.util.concurrent.atomic.AtomicLong databaseMillis = new java.util.concurrent.atomic.AtomicLong(1_000_000);
+        final BattleCompletionStore store;
+        private RealTiDb ownedTiDb;
+        Memory() throws Exception { this(false); }
+        Memory(boolean allowRealTiDb) throws Exception {
+            String required=System.getProperty("match.terminal.retry.it.require","");
+            if(allowRealTiDb&&!required.isEmpty()&&!required.equals("1"))
+                throw new IllegalArgumentException("A3真库require只允许显式1");
+            try {
+                if(allowRealTiDb&&required.equals("1")) {
+                    String endpoint=System.getenv("MATCH_IT_TIDB");
+                    if(endpoint==null||endpoint.isBlank())throw new IllegalStateException("A3真库require=1但缺MATCH_IT_TIDB，不得降级H2");
+                    // 复用本文件正式TiDB夹具：随机自有schema、强会话、生产DDL和原清理合同。
+                    ownedTiDb=new RealTiDb();ownedTiDb.open();data=ownedTiDb.data;
+                    BattleCompletionStore.sync(data);
+                } else {
+                    data=RatingTestDatabase.h2DataSource("terminal-" + UUID.randomUUID());
+                    try (var c = data.getConnection(); var sql = c.createStatement()) {
+                        for (var table : BattleCompletionStore.registry().tables()) sql.execute(RatingTestDatabase.h2Ddl(table.createTableSql()));
+                    }
+                    RatingTestDatabase.initializeRouteAuthority(data);
+                    try (var c = data.getConnection(); var sql = c.createStatement()) {
+                        sql.execute("ALTER TABLE player ADD account VARCHAR(255) NOT NULL DEFAULT ''");
+                        sql.execute("ALTER TABLE player ADD owner_revision BIGINT NOT NULL DEFAULT 1");
+                        sql.execute("ALTER TABLE player ADD trade_listing_id BIGINT NOT NULL DEFAULT 0");
+                    }
+                }
+                store=new BattleCompletionStore(data,ignored->databaseMillis.get());
+                try (var c = data.getConnection(); var sql = c.createStatement()) {
+                    sql.execute("INSERT INTO player(player_id,account,owner_revision) VALUES(1,'account-1',1),(2,'account-2',1)");
+                }
+            } catch(Exception|AssertionError failure) {
+                try { close(); } catch(Exception cleanup) { failure.addSuppressed(cleanup); }
+                throw failure;
             }
-            RatingTestDatabase.initializeRouteAuthority(data);
-            try (var c = data.getConnection(); var sql = c.createStatement()) {
-                sql.execute("ALTER TABLE player ADD account VARCHAR(255) NOT NULL DEFAULT ''");
-                sql.execute("ALTER TABLE player ADD owner_revision BIGINT NOT NULL DEFAULT 1");
-                sql.execute("ALTER TABLE player ADD trade_listing_id BIGINT NOT NULL DEFAULT 0");
-                sql.execute("INSERT INTO player(player_id,account) VALUES(1,'account-1'),(2,'account-2')");
-            }
+        }
+        @Override public void close()throws Exception { if(ownedTiDb!=null)ownedTiDb.close(); }
+        void makeDue()throws Exception {
+            try(var c=data.getConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET retry_ms=0 WHERE applied=0");}
         }
         ByteString seed(long battle) throws Exception {
             var event = BattleCompletionStoreCases.complete(battle).toBuilder().setFinishedAtMs(123).build();
@@ -291,6 +352,18 @@ class BattleTerminalRecoveryTest {
             assertEquals(terminal, store.commitOutcome(request)); store.finish(f, true);
             assertEquals(4, store.ticket(1).getState());
             assertThrows(RuntimeException.class, () -> store.commitOutcome(request.toBuilder().setTargetInstanceId("wrong-instance").build()));
+        }
+        @Test void 截止后六十秒宽限不授予ABORT_原COMPLETE仍唯一提交() throws Exception {
+            var f=prepare(940);long deadline=store.now()-30_000;
+            var original=f.toBuilder().setCreatedMs(1).setDeadlineMs(deadline).setCreateRequest(CreateBattleRequest.parseFrom(f.getCreateRequest()).toBuilder()
+                    .setCreatedAtMs(1).setDeadlineMs(deadline).build().toByteString()).build();
+            var registry=new com.game.pbmysql.PbMysql();registry.register(GlobalFormationRow.getDefaultInstance());
+            try(var c=data.getConnection()){registry.updateByPk(c,original);}
+            assertFalse(store.terminalDeadlineCandidates(0,0).battles().contains(940L));
+            assertEquals(0,store.resolveTerminalAfterDeadline(940));
+            assertEquals(1,store.commitOutcome(outcome(original)).getTerminalDecision());
+            assertEquals(1,store.resolveTerminalAfterDeadline(940));
+            assertEquals(2,new BattleCompletionStore(data).pendingPlayers(0,0).size());
         }
         @Test void 截止ABORT与COMPLETE竞争同formation_全员来源零份或两份不可半提交() throws Exception {
             var f = prepare(902);

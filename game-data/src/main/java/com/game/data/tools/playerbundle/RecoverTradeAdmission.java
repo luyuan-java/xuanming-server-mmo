@@ -24,11 +24,11 @@ import javax.sql.DataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 
 /**
- * 本机受控维护：默认只计划，只有完整计划SHA及同一目标的显式apply才会提交。
+ * 正式受控维护：默认只计划，只有完整计划SHA及同一专用维护目标的显式apply才会提交。
  * SQL业务判断全部委托PlayerTradeStore，不碰Redis、不伪造Scene ACK或APPLIED。
  */
 public final class RecoverTradeAdmission {
-    private static final String SCHEMA="player-trade-open-recovery-plan-v2";
+    private static final String SCHEMA="player-trade-open-recovery-plan-v3";
     private static final Duration BUDGET=Duration.ofSeconds(10);
     private static final ObjectMapper JSON=new ObjectMapper()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
@@ -36,10 +36,11 @@ public final class RecoverTradeAdmission {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private RecoverTradeAdmission() {}
 
-    record Plan(String schema,String namespace,String instance,String database,PlayerTradeStore.RecoveryPlan original) {}
+    record Plan(String schema,String namespace,String instance,String database,PlayerTradeStore.RecoveryTarget target,
+                PlayerTradeStore.RecoveryPlan original) {}
     record Applied(String schema,String planSha256,String namespace,String instance,String database,
-                   PlayerTradeStore.RecoveryReceipt receipt) {}
-    record Args(boolean apply,Path out,Path plan,String sha,String database,String instance,
+                   PlayerTradeStore.RecoveryTarget target,PlayerTradeStore.RecoveryReceipt receipt) {}
+    record Args(boolean apply,Path out,Path plan,String sha,String database,String instance,String targetNonce,long zoneId,
                 PlayerTradeStore.RecoveryRequest request) {}
 
     /** 连接接缝只隔离目标/会话与生命周期；SQL提交仍使用生产Store。 */
@@ -72,9 +73,10 @@ public final class RecoverTradeAdmission {
             Args args=parse(argv);
             if(PlayerBundleExport.checkOutputPath(args.out())!=null)throw new IllegalArgumentException();
             String url=env.get("GAME_TRADE_RECOVERY_JDBC"),user=env.get("GAME_MYSQL_USER");
-            // URL只指本地库；秘密一律取独立环境，超时由本工具固定，避免驱动错误日志带出URL凭证。
-            if(!localJdbcUrl(url) || user==null || user.isBlank())
-                throw new IllegalArgumentException();
+            // URL只承载实际单一端点和库名；凭据取独立环境，不以loopback或debug_import充当维护资格。
+            String physicalAddress=recoveryJdbcAddress(url,args.database());
+            if(physicalAddress==null || user==null || user.isBlank())throw new IllegalArgumentException();
+            var target=new PlayerTradeStore.RecoveryTarget(args.targetNonce(),args.zoneId(),args.database(),physicalAddress,args.instance());
             var namespace=GameNamespaceBinder.bind(properties,env).namespace();
             Plan approved=null;
             if(args.apply()) {
@@ -84,7 +86,7 @@ public final class RecoverTradeAdmission {
                 approved=JSON.readValue(bytes,Plan.class);
                 if(!SCHEMA.equals(approved.schema()) || !namespace.value().equals(approved.namespace())
                         || !args.instance().equals(approved.instance()) || !args.database().equals(approved.database())
-                        || approved.original()==null || !args.database().equals(approved.original().database()))
+                        || !target.equals(approved.target()) || approved.original()==null || !args.database().equals(approved.original().database()))
                     throw new IllegalArgumentException();
             }
             source=connections.open(url,user,env.getOrDefault("GAME_MYSQL_PASSWORD",""));
@@ -94,17 +96,22 @@ public final class RecoverTradeAdmission {
                         || !args.instance().equals(connections.identity(connection)))throw new SecurityException();
             }
             var store=new PlayerTradeStore(source,new DataSourceTransactionManager(source),millis,5,
-                    PlayerTradeStore.sqlFreezeVerifier());
+                    PlayerTradeStore.sqlFreezeVerifier(),null,target,connection->{
+                        connections.verify(connection);
+                        if(NamespaceDatabaseCheck.verify(connection,args.database(),namespace,"--expect-database")!=null)
+                            throw new SecurityException();
+                        return connections.identity(connection);
+                    });
             byte[] result;
             if(args.apply()) {
                 var receipt=store.applyOpenRecovery(approved.original(),BUDGET);
                 result=JSON.writerWithDefaultPrettyPrinter().writeValueAsBytes(new Applied(
-                        "player-trade-open-recovery-applied-v2",args.sha(),namespace.value(),args.instance(),args.database(),receipt));
+                        "player-trade-open-recovery-applied-v3",args.sha(),namespace.value(),args.instance(),args.database(),target,receipt));
             } else {
                 var original=store.planOpenRecovery(args.request(),BUDGET);
                 if(!args.database().equals(original.database()))throw new SecurityException();
                 result=JSON.writerWithDefaultPrettyPrinter().writeValueAsBytes(new Plan(
-                        SCHEMA,namespace.value(),args.instance(),args.database(),original));
+                        SCHEMA,namespace.value(),args.instance(),args.database(),target,original));
             }
             connections.close(source);source=null;
             PlayerBundleExport.writeOwnerOnly(args.out(),result);
@@ -123,30 +130,40 @@ public final class RecoverTradeAdmission {
             String key=argv.get(i);
             if(key.equals("--apply")) { if(apply)throw new IllegalArgumentException();apply=true;continue; }
             if(!Set.of("--out","--plan","--plan-sha256","--expect-database","--expect-instance","--recovery-id",
-                    "--listing-id","--player-id","--seller-account","--owner-revision","--old-epoch","--source-instance").contains(key)
+                    "--listing-id","--player-id","--seller-account","--owner-revision","--old-epoch","--source-instance","--maintenance-target-nonce","--zone-id").contains(key)
                     || i+1==argv.size() || values.put(key,argv.get(++i))!=null)throw new IllegalArgumentException();
         }
         String database=required(values,"--expect-database"),instance=required(values,"--expect-instance");
         if(!database.matches("[A-Za-z0-9_]{1,64}") || instance.isBlank() || instance.length()>1024)throw new IllegalArgumentException();
+        String nonce=required(values,"--maintenance-target-nonce");
+        long zone=number(values,"--zone-id");
+        if(!nonce.matches("[0-9a-f]{32}")||nonce.equals("0".repeat(32))||zone>0xffff_ffffL)throw new IllegalArgumentException();
         Path out=Path.of(required(values,"--out"));
         if(apply) {
-            if(values.size()!=5)throw new IllegalArgumentException();
+            if(values.size()!=7)throw new IllegalArgumentException();
             String sha=required(values,"--plan-sha256").toLowerCase(java.util.Locale.ROOT);
             if(!sha.matches("[0-9a-f]{64}"))throw new IllegalArgumentException();
-            return new Args(true,out,Path.of(required(values,"--plan")),sha,database,instance,null);
+            return new Args(true,out,Path.of(required(values,"--plan")),sha,database,instance,nonce,zone,null);
         }
-        if(values.size()!=10)throw new IllegalArgumentException();
+        if(values.size()!=12)throw new IllegalArgumentException();
         var freeze=new PlayerTradeStore.FreezeRequest(number(values,"--listing-id"),number(values,"--player-id"),
                 required(values,"--seller-account"),number(values,"--owner-revision"));
-        return new Args(false,out,null,null,database,instance,new PlayerTradeStore.RecoveryRequest(
+        return new Args(false,out,null,null,database,instance,nonce,zone,new PlayerTradeStore.RecoveryRequest(
                 required(values,"--recovery-id"),freeze,number(values,"--old-epoch"),required(values,"--source-instance")));
     }
     /** URL只承载端点和库名；不让URL凭证/驱动参数进入连接池错误日志。 */
-    private static boolean localJdbcUrl(String url) {
-        if(url==null || !url.startsWith("jdbc:mysql://") || LocalTargets.checkJdbcUrl(url,Set.of())!=null)return false;
-        var target=java.net.URI.create(url.substring("jdbc:".length()));
-        return target.getRawUserInfo()==null && target.getRawQuery()==null && target.getRawFragment()==null
-                && target.getRawPath()!=null && target.getRawPath().matches("/[A-Za-z0-9_]{1,64}");
+    static String recoveryJdbcAddress(String url,String database) {
+        if(url==null||!url.startsWith("jdbc:mysql://"))return null;
+        try {
+            var target=java.net.URI.create(url.substring("jdbc:".length()));
+            String address=target.getRawAuthority();
+            if(target.getHost()==null||target.getHost().isBlank()||target.getPort()<1||target.getPort()>65535
+                    ||target.getRawUserInfo()!=null||target.getRawQuery()!=null||target.getRawFragment()!=null
+                    ||!("/"+database).equals(target.getRawPath())||address==null||address.length()>255
+                    ||address.chars().anyMatch(c->Character.isWhitespace(c)||c=='\\'||c=='@'||c=='|')
+                    ||!address.substring(address.lastIndexOf(':')+1).equals(Integer.toString(target.getPort())))return null;
+            return address;
+        } catch(IllegalArgumentException invalid){return null;}
     }
     private static String required(Map<String,String> values,String key) {
         String value=values.get(key);if(value==null || value.isBlank())throw new IllegalArgumentException();return value;

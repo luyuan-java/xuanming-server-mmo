@@ -153,16 +153,58 @@ class BattleInboxLifecycleTest {
         assertThat(next.repo.pendingProgress()).isZero();
     }
 
-    @Test void 缺宝宝或铸号失败均在首副作用前DEFER_金币和消耗不改变() {
+    @Test void 已转出或永久缺配置宝宝只跳子效果_铸号失败仍首副作用前DEFER() {
         var f = new Fixture(); ScenePlayer player = f.enter(PlayerState.getDefaultInstance());
-        PlayerState before = player.persistentState();
         var missingPet = source(15, 10).toBuilder().addPets(BattlePetSettlementData.newBuilder().setPetId(9001)).build();
-        assertThat(f.battle.applyInbox(player, missingPet).outcome()).isEqualTo(BattleSettlementService.Outcome.DEFERRED);
+        assertThat(f.battle.applyInbox(player, missingPet).outcome()).isEqualTo(BattleSettlementService.Outcome.APPLIED);
+        assertThat(player.wallet().balance(Wallet.GOLD)).isEqualTo(10);
+        var configured = new Fixture();
+        var pet = com.game.player.store.state.PetEntry.newBuilder().setPetId(9002).setPetTableId(999999).setLevel(1).setHealth(17).build();
+        ScenePlayer retired = configured.enter(PlayerState.newBuilder().setPets(com.game.player.store.state.PetState.newBuilder().addPets(pet)).build());
+        var beforePets=retired.pets().toState();
+        assertThat(configured.battle.applyInbox(retired,source(18,10).toBuilder().addPets(BattlePetSettlementData.newBuilder().setPetId(9002)).build()).outcome())
+                .isEqualTo(BattleSettlementService.Outcome.APPLIED);
+        assertThat(retired.wallet().balance(Wallet.GOLD)).isEqualTo(10);assertThat(retired.pets().toState()).isEqualTo(beforePets);
+        var mint = new Fixture(); ScenePlayer blocked = mint.enter(PlayerState.getDefaultInstance());
+        PlayerState before = blocked.persistentState();mint.failMint = true;
+        var dropped = source(19, 10).toBuilder().addItemsGained(BattleItemEntry.newBuilder().setItemTableId(11).setCount(1)).build();
+        assertThat(mint.battle.applyInbox(blocked, dropped).outcome()).isEqualTo(BattleSettlementService.Outcome.DEFERRED);
+        assertThat(blocked.persistentState()).isEqualTo(before);
+    }
+
+    @Test void 当前battleUsable热更不抹原消耗_真GUID扣减且无关opaque逐字保留() {
+        var f=new Fixture();ScenePlayer player=f.enter(PlayerState.getDefaultInstance());
+        assertThat(f.bags.addItems(player,BagType.INVENTORY,java.util.Map.of(10,2L),AssetAudit.Reason.SYSTEM_GRANT,0,"").ok()).isTrue();
+        var original=player.bags().toState();long consumedGuid=original.getItems(0).getItemUuid();
+        var unknown=com.google.protobuf.UnknownFieldSet.newBuilder().addField(900,com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(1).build()).build();
+        var opaque=com.game.player.store.state.BagItemState.newBuilder().setItemUuid(700001).setConfigId(999999).setStackSize(1)
+                .setBagType(BagType.INVENTORY.code()).setPos(1).setUnknownFields(unknown).build();
+        var candidate=com.game.scene.player.PlayerBags.restore(original.toBuilder().addItems(opaque).build());candidate.normalize(f.bags.tables());player.bags().commitPrepared(candidate);
+        var kept=player.bags().toState().getItemsList().stream().filter(i->i.getItemUuid()==700001).findFirst().orElseThrow();
+        var hot=new SceneBattleTables(f.tables.fingerprint(),f.tables.skills(),f.tables.castableSkills(),java.util.Set.of(),f.tables.classes());
+        var service=new BattleSettlementService(f.currency,f.bags,f.pets,f.missions,hot,SceneBattleMetrics.noop(),f.clock,184);
+        var consumed=source(20,10).toBuilder().addItemsConsumed(BattleItemEntry.newBuilder().setItemTableId(10).setCount(1)).build();
+        assertThat(service.applyInbox(f.world,player,consumed).outcome()).isEqualTo(BattleSettlementService.Outcome.APPLIED);
+        assertThat(player.bags().toState().getItemsList().stream().filter(i->i.getItemUuid()==consumedGuid).findFirst().orElseThrow().getStackSize()).isEqualTo(1);
+        assertThat(player.bags().toState().getItemsList().stream().filter(i->i.getItemUuid()==700001).findFirst().orElseThrow()).isEqualTo(kept);
+        var shortfall=source(21,0).toBuilder().addItemsConsumed(BattleItemEntry.newBuilder().setItemTableId(10).setCount(3)).build();
+        assertThat(service.applyInbox(f.world,player,shortfall).outcome()).isEqualTo(BattleSettlementService.Outcome.APPLIED);
+        assertThat(player.bags().bag(BagType.INVENTORY).total(10)).isZero();
+        assertThat(player.bags().toState().getItemsList().stream().filter(i->i.getItemUuid()==700001).findFirst().orElseThrow()).isEqualTo(kept);
+    }
+
+    @Test void 消耗相关unknown实例与损坏宠物均在首副作用前拒绝() {
+        var unknown=com.google.protobuf.UnknownFieldSet.newBuilder().addField(900,com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(1).build()).build();
+        var f=new Fixture();ScenePlayer player=f.enter(PlayerState.newBuilder().setBag(com.game.player.store.state.BagState.newBuilder()
+                .addItems(com.game.player.store.state.BagItemState.newBuilder().setItemUuid(700002).setConfigId(10).setStackSize(2).setUnknownFields(unknown))).build());
+        PlayerState before=player.persistentState();
+        var value=source(22,10).toBuilder().addItemsConsumed(BattleItemEntry.newBuilder().setItemTableId(10).setCount(1)).build();
+        assertThat(f.battle.applyInbox(player,value).outcome()).isEqualTo(BattleSettlementService.Outcome.DEFERRED);
         assertThat(player.persistentState()).isEqualTo(before);
-        f.failMint = true;
-        var dropped = source(15, 10).toBuilder().addItemsGained(BattleItemEntry.newBuilder().setItemTableId(11).setCount(1)).build();
-        assertThat(f.battle.applyInbox(player, dropped).outcome()).isEqualTo(BattleSettlementService.Outcome.DEFERRED);
-        assertThat(player.persistentState()).isEqualTo(before);
+        var pets=new Fixture();ScenePlayer invalid=pets.enter(PlayerState.newBuilder().setPets(com.game.player.store.state.PetState.newBuilder().setUnknownFields(unknown)).build());
+        PlayerState beforePet=invalid.persistentState();
+        assertThat(pets.battle.applyInbox(invalid,source(23,10)).outcome()).isEqualTo(BattleSettlementService.Outcome.DEFERRED);
+        assertThat(invalid.persistentState()).isEqualTo(beforePet);
     }
 
     @Test void 自动领奖正常失败保claimable_金币消耗击杀与水位只一次_以后可手动领() {
@@ -192,6 +234,23 @@ class BattleInboxLifecycleTest {
         assertThat(reloaded.persistentState()).isEqualTo(afterClaim);
     }
 
+    @Test void 未知物品表行不得被已知投影普通化扣减_其它配置和装备槽保持() {
+        var unknown=com.google.protobuf.UnknownFieldSet.newBuilder().addField(900,com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(1).build()).build();
+        var config=org.mockito.Mockito.mock(com.game.table.ConfigTables.class);
+        var items=org.mockito.Mockito.mock(com.game.table.ItemRows.class);
+        var rows=BattleFixture.CONFIG.item().all().stream().map(row->row.getId()==10?row.toBuilder().setUnknownFields(unknown).build():row).toList();
+        org.mockito.Mockito.when(config.item()).thenReturn(items);org.mockito.Mockito.when(items.all()).thenReturn(rows);
+        org.mockito.Mockito.when(config.equipSlot()).thenReturn(BattleFixture.CONFIG.equipSlot());
+        var tables=BagTables.from(config);assertThat(tables.hasUnknownItemSchema(10)).isTrue();assertThat(tables.hasUnknownItemSchema(11)).isFalse();
+        assertThat(tables.item(10)).isEqualTo(BagTables.from(BattleFixture.CONFIG).item(10));
+        assertThat(tables.equipSlots(1)).isEqualTo(BagTables.from(BattleFixture.CONFIG).equipSlots(1));
+        var f=new Fixture();ScenePlayer player=f.enter(PlayerState.getDefaultInstance());
+        assertThat(f.bags.addItems(player,BagType.INVENTORY,java.util.Map.of(10,2L),AssetAudit.Reason.SYSTEM_GRANT,0,"").ok()).isTrue();
+        var before=player.persistentState();var bags=new BagService(tables,f.ids,f.audit,GainAnomalyDetector.off(),SceneMetrics.noop());
+        assertThat(bags.prepareBattle(player,java.util.Map.of(10,1L),java.util.Map.of()).tip()).isNotZero();
+        assertThat(player.persistentState()).isEqualTo(before);
+        assertThat(bags.prepareBattle(player,java.util.Map.of(11,1L),java.util.Map.of()).tip()).isZero();
+    }
     private static BattleSettlementData source(long battle, long gold) {
         return BattleSettlementData.newBuilder().setPlayerId(7).setBattleId(battle).setGoldGain(gold)
                 .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN).setHealth(10).setMana(10).build();

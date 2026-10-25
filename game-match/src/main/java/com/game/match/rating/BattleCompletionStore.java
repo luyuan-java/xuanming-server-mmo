@@ -24,7 +24,13 @@ public final class BattleCompletionStore {
     private final DataSource source;
     private final PbMysql db=registry();
 
-    public BattleCompletionStore(DataSource source) { this.source=java.util.Objects.requireNonNull(source); }
+    @FunctionalInterface interface SqlClock { long now(Connection connection)throws SQLException; }
+    private final SqlClock clock;
+    public BattleCompletionStore(DataSource source) { this(source,BattleCompletionStore::databaseNowMillis); }
+    /** 同包测试显式推进数据库时钟，避免退避回归依赖真实等待；正式构造始终使用同连接数据库时间。 */
+    BattleCompletionStore(DataSource source,SqlClock clock) {
+        this.source=java.util.Objects.requireNonNull(source);this.clock=java.util.Objects.requireNonNull(clock);
+    }
 
     public static PbMysql registry() {
         PbMysql db=new PbMysql();
@@ -111,6 +117,58 @@ public final class BattleCompletionStore {
                     "applied=0 AND owner_revision>0 AND (battle_id>? OR (battle_id=? AND player_id>?)) ORDER BY battle_id,player_id LIMIT 16",
                     PbMysql.uint64(battle),PbMysql.uint64(battle),PbMysql.uint64(player));
         } catch(SQLException failure) { throw new IllegalStateException("个人永久来源待投读取失败",failure); }
+    }
+    /** 两类各保留8个名额；本轮固定最大battle，持续新流不能阻止旧失败项回头。 */
+    public record PendingInboxBatch(long upperBattle,java.util.List<BattlePlayerCompletionRow> sources) { }
+    public PendingInboxBatch pendingInbox(boolean first,long battle,long player,long upperBattle) {
+        String stage=first?"inbox_seq=0":"inbox_seq>0";
+        try(Connection c=source.getConnection()) {
+            long stamp=nowMillis(c),upper=upperBattle;
+            if(upper==0)try(var query=c.prepareStatement("SELECT MAX(battle_id) FROM match_battle_player_completion WHERE applied=0 AND owner_revision>0 AND "+stage+" AND retry_ms<=?")) {
+                query.setQueryTimeout(3);query.setLong(1,stamp);
+                try(var rows=query.executeQuery()){if(rows.next()&&rows.getString(1)!=null)upper=Long.parseUnsignedLong(rows.getString(1));}
+            }
+            if(upper==0)return new PendingInboxBatch(0,java.util.List.of());
+            var rows=db.findAll(c,BattlePlayerCompletionRow.class,
+                    "applied=0 AND owner_revision>0 AND "+stage+" AND retry_ms<=? AND battle_id<=? AND (battle_id>? OR (battle_id=? AND player_id>?)) ORDER BY battle_id,player_id LIMIT 8",
+                    stamp,PbMysql.uint64(upper),PbMysql.uint64(battle),PbMysql.uint64(battle),PbMysql.uint64(player));
+            return new PendingInboxBatch(upper,rows);
+        } catch(SQLException failure){throw new IllegalStateException("个人来源到期分批读取失败",failure);}
+    }
+    /** 在原route/P/个人行锁内先登记下一次到期；并发副本及旧扫描不得重复领取同次RPC。 */
+    public boolean claimInboxAttempt(BattlePlayerCompletionRow expected) {
+        try(Connection c=source.getConnection()) {
+            c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);c.setAutoCommit(false);
+            try {
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c,3,true);
+                com.game.common.player.PlayerSessionAuthority.lock(c,expected.getPlayerId(),expected.getOwnerAccount(),expected.getOwnerRevision(),3);
+                var row=db.findOneByPkForUpdate(c,BattlePlayerCompletionRow.newBuilder().setBattleId(expected.getBattleId()).setPlayerId(expected.getPlayerId()).build()).orElseThrow();
+                if(!row.getOriginal().equals(expected.getOriginal())||!row.getOriginalDigest().equals(expected.getOriginalDigest())
+                        ||!row.getOwnerAccount().equals(expected.getOwnerAccount())||row.getOwnerRevision()!=expected.getOwnerRevision()
+                        ||row.getIssuedAtMs()!=expected.getIssuedAtMs())throw new SQLException("个人投递领取原件不同");
+                long stamp=nowMillis(c);
+                if(row.getApplied()||row.getInboxSeq()!=expected.getInboxSeq()||row.getRetryMs()!=expected.getRetryMs()
+                        ||Long.compareUnsigned(row.getRetryMs(),stamp)>0){c.commit();return false;}
+                // 首投2秒、永久seq后只Lookup并退避15秒；失联/异常也不在500ms轮询中热重发。
+                long delay=row.getInboxSeq()==0?2_000L:15_000L;
+                long next=stamp>Long.MAX_VALUE-delay?Long.MAX_VALUE:stamp+delay;
+                try(var update=c.prepareStatement("UPDATE match_battle_player_completion SET retry_ms=? WHERE battle_id=? AND player_id=? AND applied=0 AND inbox_seq=? AND retry_ms=?")) {
+                    update.setQueryTimeout(3);update.setLong(1,next);update.setObject(2,PbMysql.uint64(row.getBattleId()));update.setObject(3,PbMysql.uint64(row.getPlayerId()));
+                    update.setObject(4,PbMysql.uint64(row.getInboxSeq()));update.setObject(5,PbMysql.uint64(row.getRetryMs()));
+                    boolean claimed=update.executeUpdate()==1;c.commit();return claimed;
+                }
+            } catch(Exception failure){try{c.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
+        } catch(SQLException failure){throw new IllegalStateException("个人来源投递退避领取失败",failure);}
+    }
+    private long nowMillis(Connection c)throws SQLException { return clock.now(c); }
+    private static long databaseNowMillis(Connection c)throws SQLException {
+        try(var query=c.prepareStatement("SELECT CURRENT_TIMESTAMP(3)")) {
+            query.setQueryTimeout(3);
+            try(var rows=query.executeQuery()){
+                if(!rows.next()||rows.getTimestamp(1)==null)throw new SQLException("缺少数据库时间");
+                long stamp=rows.getTimestamp(1).getTime();if(stamp<0)throw new SQLException("数据库时间无效");return stamp;
+            }
+        }
     }
     public void resultPublished(BattleCompletionRow expected) {
         try(Connection c=source.getConnection()) {

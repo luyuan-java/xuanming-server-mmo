@@ -24,9 +24,15 @@ public final class BagTables implements ItemCatalog {
     private static final Logger log = LoggerFactory.getLogger(BagTables.class);
 
     private final Map<Integer, ItemSpec> items;
+    private final java.util.Set<Integer> unknownItemSchemas;
     private final Map<Integer, List<Integer>> slotsByKind;
 
     BagTables(Map<Integer, ItemSpec> items, Map<Integer, List<Integer>> slotsByKind) {
+        this(items, slotsByKind, java.util.Set.of());
+    }
+
+    private BagTables(Map<Integer, ItemSpec> items, Map<Integer, List<Integer>> slotsByKind, java.util.Set<Integer> unknownItemSchemas) {
+        this.unknownItemSchemas = java.util.Set.copyOf(unknownItemSchemas);
         this.items = Map.copyOf(items);
         Map<Integer, List<Integer>> slots = new HashMap<>();
         slotsByKind.forEach((kind, list) -> slots.put(kind, List.copyOf(list)));
@@ -35,8 +41,10 @@ public final class BagTables implements ItemCatalog {
 
     public static BagTables from(ConfigTables tables) {
         Map<Integer, ItemSpec> items = new HashMap<>();
+        java.util.Set<Integer> unknownItemSchemas = new java.util.HashSet<>();
         for (ItemTable row : tables.item().all()) {
             items.put(row.getId(), new ItemSpec(row.getId(), row.getMaxStackSize(), row.getEquipKind()));
+            if (!row.getUnknownFields().asMap().isEmpty()) unknownItemSchemas.add(row.getId());
             if (row.getMaxStackSize() == 0) {
                 log.warn("物品表 max_stack_size 为 0，这种物品入包一律回 1002 id={}", Integer.toUnsignedString(row.getId()));
             }
@@ -52,7 +60,12 @@ public final class BagTables implements ItemCatalog {
                 slotsByKind.computeIfAbsent(row.getEquipKind(), k -> new ArrayList<>()).add(row.getId());
             }
         }
-        return new BagTables(items, slotsByKind);
+        return new BagTables(items, slotsByKind, unknownItemSchemas);
+    }
+
+    /** 数量语义仍有未知字段的表行不能用于新扣减；已知投影和装备布局保持原样。 */
+    public boolean hasUnknownItemSchema(int configId) {
+        return unknownItemSchemas.contains(configId);
     }
 
     @Override

@@ -222,8 +222,9 @@ public final class InboxStore {
                         .setContentSha256(com.google.protobuf.ByteString.copyFrom(digest)).build();
             }
             if (!enqueue) return response.build();
-            if (!owner.account().equals(request.getExpectedOwnerAccount()) || owner.revision() != request.getExpectedOwnerRevision()
-                    || owner.released()) throw new SecurityException("战斗来源不能借当前目录替换原归属");
+            // released只结束在线写租约；离线也可入箱，仍逐字核原account/revision，不改绑新主人。
+            if (!owner.account().equals(request.getExpectedOwnerAccount()) || owner.revision() != request.getExpectedOwnerRevision())
+                throw new SecurityException("战斗来源不能借当前目录替换原归属");
             var params = new EnqueueParams(request.getPlayerId(), type, producer, request.getBattleId(),
                     request.getIssuedAtMs(), payload, "match", "永久战斗终局", null);
             var result = enqueueLocked(s, shard, domain, registry.domain(domain).orElseThrow(), digest, params, owner);

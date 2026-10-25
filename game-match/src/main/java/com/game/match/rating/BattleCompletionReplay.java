@@ -38,7 +38,8 @@ public final class BattleCompletionReplay implements AutoCloseable {
     private final LongSupplier clock;
     private final ScheduledExecutorService worker=Executors.newSingleThreadScheduledExecutor(
             Thread.ofPlatform().name("battle-terminal-replay").daemon(true).factory());
-    private long deadlineCursor,deadlineUpper,resultCursor,playerBattleCursor,playerCursor;
+    private long deadlineCursor,deadlineUpper,resultCursor;
+    private final PlayerScanCursor firstPlayers=new PlayerScanCursor(),waitingPlayers=new PlayerScanCursor();
     public BattleCompletionReplay(BattleCompletionStore store,GlobalMatchStore formations,PlayerInboxService inbox,Results results,String secret,LongSupplier clock) {
         this.store=Objects.requireNonNull(store);this.formations=Objects.requireNonNull(formations);
         this.inbox=Objects.requireNonNull(inbox);this.results=Objects.requireNonNull(results);
@@ -49,7 +50,7 @@ public final class BattleCompletionReplay implements AutoCloseable {
     private void roundSafely() {
         try{round();}catch(RuntimeException failure){log.warn("战斗永久来源扫描暂不可读，保留游标，类别={}",failure.getClass().getSimpleName());}
     }
-    /** 单次至多16截止+16全局+16个人；每条错误仍推进本轮游标，下一轮回头恢复，禁止队首页饥饿。 */
+    /** 单次至多16截止+16全局+8首投+8等待APPLIED；各类固定上界轮转，异常也推进游标。 */
     public synchronized void round() {
         var deadlines=formations.terminalDeadlineCandidates(deadlineCursor,deadlineUpper);
         deadlineUpper=deadlines.upperBattle();
@@ -68,12 +69,19 @@ public final class BattleCompletionReplay implements AutoCloseable {
             finally{resultCursor=source.getBattleId();}
             if(Thread.currentThread().isInterrupted())return;
         }
-        var people=store.pendingPlayers(playerBattleCursor,playerCursor);
-        if(people.isEmpty()){playerBattleCursor=0;playerCursor=0;}
-        for(var source:people) {
-            try{deliver(source);}catch(InterruptedException stopped){Thread.currentThread().interrupt();return;}
+        deliverPending(true,firstPlayers);
+        if(Thread.currentThread().isInterrupted())return;
+        deliverPending(false,waitingPlayers);
+    }
+    private static final class PlayerScanCursor { long battle,player,upper; }
+    private void deliverPending(boolean first,PlayerScanCursor cursor) {
+        var batch=store.pendingInbox(first,cursor.battle,cursor.player,cursor.upper);cursor.upper=batch.upperBattle();
+        if(batch.sources().isEmpty()){cursor.battle=0;cursor.player=0;cursor.upper=0;}
+        for(var source:batch.sources()) {
+            try{if(store.claimInboxAttempt(source))deliver(source);}
+            catch(InterruptedException stopped){Thread.currentThread().interrupt();return;}
             catch(Exception failure){log.warn("个人终局未取得Inbox永久APPLIED，保留来源和ready票，类别={}",failure.getClass().getSimpleName());}
-            finally{playerBattleCursor=source.getBattleId();playerCursor=source.getPlayerId();}
+            finally{cursor.battle=source.getBattleId();cursor.player=source.getPlayerId();}
             if(Thread.currentThread().isInterrupted())return;
         }
     }

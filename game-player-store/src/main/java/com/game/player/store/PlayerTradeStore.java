@@ -6,6 +6,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
@@ -66,6 +67,14 @@ public final class PlayerTradeStore {
     private final int maxPlayers;
     private final FreezeVerifier verifier;
     private final FreezeEligibility eligibility;
+    /** 独立维护目标只限定恢复操作；普通交易不依赖此标记。 */
+    public record RecoveryTarget(String nonce,long zoneId,String database,String physicalAddress,String instance) {}
+    /** 复用维护CLI的正式实例/强会话核验；必须只读给定SQL连接，不能访问其他服务。 */
+    @FunctionalInterface public interface RecoveryInstanceIdentity {
+        String read(Connection connection) throws Exception;
+    }
+    private final RecoveryTarget recoveryTarget;
+    private final RecoveryInstanceIdentity recoveryIdentity;
 
     public PlayerTradeStore(DataSource source, PlatformTransactionManager transactions, LongSupplier millis,
                             int maxPlayers, FreezeVerifier verifier) {
@@ -73,6 +82,13 @@ public final class PlayerTradeStore {
     }
     public PlayerTradeStore(DataSource source, PlatformTransactionManager transactions, LongSupplier millis,
                             int maxPlayers, FreezeVerifier verifier, FreezeEligibility eligibility) {
+        this(source,transactions,millis,maxPlayers,verifier,eligibility,null,null);
+    }
+    public PlayerTradeStore(DataSource source, PlatformTransactionManager transactions, LongSupplier millis,
+                            int maxPlayers, FreezeVerifier verifier, FreezeEligibility eligibility,
+                            RecoveryTarget recoveryTarget, RecoveryInstanceIdentity recoveryIdentity) {
+        if ((recoveryTarget==null)!=(recoveryIdentity==null))throw fail(Code.INVALID,"维护目标与实例核验必须成对提供");
+        if (recoveryTarget!=null)validateRecoveryTarget(recoveryTarget);
         if (maxPlayers < 1 || maxPlayers > 10_000) throw fail(Code.INVALID, "账号角色上限非法");
         this.sql = new JdbcTemplate(source);
         this.source=Objects.requireNonNull(source);
@@ -82,6 +98,8 @@ public final class PlayerTradeStore {
         this.maxPlayers = maxPlayers;
         this.verifier = verifier;
         this.eligibility = eligibility;
+        this.recoveryTarget=recoveryTarget;
+        this.recoveryIdentity=recoveryIdentity;
     }
 
     public FreezeReceipt beginFreeze(FreezeRequest request, Duration timeout) {
@@ -491,7 +509,9 @@ public final class PlayerTradeStore {
     /** 默认纯计划：同原路由/P锁读取真实SQL，不改OPEN、待投、角色数据或交易终局。 */
     public RecoveryPlan planOpenRecovery(RecoveryRequest request,Duration timeout) {
         validateRecoveryRequest(request);
+        requireRecoveryTarget();
         return transaction(timeout,()->{
+            lockRecoveryTarget();
             routeLock(request.freeze().playerId());lockAccounts(request.freeze().sellerAccount());
             return recoveryPlanLocked(request);
         });
@@ -500,8 +520,11 @@ public final class PlayerTradeStore {
     /** 唯一提交点：先重核完整计划，再同事务写永久原件收据并退休这一条精确OPEN；不伪造APPLIED。 */
     public RecoveryReceipt applyOpenRecovery(RecoveryPlan approved,Duration timeout) {
         validateRecoveryPlan(approved);
+        requireRecoveryTarget();
+        requireRecoveryTargetZone(java.util.HexFormat.of().parseHex(approved.admissionHex()));
         return transaction(timeout,()->{
-            // 永久收据只读重放不借当前角色/下一代身份；提交未知也必须用同一完整计划重查。
+            lockRecoveryTarget();
+            // 永久收据只读重放仍核独立维护目标，不借当前角色/下一代身份。
             var replay=readRecovery(approved,false);if(replay!=null)return replay;
             var request=approved.request();
             routeLock(request.freeze().playerId());lockAccounts(request.freeze().sellerAccount());
@@ -582,6 +605,8 @@ public final class PlayerTradeStore {
         try {
             String catalog=connection.getCatalog();if(catalog==null||catalog.isBlank())throw fail(Code.NOT_READY,"无法确定真实业务库");
             long zone=sql.queryForObject("SELECT zone_id FROM player WHERE player_id=?",Long.class,wanted.playerId());
+            if(zone!=recoveryTarget.zoneId())throw fail(Code.CONFLICT,"维护目标区号与原角色不符");
+            requireRecoveryTargetZone(admission);
             String generation=sql.queryForObject("SELECT generation FROM route_meta WHERE id=1",String.class);
             String route=digestHex("recovery-route",rawRows("SELECT * FROM route_meta WHERE id=1"),
                     rawRows("SELECT * FROM zone_merge_fence WHERE zone_id=? ORDER BY shard",zone));
@@ -607,6 +632,52 @@ public final class PlayerTradeStore {
         catch(com.google.protobuf.InvalidProtocolBufferException invalid){throw fail(Code.NOT_READY,"原player_state不是合法protobuf，维护不补初始数据");}
     }
 
+    private static void validateRecoveryTarget(RecoveryTarget target) {
+        if(target.nonce()==null||!target.nonce().matches("[0-9a-f]{32}")||target.nonce().equals("0".repeat(32))
+                ||target.zoneId()<=0||target.zoneId()>0xffff_ffffL
+                ||target.database()==null||!target.database().matches("[A-Za-z0-9_]{1,64}")
+                ||target.instance()==null||target.instance().isBlank()||target.instance().length()>1024)
+            throw fail(Code.INVALID,"独立维护目标scope或nonce无效");
+        try {
+            String address=target.physicalAddress();
+            if(address==null||address.length()>255||address.chars().anyMatch(c->Character.isWhitespace(c)||c=='\\'||c=='@'||c=='|'))
+                throw new IllegalArgumentException();
+            var uri=java.net.URI.create("mysql://"+address);
+            if(uri.getHost()==null||uri.getHost().isBlank()||uri.getPort()<1||uri.getPort()>65535
+                    ||uri.getRawUserInfo()!=null||uri.getRawQuery()!=null||uri.getRawFragment()!=null
+                    ||!uri.getRawPath().isEmpty()||!address.equals(uri.getRawAuthority())
+                    ||!address.substring(address.lastIndexOf(':')+1).equals(Integer.toString(uri.getPort())))
+                throw new IllegalArgumentException();
+        } catch(RuntimeException invalid){throw fail(Code.INVALID,"维护物理地址必须为无凭据的规范host:port");}
+    }
+    private void requireRecoveryTarget() {
+        if(recoveryTarget==null||recoveryIdentity==null)throw fail(Code.NOT_READY,"恢复必须显式提供独立维护目标");
+        validateRecoveryTarget(recoveryTarget);
+    }
+    /** 标记行锁在路由/P锁之前取得；运维在维护命令之外预置，不设TTL或自动创建。 */
+    private void lockRecoveryTarget() {
+        requireRecoveryTarget();
+        var connection=org.springframework.jdbc.datasource.DataSourceUtils.getConnection(source);
+        try {
+            if(!recoveryTarget.database().equals(connection.getCatalog())
+                    ||!recoveryTarget.instance().equals(recoveryIdentity.read(connection)))
+                throw fail(Code.CONFLICT,"事务内实际库或实例身份改变");
+            var markers=sql.query("SELECT target_nonce,physical_addr FROM maintenance_recovery_target WHERE purpose=? AND zone_id=? AND schema_name=? FOR UPDATE",
+                    (rs,ignored)->new byte[][]{rs.getBytes(1),rs.getBytes(2)},ascii("admission"),recoveryTarget.zoneId(),ascii(recoveryTarget.database()));
+            if(markers.size()!=1||!Arrays.equals(markers.getFirst()[0],ascii(recoveryTarget.nonce()))
+                    ||!Arrays.equals(markers.getFirst()[1],ascii(recoveryTarget.physicalAddress())))
+                throw fail(Code.CONFLICT,"专用维护标记缺失或scope/nonce/物理地址不同");
+        } catch(Failure failure){throw failure;}
+        catch(Exception unreadable){throw fail(Code.NOT_READY,"事务内维护目标无法核验");}
+        finally{org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(connection,source);}
+    }
+    private void requireRecoveryTargetZone(byte[] admission) {
+        try {
+            var original=com.game.proto.common.base.RoleAdmissionIdentity.parseFrom(admission);
+            if(Integer.toUnsignedLong(original.getZoneId())!=recoveryTarget.zoneId())
+                throw fail(Code.CONFLICT,"维护目标不属于原入场区号");
+        } catch(com.google.protobuf.InvalidProtocolBufferException invalid){throw fail(Code.CORRUPT,"原入场区号无法解析");}
+    }
     private static void validateRecoveryRequest(RecoveryRequest request) {
         if(request==null||request.freeze()==null)throw fail(Code.INVALID,"恢复缺少原冻结请求");
         validate(request.freeze());

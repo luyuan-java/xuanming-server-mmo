@@ -129,6 +129,23 @@ final class BattleInboxRecoveryTest {
             assertEquals(first.getSeq(),f.item(91).getSeq());assertNull(f.item(92));
         }
     }
+    @Test void 原归属离线释放仍可入箱_永久原件不改绑后来主人()throws Exception{
+        try(var f=new Fixture()){
+            f.sql("UPDATE player SET owner_released=1 WHERE player_id=1");
+            var original=request(91);var first=f.store.battleSettlement(budget(),original,true);
+            assertTrue(first.getSeq()!=0);assertEquals(PlayerInboxItemState.PLAYER_INBOX_ITEM_PENDING,first.getState());
+            var replay=f.store.battleSettlement(budget(),original,false);
+            assertTrue(first.hasErrorMessage());assertEquals(0,first.getErrorMessage().getId());assertEquals(com.game.proto.TipInfoMessage.getDefaultInstance(),first.getErrorMessage());assertFalse(replay.hasErrorMessage());
+            assertEquals(first.toBuilder().clearErrorMessage().build(),replay);
+            f.sql("UPDATE player SET account='new-owner',owner_revision=2,owner_released=0 WHERE player_id=1");
+            assertEquals(replay,f.store.battleSettlement(budget(),original,true));
+            assertThrows(SecurityException.class,()->f.store.battleSettlement(budget(),request(92),true));
+            assertThrows(SecurityException.class,()->f.store.battleSettlement(budget(),original.toBuilder()
+                    .setExpectedOwnerAccount("new-owner").setExpectedOwnerRevision(2).build(),true));
+            assertNull(f.item(92));assertEquals(1,f.item(91).getOwnerRevision());
+            assertEquals("fixture-owner",f.item(91).getOwnerAccount());
+        }
+    }
     @Test void 普通GM入口不能冒Match专用生产者()throws Exception{
         try(var f=new Fixture()){
             var p=new InboxStore.EnqueueParams(1,TYPE,PlayerInboxProducerKind.PLAYER_INBOX_PRODUCER_MATCH,91,NOW,

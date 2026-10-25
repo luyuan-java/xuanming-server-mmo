@@ -13,6 +13,8 @@ import javax.sql.DataSource;
 
 /** TiDB是票据、邀请、成局和原请求的唯一权威。提交先unsigned全员P，再领域原件/票；finish先P再F及原票，单独工作租约只锁F。 */
 public final class GlobalMatchStore {
+    /** 原deadline仍约束运行；只给终局提交留固定60秒，随后才可竞争永久ABORT。 */
+    static final long TERMINAL_OUTCOME_GRACE_MS = 60_000L;
     private final DataSource source;
     private final PbMysql db = new PbMysql();
     private final GlobalMatchProperties config;
@@ -833,7 +835,7 @@ public final class GlobalMatchStore {
                 var raw=ByteString.copyFrom(com.game.common.token.NetworkProbes.bytes(value));
                 db.insert(c,com.game.match.completion.pb.BattlePlayerCompletionRow.newBuilder().setBattleId(f.getBattleId()).setPlayerId(member.getPlayerId())
                         .setOriginal(raw).setOriginalDigest(com.game.match.rating.BattleCompletionStore.digest(raw))
-                        .setOwnerAccount(ticket.getOwnerAccount()).setOwnerRevision(ticket.getOwnerRevision()).setIssuedAtMs(stamp).build());
+                        .setOwnerAccount(ticket.getOwnerAccount()).setOwnerRevision(ticket.getOwnerRevision()).setIssuedAtMs(stamp).setRetryMs(stamp).build());
                 var completedTicket=ticket.toBuilder().setState(3).build();
                 db.updateByPk(c,completedTicket);completedTickets.add(completedTicket);
             }
@@ -878,18 +880,18 @@ public final class GlobalMatchStore {
     public record TerminalDeadlineBatch(long upperBattle,List<Long> battles) {}
     public TerminalDeadlineBatch terminalDeadlineCandidates(long afterBattle,long upperBattle) {
         return tx(c->{
-            long stamp=now(c),upper=upperBattle;
+            long stamp=now(c),cutoff=stamp>=TERMINAL_OUTCOME_GRACE_MS?stamp-TERMINAL_OUTCOME_GRACE_MS:0,upper=upperBattle;
             String candidates=" FROM match_global_formation f JOIN match_battle_completion t ON t.battle_id=f.battle_id "
-                    +"WHERE f.state IN (2,3,4) AND f.deadline_ms<=? AND t.terminal_decision=0";
+                    +"WHERE f.state IN (2,3,4) AND f.deadline_ms>0 AND f.deadline_ms<=? AND t.terminal_decision=0";
             if(upper==0)try(var query=c.prepareStatement("SELECT f.battle_id"+candidates+" ORDER BY f.battle_id DESC LIMIT 1")) {
-                query.setQueryTimeout(3);query.setLong(1,stamp);
+                query.setQueryTimeout(3);query.setLong(1,cutoff);
                 try(var rows=query.executeQuery()){if(rows.next())upper=Long.parseUnsignedLong(rows.getString(1));}
             }
             if(upper==0)return new TerminalDeadlineBatch(0,List.of());
             List<Long> result=new ArrayList<>();
             try(var query=c.prepareStatement("SELECT f.battle_id"+candidates
                     +" AND f.battle_id>? AND f.battle_id<=? ORDER BY f.battle_id LIMIT 16")) {
-                query.setQueryTimeout(3);query.setLong(1,stamp);query.setObject(2,PbMysql.uint64(afterBattle));query.setObject(3,PbMysql.uint64(upper));
+                query.setQueryTimeout(3);query.setLong(1,cutoff);query.setObject(2,PbMysql.uint64(afterBattle));query.setObject(3,PbMysql.uint64(upper));
                 try(var rows=query.executeQuery()){while(rows.next())result.add(Long.parseUnsignedLong(rows.getString(1)));}
             }
             return new TerminalDeadlineBatch(upper,List.copyOf(result));
@@ -912,9 +914,12 @@ public final class GlobalMatchStore {
             if(maybe.isEmpty())return 0;var t=maybe.get();if(t.getTerminalDecision()!=0)return t.getTerminalDecision();
             if(t.getAdoptedOutcomeObserved()&&t.getAdoptedOutcomeProtocolVersion()!=1)
                 throw new SecurityException("真实adopted非v1，不能中止");
+            // 两端均非负且先核stamp>=deadline，再作差，避免deadline+宽限溢出误中止。
+            long stamp=now(c);
             if(t.getOutcomeProtocolVersion()!=1||t.getPreflightSupportedVersion()!=1||!t.getPreflightInstanceId().equals(f.getInstanceId())
                     ||!t.getPlacementOperationId().equals(f.getOperationId())||!t.getTargetInstanceId().equals(f.getInstanceId())
-                    ||f.getState()<2||f.getState()>4||f.getCreateRequest().isEmpty()||now(c)<f.getDeadlineMs())return 0;
+                    ||f.getState()<2||f.getState()>4||f.getCreateRequest().isEmpty()||f.getDeadlineMs()<=0
+                    ||stamp<f.getDeadlineMs()||stamp-f.getDeadlineMs()<TERMINAL_OUTCOME_GRACE_MS)return 0;
             var create=com.game.proto.CreateBattleRequest.parseFrom(f.getCreateRequest());
             if(create.getOutcomeProtocolVersion()!=1)return 0;
             validateCreateBinding(f,create);

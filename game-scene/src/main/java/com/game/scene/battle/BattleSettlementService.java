@@ -120,27 +120,51 @@ public final class BattleSettlementService {
             long now=currency.nowSeconds(),gold=settlement.getGoldGain();
             if(gold<0||gold>0&&currency.checkAdd(player,Wallet.GOLD,gold,now)!=0)
                 return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_CURRENCY);
-            // 正式面板只在pool和table均存在时给出正maxHealth；缺组件/来源pet不再owned不能静默跳过。
-            var known=pets.buildList(player).getPetsList();
-            java.util.Set<Long> seen=new java.util.HashSet<>();
-            for(var entry:settlement.getPetsList())if(!seen.add(entry.getPetId())||player.pets().find(entry.getPetId())==null
-                    ||known.stream().noneMatch(p->p.getPetId()==entry.getPetId()&&p.getDerived().getMaxHealth()>0))
+            // 未知/损坏的持久组件仍整笔拒绝；合法空组件不等于损坏。
+            var petState=player.pets().toState();
+            java.util.Set<Long> owned=new java.util.HashSet<>();
+            if(!petState.getUnknownFields().asMap().isEmpty())return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+            for(var pet:petState.getPetsList())if(pet.getPetId()==0||pet.getPetTableId()==0||pet.getLevel()==0
+                    ||!owned.add(pet.getPetId())||!pet.getUnknownFields().asMap().isEmpty())
                 return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+            if(petState.getActivePetId()!=0&&!owned.contains(petState.getActivePetId()))
+                return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+            var known=pets.buildList(player).getPetsList();
+            var applicablePets=new java.util.ArrayList<com.game.proto.BattlePetSettlementData>();
+            java.util.Set<Long> seen=new java.util.HashSet<>();
+            for(var entry:settlement.getPetsList()){
+                if(entry.getPetId()==0||!seen.add(entry.getPetId())||!entry.getUnknownFields().asMap().isEmpty())
+                    return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+                // PetService正式面板仅在pool/table均存在时给正maxHealth；永久缺失只跳此子效果。
+                if(!owned.contains(entry.getPetId())||known.stream().noneMatch(p->p.getPetId()==entry.getPetId()&&p.getDerived().getMaxHealth()>0)){
+                    log.warn("战斗宠物子效果不再适用 reason=retired_or_missing_config battle={} pet={}",
+                            Long.toUnsignedString(settlement.getBattleId()),Long.toUnsignedString(entry.getPetId()));
+                    continue;
+                }
+                applicablePets.add(entry);
+            }
             Map<Integer,Long> consumed=new TreeMap<>(Integer::compareUnsigned),gained=new TreeMap<>(Integer::compareUnsigned);
             for(var item:settlement.getItemsConsumedList()){
                 if(item.getItemTableId()==0||item.getCount()==0)continue;
-                if(!tables.battleUsable(item.getItemTableId()))return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+                // 原终局已经固定开局准许的config/count；热更后的battleUsable不能抹掉已发生的消耗。
                 consumed.merge(item.getItemTableId(),clampCount(item.getCount()),(a,b)->Math.min(a+b,UINT32_MAX));
             }
             for(var item:settlement.getItemsGainedList())if(item.getItemTableId()!=0&&item.getCount()!=0)
                 gained.merge(item.getItemTableId(),clampCount(item.getCount()),(a,b)->Math.min(a+b,UINT32_MAX));
+            Map<Integer,Long> shortfalls=new TreeMap<>(Integer::compareUnsigned);
+            consumed.forEach((config,wanted)->{long held=player.bags().bag(BagType.INVENTORY).total(config);if(held<wanted)shortfalls.put(config,wanted-held);});
             var bag=bags.prepareBattle(player,consumed,gained);
             if(bag.tip()!=0)return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
             // 正常业务拒绝已全部预检。普通异常交给组合根不存盘隔离，绝不逐步catch后登记APPLIED。
             if(gold>0&&!currency.add(player,Wallet.GOLD,gold,AssetAudit.Reason.BATTLE_REWARD,settlement.getBattleId(),now).ok())
                 throw new IllegalStateException("战斗金币预检与同任务提交不一致");
             bag.commitBattle(settlement.getBattleId());applyVitals(player,settlement);
-            pets.applyBattleSettlement(player,settlement.getPetsList());
+            pets.applyBattleSettlement(player,applicablePets);
+            shortfalls.forEach((config,missing)->{
+                metrics.item(ItemKind.CONSUME_CLAMPED);
+                log.error("战斗消耗按原持有夹紧 reason=held_shortfall battle={} item={} missing={}",
+                        Long.toUnsignedString(settlement.getBattleId()),Integer.toUnsignedString(config),missing);
+            });
             for(var defeat:settlement.getDefeatedMonstersList())missions.onMonsterKilled(player,defeat.getMonsterConfigId(),defeat.getCount());
             // 自动领奖失败的claimable仍在同份玩家状态，不删资格；经验产品边界仍不冒已到账。
             if(settlement.getExpGain()!=0)metrics.expIgnored();
