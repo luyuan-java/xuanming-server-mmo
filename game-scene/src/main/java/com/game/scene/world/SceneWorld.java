@@ -22,6 +22,7 @@ import com.game.proto.ActorMoveListS2C;
 import com.game.proto.EnterSceneS2C;
 import com.game.proto.MessageContent;
 import com.game.proto.MoveAckS2C;
+import com.game.proto.Rotation;
 import com.game.proto.SceneInfoComp;
 import com.game.proto.TravelToZoneResponse;
 import com.game.scene.metrics.SceneMetrics;
@@ -36,6 +37,9 @@ import com.game.scene.metrics.SceneMetrics.MirrorRequest;
 import com.game.scene.metrics.SceneMetrics.MirrorResolve;
 import com.game.scene.metrics.SceneMetrics.MoveResult;
 import com.game.scene.metrics.SceneMetrics.PeriodicSave;
+import com.game.scene.metrics.SceneMetrics.TeleportReason;
+import com.game.scene.metrics.SceneMetrics.TeleportResult;
+import com.game.scene.metrics.SceneMetrics.TeleportSettle;
 import com.game.scene.metrics.SceneMetrics.SwitchResolve;
 import com.game.scene.metrics.SceneMetrics.TransferEnter;
 import com.game.scene.metrics.SceneMetrics.TransferReason;
@@ -1706,6 +1710,7 @@ public final class SceneWorld {
         player.stopMotion();
         player.moveGuard().reset(at, clock.nanoTime());
         player.clearMoveBroadcast();
+        voidTeleportSettle(player);
         enterScene(player, target);
         if (previousSwitch != null && previousSwitch.purpose() == PlayerSwitch.Purpose.MIRROR_CREATE
                 && player.switching() == previousSwitch) {
@@ -2558,6 +2563,22 @@ public final class SceneWorld {
                     input.inputSeq());
             return;
         }
+        ScenePlayer.TeleportSettle settle = player.teleportSettle();
+        if (settle != null) {
+            double distance = Math.hypot(input.location().x() - settle.targetX(), input.location().y() - settle.targetY());
+            MovementRules.TeleportVerdict verdict = MovementRules.judgeAfterTeleport(distance, clock.nanoTime(), settle.deadlineNanos());
+            if (verdict == MovementRules.TeleportVerdict.STALE) {
+                metrics.move(MoveResult.TELEPORT_STALE);
+                return;
+            }
+            player.setTeleportSettle(null);
+            metrics.teleportSettle(verdict == MovementRules.TeleportVerdict.SETTLED
+                    ? TeleportSettle.SETTLED : TeleportSettle.EXPIRED);
+            if (verdict == MovementRules.TeleportVerdict.EXPIRED) {
+                log.warn("瞬移落位等待超时 player={} 目标=({}, {}) 上报={}", player.playerId(),
+                        settle.targetX(), settle.targetY(), input.location());
+            }
+        }
         Optional<Vec3> admitted = player.moveGuard().admit(input.location(), clock.nanoTime());
         if (admitted.isEmpty()) {
             metrics.move(MoveResult.INVALID);
@@ -2592,6 +2613,113 @@ public final class SceneWorld {
     /** 收到该玩家的任一客户端消息：刷新活跃帧（挂机判定的唯一输入，基线 LastActiveFrameComp）。 */
     void touch(ScenePlayer player) {
         player.markActive(frame);
+    }
+
+    // ------------------------------------------------------------------ 同场景瞬移
+
+    /**
+     * 逻辑线程上同步瞬移；step 期间禁止调用，以免改动帧正在遍历的兴趣集合。
+     * facing 为 null 表示保持原朝向（Java 管理口扩展）。按定案只校验世界范围，不附加导航夹持；操作者须选可走落点。
+     */
+    public TeleportResult teleportWithinScene(ScenePlayer player, Vec3 target, Rotation facing, TeleportReason reason) {
+        if (stepping) throw new IllegalStateException("场景帧内不能瞬移");
+        Objects.requireNonNull(reason, "瞬移原因");
+        TeleportResult rejected = null;
+        if (player == null || playerById(player.playerId()) != player) rejected = TeleportResult.NOT_HERE;
+        else if (player.frozen()) rejected = TeleportResult.FROZEN;
+        else if (player.inBattle()) rejected = TeleportResult.IN_BATTLE;
+        else if (target == null || !MovementRules.insideWorld(target)
+                || facing != null && (!Double.isFinite(facing.getX()) || !Double.isFinite(facing.getY())
+                || !Double.isFinite(facing.getZ()))) rejected = TeleportResult.INVALID_TARGET;
+        if (rejected != null) {
+            metrics.teleport(reason, rejected);
+            return rejected;
+        }
+
+        Scene scene = player.scene();
+        Vec3 from = player.position();
+        ViewIndex.Reentered reentered = scene.teleport(player, target);
+        if (facing != null) player.setRotation(facing);
+        player.stopMotion();
+        player.markDirty(ScenePlayer.DIRTY_TRANSFORM | ScenePlayer.DIRTY_VELOCITY);
+        long now = clock.nanoTime();
+        player.moveGuard().reset(target, now);
+        voidTeleportSettle(player);
+        player.setTeleportSettle(new ScenePlayer.TeleportSettle(target.x(), target.y(),
+                now + MovementRules.TELEPORT_SETTLE_TIMEOUT.toNanos()));
+        player.clearMoveBroadcast();
+
+        Set<ScenePlayer> old = new HashSet<>(reentered.lostWatching());
+        Set<ScenePlayer> seen = new HashSet<>(reentered.seen());
+        List<ScenePlayer> gone = reentered.lostWatching().stream().filter(p -> !seen.contains(p)).toList();
+        List<ScenePlayer> fresh = reentered.seen().stream().filter(p -> !old.contains(p)).toList();
+        for (ScenePlayer targetPlayer : fresh) targetPlayer.markFullStateForNewWatcher();
+
+        sendTo(player, push(ids.notifyTeleport(), player.toTeleport(teleportReasonCode(reason))));
+        if (!gone.isEmpty()) {
+            ActorListDestroyS2C.Builder destroyed = ActorListDestroyS2C.newBuilder();
+            for (ScenePlayer targetPlayer : gone) destroyed.addEntity(targetPlayer.entity());
+            sendTo(player, push(ids.notifyActorListDestroy(), destroyed.build()));
+        }
+        if (!fresh.isEmpty()) {
+            sendTo(player, push(ids.notifyActorListCreate(), actorList(fresh)));
+            catchUpMoves(player, fresh);
+        }
+        // 旁人手里的实体真的换了位置：必须先销毁，再创建；本人只通知差集，保留交集插值状态。
+        if (!reentered.lostWatchers().isEmpty()) {
+            broadcast(reentered.lostWatchers(), push(ids.notifyActorListDestroy(),
+                    ActorListDestroyS2C.newBuilder().addEntity(player.entity()).build()));
+        }
+        if (!reentered.seers().isEmpty()) {
+            broadcast(reentered.seers(), push(ids.notifyActorCreate(), player.toActorCreate()));
+        }
+        metrics.aoiLeft(reentered.lostWatchers().size() + gone.size());
+        metrics.aoiEntered(reentered.seers().size() + fresh.size());
+        metrics.teleport(reason, TeleportResult.TELEPORTED);
+        log.info("同场景瞬移 player={} scene={} from={} to={} reason={} lostWatchers={} gone={} fresh={} seers={}",
+                player.playerId(), scene.sceneId(), from, target, reason, reentered.lostWatchers().size(),
+                gone.size(), fresh.size(), reentered.seers().size());
+        return TeleportResult.TELEPORTED;
+    }
+
+    /** 本节点同场景且双向可见；给组队归队调用，不预置容量查询或队友优先级。 */
+    public boolean mutuallyVisible(ScenePlayer a, ScenePlayer b) {
+        if (a == null || b == null || a.scene() == null || a.scene() != b.scene()) return false;
+        return a.scene().watching(a).contains(b) && a.scene().watching(b).contains(a);
+    }
+
+    /** dev 管理口的逻辑线程入口；找人失败同样计一次请求，不碰 HTTP 线程上的世界状态。 */
+    public int adminTeleport(long playerId, Vec3 target) {
+        if (stepping) throw new IllegalStateException("场景帧内不能瞬移");
+        if (playerId == 0) {
+            metrics.teleport(TeleportReason.ADMIN, TeleportResult.INVALID_TARGET);
+            return CommonErrorTip.common_error.kInvalidParameter_VALUE;
+        }
+        ScenePlayer player = playerById(playerId);
+        if (player == null) {
+            metrics.teleport(TeleportReason.ADMIN, TeleportResult.NOT_HERE);
+            return CommonErrorTip.common_error.kEntityIsNull_VALUE;
+        }
+        return switch (teleportWithinScene(player, target, null, TeleportReason.ADMIN)) {
+            case TELEPORTED -> 0;
+            case INVALID_TARGET -> CommonErrorTip.common_error.kInvalidParameter_VALUE;
+            case NOT_HERE -> CommonErrorTip.common_error.kEntityIsNull_VALUE;
+            case FROZEN, IN_BATTLE -> CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
+        };
+    }
+
+    private static int teleportReasonCode(TeleportReason reason) {
+        return switch (reason) {
+            case ADMIN -> MovementRules.TELEPORT_REASON_ADMIN;
+            case TEAM_REGROUP -> MovementRules.TELEPORT_REASON_TEAM_REGROUP;
+        };
+    }
+
+    private void voidTeleportSettle(ScenePlayer player) {
+        if (player.teleportSettle() != null) {
+            player.setTeleportSettle(null);
+            metrics.teleportSettle(TeleportSettle.VOIDED);
+        }
     }
 
     // ------------------------------------------------------------------ 帧

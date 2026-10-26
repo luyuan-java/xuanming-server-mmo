@@ -1,5 +1,7 @@
 package com.game.scene.world;
 
+import java.time.Duration;
+
 /**
  * 移动相关的常量与纯函数（契约文档 {@code docs/reference/mmorpg-client-contract-movement.md} §4 / §5）。
  */
@@ -17,6 +19,18 @@ final class MovementRules {
     static final double STEP_SECONDS = 0.05;
     /** 连续这么多帧（30 秒）没有任何客户端消息即视为挂机，停止外推（基线 AfkSystem 600 帧）。 */
     static final long AFK_FRAMES = 600;
+    /** 与基线一致：先判水平距离，再判单调时钟截止。 */
+    static final double TELEPORT_SETTLE_RADIUS = 3.0;
+    static final Duration TELEPORT_SETTLE_TIMEOUT = Duration.ofSeconds(3);
+    static final int TELEPORT_REASON_ADMIN = 3;
+    static final int TELEPORT_REASON_TEAM_REGROUP = 5;
+
+    enum TeleportVerdict { SETTLED, EXPIRED, STALE }
+
+    static TeleportVerdict judgeAfterTeleport(double horizontalDistance, long nowNanos, long deadlineNanos) {
+        if (horizontalDistance <= TELEPORT_SETTLE_RADIUS) return TeleportVerdict.SETTLED;
+        return nowNanos - deadlineNanos >= 0 ? TeleportVerdict.EXPIRED : TeleportVerdict.STALE;
+    }
     /**
      * 世界坐标范围（米）：上报位置任一分量的绝对值超过它，整条输入丢弃（基线不查）。取 1e7 m（一万公里），
      * 远大于任何地图（UE 默认世界约 ±10 km），正常客户端碰不到。它保证坐标差、水平距离、三维距离的平方都不会溢出：

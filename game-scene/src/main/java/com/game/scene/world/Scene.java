@@ -16,7 +16,7 @@ import java.util.Set;
  * 的地方都必须先看种类。
  *
  * <p>玩家按进场顺序保存（帧内外推与属性同步按这个顺序遍历，结果可复现）；视野由本场景的 {@link ViewIndex} 维护。
- * 玩家的进出与位置变化只能经本类（{@link #add} / {@link #remove} / {@link #relocate}），格子与兴趣列表才不会与位置脱节。
+ * 玩家的进出与位置变化只能经本类（{@link #add} / {@link #remove} / {@link #relocate} / {@link #teleport}），格子与兴趣列表才不会与位置脱节。
  *
  * <p><b>频道状态</b>（批次 5.1，scene-channels-spec §4.10.2）：承载中 / 排空中，由 {@link SceneWorld#applyChannelPlan} 按频道计划切换。
  * 排空中的场景不接受显式进入（63 指定它回 3023，D11）、不被组队跟随跟进（§4.13）、进场加载完成时改进兄弟频道（§4.10.4），
@@ -221,6 +221,14 @@ public final class Scene {
         }
         player.setPosition(position);
         view.moved(player);
+    }
+
+    /** 同场景瞬移：先校验全部前置再动位置，同步重建视野，玩家表与人数保持不变。 */
+    ViewIndex.Reentered teleport(ScenePlayer player, Vec3 target) {
+        if (!target.isFinite()) throw new IllegalArgumentException("瞬移目标必须有限: " + target);
+        if (players.get(player.playerId()) != player) throw new IllegalStateException("玩家不在本场景");
+        player.setPosition(target);
+        return view.reenter(player);
     }
 
     /** 本帧的视野刷新：重判位置变过的玩家（节奏见 {@link ViewIndex}），变化记进 {@code out}。 */

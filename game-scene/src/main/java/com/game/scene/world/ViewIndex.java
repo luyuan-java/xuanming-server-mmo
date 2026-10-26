@@ -70,6 +70,17 @@ final class ViewIndex {
     record Entered(List<ScenePlayer> seen, List<ScenePlayer> seers) {
     }
 
+    /** 瞬移重建前后的原始集合；调用方决定通知差集，不改变索引的完整重建语义。 */
+    record Reentered(List<ScenePlayer> lostWatching, List<ScenePlayer> lostWatchers,
+                     List<ScenePlayer> seen, List<ScenePlayer> seers) { }
+
+    Reentered reenter(ScenePlayer player) {
+        List<ScenePlayer> lostWatching = List.copyOf(watching(player));
+        List<ScenePlayer> lostWatchers = leave(player);
+        Entered entered = enter(player);
+        return new Reentered(lostWatching, lostWatchers, entered.seen(), entered.seers());
+    }
+
     private final int capacity;
     private final GridIndex<Interest> grid = new GridIndex<>(CELL_SIZE);
     private final Map<ScenePlayer, Interest> interests = new HashMap<>();
@@ -128,7 +139,7 @@ final class ViewIndex {
 
     /**
      * 玩家离开本场景：从格子、双方的兴趣列表与待刷新名单里彻底清掉（不留悬空引用），返回离开前看得见它的实体（51 的收件人）。
-     * 离开者自己的兴趣列表静默清空（基线：离场者收不到 64 / 51）。不在本索引里返回空列表。
+     * 离开者自己的兴趣列表静默清空；瞬移的 reenter 调用方另按返回差集通知本人。不在本索引里返回空列表。
      */
     List<ScenePlayer> leave(ScenePlayer leaver) {
         Interest mine = interests.remove(leaver);

@@ -314,6 +314,67 @@ class ViewIndexTest {
         assertThat(view.watchers(a)).isEmpty();
     }
 
+    @Test
+    void V5_reenter清旧格和待刷新_四集合准确_两张表互为镜像() {
+        ScenePlayer a = player(1, 0, 0, 0), b = player(2, 1, 0, 0), c = player(3, 100, 0, 0);
+        view.enter(a); view.enter(b); view.enter(c);
+        view.moved(a);
+        assertThat(view.pendingMoves()).isEqualTo(1);
+        a.setPosition(new Vec3(100, 1, 0));
+        ViewIndex.Reentered result = view.reenter(a);
+        assertThat(result.lostWatching()).containsExactly(b);
+        assertThat(result.lostWatchers()).containsExactly(b);
+        assertThat(result.seen()).containsExactly(c);
+        assertThat(result.seers()).containsExactly(c);
+        assertThat(view.pendingMoves()).isZero();
+        assertThat(view.watching(a)).containsExactly(c);
+        assertThat(view.watchers(a)).containsExactly(c);
+        assertThat(view.watching(c)).containsExactly(a);
+        assertThat(view.watchers(c)).containsExactly(a);
+        assertThat(view.watching(b)).isEmpty();
+        assertThat(view.watchers(b)).isEmpty();
+        assertThat(view.enter(player(4, 101, 0, 0)).seen()).contains(a);
+        assertThat(view.enter(player(5, 0, 1, 0)).seen()).doesNotContain(a);
+        assertThat(result.lostWatching()).as("离开前的独立快照未被后续进入修改").containsExactly(b);
+    }
+
+    @Test
+    void V5_reenter容量一_只返回实际建链方向_双方索引仍一致() {
+        view = new ViewIndex(1);
+        ScenePlayer a = player(1, 0, 0, 0), b = player(2, 100, 0, 0), c = player(3, 101, 0, 0);
+        view.enter(a); view.enter(b); view.enter(c);
+        a.setPosition(new Vec3(100, 0, 0));
+        ViewIndex.Reentered result = view.reenter(a);
+        assertThat(result.lostWatching()).isEmpty();
+        assertThat(result.lostWatchers()).isEmpty();
+        assertThat(result.seen()).containsExactly(b);
+        assertThat(result.seers()).isEmpty();
+        for (ScenePlayer observer : List.of(a, b, c)) {
+            assertThat(view.watching(observer)).hasSize(1);
+            for (ScenePlayer target : List.of(a, b, c)) {
+                assertThat(view.watching(observer).contains(target)).isEqualTo(view.watchers(target).contains(observer));
+            }
+        }
+        assertThat(view.watchers(b)).containsExactly(c, a);
+        assertThat(view.watchers(a)).isEmpty();
+    }
+
+    @Test
+    void V2b_reenter不重建十至二十米旧关系() {
+        ScenePlayer a = player(1, 0, 0, 0), b = player(2, 1, 0, 0);
+        view.enter(a); view.enter(b);
+        a.setPosition(new Vec3(16, 0, 0));
+        ViewIndex.Reentered result = view.reenter(a);
+        assertThat(result.lostWatching()).containsExactly(b);
+        assertThat(result.lostWatchers()).containsExactly(b);
+        assertThat(result.seen()).isEmpty();
+        assertThat(result.seers()).isEmpty();
+        assertThat(view.watching(a)).isEmpty();
+        assertThat(view.watching(b)).isEmpty();
+        assertThat(view.watchers(a)).isEmpty();
+        assertThat(view.watchers(b)).isEmpty();
+    }
+
     private void moveTo(ScenePlayer player, double x, double y, double z) {
         player.setPosition(new Vec3(x, y, z));
         view.moved(player);
