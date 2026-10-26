@@ -669,6 +669,7 @@ class SceneWorldTest {
         world.step();
 
         assertThat(meters.get("game.scene.tick").timer().count()).isEqualTo(3);
+        assertThat(meters.get("game.scene.broadcast").tag("kind", "actor_move").timer().count()).isEqualTo(3);
         assertThat(meters.get("game.scene.broadcast").tag("kind", "view_changes").timer().count()).isEqualTo(3);
         assertThat(meters.get("game.scene.broadcast").tag("kind", "attribute_sync").timer().count()).isEqualTo(2);
     }

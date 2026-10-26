@@ -96,4 +96,29 @@ class SceneWorldNavigationTest {
         world.applyMove(player, new MoveInput(to, Rotation.getDefaultInstance(), Vec3.ORIGIN, 1));
         assertThat(player.position()).isEqualTo(to);
     }
+
+    @Test
+    void T6_外推撞墙清速当帧133_停步位置为墙前_后续不重复() throws Exception {
+        ScenePlayer player = enter(0, Vec3.ORIGIN);
+        repository.put(new PlayerData(1002, 1, 3, 1, "", 10, 1, player.position()));
+        world.onPlayerEnter(1, SceneWorldTest.enterFrame(12, 1002, scene.sceneId(), 1));
+        repository.completeAll();
+        world.applyMove(player, new MoveInput(player.position(), Rotation.getDefaultInstance(), new Vec3(0, 10, 0), 1));
+        sink.clear();
+        int frames = 0;
+        while (!player.velocity().isOrigin() && frames++ < 20) world.step();
+        assertThat(frames).isLessThan(20);
+        var moves = sink.to(1, 12).stream().filter(m -> m.getMessageId() == 133).toList();
+        assertThat(moves).hasSize(2);
+        var stopped = com.game.proto.ActorMoveS2C.parseFrom(moves.getLast().getSerializedMessage());
+        assertThat(stopped.getEntity()).isEqualTo(player.entity());
+        assertThat(stopped.getTransform().getLocation()).isEqualTo(player.position().toProto());
+        assertThat(stopped.hasVelocity()).isTrue();
+        assertThat(stopped.getVelocity()).isEqualTo(Vec3.ORIGIN.toVelocity());
+        assertThat(stopped.getMoveState()).isZero();
+        assertThat(moves.getLast().getId()).isZero();
+        assertThat(player.moveBroadcastPending()).isFalse();
+        for (int i = 0; i < 4; i++) world.step();
+        assertThat(sink.to(1, 12).stream().filter(m -> m.getMessageId() == 133)).hasSize(2);
+    }
 }

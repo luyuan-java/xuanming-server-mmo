@@ -588,7 +588,7 @@ class InBattleGateMatrixTest {
         assertThat(player.switchPhase()).as("原来的选目标在途不受影响").isEqualTo(SwitchPhase.RESOLVING);
     }
 
-    /** 131：只把速度清零（旁观者下一个同步帧收到速度 0 的 66），<b>不收</b>上报的位置；134 / 132 连速度也不碰。 */
+    /** 131：只清残留速度并当场133，下一个同步帧仍收到66；不收上报位置。静止131不重复广播，134/132连速度也不碰。 */
     @Test
     void 移动131_只把残留的速度清零_不收位置_134与132连速度也不动() throws Exception {
         ScenePlayer player = f.enter(SESSION, PLAYER);
@@ -617,6 +617,7 @@ class InBattleGateMatrixTest {
         assertThat(player.velocity().isOrigin()).as("131 只把速度清零").isTrue();
         assertThat(WorldTestAccess.velocityDirty(player)).as("置速度脏位：旁观者收到速度 0 的 66").isTrue();
         assertThat(player.position()).as("131 不收上报的终点").isEqualTo(before);
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
         f.world.step();
         f.world.step();
         List<MessageContent> synced = f.pushes(watcher, Contracts.IDS.syncBaseAttribute());
@@ -625,6 +626,7 @@ class InBattleGateMatrixTest {
         assertThat(attributes.getVelocity()).as("速度全零 = 停了").isEqualTo(Vec3.ORIGIN.toVelocity());
         assertThat(attributes.hasTransform()).as("位置没动，不带 transform").isFalse();
         assertThat(f.messageIds(player)).as("三条都不回包").isEmpty();
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
         assertThat(moves("in_battle")).isEqualTo(3);
         assertThat(gateRejects("move")).isEqualTo(3);
         assertThat(moves("accepted") + moves("clamped") + moves("corrected")).as("没有一条进了位移裁决").isZero();
@@ -636,6 +638,7 @@ class InBattleGateMatrixTest {
         assertThat(WorldTestAccess.velocityDirty(player)).as("速度本来就是 0：不置脏位").isFalse();
         f.world.step();
         f.world.step();
+        assertThat(f.pushes(watcher, Contracts.IDS.notifyActorMove())).as("静止131没有第二条133").isEmpty();
         assertThat(f.pushes(watcher, Contracts.IDS.syncBaseAttribute())).as("没有第二条 66").isEmpty();
         assertThat(player.position()).isEqualTo(before);
         assertThat(moves("in_battle")).as("照样计数").isEqualTo(4);
@@ -643,7 +646,7 @@ class InBattleGateMatrixTest {
     }
 
     /**
-     * 第二轮修正 R2-e：服务器的帧外推整个跳过战斗在途的玩家（基线 {@code movement.cpp:49-52} 的 {@code exclude<InBattleComp>}：进战时的残留速度
+     * 第二轮修正 R2-e：服务器的帧外推整个跳过战斗在途的玩家（基线 {@code movement.cpp MovementSystem::Update:71-74} 的 {@code exclude<InBattleComp>}：进战时的残留速度
      * 不能让玩家在战斗里一路飘走）。备战时已停步、在途的移动上行也不收速度，正常流程里在途玩家的速度恒为 0——这里硬摆一个残留速度，
      * 才看得出外推这一层自己也挡着（纵深防御）：位置不动、速度原样、不置位置脏位；同场景不在战斗的对照玩家照常被外推；解冻后照常外推。
      */

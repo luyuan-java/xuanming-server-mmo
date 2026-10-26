@@ -400,10 +400,11 @@ class BattleRecoveryTest {
 
     /**
      * 按锁重建挂上冻结的那一步<b>同时停步</b>：移动上行此后被在途闸丢弃，旧速度不能继续被外推。恢复读在途时玩家可以照常走动（在途闸只看冻结），
-     * 读回来、冻结挂上的同一步速度清零并置脏位（旁观者下一个同步帧收到速度 0 的 66）——不等复核回来。
+     * 读回来、冻结挂上的同一步速度清零并置脏位（旁观者当场收到零速133，下一个同步帧仍收到66）——不等复核回来。
      */
     @Test
     void 按锁重建时停步_挂冻结的同一步速度清零并置脏位_不等复核() {
+        ScenePlayer watcher = f.enter(SESSION + 1, 2002);
         putFightingLock(PLAYER, X);
         f.locks.hold(Op.ENTER_READ, Op.TOUCH);
         ScenePlayer player = load();
@@ -418,6 +419,10 @@ class BattleRecoveryTest {
         assertThat(f.locks.pending(Op.TOUCH)).as("复核还没回来").hasSize(1);
         assertThat(player.velocity().isOrigin()).isTrue();
         assertThat(WorldTestAccess.velocityDirty(player)).isTrue();
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
+        f.world.step();
+        f.world.step();
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
     }
 
     /**

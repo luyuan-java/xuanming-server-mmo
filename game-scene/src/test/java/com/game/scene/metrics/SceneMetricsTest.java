@@ -28,6 +28,44 @@ import org.junit.jupiter.api.Test;
 
 class SceneMetricsTest {
 
+    @Test
+    void T14_移动广播与瞬移指标_启动即注册_导出名与标签() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            SceneMetrics exported = new SceneMetrics(prometheus);
+            String before = prometheus.scrape();
+            assertThat(before).contains("game_scene_broadcast_seconds_count{kind=\"actor_move\"} 0",
+                    "game_scene_moves_total{result=\"teleport_stale\"} 0");
+            for (String kind : new String[] {"broadcast", "catch_up"}) {
+                assertThat(before).contains("game_scene_actor_move_deliveries_total{kind=\"" + kind + "\"} 0");
+            }
+            for (String reason : new String[] {"admin", "team_regroup"}) {
+                for (String result : new String[] {"teleported", "not_here", "frozen", "in_battle", "invalid_target"}) {
+                    assertThat(before).contains("game_scene_teleports_total{reason=\"" + reason + "\",result=\"" + result + "\"} 0");
+                }
+            }
+            for (String result : new String[] {"settled", "expired", "voided"}) {
+                assertThat(before).contains("game_scene_teleport_settles_total{result=\"" + result + "\"} 0");
+            }
+            exported.actorMoveDelivered(SceneMetrics.ActorMoveDelivery.BROADCAST, 2);
+            exported.actorMoveDelivered(SceneMetrics.ActorMoveDelivery.CATCH_UP, 3);
+            exported.teleport(SceneMetrics.TeleportReason.ADMIN, SceneMetrics.TeleportResult.TELEPORTED);
+            exported.teleportSettle(SceneMetrics.TeleportSettle.SETTLED);
+            exported.adminRequest(SceneMetrics.ADMIN_OP_PLAYER_TELEPORT, 200);
+            String after = prometheus.scrape();
+            assertThat(after).contains("game_scene_actor_move_deliveries_total{kind=\"broadcast\"} 2",
+                    "game_scene_actor_move_deliveries_total{kind=\"catch_up\"} 3",
+                    "game_scene_teleports_total{reason=\"admin\",result=\"teleported\"} 1",
+                    "game_scene_teleport_settles_total{result=\"settled\"} 1",
+                    "game_scene_admin_requests_total{op=\"player_teleport\",status=\"200\"} 1");
+            assertThat(labelNames(after, "game_scene_actor_move_")).containsOnly("kind");
+            assertThat(labelNames(after, "game_scene_teleports_")).containsOnly("reason", "result");
+            assertThat(labelNames(after, "game_scene_teleport_settles_")).containsOnly("result");
+        } finally {
+            prometheus.close();
+        }
+    }
+
     private final MockClock clock = new MockClock();
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry(SimpleConfig.DEFAULT, clock);
     private final SceneMetrics metrics = new SceneMetrics(meters);

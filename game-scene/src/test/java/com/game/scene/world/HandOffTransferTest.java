@@ -48,20 +48,23 @@ class HandOffTransferTest {
     // ------------------------------------------------------------------ 冻结
 
     @Test
-    void 冻结前停下_旁人下一同步帧收到停了的66_快照就是交出写的内容() {
+    void 冻结前停下_旁人当场收到133下一同步帧收到66_快照就是交出写的内容() {
         f.world.applyMove(a, new MoveInput(a.position(), Rotation.getDefaultInstance(), new Vec3(2, 0, 0), 1));
         f.world.step();
         f.world.step();
         f.sink.clear();
 
         PendingHandOff handOff = f.freeze(a);
+        assertThat(f.sink.messageIdsTo(LINK, 12)).containsExactly(133);
+        WorldTestAccess.assertStoppedMove(f.sink.to(LINK, 12), a);
+        assertThat(a.moveBroadcastPending()).isFalse();
 
         assertThat(a.velocity().isOrigin()).isTrue();
         assertThat(handOff.frozen()).isEqualTo(a.toSave());
         assertThat(handOff.frozen().ownerEpoch()).isEqualTo(E);
         f.world.step();
         f.world.step();
-        assertThat(f.sink.messageIdsTo(LINK, 12)).as("冻结后不再外推，旁人收到速度 0 的 66").containsExactly(66);
+        assertThat(f.sink.messageIdsTo(LINK, 12)).as("冻结当场133，下一同步帧66").containsExactly(133, 66);
         assertThat(f.inFlight()).isEqualTo(1);
     }
 
@@ -80,6 +83,24 @@ class HandOffTransferTest {
     }
 
     // ------------------------------------------------------------------ 交出成功
+
+    @Test
+    void T6_T7_待发移动冻结时当场停步_交出提交只销毁无后续133() throws Exception {
+        f.world.applyMove(a, new MoveInput(a.position(), Rotation.getDefaultInstance(), new Vec3(2, 0, 0), 1));
+        assertThat(a.moveBroadcastPending()).isTrue();
+        f.sink.clear();
+        PendingHandOff handOff = f.freeze(a);
+        WorldTestAccess.assertStoppedMove(f.sink.to(LINK, 12), a);
+        assertThat(a.moveBroadcastPending()).isFalse();
+        f.world.step();
+        assertThat(f.sink.messageIdsTo(LINK, 12)).containsExactly(133, 66);
+        f.sink.clear();
+        handOff.complete(new HandOffOutcome.HandedOff(E + 1));
+        f.world.step();
+        f.world.step();
+        assertThat(f.sink.messageIdsTo(LINK, 12)).containsExactly(51);
+        assertThat(ActorDestroyS2C.parseFrom(f.sink.to(LINK, 12).getFirst().getSerializedMessage()).getEntity()).isEqualTo(a.entity());
+    }
 
     @Test
     void 交出成功_旁人收到51_本人收不到79_发PlayerTransfer_不写回不拍快照不写位置() throws Exception {

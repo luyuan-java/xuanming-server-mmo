@@ -15,6 +15,7 @@ import com.game.player.store.state.PlayerState;
 import com.game.scene.battle.BattleFreeze.Phase;
 import com.game.scene.battle.PlayerBattle.Recovery;
 import com.game.scene.testing.FakeBattleLocks.Call;
+import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakeBattleLocks.Op;
 import com.game.scene.world.PlayerRepository.ProgressResult;
 import com.game.scene.world.ScenePlayer;
@@ -529,6 +530,7 @@ class ConfirmBattleTest {
     @Test
     void 迟到确认_按锁重建FIGHTING_节点号与备战期限取锁_期限取事件值_停步_推144() {
         ScenePlayer player = f.enter(SESSION, PLAYER);
+        ScenePlayer watcher = f.enter(SESSION + 1, 2002);
         long prepareDeadline = f.prepareDeadline();
         f.locks.putLock(PLAYER, X, 33, BattleRedis.STATE_PREPARING, f.deadline(), prepareDeadline, PREPARE_TTL);
         WorldTestAccess.setVelocity(player, new Vec3(1, 0, 0));
@@ -556,6 +558,10 @@ class ConfirmBattleTest {
         assertThat(freeze.rescuing()).isFalse();
         assertThat(player.velocity().isOrigin()).as("挂冻结即停步").isTrue();
         assertThat(WorldTestAccess.velocityDirty(player)).isTrue();
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
+        f.world.step();
+        f.world.step();
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
         assertThat(f.reconnectHints(player)).containsExactly(X);
         assertThat(f.locks.lockState(PLAYER)).isEqualTo("F");
         assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(365);

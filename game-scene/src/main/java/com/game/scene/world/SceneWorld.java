@@ -18,6 +18,7 @@ import com.game.proto.ActorCreateS2C;
 import com.game.proto.ActorDestroyS2C;
 import com.game.proto.ActorListCreateS2C;
 import com.game.proto.ActorListDestroyS2C;
+import com.game.proto.ActorMoveListS2C;
 import com.game.proto.EnterSceneS2C;
 import com.game.proto.MessageContent;
 import com.game.proto.MoveAckS2C;
@@ -25,6 +26,7 @@ import com.game.proto.SceneInfoComp;
 import com.game.proto.TravelToZoneResponse;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.BattleGate;
+import com.game.scene.metrics.SceneMetrics.ActorMoveDelivery;
 import com.game.scene.metrics.SceneMetrics.BroadcastKind;
 import com.game.scene.metrics.SceneMetrics.ChannelPlanApply;
 import com.game.scene.metrics.SceneMetrics.ChannelRelocation;
@@ -92,13 +94,13 @@ import org.slf4j.LoggerFactory;
  * <p><b>视野</b>：每个场景一个 {@link ViewIndex}（均匀方格 + 双向兴趣列表，规则见该类）。进场 / 离场当场发 21 / 47 / 51；
  * 移动带来的进出视野在帧里合并成每个观察者一条 47、一条 64。51、66、70 的收件人都是「看得见该玩家的人」，
  * 所以客户端收到某实体的任何推送之前一定先收到过它的创建消息，收到销毁消息之后不会再收到它的推送。
- * 21 / 47 只带位置；有新观察者时把目标的朝向 / 速度置脏，下一个同步帧的 66 补给全部观察者（修基线缺口 9，
- * 不另发单播，66 仍是每实体每 100 ms 至多一条）。
+ * 21 / 47 带位置与已有朝向；新观察者在 47 后收到在动目标的 135。原有 66 脏位补发保留，仍每实体最多 10 Hz。
  *
  * <p><b>移动</b>（契约文档 {@code mmorpg-client-contract-movement.md}）：134 / 132 / 131 在收到时当场裁决（{@link #applyMove}），
- * 永不回包；只有裁决位置与上报位置水平偏差 &gt; 0.5 m 时给本人发 137。
+ * 永不回包；只有裁决位置与上报位置水平偏差 &gt; 0.5 m 时给本人发 137。接受输入挂 133 待发，帧开头合并兑现；
+ * 服务器让仍在场的人由动变停时当场广播 133，普通外推不发。
  *
- * <p><b>帧</b>（{@link #step()}，20 FPS，由 {@link SceneTicker} 驱动）：外推（含挂机停推）→ 视野刷新并发 47 / 64 →
+ * <p><b>帧</b>（{@link #step()}，20 FPS，由 {@link SceneTicker} 驱动）：兑现 133 → 外推（含挂机 / 撞墙停步）→ 视野刷新并发 47 / 135 / 64 →
  * 偶数帧属性同步（66）→ 帧号 +1。外推放在视野刷新之前，这一帧的 47 / 64 与随后的 66 用的是同一份位置
  * （基线是视野 → 外推 → 同步，移动带来的 47 / 64 晚一帧；两种顺序都满足「47 先于 66、64 之后不再有 66」）。
  *
@@ -250,6 +252,8 @@ public final class SceneWorld {
     private long locationSecond;
     /** 已跑过的帧数（下一帧的帧号）。偶数帧做属性同步。 */
     private long frame;
+    /** 逻辑线程所有；整个 step（含假链路回调）期间不允许瞬移。 */
+    private boolean stepping;
     /** 跨节点换图的令牌（单调递增，只用于日志对照）。 */
     private long switchTokens;
     /** 冻结中（交出在途）的玩家数（指标 {@code game.scene.transfers.in.flight}）。 */
@@ -1613,7 +1617,7 @@ public final class SceneWorld {
         noteOccupancy(scene);
         publishPopulation(scene.configId());
         metrics.aoiEntered(entered.seen().size() + entered.seers().size());
-        // 新观察者只从 21 / 47 拿到位置：朝向、速度由下一个同步帧的 66 补上（见 markFullStateForNewWatcher）。
+        // 66 的新观察者补发保持原样；客户端可见初态另由 21 / 47 的朝向与 135 的速度提供。
         for (ScenePlayer seen : entered.seen()) {
             seen.markFullStateForNewWatcher();
         }
@@ -1626,6 +1630,7 @@ public final class SceneWorld {
         sendTo(player, push(ids.notifyActorCreate(), self));
         if (!entered.seen().isEmpty()) {
             sendTo(player, push(ids.notifyActorListCreate(), actorList(entered.seen())));
+            catchUpMoves(player, entered.seen());
         }
         broadcast(entered.seers(), push(ids.notifyActorCreate(), self));
     }
@@ -1700,6 +1705,7 @@ public final class SceneWorld {
         player.setPosition(at);
         player.stopMotion();
         player.moveGuard().reset(at, clock.nanoTime());
+        player.clearMoveBroadcast();
         enterScene(player, target);
         if (previousSwitch != null && previousSwitch.purpose() == PlayerSwitch.Purpose.MIRROR_CREATE
                 && player.switching() == previousSwitch) {
@@ -1887,11 +1893,10 @@ public final class SceneWorld {
         repository.handOff(snapshot, outcome -> onHandOffDone(player, sw, outcome));
     }
 
-    /** 冻结前停下（旁人下一个同步帧收到「停了」的 66，服务器不再外推）并拍冻结快照；跨节点换图与跨 zone 传送共用。 */
+    /** 冻结前停下（旁人当场收到零速 133，下一个同步帧仍收到 66）并拍冻结快照；跨节点换图与跨 zone 传送共用。 */
     private PlayerSave haltForFreeze(ScenePlayer player) {
         if (!player.velocity().isOrigin()) {
-            player.stopMotion();
-            player.markDirty(ScenePlayer.DIRTY_VELOCITY);
+            haltMotion(player);
         }
         return player.toSave();
     }
@@ -2568,6 +2573,7 @@ public final class SceneWorld {
         player.setRotation(input.rotation());
         player.setVelocity(move.blocked() ? Vec3.ORIGIN : navigation.velocity(MovementRules.clampSpeed(input.velocity())));
         player.markDirty(ScenePlayer.DIRTY_TRANSFORM | ScenePlayer.DIRTY_VELOCITY);
+        player.markMoveBroadcast();
         boolean correct = MovementRules.needsCorrection(accepted, input.location());
         metrics.move(correct ? MoveResult.CORRECTED
                 : accepted.equals(input.location()) ? MoveResult.ACCEPTED : MoveResult.CLAMPED);
@@ -2591,30 +2597,77 @@ public final class SceneWorld {
     // ------------------------------------------------------------------ 帧
 
     /**
-     * 跑一帧（固定步长 {@link MovementRules#STEP_SECONDS}）：外推 → 视野刷新（47 / 64）→ 偶数帧属性同步（66）→ 帧号 +1。
+     * 跑一帧（固定步长 {@link MovementRules#STEP_SECONDS}）：兑现 133 → 外推 → 视野刷新（47 / 135 / 64）→ 偶数帧 66 → 帧号 +1。
      * 由 {@link SceneTicker} 在场景逻辑线程上调用。没有移动、没有脏字段时只是遍历一遍玩家，不新建集合、不发消息。
-     * 指标：整帧耗时每帧记一次；两个广播阶段（全部场景合计）每执行一次记一次——视野变化每帧、属性同步偶数帧。
+     * 指标：整帧、移动兑现与视野变化每帧各一次；属性同步偶数帧一次。帧内禁止瞬移以免改动正在遍历的兴趣集合。
      */
     public void step() {
-        long start = clock.nanoTime();
-        long viewBroadcastNanos = 0;
-        for (Scene scene : scenes.values()) {
-            integrate(scene);
-            scene.refreshViews(viewChanges);
-            long emitStart = clock.nanoTime();
-            emitViewChanges();
-            viewBroadcastNanos += clock.nanoTime() - emitStart;
-        }
-        metrics.broadcast(BroadcastKind.VIEW_CHANGES, viewBroadcastNanos);
-        if (frame % 2 == 0) {
-            long syncStart = clock.nanoTime();
+        if (stepping) throw new IllegalStateException("场景帧不能重入");
+        stepping = true;
+        try {
+            long start = clock.nanoTime();
+            long moveStart = clock.nanoTime();
             for (Scene scene : scenes.values()) {
-                syncAttributes(scene);
+                flushMoveBroadcasts(scene);
             }
-            metrics.broadcast(BroadcastKind.ATTRIBUTE_SYNC, clock.nanoTime() - syncStart);
+            metrics.broadcast(BroadcastKind.ACTOR_MOVE, clock.nanoTime() - moveStart);
+            long viewBroadcastNanos = 0;
+            for (Scene scene : scenes.values()) {
+                integrate(scene);
+                scene.refreshViews(viewChanges);
+                long emitStart = clock.nanoTime();
+                emitViewChanges();
+                viewBroadcastNanos += clock.nanoTime() - emitStart;
+            }
+            metrics.broadcast(BroadcastKind.VIEW_CHANGES, viewBroadcastNanos);
+            if (frame % 2 == 0) {
+                long syncStart = clock.nanoTime();
+                for (Scene scene : scenes.values()) {
+                    syncAttributes(scene);
+                }
+                metrics.broadcast(BroadcastKind.ATTRIBUTE_SYNC, clock.nanoTime() - syncStart);
+            }
+            frame++;
+            metrics.tick(clock.nanoTime() - start);
+        } finally {
+            stepping = false;
         }
-        frame++;
-        metrics.tick(clock.nanoTime() - start);
+    }
+
+    /** 输入每实体每帧至多兑现一次；被冻结或进战的目标与观察者同样要收到最新状态。 */
+    private void flushMoveBroadcasts(Scene scene) {
+        for (ScenePlayer player : scene.players()) {
+            if (player.moveBroadcastPending()) broadcastMove(player);
+        }
+    }
+
+    /** 133 唯一发送点。只读观察者集合，消息体只序列化一次；无人观察也清标记。 */
+    private void broadcastMove(ScenePlayer player) {
+        player.clearMoveBroadcast();
+        Set<ScenePlayer> watchers = player.scene().watchers(player);
+        if (watchers.isEmpty()) return;
+        broadcast(watchers, push(ids.notifyActorMove(), player.toActorMove(clock.epochMillis())));
+        metrics.actorMoveDelivered(ActorMoveDelivery.BROADCAST, watchers.size());
+    }
+
+    /** 仅给新观察者补当前在动的目标，不清目标待发，其他观察者仍须收到帧开头的 133。 */
+    private void catchUpMoves(ScenePlayer watcher, Collection<ScenePlayer> targets) {
+        ActorMoveListS2C.Builder moves = ActorMoveListS2C.newBuilder();
+        long now = clock.epochMillis();
+        for (ScenePlayer target : targets) {
+            if (target.isMoving()) moves.addMoves(target.toActorMove(now));
+        }
+        if (moves.getMovesCount() == 0) return;
+        sendTo(watcher, push(ids.notifyActorMoveList(), moves.build()));
+        metrics.actorMoveDelivered(ActorMoveDelivery.CATCH_UP, moves.getMovesCount());
+    }
+
+    /** 仍留在场的服务器停步：保持 66 脏位规则；原先在动才当场发 133，并吃掉输入待发。 */
+    private void haltMotion(ScenePlayer player) {
+        boolean wasMoving = player.isMoving();
+        player.stopMotion();
+        player.markDirty(ScenePlayer.DIRTY_VELOCITY);
+        if (wasMoving) broadcastMove(player);
     }
 
     long frame() {
@@ -2624,10 +2677,10 @@ public final class SceneWorld {
     /**
      * 服务器外推（基线 MovementSystem）：速度非零的玩家 {@code location += velocity × 0.05}，置 Transform 脏位。
      * 连续 {@link MovementRules#AFK_FRAMES} 帧没有任何客户端消息即停推（基线 AfkSystem）；停推时把速度清零并置脏位，
-     * 让看得见它的人收到一条「停了」的 66——基线停推但不清速度，观察者的客户端按旧速度一直外推下去。
+     * 让看得见它的人当场收到「停了」的 133，66 照旧。客户端 1 秒外推上限只是兜底，不能代替停止通知。
      * 有导航的地图逐格检查整段位移，撞墙夹持并清速度；旧无导航场景保留原有外推规则。
      *
-     * <p><b>回合制战斗在途（有战斗冻结，备战或战斗中）的玩家整个跳过</b>：不外推、不动速度、不置脏位（基线 {@code movement.cpp:49-52} 的
+     * <p><b>回合制战斗在途（有战斗冻结，备战或战斗中）的玩家整个跳过</b>：不外推、不动速度、不置脏位（基线 {@code MovementSystem::Update} 的
      * {@code exclude<InBattleComp>}：进战时的残留速度会让玩家在战斗中一路飘走，战后位置与客户端画面对不上）。Java 挂冻结时已经停步
      * （{@link #haltForBattle}）、在途的移动上行也不收速度，正常流程里在途玩家的速度恒为 0，这里是纵深防御；解冻后照常外推。
      */
@@ -2641,8 +2694,7 @@ public final class SceneWorld {
                 continue;
             }
             if (frame - player.lastActiveFrame() >= MovementRules.AFK_FRAMES) {
-                player.setVelocity(Vec3.ORIGIN);
-                player.markDirty(ScenePlayer.DIRTY_VELOCITY);
+                haltMotion(player);
                 log.debug("玩家 {} 帧内无消息，停止外推 player={}", MovementRules.AFK_FRAMES, player.playerId());
                 continue;
             }
@@ -2650,15 +2702,15 @@ public final class SceneWorld {
                     player.position().plusScaled(velocity, MovementRules.STEP_SECONDS));
             scene.relocate(player, move.position());
             if (move.blocked()) {
-                player.setVelocity(Vec3.ORIGIN);
                 player.moveGuard().correctAnchor(move.position());
-                player.markDirty(ScenePlayer.DIRTY_VELOCITY);
+                // 实现前复核：当前三图导航已接入，撞墙由动变停也必须当场告知观察者（规格 §5.3 ⑦）。
+                haltMotion(player);
             }
             player.markDirty(ScenePlayer.DIRTY_TRANSFORM);
         }
     }
 
-    /** 把本次视野刷新的变化发出去：每个观察者先一条 47（新看见的）、再一条 64（看不见了的），与基线同序。 */
+    /** 视野变化按观察者发送：47 → 135（新看见且在动）→ 64，保持先创建后移动的顺序。 */
     private void emitViewChanges() {
         if (viewChanges.isEmpty()) {
             return;
@@ -2671,6 +2723,7 @@ public final class SceneWorld {
                 for (ScenePlayer target : delta.added()) {
                     target.markFullStateForNewWatcher();
                 }
+                catchUpMoves(watcher, delta.added());
             }
             if (!delta.removed().isEmpty()) {
                 ActorListDestroyS2C.Builder destroyed = ActorListDestroyS2C.newBuilder();
@@ -3232,12 +3285,11 @@ public final class SceneWorld {
     }
 
     /**
-     * 回合制战斗备战即停步（scene-battle-spec §7.5 第 3 步，D5）：速度清零并置速度脏位，看得见它的人在下一个同步帧收到速度 0 的 66。
+     * 回合制战斗备战即停步（scene-battle-spec §7.5 第 3 步，D5）：速度清零并置速度脏位，原先在动时旁人当场收到零速 133，下一个同步帧仍收到 66。
      * 与跨节点换图冻结的停步同一做法（{@link #freeze}）。逻辑线程上调用。
      */
     public void haltForBattle(ScenePlayer player) {
-        player.stopMotion();
-        player.markDirty(ScenePlayer.DIRTY_VELOCITY);
+        haltMotion(player);
     }
 
     /** 本节点在场玩家的快照（逻辑线程上调用；遍历时可以改集合）。 */

@@ -47,6 +47,9 @@ public final class SceneMetrics {
     static final String TICK = "game.scene.tick";
     static final String BROADCAST = "game.scene.broadcast";
     static final String MOVES = "game.scene.moves";
+    static final String ACTOR_MOVE_DELIVERIES = "game.scene.actor.move.deliveries";
+    static final String TELEPORTS = "game.scene.teleports";
+    static final String TELEPORT_SETTLES = "game.scene.teleport.settles";
     static final String PERIODIC_SAVES = "game.scene.periodic.saves";
     static final String AOI_CHANGES = "game.scene.aoi.changes";
     static final String STORAGE_WRITES = "game.scene.storage.writes";
@@ -95,6 +98,7 @@ public final class SceneMetrics {
     /** 管理口指标的 op 标签（只取已知接口，任意路径都不得变成标签值）。 */
     public static final String ADMIN_OP_INSTANCE_CREATE = "instance_create";
     public static final String ADMIN_OP_INSTANCE_DESTROY = "instance_destroy";
+    public static final String ADMIN_OP_PLAYER_TELEPORT = "player_teleport";
     public static final String ADMIN_OP_OTHER = "other";
 
     /**
@@ -135,7 +139,9 @@ public final class SceneMetrics {
         /** 玩家在冻结中（跨节点换图交出在途，scene-handoff-spec §5.9 DROP），整条静默丢弃。 */
         FROZEN,
         /** 玩家有在途的回合制战斗（134 / 132 静默丢、131 只清速度，scene-battle-spec §7.13）。 */
-        IN_BATTLE
+        IN_BATTLE,
+        /** 瞬移落位等待中，离目标过远且尚未到期的旧位置上报，整条丢弃。 */
+        TELEPORT_STALE
     }
 
     /** 一次放技能（84）的裁决（{@code game.scene.skill.releases{result}}），每条恰好计一次。 */
@@ -175,11 +181,25 @@ public final class SceneMetrics {
 
     /** 帧内的广播阶段（{@code game.scene.broadcast{kind}}）。 */
     public enum BroadcastKind {
-        /** 视野变化：每个观察者一条 47 / 64（每帧一次，全部场景合计）。 */
+        /** 输入触发的 133 在帧开头兑现（每帧一次，全部场景合计；停步当场发不计此段）。 */
+        ACTOR_MOVE,
+        /** 视野变化：每个观察者 47 / 135 / 64（每帧一次，全部场景合计）。 */
         VIEW_CHANGES,
         /** 属性同步：66（偶数帧一次，全部场景合计）。 */
         ATTRIBUTE_SYNC
     }
+
+    /** 同场景瞬移的业务来源，保持低基数。 */
+    public enum TeleportReason { TEAM_REGROUP, ADMIN }
+
+    /** 每次瞬移请求恰好一个结局，含管理口找人阶段的拒绝。 */
+    public enum TeleportResult { TELEPORTED, NOT_HERE, FROZEN, IN_BATTLE, INVALID_TARGET }
+
+    /** 落位等待的结局：VOIDED 表示换场景或再次瞬移覆盖。 */
+    public enum TeleportSettle { SETTLED, EXPIRED, VOIDED }
+
+    /** 133 / 135 送出的（收件人，实体）对数。 */
+    public enum ActorMoveDelivery { BROADCAST, CATCH_UP }
 
     /**
      * 一次组队跟随检查（进场 / 换场景后读成员关系，team-spec §6.10）的结局（{@code game.scene.team.follow{result}}），
@@ -597,6 +617,9 @@ public final class SceneMetrics {
     private final Timer tick;
     private final Map<BroadcastKind, Timer> broadcasts;
     private final Map<MoveResult, Counter> moves;
+    private final Map<ActorMoveDelivery, Counter> actorMoveDeliveries;
+    private final Map<TeleportReason, Map<TeleportResult, Counter>> teleports;
+    private final Map<TeleportSettle, Counter> teleportSettles;
     private final Map<SkillResult, Counter> skillReleases;
     private final Counter skillInterrupts;
     private final Map<PeriodicSave, Counter> periodicSaves;
@@ -654,6 +677,18 @@ public final class SceneMetrics {
                     .register(registry));
         }
         this.moves = counters(MoveResult.class, MOVES, "result", "移动上行的裁决结果");
+        this.actorMoveDeliveries = counters(ActorMoveDelivery.class, ACTOR_MOVE_DELIVERIES, "kind",
+                "移动广播与新观察者补发的收件人实体对数");
+        this.teleportSettles = counters(TeleportSettle.class, TELEPORT_SETTLES, "result", "瞬移落位等待的结局");
+        this.teleports = new EnumMap<>(TeleportReason.class);
+        for (TeleportReason reason : TeleportReason.values()) {
+            Map<TeleportResult, Counter> results = new EnumMap<>(TeleportResult.class);
+            for (TeleportResult result : TeleportResult.values()) {
+                results.put(result, Counter.builder(TELEPORTS).description("同场景瞬移请求的结局")
+                        .tag("reason", tagValue(reason)).tag("result", tagValue(result)).register(registry));
+            }
+            this.teleports.put(reason, results);
+        }
         this.skillReleases = counters(SkillResult.class, SKILL_RELEASES, "result", "放技能（84）的裁决结果");
         this.skillInterrupts = Counter.builder(SKILL_INTERRUPTS).description("放技能打断了进行中的施法（推了 33），每次打断计一次")
                 .register(registry);
@@ -1031,7 +1066,7 @@ public final class SceneMetrics {
 
     /**
      * dev 管理口的一次调用（{@code game.scene.admin.requests{op, status}}；HTTP 线程）。op 只取 {@link #ADMIN_OP_INSTANCE_CREATE} /
-     * {@link #ADMIN_OP_INSTANCE_DESTROY} / {@link #ADMIN_OP_OTHER}，status 是 HTTP 状态码（有界）。
+     * {@link #ADMIN_OP_INSTANCE_DESTROY} / {@link #ADMIN_OP_PLAYER_TELEPORT} / {@link #ADMIN_OP_OTHER}，status 是 HTTP 状态码（有界）。
      */
     public void adminRequest(String op, int status) {
         Counter.builder(ADMIN_REQUESTS).description("scene 管理端口 /admin/** 的调用（鉴权失败也计）")
@@ -1072,6 +1107,18 @@ public final class SceneMetrics {
         moves.get(result).increment();
     }
 
+    public void actorMoveDelivered(ActorMoveDelivery kind, int pairs) {
+        if (pairs > 0) actorMoveDeliveries.get(kind).increment(pairs);
+    }
+
+    public void teleport(TeleportReason reason, TeleportResult result) {
+        teleports.get(reason).get(result).increment();
+    }
+
+    public void teleportSettle(TeleportSettle result) {
+        teleportSettles.get(result).increment();
+    }
+
     public void skillRelease(SkillResult result) {
         skillReleases.get(result).increment();
     }
@@ -1087,7 +1134,7 @@ public final class SceneMetrics {
 
     /**
      * 观察者被告知某实体进入视野的次数（{@code game.scene.aoi.changes{change=enter}}）：进场时给进场者的 47 条目、
-     * 给看得见进场者的人的 21，以及帧内 47 的条目，一对（观察者, 目标）计一次。
+     * 给看得见进场者的人的 21，以及帧内 47 的条目，一对（观察者, 目标）计一次。瞬移本人只计新增差集，旁人计重建。
      */
     public void aoiEntered(int pairs) {
         if (pairs > 0) {
@@ -1097,7 +1144,7 @@ public final class SceneMetrics {
 
     /**
      * 观察者被告知某实体离开视野的次数（{@code game.scene.aoi.changes{change=leave}}）：离场 / 换场景时的 51、帧内 64 的条目，
-     * 一对计一次。离场者自己的兴趣列表是静默清空的（它收不到 64 / 51），不计。
+     * 一对计一次。瞬移本人只计消失差集，旁人计销毁；普通离场者自己的兴趣列表静默清空，不计。
      */
     public void aoiLeft(int pairs) {
         if (pairs > 0) {

@@ -27,6 +27,9 @@ public record SceneMessageIds(
         int moveSync,
         int moveStop,
         int notifyMoveAck,
+        int notifyActorMove,
+        int notifyActorMoveList,
+        int notifyTeleport,
         int sendTipToClient,
         int travelToZone) {
 
@@ -55,6 +58,9 @@ public record SceneMessageIds(
                 registry.requireId(MOVEMENT_SERVICE, "MoveSync"),
                 registry.requireId(MOVEMENT_SERVICE, "MoveStop"),
                 registry.requireId(MOVEMENT_SERVICE, "NotifyMoveAck"),
+                registry.requireId(MOVEMENT_SERVICE, "NotifyActorMove"),
+                registry.requireId(MOVEMENT_SERVICE, "NotifyActorMoveList"),
+                registry.requireId(MOVEMENT_SERVICE, "NotifyTeleport"),
                 registry.requireId(COMMON_SERVICE, "SendTipToClient"),
                 registry.requireId(SCENE_SERVICE, "TravelToZone"));
     }

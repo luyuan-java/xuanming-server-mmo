@@ -51,7 +51,7 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>逐条拒绝码及其次序（1005 → 1004 → 1006 换图在途 → 1006 已有冻结 → 1006 恢复未就绪 / 账本未落盘 / 账本损坏 → 1006 0 血 → 1011），
  *       拒绝时零冻结、零 Redis 调用；</li>
- *   <li>成功：挂冻结即生效（客户端的 168 立刻 25011）、锁写完才回应答、锁字段与 TTL、停步（旁观者收到速度 0 的 66）；</li>
+ *   <li>成功：挂冻结即生效（客户端的 168 立刻 25011）、锁写完才回应答、锁字段与 TTL、停步（旁观者当场收到零速133，下一个同步帧仍收到66）；</li>
  *   <li>写锁结局的各分支：被占、脚本重放、Redis 失败、写锁期间离场 / 收到取消 / 同 epoch 重进 / 备战到期；</li>
  *   <li>6.3 审计修掉的几处（FRZ-6 / RDS-10 过期分支结局不明也删锁、FRZ-7 只删备战锁、GAT-14 过期的 RESOLVING 槽不再挡、
  *       FRZ-2 回调出错应答仍有结局、STL-11 账本损坏打带原因的日志）；</li>
@@ -854,7 +854,7 @@ class PrepareBattleTest {
     }
 
     /**
-     * D5：备战即停步。看得见他的人在下一个同步帧收到一条 66：只带 velocity、且是全零（「停了」），不带 transform；他自己不收
+     * D5：备战即停步。看得见他的人当场收到零速133；下一个同步帧仍收到一条66：只带velocity且全零，不带transform；他自己不收
      * （66 不发给本人）；备战本身不给客户端推任何东西（结论只经 match 可见）。
      */
     @Test
@@ -867,6 +867,9 @@ class PrepareBattleTest {
         f.sink.clear();
 
         f.prepared(PLAYER, BATTLE);
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
+        assertThat(player.rotation()).isNull();
+        assertThat(WorldTestAccess.moveBroadcastPending(player)).isFalse();
         f.world.step();
         f.world.step();
 
@@ -882,7 +885,61 @@ class PrepareBattleTest {
 
         f.world.step();
         f.world.step();
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
         assertThat(f.pushes(watcher, Contracts.IDS.syncBaseAttribute())).as("之后不再重复发").hasSize(1);
+    }
+
+    @Test
+    void T6_真实备战吃掉移动待发_战斗中观察者照收别人的133() {
+        ScenePlayer player = f.enter(SESSION, PLAYER);
+        ScenePlayer watcher = f.enter(SESSION + 1, 2002);
+        f.prepared(watcher.playerId(), BATTLE + 1);
+        f.request(player, "SceneMovementClientPlayer", "MoveStart", com.game.proto.MoveStartC2S.newBuilder()
+                .setStartLocation(player.position().toLocation()).setVelocity(new Vec3(1, 0, 0).toVelocity()).build());
+        assertThat(WorldTestAccess.moveBroadcastPending(player)).isTrue();
+        f.sink.clear();
+        f.prepared(PLAYER, BATTLE);
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
+        assertThat(WorldTestAccess.moveBroadcastPending(player)).isFalse();
+        f.world.step();
+        f.world.step();
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
+        assertThat(f.pushes(player, Contracts.IDS.notifyActorMove())).isEmpty();
+    }
+
+    @Test
+    void T6_静止备战只置66脏位_已有静止待发下一帧照发且不按战斗过滤() {
+        ScenePlayer player = f.enter(SESSION, PLAYER);
+        ScenePlayer watcher = f.enter(SESSION + 1, 2002);
+        f.request(player, "SceneMovementClientPlayer", "MoveStop", com.game.proto.MoveStopC2S.newBuilder()
+                .setEndLocation(player.position().toLocation()).build());
+        assertThat(WorldTestAccess.moveBroadcastPending(player)).isTrue();
+        f.sink.clear();
+        f.prepared(PLAYER, BATTLE);
+        assertThat(f.pushes(watcher, Contracts.IDS.notifyActorMove())).isEmpty();
+        assertThat(WorldTestAccess.velocityDirty(player)).isTrue();
+        assertThat(WorldTestAccess.moveBroadcastPending(player)).isTrue();
+        f.world.step();
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
+        assertThat(WorldTestAccess.moveBroadcastPending(player)).isFalse();
+        f.world.step();
+        WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
+    }
+
+    @Test
+    void T6_没有待发的静止玩家备战不产生133_66仍置脏位() {
+        ScenePlayer player = f.enter(SESSION, PLAYER);
+        ScenePlayer watcher = f.enter(SESSION + 1, 2002);
+        f.world.step();
+        f.world.step();
+        f.sink.clear();
+        f.prepared(PLAYER, BATTLE);
+        assertThat(WorldTestAccess.velocityDirty(player)).isTrue();
+        assertThat(f.pushes(watcher, Contracts.IDS.notifyActorMove())).isEmpty();
+        f.world.step();
+        f.world.step();
+        assertThat(f.pushes(watcher, Contracts.IDS.notifyActorMove())).isEmpty();
+        assertThat(f.pushes(watcher, Contracts.IDS.syncBaseAttribute())).hasSize(1);
     }
 
     private static ActorBaseAttributesS2C parseSync(MessageContent content) {

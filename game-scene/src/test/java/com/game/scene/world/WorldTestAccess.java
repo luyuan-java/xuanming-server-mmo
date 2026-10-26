@@ -39,6 +39,37 @@ public final class WorldTestAccess {
         player.setVelocity(velocity);
     }
 
+    /** 2.10：跨包测试读取待发与落位状态，不绕过生产入口写标记。 */
+    public static boolean moveBroadcastPending(ScenePlayer player) {
+        return player.moveBroadcastPending();
+    }
+
+    public static boolean teleportSettling(ScenePlayer player) {
+        return player.teleportSettle() != null;
+    }
+
+    /** 验证跨包停步入口的133完整负载与信封。 */
+    public static void assertStoppedMove(java.util.List<com.game.proto.MessageContent> frames, ScenePlayer player) {
+        org.assertj.core.api.Assertions.assertThat(frames).hasSize(1);
+        com.game.proto.MessageContent frame = frames.getFirst();
+        org.assertj.core.api.Assertions.assertThat(frame.getMessageId()).isEqualTo(133);
+        org.assertj.core.api.Assertions.assertThat(frame.getId()).isZero();
+        try {
+            var move = com.game.proto.ActorMoveS2C.parseFrom(frame.getSerializedMessage());
+            org.assertj.core.api.Assertions.assertThat(move.getEntity()).isEqualTo(player.entity()).isNotEqualTo(player.playerId());
+            org.assertj.core.api.Assertions.assertThat(move.getTransform().hasLocation()).isTrue();
+            org.assertj.core.api.Assertions.assertThat(move.getTransform().getLocation()).isEqualTo(player.position().toProto());
+            org.assertj.core.api.Assertions.assertThat(move.getTransform().hasRotation()).isEqualTo(player.rotation() != null);
+            if (player.rotation() != null) org.assertj.core.api.Assertions.assertThat(move.getTransform().getRotation()).isEqualTo(player.rotation());
+            org.assertj.core.api.Assertions.assertThat(move.hasVelocity()).isTrue();
+            org.assertj.core.api.Assertions.assertThat(move.getVelocity()).isEqualTo(Vec3.ORIGIN.toVelocity());
+            org.assertj.core.api.Assertions.assertThat(move.getMoveState()).isZero();
+            org.assertj.core.api.Assertions.assertThat(move.getServerTimeMs()).isEqualTo(com.game.scene.testing.ManualClock.EPOCH_MILLIS_START);
+        } catch (com.google.protobuf.InvalidProtocolBufferException ex) {
+            throw new AssertionError(ex);
+        }
+    }
+
     /** 速度脏位是否已置（下一个同步帧会给看得见它的人发带 velocity 的 66）。 */
     public static boolean velocityDirty(ScenePlayer player) {
         return (player.syncDirty() & ScenePlayer.DIRTY_VELOCITY) != 0;

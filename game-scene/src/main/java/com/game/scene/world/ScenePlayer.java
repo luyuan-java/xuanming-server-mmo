@@ -6,6 +6,8 @@ import com.game.proto.ActorBaseAttributesS2C;
 import com.game.proto.common.base.RoleAdmissionIdentity;
 import com.game.common.player.SceneAdmissionAuthority;
 import com.game.proto.ActorCreateS2C;
+import com.game.proto.ActorMoveS2C;
+import com.game.proto.TeleportS2C;
 import com.game.proto.ActorType;
 import com.game.proto.Rotation;
 import com.game.proto.Transform;
@@ -27,10 +29,10 @@ import java.util.List;
 /**
  * 场景里的一个玩家（一次进场一个实例）。只在场景逻辑线程上读写。
  *
- * <p>{@code entity} 是场景内实体号（雪花号，恒非 0，一次进场内稳定），客户端用它做技能目标；
+ * <p>{@code entity} 是场景内实体号（雪花号，恒非 0，一次进场内稳定），用于技能目标与 21 / 47 / 133 / 135 / 130；
  * 它与 {@code playerId}（ActorCreateS2C.guid、66 的 entity_id）不是一回事。
  *
- * <p>位置只能经所在 {@link Scene} 改（{@link Scene#relocate}），这样格子索引与视野刷新不会漏；
+ * <p>位置只能经所在 {@link Scene} 改（{@link Scene#relocate} / {@link Scene#teleport}），这样格子索引与视野刷新不会漏；
  * 本类只保存状态，规则在 {@link SceneWorld}。
  */
 public final class ScenePlayer {
@@ -105,6 +107,12 @@ public final class ScenePlayer {
     /** 当前速度（已截断到信任上限）；(0,0,0) 为静止。 */
     private Vec3 velocity = Vec3.ORIGIN;
     private int syncDirty;
+    /** 输入触发的 133 待发标记；只由 applyMove 置位，不落盘。 */
+    private boolean moveBroadcastPending;
+    /** 瞬移后等待客户端在目标附近首次上报；不落盘，换场景或新瞬移作废。 */
+    private TeleportSettle teleportSettle;
+
+    record TeleportSettle(double targetX, double targetY, long deadlineNanos) { }
     /** 最近一次收到该玩家客户端消息时的帧号（挂机判定）。 */
     private long lastActiveFrame;
 
@@ -214,9 +222,24 @@ public final class ScenePlayer {
         return velocity;
     }
 
-    Rotation rotation() {
+    public Rotation rotation() {
         return rotation;
     }
+
+    /** 当前速度非零；只有正在动的新目标需要 135 补发。 */
+    public boolean isMoving() {
+        return !velocity.isOrigin();
+    }
+
+    void markMoveBroadcast() { moveBroadcastPending = true; }
+
+    boolean moveBroadcastPending() { return moveBroadcastPending; }
+
+    void clearMoveBroadcast() { moveBroadcastPending = false; }
+
+    TeleportSettle teleportSettle() { return teleportSettle; }
+
+    void setTeleportSettle(TeleportSettle settle) { teleportSettle = settle; }
 
     MoveGuard moveGuard() {
         return moveGuard;
@@ -249,7 +272,7 @@ public final class ScenePlayer {
         locationSeq = Math.max(locationSeq, from);
     }
 
-    /** 只由 {@link Scene#relocate}（在场景内）或换场景时（不在任何场景里）调用。 */
+    /** 只由 {@link Scene#relocate} / {@link Scene#teleport} 或换场景时（不在任何场景里）调用。 */
     void setPosition(Vec3 position) {
         this.position = position;
     }
@@ -263,17 +286,16 @@ public final class ScenePlayer {
     }
 
     /**
-     * 停下（速度清零，不置脏位）：离场写回 / 被接管 / 停服前、换场景时、跨节点换图冻结时调用（基线 StopMotionForExit；
-     * 冻结时由调用方另置速度脏位，让还看得见它的人收到「停了」的 66）。
-     * 离场时实体随即被销毁（旁人收到 51），不需要再发「停了」的 66；换场景后新场景的人从 21 看到的本来就是静止的它。
+     * 只清速度，不置脏位、也不发 133。离场 / 换场景 / 瞬移由销毁与创建传达；停服不发下行。
+     * 仍留在场景里的停步必须经 SceneWorld 的 haltMotion，原先在动才当场发 133，并保留 66 脏位语义。
      */
     void stopMotion() {
         this.velocity = Vec3.ORIGIN;
     }
 
     /**
-     * 有人刚开始看见它（进视野 / 进场）：21 / 47 只带位置，朝向与速度要靠 66 补上（基线缺口 9：移动中的实体进视野时
-     * 显示为静止，要等它下次改速度）。朝向上报过就置 transform 脏位（transform 带 rotation），在动就置 velocity 脏位，
+     * 有人刚开始看见它（进视野 / 进场）：保留原有 66 补发语义；21 / 47 已带朝向，在动目标另由 135 补速度。
+     * 朝向上报过就置 transform 脏位（transform 带 rotation），在动就置 velocity 脏位，
      * 下一个同步帧（≤ 100 ms）的 66 一并带给全部观察者——不另发单播，66 的「每实体每 100 ms 至多一条」不被打破；
      * 老观察者多收一次相同的值，无害。从没上报过朝向、静止的实体，21 / 47 已是全部状态，什么也不置。
      */
@@ -299,19 +321,38 @@ public final class ScenePlayer {
     }
 
     /**
-     * 21 / 47 里的一项（基线 ViewSystem::FillActorCreateMessageInfo）：transform 只填 location，
-     * rotation / scale 不填；玩家的 config_id 不填（0）。
+     * 21 / 47 里的一项：location 恒在，rotation 非 null 时带上（2.10 有意差异 X3，基线只填 location）。
+     * scale 与玩家的 config_id 不填；客户端创建时即读取朝向。
      */
     ActorCreateS2C toActorCreate() {
         return ActorCreateS2C.newBuilder()
                 .setEntity(entity)
-                .setTransform(Transform.newBuilder().setLocation(position.toProto()))
+                .setTransform(movementTransform())
                 .setActorType(ActorType.ACTOR_TYPE_PLAYER)
                 .setGuid(playerId)
                 .setAppearanceId(appearanceId)
                 .setClassId(classId)
                 .setGender(gender)
                 .build();
+    }
+
+    /** 133 的权威快照：实体号不是 playerId；停止时 velocity 仍存在（线上 1a 00）。 */
+    ActorMoveS2C toActorMove(long serverTimeMs) {
+        return ActorMoveS2C.newBuilder().setEntity(entity).setTransform(movementTransform())
+                .setVelocity(velocity.toVelocity()).setServerTimeMs(serverTimeMs)
+                .setMoveState(isMoving() ? 1 : 0).build();
+    }
+
+    /** 130 只给本人：位置恒在，朝向非 null 必带；input_seq 不设，与基线一致。 */
+    TeleportS2C toTeleport(int reasonCode) {
+        return TeleportS2C.newBuilder().setEntity(entity).setTransform(movementTransform())
+                .setReason(reasonCode).build();
+    }
+
+    private Transform.Builder movementTransform() {
+        Transform.Builder transform = Transform.newBuilder().setLocation(position.toProto());
+        if (rotation != null) transform.setRotation(rotation);
+        return transform;
     }
 
     /**

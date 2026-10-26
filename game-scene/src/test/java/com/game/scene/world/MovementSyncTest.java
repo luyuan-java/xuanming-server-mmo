@@ -50,31 +50,7 @@ import org.junit.jupiter.api.Test;
  * 用手动时钟（{@link ManualClock}）、手动推帧（{@link SceneWorld#step()}）与记录出站的 {@link RecordingSink}，
  * 上行一律经 {@link ClientRequestHandler}（与线上同一条解析 / 派发路径）。
  */
-class MovementSyncTest {
-
-    private static final long LINK = 1;
-    private static final SceneMessageIds IDS = Contracts.IDS;
-    private static final Vec3 SPAWN = FakeSceneTables.SPAWN_1;
-    private static final Rotation FACING = Rotation.newBuilder().setZ(90).build();
-
-    private RecordingSink sink;
-    private FakePlayerRepository repo;
-    private ManualClock clock;
-    private SceneWorld world;
-    private ClientRequestHandler handler;
-    private Scene scene;
-
-    @BeforeEach
-    void setUp() {
-        sink = new RecordingSink();
-        repo = new FakePlayerRepository();
-        clock = new ManualClock();
-        AtomicLong ids = new AtomicLong(7000);
-        FakeSceneTables tables = new FakeSceneTables();
-        world = new SceneWorld(tables, IDS, sink, repo, ids::incrementAndGet, clock, SceneMetrics.noop());
-        handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS);
-        scene = world.createScene(1);
-    }
+class MovementSyncTest extends MovementFixture {
 
     // ------------------------------------------------------------------ 移动 §10：上行处理
 
@@ -383,11 +359,11 @@ class MovementSyncTest {
         steps(3);
 
         List<MessageContent> toB = sink.to(LINK, 12);
-        assertThat(toB).as("停下后只发一条，之后静默").singleElement()
-                .satisfies(m -> assertThat(m.getMessageId()).isEqualTo(66))
-                .satisfies(m -> assertThat(m.getId()).isZero());
+        assertThat(toB).as("停下后133与66各一条，之后静默").extracting(MessageContent::getMessageId)
+                .containsExactly(133, 66);
+        assertThat(toB).allSatisfy(m -> assertThat(m.getId()).isZero());
         // 契约文档 movement §6.1 的示例字节，前面加上 entity_id = 1001（08 e9 07）。
-        assertThat(HexFormat.of().formatHex(toB.getFirst().getSerializedMessage().toByteArray())).isEqualTo(
+        assertThat(HexFormat.of().formatHex(toB.get(1).getSerializedMessage().toByteArray())).isEqualTo(
                 "08e907"
                         + "1216" + "0a12" + "0900000000008066401100000000000069401200"
                         + "1a00");
@@ -406,6 +382,8 @@ class MovementSyncTest {
         List<MessageContent> toB = sink.to(LINK, 12);
         assertThat(toB).extracting(MessageContent::getMessageId).containsExactly(79, 21, 47, 66);
         ActorBaseAttributesS2C sync = ActorBaseAttributesS2C.parseFrom(toB.get(3).getSerializedMessage());
+        assertThat(ActorListCreateS2C.parseFrom(toB.get(2).getSerializedMessage()).getActorList(0)
+                .getTransform().getRotation()).isEqualTo(FACING);
         assertThat(Vec3.fromProto(sync.getTransform().getLocation())).isEqualTo(new Vec3(181, 200, 0));
         assertThat(sync.getTransform().getRotation()).isEqualTo(FACING);
         assertThat(sync.hasVelocity()).isTrue();
@@ -424,8 +402,13 @@ class MovementSyncTest {
         enterNew(12, 1002);
         steps(2); // 第 3 帧奇数，第 4 帧同步
         List<MessageContent> toB = sink.to(LINK, 12);
-        assertThat(toB).extracting(MessageContent::getMessageId).containsExactly(79, 21, 47, 66);
-        ActorBaseAttributesS2C forB = ActorBaseAttributesS2C.parseFrom(toB.get(3).getSerializedMessage());
+        assertThat(toB).extracting(MessageContent::getMessageId).containsExactly(79, 21, 47, 135, 66);
+        ActorBaseAttributesS2C forB = ActorBaseAttributesS2C.parseFrom(toB.get(4).getSerializedMessage());
+        var caught = com.game.proto.ActorMoveListS2C.parseFrom(toB.get(3).getSerializedMessage()).getMovesList();
+        assertThat(caught).hasSize(1);
+        assertThat(caught.getFirst().getEntity()).isEqualTo(a.entity());
+        assertThat(caught.getFirst().getTransform().getRotation()).isEqualTo(FACING);
+        assertThat(caught.getFirst().getVelocity()).isEqualTo(new Vec3(1, 0, 0).toVelocity());
         assertThat(forB.getEntityId()).isEqualTo(1001L);
         assertThat(forB.getTransform().getRotation()).isEqualTo(FACING);
         assertThat(Vec3.fromVelocity(forB.getVelocity())).isEqualTo(new Vec3(1, 0, 0));
@@ -436,10 +419,10 @@ class MovementSyncTest {
         moveStop(14, 1004, new Vec3(188, 200, 0), FACING, 1);
         steps(2); // 第 5 帧刷新视野发 47，第 6 帧同步
         List<MessageContent> toD = sink.to(LINK, 14);
-        assertThat(toD).extracting(MessageContent::getMessageId).containsExactly(79, 21, 47, 66);
+        assertThat(toD).extracting(MessageContent::getMessageId).containsExactly(79, 21, 47, 135, 66);
         assertThat(ActorListCreateS2C.parseFrom(toD.get(2).getSerializedMessage()).getActorListList())
                 .extracting(actor -> actor.getGuid()).contains(1001L);
-        ActorBaseAttributesS2C forD = ActorBaseAttributesS2C.parseFrom(toD.get(3).getSerializedMessage());
+        ActorBaseAttributesS2C forD = ActorBaseAttributesS2C.parseFrom(toD.get(4).getSerializedMessage());
         assertThat(forD.getEntityId()).isEqualTo(1001L);
         assertThat(Vec3.fromVelocity(forD.getVelocity())).isEqualTo(new Vec3(1, 0, 0));
         assertThat(d.position()).isEqualTo(new Vec3(188, 200, 0));
@@ -466,15 +449,15 @@ class MovementSyncTest {
         clock.advanceMillis(2_000);
         moveSync(12, 1002, new Vec3(180, 225.5, 0), FACING, Vec3.ORIGIN, 2);
         steps(4); // 第 1 帧出视野（64），第 2、4 帧同步时 1001 已不在 1002 的观察者里
-        assertThat(sink.messageIdsTo(LINK, 11)).containsExactly(47, 66, 64);
+        assertThat(sink.messageIdsTo(LINK, 11)).containsExactly(47, 66, 133, 64);
         assertThat(sink.messageIdsTo(LINK, 12)).containsExactly(47, 64);
-        assertThat(ActorListDestroyS2C.parseFrom(sink.to(LINK, 11).get(2).getSerializedMessage()).getEntityList())
+        assertThat(ActorListDestroyS2C.parseFrom(sink.to(LINK, 11).get(3).getSerializedMessage()).getEntityList())
                 .containsExactly(b.entity());
         assertThat(ActorListDestroyS2C.parseFrom(sink.to(LINK, 12).get(1).getSerializedMessage()).getEntityList())
                 .containsExactly(a.entity());
 
         world.onPlayerLeave(LINK, leave(12, 1002));
-        assertThat(sink.messageIdsTo(LINK, 11)).as("没有残影，也不收多余的 51").containsExactly(47, 66, 64);
+        assertThat(sink.messageIdsTo(LINK, 11)).as("没有残影，也不收多余的 51").containsExactly(47, 66, 133, 64);
     }
 
     @Test
@@ -508,7 +491,7 @@ class MovementSyncTest {
             steps(2);
         }
 
-        assertThat(sink.messageIdsTo(LINK, 11)).as("19 m 与 9 m 之间来回：只有 66").containsOnly(66);
+        assertThat(sink.messageIdsTo(LINK, 11)).as("19 m 与 9 m 之间来回：133 与 66，不重建视野").containsOnly(133, 66);
         assertThat(sink.messageIdsTo(LINK, 12)).isEmpty();
     }
 
@@ -618,11 +601,11 @@ class MovementSyncTest {
     }
 
     @Test
-    void 从不发133_135_130与65_55_82_68_75() {
-        Set<Integer> never = Set.of(id("NotifyActorMove"), id("NotifyActorMoveList"), id("NotifyTeleport"),
+    void 从不发65_55_82_68_75() {
+        Set<Integer> never = Set.of(
                 syncId("SyncAttribute2Frames"), syncId("SyncAttribute5Frames"), syncId("SyncAttribute10Frames"),
                 syncId("SyncAttribute30Frames"), syncId("SyncAttribute60Frames"));
-        assertThat(never).containsExactlyInAnyOrder(133, 135, 130, 65, 55, 82, 68, 75);
+        assertThat(never).containsExactlyInAnyOrder(65, 55, 82, 68, 75);
         Scene second = world.createScene(2);
         ScenePlayer a = enterNew(11, 1001);
         enterNew(12, 1002);
@@ -698,68 +681,6 @@ class MovementSyncTest {
         world = new SceneWorld(tables, IDS, sink, wrapped, ids::incrementAndGet, clock, SceneMetrics.noop());
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, IDS);
         scene = world.createScene(1);
-    }
-
-    private ScenePlayer enterNew(int sessionId, long playerId) {
-        repo.putNewPlayer(playerId, 1);
-        return enter(sessionId, playerId);
-    }
-
-    private ScenePlayer enterSaved(int sessionId, long playerId, Vec3 position) {
-        repo.putSavedPlayer(playerId, 1, 1, position);
-        return enter(sessionId, playerId);
-    }
-
-    private ScenePlayer enter(int sessionId, long playerId) {
-        world.onPlayerEnter(LINK, enterFrame(sessionId, playerId, scene.sceneId(), 1));
-        repo.completeAll();
-        return world.playerBySession(new SessionKey(LINK, sessionId));
-    }
-
-    private void steps(long frames) {
-        for (long i = 0; i < frames; i++) {
-            world.step();
-        }
-    }
-
-    private void moveStart(int sessionId, long playerId, Vec3 at, Rotation rotation, Vec3 velocity, int seq) {
-        MoveStartC2S.Builder move = MoveStartC2S.newBuilder()
-                .setStartLocation(at.toLocation()).setVelocity(velocity.toVelocity()).setInputSeq(seq);
-        if (rotation != null) {
-            move.setRotation(rotation);
-        }
-        forward(sessionId, playerId, IDS.moveStart(), move.build(), 0);
-    }
-
-    private void moveSync(int sessionId, long playerId, Vec3 at, Rotation rotation, Vec3 velocity, int seq) {
-        MoveSyncC2S.Builder move = MoveSyncC2S.newBuilder()
-                .setLocation(at.toLocation()).setVelocity(velocity.toVelocity()).setInputSeq(seq);
-        if (rotation != null) {
-            move.setRotation(rotation);
-        }
-        forward(sessionId, playerId, IDS.moveSync(), move.build(), 0);
-    }
-
-    private void moveStop(int sessionId, long playerId, Vec3 at, Rotation rotation, int seq) {
-        MoveStopC2S.Builder move = MoveStopC2S.newBuilder().setEndLocation(at.toLocation()).setInputSeq(seq);
-        if (rotation != null) {
-            move.setRotation(rotation);
-        }
-        forward(sessionId, playerId, IDS.moveStop(), move.build(), 0);
-    }
-
-    private void forward(int sessionId, long playerId, int messageId, Message body, long requestId) {
-        forward(sessionId, playerId, messageId, body.toByteString(), requestId);
-    }
-
-    private void forward(int sessionId, long playerId, int messageId, ByteString body, long requestId) {
-        handler.onClientForward(LINK, ClientForward.newBuilder()
-                .setSessionId(sessionId)
-                .setPlayerId(playerId)
-                .setMessageId(messageId)
-                .setBody(body)
-                .setRequestId(requestId)
-                .build());
     }
 
     private List<ActorBaseAttributesS2C> syncsTo(int sessionId) {

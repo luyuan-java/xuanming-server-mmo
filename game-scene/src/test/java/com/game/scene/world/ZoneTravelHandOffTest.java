@@ -53,13 +53,16 @@ class ZoneTravelHandOffTest {
     // ------------------------------------------------------------------ 冻结与成功路径
 
     @Test
-    void 冻结前停下_快照就是交出写的内容_交出模式是RELEASE() {
+    void 冻结前停下_旁人当场133下帧66_快照就是交出写的内容_交出模式是RELEASE() {
         f.world.applyMove(a, new MoveInput(a.position(), Rotation.getDefaultInstance(), new Vec3(2, 0, 0), 1));
         f.world.step();
         f.world.step();
         f.sink.clear();
 
         PendingHandOff handOff = f.freeze(a);
+        assertThat(f.sink.messageIdsTo(LINK, 12)).containsExactly(133);
+        WorldTestAccess.assertStoppedMove(f.sink.to(LINK, 12), a);
+        assertThat(a.moveBroadcastPending()).isFalse();
 
         assertThat(a.velocity().isOrigin()).isTrue();
         assertThat(handOff.mode()).isEqualTo(HandOffMode.RELEASE);
@@ -67,7 +70,7 @@ class ZoneTravelHandOffTest {
         assertThat(handOff.frozen().ownerEpoch()).isEqualTo(E);
         f.world.step();
         f.world.step();
-        assertThat(f.sink.messageIdsTo(LINK, 12)).as("冻结后不再外推，旁人收到速度 0 的 66").containsExactly(66);
+        assertThat(f.sink.messageIdsTo(LINK, 12)).as("冻结当场133，下一同步帧66").containsExactly(133, 66);
         assertThat(f.inFlight()).isEqualTo(1);
         assertThat(f.resolves("chosen")).isEqualTo(1);
     }
