@@ -109,4 +109,22 @@ class SceneAdminAuthFilterTest {
         assertThat(SceneAdminAuthFilter.printable("/admin/x\ny")).isEqualTo("/admin/x?y");
         assertThat(SceneAdminAuthFilter.printable(null)).isNull();
     }
+
+    @Test
+    void 瞬移口沿用鉴权并按固定playerTeleport标签计数() throws Exception {
+        AtomicBoolean passed = new AtomicBoolean();
+        FilterChain chain = (req, res) -> passed.set(true);
+
+        assertThat(SceneAdminAuthFilter.opOf(SceneAdminController.TELEPORT_PATH))
+                .isEqualTo(SceneMetrics.ADMIN_OP_PLAYER_TELEPORT);
+        assertThat(call("", SceneAdminController.TELEPORT_PATH, "secret", "ops", chain)).isEqualTo(503);
+        assertThat(call("secret", SceneAdminController.TELEPORT_PATH, "wrong", "ops", chain)).isEqualTo(401);
+        assertThat(passed).isFalse();
+        assertThat(call("secret", SceneAdminController.TELEPORT_PATH, "secret", "ops", chain)).isEqualTo(200);
+        assertThat(passed).isTrue();
+        assertThat(counted(SceneMetrics.ADMIN_OP_PLAYER_TELEPORT, "503")).isEqualTo(1);
+        assertThat(counted(SceneMetrics.ADMIN_OP_PLAYER_TELEPORT, "401")).isEqualTo(1);
+        assertThat(counted(SceneMetrics.ADMIN_OP_PLAYER_TELEPORT, "200")).isEqualTo(1);
+        assertThat(meters.find("game.scene.admin.requests").tag("op", SceneMetrics.ADMIN_OP_OTHER).counter()).isNull();
+    }
 }

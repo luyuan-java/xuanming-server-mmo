@@ -2,6 +2,7 @@ package com.game.scene;
 
 import com.game.api.proto.CreateDungeonInstanceResponse;
 import com.game.api.proto.DestroyInstanceResponse;
+import com.game.api.proto.TeleportPlayerResponse;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.proto.BattleRouting;
@@ -92,6 +93,7 @@ import com.game.scene.world.SceneTables;
 import com.game.scene.world.SceneTicker;
 import com.game.scene.world.SceneWorld;
 import com.game.scene.world.ZoneTravel;
+import com.game.scene.world.Vec3;
 import io.netty.channel.DefaultEventLoop;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.time.Duration;
@@ -632,6 +634,27 @@ public class SceneNode implements SmartLifecycle {
         }
         submitAdmin(result, () -> result.complete(
                 DestroyInstanceResponse.newBuilder().setTipId(w.destroyInstance(sceneId)).build()));
+        return result;
+    }
+
+    /**
+     * dev 管理口同场景瞬移（2.10 §5.9；任意线程可调，不阻塞）。场景状态只在逻辑任务中访问；HTTP 超时撤掉结果后，
+     * 尚未执行的任务不瞬移也不计瞬移指标。任务已开始后与取消发生的极窄竞态，可能已经瞬移但 HTTP 回了 503（dev 验证工具的既定边界）。
+     */
+    public CompletableFuture<TeleportPlayerResponse> teleportPlayer(long playerId, double x, double y, double z) {
+        CompletableFuture<TeleportPlayerResponse> result = new CompletableFuture<>();
+        SceneWorld w = world;
+        if (!running || w == null) {
+            result.completeExceptionally(new IllegalStateException("场景节点没在运行"));
+            return result;
+        }
+        submitAdmin(result, () -> {
+            if (result.isDone()) {
+                return;
+            }
+            result.complete(TeleportPlayerResponse.newBuilder()
+                    .setTipId(w.adminTeleport(playerId, new Vec3(x, y, z))).build());
+        });
         return result;
     }
 

@@ -15,7 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * scene 管理端口运维接口（{@code /admin/**}，批次 5.3 只有 dev 实例管理口 {@link SceneAdminController}）的鉴权（dungeon-mirror-spec §6.13）。
+ * scene 管理端口运维接口（{@code /admin/**}，dev 实例与玩家瞬移管理口 {@link SceneAdminController}）的鉴权。
  * 语义照抄 game-trade 的 {@code TradeAdminAuthFilter}（game-common 没有 servlet 依赖，只能复制一份）：
  * <ul>
  *   <li>共享令牌：环境变量 {@value #TOKEN_ENV}（只从环境变量读，不进配置文件），请求头 {@value #TOKEN_HEADER}，常数时间比较；</li>
@@ -25,7 +25,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * </ul>
  * 作用范围只由注册时的 URL 模式（{@code /admin/*}）决定：容器按解码、去掉 {@code ;参数} 之后的规范路径匹配；这里不再按原始 URI 判断要不要过滤
  * （原始 URI 里的 {@code /admin;x/...}、{@code /%61dmin/...} 与规范路径不一致，自行判断会被绕过）。日志与指标也用规范路径。
- * 管理端口缺省只绑本机（{@code GAME_MANAGEMENT_ADDRESS}）；实例管理口在 prod 也注册（只回 403），令牌仍是第一道闸。GM 签名停机
+ * 管理端口缺省只绑本机（{@code GAME_MANAGEMENT_ADDRESS}）；dev 管理口在 prod 也注册（只回 403），令牌仍是第一道闸。GM 签名停机
  * {@code /gm/**} 不在这个前缀下，不受影响。
  */
 public final class SceneAdminAuthFilter extends OncePerRequestFilter {
@@ -88,6 +88,9 @@ public final class SceneAdminAuthFilter extends OncePerRequestFilter {
         }
         if (SceneAdminController.DESTROY_PATH.equals(path)) {
             return SceneMetrics.ADMIN_OP_INSTANCE_DESTROY;
+        }
+        if (SceneAdminController.TELEPORT_PATH.equals(path)) {
+            return SceneMetrics.ADMIN_OP_PLAYER_TELEPORT;
         }
         return SceneMetrics.ADMIN_OP_OTHER;
     }

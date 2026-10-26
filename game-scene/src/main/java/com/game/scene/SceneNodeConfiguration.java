@@ -188,9 +188,15 @@ public class SceneNodeConfiguration {
         };
     }
 
+    /** dev 玩家瞬移管理口（2.10 §5.9）的业务入口：只经节点投到场景逻辑线程。 */
+    @Bean
+    public SceneAdminController.PlayerAdmin scenePlayerAdmin(SceneNode sceneNode) {
+        return sceneNode::teleportPlayer;
+    }
+
     /**
      * 管理端口 {@code /admin/*} 的运维鉴权（容器按规范路径匹配；令牌只从环境变量 {@code GAME_ADMIN_TOKEN} 读，没配一律 503）。
-     * 只覆盖 dev 实例管理口；actuator 与 GM 签名停机 {@code /gm/**} 不在这个前缀下。
+     * 覆盖 dev 实例与玩家瞬移管理口；actuator 与 GM 签名停机 {@code /gm/**} 不在这个前缀下。
      */
     @Bean
     public FilterRegistrationBean<SceneAdminAuthFilter> sceneAdminAuthFilter(SceneMetrics sceneMetrics,
@@ -198,9 +204,9 @@ public class SceneNodeConfiguration {
         SceneAdminAuthFilter filter = new SceneAdminAuthFilter(System.getenv(SceneAdminAuthFilter.TOKEN_ENV), sceneMetrics);
         RunMode runMode = RunMode.parse(props.runMode());
         if (!filter.tokenConfigured()) {
-            log.info("运维令牌 {} 未配置：管理端口 /admin/**（dev 实例管理口）一律 503", SceneAdminAuthFilter.TOKEN_ENV);
+            log.info("运维令牌 {} 未配置：管理端口 /admin/**（dev 管理口）一律 503", SceneAdminAuthFilter.TOKEN_ENV);
         } else {
-            log.info("dev 实例管理口 {}（运行模式 {}）", runMode.allowsGmCommands() ? "开放" : "关闭（403）", runMode);
+            log.info("dev 管理口 {}（运行模式 {}）", runMode.allowsGmCommands() ? "开放" : "关闭（403）", runMode);
         }
         FilterRegistrationBean<SceneAdminAuthFilter> registration = new FilterRegistrationBean<>(filter);
         registration.addUrlPatterns("/admin/*");
