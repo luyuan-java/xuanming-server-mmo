@@ -11,6 +11,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -57,6 +58,7 @@ final class SchemaSync {
         String lockName = lockName(database);
         boolean locked = acquireLock(conn, lockName);
         try {
+            preflightAutoIncrementAlter(conn, database, sorted);
             for (TableSchema table : sorted) {
                 syncTable(conn, database, table);
             }
@@ -108,6 +110,50 @@ final class SchemaSync {
             }
             return db;
         }
+    }
+
+    /**
+     * 已有表新增自增列与初次CREATE是不同能力。整批先读已有列，已知TiDB不支持的迁移不能在
+     * 排序更早的表或普通列上留下部分DDL。仍沿原同连接咨询锁；不复制表、不更换号源。
+     */
+    private static void preflightAutoIncrementAlter(Connection conn, String database, List<TableSchema> tables)
+            throws SQLException {
+        Map<String, Map<String, ColumnMeta>> existing = new LinkedHashMap<>();
+        for (TableSchema table : tables) {
+            if (tableExists(conn, database, table.tableName())) {
+                existing.put(table.tableName(), readColumns(conn, database, table.tableName()));
+            }
+        }
+        List<String> additions = new ArrayList<>();
+        for (TableSchema table : tables) {
+            Map<String, ColumnMeta> columns = existing.get(table.tableName());
+            String auto = table.autoIncrementKey();
+            if (columns != null && !auto.isEmpty()
+                    && columns.keySet().stream().noneMatch(name -> name.equalsIgnoreCase(auto))) {
+                additions.add(table.tableName() + "." + auto);
+            }
+        }
+        if (additions.isEmpty() || !isTiDb(conn)) {
+            return;
+        }
+        throw new SQLFeatureNotSupportedException(
+                "TiDB 不支持为已有表 ALTER 新增 AUTO_INCREMENT 列：" + String.join(", ", additions)
+                        + "；本轮尚未执行任何 CREATE/ALTER，须经明确维护方案处理", "0A000");
+    }
+
+    /** 仅判定已知后端迁移能力；不能把无法识别的后端当作MySQL成功能力。 */
+    static boolean isTiDb(Connection conn) throws SQLException {
+        var metadata = conn.getMetaData();
+        String product = metadata.getDatabaseProductName();
+        if ("TiDB".equalsIgnoreCase(product)) {
+            return true;
+        }
+        String version = metadata.getDatabaseProductVersion();
+        if (!"MySQL".equalsIgnoreCase(product) || version == null || version.isBlank()) {
+            throw new SQLFeatureNotSupportedException(
+                    "无法确认后端的 ALTER 新增 AUTO_INCREMENT 能力；本轮尚未执行任何 CREATE/ALTER", "0A000");
+        }
+        return version.toLowerCase(Locale.ROOT).contains("tidb");
     }
 
     // ================================================================ 单表

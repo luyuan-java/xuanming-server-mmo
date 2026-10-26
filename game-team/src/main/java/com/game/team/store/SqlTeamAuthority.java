@@ -174,7 +174,7 @@ final class SqlTeamAuthority {
                         var unlocked=snap.record().toBuilder().clearLaunchRequestId().clearMatchLockToken().clearMatchLockExpireAtMs().clearMatchLockRoster().build();
                         Decision candidate=TeamRules.apply(op.withCallerTeamId(snap.playerTeamId()),unlocked,snap.nowMs(),states,config);
                         if(candidate.code()==0&&candidate.changed()&&constraints(c,snap,candidate)==0){
-                            var original=launch(c,snap.record().getLaunchRequestId(),true);if(original==null||original.getOriginalProto().isEmpty())throw new SQLException("排队名册变动缺少永久原launch");
+                            var original=storedLaunchForRecord(c,snap.record(),true);if(original==null||original.getOriginalProto().isEmpty())throw new SQLException("排队名册变动缺少永久原launch");
                             com.game.proto.team.TeamLaunchOriginal captured;try{captured=com.game.proto.team.TeamLaunchOriginal.parseFrom(original.getOriginalProto());}catch(com.google.protobuf.InvalidProtocolBufferException invalid){throw new SQLException("原launch损坏",invalid);}
                             if(com.game.common.player.TeamQueueAuthority.cancel(c.connection(),captured,original.getOriginalProto().toByteArray(),timeout(d))==com.game.common.player.TeamQueueAuthority.Result.CANCELLED){
                                 decision=candidate;c.update("UPDATE team_launch_role SET state=2 WHERE request_id=?",original.getRequestId());c.update("UPDATE team_launch SET active=0 WHERE request_id=?",original.getRequestId());
@@ -202,7 +202,7 @@ final class SqlTeamAuthority {
             com.game.common.player.PlayerRouteAuthority.lock(c.connection(),players,timeout(d));if(bound())actorLock(c,d);
             var current=team(c,view.getTeamId(),false);var result=view.toBuilder().setMatchFillSupported(true);
             if(current==null||current.tombstone()||current.version()!=view.getVersion()||current.record().getLaunchRequestId().isEmpty())return result.build();
-            var launch=launch(c,current.record().getLaunchRequestId(),false);if(launch==null)throw new SQLException("队伍显示缺少原launch");
+            var launch=storedLaunchForRecord(c,current.record(),false);if(launch==null)throw new SQLException("队伍显示缺少原launch");
             var unit=c.one("SELECT state,target_size,enqueued_ms,config_id,launch_original FROM match_global_queue_unit WHERE unit_id=?",r->{
                 if(!Arrays.equals(launch.getOriginalProto().toByteArray(),r.getBytes(5)))throw new SQLException("队伍排队显示原件不符");
                 int state=r.getInt(1);if(state<1||state>4)throw new SQLException("队伍排队显示状态未知");
@@ -241,9 +241,40 @@ final class SqlTeamAuthority {
             return PinnedResult.committed(committed);
         },true);
     }
-    private TeamLaunchRow launch(AuthorityJdbc.Session c,String id,boolean lock)throws SQLException{
+    private TeamLaunchRow readLaunchRow(AuthorityJdbc.Session c,String id,boolean lock)throws SQLException{
         var row=c.one("SELECT team_id,team_version,lock_token,actor_player_id,owner_account,owner_revision,request_proto,record_proto,state,battle_id,updated_ms,original_proto,submission_proto,active FROM team_launch WHERE request_id=?"+(lock?" FOR UPDATE":""),r->TeamLaunchRow.newBuilder().setRequestId(id).setTeamId(r.getLong(1)).setTeamVersion(r.getLong(2)).setLockToken(r.getString(3)).setActorPlayerId(r.getLong(4)).setOwnerAccount(r.getString(5)).setOwnerRevision(r.getLong(6)).setRequestProto(ByteString.copyFrom(r.getBytes(7))).setRecordProto(ByteString.copyFrom(r.getBytes(8))).setState(r.getInt(9)).setBattleId(r.getLong(10)).setUpdatedMs(r.getLong(11)).setOriginalProto(ByteString.copyFrom(r.getBytes(12))).setSubmissionProto(ByteString.copyFrom(r.getBytes(13))).setActive(r.getBoolean(14)).build(),id);
+        return row;
+    }
+    private TeamLaunchRow launch(AuthorityJdbc.Session c,String id,boolean lock)throws SQLException{
+        var row=readLaunchRow(c,id,lock);
         if(row!=null&&(row.getActorPlayerId()!=actor.getPlayerId()||!row.getOwnerAccount().equals(actor.getAccount())||row.getOwnerRevision()!=actor.getOwnerRevision()||!row.getRequestProto().equals(payload)))throw new SecurityException("开局UUID与原件不一致");return row;
+    }
+    // 持久开局属于已锁住的Team，不属于随后Leave/Get等请求的UUID或payload。
+    // 当前Start重放仍走launch()；此处只核原行与冻结Team及完整TeamLaunchOriginal。
+    private TeamLaunchRow storedLaunchForRecord(AuthorityJdbc.Session c,TeamRecord record,boolean lock)throws SQLException{
+        var row=readLaunchRow(c,record.getLaunchRequestId(),lock);if(row==null)return null;
+        var originalRecord=parse(row.getRecordProto().toByteArray());
+        com.game.proto.team.TeamLaunchOriginal captured;
+        try{captured=com.game.proto.team.TeamLaunchOriginal.parseFrom(row.getOriginalProto());}
+        catch(com.google.protobuf.InvalidProtocolBufferException invalid){throw new SQLException("永久开局原件损坏",invalid);}
+        UUID id;try{id=UUID.fromString(row.getRequestId());}catch(IllegalArgumentException invalid){throw new SQLException("永久开局UUID损坏",invalid);}
+        var start=captured.getRequest();var owner=captured.getActor();
+        if(!id.toString().equals(row.getRequestId())||id.equals(new UUID(0,0))||row.getActorPlayerId()==0||row.getOwnerAccount().isEmpty()||row.getOwnerRevision()<=0
+                ||!start.getRequestId().equals(row.getRequestId())||!row.getRequestProto().equals(ByteString.copyFrom(deterministic(start)))
+                ||captured.getTeamId()!=row.getTeamId()||captured.getTeamVersion()!=row.getTeamVersion()||!captured.getLockToken().equals(row.getLockToken())
+                ||owner.getPlayerId()!=row.getActorPlayerId()||!owner.getOwnerAccount().equals(row.getOwnerAccount())||owner.getOwnerRevision()!=row.getOwnerRevision()
+                ||row.getTeamId()!=record.getTeamId()||!row.getRequestId().equals(record.getLaunchRequestId())||!row.getLockToken().equals(record.getMatchLockToken())
+                ||originalRecord==null||originalRecord.getTeamId()!=record.getTeamId()||originalRecord.getLeaderId()!=record.getLeaderId()
+                ||!originalRecord.getLaunchRequestId().equals(row.getRequestId())||!originalRecord.getMatchLockToken().equals(row.getLockToken())
+                ||!originalRecord.getMembersList().equals(record.getMembersList())||!originalRecord.getMatchLockRosterList().equals(record.getMatchLockRosterList())
+                ||captured.getMembersCount()!=record.getMatchLockRosterCount())throw new SecurityException("当前Team与永久开局原件不一致");
+        for(int i=0;i<captured.getMembersCount();i++){
+            var capturedMember=captured.getMembers(i);var role=capturedMember.getOriginal();
+            var member=record.getMembersList().stream().filter(m->m.getPlayerId()==role.getPlayerId()).findFirst().orElse(null);
+            if(role.getPlayerId()!=record.getMatchLockRoster(i)||capturedMember.getRosterOrder()!=i+1||!capturedMember.getTicket().equals(TeamStore.ticketId(row.getRequestId(),role.getPlayerId()))
+                    ||member==null||!role.getOwnerAccount().equals(member.getOwnerAccount())||role.getOwnerRevision()!=member.getOwnerRevision())throw new SecurityException("永久开局完整名册与原归属不一致");
+        }
+        return row;
     }
     private CommitResult launchCommit(TeamLaunchRow row)throws SQLException{
         var record=parse(row.getRecordProto().toByteArray());if(record==null||record.getMembersCount()==0||!record.getMatchLockToken().equals(row.getLockToken())||!record.getLaunchRequestId().equals(row.getRequestId()))throw new SQLException("队伍原开局损坏");
@@ -262,7 +293,7 @@ final class SqlTeamAuthority {
         return run(d,c->{var owners=lockPeople(c,participants(before,actor.getPlayerId(),0),d);var snap=snapshot(c,0,teamId,true);var rec=snap.record();
             if(rec==null)return LockRelease.stopped(EndMatchStop.RECORD_MISSING);if(!rec.getMatchLockToken().equals(token))return LockRelease.stopped(EndMatchStop.TOKEN_MISMATCH);
             if(snap.version()!=before.version())return LockRelease.attempted(PinnedResult.retry(List.of()));verifyRecord(rec,owners);
-            var original=launch(c,rec.getLaunchRequestId(),true);if(original==null)throw new SQLException("业务开战锁缺少永久原件");
+            var original=storedLaunchForRecord(c,rec,true);if(original==null)throw new SQLException("业务开战锁缺少永久原件");
             var originalRecord=parse(original.getRecordProto().toByteArray());
             if(originalRecord==null||Long.compareUnsigned(snap.version(),original.getTeamVersion())<0||rec.getLeaderId()!=originalRecord.getLeaderId()
                     ||!rec.getMembersList().equals(originalRecord.getMembersList())||!rec.getMatchLockRosterList().equals(originalRecord.getMatchLockRosterList())

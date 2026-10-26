@@ -337,23 +337,36 @@ class RatingStoreSqlTest extends RatingStoreCases {
         db.putRating(102, 140_000, 0);
         seedFillerRows(1_000, 300);
 
+        CountDownLatch firstRatingLocked = new CountDownLatch(1);
+        if (tidb) {
+            // 补行的 ON DUPLICATE KEY UPDATE 已锁住 101；到加锁读才挂钩子会先等在补 102 上。
+            // TiDB 不按 InnoDB 的事务分量选牺牲者：先让对手真等 101，再由入账事务取 102 成环。
+            ds.afterOnce(ENSURE_ROW, () -> {
+                firstRatingLocked.countDown();
+                awaitLockWaiter();
+            });
+        }
         try (Connection rival = db.dataSource.getConnection(); ExecutorService pool = Executors.newSingleThreadExecutor()) {
             rival.setAutoCommit(false);
             try (Statement st = rival.createStatement()) {
-                // 对手事务先改 300 行（分量重，死锁时 InnoDB 会挑分量轻的入账事务回滚），再锁住 102
+                // 对手先改 300 行，保留 InnoDB 选择较轻入账事务回滚的原覆盖，再锁住 102。
                 assertThat(st.executeUpdate("UPDATE match_rating SET games = games + 1 WHERE player_id >= 1000")).isEqualTo(300);
                 lockRow(rival, 102);
 
-                // 入账事务：插标记 → 锁 101 → 等 102（被对手拿着）
                 Future<Result> applying = pool.submit(() -> apply(event(9931, MatchModes.ONE_V_ONE, A_WIN, List.of(101L), List.of(102L))));
-                awaitLockWaiter(applying);
+                if (tidb) {
+                    assertThat(firstRatingLocked.await(10, TimeUnit.SECONDS)).as("入账事务已在独立语句中锁住 101").isTrue();
+                } else {
+                    // InnoDB 保持原顺序：入账事务先等 102，对手再取 101 成环。
+                    awaitLockWaiter(applying);
+                }
 
-                // 对手再去要 101：成环。InnoDB 回滚入账事务（1213），对手拿到锁
+                // TiDB 的对手先等 101；钩子看到真实等待边后，入账事务才继续取 102。
                 try {
                     lockRow(rival, 101);
                 } catch (SQLException e) {
                     rival.rollback();
-                    fail("死锁的牺牲者应该是入账事务，而不是分量重的对手事务: " + e);
+                    fail("死锁的牺牲者应该是入账事务，而不是对手事务: " + e);
                 }
                 rival.commit();
 

@@ -168,6 +168,10 @@ class CommerceTiDbTest {
         assertThat(e.store.defer(row, now + 60000, budget())).isFalse();
         assertThat(e.store.quarantine(row, budget())).isFalse();
         var current = e.store.get(row.getCommerceId());
+        var originalOps = e.store.ops("ref_id=? ORDER BY op_id", row.getCommerceId());
+        e.advance(row, budget());
+        assertThat(e.store.get(row.getCommerceId())).isEqualTo(current);
+        assertThat(e.store.ops("ref_id=? ORDER BY op_id", row.getCommerceId())).isEqualTo(originalOps);
         var badBytes = com.google.protobuf.ByteString.copyFrom(new byte[] {(byte) 255});
         e.store.transaction(budget(), c -> {
             e.store.save(c, current.toBuilder().setWorkflowProto(badBytes));
@@ -304,6 +308,10 @@ class CommerceTiDbTest {
         e.advance(e.store.get(row.getCommerceId()), budget());
         var before = CommerceEngine.workflow(e.store.get(row.getCommerceId())).build();
         assertThat(before.getStage()).isEqualTo("open");
+        assertThat(e.store.get(row.getCommerceId()).getBuyerPlayerId()).isZero();
+        assertThat(before.getBuyerIdentity().getAccount()).isEqualTo("fixture-account-22");
+        assertThat(before.getBuyerIdentity().getOwnerRevision()).isEqualTo(1);
+        var refusedDebit = e.store.ops("player_id=22 AND stream=3").getFirst();
         assertThatThrownBy(() -> e.mutate(22, row.getCommerceId(), "buy", budget(), "buy-retry-001"))
             .isInstanceOfSatisfying(
                 CommerceRules.Refusal.class, denied -> assertThat(denied.tip()).isEqualTo(CommerceRules.CONFLICT));
@@ -313,6 +321,7 @@ class CommerceTiDbTest {
         e.mutate(22, row.getCommerceId(), "buy", budget(), "buy-retry-002");
         e.advance(e.store.get(row.getCommerceId()), budget());
         assertThat(e.store.ops("player_id=22 AND stream=3")).hasSize(2);
+        assertThat(e.store.ops("op_id=?", refusedDebit.getOpId())).containsExactly(refusedDebit);
     }
 
     long openMarket(long player, int side, long price, int quantity) throws Exception {
@@ -401,18 +410,30 @@ class CommerceTiDbTest {
 
     @Test
     void 人民币意图换主先退款_原卖家退回提交再次核对持久原身份() throws Exception {
-        var json=new com.fasterxml.jackson.databind.ObjectMapper();long listingId=7001;
+        var json=new com.fasterxml.jackson.databind.ObjectMapper();long listingId=7001, originalDebitId=9001;
         var original=TradeRmbConsignmentWorkflow.newBuilder().setSellerAccount("fixture-account-11").setSellerOwnerRevision(1)
             .setAssetKind("ITEMS").setPriceFen(100).setEscrowReference("7001").setEscrowProof("a".repeat(64))
             .setRegisteredListing(RmbConsignmentView.newBuilder().setListingId(listingId).setSellerPlayerId(11));
         var workflow=TradeCommerceWorkflow.newBuilder().setStage("rmb_open").setRmb(original)
-            .addLegs(TradeCommerceLeg.newBuilder().setRole("seller_debit").setPlayerId(11).setStream(3).setOutcome(2)
+            .addLegs(TradeCommerceLeg.newBuilder().setRole("seller_debit").setPlayerId(11).setStream(3).setOpId(originalDebitId).setOutcome(2)
                 .setBundle(com.game.proto.AssetBundle.newBuilder().addItems(com.game.proto.ItemGrant.newBuilder().setConfigId(10).setCount(1))));
         var row=com.game.trade.store.pb.TradeCommerceRow.newBuilder().setCommerceId(listingId).setRequestKey("rmb-original-owner-fixture")
             .setRequestDigest(com.google.protobuf.ByteString.copyFromUtf8("fixture-digest")).setKind(6).setSellerPlayerId(11)
             .setStatus(2).setVersion(1).setWorkflowProto(workflow.build().toByteString()).build();
-        e.store.transaction(budget(), c -> { CommerceStore.insert(c,"trade_commerce",row);
-            CommerceStore.execute(c,"UPDATE player SET account='new-buyer-owner',owner_revision=2 WHERE player_id=22");return null; });
+        // 只注入已完成的SQL原扣款，真实seq/epoch由原enqueue产生；不冒充Scene扣款验收。
+        e.store.ensureSeqs(budget(), 11);
+        e.store.transaction(budget(), c -> {
+            long now=CommerceStore.sqlNow(c);
+            e.store.enqueue(c,com.game.trade.store.pb.TradeAssetOpRow.newBuilder().setOpId(originalDebitId)
+                .setPlayerId(11).setStream(3).setKind(1).setStatus(2).setDurable(true).setTxType(3)
+                .setRefKind(2).setRefId(listingId).setPayload(workflow.getLegs(0).getBundle().toByteString())
+                .setCreatedMs(now).setUpdatedMs(now).setLastSendMs(now));
+            CommerceStore.insert(c,"trade_commerce",row);
+            CommerceStore.execute(c,"UPDATE player SET account='new-buyer-owner',owner_revision=2 WHERE player_id=22");return null;
+        });
+        var originalDebit=e.store.ops("op_id=?",originalDebitId).getFirst();
+        assertThat(originalDebit.getStatus()).isEqualTo(2);assertThat(originalDebit.getDurable()).isTrue();
+        assertThat(originalDebit.getSeq()).isNotZero();assertThat(originalDebit.getStreamEpoch()).isNotZero();
         var intent=json.createObjectNode().put("orderId",UUID.randomUUID().toString()).put("buyerPlayerId","22")
             .put("buyerAccount","fixture-account-22").put("buyerOwnerRevision","1").put("listingId","7001")
             .put("escrowReference","7001").put("escrowProof","a".repeat(64)).put("amountFen",100);
@@ -437,14 +458,29 @@ class CommerceTiDbTest {
             service.poll(budget());var bound=e.store.get(listingId);
             assertThat(CommerceEngine.workflow(bound).getStage()).isEqualTo("rmb_refund");
             assertThat(CommerceEngine.workflow(bound).getRmb().getBuyerOwnerRevision()).isEqualTo(1);
-            assertThat(e.store.ops("ref_id=?",listingId)).isEmpty();
+            assertThat(e.store.ops("ref_id=? AND op_id<>?",listingId,originalDebitId)).isEmpty();
+            assertThat(e.store.ops("op_id=?",originalDebitId)).containsExactly(originalDebit);
             service.advance(bound,budget());assertThat(receipts).hasSize(1);
             assertThat(receipts.getFirst().path("state").asText()).isEqualTo("REFUND_PENDING");
+            assertThat(e.store.ops("ref_id=? AND op_id<>?",listingId,originalDebitId)).isEmpty();
+            assertThat(e.store.ops("op_id=?",originalDebitId)).containsExactly(originalDebit);
             // 维护注入错误归属，原返还不能发给新主；保留rmb_return等待人工/恢复。
             e.store.transaction(budget(), c -> {CommerceStore.execute(c,"UPDATE player SET account='new-seller-owner',owner_revision=2 WHERE player_id=11");return null;});
             assertThatThrownBy(() -> service.advance(e.store.get(listingId),budget())).isInstanceOf(SecurityException.class);
-            assertThat(e.store.ops("ref_id=?",listingId)).isEmpty();
+            assertThat(e.store.ops("ref_id=? AND op_id<>?",listingId,originalDebitId)).isEmpty();
+            assertThat(e.store.ops("op_id=?",originalDebitId)).containsExactly(originalDebit);
             assertThat(CommerceEngine.workflow(e.store.get(listingId)).getStage()).isEqualTo("rmb_return");
+            // 坏终局没有原操作ID时必须隔离原件，不能悄悄生成另一笔扣款。
+            var malformedWorkflow=workflow.build().toBuilder().setStage("rmb_refund");
+            malformedWorkflow.getLegsBuilder(0).clearOpId();
+            var malformed=row.toBuilder().setCommerceId(7002).setRequestKey("rmb-missing-original-op-fixture")
+                .setWorkflowProto(malformedWorkflow.build().toByteString()).build();
+            e.store.transaction(budget(),c->{CommerceStore.insert(c,"trade_commerce",malformed);return null;});
+            var beforeMalformedOps=e.store.ops("1=1 ORDER BY op_id");
+            assertThatThrownBy(()->e.advance(malformed,budget())).isInstanceOf(CommerceEngine.CorruptContract.class)
+                .hasMessageContaining("原操作ID");
+            assertThat(e.store.get(malformed.getCommerceId())).isEqualTo(malformed);
+            assertThat(e.store.ops("1=1 ORDER BY op_id")).isEqualTo(beforeMalformedOps);
         } finally {server.stop(0);}
     }
 

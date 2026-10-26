@@ -42,6 +42,123 @@ public final class LockPlans {
     private LockPlans() {
     }
 
+    /** 只读服务端实际版本；不按 URL、环境变量或 MySQL 兼容前缀猜后端。 */
+    public static boolean isTiDb(GuildMysqlFixture db) throws SQLException {
+        try (Connection c = db.dataSource.getConnection(); Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery("SELECT VERSION()")) {
+            assertThat(rs.next()).isTrue();
+            String version = rs.getString(1);
+            assertThat(ServerVersion.rejection(version)).isNull();
+            return version.toLowerCase(Locale.ROOT).contains("tidb");
+        }
+    }
+
+    /** TiDB 直接读取原生产 SQL 的全部计划节点，不伪造 MySQL 的 key/type/key_len 列。 */
+    private static void assertTiDbPointOperation(GuildMysqlFixture db, PlanCase planCase) throws SQLException {
+        List<String> primary = new ArrayList<>();
+        String pkType;
+        try (Connection c = db.dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS"
+                     + " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME='PRIMARY' ORDER BY SEQ_IN_INDEX")) {
+            ps.setString(1, planCase.table());
+            try (ResultSet rs = ps.executeQuery()) { while (rs.next()) primary.add(rs.getString(1)); }
+            assertThat(primary).isNotEmpty();
+            try (PreparedStatement table = c.prepareStatement("SELECT TIDB_PK_TYPE FROM INFORMATION_SCHEMA.TABLES"
+                    + " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?")) {
+                table.setString(1, planCase.table());
+                try (ResultSet rs = table.executeQuery()) {
+                    assertThat(rs.next()).isTrue();
+                    pkType = rs.getString(1);
+                    assertThat(rs.next()).isFalse();
+                }
+            }
+        }
+        String statement = inline(planCase.sql(), planCase.args());
+        List<Map<String, String>> nodes = new ArrayList<>();
+        try (Connection c = db.dataSource.getConnection(); Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery("EXPLAIN FORMAT=TRADITIONAL " + statement)) {
+            while (rs.next()) {
+                Map<String, String> row = new HashMap<>();
+                ResultSetMetaData meta = rs.getMetaData();
+                for (int i = 1; i <= meta.getColumnCount(); i++) {
+                    row.put(meta.getColumnLabel(i).toLowerCase(Locale.ROOT), rs.getString(i));
+                }
+                nodes.add(row);
+            }
+        }
+        assertThat(nodes).as("%s 的 TiDB 真实计划", planCase.name()).isNotEmpty();
+        String primaryIndex = "index:PRIMARY(" + String.join(",", primary) + ")";
+        String clusteredIndex = "clustered " + primaryIndex;
+        String tableOnly = "table:" + planCase.table();
+        int keyAccesses = 0;
+        int rowIdLookups = 0;
+        boolean primaryIndexRange = false;
+        boolean indexLookup = false;
+        for (Map<String, String> node : nodes) {
+            String id = node.get("id");
+            assertThat(id).isNotNull();
+            // 树形缩进只用于显示；算子名称严格从 TiDB 的 id 后缀前读取。
+            String operator = id.replaceFirst("^[^A-Za-z]*", "").replaceFirst("_[0-9]+(?:\\(Build\\)|\\(Probe\\))?$", "");
+            String access = node.get("access object");
+            String info = node.get("operator info");
+            assertThat(access).as("%s 缺 access object", planCase.name()).isNotNull();
+            assertThat(info).as("%s 缺 operator info", planCase.name()).isNotNull();
+            access = access.replace(", ", ",");
+            switch (operator) {
+                case "Point_Get" -> {
+                    keyAccesses++;
+                    if (access.equals(tableOnly)) {
+                        assertThat(pkType).isEqualTo("CLUSTERED");
+                        assertThat(primary).hasSize(1);
+                        assertThat(info).contains("handle:");
+                    } else {
+                        assertThat(access).isIn(tableOnly + "," + primaryIndex, tableOnly + "," + clusteredIndex);
+                    }
+                }
+                case "TableRangeScan" -> {
+                    keyAccesses++;
+                    assertThat(access).isEqualTo(tableOnly);
+                    assertThat(pkType).isEqualTo("CLUSTERED");
+                    assertCompletePointRange(info, primary.size(), planCase.name());
+                }
+                case "IndexRangeScan" -> {
+                    keyAccesses++;
+                    primaryIndexRange = true;
+                    assertThat(access).isIn(tableOnly + "," + primaryIndex, tableOnly + "," + clusteredIndex);
+                    assertCompletePointRange(info, primary.size(), planCase.name());
+                }
+                case "TableRowIDScan" -> {
+                    rowIdLookups++;
+                    assertThat(access).isEqualTo(tableOnly);
+                }
+                case "IndexLookUp" -> {
+                    indexLookup = true;
+                    assertThat(access).isEmpty();
+                }
+                case "Projection", "Selection", "Update", "Delete", "TableReader", "SelectLock" ->
+                    assertThat(access).isEmpty();
+                default -> throw new AssertionError(planCase.name() + " 出现未证明为完整主键点操作的 TiDB 算子：" + operator);
+            }
+        }
+        assertThat(keyAccesses).as("%s 必须恰好一个完整主键点入口", planCase.name()).isEqualTo(1);
+        if (primaryIndexRange) {
+            assertThat(indexLookup).isTrue();
+            assertThat(rowIdLookups).isEqualTo(1);
+        } else {
+            assertThat(indexLookup).isFalse();
+            assertThat(rowIdLookups).isZero();
+        }
+    }
+
+    /** TiDB Range.String 的闭区间：上下界全列逐值相等；未知/无界/前缀/多区间一律红。 */
+    private static void assertCompletePointRange(String info, int keyColumns, String name) {
+        var matcher = Pattern.compile("^range:\\[(-?\\d+(?: -?\\d+)*),(-?\\d+(?: -?\\d+)*)], (.+)$").matcher(info);
+        assertThat(matcher.matches()).as("%s 不是单个整数闭区间：%s", name, info).isTrue();
+        assertThat(matcher.group(1)).as("%s 不是等值点区间", name).isEqualTo(matcher.group(2));
+        assertThat(matcher.group(1).split(" ")).as("%s 区间没有用满主键列", name).hasSize(keyColumns);
+        assertThat(matcher.group(3)).doesNotContain("range:");
+    }
+
     /** 逐条 EXPLAIN 并断言（夹具行必须存在且满足语句里的其余条件，否则 table / key 都是 NULL，用例因夹具而红）。 */
     public static void assertPrimaryKeyPointOperations(GuildMysqlFixture db, List<PlanCase> cases) throws SQLException {
         Map<String, String> keyLen = new HashMap<>();
@@ -49,6 +166,10 @@ public final class LockPlans {
             if (!keyLen.containsKey(c.table())) {
                 keyLen.put(c.table(), primaryKeyLen(db, c.table()));
             }
+        }
+        if (isTiDb(db)) {
+            for (PlanCase c : cases) assertTiDbPointOperation(db, c);
+            return;
         }
         for (PlanCase c : cases) {
             String stmt = inline(c.sql(), c.args());

@@ -194,4 +194,74 @@ class TeamSqlAuthorityTiDbTest {
         player(1);String request=UUID.randomUUID().toString();var create=id(CreateTeamRequest.getDefaultInstance(),request);var original=bound(1,"CreateTeam",create);original.mutate(Bind.create(1,10),Op.create(1,10,1),SessionLoader.NONE,RuleConfig.DEFAULT,budget());
         var leave=id(LeaveTeamRequest.newBuilder().setExpectedTeamId(10).build(),request);assertThrows(RuntimeException.class,()->bound(1,"LeaveTeam",leave).replay(budget()));assertEquals(1,count("team_action"));assertNotNull(store.read(1,10,budget()).record());
     }
+
+    @Test void 历史开局显示允许不同查询正文和未绑定读取_损坏UUID名册与归属必拒绝()throws Exception{
+        player(1);create(1,10);
+        var request=id(StartTeamMatchRequest.newBuilder().setExpectedTeamId(10).setBattleConfigId(7).setTargetTeamSize(3).build());
+        var start=bound(1,"StartTeamMatch",request);var snap=start.read(1,10,budget());String token=UUID.randomUUID().toString();
+        var locked=start.commitMatchLock(snap,1,token,List.of(1L),snap.nowMs()+30_000,SessionLoader.NONE,budget(),Map.of(1L,1),30);
+        assertNotNull(locked.commit());var bytes=start.launchOriginal(budget());var original=TeamLaunchOriginal.parseFrom(bytes);
+        sqlRun("INSERT INTO match_global_queue_unit(unit_id,state,target_size,enqueued_ms,config_id,launch_original,team_id,battle_id) VALUES(?,1,?,?,?,?,10,0)",
+                "t:10:"+request.getRequestId(),3,original.getEnqueuedMs(),7,bytes.toByteArray());
+        var view=TeamView.newBuilder().setTeamId(10).setVersion(locked.commit().version()).addMembers(TeamMemberView.newBuilder().setPlayerId(1)).build();
+        var query=bound(1,"GetMyTeam",GetMyTeamRequest.getDefaultInstance());
+        var projected=query.projectMatchView(view,budget());var unbound=store.projectMatchView(view,budget());
+        assertEquals(projected,unbound);assertTrue(projected.getMatchFillSupported());assertEquals(TeamMatchState.TEAM_MATCH_STATE_QUEUED,projected.getMatchState());
+        assertEquals(3,projected.getMatchTargetSize());assertEquals(original.getEnqueuedMs(),projected.getMatchQueuedAtMs());assertEquals(7,projected.getMatchBattleConfigId());
+        var changed=id(request.toBuilder().setBattleConfigId(99).build(),request.getRequestId());
+        assertThrows(RuntimeException.class,()->bound(1,"StartTeamMatch",changed).resumeLaunch(budget()),"当前Start相同UUID仍不得换完整正文");
+        var wrongUUID=original.toBuilder().setRequest(original.getRequest().toBuilder().setRequestId(UUID.randomUUID().toString())).build();
+        var wrongRoster=original.toBuilder().setMembers(0,original.getMembers(0).toBuilder().setRosterOrder(2)).build();
+        var wrongActor=original.toBuilder().setActor(original.getActor().toBuilder().setOwnerRevision(8)).build();
+        for(var damaged:List.of(wrongUUID,wrongRoster,wrongActor)){
+            sqlRun("UPDATE team_launch SET original_proto=? WHERE request_id=?",damaged.toByteArray(),request.getRequestId());
+            sqlRun("UPDATE match_global_queue_unit SET launch_original=? WHERE unit_id=?",damaged.toByteArray(),"t:10:"+request.getRequestId());
+            try{
+                assertThrows(RuntimeException.class,()->query.projectMatchView(view,budget()));
+                assertThrows(RuntimeException.class,()->store.projectMatchView(view,budget()));
+                assertEquals(token,store.read(1,10,budget()).record().getMatchLockToken());
+                assertEquals(1,count("team_launch"));assertEquals(0,count("match_global_direct_intent"));assertEquals(0,count("match_global_join_intent"));
+            }finally{
+                sqlRun("UPDATE team_launch SET original_proto=? WHERE request_id=?",bytes.toByteArray(),request.getRequestId());
+                sqlRun("UPDATE match_global_queue_unit SET launch_original=? WHERE unit_id=?",bytes.toByteArray(),"t:10:"+request.getRequestId());
+            }
+        }
+        assertEquals(projected,query.projectMatchView(view,budget()));assertEquals(bytes,start.launchOriginal(budget()));
+    }
+    @Test void 内部清锁允许不同当前请求正文_仍须原永久取消证明且拒绝损坏原件()throws Exception{
+        player(1);create(1,10);
+        var request=id(StartTeamMatchRequest.newBuilder().setExpectedTeamId(10).setBattleConfigId(7).setTargetTeamSize(3).build());
+        var start=bound(1,"StartTeamMatch",request);var snap=start.read(1,10,budget());String token=UUID.randomUUID().toString();
+        assertNotNull(start.commitMatchLock(snap,1,token,List.of(1L),snap.nowMs()+30_000,SessionLoader.NONE,budget(),Map.of(1L,1),30).commit());
+        var bytes=start.launchOriginal(budget());var original=TeamLaunchOriginal.parseFrom(bytes);
+        var requestNow=id(LeaveTeamRequest.newBuilder().setExpectedTeamId(10).build());assertNotEquals(request.getRequestId(),requestNow.getRequestId());
+        var internal=bound(1,"LeaveTeam",requestNow);
+        assertEquals(EndMatchStop.DEADLINE,internal.releaseMatchLockOnce(10,token,SessionLoader.NONE,budget()).stop(),"没有SQL终局证明不能因不同当前请求解除原锁");
+        assertEquals(token,store.read(1,10,budget()).record().getMatchLockToken());
+        sql.tx(budget(),c->{
+            com.game.common.player.PlayerSessionAuthority.lock(c.connection(),1,actor(1).getAccount(),actor(1).getOwnerRevision(),3);
+            c.one("SELECT version FROM team_authority WHERE team_id=10 FOR UPDATE",r->r.getLong(1));
+            assertEquals(com.game.common.player.TeamQueueAuthority.Result.CANCELLED,
+                    com.game.common.player.TeamQueueAuthority.cancel(c.connection(),original,bytes.toByteArray(),3));
+            return null;
+        });
+        var wrongActor=original.toBuilder().setActor(original.getActor().toBuilder().setOwnerRevision(8)).build();
+        sqlRun("UPDATE team_launch SET original_proto=? WHERE request_id=?",wrongActor.toByteArray(),request.getRequestId());
+        sqlRun("UPDATE match_global_queue_unit SET launch_original=? WHERE unit_id=?",wrongActor.toByteArray(),"t:10:"+request.getRequestId());
+        try{
+            assertThrows(RuntimeException.class,()->internal.releaseMatchLockOnce(10,token,SessionLoader.NONE,budget()));
+            assertEquals(token,store.read(1,10,budget()).record().getMatchLockToken());
+        }finally{
+            sqlRun("UPDATE team_launch SET original_proto=? WHERE request_id=?",bytes.toByteArray(),request.getRequestId());
+            sqlRun("UPDATE match_global_queue_unit SET launch_original=? WHERE unit_id=?",bytes.toByteArray(),"t:10:"+request.getRequestId());
+        }
+        assertNotNull(internal.releaseMatchLockOnce(10,token,SessionLoader.NONE,budget()).pinned().commit());
+        assertTrue(store.read(1,10,budget()).record().getMatchLockToken().isEmpty());assertEquals(bytes,start.launchOriginal(budget()));
+        sql.read(budget(),c->{
+            assertEquals(1,c.<Integer>one("SELECT COUNT(*) FROM match_global_direct_intent WHERE cancelled=1 AND battle_id=0",r->r.getInt(1)).intValue());
+            assertEquals(4,c.<Integer>one("SELECT state FROM match_global_queue_unit",r->r.getInt(1)).intValue());
+            assertEquals(0,c.<Integer>one("SELECT COUNT(*) FROM team_launch WHERE request_id=?",r->r.getInt(1),requestNow.getRequestId()).intValue());
+            return null;
+        });
+    }
 }

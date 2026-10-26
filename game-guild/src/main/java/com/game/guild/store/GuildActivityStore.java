@@ -240,6 +240,58 @@ public final class GuildActivityStore {
         for (long p : view.getMemberPlayerIdsList())
             s.update("UPDATE guild_activity_slot SET expires_ms=0 WHERE player_id=? AND lobby_id=?", u64(p), u64(view.getLobbyId()));
     }
+    /** 已持原身份P/G锁并写入SQL终局后关闭同一展示投影；TTL不能赋予释放资格。 */
+    private void closeTerminalLobby(AuthorityJdbc.Session s, GuildTrialLaunchOriginal original, long battle,
+                                    GuildTrialCancellation.Verified cancellation) throws SQLException {
+        var terminal = TrialLaunchAuthority.load(s, original.getRequestId(), true);
+        if (terminal == null || terminal.getState() != 3 || terminal.getBattleId() != battle
+                || !TrialLaunchAuthority.original(terminal).equals(original))
+            throw new SQLException("历练大厅关闭缺少同一原launch的SQL终局");
+        TrialLaunchAuthority.verifyProjection(s, original, false);
+        var start = TrialLaunchAuthority.start(original);
+        if (cancellation != null) {
+            if (!cancellation.terminal() || !cancellation.original().equals(start)
+                    || cancellation.response().getBattleId() != battle
+                    || !Arrays.equals(terminal.getCancelReceipt().toByteArray(), cancellation.response().toByteArray()))
+                throw new SecurityException("历练大厅关闭缺少原签名取消收据");
+        } else {
+            if (battle == 0) throw new SQLException("历练大厅关闭缺少原battle_id");
+            Object[] ended = s.one("SELECT state,context_proto FROM guild_trial_battle WHERE battle_id=? FOR UPDATE",
+                    r -> new Object[] {r.getInt(1), r.getBytes(2)}, u64(battle));
+            if (ended == null || (Integer) ended[0] != 2 && (Integer) ended[0] != 4
+                    || !Arrays.equals((byte[]) ended[1], start.getActivityContext().toByteArray()))
+                throw new SQLException("历练大厅关闭缺少同一原battle的SQL终局");
+        }
+        Object[] projection = s.one("SELECT guild_id,activity_id,state,view_proto,battle_id"
+                        + " FROM guild_trial_lobby WHERE lobby_id=? FOR UPDATE",
+                r -> new Object[] {u64(r, 1), r.getInt(2), r.getInt(3), r.getBytes(4), u64(r, 5)},
+                u64(original.getRequestId()));
+        if (projection != null) {
+            var view = decode((byte[]) projection[3]);
+            var expected = original.getRosterList().stream().map(role -> role.getPlayerId())
+                    .collect(java.util.stream.Collectors.toSet());
+            var actual = new HashSet<>(view.getMemberPlayerIdsList());
+            if ((Long) projection[0] != original.getGuildId() || (Integer) projection[1] != original.getActivityId()
+                    || (Integer) projection[2] != view.getStateValue() || view.getStateValue() < 1 || view.getStateValue() > 4
+                    || view.getLobbyId() != original.getRequestId() || view.getInitiatorPlayerId() != original.getInitiatorPlayerId()
+                    || actual.size() != view.getMemberPlayerIdsCount() || !actual.equals(expected)
+                    || (Long) projection[4] != view.getBattleId() || view.getBattleId() != 0 && view.getBattleId() != battle)
+                throw new SQLException("历练终局大厅投影与永久原件冲突");
+            var closed = view.toBuilder().setStateValue(4).setBattleId(battle);
+            if (cancellation != null) closed.setEndTipId(GuildTips.TRIAL_SERVICE_BUSY);
+            saveLobby(s, closed.build(), 0, start.toByteArray());
+        }
+        // 房间投影可清理；仅退休仍指向原request的slot，绝不覆盖此后建立的新房间。
+        for (var identity : original.getRosterList()) {
+            if (projection == null)
+                s.update("UPDATE guild_activity_slot SET lobby_id=0,expires_ms=0 WHERE player_id=? AND lobby_id=?",
+                        u64(identity.getPlayerId()), u64(original.getRequestId()));
+            else
+                s.update("UPDATE guild_activity_slot SET expires_ms=0 WHERE player_id=? AND lobby_id=?",
+                        u64(identity.getPlayerId()), u64(original.getRequestId()));
+        }
+    }
+
     private GuildTrialLobbyView end(AuthorityJdbc.Session s, GuildTrialLobbyView view, int tip, String... parameters) throws SQLException {
         var ended =
                 view.toBuilder().setStateValue(4).setEndTipId(tip).clearEndParameters().addAllEndParameters(List.of(parameters)).build();
@@ -568,11 +620,7 @@ public final class GuildActivityStore {
             TrialLaunchAuthority.update(s,original,reply.getBattleId(),true,reply.toByteArray(),now);
             if (reply.getBattleId() != 0)
                 s.update("UPDATE guild_trial_battle SET state=4 WHERE battle_id=? AND state IN(1,3)",u64(reply.getBattleId()));
-            var view = lobby(s,launch.lobby,true);
-            if (view != null) {
-                saveLobby(s,view.toBuilder().setStateValue(4).setEndTipId(GuildTips.TRIAL_SERVICE_BUSY).build(),0,launch.request.toByteArray());
-                release(s,view);
-            }
+            closeTerminalLobby(s, original, reply.getBattleId(), proof);
             return null;
         });
     }
@@ -713,6 +761,7 @@ public final class GuildActivityStore {
                             + "state=2,result_hash=VALUES(result_hash),result_proto=VALUES(result_proto)",
                     u64(event.getBattleId()), u64(context.getGuildId()), context.getActivityId(), context.toByteArray(), now, digest, raw);
             TrialLaunchAuthority.update(s,original,event.getBattleId(),true,new byte[0],now);
+            closeTerminalLobby(s, original, event.getBattleId(), null);
             return null;
         });
     }
@@ -821,6 +870,7 @@ public final class GuildActivityStore {
             if (launch.getState() != 3) {
                 TrialLaunchAuthority.update(s,original,battle,true,new byte[0],now);
                 s.update("UPDATE guild_trial_battle SET state=4 WHERE battle_id=? AND state IN(1,3)",u64(battle));
+                closeTerminalLobby(s, original, battle, null);
             }
             return null;
         });

@@ -1902,6 +1902,442 @@ class PlayerStoreSqlTest {
         assertThat(store.countPlayers("robot_nobody")).isZero();
     }
 
+
+    @Test
+    void 逐语句预算_重算剩余值且保原较小非零上限_每句恢复同物理连接() throws Exception {
+        try (var fixture = new StatementBudgetFixture(750, 0, 5000);
+             var scope = StrongTiDbConnectionPolicy.openStatementDeadline(fixture.pooled, fixture.remaining::get, fixture.nanos::get)) {
+            fixture.execute();
+            fixture.remaining.set(300);
+            fixture.execute();
+            assertThat(fixture.seen).hasSize(2);
+            assertThat(fixture.seen.get(0)).containsExactly(750, 1000, 2000, 2);
+            assertThat(fixture.seen.get(1)).containsExactly(300, 300, 1300, 2);
+            assertThat(fixture.caps).containsExactly(750, 0);
+            assertThat(fixture.network.get()).isEqualTo(5000);
+            assertThat(scope.healthy()).isTrue();
+        }
+    }
+
+    @Test
+    void 逐语句预算_只认同作用域真实业务3024_不认伪造码或suppressed() throws Exception {
+        try (var fixture = new StatementBudgetFixture(0, 0, 0);
+             var scope = StrongTiDbConnectionPolicy.openStatementDeadline(fixture.pooled, fixture.remaining::get, fixture.nanos::get)) {
+            var business = new java.sql.SQLException("原业务delegate", "HY000", 3024);
+            fixture.businessFailure = business;
+            assertThatThrownBy(fixture::execute).isSameAs(business);
+            assertThat(scope.businessTimedOut(new IllegalStateException("原包装", business))).isTrue();
+            assertThat(scope.businessTimedOut(new java.sql.SQLException("另一个错误", "HY000", 3024))).isFalse();
+            var suppressedOnly = new IllegalStateException("无关错误");
+            suppressedOnly.addSuppressed(business);
+            assertThat(scope.businessTimedOut(suppressedOnly)).isFalse();
+            business.addSuppressed(new java.sql.SQLException("另一个真实关闭错误"));
+            assertThat(scope.businessTimedOut(new IllegalStateException("原超时外还关闭失败", business))).isFalse();
+            assertThat(fixture.caps).containsExactly(0, 0);
+        }
+    }
+
+    @Test
+    void 逐语句预算_控制读写或坏读回不能变业务超时_被吞以后关闭仍拒绝() throws Exception {
+        for (int phase : List.of(1, 2, 3, 4, 5, 6)) {
+            try (var fixture = new StatementBudgetFixture(0, 0, 0)) {
+                var scope = StrongTiDbConnectionPolicy.openStatementDeadline(fixture.pooled, fixture.remaining::get, fixture.nanos::get);
+                fixture.failControlAt = phase < 4 ? phase : 0;
+                fixture.driftReadback = phase == 4;
+                fixture.failQueryProjection = phase == 5;
+                fixture.queryReadDriftAt = phase == 6 ? 2 : 0;
+                try { fixture.execute(); throw new AssertionError("控制错误必须传播"); }
+                catch (java.sql.SQLException control) {
+                    assertThat(scope.businessTimedOut(new IllegalStateException("包装", control))).isFalse();
+                    assertThat(scope.healthy()).isFalse();
+                }
+                assertThat(fixture.delegateCalls).isZero();
+                assertThat(fixture.caps).containsExactly(0, 0);
+                assertThat(fixture.network.get()).isZero();
+                assertThatThrownBy(scope::close).isInstanceOf(java.sql.SQLNonTransientConnectionException.class)
+                        .hasMessageContaining("拒绝提交");
+            }
+        }
+    }
+
+    @Test
+    void 逐语句预算_恢复3024覆盖业务超时并隔离原holder_禁止回池() throws Exception {
+        try (var fixture = new StatementBudgetFixture(0, 0, 0)) {
+            var scope = StrongTiDbConnectionPolicy.openStatementDeadline(fixture.pooled, fixture.remaining::get, fixture.nanos::get);
+            fixture.businessFailure = new java.sql.SQLException("原业务超时", "HY000", 3024);
+            fixture.failRestoration = true;
+            try { fixture.execute(); throw new AssertionError("恢复失败必须传播"); }
+            catch (java.sql.SQLException restoration) {
+                assertThat(restoration).isInstanceOf(java.sql.SQLNonTransientConnectionException.class)
+                        .hasMessageContaining("禁止回池");
+                assertThat(scope.businessTimedOut(restoration)).isFalse();
+                assertThat(restoration.getSuppressed()).contains(fixture.businessFailure);
+            }
+            assertThat(fixture.holder.isDiscard()).isTrue();
+            assertThat(fixture.pooled.isDisable()).isTrue();
+            assertThat(fixture.pooled.getConnectionHolder()).isNull();
+            assertThat(fixture.physicalClosed.get()).isTrue();
+            assertThatThrownBy(scope::close).isInstanceOf(java.sql.SQLNonTransientConnectionException.class);
+        }
+    }
+
+    @Test
+    void 逐语句预算_换物理连接或预算已尽均不发业务_只有纯预算耗尽认超时() throws Exception {
+        try (var fixture = new StatementBudgetFixture(0, 0, 0)) {
+            var scope = StrongTiDbConnectionPolicy.openStatementDeadline(fixture.pooled, fixture.remaining::get, fixture.nanos::get);
+            fixture.remaining.set(0);
+            try { fixture.execute(); throw new AssertionError("没有预算不能发业务"); }
+            catch (java.sql.SQLException expired) { assertThat(scope.businessTimedOut(expired)).isTrue(); }
+            assertThat(fixture.delegateCalls).isZero();
+            assertThat(fixture.writes).isZero();
+            scope.close();
+        }
+        try (var fixture = new StatementBudgetFixture(0, 0, 0)) {
+            var scope = StrongTiDbConnectionPolicy.openStatementDeadline(fixture.pooled, fixture.remaining::get, fixture.nanos::get);
+            var other = org.mockito.Mockito.mock(com.alibaba.druid.proxy.jdbc.ConnectionProxy.class);
+            org.mockito.Mockito.when(other.getRawObject()).thenReturn(org.mockito.Mockito.mock(java.sql.Connection.class));
+            org.mockito.Mockito.when(fixture.statement.getConnectionProxy()).thenReturn(other);
+            assertThatThrownBy(fixture::execute).isInstanceOf(java.sql.SQLNonTransientConnectionException.class);
+            assertThat(fixture.delegateCalls).isZero();
+            assertThat(scope.healthy()).isFalse();
+            assertThatThrownBy(scope::close).isInstanceOf(java.sql.SQLNonTransientConnectionException.class);
+        }
+    }
+
+    @Test
+    void 带时限写入_拒绝加入外层事务_不改变既有数据() {
+        long player = newPlayer(4031, "外层甲");
+        tx.executeWithoutResult(ignored ->
+                assertThatThrownBy(() -> store.claimOwnership(player, BUDGET))
+                        .isInstanceOf(IllegalStateException.class).hasMessageContaining("外层事务"));
+        assertThat(store.claimOwnership(player)).isEqualTo(new ClaimResult.Claimed(1));
+    }
+
+    @Test
+    void 带时限写入_提交和回滚超时仍传播_不能伪装TimedOut() {
+        DataSource source = context.getBean(DataSource.class);
+        var commitFailure = new org.springframework.dao.QueryTimeoutException("真实提交错误的替身");
+        var commitManager = new DataSourceTransactionManager(source) {
+            @Override protected void doCommit(org.springframework.transaction.support.DefaultTransactionStatus status) {
+                super.doCommit(status);
+                throw commitFailure;
+            }
+        };
+        var commitStore = new PlayerStore(mapper, CLOCK::get, commitManager, System::nanoTime);
+        assertThatThrownBy(() -> commitStore.claimOwnership(424244, BUDGET)).isSameAs(commitFailure);
+
+        var rollbackFailure = new org.springframework.dao.QueryTimeoutException("真实回滚错误的替身");
+        var rollbackManager = new DataSourceTransactionManager(source) {
+            @Override protected void doRollback(org.springframework.transaction.support.DefaultTransactionStatus status) {
+                super.doRollback(status);
+                throw rollbackFailure;
+            }
+        };
+        AtomicLong nanos = new AtomicLong();
+        PlayerMapper timedMapper = observed(method -> nanos.addAndGet(BUDGET.toNanos()));
+        var rollbackStore = new PlayerStore(timedMapper, CLOCK::get, rollbackManager, nanos::get);
+        assertThatThrownBy(() -> rollbackStore.claimOwnership(424245, BUDGET)).isSameAs(rollbackFailure);
+    }
+
+    @Test
+    void 语句预算_MySQL和H2不发送TiDB变量() throws Exception {
+        for (String product : List.of("MySQL", "H2")) {
+            var connection = org.mockito.Mockito.mock(java.sql.Connection.class);
+            var metadata = org.mockito.Mockito.mock(java.sql.DatabaseMetaData.class);
+            org.mockito.Mockito.when(connection.getMetaData()).thenReturn(metadata);
+            org.mockito.Mockito.when(metadata.getDatabaseProductName()).thenReturn(product);
+            org.mockito.Mockito.when(metadata.getDatabaseProductVersion()).thenReturn("8.4.13");
+            try (var scope = StrongTiDbConnectionPolicy.openStatementDeadline(connection, () -> 1000, System::nanoTime)) {
+                assertThat(scope.tiDb()).isFalse();
+                assertThat(scope.healthy()).isTrue();
+            }
+            org.mockito.Mockito.verify(connection, org.mockito.Mockito.never()).createStatement();
+            org.mockito.Mockito.verify(connection, org.mockito.Mockito.never()).setNetworkTimeout(
+                    org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyInt());
+        }
+    }
+
+
+    @Test
+    void 逐句预算_控制往返后取消响应计时跟随server上限_原截止耗尽不再发业务() throws Exception {
+        try (var fixture = new StatementBudgetFixture(0, 0, 10000);
+             var scope = StrongTiDbConnectionPolicy.openStatementDeadline(
+                     fixture.pooled, fixture.remaining::get, fixture.nanos::get)) {
+            fixture.controlDelayMillis = 600;
+            fixture.execute();
+            assertThat(fixture.seen.get(0)).containsExactly(1000, 1000, 2000, 2);
+            assertThat(fixture.remaining.get()).isEqualTo(400);
+            assertThat(fixture.nanos.get()).isEqualTo(TimeUnit.MILLISECONDS.toNanos(600));
+            assertThat(fixture.caps).containsExactly(0, 0);
+            assertThat(fixture.querySeconds.get()).isZero();
+            assertThat(fixture.network.get()).isEqualTo(10000);
+        }
+        try (var fixture = new StatementBudgetFixture(0, 0, 10000);
+             var scope = StrongTiDbConnectionPolicy.openStatementDeadline(
+                     fixture.pooled, fixture.remaining::get, fixture.nanos::get)) {
+            fixture.controlDelayMillis = 1000;
+            try { fixture.execute(); throw new AssertionError("控制往返已耗尽原预算"); }
+            catch (java.sql.SQLException exhausted) { assertThat(scope.businessTimedOut(exhausted)).isTrue(); }
+            assertThat(fixture.delegateCalls).isZero();
+            assertThat(fixture.queryWrites).isZero();
+            assertThat(fixture.caps).containsExactly(0, 0);
+        }
+    }
+
+    @Test
+    void 逐句预算_原较小query上限纳入server工作预算_每句恢复原query值() throws Exception {
+        try (var fixture = new StatementBudgetFixture(70, 0, 5000);
+             var scope = StrongTiDbConnectionPolicy.openStatementDeadline(
+                     fixture.pooled, fixture.remaining::get, fixture.nanos::get)) {
+            fixture.remaining.set(5000);
+            fixture.querySeconds.set(1);
+            fixture.execute();
+            assertThat(fixture.seen.get(0)).containsExactly(70, 1000, 2000, 2);
+            assertThat(fixture.caps).containsExactly(70, 0);
+            assertThat(fixture.querySeconds.get()).isEqualTo(1);
+            assertThat(fixture.network.get()).isEqualTo(5000);
+        }
+    }
+
+    @Test
+    void 逐句预算_原更小外部socket不扩大_未知取消隔离不能伪装TimedOut() throws Exception {
+        try (var fixture = new StatementBudgetFixture(0, 0, 120)) {
+            var scope = StrongTiDbConnectionPolicy.openStatementDeadline(
+                    fixture.pooled, fixture.remaining::get, fixture.nanos::get);
+            fixture.businessFailure = new java.sql.SQLTimeoutException("原外部传输guard先到", "08S01", 0);
+            try { fixture.execute(); throw new AssertionError("未知取消必须传播"); }
+            catch (java.sql.SQLException unknown) {
+                assertThat(scope.businessTimedOut(unknown)).isFalse();
+                assertThat(scope.pureWorkTimeoutAllowed(new org.springframework.dao.QueryTimeoutException("包装", unknown))).isFalse();
+            }
+            assertThat(fixture.seen.get(0)).containsExactly(1000, 1000, 120, 2);
+            assertThat(fixture.networkHistory).allMatch(value -> value <= 120);
+            assertThat(fixture.holder.isDiscard()).isTrue();
+            assertThat(fixture.pooled.isDisable()).isTrue();
+            assertThat(fixture.physicalClosed.get()).isTrue();
+            assertThatThrownBy(scope::close).isInstanceOf(java.sql.SQLNonTransientConnectionException.class);
+        }
+    }
+
+    @Test
+    void 逐句预算_query恢复写入或读回失败必须隔离_不吞业务错误() throws Exception {
+        for (boolean badReadback : List.of(false, true)) {
+            try (var fixture = new StatementBudgetFixture(0, 0, 5000)) {
+                var scope = StrongTiDbConnectionPolicy.openStatementDeadline(
+                        fixture.pooled, fixture.remaining::get, fixture.nanos::get);
+                fixture.failQueryRestore = !badReadback;
+                fixture.queryReadDriftAt = badReadback ? 3 : 0;
+                fixture.businessFailure = new java.sql.SQLException("原业务deadline", "HY000", 3024);
+                try { fixture.execute(); throw new AssertionError("原queryTimeout未恢复不能回TimedOut"); }
+                catch (java.sql.SQLException failure) {
+                    assertThat(scope.businessTimedOut(failure)).isFalse();
+                    assertThat(failure.getSuppressed()).contains(fixture.businessFailure);
+                }
+                assertThat(fixture.holder.isDiscard()).isTrue();
+                assertThat(fixture.pooled.isDisable()).isTrue();
+                assertThat(fixture.physicalClosed.get()).isTrue();
+                assertThatThrownBy(scope::close).isInstanceOf(java.sql.SQLNonTransientConnectionException.class);
+            }
+        }
+    }
+
+    @Test
+    void 逐句预算_取消与restore共用原窗口_两次控制往返不会重赠一秒() throws Exception {
+        try (var fixture = new StatementBudgetFixture(0, 0, 5000);
+             var scope = StrongTiDbConnectionPolicy.openStatementDeadline(
+                     fixture.pooled, fixture.remaining::get, fixture.nanos::get)) {
+            fixture.businessElapsedMillis = 1000;
+            fixture.restorationDelays = new long[] {600, 300};
+            fixture.businessFailure = new java.sql.SQLException("服务端业务deadline", "HY000", 3024);
+            try { fixture.execute(); throw new AssertionError("应保留原业务错误交调用者分类"); }
+            catch (java.sql.SQLException server) { assertThat(scope.businessTimedOut(server)).isTrue(); }
+            assertThat(fixture.networkHistory).containsSubsequence(1000, 400, 5000);
+            assertThat(fixture.nanos.get()).isEqualTo(TimeUnit.MILLISECONDS.toNanos(1900));
+            assertThat(fixture.querySeconds.get()).isZero();
+            assertThat(fixture.caps).containsExactly(0, 0);
+        }
+        try (var fixture = new StatementBudgetFixture(0, 0, 5000)) {
+            var scope = StrongTiDbConnectionPolicy.openStatementDeadline(
+                    fixture.pooled, fixture.remaining::get, fixture.nanos::get);
+            fixture.businessElapsedMillis = 1900;
+            fixture.restorationDelays = new long[] {120, 0};
+            try { fixture.execute(); throw new AssertionError("共享响应窗口已耗尽不能再读回"); }
+            catch (java.sql.SQLException failure) { assertThat(scope.businessTimedOut(failure)).isFalse(); }
+            assertThat(fixture.controlOperations).isEqualTo(4);
+            assertThat(fixture.holder.isDiscard()).isTrue();
+            assertThat(fixture.physicalClosed.get()).isTrue();
+            assertThatThrownBy(scope::close).isInstanceOf(java.sql.SQLNonTransientConnectionException.class);
+        }
+    }
+
+    @Test
+    void 带时限写入_保原纯工作段QueryTimeout路径_已记录未知SQL不能借typed包装变超时() throws Exception {
+        long player = newPlayer(4032, "纯预算甲");
+        PlayerStore pureTimeout = timedStore(observed(method -> {
+            throw new org.springframework.dao.QueryTimeoutException("原路由纯截止",
+                    new java.sql.SQLTimeoutException("路由剩余预算已用尽"));
+        }), new AtomicLong());
+        assertThat(pureTimeout.claimOwnership(player, BUDGET)).isEqualTo(new ClaimResult.TimedOut());
+        assertThat(store.claimOwnership(player)).isEqualTo(new ClaimResult.Claimed(1));
+
+        try (var fixture = new StatementBudgetFixture(0, 0, 5000);
+             var scope = StrongTiDbConnectionPolicy.openStatementDeadline(
+                     fixture.pooled, fixture.remaining::get, fixture.nanos::get)) {
+            var unknown = new java.sql.SQLException("真实永久SQL错误", "42000", 1235);
+            fixture.businessFailure = unknown;
+            assertThatThrownBy(fixture::execute).isSameAs(unknown);
+            var typed = new org.springframework.dao.QueryTimeoutException("不能用此包装改变来源", unknown);
+            assertThat(scope.businessTimedOut(typed)).isFalse();
+            assertThat(scope.pureWorkTimeoutAllowed(typed)).isFalse();
+            var pure = new org.springframework.dao.QueryTimeoutException("另一个真正纯预算",
+                    new java.sql.SQLTimeoutException("没有delegate的路由截止"));
+            assertThat(scope.pureWorkTimeoutAllowed(pure)).isTrue();
+        }
+    }
+
+    @Test
+    void 固定Druid的large入口继承JDBC显式拒绝_不调用原driver() throws Exception {
+        for (Class<?> type : List.of(com.alibaba.druid.pool.DruidPooledPreparedStatement.class,
+                com.alibaba.druid.proxy.jdbc.PreparedStatementProxyImpl.class)) {
+            assertThat(type.getMethod("executeLargeUpdate").getDeclaringClass()).isEqualTo(java.sql.PreparedStatement.class);
+            assertThat(type.getMethod("executeLargeBatch").getDeclaringClass()).isEqualTo(java.sql.Statement.class);
+            assertThat(type.getMethod("executeLargeUpdate", String.class).getDeclaringClass()).isEqualTo(java.sql.Statement.class);
+            assertThat(type.getMethod("executeLargeUpdate", String.class, int.class).getDeclaringClass()).isEqualTo(java.sql.Statement.class);
+            assertThat(type.getMethod("executeLargeUpdate", String.class, int[].class).getDeclaringClass()).isEqualTo(java.sql.Statement.class);
+            assertThat(type.getMethod("executeLargeUpdate", String.class, String[].class).getDeclaringClass()).isEqualTo(java.sql.Statement.class);
+        }
+        var driver = org.mockito.Mockito.mock(java.sql.PreparedStatement.class);
+        var connection = org.mockito.Mockito.mock(com.alibaba.druid.proxy.jdbc.ConnectionProxy.class);
+        var statement = new com.alibaba.druid.proxy.jdbc.PreparedStatementProxyImpl(connection, driver, "SELECT 1", 1);
+        assertThatThrownBy(statement::executeLargeUpdate).isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(statement::executeLargeBatch).isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> statement.executeLargeUpdate("UPDATE player SET level=1"))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> statement.executeLargeUpdate("UPDATE player SET level=1", 1))
+                .isInstanceOf(java.sql.SQLFeatureNotSupportedException.class);
+        assertThatThrownBy(() -> statement.executeLargeUpdate("UPDATE player SET level=1", new int[] {1}))
+                .isInstanceOf(java.sql.SQLFeatureNotSupportedException.class);
+        assertThatThrownBy(() -> statement.executeLargeUpdate("UPDATE player SET level=1", new String[] {"player_id"}))
+                .isInstanceOf(java.sql.SQLFeatureNotSupportedException.class);
+        org.mockito.Mockito.verifyNoInteractions(driver);
+    }
+
+    /** 通过现有Druid/Filter接口替换数据库往返；不复制PlayerStore的业务规则。 */
+    private static final class StatementBudgetFixture implements AutoCloseable {
+        final DruidDataSource pool = new DruidDataSource();
+        final java.sql.Connection raw = org.mockito.Mockito.mock(java.sql.Connection.class);
+        final com.alibaba.druid.proxy.jdbc.ConnectionProxy proxy =
+                org.mockito.Mockito.mock(com.alibaba.druid.proxy.jdbc.ConnectionProxy.class);
+        final com.alibaba.druid.proxy.jdbc.PreparedStatementProxy statement =
+                org.mockito.Mockito.mock(com.alibaba.druid.proxy.jdbc.PreparedStatementProxy.class);
+        final com.alibaba.druid.filter.FilterChain chain = org.mockito.Mockito.mock(com.alibaba.druid.filter.FilterChain.class);
+        final com.alibaba.druid.pool.DruidConnectionHolder holder;
+        final com.alibaba.druid.pool.DruidPooledConnection pooled;
+        final com.alibaba.druid.filter.Filter filter;
+        final AtomicLong remaining = new AtomicLong(1000);
+        final AtomicLong nanos = new AtomicLong();
+        final java.util.concurrent.atomic.AtomicInteger querySeconds = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.List<Integer> networkHistory = new java.util.ArrayList<>();
+        final java.util.concurrent.atomic.AtomicInteger network;
+        final java.util.concurrent.atomic.AtomicBoolean physicalClosed = new java.util.concurrent.atomic.AtomicBoolean();
+        final long[] caps;
+        final java.util.List<long[]> seen = new java.util.ArrayList<>();
+        java.sql.SQLException businessFailure;
+        int failControlAt;
+        int controlOperations;
+        boolean driftReadback;
+        boolean failRestoration;
+        int writes;
+        int delegateCalls;
+        int queryReads;
+        int queryWrites;
+        int queryReadDriftAt;
+        boolean failQueryProjection;
+        boolean failQueryRestore;
+        long controlDelayMillis;
+        long businessElapsedMillis;
+        long[] restorationDelays = new long[] {0, 0};
+
+        StatementBudgetFixture(long select, long dml, int networkMillis) throws Exception {
+            caps = new long[] {select, dml};
+            network = new java.util.concurrent.atomic.AtomicInteger(networkMillis);
+            var metadata = org.mockito.Mockito.mock(java.sql.DatabaseMetaData.class);
+            org.mockito.Mockito.when(metadata.getDatabaseProductName()).thenReturn("MySQL");
+            org.mockito.Mockito.when(metadata.getDatabaseProductVersion()).thenReturn("5.7.25-TiDB-v8.5.4");
+            org.mockito.Mockito.when(proxy.getMetaData()).thenReturn(metadata);
+            org.mockito.Mockito.when(proxy.getRawObject()).thenReturn(raw);
+            org.mockito.Mockito.when(raw.getAutoCommit()).thenReturn(false);
+            org.mockito.Mockito.when(raw.isClosed()).thenAnswer(call -> physicalClosed.get());
+            org.mockito.Mockito.when(raw.getNetworkTimeout()).thenAnswer(call -> network.get());
+            org.mockito.Mockito.doAnswer(call -> {
+                        int value = call.getArgument(1); network.set(value); networkHistory.add(value); return null;
+                    })
+                    .when(raw).setNetworkTimeout(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyInt());
+            org.mockito.Mockito.doAnswer(call -> { physicalClosed.set(true); return null; })
+                    .when(raw).abort(org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.doAnswer(call -> { physicalClosed.set(true); return null; }).when(proxy).close();
+            new StrongTiDbConnectionPolicy("player", true).postProcessBeforeInitialization(pool, "fixture");
+            assertThat(pool.getProxyFilters()).hasSize(1);
+            filter = pool.getProxyFilters().get(0);
+            holder = new com.alibaba.druid.pool.DruidConnectionHolder(pool, proxy, 0);
+            pooled = new com.alibaba.druid.pool.DruidPooledConnection(holder);
+            org.mockito.Mockito.when(statement.getConnectionProxy()).thenReturn(proxy);
+            org.mockito.Mockito.when(statement.getQueryTimeout()).thenAnswer(call -> {
+                queryReads++; return querySeconds.get() + (queryReads == queryReadDriftAt ? 1 : 0);
+            });
+            org.mockito.Mockito.doAnswer(call -> {
+                queryWrites++;
+                if ((failQueryProjection && queryWrites == 1) || (failQueryRestore && queryWrites == 2))
+                    throw new java.sql.SQLException("queryTimeout控制错误", "HY000", 3024);
+                querySeconds.set(call.getArgument(0)); return null;
+            }).when(statement).setQueryTimeout(org.mockito.ArgumentMatchers.anyInt());
+            org.mockito.Mockito.when(raw.createStatement()).thenAnswer(call -> {
+                var control = org.mockito.Mockito.mock(java.sql.Statement.class);
+                org.mockito.Mockito.when(control.executeQuery(org.mockito.ArgumentMatchers.anyString())).thenAnswer(query -> {
+                    controlOperations++; advanceControl();
+                    if (controlOperations == failControlAt) throw new java.sql.SQLException("原控制SELECT", "HY000", 3024);
+                    var rows = org.mockito.Mockito.mock(java.sql.ResultSet.class);
+                    long[] snapshot = caps.clone();
+                    if (driftReadback && controlOperations == 3) snapshot[0]++;
+                    org.mockito.Mockito.when(rows.next()).thenReturn(true, false);
+                    org.mockito.Mockito.when(rows.getLong(org.mockito.ArgumentMatchers.anyInt()))
+                            .thenAnswer(read -> snapshot[(int) read.getArgument(0) - 1]);
+                    return rows;
+                });
+                org.mockito.Mockito.when(control.execute(org.mockito.ArgumentMatchers.anyString())).thenAnswer(write -> {
+                    writes++; controlOperations++; advanceControl();
+                    if (failRestoration && writes == 2) throw new java.sql.SQLException("原恢复SET", "HY000", 3024);
+                    String sql = write.getArgument(0);
+                    var matcher = java.util.regex.Pattern.compile(
+                            "SET SESSION max_execution_time=([0-9]+),tidb_dml_max_execution_time=([0-9]+)").matcher(sql);
+                    if (!matcher.matches()) throw new AssertionError("测试没有登记此控制SQL");
+                    caps[0] = Long.parseLong(matcher.group(1));
+                    caps[1] = Long.parseLong(matcher.group(2));
+                    if (controlOperations == failControlAt) throw new java.sql.SQLException("原SET可能已生效", "HY000", 3024);
+                    return false;
+                });
+                return control;
+            });
+            org.mockito.Mockito.when(chain.preparedStatement_executeUpdate(statement)).thenAnswer(call -> {
+                delegateCalls++;
+                seen.add(new long[] {caps[0], caps[1], network.get(), querySeconds.get()});
+                advance(businessElapsedMillis);
+                if (businessFailure != null) throw businessFailure;
+                return 1;
+            });
+        }
+        private void advance(long millis) {
+            remaining.addAndGet(-millis);
+            nanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(millis));
+        }
+        private void advanceControl() {
+            if (controlOperations == 3) advance(controlDelayMillis);
+            if (controlOperations == 4 || controlOperations == 5) advance(restorationDelays[controlOperations - 4]);
+        }
+        int execute() throws java.sql.SQLException { return filter.preparedStatement_executeUpdate(chain, statement); }
+        @Override public void close() { pool.close(); }
+    }
+
     // ================================================================ 带时限的建角 / 夺权（mmorpg client-request-ordering.md §6.1）
 
     /** 调用方剩余的预算；测试里的单调时钟只在钩子里拨动，预算本身不会自己耗完。 */

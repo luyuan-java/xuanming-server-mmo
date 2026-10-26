@@ -324,9 +324,9 @@ public final class CommerceEngine {
                 throw new CorruptContract("交易合同缺少参与者原账号或归属修订");
             if (prior.getKind() != 6 && (pw.hasSellerIdentity() || pw.hasBuyerIdentity())) {
                 CommerceStore.lockAssetOwners(c, prior.getSellerPlayerId(), prior.getBuyerPlayerId());
-                if (pw.hasSellerIdentity()) com.game.common.player.PlayerSessionAuthority.lock(c, prior.getSellerPlayerId(),
+                if (prior.getSellerPlayerId() != 0 && pw.hasSellerIdentity()) com.game.common.player.PlayerSessionAuthority.lock(c, prior.getSellerPlayerId(),
                     pw.getSellerIdentity().getAccount(), pw.getSellerIdentity().getOwnerRevision(), 2);
-                if (pw.hasBuyerIdentity()) com.game.common.player.PlayerSessionAuthority.lock(c, prior.getBuyerPlayerId(),
+                if (prior.getBuyerPlayerId() != 0 && pw.hasBuyerIdentity()) com.game.common.player.PlayerSessionAuthority.lock(c, prior.getBuyerPlayerId(),
                     pw.getBuyerIdentity().getAccount(), pw.getBuyerIdentity().getOwnerRevision(), 2);
             }
             if (prior.getKind() == 6 && pw.getRmb().getCharacterPlayerId() == 0) {
@@ -338,10 +338,14 @@ public final class CommerceEngine {
                         pw.getRmb().getBuyerOwnerRevision(), 2);
             }
             var current = store.lock(c, prior.getCommerceId());
-            if (current == null)
+            // 原身份与点锁来自prior；新版本必须等下一轮用自身原件取锁，不能借旧观察推进。
+            if (current == null || current.getVersion() != prior.getVersion())
                 return null;
             var r = current.toBuilder();
             var w = workflow(current);
+            for (var l : w.getLegsList())
+                if (l.getOutcome() != 0 && l.getOpId() == 0)
+                    throw new CorruptContract("交易资产终局缺少原操作ID，拒绝重开扣款");
             long now = CommerceStore.sqlNow(c);
             for (var l : w.getLegsBuilderList()) {
                 if (l.getOpId() == 0 || l.getOutcome() != 0)

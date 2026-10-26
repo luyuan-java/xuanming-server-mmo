@@ -780,6 +780,18 @@ class JdbcFriendStoreMysqlTest {
     }
 
     private static void assertPointLookup(String sql, int keyLen, Object... args) throws SQLException {
+        // TiDB 的传统 EXPLAIN 是算子树，不提供 MySQL 的 key/key_len/type 列。
+        try (Connection c = dataSource.getConnection(); Statement versionStatement = c.createStatement();
+             ResultSet versionRows = versionStatement.executeQuery("SELECT VERSION()")) {
+            assertThat(versionRows.next()).isTrue();
+            String version = versionRows.getString(1);
+            assertThat(version).isNotBlank();
+            assertThat(versionRows.next()).isFalse();
+            if (version.toLowerCase(java.util.Locale.ROOT).contains("tidb")) {
+                assertTiDbPointLookup(c, sql, keyLen, args);
+                return;
+            }
+        }
         // 服务端默认 EXPLAIN 格式可变；断言 key / key_len 前显式要求传统表格格式。
         try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement("EXPLAIN FORMAT=TRADITIONAL " + sql)) {
             for (int i = 0; i < args.length; i++) {
@@ -797,6 +809,131 @@ class JdbcFriendStoreMysqlTest {
                 }
             }
         }
+    }
+
+
+    /** 原生产语句的 TiDB 计划：恰一完整 PRIMARY 点入口，拒绝扫描/前缀/多点与未知算子。 */
+    private static void assertTiDbPointLookup(Connection c, String sql, int keyLen, Object... args) throws SQLException {
+        String normalized = sql.replaceAll("\\s+", " ").strip();
+        var tableMatch = java.util.regex.Pattern.compile("(?i)^(?:SELECT .+? FROM|UPDATE|DELETE FROM) ([a-z_]+)\\b.*$").matcher(normalized);
+        assertThat(tableMatch.matches()).as("未登记的单表主键语句").isTrue();
+        String table = tableMatch.group(1);
+        assertThat(table).isIn("friend_capacity", "friend_block", "friend", "friend_request");
+        List<String> primary = new ArrayList<>();
+        int actualKeyLen = 0;
+        Map<String, Integer> widths = Map.of("tinyint", 1, "smallint", 2, "mediumint", 3, "int", 4, "bigint", 8);
+        try (PreparedStatement columns = c.prepareStatement("SELECT s.COLUMN_NAME,c.DATA_TYPE,c.IS_NULLABLE"
+                + " FROM INFORMATION_SCHEMA.STATISTICS s JOIN INFORMATION_SCHEMA.COLUMNS c"
+                + " ON c.TABLE_SCHEMA=s.TABLE_SCHEMA AND c.TABLE_NAME=s.TABLE_NAME AND c.COLUMN_NAME=s.COLUMN_NAME"
+                + " WHERE s.TABLE_SCHEMA=DATABASE() AND s.TABLE_NAME=? AND s.INDEX_NAME='PRIMARY' ORDER BY s.SEQ_IN_INDEX")) {
+            columns.setString(1, table);
+            try (ResultSet rs = columns.executeQuery()) {
+                while (rs.next()) {
+                    primary.add(rs.getString(1));
+                    Integer width = widths.get(rs.getString(2).toLowerCase(java.util.Locale.ROOT));
+                    assertThat(width).as("PRIMARY 列必须是已知整数类型").isNotNull();
+                    assertThat(rs.getString(3)).isEqualTo("NO");
+                    actualKeyLen += width;
+                }
+            }
+        }
+        assertThat(primary).isNotEmpty();
+        assertThat(actualKeyLen).as("原 keyLen 仍须覆盖全部 PRIMARY 列").isEqualTo(keyLen);
+        String pkType;
+        try (PreparedStatement metadata = c.prepareStatement("SELECT TIDB_PK_TYPE FROM INFORMATION_SCHEMA.TABLES"
+                + " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?")) {
+            metadata.setString(1, table);
+            try (ResultSet rs = metadata.executeQuery()) {
+                assertThat(rs.next()).isTrue();
+                pkType = rs.getString(1);
+                assertThat(pkType).isIn("CLUSTERED", "NONCLUSTERED");
+                assertThat(rs.next()).isFalse();
+            }
+        }
+        List<Map<String, String>> nodes = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement("EXPLAIN FORMAT=TRADITIONAL " + sql)) {
+            for (int i = 0; i < args.length; i++) ps.setObject(i + 1, args[i]);
+            try (ResultSet rs = ps.executeQuery()) {
+                var meta = rs.getMetaData();
+                while (rs.next()) {
+                    Map<String, String> row = new java.util.HashMap<>();
+                    for (int i = 1; i <= meta.getColumnCount(); i++)
+                        row.put(meta.getColumnLabel(i).toLowerCase(java.util.Locale.ROOT), rs.getString(i));
+                    nodes.add(row);
+                }
+            }
+        }
+        assertThat(nodes).as("TiDB 必须返回原语句的实际完整计划").isNotEmpty();
+        String primaryIndex = "index:PRIMARY(" + String.join(",", primary) + ")";
+        String clusteredIndex = "clustered " + primaryIndex;
+        String tableOnly = "table:" + table;
+        int keyAccesses = 0;
+        int rowIdLookups = 0;
+        boolean primaryIndexRange = false;
+        boolean indexLookup = false;
+        for (Map<String, String> node : nodes) {
+            String id = node.get("id");
+            assertThat(id).isNotNull();
+            // 树形缩进只用于显示；算子名称严格从 TiDB 的 id 后缀前读取。
+            String operator = id.replaceFirst("^[^A-Za-z]*", "").replaceFirst("_[0-9]+(?:\\(Build\\)|\\(Probe\\))?$", "");
+            String access = node.get("access object");
+            String info = node.get("operator info");
+            assertThat(access).as("%s 缺 access object", sql).isNotNull();
+            assertThat(info).as("%s 缺 operator info", sql).isNotNull();
+            access = access.replace(", ", ",");
+            switch (operator) {
+                case "Point_Get" -> {
+                    keyAccesses++;
+                    if (access.equals(tableOnly)) {
+                        assertThat(pkType).isEqualTo("CLUSTERED");
+                        assertThat(primary).hasSize(1);
+                        assertThat(info).contains("handle:");
+                    } else {
+                        assertThat(access).isIn(tableOnly + "," + primaryIndex, tableOnly + "," + clusteredIndex);
+                    }
+                }
+                case "TableRangeScan" -> {
+                    keyAccesses++;
+                    assertThat(access).isEqualTo(tableOnly);
+                    assertThat(pkType).isEqualTo("CLUSTERED");
+                    assertCompletePointRange(info, primary.size(), sql);
+                }
+                case "IndexRangeScan" -> {
+                    keyAccesses++;
+                    primaryIndexRange = true;
+                    assertThat(access).isIn(tableOnly + "," + primaryIndex, tableOnly + "," + clusteredIndex);
+                    assertCompletePointRange(info, primary.size(), sql);
+                }
+                case "TableRowIDScan" -> {
+                    rowIdLookups++;
+                    assertThat(access).isEqualTo(tableOnly);
+                }
+                case "IndexLookUp" -> {
+                    indexLookup = true;
+                    assertThat(access).isEmpty();
+                }
+                case "Projection", "Selection", "Update", "Delete", "TableReader", "SelectLock" ->
+                    assertThat(access).isEmpty();
+                default -> throw new AssertionError(sql + " 出现未证明为完整主键点操作的 TiDB 算子：" + operator);
+            }
+        }
+        assertThat(keyAccesses).as("%s 必须恰好一个完整主键点入口", sql).isEqualTo(1);
+        if (primaryIndexRange) {
+            assertThat(indexLookup).isTrue();
+            assertThat(rowIdLookups).isEqualTo(1);
+        } else {
+            assertThat(indexLookup).isFalse();
+            assertThat(rowIdLookups).isZero();
+        }
+    }
+
+    /** TiDB Range.String 的闭区间：上下界全列逐值相等；未知/无界/前缀/多区间一律红。 */
+    private static void assertCompletePointRange(String info, int keyColumns, String name) {
+        var matcher = java.util.regex.Pattern.compile("^range:\\[(-?\\d+(?: -?\\d+)*),(-?\\d+(?: -?\\d+)*)], (.+)$").matcher(info);
+        assertThat(matcher.matches()).as("%s 不是单个整数闭区间：%s", name, info).isTrue();
+        assertThat(matcher.group(1)).as("%s 不是等值点区间", name).isEqualTo(matcher.group(2));
+        assertThat(matcher.group(1).split(" ")).as("%s 区间没有用满主键列", name).hasSize(keyColumns);
+        assertThat(matcher.group(3)).doesNotContain("range:");
     }
 
     // ================================================================ 工具

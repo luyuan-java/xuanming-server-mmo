@@ -107,6 +107,11 @@ class GuildLockPlanMysqlTest {
         assertThat(keyLen).containsEntry("guild", "8").containsEntry("guild_player_state", "8")
                 .containsEntry("guild_member", "16").containsEntry("guild_application", "16");
 
+        if (LockPlans.isTiDb(db)) {
+            LockPlans.assertPrimaryKeyPointOperations(db, cases.stream().map(c -> new LockPlans.PlanCase(
+                    c.name(), c.sql(), c.args(), c.table(), c.types())).toList());
+            return;
+        }
         for (PlanCase c : cases) {
             String stmt = inline(c.sql(), c.args());
             Map<String, String> plan = explain(stmt);

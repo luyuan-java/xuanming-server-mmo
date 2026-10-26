@@ -384,6 +384,58 @@ class GuildActivityStoreTiDbTest {
         assertEquals(3,count("SELECT state FROM guild_trial_launch WHERE request_id=?",first.lobby()));
         assertEquals(2,count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=2"));
         assertEquals(2,count("SELECT COUNT(*) FROM guild_activity_reward_owed WHERE status=0"));
+        assertEquals(0,count("SELECT COUNT(*) FROM guild_activity_slot WHERE lobby_id=?",first.lobby()));
+        assertNotNull(readyLaunch(NOW+20_000));
+    }
+
+    @Test
+    void 正常终局关闭原大厅_新局不被迟到重复战果覆盖() throws Exception {
+        var first = readyLaunch(NOW);
+        store.completeLaunch(first, StartActivityBattleResponse.newBuilder().setBattleId(9111).build(), NOW + 3, budget());
+        var event = result(first, 9111, NOW + 1000);
+        store.settle(event, NOW + 2000, budget());
+        assertEquals(3, count("SELECT state FROM guild_trial_launch WHERE request_id=?", first.lobby()));
+        assertEquals(4, count("SELECT state FROM guild_trial_lobby WHERE lobby_id=?", first.lobby()));
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE request_id=? AND state=2", first.lobby()));
+        var next = readyLaunch(NOW + 20_000);
+        assertNotEquals(first.lobby(), next.lobby());
+        store.settle(event, NOW + 20_001, budget());
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_activity_slot WHERE lobby_id=?", next.lobby()));
+        assertEquals(1, count("SELECT state FROM guild_trial_launch WHERE request_id=?", next.lobby()));
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
+    }
+
+    @Test
+    void 签名取消终局在房间投影丢失时仍退休原slot() throws Exception {
+        var first = readyLaunch(NOW);
+        exec("DELETE FROM guild_trial_lobby WHERE lobby_id=?", first.lobby());
+        var proof = cancelProof(first, 0, 0, true);
+        store.completeCancellation(first, proof, NOW + 3, budget());
+        assertEquals(3, count("SELECT state FROM guild_trial_launch WHERE request_id=?", first.lobby()));
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE request_id=? AND state=2", first.lobby()));
+        assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_slot WHERE lobby_id=?", first.lobby()));
+        var next = readyLaunch(NOW + 20_000);
+        store.completeCancellation(first, proof, NOW + 20_001, budget());
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_activity_slot WHERE lobby_id=?", next.lobby()));
+        assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
+    }
+
+    @Test
+    void 终局大厅原件冲突使结算与隔离整笔回滚() throws Exception {
+        var launch = readyLaunch(NOW);
+        store.completeLaunch(launch, StartActivityBattleResponse.newBuilder().setBattleId(9112).build(), NOW + 3, budget());
+        exec("UPDATE guild_trial_lobby SET guild_id=? WHERE lobby_id=?", OTHER_GUILD, launch.lobby());
+        assertThrows(SQLException.class, () -> store.settle(result(launch, 9112, NOW + 1000), NOW + 2000, budget()));
+        assertEquals(2, count("SELECT state FROM guild_trial_launch WHERE request_id=?", launch.lobby()));
+        assertEquals(1, count("SELECT state FROM guild_trial_battle WHERE battle_id=9112"));
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE request_id=? AND state=1", launch.lobby()));
+        assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
+        exec("UPDATE guild_trial_lobby SET guild_id=?,battle_id=? WHERE lobby_id=?", GUILD, 9113L, launch.lobby());
+        assertThrows(SQLException.class, () -> store.poisonBattle(9112, "fixture", 1, 8, new byte[] {1}, NOW + 2001, budget()));
+        assertEquals(2, count("SELECT state FROM guild_trial_launch WHERE request_id=?", launch.lobby()));
+        assertEquals(1, count("SELECT state FROM guild_trial_battle WHERE battle_id=9112"));
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE request_id=? AND state=1", launch.lobby()));
+        assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_result_poison"));
     }
 
     private GuildTrialCancellation.Verified cancelProof(GuildActivityStore.Launch launch,long battle,int state,boolean cancelled) {
@@ -433,6 +485,7 @@ class GuildActivityStoreTiDbTest {
         assertEquals(2,count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=2"));
         assertEquals(0,count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
         assertEquals(4,count("SELECT state FROM guild_trial_battle WHERE battle_id=9104"));
+        assertEquals(4,count("SELECT state FROM guild_trial_lobby WHERE lobby_id=?",launch.lobby()));
         // 另一局的成功结算产生owed；冻结先提交时后台不得将它变成发给新主的op。
         var next = readyLaunch(NOW+20_000);
         store.completeLaunch(next,StartActivityBattleResponse.newBuilder().setBattleId(9105).build(),NOW+20_003,budget());

@@ -199,6 +199,11 @@ class GuildEconomyChannelIntegrationTest {
             String key = request.getStreamValue() + ":" + request.getStreamEpoch() + ":" + request.getSeq();
             AssetOpResponse seen = ledger.get(key);
             if (seen != null) {
+                try {
+                    writePersistedLedger(request, seen);
+                } catch (Exception failure) {
+                    throw new java.util.concurrent.CompletionException(failure);
+                }
                 return seen.toBuilder().setDurable(true).build();
             }
             AssetOpResponse answer;
@@ -550,24 +555,103 @@ class GuildEconomyChannelIntegrationTest {
                 .isEqualTo(GuildTip.NOT_IN_ANY_GUILD.proto());
     }
 
-    /** 往 player_state 写一份已落盘账本：这一行的 (流, 纪元, seq) 已应用。 */
+    /** 夹具只模拟已确认 SQL 快照，不用远端 durable 声明替代生产读者的核验。 */
     private void writePersistedLedger(GuildAssetOpRow row) throws Exception {
-        long seq = row.getSeq();
+        AssetOpRequest request = AssetOpRequest.newBuilder().setPlayerId(row.getPlayerId())
+                .setStreamValue(row.getStream()).setStreamEpoch(row.getStreamEpoch()).setSeq(row.getSeq())
+                .setCorrelationId(row.getOpId()).setTxType(row.getTxType())
+                .setBundle(com.game.api.proto.AssetBundle.parseFrom(row.getPayload())).build();
+        writePersistedLedger(request, AssetOpResponse.newBuilder().setOutcome(AssetOutcome.ASSET_OUTCOME_APPLIED).build());
+    }
+
+    /** 合并所有旧流和未知字段；同一 seq 的原身份、结局不得被替换。 */
+    private void writePersistedLedger(AssetOpRequest request, AssetOpResponse answer) throws Exception {
+        assertThat(request.getPlayerId()).isEqualTo(a);
+        long seq = request.getSeq();
         assertThat(seq).isBetween(1L, 64L);
-        AssetOpStreamLedgerState.Builder stream = AssetOpStreamLedgerState.newBuilder().setStream(row.getStream())
-                .setWatermark(0).setStreamEpoch(row.getStreamEpoch()).setMaxSeq(seq);
-        for (int i = 0; i < 16; i++) {
-            long bit = i == 0 ? 1L << (seq - 1) : 0;
-            stream.addSeenBits(bit).addAppliedBits(bit);
-        }
-        PlayerState state = PlayerState.newBuilder().setAssetLedger(AssetOpLedgerState.newBuilder().addStreams(stream)).build();
-        try (Connection conn = dataSource.getConnection(); PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO player_state (player_id, data, saved_epoch, updated_at) VALUES (?, ?, ?, ?)")) {
-            ps.setObject(1, new BigInteger(Long.toUnsignedString(a)));
-            ps.setBytes(2, state.toByteArray());
-            ps.setLong(3, OWNER_EPOCH);
-            ps.setLong(4, System.currentTimeMillis());
-            ps.executeUpdate();
+        assertThat(answer.getOutcome()).isIn(AssetOutcome.ASSET_OUTCOME_APPLIED, AssetOutcome.ASSET_OUTCOME_REJECTED);
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                PlayerState previous = PlayerState.getDefaultInstance();
+                boolean exists;
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT data, saved_epoch FROM player_state WHERE player_id = ? FOR UPDATE")) {
+                    ps.setObject(1, new BigInteger(Long.toUnsignedString(a)));
+                    try (var rs = ps.executeQuery()) {
+                        exists = rs.next();
+                        if (exists) {
+                            assertThat(rs.getLong(2)).isEqualTo(OWNER_EPOCH);
+                            previous = PlayerState.parseFrom(rs.getBytes(1));
+                        }
+                    }
+                }
+                var ledger = previous.getAssetLedger().toBuilder();
+                assertThat(com.game.player.store.asset.AssetLedgerRules.validate(ledger.build())).isNull();
+                int streamIndex = -1;
+                for (int i = 0; i < ledger.getStreamsCount(); i++) {
+                    if (ledger.getStreams(i).getStream() == request.getStreamValue()) {
+                        assertThat(streamIndex).isEqualTo(-1);
+                        streamIndex = i;
+                    }
+                }
+                AssetOpStreamLedgerState.Builder stream;
+                if (streamIndex < 0) {
+                    stream = AssetOpStreamLedgerState.newBuilder().setStream(request.getStreamValue())
+                            .setStreamEpoch(request.getStreamEpoch()).setWatermark(0);
+                    for (int i = 0; i < 16; i++) stream.addSeenBits(0).addAppliedBits(0);
+                } else {
+                    stream = ledger.getStreams(streamIndex).toBuilder();
+                    assertThat(stream.getStreamEpoch()).isEqualTo(request.getStreamEpoch());
+                    assertThat(stream.getWatermark()).isZero();
+                }
+                var digest = AssetOpSignatures.requestDigest(request);
+                long bit = 1L << (seq - 1);
+                if ((stream.getSeenBits(0) & bit) != 0) {
+                    var original = com.game.player.store.asset.PersistedAssetLedger.restore(ledger.build());
+                    assertThat(original.identityMatches(request.getStreamValue(), request.getStreamEpoch(), seq,
+                            request.getCorrelationId(), digest)).isTrue();
+                    var outcome = original.outcomeOf(request.getStreamValue(), request.getStreamEpoch(), seq);
+                    assertThat(outcome.conclusive()).isTrue();
+                    assertThat(outcome.state()).isEqualTo(answer.getOutcome() == AssetOutcome.ASSET_OUTCOME_APPLIED
+                            ? com.game.player.store.asset.AssetSeqState.APPLIED : com.game.player.store.asset.AssetSeqState.REJECTED);
+                    assertThat(outcome.rejectionReason()).isEqualTo(answer.getReason());
+                    conn.rollback();
+                    return;
+                }
+                stream.setSeenBits(0, stream.getSeenBits(0) | bit).setMaxSeq(Math.max(stream.getMaxSeq(), seq));
+                if (answer.getOutcome() == AssetOutcome.ASSET_OUTCOME_APPLIED) {
+                    stream.setAppliedBits(0, stream.getAppliedBits(0) | bit);
+                } else if (answer.getReason() != 0) {
+                    var rejections = new ArrayList<>(stream.getRejectionsList());
+                    rejections.add(com.game.player.store.state.AssetOpRejectionState.newBuilder()
+                            .setSeq(seq).setReasonTipId(answer.getReason()).build());
+                    rejections.sort((left, right) -> Long.compareUnsigned(left.getSeq(), right.getSeq()));
+                    stream.clearRejections().addAllRejections(rejections);
+                }
+                var receipts = new ArrayList<>(stream.getReceiptsList());
+                receipts.add(com.game.player.store.state.AssetOpReceiptState.newBuilder().setSeq(seq)
+                        .setCorrelationId(request.getCorrelationId()).setRequestDigest(digest).build());
+                receipts.sort((left, right) -> Long.compareUnsigned(left.getSeq(), right.getSeq()));
+                stream.clearReceipts().addAllReceipts(receipts);
+                if (streamIndex < 0) ledger.addStreams(stream); else ledger.setStreams(streamIndex, stream);
+                assertThat(com.game.player.store.asset.AssetLedgerRules.validate(ledger.build())).isNull();
+                PlayerState state = previous.toBuilder().setAssetLedger(ledger).build();
+                String sql = exists
+                        ? "UPDATE player_state SET data = ?, updated_at = ? WHERE player_id = ? AND saved_epoch = ?"
+                        : "INSERT INTO player_state (data, updated_at, player_id, saved_epoch) VALUES (?, ?, ?, ?)";
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    ps.setBytes(1, state.toByteArray());
+                    ps.setLong(2, System.currentTimeMillis());
+                    ps.setObject(3, new BigInteger(Long.toUnsignedString(a)));
+                    ps.setLong(4, OWNER_EPOCH);
+                    assertThat(ps.executeUpdate()).isEqualTo(1);
+                }
+                conn.commit();
+            } catch (Exception | AssertionError failure) {
+                try { conn.rollback(); } catch (java.sql.SQLException cleanup) { failure.addSuppressed(cleanup); }
+                throw failure;
+            }
         }
     }
 }

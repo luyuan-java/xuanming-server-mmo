@@ -931,38 +931,66 @@ public class PlayerStore {
     }
 
     /**
-     * 在带时限的事务里执行 {@code work}（带时限的建角 / 夺权共用）。调用方截止 = 进入本方法时 + {@code timeout}（{@link #nanoClock}）：
-     * <ul>
-     *   <li>事务时限取 {@code timeout}（{@link #transaction}）：每条语句的 JDBC 查询超时取事务剩余时间，行锁等待也受它约束；
-     *       语句超时（{@link QueryTimeoutException}）与事务超时（{@link TransactionTimedOutException}）时事务已回滚，回 {@code timedOut}；</li>
-     *   <li>事务时限向上取整到秒、又从拿到连接才开始算，比调用方截止宽：进事务时（取连接可能等了连接池上限）与回调返回前
-     *       （提交之前）各按纳秒复核一次调用方截止，到点就 {@code setRollbackOnly}、回 {@code timedOut}——截止之后不提交；</li>
-     *   <li>剩下的窗口：截止之前已开始的提交可能在截止之后才完成（提交只受连接 socketTimeout 约束），同 {@link #handOffOwnership}。</li>
-     * </ul>
-     * 其余异常原样抛出（事务回滚）。
-     *
-     * @throws IllegalArgumentException {@code timeout} 不为正
-     * @throws IllegalStateException    本实例没有事务管理器
+     * 只拥有自己的新事务；业务语句共享调用方单调截止时刻和Spring原剩余预算。
+     * TiDB每句按原剩余时间/原较小queryTimeout与SESSION上限收紧服务器工作预算；
+     * JDBC查询与网络计时只为取消响应保留有界余量，每句恢复原值。业务截止和提交前拒绝不延后。
+     * 响应/清理可能晚于业务截止；这不承诺任意网络故障时仍在timeout毫秒内返回。MySQL/H2原行为不变。
+     * 仅纯业务段的确证超时回timedOut；控制、恢复、提交和回滚失败原样传播。
+     * 提交开始后仍遵循原事务/连接的超时合同，不把未知提交结果伪装成TimedOut。
      */
     private <T> T withinDeadline(Duration timeout, Supplier<T> work, T timedOut) {
-        TransactionTemplate template = transaction(timeout);
-        long deadline = nanoClock.getAsLong() + timeout.toNanos();
-        try {
-            return template.execute(status -> {
-                if (deadline - nanoClock.getAsLong() <= 0) {
-                    status.setRollbackOnly();
-                    return timedOut;
-                }
-                T result = work.get();
-                if (deadline - nanoClock.getAsLong() <= 0) {
-                    status.setRollbackOnly();
-                    return timedOut;
-                }
-                return result;
-            });
-        } catch (QueryTimeoutException | TransactionTimedOutException e) {
-            return timedOut;
+        TransactionTemplate template = transaction(timeout); // 参数与事务管理器先按原合同校验。
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("带时限玩家写入必须拥有独立的新事务，不能加入外层事务");
         }
+        long deadline = nanoClock.getAsLong() + timeout.toNanos();
+        return template.execute(status -> {
+            if (!status.isNewTransaction()) throw new IllegalStateException("带时限玩家写入没有新事务");
+            if (deadline - nanoClock.getAsLong() <= 0) {
+                status.setRollbackOnly();
+                return timedOut;
+            }
+            if (routeSource == null
+                    || !(TransactionSynchronizationManager.getResource(routeSource)
+                        instanceof org.springframework.jdbc.datasource.ConnectionHolder holder)
+                    || !holder.hasTimeout()) {
+                throw new IllegalStateException("带时限玩家写入缺少原Spring有界连接");
+            }
+            var connection = org.springframework.jdbc.datasource.DataSourceUtils.getConnection(routeSource);
+            try {
+                if (holder.getConnection() != connection
+                        || !org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(connection, routeSource)) {
+                    throw new IllegalStateException("带时限玩家写入不是原Spring绑定连接");
+                }
+                java.util.function.LongSupplier remaining = () -> {
+                    long mono = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadline - nanoClock.getAsLong());
+                    if (mono < 1) return 0;
+                    try { return Math.min(mono, holder.getTimeToLiveInMillis()); }
+                    catch (TransactionTimedOutException expired) { return 0; }
+                };
+                try (var budget = com.game.discovery.sql.StrongTiDbConnectionPolicy
+                        .openStatementDeadline(connection, remaining, nanoClock)) {
+                    T result;
+                    try { result = work.get(); }
+                    catch (RuntimeException failure) {
+                        boolean pureTypedTimeout = budget.pureWorkTimeoutAllowed(failure)
+                                && (failure instanceof TransactionTimedOutException || failure instanceof QueryTimeoutException);
+                        if (!(budget.businessTimedOut(failure) || pureTypedTimeout)) throw failure;
+                        status.setRollbackOnly();
+                        return timedOut;
+                    }
+                    if (deadline - nanoClock.getAsLong() <= 0) {
+                        status.setRollbackOnly();
+                        return timedOut;
+                    }
+                    return result;
+                } // 恢复/隔离失败在业务超时catch之外；不能被折叠成TimedOut。
+            } catch (SQLException controlOrRestoration) {
+                throw new IllegalStateException("玩家语句预算初始化或恢复失败", controlOrRestoration);
+            } finally {
+                org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(connection, routeSource);
+            }
+        }); // commit/rollback及未知提交失败没有任何超时吞并catch。
     }
 
     /** 带时限的编程式事务（缺省传播 / 隔离级别）。 */

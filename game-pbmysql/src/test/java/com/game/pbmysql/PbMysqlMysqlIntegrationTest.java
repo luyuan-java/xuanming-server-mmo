@@ -199,6 +199,11 @@ class PbMysqlMysqlIntegrationTest {
         db.register(KitchenSink.getDefaultInstance(), withTableName(table), withPrimaryKey("owner_id"),
                 withAutoIncrementKey("slot"), withIndexes("slot,owner_id"));
         try (Connection c = connect()) {
+            if (SchemaSync.isTiDb(c)) {
+                // TiDB只验证明确拒绝和原件不变，不能把fresh CREATE冒成已有表ALTER支持。
+                assertTiDbAutoIncrementAlterRejected(c, db, table);
+                return;
+            }
             db.syncAll(c);
             exec("ALTER TABLE `" + table + "` DROP INDEX `idx_" + table + "_0`, DROP COLUMN `slot`");
             exec("INSERT INTO `" + table + "` (`owner_id`, `token`) VALUES (31, X'31')");
@@ -212,6 +217,95 @@ class PbMysqlMysqlIntegrationTest {
         }
     }
 
+    private static void assertTiDbAutoIncrementAlterRejected(Connection c, PbMysql db, String table)
+            throws SQLException {
+        String freshTable = table + "_fresh";
+        PbMysql fresh = new PbMysql();
+        fresh.register(KitchenSink.getDefaultInstance(), withTableName(freshTable), withPrimaryKey("owner_id"),
+                withAutoIncrementKey("slot"), withIndexes("slot,owner_id"));
+        fresh.syncAll(c);
+        fresh.syncAll(c);
+        assertThat(SchemaSync.readColumns(c, DATABASE, freshTable).get("slot").extra())
+                .contains("auto_increment");
+
+        // 用同一目标定义建立合法旧schema；缺普通列note使测试能抓住先ALTER普通列的半迁移。
+        TableSchema target = db.schema(KitchenSink.class);
+        String create = target.buildCreateTableSql();
+        String slot = "  `slot` " + target.columnType(KitchenSink.getDescriptor().findFieldByName("slot"))
+                + TableSchema.columnComment(2) + ",\n";
+        String note = "  `note` " + target.columnType(KitchenSink.getDescriptor().findFieldByName("note"))
+                + TableSchema.columnComment(4) + ",\n";
+        String slotIndex = "  INDEX `" + target.indexName(0) + "` ("
+                + target.indexColumnsSql("slot,owner_id") + "),\n";
+        assertThat(create).containsOnlyOnce(slot).containsOnlyOnce(note).containsOnlyOnce(slotIndex);
+        exec(create.replace(slot, "").replace(note, "").replace(slotIndex, ""));
+        exec("INSERT INTO `" + table + "` (`owner_id`, `token`) VALUES (31, X'31')");
+
+        // 若预检只做到单表中途，这个排序更早的新表会先CREATE；必须保持不存在。
+        String earlier = "aaa_pbm_auto_preflight_probe";
+        db.register(SyncItemV1.getDefaultInstance(), withTableName(earlier));
+        byte[] schemaBefore = createTableBytes(c, table);
+        byte[] rowsBefore = allRowBytes(c, table);
+        assertThat(tablePresent(c, earlier)).isFalse();
+        for (int attempt = 0; attempt < 2; attempt++) {
+            assertThatThrownBy(() -> db.syncAll(c))
+                    .isInstanceOf(java.sql.SQLFeatureNotSupportedException.class)
+                    .hasMessageContaining("TiDB").hasMessageContaining("AUTO_INCREMENT")
+                    .satisfies(failure -> assertThat(((SQLException) failure).getSQLState()).isEqualTo("0A000"));
+            assertThat(createTableBytes(c, table)).isEqualTo(schemaBefore);
+            assertThat(allRowBytes(c, table)).isEqualTo(rowsBefore);
+            assertThat(SchemaSync.readColumns(c, DATABASE, table)).doesNotContainKeys("slot", "note");
+            assertThat(tablePresent(c, earlier)).isFalse();
+        }
+    }
+
+    private static boolean tablePresent(Connection c, String table) throws SQLException {
+        try (var statement = c.prepareStatement(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?")) {
+            statement.setString(1, DATABASE);
+            statement.setString(2, table);
+            try (var rows = statement.executeQuery()) {
+                return rows.next() && rows.getLong(1) != 0;
+            }
+        }
+    }
+
+    private static byte[] createTableBytes(Connection c, String table) throws SQLException {
+        try (Statement statement = c.createStatement(); ResultSet rows = statement.executeQuery(
+                "SHOW CREATE TABLE `" + table + "`")) {
+            if (!rows.next()) throw new SQLException("测试schema原件缺失");
+            return rows.getBytes(2);
+        }
+    }
+
+    /** 固定PK顺序、列元数据和逐列NULL/长度/原字节；不把COUNT一致当作旧行不变。 */
+    private static byte[] allRowBytes(Connection c, String table) throws SQLException {
+        try (Statement statement = c.createStatement(); ResultSet rows = statement.executeQuery(
+                "SELECT * FROM `" + table + "` ORDER BY `owner_id`")) {
+            var output = new java.io.ByteArrayOutputStream();
+            try (var data = new java.io.DataOutputStream(output)) {
+                var metadata = rows.getMetaData();
+                int count = metadata.getColumnCount();
+                data.writeInt(count);
+                for (int column = 1; column <= count; column++) {
+                    data.writeUTF(metadata.getColumnName(column));
+                    data.writeInt(metadata.getColumnType(column));
+                }
+                while (rows.next()) {
+                    data.writeBoolean(true);
+                    for (int column = 1; column <= count; column++) {
+                        byte[] value = rows.getBytes(column);
+                        data.writeInt(value == null ? -1 : value.length);
+                        if (value != null) data.write(value);
+                    }
+                }
+                data.writeBoolean(false);
+            }
+            return output.toByteArray();
+        } catch (java.io.IOException memoryOnly) {
+            throw new AssertionError("内存原件序列化失败", memoryOnly);
+        }
+    }
     @Test
     void 线上列更窄_可空_缺注释时拒绝且不执行任何DDL() throws SQLException {
         exec("CREATE TABLE `pbm_drift` (`id` int unsigned NOT NULL DEFAULT 0 COMMENT 'pb:1', `name` MEDIUMTEXT,"
