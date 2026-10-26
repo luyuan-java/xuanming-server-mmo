@@ -16,7 +16,7 @@
 - `team --team-regroup-probe`：额外核对入队即归队、显式远距 / 高度不可见归队，以及近距、队长、无队者不移动。需要 `--expect-dev allow` 和指向当前单 scene 的 `--scene-admin-url`；口令仍只取 `GAME_ADMIN_TOKEN`。
 - `guild` 追加活动全流程，缺少前提会失败：`game.guild.activity.enabled=true`、资产 worker、全球 match 与 Kafka / Redis；三类活动开放且最低帮会等级 1、`join_min_hours=0`、物品奖励非空。灯会 / 聚餐剩余次数须为 1–8，聚餐人数阈值不超过 5，试炼人数 2–5，配置副本须可被新号击败。邀请拒绝不得有 177 / 143；成功局核对直连终局、背包、个人贡献、帮会资金与占用解除。
 
-239 是活动视图、240 是灯会、241 是聚餐。242 / 243 的共享客户端协议没有请求 UUID 字段；不伪造字段，不在结局未知时以新请求重试写操作，恢复通过 239 查询确认。
+241 是活动视图、239 是灯会、240 是聚餐。242 / 243 的共享客户端协议没有请求 UUID 字段；不伪造字段，不在结局未知时以新请求重试写操作，恢复通过 241 查询确认。
 
 ```bash
 ./mvnw -B -f game-robot/pom.xml clean install        # 产物 game-robot/target/game-robot-0.1.0-SNAPSHOT.jar（可 java -jar）
