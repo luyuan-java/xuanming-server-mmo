@@ -1,10 +1,9 @@
-# AOI / 视野与属性同步：客户端可见契约（基线 mmorpg@9c9c012b7）
+# AOI / 视野与属性同步：客户端可见契约（旧基线9c9c012b7；2.10复核至275f9c5c0）
 
-> 来源：mmorpg 已提交内容 `9c9c012b7`（与 `contract/SOURCE.properties` 的 `mmorpg.commit` 一致），读法 `git -C <mmorpg> show 9c9c012b7:<路径>`。下文路径都相对 mmorpg 根目录。
+> 历史来源为mmorpg `9c9c012b7`，下文旧行号按该提交读取；2.10移动/瞬移已按C++ `275f9c5c0`、客户端 `9ccb99c51` 复核，Java契约记录现为 `f83da2e18`。
 > AOI、视野、移动、属性同步相关源码在 `766cb037c..9c9c012b7` 之间**没有改动**（`git diff --stat` 为空），所以本文与 `mmorpg-client-contract-scene.md` 用的是同一份实现。
-> 范围：进视野 / 出视野的规则与下行消息（21 / 47 / 51 / 64），移动输入如何变成下行推送（66 / 137），属性同步（66 与 65/55/82/68/75），以及这些消息之间的先后顺序。
-> 没读客户端仓库（`../mmorpg-client`，mmorpg AGENTS.md §9 要求授权才能读）。UE 客户端具体怎么消费 66，要去客户端仓库核对；robot 的处理见 §3.6。
-> 本文是 Java 版 game-scene 实现 AOI、移动和属性同步的规格。§8 是 Java 现状，§9 是设计建议，§10 是必做清单。
+> 范围：进出视野21 / 47 / 51 / 64、移动133 / 135、同场景瞬移130、纠偏137及保留的66属性同步。Unity当前仍无66处理器，未知entity的133静默丢弃。
+> §8为Java当前实现，§9为实现约束，§10为核对清单；2.10完整规则与验证分级见 `../porting/movement-broadcast-spec.md`。旧基线缺口的当前变化在对应位置注明。
 
 ---
 
@@ -23,7 +22,7 @@
 | 134 / 132 / 131 | SceneMovementClientPlayer / MoveStart / MoveSync / MoveStop | `MoveStartC2S` / `MoveSyncC2S` / `MoveStopC2S` | C→S | 应答是 `Empty`，不回包（§4.1） |
 | 137 | SceneMovementClientPlayer / NotifyMoveAck | `MoveAckS2C` | S→C | 只在纠偏时发（§4.3） |
 | 136 | SceneMovementClientPlayer / TeleportRequest | `TeleportRequestC2S` → `TeleportRequestC2SResponse` | C→S | handler 是空的（§4.4） |
-| 133 / 135 / 130 | NotifyActorMove / NotifyActorMoveList / NotifyTeleport | `ActorMoveS2C` / `ActorMoveListS2C` / `TeleportS2C` | S→C | **从不发**（没有任何调用点） |
+| 133 / 135 / 130 | NotifyActorMove / NotifyActorMoveList / NotifyTeleport | `ActorMoveS2C` / `ActorMoveListS2C` / `TeleportS2C` | S→C | C++发133与130、仍不发135；Java 2.10发133，47后补新增移动目标135，同场景瞬移只给本人130 |
 | 70 / 33 | SceneSkillClientPlayer / NotifySkillUsed / NotifySkillInterrupted | `SkillUsedS2C` / `SkillInterruptedS2C` | S→C | 收件人规则见 §6.4 |
 | 79 | SceneSceneClientPlayer / NotifyEnterScene | `EnterSceneS2C` | S→C | 见 scene 契约文档 |
 
@@ -76,7 +75,7 @@
 ### 2.3 兴趣列表（`AoiListComp`）
 
 - 每个观察者一张表，结构是 `entries: map<目标实体, {priority}>`（`spatial/comp/scene_node_scene_comp.h:18-33`）。
-- 兴趣是**单向**的：A 看得见 B 不代表 B 看得见 A（`docs/design/aoi_priority_design.md` 的 Directionality 一节）。设计原则是「**客户端显示的就是兴趣列表**」。但基线在反向与淘汰时没有通知客户端，所以原则没守住，见 §7。
+- 兴趣是**单向**的：A看得见B不代表B看得见A。当前C++反向新增/移除已补47 / 64，淘汰仍不通知；Java精确维护watching / watchers反向索引，不挤人。
 - 容量取 `min(客户端期望, 场景压力上限)`（`spatial/system/interest.cpp:39-63`）。
   - 基线生产代码里没人挂 `AoiClientCapacityComp`、`ScenePressureComp`、`ScenePriorityPolicyComp`，所以**实际容量是 100**（`kAoiListCapacityDefault`），策略是开放世界。
   - 常量见 `spatial/constants/aoi_priority.h:97-99`：默认 100，下限 20，上限 200。
@@ -96,10 +95,10 @@
    - 格子变了：`离开格 = 旧 7 格 − 新 7 格`，`进入格 = 新 7 格 − 旧 7 格`，再把 E 从旧格挪到新格。
 2. **进入格里的每个其他实体 O**（`aoi.cpp:104-123`）
    - 正向：`CanSee(E,O)` 为真且 `AddAoiEntity(E,O)` 成功时，O 进入发给 E 的「进视野集合」。
-   - **反向**：`CanSee(O,E)` 为真时，`AddAoiEntity(O,E)`。**只改 O 的表，不给 O 发任何消息。**
+   - **反向**：`CanSee(O,E)`为真时尝试加入；当前C++在实际新增关系时给O发47（旧基线缺口1已修）。
 3. **离开格里的每个其他实体 O**（`aoi.cpp:128-153`）
    - 正向：O 在 E 的表里且不是 `kPinned` 时，把它移除，并放进发给 E 的「出视野集合」。这里**不判距离**。
-   - **反向**：E 在 O 的表里且不是 pinned 时，把 E 从 O 的表里移除。**同样不给 O 发消息。**
+   - **反向**：E在O的表里且不是pinned时移除，并给O发64（旧基线缺口2已修）。
 4. **下发**（`NotifyEntityVisibilityChanges`，`aoi.cpp:158-180`）：先发 **47**，再发 **64**，都只发给 E。
    - E 是 NPC 时没有会话，`SendMessageToClientViaGate` 记一条警告后放弃。
    - 进、出两个集合天然不相交，因为同一个实体只在一个格里。
@@ -144,7 +143,7 @@
 | 字段 | 号 | 类型 | 值 |
 |---|---|---|---|
 | `entity` | 1 | uint64 | 进视野实体在场景内的实体号（C++ 为 `(node_id << 32) + seq`：同时在线的节点之间唯一、本进程内不复用，进程重启后可能重发；Java 用非 0 雪花号，跨重启唯一）。**不是 player_id** |
-| `transform` | 2 | Transform | **只拷 `location`**，`rotation` 和 `scale` 不填。没有 Transform 组件时整个字段不写 |
+| `transform` | 2 | Transform | C++只拷location；Java 2.10另带非null的rotation（静止目标也带），scale不填；Java的location恒在 |
 | `actor_type` | 3 | enum | 玩家为 `ACTOR_TYPE_PLAYER=1`，NPC 为 `ACTOR_TYPE_NPC=2` |
 | `guid` | 4 | uint64 | `Guid` 组件，也就是玩家的 **player_id**。NPC 没有，为 0 |
 | `config_id` | 5 | uint64 | **从不填**（恒为 0，NPC 也一样） |
@@ -152,8 +151,8 @@
 | `class_id` | 7 | uint32 | `PlayerUint32Comp.class`，仅玩家 |
 | `gender` | 8 | uint32 | `PlayerProfileComp.gender`，仅玩家 |
 
-- `observer` 参数在函数里没有用到，同一个实体发给谁内容都一样。
-- **不带速度和朝向**：正在移动的实体刚进视野时，在客户端看来是静止的，要等它的下一条 66 才更新（§5）。
+- 当前C++ `FillActorCreateMessageInfo(entrant, netId, ...)`已去掉旧observer参数；同一实体发给谁内容相同。
+- 创建消息不带速度；C++也不带朝向，要等下一条133。Java创建即带朝向，47之后用135补新增移动目标，静止目标不需要补发；66原样保留。
 - 基线**只在一个地方单独发 21**：`PlayerSceneSystem::HandleEnterScene` 给进场者发它自己（`player_scene.cpp:114-116`）。AOI 路径从不单独发 21。
 
 ### 3.2 47 `ActorListCreateS2C`（`player_scene.proto:66-69`）
@@ -175,7 +174,7 @@
 
 ### 3.5 实体号的两套口径（易错）
 
-- 21 / 47 / 51 / 64 / 70 / 33 里的实体号，以及 `ReleaseSkillRequest.target_id`，都是**场景内实体号**。
+- 21 / 47 / 51 / 64 / 70 / 33 / 133 / 135 / 130里的实体号，以及`ReleaseSkillRequest.target_id`，都是**不透明场景网络号**，不是player_id或C++本地句柄。
 - 66 的 `entity_id` 是 **guid**，也就是 player_id（§5.1）。
 - 基线场景实体号在一次在线期间（包括同节点换场景）保持不变，重登时可能变。robot 把实体号 0 当作「没有目标」，所以 **Java 的实体号必须非 0**（现在用雪花号，满足）。
 
@@ -187,12 +186,14 @@
 - 收到 79 且 `scene_id` 变化时清空已知实体（`robot/logic/gameobject/player.go:148-158`）。
 - robot **不处理 66**，只打一条 Unhandled 日志。**robot 不发移动**（只有 `travel_smoke_scenario.go` 的 `probeMove` 发 134 / 131，并尽力等 137）。
 - 137 / 133 / 135 / 130 的 handler 都是空函数。
+- 以上是Go robot；Java `game-robot`的movement已加入133 / 135 / 130解析与纯函数判定，行走→重登→瞬移→跳跃。端到端未运行，不以Go空handler作为互通证据。
 
 ---
 
 ## 4. 移动输入与移动推送
 
-基线没有「移动广播」专用消息：133 `ActorMoveS2C`、135、130 都**没有任何发送点**。**别人的移动完全经由 66 下发。**
+当前C++由133驱动旁人的移动、130通知同场景瞬移；135尚不发送。Java2.10接受输入后挂待发、帧开头外推前合并133；
+服务器挂机 / 战斗 / 冻结 / 已有导航撞墙由动变停当场发133；21 / 47带朝向、47后补新增移动目标135。66完全保留，Unity仍不处理66。
 
 ### 4.1 上行 134 / 132 / 131（`proto/scene/player_movement.proto`，handler 在 `cpp/nodes/scene/handler/rpc/player/player_movement_handler.cpp`）
 
@@ -208,7 +209,7 @@
 - 玩家在回合制战斗中（`InBattleComp`）或归属交接冻结中（`PlayerFrozenComp`）时丢弃。MoveStop 例外：仍把速度清零。
 - **位置**（`ApplyReportedLocation`，`:82-154`）
   - 有导航网格时：从服务器当前位置向上报位置做 raycast，撞墙就截在阻挡点；起点不在网格上时吸附上报点，吸附也失败就落到出生点。
-  - **没有导航网格时原样接受（fail-open）**。Java 没有导航网格，属于这种情况。
+  - C++没有导航网格时原样接受（fail-open）；Java无导航地图仍检查MoveGuard位移额度，当前三图还会经过已有保守位图导航。
   - 然后写 `Transform.location`，**用请求里的 `rotation` 整体替换 `Transform.rotation`**（请求没带时替换成空的 Rotation），并置 Transform 脏位。
 - **速度**（`ApplyReportedVelocity`，`:56-70`）
   - MoveStart / MoveSync：用上报的速度，模长超过 10 m/s 时等比缩放到 10，方向不变，并**无条件**置 Velocity 脏位。
@@ -238,7 +239,7 @@
 | `server_velocity` | 当前 Velocity 组件；没有该组件时不写 |
 | `server_time_ms` | UTC Unix 毫秒 |
 
-- **没有导航网格时永远不会发 137**，因为原样接受，距离为 0。
+- C++没有导航网格时原样接受，因而不发137；Java即使无导航，MoveGuard截断超过0.5m也会发137。
 
 ### 4.4 136 TeleportRequest
 
@@ -279,10 +280,12 @@ handler 是空的。生成的 `CallMethod` 会把空 TLS tip 写进 `error_messa
 
 ### 5.2 各消息的时序关系
 
-在同一 tick 内，AOI 阶段在属性同步阶段之前，所以：
+Java2.10的帧顺序为133兑现→外推→AOI刷新及47 / 64 / 135→偶数帧66。新观察关系只在创建消息之后收到移动，所以：
 
-- 本 tick 新进视野的实体，**先**在 47 里给出，**然后**才可能收到它的 66。
-- 本 tick 出视野的实体，64 发出后就不会再收到它的 66，因为同步阶段用的是更新后的兴趣列表。
+- 本帧新进视野的实体先在47给出，移动目标随后在135给出；其后的133 / 66不会先于创建。
+- 帧开头133可以先于本帧AOI发出的64；64发出之后不会再收到该旧关系的133 / 135 / 66。
+- 服务器由动变停当场133，不等下一帧；新观察者135只含当时在动的目标，停步后不重复补零速。
+- 同场景瞬移在帧外同步重建：本人130→64旧差集→47新差集→135新增移动目标；旁人64→21，重叠观察者先销毁再创建，本人共同目标不重建。
 
 ### 5.3 65 / 55 / 82 / 68 / 75 `AttributeDelta{2,5,10,30,60}FramesS2C`
 
@@ -305,10 +308,11 @@ handler 是空的。生成的 `CallMethod` 会把空 TLS tip 写进 `error_messa
 
 | 事件 | 当场（事件循环里）发出 | 下一个 tick 发出 |
 |---|---|---|
-| 进场（首登 / 重连 / 换场景） | 给进场者发 79，然后发 21（自己）。换场景时另向旧场景 7 格里的玩家广播 51 | AOI 阶段给进场者发 47（视野内的其他实体）。旁人**什么都收不到**（缺口 1）。同 tick 若是偶数帧，旁人会收到进场者的 66（只有 transform，没有 entity_id） |
-| 走动但没换格 | 可能给本人发 137 | 偶数帧给「行走者兴趣列表」里的实体发 66（transform，以及上报带来的 velocity） |
-| 走动并换格 | 同上 | AOI 阶段给行走者发 47，再发 64。新靠近的人和新远离的人**都收不到任何消息**（缺口 1、2）。然后偶数帧发 66 |
-| 离场（退出 / 断线 / 顶号） | 给离场者 7 格里的全部玩家广播 51，离场者什么也收不到 | —— |
+| Java进场（首登 / 重连 / 换场景） | 本人79→21→47→135（最后两条按非空发送，135仅含在动目标）；旁人21。换场景先向旧watchers发51 | 偶数帧66仍按既有脏位发送 |
+| Java接受移动输入 | 当场裁决，必要时本人137，只挂133待发 | 帧开头按当前watchers兑现133；外推后刷新视野并发47 / 64 / 135；偶数帧66 |
+| Java服务器停步（挂机 / 战斗 / 冻结 / 撞墙） | 由动变停当场133，清待发 | 66保持既有同步节奏 |
+| Java同场景瞬移 | 本人130→64差集→47差集→135；旧watchers64、新seers21 | 不额外发133；66照旧 |
+| Java离场（退出 / 断线 / 顶号） | 只向旧watchers发51，离场者不收；停服不下行 | —— |
 | 放技能 / 被打断 | 70 / 33，见 §6.4 | —— |
 
 ### 6.4 70 / 33 的收件人
@@ -320,7 +324,9 @@ handler 是空的。生成的 `CallMethod` 会把空 TLS tip 写进 `error_messa
 
 ---
 
-## 7. 基线缺口与怪癖（Java 可以修，但必须确认不破坏客户端）
+## 7. 历史基线缺口与当前差异
+
+第1、2、5条是`9c9c012b7`的历史缺口：当前C++已补反向47 / 64通知和每条66的player_id。其余差异仍按本节与批次2.10规格核对，不能把历史缺口当作当前实现。
 
 1. **反向进视野静默**（`aoi.cpp:118-121`）：E 进场或走近时，只有 E 收到 47。场内原有的人 O 只是在服务端的表里加上 E，**客户端永远收不到 E 的创建消息**。直到 O 自己换格——而那时 E 已经在 O 的表里了，也不会再出现在 47 里。结果是**老观察者看不见新来者和走近者**。
 2. **反向出视野静默**（`aoi.cpp:144-151`）：E 走远离开 O 的邻域时，O 的表里删掉了 E，但 O 的客户端收不到 64 或 51。E 成了 O 屏幕上的**残影**，直到 E 离开场景（且 O 恰好在 E 的 7 格里）或 O 收到新的 79。
@@ -330,81 +336,54 @@ handler 是空的。生成的 `CallMethod` 会把空 TLS tip 写进 `error_messa
 6. **66 的 `entity_id` 是 guid**，其余视野消息都用场景实体号。两套口径并存，客户端要维护 guid → 实体的映射（21 里同时带着 entity 和 guid）。
 7. **51 不看可见性**：发给离场者 7 格里的所有玩家，包括从没见过离场者的人。
 8. **70 / 33 不发给施法者本人**，与 `view.h` 的注释相反。Java 现在会发给本人（§8）。
-9. **创建消息只带位置**：没有朝向和速度。正在移动的实体进视野时显示为静止，要等到它的速度下次变化才会收到 velocity。
+9. **C++创建消息只带位置**：当前仍无新观察者135补发，要等下一条133。Java2.10的21 / 47带朝向，新增的移动目标在47后补135，原有66补发仍保留。
 10. **隐身生效时不会把目标从现有的兴趣列表里移除**，只影响之后的进视野判定。
 11. **移动输入不校验 NaN / Inf**：NaN 会进入 Transform，再进入 `hex_round`，而 C++ 把 NaN 转 int 是未定义行为。
-12. 136 回「受理」却什么也不做。133 / 135 / 130 在 proto 里有定义，但从不发送。
+12. C++的136仍回「受理」却什么也不做，Java回1006；服务器主动133 / 130已发送，Java另补135，与136应答无关。
 
 ---
 
-## 8. Java 现状（`game-scene/src/main/java/com/game/scene/world/*`）
+## 8. Java当前实现（批次2.10）
 
-| 方面 | 现状 | 与基线的关系 |
+| 方面 | 实现 | 与C++的关系 |
 |---|---|---|
-| 视野计算 | `SceneWorld.viewersOf`：同一场景内逐人比较三维距离 ≤ `VIEW_RADIUS = 10`，只在进场、离场、换场景时算。没有格子、没有 tick、没有兴趣列表状态 | 首批没有移动，位置不会变，所以结果等价于「双向、对称」的视野 |
-| 进场 | 发 79 → 21（自己）→ 47（视野内他人，非空才发）→ 给视野内他人补发 21（新进场者），全部**当场同步**发出 | 修了缺口 1 的进场部分。47 比基线早一个 tick |
-| 离场 / 换场景 | 向离开前视野内的人广播 51，离场者什么也收不到 | 收件人是「视野内」，基线是 7 格内全部玩家。Java 版更准（缺口 7） |
-| 64 | 不发，`SceneMessageIds` 里也没有 | 缺 |
-| 移动 131 / 132 / 134 | 应答是 `Empty`，`ClientRequestHandler` 只记一条 debug 日志后忽略，坐标不变 | 缺 |
-| 136 | 回 `error_message{1006}` | 基线回 `{0}`（受理但不处理）。两者都不会有后续 |
-| 137 / 66 / tick | 都没有 | 缺 |
-| 70 | `broadcastToSelfAndViewers`，**包括施法者本人**。注释称「基线收件人包括施法者自己」，与实现不符 | **偏离**（缺口 8） |
-| 实体号 | `ScenePlayer.entity`：雪花号，非 0，一次进场内稳定，换场景也不变 | 符合 |
-| `ActorCreateS2C` | `toActorCreate()` 只填 location、`actor_type=1`、guid、appearance、class、gender，`config_id=0` | 符合 §3.1 |
+| 视野索引 | 每Scene一个ViewIndex，20m方格3×3邻域；watching / watchers互为反向索引、容量100、表满不挤人 | C++六边形7格、同队高优先级可静默挤出；Java队友容量策略留4.3b重开D8 |
+| 重判 | 静止目标位置变化下一帧重判；移动目标累计1m重判；进入≤10m、离开>20m，均三维距离 | C++仍只在跨格时重判；格子形状属内部实现 |
+| 进场 | 本人79→21→47→135（只含新看见且在动目标，空列表不发）；旁人21 | Java同步建关系，C++47等下一模拟步 |
+| 离场 / 换场景 | 向旧watchers发51，清双表、格子和待刷新状态；停服不下行 | C++51发给7格全部玩家 |
+| 帧 | 133兑现→外推→视野刷新47 / 64 / 135→偶数帧66 | 输入只挂待发；服务器停步当场133，普通外推不发133 |
+| 移动与纠偏 | MoveGuard位移额度，现有三图导航，速度上限10m/s，纠偏>0.5m回137 | 位置与速度上行裁决保持原规则；落位等待在基础合法性校验之后、额度裁决之前 |
+| 同场景瞬移 | 本人130与视野差集，旁人64→21，同步重建；重置锚点、清速、清待发、3s/3m落位等待 | C++本人全量销毁、下个模拟步重建；Java不追加导航夹持 |
+| 136 | 回error_message{1006}，不因该请求发130 | C++回0但无动作；主动130与136无关 |
+| 创建消息 | toActorCreate带location与非null的rotation，actor_type=1、guid、appearance、class、gender，config_id=0 | C++仍只填location；Java有意差异X3，客户端两条创建路径都读取rotation |
+| 实体号 | ScenePlayer.entityId是非0雪花号，重登重新分配，同节点换场景不变 | 133 / 135 / 130与21 / 47 / 64 / 51同一网络号；66仍为player_id |
+| 70 / 33 | 发给本人及watchers | 已登记为有意差异，不随2.10改变 |
+
+## 9. Java实现约束
+
+- 场景状态只在逻辑线程访问；服务器主动瞬移不能在step遍历中调用，有运行期重入守卫。
+- broadcastMove是唯一133发送函数，不按冻结 / 战斗过滤发送者或收件人，无观察者也清标记；applyMove是待发标记唯一写入点。
+- haltMotion统一处理仍留在场景的停步，原本移动才当场发133；位置外推只置66脏位，不挂133。
+- ViewIndex.reenter先保存旧双向关系，再leave / enter；Scene.teleport先校验有限落点与玩家实例归属，再改变位置和索引。
+- 同场景瞬移本人只发旧新视野差集；共同可见者保留，64 / 47不含本人，不重发本人21。旁人必须先64再21，因为客户端对已有entity的创建去重。
+- markFullStateForNewWatcher、偶数帧66、无人观察时保留脏位、entity_id=player_id均保持；新增135不能替代或删改66断言。
+- 新增指标只使用SceneMetrics内有界枚举，不能把player_id / entity_id / 坐标作为标签。
+- 验收分别记单测/基准、robot端到端、双Unity客户端；源码完成不代表联机验收，2.10两行PARITY保持Java进行中。
 
 ---
-
-## 9. Java 实现建议（按 Java 惯用方式组织，不照抄 ECS）
-
-- **`HexGrid`**（纯函数，无状态）：`cellOf(x, y) → HexCell(q, r)`，`neighborhood(cell) → 7 格`。实现 §2.1 的运算和 C 的舍入语义，用 §2.1 的金标准做单测。
-- **`AoiIndex`**（每个 `Scene` 一个，只在场景逻辑线程上用）：
-  - `Map<HexCell, Set<ScenePlayer>>`；
-  - 每个玩家两张表：`watching`（我看得见谁，也就是兴趣列表，容量 100）和 `watchedBy`（谁看得见我，反向索引）。
-  - 用 `LinkedHashSet` 或 `LinkedHashMap`，让 47 / 64 的顺序确定、单测可复现。
-- **`SceneTicker`**：在场景逻辑线程（`DefaultEventLoop`）上 `scheduleAtFixedRate` 每 50 ms 跑一次。
-  - 用固定步长累加器，每次最多 5 步，帧号单调递增。
-  - 每步顺序：AOI → 移动积分 → 属性同步（偶数帧）。与 §2.7 一致。
-- **进出视野的规则**（建议口径，需要登记 PARITY，并请 mmorpg 同步修改）：
-  - **候选集**：与基线相同的 7 格。
-  - **进视野**：双方同场景、在候选集内、距离 ≤ 10 m（三维，含等号）、表未满。**判定时机**：任一方位置变化的那个 tick 都重新检查候选集里还没进表的实体（修缺口 3），不再只在换格时检查。
-  - **出视野**：对方离开 7 格候选集时移除（保留基线的隐式滞回：进 ≤ 10 m，出 ≥ 20 m），或者对方离开场景。
-  - **对称通知**（修缺口 1、2、4）：
-    - 任何「W 的表加入 T」都给 W 发 T 的创建消息。同一 tick 同一 W 的多个加入合成一条 47；进场路径沿用现有的「47 给进场者，21 给旁人」。
-    - 任何「W 的表移除 T」都给 W 发销毁消息。tick 内合成 64；离场时发 51。
-    - 效果：**任何客户端收到的 66 / 70 / 33，所涉实体都一定先收到过它的创建消息**；收到销毁消息后，不会再收到该实体的任何推送。
-  - **51 的收件人**：`watchedBy(离场者)`。修了缺口 7，客户端本来也必须容忍多余的销毁消息，改了没有兼容风险。
-- **移动**：
-  - 处理 134 / 132 / 131：先校验 finite，非有限值直接丢弃（fail-closed，应答本来就是 Empty）；速度按模长夹到 10 m/s；位置原样接受（没有导航网格时与基线的 fail-open 一致）；rotation 整体替换；置脏位。
-  - 每个 tick 积分。
-  - 137 按 §4.3 实现。没有导航网格时它永远不会触发，但代码路径要留好。
-  - 可选的反作弊（例如单位时间最大位移、越界拉回并发 137）会偏离基线，要先定口径。
-- **属性同步**：
-  - 每个玩家带一个脏位集合，首批只需要 `TRANSFORM` 和 `VELOCITY`。
-  - 偶数帧构造 66，**每条都带 `entity_id = player_id`**（修缺口 5，保持缺口 6 的 guid 口径，**不要**填场景实体号）。
-  - 收件人是 `watchedBy(发送者)`，不含发送者本人。
-  - 表为空时保留脏位。子消息存在性按 §5.1 处理。
-  - 可选：给新观察者发完创建消息后，紧跟一条该实体的全量 66（transform + velocity），修缺口 9。
-- **70 / 33**：~~收件人改为 `watchedBy(施法者)`、不含施法者本人~~——已作废：2026-09-30 核对客户端后 Java 保留发给本人（PARITY「70 SkillUsed 的收件人」行），33 自 2026-10-03 用同一规则。
-  - UE 客户端对自己放的技能很可能在本地播放；再发 70 给本人，有重复播放的风险。改之前要到客户端仓库核对。
-  - robot 只统计 70 的数量，单机器人跑时这个数会变成 0，但不影响冒烟判定。
-- `SceneMessageIds` 需要补上：`NotifyActorListDestroy`(64)、`ScenePlayerSync/SyncBaseAttribute`(66)、`SceneMovementClientPlayer/{MoveStart, MoveSync, MoveStop, NotifyMoveAck, TeleportRequest}`、`NotifySkillInterrupted`(33)。一律按名字解析。
-- **存储**：离场写回已经带坐标。有了移动之后，进程被 kill 时丢失的坐标增量会变多，周期存盘仍在 architecture.md §10 的「首批不做」之列，这里不改。
-
----
-
 ## 10. Java 必须做到（清单）
 
 **线上兼容（必须）**
 
-- [ ] 21 / 47 的每一项严格按 §3.1 填写：`entity` 非 0 且稳定；`transform` 只有 location；`actor_type=1`；`guid=player_id`；`config_id=0`；appearance / class / gender 取角色数据。
+- [ ] 21 / 47每项严格按§3.1：entity非0且稳定，transform.location恒在、rotation非null才带；actor_type=1、guid=player_id、config_id=0，appearance / class / gender取角色数据。
 - [ ] 47 是 `repeated ActorCreateS2C actor_list=1`；64 是 `repeated uint64 entity=1`；51 是 `uint64 entity=1`。实体号用场景实体号。
 - [ ] 进场顺序：79 → 21（自己）→ 47（他人）。
-- [ ] 不在客户端收到某实体的创建消息之前推送它的 66 / 70 / 33。同一 tick 内先处理 AOI 再做同步，保证 47 在 66 之前、64 之后不再有该实体的 66。
+- [ ] 创建先于该关系的133 / 135 / 66 / 70 / 33；47后补135，帧开头133只按既有watchers发送；64之后不再收到旧关系的133 / 135 / 66。
 - [ ] 离场者收不到 51 / 64。离场、断线、换场景时向旁人发 51，离场者的视野状态静默清空。
 - [ ] 视野半径 10 m，三维欧氏距离，`≤` 含等号，不从配置表读。坐标 z-up，格子只看 x/y，单位是米，类型是 double。
 - [ ] 66 的字段号和类型：`entity_id=1 (uint64，= player_id)`、`transform=2`、`velocity=3`、`combat_state_flags=4`。只带脏字段，脏子消息即使全 0 也要写上（停步时 `velocity` 出现且为空）。
 - [ ] 66 每个实体最多 10 Hz（20 FPS 的偶数帧），不发给发送者本人。
-- [ ] 不发 65 / 55 / 82 / 68 / 75 / 133 / 135 / 130。
+- [ ] 不发65 / 55 / 82 / 68 / 75；133 / 135 / 130按2.10发送，entity是场景网络号、location恒在、信封id=0。
 - [ ] 134 / 132 / 131 不回包。速度夹到 10 m/s。137 只在水平纠偏 > 0.5 m 时发，字段按 §4.3，`input_seq` 回显。
 - [ ] 所有下行都经 `MessageContent{message_id, serialized_message}`，`id=0`。消息号按「服务名 + 方法名」解析。
 - [ ] 同一客户端的下行只在场景逻辑线程上按顺序写到同一条链路（保序）。
@@ -421,9 +400,9 @@ handler 是空的。生成的 `CallMethod` 会把空 TLS tip 写进 `error_messa
 - [ ] 每条 66 都带 `entity_id`（缺口 5）。
 - [ ] 51 只发给 `watchedBy`（缺口 7）。
 - [x] ~~70 / 33 不发给施法者（缺口 8）~~：已核对客户端，决定保留发给本人（PARITY「70 SkillUsed 的收件人」行）。
-- [ ] 可选：给新观察者补发一条全量 66（缺口 9）。
+- [ ] 已实现的新观察者规则必须保持：21 / 47带朝向、47后135仅含移动目标；66仍由markFullStateForNewWatcher置脏，下个偶数帧补，不能改成额外单播66。
 
-**验证（写单测，按 AGENTS.md §4 用 `clean install` 跑）**
+**验证（批次2.10使用离线 `mvn -o -B -fae clean verify`；结果见PARITY与实现报告，不用install）**
 
 - [ ] `HexGrid` 的金标准（§2.1），以及负坐标的舍入。
 - [ ] 两人走近、走远时双方的收包序列：47 / 21 / 64 / 51 各一次，没有残影；换场景和断线的收包序列。

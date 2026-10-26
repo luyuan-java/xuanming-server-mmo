@@ -3,7 +3,7 @@
 > **基线**：2026-10-26 实现前复核 mmorpg `275f9c5c0`（`D:\luyuan\xuanming-server-mmo-cpp`）。原稿按 `73b852f32` / `0aa1027bc` 写成，之后相关源码已有变化，不能再称逐字相同。
 > 133、130 的 entity 已取不透明 actor 网络号，退出停步另有角色交易冻结调用；核心广播 / 瞬移 / 3 s 与 3 m 落位规则未变（§12.7）。
 > mmorpg 已提交的 `docs/handoff/global-economy-claude-review-20261022.md` 有完整构建与 AOI 执行历史；本次未重跑 C++，不把历史记录当作本批验收。
-> **客户端怎么解读仍以 Unity 实际处理器为准**（§2）。未更新的旧行号只作历史定位，应按函数名查当前代码。
+> **客户端怎么解读仍以 Unity 实际处理器为准**（§2）。当前 C++ 引用以文件与函数名为主；§12 历史评审行号仅用于追溯，不作为当前定位。
 >
 > **客户端**：`D:\luyuan\mmorpg-client`，2026-10-26 实现前核实 `HEAD = origin/main = 9ccb99c51`，工作区干净。
 > 历史规格以 `f537079` 为基线；当前已包含 `40e6fdd43`（远端双端外推、1 秒外推上限、转向补 MoveSync、图元禁碰撞、走路跟随）。
@@ -31,7 +31,7 @@
 >   消息形状取自 `game-proto/src/main/proto/**/player_movement.proto`（同步产物，下称 `player_movement.proto`）。
 > - 带「推导」字样的结论没有对应的测试或运行覆盖，是把多处代码路径串起来得出的；带「转述」的没有在代码上复核。
 >
-> 本稿只读代码，除本文件外没有改任何文件。2026-10-13 按七视角复核与主持人定案修订过一轮，修订内容与出处见文末 §12「评审修订记录」；正文只保留定案后的设计。
+> 2026-10-13 的规格评审只读代码，修订内容与出处见 §12；2026-10-26 已在独立分支实现，执行证据与保留边界见 §13。正文保留定案后的设计。
 
 ---
 
@@ -39,8 +39,8 @@
 
 ### 0.1 结论速览
 
-- **基线做了什么**（`9199d217d`）：新增 `MovementSystem::BroadcastMove`，把实体此刻的权威 Transform / Velocity 发成 133 `ActorMoveS2C`，收件人是「互相可见且有会话」的玩家、
-  不含自己；在 134 / 132 / 131 被接受之后、战斗或冻结中收到 131、外推撞墙清速、走着退出（`StopMotionForExit`）四处调用。新增服务器主动的**同场景瞬移原语**
+- **基线做了什么**（`9199d217d` 引入，当前 `275f9c5c0` 复核）：新增 `MovementSystem::BroadcastMove`，把实体此刻的权威 Transform / Velocity 发成 133 `ActorMoveS2C`，收件人是「互相可见且有会话」的玩家、
+  不含自己；在 134 / 132 / 131 被接受之后、战斗或冻结中收到 131、外推撞墙清速、退出或角色交易冻结停步（`StopMotionForExit`）几类路径调用。新增服务器主动的**同场景瞬移原语**
   `MovementSystem::TeleportWithinScene`：写位置、清速度、只给本人发 130 `TeleportS2C`（reason 5）、`AoiSystem::ResetEntityVisibility` 把可见性当作「离开旧位置 + 重新进场」重建，
   并挂 `TeleportSettleComp`：3 s（单调时钟）内上报点离目标水平距离超过 3 m 的 134 / 132 / 131 整条丢弃。**66 那一路原样保留**。唯一调用瞬移的是组队归队（4.3b）。
 - **客户端实际怎么收**（§2，`9ccb99c51` 上逐个复核）：移动下行处理133/135/130/137（`GameClient.cs:1853-1903`），仍无66的消息常量、proto类与处理器；
@@ -96,128 +96,134 @@
 
 ---
 
-## 1 基线协议
+## 1 基线协议（C++ `275f9c5c0`，2026-10-26 源码复核）
 
-### 1.1 消息（`player_movement.proto`，0.3 已同步，形状与基线逐字相同）
+本节的「当前基线」均指文首 C++ HEAD；源码按文件与函数名定位。历史提交 `9199d217d` 是功能引入点，不代表当前文件行号或所有实现细节。
+
+### 1.1 消息（`player_movement.proto`，现有同步契约的 wire 字段不变）
 
 | id | 方向 | 类型 | 字段 |
 |---|---|---|---|
-| **133** | S→C | `ActorMoveS2C` | `uint64 entity = 1`（proto 注释「actor entity id」）、`Transform transform = 2`、`Velocity velocity = 3`（零 = 停）、`uint64 server_time_ms = 4`（注释「server timestamp; clients use it for interpolation」，`:82`）、`uint32 move_state = 5`（0 停 / 1 走 / 2 跑 / 3 冲刺）。消息注释（`:76-77`；mmorpg 侧 `proto/scene/player_movement.proto:73-74`）：「Sent on start / stop / direction change, NOT every tick」 |
+| **133** | S→C | `ActorMoveS2C` | `uint64 entity = 1`（当前 proto 明确为不透明 actor 网络号，不是玩家 GUID 或本地 ECS 句柄）、`Transform transform = 2`、`Velocity velocity = 3`（零 = 停）、`uint64 server_time_ms = 4`（注释：服务器时间戳，供客户端插值）、`uint32 move_state = 5`（0 停 / 1 走 / 2 跑 / 3 冲刺）。消息注释仍为「Sent on start / stop / direction change, NOT every tick」 |
 | **135** | S→C | `ActorMoveListS2C` | `repeated ActorMoveS2C moves = 1`；proto 注释：玩家刚进 AOI 格、要一次同步很多 actor 时用 |
-| **130** | S→C | `TeleportS2C` | `uint64 entity = 1`、`Transform transform = 2`、`uint32 input_seq = 3`（注释：客户端丢弃 ≤ 它的预测输入）、`uint32 reason = 4`（注释列到 4：0 纠正 / 1 传送门 / 2 技能 / 3 管理员 / 4 复活；基线 5 = 组队归队，`movement.h:13`，注释待 mmorpg 下次重生成时补） |
-| 66 | S→C | `ActorBaseAttributesS2C` | 不变（基线移动触发的不带 `entity_id`；Java 每条带 `player_id`） |
+| **130** | S→C | `TeleportS2C` | `uint64 entity = 1`（被传送者的不透明 actor 网络号）、`Transform transform = 2`、`uint32 input_seq = 3`（注释：客户端丢弃 ≤ 它的预测输入）、`uint32 reason = 4`（proto 注释仍列到 4：0 纠正 / 1 传送门 / 2 技能 / 3 管理员 / 4 复活；`movement.h` 的 `kTeleportReasonTeamRegroup = 5` 定义组队归队） |
+| 66 | S→C | `ActorBaseAttributesS2C` | 当前 C++ 有有效脏字段且存在 `PlayerGuidComp` 时，写 `entity_id = PlayerGuidComp.value`，即玩家 GUID；Java 每条带 `player_id`，玩家消息的标识口径相同。**66 的标识与 133 / 130 的 actor 网络号不同** |
 
-`Transform` = `{Vector3 location = 1; Rotation rotation = 2; Scale scale = 3}`，各分量 `double`（fixed64），proto3 下 0.0 不编码（`mmorpg-client-contract-movement.md` §1）。
-基线 133 经 `BroadcastMessageToPlayers`、130 经 `SendMessageToClientViaGate` 下发，信封 `MessageContent{message_id, id = 0}`；**135 基线仍然从不发**。
-**没有新 proto、新消息号、新 tip**（`9199d217d` 提交说明）。
+66 的事实以 `cpp/libs/services/scene/generated/attribute/actorbaseattributess2c_attribute_sync.cpp` 的 `ActorBaseAttributesS2CSyncAttributesCore` 为准。
+`movement.h` 中「移动脏位不带 entity_id」的旧注释已失效，不能据此推断当前消息；客户端仍没有 66 处理器（§2.1），所以 133 的必要性不变。
 
-### 1.2 `BroadcastMove`（`movement.cpp:121-176`，声明与注释 `movement.h:38-49`）
+`Transform` = `{Vector3 location = 1; Rotation rotation = 2; Scale scale = 3}`，各分量 `double`（fixed64），proto3 下 +0.0 不编码（`mmorpg-client-contract-movement.md` §1）。
+当前 133 经 `BroadcastToPlayerClients`、130 经 `SendMessageToClientViaGate` 下发（`cpp/libs/engine/core/network/client_message_sender.cpp`），信封 `MessageContent{message_id, id = 0}`；**135 当前仍无发送路径**。
+本批没有新的客户端 proto、客户端消息号或 tip；dev 管理口消息按 §5.9 追加。当前协议另外已有 OneWay / Push 元数据，不把历史「逐字相同」延伸到注释和 RPC 元数据。
 
-- **内容**：当前 `entity = actor_net_id::Of(entity)`（`movement.cpp:163-169`，缺号记错不发；与 21 / 47 / 51 / 64 同口径，不是 guid 或本地 ECS 句柄）；`transform = *transform`（整个 Transform：location 恒在；
-  rotation 写过才在——`ApplyReportedLocation` 每次都 `*transform->mutable_rotation() = rotation`（`mvh.cpp:133`），所以被接受过一条上报之后 rotation 恒在场，请求没带朝向时是空消息 `12 00`）；
-  `velocity` 有 Velocity 组件就拷（停止时是「存在但全零」，没有组件时字段缺席）；`server_time_ms = TimeSystem::NowMilliseconds()`（`:172`，墙钟 UTC 毫秒，与 137 同口径；
-  B1 / B2 / B3 在 handler 里同步调用，所以它就是**裁决时刻**）；`move_state = 速度非零 ? 1 : 0`（`kMoveStateWalking` / `kMoveStateStopped`，`movement.h:16-17`），从不发 2 / 3。
-- **收件人**：遍历**自己的** `AoiListComp`，留下「仍有效、有 `PlayerSessionSnapshotComp`（有网关会话）、对方的 `AoiListComp` 里也有我」的实体（`:134-156`），不含自己；
-  一个都没有就不发。**理由**（`movement.h:41-45`）：只按自己的表发会把坐标发给看不见我的人（隐身时对方表里没有我）；严格的「谁看得见我」要扫 7 格全部实体，每条上报都走这条路径，扫不起。
-  **已知缺口**：对方看得见我、但我的表因容量满没收下对方时，对方收不到我的移动（与 66 同一口径的既有缺口）。（可见性本身的同格缺口——基线只在跨格时重判——是视野的差异，
-  见 PARITY「视野（AOI）」行缺口 3，不属于 133。）
-- **序列化一次**，按目标所在 gate 分组，每个 gate 一条内部广播，gate 再逐会话下发（`BroadcastMessageToPlayers`，同 66 的批量方式，`mmorpg-client-contract-movement.md` §6.1）。
-- **只读组件、不增删组件**，可以在 view 遍历中调用（`movement.h:48`）。
+### 1.2 `MovementSystem::BroadcastMove`（`movement.cpp`；声明与设计说明在 `movement.h`）
 
-### 1.3 调用点（HEAD 行号）
+- **内容**：`entity = actor_net_id::Of(registry, entity)`（缺号记错不发；与 21 / 47 / 51 / 64 同口径）；`transform = *transform`，拷贝整个 Transform。
+  玩家裁决路径会写 location；`mvh.cpp` 的 `ApplyReportedLocation` 每次无条件写 rotation，所以被接受过一条上报之后 rotation 恒在场，请求没带朝向时是空消息 `12 00`。
+  有 Velocity 组件就拷贝（停止时是「存在但全零」），没有组件则字段缺席。`server_time_ms = TimeSystem::NowMilliseconds()`（墙钟 UTC 毫秒，与 137 同口径）；
+  B1 / B2 / B3 在 handler 里同步调用，所以是**裁决时刻**。`move_state = 速度非零 ? kMoveStateWalking : kMoveStateStopped`（1 / 0），从不发 2 / 3。
+- **收件人**：遍历**自己的** `AoiListComp`，留下「仍有效、有 `PlayerSessionSnapshotComp`、对方兴趣表也含我」的实体；正常 AOI 不含自己，无收件人则不发。
+  只按自己的表发会把坐标发给看不见我的人；严格反向查询要扫描当前格与六个邻格，源码为这条高频路径选择了互相可见过滤。
+  **已知缺口**：对方看得见我、但我的表因容量满没收下对方时，对方收不到我的移动。66 同样从自己的兴趣表取目标，但不额外作互相可见过滤。
+  同格移动不重判可见性的既有缺口见 PARITY「视野（AOI）」行，不属于 133。
+- **序列化一次**：`BroadcastToPlayerClientsImpl` 按目标所在 gate 分组，每个 gate 一条内部广播，目标同时携带会话与玩家 GUID，gate 再逐会话下发。
+- **只读组件、不增删组件**，可以在 view 遍历中调用。
+
+### 1.3 当前调用点（按函数名定位）
 
 | # | 位置 | 时机 | 备注 |
 |---|---|---|---|
-| B1 | `mvh.cpp:183`（MoveStart）、`:232`（MoveSync） | 战斗 / 冻结闸与落位等待闸都过了、`ApplyReportedLocation` + `ApplyReportedVelocity` 之后 | 每条被接受的上报发一条，**不合批**；137（若有）先于 133 发出 |
-| B2 | `mvh.cpp:212`（MoveStop） | 同上，速度清零之后 | |
-| B3 | `mvh.cpp:195-201` | 回合制战斗在途（`InBattleComp`）**或**归属交接冻结（`PlayerFrozenComp`）中收到 131：只清速度、**无条件**广播（`:200`） | 注释：进战 / 冻结前最后一次广播还带着行走速度。冻结 / 战斗中的人要等自己的客户端发 131 才停 |
-| B4 | `movement.cpp:112-117` | 外推撞墙清速的那一 tick | 当 tick 发、只发一次（速度已清零，之后不再进这段） |
-| B5 | `player_lifecycle.cpp:3255-3274` 的 `StopMotionForExit`，广播在 `:3271` | 速度原本非零才清、才广播；当前三个调用点：`FreezeRoleForTrade:3244`、`HandleExitGameNode:3332/3412` | 除退出重存兜底与常规退出外，新增角色交易冻结调用。归属交接冻结仍只挂冻结，不能把它与角色交易冻结混为一谈；Java 寄售排空直接移除实体并发 51，不新增一条无效果的 133 |
+| B1 | `mvh.cpp` 的 `MoveStart` / `MoveSync` | 战斗 / 冻结闸与落位等待闸都过了、`ApplyReportedLocation` + `ApplyReportedVelocity` 之后 | 每条被接受的上报发一条，**不合批**；137（若有）先于 133 |
+| B2 | `mvh.cpp` 的 `MoveStop` 正常分支 | 同上，速度清零之后 | |
+| B3 | `MoveStop` 的 `InBattleComp` / `PlayerFrozenComp` 分支 | 只清速度、**无条件**广播，然后返回 | 进战与归属交接冻结本身不清速，收到 131 才走这个停步分支；角色交易冻结另走 B5 |
+| B4 | `movement.cpp` 的 `MovementSystem::Update`，`stoppedByWall` 分支 | 外推撞墙清速的那一 tick | 当 tick 发；速度已零，后续不会重复进入该分支 |
+| B5 | `player_lifecycle.cpp` 的 `StopMotionForExit` | 已有 Velocity 且原本非零才清、才广播 | 当前调用方是 `FreezeRoleForTrade`，以及 `HandleExitGameNode` 的退出重存兜底与常规退出两处。归属交接冻结和角色交易冻结不可混为一谈；Java 寄售排空直接移除实体并发 51，不新增一条无效果的 133 |
 
-基线**不**发 133 的地方：
-- AFK 停推（`afk.cpp` 只挂 `AfkComp`、不清速度）；
-- 进战（`InBattleComp` 只让外推跳过，不清速度，要等客户端发 131 才走 B3）；
-- 归属交接冻结：`StartTravelHandoff` 只挂 `PlayerFrozenComp`、不清速度（`player_lifecycle.cpp:4035`），冻结期间只有客户端自己发 131 才走 B3；66 那一路同样排除冻结实体
-  （`actor_state_attribute_sync.cpp` 的 `exclude<PlayerFrozenComp>`），所以冻结期间旁人收不到任何停步信号。交接未成解冻（`AbortTravelHandoff`，`:5501`）也不清速，解冻后按冻结前的速度继续积分；
-- **归属交接放行后的源端销毁**：走 `DestroyDeposedPlayer`（`player_lifecycle.cpp:3794-3840`；调用点 `:3791`、`:4446`、`:4486`、`:5022`、`:5073`、`:5181`、`:5462`，
-  覆盖交接放行 / 被废黜 / 重入取代），只做 `DetachFromScene` → 摘会话 → 销毁，**不经 `HandleExitGameNode`、不调 `StopMotionForExit`**；交接在途时 scene_manager 的 `ReleasePlayer`
-  在 `scene_node_service.cpp:168-176` 就返回了，走不到 `:182` 的 `HandleExitGameNode`。所以冻结中的人在旁人屏幕上一直跑到 51 把它销毁，
-  例外只有冻结中客户端自己发了 131（B3）或交接途中断线（退出优先，才走 B5）；
-- 新观察者进视野（缺口 9 在基线仍在）；换场景（旧场景广播销毁，新场景重新进场）；逐帧外推（`movement.cpp:108-110` 只置 66 的 Transform 脏位）。
+当前基线**不**发 133 的地方：
+- AFK 停推：`AfkSystem::Update` 只挂 `AfkComp`，不清速度；
+- 进战：`InBattleComp` 让 `MovementSystem::Update` 跳过实体，不清速度，等待客户端 131 走 B3；
+- 归属交接冻结：`StartTravelHandoff` 挂 `PlayerFrozenComp`，不清速度；属性同步 `Update` 同样排除冻结实体。未收到 B3 的 131 时，旁人没有权威停步样本。
+  `AbortTravelHandoff` 解冻本身也不清速度，后续可按原速度继续积分；
+- **归属交接放行后的源端销毁**：`DestroyDeposedPlayer` 走 `PlayerSceneSystem::LeaveCurrentScene` → 摘会话 → 销毁，**不经 `HandleExitGameNode`、不调 `StopMotionForExit`**。
+  当前 gRPC `SceneNodeGrpcImpl::HandleReleasePlayer` 已把交接释放转交 `PlayerLifecycleSystem::HandleReleaseFromSceneManager`；后者的 `kSkipHandoffInFlight` 分支直接返回，
+  非交接且通过归属栅栏的释放才进入 `HandleExitGameNode`。交接成功销毁只有 51；交接中退出仍可能走 B5。
+  当前客户端在最后样本超过 1 s 后自行清速（§2.2），因此旧稿「屏幕上一直跑到 51」已不成立；缺少服务端即时停步的事实仍成立；
+- 新观察者进视野：只发创建，仍不补 133 / 135（缺口 9）；换场景：旧场景销毁、新场景重新进场；普通逐帧外推：`MovementSystem::Update` 只置 Transform 脏位，不发 133。
 
 ### 1.4 频率与量
 
 - 客户端移动中每 0.25 s 一条 132（`TianyongPlayerController.cs:642-650`，实际是「≥ 0.25 s 后的第一个渲染帧」，与服务器帧不锁相），起步一条 134，停步一条 131；
   转向补 132 已落地：距上次报告 ≥ 0.12 s 且方向点积 < 0.94（约 > 19.95°，`:37-44`、`:642-650`）。移动中的玩家周期约 4 条 / 秒，持续转向最多约 8 条 / 秒。
-- gate 按 MessageLimiter 限频，表值 134 → 15、132 → 20、131 → 15（窗口 1 秒；PARITY「gate 按消息号限频」行，两仓 `messagelimiter.pb` 逐字节相同）。
-  **基线**限频器按整秒时间戳、`>` 淘汰（`cpp/libs/engine/core/message_limiter/message_limiter.cpp:13`、`:34`），任意相邻两个整秒合计至多 N 条：
-  单人被接受的移动输入单秒突发最多 50 条、持续约 25 条 / 秒。**Java** gate 是 1 秒纳秒滑窗（`MessageRateLimiter.java:29`），持续上限 50 条 / 秒。
-  B1 / B2 不合批，基线的 133 扇出跟着这个输入速率走，没有自己的上限。
-- 收件人受兴趣表容量约束（`kAoiListCapacityDefault = 100`，`aoi_priority.h:97`）。`team-system.md` V.2 第 5 条 / V.5 估算：每个移动中的玩家每秒 4–8 条 × 互相可见人数；
-  「要减可以改成只在起步 / 停步 / 转向时发（协议注释的原意），代价是远端外推误差变大」。基线没有压测。
-- **66 那一路原样保留**：偶数帧（每实体 ≤ 10 Hz）按脏位发给自己兴趣表里的实体，冻结实体不发（`actor_state_attribute_sync.cpp:56-113`，契约文档 movement §6.1）。
+- gate 表值 134 → 15、132 → 20、131 → 15，窗口 1 秒；两仓 `messagelimiter.pb` 当前 SHA-256 相同。
+  C++ `MessageLimiter::CanSend` 按整秒时间戳、`>` 淘汰：任意相邻两个整秒合计至多 N 条，单人被接受的移动输入单秒突发最多 50 条、持续约 25 条 / 秒。
+  Java gate 是 1 秒纳秒滑窗，持续上限 50 条 / 秒。B1 / B2 不合批，C++ 133 随输入速率扇出，没有独立上限。
+- 收件人受兴趣表有效容量约束：`aoi_priority.h` 的默认容量 100；当前 `InterestSystem::GetEffectiveCapacity` 预留按玩家与服务器容量取限制，但源码注明这些稀疏配置生产尚未接线，缺失时用默认值。
+  `team-system.md` V.2 / V.5 的历史估算是每个移动玩家每秒 4–8 条 × 互相可见人数；本次未跑 133 专项压测。
+- **66 保留**：`ActorStateAttributeSyncSystem::Update` 偶数帧按脏位发给自己的兴趣表，冻结实体不发。当前 `core/constants/fps.h` 的 `kTargetFPS = 20`，故名义每实体 ≤ 10 Hz。
 
-### 1.5 同场景瞬移 `TeleportWithinScene`（`movement.cpp:179-217`，注释 `movement.h:51-58`）
+### 1.5 同场景瞬移 `MovementSystem::TeleportWithinScene`（`movement.cpp`）
 
 调用方保证落点是该场景导航上的合法点；没有 Transform 直接返回；只能在 scene 节点 loop 线程调。按顺序：
 
-1. 写 `Transform.location = 落点`、`Transform.rotation = 入参`（`:189` `*transform->mutable_rotation() = rotation`，**无条件覆盖**），置 Transform 脏位（`:188-190`）。
-2. 有 Velocity 组件就 `Clear()` 并置 Velocity 脏位（`:193-197`）——否则 `Update` 从新位置按旧速度继续积分，人一落地就飘走。
-3. `emplace_or_replace<TeleportSettleComp>`：记当时的场景句柄、目标 x / y、`expireAtMs = 单调时钟 + 3000`（`:200-205`）；重复瞬移以最后一次为准。
-4. 实体是玩家（有 `Player` 组件）时**只给本人**发 130：`entity` = 场景实体号、`transform = *transform`（新位置 + 新朝向；`rotation` 恒在，可能是空消息）、`reason`；
-   **`input_seq` 不设（0）**（`:207-214`）。
-5. `AoiSystem::ResetEntityVisibility(entity)`（`:216`）。
+1. 写 `Transform.location = 落点`、`Transform.rotation = 入参`（**无条件覆盖**），置 Transform 脏位。
+2. 有 Velocity 组件就 `Clear()` 并置 Velocity 脏位；没有组件则不新建，避免后续从落点按旧速度继续积分。
+3. `emplace_or_replace<TeleportSettleComp>`：记当前场景句柄、目标 x / y、`expireAtMs = 单调时钟 + 3000`；重复瞬移以最后一次为准。
+4. 有 `Player` 组件且 actor 网络号非零时，**只给本人**发 130：`entity = actor_net_id::Of(...)`、`transform = *transform`、`reason`；**`input_seq` 不设（0）**。
+   玩家缺少网络号时记录错误并跳过 130，但前面的状态改写和下面的 AOI 重置仍执行。
+5. 调 `AoiSystem::ResetEntityVisibility(entity)`。
 
-**没有**给旁人发 133，**没有**动 `LastActiveFrame`，**没有**改位置记录（Redis location 只记场景）。
+**没有**给旁人发 133，**没有**动 `LastActiveFrame`，**没有**改 Redis location（位置记录只记场景）。
 
-### 1.6 `ResetEntityVisibility`（`aoi.cpp:234-299`，注释 `aoi.h:15-26`）
+### 1.6 `AoiSystem::ResetEntityVisibility`（`aoi.cpp`；边界说明在 `aoi.h`）
 
 把同场景瞬移当作「从旧位置离开视野、在新位置重新进场」：
 
-1. 自己这一侧：兴趣表里非 `kPinned` 的条目全部摘掉，**通知自己的客户端销毁**（`NotifyEntityVisibilityChanges` → 64 列表，`:241-253`）。
-   注释给的理由：不通知的话客户端会把旧位置的 actor 永远留着，**之后同一实体再进视野时客户端按 entity 去重，连位置都不会更新**。
-   基线全量摘是因为重建在下一次 `Update`，它当下分不出谁仍然可见。
-2. 观察者一侧：旧 Hex 的当前格 + 6 邻格里、兴趣表里有它（非钉住）的实体，摘掉并各收一条 64（`:257-291`）；把它移出格子、摘掉 `Hex`。
-3. 下一次 `AoiSystem::Update`：没有 `Hex` 的实体走「首次进场」分支，按新位置对当前格及邻格重新做双向 `CanSee`（先按视野半径 10 判，`view.cpp:175-179`），自己收 47、旁人经 `8843a1465` 的反向通知收 47。
-   **所以基线的「新位置可见」晚到下一个模拟步（名义 ≤ 50 ms）**；这一步之前被瞬移者自己的兴趣表是空的，期间它被接受的上报调 `BroadcastMove` 会在 `movement.cpp:124` 直接返回（没人收到它的 133）。
-4. 已知边界：钉住它的观察者既不收销毁也不收重建；移动广播只发给互相可见的人，它在那些客户端上会停在瞬移前的位置（`aoi.h:23-25`；目前没有玩法钉住玩家）。
+1. 自己这一侧：兴趣表里非 `kPinned` 条目全部摘掉，经 `NotifyEntityVisibilityChanges` 给自己发 64 列表。当前 64 / 47 均取 actor 网络号，缺号条目记错并跳过。
+   不先销毁会使客户端保留旧 actor，之后相同实体再进视野时又被去重；当前基线重建在下次 Update，因此没有在本次调用内计算保留交集。
+2. 观察者一侧：旧 Hex 当前格与六个邻格中、兴趣表含它的非钉住关系摘掉并各发 64；把实体移出格子、摘掉 Hex。
+   若尚无 Hex，只处理自己的表后返回；无有效场景或格子表时不补建空表。
+3. 下次 `AoiSystem::Update` 的 `UpdateGridState` 把无 Hex 的实体当作首次进场，`HandleEntityVisibility` 对新位置当前格与邻格做双向 `ViewSystem::CanSee`，自己与新观察者均收 47。
+   视野先作三维距离判定，默认半径 10（可由 ViewRadius 组件覆盖），再判隐身。**新位置可见性晚到下一个模拟步，20 Hz 下名义 ≤ 50 ms**。
+   在没有钉住关系的正常玩家路径上，此前自己的兴趣表为空或缺席，期间 `BroadcastMove` 直接返回。
+4. 钉住它的观察者不收销毁；`HandleEntityVisibility` 对已存在的反向关系也不重复发创建。`aoi.h` 明确此类关系没有可靠的瞬移位置更新；目前没有玩法钉住玩家。
+   Java 没有钉住条目，本批不引入这套机制。
 
-### 1.7 落位等待（`teleport_settle_comp.h`、`movement.cpp:219-258`、`movement.h:19-31`、`:61-77`）
+### 1.7 落位等待（`teleport_settle_comp.h`、`MovementSystem::ShouldDropReportAfterTeleport` / `JudgeReportAfterTeleport`）
 
-- **为什么**：移动是客户端上报、服务器裁决。瞬移发出时客户端可能还有按旧位置发的 134 / 132 / 131 在路上；照常裁决会把人沿直线拉回旧位置（中间没墙就整段接受），瞬移等于白做。
-- **判定**（三个 handler 在战斗 / 冻结闸**之后**、裁决**之前**问 `ShouldDropReportAfterTeleport`，`mvh.cpp:176`、`:204`、`:225`）：
-  - 没挂组件 → 照常（每条上报一次 `try_get`）；
-  - 瞬移之后换了场景（场景句柄不同）→ 摘组件、照常；
-  - 纯函数 `JudgeReportAfterTeleport(水平距离, now, expire)`：**先看距离再看时间**——上报点离目标 ≤ `kTeleportSettleRadius = 3`（含等号）→ `kSettled`（摘组件、照常裁决）；
-    否则 `now ≥ expire` → `kExpired`（摘组件、照常裁决、`LOG_WARN`）；否则 `kStale` → **整条丢弃**（位置、速度、137、133 都没有）。
-  - 先看距离的理由：客户端落位后可能站着不动，过了超时才发第一条上报，那仍是一次正常落位。
-- **没有定时器**：判定与摘除都发生在下一条上报到达时；一直不上报的实体一直带着组件，无害。只在战斗 / 冻结闸之后判，所以战斗中的 131（B3）不受它影响。
-  活跃帧在分发处刷新（`scene_handler.cpp:468-473`），被落位等待丢掉的上报照样算活跃。
-- 不落盘、不进 proto。单调时钟（`std::chrono::steady_clock` 自纪元起的 uint64 毫秒，直接比大小）。
+- **为什么**：瞬移发出时可能还有旧位置的 134 / 132 / 131 在途；照常裁决可能把人拉回旧位置。
+- 三个移动 handler 都在战斗 / 冻结闸**之后**、位置裁决**之前**问 `ShouldDropReportAfterTeleport`：
+  - 没组件 → 照常；
+  - 当前场景句柄与记录不同 → 摘组件、照常；
+  - 纯函数 `JudgeReportAfterTeleport` **先看距离再看时间**：上报点离目标水平距离 ≤ `kTeleportSettleRadius = 3`（含等号）→ `kSettled`；否则 `now ≥ expire` → `kExpired`；否则 `kStale`。
+  - `kSettled` 摘组件并照常裁决；`kExpired` 摘组件、记录 WARN 后照常裁决；`kStale` **整条丢弃**，不改位置 / 速度、不发 137 / 133。
+- 先看距离允许客户端已落位、站着不动、超时之后才发首条报告时仍按正常落位处理。
+- **没有定时器**：下一条上报才判定与摘除；一直不上报则一直保留组件。B3 的战斗 / 冻结中 131 先返回，不经过落位闸。
+  `SceneHandler::ProcessClientPlayerMessage` 在分发前刷新非退出中玩家的 `LastActiveFrameComp`，所以正常活跃实体的陈旧落位报告仍算活跃。
+- 不落盘、不进 proto；使用 `std::chrono::steady_clock` 的 uint64 毫秒，直接比较大小。
 
-### 1.8 唯一的调用方（4.3b 的内容，列在这里只为说明原语怎么被用）
+### 1.8 唯一生产调用方（4.3b，列在这里只为说明原语怎么被用）
 
-`PlayerTeamSystem::RegroupToLeader`（`player_team.cpp:514-574`）：与队长同一场景实例、队长归属交接不在途（`:529` `IsOwnershipInFlight(leader)`，= `PlayerFrozenComp` ∪ `PlayerTravelHandoffComp`，`:78-82`）、
-`ShouldRegroup(水平距离, 互相可见)`（`player_team.h:93-96`：互相不可见，或距离 > `kTeamRegroupDistance = 8`）→ `TeleportWithinScene(队员, 队长位置, 队长朝向, 5)`
-（朝向取 `leaderTransform->rotation()`，`:569`，队长没写过朝向时是全零默认值）。「互相可见」只在双方都已有 `Hex`（已被 AOI 评估过）时看兴趣表，
-否则按可见处理——因为基线的瞬移 / 进场到首次 `Update` 之间有一个模拟步的「还没评估」窗口（`:543-555`）。
+`player_team.cpp` 的 `PlayerTeamSystem::RegroupToLeader`：队长在本节点、不是自己、两者实际绑定同一场景且均有 Transform，队长归属交接不在途
+（`IsOwnershipInFlight` = Frozen ∪ TravelHandoff）时，计算水平距离与互相可见性，再调用 `ShouldRegroup`：互相不可见，或距离 > `kTeamRegroupDistance = 8` 就归队。
+随后拷贝队长位置与 `leaderTransform->rotation()`，调用 `TeleportWithinScene(队员, 队长位置, 队长朝向, 5)`；队长没写过朝向时取全零默认值。
 
-**队员一侧的守卫在调用方**：到达 `RegroupToLeader` 之前，`CheckFollowLeader` 已对队员查过回合制战斗在途、归属交接在途（Frozen ∪ TravelHandoff）、换图请求在途（`IsSceneChangeInFlight`）、
-会话存活（`player_team.cpp:361-380`），MGET 回调里 `battle:lock` 非 NIL 即跳过并把前四道重查一遍（`:403-429`）；`RegroupToLeader` 另查队长实体在本节点且不是自己（`:518`）、
-两实体此刻绑定同一场景（`:523-527`）、双方有 Transform（`:536-541`）。「换图请求在途」只对队员自己查，没有拿它查队长。
+`visibilityEvaluated` 仍以**双方都有 Hex**为条件；只有已经评估过时才看两张兴趣表。任一方尚未首次入格或刚瞬移、还没到下次 Update 时按互相可见处理，避免未评估窗口内重复瞬移；距离 > 8 仍会触发。
 
-**表满怎么办**：基线靠队友优先级挤出。`DetermineAoiPriority` 对同队返回 `AoiPriority::kTeammate`（`aoi.cpp:24-37`），瞬移后首次进场评估双向都带这个优先级（`aoi.cpp:111-125`），
-表满时权重更高的挤掉最低的一条（`interest.cpp:105-114`，`aoi_priority.h:42-44`：kNormal 0 / kTeammate 1；**被挤者不发 64，挤出是静默的**）。入队时 `RefreshTeammateAoi`
-只升级已有条目（`player_team_aoi.cpp:31-38`），所以人群里原本互不可见的一对，在基线正是靠「互相不可见 → 瞬移 → 首次进场按 kTeammate 挤出」建立可见。
+**队员守卫在调用方**：`CheckFollowLeader` 先查战斗、归属交接、换图请求、会话；Redis MGET 的战斗锁非 NIL 则跳过，回调中重查这些守卫。
+`RegroupToLeader` 不额外检查队长的换图请求在途，只查队长归属交接；本批不实现组队归队本身。
+
+**表满**：`aoi.cpp` 的 `DetermineAoiPriority` 给同队 `kTeammate`，首次进场双向评估都使用它；`InterestSystem::AddAoiEntity` 按当前场景策略权重，允许更高优先级挤掉最低项，**被挤者不发 64**。
+默认开放世界策略的 kNormal / kTeammate 权重是 0 / 1；其他策略权重可能不同。`player_team_aoi.cpp` 的 `RefreshTeammateAoi` 只修正已有条目，不新增不可见关系；
+因此「互相不可见 → 归队瞬移 → 首次进场带队友优先级」仍是当前基线建立这类关系的路径。
 
 ### 1.9 验证状态
 
 | 范围 | 证据 |
 |---|---|
-| 服务端 C++ | 当前 HEAD 已有历史构建与 AOI 执行记录（文首），本次未复跑。`aoi_system_test.cpp` 的 Reset 四条在 372/397/427/448，另有 Pinned 重入 473；落位纯函数在 1329/1336/1345，归队规则在 1305/1312/1319。仍无 `TeleportWithinScene` / `ShouldDropReportAfterTeleport` / `BroadcastMove` 直接测试 |
-| Go robot | `robot/logic/handler/scene_movement_client_player_notify_{actor_move,actor_move_list,teleport}.go` 都是空函数（`message_body_handler.go:91-93` 已注册）；`team_smoke` 没有 133 / 130 断言 |
-| 客户端配套 | `9ccb99c51` 已包含 `40e6fdd43` 的配套源码（§2）；历史纯逻辑36/36为转述，本次未运行客户端测试、Unity测试或双号联机 |
-| 联机 | 没有（`team-system.md` V.6 第 3 步是待办清单） |
+| 服务端 C++ | 当前 HEAD 已有历史构建与 AOI 执行记录（文首），本次未复跑。`aoi_system_test.cpp` 包含四条 `ResetEntityVisibility*`、`FirstEntryAfterResetKeepsPinnedEntries`，以及 `TeleportReportVerdictTest` / `TeamRegroupRuleTest`；用例名与覆盖见 §11.1。仍无 `TeleportWithinScene` / `ShouldDropReportAfterTeleport` / `BroadcastMove` 直接测试 |
+| Go robot | `robot/logic/handler/scene_movement_client_player_notify_{actor_move,actor_move_list,teleport}.go` 仍为空函数；当前 `team_smoke` 没有 133 / 130 断言 |
+| 客户端配套 | `9ccb99c51` 已包含 `40e6fdd43` 的配套源码（§2）；历史纯逻辑 36/36 为转述，本次未运行客户端测试、Unity 测试或双号联机 |
+| 联机 | 本次未运行；`team-system.md` 的历史待办不作为已通过证据 |
 
 ---
 
@@ -313,7 +319,7 @@
 本次仅检查源码，未运行Unity测试或双客户端联机；D1服务器停步当场发、D2创建朝向和移动目标补135均保持原定案。
 
 ---
-## 3 Java 现状与差距
+## 3 Java 实现前状态与差距（本批结果见 §13）
 
 ### 3.1 今天置 66 脏位 / 让人停下的全部地方
 
@@ -367,16 +373,16 @@ Java 已经有、2.10 直接复用的：
 |---|---|---|
 | A 走动，B 看得见 A | 每条被接受的输入当场一条 133（4–8 / 秒；受 gate 限频，突发 50 / 秒、持续约 25 / 秒） | 下一帧开头一条 133，同帧多条合并（4–8 / 秒，上限 20 / 秒）；每条样本比基线晚 0–50 ms 且逐条不同（X2） |
 | A 停下（131） | 133（速度零，`move_state` 0） | 同（下一帧开头） |
-| A 30 s 无任何消息 | 服务器停推但**不发** 133（不清速度），B 上的 A 按旧速度一直跑 | 停推那一帧清速并**当场**发 133（有意差异 ③ 的延续，X4） |
-| A 备战 / 进入回合制战斗 | 不清速度；B 上的 A 一直跑，直到 A 的客户端发 131（B3）才有 133 | 备战即停步，在动则当场 133（X5） |
-| A 换节点 / 跨 zone 冻结 | 冻结不清速度、66 也不发；B 上的 A 一直跑，直到 A 的客户端发 131（B3）；**交接放行后只有 51，没有 133**（`DestroyDeposedPlayer`） | 冻结时在动则当场 133；交出提交后 51（X5） |
+| A 30 s 无任何消息 | 服务器停推但**不发** 133（不清速度）；当前客户端在最后样本超过 1 s 后自行停推，仍缺权威落点 | 停推那一帧清速并**当场**发 133（有意差异 ③ 的延续，X4） |
+| A 备战 / 进入回合制战斗 | 不清速度；收到 A 的 131（B3）才发零速 133；当前客户端另有最后样本超过 1 s 的停推兜底 | 备战即停步，在动则当场 133（X5） |
+| A 换节点 / 跨 zone 冻结 | 冻结不清速度、66 也不发；仅 A 发 131（B3）才补权威停止，当前客户端另有 1 s 停推兜底；**交接放行后只有 51，没有 133**（`DestroyDeposedPlayer`） | 冻结时在动则当场 133；交出提交后 51（X5） |
 | 战斗在途 / 冻结中 A 的客户端发 131 | 无条件一条 133（B3） | 战斗在途：仍在动才停、才发（备战时已停步，通常不发）；冻结中：131 直接丢（冻结时已停步）（X10） |
 | A 走着掉线 / 主动退出 / 停机（经 `HandleExitGameNode`） | 133 + 51 | 掉线 / 退出 / 被接管：只有 51（实体随即销毁，133 没有可见效果，X8）；停服：**没有任何下行**（链路已先断开，客户端随连接断开） |
 | A 被更新一代取代 / 被废黜（`DestroyDeposedPlayer`，推导） | 只有 51 | 被接管：只有 51（同） |
 | B 刚看见 A（进场 / 走近） | 只有 21 / 47 的位置；A 在动则静止到下一条 133；transform 的朝向为零 | 21 / 47 带位置与朝向；A 在动则 47 之后当场一条 135（X3）。A 进场 / 换场景时速度恒为零，旁人只收 21 |
-| 服务器把 A 瞬移 | A ← 130；A ← 64（旧视野全部）；旧观察者 ← 64；下一个模拟步：A ← 47、新观察者 ← 47 | A ← 130 → 64（不再看得见的）→ 47（新看见的）→ 135（新看见且在动的）；旧观察者 ← 64；新观察者 ← 21。全部在同一次调用里；A 瞬移前后都看得见的人在 A 的客户端上原样保留（X6）。两版都按进视野半径 10 m 重建：离落点 10–20 m 的旧关系只销毁、不重建 |
+| 服务器把 A 瞬移 | A ← 130；A ← 64（旧视野非钉住条目全部）；旧观察者 ← 64；下一个模拟步：A ← 47、新观察者 ← 47 | A ← 130 → 64（不再看得见的）→ 47（新看见的）→ 135（新看见且在动的）；旧观察者 ← 64；新观察者 ← 21。全部在同一次调用里；A 瞬移前后都看得见的人在 A 的客户端上原样保留（X6）。Java 与 C++ 默认视野都按进视野半径 10 m 重建：离落点 10–20 m 的旧关系只销毁、不重建 |
 | 瞬移后 3 s 内的旧位置上报 | 丢弃 | 同（计 `moves{result=teleport_stale}`） |
-| 66 | 照发（不带 entity_id） | 照发（带 player_id）；客户端都不处理，每条一次 `Debug.Log`（§2.5） |
+| 66 | 照发（有脏字段的玩家消息带 entity_id = 玩家 GUID） | 照发（带 player_id）；客户端都不处理，每条一次 `Debug.Log`（§2.5） |
 
 ---
 
@@ -454,7 +460,7 @@ void markMoveBroadcast();   boolean moveBroadcastPending();   void clearMoveBroa
 | ⑨ | `switchScene` | 无 | — | **不发**；清掉待发标记与落位等待（§5.4、§5.8）。旧场景的人收到 51；新场景的人从 21（带朝向、速度为零）看到它，不需要 133 |
 | ⑩ | 新观察者（J7 的两处 + 瞬移重建） | 无（缺口 9） | 目标 `isMoving()` | 21 / 47 带朝向；在动的目标在 47 之后进一条 135 给观察者（§5.5）。不挂待发、不给目标的老观察者重发 |
 | ⑪ | 同场景瞬移 | `TeleportWithinScene` | — | 不发 133（旧观察者收 64，新观察者收 21，瞬移后速度为零）；清待发（§5.7） |
-| ⑫ | `integrate` 逐帧外推（J0） | `movement.cpp:108-110` 只置脏位；proto 注释「NOT every tick」 | — | **不发、不挂**：位置按已告知的速度连续演进，客户端按同一速度自行外推，没有新信息；挂了就是每个移动中的实体恒为 20 Hz |
+| ⑫ | `integrate` 逐帧外推（J0） | `MovementSystem::Update` 的普通积分分支只置脏位；proto 注释「NOT every tick」 | — | **不发、不挂**：位置按已告知的速度连续演进，客户端按同一速度自行外推，没有新信息；挂了就是每个移动中的实体恒为 20 Hz |
 
 **`haltMotion` 与两个现有入口**：
 
@@ -485,7 +491,7 @@ private void haltMotion(ScenePlayer p) {
 **唯一的发送函数**：
 
 ```java
-/** 发一条 133 给此刻看得见 p 的人。只读 watchers、不增删任何集合，可以在遍历 scene.players() 时调用（基线 movement.h:48 同样允许）。 */
+/** 发一条 133 给此刻看得见 p 的人。只读 watchers、不增删任何集合，可以在遍历 scene.players() 时调用（基线 movement.h 的 BroadcastMove 声明说明同样允许）。 */
 private void broadcastMove(ScenePlayer p) {
     p.clearMoveBroadcast();                                   // 有没有收件人都清
     Collection<ScenePlayer> watchers = p.scene().watchers(p); // 不含 p 自己
@@ -534,7 +540,7 @@ stepping = false                 // finally
 - **实现**：`flushMoveBroadcasts` 直接遍历 `scene.players()` 看标记（与 `integrate` 同为 O(N) 的布尔检查；也可以并进 `integrate` 的同一个循环——每人先兑现、再外推，等价），
   不另建待发名单，所以移除 / 换场景不需要额外清理名单；`switchScene` 与瞬移只把标记清掉。帧开头这一段的耗时记进 `game.scene.broadcast{kind=actor_move}`（§7）。
 - **收件人** = `scene.watchers(p)`（不含 p 自己）。不需要基线的「互相可见」过滤：Java 的反向索引是精确的、观察者一侧的每次增删都通知了（§3.2 末段），所以它就是「客户端上有 p 的人」；
-  基线那条「对方表满时收不到」的缺口在 Java 不存在（有意差异 X1）。冻结中会话已离开的实例也会被当成收件人，由 gate / 链路层丢弃，与 66 同（§3.2）。
+  基线那条「自身表满漏收观察者，使该观察者收不到移动」的缺口在 Java 不存在（有意差异 X1）。冻结中会话已离开的实例也会被当成收件人，由 gate / 链路层丢弃，与 66 同（§3.2）。
 - **与视野的关系、带宽上界**：133 只读 `watchers`，不触发、也不参与视野重判（位置变化照旧经 `Scene#relocate` → `ViewIndex.moved` 登记，按「静止立即、移动中每累计 1 m」的节奏重判）。
   容量只约束观察者自己的表（`ViewIndex.DEFAULT_CAPACITY = 100`），`watchers(p)` 可以超过 100；所以**单个客户端**收到的 133 只来自它 `watching` 里的实体，
   上界 = 100 × 20 条 / 秒，典型 = 可见的移动者数 × 4–8 条 / 秒（每条约 77 字节，§5.2）；服务器出站总量 = Σ_W |watching(W)| × 各实体的兑现率 ≤ 在线人数 × 100 × 20 条 / 秒。
@@ -566,7 +572,7 @@ PARITY「属性同步 66」行的标题「移动广播的唯一通道」与「�
 ```java
 /**
  * 逻辑线程，且不在帧内：step() 期间调用抛 IllegalStateException（它会改兴趣集合）。
- * target 必须在世界范围内。facing 为 null 表示保持原朝向——Java 扩展，只给管理口用；基线恒覆盖（movement.cpp:189）。
+ * target 必须在世界范围内。facing 为 null 表示保持原朝向——Java 扩展，只给管理口用；基线 TeleportWithinScene 恒覆盖。
  */
 public TeleportResult teleportWithinScene(ScenePlayer p, Vec3 target, Rotation facing, TeleportReason reason)
 ```
@@ -634,7 +640,7 @@ public TeleportResult teleportWithinScene(ScenePlayer p, Vec3 target, Rotation f
 - 纯函数 `MovementRules.judgeAfterTeleport(double horizontalDistance, long nowNanos, long deadlineNanos) → SETTLED | EXPIRED | STALE`，规则照基线：先距离（≤ 3.0 m，含等号 → `SETTLED`）
   后时间。**时间判定用差值** `nowNanos - deadlineNanos >= 0` → `EXPIRED`，否则 `STALE`：`SceneClock#nanoTime` 就是 `System.nanoTime()`，起点任意、可为负，只保证差值有意义；
   仓库里现有的到期判断都用差值（`SceneWorld.java:1589` `clock.nanoTime() - sw.deadlineNanos() >= 0`、`TransferTombstone.java:65`）。基线直接比大小是因为它用的是 steady_clock 自纪元起的 uint64 毫秒。
-  `deadlineNanos = now + TELEPORT_SETTLE_TIMEOUT.toNanos()`，允许回绕。常量 `TELEPORT_SETTLE_RADIUS = 3.0`、`TELEPORT_SETTLE_TIMEOUT = 3 s`（基线 `movement.h:20-23`），放 `MovementRules`。
+  `deadlineNanos = now + TELEPORT_SETTLE_TIMEOUT.toNanos()`，允许回绕。常量 `TELEPORT_SETTLE_RADIUS = 3.0`、`TELEPORT_SETTLE_TIMEOUT = 3 s`（基线 `movement.h` 的同名落位常量），放 `MovementRules`。
 - 在 `applyMove` 里的位置：`isAcceptable()` **之后**（非有限 / 越界的输入照旧计 `INVALID`，不让 NaN 距离参与判定；基线对非有限上报是按时间落到 kStale / kExpired，口径不同但都是丢弃）、
   `MoveGuard.admit` **之前**：
   - `settle == null` → 照常；
@@ -711,8 +717,8 @@ public TeleportResult teleportWithinScene(ScenePlayer p, Vec3 target, Rotation f
 |---|---|---|
 | 瞬移原语 | `SceneWorld#teleportWithinScene(p, target, facing, reason)` → `SceneMetrics.TeleportResult`（public，逻辑线程，不在帧内） | 归队：`(队员, leader.position(), 朝向, TEAM_REGROUP)`。原语拒冻结 / 战斗，4.3b 的守卫（对队员自己的 `switchInFlight`、`inBattle`、战斗锁）照旧在前 |
 | 原因 | `SceneMetrics.TeleportReason.TEAM_REGROUP`（指标 `team_regroup`；130 的 wire 值 `MovementRules.TELEPORT_REASON_TEAM_REGROUP = 5`） | robot team 断言「B 收到 130 reason 5」用它 |
-| 互相可见 | `SceneWorld#mutuallyVisible(a, b)`（public，逻辑线程；同场景且 `a ∈ watching(b) ∧ b ∈ watching(a)`） | `ShouldRegroup(距离, 互相可见)` 直接用。**进场与瞬移同步评估**，基线 `visibilityEvaluated`（`player_team.cpp:543-555`）防的两种情况——进场链、瞬移后紧跟的第二次检查——在 Java 不存在，4.3b 不需要那个分支；普通移动仍按帧内节奏重判（见下面 ①） |
-| 朝向 | `ScenePlayer#rotation()`（改为 public，`Rotation` 不可变，可为 null） | 传 `leader.rotation()`，**为 null 时传 `Rotation.getDefaultInstance()`**（与基线 `player_team.cpp:569` 同值：队长没写过朝向时队员被写成零朝向）。不要把 null 直接传进去——null 在原语里是「保持原朝向」，只给管理口用 |
+| 互相可见 | `SceneWorld#mutuallyVisible(a, b)`（public，逻辑线程；同场景且 `a ∈ watching(b) ∧ b ∈ watching(a)`） | `ShouldRegroup(距离, 互相可见)` 直接用。**进场与瞬移同步评估**，基线 `visibilityEvaluated`（`PlayerTeamSystem::RegroupToLeader`）防的两种情况——进场链、瞬移后紧跟的第二次检查——在 Java 不存在，4.3b 不需要那个分支；普通移动仍按帧内节奏重判（见下面 ①） |
+| 朝向 | `ScenePlayer#rotation()`（改为 public，`Rotation` 不可变，可为 null） | 传 `leader.rotation()`，**为 null 时传 `Rotation.getDefaultInstance()`**（与基线 `RegroupToLeader` 的 `targetRotation` 同值：队长没写过朝向时队员被写成零朝向）。不要把 null 直接传进去——null 在原语里是「保持原朝向」，只给管理口用 |
 | 落位等待 | 原语自带；重复瞬移覆盖目标与截止 | 4.3b 不需要自己挡过期上报 |
 | 指标 | `game.scene.teleports{reason=team_regroup, result}` 2.10 就注册 | 4.3b 只加 `TeamFollowResult` 的新取值（如 `REGROUPED` / `REGROUP_SKIPPED`） |
 | robot | robot `MessageIds` 的 `notifyActorMove` / `notifyActorMoveList` / `notifyTeleport`；`MoveAssertions` 的 133 / 135 / 130 解析与按实体号匹配、瞬移判定纯函数 | `TeamScenario` 直接复用 |
@@ -724,7 +730,7 @@ game-team 入队提交后通知被加入者所在 scene 节点的通道（改「
 
 **4.3b 要考虑的 2.10 事实**：
 
-- ① **「互相不可见」的三种来源**：(i) 兴趣表满；(ii) 判定距离是水平的而视野是三维的（基线 `player_team.cpp:557-559` 只算 dx / dy，Java `ViewIndex` 按三维 ≤ 10 m，高度原样取上报值），
+- ① **「互相不可见」的三种来源**：(i) 兴趣表满；(ii) 判定距离是水平的而视野是三维的（基线 `RegroupToLeader` 只算 dx / dy，Java `ViewIndex` 按三维 ≤ 10 m，高度原样取上报值），
   水平 ≤ 8 m 而高差大时互不可见；(iii) 重判节奏窗口——移动输入 `relocate` 之后到下一帧 `refreshViews` 之前还没重判（单条上报可跳 ≤ 24 m）。(ii)(iii) 瞬移都能解决，照常瞬移至多多一次，无害。
   只有 (i) 是 Java 的瞬移解决不了的：`ViewIndex` 不挤人（`link` 表满直接 false，`ViewIndex.java:273-276`；`enter` 按格子遍历序先到先得），瞬移后队长不一定进得了队员新建的表，队长自己的表满也收不下队员。
 - ② **基线靠 kTeammate 挤出解决表满**（§1.8），归队瞬移后队长 ↔ 队员必互见；Java 的 team-spec D8（「不做队友 AOI 优先级……优先级没有可见效果」，`team-spec.md:1913`）的前提在归队落地后不再成立，
@@ -752,7 +758,7 @@ game-team 入队提交后通知被加入者所在 scene 节点的通道（改「
   - 「组队跟随 v1.1」行 → 只注明「依赖的 2.10 已交付（Java 进行中）；4.3b 要重开 team-spec D8」，状态不变。
   - 「gate 按消息号限频」行 → 行文更正（不改行为）：「语义一致、边界略宽松」改为「Java 的持续受理上限是基线的 2 倍（基线按整秒时间戳、任意相邻两个整秒合计 N 条；Java 是 1 秒纳秒滑窗、N 条 / 秒）」。
     要不要收紧到与基线一致不在 2.10 范围，另行决定。
-- **`docs/reference/mmorpg-client-contract-movement.md`**：头部基线改为「`9c9c012b7`，移动广播与瞬移部分按 `73b852f3`」；§0 第 2–3 条（133 有发送方、别人看到你在动靠 133、
+- **`docs/reference/mmorpg-client-contract-movement.md`**：头部注明当前契约同步记录 `f83da2e18`，移动广播与瞬移源码按 `275f9c5c0` 复核；§0 第 2–3 条（133 有发送方、别人看到你在动靠 133、
   并注明客户端没有 66 的处理器）；§2 消息清单（133 / 135 / 130 的「基线实际行为」与 66 行「唯一通道」）；§3.6 标题与 130 的 reason 取值（补 5，注 Java 管理口用 3）；
   §4.5 两行（「别人收到 66」→「别人收到 133（与 66）」）；§6 加 6.0「133」、把 6.1 的「唯一的位置广播」改掉、§6.3（`:281`「观察者只能从后续的 66 拿朝向」→ Java 由 21 / 47 带朝向）；
   §10 清单（`:374`「不发 133 / 135 / 130」）改为本规格的要求；新增一节「瞬移与落位等待」。
@@ -777,9 +783,9 @@ game-team 入队提交后通知被加入者所在 scene 节点的通道（改「
   - `Scene.java:19`（「位置变化只能经本类（add / remove / relocate）」）；`ViewIndex.java:130-131`（「离开者自己的兴趣列表静默清空」——`reenter` 的调用方要自己通知）。
   - `PlayerBattleService.java:221`；`SceneMetrics` 的 `MoveResult`（`:126-138`）与 `BroadcastKind`（`:177-182`）成员注释、`adminRequest` 的 javadoc（`:1023-1024`）。
   - §5.9 列的管理口注释与文案；`game-api` 的 `scene_admin.proto` 文件头；robot `SceneAdminClient` 类注释（`:19-26`）与 `MovementScenario` 类 javadoc。
-  - **引用基线行号的注释**（停在 `9199d217d` 之前的行号，2.10 正好改这几处代码）：`ClientRequestHandler.java:322`（「基线 mvh.cpp:170-173、:205-208」）、`:329`（「基线 mvh.cpp:188-192」），`BattlePolicy.java:21`、`:24`，
-    `SceneWorld.java:2481` 与 `InBattleGateMatrixTest.java:646`（「movement.cpp:49-52 的 exclude<InBattleComp>」）。改成 `73b852f3` 的行号并**同时写函数名**
-    （「mvh.cpp MoveStart / MoveSync / MoveStop 的战斗·冻结闸」= `:171-174` / `:221-224` / `:195-202`；`movement.cpp:71-74`），下次基线漂移不必再改；STOP_ONLY 的注释补上基线在这里无条件 `BroadcastMove`（`mvh.cpp:200`）。
+  - **引用基线源码的注释**：`ClientRequestHandler`、`BattlePolicy`、`SceneWorld`、`InBattleGateMatrixTest` 的旧行号改用当前 `275f9c5c0` 的文件与函数名：
+    `mvh.cpp` 的 `MoveStart` / `MoveSync` / `MoveStop` 战斗·冻结闸，以及 `MovementSystem::Update` 的 `exclude<InBattleComp>`；
+    STOP_ONLY 注释说明当前基线 `MoveStop` 在这里无条件调用 `BroadcastMove`。不用旧行号冒充当前定位。
   - `MovementSyncTest` 的用例名（§11.2 T12）与 `HandOffTransferTest` / `ZoneTravelHandOffTest` 的用例名。
 - `inventory/delta-20261010.md` 是快照，不改（条目 ④ 的勘误见 §0.2）。
 
@@ -803,9 +809,8 @@ game-team 入队提交后通知被加入者所在 scene 节点的通道（改「
 
 不改：同步产物（proto、消息号、tip、配表）、gate（对 scene 下行没有消息号白名单）、login、scene-manager、game-team、`tools/local`（缺省的 18104 就是切片第一个 scene 节点的管理端口，令牌由 `start-slice.sh` 生成）。
 
-**提交注意**：代码在 worktree `D:\luyuan\wt210`（分支 `batch-2.10`）里做，提交只 `git add` 本批路径、不用 `-A`；PARITY.md 在 worktree 里正常提交，不需要临时拼索引（先前「另一个会话未提交的组队改动」已随 `d942f74` 提交并推送）。
-分支上已有 `a761096`。接回时在 worktree 里 `git rebase main`，再到主工作区 `git merge --ff-only batch-2.10`；主工作区若有别的会话未提交且与本批重叠的改动，ff 会拒绝（fail-closed），先与对方协调、
-等对方提交后再 rebase——修订收尾时就有这样一批（战斗缺省回合上限，重叠 `PARITY.md` 与 `RobotOptions.java`，见文首），**不要替对方提交，也不要绕开它**。
+**本次提交边界以任务书为准**：独立 worktree `D:\luyuan\wt210-impl`、分支 `batch-2.10-impl`，从 `origin/main` 的 `58e0296b` 开始；只 `git add` 本批路径、不用 `-A`，按 S0 / S1 / S2 / S3 / R / D 分包中文提交。
+不修改主工作区，不使用或删除旧 `D:\luyuan\wt210`，不推送、不合并、不自行接回 main；完成仓库外报告 `D:\luyuan\REPORT-gpt-batch-2.10.md` 后停下，交由后续独立审查。
 
 ---
 
@@ -813,7 +818,7 @@ game-team 入队提交后通知被加入者所在 scene 节点的通道（改「
 
 ### 6.1 基线
 
-全是编译期常量：`kTeleportSettleTimeoutMs = 3000`、`kTeleportSettleRadius = 3.0`、`kTeleportReasonTeamRegroup = 5`、`kMoveStateStopped / Walking = 0 / 1`（`movement.h:13-23`）；
+全是编译期常量：`kTeleportSettleTimeoutMs = 3000`、`kTeleportSettleRadius = 3.0`、`kTeleportReasonTeamRegroup = 5`、`kMoveStateStopped / Walking = 0 / 1`（`movement.h` 的命名常量）；
 `kTeamRegroupDistance = 8`（4.3b）。没有配置项。
 
 ### 6.2 Java
@@ -828,7 +833,7 @@ game-team 入队提交后通知被加入者所在 scene 节点的通道（改「
 
 ### 7.1 基线
 
-只有日志：`metric=team_regroup` / `team_regroup_skipped`（`player_team.cpp`，4.3b）与落位超时的 `LOG_WARN`（`movement.cpp:250-253`）。133 没有任何计数。
+只有日志：`metric=team_regroup` / `team_regroup_skipped`（`player_team.cpp`，4.3b）与落位超时的 `LOG_WARN`（`MovementSystem::ShouldDropReportAfterTeleport` 的过期分支）。133 没有任何计数。
 
 ### 7.2 Java（Micrometer；不以 player / session / 场景号 / 节点号作标签，`architecture.md:1871`、`AGENTS.md` §5）
 
@@ -863,9 +868,9 @@ game-team 入队提交后通知被加入者所在 scene 节点的通道（改「
 |---|---|---|
 | B-1 | 133 不合批：扇出跟着输入速率走（gate 限频后单人突发 50 条 / 秒、持续约 25 条 / 秒，§1.4），没有自己的上限 | 输入触发的 133 帧开头合并，每实体 ≤ 20 Hz（X2），与输入速率无关 |
 | B-2 | AFK停推、进战、交接冻结不清速/不发133，客户端未立即获知真实停止；历史 `f537079` 无限外推，当前 `9ccb99c51` 超过1s才自行清速 | 全部清速 + 当场133（X4、X5），不能依赖客户端兜底 |
-| B-3 | 「互相可见」过滤：对方表满时收不到移动（`movement.h:44-45`） | 反向索引精确，无此缺口（X1） |
+| B-3 | 「互相可见」过滤：自身表满漏收观察者时，该观察者虽看得见自己也收不到移动（`BroadcastMove`） | 反向索引精确，无此缺口（X1） |
 | B-4 | 新观察者没有初始状态（缺口 9）：移动中的人进视野静止到下一条 133；创建消息不带朝向 | 21 / 47 带朝向，在动的目标当场补 135（X3） |
-| B-5 | 瞬移后新位置的可见性晚到下一个模拟步，其间被瞬移者的 133 没人收到；自己一侧全量销毁再重建（仍看得见的人也闪一下）；钉住它的观察者收不到销毁 / 重建 | 同步重建，本人一侧只发差集；Java 没有钉住（X6） |
+| B-5 | 瞬移后新位置的可见性晚到下一个模拟步，其间被瞬移者的 133 没人收到；自己一侧全部非钉住关系销毁再重建（仍看得见的人也闪一下）；钉住它的观察者收不到销毁 / 重建 | 同步重建，本人一侧只发差集；Java 没有钉住（X6） |
 | B-6 | 4.3b 的「还没评估」窗口要靠 `visibilityEvaluated` 绕开，否则进场链与紧跟的第二次检查都会重复瞬移；表满靠 kTeammate 静默挤出（§1.8） | Java 进场 / 瞬移同步评估，没有这个窗口；表满是 4.3b 要重开的 team-spec D8（§5.12 ②） |
 | B-7 | 130 的 `input_seq` 不设，proto 注释说客户端据此丢弃预测——客户端实际不用（§2.3） | 照搬（Q8） |
 | B-8 | 本次未重跑 C++，历史证据不代替跨实现验收 | Java 以自己的单测为准；robot 与真客户端的证据待在有中间件 / Unity 的机器上跑（§11.0）；跨实现只对客户端可见形状（§11.7） |
@@ -906,12 +911,12 @@ game-team 入队提交后通知被加入者所在 scene 节点的通道（改「
 
 | 编号 | 差异 | 理由 | 客户端可见？ | 两版同改？ |
 |---|---|---|---|---|
-| X1 | 133 收件人 = `watchers(p)`（精确反向索引），不做「对方表里也有我」的过滤 | Java 的 `watchers` 就是「客户端上有 p 的人」；基线的过滤是因为它不知道谁看得见自己（`movement.h:41-45`）；没有隐身、没有 NPC | 是：基线表满缺口下收不到的人，Java 收得到 | 否（基线做法受它的 AOI 结构限制） |
+| X1 | 133 收件人 = `watchers(p)`（精确反向索引），不做「对方表里也有我」的过滤 | Java 的 `watchers` 就是「客户端上有 p 的人」；基线的过滤是因为它不知道谁看得见自己（`movement.h` 的 `BroadcastMove` 说明）；没有隐身、没有 NPC | 是：基线表满缺口下收不到的人，Java 收得到 | 否（基线做法受它的 AOI 结构限制） |
 | X2 | **输入触发**的 133 在下一帧开头兑现、同帧合并，每实体 ≤ 20 Hz；`server_time_ms` 取发送时刻（帧开头）的墙钟。基线每条输入当场发、时间戳是裁决时刻 | 扇出与输入速率解耦（B-1）；位置仍是裁决值，帧开头那一刻服务器的权威位置就是它 | 是：每条样本晚 0–50 ms 且逐条不同，当前 `9ccb99c51` 上表现为误差插值的那条样本在 0.15 s 内多收 / 少收至多「速度 × 0.05」（≤ 0.5 m）；同帧的「停 + 走」只看到最终状态；`server_time_ms` 比基线晚 0–50 ms（当前客户端仍不读） | mmorpg 可选 |
 | X3 | 新观察者的初始状态：**21 / 47 的 `transform` 带朝向**（基线 `FillActorCreateMessageInfo` 只填 location），新看见的**在动**目标在 47 之后补一条 135；基线不补 | 创建消息带完整的初始 transform 是状态复制的标准做法，客户端本来就读（§2.4）；修缺口 9 在真客户端上的版本（Java 原先的 66 补发客户端收不到）；静止目标因此不需要任何补发 | 是：进视野即在动；朝向只落在实体的 transform 上——当前 `9ccb99c51` 的精灵仍始终朝相机，朝向在画面上不可见（§2.2） | mmorpg 可选（缺口 9 已登记「mmorpg 待做」） |
 | X4 | 挂机停推清速并当场发 133；基线既不清速也不发 | 「移动上行」有意差异 ③ 的延续（原先发的是客户端收不到的 66） | 是 | mmorpg 可选（③ 已登记） |
 | X5 | 备战 / 进场恢复挂冻结 / 交出冻结时停步并当场发 133；基线要等客户端自己发 131（B3），交接放行经 `DestroyDeposedPlayer` 销毁、不发 133 | Java 早已在这些时刻停步（D5、5.2 §5.5），只是改用客户端能收的通道 | 是：旁人看到的人在冻结 / 备战那一刻停下 | mmorpg 可选 |
-| X6 | 瞬移的可见性重建在同一次调用里同步完成（旧观察者 64、新观察者 21）；**本人一侧只发差集**，仍看得见的人不销毁不重建。基线销毁当下、重建在下一个模拟步（新观察者收 47），自己一侧全量销毁 | Java 的视野索引可以当场判，分得出谁仍可见；没有「还没评估」窗口，4.3b 不需要绕开 | 是：新位置的人早到一个模拟步（名义 ≤ 50 ms）看见；新观察者收 21（单条）而不是 47（列表），客户端同义；被瞬移者屏幕上仍看得见的人不闪 | 否 |
+| X6 | 瞬移的可见性重建在同一次调用里同步完成（旧观察者 64、新观察者 21）；**本人一侧只发差集**，仍看得见的人不销毁不重建。基线销毁当下、重建在下一个模拟步（新观察者收 47），自己一侧全量销毁非钉住关系 | Java 的视野索引可以当场判，分得出谁仍可见；没有「还没评估」窗口，4.3b 不需要绕开 | 是：新位置的人早到一个模拟步（名义 ≤ 50 ms）看见；新观察者收 21（单条）而不是 47（列表），客户端同义；被瞬移者屏幕上仍看得见的人不闪 | 否 |
 | X7 | 瞬移原语自己拒冻结 / 回合制战斗在途；基线原语不查（调用方查） | 冻结快照一致性与战斗语义属于原语的前置条件，放在原语里一处守住 | 否 | 否 |
 | X8 | 掉线 / 主动退出 / 被接管前不发「停了」的 133；基线经 `HandleExitGameNode` 的退出（断线 / 主动退出 / 停机 / 排空疏散 / 非交接的 ReleasePlayer）由 `StopMotionForExit` 发 133 后紧跟 51 | 51 随即销毁实体，133 没有可见效果。Java「交出提交后的移除」与基线的 `DestroyDeposedPlayer` 一样不发，不算差异；Java 停服不发任何下行（链路已先断开） | 是：少一条无效果的 133 | 否 |
 | X9 | dev 管理口瞬移（reason 3） | 4.3b 之前端到端验证原语；Java 自有工具，不是客户端协议 | 否（生产不可达） | 否 |
@@ -936,10 +941,10 @@ game-team 入队提交后通知被加入者所在 scene 节点的通道（改「
 
 ### 9.3 照搬基线、不算差异
 
-133 的字段与取值（`entity` = 场景实体号、transform 整体、velocity 恒在、`server_time_ms` = 墙钟毫秒（时钟口径相同，取值时刻见 X2）、`move_state` 只有 0 / 1）；
+玩家移动路径的 133 字段与取值（`entity` = actor 网络号、transform 整体、velocity 为当前组件内容（C++ 无组件时可缺席，Java 玩家模型恒有）、`server_time_ms` = 墙钟毫秒（时钟口径相同，取值时刻见 X2）、`move_state` 只有 0 / 1）；
 每条被接受的输入都会产生一次（合并前）；逐帧外推不发；不发给自己；130 只发给本人、`input_seq` 不设、reason 透传、`transform.rotation` = 瞬移后的朝向；
-瞬移 = 写位置、写朝向（`facing` 非 null 时；null「保持」是只给管理口用的 Java 扩展）、清速度、`MoveGuard` / 落位等待、旧观察者销毁、新位置按进视野半径重新进场；
-落位等待的 3 s / 3 m、先距离后时间、换场景作废、没有定时器、在战斗 / 冻结闸之后判、被丢弃的上报照样刷新活跃帧；交接放行后的源端移除不发 133；66 原样保留。
+瞬移 = 写位置、写朝向（`facing` 非 null 时；null「保持」是只给管理口用的 Java 扩展）、清速度、落位等待、旧观察者销毁、新位置按进视野半径重新进场；
+落位等待的 3 s / 3 m、先距离后时间、换场景作废、没有定时器、在战斗 / 冻结闸之后判、被丢弃的上报照样刷新活跃帧；交接放行后的源端移除不发 133；66 原样保留。Java 另重置既有 `MoveGuard` 锚点；C++ 没有该 Java 移动限距模型。
 
 ---
 
@@ -982,12 +987,12 @@ game-team 入队提交后通知被加入者所在 scene 节点的通道（改「
 
 | 基线用例 | 性质 | Java 对应 |
 |---|---|---|
-| `aoi_system_test.cpp:303` `ResetEntityVisibilityRebuildsViewAfterSameHexTeleport` | 同格、**原先互不可见**（相距 14，`:313-314`）→ 瞬移到脚下后双向建立（`:322-323`） | §11.3 V1 里 C 的那一半（只创建、没有 64）；Java 没有「同格不重判」，不需要单独的同格用例 |
-| `:328` `ResetEntityVisibilityDropsOldNeighbours` | 远距离瞬移摘掉旧邻居 | §11.3 V1 |
-| `:358` `ResetEntityVisibilityKeepsPinnedEntriesOnBothSides` | 钉住的条目不动 | 不适用（Java 没有钉住） |
-| `:379` `ResetEntityVisibilityBeforeFirstUpdateIsHarmless` | 首次 Update 之前调用无害 | 不适用（Java 进场同步评估）；改为 §11.3 V6「刚进场就瞬移」 |
-| `:1228` / `:1235` / `:1244` `TeleportReportVerdictTest` | 判定纯函数：远且未到期 → `kStale`（`:1232`）；恰好 3.0 m → `kSettled`（`:1238`，到期前后都是）；远且恰好到期 → `kExpired`（`:1246`） | §11.4 S1–S3 逐条照写（三个边界基线已含）；另加 Java 自己的差值比较用例 |
-| `:1204` / `:1211` / `:1218` `TeamRegroupRuleTest` | 归队判定 | 4.3b |
+| `aoi_system_test.cpp` 的 `ResetEntityVisibilityRebuildsViewAfterSameHexTeleport` | 同格、**原先互不可见**（相距 14）→ 瞬移到脚下后双向建立 | §11.3 V1 里 C 的那一半（只创建、没有 64）；Java 没有「同格不重判」，不需要单独的同格用例 |
+| `ResetEntityVisibilityDropsOldNeighbours` | 远距离瞬移摘掉旧邻居 | §11.3 V1 |
+| `ResetEntityVisibilityKeepsPinnedEntriesOnBothSides` / `FirstEntryAfterResetKeepsPinnedEntries` | 钉住条目在重置与后续首次入格中保留 | 不适用（Java 没有钉住） |
+| `ResetEntityVisibilityBeforeFirstUpdateIsHarmless` | 首次 Update 之前调用无害 | 不适用（Java 进场同步评估）；改为 §11.3 V6「刚进场就瞬移」 |
+| `TeleportReportVerdictTest` 的 `FarReportBeforeDeadlineIsStale` / `NearReportSettlesBeforeAndAfterDeadline` / `FarReportAtOrAfterDeadlineExpires` | 远且未到期 → `kStale`；恰好 3.0 m → `kSettled`（到期前后都是）；远且恰好到期 → `kExpired` | §11.4 S1–S3 逐条照写（三个边界基线已含）；另加 Java 自己的差值比较用例 |
+| `TeamRegroupRuleTest` 的 `InvisibleLeaderAlwaysRegroupsEvenWhenAdjacent` / `VisibleLeaderWithinFormationIsLeftAlone` / `VisibleLeaderBeyondFormationRegroups` | 归队判定 | 4.3b |
 | 无 | 133 的内容、收件人、调用点；`TeleportWithinScene` 五步；`ShouldDropReportAfterTeleport` 的换场景作废分支；瞬移的任何下行（基线四条 Reset 用例只断言兴趣表与格子，不断言 64 / 47） | §11.2；§11.3 V1 / V2（交集）；§11.4 S7 |
 
 **本次未复跑以上基线用例**（§1.9），对照只用来保证规则覆盖，不当作基线行为的证据。
@@ -1025,7 +1030,7 @@ battle 包读旁观者下行用 `BattleFixture.pushes(watcher, IDS.notifyActorMo
   - 进场者的观察者不收 133（进场者速度为零）。
 - **T11 补发不清待发**：A 在动且挂着待发 → C 进场收 47 + 135{A} → 下一帧开头老观察者 B 仍收到 A 的 133（C 也再收一条同状态的，R9）。
 - **T12 改名**：`MovementSyncTest` `:621` 改名为「从不发 65 / 55 / 82 / 68 / 75」，`never` 集合去掉 133 / 135 / 130。
-- **T13 现有用例的期望序列**（下表；按本稿的设计对着现有断言逐条推出来的，没有运行证据）。
+- **T13 现有用例的期望序列**（下表保留实现前→实现后的推演；已据运行结果落实，证据见 §13，原66内容断言保留）。
 - **T14 指标**：`deliveries{broadcast}` / `{catch_up}` 的增量（T1、T10 里顺带）；`broadcast{kind=actor_move}` 三帧计 3 次（加在 `SceneWorldTest`「指标_每帧记一次帧耗时…」用例里，`:579`）；
   `SceneMetricsTest` 加一条「移动广播与瞬移指标_启动即注册_导出名与标签」：`game_scene_broadcast_seconds_count{kind="actor_move"}`、`game_scene_moves_total{result="teleport_stale"}`、
   `game_scene_actor_move_deliveries_total{kind=…}`、`game_scene_teleports_total{reason=…,result=…}`（2 × 5 全部为 0）、`game_scene_teleport_settles_total{result=…}`、`game_scene_admin_requests_total` 的 `op="player_teleport"`。
@@ -1060,8 +1065,8 @@ battle 包读旁观者下行用 `BattleFixture.pushes(watcher, IDS.notifyActorMo
 `ChannelDrainTest`（`:119-129`、`:171`）、`ClientRequestHandlerTest`（`:129`、`:155`）、`HandOffTransferTest`（`:534-537`）、`MirrorSceneTest`（`:86`、`:114-116`）、`MovementSyncTest`（`:440`、`:461-464`）；
 game-robot 的 `PlayerFlow.awaitSelfActor`（`:295-313`）、`CrossNodeScenario.findActor`（`:654`）与各场景对它的调用（`SceneMoves`、`MovementScenario`、`ReconnectScenario`、`TravelScenario`、`BattleSettleScenario`、
 `DungeonScenario`、`MirrorScenario`、`SkillScenario`），测试替身 `CrossNodeScenarioTest`（`:46-47`）与 `FakeTravelWorld`（`:463-465`，自己构造 21）。新增的朝向断言放 T10 与 §11.6 重登段。
-以上「不变 / 不受影响」都是推演，**实现时以运行结果为准**：落笔前在驱动过移动的测试类（grep `applyMove(|moveStart(|moveSync(|moveStop(|setVelocity(`）里查 `messageIdsTo(` / `sink.to(` 后接
-`containsExactly|containsOnly|singleElement|hasSize` 的断言，逐条对一遍，改动的断言逐个列在提交说明里。
+以上表格保留实现前的推演与原始行号；本批已逐项核对驱动移动后的下行断言并运行回归，实际结果见 §13。
+改动的期望序列逐项列于S1提交正文和交付报告，原66内容断言保留；MovementSyncTest的26个用例与抽取的9个辅助方法另经只读保护复核。
 
 ### 11.3 瞬移（新类 `TeleportWithinSceneTest`；`ViewIndexTest` 加 `reenter` 的用例）
 
@@ -1177,8 +1182,8 @@ Go robot 的 133 / 135 / 130 处理器是空函数（§1.9），**不能做任�
 7. 用robot造20个以上移动者围着真客户端，观察帧率与66日志增长；只作为两版同步评估停发移动66的输入，不改变2.10设计。
 ### 11.9 回归面与构建
 
-- 在 worktree 里 `mvn -o -B -fae clean verify`（**不用 `install`**：多个会话共用 `~/.m2`，`install` 会互相覆盖 SNAPSHOT）；接回 main 之后在 main 上再跑一次全量。
-  当前基线：main `d942f74` 上 9892 条用例 0 失败（其中 game-match 的 `DevActivityBattleControllerTest` 在机器高负载时会因 10 s HTTP 超时报错，单独重跑通过，与本批无关）。
+- 在本次独立 worktree 里 `mvn -o -B -fae clean verify`（**不用 `install`**：多个会话共用 `~/.m2`，`install` 会互相覆盖 SNAPSHOT）；当前任务不接回 main，后续由独立审查者决定接回并复跑。
+  历史基线 `d942f74` 的9892项不作为本次证据；本次从 `58e0296b` 开始，最终结果见 §13。已知 game-match 的 `DevActivityBattleControllerTest` 高负载时可能因10s HTTP超时失败，若发生必须逐次记录。
 - 重点模块 game-scene、game-robot、game-api。
 - 现有断言：**66 的解析内容与时机断言一条不改**（这是「66 不变」的证据）；要改的只有 T13 列出的期望序列（多出 133 / 135）、两个 HandOff 用例与 T12 的改名；视野 / 冻结 / 战斗用例的其余断言不动。
   没有运行证据时不声称「测试通过」。
@@ -1224,7 +1229,7 @@ Go robot 的 133 / 135 / 130 处理器是空函数（§1.9），**不能做任�
 11. **真客户端验收**（D15）：§11.8 第 2、4、5、7 步，R12。来源：java-current:JAVA-8；client 视角补充发现第 1 条。
 12. **文档与注释清单**（D16）：§5.13（aoi.md 的 §0 / §7 / §10、scene.md、README、路线图「建议顺序」与 7.5 待办、`architecture.md` 的指标表与管理口、引用基线行号的注释、`setPosition` 的 javadoc 等）。
     来源：tests-docs:TP-7、TP-8；design-teleport:TP-13；cpp-teleport:CPPTP-8。
-13. **工作区、提交与行号**：文首、§5.14 提交注意、§11.9；行号更正——`movement.h:38-49` / `:61-77`，`GameClient.cs:1848-1877` / `:1827-1877`，`TianyongPlayerController.cs:512-519`，
+13. **工作区、提交与行号**（以下为 2026-10-13 历史定位，当前以 §1 / §12.7 的函数名为准）：文首、§5.14 提交注意、§11.9；行号更正——`movement.h:38-49` / `:61-77`，`GameClient.cs:1848-1877` / `:1827-1877`，`TianyongPlayerController.cs:512-519`，
     `SceneWorld.java` 的 `applyMove` `:2403-2435`、`enterScene` `:1490-1512`、`removePlayer` `:2839-2858`、`syncAttributes` `:2535-2548`，`ClientRequestHandler.java:328-336`，`SceneAdminController.java:32-45`；PARITY 改为按行标题引用。
     来源：cpp-133:CPP133-5、CPP133-6；java-current:JAVA-7、JAVA-9；tests-docs:TP-14；client:CLI-11、CLI-12；design-frame:DSN-13；design-teleport:TP-15、TP-16。
 
@@ -1277,15 +1282,70 @@ D11 给 4.3b 的说明（重开 D8、`leader.frozen()`、不预置表满查询�
 
 ### 12.7 C++ 与 Java 实现前基线复核（2026-10-26）
 
-- C++ `275f9c5c0`：133 的 B1/B2/B3 仍在移动 handler 183/232、212、200，B4 仍在 movement 116；B5 新增角色交易冻结调用（表已修正）。
-  BroadcastMove 现为 movement 121–182，TeleportWithinScene 185–228，ShouldDropReportAfterTeleport 230–269；130 与133均取 `actor_net_id::Of`，不是 entt 句柄。
-  actor 网络号与玩家 GUID 分离，与 Java 雪花实体号的现有口径一致；消息形状未变，proto 仅补网络号说明与 OneWay/Push 元数据。
-- ResetEntityVisibility 现为 aoi 233–298，非钉住关系销毁、下一个模拟步重建的规则未变；interest 129–138 仍为队友高优先级静默挤出。
-  RegroupToLeader 现为 player_team 419–479；队长在途守卫434、双Hex454–460、距离464–465、朝向474、瞬移478。
+- C++ `275f9c5c0`：B1 / B2 / B3 仍在 `MoveStart` / `MoveSync` / `MoveStop`，B4 在 `MovementSystem::Update` 的撞墙分支；B5 的 `StopMotionForExit` 新增角色交易冻结调用。
+  `BroadcastMove` / `TeleportWithinScene` 的 133 / 130 均取 `actor_net_id::Of`，不是 entt 句柄。66 的生成同步函数则取 `PlayerGuidComp.value` 写 entity_id，**不是 actor 网络号**；
+  这与 Java 66 的 player_id 同口径，旧稿及 movement.h 的「66 不带 entity_id」已失效。消息 wire 字段未变，proto 已补网络号说明与 OneWay / Push 元数据。
+- `ResetEntityVisibility` 非钉住关系销毁、下个模拟步重建的规则未变；`InterestSystem::AddAoiEntity` 仍为高权重静默挤出。
+  `RegroupToLeader` 仍查队长归属交接守卫、双 Hex 的 visibilityEvaluated、水平距离，并拷贝队长朝向传给瞬移；§1 与全篇当前引用改按函数名定位。
   3 s / 3 m、先距离后时间、换场景作废规则未变；settle 的 scene 改强类型 SceneEntity 属内部实现。
+  当前 ReleasePlayer 守卫已从 gRPC 实现迁入 `HandleReleaseFromSceneManager`；成功交接的 `DestroyDeposedPlayer` 仍不发 133。
+  当前 Unity 的 1 s 外推上限使旧稿「一直跑到停止消息 / 51」描述失效，§1 / §4 已改为区分客户端兜底与缺少权威停止。
 - Java `58e0296b`：契约记录已为 `f83da2e18`（不是任务书较早的190d9f2ea），本批保持受管契约不动。`SceneWorld.applyMove` 现含导航 trace 与 correctAnchor；`integrate` 已有撞墙清速。
   将现存撞墙分支接入 `haltMotion`，属于 D1 / §5.3 ⑦ 的直接适配，不改变导航算法、66脏位或既有裁决。新增导航停步单测。
   `beginFinalExit` 清速紧接退出/停服，`drainForTrade` 经 removePlayer 发51，均按离场不发133处理。旧“只有七处写入”清单以本节复核为准。
 - 需要在报告明确的定案边界：瞬移仍仅校验世界范围与有限朝向，保留 D5/D6 不夹持导航；当前已有导航地图上的后续移动会正常走导航，S6a/S6b的24m结论针对无导航夹具。
   dev操作者须选择可走落点。本批不擅自新增瞬移导航规则，4.3b传队长已处于合法地图的位置。
 - C++历史构建与AOI记录见文首，本次仅做源码复核。工作方式以任务书为准：独立分支、离线verify、不推送不合并、报告后停。
+
+## 13 实现记录（2026-10-26）
+
+### 13.1 实现范围与交付
+
+从 `origin/main = 58e0296b` 建立 `D:\luyuan\wt210-impl` / `batch-2.10-impl`；首个提交为基线复核，之后按 S0、S1、S2、S3、R、D 分包提交。
+主工作区检查时已干净，本批未写入；旧 `D:\luyuan\wt210` 未使用或删除。不推送、不合并、不建tag；报告位于仓库外 `D:\luyuan\REPORT-gpt-batch-2.10.md`。
+
+- S0：仅在Java自有 `game-api/scene_admin.proto` 追加瞬移请求/应答；受管契约、配表、消息号和来源记录均未改。
+- S1：`SceneMessageIds` / `ScenePlayer` / `SceneWorld` / `SceneMetrics` 实现21/47朝向、帧开头133、停步当场133、47后移动目标135、指标；66规则保留。
+- S2：`Scene` / `ViewIndex` 重入，`SceneWorld.teleportWithinScene` 本人差集与旁人64→21、锚点/待发/落位状态，`MovementRules.judgeAfterTeleport`、换场景作废和双向可见查询。
+- S3：运维鉴权的dev/test瞬移HTTP口、逻辑线程投递、结果映射、超时取消、固定指标标签和审计。
+- R：movement行走→重登→瞬移→跳跃、133/135/130纯函数判定、手工protobuf与生成类对照、可选AFK探针；README同步。
+- D：本规格、PARITY、roadmap、architecture、movement/aoi/scene参考文档、导航规格及相关类注释。
+
+### 13.2 运行证据
+
+所有构建先 `source /d/luyuan/tools/env.sh`，一律离线 `mvn -o`，没有install、部署命名空间参数或外部集成测试开关。
+
+| 验证 | 命令/范围 | 实际结果 |
+|---|---|---|
+| 场景与robot定向 | `mvn -o -B -fae -pl game-scene,game-robot -am test -Dtest="com.game.scene.**,com.game.robot.**" -Dsurefire.failIfNoSpecifiedTests=false` | scene 1755项，0失败0错误，8跳过；robot 653项，0失败0错误0跳过 |
+| 最终全量 | `mvn -o -B -fae clean verify` | **BUILD SUCCESS**，14分37秒；830份JUnit报告合计 **11018项、0失败、0错误、1011跳过** |
+| main基准 | 独立detached `58e0296b`，`ViewCrowdBenchmarkTest` + `-Dgame.bench=true` | 3轮全部成功，每轮1项、0失败0错误0跳过 |
+| 实现基准 | 同一命令，新增133兑现、deliveries与整帧减66估算 | 3轮全部成功，完整数字见architecture；未挑选/剔除第三轮波动 |
+
+全量跳过项主要为需显式外部环境或基准开关的测试；不等于这些验收已完成。`DevActivityBattleControllerTest` 本轮4/4通过，无需专项重跑。
+原始日志、逐模块统计、跳过类、测试映射与基准六轮表保存在 `D:\luyuan\tools\review210\implementation-evidence\`；报告给出全部路径。
+
+### 13.3 §11 用例落点与旧断言保护
+
+| 计划 | 落点 |
+|---|---|
+| T1–T11 | `MovementBroadcastTest`；实际备战/恢复/确认覆盖在 `PrepareBattleTest`、`ConfirmBattleTest`、`BattleRecoveryTest`、`InBattleGateMatrixTest`；实际交出冻结在 `HandOffTransferTest`、`ZoneTravelHandOffTest`；现有导航撞墙在 `SceneWorldNavigationTest` |
+| T12/T13 | `MovementSyncTest` 与两类交出测试只调期望序列、取项和名称；原66字节、字段、频率和收件人断言不变，另加133/135断言 |
+| T14 | `SceneMetricsTest` 钉启动注册/导出名/有界标签，`SceneWorldTest`钉actor_move每帧计时；广播/补发测试钉计数增量 |
+| V1–V11 | `TeleportWithinSceneTest`；容量、镜像、格子、pending与滞回重建在 `ViewIndexTest` |
+| S1–S7 | `MovementRulesTest` 纯函数边界/单调时钟回绕，`TeleportWithinSceneTest`旧包无副作用、落位解除、到期回归普通裁决、WARN与换图作废 |
+| §11.4b | `SceneAdminControllerTest`新增8方法、`SceneAdminAuthFilterTest`新增1方法、`SceneNodeAdminTest`新增6方法，另有world tip/指标与robot编码对照 |
+| §11.6纯函数 | robot新增21方法（MoveAssertions 13、SceneAdminClient 5、RobotOptions 3）与消息号断言；不视为端到端证据 |
+
+`MovementSyncTest`原26个测试保留，抽出的9个辅助方法体规范化后逐字相同。S1提交与交付报告逐项列T13旧→新序列。
+中间发现的编译引用/import/registry资源写法错误已修；首轮可执行场景回归的2个失败均为新增夹具（退出终局身份复用、静止目标66脏位预期），修正后定向与全量通过，没有修改66生产行为。
+
+### 13.4 保留的边界与待验收
+
+实现遵循D1–D17，任务书覆盖旧D12。当前导航撞墙接入haltMotion是现存基线适配；瞬移仍按D5/D6只查世界范围与有限朝向，不新增导航夹持，调用方负责可走落点。
+无导航夹具的S6结论保持：等待到期后24m以内旧上报可能静默撤销瞬移；已有导航地图则继续正常导航裁决。
+管理任务开始后才被HTTP取消的极窄竞态仍可能已瞬移却503，沿用§5.9定案；未执行任务被取消不会再瞬移。
+
+基准两组第三轮均变慢；实现2000人第三轮mean=52.00ms、p99=395.31ms，未采样CPU/GC/调度，不作归因。按D3/D4只记录，不改变66策略；极端密度仍需分散出生点。
+未运行中间件集成、本机真实切片、robot movement端到端/跨实现、双Unity客户端或客户端帧率日志验收；未重跑C++或Unity测试。
+PARITY两项保持 **Java 进行中**。4.3b生产归队和表满策略未接入，仍须后续单独实现及验收。

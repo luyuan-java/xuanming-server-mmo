@@ -787,6 +787,10 @@ createscenelogic（建实例）/ instance_lifecycle（空闲回收、级联）�
   `POST /admin/scene/instance/destroy`（`DestroyInstanceRequest{scene_id}` → `{tip_id}`），protobuf 二进制（`game-api` 的 `scene_admin.proto`）。鉴权同 game-trade 播种
   （`SceneAdminAuthFilter`：`GAME_ADMIN_TOKEN` 常数时间比对、未配 503、错 401，`X-Game-Operator` 必填、每次写审计行），运行模式不是 dev / test 一律 403（先于解析请求体）。
   建副本的 HTTP 线程最多等 `switch-resolve-timeout` + 2 s，超时就撤掉结果：逻辑线程据此不取号、不建，或建好交不回去就当场销毁——不留没人知道号的副本。
+  批次2.10增加`POST /admin/scene/player/teleport`：`TeleportPlayerRequest{player_id,x,y,z}` → `TeleportPlayerResponse{tip_id}`，同一鉴权与运行模式闸。
+  HTTP线程只编解码并限时等待，`SceneNode.teleportPlayer`经`submitAdmin`投到逻辑线程；超时取消并回503，尚未执行的任务发现结果已取消即退出，结果恰好已定则照实返回。
+  tip为成功0、非法玩家号/落点1005、本节点无人1004、冻结/战斗1006；保持朝向、130.reason=3。审计记录操作人、玩家号、坐标与tip，指标op=player_teleport。
+  该入口只验证同场景瞬移：不夹持现有导航，操作者负责可走落点；生产归队由4.3b接入。任务已开始后才取消的极窄竞态可能已瞬移但HTTP回503，robot据503判失败。
 - **重连与存盘**：`SceneAssigner` 的原实例分支种类无关——断线重连回到还在、且不在回收宽限 / 排空中的实例，否则按原地图（镜像的地图是源地图，落同图主世界频道；
   副本落默认主世界）。实例里存盘的 conf 就是实例的地图、坐标是当时位置，不新增持久化字段；同节点换入实例不涉及归属，`owner_epoch` 围栏不受影响。
 - **配置**（`game.scene.instance.*`，绑定时校验、不满足拒启）：`mirror-idle-timeout` 30 s、`idle-timeout` 300 s、`reclaim-grace` 30 s（≥ 10 s，不短于软预占 TTL /
@@ -895,7 +899,7 @@ mmorpg：scene 的 `battle/system/player_battle.{h,cpp}`（PrepareBattle / Cance
   唯一谓词 `ScenePlayer.inBattle()` = 有冻结；`frozen()` 仍只表示 5.2 的交出冻结。改冻结的唯一入口是 `PlayerBattleService.clearFreeze(player, LockAction)`
   （只删备战锁 / 不看阶段地删（reaper 判废专用）/ 保留锁）。所有异步回调先核对「实例仍是这个、冻结对象没换」再动状态。
 - **备战 / 取消 / 确认**：备战按基线次序判定（参数为 0 或期限超出 7 天 1005 → 不在本节点 1004 → 换图在途 / 已有冻结 / 恢复未就绪或账本有未落盘条目 / 气血 0 都是 1006），
-  拒绝即零痕迹；通过后组快照（`BattleSnapshots`，含出战宝宝与战斗配表指纹）、挂 PREPARING 冻结并停步（旁观者收到速度为 0 的 66）、写锁，**锁写成功才回快照**；
+  拒绝即零痕迹；通过后组快照（`BattleSnapshots`，含出战宝宝与战斗配表指纹）、挂PREPARING冻结并停步（原本在动时旁观者当场收到零速133，66照旧）、写锁，**锁写成功才回快照**；
   被占回 1006，Redis 出错 / 超时回 1003 并尽力只删备战锁。取消：离线一段 Lua；在线 PREPARING 当场解冻、只删备战锁；已 FIGHTING 的拒绝（同基线）；写锁在途时延后到写锁完成。
   删锁与写锁都是异步的：这把备战锁从写上到删掉之间可能被一次进场恢复读到（同 epoch 重进最常见），所以本节点发出的「只删备战锁」有了结局时，现任实例上按这把锁重建出来的
   PREPARING 冻结一并摘掉（`dropPreparingRebuiltFromLock`），不留一把没有锁的冻结到备战期限。
@@ -1159,8 +1163,11 @@ JDK 21、离线、单线程、两个处理器及 512 MiB 堆执行：集成 `cle
   场景状态只在逻辑线程读写，不加锁。
 - **scene 场景帧**（`SceneTicker` + `SceneWorld.step`）：20 FPS 定时任务同样跑在逻辑线程上，与客户端消息串行。
   固定步长累加器（夹 ±1s、每次最多补 5 帧，多出的整帧时间只扣不补），帧内异常只记日志、不让定时任务停掉。
-  每帧顺序：外推（速度非零的 `location += v × 0.05`，600 帧无任何客户端消息即停推）→ 视野刷新并发 47 / 64 →
-  偶数帧属性同步 66 → 帧号 +1。移动上行（134 / 132 / 131）在两帧之间收到时当场裁决，位置变化登记到下一帧的视野刷新。
+  每帧顺序：兑现133待发（外推前，同实体输入合并）→ 外推（速度非零的`location += v × 0.05`，600帧无任何客户端消息停推）→
+  视野刷新并发47 / 64、对新看到的移动目标补135 → 偶数帧66 → 帧号+1。移动上行当场裁决但只挂133待发，普通外推不挂不发133。
+  仍留场景的挂机 / 备战 / 战斗或冻结停步 / 现有导航撞墙统一经haltMotion，原本在动才当场发零速133并清待发，不等下一帧。
+  21 / 47创建带非null朝向，135只补新增移动目标；66收件人、频率、脏位与新观察者补发完全保留。133只读精确watchers，不按战斗/冻结过滤。
+  同场景瞬移只在step之外执行，有帧内重入守卫；本人130→64旧差集→47新差集→135，旁人64→21，同步重建并重置锚点、清速、挂3s / 3m落位等待。
   视野索引（`ViewIndex`：20 m 方格 3×3 邻域 + 双向兴趣列表）每个场景一份、只归逻辑线程所有。
   重判节奏：静止的人位置一变（含刚停步、挂机停推）下一帧就按精确位置重判；移动中的人相对上次重判累计位移 ≥ 1 m 才重判，
   不足的留在待刷新名单里——进 / 出视野在移动中最多晚约 1 m 位移，换来人群里每人每帧一次 3×3 扫描降到约每走 1 m 一次。
@@ -1171,7 +1178,37 @@ JDK 21、离线、单线程、两个处理器及 512 MiB 堆执行：集成 `cle
   2026-09-30 本机整帧均值 1000 人 42.7 ms → 4.2 ms（p99 8.8 ms）、2000 人 174.5 ms → 22.4 ms（p99 48.9 ms，
   其中偶数帧 66 扇出约 8 ms）；2000 人挤在 15 m 内的极端密度下尾延迟仍贴着 50 ms 预算，真要承载需分散出生点。
   帧里不做任何阻塞 I/O（写回 / 释放都交给存储线程池）。规则与客户端可见行为见
-  `docs/reference/mmorpg-client-contract-{movement,aoi}.md` 与 PARITY「移动」「视野」「属性同步」各行。
+  `docs/reference/mmorpg-client-contract-{movement,aoi}.md`与PARITY「移动上行」「视野（AOI）」「属性同步66」「移动广播133」「同场景瞬移」各行。
+  2026-10-26的2.10基准比较使用同机main `58e0296b`三轮，每轮200帧；以下单位ms，66均值只统计100个偶数帧，按全部帧折算应除2。
+
+  | 轮次 | 人数 | 整帧均值 | p90 | p99 | view_changes均值 | attribute_sync均值（偶数帧） |
+  |---|---:|---:|---:|---:|---:|---:|
+  | 1 | 1000 | 4.10 | 6.11 | 6.76 | 0.07 | 2.72 |
+  | 1 | 2000 | 15.51 | 20.12 | 29.43 | 0.13 | 6.23 |
+  | 2 | 1000 | 4.15 | 6.51 | 8.41 | 0.06 | 2.81 |
+  | 2 | 2000 | 15.36 | 19.11 | 24.28 | 0.11 | 6.12 |
+  | 3 | 1000 | 7.60 | 11.35 | 17.38 | 0.11 | 5.40 |
+  | 3 | 2000 | 28.19 | 38.23 | 58.56 | 0.22 | 11.87 |
+
+  main尚无actor_move计时与deliveries，记不适用，不能视为实测零值。实现分支`batch-2.10-impl`也跑满三轮，测量期间五个相关Java源码的SHA256前后一致。
+  下表单位ms，66均值仍只算偶数帧；135补发计入view_changes，进场与瞬移另属帧外。每轮100帧预热、200帧测量，与基线相同种子和上报节奏。
+
+  | 轮次 | 人数 | 整帧均值 | p90 | p99 | view_changes均值 | actor_move均值 | attribute_sync均值（偶数帧） | 整帧减66估算均值 |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+  | 1 | 1000 | 5.61 | 8.94 | 11.89 | 0.13 | 0.72 | 3.25 | 3.99 |
+  | 1 | 2000 | 18.26 | 24.05 | 30.54 | 0.20 | 1.48 | 6.40 | 15.06 |
+  | 2 | 1000 | 4.57 | 6.29 | 8.17 | 0.09 | 0.52 | 2.44 | 3.35 |
+  | 2 | 2000 | 16.51 | 20.84 | 29.14 | 0.20 | 1.25 | 5.86 | 13.58 |
+  | 3 | 1000 | 13.57 | 21.90 | 55.18 | 0.29 | 1.73 | 8.39 | 9.38 |
+  | 3 | 2000 | 52.00 | 82.00 | 395.31 | 0.71 | 5.58 | 22.33 | 40.84 |
+
+  三轮deliveries/s相同：1000人broadcast=399952.5、catch_up=5141.1；2000人broadcast=799929.2、catch_up=10805.9。
+  单位为每模拟秒的(收件人,实体)对，扣除预热/进场，以200×0.05=10秒为分母，不是封包数。
+  66关闭的估算只取逐帧减66段，不提供生产开关；第三轮2000人的该估算mean/p90/p99仍为40.84/67.42/316.05ms。
+  六轮均成功且完整保留：两组第三轮均变慢，实现第三轮尤其明显；未采样CPU、GC或调度，不能归因某个进程，也不能将跨轮差值当新增功能成本。
+  基线第三轮2000人p99=58.56ms，实现第三轮1000人p99=55.18ms、2000人均值=52.00ms/p99=395.31ms，均如实登记。
+  数字仅记录、不改变66或广播设计，极端密度仍须分散出生点。原始证据在仓库外`D:\luyuan\tools\review210\implementation-evidence\`的
+  `baseline-bench-{1,2,3}.log`、`implementation-bench-{1,2,3}.log`与`benchmark-summary.md`；无生产关66开关、无补跑挑选样本。
   当前主城、八仙岛、渔村导航由 `ConfigSceneTables` 在启动时从 `game.table-dir` 兄弟目录
   `navmesh/current_maps` 加载为不可变 `CurrentMapNavigation`；文件缺失、SHA 或出生点不符即拒启。
   运行线程仅查内存位图：上报经位移额度后逐格检查线段，外推也走相同裁决；撞墙退至合法点并清速度。
@@ -1781,7 +1818,7 @@ client     gate G                       源 scene S                          sce
   本地兜底超时 `game.scene.switch-resolve-timeout`（缺省 4 s，须大于 3 s、不超过 30 s；也是 RESOLVING 的寿命，再加 1 s 兜底清槽）。
 - **结果回到逻辑线程**先核对实例仍在、令牌仍是这一次（否则丢弃、计 `stale`）：调用失败 / 超时 / 应答残缺 → 23 {1003}；拒绝 → 23 {3023}；
   落在本节点 → 本地换（就是当前场景什么都不发；本节点上却不在或在排空 → 23 {3023}，绝不交给自己）；别的节点 → **冻结**：
-  停下（旁人收到速度为 0 的 66）→ `toSave()` 拍冻结快照 → FREEZING → 存储线程池提交 `HANDOFF`（§7 第 6 步）。
+  停下（原本在动时旁人当场收到零速133，66照旧）→ `toSave()`拍冻结快照 → FREEZING → 存储线程池提交`HANDOFF`（§7第6步）。
 - **冻结闸**（入口集中、缺省拒绝，只在 FREEZING 生效；批次 5.4 的跨 zone 传送冻结（`reason = TRAVEL`，§8.2）用同一套闸，`FreezeGateTest` 两种冻结各跑一遍）：
   - 客户端请求按注册时声明的 `FreezePolicy`（§4.4）：ALLOW = 63（自己回 3014）、226（批次 5.4，自己回 13000）、84（基线请求不拒、只在施法点 no-op；Java 施法运行态不持久化）；
     READ_ONLY = 43 / 77 / 54 / 167 / 191 / 193 / 190 / 181；GATED = 37 / 49 / 168 / 169 / 171 / 172 / 174 / 175 / 192 / 194 / 195 / 182 / 183 / 185–189，
@@ -1948,7 +1985,7 @@ scene-manager `SceneDirectoryProvider`（跨 zone 选路的两个计时器在 `t
 | game-trade | `http://127.0.0.1:18111/actuator/prometheus` | 管理专用端口；同一端口上还有 dev / test 专用的播种接口 `POST /admin/trade/seed-listing`（运维令牌，其他运行模式 403） |
 | game-scene-manager | `http://127.0.0.1:18102/actuator/prometheus` | 管理专用端口 |
 | game-gate | `http://127.0.0.1:18103/actuator/prometheus` | 管理专用端口 |
-| game-scene | `http://127.0.0.1:18104/actuator/prometheus` | 管理专用端口；同机多个 scene 实例要各用 `SERVER_PORT` 错开（与链路端口一样）；同一端口上还有 dev / test 专用的建 / 毁副本接口 `POST /admin/scene/instance/{create,destroy}`（运维令牌，其他运行模式 403，§4.21） |
+| game-scene | `http://127.0.0.1:18104/actuator/prometheus` | 管理专用端口；同机多个scene实例用SERVER_PORT错开；另有dev/test建毁副本`POST /admin/scene/instance/{create,destroy}`与同场景瞬移`POST /admin/scene/player/teleport`（运维令牌，其他模式403，§4.21） |
 | game-data | `http://127.0.0.1:18106/actuator/prometheus` | Web 进程：同一端口上还有带令牌的运维接口 `/admin/**`（§4.5），默认只绑本机 |
 | game-battle | `http://127.0.0.1:18112/actuator/prometheus` | 管理专用端口；同一端口上还有 dev / test 专用的建房接口 `POST /admin/battle/dev/*`（运维令牌，其他运行模式 403，§4.22）。业务端口：客户端直连 12000（对客户端开放）、控制面 Dubbo 21200 |
 | game-match | `http://127.0.0.1:18113/actuator/prometheus` | 管理专用端口；同一端口上还有 dev / test 专用的 `GET /admin/match/dev/rating/{pid}` 与 `POST /admin/match/dev/activity-battle`（运维令牌 + 操作人，其他运行模式 403，§4.24）。业务端口：Dubbo 20888。`/actuator/health` 含组件 `matchLease`：发号租约真正丢失时报 DOWN（503），要重启进程 |
@@ -2069,11 +2106,14 @@ scene-manager `SceneDirectoryProvider`（跨 zone 选路的两个计时器在 `t
 | scene | `game_scene_logic_task_wait_seconds` | Timer | — | 逻辑任务从投递到开始执行的排队等待（经 `SceneNode.runOnLogic` 投递的全部任务；同步的目录 / 归属快照不计） |
 | scene | `game_scene_logic_task_run_seconds` | Timer | — | 逻辑任务的执行耗时（抛异常的也计） |
 | scene | `game_scene_tick_seconds` | Timer | — | 一帧的耗时（外推 + 视野刷新 + 广播），20 FPS、每帧一次；超过 50ms 桶即超预算 |
-| scene | `game_scene_broadcast_seconds` | Timer | `kind`=view_changes / attribute_sync | 帧内广播阶段（组包、序列化、交给链路）：view_changes = 47 / 64，每帧一次；attribute_sync = 66，偶数帧一次（均为全部场景合计） |
-| scene | `game_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid / frozen / in_battle | 移动上行（134 / 132 / 131）的裁决，每条恰好计一次：原样接受 / 超额度截断但偏差 ≤ 0.5m / 截断且回了 137 / 含非有限值或坐标超出世界范围（±1e7 m）丢弃 / 跨节点换图冻结中静默丢（§8.1）/ 回合制战斗在途（134 / 132 静默丢，131 只清速度，§4.23） |
+| scene | `game_scene_broadcast_seconds` | Timer | `kind`=actor_move / view_changes / attribute_sync | actor_move=帧开头133兑现，每帧一次，不含当场停步；view_changes=47 / 64及135，每帧一次；attribute_sync=66，偶数帧一次；均为全部场景合计 |
+| scene | `game_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid / frozen / in_battle / teleport_stale | 134 / 132 / 131每条恰好计一次；原样 / 额度或导航截断≤0.5m / 回137 / 非有限或世界越界 / 交出冻结 / 战斗在途 / 瞬移落位等待整条丢弃 |
+| scene | `game_scene_actor_move_deliveries_total` | Counter | `kind`=broadcast / catch_up | broadcast=每条133×收件人数；catch_up=135移动条目×收件人数；按实体与收件人对数计，空收件人计0，含冻结中会话已离开的旧watcher |
+| scene | `game_scene_teleports_total` | Counter | `reason`=team_regroup / admin，`result`=teleported / not_here / frozen / in_battle / invalid_target | 每次瞬移请求恰好一次，含管理口找人阶段拒绝；玩家号与坐标不进标签 |
+| scene | `game_scene_teleport_settles_total` | Counter | `result`=settled / expired / voided | 近处落位 / 到期仍远 / 换场景或再次瞬移覆盖旧等待；离场随实例丢弃不计 |
 | scene | `game_scene_skill_releases_total` | Counter | `result`=ok / unknown_skill / invalid_target / cooldown / uninterruptible / state_rejected / caster_in_battle / target_in_battle | 放技能（84）的裁决，每条恰好计一次（§4.9）；不带技能号（客户端可控）与玩家号。后两个取值（批次 6.3）按回码拆开：施法者在回合制战斗中 7004 / 指定的目标在战斗中 7002 |
 | scene | `game_scene_skill_interrupts_total` | Counter | — | 放技能打断了进行中的施法（推了 33）的次数 |
-| scene | `game_scene_aoi_changes_total` | Counter | `change`=enter / leave | 视野变化通知，一对（观察者, 目标）计一次：enter = 进场的 47 条目与给旁人的 21、帧内 47 条目；leave = 离场 / 换场景的 51、帧内 64 条目。离场者自己的列表静默清空，不计 |
+| scene | `game_scene_aoi_changes_total` | Counter | `change`=enter / leave | 每个实际下发（观察者,目标）对计一次：进场21 / 47、帧内47 / 64、离场51；瞬移按本人64 / 47差集与旁人64 / 21条目计；离场本人静默清表不计 |
 | scene | `game_scene_storage_writes_seconds` | Timer | `op`=save / release / progress / handoff / probe，`result`=released / saved / fenced / failed / rejected / handed_off / lease_too_short / not_committed / lost | 玩家数据写（写回并释放 / 只释放 / 在线存盘 / 交出 / 交出探测，§7 第 6 步）的结局与耗时（含瞬时故障重试），每个写任务恰好计一次：已落库并释放 / 已落库未释放（在线存盘）/ 围栏拒绝（不是故障）/ 重试用尽或非瞬时故障 / 存储线程池拒绝（耗时记 0）/ 已交出（含探测认出自己的提交）/ 剩余租约不足没提交 / 探测确认没提交 / 探测判定不了或读到已失去。只注册各 op 可能出现的组合：save / release = released / fenced / failed / rejected，progress = saved / fenced / failed / rejected，handoff = handed_off / lease_too_short / fenced / failed / rejected（failed / rejected 是结局不明、交给探测，不算写丢失），probe = handed_off / not_committed / lost / rejected。停服时 `shutdownNow` 丢弃的写只进 ERROR 日志 |
 | scene | `game_scene_periodic_saves_total` | Counter | `result`=written / unchanged / in_flight / deferred | 周期存盘对每个到期玩家的处理，每人每次到期恰好计一次：有变化提交了在线存盘 / 与上次落库相同跳过 / 上一次还在途跳过 / 存储线程池积压（排队 ≥ 线程数 × 2）推到下个周期 |
 | scene | `executor_*{name="scene-storage"}` | Micrometer 标准线程池指标 | — | 存储线程池排队（`executor_queued_tasks`）/ 剩余容量 / 活跃 / 完成数 |
@@ -2085,7 +2125,7 @@ scene-manager `SceneDirectoryProvider`（跨 zone 选路的两个计时器在 `t
 | scene | `game_scene_instance_lifecycle_total` | Counter | `kind`=mirror / dungeon，`event`=created / rejected / reclaim_started / revived / cascade_started / destroyed_idle / destroyed_cascade / destroyed_admin | 实例生命周期事件：建好 / 建实例被拒（不建、记 ERROR）/ 空置满超时进入回收宽限 / 宽限中复活 / 源已销毁转级联 / 三种销毁。勾稽：每个 created 最终恰好对应一个 destroyed_*（或停服）；`mirror_resolves{created}` = `instance_lifecycle{kind="mirror",event="created"}` |
 | scene | `game_scene_mirror_requests_total` | Counter | `result`=accepted / bad_source / bad_mirror_config / source_draining / not_accepting / node_cap / creator_cap | 63 镜像分支的同步结局，每条镜像请求恰好计一次（3014 / 全 0 在分支之前，不计）：受理回 `{0}`，其余各回 3005 |
 | scene | `game_scene_mirror_resolves_total` | Counter | `result`=created / rejected / error / stale / wrong_node / source_moved / create_rejected | 镜像取号结果回到逻辑线程后的结局，每次受理恰好计一次：建好换入 / scene-manager 拒绝（23 {3023}）/ 调用失败、超时、租约无效、没装配（23 {1003}）/ 玩家已离开或在途已作废（丢弃，号作废）/ 号落在别的节点（23 {3023}，不该出现）/ 玩家已不在源、源已不在或在排空、停止接客、达上限（23 {3023}）/ 本地重号或建实例被拒（23 {3023}）。勾稽：`mirror_requests{accepted}` = Σ`mirror_resolves` + 在途数 |
-| scene | `game_scene_admin_requests_total` | Counter | `op`=instance_create / instance_destroy / other，`status`=HTTP 状态码 | scene 管理端口 `/admin/**`（dev / test 建 / 毁副本，§4.21）的调用，鉴权失败也计；首次用到时才注册 |
+| scene | `game_scene_admin_requests_total` | Counter | `op`=instance_create / instance_destroy / player_teleport / other，`status`=HTTP状态码 | scene管理端口/admin/**的建毁副本与同场景瞬移调用（§4.21），鉴权失败也计；首次用到才注册 |
 | scene | `game_scene_switch_resolves_total` | Counter | `result`=local / remote / same / rejected / error / stale / in_battle | 63 远端去向经 scene-manager 选目标的结果（§8.1），每次恰好计一次（本节点直接解析掉的 63 不计）：落在本节点本地换 / 别的节点（冻结、交出）/ 就是当前场景 / 拒绝或指向本节点却不在、在排空（23 {3023}）/ 调用失败、兜底超时、应答残缺（23 {1003}）/ 回来时实例已离开或令牌不符（丢弃）/ 玩家在回合制战斗中（批次 6.3，§4.23）：选目标期间进了战斗（例如迟到的确认按锁重建了冻结），结果回来时中止换图、推 23 {3023}；发起交出的入口 `beginRemoteSwitch` 遇到在途玩家也计在这里（63 已先回 3023，那一支只是纵深防御） |
 | scene | `game_scene_transfers_total` | Counter | `reason`=player / travel（批次 5.4），`result`=handed_off / lease_too_short / fenced / aborted_in_place / lost_unknown / left / taken_over / link_gone / superseded | 冻结交出的结局（§8.1 结局表），每次冻结恰好终结一次；reason × result 全量预注册，player = 63 的跨节点换图、travel = 226 的跨 zone 传送（§8.2）。勾稽：`switch_resolves{remote}` ≈ Σ`transfers{player}` + 在途的 63 冻结数——`transfers_in_flight` 不分 reason、含 226 的冻结（`freezeForTravel` 同样加一），没有跨 zone 冻结在途时才等于它；player 的 handed_off 在 `PlayerTransfer` 交给链路时就计，之后异步写失败另计 `link_dropped{write_failed}`。travel 下：handed_off 在交出提交、移除实例时就计（帧还没发，勾稽见 zone-travel-spec §7.3 第二条）；superseded = 交出 / 探测读到 ≥ E+2（踢 2017）；帧没写出的 link_gone 在 handed_off **之外另计**、不是终结结局；travel 的冻结时长同样记进 `transfer_freeze` |
 | scene | `game_scene_travel_requests_total` | Counter | `result`=accepted / zone_invalid / map_invalid / in_battle / in_team / busy_transfer / busy_switch / team_read_error / unavailable | 226 在受理之前的结局（批次 5.4，§8.2），每条恰好计一次；team_read_error 含读失败、超时与 PRECHECK 槽过期由作废方回 3027；unavailable = 没装配跨 zone 传送、同步 3027 |

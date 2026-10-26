@@ -278,7 +278,7 @@ public final class MovementScenario {
             }
         }
         report.note("B 收到 A 的 66 共 " + observed.size() + " 条，其中不带 entity_id 的 " + unattributed
-                + " 条（基线移动的 66 不带 entity_id、按「只有 A 在动」归给 A；Java 版每条都带，AOI §5.1、§9）");
+                + " 条（保留旧基线无entity_id时按唯一移动者归属的兼容判定；当前两版均带玩家GUID，AOI §5.1、§9）");
 
         List<InputMatch> matches = MoveAssertions.matchInputs(sent, observed, LOCATION_EPS, VELOCITY_EPS);
         checkInputsObserved(matches, report);
@@ -397,7 +397,7 @@ public final class MovementScenario {
 
     /**
      * 收件人收到的「自己的」66 条数：{@code entity_id} = 自己；收件人是本场景唯一的移动者时，另算不带 entity_id 但带 velocity 的
-     * （只有移动输入会置 velocity 脏位，基线移动的 66 又不带 entity_id——场景里只有它在动，那条只能是它自己的回声）。
+     * （兼容旧基线无entity_id的移动66；当前两版均带玩家GUID，此处保留原有断言口径）。
      */
     private long countOwnSync(EnteredPlayer receiver, int from, boolean receiverIsOnlyMover) {
         long count = 0;

@@ -18,10 +18,10 @@ public enum BattlePolicy {
      */
     GATED,
 
-    /** 静默丢、不进处理器、不回包（134 MoveStart / 132 MoveSync，基线 {@code mvh.cpp:170-173}）。只给场景核心的移动上行。 */
+    /** 静默丢、不进处理器、不回包（mmorpg 275f9c5c0的MoveStart / MoveSync战斗·冻结闸，mvh.cpp:171-174 / 221-224）。只给核心移动上行。 */
     DROP,
 
-    /** 只把速度清零、不收位置（131 MoveStop，基线 {@code mvh.cpp:188-192}）。只给场景核心的移动上行。 */
+    /** 只清速度、不收位置（MoveStop，mvh.cpp:195-202）；C++无条件BroadcastMove，Java原本在动才当场发133。只给核心移动上行。 */
     STOP_ONLY,
 
     /** 不进处理器，回应答内 {@code error_message{1005}}（应答为 {@code Empty} 的方法静默丢）。<b>缺省策略</b>。 */

@@ -331,14 +331,14 @@ public final class ClientRequestHandler {
                 return true;
             }
             case DROP -> {
-                // 134 / 132 静默丢（基线 mvh.cpp:170-173、:205-208）：每条移动上行在 moves{result} 里恰好计一次
+                // 134 / 132静默丢（mmorpg 275f9c5c0 mvh.cpp MoveStart:171-174 / MoveSync:221-224战斗·冻结闸）：每条上行计一次。
                 metrics.move(MoveResult.IN_BATTLE);
                 metrics.battleGateReject(BattleGate.MOVE);
                 log.debug("回合制战斗在途，丢弃移动上行 {} player={}", method.key(), player.playerId());
                 return false;
             }
             case STOP_ONLY -> {
-                // 131 只把速度清零、不收位置（基线 mvh.cpp:188-192）；备战时已停步，这里通常是空操作
+                // 131只清速度、不收位置（mmorpg 275f9c5c0 mvh.cpp MoveStop:195-202）；C++无条件发133，Java原本在动才当场发。
                 metrics.move(MoveResult.IN_BATTLE);
                 metrics.battleGateReject(BattleGate.MOVE);
                 if (!player.velocity().isOrigin()) {

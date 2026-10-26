@@ -241,7 +241,7 @@ public final class PlayerBattleService implements BattleHooks {
         BattleFreeze freeze = new BattleFreeze(battleId, request.getBattleNodeId(), Phase.PREPARING, deadline, prepareDeadline, true);
         freeze.setLockPending(true);
         player.battle().setFreeze(freeze);
-        // D5：备战即停步，旁观者在下一个同步帧收到速度 0 的 66
+        // D5：备战即停步，原本在动时旁观者当场收到零速133，66仍在下个同步帧兑现。
         world.haltForBattle(player);
         CompletableFuture<PrepareBattleResponse> reply = new CompletableFuture<>();
         long ttl = BattleRedis.lockTtlSec(prepareDeadline, clock.epochMillis());

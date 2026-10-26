@@ -145,7 +145,7 @@ enum ActorType { ACTOR_TYPE_NONE = 0; ACTOR_TYPE_PLAYER = 1; ACTOR_TYPE_NPC = 2;
 | 字段 | 值来源 |
 |---|---|
 | `entity`(1) | `entt::to_integral(entity)`，即 scene 内的 ECS 实体号（**不是** player_id） |
-| `transform`(2) | **只填 `transform.location`**（Vector3 x/y/z），取 §1 算出的落位；`rotation`、`scale` 不填 |
+| `transform`(2) | C++只填location（Vector3 x/y/z），取§1落位；Java2.10的21 / 47另带非null的rotation（有意差异X3，当前客户端创建时读取），scale不填 |
 | `actor_type`(3) | 实体有 `Player` 组件时为 `ACTOR_TYPE_PLAYER`=1 |
 | `guid`(4) | `Guid` 组件，也就是 **player_id** |
 | `config_id`(5) | 玩家不填（0） |
@@ -315,7 +315,7 @@ robot 不处理的推送 id 只会产生 `Unhandled message` 日志，包括 66�
 ## Java 必须做到（清单）
 
 - [ ] **进场成功立即推 79**：`EnterSceneS2C.scene_info` 必须非空，`scene_config_id=1`（World 表第一行）、`scene_id` 非 0、`mirror_config_id=0`、`dungeon_config_id=0`、`creators` 为空。信封 `message_id=79`、`id=0`。
-- [ ] **紧跟着推 21（自身）**，保持 79 在前：`entity` 非 0 且稳定；`guid=player_id`；`actor_type=1`；`transform.location` = 落位（新号无导航网格时为 (180,200,0)）；`class_id`、`appearance_id`、`gender` 取角色数据；`config_id=0`；rotation 和 scale 不填。
+- [ ] **紧跟着推21（自身）**，保持79在前：entity非0且稳定、guid=player_id、actor_type=1；transform.location=落位（新号无导航时为(180,200,0)）；class_id / appearance_id / gender取角色数据、config_id=0。Java2.10的21 / 47另带非null的rotation，scale不填；新观察者47后仅对移动目标补135。
 - [ ] **重连、顶号、换线等每次成功进场都推 79 和 21**，不照搬基线的幂等早退。
 - [ ] **ListSkills(77)**：应答 `message_id=77`、`id` 回显请求 seq；`ListSkillsResponse.skill_list` 必须存在，没有技能时也要是空列表；新号内容为 `[{skill_table_id:1},{skill_table_id:2},{skill_table_id:13}]`（Class 表全表去重并集，`id=0`）；`error_message` 存在且 `id=0`。
 - [ ] `Empty` 返回型方法（Notify*、43）不回包；43 改为推送 31 `SceneInfoS2C`。

@@ -358,8 +358,8 @@ public final class ScenePlayer {
     /**
      * 66 {@code ActorBaseAttributesS2C}：只写 {@code dirty} 指定的字段（契约文档 AOI §5.1）。
      * <ul>
-     *   <li>{@code entity_id} 每条都带，取 player_id（guid 口径，不是场景实体号）——修基线缺口：基线移动触发的 66 不带它，
-     *       观察者无法归属；字段是加出来的，旧客户端忽略也不出错；</li>
+     *   <li>{@code entity_id} 每条都带，取 player_id（guid 口径，不是场景实体号）；当前 C++ 也取 PlayerGuidComp，
+     *       旧基线曾缺此字段；本批不改变既有 66 内容或同步规则；</li>
      *   <li>transform：location 总在，rotation 上报过才在（全零也写，线上为 {@code 12 00}），scale 从不写；</li>
      *   <li>velocity：脏就写，<b>全零也写</b>（线上 {@code 1a 00}，表示「停了」）。</li>
      * </ul>

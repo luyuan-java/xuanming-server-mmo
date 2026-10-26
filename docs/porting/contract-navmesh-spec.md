@@ -455,7 +455,7 @@ bind 1 main_scene.bin spawn=180,200,0
 |---|---|---|---|
 | 进场落位：`player/system/player_scene.cpp:102` → `SceneSpawnSystem::EnsureValidEnterLocation`（`spatial/system/scene_spawn.cpp:91-149`） | SnapToMesh | `mapChanged`（只和内存里的旧场景比，`player_scene.cpp:60-66`）→ 落出生点并吸附（`scene_spawn.cpp:108-113`、`:65-84`）。有导航：能吸附就只吸附（修高度），否则落出生点（`:114-128`）。无导航：只修 (0,0,0)（`:129-135`）。出生点取表里有效值，否则 (180,200,0)（`:45-63`、`constants/nav.h:35-37`）。改写时打 INFO（`:140-147`）。在 79 和自身 21 之前执行 | 自身 21 的坐标 |
 | 移动上行 134 / 132 / 131：`nodes/scene/handler/rpc/player/player_movement_handler.cpp:82-154`（`ApplyReportedLocation`） | ValidateMove + SnapToMesh | 通过 → 吸附后的终点；起点在网格上但撞墙 → 撞墙点（`blocked`）；起点不在网格上 → 上报点能吸附就用吸附点（`guided`），否则落出生点（`respawned`，`:124` `FallbackLocationForPlayer`）（`:96-129`）。水平偏差 > 0.5 m（`constants/nav.h:19`）给本人回 137（`:135-153`）。先裁决位置再写速度（`:174-176`），所以 137 的 `server_velocity` 是旧速度。战斗中 / 冻结时丢弃（`:170-173`） | 137 及其 `server_location`；66 的坐标与高度 |
-| 帧外推：`spatial/system/movement.cpp:66-82` | ValidateMove | 不通过（撞墙或起点不在网格上）就清零速度、置 Velocity 脏位，位置取 clamped（起点不在网格上时 clamped 预置为当前位置，即原地不动）。战斗中 / 冻结 / 挂机不参与外推（`:51-52`）。**不发 137** | 66（速度变 0） |
+| 帧外推：`spatial/system/movement.cpp` `Update`（当前275f9c5c0:88-117） | ValidateMove | 不通过（撞墙或起点不在网格上）清零速度并置脏，位置取clamped（起点非法时预置当前位置）。战斗 / 冻结 / 挂机不外推；**不发137**。Java现有三图导航的撞墙分支在2.10接入haltMotion | 当场零速133，66保留原同步节奏 |
 | 启动探针：`navigation.cpp:59-88` | SnapToMesh | 决定这一行是否注册导航 | 间接：没注册的场景完全放行 |
 
 ### 3.4 不用导航的部分（Java 不移植）
@@ -712,16 +712,17 @@ ContractSync 同步成功后打印上面第二条命令。报告里有 C 级 BRE
 有导航时对 `当前 → 当前 + v × 0.05` 做 `validateMove`：
 
 - `Passed(end)`：位置取 end（高度跟随网格）；
-- `Blocked(hit)`：位置取 hit，速度清零，置 `DIRTY_VELOCITY`；
-- `StartOffMesh`：原地不动，速度清零，置 `DIRTY_VELOCITY`。
+- `Blocked(hit)`：位置取hit，经`haltMotion`清速、置`DIRTY_VELOCITY`，由动变停当场发133；
+- `StartOffMesh`：原地不动，同样经`haltMotion`清速并当场发133。
 
-不发 137（与基线 `movement.cpp:66-82` 相同）。挂机停推等现有逻辑不变；javadoc（`:1313-1319`）「没有导航网格，不做撞墙夹持」改掉。
+不发137（与C++ `MovementSystem::Update`相同）；66脏位与频率保持。现有三图导航已接入，2.10只把服务器撞墙停步统一到haltMotion，不改变导航算法。
+以后接入其它网格也沿用这条停步路径；普通外推不挂133待发。瞬移只校验世界范围，不主动吸附网格，后续上报继续走现有导航。
 
 #### 4.4.6 指标（不加任何玩家或场景维度的 label）
 
 | 指标 | 类型 | label | 说明 |
 |---|---|---|---|
-| `game_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid（不变） | 口径改为：accepted = 水平位置未变（高度可能被吸附）；clamped = 水平位置被改（额度或导航）但偏差 ≤ 0.5 m；corrected = 回了 137 |
+| `game_scene_moves_total` | Counter | `result`=accepted / clamped / corrected / invalid / frozen / in_battle / teleport_stale | accepted=水平位置未变（高度可能吸附）；clamped=额度或导航改动但偏差≤0.5m；corrected=回137；teleport_stale=2.10落位等待丢弃，发生在额度与导航之前 |
 | `game_scene_nav_verdicts_total` | Counter | `verdict`=passed / blocked / guided / respawned | 导航场景的移动上行裁决，每条恰好一次 |
 | `game_scene_nav_extrapolation_stops_total` | Counter | — | 外推被夹住、速度清零的次数 |
 | `game_scene_nav_configs` | Gauge | — | 已注册导航的场景配置数（启动时设定，当前 21） |
@@ -1018,7 +1019,7 @@ Java 参数化测试：布尔结果与类别完全相同，坐标误差 ≤ 1e-9
 
 - 合法移动被接受、z = 0；撞墙回 137 且 `server_location` 是撞墙点；额度截断与撞墙叠加时取较近的点，锚点与额度按 §4.4.4 记账。
 - guided、respawned 两个分支，且重置额度。
-- 外推撞墙：速度清零、置脏位、66 带速度 0、不发 137；起点在网格外时原地不动并清零速度。
+- 外推撞墙：经haltMotion清速、置脏、当场零速133，66仍按原节奏带零速，不发137；起点网格外时原地不动并清速。
 - 进场：存档在网格上保留（z 吸附）、不在网格上落出生点、换图落出生点；七种进场路径都经 `EnterPlacement`。
 - 无导航场景（替身返回空、或 `nav-enabled=false`）：现有用例全部保持绿；`MoveGuardTest` 原样通过，包括截断后额度恰好为 0 的断言（§4.4.4）。
 - 有导航时额度记账：`Passed` 扣 `proposal.spent()`（与无导航逐位相同）；`Blocked` 扣 `min(spent, 锚点到撞墙点)`；`guided` / `respawned` 之后额度满格。
@@ -1041,7 +1042,7 @@ Java 参数化测试：布尔结果与类别完全相同，坐标误差 ≤ 1e-9
      **期望**：收到 137，`server_location` = (195.96 ± 0.01, 200, 0)，`input_seq` 回显；在该点发 MoveStop，之后不再收到 137。
      （推算：MoveSync 到达时服务器外推到 ≈184.25，射线 184.25 → 199 在 196.01 撞墙，回缩 0.05 m。网络慢到外推已先撞墙时，起点就是 195.96，结果相同。）
      不用「连续 2 m 一步走到墙」的写法：起点离墙不到 0.05 m 时裁决点等于起点（§6.2 第 3 条），期望值会漂。
-  4. **外推夹持**：B 合法走到 (190,200,0)；A 合法走到 (194,200,0) 后以 +9 m/s 发 MoveStart 并保持静默。期望 B 在约 1 s 内收到 A 的 66：速度 0、x = 195.96（±0.01）；A 收不到 137。
+  4. **外推夹持**：B合法走到(190,200,0)；A合法走到(194,200,0)后以+9m/s发MoveStart并静默。B应先收起步133，再在撞墙当帧收到零速133，x=195.96（±0.01）；66仍保留作旁证，A收不到137。该坐标针对本节导航夹具，不代替当前三图可走落点。
      （推算：外推步长 0.45 m，194 → 194.45 → … → 195.8，下一步越过 196.01 被夹到 195.96。195.8 离墙超过 0.05 m，回缩完整生效，所以结果是确定的。）
   5. **重登**：A 重新登录，自己的 21 位置等于最后的裁决位置。
   6. **远距离上报**：A 上报 (1e5, 1e5, 0)，3 s 内收到 137；位置有限、离上一个位置水平不超过 24 m、z = 0。

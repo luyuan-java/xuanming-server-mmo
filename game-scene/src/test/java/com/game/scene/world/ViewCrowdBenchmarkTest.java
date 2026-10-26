@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 /**
- * 出生点人群基准：视野刷新（{@link ViewIndex#refresh}）与 66 扇出各占一帧多少。<b>默认跳过</b>，不拖慢 {@code clean install}；
+ * 出生点人群基准：视野刷新（{@link ViewIndex#refresh}）、133 兑现与 66 扇出各占一帧多少。<b>默认跳过</b>，不拖慢 {@code clean verify}；
  * 显式开启：{@code ./mvnw -o -pl game-scene test -Dtest=ViewCrowdBenchmarkTest -Dgame.bench=true -Dsurefire.failIfNoSpecifiedTests=false}。
  *
  * <p><b>场景</b>：N 人（1000 / 2000）全部落在出生点周围半径 {@link #RADIUS} 内（新号与换地图的人都落在同一个出生点），
@@ -32,7 +32,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  *
  * <p><b>输出</b>（只打印、不断言耗时，耗时与机器相关；标签用 ASCII，避免控制台编码把中文打成问号）：
  * <ul>
- *   <li>A. {@link SceneWorld#step()} 整帧耗时分布，拆出 66 扇出（偶数帧）与 47 / 64 下发；整帧减去这两段 ≈ 外推 + 视野刷新；</li>
+ *   <li>A. {@link SceneWorld#step()} 整帧耗时分布，拆出 133 兑现、66 扇出（偶数帧）与 47 / 135 / 64 下发；整帧减去这三段 ≈ 外推 + 视野刷新；</li>
  *   <li>B. 只跑「与外推同样的位置变化 + {@link Scene#refreshViews}」，单独得到视野刷新的耗时分布。</li>
  * </ul>
  * 断言只用来确认场景确实是「人群」：每人兴趣列表平均接近满。
@@ -107,15 +107,25 @@ class ViewCrowdBenchmarkTest {
         }
         Timer sync = registry.get("game.scene.broadcast").tag("kind", "attribute_sync").timer();
         Timer views = registry.get("game.scene.broadcast").tag("kind", "view_changes").timer();
+        Timer moves = registry.get("game.scene.broadcast").tag("kind", "actor_move").timer();
+        var delivered = registry.get("game.scene.actor.move.deliveries").tag("kind", "broadcast").counter();
+        var caught = registry.get("game.scene.actor.move.deliveries").tag("kind", "catch_up").counter();
+        double deliveredBefore = 0, caughtBefore = 0;
 
         long[] frameNanos = new long[MEASURE_FRAMES];
         long[] syncNanos = new long[MEASURE_FRAMES];
         long[] viewNanos = new long[MEASURE_FRAMES];
+        long[] moveNanos = new long[MEASURE_FRAMES];
         for (int f = 0; f < WARMUP_FRAMES + MEASURE_FRAMES; f++) {
+            if (f == WARMUP_FRAMES) {
+                deliveredBefore = delivered.count();
+                caughtBefore = caught.count();
+            }
             clock.nextFrame();
             report(world, players, random, f);
             double syncBefore = sync.totalTime(TimeUnit.NANOSECONDS);
             double viewBefore = views.totalTime(TimeUnit.NANOSECONDS);
+            double moveBefore = moves.totalTime(TimeUnit.NANOSECONDS);
             long start = System.nanoTime();
             world.step();
             long elapsed = System.nanoTime() - start;
@@ -124,11 +134,14 @@ class ViewCrowdBenchmarkTest {
                 frameNanos[m] = elapsed;
                 syncNanos[m] = (long) (sync.totalTime(TimeUnit.NANOSECONDS) - syncBefore);
                 viewNanos[m] = (long) (views.totalTime(TimeUnit.NANOSECONDS) - viewBefore);
+                moveNanos[m] = (long) (moves.totalTime(TimeUnit.NANOSECONDS) - moveBefore);
             }
         }
         long[] rest = new long[MEASURE_FRAMES];
+        long[] without66 = new long[MEASURE_FRAMES];
         for (int m = 0; m < MEASURE_FRAMES; m++) {
-            rest[m] = frameNanos[m] - syncNanos[m] - viewNanos[m];
+            rest[m] = frameNanos[m] - syncNanos[m] - viewNanos[m] - moveNanos[m];
+            without66[m] = frameNanos[m] - syncNanos[m];
         }
         long[] syncEven = new long[MEASURE_FRAMES / 2];
         for (int m = 0, k = 0; m < MEASURE_FRAMES && k < syncEven.length; m++) {
@@ -139,8 +152,14 @@ class ViewCrowdBenchmarkTest {
         System.out.printf(Locale.ROOT, "[bench] A world N=%d%n", count);
         print("  step()", frameNanos);
         print("  integrate+refresh (step - broadcasts)", rest);
-        print("  47/64 emit", viewNanos);
+        print("  47/135/64 emit", viewNanos);
+        print("  133 flush", moveNanos);
         print("  66 fan-out (even frames)", syncEven);
+        print("  step - 66 (estimate)", without66);
+        double simulatedSeconds = MEASURE_FRAMES * MovementRules.STEP_SECONDS;
+        System.out.printf(Locale.ROOT, "  deliveries/s broadcast=%.1f catch_up=%.1f%n",
+                (delivered.count() - deliveredBefore) / simulatedSeconds,
+                (caught.count() - caughtBefore) / simulatedSeconds);
         System.out.printf(Locale.ROOT, "  avg watching %.1f%n", averageWatching(scene, players));
         assertThat(averageWatching(scene, players)).as("确实是人群：兴趣列表接近满").isGreaterThan(80);
     }
