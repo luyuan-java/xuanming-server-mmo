@@ -81,7 +81,7 @@ public record InstanceOptions(int mirrorConfigId, Duration instanceWait, boolean
             throw new UsageException("--expect-mirror-validation 只能是 strict / lenient：" + validation);
         }
         return new InstanceOptions(mirrorConfigId, Duration.ofMillis(waitMs), validation.equals("strict"),
-                url(RobotOptions.Opt.SCENE_ADMIN_URL, given, env), url(RobotOptions.Opt.SCENE_MANAGER_METRICS_URL, given, env));
+                RobotOptions.sceneAdminUrl(given, env), url(RobotOptions.Opt.SCENE_MANAGER_METRICS_URL, given, env));
     }
 
     private static RobotOptions.Opt byArg(String name) throws UsageException {

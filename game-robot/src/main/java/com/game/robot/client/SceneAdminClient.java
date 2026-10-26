@@ -16,10 +16,10 @@ import java.time.Duration;
 import java.util.List;
 
 /**
- * game-scene dev / test 实例管理口的 HTTP 客户端（dungeon-mirror-spec §6.13、Q3；契约 {@code game-api/src/main/proto/game/api/scene_admin.proto}）：
+ * game-scene dev/test实例与瞬移管理口客户端（dungeon-mirror-spec §6.13、movement-broadcast-spec §5.9；内部契约scene_admin.proto）：
  * <ul>
  *   <li>{@code POST /admin/scene/instance/create}（建副本）与 {@code POST /admin/scene/instance/destroy}（显式销毁实例），挂在 scene 管理端口
- *       （缺省 18104）；</li>
+ *       （缺省18104），以及{@code POST /admin/scene/player/teleport}同场景瞬移；</li>
  *   <li>请求 / 应答体是 protobuf 二进制（{@value #CONTENT_TYPE}）；鉴权同 game-trade 播种：令牌头 {@code X-Game-Admin-Token}
  *       （令牌同 {@link AdminClient#resolveToken}）+ 操作人 {@code X-Game-Operator}；</li>
  *   <li>HTTP 状态：令牌没配 503、令牌错 401、缺操作人或请求体不对 400、运行模式不是 dev / test 403；其余 200，结论在应答体的 {@code tip_id}。</li>
@@ -30,6 +30,7 @@ public final class SceneAdminClient {
 
     public static final String CREATE = "/admin/scene/instance/create";
     public static final String DESTROY = "/admin/scene/instance/destroy";
+    public static final String TELEPORT = "/admin/scene/player/teleport";
     public static final String CONTENT_TYPE = "application/x-protobuf";
 
     /**
@@ -97,6 +98,22 @@ public final class SceneAdminClient {
     /** 显式销毁，不判状态码（prod 模式下核对 403 用）。 */
     public HttpResult destroyRaw(long sceneId) throws RobotException {
         return post(DESTROY, encodeDestroy(sceneId));
+    }
+
+    /** 同场景瞬移：0成功，1004不在本节点，1005参数非法，1006冻结/战斗在途。 */
+    public int teleport(long playerId, double x, double y, double z) throws RobotException {
+        return decodeTeleported(expect200(TELEPORT, encodeTeleport(playerId, x, y, z)).body());
+    }
+
+    /** 不判状态码，供prod模式核对403。 */
+    public HttpResult teleportRaw(long playerId, double x, double y, double z) throws RobotException {
+        return post(TELEPORT, encodeTeleport(playerId, x, y, z));
+    }
+
+    /** 解开raw调用的成功应答，供先判断403的探针复用。 */
+    public static int teleportTip(HttpResult result) throws RobotException {
+        if (result.status() != 200) throw new RobotException("瞬移管理口返回HTTP " + result.status() + statusHint(result.status()));
+        return decodeTeleported(result.body());
     }
 
     /** 不判状态码的原始调用。 */
@@ -170,6 +187,25 @@ public final class SceneAdminClient {
         });
     }
 
+    /** proto3 double按原始位判断缺省：+0省略，-0必须保留，NaN载荷不改写。 */
+    static byte[] encodeTeleport(long playerId, double x, double y, double z) {
+        return encode(out -> {
+            if (playerId != 0) out.writeUInt64(1, playerId);
+            if (Double.doubleToRawLongBits(x) != 0) out.writeDouble(2, x);
+            if (Double.doubleToRawLongBits(y) != 0) out.writeDouble(3, y);
+            if (Double.doubleToRawLongBits(z) != 0) out.writeDouble(4, z);
+        });
+    }
+
+    /** {@code TeleportPlayerResponse{uint32 tip_id = 1}}，缺字段为0。 */
+    static int decodeTeleported(byte[] body) throws RobotException {
+        try {
+            return (int) varint(UnknownFieldSet.parseFrom(body), 1);
+        } catch (InvalidProtocolBufferException e) {
+            throw new RobotException("game-scene 瞬移接口的200应答体不是TeleportPlayerResponse：" + e.getMessage(), e);
+        }
+    }
+
     /** {@code CreateDungeonInstanceResponse{tip_id 1, scene_id 2, scene_config_id 3, scene_node_id 4}}，缺字段按 0。 */
     static Created decodeCreated(byte[] body) throws RobotException {
         try {
@@ -192,11 +228,11 @@ public final class SceneAdminClient {
     /** 按 HTTP 状态给的排查提示（§6.13 的状态映射）。 */
     public static String statusHint(int status) {
         return switch (status) {
-            case 403 -> "（game-scene 运行模式不是 dev / test，实例管理口关闭；本机切片缺省 GAME_RUN_MODE=dev）";
+            case 403 -> "（game-scene 运行模式不是 dev / test，dev管理口关闭；本机切片缺省 GAME_RUN_MODE=dev）";
             case 401 -> "（运维令牌不对：robot 的 GAME_ADMIN_TOKEN / run/game-admin-token 与 game-scene 进程的 GAME_ADMIN_TOKEN 不一致）";
-            case 503 -> "（game-scene 进程没配 GAME_ADMIN_TOKEN，实例管理口一律拒绝）";
+            case 503 -> "（game-scene没配GAME_ADMIN_TOKEN，或逻辑线程排队/处理超时）";
             case 400 -> "（缺操作人头 X-Game-Operator，或请求体不是对应的 protobuf 二进制）";
-            case 404 -> "（这个端口上没有实例管理口：--scene-admin-url 指错了端口，或 game-scene 版本早于批次 5.3）";
+            case 404 -> "（管理路径不存在：--scene-admin-url 指错了端口，或game-scene尚未实现该接口）";
             default -> "";
         };
     }
@@ -204,7 +240,7 @@ public final class SceneAdminClient {
     private HttpResult expect200(String path, byte[] body) throws RobotException {
         HttpResult result = post(path, body);
         if (result.status() != 200) {
-            throw new RobotException("game-scene 实例管理口 POST " + path + " 返回 " + result.status() + statusHint(result.status())
+            throw new RobotException("game-scene dev管理口 POST " + path + " 返回 " + result.status() + statusHint(result.status())
                     + "：" + result.text());
         }
         return result;

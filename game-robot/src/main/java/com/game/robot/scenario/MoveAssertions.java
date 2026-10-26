@@ -1,7 +1,17 @@
 package com.game.robot.scenario;
 
 import com.game.proto.ActorBaseAttributesS2C;
+import com.game.proto.ActorCreateS2C;
+import com.game.proto.ActorDestroyS2C;
+import com.game.proto.ActorListCreateS2C;
+import com.game.proto.ActorListDestroyS2C;
+import com.game.proto.ActorMoveListS2C;
+import com.game.proto.ActorMoveS2C;
 import com.game.proto.MoveAckS2C;
+import com.game.proto.TeleportS2C;
+import com.game.robot.client.MessageIds;
+import com.game.robot.client.Received;
+import com.game.robot.client.RobotException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -44,7 +54,7 @@ public final class MoveAssertions {
      */
     public record SentInput(int seq, InputKind kind, Vec3 location, Vec3 sentVelocity, long sentNanos) {
 
-        /** 观察者应在 66 里看到的速度：STOP 为全零，其余为截断到 10 m/s 的上报速度。 */
+        /** 观察者在133或66里应看到的速度：STOP全零，其余为截断到10m/s的上报速度。 */
         public Vec3 expectedVelocity() {
             return kind == InputKind.STOP ? Vec3.ZERO : clampSpeed(sentVelocity);
         }
@@ -248,6 +258,190 @@ public final class MoveAssertions {
                     + " ms，不像 UTC Unix 毫秒");
         }
         return new JumpVerdict(true, server, violations);
+    }
+
+    /** 133与135条目的统一视图；135的多个条目保留同一信封到达序号。 */
+    public record ObsMove(int index, long receivedNanos, long envelopeId, int messageId, ActorMoveS2C move) {
+        public Obs66 asMotion() {
+            return new Obs66(index, receivedNanos, move.getEntity(),
+                    move.hasTransform() && move.getTransform().hasLocation() ? Vec3.of(move.getTransform().getLocation()) : null,
+                    move.hasTransform() && move.getTransform().hasRotation() ? Vec3.of(move.getTransform().getRotation()) : null,
+                    move.hasVelocity() ? Vec3.of(move.getVelocity()) : null);
+        }
+    }
+
+    /** 实体号口径，不能拿player_id匹配133/135/130。 */
+    public static Owner actorOwner(long entity, long moverEntity, long receiverEntity) {
+        if (entity == 0) return Owner.UNATTRIBUTED;
+        if (entity == moverEntity) return Owner.MOVER;
+        return entity == receiverEntity ? Owner.RECEIVER : Owner.OTHER;
+    }
+
+    /** 只解析移动下行；坏包显式报错，不静默丢弃造成断言假通过。 */
+    public static List<ObsMove> moves(List<Received> frames, MessageIds ids) throws RobotException {
+        List<ObsMove> result = new ArrayList<>();
+        for (Received frame : frames) {
+            if (frame.messageId() == ids.notifyActorMove()) {
+                result.add(new ObsMove(frame.index(), frame.receivedNanos(), frame.requestId(), frame.messageId(),
+                        frame.parse(ActorMoveS2C.parser())));
+            } else if (frame.messageId() == ids.notifyActorMoveList()) {
+                for (ActorMoveS2C move : frame.parse(ActorMoveListS2C.parser()).getMovesList()) {
+                    result.add(new ObsMove(frame.index(), frame.receivedNanos(), frame.requestId(), frame.messageId(), move));
+                }
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    /** effective为合并后实际保留下来的输入；逐位位置断言只对它进行。 */
+    public record ActorInputMatch(SentInput input, SentInput effective, ObsMove observed) {
+        public long latencyMillis() {
+            return observed == null ? -1 : (observed.receivedNanos() - input.sentNanos()) / 1_000_000;
+        }
+    }
+
+    /** 复用66的到达顺序与合并容忍规则，额外保留最终输入以验证133精确位置。 */
+    public static List<ActorInputMatch> matchActorInputs(List<SentInput> inputs, List<ObsMove> observed) {
+        List<InputMatch> matched = matchInputs(inputs, observed.stream().map(ObsMove::asMotion).toList(), 1e-4, 1e-6);
+        List<ActorInputMatch> result = new ArrayList<>();
+        for (int i = 0; i < inputs.size(); i++) {
+            Obs66 motion = matched.get(i).observed();
+            ObsMove found = motion == null ? null : observed.stream().filter(o -> o.asMotion().equals(motion)).findFirst().orElseThrow();
+            SentInput effective = null;
+            if (found != null) {
+                for (int k = i; k < inputs.size(); k++) {
+                    SentInput candidate = inputs.get(k);
+                    if (candidate.sentNanos() > found.receivedNanos()) break;
+                    if (motion.velocity().approx(candidate.expectedVelocity(), 1e-6)
+                            && (candidate.kind() != InputKind.STOP || motion.location().approx(candidate.location(), 1e-4))) {
+                        effective = candidate;
+                        break;
+                    }
+                }
+            }
+            result.add(new ActorInputMatch(inputs.get(i), effective, found));
+        }
+        return List.copyOf(result);
+    }
+
+    /** 原始double位比较，包含-0，避免容差掩盖裁决位置被错误外推。 */
+    public static boolean sameBits(Vec3 a, Vec3 b) {
+        return a != null && b != null && Double.doubleToRawLongBits(a.x()) == Double.doubleToRawLongBits(b.x())
+                && Double.doubleToRawLongBits(a.y()) == Double.doubleToRawLongBits(b.y())
+                && Double.doubleToRawLongBits(a.z()) == Double.doubleToRawLongBits(b.z());
+    }
+
+    /** 验证133完整字段、实体口径、发送墙钟、状态位和推送信封。 */
+    public static List<String> actorMoveProblems(ObsMove observed, long entity, SentInput effective, Vec3 facing, long wallNow) {
+        List<String> problems = new ArrayList<>();
+        ActorMoveS2C move = observed.move();
+        Obs66 motion = observed.asMotion();
+        if (observed.envelopeId() != 0) problems.add("133/135信封id非0");
+        if (move.getEntity() != entity) problems.add("entity不是场景实体号" + entity);
+        if (!sameBits(motion.location(), effective.location())) problems.add("location缺席或不等于裁决输入的原始位");
+        if (!sameBits(motion.rotation(), facing)) problems.add("rotation缺席或不等于FACING");
+        if (!sameBits(motion.velocity(), effective.expectedVelocity())) problems.add("velocity缺席或不等于截断后的速度");
+        int state = effective.expectedVelocity().isZero() ? 0 : 1;
+        if (move.getMoveState() != state) problems.add("move_state应为" + state);
+        if (move.getServerTimeMs() < wallNow - SERVER_TIME_TOLERANCE_MS
+                || move.getServerTimeMs() > wallNow + SERVER_TIME_TOLERANCE_MS) problems.add("server_time_ms不是当前UTC毫秒");
+        return List.copyOf(problems);
+    }
+
+    public static List<String> teleportProblems(Received frame, long entity, Vec3 target, Vec3 facing, int reason)
+            throws RobotException {
+        TeleportS2C teleport = frame.parse(TeleportS2C.parser());
+        List<String> problems = new ArrayList<>();
+        if (frame.requestId() != 0) problems.add("130信封id非0");
+        if (teleport.getEntity() != entity) problems.add("130 entity不是场景实体号" + entity);
+        if (!teleport.hasTransform() || !teleport.getTransform().hasLocation()
+                || !sameBits(Vec3.of(teleport.getTransform().getLocation()), target)) problems.add("130 location缺席或原始位不等于目标");
+        if (!teleport.getTransform().hasRotation() || !sameBits(Vec3.of(teleport.getTransform().getRotation()), facing)) {
+            problems.add("130 rotation缺席或不等于FACING");
+        }
+        if (teleport.getReason() != reason) problems.add("130 reason应为" + reason);
+        if (teleport.getInputSeq() != 0) problems.add("130 input_seq应为0");
+        return List.copyOf(problems);
+    }
+
+    /** 两人单节点瞬移序列：本人130→64/47，旁人去程64、回程21；66不参与此序列。 */
+    public static List<String> teleportSequenceProblems(List<Received> atMover, List<Received> atPeer, MessageIds ids,
+                                                        long mover, long peer, Vec3 target, Vec3 facing, boolean returning)
+            throws RobotException {
+        List<String> problems = new ArrayList<>();
+        List<Received> teleports = atMover.stream().filter(r -> r.messageId() == ids.notifyTeleport()).toList();
+        if (teleports.size() != 1) problems.add("本人130应恰好一条，实际" + teleports.size());
+        int teleportIndex = teleports.isEmpty() ? Integer.MAX_VALUE : teleports.getFirst().index();
+        if (!teleports.isEmpty()) problems.addAll(teleportProblems(teleports.getFirst(), mover, target, facing, 3));
+        int ownChangeCount = 0;
+        for (Received frame : atMover) {
+            if (frame.messageId() == ids.notifyEnterScene()) problems.add("同场景瞬移不应收到79清场");
+            if (frame.messageId() == ids.notifyActorDestroy()
+                    && frame.parse(ActorDestroyS2C.parser()).getEntity() == mover) problems.add("本人51包含自己");
+            if (frame.messageId() == ids.notifyActorListDestroy()) {
+                List<Long> entities = frame.parse(ActorListDestroyS2C.parser()).getEntityList();
+                if (entities.contains(mover)) problems.add("本人64包含自己");
+                if (frame.requestId() != 0) problems.add("本人64信封id非0");
+                if (entities.contains(peer)) {
+                    ownChangeCount++;
+                    if (returning || frame.index() <= teleportIndex) problems.add("本人64顺序或方向错误");
+                }
+            } else if (frame.messageId() == ids.notifyActorListCreate()) {
+                for (ActorCreateS2C actor : frame.parse(ActorListCreateS2C.parser()).getActorListList()) {
+                    if (actor.getEntity() == mover) problems.add("本人47包含自己");
+                    if (actor.getEntity() == peer) {
+                        ownChangeCount++;
+                        if (!returning || frame.index() <= teleportIndex) problems.add("本人47顺序或方向错误");
+                    }
+                }
+                if (frame.requestId() != 0) problems.add("本人47信封id非0");
+            } else if (frame.messageId() == ids.notifyActorCreate()
+                    && frame.parse(ActorCreateS2C.parser()).getEntity() == mover) problems.add("瞬移重发本人21");
+        }
+        if (ownChangeCount != 1) problems.add("本人对旁人的64/47应恰好一次，实际" + ownChangeCount);
+        int peerChanges = 0;
+        for (Received frame : atPeer) {
+            if (frame.messageId() == ids.notifyActorListDestroy()
+                    && frame.parse(ActorListDestroyS2C.parser()).getEntityList().contains(mover)) {
+                peerChanges++;
+                if (returning || frame.requestId() != 0) problems.add("旁人64方向或信封错误");
+            } else if (frame.messageId() == ids.notifyActorCreate()) {
+                ActorCreateS2C actor = frame.parse(ActorCreateS2C.parser());
+                if (actor.getEntity() != mover) continue;
+                peerChanges++;
+                if (!returning || frame.requestId() != 0 || !actor.hasTransform() || !actor.getTransform().hasLocation()
+                        || !sameBits(Vec3.of(actor.getTransform().getLocation()), target)
+                        || !actor.getTransform().hasRotation() || !sameBits(Vec3.of(actor.getTransform().getRotation()), facing)) {
+                    problems.add("旁人21方向、信封、位置或朝向错误");
+                }
+            } else if (frame.messageId() == ids.notifyTeleport()) problems.add("旁人不应收到130");
+        }
+        if (peerChanges != 1) problems.add("旁人64/21应恰好一次，实际" + peerChanges);
+        if (moves(atMover, ids).stream().anyMatch(o -> o.move().getEntity() == mover)) problems.add("本人收到自己的133/135");
+        if (moves(atPeer, ids).stream().anyMatch(o -> o.move().getEntity() == mover)) problems.add("静止瞬移目标不应补133/135");
+        return List.copyOf(problems);
+    }
+
+    /** AFK必须仅有起步与服务器停步两条，不能被客户端1秒外推上限或中途离场替代。 */
+    public static List<String> afkProblems(List<ObsMove> observed, long entity, Vec3 start, Vec3 facing,
+                                          long sentAt, long maxWaitMillis, long wallNow) {
+        List<String> problems = new ArrayList<>();
+        if (observed.size() != 2) {
+            problems.add("AFK的133应恰好两条，实际" + observed.size());
+            return problems;
+        }
+        ObsMove begun = observed.getFirst();
+        ObsMove stop = observed.getLast();
+        problems.addAll(actorMoveProblems(begun, entity, new SentInput(41, InputKind.START, start,
+                new Vec3(0.3, 0, 0), sentAt), facing, wallNow));
+        Vec3 stopped = stop.asMotion().location();
+        problems.addAll(actorMoveProblems(stop, entity, new SentInput(41, InputKind.STOP, stopped,
+                Vec3.ZERO, sentAt), facing, wallNow));
+        long delay = (stop.receivedNanos() - sentAt) / 1_000_000;
+        if (delay < 29_000 || delay > maxWaitMillis) problems.add("AFK停步时刻不在约30秒窗口，实际" + delay + "ms");
+        if (stopped == null || !stopped.approx(start.plus(new Vec3(9, 0, 0)), 0.1)) problems.add("AFK停止位置不在约9米处");
+        if (stop.index() <= begun.index()) problems.add("AFK停步早于起步");
+        return List.copyOf(problems);
     }
 
     static String fmt(double v) {

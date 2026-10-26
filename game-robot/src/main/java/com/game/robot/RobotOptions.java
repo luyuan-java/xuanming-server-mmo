@@ -64,7 +64,9 @@ import java.util.regex.Pattern;
  * @param battleAdminUrl  battle / battle-edge 场景：game-battle 管理端口（dev 接口 {@code POST /admin/battle/dev/*} 与指标）
  * @param matchAdminUrl   battle-smoke / battle-cross-zone / match-activity / match-5v5 场景：game-match 管理端口（dev 接口
  *                        {@code /admin/match/dev/*} 与指标）
- * @param expectDevAllowed battle / battle-edge 场景：game-battle 的 dev 接口开放（allow，dev / test 运行模式）还是回 403（deny，prod）
+ * @param sceneAdminUrl   movement / dungeon的game-scene管理端口；movement须指向A所在单节点
+ * @param afkProbe        movement另跑30秒挂机探针
+ * @param expectDevAllowed movement / dungeon / battle等场景的dev接口开放（allow）还是回403（deny）
  * @param slow            battle-edge 场景：也跑慢用例（连上不握手、等 10 s 握手期限）
  */
 public record RobotOptions(
@@ -85,6 +87,8 @@ public record RobotOptions(
         boolean expectGmAllowed,
         String dataUrl,
         String sceneMetricsUrl,
+        String sceneAdminUrl,
+        boolean afkProbe,
         String tableDir,
         String tradeAdminUrl,
         MarketScope tradeScope,
@@ -198,7 +202,9 @@ public record RobotOptions(
                         + "cross-node 里也是 63 受理后等 79 / 23 {3023} 的上限"),
         ENTER_SCENE_TIMEOUT("enter-scene-timeout-ms", "GAME_ROBOT_ENTER_SCENE_TIMEOUT_MS", "15000", "发出进游戏后等 79 的上限"),
         OBSERVE_TIMEOUT("observe-timeout-ms", "GAME_ROBOT_OBSERVE_TIMEOUT_MS", "2000",
-                "movement：每条移动输入后 B 收到 66、跳跃后 A 收到 137、等 21 / 47 的上限；cross-node：等 21 / 47 / 51 / 66 的上限"),
+                "movement：每条移动输入后 B 收到133/66、瞬移130、跳跃137与21/47的观察上限；cross-node：等21/47/51/66的上限"),
+        AFK_PROBE("afk-probe", "GAME_ROBOT_AFK_PROBE", "false",
+                "movement：另跑0.3m/s静默30秒的挂机停推探针（缺省关；可只写 --afk-probe）"),
         EXPECT_JUMP("expect-jump", "GAME_ROBOT_EXPECT_JUMP", "auto",
                 "movement 跳跃检查的期望：auto（纠偏或 fail-open 都接受）/ correct（必须回 137）/ accept（必须原样接受）"),
         EXPECT_GM("expect-gm", "GAME_ROBOT_EXPECT_GM", "allow",
@@ -220,7 +226,7 @@ public record RobotOptions(
         EXPECT_MIRROR_VALIDATION("expect-mirror-validation", "GAME_ROBOT_EXPECT_MIRROR_VALIDATION", "strict",
                 "mirror：表外 mirror_config_id 的期望：strict（同步 3005，Java 先查 Mirror 表）/ lenient（{0} + 79，不查表的实现）"),
         SCENE_ADMIN_URL("scene-admin-url", "GAME_ROBOT_SCENE_ADMIN_URL", "http://127.0.0.1:18104",
-                "dungeon：game-scene 管理端口（dev 实例管理口 POST /admin/scene/instance/*，运维令牌同 audit；副本建在这个节点上，指标也抓这里）"),
+                "movement / dungeon：game-scene管理端口（瞬移 / 实例dev接口，运维令牌同audit）；movement只在单scene节点切片跑，必须指向A所在节点"),
         SCENE_MANAGER_METRICS_URL("scene-manager-metrics-url", "GAME_ROBOT_SCENE_MANAGER_METRICS_URL", "http://127.0.0.1:18102",
                 "mirror / dungeon：game-scene-manager 管理端口（抓 game_scene_manager_instance_seconds）"),
         BATTLE_ADMIN_URL("battle-admin-url", "GAME_ROBOT_BATTLE_ADMIN_URL", "http://127.0.0.1:18112",
@@ -229,7 +235,7 @@ public record RobotOptions(
                 "battle-smoke / battle-cross-zone / match-activity / match-5v5：game-match 管理端口（dev 接口 GET /admin/match/dev/rating/{pid}、"
                         + "POST /admin/match/dev/activity-battle 与指标；运维令牌同 audit）"),
         EXPECT_DEV("expect-dev", "GAME_ROBOT_EXPECT_DEV", "allow",
-                "battle / battle-edge：game-battle dev 接口的期望：allow（dev / test 运行模式）/ deny（prod：403，只跑不需要建房的步骤）"),
+                "movement / dungeon / battle / battle-edge：dev接口期望allow（dev/test）或deny（prod回403）；movement两种模式均需运维令牌"),
         SLOW("slow", "GAME_ROBOT_SLOW", "false",
                 "也跑慢用例——battle-edge：连上不握手 10 ± 1 s 被关；battle-settle：备战到期、离线结算等满 130 s 重投窗口；"
                         + "写 --slow 即 true，也接受 --slow true / false"),
@@ -248,7 +254,7 @@ public record RobotOptions(
 
         /** 布尔开关：命令行可以只写 {@code --名字}（下一个参数不是 true / false 时不吃掉它）。 */
         boolean isFlag() {
-            return this == SLOW;
+            return this == SLOW || this == AFK_PROBE;
         }
 
         final String arg;
@@ -380,6 +386,11 @@ public record RobotOptions(
         if (!slow.equals("true") && !slow.equals("false")) {
             throw new UsageException("--slow 只能是 true / false：" + slow);
         }
+        String sceneAdminUrl = sceneAdminUrl(given, env);
+        String afkProbe = value(Opt.AFK_PROBE, given, env);
+        if (!afkProbe.equals("true") && !afkProbe.equals("false")) {
+            throw new UsageException("--afk-probe 只能是 true / false：" + afkProbe);
+        }
         String password = env.get(PASSWORD_ENV);
         if (password == null || password.isEmpty()) {
             throw new UsageException("需要环境变量 " + PASSWORD_ENV + "（与 game-login 相同的开发口令）");
@@ -431,7 +442,8 @@ public record RobotOptions(
                 millis(Opt.CONNECT_TIMEOUT, given, env), millis(Opt.REQUEST_TIMEOUT, given, env),
                 millis(Opt.ENTER_SCENE_TIMEOUT, given, env), millis(Opt.OBSERVE_TIMEOUT, given, env),
                 expectJump, expectGm.equals("allow"), stripSlash(value(Opt.DATA_URL, given, env)),
-                stripSlash(value(Opt.SCENE_METRICS_URL, given, env)), value(Opt.TABLE_DIR, given, env), tradeAdminUrl,
+                stripSlash(value(Opt.SCENE_METRICS_URL, given, env)), sceneAdminUrl, afkProbe.equals("true"),
+                value(Opt.TABLE_DIR, given, env), tradeAdminUrl,
                 tradeScope, battleAdminUrl, matchAdminUrl, expectDev.equals("allow"), slow.equals("true"), password);
     }
 
@@ -440,7 +452,7 @@ public record RobotOptions(
         StringBuilder out = new StringBuilder();
         out.append("用法：java -jar game-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|battle-smoke|battle-cross-zone|match-activity|match-5v5|travel|travel-abandon|travel-long|ordering-smoke|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
-        out.append("  movement  A、B 同场景：A 移动（134/132/131），B 收 66；A 重登核对位置；超速跳跃负向检查\n");
+        out.append("  movement  单scene节点：行走133（66旁证）→重登朝向→管理口瞬移130→超速跳跃；需GAME_ADMIN_TOKEN或run/game-admin-token，--afk-probe可选\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
                 + "或按 --expect-gm deny 核对生产模式的拒绝\n");
         out.append("  attribute 属性加点：面板 → GM 设 30 级（先推 170）→ 自动加点 → 确认 → 幂等 / 只增不减 → 开方案扣金币 → "
@@ -655,6 +667,15 @@ public record RobotOptions(
             }
         }
         throw new UsageException("未知选项：--" + name);
+    }
+
+    /** scene管理端口的唯一校验入口，实例附加选项也复用，movement不解析实例专用选项。 */
+    static String sceneAdminUrl(Map<Opt, String> given, Map<String, String> env) throws UsageException {
+        String url = stripSlash(value(Opt.SCENE_ADMIN_URL, given, env));
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            throw new UsageException("--scene-admin-url 必须以 http:// 或 https:// 开头：" + url);
+        }
+        return url;
     }
 
     private static String stripSlash(String url) {

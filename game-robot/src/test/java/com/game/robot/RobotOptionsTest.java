@@ -16,6 +16,40 @@ class RobotOptionsTest {
     private static final long NOW = 1_760_000_000_000L;
 
     @Test
+    void movement管理端口与挂机开关缺省值_不解析实例专用选项() throws Exception {
+        RobotOptions o = RobotOptions.parse(List.of("movement", "--mirror-config-id", "invalid"), ENV, NOW);
+        assertThat(o.sceneAdminUrl()).isEqualTo("http://127.0.0.1:18104");
+        assertThat(o.afkProbe()).isFalse();
+        assertThat(o.expectDevAllowed()).isTrue();
+    }
+
+    @Test
+    void movement管理端口和挂机开关的优先级与开关写法() throws Exception {
+        Map<String, String> env = Map.of(RobotOptions.PASSWORD_ENV, "p", "GAME_ROBOT_SCENE_ADMIN_URL", "http://env:8/",
+                "GAME_ROBOT_AFK_PROBE", "true");
+        RobotOptions fromEnv = RobotOptions.parse(List.of("movement"), env, NOW);
+        assertThat(fromEnv.sceneAdminUrl()).isEqualTo("http://env:8");
+        assertThat(fromEnv.afkProbe()).isTrue();
+        RobotOptions arg = RobotOptions.parse(List.of("--afk-probe", "movement", "--scene-admin-url=https://arg:9//",
+                "--expect-dev", "deny"), env, NOW);
+        assertThat(arg.sceneAdminUrl()).isEqualTo("https://arg:9");
+        assertThat(arg.afkProbe()).isTrue();
+        assertThat(arg.expectDevAllowed()).isFalse();
+        assertThat(RobotOptions.parse(List.of("movement", "--afk-probe", "false"), env, NOW).afkProbe()).isFalse();
+        assertThat(InstanceOptions.parse(List.of("dungeon", "--scene-admin-url=https://arg:9//"), env).sceneAdminUrl())
+                .isEqualTo(arg.sceneAdminUrl());
+    }
+
+    @Test
+    void movement管理端口和挂机非法参数明确拒绝() {
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("movement", "--scene-admin-url", "localhost:1"), ENV, NOW))
+                .hasMessageContaining("--scene-admin-url");
+        assertThatThrownBy(() -> RobotOptions.parse(List.of("movement", "--afk-probe=maybe"), ENV, NOW))
+                .hasMessageContaining("--afk-probe");
+        assertThat(RobotOptions.usage()).contains("单scene节点", "--afk-probe", "GAME_ADMIN_TOKEN");
+    }
+
+    @Test
     void 缺省值() throws Exception {
         RobotOptions o = RobotOptions.parse(List.of("smoke"), ENV, NOW);
         assertThat(o.scenario()).isEqualTo(RobotOptions.Scenario.SMOKE);

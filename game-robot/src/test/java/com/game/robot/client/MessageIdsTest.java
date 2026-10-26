@@ -19,10 +19,13 @@ class MessageIdsTest {
         List<Integer> all = List.of(ids.login(), ids.createPlayer(), ids.enterGame(), ids.sendTip(),
                 ids.notifyEnterScene(), ids.notifyActorCreate(), ids.notifyActorListCreate(), ids.notifyActorDestroy(),
                 ids.notifyActorListDestroy(), ids.listSkills(), ids.syncBaseAttribute(), ids.moveStart(),
-                ids.moveSync(), ids.moveStop(), ids.notifyMoveAck());
+                ids.moveSync(), ids.moveStop(), ids.notifyMoveAck(), ids.notifyActorMove(), ids.notifyActorMoveList(), ids.notifyTeleport());
         Set<Integer> distinct = new HashSet<>(all);
         assertThat(distinct).hasSize(all.size());
         assertThat(all).allSatisfy(id -> assertThat(id).isPositive());
+        assertThat(ids.notifyActorMove()).isEqualTo(133);
+        assertThat(ids.notifyActorMoveList()).isEqualTo(135);
+        assertThat(ids.notifyTeleport()).isEqualTo(130);
     }
 
     @Test

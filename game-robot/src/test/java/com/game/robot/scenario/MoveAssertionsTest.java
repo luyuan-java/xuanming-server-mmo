@@ -1,8 +1,24 @@
 package com.game.robot.scenario;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.proto.ActorBaseAttributesS2C;
+import com.game.proto.ActorCreateS2C;
+import com.game.proto.ActorDestroyS2C;
+import com.game.proto.EnterSceneS2C;
+import com.game.proto.ActorListCreateS2C;
+import com.game.proto.ActorListDestroyS2C;
+import com.game.proto.ActorMoveS2C;
+import com.game.proto.ActorMoveListS2C;
+import com.game.proto.MessageContent;
+import com.game.proto.TeleportS2C;
+import com.game.contract.MessageIdRegistry;
+import com.game.robot.client.MessageIds;
+import com.game.robot.client.Received;
+import com.game.robot.client.RobotException;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.Message;
 import com.game.proto.MoveAckS2C;
 import com.game.proto.Transform;
 import com.game.proto.Vector3;
@@ -20,6 +36,216 @@ class MoveAssertionsTest {
     private static final long MS = 1_000_000L;
     private static final Vec3 P0 = new Vec3(180, 200, 0);
     private static final long NOW_MS = 1_760_000_000_000L;
+    private static final MessageIds IDS = MessageIds.resolve(MessageIdRegistry.loadFromClasspath());
+    private static final long ENTITY = 901;
+    private static final long PEER = 902;
+    private static final Vec3 FACE = new Vec3(0, 0, 90);
+
+    private static Transform transform(Vec3 at) {
+        return Transform.newBuilder().setLocation(Vector3.newBuilder().setX(at.x()).setY(at.y()).setZ(at.z()))
+                .setRotation(FACE.toRotation()).build();
+    }
+
+    private static ActorMoveS2C actorMove(Vec3 at, Vec3 velocity) {
+        return ActorMoveS2C.newBuilder().setEntity(ENTITY).setTransform(transform(at)).setVelocity(velocity.toVelocity())
+                .setMoveState(velocity.isZero() ? 0 : 1).setServerTimeMs(NOW_MS).build();
+    }
+
+    private static Received frame(int index, long ms, int id, Message message) {
+        return new Received(index, ms * MS, MessageContent.newBuilder().setMessageId(id).setSerializedMessage(message.toByteString()).build());
+    }
+
+    private static MoveAssertions.ObsMove moving(int index, long ms, Vec3 at, Vec3 velocity) {
+        return new MoveAssertions.ObsMove(index, ms * MS, 0, IDS.notifyActorMove(), actorMove(at, velocity));
+    }
+
+    private static TeleportS2C teleport(Vec3 target) {
+        return TeleportS2C.newBuilder().setEntity(ENTITY).setTransform(transform(target)).setReason(3).build();
+    }
+
+    @Test
+    void 移动下行解析_135展开保留顺序与信封_空表无条目() throws Exception {
+        ActorMoveS2C first = actorMove(P0, new Vec3(4, 0, 0));
+        ActorMoveS2C second = first.toBuilder().setEntity(PEER).build();
+        List<MoveAssertions.ObsMove> seen = MoveAssertions.moves(List.of(
+                frame(0, 10, IDS.notifyActorMove(), first),
+                frame(1, 20, IDS.notifyActorMoveList(), ActorMoveListS2C.newBuilder().addMoves(first).addMoves(second).build()),
+                frame(2, 30, IDS.notifyActorMoveList(), ActorMoveListS2C.getDefaultInstance()),
+                frame(3, 40, IDS.notifyMoveAck(), MoveAckS2C.getDefaultInstance())), IDS);
+        assertThat(seen).extracting(o -> o.move().getEntity()).containsExactly(ENTITY, ENTITY, PEER);
+        assertThat(seen).extracting(MoveAssertions.ObsMove::index).containsExactly(0, 1, 1);
+        assertThat(seen.getLast().receivedNanos()).isEqualTo(20 * MS);
+        assertThat(seen).allSatisfy(o -> assertThat(o.envelopeId()).isZero());
+    }
+
+    @Test
+    void 移动下行坏包不能被静默忽略() {
+        for (int id : List.of(IDS.notifyActorMove(), IDS.notifyActorMoveList())) {
+            Received broken = new Received(0, 0, MessageContent.newBuilder().setMessageId(id)
+                    .setSerializedMessage(ByteString.copyFrom(new byte[] {(byte) 0xff})).build());
+            assertThatThrownBy(() -> MoveAssertions.moves(List.of(broken), IDS)).isInstanceOf(RobotException.class);
+        }
+    }
+
+    @Test
+    void actor按实体号归属_不接受player_id替代() {
+        assertThat(MoveAssertions.actorOwner(ENTITY, ENTITY, PEER)).isEqualTo(Owner.MOVER);
+        assertThat(MoveAssertions.actorOwner(PEER, ENTITY, PEER)).isEqualTo(Owner.RECEIVER);
+        assertThat(MoveAssertions.actorOwner(123, ENTITY, PEER)).isEqualTo(Owner.OTHER);
+        assertThat(MoveAssertions.actorOwner(0, ENTITY, PEER)).isEqualTo(Owner.UNATTRIBUTED);
+    }
+
+    @Test
+    void actor配对容忍同帧合并_保留实际输入用于逐位比较() {
+        List<SentInput> inputs = List.of(input(1, InputKind.START, 0, 4, 0), input(2, InputKind.SYNC, 1, 5, 10),
+                input(3, InputKind.STOP, 2, 0, 300));
+        List<MoveAssertions.ActorInputMatch> matched = MoveAssertions.matchActorInputs(inputs,
+                List.of(moving(0, 20, x(1), new Vec3(5, 0, 0)), moving(1, 350, x(2), Vec3.ZERO)));
+        assertThat(matched).extracting(m -> m.effective().seq()).containsExactly(2, 2, 3);
+        assertThat(matched).extracting(m -> m.observed().index()).containsExactly(0, 0, 1);
+        assertThat(matched.getFirst().latencyMillis()).isEqualTo(20);
+        assertThat(MoveAssertions.actorMoveProblems(matched.getFirst().observed(), ENTITY, matched.getFirst().effective(), FACE, NOW_MS))
+                .isEmpty();
+    }
+
+    @Test
+    void actor配对不借未来输入_字段缺席或旧观察不能匹配() {
+        List<SentInput> inputs = List.of(input(1, InputKind.START, 0, 4, 100), input(2, InputKind.SYNC, 1, 5, 300));
+        assertThat(MoveAssertions.matchActorInputs(inputs, List.of(moving(0, 200, x(1), new Vec3(5, 0, 0)))))
+                .allSatisfy(m -> assertThat(m.observed()).isNull());
+        assertThat(MoveAssertions.matchActorInputs(inputs, List.of(moving(0, 50, P0, new Vec3(4, 0, 0)))))
+                .allSatisfy(m -> assertThat(m.observed()).isNull());
+        MoveAssertions.ObsMove noVelocity = new MoveAssertions.ObsMove(1, 200 * MS, 0, IDS.notifyActorMove(),
+                actorMove(P0, new Vec3(4, 0, 0)).toBuilder().clearVelocity().build());
+        assertThat(MoveAssertions.matchActorInputs(inputs, List.of(noVelocity))).allSatisfy(m -> assertThat(m.observed()).isNull());
+    }
+
+    @Test
+    void actor逐字段断言抓住实体位置朝向速度状态时间与信封错误() {
+        SentInput input = input(1, InputKind.START, 0, 30, 0);
+        ActorMoveS2C good = actorMove(P0, new Vec3(10, 0, 0));
+        assertThat(MoveAssertions.actorMoveProblems(new MoveAssertions.ObsMove(0, MS, 0, IDS.notifyActorMove(), good),
+                ENTITY, input, FACE, NOW_MS)).isEmpty();
+        List<ActorMoveS2C> bad = List.of(good.toBuilder().setEntity(123).build(),
+                good.toBuilder().setTransform(good.getTransform().toBuilder().clearLocation()).build(),
+                good.toBuilder().setTransform(transform(new Vec3(Math.nextUp(P0.x()), P0.y(), P0.z()))).build(),
+                good.toBuilder().setTransform(good.getTransform().toBuilder().clearRotation()).build(),
+                good.toBuilder().clearVelocity().build(), good.toBuilder().setVelocity(new Vec3(30, 0, 0).toVelocity()).build(),
+                good.toBuilder().setMoveState(0).build(), good.toBuilder().setServerTimeMs(0).build());
+        for (ActorMoveS2C invalid : bad) {
+            assertThat(MoveAssertions.actorMoveProblems(new MoveAssertions.ObsMove(0, MS, 0, IDS.notifyActorMove(), invalid),
+                    ENTITY, input, FACE, NOW_MS)).isNotEmpty();
+        }
+        assertThat(MoveAssertions.actorMoveProblems(new MoveAssertions.ObsMove(0, MS, 7, IDS.notifyActorMove(), good),
+                ENTITY, input, FACE, NOW_MS)).contains("133/135信封id非0");
+    }
+
+    @Test
+    void actor停止要求速度消息存在与state0_逐位区分负零() {
+        SentInput stop = input(2, InputKind.STOP, 0, 0, 0);
+        MoveAssertions.ObsMove good = moving(0, 1, P0, Vec3.ZERO);
+        assertThat(MoveAssertions.actorMoveProblems(good, ENTITY, stop, FACE, NOW_MS)).isEmpty();
+        assertThat(MoveAssertions.sameBits(Vec3.ZERO, new Vec3(-0.0, 0, 0))).isFalse();
+        assertThat(MoveAssertions.actorMoveProblems(new MoveAssertions.ObsMove(0, MS, 0, IDS.notifyActorMove(),
+                good.move().toBuilder().setMoveState(1).build()), ENTITY, stop, FACE, NOW_MS)).contains("move_state应为0");
+    }
+
+    @Test
+    void 瞬移字段必须有位置朝向_实体reason_inputseq和信封正确() throws Exception {
+        TeleportS2C good = teleport(x(50));
+        assertThat(MoveAssertions.teleportProblems(frame(0, 1, IDS.notifyTeleport(), good), ENTITY, x(50), FACE, 3)).isEmpty();
+        for (TeleportS2C invalid : List.of(good.toBuilder().setEntity(123).build(), good.toBuilder().setReason(5).build(),
+                good.toBuilder().setInputSeq(1).build(), good.toBuilder().clearTransform().build(),
+                good.toBuilder().setTransform(good.getTransform().toBuilder().clearLocation()).build(),
+                good.toBuilder().setTransform(good.getTransform().toBuilder().clearRotation()).build(),
+                good.toBuilder().setTransform(transform(x(49))).build())) {
+            assertThat(MoveAssertions.teleportProblems(frame(0, 1, IDS.notifyTeleport(), invalid), ENTITY, x(50), FACE, 3))
+                    .isNotEmpty();
+        }
+        Received nonzero = frame(0, 1, IDS.notifyTeleport(), good);
+        assertThat(MoveAssertions.teleportProblems(new Received(0, MS, nonzero.content().toBuilder().setId(7).build()),
+                ENTITY, x(50), FACE, 3)).contains("130信封id非0");
+    }
+
+    private static List<Received> outgoingA() {
+        return List.of(frame(0, 1, IDS.notifyTeleport(), teleport(x(50))),
+                frame(1, 2, IDS.notifyActorListDestroy(), ActorListDestroyS2C.newBuilder().addEntity(PEER).build()));
+    }
+
+    private static List<Received> outgoingB() {
+        return List.of(frame(0, 2, IDS.notifyActorListDestroy(), ActorListDestroyS2C.newBuilder().addEntity(ENTITY).build()));
+    }
+
+    @Test
+    void 瞬移去程_先130再64差集_旁人只64_忽略66旁证() throws Exception {
+        assertThat(MoveAssertions.teleportSequenceProblems(outgoingA(), outgoingB(), IDS, ENTITY, PEER, x(50), FACE, false)).isEmpty();
+        List<Received> with66 = new java.util.ArrayList<>(outgoingA());
+        with66.add(frame(2, 3, IDS.syncBaseAttribute(), ActorBaseAttributesS2C.getDefaultInstance()));
+        assertThat(MoveAssertions.teleportSequenceProblems(with66, outgoingB(), IDS, ENTITY, PEER, x(50), FACE, false)).isEmpty();
+    }
+
+    @Test
+    void 瞬移去程序列抓住缺包乱序自毁和重复130() throws Exception {
+        List<List<Received>> invalid = List.of(List.of(outgoingA().getFirst()),
+                List.of(frame(0, 1, IDS.notifyActorListDestroy(), ActorListDestroyS2C.newBuilder().addEntity(PEER).build()),
+                        frame(1, 2, IDS.notifyTeleport(), teleport(x(50)))),
+                List.of(outgoingA().getFirst(), frame(1, 2, IDS.notifyActorListDestroy(),
+                        ActorListDestroyS2C.newBuilder().addEntity(ENTITY).addEntity(PEER).build())),
+                List.of(outgoingA().getFirst(), outgoingA().getLast(), frame(2, 3, IDS.notifyTeleport(), teleport(x(50)))));
+        for (List<Received> frames : invalid) {
+            assertThat(MoveAssertions.teleportSequenceProblems(frames, outgoingB(), IDS, ENTITY, PEER, x(50), FACE, false)).isNotEmpty();
+        }
+        assertThat(MoveAssertions.teleportSequenceProblems(outgoingA(), List.of(), IDS, ENTITY, PEER, x(50), FACE, false)).isNotEmpty();
+    }
+
+    private static List<Received> returningA() {
+        return List.of(frame(0, 1, IDS.notifyTeleport(), teleport(P0)), frame(1, 2, IDS.notifyActorListCreate(),
+                ActorListCreateS2C.newBuilder().addActorList(ActorCreateS2C.newBuilder().setEntity(PEER).setTransform(transform(P0))).build()));
+    }
+
+    private static List<Received> returningB() {
+        return List.of(frame(0, 2, IDS.notifyActorCreate(), ActorCreateS2C.newBuilder().setEntity(ENTITY).setTransform(transform(P0)).build()));
+    }
+
+    @Test
+    void 瞬移回程_130后47_旁人21位置朝向正确且无移动条目() throws Exception {
+        assertThat(MoveAssertions.teleportSequenceProblems(returningA(), returningB(), IDS, ENTITY, PEER, P0, FACE, true)).isEmpty();
+        List<Received> wrong = List.of(frame(0, 2, IDS.notifyActorCreate(), ActorCreateS2C.newBuilder().setEntity(ENTITY)
+                .setTransform(transform(x(1))).build()));
+        assertThat(MoveAssertions.teleportSequenceProblems(returningA(), wrong, IDS, ENTITY, PEER, P0, FACE, true)).isNotEmpty();
+    }
+
+    @Test
+    void 瞬移回程拒绝本人重建或自己的移动_旁人不得收130和静止135() throws Exception {
+        for (Received invalid : List.of(frame(2, 3, IDS.notifyActorCreate(), ActorCreateS2C.newBuilder().setEntity(ENTITY).build()),
+                frame(2, 3, IDS.notifyActorDestroy(), ActorDestroyS2C.newBuilder().setEntity(ENTITY).build()),
+                frame(2, 3, IDS.notifyEnterScene(), EnterSceneS2C.getDefaultInstance()),
+                frame(2, 3, IDS.notifyActorMove(), actorMove(P0, Vec3.ZERO)),
+                frame(2, 3, IDS.notifyActorListCreate(), ActorListCreateS2C.newBuilder()
+                        .addActorList(ActorCreateS2C.newBuilder().setEntity(ENTITY)).build()))) {
+            List<Received> badA = new java.util.ArrayList<>(returningA());
+            badA.add(invalid);
+            assertThat(MoveAssertions.teleportSequenceProblems(badA, returningB(), IDS, ENTITY, PEER, P0, FACE, true)).isNotEmpty();
+        }
+        for (Received invalid : List.of(frame(1, 3, IDS.notifyTeleport(), teleport(P0)),
+                frame(1, 3, IDS.notifyActorMoveList(), ActorMoveListS2C.newBuilder().addMoves(actorMove(P0, Vec3.ZERO)).build()))) {
+            List<Received> badB = new java.util.ArrayList<>(returningB());
+            badB.add(invalid);
+            assertThat(MoveAssertions.teleportSequenceProblems(returningA(), badB, IDS, ENTITY, PEER, P0, FACE, true)).isNotEmpty();
+        }
+    }
+
+    @Test
+    void 挂机断言仅接受起步与约30秒9米处的停止() {
+        MoveAssertions.ObsMove start = moving(0, 50, P0, new Vec3(0.3, 0, 0));
+        MoveAssertions.ObsMove stop = moving(1, 30_050, x(8.985), Vec3.ZERO);
+        assertThat(MoveAssertions.afkProblems(List.of(start, stop), ENTITY, P0, FACE, 0, 37_000, NOW_MS)).isEmpty();
+        assertThat(MoveAssertions.afkProblems(List.of(start), ENTITY, P0, FACE, 0, 37_000, NOW_MS)).isNotEmpty();
+        assertThat(MoveAssertions.afkProblems(List.of(start, moving(1, 1000, x(0.3), Vec3.ZERO)),
+                ENTITY, P0, FACE, 0, 37_000, NOW_MS)).contains("AFK停止位置不在约9米处");
+        assertThat(MoveAssertions.afkProblems(List.of(start, moving(1, 15_000, x(4.5), new Vec3(0.3, 0, 0)), stop),
+                ENTITY, P0, FACE, 0, 37_000, NOW_MS)).contains("AFK的133应恰好两条，实际3");
+    }
 
     private static Vec3 x(double dx) {
         return P0.plus(new Vec3(dx, 0, 0));

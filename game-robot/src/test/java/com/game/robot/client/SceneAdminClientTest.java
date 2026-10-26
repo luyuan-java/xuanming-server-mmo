@@ -7,6 +7,8 @@ import com.game.api.proto.CreateDungeonInstanceRequest;
 import com.game.api.proto.CreateDungeonInstanceResponse;
 import com.game.api.proto.DestroyInstanceRequest;
 import com.game.api.proto.DestroyInstanceResponse;
+import com.game.api.proto.TeleportPlayerRequest;
+import com.game.api.proto.TeleportPlayerResponse;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -183,5 +185,65 @@ class SceneAdminClientTest {
 
     private SceneAdminClient client(String token) {
         return new SceneAdminClient("http://127.0.0.1:" + server.getAddress().getPort(), token, Duration.ofSeconds(5));
+    }
+
+    @Test
+    void 瞬移_路径令牌操作人与位置字段逐项相同() throws Exception {
+        responseBody.set(TeleportPlayerResponse.newBuilder().setTipId(1004).build().toByteArray());
+        assertThat(client("tok").teleport(BIG, 12.5, -0.0, -91.25)).isEqualTo(1004);
+        assertThat(captured).singleElement().satisfies(c -> {
+            assertThat(c.method()).isEqualTo("POST");
+            assertThat(c.path()).isEqualTo("/admin/scene/player/teleport");
+            assertThat(c.token()).isEqualTo("tok");
+            assertThat(c.operator()).isEqualTo(AdminClient.OPERATOR);
+            assertThat(c.contentType()).isEqualTo(SceneAdminClient.CONTENT_TYPE);
+            assertThat(TeleportPlayerRequest.parseFrom(c.body())).isEqualTo(TeleportPlayerRequest.newBuilder()
+                    .setPlayerId(BIG).setX(12.5).setY(-0.0).setZ(-91.25).build());
+        });
+    }
+
+    @Test
+    void 瞬移编码逐字节对照生成类_正零负零非有限与uint64() throws Exception {
+        double[] values = {0.0, -0.0, 1.25, -17.75, Double.MIN_VALUE, Double.MAX_VALUE,
+                Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.longBitsToDouble(0x7ff8_0000_0000_0042L)};
+        for (long playerId : new long[] {0, 1, BIG, -1}) {
+            for (double value : values) {
+                byte[] actual = SceneAdminClient.encodeTeleport(playerId, value, value, value);
+                assertThat(actual).isEqualTo(TeleportPlayerRequest.newBuilder().setPlayerId(playerId)
+                        .setX(value).setY(value).setZ(value).build().toByteArray());
+                assertThat(Double.doubleToRawLongBits(TeleportPlayerRequest.parseFrom(actual).getX()))
+                        .isEqualTo(Double.doubleToRawLongBits(value));
+            }
+        }
+        assertThat(SceneAdminClient.encodeTeleport(0, 0, 0, 0)).isEmpty();
+        assertThat(SceneAdminClient.encodeTeleport(0, -0.0, 0, 0)).hasSize(9);
+    }
+
+    @Test
+    void 瞬移应答缺省0与所有tip映射_坏包失败() throws Exception {
+        for (int tip : new int[] {0, 1004, 1005, 1006}) {
+            assertThat(SceneAdminClient.decodeTeleported(TeleportPlayerResponse.newBuilder().setTipId(tip).build().toByteArray()))
+                    .isEqualTo(tip);
+        }
+        assertThat(SceneAdminClient.decodeTeleported(new byte[0])).isZero();
+        assertThatThrownBy(() -> SceneAdminClient.decodeTeleported(new byte[] {(byte) 0xff}))
+                .isInstanceOf(RobotException.class).hasMessageContaining("TeleportPlayerResponse");
+    }
+
+    @Test
+    void 瞬移raw保留403_非200不解为成功() throws Exception {
+        status.set(403);
+        SceneAdminClient.HttpResult result = client("tok").teleportRaw(1, 2, 3, 4);
+        assertThat(result.status()).isEqualTo(403);
+        assertThatThrownBy(() -> SceneAdminClient.teleportTip(result)).hasMessageContaining("403");
+        assertThatThrownBy(() -> client("tok").teleport(1, 2, 3, 4)).hasMessageContaining("403");
+        assertThat(captured).allSatisfy(c -> assertThat(c.path()).isEqualTo(SceneAdminClient.TELEPORT));
+    }
+
+    @Test
+    void 瞬移没有令牌不发请求() {
+        assertThatThrownBy(() -> client(null).teleportRaw(1, 2, 3, 4)).isInstanceOf(RobotException.class)
+                .hasMessageContaining("GAME_ADMIN_TOKEN").hasMessageContaining("run/game-admin-token");
+        assertThat(captured).isEmpty();
     }
 }

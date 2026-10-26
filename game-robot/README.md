@@ -31,7 +31,7 @@
    区 2 的 scene / gate 节点号也是 1 号（节点号按区分配，与区 1 同号是有意的）。区 2 在区服列表里的状态由脚本跟着 `GAME_ZONES` 改——=2 时置为 OPEN（库里还没有就建出来），
    =1 时置为维护——脚本等 `GET /api/server-list` 反映出来才报「全部就绪（场景节点 N 个、区 M 个）」。所以回到单 zone 切片后区 2 显示 MAINTENANCE 是预期的；手工改过的区 2 状态下次启动会被覆盖。
 
-2. 同一个 shell 里（探针只读 `GAME_LOGIN_DEV_PASSWORD`，与 game-login 相同；口令不接受命令行传入）：
+2. 同一个 shell 里设置与game-login相同的 `GAME_LOGIN_DEV_PASSWORD`（不接受命令行口令）。movement瞬移段还需运维令牌 `GAME_ADMIN_TOKEN`，或从仓库根目录读取 `run/game-admin-token`；只在单scene节点切片运行：
 
    ```bash
    java -jar game-robot/target/game-robot-0.1.0-SNAPSHOT.jar smoke                       # 3 个账号 robot_java_0001..0003
@@ -62,8 +62,12 @@ Windows 注意：
 | `--connect-timeout-ms` | `GAME_ROBOT_CONNECT_TIMEOUT_MS` | `5000` | HTTP 与 TCP 建连 |
 | `--request-timeout-ms` | `GAME_ROBOT_REQUEST_TIMEOUT_MS` | `15000` | 握手 / 48 / 14 / 26 / 77 各自等应答；movement 里 A 断开后等 51 |
 | `--enter-scene-timeout-ms` | `GAME_ROBOT_ENTER_SCENE_TIMEOUT_MS` | `15000` | 发出 26 后等 79 |
-| `--observe-timeout-ms` | `GAME_ROBOT_OBSERVE_TIMEOUT_MS` | `2000` | 每条移动输入后 B 收到 66、跳跃后 A 收到 137 |
+| `--observe-timeout-ms` | `GAME_ROBOT_OBSERVE_TIMEOUT_MS` | `2000` | 每条移动输入后B收到133（66旁证），瞬移130、跳跃137与视野消息 |
 | `--expect-jump` | `GAME_ROBOT_EXPECT_JUMP` | `auto` | `auto` 纠偏或 fail-open 都接受 / `correct` 必须回 137 / `accept` 必须原样接受 |
+
+| `--scene-admin-url` | `GAME_ROBOT_SCENE_ADMIN_URL` | `http://127.0.0.1:18104` | A所在的game-scene节点管理端口；movement只在单节点切片运行 |
+| `--expect-dev` | `GAME_ROBOT_EXPECT_DEV` | `allow` | movement瞬移段：allow完整执行，deny只核对403；两者均需运维令牌 |
+| `--afk-probe` | `GAME_ROBOT_AFK_PROBE` | `false` | 另跑0.3m/s起步、静默约30s的挂机停推探针；可写开关或true/false |
 
 上表只列 smoke / movement 用到的选项；其余子命令的选项（管理端口地址、`--expect-dev`、`--slow`、`--crash-*` 等）以 `--help` 为准，
 battle-settle、battle-smoke / match-activity / match-5v5（`--match-admin-url`）、battle-cross-zone 与 travel（`--visit-zone`、`--dwell-ms`、`--travel-scene-config`）、
@@ -80,18 +84,29 @@ team / guild / reconnect 的跨区步骤（`--cross-zone`、`--team-cross-zone`�
 登录阶段按 `error_message` **是否存在**判失败（robot 契约 §3.4 第 3 条）；26 回的 `player_id` 必须等于请求；
 进游戏撞上 2005（归属还没释放）等 1s 重试，最多 4 次。逐账号打印各步耗时。
 
-**movement**（两个新账号，A 先进、B 后进同一场景）：
+**movement**（两个新账号，单scene节点；批次2.10，`movement-broadcast-spec.md` §11.6）：
 
-1. 进场：A、B 同一 `scene_id`、相距 ≤ 10 m；B 收到含 A 的 47 / 21，实体号与位置同 A 自己的 21（AOI §3.1）。
-2. 行走：A 每 250ms 一条 MoveStart → MoveSync ×3（最后一条上报 30 m/s）→ MoveStop，沿 +x 约 4.4 m。断言：
-   每条输入后 B 在观察时限内收到 A 的 66——Start / Sync 带对应 velocity，超速的截断到 10 m/s，Stop 带全零 velocity、位置 = 停止点
-   （movement §6.1、§4.3）；66 位置都在路径上、rotation = 上报值（§5、§4.3 第 4 步）；停下后 1s 静默（§6.1）；
-   A 对 134/132/131 没有任何回包（§0 第 1 条）、不收 137（§4.3 第 5 步）；66 不发给被同步者自己（§6.1，AOI §5.1）。
-3. 重登：A 断开 → B 收到 A 的 51（AOI §2.5）→ A 重新进场，自己的 21 位置 = 停止点（movement §7）。
-4. 跳跃：MoveStart 后 250ms 发一条前跳 200 m 的 MoveSync。收到 137 → 校验 `input_seq` 回显、水平偏差 > 0.5 m、
-   `server_time_ms` 是 UTC 毫秒、信封 `id=0`（§3.5、§4.3 第 5 步），客户端在 `server_location` 停下；
-   没收到 → 按 fail-open（无导航网格原样接受，§4.3 第 2 步）在上报位置停下。随后重登，落盘位置必须等于服务端的裁决位置。
-   Java 版 game-scene 有位移令牌桶（`MoveGuard`，比基线严，movement §9 第 6 条），对 Java 版建议 `--expect-jump correct`。
+前提是A、B同场景且相邻；`--scene-admin-url`必须指向A所在节点。需要运维令牌（`GAME_ADMIN_TOKEN`或仓库根下的 `run/game-admin-token`），
+包括 `--expect-dev deny`。本机没有中间件时只能跑编解码与判定逻辑单测，不能把它们当作端到端验收。
+当前Java已有导航裁决：测试行走路线、当前位置沿+x的50m瞬移目标以及目标附近1m必须可走；若被墙或地图边界裁决，报告会失败，不绕过导航。
+
+1. **行走**：A每250ms发送MoveStart→MoveSync×3（最后30m/s）→MoveStop，B收到A场景实体号的133。
+   按既有合并规则配回输入，逐位核对位置、FACING、截断到10m/s的速度、move_state和UTC毫秒；信封id=0。
+   B的133条数不多于输入数，A不收自己的133/135，停止后1s无额外133。原66的配对、路径、朝向、停止静默与不回自己断言全部保留。
+2. **重登**：A断开，B收旧实体51；A重登位置仍为停止点，A和B的新实体21都带FACING。静止目标1s内没有133/135补发。
+3. **瞬移**：`allow`经 `POST /admin/scene/player/teleport` 把A挪到沿+x的50m处，核对A的130→含B的64、B含A的64。
+   130的entity、逐位location、rotation、reason=3、input_seq=0、信封id=0都检查。收到130立即从旧位置发132，不应收到137；
+   再从实际130落点+1m发131，不应收到137。返回B附近后A收130→47、B收带正确位置朝向的21，没有静止133/135；
+   再从第二条130的实际location出发走一步，核对两条输入对应的133。robot始终记住130落点，后续上报从该点出发。
+   `deny`只核对管理口403，跳过瞬移其余步骤；缺令牌、HTTP错误或tip失败会记失败并继续跳跃段。
+   tip1004明确提示管理端口指错节点。单节点与可走点前提不满足时不把失败当成通过。
+4. **跳跃**：从瞬移后停止点（瞬移跳过/失败则从重登21位置）发送起步、250ms后上报前跳200m。
+   137需回显input_seq、水平偏差>0.5m、UTC毫秒与信封id=0；robot服从裁决发131，再重登核对落盘位置。
+   Java有位移令牌桶与导航裁决，建议 `--expect-jump correct`；原有 `auto / accept` 模式保留。
+
+可选 `--afk-probe` 在跳跃前另跑：A仅发一条0.3m/s起步后保持连接静默，B应只收到起步133和约30s（600帧）后速度为零的133，
+停止位置约前进9m，期间未离开B视野，A不收自己的移动条目。这会多耗30多秒；当前Unity无新样本1s后会自己停画面外推，
+**服务端第30s的停推必须以robot收包断言为准**，不能凭肉眼提前停止判断。
 
 **cross-node**（批次 5.2 跨节点换图与归属交接，scene-handoff-spec §10.8；三个新账号 `前缀 + xn + 标签 + _1 / _2 / _3`）。
 前提：两个 scene 节点、per-node 覆盖、每图每节点一个频道（本机切片缺省），这样「同图不同 `scene_id`」即不同节点：

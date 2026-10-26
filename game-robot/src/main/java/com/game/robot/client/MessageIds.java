@@ -21,7 +21,10 @@ public record MessageIds(
         int moveStart,
         int moveSync,
         int moveStop,
-        int notifyMoveAck) {
+        int notifyMoveAck,
+        int notifyActorMove,
+        int notifyActorMoveList,
+        int notifyTeleport) {
 
     private static final String LOGIN_SERVICE = "ClientPlayerLogin";
     private static final String COMMON_SERVICE = "SceneClientPlayerCommon";
@@ -46,7 +49,10 @@ public record MessageIds(
                 registry.requireId(MOVEMENT_SERVICE, "MoveStart"),
                 registry.requireId(MOVEMENT_SERVICE, "MoveSync"),
                 registry.requireId(MOVEMENT_SERVICE, "MoveStop"),
-                registry.requireId(MOVEMENT_SERVICE, "NotifyMoveAck"));
+                registry.requireId(MOVEMENT_SERVICE, "NotifyMoveAck"),
+                registry.requireId(MOVEMENT_SERVICE, "NotifyActorMove"),
+                registry.requireId(MOVEMENT_SERVICE, "NotifyActorMoveList"),
+                registry.requireId(MOVEMENT_SERVICE, "NotifyTeleport"));
     }
 
     /** 三条移动上行之一（应答类型都是 Empty，契约规定永不回包）。 */

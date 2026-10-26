@@ -410,7 +410,9 @@ public final class RobotMain {
                     report = scenario.run();
                 } else {
                     MovementScenario scenario = new MovementScenario(flow, ids, options.accountPrefix(),
-                            options.runTag(), options.observeTimeout(), options.requestTimeout(), options.expectJump());
+                            options.runTag(), options.observeTimeout(), options.requestTimeout(), options.expectJump(),
+                            new SceneAdminClient(options.sceneAdminUrl(), AdminClient.resolveToken(env.get("GAME_ADMIN_TOKEN")),
+                                    options.requestTimeout()), options.expectDevAllowed(), options.afkProbe());
                     title = "game-robot movement：A=" + scenario.accountA() + " B=" + scenario.accountB() + "，" + target;
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
