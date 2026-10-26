@@ -24,6 +24,7 @@ import com.game.proto.MessageContent;
 import com.game.proto.MoveAckS2C;
 import com.game.proto.Rotation;
 import com.game.proto.SceneInfoComp;
+import com.game.proto.SceneInfoS2C;
 import com.game.proto.TravelToZoneResponse;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.BattleGate;
@@ -170,8 +171,9 @@ public final class SceneWorld {
     private static final int ENTER_PARAM_ERROR = SceneErrorTip.scene_error.kEnterSceneParamError_VALUE;
     /** 管理口销毁：本节点没有这个场景。 */
     private static final int SCENE_NOT_FOUND = SceneErrorTip.scene_error.kEnterSceneNotFound_VALUE;
-    /** 选目标调用失败 / 超时时推的 tip（基线第一跳 gRPC 传输失败推 23 {1003}，player_lifecycle.cpp:3195-3216）。 */
+    /** 通用服务不可用（管理口与其它业务）；换图传输失败单独用 3028。 */
     private static final int SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
+    private static final int ENTER_SERVER_BUSY = SceneErrorTip.scene_error.kEnterSceneServerBusy_VALUE;
     /** 被别的会话接管 / 失去归属时推给旧会话的 tip（基线顶号同码，经 23 推送，本里程碑不发 34）。 */
     static final int KICKED_BY_ANOTHER = LoginErrorTip.login_error.kLoginBeKickByAnOtherAccount_VALUE;
     /** 226：目标 zone 为 0 或就是本 zone（基线 player_lifecycle.cpp:2759-2763）。 */
@@ -267,6 +269,9 @@ public final class SceneWorld {
      * 也不随链路断开 / 停服清掉（由待落点写完的回调裁决，{@link #onPlacementWritten}）。
      */
     private final Map<SessionKey, TransferTombstone> transferTombstones = new HashMap<>();
+    /** 本机已切线、共享冷却仍在途：按玩家保留，重连重建实体也不能在写入前再手动选线。只由逻辑线程访问。 */
+    private record ChannelCooldownWrite(long token, long deadlineNanos) { }
+    private final Map<Long, ChannelCooldownWrite> channelCooldownWrites = new HashMap<>();
     /**
      * 已交出并释放、实例已移出世界、重定向帧还没定（发出或确定不发）的旅客数（zone-travel-spec §5.3「世界计数」、TF16）：
      * 交出提交且实例移除时 +1，待落点写完的回调里定下帧的去留时 −1。给 5.5 的停服 / 冲突疏散收敛谓词用（{@link #travelFramesPending()}）。
@@ -316,7 +321,7 @@ public final class SceneWorld {
     }
 
     /**
-     * @param instances 镜像 / 副本实例的装配与参数（批次 5.3；{@link SceneInstances#DISABLED} = 不接取号：63 镜像分支受理后推 23 {1003}，
+     * @param instances 镜像 / 副本实例的装配与参数（批次 5.3；{@link SceneInstances#DISABLED} = 不接取号：63 镜像分支受理后推 23 {3028}，
      *                  节点本地的回收 / 级联照常）
      */
     public SceneWorld(SceneTables tables, SceneMessageIds ids, ClientSink sink, PlayerRepository repository,
@@ -1052,7 +1057,7 @@ public final class SceneWorld {
     /**
      * 63 镜像分支已受理（应答 {@code {0}} 已回）：进 RESOLVING（{@link PlayerSwitch#mirrorCreate}，复用 5.2 的在途槽与本地兜底超时——
      * 期间再发 63 回 3014，D4），向 scene-manager 取一个全服 scene_id。不冻结：离场 / 断链 / 接管 / 失去归属照现有逻辑处理，迟到的结果按引用比对丢弃
-     * （号作废，任何地方都不留幽灵镜像，D3）。没装配取号（{@link SceneInstances#DISABLED}）= 没有 scene-manager 可用：推 23 {1003}（D9）。
+     * （号作废，任何地方都不留幽灵镜像，D3）。没装配取号（{@link SceneInstances#DISABLED}）= 没有 scene-manager 可用：推 23 {3028}（5.6 更新 D9）。
      */
     void beginMirrorCreate(ScenePlayer player, int mirrorConfigId) {
         Scene source = player.scene();
@@ -1093,7 +1098,7 @@ public final class SceneWorld {
                 metrics.mirrorResolve(MirrorResolve.ERROR);
                 log.warn("镜像取号调用失败，留在原地 player={} token={}: {}", Long.toUnsignedString(player.playerId()),
                         sw.token(), failed.reason());
-                pushTip(player, SERVICE_UNAVAILABLE);
+                pushTip(player, ENTER_SERVER_BUSY);
             }
             case InstanceIds.Result.Refused refused -> {
                 metrics.mirrorResolve(MirrorResolve.REJECTED);
@@ -1288,6 +1293,42 @@ public final class SceneWorld {
 
     Scene sceneById(long sceneId) {
         return scenes.get(sceneId);
+    }
+
+    /** 43：普通请求保持原有零 IO 路径；大世界显式请求目录时异步读取，失败仍推一条 31。 */
+    void requestSceneInfo(ScenePlayer player, boolean withDirectory) {
+        Scene source = player.scene();
+        SceneInfoS2C.Builder info = SceneInfoS2C.newBuilder().addSceneInfo(source.info());
+        if (!withDirectory || !source.isWorldChannel()) {
+            sendTo(player, push(ids.notifySceneInfo(), info.build()));
+            return;
+        }
+        SessionKey session = player.session();
+        long epoch = player.ownerEpoch();
+        crossNode.channels().directory(source.configId(), directory -> {
+            if (playerById(player.playerId()) != player || playerBySession(session) != player
+                    || player.ownerEpoch() != epoch || player.scene() != source) return;
+            if (directory != null) info.setChannelDirectory(directory);
+            sendTo(player, push(ids.notifySceneInfo(), info.build()));
+        });
+    }
+
+    /** 生产节点的显式世界线统一经 manager；本地镜像 / 副本仍走既有路径。 */
+    boolean needsChannelPrecheck(long sceneId) {
+        if (sceneId == 0 || !crossNode.enabled()) return false;
+        Scene target = scenes.get(sceneId);
+        return target == null || target.isWorldChannel();
+    }
+
+    /** 独立于实例的换图槽：只拦手动世界选线，不让 226 等调用方误以为新实体已有 PlayerSwitch。 */
+    boolean channelCooldownPending(long playerId) {
+        ChannelCooldownWrite pending = channelCooldownWrites.get(playerId);
+        if (pending == null) return false;
+        if (clock.nanoTime() - pending.deadlineNanos() >= 0) {
+            channelCooldownWrites.remove(playerId, pending);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -1621,6 +1662,7 @@ public final class SceneWorld {
         noteOccupancy(scene);
         publishPopulation(scene.configId());
         metrics.aoiEntered(entered.seen().size() + entered.seers().size());
+        emitViewChanges(entered.displaced());
         // 66 的新观察者补发保持原样；客户端可见初态另由 21 / 47 的朝向与 135 的速度提供。
         for (ScenePlayer seen : entered.seen()) {
             seen.markFullStateForNewWatcher();
@@ -1783,6 +1825,10 @@ public final class SceneWorld {
      * 离场 / 断链 / 接管 / 失去归属照现有逻辑处理；结果回来时实例已不在或换图已作废就丢弃（计 stale）。
      */
     void beginRemoteSwitch(ScenePlayer player, long wantSceneId, int wantConfigId) {
+        beginRemoteSwitch(player, wantSceneId, wantConfigId, false);
+    }
+
+    void beginRemoteSwitch(ScenePlayer player, long wantSceneId, int wantConfigId, boolean clientChannelPick) {
         if (!crossNode.enabled()) {
             throw new IllegalStateException("跨节点换图没装配，不该解析出远端去向");
         }
@@ -1796,21 +1842,29 @@ public final class SceneWorld {
         long token = ++switchTokens;
         PlayerSwitch sw = new PlayerSwitch(token, wantSceneId, wantConfigId,
                 clock.nanoTime() + crossNode.resolveTimeout().toNanos() + RESOLVE_SLOT_GRACE_NANOS);
+        sw.clientChannelPick(clientChannelPick);
         player.setSwitching(sw);
+        Scene source = player.scene();
         log.info("跨节点换图：请 scene-manager 选目标 player={} token={} 当前 scene_id={} 指定 scene_id={} scene_config_id={}",
                 Long.toUnsignedString(player.playerId()), token, Long.toUnsignedString(player.scene().sceneId()),
                 Long.toUnsignedString(wantSceneId), wantConfigId);
-        crossNode.targets().select(player.playerId(), player.scene().sceneId(), wantSceneId, wantConfigId,
-                selection -> onSwitchTargetSelected(player, sw, selection));
+        crossNode.targets().select(player.playerId(), source.sceneId(), wantSceneId, wantConfigId, clientChannelPick,
+                selection -> onSwitchTargetSelected(player, source, sw, selection));
     }
 
     /** 选目标的结果（逻辑线程）。先核对实例与令牌（§5.5 第 4 步），再按结果分派。 */
-    private void onSwitchTargetSelected(ScenePlayer player, PlayerSwitch sw, Selection selection) {
+    private void onSwitchTargetSelected(ScenePlayer player, Scene source, PlayerSwitch sw, Selection selection) {
         if (playersById.get(player.playerId()) != player || player.switching() != sw
                 || sw.phase() != SwitchPhase.RESOLVING) {
             metrics.switchResolve(SwitchResolve.STALE);
             log.debug("选目标的结果回来时实例已离开 / 已重新进场 / 换图已作废，丢弃 player={} token={}",
                     Long.toUnsignedString(player.playerId()), sw.token());
+            return;
+        }
+        if (sw.clientChannelPick() && player.scene() != source) {
+            player.setSwitching(null);
+            metrics.switchResolve(SwitchResolve.STALE);
+            pushTip(player, ENTER_FAILED);
             return;
         }
         switch (selection) {
@@ -1819,12 +1873,13 @@ public final class SceneWorld {
                 metrics.switchResolve(SwitchResolve.ERROR);
                 log.warn("选目标调用失败，留在原地 player={} token={}: {}", Long.toUnsignedString(player.playerId()),
                         sw.token(), failed.reason());
-                pushTip(player, SERVICE_UNAVAILABLE);
+                pushTip(player, ENTER_SERVER_BUSY);
             }
             case Selection.Refused refused -> {
                 player.setSwitching(null);
                 metrics.switchResolve(SwitchResolve.REJECTED);
-                log.info("scene-manager 拒绝换图目标，留在原地 player={} token={} tip={}",
+                // 玩家预检拒绝只记低基数结果，不把正常冷却 / 满员当作告警。
+                if (!sw.clientChannelPick()) log.info("scene-manager 拒绝换图目标，留在原地 player={} token={} tip={}",
                         Long.toUnsignedString(player.playerId()), sw.token(), refused.tipId());
                 pushTip(player, ENTER_FAILED);
             }
@@ -1833,15 +1888,25 @@ public final class SceneWorld {
     }
 
     private void onSwitchTargetChosen(ScenePlayer player, PlayerSwitch sw, Selection.Chosen chosen) {
+        sw.channelCooldownSeconds(chosen.switchCooldownSeconds());
+        if (chosen.sceneNodeId() == 0 || chosen.sceneId() == 0) {
+            player.setSwitching(null);
+            metrics.switchResolve(SwitchResolve.ERROR);
+            log.error("scene-manager 的选目标应答残缺（节点号或场景号为 0），留在原地 player={} 应答={}",
+                    Long.toUnsignedString(player.playerId()), chosen);
+            pushTip(player, ENTER_SERVER_BUSY);
+            return;
+        }
         Scene local = scenes.get(chosen.sceneId());
         if (local != null) {
             // 结果在本节点：目录过时（63 时还不在 / 已在排空），或只带地图时选中本节点另一个频道
-            player.setSwitching(null);
             if (local == player.scene()) {
+                player.setSwitching(null);
                 metrics.switchResolve(SwitchResolve.SAME);
                 return;
             }
             if (local.draining()) {
+                player.setSwitching(null);
                 metrics.switchResolve(SwitchResolve.REJECTED);
                 log.info("选中的本节点场景在排空，留在原地 player={} scene_id={}", Long.toUnsignedString(player.playerId()),
                         Long.toUnsignedString(local.sceneId()));
@@ -1849,15 +1914,21 @@ public final class SceneWorld {
                 return;
             }
             metrics.switchResolve(SwitchResolve.LOCAL);
+            if (sw.channelCooldownSeconds() == 0 || !local.isWorldChannel()) player.setSwitching(null);
             switchScene(player, local);
-            return;
-        }
-        if (chosen.sceneNodeId() == 0 || chosen.sceneId() == 0) {
-            player.setSwitching(null);
-            metrics.switchResolve(SwitchResolve.ERROR);
-            log.error("scene-manager 的选目标应答残缺（节点号或场景号为 0），留在原地 player={} 应答={}",
-                    Long.toUnsignedString(player.playerId()), chosen);
-            pushTip(player, SERVICE_UNAVAILABLE);
+            if (player.scene() == local && sw.channelCooldownSeconds() != 0 && local.isWorldChannel()) {
+                long deadline = clock.nanoTime() + Duration.ofSeconds(4).toNanos();
+                sw.startChannelCooldown(deadline);
+                ChannelCooldownWrite pending = new ChannelCooldownWrite(sw.token(), deadline);
+                channelCooldownWrites.put(player.playerId(), pending);
+                crossNode.channels().switched(player.playerId(), sw.channelCooldownSeconds(), () -> {
+                    channelCooldownWrites.remove(player.playerId(), pending);
+                    if (playerById(player.playerId()) == player && player.switching() == sw) {
+                        player.setSwitching(null);
+                        teamFollow.onRefresh(this, player, true);
+                    }
+                });
+            }
             return;
         }
         if (chosen.sceneNodeId() == crossNode.localNodeId()) {
@@ -1869,13 +1940,10 @@ public final class SceneWorld {
             pushTip(player, ENTER_FAILED);
             return;
         }
+        // 选目标期间迟到的战斗确认只阻止跨节点交出；同节点换场保持既有语义，战斗冻结随人走。
         if (player.inBattle()) {
-            // 两种冻结互斥（scene-battle-spec §7.13 世界内部第 1 条；基线起交接前复查 lc.cpp:2853-2860）：选目标期间进了战斗
-            // （迟到确认 / 进场恢复在 RESOLVING 时挂上了冻结）→ 中止换图、推 23 {3023}。按 D4 应恒为 0，是纵深防御
             player.setSwitching(null);
             metrics.switchResolve(SwitchResolve.IN_BATTLE);
-            log.info("选目标回来时玩家已在回合制战斗中，中止跨节点换图 player={} battle={}", Long.toUnsignedString(player.playerId()),
-                    player.battle().freeze());
             pushTip(player, ENTER_FAILED);
             return;
         }
@@ -1992,6 +2060,19 @@ public final class SceneWorld {
             case NONE -> {
                 if (sw.reason() == SwitchReason.TRAVEL) {
                     sendRedirect(player, sw, newEpoch);
+                } else if (sw.channelCooldownSeconds() != 0 && !sw.channelCooldownStarted()) {
+                    // SQL 已确认 E→E+1，目标节点尚未收到交接；写冷却结束后再按当前离开 / 接管状态收尾。
+                    sw.startChannelCooldown(clock.nanoTime() + Duration.ofSeconds(4).toNanos());
+                    // 在原 handOff/probe 回调返回前接过结算责任；停服须等冷却续接把 E+1 释放入队，才可关存储池。
+                    var continuation = repository.retainTransferContinuation();
+                    crossNode.channels().switched(playerId, sw.channelCooldownSeconds(), () -> {
+                        try { onHandedOff(player, sw, newEpoch); }
+                        finally { continuation.close(); }
+                    }, () -> {
+                        // 逻辑线程已停，绝不读写世界；交接帧尚未发，只有源节点知道 E+1，直接交出异步释放。
+                        try { repository.release(playerId, newEpoch); }
+                        finally { continuation.close(); }
+                    });
                 } else {
                     sendTransfer(player, sw, newEpoch);
                 }
@@ -2163,10 +2244,11 @@ public final class SceneWorld {
     }
 
     private void purgeExpiredTombstones() {
+        long now = clock.nanoTime();
+        channelCooldownWrites.values().removeIf(pending -> now - pending.deadlineNanos() >= 0);
         if (transferTombstones.isEmpty()) {
             return;
         }
-        long now = clock.nanoTime();
         transferTombstones.values().removeIf(tombstone -> tombstone.expired(now));
     }
 
@@ -2670,6 +2752,7 @@ public final class SceneWorld {
             broadcast(reentered.lostWatchers(), push(ids.notifyActorListDestroy(),
                     ActorListDestroyS2C.newBuilder().addEntity(player.entity()).build()));
         }
+        emitViewChanges(reentered.displaced());
         if (!reentered.seers().isEmpty()) {
             broadcast(reentered.seers(), push(ids.notifyActorCreate(), player.toActorCreate()));
         }
@@ -2682,10 +2765,27 @@ public final class SceneWorld {
         return TeleportResult.TELEPORTED;
     }
 
-    /** 本节点同场景且双向可见；给组队归队调用，不预置容量查询或队友优先级。 */
+    /** 本节点同场景且双向可见；队友优先级已由视野索引统一裁决。 */
     public boolean mutuallyVisible(ScenePlayer a, ScenePlayer b) {
         if (a == null || b == null || a.scene() == null || a.scene() != b.scene()) return false;
         return a.scene().watching(a).contains(b) && a.scene().watching(b).contains(a);
+    }
+
+    /** 内部提示只触发强读；调用方必须先排入逻辑线程，不接受提示携带的成员关系。 */
+    public void refreshTeam(long playerId, boolean follow) {
+        if (stepping) throw new IllegalStateException("场景帧内不能刷新组队关系");
+        ScenePlayer player = playerById(playerId);
+        if (player != null) teamFollow.onRefresh(this, player, follow);
+    }
+
+    /** 应用本次进场实例的权威成员关系提示。epoch 只允许前进，同 epoch 不能换队。 */
+    public boolean applyTeamMembership(ScenePlayer player, long teamId, long epoch) {
+        if (stepping) throw new IllegalStateException("场景帧内不能刷新组队关系");
+        if (playerById(player.playerId()) != player || !player.applyTeamMembership(teamId, epoch)) return false;
+        ViewChanges changed = new ViewChanges();
+        player.scene().refreshTeamView(player, changed);
+        emitViewChanges(changed);
+        return true;
     }
 
     /** dev 管理口的逻辑线程入口；找人失败同样计一次请求，不碰 HTTP 线程上的世界状态。 */
@@ -2840,10 +2940,14 @@ public final class SceneWorld {
 
     /** 视野变化按观察者发送：47 → 135（新看见且在动）→ 64，保持先创建后移动的顺序。 */
     private void emitViewChanges() {
-        if (viewChanges.isEmpty()) {
+        emitViewChanges(viewChanges);
+    }
+
+    private void emitViewChanges(ViewChanges changes) {
+        if (changes.isEmpty()) {
             return;
         }
-        viewChanges.forEach((watcher, delta) -> {
+        changes.forEach((watcher, delta) -> {
             metrics.aoiEntered(delta.added().size());
             metrics.aoiLeft(delta.removed().size());
             if (!delta.added().isEmpty()) {
@@ -2861,7 +2965,7 @@ public final class SceneWorld {
                 sendTo(watcher, push(ids.notifyActorListDestroy(), destroyed.build()));
             }
         });
-        viewChanges.clear();
+        changes.clear();
     }
 
     /**
@@ -3349,6 +3453,7 @@ public final class SceneWorld {
             releaseClaim(pending);
         }
         pendingEnters.clear();
+        channelCooldownWrites.clear();
         transferTombstones.values().removeIf(tombstone -> !tombstone.redirectPending());
         List<ScenePlayer> all = List.copyOf(playersById.values());
         for (ScenePlayer player : all) {

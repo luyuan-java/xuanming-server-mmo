@@ -1,6 +1,7 @@
 package com.game.scenemanager.world;
 
 import com.game.discovery.world.WorldChannelStore;
+import com.game.discovery.world.WorldChannelDirectoryStore;
 import com.game.discovery.world.WorldLeaderLock;
 import com.game.scenemanager.SceneIdAllocator;
 import com.game.scenemanager.SceneNodeSource;
@@ -10,7 +11,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * 控制面的装配与生命周期（scene-channels-spec §4.4、§4.5）：{@code leader-eligible = false} 时什么也不起（本副本只做数据面分配与实例取号）；
- * 否则建规划器与协调者 → 起两条控制面线程。
+ * 否则建规划器与协调者 → 起规划、续期和目录发布调度。
  *
  * <p>scene_id 发号租约<b>不归控制面</b>（批次 5.3 R5，dungeon-mirror-spec §6.6）：由独立 bean {@link SceneIdAllocator} 在<b>每个</b>副本上申领
  * （不竞选的副本也要能给镜像 / 副本实例发号），控制面只借用它。租约无效（续期滞后）期间规划器跳过全部新建（fail-closed）；
@@ -35,6 +36,12 @@ public final class WorldChannelControlPlane implements AutoCloseable {
     public static WorldChannelControlPlane start(WorldChannelStore store, SceneNodeSource source, WorldSceneConfigs worldConfigs,
                                                  WorldChannelProperties props, WorldChannelMetrics metrics,
                                                  SceneIdAllocator ids) {
+        return start(store, source, worldConfigs, props, metrics, ids, null, ChannelSwitchProperties.defaults());
+    }
+
+    public static WorldChannelControlPlane start(WorldChannelStore store, SceneNodeSource source, WorldSceneConfigs worldConfigs,
+                                                 WorldChannelProperties props, WorldChannelMetrics metrics, SceneIdAllocator ids,
+                                                 WorldChannelDirectoryStore directories, ChannelSwitchProperties switchProps) {
         if (!props.leaderEligible()) {
             log.info("game.scene-manager.world.leader-eligible=false：本副本不竞选频道计划领导者，只做数据面分配与实例取号（发号 worker={}）",
                     ids.worker());
@@ -47,7 +54,9 @@ public final class WorldChannelControlPlane implements AutoCloseable {
         ids.onLost(coordinator::onIdLeaseLost);
         log.info("主世界频道控制面 scene_id 发号 worker={} 覆盖模式={} 自动扩缩容={} 种子={} 按图覆盖={}", ids.worker(), props.coverage(),
                 props.autoscale().enabled(), props.channelCount(), props.channelCountByConfig());
-        WorldChannelRunner runner = new WorldChannelRunner(coordinator, props.tick(), props.leaderLockTtl().dividedBy(3));
+        ChannelDirectoryPublisher publisher = directories == null ? null : new ChannelDirectoryPublisher(store, directories,
+                source, switchProps, props, worldConfigs.orderedConfigIds(), coordinator::ledZones, token, System::currentTimeMillis, metrics);
+        WorldChannelRunner runner = new WorldChannelRunner(coordinator, props.tick(), props.leaderLockTtl().dividedBy(3), publisher);
         return new WorldChannelControlPlane(ids, coordinator, runner);
     }
 

@@ -226,6 +226,11 @@ public class InMemoryAssetStore implements GuildAssetStore {
     }
 
     @Override
+    public long terminalCleanupWatermark(Deadline deadline) {
+        return 0; // 此替身从不删除终态行。
+    }
+
+    @Override
     public AppliedOpsPage listAppliedSince(AppliedOpsQuery query, Deadline deadline) {
         String invalid = query.invalidReason();
         if (invalid != null) {

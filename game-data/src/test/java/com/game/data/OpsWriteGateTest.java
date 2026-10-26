@@ -67,4 +67,17 @@ class OpsWriteGateTest {
         assertThatThrownBy(() -> bind(Map.of("game.data.ops.heartbeat", "5s", "game.data.ops.stale-after", "10s")))
                 .isInstanceOf(BindException.class);
     }
+
+    @Test
+    void 写后复查预算不得短于初查_调大初查必须同时留足复查预算() {
+        assertThatThrownBy(() -> bind(Map.of("game.data.rollback.guild.check-budget", "300s")))
+                .isInstanceOf(BindException.class).hasRootCauseMessage("game.data.rollback.guild 配置非法（clock-skew-margin ∈ [5s, 1h]，"
+                        + "check-budget / recheck-budget ∈ (0, 1h]，recheck-budget ≥ check-budget，settle / recheck-delay ≥ 0，call-timeout > 0）");
+        assertThat(bind(Map.of("game.data.rollback.guild.check-budget", "300s", "game.data.rollback.guild.recheck-budget", "300s"))
+                .rollback().guild().recheckBudget()).isEqualTo(Duration.ofSeconds(300));
+        assertThat(bind(Map.of("game.data.rollback.guild.check-budget", "10s")).rollback().guild().recheckBudget())
+                .isEqualTo(Duration.ofSeconds(120));
+        assertThatThrownBy(() -> bind(Map.of("game.data.rollback.guild.recheck-budget", "119s")))
+                .isInstanceOf(BindException.class);
+    }
 }

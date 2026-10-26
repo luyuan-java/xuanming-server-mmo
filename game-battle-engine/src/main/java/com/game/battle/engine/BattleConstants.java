@@ -30,8 +30,17 @@ public final class BattleConstants {
 
     /** 每队玩家数上限；只统计 {@code team_index <= 1} 的快照，宝宝不计（{@code constants.h:30}）。 */
     public static final int MAX_BATTLE_TEAM_SIZE = 5;
-    /** 全自动房间的回合推进间隔（只有 battle 节点用，{@code constants.h:35}）。 */
+    /** 全自动房间的回合推进间隔下限；开局或不超过八个出手单位仍是 2 秒。 */
     public static final long AUTO_ROUND_INTERVAL_MS = 2000;
+    /** 为上一回合每个出手单位预留的客户端演出毫秒数（批次 6.6）。 */
+    public static final long AUTO_ROUND_PER_ACTOR_MS = 250;
+    /** PVE 按人数放大后的怪物上限，和客户端每侧十个阵位一致。 */
+    public static final int MAX_SCALED_PVE_MONSTERS = 10;
+
+    /** 只按上一回合排定的出手序计数；手动回合仍用 {@link #ROUND_DURATION_MS}。 */
+    public static long autoRoundIntervalMsFor(int actedActorCount) {
+        return Math.max(AUTO_ROUND_INTERVAL_MS, actedActorCount * AUTO_ROUND_PER_ACTOR_MS);
+    }
 
     // ---- 技能类型位号（SkillTable.skill_type 存的是位号，不是掩码；SkillPermission.skill_type 按位号平铺） ----
 

@@ -136,6 +136,19 @@ class SceneManagerSwitchTargetsTest {
     }
 
     @Test
+    void 显式选线标志上送_核准冷却秒数按uint32原样返回() throws Exception {
+        client = newClient(Duration.ofSeconds(4));
+        nextReply = CompletableFuture.completedFuture(SelectSwitchTargetResponse.newBuilder()
+                .setSceneNodeId(9).setSceneId(900_001).setSceneConfigId(2).setSwitchCooldownSeconds(-1).build());
+        CompletableFuture<Selection> result = new CompletableFuture<>();
+        client.select(1001, 50, 60, 2, true, result::complete);
+        Runnable task = logicQueue.poll(5, TimeUnit.SECONDS);
+        assertThat(task).isNotNull(); task.run();
+        assertThat(requests).singleElement().satisfies(r -> assertThat(r.getClientChannelPick()).isTrue());
+        assertThat(result.join()).isEqualTo(new Selection.Chosen(9, 900_001, 2, -1));
+    }
+
+    @Test
     void tip非0映射成Refused() throws Exception {
         client = newClient(Duration.ofSeconds(4));
         nextReply = CompletableFuture.completedFuture(SelectSwitchTargetResponse.newBuilder().setTipId(3000).build());

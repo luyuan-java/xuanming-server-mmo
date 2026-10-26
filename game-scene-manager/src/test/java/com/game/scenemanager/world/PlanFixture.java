@@ -138,6 +138,8 @@ final class PlanFixture {
                 .setSceneConfigId(conf)
                 .setNodeId(node)
                 .setSlot(slot)
+                // 通用旧用例按已升级计划搭建；专测迁移的用例显式置零/重复。
+                .setChannelNo((int) sceneId == 0 ? 1 : (int) sceneId)
                 .setState(state)
                 .setDrainReason(reason)
                 .setCreatedMs(sinceMs)

@@ -67,4 +67,7 @@ message WorldChannel {
   ChannelKind kind = 9;
   // 只在 state = CHANNEL_DRAINING 时有意义。
   DrainReason drain_reason = 10;
+  // 面向玩家的稳定线号，从 1 开始；同地图 ACTIVE 与 DRAINING 共用号池，记录真正删除后才可复用。
+  // 与参与哈希放置的 slot 无关。旧计划的 0 由领导者在原有令牌 + 版本 CAS 内补齐。
+  uint32 channel_no = 11;
 }

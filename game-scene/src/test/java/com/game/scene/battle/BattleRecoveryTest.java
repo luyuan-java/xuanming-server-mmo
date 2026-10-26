@@ -755,6 +755,7 @@ class BattleRecoveryTest {
         assertThat(player.scene()).isSameAs(f.scene1);
 
         f.enterScene(player, f.scene2.sceneId(), f.scene2.configId());
+        f.targets.take().chosen(BattleFixture.LOCAL_NODE, f.scene2.sceneId(), f.scene2.configId());
 
         assertThat(player.scene()).as("63 没有因为恢复未就绪被拒").isSameAs(f.scene2);
         assertThat(player.battle().recovery()).isEqualTo(Recovery.PENDING);

@@ -131,6 +131,60 @@ class JdbcGuildAssetStoreUnitTest {
                 retention30d)).isEqualTo(1);
     }
 
+    @Test
+    void 终态清理必须先推进水位_推进失败只跳过终态_其余表照常清理() {
+        List<String> calls = new ArrayList<>();
+        BackgroundTx tx = emptyCleanupDatabase(calls);
+        TerminalCleanupWatermark unavailable = new TerminalCleanupWatermark() {
+            @Override public void advance(long cutoff, Deadline deadline) {
+                calls.add("advance:" + cutoff);
+                throw new Deadline.DependencyException("水位写不进");
+            }
+            @Override public long read(Deadline deadline) { throw new AssertionError("清理不需要回读"); }
+        };
+        assertThatThrownBy(() -> new JdbcGuildAssetStore(tx, GuildAssetStore.Listener.NONE, unavailable)
+                .cleanupOnce(NOW, Duration.ofDays(30), Duration.ofDays(30)))
+                .isInstanceOf(Deadline.DependencyException.class).hasRootCauseMessage("水位写不进");
+        assertThat(calls).containsExactly("client_request", "advance:" + (NOW - Duration.ofDays(30).toMillis()), "counter", "counter");
+
+        calls.clear();
+        TerminalCleanupWatermark recorded = new TerminalCleanupWatermark() {
+            @Override public void advance(long cutoff, Deadline deadline) { calls.add("advance:" + cutoff); }
+            @Override public long read(Deadline deadline) { return 123; }
+        };
+        var store = new JdbcGuildAssetStore(tx, GuildAssetStore.Listener.NONE, recorded);
+        assertThat(store.cleanupOnce(NOW, Duration.ofDays(30), Duration.ofDays(30)))
+                .isEqualTo(new GuildAssetStore.CleanupReport(0, 0, 0));
+        assertThat(calls).containsExactly("client_request", "advance:" + (NOW - Duration.ofDays(30).toMillis()), "terminal", "counter", "counter");
+        assertThat(store.terminalCleanupWatermark(d())).isEqualTo(123);
+    }
+
+    @Test
+    void 清理水位缺装配也拒绝_而不是继续删终态() {
+        List<String> calls = new ArrayList<>();
+        assertThatThrownBy(() -> new JdbcGuildAssetStore(emptyCleanupDatabase(calls), GuildAssetStore.Listener.NONE)
+                .cleanupOnce(NOW, Duration.ofDays(30), Duration.ofDays(30)))
+                .isInstanceOf(Deadline.DependencyException.class).hasRootCauseMessage("终态指令清理水位没有装配");
+        assertThat(calls).containsExactly("client_request", "counter", "counter");
+        assertThatThrownBy(() -> noDatabase().terminalCleanupWatermark(d()))
+                .isInstanceOf(Deadline.DependencyException.class).hasMessageContaining("没有装配");
+    }
+
+    private static BackgroundTx emptyCleanupDatabase(List<String> calls) {
+        var jdbc = org.mockito.Mockito.mock(com.game.guild.store.GuildJdbc.class, invocation -> {
+            String sql = invocation.getArgument(0);
+            if (sql.equals(JdbcGuildAssetStore.LIST_CLEANUP_TERMINAL_OPS)) calls.add("terminal");
+            else if (sql.equals(JdbcGuildAssetStore.LIST_CLEANUP_CLIENT_REQUESTS)) calls.add("client_request");
+            else if (sql.equals(JdbcGuildAssetStore.LIST_CLEANUP_COUNTERS)) calls.add("counter");
+            else throw new AssertionError("意外 SQL: " + sql);
+            return List.of();
+        });
+        return org.mockito.Mockito.mock(BackgroundTx.class, invocation -> {
+            assertThat(invocation.getMethod().getName()).isEqualTo("autocommit");
+            return invocation.<BackgroundTx.Body<?>>getArgument(1).run(jdbc);
+        });
+    }
+
     // ================================================================ 语句形状
 
     /** 回档检查语句的两种完整形状（TestListAppliedSinceStatementShape，asset_op_divergence_repo_test.go:75）。 */

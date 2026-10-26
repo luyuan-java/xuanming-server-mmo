@@ -11,8 +11,7 @@ import java.util.function.BiConsumer;
  * 场景逻辑据此给每个观察者发<b>一条</b> 47（新加的）和<b>一条</b> 64（删掉的）。只在场景逻辑线程上使用。
  *
  * <p>观察者按第一次出现变化的先后排列，每个观察者的列表按变化发生的先后排列，结果可复现。
- * 同一次刷新里同一对 (观察者, 目标) 不会既加又删：刷新期间位置不变，而进视野要求距离 ≤ 视野半径、
- * 出视野要求距离 &gt; 离开半径，两者互斥。
+ * 同一次刷新里普通实体可能刚加入又被队友替换；相反操作互相抵消，只发送最终差集。
  */
 final class ViewChanges {
 
@@ -34,11 +33,13 @@ final class ViewChanges {
     private final Map<ScenePlayer, Delta> byWatcher = new LinkedHashMap<>();
 
     void added(ScenePlayer watcher, ScenePlayer target) {
-        delta(watcher).added.add(target);
+        Delta delta = delta(watcher);
+        if (!delta.removed.remove(target) && !delta.added.contains(target)) delta.added.add(target);
     }
 
     void removed(ScenePlayer watcher, ScenePlayer target) {
-        delta(watcher).removed.add(target);
+        Delta delta = delta(watcher);
+        if (!delta.added.remove(target) && !delta.removed.contains(target)) delta.removed.add(target);
     }
 
     boolean isEmpty() {

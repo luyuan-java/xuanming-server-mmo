@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
 /**
  * scene → scene-manager 的选目标客户端（{@link SceneDirectoryService#selectSwitchTarget}，scene-handoff-spec §5.4、Q7）：编程式 Dubbo 引用
  * （自己的 {@link IsolatedDubboModule}，同资产通道的做法），直连 {@code game.scene.scene-manager-url}（缺省 {@code tri://127.0.0.1:20882}，与 login 同），
- * {@code retries = 0}（选目标会写软预占，重发打乱人数；失败直接推 1003，由玩家再发 63）、{@code check = false}（scene-manager 不在不影响 scene 启动）、
+ * {@code retries = 0}（选目标会写软预占，重发打乱人数；失败直接推 3028，由玩家再发 63）、{@code check = false}（scene-manager 不在不影响 scene 启动）、
  * 单次超时 {@link #DUBBO_TIMEOUT}（= scene-manager 提供方超时）。调用方鉴权（{@code GAME_DUBBO_SECRET}）由 game-api 的 SPI 过滤器自动带上。
  *
  * <p><b>线程</b>：{@link #select} 在场景逻辑线程上调，<b>不阻塞</b>——建引用（对端不可达时 Dubbo 会同步建连数秒）与发起调用都在本类自己的
@@ -112,6 +112,12 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
     @Override
     public void select(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId,
                        Consumer<Selection> onDone) {
+        select(playerId, fromSceneId, wantSceneId, wantSceneConfigId, false, onDone);
+    }
+
+    @Override
+    public void select(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId,
+                       boolean clientChannelPick, Consumer<Selection> onDone) {
         SelectSwitchTargetRequest request = SelectSwitchTargetRequest.newBuilder()
                 .setZoneId(zoneId)
                 .setPlayerId(playerId)
@@ -119,6 +125,7 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
                 .setFromSceneId(fromSceneId)
                 .setWantSceneId(wantSceneId)
                 .setWantSceneConfigId(wantSceneConfigId)
+                .setClientChannelPick(clientChannelPick)
                 .build();
         call(service -> service.selectSwitchTarget(request))
                 .whenComplete((response, failure) -> deliver(playerId, onDone, toSelection(response, failure)));
@@ -292,7 +299,8 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
         if (response.getTipId() != 0) {
             return new Selection.Refused(response.getTipId());
         }
-        return new Selection.Chosen(response.getSceneNodeId(), response.getSceneId(), response.getSceneConfigId());
+        return new Selection.Chosen(response.getSceneNodeId(), response.getSceneId(), response.getSceneConfigId(),
+                response.getSwitchCooldownSeconds());
     }
 
     private static Throwable unwrap(Throwable failure) {

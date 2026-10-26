@@ -12,9 +12,15 @@ import java.util.function.Consumer;
  * @param renewSoon      交出进场成功后立即单独续约一次新 epoch（{@code OwnerLeaseRenewer.renewSoon}）；不阻塞、可在逻辑线程上调
  * @param resolveTimeout 选目标的本地兜底超时（{@code game.scene.switch-resolve-timeout}）；RESOLVING 槽在它之后再过 1 s 作废（兜底，正常由结果回调结束）
  * @param tombstoneTtl   交出墓碑的存活时长（{@code game.scene.transfer-tombstone-ttl}）：与 PlayerTransfer 在链路上交叉的 PlayerLeave 靠它补写位置
+ * @param channels      5.6 共享目录读取与成功后冷却写入；两种 IO 均异步回到逻辑线程
  */
 public record CrossNodeSwitch(int localNodeId, RemoteSwitchTargets targets, Consumer<OwnedPlayer> renewSoon,
-                              Duration resolveTimeout, Duration tombstoneTtl) {
+                              Duration resolveTimeout, Duration tombstoneTtl, PlayerChannels channels) {
+
+    public CrossNodeSwitch(int localNodeId, RemoteSwitchTargets targets, Consumer<OwnedPlayer> renewSoon,
+                           Duration resolveTimeout, Duration tombstoneTtl) {
+        this(localNodeId, targets, renewSoon, resolveTimeout, tombstoneTtl, PlayerChannels.NONE);
+    }
 
     /** 不启用（单测与本地装配的缺省）：63 的远端去向回 3023，与 5.1 相同。 */
     public static final CrossNodeSwitch DISABLED = new CrossNodeSwitch(0, null, owned -> { },
@@ -24,6 +30,7 @@ public record CrossNodeSwitch(int localNodeId, RemoteSwitchTargets targets, Cons
         Objects.requireNonNull(renewSoon, "renewSoon");
         Objects.requireNonNull(resolveTimeout, "resolveTimeout");
         Objects.requireNonNull(tombstoneTtl, "tombstoneTtl");
+        Objects.requireNonNull(channels, "channels");
         if (targets != null && localNodeId <= 0) {
             throw new IllegalArgumentException("启用跨节点换图时本节点号必须为正: " + localNodeId);
         }

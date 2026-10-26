@@ -119,6 +119,12 @@ public final class TableBattleData implements BattleData {
         return tables.cooldown().find(cooldownTableId).map(row -> Integer.toUnsignedLong(row.getDuration())).orElse(0L);
     }
 
+    /** 每人面对完整一组，保留单人可遇到的任务怪和掉落来源；缺行/空组由引擎兜底。 */
+    @Override
+    public int dungeonMonstersPerPlayer(int dungeonTableId) {
+        return dungeonMonsterIds(dungeonTableId).size();
+    }
+
     /** {@code DungeonTable.monster} 按表内顺序、跳过 0（表内跨列留空补的 0）；缺行返回空列表。 */
     @Override
     public List<Integer> dungeonMonsterIds(int dungeonTableId) {

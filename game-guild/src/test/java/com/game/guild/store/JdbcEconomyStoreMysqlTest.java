@@ -819,6 +819,49 @@ class JdbcEconomyStoreMysqlTest {
         recorder.assertNoDeadlocks("退帮 / 被踢 / 解散的提前截止");
     }
 
+    @Test
+    void 解散同事务删除本帮全部活动进度_完整无符号主键不影响他帮() throws SQLException {
+        long guildId = 7691, other = 7692, leader = 8691;
+        seedGuild(guildId, 2, leader, Map.of(8692L, GuildRoles.MEMBER));
+        seedGuild(other, 2, 8693, Map.of());
+        for (long guild : List.of(guildId, other))
+            for (int activity : new int[] {101, -1})
+                for (int period : new int[] {20261025, -2})
+                    db.exec("INSERT INTO guild_activity_progress(guild_id,activity_id,period_key,progress) VALUES(?,?,?,1)",
+                            guild, activity, period);
+        assertThat(guilds.disbandGuild(guildId, leader, NOW + 1, null, roomy()).isOk()).isTrue();
+        assertThat(db.count("SELECT COUNT(*) FROM guild_activity_progress WHERE guild_id=?", guildId)).isZero();
+        assertThat(db.count("SELECT COUNT(*) FROM guild_activity_progress WHERE guild_id=?", other)).isEqualTo(4);
+        assertThat(db.count("SELECT COUNT(*) FROM guild WHERE guild_id=?", guildId)).isZero();
+        assertThat(db.count("SELECT COUNT(*) FROM guild_member WHERE guild_id=?", guildId)).isZero();
+    }
+
+    @Test
+    void 活动进度点删后故障回滚整个解散_成员进度与捐献截止都保留() throws SQLException {
+        long guildId = 7693, leader = 8694, member = 8695;
+        seedGuild(guildId, 2, leader, Map.of(member, GuildRoles.MEMBER));
+        db.exec("INSERT INTO guild_activity_progress(guild_id,activity_id,period_key,progress) VALUES(?,?,?,3)", guildId, 101, 20261025);
+        var donation = donation(9_690_001, member, guildId, NOW);
+        assertThat(econ.reserveDonation(donation, roomy()).isOk()).isTrue();
+        var failing = db.store(recorder, new GuildTxHooks() {
+            @Override public void accelerateDonationDeadlines(GuildJdbc tx, long guild, List<Long> players, long now) throws SQLException {
+                EconomyTxHooks.INSTANCE.accelerateDonationDeadlines(tx, guild, players, now);
+            }
+            @Override public void deleteGuildActivityProgress(GuildJdbc tx, long guild) throws SQLException {
+                EconomyTxHooks.INSTANCE.deleteGuildActivityProgress(tx, guild);
+                throw new SQLException("夹具在实际点删后中断解散");
+            }
+        });
+        assertThatThrownBy(() -> failing.disbandGuild(guildId, leader, NOW + 1, null, roomy()))
+                .isInstanceOf(com.game.common.deadline.Deadline.DependencyException.class);
+        assertThat(db.count("SELECT COUNT(*) FROM guild WHERE guild_id=?", guildId)).isEqualTo(1);
+        assertThat(db.count("SELECT COUNT(*) FROM guild_member WHERE guild_id=?", guildId)).isEqualTo(2);
+        assertThat(db.count("SELECT progress FROM guild_activity_progress WHERE guild_id=? AND activity_id=? AND period_key=?",
+                guildId, 101, 20261025)).isEqualTo(3);
+        assertThat(record(db, donation.opId()).getDeadlineMs()).isEqualTo(donation.deadlineMs());
+        assertThat(record(db, donation.opId()).getNextAttemptMs()).isEqualTo(donation.leaseUntilMs());
+    }
+
     /**
      * 提前截止的过滤与分块（TestAccelerate_ChunksCandidatesAndSkipsNonMatching）：150 个玩家跨两批（100 + 50）候选读，命中行分布在两批
      * 首尾；五类不该动的行各放一条。再用更晚的 now 重放一次：已提前的行不再是候选，重放是 no-op。

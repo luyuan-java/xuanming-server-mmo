@@ -284,12 +284,18 @@ public interface GuildAssetStore {
      * 客户端幂等键的去重记录（guild_client_request）按 created_ms 与终态行同一个截止删，并排在终态行之前：指令按终结时刻判龄、终结不早于创建，
      * 一笔指令可删时它的去重记录早已可删（批次上限或单行失败仍可能让少量去重记录晚一轮删，那段时间重发同一个键查到记录却查不到指令行——
      * 经济服务按 1005 拒绝、不重新执行）。
+     * 删终态行之前先只增推进共享清理水位；推进失败跳过终态行，去重记录与计数行仍独立清理。
      * 一类失败不影响其它类；已删的行数照常经 {@link Listener#cleanupDeleted} 计。线程被中断时停止并报错。
      *
      * @throws IllegalArgumentException 保留期 ≤ 0
      * @throws Deadline.DependencyException 任一类出错（其余类的错误挂在 suppressed 上）
      */
     CleanupReport cleanupOnce(long nowMs, Duration terminalRetention, Duration counterRetention);
+
+    /** 读已清理终态行的最大截止；未知或故障必须抛异常，回档查询据此拒绝。 */
+    default long terminalCleanupWatermark(Deadline deadline) {
+        return TerminalCleanupWatermark.UNAVAILABLE.read(deadline);
+    }
 
     /**
      * 回档检查查询（ListAppliedAssetOpsSince，asset_op_divergence_repo.go:105-144）：<b>一条非锁定普通读</b>，不开事务、不加锁、不写索引提示；

@@ -3,6 +3,13 @@ package com.game.robot.scenario;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.proto.TipInfoMessage;
+import com.game.proto.match.CancelQueueRequest;
+import com.game.proto.match.GetQueueStatusRequest;
+import com.game.proto.match.GetQueueStatusResponse;
+import com.game.proto.match.JoinQueueRequest;
+import com.game.proto.match.QueueState;
+import com.game.proto.team.StartTeamMatchRequest;
+import com.game.robot.client.GameConnection;
 import com.game.robot.client.RobotClient;
 import com.game.robot.client.RobotException;
 import com.game.robot.flow.PlayerFlow;
@@ -11,6 +18,10 @@ import com.game.robot.scenario.FakeMatchWorld.Fault;
 import com.game.robot.scenario.TeamMatchSteps.StartVerdict;
 import java.io.IOException;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.UUID;
+import com.google.protobuf.Message;
+import com.google.protobuf.Parser;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -43,18 +54,22 @@ class TeamMatchStepsTest {
     private final class Squad implements AutoCloseable {
         final CheckReport report = new CheckReport();
         final StepTrack track = new StepTrack(TeamScenario.MARKER);
-        final MatchSupport.Bot a;
-        final MatchSupport.Bot b;
+        final OriginalCaller a;
+        final OriginalCaller b;
+        final List<Long> profiles = new ArrayList<>();
         final long tid;
         final TeamMatchSteps steps;
 
         Squad(String runTag) throws RobotException {
             RobotClient client = world.newClient();
             PlayerFlow flow = world.flow(client);
-            a = new MatchSupport.Bot("A", flow.enter("robot_java_tm" + runTag + "_a", new Timings()), FakeMatchWorld.TIMEOUT, FakeMatchWorld.FAST);
-            b = new MatchSupport.Bot("B", flow.enter("robot_java_tm" + runTag + "_b", new Timings()), FakeMatchWorld.TIMEOUT, FakeMatchWorld.FAST);
+            a = new OriginalCaller(new MatchSupport.Bot("A", flow.enter("robot_java_tm" + runTag + "_a", new Timings()), FakeMatchWorld.TIMEOUT, FakeMatchWorld.FAST));
+            b = new OriginalCaller(new MatchSupport.Bot("B", flow.enter("robot_java_tm" + runTag + "_b", new Timings()), FakeMatchWorld.TIMEOUT, FakeMatchWorld.FAST));
             tid = world.formTeam(a.id(), b.id());
-            steps = new TeamMatchSteps(client, world.registry(), report, track, FakeMatchWorld.TIMEOUT, FakeMatchWorld.FAST);
+            steps = new TeamMatchSteps(client, world.registry(), report, track, FakeMatchWorld.TIMEOUT, FakeMatchWorld.FAST, bot -> {
+                profiles.add(bot.id());
+                return "fixture-current-session-plan-" + Long.toUnsignedString(bot.id());
+            });
         }
 
         List<String> failed() {
@@ -66,6 +81,49 @@ class TeamMatchStepsTest {
             steps.close();
             a.connection().close();
             b.connection().close();
+        }
+    }
+
+    /** 旧假世界只模拟战斗。此专属边界补全全球原请求/撤销墓碑，真实探测协议另由PveNetworkProbeTest走本地TCP。 */
+    private static final class OriginalCaller implements MatchSupport.Caller {
+        private final MatchSupport.Caller delegate;
+        final List<StartTeamMatchRequest> starts = new ArrayList<>();
+        final List<JoinQueueRequest> joins = new ArrayList<>();
+        private JoinQueueRequest current;
+        private String cancelled = "";
+        OriginalCaller(MatchSupport.Caller delegate) { this.delegate = delegate; }
+        @Override public String name() { return delegate.name(); }
+        @Override public long id() { return delegate.id(); }
+        @Override public GameConnection connection() { return delegate.connection(); }
+        @Override public int mark() { return delegate.mark(); }
+        @Override public <T extends Message> T call(int id, Message body, Parser<T> parser) throws RobotException {
+            if (body instanceof StartTeamMatchRequest start) {
+                assertThat(UUID.fromString(start.getRequestId()).toString()).isEqualTo(start.getRequestId());
+                starts.add(start);
+            } else if (body instanceof JoinQueueRequest join) {
+                assertThat(UUID.fromString(join.getRequestId()).toString()).isEqualTo(join.getRequestId());
+                assertThat(join.getNetworkPlanId()).isNotBlank();
+                current = join;
+                joins.add(join);
+            } else if (body instanceof GetQueueStatusRequest status) {
+                assertThat(current).isNotNull();
+                assertThat(status.getRequestId()).isEqualTo(current.getRequestId());
+            }
+            T response = delegate.call(id, body, parser);
+            if (body instanceof GetQueueStatusRequest status && response instanceof GetQueueStatusResponse result
+                    && result.getState() == QueueState.QUEUE_STATE_NOT_QUEUED && status.getRequestId().equals(cancelled)) {
+                try { return parser.parseFrom(result.toBuilder().setRequestCancelled(true).build().toByteString()); }
+                catch (com.google.protobuf.InvalidProtocolBufferException bad) { throw new RobotException("假服应答类型不符", bad); }
+            }
+            return response;
+        }
+        @Override public long send(int id, Message body) throws RobotException {
+            if (body instanceof CancelQueueRequest cancel) {
+                assertThat(current).isNotNull();
+                assertThat(cancel.getRequestId()).isEqualTo(current.getRequestId());
+                cancelled = cancel.getRequestId();
+            }
+            return delegate.send(id, body);
         }
     }
 
@@ -115,6 +173,9 @@ class TeamMatchStepsTest {
         assertThat(TeamMatchSteps.startRequest(TeamMatchSteps.BATTLE_CONFIG_ID, BIG).getBattleConfigId()).isEqualTo(1);
         assertThat(TeamMatchSteps.startRequest(TeamMatchSteps.BATTLE_CONFIG_ID, BIG).getExpectedTeamId()).isEqualTo(BIG);
         assertThat(TeamMatchSteps.BATTLE_CONFIG_NOT_OPEN).isEqualTo(2).isNotEqualTo(TeamMatchSteps.BATTLE_CONFIG_ID);
+        var first = TeamMatchSteps.startRequest(1, BIG);
+        assertThat(UUID.fromString(first.getRequestId()).toString()).isEqualTo(first.getRequestId());
+        assertThat(TeamMatchSteps.startRequest(1, BIG).getRequestId()).isNotEqualTo(first.getRequestId());
     }
 
     // ---------------------------------------------------------------- 对着假服务端
@@ -136,6 +197,8 @@ class TeamMatchStepsTest {
                     .matches("TEAM_SMOKE_OK battle_id=\\d+");
             assertThat(world.queuedTickets()).as("B 的 1V1 票已取消").isZero();
             assertThat(world.eventually(() -> world.lockedPlayers() == 0)).as("两局都打完，结算随后落地").isTrue();
+            assertThat(squad.profiles).containsExactly(squad.a.id(), squad.b.id(), squad.a.id(), squad.b.id(), squad.b.id());
+            assertThat(squad.b.joins.stream().map(JoinQueueRequest::getRequestId).distinct()).hasSize(2);
         }
     }
 
@@ -152,6 +215,22 @@ class TeamMatchStepsTest {
             assertThat(squad.failed()).as(squad.report.render("team 开战段")).isEmpty();
             // 211 的条数：拒绝码 3 条 + S7 1 条 + S8 至少 2 条（先 4025[A]、后 4025[B]）
             assertThat(world.receivedCount(startTeamMatch)).isGreaterThanOrEqualTo(6);
+            var byOriginal = squad.a.starts.stream().collect(java.util.stream.Collectors.groupingBy(StartTeamMatchRequest::getRequestId));
+            assertThat(byOriginal.values()).anySatisfy(requests -> assertThat(requests).hasSizeGreaterThanOrEqualTo(2));
+            byOriginal.values().forEach(requests -> assertThat(requests).containsOnly(requests.getFirst()));
+        }
+    }
+
+    @Test
+    void 单人排队过渡态重试沿用整份UUID和网络原计划() throws Exception {
+        try (Squad squad = new Squad("join-retry")) {
+            world.slowSettlePlayer = squad.b.id();
+            world.slowSettleExtraMs = 1500;
+            squad.steps.run(squad.a, squad.b, squad.tid);
+            assertThat(squad.failed()).as(squad.report.render("team 开战段")).isEmpty();
+            var solo = squad.b.joins.stream().filter(request -> request.getMode() == com.game.proto.match.MatchMode.MATCH_MODE_PVE_SOLO).toList();
+            assertThat(solo).hasSizeGreaterThanOrEqualTo(2);
+            assertThat(solo).containsOnly(solo.getFirst());
         }
     }
 

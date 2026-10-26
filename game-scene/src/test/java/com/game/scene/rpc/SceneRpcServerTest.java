@@ -381,6 +381,25 @@ class SceneRpcServerTest {
      * （提供方过滤器抛的 {@code RpcException(AUTHORIZATION_EXCEPTION)} 在线上的形态）。过滤器给的那句中文原因经 grpc-message 头传过来只剩问号，
      * 所以按状态码认，不按文案认。
      */
+    @Test
+    void 同端口组队提醒服务可直连且保留目标实例与跟随语义() throws Exception {
+        List<com.game.api.proto.SceneTeamRefresh> signals = new java.util.concurrent.CopyOnWriteArrayList<>();
+        com.game.api.SceneTeamService provider = request -> {
+            signals.add(request);
+            return CompletableFuture.completedFuture(com.game.api.proto.SceneTeamRefreshReply.newBuilder().setAccepted(true).build());
+        };
+        server = SceneRpcServer.export(assetProvider(), newBattleProvider(8), null, provider, "127.0.0.1", port);
+        assertThat(server.exportedUrls()).hasSize(3).anySatisfy(url -> assertThat(url)
+                .contains("/com.game.api.SceneTeamService").contains("group=scene-team").contains("register=false"));
+        try (var clients = new NodeRpcClients<>("game-scene-test-team-caller", com.game.api.SceneTeamService.class,
+                DubboGroups.SCENE_TEAM, TIMEOUT, "test-scene-team-connect")) {
+            var request = com.game.api.proto.SceneTeamRefresh.newBuilder().setPlayerId(PLAYER)
+                    .setTargetInstanceId(BattleFixture.SCENE_INSTANCE).setFollow(true).build();
+            assertThat(clients.call(target(), TIMEOUT, service -> service.refresh(request)).get(10, TimeUnit.SECONDS).getAccepted()).isTrue();
+            assertThat(signals).containsExactly(request);
+        }
+    }
+
     private static void assertAuthRejected(org.assertj.core.api.ThrowableAssert.ThrowingCallable invocation) {
         assertThatThrownBy(invocation).isInstanceOf(ExecutionException.class)
                 .cause().isInstanceOf(org.apache.dubbo.rpc.StatusRpcException.class)

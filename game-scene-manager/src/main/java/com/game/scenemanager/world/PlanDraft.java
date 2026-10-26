@@ -113,6 +113,29 @@ final class PlanDraft {
         channels.put(channel.getSceneId(), channel);
     }
 
+    /**
+     * 在线生命周期内线号不变；ACTIVE 与 DRAINING 一起占号。先保留全部合法号，再按 scene_id 无符号顺序
+     * 为旧零值/重复值补最小空闲正数，避免较早的零值抢走后面已有线号。与计划一起 CAS 持久化。
+     */
+    void repairChannelNumbers() {
+        Map<Integer, Set<Integer>> used = new HashMap<>();
+        List<WorldChannel> missing = new ArrayList<>();
+        for (WorldChannel channel : channels.values()) {
+            if (!writable(channel)) continue;
+            Set<Integer> numbers = used.computeIfAbsent(channel.getSceneConfigId(), ignored -> new HashSet<>());
+            if (channel.getChannelNo() == 0 || !numbers.add(channel.getChannelNo())) missing.add(channel);
+        }
+        for (WorldChannel channel : missing) {
+            Set<Integer> numbers = used.get(channel.getSceneConfigId());
+            int number = 1;
+            while (numbers.contains(number)) {
+                if (++number == 0) throw new IllegalStateException("频道线号已用完");
+            }
+            numbers.add(number);
+            put(channel.toBuilder().setChannelNo(number).build());
+        }
+    }
+
     /** 删记录（排空收尾 / 死节点），并按原因计事件。 */
     void finish(WorldChannel channel, boolean nodeDead) {
         channels.remove(channel.getSceneId());

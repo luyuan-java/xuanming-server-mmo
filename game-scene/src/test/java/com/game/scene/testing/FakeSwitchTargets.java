@@ -10,7 +10,7 @@ public final class FakeSwitchTargets implements RemoteSwitchTargets {
 
     /** 一次挂起的选目标请求。 */
     public record PendingSelect(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId,
-                                Consumer<Selection> callback) {
+                                boolean clientChannelPick, Consumer<Selection> callback) {
 
         public void complete(Selection selection) {
             callback.accept(selection);
@@ -19,6 +19,10 @@ public final class FakeSwitchTargets implements RemoteSwitchTargets {
         public void chosen(int nodeId, long sceneId, int configId) {
             complete(new Selection.Chosen(nodeId, sceneId, configId));
         }
+
+        public void chosen(int nodeId, long sceneId, int configId, int cooldownSeconds) {
+            complete(new Selection.Chosen(nodeId, sceneId, configId, cooldownSeconds));
+        }
     }
 
     private final Deque<PendingSelect> pending = new ArrayDeque<>();
@@ -26,7 +30,13 @@ public final class FakeSwitchTargets implements RemoteSwitchTargets {
     @Override
     public void select(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId,
                        Consumer<Selection> onDone) {
-        pending.add(new PendingSelect(playerId, fromSceneId, wantSceneId, wantSceneConfigId, onDone));
+        select(playerId, fromSceneId, wantSceneId, wantSceneConfigId, false, onDone);
+    }
+
+    @Override
+    public void select(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId,
+                       boolean clientChannelPick, Consumer<Selection> onDone) {
+        pending.add(new PendingSelect(playerId, fromSceneId, wantSceneId, wantSceneConfigId, clientChannelPick, onDone));
     }
 
     /** 取出最早一个挂起的请求。 */

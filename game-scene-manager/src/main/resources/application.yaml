@@ -63,6 +63,13 @@ game:
     address: redis://127.0.0.1:6379
     database: 12
   scene-manager:
+    # 玩家主动切线（5.6）；自动选线、组队跟随、镜像与交接重放不受这些软门槛限制。
+    # channel-switch:
+    #   disabled: false
+    #   cooldown-seconds: 10          # 0=默认10；负数关闭；最多86400
+    #   max-players-per-channel: 0    # 正数优先，否则 world.autoscale.scale-out-players，再否则2000
+    #   busy-percent: 60             # 0=默认60，其余钳制1..100
+    #   directory-refresh-seconds: 2 # 独立发布节拍；0=默认2，负数关闭，最多86400
     # 默认世界地图（scene_config_id）。不配 = World 表按表序第一行的 scene_id（当前为 1）。
     # default-world-config-id: 1
     # 主世界频道（批次 5.1，docs/porting/scene-channels-spec.md §5.2）。下面是缺省值，不配即生效。

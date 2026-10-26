@@ -601,6 +601,7 @@ class JdbcGuildAssetStoreMysqlTest {
         }
 
         CleanupReport report = store.cleanupOnce(NOW, Duration.ofDays(30), Duration.ofDays(30));
+        assertThat(store.terminalCleanupWatermark(roomy())).isEqualTo(NOW - Duration.ofDays(30).toMillis());
         for (Case c : cases) {
             assertThat(opExists(db, c.opId())).as("op %d status=%s", c.opId(), c.status()).isEqualTo(c.survives());
         }

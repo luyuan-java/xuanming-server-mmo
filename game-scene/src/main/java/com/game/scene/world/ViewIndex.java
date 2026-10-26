@@ -22,7 +22,8 @@ import java.util.Set;
  *       边界附近来回走不会反复 47 / 64（基线出视野靠「离开 7 个六边形格」，实际在 20–73 m 之间，随格子形状变化）；</li>
  *   <li><b>对称通知</b>：任何「W 的表加入 / 删除 T」都记进 {@link ViewChanges}，由调用方给 W 发 47 / 64
  *       （修基线缺口 1、2：基线只通知移动者本人，旁人留下残影或永远看不见新来者）；</li>
- *   <li>表满时不挤人（基线生产数据里只有 kNormal 一档优先级，满了就拒绝），被拒的一对等任一方下次重判再判。</li>
+ *   <li>容量固定为 100：普通实体满表时拒绝；队友可替换最早加入的普通实体，明确通知 64。
+ *       队友身份来自场景强读 SQL 后的提示，不放宽任何距离条件，也不挤出其它队友。</li>
  * </ul>
  *
  * <p><b>重判</b>：位置变化的玩家登记进待刷新名单（{@link #moved}），{@link #refresh} 时：
@@ -67,18 +68,18 @@ final class ViewIndex {
      * @param seen   进场者看得见的实体（加进了进场者的表，给进场者发 47）
      * @param seers  看得见进场者的实体（进场者加进了它们的表，给它们发进场者的 21）
      */
-    record Entered(List<ScenePlayer> seen, List<ScenePlayer> seers) {
+    record Entered(List<ScenePlayer> seen, List<ScenePlayer> seers, ViewChanges displaced) {
     }
 
     /** 瞬移重建前后的原始集合；调用方决定通知差集，不改变索引的完整重建语义。 */
     record Reentered(List<ScenePlayer> lostWatching, List<ScenePlayer> lostWatchers,
-                     List<ScenePlayer> seen, List<ScenePlayer> seers) { }
+                     List<ScenePlayer> seen, List<ScenePlayer> seers, ViewChanges displaced) { }
 
     Reentered reenter(ScenePlayer player) {
         List<ScenePlayer> lostWatching = List.copyOf(watching(player));
         List<ScenePlayer> lostWatchers = leave(player);
         Entered entered = enter(player);
-        return new Reentered(lostWatching, lostWatchers, entered.seen(), entered.seers());
+        return new Reentered(lostWatching, lostWatchers, entered.seen(), entered.seers(), entered.displaced());
     }
 
     private final int capacity;
@@ -117,8 +118,8 @@ final class ViewIndex {
         mine.evaluatedAt = at;
         grid.insert(mine, at.x(), at.y());
 
-        List<ScenePlayer> seen = new ArrayList<>();
         List<ScenePlayer> seers = new ArrayList<>();
+        ViewChanges displaced = new ViewChanges();
         candidates.clear();
         grid.collectAround(mine, candidates);
         for (int c = 0; c < candidates.size(); c++) {
@@ -126,15 +127,14 @@ final class ViewIndex {
             if (theirs == mine || !theirs.player.position().within(at, VIEW_RADIUS)) {
                 continue;
             }
-            if (link(mine, theirs)) {
-                seen.add(theirs.player);
-            }
-            if (link(theirs, mine)) {
+            // 本人尚未发送创建，只发最后留下的集合；旁人的旧实体已创建，驱逐必须记 64。
+            link(mine, theirs, null);
+            if (link(theirs, mine, displaced)) {
                 seers.add(theirs.player);
             }
         }
         candidates.clear();
-        return new Entered(seen, seers);
+        return new Entered(new ArrayList<>(mine.watching), seers, displaced);
     }
 
     /**
@@ -206,6 +206,14 @@ final class ViewIndex {
         }
     }
 
+    /** 成员关系变化不等待移动阈值；双方都重判，异步缓存到达顺序不影响队友优先边。 */
+    void refreshTeam(ScenePlayer player, ViewChanges out) {
+        Interest mine = interests.get(player);
+        if (mine == null) return;
+        reevaluate(mine, player.position(), out);
+        candidates.clear();
+    }
+
     /** 按 {@code at} 重判 {@code mine} 的出视野与进视野（双向）。 */
     private void reevaluate(Interest mine, Vec3 at, ViewChanges out) {
         ScenePlayer mover = mine.player;
@@ -230,16 +238,16 @@ final class ViewIndex {
         boolean mineFull = isFull(mine);
         for (int c = 0; c < candidates.size(); c++) {
             Interest theirs = candidates.get(c);
-            // 双方的表都满时两个方向都建不了，距离不必算（人群里的常态）。
-            if (theirs == mine || (mineFull && isFull(theirs))
+            // 普通人的双方都满时保留热路径；队友仍要判断距离与是否能替换普通实体。
+            if (theirs == mine || (mineFull && isFull(theirs) && !teammates(mover, theirs.player))
                     || !theirs.player.position().within(at, VIEW_RADIUS)) {
                 continue;
             }
-            if (link(mine, theirs)) {
+            if (link(mine, theirs, out)) {
                 out.added(mover, theirs.player);
                 mineFull = isFull(mine);
             }
-            if (link(theirs, mine)) {
+            if (link(theirs, mine, out)) {
                 out.added(theirs.player, mover);
             }
         }
@@ -278,15 +286,31 @@ final class ViewIndex {
     }
 
     /**
-     * 建立 watcher → target 的兴趣；watcher 的表已满或已存在返回 false。
-     * 先判容量再查重：人群里表都满，省掉每个候选一次哈希查找；{@code add} 本身兼做查重。
+     * 建立 watcher → target 的兴趣。队友满表时替换最早加入的普通实体；两张索引同时修改。
+     * out 为 null 仅用于本人进场的尚未发送集合，这时不产生瞬态实体的销毁通知。
      */
-    private boolean link(Interest watcher, Interest target) {
-        if (isFull(watcher) || !watcher.watching.add(target.player)) {
-            return false;
+    private boolean link(Interest watcher, Interest target, ViewChanges out) {
+        if (isFull(watcher)) {
+            if (!teammates(watcher.player, target.player) || watcher.watching.contains(target.player)) return false;
+            ScenePlayer victim = null;
+            for (ScenePlayer existing : watcher.watching) {
+                if (!teammates(watcher.player, existing)) {
+                    victim = existing;
+                    break;
+                }
+            }
+            if (victim == null) return false;
+            watcher.watching.remove(victim);
+            interests.get(victim).watchedBy.remove(watcher.player);
+            if (out != null) out.removed(watcher.player, victim);
         }
+        if (!watcher.watching.add(target.player)) return false;
         target.watchedBy.add(watcher.player);
         return true;
+    }
+
+    private static boolean teammates(ScenePlayer first, ScenePlayer second) {
+        return first.teamId() != 0 && first.teamId() == second.teamId();
     }
 
     private boolean isFull(Interest interest) {

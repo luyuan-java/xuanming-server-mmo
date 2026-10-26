@@ -25,11 +25,12 @@ import org.slf4j.LoggerFactory;
  * 回档闸（7.2）回档写玩家数据之前先问「这些玩家自快照时刻以来，有没有已终结为已应用的帮会资产指令」，有就拒绝回档。4.5 只交付提供方，没有消费方。
  *
  * <p>判定顺序（全部先于 SQL，guild_internal_server.go:146-226）：入参（{@code INVALID_ARGUMENT}，文案照抄基线，记 ERROR——调用方的编程错误）→
- * 装配（Store 未装配或保留期 ≤ 0 → {@code UNAVAILABLE}）→ 保留期（{@code since_ms < now + 1 h − 终态保留期} → {@code RETENTION_REJECTED}，
+ * 装配 / 清理水位（缺失端口、读取失败或坏值 → {@code UNAVAILABLE}）→ 可证明下界
+ * （{@code max(now + 1 h − 终态保留期, 清理水位 + 1 h)}；早于下界 → {@code RETENTION_REJECTED}，
  * 带 {@code cutoff_ms}，记 INFO——预期内）→ 查询（失败 → {@code ERROR}；超时与其它失败的 detail 照基线区分，库错误原文不外发）。
  * E11：拒绝走应答里的结果码与 {@code cutoff_ms} 字段，不靠异常与解析 message 前缀；{@code detail} 只进日志。
  *
- * <p>线程：判定在 Dubbo 线程上做（纯计算），SQL 在 guild-worker 上跑（阻塞 JDBC 不占 Dubbo 线程）；工作队列满 → {@code ERROR}（消费方按「问不到」
+ * <p>线程：入参判定在 Dubbo 线程上做；水位读取、保留期判定与 SQL 在 guild-worker 上跑（阻塞 I/O 不占 Dubbo 线程）；工作队列满 → {@code ERROR}（消费方按「问不到」
  * 拒绝回档，方向 fail-closed）。查询没有自己的子预算，靠整请求预算（同基线）。player_id 不进日志与指标，只记规模。线程安全。
  */
 public final class GuildInternalQueries {
@@ -79,15 +80,6 @@ public final class GuildInternalQueries {
             return done(reject(com.game.api.proto.ListAppliedResult.LIST_APPLIED_RESULT_UNAVAILABLE,
                     "guild asset op store is not available", 0));
         }
-        long cutoff = AppliedOpsQuery.retentionCutoffMs(clockMs.getAsLong(), terminalRetentionMs);
-        if (Long.compareUnsigned(request.getSinceMs(), cutoff) < 0) {
-            // 预期内的答复：快照早于终态流水保留期，这段已无法证明。消费方据 cutoff_ms 钳位重查，不打 ERROR
-            metrics.listApplied(ListAppliedResult.RETENTION, 0);
-            log.info("[GuildInternal] ListAppliedAssetOpsSince since_ms={} 早于保留期下界 cutoff_ms={}",
-                    Long.toUnsignedString(request.getSinceMs()), Long.toUnsignedString(cutoff));
-            return done(reject(com.game.api.proto.ListAppliedResult.LIST_APPLIED_RESULT_RETENTION_REJECTED,
-                    RETENTION_REJECTED_PREFIX + Long.toUnsignedString(cutoff), cutoff));
-        }
         AppliedOpsQuery query = new AppliedOpsQuery(request.getZoneId(), request.getPlayerIdsList(), request.getSinceMs(),
                 request.getAfterOpId(), AppliedOpsQuery.effectiveLimit(request.getLimit()));
         Deadline deadline = Deadline.after(budgetMillis);
@@ -104,6 +96,26 @@ public final class GuildInternalQueries {
     }
 
     private ListAppliedAssetOpsSinceResponse query(AppliedOpsQuery query, Deadline deadline) {
+        long cutoff;
+        try {
+            if (deadline.expired()) {
+                throw new Deadline.DependencyException("读取清理水位之前预算已耗尽");
+            }
+            long watermark = store.terminalCleanupWatermark(deadline);
+            cutoff = AppliedOpsQuery.provableCutoffMs(clockMs.getAsLong(), terminalRetentionMs, watermark);
+        } catch (RuntimeException e) {
+            metrics.listApplied(ListAppliedResult.UNAVAILABLE, 0);
+            log.error("[GuildInternal] ListAppliedAssetOpsSince 读不到可信清理水位: {}", e.toString());
+            return reject(com.game.api.proto.ListAppliedResult.LIST_APPLIED_RESULT_UNAVAILABLE,
+                    "guild asset op cleanup watermark is not available", 0);
+        }
+        if (Long.compareUnsigned(query.sinceMs(), cutoff) < 0) {
+            metrics.listApplied(ListAppliedResult.RETENTION, 0);
+            log.info("[GuildInternal] ListAppliedAssetOpsSince since_ms={} 早于可证明下界 cutoff_ms={}",
+                    Long.toUnsignedString(query.sinceMs()), Long.toUnsignedString(cutoff));
+            return reject(com.game.api.proto.ListAppliedResult.LIST_APPLIED_RESULT_RETENTION_REJECTED,
+                    RETENTION_REJECTED_PREFIX + Long.toUnsignedString(cutoff), cutoff);
+        }
         AppliedOpsPage page;
         try {
             page = store.listAppliedSince(query, deadline);

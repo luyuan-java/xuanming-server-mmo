@@ -81,6 +81,20 @@ final class PlayerSwitch {
      * 不再推、也不再计数（每次受理在 {@code travel_resolves} 上恰好计一次）。
      */
     private boolean expired;
+    /** 5.6：只有客户端显式选线请求可以在成功后建立共享冷却。 */
+    private boolean clientChannelPick;
+    private int channelCooldownSeconds;
+    private boolean channelCooldownStarted;
+
+    void clientChannelPick(boolean value) { clientChannelPick = value; }
+    boolean clientChannelPick() { return clientChannelPick; }
+    void channelCooldownSeconds(int seconds) { channelCooldownSeconds = clientChannelPick ? seconds : 0; }
+    int channelCooldownSeconds() { return channelCooldownSeconds; }
+    boolean channelCooldownStarted() { return channelCooldownStarted; }
+    void startChannelCooldown(long deadline) {
+        channelCooldownStarted = true;
+        if (phase == SwitchPhase.RESOLVING) deadlineNanos = deadline;
+    }
 
     PlayerSwitch(long token, long wantSceneId, int wantConfigId, long resolveDeadlineNanos) {
         this(token, SwitchReason.PLAYER, Purpose.REMOTE_SWITCH, SwitchPhase.RESOLVING, wantSceneId, wantConfigId, 0, null,

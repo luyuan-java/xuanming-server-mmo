@@ -160,11 +160,11 @@ class TeamConfigurationTest {
     }
 
     @Test
-    void 三个线程池各司其职_整队开战收尾池单独一个() {
+    void 四个线程池各司其职_开战收尾与场景通知各自独立() {
         runner.run(ctx -> {
             assertThat(ctx).hasNotFailed();
             assertThat(ctx.getBeansOfType(TeamWorkerPool.class).keySet())
-                    .containsExactlyInAnyOrder("teamWorkerPool", "teamMatchEndPool", "teamPushPool");
+                    .containsExactlyInAnyOrder("teamWorkerPool", "teamMatchEndPool", "teamPushPool", "teamSceneSignalPool");
             // 线程名就是池名：收尾任务（清开战锁，最坏阻塞 110 s）不在请求工作线程上跑
             AtomicReference<String> thread = new AtomicReference<>();
             CountDownLatch ran = new CountDownLatch(1);
@@ -174,6 +174,25 @@ class TeamConfigurationTest {
             });
             assertThat(ran.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(thread.get()).startsWith("team-match-end-");
+            CountDownLatch signalled = new CountDownLatch(1);
+            ctx.getBean("teamSceneSignalPool", TeamWorkerPool.class).execute(() -> {
+                thread.set(Thread.currentThread().getName());
+                signalled.countDown();
+            });
+            assertThat(signalled.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(thread.get()).startsWith("team-scene-signal-");
+        });
+    }
+
+    @Test
+    void 场景信号池先排空_目录清扫随后停_最后销毁RPC引用() throws Exception {
+        var dependency = TeamConfiguration.class.getMethod("teamSceneSignalPool", TeamProperties.class)
+                .getAnnotation(org.springframework.context.annotation.DependsOn.class);
+        assertThat(dependency.value()).contains("sceneTeamClients", "sceneTeamEndpointSweeper");
+        runner.run(ctx -> {
+            assertThat(ctx).hasNotFailed().hasSingleBean(com.game.team.push.SceneTeamEndpointSweeper.class);
+            var factory = ctx.getSourceApplicationContext().getBeanFactory();
+            assertThat(factory.getDependenciesForBean("sceneTeamEndpointSweeper")).contains("sceneTeamClients");
         });
     }
 

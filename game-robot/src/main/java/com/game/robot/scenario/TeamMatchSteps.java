@@ -4,6 +4,9 @@ import com.game.contract.MessageIdRegistry;
 import com.game.proto.BattleAssignedS2C;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.match.GetQueueStatusResponse;
+import com.game.proto.match.GetQueueStatusRequest;
+import com.game.proto.match.JoinQueueRequest;
+import com.game.proto.match.CancelQueueRequest;
 import com.game.proto.match.JoinQueueResponse;
 import com.game.proto.match.MatchMode;
 import com.game.proto.match.QueueState;
@@ -27,8 +30,10 @@ import com.game.table.TeamErrorTip;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
+import java.util.UUID;
 
 /**
  * team 场景的开战段（批次 6.4，match-spec §15.5「场景 team 升级」；基线 {@code robot/team_smoke_scenario.go} 的 S7 / S8）。从
@@ -43,7 +48,7 @@ import java.util.Set;
  *       随后 B 开自动把这一局打完。</li>
  * </ol>
  * 过渡态：上一场结算落地之前队员仍持战斗锁（211 回 4025[那个人]、157 回 16000）、上一场的 ready 票还没清（4026）——按节奏重试到上限；
- * 被拒时服务端不加锁，重试没有副作用。三段各自独立：某一段中断时记一条失败，后面的段照常跑。
+ * 同一轮过渡态重试复用完整请求与UUID，不补造开局。三段各自独立：某一段中断时记一条失败，后面的段照常跑。
  *
  * <p>只在场景线程上使用。用完 {@link #close()}（关掉本类建的战斗直连）。
  */
@@ -82,14 +87,24 @@ final class TeamMatchSteps implements AutoCloseable {
     private final int notifySnapshot;
     private final Duration requestTimeout;
     private final Tempo tempo;
+    private final NetworkProfiles profiles;
     private final List<Direct> directs = new ArrayList<>();
+    private final Map<Long, OriginalJoin> originals = new LinkedHashMap<>();
     private long teamBattleId;
+    private record OriginalJoin(Caller bot, JoinQueueRequest request, String ticket) {}
+    @FunctionalInterface interface NetworkProfiles { String prepare(Caller bot) throws RobotException; }
 
     /**
      * @param report 检查记到调用方的报告里
      * @param steps  步骤记到调用方的结果行里（{@code match-rejects} / {@code s7-team-battle} / {@code s8-member-in-battle}）
      */
     TeamMatchSteps(RobotClient client, MessageIdRegistry registry, CheckReport report, StepTrack steps, Duration requestTimeout, Tempo tempo) {
+        this(client, registry, report, steps, requestTimeout, tempo, bot -> PveNetworkProbe.prepare(bot, registry, requestTimeout));
+    }
+
+    /** 假服可注入档案准备，但真实构造始终执行公网nonce探测和签名回执提交。 */
+    TeamMatchSteps(RobotClient client, MessageIdRegistry registry, CheckReport report, StepTrack steps, Duration requestTimeout, Tempo tempo,
+            NetworkProfiles profiles) {
         this.client = client;
         this.report = report;
         this.steps = steps;
@@ -99,6 +114,7 @@ final class TeamMatchSteps implements AutoCloseable {
         this.notifySnapshot = registry.requireId(SERVICE, "NotifyTeamSnapshot");
         this.requestTimeout = requestTimeout;
         this.tempo = tempo;
+        this.profiles = profiles;
     }
 
     /** S7 那一局的 battle_id；没打成为 0。 */
@@ -122,12 +138,18 @@ final class TeamMatchSteps implements AutoCloseable {
     @Override
     public void close() {
         directs.forEach(Direct::close);
+        for (var original : List.copyOf(originals.values())) {
+            try { cancelOriginal(original.bot()); }
+            catch (RobotException | RuntimeException failure) { report.fail("原排队意图收尾未确认", failure.getMessage(), REF); }
+        }
     }
 
     // ---------------------------------------------------------------- 三段
 
     private void matchRejects(Caller a, Caller b, long tid) throws RobotException {
         steps.step("match-rejects", report);
+        profiles.prepare(a);
+        String plan = profiles.prepare(b);
         TeamResponse notLeader = start(b, BATTLE_CONFIG_ID, tid);
         report.check(tipOf(notLeader) == TIP_NOT_LEADER && notLeader.hasTeam() && notLeader.getTeam().getTeamId() == tid,
                 "非队长 B 开战 → 4018（带当前视图）", TeamScenario.describe(notLeader), REF);
@@ -135,7 +157,7 @@ final class TeamMatchSteps implements AutoCloseable {
         report.check(tipOf(notOpen) == TIP_DUNGEON_NOT_OPEN && idleViewOf(notOpen, tid),
                 "A 发 211(" + BATTLE_CONFIG_NOT_OPEN + ")（没配组队人数的副本）→ 4027，带视图且 match_state = IDLE", TeamScenario.describe(notOpen), REF);
 
-        JoinQueueResponse queued = MatchSupport.join(b, matchIds, MatchMode.MATCH_MODE_1V1, PVP_CONFIG);
+        JoinQueueResponse queued = joinOriginal(b, newJoin(b, MatchMode.MATCH_MODE_1V1, PVP_CONFIG, plan));
         String ticketProblem = BattleSmokeChecks.joinAcceptedProblem(queued);
         must(ticketProblem == null, "B 排 1V1 受理（持有一张排队票）", ticketProblem == null ? BattleSmokeChecks.describe(queued) : ticketProblem);
         RobotException failure = null;
@@ -147,10 +169,9 @@ final class TeamMatchSteps implements AutoCloseable {
             failure = e;
         }
         // 上一步无论结果如何都把票取消掉（148 成功不回包），再用 153 确认：免得 S7 的预检被这张票挡住
-        MatchSupport.cancel(b, matchIds, queued.getQueueTicket());
-        GetQueueStatusResponse status = MatchSupport.status(b, matchIds);
-        report.check(status.getState() == QueueState.QUEUE_STATE_NOT_QUEUED, "B 发 148 取消排队后 153 → NOT_QUEUED",
-                BattleSmokeChecks.describe(status), REF);
+        GetQueueStatusResponse status = cancelOriginal(b);
+        report.check(status.getState() == QueueState.QUEUE_STATE_NOT_QUEUED && status.getRequestCancelled(),
+                "B 发 148 取消排队后 153 → NOT_QUEUED，且原UUID撤销墓碑已提交", BattleSmokeChecks.describe(status), REF);
         if (failure != null) {
             throw failure;
         }
@@ -158,6 +179,8 @@ final class TeamMatchSteps implements AutoCloseable {
 
     private void teamBattle(Caller a, Caller b, long tid) throws RobotException {
         steps.step("s7-team-battle", report);
+        profiles.prepare(a);
+        profiles.prepare(b);
         int aMark = a.mark();
         int bMark = b.mark();
         TeamResponse started = startRetrying(a, tid);
@@ -216,8 +239,7 @@ final class TeamMatchSteps implements AutoCloseable {
 
     private void memberInBattle(Caller a, Caller b, long tid) throws RobotException {
         steps.step("s8-member-in-battle", report);
-        JoinAttempts solo = MatchSupport.joinRetrying(b, matchIds, MatchMode.MATCH_MODE_PVE_SOLO, BATTLE_CONFIG_ID,
-                Set.of(BattleSmokeChecks.TIP_IN_BATTLE), tempo);
+        JoinAttempts solo = joinRetrying(b, newJoin(b, MatchMode.MATCH_MODE_PVE_SOLO, BATTLE_CONFIG_ID, profiles.prepare(b)));
         must(solo.accepted(), "S8 B 单人 PVE 排队受理（上一场结算落地前的 16000 按过渡态重试）", solo.describe());
         Started bSolo = MatchSupport.awaitBattle(b.name(), b.connection(), solo.mark(), 0, battleIds, tempo.battleStartTimeout());
         // 开战即直连：下面的拒绝断言在过渡态下会重试十几秒，远超一回合 6 s；晚连的话超时结算的回合全被丢弃，单人 PVE 甚至可能先打完。
@@ -233,6 +255,7 @@ final class TeamMatchSteps implements AutoCloseable {
         bDirect.close();
         report.check(end.turns() >= 1 && end.autoAccepted(), "S8 B 开自动把这一局打到 150（162 没有被拒）",
                 "outcome=" + end.end().getOutcome() + " 139 × " + end.turns() + end.autoNote(), REF);
+        awaitReleased(b);
     }
 
     // ---------------------------------------------------------------- 211
@@ -247,8 +270,9 @@ final class TeamMatchSteps implements AutoCloseable {
      */
     private TeamResponse startRetrying(Caller leader, long tid) throws RobotException {
         long deadline = System.nanoTime() + tempo.settleTimeout().toNanos();
+        var original = startRequest(BATTLE_CONFIG_ID, tid);
         while (true) {
-            TeamResponse response = start(leader, BATTLE_CONFIG_ID, tid);
+            TeamResponse response = leader.call(startMatch, original, TeamResponse.parser());
             if (!transientStartTip(tipOf(response)) || System.nanoTime() - deadline >= 0) {
                 return response;
             }
@@ -262,8 +286,9 @@ final class TeamMatchSteps implements AutoCloseable {
      */
     private TeamResponse startUntilMemberInBattle(Caller leader, long tid, long inBattle) throws RobotException {
         long deadline = System.nanoTime() + tempo.settleTimeout().toNanos();
+        var original = startRequest(BATTLE_CONFIG_ID, tid);
         while (true) {
-            TeamResponse response = start(leader, BATTLE_CONFIG_ID, tid);
+            TeamResponse response = leader.call(startMatch, original, TeamResponse.parser());
             StartVerdict verdict = memberInBattleVerdict(tipOf(response), response.getErrorMessage().getParametersList(), inBattle);
             if (verdict != StartVerdict.RETRY || System.nanoTime() - deadline >= 0) {
                 return response;
@@ -290,7 +315,69 @@ final class TeamMatchSteps implements AutoCloseable {
     }
 
     static StartTeamMatchRequest startRequest(int battleConfigId, long tid) {
-        return StartTeamMatchRequest.newBuilder().setBattleConfigId(battleConfigId).setExpectedTeamId(tid).build();
+        return StartTeamMatchRequest.newBuilder().setBattleConfigId(battleConfigId).setExpectedTeamId(tid)
+                .setRequestId(UUID.randomUUID().toString()).build();
+    }
+
+    // 全球SQL入口必须保存整份原请求；每个逻辑操作只建一次UUID，过渡态重试/撤销/查票都引用它。
+    private JoinQueueRequest newJoin(Caller bot, MatchMode mode, int config, String plan) {
+        if (plan == null || plan.isBlank()) throw new IllegalArgumentException("缺少已确认的网络探测原计划");
+        return JoinQueueRequest.newBuilder().setPlayerId(bot.id()).setMode(mode).setBattleConfigId(config)
+                .setRequestId(UUID.randomUUID().toString()).setNetworkPlanId(plan).build();
+    }
+    private JoinQueueResponse joinOriginal(Caller bot, JoinQueueRequest request) throws RobotException {
+        var previous = originals.get(bot.id());
+        if (previous != null && !previous.request().equals(request)) throw new RobotException("旧排队原件尚未确认终结，不能覆盖");
+        originals.put(bot.id(), new OriginalJoin(bot, request, previous == null ? "" : previous.ticket()));
+        var response = bot.call(matchIds.joinQueue(), request, JoinQueueResponse.parser());
+        originals.put(bot.id(), new OriginalJoin(bot, request, response.getQueueTicket()));
+        return response;
+    }
+    private JoinAttempts joinRetrying(Caller bot, JoinQueueRequest request) throws RobotException {
+        long until = System.nanoTime() + tempo.settleTimeout().toNanos();
+        List<Integer> retried = new ArrayList<>();
+        while (true) {
+            int mark = bot.mark();
+            var response = joinOriginal(bot, request);
+            if (response.getErrorCode() != BattleSmokeChecks.TIP_IN_BATTLE || System.nanoTime() >= until)
+                return new JoinAttempts(mark, response, retried);
+            retried.add(response.getErrorCode());
+            BattleSupport.sleep(tempo.retryInterval());
+        }
+    }
+    private GetQueueStatusResponse originalStatus(OriginalJoin original) throws RobotException {
+        return original.bot().call(matchIds.queueStatus(), GetQueueStatusRequest.newBuilder().setPlayerId(original.bot().id())
+                .setRequestId(original.request().getRequestId()).build(), GetQueueStatusResponse.parser());
+    }
+    private GetQueueStatusResponse cancelOriginal(Caller bot) throws RobotException {
+        var original = originals.get(bot.id());
+        if (original == null) throw new RobotException("缺少可撤销的原Join");
+        bot.send(matchIds.cancelQueue(), CancelQueueRequest.newBuilder().setPlayerId(bot.id()).setQueueTicket(original.ticket())
+                .setRequestId(original.request().getRequestId()).build());
+        long until = System.nanoTime() + tempo.settleTimeout().toNanos();
+        GetQueueStatusResponse status;
+        do {
+            status = originalStatus(original);
+            if (PveTeamSizeChecks.cancelledProblem(status).isEmpty()) {
+                originals.remove(bot.id());
+                return status;
+            }
+            BattleSupport.sleep(tempo.retryInterval());
+        } while (System.nanoTime() < until);
+        throw new RobotException("原Join撤销未确认：" + PveTeamSizeChecks.cancelledProblem(status));
+    }
+    private void awaitReleased(Caller bot) throws RobotException {
+        var original = originals.get(bot.id());
+        long until = System.nanoTime() + tempo.settleTimeout().toNanos();
+        do {
+            var status = originalStatus(original);
+            if (status.getState() == QueueState.QUEUE_STATE_NOT_QUEUED && status.getQueueTicket().isEmpty() && status.getBattleId() == 0) {
+                originals.remove(bot.id());
+                return;
+            }
+            BattleSupport.sleep(tempo.retryInterval());
+        } while (System.nanoTime() < until);
+        throw new RobotException("已收到150，但原Join票仍未释放");
     }
 
     /** 应答带调用者当前视图、是这支队伍、且没有开战锁（IDLE）。 */

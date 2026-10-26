@@ -61,6 +61,14 @@ class TableBattleDataTest {
     // ---- 移植 tdp_test.cpp ----
 
     @Test
+    void 真实配置每人对应完整怪物组() {
+        for (DungeonTable row : tables.dungeon().all()) {
+            assertThat(data.dungeonMonstersPerPlayer(row.getId())).isEqualTo(data.dungeonMonsterIds(row.getId()).size());
+        }
+        assertThat(data.dungeonMonstersPerPlayer(999)).isZero();
+    }
+
+    @Test
     void 副本怪物组与导出表一致_补位的0不进组() {
         // 【C++ 断言】tdp_test.cpp:94-100
         assertThat(data.dungeonMonsterIds(1)).containsExactly(1, 2);

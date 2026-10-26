@@ -313,11 +313,16 @@ public final class TurnBattleEngine {
 
     /**
      * 怪物入场（{@code InitMonsters}，{@code engine.cpp:240-259}；规格 §1.7），只在 PVE：参考等级 = max(1, 所有玩家快照等级)（宝宝不参与，
-     * uint32）；怪物组取副本配置，为空时改成「每个玩家快照一只兜底怪（id 0）」。
+     * uint32）；普通 PVE 按进攻方玩家数循环生成完整怪物组，最多十只，宝宝不计人数。
+     * 活动对局保留固定组；空组仍是每个玩家快照一只兜底怪（id 0）。
      */
     private void initMonsters() {
         int referenceLevel = 1;
+        int attackerCount = 0;
         for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
+            if (snapshot.getTeamIndex() == 0) {
+                attackerCount++;
+            }
             // std::max(referenceLevel, level) = referenceLevel < level ? level : referenceLevel（uint32）
             if (Integer.compareUnsigned(referenceLevel, snapshot.getLevel()) < 0) {
                 referenceLevel = snapshot.getLevel();
@@ -328,6 +333,18 @@ public final class TurnBattleEngine {
             monsterIds = new ArrayList<>(request.getPlayersCount());
             for (int i = 0; i < request.getPlayersCount(); i++) {
                 monsterIds.add(0);
+            }
+        } else if (attackerCount > 0 && request.getActivityContext().getKindValue() == 0) {
+            // 未知非零活动 kind 也视为活动；不能随人数放大其固定难度。
+            long perPlayer = Integer.toUnsignedLong(ctx.data().dungeonMonstersPerPlayer(request.getBattleConfigId()));
+            if (perPlayer > 0) {
+                int count = (int) Math.min(BattleConstants.MAX_SCALED_PVE_MONSTERS,
+                        attackerCount * Math.min(perPlayer, BattleConstants.MAX_SCALED_PVE_MONSTERS));
+                List<Integer> scaled = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) {
+                    scaled.add(monsterIds.get(i % monsterIds.size()));
+                }
+                monsterIds = scaled;
             }
         }
         int monsterIndex = 0;

@@ -12,24 +12,24 @@ import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.ByteArrayCodec;
 
 /**
- * 读一个玩家的组队成员关系（索引 + 投影）。读者是 game-scene 的场景跟随（team-spec §6.10，D7），将来跨 zone 传送的「在队即拒」也用它。
+ * 读一个玩家的组队成员关系（索引 + 投影）。生产构造器从 SQL 一次快照读永久成员关系与队伍原件，
+ * 由有界存储执行器承载 JDBC；场景回调须自行投递回逻辑线程，并核对进场实例与成员 epoch。
+ * scene 的 TeamId 只是 AOI 排序提示，不是权限或玩法裁决的权威（4.3b）。
  *
- * <p>一段只读 Lua、一次往返原子读出（基线 C++ scene 是两跳：先 {@code HMGET team:player:<pid> tid epoch}，再 {@code GET team:<tid>}，
- * cpp/libs/services/scene/player/system/player_team.cpp:149-195、:230-348）：
+ * <p>旧 Redis 构造器保留给兼容装配与投影测试：一段只读 Lua、一次往返原子读出：
  * <ol>
  *   <li>{@code HMGET game:{team}:player:<pid> tid epoch}；</li>
  *   <li>tid 是非 0 的规范十进制时再 {@code GET game:{team}:info:<tid>}。</li>
  * </ol>
  * 投影键由 tid 在脚本里拼出（只拼规范十进制，不让损坏的 tid 拼出别的键），没有出现在 KEYS 里；两把键带同一个 hash tag
- * {@code {team}}（team-spec D2），将来上 Cluster 仍落在同一槽。Java 不缓存 TeamId，所以不需要基线的 {@code EXISTS rec}：
- * 「投影缺失」与「无队」对跟随来说一样，都是不跟随。
+ * {@code {team}}（team-spec D2），在 Cluster 上仍落在同一槽；投影缺失按未知处理，不能清掉已缓存的成员提示。
  *
- * <p>形状判定同基线 {@code ParseTeamIndexReply}（player_team.h:79-108）：两个字段都缺失 = 键缺失（{@link TeamMembership#KEY_MISSING}）；
+ * <p>旧 Redis 回复的形状判定：两个字段都缺失 = 键缺失（{@link TeamMembership#KEY_MISSING}）；
  * 两个都是合法十进制 = 存在；其余（半个 hash、非十进制、回复形状不对）以及投影解析失败都是数据损坏，返回的 future 以
  * {@link IllegalStateException} 异常完成（不降级成「无队」，调用方按读失败 fail-closed）。
  *
- * <p>全部异步（Redisson async，不阻塞调用线程，可在场景逻辑线程上调用；结果在 Redisson 的线程上完成，调用方自己投递回所属线程）。
- * 只读脚本以 {@code READ_ONLY} 执行，单条 {@code evalAsync}（遇到 NOSCRIPT 自动重新加载）；参数与回复都走 ByteArrayCodec。
+ * <p>两个构造器均不阻塞调用线程。兼容 Redis 路径用 {@code READ_ONLY evalAsync}（NOSCRIPT 自动重新加载），
+ * 参数与回复均走 ByteArrayCodec；它不取代生产 SQL 权威。
  */
 public final class TeamMembershipReader {
 
@@ -77,7 +77,7 @@ public final class TeamMembershipReader {
     }
 
     /**
-     * 读 {@code playerId} 此刻的成员关系。Redis 故障 / 超时 / 数据损坏时异常完成（从不同步抛出）。
+     * 读 {@code playerId} 此刻的成员关系。存储故障 / 超时 / 数据损坏时异常完成（从不同步抛出）。
      */
     public CompletableFuture<TeamMembership> readAsync(long playerId) {
         if(authority!=null){

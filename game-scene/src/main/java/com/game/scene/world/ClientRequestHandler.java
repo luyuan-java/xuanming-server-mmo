@@ -19,7 +19,7 @@ import com.game.proto.MoveSyncC2S;
 import com.game.proto.PlayerSkillComp;
 import com.game.proto.PlayerSkillListComp;
 import com.game.proto.SceneInfoComp;
-import com.game.proto.SceneInfoS2C;
+import com.game.proto.SceneInfoRequest;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.TravelToZoneRequest;
 import com.game.scene.metrics.SceneMetrics;
@@ -144,8 +144,8 @@ public final class ClientRequestHandler {
         // 63 自己判战斗在途（3023，先于换图在途 3014，scene-battle-spec §7.13）
         register(ids.enterScene(), EnterSceneC2SRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED, this::enterScene);
         // 应答是 Empty 不回包，改推 31（基线 player_scene_handler.cpp SceneInfoC2S）。
-        register(ids.sceneInfoC2S(), Message.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, (call, req) -> world.sendTo(call.player(),
-                push(ids.notifySceneInfo(), SceneInfoS2C.newBuilder().addSceneInfo(call.player().scene().info()).build())));
+        register(ids.sceneInfoC2S(), SceneInfoRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                (call, req) -> world.requestSceneInfo(call.player(), req.getWithChannelDirectory()));
         // 226 跨 zone 传送（批次 5.4，zone-travel-spec §5.5）：自己判战斗在途（3025）与换图在途（冻结中 / 传送在途 13000，63 在途 3014），
         // 冻结闸与战斗闸都放行；应答可能是延迟应答（在队检查读回来才回）
         register(ids.travelToZone(), TravelToZoneRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED,
@@ -378,12 +378,13 @@ public final class ClientRequestHandler {
      * <ul>
      *   <li>镜像分支（dungeon-mirror-spec §6.7）：同步校验（当前场景不是主世界频道、M 不在 Mirror 表、当前频道在排空、停止接客、实例数上限）
      *       任一不满足回 3005、不发 79；否则先回 {@code {0}}，再进 RESOLVING 向 scene-manager 取实例号（{@link SceneWorld#beginMirrorCreate}），
-     *       号回来后在本节点建镜像并换入：旁人 51 → 本人 79（镜像 info）/ 21 / 47，同图保留坐标。之后的失败以 23 推送：取号调用失败 {1003}、
+     *       号回来后在本节点建镜像并换入：旁人 51 → 本人 79（镜像 info）/ 21 / 47，同图保留坐标。之后的失败以 23 推送：取号调用失败 {3028}、
      *       scene-manager 拒绝 / 玩家已不在源场景等 {3023}（D5、D6）；在途期间再发 63 回 3014（D4）；</li>
-     *   <li>本节点内：同步换场景。指定排空中的频道回 3023（D11）；只带当前地图时在本节点同图频道里挑最空的（含自己、并列留原地，D17），
+     *   <li>显式世界线：包含本节点目标在内统一请 manager 预检，拒绝以 23 {3023} 推送；成功后才写共享冷却（5.6）。
+     *       只带地图与按号进本地镜像 / 副本仍同步换场景；只带当前地图时在本节点同图频道里挑最空的（含自己、并列留原地，D17），
      *       挑回原频道 = 受理、不发 79；</li>
      *   <li>远端（批次 5.2，scene-handoff-spec §5.5）：先回 {@code {0}}，再经 scene-manager 选目标、冻结、交出、由 gate 改绑到目标节点
-     *       （{@link SceneWorld#beginRemoteSwitch}）。之后的失败以 23 推送：选目标拒绝 / 交出没提交 {3023}、调用失败 {1003}（D12）；
+     *       （{@link SceneWorld#beginRemoteSwitch}）。之后的失败以 23 推送：选目标拒绝 / 交出没提交 {3023}、调用失败 {3028}（5.6 更新 D12）；
      *       交出提交之后的失败 23 {3023} 后断开（D5）。在途期间再发 63 回 3014（基线 IsSceneChangeBusy 同码）。</li>
      * </ul>
      * 63 自己处理在途判定，冻结闸（§5.9）对它放行。
@@ -410,6 +411,11 @@ public final class ClientRequestHandler {
             mirror = tipId == 0;
         } else if (want.getSceneId() != 0 && want.getSceneId() == current.sceneId()) {
             tipId = ENTER_IN_CURRENT_SCENE;
+        } else if (world.needsChannelPrecheck(want.getSceneId())) {
+            // 显式世界选线即使目标就在本节点，也必须经过同一套满员 / 开关 / 地图 / 冷却预检。
+            // 本机成功后的共享冷却写可能尚未完成；按玩家的短闸覆盖重连重建实体，不发第二次 manager 请求。
+            tipId = world.channelCooldownPending(player.playerId()) ? ENTER_CHANGING_SCENE : 0;
+            remote = tipId == 0;
         } else {
             switch (world.resolveSwitchTarget(current, want.getSceneId(), want.getSceneConfigId())) {
                 case SwitchTarget.Reject reject -> tipId = reject.tip();
@@ -431,7 +437,7 @@ public final class ClientRequestHandler {
         if (target != null && target != current) {
             world.switchScene(player, target);
         } else if (remote) {
-            world.beginRemoteSwitch(player, want.getSceneId(), want.getSceneConfigId());
+            world.beginRemoteSwitch(player, want.getSceneId(), want.getSceneConfigId(), want.getSceneId() != 0);
         } else if (mirror) {
             world.beginMirrorCreate(player, want.getMirrorConfigId());
         }

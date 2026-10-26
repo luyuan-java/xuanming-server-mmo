@@ -49,7 +49,7 @@ import org.slf4j.LoggerFactory;
  *   <li>每份视图的 epoch 只取自 S_COMMIT / S_READ_MEMBERS 的同源结果（{@link TeamViews}），每个收件人一份自己的视图
  *       （epoch 各不相同、申请与已发邀请只给队长），所以逐人推，<b>不能</b>用 {@code pushToPlayers} 广播同一份；</li>
  *   <li>RPC 调用者本人不收自己这次提交的快照与 INVITE_REVOKED（他的回包里已经是同一次提交构建的视图），被拒申请人也排除调用者；</li>
- *   <li>Java 不发 scene 刷新信号（D7：scene 进场时现读成员关系），所以基线 publish 的 healed 名单（只用于 scene 信号）在这里没有对应。</li>
+ *   <li>J/K/L 与 healed 都发场景刷新；仅新加入者和显式 regroup 请求允许跟随。提示不携带权威成员信息，scene 自己强读。</li>
  * </ul>
  * 执行器拒绝时整批放弃：按本批计划要推的种类逐条记 error 并打日志。批内一条推送超出批预算就记 error、不再发出（基线 ctx 过期后
  * PushToPlayer 立即失败）。结局映射：SENT → ok，OFFLINE → offline，GATE_UNREACHABLE / 异常 / 超时 → error。线程安全。
@@ -89,6 +89,8 @@ public final class TeamPushes {
     private final TeamMetrics metrics;
     private final long batchBudgetMillis;
     private final MessageIds messageIds;
+    private final SceneTeamSignals sceneSignals;
+    private final Executor sceneExecutor;
 
     /**
      * @param store       S_READ_MEMBERS（MEMBER_ONLINE）
@@ -98,6 +100,16 @@ public final class TeamPushes {
      */
     public TeamPushes(TeamStore store, DisplayLoader display, Pusher pusher, Executor executor, TeamMetrics metrics,
                       Duration batchBudget, MessageIds messageIds) {
+        this(store, display, pusher, executor, metrics, batchBudget, messageIds, SceneTeamSignals.NONE);
+    }
+
+    public TeamPushes(TeamStore store, DisplayLoader display, Pusher pusher, Executor executor, TeamMetrics metrics,
+                      Duration batchBudget, MessageIds messageIds, SceneTeamSignals sceneSignals) {
+        this(store, display, pusher, executor, metrics, batchBudget, messageIds, sceneSignals, executor);
+    }
+
+    public TeamPushes(TeamStore store, DisplayLoader display, Pusher pusher, Executor executor, TeamMetrics metrics,
+                      Duration batchBudget, MessageIds messageIds, SceneTeamSignals sceneSignals, Executor sceneExecutor) {
         this.store = store;
         this.display = display;
         this.pusher = pusher;
@@ -105,6 +117,8 @@ public final class TeamPushes {
         this.metrics = metrics;
         this.batchBudgetMillis = batchBudget.toMillis();
         this.messageIds = messageIds;
+        this.sceneSignals = Objects.requireNonNull(sceneSignals, "sceneSignals");
+        this.sceneExecutor = Objects.requireNonNull(sceneExecutor, "sceneExecutor");
     }
 
     // ================================================================ 入口
@@ -115,10 +129,18 @@ public final class TeamPushes {
      * @param caller RPC 调用者（排除在快照、INVITE_REVOKED、APPLICATION_REJECTED 之外）；0 = 不排除任何人（6.4 的开战结果推送）
      */
     public void publish(long caller, List<CommitResult> commits) {
+        publish(caller, commits, List.of());
+    }
+
+    /** healed 只刷新提示，不触发跟随；即使没有主提交，也不能丢失孤儿关系清除通知。 */
+    public void publish(long caller, List<CommitResult> commits, Collection<Long> healed) {
         List<CommitResult> batch = commits == null ? List.of() : commits.stream().filter(Objects::nonNull).toList();
-        if (batch.isEmpty()) {
+        List<Long> repaired = healed == null ? List.of() : TeamViews.uniqueIds(healed);
+        if (batch.isEmpty() && repaired.isEmpty()) {
             return;
         }
+        publishSceneSignals(batch, repaired);
+        if (batch.isEmpty()) return;
         // 预算从提交时刻起算（基线 goroutine 与 3 s ctx 在 publish 时就开始）：在执行器里排队超过预算的整批按 error 丢弃、不读 MySQL，
         // 不把过时的视图 / 邀请（客户端按 server_time_ms 推算过期）晚几分钟送达
         Deadline deadline = Deadline.after(batchBudgetMillis);
@@ -140,14 +162,52 @@ public final class TeamPushes {
         } catch (RejectedExecutionException e) {
             int n = countAsError(caller, batch);
             log.warn("[team] 推送执行器已满，放弃一批 {} 次提交的 {} 条推送 team={}", batch.size(), n,
-                    Long.toUnsignedString(batch.get(batch.size() - 1).teamId()));
+                    batch.isEmpty() ? "0" : Long.toUnsignedString(batch.get(batch.size() - 1).teamId()));
         }
     }
 
     private void dropStale(long caller, List<CommitResult> batch) {
         int n = countAsError(caller, batch);
         log.warn("[team] 一批 {} 次提交的 {} 条推送在推送执行器里排队超过预算，放弃 team={}", batch.size(), n,
-                Long.toUnsignedString(batch.get(batch.size() - 1).teamId()));
+                batch.isEmpty() ? "0" : Long.toUnsignedString(batch.get(batch.size() - 1).teamId()));
+    }
+
+    private void refreshScene(Deadline deadline, long playerId, boolean follow) {
+        if (playerId == 0 || deadline.expired()) return;
+        try {
+            sceneSignals.refresh(playerId, follow, deadline);
+        } catch (RuntimeException e) {
+            log.warn("[team] 场景刷新未送达 player={} follow={}: {}", Long.toUnsignedString(playerId), follow, e.toString());
+        }
+    }
+
+    /** 定位/RPC 与客户端推送分池、分预算；任一依赖故障不能耗尽另一条已提交通知的时间。 */
+    private void publishSceneSignals(List<CommitResult> batch, List<Long> repaired) {
+        if (sceneSignals == SceneTeamSignals.NONE) return;
+        Map<Long, Boolean> signals = new java.util.LinkedHashMap<>();
+        for (CommitResult c : batch) {
+            for (long pid : c.decision().kept()) signals.putIfAbsent(pid, false);
+            for (long pid : c.decision().left()) signals.putIfAbsent(pid, false);
+            for (long pid : c.decision().joined()) signals.put(pid, true);
+        }
+        for (long pid : repaired) signals.putIfAbsent(pid, false);
+        Deadline deadline = Deadline.after(batchBudgetMillis);
+        try {
+            sceneExecutor.execute(() -> signals.forEach((pid, follow) -> refreshScene(deadline, pid, follow)));
+        } catch (RejectedExecutionException e) {
+            log.warn("[team] 场景提示执行器已满，放弃 {} 个已提交成员刷新", signals.size());
+        }
+    }
+
+    /** 仅以同次响应视图判调用者是队员；距离/战斗/跨节点等守卫由 scene 再读验证。 */
+    public void publishRegroup(long caller, TeamView team) {
+        if (team == null || team.getTeamId() == 0 || team.getLeaderId() == 0 || team.getLeaderId() == caller) return;
+        Deadline deadline = Deadline.after(batchBudgetMillis);
+        try {
+            sceneExecutor.execute(() -> refreshScene(deadline, caller, true));
+        } catch (RejectedExecutionException e) {
+            log.warn("[team] 推送执行器已满，放弃归队提示 player={}", Long.toUnsignedString(caller));
+        }
     }
 
     /** 整批放弃：每条计划中的推送按其 kind 计一次 error（计划不做 I/O）；返回条数。 */

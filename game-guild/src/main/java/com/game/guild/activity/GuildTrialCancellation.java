@@ -4,6 +4,7 @@ import com.game.discovery.serviceauth.ServiceCallSignatures;
 import com.game.proto.match.CancelActivityBattleRequest;
 import com.game.proto.match.CancelActivityBattleResponse;
 import com.game.proto.match.StartActivityBattleRequest;
+import com.game.proto.match.BattleOutcomeDecision;
 import java.util.Map;
 import java.util.function.LongSupplier;
 
@@ -49,7 +50,8 @@ public final class GuildTrialCancellation {
         public CancelActivityBattleResponse response() { return response; }
         public boolean terminal() {
             return response.getRequestCancelled() && response.getBattleId() == 0
-                    || response.getBattleId() != 0 && response.getFormationState() == 5;
+                    || response.getBattleId() != 0 && response.getFormationState() == 5
+                        && response.getTerminalDecision() != BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE;
         }
     }
 }

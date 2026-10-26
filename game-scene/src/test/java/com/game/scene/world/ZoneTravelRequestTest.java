@@ -1,6 +1,7 @@
 package com.game.scene.world;
 
 import static com.game.scene.world.TravelFixture.LINK;
+import static com.game.scene.world.TravelFixture.LOCAL_NODE;
 import static com.game.scene.world.TravelFixture.LOCAL_ZONE;
 import static com.game.scene.world.TravelFixture.REDIRECT;
 import static com.game.scene.world.TravelFixture.RESOLVE_TIMEOUT;
@@ -348,6 +349,7 @@ class ZoneTravelRequestTest {
 
         f.clock.advanceMillis(1);
         f.enterScene(a, f.scene2.sceneId(), 2);
+        f.switchTargets.take().chosen(LOCAL_NODE, f.scene2.sceneId(), 2);
 
         List<MessageContent> all = f.sink.to(LINK, 11);
         int travelReply = indexOf(all, 226, id);
@@ -447,6 +449,7 @@ class ZoneTravelRequestTest {
         assertThat(f.pushedTips(11)).containsExactly(TRAVEL_FAILED, TRAVEL_FAILED);
 
         f.enterScene(a, f.scene2.sceneId(), 2);
+        f.switchTargets.take().chosen(LOCAL_NODE, f.scene2.sceneId(), 2);
         assertThat(a.scene()).as("可继续游玩").isSameAs(f.scene2);
 
         f.resolve(a).chosen(TARGET_MAP, REDIRECT);
@@ -519,6 +522,7 @@ class ZoneTravelRequestTest {
 
         f.clock.advanceMillis(1);
         f.enterScene(a, f.scene2.sceneId(), 2);
+        f.switchTargets.take().chosen(LOCAL_NODE, f.scene2.sceneId(), 2);
 
         List<MessageContent> all = f.sink.to(LINK, 11);
         int tip = lastIndexOf(all, TravelFixture.TIP);

@@ -52,6 +52,7 @@ public class GlobalMatchConfiguration {
     @Bean(initMethod="start",destroyMethod="close") @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     GlobalMatchService globalMatchService(GlobalMatchStore store,GlobalMatchProperties config,MatchProperties props,NodeDirectory<BattleNodeInfo> directory,
             MatchIds ids,RatingReader ratings,ScenePreparer scenes,NodeCalls<BattleNodeService> calls,PlayerStatusReader players,PlacementStore projections,GatherHooks hooks,
-            com.game.match.spectate.SqlSpectateStore spectators){
-        return new GlobalMatchService(store,config,props,directory,ids,ratings,scenes,calls,players,projections,hooks).withSpectators(spectators);}
+            com.game.match.spectate.SqlSpectateStore spectators,com.game.match.metrics.MatchMetrics metrics){
+        return new GlobalMatchService(store,config,props,directory,ids,ratings,scenes,calls,players,projections,hooks)
+                .withSpectators(spectators).withMetrics(metrics);}
 }

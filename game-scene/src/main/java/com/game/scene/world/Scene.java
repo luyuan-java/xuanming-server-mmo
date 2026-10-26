@@ -236,6 +236,11 @@ public final class Scene {
         view.refresh(out);
     }
 
+    /** 成员关系刷新后立即补齐双向兴趣，容量与距离仍由同一个索引裁决。 */
+    void refreshTeamView(ScenePlayer player, ViewChanges out) {
+        view.refreshTeam(player, out);
+    }
+
     /** 看得见 {@code player} 的玩家（只读）。 */
     Set<ScenePlayer> watchers(ScenePlayer player) {
         return view.watchers(player);

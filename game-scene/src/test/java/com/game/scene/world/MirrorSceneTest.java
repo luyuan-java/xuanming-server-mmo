@@ -37,7 +37,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 /**
  * 63 的镜像分支（批次 5.3，dungeon-mirror-spec §6.7、§6.8、§12.2 第 1–6、13、14 条）：先回 {0}、进 RESOLVING 向 scene-manager 取号、
  * 号回来后在本节点建镜像并换入（79 逐字段、旁人 51、坐标保留、位置记录、目录补发）；准入顺序与各同步拒绝（3014 / 3005 / 3008）；
- * 异步结局（1003 / 3023 / 号落别的节点）；陈旧结果；按号加入、离开；43；79 的字节级形态。
+ * 异步结局（3028 / 3023 / 号落别的节点）；陈旧结果；按号加入、离开；43；79 的字节级形态。
  */
 class MirrorSceneTest {
 
@@ -45,7 +45,7 @@ class MirrorSceneTest {
     private static final int PARAM_ERROR = 3005;
     private static final int IN_CURRENT_SCENE = 3008;
     private static final int ENTER_FAILED = 3023;
-    private static final int SERVICE_UNAVAILABLE = 1003;
+    private static final int SERVICE_UNAVAILABLE = 3028;
 
     private InstanceFixture f;
     private ScenePlayer a;
@@ -269,7 +269,7 @@ class MirrorSceneTest {
     // ------------------------------------------------------------------ 3 异步结局
 
     @Test
-    void 取号调用失败_回NONE_推23的1003_不建_之后可再发() {
+    void 取号调用失败_回NONE_推23的3028_不建_之后可再发() {
         f.requestMirror(a, M);
         f.sink.clear();
 
@@ -312,7 +312,7 @@ class MirrorSceneTest {
     }
 
     @Test
-    void 没装配取号_应答0之后推23的1003_D9() {
+    void 没装配取号_应答0之后推23的3028_D9() {
         InstanceFixture noIds = new InstanceFixture(InstanceFixture.Settings.DEFAULT.withoutIds());
         ScenePlayer x = noIds.enter(11, 1001, A);
 

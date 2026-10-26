@@ -34,6 +34,11 @@
             <groupId>com.game</groupId>
             <artifactId>game-api</artifactId>
         </dependency>
+        <!-- 5.6：发布客户端 SceneChannelDirectory 读模型，显式声明直接使用的共享契约。 -->
+        <dependency>
+            <groupId>com.game</groupId>
+            <artifactId>game-proto</artifactId>
+        </dependency>
         <!-- 批次 5.4：跨 zone 重定向票据由 scene-manager 签（GateTokens / GateTokenIssuer）。此前只经 game-discovery 传递进来，
              现在直接用令牌类，显式声明 -->
         <dependency>

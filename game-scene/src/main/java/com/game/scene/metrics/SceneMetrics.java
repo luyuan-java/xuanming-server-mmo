@@ -203,13 +203,21 @@ public final class SceneMetrics {
 
     /**
      * 一次组队跟随检查（进场 / 换场景后读成员关系，team-spec §6.10）的结局（{@code game.scene.team.follow{result}}），
-     * 每次读回来恰好计一次（队长进场扇出时，每个被扇出的成员各自再读一次、各计一次）。
+     * 每次有效判定计一次；标脏后丢弃并重读的中间结果不计（扇出的成员各自判定）。
      */
     public enum TeamFollowResult {
         /** 换到了本节点上队长所在的场景实例。 */
         FOLLOWED,
-        /** 已与队长同场景，什么都不做。 */
+        /** 已与队长同场景、水平距离不超过 8 m 且双向可见，无需归队。 */
         SAME_SCENE,
+        /** 同场景归队成功（130 原因 5）。 */
+        REGROUPED,
+        /** 同场景瞬移的前置条件拒绝。 */
+        REGROUP_REJECTED,
+        /** 队长已进入归属交接冻结。 */
+        LEADER_FROZEN,
+        /** 仅刷新 AOI 成员提示，不发起跟随。 */
+        REFRESHED,
         /** 不在队（索引 tid 为 0 或索引键缺失）。 */
         NOT_IN_TEAM,
         /** 在队但投影缺失，或投影与索引对不上（team_id 不符、leader_id 为 0）。 */
@@ -226,7 +234,7 @@ public final class SceneMetrics {
         IS_LEADER,
         /** 读回来时玩家已离开或已重新进场（不是发起读时的那个实例），丢弃。 */
         STALE,
-        /** 读失败（Redis 故障 / 超时）、索引 / 投影损坏，或检查本身出错：不跟随。 */
+        /** 读失败（SQL 故障 / 超时）、索引 / 投影损坏，或检查本身出错：不跟随。 */
         READ_ERROR,
         /** 自己有在途的回合制战斗（内存冻结；只在读回来后的回调里判一次、不做读前预判，scene-battle-spec §7.13）：不跟随。 */
         IN_BATTLE,

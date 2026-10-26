@@ -92,4 +92,17 @@ public record AppliedOpsQuery(int zoneId, List<Long> playerIds, long sinceMs, lo
         }
         return nowMs + safety - terminalRetentionMs;
     }
+
+    /** 已清理窗口不会因调大保留期重新变得可证明；水位的安全余量与配置下界同为 1 h。 */
+    public static long provableCutoffMs(long nowMs, long terminalRetentionMs, long cleanupWatermarkMs) {
+        long configured = retentionCutoffMs(nowMs, terminalRetentionMs);
+        if (cleanupWatermarkMs == 0) {
+            return configured;
+        }
+        if (cleanupWatermarkMs < 0 || cleanupWatermarkMs > Long.MAX_VALUE - GuildLimits.APPLIED_OPS_RETENTION_SAFETY_MS) {
+            throw new IllegalArgumentException("终态指令清理水位超出可证明时间范围");
+        }
+        long cleaned = cleanupWatermarkMs + GuildLimits.APPLIED_OPS_RETENTION_SAFETY_MS;
+        return Long.compareUnsigned(configured, cleaned) >= 0 ? configured : cleaned;
+    }
 }

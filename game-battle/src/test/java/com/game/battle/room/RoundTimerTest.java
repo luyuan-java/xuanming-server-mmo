@@ -158,6 +158,29 @@ class RoundTimerTest {
     }
 
     @Test
+    void 十五单位自动回合预留3750毫秒_关闭自动后回到6秒() {
+        h.data.setDungeonMonsters(RoomHarness.DUNGEON_TANK, 71, 71, 71, 71, 71, 71, 71, 71, 71, 71);
+        long[] players = {A, B, C, D, D + 1};
+        h.create(h.pveTeam(2099, players).setBattleConfigId(RoomHarness.DUNGEON_TANK));
+        FakeLink a = h.connect(2099, A, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT);
+        for (long player : players) {
+            setAuto(2099, player, true);
+        }
+        var turn = a.parsed(TURN, TurnResultS2C.parser()).get(0);
+        assertThat(turn.getActionOrderCount()).isEqualTo(15);
+        assertThat(turn.getState().getActionDeadlineMs()).isEqualTo(h.now() + 3750);
+        h.scheduler.advance(3749);
+        assertThat(a.parsed(TURN, TurnResultS2C.parser())).hasSize(1);
+        h.scheduler.advance(1);
+        assertThat(a.parsed(TURN, TurnResultS2C.parser())).hasSize(2);
+        setAuto(2099, A, false);
+        long armed = h.service().room(2099).actionDeadlineMs;
+        assertThat(armed).isEqualTo(h.now() + 3750);
+        h.scheduler.advanceTo(armed);
+        assertThat(h.service().room(2099).actionDeadlineMs).isEqualTo(h.now() + 6000);
+    }
+
+    @Test
     void 全自动房间里挂机玩家合法提交当场结算_钉住B2() {
         h.create(h.pvp(2005, A, B));
         FakeLink a = h.connect(2005, A, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT);

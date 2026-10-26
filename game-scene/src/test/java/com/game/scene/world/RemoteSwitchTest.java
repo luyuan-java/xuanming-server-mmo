@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * 63 的远端去向（批次 5.2，scene-handoff-spec §5.5 第 1–4 步、§10.3「63 分支」）：先回 {0}、RESOLVING 不冻结、选目标结果的各行
- * （失败 1003 / 拒绝 3023 / 本节点同步换 / 就是当前场景 / 别的节点冻结）、令牌过期丢弃、在途 3014。
+ * （失败 3028 / 拒绝 3023 / 本节点同步换 / 就是当前场景 / 别的节点冻结）、令牌过期丢弃、在途 3014。
  */
 class RemoteSwitchTest {
 
@@ -119,13 +119,13 @@ class RemoteSwitchTest {
     }
 
     @Test
-    void 选目标调用失败_回NONE_推23的1003_之后可再发63() {
+    void 选目标调用失败_回NONE_推23的3028_之后可再发63() {
         PendingSelect select = f.resolveRemote(a);
         f.sink.clear();
 
         select.complete(new Selection.Failed("连不上"));
 
-        assertThat(f.pushedTips(11)).containsExactly(1003);
+        assertThat(f.pushedTips(11)).containsExactly(3028);
         assertThat(a.switchPhase()).isEqualTo(SwitchPhase.NONE);
         assertThat(f.resolves("error")).isEqualTo(1);
         f.enterScene(11, 1001, REMOTE_SCENE, 0, 5);
@@ -200,13 +200,13 @@ class RemoteSwitchTest {
     }
 
     @Test
-    void 应答残缺_节点号或场景号为0_按调用失败推1003() {
+    void 应答残缺_节点号或场景号为0_按调用失败推3028() {
         f.resolveRemote(a).chosen(0, REMOTE_SCENE, 2);
-        assertThat(f.pushedTips(11)).containsExactly(1003);
+        assertThat(f.pushedTips(11)).containsExactly(3028);
         f.sink.clear();
 
         f.resolveRemote(a).chosen(TARGET_NODE, 0, 2);
-        assertThat(f.pushedTips(11)).containsExactly(1003);
+        assertThat(f.pushedTips(11)).containsExactly(3028);
         assertThat(f.resolves("error")).isEqualTo(2);
         assertThat(f.repo.pendingHandOffs()).isZero();
     }

@@ -16,6 +16,14 @@ class RobotOptionsTest {
     private static final long NOW = 1_760_000_000_000L;
 
     @Test
+    void 人数档子命令使用完整全球匹配流程且无需开发管理口() throws Exception {
+        RobotOptions options = RobotOptions.parse(List.of("pve-team-size", "--expect-dev", "deny"), ENV, NOW);
+        assertThat(options.scenario()).isEqualTo(RobotOptions.Scenario.PVE_TEAM_SIZE);
+        assertThat(options.expectDevAllowed()).isFalse();
+        assertThat(RobotOptions.subcommand(options.scenario())).isEqualTo("pve-team-size");
+    }
+
+    @Test
     void movement管理端口与挂机开关缺省值_不解析实例专用选项() throws Exception {
         RobotOptions o = RobotOptions.parse(List.of("movement", "--mirror-config-id", "invalid"), ENV, NOW);
         assertThat(o.sceneAdminUrl()).isEqualTo("http://127.0.0.1:18104");

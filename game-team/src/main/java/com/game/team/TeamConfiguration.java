@@ -171,7 +171,7 @@ public class TeamConfiguration {
      * 然后收尾池，推送池最后关。
      */
     @Bean(destroyMethod = "close")
-    @DependsOn({"teamMatchEndPool", "teamPushPool"})
+    @DependsOn({"teamMatchEndPool", "teamPushPool", "teamSceneSignalPool"})
     public TeamWorkerPool teamWorkerPool(TeamProperties props) {
         return new TeamWorkerPool(TeamWorkerPool.WORKER, props.workerThreads(), props.workerQueueCapacity(), DRAIN_TIMEOUT);
     }
@@ -193,15 +193,44 @@ public class TeamConfiguration {
         return new TeamWorkerPool(TeamWorkerPool.PUSH, props.pushThreads(), props.pushQueueCapacity(), DRAIN_TIMEOUT);
     }
 
+    /** scene 定位/RPC 不与客户端快照推送争用工作线程或批预算。 */
+    @Bean(destroyMethod = "close")
+    @DependsOn({"sceneTeamClients", "sceneTeamEndpointSweeper"})
+    public TeamWorkerPool teamSceneSignalPool(TeamProperties props) {
+        return new TeamWorkerPool("team-scene-signal", props.pushThreads(), props.pushQueueCapacity(), DRAIN_TIMEOUT);
+    }
+
     @Bean
     public TeamPushes teamPushes(TeamStore store, TeamDisplay display, PlayerPushes pushes,
                                  @Qualifier("teamPushPool") TeamWorkerPool teamPushPool, TeamMetrics metrics,
-                                 TeamProperties props, MessageIdRegistry registry) {
+                                 TeamProperties props, MessageIdRegistry registry, com.game.team.push.SceneTeamSignals sceneSignals,
+                                 @Qualifier("teamSceneSignalPool") TeamWorkerPool sceneSignalPool) {
         return new TeamPushes(store, display, pushes::pushToPlayer, teamPushPool, metrics, props.pushBatchBudget(),
                 new TeamPushes.MessageIds(
                         registry.requireId(TeamMethods.SERVICE, TeamMethods.NOTIFY_TEAM_SNAPSHOT),
                         registry.requireId(TeamMethods.SERVICE, TeamMethods.NOTIFY_TEAM_INVITE),
-                        registry.requireId(TeamMethods.SERVICE, TeamMethods.NOTIFY_TEAM_EVENT)));
+                        registry.requireId(TeamMethods.SERVICE, TeamMethods.NOTIFY_TEAM_EVENT)), sceneSignals, sceneSignalPool);
+    }
+
+    @Bean(destroyMethod = "close")
+    public com.game.api.rpc.NodeRpcClients<com.game.api.SceneTeamService> sceneTeamClients(TeamProperties props) {
+        return new com.game.api.rpc.NodeRpcClients<>("game-team-scene", com.game.api.SceneTeamService.class,
+                com.game.api.DubboGroups.SCENE_TEAM, props.pushBatchBudget(), "team-scene-connect");
+    }
+
+    @Bean(initMethod = "start", destroyMethod = "close")
+    public com.game.team.push.SceneTeamEndpointSweeper sceneTeamEndpointSweeper(RedissonClient redis, RedisKeys keys,
+            com.game.api.rpc.NodeRpcClients<com.game.api.SceneTeamService> sceneTeamClients) {
+        var nodes = new com.game.discovery.NodeDirectory<>(redis, keys, NodeTypes.SCENE, com.game.api.proto.SceneNodeInfo.parser());
+        return new com.game.team.push.SceneTeamEndpointSweeper(nodes::list, sceneTeamClients);
+    }
+
+    @Bean
+    public com.game.team.push.SceneTeamSignals sceneTeamSignals(PlayerLocationDirectory locations, RedissonClient redis,
+            RedisKeys keys, com.game.team.push.SceneTeamEndpointSweeper sceneTeamEndpointSweeper) {
+        var nodes = new com.game.discovery.NodeDirectory<>(redis, keys, NodeTypes.SCENE, com.game.api.proto.SceneNodeInfo.parser());
+        return new com.game.team.push.DubboSceneTeamSignals(
+                new com.game.discovery.location.SceneAssetLocator(locations, nodes, null), sceneTeamEndpointSweeper);
     }
 
     /**

@@ -134,7 +134,7 @@ public final class MatchMetrics {
     }
 
     /** 157 的出口（{@code game_match_join_queue_total{outcome}}；同基线，{@code overloaded} 是 Java 新增）。 */
-    public enum JoinOutcome { OK, IN_BATTLE, ALREADY_QUEUED, MODE_NOT_OPEN, NO_TEAM_SIZE, NOT_IN_SCENE, INTERNAL, OVERLOADED }
+    public enum JoinOutcome { OK, IN_BATTLE, ALREADY_QUEUED, MODE_NOT_OPEN, NO_TEAM_SIZE, TEAM_SIZE_OVER_LIMIT, NOT_IN_SCENE, INTERNAL, OVERLOADED }
 
     /** 凑单一轮的结局：三种暂停都在抢锁之前判（battle 池不可分配 / 发号租约无效 / gather 许可已满）。 */
     public enum MatcherRound { OK, PAUSED_NO_BATTLE, PAUSED_NO_LEASE, PAUSED_SATURATED, ERROR }
@@ -457,6 +457,16 @@ public final class MatchMetrics {
     /** 157 的一个出口。{@code mode} 传请求里的原始数值（在这里净化）。 */
     public void joinQueue(int mode, JoinOutcome outcome) {
         joinCounter(MetricLabels.mode(mode), outcome).increment();
+    }
+
+    /** 全球 SQL 人数档入口：只允许 0..5 与 invalid 标签，不把客户端 uint32 原值放入指标。 */
+    public void joinQueue(int mode, int teamSize, JoinOutcome outcome) {
+        joinQueue(mode, outcome);
+        if (mode == MatchModes.PVE_TEAM) {
+            String size = teamSize >= 0 && teamSize <= 5 ? Integer.toString(teamSize) : "invalid";
+            counter("game.match.pve.team.size.requests", "PVE 人数档请求出口（0 表示未配置，invalid 表示越界）",
+                    "size", size, "outcome", tag(outcome)).increment();
+        }
     }
 
     // ================================================================ 凑单

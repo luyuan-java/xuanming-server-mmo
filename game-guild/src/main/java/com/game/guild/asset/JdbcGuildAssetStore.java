@@ -201,14 +201,20 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
 
     private final BackgroundTx tx;
     private final Listener listener;
+    private final TerminalCleanupWatermark cleanupWatermark;
 
     /**
      * @param tx       后台写事务基座（连接、语句超时上限、重跑钩子都在它里面）
      * @param listener 提交后的钩子（失效 / 指标 / 推送）；assetopfix 传只失效、不推送的实现
      */
     public JdbcGuildAssetStore(BackgroundTx tx, Listener listener) {
+        this(tx, listener, TerminalCleanupWatermark.UNAVAILABLE);
+    }
+
+    public JdbcGuildAssetStore(BackgroundTx tx, Listener listener, TerminalCleanupWatermark cleanupWatermark) {
         this.tx = Objects.requireNonNull(tx, "tx");
         this.listener = Objects.requireNonNull(listener, "listener");
+        this.cleanupWatermark = Objects.requireNonNull(cleanupWatermark, "cleanupWatermark");
     }
 
     // ================================================================ 领取
@@ -548,7 +554,13 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
         if (opCutoffMs > 0) {
             // 去重记录排在终态行之前、同一个截止（见接口注释）
             clientRequests = cleanupInBatches(CleanupTable.CLIENT_REQUEST, () -> cleanupClientRequestsBatch(opCutoffMs), errors);
-            ops = cleanupInBatches(CleanupTable.ASSET_OP, () -> cleanupTerminalOpsBatch(opCutoffMs), errors);
+            try {
+                // 先记水位再删；推进失败只跳过终态，去重记录与计数行仍照常清理（同基线）。
+                cleanupWatermark.advance(opCutoffMs, Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS));
+                ops = cleanupInBatches(CleanupTable.ASSET_OP, () -> cleanupTerminalOpsBatch(opCutoffMs), errors);
+            } catch (RuntimeException e) {
+                errors.add(new DependencyException("跳过终态指令清理：水位未获推进确认", e));
+            }
         }
         long counters = cleanupInBatches(CleanupTable.DAILY_COUNTER,
                 () -> cleanupCountersBatch(GuildLimits.DAY_KEY_FLOOR, cutoffs.dayKey()), errors);
@@ -615,6 +627,11 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
         } catch (RuntimeException e) {
             log.error("[GuildAsset] 清理计数钩子失败: {}", e.toString());
         }
+    }
+
+    @Override
+    public long terminalCleanupWatermark(Deadline deadline) {
+        return cleanupWatermark.read(within(deadline, GuildLimits.ASSET_STORE_READ_BUDGET_MS));
     }
 
     /** 普通读至多 500 个保留期外的三种终态 op_id（升序），逐行短事务点锁 + 点删并复核条件。 */

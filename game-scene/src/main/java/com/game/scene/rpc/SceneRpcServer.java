@@ -4,6 +4,7 @@ import com.game.api.DubboGroups;
 import com.game.api.SceneAssetOpService;
 import com.game.api.SceneBattleService;
 import com.game.api.SceneInboxService;
+import com.game.api.SceneTeamService;
 import com.game.api.asset.IsolatedDubboModule;
 import java.util.ArrayList;
 import java.util.List;
@@ -58,6 +59,12 @@ public final class SceneRpcServer implements AutoCloseable {
     /** 同上，另在同一端口导出收件箱在线提醒入口（group scene-inbox，register = false）；inbox 为 null = 不导出。 */
     public static SceneRpcServer export(SceneAssetOpService asset, SceneBattleService battle, SceneInboxService inbox, String host,
                                         int port) {
+        return export(asset, battle, inbox, null, host, port);
+    }
+
+    /** 同一实例端口另导出队伍刷新提示；旧重载供不需要组队的测试使用。 */
+    public static SceneRpcServer export(SceneAssetOpService asset, SceneBattleService battle, SceneInboxService inbox,
+                                        SceneTeamService team, String host, int port) {
         if (port < 1 || port > 65535) {
             throw new IllegalArgumentException("scene RPC 端口超出范围: " + port);
         }
@@ -72,6 +79,9 @@ public final class SceneRpcServer implements AutoCloseable {
             }
             if (inbox != null) {
                 exported.add(exportOne(dubbo, protocol, SceneInboxService.class, inbox, DubboGroups.SCENE_INBOX));
+            }
+            if (team != null) {
+                exported.add(exportOne(dubbo, protocol, SceneTeamService.class, team, DubboGroups.SCENE_TEAM));
             }
             log.info("scene Dubbo 提供方已导出 {}://{}:{} groups={} register=false", PROTOCOL, host, port,
                     battle != null ? DubboGroups.SCENE_ASSET + "," + DubboGroups.SCENE_BATTLE : DubboGroups.SCENE_ASSET);

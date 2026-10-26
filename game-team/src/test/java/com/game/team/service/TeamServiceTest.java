@@ -16,6 +16,23 @@ import org.junit.jupiter.api.Test;
 class TeamServiceTest extends TeamMatchScenarios {
 
     @Test
+    void GetMyTeam仅显式regroup触发归队_普通查询与队长查询保持不动() {
+        long[] team = fx.team(2);
+        long leader = team[1], member = team[2];
+        fx.sceneSignals.clear();
+        var ordinary = fx.service.getMyTeam(member, com.game.proto.team.GetMyTeamRequest.getDefaultInstance(), TeamMatchFixture.deadline());
+        assertThat(ordinary.getTeam().getTeamId()).isEqualTo(team[0]);
+        assertThat(fx.sceneSignals).isEmpty();
+        var regroup = com.game.proto.team.GetMyTeamRequest.newBuilder().setRegroup(true).build();
+        var reply = fx.service.getMyTeam(member, regroup, TeamMatchFixture.deadline());
+        assertThat(reply.getTeam().getTeamId()).isEqualTo(team[0]);
+        assertThat(fx.sceneSignals).containsExactly(new TeamMatchFixture.SceneSignal(member, true));
+        fx.sceneSignals.clear();
+        fx.service.getMyTeam(leader, regroup, TeamMatchFixture.deadline());
+        assertThat(fx.sceneSignals).isEmpty();
+    }
+
+    @Test
     void 收尾拒绝且gather异常完成_211仍恰好计一次未知结局() {
         fx.rejectBackground = true;
         fx.match.gatherReply = request -> CompletableFuture.failedFuture(new IllegalStateException("gather失败"));

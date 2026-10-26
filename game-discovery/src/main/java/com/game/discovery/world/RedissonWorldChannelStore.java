@@ -178,7 +178,8 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
 
     @Override
     public WorldPlan readPlan(int zoneId) {
-        Object raw = script().eval(RScript.Mode.READ_ONLY, PLAN, RScript.ReturnType.MULTI,
+        // 5.6 手动切线也读取此计划；强制主节点，避免副本滞后把已排空线路当 ACTIVE 放行。
+        Object raw = script().eval(RScript.Mode.READ_WRITE, PLAN, RScript.ReturnType.MULTI,
                 keys(redisKeys.worldChannels(zoneId), redisKeys.worldPlanVersion(zoneId)));
         return WorldPlanCodec.parsePlan(zoneId, raw);
     }

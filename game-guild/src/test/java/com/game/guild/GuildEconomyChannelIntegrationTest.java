@@ -312,7 +312,7 @@ class GuildEconomyChannelIntegrationTest {
         GuildPushes pushes = wiring.guildPushes(playerPushes, metrics, props, REGISTRY);
         BackgroundTx backgroundTx = wiring.guildBackgroundTx(dataSource, props);
         EconomyAssetEffects effects = wiring.economyAssetEffects(invalidator, pushes, metrics);
-        assetStore = wiring.guildAssetStore(backgroundTx, effects, ready);
+        assetStore = wiring.guildAssetStore(backgroundTx, effects, ready, redis, REDIS_KEYS);
         EconomyTables.Lookup economyTables = wiring.economyTables(tables);
         settlePool = wiring.guildAssetSettlePool(props, dataSource, redis);
         workerPool = wiring.guildAssetWorkerPool(props, dataSource, redis);

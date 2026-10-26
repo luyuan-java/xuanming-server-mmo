@@ -14,10 +14,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * team 的阻塞线程池（照 game-friend 的 FriendWorkerPool，team-spec §6.4）。三个实例：
+ * team 的阻塞线程池（照 game-friend 的 FriendWorkerPool，team-spec §6.4）。四个实例：
  * <ul>
  *   <li>{@value #WORKER}：处理客户端请求（等 Redis 结果、读 MySQL 都在这里，不占 Dubbo 线程，AGENTS.md §3）；</li>
  *   <li>{@value #PUSH}：提交后的推送批（展示资料要读 MySQL，所以允许阻塞），不与请求争线程；</li>
+ *   <li>team-scene-signal：提交后的 scene 刷新提示，定位/RPC 故障不占客户端推送的线程与预算；</li>
  *   <li>{@value #MATCH_END}：整队开战加锁之后的收尾（清开战锁、退票；match-spec §7.6）。一次收尾最坏阻塞锁时长 + 3.2 s（5 人 104.2 s；Redis 持续故障时的
  *       EndMatch 循环），所以既不能占请求工作线程，也不能在 Dubbo 的回调线程上做。</li>
  * </ul>

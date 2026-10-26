@@ -35,6 +35,8 @@ class MatchTipsTest {
         EXPECTED.put(MatchTip.JOIN_ALREADY_QUEUED, new Object[] {16001, "已在匹配队列中"});
         EXPECTED.put(MatchTip.JOIN_MODE_NOT_OPEN, new Object[] {16002, "该匹配模式未开放"});
         EXPECTED.put(MatchTip.JOIN_TEAM_SIZE_NOT_CONFIGURED, new Object[] {16003, "该副本未开放组队"});
+        EXPECTED.put(MatchTip.JOIN_TEAM_SIZE_OVER_LIMIT, new Object[] {16002, "该副本不支持这个队伍人数"});
+        EXPECTED.put(MatchTip.JOIN_TEAM_SIZE_REQUIRES_GLOBAL, new Object[] {16002, "该匹配模式暂不支持指定人数"});
         EXPECTED.put(MatchTip.JOIN_NOT_IN_SCENE, new Object[] {16020, "请先进入场景"});
         EXPECTED.put(MatchTip.CHALLENGE_SELF, new Object[] {16007, "不能挑战自己"});
         EXPECTED.put(MatchTip.CHALLENGE_SELF_BUSY, new Object[] {16010, "战斗尚未结束,无法发起切磋"});

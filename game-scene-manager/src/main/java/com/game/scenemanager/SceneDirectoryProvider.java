@@ -165,7 +165,8 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
 
     /**
      * 在线换图选跨节点目标（scene-handoff-spec §5.4）。业务拒绝（无场景 / 排空中 / 参数错）是正常应答；
-     * 目录或预占存储不可用时 future 以异常完成（scene 推 23 {1003}），异常同样只带概要。
+     * 手动切线预检读失败返回普通业务拒绝（scene 推 23 {3023}）；其它目录或预占存储不可用时
+     * future 以异常完成（scene 推 23 {3028}），异常同样只带概要。
      */
     @Override
     public CompletableFuture<SelectSwitchTargetResponse> selectSwitchTarget(SelectSwitchTargetRequest request) {

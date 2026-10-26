@@ -46,6 +46,18 @@ class RobotMainTest {
     }
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void 续移植探针连不上入口时明确失败_不误报或跳过() throws Exception {
+        int port = closedPort();
+        Run channel = run("channel-smoke", port);
+        assertThat(channel.exit()).isEqualTo(RobotMain.EXIT_FAIL);
+        assertThat(channel.lastLine()).startsWith("CHANNEL_SMOKE_FAIL step=C1-login");
+        Run sizes = run("pve-team-size", port);
+        assertThat(sizes.exit()).isEqualTo(RobotMain.EXIT_FAIL);
+        assertThat(sizes.lastLine()).startsWith("PVE_TEAM_SIZE_FAIL");
+    }
+
+    @Test
     @Timeout(value = 120, unit = TimeUnit.SECONDS)
     void 匹配类三个子命令与team_连不上服务端时退出码1_报告之后的最后一行是结果行() throws Exception {
         int port = closedPort();

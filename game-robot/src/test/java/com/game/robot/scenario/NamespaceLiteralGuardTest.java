@@ -120,6 +120,8 @@ class NamespaceLiteralGuardTest {
             Map.entry("game-scene/src/main/java/com/game/scene/transfer/SceneManagerSwitchTargets.java", Set.of("game-scene-switch")),
             // 持久收件箱双方的NodeRpcClients隔离Dubbo应用名；不是Kafka topic/消费组/client.id，按文件精确登记。
             Map.entry("game-inbox/src/main/java/com/game/inbox/InboxConfiguration.java", Set.of("game-inbox-scene")),
+            // 组队成员变更的 scene 通知客户端应用名；不是共享中间件名称。
+            Map.entry("game-team/src/main/java/com/game/team/TeamConfiguration.java", Set.of("game-team-scene")),
             Map.entry("game-scene/src/main/java/com/game/scene/inbox/DubboInboxTransport.java", Set.of("game-scene-inbox")),
             Map.entry("game-battle/src/main/java/com/game/battle/admin/DevGatherConfiguration.java", Set.of("game-battle-dev-gather")),
             Map.entry("game-battle/src/main/java/com/game/battle/port/scene/SceneTransport.java", Set.of("game-battle-scene")),

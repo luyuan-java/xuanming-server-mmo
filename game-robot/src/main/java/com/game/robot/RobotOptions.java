@@ -11,6 +11,7 @@ import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.BattleSettleScenario;
 import com.game.robot.scenario.BattleSmokeScenario;
 import com.game.robot.scenario.ChatScenario;
+import com.game.robot.scenario.ChannelScenario;
 import com.game.robot.scenario.CrossNodeScenario;
 import com.game.robot.scenario.CrossZoneGate;
 import com.game.robot.scenario.CurrencyScenario;
@@ -28,6 +29,7 @@ import com.game.robot.scenario.MirrorScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.OrderingScenario;
 import com.game.robot.scenario.PetScenario;
+import com.game.robot.scenario.PveTeamSizeScenario;
 import com.game.robot.scenario.RateLimitScenario;
 import com.game.robot.scenario.ReconnectScenario;
 import com.game.robot.scenario.RollbackScenario;
@@ -89,6 +91,7 @@ public record RobotOptions(
         String sceneMetricsUrl,
         String sceneAdminUrl,
         boolean afkProbe,
+        boolean teamRegroupProbe,
         String tableDir,
         String tradeAdminUrl,
         MarketScope tradeScope,
@@ -159,6 +162,10 @@ public record RobotOptions(
         MATCH_ACTIVITY,
         /** 5V5 排队成局与蛇形分队（批次 6.4，match-spec §15.5「match-5v5」，可选，10 个新号）；子命令写作 {@code match-5v5}。 */
         MATCH_5V5,
+        /** PVE 人数档、全球网络探测与按人数缩放的客户端验收。 */
+        PVE_TEAM_SIZE,
+        /** 主动切线目录、稳定线号与成功后冷却。 */
+        CHANNEL_SMOKE,
         /**
          * 跨 zone 传送往返（批次 5.4，zone-travel-spec §11.11）；需要 {@code GAME_ZONES=2} 的切片。从 {@code --zone} 发 226 传送到
          * {@code --visit-zone}、跟随 124、严格重登，停留后再传送回来；附加选项 {@code --dwell-ms / --travel-scene-config}
@@ -239,6 +246,8 @@ public record RobotOptions(
         SLOW("slow", "GAME_ROBOT_SLOW", "false",
                 "也跑慢用例——battle-edge：连上不握手 10 ± 1 s 被关；battle-settle：备战到期、离线结算等满 130 s 重投窗口；"
                         + "写 --slow 即 true，也接受 --slow true / false"),
+        TEAM_REGROUP_PROBE("team-regroup-probe", "GAME_ROBOT_TEAM_REGROUP_PROBE", "false",
+                "team：在单scene节点用dev瞬移布置位置，验证入队跟随和显式归队；须运维令牌和 --expect-dev allow"),
         CRASH_WINDOW("crash-window", "GAME_ROBOT_CRASH_WINDOW", "none",
                 "battle-settle 的故障变体（scene-battle-spec §13.8，由 tools/local/battle-crash-window.sh 编排 kill -9 与重启）：none（跑完整场景）/ "
                         + "scene-after-150（大厅收到 150 后 kill scene）/ battle-after-store（结算落库后、大厅 150 之前 kill battle）"),
@@ -254,7 +263,7 @@ public record RobotOptions(
 
         /** 布尔开关：命令行可以只写 {@code --名字}（下一个参数不是 true / false 时不吃掉它）。 */
         boolean isFlag() {
-            return this == SLOW || this == AFK_PROBE;
+            return this == SLOW || this == AFK_PROBE || this == TEAM_REGROUP_PROBE;
         }
 
         final String arg;
@@ -388,6 +397,13 @@ public record RobotOptions(
         }
         String sceneAdminUrl = sceneAdminUrl(given, env);
         String afkProbe = value(Opt.AFK_PROBE, given, env);
+        String teamRegroupProbe = value(Opt.TEAM_REGROUP_PROBE, given, env);
+        if (!teamRegroupProbe.equals("true") && !teamRegroupProbe.equals("false")) {
+            throw new UsageException("--team-regroup-probe 只能是 true / false：" + teamRegroupProbe);
+        }
+        if (scenario == Scenario.TEAM && teamRegroupProbe.equals("true") && !expectDev.equals("allow")) {
+            throw new UsageException("--team-regroup-probe 必须使用 --expect-dev allow");
+        }
         if (!afkProbe.equals("true") && !afkProbe.equals("false")) {
             throw new UsageException("--afk-probe 只能是 true / false：" + afkProbe);
         }
@@ -431,6 +447,8 @@ public record RobotOptions(
             case BATTLE_CROSS_ZONE -> BattleCrossZoneScenario.accountName(prefix, runTag, "a");
             case MATCH_ACTIVITY -> MatchActivityScenario.accountName(prefix, runTag, "a");
             case MATCH_5V5 -> Match5v5Scenario.accountName(prefix, runTag, Match5v5Scenario.PLAYERS - 1);
+            case PVE_TEAM_SIZE -> PveTeamSizeScenario.accountName(prefix, runTag, 4);
+            case CHANNEL_SMOKE -> ChannelScenario.accountName(prefix, runTag);
             case TRAVEL, TRAVEL_ABANDON, TRAVEL_LONG -> TravelScenario.accountName(prefix, runTag, "a");
             case ORDERING_SMOKE -> OrderingScenario.accountName(prefix, runTag, "gl");
         };
@@ -442,7 +460,7 @@ public record RobotOptions(
                 millis(Opt.CONNECT_TIMEOUT, given, env), millis(Opt.REQUEST_TIMEOUT, given, env),
                 millis(Opt.ENTER_SCENE_TIMEOUT, given, env), millis(Opt.OBSERVE_TIMEOUT, given, env),
                 expectJump, expectGm.equals("allow"), stripSlash(value(Opt.DATA_URL, given, env)),
-                stripSlash(value(Opt.SCENE_METRICS_URL, given, env)), sceneAdminUrl, afkProbe.equals("true"),
+                stripSlash(value(Opt.SCENE_METRICS_URL, given, env)), sceneAdminUrl, afkProbe.equals("true"), teamRegroupProbe.equals("true"),
                 value(Opt.TABLE_DIR, given, env), tradeAdminUrl,
                 tradeScope, battleAdminUrl, matchAdminUrl, expectDev.equals("allow"), slow.equals("true"), password);
     }
@@ -450,7 +468,7 @@ public record RobotOptions(
     /** 帮助文本。 */
     public static String usage() {
         StringBuilder out = new StringBuilder();
-        out.append("用法：java -jar game-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|battle-smoke|battle-cross-zone|match-activity|match-5v5|travel|travel-abandon|travel-long|ordering-smoke|team> [选项]\n");
+        out.append("用法：java -jar game-robot.jar <smoke|movement|currency|attribute|audit|guard|bag|features|skill|pet|token|reconnect|zones|queue|ratelimit|drain|friend|chat|killswitch|guild|guild-economy|trade|rollback|cross-node|mirror|dungeon|battle|battle-edge|battle-settle|battle-smoke|battle-cross-zone|match-activity|match-5v5|pve-team-size|channel-smoke|travel|travel-abandon|travel-long|ordering-smoke|team> [选项]\n");
         out.append("  smoke     N 个账号：登录 → 没角色就建角 → 进游戏 → 79 → ListSkills 非空 → 断开\n");
         out.append("  movement  单scene节点：行走133（66旁证）→重登朝向→管理口瞬移130→超速跳跃；需GAME_ADMIN_TOKEN或run/game-admin-token，--afk-probe可选\n");
         out.append("  currency  新号查余额（54）；GM 加 / 扣 / 封禁 / 解封（37/49/94/95）后重登核对余额，"
@@ -576,6 +594,8 @@ public record RobotOptions(
                 + "MEMBER_OFFLINE（offender = 该账号）→ 名单 [A, B] 受理、battle_id ≠ 0、两人收到同一局的 177 / 143 → 战斗中再发 "
                 + "MEMBER_IN_BATTLE → 两人直连挂机打完；guild_id / activity_id 用不存在的值；"
                 + "结尾写 MATCH_ACTIVITY_OK … 或 MATCH_ACTIVITY_FAIL step=… reason=…\n");
+        out.append("  channel-smoke 一个新号，经43/31查目录，63/79切线，核对稳定线号、当前线3008与冷却3023/过期恢复及拒绝不续期；单线明确SKIP。完整冷却验收需两条可选世界线和10–60秒冷却（默认10）；短冷却或慢链路窗口不足为cooldown=skipped，0秒为disabled，不用dev管理口。\n");
+        out.append("  pve-team-size 五个新号，经全球 SQL 匹配与真实网络探测校验人数档：0 默认 5、超限拒绝、不同档隔离、取消重排、两人四怪、单人两怪；需要 PVE 配置 1 每人两只怪，不用 dev 开战。\n");
         out.append("  match-5v5 5V5 排队（10 个新号，可选；前置同 battle-smoke）：按次序逐个 157 {mode = 1} 受理 → 十人收到同一个 battle_id 的 "
                 + "177 / 143 → 评分相同按入队次序蛇形分队 0,1,1,0,0,1,1,0,0,1 → 全员直连挂机打到 150 → 评分查询每人 games + 1；"
                 + "结尾写 MATCH_5V5_OK … 或 MATCH_5V5_FAIL step=… reason=…\n");
@@ -636,7 +656,7 @@ public record RobotOptions(
         try {
             return Scenario.valueOf(arg.toUpperCase(Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle / battle-smoke / battle-cross-zone / match-activity / match-5v5 / travel / travel-abandon / travel-long / ordering-smoke）");
+            throw new UsageException("未知子命令：" + arg + "（只有 smoke / movement / currency / attribute / audit / guard / bag / features / skill / pet / token / reconnect / zones / queue / ratelimit / drain / friend / chat / killswitch / team / guild / guild-economy / trade / rollback / cross-node / mirror / dungeon / battle / battle-edge / battle-settle / battle-smoke / battle-cross-zone / match-activity / match-5v5 / pve-team-size / channel-smoke / travel / travel-abandon / travel-long / ordering-smoke）");
         }
     }
 

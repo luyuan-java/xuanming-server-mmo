@@ -171,6 +171,12 @@ public final class QueueService {
             if (props.pveTeamSizeFor(configId) == 0) {
                 return rejected(mode, JoinOutcome.NO_TEAM_SIZE, MatchTip.JOIN_TEAM_SIZE_NOT_CONFIGURED);
             }
+            if (Integer.compareUnsigned(request.getTeamSize(), props.pveTeamSizeFor(configId)) > 0) {
+                return rejected(mode, JoinOutcome.TEAM_SIZE_OVER_LIMIT, MatchTip.JOIN_TEAM_SIZE_OVER_LIMIT);
+            }
+            if (request.getTeamSize() != 0 && request.getTeamSize() != props.pveTeamSizeFor(configId)) {
+                return rejected(mode, JoinOutcome.MODE_NOT_OPEN, MatchTip.JOIN_TEAM_SIZE_REQUIRES_GLOBAL);
+            }
         } else if (!MatchModes.joinable(mode)) {
             return rejected(mode, JoinOutcome.MODE_NOT_OPEN, MatchTip.JOIN_MODE_NOT_OPEN);
         }

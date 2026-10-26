@@ -108,6 +108,8 @@ final class RollbackHarness implements AutoCloseable {
         UnaryOperator<OpsJobStore> jobs = UnaryOperator.identity();
         /** 只换写事务（{@link RollbackWriter}）用的流水 Mapper；回收逆转检查读流水走的仍是真实的。 */
         UnaryOperator<TransactionLogMapper> writerTxlog = UnaryOperator.identity();
+        /** 只包写事务的提交边界，允许真实提交后模拟确认丢失。 */
+        UnaryOperator<org.springframework.transaction.PlatformTransactionManager> writerTransactions = UnaryOperator.identity();
     }
 
     RollbackHarness(Map<String, String> overrides, boolean guildConfigured, Seams seams) throws Exception {
@@ -135,7 +137,9 @@ final class RollbackHarness implements AutoCloseable {
         }, metrics);
         GuildDivergenceGate guild = new GuildDivergenceGate(guildConfigured ? this::guild : null, Duration.ofSeconds(2));
         RollbackWriter writer = new RollbackWriter(store, db.playerMapper, db.players, db.snapshots,
-                seams.writerTxlog.apply(db.txlog), jobs, ids, db.tx(), json, Clock.systemUTC());
+                seams.writerTxlog.apply(db.txlog), jobs, ids,
+                new org.springframework.transaction.support.TransactionTemplate(seams.writerTransactions.apply(db.transactionManager)),
+                json, Clock.systemUTC());
         BattleLockGate battleLocks = new BattleLockGate(this::readBattleLocks, props.ops().battleLockWait());
         deps = new RollbackJob.Deps(new RollbackPlanner(db.players, db.snapshots), writer, ownership, guild, battleLocks,
                 db.players, db.snapshots, new TransactionLogQueryService(db.txlog, Duration.ofDays(7)), jobs, props, metrics,

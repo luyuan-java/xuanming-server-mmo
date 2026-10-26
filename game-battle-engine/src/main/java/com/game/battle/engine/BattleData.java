@@ -52,6 +52,14 @@ public interface BattleData {
      */
     List<Integer> dungeonMonsterIds(int dungeonTableId);
 
+    /**
+     * 每名进攻方玩家对应的怪物只数（uint32）：0 保留固定阵容；生产按副本完整怪物组返回。
+     * 测试替身默认 0，以保持手工固定阵容的回放；生产取值另由真实配置表契约测试验证。
+     */
+    default int dungeonMonstersPerPlayer(int dungeonTableId) {
+        return 0;
+    }
+
     /** 技能伤害公式 {@code Skill.damage}，参数 {@code level = casterLevel}（{@code GetSkillDamage}）。引擎只在查到行之后调用。 */
     double skillDamage(int skillTableId, double casterLevel);
 

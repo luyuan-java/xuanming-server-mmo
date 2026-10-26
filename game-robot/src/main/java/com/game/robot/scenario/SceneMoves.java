@@ -20,6 +20,7 @@ import com.game.robot.flow.EnteredPlayer;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.flow.Timings;
 import com.game.table.CommonErrorTip;
+import com.game.table.SceneErrorTip;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -208,9 +209,14 @@ final class SceneMoves {
 
     /** 发 43（应答是 Empty 不回包），等 scene 改推的 31；超时抛出。 */
     SceneInfoS2C querySceneInfo(ProbeBot bot, String label) throws RobotException {
+        return querySceneInfo(bot, label, false);
+    }
+
+    /** 主动切线目录为显式选项；旧探针仍走不带目录的零额外读取路径。 */
+    SceneInfoS2C querySceneInfo(ProbeBot bot, String label, boolean withDirectory) throws RobotException {
         GameConnection connection = bot.connection();
         int mark = connection.inbox().size();
-        connection.send(sceneInfoC2S, SceneInfoRequest.getDefaultInstance());
+        connection.send(sceneInfoC2S, SceneInfoRequest.newBuilder().setWithChannelDirectory(withDirectory).build());
         Received pushed = connection.await(mark, r -> r.messageId() == notifySceneInfo, requestTimeout)
                 .orElseThrow(() -> new RobotException(label + "：发 43 之后 " + requestTimeout.toMillis() + " ms 内没收到 31"
                         + connection.describeSince(mark)));
@@ -274,13 +280,14 @@ final class SceneMoves {
 
     // ------------------------------------------------------------------ 内部
 
-    /** 异步失败的 23：取号调用失败 1003，或拒绝 / 结果作废 3023。 */
+    /** 异步失败的23：兼容旧1003，当前内部调用未确认3028，或业务拒绝/结果作废3023。 */
     private boolean isAsyncFailure(Received r) {
         if (r.messageId() != ids.sendTip()) {
             return false;
         }
         int tip = CrossNodeScenario.tipId(r);
-        return tip == SERVICE_UNAVAILABLE || tip == InstanceChecks.ENTER_FAILED;
+        return tip == SERVICE_UNAVAILABLE || tip == InstanceChecks.ENTER_FAILED
+                || tip == SceneErrorTip.scene_error.kEnterSceneServerBusy_VALUE;
     }
 
     private void pace(GameConnection connection, int count) throws RobotException {

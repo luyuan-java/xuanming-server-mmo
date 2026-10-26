@@ -170,7 +170,7 @@ public record DataProperties(
      *
      * @param settle          帮会检查前的沉降等待（基线常量 30 s，Q6：缺省与基线一致、做成配置）
      * @param recheckDelay    写后复查前的等待
-     * @param recheckBudget   写后复查的预算
+     * @param recheckBudget   写后复查的预算（必须至少覆盖 checkBudget，避免初查完成却因更短预算复查失败）
      * @param clockSkewMargin 检查起点 = 快照内容时刻 − 余量（钳到 ≥ 1）；合法区间 [5 s, 1 h]
      * @param checkBudget     一次检查的预算（缺省 120 s，上限 1 h）
      * @param callTimeout     单次 Dubbo 调用的上限（再受剩余预算约束）
@@ -191,9 +191,11 @@ public record DataProperties(
             if (settle.isNegative() || recheckDelay.isNegative() || recheckBudget.isNegative() || recheckBudget.isZero()
                     || clockSkewMargin.compareTo(MIN_MARGIN) < 0 || clockSkewMargin.compareTo(MAX_MARGIN) > 0
                     || checkBudget.isNegative() || checkBudget.isZero() || checkBudget.compareTo(MAX_BUDGET) > 0
-                    || recheckBudget.compareTo(MAX_BUDGET) > 0 || callTimeout.isNegative() || callTimeout.isZero()) {
+                    || recheckBudget.compareTo(MAX_BUDGET) > 0 || recheckBudget.compareTo(checkBudget) < 0
+                    || callTimeout.isNegative() || callTimeout.isZero()) {
                 throw new IllegalArgumentException("game.data.rollback.guild 配置非法（clock-skew-margin ∈ [5s, 1h]，"
-                        + "check-budget / recheck-budget ∈ (0, 1h]，settle / recheck-delay ≥ 0，call-timeout > 0）");
+                        + "check-budget / recheck-budget ∈ (0, 1h]，recheck-budget ≥ check-budget，"
+                        + "settle / recheck-delay ≥ 0，call-timeout > 0）");
             }
         }
     }

@@ -356,7 +356,10 @@ public class SceneNode implements SmartLifecycle {
             if (renewer != null) {
                 renewer.renewSoon(owned);
             }
-        }, settings.switchResolveTimeout(), settings.transferTombstoneTtl());
+        }, settings.switchResolveTimeout(), settings.transferTombstoneTtl(),
+                new com.game.scene.transfer.SharedPlayerChannels(zoneId,
+                        new com.game.discovery.world.RedissonWorldChannelDirectoryStore(redis, redisKeys),
+                        new com.game.discovery.world.RedissonChannelSwitchCooldown(redis, redisKeys), storageExecutor, logic));
         // 跨 zone 传送（批次 5.4，zone-travel-spec §5.5）：选目标复用同一个 scene-manager 客户端；受理前的在队检查与组队跟随共用成员关系的读口。
         // 两个时限与 63 共用配置键，但装配记录各带各的——226 不依赖跨节点换图是否启用
         ZoneTravel zoneTravel = new ZoneTravel(zoneId, switchTargets, new TravelTeamChecks(teamMemberships::readAsync, logic),
@@ -517,6 +520,7 @@ public class SceneNode implements SmartLifecycle {
 
         // 资产通道导出：成功之后才把 rpc 地址写进目录（调用方只从目录找它，guild-economy-spec §4.6 第 6 条）；端口被占 / 缺 GAME_DUBBO_SECRET 拒绝启动
         SceneRpcServer rpc = SceneRpcServer.export(assetProvider, battleProvider, new SceneInboxProvider(() -> inboxService, instanceId, logic),
+                new com.game.scene.team.SceneTeamProvider(() -> sceneWorld, instanceId, logic),
                 props.advertiseHost(), settings.assetRpcPort());
         assetRpc = rpc;
 
@@ -752,10 +756,11 @@ public class SceneNode implements SmartLifecycle {
                 int count = w.shutdown();
                 g.closeAll();
                 return count;
-            }, transfers, finals, repo==null?()->0:repo::undeliveredFinalResults,
+            }, transfers, finals, repo==null?()->0:repo::undeliveredFinalResults,repo==null?()->0:repo::writeFailures,
                     storage, props.scene().shutdownSaveTimeout(), approxPlayers::get, System::nanoTime);
-            log.info("停服写回 已执行={} 人数={} 丢弃存储任务={} 未登记最终快照={} 未送达最终结果={} clean={}", result.writeBackRan(),
-                    result.playersSubmitted(),result.droppedTasks(),result.unregisteredFinals(),result.undeliveredFinalResults(),result.clean());
+            log.info("停服写回 已执行={} 人数={} 丢弃存储任务={} 未登记最终快照={} 未送达最终结果={} 仓储累计写失败={} clean={}", result.writeBackRan(),
+                    result.playersSubmitted(),result.droppedTasks(),result.unregisteredFinals(),result.undeliveredFinalResults(),
+                    result.storageWriteFailures(),result.clean());
         } else if (storage != null) {
             storage.shutdownNow();
         }

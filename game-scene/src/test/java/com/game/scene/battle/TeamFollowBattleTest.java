@@ -9,6 +9,7 @@ import com.game.discovery.proto.TeamInfo;
 import com.game.discovery.team.TeamMembership;
 import com.game.player.store.state.PlayerState;
 import com.game.proto.BattleSettlementData;
+import com.game.proto.TeleportS2C;
 import com.game.scene.battle.BattleFreeze.Phase;
 import com.game.scene.team.TeamFollowService;
 import com.game.scene.testing.FakeBattleLocks.Call;
@@ -163,11 +164,18 @@ class TeamFollowBattleTest {
         });
         lockReadOverrides.put(1005L, id -> CompletableFuture.completedFuture(null));
         lockReadOverrides.put(1006L, id -> null);
-        team(LEADER, LEADER, MEMBER, 1003, 1004, 1005, 1006);
+        team(LEADER, LEADER, MEMBER, 1003, 1004, 1005);
+        // 成员关系权威最多 5 人；第四种失败放到第二支合法队伍，保留所有失败与正常对照断言。
+        long secondLeader = 1007;
+        TeamInfo second = TeamInfo.newBuilder().setTeamId(TEAM + 1).setLeaderId(secondLeader)
+                .addMembers(secondLeader).addMembers(1006).build();
+        memberships.put(secondLeader, new TeamMembership(TEAM + 1, 5, false, second));
+        memberships.put(1006L, new TeamMembership(TEAM + 1, 5, false, second));
         lockReads.clear();
 
         enterLeader(f.scene2);
 
+        f.enter(MEMBER_SESSION + 5, secondLeader, 1, f.scene2, PlayerState.getDefaultInstance());
         assertThat(failed.scene()).as("读锁异常完成：按在途").isSameAs(f.scene1);
         assertThat(thrown.scene()).as("读锁同步抛出：按在途").isSameAs(f.scene1);
         assertThat(noAnswer.scene()).as("读回来是 null（没问到结论）：按在途").isSameAs(f.scene1);
@@ -254,7 +262,7 @@ class TeamFollowBattleTest {
      * 结算应用后解冻（锁续到落盘）：那次检查读到锁而放弃；等存盘落库、销账脚本<b>真的放掉了锁</b>（位 2）才补上跟随。
      */
     @Test
-    void 结算应用后保留锁的解冻不补_存盘落库销账放锁后才补上跟随() {
+    void 结算应用后保留锁的解冻不补_存盘落库销账放锁后才补上跟随() throws Exception {
         ScenePlayer member = memberInBattleWithLeaderElsewhere(Phase.FIGHTING);
 
         CompletableFuture<SceneBattleReply> reply = f.deliver(BattleFixture.settlement(MEMBER, X, 100).build());
@@ -274,11 +282,22 @@ class TeamFollowBattleTest {
         assertThat(f.locks.count(Op.ACK)).isEqualTo(1);
         assertThat(f.locks.lock(MEMBER)).as("销账放掉了锁").isNull();
         assertThat(f.acks("persisted", "released")).isEqualTo(1);
-        assertThat(checks).as("放锁后补一次（被拉过去后进场钩子再查一次，已同场景）").containsExactly(MEMBER, MEMBER);
+        assertThat(checks).as("补读未刷新的队长后重验自己，换场后再检查").containsExactly(MEMBER, LEADER, MEMBER, MEMBER);
         assertThat(member.scene()).as("补上了跟随").isSameAs(f.scene2);
         assertThat(follow("followed")).isEqualTo(1);
-        assertThat(follow("same_scene")).isEqualTo(1);
+        // 跨地图先落出生点，距队长超过 8 米：4.3b 的再次检查须继续瞬移归队。
+        assertThat(follow("regrouped")).isEqualTo(1);
+        assertThat(follow("same_scene")).isZero();
         assertThat(follow("battle_lock")).isEqualTo(1);
+        ScenePlayer leader = f.world.playerById(LEADER);
+        assertThat(member.position()).isEqualTo(leader.position());
+        assertThat(f.world.mutuallyVisible(member, leader)).isTrue();
+        var teleports = f.pushes(member, 130);
+        assertThat(teleports).as("销账后的归队只发一次瞬移").hasSize(1);
+        TeleportS2C teleport = TeleportS2C.parseFrom(teleports.getFirst().getSerializedMessage());
+        assertThat(teleport.getReason()).isEqualTo(5);
+        assertThat(teleport.getEntity()).isEqualTo(member.entity());
+        assertThat(teleport.getTransform().getLocation()).isEqualTo(leader.position().toProto());
     }
 
     /**
@@ -439,7 +458,7 @@ class TeamFollowBattleTest {
 
         assertThat(staleAck.lastReply()).as("旧实例的销账删了记录、放了锁").isEqualTo(3L);
         assertThat(f.locks.lock(MEMBER)).isNull();
-        assertThat(checks).as("给现任实例补一次（被拉过去后进场钩子再查一次，已同场景）").containsExactly(MEMBER, MEMBER);
+        assertThat(checks).as("给现任实例补读队长后重验自己，换场后再检查").containsExactly(MEMBER, LEADER, MEMBER, MEMBER);
         assertThat(fresh.scene()).as("新实例跟到了队长的场景").isSameAs(f.scene2);
         assertThat(follow("followed")).isEqualTo(1);
         assertThat(follow("battle_lock")).as("这次读到的是「没有锁」").isEqualTo(lockedBefore);
@@ -475,7 +494,7 @@ class TeamFollowBattleTest {
         assertThat(delete.lastReply()).isEqualTo(BattleRedis.PREPARING_DELETE_DONE);
         assertThat(cancelled).isCompleted();
         assertThat(f.locks.lock(MEMBER)).isNull();
-        assertThat(checks).as("给现任实例补一次（被拉过去后进场钩子再查一次，已同场景）").containsExactly(MEMBER, MEMBER);
+        assertThat(checks).as("给现任实例补读队长后重验自己，换场后再检查").containsExactly(MEMBER, LEADER, MEMBER, MEMBER);
         assertThat(fresh.scene()).as("新实例跟到了队长的场景").isSameAs(f.scene2);
         assertThat(follow("followed")).isEqualTo(1);
         assertThat(follow("battle_lock")).as("这次读到的是「没有锁」").isEqualTo(1);

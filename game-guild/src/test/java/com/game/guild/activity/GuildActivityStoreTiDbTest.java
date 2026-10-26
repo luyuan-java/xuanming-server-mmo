@@ -431,7 +431,7 @@ class GuildActivityStoreTiDbTest {
         assertEquals(2, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE request_id=? AND state=1", launch.lobby()));
         assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
         exec("UPDATE guild_trial_lobby SET guild_id=?,battle_id=? WHERE lobby_id=?", GUILD, 9113L, launch.lobby());
-        assertThrows(SQLException.class, () -> store.poisonBattle(9112, "fixture", 1, 8, new byte[] {1}, NOW + 2001, budget()));
+        assertThrows(SQLException.class, () -> store.poisonBattle(9112, "fixture", 1, 8, result(launch, 9112, NOW + 1000).toByteArray(), NOW + 2001, budget()));
         assertEquals(2, count("SELECT state FROM guild_trial_launch WHERE request_id=?", launch.lobby()));
         assertEquals(1, count("SELECT state FROM guild_trial_battle WHERE battle_id=9112"));
         assertEquals(2, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE request_id=? AND state=1", launch.lobby()));
@@ -439,11 +439,15 @@ class GuildActivityStoreTiDbTest {
     }
 
     private GuildTrialCancellation.Verified cancelProof(GuildActivityStore.Launch launch,long battle,int state,boolean cancelled) {
+        return cancelProof(launch, battle, state, cancelled, com.game.proto.match.BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_UNKNOWN);
+    }
+    private GuildTrialCancellation.Verified cancelProof(GuildActivityStore.Launch launch,long battle,int state,boolean cancelled,
+            com.game.proto.match.BattleOutcomeDecision decision) {
         String secret = "guild-trial-tidb-fixture-000000000000000001";
         var signer = new GuildTrialCancellation(secret,() -> NOW);
         var request = signer.request(launch.request());
         var response = ServiceCallSignatures.sign(GuildTrialCancellation.METHOD + "/reply",CancelActivityBattleResponse.newBuilder()
-                .setBattleId(battle).setFormationState(state).setRequestCancelled(cancelled)
+                .setBattleId(battle).setFormationState(state).setRequestCancelled(cancelled).setTerminalDecision(decision)
                 .setRequestDigest(ServiceCallSignatures.digest(request)).build(),"match",secret,NOW);
         return signer.verify(request,response);
     }
@@ -481,7 +485,7 @@ class GuildActivityStoreTiDbTest {
     void POISON终结原件但不发奖励_终结后欠发物与真实op各自继续保护() throws Exception {
         var launch = readyLaunch(NOW);
         store.completeLaunch(launch,StartActivityBattleResponse.newBuilder().setBattleId(9104).build(),NOW+3,budget());
-        store.poisonBattle(9104,"fixture",1,8,new byte[]{1},NOW+4,budget());
+        store.poisonBattle(9104,"fixture",1,8,result(launch,9104,NOW+4).toByteArray(),NOW+4,budget());
         assertEquals(2,count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=2"));
         assertEquals(0,count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
         assertEquals(4,count("SELECT state FROM guild_trial_battle WHERE battle_id=9104"));
@@ -514,7 +518,7 @@ class GuildActivityStoreTiDbTest {
     void POISON后角色修订变化不阻塞重复毒消息归档_原件和终局投影保持() throws Exception {
         var launch = readyLaunch(NOW);
         store.completeLaunch(launch,StartActivityBattleResponse.newBuilder().setBattleId(9106).build(),NOW+3,budget());
-        store.poisonBattle(9106,"fixture",1,8,new byte[]{1},NOW+4,budget());
+        store.poisonBattle(9106,"fixture",1,8,result(launch,9106,NOW+4).toByteArray(),NOW+4,budget());
         exec("UPDATE player SET owner_revision=8 WHERE player_id=?",PLAYER);
         var event = result(launch,9106,NOW+5);
         assertThrows(GuildActivityStore.InvalidResult.class,() -> store.settle(event,NOW+6,budget()));
@@ -613,6 +617,89 @@ class GuildActivityStoreTiDbTest {
         assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
         assertEquals(0, count("SELECT SUM(contribution_balance) FROM guild_member"));
         assertEquals(0, count("SELECT funds FROM guild WHERE guild_id=?", GUILD));
+    }
+
+    @Test
+    void COMPLETE取消回执不能绑定或终结原件_仍等真实战报() throws Exception {
+        var launch = readyLaunch(NOW);
+        var complete = cancelProof(launch, 9120, 5, false,
+                com.game.proto.match.BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE);
+        assertFalse(complete.terminal());
+        assertThrows(SQLException.class, () -> store.completeCancellation(launch, complete, NOW + 3, budget()));
+        assertEquals(1, count("SELECT state FROM guild_trial_launch WHERE request_id=?", launch.lobby()));
+        assertEquals(0, count("SELECT COUNT(*) FROM guild_trial_battle"));
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=1"));
+        store.completeLaunch(launch, StartActivityBattleResponse.newBuilder().setBattleId(9120).build(), NOW + 4, budget());
+        assertThrows(SQLException.class, () -> store.completeCancellation(launch, complete, NOW + 5, budget()));
+        assertEquals(1, count("SELECT state FROM guild_trial_battle WHERE battle_id=9120"));
+        store.settle(result(launch, 9120, NOW + 6), NOW + 7, budget());
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
+    }
+
+    @Test
+    void 残缺和畸形战报不能经结算或隔离解除ACTIVE_原件随后可正常结算() throws Exception {
+        var launch = readyLaunch(NOW);
+        store.completeLaunch(launch, StartActivityBattleResponse.newBuilder().setBattleId(9121).build(), NOW + 3, budget());
+        var valid = result(launch, 9121, NOW + 4);
+        for (var invalid : List.of(valid.toBuilder().clearFinishedAtMs().build(), valid.toBuilder().clearOutcome().build(),
+                valid.toBuilder().setOutcomeValue(99).build(), valid.toBuilder().clearTeams().build(),
+                valid.toBuilder().addDeadPlayerIds(999).build(), valid.toBuilder().addDeadPlayerIds(PLAYER).addDeadPlayerIds(PLAYER).build(),
+                valid.toBuilder().addFledPlayerIds(999).build(), valid.toBuilder().addFledPlayerIds(PLAYER).addFledPlayerIds(PLAYER).build())) {
+            assertThrows(GuildActivityStore.UnprovenResult.class, () -> store.settle(invalid, NOW + 5, budget()));
+            assertThrows(GuildActivityStore.UnprovenResult.class,
+                    () -> store.poisonBattle(9121, "fixture", 1, 8, invalid.toByteArray(), NOW + 5, budget()));
+            assertEquals(2, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=1"));
+            assertEquals(1, count("SELECT state FROM guild_trial_battle WHERE battle_id=9121"));
+            assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_result_poison"));
+            assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
+        }
+        assertThrows(GuildActivityStore.UnprovenResult.class,
+                () -> store.poisonBattle(9121, "fixture", 1, 8, new byte[] {(byte) 0x80}, NOW + 5, budget()));
+        store.settle(valid.toBuilder().addDeadPlayerIds(PLAYER).addFledPlayerIds(PARTNER).build(), NOW + 6, budget());
+        assertEquals(1, count("SELECT COUNT(*) FROM guild_activity_reward_owed WHERE player_id=?", PLAYER));
+        assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_reward_owed WHERE player_id=?", PARTNER));
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=2"));
+    }
+
+    @Test
+    void 已验证战报奖励配置损坏可隔离_活动行缺失仍终结且不发奖() throws Exception {
+        var launch = readyLaunch(NOW);
+        store.completeLaunch(launch, StartActivityBattleResponse.newBuilder().setBattleId(9122).build(), NOW + 3, budget());
+        var valid = result(launch, 9122, NOW + 4);
+        var configuredReward = tables.reward().find(1);
+        when(tables.reward().find(1)).thenReturn(Optional.empty());
+        assertThrows(GuildActivityStore.InvalidResult.class, () -> store.settle(valid, NOW + 5, budget()));
+        assertEquals(0, count("SELECT COUNT(*) FROM guild_daily_counter"));
+        assertEquals(0, count("SELECT SUM(contribution_balance) FROM guild_member"));
+        store.poisonBattle(9122, "fixture", 1, 8, valid.toByteArray(), NOW + 6, budget());
+        assertEquals(4, count("SELECT state FROM guild_trial_battle WHERE battle_id=9122"));
+        assertEquals(2, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=2"));
+        assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
+        when(tables.reward().find(1)).thenReturn(configuredReward);
+        var next = readyLaunch(NOW + 20_000);
+        store.completeLaunch(next, StartActivityBattleResponse.newBuilder().setBattleId(9123).build(), NOW + 20_003, budget());
+        when(tables.guildActivity().find(TRIAL)).thenReturn(Optional.empty());
+        store.settle(result(next, 9123, NOW + 20_004), NOW + 20_005, budget());
+        assertEquals(2, count("SELECT state FROM guild_trial_battle WHERE battle_id=9123"));
+        assertEquals(0, count("SELECT COUNT(*) FROM guild_trial_launch_role WHERE state=1"));
+        assertEquals(0, count("SELECT COUNT(*) FROM guild_activity_reward_owed"));
+    }
+
+    @Test
+    void 百条失败巡检推进排序水位_后续候选可被下一轮取到且ACTIVE状态不变() throws Exception {
+        jdbc.tx(budget(), s -> {
+            for (long id = 1; id <= 101; id++)
+                s.update("INSERT INTO guild_trial_battle(battle_id,guild_id,activity_id,context_proto,state,created_ms,result_hash,result_proto,next_inspect_ms) VALUES(?,?,?, ?,1,?,X'',X'',0)",
+                        9200L + id, GUILD, TRIAL, new byte[0], NOW);
+            return null;
+        });
+        var first = store.unsettled(budget(), NOW);
+        assertEquals(100, first.size());
+        for (var battle : first) store.deferBattleInspection(battle.id(), NOW, budget());
+        assertEquals(List.of(9301L), store.unsettled(budget(), NOW).stream().map(GuildActivityStore.Battle::id).toList());
+        assertEquals(101, count("SELECT COUNT(*) FROM guild_trial_battle WHERE state=1"));
+        assertEquals(100, count("SELECT COUNT(*) FROM guild_trial_battle WHERE next_inspect_ms=?", NOW + 30_000));
+        assertEquals(100, store.unsettled(budget(), NOW + 30_000).size());
     }
 
     @Test

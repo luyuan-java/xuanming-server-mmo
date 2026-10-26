@@ -35,7 +35,8 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>只做选择：不铸 epoch、不写位置记录、不碰归属；唯一的副作用是软预占（带 TTL、以 player_id 为成员）。</li>
  *   <li>业务拒绝放在 {@code tip_id}（scene 对客户端一律推 3023，这里的码只进日志与指标）；{@link SceneNodeSource} 与预占存储抛出的基础设施异常
- *       原样上抛，由 Dubbo 提供方转成调用失败（scene 推 1003），不伪装成「无场景」。</li>
+ *       原样上抛，由 Dubbo 提供方转成调用失败（scene 推 3028）；主动切线的纯读预检失败单独归 CHANNEL_READ_ERROR，
+ *       正常业务拒绝（scene 推 3023），所有预检拒绝都发生在预占之前。</li>
  *   <li>无可变状态，线程安全（Dubbo 业务线程并发调用）。</li>
  * </ul>
  */
@@ -51,7 +52,14 @@ public final class SwitchTargetSelector {
         /** 显式场景号在排空中。 */
         DRAINING,
         /** 参数不合法（zone / player 为 0、两个期望号都为 0、显式场景号与期望配置不符）。 */
-        BAD_REQUEST
+        BAD_REQUEST,
+        CHANNEL_CLOSING,
+        CHANNEL_CONF_MISMATCH,
+        CHANNEL_DISABLED,
+        CHANNEL_FULL,
+        CHANNEL_COOLDOWN,
+        CHANNEL_UNAVAILABLE,
+        CHANNEL_READ_ERROR
     }
 
     /** 选择结果：给调用方的应答 + 指标用的结局（应答里 not_found 与 draining 同码，靠这里区分）。 */
@@ -61,11 +69,18 @@ public final class SwitchTargetSelector {
     private final SceneNodeSource source;
     private final WorldSceneConfigs worldConfigs;
     private final ChannelSelector selector;
+    private final ClientChannelPick channelPick;
 
     public SwitchTargetSelector(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector selector) {
+        this(source, worldConfigs, selector, null);
+    }
+
+    public SwitchTargetSelector(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector selector,
+                                ClientChannelPick channelPick) {
         this.source = source;
         this.worldConfigs = worldConfigs;
         this.selector = selector;
+        this.channelPick = channelPick;
     }
 
     public Selection select(SelectSwitchTargetRequest request) {
@@ -83,10 +98,28 @@ public final class SwitchTargetSelector {
             return reject(Result.NOT_FOUND, SceneAssigner.TIP_NO_SCENE);
         }
 
-        List<SceneNodeInfo> nodes = source.list(zoneId).stream().filter(n -> SceneAssigner.isUsable(n, zoneId)).toList();
-        return wantSceneId != 0
+        List<SceneNodeInfo> nodes;
+        int cooldownSeconds = 0;
+        if (request.getClientChannelPick() && wantSceneId != 0) {
+            try {
+                if (channelPick == null) throw new IllegalStateException("主动切线预检未装配");
+                nodes = source.list(zoneId).stream().filter(n -> SceneAssigner.isUsable(n, zoneId)).toList();
+                ClientChannelPick.Verdict verdict = channelPick.check(request, nodes);
+                if (verdict.rejection() != null) return reject(verdict.rejection(), SceneAssigner.TIP_NO_SCENE);
+                cooldownSeconds = verdict.cooldownSeconds();
+            } catch (RuntimeException failure) {
+                log.warn("主动切线预检读取失败，未预占也未写冷却 zone={} player={}: {}", zoneId, playerId, failure.toString());
+                return reject(Result.CHANNEL_READ_ERROR, SceneAssigner.TIP_NO_SCENE);
+            }
+        } else {
+            nodes = source.list(zoneId).stream().filter(n -> SceneAssigner.isUsable(n, zoneId)).toList();
+        }
+        Selection selected = wantSceneId != 0
                 ? selectExplicit(request, nodes)
                 : selectByMap(request, nodes);
+        return selected.result() == Result.OK && cooldownSeconds > 0
+                ? new Selection(Result.OK, selected.response().toBuilder().setSwitchCooldownSeconds(cooldownSeconds).build())
+                : selected;
     }
 
     /** 显式场景号：只认目录里这一个实例，不回落按地图挑。 */

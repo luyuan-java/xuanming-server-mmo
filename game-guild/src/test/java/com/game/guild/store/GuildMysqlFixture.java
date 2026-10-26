@@ -77,6 +77,9 @@ public final class GuildMysqlFixture implements AutoCloseable {
         ds.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         GuildMysqlFixture fixture = new GuildMysqlFixture(database, ds);
         GuildTables.sync(ds, java.time.Duration.ofMinutes(1));
+        var activity = new com.game.pbmysql.PbMysql();
+        activity.register(com.game.guild.activity.pb.ActivityProgressRow.getDefaultInstance());
+        try (var connection = ds.getConnection()) { activity.syncAll(connection); }
         fixture.exec("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,name VARCHAR(64) NOT NULL DEFAULT 'fixture',account VARCHAR(64) NOT NULL DEFAULT 'fixture-account',owner_revision BIGINT UNSIGNED NOT NULL DEFAULT 1,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 7)");
         new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(ds);
         try(var c=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),List.of(7));}
@@ -99,6 +102,7 @@ public final class GuildMysqlFixture implements AutoCloseable {
         for (String table : GuildTables.NAMES) {
             exec("TRUNCATE TABLE `" + table + "`");
         }
+        exec("TRUNCATE TABLE guild_activity_progress");
         startup(GuildTxListener.NONE).ensureGlobalInsertGuard(NOW, d());
     }
 

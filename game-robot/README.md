@@ -9,6 +9,15 @@
 
 ## 构建
 
+2026-10-26 续移植探针（运行证据见 `docs/porting/cpp-continuation-20261026.md`）：
+
+- `pve-team-size`：五个新号，经 157 / 148 / 153 的原请求 UUID 与真实网络探测，核对 0 默认 5、uint32 超限、人数档隔离、取消重排、两人四怪、单人两怪。需要全球 SQL 匹配、battle、Kafka、Redis 和配表 1 每人两怪；不用 dev 直接开战。
+- `channel-smoke`：一个新号，以 43 / 31 验证目录、63 / 79 验证选线、稳定线号、当前线 3008、冷却中 3023 与过期切回。完整冷却验收需要至少两条可选世界线、冷却 10–60 秒（默认 10 秒），以及足够的网络观测窗口。以首次 63 发送至首次 79 到达后 3 秒作为冷却起算区间，等待首次写入有界完成后再探测拒绝，按原区间的固定截止切回，核对拒绝没有续期。短冷却、慢到达或切回过晚时明确 `SKIP` 对应子项，结果为 `cooldown=skipped`，不能当成完整冷却验收；0 秒为 `cooldown=disabled`。单线输出 `CHANNEL_SMOKE_SKIP`，不能作为切线已验收证据。
+- `team --team-regroup-probe`：额外核对入队即归队、显式远距 / 高度不可见归队，以及近距、队长、无队者不移动。需要 `--expect-dev allow` 和指向当前单 scene 的 `--scene-admin-url`；口令仍只取 `GAME_ADMIN_TOKEN`。
+- `guild` 追加活动全流程，缺少前提会失败：`game.guild.activity.enabled=true`、资产 worker、全球 match 与 Kafka / Redis；三类活动开放且最低帮会等级 1、`join_min_hours=0`、物品奖励非空。灯会 / 聚餐剩余次数须为 1–8，聚餐人数阈值不超过 5，试炼人数 2–5，配置副本须可被新号击败。邀请拒绝不得有 177 / 143；成功局核对直连终局、背包、个人贡献、帮会资金与占用解除。
+
+239 是活动视图、240 是灯会、241 是聚餐。242 / 243 的共享客户端协议没有请求 UUID 字段；不伪造字段，不在结局未知时以新请求重试写操作，恢复通过 239 查询确认。
+
 ```bash
 ./mvnw -B -f game-robot/pom.xml clean install        # 产物 game-robot/target/game-robot-0.1.0-SNAPSHOT.jar（可 java -jar）
 ```

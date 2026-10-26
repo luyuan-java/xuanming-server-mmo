@@ -19,18 +19,25 @@ public interface RemoteSwitchTargets {
      */
     void select(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId, Consumer<Selection> onDone);
 
+    /** 只有客户端显式 scene_id 的 63 置位；普通选路、跟随、镜像、疏散与交接重发不占切线冷却。 */
+    default void select(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId,
+                        boolean clientChannelPick, Consumer<Selection> onDone) {
+        select(playerId, fromSceneId, wantSceneId, wantSceneConfigId, onDone);
+    }
+
     /** 选目标的结果。 */
     sealed interface Selection {
 
         /** 选中了：节点号、场景号、场景的地图。节点可能就是本节点（目录过时，或选中本节点另一个频道）。 */
-        record Chosen(int sceneNodeId, long sceneId, int sceneConfigId) implements Selection {
+        record Chosen(int sceneNodeId, long sceneId, int sceneConfigId, int switchCooldownSeconds) implements Selection {
+            public Chosen(int sceneNodeId, long sceneId, int sceneConfigId) { this(sceneNodeId, sceneId, sceneConfigId, 0); }
         }
 
         /** scene-manager 业务拒绝（tip 只进日志与指标；客户端一律看到 23 {3023}，同基线把非 0 非 18 映射成 3023）。 */
         record Refused(int tipId) implements Selection {
         }
 
-        /** 调用失败或本地兜底超时（结局未知，但选目标没有副作用）：客户端看到 23 {1003}。 */
+        /** 调用失败或本地兜底超时（结局未知，但选目标没有副作用）：客户端看到 23 {3028}。 */
         record Failed(String reason) implements Selection {
         }
     }

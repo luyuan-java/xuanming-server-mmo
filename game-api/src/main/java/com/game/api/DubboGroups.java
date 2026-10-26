@@ -42,6 +42,9 @@ public final class DubboGroups {
      */
     public static final String SCENE_INBOX = "scene-inbox";
 
+    /** 队伍变化与归队提醒，与资产端口一起按节点导出。 */
+    public static final String SCENE_TEAM = "scene-team";
+
     /**
      * 匹配（{@code proto/match/...}，服务 {@code match.MatchService}），由 game-match 提供（批次 6.4，match-spec §9.1）。同一个 group 下有三个接口：
      * gate 调的 {@link ClientMessageService}、game-team 调的 {@link MatchTeamService}（整队开战）、game-guild 调的 {@link MatchInternalService}

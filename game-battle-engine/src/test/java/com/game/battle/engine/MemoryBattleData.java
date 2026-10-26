@@ -34,6 +34,7 @@ final class MemoryBattleData implements BattleData {
     private final Map<Integer, ItemTable.Builder> itemRows = new HashMap<>();
     private final Map<Integer, Long> cooldownDurations = new HashMap<>();
     private final Map<Integer, List<Integer>> dungeonMonsterIds = new HashMap<>();
+    private final Map<Integer, Integer> monstersPerPlayer = new HashMap<>();
     private final Map<Integer, Double> skillDamageValues = new HashMap<>();
     private final Map<Integer, Double> buffRegenValues = new HashMap<>();
 
@@ -77,6 +78,15 @@ final class MemoryBattleData implements BattleData {
     /** 同上，传列表。 */
     void setDungeonMonsters(int dungeonTableId, List<Integer> monsterIds) {
         dungeonMonsterIds.put(dungeonTableId, List.copyOf(monsterIds));
+    }
+
+    void setDungeonMonstersPerPlayer(int dungeonTableId, int count) {
+        monstersPerPlayer.put(dungeonTableId, count);
+    }
+
+    @Override
+    public int dungeonMonstersPerPlayer(int dungeonTableId) {
+        return monstersPerPlayer.getOrDefault(dungeonTableId, 0);
     }
 
     /** 技能伤害定值（忽略施法者等级）。 */

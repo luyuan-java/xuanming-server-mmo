@@ -88,7 +88,8 @@ public final class RollbackWriter {
     }
 
     /**
-     * 写一名玩家。返回结局（{@link #RESTORED} 或某个没写的原因）；访问库出错抛异常（事务已回滚，什么也没写）。
+     * 写一名玩家。正常返回结局（{@link #RESTORED} 或某个没写的原因）；访问库异常可能发生在 COMMIT 确认阶段，
+     * 调用方不得将异常视为确定回滚，必须把这名玩家纳入写后复查。
      *
      * @param snapshotId 计划时钉住的快照
      * @param epoch      我们持有的 epoch E'

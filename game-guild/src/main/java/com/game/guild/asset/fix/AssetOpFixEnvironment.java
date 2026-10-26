@@ -153,7 +153,8 @@ final class AssetOpFixEnvironment {
         GuildCacheInvalidator invalidator = new GuildCacheInvalidator(new RedissonGuildCacheRedis(redis), redisKeys, props.cacheTtl(),
                 background, metrics);
         BackgroundTx tx = new BackgroundTx(dataSource::getConnection, props.queryTimeoutCapSeconds(), BackgroundTx.Listener.NONE);
-        GuildAssetStore store = new JdbcGuildAssetStore(tx, new ManualListener(invalidator));
+        GuildAssetStore store = new JdbcGuildAssetStore(tx, new ManualListener(invalidator),
+                new com.game.guild.asset.RedissonTerminalCleanupWatermark(redis, redisKeys));
         return new AssetOpFixMain.OpenedStore(store, () -> {
             // 让后台失效重试有机会跑完（一次性延迟任务在 shutdown 之后照常执行）
             background.shutdown();

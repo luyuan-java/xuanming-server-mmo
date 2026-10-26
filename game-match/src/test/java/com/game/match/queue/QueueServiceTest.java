@@ -104,6 +104,15 @@ class QueueServiceTest {
         return JoinQueueRequest.newBuilder().setModeValue(mode).setBattleConfigId(configId).build();
     }
 
+    @Test
+    void 旧开发兼容队列拒绝不支持的人数档_不能静默变成上限档() {
+        var response = service.join(A, request(MODE_PVE_TEAM, 1).toBuilder().setTeamSize(2).build(), d());
+        assertThat(response.getErrorMessage()).isEqualTo(com.game.match.support.MatchTip.JOIN_TEAM_SIZE_REQUIRES_GLOBAL.proto());
+        assertThat(response.getQueueTicket()).isEmpty();
+        var tooLarge = service.join(A, request(MODE_PVE_TEAM, 1).toBuilder().setTeamSize(-1).build(), d());
+        assertThat(tooLarge.getErrorMessage()).isEqualTo(com.game.match.support.MatchTip.JOIN_TEAM_SIZE_OVER_LIMIT.proto());
+    }
+
     private JoinQueueResponse join(long playerId, int mode, int configId) {
         return service.join(playerId, request(mode, configId), d());
     }

@@ -100,6 +100,7 @@ public final class WorldChannelPlanner {
         if (props.coverage() == Coverage.HASH) {
             WorldRebalancePlanner.run(draft, mirrors, ids);
         }
+        draft.repairChannelNumbers();
         return finish(draft);
     }
 

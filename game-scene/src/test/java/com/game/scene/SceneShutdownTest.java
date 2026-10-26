@@ -3,14 +3,18 @@ package com.game.scene;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.player.store.PlayerStore;
+import com.game.discovery.world.ChannelSwitchCooldown;
+import com.game.discovery.world.WorldChannelDirectoryStore;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.storage.StoragePlayerRepository;
+import com.game.scene.transfer.SharedPlayerChannels;
 import com.game.scene.world.PlayerSave;
 import com.game.scene.world.Vec3;
 import io.netty.channel.DefaultEventLoop;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -59,6 +63,115 @@ class SceneShutdownTest {
                     row.getOwnerEpoch(),1,inv.getArgument(2),"a".repeat(64));
         });
         return new StoragePlayerRepository(store, storage, logic, SceneMetrics.noop());
+    }
+
+    @Test
+    void SQL已交出后仍等冷却续接_先释放新epoch入队再关存储池() throws Exception {
+        PlayerStore store = Mockito.mock(PlayerStore.class);
+        Mockito.when(store.handOffOwnership(Mockito.any(), Mockito.any(), Mockito.anyLong(), Mockito.anyLong(), Mockito.any()))
+                .thenReturn(new PlayerStore.HandOffResult.HandedOff(10));
+        Mockito.when(store.releaseOwnership(99, 10)).thenReturn(true);
+        var repository = new StoragePlayerRepository(store, storage, logic, SceneMetrics.noop());
+        var cooldownTasks = new LinkedBlockingQueue<Runnable>();
+        var channels = new SharedPlayerChannels(7, Mockito.mock(WorldChannelDirectoryStore.class),
+                Mockito.mock(ChannelSwitchCooldown.class), cooldownTasks::add, logic);
+        CountDownLatch handedOff = new CountDownLatch(1);
+        CountDownLatch shutdownReachedSettlement = new CountDownLatch(1);
+        AtomicBoolean detached = new AtomicBoolean();
+        repository.handOff(new PlayerSave(99, 9, 1, 1, Vec3.ORIGIN), outcome -> {
+            assertThat(outcome).isEqualTo(new com.game.scene.world.PlayerRepository.HandOffOutcome.HandedOff(10));
+            var continuation = repository.retainTransferContinuation();
+            channels.switched(99, 30, () -> {
+                try {
+                    assertThat(detached).isTrue();
+                    repository.release(99, 10);
+                } finally { continuation.close(); }
+            }, () -> {
+                try { repository.release(99, 10); }
+                finally { continuation.close(); }
+            });
+            handedOff.countDown();
+        });
+        assertThat(handedOff.await(5, TimeUnit.SECONDS)).isTrue();
+        logic.submit(() -> { }).get(5, TimeUnit.SECONDS);
+        assertThat(repository.awaitTransfersSettled(0)).as("原 SQL 回调已返回，冷却仍持有结算责任").isEqualTo(1);
+        var stopping = CompletableFuture.supplyAsync(() -> SceneShutdown.writeBackThenDrainStorage(logic, () -> {
+            detached.set(true);
+            return 0;
+        }, remaining -> {
+            shutdownReachedSettlement.countDown();
+            return repository.awaitTransfersSettled(remaining);
+        }, SceneShutdown.TransferSettlement.NONE, () -> 0, repository::writeFailures,
+                storage, Duration.ofSeconds(10), () -> 0, System::nanoTime));
+        assertThat(shutdownReachedSettlement.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(storage.isShutdown()).isFalse();
+        assertThat(stopping).isNotDone();
+        Runnable cooldown = cooldownTasks.poll(5, TimeUnit.SECONDS);
+        assertThat(cooldown).isNotNull(); cooldown.run();
+        assertThat(stopping.get(5, TimeUnit.SECONDS).clean()).isTrue();
+        Mockito.verify(store).releaseOwnership(99, 10);
+        assertThat(repository.writeFailures()).isZero();
+        assertThat(storage.isTerminated()).isTrue();
+    }
+
+    @Test
+    void 满队列拒绝释放但其余任务正常排空_仍须报告写失败且unclean() throws Exception {
+        var limited = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(1));
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch unblock = new CountDownLatch(1);
+        var store = Mockito.mock(PlayerStore.class);
+        var repository = new StoragePlayerRepository(store, limited, logic, SceneMetrics.noop());
+        try {
+            limited.execute(() -> {
+                started.countDown();
+                try { unblock.await(5, TimeUnit.SECONDS); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            });
+            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+            limited.execute(() -> { });
+            var result = SceneShutdown.writeBackThenDrainStorage(logic, () -> {
+                var continuation = repository.retainTransferContinuation();
+                try { repository.release(99, 10); }
+                finally { continuation.close(); unblock.countDown(); }
+                return 0;
+            }, repository::awaitTransfersSettled, SceneShutdown.TransferSettlement.NONE, () -> 0,
+                    repository::writeFailures, limited, Duration.ofSeconds(5), () -> 0, System::nanoTime);
+            assertThat(result.writeBackRan()).isTrue();
+            assertThat(result.unsettledTransfers()).isZero();
+            assertThat(result.droppedTasks()).isZero();
+            assertThat(result.storageTerminated()).isTrue();
+            assertThat(result.storageForceStopped()).isFalse();
+            assertThat(result.storageWriteFailures()).isEqualTo(1);
+            assertThat(result.clean()).isFalse();
+            Mockito.verify(store, Mockito.never()).releaseOwnership(99, 10);
+        } finally { unblock.countDown(); limited.shutdownNow(); }
+    }
+
+    @Test
+    void 已入队释放在SQL执行时失败_排空后计入写失败() {
+        var store = Mockito.mock(PlayerStore.class);
+        Mockito.when(store.releaseOwnership(99, 10)).thenThrow(new IllegalStateException("SQL failure"));
+        var repository = new StoragePlayerRepository(store, storage, logic, SceneMetrics.noop());
+        var result = SceneShutdown.writeBackThenDrainStorage(logic, () -> {
+            repository.release(99, 10); return 0;
+        }, repository::awaitTransfersSettled, SceneShutdown.TransferSettlement.NONE, () -> 0,
+                repository::writeFailures, storage, Duration.ofSeconds(5), () -> 0, System::nanoTime);
+        assertThat(result.droppedTasks()).isZero();
+        assertThat(result.storageTerminated()).isTrue();
+        assertThat(result.storageWriteFailures()).isEqualTo(1);
+        assertThat(result.clean()).isFalse();
+    }
+
+    @Test
+    void 冷却续接未结算且等待预算用尽_不能把停服报成clean() {
+        var repository = repository();
+        var continuation = repository.retainTransferContinuation();
+        try {
+            var result = SceneShutdown.writeBackThenDrainStorage(logic, () -> 0,
+                    ignored -> repository.awaitTransfersSettled(0), storage, Duration.ofSeconds(2), () -> 0, System::nanoTime);
+            assertThat(result.unsettledTransfers()).isEqualTo(1);
+            assertThat(result.clean()).isFalse();
+        } finally { continuation.close(); }
     }
 
     @Test

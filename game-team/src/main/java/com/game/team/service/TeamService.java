@@ -251,6 +251,9 @@ public final class TeamService {
             }
         }
         TeamResponse resp = m.response();
+        if (request.getRegroup() && resp.hasTeam()) {
+            pushes.publishRegroup(caller, resp.getTeam());
+        }
         if (request.getNotifyOnline() && resp.hasTeam() && resp.getTeam().getTeamId() != 0) {
             List<Long> members = new ArrayList<>(resp.getTeam().getMembersCount());
             for (TeamMemberView member : resp.getTeam().getMembersList()) {
@@ -825,7 +828,7 @@ public final class TeamService {
 
     /**
      * 记一次 mutate 的冲突 / 自愈指标，并派发已落盘提交的推送（修复提交在前、主提交在后；service.go:650-675）。
-     * 孤儿索引自愈在基线还给调用者发 scene 信号，Java 不发（D7），只记指标。
+     * 孤儿索引自愈也给调用者发仅刷新信号，及时清除场景队友优先提示。
      */
     private void mutateEffects(long caller, String method, MutateResult res) {
         for (int i = 0; i < res.conflicts(); i++) {
@@ -842,7 +845,7 @@ public final class TeamService {
         if (res.outcome() == Outcome.COMMITTED) {
             commits.add(res.commit());
         }
-        pushes.publish(caller, commits);
+        pushes.publish(caller, commits, res.healedOrphan() ? List.of(caller) : List.of());
     }
 
     /**
@@ -906,11 +909,12 @@ public final class TeamService {
         return new SelfRead(read.snapshot(), null);
     }
 
-    /** {@link TeamStore#readFree} 加上自愈指标与故障日志（service.go:745-756；Java 不发 scene 信号，D7）。 */
+    /** {@link TeamStore#readFree} 加上自愈指标、仅刷新场景信号与故障日志。 */
     private FreeRead readFree(String method, long playerId, Deadline deadline) {
         FreeRead read = store.readFree(playerId, deadline);
         if (read.healed()) {
             metrics.heal(HealKind.ORPHAN_INDEX);
+            pushes.publish(0, List.of(), List.of(playerId));
         }
         switch (read.status()) {
             case OK -> {

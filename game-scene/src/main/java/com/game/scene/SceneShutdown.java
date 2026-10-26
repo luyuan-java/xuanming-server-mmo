@@ -42,15 +42,21 @@ final class SceneShutdown {
      * @param writeBackRan     写回任务是否执行完
      * @param playersSubmitted 写回任务交给存储线程池的人数（没执行完为 0）
      * @param droppedTasks     预算用完时存储线程池里被丢弃的任务数
+     * @param storageWriteFailures 仓储进程内累计的释放失败与最终保存未确认 / 冲突次数；排空后采样，非零保守判不干净
      */
     record Result(boolean writeBackRan, int playersSubmitted, int droppedTasks, int unregisteredFinals,
                   int unsettledTransfers,int undeliveredFinalResults,boolean storageTerminated,
-                  boolean storageForceStopped) {
+                  boolean storageForceStopped,long storageWriteFailures) {
         Result(boolean writeBackRan,int playersSubmitted,int droppedTasks) {
-            this(writeBackRan,playersSubmitted,droppedTasks,0,0,0,true,false);
+            this(writeBackRan,playersSubmitted,droppedTasks,0,0,0,true,false,0);
+        }
+        Result(boolean writeBackRan,int playersSubmitted,int droppedTasks,int unregisteredFinals,
+               int unsettledTransfers,int undeliveredFinalResults,boolean storageTerminated,boolean storageForceStopped) {
+            this(writeBackRan,playersSubmitted,droppedTasks,unregisteredFinals,unsettledTransfers,
+                    undeliveredFinalResults,storageTerminated,storageForceStopped,0);
         }
         boolean clean(){return writeBackRan && droppedTasks==0 && unregisteredFinals==0 && unsettledTransfers==0
-                && undeliveredFinalResults==0 && storageTerminated && !storageForceStopped;}
+                && undeliveredFinalResults==0 && storageTerminated && !storageForceStopped && storageWriteFailures==0;}
     }
 
     private record StorageDrain(int droppedTasks,boolean terminated,boolean forceStopped) { }
@@ -99,6 +105,15 @@ final class SceneShutdown {
                                             TransferSettlement transfers,TransferSettlement finalRegistrations,
                                             IntSupplier undeliveredFinalResults,ExecutorService storage,Duration budget,
                                             IntSupplier approxPlayers,LongSupplier nanoClock) {
+        return writeBackThenDrainStorage(logic,writeBack,transfers,finalRegistrations,undeliveredFinalResults,
+                ()->0,storage,budget,approxPlayers,nanoClock);
+    }
+
+    static Result writeBackThenDrainStorage(ExecutorService logic,Callable<Integer> writeBack,
+                                            TransferSettlement transfers,TransferSettlement finalRegistrations,
+                                            IntSupplier undeliveredFinalResults,LongSupplier storageWriteFailures,
+                                            ExecutorService storage,Duration budget,IntSupplier approxPlayers,
+                                            LongSupplier nanoClock) {
         long deadline = nanoClock.getAsLong() + budget.toNanos();
         Integer submitted = runWriteBack(logic, writeBack, budget, approxPlayers, deadline, nanoClock);
         int unsettled=0;
@@ -114,8 +129,11 @@ final class SceneShutdown {
         // 最后一个存储任务可能在drain期间公布投递失败；必须在drain之后独立采样。
         int undelivered=undeliveredFinalResults.getAsInt();
         if(undelivered>0)log.error("最终SQL凭据与结果投递分别计数：仍有 {} 个结果未成功送达，停机明确unclean",undelivered);
+        // release 被满队列拒绝不会留在 drain 的丢弃列表里；在途 SQL 也可能到 drain 末尾才宣布失败。
+        long writeFailures=storageWriteFailures.getAsLong();
+        if(writeFailures>0)log.error("仓储累计释放失败或最终保存未确认 / 冲突 {} 次，停机明确unclean",writeFailures);
         return new Result(submitted != null, submitted == null ? 0 : submitted, drained.droppedTasks(),
-                unregistered,unsettled,undelivered,drained.terminated(),drained.forceStopped());
+                unregistered,unsettled,undelivered,drained.terminated(),drained.forceStopped(),writeFailures);
     }
 
     private static int awaitTransfers(TransferSettlement transfers, Duration budget, long deadline,

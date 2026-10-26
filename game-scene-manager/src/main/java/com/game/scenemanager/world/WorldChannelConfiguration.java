@@ -3,6 +3,10 @@ package com.game.scenemanager.world;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.world.RedissonWorldChannelStore;
 import com.game.discovery.world.WorldChannelStore;
+import com.game.discovery.world.WorldChannelDirectoryStore;
+import com.game.discovery.world.RedissonWorldChannelDirectoryStore;
+import com.game.discovery.world.ChannelSwitchCooldown;
+import com.game.discovery.world.RedissonChannelSwitchCooldown;
 import com.game.scenemanager.SceneIdAllocator;
 import com.game.scenemanager.SceneNodeSource;
 import com.game.scenemanager.WorldSceneConfigs;
@@ -17,12 +21,22 @@ import org.springframework.context.annotation.Configuration;
  * 数据面（分配时的软预占）在 {@code SceneManagerConfiguration} 里接 {@link WorldChannelStore}。
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties(WorldChannelProperties.class)
+@EnableConfigurationProperties({WorldChannelProperties.class, ChannelSwitchProperties.class})
 public class WorldChannelConfiguration {
 
     @Bean
     public WorldChannelStore worldChannelStore(RedissonClient redis, RedisKeys redisKeys) {
         return new RedissonWorldChannelStore(redis, redisKeys);
+    }
+
+    @Bean
+    public WorldChannelDirectoryStore worldChannelDirectoryStore(RedissonClient redis, RedisKeys keys) {
+        return new RedissonWorldChannelDirectoryStore(redis, keys);
+    }
+
+    @Bean
+    public ChannelSwitchCooldown channelSwitchCooldown(RedissonClient redis, RedisKeys keys) {
+        return new RedissonChannelSwitchCooldown(redis, keys);
     }
 
     @Bean
@@ -37,8 +51,10 @@ public class WorldChannelConfiguration {
     @Bean(destroyMethod = "close")
     public WorldChannelControlPlane worldChannelControlPlane(WorldChannelStore store, SceneNodeSource sceneNodeSource,
                                                              WorldSceneConfigs worldConfigs, WorldChannelProperties props,
-                                                             WorldChannelMetrics metrics, SceneIdAllocator sceneIdAllocator) {
-        return WorldChannelControlPlane.start(store, sceneNodeSource, worldConfigs, props, metrics, sceneIdAllocator);
+                                                             WorldChannelMetrics metrics, SceneIdAllocator sceneIdAllocator,
+                                                             WorldChannelDirectoryStore directories, ChannelSwitchProperties switchProps) {
+        return WorldChannelControlPlane.start(store, sceneNodeSource, worldConfigs, props, metrics, sceneIdAllocator,
+                directories, switchProps);
     }
 
     /** 健康组件 {@code worldChannels}（bean 名去掉 HealthIndicator 后缀即组件名）。 */

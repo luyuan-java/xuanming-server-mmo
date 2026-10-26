@@ -331,8 +331,9 @@ public class GuildConfiguration {
     /** 资产指令账本的后台 Store：无条件建（升级、读页、清理、内部查询都不依赖通道开关，guild.go:235-245）。 */
     @Bean
     public GuildAssetStore guildAssetStore(BackgroundTx guildBackgroundTx, EconomyAssetEffects economyAssetEffects,
-                                           SchemaReady guildSchemaReady) {
-        return new JdbcGuildAssetStore(guildBackgroundTx, economyAssetEffects);
+                                           SchemaReady guildSchemaReady, RedissonClient redis, RedisKeys keys) {
+        return new JdbcGuildAssetStore(guildBackgroundTx, economyAssetEffects,
+                new com.game.guild.asset.RedissonTerminalCleanupWatermark(redis, keys));
     }
 
     @Bean

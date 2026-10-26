@@ -26,7 +26,7 @@ import java.util.concurrent.TimeoutException;
  *       再按每人自己的起点过滤（{@code updated_ms > since_p}），结果相同、请求更少。</li>
  *   <li><b>只认 OK</b>：其它结果码（含缺省 0）、future 异常完成、超预算、游标不前进、返回块外玩家、过滤后超过 {@value #MAX_ROWS} 行，一律
  *       {@link Result#checkFailed()}——放行无效（基线 28）。帮会检查把非 OK 当「没有分歧」会让回档复制资产（§9.2 第 8 条）。</li>
- *   <li><b>保留期拒绝</b>：用应答的 {@code cutoff_ms} 钳位重查一次；起点早于 cutoff 的玩家记为不可证明（那一段已无从得知）。</li>
+ *   <li><b>保留期拒绝</b>：用应答的 {@code cutoff_ms + 900 s} 钳位重查一次；起点早于重查下界的玩家记为不可证明（那一段已无从得知）。</li>
  * </ul>
  * 没有装配客户端（{@code game.dubbo.guild-url} 为空）= 一律 check_failed（基线 checker 为 nil 就拒绝，D2）。只读、无状态、线程安全。
  */
@@ -37,6 +37,9 @@ public final class GuildDivergenceGate {
     public static final int PAGE = 500;
     public static final int MAX_ROWS = 10_000;
     public static final int SAMPLE = 20;
+
+    /** guild 每次按当前墙钟重算 cutoff；留 15 分钟覆盖重查耗时与允许的时钟偏差（同基线）。 */
+    public static final long RETENTION_CLAMP_SLACK_MS = 900_000;
 
     /** 帮会内部查询的调用方（生产为 Dubbo，见 {@link DubboGuildInternalClient}）。 */
     @FunctionalInterface
@@ -184,12 +187,17 @@ public final class GuildDivergenceGate {
                     return "帮会保留期拒绝且无法钳位（cutoff_ms=" + Long.toUnsignedString(cutoff) + "，since="
                             + since + "）：" + response.getDetail();
                 }
+                if (cutoff > Long.MAX_VALUE - RETENTION_CLAMP_SLACK_MS) {
+                    return "帮会保留期下界加重查余量溢出";
+                }
+                long clampedSince = cutoff + RETENTION_CLAMP_SLACK_MS;
                 for (long p : chunk) {
-                    if (sinceByPlayer.get(p) < cutoff) {
+                    // [cutoff, clampedSince) 也没有查，必须同样记为不可证明，不能静默少查。
+                    if (sinceByPlayer.get(p) < clampedSince) {
                         unprovable.add(p);
                     }
                 }
-                since = cutoff;
+                since = clampedSince;
                 clamped = true;
                 continue;
             }

@@ -9,8 +9,11 @@ import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.WorldChannel;
 import com.game.discovery.proto.TeamInfo;
 import com.game.discovery.team.TeamMembership;
+import com.game.proto.Rotation;
+import com.game.proto.TeleportS2C;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.TeamFollowResult;
+import com.game.scene.metrics.SceneMetrics.TeleportReason;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakeSceneTables;
@@ -22,6 +25,7 @@ import com.game.scene.world.PlayerSnapshots;
 import com.game.scene.world.Scene;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
+import com.game.scene.world.Vec3;
 import com.game.scene.world.WorldTestAccess;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.ArrayDeque;
@@ -68,6 +72,7 @@ class TeamFollowServiceTest {
 
     private SimpleMeterRegistry meters;
     private FakePlayerRepository repo;
+    private final RecordingSink sink = new RecordingSink();
     private SceneWorld world;
     private Scene map1;
     /** 与 map1 同配置的另一条频道（另一个场景实例）：跟随必须精确到实例，不是只到配置。 */
@@ -88,7 +93,7 @@ class TeamFollowServiceTest {
     }
 
     private SceneWorld newWorld(TeamFollow follow, SceneMetrics metrics) {
-        return new SceneWorld(new FakeSceneTables(), Contracts.IDS, new RecordingSink(), repo,
+        return new SceneWorld(new FakeSceneTables(), Contracts.IDS, sink, repo,
                 new AtomicLong(1000)::incrementAndGet, new ManualClock(), metrics, PlayerInitializer.NONE,
                 PlayerSnapshots.NONE, PlayerLocations.NONE, follow);
     }
@@ -354,13 +359,13 @@ class TeamFollowServiceTest {
     }
 
     @Test
-    void 入队没有进场事件_不拉人() {
+    void 无进场或组队提示_不自行轮询拉人() {
         enter(LEADER, map1);
         enter(M1, map2);
         settle();
         readLog.clear();
 
-        team(LEADER, LEADER, M1);   // 组队服务写了 Redis，但 scene 不收刷新信号（D7）
+        team(LEADER, LEADER, M1);   // 只更新权威数据，尚未送入队提示；没有后台轮询。
         settle();
 
         assertThat(readLog).isEmpty();
@@ -438,6 +443,229 @@ class TeamFollowServiceTest {
 
         assertThat(logicQueue).isEmpty();
         assertThat(counts()).isEmpty();
+    }
+
+    @Test
+    void 入队提示强读自己与尚未刷新的队长_同节点换场景后归队_不扇出其他队员() {
+        ScenePlayer leader = enter(LEADER, map1);
+        ScenePlayer member = enter(M1, map2);
+        ScenePlayer other = enter(M2, map1b);
+        settle();
+        team(LEADER, LEADER, M1, M2);
+        readLog.clear();
+        world.refreshTeam(M1, true);
+        settle();
+        assertThat(member.scene()).isSameAs(leader.scene());
+        assertThat(member.teamId()).isEqualTo(TEAM);
+        assertThat(leader.teamId()).isEqualTo(TEAM);
+        assertThat(other.scene()).isSameAs(map1b);
+        assertThat(readLog).containsExactly(M1, LEADER, M1, M1).doesNotContain(M2);
+        assertThat(count(TeamFollowResult.FOLLOWED)).isEqualTo(1);
+    }
+
+    @Test
+    void 保留成员与队长转让提示只刷新_离队清掉提示_不产生移动() {
+        ScenePlayer leader = enter(LEADER, map1);
+        ScenePlayer member = enter(M1, map2);
+        settle();
+        team(LEADER, LEADER, M1);
+        world.refreshTeam(M1, false);
+        world.refreshTeam(LEADER, false);
+        settle();
+        assertThat(member.teamId()).isEqualTo(TEAM);
+        assertThat(leader.teamId()).isEqualTo(TEAM);
+        assertThat(member.scene()).isSameAs(map2);
+        team(M1, LEADER, M1);
+        world.refreshTeam(LEADER, false);
+        world.refreshTeam(M1, false);
+        settle();
+        assertThat(leader.scene()).isSameAs(map1);
+        assertThat(member.scene()).isSameAs(map2);
+        memberships.put(M1, new TeamMembership(0, 6, false, null));
+        world.refreshTeam(M1, false);
+        settle();
+        assertThat(member.teamId()).isZero();
+        assertThat(count(TeamFollowResult.FOLLOWED)).isZero();
+        assertThat(count(TeamFollowResult.REGROUPED)).isZero();
+    }
+
+    @Test
+    void 同场景超过8米_130原因5与队长朝向_落位等待生效_不触发79或51() throws Exception {
+        team(LEADER, LEADER, M1);
+        ScenePlayer leader = enter(LEADER, map1);
+        ScenePlayer member = enter(M1, map1);
+        settle();
+        Rotation facing = Rotation.newBuilder().setX(10).setY(20).setZ(135).build();
+        world.teleportWithinScene(leader, leader.position(), facing, TeleportReason.ADMIN);
+        world.teleportWithinScene(member, leader.position().plus(new Vec3(50, 0, 0)), null, TeleportReason.ADMIN);
+        sink.clear();
+        world.refreshTeam(M1, true);
+        settle();
+        assertThat(member.position()).isEqualTo(leader.position());
+        assertThat(member.rotation()).isEqualTo(facing);
+        assertThat(member.velocity()).isEqualTo(Vec3.ORIGIN);
+        assertThat(WorldTestAccess.teleportSettling(member)).isTrue();
+        assertThat(sink.messageIdsTo(LINK, member.session().sessionId())).contains(130).doesNotContain(79, 51);
+        var frame = sink.to(LINK, member.session().sessionId()).stream().filter(f -> f.getMessageId() == 130).findFirst().orElseThrow();
+        TeleportS2C teleport = TeleportS2C.parseFrom(frame.getSerializedMessage());
+        assertThat(teleport.getReason()).isEqualTo(5);
+        assertThat(teleport.getEntity()).isEqualTo(member.entity());
+        assertThat(teleport.getTransform().getLocation()).isEqualTo(leader.position().toProto());
+        assertThat(teleport.getTransform().getRotation()).isEqualTo(facing);
+        assertThat(count(TeamFollowResult.REGROUPED)).isEqualTo(1);
+    }
+
+    @Test
+    void 恰好8米且互相可见不瞬移_超过8或只有高度导致不可见就归队() {
+        team(LEADER, LEADER, M1);
+        ScenePlayer leader = enter(LEADER, map1);
+        ScenePlayer member = enter(M1, map1);
+        settle();
+        world.teleportWithinScene(member, leader.position().plus(new Vec3(8, 0, 0)), null, TeleportReason.ADMIN);
+        world.refreshTeam(M1, true);
+        settle();
+        assertThat(member.position().horizontalDistance(leader.position())).isEqualTo(8);
+        assertThat(count(TeamFollowResult.REGROUPED)).isZero();
+        world.teleportWithinScene(member, leader.position().plus(new Vec3(8.000001, 0, 0)), null, TeleportReason.ADMIN);
+        world.refreshTeam(M1, true);
+        settle();
+        assertThat(member.position()).isEqualTo(leader.position());
+        world.teleportWithinScene(member, leader.position().plus(new Vec3(0, 0, 21)), null, TeleportReason.ADMIN);
+        assertThat(world.mutuallyVisible(leader, member)).isFalse();
+        world.refreshTeam(M1, true);
+        settle();
+        assertThat(member.position()).isEqualTo(leader.position());
+        assertThat(count(TeamFollowResult.REGROUPED)).isEqualTo(2);
+        assertThat(TeamFollowService.shouldRegroup(8, true)).isFalse();
+        assertThat(TeamFollowService.shouldRegroup(0, false)).isTrue();
+    }
+
+    @Test
+    void 队长冻结时拒绝归队_队长只是RESOLVING则仍允许() {
+        team(LEADER, LEADER, M1);
+        ScenePlayer leader = enter(LEADER, map1);
+        ScenePlayer member = enter(M1, map1);
+        settle();
+        Vec3 far = leader.position().plus(new Vec3(50, 0, 0));
+        world.teleportWithinScene(member, far, null, TeleportReason.ADMIN);
+        WorldTestAccess.startFreezing(leader);
+        world.refreshTeam(M1, true);
+        settle();
+        assertThat(member.position()).isEqualTo(far);
+        assertThat(count(TeamFollowResult.LEADER_FROZEN)).isEqualTo(1);
+        WorldTestAccess.clearSwitch(leader);
+        WorldTestAccess.startResolving(leader);
+        world.refreshTeam(M1, true);
+        settle();
+        assertThat(member.position()).isEqualTo(leader.position());
+        assertThat(count(TeamFollowResult.REGROUPED)).isEqualTo(1);
+    }
+
+    @Test
+    void 同一实例单飞_提示标脏丢弃旧结果_同epoch转让按最新队长跟随() {
+        enter(LEADER, map1);
+        ScenePlayer member = enter(M1, map2);
+        ScenePlayer newLeader = enter(M2, map1b);
+        settle();
+        team(LEADER, LEADER, M1, M2);
+        readLog.clear();
+        world.refreshTeam(M1, true);
+        completeReads(); // 旧投影已读完，逻辑线程尚未应用。
+        team(M2, LEADER, M1, M2); // team id / membership epoch 不变，只有队长变。
+        world.refreshTeam(M1, false);
+        world.refreshTeam(M1, false);
+        assertThat(readLog).containsExactly(M1);
+        runLogic();
+        assertThat(member.teamId()).as("标脏的旧结果不能先更新 AOI 缓存").isZero();
+        assertThat(readLog).containsExactly(M1, M1);
+        settle();
+        assertThat(member.scene()).isSameAs(newLeader.scene());
+        assertThat(count(TeamFollowResult.FOLLOWED)).isEqualTo(1);
+    }
+
+    @Test
+    void 离队后的旧epoch和键缺失都不能恢复旧队友优先级或跟随() {
+        team(LEADER, LEADER, M1);
+        ScenePlayer leader = enter(LEADER, map1);
+        ScenePlayer member = enter(M1, map1);
+        settle();
+        TeamMembership old = memberships.get(M1);
+        memberships.put(M1, new TeamMembership(0, 6, false, null));
+        world.refreshTeam(M1, false);
+        settle();
+        Vec3 far = leader.position().plus(new Vec3(50, 0, 0));
+        world.teleportWithinScene(member, far, null, TeleportReason.ADMIN);
+        memberships.put(M1, old);
+        world.refreshTeam(M1, true);
+        settle();
+        memberships.remove(M1);
+        world.refreshTeam(M1, true);
+        settle();
+        assertThat(member.teamId()).isZero();
+        assertThat(member.position()).isEqualTo(far);
+        assertThat(count(TeamFollowResult.STALE)).isEqualTo(2);
+        assertThat(count(TeamFollowResult.REGROUPED)).isZero();
+    }
+
+    @Test
+    void 等待队长强读时自己收到离队提示_旧归队决定失效() {
+        enter(LEADER, map1);
+        ScenePlayer member = enter(M1, map2);
+        settle();
+        team(LEADER, LEADER, M1);
+        world.refreshTeam(M1, true);
+        completeReads();
+        runLogic();
+        assertThat(pendingReads).extracting(PendingRead::playerId).containsExactly(LEADER);
+        memberships.put(M1, new TeamMembership(0, 6, false, null));
+        world.refreshTeam(M1, false);
+        settle();
+        assertThat(member.teamId()).isZero();
+        assertThat(member.scene()).isSameAs(map2);
+        assertThat(count(TeamFollowResult.FOLLOWED)).isZero();
+    }
+
+    @Test
+    void 等待队长补读期间战斗锁出现_重新读取自己后拒绝跟随() {
+        var locked = new java.util.concurrent.atomic.AtomicBoolean();
+        SceneMetrics metrics = new SceneMetrics(meters);
+        world = newWorld(new TeamFollowService(this::read,
+                id -> CompletableFuture.completedFuture(id == M1 && locked.get()), logic, metrics), metrics);
+        map1 = world.createScene(1);
+        map2 = world.createScene(2);
+        enter(LEADER, map1);
+        ScenePlayer member = enter(M1, map2);
+        settle();
+        team(LEADER, LEADER, M1);
+        readLog.clear();
+        world.refreshTeam(M1, true);
+        completeReads();
+        runLogic();
+        assertThat(pendingReads).extracting(PendingRead::playerId).containsExactly(LEADER);
+        locked.set(true);
+        settle();
+        assertThat(member.scene()).isSameAs(map2);
+        assertThat(readLog).containsExactly(M1, LEADER, M1);
+        assertThat(count(TeamFollowResult.BATTLE_LOCK)).isEqualTo(1);
+        assertThat(count(TeamFollowResult.FOLLOWED)).isZero();
+    }
+
+    @Test
+    void 零epoch与超过5人和重复成员投影拒绝_不能建立队友提示() {
+        long zeroEpoch = 21, oversized = 22, duplicate = 23;
+        TeamInfo base = TeamInfo.newBuilder().setTeamId(TEAM).setLeaderId(LEADER).addMembers(LEADER).build();
+        memberships.put(zeroEpoch, new TeamMembership(TEAM, 0, false, base.toBuilder().addMembers(zeroEpoch).build()));
+        memberships.put(oversized, new TeamMembership(TEAM, 1, false,
+                base.toBuilder().addMembers(oversized).addMembers(31).addMembers(32).addMembers(33).addMembers(34).build()));
+        memberships.put(duplicate, new TeamMembership(TEAM, 1, false,
+                base.toBuilder().addMembers(duplicate).addMembers(duplicate).build()));
+        for (long id : List.of(zeroEpoch, oversized, duplicate)) enter(id, map1);
+        settle();
+        for (long id : List.of(zeroEpoch, oversized, duplicate)) {
+            assertThat(world.playerById(id).teamMembershipKnown()).isFalse();
+            assertThat(world.playerById(id).teamId()).isZero();
+        }
+        assertThat(count(TeamFollowResult.PROJECTION_MISSING)).isEqualTo(3);
     }
 
     // ------------------------------------------------------------------ 主世界频道的排空（批次 5.1，scene-channels-spec §4.13）

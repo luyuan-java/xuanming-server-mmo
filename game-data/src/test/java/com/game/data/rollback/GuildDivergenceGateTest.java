@@ -92,20 +92,46 @@ class GuildDivergenceGateTest {
     }
 
     @Test
-    void 保留期拒绝_用cutoff钳位重查一次_早于cutoff的玩家不可证明() {
+    void 保留期拒绝_用cutoff加余量重查一次_未查区间全部记不可证明() {
+        long clamped = 500 + GuildDivergenceGate.RETENTION_CLAMP_SLACK_MS;
         GuildDivergenceGate g = gate(req -> req.getSinceMs() < 500
                 ? ListAppliedAssetOpsSinceResponse.newBuilder()
                         .setResult(ListAppliedResult.LIST_APPLIED_RESULT_RETENTION_REJECTED).setCutoffMs(500).build()
-                : ok(op(9, 8, 900)).build());
-        GuildDivergenceGate.Result r = g.check(since(7, 100, 8, 600), Duration.ofSeconds(1));
+                : ok(op(9, 8, clamped + 1)).build());
+        GuildDivergenceGate.Result r = g.check(since(7, 100, 8, clamped), Duration.ofSeconds(1));
         assertThat(r.checkFailed()).isFalse();
         assertThat(r.unprovable()).containsExactly(7L);
         assertThat(r.rows()).extracting(GuildAssetOpBrief::getOpId).containsExactly(9L);
-        assertThat(calls).extracting(ListAppliedAssetOpsSinceRequest::getSinceMs).containsExactly(100L, 500L);
+        assertThat(calls).extracting(ListAppliedAssetOpsSinceRequest::getSinceMs).containsExactly(100L, clamped);
 
         GuildDivergenceGate twice = gate(req -> ListAppliedAssetOpsSinceResponse.newBuilder()
                 .setResult(ListAppliedResult.LIST_APPLIED_RESULT_RETENTION_REJECTED).setCutoffMs(req.getSinceMs() + 10).build());
         assertThat(twice.check(since(7, 100), Duration.ofSeconds(1)).checkFailed()).isTrue();
+    }
+
+    @Test
+    void 每次调用按当前时刻重算cutoff_余量盖住前移_边缘区间也不可证明() {
+        java.util.concurrent.atomic.AtomicLong cutoff = new java.util.concurrent.atomic.AtomicLong(10_000);
+        long clamped = 10_000 + GuildDivergenceGate.RETENTION_CLAMP_SLACK_MS;
+        GuildDivergenceGate g = gate(req -> {
+            long current = cutoff.getAndAdd(1234);
+            return req.getSinceMs() < current ? ListAppliedAssetOpsSinceResponse.newBuilder()
+                    .setResult(ListAppliedResult.LIST_APPLIED_RESULT_RETENTION_REJECTED).setCutoffMs(current).build()
+                    : ok(op(99, 9, clamped + 1)).build();
+        });
+        GuildDivergenceGate.Result r = g.check(since(7, 1, 8, clamped - 1, 9, clamped), Duration.ofSeconds(1));
+        assertThat(r.checkFailed()).isFalse();
+        assertThat(r.unprovable()).containsExactlyInAnyOrder(7L, 8L);
+        assertThat(r.rows()).extracting(GuildAssetOpBrief::getOpId).containsExactly(99L);
+        assertThat(calls).extracting(ListAppliedAssetOpsSinceRequest::getSinceMs).containsExactly(1L, clamped);
+    }
+
+    @Test
+    void cutoff加余量溢出时拒绝而不是绕回早期时间() {
+        GuildDivergenceGate g = gate(req -> ListAppliedAssetOpsSinceResponse.newBuilder()
+                .setResult(ListAppliedResult.LIST_APPLIED_RESULT_RETENTION_REJECTED).setCutoffMs(Long.MAX_VALUE).build());
+        assertThat(g.check(since(7, 1), Duration.ofSeconds(1)).failure()).contains("溢出");
+        assertThat(calls).hasSize(1);
     }
 
     @Test

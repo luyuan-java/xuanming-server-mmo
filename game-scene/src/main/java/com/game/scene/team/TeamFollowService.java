@@ -2,107 +2,78 @@ package com.game.scene.team;
 
 import com.game.discovery.proto.TeamInfo;
 import com.game.discovery.team.TeamMembership;
-import com.game.discovery.team.TeamMembershipReader;
+import com.game.proto.Rotation;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.TeamFollowResult;
+import com.game.scene.metrics.SceneMetrics.TeleportReason;
+import com.game.scene.metrics.SceneMetrics.TeleportResult;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 组队场景跟随（team-spec §6.10，D7 / D8 / D9；基线 C++ cpp/libs/services/scene/player/system/player_team.{h,cpp}）。
- * 只做同节点跟随：队员被拉到本节点上队长所在的<b>同一个场景实例</b>。
- *
- * <p>流程（全部在场景逻辑线程上，读 Redis 异步）：
- * <ol>
- *   <li>进场 / 换场景之后（{@link #onEnteredScene}），或回合制战斗冻结解除之后（{@link #onBattleFreezeCleared}）读这个玩家的成员关系
- *       （{@link TeamMembershipReader}，一次往返读出索引与投影），<b>同时并行</b>读他的战斗锁在不在（{@link BattleLockProbe}，一条 EXISTS）；
- *       两个结果都回来后一起投递回逻辑线程；</li>
- *   <li>回调先核对实例：{@code world.playerById(pid)} 已不是发起读时的那个实例（已离开、已重新进场）→ 丢弃
- *       （基线每一跳回调的 {@code IsSamePlayer}，player_team.cpp:55-59）；</li>
- *   <li>读失败或数据损坏、无队（tid = 0 或键缺失）、投影缺失或与索引对不上（team_id 不符、leader_id = 0）、自己不在 members 里
- *       → 不跟随（player_team.cpp:290-318）；</li>
- *   <li>队长不是自己 → {@link #followLeader}，守卫按这个次序：自己有在途的跨节点换图（选目标中或冻结中，批次 5.2）不跟随；
- *       <b>自己有在途的回合制战斗</b>不跟随——内存冻结（{@code inBattle()}，计 {@code in_battle}）或战斗锁存在 / 读锁失败（计 {@code battle_lock}：
- *       这一局还没完，已结算待落盘时锁也还在；读失败按在途，fail-closed，同基线 {@code team.cpp:378-402}）；队长不在本节点（跨节点、跨 zone、离线）
- *       不跟随；已同场景什么都不做；队长所在频道在排空中不跟随（批次 5.1，scene-channels-spec §4.13）；否则
- *       {@code world.switchScene(self, leader.scene())}。用内存里的队长场景、不读 {@code game:location}（同节点时内存就是权威，D9），
- *       不经 scene-manager（Java 同节点换场景是同步的，没有 60 s 去重）；</li>
- *   <li>队长是自己、且这次是自己进场 → 对 members 里在本节点上的其他成员各自再读一次<b>自己的</b>成员关系，按「只跟随、不扇出」处理
- *       （player_team.cpp:327-347，防循环）。</li>
- * </ol>
- * 被跟随换场景（以及被扇出后的跟随）也会触发进场钩子：那次按「只跟随、不扇出」处理；它已和队长同场景，所以什么都不做，不会循环。
- *
- * <p><b>回合制战斗</b>（批次 6.3，scene-battle-spec §7.13 世界内部第 3 条）：战斗在途的队员不被拉走，解冻后补一次。
- * {@link #onBattleFreezeCleared} 由 {@code PlayerBattleService} 在三类时机调，都按「只跟随、不扇出」处理：解冻且条件删锁<b>完成之后</b>（取消备战、reaper 判废）；
- * 保留锁的解冻（备战到期、结算应用后）——这次检查会读到锁而放弃，等于空跑；销账脚本确实放掉了锁之后（位 2）——真正补上的是这一次。
- * 删锁 / 销账的结局回来时发起它的实例已经换掉（同 epoch 重进）的，或者那次删除本来就不跟着一次解冻的（备战失败 / 过期后的尽力删锁、离线取消），
- * 只要锁确实是这一次删掉 / 放掉的，就补给<b>现任实例</b>（它没有战斗冻结时）——它进场那次检查读到的还是这把锁。
- * 与基线的一处写法差异：基线在 {@code CheckFollowLeader} 的第二跳（读队长位置与自己的锁）之前、回调之后各判一次内存冻结
- * （{@code player_team.cpp:353}、{@code :402}）；Java 把锁读并进了成员关系那一次读，没有「第二跳之前」这个位置，<b>只在回调后统一判一次</b>，
- * 不做读前预判（代价：战斗中的非队长多发一次 EXISTS，结果相同）。也不能把预判加在发起读之前：成员关系那一跳不受战斗闸约束，
- * 队长在战斗中进场照样要扇出（基线 {@code player_team.cpp:327-345} 同）。
- *
- * <p>与基线的其余差异（team-spec D7–D10）：不收 {@code PlayerTeamRefreshEvent}、不缓存 TeamId（入队 / 转让 / 踢人本来就不拉人，
- * 基线的 RefreshOnly 模式只为刷新组件）；不做队友 AOI 优先级；
- * 基线的「归属交接在途 / 换图在途」守卫对应 Java 的跨节点换图在途（批次 5.2，{@link SceneWorld#switchInFlight} 为真不跟随；
- * 过了期限的 RESOLVING 槽在这次判定里就地作废、不再挡）；「会话不活」守卫在 Java 不存在（断线即移出）。
- *
- * <p>指标：每次读回来恰好计一次 {@code game.scene.team.follow{result}}（{@link TeamFollowResult}）。
+ * 组队跟随与成员关系提示（4.3b）：SQL 是权威，提示只触发强读；所有判定与 AOI 变化在场景逻辑线程。
+ * 每个进场实例同时只有一次读取。读取期间又收到提示时标脏，丢弃旧结果再读，避免同 epoch 的队长转让旧结果倒灌。
+ * 入队 / 显式归队只跟随，保留 / 离队仅刷新；进场的队长才扇出，战斗解冻后的检查不扇出。
+ * 同节点换场景沿用原通道；同场景水平距离超过 8 m 或双向不可见时，用 2.10 原语瞬移并保留落位等待。
  */
 public final class TeamFollowService implements TeamFollow {
 
     private static final Logger log = LoggerFactory.getLogger(TeamFollowService.class);
+    static final double REGROUP_DISTANCE = 8.0;
 
-    /** 读一个玩家的成员关系（生产 = {@link TeamMembershipReader#readAsync}）。不得阻塞；失败以异常完成。 */
+    /** 生产读取 SQL 权威成员索引与队伍投影；不得阻塞逻辑线程。 */
     @FunctionalInterface
     public interface MembershipReads {
         CompletionStage<TeamMembership> readAsync(long playerId);
     }
 
-    /** 一次读回来之后怎么处理（基线 FollowMode，player_team.h 的 kFollowLeader / kFollowLeaderAndFanout）。 */
-    private enum Mode {
-        /** 自己进场：非队长跟随队长，队长扇出给本节点成员。 */
-        FOLLOW_AND_FANOUT,
-        /** 被跟随 / 被扇出触发：只跟随，不扇出。 */
-        FOLLOW_ONLY
-    }
-
-    /** 读一个玩家的战斗锁在不在（生产 = {@code BattleLockReader#exists}）。不得阻塞；失败以异常完成（按在途处理）。 */
     @FunctionalInterface
     public interface BattleLockProbe {
         CompletionStage<Boolean> lockedAsync(long playerId);
+        BattleLockProbe NONE = playerId -> CompletableFuture.completedFuture(false);
+    }
 
-        /** 不读锁（测试与不接战斗的装配）：恒为「不在战斗」。 */
-        BattleLockProbe NONE = playerId -> java.util.concurrent.CompletableFuture.completedFuture(false);
+    private enum Mode { REFRESH_ONLY, FOLLOW_ONLY, FOLLOW_AND_FANOUT }
+
+    /** 只由逻辑线程读写；等待队长补读时也保留令牌，新提示会使旧归队决定失效。 */
+    private static final class ReadState {
+        final long ownerEpoch;
+        final List<Consumer<Boolean>> completions = new ArrayList<>();
+        Mode mode;
+        boolean reading = true;
+        boolean dirty;
+
+        ReadState(ScenePlayer player, Mode mode) {
+            this.ownerEpoch = player.ownerEpoch();
+            this.mode = mode;
+        }
     }
 
     private final MembershipReads reads;
     private final BattleLockProbe battleLocks;
     private final Executor logic;
     private final SceneMetrics metrics;
-    /**
-     * 正在执行一次跟随换场景（{@code world.switchScene} 是同步的，换完会同步回调 {@link #onEnteredScene}）：
-     * 这期间触发的进场钩子按「只跟随、不扇出」处理。只在逻辑线程上读写。
-     */
+    private final Map<ScenePlayer, ReadState> pending = new IdentityHashMap<>();
+    /** switchScene 同步触发的进场只能跟随，不能重新扇出。 */
     private boolean following;
 
-    /**
-     * @param reads   成员关系的异步读
-     * @param logic   投递回场景逻辑线程（停服后可能拒绝，拒绝时丢弃这次结果）
-     * @param metrics scene 指标
-     */
     public TeamFollowService(MembershipReads reads, Executor logic, SceneMetrics metrics) {
         this(reads, BattleLockProbe.NONE, logic, metrics);
     }
 
-    /**
-     * @param battleLocks 与成员关系那次读并行发的战斗锁 EXISTS（scene-battle-spec §7.13 世界内部第 3 条；存在或读失败都按在途、不跟随）
-     */
     public TeamFollowService(MembershipReads reads, BattleLockProbe battleLocks, Executor logic, SceneMetrics metrics) {
         this.reads = reads;
         this.battleLocks = battleLocks;
@@ -112,151 +83,203 @@ public final class TeamFollowService implements TeamFollow {
 
     @Override
     public void onEnteredScene(SceneWorld world, ScenePlayer player) {
-        check(world, player, following ? Mode.FOLLOW_ONLY : Mode.FOLLOW_AND_FANOUT);
+        check(world, player, following ? Mode.FOLLOW_ONLY : Mode.FOLLOW_AND_FANOUT, null);
     }
 
-    /** 战斗冻结解除后补一次跟随（基线 {@code OnBattleFreezeCleared → RefreshAndFollow}）：只跟随、不扇出。 */
     @Override
     public void onBattleFreezeCleared(SceneWorld world, ScenePlayer player) {
-        check(world, player, Mode.FOLLOW_ONLY);
+        check(world, player, Mode.FOLLOW_ONLY, null);
     }
 
-    /** 发起一次读（逻辑线程）；结果投递回逻辑线程再处理。 */
-    private void check(SceneWorld world, ScenePlayer player, Mode mode) {
-        long playerId = player.playerId();
+    @Override
+    public void onRefresh(SceneWorld world, ScenePlayer player, boolean follow) {
+        check(world, player, follow ? Mode.FOLLOW_ONLY : Mode.REFRESH_ONLY, null);
+    }
+
+    private void check(SceneWorld world, ScenePlayer player, Mode mode, Consumer<Boolean> completion) {
+        ReadState active = pending.get(player);
+        if (active != null && active.reading) {
+            active.dirty = true;
+            if (mode.ordinal() > active.mode.ordinal()) active.mode = mode;
+            if (completion != null) active.completions.add(completion);
+            return;
+        }
+        // 已读完但在等队长提示：新提示优先，旧的跟随决定不再允许执行。
+        if (active != null) finish(player, active, false);
+        ReadState state = new ReadState(player, mode);
+        if (completion != null) state.completions.add(completion);
+        pending.put(player, state);
+        read(world, player, state);
+    }
+
+    private void read(SceneWorld world, ScenePlayer player, ReadState state) {
+        state.reading = true;
+        state.dirty = false;
         try {
-            CompletionStage<TeamMembership> read = reads.readAsync(playerId);
-            java.util.concurrent.CompletableFuture<Boolean> locked = lockRead(playerId);
-            read.whenComplete((membership, failure) -> locked.whenComplete((isLocked, ignored) -> post(playerId,
-                    () -> onRead(world, player, mode, membership, failure, isLocked == null || isLocked))));
-        } catch (RuntimeException e) {
-            // 读没发出去（客户端已关闭等）：不跟随，进场 / 换场景照常
-            readFailed(playerId, e);
+            // 两项并行，超时保证断线实例不会因为一个悬挂 future 永久留在 pending 中。
+            CompletableFuture<TeamMembership> membership = reads.readAsync(player.playerId()).toCompletableFuture()
+                    .orTimeout(5, TimeUnit.SECONDS);
+            CompletableFuture<Boolean> locked = state.mode == Mode.REFRESH_ONLY
+                    ? CompletableFuture.completedFuture(false) : lockRead(player.playerId());
+            membership.whenComplete((value, failure) -> locked.whenComplete((isLocked, ignored) -> post(player.playerId(),
+                    () -> onRead(world, player, state, value, failure, isLocked == null || isLocked))));
+        } catch (RuntimeException error) {
+            readFailed(player.playerId(), error);
+            finish(player, state, false);
         }
     }
 
-    /** 战斗锁读（从不异常完成：读失败按「在途」，同基线 team.cpp:378-402 的 fail-closed）。 */
-    private java.util.concurrent.CompletableFuture<Boolean> lockRead(long playerId) {
+    private CompletableFuture<Boolean> lockRead(long playerId) {
         try {
-            return battleLocks.lockedAsync(playerId).toCompletableFuture().handle((locked, error) -> error != null || locked == null || locked);
-        } catch (RuntimeException e) {
-            return java.util.concurrent.CompletableFuture.completedFuture(true);
+            return battleLocks.lockedAsync(playerId).toCompletableFuture().orTimeout(5, TimeUnit.SECONDS)
+                    .handle((locked, error) -> error != null || locked == null || locked);
+        } catch (RuntimeException error) {
+            return CompletableFuture.completedFuture(true);
         }
     }
 
     private void post(long playerId, Runnable task) {
         try {
             logic.execute(task);
-        } catch (RejectedExecutionException e) {
-            log.debug("逻辑线程已停止，丢弃组队跟随检查 player={}", Long.toUnsignedString(playerId));
+        } catch (RejectedExecutionException error) {
+            // 逻辑执行器关闭后不从 I/O 线程触碰它所有的 map / 玩家 / 指标。
+            log.debug("逻辑线程已停止，丢弃组队检查 player={}", Long.toUnsignedString(playerId));
         }
     }
 
-    /** 读回来了（逻辑线程）。 */
-    private void onRead(SceneWorld world, ScenePlayer player, Mode mode, TeamMembership membership, Throwable failure,
-                        boolean battleLocked) {
-        try {
-            decide(world, player, mode, membership, failure, battleLocked);
-        } catch (RuntimeException e) {
-            // 钩子不得让逻辑任务带着异常结束（换场景已开始的那部分由 SceneWorld 自己保证一致）
-            metrics.teamFollow(TeamFollowResult.READ_ERROR);
-            log.error("组队跟随检查出错 player={}", Long.toUnsignedString(player.playerId()), e);
-        }
-    }
-
-    private void decide(SceneWorld world, ScenePlayer player, Mode mode, TeamMembership membership, Throwable failure,
-                        boolean battleLocked) {
-        long playerId = player.playerId();
-        if (world.playerById(playerId) != player) {
+    private void onRead(SceneWorld world, ScenePlayer player, ReadState state, TeamMembership membership,
+                        Throwable failure, boolean locked) {
+        if (pending.get(player) != state) return;
+        if (!current(world, player, state)) {
             metrics.teamFollow(TeamFollowResult.STALE);
-            log.debug("组队跟随检查读回来时玩家已离开或已重新进场，丢弃 player={}", Long.toUnsignedString(playerId));
+            finish(player, state, false);
             return;
         }
-        if (failure != null) {
-            readFailed(playerId, failure);
+        if (state.dirty) {
+            // 旧结果连 AOI 提示也不应用；新读取在旧读取完成后才发起，同 epoch 变更有确定先后。
+            read(world, player, state);
             return;
         }
-        if (!membership.inTeam()) {
-            metrics.teamFollow(TeamFollowResult.NOT_IN_TEAM);
-            return;
-        }
-        TeamInfo info = membership.info();
-        if (info == null || info.getTeamId() != membership.teamId() || info.getLeaderId() == 0) {
-            // 投影缺失（game-team 下一次提交 / 续期会重写）或与索引对不上：本次不跟随，等下一次进场
-            metrics.teamFollow(TeamFollowResult.PROJECTION_MISSING);
-            log.debug("组队投影缺失或与索引不符，不跟随 player={} team={}", Long.toUnsignedString(playerId),
-                    Long.toUnsignedString(membership.teamId()));
-            return;
-        }
-        if (!info.getMembersList().contains(playerId)) {
-            // 投影里没有自己：索引可能刚过时，等下一次进场
-            metrics.teamFollow(TeamFollowResult.NOT_MEMBER);
-            return;
-        }
-        long leaderId = info.getLeaderId();
-        if (leaderId != playerId) {
-            followLeader(world, player, leaderId, battleLocked);
-            return;
-        }
-        metrics.teamFollow(TeamFollowResult.IS_LEADER);
-        if (mode != Mode.FOLLOW_AND_FANOUT) {
-            return;
-        }
-        // 队长自己进场：本节点上的其他成员各自再读一次自己的成员关系，只跟随、不再扇出（防循环）；不在本节点的不跨节点拉人
-        for (long memberId : info.getMembersList()) {
-            if (memberId == playerId) {
-                continue;
+        state.reading = false;
+        try {
+            if (failure != null || membership == null) {
+                readFailed(player.playerId(), failure == null ? new IllegalStateException("空成员关系") : failure);
+                finish(player, state, false);
+                return;
             }
-            ScenePlayer member = world.playerById(memberId);
-            if (member != null) {
-                check(world, member, Mode.FOLLOW_ONLY);
+            TeamInfo info = membership.info();
+            if (membership.inTeam()) {
+                if (membership.epoch() == 0 || info == null || info.getTeamId() != membership.teamId() || info.getLeaderId() == 0
+                        || !info.getMembersList().contains(info.getLeaderId()) || info.getMembersCount() > 5
+                        || new HashSet<>(info.getMembersList()).size() != info.getMembersCount()) {
+                    metrics.teamFollow(TeamFollowResult.PROJECTION_MISSING);
+                    finish(player, state, false);
+                    return;
+                }
+                if (!info.getMembersList().contains(player.playerId())) {
+                    metrics.teamFollow(TeamFollowResult.NOT_MEMBER);
+                    finish(player, state, false);
+                    return;
+                }
             }
+            if (!world.applyTeamMembership(player, membership.teamId(), membership.epoch())) {
+                metrics.teamFollow(TeamFollowResult.STALE);
+                finish(player, state, false);
+                return;
+            }
+            if (!membership.inTeam()) {
+                metrics.teamFollow(TeamFollowResult.NOT_IN_TEAM);
+                finish(player, state, true);
+            } else if (state.mode == Mode.REFRESH_ONLY) {
+                metrics.teamFollow(TeamFollowResult.REFRESHED);
+                finish(player, state, true);
+            } else if (info.getLeaderId() == player.playerId()) {
+                metrics.teamFollow(TeamFollowResult.IS_LEADER);
+                finish(player, state, true);
+                if (state.mode == Mode.FOLLOW_AND_FANOUT) {
+                    for (long memberId : info.getMembersList()) {
+                        ScenePlayer member = world.playerById(memberId);
+                        if (memberId != player.playerId() && member != null) check(world, member, Mode.FOLLOW_ONLY, null);
+                    }
+                }
+            } else if (!followLeader(world, player, state, info.getLeaderId(), locked)) {
+                finish(player, state, true);
+            }
+        } catch (RuntimeException error) {
+            readFailed(player.playerId(), error);
+            finish(player, state, false);
         }
     }
 
-    /** 跟随队长到它所在的场景实例（逻辑线程）。 */
-    private void followLeader(SceneWorld world, ScenePlayer player, long leaderId, boolean battleLocked) {
+    private boolean current(SceneWorld world, ScenePlayer player, ReadState state) {
+        return world.playerById(player.playerId()) == player && player.ownerEpoch() == state.ownerEpoch;
+    }
+
+    /** 返回 true 表示在等队长补读；调用方保留令牌直到回调或新提示使它失效。 */
+    private boolean followLeader(SceneWorld world, ScenePlayer player, ReadState state, long leaderId,
+                                 boolean battleLocked) {
         if (world.switchInFlight(player)) {
-            // 自己有在途的跨节点换图（选目标中或冻结中，scene-handoff-spec §5.5；基线 IsFollowBlocked 查冻结或交接意图，
-            // player_team.cpp:65-75）：换图的结局优先，不跟随。经世界的「在途」判定而不是直接看 switchPhase：过了期限的 RESOLVING 槽
-            // （结果回调丢了）在这里就地作废、不再挡——否则这名队员的跟随会一直被一个死槽挡住，直到他再发 63 或有人对他备战
-            // （与回合制战斗的备战闸同口径，审计 GAT-14 的做法延伸）
             metrics.teamFollow(TeamFollowResult.SWITCHING);
-            log.debug("有在途的跨节点换图，不跟随 player={} 阶段={}", Long.toUnsignedString(player.playerId()),
-                    player.switchPhase());
-            return;
+            return false;
         }
         if (player.inBattle()) {
-            // 回合制战斗在途（内存冻结，scene-battle-spec §7.13）：不跟随，解冻后由 onBattleFreezeCleared 补一次
             metrics.teamFollow(TeamFollowResult.IN_BATTLE);
-            return;
+            return false;
         }
         if (battleLocked) {
-            // 锁存在（或读锁失败）：这一局还没完（已结算待落盘时锁也还在），不跟随；锁真正放掉时由销账回调补一次
             metrics.teamFollow(TeamFollowResult.BATTLE_LOCK);
-            return;
+            return false;
         }
         ScenePlayer leader = world.playerById(leaderId);
         if (leader == null) {
             metrics.teamFollow(TeamFollowResult.LEADER_NOT_ON_NODE);
-            log.debug("队长不在本节点，不跟随 player={} leader={}", Long.toUnsignedString(player.playerId()),
-                    Long.toUnsignedString(leaderId));
-            return;
+            return false;
+        }
+        // 队长 PRECHECK / RESOLVING 尚未失去可跟随性；只检查已进入冻结的归属交接。
+        if (leader.frozen()) {
+            metrics.teamFollow(TeamFollowResult.LEADER_FROZEN);
+            return false;
+        }
+        if (leader.teamId() != player.teamId()) {
+            check(world, leader, Mode.REFRESH_ONLY, success -> {
+                if (pending.get(player) != state) return;
+                if (!success || !current(world, player, state)) {
+                    metrics.teamFollow(TeamFollowResult.STALE);
+                    finish(player, state, false);
+                    return;
+                }
+                try {
+                    if (world.playerById(leaderId) != leader || leader.teamId() != player.teamId()) {
+                        metrics.teamFollow(TeamFollowResult.PROJECTION_MISSING);
+                        finish(player, state, false);
+                        return;
+                    }
+                    // 补读队长可能跨过离队 / 转让 / 战斗锁变化。重新读自己，不能继续使用等待前的决定。
+                    finish(player, state, true);
+                    check(world, player, state.mode, null);
+                } catch (RuntimeException error) {
+                    readFailed(player.playerId(), error);
+                    finish(player, state, false);
+                }
+            });
+            return true;
         }
         if (leader.scene() == player.scene()) {
-            metrics.teamFollow(TeamFollowResult.SAME_SCENE);
-            return;
+            if (shouldRegroup(player.position().horizontalDistance(leader.position()), world.mutuallyVisible(player, leader))) {
+                Rotation facing = leader.rotation() == null ? Rotation.getDefaultInstance() : leader.rotation();
+                TeleportResult result = world.teleportWithinScene(player, leader.position(), facing, TeleportReason.TEAM_REGROUP);
+                metrics.teamFollow(result == TeleportResult.TELEPORTED ? TeamFollowResult.REGROUPED : TeamFollowResult.REGROUP_REJECTED);
+            } else {
+                metrics.teamFollow(TeamFollowResult.SAME_SCENE);
+            }
+            return false;
         }
         if (leader.scene().draining()) {
-            // 批次 5.1 §4.13：不跟进排空中的频道（基线跟随可以进，B5；scene-channels-spec D11）。队长随后被改派时以「自己进场」
-            // 触发扇出，把本节点队员拉到它的新频道，队伍照样收拢，不会被反复拉回排空频道再改派。
             metrics.teamFollow(TeamFollowResult.LEADER_SCENE_DRAINING);
-            log.debug("队长所在频道在排空，不跟随 player={} leader={} scene_id={}", Long.toUnsignedString(player.playerId()),
-                    Long.toUnsignedString(leaderId), Long.toUnsignedString(leader.scene().sceneId()));
-            return;
+            return false;
         }
-        long from = player.scene().sceneId();
-        long to = leader.scene().sceneId();
+        // 换场景会同步进入下一次检查；旧状态必须先退休，不能把新场景检查合进已完成的读取。
+        finish(player, state, true);
         boolean outer = following;
         following = true;
         try {
@@ -265,8 +288,16 @@ public final class TeamFollowService implements TeamFollow {
             following = outer;
         }
         metrics.teamFollow(TeamFollowResult.FOLLOWED);
-        log.info("跟随队长换场景 player={} leader={} {} -> {}", Long.toUnsignedString(player.playerId()),
-                Long.toUnsignedString(leaderId), from, to);
+        return false;
+    }
+
+    static boolean shouldRegroup(double horizontalDistance, boolean mutuallyVisible) {
+        return horizontalDistance > REGROUP_DISTANCE || !mutuallyVisible;
+    }
+
+    private void finish(ScenePlayer player, ReadState state, boolean success) {
+        if (!pending.remove(player, state)) return;
+        for (Consumer<Boolean> completion : state.completions) completion.accept(success);
     }
 
     private void readFailed(long playerId, Throwable failure) {

@@ -40,6 +40,11 @@ public final class GlobalMatchService implements AutoCloseable {
     private final PlayerStatusReader players;
     private final PlacementStore projections;
     private final GatherHooks hooks;
+    private com.game.match.metrics.MatchMetrics metrics;
+    public GlobalMatchService withMetrics(com.game.match.metrics.MatchMetrics metrics) {
+        this.metrics = Objects.requireNonNull(metrics);
+        return this;
+    }
     private com.game.match.spectate.SqlSpectateStore spectators;
     public GlobalMatchService withSpectators(com.game.match.spectate.SqlSpectateStore spectators){this.spectators=spectators;return this;}
     private void exitSpectators(List<ObserverExitOriginal> originals,Deadline deadline){
@@ -156,13 +161,37 @@ public final class GlobalMatchService implements AutoCloseable {
         return CommitNetworkProbeResponse.newBuilder().setExpiresAtMs(expiry).build();
     }
     public JoinQueueResponse join(SessionContext session,JoinQueueRequest request,Deadline deadline) {
+        var response = joinOriginal(session, request, deadline);
+        if (metrics != null) {
+            var outcome = response.getErrorMessage().equals(MatchTip.JOIN_TEAM_SIZE_OVER_LIMIT.proto())
+                    ? com.game.match.metrics.MatchMetrics.JoinOutcome.TEAM_SIZE_OVER_LIMIT
+                    : switch (response.getErrorCode()) {
+                        case MatchTips.IN_BATTLE -> com.game.match.metrics.MatchMetrics.JoinOutcome.IN_BATTLE;
+                        case MatchTips.ALREADY_QUEUED -> com.game.match.metrics.MatchMetrics.JoinOutcome.ALREADY_QUEUED;
+                        case MatchTips.MODE_NOT_OPEN -> com.game.match.metrics.MatchMetrics.JoinOutcome.MODE_NOT_OPEN;
+                        case MatchTips.TEAM_SIZE_NOT_CONFIGURED -> com.game.match.metrics.MatchMetrics.JoinOutcome.NO_TEAM_SIZE;
+                        case MatchTips.NOT_IN_SCENE -> com.game.match.metrics.MatchMetrics.JoinOutcome.NOT_IN_SCENE;
+                        case 0 -> response.hasErrorMessage() ? com.game.match.metrics.MatchMetrics.JoinOutcome.INTERNAL
+                                : com.game.match.metrics.MatchMetrics.JoinOutcome.OK;
+                        default -> com.game.match.metrics.MatchMetrics.JoinOutcome.INTERNAL;
+                    };
+            int size = request.getTeamSize() == 0 ? props.pveTeamSizeFor(request.getBattleConfigId()) : request.getTeamSize();
+            metrics.joinQueue(request.getModeValue(), size, outcome);
+        }
+        return response;
+    }
+
+    private JoinQueueResponse joinOriginal(SessionContext session,JoinQueueRequest request,Deadline deadline) {
         try {GlobalMatchStore.validateRequestId(request.getRequestId());}
         catch(IllegalArgumentException e){return JoinQueueResponse.newBuilder().setErrorMessage(com.game.proto.TipInfoMessage.newBuilder().setId(MatchTips.INVALID_PARAMETER)).build();}
         try {
             current(session,deadline);
             var replay=store.existingJoin(session,request);if(replay!=null){if(!replay.getResponsePayload().isEmpty())try{return JoinQueueResponse.parseFrom(replay.getResponsePayload());}catch(com.google.protobuf.InvalidProtocolBufferException bad){throw new IllegalStateException("原Join回执损坏",bad);}return resumeJoin(replay,deadline);}
-            int mode=request.getModeValue(),size=MatchModes.requestedPlayers(mode,props.pveTeamSizeFor(request.getBattleConfigId()),request.getTeamSize());
-            if(size<1) return MatchTips.joinRejected(MatchTip.JOIN_MODE_NOT_OPEN);
+            int mode=request.getModeValue(),maximum=props.pveTeamSizeFor(request.getBattleConfigId());
+            int size=MatchModes.requestedPlayers(mode,maximum,request.getTeamSize());
+            if(mode==MatchModes.PVE_TEAM&&maximum==0)return MatchTips.joinRejected(MatchTip.JOIN_TEAM_SIZE_NOT_CONFIGURED);
+            if(size<1) return MatchTips.joinRejected(mode==MatchModes.PVE_TEAM
+                    ? MatchTip.JOIN_TEAM_SIZE_OVER_LIMIT : MatchTip.JOIN_MODE_NOT_OPEN);
             if(players.inBattle(session.getPlayerId(),deadline))return MatchTips.joinRejected(MatchTip.JOIN_IN_BATTLE);
             var location=players.location(session.getPlayerId(),deadline);
             if(location.location()==null||location.status()!=com.game.discovery.location.PlayerLocationDirectory.LocationStatus.ONLINE)

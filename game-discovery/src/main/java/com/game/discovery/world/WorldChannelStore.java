@@ -27,7 +27,7 @@ public interface WorldChannelStore {
     /** {@code GET game:world:{z:<zone>}:ver}（不存在为 0）。scene 节点每秒调一次，与上次应用的相同就不整读（§4.10.1）。 */
     long planVersion(int zoneId);
 
-    /** 版本号与整张频道表，一段只读 Lua 一次取回（scene 节点拉取，§4.10.1）。 */
+    /** 版本号与整张频道表，从主节点用一段只读 Lua 一次取回（节点拉取/主动切线预检/展示目录）。 */
     WorldPlan readPlan(int zoneId);
 
     /** 版本号、频道表、期望数、冷却与 Redis TIME，一段只读 Lua 一次取回（领导者一拍的输入，§4.6.1）。 */

@@ -115,10 +115,21 @@ class TeamScenarioTest {
         RobotOptions options = RobotOptions.parse(List.of("team", "--run-tag", "x1"),
                 Map.of(RobotOptions.PASSWORD_ENV, "p"), 0);
         assertThat(options.scenario()).isEqualTo(RobotOptions.Scenario.TEAM);
+        assertThat(options.teamRegroupProbe()).isFalse();
         assertThat(TeamScenario.accountName(options.accountPrefix(), options.runTag(), "a")).isEqualTo("robot_java_tmx1_a");
         assertThat(TeamScenario.accountName(options.accountPrefix(), options.runTag(), "e")).hasSize(
                 TeamScenario.accountName(options.accountPrefix(), options.runTag(), "a").length());
         assertThat(RobotOptions.usage()).contains("|team>", "  team ");
+    }
+
+    @Test
+    void 归队探针显式开启且拒绝生产禁用dev的组合() throws Exception {
+        var env = Map.of(RobotOptions.PASSWORD_ENV, "p");
+        assertThat(RobotOptions.parse(List.of("team", "--team-regroup-probe"), env, 0).teamRegroupProbe()).isTrue();
+        assertThat(RobotOptions.parse(List.of("team", "--team-regroup-probe", "false"), env, 0).teamRegroupProbe()).isFalse();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> RobotOptions.parse(
+                List.of("team", "--team-regroup-probe", "--expect-dev", "deny"), env, 0))
+                .hasMessageContaining("必须使用 --expect-dev allow");
     }
 
     @Test

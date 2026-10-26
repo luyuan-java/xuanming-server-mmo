@@ -22,6 +22,7 @@ import com.game.robot.scenario.BattleScenario;
 import com.game.robot.scenario.BattleSettleScenario;
 import com.game.robot.scenario.BattleSmokeScenario;
 import com.game.robot.scenario.ChatScenario;
+import com.game.robot.scenario.ChannelScenario;
 import com.game.robot.scenario.CheckReport;
 import com.game.robot.scenario.CrossNodeScenario;
 import com.game.robot.scenario.CrossZoneGate;
@@ -40,6 +41,7 @@ import com.game.robot.scenario.MirrorScenario;
 import com.game.robot.scenario.MovementScenario;
 import com.game.robot.scenario.OrderingScenario;
 import com.game.robot.scenario.PetScenario;
+import com.game.robot.scenario.PveTeamSizeScenario;
 import com.game.robot.scenario.QueueScenario;
 import com.game.robot.scenario.RateLimitScenario;
 import com.game.robot.scenario.ReconnectScenario;
@@ -170,6 +172,8 @@ public final class RobotMain {
                                 options.requestTimeout());
                         title = "game-robot team：" + scenario.accountA() + " 等，" + target + " cross-zone=" + options.crossZone().wire()
                                 + " visit-zone=" + options.visitZoneId() + " team-cross-zone=" + (options.teamCrossZoneAllowed() ? "allow" : "deny");
+                        if (options.teamRegroupProbe()) scenario.withRegroupProbe(new SceneAdminClient(options.sceneAdminUrl(),
+                                AdminClient.resolveToken(env.get("GAME_ADMIN_TOKEN")), options.requestTimeout()));
                         out.println("== " + title + " 开始 ==");
                         report = scenario.run();
                         resultLine = scenario.resultLine();
@@ -225,6 +229,20 @@ public final class RobotMain {
                     out.println("== " + title + " 开始 ==");
                     report = scenario.run();
                     resultLine = scenario.resultLine();
+                } else if (options.scenario() == RobotOptions.Scenario.CHANNEL_SMOKE) {
+                    ChannelScenario scenario = new ChannelScenario(flow, registry, options.accountPrefix(), options.runTag(),
+                            options.zoneId(), options.requestTimeout(), options.observeTimeout());
+                    title = "game-robot channel-smoke：" + scenario.account() + "，" + target;
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                    resultLine = scenario.resultLine();
+                } else if (options.scenario() == RobotOptions.Scenario.PVE_TEAM_SIZE) {
+                    PveTeamSizeScenario scenario = new PveTeamSizeScenario(client, flow, registry,
+                            options.accountPrefix(), options.runTag(), options.requestTimeout());
+                    title = "game-robot pve-team-size：" + scenario.firstAccount() + " 等，" + target;
+                    out.println("== " + title + " 开始 ==");
+                    report = scenario.run();
+                    resultLine = scenario.resultLine();
                 } else if (options.scenario() == RobotOptions.Scenario.ORDERING_SMOKE) {
                     OrderingScenario scenario = new OrderingScenario(client, flow, registry, options.password(), options.accountPrefix(),
                             options.runTag(), options.requestTimeout(), options.enterSceneTimeout());
@@ -235,7 +253,7 @@ public final class RobotMain {
                 } else if (options.scenario() == RobotOptions.Scenario.GUILD) {
                     // 跨区第 4 步的 C 经 --visit-zone 登录
                     try (RobotClient visitClient = clientFor(options, options.visitZoneId(), ids, redirectToGateId)) {
-                        GuildScenario scenario = new GuildScenario(flow, visitFor(options, visitClient), registry, options.accountPrefix(),
+                        GuildScenario scenario = new GuildScenario(client, flow, visitFor(options, visitClient), registry, options.accountPrefix(),
                                 options.runTag(), options.zoneId(), options.requestTimeout());
                         title = "game-robot guild：" + scenario.accountA() + " 等，" + target + " cross-zone=" + options.crossZone().wire()
                                 + " visit-zone=" + options.visitZoneId();

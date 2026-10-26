@@ -134,6 +134,64 @@ class GuildInternalQueriesTest {
     }
 
     @Test
+    void 调大保留期不能恢复已清理历史的可证明性_每次查询都重读水位() {
+        java.util.concurrent.atomic.AtomicLong watermark = new java.util.concurrent.atomic.AtomicLong(NOW - RETENTION.toMillis());
+        InMemoryAssetStore cleaned = new InMemoryAssetStore() {
+            @Override public long terminalCleanupWatermark(Deadline deadline) { return watermark.get(); }
+        };
+        GuildInternalQueries q = new GuildInternalQueries(cleaned, Duration.ofDays(60), Runnable::run, metrics, () -> NOW, 3500);
+        long cutoff = watermark.get() + 3_600_000;
+        var rejected = call(q, req(NOW - Duration.ofDays(45).toMillis(), 1L));
+        assertThat(rejected.getResult()).isEqualTo(ListAppliedResult.LIST_APPLIED_RESULT_RETENTION_REJECTED);
+        assertThat(rejected.getCutoffMs()).isEqualTo(cutoff);
+        assertThat(call(q, req(cutoff, 1L)).getResult()).isEqualTo(ListAppliedResult.LIST_APPLIED_RESULT_OK);
+        watermark.incrementAndGet();
+        assertThat(call(q, req(cutoff, 1L)).getResult()).isEqualTo(ListAppliedResult.LIST_APPLIED_RESULT_RETENTION_REJECTED);
+        // 收紧保留期时配置下界优先，旧水位不能把窗口放宽。
+        var tighter = new GuildInternalQueries(cleaned, Duration.ofDays(7), Runnable::run, metrics, () -> NOW, 3500);
+        assertThat(call(tighter, req(cutoff + 1, 1L)).getCutoffMs()).isEqualTo(NOW - Duration.ofDays(7).toMillis() + 3_600_000);
+    }
+
+    @Test
+    void 水位读取在工作池上_故障或损坏回UNAVAILABLE_不碰SQL也不泄露内部错误() {
+        List<Runnable> pending = new ArrayList<>();
+        List<String> calls = new ArrayList<>();
+        InMemoryAssetStore failing = new InMemoryAssetStore() {
+            @Override public long terminalCleanupWatermark(Deadline deadline) {
+                calls.add("watermark");
+                throw new Deadline.DependencyException("secret-host Redis disconnected");
+            }
+            @Override public AppliedOpsPage listAppliedSince(com.game.guild.asset.AppliedOpsQuery query, Deadline deadline) {
+                throw new AssertionError("水位不可读不能查 SQL 后当作干净");
+            }
+        };
+        var future = new GuildInternalQueries(failing, RETENTION, pending::add, metrics, () -> NOW, 3500)
+                .listAppliedAssetOpsSince(req(NOW, 1L).build());
+        assertThat(calls).isEmpty();
+        assertThat(future).isNotDone();
+        pending.removeFirst().run();
+        assertThat(calls).containsExactly("watermark");
+        assertThat(future.join().getResult()).isEqualTo(ListAppliedResult.LIST_APPLIED_RESULT_UNAVAILABLE);
+        assertThat(future.join().getDetail()).isEqualTo("guild asset op cleanup watermark is not available");
+        assertThat(count("unavailable")).isEqualTo(1);
+    }
+
+    @Test
+    void 未装配水位不能以零冒充从未清理_时间戳溢出也拒绝() {
+        var tx = new com.game.guild.store.BackgroundTx(wait -> {
+            throw new AssertionError("水位未装配不许碰库");
+        }, 3, com.game.guild.store.BackgroundTx.Listener.NONE);
+        var missing = new com.game.guild.asset.JdbcGuildAssetStore(tx, com.game.guild.asset.GuildAssetStore.Listener.NONE);
+        assertThat(call(new GuildInternalQueries(missing, RETENTION, Runnable::run, metrics, () -> NOW, 3500), req(NOW, 1L))
+                .getResult()).isEqualTo(ListAppliedResult.LIST_APPLIED_RESULT_UNAVAILABLE);
+        InMemoryAssetStore invalid = new InMemoryAssetStore() {
+            @Override public long terminalCleanupWatermark(Deadline deadline) { return Long.MAX_VALUE; }
+        };
+        assertThat(call(new GuildInternalQueries(invalid, RETENTION, Runnable::run, metrics, () -> NOW, 3500), req(NOW, 1L))
+                .getResult()).isEqualTo(ListAppliedResult.LIST_APPLIED_RESULT_UNAVAILABLE);
+    }
+
+    @Test
     void 结果标签启动即预建() {
         for (String result : List.of("ok_empty", "ok_rows", "invalid", "retention", "unavailable", "error")) {
             assertThat(count(result)).isZero();

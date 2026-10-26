@@ -41,6 +41,9 @@ message SelectSwitchTargetRequest {
   // 期望的场景配置（地图）；want_scene_id 为 0 时按它选频道（排除 from_scene_id），
   // want_scene_id 非 0 时用来校验该场景的配置（不符即拒）；0 表示不指定。
   uint32 want_scene_config_id = 6;
+  // 仅客户端显式指定主世界 scene_id 时置位；登录、跟随、疏散、自动选图与交接重放不置位。
+  // 只读校验主动切线政策；预检拒绝不写冷却或预占，通过后保留既有软预占，冷却仍由成功交接写入。
+  bool client_channel_pick = 7;
 }
 
 message SelectSwitchTargetResponse {
@@ -49,6 +52,9 @@ message SelectSwitchTargetResponse {
   uint32 scene_node_id = 2;
   uint64 scene_id = 3;
   uint32 scene_config_id = 4;
+  // 主动切线预检通过后的政策快照；0 表示不计冷却。源 scene 在本地切换成功 / SQL 交接确认后写 TTL，
+  // 不得在收到本响应时起算，也不得把失败的切换写成成功。
+  uint32 switch_cooldown_seconds = 5;
 }
 
 // scene → scene-manager：为一个新的镜像 / 副本实例取全服 scene_id 并定放置（批次 5.3，docs/porting/dungeon-mirror-spec.md §6.5、§6.6；

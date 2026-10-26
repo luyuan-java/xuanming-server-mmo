@@ -75,7 +75,8 @@ public final class EconomyFixtures {
     /** 资产 Store（后台写走 BackgroundTx）。 */
     public static JdbcGuildAssetStore assets(GuildMysqlFixture db, BackgroundTx.Listener background,
                                              GuildAssetStore.Listener listener) {
-        return new JdbcGuildAssetStore(backgroundTx(db, background), listener);
+        return new JdbcGuildAssetStore(backgroundTx(db, background), listener,
+                new com.game.guild.asset.InMemoryTerminalCleanupWatermark());
     }
 
     /** 每次调用一个宽裕的截止（关心的是 SQL 行为，不是超时）。 */

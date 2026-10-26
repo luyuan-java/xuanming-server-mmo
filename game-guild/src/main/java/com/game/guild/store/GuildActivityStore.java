@@ -33,6 +33,12 @@ public final class GuildActivityStore {
             super(reason);
         }
     }
+    /** 尚未证明完整终局：只能保留原 ACTIVE 重试，不能按确定性结算失败隔离销账。 */
+    public static final class UnprovenResult extends SQLException {
+        public UnprovenResult(String reason) {
+            super(reason);
+        }
+    }
     public static final class Rejected extends RuntimeException {
         public final int tip;
         public final List<String> parameters;
@@ -614,6 +620,8 @@ public final class GuildActivityStore {
             if (record.getState() == 3) return null;
             var reply = proof.response();
             if (!proof.terminal()) {
+                if (reply.getFormationState() == 5)
+                    throw new SQLException("历练取消回执与COMPLETE终局冲突，等待原战报结算");
                 if (reply.getBattleId() != 0) bindBattle(s,original,reply.getBattleId(),now);
                 return null;
             }
@@ -652,11 +660,8 @@ public final class GuildActivityStore {
         if (event.getActivityContext().getKindValue() != 1)
             return;
         var context = event.getActivityContext();
-        if (event.getBattleId() == 0 || context.getGuildId() == 0 || context.getActivityId() == 0 || context.getPeriodKey() == 0
-                || context.getGuildPeriodKey() == 0 || context.getLaunchRequestId() == 0 || event.getMatchMode() != MatchMode.MATCH_MODE_PVE_TEAM_VALUE)
-            throw new InvalidResult("历练战报上下文不完整");
-        var original = launchOriginal(context.getLaunchRequestId(),d);
-        if (!TrialLaunchAuthority.start(original).getActivityContext().equals(context)) throw new InvalidResult("历练战报不属于永久开战原件");
+        var original = terminalOriginal(event, d);
+        Set<Long> team = terminalRoster(TrialLaunchAuthority.start(original), event);
         byte[] raw = event.toByteArray();
         byte[] digest;
         try {
@@ -705,23 +710,6 @@ public final class GuildActivityStore {
                 throw new InvalidResult("历练战报超过安全计数保留窗口，需人工处理");
             // RPC未知时后台重投原request_id取回同battleID，确认后才允许结果关联。
 
-            // 名单只取永久开战原件；客户端房间投影被清理后仍可结算同一局。
-            StartActivityBattleRequest start = TrialLaunchAuthority.start(original);
-            Set<Long> team = new HashSet<>();
-            int teamZeroCount = 0;
-            for (var t : event.getTeamsList())
-                if (t.getTeamIndex() == 0) {
-                    teamZeroCount++;
-                    for (long p : t.getPlayerIdsList())
-                        if (p == 0 || !team.add(p))
-                            throw new InvalidResult("历练战报己方名单重复或为0");
-                }
-            if (teamZeroCount != 1)
-                throw new InvalidResult("历练战报缺少唯一己方队伍");
-            if (!new HashSet<>(start.getMemberPlayerIdsList()).equals(team))
-                throw new InvalidResult("历练战报名单与永久原同意不符");
-            if (start.getBattleConfigId() != event.getBattleConfigId() || event.getOutcomeValue() == 1 && event.getWinnerTeamIndex() != 0)
-                throw new InvalidResult("历练战报副本或胜方冲突");
             var row = tables.guildActivity().find(context.getActivityId()).orElse(null);
             if (guild != null && row != null && row.getType() == 3 && event.getOutcomeValue() == 1) {
                 var players = new ArrayList<>(team);
@@ -735,6 +723,14 @@ public final class GuildActivityStore {
                                     r -> u64(r, 1), u64(guild), u64(player));
                     if (joined != null)
                         qualified.add(player);
+                }
+                if (!qualified.isEmpty()) {
+                    // 只有完整终局已绑定原件后，确定性的奖励配置错误才允许走POISON；事务回滚全部奖励副作用。
+                    try {
+                        ActivityRules.buildRewardBundle(row.getRewardId(), key -> tables.reward().find(key).orElse(null));
+                    } catch (IllegalStateException invalidConfig) {
+                        throw new InvalidResult("历练奖励配置不可结算：" + invalidConfig.getMessage());
+                    }
                 }
                 var t = jdbc(s, d);
                 for (long player : qualified) {
@@ -764,6 +760,45 @@ public final class GuildActivityStore {
             closeTerminalLobby(s, original, event.getBattleId(), null);
             return null;
         });
+    }
+    private GuildTrialLaunchOriginal terminalOriginal(BattleResultEvent event, Deadline d) throws SQLException {
+        if (event.getBattleId() == 0 || event.getFinishedAtMs() == 0 || event.getOutcomeValue() < 1 || event.getOutcomeValue() > 3
+                || event.getMatchMode() != MatchMode.MATCH_MODE_PVE_TEAM_VALUE
+                || event.getActivityContext().getKindValue() != 1 || event.getActivityContext().getLaunchRequestId() == 0)
+            throw new UnprovenResult("历练战报缺少完整终局，保留原ACTIVE");
+        var record = baseSql.read(d, s -> TrialLaunchAuthority.load(s, event.getActivityContext().getLaunchRequestId(), false));
+        var original = TrialLaunchAuthority.original(record);
+        if (record.getBattleId() != event.getBattleId())
+            throw new UnprovenResult("历练战报缺少原开战对局绑定，保留原ACTIVE");
+        terminalRoster(TrialLaunchAuthority.start(original), event);
+        return original;
+    }
+    /** 纯终局核验；名单取永久原件，死亡成员仍可得奖，逃跑与死亡仅各自要求是原名单的无重复子集。 */
+    static Set<Long> terminalRoster(StartActivityBattleRequest start, BattleResultEvent event) throws UnprovenResult {
+        if (event.getBattleId() == 0 || event.getFinishedAtMs() == 0 || event.getOutcomeValue() < 1 || event.getOutcomeValue() > 3
+                || event.getMatchMode() != MatchMode.MATCH_MODE_PVE_TEAM_VALUE || event.getActivityContext().getKindValue() != 1
+                || !start.getActivityContext().equals(event.getActivityContext()) || start.getBattleConfigId() != event.getBattleConfigId()
+                || event.getOutcomeValue() == 1 && event.getWinnerTeamIndex() != 0)
+            throw new UnprovenResult("历练战报终局、副本或上下文不属于永久开战原件");
+        Set<Long> roster = new HashSet<>(start.getMemberPlayerIdsList());
+        Set<Long> team = new HashSet<>();
+        int teamZeroCount = 0;
+        for (var t : event.getTeamsList())
+            if (t.getTeamIndex() == 0) {
+                teamZeroCount++;
+                for (long player : t.getPlayerIdsList())
+                    if (!roster.contains(player) || player == 0 || !team.add(player))
+                        throw new UnprovenResult("历练战报己方名单越界或重复");
+            }
+        if (teamZeroCount != 1 || !roster.equals(team))
+            throw new UnprovenResult("历练战报缺少唯一完整己方名单");
+        for (var subset : List.of(event.getFledPlayerIdsList(), event.getDeadPlayerIdsList())) {
+            Set<Long> seen = new HashSet<>();
+            for (long player : subset)
+                if (!roster.contains(player) || !seen.add(player))
+                    throw new UnprovenResult("历练战报逃跑或死亡名单越界或重复");
+        }
+        return Set.copyOf(team);
     }
     public int enqueueRewards(long now, Deadline d) throws SQLException {
         var due = sql.read(d,
@@ -830,6 +865,13 @@ public final class GuildActivityStore {
             return null;
         });
     }
+    /** 巡检在外部I/O前推进排序水位；坏记录和依赖故障不得持续霸占首批100条。 */
+    public void deferBattleInspection(long id, long now, Deadline d) throws SQLException {
+        baseSql.tx(d, s -> {
+            s.update("UPDATE guild_trial_battle SET next_inspect_ms=? WHERE battle_id=? AND state IN(1,3)", now + 30000, u64(id));
+            return null;
+        });
+    }
     public void poison(String topic, int partition, long offset, byte[] payload, long now, Deadline d) throws SQLException {
         sql.tx(d, s -> {
             s.update("INSERT IGNORE INTO guild_activity_result_poison(partition_id,offset_id,payload,topic,created_ms) VALUES(?,?,?,?,?)",
@@ -838,12 +880,16 @@ public final class GuildActivityStore {
         });
     }
     public void poisonBattle(long battle, String topic, int partition, long offset, byte[] payload, long now, Deadline d) throws SQLException {
+        BattleResultEvent event;
+        try { event = BattleResultEvent.parseFrom(payload); }
+        catch (com.google.protobuf.InvalidProtocolBufferException malformed) { throw new UnprovenResult("历练隔离缺少可解析的完整终局"); }
+        if (event.getBattleId() != battle) throw new UnprovenResult("历练隔离战报与待结算对局不符");
+        var original = terminalOriginal(event, d);
         byte[] contextBytes = baseSql.read(d,s -> s.one("SELECT context_proto FROM guild_trial_battle WHERE battle_id=?",r -> r.getBytes(1),u64(battle)));
         if (contextBytes == null) throw new SQLException("历练隔离缺少已绑定对局，保留ACTIVE等待原开战恢复");
         BattleActivityContext context;
         try { context = BattleActivityContext.parseFrom(contextBytes); }
         catch (com.google.protobuf.InvalidProtocolBufferException bad) { throw new SQLException("历练隔离原上下文损坏",bad); }
-        var original = launchOriginal(context.getLaunchRequestId(),d);
         if (!TrialLaunchAuthority.start(original).getActivityContext().equals(context)) throw new SQLException("历练隔离原件不符");
         var observed = baseSql.read(d,s -> TrialLaunchAuthority.load(s,original.getRequestId(),false));
         if (observed != null && observed.getState() == 3) {

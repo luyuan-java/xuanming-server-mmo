@@ -34,6 +34,10 @@ public enum MatchTip {
     JOIN_MODE_NOT_OPEN(MatchTips.MODE_NOT_OPEN, "该匹配模式未开放"),
     /** 第 2a 行：PVE_TEAM 且该副本没配组队人数。 */
     JOIN_TEAM_SIZE_NOT_CONFIGURED(MatchTips.TEAM_SIZE_NOT_CONFIGURED, "该副本未开放组队"),
+    /** PVE 人数档超过该副本上限（uint32 口径）。 */
+    JOIN_TEAM_SIZE_OVER_LIMIT(MatchTips.MODE_NOT_OPEN, "该副本不支持这个队伍人数"),
+    /** 仅 dev/test 的旧 Redis 兼容路径没有独立人数档，不得静默按上限排错队。 */
+    JOIN_TEAM_SIZE_REQUIRES_GLOBAL(MatchTips.MODE_NOT_OPEN, "该匹配模式暂不支持指定人数"),
     /** 第 8 行：没有在线的位置记录。 */
     JOIN_NOT_IN_SCENE(MatchTips.NOT_IN_SCENE, "请先进入场景"),
 

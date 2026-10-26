@@ -743,11 +743,13 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
 
     /**
-     * 装填回合窗口（{@code ArmRoundTimer}，{@code room.cpp:1022-1037}）：装填那一刻全员就绪（含空真）就是 2000 ms，否则 6000 ms；
+     * 装填回合窗口：全员就绪（含空真）取 max(2000, 上一回合出手单位数 × 250) ms，否则 6000 ms；
      * 之后切换挂机不改变本回合的窗口。
      */
     private void armRoundTimer(BattleRoom room) {
-        long windowMs = room.engine.allPlayersReady() ? BattleConstants.AUTO_ROUND_INTERVAL_MS : BattleConstants.ROUND_DURATION_MS;
+        long windowMs = room.engine.allPlayersReady()
+                ? BattleConstants.autoRoundIntervalMsFor(room.engine.lastActionOrder().size())
+                : BattleConstants.ROUND_DURATION_MS;
         room.actionDeadlineMs = clock.epochMillis() + windowMs;
         room.roundTimer = scheduler.after(windowMs, () -> {
             if (isCurrent(room)) {

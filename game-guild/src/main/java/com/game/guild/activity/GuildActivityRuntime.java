@@ -127,7 +127,8 @@ public final class GuildActivityRuntime implements SmartLifecycle {
                     return;
                 try { launch(id); }
                 catch (Exception failure) {
-                    store.deferLaunch(id,System.currentTimeMillis(),Deadline.after(1000));
+                    try { store.deferLaunch(id,System.currentTimeMillis(),Deadline.after(1000)); }
+                    catch (Exception deferFailure) { failure.addSuppressed(deferFailure); }
                     failed("launch",failure);
                 }
             }
@@ -139,21 +140,28 @@ public final class GuildActivityRuntime implements SmartLifecycle {
             for (var battle : store.unsettled(Deadline.after(1500), System.currentTimeMillis())) {
                 if (!running)
                     return;
-                var bucket = redis.<byte[]>getBucket(keys.battleActivityResult(battle.id()), ByteArrayCodec.INSTANCE);
-                byte[] raw = bucket.getAsync().toCompletableFuture().get(800, TimeUnit.MILLISECONDS);
-                if (raw != null) {
-                    try {
-                        settle(BattleResultEvent.parseFrom(raw));
-                    } catch (com.google.protobuf.InvalidProtocolBufferException malformed) {
-                        store.poison("redis-raw-activity", 0, battle.id(), raw, System.currentTimeMillis(), Deadline.after(1500));
-                        bucket.compareAndSetAsync(raw, null).toCompletableFuture().get(800, TimeUnit.MILLISECONDS);
+                try {
+                    // 先把本条移到轮转队尾：解析、原件核验、Redis或Match失败均不挡住同批及后续候选。
+                    store.deferBattleInspection(battle.id(), System.currentTimeMillis(), Deadline.after(1000));
+                    var bucket = redis.<byte[]>getBucket(keys.battleActivityResult(battle.id()), ByteArrayCodec.INSTANCE);
+                    byte[] raw = bucket.getAsync().toCompletableFuture().get(800, TimeUnit.MILLISECONDS);
+                    if (raw != null) {
+                        try {
+                            settle(BattleResultEvent.parseFrom(raw));
+                        } catch (com.google.protobuf.InvalidProtocolBufferException malformed) {
+                            // 留原记录与ACTIVE供恢复；审计归档本身不构成终局证明，不能CAS销账。
+                            store.poison("redis-raw-activity", 0, battle.id(), raw, System.currentTimeMillis(), Deadline.after(1500));
+                            throw malformed;
+                        }
+                    } else {
+                        store.expireBattle(battle.id(), System.currentTimeMillis(), Deadline.after(1000));
+                        cancel(store.battleLaunch(battle.id(),Deadline.after(1000)));
                     }
-                } else {
-                    store.expireBattle(battle.id(), System.currentTimeMillis(), Deadline.after(1000));
-                    cancel(store.battleLaunch(battle.id(),Deadline.after(1000)));
+                    count("recover", true);
+                } catch (Exception failure) {
+                    failed("recover", failure);
                 }
             }
-            count("recover", true);
         } catch (Exception e) {
             failed("recover", e);
         }

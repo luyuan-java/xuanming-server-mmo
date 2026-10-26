@@ -229,6 +229,11 @@ public final class RedisKeys {
         return prefix + "guild:{apply:" + Long.toUnsignedString(playerId) + "}";
     }
 
+    /** 终态资产指令已清理的最大截止毫秒（STRING，无 TTL、只增）；回档检查用它限制可证明窗口。 */
+    public String guildTerminalCleanupWatermark() {
+        return prefix + "guild:asset-op:terminal-cleanup-watermark-ms";
+    }
+
     /**
      * 帮会全服榜 {@code game:guild:{rank}:all}（ZSET：成员 = 帮会号无符号十进制，分数 = 排行分）。排行的全部键共用 hash tag {@code {rank}}，
      * 多键 Lua 与换榜的 RENAME 在 Cluster 下同槽（guild-spec D16）。基线 {@code guild_rank}（guild_repo.go:154）。
@@ -273,6 +278,16 @@ public final class RedisKeys {
      */
     public String worldChannels(int zoneId) {
         return worldZonePrefix(zoneId) + "ch";
+    }
+
+    /** 玩家可见分线目录（protobuf STRING，短 TTL）；与该 zone 领导锁/计划同槽。 */
+    public String worldChannelDirectory(int zoneId, int configId) {
+        return worldZonePrefix(zoneId) + "directory:" + Integer.toUnsignedString(configId);
+    }
+
+    /** 玩家主动切线冷却（STRING，短 TTL）；全局 player 维度，跨节点/zone不重置。 */
+    public String channelSwitchCooldown(long playerId) {
+        return prefix + "player:" + Long.toUnsignedString(playerId) + ":channel-switch-cooldown";
     }
 
     /**

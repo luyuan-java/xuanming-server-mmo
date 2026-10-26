@@ -1926,7 +1926,7 @@ label 只允许固定枚举，禁止 player_id 和 team_id。
 | D5 | home zone = `player.zone_id`，代替 data_service 的 `player:zone` 映射 | Java 没有 data_service；合服重映射等 7.3 | 否 | 否 |
 | D6 | 推送走 `PlayerPushes`（Redis pub/sub + 玩家栅栏），代替 Kafka gate-cmd；GATE_UNREACHABLE 记 error | `architecture.md` §4.3；排序契约 `(epoch, version)` 不变 | 否 | 否 |
 | D7 | 不发 `PlayerTeamRefreshEvent`，scene 不缓存 TeamId，进场时现读；不移植 `team_scene_refresh_total` | Java scene 里 TeamId 的消费方只有跟随；少一个 Kafka 依赖 | 否 | 否 |
-| D8 | 不做队友 AOI 优先级（kTeammate） | Java 的 `ViewIndex` 表满时不挤人，优先级没有可见效果；以后引入挤出时再加 | 否（眼下） | 否 |
+| D8 | 2026-10-26 由 4.3b 重开并关闭：近距队友可逐出最早入视野的普通目标，不能逐出队友 | 客户端已会对不可见队长请求归队；表满不挤出会导致反复 130 仍不可见。队伍 hint 来自强读，保持 100 上限与正反向索引，逐出发 64；详见 [续移植记录](cpp-continuation-20261026.md) §2 | 是 | 本批代码与测试，运行结果见续移植记录 |
 | D9 | 跟随用内存里同节点队长的场景，同步 `switchScene`；不读 location，不经 scene-manager | 基线也只做同节点跟随；Java 同节点换图是同步的，没有在途槽，也没有 60 s 去重 | 否（行为等价） | 否 |
 | D10 | `in_battle` 恒为 false；跟随与开战预检没有战斗锁（6.3 前）。**已收口（批次 6.3，2026-10-06）**：`in_battle` 由 `BattleLockReader.existsAll` 批量 EXISTS 算出（全体 rosterIds，任何失败整批按 false，§6.7）；scene 组队跟随读锁并有内存冻结守卫（§6.10 第 5 条）。只剩整队开战预检的 4025 随 6.4（现在恒回 4027，D11）。**6.4 已接（2026-10-08）**：4025 由 game-match 的成员预检读战斗锁给出（§5.5 第 2 点） | Java 还没有战斗（6.3 起有了） | 收口后与基线相同 | 否 |
 | D11 | 4.3 的 StartTeamMatch 走规则路径回 4027（端口恒为 0）。**已关闭（批次 6.4，2026-10-08）**：端口换成 `MatchTeamBattle`，211 走真实的预检 → 加锁 → 建票 → gather → EndMatch（§5.5）；4027 只在该副本未配置组队人数时出现。跨进程带来的新故障面（game-match 调不通 / 过载 / 租约无效时回 4030）登记在 match-spec M20 | 基线未接线时回 4030（fault）；4027 文案真实、不触发告警，6.4 换真端口零改动 | 关闭后与基线相同（只在 game-match 故障时多 4030 与一条 MATCH_FAILED） | 否，按批次登记 |

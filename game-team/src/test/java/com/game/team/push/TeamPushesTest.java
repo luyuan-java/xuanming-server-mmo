@@ -164,6 +164,82 @@ class TeamPushesTest {
     // ================================================================ 收件人矩阵
 
     @Test
+    void 提交刷新全员与自愈者_仅加入者跟随_调用者也收到场景提示() {
+        List<String> signals = new ArrayList<>();
+        TeamPushes pipeline = new TeamPushes(new TeamStore(new FailingRedis(), REDIS_KEYS),
+                (ids, d) -> Map.of(), recording(PlayerPushes.Outcome.SENT), Runnable::run, metrics, Duration.ofSeconds(3),
+                new TeamPushes.MessageIds(SNAPSHOT, INVITE, EVENT),
+                (pid, follow, d) -> signals.add(pid + ":" + follow));
+        CommitResult joined = commit(decision(record(A, A, B), List.of(B), List.of(A), List.of(C),
+                TeamChangeReason.TEAM_CHANGE_REASON_MEMBER_JOINED, B, false, List.of(), 0, 0));
+        pipeline.publish(B, List.of(joined), List.of(C, D));
+        assertThat(signals).containsExactly(A + ":false", C + ":false", B + ":true", D + ":false");
+    }
+
+    @Test
+    void 孤儿自愈无提交也刷新_单个场景故障不影响其他提示与回包推送() {
+        List<Long> signals = new ArrayList<>();
+        TeamPushes pipeline = new TeamPushes(new TeamStore(new FailingRedis(), REDIS_KEYS),
+                (ids, d) -> Map.of(), recording(PlayerPushes.Outcome.SENT), Runnable::run, metrics, Duration.ofSeconds(3),
+                new TeamPushes.MessageIds(SNAPSHOT, INVITE, EVENT), (pid, follow, d) -> {
+                    assertThat(follow).isFalse();
+                    signals.add(pid);
+                    if (pid == A) throw new IllegalStateException("定位暂不可用");
+                });
+        pipeline.publish(0, List.of(), List.of(A, B));
+        assertThat(signals).containsExactly(A, B);
+    }
+
+    @Test
+    void 手动归队仅给视图里的非队长发跟随提示_在独立异步任务执行() {
+        List<Runnable> tasks = new ArrayList<>();
+        List<Long> signals = new ArrayList<>();
+        TeamPushes pipeline = new TeamPushes(new TeamStore(new FailingRedis(), REDIS_KEYS),
+                (ids, d) -> Map.of(), recording(PlayerPushes.Outcome.SENT), tasks::add, metrics, Duration.ofSeconds(3),
+                new TeamPushes.MessageIds(SNAPSHOT, INVITE, EVENT), (pid, follow, d) -> {
+                    assertThat(follow).isTrue();
+                    signals.add(pid);
+                });
+        var team = TeamView.newBuilder().setTeamId(TID).setLeaderId(A).build();
+        pipeline.publishRegroup(A, team);
+        pipeline.publishRegroup(B, TeamView.getDefaultInstance());
+        pipeline.publishRegroup(B, null);
+        assertThat(tasks).isEmpty();
+        pipeline.publishRegroup(B, team);
+        assertThat(signals).isEmpty();
+        assertThat(tasks).hasSize(1);
+        tasks.get(0).run();
+        assertThat(signals).containsExactly(B);
+    }
+
+    @Test
+    void 场景通知排队或执行器满不延迟已提交的客户端快照() {
+        List<Runnable> sceneTasks = new ArrayList<>();
+        List<Long> signals = new ArrayList<>();
+        var commit = commit(decision(record(A, A, B), List.of(B), List.of(A), List.of(),
+                TeamChangeReason.TEAM_CHANGE_REASON_MEMBER_JOINED, B, false, List.of(), 0, 0));
+        TeamPushes pipeline = new TeamPushes(new TeamStore(new FailingRedis(), REDIS_KEYS),
+                (ids, deadline) -> Map.of(A, display(true), B, display(true)), recording(PlayerPushes.Outcome.SENT),
+                Runnable::run, metrics, Duration.ofSeconds(3), new TeamPushes.MessageIds(SNAPSHOT, INVITE, EVENT),
+                (pid, follow, deadline) -> signals.add(pid), sceneTasks::add);
+        pipeline.publish(B, List.of(commit));
+        assertThat(sceneTasks).hasSize(1);
+        assertThat(signals).isEmpty();
+        assertThat(sent).extracting(Sent::playerId).containsExactly(A);
+        sceneTasks.getFirst().run();
+        assertThat(signals).containsExactly(A, B);
+
+        sent.clear();
+        TeamPushes rejected = new TeamPushes(new TeamStore(new FailingRedis(), REDIS_KEYS),
+                (ids, deadline) -> Map.of(A, display(true), B, display(true)), recording(PlayerPushes.Outcome.SENT),
+                Runnable::run, metrics, Duration.ofSeconds(3), new TeamPushes.MessageIds(SNAPSHOT, INVITE, EVENT),
+                (pid, follow, deadline) -> { throw new AssertionError("满队列不应调用"); },
+                task -> { throw new RejectedExecutionException("full"); });
+        rejected.publish(B, List.of(commit));
+        assertThat(sent).extracting(Sent::playerId).containsExactly(A);
+    }
+
+    @Test
     void 快照推送使用当前匹配投影且保留原提交和接收者视图() {
         TeamStore store = mock(TeamStore.class);
         List<TeamView> projected = new ArrayList<>();

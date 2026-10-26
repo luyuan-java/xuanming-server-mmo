@@ -1,0 +1,17 @@
+// Java 内部提醒：队伍提交后由 scene 强读成员关系；消息本身不授予任何队伍权限。
+syntax = "proto3";
+package game.api;
+option java_package = "com.game.api.proto";
+option java_multiple_files = true;
+
+message SceneTeamRefresh {
+  uint64 player_id = 1;
+  string target_instance_id = 2;
+  // false 仅刷新可见性提示；true 还请求当前队员按 scene 的守卫规则归队。
+  bool follow = 3;
+}
+
+message SceneTeamRefreshReply {
+  // 仅表示进了逻辑线程；移动结果由 scene 再读权威状态后决定。
+  bool accepted = 1;
+}

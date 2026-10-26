@@ -1228,7 +1228,7 @@ public interface SceneAssetOpService {
 | E5 | **规范串单一出处**挪到 game-api，scene 验签与 guild 签名共用，golden 两侧钉 | 两份实现分叉 = 验签失败 → UNKNOWN → 行卡死（`assetop/auth.go:116-117`） | 否 | 否 |
 | E6 | **op_id 来自 game-guild 的全服雪花**（`NodeTypes.GUILD` 租约，与 guild_id 共用生成器；租约无效 / 时钟回拨 / 返回 0 → 14008）；基线只用号段、禁止回退 snowflake | Java 没有号段服务（D8）；雪花 63 位、随时间单调（`game-common/.../id/Snowflake.java:17-72`），清理「按 op_id 取老行」反而精确；correlation_id 在流水里时间有序 | 否（op_id 只当 uint64 展示） | 否 |
 | E7 | **durable 介质 = MySQL `player_state` 围栏写提交成功**（2.9 已如此，登记在资产通道行） | Java 没有 Redis 存档层 | 否 | 否 |
-| E8 | **离线读已落盘账本：Java 接线**，game-guild 直读 MySQL `player_state.asset_ledger`，分类与 scene 共用（基线帮会未接线） | 介质就是 durable 本身，无需中转；离线玩家已记账的行可提前终结、不再一直占次数；路线图把 asset-op-ledger-read 排在 4.5（`roadmap.md:36`） | 否（只影响「结算中」持续时长） | 否（mmorpg 可选接线） |
+| E8 | 离线读已落盘账本：两版当前都已接线，关闭旧差异 | Java game-guild 直读 MySQL `player_state.asset_ledger`，分类与 scene 共用；2026-10-26 复核 mmorpg 已有对应 durable 查询。本批另加终态清理水位与回档下界保护，见 [续移植记录](cpp-continuation-20261026.md) §6 | 否（只影响「结算中」持续时长） | 已关闭 |
 | E9 | 同步投递标记用显式参数 `DeliveryOrigin`，代替 ctx 值 | Java 没有 ctx | 否 | 否 |
 | E10 | **重投退避启用 ±20% 抖动**（基线 `Loop.Rand` 未设 → 不抖动） | 配表与代码注释的设计意图；scene 恢复后同一批行不在同一毫秒一起重投 | 否 | 否（mmorpg 可选：给 Loop.Rand 赋值） |
 | E11 | **`ListAppliedAssetOpsSince`**：game-api 类型化 Dubbo 接口，错误语义改为应答内结果码 + `cutoff_ms` 字段，不解析 message 前缀；4.5 只交付提供方与测试，消费方随 7.2 | Dubbo 异常类型不够细，解析字符串是脆弱的跨服务契约（`guild_divergence.go:43-46`、`:222-241`） | 否 | 否 |

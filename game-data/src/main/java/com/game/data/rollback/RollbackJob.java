@@ -47,7 +47,7 @@ import org.slf4j.LoggerFactory;
  * 3 续约（data-ops-fence 每 10 s，AdminOwnership.renew）
  * 4 账本差集（立即）→ 沉降 → 帮会检查 → 回收逆转检查 → 裁决；放行时 ACCEPTED 事件（写不进零写入）+ 逐行 ERROR 日志
  * 5 逐人写事务（RollbackWriter），按 player_id 升序
- * 6 至少一人写成功时：等 recheck-delay → 写后复查（持有归属期间）；发现新 op_id → DIVERGED_AFTER_WRITE（紧急告警，不自动撤销）
+ * 6 至少一人可能已写（成功或异常未获确认）时：等 recheck-delay → 写后复查（持有归属期间）；发现新 op_id → DIVERGED_AFTER_WRITE（紧急告警，不自动撤销）
  * 7 RESULT（OpsJobRunner）  8 逐人：位置墓碑 → 释放（afterResult）
  * </pre>
  * 不变量：STARTED 先于一切（受理时已提交，I3）；三道检查没有得出「通过」之前不写任何玩家，写后复查在释放之前（I4）；释放前已尝试写墓碑（I5）。
@@ -468,11 +468,18 @@ public final class RollbackJob implements JobBody {
         }
 
         // ---------------------------------------------------------------- 5 写
-        List<Long> written = new ArrayList<>();
+        // 成功和异常都可能已经提交；只有正常返回明确的未写结局才可排除（COMMIT 确认丢失不能证明回滚）。
+        List<Long> possiblyWritten = new ArrayList<>();
+        List<Long> unconfirmedWrites = new ArrayList<>();
         int consecutiveFailures = 0;
         boolean stopped = false;
         for (Long playerId : List.copyOf(claimed.keySet())) {
-            ctx.checkpoint();
+            if (possiblyWritten.isEmpty()) {
+                ctx.checkpoint();
+            } else if (ctx.aborted() || Thread.currentThread().isInterrupted()) {
+                // 已有可能写入的玩家时停止继续写，但不能抛出后直接跳过复查（同基线 WithoutCancel）。
+                stopped = true;
+            }
             if (!stopped && ctx.timedOut()) {
                 // 写阶段超时：写完当前玩家后停，剩下的 not_executed；结果码记 job_timeout（一个没写成时作业 FAILED，见 finish）
                 stopped = true;
@@ -492,13 +499,15 @@ public final class RollbackJob implements JobBody {
                 outcome = d.writer().write(ctx.jobId(), ctx.operator(), playerId, t.snapshot().getSnapshotId(),
                         claimed.get(playerId), req.sections());
             } catch (RuntimeException e) {
-                log.error("回档作业 job={} 写玩家 {} 失败（事务已回滚）", ctx.jobIdText(), Long.toUnsignedString(playerId), e);
+                log.error("回档作业 job={} 写玩家 {} 未获提交确认（可能已写，纳入写后复查）", ctx.jobIdText(), Long.toUnsignedString(playerId), e);
+                possiblyWritten.add(playerId);
+                unconfirmedWrites.add(playerId);
                 outcome = FAILED;
             }
             if (RollbackWriter.RESTORED.equals(outcome)) {
                 restored++;
                 consecutiveFailures = 0;
-                written.add(playerId);
+                possiblyWritten.add(playerId);
                 outcomes.put(playerId, outcome);
                 d.metrics().opsPlayer(KIND, METRIC_RESTORED);
                 audit.info("[Rollback] WRITE job={} player={} snapshot={} epoch={}", ctx.jobIdText(),
@@ -529,17 +538,19 @@ public final class RollbackJob implements JobBody {
         summary.put("check", check);
         summary.put("restored", restored);
         summary.put("outcomes", countOutcomes());
+        summary.put("unconfirmedWrites", unconfirmedWrites.size());
+        summary.put("unconfirmedWritePlayers", unconfirmedWrites.stream().limit(GuildDivergenceGate.SAMPLE)
+                .map(Long::toUnsignedString).toList());
         if (writeTimedOut) {
             summary.put("timedOut", true);
         }
         String code = null;
-        if (!written.isEmpty()) {
-            ctx.pause(guild.recheckDelay());
+        if (!possiblyWritten.isEmpty()) {
             Map<Long, Long> recheckSince = new LinkedHashMap<>();
-            for (Long p : written) {
+            for (Long p : possiblyWritten) {
                 recheckSince.put(p, sinceByPlayer.get(p));
             }
-            GuildDivergenceGate.Result recheck = d.guild().check(recheckSince, guild.recheckBudget());
+            GuildDivergenceGate.Result recheck = recheckAfterWrite(recheckSince, guild);
             Set<Long> seen = new HashSet<>();
             guildResult.rows().forEach(op -> seen.add(op.getOpId()));
             List<GuildAssetOpBrief> fresh = recheck.rows().stream().filter(op -> !seen.contains(op.getOpId())).toList();
@@ -551,8 +562,8 @@ public final class RollbackJob implements JobBody {
             summary.put("recheck", recheckView);
             if (recheck.checkFailed()) {
                 d.metrics().divergenceCheck("guild", "post_write_failed");
-                log.error("回档作业 job={} 写后复查问不到帮会（{}）：已写的 {} 人转人工核对", ctx.jobIdText(), recheck.failure(),
-                        written.size());
+                log.error("回档作业 job={} 写后复查问不到帮会（{}）：可能已写的 {} 人转人工核对", ctx.jobIdText(), recheck.failure(),
+                        possiblyWritten.size());
                 code = POST_WRITE_UNVERIFIED;
             } else if (!fresh.isEmpty()) {
                 d.metrics().divergenceCheck("guild", "post_write_diverged");
@@ -571,6 +582,25 @@ public final class RollbackJob implements JobBody {
         }
         return finish(ctx, summary, code, divergenceRows, unprovable.size(), acceptedDivergence, acceptedReversal,
                 targets.size());
+    }
+
+    /** 写后复查有独立预算；作业取消 / 写请求中断不能让已经可能提交的玩家跳过它。 */
+    private GuildDivergenceGate.Result recheckAfterWrite(Map<Long, Long> sinceByPlayer, DataProperties.Guild guild) {
+        boolean interrupted = Thread.interrupted();
+        try {
+            long until = System.nanoTime() + guild.recheckDelay().toNanos();
+            long remaining;
+            while ((remaining = until - System.nanoTime()) > 0) {
+                try {
+                    java.util.concurrent.TimeUnit.NANOSECONDS.sleep(remaining);
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            return d.guild().check(sinceByPlayer, guild.recheckBudget());
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
     }
 
     /** 整区里夺不到的玩家（升序；摘要给前 100 个与总数）。 */
@@ -654,7 +684,7 @@ public final class RollbackJob implements JobBody {
             resultCode = OK;
         } else if (writeFailures > 0) {
             status = OpsJobStatus.OPS_JOB_FAILED;
-            resultCode = DB_ERROR;
+            resultCode = code != null ? code : DB_ERROR;
         } else if (writeTimedOut) {
             // 写阶段超时、一个也没写成：按超时报 FAILED，而不是拿第一个没写成的明细结局当成规则拒绝
             status = OpsJobStatus.OPS_JOB_FAILED;
@@ -752,7 +782,7 @@ public final class RollbackJob implements JobBody {
         d.ownership().release(playerId);
     }
 
-    /** 明细 PLANNED → 某个没写的结局（尽力：写不进只记日志，作业照常）。 */
+    /** 明细 PLANNED → 未写或未获确认的结局（已提交的 RESTORED 不覆盖；写不进只记日志，作业照常）。 */
     private void setOutcome(JobContext ctx, long playerId, String outcome) {
         if (outcomes.containsKey(playerId)) {
             return;

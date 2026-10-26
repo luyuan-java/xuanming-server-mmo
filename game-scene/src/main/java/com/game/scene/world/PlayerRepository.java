@@ -123,6 +123,19 @@ public interface PlayerRepository {
     void probe(HandOffOutcome.Failed failed, Consumer<ProbeOutcome> onDone);
 
     /**
+     * 原交出 / 探测回调返回前，为异步续接保留停服结算责任。续接完成（含必要的 E+1 释放已入队）后关闭，
+     * close 必须幂等且不阻塞。纯世界替身没有存储池，可沿用空句柄。
+     */
+    default TransferContinuation retainTransferContinuation() {
+        return () -> { };
+    }
+
+    @FunctionalInterface
+    interface TransferContinuation extends AutoCloseable {
+        @Override void close();
+    }
+
+    /**
      * 此刻是否适合再提交在线存盘（存储积压时返回 false：在线存盘可以晚一个周期，续约 / 最终写回 / 加载不能等）。
      * 只是建议，非阻塞、可在逻辑线程上调用。
      */

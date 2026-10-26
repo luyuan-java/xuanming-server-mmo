@@ -320,6 +320,15 @@ public final class StoragePlayerRepository implements PlayerRepository {
         submit(new ProbeTask(failed, onDone));
     }
 
+    @Override
+    public TransferContinuation retainTransferContinuation() {
+        transfersUnsettled.incrementAndGet();
+        var closed = new java.util.concurrent.atomic.AtomicBoolean();
+        return () -> {
+            if (closed.compareAndSet(false, true)) transferSettled();
+        };
+    }
+
     /**
      * 存储线程池排队数低于「线程数 × 2」才接在线存盘：在线存盘可以晚一个周期，续约、最终写回、加载不能等——
      * 库变慢时不让周期存盘把它们堵在同一个 FIFO 队列后面（续约晚于租约会让别的会话强制夺权，最终写回随之被围栏拒掉）。
@@ -334,7 +343,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
 
     /**
      * 停服用（在关存储线程池<b>之前</b>、写回交出去之后调用；阻塞调用线程，不能在逻辑线程上调用）：等全部已提交的交出 / 探测
-     * 「结局已在逻辑线程上处理完」——处理里提交的「释放 E+1」/ 探测随之都已交给仍开着的存储线程池，关池后照常落库，
+     * 「结局及其保留的异步续接已处理完」——处理里提交的「释放 E+1」/ 探测随之都已交给仍开着的存储线程池，关池后照常落库，
      * 不会被已关闭的池拒掉（scene-handoff-spec §5.2、§5.5 停服行）。交出带重试截止、探测带截止，等待有界。
      * 等待用真实单调时钟（与注入的 {@code nanoClock} 无关）。
      *

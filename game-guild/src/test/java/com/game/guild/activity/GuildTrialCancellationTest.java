@@ -45,4 +45,14 @@ class GuildTrialCancellationTest {
         assertThrows(SecurityException.class, () -> expired.verify(request,response));
         assertThrows(IllegalArgumentException.class, () -> new GuildTrialCancellation("short",() -> NOW));
     }
+    @Test void 已签COMPLETE不能伪装安全中止_ABORT和发房前未知终局仍可释放() {
+        var request = cancellation.request(original());
+        for (var decision : BattleOutcomeDecision.values()) {
+            if (decision == BattleOutcomeDecision.UNRECOGNIZED) continue;
+            var response = ServiceCallSignatures.sign(GuildTrialCancellation.METHOD + "/reply",
+                    reply(request,99,5,false).toBuilder().setTerminalDecision(decision).build(),"match",SECRET,NOW);
+            assertEquals(decision != BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE,
+                    cancellation.verify(request,response).terminal(), decision.name());
+        }
+    }
 }

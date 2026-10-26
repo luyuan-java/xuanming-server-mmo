@@ -204,7 +204,9 @@ class SceneDirectoryProviderTest {
 
         assertThat(meters.get(SceneDirectoryProvider.SWITCH_METRIC).timers())
                 .extracting(t -> t.getId().getTag("result"))
-                .containsExactlyInAnyOrder("ok", "not_found", "draining", "bad_request", "error");
+                .containsExactlyInAnyOrder("ok", "not_found", "draining", "bad_request", "error",
+                        "channel_closing", "channel_conf_mismatch", "channel_disabled", "channel_full",
+                        "channel_cooldown", "channel_unavailable", "channel_read_error");
         assertThat(meters.get(SceneDirectoryProvider.SWITCH_METRIC).timers())
                 .allSatisfy(t -> assertThat(t.getId().getTags()).hasSize(1));
     }

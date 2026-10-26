@@ -188,6 +188,8 @@ final class TeamMatchFixture {
 
     final Map<Long, SessionState> states = new ConcurrentHashMap<>();
     private final List<Pushed> pushes = Collections.synchronizedList(new ArrayList<>());
+    record SceneSignal(long playerId, boolean follow) { }
+    final List<SceneSignal> sceneSignals = Collections.synchronizedList(new ArrayList<>());
     private final Deque<Runnable> background = new ArrayDeque<>();
     private boolean drainingBackground;
     private final long pidBase;
@@ -262,7 +264,8 @@ final class TeamMatchFixture {
             }
         };
         TeamPushes teamPushes = new TeamPushes(store, this::display, this::push, Runnable::run, metrics, Duration.ofSeconds(3),
-                new TeamPushes.MessageIds(TeamServiceFixture.SNAPSHOT, TeamServiceFixture.INVITE, TeamServiceFixture.EVENT));
+                new TeamPushes.MessageIds(TeamServiceFixture.SNAPSHOT, TeamServiceFixture.INVITE, TeamServiceFixture.EVENT),
+                (pid, follow, deadline) -> sceneSignals.add(new SceneSignal(pid, follow)));
         this.service = new TeamService(store, sessions, this::display, (ids, deadline) -> {
             Map<Long, Integer> out = new LinkedHashMap<>();
             for (long id : ids) {

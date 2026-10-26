@@ -296,8 +296,9 @@ class RollbackJobBranchesSqlTest {
         assertThat(write.toString()).isEqualTo("{\"restored\":0,\"failed\":3,\"stopped\":true,\"timedOut\":false}");
         // 每个失败的人的事务都整体回滚（安全快照、覆盖写都不在）；没人写成就不做写后复查
         assertUntouched(2001, 2002, 2003, 2004, 2005);
-        assertThat(h.eventTypes(job.getJobId())).containsExactly("STARTED", "PLANNED", "CLAIMED", "CHECK", "WRITE", "RESULT");
-        assertThat(h.guildCalls).hasSize(1);
+        assertThat(h.eventTypes(job.getJobId())).containsExactly("STARTED", "PLANNED", "CLAIMED", "CHECK", "WRITE", "RECHECK", "RESULT");
+        assertThat(h.guildCalls).hasSize(2);
+        assertThat(h.guildCalls.get(1).getPlayerIdsList()).containsExactly(2001L, 2002L, 2003L);
         assertReleased(2001, 2002, 2003, 2004, 2005);
         assertThat(h.tombstones).hasSize(5);
         assertThat(h.playersCounted("failed")).isEqualTo(3);
@@ -337,7 +338,7 @@ class RollbackJobBranchesSqlTest {
         assertUntouched(2002, 2004, 2005, 2006, 2007);
         // 写后复查只问写成的人
         assertThat(h.guildCalls).hasSize(2);
-        assertThat(h.guildCalls.get(1).getPlayerIdsList()).containsExactly(2001L, 2003L);
+        assertThat(h.guildCalls.get(1).getPlayerIdsList()).containsExactly(2001L, 2002L, 2003L, 2004L, 2005L, 2006L);
         assertReleased(2001, 2002, 2003, 2004, 2005, 2006, 2007);
     }
 

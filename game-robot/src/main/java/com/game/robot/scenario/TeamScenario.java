@@ -45,6 +45,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.UUID;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -150,6 +151,8 @@ public final class TeamScenario {
     private final List<GameConnection> connections = new ArrayList<>();
     /** 开战段（批次 6.4）：开战拒绝码、S7、S8；它建的战斗直连由它自己收尾。 */
     private final TeamMatchSteps matchSteps;
+    private TeamRegroupSteps regroupSteps;
+    private final MessageIdRegistry registry;
 
     /** 结果行的字段（没跑到的保持 0）。 */
     private long teamId;
@@ -169,6 +172,7 @@ public final class TeamScenario {
     public TeamScenario(RobotClient client, PlayerFlow flow, CrossZoneGate.Visit visit, boolean crossZoneTeamAllowed, MessageIdRegistry registry,
                         Path tableDir, String accountPrefix, String runTag, int zoneId, Duration requestTimeout) {
         this.flow = flow;
+        this.registry = registry;
         this.visit = visit;
         this.crossZoneTeamAllowed = crossZoneTeamAllowed;
         this.matchSteps = new TeamMatchSteps(client, registry, report, steps, requestTimeout, MatchSupport.Tempo.STANDARD);
@@ -206,6 +210,12 @@ public final class TeamScenario {
 
     public String accountA() {
         return accountA;
+    }
+
+    /** 可选 dev 位置布置；主流程和跨节点跟随断言仍照常执行。 */
+    public TeamScenario withRegroupProbe(com.game.robot.client.SceneAdminClient admin) {
+        this.regroupSteps = new TeamRegroupSteps(registry, admin, FOLLOW_TIMEOUT, report);
+        return this;
     }
 
     public CheckReport run() {
@@ -253,7 +263,7 @@ public final class TeamScenario {
 
         // ---- S1：A 建队 → B 申请 → A 同意 ----
         steps.step("s1-create-apply-approve", report);
-        TeamResponse createResp = a.call(createTeam, CreateTeamRequest.getDefaultInstance(), TeamResponse.parser());
+        TeamResponse createResp = a.call(createTeam, CreateTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).build(), TeamResponse.parser());
         TeamView created = createResp.getTeam();
         long tid = created.getTeamId();
         must(tipOf(createResp) == 0 && tid != 0 && created.getLeaderId() == a.id() && created.getMembersCount() == 1,
@@ -261,19 +271,19 @@ public final class TeamScenario {
         teamId = tid;
         report.check(created.getZoneId() == zoneId, "S1 队伍 zone_id == A 的 home zone（本区）",
                 "zone_id=" + created.getZoneId() + "，期望 " + zoneId, REF);
-        TeamResponse dupCreate = a.call(createTeam, CreateTeamRequest.getDefaultInstance(), TeamResponse.parser());
+        TeamResponse dupCreate = a.call(createTeam, CreateTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).build(), TeamResponse.parser());
         report.check(tipOf(dupCreate) == TIP_MEMBER_IN_TEAM && dupCreate.hasTeam() && dupCreate.getTeam().getTeamId() == tid
                         && dupCreate.getTeam().getLeaderId() == a.id(),
                 "重复建队 → 4003，带当前视图且 leader_id == A（客户端按成功处理）", describe(dupCreate), REF);
 
-        expectTip(b, applyJoin, ApplyJoinTeamRequest.newBuilder().setTargetPlayerId(a.id()).build(), 0, "S1 B 申请加入 A 的队伍");
+        expectTip(b, applyJoin, ApplyJoinTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(a.id()).build(), 0, "S1 B 申请加入 A 的队伍");
         TeamView afterApply = myTeam(a);
         report.check(hasApplication(afterApply, b.id()) && Long.compareUnsigned(afterApply.getVersion(), created.getVersion()) > 0,
                 "S1 A 拉取看到 B 的申请，version 增长", "申请 " + afterApply.getApplicationsCount() + " 条 version="
                         + uid(afterApply.getVersion()) + "（建队时 " + uid(created.getVersion()) + "）", REF);
 
         int bMark = b.mark();
-        HandleApplicationRequest approveReq = HandleApplicationRequest.newBuilder().setApplicantId(b.id()).setApprove(true)
+        HandleApplicationRequest approveReq = HandleApplicationRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setApplicantId(b.id()).setApprove(true)
                 .setExpectedTeamId(tid).build();
         TeamResponse approveResp = a.call(handleApplication, approveReq, TeamResponse.parser());
         TeamView approved = approveResp.getTeam();
@@ -298,7 +308,7 @@ public final class TeamScenario {
         report.note("S2 重放前后 version：" + uid(approved.getVersion()) + " → " + uid(replay.getTeam().getVersion()));
 
         // Java 增项：迟到的旧离队请求（expected 与当前队伍不符）→ 成功、不写，回当前视图（team-spec §3.10）
-        TeamResponse staleLeave = b.call(leaveTeam, LeaveTeamRequest.newBuilder().setExpectedTeamId(tid + 1).build(),
+        TeamResponse staleLeave = b.call(leaveTeam, LeaveTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setExpectedTeamId(tid + 1).build(),
                 TeamResponse.parser());
         report.check(tipOf(staleLeave) == 0 && staleLeave.getTeam().getTeamId() == tid
                         && countMember(staleLeave.getTeam(), b.id()) == 1,
@@ -306,7 +316,7 @@ public final class TeamScenario {
 
         // ---- S3：邀请 D（D 收 215）→ D 拒绝 → 再邀请 → D 接受 ----
         steps.step("s3-invite", report);
-        InviteToTeamRequest inviteD = InviteToTeamRequest.newBuilder().setTargetPlayerId(d.id()).setExpectedTeamId(tid).build();
+        InviteToTeamRequest inviteD = InviteToTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(d.id()).setExpectedTeamId(tid).build();
         int dMark = d.mark();
         TeamResponse invited = a.call(invite, inviteD, TeamResponse.parser());
         report.check(tipOf(invited) == 0 && hasPendingInvite(invited.getTeam(), d.id()),
@@ -326,15 +336,16 @@ public final class TeamScenario {
                 "S3 D 的 ListMyInvites 里有队伍 " + uid(tid), "tip=" + tipOf(dInvites.getErrorMessage()) + " "
                         + dInvites.getInvitesCount() + " 条", REF);
         int aMark = a.mark();
-        expectTip(d, respondInvite, RespondInviteRequest.newBuilder().setTeamId(tid).setAccept(false).build(), 0, "S3 D 拒绝邀请");
+        expectTip(d, respondInvite, RespondInviteRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTeamId(tid).setAccept(false).build(), 0, "S3 D 拒绝邀请");
         Optional<TeamSnapshotS2C> inviteChanged = awaitSnapshot(a, aMark,
                 s -> s.getReason() == TeamChangeReason.TEAM_CHANGE_REASON_INVITE_CHANGED && s.getTeam().getTeamId() == tid
                         && !hasPendingInvite(s.getTeam(), d.id()));
         report.check(inviteChanged.isPresent(), "S3 A 收到 INVITE_CHANGED，其中已没有给 D 的邀请",
                 inviteChanged.map(s -> "actor_id=" + uid(s.getActorId()) + " " + describe(s.getTeam()))
                         .orElse(PUSH_TIMEOUT.toSeconds() + " s 内没收到" + a.describeSince(aMark)), REF);
-        expectTip(a, invite, inviteD, 0, "S3 A 再次邀请 D");
-        TeamResponse acceptResp = d.call(respondInvite, RespondInviteRequest.newBuilder().setTeamId(tid).setAccept(true).build(),
+        // D已拒绝，第二次邀请是新业务操作；S2的同意重放则继续使用同一原请求。
+        expectTip(a, invite, inviteD.toBuilder().setRequestId(UUID.randomUUID().toString()).build(), 0, "S3 A 再次邀请 D");
+        TeamResponse acceptResp = d.call(respondInvite, RespondInviteRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTeamId(tid).setAccept(true).build(),
                 TeamResponse.parser());
         TeamView accepted = acceptResp.getTeam();
         must(tipOf(acceptResp) == 0 && accepted.getTeamId() == tid && countMember(accepted, d.id()) == 1
@@ -345,7 +356,7 @@ public final class TeamScenario {
         // ---- S4：踢 D（D 收空视图、epoch 变大）；A → B → A 转让 ----
         steps.step("s4-kick-transfer", report);
         dMark = d.mark();
-        TeamResponse kicked = a.call(kick, KickMemberRequest.newBuilder().setTargetPlayerId(d.id()).setExpectedTeamId(tid).build(),
+        TeamResponse kicked = a.call(kick, KickMemberRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(d.id()).setExpectedTeamId(tid).build(),
                 TeamResponse.parser());
         report.check(tipOf(kicked) == 0 && countMember(kicked.getTeam(), d.id()) == 0, "S4 A 踢 D：受理，视图里没有 D",
                 describe(kicked), REF);
@@ -356,22 +367,22 @@ public final class TeamScenario {
                 "S4 D 收到 team_id = 0 的 MEMBER_KICKED，membership_epoch 大于在队时",
                 kickedPush.map(s -> "epoch=" + uid(s.getTeam().getMembershipEpoch()) + "（在队时 " + uid(dEpochInTeam) + "）")
                         .orElse(PUSH_TIMEOUT.toSeconds() + " s 内没收到" + d.describeSince(dMark)), REF);
-        TeamResponse toB = a.call(transfer, TransferLeaderRequest.newBuilder().setTargetPlayerId(b.id()).setExpectedTeamId(tid)
+        TeamResponse toB = a.call(transfer, TransferLeaderRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(b.id()).setExpectedTeamId(tid)
                 .build(), TeamResponse.parser());
         report.check(tipOf(toB) == 0 && toB.getTeam().getLeaderId() == b.id(), "S4 A 转让队长给 B", describe(toB), REF);
-        TeamResponse toA = b.call(transfer, TransferLeaderRequest.newBuilder().setTargetPlayerId(a.id()).setExpectedTeamId(tid)
+        TeamResponse toA = b.call(transfer, TransferLeaderRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(a.id()).setExpectedTeamId(tid)
                 .build(), TeamResponse.parser());
         must(tipOf(toA) == 0 && toA.getTeam().getLeaderId() == a.id(), "S4 B 转回给 A", describe(toA));
 
         // Java 增项：规则层拒绝码（都带当前视图）
-        expectTipWithView(a, kick, KickMemberRequest.newBuilder().setTargetPlayerId(a.id()).setExpectedTeamId(tid).build(),
+        expectTipWithView(a, kick, KickMemberRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(a.id()).setExpectedTeamId(tid).build(),
                 TIP_KICK_SELF, tid, "队长踢自己 → 4005");
-        expectTipWithView(a, transfer, TransferLeaderRequest.newBuilder().setTargetPlayerId(a.id()).setExpectedTeamId(tid).build(),
+        expectTipWithView(a, transfer, TransferLeaderRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(a.id()).setExpectedTeamId(tid).build(),
                 TIP_APPOINT_SELF, tid, "队长转让给自己 → 4007");
-        expectTipWithView(b, kick, KickMemberRequest.newBuilder().setTargetPlayerId(a.id()).setExpectedTeamId(tid).build(),
+        expectTipWithView(b, kick, KickMemberRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(a.id()).setExpectedTeamId(tid).build(),
                 TIP_KICK_NOT_LEADER, tid, "非队长 B 踢人 → 4006");
         // Java 增项：邀请目标不在线（服务前置，早于队伍检查）→ 4017
-        expectTip(a, invite, InviteToTeamRequest.newBuilder().setTargetPlayerId(e.id()).setExpectedTeamId(tid).build(),
+        expectTip(a, invite, InviteToTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(e.id()).setExpectedTeamId(tid).build(),
                 TIP_PLAYER_NOT_FOUND, "邀请已登出的账号 E → 4017");
 
         // Java 增项：notify_online → 其他在线队员收 MEMBER_ONLINE，version 不变（team-spec §4.6）
@@ -402,18 +413,18 @@ public final class TeamScenario {
                 (replied ? "收到了 213 的回包" : "") + (tipped ? " 收到了 23 tip" + a.describeSince(aMark) : ""), REF);
 
         // Java 增项：拒绝不存在的邀请 → 幂等成功；RespondInvite(team_id = 0) → 4013（带视图）
-        expectTip(d, respondInvite, RespondInviteRequest.newBuilder().setTeamId(tid).setAccept(false).build(), 0,
+        expectTip(d, respondInvite, RespondInviteRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTeamId(tid).setAccept(false).build(), 0,
                 "D 拒绝一个不存在的邀请 → 幂等成功");
-        TeamResponse zeroTeam = d.call(respondInvite, RespondInviteRequest.newBuilder().setTeamId(0).setAccept(true).build(),
+        TeamResponse zeroTeam = d.call(respondInvite, RespondInviteRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTeamId(0).setAccept(true).build(),
                 TeamResponse.parser());
         report.check(tipOf(zeroTeam) == TIP_NO_TEAM && zeroTeam.hasTeam(), "RespondInvite(team_id = 0) → 4013（带调用者视图）",
                 describe(zeroTeam), REF);
 
         // ---- S5：D 申请，A 拒绝 → D 收 203 APPLICATION_REJECTED ----
         steps.step("s5-reject-application", report);
-        expectTip(d, applyJoin, ApplyJoinTeamRequest.newBuilder().setTargetPlayerId(a.id()).build(), 0, "S5 D 申请加入");
+        expectTip(d, applyJoin, ApplyJoinTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(a.id()).build(), 0, "S5 D 申请加入");
         dMark = d.mark();
-        TeamResponse rejected = a.call(handleApplication, HandleApplicationRequest.newBuilder().setApplicantId(d.id())
+        TeamResponse rejected = a.call(handleApplication, HandleApplicationRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setApplicantId(d.id())
                 .setApprove(false).setExpectedTeamId(tid).build(), TeamResponse.parser());
         report.check(tipOf(rejected) == 0 && !hasApplication(rejected.getTeam(), d.id()),
                 "S5 A 拒绝 D 的申请：受理，视图里不再有 D 的申请", describe(rejected), REF);
@@ -427,6 +438,12 @@ public final class TeamScenario {
         // ---- S6：A 换图，B 跟随 ----
         steps.step("s6-follow", report);
         follow(a, b);
+        if (regroupSteps != null) {
+            steps.step("s6-regroup", report);
+            regroupSteps.run(a, b, d, tid, a.scene.getSceneId());
+        } else {
+            report.note("4.3b dev位置探针未运行；用 --team-regroup-probe 在单scene节点验收入队/远距/高差/近距归队");
+        }
 
         // ---- X1 / X2：跨区（批次 5.4 解锁）。放在开战段之前：X2 里 C 进过队，开战段只该有 A、B 两人 ----
         crossZone(a, b, tid);
@@ -451,7 +468,7 @@ public final class TeamScenario {
             marks.add(bot.mark());
         }
         report.check(waiters.contains(b), "S9 解散前 B 仍在队（D 已被踢、申请被拒）", describe(before), REF);
-        TeamResponse disbanded = a.call(disband, DisbandTeamRequest.newBuilder().setExpectedTeamId(tid).build(),
+        TeamResponse disbanded = a.call(disband, DisbandTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setExpectedTeamId(tid).build(),
                 TeamResponse.parser());
         report.check(tipOf(disbanded) == 0 && disbanded.hasTeam() && disbanded.getTeam().getTeamId() == 0,
                 "S9 A 解散：受理，回包是 team_id = 0 的空视图", describe(disbanded), REF);
@@ -587,7 +604,7 @@ public final class TeamScenario {
         }
         String left;
         try {
-            left = describe(c.call(leaveTeam, LeaveTeamRequest.newBuilder().setExpectedTeamId(tid).build(), TeamResponse.parser()));
+            left = describe(c.call(leaveTeam, LeaveTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setExpectedTeamId(tid).build(), TeamResponse.parser()));
         } catch (RobotException e) {
             left = e.getMessage();
         }
@@ -601,9 +618,9 @@ public final class TeamScenario {
     /** X1（game-team 缺省 allow-cross-zone = false）：别区的 C 申请、被邀请都回 4020，队伍不变。 */
     private void crossZoneDenied(Bot a, Bot c, long tid) throws RobotException {
         steps.step("x1-cross-zone-denied", report);
-        expectTip(c, applyJoin, ApplyJoinTeamRequest.newBuilder().setTargetPlayerId(a.id()).build(), TIP_CROSS_ZONE_DENIED,
+        expectTip(c, applyJoin, ApplyJoinTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(a.id()).build(), TIP_CROSS_ZONE_DENIED,
                 "X1 别区的 C 申请加入 A 的队伍 → " + TIP_CROSS_ZONE_DENIED);
-        expectTip(a, invite, InviteToTeamRequest.newBuilder().setTargetPlayerId(c.id()).setExpectedTeamId(tid).build(), TIP_CROSS_ZONE_DENIED,
+        expectTip(a, invite, InviteToTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(c.id()).setExpectedTeamId(tid).build(), TIP_CROSS_ZONE_DENIED,
                 "X1 A 邀请别区的 C → " + TIP_CROSS_ZONE_DENIED);
         TeamView view = myTeam(a);
         report.check(view.getTeamId() == tid && countMember(view, c.id()) == 0 && !hasApplication(view, c.id()) && !hasPendingInvite(view, c.id()),
@@ -614,9 +631,9 @@ public final class TeamScenario {
     /** X2（game-team allow-cross-zone = true）：C 跨区入队；A 换图时同区的 B 跟进、别区的 C 不跟随；C 离队。 */
     private void crossZoneAllowed(Bot a, Bot b, Bot c, long tid) throws RobotException {
         steps.step("x2-cross-zone-team", report);
-        expectTip(c, applyJoin, ApplyJoinTeamRequest.newBuilder().setTargetPlayerId(a.id()).build(), 0,
+        expectTip(c, applyJoin, ApplyJoinTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setTargetPlayerId(a.id()).build(), 0,
                 "X2 别区的 C 申请加入 A 的队伍：受理（game-team 允许跨区）");
-        TeamResponse approved = a.call(handleApplication, HandleApplicationRequest.newBuilder().setApplicantId(c.id()).setApprove(true)
+        TeamResponse approved = a.call(handleApplication, HandleApplicationRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setApplicantId(c.id()).setApprove(true)
                 .setExpectedTeamId(tid).build(), TeamResponse.parser());
         List<String> problems = crossZoneJoinProblems(approved, a.id(), b.id(), c.id(), zoneId);
         report.check(problems.isEmpty(), "X2 A 同意：C 入队，三人跨区同队（A、B、C 各恰好一次、共 3 人；队伍 zone_id 仍是 A 的区 " + zoneId + "）",
@@ -648,7 +665,7 @@ public final class TeamScenario {
         } catch (RobotException | RuntimeException e) {
             report.fail("X2 A 换图看跟随", e.getMessage() == null ? e.toString() : e.getMessage(), REF_CROSS);
         }
-        TeamResponse left = c.call(leaveTeam, LeaveTeamRequest.newBuilder().setExpectedTeamId(tid).build(), TeamResponse.parser());
+        TeamResponse left = c.call(leaveTeam, LeaveTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setExpectedTeamId(tid).build(), TeamResponse.parser());
         boolean out = tipOf(left) == 0 && left.getTeam().getTeamId() == 0;
         report.check(out, "X2 C 离队（开战段只该有 A、B）", describe(left), REF_CROSS);
         if (!out) {
@@ -733,8 +750,8 @@ public final class TeamScenario {
                 return "";
             }
             TeamResponse response = view.getLeaderId() == bot.id()
-                    ? bot.call(disband, DisbandTeamRequest.newBuilder().setExpectedTeamId(tid).build(), TeamResponse.parser())
-                    : bot.call(leaveTeam, LeaveTeamRequest.newBuilder().setExpectedTeamId(tid).build(), TeamResponse.parser());
+                    ? bot.call(disband, DisbandTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setExpectedTeamId(tid).build(), TeamResponse.parser())
+                    : bot.call(leaveTeam, LeaveTeamRequest.newBuilder().setRequestId(UUID.randomUUID().toString()).setExpectedTeamId(tid).build(), TeamResponse.parser());
             if (tipOf(response) == TIP_IN_MATCH) {
                 return "残留队伍 " + uid(tid) + " 的开战锁仍有效（4023），稍后重跑";
             }

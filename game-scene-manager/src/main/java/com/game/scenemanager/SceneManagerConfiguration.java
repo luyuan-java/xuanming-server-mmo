@@ -3,6 +3,8 @@ package com.game.scenemanager;
 import com.game.common.token.DubboCallAuth;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.world.WorldChannelStore;
+import com.game.discovery.world.ChannelSwitchCooldown;
+import com.game.scenemanager.world.ChannelSwitchProperties;
 import com.game.scenemanager.world.NodeAvailability;
 import com.game.scenemanager.world.WorldChannelProperties;
 import com.game.table.ConfigTables;
@@ -63,8 +65,11 @@ public class SceneManagerConfiguration {
     /** 在线换图选跨节点目标（批次 5.2，scene-handoff-spec §5.4）：与进游戏分配共用目录、世界地图集合与选频道 + 软预占。 */
     @Bean
     public SwitchTargetSelector switchTargetSelector(SceneNodeSource source, WorldSceneConfigs worldConfigs,
-                                                     ChannelSelector channelSelector) {
-        return new SwitchTargetSelector(source, worldConfigs, channelSelector);
+                                                     ChannelSelector channelSelector, WorldChannelStore plans,
+                                                     ChannelSwitchCooldown cooldown, ChannelSwitchProperties switchProps,
+                                                     WorldChannelProperties worldProps) {
+        return new SwitchTargetSelector(source, worldConfigs, channelSelector,
+                new ClientChannelPick(plans, cooldown, switchProps, worldProps));
     }
 
     /**

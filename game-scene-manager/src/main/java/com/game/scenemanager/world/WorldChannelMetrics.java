@@ -33,6 +33,7 @@ public final class WorldChannelMetrics {
     static final String LEADER_ZONES = "game.scene_manager.world.leader_zones";
     static final String TICKS = "game.scene_manager.world.ticks";
     static final String TICK = "game.scene_manager.world.tick";
+    static final String DIRECTORY_PUBLISH = "game.scene_manager.channel.directory_publish";
     static final String CHANNELS = "game.scene_manager.world.channels";
     static final String AUTOSCALE = "game.scene_manager.world.autoscale";
     static final String REBALANCE_PENDING = "game.scene_manager.rebalance.pending";
@@ -67,8 +68,12 @@ public final class WorldChannelMetrics {
     /** {@code game_scene_manager_world_channels{state}}。 */
     enum ChannelStateTag { ACTIVE, DRAINING, MISSING }
 
+    /** 每个领导 zone 的目录发布尝试恰好一次；不含 zone/地图/场景/玩家标签。 */
+    public enum DirectoryPublishResult { OK, EMPTY, ERROR, FENCED }
+
     private final AtomicInteger leaderZones = new AtomicInteger();
     private final Map<TickResult, Counter> ticks = new EnumMap<>(TickResult.class);
+    private final Map<DirectoryPublishResult, Counter> directoryPublishes = new EnumMap<>(DirectoryPublishResult.class);
     private final Timer tickTimer;
     private final Map<AutoscaleAction, Map<AutoscaleOutcome, Counter>> autoscale = new EnumMap<>(AutoscaleAction.class);
     private final Map<MigrationReason, Map<MigrationOutcome, Counter>> migrations = new EnumMap<>(MigrationReason.class);
@@ -87,6 +92,11 @@ public final class WorldChannelMetrics {
                     .description("频道计划领导者的拍数（每 zone 每拍一次）")
                     .tag("result", tag(result))
                     .register(registry));
+        }
+        for (DirectoryPublishResult result : DirectoryPublishResult.values()) {
+            directoryPublishes.put(result, Counter.builder(DIRECTORY_PUBLISH)
+                    .description("分线目录发布尝试（每领导 zone 每次一次，空计划成功发布计 empty）")
+                    .tag("result", tag(result)).register(registry));
         }
         tickTimer = Timer.builder(TICK)
                 .description("一拍耗时（计划快照 + 目录 + 规划 + 写入）")
@@ -128,6 +138,8 @@ public final class WorldChannelMetrics {
     public void tick(TickResult result) {
         ticks.get(result).increment();
     }
+
+    public void directoryPublish(DirectoryPublishResult result) { directoryPublishes.get(result).increment(); }
 
     public Timer tickTimer() {
         return tickTimer;

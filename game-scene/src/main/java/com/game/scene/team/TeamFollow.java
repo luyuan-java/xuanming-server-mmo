@@ -27,6 +27,10 @@ public interface TeamFollow {
     default void onBattleFreezeCleared(SceneWorld world, ScenePlayer player) {
     }
 
+    /** 成员关系失效提醒；follow 只对新加入者或显式归队为真，保留 / 移出成员仅刷新 AOI 提示。 */
+    default void onRefresh(SceneWorld world, ScenePlayer player, boolean follow) {
+    }
+
     /** 不跟随（测试与不接 Redis 的装配）。 */
     TeamFollow NONE = (world, player) -> {
     };

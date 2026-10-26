@@ -47,6 +47,7 @@ import com.game.proto.guild.UpdateGuildScoreRequest;
 import com.game.robot.client.GameConnection;
 import com.game.robot.client.Received;
 import com.game.robot.client.RobotException;
+import com.game.robot.client.RobotClient;
 import com.game.robot.flow.EnteredPlayer;
 import com.game.robot.flow.PlayerFlow;
 import com.game.robot.flow.Timings;
@@ -155,6 +156,8 @@ public final class GuildScenario {
     private static final String REF_CROSS = "PARITY「帮会核心」行；guild-spec §11.6 第 4 步、D18；zone-travel-spec §5.13";
 
     private final PlayerFlow flow;
+    private final RobotClient client;
+    private final MessageIdRegistry registry;
     private final CrossZoneGate.Visit visit;
     private final String accountA;
     private final String accountB;
@@ -192,6 +195,13 @@ public final class GuildScenario {
      */
     public GuildScenario(PlayerFlow flow, CrossZoneGate.Visit visit, MessageIdRegistry registry, String accountPrefix, String runTag, int zoneId,
                          Duration requestTimeout) {
+        this(null, flow, visit, registry, accountPrefix, runTag, zoneId, requestTimeout);
+    }
+
+    public GuildScenario(RobotClient client, PlayerFlow flow, CrossZoneGate.Visit visit, MessageIdRegistry registry, String accountPrefix,
+                         String runTag, int zoneId, Duration requestTimeout) {
+        this.client = client;
+        this.registry = registry;
         this.flow = flow;
         this.visit = visit;
         this.accountA = accountName(accountPrefix, runTag, "a");
@@ -538,6 +548,12 @@ public final class GuildScenario {
 
         // ---- 第 11 步：迟到的退帮带着过期的 expected_guild_id，不得作用到玩家的新帮会（Go :708-771） ----
         staleExpectedGuild(a, b, gid);
+
+        // 普通客户端活动链路：另建独立测试帮，真实邀请/本人确认，经战斗终局验证可靠奖励。
+        if (client == null)
+            report.fail("帮会活动链路未装配", "guild完整场景需要RobotClient以直连真实历练战斗", "guild-spec §11.6、4.6a/4.6b");
+        else
+            new GuildActivitySteps(client, registry, report, requestTimeout).run(bots);
 
         report.note("guild_id=" + uid(gid) + " zone=" + zoneId + " leader=A officer=D kicked=E rejected=F（同基线 GUILD_MGMT_OK / "
                 + "GUILD_SMOKE_OK 的字段；C 只在跨区第 4 步出现）");
@@ -1010,7 +1026,7 @@ public final class GuildScenario {
     }
 
     /** 一个已进场的机器人。只在场景线程上使用；每次发送先过 {@link Pacer}（帮会经济场景复用同一份节拍）。 */
-    static final class Bot {
+    static final class Bot implements MatchSupport.Caller {
 
         final String name;
         final EnteredPlayer player;
@@ -1023,15 +1039,21 @@ public final class GuildScenario {
             this.requestTimeout = requestTimeout;
         }
 
-        long id() {
+        @Override
+        public String name() { return name; }
+
+        @Override
+        public long id() {
             return player.playerId();
         }
 
-        GameConnection connection() {
+        @Override
+        public GameConnection connection() {
             return player.connection();
         }
 
-        int mark() {
+        @Override
+        public int mark() {
             return connection().inbox().size();
         }
 
@@ -1040,7 +1062,8 @@ public final class GuildScenario {
         }
 
         /** 发请求等应答；信封错误（限频 1008、故障 1003 ……）与超时抛出：它们说明请求没到 guild 业务逻辑。 */
-        <T extends Message> T call(int messageId, Message body, Parser<T> parser) throws RobotException {
+        @Override
+        public <T extends Message> T call(int messageId, Message body, Parser<T> parser) throws RobotException {
             pace(messageId);
             try {
                 return connection().call(messageId, body, parser, requestTimeout);
@@ -1050,7 +1073,8 @@ public final class GuildScenario {
         }
 
         /** 只发不等。 */
-        long send(int messageId, Message body) throws RobotException {
+        @Override
+        public long send(int messageId, Message body) throws RobotException {
             pace(messageId);
             return connection().send(messageId, body);
         }

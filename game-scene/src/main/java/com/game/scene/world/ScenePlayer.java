@@ -57,6 +57,10 @@ public final class ScenePlayer {
     private final List<Integer> skills;
     private final MoveGuard moveGuard;
     private Scene scene;
+    /** SQL 成员关系的运行时提示；仅供 AOI 排序，不作为玩法或资产授权，随本次进场实例销毁。 */
+    private boolean teamMembershipKnown;
+    private long teamId;
+    private long teamMembershipEpoch;
     /** 位置记录的写序号（本次进场内单调递增，见 PlayerLocationDirectory；只在逻辑线程上读写）。 */
     private long locationSeq;
     private Vec3 position;
@@ -169,6 +173,20 @@ public final class ScenePlayer {
 
     public long ownerEpoch() {
         return ownerEpoch;
+    }
+
+    public long teamId() { return teamId; }
+
+    public boolean teamMembershipKnown() { return teamMembershipKnown; }
+
+    /** 只接受单调的成员关系；相同 epoch 不能换队，缺失快照不能覆盖已经见过的永久版本。 */
+    boolean applyTeamMembership(long id, long epoch) {
+        if (teamMembershipKnown && (Long.compareUnsigned(epoch, teamMembershipEpoch) < 0
+                || epoch == teamMembershipEpoch && id != teamId)) return false;
+        teamMembershipKnown = true;
+        teamId = id;
+        teamMembershipEpoch = epoch;
+        return true;
     }
 
     public RoleAdmissionIdentity admission() { return admission; }
