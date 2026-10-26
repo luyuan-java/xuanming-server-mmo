@@ -1,5 +1,5 @@
-// Java 版内部契约：scene 节点的 dev / test 实例管理口（批次 5.3，docs/porting/dungeon-mirror-spec.md §6.13、Q3）。
-// 只给 robot 与本机切片验证副本 / 显式销毁用，生产不可达：运行模式不是 dev / test 一律 403；没有任何客户端消息号。
+// Java 版内部契约：scene 节点的 dev / test 实例管理口与玩家瞬移（批次 5.3 / 2.10）。
+// 只给 robot 与本机切片验证副本 / 显式销毁 / 同场景瞬移用，生产不可达：非 dev / test 一律 403；没有客户端消息号。
 // 载体：scene 管理端口（缺省 18104）上的 HTTP POST，请求 / 应答体是本文件消息的 protobuf 二进制（Content-Type: application/x-protobuf）；
 // 鉴权同 game-trade 播种：头 X-Game-Admin-Token 与环境变量 GAME_ADMIN_TOKEN 常数时间比对（不设则 503）、X-Game-Operator 必填、每次写审计行。
 syntax = "proto3";
@@ -34,5 +34,18 @@ message DestroyInstanceRequest {
 
 message DestroyInstanceResponse {
   // 0 = 已受理（含已在排空中的重复调用，幂等）；3000 = 本节点没有这个场景；3005 = 是主世界频道（只能由频道计划销毁）或 scene_id 为 0。
+  uint32 tip_id = 1;
+}
+
+// POST /admin/scene/player/teleport：在玩家所在场景内瞬移；坐标采用服务器坐标系，保留原朝向。
+message TeleportPlayerRequest {
+  uint64 player_id = 1;
+  double x = 2;
+  double y = 3;
+  double z = 4;
+}
+
+message TeleportPlayerResponse {
+  // 0 = 已瞬移；1005 = 参数非法；1004 = 玩家不在本节点；1006 = 归属冻结或战斗在途。
   uint32 tip_id = 1;
 }
