@@ -1968,7 +1968,7 @@ class PlayerStoreSqlTest {
             fixture.failRestoration = true;
             try { fixture.execute(); throw new AssertionError("恢复失败必须传播"); }
             catch (java.sql.SQLException restoration) {
-                assertThat(restoration).isInstanceOf(java.sql.SQLNonTransientConnectionException.class)
+                assertThat((Throwable) restoration).isInstanceOf(java.sql.SQLNonTransientConnectionException.class)
                         .hasMessageContaining("禁止回池");
                 assertThat(scope.businessTimedOut(restoration)).isFalse();
                 assertThat(restoration.getSuppressed()).contains(fixture.businessFailure);
