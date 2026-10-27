@@ -197,7 +197,7 @@ class EnterGameSecondLegSqlTest {
             h2.setURL("jdbc:h2:mem:game_login_" + UUID.randomUUID().toString().replace("-", "")
                     + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
             new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(h2);
-            try(var connection=h2.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1,2,3));}
+            try(var connection=h2.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1,2,3), schemaPrincipal(connection));}
             return h2;
         }
 
@@ -228,4 +228,5 @@ class EnterGameSecondLegSqlTest {
             return new PlayerStore(playerMapper, CLOCK::get, transactionManager);
         }
     }
+    private static String schemaPrincipal(java.sql.Connection connection)throws java.sql.SQLException{try(var statement=connection.createStatement();var rows=statement.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new java.sql.SQLException("缺少实际schema主体");return rows.getString(1);}}
 }

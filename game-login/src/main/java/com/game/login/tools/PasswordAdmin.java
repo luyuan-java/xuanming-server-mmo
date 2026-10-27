@@ -64,7 +64,7 @@ public final class PasswordAdmin {
 
     public static void main(String[] args) {
         DriverManager.setLoginTimeout(TIMEOUT_SECONDS);
-        int code = run(Arrays.asList(args), System.getenv(), System.getProperties(), System.console(), System.in, DriverManager::getConnection,
+        int code = run(Arrays.asList(args), System.getenv(), System.getProperties(), System.console(), System.in, url->com.game.common.sql.AuthorityDataSource.fromEnvironment(url,System.getenv()).getConnection(),
                 System.out, System.err);
         System.exit(code);
     }

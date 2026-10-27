@@ -75,7 +75,7 @@ public final class PlayerBundleExport {
     static final Connections REAL = new Connections() {
         @Override
         public Connection mysql(String url) throws SQLException {
-            return DriverManager.getConnection(url);
+            return com.game.common.sql.AuthorityDataSource.fromEnvironment(url,System.getenv()).getConnection();
         }
 
         @Override

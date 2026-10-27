@@ -124,7 +124,7 @@ public final class AuditFallbackReplay {
         }
         // 不起 Spring 的入口：按取到的命名空间自己构造键的出处（只用于节点号租约）
         RedisKeys keys = new RedisKeys(namespace);
-        try (Connection conn = DriverManager.getConnection(url);
+        try (Connection conn = com.game.common.sql.AuthorityDataSource.fromEnvironment(url,env).getConnection();
              LazyIds ids = new LazyIds(keys, args.redis(), args.redisDatabase(), env.get(REDIS_PASSWORD_ENV), err)) {
             // 建运维表（OpsTables.sync）之前核对库名：命名空间与库必须属于同一个部署
             String mismatch = NamespaceDatabaseCheck.verify(conn, args.expectDatabase(), namespace, EXPECT_DATABASE_HINT);
@@ -258,15 +258,15 @@ public final class AuditFallbackReplay {
 
         @Override
         public void close() {
-            if (lease != null) {
-                lease.close();
-            }
-            if (scheduler != null) {
+            RuntimeException failure=null;
+            try{if(lease!=null)lease.close();}catch(RuntimeException unknown){failure=new IllegalStateException("回灌发号租约释放未确认");}
+            if(scheduler!=null){
                 scheduler.shutdownNow();
+                try{if(!scheduler.awaitTermination(5,java.util.concurrent.TimeUnit.SECONDS))failure=new IllegalStateException("回灌发号续租线程未真实join");}
+                catch(InterruptedException interrupted){Thread.currentThread().interrupt();failure=new IllegalStateException("回灌续租线程join被取消");}
             }
-            if (redis != null) {
-                redis.shutdown();
-            }
+            try{if(redis!=null)redis.shutdown(0,5,java.util.concurrent.TimeUnit.SECONDS);}catch(RuntimeException unknown){failure=new IllegalStateException("回灌Redis关闭未确认");}
+            if(failure!=null)throw failure;
         }
     }
 }

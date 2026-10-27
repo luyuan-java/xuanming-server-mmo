@@ -1,5 +1,8 @@
 package com.game.rank;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -70,7 +73,7 @@ class RankMailChainTiDbTest {
     private static final String RANK_SECRET = "rank-chain-local-fixture-only-match-key-0123456789";
     private static final String MAIL_SECRET = "rank-chain-local-fixture-only-mail-key-0123456789";
     private static final long WINNER = 7001, OTHER = 7002;
-    private static String database;
+    private static AuthoritySqlFixture fixture;
     private static DruidDataSource pool;
     private static AuthorityJdbc sql;
     private static RankStore ranks;
@@ -92,32 +95,28 @@ class RankMailChainTiDbTest {
     private static Deadline budget() { return Deadline.after(20_000); }
 
     @BeforeAll static void start() throws Exception {
-        assertEquals("jdbc:mysql://127.0.0.1:4000/", System.getenv("MAIL_RANK_TEST_JDBC"), "仅允许显式本机专用 TiDB");
+        String root=System.getenv("MAIL_RANK_TEST_JDBC");
+        assertNotNull(root,"整链测试必须显式指定数值loopback TiDB根URL");
         assertNotNull(System.getenv("GAME_DUBBO_SECRET"), "真实 Dubbo HMAC 必须由测试进程环境注入");
-        database = "rankchain_" + UUID.randomUUID().toString().replace("-", "");
-        try (var c = DriverManager.getConnection("jdbc:mysql://127.0.0.1:4000/", "root", ""); var s = c.createStatement()) {
-            s.execute("CREATE DATABASE `" + database + "`");
-        }
-        pool = new DruidDataSource();
-        pool.setUrl("jdbc:mysql://127.0.0.1:4000/" + database + "?useSSL=false&useAffectedRows=true&connectTimeout=3000&socketTimeout=5000");
-        pool.setUsername("root"); pool.setPassword(""); pool.setMaxActive(8); pool.setMaxWait(3_000);
-        pool.setConnectionInitSqls(List.of(StrongTiDbConnectionPolicy.SESSION_SQL));
-        pool.init();
-        try (var first = pool.getConnection(); var second = pool.getConnection()) {
-            StrongTiDbConnectionPolicy.verify(first, true);
-            StrongTiDbConnectionPolicy.verify(second, true);
-        }
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(
-                new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
-        try(var connection=pool.getConnection();var statement=connection.createStatement()) {
+        fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(root,
+                System.getProperty("game.it.mysql.user","root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD",""),
+                "rankchain",false,List.of(1)),(connection,principal)->{
+            GlobalMatchStore.registry().initializeFresh(connection,principal);
+            MatchRatingTables.registry().initializeFresh(connection,principal);
+            RankTables.registry().initializeFresh(connection,principal);
+            MailTables.registry().initializeFresh(connection,principal);
+            GuildTables.registry().initializeFresh(connection,principal);
+            try(var statement=connection.createStatement()){
             statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARCHAR(191) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,zone_id INT UNSIGNED NOT NULL)");
             try(var insert=connection.prepareStatement("INSERT INTO player VALUES(?,'local-fixture',1,0,1)")) {
                 for(long player:List.of(WINNER,OTHER)){insert.setLong(1,player);insert.executeUpdate();}
             }
-            com.game.common.player.RouteAuthorityInitializer.initialize(connection,java.util.UUID.randomUUID().toString(),List.of(1));
-        }
-        // 所有领域表均走原来的登记/迁移入口；guild_member 是邮箱可见性查询的真实依赖。
-        new GlobalMatchStore(pool, new GlobalMatchProperties(true, true, 30, 180, 120, RANK_SECRET));
+            }
+        });
+        pool=new DruidDataSource();pool.setUrl(fixture.jdbcUrl("?useSSL=false&useAffectedRows=true&connectTimeout=3000&socketTimeout=5000"));
+        pool.setUsername(fixture.normalUser());pool.setPassword(fixture.normalPassword());pool.setMaxActive(8);pool.setMaxWait(3000);
+        AuthorityDataSourcePolicy.protectDruid(pool,fixture.writerBoot(),true);
+        try(var first=pool.getConnection();var second=pool.getConnection()){StrongTiDbConnectionPolicy.verify(first,true);StrongTiDbConnectionPolicy.verify(second,true);}
         MatchRatingTables.sync(pool, Duration.ofSeconds(60));
         RankTables.sync(pool); MailTables.sync(pool); GuildTables.sync(pool, Duration.ofSeconds(60));
         sql = new AuthorityJdbc(pool);
@@ -320,11 +319,6 @@ class RankMailChainTiDbTest {
         if (caller != null) caller.close(); if (server != null) server.close();
         if (mailDispatch != null) mailDispatch.close(); if (mailProvider != null) mailProvider.close(); if (rankProvider != null) rankProvider.close();
         metrics.close(); if (pool != null) pool.close();
-        if (database != null) {
-            assertTrue(database.matches("rankchain_[0-9a-f]{32}"));
-            try (var c = DriverManager.getConnection("jdbc:mysql://127.0.0.1:4000/", "root", ""); var s = c.createStatement()) {
-                s.execute("DROP DATABASE `" + database + "`");
-            }
-        }
+        if(fixture!=null)fixture.close();
     }
 }

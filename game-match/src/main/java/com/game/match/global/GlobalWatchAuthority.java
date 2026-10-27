@@ -23,15 +23,16 @@ import javax.sql.DataSource;
 /** 观战原件与匹配票共享TiDB和P首锁；网络只在原Add提交以后发，取消未知不终结。 */
 public final class GlobalWatchAuthority {
     private final AuthorityJdbc sql;
+    private final GlobalMatchStore publication;
     private final PbMysql db=new PbMysql();
     public GlobalWatchAuthority(DataSource source,GlobalMatchStore schema) {
-        sql=new AuthorityJdbc(source);db.register(GlobalWatchingRow.getDefaultInstance());db.register(GlobalTicketRow.getDefaultInstance());db.register(GlobalFormationRow.getDefaultInstance());
+        this.publication=Objects.requireNonNull(schema);sql=new AuthorityJdbc(source);db.register(GlobalWatchingRow.getDefaultInstance());db.register(GlobalTicketRow.getDefaultInstance());db.register(GlobalFormationRow.getDefaultInstance());
         db.register(GlobalWatchRequestRow.getDefaultInstance());db.register(GlobalWatchHeadRow.getDefaultInstance());
     }
     private static SessionContext original(GlobalWatchingRow row){return SessionContext.newBuilder().setPlayerId(row.getPlayerId()).setAccount(row.getOwnerAccount()).setOwnerRevision(row.getOwnerRevision()).build();}
     private <T>T tx(SessionContext actor,Deadline deadline,AuthorityJdbc.Work<T> work) {
-        try{return (actor==null?sql:sql.forActor(actor.getPlayerId(),actor.getAccount(),actor.getOwnerRevision())).tx(deadline,work);}
-        catch(SQLException|RuntimeException failure){throw new Deadline.DependencyException("全球观战SQL原件操作尚未确认",failure);}
+        try{return publication.watchPublication(()->{try{return (actor==null?sql:sql.forActor(actor.getPlayerId(),actor.getAccount(),actor.getOwnerRevision())).tx(deadline,work);}catch(SQLException failure){throw new Deadline.DependencyException("观战提交未知，原件留存",failure);}});}
+        catch(RuntimeException failure){throw new Deadline.DependencyException("全球观战SQL原件操作尚未确认",failure);}
     }
     private static long now(AuthorityJdbc.Session c)throws SQLException {
         Long stamp=c.one("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)",row->row.getLong(1));
@@ -62,6 +63,7 @@ public final class GlobalWatchAuthority {
                 if(!original.getRequestPayload().equals(bytes))throw new SecurityException("观战UUID载荷发生变化");
                 return new Request(original,latest(c,actor.getPlayerId(),request.getRequestId()));
             }
+            publication.requireNewRoot();
             var original=key.toBuilder().setOwnerAccount(actor.getAccount()).setOwnerRevision(actor.getOwnerRevision()).setRequestPayload(bytes).setCreatedMs(now(c)).build();
             if(queued(c,actor.getPlayerId())){
                 original=original.toBuilder().setResponsePayload(com.game.match.support.MatchTips.watchRejected(com.game.match.support.MatchTip.WATCH_QUEUED).toByteString()).build();

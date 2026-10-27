@@ -1,5 +1,8 @@
 package com.game.trade.commerce;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.assertj.core.api.Assertions.*;
 
 import com.alibaba.druid.pool.DruidDataSource;
@@ -16,9 +19,9 @@ import org.junit.jupiter.api.*;
 /** 只验交易SQL合同与恢复，不把人工注入资产终局的夹具冒充scene端到端。 */
 class CommerceTiDbTest {
     private DruidDataSource pool;
-    private Connection admin;
-    private String database;
+    private AuthoritySqlFixture fixture;
     private CommerceEngine e;
+    private CommerceStore fixtureStore;
     /** 只配置本机TiDB测试端口，非法数值必须在连接前失败。 */
     static int tiDbTestPort() {
         int port = Integer.parseInt(System.getProperty("game.it.tidb.port", "4000"));
@@ -32,29 +35,21 @@ class CommerceTiDbTest {
         Assumptions.assumeTrue(url != null, "未配置隔离TiDB");
         if (!url.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):" + tiDbTestPort()))
             throw new IllegalArgumentException("仅允许本机game.it.tidb.port指定端口TiDB随机库");
-        admin = DriverManager.getConnection(url + "/", "root", "");
-        database = "trade_it_" + UUID.randomUUID().toString().replace("-", "");
-        try (var q = admin.createStatement()) {
-            q.execute("CREATE DATABASE `" + database + "`");
-        }
-        pool = new DruidDataSource();
-        pool.setUrl(url + "/" + database);
-        pool.setUsername("root");
-        pool.setPassword("");
-        pool.setMaxActive(12);
-        pool.setConnectionInitSqls(List.of(StrongTiDbConnectionPolicy.SESSION_SQL));
-        pool.init();
-        try (var c = pool.getConnection()) {
-            StrongTiDbConnectionPolicy.verify(c, true);
-        }
-        TradeTables.sync(pool, java.time.Duration.ofSeconds(30));
-        try (var c = pool.getConnection(); var statement = c.createStatement()) {
+        fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(url,
+                System.getProperty("game.it.mysql.user","root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD",""),
+                "trade_commerce",false,List.of(1)),(c,principal)->{
+            TradeTables.registry().initializeFresh(c,principal);
+            try(var statement=c.createStatement()){
             statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,account VARCHAR(64) NOT NULL,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
             for (int player = 1; player <= 100; player++)
                 statement.execute("INSERT INTO player(player_id,owner_revision,trade_listing_id,account) VALUES(" + player + ",1,0,'fixture-account-" + player + "')");
-        }
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
-        try(var connection=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1));}
+            }
+        });
+        pool=new DruidDataSource();pool.setUrl(fixture.jdbcUrl("?connectTimeout=3000&socketTimeout=30000"));
+        pool.setUsername(fixture.normalUser());pool.setPassword(fixture.normalPassword());pool.setMaxActive(12);pool.setMaxWait(3000);
+        AuthorityDataSourcePolicy.protectDruid(pool,fixture.writerBoot(),true);
+        TradeTables.sync(pool,java.time.Duration.ofSeconds(30));
+        fixtureStore=new CommerceStore(fixture.schemaDataSource());
         AtomicLong ids = new AtomicLong(1000);
         var policy = new CommerceRules.Policy(Set.of(10), Set.of(), Set.of(1), false,
             List.of(TradeMarketView.newBuilder()
@@ -69,14 +64,7 @@ class CommerceTiDbTest {
     void close() throws Exception {
         if (pool != null)
             pool.close();
-        if (admin != null) {
-            try (var q = admin.createStatement()) {
-                if (database == null || !database.matches("trade_it_[0-9a-f]{32}"))
-                    throw new IllegalStateException("非法测试库");
-                q.execute("DROP DATABASE `" + database + "`");
-            }
-            admin.close();
-        }
+        if(fixture!=null)fixture.close();
     }
     Deadline budget() {
         return Deadline.after(10000);
@@ -121,7 +109,7 @@ class CommerceTiDbTest {
         assertThat(CommerceEngine.workflow(e.store.get(originalId)).getStage()).isEqualTo("bid_held");
         // 下一笔出价必须加价，丢回执后的原请求仍只查询原合同，不再冻结资金。
         assertThat(matching.bid(21, lot.getCommerceId(), input, budget()).getCommerceId()).isEqualTo(originalId);
-        e.store.transaction(budget(), c -> {
+        fixtureStore.transaction(budget(), c -> {
             CommerceStore.execute(c, "UPDATE trade_commerce SET expires_ms=1 WHERE commerce_id=?", lot.getCommerceId());
             return null;
         });
@@ -148,7 +136,7 @@ class CommerceTiDbTest {
         });
     }
     void complete(int status) throws Exception {
-        e.store.transaction(budget(), c -> {
+        fixtureStore.transaction(budget(), c -> {
             CommerceStore.execute(c, "UPDATE trade_asset_op SET status=?,durable=1 WHERE status=1", status);
             return null;
         });
@@ -173,7 +161,7 @@ class CommerceTiDbTest {
         assertThat(e.store.get(row.getCommerceId())).isEqualTo(current);
         assertThat(e.store.ops("ref_id=? ORDER BY op_id", row.getCommerceId())).isEqualTo(originalOps);
         var badBytes = com.google.protobuf.ByteString.copyFrom(new byte[] {(byte) 255});
-        e.store.transaction(budget(), c -> {
+        fixtureStore.transaction(budget(), c -> {
             e.store.save(c, current.toBuilder().setWorkflowProto(badBytes));
             return null;
         });
@@ -194,7 +182,7 @@ class CommerceTiDbTest {
                 .setAssets(TradeAssetSelection.newBuilder().putItems(10, 1))
                 .setCurrencyType(1).setPrice(50).setDurationMs(60000).build(), budget());
         e.advance(row, budget());
-        e.store.transaction(budget(), c -> {
+        fixtureStore.transaction(budget(), c -> {
             CommerceStore.execute(c, "UPDATE trade_asset_op SET status=6,durable=0 WHERE ref_id=?", row.getCommerceId());
             return null;
         });
@@ -209,7 +197,7 @@ class CommerceTiDbTest {
             com.game.trade.store.pb.TradeCommerceRow.newBuilder().setSellerPlayerId(22)
                 .setKind(3).setStatus(3).setExpiresMs(System.currentTimeMillis() + 60000), w, budget());
         e.advance(instanceRow, budget());
-        e.store.transaction(budget(), c -> {
+        fixtureStore.transaction(budget(), c -> {
             CommerceStore.execute(c, "UPDATE trade_asset_op SET status=2,durable=0,resolved_by='test-operator' WHERE ref_id=?",
                 instanceRow.getCommerceId());
             return null;
@@ -349,13 +337,13 @@ class CommerceTiDbTest {
         var original = e.forActor(session).consignment(11,input,budget());
         assertThat(CommerceEngine.workflow(original).getSellerIdentity().getOwnerRevision()).isEqualTo(1);
         // 这里只注入已完成原合同和后续归属变化，验证提交接缝；不将其声称真实过户/资产结算验收。
-        e.store.transaction(budget(), c -> {
+        fixtureStore.transaction(budget(), c -> {
             CommerceStore.execute(c,"UPDATE trade_commerce SET status=11 WHERE commerce_id=?",original.getCommerceId());
             CommerceStore.execute(c,"UPDATE player SET account='new-owner',owner_revision=2 WHERE player_id=11"); return null;
         });
         assertThatThrownBy(() -> e.forActor(session).consignment(11,input.toBuilder().setClientRequestId("late-request-0002").build(),budget()))
             .isInstanceOf(SecurityException.class);
-        e.store.transaction(budget(), c -> { CommerceStore.execute(c,"UPDATE player SET account='fixture-account-11',owner_revision=3 WHERE player_id=11"); return null; });
+        fixtureStore.transaction(budget(), c -> { CommerceStore.execute(c,"UPDATE player SET account='fixture-account-11',owner_revision=3 WHERE player_id=11"); return null; });
         assertThatThrownBy(() -> e.forActor(session).consignment(11,input.toBuilder().setClientRequestId("late-request-0003").build(),budget()))
             .isInstanceOf(SecurityException.class);
         var current = e.forActor(session.toBuilder().setOwnerRevision(3).build()).consignment(11,input,budget());
@@ -375,7 +363,7 @@ class CommerceTiDbTest {
                 .put("skuId", 1).put("quantity", 1).put("itemConfigId", 10).put("itemCount", 1)
                 .put("amountMinor", 100).put("currency", "CNY");
             // 独立注入归属变化来验证交付提交接缝；此用例不冒充真实角色过户验收。
-            e.store.transaction(budget(), c -> { CommerceStore.execute(c,
+            fixtureStore.transaction(budget(), c -> { CommerceStore.execute(c,
                 "UPDATE player SET account=?,owner_revision=? WHERE player_id=?", aba ? originalAccount : "new-owner", aba ? 3L : 2L,buyer); return null; });
             List<com.fasterxml.jackson.databind.JsonNode> receipts = new ArrayList<>();
             var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1",0),0);
@@ -422,7 +410,7 @@ class CommerceTiDbTest {
             .setStatus(2).setVersion(1).setWorkflowProto(workflow.build().toByteString()).build();
         // 只注入已完成的SQL原扣款，真实seq/epoch由原enqueue产生；不冒充Scene扣款验收。
         e.store.ensureSeqs(budget(), 11);
-        e.store.transaction(budget(), c -> {
+        fixtureStore.transaction(budget(), c -> {
             long now=CommerceStore.sqlNow(c);
             e.store.enqueue(c,com.game.trade.store.pb.TradeAssetOpRow.newBuilder().setOpId(originalDebitId)
                 .setPlayerId(11).setStream(3).setKind(1).setStatus(2).setDurable(true).setTxType(3)
@@ -465,7 +453,7 @@ class CommerceTiDbTest {
             assertThat(e.store.ops("ref_id=? AND op_id<>?",listingId,originalDebitId)).isEmpty();
             assertThat(e.store.ops("op_id=?",originalDebitId)).containsExactly(originalDebit);
             // 维护注入错误归属，原返还不能发给新主；保留rmb_return等待人工/恢复。
-            e.store.transaction(budget(), c -> {CommerceStore.execute(c,"UPDATE player SET account='new-seller-owner',owner_revision=2 WHERE player_id=11");return null;});
+            fixtureStore.transaction(budget(), c -> {CommerceStore.execute(c,"UPDATE player SET account='new-seller-owner',owner_revision=2 WHERE player_id=11");return null;});
             assertThatThrownBy(() -> service.advance(e.store.get(listingId),budget())).isInstanceOf(SecurityException.class);
             assertThat(e.store.ops("ref_id=? AND op_id<>?",listingId,originalDebitId)).isEmpty();
             assertThat(e.store.ops("op_id=?",originalDebitId)).containsExactly(originalDebit);
@@ -475,7 +463,7 @@ class CommerceTiDbTest {
             malformedWorkflow.getLegsBuilder(0).clearOpId();
             var malformed=row.toBuilder().setCommerceId(7002).setRequestKey("rmb-missing-original-op-fixture")
                 .setWorkflowProto(malformedWorkflow.build().toByteString()).build();
-            e.store.transaction(budget(),c->{CommerceStore.insert(c,"trade_commerce",malformed);return null;});
+            fixtureStore.transaction(budget(),c->{CommerceStore.insert(c,"trade_commerce",malformed);return null;});
             var beforeMalformedOps=e.store.ops("1=1 ORDER BY op_id");
             assertThatThrownBy(()->e.advance(malformed,budget())).isInstanceOf(CommerceEngine.CorruptContract.class)
                 .hasMessageContaining("原操作ID");
@@ -527,7 +515,7 @@ class CommerceTiDbTest {
                        .getItems(0)
                        .getCount())
             .isEqualTo(1);
-        e.store.transaction(budget(), c -> {
+        fixtureStore.transaction(budget(), c -> {
             CommerceStore.execute(
                 c, "UPDATE trade_asset_op SET status=2,durable=1 WHERE ref_id=? AND stream=4", second);
             return null;

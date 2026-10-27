@@ -23,15 +23,17 @@ class PlayerRouteAuthoritySqlTest {
     @Test void 缺meta或缺任一围栏片均拒绝建角_不从player或缓存自动补原件()throws Exception{
         try(var f=new PlayerTradeStoreTest.Fixture()){
             f.sql.update("DELETE FROM route_meta");assertThrows(RuntimeException.class,()->f.player(1,"seller"));assertEquals(0,f.count("player"));
-            try(var connection=f.source.getConnection()){RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(7));}
+            if(f.endpoint!=null)try(var connection=f.schemaConnection()){assertThrows(SQLException.class,()->RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(7),schemaPrincipal(connection)));}
+        }
+        try(var f=new PlayerTradeStoreTest.Fixture()){
             f.sql.update("DELETE FROM zone_merge_fence WHERE zone_id=7 AND shard=63");assertThrows(RuntimeException.class,()->f.player(1,"seller"));assertEquals(0,f.count("player"));assertEquals(63,f.sql.queryForObject("SELECT COUNT(*) FROM zone_merge_fence WHERE zone_id=7",Integer.class));
         }
     }
     @Test void 已开放世代缺片不能由初始化重跑悄悄补权_不同世代不能覆盖()throws Exception{
         try(var f=new PlayerTradeStoreTest.Fixture()){
             String generation=f.sql.queryForObject("SELECT generation FROM route_meta WHERE id=1",String.class);
-            try(var connection=f.source.getConnection()){RouteAuthorityInitializer.initialize(connection,generation,List.of(7));assertThrows(SQLException.class,()->RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(7)));}
-            f.sql.update("DELETE FROM zone_merge_fence WHERE zone_id=7 AND shard=63");try(var connection=f.source.getConnection()){assertThrows(SQLException.class,()->RouteAuthorityInitializer.initialize(connection,generation,List.of(7)));}
+            try(var connection=f.schemaConnection()){if(f.endpoint==null)RouteAuthorityInitializer.initialize(connection,generation,List.of(7),schemaPrincipal(connection));else assertThrows(SQLException.class,()->RouteAuthorityInitializer.initialize(connection,generation,List.of(7),schemaPrincipal(connection)));assertThrows(SQLException.class,()->RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(7),schemaPrincipal(connection)));}
+            f.sql.update("DELETE FROM zone_merge_fence WHERE zone_id=7 AND shard=63");try(var connection=f.schemaConnection()){assertThrows(SQLException.class,()->RouteAuthorityInitializer.initialize(connection,generation,List.of(7),schemaPrincipal(connection)));}
             assertEquals(63,f.sql.queryForObject("SELECT COUNT(*) FROM zone_merge_fence WHERE zone_id=7",Integer.class));
         }
     }
@@ -44,7 +46,7 @@ class PlayerRouteAuthoritySqlTest {
     }
     @Test void SQLmeta冻结拒绝夺权和全员事务_资产与旧E不变()throws Exception{
         try(var f=new PlayerTradeStoreTest.Fixture()){
-            f.player(1,"seller");var before=f.row(1);f.sql.update("UPDATE route_meta SET writable=0 WHERE id=1");assertThrows(RuntimeException.class,()->f.players.claimOwnership(1,BUDGET));assertEquals(before.getOwnerEpoch(),f.row(1).getOwnerEpoch());assertEquals(before.getOwnerRevision(),f.row(1).getOwnerRevision());
+            f.player(1,"seller");var before=f.row(1);f.sql.update("UPDATE route_meta SET writable=0 WHERE id=1");assertThrows(RuntimeException.class,()->f.players.claimOwnership(1,BUDGET));assertEquals(before.getOwnerEpoch(),f.sql.queryForObject("SELECT owner_epoch FROM player WHERE player_id=1",Long.class));assertEquals(before.getOwnerRevision(),f.sql.queryForObject("SELECT owner_revision FROM player WHERE player_id=1",Long.class));
         }
     }
     @Test void 恢复必须独立双上界_原账号修订与旧会话同时失效_不改home及存档()throws Exception{
@@ -76,4 +78,5 @@ class PlayerRouteAuthoritySqlTest {
         }
     }
     private static void lock(PlayerTradeStoreTest.Fixture f,List<Long> players){var tx=new TransactionTemplate(f.manager);tx.setTimeout(5);tx.execute(status->f.sql.execute((ConnectionCallback<Void>)connection->{PlayerRouteAuthority.lock(connection,players,3);return null;}));}
+    private static String schemaPrincipal(java.sql.Connection connection)throws SQLException{try(var statement=connection.createStatement();var rows=statement.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new SQLException("缺实际schema主体");return rows.getString(1);}}
 }

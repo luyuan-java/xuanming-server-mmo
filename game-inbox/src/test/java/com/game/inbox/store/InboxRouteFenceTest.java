@@ -1,5 +1,8 @@
 package com.game.inbox.store;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.game.common.deadline.Deadline;
@@ -40,8 +43,7 @@ final class InboxRouteFenceTest {
     static final class Fixture implements AutoCloseable {
         final DataSource source;
         DruidDataSource nativePool;
-        Connection admin;
-        String database;
+        AuthoritySqlFixture fixture;
         final SimpleMeterRegistry metrics=new SimpleMeterRegistry();
         final AuthorityJdbc jdbc;
         Fixture() throws Exception {
@@ -54,45 +56,31 @@ final class InboxRouteFenceTest {
                 source=memory;
             } else {
                 requireEndpoint(endpoint);
-                database="inbox_route_it_"+UUID.randomUUID().toString().replace("-", "");
                 String password=System.getenv().getOrDefault("GAME_TEST_MYSQL_PASSWORD", "");
-                admin=DriverManager.getConnection("jdbc:mysql://"+endpoint+"/?connectTimeout=3000&socketTimeout=4000", "root", password);
-                boolean created=false;
-                try(var statement=admin.createStatement()) {
-                    statement.setQueryTimeout(3);
-                    try(var rows=statement.executeQuery("SELECT VERSION(),@@version_comment")) {
-                        assertTrue(rows.next());
-                        assertTrue((rows.getString(1)+rows.getString(2)).toLowerCase(java.util.Locale.ROOT).contains("tidb"));
-                    }
-                    statement.execute("CREATE DATABASE `"+database+"`");
-                    created=true;
-                } catch(Exception | AssertionError failure) {
-                    try(var cleanup=admin.createStatement()){if(created){cleanup.setQueryTimeout(3);cleanup.execute("DROP DATABASE IF EXISTS `"+database+"`");}}
-                    catch(Exception cleanup){failure.addSuppressed(cleanup);}
-                    finally {try {admin.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}}
-                    throw failure;
-                }
+                fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment("jdbc:mysql://"+endpoint+"/",
+                        System.getProperty("game.it.mysql.user", "root"),password,"inbox_route",false,List.of(7)),(connection,principal)->{
+                    try(var statement=connection.createStatement()) { createDomain(connection,statement); }
+                });
                 nativePool=new DruidDataSource();
-                nativePool.setUrl("jdbc:mysql://"+endpoint+"/"+database);
-                nativePool.setUsername("root");nativePool.setPassword(password);nativePool.setMaxActive(2);nativePool.setMaxWait(3000);
-                nativePool.setConnectionInitSqls(List.of(StrongTiDbConnectionPolicy.SESSION_SQL));
-                source=nativePool;
+                try {
+                    nativePool.setUrl(fixture.jdbcUrl("?connectTimeout=3000&socketTimeout=4000"));
+                    nativePool.setUsername(fixture.normalUser());nativePool.setPassword(fixture.normalPassword());nativePool.setMaxActive(2);nativePool.setMaxWait(3000);
+                    AuthorityDataSourcePolicy.protectDruid(nativePool,fixture.writerBoot(),true);
+                    source=nativePool;
+                } catch(Exception|Error failure) {
+                    nativePool.close();try{fixture.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;
+                }
             }
             try {
-            try(var connection=source.getConnection();var statement=connection.createStatement()) {
-                if(nativePool!=null) StrongTiDbConnectionPolicy.verify(connection,true);
+            if(nativePool==null) try(var connection=source.getConnection();var statement=connection.createStatement()) {
                 try(var input=RouteAuthorityInitializer.class.getResourceAsStream("/db/game-route-authority-schema.sql")) {
                     assertNotNull(input);
-                    for(String sql:new String(input.readAllBytes(),StandardCharsets.UTF_8).split(";"))
-                        if(!sql.isBlank()) statement.execute(sql);
+                    String ddl=new String(input.readAllBytes(),StandardCharsets.UTF_8).replaceAll("(?i)ENGINE\\s*=\\s*InnoDB[^;]*","");
+                    for(String sql:ddl.split(";")) if(!sql.isBlank()) statement.execute(sql);
                 }
-                statement.execute("CREATE TABLE player(player_id BIGINT PRIMARY KEY,zone_id INT NOT NULL,trade_listing_id BIGINT NOT NULL,account VARCHAR(64) NOT NULL,owner_revision BIGINT NOT NULL,owner_epoch BIGINT NOT NULL,owner_released INT NOT NULL)");
-                statement.execute("INSERT INTO player VALUES(1,7,0,'fixture-owner',1,1,0)");
-                RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(7));
-                statement.execute("CREATE TABLE player_inbox_stream(shard INT,player_id BIGINT,domain INT,next_seq BIGINT,notify_due_ms BIGINT,PRIMARY KEY(shard,player_id,domain))");
-                try(var insert=connection.prepareStatement("INSERT INTO player_inbox_stream VALUES(?,1,?,2,100)")) {
-                    insert.setInt(1,InboxShards.rowShard(1));insert.setInt(2,DOMAIN.getNumber());insert.executeUpdate();
-                }
+                createDomain(connection,statement);
+                String principal;try(var identity=statement.executeQuery("SELECT CURRENT_USER()")){assertTrue(identity.next());principal=identity.getString(1);}
+                RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(7),principal);
             }
             jdbc=new AuthorityJdbc(source);
             } catch(Exception | AssertionError failure) {
@@ -100,17 +88,23 @@ final class InboxRouteFenceTest {
                 throw failure;
             }
         }
-        void sql(String sql) throws SQLException {try(var connection=source.getConnection();var statement=connection.createStatement()){statement.execute(sql);}}
+        Connection schemaConnection() throws SQLException {return fixture==null?source.getConnection():fixture.schemaConnection();}
+        private static void createDomain(Connection connection,java.sql.Statement statement)throws SQLException {
+                statement.execute("CREATE TABLE player(player_id BIGINT PRIMARY KEY,zone_id INT NOT NULL,trade_listing_id BIGINT NOT NULL,account VARCHAR(64) NOT NULL,owner_revision BIGINT NOT NULL,owner_epoch BIGINT NOT NULL,owner_released INT NOT NULL)");
+                statement.execute("INSERT INTO player VALUES(1,7,0,'fixture-owner',1,1,0)");
+                statement.execute("CREATE TABLE player_inbox_stream(shard INT,player_id BIGINT,domain INT,next_seq BIGINT,notify_due_ms BIGINT,PRIMARY KEY(shard,player_id,domain))");
+                try(var insert=connection.prepareStatement("INSERT INTO player_inbox_stream VALUES(?,1,?,2,100)")) {
+                    insert.setInt(1,InboxShards.rowShard(1));insert.setInt(2,DOMAIN.getNumber());insert.executeUpdate();
+                }
+        }
+        void sql(String sql) throws SQLException {try(var connection=schemaConnection();var statement=connection.createStatement()){statement.execute(sql);}}
         long due() throws SQLException {try(var connection=source.getConnection();var statement=connection.createStatement();var rows=statement.executeQuery("SELECT notify_due_ms FROM player_inbox_stream")){assertTrue(rows.next());return rows.getLong(1);}}
         boolean clear() throws SQLException {return InboxStore.clearNotifyDue(Deadline.after(3000),jdbc,1,DOMAIN,2);}
         @Override public void close() throws SQLException {
             metrics.close();
             if(nativePool==null) { sql("DROP ALL OBJECTS");return; }
             nativePool.close();
-            try {
-                if(database==null || !database.matches("inbox_route_it_[0-9a-f]{32}")) throw new SQLException("临时数据库边界无效");
-                try(var statement=admin.createStatement()){statement.setQueryTimeout(3);statement.execute("DROP DATABASE `"+database+"`");}
-            } finally { admin.close(); }
+            if(fixture!=null)fixture.close();
         }
     }
     @Test void 开放原件允许CAS清提醒_过期CAS不能覆盖后续提醒() throws Exception {

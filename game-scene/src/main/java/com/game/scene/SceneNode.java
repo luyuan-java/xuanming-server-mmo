@@ -186,7 +186,19 @@ public class SceneNode implements SmartLifecycle {
     private final KafkaNames kafkaNames;
     private final SceneBattleTables battleTables;
     private final SceneBattleMetrics battleMetrics;
-    private final String instanceId = UUID.randomUUID().toString();
+    private String instanceId = UUID.randomUUID().toString();
+    private final com.game.scene.admin.SceneMaintenanceController.Gate maintenance=new com.game.scene.admin.SceneMaintenanceController.Gate();
+    private com.game.common.sql.WriterAuthority writerBoot;
+    private boolean maintenanceStorageStopped;
+    @FunctionalInterface private interface PublicationStart{void start()throws Exception;}
+    private PublicationStart publicationStart;
+    private com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerReadiness preparedSource,preparedSourceRequest;
+    private com.game.player.store.state.SqlWriterMaintenanceReceipt.SourceOpenAck sourceOpenIntent,sourceOpenAck;
+    public synchronized SceneNode withMaintenanceBoot(com.game.common.sql.WriterAuthority boot){
+        if(running)throw new IllegalStateException("节点已启动");writerBoot=java.util.Objects.requireNonNull(boot);
+        var bytes=java.nio.ByteBuffer.wrap(boot.instanceId());instanceId=new UUID(bytes.getLong(),bytes.getLong()).toString();
+        if(boot.prepareOnly())maintenance.prepareOnly();return this;
+    }
     /** 最近一次目录快照里的在线人数（停服写回没能执行时报告用，任意线程可读）。 */
     private final AtomicInteger approxPlayers = new AtomicInteger();
 
@@ -415,14 +427,14 @@ public class SceneNode implements SmartLifecycle {
                 new LinkedBlockingQueue<>(), new DefaultThreadFactory("scene-asset-reply", true));
         metrics.bindAssetReplyExecutor(assetReplyExecutor);
         assetProvider = new SceneAssetOpProvider(() -> assetOps, settings.assetOpMaxInflight(), assetReplyExecutor,
-                metrics);
+                metrics).withMaintenance(maintenance);
         metrics.bindAssetOpsInFlight(() -> {
             SceneAssetOpProvider p = assetProvider;
             return p == null ? 0 : p.inFlight();
         });
         // 回合制战斗入口的跨进程提供方：同一端口、同一个回写池，在途上限各自独立（scene-battle-spec §7.3）
         battleProvider = new SceneBattleProvider(() -> battleService, instanceId, logic, settings.battleRpcMaxInflight(),
-                assetReplyExecutor, battleMetrics);
+                assetReplyExecutor, battleMetrics).withMaintenance(maintenance);
         RunMode runMode = RunMode.parse(props.runMode());
         if (!RunMode.isRecognized(props.runMode())) {
             log.warn("game.run-mode（GAME_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
@@ -504,6 +516,7 @@ public class SceneNode implements SmartLifecycle {
                 lost -> postToLogic(() -> sceneWorld.onOwnershipLost(lost)));
         leaseRenewer.start(scheduler);
 
+        publicationStart=()->{
         LinkIdentity identity = new LinkIdentity(nodeId, instanceId, zoneId);
         SceneLinkService linkService = new SceneLinkService(identity, gateLinks, sceneWorld, requests, metrics);
         AtomicLong linkIds = new AtomicLong();
@@ -516,10 +529,10 @@ public class SceneNode implements SmartLifecycle {
         });
         int linkPort = linkServer.start(settings.linkBindHost(), settings.linkPort(),
                 () -> new NodeLinkHandler(identity, linkAuth, InstantSource.system(), linkService, logic, linkIds,
-                        handshakeTimeout, maxPendingFrames, metrics));
+                        handshakeTimeout, maxPendingFrames, metrics).withMaintenance(maintenance));
 
         // 资产通道导出：成功之后才把 rpc 地址写进目录（调用方只从目录找它，guild-economy-spec §4.6 第 6 条）；端口被占 / 缺 GAME_DUBBO_SECRET 拒绝启动
-        SceneRpcServer rpc = SceneRpcServer.export(assetProvider, battleProvider, new SceneInboxProvider(() -> inboxService, instanceId, logic),
+        SceneRpcServer rpc = SceneRpcServer.export(assetProvider, battleProvider, new SceneInboxProvider(() -> inboxService, instanceId, logic).withMaintenance(maintenance),
                 new com.game.scene.team.SceneTeamProvider(() -> sceneWorld, instanceId, logic),
                 props.advertiseHost(), settings.assetRpcPort());
         assetRpc = rpc;
@@ -545,6 +558,8 @@ public class SceneNode implements SmartLifecycle {
         log.info("场景节点已启动 zone={} node_id={} instance={} link={}:{} asset_rpc={}:{} 频道计划版本={}", zoneId, nodeId,
                 instanceId, props.advertiseHost(), linkPort, props.advertiseHost(), rpc.port(),
                 follower.appliedVersion() < 0 ? "未拉到" : Long.toUnsignedString(follower.appliedVersion()));
+        };
+        if(writerBoot==null||!writerBoot.prepareOnly())publicationStart.start();
     }
 
     /**
@@ -557,6 +572,97 @@ public class SceneNode implements SmartLifecycle {
         if (p != null) {
             p.requestPublishNow();
         }
+    }
+
+    /** 新SQL_RELEASED boot先启动真实存储/补偿/消费者，监听与目录仍关闭。 */
+    public synchronized com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerReadiness prepareMaintenanceSource(
+            com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerReadiness input)throws Exception{
+        rejectUnknownMaintenance(input);
+        if(writerBoot==null||!writerBoot.prepareOnly()||!running||world==null||playerRepository==null||storageExecutor==null||publicationStart==null||maintenance.accepting()||sourceOpenIntent!=null)throw new IllegalStateException("新boot消费者尚未完成prepare-only启动");
+        if(input.getIssuerId().isEmpty()||input.getLogicalRole().isBlank()||!java.util.Arrays.equals(input.getInstanceId().toByteArray(),writerBoot.instanceId())||!java.util.Arrays.equals(input.getPhysicalWriterKey().toByteArray(),writerBoot.writerKey())||input.getRegistrationReceiptId().size()!=16||!java.util.Arrays.equals(input.getRegistrationReceiptDigest().toByteArray(),writerBoot.registrationDigest())||input.getPreparedClosedMs()!=0||!input.getConsumerReadyFrontierDigest().isEmpty())throw new IllegalArgumentException("prepare原件身份或结果字段不符");
+        verifyPublicationPins(input.getSourcePinsList());try(var connection=teamAuthoritySource.getConnection()){writerBoot.verifyPrepareBinding(connection,writerBoot.maintenanceRunId(),input.getRegistrationReceiptId().toByteArray(),input.getRegistrationReceiptDigest().toByteArray());}
+        if(preparedSource!=null){if(!preparedSourceRequest.equals(input))throw new IllegalStateException("prepare请求不能换原件");return preparedSource;}
+        if(!maintenance.settled()||storageExecutor.isShutdown())throw new IllegalStateException("prepare仍有UNKNOWN或存储不可用");
+        // Scene没有Kafka消费者；实际Redis/存储gate准备检查仍在上方，空组报告不能代替这些检查。
+        byte[] report=new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsBytes(java.util.Map.of("groups",java.util.List.of(),"manualAssignments",java.util.List.of()));
+        byte[] digest=java.security.MessageDigest.getInstance("SHA-256").digest(report);
+        if(input.getSourcePinsList().stream().anyMatch(pin->java.util.Arrays.equals(pin.getSha256().toByteArray(),digest)))throw new IllegalArgumentException("输入source pins不能预填消费者报告摘要");
+        var reportPath=writerBoot.persistConsumerReadiness(report);
+        if(input.getSourcePinsList().stream().anyMatch(pin->java.nio.file.Path.of(pin.getAbsolutePath()).normalize().equals(reportPath.normalize())))throw new IllegalArgumentException("消费者报告由实际owner生成，输入不能预填同路径");
+        var pin=com.game.player.store.state.SqlWriterMaintenanceReceipt.SourcePin.newBuilder().setAbsolutePath(reportPath.toString()).setSha256(com.google.protobuf.ByteString.copyFrom(digest));
+        preparedSourceRequest=input;preparedSource=input.toBuilder().setPreparedClosedMs(System.currentTimeMillis()).setConsumerReadyFrontierDigest(com.google.protobuf.ByteString.copyFrom(digest)).addSourcePins(pin).build();return preparedSource;
+    }
+    public synchronized com.game.player.store.state.SqlWriterMaintenanceReceipt.SourceOpenAck openMaintenanceSource(
+            com.game.player.store.state.SqlWriterMaintenanceReceipt.SourceOpenAck input)throws Exception{
+        rejectUnknownMaintenance(input);
+        if(sourceOpenIntent!=null){if(!sourceOpenIntent.equals(input))throw new IllegalStateException("source open请求不能换目标");if(sourceOpenAck!=null)return sourceOpenAck;throw new IllegalStateException("source open在途或结局UNKNOWN，不重放副作用");}
+        if(preparedSource==null||writerBoot==null||input.getOpenRequestId().size()!=16||input.getOpenRequestId().equals(com.google.protobuf.ByteString.copyFrom(new byte[16]))||input.getOpenedMs()!=0||!input.getAcceptedFrontierDigest().isEmpty()||!input.getIssuerId().equals(preparedSource.getIssuerId())||!input.getLogicalRole().equals(preparedSource.getLogicalRole())||!input.getInstanceId().equals(preparedSource.getInstanceId())||!input.getPhysicalWriterKey().equals(preparedSource.getPhysicalWriterKey())||!input.getRegistrationReceiptId().equals(preparedSource.getRegistrationReceiptId())||!input.getRegistrationReceiptDigest().equals(preparedSource.getRegistrationReceiptDigest())||!input.getSourcePinsList().equals(preparedSource.getSourcePinsList()))throw new IllegalArgumentException("source open不是已准备的新boot完整原件");
+        verifyPublicationPins(input.getSourcePinsList());byte[] manifest;try(var connection=teamAuthoritySource.getConnection()){manifest=writerBoot.verifyPrepareBinding(connection,input.getOperationId().toByteArray(),input.getRegistrationReceiptId().toByteArray(),input.getRegistrationReceiptDigest().toByteArray());}
+        if(!java.util.Arrays.equals(manifest,input.getManifestDigest().toByteArray()))throw new IllegalStateException("source open manifest不符");
+        sourceOpenIntent=input;publicationStart.start();maintenance.openPrepared();
+        sourceOpenAck=input.toBuilder().setOpenedMs(System.currentTimeMillis()).setAcceptedFrontierDigest(com.google.protobuf.ByteString.copyFrom(maintenance.frontier())).build();return sourceOpenAck;
+    }
+    private static void rejectUnknownMaintenance(com.google.protobuf.Message input){
+        if(!input.getUnknownFields().asMap().isEmpty())throw new IllegalArgumentException("维护原件包含未知字段");
+        for(var entry:input.getAllFields().entrySet())if(entry.getKey().getJavaType()==com.google.protobuf.Descriptors.FieldDescriptor.JavaType.MESSAGE){if(entry.getKey().isRepeated())for(Object value:(java.util.List<?>)entry.getValue())rejectUnknownMaintenance((com.google.protobuf.Message)value);else rejectUnknownMaintenance((com.google.protobuf.Message)entry.getValue());}
+    }
+    private static void verifyPublicationPins(java.util.List<com.game.player.store.state.SqlWriterMaintenanceReceipt.SourcePin> pins)throws Exception{
+        if(pins.isEmpty())throw new IllegalArgumentException("缺source pins");java.util.Set<String> paths=new java.util.HashSet<>();
+        for(var pin:pins){var path=java.nio.file.Path.of(pin.getAbsolutePath());if(!path.isAbsolute()||pin.getSha256().size()!=32||!paths.add(path.normalize().toString())||!java.nio.file.Files.isRegularFile(path,java.nio.file.LinkOption.NOFOLLOW_LINKS)||java.nio.file.Files.isSymbolicLink(path))throw new IllegalArgumentException("source pin形状不符");var digest=java.security.MessageDigest.getInstance("SHA-256");try(var input=java.nio.file.Files.newInputStream(path)){byte[] block=new byte[65536];int size;while((size=input.read(block))!=-1)digest.update(block,0,size);}if(!java.util.Arrays.equals(digest.digest(),pin.getSha256().toByteArray()))throw new IllegalStateException("source原件已漂移");}
+    }
+
+    /** P1永久cut：真实关闭监听、目录与三个provider，存储和最终快照补偿继续存活。 */
+    public synchronized com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerClosure closeMaintenanceRoots(String operation,
+            com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerClosure expected)throws Exception {
+        verifyMaintenanceIdentity(expected);maintenance.close(operation,expected.getPermanentRevivalFenceId().toByteArray());
+        if(channelFollower!=null)channelFollower.stop();
+        if(publisher!=null)publisher.stop(false);
+        if(linkServer!=null&&!linkServer.closeAndJoin(Duration.ofSeconds(6)))throw new IllegalStateException("客户端链路实际关闭/IO屏障未完成；保持relay存活");
+        if(world!=null)callOnLogic(()->{world.stopAcceptingEnters();return null;});
+        if(!maintenance.settled())throw new IllegalStateException("客户端帧/provider仍有未结算或UNKNOWN publication，不能给闭合原件");
+        return maintenanceReport(expected,false);
+    }
+    /** 只在真实TX2 APPLIED/owner释放和已受理工作全部终结后停止relay；失败保留补偿与原writer。 */
+    public synchronized com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerClosure maintenanceStopAndReport(String operation,
+            com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerClosure expected)throws Exception {
+        closeMaintenanceRoots(operation,expected);
+        if(!maintenance.settled())throw new IllegalStateException("provider尚有在途或UNKNOWN；保持relay存活");
+        if(!maintenanceStorageStopped){
+            if(playerRepository==null||world==null||logicLoop==null||storageExecutor==null)throw new IllegalStateException("缺少真实scene排空依赖");
+            long until=System.nanoTime()+Math.min(props.scene().shutdownSaveTimeout().toNanos(),60_000_000_000L);
+            callOnLogic(()->{world.shutdown();if(links!=null)links.closeAll();return null;});
+            if(playerRepository.awaitTransfersSettled(Math.max(0,until-System.nanoTime()))!=0
+                    ||playerRepository.awaitFinalApplied(Math.max(0,until-System.nanoTime()))!=0
+                    ||playerRepository.undeliveredFinalResults()!=0)
+                throw new IllegalStateException("最终快照只到TX1、owner未释放或结果UNKNOWN；保持补偿和存储存活");
+            if(!playerRepository.stopFinalRecoveryIfApplied())throw new IllegalStateException("最终应用正在并发推进，保持relay存活");
+            storageExecutor.shutdown();
+            if(!storageExecutor.awaitTermination(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS))
+                throw new IllegalStateException("存储任务尚未真实终止，不生成闭合报告");
+            writerBoot.seal();maintenanceStorageStopped=true;
+        }
+        return maintenanceReport(expected,true);
+    }
+    private void verifyMaintenanceIdentity(com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerClosure expected)throws Exception {
+        if(writerBoot==null||expected.getIssuerId().isEmpty()||expected.getPermanentRevivalFenceId().size()!=16
+                ||!java.util.Arrays.equals(writerBoot.writerKey(),expected.getPhysicalWriterKey().toByteArray())
+                ||!java.util.Arrays.equals(writerBoot.instanceId(),expected.getInstanceId().toByteArray())||expected.getLogicalRole().isBlank())
+            throw new IllegalArgumentException("维护P0角色/boot/writer原件不符");
+        if(expected.getSourceEvidenceCount()==0)throw new IllegalArgumentException("缺少source pins");
+        for(var pin:expected.getSourceEvidenceList()){
+            var file=java.nio.file.Path.of(pin.getAbsolutePath());
+            if(!file.isAbsolute()||pin.getSha256().size()!=32||!java.nio.file.Files.isRegularFile(file))throw new IllegalArgumentException("source pin形状不符");
+            try(var input=java.nio.file.Files.newInputStream(file)){var hash=java.security.MessageDigest.getInstance("SHA-256");byte[] block=new byte[65536];int count;while((count=input.read(block))!=-1)hash.update(block,0,count);
+                if(!java.security.MessageDigest.isEqual(hash.digest(),pin.getSha256().toByteArray()))throw new IllegalStateException("source pin已漂移");}
+        }
+    }
+    private com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerClosure maintenanceReport(
+            com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerClosure expected,boolean relayClosed){
+        if(relayClosed&&!maintenance.settled())throw new IllegalStateException("publication未闭合");
+        return expected.toBuilder().setAcceptingClosedMs(maintenance.closedMs())
+                .setAcceptedSettledMs(maintenance.settled()?System.currentTimeMillis():0)
+                .setAcceptedFrontierDigest(com.google.protobuf.ByteString.copyFrom(maintenance.frontier()))
+                .setUnresolvedPublications(maintenance.unresolved()).build();
     }
 
     @Override

@@ -1,6 +1,8 @@
 package com.game.match.rating;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
 import com.game.pbmysql.PbMysql;
 import com.game.pbmysql.TableSchema;
 import java.math.BigDecimal;
@@ -46,8 +48,11 @@ public final class RatingTestDatabase implements AutoCloseable {
 
     public final DataSource dataSource;
     private final String mysqlDatabase;
+    private final AuthoritySqlFixture authority;
 
-    private RatingTestDatabase(DataSource dataSource, String mysqlDatabase) {
+    private RatingTestDatabase(DataSource dataSource,String mysqlDatabase){this(dataSource,mysqlDatabase,null);}
+    private RatingTestDatabase(DataSource dataSource, String mysqlDatabase,AuthoritySqlFixture authority) {
+        this.authority=authority;
         this.dataSource = dataSource;
         this.mysqlDatabase = mysqlDatabase;
     }
@@ -108,35 +113,16 @@ public final class RatingTestDatabase implements AutoCloseable {
      * @param lockWaitTimeoutSeconds 会话的 {@code innodb_lock_wait_timeout}（生产是 1；要观察死锁而不是锁等待超时的用例给大一点）
      */
     public static RatingTestDatabase mysql(int lockWaitTimeoutSeconds) {
-        if (!mysqlAvailable()) {
-            throw new IllegalStateException("没有给 -Dgame.it.mysql");
-        }
-        String database = "game_match_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        String params = "?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=20000"
-                + "&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',"
-                + "innodb_lock_wait_timeout=" + lockWaitTimeoutSeconds;
-        try (Connection c = DriverManager.getConnection(MYSQL_URL + "/" + params, MYSQL_USER, MYSQL_PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("CREATE DATABASE `" + database + "` DEFAULT CHARACTER SET utf8mb4");
-        } catch (SQLException e) {
-            throw new IllegalStateException("建一次性库失败", e);
-        }
-        DruidDataSource ds = new DruidDataSource();
-        ds.setUrl(MYSQL_URL + "/" + database + params);
-        ds.setUsername(MYSQL_USER);
-        ds.setPassword(MYSQL_PASSWORD);
-        ds.setMaxActive(16);
-        ds.setMaxWait(10_000);
-        ds.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-        RatingTestDatabase db = new RatingTestDatabase(ds, database);
-        try {
-            MatchRatingTables.sync(ds, Duration.ofMinutes(1));
-            initializeRouteAuthority(ds);
-        } catch (SQLException | RuntimeException e) {
-            db.close();
-            throw new IllegalStateException("真 MySQL 上同步评分表失败", e);
-        }
-        return db;
+        if(!mysqlAvailable())throw new IllegalStateException("没有给-Dgame.it.mysql");
+        String parameters="?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=20000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout="+lockWaitTimeoutSeconds;
+        try{
+            var options=AuthoritySqlFixture.Options.fromEnvironment(MYSQL_URL,MYSQL_USER,MYSQL_PASSWORD,"game_match",!Boolean.getBoolean("game.it.require-tidb"),java.util.List.of(1));
+            var authority=AuthoritySqlFixture.prepare(options,(connection,principal)->{MatchRatingTables.registry().initializeFresh(connection,principal);createPlayerTable(connection);});
+            DruidDataSource ds=new DruidDataSource();
+            try{ds.setUrl(authority.jdbcUrl(parameters));ds.setUsername(authority.normalUser());ds.setPassword(authority.normalPassword());ds.setMaxActive(16);ds.setMaxWait(10_000);ds.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                AuthorityDataSourcePolicy.protectDruid(ds,authority.writerBoot(),!options.allowMySql());MatchRatingTables.sync(ds,Duration.ofMinutes(1));return new RatingTestDatabase(ds,authority.database(),authority);
+            }catch(Exception failure){ds.close();try{authority.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
+        }catch(Exception failure){throw new IllegalStateException("评分隔离SQL夹具初始化失败",failure);}
     }
 
     public boolean isMysql() {
@@ -153,17 +139,24 @@ public final class RatingTestDatabase implements AutoCloseable {
         initializeRouteAuthority(ds);
     }
 
-    static void initializeRouteAuthority(DataSource source)throws SQLException {
-        try(var c=source.getConnection();var statement=c.createStatement()){
+    private static void createPlayerTable(Connection connection)throws SQLException{
+        try(var statement=connection.createStatement()){
             statement.execute("CREATE TABLE IF NOT EXISTS player(player_id BIGINT PRIMARY KEY,zone_id INT NOT NULL DEFAULT 1,"
                     + "name VARCHAR(128) NOT NULL DEFAULT '',level INT NOT NULL DEFAULT 1,class_id INT NOT NULL DEFAULT 0,"
                     + "gender INT NOT NULL DEFAULT 0,appearance_id VARCHAR(128) NOT NULL DEFAULT '')");
+        }
+    }
+
+    static void initializeRouteAuthority(DataSource source)throws SQLException {
+        try(var c=source.getConnection();var statement=c.createStatement()){
+            createPlayerTable(c);
             var resource=new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql");
             String sql;try(var input=resource.getInputStream()){sql=new String(input.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}
             if("H2".equals(c.getMetaData().getDatabaseProductName()))sql=sql.replaceAll("(?i)ENGINE\\s*=\\s*InnoDB[^;]*","");
             org.springframework.jdbc.datasource.init.ScriptUtils.executeSqlScript(c,new org.springframework.core.io.support.EncodedResource(new org.springframework.core.io.ByteArrayResource(sql.getBytes(java.nio.charset.StandardCharsets.UTF_8))));
             try(var check=c.createStatement();var rows=check.executeQuery("SELECT COUNT(*) FROM route_meta")){rows.next();if(rows.getInt(1)!=0)return;}
-            com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1));
+            String principal;try(var identity=c.createStatement();var rows=identity.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new SQLException("缺H2 schema主体");principal=rows.getString(1);}
+            com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1),principal);
         }catch(java.io.IOException failure){throw new SQLException("正式路由测试DDL不可读",failure);}
     }
 
@@ -230,7 +223,7 @@ public final class RatingTestDatabase implements AutoCloseable {
     }
 
     public void update(String sql, Object... args) {
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+        try (Connection c = authority==null?dataSource.getConnection():authority.schemaConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             for (int i = 0; i < args.length; i++) {
                 ps.setObject(i + 1, args[i]);
             }
@@ -259,22 +252,8 @@ public final class RatingTestDatabase implements AutoCloseable {
     }
 
     /** 真 MySQL：关连接池并删掉一次性库。H2：把内存库清掉。 */
-    @Override
-    public void close() {
-        if (isMysql()) {
-            ((DruidDataSource) dataSource).close();
-            try (Connection c = DriverManager.getConnection(MYSQL_URL + "/?useSSL=false&allowPublicKeyRetrieval=true", MYSQL_USER, MYSQL_PASSWORD);
-                 Statement st = c.createStatement()) {
-                st.execute("DROP DATABASE IF EXISTS `" + mysqlDatabase + "`");
-            } catch (SQLException e) {
-                throw new IllegalStateException("删一次性库 " + mysqlDatabase + " 失败", e);
-            }
-        } else {
-            try (Connection c = dataSource.getConnection(); Statement st = c.createStatement()) {
-                st.execute("SHUTDOWN");
-            } catch (SQLException e) {
-                // 内存库已经不在了：无事可做
-            }
-        }
+    @Override public void close(){
+        if(authority!=null){((DruidDataSource)dataSource).close();try{authority.close();}catch(SQLException failure){throw new IllegalStateException("评分fixture归属清理未确认",failure);}return;}
+        try(Connection connection=dataSource.getConnection();Statement statement=connection.createStatement()){statement.execute("SHUTDOWN");}catch(SQLException failure){throw new IllegalStateException("H2评分fixture关闭未确认",failure);}
     }
 }

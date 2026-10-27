@@ -55,8 +55,93 @@
 # Windows 上新占的五个端口不在保留端口段里（netsh int ipv4 show excludedportrange tcp 可查）。
 set -euo pipefail
 
+# 唯一启动资格helper；故障重启脚本与纯夹具以library-only source复用，不执行下面的启动副作用。
+sql_assert_publication_open() {
+  local fence_root=${MMORPG_PUBLICATION_FENCE_DIR:-run/maintenance/publication-fences} entry
+  [[ ! -L "$fence_root" ]] || { echo '发布围栏目录不可为符号链接' >&2; return 1; }
+  if [[ -d "$fence_root" ]]; then
+    for entry in "$fence_root"/*.closed.json; do
+      [[ ! -e "$entry" ]] || { echo '发布已永久关闭，普通start/restart无权解除' >&2; return 1; }
+    done
+  fi
+}
+
+sql_boot_environment() {
+  local instance=$1 module=${2:-$1} mode=${3:-normal} catalog=${MMORPG_SQL_BOOT_CATALOG_DIR:-} file key value actual sql=1
+  local operator_url=${MMORPG_SQL_OPERATOR_JDBC_URL:-} operator_user=${MMORPG_SQL_OPERATOR_USER:-} operator_password=${MMORPG_SQL_OPERATOR_PASSWORD:-} operator_principal=${MMORPG_SQL_OPERATOR_PRINCIPAL:-}
+  [[ "$mode" == normal || ( "$mode" == prepare && ( "$module" == game-scene || "$module" == game-match ) ) ]] || { echo 'prepare只支持已装配真实准备/开放接缝的game-scene/game-match' >&2; return 1; }
+  local -A seen=()
+  case "$module" in game-battle|game-gate|game-gate-z2) sql=0;; esac
+  # 每次launch先摘掉上一实例能力与Spring高优先级SQL覆盖；只能读取本boot选中完整配置。
+  unset MMORPG_SQL_WRITER_GRANT_FILE MMORPG_SQL_WRITER_GRANT_SHA256 MMORPG_SQL_WRITER_CONSUME_DIR MMORPG_SQL_DEPLOYMENT_ID MMORPG_SQL_PHYSICAL_AUTHORITY_SHA256
+  unset MMORPG_SQL_RUNTIME_CONFIG_FILE MMORPG_SQL_RUNTIME_CONFIG_SHA256 SPRING_CONFIG_ADDITIONAL_LOCATION
+  unset MMORPG_SQL_REGISTRAR_DSN MMORPG_SQL_MAINTENANCE_DSN MMORPG_SQL_SCHEMA_DSN MMORPG_SQL_OPERATOR_PRINCIPAL MMORPG_SQL_SCHEMA_PRINCIPAL
+  unset MMORPG_SQL_OPERATOR_JDBC_URL MMORPG_SQL_OPERATOR_USER MMORPG_SQL_OPERATOR_PASSWORD
+  unset SPRING_DATASOURCE_URL SPRING_DATASOURCE_USERNAME SPRING_DATASOURCE_PASSWORD GAME_MYSQL_USER GAME_MYSQL_PASSWORD
+  if [[ "$mode" == normal ]]; then sql_assert_publication_open || return 1; fi
+  [[ "$instance" =~ ^[A-Za-z0-9_-]{1,96}$ && -n "$catalog" && -d "$catalog" && ! -L "$catalog" ]] || { echo '缺少具名单boot启动目录' >&2; return 1; }
+  file="$catalog/$instance.env"
+  [[ -f "$file" && ! -L "$file" ]] || { echo "实例无独立boot授权：$instance" >&2; return 1; }
+  while IFS='=' read -r key value || [[ -n "$key$value" ]]; do
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    case "$key" in
+      MMORPG_SQL_RUNTIME_CONFIG_FILE|MMORPG_SQL_RUNTIME_CONFIG_SHA256) ;;
+      MMORPG_SQL_WRITER_GRANT_FILE|MMORPG_SQL_WRITER_GRANT_SHA256|MMORPG_SQL_WRITER_CONSUME_DIR|MMORPG_SQL_DEPLOYMENT_ID|MMORPG_SQL_PHYSICAL_AUTHORITY_SHA256)
+        ((sql==1)) || { echo '非SQL应用不能借另一服务的writer grant' >&2; return 1; };;
+      *) echo 'boot环境文件有未知字段，禁止source/eval' >&2; return 1 ;;
+    esac
+    [[ -z "${seen[$key]:-}" && -n "$value" && "$value" != *$'\r'* ]] || { echo 'boot环境重复或空值' >&2; return 1; }
+    seen[$key]=1
+    export "$key=$value"
+  done < "$file"
+  [[ "${MMORPG_SQL_RUNTIME_CONFIG_SHA256:-}" =~ ^[a-f0-9]{64}$ && -f "${MMORPG_SQL_RUNTIME_CONFIG_FILE:-}" && ! -L "$MMORPG_SQL_RUNTIME_CONFIG_FILE" ]] || { echo '缺选中完整runtime配置原件/SHA' >&2; return 1; }
+  case "$MMORPG_SQL_RUNTIME_CONFIG_FILE" in /*|[A-Za-z]:[\\/]*) ;; *) echo 'runtime配置必须绝对路径' >&2; return 1;; esac
+  actual=$(sha256sum -- "$MMORPG_SQL_RUNTIME_CONFIG_FILE") || return 1
+  [[ "${actual%% *}" == "$MMORPG_SQL_RUNTIME_CONFIG_SHA256" ]] || { echo '选中runtime配置SHA不符' >&2; return 1; }
+  export SPRING_CONFIG_ADDITIONAL_LOCATION="file:$MMORPG_SQL_RUNTIME_CONFIG_FILE"
+  if ((sql==0)); then [[ ${#seen[@]} -eq 2 ]] || return 1; return 0; fi
+  [[ ${#seen[@]} -eq 7 && "${MMORPG_SQL_WRITER_GRANT_SHA256:-}" =~ ^[a-f0-9]{64}$ && "${MMORPG_SQL_PHYSICAL_AUTHORITY_SHA256:-}" =~ ^[a-f0-9]{64}$ ]] || { echo 'boot环境不完整或摘要非法' >&2; return 1; }
+  [[ -f "$MMORPG_SQL_WRITER_GRANT_FILE" && ! -L "$MMORPG_SQL_WRITER_GRANT_FILE" && -d "$MMORPG_SQL_WRITER_CONSUME_DIR" && ! -L "$MMORPG_SQL_WRITER_CONSUME_DIR" ]] || { echo 'boot原件/持久消费目录不存在或为符号链接' >&2; return 1; }
+  actual=$(sha256sum -- "$MMORPG_SQL_WRITER_GRANT_FILE") || return 1
+  [[ "${actual%% *}" == "$MMORPG_SQL_WRITER_GRANT_SHA256" ]] || { echo 'boot原件SHA不符' >&2; return 1; }
+  if [[ "$mode" == prepare ]]; then
+    local tool=${MMORPG_SQL_AUTHORITY_TOOL_JAR:-} tool_sha=${MMORPG_SQL_AUTHORITY_TOOL_SHA256:-} schema=${MMORPG_SQL_AUTHORITY_SCHEMA:-}
+    [[ -f "$tool" && ! -L "$tool" && "$tool_sha" =~ ^[a-f0-9]{64}$ && "$schema" =~ ^[A-Za-z0-9_]{1,64}$ ]] || { echo 'prepare缺少固定authority工具jar/SHA/schema' >&2; return 1; }
+    case "$tool" in /*|[A-Za-z]:[\\/]*) ;; *) echo 'authority工具必须绝对路径' >&2; return 1;; esac
+    actual=$(sha256sum -- "$tool") || return 1
+    [[ "${actual%% *}" == "$tool_sha" && -n "$operator_url" && -n "$operator_user" && -n "$operator_password" && -n "$operator_principal" ]] || { echo 'prepare工具摘要或独立operator输入不完整' >&2; return 1; }
+    # 只读资格核验不消费grant；独立控制凭据只进入该CLI，绝不进入随后normal JVM。
+    MMORPG_SQL_OPERATOR_JDBC_URL="$operator_url" MMORPG_SQL_OPERATOR_USER="$operator_user" MMORPG_SQL_OPERATOR_PASSWORD="$operator_password" MMORPG_SQL_OPERATOR_PRINCIPAL="$operator_principal" \
+      java -Dloader.main=com.game.data.tools.InitializeRouteAuthority -cp "$tool" org.springframework.boot.loader.launch.PropertiesLauncher \
+        --command verify-prepare --authority-schema "$schema" --input "$MMORPG_SQL_WRITER_GRANT_FILE" || return 1
+  fi
+  # 不在shell消费marker；真实BPP按正式proto、SQL主体/原REGISTER/部署绑定O_EXCL+fsync消费一次。
+  unset MMORPG_SQL_REGISTRAR_DSN MMORPG_SQL_MAINTENANCE_DSN MMORPG_SQL_SCHEMA_DSN MMORPG_SQL_OPERATOR_PRINCIPAL MMORPG_SQL_SCHEMA_PRINCIPAL
+  unset MMORPG_SQL_OPERATOR_JDBC_URL MMORPG_SQL_OPERATOR_USER MMORPG_SQL_OPERATOR_PASSWORD
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  [[ "${GAME_SQL_BOOT_LIBRARY_ONLY:-0}" == 1 ]] || { echo 'start-slice只允许显式library-only source' >&2; return 1; }
+  return 0
+fi
+
+# P8/P9只拉起已有实际prepare-only接缝的单个Scene/Match，不能借此跳过整套切片的永久发布围栏。
+# 选中完整配置必须包含本boot准备上下文；应用消费grant后维持root关闭。
+if [[ "${1:-}" == --prepare ]]; then
+  [[ $# -eq 3 && ( "$3" == game-scene || "$3" == game-match ) ]] || { echo '用法：start-slice.sh --prepare <固定实例名> game-scene|game-match' >&2; exit 1; }
+  application=${MMORPG_SQL_PREPARE_APPLICATION_JAR:-}
+  application_sha=${MMORPG_SQL_PREPARE_APPLICATION_SHA256:-}
+  [[ -f "$application" && ! -L "$application" && "$application_sha" =~ ^[a-f0-9]{64}$ ]] || { echo 'prepare缺固定应用jar原件/SHA' >&2; exit 1; }
+  case "$application" in /*|[A-Za-z]:[\\/]*) ;; *) echo 'Scene应用jar必须绝对路径' >&2; exit 1;; esac
+  actual=$(sha256sum -- "$application")
+  [[ "${actual%% *}" == "$application_sha" ]] || { echo 'Scene应用jar原件SHA不符' >&2; exit 1; }
+  sql_boot_environment "$2" "$3" prepare
+  echo '启动prepare-only；应用启动不等于consumerReady。须保存对应/admin/scene/maintenance/prepare-source或/admin/match/maintenance/prepare-source的正式protobuf响应，再由同run请求调用open-source并保存实际ACK。'
+  exec java -jar "$application"
+fi
+
 cd "$(dirname "$0")/../.."
-: "${GAME_MYSQL_PASSWORD:?需要环境变量 GAME_MYSQL_PASSWORD}"
+sql_assert_publication_open
 : "${GAME_GATE_TOKEN_SECRET:?需要环境变量 GAME_GATE_TOKEN_SECRET}"
 : "${GAME_LOGIN_DEV_PASSWORD:?需要环境变量 GAME_LOGIN_DEV_PASSWORD}"
 : "${GAME_NODE_LINK_SECRET:?需要环境变量 GAME_NODE_LINK_SECRET（gate → scene 链路密钥）}"
@@ -278,13 +363,14 @@ ZONE2_MAINTENANCE_BODY='{"maintenance_msg":"本机切片 GAME_ZONES=1：没有�
 launch() {
   local instance=$1 module=$2 jar
   shift 2
+  (sql_boot_environment "$instance" "$module")
   jar=$(ls "$module"/target/"$module"-*.jar 2>/dev/null | grep -v -- '-plain' | head -1 || true)
   if [[ -z "$jar" ]]; then
     echo "找不到 $module 的可执行 jar，先 ./mvnw -DskipTests install" >&2
     exit 1
   fi
   echo "启动 $instance ($jar)"
-  java -jar "$jar" "$@" > "run/logs/$instance.log" 2>&1 &
+  (sql_boot_environment "$instance" "$module" && exec java -jar "$jar" "$@") > "run/logs/$instance.log" 2>&1 &
   echo $! > "run/pids/$instance.pid"
 }
 

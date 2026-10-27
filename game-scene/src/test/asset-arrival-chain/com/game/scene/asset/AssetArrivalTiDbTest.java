@@ -1,5 +1,8 @@
 package com.game.scene.asset;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.mock;
@@ -64,7 +67,8 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 class AssetArrivalTiDbTest {
     private static final long SELLER = 11, BUYER = 22;
     private static final String SECRET = "asset-arrival-test-only-secret-0123456789";
-    private String base, database;
+    private String base;
+    private AuthoritySqlFixture fixture;
     private DruidDataSource pool;
     private AnnotationConfigApplicationContext context;
     private PlayerStore players;
@@ -90,34 +94,21 @@ class AssetArrivalTiDbTest {
     @BeforeEach
     void start() throws Exception {
         base = System.getenv("GAME_ASSET_ARRIVAL_TEST_JDBC");
-        assertThat(base).as("显式整链 profile 必须配置本机 TiDB，缺失失败而非跳过")
-                .matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):(4000|24000)/?");
-        base = base.replaceAll("/$", "");
-        database = "asset_arrival_it_" + UUID.randomUUID().toString().replace("-", "");
+        assertThat(base).as("显式整链profile必须配置本机TiDB根URL").isNotBlank();
         Class.forName("com.mysql.cj.jdbc.Driver");
-        try (var c = DriverManager.getConnection(base + "/", "root", ""); var s = c.createStatement()) {
-            s.execute("CREATE DATABASE " + database);
-        }
-        System.out.println("测试随机库创建=" + database);
-        pool = new DruidDataSource();
-        pool.setUrl(base + "/" + database + "?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000");
-        pool.setUsername("root");
-        pool.setPassword("");
-        pool.setMaxActive(12);
-        pool.setMaxWait(2000);
-        new StrongTiDbConnectionPolicy("asset-arrival", true).postProcessBeforeInitialization(pool, "pool");
-        pool.init();
-        try (var c = pool.getConnection()) { StrongTiDbConnectionPolicy.verify(c, true); }
-        new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql")).execute(pool);
-        new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
-        try(var connection=pool.getConnection()) {
-            com.game.common.player.RouteAuthorityInitializer.initialize(connection,java.util.UUID.randomUUID().toString(),List.of(1));
-        }
-        try (var c = pool.getConnection(); var s = c.createStatement()) {
-            s.execute("CREATE TABLE guild_member (player_id BIGINT UNSIGNED PRIMARY KEY,guild_id BIGINT UNSIGNED NOT NULL)");
-        }
-        MailTables.sync(pool);
-        TradeTables.sync(pool, Duration.ofSeconds(15));
+        fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(base,
+                System.getProperty("game.it.mysql.user","root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD",""),
+                "asset_arrival",false,List.of(1)),(connection,principal)->{
+            new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql")).populate(connection);
+            MailTables.registry().initializeFresh(connection,principal);
+            TradeTables.registry().initializeFresh(connection,principal);
+            try(var statement=connection.createStatement()){statement.execute("CREATE TABLE guild_member (player_id BIGINT UNSIGNED PRIMARY KEY,guild_id BIGINT UNSIGNED NOT NULL)");}
+        });
+        pool=new DruidDataSource();pool.setUrl(fixture.jdbcUrl("?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"));
+        pool.setUsername(fixture.normalUser());pool.setPassword(fixture.normalPassword());pool.setMaxActive(12);pool.setMaxWait(2000);
+        AuthorityDataSourcePolicy.protectDruid(pool,fixture.writerBoot(),true);
+        try(var c=pool.getConnection()){StrongTiDbConnectionPolicy.verify(c,true);}
+        MailTables.sync(pool);TradeTables.sync(pool,Duration.ofSeconds(15));
         context = new AnnotationConfigApplicationContext();
         context.registerBean(DataSource.class, () -> pool);
         context.register(SqlConfiguration.class);
@@ -552,7 +543,8 @@ class AssetArrivalTiDbTest {
     @Test
     void 被改成副本读的物理连接不得出具SQL资产证明() throws Exception {
         try (var poisoned = new DruidDataSource()) {
-            poisoned.setUrl(pool.getUrl()); poisoned.setUsername("root"); poisoned.setPassword("");
+            // 故意未安装writer adapter的只读负例，仍使用独立normal身份，不能借管理权限证明失败。
+            poisoned.setUrl(pool.getUrl()); poisoned.setUsername(fixture.normalUser()); poisoned.setPassword(fixture.normalPassword());
             poisoned.setMaxActive(1); poisoned.setMaxWait(1000);
             poisoned.setConnectionInitSqls(List.of(StrongTiDbConnectionPolicy.SESSION_SQL)); poisoned.init();
             try (var c = poisoned.getConnection(); var s = c.createStatement()) { s.execute("SET SESSION tidb_replica_read='follower'"); }
@@ -578,17 +570,7 @@ class AssetArrivalTiDbTest {
         }
         if (context != null) context.close();
         if (pool != null) pool.close();
-        if (database != null) {
-            assertThat(database).matches("asset_arrival_it_[0-9a-f]{32}");
-            try (var c = DriverManager.getConnection(base + "/", "root", ""); var s = c.createStatement()) {
-                s.execute("DROP DATABASE " + database);
-                try (var query = c.prepareStatement("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?")) {
-                    query.setString(1, database);
-                    try (var rows = query.executeQuery()) { assertThat(rows.next()).isTrue(); assertThat(rows.getInt(1)).isZero(); }
-                }
-            }
-            System.out.println("测试随机库清理=" + database);
-        }
+        if(fixture!=null)fixture.close();
     }
 
     /** 精确暂停下一笔实际存储任务，后续加载仍由真实存储线程执行；没有数据库结果替身。 */

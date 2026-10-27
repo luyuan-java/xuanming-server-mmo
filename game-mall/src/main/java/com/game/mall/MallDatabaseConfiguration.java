@@ -22,7 +22,9 @@ public class MallDatabaseConfiguration {
     @Bean
     DataSource dataSource(DataSourceProperties source, MallProperties properties,
                           @Value("${game.run-mode:prod}") String runMode) {
-        return new HikariDataSource(poolConfiguration(source, properties, runMode));
+        HikariDataSource pool = new HikariDataSource();
+        poolConfiguration(source, properties, runMode).copyStateTo(pool);
+        return pool;
     }
 
     static HikariConfig poolConfiguration(DataSourceProperties source, MallProperties properties, String runMode) {

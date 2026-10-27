@@ -93,5 +93,11 @@ public final class SqlSpectateStore implements SpectateStore,AutoCloseable {
         }catch(com.google.protobuf.InvalidProtocolBufferException corrupt){throw new Deadline.DependencyException("原观战Add或落点损坏",corrupt);}
         authority.settled(work,active,proof,d);
     }
+    /** 只在同run根cut且所有SQL原件已有终局后调用，返回真实timer/workers join结果。 */
+    public boolean stopAndReport(long nanos)throws InterruptedException{
+        long until=System.nanoTime()+Math.max(0,Math.min(nanos,10_000_000_000L));timer.shutdown();
+        if(!timer.awaitTermination(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS))return false;
+        workers.shutdown();return workers.awaitTermination(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS);
+    }
     @Override public void close(){timer.shutdownNow();workers.shutdown();try{if(!workers.awaitTermination(5,TimeUnit.SECONDS))workers.shutdownNow();}catch(InterruptedException stop){Thread.currentThread().interrupt();workers.shutdownNow();}}
 }

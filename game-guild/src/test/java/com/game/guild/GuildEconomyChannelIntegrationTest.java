@@ -1,5 +1,8 @@
 package com.game.guild;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.druid.pool.DruidDataSource;
@@ -134,7 +137,7 @@ class GuildEconomyChannelIntegrationTest {
     private static final String USER = System.getProperty("game.it.mysql.user", "root");
     private static final String PASSWORD = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
     private static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&useAffectedRows=true"
-            + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1";
+            + "&connectTimeout=3000&socketTimeout=10000";
     private static final MessageIdRegistry REGISTRY = MessageIdRegistry.loadFromClasspath();
     private static final int SCENE_NODE = 7;
     private static final long OWNER_EPOCH = 5;
@@ -146,6 +149,7 @@ class GuildEconomyChannelIntegrationTest {
 
     private String database;
     private DruidDataSource dataSource;
+    private AuthoritySqlFixture fixture;
     private RedissonClient redis;
     private ScheduledExecutorService leaseScheduler;
     private ScheduledExecutorService background;
@@ -230,19 +234,10 @@ class GuildEconomyChannelIntegrationTest {
     void setUp() throws Exception {
         Assumptions.assumeTrue(AssetOpSignatures.usableSecret(AssetOpSignatures.normalizeSecret(secret)),
                 "需要 surefire 注入的 GAME_ASSET_OP_SECRET_GUILD");
-        database = "game_guild_it_econ_" + UUID.randomUUID().toString().replace("-", "").substring(0, 10);
-        try (Connection conn = DriverManager.getConnection(MYSQL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = conn.createStatement()) {
-            st.execute("CREATE DATABASE `" + database + "` DEFAULT CHARACTER SET utf8mb4");
-        }
-        dataSource = new DruidDataSource();
-        dataSource.setUrl(MYSQL + "/" + database + PARAMS);
-        dataSource.setUsername(USER);
-        dataSource.setPassword(PASSWORD);
-        dataSource.setMaxActive(16);
-        dataSource.setMaxWait(10_000);
-        dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-        try (Connection conn = dataSource.getConnection(); Statement st = conn.createStatement()) {
+        fixture = AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(
+                MYSQL.replaceAll("/$", "") + "/", USER, PASSWORD, "game_guild_econ", true, List.of(zone)), (conn, principal) -> {
+            com.game.guild.store.GuildTables.registry().initializeFresh(conn, principal);
+            try (Statement st = conn.createStatement()) {
             st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, name VARCHAR(64) NOT NULL,"
                     + " level INT UNSIGNED NOT NULL DEFAULT 1, class_id INT UNSIGNED NOT NULL DEFAULT 0,"
                     + " gender INT UNSIGNED NOT NULL DEFAULT 0, appearance_id VARCHAR(64) NOT NULL DEFAULT '',"
@@ -256,8 +251,16 @@ class GuildEconomyChannelIntegrationTest {
                 ps.executeUpdate();
             }
         }
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(dataSource);
-        try(var connection=dataSource.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(zone));}
+        });
+        database = fixture.database();
+        dataSource = new DruidDataSource();
+        dataSource.setUrl(fixture.jdbcUrl(PARAMS));
+        dataSource.setUsername(fixture.normalUser());
+        dataSource.setPassword(fixture.normalPassword());
+        dataSource.setMaxActive(16);
+        dataSource.setMaxWait(10_000);
+        dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        AuthorityDataSourcePolicy.protectDruid(dataSource, fixture.writerBoot(), false);
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(10);
         redis = Redisson.create(config);
@@ -433,12 +436,7 @@ class GuildEconomyChannelIntegrationTest {
         if (dataSource != null) {
             dataSource.close();
         }
-        if (database != null) {
-            try (Connection conn = DriverManager.getConnection(MYSQL + "/" + PARAMS, USER, PASSWORD);
-                 Statement st = conn.createStatement()) {
-                st.execute("DROP DATABASE IF EXISTS `" + database + "`");
-            }
-        }
+        if (fixture != null) fixture.close();
     }
 
     private <T extends Message> T call(String method, Message request, com.google.protobuf.Parser<T> parser) throws Exception {
@@ -520,7 +518,7 @@ class GuildEconomyChannelIntegrationTest {
         assertThat(row.getStatus()).isEqualTo(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING);
         assertThat(row.getLastOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_NOT_HERE_VALUE);
         writePersistedLedger(row);
-        try (Connection conn = dataSource.getConnection();
+        try (Connection conn = fixture.schemaConnection();
              PreparedStatement ps = conn.prepareStatement(
                      "UPDATE guild_asset_op SET attempts = 3, next_attempt_ms = 0, lease_until_ms = 0 WHERE op_id = ?")) {
             ps.setObject(1, new BigInteger(Long.toUnsignedString(opId)));
@@ -570,7 +568,7 @@ class GuildEconomyChannelIntegrationTest {
         long seq = request.getSeq();
         assertThat(seq).isBetween(1L, 64L);
         assertThat(answer.getOutcome()).isIn(AssetOutcome.ASSET_OUTCOME_APPLIED, AssetOutcome.ASSET_OUTCOME_REJECTED);
-        try (Connection conn = dataSource.getConnection()) {
+        try (Connection conn = fixture.schemaConnection()) {
             conn.setAutoCommit(false);
             try {
                 PlayerState previous = PlayerState.getDefaultInstance();

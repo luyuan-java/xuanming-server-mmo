@@ -1,5 +1,8 @@
 package com.game.friend.store;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.AdditionalAnswers.delegatesTo;
@@ -62,8 +65,8 @@ class JdbcFriendStoreMysqlTest {
     private static final String USER = System.getProperty("game.it.mysql.user", "root");
     private static final String PASSWORD = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
     private static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true"
-            + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=5";
-    private static final String DATABASE = "game_friend_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+            + "&connectTimeout=3000&socketTimeout=10000";
+    private static AuthoritySqlFixture fixture;
     private static final java.util.concurrent.atomic.AtomicLong REQUEST_IDS = new java.util.concurrent.atomic.AtomicLong(10000);
     private static final FriendLimits LIMITS = new FriendLimits(200, 50, 200, 200);
 
@@ -72,43 +75,35 @@ class JdbcFriendStoreMysqlTest {
     private final Map<String, AtomicInteger> retries = new ConcurrentHashMap<>();
 
     @BeforeAll
-    static void createDatabase() throws SQLException {
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("CREATE DATABASE `" + DATABASE + "` DEFAULT CHARACTER SET utf8mb4");
-        }
-        dataSource = new DruidDataSource();
-        dataSource.setUrl(BASE_URL + "/" + DATABASE + PARAMS);
-        dataSource.setUsername(USER);
-        dataSource.setPassword(PASSWORD);
-        dataSource.setMaxActive(64);
-        dataSource.setMaxWait(10_000);
-        dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+    static void createDatabase() throws Exception {
         PbMysql db = new PbMysql();
         db.register(FriendEdgeRow.getDefaultInstance());
         db.register(FriendRequestRow.getDefaultInstance());
         db.register(FriendCapacityRow.getDefaultInstance());
         db.register(FriendBlockRow.getDefaultInstance());
-        try (Connection c = dataSource.getConnection()) {
-            db.syncAll(c);
+        fixture = AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(
+                BASE_URL.replaceAll("/$", "") + "/", USER, PASSWORD, "game_friend", true, List.of(1)), (c, principal) -> {
+            db.initializeFresh(c, principal);
             try (Statement st = c.createStatement()) {
                 st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED PRIMARY KEY, account VARBINARY(191) NOT NULL,"
                         + " owner_revision BIGINT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0, zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
             }
-            new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(dataSource);
-            com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1));
-        }
+        });
+        dataSource = new DruidDataSource();
+        dataSource.setUrl(fixture.jdbcUrl(PARAMS));
+        dataSource.setUsername(fixture.normalUser());
+        dataSource.setPassword(fixture.normalPassword());
+        dataSource.setMaxActive(64);
+        dataSource.setMaxWait(10_000);
+        dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        AuthorityDataSourcePolicy.protectDruid(dataSource, fixture.writerBoot(), false);
+        try (Connection c = dataSource.getConnection()) { db.syncAll(c); }
     }
 
     @AfterAll
-    static void dropDatabase() throws SQLException {
-        if (dataSource != null) {
-            dataSource.close();
-        }
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("DROP DATABASE IF EXISTS `" + DATABASE + "`");
-        }
+    static void dropDatabase() throws Exception {
+        if (dataSource != null) dataSource.close();
+        if (fixture != null) fixture.close();
     }
 
     @BeforeEach
@@ -162,18 +157,27 @@ class JdbcFriendStoreMysqlTest {
     // ================================================================ 业务规则
 
     @Test
-    void 旧申请表扩展列与普通索引_保留历史记录并按需补号() throws SQLException {
+    void 旧申请表普通启动拒绝自动升级_新Schema历史形状仍按需补号() throws SQLException {
         exec("ALTER TABLE friend_request DROP INDEX idx_friend_request_2, DROP COLUMN request_id");
         exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms)"
                 + " VALUES (91,92,123,1,456)");
         PbMysql upgraded = new PbMysql();
         upgraded.register(FriendRequestRow.getDefaultInstance());
-        try (Connection c = dataSource.getConnection()) {
-            upgraded.syncAll(c);
+        try {
+            try (Connection c = dataSource.getConnection()) {
+                assertThatThrownBy(() -> upgraded.syncAll(c)).isInstanceOf(SQLException.class);
+            }
+            assertThat(query("SELECT request_time_ms FROM friend_request WHERE from_player_id=91 AND to_player_id=92")).containsExactly(123L);
+            assertThat(updatedMsOf(91,92)).isEqualTo(456);
+        } finally {
+            // 当前仅支持上线前fresh Schema；显式重建本测试单表，普通启动绝不修复已有数据。
+            exec("DROP TABLE friend_request");
+            exec(upgraded.tables().iterator().next().createTableSql());
         }
+        exec("INSERT INTO friend_request (from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (91,92,123,1,456)");
         assertThat(query("SELECT request_id FROM friend_request WHERE from_player_id=91 AND to_player_id=92"))
                 .containsExactly(0L);
-        assertThat(query("SELECT non_unique FROM information_schema.statistics WHERE table_schema='" + DATABASE
+        assertThat(query("SELECT non_unique FROM information_schema.statistics WHERE table_schema='" + fixture.database()
                 + "' AND table_name='friend_request' AND index_name='idx_friend_request_2'"))
                 .containsExactly(1L);
         assertThat(store(LIMITS).pendingRequests(92, 10, d())).singleElement().satisfies(row -> {
@@ -1093,7 +1097,7 @@ class JdbcFriendStoreMysqlTest {
     }
 
     private static void exec(String sql) throws SQLException {
-        try (Connection c = dataSource.getConnection(); Statement st = c.createStatement()) {
+        try (Connection c = fixture.schemaConnection(); Statement st = c.createStatement()) {
             st.execute(sql);
         }
     }

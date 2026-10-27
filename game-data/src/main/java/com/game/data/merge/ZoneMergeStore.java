@@ -5,6 +5,10 @@ import com.game.data.merge.pb.ZoneMergeEntityOriginal;
 import com.game.data.merge.pb.ZoneMergeRunRow;
 import com.game.player.store.RolePendingFence;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Message;
+import com.google.protobuf.CodedOutputStream;
+import com.game.player.store.state.SqlWriterMaintenanceReceipt;
+import com.game.player.store.state.SqlWriterLifecycleReceipt;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.security.MessageDigest;
@@ -14,14 +18,15 @@ import javax.sql.DataSource;
 
 /**
  * 单库合区维护的完整提交面。调用者只推进一个有界阶段，不拼装内部锁序。
- * 显式Freeze持metaX排空正常事务；整个namespace短维护，直到人工带原计划hash调用Release。
- * 每步metaX→两区64片X→目录→全P无符号升序→run/items→实体；异常回滚且永久冻结不变。
+ * 只在同run consumed NORMAL票据和永久SQL FROZEN之后推进域维护；不发全局冻结或重开权限。
+ * 每步验证NORMAL空ACTIVE集后沿meta→drain run→ticket→两区围栏→目录→P→域run/items；异常不解除全局冻结。
  * 没有租约解冻、后台自动放行、Redis事实或原owner补权；阻塞JDBC只在运维工作线程/CLI调用。
  */
 public final class ZoneMergeStore {
     public static final int BATCH=16;
-    private final DataSource source;
-    public ZoneMergeStore(DataSource source){this.source=Objects.requireNonNull(source);}
+    private final DataSource source;private final String operatorPrincipal;
+    public ZoneMergeStore(DataSource source){this(source,System.getenv("MMORPG_SQL_OPERATOR_PRINCIPAL"));}
+    public ZoneMergeStore(DataSource source,String operatorPrincipal){this.source=Objects.requireNonNull(source);this.operatorPrincipal=operatorPrincipal;}
     @FunctionalInterface private interface Work<T>{T run(Sql sql)throws SQLException;}
     @FunctionalInterface private interface Row<T>{T map(ResultSet row)throws SQLException;}
     private <T>T tx(Work<T> work)throws SQLException{
@@ -49,7 +54,7 @@ public final class ZoneMergeStore {
     public static void verifySchema(Connection c)throws SQLException{
         long until=System.nanoTime()+30_000_000_000L;
         var columns=new LinkedHashMap<String,String>();
-        columns.put("route_meta","id,generation,writable,fence_shards");columns.put("zone_merge_fence","zone_id,shard,run_id,revision");columns.put("zone_merged_into","zone_id,target_zone,run_id,revision");
+        columns.put("route_meta","id,generation,writable,fence_shards,writer_epoch,catalog_revision,freeze_run_id");columns.put("zone_merge_fence","zone_id,shard,run_id,revision");columns.put("zone_merged_into","zone_id,target_zone,run_id,revision");
         columns.put("zone_merge_run","run_id,mode,source_zone,target_zone,generation,original_run_id,state,phase,cursor_id,item_count,plan_hash,requested_by,approved_by,released_by,created_ms,updated_ms,expected_players,initial_hash");
         columns.put("zone_merge_item","run_id,kind,entity_id,original_proto,state,after_digest,after_epoch");columns.put("zone_config","zone_id,manual_status,maintenance_msg,updated_at");
         columns.put("player","player_id,account,zone_id,owner_revision,owner_epoch,owner_released,owner_lease_until,trade_listing_id");columns.put("player_final_save","player_id,status");
@@ -98,8 +103,65 @@ public final class ZoneMergeStore {
             require(shards.size()==64,"合区围栏缺片，不能自动播种");for(int i=0;i<64;i++)require(shards.get(i)==i,"合区围栏分片损坏");
         }
     }
-    private static ZoneMergeRunRow held(Sql sql,String key)throws SQLException{
-        String generation=meta(sql,0);var hint=run(sql,key,false);require(hint!=null&&hint.getState()!=6,"维护原run不存在或已显式释放");
+    private static byte[] runBytes(String key){var id=UUID.fromString(uuid(key));return java.nio.ByteBuffer.allocate(16).putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits()).array();}
+    /** 只认同run已经消费的NORMAL授权与永久FROZEN结局；本工具不发票、不消费票、不冻结全局SQL。 */
+    private String frozenAuthority(Sql sql,String key)throws SQLException {
+        String principal=operatorPrincipal;
+        require(principal!=null&&!principal.isBlank(),"合服需要独立operator主体");
+        require(principal.equals(sql.one("SELECT CURRENT_USER()",r->r.getString(1))),"实际operator主体不符");
+        byte[] runId=runBytes(key);
+        // NORMAL在P5前已将P0 writer永久退役；空ACTIVE集无需也禁止锁旧REVOKED片。
+        Object[] meta=sql.one("SELECT generation,writable,writer_epoch,catalog_revision,freeze_run_id FROM route_meta WHERE id=1 FOR UPDATE",
+                r->new Object[]{r.getString(1),r.getInt(2),r.getString(3),r.getString(4),r.getBytes(5)});
+        require(meta!=null&&(Integer)meta[1]==0&&Arrays.equals(runId,(byte[])meta[4]),"全局SQL未永久冻结于同run");
+        String generation=(String)meta[0];uuid(generation);
+        require(sql.count("SELECT COUNT(*) FROM writer_registry WHERE state=1")==0&&sql.count("SELECT COUNT(*) FROM writer_slot WHERE state=1")==0,"NORMAL维护必须保留全部旧writer已永久退役的空ACTIVE集");
+        Object[] run=sql.one("SELECT generation,attempt_revision,phase,frozen_request_id,manifest_digest,manifest_proto FROM sql_writer_drain_run WHERE operation_id=? FOR UPDATE",
+                r->new Object[]{r.getString(1),r.getString(2),r.getInt(3),r.getBytes(4),r.getBytes(5),r.getBytes(6)},runId);
+        require(run!=null&&generation.equals(run[0])&&List.of(7,8).contains((Integer)run[2])&&((byte[])run[3]).length==16,"同run未处于SQL_FROZEN/RELEASE_READY");
+        Object[] ticket=sql.one("SELECT generation,state,authorization_kind,freeze_request_id,consumed_receipt_digest,freeze_request_digest,manifest_digest FROM sql_writer_freeze_ticket WHERE operation_id=? AND attempt_revision=? FOR UPDATE",
+                r->new Object[]{r.getString(1),r.getInt(2),r.getInt(3),r.getBytes(4),r.getBytes(5),r.getBytes(6),r.getBytes(7)},runId,run[1]);
+        require(ticket!=null&&generation.equals(ticket[0])&&(Integer)ticket[1]==2&&(Integer)ticket[2]==1
+                &&Arrays.equals((byte[])ticket[3],(byte[])run[3])&&Arrays.equals((byte[])ticket[6],(byte[])run[4]),"必须同attempt consumed NORMAL票据；紧急HOLD不授权合服");
+        var frozen=sql.one("SELECT request_id,request_digest,run_id,generation,before_epoch,after_epoch,catalog_revision,phase,plan_proto,committed_ms,kind,run_phase,attempt_revision,prior_receipt_id,prior_receipt_digest,evidence,receipt_digest FROM sql_writer_maintenance_receipt WHERE request_id=?",ZoneMergeStore::maintenanceReceipt,run[3]);
+        require(frozen!=null&&Arrays.equals(runId,frozen.getRunId().toByteArray())&&generation.equals(frozen.getGeneration())&&meta[2].equals(Long.toUnsignedString(frozen.getAfterEpoch()))&&meta[3].equals(Long.toUnsignedString(frozen.getCatalogRevision()))
+                &&frozen.getPhaseValue()==1&&frozen.getKindValue()==1&&frozen.getRunPhaseValue()==7&&run[1].equals(Long.toUnsignedString(frozen.getAttemptRevision()))
+                &&Arrays.equals((byte[])ticket[4],frozen.getReceiptDigest().toByteArray())&&Arrays.equals((byte[])ticket[5],frozen.getRequestDigest().toByteArray())
+                &&Arrays.equals((byte[])run[5],frozen.getPlanProto().toByteArray())&&Arrays.equals((byte[])run[4],digest((byte[])run[5])),"缺少与meta/consumed票据完全绑定的永久FROZEN收据");
+        verifyRetiredCatalogue(sql,frozen);
+        return generation;
+    }
+    private static byte[] canonical(Message message)throws SQLException{
+        try{byte[] bytes=new byte[message.getSerializedSize()];var out=CodedOutputStream.newInstance(bytes);out.useDeterministicSerialization();message.writeTo(out);out.checkNoSpaceLeft();return bytes;}catch(java.io.IOException bad){throw new SQLException("正式控制原件无法编码",bad);}
+    }
+    private static void noUnknown(Message message)throws SQLException{
+        require(message.getUnknownFields().asMap().isEmpty(),"控制原件含未知字段");for(var entry:message.getAllFields().entrySet())if(entry.getKey().getJavaType()==com.google.protobuf.Descriptors.FieldDescriptor.JavaType.MESSAGE){if(entry.getKey().isRepeated())for(Object value:(List<?>)entry.getValue())noUnknown((Message)value);else noUnknown((Message)entry.getValue());}
+    }
+    private static SqlWriterMaintenanceReceipt maintenanceReceipt(ResultSet row)throws SQLException{
+        try{var result=SqlWriterMaintenanceReceipt.newBuilder().setRequestId(ByteString.copyFrom(row.getBytes(1))).setRequestDigest(ByteString.copyFrom(row.getBytes(2))).setRunId(ByteString.copyFrom(row.getBytes(3))).setGeneration(row.getString(4))
+            .setBeforeEpoch(Long.parseUnsignedLong(row.getString(5))).setAfterEpoch(Long.parseUnsignedLong(row.getString(6))).setCatalogRevision(Long.parseUnsignedLong(row.getString(7))).setPhaseValue(row.getInt(8)).setPlanProto(ByteString.copyFrom(row.getBytes(9)))
+            .setCommittedMs(Long.parseUnsignedLong(row.getString(10))).setKindValue(row.getInt(11)).setRunPhaseValue(row.getInt(12)).setAttemptRevision(Long.parseUnsignedLong(row.getString(13))).setPriorReceiptId(ByteString.copyFrom(row.getBytes(14))).setPriorReceiptDigest(ByteString.copyFrom(row.getBytes(15)))
+            .setEvidence(SqlWriterMaintenanceReceipt.Evidence.parseFrom(row.getBytes(16))).setReceiptDigest(ByteString.copyFrom(row.getBytes(17))).build();noUnknown(result);
+            require(MessageDigest.isEqual(digest(canonical(result.toBuilder().clearReceiptDigest().build())),result.getReceiptDigest().toByteArray()),"永久FROZEN全文摘要损坏");require(MessageDigest.isEqual(digest(canonical(result.toBuilder().clearRequestDigest().clearReceiptDigest().clearCommittedMs().clearAfterEpoch().build())),result.getRequestDigest().toByteArray()),"永久FROZEN不能还原原请求摘要");return result;
+        }catch(java.io.IOException|IllegalArgumentException invalid){throw new SQLException("永久FROZEN原件损坏",invalid);}
+    }
+    private static void verifyRetiredCatalogue(Sql sql,SqlWriterMaintenanceReceipt frozen)throws SQLException{
+        try{var plan=SqlWriterMaintenanceReceipt.Plan.parseFrom(frozen.getPlanProto());noUnknown(plan);var remaining=new HashSet<>(plan.getActiveWriterKeysList());
+            require(remaining.size()>0&&remaining.size()<=1024&&remaining.size()==plan.getActiveWriterKeysCount(),"P0 writer目录非法");
+            var difference=new java.math.BigInteger(Long.toUnsignedString(frozen.getCatalogRevision())).subtract(new java.math.BigInteger(Long.toUnsignedString(plan.getCatalogRevision())));
+            require(difference.equals(java.math.BigInteger.valueOf(remaining.size()))&&frozen.getBeforeEpoch()==plan.getBeforeEpoch()&&frozen.getAfterEpoch()==plan.getBeforeEpoch()+1&&plan.getBeforeEpoch()!=-1L,"NORMAL冻结目录/E不是P0全部合法退役后的结局");
+            var revisions=sql.list("SELECT request_id,kind,generation,request_digest,request_proto,previous_epoch,resulting_epoch,catalog_revision FROM writer_lifecycle_receipt WHERE catalog_revision>? AND catalog_revision<=? ORDER BY catalog_revision,request_id LIMIT "+(remaining.size()+1),r->new Object[]{r.getBytes(1),r.getInt(2),r.getString(3),r.getBytes(4),r.getBytes(5),r.getString(6),r.getString(7),r.getString(8)},new java.math.BigInteger(Long.toUnsignedString(plan.getCatalogRevision())),new java.math.BigInteger(Long.toUnsignedString(frozen.getCatalogRevision())));
+            require(revisions.size()==remaining.size(),"永久RETIRE序列缺失/重复");long revision=plan.getCatalogRevision();
+            for(var item:revisions){var request=SqlWriterLifecycleReceipt.Request.parseFrom((byte[])item[4]);noUnknown(request);require((Integer)item[1]==2&&request.getKindValue()==2&&frozen.getGeneration().equals(item[2])&&frozen.getGeneration().equals(request.getWriter().getGeneration())
+                &&Arrays.equals((byte[])item[0],request.getRequestId().toByteArray())&&Arrays.equals((byte[])item[3],digest(canonical(request)))&&request.getMaintenanceRunId().equals(frozen.getRunId())&&request.getExpectedCatalogRevision()==revision&&request.getExpectedEpoch()==plan.getBeforeEpoch()
+                &&item[5].equals(Long.toUnsignedString(plan.getBeforeEpoch()))&&item[6].equals(Long.toUnsignedString(plan.getBeforeEpoch()))&&item[7].equals(Long.toUnsignedString(++revision))&&remaining.remove(request.getWriter().getWriterKey()),"不是连续同run全文RETIRE原件");
+                require(sql.count("SELECT COUNT(*) FROM writer_registry WHERE writer_key=? AND state=2 AND retirement_request_id=? AND retirement_digest=? AND instance_id=? AND registration_digest=?",request.getWriter().getWriterKey().toByteArray(),item[0],item[3],request.getWriter().getInstanceId().toByteArray(),request.getWriter().getRegistrationDigest().toByteArray())==1,"旧writer退休原件不符");
+            }
+            require(remaining.isEmpty(),"仍有P0 writer未永久退休");
+        }catch(java.io.IOException|IllegalArgumentException invalid){throw new SQLException("P0/RETIRE正式原件损坏",invalid);}
+    }
+    private ZoneMergeRunRow held(Sql sql,String key)throws SQLException{
+        String generation=frozenAuthority(sql,key);var hint=run(sql,key,false);require(hint!=null&&hint.getState()!=6,"维护原run不存在或已显式释放");
         require(generation.equals(hint.getGeneration()),"路由世代已改变，不能从历史run补权");fences(sql,hint,false);directory(sql,hint.getSourceZone(),hint.getTargetZone());return hint;
     }
     /** 显式全服Freeze；调用前应先停准入并真实排空所有scene。不是服务自动维护开关。 */
@@ -108,10 +170,9 @@ public final class ZoneMergeStore {
         uuid(key);zones(from,to);operator(requestedBy);if(expectedSourcePlayers<0)throw new IllegalArgumentException("源玩家计数必须显式且非负");if(!originalKey.isEmpty())uuid(originalKey);
         return tx(sql->{
             verifySchema(sql.c);
-            // meta必须是锁序第一把。相同UUID只回原原件，不改参数、不重新抓取清单。
-            Integer state=sql.one("SELECT writable FROM route_meta WHERE id=1 FOR UPDATE",r->r.getObject(1)==null?null:r.getInt(1));require(state!=null,"缺少显式初始化meta");
+            String generation=frozenAuthority(sql,key);
             var prior=run(sql,key,false);if(prior!=null){require(prior.getSourceZone()==from&&prior.getTargetZone()==to&&prior.getExpectedPlayers()==expectedSourcePlayers&&prior.getOriginalRunId().equals(originalKey)&&prior.getRequestedBy().equals(requestedBy),"run UUID被另一份维护意图使用");return prior;}
-            String generation=meta(sql,1);int mode=originalKey.isEmpty()?1:2;
+            int mode=originalKey.isEmpty()?1:2;
             var initial=ZoneMergeRunRow.newBuilder().setRunId(key).setMode(mode).setSourceZone(from).setTargetZone(to).setGeneration(generation).setOriginalRunId(originalKey).setExpectedPlayers(expectedSourcePlayers).setRequestedBy(requestedBy).build();
             fences(sql,initial,true);directory(sql,from,to);
             require(sql.count("SELECT COUNT(*) FROM player WHERE owner_released IS NULL OR owner_released<>1")==0,"全服仍有未真实最终释放的scene写者，租约过期不能替代排空");
@@ -123,7 +184,6 @@ public final class ZoneMergeStore {
                 require(sql.count("SELECT COUNT(*) FROM zone_merge_item WHERE run_id=? AND kind=1",originalKey)==expectedSourcePlayers,"撤销玩家数量与原清单不符");}
             long now=sql.now();byte[] seed=digest(initial.toByteArray());
             sql.update("INSERT INTO zone_merge_run(run_id,mode,source_zone,target_zone,generation,original_run_id,state,phase,cursor_id,item_count,plan_hash,requested_by,approved_by,released_by,created_ms,updated_ms,expected_players,initial_hash) VALUES(?,?,?,?,?,?,1,1,0,0,?,?,'','',?,?,?,?)",key,mode,Integer.toUnsignedLong(from),Integer.toUnsignedLong(to),generation,originalKey,seed,requestedBy,now,now,expectedSourcePlayers,seed);
-            require(sql.update("UPDATE route_meta SET writable=0 WHERE id=1 AND writable=1")==1,"冻结meta CAS失败");
             require(sql.update("UPDATE zone_merge_fence SET run_id=?,revision=revision+1 WHERE zone_id IN(?,?) AND run_id='' AND revision<9223372036854775807",key,Integer.toUnsignedLong(from),Integer.toUnsignedLong(to))==128,"冻结围栏CAS失败");return run(sql,key,false);
         });
     }
@@ -214,13 +274,33 @@ public final class ZoneMergeStore {
     }
     /** 尚未写任何实体的计划可显式放弃；仍需Release带hash审核，绝不自动清冻。 */
     public ZoneMergeRunRow abort(String key,String hash,String approvedBy)throws SQLException{uuid(key);operator(approvedBy);return tx(sql->{held(sql,key);var r=run(sql,key,true);approvedHash(r,hash);require(List.of(1,2,3,7).contains(r.getState())&&sql.count("SELECT COUNT(*) FROM zone_merge_item WHERE run_id=? AND state<>1",key)==0,"已写实体不得放弃，必须续跑原run后按原件撤销");if(r.getState()!=7)sql.update("UPDATE zone_merge_run SET state=7,approved_by=?,updated_ms=? WHERE run_id=?",approvedBy,sql.now(),key);return run(sql,key,false);});}
-    /** 唯一显式解冻入口；不是启动初始化、超时回收或服务后台动作。 */
+    /** P7/P8同一维护事务复核真实域终局；不发控制授权、不清围栏、不执行补偿。 */
+    public static ZoneMergeRunRow auditReleased(Connection connection,String key)throws SQLException{
+        uuid(key);require(!connection.getAutoCommit(),"合区审核必须在控制器已有事务中");var sql=new Sql(connection);String generation=meta(sql,0);
+        byte[] operation=runBytes(key);byte[] actual=sql.one("SELECT freeze_run_id FROM route_meta WHERE id=1",r->r.getBytes(1));require(Arrays.equals(operation,actual),"域审核不是同一冻结run");
+        var run=run(sql,key,true);require(run!=null&&run.getState()==6&&run.getGeneration().equals(generation)&&!run.getReleasedBy().isBlank(),"域run尚无真实显式release终局");
+        require(sql.count("SELECT COUNT(*) FROM zone_merge_fence WHERE zone_id IN(?,?) AND run_id=''",Integer.toUnsignedLong(run.getSourceZone()),Integer.toUnsignedLong(run.getTargetZone()))==128,"两区完整围栏尚未按域终局清理");
+        require(sql.count("SELECT COUNT(*) FROM player WHERE owner_released IS NULL OR owner_released<>1")==0,"域审核存在未释放玩家写者");
+        require(sql.count("SELECT COUNT(*) FROM zone_merge_item WHERE run_id=?",key)==run.getItemCount()&&sql.count("SELECT COUNT(*) FROM zone_merge_item WHERE run_id=? AND (state IS NULL OR state NOT IN(1,2))",key)==0,"域清单数量或状态不同");
+        long done=sql.count("SELECT COUNT(*) FROM zone_merge_item WHERE run_id=? AND state=2",key);require(done==0||done==run.getItemCount(),"域清单仅部分提交");
+        long merged=sql.count("SELECT COUNT(*) FROM zone_merged_into WHERE zone_id=? AND target_zone=? AND run_id=?",Integer.toUnsignedLong(run.getSourceZone()),Integer.toUnsignedLong(run.getTargetZone()),key);
+        long original=run.getMode()==2?sql.count("SELECT COUNT(*) FROM zone_merged_into WHERE zone_id=? AND target_zone=? AND run_id=?",Integer.toUnsignedLong(run.getTargetZone()),Integer.toUnsignedLong(run.getSourceZone()),run.getOriginalRunId()):0;
+        boolean completed=done>0||run.getItemCount()==0&&(run.getMode()==1&&merged==1||run.getMode()==2&&original==0);
+        require(run.getMode()==1||run.getMode()==2,"域维护模式未知");
+        if(completed){
+            require(done==run.getItemCount(),"已完成域清单未全部提交");verifyItems(sql,run);
+            if(run.getMode()==1){require(merged==1&&sql.count("SELECT COUNT(*) FROM zone_config WHERE zone_id=? AND manual_status=2",Integer.toUnsignedLong(run.getSourceZone()))==1,"合区目录终局不同");require(sql.count("SELECT COUNT(*) FROM player WHERE zone_id=?",Integer.toUnsignedLong(run.getSourceZone()))==0&&sql.count("SELECT COUNT(*) FROM guild WHERE zone_id=?",Integer.toUnsignedLong(run.getSourceZone()))==0&&sql.count("SELECT COUNT(*) FROM trade_listing WHERE market_zone=?",Integer.toUnsignedLong(run.getSourceZone()))==0,"源区仍有清单外实体");}
+            else require(original==0&&sql.count("SELECT COUNT(*) FROM zone_config WHERE zone_id=? AND manual_status=1",Integer.toUnsignedLong(run.getTargetZone()))==1,"撤销目录未恢复到维护态");
+        }else require(done==0&&(run.getMode()==1?merged==0:original==1),"安全放弃的原目录被改变");
+        return run;
+    }
+    /** 只解除本域围栏并固定域完成收据；全局SQL保持FROZEN，由唯一operator后续显式release。 */
     public ZoneMergeRunRow release(String key,String hash,String generation,String releasedBy)throws SQLException{uuid(key);uuid(generation);operator(releasedBy);return tx(sql->{
-        require(sql.one("SELECT id FROM route_meta WHERE id=1 FOR UPDATE",row->row.getInt(1))!=null,"缺少路由meta");var receipt=run(sql,key,false);
+        frozenAuthority(sql,key);var receipt=run(sql,key,false);
         if(receipt!=null&&receipt.getState()==6){approvedHash(receipt,hash);require(receipt.getGeneration().equals(generation)&&receipt.getReleasedBy().equals(releasedBy),"解冻原回执与重试参数不同");return receipt;}
         var hint=held(sql,key);require(hint.getGeneration().equals(generation),"解冻必须携带外部保留的原路由世代");var r=run(sql,key,true);approvedHash(r,hash);require(r.getState()==5||r.getState()==7,"未完成或未安全放弃的run禁止解冻");if(r.getState()==5)verifyItems(sql,r);
         require(sql.count("SELECT COUNT(*) FROM player WHERE owner_released IS NULL OR owner_released<>1")==0,"全服出现未释放写者，拒绝解冻");
         require(sql.update("UPDATE zone_merge_fence SET run_id='',revision=revision+1 WHERE zone_id IN(?,?) AND run_id=? AND revision<9223372036854775807",Integer.toUnsignedLong(r.getSourceZone()),Integer.toUnsignedLong(r.getTargetZone()),key)==128,"解冻围栏原件CAS失败");
-        require(sql.update("UPDATE route_meta SET writable=1 WHERE id=1 AND generation=? AND writable=0",generation)==1,"解冻meta世代CAS失败");sql.update("UPDATE zone_merge_run SET state=6,released_by=?,updated_ms=? WHERE run_id=?",releasedBy,sql.now(),key);return run(sql,key,false);
+        sql.update("UPDATE zone_merge_run SET state=6,released_by=?,updated_ms=? WHERE run_id=?",releasedBy,sql.now(),key);return run(sql,key,false);
     });}
 }

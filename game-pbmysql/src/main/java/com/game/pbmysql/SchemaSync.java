@@ -45,7 +45,11 @@ final class SchemaSync {
     }
 
     /** 同步一批表：先整批做内存预检（物理表名判重），再抢锁，按表名排序逐张同步。 */
-    static void sync(Connection conn, List<TableSchema> tables, List<TableSchema> registry) throws SQLException {
+    static void initializeFresh(Connection conn, List<TableSchema> tables, List<TableSchema> registry) throws SQLException {
+        initializeFresh(conn,tables,registry,System.getenv("MMORPG_SQL_SCHEMA_PRINCIPAL"));
+    }
+    static void initializeFresh(Connection conn,List<TableSchema> tables,List<TableSchema> registry,String schemaPrincipal)throws SQLException {
+        requireSchemaPrincipal(conn,schemaPrincipal);
         checkDuplicateMappings(registry);
         if (!conn.getAutoCommit()) {
             throw new IllegalStateException("结构同步不能在事务里执行：MySQL 的 DDL 会隐式提交，无法随业务事务回滚");
@@ -58,7 +62,8 @@ final class SchemaSync {
         String lockName = lockName(database);
         boolean locked = acquireLock(conn, lockName);
         try {
-            preflightAutoIncrementAlter(conn, database, sorted);
+            for(TableSchema table:sorted)if(tableExists(conn,database,table.tableName()))
+                throw new SQLException("fresh-prestart仅建全新表；已有存量必须另交迁移证据，保持HOLD");
             for (TableSchema table : sorted) {
                 syncTable(conn, database, table);
             }
@@ -74,6 +79,31 @@ final class SchemaSync {
         }
         if (locked) {
             releaseLock(conn, lockName);
+        }
+    }
+
+    /** normal启动唯一入口：只读现存结构，缺表、列或索引一律拒启。 */
+    static void sync(Connection conn,List<TableSchema> tables,List<TableSchema> registry)throws SQLException {
+        checkDuplicateMappings(registry);String database=currentDatabase(conn);
+        for(TableSchema table:tables){
+            if(!tableExists(conn,database,table.tableName()))throw new SQLException("缺少显式fresh-prestart表："+table.tableName());
+            Plan plan=SchemaPlanner.plan(table,readColumns(conn,database,table.tableName()),
+                    readIndexes(conn,database,table.tableName(),false),
+                    table.primaryKey().isEmpty()?null:primaryKeyOf(readIndexes(conn,database,table.tableName(),true)));
+            if(!plan.isEmpty())throw new SQLException("normal只读结构核验发现未迁移列、主键或索引："+table.tableName());
+        }
+    }
+    private static void requireSchemaPrincipal(Connection conn,String principal)throws SQLException {
+        if(principal==null||principal.isBlank()||!conn.getAutoCommit())throw new SQLException("fresh-prestart需要独立schema主体和无事务连接");
+        try(var s=conn.createStatement();var r=s.executeQuery("SELECT CURRENT_USER()")){
+            if(!r.next()||!principal.equals(r.getString(1))||r.next())throw new SQLException("实际schema主体不符");
+        }
+        String database=currentDatabase(conn);
+        if(tableExists(conn,database,"writer_registry"))try(var s=conn.createStatement();var r=s.executeQuery("SELECT 1 FROM writer_registry LIMIT 1")){
+            if(r.next())throw new SQLException("已有writer，fresh-prestart结束，禁止进入DDL");
+        }
+        if(tableExists(conn,database,"sql_writer_drain_run"))try(var s=conn.createStatement();var r=s.executeQuery("SELECT 1 FROM sql_writer_drain_run LIMIT 1")){
+            if(r.next())throw new SQLException("存在维护run，不能执行fresh-prestart或迁移");
         }
     }
 

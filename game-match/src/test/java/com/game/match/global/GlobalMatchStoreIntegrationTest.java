@@ -1,5 +1,8 @@
 package com.game.match.global;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.match.global.pb.*;
@@ -16,18 +19,16 @@ class GlobalMatchStoreIntegrationTest {
     private DruidDataSource data;
     private String database;
     private String jdbcRoot;
-    private boolean databaseCreated;
+    private AuthoritySqlFixture fixture;
     private GlobalMatchStore store;
     @BeforeEach void open()throws Exception{
         jdbcRoot=com.game.match.rating.RatingTestDatabase.tidbRoot(System.getenv("MATCH_IT_TIDB"));
-        database="jmatchit_"+UUID.randomUUID().toString().replace("-","");
-        try(var c=DriverManager.getConnection(jdbcRoot+"?connectTimeout=3000&socketTimeout=4000","root","");var s=c.createStatement()){
-            com.game.match.rating.RatingTestDatabase.requireTiDb(c);s.execute("CREATE DATABASE `"+database+"`");databaseCreated=true;
-        }
-        data=new DruidDataSource();data.setUrl(jdbcRoot+database+"?useSSL=false&socketTimeout=4000&connectTimeout=3000");
-        data.setUsername("root");data.setPassword("");data.setMaxActive(8);data.setMaxWait(3000);
-        data.setConnectionInitSqls(List.of("SET SESSION tidb_snapshot='',tidb_read_staleness=0,tidb_low_resolution_tso=OFF,tidb_read_consistency='strict',tidb_replica_read='leader',tidb_txn_mode='pessimistic',transaction_isolation='READ-COMMITTED'"));
-        try(var c=data.getConnection();var q=c.createStatement()){
+        fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(jdbcRoot,
+                com.game.match.rating.RatingTestDatabase.MYSQL_USER,com.game.match.rating.RatingTestDatabase.MYSQL_PASSWORD,
+                "jmatch",false,List.of(1,2)),(c,principal)->{
+            GlobalMatchStore.registry().initializeFresh(c,principal);
+            com.game.match.rating.MatchRatingTables.registry().initializeFresh(c,principal);
+            try(var q=c.createStatement()){
             q.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARCHAR(255) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
             q.execute("CREATE TABLE team_launch(request_id VARCHAR(36) PRIMARY KEY,state INT UNSIGNED NOT NULL,active BOOLEAN NOT NULL DEFAULT TRUE,team_id BIGINT UNSIGNED NOT NULL DEFAULT 0,team_version BIGINT UNSIGNED NOT NULL DEFAULT 0,lock_token VARCHAR(36) NOT NULL DEFAULT '',actor_player_id BIGINT UNSIGNED NOT NULL DEFAULT 0,owner_account VARCHAR(255) NOT NULL DEFAULT '',owner_revision BIGINT UNSIGNED NOT NULL DEFAULT 0,request_proto MEDIUMBLOB,record_proto MEDIUMBLOB,battle_id BIGINT UNSIGNED NOT NULL DEFAULT 0,updated_ms BIGINT UNSIGNED NOT NULL DEFAULT 0,original_proto MEDIUMBLOB)");
             q.execute("CREATE TABLE team_authority(team_id BIGINT UNSIGNED PRIMARY KEY,version BIGINT UNSIGNED NOT NULL,record_proto MEDIUMBLOB,tombstone TINYINT NOT NULL DEFAULT 0,active_launch_id VARCHAR(36) NOT NULL)");
@@ -37,17 +38,19 @@ class GlobalMatchStoreIntegrationTest {
             q.execute("CREATE TABLE guild_trial_launch_role(player_id BIGINT UNSIGNED NOT NULL,request_id BIGINT UNSIGNED NOT NULL,account VARCHAR(255) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,state INT UNSIGNED NOT NULL,PRIMARY KEY(player_id,request_id),INDEX by_request(request_id,player_id),INDEX by_state(player_id,state,request_id))");
             q.execute("CREATE TABLE guild_activity_slot(player_id BIGINT UNSIGNED PRIMARY KEY,lobby_id BIGINT UNSIGNED,expires_ms BIGINT UNSIGNED)");
             q.execute("CREATE TABLE guild_trial_lobby(lobby_id BIGINT UNSIGNED PRIMARY KEY,state INT,view_proto MEDIUMBLOB,guild_id BIGINT UNSIGNED,activity_id INT UNSIGNED)");
-            // 正式M16唯一资源；空隔离库显式种原件，不能用缺表旁路。
-            new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(data);
-            com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),List.of(1,2));
+            }
             c.setAutoCommit(false);com.game.common.team.TeamPolicyAuthority.ensure(c,false,3);c.commit();c.setAutoCommit(true);
-        }
+        });
+        database=fixture.database();
+        data=new DruidDataSource();data.setUrl(fixture.jdbcUrl("?useSSL=false&socketTimeout=4000&connectTimeout=3000"));
+        data.setUsername(fixture.normalUser());data.setPassword(fixture.normalPassword());data.setMaxActive(8);data.setMaxWait(3000);
+        AuthorityDataSourcePolicy.protectDruid(data,fixture.writerBoot(),true);
         store=new GlobalMatchStore(data,new GlobalMatchProperties(true,true,30,180,120,GlobalRegionPolicyTest.CONFIG.probeSecret()));
     }
-    @AfterEach void close()throws Exception{if(data!=null)data.close();if(databaseCreated)try(var c=DriverManager.getConnection(jdbcRoot+"?connectTimeout=3000&socketTimeout=4000","root","");var s=c.createStatement()){com.game.match.rating.RatingTestDatabase.requireTiDb(c);s.execute("DROP DATABASE `"+database+"`");}}
+    @AfterEach void close()throws Exception{if(data!=null)data.close();if(fixture!=null)fixture.close();}
 
     private void execute(String sql,Object...args)throws Exception{
-        try(var c=data.getConnection();var q=c.prepareStatement(sql)){for(int i=0;i<args.length;i++)q.setObject(i+1,args[i]);q.executeUpdate();}
+        try(var c=fixture.schemaConnection();var q=c.prepareStatement(sql)){for(int i=0;i<args.length;i++)q.setObject(i+1,args[i]);q.executeUpdate();}
     }
     private boolean entryOccupied(long player,String ownTeam,long ownTrial)throws Exception{
         try(var c=data.getConnection()){
@@ -102,7 +105,7 @@ class GlobalMatchStoreIntegrationTest {
     private static com.game.api.proto.SessionContext actor(long player){return com.game.api.proto.SessionContext.newBuilder().setPlayerId(player).setAccount("account-"+Long.toUnsignedString(player)).setOwnerRevision(1).build();}
     private static com.google.protobuf.ByteString decision(long challenge,long player,boolean accept){return RespondChallengeRequest.newBuilder().setChallengeId(challenge).setPlayerId(player).setAccept(accept).build().toByteString();}
     private void seedPlayer(long player)throws Exception {
-        try(var c=data.getConnection();var q=c.prepareStatement("INSERT IGNORE INTO player(player_id,account,owner_revision) VALUES(?,?,1)")){
+        try(var c=fixture.schemaConnection();var q=c.prepareStatement("INSERT IGNORE INTO player(player_id,account,owner_revision) VALUES(?,?,1)")){
             q.setObject(1,com.game.pbmysql.PbMysql.uint64(player));q.setString(2,actor(player).getAccount());q.executeUpdate();
         }
     }
@@ -146,7 +149,7 @@ class GlobalMatchStoreIntegrationTest {
     @Test void claimRechecksTicketExpiryAndRollsBackWholeParty()throws Exception{
         var a=join(1);var b=join(2);
         // 候选原票与机房回执仍有效，SQL 票据已到期；提交点不能沿用扫描时的时效判断。
-        try(var c=data.getConnection();var q=c.prepareStatement("UPDATE match_global_ticket SET expires_ms=1 WHERE player_id=?")){
+        try(var c=fixture.schemaConnection();var q=c.prepareStatement("UPDATE match_global_ticket SET expires_ms=1 WHERE player_id=?")){
             q.setLong(1,b.getPlayerId());assertEquals(1,q.executeUpdate());
         }
         assertThrows(RuntimeException.class,()->store.claim(List.of(a,b),formation(103),false));
@@ -233,7 +236,7 @@ class GlobalMatchStoreIntegrationTest {
         var other=new GlobalMatchStore(data,new GlobalMatchProperties(true,true,30,180,120,GlobalRegionPolicyTest.CONFIG.probeSecret()));
         assertThrows(RuntimeException.class,()->other.acquireWork(701));
         store.prepared(work,GlobalPreparedEndpoint.newBuilder().setPlayerId(71).setHost("original-scene").setPort(1).build());
-        try(var c=data.getConnection();var q=c.createStatement()){q.executeUpdate("UPDATE match_global_formation SET retry_ms=1 WHERE battle_id=701");}
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE match_global_formation SET retry_ms=1 WHERE battle_id=701");}
         var stale=work.toBuilder().setRetryMs(1).build();var recovered=other.acquireWork(701);assertEquals(3,recovered.getState());
         assertThrows(RuntimeException.class,()->store.checkWork(stale));
         assertThrows(RuntimeException.class,()->store.prepared(stale,GlobalPreparedEndpoint.newBuilder().setPlayerId(72).build()));
@@ -279,7 +282,7 @@ class GlobalMatchStoreIntegrationTest {
     }
     @Test void 原归属撤销墓碑在过户及ABA后均不可读取覆盖或复活()throws Exception {
         seedPlayer(2301);String request=UUID.randomUUID().toString();assertFalse(store.cancel(actor(2301),"",request));
-        try(var c=data.getConnection();var q=c.createStatement()){q.executeUpdate("UPDATE player SET owner_revision=3 WHERE player_id=2301");}
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE player SET owner_revision=3 WHERE player_id=2301");}
         var current=actor(2301).toBuilder().setOwnerRevision(3).build();
         assertThrows(RuntimeException.class,()->store.requestCancelled(actor(2301),request));
         assertThrows(RuntimeException.class,()->store.requestCancelled(current,request));
@@ -297,10 +300,10 @@ class GlobalMatchStoreIntegrationTest {
     }
     @Test void 机房投影可重建且过期排队明确终止_不留下永久阻售占位()throws Exception {
         var a=join(2601);var b=join(2602);
-        try(var c=data.getConnection();var q=c.createStatement()){q.executeUpdate("DELETE FROM match_global_ticket_region");}
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("DELETE FROM match_global_ticket_region");}
         assertTrue(store.peers(a,1,false,store.now()).isEmpty());assertTrue(store.repairRegions());
         assertEquals(List.of(b.getPlayerId()),store.peers(a,1,false,store.now()).stream().map(GlobalTicketRow::getPlayerId).toList());
-        try(var c=data.getConnection();var q=c.createStatement()){q.executeUpdate("UPDATE match_global_ticket SET expires_ms=1 WHERE player_id=2602");}
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE match_global_ticket SET expires_ms=1 WHERE player_id=2602");}
         assertTrue(store.repairRegions());assertEquals(4,store.ticket(2602).getState());assertTrue(store.peers(a,1,false,store.now()).isEmpty());
         assertEquals(4,store.ticket(2699).getState());
     }
@@ -356,7 +359,7 @@ class GlobalMatchStoreIntegrationTest {
     private WatchBattleRequest watchRequest(long battle){return WatchBattleRequest.newBuilder().setBattleId(battle).setRequestId(UUID.randomUUID().toString()).build();}
     private void watchable(long battle)throws Exception{
         var pb=new com.game.pbmysql.PbMysql();pb.register(GlobalFormationRow.getDefaultInstance());
-        try(var c=data.getConnection()){pb.insert(c,formation(battle).toBuilder().setState(4).setCreatedMs(store.now()).setCreateRequest(com.game.proto.CreateBattleRequest.getDefaultInstance().toByteString()).build());}
+        try(var c=fixture.schemaConnection()){pb.insert(c,formation(battle).toBuilder().setState(4).setCreatedMs(store.now()).setCreateRequest(com.game.proto.CreateBattleRequest.getDefaultInstance().toByteString()).build());}
     }
     @Test void watchUuidHistoryNeverClearsNewerOperationAndDoesNotRebindOwner()throws Exception{
         seedPlayer(901);var sql=watches();var first=watchRequest(800);var second=watchRequest(801);
@@ -369,7 +372,7 @@ class GlobalMatchStoreIntegrationTest {
         assertThrows(RuntimeException.class,()->sql.cancelForRequest(actor(901),first.getRequestId(),mark,com.game.common.deadline.Deadline.after(3000)));
         assertEquals(mark,sql.read(901,com.game.common.deadline.Deadline.after(3000)).getMark());
         assertThrows(RuntimeException.class,()->sql.begin(actor(901),first.toBuilder().setBattleId(999).build(),com.game.common.deadline.Deadline.after(3000)));
-        try(var c=data.getConnection();var q=c.createStatement()){q.executeUpdate("UPDATE player SET owner_revision=3 WHERE player_id=901");}
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE player SET owner_revision=3 WHERE player_id=901");}
         assertThrows(RuntimeException.class,()->sql.begin(actor(901).toBuilder().setOwnerRevision(3).build(),first,com.game.common.deadline.Deadline.after(3000)));
     }
     @Test void watchCancelRequiresOriginalPositiveProofAndNeverExtendsOriginalAdd()throws Exception{
@@ -417,7 +420,7 @@ class GlobalMatchStoreIntegrationTest {
             sql.select(actor(player),request.getRequestId(),810,com.game.common.deadline.Deadline.after(3000));
             sql.reserve(actor(player),player,"810:"+request.getRequestId(),com.game.common.deadline.Deadline.after(3000));
         }
-        try(var c=data.getConnection();var q=c.createStatement()){q.executeUpdate("UPDATE match_global_watching SET retry_ms=1");q.executeUpdate("UPDATE player SET owner_revision=3 WHERE player_id<918");}
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE match_global_watching SET retry_ms=1");q.executeUpdate("UPDATE player SET owner_revision=3 WHERE player_id<918");}
         var page=sql.pending(0,0,com.game.common.deadline.Deadline.after(3000));assertEquals(8,page.size());
         for(var row:page)assertThrows(RuntimeException.class,()->sql.lease(row,com.game.common.deadline.Deadline.after(3000)));
         var last=page.getLast();var next=sql.pending(last.getRetryMs(),last.getPlayerId(),com.game.common.deadline.Deadline.after(3000));assertEquals(4,next.size());
@@ -446,7 +449,7 @@ class GlobalMatchStoreIntegrationTest {
         var pending=sql.cancelExit(exit,budget());var work=sql.lease(pending,budget());
         sql.settled(work,false,com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(watch.getRequestId()).setTargetInstanceId("instance").build(),budget());
         assertNull(sql.cancelExit(exit,budget()));
-        try(var c=data.getConnection();var q=c.createStatement()){q.executeUpdate("UPDATE match_global_profile SET expires_ms=1 WHERE player_id=3002");}
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE match_global_profile SET expires_ms=1 WHERE player_id=3002");}
         assertTrue(store.closeObsoleteJoin(original,budget()));assertEquals(4,store.ticket(3002).getState());assertTrue(store.requestCancelled(actor(3002),request.getRequestId()));
         assertThrows(RuntimeException.class,()->store.prepareJoin(actor(3002),request,2,1,150000,"s"));
     }
@@ -464,14 +467,14 @@ class GlobalMatchStoreIntegrationTest {
         var original=com.game.proto.team.TeamLaunchOriginal.newBuilder().setTeamId(team).setTeamVersion(1).setLockToken(token).setRequest(start).setLockTtlSeconds(30).setEnqueuedMs(stamp).setNotBeforeMs(stamp);
         var record=com.game.proto.team.TeamRecord.newBuilder().setTeamId(team).setLeaderId(players[0]).setZoneId(zone).setCreatedAtMs(stamp).setMatchLockToken(token);
         for(int i=0;i<players.length;i++){long player=players[i];var old=join(player);store.cancel(actor(player),old.getTicket(),old.getRequestId());
-            try(var c=data.getConnection();var q=c.prepareStatement("UPDATE player SET zone_id=? WHERE player_id=?")){q.setInt(1,zone);q.setLong(2,player);q.executeUpdate();}
+            try(var c=fixture.schemaConnection();var q=c.prepareStatement("UPDATE player SET zone_id=? WHERE player_id=?")){q.setInt(1,zone);q.setLong(2,player);q.executeUpdate();}
             var role=com.game.proto.team.TeamOriginalRole.newBuilder().setPlayerId(player).setOwnerAccount(actor(player).getAccount()).setOwnerRevision(1).build();if(i==0)original.setActor(role);
             String ticket=UUID.randomUUID().toString();original.addMembers(com.game.proto.team.TeamLaunchMember.newBuilder().setOriginal(role).setRosterOrder(i+1).setTicket(ticket)).putZones(player,zone);
             record.addMembers(com.game.proto.team.TeamMemberRecord.newBuilder().setPlayerId(player).setZoneId(zone).setJoinedAtMs(stamp).setJoinSeq(i+1)).addMatchLockRoster(player);
             members.add(old.toBuilder().setMode(5).setTeamSize(5).setZoneId(zone).setTeamId(team).setTicket(ticket).setRequestId(request).clearFormationId().clearSelectedRegion().setState(1).build());
         }
         var launch=original.build();byte[] rec=record.build().toByteArray();
-        try(var c=data.getConnection()){
+        try(var c=fixture.schemaConnection()){
             try(var q=c.prepareStatement("INSERT INTO team_authority(team_id,version,record_proto,tombstone,active_launch_id) VALUES(?,1,?,0,?)")){q.setLong(1,team);q.setBytes(2,rec);q.setString(3,request);q.executeUpdate();}
             try(var q=c.prepareStatement("INSERT INTO team_launch(request_id,state,team_id,team_version,lock_token,actor_player_id,owner_account,owner_revision,request_proto,record_proto,original_proto) VALUES(?,1,?,1,?,?,?,1,?,?,?)")){
                 q.setString(1,request);q.setLong(2,team);q.setString(3,token);q.setLong(4,players[0]);q.setString(5,actor(players[0]).getAccount());q.setBytes(6,start.toByteArray());q.setBytes(7,rec);q.setBytes(8,launch.toByteArray());q.executeUpdate();}
@@ -527,7 +530,7 @@ class GlobalMatchStoreIntegrationTest {
     }
     @Test void Team策略原件改变时旧Match实例及不一致新副本都拒绝()throws Exception {
         byte[] raw=com.game.common.team.TeamPolicyAuthority.canonicalContract(true);byte[] digest=java.security.MessageDigest.getInstance("SHA-256").digest(raw);
-        try(var c=data.getConnection();var q=c.prepareStatement("UPDATE team_policy SET contract=?,allow_cross_zone=1,contract_digest=? WHERE id=1")){q.setBytes(1,raw);q.setBytes(2,digest);assertEquals(1,q.executeUpdate());}
+        try(var c=fixture.schemaConnection();var q=c.prepareStatement("UPDATE team_policy SET contract=?,allow_cross_zone=1,contract_digest=? WHERE id=1")){q.setBytes(1,raw);q.setBytes(2,digest);assertEquals(1,q.executeUpdate());}
         assertThrows(RuntimeException.class,store::now);assertThrows(RuntimeException.class,()->new GlobalMatchStore(data,new GlobalMatchProperties(true,true,30,180,120,GlobalRegionPolicyTest.CONFIG.probeSecret())));
     }
     @Test void 挑战接受原pending不能借先前普通JoinUUID拆掉单个成员()throws Exception {
@@ -541,11 +544,11 @@ class GlobalMatchStoreIntegrationTest {
         var group=party(5100,5101,5102);var sql=watches();var watch=watchRequest(5109);
         assertFalse(sql.begin(actor(5101),watch,budget()).original().getResponsePayload().isEmpty());assertThrows(RuntimeException.class,()->store.prepareJoin(actor(5101),joinRequest(5101),2,1,150000,"s"));
         var old=join(5111);store.cancel(actor(5111),old.getTicket(),old.getRequestId());
-        try(var c=data.getConnection();var q=c.createStatement()){
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){
             q.executeUpdate("INSERT INTO guild_trial_launch(request_id,state) VALUES(5110,1)");q.executeUpdate("INSERT INTO guild_trial_launch_role(player_id,request_id,account,owner_revision,state) VALUES(5111,5110,'account-5111',1,1)");
         }
         assertFalse(sql.begin(actor(5111),watchRequest(5119),budget()).original().getResponsePayload().isEmpty());assertThrows(RuntimeException.class,()->store.prepareJoin(actor(5111),joinRequest(5111),2,1,150000,"s"));
-        try(var c=data.getConnection();var q=c.createStatement()){
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){
             // 正规终局同时提交父CLOSED和角色CLOSED；只有子投影2不能掩盖仍PREPARED的父原件。
             c.setAutoCommit(false);q.executeUpdate("UPDATE guild_trial_launch SET state=3 WHERE request_id=5110");
             q.executeUpdate("UPDATE guild_trial_launch_role SET state=2 WHERE player_id=5111");c.commit();
@@ -572,7 +575,7 @@ class GlobalMatchStoreIntegrationTest {
     }
     @Test void 排队后home改变不能由修复任务覆盖原单位()throws Exception {
         var group=party(5300,5301,5302);var unit=queued(group);
-        try(var c=data.getConnection();var q=c.createStatement()){q.executeUpdate("UPDATE player SET zone_id=2 WHERE player_id=5301");}
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE player SET zone_id=2 WHERE player_id=5301");}
         assertThrows(RuntimeException.class,store::repairRegions);
         var raw=store.unitCandidates(0,"").stream().filter(row->row.getUnitId().equals(unit.getUnitId())).findFirst().orElseThrow();assertEquals(unit,raw);
         assertEquals(1,store.ticket(5301).getZoneId());

@@ -1,5 +1,8 @@
 package com.game.rank;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -17,7 +20,8 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.*;
 
 class RankStoreTiDbTest {
-    private String base, database;
+    private String base;
+    private AuthoritySqlFixture fixture;
     private DruidDataSource pool;
     private AuthorityJdbc jdbc;
     private RankStore store;
@@ -32,29 +36,17 @@ class RankStoreTiDbTest {
                 fail("MAIL_RANK_TEST_JDBC必须配置");
             Assumptions.assumeTrue(false, "未配置隔离TiDB");
         }
-        database = "rank_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-        try (var c = DriverManager.getConnection(base, "root", ""); var s = c.createStatement()) {
-            s.execute("CREATE DATABASE " + database);
-        }
-        pool = new DruidDataSource();
-        pool.setUrl(base + database + "?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true");
-        pool.setUsername("root");
-        pool.setPassword("");
-        pool.setMaxActive(16);
-        pool.setMaxWait(5000);
-        pool.setConnectionInitSqls(List.of(StrongTiDbConnectionPolicy.SESSION_SQL));
-        pool.init();
-        try (var a = pool.getConnection(); var b = pool.getConnection()) {
-            StrongTiDbConnectionPolicy.verify(a, true);
-            StrongTiDbConnectionPolicy.verify(b, true);
-        }
+        fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(base,
+                System.getProperty("game.it.mysql.user","root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD",""),
+                "rank",false,List.of(1)),(connection,principal)->{
+            RankTables.registry().initializeFresh(connection,principal);
+            try(var statement=connection.createStatement()){statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,zone_id INT UNSIGNED NOT NULL)");}
+        });
+        pool=new DruidDataSource();pool.setUrl(fixture.jdbcUrl("?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true"));
+        pool.setUsername(fixture.normalUser());pool.setPassword(fixture.normalPassword());pool.setMaxActive(16);pool.setMaxWait(5000);
+        AuthorityDataSourcePolicy.protectDruid(pool,fixture.writerBoot(),true);
+        try(var a=pool.getConnection();var b=pool.getConnection()){StrongTiDbConnectionPolicy.verify(a,true);StrongTiDbConnectionPolicy.verify(b,true);}
         RankTables.sync(pool);
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(
-                new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
-        try(var connection=pool.getConnection();var statement=connection.createStatement()) {
-            statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,zone_id INT UNSIGNED NOT NULL)");
-            com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1));
-        }
         jdbc = new AuthorityJdbc(pool);
         store = new RankStore(jdbc, new AuthorityIds(jdbc, "rank_id_sequence"), id -> id == 1, System::currentTimeMillis);
     }
@@ -62,12 +54,7 @@ class RankStoreTiDbTest {
     void cleanup() throws Exception {
         if (pool != null)
             pool.close();
-        if (database != null) {
-            assertTrue(database.matches("rank_it_[0-9a-f]{16}"));
-            try (var c = DriverManager.getConnection(base, "root", ""); var s = c.createStatement()) {
-                s.execute("DROP DATABASE " + database);
-            }
-        }
+        if(fixture!=null)fixture.close();
     }
     private RankBoardKey key() {
         return RankBoardKey.newBuilder().setBoardType(1).setScopeValue(1).setPeriod("season").setGeneration(7).build();
@@ -152,7 +139,7 @@ class RankStoreTiDbTest {
         long id = store.open("match", opening(), budget()).getBoardId();
         store.submit("match", input(id, 1), budget());
         long next = jdbc.read(budget(), s -> s.one("SELECT next_value FROM rank_id_sequence WHERE sequence_key=1", r -> r.getLong(1)));
-        jdbc.tx(budget(), s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(), s -> {
             s.update("INSERT INTO rank_mail_reward "
                      + "(reward_id,settlement_id,player_id,`rank`,attachments,status,mail_id,next_attempt_ms,lease_until_ms,lease_token,"
                      + "attempts,created_ms,updated_ms) VALUES (?,800,7,1,?,2,1,0,0,0,0,0,0)",
@@ -163,7 +150,7 @@ class RankStoreTiDbTest {
         assertEquals(0L, (long) jdbc.read(budget(), s -> s.count("SELECT COUNT(*) FROM rank_snapshot")));
         assertEquals(0L, (long) jdbc.read(budget(), s -> s.count("SELECT COUNT(*) FROM rank_settlement")));
         assertEquals(1L, (long) jdbc.read(budget(), s -> s.count("SELECT COUNT(*) FROM rank_board WHERE state=1 AND settlement_id=0")));
-        jdbc.tx(budget(), s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(), s -> {
             s.update("DELETE FROM rank_mail_reward");
             return null;
         });

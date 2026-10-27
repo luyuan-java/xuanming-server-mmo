@@ -21,6 +21,9 @@ import org.slf4j.LoggerFactory;
  */
 public final class SceneInboxProvider implements SceneInboxService {
 
+    private com.game.scene.admin.SceneMaintenanceController.Gate maintenance=new com.game.scene.admin.SceneMaintenanceController.Gate();
+    public SceneInboxProvider withMaintenance(com.game.scene.admin.SceneMaintenanceController.Gate gate){this.maintenance=Objects.requireNonNull(gate);return this;}
+
     private static final Logger log = LoggerFactory.getLogger(SceneInboxProvider.class);
 
     /** 排进逻辑线程、还没执行的提醒上限（提醒量 = 入箱量，远小于它；防的是异常洪峰占满逻辑线程的队列）。 */
@@ -55,15 +58,18 @@ public final class SceneInboxProvider implements SceneInboxService {
             log.warn("[PlayerInbox] 在线提醒排队已满，回过载 player={}", Long.toUnsignedString(request.getPlayerId()));
             return CompletableFuture.completedFuture(reply(SceneInboxNotifyStatus.SCENE_INBOX_NOTIFY_OVERLOADED));
         }
+        final com.game.scene.admin.SceneMaintenanceController.Lease admitted;
+        try{admitted=maintenance.admit(request.toByteArray());}catch(RejectedExecutionException closed){queued.release();return CompletableFuture.failedFuture(closed);}
         long playerId = request.getPlayerId();
         int domain = request.getDomain();
         try {
             logic.execute(() -> {
-                queued.release();
-                svc.onNotify(playerId, domain);
+                try{svc.onNotify(playerId,domain);admitted.complete(null);}
+                catch(RuntimeException failure){admitted.complete(failure);throw failure;}
+                finally{queued.release();}
             });
         } catch (RejectedExecutionException e) {
-            queued.release();
+            admitted.complete(e);queued.release();
             return CompletableFuture.failedFuture(e);
         }
         return CompletableFuture.completedFuture(reply(SceneInboxNotifyStatus.SCENE_INBOX_NOTIFY_ACCEPTED));

@@ -1396,3 +1396,9 @@ stress AI 的 `switch_scene` 在疏散期间仍可用；Go robot 感知不到连
 | 19 | 与并行规格的矛盾（5.4 / 6.3） | 工作区里已有 5.4 `zone-travel-spec.md` 与 6.3 `scene-battle-spec.md`：`SwitchReason` 改为 `{PLAYER, TRAVEL, EVACUATE}`（TRAVEL 由 5.4 引入，裁决 16），`playerRequested ≡ reason != EVACUATE`（原稿 `== PLAYER` 会把 226 判成非玩家发起）；收敛谓词并入 5.4 的 `travelFramesPending`（5.4 TF16 的硬要求）；§5.4.3 补疏散中 226 的处理；指标 `reason` 取值加 travel；proto `SelectSwitchTargetRequest.reason` 不含 TRAVEL（跨 zone 不选目标）；§0.4 的 5.4 / 6.3 行引用两稿的钩子（6.3 入口拒绝 `inBattle()` 与本稿 Q16 一致） | `zone-travel-spec.md:98`、`:123`、`:357`、`:613-614`、`:898`；`scene-battle-spec.md:881`、`:1090`、`:1244` |
 
 本稿行号在评审后整体后移；5.4 稿引用的 `scene-drain-spec.md:104`、`:130`、`:508`、`:609-612`、`:962`、`:1012` 已不再对应原段落，以章节名（§0.4、§0.6 A6、§5.2、§5.4.4、§7.2、§8.2 R3）为准。
+
+## 2026-10-26 SOURCE 与 RELAY 分阶段闭合（候选，未运行）
+
+P1将客户端帧与provider受理放在同一Gate；先永久cut，再实际关闭监听、等待所有IO队列屏障与已入逻辑队列的帧，任何队列拒绝或未知完成都保留未决。存储和最终存盘补偿仍存活。P3只按真实TX2 APPLIED、owner释放、存储与补偿join出具RELAY_QUIESCED后seal，同物理writer不能在P1提前退役。NodeLink真实join/gate接线及回归已获497范围授权并纳入隔离候选。
+
+P8之后新注册boot的prepare-only启动实际world/存储/补偿/消费者，监听和目录发布保持关闭。prepare-source回传同REGISTER的正式IssuerReadiness；open-source按同run/manifest/register原件一次开启监听/发布者并返回实际SourceOpenAck。旧cut不能通过prepareOnly/openPrepared复活。该源码状态不代表已完成全进程、Redis/Kafka、真实TiDB或Windows验收，原普通SIGTERM用例与业务断言仍保留。

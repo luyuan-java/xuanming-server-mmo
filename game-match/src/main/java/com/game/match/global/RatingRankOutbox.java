@@ -24,6 +24,8 @@ import org.slf4j.LoggerFactory;
 /** 评级源的可靠投榜：业务事务保留完整批次，发送只从已提交游标顺发。 */
 public final class RatingRankOutbox implements RatingStore.CommitHook,AutoCloseable {
     private static final Logger log=LoggerFactory.getLogger(RatingRankOutbox.class);
+    private final java.util.concurrent.locks.ReentrantLock publication=new java.util.concurrent.locks.ReentrantLock();
+    private volatile boolean quiesced;
     private final DataSource source;
     private final PbMysql db=new PbMysql();
     private final GlobalRankProperties config;
@@ -58,7 +60,8 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
         db.updateByPk(c,guard.toBuilder().setProducedCursor(cursor).build());
     }
     public void start(){timer.scheduleWithFixedDelay(()->{try{publish();}catch(Exception e){log.warn("评级投榜等待恢复，未推进源游标: {}",e.getClass().getSimpleName());}},0,2,TimeUnit.SECONDS);}
-    public void publish()throws Exception{
+    public void publish()throws Exception{if(quiesced||!publication.tryLock())return;try{publishOwned();}finally{publication.unlock();}}
+    private void publishOwned()throws Exception{
         GlobalRankSourceRow guard;
         try(var c=source.getConnection()){guard=db.findOneByPk(c,GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build()).orElse(null);}
         if(guard==null)return;
@@ -108,5 +111,19 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
     }
     private <T extends com.google.protobuf.Message>T sign(String method,T request){return ServiceCallSignatures.sign(method,request,"match",config.secret(),System.currentTimeMillis());}
     private <R>R call(Function<RankAdminService,CompletableFuture<R>> action)throws Exception{return calls.call(target,Duration.ofSeconds(3),action).get(3250,TimeUnit.MILLISECONDS);}
+    /** 必须先停源，再等完整连续ACK游标；未知发布不推进committed，也不关闭relay。 */
+    public boolean stopAndReport(long timeoutNanos)throws Exception {
+        long until=System.nanoTime()+Math.max(0,timeoutNanos);
+        if(!publication.tryLock(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS))return false;
+        try{
+            try(var c=source.getConnection()){
+                var sourceRow=db.findOneByPk(c,GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build()).orElse(null);
+                if(sourceRow!=null&&(!sourceRow.getStopped()||sourceRow.getCommittedCursor()!=sourceRow.getProducedCursor()))return false;
+            }
+            quiesced=true;timer.shutdown();
+        }finally{publication.unlock();}
+        if(!timer.awaitTermination(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS))return false;
+        calls.close();return true;
+    }
     @Override public void close(){timer.shutdownNow();try{timer.awaitTermination(4,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}calls.close();}
 }

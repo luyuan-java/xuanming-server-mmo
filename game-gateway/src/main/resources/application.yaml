@@ -20,9 +20,9 @@ spring:
   # 区服目录 / 白名单 / 公告（库 <ns> = 部署命名空间 game.namespace，缺省 game；运维经 game-data 的 /admin 接口改）。口令只从环境变量读。
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"
-    username: ${GAME_MYSQL_USER:root}
-    password: ${GAME_MYSQL_PASSWORD:}
+    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"
+    username: ${MMORPG_SQL_USERNAME}
+    password: ${MMORPG_SQL_PASSWORD}
     druid:
       initial-size: 1
       min-idle: 1
@@ -31,7 +31,7 @@ spring:
   sql:
     init:
       # 只建本服务自己的表（CREATE TABLE IF NOT EXISTS）
-      mode: always
+      mode: never
       schema-locations: classpath:db/game-route-authority-schema.sql,classpath:db/game-gateway-schema.sql
 
 # 管理端点：http://127.0.0.1:18081/actuator/health 与 /actuator/prometheus（与客户端 HTTP 接口同一个端口，本地开发用）。

@@ -16,6 +16,83 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../.."
 
+# 严格维护分支不走下方TERM→强杀兼容路径。原普通停止语义及固定顺序保留。
+# 每issuer的受控env只含PID/start/exe/source/frontier路径；v2工具核正规IssuerClosure正文。
+strict_stop_and_report() {
+  local plan_dir=${1:?缺少固定issuer计划目录} output=${2:?缺少永久输出目录}
+  local issuer pid expected_start expected_exe expected_sha report signal_path signal_sha stage role shares_relay now deadline actual key value
+  [[ -d "$plan_dir" && ! -L "$plan_dir" && ! -e "$output" ]] || { echo '严格停止计划/输出状态不符' >&2; return 1; }
+  local fence=${MMORPG_PUBLICATION_FENCE_DIR:-run/maintenance/publication-fences}
+  local operation=${MMORPG_MAINTENANCE_OPERATION_ID:?缺少维护operation}
+  [[ "$operation" =~ ^[a-f0-9]{32}$ ]] || return 1
+  mkdir -p -- "$fence"
+  # 原子noclobber永久围栏；存在则保留，绝不TTL或删除。
+  if [[ ! -e "$fence/$operation.closed.json" ]]; then
+    (umask 077; set -o noclobber; printf '{"operationId":"%s","closed":true}\n' "$operation" > "$fence/$operation.closed.json") || return 1
+  fi
+  mkdir -m 700 -- "$output" || return 1
+  deadline=$((SECONDS + 60))
+  local count=0
+  for issuer in "$plan_dir"/*.env; do
+    [[ -f "$issuer" && ! -L "$issuer" ]] || { echo '缺少具名issuer计划' >&2; return 1; }
+    count=$((count+1)); ((count<=1024)) || { echo 'issuer超过既有预算' >&2; return 1; }
+    pid='' expected_start='' expected_exe='' expected_sha='' report='' signal_path='' signal_sha='' stage='' role='' shares_relay=''
+    local -A seen=()
+    while IFS='=' read -r key value || [[ -n "$key$value" ]]; do
+      [[ -z "$key" || "$key" == \#* ]] && continue
+      [[ -z "${seen[$key]:-}" && -n "$value" ]] || return 1
+      seen[$key]=1
+      case "$key" in
+        pid) pid=$value;; startTime) expected_start=$value;; executable) expected_exe=$value;; executableSha256) expected_sha=$value;; applicationReport) report=$value;; signalScript) signal_path=$value;; signalScriptSha256) signal_sha=$value;; stage) stage=$value;; logicalRole) role=$value;; sharesRelay) shares_relay=$value;;
+        *) echo 'issuer计划有未知字段' >&2; return 1;;
+      esac
+    done < "$issuer"
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$expected_sha" =~ ^[a-f0-9]{64}$ && -n "$expected_start" && -f "$expected_exe" && -n "$report" ]] || return 1
+    [[ "$stage" == P1 || "$stage" == P3 ]] || { echo '严格停止必须显式P1/P3' >&2; return 1; }
+    [[ "$role" == SOURCE || "$role" == RELAY ]] || return 1
+    [[ "$shares_relay" == true || "$shares_relay" == false ]] || return 1
+    if [[ "$stage" == P1 && ( "$role" != SOURCE || "$shares_relay" != false ) ]]; then
+      echo 'P1不能停共享relay进程，先由应用logical close SOURCE给正式原件' >&2; return 1
+    fi
+    # 要求真实进程启动身份，不能按PID缺席当成功。Linux/proc是本分支受支持的实际身份源。
+    [[ -r "/proc/$pid/stat" && -e "/proc/$pid/exe" ]] || { echo '没有受支持的进程身份源，HOLD' >&2; return 1; }
+    actual=$(readlink "/proc/$pid/exe") || return 1
+    [[ "$actual" == "$expected_exe" ]] || { echo 'PID可执行来源不符' >&2; return 1; }
+    actual=$(sha256sum -- "$expected_exe") || return 1
+    [[ "${actual%% *}" == "$expected_sha" ]] || return 1
+    actual=$(awk '{print $22}' "/proc/$pid/stat") || return 1
+    [[ "$actual" == "$expected_start" ]] || { echo 'PID启动世代变化' >&2; return 1; }
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*)
+        # Git Bash的kill可能直接终止JVM；只允许固定SHA的现有控制台优雅信号脚本，不隐式编译新helper。
+        [[ -n "$signal_path" && -f "$signal_path" && "$signal_sha" =~ ^[a-f0-9]{64}$ ]] || { echo '缺确定Windows优雅信号owner，HOLD' >&2; return 1; }
+        actual=$(sha256sum -- "$signal_path") || return 1
+        [[ "${actual%% *}" == "$signal_sha" ]] || return 1
+        pwsh -NoProfile -File "$signal_path" -Command signal-only -SignalProcessId "$pid" || return 1;;
+      Linux*) kill -TERM "$pid" || return 1;;
+      *) echo '未支持的严格停止平台，HOLD' >&2; return 1;;
+    esac
+    while kill -0 "$pid" 2>/dev/null; do
+      ((SECONDS < deadline)) || { echo '严格停止超时；不强杀、不删除PID、不签排空' >&2; return 1; }
+      sleep 0.1
+    done
+    [[ -f "$report" && ! -L "$report" ]] || { echo '进程退出但没有正式app frontier原件，HOLD' >&2; return 1; }
+    [[ $(wc -c < "$report") -le 16777216 ]] || return 1
+    cp -- "$report" "$output/$(basename "$issuer" .env).issuer.json" || return 1
+    sha256sum -- "$output/$(basename "$issuer" .env).issuer.json" >> "$output/sha256sums.txt" || return 1
+  done
+  ((count>0)) || return 1
+  # 只收集真实app原件，不构造角色proof或冒ROOTS_CLOSED/P4。J CLI核完整typed事实后才写SQL阶段：
+  # --command phase --authority-schema <schema> --input <完整原请求> --output <新收据>。
+  # P1完整roots或P3完整relay永久事实确认后，另按原RETIRE请求退休物理writer。
+  printf '正式app原件已收集；尚未记录SQL阶段或执行RETIRE\n'
+}
+
+if [[ "${1:-}" == '--stop-and-report' ]]; then
+  strict_stop_and_report "${2:-}" "${3:-}"
+  exit $?
+fi
+
 # 停一个实例（$1 实例名 = PID 文件名）：没有 PID 文件的跳过；发 SIGTERM 后给 20s，到点强制结束
 stop_one() {
   local name=$1 pidfile pid

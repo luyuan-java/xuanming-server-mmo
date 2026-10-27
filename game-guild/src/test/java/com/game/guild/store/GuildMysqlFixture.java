@@ -3,6 +3,8 @@ package com.game.guild.store;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
 import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.guild.rules.GuildReject;
@@ -56,53 +58,42 @@ public final class GuildMysqlFixture implements AutoCloseable {
 
     public final String database;
     public final DruidDataSource dataSource;
+    private final AuthoritySqlFixture authority;
 
-    private GuildMysqlFixture(String database, DruidDataSource dataSource) {
+    private GuildMysqlFixture(String database, DruidDataSource dataSource,AuthoritySqlFixture authority) {
+        this.authority=authority;
         this.database = database;
         this.dataSource = dataSource;
     }
 
     public static GuildMysqlFixture create() throws SQLException {
-        String database = "game_guild_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("CREATE DATABASE `" + database + "` DEFAULT CHARACTER SET utf8mb4");
-        }
-        DruidDataSource ds = new DruidDataSource();
-        ds.setUrl(BASE_URL + "/" + database + PARAMS);
-        ds.setUsername(USER);
-        ds.setPassword(PASSWORD);
-        ds.setMaxActive(96);
-        ds.setMaxWait(10_000);
-        ds.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-        GuildMysqlFixture fixture = new GuildMysqlFixture(database, ds);
-        GuildTables.sync(ds, java.time.Duration.ofMinutes(1));
-        var activity = new com.game.pbmysql.PbMysql();
-        activity.register(com.game.guild.activity.pb.ActivityProgressRow.getDefaultInstance());
-        try (var connection = ds.getConnection()) { activity.syncAll(connection); }
-        fixture.exec("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,name VARCHAR(64) NOT NULL DEFAULT 'fixture',account VARCHAR(64) NOT NULL DEFAULT 'fixture-account',owner_revision BIGINT UNSIGNED NOT NULL DEFAULT 1,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 7)");
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(ds);
-        try(var c=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),List.of(7));}
-        fixture.exec("CREATE TABLE `" + GATE_TABLE + "` (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB");
-        fixture.exec("INSERT INTO `" + GATE_TABLE + "` (id) VALUES (1)");
-        return fixture;
+        try{
+            var options=AuthoritySqlFixture.Options.fromEnvironment(BASE_URL,USER,PASSWORD,"game_guild",!Boolean.getBoolean("game.it.require-tidb"),List.of(7));
+            var authority=AuthoritySqlFixture.prepare(options,(connection,principal)->{
+                var tables = GuildTables.registry();
+                tables.register(com.game.guild.activity.pb.ActivityProgressRow.getDefaultInstance());
+                tables.initializeFresh(connection,principal);
+                try(var sql=connection.createStatement()){sql.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,name VARCHAR(64) NOT NULL DEFAULT 'fixture',account VARCHAR(64) NOT NULL DEFAULT 'fixture-account',owner_revision BIGINT UNSIGNED NOT NULL DEFAULT 1,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 7)");sql.execute("CREATE TABLE "+GATE_TABLE+" (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB");sql.execute("INSERT INTO "+GATE_TABLE+" VALUES(1)");}
+            });
+            DruidDataSource ds=new DruidDataSource();
+            try{ds.setUrl(authority.jdbcUrl(PARAMS));ds.setUsername(authority.normalUser());ds.setPassword(authority.normalPassword());ds.setMaxActive(96);ds.setMaxWait(10_000);ds.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                AuthorityDataSourcePolicy.protectDruid(ds,authority.writerBoot(),!options.allowMySql());
+                GuildTables.sync(ds,java.time.Duration.ofMinutes(1));return new GuildMysqlFixture(authority.database(),ds,authority);
+            }catch(Exception failure){ds.close();try{authority.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
+        }catch(SQLException failure){throw failure;}catch(Exception failure){throw new SQLException("隔离公会SQL夹具初始化失败",failure);}
     }
 
     @Override
     public void close() throws SQLException {
-        dataSource.close();
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("DROP DATABASE IF EXISTS `" + database + "`");
-        }
+        dataSource.close();authority.close();
     }
 
     /** 清空全部表（GuildTables.NAMES）、按启动顺序重建哨兵行（updated_ms = NOW）。 */
     public void reset() throws SQLException {
         for (String table : GuildTables.NAMES) {
-            exec("TRUNCATE TABLE `" + table + "`");
+            try(var connection=authority.schemaConnection();var sql=connection.createStatement()){sql.execute("TRUNCATE TABLE `"+table+"`");}
         }
-        exec("TRUNCATE TABLE guild_activity_progress");
+        try(var connection=authority.schemaConnection();var sql=connection.createStatement()){sql.execute("TRUNCATE TABLE guild_activity_progress");}
         startup(GuildTxListener.NONE).ensureGlobalInsertGuard(NOW, d());
     }
 
@@ -128,7 +119,7 @@ public final class GuildMysqlFixture implements AutoCloseable {
     // ================================================================ 夹具
 
     public void exec(String sql, Object... args) throws SQLException {
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+        try (Connection c = authority.schemaConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             bind(ps, args);
             ps.executeUpdate();
         }

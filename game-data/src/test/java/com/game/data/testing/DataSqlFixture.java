@@ -1,6 +1,8 @@
 package com.game.data.testing;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
 import com.game.data.ops.OpsJobStore;
 import com.game.data.ops.OpsTables;
 import com.game.data.ops.fence.StrictClock;
@@ -56,9 +58,11 @@ public final class DataSqlFixture implements AutoCloseable {
     /** game-player-store 的生产 Mapper（夺权 / 续约 / 释放 / 带围栏写 / 加锁读；批次 7.2b）。 */
     public final PlayerMapper playerMapper;
     public final PbMysql ops;
+    private final AuthoritySqlFixture authority;
 
     private DataSqlFixture(String database, DataSource dataSource, PlatformTransactionManager transactionManager,
-                           SqlSessionTemplate session, PbMysql ops) {
+                           SqlSessionTemplate session, PbMysql ops,AuthoritySqlFixture authority) {
+        this.authority=authority;
         this.database = database;
         this.dataSource = dataSource;
         this.transactionManager = transactionManager;
@@ -81,53 +85,29 @@ public final class DataSqlFixture implements AutoCloseable {
         return MYSQL_URL != null;
     }
 
-    public static DataSqlFixture create() throws Exception {
-        boolean strictTiDb = Boolean.getBoolean("game.it.require-tidb");
-        if (strictTiDb && (MYSQL_URL == null || !MYSQL_URL.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):(4000|24000)/?"))) {
-            throw new IllegalStateException("显式强 TiDB 回归必须配置本会话本机测试端口，不能回退到 H2/MySQL");
-        }
-        String database = "game_data_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        DataSource ds;
-        if (strictTiDb) {
-            Class.forName("com.mysql.cj.jdbc.Driver");
-            try (var c = strictAdmin(); var s = c.createStatement()) { s.execute("CREATE DATABASE " + database); }
-            System.out.println("强 TiDB 随机库创建=" + database);
-            var pool = new DruidDataSource();
-            pool.setUrl(MYSQL_URL.replaceAll("/$", "") + "/" + database
-                    + "?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true&connectTimeout=3000&socketTimeout=10000");
-            pool.setUsername(MYSQL_USER);
-            pool.setPassword(MYSQL_PASSWORD);
-            pool.setMaxActive(4);
-            pool.setMaxWait(1000);
-            new StrongTiDbConnectionPolicy("运维恢复集成", true).postProcessBeforeInitialization(pool, "fixture");
-            ds = pool;
-        } else if (mysql()) {
-            ds = new DriverManagerDataSource(MYSQL_URL + "/" + database
-                    + "?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true",
-                    MYSQL_USER, MYSQL_PASSWORD);
-        } else {
-            JdbcDataSource h2 = new JdbcDataSource();
-            h2.setURL("jdbc:h2:mem:" + database + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
-            ds = h2;
-        }
-        try {
-            if (strictTiDb) {
-                ((DruidDataSource) ds).init();
-                try (var c = ds.getConnection()) { StrongTiDbConnectionPolicy.verify(c, true); }
-            }
-            new ResourceDatabasePopulator(new ClassPathResource("db/game-data-schema.sql"),
-                    new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(ds);
-            new ResourceDatabasePopulator(new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(ds);
-            try(var routeInit=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,4,7,9,11));}
-            PbMysql ops;
-            if (mysql()) {
-                ops = OpsTables.sync(ds, Duration.ofMinutes(1));
-            } else {
-                ops = OpsTables.registry();
-                try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
-                    for (TableSchema t : ops.tables()) {
-                        st.execute(h2Ddl(t.createTableSql()));
-                    }
+    public static DataSqlFixture create()throws Exception{return create(null);}
+    public static DataSqlFixture create(AuthoritySqlFixture.SchemaBuilder additionalSchema) throws Exception {
+        boolean strictTiDb=Boolean.getBoolean("game.it.require-tidb");
+        if(strictTiDb&&!mysql())throw new IllegalStateException("强TiDB专项不能回退H2");
+        AuthoritySqlFixture authority=null;DataSource ds=null;String database;PbMysql ops=OpsTables.registry();
+        try{
+            if(mysql()){
+                var options=AuthoritySqlFixture.Options.fromEnvironment(MYSQL_URL,MYSQL_USER,MYSQL_PASSWORD,"game_data",!strictTiDb,java.util.List.of(1,2,3,4,7,9,11));
+                authority=AuthoritySqlFixture.prepare(options,(connection,principal)->{
+                    new ResourceDatabasePopulator(new ClassPathResource("db/game-data-schema.sql"),new ClassPathResource("db/game-player-schema.sql"),new ClassPathResource("db/role-pending-fence-fixture.sql")).populate(connection);
+                    OpsTables.registry().initializeFresh(connection,principal);if(additionalSchema!=null)additionalSchema.create(connection,principal);
+                });database=authority.database();
+                String params="?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true&connectTimeout=3000&socketTimeout=10000";
+                if(strictTiDb){var pool=new DruidDataSource();ds=pool;pool.setUrl(authority.jdbcUrl(params));pool.setUsername(authority.normalUser());pool.setPassword(authority.normalPassword());pool.setMaxActive(4);pool.setMaxWait(1000);AuthorityDataSourcePolicy.protectDruid(pool,authority.writerBoot(),true);}
+                else ds=authority.normalDataSource(params);
+                OpsTables.sync(ds,Duration.ofMinutes(1));
+            }else{
+                database="game_data_it_"+UUID.randomUUID().toString().replace("-","").substring(0,12);JdbcDataSource h2=new JdbcDataSource();h2.setURL("jdbc:h2:mem:"+database+";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");ds=h2;
+                new ResourceDatabasePopulator(new ClassPathResource("db/game-data-schema.sql"),new ClassPathResource("db/game-route-authority-schema.sql"),new ClassPathResource("db/game-player-schema.sql"),new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(ds);
+                try(var connection=ds.getConnection();var statement=connection.createStatement()){
+                    String principal;try(var rows=statement.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new SQLException("缺H2 schema主体");principal=rows.getString(1);}
+                    com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),java.util.List.of(1,2,3,4,7,9,11),principal);
+                    for(TableSchema table:ops.tables())statement.execute(h2Ddl(table.createTableSql()));if(additionalSchema!=null)additionalSchema.create(connection,principal);
                 }
             }
             SqlSessionFactoryBean factory = new SqlSessionFactoryBean();
@@ -140,33 +120,8 @@ public final class DataSqlFixture implements AutoCloseable {
             configuration.addMapper(PlayerMapper.class);
             factory.setConfiguration(configuration);
             SqlSessionFactory sessions = factory.getObject();
-            return new DataSqlFixture(database, ds, new DataSourceTransactionManager(ds), new SqlSessionTemplate(sessions), ops);
-        } catch (Exception e) {
-            if (strictTiDb) {
-                ((DruidDataSource) ds).close();
-                try { dropStrictDatabase(database); } catch (SQLException cleanup) { e.addSuppressed(cleanup); }
-            }
-            throw e;
-        }
-    }
-
-    private static Connection strictAdmin() throws SQLException {
-        return DriverManager.getConnection(MYSQL_URL.replaceAll("/$", "")
-                + "/?connectTimeout=3000&socketTimeout=10000", MYSQL_USER, MYSQL_PASSWORD);
-    }
-
-    private static void dropStrictDatabase(String database) throws SQLException {
-        if (!database.matches("game_data_it_[0-9a-f]{12}")) throw new SQLException("拒绝清理非本次夹具库名");
-        try (var c = strictAdmin(); var s = c.createStatement()) {
-            s.execute("DROP DATABASE " + database);
-            try (var check = c.prepareStatement("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?")) {
-                check.setString(1, database);
-                try (var rows = check.executeQuery()) {
-                    if (!rows.next() || rows.getInt(1) != 0) throw new SQLException("随机库清理后仍存在");
-                }
-            }
-        }
-        System.out.println("强 TiDB 随机库清理并复核0=" + database);
+            return new DataSqlFixture(database, ds, new DataSourceTransactionManager(ds), new SqlSessionTemplate(sessions), ops,authority);
+        }catch(Exception failure){if(ds instanceof DruidDataSource pool)pool.close();if(authority!=null)try{authority.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
     }
 
     /** pbmysql 的 MySQL DDL → H2 MySQL 模式能执行的形式（只去掉键列的字符集 / 排序规则与表尾选项）。 */
@@ -183,8 +138,12 @@ public final class DataSqlFixture implements AutoCloseable {
         return new OpsJobStore(dataSource, ops);
     }
 
+    /** 仅SQL合区回归前置，不是完整P0-P9或真实非SQL证据。 */
+    public void seedNormalFrozenSqlSeam(String run)throws Exception{if(authority==null)throw new SQLException("SQL seam冻结必须真实隔离fixture");authority.seedNormalFrozenSqlSeam(run);}
+    public DataSource schemaDataSource(){return authority==null?dataSource:authority.schemaDataSource();}
+    public Connection schemaConnection()throws SQLException{return schemaDataSource().getConnection();}
     public JdbcTemplate jdbc() {
-        return new JdbcTemplate(dataSource);
+        return new JdbcTemplate(schemaDataSource());
     }
 
     /** 造一名玩家和非null空protobuf初始存档；与正常建角一样同事务存在。 */
@@ -211,17 +170,9 @@ public final class DataSqlFixture implements AutoCloseable {
         return n == null ? 0 : n;
     }
 
-    @Override
-    public void close() throws SQLException {
-        if (dataSource instanceof DruidDataSource pool && Boolean.getBoolean("game.it.require-tidb")) {
-            pool.close();
-            dropStrictDatabase(database);
-        } else if (mysql()) {
-            new JdbcTemplate(dataSource).execute("DROP DATABASE IF EXISTS " + database);
-        } else {
-            try (Connection c = dataSource.getConnection(); Statement st = c.createStatement()) {
-                st.execute("SHUTDOWN");
-            }
-        }
+    @Override public void close() throws SQLException {
+        if(authority!=null){if(dataSource instanceof DruidDataSource pool)pool.close();authority.close();return;}
+        try(Connection connection=dataSource.getConnection();Statement statement=connection.createStatement()){statement.execute("SHUTDOWN");}
     }
+
 }

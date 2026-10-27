@@ -68,6 +68,10 @@
                     <sourceDirectories>
                         <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
                     </sourceDirectories>
+                    <!-- 维护协议统一由game-common从本源文件生成，本模块经discovery复用，避免重复类。 -->
+                    <excludes>
+                        <exclude>game/storage/route_authority.proto</exclude>
+                    </excludes>
                     <ignoreProjectDependencies>true</ignoreProjectDependencies>
                 </configuration>
             </plugin>

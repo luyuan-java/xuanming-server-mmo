@@ -285,6 +285,8 @@ public final class StoragePlayerRepository implements PlayerRepository {
 
     public void startFinalRecovery(java.util.concurrent.ScheduledExecutorService scheduler){finalSaves.start(scheduler);}
     public int awaitFinalRegistered(long nanos) throws InterruptedException{return finalSaves.awaitRegistered(nanos);}
+    public int awaitFinalApplied(long nanos)throws InterruptedException{return finalSaves.awaitApplied(nanos);}
+    public boolean stopFinalRecoveryIfApplied(){return finalSaves.stopIfApplied();}
     public int unregisteredFinalCount(){return finalSaves.unregisteredCount();}
     public int undeliveredFinalResults(){return finalSaves.undeliveredResultCount();}
     public void closeFinalRecovery(){finalSaves.close();}

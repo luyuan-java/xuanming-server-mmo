@@ -38,6 +38,8 @@ public final class BattleCompletionReplay implements AutoCloseable {
     private final LongSupplier clock;
     private final ScheduledExecutorService worker=Executors.newSingleThreadScheduledExecutor(
             Thread.ofPlatform().name("battle-terminal-replay").daemon(true).factory());
+    private final java.util.concurrent.locks.ReentrantLock turn=new java.util.concurrent.locks.ReentrantLock();
+    private volatile boolean quiesced;
     private long deadlineCursor,deadlineUpper,resultCursor;
     private final PlayerScanCursor firstPlayers=new PlayerScanCursor(),waitingPlayers=new PlayerScanCursor();
     public BattleCompletionReplay(BattleCompletionStore store,GlobalMatchStore formations,PlayerInboxService inbox,Results results,String secret,LongSupplier clock) {
@@ -51,7 +53,8 @@ public final class BattleCompletionReplay implements AutoCloseable {
         try{round();}catch(RuntimeException failure){log.warn("战斗永久来源扫描暂不可读，保留游标，类别={}",failure.getClass().getSimpleName());}
     }
     /** 单次至多16截止+16全局+8首投+8等待APPLIED；各类固定上界轮转，异常也推进游标。 */
-    public synchronized void round() {
+    public void round(){if(quiesced||!turn.tryLock())return;try{roundOwned();}finally{turn.unlock();}}
+    private void roundOwned() {
         var deadlines=formations.terminalDeadlineCandidates(deadlineCursor,deadlineUpper);
         deadlineUpper=deadlines.upperBattle();
         if(deadlines.battles().isEmpty()){deadlineCursor=0;deadlineUpper=0;}
@@ -129,6 +132,13 @@ public final class BattleCompletionReplay implements AutoCloseable {
                     .putLong(request.getIssuedAtMs()).array());
             return digest.digest(request.getSettlementPayload().toByteArray());
         } catch(java.security.NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
+    }
+    public boolean stopAndReport(long timeoutNanos)throws InterruptedException {
+        long until=System.nanoTime()+Math.max(0,timeoutNanos);
+        if(!turn.tryLock(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS))return false;
+        try{if(store.maintenanceOutstanding()!=0||formations.maintenanceOutstanding()!=0)return false;quiesced=true;worker.shutdown();}
+        finally{turn.unlock();}
+        return worker.awaitTermination(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS);
     }
     @Override public void close() {
         worker.shutdownNow();

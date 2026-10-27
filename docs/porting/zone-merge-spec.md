@@ -919,3 +919,21 @@ verify 在 Tomcat 线程上同步执行，几条按清单 join 的 SQL（50 万�
 原 Chat 三项 owned TiDB 回归在业务断言前全部收到 `LOCK IN SHARE MODE` 不支持错误，原生退出 1（原件 FD483EFC…07D8），不能以 H2 绿替代。TiDB 官方说明其默认没有真实行共享锁；8.3 起可把共享锁请求提升为 `FOR UPDATE` 排他锁，`noop` 则不提供锁保护。本实现不修改数据库变量：JDBC 明确识别 TiDB 产品／版本后直接使用 `FOR UPDATE`，MySQL 保原真实共享锁，H2 保既有排他锁，未知产品、版本缺失或元数据读取失败在锁查询前拒绝。出处：[TiDB 悲观事务文档](https://docs.pingcap.com/tidb/stable/pessimistic-transaction/)。
 
 meta→zone／64 片→P 无符号升序及原事务截止预算不变。TiDB 对单例 `route_meta` 的排他锁意味着同一库的权威写事务在此前缀串行；跨副本并不消除这一热点，不能声称横向吞吐不变或无限容量。优先维持维护冻结与领域提交的原子范围，后续只按实际锁等待、业务耗时和受控容量证据评估，不为通过测试取消围栏或隐式缩小维护范围。此次追加仅登记实现及边界；原 Chat3 和 Data17 的真实 meta／zone 阻写回归将在修后按原断言验证，既有嵌入 common 的 JAR 在实际重建前均不冒新修复产物。
+
+## 2026-10-26 合区与全局 SQL 冻结职责修正（候选，未运行）
+
+本节覆盖前文旧版“MergeZone.freeze自行冻结全局meta、release自行恢复全局meta”的描述。全局Freeze/Release只由独立InitializeRouteAuthority operator按正式票据与永久闭合收据执行；MergeZone只消费同run、同attempt的NORMAL已消费票据及永久FROZEN结局。紧急HOLD不授权合区。NORMAL P5要求旧writer全部合法退役，合区在meta/run/ticket锁内复核空ACTIVE集，不再锁REVOKED旧slot。
+
+域freeze仍取得源/目标128片，域release只释放自己的域围栏与记录，不提供全局SQL开放权限；完整恢复审计和全局release之后才允许新boot准备/逐role开放。合区回归保留业务数据、原owner、ABA与失败留冻断言，并补错run、错票据绑定及冻结后域前置损坏拒绝。控制前置只由隔离随机库的共享AuthoritySqlFixture按正式DDL/proto/摘要安装，明确属于SQL接缝种子；ZoneMerge使用独立Operator，业务池保持NORMAL。该种子不执行或证明真实Kafka、Redis与完整P0-P9，也不生成生产source闭合原件。共享fixture已获497范围授权并纳入隔离候选，当前没有生成、编译、真库或全流程运行证据。
+
+### 2026-10-26 P6工具单次boot与P7业务审核（候选源码，未运行）
+
+MergeZone 的每次写命令属于P0预列的独立 MAINTENANCE issuer/instance，不能复用已退休的NORMAL业务boot。除纯只读read外，每次命令显式传入 `--maintenance-runtime <绝对文件> --maintenance-sha256 <原bytes SHA256> --maintenance-dir <固定私有目录> --ticket-id <32位十六进制>`。runtime使用正式SqlWriterMaintenanceReceipt：保留原PlanProto/run/generation/attempt，run_phase为SQL_FROZEN，before_epoch/catalog_revision为原freeze结果，Evidence.Publication仅选中P0 MaintenanceIssuers中的一个原seed，不预填闭合结果。runtime文件和consume/output目录必须相同，且该目录是所选seed一个固定SourceEvidence原件的父目录；不允许换新目录复用boot。
+
+工具真实连接使用独立MMORPG_SQL_OPERATOR_JDBC_URL/USER/PASSWORD/PRINCIPAL，GAME_ZONE_MERGE_JDBC必须是同一实际端点，业务库必须就是本轮authority schema。工具另以MMORPG_SQL_PHYSICAL_AUTHORITY_SHA256核固定物理authority原件。独立控制连接核CURRENT_USER、同attempt NORMAL已消费ticket、完整永久freeze、run最新事实和meta E/catalog及空ACTIVE目录，再CreateNew消费该工具boot。每次只受理一个同步命令，连接池实际关闭后，才保存返回的正式ZoneMergeRunRow到maintenance.domain.pb，并发行maintenance.issuer.json；任何异常、关闭失败或提交未知都不产生成功闭合报告，也不清全局冻结。
+
+P7与P8均要求P0工具目录完整闭合且真实关闭时刻不早于原freeze。RecoveryAudit选择最终域release命令产生的唯一maintenance.domain.pb；控制器在同一meta/run/ticket维护事务内，重新调用ZoneMergeStore.auditReleased核实际state=6、完整128片已清、全服owner已释放、清单全提交或安全放弃、迁后归属及目录marker，并与pinned正式域原件全文相等。closure只证明命令owner已结束，不能代替业务审核。域release仍不恢复全局writable。
+
+RecoverTradeAdmission的独立recovery target与事务writable=1契约保持原义，生产入口消费NORMAL grant，不因“维护”名称提权为Operator。AuditFallbackReplay按data-ops-spec §2.4保持常态NORMAL回灌，结束时真实关闭租约、join续租线程并有界关闭Redis；它不是P6工具。有限NORMAL工具退出后历史ACTIVE目录的正式退役，仍由统一控制协议处理，seal或进程退出本身不能冒充Catalog RETIRED。
+
+新增源码检查与回归不构成执行证据。当前descriptor生成、编译、默认单测、真实TiDB、双副本Kafka、P6完整运行与Windows私有文件helper资格均未执行。

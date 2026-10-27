@@ -102,6 +102,25 @@ public final class NodeLinkServer {
         }
     }
 
+    /** 维护使用真实close结果和IO队列屏障；预算到期保持HOLD，不替代为“等过三秒”。 */
+    public boolean closeAndJoin(java.time.Duration budget)throws InterruptedException{
+        long nanos=Math.max(0,Math.min(budget.toNanos(),java.util.concurrent.TimeUnit.SECONDS.toNanos(6)));
+        long until=System.nanoTime()+nanos;
+        Channel listener=serverChannel;
+        if(listener!=null){var closed=listener.close();if(!awaitClosed(closed,until)||listener.isOpen())return false;}
+        // acceptor之前交给worker的注册任务也必须走完，否则关闭Group后仍可能加入迟到连接。
+        if(!barrier(boss,until)||!barrier(workers,until))return false;
+        var closed=links.close();if(!closed.await(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS)||!closed.isSuccess())return false;
+        // closeFuture可能先于channelInactive完成；第二道worker屏障确保最后的逻辑投递已经发生。
+        return barrier(workers,until)&&links.isEmpty();
+    }
+    private static boolean awaitClosed(io.netty.channel.ChannelFuture future,long until)throws InterruptedException{
+        return future.await(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS)&&future.isSuccess();
+    }
+    private static boolean barrier(io.netty.channel.EventLoopGroup group,long until)throws InterruptedException{
+        for(var executor:group){if(executor.inEventLoop())throw new IllegalStateException("不能在IO线程等待自己的维护屏障");var future=executor.submit(()->{});if(!future.await(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS)||!future.isSuccess())return false;}return true;
+    }
+
     /** 关闭监听与全部 I/O 线程（已有链路随之断开）。幂等。 */
     public void shutdown() {
         stopAccepting();

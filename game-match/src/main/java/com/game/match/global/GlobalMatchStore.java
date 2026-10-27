@@ -15,23 +15,47 @@ import javax.sql.DataSource;
 public final class GlobalMatchStore {
     /** 原deadline仍约束运行；只给终局提交留固定60秒，随后才可竞争永久ABORT。 */
     static final long TERMINAL_OUTCOME_GRACE_MS = 60_000L;
-    private final DataSource source;
-    private final PbMysql db = new PbMysql();
-    private final GlobalMatchProperties config;
-    private final MatchProperties.Rating rating;
-    private final GlobalRegionIndex regions = new GlobalRegionIndex(db);
-    private final GlobalQueueUnits units;
-    private final com.game.common.team.TeamPolicyAuthority.Contract teamPolicy;
-
-    public GlobalMatchStore(DataSource source, GlobalMatchProperties config) throws SQLException {
-        this(source,config,new MatchProperties(null,null,null,null,null,null,null,null,null,null,null,null,null));
+    private final java.util.concurrent.locks.ReentrantReadWriteLock publication=new java.util.concurrent.locks.ReentrantReadWriteLock(true);
+    private final java.util.concurrent.atomic.AtomicLong rootAccepted=new java.util.concurrent.atomic.AtomicLong(),rootSettled=new java.util.concurrent.atomic.AtomicLong();
+    private final ThreadLocal<long[]> rootWork=new ThreadLocal<>();
+    private volatile boolean rootsClosed,preparedOnly;
+    private volatile String maintenanceOperation="";
+    public void prepareOnly(){publication.writeLock().lock();try{if(!maintenanceOperation.isEmpty()||rootAccepted.get()!=0)throw new IllegalStateException("旧root不能成为新prepared boot");rootsClosed=true;preparedOnly=true;}finally{publication.writeLock().unlock();}}
+    public void openPrepared(){publication.writeLock().lock();try{if(!preparedOnly||!maintenanceOperation.isEmpty()||rootAccepted.get()!=0||rootSettled.get()!=0)throw new IllegalStateException("只有全新prepared boot可一次开放");rootsClosed=false;preparedOnly=false;}finally{publication.writeLock().unlock();}}
+    public javax.sql.DataSource maintenanceDataSource(){return source;}
+    public void closeRoots(String run){
+        if(!UUID.fromString(run).toString().equals(run))throw new IllegalArgumentException("维护run必须为规范UUID");
+        publication.writeLock().lock();try{if(!maintenanceOperation.isEmpty()&&!maintenanceOperation.equals(run))throw new IllegalStateException("不能替换原维护run");maintenanceOperation=run;rootsClosed=true;}finally{publication.writeLock().unlock();}
     }
-    public GlobalMatchStore(DataSource source,GlobalMatchProperties config,MatchProperties properties)throws SQLException {
-        this.source = source;
-        this.config = config;
-        this.rating=properties.rating();
-        try(var c=source.getConnection()){this.teamPolicy=com.game.common.team.TeamPolicyAuthority.load(c,3);}
-        this.units=new GlobalQueueUnits(db,config,teamPolicy.allowCrossZone());
+    void requireNewRoot(){if(rootsClosed)throw new java.util.concurrent.RejectedExecutionException("Match维护永久拒绝新root，已存在原请求仍由relay续跑");var work=rootWork.get();if(work==null)throw new IllegalStateException("新root不在同publication事务内");work[0]=Math.addExact(work[0],1);rootAccepted.incrementAndGet();}
+    public boolean rootsClosed(){return rootsClosed;}
+    /** 观战与匹配共用同一物理boot的publication切口，持锁直到提交/回滚完成。 */
+    <T>T watchPublication(java.util.function.Supplier<T> transaction){
+        publication.readLock().lock();boolean outer=rootWork.get()==null;if(outer)rootWork.set(new long[1]);
+        try{T result=transaction.get();if(outer)rootSettled.addAndGet(rootWork.get()[0]);return result;}
+        finally{if(outer)rootWork.remove();publication.readLock().unlock();}
+    }
+    public boolean rootsSettled(){return rootsClosed&&rootAccepted.get()==rootSettled.get();}
+    public byte[] rootsFrontier(){if(!rootsSettled())throw new IllegalStateException("新root事务仍有未确认结局");return publicationFrontier();}
+    public byte[] publicationFrontier(){try{return java.security.MessageDigest.getInstance("SHA-256").digest(java.nio.ByteBuffer.allocate(16).putLong(rootAccepted.get()).putLong(rootSettled.get()).array());}catch(java.security.NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}}
+    private void rootRollbackConfirmed(){var work=rootWork.get();if(work!=null){rootSettled.addAndGet(work[0]);work[0]=0;}}
+    public long maintenanceOutstanding(){return tx(c->{
+        long total=0;
+        for(String query:List.of("SELECT COUNT(*) FROM match_global_ticket WHERE state<>4",
+                "SELECT COUNT(*) FROM match_global_queue_unit WHERE state<>4",
+                "SELECT COUNT(*) FROM match_global_join_intent WHERE admission_prepared=1 AND admission_completed=0 AND cancelled=0",
+                "SELECT COUNT(*) FROM match_global_direct_intent WHERE admission_prepared=1 AND admission_completed=0 AND cancelled=0",
+                "SELECT COUNT(*) FROM match_global_formation f LEFT JOIN match_battle_completion t ON t.battle_id=f.battle_id WHERE f.state<4 OR (f.state=4 AND (t.battle_id IS NULL OR t.terminal_decision=0))",
+                "SELECT COUNT(*) FROM match_global_challenge WHERE state NOT IN(2,3)",
+                "SELECT COUNT(*) FROM match_global_watching WHERE state<>5")){
+            try(var s=c.prepareStatement(query)){s.setQueryTimeout(3);try(var r=s.executeQuery()){if(!r.next())throw new SQLException("排空计数缺失");total=Math.addExact(total,r.getLong(1));}}
+        }
+        return total;
+    });}
+    private final DataSource source;
+    private final PbMysql db = registry();
+    /** fresh-schema由独立schema主体调用，普通构造器仍只核已有结构。 */
+    public static PbMysql registry(){var db=new PbMysql();
         db.register(GlobalProfileRow.getDefaultInstance());
         db.register(GlobalTicketRow.getDefaultInstance());
         db.register(GlobalJoinIntentRow.getDefaultInstance());
@@ -47,6 +71,23 @@ public final class GlobalMatchStore {
         db.register(GlobalWatchingRow.getDefaultInstance());
         db.register(GlobalWatchRequestRow.getDefaultInstance());
         db.register(GlobalWatchHeadRow.getDefaultInstance());
+        return db;
+    }
+    private final GlobalMatchProperties config;
+    private final MatchProperties.Rating rating;
+    private final GlobalRegionIndex regions = new GlobalRegionIndex(db);
+    private final GlobalQueueUnits units;
+    private final com.game.common.team.TeamPolicyAuthority.Contract teamPolicy;
+
+    public GlobalMatchStore(DataSource source, GlobalMatchProperties config) throws SQLException {
+        this(source,config,new MatchProperties(null,null,null,null,null,null,null,null,null,null,null,null,null));
+    }
+    public GlobalMatchStore(DataSource source,GlobalMatchProperties config,MatchProperties properties)throws SQLException {
+        this.source = source;
+        this.config = config;
+        this.rating=properties.rating();
+        try(var c=source.getConnection()){this.teamPolicy=com.game.common.team.TeamPolicyAuthority.load(c,3);}
+        this.units=new GlobalQueueUnits(db,config,teamPolicy.allowCrossZone());
         try (Connection c = source.getConnection()) {
             if (config.requireTiDb()) {
                 try (Statement s = c.createStatement(); ResultSet r = s.executeQuery("SELECT @@version,@@tidb_read_consistency,@@tidb_replica_read,@@tidb_txn_mode,@@tidb_read_staleness,@@tidb_snapshot,@@tidb_low_resolution_tso")) {
@@ -76,15 +117,19 @@ public final class GlobalMatchStore {
 
     @FunctionalInterface private interface Work<T> { T apply(Connection c) throws Exception; }
     private <T> T tx(Work<T> work) {return tx(Deadline.after(3000),work);}
-    private <T> T tx(Deadline deadline,Work<T> work) {
+    private <T>T tx(Deadline deadline,Work<T> work){
+        return watchPublication(()->transact(deadline,work));
+    }
+    private <T> T transact(Deadline deadline,Work<T> work) {
         if(deadline.expired())throw new Deadline.DependencyException("全球SQL事务预算到期");
         try (Connection c = source.getConnection()) {
             int previousTimeout=c.getNetworkTimeout();
             c.setNetworkTimeout(Runnable::run,(int)Math.max(1,Math.min(3000,deadline.remainingMillis())));
             c.setAutoCommit(false);
             c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-            try { com.game.common.player.PlayerRouteAuthority.requireMeta(c,(int)Math.max(1,Math.min(3,(deadline.remainingMillis()+999)/1000)),true); if(!java.util.Arrays.equals(teamPolicy.original(),com.game.common.team.TeamPolicyAuthority.load(c,3).original()))throw new SQLException("Team策略世代已改变，旧Match实例必须退出"); T result = work.apply(c); if(deadline.expired())throw new SQLTimeoutException("全球SQL提交预算到期"); c.commit(); return result; }
-            catch (Exception e) { try { c.rollback(); } catch (SQLException rollback) { e.addSuppressed(rollback); } throw e; }
+            boolean committing=false;
+            try { com.game.common.player.PlayerRouteAuthority.requireMeta(c,(int)Math.max(1,Math.min(3,(deadline.remainingMillis()+999)/1000)),true); if(!java.util.Arrays.equals(teamPolicy.original(),com.game.common.team.TeamPolicyAuthority.load(c,3).original()))throw new SQLException("Team策略世代已改变，旧Match实例必须退出"); T result = work.apply(c); if(deadline.expired())throw new SQLTimeoutException("全球SQL提交预算到期"); committing=true;c.commit(); return result; }
+            catch (Exception e) { try { c.rollback();if(!committing)rootRollbackConfirmed(); } catch (SQLException rollback) { e.addSuppressed(rollback); } throw e; }
             finally {c.setNetworkTimeout(Runnable::run,previousTimeout);}
         } catch (Exception e) { throw new Deadline.DependencyException("全球匹配 SQL 操作失败", e); }
     }
@@ -136,12 +181,12 @@ public final class GlobalMatchStore {
     public GlobalProfileRow profile(long player) { return tx(c -> db.findOneByPk(c,
             GlobalProfileRow.newBuilder().setPlayerId(player).build()).orElseThrow()); }
     public void plan(long player, GlobalProbeProfile profile, long expiry) {
-        tx(c -> { owner(c,player,profile.getOwnerAccount(),profile.getOwnerRevision());
+        tx(c -> { requireNewRoot();owner(c,player,profile.getOwnerAccount(),profile.getOwnerRevision());
             db.upsert(c, GlobalProfileRow.newBuilder().setPlayerId(player).setPayload(profile.toByteString()).setExpiresMs(expiry).build()); return null; });
     }
     public void commitProfile(long player, GlobalProbeProfile profile, long expiry) {
         tx(c -> {
-            owner(c,player,profile.getOwnerAccount(),profile.getOwnerRevision());
+            requireNewRoot();owner(c,player,profile.getOwnerAccount(),profile.getOwnerRevision());
             var old = db.findOneByPkForUpdate(c, GlobalProfileRow.newBuilder().setPlayerId(player).build()).orElseThrow();
             var before = GlobalProbeProfile.parseFrom(old.getPayload());
             if (old.getExpiresMs() <= now(c) || !before.getPlanId().equals(profile.getPlanId())
@@ -177,7 +222,7 @@ public final class GlobalMatchStore {
                 if(original.getAdmissionPrepared()&&!original.getRequestPayload().equals(payload))throw new IllegalArgumentException("原Join正文不同");
                 if(!original.getAdmissionPrepared()&&original.getTicketRecord().isEmpty())throw new SQLException("旧Join原件缺少准入和原票");return original;
             }
-            var previous=locked(c,session.getPlayerId());
+            requireNewRoot();var previous=locked(c,session.getPlayerId());
             if(previous.getState()!=4){
                 if(!previous.getOwnerAccount().equals(session.getAccount())||previous.getOwnerRevision()!=session.getOwnerRevision())throw new SecurityException("当前占用票并非原会话归属");
                 var receipt=key.toBuilder().setOwnerAccount(session.getAccount()).setOwnerRevision(session.getOwnerRevision()).setRequestPayload(payload).setAdmissionPrepared(true).setAdmissionCompleted(true)
@@ -426,7 +471,7 @@ public final class GlobalMatchStore {
             if(original.getBattleId()!=0||original.getAdmissionPrepared()&&original.hasStartOriginal())return original;
             throw new SQLException("旧direct缺原始准入原件，不能补当前名单");
         }
-        com.game.common.player.MatchEntryAuthority.requireFree(c,members.stream().map(GlobalTicketRow::getPlayerId).toList(),"",key.getKind()==2?key.getRequestLow():0,3);
+        requireNewRoot();com.game.common.player.MatchEntryAuthority.requireFree(c,members.stream().map(GlobalTicketRow::getPlayerId).toList(),"",key.getKind()==2?key.getRequestLow():0,3);
         List<GlobalTicketRow> pending=new ArrayList<>();long stamp=now(c);
         for(var member:members.stream().sorted((a,b)->Long.compareUnsigned(a.getPlayerId(),b.getPlayerId())).toList())if(locked(c,member.getPlayerId()).getState()!=4)throw new SQLException("直接准入成员已有原票占用");
         for(var member:members){var profile=db.findOneByPk(c,GlobalProfileRow.newBuilder().setPlayerId(member.getPlayerId()).build()).orElseThrow();
@@ -493,7 +538,7 @@ public final class GlobalMatchStore {
                     return null;
                 return previous;
             }
-            var row=GlobalChallengeRow.newBuilder().setChallengeId(challenge).setChallengerId(session.getPlayerId()).setTargetId(target).setConfigId(configId)
+            requireNewRoot();var row=GlobalChallengeRow.newBuilder().setChallengeId(challenge).setChallengerId(session.getPlayerId()).setTargetId(target).setConfigId(configId)
                     .setChallengerAccount(session.getAccount()).setChallengerRevision(session.getOwnerRevision())
                     .setTargetAccount(recipient.getAccount()).setTargetRevision(recipient.getOwnerRevision()).setCreatedMs(stamp).setExpiresMs(Math.addExact(stamp,ttl)).setState(1).build();
             db.insert(c,row);return row;
@@ -576,7 +621,7 @@ public final class GlobalMatchStore {
             if(prior.isPresent()){
                 var original=prior.get();if(!original.getOwnerAccount().equals(key.getOwnerAccount())||original.getOwnerRevision()!=key.getOwnerRevision()||!original.getPayload().equals(launch.getRequest().toByteString())||!original.hasStartOriginal()||!original.getStartOriginal().getTeamLaunchOriginal().equals(raw))throw new SQLException("Team首次准入原件不同或缺失");return original;
             }
-            for(var member:members){if(locked(c,member.getPlayerId()).getState()!=4)throw new SQLException("Team首次准入角色已有票");var profile=db.findOneByPk(c,GlobalProfileRow.newBuilder().setPlayerId(member.getPlayerId()).build()).orElseThrow();if(!profile.getPayload().equals(member.getProfile())||profile.getExpiresMs()<=now(c))throw new SQLException("Team首次准入网络原件已变");}
+            requireNewRoot();for(var member:members){if(locked(c,member.getPlayerId()).getState()!=4)throw new SQLException("Team首次准入角色已有票");var profile=db.findOneByPk(c,GlobalProfileRow.newBuilder().setPlayerId(member.getPlayerId()).build()).orElseThrow();if(!profile.getPayload().equals(member.getProfile())||profile.getExpiresMs()<=now(c))throw new SQLException("Team首次准入网络原件已变");}
             var original=key.toBuilder().setPayload(launch.getRequest().toByteString()).setAdmissionPrepared(true).setStartOriginal(GlobalDirectStartOriginal.newBuilder().setTeamLaunchOriginal(raw).setFormation(formation).addAllTickets(members)).build();db.insert(c,original);return original;
         });
     }
@@ -619,7 +664,7 @@ public final class GlobalMatchStore {
             if(GlobalTeamLaunchAuthority.lock(c,original,launch,members)>=4)throw new IllegalStateException("终局launch不得重新排队");
             String unitId=GlobalQueueUnits.teamId(original);var prior=units.find(c,unitId,false);
             if(prior!=null){if(!prior.getLaunchOriginal().equals(launch))throw new SecurityException("整队单位原件不同");return GlobalFormationRow.newBuilder().setBattleId(prior.getBattleId()).setState(prior.getState()==4?5:prior.getState()==3?4:2).build();}
-            db.insertIgnore(c,key.toBuilder().setPayload(original.getRequest().toByteString()).build());
+            requireNewRoot();db.insertIgnore(c,key.toBuilder().setPayload(original.getRequest().toByteString()).build());
             var intent=db.findOneByPkForUpdate(c,key).orElseThrow();
             if(intent.getCancelled()||intent.getBattleId()!=0||!intent.getPayload().equals(original.getRequest().toByteString())||!intent.getOwnerAccount().equals(key.getOwnerAccount())||intent.getOwnerRevision()!=key.getOwnerRevision())throw new SecurityException("整队补位原意图已决定或归属不同");
             for(var member:members){var receipt=db.findOneByPk(c,intentKey(member.getPlayerId(),original.getRequest().getRequestId()));

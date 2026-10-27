@@ -32,6 +32,12 @@ public final class BattleCompletionStore {
         this.source=java.util.Objects.requireNonNull(source);this.clock=java.util.Objects.requireNonNull(clock);
     }
 
+    /** 不受重试时刻过滤；未来待重放、UNKNOWN和未APPLIED来源都真实计入。 */
+    public long maintenanceOutstanding(){
+        try(var c=source.getConnection();var s=c.prepareStatement("SELECT (SELECT COUNT(*) FROM match_battle_completion WHERE terminal_decision=1 AND result_published=0)+(SELECT COUNT(*) FROM match_battle_player_completion WHERE applied=0)")){
+            s.setQueryTimeout(3);try(var r=s.executeQuery()){if(!r.next())throw new SQLException("缺少持久终局排空计数");return r.getLong(1);}
+        }catch(SQLException failure){throw new IllegalStateException("终局来源不可读，不能证明排空",failure);}
+    }
     public static PbMysql registry() {
         PbMysql db=new PbMysql();
         db.register(BattleCompletionRow.getDefaultInstance());

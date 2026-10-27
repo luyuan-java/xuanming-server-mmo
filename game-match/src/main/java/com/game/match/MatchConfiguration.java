@@ -186,8 +186,8 @@ public class MatchConfiguration {
     // ================================================================ 发号
 
     @Bean
-    public MatchInstance matchInstance() {
-        return new MatchInstance(UUID.randomUUID().toString());
+    public MatchInstance matchInstance(com.game.common.sql.WriterAuthority boot) {
+        var value=java.nio.ByteBuffer.wrap(boot.instanceId());return new MatchInstance(new UUID(value.getLong(),value.getLong()).toString());
     }
 
     @Bean(destroyMethod = "shutdownNow")
@@ -236,9 +236,13 @@ public class MatchConfiguration {
     @Bean
     public MatchLifecycle matchLifecycle(MatcherControl matcherControl, ResultConsumerControl resultConsumerControl,
                                          GatherLauncher gatherLauncher, MatchWorkerPool matchWorkerPool,
-                                         InflightWatches inflightWatches, SweeperControl sweeperControl) {
+                                         InflightWatches inflightWatches, SweeperControl sweeperControl,
+                                         com.game.match.global.GlobalMatchService global,com.game.match.rating.BattleCompletionReplay replay,
+                                         com.game.match.global.RatingRankOutbox outbox,com.game.common.sql.WriterAuthority boot,com.game.match.spectate.SqlSpectateStore spectate,
+                                         @org.springframework.beans.factory.annotation.Qualifier("matchMaintenanceConsumerFrontier") com.game.match.rating.BattleResultConsumer.ReadinessControl consumerFrontier,
+                                         @org.springframework.beans.factory.annotation.Qualifier("matchMaintenanceConsumerStopped") java.util.function.BooleanSupplier consumerStopped) {
         return new MatchLifecycle(matcherControl, resultConsumerControl, gatherLauncher, matchWorkerPool::close,
-                MatchLifecycle.GATHER_DRAIN_TIMEOUT, inflightWatches, Duration.ofMillis(MatchBudgets.SPECTATE_DRAIN_TIMEOUT_MS), sweeperControl);
+                MatchLifecycle.GATHER_DRAIN_TIMEOUT, inflightWatches, Duration.ofMillis(MatchBudgets.SPECTATE_DRAIN_TIMEOUT_MS), sweeperControl).withMaintenance(global,replay,outbox,boot,spectate,consumerFrontier,consumerStopped);
     }
 
     // ================================================================ 管理端口：dev / test 管理口的鉴权

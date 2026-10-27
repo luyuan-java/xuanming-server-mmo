@@ -32,7 +32,7 @@ class GatewayStoreSqlTest {
         new ResourceDatabasePopulator(new ClassPathResource("db/game-gateway-schema.sql")).execute(ds);
         new org.springframework.jdbc.core.JdbcTemplate(ds).execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,zone_id INT UNSIGNED NOT NULL)");
         new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql")).execute(ds);
-        try(var c=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1,2,3,4,5,6,7,8,9));}
+        try(var c=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1,2,3,4,5,6,7,8,9), schemaPrincipal(c));}
         SqlSessionFactoryBean factory = new SqlSessionFactoryBean();
         factory.setDataSource(ds);
         SqlSessionFactory sessions = factory.getObject();
@@ -144,4 +144,5 @@ class GatewayStoreSqlTest {
         assertThatThrownBy(() -> store.createAnnouncement("倒挂", null, null, 10L, 5L))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+    private static String schemaPrincipal(java.sql.Connection connection)throws java.sql.SQLException{try(var statement=connection.createStatement();var rows=statement.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new java.sql.SQLException("缺少实际schema主体");return rows.getString(1);}}
 }

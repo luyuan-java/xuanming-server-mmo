@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 abstract class BattleCompletionStoreCases {
     DataSource data;
     BattleCompletionStore store;
+    java.sql.Connection schemaConnection() throws SQLException {return data.getConnection();}
 
     static BattleResultEvent complete(long battle) {
         var a=BattleSettlementData.newBuilder().setBattleId(battle).setPlayerId(1).setPlayerTeamIndex(0)
@@ -144,7 +145,7 @@ abstract class BattleCompletionStoreCases {
     }
     @Test void 已存个人来源丢失或损坏不能把重复当作成功()throws Exception {
         var event=complete(708);store.archive(received(event));
-        try(var c=data.getConnection();var q=c.createStatement()) {q.executeUpdate("DELETE FROM match_battle_player_completion WHERE player_id=2");}
+        try(var c=schemaConnection();var q=c.createStatement()) {q.executeUpdate("DELETE FROM match_battle_player_completion WHERE player_id=2");}
         assertThrows(RuntimeException.class,()->store.archive(received(event)));
     }
     @Test void 评分关闭及不计分也先归档且来源失败不调用评分()throws Exception {

@@ -296,6 +296,36 @@ public final class BattleResultIngest implements ResultConsumerControl {
     }
 
     /** 已 {@link #start()} 且尚未 {@link #stop()}（开关关闭、或启动时因契约不符抛出的，恒为 false）。 */
+    /** 只有最近真实请求完成双轮代次与位点核验的当前循环才保留frontier；授权入口使用maintenanceControl。 */
+    public synchronized boolean maintenanceStopped(){return !running&&(initThread==null||!initThread.isAlive())&&(consumerThread==null||!consumerThread.isAlive());}
+    public BattleResultConsumer.ReadinessControl maintenanceControl(){return new BattleResultConsumer.ReadinessControl(){
+        @Override public com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness read(com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness seed){return maintenanceReadiness(seed);}
+        @Override public void withReady(com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness seed,com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness expected,Runnable open){
+            var observed=maintenanceReadiness(seed);BattleResultConsumer current=loop;if(!observed.equals(expected)||!running||current==null)throw new IllegalStateException("开放前实际Kafka资格已改变");
+            current.withMaintenanceReady(seed,expected,()->{if(!running||loop!=current)throw new IllegalStateException("consumer owner已替换");open.run();});
+        }
+    };}
+    private java.util.function.Supplier<org.apache.kafka.clients.admin.Admin> readinessAdmin;
+    public BattleResultIngest withReadinessAdmin(java.util.function.Supplier<org.apache.kafka.clients.admin.Admin> factory){this.readinessAdmin=Objects.requireNonNull(factory);return this;}
+    /** 真实cluster/topic ID由同配置Admin核验；模板只提供P0期望，不能替代观测。 */
+    public com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness maintenanceReadiness(com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness seed){
+        BattleResultConsumer current=loop;if(!running||current==null||readinessAdmin==null)throw new IllegalStateException("消费者或真实Kafka元数据接线未就绪");
+        var report=current.maintenanceReadiness(seed);
+        var admin=readinessAdmin.get();try{
+            String cluster=admin.describeCluster(new org.apache.kafka.clients.admin.DescribeClusterOptions().timeoutMs(3000)).clusterId().get(3,TimeUnit.SECONDS);
+            var description=admin.describeTopics(java.util.List.of(topic),new org.apache.kafka.clients.admin.DescribeTopicsOptions().timeoutMs(3000)).allTopicNames().get(3,TimeUnit.SECONDS).get(topic);
+            if(description==null||description.topicId().equals(org.apache.kafka.common.Uuid.ZERO_UUID))throw new IllegalStateException("Kafka topic ID未知");
+            var id=java.nio.ByteBuffer.allocate(16).putLong(description.topicId().getMostSignificantBits()).putLong(description.topicId().getLeastSignificantBits()).array();
+            var expected=new java.util.HashSet<Integer>();for(var part:report.getGroups(0).getExpectedPartitionsList()){
+                if(!part.getClusterId().equals(com.google.protobuf.ByteString.copyFromUtf8(cluster))||!part.getTopicId().equals(com.google.protobuf.ByteString.copyFrom(id))||!part.getTopicName().equals(topic)||!expected.add(part.getPartition()))throw new IllegalStateException("Kafka实际cluster/topic与P0历史身份不同");
+            }
+            var actual=new java.util.HashSet<Integer>();for(var partition:description.partitions())actual.add(partition.partition());if(!expected.equals(actual))throw new IllegalStateException("P0遗漏实际topic分区");
+            var currentReport=current.maintenanceReadiness(seed);if(loop!=current||!running||!report.equals(currentReport))throw new IllegalStateException("Kafka元数据核验期间consumer代次已改变");return report;
+        }catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw new IllegalStateException("消费者元数据核验被取消");}
+        catch(Exception failure){throw new IllegalStateException("消费者真实Kafka元数据资格失败");}
+        finally{admin.close(Duration.ofSeconds(3));}
+    }
+    public byte[] maintenanceFrontier(){BattleResultConsumer current=loop;return running&&current!=null?current.maintenanceFrontier():new byte[0];}
     public boolean isRunning() {
         return running;
     }

@@ -1,5 +1,8 @@
 package com.game.guild.activity;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -72,7 +75,8 @@ class GuildActivityStoreTiDbTest {
     private static final long DAY = 86_400_000L;
     private static final long GUILD = 11, OTHER_GUILD = 22, PLAYER = 7, PARTNER = 8;
     private static final int LANTERN = 101, REUNION = 102, TRIAL = 103;
-    private String base, database;
+    private String base;
+    private AuthoritySqlFixture fixture;
     private DruidDataSource pool;
     private AuthorityJdbc jdbc;
     private GuildActivityStore store;
@@ -91,38 +95,35 @@ class GuildActivityStoreTiDbTest {
                 fail("MAIL_RANK_TEST_JDBC必须配置");
             Assumptions.assumeTrue(false, "未配置隔离TiDB");
         }
-        database = "guild_activity_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-        try (var c = DriverManager.getConnection(base, "root", ""); var s = c.createStatement()) {
-            s.execute("CREATE DATABASE " + database);
-        }
-        pool = new DruidDataSource();
-        pool.setUrl(base + database + "?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true");
-        pool.setUsername("root");
-        pool.setPassword("");
-        pool.setMaxActive(16);
-        pool.setMaxWait(5000);
-        pool.setConnectionInitSqls(List.of(StrongTiDbConnectionPolicy.SESSION_SQL));
-        pool.init();
         var registry = GuildTables.registry();
         for (var prototype : List.of(ActivityProgressRow.getDefaultInstance(), ActivitySlotRow.getDefaultInstance(),
                      TrialLobbyRow.getDefaultInstance(), TrialBattleRow.getDefaultInstance(), ActivityRewardRow.getDefaultInstance(),
                      ActivityPoisonRow.getDefaultInstance()))
             registry.register(prototype);
         ActivityTables.registerTrialAuthority(registry);
-        try (var first = pool.getConnection(); var second = pool.getConnection()) {
-            StrongTiDbConnectionPolicy.verify(first, true);
-            StrongTiDbConnectionPolicy.verify(second, true);
-            first.setNetworkTimeout(Runnable::run, 60_000);
-            registry.syncAll(first);
-            try (var statement = first.createStatement()) {
+        fixture = AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(
+                base, System.getProperty("game.it.mysql.user", "root"), System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""),
+                "guild_activity", false, List.of(17)), (connection, principal) -> {
+            registry.initializeFresh(connection, principal);
+            try (var statement = connection.createStatement()) {
                 statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARBINARY(191) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 17)");
                 statement.execute("CREATE TABLE match_global_ticket(player_id BIGINT UNSIGNED PRIMARY KEY,state INT)");
                 statement.execute("CREATE TABLE team_launch(request_id VARCHAR(36) PRIMARY KEY,state INT)");
                 statement.execute("CREATE TABLE team_launch_role(player_id BIGINT UNSIGNED,request_id VARCHAR(36),state INT)");
             }
+        });
+        pool = new DruidDataSource();
+        pool.setUrl(fixture.jdbcUrl("?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true"));
+        pool.setUsername(fixture.normalUser());
+        pool.setPassword(fixture.normalPassword());
+        pool.setMaxActive(16);
+        pool.setMaxWait(5000);
+        AuthorityDataSourcePolicy.protectDruid(pool, fixture.writerBoot(), true);
+        try (var first = pool.getConnection(); var second = pool.getConnection()) {
+            StrongTiDbConnectionPolicy.verify(first, true);
+            StrongTiDbConnectionPolicy.verify(second, true);
+            registry.syncAll(first);
         }
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
-        try(var connection=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(17));}
         jdbc = new AuthorityJdbc(pool);
         ids = new AtomicLong(10_000);
         tables = mock(ConfigTables.class, RETURNS_DEEP_STUBS);
@@ -167,19 +168,14 @@ class GuildActivityStoreTiDbTest {
     void cleanup() throws Exception {
         if (pool != null)
             pool.close();
-        if (database != null) {
-            assertTrue(database.matches("guild_activity_it_[0-9a-f]{16}"));
-            try (var c = DriverManager.getConnection(base, "root", ""); var s = c.createStatement()) {
-                s.execute("DROP DATABASE " + database);
-            }
-        }
+        if (fixture != null) fixture.close();
     }
 
     private void exec(String statement, Object... args) throws SQLException {
-        jdbc.tx(budget(), s -> {
-            s.update(statement, args);
-            return null;
-        });
+        try (var connection = fixture.schemaConnection(); var sql = connection.prepareStatement(statement)) {
+            for (int i = 0; i < args.length; i++) sql.setObject(i + 1, args[i]);
+            sql.executeUpdate();
+        }
     }
 
     private long count(String statement, Object... args) throws SQLException {
@@ -532,7 +528,7 @@ class GuildActivityStoreTiDbTest {
     void 冻结玩家的百条owed只退避_后续玩家仍有入队机会() throws Exception {
         store.participate(PLAYER,GUILD,1,LANTERN,0,NOW,budget());
         byte[] payload = bytes("SELECT payload FROM guild_activity_reward_owed WHERE player_id=?",PLAYER);
-        jdbc.tx(budget(),s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(),s -> {
             for (int index=2;index<=100;index++)
                 s.update("INSERT INTO guild_activity_reward_owed(reward_id,player_id,guild_id,activity_id,period_key,payload,status,op_id,created_ms,next_attempt_ms) VALUES(?,?,?,?,?,?,0,0,?,0)",
                         10000L+index,PLAYER,GUILD,LANTERN,GameDay.dayKey(NOW),payload,NOW);
@@ -780,7 +776,7 @@ class GuildActivityStoreTiDbTest {
                          .setRefId(TRIAL)
                          .setLastReason(27001)
                          .build();
-        jdbc.tx(budget(), s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(), s -> {
             s.update(AssetOpColumns.INSERT, AssetOpColumns.insertArgs(op));
             return null;
         });
@@ -799,7 +795,7 @@ class GuildActivityStoreTiDbTest {
         store.participate(PLAYER, GUILD, 1, LANTERN, 0, NOW, budget());
         long epoch = count("SELECT epoch FROM guild_player_op_seq WHERE player_id=? AND stream=2", PLAYER);
         var payload = AssetBundle.newBuilder().addItems(AssetItem.newBuilder().setConfigId(9).setCount(1)).build();
-        jdbc.tx(budget(), s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(), s -> {
             for (int seq = 1; seq <= 16; seq++) {
                 var op = GuildAssetOpRow.newBuilder()
                                  .setOpId(200_000 + seq)

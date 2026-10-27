@@ -66,6 +66,10 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
 
     // 背压计数：I/O 线程加、逻辑线程减。
     private final AtomicInteger pendingFrames = new AtomicInteger();
+    private com.game.scene.admin.SceneMaintenanceController.Gate maintenance;
+    public NodeLinkHandler withMaintenance(com.game.scene.admin.SceneMaintenanceController.Gate gate){
+        if(maintenance!=null)throw new IllegalStateException("链路publication gate已固定");maintenance=java.util.Objects.requireNonNull(gate);return this;
+    }
     /** 读已暂停（I/O 线程写，逻辑线程读）：逻辑线程只在暂停时才安排恢复，平时不给 I/O 线程加任务。 */
     private volatile boolean pausedFlag;
     private final AtomicBoolean resumeScheduled = new AtomicBoolean();
@@ -118,7 +122,7 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
                     return;
                 }
                 long id = linkId;
-                postFrame(ctx, () -> inbound.frameReceived(id, frame));
+                postFrame(ctx,frame.toByteArray(), () -> inbound.frameReceived(id, frame));
             }
             case REJECTED -> {
                 // 已回拒绝、正在断开，后续帧一律丢弃。
@@ -190,7 +194,11 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
     }
 
     /** I/O 线程：计数、必要时暂停读，再把帧投递给逻辑线程；逻辑线程执行完回调 {@link #frameDone}。 */
-    private void postFrame(ChannelHandlerContext ctx, Runnable task) {
+    private void postFrame(ChannelHandlerContext ctx,byte[] original, Runnable task) {
+        com.game.scene.admin.SceneMaintenanceController.Lease admitted;
+        try{admitted=maintenance==null?null:maintenance.admit(original);}
+        catch(RejectedExecutionException closed){ctx.close();return;}
+        final var accepted=admitted;
         int pending = pendingFrames.incrementAndGet();
         if (!readPaused && pending >= maxPendingFrames) {
             readPaused = true;
@@ -203,13 +211,13 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
                 resumeReading(ctx);
             }
         }
-        post(() -> {
-            try {
-                task.run();
-            } finally {
-                frameDone(ctx);
-            }
-        });
+        try{logicExecutor.execute(() -> {
+            Throwable failure=null;try{task.run();}
+            catch(RuntimeException|Error unknown){failure=unknown;throw unknown;}
+            finally{if(accepted!=null)accepted.complete(failure);frameDone(ctx);}
+        });}catch(RejectedExecutionException rejected){
+            if(accepted!=null)accepted.complete(rejected);frameDone(ctx);ctx.close();
+        }
     }
 
     /** 逻辑线程：计数减一；读已暂停且积压降到恢复线以下时，请 I/O 线程恢复读（只安排一次）。 */
@@ -246,7 +254,8 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
         try {
             logicExecutor.execute(task);
         } catch (RejectedExecutionException e) {
-            // 停服时逻辑线程先停，迟到的链路事件没有接收方了。
+            // 维护期间入队失败是UNKNOWN；不能在收据中以日志代替其结局。
+            if(maintenance!=null)maintenance.recordUnknown();
             log.debug("场景逻辑线程已停止，丢弃链路事件 link={}", linkId);
         }
     }

@@ -35,7 +35,8 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
- * 用仓库里的 application.yaml 整体起一次（RedissonClient 用替身，不连 Redis），确认默认配置能绑定、能对外服务，
+ * HTTP与配置装配接缝：使用H2和Redisson替身，保留全部HTTP鉴权、业务与管理端口断言；不代表production SQL启动资格。
+ * 仅测试配置排除新增NORMAL物理池AutoConfig，真实SQL池/权限由AuthorityPoolTiDbTest独立覆盖，确认配置能绑定、能对外服务，
  * 以及管理端点按配置暴露在<b>独立的管理端口</b>上、对外端口看不到（{@link AutoConfigureObservability} 打开测试里默认关闭的 Prometheus 导出）。
  * 用真实端口起服务（主端口与管理端口都随机），与生产的「管理端口独立、只绑本机」同形。
  */
@@ -45,7 +46,9 @@ import org.springframework.test.web.servlet.MockMvc;
 // game.zone-id 显式钉住，免得开发机上的 GAME_ZONE_ID 环境变量改掉默认区服。
 @TestPropertySource(properties = {GatewayConfiguration.TOKEN_SECRET_ENV + "=boot-test-secret", "game.zone-id=1",
         "management.server.port=0",
-        // MySQL 换成 MySQL 兼容模式的内存库：建表脚本与启动播种照常执行
+        "spring.autoconfigure.exclude=com.game.discovery.sql.AuthorityDataSourcePolicy",
+        "spring.sql.init.mode=always",
+        // 仅H2 Web接缝预建schema；不造BootGrant/I3，不隔离HTTP令牌或管理端口安全配置
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.url=jdbc:h2:mem:gwapp;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
         "spring.datasource.username=sa", "spring.datasource.password="})
@@ -65,7 +68,7 @@ class GatewayApplicationTest {
         public void run(ApplicationArguments args) throws Exception {
             try (var connection = dataSource.getConnection(); var statement = connection.createStatement()) {
                 statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,zone_id INT UNSIGNED NOT NULL)");
-                com.game.common.player.RouteAuthorityInitializer.initialize(connection, UUID.randomUUID().toString(), List.of(1));
+                com.game.common.player.RouteAuthorityInitializer.initialize(connection, UUID.randomUUID().toString(), List.of(1), schemaPrincipal(connection));
             }
         }
     }
@@ -131,4 +134,5 @@ class GatewayApplicationTest {
                 .contains("game_gateway_assign_gate_total{application=\"game-gateway\",code=\"0\",reason=\"ok\"} 0")
                 .doesNotContain("zone_id");
     }
+    private static String schemaPrincipal(java.sql.Connection connection)throws java.sql.SQLException{try(var statement=connection.createStatement();var rows=statement.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new java.sql.SQLException("缺少实际schema主体");return rows.getString(1);}}
 }

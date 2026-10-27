@@ -39,6 +39,9 @@ import org.slf4j.LoggerFactory;
  */
 public final class SceneBattleProvider implements SceneBattleService {
 
+    private com.game.scene.admin.SceneMaintenanceController.Gate maintenance=new com.game.scene.admin.SceneMaintenanceController.Gate();
+    public SceneBattleProvider withMaintenance(com.game.scene.admin.SceneMaintenanceController.Gate gate){this.maintenance=Objects.requireNonNull(gate);return this;}
+
     private static final Logger log = LoggerFactory.getLogger(SceneBattleProvider.class);
 
     private static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
@@ -168,6 +171,8 @@ public final class SceneBattleProvider implements SceneBattleService {
             metrics.rpc(method, RpcResult.NOT_HERE);
             return CompletableFuture.completedFuture(status(SceneBattleStatus.SCENE_BATTLE_NOT_HERE));
         }
+        final com.game.scene.admin.SceneMaintenanceController.Lease admitted;
+        try{admitted=maintenance.admit(call.toByteArray());}catch(RejectedExecutionException closed){permits.release();return CompletableFuture.failedFuture(closed);}
         CompletableFuture<SceneBattleReply> handled;
         try {
             handled = handler.handle(svc, call);
@@ -176,6 +181,7 @@ public final class SceneBattleProvider implements SceneBattleService {
         }
         CompletableFuture<SceneBattleReply> reply = new CompletableFuture<>();
         handled.whenComplete((response, error) -> completeOffLogic(() -> {
+            admitted.complete(error);
             permits.release();
             if (error != null) {
                 metrics.rpc(method, RpcResult.ERROR);

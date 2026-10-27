@@ -1,5 +1,8 @@
 package com.game.match.rating;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.alibaba.druid.pool.DruidDataSource;
@@ -84,7 +87,7 @@ class BattleTerminalRecoveryTest {
 
     @Test void 首投和等待APPLIED各保留八个份额_固定上界后再回头()throws Exception {
         try(var f=new Memory(true)){for(int i=0;i<10;i++)f.seed(1000+i);
-        try(var c=f.data.getConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET inbox_seq=10+player_id WHERE battle_id>=1005");}
+        try(var c=f.schemaConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET inbox_seq=10+player_id WHERE battle_id>=1005");}
         var inbox=new Inbox();
         try(var replay=new BattleCompletionReplay(f.store,noDeadlines(),inbox,(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000)){
             replay.round();assertEquals(8,inbox.enqueued.size());assertEquals(8,inbox.lookedUp.size());
@@ -107,7 +110,7 @@ class BattleTerminalRecoveryTest {
         var known=f.store.pendingPlayers(0,0).getFirst();assertEquals(claimed.getRetryMs(),known.getRetryMs());
         assertEquals(original.getOriginal(),known.getOriginal());assertEquals(original.getOwnerAccount(),known.getOwnerAccount());
         assertFalse(f.store.claimInboxAttempt(original));
-        try(var c=f.data.getConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET applied=1 WHERE player_id=2");}
+        try(var c=f.schemaConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET applied=1 WHERE player_id=2");}
         var inbox=new Inbox();inbox.applied=true;
         try(var replay=new BattleCompletionReplay(f.store,noDeadlines(),inbox,(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000)){
             replay.round();assertTrue(inbox.enqueued.isEmpty());assertTrue(inbox.lookedUp.isEmpty());
@@ -242,7 +245,7 @@ class BattleTerminalRecoveryTest {
                     }
                 }
                 store=new BattleCompletionStore(data,ignored->databaseMillis.get());
-                try (var c = data.getConnection(); var sql = c.createStatement()) {
+                try (var c = schemaConnection(); var sql = c.createStatement()) {
                     sql.execute("INSERT INTO player(player_id,account,owner_revision) VALUES(1,'account-1',1),(2,'account-2',1)");
                 }
             } catch(Exception|AssertionError failure) {
@@ -252,12 +255,13 @@ class BattleTerminalRecoveryTest {
         }
         @Override public void close()throws Exception { if(ownedTiDb!=null)ownedTiDb.close(); }
         void makeDue()throws Exception {
-            try(var c=data.getConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET retry_ms=0 WHERE applied=0");}
+            try(var c=schemaConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET retry_ms=0 WHERE applied=0");}
         }
+        java.sql.Connection schemaConnection()throws java.sql.SQLException{return ownedTiDb==null?data.getConnection():ownedTiDb.fixture.schemaConnection();}
         ByteString seed(long battle) throws Exception {
             var event = BattleCompletionStoreCases.complete(battle).toBuilder().setFinishedAtMs(123).build();
             var db = BattleCompletionStore.registry();
-            try (var c = data.getConnection()) {
+            try (var c = schemaConnection()) {
                 db.insert(c, BattleCompletionRow.newBuilder().setBattleId(battle).setFormatVersion(1).setTerminalDecision(1).setOutcomeProtocolVersion(1)
                         .setSourceKind(2).setOriginal(event.toByteString()).setOriginalDigest(BattleCompletionStore.digest(event.toByteString())).setPlayerCount(2).build());
                 for (var player : event.getSettlementsList()) db.insert(c, BattlePlayerCompletionRow.newBuilder().setBattleId(battle).setPlayerId(player.getPlayerId())
@@ -270,16 +274,14 @@ class BattleTerminalRecoveryTest {
 
     @Nested @EnabledIfEnvironmentVariable(named = "MATCH_IT_TIDB", matches = ".+")
     class RealTiDb {
-        DruidDataSource data; String root, database; boolean created; GlobalMatchStore store;
+        DruidDataSource data; String root; AuthoritySqlFixture fixture; GlobalMatchStore store;
         @BeforeEach void open() throws Exception {
-            root = RatingTestDatabase.tidbRoot(System.getenv("MATCH_IT_TIDB")); database = "jterminal_" + UUID.randomUUID().toString().replace("-", "");
-            try (var c = DriverManager.getConnection(root + "?connectTimeout=3000&socketTimeout=4000", RatingTestDatabase.MYSQL_USER, RatingTestDatabase.MYSQL_PASSWORD); var s = c.createStatement()) {
-                RatingTestDatabase.requireTiDb(c); s.execute("CREATE DATABASE `" + database + "`"); created = true;
-            }
-            data = new DruidDataSource(); data.setUrl(root + database + "?useSSL=false&socketTimeout=4000&connectTimeout=3000");
-            data.setUsername(RatingTestDatabase.MYSQL_USER); data.setPassword(RatingTestDatabase.MYSQL_PASSWORD); data.setMaxActive(8); data.setMaxWait(3000);
-            data.setConnectionInitSqls(List.of("SET SESSION tidb_snapshot='',tidb_read_staleness=0,tidb_low_resolution_tso=OFF,tidb_read_consistency='strict',tidb_replica_read='leader',tidb_txn_mode='pessimistic',transaction_isolation='READ-COMMITTED'"));
-            try (var c = data.getConnection(); var s = c.createStatement()) {
+            root = RatingTestDatabase.tidbRoot(System.getenv("MATCH_IT_TIDB"));
+            fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(root,RatingTestDatabase.MYSQL_USER,
+                    RatingTestDatabase.MYSQL_PASSWORD,"jterminal",false,List.of(1,2)),(c,principal)->{
+                GlobalMatchStore.registry().initializeFresh(c,principal);
+                BattleCompletionStore.registry().initializeFresh(c,principal);
+                try(var s=c.createStatement()) {
                 s.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARCHAR(255) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
                 s.execute("CREATE TABLE team_launch(request_id VARCHAR(36) PRIMARY KEY,state INT UNSIGNED NOT NULL,active BOOLEAN NOT NULL DEFAULT TRUE,team_id BIGINT UNSIGNED NOT NULL DEFAULT 0,team_version BIGINT UNSIGNED NOT NULL DEFAULT 0,lock_token VARCHAR(36) NOT NULL DEFAULT '',actor_player_id BIGINT UNSIGNED NOT NULL DEFAULT 0,owner_account VARCHAR(255) NOT NULL DEFAULT '',owner_revision BIGINT UNSIGNED NOT NULL DEFAULT 0,request_proto MEDIUMBLOB,record_proto MEDIUMBLOB,battle_id BIGINT UNSIGNED NOT NULL DEFAULT 0,updated_ms BIGINT UNSIGNED NOT NULL DEFAULT 0,original_proto MEDIUMBLOB)");
                 s.execute("CREATE TABLE team_authority(team_id BIGINT UNSIGNED PRIMARY KEY,version BIGINT UNSIGNED NOT NULL,record_proto MEDIUMBLOB,tombstone TINYINT NOT NULL DEFAULT 0,active_launch_id VARCHAR(36) NOT NULL)");
@@ -289,17 +291,17 @@ class BattleTerminalRecoveryTest {
                 s.execute("CREATE TABLE guild_trial_launch_role(player_id BIGINT UNSIGNED NOT NULL,request_id BIGINT UNSIGNED NOT NULL,account VARCHAR(255) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,state INT UNSIGNED NOT NULL,PRIMARY KEY(player_id,request_id),INDEX by_request(request_id,player_id),INDEX by_state(player_id,state,request_id))");
                 s.execute("CREATE TABLE guild_activity_slot(player_id BIGINT UNSIGNED PRIMARY KEY,lobby_id BIGINT UNSIGNED,expires_ms BIGINT UNSIGNED)");
                 s.execute("CREATE TABLE guild_trial_lobby(lobby_id BIGINT UNSIGNED PRIMARY KEY,state INT,view_proto MEDIUMBLOB,guild_id BIGINT UNSIGNED,activity_id INT UNSIGNED)");
-                new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(data);
-                com.game.common.player.RouteAuthorityInitializer.initialize(c, UUID.randomUUID().toString(), List.of(1, 2));
-                c.setAutoCommit(false); com.game.common.team.TeamPolicyAuthority.ensure(c, false, 3); c.commit();
-            }
+                }
+                c.setAutoCommit(false);com.game.common.team.TeamPolicyAuthority.ensure(c,false,3);c.commit();c.setAutoCommit(true);
+            });
+            data = new DruidDataSource();data.setUrl(fixture.jdbcUrl("?useSSL=false&socketTimeout=4000&connectTimeout=3000"));
+            data.setUsername(fixture.normalUser());data.setPassword(fixture.normalPassword());data.setMaxActive(8);data.setMaxWait(3000);
+            AuthorityDataSourcePolicy.protectDruid(data,fixture.writerBoot(),true);
             store = new GlobalMatchStore(data, new GlobalMatchProperties(true, true, 30, 180, 120, SECRET));
         }
         @AfterEach void close() throws Exception {
             if (data != null) data.close();
-            if (created) try (var c = DriverManager.getConnection(root + "?connectTimeout=3000&socketTimeout=4000", RatingTestDatabase.MYSQL_USER, RatingTestDatabase.MYSQL_PASSWORD); var s = c.createStatement()) {
-                RatingTestDatabase.requireTiDb(c); s.execute("DROP DATABASE `" + database + "`");
-            }
+            if(fixture!=null)fixture.close();
         }
         private GlobalTicketRow join(long player) throws Exception { return join(player,3,2); }
         private GlobalTicketRow join(long player,int mode,int size) throws Exception {
@@ -327,7 +329,7 @@ class BattleTerminalRecoveryTest {
             var expired=f.toBuilder().setCreatedMs(1).setDeadlineMs(2).setCreateRequest(CreateBattleRequest.parseFrom(f.getCreateRequest()).toBuilder()
                     .setCreatedAtMs(1).setDeadlineMs(2).build().toByteString()).build();
             var registry=new com.game.pbmysql.PbMysql();registry.register(GlobalFormationRow.getDefaultInstance());
-            try(var connection=data.getConnection()){registry.updateByPk(connection,expired);}
+            try(var connection=fixture.schemaConnection()){registry.updateByPk(connection,expired);}
             return expired;
         }
         private CommitBattleOutcomeRequest outcome(GlobalFormationRow f) {
@@ -335,7 +337,7 @@ class BattleTerminalRecoveryTest {
                     .setRawResultPayload(BattleCompletionStoreCases.complete(f.getBattleId()).toBuilder().setBattleConfigId(1).setFinishedAtMs(store.now()).build().toByteString()).build();
         }
         private void sql(String text, Object... values) throws Exception {
-            try (var c = data.getConnection(); var q = c.prepareStatement(text)) { for (int i = 0; i < values.length; i++) q.setObject(i + 1, values[i]); q.setQueryTimeout(3); q.executeUpdate(); }
+            try (var c = fixture.schemaConnection(); var q = c.prepareStatement(text)) { for (int i = 0; i < values.length; i++) q.setObject(i + 1, values[i]); q.setQueryTimeout(3); q.executeUpdate(); }
         }
         @Test void 早COMPLETE后迟finish幂等_入箱PENDING不释放_实际APPLIED后才可下局() throws Exception {
             var f = prepare(901); var request = outcome(f); var terminal = store.commitOutcome(request);
@@ -358,7 +360,7 @@ class BattleTerminalRecoveryTest {
             var original=f.toBuilder().setCreatedMs(1).setDeadlineMs(deadline).setCreateRequest(CreateBattleRequest.parseFrom(f.getCreateRequest()).toBuilder()
                     .setCreatedAtMs(1).setDeadlineMs(deadline).build().toByteString()).build();
             var registry=new com.game.pbmysql.PbMysql();registry.register(GlobalFormationRow.getDefaultInstance());
-            try(var c=data.getConnection()){registry.updateByPk(c,original);}
+            try(var c=fixture.schemaConnection()){registry.updateByPk(c,original);}
             assertFalse(store.terminalDeadlineCandidates(0,0).battles().contains(940L));
             assertEquals(0,store.resolveTerminalAfterDeadline(940));
             assertEquals(1,store.commitOutcome(outcome(original)).getTerminalDecision());
@@ -371,7 +373,7 @@ class BattleTerminalRecoveryTest {
             var expired = f.toBuilder().setCreatedMs(1).setDeadlineMs(2).setCreateRequest(CreateBattleRequest.parseFrom(f.getCreateRequest()).toBuilder()
                     .setCreatedAtMs(1).setDeadlineMs(2).build().toByteString()).build();
             var db = new com.game.pbmysql.PbMysql(); db.register(GlobalFormationRow.getDefaultInstance());
-            try (var c = data.getConnection()) { db.updateByPk(c, expired); }
+            try (var c = fixture.schemaConnection()) { db.updateByPk(c, expired); }
             var start = new CyclicBarrier(2); var request = outcome(expired);
             try (var workers = Executors.newFixedThreadPool(2)) {
                 var complete = workers.submit(() -> { start.await(); return store.commitOutcome(request).getTerminalDecision(); });
@@ -466,12 +468,12 @@ class BattleTerminalRecoveryTest {
                     original.toBuilder().setPlayers(1, original.getPlayers(1).toBuilder().setTeamIndex(0)).build());
             var db = new com.game.pbmysql.PbMysql(); db.register(GlobalFormationRow.getDefaultInstance());
             for (var changed : variants) {
-                try (var c = data.getConnection()) { db.updateByPk(c, f.toBuilder().setCreateRequest(changed.toByteString()).build()); }
+                try (var c = fixture.schemaConnection()) { db.updateByPk(c, f.toBuilder().setCreateRequest(changed.toByteString()).build()); }
                 assertThrows(RuntimeException.class, () -> store.commitOutcome(request));
                 assertEquals(0, store.terminal(904).getTerminalDecision());
                 assertTrue(new BattleCompletionStore(data).pendingPlayers(0, 0).isEmpty());
             }
-            try (var c = data.getConnection()) { db.updateByPk(c, f); }
+            try (var c = fixture.schemaConnection()) { db.updateByPk(c, f); }
             var beforeBirth = BattleResultEvent.parseFrom(request.getRawResultPayload()).toBuilder().setFinishedAtMs(original.getCreatedAtMs() - 1).build();
             assertThrows(RuntimeException.class, () -> store.commitOutcome(request.toBuilder().setRawResultPayload(beforeBirth.toByteString()).build()));
             assertEquals(1, store.commitOutcome(request).getTerminalDecision());

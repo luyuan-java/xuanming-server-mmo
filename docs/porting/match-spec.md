@@ -2457,3 +2457,9 @@ Java Team 的 4/5 分别对应已确证原 F 的正常结束/失败取消，角�
 补充真实 TiDB 回归源码覆盖过期/孤儿/未知大厅阻 Join、Watch、首次 Team launch，己方原大厅范围与持久原件例外，首次邀请反向互斥，以及父终局/角色 ACTIVE 不得放行。未运行生成、编译或测试，等待主控统一验证。
 
 本轮真库使用root确认的owned Docker TiDB端口 `127.0.0.1:24000`。Match两组原生夹具从 `MATCH_IT_TIDB` 读取显式数值loopback端口、校验范围1..65535，先执行 `TIDB_VERSION()` 再创建随机自有库；不默认连4000，不创建新映射或触碰未知服务。非法地址应失败，不能被条件注解静默跳过。
+
+## 2026-10-26 本轮 writer 排空接缝（候选，未运行）
+
+匹配与观战首次请求共享同一 boot publication 读锁，根 cut 持写锁等待已受理提交/回滚；观战的真实新根在 GlobalWatchAuthority.begin，SqlSpectateStore 负责后续恢复与实际 timer/workers join。P3还要求全部 SQL 业务原件终局、在途 gather/watch 结束、outbox/replay/结果消费线程真实退出，才 seal writer；TTL、shutdown 标志或吞掉异常不构成成功。提交未知保留未决计数。
+
+新 SQL_RELEASED boot 在 Spring 导出前先关闭新根，启动消费者；prepare-source 读取同 run 永久 REGISTER/release，结果消费者须实际取得消费组分配且完成 poll，回传正式 IssuerReadiness。open-source 复核同原件后只一次开放新根并启动 matcher，返回正式 SourceOpenAck；任何部分副作用未明不自动重放。旧 boot 的永久 cut 没有重开分支。消费者与观战 owner 的必要额外路径已获497范围授权并纳入 candidate；未生成、编译或运行。

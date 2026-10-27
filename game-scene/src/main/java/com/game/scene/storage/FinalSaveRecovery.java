@@ -164,7 +164,7 @@ public final class FinalSaveRecovery implements AutoCloseable {
         }
     }
     /** 定时器只投递任务；全部SQL仍在原有有界存储池执行。测试可显式推进此方法。 */
-    public void sweep() {
+    public synchronized void sweep() {
         if(closed) return;
         for(int count=0;count<32;count++) {
             Key key=turns.poll();if(key==null)break;
@@ -258,6 +258,22 @@ public final class FinalSaveRecovery implements AutoCloseable {
             }
         }
         return unregistered.size();
+    }
+    /** 等待真实TX2及owner释放；TX1接管凭据不能作为全局维护的排空证据。 */
+    public int awaitApplied(long timeoutNanos)throws InterruptedException {
+        long until=System.nanoTime()+Math.max(0,timeoutNanos);
+        synchronized(unregistered){
+            while(unregisteredCount()!=0||awaitingAppliedCount()!=0||pendingResults.get()!=0||applying.get()||scanning.get()||probing.get()){
+                long left=until-System.nanoTime();if(left<=0)break;
+                TimeUnit.NANOSECONDS.timedWait(unregistered,Math.min(left,100_000_000L));
+            }
+            return (int)Math.min(Integer.MAX_VALUE,(long)unregisteredCount()+awaitingAppliedCount()+undeliveredResultCount()
+                    +(applying.get()?1:0)+(scanning.get()?1:0)+(probing.get()?1:0));
+        }
+    }
+    public synchronized boolean stopIfApplied(){
+        if(unregisteredCount()!=0||awaitingAppliedCount()!=0||undeliveredResultCount()!=0||applying.get()||scanning.get()||probing.get())return false;
+        closed=true;if(scheduled!=null)scheduled.cancel(false);return true;
     }
     @Override public synchronized void close() {
         if(closed) return;closed=true;if(scheduled!=null)scheduled.cancel(false);

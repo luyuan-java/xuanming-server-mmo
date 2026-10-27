@@ -108,6 +108,16 @@ public final class PbMysql {
 
     // ================================================================ 结构
 
+    /** 独立schema主体、无writer且无维护run的fresh-prestart入口；不处理存量迁移。 */
+    public void initializeFresh(Connection conn)throws SQLException {
+        List<TableSchema> all=new ArrayList<>(byFullName.values());SchemaSync.initializeFresh(conn,all,all);
+    }
+    /** 独立fresh-prestart/schema fixture传入明确主体，不读取或改写进程环境。 */
+    public void initializeFresh(Connection conn,String schemaPrincipal)throws SQLException{
+        List<TableSchema> all=new ArrayList<>(byFullName.values());SchemaSync.initializeFresh(conn,all,all,schemaPrincipal);
+    }
+
+
     /** 某张已注册表的建表语句（带结尾分号），与 Go 版 GetCreateTableSQL 逐字节相同。 */
     public String createTableSql(Class<? extends Message> type) {
         return schema(type).createTableSql();
@@ -120,6 +130,7 @@ public final class PbMysql {
      * <p>整轮在 {@code conn} 这一条连接上执行并持有 {@code GET_LOCK} 咨询锁；连接必须处于自动提交模式（DDL 会隐式提交）。
      * 两个不同 message 映射到同一张物理表时在任何 I/O 之前拒绝。
      */
+    /** normal启动只读核验；不获取DDL咨询锁，不建表、不补列和索引。 */
     public void syncAll(Connection conn) throws SQLException {
         List<TableSchema> all = new ArrayList<>(byFullName.values());
         SchemaSync.sync(conn, all, all);

@@ -106,6 +106,84 @@ public final class MatchLifecycle implements SmartLifecycle, SmartApplicationLis
      * 串行化启动线程与关停线程对「起不起 / 停不停」的判定（见类注释「线程」）。锁里只有凑单的启停（start 不阻塞；stop 有界地等当前一轮结束）、
      * 观战清扫的启动（不阻塞）与三个「起过没有」标志的读写；评分消费的启停、清扫的停止都在锁外。
      */
+    private com.game.match.global.GlobalMatchService global;
+    private com.game.match.rating.BattleCompletionReplay terminalReplay;
+    private com.game.match.global.RatingRankOutbox rankOutbox;
+    private com.game.common.sql.WriterAuthority writerBoot;
+    private com.game.match.spectate.SqlSpectateStore spectate;
+    private com.game.match.rating.BattleResultConsumer.ReadinessControl consumerFrontier;
+    private java.util.function.BooleanSupplier consumerStopped;
+    private com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerReadiness preparedSource,preparedSourceRequest;
+    private com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness consumerSeed;
+    private com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness preparedConsumers;
+    private com.game.player.store.state.SqlWriterMaintenanceReceipt.SourceOpenAck sourceOpenIntent,sourceOpenAck;
+    private String maintenanceOperation="";
+    private long rootsClosedMs;
+    private boolean maintenanceQuiesced;
+    public MatchLifecycle withMaintenance(com.game.match.global.GlobalMatchService global,
+            com.game.match.rating.BattleCompletionReplay terminalReplay,com.game.match.global.RatingRankOutbox rankOutbox,
+            com.game.common.sql.WriterAuthority boot,com.game.match.spectate.SqlSpectateStore spectate,com.game.match.rating.BattleResultConsumer.ReadinessControl consumerFrontier,java.util.function.BooleanSupplier consumerStopped){this.consumerStopped=Objects.requireNonNull(consumerStopped);this.consumerFrontier=Objects.requireNonNull(consumerFrontier);this.spectate=Objects.requireNonNull(spectate);this.global=Objects.requireNonNull(global);this.terminalReplay=Objects.requireNonNull(terminalReplay);this.rankOutbox=Objects.requireNonNull(rankOutbox);this.writerBoot=Objects.requireNonNull(boot);if(boot.prepareOnly())global.store().prepareOnly();return this;}
+    private static void noUnknown(com.google.protobuf.Message message){
+        if(!message.getUnknownFields().asMap().isEmpty())throw new IllegalArgumentException("维护原件含未知字段");
+        for(var entry:message.getAllFields().entrySet())if(entry.getKey().getJavaType()==com.google.protobuf.Descriptors.FieldDescriptor.JavaType.MESSAGE){if(entry.getKey().isRepeated())for(Object value:(java.util.List<?>)entry.getValue())noUnknown((com.google.protobuf.Message)value);else noUnknown((com.google.protobuf.Message)entry.getValue());}
+    }
+    private static void sourcePins(java.util.List<com.game.player.store.state.SqlWriterMaintenanceReceipt.SourcePin> pins)throws Exception{
+        if(pins.isEmpty())throw new IllegalArgumentException("缺source原件");var seen=new java.util.HashSet<String>();for(var pin:pins){var path=java.nio.file.Path.of(pin.getAbsolutePath());if(!path.isAbsolute()||!seen.add(path.normalize().toString())||pin.getSha256().size()!=32||!java.nio.file.Files.isRegularFile(path,java.nio.file.LinkOption.NOFOLLOW_LINKS))throw new IllegalArgumentException("source pin形状非法");var hash=java.security.MessageDigest.getInstance("SHA-256");try(var input=java.nio.file.Files.newInputStream(path,java.nio.file.LinkOption.NOFOLLOW_LINKS)){byte[] block=new byte[65536];int n;while((n=input.read(block))!=-1)hash.update(block,0,n);}if(!java.util.Arrays.equals(hash.digest(),pin.getSha256().toByteArray()))throw new IllegalStateException("source原件已漂移");}
+    }
+    private static byte[] consumerReportBytes(com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness report)throws Exception{
+        noUnknown(report);if(report.getGroupsCount()!=1)throw new IllegalStateException("Match结果消费者必须有唯一真实group报告");byte[] bytes=new byte[report.getSerializedSize()];var output=com.google.protobuf.CodedOutputStream.newInstance(bytes);output.useDeterministicSerialization();report.writeTo(output);output.checkNoSpaceLeft();return bytes;
+    }
+    public synchronized com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerReadiness prepareMaintenanceSource(com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerReadiness input)throws Exception{
+        noUnknown(input);if(writerBoot==null||!writerBoot.prepareOnly()||!running||!backgroundStarted.get()||!global.store().rootsSettled()||sourceOpenIntent!=null)throw new IllegalStateException("新Match boot尚未以source关闭状态准备");
+        if(input.getIssuerId().isEmpty()||input.getLogicalRole().isBlank()||!java.util.Arrays.equals(input.getInstanceId().toByteArray(),writerBoot.instanceId())||!java.util.Arrays.equals(input.getPhysicalWriterKey().toByteArray(),writerBoot.writerKey())||input.getRegistrationReceiptId().size()!=16||!java.util.Arrays.equals(input.getRegistrationReceiptDigest().toByteArray(),writerBoot.registrationDigest())||input.getPreparedClosedMs()!=0||!input.getConsumerReadyFrontierDigest().isEmpty())throw new IllegalArgumentException("prepared不是同boot登记身份");
+        sourcePins(input.getSourcePinsList());byte[] manifest;try(var connection=global.store().maintenanceDataSource().getConnection()){manifest=writerBoot.verifiedPrepareManifest(connection,writerBoot.maintenanceRunId(),input.getRegistrationReceiptId().toByteArray(),input.getRegistrationReceiptDigest().toByteArray());}
+        if(preparedSource!=null){if(!preparedSourceRequest.equals(input))throw new IllegalStateException("prepared原件不能替换");return preparedSource;}
+        var plan=com.game.player.store.state.SqlWriterMaintenanceReceipt.Plan.parseFrom(manifest);noUnknown(plan);if(!java.util.Arrays.equals(plan.getRunId().toByteArray(),writerBoot.maintenanceRunId()))throw new IllegalStateException("prepare不是同轮P0原manifest");
+        consumerSeed=com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness.newBuilder().setOperationId(plan.getRunId()).setManifestDigest(com.google.protobuf.ByteString.copyFrom(java.security.MessageDigest.getInstance("SHA-256").digest(manifest))).setIssuerId(input.getIssuerId()).setInstanceId(input.getInstanceId()).addAllExpectedPartitions(plan.getKafkaPartitionsList()).build();
+        var report=consumerFrontier.read(consumerSeed);byte[] raw=consumerReportBytes(report);byte[] frontier=java.security.MessageDigest.getInstance("SHA-256").digest(raw);
+        if(input.getSourcePinsList().stream().anyMatch(pin->java.util.Arrays.equals(pin.getSha256().toByteArray(),frontier)))throw new IllegalArgumentException("输入source pins不能预填消费者报告摘要");
+        var reportPath=writerBoot.persistConsumerReadiness(raw);var reportPin=com.game.player.store.state.SqlWriterMaintenanceReceipt.SourcePin.newBuilder().setAbsolutePath(reportPath.toString()).setSha256(com.google.protobuf.ByteString.copyFrom(frontier)).build();
+        if(input.getSourcePinsList().stream().anyMatch(pin->java.nio.file.Path.of(pin.getAbsolutePath()).normalize().equals(reportPath.normalize())))throw new IllegalArgumentException("消费者报告由实际owner生成，输入不能预填同路径");
+        preparedConsumers=report;preparedSourceRequest=input;preparedSource=input.toBuilder().setPreparedClosedMs(System.currentTimeMillis()).setConsumerReadyFrontierDigest(com.google.protobuf.ByteString.copyFrom(frontier)).addSourcePins(reportPin).build();return preparedSource;
+    }
+    public synchronized com.game.player.store.state.SqlWriterMaintenanceReceipt.SourceOpenAck openMaintenanceSource(com.game.player.store.state.SqlWriterMaintenanceReceipt.SourceOpenAck input)throws Exception{
+        noUnknown(input);if(sourceOpenIntent!=null){if(!sourceOpenIntent.equals(input))throw new IllegalStateException("open不能换原件");if(sourceOpenAck!=null)return sourceOpenAck;throw new IllegalStateException("open副作用结局未知，不自动重放");}
+        if(preparedSource==null||input.getOpenRequestId().size()!=16||input.getOpenRequestId().equals(com.google.protobuf.ByteString.copyFrom(new byte[16]))||input.getOpenedMs()!=0||!input.getAcceptedFrontierDigest().isEmpty()||!input.getIssuerId().equals(preparedSource.getIssuerId())||!input.getLogicalRole().equals(preparedSource.getLogicalRole())||!input.getInstanceId().equals(preparedSource.getInstanceId())||!input.getPhysicalWriterKey().equals(preparedSource.getPhysicalWriterKey())||!input.getRegistrationReceiptId().equals(preparedSource.getRegistrationReceiptId())||!input.getRegistrationReceiptDigest().equals(preparedSource.getRegistrationReceiptDigest())||!input.getSourcePinsList().equals(preparedSource.getSourcePinsList()))throw new IllegalArgumentException("open不是已prepared原件");
+        sourcePins(input.getSourcePinsList());byte[] manifest;try(var connection=global.store().maintenanceDataSource().getConnection()){manifest=writerBoot.verifyPrepareBinding(connection,input.getOperationId().toByteArray(),input.getRegistrationReceiptId().toByteArray(),input.getRegistrationReceiptDigest().toByteArray());}
+        if(!java.util.Arrays.equals(manifest,input.getManifestDigest().toByteArray()))throw new IllegalStateException("同run release资格失效");
+        byte[] current=java.security.MessageDigest.getInstance("SHA-256").digest(consumerReportBytes(consumerFrontier.read(consumerSeed)));
+        if(!java.util.Arrays.equals(current,preparedSource.getConsumerReadyFrontierDigest().toByteArray()))throw new IllegalStateException("消费者当前代次、成员、assignment或位点已改变，不能使用旧prepared开放");
+        sourceOpenIntent=input;consumerFrontier.withReady(consumerSeed,preparedConsumers,()->{synchronized(gate){if(stopped.get()||matcherStopped.get())throw new IllegalStateException("新Match boot已停止");global.store().openPrepared();matcherStartAttempted=true;matcher.start();}});
+        sourceOpenAck=input.toBuilder().setOpenedMs(System.currentTimeMillis()).setAcceptedFrontierDigest(com.google.protobuf.ByteString.copyFrom(global.store().publicationFrontier())).build();return sourceOpenAck;
+    }
+    public synchronized void closeMaintenanceRoots(String run){
+        if(writerBoot==null||global==null)throw new IllegalStateException("缺少同boot维护接线");
+        if(!java.util.UUID.fromString(run).toString().equals(run)||!maintenanceOperation.isEmpty()&&!maintenanceOperation.equals(run))throw new IllegalArgumentException("维护run不可替换");
+        global.closeRoots(run);maintenanceOperation=run;if(rootsClosedMs==0)rootsClosedMs=System.currentTimeMillis();
+    }
+    /** 与普通SIGTERM分开：不吞异常、不认TTL，未闭合时继续保留relay和SQL池。 */
+    public synchronized boolean maintenanceStopAndReport(String run,Duration timeout)throws Exception {
+        closeMaintenanceRoots(run);if(maintenanceQuiesced)return true;
+        long until=System.nanoTime()+Math.min(timeout.toNanos(),60_000_000_000L);
+        if(global.store().maintenanceOutstanding()!=0)return false;
+        synchronized(gate){if(matcherStartAttempted)matcher.stop();matcherStopped.set(true);}
+        drainWorkers.run();
+        if(!watches.awaitIdle(Duration.ofNanos(Math.max(0,until-System.nanoTime())))
+                ||!gathers.awaitIdle(Duration.ofNanos(Math.max(0,until-System.nanoTime()))))return false;
+        if(sweeperStartAttempted)sweeper.stop();
+        if(consumerStartAttempted)consumer.stop();
+        if(!consumerStopped.getAsBoolean())return false;
+        rankOutbox.stopSource();
+        if(!global.stopAndReport(Math.max(0,until-System.nanoTime()))
+                ||!terminalReplay.stopAndReport(Math.max(0,until-System.nanoTime()))
+                ||!rankOutbox.stopAndReport(Math.max(0,until-System.nanoTime())))return false;
+        if(!spectate.stopAndReport(Math.max(0,until-System.nanoTime())))return false;
+        writerBoot.seal();maintenanceQuiesced=true;return true;
+    }
+    public long rootsClosedMs(){return rootsClosedMs;}
+    public boolean rootsSettled(){return global!=null&&global.store().rootsSettled();}
+    public byte[] rootsFrontier(){return global.store().rootsFrontier();}
+    public com.game.common.sql.WriterAuthority writerBoot(){return writerBoot;}
     private final Object gate = new Object();
     private final AtomicBoolean backgroundStarted = new AtomicBoolean();
     private final AtomicBoolean matcherStopped = new AtomicBoolean();
@@ -182,6 +260,10 @@ public final class MatchLifecycle implements SmartLifecycle, SmartApplicationLis
      * @throws RuntimeException 任何一步启动失败（原样抛出 = 拒绝启动）
      */
     public void startBackground() {
+        if(writerBoot!=null&&writerBoot.prepareOnly()){
+            synchronized(gate){if(stopped.get()||!backgroundStarted.compareAndSet(false,true))return;sweeperStartAttempted=true;sweeper.start();consumerStartAttempted=true;}
+            consumer.start();return;
+        }
         synchronized (gate) {
             // 判定与启动在同一把锁里：停机的第 1 步要么已经做过（这里不再起），要么排在 matcher.start() 返回之后（它会把凑单停掉）
             if (matcherStopped.get() || stopped.get() || !backgroundStarted.compareAndSet(false, true)) {

@@ -40,7 +40,7 @@ public class PlayerSqlAuthorityAutoConfiguration {
     }
     static void verifyRouteSchema(java.sql.Connection connection)throws java.sql.SQLException{
         com.game.common.player.PlayerRouteAuthority.verifySchema(connection);
-        for(String sql:java.util.List.of("SELECT id,generation,writable,fence_shards FROM route_meta WHERE 1=0","SELECT zone_id,shard,run_id,revision FROM zone_merge_fence WHERE 1=0")){
+        for(String sql:java.util.List.of("SELECT id,generation,writable,fence_shards,writer_epoch,catalog_revision,freeze_run_id FROM route_meta WHERE 1=0","SELECT zone_id,shard,run_id,revision FROM zone_merge_fence WHERE 1=0")){
             try(var statement=connection.prepareStatement(sql);var rows=statement.executeQuery()){
                 var metadata=rows.getMetaData();for(int i=1;i<=metadata.getColumnCount();i++)if(metadata.isNullable(i)!=java.sql.ResultSetMetaData.columnNoNulls)throw new IllegalStateException("SQL路由围栏列不能可空");
             }

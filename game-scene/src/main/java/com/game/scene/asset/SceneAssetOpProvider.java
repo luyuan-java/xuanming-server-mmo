@@ -38,6 +38,9 @@ import org.slf4j.LoggerFactory;
  */
 public final class SceneAssetOpProvider implements SceneAssetOpService {
 
+    private com.game.scene.admin.SceneMaintenanceController.Gate maintenance=new com.game.scene.admin.SceneMaintenanceController.Gate();
+    public SceneAssetOpProvider withMaintenance(com.game.scene.admin.SceneMaintenanceController.Gate gate){this.maintenance=Objects.requireNonNull(gate);return this;}
+
     private static final Logger log = LoggerFactory.getLogger(SceneAssetOpProvider.class);
 
     private final Supplier<AssetOpEndpoint> endpoint;
@@ -102,6 +105,8 @@ public final class SceneAssetOpProvider implements SceneAssetOpService {
             return CompletableFuture.failedFuture(new RejectedExecutionException(
                     "scene asset op overloaded (max in-flight " + maxInFlight + ")"));
         }
+        final com.game.scene.admin.SceneMaintenanceController.Lease admitted;
+        try{admitted=maintenance.admit(request.toByteArray());}catch(RejectedExecutionException closed){permits.release();return CompletableFuture.failedFuture(closed);}
         CompletableFuture<AssetOpResponse> handled;
         try {
             handled = ops.submit(rpc, request);
@@ -110,6 +115,7 @@ public final class SceneAssetOpProvider implements SceneAssetOpService {
         }
         CompletableFuture<AssetOpResponse> reply = new CompletableFuture<>();
         handled.whenComplete((response, error) -> completeOffLogic(() -> {
+            admitted.complete(error);
             permits.release();
             if (error != null) {
                 metrics.assetOp(rpc, AssetOpResult.ERROR);

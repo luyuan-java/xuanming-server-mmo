@@ -24,11 +24,11 @@ public final class PlayerRouteAuthority {
     /** 启动只读核验，不建行、不把旧缓存变成SQL原件。 */
     public static void verifySchema(Connection connection)throws SQLException{
         requireMeta(connection,3,false);
-        for(var definition:Map.of("route_meta",List.of("id","generation","writable","fence_shards"),"zone_merge_fence",List.of("zone_id","shard","run_id","revision"),"zone_merged_into",List.of("zone_id","target_zone","run_id","revision")).entrySet()){
+        for(var definition:Map.of("route_meta",List.of("id","generation","writable","fence_shards","writer_epoch","catalog_revision","freeze_run_id"),"zone_merge_fence",List.of("zone_id","shard","run_id","revision"),"zone_merged_into",List.of("zone_id","target_zone","run_id","revision")).entrySet()){
             try(var statement=connection.prepareStatement("SELECT "+String.join(",",definition.getValue())+" FROM "+definition.getKey()+" WHERE 1=0")){statement.setQueryTimeout(3);try(var rows=statement.executeQuery()){
                 var fields=rows.getMetaData();for(int i=1;i<=fields.getColumnCount();i++){
                     String name=definition.getValue().get(i-1);int type=fields.getColumnType(i);
-                    if(fields.isNullable(i)!=java.sql.ResultSetMetaData.columnNoNulls||type!=(name.equals("generation")||name.equals("run_id")?java.sql.Types.VARCHAR:name.equals("revision")?java.sql.Types.BIGINT:java.sql.Types.INTEGER))throw new SQLException("路由围栏正式列形状不符");
+                    if(fields.isNullable(i)!=java.sql.ResultSetMetaData.columnNoNulls||type!=(name.equals("generation")||name.equals("run_id")?java.sql.Types.VARCHAR:name.equals("freeze_run_id")?java.sql.Types.VARBINARY:java.util.Set.of("revision","writer_epoch","catalog_revision").contains(name)?java.sql.Types.BIGINT:java.sql.Types.INTEGER))throw new SQLException("路由围栏正式列形状不符");
                     if((name.equals("generation")||name.equals("run_id"))&&fields.getPrecision(i)<36)throw new SQLException("路由原件列不能容纳UUID");
                 }
             }}
@@ -46,6 +46,7 @@ public final class PlayerRouteAuthority {
         if(connection.getAutoCommit()||timeout<=0||players.isEmpty()||players.size()>MAX_PLAYERS)throw new SQLException("路由提交缺少有界事务或完整角色集合");
         var ordered=new TreeSet<Long>(Long::compareUnsigned);ordered.addAll(players);
         if(ordered.contains(0L))throw new SQLException("角色零号不能获取路由权威");
+        com.game.common.sql.AuthorityConnection.require(connection);
         long until=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(timeout);
         requireMeta(connection,left(until),true);
         var homes=new TreeMap<Long,Long>(Long::compareUnsigned);var zones=new TreeSet<Long>();
@@ -60,7 +61,7 @@ public final class PlayerRouteAuthority {
     }
     private static int left(long until)throws java.sql.SQLTimeoutException{long nanos=until-System.nanoTime();if(nanos<=0||Thread.currentThread().isInterrupted())throw new java.sql.SQLTimeoutException("路由事务预算耗尽或已取消");return (int)Math.max(1,java.util.concurrent.TimeUnit.NANOSECONDS.toSeconds(nanos+999_999_999L));}
     public static void requireMeta(Connection connection,int timeout,boolean shared)throws SQLException{
-        try(var statement=connection.prepareStatement("SELECT generation,writable,fence_shards FROM route_meta WHERE id=1"+(shared?sharedLock(connection):""))){
+        try(var statement=connection.prepareStatement("SELECT generation,writable,fence_shards FROM route_meta WHERE id=1")){
             statement.setQueryTimeout(timeout);
             try(var rows=statement.executeQuery()){
                 if(!rows.next())throw new SQLException("缺少显式初始化的SQL路由meta，禁止从缓存推断归属");

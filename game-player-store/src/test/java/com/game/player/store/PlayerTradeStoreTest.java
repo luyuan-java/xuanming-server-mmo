@@ -1,5 +1,8 @@
 package com.game.player.store;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.alibaba.druid.pool.DruidDataSource;
@@ -257,6 +260,7 @@ class PlayerTradeStoreTest {
         final String endpoint = System.getProperty("game.it.mysql");
         final String database = "playertrade" + UUID.randomUUID().toString().replace("-", "");
         final DataSource source;
+        AuthoritySqlFixture fixture;
         final JdbcTemplate sql;
         final DataSourceTransactionManager manager;
         final PlayerStore players;
@@ -270,24 +274,32 @@ class PlayerTradeStoreTest {
                     h2.setURL("jdbc:h2:mem:" + database + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=5000");
                     source = h2;
                 } else {
-                    if (!endpoint.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):(4000|24000)/?")) throw new IllegalArgumentException("只允许本机会话TiDB端点且不带已有库名");
-                    try (var admin = admin(); var statement = admin.createStatement()) { statement.execute("CREATE DATABASE " + database); }
+                    fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(endpoint,
+                            System.getProperty("game.it.mysql.user", "root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""),
+                            "playertrade",false,List.of(1,2,3,7,9,11)),(connection,principal)->{
+                        new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql"),
+                                new ClassPathResource("db/role-pending-fence-fixture.sql")).populate(connection);
+                    });
                     pool = new DruidDataSource();
-                    pool.setUrl(endpoint.replaceAll("/$", "") + "/" + database + "?connectTimeout=3000&socketTimeout=30000");
-                    pool.setUsername(System.getProperty("game.it.mysql.user", "root"));
-                    pool.setPassword(System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""));
-                    pool.setMaxActive(8); pool.setMaxWait(3000);
-                    new StrongTiDbConnectionPolicy("角色交易集成", true).postProcessBeforeInitialization(pool, "fixture");
-                    pool.init(); source = pool;
+                    pool.setUrl(fixture.jdbcUrl("?connectTimeout=3000&socketTimeout=30000"));
+                    pool.setUsername(fixture.normalUser());pool.setPassword(fixture.normalPassword());
+                    pool.setMaxActive(8);pool.setMaxWait(3000);
+                    AuthorityDataSourcePolicy.protectDruid(pool,fixture.writerBoot(),true);
+                    source=pool;
                 }
-                new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(source);
-                try(var routeInit=source.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11));}
+                if(fixture==null){
+                    new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"),new ClassPathResource("db/game-player-schema.sql"),
+                            new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(source);
+                    try(var connection=source.getConnection();var statement=connection.createStatement();var identity=statement.executeQuery("SELECT CURRENT_USER()")){
+                        if(!identity.next())throw new java.sql.SQLException("H2 schema主体缺失");
+                        com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1,2,3,7,9,11),identity.getString(1));
+                    }
+                }
                 try (var connection = source.getConnection()) {
                     if (endpoint != null) StrongTiDbConnectionPolicy.verify(connection, true);
                     PlayerSqlAuthorityAutoConfiguration.verifyTradeSchema(connection);
                 }
-                sql = new JdbcTemplate(source); manager = new DataSourceTransactionManager(source);
-                new ResourceDatabasePopulator(new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(source);
+                sql = new JdbcTemplate(fixture==null?source:fixture.schemaDataSource()); manager = new DataSourceTransactionManager(source);
                 var config = new org.apache.ibatis.session.Configuration(); config.setMapUnderscoreToCamelCase(true); config.addMapper(PlayerMapper.class);
                 var factory = new SqlSessionFactoryBean(); factory.setDataSource(source); factory.setConfiguration(config);
                 mapper = new SqlSessionTemplate(factory.getObject()).getMapper(PlayerMapper.class);
@@ -295,9 +307,7 @@ class PlayerTradeStoreTest {
                 for (String account : List.of("seller", "buyer", "other")) players.ensureAccount(account);
             } catch (Exception | Error failure) {
                 if (pool != null) pool.close();
-                if (endpoint != null && endpoint.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):(4000|24000)/?")) {
-                    try { drop(); } catch (Exception cleanup) { failure.addSuppressed(cleanup); }
-                }
+                if(fixture!=null)try{fixture.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}
                 throw failure;
             }
         }
@@ -312,20 +322,9 @@ class PlayerTradeStoreTest {
         }
         PlayerRow row(long player) { return players.findPlayer(player).orElseThrow(); }
         int count(String table) { return sql.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class); }
-        private Connection admin() throws Exception {
-            var connection = DriverManager.getConnection(endpoint.replaceAll("/$", "") + "/?connectTimeout=3000&socketTimeout=30000",
-                    System.getProperty("game.it.mysql.user", "root"), System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""));
-            try {
-                try (var statement = connection.createStatement()) { statement.execute(StrongTiDbConnectionPolicy.SESSION_SQL); }
-                StrongTiDbConnectionPolicy.verify(connection, true); return connection;
-            } catch (Exception | Error failure) { try { connection.close(); } catch (Exception cleanup) { failure.addSuppressed(cleanup); } throw failure; }
-        }
-        private void drop() throws Exception {
-            if (!database.matches("playertrade[0-9a-f]{32}")) throw new IllegalStateException("拒绝删除非本例专属库");
-            try (var connection = admin(); var statement = connection.createStatement()) { statement.execute("DROP DATABASE IF EXISTS " + database); }
-        }
+        Connection schemaConnection() throws java.sql.SQLException {return fixture==null?source.getConnection():fixture.schemaConnection();}
         @Override public void close() throws Exception {
-            if (source instanceof DruidDataSource pool) { pool.close(); drop(); }
+            if (source instanceof DruidDataSource pool) { pool.close(); fixture.close(); }
             else sql.execute("SHUTDOWN");
         }
     }

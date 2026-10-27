@@ -11,13 +11,20 @@ import java.util.UUID;
 public final class RouteAuthorityInitializer {
     private RouteAuthorityInitializer(){}
     public static void initialize(Connection connection,String generation,Collection<Integer> configuredZones)throws SQLException{
+        initialize(connection,generation,configuredZones,System.getenv("MMORPG_SQL_SCHEMA_PRINCIPAL"));
+    }
+    /** 显式离线schema装配可注入独立主体；实际连接身份仍须读回一致，normal不得持有该凭据。 */
+    public static void initialize(Connection connection,String generation,Collection<Integer> configuredZones,String schemaPrincipal)throws SQLException{
         UUID id=UUID.fromString(generation);if(!id.toString().equals(generation)||id.equals(new UUID(0,0)))throw new IllegalArgumentException("初始化需要新的非零规范世代UUID");
+        if(schemaPrincipal==null||schemaPrincipal.isBlank())throw new SQLException("初始化仅允许独立fresh-prestart schema主体");
+        try(var s=connection.createStatement();var r=s.executeQuery("SELECT CURRENT_USER()")){if(!r.next()||!schemaPrincipal.equals(r.getString(1)))throw new SQLException("实际schema主体不符");}
+        for(String table:java.util.List.of("writer_registry","sql_writer_drain_run"))try(var s=connection.createStatement();var r=s.executeQuery("SELECT 1 FROM "+table+" LIMIT 1")){if(r.next())throw new SQLException("已有writer或维护run，拒绝fresh初始化");}
         if(!connection.getAutoCommit())throw new SQLException("路由初始化必须使用独立连接事务");
         connection.setAutoCommit(false);
         try{
             boolean existed;
             try(var statement=connection.prepareStatement("SELECT id FROM route_meta WHERE id=1")){statement.setQueryTimeout(5);try(var rows=statement.executeQuery()){existed=rows.next();}}
-            try(var statement=connection.prepareStatement("INSERT INTO route_meta(id,generation,writable,fence_shards) VALUES(1,?,0,64) ON DUPLICATE KEY UPDATE id=id")){statement.setQueryTimeout(5);statement.setString(1,generation);statement.executeUpdate();}
+            try(var statement=connection.prepareStatement("INSERT INTO route_meta(id,generation,writable,fence_shards,writer_epoch,catalog_revision,freeze_run_id) VALUES(1,?,0,64,1,1,?) ON DUPLICATE KEY UPDATE id=id")){statement.setQueryTimeout(5);statement.setString(1,generation);statement.setBytes(2,new byte[0]);statement.executeUpdate();}
             boolean alreadyWritable;
             try(var statement=connection.prepareStatement("SELECT generation,writable,fence_shards FROM route_meta WHERE id=1 FOR UPDATE")){statement.setQueryTimeout(5);try(var rows=statement.executeQuery()){
                 if(!rows.next()||!generation.equals(rows.getString(1))||!java.util.Set.of("0","1").contains(rows.getString(2))||rows.getInt(3)!=PlayerRouteAuthority.FENCE_SHARDS)throw new SQLException("路由世代已有不同原件，禁止自动修复或替换");

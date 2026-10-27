@@ -1,5 +1,8 @@
 package com.game.guild;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.druid.pool.DruidDataSource;
@@ -103,7 +106,7 @@ class GuildEndToEndIntegrationTest {
     private static final String USER = System.getProperty("game.it.mysql.user", "root");
     private static final String PASSWORD = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
     private static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&useAffectedRows=true"
-            + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1";
+            + "&connectTimeout=3000&socketTimeout=10000";
     private static final int ZONE = 1;
     private static final MessageIdRegistry REGISTRY = MessageIdRegistry.loadFromClasspath();
 
@@ -114,6 +117,7 @@ class GuildEndToEndIntegrationTest {
 
     private String database;
     private DruidDataSource dataSource;
+    private AuthoritySqlFixture fixture;
     private RedissonClient redis;
     private SimpleMeterRegistry meters;
     private ScheduledExecutorService leaseScheduler;
@@ -127,19 +131,10 @@ class GuildEndToEndIntegrationTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        database = "game_guild_it_e2e_" + UUID.randomUUID().toString().replace("-", "").substring(0, 10);
-        try (Connection conn = DriverManager.getConnection(MYSQL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = conn.createStatement()) {
-            st.execute("CREATE DATABASE `" + database + "` DEFAULT CHARACTER SET utf8mb4");
-        }
-        dataSource = new DruidDataSource();
-        dataSource.setUrl(MYSQL + "/" + database + PARAMS);
-        dataSource.setUsername(USER);
-        dataSource.setPassword(PASSWORD);
-        dataSource.setMaxActive(16);
-        dataSource.setMaxWait(10_000);
-        dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-        try (Connection conn = dataSource.getConnection(); Statement st = conn.createStatement()) {
+        fixture = AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(
+                MYSQL.replaceAll("/$", "") + "/", USER, PASSWORD, "game_guild_e2e", true, List.of(ZONE)), (conn, principal) -> {
+            com.game.guild.store.GuildTables.registry().initializeFresh(conn, principal);
+            try (Statement st = conn.createStatement()) {
             st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, name VARCHAR(64) NOT NULL,"
                     + " level INT UNSIGNED NOT NULL DEFAULT 1, class_id INT UNSIGNED NOT NULL DEFAULT 0,"
                     + " gender INT UNSIGNED NOT NULL DEFAULT 0, appearance_id VARCHAR(64) NOT NULL DEFAULT '',"
@@ -150,9 +145,17 @@ class GuildEndToEndIntegrationTest {
                 insertPlayer(ps, c, "丙", ZONE);
             }
         }
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(dataSource);
-        try(var connection=dataSource.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(ZONE));}
-        try(var connection=dataSource.getConnection();var ps=connection.prepareStatement("UPDATE player SET zone_id=0 WHERE player_id=?")){ps.setObject(1,new BigInteger(Long.toUnsignedString(c)));ps.executeUpdate();}
+        });
+        database = fixture.database();
+        dataSource = new DruidDataSource();
+        dataSource.setUrl(fixture.jdbcUrl(PARAMS));
+        dataSource.setUsername(fixture.normalUser());
+        dataSource.setPassword(fixture.normalPassword());
+        dataSource.setMaxActive(16);
+        dataSource.setMaxWait(10_000);
+        dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        AuthorityDataSourcePolicy.protectDruid(dataSource, fixture.writerBoot(), false);
+        try(var connection=fixture.schemaConnection();var ps=connection.prepareStatement("UPDATE player SET zone_id=0 WHERE player_id=?")){ps.setObject(1,new BigInteger(Long.toUnsignedString(c)));ps.executeUpdate();}
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(10);
         redis = Redisson.create(config);
@@ -249,10 +252,7 @@ class GuildEndToEndIntegrationTest {
         if (dataSource != null) {
             dataSource.close();
         }
-        try (Connection conn = DriverManager.getConnection(MYSQL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = conn.createStatement()) {
-            st.execute("DROP DATABASE IF EXISTS `" + database + "`");
-        }
+        if (fixture != null) fixture.close();
     }
 
     private ClientReply send(long player, String method, Message request) {

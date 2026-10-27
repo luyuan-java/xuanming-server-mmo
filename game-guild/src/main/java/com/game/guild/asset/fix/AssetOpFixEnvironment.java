@@ -102,8 +102,8 @@ final class AssetOpFixEnvironment {
 
         DruidDataSource dataSource = new DruidDataSource();
         dataSource.setUrl(url);
-        dataSource.setUsername(env.getProperty("spring.datasource.username", "root"));
-        dataSource.setPassword(env.getProperty("spring.datasource.password", ""));
+        dataSource.setUsername(env.getRequiredProperty("spring.datasource.username"));
+        dataSource.setPassword(env.getRequiredProperty("spring.datasource.password"));
         dataSource.setInitialSize(0);
         dataSource.setMinIdle(0);
         dataSource.setMaxActive(2);
@@ -111,6 +111,8 @@ final class AssetOpFixEnvironment {
         dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         String databaseLabel = expectDatabase == null ? namespace.value() : expectDatabase;
         String mismatch;
+        try{com.game.discovery.sql.AuthorityDataSourcePolicy.protectDruid(dataSource,com.game.common.sql.WriterAuthority.consumeEnvironment(),true);}
+        catch(java.io.IOException invalid){dataSource.close();throw new IllegalStateException("NORMAL CLI启动grant缺失",invalid);}
         try (Connection conn = dataSource.getConnection(PING_TIMEOUT_MS)) {
             if (!conn.isValid((int) (PING_TIMEOUT_MS / 1000))) {
                 throw new IllegalStateException("连接无效");

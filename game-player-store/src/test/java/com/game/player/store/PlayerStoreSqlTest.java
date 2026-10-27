@@ -1,5 +1,8 @@
 package com.game.player.store;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -57,7 +60,6 @@ class PlayerStoreSqlTest {
      */
     private static final String MYSQL_URL = System.getProperty("game.it.mysql");
     private static final boolean REQUIRE_TIDB = Boolean.getBoolean("game.it.require-tidb");
-    private static final java.util.Queue<String> MYSQL_DATABASES = new java.util.concurrent.ConcurrentLinkedQueue<>();
 
     private AnnotationConfigApplicationContext context;
     private PlayerStore store;
@@ -75,56 +77,8 @@ class PlayerStoreSqlTest {
     }
 
     @AfterEach
-    void tearDown() throws Exception {
-        if (!REQUIRE_TIDB) {
-            DataSource ds = context.getBean(DataSource.class);
-            context.close();
-            for (String database = MYSQL_DATABASES.poll(); database != null; database = MYSQL_DATABASES.poll()) {
-                new JdbcTemplate(ds).execute("DROP DATABASE IF EXISTS " + database);
-            }
-            return;
-        }
-        // 初始化失败也清理已经登记的本用例库；保留首错及独立清理错误。
-        Throwable failure = null;
-        try { if (context != null) context.close(); } catch (Throwable closeFailure) { failure = closeFailure; }
-        for (String database = MYSQL_DATABASES.poll(); database != null; database = MYSQL_DATABASES.poll()) {
-            try { dropStrictDatabase(database); } catch (Throwable cleanup) {
-                if (failure == null) failure = cleanup; else failure.addSuppressed(cleanup);
-            }
-        }
-        if (failure instanceof Error error) throw error;
-        if (failure instanceof Exception exception) throw exception;
-    }
-
-    private static java.sql.Connection strictAdmin() throws java.sql.SQLException {
-        if (MYSQL_URL == null || !MYSQL_URL.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):(4000|24000)/?")) {
-            throw new IllegalStateException("强TiDB回归必须显式指定本会话本机测试端口，拒绝H2或其它库");
-        }
-        var connection = java.sql.DriverManager.getConnection(MYSQL_URL.replaceAll("/$", "")
-                + "/?connectTimeout=3000&socketTimeout=10000", System.getProperty("game.it.mysql.user", "root"),
-                System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""));
-        try {
-            try (var statement = connection.createStatement()) { statement.execute(StrongTiDbConnectionPolicy.SESSION_SQL); }
-            StrongTiDbConnectionPolicy.verify(connection, true);
-            return connection;
-        } catch (java.sql.SQLException | RuntimeException | Error failure) {
-            try { connection.close(); } catch (java.sql.SQLException cleanup) { failure.addSuppressed(cleanup); }
-            throw failure;
-        }
-    }
-
-    private static void dropStrictDatabase(String database) throws java.sql.SQLException {
-        if (!database.matches("game_it_[0-9a-f]{32}")) throw new java.sql.SQLException("拒绝清理非本用例随机库");
-        try (var connection = strictAdmin(); var statement = connection.createStatement()) {
-            statement.execute("DROP DATABASE IF EXISTS " + database);
-            try (var query = connection.prepareStatement("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=?")) {
-                query.setString(1, database);
-                try (var rows = query.executeQuery()) {
-                    if (!rows.next() || rows.getInt(1) != 0) throw new java.sql.SQLException("玩家测试随机库清理后仍存在");
-                }
-            }
-        }
-        System.out.println("玩家强TiDB随机库清理并复核0=" + database);
+    void tearDown() {
+        if(context!=null)context.close();
     }
 
     private long newPlayer(long playerId, String name) {
@@ -154,9 +108,9 @@ class PlayerStoreSqlTest {
     void 登录夺权在实际player锁内复核账号与原修订_旧账号和ABA旧修订均拒绝() {
         long p = newPlayer(9001, "提交归属闸");
         store.ensureAccount("new_owner");
-        jdbc().update("UPDATE player SET account='new_owner',owner_revision=2 WHERE player_id=?", p);
+        schemaJdbc().update("UPDATE player SET account='new_owner',owner_revision=2 WHERE player_id=?", p);
         assertThat(store.claimOwnership(p, ACCOUNT, 1, Duration.ofSeconds(3))).isInstanceOf(ClaimResult.NotFound.class);
-        jdbc().update("UPDATE player SET account=?,owner_revision=3 WHERE player_id=?", ACCOUNT, p);
+        schemaJdbc().update("UPDATE player SET account=?,owner_revision=3 WHERE player_id=?", ACCOUNT, p);
         assertThat(store.claimOwnership(p, ACCOUNT, 1, Duration.ofSeconds(3))).isInstanceOf(ClaimResult.NotFound.class);
         assertThat(store.findPlayer(p).orElseThrow().getOwnerEpoch()).isZero();
         assertThat(store.claimOwnership(p, ACCOUNT, 3, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Claimed(1));
@@ -168,7 +122,7 @@ class PlayerStoreSqlTest {
         var initialState = jdbc().queryForMap("SELECT data,saved_epoch,updated_at FROM player_state WHERE player_id=?", p);
         assertThat((byte[]) initialState.get("data")).isNotNull().isEmpty();
         assertThat(store.claimOwnership(p, ACCOUNT, 1, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Claimed(1));
-        jdbc().update("UPDATE player SET trade_listing_id=101 WHERE player_id=?", p);
+        schemaJdbc().update("UPDATE player SET trade_listing_id=101 WHERE player_id=?", p);
         CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis() * 2);
         assertThat(store.claimOwnership(p, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Held(1));
         assertThat(store.recoverOwnershipAfterRestore(p, 5, 1, Duration.ofSeconds(3))).isEqualTo(new ClaimResult.Held(1));
@@ -202,7 +156,7 @@ class PlayerStoreSqlTest {
         assertThat(store.loadForScene(original.toBuilder().setOwnerRevision(2).build(), ACCOUNT, TX_TIMEOUT)).isEmpty();
         assertThat(jdbc().queryForObject("SELECT admission_proto FROM player_final_save WHERE player_id=? AND owner_epoch=1",
                 byte[].class, p)).isEqualTo(com.game.common.player.SceneAdmissionAuthority.original(original));
-        jdbc().update("UPDATE player_final_save SET admission_proto=NULL WHERE player_id=?", p);
+        schemaJdbc().update("UPDATE player_final_save SET admission_proto=NULL WHERE player_id=?", p);
         assertThat(store.loadForScene(original, ACCOUNT, TX_TIMEOUT)).isEmpty();
     }
 
@@ -238,17 +192,17 @@ class PlayerStoreSqlTest {
         };
         String[] tables = {"team_launch_role", "guild_trial_launch_role", "player_inbox_item", "trade_asset_op"};
         for (int i = 0; i < tables.length; i++) {
-            jdbc().update(insertions[i], p);
+            schemaJdbc().update(insertions[i], p);
             assertThat(store.recoverOwnershipAfterRestore(p, 10, 20, TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
             PlayerRow unchanged = store.findPlayer(p).orElseThrow();
             assertThat(unchanged.getOwnerEpoch()).isEqualTo(1);
             assertThat(unchanged.getOwnerRevision()).isEqualTo(1);
             assertThat(unchanged.getAccount()).isEqualTo(ACCOUNT);
-            jdbc().update("DELETE FROM " + tables[i] + " WHERE player_id=?", p);
+            schemaJdbc().update("DELETE FROM " + tables[i] + " WHERE player_id=?", p);
         }
-        jdbc().update("INSERT INTO player_inbox_item(shard,player_id,state) VALUES (?,?,5)",
+        schemaJdbc().update("INSERT INTO player_inbox_item(shard,player_id,state) VALUES (?,?,5)",
                 com.game.common.inbox.InboxShards.rowShard(p), p);
-        jdbc().update("INSERT INTO trade_asset_op(op_id,player_id,status,receipt_ack_pending,business_consumed) VALUES (103,?,2,0,1)", p);
+        schemaJdbc().update("INSERT INTO trade_asset_op(op_id,player_id,status,receipt_ack_pending,business_consumed) VALUES (103,?,2,0,1)", p);
         assertThat(store.recoverOwnershipAfterRestore(p, 10, 20, TX_TIMEOUT)).isEqualTo(new ClaimResult.Claimed(11));
         assertThat(store.findPlayer(p).orElseThrow().getOwnerRevision()).isEqualTo(21);
     }
@@ -506,12 +460,12 @@ class PlayerStoreSqlTest {
     void 损坏或原epoch已被外部改动的PENDING不删除不改绑也不写回() {
         long p = finalSavePlayer(1911, "终存子");
         registerFinal(p);
-        jdbc().update("UPDATE player_final_save SET data = ? WHERE player_id = ? AND owner_epoch = 1", facing(8).toByteArray(), p);
+        schemaJdbc().update("UPDATE player_final_save SET data = ? WHERE player_id = ? AND owner_epoch = 1", facing(8).toByteArray(), p);
         assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
         assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
         assertThat(store.loadState(p)).isEqualTo(facing(0.1));
-        jdbc().update("UPDATE player_final_save SET data = ? WHERE player_id = ? AND owner_epoch = 1", facing(0.9).toByteArray(), p);
-        jdbc().update("UPDATE player SET owner_epoch = 2 WHERE player_id = ?", p);
+        schemaJdbc().update("UPDATE player_final_save SET data = ? WHERE player_id = ? AND owner_epoch = 1", facing(0.9).toByteArray(), p);
+        schemaJdbc().update("UPDATE player SET owner_epoch = 2 WHERE player_id = ?", p);
         assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.FENCED);
         assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
         assertThat(jdbc().queryForObject("SELECT source_instance FROM player_final_save WHERE player_id = ? AND owner_epoch = 1",
@@ -626,13 +580,13 @@ class PlayerStoreSqlTest {
         long p=finalSavePlayer(1940,"隔离状态甲");
         registerFinal(p);
         // 故意破坏存量结构；启动M14本会拒启，这里证明已运行实例也不能把NULL当合法终态。
-        jdbc().execute(MYSQL_URL==null
+        schemaJdbc().execute(MYSQL_URL==null
                 ? "ALTER TABLE player_final_save ALTER COLUMN status DROP NOT NULL"
                 : "ALTER TABLE player_final_save MODIFY status VARCHAR(16) NULL");
         CLOCK.addAndGet(PlayerStore.OWNER_LEASE.toMillis()+1);
         byte[] before=stateBytes(p);
         for(String broken:java.util.Arrays.asList("BROKEN","pending","PENDING ","open","OPEN ","applied","APPLIED ",null)) {
-            jdbc().update("UPDATE player_final_save SET status=? WHERE player_id=? AND owner_epoch=1",broken,p);
+            schemaJdbc().update("UPDATE player_final_save SET status=? WHERE player_id=? AND owner_epoch=1",broken,p);
             assertThat(store.claimOwnership(p)).as("状态="+broken).isEqualTo(new ClaimResult.Held(1));
             assertThat(store.claimOwnership(p,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
             assertThat(store.recoverOwnershipAfterRestore(p, 20, 1, TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(1));
@@ -656,11 +610,11 @@ class PlayerStoreSqlTest {
     @Test
     void 异E未知意图也阻断全部入口_大小写尾空格不能被旧终态清理删除() {
         long p=finalSavePlayer(1941,"隔离状态乙");registerFinal(p);
-        jdbc().update("UPDATE player SET owner_epoch=2,owner_released=1,owner_lease_until=0 WHERE player_id=?",p);
+        schemaJdbc().update("UPDATE player SET owner_epoch=2,owner_released=1,owner_lease_until=0 WHERE player_id=?",p);
         CLOCK.addAndGet(100_000);
         byte[] before=stateBytes(p);
         for(String broken:List.of("BROKEN","open","OPEN ","applied","APPLIED ")) {
-            jdbc().update("UPDATE player_final_save SET status=?,applied_at=1 WHERE player_id=? AND owner_epoch=1",broken,p);
+            schemaJdbc().update("UPDATE player_final_save SET status=?,applied_at=1 WHERE player_id=? AND owner_epoch=1",broken,p);
             assertThat(store.claimOwnership(p,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(2));
             assertThat(store.recoverOwnershipAfterRestore(p, 20, 1, TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(2));
             assertThat(store.loadForScene(p,2,OTHER_SOURCE,TX_TIMEOUT)).isEmpty();
@@ -685,7 +639,7 @@ class PlayerStoreSqlTest {
         byte[] later=facing(2).toByteArray();
         assertThat(store.registerFinalSave(save(p,2,2,99),later,OTHER_SOURCE,TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.ACCEPTED);
         // 故障注入一个更大E的损坏记录，让合法PENDING在按epoch排序时排在前面。
-        jdbc().update("UPDATE player_final_save SET owner_epoch=3,status='BROKEN' WHERE player_id=? AND owner_epoch=1",p);
+        schemaJdbc().update("UPDATE player_final_save SET owner_epoch=3,status='BROKEN' WHERE player_id=? AND owner_epoch=1",p);
         assertThat(store.claimOwnership(p,TX_TIMEOUT)).isEqualTo(new ClaimResult.Held(2));
         assertThat(store.completeFinalSave(p,2,TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
         assertThat(finalStatus(p,2)).isEqualTo("PENDING");
@@ -734,12 +688,12 @@ class PlayerStoreSqlTest {
     void SQL意图状态或来源损坏不被原payload重投冒认为持久接管成功() {
         long p = finalSavePlayer(1922, "终存酉");
         registerFinal(p);
-        jdbc().update("UPDATE player_final_save SET status = 'BROKEN' WHERE player_id = ? AND owner_epoch = 1", p);
+        schemaJdbc().update("UPDATE player_final_save SET status = 'BROKEN' WHERE player_id = ? AND owner_epoch = 1", p);
         assertThat(registerFinal(p).status()).isEqualTo(FinalSaveStatus.CONFLICT);
         assertThat(store.probeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
         assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
         assertThat(stateBytes(p)).containsExactly(facing(0.1).toByteArray());
-        jdbc().update("UPDATE player_final_save SET status = 'PENDING', source_instance = 'bad source' "
+        schemaJdbc().update("UPDATE player_final_save SET status = 'PENDING', source_instance = 'bad source' "
                 + "WHERE player_id = ? AND owner_epoch = 1", p);
         assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
         assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
@@ -751,10 +705,10 @@ class PlayerStoreSqlTest {
     void 意图版本或seq被外部改坏_保留原行并冲突不能降级认重() {
         long p = finalSavePlayer(1923, "终存戌");
         registerFinal(p);
-        jdbc().update("UPDATE player_final_save SET save_seq = 2 WHERE player_id = ? AND owner_epoch = 1", p);
+        schemaJdbc().update("UPDATE player_final_save SET save_seq = 2 WHERE player_id = ? AND owner_epoch = 1", p);
         assertThat(registerFinal(p).status()).isEqualTo(FinalSaveStatus.CONFLICT);
         assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
-        jdbc().update("UPDATE player_final_save SET save_seq = 1, protocol_version = 2 WHERE player_id = ? AND owner_epoch = 1", p);
+        schemaJdbc().update("UPDATE player_final_save SET save_seq = 1, protocol_version = 2 WHERE player_id = ? AND owner_epoch = 1", p);
         assertThat(registerFinal(p).status()).isEqualTo(FinalSaveStatus.CONFLICT);
         assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
         assertThat(finalStatus(p, 1)).isEqualTo("PENDING");
@@ -783,7 +737,7 @@ class PlayerStoreSqlTest {
     void M14共同schema门禁接受正式脚本且缺表明确拒启() throws Exception {
         try (var connection = context.getBean(DataSource.class).getConnection()) {
             PlayerSqlAuthorityAutoConfiguration.verifyFinalSaveSchema(connection);
-            jdbc().execute("DROP TABLE player_final_save");
+            schemaJdbc().execute("DROP TABLE player_final_save");
             assertThatThrownBy(() -> PlayerSqlAuthorityAutoConfiguration.verifyFinalSaveSchema(connection))
                     .isInstanceOf(java.sql.SQLException.class);
         }
@@ -889,16 +843,16 @@ class PlayerStoreSqlTest {
         String finalTable = schema.substring(from);
         String changed = incompatible.apply(finalTable);
         assertThat(changed).as("每个负向案例必须真的改变正式DDL").isNotEqualTo(finalTable);
-        jdbc().execute("DROP TABLE player_final_save");
+        schemaJdbc().execute("DROP TABLE player_final_save");
         new ResourceDatabasePopulator(new org.springframework.core.io.ByteArrayResource(
-                changed.getBytes(java.nio.charset.StandardCharsets.UTF_8))).execute(context.getBean(DataSource.class));
+                changed.getBytes(java.nio.charset.StandardCharsets.UTF_8))).execute(schemaSource());
     }
 
 
     @Test
     void 口令记录_新账号没有口令_写入后读回规范账号与哈希_不存在的账号为空() {
         assertThat(store.findAccountPassword(ACCOUNT)).contains(new AccountPassword(ACCOUNT, null));
-        new JdbcTemplate(context.getBean(javax.sql.DataSource.class))
+        schemaJdbc()
                 .update("UPDATE account SET password_hash = ? WHERE account = ?", "$argon2id$v=19$x", ACCOUNT);
         assertThat(store.findAccountPassword(ACCOUNT)).contains(new AccountPassword(ACCOUNT, "$argon2id$v=19$x"));
         assertThat(store.findAccountPassword("robot_9999")).isEmpty();
@@ -931,7 +885,7 @@ class PlayerStoreSqlTest {
         // Connector/J 读 INT UNSIGNED 进 int 时超出 int 会抛 NumberOutOfRange（H2 不复现，只在真 MySQL 上跑）
         org.junit.jupiter.api.Assumptions.assumeTrue(MYSQL_URL != null, "需要 -Dgame.it.mysql");
         long p = newPlayer(1201, "戊");
-        new JdbcTemplate(context.getBean(DataSource.class)).update("UPDATE player SET level = 4294967295 WHERE player_id = ?", p);
+        schemaJdbc().update("UPDATE player SET level = 4294967295 WHERE player_id = ?", p);
 
         assertThat(store.findPlayer(p).orElseThrow().getLevel()).isEqualTo(4294967295L);
     }
@@ -950,7 +904,7 @@ class PlayerStoreSqlTest {
         long p = newPlayer(88002, "历史存档");
         assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(1));
         assertThat(store.saveStateHeld(save(p, 1, 2, 7), facing(0.5))).isTrue();
-        jdbc().update("DELETE FROM player_state WHERE player_id=?", p);
+        schemaJdbc().update("DELETE FROM player_state WHERE player_id=?", p);
         var directory = jdbc().queryForMap("SELECT * FROM player WHERE player_id=?", p);
         assertThatThrownBy(() -> store.loadState(p)).isInstanceOf(IllegalStateException.class);
         assertThat(jdbc().queryForObject("SELECT COUNT(*) FROM player_state WHERE player_id=?", Long.class, p)).isZero();
@@ -961,7 +915,7 @@ class PlayerStoreSqlTest {
     void 初始存档冲突_目录插入同事务回滚且孤儿原件不变() {
         long p = 88003;
         byte[] original = facing(0.75).toByteArray();
-        jdbc().update("INSERT INTO player_state(player_id,data,saved_epoch,updated_at) VALUES(?,?,7,123)", p, original);
+        schemaJdbc().update("INSERT INTO player_state(player_id,data,saved_epoch,updated_at) VALUES(?,?,7,123)", p, original);
         PlayerRow row = new PlayerRow();row.setPlayerId(p);row.setAccount(ACCOUNT);row.setZoneId(1);
         assertThatThrownBy(() -> store.createPlayerWithinCap(row, 5, List.of("孤儿冲突"))).isInstanceOf(RuntimeException.class);
         assertThat(store.findPlayer(p)).isEmpty();
@@ -1073,6 +1027,11 @@ class PlayerStoreSqlTest {
                 now + PlayerStore.OWNER_LEASE.toMillis(), now + MARGIN_MS, TX_TIMEOUT);
     }
 
+    private DataSource schemaSource() {
+        var fixture=context.getBean(Config.class).fixture;
+        return fixture==null?context.getBean(DataSource.class):fixture.schemaDataSource();
+    }
+    private JdbcTemplate schemaJdbc() {return new JdbcTemplate(schemaSource());}
     private JdbcTemplate jdbc() {
         return new JdbcTemplate(context.getBean(DataSource.class));
     }
@@ -2498,58 +2457,46 @@ class PlayerStoreSqlTest {
     /** 与生产相同的装配要素：建表脚本、Mapper、列名下划线转驼峰、Spring 事务（@Transactional 经代理生效）。 */
     @Configuration(proxyBeanMethods = false)
     @EnableTransactionManagement
-    static class Config {
+    static class Config implements org.springframework.beans.factory.DisposableBean {
+        private AuthoritySqlFixture fixture;
+        private DruidDataSource normalPool;
+        private JdbcDataSource memory;
+        @Override public void destroy() throws Exception {
+            // 配置实例拥有本用例夹具；不跨用例排空全局队列，失败初始化亦由Spring销毁已创建单例。
+            if(normalPool!=null)normalPool.close();
+            if(fixture!=null)fixture.close();
+            if(memory!=null)new JdbcTemplate(memory).execute("SHUTDOWN");
+        }
 
         @Bean
-        DataSource dataSource() throws java.sql.SQLException {
-            String database = "game_it_" + UUID.randomUUID().toString().replace("-", "");
-            DataSource ds;
-            if (REQUIRE_TIDB) {
-                // 使用同一生产策略初始化每条物理连接，建表前确认悲观RC强读，不能靠URL冒充TiDB。
-                try {
-                    MYSQL_DATABASES.add(database);
-                    try (var admin = strictAdmin(); var statement = admin.createStatement()) {
-                        statement.execute("CREATE DATABASE " + database);
-                    }
-                    System.out.println("玩家强TiDB随机库创建=" + database);
-                    var pool = new DruidDataSource();
-                    pool.setUrl(MYSQL_URL.replaceAll("/$", "") + "/" + database
-                            + "?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000");
-                    pool.setUsername(System.getProperty("game.it.mysql.user", "root"));
-                    pool.setPassword(System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""));
-                    pool.setMaxActive(12);
-                    pool.setMaxWait(1000);
-                    new StrongTiDbConnectionPolicy("玩家最终存盘集成", true).postProcessBeforeInitialization(pool, "fixture");
-                    try {
-                        pool.init();
-                        try (var connection = pool.getConnection()) { StrongTiDbConnectionPolicy.verify(connection, true); }
-                        new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(pool);
-                        new ResourceDatabasePopulator(new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(pool);
-                try(var routeInit=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11));}
-                        return pool;
-                    } catch (java.sql.SQLException | RuntimeException | Error failure) {
-                        pool.close();
-                        throw failure;
-                    }
-                } catch (java.sql.SQLException failure) {
-                    throw new IllegalStateException("玩家强TiDB夹具初始化失败", failure);
-                }
-            } else if (MYSQL_URL != null) {
-                // 真 MySQL：每个用例一个临时库（URL 里 createDatabaseIfNotExist），用例结束删库。
-                ds = new DriverManagerDataSource(MYSQL_URL + "/" + database
-                        + "?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES'",
-                        System.getProperty("game.it.mysql.user", "root"),
-                        System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""));
-                MYSQL_DATABASES.add(database);
-            } else {
-                JdbcDataSource h2 = new JdbcDataSource();
-                h2.setURL("jdbc:h2:mem:" + database + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
-                ds = h2;
+        DataSource dataSource() throws Exception {
+            if(REQUIRE_TIDB&&MYSQL_URL==null)throw new IllegalStateException("强TiDB回归缺显式测试端点");
+            if(MYSQL_URL!=null){
+                fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(MYSQL_URL,
+                        System.getProperty("game.it.mysql.user","root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD",""),
+                        "game_player",!REQUIRE_TIDB,java.util.List.of(1,2,3,7,9,11)),(connection,principal)->{
+                    new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql"),
+                            new ClassPathResource("db/role-pending-fence-fixture.sql")).populate(connection);
+                });
+                var pool=new DruidDataSource();normalPool=pool;
+                try{
+                    pool.setUrl(fixture.jdbcUrl("?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"));
+                    pool.setUsername(fixture.normalUser());pool.setPassword(fixture.normalPassword());
+                    pool.setMaxActive(12);pool.setMaxWait(1000);
+                    AuthorityDataSourcePolicy.protectDruid(pool,fixture.writerBoot(),REQUIRE_TIDB);
+                    try(var connection=pool.getConnection()){StrongTiDbConnectionPolicy.verify(connection,REQUIRE_TIDB);}
+                    return pool;
+                }catch(Exception|Error failure){pool.close();try{fixture.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
             }
-            new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(ds);
-            new ResourceDatabasePopulator(new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(ds);
-                try(var routeInit=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11));}
-            return ds;
+            var h2=new JdbcDataSource();memory=h2;
+            h2.setURL("jdbc:h2:mem:game_it_"+UUID.randomUUID()+";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
+            new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"),new ClassPathResource("db/game-player-schema.sql"),
+                    new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(h2);
+            try(var connection=h2.getConnection();var statement=connection.createStatement();var identity=statement.executeQuery("SELECT CURRENT_USER()")){
+                if(!identity.next())throw new java.sql.SQLException("H2 schema主体缺失");
+                com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11),identity.getString(1));
+            }
+            return h2;
         }
 
         @Bean

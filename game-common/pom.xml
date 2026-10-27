@@ -14,6 +14,7 @@
     <name>game-common</name>
     <description>无框架公共件：雪花 ID、gate 令牌签名</description>
 
+    <properties><protoc.spec>file:/__MMORPG_EXPLICIT_PROTOC_REQUIRED__</protoc.spec></properties>
     <dependencies>
         <dependency>
             <groupId>com.game</groupId>
@@ -35,4 +36,15 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+    <build><resources><resource><directory>src/main/resources</directory></resource><resource><directory>${project.build.directory}/generated-resources/sql-authority</directory><targetPath>META-INF/sql-authority</targetPath></resource></resources><plugins><plugin><groupId>io.github.ascopes</groupId><artifactId>protobuf-maven-plugin</artifactId><version>${protobuf-maven-plugin.version}</version>
+ <executions><execution><id>default</id><goals><goal>generate</goal></goals><configuration>
+  <!-- 全部服务共享同源SQL维护协议的生成类型；不为取协议类型加载player-store自动配置。 -->
+  <protoc kind="url"><url>${protoc.spec}</url></protoc><javaEnabled>true</javaEnabled><kotlinEnabled>false</kotlinEnabled>
+  <ignoreProjectDependencies>true</ignoreProjectDependencies><embedSourcesInClassOutputs>false</embedSourcesInClassOutputs>
+  <sourceDirectories><sourceDirectory>${project.basedir}/../game-player-store/src/main/proto</sourceDirectory></sourceDirectories>
+  <includes><include>game/storage/route_authority.proto</include></includes>
+  <importPaths><importPath>${project.basedir}/../game-player-store/src/main/proto</importPath></importPaths>
+  <outputDescriptorFile>${project.build.directory}/generated-resources/sql-authority/route-authority.desc</outputDescriptorFile>
+  <outputDescriptorIncludeImports>true</outputDescriptorIncludeImports><outputDescriptorAttached>false</outputDescriptorAttached>
+ </configuration></execution></executions></plugin></plugins></build>
 </project>

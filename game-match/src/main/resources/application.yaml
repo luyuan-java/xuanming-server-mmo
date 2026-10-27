@@ -24,9 +24,9 @@ spring:
   datasource:
     # 会话级 READ COMMITTED；STRICT_TRANS_TABLES；innodb_lock_wait_timeout=1（评分入账一局一笔事务，撞锁等待超时或死锁就整笔重跑，
     # 等更久只会拖住消费线程，match-spec §5.2；同帮会的取值）；useAffectedRows 与其他服务一致；socketTimeout 4 s。
-    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"
-    username: ${GAME_MYSQL_USER:root}
-    password: ${GAME_MYSQL_PASSWORD:}
+    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"
+    username: ${MMORPG_SQL_USERNAME}
+    password: ${MMORPG_SQL_PASSWORD}
     driver-class-name: com.mysql.cj.jdbc.Driver
     druid:
       initial-size: 2

@@ -31,6 +31,10 @@ import org.springframework.context.annotation.Configuration;
  */
 @Configuration(proxyBeanMethods = false)
 public class RatingConfiguration {
+    @Bean(name="matchMaintenanceConsumerStopped")
+    public java.util.function.BooleanSupplier maintenanceConsumerStopped(BattleResultIngest ingest){return ingest::maintenanceStopped;}
+    @Bean(name="matchMaintenanceConsumerFrontier")
+    public BattleResultConsumer.ReadinessControl maintenanceConsumerFrontier(BattleResultIngest ingest){return ingest.maintenanceControl();}
 
     private static final Logger log = LoggerFactory.getLogger(RatingConfiguration.class);
 
@@ -153,7 +157,7 @@ public class RatingConfiguration {
         BattleResultIngest ingest = new BattleResultIngest(settings, new BattleResultTopics(kafkaNames),
                 () -> new KafkaTopicAdmin(kafka.bootstrapServers(), ids.adminClientId()),
                 BattleResultIngest.kafkaConsumers(kafka.bootstrapServers(), ids.group(), ids.clientId()),
-                handler, metrics);
+                handler, metrics).withReadinessAdmin(()->org.apache.kafka.clients.admin.Admin.create(java.util.Map.of("bootstrap.servers",kafka.bootstrapServers(),"client.id",ids.adminClientId()+"-readiness")));
         ingest.requireDurableTopicBeforeAdmission();
         log.info("评分回流 enabled={} topic={} group={} 回合打满按平局阈值={} 覆盖={}", rating.enabled(), ingest.topic(), ids.group(),
                 rating.drawRoundCap(), rating.drawRoundCapByConfigId());

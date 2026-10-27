@@ -144,9 +144,9 @@ public class SceneNodeConfiguration {
                                BagTables bagTables, MissionTables missionTables, SkillTables skillTables,
                                PetTables petTables, NodeLinkAuth nodeLinkAuth,
                                SceneMetrics sceneMetrics, AuditProperties audit, KafkaNames kafkaNames,
-                               SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source) {
+                               SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source,com.game.common.sql.WriterAuthority boot) {
         return new SceneNode(props, redis, redisKeys, playerStore, playerTrades, registry, tables, attributeTables, bagTables, missionTables,
-                skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, kafkaNames, sceneBattleTables, sceneBattleMetrics,source);
+                skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, kafkaNames, sceneBattleTables, sceneBattleMetrics,source).withMaintenanceBoot(boot);
     }
 
     /** GM 签名停机的校验（密钥只从环境变量 GAME_GM_ADMIN_SECRET 读，没配一律拒）。 */

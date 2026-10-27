@@ -96,7 +96,7 @@ public class PlayerSqlAuthorityAutoConfigurationTest {
             // 正向装配使用唯一正式DDL；负向保留空库，验证独立于Mapper的拒启门禁。
             if (initializeSchema) {
                 new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(pool);
-                try(var routeInit=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11));}
+                try(var routeInit=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(routeInit,java.util.UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11), schemaPrincipal(routeInit));}
             }
             return pool;
         } catch (java.sql.SQLException failure){pool.close();throw new IllegalStateException("路由原件夹具初始化失败",failure);
@@ -146,4 +146,5 @@ public class PlayerSqlAuthorityAutoConfigurationTest {
                     .isInstanceOf(IllegalStateException.class).hasMessageContaining("主键");
         }
     }
+    private static String schemaPrincipal(java.sql.Connection connection)throws java.sql.SQLException{try(var statement=connection.createStatement();var rows=statement.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new java.sql.SQLException("缺少实际schema主体");return rows.getString(1);}}
 }

@@ -1,5 +1,8 @@
 package com.game.friend.store;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -38,48 +41,42 @@ class RecommendAndSweepMysqlTest {
     private static final String USER = System.getProperty("game.it.mysql.user", "root");
     private static final String PASSWORD = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
     private static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true"
-            + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES'";
-    private static final String DATABASE = "game_friend_rs_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+            + "&connectTimeout=3000&socketTimeout=10000";
+    private static AuthoritySqlFixture fixture;
     private static final long DAY = 86_400_000L;
 
     private static DruidDataSource dataSource;
 
     @BeforeAll
-    static void createDatabase() throws SQLException {
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("CREATE DATABASE `" + DATABASE + "` DEFAULT CHARACTER SET utf8mb4");
-        }
-        dataSource = new DruidDataSource();
-        dataSource.setUrl(BASE_URL + "/" + DATABASE + PARAMS);
-        dataSource.setUsername(USER);
-        dataSource.setPassword(PASSWORD);
-        dataSource.setMaxActive(8);
+    static void createDatabase() throws Exception {
         PbMysql db = new PbMysql();
         db.register(FriendEdgeRow.getDefaultInstance());
         db.register(FriendRequestRow.getDefaultInstance());
         db.register(FriendCapacityRow.getDefaultInstance());
         db.register(FriendBlockRow.getDefaultInstance());
-        try (Connection c = dataSource.getConnection()) {
-            db.syncAll(c);
+        fixture = AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(
+                BASE_URL.replaceAll("/$", "") + "/", USER, PASSWORD, "game_friend_rs", true, List.of(1)), (c, principal) -> {
+            db.initializeFresh(c, principal);
             try (Statement st = c.createStatement()) {
                 st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED PRIMARY KEY, account VARBINARY(191) NOT NULL,"
                         + " owner_revision BIGINT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0, zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
             }
-            new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(dataSource);
-            com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1));
-        }
+        });
+        dataSource = new DruidDataSource();
+        dataSource.setUrl(fixture.jdbcUrl(PARAMS));
+        dataSource.setUsername(fixture.normalUser());
+        dataSource.setPassword(fixture.normalPassword());
+        dataSource.setMaxActive(8);
+        dataSource.setMaxWait(10_000);
+        dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        AuthorityDataSourcePolicy.protectDruid(dataSource, fixture.writerBoot(), false);
+        try (Connection c = dataSource.getConnection()) { db.syncAll(c); }
     }
 
     @AfterAll
-    static void dropDatabase() throws SQLException {
-        if (dataSource != null) {
-            dataSource.close();
-        }
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("DROP DATABASE IF EXISTS `" + DATABASE + "`");
-        }
+    static void dropDatabase() throws Exception {
+        if (dataSource != null) dataSource.close();
+        if (fixture != null) fixture.close();
     }
 
     @BeforeEach
@@ -317,7 +314,7 @@ class RecommendAndSweepMysqlTest {
     }
 
     private static void exec(String sql) throws SQLException {
-        try (Connection c = dataSource.getConnection(); Statement st = c.createStatement()) {
+        try (Connection c = fixture.schemaConnection(); Statement st = c.createStatement()) {
             st.execute(sql);
         }
     }

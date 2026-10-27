@@ -1,5 +1,8 @@
 package com.game.trade.service;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.druid.pool.DruidDataSource;
@@ -54,8 +57,7 @@ class TradeFlowMysqlTest {
     private static final String USER = System.getProperty("game.it.mysql.user", "root");
     private static final String PASSWORD = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
     private static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&useAffectedRows=true"
-            + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout="
-            + TradeLimits.LOCK_WAIT_TIMEOUT_SECONDS;
+            + "&connectTimeout=3000&socketTimeout=10000";
 
     private static final long SELLER = 9_000_000_000_000_000_001L;   // > 2^62，接近 2^63（雪花 player_id 的量级）
     private static final long BUYER = 9_000_000_000_000_000_002L;
@@ -63,7 +65,7 @@ class TradeFlowMysqlTest {
     private static final long NO_ZONE = 9_000_000_000_000_000_004L;
     private static final int ZONE = 3;
 
-    private String database;
+    private AuthoritySqlFixture fixture;
     private DruidDataSource dataSource;
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final TradeMetrics metrics = new TradeMetrics(meters);
@@ -71,41 +73,35 @@ class TradeFlowMysqlTest {
     private PlayerHomeZones homeZones;
 
     @BeforeAll
-    void setUp() throws SQLException {
-        database = "game_trade_flow_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD); Statement st = c.createStatement()) {
-            st.execute("CREATE DATABASE `" + database + "` DEFAULT CHARACTER SET utf8mb4");
-        }
-        dataSource = new DruidDataSource();
-        dataSource.setUrl(BASE_URL + "/" + database + PARAMS);
-        dataSource.setUsername(USER);
-        dataSource.setPassword(PASSWORD);
-        dataSource.setMaxWait(10_000);
-        dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-        TradeTables.sync(dataSource, Duration.ofMinutes(1));
-        try (Connection c = dataSource.getConnection(); Statement st = c.createStatement()) {
+    void setUp() throws Exception {
+        fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(BASE_URL,USER,PASSWORD,
+                "game_trade_flow",true,List.of(ZONE,ZONE+1)),(c,principal)->{
+            TradeTables.registry().initializeFresh(c,principal);
+            try(var st=c.createStatement()){
             st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, name VARCHAR(64) NOT NULL DEFAULT '',"
                     + " level INT NOT NULL DEFAULT 1, class_id INT NOT NULL DEFAULT 0, gender INT NOT NULL DEFAULT 0,"
                     + " appearance_id VARCHAR(64) NOT NULL DEFAULT '', zone_id INT UNSIGNED NOT NULL DEFAULT 0)");
             st.execute("INSERT INTO player (player_id, name, zone_id) VALUES (" + Long.toUnsignedString(SELLER) + ", 'seller', " + ZONE
                     + "), (" + Long.toUnsignedString(BUYER) + ", 'buyer', " + ZONE + "), (" + Long.toUnsignedString(OTHER_ZONE)
                     + ", 'other', " + (ZONE + 1) + ")");
-        }
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(dataSource);
-        try(var connection=dataSource.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(ZONE,ZONE+1));}
+            }
+        });
+        dataSource=new DruidDataSource();dataSource.setUrl(fixture.jdbcUrl(PARAMS));
+        dataSource.setUsername(fixture.normalUser());dataSource.setPassword(fixture.normalPassword());dataSource.setMaxWait(10000);
+        dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        AuthorityDataSourcePolicy.protectDruid(dataSource,fixture.writerBoot(),false);
+        TradeTables.sync(dataSource,Duration.ofMinutes(1));
         store = new JdbcListingStore(dataSource::getConnection, 3, metrics);
         homeZones = new PlayerHomeZones(dataSource,
                 Duration.ofMillis(TradeLimits.HOME_ZONE_LOOKUP_TIMEOUT_MS));
     }
 
     @AfterAll
-    void tearDown() throws SQLException {
+    void tearDown() throws Exception {
         if (dataSource != null) {
             dataSource.close();
         }
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD); Statement st = c.createStatement()) {
-            st.execute("DROP DATABASE IF EXISTS `" + database + "`");
-        }
+        if(fixture!=null)fixture.close();
     }
 
     private JubaozhaiService service(MarketScope scope) {

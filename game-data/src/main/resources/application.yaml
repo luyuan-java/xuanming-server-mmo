@@ -15,9 +15,9 @@ spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     # useAffectedRows=true：ON DUPLICATE KEY UPDATE 的受影响行数 = 新插入的行数（重放的重复行计 0）
-    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=30000&useAffectedRows=true"
-    username: ${GAME_MYSQL_USER:root}
-    password: ${GAME_MYSQL_PASSWORD:}
+    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=30000&useAffectedRows=true"
+    username: ${MMORPG_SQL_USERNAME}
+    password: ${MMORPG_SQL_PASSWORD}
     druid:
       initial-size: 1
       min-idle: 1
@@ -27,7 +27,7 @@ spring:
   sql:
     init:
       # 只建本服务自己的表（CREATE TABLE IF NOT EXISTS）
-      mode: always
+      mode: never
       schema-locations: classpath:db/game-data-schema.sql
 
 # 管理端口：actuator（health / prometheus）+ 运维接口 /admin/**。默认只绑本机，不要暴露到公网。

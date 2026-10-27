@@ -1,5 +1,8 @@
 package com.game.mail;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -21,7 +24,8 @@ import org.junit.jupiter.api.*;
 
 /** 真TiDB隔离库；缺DSN时仅开发默认跳过，MAIL_RANK_REQUIRE_TESTS=1强制失败。 */
 class MailStoreTiDbTest {
-    private String base, database;
+    private String base;
+    private AuthoritySqlFixture fixture;
     private DruidDataSource pool;
     private AuthorityJdbc jdbc;
     private MailStore store;
@@ -36,32 +40,27 @@ class MailStoreTiDbTest {
                 fail("MAIL_RANK_TEST_JDBC必须配置");
             Assumptions.assumeTrue(false, "未配置隔离TiDB");
         }
-        database = "mail_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-        // 单JVM跨模块执行时，DriverManager的首次服务发现可能来自上一个测试类加载器。
         Class.forName("com.mysql.cj.jdbc.Driver");
-        try (var c = DriverManager.getConnection(base, "root", ""); var s = c.createStatement()) {
-            s.execute("CREATE DATABASE " + database);
-        }
+        fixture = AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(base,
+                System.getProperty("game.it.mysql.user", "root"), System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""),
+                "mail", false, List.of(1)), (connection, principal) -> {
+            MailTables.registry().initializeFresh(connection, principal);
+            try (var sql = connection.createStatement()) {
+                sql.execute("CREATE TABLE guild_member (player_id BIGINT UNSIGNED PRIMARY KEY,guild_id BIGINT UNSIGNED NOT NULL)");
+                sql.execute("CREATE TABLE player_state (player_id BIGINT UNSIGNED PRIMARY KEY,data MEDIUMBLOB NOT NULL)");
+                sql.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARBINARY(191) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+            }
+        });
         pool = new DruidDataSource();
-        pool.setUrl(base + database + "?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true");
-        pool.setUsername("root");
-        pool.setPassword("");
+        pool.setUrl(fixture.jdbcUrl("?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true"));
+        pool.setUsername(fixture.normalUser());
+        pool.setPassword(fixture.normalPassword());
         pool.setMaxActive(16);
         pool.setMaxWait(5000);
-        pool.setConnectionInitSqls(List.of(StrongTiDbConnectionPolicy.SESSION_SQL));
-        pool.init();
+        AuthorityDataSourcePolicy.protectDruid(pool, fixture.writerBoot(), true);
         try (var first = pool.getConnection(); var second = pool.getConnection()) {
             StrongTiDbConnectionPolicy.verify(first, true);
             StrongTiDbConnectionPolicy.verify(second, true);
-            try (var s = first.createStatement()) {
-                s.execute("CREATE TABLE guild_member (player_id BIGINT UNSIGNED PRIMARY KEY,guild_id BIGINT UNSIGNED NOT NULL)");
-                s.execute("CREATE TABLE player_state (player_id BIGINT UNSIGNED PRIMARY KEY,data MEDIUMBLOB NOT NULL)");
-            }
-        }
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
-        try(var connection=pool.getConnection();var statement=connection.createStatement()){
-            statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARBINARY(191) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
-            com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1));
         }
         MailTables.sync(pool);
         jdbc = new AuthorityJdbc(pool);
@@ -71,12 +70,7 @@ class MailStoreTiDbTest {
     void cleanup() throws Exception {
         if (pool != null)
             pool.close();
-        if (database != null) {
-            assertTrue(database.matches("mail_it_[0-9a-f]{16}"));
-            try (var c = DriverManager.getConnection(base, "root", ""); var s = c.createStatement()) {
-                s.execute("DROP DATABASE " + database);
-            }
-        }
+        if (fixture != null) fixture.close();
     }
     private SendMailRequest personal(long request, long player) {
         return SendMailRequest.newBuilder()
@@ -89,13 +83,11 @@ class MailStoreTiDbTest {
                 .build();
     }
     private void roleOwner(String account, long revision, long listing) throws Exception {
-        jdbc.tx(budget(), s -> {
-            s.update("CREATE TABLE IF NOT EXISTS player (player_id BIGINT UNSIGNED PRIMARY KEY,account VARBINARY(191) NOT NULL,"
-                    + "owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
-            s.update("INSERT INTO player(player_id,account,owner_revision,trade_listing_id) VALUES (7,?,?,?) ON DUPLICATE KEY UPDATE account=?,owner_revision=?,trade_listing_id=?",
-                    account, revision, listing, account, revision, listing);
-            return null;
-        });
+        try (var connection = fixture.schemaConnection(); var sql = connection.prepareStatement(
+                "INSERT INTO player(player_id,account,owner_revision,trade_listing_id) VALUES (7,?,?,?) ON DUPLICATE KEY UPDATE account=?,owner_revision=?,trade_listing_id=?")) {
+            sql.setString(1, account); sql.setLong(2, revision); sql.setLong(3, listing);
+            sql.setString(4, account); sql.setLong(5, revision); sql.setLong(6, listing); sql.executeUpdate();
+        }
     }
     private MailStore actor(String account, long revision) {
         return store.forActor(SessionContext.newBuilder().setPlayerId(7).setAccount(account).setOwnerRevision(revision).build());
@@ -216,7 +208,7 @@ class MailStoreTiDbTest {
         stream.addReceipts(AssetOpReceiptState.newBuilder().setSeq(operation.seq()).setCorrelationId(op)
                 .setRequestDigest(com.game.api.asset.AssetOpSignatures.requestDigest(operation.request())));
         var state = PlayerState.newBuilder().setAssetLedger(AssetOpLedgerState.newBuilder().addStreams(stream)).build();
-        jdbc.tx(budget(), s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(), s -> {
             s.update("INSERT INTO player_state (player_id,data) VALUES (?,?)", 7, state.toByteArray());
             return null;
         });
@@ -234,14 +226,14 @@ class MailStoreTiDbTest {
     }
     @Test
     void guildTextEligibilityIsTheSameSqlSnapshot() throws Exception {
-        jdbc.tx(budget(), s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(), s -> {
             s.update("INSERT INTO guild_member VALUES (7,90)");
             return null;
         });
         var r = SendMailRequest.newBuilder().setSenderKind(2).setRequestId(44).setGuildId(90).setTitle("帮会公告").build();
         store.send("guild", 3, r, budget());
         assertEquals(1, store.list(7, ListMailsRequest.getDefaultInstance(), budget()).getMailsCount());
-        jdbc.tx(budget(), s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(), s -> {
             s.update("DELETE FROM guild_member WHERE player_id=7");
             return null;
         });
@@ -261,14 +253,14 @@ class MailStoreTiDbTest {
         stream.addReceipts(AssetOpReceiptState.newBuilder().setSeq(op.seq()).setCorrelationId(op.id())
                 .setRequestDigest(com.game.api.asset.AssetOpSignatures.requestDigest(op.request())));
         var data = PlayerState.newBuilder().setAssetLedger(AssetOpLedgerState.newBuilder().addStreams(stream)).build();
-        jdbc.tx(budget(), s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(), s -> {
             s.update("INSERT INTO player_state (player_id,data) VALUES (?,?)", 7, data.toByteArray());
             return null;
         });
         var read = new PersistedAssetLedgerReader(pool).read(7);
         assertInstanceOf(PersistedAssetLedgerReader.Read.Loaded.class, read);
         store.settle(budget(), op, ((PersistedAssetLedgerReader.Read.Loaded) read).ledger());
-        jdbc.tx(budget(), s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(), s -> {
             s.update("UPDATE mail_message SET expire_ms=1 WHERE mail_id=?", id);
             return null;
         });
@@ -291,7 +283,7 @@ class MailStoreTiDbTest {
     @Test
     void unknownFutureClaimStateIsVisibleProtectedAndNeverCredited() throws Exception {
         long id = store.send("admin", 1, personal(77, 7), budget()).getMailId();
-        jdbc.tx(budget(), s -> {
+        new AuthorityJdbc(fixture.schemaDataSource()).tx(budget(), s -> {
             s.update("UPDATE mail_state SET claim_state=99 WHERE player_id=7 AND mail_id=?", id);
             s.update("UPDATE mail_message SET expire_ms=1 WHERE mail_id=?", id);
             return null;

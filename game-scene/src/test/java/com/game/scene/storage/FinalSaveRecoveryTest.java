@@ -400,6 +400,12 @@ class FinalSaveRecoveryTest {
         assertThat(recovery.awaitingAppliedCount()).isZero();
     }
 
+    @Test void maintenanceCannotCloseAfterTx1BeforeAppliedOwnerRelease()throws Exception{
+        accepts(7,6);List<FinalSaveRegistration> received=new ArrayList<>();recovery.submit(snapshot(7,6),received::add);
+        storage.drain();logic.drain();assertThat(recovery.awaitRegistered(0)).isZero();assertThat(recovery.awaitApplied(0)).isPositive();assertThat(recovery.stopIfApplied()).isFalse();
+        recovery.sweep();storage.drain();logic.drain();assertThat(recovery.awaitApplied(0)).isZero();assertThat(recovery.stopIfApplied()).isTrue();
+    }
+
     private static final class ManualExecutor implements Executor {
         private final ArrayDeque<Runnable> tasks = new ArrayDeque<>();
         private boolean reject;

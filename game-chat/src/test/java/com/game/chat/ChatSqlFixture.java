@@ -3,6 +3,8 @@ package com.game.chat;
 import static org.mockito.Mockito.*;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
 import com.game.chat.store.ChatRoleAuthority;
 import com.game.chat.store.JdbcChatStore;
 import com.game.common.player.RouteAuthorityInitializer;
@@ -31,6 +33,7 @@ final class ChatSqlFixture implements AutoCloseable {
     final JdbcChatStore store;
     final AtomicLong clock = new AtomicLong(1_000_000);
     private final DataSource physical;
+    private final AuthoritySqlFixture sqlFixture;
     private final String database;
     private final String rootUrl;
     private final String user;
@@ -40,6 +43,7 @@ final class ChatSqlFixture implements AutoCloseable {
 
     ChatSqlFixture(ChatProperties rules, String endpoint) throws Exception {
         if (endpoint == null) {
+            sqlFixture=null;
             var h2 = new JdbcDataSource();
             h2.setURL("jdbc:h2:mem:chat_" + UUID.randomUUID() + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=5000");
             physical = h2;
@@ -74,30 +78,34 @@ final class ChatSqlFixture implements AutoCloseable {
             rootUrl = "jdbc:mysql://" + endpoint + "/";
             user = System.getProperty("game.it.mysql.user", "root");
             password = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
-            database = "game_chat_it_" + UUID.randomUUID().toString().replace("-", "");
-            try (var connection = DriverManager.getConnection(rootUrl + parameters(), user, password);
-                 var statement = connection.createStatement()) {
-                statement.setQueryTimeout(3);
-                statement.execute(StrongTiDbConnectionPolicy.SESSION_SQL);
-                StrongTiDbConnectionPolicy.verify(connection, true);
-                statement.execute("CREATE DATABASE `" + database + "` CHARACTER SET utf8mb4");
+            var options=AuthoritySqlFixture.Options.fromEnvironment(rootUrl,user,password,"game_chat",false,List.of(1));
+            sqlFixture=AuthoritySqlFixture.prepare(options,(connection,principal)->{
+                try(var statement=connection.createStatement()){statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,account VARCHAR(191) NOT NULL,owner_revision BIGINT NOT NULL,trade_listing_id BIGINT NOT NULL,zone_id INT NOT NULL)");}
+                new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-authority.sql")).populate(connection);
+            });
+            database=sqlFixture.database();var pool=new DruidDataSource();pool.setUrl(sqlFixture.jdbcUrl(parameters()));pool.setUsername(sqlFixture.normalUser());pool.setPassword(sqlFixture.normalPassword());pool.setMaxActive(8);pool.setMaxWait(1000);
+            try { AuthorityDataSourcePolicy.protectDruid(pool,sqlFixture.writerBoot(),true); }
+            catch (Exception failure) {
+                pool.close();
+                try { sqlFixture.close(); } catch (Exception cleanup) { failure.addSuppressed(cleanup); }
+                throw failure;
             }
-            var pool = new DruidDataSource();
-            pool.setUrl(rootUrl + database + parameters());
-            pool.setUsername(user); pool.setPassword(password);
-            pool.setMaxActive(8); pool.setMaxWait(1000); pool.setConnectionInitSqls(List.of(StrongTiDbConnectionPolicy.SESSION_SQL));
             physical = source = pool;
         }
-        sql = new JdbcTemplate(source);
+        sql = new JdbcTemplate(sqlFixture==null?source:sqlFixture.schemaDataSource());
         ChatRoleAuthority created = null;
         try {
+        if(endpoint==null){
         sql.execute("CREATE TABLE player(player_id " + (endpoint == null ? "DECIMAL(20,0)" : "BIGINT UNSIGNED")
                 + " NOT NULL PRIMARY KEY,account VARCHAR(191) NOT NULL,owner_revision BIGINT NOT NULL,"
                 + "trade_listing_id BIGINT NOT NULL,zone_id INT NOT NULL)");
         install("db/game-route-authority-schema.sql", false);
         install("db/chat-authority.sql", endpoint == null);
+        }
         try (var connection = source.getConnection()) {
-            RouteAuthorityInitializer.initialize(connection, UUID.randomUUID().toString(), List.of(1));
+            if(endpoint==null){String principal;try(var identity=connection.createStatement();var rows=identity.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new java.sql.SQLException("缺H2 schema主体");principal=rows.getString(1);}
+                RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1),principal);
+            }
             ChatSqlConfiguration.verifySchema(connection);
             if (endpoint != null) StrongTiDbConnectionPolicy.verify(connection, true);
         }
@@ -139,13 +147,6 @@ final class ChatSqlFixture implements AutoCloseable {
 
     private void cleanupDatabase() throws Exception {
         if (database == null) { sql.execute("DROP ALL OBJECTS"); return; }
-        if (!database.matches("game_chat_it_[0-9a-f]{32}")) throw new IllegalStateException("不能清理非本夹具随机库");
-        try (var connection = DriverManager.getConnection(rootUrl + parameters(), user, password);
-             var statement = connection.createStatement()) {
-            statement.setQueryTimeout(3);
-            statement.execute(StrongTiDbConnectionPolicy.SESSION_SQL);
-            StrongTiDbConnectionPolicy.verify(connection, true);
-            statement.execute("DROP DATABASE `" + database + "`");
-        }
+        sqlFixture.close();
     }
 }

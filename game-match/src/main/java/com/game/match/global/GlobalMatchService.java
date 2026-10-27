@@ -78,6 +78,14 @@ public final class GlobalMatchService implements AutoCloseable {
     private long joinPlayer,joinHigh,joinLow,directOwner,directHigh,directLow;
     private int directKind;
     /** 两条独立有界恢复循环，只沿永久原件推进；游标是可丢缓存，不授予业务权限。 */
+    public void closeRoots(String run){store.closeRoots(run);}
+    public boolean stopAndReport(long timeoutNanos)throws InterruptedException{
+        if(!store.rootsClosed()||store.maintenanceOutstanding()!=0||!running.isEmpty()||!admissions.isEmpty())return false;
+        long until=System.nanoTime()+Math.max(0,timeoutNanos);admissionTimer.shutdown();
+        if(!admissionTimer.awaitTermination(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS))return false;
+        workers.shutdown();return workers.awaitTermination(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS)
+                &&running.isEmpty()&&admissions.isEmpty()&&store.maintenanceOutstanding()==0;
+    }
     public void start(){
         admissionTimer.scheduleWithFixedDelay(()->{try{recoverJoins();}catch(RuntimeException failure){log.warn("原Join恢复扫描待重读，类别={}",failure.getClass().getSimpleName());}},500,500,TimeUnit.MILLISECONDS);
         admissionTimer.scheduleWithFixedDelay(()->{try{recoverDirects();}catch(RuntimeException failure){log.warn("原direct恢复扫描待重读，类别={}",failure.getClass().getSimpleName());}},500,500,TimeUnit.MILLISECONDS);

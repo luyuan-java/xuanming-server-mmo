@@ -99,6 +99,61 @@ public final class BattleResultConsumer implements Runnable {
     /** 正在为入账重试而暂停消费（重平衡新分到的分区也要跟着暂停）。只在本线程读写。 */
     private boolean pausedForRetry;
     private volatile boolean running = true;
+    private volatile byte[] maintenanceFrontier=new byte[0];
+    private boolean groupAssigned;
+    private final java.util.concurrent.atomic.AtomicReference<ReadinessRequest> readinessRequest=new java.util.concurrent.atomic.AtomicReference<>();
+    public interface ReadinessControl {
+        com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness read(com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness seed);
+        void withReady(com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness seed,com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness expected,Runnable open);
+    }
+    private static final class ReadinessRequest {
+        final com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness seed;
+        final java.util.concurrent.CompletableFuture<com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness> result=new java.util.concurrent.CompletableFuture<>();
+        volatile com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness first;
+        com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness expected;Runnable open;final long deadline=System.nanoTime()+10_000_000_000L;boolean cancelled,started;
+        ReadinessRequest(com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness seed){this.seed=seed;}
+    }
+    public byte[] maintenanceFrontier(){return running?maintenanceFrontier.clone():new byte[0];}
+    /** HTTP维护线程提交只读请求；所有KafkaConsumer操作仍由消费线程独占。连续两轮稳定代次才交付。 */
+    public com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness maintenanceReadiness(com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness seed){return requestReadiness(new ReadinessRequest(seed));}
+    public void withMaintenanceReady(com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness seed,com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness expected,Runnable open){
+        var request=new ReadinessRequest(seed);request.expected=Objects.requireNonNull(expected);request.open=Objects.requireNonNull(open);requestReadiness(request);
+    }
+    private com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness requestReadiness(ReadinessRequest request){
+        if(!running)throw new IllegalStateException("消费者已停止");
+        if(!readinessRequest.compareAndSet(null,request))throw new IllegalStateException("已有消费者资格请求未结束");
+        try{return request.result.get(10,java.util.concurrent.TimeUnit.SECONDS);}
+        catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw new IllegalStateException("消费者资格等待被取消");}
+        catch(java.util.concurrent.ExecutionException|java.util.concurrent.TimeoutException failure){throw new IllegalStateException("消费者资格未知或超时");}
+        finally{synchronized(request){if(!request.started)request.cancelled=true;}readinessRequest.compareAndSet(request,null);}
+    }
+    private void clearReadiness(){maintenanceFrontier=new byte[0];var pending=readinessRequest.get();if(pending!=null)pending.first=null;}
+    private void recordReadyPoll(){
+        var request=readinessRequest.get();if(request==null||request.result.isDone())return;
+        try{
+            if(!groupAssigned||!running||pausedForRetry){clearReadiness();return;}
+            var metadata=consumer.groupMetadata();if(metadata.generationId()<0||metadata.memberId().isBlank()||metadata.groupId().isBlank()){clearReadiness();return;}
+            var seed=request.seed;var expected=new java.util.LinkedHashMap<TopicPartition,com.game.player.store.state.SqlWriterMaintenanceReceipt.KafkaPartitionClosure>();
+            for(var original:seed.getExpectedPartitionsList())if(original.getGroup().equals(metadata.groupId())&&original.getTopicName().equals(topic)){
+                if(expected.put(new TopicPartition(topic,original.getPartition()),original)!=null)throw new IllegalStateException("消费者P0目录重复");
+            }
+            if(expected.isEmpty())throw new IllegalStateException("实际consumer group/topic不在固定P0目录");
+            var assignment=new java.util.HashSet<>(consumer.assignment());if(!expected.keySet().containsAll(assignment))throw new IllegalStateException("实际assignment超出固定P0目录");
+            var bounds=Duration.ofSeconds(2);var earliest=consumer.beginningOffsets(assignment,bounds);var ends=consumer.endOffsets(assignment,bounds);var committed=consumer.committed(assignment,bounds);
+            var group=seed.toBuilder().setGroup(metadata.groupId()).setGenerationId(metadata.generationId()).setMemberId(metadata.memberId()).clearExpectedPartitions().addAllExpectedPartitions(expected.values()).clearAssignedPartitions();
+            for(var partition:assignment.stream().sorted(java.util.Comparator.comparing(TopicPartition::topic).thenComparingInt(TopicPartition::partition)).toList()){
+                var original=expected.get(partition);var begin=earliest.get(partition);var finish=ends.get(partition);var next=committed.get(partition);
+                if(begin==null||finish==null||next==null||begin<0||begin>original.getProtectedCommittedFloor()||finish<original.getProtectedCommittedFloor()||next.offset()!=finish)throw new IllegalStateException("消费者历史边界、提交位点或末端未知/未排空");
+                group.addAssignedPartitions(original.toBuilder().setFinalEarliest(begin).setFinalExclusiveEnd(finish).setFinalCommitted(next.offset()));
+            }
+            var current=group.build();if(!current.equals(request.first)){request.first=current;maintenanceFrontier=new byte[0];return;}
+            var result=com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerReadiness.newBuilder().addGroups(current).build();
+            byte[] raw=new byte[result.getSerializedSize()];var out=com.google.protobuf.CodedOutputStream.newInstance(raw);out.useDeterministicSerialization();result.writeTo(out);out.checkNoSpaceLeft();
+            maintenanceFrontier=java.security.MessageDigest.getInstance("SHA-256").digest(raw);
+            synchronized(request){if(request.cancelled||System.nanoTime()>=request.deadline||readinessRequest.get()!=request)throw new IllegalStateException("消费者资格请求已过期");if(request.expected!=null&&!request.expected.equals(result))throw new IllegalStateException("开放前consumer代次或位点改变");request.started=true;}
+            if(request.open!=null)request.open.run();request.result.complete(result);
+        }catch(Exception failure){clearReadiness();request.result.completeExceptionally(new IllegalStateException("实际consumer资格核验失败"));}
+    }
 
     public BattleResultConsumer(Consumer<String, byte[]> consumer, String topic, Handler handler, MatchMetrics metrics,
                                 Duration pollTimeout, Duration retryInitial, Duration retryMax) {
@@ -138,12 +193,12 @@ public final class BattleResultConsumer implements Runnable {
         consumer.subscribe(List.of(topic), new ConsumerRebalanceListener() {
             @Override
             public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
-                revoked.addAll(partitions);
+                groupAssigned=false;clearReadiness();revoked.addAll(partitions);
             }
 
             @Override
             public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-                log.info("[rating] 对局结果消费者分到分区 {}", partitions);
+                groupAssigned=true;clearReadiness();log.info("[rating] 对局结果消费者分到分区 {}", partitions);
                 if (pausedForRetry) {
                     consumer.pause(partitions);
                 }
@@ -156,6 +211,7 @@ public final class BattleResultConsumer implements Runnable {
                     revoked.clear();
                     process(records);
                 }
+                recordReadyPoll();
             }
         } catch (WakeupException e) {
             if (running) {
@@ -165,14 +221,15 @@ public final class BattleResultConsumer implements Runnable {
             log.error("[rating] 对局结果消费循环异常退出", e);
             throw e;
         } finally {
-            metrics.ratingConsumerPaused(false);
+            clearReadiness();var pending=readinessRequest.get();if(pending!=null)pending.result.completeExceptionally(new IllegalStateException("消费者循环已结束"));metrics.ratingConsumerPaused(false);
             consumer.close(Duration.ofSeconds(5));
         }
     }
 
     /** 任意线程：请求停止（唤醒阻塞中的 poll）。 */
     public void stop() {
-        running = false;
+        if(!running)return;
+        running = false;clearReadiness();var pending=readinessRequest.get();if(pending!=null)pending.result.completeExceptionally(new IllegalStateException("消费者已停止"));
         consumer.wakeup();
     }
 

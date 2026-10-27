@@ -1,5 +1,8 @@
 package com.game.friend;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -44,14 +47,12 @@ import org.junit.jupiter.api.Timeout;
  */
 @Timeout(value = 3, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class FriendReplicasTiDBTest {
-    private static final String DATABASE = "game_friend_replica_it_"
-            + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+    private static AuthoritySqlFixture fixture;
     private static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true"
             + "&connectTimeout=3000&socketTimeout=10000";
     private static final FriendLimits LIMITS = new FriendLimits(200, 50, 200, 200);
     private static final AtomicLong REQUEST_IDS = new AtomicLong(10000);
     private static String server;
-    private static boolean databaseCreated;
     private static DruidDataSource firstPool;
     private static DruidDataSource secondPool;
 
@@ -66,67 +67,60 @@ class FriendReplicasTiDBTest {
             throw new IllegalArgumentException("双副本测试只接受本机 TiDB JDBC 地址");
         }
         URI address = URI.create(configured.substring("jdbc:".length()));
-        if ((!"127.0.0.1".equals(address.getHost()) && !"localhost".equals(address.getHost()))
+        if (!"127.0.0.1".equals(address.getHost())
                 || address.getPort() <= 0 || address.getRawUserInfo() != null) {
             throw new IllegalArgumentException("双副本测试只接受本机显式端口，凭据不得放进 URL");
         }
         server = "jdbc:mysql://" + address.getHost() + ":" + address.getPort();
-        try (Connection connection = admin(); var statement = connection.createStatement()) {
-            statement.execute(FriendConnectionPolicy.SESSION_SQL);
-            FriendConfiguration.verifyFriendDatabase(connection, true);
-            statement.execute("CREATE DATABASE `" + DATABASE + "` DEFAULT CHARACTER SET utf8mb4");
-            databaseCreated = true;
-        }
-        firstPool = pool();
-        secondPool = pool();
         PbMysql schema = new PbMysql();
         schema.register(FriendEdgeRow.getDefaultInstance());
         schema.register(FriendRequestRow.getDefaultInstance());
         schema.register(FriendCapacityRow.getDefaultInstance());
         schema.register(FriendBlockRow.getDefaultInstance());
+        fixture = AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(
+                server + "/", user(), password(), "game_friend_replica", false, List.of(1)), (connection, principal) -> {
+            schema.initializeFresh(connection, principal);
+            try (var statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY, account VARBINARY(191) NOT NULL,"
+                        + " owner_revision BIGINT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0, zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+            }
+        });
+        firstPool = pool();
+        secondPool = pool();
         try (Connection first = firstPool.getConnection(); Connection second = secondPool.getConnection()) {
             FriendConfiguration.verifyFriendDatabase(first, true);
             FriendConfiguration.verifyFriendDatabase(second, true);
             assertThat(connectionId(first)).isNotEqualTo(connectionId(second));
             schema.syncAll(first);
-            try (var statement = first.createStatement()) {
-                statement.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY, account VARBINARY(191) NOT NULL,"
-                        + " owner_revision BIGINT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0, zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
-            }
-            new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(firstPool);
-            com.game.common.player.RouteAuthorityInitializer.initialize(first,UUID.randomUUID().toString(),java.util.List.of(1));
         }
     }
 
-    private static DruidDataSource pool() {
+    private static DruidDataSource pool() throws SQLException {
         DruidDataSource pool = new DruidDataSource();
-        pool.setUrl(server + "/" + DATABASE + PARAMS);
-        pool.setUsername(user());
-        pool.setPassword(password());
+        pool.setUrl(fixture.jdbcUrl(PARAMS));
+        pool.setUsername(fixture.normalUser());
+        pool.setPassword(fixture.normalPassword());
         pool.setMaxActive(16);
         pool.setMaxWait(10_000);
         new FriendConnectionPolicy(true).postProcessBeforeInitialization(pool, "replicaDataSource");
+        AuthorityDataSourcePolicy.protectDruid(pool, fixture.writerBoot(), true);
         return pool;
     }
 
     @AfterAll
-    static void dropDatabase() throws SQLException {
+    static void dropDatabase() throws Exception {
         if (firstPool != null) {
             firstPool.close();
         }
         if (secondPool != null) {
             secondPool.close();
         }
-        if (databaseCreated) {
-            try (Connection connection = admin(); var statement = connection.createStatement()) {
-                statement.execute("DROP DATABASE `" + DATABASE + "`");
-            }
-        }
+        if (fixture != null) fixture.close();
     }
 
     @BeforeEach
     void emptyTables() throws SQLException {
-        try (Connection connection = firstPool.getConnection(); var statement = connection.createStatement()) {
+        try (Connection connection = fixture.schemaConnection(); var statement = connection.createStatement()) {
             for (String table : List.of("friend", "friend_request", "friend_capacity", "friend_block", "player")) {
                 statement.execute("TRUNCATE TABLE " + table);
             }
@@ -135,7 +129,7 @@ class FriendReplicasTiDBTest {
 
     @Test
     void 双副本共享原会话权限_过户与ABA旧请求拒绝_冻结目标关系不变() throws Exception {
-        try (Connection connection = firstPool.getConnection(); var statement = connection.createStatement()) {
+        try (Connection connection = fixture.schemaConnection(); var statement = connection.createStatement()) {
             statement.execute("INSERT INTO player(player_id,account,owner_revision) VALUES(3101,'original',7),(3102,'peer',3)");
         }
         FriendStore original = store(firstPool, LIMITS).forActor(3101, "original", 7);
@@ -144,7 +138,7 @@ class FriendReplicasTiDBTest {
         assertThat(peer.accept(request, 3102, 0, deadline()).result()).isEqualTo(AcceptResult.OK);
         assertThat(original.friends(3101, 200, deadline())).hasSize(1);
         for (String changed : List.of("account='next',owner_revision=8", "account='original',owner_revision=9")) {
-            try (Connection connection = secondPool.getConnection(); var statement = connection.createStatement()) {
+            try (Connection connection = fixture.schemaConnection(); var statement = connection.createStatement()) {
                 statement.execute("UPDATE player SET " + changed + " WHERE player_id=3101");
             }
             assertThatThrownBy(() -> original.remove(3101, 3102, deadline())).isInstanceOf(SecurityException.class);
@@ -155,7 +149,7 @@ class FriendReplicasTiDBTest {
         }
         FriendStore current = store(secondPool, LIMITS).forActor(3101, "original", 9);
         assertThat(current.friends(3101, 200, deadline())).hasSize(1);
-        try (Connection connection = firstPool.getConnection(); var statement = connection.createStatement()) {
+        try (Connection connection = fixture.schemaConnection(); var statement = connection.createStatement()) {
             statement.execute("UPDATE player SET trade_listing_id=81 WHERE player_id=3101");
         }
         assertThatThrownBy(() -> current.remove(3101, 3102, deadline())).isInstanceOf(SecurityException.class);
@@ -264,7 +258,7 @@ class FriendReplicasTiDBTest {
     }
 
     private static long count(String query) throws SQLException {
-        try (Connection connection = secondPool.getConnection(); var statement = connection.createStatement();
+        try (Connection connection = firstPool.getConnection(); var statement = connection.createStatement();
              var rows = statement.executeQuery(query)) {
             assertThat(rows.next()).isTrue();
             return rows.getLong(1);
@@ -280,10 +274,6 @@ class FriendReplicasTiDBTest {
 
     private static Deadline deadline() {
         return Deadline.after(60_000);
-    }
-
-    private static Connection admin() throws SQLException {
-        return DriverManager.getConnection(server + "/" + PARAMS, user(), password());
     }
 
     private static String user() {

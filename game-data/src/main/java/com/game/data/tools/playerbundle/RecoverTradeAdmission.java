@@ -58,6 +58,7 @@ public final class RecoverTradeAdmission {
                 pool.setInitialSize(0);pool.setMinIdle(0);pool.setMaxActive(1);pool.setMaxWait(3000);
                 pool.setConnectTimeout(3000);pool.setSocketTimeout(10_000);
                 new StrongTiDbConnectionPolicy("旧OPEN维护恢复",true).postProcessBeforeInitialization(pool,"recovery");
+                com.game.discovery.sql.AuthorityDataSourcePolicy.protectDruid(pool,com.game.common.sql.WriterAuthority.consumeEnvironment(),true);
                 pool.init();return pool;
             } catch(Exception | Error failure) { pool.close();throw failure; }
         }
@@ -73,7 +74,7 @@ public final class RecoverTradeAdmission {
             Args args=parse(argv);
             if(PlayerBundleExport.checkOutputPath(args.out())!=null)throw new IllegalArgumentException();
             String url=env.get("GAME_TRADE_RECOVERY_JDBC"),user=env.get("GAME_MYSQL_USER");
-            // URL只承载实际单一端点和库名；凭据取独立环境，不以loopback或debug_import充当维护资格。
+            // 独立恢复目标仍走已登记NORMAL boot与原writable=1域围栏；不会因CLI名称升级为Operator。
             String physicalAddress=recoveryJdbcAddress(url,args.database());
             if(physicalAddress==null || user==null || user.isBlank())throw new IllegalArgumentException();
             var target=new PlayerTradeStore.RecoveryTarget(args.targetNonce(),args.zoneId(),args.database(),physicalAddress,args.instance());

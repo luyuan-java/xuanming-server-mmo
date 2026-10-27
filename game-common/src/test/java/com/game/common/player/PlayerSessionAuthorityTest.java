@@ -32,35 +32,72 @@ class PlayerSessionAuthorityTest {
         }
     }
 
-    @Test void 路由提交锁方言_TiDB和H2显式排他_MySQL保真实共享() throws Exception {
+    @Test void zone围栏锁方言_TiDB和H2显式排他_MySQL保真实共享() throws Exception {
         for (var database : java.util.List.of(
                 new String[]{"MySQL", "8.0.11-TiDB-v8.5.2", " FOR UPDATE"},
                 new String[]{"TiDB", "v8.5.2", " FOR UPDATE"},
                 new String[]{"H2", "2.3.232", " FOR UPDATE"},
                 new String[]{"MySQL", "8.4.13", " LOCK IN SHARE MODE"})) {
-            var fixture = routeMetadata(database[0], database[1]);
-            PlayerRouteAuthority.requireMeta(fixture.connection(), 2, true);
+            var fixture = routeZoneMetadata(database[0], database[1]);
+            PlayerRouteAuthority.lockConfigurationZone(fixture.connection(), 1, 2);
             verify(fixture.connection()).prepareStatement(
-                    "SELECT generation,writable,fence_shards FROM route_meta WHERE id=1" + database[2]);
-            verify(fixture.statement()).setQueryTimeout(2);
+                    "SELECT generation,writable,fence_shards FROM route_meta WHERE id=1");
+            verify(fixture.connection()).prepareStatement(
+                    "SELECT shard,run_id,revision FROM zone_merge_fence WHERE zone_id=? ORDER BY shard" + database[2]);
+            verify(fixture.meta()).setQueryTimeout(2);
+            verify(fixture.zone()).setQueryTimeout(2);
+            verify(fixture.zone()).setLong(1, 1);
+            verify(fixture.zone()).executeQuery();
         }
     }
 
-    @Test void 未知产品或版本与元数据故障在路由SQL前拒绝_不猜共享或启用noop() throws Exception {
+    @Test void 未知产品或版本与元数据故障在zone锁SQL前拒绝_不猜共享或启用noop() throws Exception {
         for (var database : java.util.List.of(
                 new String[]{"unknown", "8.5.2"},
                 new String[]{"MySQL", null}, new String[]{"MySQL", " "},
                 new String[]{null, "8.4.13"})) {
-            var fixture = routeMetadata(database[0], database[1]);
-            assertThrows(SQLException.class, () -> PlayerRouteAuthority.requireMeta(fixture.connection(), 2, true));
-            verify(fixture.connection(), never()).prepareStatement(anyString());
+            var fixture = routeZoneMetadata(database[0], database[1]);
+            assertThrows(SQLException.class, () -> PlayerRouteAuthority.lockConfigurationZone(fixture.connection(), 1, 2));
+            verify(fixture.connection(), never()).prepareStatement(
+                    startsWith("SELECT shard,run_id,revision FROM zone_merge_fence"));
+            verify(fixture.zone(), never()).executeQuery();
         }
-        var fixture = routeMetadata("MySQL", "8.4.13");
+        var fixture = routeZoneMetadata("MySQL", "8.4.13");
         when(fixture.connection().getMetaData().getDatabaseProductVersion()).thenThrow(new SQLException("元数据读取失败"));
-        assertThrows(SQLException.class, () -> PlayerRouteAuthority.requireMeta(fixture.connection(), 2, true));
-        verify(fixture.connection(), never()).prepareStatement(anyString());
+        assertThrows(SQLException.class, () -> PlayerRouteAuthority.lockConfigurationZone(fixture.connection(), 1, 2));
+        verify(fixture.connection(), never()).prepareStatement(
+                startsWith("SELECT shard,run_id,revision FROM zone_merge_fence"));
+        verify(fixture.zone(), never()).executeQuery();
     }
 
+    @Test void CURRENT写者首锁拒绝后不读取路由或角色原件() throws Exception {
+        var connection = mock(Connection.class);
+        var fence = mock(com.game.common.sql.AuthorityConnection.Fence.class);
+        when(connection.getAutoCommit()).thenReturn(false);
+        when(connection.unwrap(com.game.common.sql.AuthorityConnection.Fence.class)).thenReturn(fence);
+        var retired = new SQLException("本boot已退役", "40001");
+        doThrow(retired).when(fence).requireNormalTransaction();
+        assertSame(retired, assertThrows(SQLException.class,
+                () -> PlayerRouteAuthority.lock(connection, java.util.List.of(1L), 2)));
+        verify(fence).requireNormalTransaction();
+        verify(connection, never()).prepareStatement(anyString());
+    }
+
+    @Test void meta写侧校验保持只读且冻结或缺片仍拒绝() throws Exception {
+        for (boolean shared : new boolean[]{false, true}) {
+            var fixture = routeMetadata("unknown", null);
+            PlayerRouteAuthority.requireMeta(fixture.connection(), 2, shared);
+            verify(fixture.connection()).prepareStatement("SELECT generation,writable,fence_shards FROM route_meta WHERE id=1");
+            verify(fixture.connection(), never()).getMetaData();
+            verify(fixture.statement()).setQueryTimeout(2);
+            var rows = fixture.statement().executeQuery();
+            when(rows.getString(2)).thenReturn("0");
+            assertThrows(SQLException.class, () -> PlayerRouteAuthority.requireMeta(fixture.connection(), 2, shared));
+            when(rows.getString(2)).thenReturn("1");
+            when(rows.getInt(3)).thenReturn(PlayerRouteAuthority.FENCE_SHARDS - 1);
+            assertThrows(SQLException.class, () -> PlayerRouteAuthority.requireMeta(fixture.connection(), 2, shared));
+        }
+    }
     @Test void 启动只读meta校验不误取事务锁_保留原无锁读契约() throws Exception {
         var fixture = routeMetadata("unknown", null);
         PlayerRouteAuthority.requireMeta(fixture.connection(), 3, false);
@@ -82,4 +119,21 @@ class PlayerSessionAuthorityTest {
         when(rows.getString(2)).thenReturn("1"); when(rows.getInt(3)).thenReturn(PlayerRouteAuthority.FENCE_SHARDS);
         return new RouteMetadata(connection, statement);
     }
+    private record RouteZoneMetadata(Connection connection, PreparedStatement meta, PreparedStatement zone) {}
+    private static RouteZoneMetadata routeZoneMetadata(String product, String version) throws Exception {
+        var fixture = routeMetadata(product, version);
+        var retired = mock(PreparedStatement.class); var retiredRows = mock(ResultSet.class);
+        when(fixture.connection().prepareStatement("SELECT zone_id FROM zone_merged_into WHERE zone_id=?")).thenReturn(retired);
+        when(retired.executeQuery()).thenReturn(retiredRows); when(retiredRows.next()).thenReturn(false);
+        var zone = mock(PreparedStatement.class); var rows = mock(ResultSet.class);
+        when(fixture.connection().prepareStatement(
+                startsWith("SELECT shard,run_id,revision FROM zone_merge_fence WHERE zone_id=? ORDER BY shard"))).thenReturn(zone);
+        when(zone.executeQuery()).thenReturn(rows);
+        int[] shard = {-1};
+        when(rows.next()).thenAnswer(call -> ++shard[0] < PlayerRouteAuthority.FENCE_SHARDS);
+        when(rows.getInt(1)).thenAnswer(call -> shard[0]);
+        when(rows.getString(2)).thenReturn(""); when(rows.getLong(3)).thenReturn(1L);
+        return new RouteZoneMetadata(fixture.connection(), fixture.statement(), zone);
+    }
+
 }

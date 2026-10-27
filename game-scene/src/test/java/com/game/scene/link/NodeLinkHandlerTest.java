@@ -40,6 +40,27 @@ class NodeLinkHandlerTest {
         metrics = new SceneMetrics(meters);
     }
 
+    @Test
+    void 维护cut拒绝后续帧且等待已受理逻辑任务() {
+        var gate=new com.game.scene.admin.SceneMaintenanceController.Gate();List<Runnable> queue=new ArrayList<>();
+        EmbeddedChannel channel=new EmbeddedChannel(new NodeLinkHandler(IDENTITY,AUTH,InstantSource.fixed(Instant.ofEpochSecond(NOW)),inbound,queue::add,new AtomicLong(),Duration.ofSeconds(10),4,metrics).withMaintenance(gate));
+        channel.writeInbound(hello(5,1,NOW));queue.remove(0).run();
+        NodeLinkFrame leave=NodeLinkFrame.newBuilder().setPlayerLeave(PlayerLeave.newBuilder().setSessionId(1).setPlayerId(2)).build();
+        channel.writeInbound(leave);byte[] frontier=gate.frontier();
+        gate.close("00000000-0000-0000-0000-000000000001",new byte[16]);
+        assertThat(gate.settled()).isFalse();channel.writeInbound(leave);assertThat(gate.frontier()).containsExactly(frontier);
+        while(!queue.isEmpty())queue.remove(0).run();
+        assertThat(gate.settled()).isTrue();assertThat(inbound.events).containsExactly("opened:1:5","frame:1:PLAYER_LEAVE","closed:1");channel.finishAndReleaseAll();
+    }
+    @Test
+    void 已受理帧入逻辑队列失败必须保留UNKNOWN() {
+        var gate=new com.game.scene.admin.SceneMaintenanceController.Gate();List<Runnable> queue=new ArrayList<>();var reject=new java.util.concurrent.atomic.AtomicBoolean();
+        NodeLinkHandler handler=new NodeLinkHandler(IDENTITY,AUTH,InstantSource.fixed(Instant.ofEpochSecond(NOW)),inbound,task->{if(reject.get())throw new java.util.concurrent.RejectedExecutionException("测试队列关闭");queue.add(task);},new AtomicLong(),Duration.ofSeconds(10),4,metrics).withMaintenance(gate);
+        EmbeddedChannel channel=new EmbeddedChannel(handler);channel.writeInbound(hello(5,1,NOW));queue.remove(0).run();reject.set(true);
+        channel.writeInbound(NodeLinkFrame.newBuilder().setPlayerLeave(PlayerLeave.newBuilder().setSessionId(1).setPlayerId(2)).build());gate.close("00000000-0000-0000-0000-000000000001",new byte[16]);
+        assertThat(handler.pendingFrames()).isZero();assertThat(gate.unresolved()).isPositive();assertThat(gate.settled()).isFalse();channel.finishAndReleaseAll();
+    }
+
     // ------------------------------------------------------------------ 鉴权
 
     @Test

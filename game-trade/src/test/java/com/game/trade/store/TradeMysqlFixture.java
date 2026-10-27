@@ -1,6 +1,8 @@
 package com.game.trade.store;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
 import com.game.common.deadline.Deadline;
 import com.game.trade.rules.TradeLimits;
 import java.sql.Connection;
@@ -34,41 +36,33 @@ final class TradeMysqlFixture implements AutoCloseable {
 
     final String database;
     final DruidDataSource dataSource;
+    private final AuthoritySqlFixture authority;
     final AtomicInteger favoriteRetries = new AtomicInteger();
 
-    private TradeMysqlFixture(String database, DruidDataSource dataSource) {
+    private TradeMysqlFixture(String database, DruidDataSource dataSource,AuthoritySqlFixture authority) {
+        this.authority=authority;
         this.database = database;
         this.dataSource = dataSource;
     }
 
     static TradeMysqlFixture create() throws SQLException {
-        String database = "game_trade_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("CREATE DATABASE `" + database + "` DEFAULT CHARACTER SET utf8mb4");
-        }
-        DruidDataSource ds = new DruidDataSource();
-        ds.setUrl(BASE_URL + "/" + database + PARAMS);
-        ds.setUsername(USER);
-        ds.setPassword(PASSWORD);
-        ds.setMaxActive(64);
-        ds.setMaxWait(10_000);
-        ds.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-        TradeMysqlFixture fixture = new TradeMysqlFixture(database, ds);
-        TradeTables.sync(ds, Duration.ofMinutes(1));
-        try(var c=ds.getConnection();var q=c.createStatement()){q.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");}
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(ds);
-        try(var c=ds.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),List.of(1));}
-        return fixture;
+        try{
+            var options=AuthoritySqlFixture.Options.fromEnvironment(BASE_URL,USER,PASSWORD,"game_trade",!Boolean.getBoolean("game.it.require-tidb"),List.of(1));
+            var authority=AuthoritySqlFixture.prepare(options,(connection,principal)->{
+                TradeTables.registry().initializeFresh(connection,principal);
+                try(var sql=connection.createStatement()){sql.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");}
+            });
+            DruidDataSource ds=new DruidDataSource();
+            try{ds.setUrl(authority.jdbcUrl(PARAMS));ds.setUsername(authority.normalUser());ds.setPassword(authority.normalPassword());ds.setMaxActive(64);ds.setMaxWait(10_000);ds.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                AuthorityDataSourcePolicy.protectDruid(ds,authority.writerBoot(),!options.allowMySql());
+                TradeTables.sync(ds,java.time.Duration.ofMinutes(1));return new TradeMysqlFixture(authority.database(),ds,authority);
+            }catch(Exception failure){ds.close();try{authority.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
+        }catch(SQLException failure){throw failure;}catch(Exception failure){throw new SQLException("隔离交易SQL夹具初始化失败",failure);}
     }
 
     @Override
     public void close() throws SQLException {
-        dataSource.close();
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("DROP DATABASE IF EXISTS `" + database + "`");
-        }
+        dataSource.close();authority.close();
     }
 
     /** 被测存储：取连接按次限等（Druid {@code getConnection(long)}，同生产装配），查询超时上限 3 s（同 friend 的 query-timeout）。 */
@@ -83,7 +77,7 @@ final class TradeMysqlFixture implements AutoCloseable {
 
     void truncate() throws SQLException {
         for (String table : TradeTables.NAMES) {
-            exec("TRUNCATE TABLE `" + table + "`");
+            try(var connection=authority.schemaConnection();var sql=connection.createStatement()){sql.execute("TRUNCATE TABLE `"+table+"`");}
         }
     }
 
@@ -91,11 +85,11 @@ final class TradeMysqlFixture implements AutoCloseable {
     Connection connect(int lockWaitSeconds) throws SQLException {
         String params = PARAMS.replace("innodb_lock_wait_timeout=" + TradeLimits.LOCK_WAIT_TIMEOUT_SECONDS,
                 "innodb_lock_wait_timeout=" + lockWaitSeconds);
-        return DriverManager.getConnection(BASE_URL + "/" + database + params, USER, PASSWORD);
+        return authority.normalDataSource(params).getConnection();
     }
 
     int exec(String sql, Object... args) throws SQLException {
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+        try (Connection c = authority.schemaConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             bind(ps, args);
             return ps.executeUpdate();
         }

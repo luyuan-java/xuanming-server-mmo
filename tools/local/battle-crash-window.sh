@@ -192,13 +192,16 @@ SCENE_NODES=(
 launch() {
   local instance=$1 module=$2 jar
   shift 2
+  # 正常故障复启也必须有新boot独立授权；旧grant的持久marker由BPP拒绝，不能自动换UUID。
+  GAME_SQL_BOOT_LIBRARY_ONLY=1 source tools/local/start-slice.sh
+  (sql_boot_environment "$instance" "$module")
   jar=$(ls "$module"/target/"$module"-*.jar 2>/dev/null | grep -v -- '-plain' | head -1 || true)
   if [[ -z "$jar" ]]; then
     echo "找不到 $module 的可执行 jar，先 ./mvnw -DskipTests install" >&2
     exit 1
   fi
   echo "启动 $instance ($jar)"
-  java -jar "$jar" "$@" > "run/logs/$instance.log" 2>&1 &
+  (sql_boot_environment "$instance" "$module" && exec java -jar "$jar" "$@") > "run/logs/$instance.log" 2>&1 &
   echo $! > "run/pids/$instance.pid"
 }
 

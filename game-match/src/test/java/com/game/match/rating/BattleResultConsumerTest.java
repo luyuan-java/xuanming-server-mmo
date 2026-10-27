@@ -51,6 +51,9 @@ class BattleResultConsumerTest {
     private static final class RecordingConsumer extends MockConsumer<String, byte[]> {
         final List<Map<TopicPartition, OffsetAndMetadata>> commits = new ArrayList<>();
         KafkaException failNextCommit;
+        volatile org.apache.kafka.clients.consumer.ConsumerGroupMetadata metadata=new org.apache.kafka.clients.consumer.ConsumerGroupMetadata("it-group",7,"member-a",java.util.Optional.empty());
+        final AtomicInteger metadataReads=new AtomicInteger();
+        @Override public org.apache.kafka.clients.consumer.ConsumerGroupMetadata groupMetadata(){metadataReads.incrementAndGet();return metadata;}
 
         RecordingConsumer() {
             super(OffsetResetStrategy.EARLIEST);
@@ -516,5 +519,35 @@ class BattleResultConsumerTest {
         assertThat(calls.get()).isZero();
         assertThat(consumer.commits).isEmpty();
         assertThat(consumer.closed()).isTrue();
+    }
+    private static com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness readinessSeed(){
+        var seed=com.game.player.store.state.SqlWriterMaintenanceReceipt.ConsumerGroupReadiness.newBuilder();
+        for(int partition=0;partition<2;partition++)seed.addExpectedPartitions(com.game.player.store.state.SqlWriterMaintenanceReceipt.KafkaPartitionClosure.newBuilder().setGroup("it-group").setTopicName(TOPIC).setPartition(partition).setProtectedCommittedFloor(0).setInitialEarliest(0));
+        return seed.build();
+    }
+    @Test void maintenanceFrontierRequiresActualAssignmentAndPollAndClearsOnStop()throws Exception{
+        var loop=loop(event->{});assertThat(loop.maintenanceFrontier()).isEmpty();assign(List.of(TP0));consumer.updateEndOffsets(Map.of(TP0,0L));consumer.commitSync(Map.of(TP0,new OffsetAndMetadata(0)));
+        var executor=java.util.concurrent.Executors.newSingleThreadExecutor();var task=executor.submit(loop);
+        try{
+            var ready=loop.maintenanceReadiness(readinessSeed());assertThat(ready.getGroupsCount()).isEqualTo(1);assertThat(ready.getGroups(0).getGenerationId()).isEqualTo(7);assertThat(ready.getGroups(0).getMemberId()).isEqualTo("member-a");
+            assertThat(ready.getGroups(0).getExpectedPartitionsCount()).isEqualTo(2);assertThat(ready.getGroups(0).getAssignedPartitionsCount()).isEqualTo(1);assertThat(consumer.metadataReads.get()).isGreaterThanOrEqualTo(2);
+            assertThat(loop.maintenanceFrontier()).hasSize(32);var opened=new AtomicInteger();var ownerThread=new java.util.concurrent.atomic.AtomicReference<Thread>();loop.withMaintenanceReady(readinessSeed(),ready,()->{ownerThread.set(Thread.currentThread());opened.incrementAndGet();});assertThat(opened.get()).isEqualTo(1);assertThat(ownerThread.get()).isNotEqualTo(Thread.currentThread());loop.stop();assertThat(loop.maintenanceFrontier()).isEmpty();task.get(3,TimeUnit.SECONDS);
+        }finally{loop.stop();executor.shutdownNow();assertThat(executor.awaitTermination(3,TimeUnit.SECONDS)).isTrue();}
+        assertThat(loop.maintenanceFrontier()).isEmpty();
+    }
+    @Test void maintenanceReadinessRejectsUncommittedTailWithoutFakingCatchup()throws Exception{
+        var loop=loop(event->{});assign(List.of(TP0));consumer.updateEndOffsets(Map.of(TP0,1L));consumer.commitSync(Map.of(TP0,new OffsetAndMetadata(0)));
+        var executor=java.util.concurrent.Executors.newSingleThreadExecutor();var task=executor.submit(loop);
+        try{org.assertj.core.api.Assertions.assertThatThrownBy(()->loop.maintenanceReadiness(readinessSeed())).isInstanceOf(IllegalStateException.class);assertThat(loop.maintenanceFrontier()).isEmpty();}
+        finally{loop.stop();task.get(3,TimeUnit.SECONDS);executor.shutdownNow();assertThat(executor.awaitTermination(3,TimeUnit.SECONDS)).isTrue();}
+    }
+    @Test void maintenanceReadinessChangesAfterActualGenerationAndMemberChange()throws Exception{
+        var loop=loop(event->{});assign(List.of(TP0));consumer.updateEndOffsets(Map.of(TP0,0L));consumer.commitSync(Map.of(TP0,new OffsetAndMetadata(0)));
+        var executor=java.util.concurrent.Executors.newSingleThreadExecutor();var task=executor.submit(loop);
+        try{var first=loop.maintenanceReadiness(readinessSeed());consumer.metadata=new org.apache.kafka.clients.consumer.ConsumerGroupMetadata("it-group",8,"member-b",java.util.Optional.empty());var opened=new AtomicInteger();org.assertj.core.api.Assertions.assertThatThrownBy(()->loop.withMaintenanceReady(readinessSeed(),first,opened::incrementAndGet)).isInstanceOf(IllegalStateException.class);assertThat(opened.get()).isZero();var changed=loop.maintenanceReadiness(readinessSeed());assertThat(changed).isNotEqualTo(first);assertThat(changed.getGroups(0).getGenerationId()).isEqualTo(8);assertThat(changed.getGroups(0).getMemberId()).isEqualTo("member-b");}
+        finally{loop.stop();task.get(3,TimeUnit.SECONDS);executor.shutdownNow();assertThat(executor.awaitTermination(3,TimeUnit.SECONDS)).isTrue();}
+    }
+    @Test void maintenanceFrontierIsAbsentUntilGroupAssignment(){
+        var loop=loop(event->{});consumer.schedulePollTask(()->{assertThat(loop.maintenanceFrontier()).isEmpty();loop.stop();});loop.run();assertThat(loop.maintenanceFrontier()).isEmpty();
     }
 }

@@ -1,5 +1,8 @@
 package com.game.trade.commerce;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -279,33 +282,23 @@ class CommerceRuntimeTest {
         org.junit.jupiter.api.Assumptions.assumeTrue(url != null, "未配置隔离TiDB，未运行真实分页合同回归");
         if (!url.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):" + CommerceTiDbTest.tiDbTestPort()))
             throw new IllegalArgumentException("仅允许本机game.it.tidb.port指定端口TiDB随机库");
-        String database = "trade_mall_page_it_" + UUID.randomUUID().toString().replace("-", "");
-        boolean created = false;
         var json = new com.fasterxml.jackson.databind.ObjectMapper();
         var intents = deliveryIntents(json, 25);
-        try (var admin = java.sql.DriverManager.getConnection(url + "/", "root", "");
-             var pool = new com.alibaba.druid.pool.DruidDataSource()) {
-            try {
-                try (var sql = admin.createStatement()) {
-                    sql.execute("CREATE DATABASE `" + database + "`");
-                    created = true;
-                }
-                pool.setUrl(url + "/" + database);
-                pool.setUsername("root");
-                pool.setPassword("");
-                pool.setMaxActive(12);
-                pool.setMaxWait(5000);
-                pool.setConnectionInitSqls(List.of(com.game.discovery.sql.StrongTiDbConnectionPolicy.SESSION_SQL));
-                try (var connection = pool.getConnection()) {
-                    com.game.discovery.sql.StrongTiDbConnectionPolicy.verify(connection, true);
-                }
-                com.game.trade.store.TradeTables.sync(pool, java.time.Duration.ofSeconds(30));
-                try (var connection = pool.getConnection(); var sql = connection.createStatement()) {
-                    sql.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,account VARCHAR(64) NOT NULL,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
-                    for (var intent : intents) sql.execute("INSERT INTO player(player_id,owner_revision,trade_listing_id,account) VALUES(" + intent.path("buyerId").asText() + ",1,0,'" + intent.path("buyerAccount").asText() + "')");
-                }
-                new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
-                try(var connection=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1));}
+        try (var fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(url,
+                System.getProperty("game.it.mysql.user","root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD",""),
+                "trade_mall_page",false,List.of(1)),(connection,principal)->{
+                    com.game.trade.store.TradeTables.registry().initializeFresh(connection,principal);
+                    try(var sql=connection.createStatement()){
+                        sql.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL,account VARCHAR(64) NOT NULL,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+                    }
+                    try(var insert=connection.prepareStatement("INSERT INTO player(player_id,owner_revision,trade_listing_id,account) VALUES(?,1,0,?)")){
+                        for(var intent:intents){insert.setObject(1,new java.math.BigInteger(intent.path("buyerId").asText()));insert.setString(2,intent.path("buyerAccount").asText());insert.executeUpdate();}
+                    }
+                }); var pool=new com.alibaba.druid.pool.DruidDataSource()) {
+                pool.setUrl(fixture.jdbcUrl("?connectTimeout=3000&socketTimeout=30000"));
+                pool.setUsername(fixture.normalUser());pool.setPassword(fixture.normalPassword());pool.setMaxActive(12);pool.setMaxWait(5000);
+                AuthorityDataSourcePolicy.protectDruid(pool,fixture.writerBoot(),true);
+                com.game.trade.store.TradeTables.sync(pool,java.time.Duration.ofSeconds(30));
                 var real = new CommerceEngine(new CommerceStore(pool), new AtomicLong(10000)::incrementAndGet,
                     engine.policy, System::currentTimeMillis);
                 try (var server = new MallHttp(json, request -> request.path("cursor").asText().isEmpty()
@@ -332,13 +325,14 @@ class CommerceRuntimeTest {
                     assertThat(originalOps).hasSize(25).allMatch(op -> op.getSeq() == 1 && op.getStatus() == 1);
                     assertThat(originalOps).extracting(TradeAssetOpRow::getOpId).doesNotHaveDuplicates();
                     // 仅给尾五项注入已提交 SQL 终局；这是交易状态机夹具，不是真实 scene 到账证明。
-                    real.store.transaction(Deadline.after(10000), connection -> {
+                    try(var connection=fixture.schemaConnection()) {
+                        connection.setAutoCommit(false);
                         for (int i = 20; i < 25; i++)
                             assertThat(CommerceStore.execute(connection,
                                 "UPDATE trade_asset_op SET status=2,durable=1 WHERE player_id=? AND stream=4 AND status=1",
                                 Long.parseUnsignedLong(intents.get(i).path("buyerId").asText()))).isEqualTo(1);
-                        return null;
-                    });
+                        connection.commit();
+                    }
                     for (int i = 20; i < 25; i++) {
                         var intent = intents.get(i);
                         real.advance(real.store.byRequest(CommerceEngine.key("official",
@@ -371,14 +365,6 @@ class CommerceRuntimeTest {
                         assertThat(stored.getRequestDigest()).isEqualTo(CommerceEngine.sha(json.writeValueAsBytes(intent)));
                     }
                 }
-            } finally {
-                pool.close();
-                if (created) {
-                    if (!database.matches("trade_mall_page_it_[0-9a-f]{32}"))
-                        throw new IllegalStateException("拒绝清理非本用例随机库");
-                    try (var sql = admin.createStatement()) { sql.execute("DROP DATABASE `" + database + "`"); }
-                }
-            }
         }
     }
 

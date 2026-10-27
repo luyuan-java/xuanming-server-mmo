@@ -2303,3 +2303,13 @@ Java的准入身份是`player_final_save(player_id, owner_epoch)`中的完整原
 CLI `RecoverTradeAdmission`默认plan，apply要求完整计划文件与SHA、显式目标实例/数据库。沿用`GameNamespaceBinder`、`NamespaceDatabaseCheck`、`LocalTargets`及实际实例身份读取，连接与凭证只来自环境；计划/结果使用已有仓外原子不覆盖私有输出。每物理TiDB连接装配现强读策略；SQL事务内不访问Redis、远程Scene或文件。跨SQL/Redis不宣称ACID，也不恢复未登记RAM。原7天有界清理只删除已被更高E围栏的旧OPEN/APPLIED、永不删除PENDING；与本显式维护收据不同，不能拿既有清理的ABSENT补出恢复成功。
 
 本节记录授权实现合同，不代表已构建、迁移、真TiDB或进程故障验证。部署须停旧写者并通过M19表形状门禁；计划漂移、缺行、失联及提交结果不明均保留原失败/原计划，禁止自动清锁或重生成更宽松计划。
+
+## 2026-10-26 全局 SQL writer 与永久 publication cut（候选，未运行）
+
+每个 NORMAL 物理连接使用真实独立 SQL 主体与一次性 BootGrant，强读当前 E 后只锁自身 ACTIVE writer 的一片，再复核 registry/meta；normal 不拥有注册、退休、DDL 或控制表写权限。fresh schema、registrar 和 operator 是独立入口。P0 的完整 Plan/Manifest、ACTIVE 目录与原 catalog revision 永久不改；P1 无 relay writer 与 P3 relay writer 仅在本轮实际闭合原件后 RETIRE。后续按连续 catalog revision、完整请求摘要和同 run RETIRE 收据有界折叠当前 ACTIVE，NORMAL P5 必须为空；空集冻结仍推进全局 E。
+
+冻结票据绑定完整原请求、授权种类和时间窗。Freeze 请求固定 grant 之前已知的前序；永久 ticket 显式连接 grant，避免摘要循环。重试从 ABORTED_CLOSED 到 DRAINING，attempt 加一，保持原 P0 和 cut；沿永久链复用根/relay闭合，非 SQL 观察与票据仍需当前 attempt。正常 release 后新 boot 才可注册、关闭 source 准备消费者、取得实际 open ACK；旧 boot 永不复活。
+
+Windows 私有控制原件由固定绝对路径和 SHA256 的无 SQL 权限 helper 完成完整 READ/CREATE_NEW/目录校验，Java不在校验后重新打开目标。helper 负责本地 NTFS、所有者/DACL、无 reparse 及祖先句柄固定；缺资格或 I/O 未明均拒绝。helper 源码与 Java descriptor-only POM 等必要补充已获497范围授权并写入隔离候选，未构建或执行；本节不是平台验收结论。
+
+P9原件入口明确分为两种：Java HTTP返回固定prepared pins；Go文件ACK只允许同一固定前缀加唯一同目录`open-source.request`尾pin。控制器在锁外固定读取原bytes并核SHA，在锁内校验原请求完整身份、run/manifest/boot/role/request及清零结果字段；未知形状或任意额外pin拒绝。Go在open副作用前同样核请求pins与ready逐项一致。此为源码接缝检查，尚未执行跨语言流程。

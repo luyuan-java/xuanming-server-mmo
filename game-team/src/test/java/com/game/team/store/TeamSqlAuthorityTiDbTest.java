@@ -1,5 +1,8 @@
 package com.game.team.store;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.alibaba.druid.pool.DruidDataSource;
@@ -17,7 +20,8 @@ import org.junit.jupiter.api.*;
 
 /** 真TiDB、每例随机独占库；不依赖Redis，不把静态阅读或测试源码当作运行结果。 */
 class TeamSqlAuthorityTiDbTest {
-    private String base,database;
+    private String base;
+    private AuthoritySqlFixture fixture;
     private DruidDataSource pool;
     private TeamStore store;
     private AuthorityJdbc sql;
@@ -27,11 +31,12 @@ class TeamSqlAuthorityTiDbTest {
             if("1".equals(System.getenv("TEAM_REQUIRE_TESTS")))fail("TEAM_TEST_JDBC必须配置且指向可建独占库的TiDB根URL");
             Assumptions.assumeTrue(false,"未配置独占TiDB");
         }
-        database="team_authority_it_"+UUID.randomUUID().toString().replace("-","").substring(0,16);
-        try(var c=DriverManager.getConnection(base,"root","");var s=c.createStatement()){s.execute("CREATE DATABASE "+database);}
-        pool=new DruidDataSource();pool.setUrl(base+database+"?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true");pool.setUsername("root");pool.setPassword("");pool.setMaxActive(16);pool.setMaxWait(5000);pool.setConnectionInitSqls(List.of(StrongTiDbConnectionPolicy.SESSION_SQL));pool.init();
-        try(var c=pool.getConnection();var s=c.createStatement()){
-            StrongTiDbConnectionPolicy.verify(c,true);s.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARBINARY(191) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+        fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(base,
+                System.getProperty("game.it.mysql.user","root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD",""),
+                "team_authority",false,List.of(1)),(c,principal)->{
+            TeamTables.registry().initializeFresh(c,principal);
+            try(var s=c.createStatement()){
+            s.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARBINARY(191) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
             // Match表由其正式生产模块创建；本域只造清锁证明所需最小列，不在生产跨域建表。
             s.execute("CREATE TABLE match_global_direct_intent(kind INT,owner_id BIGINT UNSIGNED,request_high BIGINT UNSIGNED,request_low BIGINT UNSIGNED,battle_id BIGINT UNSIGNED,owner_account VARCHAR(191),owner_revision BIGINT UNSIGNED,payload BLOB,cancelled INT NOT NULL DEFAULT 0,PRIMARY KEY(kind,owner_id,request_high,request_low))");
             s.execute("CREATE TABLE match_global_formation(battle_id BIGINT UNSIGNED PRIMARY KEY,state INT,host VARCHAR(191),port INT,node_id INT,instance_id VARCHAR(36))");
@@ -48,15 +53,17 @@ class TeamSqlAuthorityTiDbTest {
             s.execute("CREATE TABLE guild_trial_launch(request_id BIGINT UNSIGNED PRIMARY KEY,state INT)");
             s.execute("CREATE TABLE guild_activity_slot(player_id BIGINT UNSIGNED PRIMARY KEY,lobby_id BIGINT UNSIGNED,expires_ms BIGINT UNSIGNED)");
             s.execute("CREATE TABLE guild_trial_lobby(lobby_id BIGINT UNSIGNED PRIMARY KEY,state INT,view_proto MEDIUMBLOB,guild_id BIGINT UNSIGNED,activity_id INT UNSIGNED)");
-        }
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
-        try(var connection=pool.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1));}
+            }
+        });
+        pool=new DruidDataSource();pool.setUrl(fixture.jdbcUrl("?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true"));
+        pool.setUsername(fixture.normalUser());pool.setPassword(fixture.normalPassword());pool.setMaxActive(16);pool.setMaxWait(5000);
+        AuthorityDataSourcePolicy.protectDruid(pool,fixture.writerBoot(),true);
         TeamTables.sync(pool);TeamTables.ensurePolicy(pool,false);store=new TeamStore(pool);sql=new AuthorityJdbc(pool);
     }
-    @AfterEach void cleanup()throws Exception{if(pool!=null)pool.close();if(database!=null)try(var c=DriverManager.getConnection(base,"root","");var s=c.createStatement()){s.execute("DROP DATABASE "+database);}}
+    @AfterEach void cleanup()throws Exception{if(pool!=null)pool.close();if(fixture!=null)fixture.close();}
     private SessionContext actor(long p){return SessionContext.newBuilder().setPlayerId(p).setAccount("原账号 "+Long.toUnsignedString(p)).setOwnerRevision(7).build();}
     private void player(long p){sqlRun("INSERT INTO player(player_id,account,owner_revision,trade_listing_id) VALUES(?,?,7,0)",AuthorityJdbc.u64(p),actor(p).getAccount());}
-    private void sqlRun(String text,Object... args){try{sql.tx(budget(),c->{c.update(text,args);return null;});}catch(Exception e){throw new AssertionError(e);}}
+    private void sqlRun(String text,Object... args){try(var c=fixture.schemaConnection();var q=c.prepareStatement(text)){for(int i=0;i<args.length;i++)q.setObject(i+1,args[i]);q.executeUpdate();}catch(Exception e){throw new AssertionError(e);}}
     private long count(String table){try{return sql.read(budget(),c->c.count("SELECT COUNT(*) FROM "+table));}catch(Exception e){throw new AssertionError(e);}}
     @SuppressWarnings("unchecked") private static <T extends Message>T id(T value,String request){var b=value.toBuilder();var f=value.getDescriptorForType().findFieldByName("request_id");assertNotNull(f,"正式共享契约必须带稳定业务UUID");return (T)b.setField(f,request).build();}
     private static <T extends Message>T id(T value){return id(value,UUID.randomUUID().toString());}

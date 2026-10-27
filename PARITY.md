@@ -394,3 +394,5 @@ P0-b主仓账号角色SQL权威45路径已落候选，包括所有现有登录/�
 ### 2026-10-23 旧OPEN恢复SQL行证明类型兼容修正（待验证）
 
 旧OPEN恢复的SQL行证明改为v2类型化编码，保binary原字节、NULL与长度边界；整数精确、double保原位，未知类型拒绝。恢复计划/永久收据协议未改：未提交旧计划须重新plan，已提交原计划仍按永久原件只读重放。Q47实际H2红中PlayerTradeDrainSqlTest的9个ERROR为8项旧读取器把DOUBLE强转BINARY与1项H2唯一约束删除夹具错误；原14用例与全部断言保留，并补原计划对坐标/合法状态字节漂移的拒绝。修后构建、H2、真TiDB与Java33均待新实际原件，不能据此标记已通过；本段保留既有观战与其它任务登记。
+
+| 全局SQL writer目录、永久publication cut与正常冻结/重开 | R authoritysql正式协议与独立operator | 未提交 | game-common/discovery、game-data控制CLI、scene/match维护 | 0.1.0-SNAPSHOT | 候选源码已准备并获497范围授权，未生成/编译/测试 | P0不改，P1/P3实际闭合后RETIRE有界折叠；同cut重排空；票据完整摘要无循环；新boot prepared/open ACK。Windows文件helper、descriptor POM及真实owner补充已纳入授权候选；原生fixture与合区SQL接缝适配已准备，完整P0-P9仍未验；Gateway H2仅隔离新增SQL物理池自动装配，HTTP/鉴权/管理端口断言保留，production缺grant拒启由同一策略另测。不能标为验收完成。 |
