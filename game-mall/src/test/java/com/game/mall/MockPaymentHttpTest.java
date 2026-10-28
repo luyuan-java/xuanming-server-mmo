@@ -34,14 +34,14 @@ import org.springframework.web.bind.annotation.RestController;
 /** 自有随机H2库+真实loopback HTTP；只证明mock契约，不是TiDB或真实支付渠道证据。 */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
     "server.address=127.0.0.1", "server.servlet.context-path=/mall", "spring.mvc.servlet.path=/rpc",
-    "spring.datasource.username=sa", "spring.datasource.password=", "spring.sql.init.mode=always",
-    "spring.sql.init.schema-locations=classpath:db/migration/V1__official_sku.sql", "game.mall.require-tidb=false", "game.run-mode=test",
+    "spring.datasource.username=sa", "spring.datasource.password=", "spring.sql.init.mode=never",
+    "spring.sql.init.schema-locations=classpath:db/migration/V1__official_sku.sql", "game.mall.require-tidb=false", "game.sql-authority.require-tidb=false", "game.run-mode=test",
     "game.mall.mock-payment-enabled=true",
     "game.mall.gateway-secret=mock-http-gateway-test-only-key-00001",
     "game.mall.payment-secret=mock-http-payment-test-only-key-00002",
     "game.mall.delivery-secret=mock-http-delivery-test-only-key-0003"
 })
-@Import(MockPaymentHttpTest.ForwardConfiguration.class)
+@Import({MockPaymentHttpTest.ForwardConfiguration.class, MallHttpFlowTest.H2AuthorityConfiguration.class})
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class MockPaymentHttpTest {
     private static final String PREFIX = "/mall/rpc";

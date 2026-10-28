@@ -432,7 +432,7 @@ class JdbcListingStoreMysqlTest {
         assertThat(store.countListings(all.withTab(NOTICE), d())).isZero();
         assertThat(store.favoriteIds(9, List.of(1L, 2L, 3L), d())).isEmpty();
         // 提示语法本身：直接在一条连接上执行带提示的语句，SHOW WARNINGS 必须为空
-        try (var c = db.dataSource.getConnection(); var st = c.createStatement()) {
+        try (var c = db.schemaConnection(); var st = c.createStatement()) {
             st.executeQuery(ListingSql.withExecutionTimeHint(ListingSql.COUNT_LISTINGS, 1500)).close();
             try (var rs = st.executeQuery("SHOW WARNINGS")) {
                 assertThat(rs.next()).as("MAX_EXECUTION_TIME 提示被 MySQL 认出（没有 1064 / 3126 之类的告警）").isFalse();

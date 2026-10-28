@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 
 class AuthorityPoolTiDbTest {
     @Test void druidHolderAndDeadlineFilterKeepTheirRealTypes()throws Exception{
-        String root=System.getProperty("game.it.mysql");if(root==null||root.isBlank())throw new IllegalStateException("缺少真实fixture配置：game.it.mysql");
+        String root=System.getProperty("game.it.authority.jdbc",System.getProperty("game.it.mysql"));if(root==null||root.isBlank())throw new IllegalStateException("缺少真实fixture配置：game.it.authority.jdbc（兼容game.it.mysql）");
         var options=AuthoritySqlFixture.Options.fromEnvironment(root,System.getProperty("game.it.mysql.user","root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD",""),"jpooldrain",false,java.util.List.of(1));
         // 本例只需SELECT 1与slot保护；正式控制/player DDL和注册由fixture创建。
         try(var fixture=AuthoritySqlFixture.prepareWithPlayerSchema(options,(schema,actualSchemaPrincipal)->{});var pool=new DruidDataSource()){

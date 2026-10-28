@@ -27,6 +27,422 @@ public final class AuthoritySqlFixture implements AutoCloseable {
         private static String required(String key){String v=System.getenv(key);if(v==null||v.isBlank())throw new IllegalArgumentException(key);return v;}
     }
     @FunctionalInterface public interface SchemaBuilder{void create(Connection schema,String actualSchemaPrincipal)throws Exception;}
+
+    /** 未发布阶段的同步工作；连接及全部派生JDBC对象只能在本次回调内使用。 */
+    @FunctionalInterface public interface UnpublishedSchemaWork<T>{
+        T run(Connection schema,String configuredSchemaPrincipal,String database)throws Exception;
+    }
+    /** 仅隔离测试owner创建全新随机库；不接管已有库，也不向普通服务提供默认入口。 */
+    public static UnpublishedSchemaLease beginUnpublished(Options options)throws Exception{
+        var fixture=new AuthoritySqlFixture(options);
+        var lease=new UnpublishedSchemaLease(fixture);fixture.unpublishedOwner=lease;
+        try{lease.openSchema();return lease;}
+        catch(Exception|Error failure){lease.failUnknown(failure);throw failure;}
+    }
+    private static final int FIXED_PLAYER_BASE_SCHEMA_INDEX=1;
+    /** 只从固定正式八表源取player HOME真源；不加载account，避免覆盖Pb样本自己的同名表契约。 */
+    public static UnpublishedSchemaLease beginUnpublishedWithPlayerBaseSchema(Options options)throws Exception{
+        // readFixedPlayerSchema先核完整源摘要和八表顺序；不复制player列结构或接受外部DDL。
+        String playerDdl=readFixedPlayerSchema().get(FIXED_PLAYER_BASE_SCHEMA_INDEX);
+        var lease=beginUnpublished(options);
+        try{
+            lease.withSchema((schema,configuredPrincipal,database)->{
+                try(var statement=schema.createStatement()){
+                    statement.setQueryTimeout(5);statement.execute(playerDdl);
+                }
+                return null;
+            });
+            return lease;
+        }catch(Exception|Error failure){
+            try{lease.close();}catch(Exception|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}
+            throw failure;
+        }
+    }
+    /**
+     * 同一owner从全新库持有到显式发布的阶段能力。构造器私有，没有自报主体或NoOp许可入口。
+     * 只有Schema账号接触未发布业务表；发布前撤销账号并确定关闭会话，之后才安装authority和NORMAL身份。
+     */
+    public static final class UnpublishedSchemaLease implements AutoCloseable{
+        private enum Phase{HELD,PUBLISHING,PUBLISHED,FAILED_UNKNOWN,CLOSED}
+        private final AuthoritySqlFixture fixture;
+        private final String schemaUser,schemaPassword,configuredPrincipal;
+        private Connection schema;
+        private boolean schemaUserCreated,lastWorkSucceeded;
+        private Phase phase=Phase.HELD;
+        private SchemaScope activeWork;
+        private final List<UnpublishedSchemaWork<Void>> completionChecks=new ArrayList<>();
+        private UnpublishedSchemaLease(AuthoritySqlFixture fixture){
+            this.fixture=fixture;
+            schemaUser="ws_"+fixture.user.substring(3);
+            schemaPassword=Base64.getUrlEncoder().withoutPadding().encodeToString(random(32));
+            configuredPrincipal=schemaUser+"@%";
+        }
+        public String database(){return fixture.database;}
+        public String schemaPrincipal(){return configuredPrincipal;}
+        private void openSchema()throws Exception{
+            synchronized(fixture){
+                verifyUnpublishedOwner();
+                try(var admin=fixture.admin(fixture.database);var statement=admin.createStatement()){
+                    fixture.unknown=true;
+                    try{statement.execute("CREATE USER "+literal(schemaUser)+"@'%' IDENTIFIED BY "+literal(schemaPassword));}
+                    catch(SQLException unsafe){throw new SQLException("Schema账号创建结局未知，保留私有owner原件","08007",unsafe.getErrorCode());}
+                    schemaUserCreated=true;fixture.unknown=false;
+                    fixture.unknown=true;
+                    statement.execute("GRANT CREATE,ALTER,INDEX ON "+name(fixture.database)+".* TO "+literal(schemaUser)+"@'%'");
+                    fixture.unknown=false;
+                }
+                schema=DriverManager.getConnection(fixture.jdbcUrl(""),schemaUser,schemaPassword);
+                AuthorityDataSource.initialize(schema,!fixture.options.allowMySql(),List.of());
+                schema.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                schema.setNetworkTimeout(Runnable::run,5000);
+                verifySchema();verifyUnpublishedOwner();
+            }
+        }
+        private void requireHeld()throws SQLException{
+            if(phase!=Phase.HELD||fixture.closed||fixture.unknown||!fixture.owned)
+                throw new SQLException("未发布Schema阶段已撤销或结果未知");
+        }
+        private void verifySchema()throws SQLException{
+            if(schema==null||schema.isClosed()||!schema.getAutoCommit())
+                throw new SQLException("未发布Schema会话无效或遗留事务","08007");
+            if(!configuredPrincipal.equals(currentUser(schema)))
+                throw new SQLException("实际独立Schema主体与预置配置不同","08007");
+            try(var statement=schema.createStatement();var rows=statement.executeQuery("SELECT DATABASE()")){
+                if(!rows.next()||!fixture.database.equals(rows.getString(1))||rows.next())
+                    throw new SQLException("未发布Schema会话具名库不同","08007");
+            }
+        }
+        private void verifyUnpublishedOwner()throws Exception{
+            if(fixture.closed||fixture.unknown||!fixture.owned||fixture.userCreated||fixture.boot!=null)
+                throw new SQLException("未发布owner状态不符");
+            if(!MessageDigest.isEqual(WriterAuthority.readPrivateControlFile(fixture.ownerFile,65536),fixture.ownerBytes()))
+                throw new SQLException("未发布私有owner原件不同");
+            try(var admin=fixture.admin(fixture.database)){
+                try(var query=admin.prepareStatement("SELECT owner_nonce,physical_sha,normal_principal FROM __sql_fixture_owner WHERE id=1");var rows=query.executeQuery()){
+                    if(!rows.next()||!MessageDigest.isEqual(fixture.nonce,rows.getBytes(1))
+                            ||!MessageDigest.isEqual(fixture.options.physical(),rows.getBytes(2)))
+                        throw new SQLException("未发布数据库归属不同");
+                    byte[] normal=rows.getBytes(3);
+                    if(normal==null||normal.length!=0||rows.next())throw new SQLException("未发布owner已发布或不唯一");
+                }
+                try(var query=admin.prepareStatement("SELECT table_name FROM information_schema.tables WHERE table_schema=?")){
+                    query.setString(1,fixture.database);
+                    try(var rows=query.executeQuery()){
+                        while(rows.next()){
+                            String table=rows.getString(1).toLowerCase(Locale.ROOT);
+                            if(CONTROL.contains(table)&&!table.equals("__sql_fixture_owner"))
+                                throw new SQLException("未发布库出现authority控制对象，拒绝接纳");
+                        }
+                    }
+                }
+            }
+        }
+        private void grantExistingBusinessRows()throws Exception{
+            try(var admin=fixture.admin(fixture.database);var statement=admin.createStatement();
+                    var query=admin.prepareStatement("SELECT table_name FROM information_schema.tables WHERE table_schema=? AND table_type='BASE TABLE' ORDER BY table_name")){
+                query.setString(1,fixture.database);
+                var tables=new ArrayList<String>();
+                try(var rows=query.executeQuery()){while(rows.next())tables.add(rows.getString(1));}
+                for(String table:tables)if(!CONTROL.contains(table.toLowerCase(Locale.ROOT))){
+                    fixture.unknown=true;
+                    statement.execute("GRANT SELECT,INSERT,UPDATE,DELETE ON "+name(fixture.database)+"."+name(table)+" TO "+literal(schemaUser)+"@'%'");
+                    fixture.unknown=false;
+                }
+            }
+        }
+        /** CREATE已成功且DDL会话无事务后，先补真实业务表权限，再允许调用方读取列和索引元数据。 */
+        private void grantBusinessRowsAfterCreate()throws SQLException{
+            try{
+                requireHeld();verifySchema();verifyUnpublishedOwner();
+                grantExistingBusinessRows();
+                verifySchema();verifyUnpublishedOwner();
+            }catch(Exception|Error failure){
+                failUnknown(failure);
+                if(failure instanceof SQLException sql)throw sql;
+                if(failure instanceof RuntimeException runtime)throw runtime;
+                if(failure instanceof Error error)throw error;
+                throw new SQLException("CREATE后业务表权限刷新未确认","08007",failure);
+            }
+        }
+        public <T>T withSchema(UnpublishedSchemaWork<T> work)throws Exception{
+            Objects.requireNonNull(work,"Schema工作不能为空");
+            synchronized(fixture){
+                requireHeld();if(activeWork!=null)throw new SQLException("未发布Schema工作不能重入");
+                try{verifyUnpublishedOwner();verifySchema();grantExistingBusinessRows();}
+                catch(Exception|Error failure){failUnknown(failure);throw failure;}
+                var scope=new SchemaScope(this);activeWork=scope;lastWorkSucceeded=false;
+                T result=null;Throwable failure=null;
+                try{result=work.run(scope.connection(),configuredPrincipal,fixture.database);}
+                catch(Exception|Error caught){failure=caught;if(!(caught instanceof SQLException)||unknownOutcome(caught))failUnknown(caught);}
+                finally{
+                    try{scope.revoke();}catch(Exception|Error cleanup){if(failure==null)failure=cleanup;else if(cleanup!=failure)failure.addSuppressed(cleanup);failUnknown(cleanup);}
+                    finally{activeWork=null;}
+                }
+                if(phase==Phase.HELD)try{verifySchema();verifyUnpublishedOwner();}
+                catch(Exception|Error invalid){if(failure==null)failure=invalid;else if(invalid!=failure)failure.addSuppressed(invalid);failUnknown(invalid);}
+                if(failure==null&&phase!=Phase.HELD)failure=new SQLException("Schema结果未知，拒绝把回调捕获异常视为成功","08007");
+                if(failure!=null){raise(failure);return null;}
+                lastWorkSucceeded=true;return result;
+            }
+        }
+        /** 真实结构变更在开始前登记完整只读验证；失败后seed或metadata成功不能清除目标。 */
+        public <T>T withSchemaChange(UnpublishedSchemaWork<T> change,UnpublishedSchemaWork<Void> fullValidation)throws Exception{
+            Objects.requireNonNull(change,"Schema变更不能为空");
+            Objects.requireNonNull(fullValidation,"完整Schema验证不能为空");
+            synchronized(fixture){
+                requireHeld();if(activeWork!=null)throw new SQLException("未发布Schema变更不能重入");
+                completionChecks.add(fullValidation);
+                return withSchema(change);
+            }
+        }
+        public AuthoritySqlFixture publish()throws Exception{
+            synchronized(fixture){
+                requireHeld();if(activeWork!=null)throw new SQLException("不能在Schema工作内重入发布");
+                if(!lastWorkSucceeded)throw new SQLException("最后一次Schema工作未成功，须显式修复并重新执行");
+                // 普通校验失败由withSchema保留HELD；在发布副作用的UNKNOWN收口之前执行。
+                for(UnpublishedSchemaWork<Void> check:completionChecks)withSchema(check);
+                try{
+                    verifySchema();verifyUnpublishedOwner();phase=Phase.PUBLISHING;
+                    closeSchema();dropConfirmedSchemaUser();
+                    try(var admin=fixture.admin(fixture.database)){
+                        try(var input=AuthoritySqlFixture.class.getResourceAsStream("/db/game-route-authority-schema.sql")){
+                            if(input==null)throw new SQLException("缺同源正式authority DDL");
+                            String ddl=new String(input.readAllBytes(),StandardCharsets.UTF_8);
+                            for(String sql:ddl.split(";"))if(!sql.isBlank())try(var statement=admin.createStatement()){
+                                statement.setQueryTimeout(5);fixture.unknown=true;statement.execute(sql);fixture.unknown=false;
+                            }
+                        }
+                        fixture.unknown=true;
+                        RouteAuthorityInitializer.initialize(admin,UUID.randomUUID().toString(),fixture.options.zones(),currentUser(admin));
+                        fixture.unknown=false;fixture.register(admin);
+                    }
+                    phase=Phase.PUBLISHED;return fixture;
+                }catch(Exception|Error failure){failUnknown(failure);throw failure;}
+            }
+        }
+        private void closeSchema()throws SQLException{
+            if(schema!=null){
+                Connection connection=schema;
+                try{
+                    connection.close();
+                    if(!connection.isClosed())throw new SQLException("Schema会话关闭未确认","08007");
+                    schema=null;
+                }catch(SQLException|RuntimeException|Error failure){
+                    try{connection.abort(Runnable::run);}catch(Exception|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}throw failure;
+                }
+            }
+        }
+        private void dropConfirmedSchemaUser()throws Exception{
+            if(!schemaUserCreated)return;
+            verifyUnpublishedOwner();
+            try(var account=DriverManager.getConnection(fixture.jdbcUrl(""),schemaUser,schemaPassword)){
+                if(!configuredPrincipal.equals(currentUser(account)))throw new SQLException("待撤销Schema账号归属不同");
+            }
+            try(var admin=fixture.admin("");var statement=admin.createStatement()){
+                fixture.unknown=true;statement.execute("DROP USER "+literal(schemaUser)+"@'%'");
+                schemaUserCreated=false;fixture.unknown=false;
+            }
+        }
+        private void failUnknown(Throwable failure){
+            phase=Phase.FAILED_UNKNOWN;fixture.unknown=true;lastWorkSucceeded=false;
+            if(fixture.boot!=null)fixture.boot.seal();
+            if(activeWork!=null)activeWork.active=false;
+            try{closeSchema();}catch(Exception|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}
+        }
+        private static boolean unknownOutcome(Throwable failure){
+            Set<Throwable> seen=Collections.newSetFromMap(new IdentityHashMap<Throwable,Boolean>());
+            var pending=new ArrayDeque<Throwable>();pending.add(failure);
+            while(!pending.isEmpty()){
+                Throwable cause=pending.removeFirst();if(!seen.add(cause))continue;
+                if(cause instanceof Error||cause instanceof java.io.IOException||cause instanceof InterruptedException
+                        ||cause instanceof SQLTimeoutException||cause instanceof SQLRecoverableException
+                        ||cause instanceof SQLTransientConnectionException||cause instanceof SQLNonTransientConnectionException)return true;
+                if(cause instanceof SQLException sql){String state=sql.getSQLState();
+                    if(state!=null&&(state.startsWith("08")||state.startsWith("HYT")||state.startsWith("S1T")||state.equals("70100")))return true;
+                    if(sql.getNextException()!=null)pending.addLast(sql.getNextException());
+                }
+                if(cause.getCause()!=null)pending.addLast(cause.getCause());
+                for(Throwable suppressed:cause.getSuppressed())pending.addLast(suppressed);
+            }
+            return false;
+        }
+        private static void raise(Throwable failure)throws Exception{
+            if(failure instanceof Exception exception)throw exception;
+            if(failure instanceof Error error)throw error;
+            throw new SQLException("Schema工作失败");
+        }
+        @Override public void close()throws Exception{
+            synchronized(fixture){
+                if(phase==Phase.CLOSED||phase==Phase.PUBLISHED)return;
+                if(activeWork!=null)throw new SQLException("不能在Schema工作内重入关闭");
+                if(phase==Phase.FAILED_UNKNOWN||fixture.unknown){
+                    var failure=new SQLException("Schema结果未知，lease已撤销，保留owner原件及对象","08007");
+                    try{closeSchema();}catch(Exception|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}throw failure;
+                }
+                requireHeld();
+                try{verifySchema();verifyUnpublishedOwner();closeSchema();dropConfirmedSchemaUser();fixture.close();phase=Phase.CLOSED;}
+                catch(Exception|Error failure){failUnknown(failure);throw failure;}
+            }
+        }
+    }
+    private UnpublishedSchemaLease unpublishedOwner;
+    /** 未发布owner不能通过旧schema入口取得管理员连接；成功发布后才恢复既有fixture用途。 */
+    public Connection schemaConnection()throws SQLException{
+        synchronized(this){
+            if(unpublishedOwner!=null&&unpublishedOwner.phase!=UnpublishedSchemaLease.Phase.PUBLISHED)
+                throw new SQLException("未发布owner只能使用受管Schema阶段，禁止管理员连接旁路");
+            return schemaConnectionInternal();
+        }
+    }
+    /** 旧路径无lease时原注册体不变；新owner只在账号和会话均撤销后的PUBLISHING阶段抵达注册。 */
+    private void register(Connection admin)throws Exception{
+        synchronized(this){
+            if(unpublishedOwner!=null&&(unpublishedOwner.phase!=UnpublishedSchemaLease.Phase.PUBLISHING
+                    ||unpublishedOwner.schema!=null||unpublishedOwner.schemaUserCreated||unpublishedOwner.activeWork!=null))
+                throw new SQLException("未发布Schema阶段尚未撤销，禁止REGISTER旁路");
+            registerInternal(admin);
+        }
+    }
+    /** 仅供本fixture的SQL-seam种子在真实旧run显式release后再登记；不是普通PUBLISHED注册入口。 */
+    private void releaseSeededSqlSeamAndRegister(Connection admin,byte[] priorRun)throws Exception{
+        if(unknown||closed||!owned||boot==null)throw new SQLException("SQL seam释放再登记不可用");
+        if(unpublishedOwner!=null&&(unpublishedOwner.phase!=UnpublishedSchemaLease.Phase.PUBLISHED
+                ||unpublishedOwner.schema!=null||unpublishedOwner.schemaUserCreated||unpublishedOwner.activeWork!=null))
+            throw new SQLException("SQL seam释放再登记要求已发布且Schema阶段已完全撤销");
+        if(!admin.getAutoCommit())throw new SQLException("SQL seam释放再登记不能继承事务");
+        String old=uuidText(priorRun);
+        if(!sqlSeamFreezes.containsKey(old))throw new SQLException("不能释放非本fixture控制种子");
+        if(!MessageDigest.isEqual(WriterAuthority.readPrivateControlFile(ownerFile,65536),ownerBytes()))
+            throw new SQLException("SQL seam释放再登记私有owner不同");
+        try(var q=admin.prepareStatement("SELECT owner_nonce,physical_sha FROM __sql_fixture_owner WHERE id=1")){
+            q.setQueryTimeout(5);
+            try(var rows=q.executeQuery()){
+                if(!rows.next()||!MessageDigest.isEqual(nonce,rows.getBytes(1))
+                        ||!MessageDigest.isEqual(options.physical(),rows.getBytes(2))||rows.next())
+                    throw new SQLException("SQL seam释放再登记数据库owner不同");
+            }
+        }
+        try(var q=admin.prepareStatement("SELECT writable,freeze_run_id FROM route_meta WHERE id=1")){
+            q.setQueryTimeout(5);
+            try(var rows=q.executeQuery()){
+                if(!rows.next()||rows.getInt(1)!=0||!Arrays.equals(priorRun,rows.getBytes(2))||rows.next())
+                    throw new SQLException("SQL seam释放再登记不是同一冻结旧run");
+            }
+        }
+        try(var q=admin.prepareStatement("SELECT state FROM zone_merge_run WHERE run_id=?")){
+            q.setString(1,old);q.setQueryTimeout(5);
+            try(var rows=q.executeQuery()){
+                if(!rows.next()||rows.getInt(1)!=6||rows.next())throw new SQLException("前一域run尚未显式release");
+            }
+        }
+        // 所有owner/phase/priorRun/state前置已完成，才进入原解冻和真实再登记顺序。
+        try{
+            unknown=true;
+            update(admin,"UPDATE route_meta SET writable=1,writer_epoch=writer_epoch+1,freeze_run_id=? WHERE id=1 AND writable=0 AND freeze_run_id=?",new byte[0],priorRun);
+            unknown=false;registerInternal(admin);
+        }catch(Exception|Error failure){
+            if(unpublishedOwner!=null)unpublishedOwner.failUnknown(failure);
+            else{unknown=true;if(boot!=null)boot.seal();}
+            throw failure;
+        }
+    }
+    /** 每次同步回调的可撤销JDBC视图；不向调用方泄漏driver对象或异步SQL入口。 */
+    private static final class SchemaScope{
+        private final UnpublishedSchemaLease lease;
+        private final Thread thread=Thread.currentThread();
+        private final IdentityHashMap<Object,Object> views=new IdentityHashMap<>();
+        private final List<AutoCloseable> resources=new ArrayList<>();
+        private final Set<Object> preparedCreates=Collections.newSetFromMap(new IdentityHashMap<Object,Boolean>());
+        private boolean active=true;
+        private SchemaScope(UnpublishedSchemaLease lease){this.lease=lease;}
+        private Connection connection()throws SQLException{return (Connection)view(lease.schema);}
+        private Object view(Object target)throws SQLException{
+            if(target==null)return null;
+            Object prior=views.get(target);if(prior!=null)return prior;
+            Class<?> type=null;
+            if(target instanceof Connection)type=Connection.class;
+            else if(target instanceof CallableStatement)type=CallableStatement.class;
+            else if(target instanceof PreparedStatement)type=PreparedStatement.class;
+            else if(target instanceof Statement)type=Statement.class;
+            else if(target instanceof ResultSet)type=ResultSet.class;
+            else if(target instanceof DatabaseMetaData)type=DatabaseMetaData.class;
+            else if(target instanceof ResultSetMetaData)type=ResultSetMetaData.class;
+            else if(target instanceof ParameterMetaData)type=ParameterMetaData.class;
+            else if(target instanceof java.sql.Array array){resources.add(array::free);throw new SQLFeatureNotSupportedException("Schema阶段不暴露数组driver对象");}
+            else if(target instanceof Blob blob){resources.add(blob::free);throw new SQLFeatureNotSupportedException("Schema阶段不暴露LOB driver对象");}
+            else if(target instanceof Clob clob){resources.add(clob::free);throw new SQLFeatureNotSupportedException("Schema阶段不暴露LOB driver对象");}
+            else if(target instanceof SQLXML xml){resources.add(xml::free);throw new SQLFeatureNotSupportedException("Schema阶段不暴露XML driver对象");}
+            else if(target instanceof java.sql.Wrapper||target instanceof java.sql.Struct)
+                throw new SQLFeatureNotSupportedException("Schema阶段不暴露其它driver对象");
+            if(type==null)return target;
+            final Object delegate=target;
+            Object proxy=java.lang.reflect.Proxy.newProxyInstance(AuthoritySqlFixture.class.getClassLoader(),new Class<?>[]{type},
+                    (object,method,args)->invokeTarget(delegate,object,method,args));
+            views.put(target,proxy);
+            if(target instanceof Statement statement)resources.add(statement);
+            else if(target instanceof ResultSet rows)resources.add(rows);
+            return proxy;
+        }
+        private static boolean createsTable(String sql){
+            return sql!=null&&sql.matches("(?is)^\\s*CREATE\\s+TABLE\\b.*");
+        }
+        private Object invokeTarget(Object target,Object proxy,java.lang.reflect.Method method,Object[] args)throws Throwable{
+            String name=method.getName();
+            if(method.getDeclaringClass()==Object.class){
+                if(name.equals("toString"))return "未发布Schema阶段JDBC视图";
+                if(name.equals("hashCode"))return System.identityHashCode(proxy);
+                if(name.equals("equals"))return proxy==args[0];
+            }
+            if(Thread.currentThread()!=thread)throw new SQLException("Schema阶段禁止跨线程SQL");
+            synchronized(lease.fixture){
+                if(!active||Thread.currentThread()!=thread||lease.activeWork!=this||lease.phase!=UnpublishedSchemaLease.Phase.HELD)
+                    throw new SQLException("Schema阶段JDBC能力已撤销或跨线程使用");
+                if(name.equals("unwrap"))throw new SQLException("Schema阶段禁止unwrap");
+                if(name.equals("isWrapperFor"))return false;
+                if(target instanceof Connection&&name.equals("abort")){
+                    lease.failUnknown(new SQLException("Schema会话被显式丢弃，lease已撤销","08007"));return null;
+                }
+                if(target instanceof Connection&&(name.equals("close")||name.equals("setNetworkTimeout")
+                        ||name.equals("setCatalog")||name.equals("setSchema")||name.equals("setClientInfo")
+                        ||name.equals("beginRequest")||name.equals("endRequest")||name.equals("setTransactionIsolation")
+                        ||name.equals("setReadOnly")||name.equals("setTypeMap")||name.equals("setHoldability")
+                        ||name.equals("createArrayOf")||name.equals("createBlob")||name.equals("createClob")
+                        ||name.equals("createNClob")||name.equals("createSQLXML")||name.equals("createStruct")))
+                    throw new SQLException("Schema会话生命周期仅由owner管理");
+                if(target instanceof ResultSet&&(name.equals("getBlob")||name.equals("getClob")||name.equals("getNClob")
+                        ||name.equals("getSQLXML")||name.equals("getArray")))
+                    throw new SQLFeatureNotSupportedException("Schema阶段不创建LOB或数组driver对象");
+                // 只识别本夹具支持的CREATE TABLE前缀；不解析表名，不在一般DML后跨连接GRANT。
+                boolean preparedCreate=preparedCreates.contains(target);
+                boolean sqlArgument=args!=null&&args.length>0&&args[0] instanceof String;
+                boolean createTable=sqlArgument?createsTable((String)args[0]):preparedCreate;
+                if(target instanceof Statement&&name.equals("addBatch")&&createTable)
+                    throw new SQLFeatureNotSupportedException("未发布Schema阶段不支持批量CREATE TABLE，请逐条执行","0A000");
+                boolean executedCreate=target instanceof Statement&&createTable
+                        &&(name.equals("execute")||name.equals("executeUpdate")||name.equals("executeLargeUpdate"));
+                try{
+                    Object result=method.invoke(target,args);
+                    if(target instanceof Connection&&result instanceof Statement statement){
+                        preparedCreates.remove(statement);
+                        if((name.equals("prepareStatement")||name.equals("prepareCall"))&&sqlArgument&&createsTable((String)args[0]))
+                            preparedCreates.add(statement);
+                    }
+                    if(executedCreate)lease.grantBusinessRowsAfterCreate();
+                    return view(result);
+                }
+                catch(java.lang.reflect.InvocationTargetException wrapped){
+                    Throwable failure=wrapped.getCause();if(!(failure instanceof SQLException)||UnpublishedSchemaLease.unknownOutcome(failure))lease.failUnknown(failure);throw failure;
+                }
+            }
+        }
+        private void revoke()throws Exception{
+            active=false;Throwable failure=null;
+            for(int index=resources.size()-1;index>=0;index--)try{resources.get(index).close();}
+            catch(Exception|Error cleanup){if(failure==null)failure=cleanup;else if(cleanup!=failure)failure.addSuppressed(cleanup);}
+            resources.clear();views.clear();preparedCreates.clear();if(failure!=null)UnpublishedSchemaLease.raise(failure);
+        }
+    }
+
     private static final Set<String> CONTROL=Set.of("route_meta","zone_merged_into","zone_merge_fence","writer_registry","writer_slot","writer_lifecycle_receipt","sql_writer_drain_run","sql_writer_freeze_ticket","sql_writer_maintenance_receipt","__sql_fixture_owner");
     private final Options options;private final String database,user,password;private final byte[] nonce;private final Path ownerFile;private boolean owned,userCreated,unknown,closed;private WriterAuthority boot;
     private AuthoritySqlFixture(Options options)throws Exception{
@@ -122,10 +538,10 @@ public final class AuthoritySqlFixture implements AutoCloseable {
         public java.util.logging.Logger getParentLogger()throws SQLFeatureNotSupportedException{throw new SQLFeatureNotSupportedException();}
         public <T>T unwrap(Class<T> type)throws SQLException{throw new SQLException("fixture不允许unwrap");}public boolean isWrapperFor(Class<?> type){return false;}
     };}
-    public Connection schemaConnection()throws SQLException{if(closed||unknown||!owned)throw new SQLException("fixture schema不可用");return admin(database);}
+    private Connection schemaConnectionInternal()throws SQLException{if(closed||unknown||!owned)throw new SQLException("fixture schema不可用");return admin(database);}
     private Connection admin(String db)throws SQLException{var connection=DriverManager.getConnection(options.root().replaceAll("/$","")+"/"+db,options.adminUser(),options.adminPassword());try{AuthorityDataSource.initialize(connection,!options.allowMySql(),List.of());connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);connection.setNetworkTimeout(Runnable::run,5000);return connection;}catch(SQLException|RuntimeException failure){try{connection.close();}catch(SQLException cleanup){failure.addSuppressed(cleanup);}throw failure;}}
     private static String currentUser(Connection connection)throws SQLException{try(var s=connection.createStatement();var r=s.executeQuery("SELECT CURRENT_USER()")){if(!r.next())throw new SQLException("缺实际主体");String value=r.getString(1);if(value==null||value.isBlank()||r.next())throw new SQLException("实际主体不唯一");return value;}}
-    private void register(Connection admin)throws Exception{
+    private void registerInternal(Connection admin)throws Exception{
         try(var statement=admin.createStatement()){
             if(!userCreated){unknown=true;try{statement.execute("CREATE USER "+literal(user)+"@'%' IDENTIFIED BY "+literal(password));}catch(SQLException unsafe){throw new SQLException("fixture账号创建结局未知，保留私有owner原件","08007");}unknown=false;userCreated=true;}
             List<String> tables=new ArrayList<>();try(var q=admin.prepareStatement("SELECT table_name FROM information_schema.tables WHERE table_schema=? AND table_type='BASE TABLE' ORDER BY table_name")){q.setString(1,database);try(var rows=q.executeQuery()){while(rows.next())tables.add(rows.getString(1));}}
@@ -160,10 +576,7 @@ public final class AuthoritySqlFixture implements AutoCloseable {
             try(var q=admin.prepareStatement("SELECT owner_nonce,physical_sha FROM __sql_fixture_owner WHERE id=1");var r=q.executeQuery()){if(!r.next()||!MessageDigest.isEqual(nonce,r.getBytes(1))||!MessageDigest.isEqual(options.physical(),r.getBytes(2))||r.next())throw new SQLException("SQL seam数据库owner不同");}
             byte[] priorRun;int writable;try(var s=admin.createStatement();var r=s.executeQuery("SELECT writable,freeze_run_id FROM route_meta WHERE id=1")){if(!r.next())throw new SQLException("缺fixture meta");writable=r.getInt(1);priorRun=r.getBytes(2);}
             if(Arrays.equals(priorRun,run)){if(writable!=0||!sqlSeamFreezes.containsKey(operation))throw new SQLException("不能接管外部run");return;}
-            if(priorRun.length!=0){String old=uuidText(priorRun);if(writable!=0||!sqlSeamFreezes.containsKey(old))throw new SQLException("不能释放非本fixture控制种子");
-                try(var q=admin.prepareStatement("SELECT state FROM zone_merge_run WHERE run_id=?")){q.setString(1,old);try(var r=q.executeQuery()){if(!r.next()||r.getInt(1)!=6)throw new SQLException("前一域run尚未显式release");}}
-                unknown=true;update(admin,"UPDATE route_meta SET writable=1,writer_epoch=writer_epoch+1,freeze_run_id=? WHERE id=1 AND writable=0 AND freeze_run_id=?",new byte[0],priorRun);unknown=false;register(admin);
-            }
+            if(priorRun.length!=0)releaseSeededSqlSeamAndRegister(admin,priorRun);
             byte[] key=boot.writerKey();admin.setAutoCommit(false);boolean committing=false;
             try{
                 try(var q=admin.prepareStatement("SELECT slot,state FROM writer_slot WHERE writer_key=? ORDER BY slot FOR UPDATE")){q.setBytes(1,key);q.setQueryTimeout(5);try(var r=q.executeQuery()){int slot=0;while(r.next()){if(r.getInt(1)!=slot++||r.getInt(2)!=1)throw new SQLException("SQL seam原writer不是完整ACTIVE");}if(slot!=64)throw new SQLException("SQL seam缺slot");}}

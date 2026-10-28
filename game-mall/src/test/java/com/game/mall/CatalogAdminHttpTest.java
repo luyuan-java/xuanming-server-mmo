@@ -22,6 +22,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -30,14 +31,15 @@ import org.springframework.web.bind.annotation.RestController;
 /** 真实Tomcat双前缀、签名、控制器和事务库；H2不代替真实TiDB或完整管理后台验收。 */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "server.address=127.0.0.1", "server.servlet.context-path=/mall", "spring.mvc.servlet.path=/rpc",
-        "game.namespace=malladminhttp", "game.run-mode=test", "game.mall.require-tidb=false",
+        "game.namespace=malladminhttp", "game.run-mode=test", "game.mall.require-tidb=false", "game.sql-authority.require-tidb=false",
         "game.mall.gateway-secret=" + MallTestDatabase.GATEWAY_KEY,
         "game.mall.payment-secret=" + MallTestDatabase.PAYMENT_KEY,
         "game.mall.delivery-secret=" + CatalogAdminHttpTest.DELIVERY_KEY,
         "game.mall.admin-secret=" + CatalogAdminHttpTest.ADMIN_KEY,
         "spring.datasource.url=jdbc:h2:mem:malladminhttp;MODE=MySQL;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=5000",
         "spring.datasource.username=sa", "spring.datasource.password=",
-        "spring.sql.init.mode=always", "spring.sql.init.schema-locations=classpath:db/migration/V1__official_sku.sql"})
+        "spring.sql.init.mode=never", "spring.sql.init.schema-locations=classpath:db/migration/V1__official_sku.sql"})
+@Import(MallHttpFlowTest.H2AuthorityConfiguration.class)
 @DirtiesContext
 class CatalogAdminHttpTest {
     static final String DELIVERY_KEY = "mall-catalog-test-delivery-key-only-0003";

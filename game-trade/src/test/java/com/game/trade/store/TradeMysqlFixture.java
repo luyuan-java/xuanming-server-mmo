@@ -88,6 +88,11 @@ final class TradeMysqlFixture implements AutoCloseable {
         return authority.normalDataSource(params).getConnection();
     }
 
+    /** 仅供本夹具显式会话诊断；业务仍使用受保护的normal连接。 */
+    Connection schemaConnection() throws SQLException {
+        return authority.schemaConnection();
+    }
+
     int exec(String sql, Object... args) throws SQLException {
         try (Connection c = authority.schemaConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             bind(ps, args);

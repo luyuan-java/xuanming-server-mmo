@@ -19,7 +19,7 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 class ZoneMergeSqlAuthorityTiDbTest {
     DataSqlFixture db;ZoneMergeStore store;
     @BeforeEach void setup()throws Exception{
-        db=DataSqlFixture.create((schema,principal)->{ZoneMergeTables.registry().initializeFresh(schema,principal);
+        db=DataSqlFixture.createUnpublished((schema,principal)->{ZoneMergeTables.registry().initializeFresh(schema,principal);
         new ResourceDatabasePopulator(new ClassPathResource("db/game-gateway-schema.sql")).populate(schema);
         for(String ddl:List.of(
             "ALTER TABLE guild_activity_reward_owed ADD COLUMN guild_id BIGINT UNSIGNED",
@@ -44,16 +44,38 @@ class ZoneMergeSqlAuthorityTiDbTest {
         String h=hash(plan);store.approve(key,h,"reviewer");for(int i=0;i<20&&n("SELECT COUNT(*) FROM zone_merge_item WHERE run_id=? AND state=1",key)>0;i++)store.apply(key,h);
         var result=store.finish(key,h);assertThat(result.getState()).isEqualTo(5);return result;
     }
+    private void assertSqlFreezeRound(String run,String generation,long beforeEpoch,long afterEpoch){
+        assertThat(n("SELECT writer_epoch FROM route_meta WHERE id=1")).isEqualTo(afterEpoch);
+        assertThat(n("SELECT writable FROM route_meta WHERE id=1")).isZero();
+        assertThat(n("SELECT COUNT(*) FROM route_meta m JOIN sql_writer_maintenance_receipt r ON r.run_id=m.freeze_run_id AND r.generation=m.generation AND r.after_epoch=m.writer_epoch AND r.catalog_revision=m.catalog_revision JOIN sql_writer_drain_run d ON d.operation_id=r.run_id AND d.frozen_request_id=r.request_id AND d.latest_receipt_id=r.request_id AND d.latest_receipt_digest=r.receipt_digest WHERE m.id=1 AND d.phase=7 AND r.run_id=UNHEX(REPLACE(?,'-','')) AND r.generation=? AND r.kind=1 AND r.phase=1 AND r.run_phase=7 AND r.before_epoch=? AND r.after_epoch=?",run,generation,beforeEpoch,afterEpoch)).isEqualTo(1);
+    }
     @Test void 正反合区仅改原清单home并推进E_业务快照与owner不回退_完成不自动解冻()throws Exception{
         String key=UUID.randomUUID().toString();var frozen=freeze(key,1,2,1,"operator");assertThat(n("SELECT writable FROM route_meta")).isZero();assertThat(n("SELECT COUNT(*) FROM zone_merge_fence WHERE run_id=?",key)).isEqualTo(128);
+        assertSqlFreezeRound(key,frozen.getGeneration(),1,2);
+        assertThat(n("SELECT COUNT(*) FROM writer_registry")).isEqualTo(1);
+        assertThat(n("SELECT COUNT(*) FROM writer_lifecycle_receipt WHERE kind=1 AND previous_epoch=1 AND resulting_epoch=1")).isEqualTo(1);
+        assertThat(n("SELECT COUNT(*) FROM writer_slot WHERE state=2 AND writer_epoch=1")).isEqualTo(64);
         var planned=plan(key);assertThat(planned.getItemCount()).isEqualTo(6);assertThatThrownBy(()->store.approve(key,"0".repeat(64),"reviewer")).isInstanceOf(SQLException.class);
         var finished=complete(key,planned);assertThat(n("SELECT zone_id FROM player WHERE player_id=1")).isEqualTo(2);assertThat(n("SELECT owner_epoch FROM player WHERE player_id=1")).isEqualTo(11);assertThat(n("SELECT owner_revision FROM player WHERE player_id=1")).isEqualTo(1);
         assertThat(db.jdbc().queryForObject("SELECT account FROM player WHERE player_id=1",String.class)).isEqualTo("acc1");assertThat(db.jdbc().queryForObject("SELECT data FROM player_state WHERE player_id=1",byte[].class)).isEqualTo(new byte[]{8,7,6});
         assertThat(n("SELECT zone_id FROM guild WHERE guild_id=10")).isEqualTo(2);assertThat(n("SELECT market_zone FROM trade_listing WHERE listing_id=100")).isEqualTo(2);assertThat(n("SELECT writable FROM route_meta")).isZero();
         assertThatThrownBy(()->{try(var c=db.dataSource.getConnection()){c.setAutoCommit(false);PlayerRouteAuthority.lock(c,List.of(1L),3);c.rollback();}}).isInstanceOf(SQLException.class);
         String h=hash(finished);assertThat(store.release(key,h,frozen.getGeneration(),"reviewer").getState()).isEqualTo(6);assertThat(store.release(key,h,frozen.getGeneration(),"reviewer").getState()).isEqualTo(6);
+        // 正式域release只释放本域，不能冒作全局SQL release。
+        assertThat(n("SELECT writer_epoch FROM route_meta WHERE id=1")).isEqualTo(2);
+        assertThat(n("SELECT writable FROM route_meta WHERE id=1")).isZero();
         try(var c=db.schemaConnection()){assertThat(PlayerRouteAuthority.fenced(c,1,3)).isTrue();assertThat(PlayerRouteAuthority.fenced(c,2,3)).isFalse();}
-        String undo=UUID.randomUUID().toString();var reverse=freeze(undo,2,1,1,"operator",key);var reversePlan=plan(undo);complete(undo,reversePlan);store.release(undo,hash(reversePlan),reverse.getGeneration(),"reviewer");
+        String undo=UUID.randomUUID().toString();var reverse=freeze(undo,2,1,1,"operator",key);
+        assertSqlFreezeRound(undo,reverse.getGeneration(),3,4);
+        assertThat(n("SELECT COUNT(*) FROM writer_registry")).isEqualTo(2);
+        assertThat(n("SELECT COUNT(*) FROM writer_registry WHERE state=2")).isEqualTo(2);
+        assertThat(n("SELECT COUNT(DISTINCT instance_id) FROM writer_registry")).isEqualTo(2);
+        assertThat(n("SELECT COUNT(*) FROM writer_lifecycle_receipt WHERE kind=1")).isEqualTo(2);
+        assertThat(n("SELECT COUNT(*) FROM writer_lifecycle_receipt WHERE kind=1 AND previous_epoch=3 AND resulting_epoch=3")).isEqualTo(1);
+        assertThat(n("SELECT COUNT(*) FROM writer_slot WHERE state=2 AND writer_epoch=1")).isEqualTo(64);
+        assertThat(n("SELECT COUNT(*) FROM writer_slot WHERE state=2 AND writer_epoch=3")).isEqualTo(64);
+        assertThat(db.jdbc().queryForList("SELECT COUNT(*) FROM writer_slot GROUP BY writer_key",Long.class)).containsExactlyInAnyOrder(64L,64L);
+        var reversePlan=plan(undo);complete(undo,reversePlan);store.release(undo,hash(reversePlan),reverse.getGeneration(),"reviewer");
         assertThat(n("SELECT zone_id FROM player WHERE player_id=1")).isEqualTo(1);assertThat(n("SELECT owner_epoch FROM player WHERE player_id=1")).isEqualTo(12);assertThat(n("SELECT zone_id FROM player WHERE player_id=2")).isEqualTo(2);assertThat(n("SELECT owner_epoch FROM player WHERE player_id=2")).isEqualTo(30);assertThat(n("SELECT COUNT(*) FROM zone_merged_into")).isZero();assertThat(n("SELECT manual_status FROM zone_config WHERE zone_id=1")).isEqualTo(1);assertThat(n("SELECT COUNT(*) FROM zone_merge_run")).isEqualTo(2);
     }
     @Test void 缺表和缺片维护态未排空都不能冻结_不以TTL或空结果补权()throws Exception{

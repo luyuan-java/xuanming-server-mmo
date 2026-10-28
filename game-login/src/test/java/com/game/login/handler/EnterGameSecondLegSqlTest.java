@@ -29,6 +29,7 @@ import com.game.proto.login.EnterGameRequest;
 import com.game.proto.login.EnterGameResponse;
 import com.game.table.LoginErrorTip;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.sql.Connection;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
@@ -191,14 +192,26 @@ class EnterGameSecondLegSqlTest {
     @EnableTransactionManagement
     static class Config {
 
-        @Bean
-        DataSource dataSource() throws java.sql.SQLException {
+        @Bean(destroyMethod = "close")
+        H2Authority h2Authority() throws java.sql.SQLException {
             JdbcDataSource h2 = new JdbcDataSource();
+            h2.setUser("sa");h2.setPassword("");
             h2.setURL("jdbc:h2:mem:game_login_" + UUID.randomUUID().toString().replace("-", "")
                     + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
-            new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(h2);
-            try(var connection=h2.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1,2,3), schemaPrincipal(connection));}
-            return h2;
+            try {
+                new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"), new ClassPathResource("db/game-player-schema.sql")).execute(h2);
+                try(var connection=h2.getConnection()){com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1,2,3), schemaPrincipal(connection));}
+                return new H2Authority(h2);
+            } catch(java.sql.SQLException|RuntimeException|Error failure) {
+                try(var raw=h2.getConnection();var statement=raw.createStatement()){statement.execute("SHUTDOWN");}
+                catch(java.sql.SQLException|RuntimeException|Error cleanup){failure.addSuppressed(cleanup);}
+                throw failure;
+            }
+        }
+
+        @Bean
+        DataSource dataSource(H2Authority h2Authority) {
+            return h2Authority.normalSource();
         }
 
         @Bean
@@ -228,5 +241,59 @@ class EnterGameSecondLegSqlTest {
             return new PlayerStore(playerMapper, CLOCK::get, transactionManager);
         }
     }
+    /** 仅H2状态机回归替身外部writer资格；不发grant，真实SQL/事务与Fence包装仍由生产代码执行。 */
+    private static final class H2Authority implements AutoCloseable {
+        private final JdbcDataSource schema;
+        private final DataSource normal;
+        private final com.game.common.sql.WriterAuthority authority;
+        private final java.util.concurrent.atomic.AtomicBoolean sealed = new java.util.concurrent.atomic.AtomicBoolean();
+        private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+
+        H2Authority(JdbcDataSource schema) throws java.sql.SQLException {
+            this.schema = schema;
+            final String physicalUrl;
+            try (Connection raw = schema.getConnection()) {
+                requireRawH2(raw);
+                physicalUrl = raw.getMetaData().getURL();
+            }
+            authority = org.mockito.Mockito.mock(com.game.common.sql.WriterAuthority.class, invocation -> {
+                String method = invocation.getMethod().getName();
+                if (method.equals("verifyPhysical") || method.equals("begin")) {
+                    Connection raw = invocation.getArgument(0);
+                    requireRawH2(raw);
+                    if (sealed.get() || !raw.getAutoCommit() || !physicalUrl.equals(raw.getMetaData().getURL())) {
+                        throw new java.sql.SQLException("H2外部writer接口替身拒绝已seal、旧事务或另一内存库连接");
+                    }
+                    // AuthorityConnection.finish仍对真实H2执行commit/rollback并恢复autoCommit。
+                    if (method.equals("begin")) raw.setAutoCommit(false);
+                    return null;
+                }
+                if (method.equals("seal")) { sealed.set(true); return null; }
+                if (method.equals("isSealed")) return sealed.get();
+                return org.mockito.Mockito.RETURNS_DEFAULTS.answer(invocation);
+            });
+            var credentials = new java.util.Properties();
+            credentials.setProperty("user", "sa"); credentials.setProperty("password", "");
+            normal = new com.game.common.sql.AuthorityDataSource(schema.getURL(), credentials, authority, false, java.util.List.of());
+        }
+
+        private static void requireRawH2(Connection raw) throws java.sql.SQLException {
+            if (org.mockito.Mockito.mockingDetails(raw).isMock() || raw.isClosed()
+                    || !"H2".equals(raw.getMetaData().getDatabaseProductName())
+                    || !"SA".equalsIgnoreCase(raw.getMetaData().getUserName())) {
+                throw new java.sql.SQLException("H2外部writer接口替身仅接受真实SA物理连接");
+            }
+        }
+
+        DataSource normalSource() { return normal; }
+        DataSource schemaSource() { if(closed.get())throw new IllegalStateException("H2测试fixture已关闭");return schema; }
+        void seal() { authority.seal(); }
+        @Override public synchronized void close() throws java.sql.SQLException {
+            if(closed.getAndSet(true))return;
+            seal();
+            try(Connection raw=schema.getConnection();var statement=raw.createStatement()){statement.execute("SHUTDOWN");}
+        }
+    }
+
     private static String schemaPrincipal(java.sql.Connection connection)throws java.sql.SQLException{try(var statement=connection.createStatement();var rows=statement.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new java.sql.SQLException("缺少实际schema主体");return rows.getString(1);}}
 }

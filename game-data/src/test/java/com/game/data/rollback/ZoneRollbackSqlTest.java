@@ -203,7 +203,7 @@ class ZoneRollbackSqlTest {
     private List<Long> zonePlayers(long first, int count, long target) {
         long now = System.currentTimeMillis();
         List<Long> ids = new ArrayList<>();
-        h.db.tx().executeWithoutResult(status -> {
+        h.db.schemaTx().executeWithoutResult(status -> {
             for (long p = first; p < first + count; p++) {
                 h.player(p, 1, RollbackJobSqlTest.currentState().toByteArray(), now - 1000, 2, false);
                 h.snapshot(100_000 + p, p, target - 10, SnapshotCauses.LOGOUT, 1, 5, 2002,

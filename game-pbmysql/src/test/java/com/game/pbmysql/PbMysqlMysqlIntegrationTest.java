@@ -7,6 +7,7 @@ import static com.game.pbmysql.TableOption.withTableName;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.sql.testing.AuthoritySqlFixture;
 import com.game.pbmysql.testpb.Account;
 import com.game.pbmysql.testpb.DriftRow;
 import com.game.pbmysql.testpb.GolangTest;
@@ -25,7 +26,6 @@ import com.game.proto.guild.GuildRecord;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -33,7 +33,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -53,26 +52,59 @@ class PbMysqlMysqlIntegrationTest {
     private static final String USER = System.getProperty("game.it.mysql.user", "root");
     private static final String PASSWORD = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
     private static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true";
-    private static final String DATABASE = "game_pbmysql_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+    private static AuthoritySqlFixture fixture;
+    private static AuthoritySqlFixture.UnpublishedSchemaLease publishedLease;
 
     @BeforeAll
-    static void createDatabase() throws SQLException {
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("CREATE DATABASE `" + DATABASE + "` DEFAULT CHARACTER SET utf8mb4");
+    static void createDatabase() throws Exception {
+        // 样本与漂移夹具只在未发布Schema阶段准备，发布后业务仅使用NORMAL。
+        try (var lease = beginUnpublished()) {
+            PbMysql samples = new PbMysql();
+            samples.register(GolangTest.getDefaultInstance());
+            samples.register(Account.getDefaultInstance());
+            samples.register(ThirdPartyAccount.getDefaultInstance());
+            samples.register(TidbHotspot.getDefaultInstance());
+            samples.register(StringKeyRow.getDefaultInstance());
+            samples.register(LongNameRow.getDefaultInstance());
+            samples.register(FriendEdgeRecord.getDefaultInstance());
+            samples.register(GuildRecord.getDefaultInstance());
+            samples.register(KitchenSink.getDefaultInstance());
+            samples.register(ScalarRow.getDefaultInstance());
+            samples.initializeFresh(lease);
+            // 同一proto full name重注册会覆盖映射，因此两个别名使用独立注册器。
+            PbMysql generatedIds = new PbMysql();
+            generatedIds.register(Account.getDefaultInstance(), withTableName("pbm_account"));
+            generatedIds.initializeFresh(lease);
+            PbMysql rowLocks = new PbMysql();
+            rowLocks.register(GolangTest.getDefaultInstance(), withTableName("pbm_lock"));
+            rowLocks.initializeFresh(lease);
+            exec(lease, "CREATE TABLE `pbm_drift` (`id` int unsigned NOT NULL DEFAULT 0 COMMENT 'pb:1', `name` MEDIUMTEXT,"
+                    + " `v` bigint NULL DEFAULT 0 COMMENT 'pb:3', PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            exec(lease, "CREATE TABLE `pbm_rename` (`id` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:1',"
+                    + " `old_name` MEDIUMTEXT COMMENT 'pb:2', `v` bigint NOT NULL DEFAULT 0 COMMENT 'pb:3', PRIMARY KEY (`id`))"
+                    + " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            fixture = lease.publish();
+            publishedLease = lease;
         }
     }
 
     @AfterAll
-    static void dropDatabase() throws SQLException {
-        try (Connection c = DriverManager.getConnection(BASE_URL + "/" + PARAMS, USER, PASSWORD);
-             Statement st = c.createStatement()) {
-            st.execute("DROP DATABASE IF EXISTS `" + DATABASE + "`");
-        }
+    static void dropDatabase() throws Exception {
+        if (fixture != null) fixture.close();
+    }
+
+    private static AuthoritySqlFixture.UnpublishedSchemaLease beginUnpublished() throws Exception {
+        return AuthoritySqlFixture.beginUnpublishedWithPlayerBaseSchema(AuthoritySqlFixture.Options.fromEnvironment(
+                BASE_URL, USER, PASSWORD, "game_pbmysql", true, List.of(1)));
     }
 
     private static Connection connect() throws SQLException {
-        return DriverManager.getConnection(BASE_URL + "/" + DATABASE + PARAMS, USER, PASSWORD);
+        return fixture.normalDataSource(PARAMS).getConnection();
+    }
+
+    private static void assertLeaseRevoked(AuthoritySqlFixture.UnpublishedSchemaLease lease) {
+        assertThatThrownBy(() -> lease.withSchema((c, configuredPrincipal, database) -> null))
+                .isInstanceOf(SQLException.class);
     }
 
     private static void exec(String sql) throws SQLException {
@@ -85,7 +117,7 @@ class PbMysqlMysqlIntegrationTest {
         Map<String, String> out = new HashMap<>();
         try (Connection c = connect(); Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("SELECT COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS"
-                     + " WHERE TABLE_SCHEMA = '" + DATABASE + "' AND TABLE_NAME = '" + table + "'")) {
+                     + " WHERE TABLE_SCHEMA = '" + fixture.database() + "' AND TABLE_NAME = '" + table + "'")) {
             while (rs.next()) {
                 out.put(rs.getString(1), rs.getString(2));
             }
@@ -97,12 +129,45 @@ class PbMysqlMysqlIntegrationTest {
         List<String> out = new ArrayList<>();
         try (Connection c = connect(); Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("SELECT DISTINCT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS"
-                     + " WHERE TABLE_SCHEMA = '" + DATABASE + "' AND TABLE_NAME = '" + table + "' ORDER BY INDEX_NAME")) {
+                     + " WHERE TABLE_SCHEMA = '" + fixture.database() + "' AND TABLE_NAME = '" + table + "' ORDER BY INDEX_NAME")) {
             while (rs.next()) {
                 out.add(rs.getString(1));
             }
         }
         return out;
+    }
+
+    private static void exec(AuthoritySqlFixture.UnpublishedSchemaLease lease, String sql) throws Exception {
+        lease.withSchema((c, configuredPrincipal, database) -> {
+            try (Statement st = c.createStatement()) { st.execute(sql); }
+            return null;
+        });
+    }
+
+    private static Map<String, String> columnTypes(AuthoritySqlFixture.UnpublishedSchemaLease lease, String table)
+            throws Exception {
+        return lease.withSchema((c, configuredPrincipal, database) -> {
+            Map<String, String> out = new HashMap<>();
+            try (Statement st = c.createStatement();
+                 ResultSet rs = st.executeQuery("SELECT COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS"
+                         + " WHERE TABLE_SCHEMA = '" + lease.database() + "' AND TABLE_NAME = '" + table + "'")) {
+                while (rs.next()) out.put(rs.getString(1), rs.getString(2));
+            }
+            return out;
+        });
+    }
+
+    private static List<String> indexNames(AuthoritySqlFixture.UnpublishedSchemaLease lease, String table)
+            throws Exception {
+        return lease.withSchema((c, configuredPrincipal, database) -> {
+            List<String> out = new ArrayList<>();
+            try (Statement st = c.createStatement();
+                 ResultSet rs = st.executeQuery("SELECT DISTINCT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS"
+                         + " WHERE TABLE_SCHEMA = '" + lease.database() + "' AND TABLE_NAME = '" + table + "' ORDER BY INDEX_NAME")) {
+                while (rs.next()) out.add(rs.getString(1));
+            }
+            return out;
+        });
     }
 
     // ================================================================ 建表与同步
@@ -125,6 +190,7 @@ class PbMysqlMysqlIntegrationTest {
             db.syncAll(c);
             db.syncAll(c); // 线上结构与 proto 完全一致：什么都不做、也不报漂移
         }
+        assertLeaseRevoked(publishedLease);
         assertThat(columnTypes("kitchen_sink")).containsEntry("token", "varbinary(64)")
                 .containsEntry("created_at", "datetime(6)").containsEntry("score", "int");
         Map<String, String> account = columnTypes("account");
@@ -138,95 +204,148 @@ class PbMysqlMysqlIntegrationTest {
     }
 
     @Test
-    void v1到v2只加列与索引_旧行按默认值读出_v1再同步不回退() throws SQLException {
+    void v1到v2只加列与索引_旧行按默认值读出_v1再同步不回退() throws Exception {
         PbMysql v1 = new PbMysql();
         v1.register(SyncItemV1.getDefaultInstance());
         PbMysql v2 = new PbMysql();
         v2.register(SyncItemV2.getDefaultInstance());
-        try (Connection c = connect()) {
-            v1.syncAll(c);
-            v1.insert(c, SyncItemV1.newBuilder().setId(1).setOwnerId(10).setName("old").build());
+        try (var lease = beginUnpublished()) {
+            v1.initializeFresh(lease);
+            lease.withSchema((c, configuredPrincipal, database) -> {
+                v1.insert(c, SyncItemV1.newBuilder().setId(1).setOwnerId(10).setName("old").build());
+                return null;
+            });
 
-            v2.syncAll(c);
-            assertThat(columnTypes("pbm_sync_item")).containsEntry("level", "int").containsEntry("code", "varchar(32)");
-            assertThat(indexNames("pbm_sync_item"))
+            v2.upgradeUnpublishedSchema(lease);
+            assertThat(columnTypes(lease, "pbm_sync_item")).containsEntry("level", "int").containsEntry("code", "varchar(32)");
+            assertThat(indexNames(lease, "pbm_sync_item"))
                     .containsExactlyInAnyOrder("PRIMARY", "idx_pbm_sync_item_0", "idx_pbm_sync_item_1", "uk_pbm_sync_item");
-            assertThat(v2.findOneByPk(c, SyncItemV2.newBuilder().setId(1).build())).contains(
-                    SyncItemV2.newBuilder().setId(1).setOwnerId(10).setName("old").build());
-            v2.syncAll(c);
+            lease.withSchema((c, configuredPrincipal, database) -> {
+                assertThat(v2.findOneByPk(c, SyncItemV2.newBuilder().setId(1).build())).contains(
+                        SyncItemV2.newBuilder().setId(1).setOwnerId(10).setName("old").build());
+                return null;
+            });
+            v2.upgradeUnpublishedSchema(lease);
 
-            // 滚动发布：还在跑 v1 的副本重启后同步，线上多出来的列与索引一律不动
-            v1.syncAll(c);
-            assertThat(columnTypes("pbm_sync_item")).containsKeys("level", "code");
+            // 未发布阶段再用v1声明核对，额外列与索引必须保留，不执行回退。
+            v1.upgradeUnpublishedSchema(lease);
+            assertThat(columnTypes(lease, "pbm_sync_item")).containsKeys("level", "code");
 
             // 被人手工删掉的声明索引会按原名补回来
-            exec("ALTER TABLE `pbm_sync_item` DROP INDEX `idx_pbm_sync_item_0`");
-            v2.syncAll(c);
-            assertThat(indexNames("pbm_sync_item")).contains("idx_pbm_sync_item_0");
+            exec(lease, "ALTER TABLE `pbm_sync_item` DROP INDEX `idx_pbm_sync_item_0`");
+            v2.upgradeUnpublishedSchema(lease);
+            assertThat(indexNames(lease, "pbm_sync_item")).contains("idx_pbm_sync_item_0");
+            try (var published = lease.publish();
+                 Connection c = published.normalDataSource(PARAMS).getConnection()) {
+                v2.syncAll(c);
+                assertThat(v2.findOneByPk(c, SyncItemV2.newBuilder().setId(1).build())).contains(
+                        SyncItemV2.newBuilder().setId(1).setOwnerId(10).setName("old").build());
+                assertLeaseRevoked(lease);
+            }
         }
     }
 
     @Test
-    void 索引阶段失败保留已补列_修正冲突后重复同步可继续且旧行不丢() throws SQLException {
+    void 索引阶段失败保留已补列_修正冲突后重复同步可继续且旧行不丢() throws Exception {
         String table = "pbm_sync_retry";
         PbMysql v1 = new PbMysql();
         v1.register(SyncItemV1.getDefaultInstance(), withTableName(table));
         PbMysql v2 = new PbMysql();
         v2.register(SyncItemV2.getDefaultInstance(), withTableName(table));
-        try (Connection c = connect()) {
-            v1.syncAll(c);
-            v1.insert(c, SyncItemV1.newBuilder().setId(1).setOwnerId(10).setName("first").build());
-            v1.insert(c, SyncItemV1.newBuilder().setId(2).setOwnerId(20).setName("second").build());
+        try (var lease = beginUnpublished()) {
+            v1.initializeFresh(lease);
+            lease.withSchema((c, configuredPrincipal, database) -> {
+                v1.insert(c, SyncItemV1.newBuilder().setId(1).setOwnerId(10).setName("first").build());
+                v1.insert(c, SyncItemV1.newBuilder().setId(2).setOwnerId(20).setName("second").build());
+                return null;
+            });
             // 新 code 列的默认值都是空串：唯一索引必须明确失败，不能把 DDL 的部分成功伪装成整轮成功。
-            assertThatThrownBy(() -> v2.syncAll(c)).isInstanceOf(SQLException.class)
+            assertThatThrownBy(() -> v2.upgradeUnpublishedSchema(lease)).isInstanceOf(SQLException.class)
                     .hasMessageContaining("补齐索引失败");
-            assertThat(columnTypes(table)).containsKeys("level", "code");
-            assertThat(v1.count(c, SyncItemV1.class, null)).isEqualTo(2);
-            exec("UPDATE `" + table + "` SET `code` = CONCAT('old-', `id`)");
-            v2.syncAll(c);
-            v2.syncAll(c);
-            assertThat(indexNames(table)).containsExactlyInAnyOrder(
+            assertThatThrownBy(() -> {
+                try (var unexpected = lease.publish()) {
+                    throw new AssertionError("索引升级未完成时不能发布");
+                }
+            }).isInstanceOfAny(SQLException.class, SchemaDriftException.class);
+            assertThat(columnTypes(lease, table)).containsKeys("level", "code");
+            lease.withSchema((c, configuredPrincipal, database) -> {
+                assertThat(v1.count(c, SyncItemV1.class, null)).isEqualTo(2);
+                return null;
+            });
+            exec(lease, "UPDATE `" + table + "` SET `code` = CONCAT('old-', `id`)");
+            assertThatThrownBy(() -> {
+                try (var unexpected = lease.publish()) {
+                    throw new AssertionError("修复DML不能代替缺失索引的真实全量校验");
+                }
+            }).isInstanceOfAny(SQLException.class, SchemaDriftException.class);
+            v2.upgradeUnpublishedSchema(lease);
+            v2.upgradeUnpublishedSchema(lease);
+            assertThat(indexNames(lease, table)).containsExactlyInAnyOrder(
                     "PRIMARY", "idx_pbm_sync_retry_0", "idx_pbm_sync_retry_1", "uk_pbm_sync_retry");
-            assertThat(v2.findOneByPk(c, SyncItemV2.newBuilder().setId(2).build()).orElseThrow())
-                    .isEqualTo(SyncItemV2.newBuilder().setId(2).setOwnerId(20).setName("second").setCode("old-2").build());
+            lease.withSchema((c, configuredPrincipal, database) -> {
+                assertThat(v2.findOneByPk(c, SyncItemV2.newBuilder().setId(2).build()).orElseThrow())
+                        .isEqualTo(SyncItemV2.newBuilder().setId(2).setOwnerId(20).setName("second").setCode("old-2").build());
+                return null;
+            });
+            try (var published = lease.publish();
+                 Connection c = published.normalDataSource(PARAMS).getConnection()) {
+                v2.syncAll(c);
+                assertThat(v2.findOneByPk(c, SyncItemV2.newBuilder().setId(2).build()).orElseThrow())
+                        .isEqualTo(SyncItemV2.newBuilder().setId(2).setOwnerId(20).setName("second").setCode("old-2").build());
+                assertLeaseRevoked(lease);
+            }
         }
     }
 
     @Test
-    void 新增非主键自增列与首列索引同句_保留旧行并可重复同步() throws SQLException {
+    void 新增非主键自增列与首列索引同句_保留旧行并可重复同步() throws Exception {
         String table = "pbm_auto_secondary_migration";
         PbMysql db = new PbMysql();
         db.register(KitchenSink.getDefaultInstance(), withTableName(table), withPrimaryKey("owner_id"),
                 withAutoIncrementKey("slot"), withIndexes("slot,owner_id"));
-        try (Connection c = connect()) {
-            if (SchemaSync.isTiDb(c)) {
+        try (var lease = beginUnpublished()) {
+            if (lease.withSchema((c, configuredPrincipal, database) -> SchemaSync.isTiDb(c))) {
                 // TiDB只验证明确拒绝和原件不变，不能把fresh CREATE冒成已有表ALTER支持。
-                assertTiDbAutoIncrementAlterRejected(c, db, table);
+                assertTiDbAutoIncrementAlterRejected(lease, db, table);
                 return;
             }
-            db.syncAll(c);
-            exec("ALTER TABLE `" + table + "` DROP INDEX `idx_" + table + "_0`, DROP COLUMN `slot`");
-            exec("INSERT INTO `" + table + "` (`owner_id`, `token`) VALUES (31, X'31')");
-            db.syncAll(c);
-            db.syncAll(c);
-            KitchenSink restored = db.findOneByPk(c, KitchenSink.newBuilder().setOwnerId(31).build()).orElseThrow();
-            assertThat(restored.getOwnerId()).isEqualTo(31);
-            assertThat(restored.getSlot()).isPositive();
-            assertThat(restored.getToken()).isEqualTo(ByteString.copyFromUtf8("1"));
-            assertThat(indexNames(table)).contains("idx_" + table + "_0");
+            db.initializeFresh(lease);
+            exec(lease, "ALTER TABLE `" + table + "` DROP INDEX `idx_" + table + "_0`, DROP COLUMN `slot`");
+            exec(lease, "INSERT INTO `" + table + "` (`owner_id`, `token`) VALUES (31, X'31')");
+            db.upgradeUnpublishedSchema(lease);
+            db.upgradeUnpublishedSchema(lease);
+            lease.withSchema((c, configuredPrincipal, database) -> {
+                KitchenSink restored = db.findOneByPk(c, KitchenSink.newBuilder().setOwnerId(31).build()).orElseThrow();
+                assertThat(restored.getOwnerId()).isEqualTo(31);
+                assertThat(restored.getSlot()).isPositive();
+                assertThat(restored.getToken()).isEqualTo(ByteString.copyFromUtf8("1"));
+                return null;
+            });
+            assertThat(indexNames(lease, table)).contains("idx_" + table + "_0");
+            try (var published = lease.publish();
+                 Connection c = published.normalDataSource(PARAMS).getConnection()) {
+                KitchenSink restored = db.findOneByPk(c, KitchenSink.newBuilder().setOwnerId(31).build()).orElseThrow();
+                assertThat(restored.getOwnerId()).isEqualTo(31);
+                assertThat(restored.getSlot()).isPositive();
+                assertThat(restored.getToken()).isEqualTo(ByteString.copyFromUtf8("1"));
+                assertLeaseRevoked(lease);
+            }
         }
     }
 
-    private static void assertTiDbAutoIncrementAlterRejected(Connection c, PbMysql db, String table)
-            throws SQLException {
+    private static void assertTiDbAutoIncrementAlterRejected(AuthoritySqlFixture.UnpublishedSchemaLease lease, PbMysql db, String table)
+            throws Exception {
         String freshTable = table + "_fresh";
         PbMysql fresh = new PbMysql();
         fresh.register(KitchenSink.getDefaultInstance(), withTableName(freshTable), withPrimaryKey("owner_id"),
                 withAutoIncrementKey("slot"), withIndexes("slot,owner_id"));
-        fresh.syncAll(c);
-        fresh.syncAll(c);
-        assertThat(SchemaSync.readColumns(c, DATABASE, freshTable).get("slot").extra())
-                .contains("auto_increment");
+        fresh.initializeFresh(lease);
+        fresh.upgradeUnpublishedSchema(lease);
+        lease.withSchema((c, configuredPrincipal, database) -> {
+            assertThat(SchemaSync.readColumns(c, c.getCatalog(), freshTable).get("slot").extra())
+                    .contains("auto_increment");
+            return null;
+        });
 
         // 用同一目标定义建立合法旧schema；缺普通列note使测试能抓住先ALTER普通列的半迁移。
         TableSchema target = db.schema(KitchenSink.class);
@@ -238,31 +357,44 @@ class PbMysqlMysqlIntegrationTest {
         String slotIndex = "  INDEX `" + target.indexName(0) + "` ("
                 + target.indexColumnsSql("slot,owner_id") + "),\n";
         assertThat(create).containsOnlyOnce(slot).containsOnlyOnce(note).containsOnlyOnce(slotIndex);
-        exec(create.replace(slot, "").replace(note, "").replace(slotIndex, ""));
-        exec("INSERT INTO `" + table + "` (`owner_id`, `token`) VALUES (31, X'31')");
+        exec(lease, create.replace(slot, "").replace(note, "").replace(slotIndex, ""));
+        exec(lease, "INSERT INTO `" + table + "` (`owner_id`, `token`) VALUES (31, X'31')");
 
         // 若预检只做到单表中途，这个排序更早的新表会先CREATE；必须保持不存在。
         String earlier = "aaa_pbm_auto_preflight_probe";
         db.register(SyncItemV1.getDefaultInstance(), withTableName(earlier));
-        byte[] schemaBefore = createTableBytes(c, table);
-        byte[] rowsBefore = allRowBytes(c, table);
-        assertThat(tablePresent(c, earlier)).isFalse();
+        byte[][] before = lease.withSchema((c, configuredPrincipal, database) ->
+                new byte[][] {createTableBytes(c, table), allRowBytes(c, table)});
+        byte[] schemaBefore = before[0];
+        byte[] rowsBefore = before[1];
+        lease.withSchema((c, configuredPrincipal, database) -> {
+            assertThat(tablePresent(c, earlier)).isFalse();
+            return null;
+        });
         for (int attempt = 0; attempt < 2; attempt++) {
-            assertThatThrownBy(() -> db.syncAll(c))
+            assertThatThrownBy(() -> db.upgradeUnpublishedSchema(lease))
                     .isInstanceOf(java.sql.SQLFeatureNotSupportedException.class)
                     .hasMessageContaining("TiDB").hasMessageContaining("AUTO_INCREMENT")
                     .satisfies(failure -> assertThat(((SQLException) failure).getSQLState()).isEqualTo("0A000"));
-            assertThat(createTableBytes(c, table)).isEqualTo(schemaBefore);
-            assertThat(allRowBytes(c, table)).isEqualTo(rowsBefore);
-            assertThat(SchemaSync.readColumns(c, DATABASE, table)).doesNotContainKeys("slot", "note");
-            assertThat(tablePresent(c, earlier)).isFalse();
+            lease.withSchema((c, configuredPrincipal, database) -> {
+                assertThat(createTableBytes(c, table)).isEqualTo(schemaBefore);
+                assertThat(allRowBytes(c, table)).isEqualTo(rowsBefore);
+                assertThat(SchemaSync.readColumns(c, c.getCatalog(), table)).doesNotContainKeys("slot", "note");
+                assertThat(tablePresent(c, earlier)).isFalse();
+                return null;
+            });
         }
+        assertThatThrownBy(() -> {
+            try (var unexpected = lease.publish()) {
+                throw new AssertionError("未完成TiDB目标结构时不能发布");
+            }
+        }).isInstanceOfAny(SQLException.class, SchemaDriftException.class);
     }
 
     private static boolean tablePresent(Connection c, String table) throws SQLException {
         try (var statement = c.prepareStatement(
                 "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?")) {
-            statement.setString(1, DATABASE);
+            statement.setString(1, c.getCatalog());
             statement.setString(2, table);
             try (var rows = statement.executeQuery()) {
                 return rows.next() && rows.getLong(1) != 0;
@@ -308,8 +440,6 @@ class PbMysqlMysqlIntegrationTest {
     }
     @Test
     void 线上列更窄_可空_缺注释时拒绝且不执行任何DDL() throws SQLException {
-        exec("CREATE TABLE `pbm_drift` (`id` int unsigned NOT NULL DEFAULT 0 COMMENT 'pb:1', `name` MEDIUMTEXT,"
-                + " `v` bigint NULL DEFAULT 0 COMMENT 'pb:3', PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         PbMysql db = new PbMysql();
         db.register(DriftRow.getDefaultInstance());
         try (Connection c = connect()) {
@@ -328,9 +458,6 @@ class PbMysqlMysqlIntegrationTest {
         assertThat(columnTypes("pbm_drift")).containsEntry("id", "int unsigned");
 
         // 按 pb:N 认出的改名同样拒绝
-        exec("CREATE TABLE `pbm_rename` (`id` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:1',"
-                + " `old_name` MEDIUMTEXT COMMENT 'pb:2', `v` bigint NOT NULL DEFAULT 0 COMMENT 'pb:3', PRIMARY KEY (`id`))"
-                + " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         PbMysql renamed = new PbMysql();
         renamed.register(DriftRow.getDefaultInstance(), withTableName("pbm_rename"));
         try (Connection c = connect()) {
@@ -354,8 +481,9 @@ class PbMysqlMysqlIntegrationTest {
         try (Connection c = connect()) {
             PbMysql single = new PbMysql();
             single.register(Account.getDefaultInstance(), withTableName("pbm_tx_guard"));
+            String principal = publishedLease.schemaPrincipal();
             c.setAutoCommit(false);
-            assertThatThrownBy(() -> single.syncAll(c)).isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(() -> single.initializeFresh(c, principal)).isInstanceOf(IllegalStateException.class);
             c.rollback();
         }
     }

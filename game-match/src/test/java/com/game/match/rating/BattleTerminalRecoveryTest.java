@@ -34,6 +34,17 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 class BattleTerminalRecoveryTest {
     private static final String SECRET = "终局回归独立密钥只用于本机夹具0123456789abcdef";
 
+    private final List<Memory> memoryFixtures = new ArrayList<>();
+    @AfterEach void closeMemoryFixtures() throws Exception {
+        Exception failure = null;
+        for (Memory memory : memoryFixtures) {
+            try { memory.close(); }
+            catch (Exception cleanup) { if (failure == null) failure = cleanup; else failure.addSuppressed(cleanup); }
+        }
+        memoryFixtures.clear();
+        if (failure != null) throw failure;
+    }
+
     @Test void 完整来源递归拒绝新资产语义及个人超限_不影响旧纯归档() {
         var event = BattleCompletionStoreCases.complete(801).toBuilder().setFinishedAtMs(123).build();
         assertEquals(2, BattleCompletionStore.validateTerminal(event.toByteString()).size());
@@ -234,11 +245,11 @@ class BattleTerminalRecoveryTest {
                     BattleCompletionStore.sync(data);
                 } else {
                     data=RatingTestDatabase.h2DataSource("terminal-" + UUID.randomUUID());
-                    try (var c = data.getConnection(); var sql = c.createStatement()) {
+                    try (var c = RatingTestDatabase.h2SchemaDataSource(data).getConnection(); var sql = c.createStatement()) {
                         for (var table : BattleCompletionStore.registry().tables()) sql.execute(RatingTestDatabase.h2Ddl(table.createTableSql()));
                     }
                     RatingTestDatabase.initializeRouteAuthority(data);
-                    try (var c = data.getConnection(); var sql = c.createStatement()) {
+                    try (var c = RatingTestDatabase.h2SchemaDataSource(data).getConnection(); var sql = c.createStatement()) {
                         sql.execute("ALTER TABLE player ADD account VARCHAR(255) NOT NULL DEFAULT ''");
                         sql.execute("ALTER TABLE player ADD owner_revision BIGINT NOT NULL DEFAULT 1");
                         sql.execute("ALTER TABLE player ADD trade_listing_id BIGINT NOT NULL DEFAULT 0");
@@ -248,16 +259,17 @@ class BattleTerminalRecoveryTest {
                 try (var c = schemaConnection(); var sql = c.createStatement()) {
                     sql.execute("INSERT INTO player(player_id,account,owner_revision) VALUES(1,'account-1',1),(2,'account-2',1)");
                 }
+                if (ownedTiDb == null) memoryFixtures.add(this);
             } catch(Exception|AssertionError failure) {
                 try { close(); } catch(Exception cleanup) { failure.addSuppressed(cleanup); }
                 throw failure;
             }
         }
-        @Override public void close()throws Exception { if(ownedTiDb!=null)ownedTiDb.close(); }
+        @Override public void close()throws Exception { if(ownedTiDb!=null)ownedTiDb.close(); else if(data instanceof AutoCloseable memory)memory.close(); }
         void makeDue()throws Exception {
             try(var c=schemaConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET retry_ms=0 WHERE applied=0");}
         }
-        java.sql.Connection schemaConnection()throws java.sql.SQLException{return ownedTiDb==null?data.getConnection():ownedTiDb.fixture.schemaConnection();}
+        java.sql.Connection schemaConnection()throws java.sql.SQLException{return ownedTiDb==null?RatingTestDatabase.h2SchemaDataSource(data).getConnection():ownedTiDb.fixture.schemaConnection();}
         ByteString seed(long battle) throws Exception {
             var event = BattleCompletionStoreCases.complete(battle).toBuilder().setFinishedAtMs(123).build();
             var db = BattleCompletionStore.registry();

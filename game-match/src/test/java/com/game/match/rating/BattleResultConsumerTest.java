@@ -526,7 +526,7 @@ class BattleResultConsumerTest {
         return seed.build();
     }
     @Test void maintenanceFrontierRequiresActualAssignmentAndPollAndClearsOnStop()throws Exception{
-        var loop=loop(event->{});assertThat(loop.maintenanceFrontier()).isEmpty();assign(List.of(TP0));consumer.updateEndOffsets(Map.of(TP0,0L));consumer.commitSync(Map.of(TP0,new OffsetAndMetadata(0)));
+        var loop=loop(event->{});assertThat(loop.maintenanceFrontier()).isEmpty();consumer.schedulePollTask(()->consumer.commitSync(Map.of(TP0,new OffsetAndMetadata(0))));assign(List.of(TP0));consumer.updateEndOffsets(Map.of(TP0,0L));
         var executor=java.util.concurrent.Executors.newSingleThreadExecutor();var task=executor.submit(loop);
         try{
             var ready=loop.maintenanceReadiness(readinessSeed());assertThat(ready.getGroupsCount()).isEqualTo(1);assertThat(ready.getGroups(0).getGenerationId()).isEqualTo(7);assertThat(ready.getGroups(0).getMemberId()).isEqualTo("member-a");
@@ -536,13 +536,13 @@ class BattleResultConsumerTest {
         assertThat(loop.maintenanceFrontier()).isEmpty();
     }
     @Test void maintenanceReadinessRejectsUncommittedTailWithoutFakingCatchup()throws Exception{
-        var loop=loop(event->{});assign(List.of(TP0));consumer.updateEndOffsets(Map.of(TP0,1L));consumer.commitSync(Map.of(TP0,new OffsetAndMetadata(0)));
+        var loop=loop(event->{});consumer.schedulePollTask(()->consumer.commitSync(Map.of(TP0,new OffsetAndMetadata(0))));assign(List.of(TP0));consumer.updateEndOffsets(Map.of(TP0,1L));
         var executor=java.util.concurrent.Executors.newSingleThreadExecutor();var task=executor.submit(loop);
         try{org.assertj.core.api.Assertions.assertThatThrownBy(()->loop.maintenanceReadiness(readinessSeed())).isInstanceOf(IllegalStateException.class);assertThat(loop.maintenanceFrontier()).isEmpty();}
         finally{loop.stop();task.get(3,TimeUnit.SECONDS);executor.shutdownNow();assertThat(executor.awaitTermination(3,TimeUnit.SECONDS)).isTrue();}
     }
     @Test void maintenanceReadinessChangesAfterActualGenerationAndMemberChange()throws Exception{
-        var loop=loop(event->{});assign(List.of(TP0));consumer.updateEndOffsets(Map.of(TP0,0L));consumer.commitSync(Map.of(TP0,new OffsetAndMetadata(0)));
+        var loop=loop(event->{});consumer.schedulePollTask(()->consumer.commitSync(Map.of(TP0,new OffsetAndMetadata(0))));assign(List.of(TP0));consumer.updateEndOffsets(Map.of(TP0,0L));
         var executor=java.util.concurrent.Executors.newSingleThreadExecutor();var task=executor.submit(loop);
         try{var first=loop.maintenanceReadiness(readinessSeed());consumer.metadata=new org.apache.kafka.clients.consumer.ConsumerGroupMetadata("it-group",8,"member-b",java.util.Optional.empty());var opened=new AtomicInteger();org.assertj.core.api.Assertions.assertThatThrownBy(()->loop.withMaintenanceReady(readinessSeed(),first,opened::incrementAndGet)).isInstanceOf(IllegalStateException.class);assertThat(opened.get()).isZero();var changed=loop.maintenanceReadiness(readinessSeed());assertThat(changed).isNotEqualTo(first);assertThat(changed.getGroups(0).getGenerationId()).isEqualTo(8);assertThat(changed.getGroups(0).getMemberId()).isEqualTo("member-b");}
         finally{loop.stop();task.get(3,TimeUnit.SECONDS);executor.shutdownNow();assertThat(executor.awaitTermination(3,TimeUnit.SECONDS)).isTrue();}

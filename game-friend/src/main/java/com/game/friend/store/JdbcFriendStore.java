@@ -20,8 +20,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>守卫事务骨架</b>（Add / Accept / Remove / Block 共用，{@link #guarded}）：
  * <ol>
- *   <li>事务外、自动提交：按玩家号升序给双方补容量行（{@link #ensureCapacityRows}：权威边数 COUNT + INSERT ODKU，绝不猜 0；
- *       遇 1213 整对重跑至多 3 遍）——放进事务会与别的事务互持新插行、抢同一接收者的行，形成插入意向锁死锁；</li>
+ *   <li>守卫事务外、独立 RC 事务：按玩家号无符号升序给双方补容量行（{@link #ensureCapacityRows}：权威边数 COUNT + INSERT ODKU，绝不猜 0；
+ *       遇 1213 整对重跑至多 3 遍）——并入守卫事务会与别的事务互持新插行、抢同一接收者的行，形成插入意向锁死锁；</li>
  *   <li>客户端绑定视图在每个事务首先按 unsigned 升序锁双方 player 行，核原账号、原修订、未冻结；随后 READ COMMITTED
  *       事务按升序 {@code SELECT friend_count ... FOR UPDATE} 锁双方容量行（守卫）。系统入口不带会话、保留原容量锁首位。缺行（被回收）
  *       绝不当 0 继续：回滚、回到第 1 步重补，至多 3 遍，用尽 fail-closed；</li>
@@ -35,7 +35,7 @@ import org.slf4j.LoggerFactory;
  * 不再重试，守卫事务在提交前再查一次（过了就回滚）——gate 已经判超时、客户端看到失败的请求，不会在之后落库（否则重试撞「已申请」）。
  * Reject / Unblock 的单条写同样放进显式事务、提交前查预算（{@link #singleStatementWrite}）：查询超时只能按秒向上取整，自动提交的语句
  * 在锁等待里可以越过截止近 1 s 才自行提交，那时 gate 可能已放行同一会话的下一条（mmorpg client-request-ordering.md §6.1）。
- * 事务外补容量行（INSERT ODKU，从不覆盖已有行，之后的每个写者都先补行）独立提交；客户端视图先在独立事务验证 P，系统入口仍自动提交。
+ * 事务外补容量行（INSERT ODKU，从不覆盖已有行，之后的每个写者都先补行）独立提交；客户端视图先在独立事务验证 P，系统入口仍按玩家独立提交。
  *
  * <p>玩家号按无符号 64 位：绑定参数用 {@link #uid}，读回用 {@link #readUid}，排序用 {@link Long#compareUnsigned}。
  * 连接池须是会话级 READ COMMITTED（自动提交语句不经事务，隔离级别来自会话），{@code innodb_lock_wait_timeout} 设短。
@@ -539,16 +539,15 @@ public final class JdbcFriendStore implements FriendStore {
     }
 
     /**
-     * 事务外补容量行：每个玩家「COUNT 权威边数 + INSERT ODKU」两条各自自动提交；遇 1213 把这一对整个重跑（COUNT 必须一起重跑，
-     * 否则写下去的是陈旧边数），至多 3 遍，每遍之前查预算。ODKU 直接取 X 锁（INSERT IGNORE 的重复键检查取 S 锁，两个排队的 S 升 X 会互等成环）。
+     * 守卫事务外补容量行：在既有独立 RC 事务中先点锁容量行，再 COUNT 权威边数与 ODKU，沿用守卫的取锁先后。
+     * 缺行允许继续创建，不把缺失当作零。系统分支仍只在 1213 时按原预算重跑该玩家完整补行步骤，至多 3 遍；会话分支由 read 持有 P 后提交。
      */
     private void ensureCapacityRows(long[] ids, Deadline deadline) {
         if (actor != null) {
             // 仍在守卫事务之外独立提交；先验 P 再补行，失效会话不能留下容量副作用。
             read(deadline, ids, db -> {
                 for (long id : ids) {
-                    long edges = count(db, COUNT_FRIENDS, uid(id));
-                    update(db, ENSURE_CAPACITY, uid(id), edges, nowMs.getAsLong());
+                    ensureCapacityRow(db, id);
                 }
                 return null;
             });
@@ -566,8 +565,7 @@ public final class JdbcFriendStore implements FriendStore {
                         requireBudget(deadline, "补容量行");
                         try {
                             com.game.common.player.PlayerRouteAuthority.requireMeta(c,FriendActor.timeout(deadline,queryTimeoutCapSeconds),true);
-                            long edges = count(db, COUNT_FRIENDS, uid(id));
-                            update(db, ENSURE_CAPACITY, uid(id), edges, nowMs.getAsLong());
+                            ensureCapacityRow(db, id);
                             requireBudget(deadline,"补容量提交");c.commit();break;
                         } catch (SQLException e) {
                             c.rollback();
@@ -586,6 +584,18 @@ public final class JdbcFriendStore implements FriendStore {
         } catch (SQLException e) {
             throw new FriendStoreException("补容量行失败", e);
         }
+    }
+
+    /**
+     * 在调用者已开启的事务内，先点锁已有容量行，再按权威边数补行。
+     * 缺行仍继续创建；关闭查询游标不提前提交或释放已取得的事务锁。
+     */
+    private void ensureCapacityRow(Db db, long id) throws SQLException {
+        try (PreparedStatement ps = prepare(db, LOCK_CAPACITY, uid(id)); ResultSet rs = ps.executeQuery()) {
+            rs.next();
+        }
+        long edges = count(db, COUNT_FRIENDS, uid(id));
+        update(db, ENSURE_CAPACITY, uid(id), edges, nowMs.getAsLong());
     }
 
     private boolean blockedEitherWay(Db db, long a, long b) throws SQLException {

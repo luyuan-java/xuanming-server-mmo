@@ -143,4 +143,183 @@ class AuthorityConnectionTest {
         managed.setObject("first");f.managed.commit();doThrow(new SQLException("已退役","25000")).when(f.authority).begin(f.raw);
         assertThrows(SQLException.class,()->managed.setObject("blocked"));verify(ref).setObject("first");verify(ref,never()).setObject("blocked");
     }
+    @Test void helperAclKeepsOwnerAndReplacementGuardsWhileAllowingAncestorCreation()throws Exception{
+        java.nio.file.attribute.UserPrincipal current=()->"current",installer=()->"NT SERVICE\\TrustedInstaller",other=()->"other";
+        var trusted=java.util.Set.of(current,installer);
+        var createOnly=java.nio.file.attribute.AclEntry.newBuilder().setType(java.nio.file.attribute.AclEntryType.ALLOW).setPrincipal(other)
+                .setPermissions(java.nio.file.attribute.AclEntryPermission.WRITE_DATA,java.nio.file.attribute.AclEntryPermission.APPEND_DATA).build();
+        // 真实C盘根的创建目录ACE不得误判为替换现有Users路径；同样的权限在实际EXE上仍拒绝。
+        assertDoesNotThrow(()->WriterAuthority.requireHelperPathAcl(false,installer,java.util.List.of(createOnly),trusted));
+        assertEquals("helper可被非受信主体替换",assertThrows(java.io.IOException.class,()->WriterAuthority.requireHelperPathAcl(true,current,java.util.List.of(createOnly),trusted)).getMessage());
+        assertEquals("helper owner未取得资格",assertThrows(java.io.IOException.class,()->WriterAuthority.requireHelperPathAcl(false,other,java.util.List.of(createOnly),trusted)).getMessage());
+        for(var permission:java.util.List.of(java.nio.file.attribute.AclEntryPermission.WRITE_NAMED_ATTRS,java.nio.file.attribute.AclEntryPermission.DELETE_CHILD,
+                java.nio.file.attribute.AclEntryPermission.WRITE_ATTRIBUTES,java.nio.file.attribute.AclEntryPermission.DELETE,java.nio.file.attribute.AclEntryPermission.WRITE_ACL,java.nio.file.attribute.AclEntryPermission.WRITE_OWNER)){
+            var replace=java.nio.file.attribute.AclEntry.newBuilder().setType(java.nio.file.attribute.AclEntryType.ALLOW).setPrincipal(other).setPermissions(permission).build();
+            assertEquals("helper可被非受信主体替换",assertThrows(java.io.IOException.class,()->WriterAuthority.requireHelperPathAcl(false,installer,java.util.List.of(replace),trusted)).getMessage());
+            assertEquals("helper可被非受信主体替换",assertThrows(java.io.IOException.class,()->WriterAuthority.requireHelperPathAcl(true,current,java.util.List.of(replace),trusted)).getMessage());
+        }
+        var readOnly=java.nio.file.attribute.AclEntry.newBuilder().setType(java.nio.file.attribute.AclEntryType.ALLOW).setPrincipal(other)
+                .setPermissions(java.nio.file.attribute.AclEntryPermission.READ_DATA,java.nio.file.attribute.AclEntryPermission.EXECUTE).build();
+        assertDoesNotThrow(()->WriterAuthority.requireHelperPathAcl(true,current,java.util.List.of(readOnly),trusted));
+        var inheritedOnly=java.nio.file.attribute.AclEntry.newBuilder(createOnly).setFlags(java.nio.file.attribute.AclEntryFlag.INHERIT_ONLY).build();
+        assertDoesNotThrow(()->WriterAuthority.requireHelperPathAcl(true,current,java.util.List.of(inheritedOnly),trusted));
+    }
+
+    @Test void boundedSelectDeadlineHintsKeepExistingProducerSqlAndDriverBytes()throws Exception{
+        // PlayerProfiles.readBatch原列/占位，以及ListingSql.COUNT_SELLER_LISTINGS经原期限hint生成的字面SQL。
+        for(String sql:java.util.List.of(
+                "SELECT /*+ MAX_EXECUTION_TIME(800) */ player_id, name, level, class_id, gender, appearance_id, zone_id FROM player WHERE player_id IN (?,?)",
+                "SELECT /*+ MAX_EXECUTION_TIME(1000) */ COUNT(*) FROM trade_listing WHERE `seller_player_id` = ?")){
+            var f=fixture();PreparedStatement driver=mock(PreparedStatement.class);
+            when(f.raw.prepareStatement(sql)).thenReturn(driver);
+            try(var managed=f.managed.prepareStatement(sql)){
+                assertNotSame(driver,managed);
+                assertEquals(AuthoritySql.Kind.READ,AuthoritySql.validate(sql));
+                verify(f.raw).prepareStatement(sql); // 不strip、不重写实际交driver的原SQL。
+                verify(driver,never()).executeQuery();
+            }
+        }
+        assertEquals(AuthoritySql.Kind.READ,AuthoritySql.validate("SELECT /*+ MAX_EXECUTION_TIME(1) */ 1"));
+        assertEquals(AuthoritySql.Kind.READ,AuthoritySql.validate("SELECT /*+ MAX_EXECUTION_TIME("+Integer.MAX_VALUE+") */ 1"));
+        assertArrayEquals(new long[]{Integer.MAX_VALUE,Integer.MAX_VALUE},AuthoritySql.deadlineCaps(
+                "SET SESSION MAX_EXECUTION_TIME="+Integer.MAX_VALUE+",TIDB_DML_MAX_EXECUTION_TIME="+Integer.MAX_VALUE));
+        assertArrayEquals(new long[]{0,0},AuthoritySql.deadlineCaps("SET SESSION MAX_EXECUTION_TIME=0,TIDB_DML_MAX_EXECUTION_TIME=0"));
+    }
+
+    @Test void selectDeadlineHintDoesNotAdmitOtherHintsLocationsOrControlSql()throws Exception{
+        for(String sql:java.util.List.of(
+                "SELECT /*+ SET_VAR(sql_mode='ANSI_QUOTES') */ 1",
+                "SELECT /*!50000 SQL_NO_CACHE */ 1",
+                "SELECT /*T! SET_VAR(tidb_snapshot='old') */ 1",
+                "SELECT /* + MAX_EXECUTION_TIME(1) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(0) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(-1) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(01) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(1+1) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(?) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(1e3) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(2147483648) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(999999999999999999999999) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) SET_VAR(sql_mode='ANSI_QUOTES') */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) */ /*+ MAX_EXECUTION_TIME(2) */ 1",
+                "/*+ MAX_EXECUTION_TIME(1) */ SELECT 1",
+                "SELECT 1 /*+ MAX_EXECUTION_TIME(1) */",
+                "SELECT (SELECT /*+ MAX_EXECUTION_TIME(1) */ 1)",
+                "UPDATE /*+ MAX_EXECUTION_TIME(1) */ business SET v=1",
+                "SELECT 1; /*+ MAX_EXECUTION_TIME(1) */",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) */ 1; DELETE FROM business",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) */ * FROM writer_registry FOR UPDATE",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) */ GET_LOCK('x',1)",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) */ 1 INTO OUTFILE 'x'")){
+            var f=fixture();
+            assertEquals("42000",assertThrows(SQLException.class,()->f.managed.prepareStatement(sql),sql).getSQLState());
+            verify(f.raw,never()).prepareStatement(anyString());
+        }
+        assertThrows(SQLException.class,()->AuthoritySql.deadlineCaps(
+                "SET SESSION MAX_EXECUTION_TIME=2147483648,TIDB_DML_MAX_EXECUTION_TIME=1"));
+    }
+
+    @Test void fixedFirstMatchHintsRemainPerSelectHeadAndKeepDriverSql()throws Exception{
+        // RecommendStore两个现producer无exclude时的原SQL；保留五个nested FIRSTMATCH、连接顺序、窗口与参数。
+        String mutual="""
+                SELECT f2.friend_player_id, COUNT(*) AS mutual
+                FROM friend f1 FORCE INDEX (PRIMARY)
+                STRAIGHT_JOIN friend f2 FORCE INDEX (PRIMARY) ON f2.player_id = f1.friend_player_id
+                WHERE f1.player_id = ?
+                  AND f2.friend_player_id <> ?
+                  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend f FORCE INDEX (PRIMARY)
+                        WHERE f.player_id = ? AND f.friend_player_id = f2.friend_player_id)
+                  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_block b_out FORCE INDEX (PRIMARY)
+                        WHERE b_out.player_id = ? AND b_out.blocked_player_id = f2.friend_player_id)
+                  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_block b_in FORCE INDEX (PRIMARY)
+                        WHERE b_in.player_id = f2.friend_player_id AND b_in.blocked_player_id = ?)
+                  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_request r_out FORCE INDEX (PRIMARY)
+                        WHERE r_out.from_player_id = ? AND r_out.to_player_id = f2.friend_player_id AND r_out.status = 1)
+                  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_request r_in FORCE INDEX (PRIMARY)
+                        WHERE r_in.from_player_id = f2.friend_player_id AND r_in.to_player_id = ? AND r_in.status = 1)
+                GROUP BY f2.friend_player_id
+                ORDER BY mutual DESC, RAND()
+                LIMIT ?""";
+        String anchor="""
+                SELECT c.player_id, 0 AS mutual
+                FROM (SELECT DISTINCT player_id FROM friend FORCE INDEX (PRIMARY)
+                      WHERE player_id >= ?
+                      ORDER BY player_id
+                      LIMIT ?) AS c
+                WHERE c.player_id <> ?
+                  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend f FORCE INDEX (PRIMARY)
+                        WHERE f.player_id = ? AND f.friend_player_id = c.player_id)
+                  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_block b_out FORCE INDEX (PRIMARY)
+                        WHERE b_out.player_id = ? AND b_out.blocked_player_id = c.player_id)
+                  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_block b_in FORCE INDEX (PRIMARY)
+                        WHERE b_in.player_id = c.player_id AND b_in.blocked_player_id = ?)
+                  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_request r_out FORCE INDEX (PRIMARY)
+                        WHERE r_out.from_player_id = ? AND r_out.to_player_id = c.player_id AND r_out.status = 1)
+                  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_request r_in FORCE INDEX (PRIMARY)
+                        WHERE r_in.from_player_id = c.player_id AND r_in.to_player_id = ? AND r_in.status = 1)
+                ORDER BY c.player_id
+                LIMIT ?""";
+        for(String sql:java.util.List.of(mutual,anchor,
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1",
+                "select\t/*+\r\nsemijoin(firstmatch)\t*/ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) MAX_EXECUTION_TIME(2147483647) */ 1",
+                "SELECT (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1), (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 2)",
+                "SELECT /*+ MAX_EXECUTION_TIME(7) */ 1 WHERE NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM business WHERE v=?)")){
+            var f=fixture();PreparedStatement driver=mock(PreparedStatement.class);
+            when(f.raw.prepareStatement(sql)).thenReturn(driver);
+            try(var managed=f.managed.prepareStatement(sql)){
+                assertNotSame(driver,managed);
+                assertEquals(AuthoritySql.Kind.READ,AuthoritySql.validate(sql));
+                verify(f.raw).prepareStatement(sql);
+                verify(driver,never()).executeQuery();
+            }
+        }
+    }
+
+    @Test void firstMatchHintGrammarDoesNotAdmitOtherPlansOrDuplicateHeads()throws Exception{
+        for(String sql:java.util.List.of(
+                "SELECT /*+ SET_VAR(sql_mode='ANSI_QUOTES') SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) SET_VAR(max_execution_time=1) */ 1",
+                "SELECT /*+ SEMIJOIN(LOOSESCAN) */ 1",
+                "SELECT /*+ SEMIJOIN(MATERIALIZATION) */ 1",
+                "SELECT /*+ NO_SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH,LOOSESCAN) */ 1",
+                "SELECT /*+ SEMIJOIN(@q FIRSTMATCH) */ 1",
+                "SELECT /*+ SEMIJOIN (FIRSTMATCH) */ 1",
+                "SELECT /*+ SEMIJOIN( FIRSTMATCH ) */ 1",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) */ 1",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) */ /*+ SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) */ /*+ SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) */ /*+ MAX_EXECUTION_TIME(1) */ 1",
+                "SELECT /* ordinary */ /*+ SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT -- ordinary\n/*+ SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT 1 /*+ SEMIJOIN(FIRSTMATCH) */",
+                "/*+ SEMIJOIN(FIRSTMATCH) */ SELECT 1",
+                "SELECT /* + SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT /*+SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT /*+\u00a0SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT (SELECT /*+ MAX_EXECUTION_TIME(1) SEMIJOIN(FIRSTMATCH) */ 1)",
+                "SELECT /*+ MAX_EXECUTION_TIME(0) SEMIJOIN(FIRSTMATCH) */ 1",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) MAX_EXECUTION_TIME(2147483648) */ 1",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH), MAX_EXECUTION_TIME(1) */ 1",
+                "WITH x AS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1) SELECT 1",
+                "INSERT INTO business(v) SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1",
+                "DELETE FROM business WHERE EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1)",
+                "UPDATE /*+ SEMIJOIN(FIRSTMATCH) */ business SET v=1",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1; DELETE FROM business",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) */ * FROM writer_registry FOR UPDATE",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) */ GET_LOCK('x',1)",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 INTO OUTFILE 'x'",
+                "SELECT /*+ SEMIJOIN(FIRSTMATCH) */ /*!50000 SQL_NO_CACHE */ 1",
+                "SELECT /*T! SET_VAR(tidb_snapshot='old') */ /*+ SEMIJOIN(FIRSTMATCH) */ 1")){
+            var f=fixture();
+            assertEquals("42000",assertThrows(SQLException.class,()->f.managed.prepareStatement(sql),sql).getSQLState());
+            verify(f.raw,never()).prepareStatement(anyString());
+        }
+    }
+
 }

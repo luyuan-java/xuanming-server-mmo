@@ -150,6 +150,22 @@ class MatchApplicationContextTest {
     @TestConfiguration(proxyBeanMethods = false)
     @EnableConfigurationProperties({MatchProperties.class, RedisProperties.class})
     static class Wiring {
+        @org.springframework.context.annotation.Bean(destroyMethod = "close")
+        RatingTestDatabase h2AuthorityOwner() { return RatingTestDatabase.h2(); }
+
+        @org.springframework.context.annotation.Bean
+        @org.springframework.context.annotation.Primary
+        com.game.common.sql.WriterAuthority h2WriterAuthority(RatingTestDatabase owner) throws java.sql.SQLException {
+            return RatingTestDatabase.h2WriterAuthority(owner.dataSource);
+        }
+
+        @org.springframework.context.annotation.Bean(destroyMethod = "")
+        DataSource dataSource(RatingTestDatabase owner) { return owner.dataSource; }
+
+        @org.springframework.context.annotation.Bean
+        MatchRatingTables.SchemaSync ratingSchemaSync(RatingTestDatabase owner) {
+            return ignored -> RatingTestDatabase.H2_SCHEMA.sync(owner.dataSource);
+        }
     }
 
     /**
@@ -174,16 +190,14 @@ class MatchApplicationContextTest {
     private static ApplicationContextRunner runner(RedissonClient client, List<Class<?>> components) {
         List<Class<?>> classes = new ArrayList<>(components);
         classes.add(Wiring.class);
-        String database = "game-match-context-" + UUID.randomUUID();
         return new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(GameNamespaceAutoConfiguration.class))
                 .withUserConfiguration(classes.toArray(Class<?>[]::new))
                 .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
                 .withBean(RedissonClient.class, () -> client)
-                .withBean(DataSource.class, () -> RatingTestDatabase.h2DataSource(database))
-                .withBean(MatchRatingTables.SchemaSync.class, () -> RatingTestDatabase.H2_SCHEMA)
                 .withPropertyValues(
                         "game.table-dir=../config-data/tables",
                         "game.run-mode=test",
+                        "game.sql-authority.require-tidb=false",
                         "game.match.rating.enabled=false",
                         "GAME_DUBBO_SECRET=dubbo-secret-for-context-tests",
                         "GAME_ADMIN_TOKEN=");

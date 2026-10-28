@@ -49,11 +49,11 @@ final class SchemaSync {
         initializeFresh(conn,tables,registry,System.getenv("MMORPG_SQL_SCHEMA_PRINCIPAL"));
     }
     static void initializeFresh(Connection conn,List<TableSchema> tables,List<TableSchema> registry,String schemaPrincipal)throws SQLException {
-        requireSchemaPrincipal(conn,schemaPrincipal);
         checkDuplicateMappings(registry);
         if (!conn.getAutoCommit()) {
             throw new IllegalStateException("结构同步不能在事务里执行：MySQL 的 DDL 会隐式提交，无法随业务事务回滚");
         }
+        requireSchemaPrincipal(conn,schemaPrincipal);
         String database = currentDatabase(conn);
         List<TableSchema> sorted = new ArrayList<>(tables);
         sorted.sort(Comparator.comparing(TableSchema::tableName)
@@ -80,6 +80,77 @@ final class SchemaSync {
         if (locked) {
             releaseLock(conn, lockName);
         }
+    }
+
+    // 正式authority DDL的精确控制表集合；不是按业务表名前缀猜测。
+    private static final List<String> UNPUBLISHED_AUTHORITY_TABLES=List.of(
+            "route_meta",
+            "zone_merged_into",
+            "zone_merge_fence",
+            "writer_registry",
+            "writer_slot",
+            "writer_lifecycle_receipt",
+            "sql_writer_drain_run",
+            "sql_writer_freeze_ticket",
+            "sql_writer_maintenance_receipt");
+
+    /** 进入owner或取得SQL连接前完成全注册表纯校验。 */
+    static void checkOwnedRegistry(List<TableSchema> registry){
+        checkDuplicateMappings(registry);rejectAuthorityTableMappings(registry);
+    }
+
+    static void initializeOwnedFresh(Connection conn,List<TableSchema> tables,List<TableSchema> registry,
+            String configuredPrincipal,String expectedDatabase)throws SQLException {
+        checkOwnedRegistry(registry);
+        requireOwnedSchemaBinding(conn,configuredPrincipal,expectedDatabase);
+        initializeFresh(conn,tables,registry,configuredPrincipal);
+        requireOwnedSchemaBinding(conn,configuredPrincipal,expectedDatabase);
+    }
+
+    /** 排他由持有整轮工作至发布的真实owner lease提供，不把GET_LOCK当跨REGISTER门禁。 */
+    static void upgradeOwnedUnpublished(Connection conn,List<TableSchema> tables,List<TableSchema> registry,
+            String configuredPrincipal,String expectedDatabase)throws SQLException {
+        checkOwnedRegistry(registry);
+        if(!conn.getAutoCommit())throw new IllegalStateException("结构升级不能在事务里执行：DDL会隐式提交");
+        requireOwnedSchemaBinding(conn,configuredPrincipal,expectedDatabase);
+        List<TableSchema> sorted=new ArrayList<>(tables);
+        sorted.sort(Comparator.comparing(TableSchema::tableName)
+                .thenComparing(t -> t.descriptor().getFullName()));
+        requireExistingTarget(conn,expectedDatabase,sorted);
+        // 整批预检先于任何CREATE/ALTER；TiDB不支持的AUTO_INCREMENT仍明确0A000，原件不变。
+        preflightAutoIncrementAlter(conn,expectedDatabase,sorted);
+        for(TableSchema table:sorted)syncTable(conn,expectedDatabase,table);
+        requireOwnedSchemaBinding(conn,configuredPrincipal,expectedDatabase);
+    }
+
+    /** 发布前重新核整个实际结构；普通seed/查询成功不能替代一次失败升级的完成证明。 */
+    static void validateOwnedStructure(Connection conn,List<TableSchema> tables,List<TableSchema> registry,
+            String configuredPrincipal,String expectedDatabase)throws SQLException {
+        checkOwnedRegistry(registry);
+        requireOwnedSchemaBinding(conn,configuredPrincipal,expectedDatabase);
+        sync(conn,tables,registry);
+    }
+
+    private static void requireOwnedSchemaBinding(Connection conn,String configuredPrincipal,String expectedDatabase)throws SQLException{
+        if(expectedDatabase==null||expectedDatabase.isBlank())throw new SQLException("缺owner绑定的具名数据库");
+        requireSchemaPrincipal(conn,configuredPrincipal);
+        if(!expectedDatabase.equals(currentDatabase(conn)))throw new SQLException("Schema连接偏离owner绑定的数据库");
+        requireUnpublishedAuthorityAbsent(conn,expectedDatabase);
+    }
+
+    private static void requireExistingTarget(Connection conn,String database,List<TableSchema> tables)throws SQLException {
+        for(TableSchema table:tables)if(tableExists(conn,database,table.tableName()))return;
+        throw new SQLException("未发布存量结构升级至少需要一张已有目标表；全新目标必须使用initializeFresh");
+    }
+
+    private static void rejectAuthorityTableMappings(List<TableSchema> registry) {
+        for(TableSchema table:registry)if((UNPUBLISHED_AUTHORITY_TABLES.contains(table.tableName().toLowerCase(Locale.ROOT))||table.tableName().equalsIgnoreCase("__sql_fixture_owner")))
+            throw new IllegalArgumentException("未发布结构升级禁止映射authority控制表："+table.tableName());
+    }
+
+    private static void requireUnpublishedAuthorityAbsent(Connection conn,String database)throws SQLException {
+        for(String table:UNPUBLISHED_AUTHORITY_TABLES)if(tableExists(conn,database,table))
+            throw new SQLException("目标已安装authority控制表，禁止未发布结构升级："+table);
     }
 
     /** normal启动唯一入口：只读现存结构，缺表、列或索引一律拒启。 */

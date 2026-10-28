@@ -12,8 +12,8 @@
 # 前置（缺一样就在动手之前退出，什么都不杀）：
 #   1. 切片是 tools/local/start-slice.sh 起的、正在跑（run/pids/ 里有 PID 文件），dev 运行模式（robot 要用 dev gather 与 GM 94 / 95），
 #      game-scene 的 reaper 间隔是切片缺省的 2s（battle-after-store 等的就是它；生产缺省 30s 时要多等半分钟）。
-#   2. 在**启动切片的同一个 shell**里执行，或导出同一组环境变量：GAME_MYSQL_PASSWORD、GAME_GATE_TOKEN_SECRET、GAME_LOGIN_DEV_PASSWORD、
-#      GAME_NODE_LINK_SECRET、GAME_DUBBO_SECRET，以及当时显式设过的任何一个 GAME_*（运行模式、reaper 间隔……）。重启出来的进程读的是本脚本的环境，
+#   2. 在**启动切片的同一个 shell**里执行，或导出同一组环境变量：GAME_GATE_TOKEN_SECRET、GAME_LOGIN_DEV_PASSWORD、
+#      GAME_NODE_LINK_SECRET、GAME_DUBBO_SECRET，以及当时显式设过的任何一个 GAME_*（运行模式、reaper 间隔……）。SQL 凭据由每个新 boot 的私有目录及完整 runtime 配置提供。重启出来的进程读的是本脚本的环境，
 #      环境不同它就和被杀的那个不是同一种配置。start-slice.sh 自己生成的四个秘密（运维令牌、GM 停机密钥、帮会资产签名密钥、战斗票据密钥）
 #      当时没设环境变量的话，本脚本从 run/ 下的文件读回同一个值；当时是从环境变量来的，这里也必须有同一个环境变量。
 #      部署命名空间 GAME_NAMESPACE 不靠环境：start-slice.sh 把切片生效的值写在 run/game-namespace，本脚本读回；这里设了而与它不同、
@@ -56,6 +56,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
+# 只导入启动资格函数；正常故障复启仍须新 boot 独立授权，旧 grant 的持久 marker 由 BPP 拒绝。
+GAME_SQL_BOOT_LIBRARY_ONLY=1 source tools/local/start-slice.sh
+
 usage() {
   sed -n '2,10p' "$0" | sed -e 's/^# \{0,1\}//'
 }
@@ -93,8 +96,8 @@ fi
 
 # ---------------------------------------------------------------- 环境：与 start-slice.sh 同一套（重启出来的进程读这里的环境）
 
-# start-slice.sh 必需的五个（它用 : "${名字:?}" 检查）；这里缺了按「前置不满足」退出 2。robot 也读 GAME_LOGIN_DEV_PASSWORD
-for required in GAME_MYSQL_PASSWORD GAME_GATE_TOKEN_SECRET GAME_LOGIN_DEV_PASSWORD GAME_NODE_LINK_SECRET GAME_DUBBO_SECRET; do
+# start-slice.sh 必需的四个（它用 : "${名字:?}" 检查）；这里缺了按「前置不满足」退出 2。robot 也读 GAME_LOGIN_DEV_PASSWORD
+for required in GAME_GATE_TOKEN_SECRET GAME_LOGIN_DEV_PASSWORD GAME_NODE_LINK_SECRET GAME_DUBBO_SECRET; do
   if [[ -z "${!required:-}" ]]; then
     echo "需要环境变量 $required（与启动切片时相同的值；在启动切片的同一个 shell 里执行本脚本）" >&2
     exit 2
@@ -192,8 +195,6 @@ SCENE_NODES=(
 launch() {
   local instance=$1 module=$2 jar
   shift 2
-  # 正常故障复启也必须有新boot独立授权；旧grant的持久marker由BPP拒绝，不能自动换UUID。
-  GAME_SQL_BOOT_LIBRARY_ONLY=1 source tools/local/start-slice.sh
   (sql_boot_environment "$instance" "$module")
   jar=$(ls "$module"/target/"$module"-*.jar 2>/dev/null | grep -v -- '-plain' | head -1 || true)
   if [[ -z "$jar" ]]; then

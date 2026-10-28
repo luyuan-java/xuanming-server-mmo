@@ -237,12 +237,26 @@ public class MatchConfiguration {
     public MatchLifecycle matchLifecycle(MatcherControl matcherControl, ResultConsumerControl resultConsumerControl,
                                          GatherLauncher gatherLauncher, MatchWorkerPool matchWorkerPool,
                                          InflightWatches inflightWatches, SweeperControl sweeperControl,
-                                         com.game.match.global.GlobalMatchService global,com.game.match.rating.BattleCompletionReplay replay,
-                                         com.game.match.global.RatingRankOutbox outbox,com.game.common.sql.WriterAuthority boot,com.game.match.spectate.SqlSpectateStore spectate,
+                                         @Value("${game.match.global.enabled:false}") boolean globalEnabled,
+                                         org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global,
+                                         org.springframework.beans.factory.ObjectProvider<com.game.match.rating.BattleCompletionReplay> replay,
+                                         org.springframework.beans.factory.ObjectProvider<com.game.match.global.RatingRankOutbox> outbox,
+                                         com.game.common.sql.WriterAuthority boot,
+                                         org.springframework.beans.factory.ObjectProvider<com.game.match.spectate.SqlSpectateStore> spectate,
                                          @org.springframework.beans.factory.annotation.Qualifier("matchMaintenanceConsumerFrontier") com.game.match.rating.BattleResultConsumer.ReadinessControl consumerFrontier,
                                          @org.springframework.beans.factory.annotation.Qualifier("matchMaintenanceConsumerStopped") java.util.function.BooleanSupplier consumerStopped) {
-        return new MatchLifecycle(matcherControl, resultConsumerControl, gatherLauncher, matchWorkerPool::close,
-                MatchLifecycle.GATHER_DRAIN_TIMEOUT, inflightWatches, Duration.ofMillis(MatchBudgets.SPECTATE_DRAIN_TIMEOUT_MS), sweeperControl).withMaintenance(global,replay,outbox,boot,spectate,consumerFrontier,consumerStopped);
+        MatchLifecycle lifecycle = new MatchLifecycle(matcherControl, resultConsumerControl, gatherLauncher, matchWorkerPool::close,
+                MatchLifecycle.GATHER_DRAIN_TIMEOUT, inflightWatches, Duration.ofMillis(MatchBudgets.SPECTATE_DRAIN_TIMEOUT_MS), sweeperControl);
+        if (!globalEnabled) {
+            // 本机兼容模式仍排空既有后台件；不能漏掉意外装入的全局SQL写者并签出不完整维护证明。
+            if (boot.prepareOnly() || global.getIfAvailable() != null || replay.getIfAvailable() != null
+                    || outbox.getIfAvailable() != null || spectate.getIfAvailable() != null) {
+                throw new IllegalStateException("关闭全球模式时不能装入维护启动资格或全局SQL后台写者");
+            }
+            return lifecycle;
+        }
+        return lifecycle.withMaintenance(global.getObject(), replay.getObject(), outbox.getObject(), boot,
+                spectate.getObject(), consumerFrontier, consumerStopped);
     }
 
     // ================================================================ 管理端口：dev / test 管理口的鉴权

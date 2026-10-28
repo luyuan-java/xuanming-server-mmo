@@ -134,6 +134,8 @@ class NamespaceLiteralGuardTest {
             Map.entry("game-match/src/main/java/com/game/match/MatchConfiguration.java", Set.of("game-match-scene-battle", "game-match-battle-node")),
             Map.entry("game-match/src/main/java/com/game/match/placement/PlacementClients.java", Set.of("game-match-battle-placement")),
             Map.entry("game-data/src/main/java/com/game/data/rollback/DubboGuildInternalClient.java", Set.of("game-data-guild-check")),
+            // 同仓SQL夹具读取兄弟模块的正式player DDL；这是仓库目录身份，不是共享中间件名称。
+            Map.entry("game-common/src/main/java/com/game/common/sql/testing/AuthoritySqlFixture.java", Set.of("game-player-store")),
             // 存进去的值（发号租约的持有者 id 前缀），不是名字
             Map.entry("game-data/src/main/java/com/game/data/DataConfiguration.java", Set.of("game-data-")),
             Map.entry("game-data/src/main/java/com/game/data/tools/AuditFallbackReplay.java", Set.of("game-audit-replay-")));
@@ -332,30 +334,30 @@ class NamespaceLiteralGuardTest {
 
     // ================================================================ R5：yaml 与模块依赖
 
-    /** JDBC 完整模板金样：保留原参数，登记新增SQL Chat/SceneManager及Team明确TiDB端点；只替换库名占位符。 */
+    /** JDBC 完整模板金样：七个已切独立建库入口的NORMAL进程移除自动建库参数，其余主机、端口、参数和库名占位符逐字节守住。 */
     private static final Map<String, String> GOLDEN_JDBC_URLS = Map.ofEntries(
             Map.entry("game-chat", "jdbc:mysql://127.0.0.1:3306/game?useUnicode=true&characterEncoding=UTF-8"),
-            Map.entry("game-data", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000"
+            Map.entry("game-data", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000"
                     + "&socketTimeout=30000&useAffectedRows=true"),
-            Map.entry("game-friend", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+            Map.entry("game-friend", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=3"),
-            Map.entry("game-gateway", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+            Map.entry("game-gateway", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&connectTimeout=3000&socketTimeout=10000"),
-            Map.entry("game-guild", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+            Map.entry("game-guild", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
             Map.entry("game-inbox", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=2000&socketTimeout=4000&useAffectedRows=true"
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
-            Map.entry("game-login", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+            Map.entry("game-login", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=10000"),
             Map.entry("game-mail", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=2000&socketTimeout=4000&useAffectedRows=true"
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
             Map.entry("game-mall", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?useSSL=false&characterEncoding=utf8"
                     + "&connectTimeout=3000&socketTimeout=6000&useAffectedRows=true"),
-            Map.entry("game-match", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+            Map.entry("game-match", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
             Map.entry("game-rank", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?useSSL=false&allowPublicKeyRetrieval=true"
@@ -367,7 +369,7 @@ class NamespaceLiteralGuardTest {
                     + "&connectTimeout=3000&socketTimeout=5000"),
             Map.entry("game-team", "jdbc:mysql://127.0.0.1:4000/game?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000"
                     + "&socketTimeout=4000"),
-            Map.entry("game-trade", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+            Map.entry("game-trade", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=2"));
 

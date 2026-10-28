@@ -1029,7 +1029,7 @@ class PlayerStoreSqlTest {
 
     private DataSource schemaSource() {
         var fixture=context.getBean(Config.class).fixture;
-        return fixture==null?context.getBean(DataSource.class):fixture.schemaDataSource();
+        return fixture==null?context.getBean(Config.class).memory:fixture.schemaDataSource();
     }
     private JdbcTemplate schemaJdbc() {return new JdbcTemplate(schemaSource());}
     private JdbcTemplate jdbc() {
@@ -2461,10 +2461,12 @@ class PlayerStoreSqlTest {
         private AuthoritySqlFixture fixture;
         private DruidDataSource normalPool;
         private JdbcDataSource memory;
+        private PlayerTradeStoreTest.H2Authority h2Authority;
         @Override public void destroy() throws Exception {
             // 配置实例拥有本用例夹具；不跨用例排空全局队列，失败初始化亦由Spring销毁已创建单例。
             if(normalPool!=null)normalPool.close();
             if(fixture!=null)fixture.close();
+            if(h2Authority!=null)h2Authority.seal();
             if(memory!=null)new JdbcTemplate(memory).execute("SHUTDOWN");
         }
 
@@ -2488,7 +2490,7 @@ class PlayerStoreSqlTest {
                     return pool;
                 }catch(Exception|Error failure){pool.close();try{fixture.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
             }
-            var h2=new JdbcDataSource();memory=h2;
+            var h2=new JdbcDataSource();h2.setUser("sa");h2.setPassword("");memory=h2;
             h2.setURL("jdbc:h2:mem:game_it_"+UUID.randomUUID()+";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
             new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"),new ClassPathResource("db/game-player-schema.sql"),
                     new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(h2);
@@ -2496,7 +2498,8 @@ class PlayerStoreSqlTest {
                 if(!identity.next())throw new java.sql.SQLException("H2 schema主体缺失");
                 com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),java.util.List.of(1,2,3,7,9,11),identity.getString(1));
             }
-            return h2;
+            h2Authority=new PlayerTradeStoreTest.H2Authority(h2);
+            return h2Authority.normalSource();
         }
 
         @Bean

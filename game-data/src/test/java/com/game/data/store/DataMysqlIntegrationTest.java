@@ -285,14 +285,15 @@ class DataMysqlIntegrationTest {
                     .setOutcome(OpsJobStore.PLANNED).build();
             long[] seen = new long[3];
             db.tx().executeWithoutResult(status -> {
-                JdbcTemplate jdbc = db.jdbc(); // JdbcTemplate 经 DataSourceUtils 取到的就是事务绑定的连接
+                JdbcTemplate jdbc = db.normalJdbc(); // 明确取得normal事务绑定的受测连接。
+                JdbcTemplate observer = db.schemaJdbc(); // raw SA仅只读观测该normal连接ID，不承担业务写入。
                 long connection = jdbc.queryForObject("SELECT CONNECTION_ID()", Long.class);
                 seen[0] = connection;
                 assertThat(db.snapshots.insertDirect(snapshot, 2, "ops", "同连接")).isEqualTo(1); // MyBatis
-                Long afterMyBatis = transactionWriteUnitsOn(jdbc, connection);
+                Long afterMyBatis = transactionWriteUnitsOn(observer, connection);
                 assertThat(afterMyBatis).as("MyBatis 的写在这条连接的事务上").isNotNull().isPositive();
                 jobs.insertPlayer(detail);                                                         // pbmysql
-                Long afterPbmysql = transactionWriteUnitsOn(jdbc, connection);
+                Long afterPbmysql = transactionWriteUnitsOn(observer, connection);
                 assertThat(afterPbmysql).as("pbmysql 的写也记在同一个事务上").isGreaterThan(afterMyBatis);
                 seen[1] = afterMyBatis;
                 seen[2] = afterPbmysql;

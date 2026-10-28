@@ -103,7 +103,7 @@ class ZoneSnapshotSqlTest {
             ids.add(id);
             rows.add(new Object[] {id, "acc" + id, zone, "name" + id, "name" + id, now - 86_400_000L, now - 1000});
         }
-        h.db.tx().executeWithoutResult(status -> {
+        h.db.schemaTx().executeWithoutResult(status -> {
         h.db.jdbc().batchUpdate(
                 "INSERT INTO player (player_id, account, zone_id, name, name_key, class_id, gender, level, scene_config_id, "
                         + "pos_x, pos_y, pos_z, owner_epoch, owner_released, owner_lease_until, created_at, updated_at) "

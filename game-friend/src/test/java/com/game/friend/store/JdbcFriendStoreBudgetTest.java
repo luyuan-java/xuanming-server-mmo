@@ -43,7 +43,7 @@ class JdbcFriendStoreBudgetTest {
     private static final FriendLimits LIMITS = new FriendLimits(200, 50, 200, 200);
     /** 宽裕到被选中语句之前的几步一定在截止之前完成；被选中的语句会把它等完。 */
     private static final long BUDGET_MS = 500;
-    private static final String LOCK_ROUTE_META = "SELECT generation,writable,fence_shards FROM route_meta WHERE id=1 LOCK IN SHARE MODE";
+    private static final String READ_ROUTE_META = "SELECT generation,writable,fence_shards FROM route_meta WHERE id=1";
 
     private final Map<String, List<Object[]>> queryRows = new HashMap<>();
     private final List<String> queries = new CopyOnWriteArrayList<>();
@@ -73,7 +73,7 @@ class JdbcFriendStoreBudgetTest {
         when(metadata.getDatabaseProductName()).thenReturn("MySQL");
         when(metadata.getDatabaseProductVersion()).thenReturn("8.4.13");
         // 系统写入口仍实际读取并校验正式meta；不绕过生产围栏，也不把未知SQL默认为可写。
-        queryRows.put(LOCK_ROUTE_META, List.<Object[]>of(new Object[] {"7425c34c-87c2-46c9-95a4-8af56755c014", "1", 64}));
+        queryRows.put(READ_ROUTE_META, List.<Object[]>of(new Object[] {"7425c34c-87c2-46c9-95a4-8af56755c014", "1", 64}));
         DataSource dataSource = mock(DataSource.class);
         when(dataSource.getConnection()).thenAnswer(ignored -> connection());
         store = new JdbcFriendStore(dataSource, LIMITS, () -> 1_000L, 3, JdbcFriendStore.Events.NONE, () -> 99L);
@@ -102,7 +102,7 @@ class JdbcFriendStoreBudgetTest {
         assertThat(outcome.result()).isEqualTo(RejectResult.OK);
         assertThat(outcome.changed()).isTrue();
         assertThat(updates).containsExactly(JdbcFriendStore.UPDATE_REQUEST_GENERATION_STATUS);
-        assertThat(queries).containsExactly(JdbcFriendStore.FIND_REQUEST, LOCK_ROUTE_META);
+        assertThat(queries).containsExactly(JdbcFriendStore.FIND_REQUEST, READ_ROUTE_META);
         assertThat(commits).as("桩确实记得到 COMMIT（下面「不提交」的断言不是空转）").hasValue(1);
         assertThat(rollbacks).hasValue(0);
     }
@@ -116,7 +116,7 @@ class JdbcFriendStoreBudgetTest {
         assertThatThrownBy(() -> store.reject(5, 22, 0, deadline)).isInstanceOf(FriendStoreException.class);
 
         assertThat(updates).as("语句在截止之前发出（测的是提交点）").containsExactly(JdbcFriendStore.UPDATE_REQUEST_GENERATION_STATUS);
-        assertThat(queries).containsExactly(JdbcFriendStore.FIND_REQUEST, LOCK_ROUTE_META);
+        assertThat(queries).containsExactly(JdbcFriendStore.FIND_REQUEST, READ_ROUTE_META);
         assertDeadlineExpiredInWrite();
         // 以前是自动提交：语句返回即已提交，客户端收到 1003 / gate 已放行下一条之后申请才变成已拒绝
         assertThat(commits).as("截止之后不发 COMMIT").hasValue(0);
@@ -131,7 +131,7 @@ class JdbcFriendStoreBudgetTest {
         assertThatThrownBy(() -> store.unblock(22, 33, deadline)).isInstanceOf(FriendStoreException.class);
 
         assertThat(updates).containsExactly(JdbcFriendStore.DELETE_BLOCK);
-        assertThat(queries).containsExactly(LOCK_ROUTE_META);
+        assertThat(queries).containsExactly(READ_ROUTE_META);
         assertDeadlineExpiredInWrite();
         assertThat(commits).as("截止之后不发 COMMIT").hasValue(0);
         assertThat(rollbacks).hasValue(1);
@@ -151,8 +151,9 @@ class JdbcFriendStoreBudgetTest {
         assertThat(updates).as("体内的写都在截止之前发出").containsExactly(JdbcFriendStore.ENSURE_CAPACITY, JdbcFriendStore.ENSURE_CAPACITY,
                 JdbcFriendStore.DELETE_EDGE, JdbcFriendStore.DECREMENT_COUNT, JdbcFriendStore.DELETE_EDGE, JdbcFriendStore.DECREMENT_COUNT);
         assertThat(queries).containsExactly(JdbcFriendStore.EDGE_EXISTS_EITHER,
-                LOCK_ROUTE_META, JdbcFriendStore.COUNT_FRIENDS, LOCK_ROUTE_META, JdbcFriendStore.COUNT_FRIENDS,
-                LOCK_ROUTE_META, JdbcFriendStore.LOCK_CAPACITY, JdbcFriendStore.LOCK_CAPACITY);
+                READ_ROUTE_META, JdbcFriendStore.LOCK_CAPACITY, JdbcFriendStore.COUNT_FRIENDS,
+                READ_ROUTE_META, JdbcFriendStore.LOCK_CAPACITY, JdbcFriendStore.COUNT_FRIENDS,
+                READ_ROUTE_META, JdbcFriendStore.LOCK_CAPACITY, JdbcFriendStore.LOCK_CAPACITY);
         assertDeadlineExpiredInWrite();
         // 补容量是先行独立提交；不能把它们混进之后越过截止的好友事务，也不能漏记这些真实提交。
         assertThat(capacityCommits).hasValue(2);

@@ -3,6 +3,19 @@ package com.game.match.lifecycle;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.game.common.sql.WriterAuthority;
+import com.game.match.MatchConfiguration;
+import com.game.match.dispatch.MatchWorkerPool;
+import com.game.match.global.GlobalMatchService;
+import com.game.match.global.RatingRankOutbox;
+import com.game.match.rating.BattleCompletionReplay;
+import com.game.match.rating.BattleResultConsumer;
+import com.game.match.spectate.SqlSpectateStore;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Consumer;
+import org.mockito.Mockito;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.ObjectProvider;
 import com.game.match.gather.GatherLauncher;
 import com.game.match.gather.GatherPlan;
 import com.game.match.gather.GatherResult;
@@ -831,5 +844,201 @@ class MatchLifecycleTest {
             var valid=input.toBuilder().clearSourcePins();for(String name:java.util.List.of("seed-z","seed-a")){var seed=directory.resolve(name);byte[] value=name.getBytes(java.nio.charset.StandardCharsets.UTF_8);java.nio.file.Files.write(seed,value);valid.addSourcePins(com.game.player.store.state.SqlWriterMaintenanceReceipt.SourcePin.newBuilder().setAbsolutePath(seed.toString()).setSha256(com.google.protobuf.ByteString.copyFrom(java.security.MessageDigest.getInstance("SHA-256").digest(value))));}
             var prepared=lifecycle.prepareMaintenanceSource(valid.build());assertThat(prepared.getSourcePinsList().subList(0,2)).containsExactlyElementsOf(valid.getSourcePinsList());assertThat(prepared.getSourcePinsCount()).isEqualTo(3);assertThat(prepared.getSourcePins(2).getAbsolutePath()).isEqualTo(reportPath.toString());assertThat(prepared.getSourcePins(2).getSha256()).isEqualTo(prepared.getConsumerReadyFrontierDigest());assertThat(prepared.getConsumerReadyFrontierDigest()).isEqualTo(com.google.protobuf.ByteString.copyFrom(digest));assertThat(events).containsExactly("consumer.start");org.mockito.Mockito.verify(boot).persistConsumerReadiness(org.mockito.Mockito.any());
         }finally{lifecycle.stop();}
+    }
+
+    // ================================================================ 全球开关的真实工厂装配
+
+    /** 只验证工厂接线和基础启停；四个全局对象仅作类型身份，不注册假bean或模拟SQL/P3成功。 */
+    private final class FactoryInputs implements AutoCloseable {
+        final MatchWorkerPool workers = new MatchWorkerPool(1, 1, Duration.ofMillis(100));
+        final GlobalMatchService global = Mockito.mock(GlobalMatchService.class);
+        final BattleCompletionReplay replay = Mockito.mock(BattleCompletionReplay.class);
+        final RatingRankOutbox outbox = Mockito.mock(RatingRankOutbox.class);
+        final SqlSpectateStore sqlSpectate = Mockito.mock(SqlSpectateStore.class);
+        final WriterAuthority boot = Mockito.mock(WriterAuthority.class);
+        final BattleResultConsumer.ReadinessControl frontier = Mockito.mock(BattleResultConsumer.ReadinessControl.class);
+        final java.util.function.BooleanSupplier consumerStopped = Mockito.mock(java.util.function.BooleanSupplier.class);
+        final ObjectProvider<GlobalMatchService> globals = missingProvider(GlobalMatchService.class);
+        final ObjectProvider<BattleCompletionReplay> replays = missingProvider(BattleCompletionReplay.class);
+        final ObjectProvider<RatingRankOutbox> outboxes = missingProvider(RatingRankOutbox.class);
+        final ObjectProvider<SqlSpectateStore> sqlSpectators = missingProvider(SqlSpectateStore.class);
+
+        MatchLifecycle build(boolean globalEnabled) {
+            return new MatchConfiguration().matchLifecycle(matcher, consumer, gathers, workers, watches, sweeper,
+                    globalEnabled, globals, replays, outboxes, boot, sqlSpectators, frontier, consumerStopped);
+        }
+
+        void provideGlobal() { provide(globals, global); }
+        void provideReplay() { provide(replays, replay); }
+        void provideOutbox() { provide(outboxes, outbox); }
+        void provideSqlSpectate() { provide(sqlSpectators, sqlSpectate); }
+
+        void provideAll() {
+            provideGlobal(); provideReplay(); provideOutbox(); provideSqlSpectate();
+        }
+
+        void assertNoBusinessOrQualificationCalls() {
+            Mockito.verifyNoInteractions(global, replay, outbox, sqlSpectate, frontier, consumerStopped);
+            Mockito.verify(boot, Mockito.never()).seal();
+        }
+
+        @Override public void close() { workers.close(); }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> ObjectProvider<T> missingProvider(Class<T> type) {
+        ObjectProvider<T> provider = Mockito.mock(ObjectProvider.class);
+        Mockito.when(provider.getObject()).thenThrow(new NoSuchBeanDefinitionException(type));
+        return provider;
+    }
+
+    private static <T> void provide(ObjectProvider<T> provider, T value) {
+        // 缺件provider原先抛异常，使用doReturn覆盖，避免在设置替身时调用它。
+        Mockito.doReturn(value).when(provider).getObject();
+        Mockito.doReturn(value).when(provider).getIfAvailable();
+    }
+
+    @Test
+    void 工厂全球关闭_保留基础开关与真实工作池关闭_不签维护资格() throws Exception {
+        try (var inputs = new FactoryInputs(); var context = new GenericApplicationContext()) {
+            MatchLifecycle actual = inputs.build(false);
+            try {
+                actual.setApplicationContext(context);
+                assertThat(actual).isExactlyInstanceOf(MatchLifecycle.class);
+                assertThat(actual.writerBoot()).isNull();
+                assertThat(actual.rootsSettled()).isFalse();
+                assertThatThrownBy(() -> actual.closeMaintenanceRoots(java.util.UUID.randomUUID().toString()))
+                        .isInstanceOf(IllegalStateException.class).hasMessage("缺少同boot维护接线");
+                assertThatThrownBy(() -> actual.prepareMaintenanceSource(
+                        com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerReadiness.getDefaultInstance()))
+                        .isInstanceOf(IllegalStateException.class).hasMessage("新Match boot尚未以source关闭状态准备");
+                assertThatThrownBy(() -> actual.openMaintenanceSource(
+                        com.game.player.store.state.SqlWriterMaintenanceReceipt.SourceOpenAck.getDefaultInstance()))
+                        .isInstanceOf(IllegalArgumentException.class).hasMessage("open不是已prepared原件");
+
+                actual.start();
+                assertThat(actual.isRunning()).isTrue();
+                assertThat(actual.backgroundStarted()).isFalse();
+                assertThat(events).isEmpty();
+                assertThat(spectate).isEmpty();
+                actual.onApplicationEvent(started(context));
+                assertThat(actual.backgroundStarted()).isTrue();
+                assertThat(events).containsExactly("matcher.start", "consumer.start");
+                assertThat(spectate).containsExactly("sweeper.start");
+
+                actual.onApplicationEvent(new ContextClosedEvent(context));
+                actual.stop();
+                assertThat(actual.isRunning()).isFalse();
+                assertThat(events).containsExactly("matcher.start", "consumer.start", "matcher.stop",
+                        "gathers.awaitIdle(10s)", "consumer.stop");
+                assertThat(spectate).containsExactly("sweeper.start", "watches.awaitIdle("
+                        + com.game.api.match.MatchBudgets.SPECTATE_DRAIN_TIMEOUT_MS + "ms)", "sweeper.stop");
+                assertThatThrownBy(() -> inputs.workers.execute(() -> { }))
+                        .isInstanceOf(RejectedExecutionException.class);
+                inputs.assertNoBusinessOrQualificationCalls();
+                Mockito.verify(inputs.globals, Mockito.never()).getObject();
+                Mockito.verify(inputs.replays, Mockito.never()).getObject();
+                Mockito.verify(inputs.outboxes, Mockito.never()).getObject();
+                Mockito.verify(inputs.sqlSpectators, Mockito.never()).getObject();
+            } finally {
+                actual.stop();
+            }
+        }
+    }
+
+    @Test
+    void 工厂全球关闭_拒绝准备态writer_不借基础生命周期开放新根() {
+        try (var inputs = new FactoryInputs()) {
+            Mockito.when(inputs.boot.prepareOnly()).thenReturn(true);
+            assertThatThrownBy(() -> inputs.build(false)).isInstanceOf(IllegalStateException.class)
+                    .hasMessage("关闭全球模式时不能装入维护启动资格或全局SQL后台写者");
+            Mockito.verifyNoInteractions(inputs.globals, inputs.replays, inputs.outboxes, inputs.sqlSpectators);
+            inputs.assertNoBusinessOrQualificationCalls();
+            assertThat(events).isEmpty();
+            assertThat(spectate).isEmpty();
+        }
+    }
+
+    private void assertOffRejectsUnexpected(Consumer<FactoryInputs> present) {
+        try (var inputs = new FactoryInputs()) {
+            present.accept(inputs);
+            assertThatThrownBy(() -> inputs.build(false)).isInstanceOf(IllegalStateException.class)
+                    .hasMessage("关闭全球模式时不能装入维护启动资格或全局SQL后台写者");
+            Mockito.verify(inputs.globals, Mockito.never()).getObject();
+            Mockito.verify(inputs.replays, Mockito.never()).getObject();
+            Mockito.verify(inputs.outboxes, Mockito.never()).getObject();
+            Mockito.verify(inputs.sqlSpectators, Mockito.never()).getObject();
+            inputs.assertNoBusinessOrQualificationCalls();
+            assertThat(events).isEmpty();
+            assertThat(spectate).isEmpty();
+        }
+    }
+
+    @Test void 工厂全球关闭_意外全局成局写者拒启() { assertOffRejectsUnexpected(FactoryInputs::provideGlobal); }
+    @Test void 工厂全球关闭_意外终局恢复写者拒启() { assertOffRejectsUnexpected(FactoryInputs::provideReplay); }
+    @Test void 工厂全球关闭_意外评分发件箱写者拒启() { assertOffRejectsUnexpected(FactoryInputs::provideOutbox); }
+    @Test void 工厂全球关闭_意外SQL观战写者拒启() { assertOffRejectsUnexpected(FactoryInputs::provideSqlSpectate); }
+
+    private void assertTrueRejectsMissing(Consumer<FactoryInputs> present, Class<?> missing) {
+        try (var inputs = new FactoryInputs()) {
+            present.accept(inputs);
+            assertThatThrownBy(() -> inputs.build(true)).isInstanceOf(NoSuchBeanDefinitionException.class)
+                    .satisfies(failure -> assertThat(((NoSuchBeanDefinitionException) failure).getBeanType()).isEqualTo(missing));
+            inputs.assertNoBusinessOrQualificationCalls();
+            assertThat(events).isEmpty();
+            assertThat(spectate).isEmpty();
+        }
+    }
+
+    @Test
+    void 工厂全球开启_缺全局成局写者拒启() {
+        assertTrueRejectsMissing(inputs -> {
+            inputs.provideReplay(); inputs.provideOutbox(); inputs.provideSqlSpectate();
+        }, GlobalMatchService.class);
+    }
+
+    @Test
+    void 工厂全球开启_缺终局恢复写者拒启() {
+        assertTrueRejectsMissing(inputs -> {
+            inputs.provideGlobal(); inputs.provideOutbox(); inputs.provideSqlSpectate();
+        }, BattleCompletionReplay.class);
+    }
+
+    @Test
+    void 工厂全球开启_缺评分发件箱写者拒启() {
+        assertTrueRejectsMissing(inputs -> {
+            inputs.provideGlobal(); inputs.provideReplay(); inputs.provideSqlSpectate();
+        }, RatingRankOutbox.class);
+    }
+
+    @Test
+    void 工厂全球开启_缺SQL观战写者拒启() {
+        assertTrueRejectsMissing(inputs -> {
+            inputs.provideGlobal(); inputs.provideReplay(); inputs.provideOutbox();
+        }, SqlSpectateStore.class);
+    }
+
+    @Test
+    void 工厂全球开启_四件齐全仍沿真实维护接线_本例不执行SQL或P3() {
+        try (var inputs = new FactoryInputs()) {
+            inputs.provideAll();
+            MatchLifecycle actual = inputs.build(true);
+            assertThat(actual).isExactlyInstanceOf(MatchLifecycle.class);
+            assertThat(Mockito.mockingDetails(actual).isMock()).isFalse();
+            assertThat(actual.writerBoot()).isSameAs(inputs.boot);
+            Mockito.verify(inputs.boot).prepareOnly();
+            Mockito.verify(inputs.globals).getObject();
+            Mockito.verify(inputs.replays).getObject();
+            Mockito.verify(inputs.outboxes).getObject();
+            Mockito.verify(inputs.sqlSpectators).getObject();
+            Mockito.verify(inputs.globals, Mockito.never()).getIfAvailable();
+            Mockito.verify(inputs.replays, Mockito.never()).getIfAvailable();
+            Mockito.verify(inputs.outboxes, Mockito.never()).getIfAvailable();
+            Mockito.verify(inputs.sqlSpectators, Mockito.never()).getIfAvailable();
+            inputs.assertNoBusinessOrQualificationCalls();
+            assertThat(events).isEmpty();
+            assertThat(spectate).isEmpty();
+            // 不启动global生命周期、不制造prepared/settled成功；工作池由本例唯一owner关闭。
+        }
     }
 }

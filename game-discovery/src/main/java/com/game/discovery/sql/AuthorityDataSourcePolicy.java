@@ -16,8 +16,9 @@ import org.springframework.core.env.Environment;
 /** 所有SQL池在init之前安装physical adapter；内部BPP最后执行，消费并清空已审init SQL。 */
 @AutoConfiguration
 public class AuthorityDataSourcePolicy {
-    /** 非Spring工具在首次借连接之前调用；不改变Druid公开连接/holder/proxy类型。 */
-    public static void protectDruid(com.alibaba.druid.pool.DruidDataSource pool,WriterAuthority boot,boolean required)throws SQLException{
+    /** 非Spring工具在首次借连接之前调用；签名只暴露JDBC类型，避免装配反射提前链接可选Druid；真实池与holder/proxy类型保持不变。 */
+    public static void protectDruid(DataSource pool,WriterAuthority boot,boolean required)throws SQLException{
+        if(pool==null||!Installer.is(pool,"com.alibaba.druid.pool.DruidDataSource"))throw new SQLException("CLI physical封口仅支持真实Druid池");
         try{Installer installer=new Installer(null,null);installer.authority=Objects.requireNonNull(boot);installer.druid(pool,"normal-cli",required);}
         catch(ReflectiveOperationException invalid){throw new SQLException("CLI physical封口安装失败",invalid);}
     }

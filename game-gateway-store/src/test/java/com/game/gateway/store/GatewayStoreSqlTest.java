@@ -26,6 +26,7 @@ class GatewayStoreSqlTest {
     @BeforeEach
     void setUp() throws Exception {
         JdbcDataSource h2 = new JdbcDataSource();
+        h2.setUser("sa");
         h2.setURL("jdbc:h2:mem:gw" + UUID.randomUUID().toString().replace("-", "")
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
         DataSource ds = h2;

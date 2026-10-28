@@ -224,7 +224,7 @@ final class RollbackHarness implements AutoCloseable {
     /** 插一份 scene 快照（经 Kafka 的口径：operator / note 为空）。 */
     void snapshot(long snapshotId, long playerId, long timeMs, int cause, int zoneId, int level, int sceneConfigId,
                   byte[] state) {
-        db.snapshots.insertDirect(new PlayerSnapshotRow(snapshotId, playerId, timeMs, cause, zoneId, 3, level, sceneConfigId,
+        db.seedSnapshot(new PlayerSnapshotRow(snapshotId, playerId, timeMs, cause, zoneId, 3, level, sceneConfigId,
                 10.5, 0, -2.5, state), timeMs + 50, "", "");
     }
 

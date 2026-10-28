@@ -33,17 +33,17 @@ import org.springframework.web.bind.annotation.RestController;
 /** 随机namespace的真实Tomcat/H2接线；trade回执仅作SQL边界夹具，不冒真实资产或外部出款。 */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
     "server.address=127.0.0.1", "server.servlet.context-path=/mall", "spring.mvc.servlet.path=/rpc",
-    "game.run-mode=test", "game.mall.require-tidb=false", "game.mall.mock-payment-enabled=true",
+    "game.run-mode=test", "game.mall.require-tidb=false", "game.sql-authority.require-tidb=false", "game.mall.mock-payment-enabled=true",
     "game.mall.gateway-secret=rmb-http-test-only-gateway-key-000001",
     "game.mall.payment-secret=rmb-http-test-only-payment-key-000002",
     "game.mall.delivery-secret=rmb-http-test-only-delivery-key-00003",
     "game.mall.consignment.notice-ms=0", "game.mall.consignment.sale-ms=600000",
     "game.mall.consignment.cooling-ms=0", "game.mall.consignment.fee-bps=500",
-    "spring.datasource.username=sa", "spring.datasource.password=", "spring.sql.init.mode=always",
+    "spring.datasource.username=sa", "spring.datasource.password=", "spring.sql.init.mode=never",
     "spring.sql.init.schema-locations=classpath:db/migration/V1__official_sku.sql"
 })
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-@Import(RmbConsignmentHttpTest.ForwardConfiguration.class)
+@Import({RmbConsignmentHttpTest.ForwardConfiguration.class, MallHttpFlowTest.H2AuthorityConfiguration.class})
 class RmbConsignmentHttpTest {
     private static final String PREFIX = "/mall/rpc";
     private static final String DATABASE = "mallrmb" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);

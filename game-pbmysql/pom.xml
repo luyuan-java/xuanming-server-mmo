@@ -19,6 +19,12 @@
 
     <dependencies>
         <dependency>
+            <!-- 未发布结构升级的生产入口消费 Common 所有者的强类型租约，不用于给测试补类路径。 -->
+            <groupId>com.game</groupId>
+            <artifactId>game-common</artifactId>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>
         </dependency>

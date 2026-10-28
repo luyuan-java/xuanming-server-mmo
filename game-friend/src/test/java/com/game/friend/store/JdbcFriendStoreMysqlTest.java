@@ -785,7 +785,7 @@ class JdbcFriendStoreMysqlTest {
 
     private static void assertPointLookup(String sql, int keyLen, Object... args) throws SQLException {
         // TiDB 的传统 EXPLAIN 是算子树，不提供 MySQL 的 key/key_len/type 列。
-        try (Connection c = dataSource.getConnection(); Statement versionStatement = c.createStatement();
+        try (Connection c = fixture.schemaConnection(); Statement versionStatement = c.createStatement();
              ResultSet versionRows = versionStatement.executeQuery("SELECT VERSION()")) {
             assertThat(versionRows.next()).isTrue();
             String version = versionRows.getString(1);
@@ -797,7 +797,7 @@ class JdbcFriendStoreMysqlTest {
             }
         }
         // 服务端默认 EXPLAIN 格式可变；断言 key / key_len 前显式要求传统表格格式。
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement("EXPLAIN FORMAT=TRADITIONAL " + sql)) {
+        try (Connection c = fixture.schemaConnection(); PreparedStatement ps = c.prepareStatement("EXPLAIN FORMAT=TRADITIONAL " + sql)) {
             for (int i = 0; i < args.length; i++) {
                 ps.setObject(i + 1, args[i]);
             }

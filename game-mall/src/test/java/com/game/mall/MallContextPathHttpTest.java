@@ -20,6 +20,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -28,13 +29,14 @@ import org.springframework.web.bind.annotation.RestController;
 /** 同时使用真实context与DispatcherServlet前缀，覆盖角色识别及内部forward的防御。 */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "server.servlet.context-path=/mall", "spring.mvc.servlet.path=/rpc",
-        "game.namespace=mallcontext", "game.run-mode=test", "game.mall.require-tidb=false", "game.mall.allowed-payment-channels=test-channel",
+        "game.namespace=mallcontext", "game.run-mode=test", "game.mall.require-tidb=false", "game.sql-authority.require-tidb=false", "game.mall.allowed-payment-channels=test-channel",
         "game.mall.gateway-secret=" + MallTestDatabase.GATEWAY_KEY,
         "game.mall.payment-secret=" + MallTestDatabase.PAYMENT_KEY,
         "game.mall.delivery-secret=mall-test-only-delivery-key-0000003",
         "spring.datasource.url=jdbc:h2:mem:mallcontext;MODE=MySQL;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=5000",
         "spring.datasource.username=sa", "spring.datasource.password=",
-        "spring.sql.init.mode=always", "spring.sql.init.schema-locations=classpath:db/migration/V1__official_sku.sql"})
+        "spring.sql.init.mode=never", "spring.sql.init.schema-locations=classpath:db/migration/V1__official_sku.sql"})
+@Import(MallHttpFlowTest.H2AuthorityConfiguration.class)
 @DirtiesContext
 class MallContextPathHttpTest {
     @LocalServerPort int port;

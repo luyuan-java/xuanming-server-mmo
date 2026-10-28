@@ -77,6 +77,6 @@ class PlayerRouteAuthoritySqlTest {
             assertEquals(2,new PlayerHomeZones(f.source).homeZoneOf(high,Deadline.after(3000)));
         }
     }
-    private static void lock(PlayerTradeStoreTest.Fixture f,List<Long> players){var tx=new TransactionTemplate(f.manager);tx.setTimeout(5);tx.execute(status->f.sql.execute((ConnectionCallback<Void>)connection->{PlayerRouteAuthority.lock(connection,players,3);return null;}));}
+    private static void lock(PlayerTradeStoreTest.Fixture f,List<Long> players){var tx=new TransactionTemplate(f.manager);tx.setTimeout(5);tx.execute(status->new org.springframework.jdbc.core.JdbcTemplate(f.source).execute((ConnectionCallback<Void>)connection->{PlayerRouteAuthority.lock(connection,players,3);return null;}));}
     private static String schemaPrincipal(java.sql.Connection connection)throws SQLException{try(var statement=connection.createStatement();var rows=statement.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new SQLException("缺实际schema主体");return rows.getString(1);}}
 }

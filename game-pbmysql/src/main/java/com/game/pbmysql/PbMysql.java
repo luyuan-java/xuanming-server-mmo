@@ -28,7 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * PbMysql db = new PbMysql();
  * db.register(FriendEdgeRecord.getDefaultInstance());          // 表选项从 proto 的 option 读
  * try (Connection c = dataSource.getConnection()) {
- *     db.syncAll(c);                                           // 建表 / 只加列与索引
+ *     db.syncAll(c);                                           // NORMAL只读结构核验
  * }
  * try (Connection c = dataSource.getConnection()) {
  *     c.setAutoCommit(false);
@@ -39,7 +39,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * }</pre>
  *
  * <ul>
- *   <li>不持有任何全局状态与连接：所有数据库方法都接收调用方的 {@link Connection}，事务由调用方掌握；本类不提交、不回滚、不关连接。</li>
+ *   <li>不持有任何全局状态与连接：普通数据库方法接收调用方的 {@link Connection}，事务由调用方掌握；未发布结构操作只消费真实owner的受管lease，不提交业务事务。</li>
  *   <li>线程安全：注册表是并发容器，{@link TableSchema} 不可变。</li>
  *   <li>每条语句都显式列出列（从不 {@code SELECT *}），读回时按列名取值；全部走 {@link PreparedStatement} 参数绑定。</li>
  *   <li>{@code where} 参数是原样拼在 {@code WHERE} 之后的裸 SQL，只能来自代码常量，取值一律走 {@code args}。</li>
@@ -118,25 +118,67 @@ public final class PbMysql {
     }
 
 
+    /** 在同一真实owner的未发布阶段建全新业务表；不接受调用方自报Schema身份。 */
+    public void initializeFresh(com.game.common.sql.testing.AuthoritySqlFixture.UnpublishedSchemaLease lease)throws SQLException {
+        runOwnedSchema(lease,OwnedSchemaAction.INITIALIZE_FRESH);
+    }
+
+    /**
+     * 只升级同一owner已创建、尚未发布的业务表，不能从裸连接或主体字符串构造能力。
+     * owner持有整轮DDL至发布的排他阶段；发布先撤销Schema会话和账号，再初始化正式authority并REGISTER。
+     * 不接管外部库，不允许已发布或FROZEN库。DDL部分成功和原异常如实保留，修复后须显式重调，不自动重试。
+     */
+    public void upgradeUnpublishedSchema(com.game.common.sql.testing.AuthoritySqlFixture.UnpublishedSchemaLease lease)throws SQLException {
+        runOwnedSchema(lease,OwnedSchemaAction.UPGRADE_UNPUBLISHED);
+    }
+
+    private enum OwnedSchemaAction{INITIALIZE_FRESH,UPGRADE_UNPUBLISHED}
+
+    private void runOwnedSchema(com.game.common.sql.testing.AuthoritySqlFixture.UnpublishedSchemaLease lease,
+            OwnedSchemaAction action)throws SQLException {
+        if(lease==null)throw new IllegalArgumentException("缺少真实未发布Schema owner能力");
+        List<TableSchema> all=new ArrayList<>(byFullName.values());
+        SchemaSync.checkOwnedRegistry(all);
+        try{
+            lease.withSchemaChange((connection,configuredPrincipal,database)->{
+                try{
+                    if(action==OwnedSchemaAction.INITIALIZE_FRESH)
+                        SchemaSync.initializeOwnedFresh(connection,all,all,configuredPrincipal,database);
+                    else SchemaSync.upgradeOwnedUnpublished(connection,all,all,configuredPrincipal,database);
+                }catch(SchemaDriftException drift){throw new OwnedSchemaDrift(drift);}
+                return null;
+            },(connection,configuredPrincipal,database)->{
+                try{SchemaSync.validateOwnedStructure(connection,all,all,configuredPrincipal,database);}
+                catch(SchemaDriftException drift){throw new OwnedSchemaDrift(drift);}
+                return null;
+            });
+        }catch(OwnedSchemaDrift adapted){
+            for(Throwable suppressed:adapted.getSuppressed())adapted.original.addSuppressed(suppressed);
+            throw adapted.original;
+        }catch(SQLException failure){throw failure;}
+        catch(RuntimeException|Error failure){throw failure;}
+        catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw new SQLException("未发布Schema工作被中断",interrupted);}
+        catch(Exception failure){throw new SQLException("未发布Schema owner工作失败",failure);}
+    }
+
+    /** common不依赖Pb；确定的业务漂移可修复，外部仍见原异常。 */
+    private static final class OwnedSchemaDrift extends SQLException{
+        private final SchemaDriftException original;
+        private OwnedSchemaDrift(SchemaDriftException original){super(original.getMessage(),"22000",original);this.original=original;}
+    }
+
     /** 某张已注册表的建表语句（带结尾分号），与 Go 版 GetCreateTableSQL 逐字节相同。 */
     public String createTableSql(Class<? extends Message> type) {
         return schema(type).createTableSql();
     }
 
-    /**
-     * 对全部已注册的表做只扩不缩的结构同步：表不存在就建；存在就只 ADD 缺的列、索引、唯一键与（线上完全没有的）主键；
-     * 任何需要 MODIFY / CHANGE / DROP 才能对齐的差异抛 {@link SchemaDriftException}（该表不执行任何 DDL），从不删列删索引。
-     *
-     * <p>整轮在 {@code conn} 这一条连接上执行并持有 {@code GET_LOCK} 咨询锁；连接必须处于自动提交模式（DDL 会隐式提交）。
-     * 两个不同 message 映射到同一张物理表时在任何 I/O 之前拒绝。
-     */
     /** normal启动只读核验；不获取DDL咨询锁，不建表、不补列和索引。 */
     public void syncAll(Connection conn) throws SQLException {
         List<TableSchema> all = new ArrayList<>(byFullName.values());
         SchemaSync.sync(conn, all, all);
     }
 
-    /** 只同步一张表（同样持锁、同样先对整个注册表做物理表名判重）。 */
+    /** normal只读核验一张表；先对整个注册表做物理表名判重，不执行DDL。 */
     public void syncTable(Connection conn, Class<? extends Message> type) throws SQLException {
         SchemaSync.sync(conn, List.of(schema(type)), new ArrayList<>(byFullName.values()));
     }

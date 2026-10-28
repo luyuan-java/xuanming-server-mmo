@@ -16,7 +16,6 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
@@ -38,6 +37,7 @@ final class ChatSqlFixture implements AutoCloseable {
     private final String rootUrl;
     private final String user;
     private final String password;
+    private com.game.common.sql.WriterAuthority h2Writer;
 
     ChatSqlFixture(ChatProperties rules) throws Exception { this(rules, null); }
 
@@ -45,29 +45,59 @@ final class ChatSqlFixture implements AutoCloseable {
         if (endpoint == null) {
             sqlFixture=null;
             var h2 = new JdbcDataSource();
+            h2.setUser("sa"); h2.setPassword("");
             h2.setURL("jdbc:h2:mem:chat_" + UUID.randomUUID() + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=5000");
             physical = h2;
             database = rootUrl = user = password = null;
+            final String physicalUrl;
+            try (Connection raw = h2.getConnection()) { physicalUrl = raw.getMetaData().getURL(); }
+            var sealed = new java.util.concurrent.atomic.AtomicBoolean();
+            h2Writer = mock(com.game.common.sql.WriterAuthority.class, invocation -> {
+                String method = invocation.getMethod().getName();
+                if (method.equals("verifyPhysical") || method.equals("begin")) {
+                    Connection raw = invocation.getArgument(0);
+                    if (sealed.get() || mockingDetails(raw).isMock() || raw.isClosed() || !raw.getAutoCommit()
+                            || !"H2".equals(raw.getMetaData().getDatabaseProductName())
+                            || !"SA".equalsIgnoreCase(raw.getMetaData().getUserName())
+                            || !physicalUrl.equals(raw.getMetaData().getURL())) {
+                        throw new java.sql.SQLException("聊天H2外部writer接口替身拒绝已seal、旧事务或非本库SA连接");
+                    }
+                    // 仅替代外部writer资格；事务提交、回滚和autoCommit恢复仍走生产包装与真实H2。
+                    if (method.equals("begin")) raw.setAutoCommit(false);
+                    return null;
+                }
+                if (method.equals("seal")) { sealed.set(true); return null; }
+                if (method.equals("isSealed")) return sealed.get();
+                return RETURNS_DEFAULTS.answer(invocation);
+            });
             source = new DelegatingDataSource(h2) {
                 @Override public Connection getConnection() throws java.sql.SQLException {
                     Connection connection = super.getConnection();
-                    return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[]{Connection.class},
+                    Connection clockConnection = (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[]{Connection.class},
                         (proxy, method, args) -> {
                             if (method.getName().equals("prepareStatement") && args != null && args.length > 0
                                     && "SELECT UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000.000".equals(args[0])) {
-                                // 固定数据库时钟标量接缝；其它SQL/锁/回滚均由真实H2执行，测试不取墙钟也不sleep跨秒。
-                                PreparedStatement statement = mock(PreparedStatement.class);
-                                when(statement.executeQuery()).thenAnswer(call -> {
-                                    ResultSet rows = mock(ResultSet.class);
-                                    when(rows.next()).thenReturn(true, false);
-                                    when(rows.getBigDecimal(1)).thenReturn(BigDecimal.valueOf(clock.get()));
-                                    return rows;
-                                });
+                                // 固定时钟仍是唯一标量接缝；真实H2结果集继续经过生产事务包装。
+                                PreparedStatement statement = connection.prepareStatement("SELECT CAST(? AS DECIMAL(20,3))");
+                                statement.setBigDecimal(1, BigDecimal.valueOf(clock.get()));
                                 return statement;
                             }
                             try { return method.invoke(connection, args); }
                             catch (InvocationTargetException wrapped) { throw wrapped.getCause(); }
                         });
+                    try {
+                        com.game.common.sql.AuthorityDataSource.initialize(clockConnection, false, List.of());
+                        return com.game.common.sql.AuthorityConnection.wrap(clockConnection, h2Writer);
+                    } catch (java.sql.SQLException | RuntimeException | Error failure) {
+                        try { connection.close(); } catch (java.sql.SQLException cleanup) { failure.addSuppressed(cleanup); }
+                        throw failure;
+                    }
+                }
+                @Override public Connection getConnection(String username, String secret) throws java.sql.SQLException {
+                    if (!"sa".equalsIgnoreCase(username) || !"".equals(secret)) {
+                        throw new java.sql.SQLException("聊天H2 normal不能切换schema主体");
+                    }
+                    return getConnection();
                 }
             };
         } else {
@@ -92,7 +122,7 @@ final class ChatSqlFixture implements AutoCloseable {
             }
             physical = source = pool;
         }
-        sql = new JdbcTemplate(sqlFixture==null?source:sqlFixture.schemaDataSource());
+        sql = new JdbcTemplate(sqlFixture==null?physical:sqlFixture.schemaDataSource());
         ChatRoleAuthority created = null;
         try {
         if(endpoint==null){
@@ -102,10 +132,16 @@ final class ChatSqlFixture implements AutoCloseable {
         install("db/game-route-authority-schema.sql", false);
         install("db/chat-authority.sql", endpoint == null);
         }
-        try (var connection = source.getConnection()) {
-            if(endpoint==null){String principal;try(var identity=connection.createStatement();var rows=identity.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new java.sql.SQLException("缺H2 schema主体");principal=rows.getString(1);}
+        if(endpoint==null){
+            try (var connection = physical.getConnection()) {
+                String principal;
+                try(var identity=connection.createStatement();var rows=identity.executeQuery("SELECT CURRENT_USER()")){
+                    if(!rows.next())throw new java.sql.SQLException("缺H2 schema主体");principal=rows.getString(1);
+                }
                 RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1),principal);
             }
+        }
+        try (var connection = source.getConnection()) {
             ChatSqlConfiguration.verifySchema(connection);
             if (endpoint != null) StrongTiDbConnectionPolicy.verify(connection, true);
         }
@@ -115,6 +151,7 @@ final class ChatSqlFixture implements AutoCloseable {
         store.initializePolicy();
         } catch (Exception failure) {
             if (created != null) created.close();
+            if (h2Writer != null) h2Writer.seal();
             if (physical instanceof DruidDataSource pool) pool.close();
             try { cleanupDatabase(); } catch (Exception cleanup) { failure.addSuppressed(cleanup); }
             throw failure;
@@ -141,6 +178,7 @@ final class ChatSqlFixture implements AutoCloseable {
 
     @Override public void close() throws Exception {
         authority.close();
+        if (h2Writer != null) h2Writer.seal();
         if (physical instanceof DruidDataSource pool) pool.close();
         cleanupDatabase();
     }

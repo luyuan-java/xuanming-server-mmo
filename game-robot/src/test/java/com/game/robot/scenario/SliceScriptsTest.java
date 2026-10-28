@@ -70,6 +70,10 @@ class SliceScriptsTest {
             assertThat(original).as("start-slice.sh 里有 %s()", name).isNotNull();
             assertThat(function(crashWindow, name)).as("battle-crash-window.sh 的 %s() 与 start-slice.sh 逐字相同", name).isEqualTo(original);
         }
+        assertThat(crashWindow).containsOnlyOnce("\nGAME_SQL_BOOT_LIBRARY_ONLY=1 source tools/local/start-slice.sh\n");
+        assertThat(crashWindow.indexOf("\nGAME_SQL_BOOT_LIBRARY_ONLY=1 source tools/local/start-slice.sh\n"))
+                .as("先只读导入资格函数，再定义与 start-slice 逐字相同的 launch").isPositive().isLessThan(crashWindow.indexOf("\nlaunch() {\n"));
+        assertThat(function(crashWindow, "launch")).doesNotContain("source ");
     }
 
     @Test
@@ -133,7 +137,7 @@ class SliceScriptsTest {
     @Test
     void 必需的环境变量与start_slice相同() {
         List<String> required = matches(startSlice, "^: \"\\$\\{(GAME_[A-Z_]+):\\?");
-        assertThat(required).containsExactly("GAME_MYSQL_PASSWORD", "GAME_GATE_TOKEN_SECRET", "GAME_LOGIN_DEV_PASSWORD", "GAME_NODE_LINK_SECRET",
+        assertThat(required).containsExactly("GAME_GATE_TOKEN_SECRET", "GAME_LOGIN_DEV_PASSWORD", "GAME_NODE_LINK_SECRET",
                 "GAME_DUBBO_SECRET");
         assertThat(crashWindow).contains("for required in " + String.join(" ", required) + "; do");
     }
@@ -359,10 +363,10 @@ class SliceScriptsTest {
     @Test
     void 放到后台跑的都是进程本身_不是包着函数的子shell_ROBOT_PID才杀得到JVM() {
         // 「函数 &」的 $! 是子 shell，java 是它的子进程：kill $! 只杀掉子 shell，JVM 被过继后继续跑、之后还会写状态文件。
-        // bash 5.3 在函数体最后一条是简单命令（且前面还有别的命令）时会省掉这次 fork，但那是随版本与写法变的优化；直接把命令放后台才在哪一版都对
+        // 服务端先在子 shell 校验独立 boot，再显式 exec 替换成 JVM；不能依赖 bash 对函数尾命令的可变 fork 优化。
         List<String> background = matches(crashWindow, "^\\s*(\\S[^\\n]*\\S)\\s+&$");
         assertThat(background).as("脚本里放后台的命令：launch 起服务端进程、arm 阶段的 robot").containsExactly(
-                "java -jar \"$jar\" \"$@\" > \"run/logs/$instance.log\" 2>&1", "\"${ROBOT_CMD[@]}\" > \"$ARM_LOG\" 2>&1");
+                "(sql_boot_environment \"$instance\" \"$module\" && exec java -jar \"$jar\" \"$@\") > \"run/logs/$instance.log\" 2>&1", "\"${ROBOT_CMD[@]}\" > \"$ARM_LOG\" 2>&1");
         assertThat(function(crashWindow, "run_robot")).as("不再有把 java 包起来的 run_robot()").isNull();
         // ROBOT_CMD 的第一个词是 java：数组直接执行时 $! 就是 JVM
         assertThat(function(crashWindow, "robot_cmd")).contains("\n  ROBOT_CMD=(java ${GAME_ROBOT_JAVA_OPTS:-} -jar \"$ROBOT_JAR\" battle-settle ");

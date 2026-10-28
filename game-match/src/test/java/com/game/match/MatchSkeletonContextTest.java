@@ -135,6 +135,7 @@ import org.springframework.test.context.DynamicPropertySource;
         properties = {
                 "server.address=127.0.0.1",
                 "game.run-mode=test",
+                "game.sql-authority.require-tidb=false",
                 "game.table-dir=../config-data/tables",
                 "game.killswitch.enabled=false",
                 // 盖住开发机上可能已设置的运维令牌：dev 管理口要带这个值才进得去
@@ -168,14 +169,30 @@ class MatchSkeletonContextTest {
             return REDIS.client;
         }
 
+        /** 独立owner先完成raw准备；Writer和池都不回注正在创建的DataSource。 */
+        @Bean(destroyMethod = "close")
+        RatingTestDatabase h2AuthorityOwner() { return RatingTestDatabase.h2(); }
+
         @Bean
-        DataSource dataSource() {
-            return RatingTestDatabase.h2DataSource("game-match-process-context");
+        @org.springframework.context.annotation.Primary
+        com.game.common.sql.WriterAuthority h2WriterAuthority(RatingTestDatabase owner) throws java.sql.SQLException {
+            return RatingTestDatabase.h2WriterAuthority(owner.dataSource);
+        }
+
+        @Bean(destroyMethod = "close")
+        DataSource dataSource(RatingTestDatabase owner) throws java.sql.SQLException {
+            var raw = (org.h2.jdbcx.JdbcDataSource) RatingTestDatabase.h2SchemaDataSource(owner.dataSource);
+            var pool = new com.alibaba.druid.pool.DruidDataSource();
+            pool.setUrl(raw.getURL()); pool.setUsername("sa"); pool.setPassword("");
+            pool.setMaxActive(8); pool.setMaxWait(3000);
+            pool.setDefaultTransactionIsolation(java.sql.Connection.TRANSACTION_READ_COMMITTED);
+            // 保持lazy，生产AuthorityDataSourcePolicy BPP在init前安装真正的physical包装。
+            return pool;
         }
 
         @Bean
-        MatchRatingTables.SchemaSync ratingSchemaSync() {
-            return RatingTestDatabase.H2_SCHEMA;
+        MatchRatingTables.SchemaSync ratingSchemaSync(RatingTestDatabase owner) {
+            return ignored -> RatingTestDatabase.H2_SCHEMA.sync(owner.dataSource);
         }
     }
 

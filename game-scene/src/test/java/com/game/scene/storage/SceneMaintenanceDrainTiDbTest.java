@@ -23,8 +23,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 /** 真实Mapper、两笔独立事务与受限normal主体；本测试独占夹具和在线玩家。 */
 class SceneMaintenanceDrainTiDbTest {
     @Test void tx1AcceptedDoesNotAuthorizeStoppingFinalRecoveryBeforeTx2OwnerRelease()throws Exception{
-        String root=System.getProperty("game.it.mysql");
-        if(root==null||root.isBlank())throw new IllegalStateException("自有Scene夹具缺少game.it.mysql根URL");
+        String root=System.getProperty("game.it.authority.jdbc",System.getProperty("game.it.mysql"));
+        if(root==null||root.isBlank())throw new IllegalStateException("自有Scene夹具缺少game.it.authority.jdbc（兼容game.it.mysql）根URL");
         long player=1;
         String source=UUID.randomUUID().toString();
         var options=AuthoritySqlFixture.Options.fromEnvironment(root,

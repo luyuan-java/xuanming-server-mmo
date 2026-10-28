@@ -87,7 +87,11 @@ public final class RatingTestDatabase implements AutoCloseable {
         try {
             createH2Tables(ds);
         } catch (SQLException e) {
+            try { ((H2Source) ds).close(); } catch (SQLException cleanup) { e.addSuppressed(cleanup); }
             throw new IllegalStateException("H2 建评分表失败", e);
+        } catch (RuntimeException | Error failure) {
+            try { ((H2Source) ds).close(); } catch (SQLException cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
         }
         return new RatingTestDatabase(ds, null);
     }
@@ -100,11 +104,19 @@ public final class RatingTestDatabase implements AutoCloseable {
         return db.dataSource;
     }
 
-    /** H2 内存库的数据源（MySQL 兼容模式；库随 JVM 存活；表要另外建，见 {@link #H2_SCHEMA}）。 */
+    /** H2 normal数据源；表由H2_SCHEMA经显式raw schema连接准备，不能在normal执行DDL。 */
     public static DataSource h2DataSource(String name) {
         JdbcDataSource h2 = new JdbcDataSource();
+        h2.setUser("sa"); h2.setPassword("");
         h2.setURL("jdbc:h2:mem:" + name + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
-        return h2;
+        try { return new H2Source(h2); }
+        catch (SQLException failure) {
+            try { shutdownH2(h2); } catch (SQLException cleanup) { failure.addSuppressed(cleanup); }
+            throw new IllegalStateException("H2 normal接口夹具创建失败", failure);
+        } catch (RuntimeException | Error failure) {
+            try { shutdownH2(h2); } catch (SQLException cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
+        }
     }
 
     /**
@@ -129,9 +141,80 @@ public final class RatingTestDatabase implements AutoCloseable {
         return mysqlDatabase != null;
     }
 
+    /** 仅供测试准备/损坏注入/清理；应用normal连接始终从原DataSource获取。 */
+    public static DataSource h2SchemaDataSource(DataSource source) throws SQLException {
+        H2Source owner = h2Owner(source); owner.requireOpen(); return owner.schema;
+    }
+
+    /** 外部writer资格接口替身；不代表grant、PD/I3或真实NORMAL授权。 */
+    public static com.game.common.sql.WriterAuthority h2WriterAuthority(DataSource source) throws SQLException {
+        H2Source owner = h2Owner(source); owner.requireOpen(); return owner.boot;
+    }
+
+    private static H2Source h2Owner(DataSource source) throws SQLException {
+        if (!(source instanceof H2Source owner)) throw new SQLException("H2 schema入口必须属于本测试fixture");
+        return owner;
+    }
+
+    private static void shutdownH2(DataSource schema) throws SQLException {
+        try (Connection connection = schema.getConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("SHUTDOWN");
+        }
+    }
+
+    /** 状态只属于这一fixture，不按URL/表存在推断所有权，不跨测试缓存。 */
+    private static final class H2Source extends org.springframework.jdbc.datasource.AbstractDataSource implements AutoCloseable {
+        final JdbcDataSource schema;
+        final DataSource normal;
+        final com.game.common.sql.WriterAuthority boot;
+        private final java.util.concurrent.atomic.AtomicBoolean sealed = new java.util.concurrent.atomic.AtomicBoolean();
+        private volatile boolean closed;
+        boolean routeAttempted, routeReady;
+
+        H2Source(JdbcDataSource schema) throws SQLException {
+            this.schema = schema;
+            final String physicalUrl;
+            try (Connection raw = schema.getConnection()) { requireRawH2(raw); physicalUrl = raw.getMetaData().getURL(); }
+            UUID identity = UUID.randomUUID();
+            byte[] instance = java.nio.ByteBuffer.allocate(16).putLong(identity.getMostSignificantBits()).putLong(identity.getLeastSignificantBits()).array();
+            boot = org.mockito.Mockito.mock(com.game.common.sql.WriterAuthority.class, invocation -> {
+                String method = invocation.getMethod().getName();
+                if (method.equals("verifyPhysical") || method.equals("begin")) {
+                    Connection raw = invocation.getArgument(0); requireRawH2(raw);
+                    if (sealed.get() || !raw.getAutoCommit() || !physicalUrl.equals(raw.getMetaData().getURL()))
+                        throw new SQLException("H2 writer接口替身拒绝已seal、旧事务或另一内存库连接");
+                    // 事务结局仍由真实AuthorityConnection在真实H2执行并恢复autoCommit。
+                    if (method.equals("begin")) raw.setAutoCommit(false);
+                    return null;
+                }
+                if (method.equals("seal")) { sealed.set(true); return null; }
+                if (method.equals("isSealed")) return sealed.get();
+                if (method.equals("instanceId")) return instance.clone();
+                return org.mockito.Mockito.RETURNS_DEFAULTS.answer(invocation);
+            });
+            var credentials = new java.util.Properties(); credentials.setProperty("user", "sa"); credentials.setProperty("password", "");
+            normal = new com.game.common.sql.AuthorityDataSource(schema.getURL(), credentials, boot, false, java.util.List.of());
+        }
+
+        private static void requireRawH2(Connection raw) throws SQLException {
+            if (org.mockito.Mockito.mockingDetails(raw).isMock() || raw.isClosed()
+                    || !"H2".equals(raw.getMetaData().getDatabaseProductName())
+                    || !"SA".equalsIgnoreCase(raw.getMetaData().getUserName()))
+                throw new SQLException("H2 writer接口替身必须收到真实SA物理连接");
+        }
+
+        void requireOpen() throws SQLException { if (closed) throw new SQLException("H2 fixture已关闭", "08003"); }
+        @Override public Connection getConnection() throws SQLException { requireOpen(); return normal.getConnection(); }
+        @Override public Connection getConnection(String user, String password) throws SQLException { requireOpen(); return normal.getConnection(user, password); }
+        @Override public synchronized void close() throws SQLException {
+            if (closed) return;
+            closed = true; boot.seal(); shutdownH2(schema);
+        }
+    }
+
     private static void createH2Tables(DataSource ds) throws SQLException {
         PbMysql registry = MatchRatingTables.registry();
-        try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+        try (Connection c = h2SchemaDataSource(ds).getConnection(); Statement st = c.createStatement()) {
             for (TableSchema table : registry.tables()) {
                 st.execute(h2Ddl(table.createTableSql()));
             }
@@ -148,16 +231,24 @@ public final class RatingTestDatabase implements AutoCloseable {
     }
 
     static void initializeRouteAuthority(DataSource source)throws SQLException {
-        try(var c=source.getConnection();var statement=c.createStatement()){
+        H2Source owner = h2Owner(source);
+        synchronized (owner) {
+            owner.requireOpen();
+            if (owner.routeReady) return;
+            if (owner.routeAttempted) throw new SQLException("本H2 fixture的fresh控制DDL曾失败，拒绝复用部分schema");
+            owner.routeAttempted = true;
+        try(var c=owner.schema.getConnection();var statement=c.createStatement()){
             createPlayerTable(c);
             var resource=new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql");
             String sql;try(var input=resource.getInputStream()){sql=new String(input.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}
             if("H2".equals(c.getMetaData().getDatabaseProductName()))sql=sql.replaceAll("(?i)ENGINE\\s*=\\s*InnoDB[^;]*","");
             org.springframework.jdbc.datasource.init.ScriptUtils.executeSqlScript(c,new org.springframework.core.io.support.EncodedResource(new org.springframework.core.io.ByteArrayResource(sql.getBytes(java.nio.charset.StandardCharsets.UTF_8))));
-            try(var check=c.createStatement();var rows=check.executeQuery("SELECT COUNT(*) FROM route_meta")){rows.next();if(rows.getInt(1)!=0)return;}
+            try(var check=c.createStatement();var rows=check.executeQuery("SELECT COUNT(*) FROM route_meta")){rows.next();if(rows.getInt(1)!=0)throw new SQLException("fresh H2 route_meta必须为空");}
             String principal;try(var identity=c.createStatement();var rows=identity.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new SQLException("缺H2 schema主体");principal=rows.getString(1);}
             com.game.common.player.RouteAuthorityInitializer.initialize(c,UUID.randomUUID().toString(),java.util.List.of(1),principal);
         }catch(java.io.IOException failure){throw new SQLException("正式路由测试DDL不可读",failure);}
+            owner.routeReady = true;
+        }
     }
 
     /**
@@ -223,7 +314,7 @@ public final class RatingTestDatabase implements AutoCloseable {
     }
 
     public void update(String sql, Object... args) {
-        try (Connection c = authority==null?dataSource.getConnection():authority.schemaConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+        try (Connection c = authority==null?h2SchemaDataSource(dataSource).getConnection():authority.schemaConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             for (int i = 0; i < args.length; i++) {
                 ps.setObject(i + 1, args[i]);
             }
@@ -254,6 +345,6 @@ public final class RatingTestDatabase implements AutoCloseable {
     /** 真 MySQL：关连接池并删掉一次性库。H2：把内存库清掉。 */
     @Override public void close(){
         if(authority!=null){((DruidDataSource)dataSource).close();try{authority.close();}catch(SQLException failure){throw new IllegalStateException("评分fixture归属清理未确认",failure);}return;}
-        try(Connection connection=dataSource.getConnection();Statement statement=connection.createStatement()){statement.execute("SHUTDOWN");}catch(SQLException failure){throw new IllegalStateException("H2评分fixture关闭未确认",failure);}
+        try { h2Owner(dataSource).close(); } catch(SQLException failure){throw new IllegalStateException("H2评分fixture关闭未确认",failure);}
     }
 }

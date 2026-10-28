@@ -86,6 +86,7 @@ public class PlayerSqlAuthorityAutoConfigurationTest {
 
     private static DruidDataSource authorityDataSource(boolean initializeSchema) {
         var pool = new DruidDataSource();
+        pool.setUsername("sa");
         pool.setUrl("jdbc:h2:mem:player_sql_authority_" + java.util.UUID.randomUUID()
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE");
         pool.setMaxActive(1);

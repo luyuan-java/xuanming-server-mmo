@@ -256,11 +256,61 @@ class PlayerTradeStoreTest {
         }
     }
 
+    /** 仅H2状态机回归替身外部writer资格；不发grant，真实SQL/事务与Fence包装仍由生产代码执行。 */
+    static final class H2Authority {
+        private final JdbcDataSource schema;
+        private final DataSource normal;
+        private final com.game.common.sql.WriterAuthority authority;
+        private final java.util.concurrent.atomic.AtomicBoolean sealed = new java.util.concurrent.atomic.AtomicBoolean();
+
+        H2Authority(JdbcDataSource schema) throws java.sql.SQLException {
+            this.schema = schema;
+            final String physicalUrl;
+            try (Connection raw = schema.getConnection()) {
+                requireRawH2(raw);
+                physicalUrl = raw.getMetaData().getURL();
+            }
+            authority = org.mockito.Mockito.mock(com.game.common.sql.WriterAuthority.class, invocation -> {
+                String method = invocation.getMethod().getName();
+                if (method.equals("verifyPhysical") || method.equals("begin")) {
+                    Connection raw = invocation.getArgument(0);
+                    requireRawH2(raw);
+                    if (sealed.get() || !raw.getAutoCommit() || !physicalUrl.equals(raw.getMetaData().getURL())) {
+                        throw new java.sql.SQLException("H2外部writer接口替身拒绝已seal、旧事务或另一内存库连接");
+                    }
+                    // AuthorityConnection.finish仍对真实H2执行commit/rollback并恢复autoCommit。
+                    if (method.equals("begin")) raw.setAutoCommit(false);
+                    return null;
+                }
+                if (method.equals("seal")) { sealed.set(true); return null; }
+                if (method.equals("isSealed")) return sealed.get();
+                return org.mockito.Mockito.RETURNS_DEFAULTS.answer(invocation);
+            });
+            var credentials = new java.util.Properties();
+            credentials.setProperty("user", "sa"); credentials.setProperty("password", "");
+            normal = new com.game.common.sql.AuthorityDataSource(schema.getURL(), credentials, authority, false, List.of());
+        }
+
+        private static void requireRawH2(Connection raw) throws java.sql.SQLException {
+            if (org.mockito.Mockito.mockingDetails(raw).isMock() || raw.isClosed()
+                    || !"H2".equals(raw.getMetaData().getDatabaseProductName())
+                    || !"SA".equalsIgnoreCase(raw.getMetaData().getUserName())) {
+                throw new java.sql.SQLException("H2外部writer接口替身仅接受真实SA物理连接");
+            }
+        }
+
+        DataSource normalSource() { return normal; }
+        DataSource schemaSource() { return schema; }
+        void seal() { authority.seal(); }
+    }
+
     static final class Fixture implements AutoCloseable {
         final String endpoint = System.getProperty("game.it.mysql");
         final String database = "playertrade" + UUID.randomUUID().toString().replace("-", "");
         final DataSource source;
         AuthoritySqlFixture fixture;
+        private JdbcDataSource memory;
+        private H2Authority h2Authority;
         final JdbcTemplate sql;
         final DataSourceTransactionManager manager;
         final PlayerStore players;
@@ -271,8 +321,10 @@ class PlayerTradeStoreTest {
             try {
                 if (endpoint == null) {
                     var h2 = new JdbcDataSource();
+                    h2.setUser("sa"); h2.setPassword(""); memory = h2;
                     h2.setURL("jdbc:h2:mem:" + database + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=5000");
-                    source = h2;
+                    h2Authority = new H2Authority(h2);
+                    source = h2Authority.normalSource();
                 } else {
                     fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(endpoint,
                             System.getProperty("game.it.mysql.user", "root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""),
@@ -289,8 +341,8 @@ class PlayerTradeStoreTest {
                 }
                 if(fixture==null){
                     new ResourceDatabasePopulator(new ClassPathResource("db/game-route-authority-schema.sql"),new ClassPathResource("db/game-player-schema.sql"),
-                            new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(source);
-                    try(var connection=source.getConnection();var statement=connection.createStatement();var identity=statement.executeQuery("SELECT CURRENT_USER()")){
+                            new ClassPathResource("db/role-pending-fence-fixture.sql")).execute(memory);
+                    try(var connection=memory.getConnection();var statement=connection.createStatement();var identity=statement.executeQuery("SELECT CURRENT_USER()")){
                         if(!identity.next())throw new java.sql.SQLException("H2 schema主体缺失");
                         com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1,2,3,7,9,11),identity.getString(1));
                     }
@@ -299,7 +351,7 @@ class PlayerTradeStoreTest {
                     if (endpoint != null) StrongTiDbConnectionPolicy.verify(connection, true);
                     PlayerSqlAuthorityAutoConfiguration.verifyTradeSchema(connection);
                 }
-                sql = new JdbcTemplate(fixture==null?source:fixture.schemaDataSource()); manager = new DataSourceTransactionManager(source);
+                sql = new JdbcTemplate(fixture==null?h2Authority.schemaSource():fixture.schemaDataSource()); manager = new DataSourceTransactionManager(source);
                 var config = new org.apache.ibatis.session.Configuration(); config.setMapUnderscoreToCamelCase(true); config.addMapper(PlayerMapper.class);
                 var factory = new SqlSessionFactoryBean(); factory.setDataSource(source); factory.setConfiguration(config);
                 mapper = new SqlSessionTemplate(factory.getObject()).getMapper(PlayerMapper.class);
@@ -308,6 +360,7 @@ class PlayerTradeStoreTest {
             } catch (Exception | Error failure) {
                 if (pool != null) pool.close();
                 if(fixture!=null)try{fixture.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}
+                if(memory!=null)try{if(h2Authority!=null)h2Authority.seal();new JdbcTemplate(memory).execute("SHUTDOWN");}catch(Exception|Error cleanup){failure.addSuppressed(cleanup);}
                 throw failure;
             }
         }
@@ -322,10 +375,10 @@ class PlayerTradeStoreTest {
         }
         PlayerRow row(long player) { return players.findPlayer(player).orElseThrow(); }
         int count(String table) { return sql.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class); }
-        Connection schemaConnection() throws java.sql.SQLException {return fixture==null?source.getConnection():fixture.schemaConnection();}
+        Connection schemaConnection() throws java.sql.SQLException {return fixture==null?memory.getConnection():fixture.schemaConnection();}
         @Override public void close() throws Exception {
             if (source instanceof DruidDataSource pool) { pool.close(); fixture.close(); }
-            else sql.execute("SHUTDOWN");
+            else { h2Authority.seal(); sql.execute("SHUTDOWN"); }
         }
     }
 }

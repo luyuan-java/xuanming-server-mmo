@@ -40,10 +40,65 @@ final class InboxRouteFenceTest {
                 "localhost:24000", "192.168.1.2:24000", "127.0.0.1:24000/game", "127.0.0.1:24000?x=y"))
             assertThrows(IllegalArgumentException.class,()->requireEndpoint(bad));
     }
+    /** 仅H2状态机回归替身外部writer资格；不发grant，真实SQL/事务与Fence包装仍由生产代码执行。 */
+    private static final class H2Authority implements AutoCloseable {
+        private final JdbcDataSource schema;
+        private final DataSource normal;
+        private final com.game.common.sql.WriterAuthority authority;
+        private final java.util.concurrent.atomic.AtomicBoolean sealed = new java.util.concurrent.atomic.AtomicBoolean();
+        private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+
+        H2Authority(JdbcDataSource schema) throws java.sql.SQLException {
+            this.schema = schema;
+            final String physicalUrl;
+            try (Connection raw = schema.getConnection()) {
+                requireRawH2(raw);
+                physicalUrl = raw.getMetaData().getURL();
+            }
+            authority = org.mockito.Mockito.mock(com.game.common.sql.WriterAuthority.class, invocation -> {
+                String method = invocation.getMethod().getName();
+                if (method.equals("verifyPhysical") || method.equals("begin")) {
+                    Connection raw = invocation.getArgument(0);
+                    requireRawH2(raw);
+                    if (sealed.get() || !raw.getAutoCommit() || !physicalUrl.equals(raw.getMetaData().getURL())) {
+                        throw new java.sql.SQLException("H2外部writer接口替身拒绝已seal、旧事务或另一内存库连接");
+                    }
+                    // AuthorityConnection.finish仍对真实H2执行commit/rollback并恢复autoCommit。
+                    if (method.equals("begin")) raw.setAutoCommit(false);
+                    return null;
+                }
+                if (method.equals("seal")) { sealed.set(true); return null; }
+                if (method.equals("isSealed")) return sealed.get();
+                return org.mockito.Mockito.RETURNS_DEFAULTS.answer(invocation);
+            });
+            var credentials = new java.util.Properties();
+            credentials.setProperty("user", "sa"); credentials.setProperty("password", "");
+            normal = new com.game.common.sql.AuthorityDataSource(schema.getURL(), credentials, authority, false, java.util.List.of());
+        }
+
+        private static void requireRawH2(Connection raw) throws java.sql.SQLException {
+            if (org.mockito.Mockito.mockingDetails(raw).isMock() || raw.isClosed()
+                    || !"H2".equals(raw.getMetaData().getDatabaseProductName())
+                    || !"SA".equalsIgnoreCase(raw.getMetaData().getUserName())) {
+                throw new java.sql.SQLException("H2外部writer接口替身仅接受真实SA物理连接");
+            }
+        }
+
+        DataSource normalSource() { return normal; }
+        DataSource schemaSource() { if(closed.get())throw new IllegalStateException("H2测试fixture已关闭");return schema; }
+        void seal() { authority.seal(); }
+        @Override public synchronized void close() throws java.sql.SQLException {
+            if(closed.getAndSet(true))return;
+            seal();
+            try(Connection raw=schema.getConnection();var statement=raw.createStatement()){statement.execute("SHUTDOWN");}
+        }
+    }
+
     static final class Fixture implements AutoCloseable {
         final DataSource source;
         DruidDataSource nativePool;
         AuthoritySqlFixture fixture;
+        private H2Authority h2Authority;
         final SimpleMeterRegistry metrics=new SimpleMeterRegistry();
         final AuthorityJdbc jdbc;
         Fixture() throws Exception {
@@ -52,8 +107,10 @@ final class InboxRouteFenceTest {
                 throw new IllegalStateException("真库门禁缺少inbox.it.tidb，不得降级成H2");
             if(endpoint.isEmpty()) {
                 var memory=new JdbcDataSource();
+                memory.setUser("sa");memory.setPassword("");
                 memory.setURL("jdbc:h2:mem:inbox_route_"+UUID.randomUUID()+";MODE=MySQL;DB_CLOSE_DELAY=-1");
-                source=memory;
+                try { h2Authority=new H2Authority(memory);source=h2Authority.normalSource(); }
+                catch(Exception|Error failure){try{if(h2Authority!=null)h2Authority.seal();new org.springframework.jdbc.core.JdbcTemplate(memory).execute("SHUTDOWN");}catch(Exception|Error cleanup){failure.addSuppressed(cleanup);}throw failure;}
             } else {
                 requireEndpoint(endpoint);
                 String password=System.getenv().getOrDefault("GAME_TEST_MYSQL_PASSWORD", "");
@@ -72,7 +129,7 @@ final class InboxRouteFenceTest {
                 }
             }
             try {
-            if(nativePool==null) try(var connection=source.getConnection();var statement=connection.createStatement()) {
+            if(nativePool==null) try(var connection=h2Authority.schemaSource().getConnection();var statement=connection.createStatement()) {
                 try(var input=RouteAuthorityInitializer.class.getResourceAsStream("/db/game-route-authority-schema.sql")) {
                     assertNotNull(input);
                     String ddl=new String(input.readAllBytes(),StandardCharsets.UTF_8).replaceAll("(?i)ENGINE\\s*=\\s*InnoDB[^;]*","");
@@ -88,7 +145,7 @@ final class InboxRouteFenceTest {
                 throw failure;
             }
         }
-        Connection schemaConnection() throws SQLException {return fixture==null?source.getConnection():fixture.schemaConnection();}
+        Connection schemaConnection() throws SQLException {return fixture==null?h2Authority.schemaSource().getConnection():fixture.schemaConnection();}
         private static void createDomain(Connection connection,java.sql.Statement statement)throws SQLException {
                 statement.execute("CREATE TABLE player(player_id BIGINT PRIMARY KEY,zone_id INT NOT NULL,trade_listing_id BIGINT NOT NULL,account VARCHAR(64) NOT NULL,owner_revision BIGINT NOT NULL,owner_epoch BIGINT NOT NULL,owner_released INT NOT NULL)");
                 statement.execute("INSERT INTO player VALUES(1,7,0,'fixture-owner',1,1,0)");
@@ -102,7 +159,7 @@ final class InboxRouteFenceTest {
         boolean clear() throws SQLException {return InboxStore.clearNotifyDue(Deadline.after(3000),jdbc,1,DOMAIN,2);}
         @Override public void close() throws SQLException {
             metrics.close();
-            if(nativePool==null) { sql("DROP ALL OBJECTS");return; }
+            if(nativePool==null) { h2Authority.close();return; }
             nativePool.close();
             if(fixture!=null)fixture.close();
         }

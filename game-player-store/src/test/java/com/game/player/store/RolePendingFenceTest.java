@@ -20,11 +20,11 @@ class RolePendingFenceTest {
         try(var f=new PlayerTradeStoreTest.Fixture()){
             f.player(1,"seller");f.sql.update("INSERT INTO trade_asset_op VALUES(1,1,2,0,0)");
             var tx=new org.springframework.transaction.support.TransactionTemplate(f.manager);
-            java.util.function.Supplier<Boolean> blocked=()->tx.execute(s->f.sql.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>)c->{com.game.common.player.PlayerRouteAuthority.lock(c,java.util.List.of(1L),3);return RolePendingFence.economicBlocked(c,1);}));
+            java.util.function.Supplier<Boolean> blocked=()->tx.execute(s->new org.springframework.jdbc.core.JdbcTemplate(f.source).execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>)c->{com.game.common.player.PlayerRouteAuthority.lock(c,java.util.List.of(1L),3);return RolePendingFence.economicBlocked(c,1);}));
             assertTrue(blocked.get());f.sql.update("UPDATE trade_asset_op SET business_consumed=1,receipt_ack_pending=1");assertTrue(blocked.get());
             f.sql.update("UPDATE trade_asset_op SET receipt_ack_pending=0,status=5");assertTrue(blocked.get());f.sql.update("UPDATE trade_asset_op SET status=2");assertFalse(blocked.get());
             f.sql.update("INSERT INTO trade_listing VALUES(17,1,2)");assertTrue(blocked.get());
-            Boolean homeClear=tx.execute(s->f.sql.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>)c->{com.game.common.player.PlayerRouteAuthority.lock(c,java.util.List.of(1L),3);return !RolePendingFence.economicBlockedForHomeMove(c,1);}));
+            Boolean homeClear=tx.execute(s->new org.springframework.jdbc.core.JdbcTemplate(f.source).execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>)c->{com.game.common.player.PlayerRouteAuthority.lock(c,java.util.List.of(1L),3);return !RolePendingFence.economicBlockedForHomeMove(c,1);}));
             assertTrue(Boolean.TRUE.equals(homeClear));
         }
     }

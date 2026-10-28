@@ -18,9 +18,9 @@ import org.junit.jupiter.api.Test;
 /** 专用隔离fixture必须预置未来retry_ms的未APPLIED个人来源；不能只数当前due列表。 */
 class MatchMaintenanceDrainTiDbTest {
     @Test void futureRetryAndUnappliedSourcesStillBlockTheRealSqlDrain() throws Exception {
-        String root = System.getProperty("game.it.mysql");
+        String root = System.getProperty("game.it.authority.jdbc",System.getProperty("game.it.mysql"));
         if (root == null || root.isBlank())
-            throw new IllegalArgumentException("必须通过game.it.mysql显式指定本机TiDB根URL");
+            throw new IllegalArgumentException("必须通过game.it.authority.jdbc（兼容game.it.mysql）显式指定本机TiDB根URL");
         var options = AuthoritySqlFixture.Options.fromEnvironment(root,
                 System.getProperty("game.it.mysql.user", "root"),
                 System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""),
