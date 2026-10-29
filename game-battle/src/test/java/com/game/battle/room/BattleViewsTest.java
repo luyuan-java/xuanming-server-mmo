@@ -6,6 +6,7 @@ import com.game.proto.BattleActorState;
 import com.game.proto.BattleBuffEntry;
 import com.game.proto.BattleItemEntry;
 import com.game.proto.BattleStateS2C;
+import com.game.proto.CombatAttributes;
 import com.game.proto.TurnResultS2C;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -23,6 +24,7 @@ class BattleViewsTest {
         return BattleActorState.newBuilder()
                 .setActorId(actorId)
                 .setOwnerPlayerId(owner)
+                .setCombat(CombatAttributes.newBuilder().setCounterRate(75).setResistAllAilment(80))
                 .putSkillCooldownRounds(cooldownSkill, 2)
                 .addBuffs(BattleBuffEntry.newBuilder().setBuffId(actorId).setBuffTableId(201).setRemainRounds(2))
                 .build();
@@ -61,6 +63,7 @@ class BattleViewsTest {
         assertThat(find(view, MONSTER).getSkillCooldownRoundsMap()).isEmpty();
         for (BattleActorState actor : view.getActorsList()) {
             assertThat(actor.getBuffsCount()).as("buff 不裁剪").isEqualTo(1);
+            assertThat(actor.hasCombat()).as("本人和宝宝也不在战斗状态下发装备概率").isFalse();
         }
         assertThat(view.getSelfItemsList()).as("先清空再只填本人的").containsExactlyElementsOf(items);
         assertThat(view.getBattleId()).isEqualTo(9);
@@ -74,6 +77,7 @@ class BattleViewsTest {
         for (BattleActorState actor : view.getActorsList()) {
             assertThat(actor.getSkillCooldownRoundsMap()).isEmpty();
             assertThat(actor.getBuffsCount()).isEqualTo(1);
+            assertThat(actor.hasCombat()).isFalse();
         }
         assertThat(view.getSelfItemsList()).isEmpty();
     }
@@ -96,6 +100,7 @@ class BattleViewsTest {
         BattleViews.forObserver(original);
 
         assertThat(original).isEqualTo(copy);
+        assertThat(original.getActorsList()).allMatch(BattleActorState::hasCombat);
     }
 
     @Test
@@ -114,5 +119,6 @@ class BattleViewsTest {
         assertThat(personal.getRoundIndex()).isEqualTo(2);
         assertThat(find(personal.getState(), A).getSkillCooldownRoundsMap()).isEmpty();
         assertThat(find(personal.getState(), B).getSkillCooldownRoundsMap()).containsEntry(103, 2);
+        assertThat(personal.getState().getActorsList()).noneMatch(BattleActorState::hasCombat);
     }
 }

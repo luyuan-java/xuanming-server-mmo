@@ -39,6 +39,9 @@ public final class RecordingSink implements ClientSink {
     private final List<Object> events = new ArrayList<>();
     private boolean transferWritable = true;
     private boolean redirectWritable = true;
+    private int pendingTransferWrites;
+    @Override public int pendingTransferWrites() { return pendingTransferWrites; }
+    public void setPendingTransferWrites(int count) { pendingTransferWrites = count; }
 
     @Override
     public boolean playerRedirect(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch,

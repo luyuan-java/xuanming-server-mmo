@@ -16,8 +16,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param channelCountByConfig 按 scene_config_id 覆盖种子（基线 WorldChannelCountByConfId，config.go:100-107、:333-351）；值 ≤0 忽略、&gt;999 拒启
  * @param coverage             频道放置模式（D6）：{@code per-node}（5.1 缺省，每个活节点对每张 World 图至少 1 个 ACTIVE 频道）或 {@code hash}
  * @param tick                 领导者一拍的间隔（基线负载刷新周期 LoadReportInterval = 5 s，load_reporter.go:31）
- * @param deadNodeGrace        计划引用的节点在目录里缺席满这么久，删掉它名下全部记录、由补建重铺容量（D12；数值同基线再入屏障 20 s，
- *                             constants/reentry_barrier.go:69，但这里只防快速重启抖动，不是屏障）
+ * @param deadNodeGrace        计划引用的节点缺席满此时长且租约明确不存在，才重铺容量；不改变 SQL 玩家归属
  * @param leaderLockTtl        分 zone 领导锁 TTL（基线 LeaderLockTTLSeconds = 30，config.go:65-74）；续期 TTL/3、有效期 2/3 TTL
  * @param leaderEligible       是否参与竞选（基线 LeaderEligible，config.go:80-86）；false 时本副本只做数据面（分配）
  * @param cleanupOrphans       World 表里已没有的图：其 ACTIVE 频道转 DRAINING(ORPHAN)、期望数 / 冷却字段删除（基线 CleanupOrphanChannelsOnStartup，config.go:232-240）
@@ -25,6 +24,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param loginOwnerClaimWait  login 的归属夺取等待（{@code game.login.owner-claim-wait}，缺省 3 s）的镜像，只用于上一条的启动校验
  * @param rebalance            择机迁移（只在 {@code coverage=hash} 下执行，§4.8）
  * @param autoscale            自动扩缩容（缺省关，§4.7）；其中 {@code drain-timeout} 不论开关都生效（排空推进与扩缩容开关无关，D19）
+ * @param stuckNodeGrace       缺席但租约仍在/未知的容量恢复长宽限，缺省120s，必须大于短宽限
+ * @param crossNodeRelocation  hash覆盖允许无本地兄弟的有玩家频道跨节点改派；缺省开，false恢复原限制
  */
 @ConfigurationProperties("game.scene-manager.world")
 public record WorldChannelProperties(
@@ -39,7 +40,9 @@ public record WorldChannelProperties(
         Duration reservationTtl,
         Duration loginOwnerClaimWait,
         Rebalance rebalance,
-        Autoscale autoscale) {
+        Autoscale autoscale,
+        Duration stuckNodeGrace,
+        Boolean crossNodeRelocation) {
 
     private static final String PREFIX = "game.scene-manager.world.";
 
@@ -62,6 +65,11 @@ public record WorldChannelProperties(
         coverage = coverage == null ? Coverage.PER_NODE : coverage;
         tick = positiveOr(tick, Duration.ofSeconds(5), "tick");
         deadNodeGrace = nonNegativeOr(deadNodeGrace, Duration.ofSeconds(20), "dead-node-grace");
+        stuckNodeGrace = positiveOr(stuckNodeGrace, Duration.ofSeconds(120), "stuck-node-grace");
+        if (deadNodeGrace.compareTo(Duration.ofSeconds(5)) < 0 || stuckNodeGrace.compareTo(deadNodeGrace) <= 0) {
+            throw new IllegalArgumentException(PREFIX + "stuck-node-grace 必须大于 dead-node-grace，后者至少为目录发布周期 5s");
+        }
+        crossNodeRelocation = crossNodeRelocation == null || crossNodeRelocation;
         leaderLockTtl = positiveOr(leaderLockTtl, WorldChannels.DEFAULT_LEADER_LOCK_TTL, "leader-lock-ttl");
         if (leaderLockTtl.compareTo(Duration.ofSeconds(1)) < 0) {
             throw new IllegalArgumentException(PREFIX + "leader-lock-ttl 不能小于 1s: " + leaderLockTtl);
@@ -78,7 +86,7 @@ public record WorldChannelProperties(
 
     /** 缺省配置（单测与不配任何 {@code game.scene-manager.world.*} 时）。 */
     public static WorldChannelProperties defaults() {
-        return new WorldChannelProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+        return new WorldChannelProperties(null, null, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     /**

@@ -23,6 +23,8 @@ message GateNodeInfo {
   // 读方用它在「同一个客户端地址有多条目录条目」（进程重启换了节点号，旧条目还没过期）时只留最新的一条。
   // 不认识这个字段的旧版本 gate 写的条目读出来是 0 = 最旧。
   uint64 started_at_ms = 8;
+  // 当前节点号租约代次，目录发布围栏拒绝旧持有者的迟到刷新；旧版本为 0。
+  uint64 lease_epoch = 9;
 }
 
 message SceneNodeInfo {
@@ -48,6 +50,10 @@ message SceneNodeInfo {
   // 本节点是否消费玩家持久收件箱（game.scene.inbox.consumer-enabled，git 跟踪的配置；mmorpg player-inbox-service.md §3.3）。
   // game-inbox 入箱前的写前门禁读它：任一在线 scene 节点为 false（含不认识这个字段的旧版本节点）就拒绝入箱，不让条目停在没人消费的箱里。
   bool inbox_consumer_enabled = 11;
+  // 与 scenes 在同一逻辑线程快照中取得；保留目录可见性，但不再承接新玩家或频道。
+  bool evacuating = 12;
+  // 本实例当前持有的节点号租约代次，换代连接不得复用旧持有者。
+  uint64 lease_epoch = 13;
 }
 
 message SceneEntry {

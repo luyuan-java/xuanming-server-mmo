@@ -27,6 +27,11 @@ public final class KafkaTopicAdmin implements TopicAdmin {
 
     private final Admin admin;
 
+    /** 同包测试注入真正管理 API 的替身，覆盖元数据适配；生产使用显式地址构造。 */
+    KafkaTopicAdmin(Admin admin) {
+        this.admin = java.util.Objects.requireNonNull(admin, "admin");
+    }
+
     public KafkaTopicAdmin(String bootstrapServers, String clientId) {
         Properties props = new Properties();
         props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);

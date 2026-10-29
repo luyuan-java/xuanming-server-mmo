@@ -25,6 +25,7 @@ import com.game.match.placement.PlacementStore;
 import com.game.match.precheck.MemberPrecheck;
 import com.game.match.proto.BattlePlacement;
 import com.game.match.spectate.ObserverDialer;
+import com.game.match.spectate.LocalObserverOperation;
 import com.game.match.spectate.SpectateRules;
 import com.game.match.rating.RatingReader;
 import com.game.match.ticket.TicketHealing;
@@ -401,6 +402,12 @@ class TestDoublesTest {
 
     // ================================================================ 观众 RPC 的替身（批次 6.5）
 
+    private static LocalObserverOperation observerOriginal(BattlePlacement placement, long observerId) {
+        return LocalObserverOperation.create(placement, observerId,
+                BattleRouting.newBuilder().setZoneId(2).setGateNodeId(1).setGateInstanceId("gate-z2").setSessionId(9).build(),
+                "观众", new java.util.UUID(placement.getBattleId(), observerId).toString(), ManualRedisClock.DEFAULT_START_MS);
+    }
+
     private static AddObserverRequest addRequest(long battleId, long observerId) {
         return AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observerId)
                 .setRouting(BattleRouting.newBuilder().setZoneId(2).setGateNodeId(1).setGateInstanceId("gate-z2").setSessionId(9)).setObserverName("acc")
@@ -414,9 +421,9 @@ class TestDoublesTest {
         BattlePlacement old = placement(76, 1, "a");
         BattlePlacement target = placement(77, 2, "b");
 
-        ObserverDialer.Outcome removed = dialer.remove(old, 1001, SpectateRules.REASON_REWATCH, Duration.ofMillis(1_800), Deadline.after(1_800));
+        ObserverDialer.Outcome removed = dialer.remove(observerOriginal(old, 1001), SpectateRules.REASON_REWATCH, Duration.ofMillis(1_800), Deadline.after(1_800));
         ObserverDialer.Outcome added = dialer.add(target, addRequest(77, 1001), Duration.ofSeconds(3), Deadline.after(4_000));
-        ObserverDialer.Outcome async = dialer.removeAsync(target, 1001, SpectateRules.REASON_CONCURRENT_QUEUE).get(1, TimeUnit.SECONDS);
+        ObserverDialer.Outcome async = dialer.removeAsync(observerOriginal(target, 1001), SpectateRules.REASON_CONCURRENT_QUEUE).get(1, TimeUnit.SECONDS);
 
         assertThat(List.of(removed, added, async)).containsOnly(new ObserverDialer.Outcome.Replied(0));
         assertThat(dialer.calls).extracting(FakeObserverDialer.Call::kind)
@@ -457,11 +464,11 @@ class TestDoublesTest {
         assertThat(dialer.clearAdd(78).add(p78, addRequest(78, 1001), Duration.ofSeconds(3), Deadline.after(3_000)))
                 .isEqualTo(new ObserverDialer.Outcome.Replied(0));
 
-        assertThat(dialer.remove(p77, 1001, "rewatch", Duration.ofSeconds(3), Deadline.after(3_000))).isInstanceOf(ObserverDialer.Outcome.NotDelivered.class);
-        assertThat(dialer.removeAsync(p77, 1001, "concurrent_queue").get(1, TimeUnit.SECONDS)).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
+        assertThat(dialer.remove(observerOriginal(p77, 1001), "rewatch", Duration.ofSeconds(3), Deadline.after(3_000))).isInstanceOf(ObserverDialer.Outcome.NotDelivered.class);
+        assertThat(dialer.removeAsync(observerOriginal(p77, 1001), "concurrent_queue").get(1, TimeUnit.SECONDS)).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
         dialer.onRemove(77, new ObserverDialer.Outcome.Dead());
-        assertThat(dialer.remove(p77, 1001, "enter_gather", Duration.ofSeconds(3), Deadline.after(3_000))).isInstanceOf(ObserverDialer.Outcome.Dead.class);
-        assertThat(dialer.clearRemove(77).remove(p77, 1001, "enter_gather", Duration.ofSeconds(3), Deadline.after(3_000)))
+        assertThat(dialer.remove(observerOriginal(p77, 1001), "enter_gather", Duration.ofSeconds(3), Deadline.after(3_000))).isInstanceOf(ObserverDialer.Outcome.Dead.class);
+        assertThat(dialer.clearRemove(77).remove(observerOriginal(p77, 1001), "enter_gather", Duration.ofSeconds(3), Deadline.after(3_000)))
                 .isEqualTo(new ObserverDialer.Outcome.Replied(0));
     }
 
@@ -475,7 +482,7 @@ class TestDoublesTest {
         BattlePlacement placement = placement(77, 1, "a");
 
         ObserverDialer.Outcome add = dialer.add(placement, addRequest(77, 1001), Duration.ofSeconds(3), Deadline.after(0));
-        ObserverDialer.Outcome remove = dialer.remove(placement, 1001, "rewatch", Duration.ofSeconds(3), Deadline.after(0));
+        ObserverDialer.Outcome remove = dialer.remove(observerOriginal(placement, 1001), "rewatch", Duration.ofSeconds(3), Deadline.after(0));
 
         assertThat(add).isInstanceOf(ObserverDialer.Outcome.NotDelivered.class);
         assertThat(remove).isInstanceOf(ObserverDialer.Outcome.NotDelivered.class);
@@ -495,14 +502,14 @@ class TestDoublesTest {
         dialer.beforeRemove = call -> events.add("清退途中:" + call.reason());
 
         dialer.add(placement, addRequest(77, 1001), Duration.ofSeconds(3), Deadline.after(3_000));
-        dialer.remove(placement, 1001, "rewatch", Duration.ofSeconds(3), Deadline.after(3_000));
+        dialer.remove(observerOriginal(placement, 1001), "rewatch", Duration.ofSeconds(3), Deadline.after(3_000));
         assertThat(events).containsExactly("observer.add:77:1001", "世界变了:77", "observer.remove:77:1001:rewatch", "清退途中:rewatch");
 
         dialer.hangAdd().hangRemove();
         long started = System.nanoTime();
         ObserverDialer.Outcome byTimeout = dialer.add(placement, addRequest(77, 1001), Duration.ofMillis(120), Deadline.after(10_000));
         // 硬截止给 1 s：从创建截止到进替身之间即使卡住几百毫秒，也不会被判成「硬截止已到，没有发出调用」（NotDelivered）那一支
-        ObserverDialer.Outcome byHardStop = dialer.remove(placement, 1001, "rewatch", Duration.ofSeconds(30), Deadline.after(1_000));
+        ObserverDialer.Outcome byHardStop = dialer.remove(observerOriginal(placement, 1001), "rewatch", Duration.ofSeconds(30), Deadline.after(1_000));
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
         assertThat(byTimeout).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
         assertThat(byHardStop).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
@@ -512,7 +519,7 @@ class TestDoublesTest {
                 () -> dialer.add(placement, addRequest(77, 1001), Duration.ofSeconds(20), Deadline.after(20_000)));
         dialer.releaseAdd().releaseRemove();
         assertThat(blocked.get(5, TimeUnit.SECONDS)).as("放行之后给出脚本里的结局").isEqualTo(new ObserverDialer.Outcome.Replied(0));
-        assertThat(dialer.remove(placement, 1001, "rewatch", Duration.ofSeconds(3), Deadline.after(3_000))).isEqualTo(new ObserverDialer.Outcome.Replied(0));
+        assertThat(dialer.remove(observerOriginal(placement, 1001), "rewatch", Duration.ofSeconds(3), Deadline.after(3_000))).isEqualTo(new ObserverDialer.Outcome.Replied(0));
     }
 
     @Test
@@ -521,8 +528,8 @@ class TestDoublesTest {
         BattlePlacement placement = placement(77, 1, "a");
         dialer.hangRemoveAsync().nextRemove(new ObserverDialer.Outcome.Unknown("慢"));
 
-        CompletableFuture<ObserverDialer.Outcome> first = dialer.removeAsync(placement, 1001, "concurrent_queue");
-        CompletableFuture<ObserverDialer.Outcome> second = dialer.removeAsync(placement, 1002, "concurrent_queue");
+        CompletableFuture<ObserverDialer.Outcome> first = dialer.removeAsync(observerOriginal(placement, 1001), "concurrent_queue");
+        CompletableFuture<ObserverDialer.Outcome> second = dialer.removeAsync(observerOriginal(placement, 1002), "concurrent_queue");
 
         assertThat(first).isNotDone();
         assertThat(second).isNotDone();
@@ -530,7 +537,7 @@ class TestDoublesTest {
         dialer.releaseRemoveAsync();
         assertThat(first.get(1, TimeUnit.SECONDS)).isInstanceOf(ObserverDialer.Outcome.Unknown.class);
         assertThat(second.get(1, TimeUnit.SECONDS)).isEqualTo(new ObserverDialer.Outcome.Replied(0));
-        assertThat(dialer.removeAsync(placement, 1003, "concurrent_queue")).as("放行之后恢复成立即完成").isDone().isNotCompletedExceptionally();
+        assertThat(dialer.removeAsync(observerOriginal(placement, 1003), "concurrent_queue")).as("放行之后恢复成立即完成").isDone().isNotCompletedExceptionally();
     }
 
     // ================================================================ 推送

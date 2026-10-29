@@ -28,6 +28,13 @@ import org.slf4j.LoggerFactory;
  */
 public final class RedissonWorldChannelStore implements WorldChannelStore {
 
+    @Override
+    public boolean sceneNodeLeaseHeld(int zoneId, int nodeId) {
+        // 空字符串或损坏值也是存在的持有者；只有 GET 的 null 是明确缺失。
+        return redis.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_WRITE,"return redis.call('GET',KEYS[1])",
+                RScript.ReturnType.VALUE,List.of(redisKeys.nodeId(com.game.discovery.NodeTypes.SCENE, zoneId, nodeId))) != null;
+    }
+
     private static final Logger log = LoggerFactory.getLogger(RedissonWorldChannelStore.class);
 
     /** Redis TIME → 毫秒（脚本片段；t[1] 秒、t[2] 微秒）。 */
@@ -38,6 +45,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
 
     /** 拉取（只读）。KEYS: ch, ver。回 {@code {ver, ch 字段, ch 值, …}}。 */
     static final String PLAN = """
+            if redis.call('EXISTS',KEYS[3])==1 then return {redis.call('GET',KEYS[2]) or '0'} end
             local ch = redis.call('HGETALL', KEYS[1])
             local out = {redis.call('GET', KEYS[2]) or '0'}
             for i = 1, #ch do out[#out + 1] = ch[i] end
@@ -49,6 +57,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
      * 回 {@code {ver, now_ms, #ch, #desired, #cooldown, ch…, desired…, cooldown…}}（平铺，免得依赖嵌套数组的解码）。
      */
     static final String SNAPSHOT = NOW_MS + """
+            if redis.call('EXISTS',KEYS[5])==1 then return {redis.call('GET',KEYS[4]) or '0',now,0,0,0} end
             local ch = redis.call('HGETALL', KEYS[1])
             local desired = redis.call('HGETALL', KEYS[2])
             local cooldown = redis.call('HGETALL', KEYS[3])
@@ -68,6 +77,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
      * 不经 Lua 的 double，任意大小都精确。
      */
     static final String WRITE = """
+            if redis.call('EXISTS',KEYS[6])==1 then return -1 end
             if redis.call('GET', KEYS[1]) ~= ARGV[1] then return -1 end
             if (redis.call('GET', KEYS[5]) or '0') ~= ARGV[2] then return -2 end
             local ops = {S = {2, 'HSET'}, D = {2, 'HDEL'}, Q = {3, 'HSET'}, N = {3, 'HSETNX'}, X = {3, 'HDEL'},
@@ -91,6 +101,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
 
     /** 竞选。KEYS[1] = 锁；ARGV[1] = 令牌，ARGV[2] = TTL 毫秒（写法同帮会排行锁 RedissonGuildRankRedis.TRY_LOCK）。 */
     static final String LEADER_TRY = """
+            if redis.call('EXISTS',KEYS[2])==1 then return 0 end
             local holder = redis.call('GET', KEYS[1])
             if holder == ARGV[1] then
               redis.call('PEXPIRE', KEYS[1], ARGV[2])
@@ -103,6 +114,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
 
     /** 续期。KEYS[1] = 锁；ARGV[1] = 令牌，ARGV[2] = TTL 毫秒。 */
     static final String LEADER_RENEW = """
+            if redis.call('EXISTS',KEYS[2])==1 then return 0 end
             if redis.call('GET', KEYS[1]) == ARGV[1] then
               redis.call('PEXPIRE', KEYS[1], ARGV[2])
               return 1
@@ -124,15 +136,16 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
      * 选定后撤掉本玩家在其它候选上的预占，再给选中者记一条并 PEXPIRE。回 {@code {best（从 1 起）, load}}。
      */
     static final String RESERVE = NOW_MS + """
+            if redis.call('EXISTS',KEYS[#KEYS])==1 then return redis.error_reply('zone retired') end
             local ttl = tonumber(ARGV[1])
             local best, load
-            for i = 1, #KEYS do
+            for i = 1, #KEYS-1 do
               redis.call('ZREMRANGEBYSCORE', KEYS[i], '-inf', now)
               local l = tonumber(ARGV[2 + i]) + redis.call('ZCARD', KEYS[i])
               if redis.call('ZSCORE', KEYS[i], ARGV[2]) then l = l - 1 end
               if best == nil or l < load then best, load = i, l end
             end
-            for i = 1, #KEYS do
+            for i = 1, #KEYS-1 do
               if i ~= best then redis.call('ZREM', KEYS[i], ARGV[2]) end
             end
             redis.call('ZADD', KEYS[best], now + ttl, ARGV[2])
@@ -142,6 +155,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
 
     /** 给指定场景记一条预占。KEYS[1] = 预占键；ARGV[1] = TTL 毫秒，ARGV[2] = player_id。 */
     static final String RESERVE_ONE = NOW_MS + """
+            if redis.call('EXISTS',KEYS[2])==1 then return redis.error_reply('zone retired') end
             local ttl = tonumber(ARGV[1])
             redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
             redis.call('ZADD', KEYS[1], now + ttl, ARGV[2])
@@ -180,15 +194,15 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
     public WorldPlan readPlan(int zoneId) {
         // 5.6 手动切线也读取此计划；强制主节点，避免副本滞后把已排空线路当 ACTIVE 放行。
         Object raw = script().eval(RScript.Mode.READ_WRITE, PLAN, RScript.ReturnType.MULTI,
-                keys(redisKeys.worldChannels(zoneId), redisKeys.worldPlanVersion(zoneId)));
+                keys(redisKeys.worldChannels(zoneId), redisKeys.worldPlanVersion(zoneId),redisKeys.worldRetirement(zoneId)));
         return WorldPlanCodec.parsePlan(zoneId, raw);
     }
 
     @Override
     public WorldPlanSnapshot snapshot(int zoneId) {
-        Object raw = script().eval(RScript.Mode.READ_ONLY, SNAPSHOT, RScript.ReturnType.MULTI,
+        Object raw = script().eval(RScript.Mode.READ_WRITE, SNAPSHOT, RScript.ReturnType.MULTI,
                 keys(redisKeys.worldChannels(zoneId), redisKeys.worldDesired(zoneId), redisKeys.worldCooldown(zoneId),
-                        redisKeys.worldPlanVersion(zoneId)));
+                        redisKeys.worldPlanVersion(zoneId),redisKeys.worldRetirement(zoneId)));
         return WorldPlanCodec.parseSnapshot(zoneId, raw);
     }
 
@@ -197,7 +211,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
         requireToken(leaderToken);
         Object raw = script().eval(RScript.Mode.READ_WRITE, WRITE, RScript.ReturnType.INTEGER,
                 keys(redisKeys.worldLeader(zoneId), redisKeys.worldChannels(zoneId), redisKeys.worldDesired(zoneId),
-                        redisKeys.worldCooldown(zoneId), redisKeys.worldPlanVersion(zoneId)),
+                        redisKeys.worldCooldown(zoneId), redisKeys.worldPlanVersion(zoneId), redisKeys.worldRetirement(zoneId)),
                 WorldPlanCodec.writeArgs(leaderToken, batch).toArray());
         WorldPlanWriteResult result = WorldPlanCodec.writeResult(raw, batch);
         if (log.isDebugEnabled()) {
@@ -210,14 +224,14 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
     public boolean tryAcquireLeader(int zoneId, String token, Duration ttl) {
         requireToken(token);
         return flag(script().eval(RScript.Mode.READ_WRITE, LEADER_TRY, RScript.ReturnType.INTEGER,
-                keys(redisKeys.worldLeader(zoneId)), WorldPlanCodec.ascii(token), millis(ttl)));
+                keys(redisKeys.worldLeader(zoneId),redisKeys.worldRetirement(zoneId)), WorldPlanCodec.ascii(token), millis(ttl)));
     }
 
     @Override
     public boolean renewLeader(int zoneId, String token, Duration ttl) {
         requireToken(token);
         return flag(script().eval(RScript.Mode.READ_WRITE, LEADER_RENEW, RScript.ReturnType.INTEGER,
-                keys(redisKeys.worldLeader(zoneId)), WorldPlanCodec.ascii(token), millis(ttl)));
+                keys(redisKeys.worldLeader(zoneId),redisKeys.worldRetirement(zoneId)), WorldPlanCodec.ascii(token), millis(ttl)));
     }
 
     @Override
@@ -240,6 +254,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
             keys.add(redisKeys.worldReservations(zoneId, candidate.sceneId()));
             args.add(WorldPlanCodec.ascii(Integer.toUnsignedString(candidate.directoryPlayers())));
         }
+        keys.add(redisKeys.worldRetirement(zoneId));
         Object raw = script().eval(RScript.Mode.READ_WRITE, RESERVE, RScript.ReturnType.MULTI, keys, args.toArray());
         return WorldPlanCodec.parsePick(raw, candidates.size());
     }
@@ -247,7 +262,7 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
     @Override
     public void reserveScene(int zoneId, long sceneId, long playerId, Duration ttl) {
         script().eval(RScript.Mode.READ_WRITE, RESERVE_ONE, RScript.ReturnType.INTEGER,
-                keys(redisKeys.worldReservations(zoneId, sceneId)), millis(ttl),
+                keys(redisKeys.worldReservations(zoneId, sceneId),redisKeys.worldRetirement(zoneId)), millis(ttl),
                 WorldPlanCodec.ascii(Long.toUnsignedString(playerId)));
     }
 
@@ -281,7 +296,12 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
         for (Object member : redis.getSet(redisKeys.worldZones(), StringCodec.INSTANCE).readAll()) {
             String s = String.valueOf(member);
             try {
-                out.add(Integer.parseUnsignedInt(s));
+                int zone=Integer.parseUnsignedInt(s);
+                Object retired=script().eval(RScript.Mode.READ_WRITE,"return redis.call('EXISTS',KEYS[1])",
+                        RScript.ReturnType.INTEGER,keys(redisKeys.worldRetirement(zone)));
+                if(!(retired instanceof Number value)||value.longValue()<0||value.longValue()>1)
+                    throw new IllegalStateException("无法确认区退休状态");
+                if(value.longValue()==0)out.add(zone);
             } catch (NumberFormatException e) {
                 log.warn("zone 集合里有非法成员，跳过 key={} member={}", redisKeys.worldZones(), s);
             }

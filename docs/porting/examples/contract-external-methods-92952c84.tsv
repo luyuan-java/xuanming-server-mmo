@@ -1,0 +1,15 @@
+# 证据样例，不是自动启用的排除配置。使用前须按输入版本复核；CLI 永远逐 id/key 验证。
+# 2026-10-27：仅 git show 92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:{proto/etcd/etcd.proto,proto/message_id.txt}。
+# Java ContractSync.java EXCLUDED_PROTO_DIRS 明确排除 proto/etcd/；当前同步表中的下列号/键一致。
+# 列：id TAB key TAB 固定源路径、完整 RPC 和不纳入 Java 描述符的原因。该样例不证明 f83da2e1 的 etcd 负载与固定源相同。
+0	KVCompact	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.KV.Compact；内部 etcd，ContractSync 排除 proto/etcd/
+4	LeaseLeaseLeases	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.Lease.LeaseLeases；内部 etcd，ContractSync 排除 proto/etcd/
+5	LeaseLeaseGrant	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.Lease.LeaseGrant；内部 etcd，ContractSync 排除 proto/etcd/
+6	WatchWatch	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.Watch.Watch；内部 etcd，ContractSync 排除 proto/etcd/
+13	LeaseLeaseKeepAlive	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.Lease.LeaseKeepAlive；内部 etcd，ContractSync 排除 proto/etcd/
+20	KVPut	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.KV.Put；内部 etcd，ContractSync 排除 proto/etcd/
+22	KVDeleteRange	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.KV.DeleteRange；内部 etcd，ContractSync 排除 proto/etcd/
+25	KVTxn	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.KV.Txn；内部 etcd，ContractSync 排除 proto/etcd/
+59	KVRange	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.KV.Range；内部 etcd，ContractSync 排除 proto/etcd/
+73	LeaseLeaseRevoke	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.Lease.LeaseRevoke；内部 etcd，ContractSync 排除 proto/etcd/
+80	LeaseLeaseTimeToLive	92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5:proto/etcd/etcd.proto etcdserverpb.Lease.LeaseTimeToLive；内部 etcd，ContractSync 排除 proto/etcd/

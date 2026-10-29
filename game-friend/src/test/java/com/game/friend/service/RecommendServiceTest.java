@@ -171,12 +171,13 @@ class RecommendServiceTest {
     @Test
     void 两级策略只补缺口_选中的追加进排除集_只补在线态() {
         mutual = List.of(new Candidate(1, 3), new Candidate(2, 1));
-        random = List.of(new Candidate(5, 0), new Candidate(6, 0), new Candidate(7, 0));
+        random = List.of(new Candidate(5, 1), new Candidate(6, 4), new Candidate(7, 0));
         online.put(5L, PlayerPresence.newBuilder().setPlayerId(5).setOnlineSinceMs(777).build());
         RecommendFriendsResponse r = service().recommendFriends(SESSION, RecommendFriendsRequest.newBuilder().setLimit(4)
                 .addExcludePlayerIds(9).build(), deadline());
         assertThat(r.getCandidatesList()).extracting(RecommendEntry::getCandidatePlayerId).containsExactly(1L, 2L, 5L, 6L);
         assertThat(r.getCandidates(0).getMutualFriends()).isEqualTo(3);
+        assertThat(r.getCandidatesList()).extracting(RecommendEntry::getMutualFriends).containsExactly(3, 1, 1, 4);
         assertThat(r.getCandidates(2).getIsOnline()).isTrue();
         assertThat(r.getCandidates(2).getLastActiveMs()).isEqualTo(777);
         assertThat(r.getCandidates(0).getName()).isEmpty();

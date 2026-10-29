@@ -58,6 +58,25 @@ class SceneLinkServiceTest {
     }
 
     @Test
+    void 逻辑线程登记后握手应答回显心跳和当前scene代次() {
+        AtomicLong epoch = new AtomicLong(8);
+        LinkIdentity identity = new LinkIdentity(7, "scene-instance", 1, epoch::get);
+        GateLinks gateLinks = new GateLinks(metrics, Runnable::run);
+        SceneLinkService linksService = new SceneLinkService(identity, gateLinks, world, null, metrics);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        epoch.set(9);
+        linksService.linkOpened(100, LinkHello.newBuilder().setGateNodeId(5).setGateInstanceId("gate-a")
+                .setLeaseEpoch(1).setZoneId(1).setPingIntervalMs(5000).build(), channel);
+        NodeLinkFrame ack = channel.readOutbound();
+        assertThat(ack.getHelloAck().getAccepted()).isTrue();
+        assertThat(ack.getHelloAck().getSceneInstanceId()).isEqualTo("scene-instance");
+        assertThat(ack.getHelloAck().getSceneLeaseEpoch()).isEqualTo(9);
+        assertThat(ack.getHelloAck().getPingIntervalMs()).isEqualTo(5000);
+        linksService.linkClosed(100);
+        channel.close();
+    }
+
+    @Test
     void 握手通过回accepted_进场后按序下发79_21_再回进场结果() throws Exception {
         EmbeddedChannel gate = connect(5, "gate-a");
         repo.putNewPlayer(1001, 3);

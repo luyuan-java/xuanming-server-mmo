@@ -94,6 +94,10 @@ class AdminAuthFilterTest {
     @Test
     void 指标op标签_已知接口固定值_封禁子路径归一_其余other() {
         assertThat(AdminAuthFilter.opOf("/admin/transaction-log")).isEqualTo("transaction_log");
+        assertThat(AdminAuthFilter.opOf("/admin/audit/consumer-probes")).isEqualTo("audit_consumer_probes");
+        assertThat(AdminAuthFilter.opOf("/admin/audit/consumer-probesX")).isEqualTo("other");
+        assertThat(AdminAuthFilter.opOf("/admin/consistency/check")).isEqualTo("consistency");
+        assertThat(AdminAuthFilter.opOf("/admin/consistency/checkX")).isEqualTo("other");
         assertThat(AdminAuthFilter.opOf("/admin/player-snapshots")).isEqualTo("player_snapshots");
         assertThat(AdminAuthFilter.opOf("/admin/gain-blocks")).isEqualTo("gain_blocks");
         assertThat(AdminAuthFilter.opOf("/admin/gain-blocks/currency/123456")).isEqualTo("gain_blocks");
@@ -104,6 +108,9 @@ class AdminAuthFilterTest {
         assertThat(AdminAuthFilter.opOf("/admin/zonesX")).isEqualTo("other");
         assertThat(AdminAuthFilter.opOf("/admin/gates/drain/1/3")).isEqualTo("gates");
         assertThat(AdminAuthFilter.opOf("/admin/gatesX")).isEqualTo("other");
+        assertThat(AdminAuthFilter.opOf("/admin/scenes/1")).isEqualTo("scenes");
+        assertThat(AdminAuthFilter.opOf("/admin/scenes/evacuate/1/3")).isEqualTo("scenes");
+        assertThat(AdminAuthFilter.opOf("/admin/scenesX")).isEqualTo("other");
         assertThat(AdminAuthFilter.opOf("/admin/killswitch")).isEqualTo("killswitch");
         // 批次 7.2a：带路径参数的运维面接口按前缀归类，路径本身绝不变成标签值
         assertThat(AdminAuthFilter.opOf("/admin/player-snapshots/18446744073709551615")).isEqualTo("player_snapshots");

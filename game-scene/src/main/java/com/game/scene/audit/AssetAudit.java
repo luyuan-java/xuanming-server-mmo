@@ -55,7 +55,13 @@ public interface AssetAudit {
         /** 回合制战斗结算的金币（Java 独有 TX_BATTLE_REWARD 1005，关联号 = battle_id；scene-battle-spec D23）。 */
         BATTLE_REWARD,
         /** 战斗掉落入包（同基线 TX_ITEM_AWARD，关联号 = battle_id）。 */
-        ITEM_AWARD
+        ITEM_AWARD,
+        /** 装备强化：成败均扣金币和材料，关联号为装备实例。 */
+        EQUIP_ENHANCE,
+        /** 镶嵌消耗一颗宝石。 */
+        EQUIP_INLAY,
+        /** 取下宝石返还到人物背包。 */
+        EQUIP_GEM_REMOVE
     }
 
     /**

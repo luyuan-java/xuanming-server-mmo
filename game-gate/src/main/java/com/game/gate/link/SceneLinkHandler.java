@@ -3,6 +3,8 @@ package com.game.gate.link;
 import com.game.api.proto.NodeLinkFrame;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.handler.timeout.IdleState;
+import io.netty.handler.timeout.IdleStateEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,7 +32,7 @@ public final class SceneLinkHandler extends SimpleChannelInboundHandler<NodeLink
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
-        link.fail("连接断开");
+        link.fail("连接断开", EnterFailure.CONNECT_UNAVAILABLE);
         ctx.fireChannelInactive();
     }
 
@@ -38,5 +40,14 @@ public final class SceneLinkHandler extends SimpleChannelInboundHandler<NodeLink
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         log.warn("scene 链路异常，断开 node={} gen={}", link.nodeId(), link.generation(), cause);
         ctx.close();
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object event) throws Exception {
+        if (event instanceof IdleStateEvent idle && idle.state() == IdleState.READER_IDLE) {
+            link.readIdle();
+            return;
+        }
+        super.userEventTriggered(ctx, event);
     }
 }

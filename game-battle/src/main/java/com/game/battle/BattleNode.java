@@ -56,8 +56,8 @@ import org.springframework.context.SmartLifecycle;
  * 导出 Dubbo（端口被占即拒启）→ 绑直连端口（被占即拒启）→ <b>在逻辑线程上开准入闸</b> → 首次发布目录（{@code accepting = true}），之后每 5 s
  * → 就绪日志。先开闸、后进目录：match 在开闸之前找不到这个节点，基线「已发布、未开闸」的窗口在 Java 里不存在（§11 N4）。
  *
- * <p><b>停机</b>（{@link #stop()}，§7.11）：停发布并删目录条目 → 在逻辑线程的<b>同一个任务</b>里关准入闸、{@code abortAll("node_shutdown")}
- * （观众收 166 ABORTED + ONGOING，参战者不收帧，房间直连全部优雅关闭）→ 直连面停止接受、有界等待排空后强关剩余连接（修基线 F1，§11 N16）
+ * <p><b>停机</b>（{@link #stop()}，§7.11）：停发布并删目录条目 → 在逻辑线程关准入闸、停止回合、关闭房间直连；
+ * 已算出的 SQL v1 终局在 shutdown-flush-timeout 内按原件补交，未确认的逐局记为未知 → 最终拆房 → 直连面有界排空后强关剩余连接（§11 N16）
  * → 反导出 Dubbo（期间进来的 createBattle 在逻辑线程上复核看到 CLOSED → NOT_ALLOCATABLE；补签 → 1005）→ 停逻辑线程与回复执行器 →
  * 最后交还租约。
  *
@@ -341,7 +341,7 @@ public final class BattleNode implements SmartLifecycle {
     }
 
     /**
-     * 按启动的逆序释放，每一步都容忍前面没建出来（启动失败时也走这里）：停发布 / 删目录 → 逻辑线程上同一个任务里关闸 + 作废全部房间 →
+     * 按启动的逆序释放，每一步都容忍前面没建出来（启动失败时也走这里）：停发布 / 删目录 → 关闸并有界补交原 SQL 终局，再拆房 →
      * 直连面停止接受并有界排空 → 反导出 Dubbo → 停逻辑线程与回复执行器 → 最后交还租约（停机期间号仍归本实例）。
      */
     private void release() {
@@ -359,7 +359,7 @@ public final class BattleNode implements SmartLifecycle {
                 p.stop(true);
             }
         }
-        // 第 2 步：同一个逻辑任务里「关闸 → 作废全部房间」：排在它后面的建房在逻辑线程上复核必然看到 CLOSED
+        // 第 2 步：关闸后有界补交 SQL v1 原终局，取得决定或记下逐局未知后才拆房。
         closeAdmissionAndAbortRooms();
         // 第 3 步：直连面停止接受，等优雅关闭的连接把终局包与 FIN 写完（至多 shutdown-flush-timeout），再强关剩余连接
         DirectEdge e = edge;
@@ -413,18 +413,22 @@ public final class BattleNode implements SmartLifecycle {
             return;
         }
         try {
-            callOnLogic(() -> {
+            var flushing=callOnLogic(() -> {
                 admission.close();
-                r.abortAll(SHUTDOWN_REASON);
-                return null;
+                return r.beginShutdown(SHUTDOWN_REASON,props.shutdownFlushTimeout());
             }, ABORT_TIMEOUT);
+            var report=flushing.get(props.shutdownFlushTimeout().toMillis()+LOGIC_CALL_TIMEOUT.toMillis(),TimeUnit.MILLISECONDS);
+            if(!report.unconfirmed().isEmpty())log.error("停服排空预算结束，{} 局 SQL 终态仍未知，逐局原件已记录",report.unconfirmed().size());
         } catch (Exception ex) {
             admission.close();
             if (ex instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            log.error("停机时作废房间没有在 {} 内完成（准入闸已关；继续停机，剩余房间随进程退出丢失，玩家冻结到期限由 scene 的 reaper 解除）",
+            log.error("停机时原终局补提交未能在预算内确认（准入闸已关；不能将未知视为作废，SQL权威继续恢复），逻辑调用预算 {}",
                     ABORT_TIMEOUT, ex);
+        } finally {
+            try{callOnLogic(()->{r.abortAll(SHUTDOWN_REASON);return null;},ABORT_TIMEOUT);}
+            catch(Exception ex){log.error("停服最终拆房未完成，仍未知的原局须查SQL权威",ex);if(ex instanceof InterruptedException)Thread.currentThread().interrupt();}
         }
     }
 

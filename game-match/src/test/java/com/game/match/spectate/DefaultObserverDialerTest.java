@@ -62,7 +62,9 @@ class DefaultObserverDialerTest {
             .setBattleInstanceId("inst-a").setRpcHost("10.1.1.1").setRpcPort(21200).setAttempt(1).setCreatedAtMs(1_800_000_000_000L).build();
     private static final AddObserverRequest ADD = AddObserverRequest.newBuilder().setBattleId(BATTLE).setObserverPlayerId(OBSERVER)
             .setRouting(BattleRouting.newBuilder().setSessionId(7).setGateNodeId(1).setGateInstanceId("gate-inst-z2").setZoneId(2))
-            .setObserverName("acc-1001").build();
+            .setObserverName("acc-1001").setSpectatorOperationId("5ed1cb26-e53c-4e42-8d85-ea8dc6f8129c")
+            .setAdmitBeforeMs(1_800_000_025_000L).setTargetInstanceId("inst-a").build();
+    private static final LocalObserverOperation ORIGINAL = new LocalObserverOperation(PLACEMENT, ADD);
 
     /** 可脚本化的假 battle：只关心两个观众方法；每次调用按「先进先出的脚本，用完回到调通」应答。 */
     private static final class ScriptedBattle implements BattleNodeService {
@@ -197,17 +199,33 @@ class DefaultObserverDialerTest {
     }
 
     @Test
-    void remove调通_请求带落点的battle_id_观众与reason_应答是Empty所以tip恒为0() {
-        Outcome outcome = dialer.remove(PLACEMENT, OBSERVER, SpectateRules.REASON_ENTER_GATHER, threeSeconds(), in(3_000));
+    void remove调通_完整原操作到达且返回匹配的取消证明才为0() {
+        Outcome outcome = dialer.remove(ORIGINAL, SpectateRules.REASON_ENTER_GATHER, threeSeconds(), in(3_000));
 
         assertThat(outcome).isEqualTo(new Outcome.Replied(0));
-        assertThat(battle.removes).containsExactly(RemoveObserverRequest.newBuilder().setBattleId(BATTLE).setObserverPlayerId(OBSERVER)
-                .setReason("enter_gather").build());
+        assertThat(battle.removes).containsExactly(ORIGINAL.remove("enter_gather"));
         assertThat(calls.calls).singleElement().satisfies(call -> assertThat(call.target()).isEqualTo(DIALED));
         assertThat(count("remove", "replied")).isEqualTo(1.0);
         assertThat(total()).isEqualTo(1.0);
     }
 
+    @Test
+    void 取消必须三项正证明_空包错操作错实例均为未知且不能记成功() {
+        var valid = com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true)
+                .setSpectatorOperationId(ADD.getSpectatorOperationId()).setTargetInstanceId(ADD.getTargetInstanceId()).build();
+        for (var invalid : List.of(valid.toBuilder().setCancelled(false).build(),
+                valid.toBuilder().setSpectatorOperationId("another-operation").build(),
+                valid.toBuilder().setTargetInstanceId("another-instance").build(),
+                com.game.proto.RemoveObserverResponse.getDefaultInstance())) {
+            battle.removeScript.add(CompletableFuture.completedFuture(invalid));
+            assertThat(dialer.remove(ORIGINAL, "rewatch", threeSeconds(), in(3_000))).isInstanceOf(Outcome.Unknown.class);
+        }
+        battle.removeScript.add(CompletableFuture.completedFuture(null));
+        assertThat(dialer.remove(ORIGINAL, "rewatch", threeSeconds(), in(3_000))).isInstanceOf(Outcome.Unknown.class);
+        assertThat(count("remove", "unknown")).isEqualTo(5.0);
+        assertThat(count("remove", "replied")).isZero();
+        assertThat(battle.removes).hasSize(5).allSatisfy(request -> assertThat(request).isEqualTo(ORIGINAL.remove("rewatch")));
+    }
     // ================================================================ 建连失败的三种去向
 
     @Test
@@ -216,7 +234,7 @@ class DefaultObserverDialerTest {
         directory.add(FakeBattleNodes.node(1, "inst-successor", 21999));
 
         Outcome add = dialer.add(PLACEMENT, ADD, threeSeconds(), in(4_300));
-        Outcome remove = dialer.remove(PLACEMENT, OBSERVER, SpectateRules.REASON_REWATCH, threeSeconds(), in(3_000));
+        Outcome remove = dialer.remove(ORIGINAL, SpectateRules.REASON_REWATCH, threeSeconds(), in(3_000));
 
         assertThat(add).isEqualTo(new Outcome.Dead());
         assertThat(remove).isEqualTo(new Outcome.Dead());
@@ -254,9 +272,9 @@ class DefaultObserverDialerTest {
         directory.add(FakeBattleNodes.node(1, "inst-successor", 21999));
 
         probe.result = ConnectProbe.Result.CONNECTED;
-        Outcome connectable = dialer.remove(PLACEMENT, OBSERVER, SpectateRules.REASON_ENTER_GATHER, threeSeconds(), in(3_000));
+        Outcome connectable = dialer.remove(ORIGINAL, SpectateRules.REASON_ENTER_GATHER, threeSeconds(), in(3_000));
         probe.result = ConnectProbe.Result.INCONCLUSIVE;
-        Outcome inconclusive = dialer.remove(PLACEMENT, OBSERVER, SpectateRules.REASON_ENTER_GATHER, threeSeconds(), in(3_000));
+        Outcome inconclusive = dialer.remove(ORIGINAL, SpectateRules.REASON_ENTER_GATHER, threeSeconds(), in(3_000));
 
         assertThat(connectable).isInstanceOf(Outcome.NotDelivered.class);
         assertThat(inconclusive).isInstanceOf(Outcome.NotDelivered.class);
@@ -273,7 +291,7 @@ class DefaultObserverDialerTest {
         directory.add(FakeBattleNodes.node(1, "inst-successor", 21999));
 
         Outcome add = dialer.add(PLACEMENT, ADD, threeSeconds(), in(4_300));
-        Outcome remove = dialer.remove(PLACEMENT, OBSERVER, SpectateRules.REASON_REWATCH, threeSeconds(), in(3_300));
+        Outcome remove = dialer.remove(ORIGINAL, SpectateRules.REASON_REWATCH, threeSeconds(), in(3_300));
 
         assertThat(add).as("超时：battle 可能已经登记了这名观众").isInstanceOf(Outcome.Unknown.class);
         assertThat(remove).isInstanceOf(Outcome.Unknown.class);
@@ -335,7 +353,7 @@ class DefaultObserverDialerTest {
         Deadline passed = Deadline.after(0);
 
         Outcome add = dialer.add(PLACEMENT, ADD, threeSeconds(), passed);
-        Outcome remove = dialer.remove(PLACEMENT, OBSERVER, SpectateRules.REASON_ENTER_GATHER, threeSeconds(), passed);
+        Outcome remove = dialer.remove(ORIGINAL, SpectateRules.REASON_ENTER_GATHER, threeSeconds(), passed);
 
         assertThat(add).isInstanceOf(Outcome.NotDelivered.class);
         assertThat(remove).isInstanceOf(Outcome.NotDelivered.class);
@@ -350,7 +368,7 @@ class DefaultObserverDialerTest {
     void 调用方给的超时为0_硬截止还没到_同样不发调用_NotDelivered_否则163会白白保留一个标记() {
         Outcome zero = dialer.add(PLACEMENT, ADD, Duration.ZERO, in(4_000));
         Outcome negative = dialer.add(PLACEMENT, ADD, Duration.ofMillis(-5), in(4_000));
-        Outcome missing = dialer.remove(PLACEMENT, OBSERVER, SpectateRules.REASON_REWATCH, null, in(4_000));
+        Outcome missing = dialer.remove(ORIGINAL, SpectateRules.REASON_REWATCH, null, in(4_000));
 
         assertThat(zero).as("直拨器对 0 超时是「不发包、按超时收场」；照翻会成为结局不明，而请求确定没有发出").isInstanceOf(Outcome.NotDelivered.class);
         assertThat(negative).isInstanceOf(Outcome.NotDelivered.class);
@@ -378,7 +396,7 @@ class DefaultObserverDialerTest {
         placementDialer.unavailable(PlacementDialer.Kind.TIMEOUT);
         assertThat(wrapped.add(PLACEMENT, ADD, Duration.ofMillis(1_800), hardStop)).isInstanceOf(Outcome.Unknown.class);
         placementDialer.unavailable(PlacementDialer.Kind.OTHER);
-        assertThat(wrapped.remove(PLACEMENT, OBSERVER, SpectateRules.REASON_REWATCH, Duration.ofMillis(1_800), hardStop))
+        assertThat(wrapped.remove(ORIGINAL, SpectateRules.REASON_REWATCH, Duration.ofMillis(1_800), hardStop))
                 .isInstanceOf(Outcome.Unknown.class);
 
         assertThat(placementDialer.dials).hasSize(5).allSatisfy(dialed -> {
@@ -410,7 +428,7 @@ class DefaultObserverDialerTest {
         DefaultObserverDialer wrapped = new DefaultObserverDialer(broken, metrics);
 
         Outcome add = wrapped.add(PLACEMENT, ADD, threeSeconds(), in(4_300));
-        Outcome remove = wrapped.remove(PLACEMENT, OBSERVER, SpectateRules.REASON_REWATCH, threeSeconds(), in(3_000));
+        Outcome remove = wrapped.remove(ORIGINAL, SpectateRules.REASON_REWATCH, threeSeconds(), in(3_000));
 
         assertThat(add).as("不知道请求发没发出去：按结局不明（163 保留标记）").isInstanceOf(Outcome.Unknown.class);
         assertThat(remove).isInstanceOf(Outcome.Unknown.class);
@@ -425,21 +443,21 @@ class DefaultObserverDialerTest {
         CompletableFuture<com.game.proto.RemoveObserverResponse> hanging = battle.nextRemoveHangs();
 
         long startedNanos = System.nanoTime();
-        CompletableFuture<Outcome> future = dialer.removeAsync(PLACEMENT, OBSERVER, SpectateRules.REASON_CONCURRENT_QUEUE);
+        CompletableFuture<Outcome> future = dialer.removeAsync(ORIGINAL, SpectateRules.REASON_CONCURRENT_QUEUE);
         long returnedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
 
         assertThat(returnedMillis).as("不等 battle：battle 此刻还没有应答").isLessThan(2_000);
         for (int i = 0; i < 2_000 && battle.removes.isEmpty(); i++) {
             Thread.sleep(5);
         }
-        assertThat(battle.removes).as("调用已经发出").containsExactly(RemoveObserverRequest.newBuilder().setBattleId(BATTLE)
-                .setObserverPlayerId(OBSERVER).setReason("concurrent_queue").build());
+        assertThat(battle.removes).as("调用已经发出").containsExactly(ORIGINAL.remove("concurrent_queue"));
         assertThat(future).as("battle 还没应答").isNotDone();
         assertThat(battle.threads).singleElement().satisfies(thread -> assertThat(thread).startsWith("match-spectate-evict-").endsWith("|virtual"));
         assertThat(calls.calls).singleElement().satisfies(call -> assertThat(call.timeout().toMillis())
                 .as("固定 3 s（MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS），不随 163 的剩余预算收短").isBetween(2_000L, 3_000L));
 
-        hanging.complete(com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).build());
+        hanging.complete(com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true)
+                .setSpectatorOperationId(ADD.getSpectatorOperationId()).setTargetInstanceId(ADD.getTargetInstanceId()).build());
 
         assertThat(future.get(10, TimeUnit.SECONDS)).isEqualTo(new Outcome.Replied(0));
         assertThat(count("remove", "replied")).isEqualTo(1.0);
@@ -449,9 +467,9 @@ class DefaultObserverDialerTest {
     @Test
     void removeAsync_没调通也正常完成_永不异常完成() throws Exception {
         calls.unreachable(RECORDED);
-        Outcome notDelivered = dialer.removeAsync(PLACEMENT, OBSERVER, SpectateRules.REASON_CONCURRENT_QUEUE).get(10, TimeUnit.SECONDS);
+        Outcome notDelivered = dialer.removeAsync(ORIGINAL, SpectateRules.REASON_CONCURRENT_QUEUE).get(10, TimeUnit.SECONDS);
         calls.timeout(RECORDED);
-        Outcome unknown = dialer.removeAsync(PLACEMENT, OBSERVER, SpectateRules.REASON_CONCURRENT_QUEUE).get(10, TimeUnit.SECONDS);
+        Outcome unknown = dialer.removeAsync(ORIGINAL, SpectateRules.REASON_CONCURRENT_QUEUE).get(10, TimeUnit.SECONDS);
 
         assertThat(notDelivered).isInstanceOf(Outcome.NotDelivered.class);
         assertThat(unknown).isInstanceOf(Outcome.Unknown.class);
@@ -466,7 +484,7 @@ class DefaultObserverDialerTest {
         };
         DefaultObserverDialer wrapped = new DefaultObserverDialer(new DirectPlacementDialer(calls, directory, probe), metrics, refusing);
 
-        CompletableFuture<Outcome> future = wrapped.removeAsync(PLACEMENT, OBSERVER, SpectateRules.REASON_CONCURRENT_QUEUE);
+        CompletableFuture<Outcome> future = wrapped.removeAsync(ORIGINAL, SpectateRules.REASON_CONCURRENT_QUEUE);
 
         assertThat(future).isDone();
         assertThat(future.get(1, TimeUnit.SECONDS)).isInstanceOf(Outcome.NotDelivered.class);
@@ -477,7 +495,7 @@ class DefaultObserverDialerTest {
     @Test
     void removeAsync_回调挂在结果上_在直拨的线程上被调_拿到的就是这一次的结局() throws Exception {
         AtomicReference<Outcome> seen = new AtomicReference<>();
-        CompletableFuture<Void> callback = dialer.removeAsync(PLACEMENT, OBSERVER, SpectateRules.REASON_CONCURRENT_QUEUE).thenAccept(seen::set);
+        CompletableFuture<Void> callback = dialer.removeAsync(ORIGINAL, SpectateRules.REASON_CONCURRENT_QUEUE).thenAccept(seen::set);
 
         callback.get(10, TimeUnit.SECONDS);
 

@@ -51,15 +51,16 @@ public final class NettyLinkConnector implements LinkConnector {
         try {
             info = resolver.resolve(link.nodeId());
         } catch (RuntimeException e) {
-            link.fail("查询 scene 节点目录失败: " + e);
+            link.fail("查询 scene 节点目录失败: " + e, EnterFailure.CONNECT_UNAVAILABLE);
             return;
         }
         if (info.isEmpty() || info.get().getLinkHost().isBlank() || info.get().getLinkPort() == 0) {
-            link.fail("节点目录中没有该 scene 节点或地址为空");
+            link.fail("节点目录中没有该 scene 节点或地址为空", EnterFailure.NODE_MISSING);
             return;
         }
         String host = info.get().getLinkHost();
         int port = info.get().getLinkPort();
+        if (!link.resolved(info.get())) return;
         try {
             new Bootstrap()
                     .group(group)
@@ -78,11 +79,11 @@ public final class NettyLinkConnector implements LinkConnector {
                     .connect(host, port)
                     .addListener((ChannelFutureListener) f -> {
                         if (!f.isSuccess()) {
-                            link.fail("连接 " + host + ":" + port + " 失败: " + f.cause());
+                            link.fail("连接 " + host + ":" + port + " 失败: " + f.cause(), EnterFailure.CONNECT_UNAVAILABLE);
                         }
                     });
         } catch (RuntimeException e) {
-            link.fail("发起连接失败: " + e);
+            link.fail("发起连接失败: " + e, EnterFailure.CONNECT_UNAVAILABLE);
         }
     }
 }

@@ -85,7 +85,11 @@ class SceneManagerSwitchTargetsTest {
     private volatile CompletableFuture<CreateInstanceResponse> nextInstanceReply = new CompletableFuture<>();
 
     private SceneManagerSwitchTargets newClient(Duration timeout) {
-        return new SceneManagerSwitchTargets(7, 3, logic, timeout, new SceneManagerSwitchTargets.Connector() {
+        return newClient(timeout, "", () -> 0);
+    }
+
+    private SceneManagerSwitchTargets newClient(Duration timeout, String instance, java.util.function.LongSupplier epoch) {
+        return new SceneManagerSwitchTargets(7, 3, instance, epoch, logic, timeout, new SceneManagerSwitchTargets.Connector() {
             @Override
             public SceneDirectoryService connect() {
                 connects.incrementAndGet();
@@ -214,6 +218,37 @@ class SceneManagerSwitchTargetsTest {
     }
 
     private static final InstanceIds.Request MIRROR = new InstanceIds.Request(1001, SceneKind.MIRROR, 50, 1, 2, 0);
+
+    @Test void 实例请求使用当前租约代次_复占后不能继续发旧代次() throws Exception {
+        var epoch = new java.util.concurrent.atomic.AtomicLong(8);
+        client = newClient(Duration.ofSeconds(4), "scene-instance", epoch::get);
+        nextInstanceReply = CompletableFuture.completedFuture(CreateInstanceResponse.newBuilder()
+                .setSceneNodeId(3).setSceneId(999).build());
+        createAndAwait(MIRROR);
+        epoch.set(9);
+        createAndAwait(MIRROR);
+        assertThat(instanceRequests).extracting(CreateInstanceRequest::getRequesterInstanceId)
+                .containsExactly("scene-instance", "scene-instance");
+        assertThat(instanceRequests).extracting(CreateInstanceRequest::getRequesterLeaseEpoch).containsExactly(8L, 9L);
+    }
+
+    @Test void 自动疏散按完整意图发送而不带客户端切线标记() throws Exception {
+        client = newClient(Duration.ofSeconds(4));
+        nextReply = CompletableFuture.completedFuture(SelectSwitchTargetResponse.newBuilder().setTipId(3000).build());
+        var result = new CompletableFuture<Selection>();
+        client.select(1001, 50, com.game.scene.world.RemoteSwitchTargets.Request.evacuate(2, 1), result::complete);
+        var task = logicQueue.poll(5, TimeUnit.SECONDS);
+        assertThat(task).isNotNull(); task.run();
+        assertThat(result.join()).isEqualTo(new Selection.Refused(3000));
+        assertThat(requests).singleElement().satisfies(request -> {
+            assertThat(request.getReason()).isEqualTo(com.game.api.proto.SwitchTargetReason.SWITCH_TARGET_EVACUATE);
+            assertThat(request.getExcludeFromNode()).isTrue();
+            assertThat(request.getWantSceneId()).isZero();
+            assertThat(request.getWantSceneConfigId()).isEqualTo(2);
+            assertThat(request.getFallbackSceneConfigId()).isEqualTo(1);
+            assertThat(request.getClientChannelPick()).isFalse();
+        });
+    }
 
     @Test
     void 取号请求带上zone_本节点号_种类与源_发了号映射成Issued() throws Exception {

@@ -116,6 +116,9 @@ public final class FakePlayerRepository implements PlayerRepository {
 
     private final Deque<PendingProgress> progress = new ArrayDeque<>();
     private boolean acceptsProgress = true;
+    private boolean evacuationCapacityAvailable = true;
+    @Override public boolean evacuationCapacityAvailable() { return evacuationCapacityAvailable; }
+    public void setEvacuationCapacityAvailable(boolean available) { evacuationCapacityAvailable = available; }
 
     @Override
     public boolean acceptsProgress() {

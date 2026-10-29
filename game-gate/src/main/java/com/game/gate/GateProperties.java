@@ -38,8 +38,22 @@ public record GateProperties(
         Duration linkHelloTimeout,
         Integer linkMaxQueuedFrames,
         Duration shutdownDrainTimeout,
-        Duration redirectLinger) {
+        Duration redirectLinger,
+        Duration linkPingInterval,
+        Duration linkIdleTimeout,
+        Duration linkSupersedeCheckInterval,
+        Duration linkSupersededGrace) {
 
+    public GateProperties(Integer clientPort, Integer advertisePort, Integer workerThreads, Integer linkThreads,
+                          Integer maxPendingRequests, Integer illegalPacketThreshold, Duration handshakeTimeout,
+                          Duration linkConnectTimeout, Duration linkHelloTimeout, Integer linkMaxQueuedFrames,
+                          Duration shutdownDrainTimeout, Duration redirectLinger) {
+        this(clientPort, advertisePort, workerThreads, linkThreads, maxPendingRequests, illegalPacketThreshold,
+                handshakeTimeout, linkConnectTimeout, linkHelloTimeout, linkMaxQueuedFrames, shutdownDrainTimeout,
+                redirectLinger, null, null, null, null);
+    }
+
+    @org.springframework.boot.context.properties.bind.ConstructorBinding
     public GateProperties {
         clientPort = clientPort == null ? 11000 : clientPort;
         advertisePort = advertisePort == null || advertisePort == 0 ? clientPort : advertisePort;
@@ -53,6 +67,13 @@ public record GateProperties(
         linkMaxQueuedFrames = linkMaxQueuedFrames == null ? 10_000 : linkMaxQueuedFrames;
         shutdownDrainTimeout = shutdownDrainTimeout == null ? Duration.ofSeconds(3) : shutdownDrainTimeout;
         redirectLinger = redirectLinger == null ? GateLimits.DEFAULT_REDIRECT_LINGER : redirectLinger;
+        linkPingInterval = linkPingInterval == null ? Duration.ofSeconds(5) : linkPingInterval;
+        linkIdleTimeout = linkIdleTimeout == null ? Duration.ofSeconds(15) : linkIdleTimeout;
+        linkSupersedeCheckInterval = linkSupersedeCheckInterval == null ? Duration.ofSeconds(5) : linkSupersedeCheckInterval;
+        linkSupersededGrace = linkSupersededGrace == null ? Duration.ofSeconds(30) : linkSupersededGrace;
+        new com.game.gate.link.LinkSettings(linkHelloTimeout, linkMaxQueuedFrames, linkPingInterval, linkIdleTimeout, linkSupersededGrace);
+        if (linkSupersedeCheckInterval.toMillis() < 1)
+            throw new IllegalArgumentException("game.gate.link-supersede-check-interval 不得短于 1ms");
         if (clientPort <= 0 || clientPort > 65535) {
             throw new IllegalArgumentException("game.gate.client-port 非法: " + clientPort);
         }

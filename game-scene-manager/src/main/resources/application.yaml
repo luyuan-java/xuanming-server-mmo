@@ -81,7 +81,9 @@ game:
       #   "[1]": 16
       # coverage: per-node               # per-node（缺省，5.2 后保持，Q4）/ hash（只带地图的 63 可能跨节点）
       # tick: 5s                         # 领导者一拍
-      # dead-node-grace: 20s             # 节点缺席满这么久，删它名下的频道记录、在活节点上用新号重铺
+      # dead-node-grace: 20s             # 目录缺席且租约明确不存在后，重铺容量
+      # stuck-node-grace: 120s           # 仍持有租约或读不到时的长宽限；只重铺容量，不接管SQL玩家
+      # cross-node-relocation: true     # hash覆盖无本地兄弟时允许跨节点改派；false恢复旧缩容限制
       # leader-lock-ttl: 30s             # 分 zone 领导锁 TTL（续期 TTL/3、有效 2/3 TTL）
       # leader-eligible: true            # false = 本副本只做分配，不竞选
       # cleanup-orphans: true            # World 表删掉的图：频道排空后删除

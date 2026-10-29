@@ -90,7 +90,9 @@ public final class Bag {
         }
         int slot = slotForNew(spec, catalog);
         if (slot < 0) return NO_SPACE;
-        place(new BagItem(source.getItemUuid(), source.getConfigId(), 1, nextAcquireSeq++, source.getUnknownFields()), slot);
+        BagItem restored = new BagItem(source.getItemUuid(), source.getConfigId(), 1, nextAcquireSeq++, source.getUnknownFields());
+        if (source.hasEquipment()) restored.equipment(source.getEquipment());
+        place(restored, slot);
         return OK;
     }
 
@@ -215,6 +217,11 @@ public final class Bag {
             }
         }
 
+        // 掷值也先完成；随机源或规则抛错时不能留下部分淘汰、并堆或新实例。
+        List<com.game.player.store.state.EquipmentState> equipment = new ArrayList<>(plan.newInstances());
+        for (Need need : plan.needs()) {
+            for (int i = 0; i < need.newInstances(); i++) equipment.add(catalog.createEquipment(need.configId()));
+        }
         // 以下才改状态：先淘汰，再并堆，再切新实例
         List<Removed> evicted = new ArrayList<>(victimCount);
         for (BagItem victim : fifo.subList(0, victimCount)) {
@@ -238,8 +245,9 @@ public final class Bag {
             }
             while (remaining > 0) {
                 long size = Math.min(max, remaining);
-                BagItem item = new BagItem(minted[nextGuid++], need.configId(), size, nextAcquireSeq++,
+                BagItem item = new BagItem(minted[nextGuid], need.configId(), size, nextAcquireSeq++,
                         UnknownFieldSet.getDefaultInstance());
+                item.equipment(equipment.get(nextGuid++));
                 place(item, slotForNew(need.spec(), catalog));
                 remaining -= size;
                 touched.add(item.guid());
@@ -259,7 +267,7 @@ public final class Bag {
             long room = 0;
             if (spec.stackable()) {
                 for (BagItem item : sortedItems(BagItem.ACQUIRE_ORDER)) {
-                    if (item.configId() == e.getKey() && item.size() < max && !excluded.contains(item)) {
+                    if (item.configId() == e.getKey() && plain(item) && item.size() < max && !excluded.contains(item)) {
                         targets.add(item);
                         room += max - item.size();
                     }
@@ -304,6 +312,32 @@ public final class Bag {
 
     /** 一个实例被抽走的部分（{@code count} 是这次抽走的数量；实例被抽空时当场回收）。 */
     public record Drawn(long guid, int configId, long count) {
+    }
+
+    /** 能安全按数量消费的普通单位；带装备段或更新版本字段的实例必须整件搬运。 */
+    public long plainQuantity(int configId) {
+        return byGuid.values().stream().filter(i -> i.configId() == configId && plain(i)).mapToLong(BagItem::size).sum();
+    }
+
+    private static boolean plain(BagItem item) {
+        return item.equipment() == null && item.unknownFields().asMap().isEmpty();
+    }
+
+    /** 装备材料的候选扣除：先问足量，再只抽普通单位，版本不认识的整实例保持原样。 */
+    public List<Drawn> drainPlainExact(int configId, long count) {
+        if (count < 0 || plainQuantity(configId) < count) throw new IllegalArgumentException("普通物品数量不足");
+        List<Drawn> drawn = new ArrayList<>();
+        long remaining = count;
+        for (BagItem item : items()) {
+            if (remaining == 0) break;
+            if (item.configId() != configId || !plain(item) || item.size() == 0) continue;
+            long take = Math.min(item.size(), remaining);
+            item.size(item.size() - take);
+            remaining -= take;
+            drawn.add(new Drawn(item.guid(), configId, take));
+            if (item.size() == 0) remove(item);
+        }
+        return List.copyOf(drawn);
     }
 
     /**
@@ -398,7 +432,7 @@ public final class Bag {
         Map<Integer, List<BagItem>> groups = new TreeMap<>(Integer::compareUnsigned);
         for (BagItem item : sortedItems(BagItem.ACQUIRE_ORDER)) {
             ItemSpec spec = catalog.item(item.configId());
-            if (spec != null && spec.stackable() && item.size() < spec.maxStack()) {
+            if (spec != null && spec.stackable() && plain(item) && item.size() < spec.maxStack()) {
                 groups.computeIfAbsent(item.configId(), k -> new ArrayList<>()).add(item);
             }
         }

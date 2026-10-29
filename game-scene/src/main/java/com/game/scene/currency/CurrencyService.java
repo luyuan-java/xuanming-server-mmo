@@ -21,6 +21,43 @@ import com.game.table.CommonErrorTip;
  */
 public final class CurrencyService {
 
+    /** 装备锻造的候选扣款：校验完成后与完整候选背包在同一逻辑线程提交，审计异常不拆散提交。 */
+    public final class PreparedDeduction {
+        private final ScenePlayer player;
+        private final Wallet.Change change;
+        private final com.game.player.store.state.BagState originalBags;
+        private boolean committed;
+        private PreparedDeduction(ScenePlayer player, Wallet.Change change) {
+            this.player = player; this.change = change; this.originalBags = player.bags().toState();
+        }
+        public int tipId() { return change.tipId(); }
+        public void commit(com.game.scene.player.PlayerBags candidate, AssetAudit.Reason reason, long correlation, String extra) {
+            if (committed || !change.ok() || !candidate.normalized() || player.frozen()
+                    || !originalBags.equals(player.bags().toState())) throw new IllegalStateException("非法或已过期的装备资产候选");
+            player.wallet().commitDeduction(change);
+            player.bags().commitPrepared(candidate);
+            committed = true;
+            if (change.before() != change.after()) {
+                try { audit.currencyChanged(player.playerId(), change.type(), change.after() - change.before(),
+                        change.before(), change.after(), reason, correlation, extra); }
+                catch (RuntimeException failure) {
+                    org.slf4j.LoggerFactory.getLogger(CurrencyService.class).error("装备候选已提交，扣款审计失败 correlation={}",
+                            Long.toUnsignedString(correlation), failure);
+                }
+            }
+        }
+    }
+
+    public PreparedDeduction prepareDeduction(ScenePlayer player, int type, long amount) {
+        Wallet candidate = Wallet.restore(player.wallet().toState());
+        int invalid = amount < 0 ? INVALID_PARAMETER : Wallet.checkRequest(type, amount == 0 ? 1 : amount);
+        Wallet.Change result = invalid != 0 ? candidate.rejected(invalid, type)
+                : player.frozen() ? candidate.rejected(Wallet.FROZEN, type)
+                : amount == 0 ? new Wallet.Change(0, type, candidate.balance(type), candidate.balance(type), 0)
+                : candidate.deduct(type, amount);
+        return new PreparedDeduction(player, result);
+    }
+
     private static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
 
     private final AssetAudit audit;

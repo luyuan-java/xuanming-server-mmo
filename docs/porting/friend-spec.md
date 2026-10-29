@@ -1080,97 +1080,107 @@ SELECT player_id, name, level, class_id, gender, appearance_id, zone_id FROM pla
 
 ### 5.1 普通推荐（`online_only=false`）
 
-代码：`recommend.go:84-148`、`recommend_repo.go`。
+**2026-10-26 复核口径**：本节按 mmorpg 固定提交 `92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5` 的
+`go/friend/internal/data/recommend_repo.go`、`recommend_sql.go` 与 `recommend.go` 更新。此前「共同好友排除后才 LIMIT、
+随机兜底共同数恒为 0、两种数据库逐字同 SQL」已过时。本节更新不表示客户端契约重新同步。
 
 **流程**
-1. `limit == 0`：只有两个阈值都被配成 0 才走得到，Validate 会先拒掉。若真走到，打 ERROR 并回**空成功**（:84-90）。
-2. 排除集 = `req.exclude_player_ids ++ [me]`（:96-98）。
-3. 策略链固定两级、顺序固定：`mutual` → `random`。
-   - 每级请求的数量 `want = limit − 已选中数`，只补缺口；已经凑满就跳过后面的级（:101-124）。
-   - 每级结果按返回顺序追加，并把选中的 id 追加进排除集，后一级不会重复（:133-137）。
-4. **任一级报错 → 立刻回 1003** `"recommend candidates unavailable"`，ERROR 日志带策略名。**不做部分降级**：第一级失败不跑第二级，也不返回已选中的部分（:125-132）。
-5. 组装 `RecommendEntry{candidate_player_id, mutual_friends}`，再补在线态：走 `FillOnlineStatus`，**任何失败都降级为离线**（:166-184）。
-   - name / level 等展示字段**不填**；`online_directory=false`；`next_cursor=""`（:140-148）。
-6. 服务端不留状态。"换一批"靠客户端回传 exclude；同一请求重放结果不同，这是设计（:53-54）。
+1. 排除集为 `req.exclude_player_ids ++ [me]`；limit 沿现有 Java 配置钳制，默认 10、上限 20。
+2. 策略固定为 `mutual → random`，每级只取尚缺数量；结果按来源顺序追加，已选 id 追加到下一级排除集。
+3. 任一级 SQL / 原会话校验失败，整次回 1003 `recommend candidates unavailable`；不返回部分结果。
+4. 两级均填写真实 `mutual_friends`。仅补在线态，在线显示查询失败按离线；不填 name / level，
+   `online_directory=false`、`next_cursor=""`。不按在线态或补出的共同数重新排序。
+5. 服务不持有推荐状态；换一批靠客户端 exclude，同数候选随机，每次重放不保证相同结果。
 
-**mutual：二度好友**（`recommend_repo.go:194-224`）
+**共同好友：先排名取 W=1024，再做关系排除**
 
 ```sql
-SELECT f2.friend_player_id, COUNT(*) AS mutual
-FROM friend f1 FORCE INDEX (PRIMARY)
-STRAIGHT_JOIN friend f2 FORCE INDEX (PRIMARY) ON f2.player_id = f1.friend_player_id
-WHERE f1.player_id = ?
-  AND f2.friend_player_id <> ?
-  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend f FORCE INDEX (PRIMARY)
-        WHERE f.player_id = ? AND f.friend_player_id = f2.friend_player_id)
-  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_block b_out FORCE INDEX (PRIMARY)
-        WHERE b_out.player_id = ? AND b_out.blocked_player_id = f2.friend_player_id)
-  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_block b_in FORCE INDEX (PRIMARY)
-        WHERE b_in.player_id = f2.friend_player_id AND b_in.blocked_player_id = ?)
-  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_request r_out FORCE INDEX (PRIMARY)
-        WHERE r_out.from_player_id = ? AND r_out.to_player_id = f2.friend_player_id AND r_out.status = 1)
-  AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_request r_in FORCE INDEX (PRIMARY)
-        WHERE r_in.from_player_id = f2.friend_player_id AND r_in.to_player_id = ? AND r_in.status = 1)
-  [AND f2.friend_player_id NOT IN (?,…)]
-GROUP BY f2.friend_player_id
-ORDER BY mutual DESC, RAND()
-LIMIT ?
+SELECT c.candidate_id, c.mutual
+FROM (SELECT f2.friend_player_id AS candidate_id, COUNT(*) AS mutual, RAND() AS shuffle
+      FROM friend f1 FORCE INDEX (PRIMARY)
+      STRAIGHT_JOIN friend f2 FORCE INDEX (PRIMARY) ON f2.player_id = f1.friend_player_id
+      WHERE f1.player_id = ? AND f2.friend_player_id <> ?
+      GROUP BY f2.friend_player_id
+      ORDER BY mutual DESC, shuffle LIMIT ?) AS c
+WHERE NOT EXISTS (… friend f WHERE f.player_id = ? AND f.friend_player_id = c.candidate_id)
+  AND NOT EXISTS (… friend_block b_out WHERE b_out.player_id = ? AND b_out.blocked_player_id = c.candidate_id)
+  AND NOT EXISTS (… friend_block b_in WHERE b_in.player_id = c.candidate_id AND b_in.blocked_player_id = ?)
+  AND NOT EXISTS (… friend_request r_out WHERE r_out.from_player_id = ? AND r_out.to_player_id = c.candidate_id AND r_out.status = 1)
+  AND NOT EXISTS (… friend_request r_in WHERE r_in.from_player_id = c.candidate_id AND r_in.to_player_id = ? AND r_in.status = 1)
+  [AND c.candidate_id NOT IN (?,…)]
+ORDER BY c.mutual DESC, c.shuffle LIMIT ?
 ```
 
-- 参数顺序：me ×7 → exclude… → limit。limit 按 int64 传（:213-223）。
-- exclude 为空时不拼 `NOT IN`，空的 `NOT IN ()` 是语法错误（:81-99）。
-- 排序：共同好友数降序，同数随机。
-- **承重写法，不得改动**（:107-141）：
-  - `STRAIGHT_JOIN` 钉住"先 f1 后 f2"；
-  - 五条 NOT EXISTS 按方向拆开，每条都是完整主键等值；
-  - `SEMIJOIN(FIRSTMATCH)` 是承重的，`FORCE INDEX(PRIMARY)` 是防线；
-  - 外层列一律写 `f2.friend_player_id`。裸列名会先解析到子查询自己的表上，排除静默失效。
-- 读数上界 ≤ 8R + 2F + 2 + limit。默认上限下 ≤ 320,422；按 MaxFriends 的平方增长，所以 MaxFriends 封顶 300（:143-163）。
+- 参数为 me ×2、1024、me ×5、exclude、limit；所有 id 以 uint64 绑定（Java 高半区 long 转 BigInteger）。
+- LIMIT 必须在派生表内，关系排除不能下推到排名窗口前。窗口全被排除就返回空，由下一级兜底；不能向第 1025 名继续扫描。
+- `RAND()` 只在内层生成一次随机键，内外排序复用 `shuffle`。外层候选列始终带 `c.`，防止相关列误绑定到子查询表。
+- 在双向成对好友边、传统 MySQL 优化器且分组临时表留在内存的前提下，关系查询 Handler 读数上界为
+  `3R + 6W + 3`，R 为二度边行数（含返回自己的边）；默认 F≤200 时 R≤40000，上界 126147。
+  F 硬上限 300 保留；不以 RPC 超时替代结构性的扫描边界。历史单向边时上界需再加 2F。
 
-**random：随机锚点兜底**（`recommend_repo.go:281-395`）
-1. `SELECT MIN(player_id), MAX(player_id) FROM friend`；出错 → 报错 → 1003。
-2. 任一为 NULL 或 `max == 0` → 返回空候选，**不是错误**（:282-295）。
-3. `pivot = lo`；`hi > lo` 时 `pivot = lo + Uint64N(hi − lo + 1)`，宽度溢出为 0 时退回 lo（:296-305）。
-4. 锚点 SQL（:363-378）：
+**随机兜底：ID 窗口不变，只为返回行计算共同好友**
+
+先查 `MIN(player_id), MAX(player_id)`；空表 / NULL 或 max=0 返回空。pivot 在无符号闭区间 [lo,hi] 中取值，
+用 `RecommendPivot` 生成偏移再加 lo；宽度溢出为 0 时退回 lo。不把高半区 ID 当作负数，也不回绕扫描。
 
 ```sql
-SELECT c.player_id, 0 AS mutual
+SELECT c.player_id,
+       (SELECT COUNT(*) FROM friend m1 FORCE INDEX (PRIMARY)
+        STRAIGHT_JOIN friend m2 FORCE INDEX (PRIMARY)
+          ON m2.player_id = c.player_id AND m2.friend_player_id = m1.friend_player_id
+        WHERE m1.player_id = ?) AS mutual
 FROM (SELECT DISTINCT player_id FROM friend FORCE INDEX (PRIMARY)
-      WHERE player_id >= ? ORDER BY player_id LIMIT ?) AS c       -- pivot, 1024
+      WHERE player_id >= ? ORDER BY player_id LIMIT ?) AS c
 WHERE c.player_id <> ?
-  AND NOT EXISTS (… friend f      WHERE f.player_id = ? AND f.friend_player_id = c.player_id)
+  AND NOT EXISTS (… friend f WHERE f.player_id = ? AND f.friend_player_id = c.player_id)
   AND NOT EXISTS (… friend_block b_out WHERE b_out.player_id = ? AND b_out.blocked_player_id = c.player_id)
-  AND NOT EXISTS (… friend_block b_in  WHERE b_in.player_id = c.player_id AND b_in.blocked_player_id = ?)
+  AND NOT EXISTS (… friend_block b_in WHERE b_in.player_id = c.player_id AND b_in.blocked_player_id = ?)
   AND NOT EXISTS (… friend_request r_out WHERE r_out.from_player_id = ? AND r_out.to_player_id = c.player_id AND r_out.status = 1)
-  AND NOT EXISTS (… friend_request r_in  WHERE r_in.from_player_id = c.player_id AND r_in.to_player_id = ? AND r_in.status = 1)
+  AND NOT EXISTS (… friend_request r_in WHERE r_in.from_player_id = c.player_id AND r_in.to_player_id = ? AND r_in.status = 1)
   [AND c.player_id NOT IN (?,…)]
-ORDER BY c.player_id
-LIMIT ?
+ORDER BY c.player_id LIMIT ?
 ```
 
-   - 每条子查询同样带 `/*+ SEMIJOIN(FIRSTMATCH) */` 和 `FORCE INDEX (PRIMARY)`。
-   - 参数：pivot → 1024 → me ×6 → exclude… → limit（:383-395）。
-- 结果按 player_id **升序**，`mutual_friends` 恒为 0。
-- **不回绕、不越窗**：pivot 靠近尾部，或窗口里被排除的人太多时，返回少于 want，可能为空（:274-280）。
-- 窗口 1024 的预算账（:229-241；守账测试 `go/friend/internal/config/config_test.go:128-149`）：
-  - 有上限的排除最多占 1 + 200 + 200 + 50 + 200 + 64 + 19 = 734 个；
-  - 再装下 20 个合格者，至少需要 754；
-  - 多出的位置留给没有上限的"拉黑我的人"。
-- **剩余风险**：派生表能不能只读 pivot 之后，依赖优化器对 `player_id >= ?` 选 range 访问；统计声称表只有 ≤1 行时会退化成从索引开头扫（:35-46）。
+- 参数为 me（共同数）、pivot、1024、me ×6、exclude、limit。候选池仍只有至少有一条好友边的玩家。
+- `m2` 必须按候选自己的主键前缀 `(c.player_id, m1.friend_player_id)` 定位。共同数是两个好友集合的交集；
+  双向边不变量成立时与 mutual 来源一致。
+- ORDER BY 只用 ID；若改为共同数排序，子查询会为整个窗口求值，成本从 `limit × (2F+1)` 放大到 `W × (2F+1)`。
+- 不越窗、不回绕；窗口排除多或 pivot 靠尾部时允许少于 want。默认有上限的排除加所需返回数共 754，小于 1024；
+  「拉黑我的人数」无上限，因此不保证凑满，配置调大也可能增加欠填。
+- 关系查询的读数界为窗口生产成本 + `(W+1) + 5W + limit×(2F+1)`。窗口生产可能是跳跃扫描，也可能按每人的好友边范围扫描；
+  `7W+3` 不是所有计划下的通用上界。
 
-**排除语义**（两级一致）
-- 排除：自己、调用方 exclude、已是我的好友、我拉黑的、拉黑我的、我发出的 pending、发给我的 pending（:68-70）。
-- **纯读**：不进事务、不加锁、不持守卫；三张表之间没有快照一致性，允许轻微陈旧。**禁止把这些查询复用为 AddFriend 的前置判定**（:19-26）。
-- 候选池只有"至少有一条好友边的玩家"，新服推荐为空（:63-66）。
-- `rows.Err()` 必须检查，否则断连会被当成"没有候选"（:419-423）。
+**Java SQL、方言和强读边界**
 
-**Java 落地**
-- 两条 SQL **逐字照搬**，包括提示和字面量 `status = 1`。
-- exclude 用 MyBatis `<foreach>` 拼 `NOT IN`，空列表时不拼。所有 id 按无符号绑定。
-- pivot 用 `lo + nextLong(hi − lo + 1)`（雪花 id 小于 2^63）；宽度 ≤0 时退回 lo。
-- 任一 SQL 异常 → 1003 `"recommend candidates unavailable"`，不返回部分结果。
-- 这些写法 H2 不支持，SQL 测试必须连真 MySQL（`-Dgame.it.mysql`，`AGENTS.md` §4）。
-- 在线态用 `PlayerPresenceDirectory.findAllAsync`，任何失败都按离线处理。
+- `RecommendStore` 是标准 JDBC repository；不可变 `RecommendSql` 统一 SQL 结构与绑定参数。没有引入 Go 目录、
+  go-zero 框架或 MyBatis 动态 SQL。启动调用 `forDatabase` 探测一次 VERSION，未知数据库拒绝装配。
+- MySQL 五条排除各带 `SEMIJOIN(FIRSTMATCH)`；TiDB 各排除子查询带 `QB_NAME(qb_f / qb_b_out / qb_b_in / qb_r_out / qb_r_in)`，
+  外层使用对应 `INL_JOIN(alias@queryblock)`，共同好友派生表另带 `QB_NAME(qb_fof)` 与 `INL_JOIN(@qb_fof f2)`。
+  两种方言都保留完整主键提示、五方向 NOT EXISTS 与字面量 pending=1；exclude 为空不拼空 IN。
+- 每次发出 SQL 时按整请求剩余毫秒与单语句上限的较小者加入 `MAX_EXECUTION_TIME`，并设置 JDBC 秒级 query timeout。
+  已超时不借连接 / 不继续发 SQL；读行与返回前再查 Deadline，超时不能伪装成空成功。
+- **客户端身份校验没有降级**：每个绑定查询在 READ_COMMITTED 短事务首锁路由权威与 P，
+  用请求原 account、原 owner_revision 校验，保锁完成查询后再提交；过户、ABA、冻结、非法高半区修订均拒绝。
+  不根据当前账号或当前修订替换原件。MIN/MAX 和 anchor 各自进入同样的绑定查询，不能只在策略链开头验一次身份。
+- 关系数据允许轻微陈旧；纯系统读仍自动提交。推荐绝不能替代 AddFriend 的事务判定。
+  生产强读连接策略、原账号绑定和修订围栏沿现有 Java 规则保留。
+- 多副本推荐没有本机共享状态，复用同一 SQL 权威域；本批不改变生产 TiDB 路由围栏的锁粒度。
+  当前全局 meta 排他锁可能限制吞吐，不能把推荐优化表述成已完成横向扩展容量验收。
+
+**验证入口与尚未验证事项**
+
+- 离线：`RecommendSqlTest` 守窗口、参数顺序、无符号绑定、提示方言与语句预算；
+  `RecommendStoreBudgetTest` 守截止前后 SQL 行为；`RecommendServiceTest` 守两级补缺及真实共同数直传；
+  `FriendPropertiesTest` 守默认排除预算。
+- `RecommendDatabaseTest` 分别接受 `-Dgame.it.mysql=jdbc:mysql://host:port`、
+  `-Dgame.it.tidb=jdbc:mysql://host:port`，每例创建随机独立库并清理；账号属性为相应 `game.it.*.user`，
+  密码取 `GAME_MYSQL_PASSWORD`。TiDB 严格验收加 `-Dgame.it.tidb.required=true`，缺入口判失败。
+- 真库用例覆盖：1024 窗口饱和、五种排除、真实共同数与顺序、高半区 ID、原账号 / revision 强读；
+  新鲜与空表陈旧统计下的计划；MySQL 的 Handler 读数界；TiDB 的完整定位别名及无提示警告。
+  `RecommendAndSweepMysqlTest` 既有断言保留，改为按数据库实际方言装配。
+- **本次实现阶段没有运行编译或数据库测试**；上述为待执行的验收条件，不是通过证据。
+  真实库统计 / 冷页 / 大数据时延与多副本负载仍须在目标环境测量。MySQL hypergraph 优化器、内存临时表落盘、
+  随机窗口在极端陈旧统计下退化为索引开头扫描等条件不能由离线单测证明无风险。
 
 ### 5.2 在线目录（`online_only=true`）
 

@@ -28,7 +28,7 @@ import java.util.List;
  * 背包的客户端方法（{@code SceneBagClientPlayer}）：191 GetBag 读取、192 SortBag 整理（基线 player_bag_handler + PlayerBagSystem）。
  *
  * <p>GetBag 纯读取：bag_type（uint32，按无符号看）不是 0–3 回 1005；成功回整包快照——物品按 item_id（无符号）升序、
- * 格子按格子号升序、每格 1×1，表里查得到才填 max_stack / equip_kind，名字与图标恒空（表没有展示列），{@code layout} 总在
+ * 格子按格子号升序、每格 1×1，表里查得到才填 max_stack / equip_kind 与展示信息；装备属性和孔位纯读现算，{@code layout} 总在
  * （空包也带容量，客户端 / robot 缺了它就当失败），{@code currency} 是当前钱包（同 54）。
  * SortBag 只允许人物背包与仓库（否则 1005），合并 + 重排后回整包快照与 {@code changed}（已经最优时 false、什么都不动）。
  * 失败只回 tip（不带 bag、不带 changed）。成功也带 {@code error_message{id:0}}（同基线线上形态）。
@@ -40,9 +40,12 @@ public final class BagFeature implements SceneFeature {
     static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
 
     private final BagService bags;
+    private final com.game.scene.equip.EquipmentDisplay equipment;
 
     public BagFeature(BagService bags) {
         this.bags = bags;
+        this.equipment = bags.tables().equipmentRules() == null ? null
+                : new com.game.scene.equip.EquipmentDisplay(bags.tables().equipmentRules());
     }
 
     /** 冻结策略（scene-handoff-spec §5.9）：191 只读；192 GATED，由 {@link BagService} 的冻结闸回 1005。 */
@@ -81,7 +84,7 @@ public final class BagFeature implements SceneFeature {
                 .build());
     }
 
-    private BagInfo snapshot(ScenePlayer player, BagType type) {
+    public BagInfo snapshot(ScenePlayer player, BagType type) {
         Bag bag = player.bags().bag(type);
         List<BagItem> items = bag.items();
         List<BagItem> byGuid = new ArrayList<>(items);
@@ -96,6 +99,7 @@ public final class BagFeature implements SceneFeature {
             if (spec != null) {
                 entry.setMaxStack(spec.maxStackSize()).setEquipKind(spec.equipKind());
             }
+            if (equipment != null) equipment.item(item, entry);
             info.addItems(entry);
         }
         BagLayoutInfo.Builder layout = BagLayoutInfo.newBuilder()
@@ -105,6 +109,7 @@ public final class BagFeature implements SceneFeature {
         for (BagItem item : items) {
             layout.addSlots(BagSlotInfo.newBuilder().setSlot(item.slot()).setItemId(item.guid()).setWidth(1).setHeight(1));
         }
+        if (equipment != null && type == BagType.EQUIPMENT) equipment.slots(layout);
         return info.setLayout(layout).setCurrency(player.wallet().toClient()).build();
     }
 }

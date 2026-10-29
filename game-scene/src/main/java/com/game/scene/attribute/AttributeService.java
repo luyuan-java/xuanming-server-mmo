@@ -82,7 +82,7 @@ public final class AttributeService {
      * </ul>
      * {@code LOAD} 与 {@code LEVEL_CHANGED} 还会先做「已分配 &gt; 总量」的收敛。
      */
-    enum RecalcReason { LOAD, LEVEL_CHANGED, ALLOCATE, SCHEME_SWITCH, RESET }
+    enum RecalcReason { LOAD, LEVEL_CHANGED, ALLOCATE, SCHEME_SWITCH, RESET, EQUIPMENT }
 
     /** 自动加点结果：成功时 {@code suggested} 是该池全部维度的建议目标已分配（含已分配部分）。 */
     public record AutoAllocation(int tipId, Map<Integer, Long> suggested) {
@@ -96,6 +96,7 @@ public final class AttributeService {
     private final SceneClock clock;
     private final CurrencyService currency;
     private final SceneMetrics metrics;
+    private final com.game.scene.equip.EquipmentRules equipment;
 
     public AttributeService(AttributeTables tables, SceneClock clock, CurrencyService currency) {
         this(tables, clock, currency, SceneMetrics.noop());
@@ -103,11 +104,21 @@ public final class AttributeService {
 
     /** @param metrics 战斗在途闸的拒绝计数（{@code game.scene.battle.gate.rejects{gate=attribute}}） */
     public AttributeService(AttributeTables tables, SceneClock clock, CurrencyService currency, SceneMetrics metrics) {
+        this(tables, clock, currency, metrics, new com.game.scene.equip.EquipmentRules(
+                com.game.scene.equip.EquipmentTables.empty(), bound -> 0));
+    }
+
+    public AttributeService(AttributeTables tables, SceneClock clock, CurrencyService currency, SceneMetrics metrics,
+                            com.game.scene.equip.EquipmentRules equipment) {
         this.tables = tables;
         this.clock = clock;
         this.currency = currency;
         this.metrics = metrics;
+        this.equipment = equipment;
     }
+
+    /** 装备变更保持当前血蓝比例，不提供穿脱回血入口。 */
+    public void equipmentChanged(ScenePlayer player) { recalculate(player, RecalcReason.EQUIPMENT); }
 
     // ------------------------------------------------------------------ 加载
 
@@ -146,11 +157,14 @@ public final class AttributeService {
 
         Accumulator acc = Accumulator.classInitial(classRow);
         Accumulator standard = standardBaseAtLevelCap(classRow);
+        var equipmentBonus = com.game.scene.equip.EquipmentBonuses.collect(player.bags(), equipment);
+        attributes.setEquipment(equipmentBonus);
         for (AttributeDimensionTable dimension : tables.playerDimensions()) {
             double natural = (double) Integer.toUnsignedLong(dimension.getBasePerLevel()) * level;
             if (natural > 0.0) {
                 acc.addLinear(dimension, natural);
             }
+            acc.addLinear(dimension, equipmentBonus.primary(dimension.getId()));
             long allocated = scheme != null ? scheme.allocated(dimension.getId()) : 0;
             if (allocated == 0) {
                 continue;
@@ -164,6 +178,10 @@ public final class AttributeService {
             }
         }
 
+        Derived flat = equipmentBonus.flat();
+        acc.maxHealth += flat.maxHealth(); acc.maxMana += flat.maxMana();
+        acc.physicalAttack += flat.physicalAttack(); acc.magicAttack += flat.magicAttack();
+        acc.speed += flat.speed(); acc.defense += flat.defense();
         Derived old = attributes.derived();
         Derived derived = new Derived(Math.max(floor(acc.maxHealth), 1), floor(acc.maxMana),
                 floor(acc.physicalAttack), floor(acc.magicAttack), floor(acc.speed), floor(acc.defense));
@@ -307,8 +325,9 @@ public final class AttributeService {
                     .setName(dimension.getName())
                     .setDesc(dimension.getDesc())
                     .setAllocated((int) allocated)
-                    // 面板值是点数：自然成长 + 已分配 + 外部加成（Java 版尚无外部加成）
-                    .setValue(Integer.toUnsignedLong(dimension.getBasePerLevel()) * level + allocated)
+                    .setBonus((int) Math.min(0xffff_ffffL, attributes.equipment().primary(dimension.getId())))
+                    .setValue(com.game.scene.equip.EquipmentRules.add(Integer.toUnsignedLong(dimension.getBasePerLevel()) * level + allocated,
+                            attributes.equipment().primary(dimension.getId())))
                     .setSort(dimension.getSort());
             AttributePoolTable pool = tables.poolOf(dimension);
             if (pool != null) {
@@ -329,6 +348,25 @@ public final class AttributeService {
                 .setDefense(derived.defense())
                 .setHealth(attributes.health())
                 .setMana(attributes.mana()));
+        var classRow = tables.classRow(player.classId());
+        var displayOrder = java.util.Comparator.comparing(com.game.table.EquipAttributeTable::getSort, Integer::compareUnsigned)
+                .thenComparing(com.game.table.EquipAttributeTable::getId, Integer::compareUnsigned);
+        Map<Integer, com.game.table.EquipAttributeTable> combatRows = new java.util.HashMap<>();
+        equipment.tables().attributes().stream().filter(a -> a.getEffect() == 5 && com.game.scene.equip.EquipmentRules.accepted(a))
+                .forEach(a -> combatRows.merge(a.getEffectParam(), a, (left, right) -> displayOrder.compare(left, right) <= 0 ? left : right));
+        combatRows.values().stream().filter(a -> !a.getName().isEmpty())
+                .sorted(java.util.Comparator.comparing(com.game.table.EquipAttributeTable::getSort, Integer::compareUnsigned)
+                        .thenComparingInt(com.game.table.EquipAttributeTable::getEffectParam)).forEach(a -> {
+                    int id = a.getEffectParam();
+                    var field = com.game.proto.CombatAttributes.getDescriptor().findFieldByNumber(id);
+                    long value = (long) attributes.combat().getField(field);
+                    long base = classRow == null ? 0 : (id == 1 || id == 2) ? classRow.getInitCritchance()
+                            : (id == 14 || id == 15) ? classRow.getInitResistance() : 0;
+                    long total = com.game.scene.equip.EquipmentRules.add(value, base < 0 ? Long.MAX_VALUE : base);
+                    panel.addCombat(com.game.proto.CombatAttributeInfo.newBuilder().setCombatId(id).setName(a.getName())
+                            .setValue(a.getPercent() != 0 ? Math.min(100, total) : total)
+                            .setPercent(a.getPercent() != 0).setSort(a.getSort()));
+                });
         return panel.build();
     }
 

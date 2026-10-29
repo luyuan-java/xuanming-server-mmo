@@ -31,29 +31,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * battle 侧结算发件箱（基线 {@code DispatchSettlementDurably} + 重投，{@code room.cpp:1657-1849}；scene-battle-spec §3.3–§3.5、§7.15）：
- * <b>先落 Redis、后投递</b>（顺序是硬要求：先投后落库会让 scene 先应用并销账、迟到的 SET 留下孤儿记录，下次登录重复发奖），未销账就有界重投。
+ * Redis 兼容通道的结算发件箱（scene-battle-spec §3.3–§3.5、§7.15）：先调用落库，再定位并首投。
+ * 写入成功或结果未知都登记原 ID 和不可变原字节；UNKNOWN 不等于回滚，仍保留既有一次尽力首投。
+ * 已有墓碑使 STORE 返回 -1 时不登记、不投递；不新增墓碑，也不从缺失记录推断未知写入已经销账。
  *
- * <ul>
- *   <li><b>线程</b>（D25）：独占一条 {@code battle-outbox}（{@link BattleScheduler}）。{@link #dispatch} 在 {@code battle-logic} 上只把任务交过来；
- *       名单、计时器、判定都在发件箱线程上，Redisson / Dubbo 的回调投递回它。</li>
- *   <li><b>落库</b>：{@code STORE_SETTLEMENT}（每局一个 Hash 字段，D13）成功 → 定位（位置记录 + 节点目录，D14）→ 投递 → 登记；定时器没开就开。
- *       首投解析不到（离线玩家的常态）→ 这次不投、照常登记。落库失败（含问不到结论：超时、空回复）→ 计 {@code not_durable}（告警）、只投一次、
- *       不登记（Q16）。落库后字段数超过 {@link BattleRedis#SETTLEMENT_FIELDS_WARN} → ERROR + 计 {@code fields_overflow}。</li>
- *   <li><b>已销账墓碑</b>（Java 独有，{@code game:battle:{pid}:settled:<battle_id>}，TTL {@link BattleRedis#SETTLED_TOMBSTONE_TTL_SEC}）：scene 的 ACK
- *       与本端的「已被取代」都会留下它，{@code STORE_SETTLEMENT} 见到它就<b>不写</b>、回 {@link BattleRedis#STORE_ALREADY_SETTLED}。发件箱把这个返回
- *       当作已销账：计 {@code already_settled}，不登记、不投递。它堵的是「落库的结局不明」这个窗口——Redisson 的落库多半败在响应超时，命令其实已经
- *       写出：按 Q16 投一次之后 scene 在线应用、落盘、销账（HDEL 是空操作）、账本 forget，那条 EVAL 这时才落地，就会留下 7 天的孤儿记录，
- *       下次进场重复发奖（正是「先落库、后投递」要防的结局）。有了墓碑，销账之后才落地的 STORE（无论是超时那一次、Redisson 的原样重发，
- *       还是本端重入的 dispatch）都写不进去，<b>不会再造出孤儿记录</b>；{@code not_durable} 的路径本身不变（仍只投一次、不登记）。
- *       残余：墓碑过期（10 min）之后才落地的落库不受保护；scene 的 reaper 判废不写墓碑（判废之后晚到的结算照常落库，由进场恢复应用）。</li>
- *   <li><b>每 10 s 一轮</b>，名单空了<b>当场</b>停表（每个摘除点之后都查一次，不等下一轮）：探测在途的跳过；登记超过
- *       {@link BattleRedis#OUTBOX_MAX_AGE} → 按用尽摘除（{@code expired}）；HEXISTS 出错或<b>没有结论</b>（空结果）→ 本轮跳过、不计次（D15：
- *       没问到结论不当已销账）；不在 → 摘除（{@code acked}）；在 → 定位（出错同样跳过、不计次）→ {@link SettlementRetryRules#classify}：
- *       RESEND 按定位到的实例重投；SKIP_NO_TARGET 另跑 {@code ACK_IF_SUPERSEDED}（2 / 3 摘除，D17）；EXHAUSTED 摘除，记录留给 scene 的进场恢复 / rescue。</li>
- *   <li><b>投递应答只计数</b>，不改名单（D16）：scene 应用之后要等落盘才能销账，「已应用」不等于「可以停止重投」。</li>
- *   <li><b>停机</b>（{@link #drainAndClose}）：最多等 {@code game.battle.outbox-drain-timeout} 让在途的落库与首投回来，然后丢弃内存名单（记录留在 Redis）。</li>
- * </ul>
+ * <p>每 10 秒探测，最多 12 次重投判定，登记最多保留 {@link BattleRedis#OUTBOX_MAX_AGE}。未知写入每轮须读取并精确核对
+ * 原字节后才能定位重投；不存在、异值或读失败都保留 UNKNOWN，不计重投次数、不补写、不调用取代销账。
+ * 正常确认写入的既有重投和销账规则保留。投递应答只计数，不能作为资产已经落盘的证明。
+ * 同进程在途或登记期间拒绝同 ID 不同字节，旧 store / probe 回包不能替换新登记；这不是跨写者 Redis 围栏。
+ *
+ * <p>全部名单操作归属 {@code battle-outbox} 线程，异步端口回包投递回该线程。{@link #drainAndClose} 有界等待落库与首投，
+ * 然后丢弃内存登记。年龄或次数耗尽只停止内存重投，不能证明已销账或原件仍存在。兼容通道仍有既有 TTL 与重启恢复限制，
+ * 不能代替 SQL v1 的永久原件和持久回执。已有墓碑的保护也只在其 TTL 内有效。
  */
 public final class SettlementOutbox implements SettlementSink {
 
@@ -71,6 +60,11 @@ public final class SettlementOutbox implements SettlementSink {
         /** HEXISTS：记录还在吗。问不到结论（出错、空回复）以异常完成，不回 false。 */
         CompletableFuture<Boolean> exists(long playerId, long battleId);
 
+        /** 读取持久原件供未知写入核对。空值只代表当前没有原件，不是销账证明。 */
+        default CompletableFuture<byte[]> readOriginal(long playerId, long battleId) {
+            return CompletableFuture.failedFuture(new UnsupportedOperationException("未装配结算原件读取"));
+        }
+
         /** {@code ACK_IF_SUPERSEDED}：3 已销账 / 0 锁不在 / 1 仍是本局 / 2 已被取代（删了记录并留下已销账墓碑）。 */
         CompletableFuture<Long> ackIfSuperseded(long playerId, long battleId);
 
@@ -85,6 +79,11 @@ public final class SettlementOutbox implements SettlementSink {
                 @Override
                 public CompletableFuture<Boolean> exists(long playerId, long battleId) {
                     return redis.settlementExists(playerId, battleId);
+                }
+
+                @Override
+                public CompletableFuture<byte[]> readOriginal(long playerId, long battleId) {
+                    return redis.readSettlement(playerId, battleId);
                 }
 
                 @Override
@@ -118,15 +117,40 @@ public final class SettlementOutbox implements SettlementSink {
         /** 开局时的 scene 节点（只进日志）。 */
         final int originalSceneNode;
         final long enqueuedAtMs;
+        final boolean persistenceUnconfirmed;
         int attempts;
         boolean probing;
 
-        Entry(long playerId, long battleId, ByteString payload, int originalSceneNode, long enqueuedAtMs) {
+        Entry(long playerId, long battleId, ByteString payload, int originalSceneNode, long enqueuedAtMs,
+              boolean persistenceUnconfirmed) {
             this.playerId = playerId;
             this.battleId = battleId;
             this.payload = payload;
             this.originalSceneNode = originalSceneNode;
             this.enqueuedAtMs = enqueuedAtMs;
+            this.persistenceUnconfirmed = persistenceUnconfirmed;
+        }
+    }
+
+    /** 同一键全部未完成写调用共享字节约束；最新回包的登记权与约束的寿命分别维护。 */
+    private static final class PendingStores {
+        final ByteString payload;
+        Object latest;
+        int unfinished;
+
+        PendingStores(ByteString payload) {
+            this.payload = payload;
+        }
+
+        Object begin() {
+            latest = new Object();
+            unfinished++;
+            return latest;
+        }
+
+        boolean finish(Object attempt) {
+            unfinished--;
+            return latest == attempt;
         }
     }
 
@@ -137,6 +161,8 @@ public final class SettlementOutbox implements SettlementSink {
     private final OutboxMetrics metrics;
     private final LongSupplier clockMillis;
     private final Map<Key, Entry> entries = new LinkedHashMap<>();
+    /** 全部未完成调用归零前保留共同 payload；不能随最新回包或登记摘除而丢掉旧写约束。 */
+    private final Map<Key, PendingStores> pendingStores = new LinkedHashMap<>();
     /** 在途的落库 + 首投（停机排空等它归零；任意线程读写）。 */
     private final AtomicInteger inFlight = new AtomicInteger();
     private Cancellable timer;
@@ -192,26 +218,46 @@ public final class SettlementOutbox implements SettlementSink {
             return;
         }
         ByteString bytes = ByteString.copyFrom(payload);
+        Key key = new Key(battleId, playerId);
+        Entry registered = entries.get(key);
+        PendingStores pending = pendingStores.get(key);
+        if ((registered != null && !registered.payload.equals(bytes))
+                || (pending != null && !pending.payload.equals(bytes))) {
+            metrics.settlement(SettlementEvent.PAYLOAD_CONFLICT);
+            log.error("同一结算原ID收到不同字节，拒绝覆盖或投递 battle_id={} player={}",
+                    Long.toUnsignedString(battleId), Long.toUnsignedString(playerId));
+            finishFirst(true);
+            return;
+        }
+        PendingStores calls = pendingStores.computeIfAbsent(key, ignored -> new PendingStores(bytes));
+        Object attempt = calls.begin();
         CompletableFuture<Long> stored;
         try {
             stored = store.store(playerId, battleId, payload);
         } catch (RuntimeException e) {
             stored = CompletableFuture.failedFuture(e);
         }
-        onOutbox(stored, (fields, error) -> onStored(routing, playerId, battleId, bytes, fields, error));
+        onOutbox(stored, (fields, error) -> {
+            boolean latest = calls.finish(attempt);
+            if (calls.unfinished == 0) {
+                pendingStores.remove(key, calls);
+            }
+            if (!latest) {
+                finishFirst(true);
+                return;
+            }
+            onStored(routing, playerId, battleId, bytes, fields, error);
+        });
     }
 
     private void onStored(BattleRouting routing, long playerId, long battleId, ByteString payload, Long fields, Throwable error) {
-        if (error != null || fields == null) {
-            // Q16：只投一次 + 告警，不登记（基线 Redis 不可用时同一结局）。没有结论（空结果）同样不算落库成功（D15 的口径）。
-            // 结局不明的那条 EVAL 即使之后才落地，也会被 scene 销账留下的墓碑挡住，不会造出孤儿记录（见类注释）
+        boolean unconfirmed = error != null || fields == null || (fields < 1 && fields != BattleRedis.STORE_ALREADY_SETTLED);
+        if (unconfirmed) {
             metrics.settlement(SettlementEvent.NOT_DURABLE);
-            log.error("结算落库失败，只投递一次、不登记重投（结算可能丢失） battle_id={} player={}: {}", Long.toUnsignedString(battleId),
-                    Long.toUnsignedString(playerId), error != null ? error.toString() : "落库没有结论（空结果）");
-            locateAndDeliver(playerId, battleId, payload, 0, true);
-            return;
+            log.error("结算持久性未确认，首投并登记原件探测；不能将异常视为回滚 battle_id={} player={}: {}", Long.toUnsignedString(battleId),
+                    Long.toUnsignedString(playerId), error != null ? error.toString() : "无效落库结果: " + fields);
         }
-        if (fields == BattleRedis.STORE_ALREADY_SETTLED) {
+        if (!unconfirmed && fields == BattleRedis.STORE_ALREADY_SETTLED) {
             // 这一局已经销账（落库的重发 / 晚到落在 scene 的 ACK 之后，脚本没有写入）：按已销账处理，不登记、不投递
             metrics.settlement(SettlementEvent.ALREADY_SETTLED);
             log.info("结算落库时这一局已销账（重放 / 晚到的落库被墓碑挡下），不登记、不投递 battle_id={} player={}",
@@ -219,15 +265,17 @@ public final class SettlementOutbox implements SettlementSink {
             finishFirst(true);
             return;
         }
-        metrics.settlement(SettlementEvent.STORED);
-        if (fields > BattleRedis.SETTLEMENT_FIELDS_WARN) {
+        if (!unconfirmed) {
+            metrics.settlement(SettlementEvent.STORED);
+        }
+        if (!unconfirmed && fields > BattleRedis.SETTLEMENT_FIELDS_WARN) {
             metrics.settlement(SettlementEvent.FIELDS_OVERFLOW);
             log.error("玩家的待结算记录字段数异常（正常为 1） player={} fields={} battle_id={}", Long.toUnsignedString(playerId), fields,
                     Long.toUnsignedString(battleId));
         }
         Key key = new Key(battleId, playerId);
         if (!closed) {
-            entries.put(key, new Entry(playerId, battleId, payload, routing.getSceneNodeId(), clockMillis.getAsLong()));
+            entries.put(key, new Entry(playerId, battleId, payload, routing.getSceneNodeId(), clockMillis.getAsLong(), unconfirmed));
             metrics.entries(entries.size());
             ensureTimer();
         }
@@ -322,14 +370,15 @@ public final class SettlementOutbox implements SettlementSink {
     void tick() {
         long now = clockMillis.getAsLong();
         for (Entry entry : new ArrayList<>(entries.values())) {
-            if (entry.probing) {
-                continue;
-            }
             if (now - entry.enqueuedAtMs > BattleRedis.OUTBOX_MAX_AGE.toMillis()) {
                 remove(entry);
                 metrics.settlement(SettlementEvent.EXPIRED);
-                log.error("结算发件箱条目超龄仍无结论（探测 / 定位一直出错），按用尽摘除；记录仍在 Redis，留给 scene 兜底 battle_id={} player={}",
+                log.error("结算发件箱条目超龄，停止内存重投；销账未确认，须核对持久原件与消费回执 persistence_unconfirmed={} battle_id={} player={}",
+                        entry.persistenceUnconfirmed,
                         Long.toUnsignedString(entry.battleId), Long.toUnsignedString(entry.playerId));
+                continue;
+            }
+            if (entry.probing) {
                 continue;
             }
             entry.probing = true;
@@ -355,12 +404,47 @@ public final class SettlementOutbox implements SettlementSink {
             return;
         }
         if (!exists) {
+            if (entry.persistenceUnconfirmed) {
+                // 未确认的写可能未落地、已销账，或仍在路上。HEXISTS=0 不证明哪一种，也不补写。
+                metrics.settlement(SettlementEvent.PROBE_ERROR);
+                return;
+            }
             remove(entry);
             metrics.settlement(SettlementEvent.ACKED);
             // 最常见的收尾（scene 已销账）：名单空了当场停表，不多空转一轮（基线 room.cpp:1782-1783）
             stopTimerIfIdle();
             return;
         }
+        if (entry.persistenceUnconfirmed) {
+            verifyOriginal(entry);
+            return;
+        }
+        locateRegistered(entry);
+    }
+
+    private void verifyOriginal(Entry entry) {
+        entry.probing = true;
+        CompletableFuture<byte[]> original;
+        try {
+            original = store.readOriginal(entry.playerId, entry.battleId);
+        } catch (RuntimeException error) {
+            original = CompletableFuture.failedFuture(error);
+        }
+        onOutbox(original, (bytes, error) -> {
+            if (!registered(entry)) {
+                return;
+            }
+            entry.probing = false;
+            if (error != null || bytes == null || !entry.payload.equals(ByteString.copyFrom(bytes))) {
+                metrics.settlement(SettlementEvent.PROBE_ERROR);
+                return;
+            }
+            // 每轮均重读原字节；一次存在证明不把写入未知永久升级为已销账可判定。
+            locateRegistered(entry);
+        });
+    }
+
+    private void locateRegistered(Entry entry) {
         entry.probing = true;
         CompletableFuture<Resolution> located;
         try {
@@ -392,17 +476,20 @@ public final class SettlementOutbox implements SettlementSink {
             }
             case SKIP_NO_TARGET -> {
                 metrics.settlement(SettlementEvent.SKIP_NO_TARGET);
-                ackIfSuperseded(entry);
+                // 兼容销账脚本的 3 仅代表字段不存在；未知写入不得借它伪造销账，也不据新锁删原件。
+                if (!entry.persistenceUnconfirmed) {
+                    ackIfSuperseded(entry);
+                }
             }
             case EXHAUSTED -> {
                 remove(entry);
                 if (hasTarget) {
                     metrics.settlement(SettlementEvent.EXHAUSTED);
-                    log.error("结算重投用尽（玩家在线却一直没销账），摘除；记录留给 scene 的 rescue / 进场恢复 battle_id={} player={} 开局节点={}",
+                    log.error("结算重投用尽（玩家在线却未确认销账），停止内存重投，未删除 Redis 原件 battle_id={} player={} 开局节点={}",
                             Long.toUnsignedString(entry.battleId), Long.toUnsignedString(entry.playerId), entry.originalSceneNode);
                 } else {
                     metrics.settlement(SettlementEvent.EXHAUSTED_OFFLINE);
-                    log.warn("结算重投用尽（玩家离线），摘除；记录留给进场恢复 battle_id={} player={}", Long.toUnsignedString(entry.battleId),
+                    log.warn("结算重投用尽（玩家离线），停止内存重投，未删除 Redis 原件 battle_id={} player={}", Long.toUnsignedString(entry.battleId),
                             Long.toUnsignedString(entry.playerId));
                 }
             }
@@ -471,8 +558,8 @@ public final class SettlementOutbox implements SettlementSink {
     }
 
     /**
-     * 停机（{@code BattleNode} 停止之后，逻辑线程已停）：最多等 {@code drainTimeout} 让在途的落库与首投回来，然后丢弃内存名单（记录留在 Redis，
-     * 由 scene 的 rescue / 进场恢复兜底）。之后的 {@link #dispatch} 只打 ERROR。
+     * 停机（{@code BattleNode} 停止之后，逻辑线程已停）：最多等 {@code drainTimeout} 让在途的落库与首投回来，然后丢弃内存名单。
+     * 已确认的原件由 scene 恢复，未知写入仍须核对持久证据。之后的 {@link #dispatch} 只打 ERROR。
      */
     public void drainAndClose(Duration drainTimeout) {
         long deadline = System.nanoTime() + drainTimeout.toNanos();
@@ -492,7 +579,7 @@ public final class SettlementOutbox implements SettlementSink {
         try {
             outbox.execute(() -> {
                 if (!entries.isEmpty()) {
-                    log.info("结算发件箱停机，丢弃 {} 条内存登记（记录留在 Redis，由 scene 的 rescue / 进场恢复兜底）", entries.size());
+                    log.info("结算发件箱停机，丢弃 {} 条内存登记；未确认销账，须核对持久原件与消费回执", entries.size());
                 }
                 entries.clear();
                 metrics.entries(0);

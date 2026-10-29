@@ -39,6 +39,11 @@ import org.slf4j.LoggerFactory;
  * 重定向帧：源节点据此把位置改回源场景，zone-travel-spec §5.5）。
  */
 public final class GateLinks implements ClientSink {
+    private final java.util.concurrent.atomic.AtomicInteger pendingTransferWrites = new java.util.concurrent.atomic.AtomicInteger();
+    private final Object transferWriteCompletion = new Object();
+
+    @Override
+    public int pendingTransferWrites() { return pendingTransferWrites.get(); }
 
     private static final Logger log = LoggerFactory.getLogger(GateLinks.class);
 
@@ -193,6 +198,7 @@ public final class GateLinks implements ClientSink {
         if (written == null) {
             return false;
         }
+        pendingTransferWrites.incrementAndGet();
         int sessionId = transfer.getSessionId();
         long playerId = transfer.getPlayerId();
         long fromEpoch = transfer.getFromEpoch();
@@ -200,6 +206,12 @@ public final class GateLinks implements ClientSink {
         boolean redirect = transfer.hasRedirect();
         written.addListener(future -> {
             if (future.isSuccess()) {
+                try {
+                    logic.execute(this::transferWriteSettled);
+                } catch (RejectedExecutionException rejected) {
+                    // 不能伪报收敛：逻辑线程已停止，保留计数供停服结论识别未完成的回调。
+                    log.warn("逻辑线程已停止，PlayerTransfer 成功回执未处理 player={}", Long.toUnsignedString(playerId));
+                }
                 return;
             }
             // 链路 I/O 线程上：帧没写出去（链路在冲刷前关闭）。gate 没收到这一帧，源节点要自己善后
@@ -209,7 +221,10 @@ public final class GateLinks implements ClientSink {
                     redirect ? "{redirect}" : "", linkId, sessionId, Long.toUnsignedString(playerId), fromEpoch, toEpoch,
                     String.valueOf(future.cause()));
             try {
-                logic.execute(onWriteFailed);
+                logic.execute(() -> {
+                    try { onWriteFailed.run(); }
+                    finally { transferWriteSettled(); }
+                });
             } catch (RejectedExecutionException e) {
                 // 逻辑线程已停（停服）：改绑指令的新 epoch 等租约过期（scene-handoff-spec §8.2 R-J1）；重定向帧的新 epoch 本来就已释放
                 log.warn("逻辑线程已停止，PlayerTransfer 写失败的善后丢弃 player={} epoch={}", Long.toUnsignedString(playerId),
@@ -217,6 +232,26 @@ public final class GateLinks implements ClientSink {
             }
         });
         return true;
+    }
+
+    private void transferWriteSettled() {
+        synchronized (transferWriteCompletion) {
+            pendingTransferWrites.decrementAndGet();
+            transferWriteCompletion.notifyAll();
+        }
+    }
+
+    /** 停机线程等待冲刷回调已经在逻辑线程处理；逻辑线程本身不得调用。 */
+    public int awaitTransferWrites(long timeoutNanos) throws InterruptedException {
+        long deadline = System.nanoTime() + Math.max(0, timeoutNanos);
+        synchronized (transferWriteCompletion) {
+            while (pendingTransferWrites.get() > 0) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) break;
+                java.util.concurrent.TimeUnit.NANOSECONDS.timedWait(transferWriteCompletion, remaining);
+            }
+            return pendingTransferWrites.get();
+        }
     }
 
     /** 写一帧；链路已断 / 不可写时返回 null（帧确定没写出），否则返回这次写的 future。 */

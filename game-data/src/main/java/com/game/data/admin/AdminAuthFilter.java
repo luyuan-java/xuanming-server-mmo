@@ -40,7 +40,8 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
     private static final Map<String, String> KNOWN_OPS = Map.of(
             AuditQueryController.TRANSACTION_LOG_PATH, "transaction_log",
             AuditQueryController.PLAYER_SNAPSHOTS_PATH, "player_snapshots",
-            KillSwitchAdminController.PATH, "killswitch");
+            KillSwitchAdminController.PATH, "killswitch",
+            AuditProbeAdminController.PATH, "audit_consumer_probes");
 
     private final byte[] token;
     private final DataMetrics metrics;
@@ -88,6 +89,7 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
      * 各子路径各归成一个，其余一律 other（任意路径不得变成标签值）。
      */
     static String opOf(String path) {
+        if (under(path, com.game.data.consistency.ConsistencyController.PATH)) { return "consistency"; }
         if (under(path, MallAdminController.PATH)) { return "mall_catalog"; }
         String known = KNOWN_OPS.get(path);
         if (known != null) {
@@ -125,6 +127,9 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
         }
         if (under(path, GateDrainAdminController.PATH)) {
             return "gates";
+        }
+        if (under(path, SceneEvacuationAdminController.PATH)) {
+            return "scenes";
         }
         return under(path, WhitelistAdminController.PATH) ? "whitelist" : "other";
     }

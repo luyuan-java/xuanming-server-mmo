@@ -31,7 +31,7 @@ import org.slf4j.LoggerFactory;
  *   <caption>结局的对应（判据在 {@code DirectPlacementDialer}，这里只翻译）</caption>
  *   <tr><th>直拨</th><th>观众 RPC</th><th>含义</th></tr>
  *   <tr><td>{@code Replied(reply)}</td><td>{@link Outcome.Replied}(tip)</td><td>battle 应答了；{@code addObserver} 的 tip 取应答的 {@code error_message.id}
- *       （0 = 登记成功），{@code removeObserver} 必须返回固定原操作与实例的取消证明；旧长参数适配只用于非全球开发接缝</td></tr>
+ *       （0 = 登记成功），{@code removeObserver} 必须返回固定原操作与实例的取消证明</td></tr>
  *   <tr><td>{@code RoomGone}</td><td>{@link Outcome.Dead}</td><td>请求确定没送达 + 目录里同号节点已换实例 + 原地址明确连不上，三条都在硬截止之前拿齐</td></tr>
  *   <tr><td>{@code Unavailable(NOT_DELIVERED)}</td><td>{@link Outcome.NotDelivered}</td><td>请求确定没送达，但判不了死（含硬截止已到）</td></tr>
  *   <tr><td>{@code Unavailable(TIMEOUT / OTHER)}</td><td>{@link Outcome.Unknown}</td><td>超时、连上之后断开、对端回了传输层错误（鉴权失败、在途超限）：
@@ -84,23 +84,30 @@ public final class DefaultObserverDialer implements ObserverDialer {
     }
 
     @Override
-    public Outcome remove(BattlePlacement placement, long observerId, String reason, Duration timeout, Deadline hardStop) {
-        Objects.requireNonNull(placement, "placement");
+    public Outcome remove(LocalObserverOperation original, String reason, Duration timeout, Deadline hardStop) {
+        Objects.requireNonNull(original, "original");
+        BattlePlacement placement = original.placement();
+        long observerId = original.playerId();
         Objects.requireNonNull(hardStop, "hardStop");
-        RemoveObserverRequest request = RemoveObserverRequest.newBuilder().setBattleId(placement.getBattleId()).setObserverPlayerId(observerId)
-                .setReason(reason == null ? "" : reason).build();
-        Outcome outcome = dial(placement, timeout, hardStop, node -> node.removeObserver(request), (RemoveObserverResponse reply) -> reply.getCancelled()?0:1);
+        RemoveObserverRequest request = original.remove(reason == null ? "" : reason);
+        Outcome outcome = dial(placement, timeout, hardStop, node -> node.removeObserver(request),
+                (RemoveObserverResponse reply) -> original.confirms(reply) ? 0 : 1);
+        if (outcome instanceof Outcome.Replied replied && replied.tipId() != 0) {
+            outcome = new Outcome.Unknown("battle 未返回原操作与固定实例的取消正证明");
+        }
         return recorded(ObserverMethod.REMOVE, placement, observerId, outcome);
     }
 
     @Override
-    public CompletableFuture<Outcome> removeAsync(BattlePlacement placement, long observerId, String reason) {
-        Objects.requireNonNull(placement, "placement");
+    public CompletableFuture<Outcome> removeAsync(LocalObserverOperation original, String reason) {
+        Objects.requireNonNull(original, "original");
+        BattlePlacement placement = original.placement();
+        long observerId = original.playerId();
         CompletableFuture<Outcome> result = new CompletableFuture<>();
         try {
             asyncRemovals.execute(() -> {
                 try {
-                    result.complete(remove(placement, observerId, reason, Duration.ofMillis(MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS),
+                    result.complete(remove(original, reason, Duration.ofMillis(MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS),
                             Deadline.after(MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS)));
                 } catch (RuntimeException e) { // remove 约定不抛；这里只防返回的 future 永不完成
                     log.error("[spectate] 异步清退观众时出错 battle_id={} player={}", Long.toUnsignedString(placement.getBattleId()),
@@ -139,7 +146,13 @@ public final class DefaultObserverDialer implements ObserverDialer {
             return new Outcome.Unknown("直拨器抛出了异常: " + e);
         }
         return switch (dial) {
-            case Dial.Replied<R> replied -> new Outcome.Replied(tipOf.applyAsInt(replied.reply()));
+            case Dial.Replied<R> replied -> {
+                try {
+                    yield replied.reply() == null ? new Outcome.Unknown("观众 RPC 空回包") : new Outcome.Replied(tipOf.applyAsInt(replied.reply()));
+                } catch (RuntimeException invalidReply) {
+                    yield new Outcome.Unknown("观众 RPC 回包无法验证");
+                }
+            }
             case Dial.RoomGone<R> gone -> new Outcome.Dead();
             case Dial.Unavailable<R> unavailable -> unavailable.kind() == PlacementDialer.Kind.NOT_DELIVERED
                     ? new Outcome.NotDelivered(unavailable.detail())

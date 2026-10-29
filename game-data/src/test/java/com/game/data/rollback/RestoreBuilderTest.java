@@ -10,18 +10,49 @@ import com.game.data.store.PersistedPlayer;
 import com.game.data.store.PlayerSnapshotEntry;
 import com.game.player.store.state.BattleLedgerEntry;
 import com.game.player.store.state.BattleLedgerState;
+import com.game.player.store.state.BagItemState;
+import com.game.player.store.state.BagState;
 import com.game.player.store.state.CurrencyState;
+import com.game.player.store.state.EquipmentGemState;
+import com.game.player.store.state.EquipmentState;
 import com.game.player.store.state.PlayerState;
 import com.game.player.store.state.Vitals;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.UnknownFieldSet;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /** 恢复内容（T-R2，data-ops-spec §4.5）：FULL 整份替换、封禁保留、SECTIONS 以现档为底、未知字段、资产变化。 */
 class RestoreBuilderTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void 资产回档预演显示同实例强化镶嵌和未知字段_不虚构数量流水() {
+        var original = BagItemState.newBuilder().setItemUuid(11).setConfigId(501).setStackSize(1)
+                .setEquipment(EquipmentState.newBuilder().setEnhanceLevel(1)).build();
+        var now = original.toBuilder().setBagType(1).setPos(2);
+        now.getEquipmentBuilder().setEnhanceLevel(2).addGems(EquipmentGemState.newBuilder().setGemConfigId(7))
+                .setUnknownFields(UnknownFieldSet.newBuilder()
+                        .addField(99, UnknownFieldSet.Field.newBuilder().addVarint(1).build()).build());
+        var snap = PlayerState.newBuilder().setBag(BagState.newBuilder().addItems(original)).build();
+        var cur = PlayerState.newBuilder().setBag(BagState.newBuilder().addItems(now)).build();
+        for (Set<RollbackSection> sections : List.of(Set.<RollbackSection>of(), Set.of(RollbackSection.ASSETS))) {
+            Restored result = RestoreBuilder.build(snapshot(snap), current(cur.toByteArray()), sections);
+            assertThat(result.state().getBag()).isEqualTo(snap.getBag());
+            assertThat(result.items()).isEmpty();
+            var view = (Map<String, Object>) result.detail().get("items");
+            assertThat(view).containsEntry("added", 0).containsEntry("removed", 0).containsEntry("stackChanged", 0)
+                    .containsEntry("instanceChangedCount", 1).containsEntry("instanceChangesTruncated", false);
+            var instances = (List<Map<String, Object>>) view.get("instanceChanged");
+            var changes = (List<Map<String, Object>>) instances.getFirst().get("changes");
+            assertThat(changes).extracting(change -> change.get("path")).containsExactlyInAnyOrder(
+                    "bag.items{11}.bag_type", "bag.items{11}.pos", "bag.items{11}.equipment.enhance_level",
+                    "bag.items{11}.equipment.gems[0]", "bag.items{11}.equipment.<unknown>");
+        }
+    }
 
     private static PlayerSnapshotEntry snapshot(PlayerState state) {
         PlayerSnapshotEntry e = new PlayerSnapshotEntry();

@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import org.apache.dubbo.config.ReferenceConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,6 +69,8 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
 
     private final int zoneId;
     private final int nodeId;
+    private final String instanceId;
+    private final LongSupplier leaseEpoch;
     private final Executor logic;
     private final Duration timeout;
     private final Connector connector;
@@ -84,11 +87,18 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
      * @param timeout 本地兜底超时（必须大于 {@link #DUBBO_TIMEOUT}，由配置校验）
      */
     SceneManagerSwitchTargets(int zoneId, int nodeId, Executor logic, Duration timeout, Connector connector) {
+        this(zoneId, nodeId, "", () -> 0, logic, timeout, connector);
+    }
+
+    SceneManagerSwitchTargets(int zoneId, int nodeId, String instanceId, LongSupplier leaseEpoch,
+                              Executor logic, Duration timeout, Connector connector) {
         if (timeout.isNegative() || timeout.isZero()) {
             throw new IllegalArgumentException("选目标超时必须为正: " + timeout);
         }
         this.zoneId = zoneId;
         this.nodeId = nodeId;
+        this.instanceId = Objects.requireNonNull(instanceId, "instanceId");
+        this.leaseEpoch = Objects.requireNonNull(leaseEpoch, "leaseEpoch");
         this.logic = Objects.requireNonNull(logic, "logic");
         this.timeout = timeout;
         this.connector = Objects.requireNonNull(connector, "connector");
@@ -103,10 +113,15 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
 
     /** 生产装配：直连 {@code url}（如 {@code tri://127.0.0.1:20882}）的 Dubbo 引用，第一次调用时才建。 */
     public static SceneManagerSwitchTargets dubbo(String url, int zoneId, int nodeId, Executor logic, Duration timeout) {
+        return dubbo(url, zoneId, nodeId, "", () -> 0, logic, timeout);
+    }
+
+    public static SceneManagerSwitchTargets dubbo(String url, int zoneId, int nodeId, String instanceId,
+            LongSupplier leaseEpoch, Executor logic, Duration timeout) {
         if (url == null || url.isBlank()) {
             throw new IllegalArgumentException("game.scene.scene-manager-url 不能为空");
         }
-        return new SceneManagerSwitchTargets(zoneId, nodeId, logic, timeout, new DubboConnector(url));
+        return new SceneManagerSwitchTargets(zoneId, nodeId, instanceId, leaseEpoch, logic, timeout, new DubboConnector(url));
     }
 
     @Override
@@ -118,14 +133,25 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
     @Override
     public void select(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId,
                        boolean clientChannelPick, Consumer<Selection> onDone) {
+        select(playerId, fromSceneId, new RemoteSwitchTargets.Request(wantSceneId, wantSceneConfigId, 0, false,
+                com.game.scene.world.SwitchReason.PLAYER, clientChannelPick), onDone);
+    }
+
+    @Override
+    public void select(long playerId, long fromSceneId, RemoteSwitchTargets.Request intent, Consumer<Selection> onDone) {
         SelectSwitchTargetRequest request = SelectSwitchTargetRequest.newBuilder()
                 .setZoneId(zoneId)
                 .setPlayerId(playerId)
                 .setFromSceneNodeId(nodeId)
                 .setFromSceneId(fromSceneId)
-                .setWantSceneId(wantSceneId)
-                .setWantSceneConfigId(wantSceneConfigId)
-                .setClientChannelPick(clientChannelPick)
+                .setWantSceneId(intent.sceneId())
+                .setWantSceneConfigId(intent.configId())
+                .setClientChannelPick(intent.clientChannelPick())
+                .setExcludeFromNode(intent.excludeSourceNode())
+                .setFallbackSceneConfigId(intent.fallbackConfigId())
+                .setReason(intent.reason() == com.game.scene.world.SwitchReason.EVACUATE
+                        ? com.game.api.proto.SwitchTargetReason.SWITCH_TARGET_EVACUATE
+                        : com.game.api.proto.SwitchTargetReason.SWITCH_TARGET_PLAYER)
                 .build();
         call(service -> service.selectSwitchTarget(request))
                 .whenComplete((response, failure) -> deliver(playerId, onDone, toSelection(response, failure)));
@@ -137,6 +163,8 @@ public final class SceneManagerSwitchTargets implements RemoteSwitchTargets, Ins
         CreateInstanceRequest wire = CreateInstanceRequest.newBuilder()
                 .setZoneId(zoneId)
                 .setRequesterSceneNodeId(nodeId)
+                .setRequesterInstanceId(instanceId)
+                .setRequesterLeaseEpoch(leaseEpoch.getAsLong())
                 .setPlayerId(request.playerId())
                 .setKind(request.kind().channelKind())
                 .setSourceSceneId(request.sourceSceneId())

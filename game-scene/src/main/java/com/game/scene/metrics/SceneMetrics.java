@@ -375,7 +375,11 @@ public final class SceneMetrics {
         /** 玩家在跨节点换图的冻结中（交出事务在途，scene-handoff-spec §5.5）：这次不改派，交出结局出来后实例即离开或解冻再改派。 */
         SWITCHING,
         /** 玩家有在途的回合制战斗：这次不改派，等结算解冻后下一次推进再看（D26）。 */
-        IN_BATTLE
+        IN_BATTLE,
+        REMOTE,
+        DEFERRED,
+        DEFERRED_CAP,
+        DEFERRED_STORAGE
     }
 
     /**
@@ -407,7 +411,9 @@ public final class SceneMetrics {
         /** 63 的远端去向：同 zone 跨节点换图（交出并保持）。 */
         PLAYER,
         /** 226 跨 zone 传送（交出并释放）。 */
-        TRAVEL
+        TRAVEL,
+        /** 服务器排空改派，复用跨节点交出事务。 */
+        EVACUATE
     }
 
     /**
@@ -520,10 +526,10 @@ public final class SceneMetrics {
     /**
      * 回合制战斗在途闸（scene-battle-spec §7.13，§9）挡掉的一次操作（{@code game.scene.battle.gate.rejects{gate}}）：入口集中闸（default = 缺省 REJECT、
      * move = 移动上行）与各服务闸（63 / 84 / 属性 / 宝宝 / 192 / 资产通道）各计一次。批次 5.4 加 {@code zone_travel}：226 被战斗在途拒（3025，
-     * 码与 63 的 3023 不同，所以单列一个取值；裁决 J4）。
+     * 码与 63 的 3023 不同，所以单列一个取值；裁决 J4）。装备扩展增加 equipment，六个写入口每次拒绝只计一次。
      */
     public enum BattleGate {
-        ENTER_SCENE, SKILL, ATTRIBUTE, PET, BAG_SORT, ASSET, MOVE, DEFAULT, ZONE_TRAVEL
+        ENTER_SCENE, SKILL, ATTRIBUTE, PET, BAG_SORT, ASSET, MOVE, DEFAULT, ZONE_TRAVEL, EQUIPMENT
     }
 
     /** 目标节点上交出进场（{@code PlayerEnter.transfer = true}）的结果（{@code game.scene.transfer.enters{result}}）。 */
@@ -566,7 +572,8 @@ public final class SceneMetrics {
         CASCADE_STARTED,
         DESTROYED_IDLE,
         DESTROYED_CASCADE,
-        DESTROYED_ADMIN
+        DESTROYED_ADMIN,
+        DESTROYED_NODE
     }
 
     /** 63 镜像分支的同步结局（{@code game.scene.mirror.requests{result}}，§6.7），每条镜像请求恰好计一次（3014 / 全 0 在分支之前，不计）。 */
@@ -853,6 +860,16 @@ public final class SceneMetrics {
                 .description("场景逻辑线程待执行的任务数（链路帧、存储回调、归属事件；不含定时的帧任务）")
                 .register(registry);
     }
+
+    public void bindNodeIdentity(IntSupplier identity, IntSupplier evacuating) {
+        Gauge.builder("game.scene.node.identity", () -> identity.getAsInt())
+                .description("节点身份：0有效，1挂起，2被占用").register(registry);
+        Gauge.builder("game.scene.node.evacuating", () -> evacuating.getAsInt())
+                .description("本节点是否正在疏散").register(registry);
+    }
+
+    public void linkIdleClosed() { registry.counter("game.scene.link.idle.closes").increment(); }
+    public void linkIdleIgnored() { registry.counter("game.scene.link.idle.ignored").increment(); }
 
     /** 未登记仍由本进程承担，已登记未应用只保留小凭据；均无玩家维度。 */
     public void bindFinalSaveRecovery(IntSupplier unregistered,IntSupplier awaitingApplied,IntSupplier undelivered) {

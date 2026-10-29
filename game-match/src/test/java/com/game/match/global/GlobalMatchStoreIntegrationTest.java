@@ -241,6 +241,52 @@ class GlobalMatchStoreIntegrationTest {
         assertThrows(RuntimeException.class,()->store.unknown(stale));assertThrows(RuntimeException.class,()->store.finish(stale,true));
         other.finish(recovered,false);assertEquals(4,store.ticket(71).getState());
     }
+
+    @Test void uncreatedExitFencesOldWorkAndKeepsOriginalTicketsWithoutForgingTerminal()throws Exception{
+        var a=join(711);var b=join(712);store.claim(List.of(a,b),formation(710).toBuilder().setRequeueOnFailure(true).build(),false);
+        var crashed=store.acquireWork(710);
+        var endpoint=GlobalPreparedEndpoint.newBuilder().setPlayerId(711).setZoneId(1).setNodeId(9).setHost("original-scene").setPort(21100).setInstanceId("scene-instance").build();
+        store.prepared(crashed,endpoint);execute("UPDATE match_global_formation SET retry_ms=1 WHERE battle_id=710");
+        var recovered=store.acquireWork(710);
+        assertThrows(RuntimeException.class,()->store.finishUncreated(crashed));
+        byte[] delayed=com.game.proto.CreateBattleRequest.newBuilder().setBattleId(710).setSeed(1).build().toByteArray();
+        assertThrows(RuntimeException.class,()->store.saveIntent(crashed,delayed));
+        var closed=store.finishUncreated(recovered);assertEquals(5,closed.getState());assertEquals(List.of(endpoint),closed.getPreparedList());
+        assertNull(store.terminal(710));
+        for(var original:List.of(a,b)){
+            var actual=store.ticket(original.getPlayerId());assertEquals(1,actual.getState());assertEquals(0,actual.getFormationId());
+            assertEquals(original.getTicket(),actual.getTicket());assertEquals(original.getEnqueuedMs(),actual.getEnqueuedMs());
+        }
+        assertEquals(closed,store.finishUncreated(recovered));assertNull(store.terminal(710));
+        assertThrows(RuntimeException.class,()->store.saveIntent(recovered,delayed));
+        assertThrows(RuntimeException.class,()->store.finishUncreated(recovered.toBuilder().setOperationId("wrong-operation").build()));
+    }
+
+    @Test void uncreatedExitRejectsPersistedCreateCompletionAndChangedOwnerBeforeAnyTicketEffect()throws Exception{
+        var a=join(721);var b=join(722);store.claim(List.of(a,b),formation(720),false);var work=store.acquireWork(720);
+        store.saveIntent(work,com.game.proto.CreateBattleRequest.newBuilder().setBattleId(720).setSeed(2).build().toByteArray());
+        assertThrows(RuntimeException.class,()->store.finishUncreated(work));assertEquals(2,store.ticket(721).getState());assertEquals(2,store.formation(720).getState());
+        var c=join(731);var d=join(732);store.claim(List.of(c,d),formation(730),false);var noCreate=store.acquireWork(730);
+        var pb=new com.game.pbmysql.PbMysql();pb.register(com.game.match.completion.pb.BattleCompletionRow.getDefaultInstance());
+        try(var connection=data.getConnection()){pb.insert(connection,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(730).setOutcomeProtocolVersion(1).build());}
+        assertThrows(RuntimeException.class,()->store.finishUncreated(noCreate));assertEquals(2,store.ticket(731).getState());assertEquals(1,store.formation(730).getState());
+        var e=join(741);var f=join(742);store.claim(List.of(e,f),formation(740),false);var ownerWork=store.acquireWork(740);
+        execute("UPDATE player SET owner_revision=2 WHERE player_id=741");
+        assertThrows(RuntimeException.class,()->store.finishUncreated(ownerWork));assertEquals(2,store.ticket(742).getState());assertEquals(1,store.formation(740).getState());
+    }
+
+    @Test void persistCreateVersusUncreatedExitHasOneWinnerAndNoHalfGroup()throws Exception{
+        var a=join(751);var b=join(752);store.claim(List.of(a,b),formation(750),false);var work=store.acquireWork(750);
+        var original=com.game.proto.CreateBattleRequest.newBuilder().setBattleId(750).setSeed(3).build().toByteArray();
+        var barrier=new CyclicBarrier(2);
+        try(var pool=Executors.newVirtualThreadPerTaskExecutor()){
+            var create=pool.submit(()->{barrier.await();try{store.saveIntent(work,original);return true;}catch(RuntimeException refused){return false;}});
+            var exit=pool.submit(()->{barrier.await();try{store.finishUncreated(work);return true;}catch(RuntimeException refused){return false;}});
+            boolean created=create.get(),closed=exit.get();assertNotEquals(created,closed);
+            assertEquals(created?2:5,store.formation(750).getState());assertEquals(created?2:4,store.ticket(751).getState());
+            assertEquals(store.ticket(751).getState(),store.ticket(752).getState());assertNull(store.terminal(750));
+        }
+    }
     @Test void acceptAndDeclineRaceHasOnlyOneDecisionAndNoHalfGroup()throws Exception{
         var a=join(81);var b=join(82);store.cancel(81,a.getTicket());store.cancel(82,b.getTicket());
         var key=GlobalDirectIntentRow.newBuilder().setKind(3).setOwnerId(82).setRequestLow(801).setOwnerAccount(actor(82).getAccount()).setOwnerRevision(1).build();var barrier=new CyclicBarrier(2);

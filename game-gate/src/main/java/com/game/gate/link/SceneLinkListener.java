@@ -34,6 +34,17 @@ public interface SceneLinkListener {
      */
     void onEnterUndeliverable(int sceneNodeId, long linkGen, PlayerEnter enter);
 
+    /** 兼容原监听器；可恢复的本地未发送失败允许会话按固定原身份限时补发。 */
+    default void onEnterUndeliverable(int nodeId, long generation, PlayerEnter enter, EnterFailure failure) {
+        onEnterUndeliverable(nodeId, generation, enter);
+    }
+
+    /** 首次调用 Channel.write 即失去可重试资格，不等待 write future，也不据失败 future 放弃 SQL 归属。 */
+    default void onEnterDispatched(int nodeId, long generation, PlayerEnter enter) { }
+
     /** 一条<b>曾经就绪</b>的链路断开：scene 那一侧已丢失经这条链路进场的全部会话。 */
     void onLinkDown(int sceneNodeId, long linkGen);
+
+    /** 兼容原监听器；生产路由区分自然断链与被新实例取代。 */
+    default void onLinkDown(int sceneNodeId, long linkGen, boolean superseded) { onLinkDown(sceneNodeId, linkGen); }
 }

@@ -14,6 +14,7 @@ public final class FakeActivityStore implements ActivityResultOutbox.Store {
 
     public final Scripted<Long> stores = new Scripted<>();
     public final Scripted<Boolean> probes = new Scripted<>();
+    public final Scripted<byte[]> originals = new Scripted<>();
 
     private final CallJournal journal;
     private final Map<Long, byte[]> copies = new HashMap<>();
@@ -46,6 +47,18 @@ public final class FakeActivityStore implements ActivityResultOutbox.Store {
         String id = Long.toUnsignedString(battleId);
         journal.add("activity-exists:" + id);
         return probes.invoke("activity-exists:" + id, () -> present(battleId));
+    }
+
+    @Override
+    public CompletableFuture<byte[]> readOriginal(long battleId) {
+        String id = Long.toUnsignedString(battleId);
+        journal.add("activity-original:" + id);
+        return originals.invoke("activity-original:" + id, () -> copy(battleId));
+    }
+
+    /** 直接推进已执行写入，用于模拟 Redis 已写成功但响应丢失。 */
+    public synchronized void applyStore(long battleId, byte[] payload) {
+        copies.put(battleId, payload.clone());
     }
 
     /** 消费方销账：删掉持久副本。 */

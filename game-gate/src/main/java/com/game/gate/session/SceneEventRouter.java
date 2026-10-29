@@ -6,6 +6,7 @@ import com.game.api.proto.PlayerKicked;
 import com.game.api.proto.PlayerTransfer;
 import com.game.api.proto.ToClient;
 import com.game.gate.link.SceneLinkListener;
+import com.game.gate.link.EnterFailure;
 import com.game.proto.MessageContent;
 import com.google.protobuf.InvalidProtocolBufferException;
 import org.slf4j.Logger;
@@ -79,18 +80,34 @@ public final class SceneEventRouter implements SceneLinkListener {
 
     @Override
     public void onEnterUndeliverable(int sceneNodeId, long linkGen, PlayerEnter enter) {
+        onEnterUndeliverable(sceneNodeId, linkGen, enter, EnterFailure.PERMANENT);
+    }
+
+    @Override
+    public void onEnterUndeliverable(int sceneNodeId, long linkGen, PlayerEnter enter, EnterFailure failure) {
         ClientSession session = registry.get(enter.getSessionId());
         if (session == null
-                || !session.execute(() -> dispatcher.onEnterUndeliverable(session, sceneNodeId, linkGen, enter))) {
+                || !session.execute(() -> dispatcher.onEnterUndeliverable(session, sceneNodeId, linkGen, enter, failure))) {
             dispatcher.onEnterUndeliverableWithoutSession(sceneNodeId, linkGen, enter);
         }
     }
 
     @Override
+    public void onEnterDispatched(int nodeId, long generation, PlayerEnter enter) {
+        ClientSession session = registry.get(enter.getSessionId());
+        if (session != null) session.execute(() -> dispatcher.onEnterDispatched(session, nodeId, generation, enter));
+    }
+
+    @Override
     public void onLinkDown(int sceneNodeId, long linkGen) {
+        onLinkDown(sceneNodeId, linkGen, false);
+    }
+
+    @Override
+    public void onLinkDown(int sceneNodeId, long linkGen, boolean superseded) {
         // 少见事件，全表扫一遍；是否绑定在这条链路上由会话线程自己判断。
         for (ClientSession session : registry.all()) {
-            session.execute(() -> dispatcher.onSceneLinkDown(session, sceneNodeId, linkGen));
+            session.execute(() -> dispatcher.onSceneLinkDown(session, sceneNodeId, linkGen, superseded));
         }
     }
 }

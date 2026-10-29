@@ -54,6 +54,14 @@ public final class StubBattleRoomService implements BattleRoomService {
     public volatile int createTip;
     /** issueBattleTicket / addObserver 回的 tip（0 = 成功）。 */
     public volatile int ticketTip;
+    /** 生命周期用例控制 SQL 原终局排空回调，不占用或睡眠逻辑线程。 */
+    public volatile java.util.function.Supplier<java.util.concurrent.CompletableFuture<ShutdownReport>> shutdownAction;
+
+    @Override
+    public java.util.concurrent.CompletableFuture<ShutdownReport> beginShutdown(String reason,java.time.Duration budget){
+        if(loop!=null)loop.assertInLoop();
+        return shutdownAction==null?BattleRoomService.super.beginShutdown(reason,budget):shutdownAction.get();
+    }
 
     private void enter(String method) {
         BattleScheduler l = loop;

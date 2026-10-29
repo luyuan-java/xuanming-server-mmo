@@ -131,7 +131,7 @@ public final class DataNode implements SmartLifecycle {
 
     private boolean verify() {
         try (TopicAdmin admin = adminFactory.get()) {
-            AuditTopicInitializer.ensure(admin, topics.all(audit.topicGeneration()), AuditTopicInitializer.Mode.OWN,
+            AuditTopicInitializer.ensure(admin, topics.all(audit.topicGeneration(), audit.minInSyncReplicas()), AuditTopicInitializer.Mode.OWN,
                     audit.replicationFactor(), audit.initTimeout());
             return true;
         } catch (AuditTopicContractException e) {

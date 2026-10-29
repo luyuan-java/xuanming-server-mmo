@@ -3,6 +3,7 @@ package com.game.gate.link;
 import com.game.api.proto.LinkHello;
 import com.game.common.token.NodeLinkAuth;
 import java.time.InstantSource;
+import java.time.Duration;
 import java.util.function.Supplier;
 
 /**
@@ -18,18 +19,25 @@ public final class LinkHellos implements Supplier<LinkHello> {
     private final long leaseEpoch;
     private final NodeLinkAuth auth;
     private final InstantSource clock;
+    private final int pingInterval;
 
     /**
      * @param leaseEpoch 本进程占到 gate 节点号时领的防护代次（{@code NodeIdLease.leaseEpoch()}）
      */
     public LinkHellos(int gateNodeId, String gateInstanceId, int zoneId, long leaseEpoch, NodeLinkAuth auth,
                       InstantSource clock) {
+        this(gateNodeId, gateInstanceId, zoneId, leaseEpoch, auth, clock, Duration.ZERO);
+    }
+
+    public LinkHellos(int gateNodeId, String gateInstanceId, int zoneId, long leaseEpoch, NodeLinkAuth auth,
+                      InstantSource clock, Duration pingInterval) {
         this.gateNodeId = gateNodeId;
         this.gateInstanceId = gateInstanceId;
         this.zoneId = zoneId;
         this.leaseEpoch = leaseEpoch;
         this.auth = auth;
         this.clock = clock;
+        this.pingInterval = Math.toIntExact(pingInterval.toMillis());
     }
 
     @Override
@@ -41,6 +49,7 @@ public final class LinkHellos implements Supplier<LinkHello> {
                 .setZoneId(zoneId)
                 .setAuthTimestamp(now)
                 .setLeaseEpoch(leaseEpoch)
+                .setPingIntervalMs(pingInterval)
                 .setAuthMac(auth.sign(gateNodeId, gateInstanceId, zoneId, leaseEpoch, now))
                 .build();
     }

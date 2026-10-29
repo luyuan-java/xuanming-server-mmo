@@ -11,6 +11,25 @@ import java.util.function.Consumer;
  */
 public interface RemoteSwitchTargets {
 
+    /** 本版内部路由意图；跨区传送有独立协议，不能混入同区改派。 */
+    record Request(long sceneId, int configId, int fallbackConfigId, boolean excludeSourceNode,
+                   SwitchReason reason, boolean clientChannelPick) {
+        public Request {
+            java.util.Objects.requireNonNull(reason, "reason");
+            if (reason == SwitchReason.TRAVEL || reason == SwitchReason.EVACUATE
+                    && (sceneId != 0 || !excludeSourceNode || clientChannelPick)) {
+                throw new IllegalArgumentException("服务器改派必须按地图并排除源节点，不能占用手动切线冷却");
+            }
+            if (reason == SwitchReason.PLAYER && fallbackConfigId != 0) {
+                throw new IllegalArgumentException("玩家换图不能回落到另一个地图");
+            }
+        }
+
+        public static Request evacuate(int configId, int fallbackConfigId) {
+            return new Request(0, configId, fallbackConfigId, true, SwitchReason.EVACUATE, false);
+        }
+    }
+
     /**
      * @param playerId          玩家
      * @param fromSceneId       玩家此刻所在的场景（只带地图时 scene-manager 不再选它）
@@ -23,6 +42,11 @@ public interface RemoteSwitchTargets {
     default void select(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId,
                         boolean clientChannelPick, Consumer<Selection> onDone) {
         select(playerId, fromSceneId, wantSceneId, wantSceneConfigId, onDone);
+    }
+
+    /** 生产适配器必须传递完整意图；旧测试替身仍可复用简单选择接口。 */
+    default void select(long playerId, long fromSceneId, Request request, Consumer<Selection> onDone) {
+        select(playerId, fromSceneId, request.sceneId(), request.configId(), request.clientChannelPick(), onDone);
     }
 
     /** 选目标的结果。 */

@@ -183,24 +183,24 @@ class ActivityResultOutboxTest {
     }
 
     @Test
-    void 落库失败_只发布一次_不登记_计not_durable_之后不探测不重发() {
+    void 落库未知_首发并登记_空记录继续探测而不盲目发布() {
         store.stores.failWith(new TimeoutException("Redis 响应超时"));
 
         dispatch(event(B));
 
         assertThat(journal.entries()).containsExactly("activity-store:" + B, "activity-store-done:" + B + "=error",
                 "publish:" + B + "@activity");
-        assertThat(outbox.size()).isZero();
-        assertThat(scheduler.scheduledCount()).isZero();
+        assertThat(outbox.size()).isEqualTo(1);
+        assertThat(scheduler.scheduledCount()).isEqualTo(1);
         assertThat(events()).containsOnly(entry("not_durable", 1));
 
         scheduler.advance(10 * ROUND_MS);
         assertThat(publisher.events).as("只发一次").hasSize(1);
-        assertThat(journal.count("activity-exists:")).isZero();
+        assertThat(journal.count("activity-exists:")).isEqualTo(10);
     }
 
     @Test
-    void 落库端口同步抛异常_没有结论_空future_都按not_durable只发一次() {
+    void 落库端口同步抛异常_没有结论_空future_均首发并登记未知() {
         store.stores.throwing(new IllegalStateException("Redis 不可用"));
         dispatch(event(B));
         store.stores.replyWith(null);
@@ -211,8 +211,8 @@ class ActivityResultOutboxTest {
         assertThat(events()).containsOnly(entry("not_durable", 3));
         assertThat(journal.starting("publish:")).containsExactly("publish:" + B + "@activity", "publish:" + (B + 1) + "@activity",
                 "publish:" + (B + 2) + "@activity");
-        assertThat(outbox.size()).isZero();
-        assertThat(scheduler.scheduledCount()).isZero();
+        assertThat(outbox.size()).isEqualTo(3);
+        assertThat(scheduler.scheduledCount()).isEqualTo(1);
     }
 
     @Test

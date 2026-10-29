@@ -160,7 +160,7 @@ class BattleRedisConstantsTest {
         assertThat(scripts().keySet()).containsExactlyInAnyOrder(
                 "PREPARE_LOCK", "CONFIRM", "CANCEL_OFFLINE", "DELETE_IF_MATCH", "TOUCH", "HOLD", "ACK", "ENTER_READ", "READ_IF_OURS",
                 "READ_LOCK_BATTLE", "DELETE_SETTLEMENT_FIELD", "STORE_SETTLEMENT", "PROBE_SETTLEMENT", "ACK_IF_SUPERSEDED",
-                "STORE_ACTIVITY_RESULT", "PROBE_ACTIVITY_RESULT");
+                "STORE_ACTIVITY_RESULT", "PROBE_ACTIVITY_RESULT", "READ_ACTIVITY_RESULT");
     }
 
     @Test
@@ -200,7 +200,7 @@ class BattleRedisConstantsTest {
     @Test
     void 只读脚本没有写命令() {
         Pattern write = Pattern.compile("'(HSET|HDEL|DEL|SET|EXPIRE|PEXPIRE|HINCRBY|INCR)'");
-        for (String name : new String[] {"ENTER_READ", "READ_IF_OURS", "READ_LOCK_BATTLE", "PROBE_SETTLEMENT", "PROBE_ACTIVITY_RESULT"}) {
+        for (String name : new String[] {"ENTER_READ", "READ_IF_OURS", "READ_LOCK_BATTLE", "PROBE_SETTLEMENT", "PROBE_ACTIVITY_RESULT", "READ_ACTIVITY_RESULT"}) {
             assertThat(write.matcher(scripts().get(name)).find()).as("%s 必须只读", name).isFalse();
         }
     }

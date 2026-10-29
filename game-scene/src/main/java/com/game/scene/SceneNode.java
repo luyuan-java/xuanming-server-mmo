@@ -48,6 +48,10 @@ import com.game.scene.battle.SceneBattleTables;
 import com.game.scene.channel.ChannelPlanFollower;
 import com.game.scene.currency.CurrencyFeature;
 import com.game.scene.currency.CurrencyService;
+import com.game.scene.equip.EquipmentFeature;
+import com.game.scene.equip.EquipmentRules;
+import com.game.scene.equip.EquipmentService;
+import com.game.scene.equip.EquipmentTables;
 import com.game.scene.discovery.SceneDirectoryPublisher;
 import com.game.scene.gainblock.GainBlockSync;
 import com.game.scene.gainblock.RedisGainBlockSource;
@@ -85,6 +89,7 @@ import com.game.scene.team.TravelTeamChecks;
 import com.game.scene.transfer.SceneManagerSwitchTargets;
 import com.game.scene.world.ClientRequestHandler;
 import com.game.scene.world.CrossNodeSwitch;
+import com.game.scene.world.NodeEvacuation;
 import com.game.scene.world.PlayerSnapshots;
 import com.game.scene.world.SceneClock;
 import com.game.scene.world.SceneInstances;
@@ -114,6 +119,8 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.redisson.api.RedissonClient;
@@ -173,6 +180,8 @@ public class SceneNode implements SmartLifecycle {
     private final PlayerStore playerStore;
     private final PlayerTradeStore playerTrades;
     private javax.sql.DataSource teamAuthoritySource;
+    private EvacuationProperties evacuation = EvacuationProperties.defaults();
+    private Runnable conflictExit = this::stop;
     private final MessageIdRegistry registry;
     private final SceneTables tables;
     private final AttributeTables attributeTables;
@@ -194,6 +203,17 @@ public class SceneNode implements SmartLifecycle {
     private volatile ScheduledExecutorService scheduler;
     private volatile NodeIdLease lease;
     private volatile NodeIdLease guidLease;
+    private volatile LeaseGatedSnowflake sceneGuids;
+    private final Object guidLock = new Object();
+    private volatile boolean closing;
+    private volatile boolean identityRecovering;
+    /** 仅逻辑线程更新，管理探针不跨线程遍历场景集合。 */
+    private volatile boolean hasActiveWorldChannel;
+    private volatile boolean evacuating;
+    private final AtomicBoolean conflictExitScheduled = new AtomicBoolean();
+    /** 只在逻辑线程上创建 / 完成；停止线程只等待 future。 */
+    private CompletableFuture<String> evacuationDone;
+    private ScheduledFuture<?> evacuationCheck;
     private volatile AuditPipeline auditPipeline;
     private volatile DefaultEventLoop logicLoop;
     private volatile ThreadPoolExecutor storageExecutor;
@@ -278,6 +298,18 @@ public class SceneNode implements SmartLifecycle {
         this.teamAuthoritySource=Objects.requireNonNull(teamAuthoritySource);
     }
 
+    public SceneNode(SceneNodeProperties props, RedissonClient redis, RedisKeys redisKeys, PlayerStore playerStore,
+                     PlayerTradeStore playerTrades, MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
+                     BagTables bagTables, MissionTables missionTables, SkillTables skillTables, PetTables petTables,
+                     NodeLinkAuth linkAuth, SceneMetrics metrics, AuditProperties audit, KafkaNames kafkaNames,
+                     SceneBattleTables battleTables, SceneBattleMetrics battleMetrics, javax.sql.DataSource source,
+                     EvacuationProperties evacuation, Runnable conflictExit) {
+        this(props, redis, redisKeys, playerStore, playerTrades, registry, tables, attributeTables, bagTables, missionTables,
+                skillTables, petTables, linkAuth, metrics, audit, kafkaNames, battleTables, battleMetrics, source);
+        this.evacuation = Objects.requireNonNull(evacuation);
+        this.conflictExit = Objects.requireNonNull(conflictExit);
+    }
+
     @Override
     public synchronized void start() {
         if (running) {
@@ -286,6 +318,8 @@ public class SceneNode implements SmartLifecycle {
         try {
             doStart();
             running = true;
+            // 身份可能在端口初始化期间被占用；启动结束仍必须走已确认冲突的收敛路径。
+            if (lease.isLost()) onLeaseLost();
         } catch (Exception e) {
             release();
             if (e instanceof InterruptedException) {
@@ -302,12 +336,19 @@ public class SceneNode implements SmartLifecycle {
 
         // 3 条：频道计划拉取与目录发布都可能同步等逻辑线程（各至多 5 s），留一条给节点号续期，续期不被它们拖到有效期之外
         scheduler = Executors.newScheduledThreadPool(SCHED_THREADS, new DefaultThreadFactory("scene-sched", true));
-        lease = NodeIdLease.acquire(redis, redisKeys, scheduler, NodeTypes.SCENE, zoneId, MIN_NODE_ID, MAX_NODE_ID, instanceId,
-                LEASE_TTL, this::onLeaseLost);
+        lease = NodeIdLease.acquireRecoverable(redis, redisKeys, scheduler, NodeTypes.SCENE, zoneId,
+                MIN_NODE_ID, MAX_NODE_ID, instanceId, LEASE_TTL, new NodeIdLease.RecoveryListener() {
+                    @Override public void onSuspended() { onIdentitySuspended(); }
+                    @Override public void onResumed() { onIdentityRecovered(); }
+                    @Override public void onRegained(long epoch) { onIdentityRecovered(); }
+                    @Override public void onTaken() { onLeaseLost(); }
+                });
         int nodeId = lease.nodeId();
         Snowflake snowflake = new Snowflake(nodeId);
 
         logicLoop = new DefaultEventLoop(new DefaultThreadFactory("scene-logic"));
+        metrics.bindNodeIdentity(() -> lease == null || !lease.isValid() ? lease != null && lease.isLost() ? 2 : 1 : 0,
+                () -> evacuating ? 1 : 0);
         // 状态量回调读 volatile 字段（抓取线程上调用，线程安全、不阻塞），组件还没建出来或已释放时报 0。
         metrics.bindLogicQueue(() -> {
             DefaultEventLoop loop = logicLoop;
@@ -325,18 +366,22 @@ public class SceneNode implements SmartLifecycle {
         GateLinks gateLinks = new GateLinks(metrics, logic);
         GainAnomalyDetector anomalies = new GainAnomalyDetector(settings.anomaly().defaults(),
                 settings.anomaly().currencyThresholds(), settings.anomaly().itemThresholds(), SceneClock.SYSTEM, metrics);
-        LeaseGatedSnowflake sceneGuids = acquireSceneGuids();
-        AssetAudit assetAudit = startAudit(zoneId, nodeId, settings, sceneGuids);
+        LeaseGatedSnowflake guids = acquireSceneGuids();
+        AssetAudit assetAudit = startAudit(zoneId, nodeId, settings, guids);
         CurrencyService currency = new CurrencyService(assetAudit, anomalies, metrics, SceneClock.SYSTEM);
         // 关闭消费也装配真实服务：目录公布的是生效开关，PENDING 留在独立收件箱；运输失败不产生 SQL 持久确认。
         DubboInboxTransport inboxClient = DubboInboxTransport.direct(settings.inbox().url(), logic);
         inboxTransport = inboxClient;
-        BagService bags = new BagService(bagTables, itemGuids(sceneGuids), assetAudit, anomalies, metrics);
+        BagService bags = new BagService(bagTables, itemGuids(guids), assetAudit, anomalies, metrics);
         startGainBlockSync(currency, bags, settings);
-        AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency, metrics);
+        EquipmentRules equipmentRules = bagTables.equipmentRules() == null
+                ? new EquipmentRules(EquipmentTables.empty(), bound -> 0) : bagTables.equipmentRules();
+        AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency, metrics, equipmentRules);
+        BagFeature bagFeature = new BagFeature(bags);
+        EquipmentService equipment = new EquipmentService(equipmentRules, bags, currency, attributes, metrics);
         MissionService missions = new MissionService(missionTables, bags, SceneClock.SYSTEM);
         SkillService skills = new SkillService(skillTables, SceneClock.SYSTEM, metrics, ids);
-        PetService petService = new PetService(petTables, currency, itemGuids(sceneGuids), SceneClock.SYSTEM,
+        PetService petService = new PetService(petTables, currency, itemGuids(guids), SceneClock.SYSTEM,
                 new SplittableRandom(), metrics);
         PetFeature pets = new PetFeature(petService, registry);
         AuditPipeline pipeline = auditPipeline;
@@ -349,8 +394,8 @@ public class SceneNode implements SmartLifecycle {
         TeamFollowService teamFollow = new TeamFollowService(teamMemberships::readAsync, battleLocks::exists, logic, metrics);
         // 跨节点换图（批次 5.2，scene-handoff-spec §5.4–§5.8）：选目标经 Dubbo 直连 scene-manager（引用在第一次调用时才建，不阻塞启动）；
         // 交出进场成功后的立即续约经 leaseRenewer（它在下面才建，所以经 volatile 字段转一手，还没建出来 / 已停时跳过，周期续约兜底）
-        switchTargets = SceneManagerSwitchTargets.dubbo(settings.sceneManagerUrl(), zoneId, nodeId, logic,
-                settings.switchResolveTimeout());
+        switchTargets = SceneManagerSwitchTargets.dubbo(settings.sceneManagerUrl(), zoneId, nodeId, instanceId,
+                lease::leaseEpoch, logic, settings.switchResolveTimeout());
         CrossNodeSwitch crossNode = new CrossNodeSwitch(nodeId, switchTargets, owned -> {
             OwnerLeaseRenewer renewer = leaseRenewer;
             if (renewer != null) {
@@ -359,7 +404,8 @@ public class SceneNode implements SmartLifecycle {
         }, settings.switchResolveTimeout(), settings.transferTombstoneTtl(),
                 new com.game.scene.transfer.SharedPlayerChannels(zoneId,
                         new com.game.discovery.world.RedissonWorldChannelDirectoryStore(redis, redisKeys),
-                        new com.game.discovery.world.RedissonChannelSwitchCooldown(redis, redisKeys), storageExecutor, logic));
+                        new com.game.discovery.world.RedissonChannelSwitchCooldown(redis, redisKeys), storageExecutor, logic),
+                evacuation.policy());
         // 跨 zone 传送（批次 5.4，zone-travel-spec §5.5）：选目标复用同一个 scene-manager 客户端；受理前的在队检查与组队跟随共用成员关系的读口。
         // 两个时限与 63 共用配置键，但装配记录各带各的——226 不依赖跨节点换图是否启用
         ZoneTravel zoneTravel = new ZoneTravel(zoneId, switchTargets, new TravelTeamChecks(teamMemberships::readAsync, logic),
@@ -431,7 +477,8 @@ public class SceneNode implements SmartLifecycle {
                 List.of(new CurrencyFeature(currency), new AttributeFeature(attributes, registry, call -> {
                     pets.onOwnerLevelChanged(call);
                     missions.onLevelChanged(call.player());
-                }), new BagFeature(bags), new MissionFeature(missions), new ActivityFeature(missions),
+                }), bagFeature, new EquipmentFeature(equipment, bagFeature, attributes, registry),
+                        new MissionFeature(missions), new ActivityFeature(missions),
                         new SkillFeature(skills), pets));
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
         // 主世界频道（批次 5.1，scene-channels-spec §4.10.5）：节点不再自己发号建场景（D18），按 scene-manager 写在 Redis 的频道计划建。
@@ -439,8 +486,9 @@ public class SceneNode implements SmartLifecycle {
         // 拉不到只告警、不带频道启动：领导者下一拍按覆盖规则给本节点铺频道，拉取每周期重试。
         NodeIdLease nodeLease = lease;
         ChannelPlanFollower follower = new ChannelPlanFollower(new RedissonWorldChannelStore(redis, redisKeys), zoneId, nodeId,
-                nodeLease::isValid, (version, mine) -> callOnLogic(() -> sceneWorld.applyChannelPlan(version, mine)),
-                this::requestDirectoryPublish, metrics);
+                nodeLease::isValid, nodeLease::leaseEpoch,
+                (version, mine, epoch) -> callOnLogic(() -> applyChannelPlanForIdentity(nodeLease, epoch, sceneWorld, version, mine)),
+                this::requestDirectoryPublish, metrics, epoch -> onPlanSynchronized(nodeLease, epoch));
         channelFollower = follower;
         follower.syncOnce();
         follower.start(scheduler, settings.channelPlanPollInterval());
@@ -448,7 +496,12 @@ public class SceneNode implements SmartLifecycle {
         // 批次 5.3 起同一个任务里做实例的空闲回收、回收宽限、级联兜底（dungeon-mirror-spec §6.10、§6.11，1 s 粒度）
         drainTask = logicLoop.scheduleAtFixedRate(() -> {
             try {
+                if (!nodeLease.isValid()) {
+                    identityRecovering = true;
+                    sceneWorld.stopAcceptingEnters();
+                }
                 sceneWorld.maintainScenes();
+                updateChannelReadiness(sceneWorld);
             } catch (RuntimeException e) {
                 log.error("场景维护（排空推进 / 实例回收）这一秒出错，下一秒照常", e);
             }
@@ -504,7 +557,7 @@ public class SceneNode implements SmartLifecycle {
                 lost -> postToLogic(() -> sceneWorld.onOwnershipLost(lost)));
         leaseRenewer.start(scheduler);
 
-        LinkIdentity identity = new LinkIdentity(nodeId, instanceId, zoneId);
+        LinkIdentity identity = new LinkIdentity(nodeId, instanceId, zoneId, nodeLease::leaseEpoch);
         SceneLinkService linkService = new SceneLinkService(identity, gateLinks, sceneWorld, requests, metrics);
         AtomicLong linkIds = new AtomicLong();
         Duration handshakeTimeout = settings.linkHandshakeTimeout();
@@ -538,8 +591,9 @@ public class SceneNode implements SmartLifecycle {
                 () -> callOnLogic(() -> {
                     List<SceneEntry> entries = sceneWorld.sceneEntries();
                     approxPlayers.set(entries.stream().mapToInt(SceneEntry::getPlayerCount).sum());
-                    return new SceneDirectoryPublisher.Snapshot(entries, sceneWorld.appliedPlanVersion());
-                }));
+                    return new SceneDirectoryPublisher.Snapshot(entries, sceneWorld.appliedPlanVersion(),
+                            sceneWorld.nodeEvacuating(), nodeLease.leaseEpoch());
+                }), nodeLease::isValid);
         publisher.start(scheduler);
 
         log.info("场景节点已启动 zone={} node_id={} instance={} link={}:{} asset_rpc={}:{} 频道计划版本={}", zoneId, nodeId,
@@ -566,6 +620,8 @@ public class SceneNode implements SmartLifecycle {
         }
         running = false;
         log.info("场景节点停止中");
+        evacuateBeforeStop();
+        closing = true;
         release();
         log.info("场景节点已停止");
     }
@@ -573,6 +629,102 @@ public class SceneNode implements SmartLifecycle {
     @Override
     public boolean isRunning() {
         return running;
+    }
+
+    /** readiness 同时要求身份已确认、频道已同步且当前未疏散。 */
+    public boolean ready() {
+        NodeIdLease held = lease;
+        return running && !closing && !identityRecovering && !evacuating && hasActiveWorldChannel
+                && held != null && held.isValid();
+    }
+
+    /** 逻辑线程快照；镜像、副本与排空中的世界频道不能证明可承接普通登录。 */
+    private void updateChannelReadiness(SceneWorld current) {
+        hasActiveWorldChannel = current.sceneEntries().stream()
+                .anyMatch(entry -> !entry.getDraining() && com.game.api.ChannelKinds.isWorldChannel(entry.getKind()));
+    }
+
+    public String identityState() {
+        NodeIdLease held = lease;
+        if (held == null || closing) return "stopped";
+        if (held.isLost()) return "taken";
+        if (!held.isValid() || identityRecovering) return "suspended";
+        return evacuating ? "evacuating" : "active";
+    }
+
+    /** 在逻辑线程上发起 / 升级疏散，收敛检查只读该线程所有的状态。 */
+    private CompletableFuture<String> beginEvacuation(NodeEvacuation.Cause cause) {
+        CompletableFuture<String> result = new CompletableFuture<>();
+        submitAdmin(result, () -> {
+            SceneWorld w = world;
+            if (w == null || closing) { result.complete("stopping"); return; }
+            w.beginNodeEvacuation(cause, evacuation.budget());
+            evacuating = true;
+            requestDirectoryPublish();
+            if (cause == NodeEvacuation.Cause.ADMIN) { result.complete("marked"); return; }
+            if (evacuationDone == null || evacuationDone.isDone()) {
+                evacuationDone = new CompletableFuture<>();
+                CompletableFuture<String> current = evacuationDone;
+                evacuationCheck = logicLoop.scheduleAtFixedRate(() -> {
+                    if (current.isDone()) return;
+                    NodeEvacuation state = w.nodeEvacuation();
+                    if (w.nodeEvacuated()) current.complete("drained");
+                    else if (state != null && state.expired(System.nanoTime())) current.complete("budget_exceeded");
+                    if (current.isDone()) evacuationCheck.cancel(false);
+                }, 0, 100, TimeUnit.MILLISECONDS);
+            }
+            evacuationDone.whenComplete((value, failure) -> {
+                if (failure == null) result.complete(value); else result.completeExceptionally(failure);
+            });
+        });
+        return result;
+    }
+
+    /** Redis 目录只决定是否值得尝试迁移；无法证明有接客节点时直接走既有最终写回。 */
+    private boolean hasOtherEvacuationTarget() {
+        NodeIdLease held = lease;
+        if (held == null) return false;
+        try {
+            return new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser())
+                    .listAsync(props.zoneId()).get(1, TimeUnit.SECONDS).stream()
+                    .anyMatch(node -> node.getZoneId() == props.zoneId() && node.getNodeId() != held.nodeId()
+                            && !node.getEvacuating() && !node.getInstanceId().isBlank()
+                            && !node.getLinkHost().isBlank() && node.getLinkPort() > 0 && node.getLinkPort() <= 65535);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (Exception e) {
+            log.warn("无法确认其他疏散目标，转最终写回", e);
+            return false;
+        }
+    }
+
+    private void evacuateBeforeStop() {
+        NodeIdLease held = lease;
+        if (!evacuation.evacuateBeforeShutdown() || held == null || !held.isValid() || world == null
+                || !hasOtherEvacuationTarget()) return;
+        long started = System.nanoTime();
+        long deadline = started + evacuation.budget().toNanos();
+        CompletableFuture<String> done = beginEvacuation(NodeEvacuation.Cause.SHUTDOWN);
+        String outcome = "budget_exceeded";
+        try {
+            while (deadline - System.nanoTime() > 0) {
+                try {
+                    outcome = done.get(Math.min(TimeUnit.SECONDS.toNanos(1), deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                    break;
+                } catch (TimeoutException timeout) {
+                    if (!hasOtherEvacuationTarget()) { outcome = "no_target"; break; }
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            outcome = "interrupted";
+        } catch (Exception e) {
+            outcome = "failed";
+            log.warn("停服前疏散失败，继续最终写回", e);
+        }
+        log.info("停服前疏散完成 result={} elapsed_ms={}", outcome,
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
     }
 
     /** 本场景节点的节点号；没在运行（没启动、正在停）为 0。任意线程可调。 */
@@ -686,6 +838,7 @@ public class SceneNode implements SmartLifecycle {
      * → 资产通道反导出 → 关线程（逻辑线程停之后才关选目标客户端与资产回写池）→ 最后才释放节点号（写回期间号仍归本实例，别的实例拿不到同一个号）。
      */
     private void release() {
+        closing = true;
         // 第一步停频道计划拉取（§4.10.5）：停服期间不再按计划建 / 排空场景；正在跑的一次最多再应用完这一版
         ChannelPlanFollower follower = channelFollower;
         if (follower != null) {
@@ -716,7 +869,7 @@ public class SceneNode implements SmartLifecycle {
         SceneDirectoryPublisher p = publisher;
         NodeIdLease l = lease;
         if (p != null) {
-            p.stop(l != null && !l.isLost());
+            p.stop(l != null && l.isValid());
         }
         NodeLinkServer server = linkServer;
         if (server != null) {
@@ -749,7 +902,8 @@ public class SceneNode implements SmartLifecycle {
         if (loop != null && w != null && g != null && storage != null) {
             // 写回之后、关存储线程池之前等在途交出 / 探测的结局在逻辑线程上处理完：其中「释放 E+1」要赶在关池之前提交
             SceneShutdown.TransferSettlement transfers =
-                    repo == null ? SceneShutdown.TransferSettlement.NONE : repo::awaitTransfersSettled;
+                    SceneShutdown.writesThenTransfers(g::awaitTransferWrites,
+                            repo == null ? SceneShutdown.TransferSettlement.NONE : repo::awaitTransfersSettled, System::nanoTime);
             SceneShutdown.TransferSettlement finals =
                     repo == null ? SceneShutdown.TransferSettlement.NONE : repo::awaitFinalRegistered;
             SceneShutdown.Result result = SceneShutdown.writeBackThenDrainStorage(loop, () -> {
@@ -809,9 +963,9 @@ public class SceneNode implements SmartLifecycle {
         if (pipeline != null) {
             pipeline.close(props.scene().auditFlushTimeout());
         }
-        NodeIdLease guids = guidLease;
-        if (guids != null) {
-            guids.close();
+        synchronized (guidLock) {
+            NodeIdLease guids = guidLease;
+            if (guids != null) guids.close();
         }
         if (l != null) {
             l.close();
@@ -827,12 +981,40 @@ public class SceneNode implements SmartLifecycle {
      * 共用（两个同 worker 的雪花实例会发出相同的号）。不论审计开不开都要：物品入包离不开它。
      */
     private LeaseGatedSnowflake acquireSceneGuids() {
-        NodeIdLease guids = NodeIdLease.acquire(redis, redisKeys, scheduler, NodeTypes.SCENE_GUID, GUID_LEASE_SCOPE, 1,
-                Snowflake.MAX_WORKER, instanceId, LEASE_TTL,
-                () -> log.error("全服发号租约丢失：物品入包发不出号（回 6004）、资产流水改写兜底日志，请尽快重启本节点"));
+        NodeIdLease guids = acquireGuidLease();
         guidLease = guids;
+        sceneGuids = new LeaseGatedSnowflake(new Snowflake(guids.nodeId()), guids::isValid);
+        scheduler.scheduleWithFixedDelay(this::recoverGuidWorker, LEASE_TTL.toMillis() / 3,
+                LEASE_TTL.toMillis() / 3, TimeUnit.MILLISECONDS);
         log.info("全服发号就绪 worker={}", guids.nodeId());
-        return new LeaseGatedSnowflake(new Snowflake(guids.nodeId()), guids::isValid);
+        return sceneGuids;
+    }
+
+    private NodeIdLease acquireGuidLease() {
+        return NodeIdLease.acquireRecoverable(redis, redisKeys, scheduler, NodeTypes.SCENE_GUID, GUID_LEASE_SCOPE, 1,
+                Snowflake.MAX_WORKER, instanceId, LEASE_TTL, new NodeIdLease.RecoveryListener() {
+                    @Override public void onSuspended() { log.warn("全服发号身份挂起，暂停新号"); }
+                    @Override public void onResumed() { log.info("全服发号身份恢复"); }
+                    @Override public void onRegained(long epoch) { log.info("全服发号原号复占 epoch={}", epoch); }
+                    @Override public void onTaken() { log.error("全服发号 worker 已被占用，暂停发号并申请新 worker"); }
+                });
+    }
+
+    private void recoverGuidWorker() {
+        synchronized (guidLock) {
+            if (closing || guidLease == null || !guidLease.isLost()) return;
+            NodeIdLease replacement = null;
+            try {
+                replacement = acquireGuidLease();
+                sceneGuids.replace(new Snowflake(replacement.nodeId()), replacement::isValid);
+                guidLease.close();
+                guidLease = replacement;
+                log.warn("全服发号已换 worker={}", replacement.nodeId());
+            } catch (RuntimeException e) {
+                if (replacement != null) replacement.close();
+                log.warn("申领新发号 worker 失败，保持暂停，下一轮重试", e);
+            }
+        }
     }
 
     /**
@@ -886,7 +1068,7 @@ public class SceneNode implements SmartLifecycle {
         AuditPipeline pipeline = new AuditPipeline(
                 () -> AuditPipeline.kafkaProducer(audit.bootstrapServers(), clientId, settings.auditMaxBlock()),
                 () -> new KafkaTopicAdmin(audit.bootstrapServers(), clientId + "-admin"),
-                topics.all(generation), topics.transactionLog(generation).name(),
+                topics.all(generation, audit.minInSyncReplicas()), topics.transactionLog(generation).name(),
                 topics.playerSnapshot(generation).name(), settings.snapshotMaxBytes(), audit.replicationFactor(),
                 audit.initTimeout(), guids,
                 settings.auditQueueCapacity(), metrics);
@@ -901,9 +1083,61 @@ public class SceneNode implements SmartLifecycle {
         return new KafkaAssetAudit(pipeline, SceneClock.SYSTEM, zoneId);
     }
 
-    /** 租约丢失回调（调度线程上，只调一次）。 */
+    private void onIdentitySuspended() {
+        identityRecovering = true;
+        SceneDirectoryPublisher p = publisher;
+        if (p != null) p.pause();
+        SceneWorld w = world;
+        if (w != null) postToLogic(w::stopAcceptingEnters);
+    }
+
+    private void onIdentityRecovered() {
+        // 周期计划拉取会重试，不能只凭租约回包就恢复旧频道接客；慢回包时 isValid 仍可能为假。
+        identityRecovering = true;
+        ChannelPlanFollower follower = channelFollower;
+        if (follower != null && !closing) scheduler.execute(follower::syncOnce);
+    }
+
+    /** 逻辑线程：排队期间租约已失效 / 换代的旧拍不能再建场景或推进排空。 */
+    private boolean applyChannelPlanForIdentity(NodeIdLease held, long epoch, SceneWorld targetWorld,
+                                               long version, List<com.game.api.proto.WorldChannel> records) {
+        if (lease != held || world != targetWorld || closing || !held.isValid() || held.leaseEpoch() != epoch) {
+            throw new IllegalStateException("频道计划所属节点身份已失效或换代");
+        }
+        return targetWorld.applyChannelPlan(version, records);
+    }
+
+    /** 计划拉取线程：沿用读取计划前的原件，读运维标记后在逻辑线程再次核验。 */
+    private void onPlanSynchronized(NodeIdLease held, long epoch) {
+        if (lease != held || !held.isValid() || held.leaseEpoch() != epoch || closing) return;
+        Boolean marked = null;
+        try {
+            var mark = new com.game.discovery.drain.SceneEvacuationMarks(redis, redisKeys).read(props.zoneId(), held.nodeId());
+            marked = mark != null && mark.appliesTo(instanceId);
+        } catch (RuntimeException e) {
+            log.warn("读取节点疏散标记失败，保持当前状态", e);
+        }
+        Boolean desired = marked;
+        postToLogic(() -> {
+            if (lease != held || closing || !held.isValid() || held.leaseEpoch() != epoch) return;
+            SceneWorld w = world;
+            if (w == null) return;
+            boolean wasEvacuating = w.nodeEvacuating();
+            boolean wasRecovering = identityRecovering;
+            if (Boolean.TRUE.equals(desired) && !wasEvacuating) w.beginNodeEvacuation(NodeEvacuation.Cause.ADMIN, evacuation.budget());
+            else if (Boolean.FALSE.equals(desired)) w.endNodeEvacuation();
+            evacuating = w.nodeEvacuating();
+            identityRecovering = false;
+            w.resumeAcceptingEnters();
+            updateChannelReadiness(w);
+            SceneDirectoryPublisher p = publisher;
+            if (p != null && (wasRecovering || wasEvacuating != evacuating)) p.resume();
+        });
+    }
+
+    /** 已确认身份被占用，只停止控制面；保留链路和 SQL 归属续约直至疏散 / 最终写回完成。 */
     private void onLeaseLost() {
-        log.error("场景节点号租约丢失：停止刷新节点目录与拉取频道计划、关闭链路监听、拒绝新进场；在场玩家继续服务至离开，请尽快重启本节点");
+        log.error("场景节点身份已被占用：开始有界疏散并退出");
         // 号可能已归别的实例：不再按这个号名下的计划建 / 排空场景（已有场景照常服务）
         ChannelPlanFollower follower = channelFollower;
         if (follower != null) {
@@ -920,6 +1154,14 @@ public class SceneNode implements SmartLifecycle {
         SceneWorld w = world;
         if (w != null) {
             postToLogic(w::stopAcceptingEnters);
+        }
+        if (closing) return;
+        CompletableFuture<String> done = beginEvacuation(NodeEvacuation.Cause.CONFLICT);
+        if (running && conflictExitScheduled.compareAndSet(false, true)) {
+            // 逻辑线程卡住时也不能无限持有冲突进程；退出在独立线程发起，不占续租调度器。
+            done.completeOnTimeout("logic_timeout", evacuation.budget().toMillis() + LOGIC_CALL_TIMEOUT_MS,
+                    TimeUnit.MILLISECONDS).whenComplete((value, failure) ->
+                    Thread.ofPlatform().name("scene-conflict-exit").start(conflictExit));
         }
     }
 

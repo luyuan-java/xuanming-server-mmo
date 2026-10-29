@@ -36,75 +36,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 163 WatchBattle 的流程（spectate-spec §3.1 的判定表、§4.4 的七步；基线 {@code watchbattlelogic.go:52-267}）。<b>判定顺序本身就是客户端契约</b>，
- * 逐行照搬；每一行的码与 {@code parameters[0]} 在 {@link MatchTip} 的 {@code WATCH_*}（两条 16004 复用 {@code NO_IDENTITY} / {@code BUSY}）。
+ * 本地 163 的有界流程：检查票据/锁，按旧原件清退（同场也一样），读取会话与固定落点，
+ * 先持久化包含完整 Add 的标记，再调用 battle。每次操作有规范 UUID、25 秒准入截止、固定实例、路由与公开名字。
  *
- * <table>
- *   <caption>163 的判定顺序（# 是规格 §3.1 的行号）</caption>
- *   <tr><th>#</th><th>条件</th><th>应答</th><th>outcome</th></tr>
- *   <tr><td>1</td><td>会话没有绑定玩家（只认 {@code SessionContext.player_id}，请求体一律忽略，W12）</td><td>16004「缺少玩家身份」</td><td>internal</td></tr>
- *   <tr><td>2 / 6</td><td>读票据与观战标记出错（一段只读脚本，一起成败）</td><td>16004「服务器繁忙,请稍后再试」</td><td>internal</td></tr>
- *   <tr><td>3</td><td>持票，任意状态（含开局后 60 s 的 ready 残留，BW1）</td><td>16014「匹配中无法观战」</td><td>queued</td></tr>
- *   <tr><td>4</td><td>读战斗锁出错</td><td>16004「服务器繁忙,请稍后再试」</td><td>internal</td></tr>
- *   <tr><td>5</td><td>战斗锁存在</td><td>16015「战斗尚未结束,无法观战」</td><td>in_battle</td></tr>
- *   <tr><td>7</td><td>已有标记：<b>不拒绝</b>。值非法 → 按原串删；显式重看同一场 → 只删标记、<b>不发</b> RemoveObserver；
- *       其余（换场、随机）→ 读旧场落点，在则<b>同步</b> RemoveObserver({@code rewatch}) 之后才删标记、往下走</td><td>继续</td><td>—</td></tr>
- *   <tr><td>8</td><td>读在线目录出错</td><td>16004「服务器繁忙,请稍后再试」</td><td>internal</td></tr>
- *   <tr><td>9</td><td>在线目录没有条目</td><td>16019「会话不在线,无法观战」</td><td>offline</td></tr>
- *   <tr><td>10</td><td>在线目录条目缺 gate 实例（数据损坏）</td><td>16004「服务器繁忙,请稍后再试」</td><td>internal</td></tr>
- *   <tr><td>11</td><td>选场循环里：随机选场 / 读落点（含损坏）/ 抢标记出错</td><td>16004「服务器繁忙,请稍后再试」</td><td>internal</td></tr>
- *   <tr><td>12</td><td>指定场：落点不存在（已公开时只摘索引成员，<b>永不删落点</b>）</td><td>16018「该战斗不存在或已结束」</td><td>not_found</td></tr>
- *   <tr><td>13</td><td>抢标记：被并发的另一条 163 占着 → 16016；发现有票（入口检查之后才建出来的，W2）→ 16014、不调 AddObserver
- *       （第 7 行刚按「重看同一场」删过旧标记时，另发一条异步的自我清退，见下面的纪律）</td>
- *       <td>16016「已在观战另一场战斗」/ 16014</td><td>already_watching / queued</td></tr>
- *   <tr><td>14</td><td>登记成功后复查命中票据或战斗锁（读票失败按无票；读锁失败或等超时按<b>有锁</b>，BW2）→ 异步自我清退</td>
- *       <td>16014「匹配中无法观战」</td><td>queued</td></tr>
- *   <tr><td>15</td><td>成功</td><td>{@code {battle_id}}，不带 {@code error_message}</td><td>ok</td></tr>
- *   <tr><td>16</td><td>battle 回「房间不存在」（1004）或直拨判死：在建房窗口内 → 不剔除；窗口外 → 按 attempt 守护剔除，随机 → 下一轮</td>
- *       <td>16018「该战斗不存在或已结束」</td><td>not_found</td></tr>
- *   <tr><td>17a</td><td>battle 回观众席已满（满员专用码）：回滚标记，随机也不换场</td><td>满员码「观战人数已满」</td><td>full</td></tr>
- *   <tr><td>17</td><td>battle 的其它拒绝、没送达、结局不明（随机也不换场，BW6）</td><td>16018「该战斗当前无法观战」</td><td>rejected</td></tr>
- *   <tr><td>18</td><td>随机两轮都没成</td><td>16017「当前没有可观战的战斗」</td><td>no_battle</td></tr>
- *   <tr><td>J</td><td>剩余预算不够发下一跳（换场前不足 2.2 s：旧标记原样保留；登记前不足 1 s：回滚刚抢到的标记，重看同一场时保留它）</td>
- *       <td>16004「服务器繁忙,请稍后再试」</td><td>internal</td></tr>
- *   <tr><td>J2</td><td>未预期异常（bug）：原样抛给派发器（信封 1003）；已抢到、还没交给 battle 的标记按值尽力释放</td><td>—</td><td>internal</td></tr>
- * </table>
- * 「在途已满」（J 行的另一半，outcome {@code overloaded}）不进这里，在 {@link WatchBattleHandler#onOverload()}。
+ * <p>标记按原字符串 compare-delete：并发或迟到取消不能删除后来操作。取消必须验证 cancelled、原 UUID、固定实例；
+ * 超时、空回包、无证明拒绝、目录判死均不冒充取消成功。Add 未知以独立 3 秒预算补发原件 Remove：
+ * 墓碑能封闭仍在途的同 UUID Add；取消未知继续保留标记，重看与开局清退可以重放同一原件恢复。
+ * 不存在“同场只改 nonce 不清退”的分支。旧 battle:nonce 无法通过当前 battle 账本，可作为旧格式按值清理；
+ * 新格式损坏或玩家身份错配则保留并失败。
  *
- * <p><b>观战标记的纪律</b>（规格 §7.1 第 4–7 条；每一条都有只靠它挡住的用例）：
- * <ul>
- *   <li><b>先标记、后登记</b>：标记先于 AddObserver 写入，之后才开始的 gather 一定能读到并清退。</li>
- *   <li><b>一律按值删</b>（W3）：标记的值带本次请求的 nonce，两条并发 163 不会删掉对方刚抢到的标记；入口删旧标记按读到的原串删。</li>
- *   <li><b>结局不明保留</b>（W4）：AddObserver 超时 / 连上后断开时 battle 可能已登记这名观众——标记留着，下一次开局清退才摘得到他；
- *       明确拒绝与「确定没送达」才回滚。不补发 RemoveObserver（它可能先于在途的 Add 到达）。</li>
- *   <li><b>换场的 Remove 先于 Add</b>：同步等旧场的 RemoveObserver 返回（或到它的硬截止）才往下走——随机模式可能重挑同一场，
- *       迟到的 Remove 会把刚登记的观众摘掉。只有复查命中后的自我清退是异步的（那时应答已定，剩余预算可能只有约 0.2 s）。</li>
- *   <li><b>重看同一场不发 Remove</b>：否则给仍活着的旧会话推一条假的 166；重推 177 / 首帧由 battle 的幂等分支负责。
- *       代价是从删掉旧标记到 AddObserver 之间，玩家仍登记在这一场、却没有标记指着它——<b>不调 AddObserver 就回包</b>的两个出口不能就这样走掉
- *       （开局清退只认标记）：抢标记回有票（16014）→ 补一条异步的自我清退（{@code concurrent_queue}；基线在同一交错下靠复查摘掉他）；
- *       登记前预算不足（16004）→ 保留刚抢到的标记。其余出口与基线相同（不在线、读落点失败等同样留下「在名单、无标记」，随那一场结束清理）；
- *       入口删旧标记<b>失败</b>（16004）→ 不补发那次异步删除，旧标记原样留着（基线在同样的故障下也是标记还在）；残余只有「等到截止、
- *       而那条删除其实已在路上并随后成功」这一种（Redis 卡顿时可见，随那一场结束清理）。</li>
- *   <li><b>复查的两个方向不能写反</b>：读票失败 → 按无票（尽力收窄，不引入新的失败面）；读锁失败 → 按有锁（宁可多清退一个观众，
- *       也不放进「观战 + 参战」）。只查一次，不做二次复查（切磋的备战晚于复查时两样都读不到，照常成功——规格 §7.1 第 16 条的既定结局）。</li>
- * </ul>
- *
- * <p><b>预算</b>（W10；lead 裁决 3）：整个请求一个截止（受理时刻 + 4500 ms，由派发器给）。每一次 Redis 读写都只等到它；两跳 battle RPC
- * 各有一个更早的<b>硬截止</b>交给 {@link ObserverDialer}——换场的 Remove 是「请求截止 − {@link MatchBudgets#WATCH_REWATCH_RESERVE_MS}」，
- * 登记的 Add 是「请求截止 − {@link MatchBudgets#WATCH_ADD_RESERVE_MS}」——直拨的本地等待、目录读与探测都夹在硬截止之内，
- * 所以 163 一定先于 gate 的 5 s 给出 in-band 应答。预算不够发下一跳时不去发一个注定超时的调用，直接回 16004。
- *
- * <p><b>与基线只在 Redis 故障时可见的出入</b>：删旧标记（入口）或随机换场前回滚本轮标记<b>失败</b>时回 16004——基线忽略删除失败继续往下走，
- * 随后的抢占会被自己没删掉的标记挡成 16016「已在观战另一场战斗」，那是一条误导的应答。
- *
- * <p><b>指标</b>：每次请求恰好记一个 {@code game_match_watch_battle_total{outcome}}；对旧标记的每一次处置另记
- * {@code game_match_spectate_evictions_total}（{@code already_watching} 只计 16016，W14）；摘索引成员记
- * {@code game_match_watchable_index_evictions_total}（只在存储回报「真的摘了」时）；损坏的落点记 {@code game_match_watchable_anomalies_total}。
- * 观众 RPC 自己的结局由 {@link ObserverDialer} 的实现记。
- *
- * <p><b>线程</b>：{@link #watch} 阻塞，跑在 163 自己的虚拟线程上（{@link SpectateExecutor}）；只在 future 上等，不持锁、不用 {@code synchronized}。
- * 复查的两次读各在一条虚拟线程上并行做（名字 {@code match-spectate-recheck-<序号>}，不占 163 的在途许可：每个请求至多两条，都只活到请求截止）。
- * 无状态、线程安全。
+ * <p>既有判定顺序、随机两次上限、建房窗口/attempt 守护、复查票据和锁的方向、4.5 秒请求预算保持。
+ * 同场重看先推旧观战结束，再新操作分配；成功应答返回新 spectator_operation_id。全球 SQL 观战仍走 GlobalWatchService。
+ * 此路径依旧是本地兼容链，Redis TTL、开局尽力清退与跨存储复查不是全球 SQL 事务互斥的证明。
  */
 public final class WatchBattleService {
 
@@ -120,7 +63,7 @@ public final class WatchBattleService {
     private final ObserverDialer observers;
     private final MatchMetrics metrics;
     private final DoubleSupplier random;
-    private final Supplier<String> nonces;
+    private final Supplier<String> operations;
     private final Executor recheckThreads;
     private GlobalWatchService global;
     public WatchBattleService withGlobal(GlobalWatchService global){this.global=global;return this;}
@@ -142,33 +85,30 @@ public final class WatchBattleService {
     private static final class Pending {
         /** 本次请求写下、还没有交代清楚的标记（出未预期异常时按值尽力释放，J2）。 */
         String mark;
-        /**
-         * 第 7 行「显式重看同一场」删掉了旧标记、<b>没有发</b> RemoveObserver：玩家多半仍登记在这一场的观众名单里，而此刻没有任何标记指着它。
-         * 走到 AddObserver 的出口各有交代（成功 → 新标记；结局不明 → 保留新标记；其余与基线相同）；<b>不调 AddObserver 就回包</b>的两个
-         * Java 独有出口（抢标记回有票、登记前预算不足）要自己补上，见 {@code decide} 里的两处。
-         */
-        boolean sameBattleRewatch;
+        /** 本次已写入标记的完整原件；Add 发出后异常也只能按它补偿。 */
+        LocalObserverOperation original;
+        boolean addMayHaveRun;
     }
 
-    /** 生产装配：随机数取 {@link ThreadLocalRandom}，nonce 取 {@link SpectateRules#newNonce}，复查的两次读各起一条虚拟线程。 */
+    /** 生产装配：随机数取 {@link ThreadLocalRandom}，操作号取 {@link java.util.UUID#randomUUID}，复查的两次读各起一条虚拟线程。 */
     public WatchBattleService(SpectateStore store, PlacementStore placements, PlayerStatusReader players, TicketReader tickets,
                               ObserverDialer observers, MatchMetrics metrics) {
-        this(store, placements, players, tickets, observers, metrics, () -> ThreadLocalRandom.current().nextDouble(), SpectateRules::newNonce,
+        this(store, placements, players, tickets, observers, metrics, () -> ThreadLocalRandom.current().nextDouble(), () -> java.util.UUID.randomUUID().toString(),
                 Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name(RECHECK_THREAD_PREFIX, 0).factory()));
     }
 
     /**
      * @param store          观战标记、可观战索引、落点的原子读
-     * @param placements     落点记录的普通读（只用来找旧场的地址，换场时清退）
+     * @param placements     现有装配保留的落点存储；新观战原子读走 store，取消只用持久原件
      * @param players        战斗锁与在线目录（别的进程拥有）
      * @param tickets        票据的只读口（只用于复查；入口与抢占的「有没有票」在 {@code store} 的脚本里判）
      * @param observers      按落点直拨 battle 的观众 RPC
      * @param random         随机选场用的 [0, 1) 随机数（测试给定值）
-     * @param nonces         每次抢标记用的 nonce（{@link SpectateRules#newNonce} 的形状）
+     * @param operations     每次新观战使用的规范 UUID
      * @param recheckThreads 复查两次读的执行器：任务会阻塞到读完或请求截止；测试可传 {@code Runnable::run}
      */
     WatchBattleService(SpectateStore store, PlacementStore placements, PlayerStatusReader players, TicketReader tickets, ObserverDialer observers,
-                       MatchMetrics metrics, DoubleSupplier random, Supplier<String> nonces, Executor recheckThreads) {
+                       MatchMetrics metrics, DoubleSupplier random, Supplier<String> operations, Executor recheckThreads) {
         this.store = Objects.requireNonNull(store, "store");
         this.placements = Objects.requireNonNull(placements, "placements");
         this.players = Objects.requireNonNull(players, "players");
@@ -176,17 +116,17 @@ public final class WatchBattleService {
         this.observers = Objects.requireNonNull(observers, "observers");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.random = Objects.requireNonNull(random, "random");
-        this.nonces = Objects.requireNonNull(nonces, "nonces");
+        this.operations = Objects.requireNonNull(operations, "operations");
         this.recheckThreads = Objects.requireNonNull(recheckThreads, "recheckThreads");
     }
 
     /**
      * 处理一次 163。
      *
-     * @param session            gate 填的会话上下文：身份只取 {@code player_id}（0 = 没进游戏）；{@code account} 作 {@code observer_name}（只进 battle 的日志）
+     * @param session            gate 填的会话上下文：身份只取 {@code player_id}（0 = 没进游戏）；公开名字由注入的查询口提供
      * @param requestedBattleId  请求里的 {@code battle_id}（0 = 随机观战）
      * @param deadline           本次请求的截止
-     * @return 应答（业务拒绝、依赖故障、预算不足都在它的 {@code error_message} 里；成功只带 {@code battle_id}）
+     * @return 应答（业务拒绝、依赖故障、预算不足在 {@code error_message}；成功带战斗号与新观战操作 UUID）
      * @throws RuntimeException 只在未预期的异常（bug）时：已抢到、还没交给 battle 的标记已按值尽力释放，由派发器回信封 1003
      */
     public WatchBattleResponse watch(SessionContext session, long requestedBattleId, Deadline deadline) {
@@ -201,8 +141,10 @@ public final class WatchBattleService {
         } catch (RuntimeException | Error e) {
             String mark = pending.mark;
             if (mark != null) {
-                log.error("[spectate] WatchBattle 出了未预期的异常，按值尽力释放本次抢到的标记 player={} mark={}", id(playerId), mark);
-                releaseAsyncQuietly(playerId, mark);
+                log.error("[spectate] WatchBattle 出了未预期的异常，按原件恢复本次操作 player={} operation={}", id(playerId),
+                        pending.original == null ? "unavailable" : pending.original.add().getSpectatorOperationId());
+                if (pending.addMayHaveRun) compensate(pending.original, mark, SpectateRules.REASON_OUTCOME_UNKNOWN);
+                else releaseAsyncQuietly(playerId, mark);
             }
             count(WatchOutcome.INTERNAL);
             throw e;
@@ -318,7 +260,16 @@ public final class WatchBattleService {
             }
 
             // 第 13 行：原子完成「没有票据 ∧ 没有标记 → 写标记」。标记必须先于观众登记生效
-            String mark = SpectateRules.encodeMark(battleId, nonces.get());
+            LocalObserverOperation original;
+            try {
+                original = LocalObserverOperation.create(placement, playerId, routing, publicName(playerId, d), operations.get(), snapshot.redisNowMs());
+            } catch (IllegalArgumentException invalid) {
+                log.error("[spectate] 固定观战原件不完整，不抢标记、不调用 battle player={} battle_id={}", player, battle);
+                return rejected(WatchOutcome.REJECTED, MatchTip.WATCH_NOT_WATCHABLE);
+            }
+            String mark = original.mark();
+            pending.original = original;
+            pending.addMayHaveRun = false;
             pending.mark = mark;
             SpectateStore.Acquire acquired;
             try {
@@ -332,15 +283,9 @@ public final class WatchBattleService {
             switch (acquired) {
                 case QUEUED -> {
                     // 入口检查之后才建出的票据（W2）
-                    if (pending.sameBattleRewatch) {
-                        // 重看同一场：旧标记已在入口删掉、没发 Remove，玩家仍登记在这一场——不调 AddObserver 就回包的话，他带着观众登记去开局，
-                        // 而开局清退只认标记、摘不到他。自我清退，结局同基线（那边 SETNX 成功 → 幂等的 AddObserver → 复查命中 → RemoveObserver）
-                        selfEvict(playerId, player, battleId, placement);
-                    }
                     // 命令被重发时首轮可能已写入标记：按本次的值释放
                     releaseMark(playerId, player, mark, d, pending);
-                    log.info("[spectate] 抢观战标记时发现已有票据，不登记观众 player={} battle_id={} same_battle_rewatch={}", player, battle,
-                            pending.sameBattleRewatch);
+                    log.info("[spectate] 抢观战标记时发现已有票据，不登记观众 player={} battle_id={}", player, battle);
                     return rejected(WatchOutcome.QUEUED, MatchTip.WATCH_QUEUED);
                 }
                 case BUSY -> {
@@ -355,14 +300,6 @@ public final class WatchBattleService {
 
             // J 行：剩余预算不够发 AddObserver → 回滚标记，不去发一个注定超时的调用
             if (d.remainingMillis() < MatchBudgets.WATCH_ADD_MIN_BUDGET_MS) {
-                if (pending.sameBattleRewatch) {
-                    // 重看同一场：玩家多半仍登记在这一场（旧标记已删、没发 Remove），刚抢到的标记指的正是它——留着（W4 的口径：
-                    // 可能仍登记着就不删），下一次 163 或开局清退才摘得到他
-                    pending.mark = null;
-                    log.warn("[spectate] WatchBattle 剩余预算不足 {} ms，不发 AddObserver；重看同一场，保留观战标记 player={} battle_id={}",
-                            MatchBudgets.WATCH_ADD_MIN_BUDGET_MS, player, battle);
-                    return rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
-                }
                 releaseMark(playerId, player, mark, d, pending);
                 log.warn("[spectate] WatchBattle 剩余预算不足 {} ms，不发 AddObserver player={} battle_id={}", MatchBudgets.WATCH_ADD_MIN_BUDGET_MS,
                         player, battle);
@@ -370,8 +307,8 @@ public final class WatchBattleService {
             }
             Deadline hardStop = SpectateRules.reserveBefore(d, MatchBudgets.WATCH_ADD_RESERVE_MS);
             Duration timeout = SpectateRules.hopTimeout(MatchBudgets.ADD_OBSERVER_TIMEOUT_MS, hardStop);
-            AddObserverRequest request = AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(playerId).setRouting(routing)
-                    .setObserverName(publicName(playerId,d)).build();
+            AddObserverRequest request = original.add();
+            pending.addMayHaveRun = true;
             Outcome outcome = observers.add(placement, request, timeout, hardStop);
 
             boolean deadNode;
@@ -379,7 +316,7 @@ public final class WatchBattleService {
                 case Outcome.Replied replied when replied.tipId() == 0 -> {
                     // 观众已登记：从这里起标记要留着（复查没命中就是成功；命中由自我清退按值删）
                     pending.mark = null;
-                    return recheck(playerId, player, battleId, placement, mark, randomMode, d);
+                    return recheck(playerId, player, battleId, placement, original, mark, randomMode, d);
                 }
                 case Outcome.Replied replied when replied.tipId() == MatchTips.BATTLE_ROOM_NOT_FOUND -> deadNode = false;
                 case Outcome.Dead dead -> deadNode = true;
@@ -404,8 +341,9 @@ public final class WatchBattleService {
                     return rejected(WatchOutcome.REJECTED, MatchTip.WATCH_NOT_WATCHABLE);
                 }
                 case Outcome.Unknown unknown -> {
-                    // 结局不明（W4）：battle 可能已登记这名观众——标记保留，下一次开局清退才摘得到他；不补发 RemoveObserver
+                    // 原件取消会先立墓碑，能封闭仍在途的 Add；没有正证明时保留原标记供下一次清退恢复。
                     pending.mark = null;
+                    compensate(original, mark, SpectateRules.REASON_OUTCOME_UNKNOWN);
                     log.error("[spectate] AddObserver 结局不明，保留观战标记 player={} battle_id={} node={}: {}", player, battle, node(placement),
                             unknown.detail());
                     return rejected(WatchOutcome.REJECTED, MatchTip.WATCH_NOT_WATCHABLE);
@@ -449,61 +387,36 @@ public final class WatchBattleService {
      * @return null = 旧标记已删，继续往下判；非 null = 就此回包（预算不够换场、或删旧标记失败）
      */
     private Verdict clearPreviousMark(long playerId, String player, String oldValue, long requestedBattleId, Deadline d, Pending pending) {
-        Optional<SpectateRules.Mark> decoded = SpectateRules.decodeMark(oldValue);
+        Optional<LocalObserverOperation> decoded = LocalObserverOperation.decode(oldValue);
         if (decoded.isEmpty()) {
-            log.warn("[spectate] 观战标记值非法，直接清除 player={} value='{}'", player, oldValue);
+            // 旧 battle:nonce 不能通过现行 battle 准入；仅这种旧格式与普通脏值允许按值清除。
+            // 新格式损坏不能被解释为已经取消，否则会丢失恢复入口。
+            if (LocalObserverOperation.isVersionedMark(oldValue)) return rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
             metrics.spectateEviction(EvictReason.REWATCH, EvictResult.INVALID_MARK);
             return releasePrevious(playerId, player, oldValue, d, true);
         }
-        long previous = decoded.get().battleId();
-        if (requestedBattleId != 0 && requestedBattleId == previous) {
-            // 重看同一场：只删标记。不发 RemoveObserver——那会给仍活着的旧会话推一条假的 166；重推 177 与首帧、换会话关旧直连由 battle 的幂等分支负责
-            log.info("[spectate] 重看同一场，只删旧标记 player={} battle_id={}", player, id(previous));
-            Verdict stop = releasePrevious(playerId, player, oldValue, d, false);
-            if (stop == null) {
-                pending.sameBattleRewatch = true; // 从这里起：名单里可能还有他，标记却没有了
-            }
-            return stop;
-        }
-
-        // 换场 / 随机：旧场还在就先同步清退
-        EvictResult result;
-        switch (placements.read(previous, d)) {
-            case PlacementStore.Read.Failed failed -> {
-                log.error("[spectate] 清退旧场时读落点记录失败，不发 RemoveObserver player={} battle_id={}: {}", player, id(previous), failed.why());
-                result = EvictResult.READ_FAILED;
-            }
-            case PlacementStore.Read.Absent absent -> result = EvictResult.NO_RECORD; // 旧场已收尾，标记只是残留
-            case PlacementStore.Read.Found found -> {
-                // J 行：换场要先后发两跳。预算不够时什么都不做——旧标记原样保留，玩家仍在看旧场
-                long needMs = MatchBudgets.WATCH_REWATCH_RESERVE_MS + MatchBudgets.WATCH_ADD_MIN_BUDGET_MS;
-                if (d.remainingMillis() < needMs) {
-                    log.warn("[spectate] WatchBattle 剩余预算不足 {} ms，不换场（旧标记保留） player={} previous_battle_id={}", needMs, player,
-                            id(previous));
-                    return rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
-                }
-                Deadline hardStop = SpectateRules.reserveBefore(d, MatchBudgets.WATCH_REWATCH_RESERVE_MS);
-                Outcome outcome = observers.remove(found.placement(), playerId, SpectateRules.REASON_REWATCH,
-                        SpectateRules.hopTimeout(MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS, hardStop), hardStop);
-                result = evictResultOf(outcome);
-                if (result == EvictResult.RPC_FAILED) {
-                    log.error("[spectate] 清退旧场的 RemoveObserver 没调通（名单里的残留随那一场结束清理） player={} battle_id={} node={}: {}",
-                            player, id(previous), node(found.placement()), outcome);
-                } else {
-                    log.info("[spectate] 已清退旧场 player={} battle_id={} reason={} result={}", player, id(previous), SpectateRules.REASON_REWATCH,
-                            result);
-                }
-            }
-        }
+        LocalObserverOperation original = decoded.get();
+        if (original.playerId() != playerId) return rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
+        long needMs = MatchBudgets.WATCH_REWATCH_RESERVE_MS + MatchBudgets.WATCH_ADD_MIN_BUDGET_MS;
+        if (d.remainingMillis() < needMs) return rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
+        Deadline hardStop = SpectateRules.reserveBefore(d, MatchBudgets.WATCH_REWATCH_RESERVE_MS);
+        Outcome outcome = observers.remove(original, SpectateRules.REASON_REWATCH,
+                SpectateRules.hopTimeout(MatchBudgets.REMOVE_OBSERVER_TIMEOUT_MS, hardStop), hardStop);
+        EvictResult result = evictResultOf(outcome);
         metrics.spectateEviction(EvictReason.REWATCH, result);
+        if (result != EvictResult.REMOVED) {
+            log.warn("[spectate] 旧观战原件取消未获证明，保留原标记、不登记新操作 player={} battle_id={} outcome={}",
+                    player, id(original.battleId()), outcome);
+            return rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
+        }
+        // 同场重看、换场、随机模式完全同口径；只有原件取消证明才允许释放旧槽。
         return releasePrevious(playerId, player, oldValue, d, true);
     }
-
     /**
      * 按读到的原串删旧标记。删不掉（Redis 故障 / 预算已尽）→ 16004：带着一个没删掉的旧标记往下走，抢占只会得到一条误导的 16016。
      *
      * @param retryAsync 删失败之后要不要再尽力异步删一次。换场 / 脏标记：要（旧场已清退或本来就指不到哪一场，标记只是残留）。
-     *                   重看同一场：不要——玩家仍登记在这一场，旧标记留着才对（开局清退只认标记；基线在同样的故障下标记也还在）。
+     *                   只有取消已确认或明确旧格式无有效准入时调用；任何未知取消均不进入此方法。
      */
     private Verdict releasePrevious(long playerId, String player, String oldValue, Deadline d, boolean retryAsync) {
         try {
@@ -549,7 +462,7 @@ public final class WatchBattleService {
      * AddObserver 成功之后再看一次票据与战斗锁（基线 {@code watchbattlelogic.go:206-231}）：收窄「入口检查 → 写标记」之间的窗口——
      * 并发的 gather（尤其即时开局的 PVE_SOLO）可能在本次写标记之前就做完了清退、读不到标记。两次读并行，各自只等到请求截止。
      */
-    private Verdict recheck(long playerId, String player, long battleId, BattlePlacement placement, String mark, boolean randomMode, Deadline d) {
+    private Verdict recheck(long playerId, String player, long battleId, BattlePlacement placement, LocalObserverOperation original, String mark, boolean randomMode, Deadline d) {
         CompletableFuture<Boolean> ticketRead = startRead(() -> tickets.read(playerId, d).isPresent());
         CompletableFuture<Boolean> lockRead = startRead(() -> players.inBattle(playerId, d));
         boolean hasTicket = false;
@@ -569,46 +482,33 @@ public final class WatchBattleService {
         }
         if (!hasTicket && !locked) {
             log.info("[spectate] 观战接入成功 player={} battle_id={} node={} random={}", player, id(battleId), node(placement), randomMode);
-            return new Verdict(WatchOutcome.OK, MatchTips.watchAccepted(battleId));
+            return new Verdict(WatchOutcome.OK, MatchTips.watchAccepted(battleId).toBuilder()
+                    .setSpectatorOperationId(original.add().getSpectatorOperationId()).build());
         }
 
-        // 自我清退：RemoveObserver 发出即返回（应答不依赖它的结果；这时剩余预算可能只有约 0.2 s），然后按值删标记
+        // 自我清退使用独立预算；业务应答不等取消，只有迟到的原操作正证明才能触发按值删除。
         log.info("[spectate] 观战与并发的排队 / 开局冲突，自我清退 player={} battle_id={} ticket={} locked={}", player, id(battleId), hasTicket,
                 locked);
-        selfEvict(playerId, player, battleId, placement);
-        releaseMark(playerId, player, mark, d, null);
+        compensate(original, mark, SpectateRules.REASON_CONCURRENT_QUEUE);
         return rejected(WatchOutcome.QUEUED, MatchTip.WATCH_QUEUED);
     }
 
-    /**
-     * 自我清退：RemoveObserver({@code concurrent_queue}) 发出即返回、永不抛——应答不依赖它的结果。两处用：复查命中（第 14 行），
-     * 以及「重看同一场」时抢标记发现已有票据（第 13 行的 16014：旧标记已删而观众登记还在）。battle 对不在名单里的人是空操作。
-     *
-     * <p><b>迟到风险（补偿，不受请求截止约束）</b>：它多半在回包、gate 放行同一会话的下一条之后才到 battle；RemoveObserver 只带战斗号与玩家号，
-     * 不带标记或 nonce，battle 认不出它属于哪一次登记。同一会话紧接着 148 取消、再 163 重看同一场时，这条迟到的 Remove 可能排在新的 AddObserver
-     * 之后执行：标记说他在看，名单里却没有他（不推画面，再发一次 163 可恢复）。根治要让 RemoveObserver 带登记时的围栏值、battle 只摘同一次登记，
-     * 那是 battle 协议改动（两版同批），尚未做（mmorpg client-request-ordering.md §6.1 的同类残留）。
-     */
-    private void selfEvict(long playerId, String player, long battleId, BattlePlacement placement) {
+    /** 有界补偿使用同一原件；未知保留恢复槽，迟到正证明也只能 compare-delete 自己的原串。 */
+    private void compensate(LocalObserverOperation original, String mark, String reason) {
+        EvictReason metricReason = SpectateRules.REASON_OUTCOME_UNKNOWN.equals(reason) ? EvictReason.WATCH_OUTCOME_UNKNOWN : EvictReason.CONCURRENT_QUEUE;
         try {
-            observers.removeAsync(placement, playerId, SpectateRules.REASON_CONCURRENT_QUEUE)
-                    .thenAccept(outcome -> selfEvicted(player, battleId, outcome));
-        } catch (RuntimeException e) { // 约定不抛；自我清退发不出去不改变应答
-            log.error("[spectate] 自我清退的 RemoveObserver 没能发出 player={} battle_id={}", player, id(battleId), e);
-            metrics.spectateEviction(EvictReason.CONCURRENT_QUEUE, EvictResult.RPC_FAILED);
+            observers.removeAsync(original, reason).thenAccept(outcome -> {
+                EvictResult result = evictResultOf(outcome);
+                metrics.spectateEviction(metricReason, result);
+                if (result == EvictResult.REMOVED) releaseAsyncQuietly(original.playerId(), mark);
+                else log.warn("[spectate] 补偿未获原操作取消证明，保留标记 player={} battle_id={} outcome={}",
+                        id(original.playerId()), id(original.battleId()), outcome);
+            });
+        } catch (RuntimeException failure) {
+            log.warn("[spectate] 原观战补偿未发出，保留标记 player={} battle_id={}", id(original.playerId()), id(original.battleId()), failure);
+            metrics.spectateEviction(metricReason, EvictResult.RPC_FAILED);
         }
     }
-
-    /** 自我清退的结局（在直拨器的线程上回调：只记指标与日志，不阻塞）。 */
-    private void selfEvicted(String player, long battleId, Outcome outcome) {
-        EvictResult result = evictResultOf(outcome);
-        metrics.spectateEviction(EvictReason.CONCURRENT_QUEUE, result);
-        if (result == EvictResult.RPC_FAILED) {
-            log.error("[spectate] 自我清退的 RemoveObserver 没调通（名单里的残留随那一场结束清理） player={} battle_id={}: {}", player, id(battleId),
-                    outcome);
-        }
-    }
-
     /** 在复查的执行器上起一次读；起不了（拒收、内存耗尽）就是一次失败的读。 */
     private CompletableFuture<Boolean> startRead(Supplier<Boolean> read) {
         try {
@@ -663,8 +563,8 @@ public final class WatchBattleService {
 
     private static EvictResult evictResultOf(Outcome outcome) {
         return switch (outcome) {
-            case Outcome.Replied replied -> EvictResult.REMOVED;
-            case Outcome.Dead dead -> EvictResult.NO_RECORD;
+            case Outcome.Replied replied -> replied.tipId() == 0 ? EvictResult.REMOVED : EvictResult.RPC_FAILED;
+            case Outcome.Dead dead -> EvictResult.RPC_FAILED;
             case Outcome.NotDelivered notDelivered -> EvictResult.RPC_FAILED;
             case Outcome.Unknown unknown -> EvictResult.RPC_FAILED;
         };

@@ -7,6 +7,7 @@ import com.game.battle.room.BattleScheduler;
 import com.game.battle.room.Cancellable;
 import com.game.discovery.battle.BattleRedis;
 import com.game.proto.contracts.kafka.BattleResultEvent;
+import com.google.protobuf.ByteString;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -20,16 +21,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 活动结果持久通道的 battle 侧（基线 {@code battle_result_activity.h} + {@code room.cpp:1861-2031}；scene-battle-spec §3.6、§7.17）：
- * {@code SET game:battle:activity-result:<id> EX 7d} 成功 → 经 {@link BattleResultSink} 发布并登记；失败 → 发布一次 + {@code not_durable}。
- * 发布一律走 {@link BattleResultSink.Channel#ACTIVITY}（首发与重发都计 {@code game_battle_results_total{channel=activity}}，普通局的
- * {@code plain} 不受影响）；登记的是事件对象本身（不可变），重发时再序列化得到的字节与落库的那份相同。
- * 每 10 s 对每条 EXISTS：0 → 摘除（消费方已销账）；1 → 用尽（30 次重发）则 ERROR 摘除，否则重发；<b>出错一律跳过、不计次</b>（与 D15 统一）；
- * 登记超过 {@link BattleRedis#OUTBOX_MAX_AGE} 仍没有结论 → 按用尽摘除（记录仍在 Redis，留给 4.6 的巡检器）。
+ * Redis 兼容通道的活动结果发件箱（scene-battle-spec §3.6、§7.17）。写入成功或结果未知时均登记原 ID 和不可变原字节，
+ * 首发走 {@link BattleResultSink.Channel#ACTIVITY}；{@link #dispatchCommitted} 已有 broker 提交证据，省略重复首发。
+ * 每 10 秒探测，最多重发 30 次、登记最多保留 {@link BattleRedis#OUTBOX_MAX_AGE}。写入未知始终不把不存在当作销账，
+ * 每次重发前必须读取并精确核对原字节，读失败、缺失或异值都跳过且不计重发次数；不补写、不销账。
+ * 同进程在途或登记期间拒绝同 ID 不同字节，旧回包不能替换新登记；这不是 Redis 的跨写者围栏。
  *
- * <p>销账方是 4.6 的帮会同道历练消费方与巡检器，两版现在都不存在（Q11）。6.4 起发布端口是真的 Kafka 生产方（{@code port.kafka.KafkaBattleResultSink}，
- * 发到对局结果 topic）：在 4.6 的消费方出现之前没有人销账，一局活动结果会按原字节重发到上限（首发 + 30 次），game-match 的评分对这些事件按
- * 「不计分」忽略（match-spec §5.4、§7.2）。线程：与结算发件箱共用 {@code battle-outbox}。
+ * <p>仍使用既有 7 天 TTL，不提供跨重启的未知记录恢复，也不代替 SQL v1 的永久原件与消费回执。
+ * 年龄或次数耗尽仅停止内存重投，不能证明已消费或原件仍存在。线程与结算发件箱共用 {@code battle-outbox}。
  */
 public final class ActivityResultOutbox implements ActivityResultSink {
 
@@ -41,6 +40,11 @@ public final class ActivityResultOutbox implements ActivityResultSink {
         CompletableFuture<Long> store(long battleId, byte[] payload);
 
         CompletableFuture<Boolean> exists(long battleId);
+
+        /** 读取持久原字节；空值不能作为活动已消费的证明。 */
+        default CompletableFuture<byte[]> readOriginal(long battleId) {
+            return CompletableFuture.failedFuture(new UnsupportedOperationException("未装配活动原件读取"));
+        }
 
         static Store redis(BattleRedis redis) {
             Objects.requireNonNull(redis, "redis");
@@ -54,19 +58,50 @@ public final class ActivityResultOutbox implements ActivityResultSink {
                 public CompletableFuture<Boolean> exists(long battleId) {
                     return redis.activityResultExists(battleId);
                 }
+
+                @Override
+                public CompletableFuture<byte[]> readOriginal(long battleId) {
+                    return redis.readActivityResult(battleId);
+                }
             };
         }
     }
 
     private static final class Entry {
         final BattleResultEvent event;
+        final ByteString payload;
         final long enqueuedAtMs;
+        final boolean persistenceUnconfirmed;
         int resent;
         boolean probing;
 
-        Entry(BattleResultEvent event, long enqueuedAtMs) {
+        Entry(BattleResultEvent event, ByteString payload, long enqueuedAtMs, boolean persistenceUnconfirmed) {
             this.event = event;
+            this.payload = payload;
             this.enqueuedAtMs = enqueuedAtMs;
+            this.persistenceUnconfirmed = persistenceUnconfirmed;
+        }
+    }
+
+    /** 全部未完成写调用共享字节约束；latest 只决定回包是否有权登记。 */
+    private static final class PendingStores {
+        final ByteString payload;
+        Object latest;
+        int unfinished;
+
+        PendingStores(ByteString payload) {
+            this.payload = payload;
+        }
+
+        Object begin() {
+            latest = new Object();
+            unfinished++;
+            return latest;
+        }
+
+        boolean finish(Object attempt) {
+            unfinished--;
+            return latest == attempt;
         }
     }
 
@@ -76,6 +111,7 @@ public final class ActivityResultOutbox implements ActivityResultSink {
     private final OutboxMetrics metrics;
     private final LongSupplier clockMillis;
     private final Map<Long, Entry> entries = new LinkedHashMap<>();
+    private final Map<Long, PendingStores> pendingStores = new LinkedHashMap<>();
     private Cancellable timer;
 
     public ActivityResultOutbox(BattleScheduler outbox, Store store, BattleResultSink publisher, OutboxMetrics metrics,
@@ -90,18 +126,23 @@ public final class ActivityResultOutbox implements ActivityResultSink {
     /** {@link ActivityResultSink}：在 {@code battle-logic} 上调用，只把任务交给发件箱线程。 */
     @Override
     public void dispatch(BattleResultEvent event) {
-        dispatch(event,false);
+        dispatch(event, false);
     }
-    @Override public void dispatchCommitted(BattleResultEvent event){dispatch(event,true);}
-    private void dispatch(BattleResultEvent event,boolean brokerCommitted){
+
+    @Override
+    public void dispatchCommitted(BattleResultEvent event) {
+        dispatch(event, true);
+    }
+
+    private void dispatch(BattleResultEvent event, boolean brokerCommitted) {
         try {
-            outbox.execute(() -> onDispatch(event,brokerCommitted));
+            outbox.execute(() -> onDispatch(event, brokerCommitted));
         } catch (RejectedExecutionException e) {
             log.error("发件箱线程已停，活动局结果没有落库也没有发布 battle_id={}", Long.toUnsignedString(event.getBattleId()));
         }
     }
 
-    private void onDispatch(BattleResultEvent event,boolean brokerCommitted) {
+    private void onDispatch(BattleResultEvent event, boolean brokerCommitted) {
         long battleId = event.getBattleId();
         byte[] payload;
         try {
@@ -111,6 +152,17 @@ public final class ActivityResultOutbox implements ActivityResultSink {
             log.error("活动局结果序列化失败，不落库不发布 battle_id={}", Long.toUnsignedString(battleId), e);
             return;
         }
+        ByteString bytes = ByteString.copyFrom(payload);
+        Entry registered = entries.get(battleId);
+        PendingStores pending = pendingStores.get(battleId);
+        if ((registered != null && !registered.payload.equals(bytes))
+                || (pending != null && !pending.payload.equals(bytes))) {
+            metrics.activity(ActivityEvent.PAYLOAD_CONFLICT);
+            log.error("同一活动结果原ID收到不同字节，拒绝覆盖或发布 battle_id={}", Long.toUnsignedString(battleId));
+            return;
+        }
+        PendingStores calls = pendingStores.computeIfAbsent(battleId, ignored -> new PendingStores(bytes));
+        Object attempt = calls.begin();
         CompletableFuture<Long> stored;
         try {
             stored = store.store(battleId, payload);
@@ -118,17 +170,25 @@ public final class ActivityResultOutbox implements ActivityResultSink {
             stored = CompletableFuture.failedFuture(e);
         }
         onOutbox(stored, (ok, error) -> {
-            if (error != null || ok == null) {
-                // 没有结论（空结果）同样不算落库成功（与 D15 同一口径）
-                metrics.activity(ActivityEvent.NOT_DURABLE);
-                log.error("活动局结果落库失败，只发布一次、不登记 battle_id={}: {}", Long.toUnsignedString(battleId),
-                        error != null ? error.toString() : "落库没有结论（空结果）");
-                if(!brokerCommitted)publish(event);
+            boolean latest = calls.finish(attempt);
+            if (calls.unfinished == 0) {
+                pendingStores.remove(battleId, calls);
+            }
+            if (!latest) {
                 return;
             }
-            metrics.activity(ActivityEvent.STORED);
-            if(!brokerCommitted)publish(event);
-            entries.put(battleId, new Entry(event, clockMillis.getAsLong()));
+            boolean unconfirmed = error != null || ok == null || ok != 1;
+            if (unconfirmed) {
+                metrics.activity(ActivityEvent.NOT_DURABLE);
+                log.error("活动结果持久性未确认，登记原件探测；不能将异常视为回滚 battle_id={}: {}", Long.toUnsignedString(battleId),
+                        error != null ? error.toString() : "无效落库结果: " + ok);
+            } else {
+                metrics.activity(ActivityEvent.STORED);
+            }
+            if (!brokerCommitted) {
+                publish(event);
+            }
+            entries.put(battleId, new Entry(event, bytes, clockMillis.getAsLong(), unconfirmed));
             if (timer == null) {
                 timer = outbox.every(BattleRedis.ACTIVITY_RETRY_INTERVAL.toMillis(), this::tick);
             }
@@ -150,13 +210,14 @@ public final class ActivityResultOutbox implements ActivityResultSink {
         for (Map.Entry<Long, Entry> e : new ArrayList<>(entries.entrySet())) {
             long battleId = e.getKey();
             Entry entry = e.getValue();
-            if (entry.probing) {
-                continue;
-            }
             if (now - entry.enqueuedAtMs > BattleRedis.OUTBOX_MAX_AGE.toMillis()) {
                 entries.remove(battleId, entry);
                 metrics.activity(ActivityEvent.EXPIRED);
-                log.error("活动局结果超龄仍无结论，摘除（副本仍在 Redis，留给巡检器） battle_id={}", Long.toUnsignedString(battleId));
+                log.error("活动结果超龄，停止内存重投；销账未确认，须核对持久原件与消费回执 persistence_unconfirmed={} battle_id={}",
+                        entry.persistenceUnconfirmed, Long.toUnsignedString(battleId));
+                continue;
+            }
+            if (entry.probing) {
                 continue;
             }
             entry.probing = true;
@@ -175,24 +236,57 @@ public final class ActivityResultOutbox implements ActivityResultSink {
                     metrics.activity(ActivityEvent.PROBE_ERROR);
                     return;
                 }
-                switch (ActivityRetryRules.classify(present, entry.resent)) {
-                    case ACKED -> {
-                        entries.remove(battleId, entry);
-                        metrics.activity(ActivityEvent.ACKED);
+                if (entry.persistenceUnconfirmed) {
+                    if (present) {
+                        verifyOriginal(battleId, entry);
+                    } else {
+                        metrics.activity(ActivityEvent.PROBE_ERROR);
                     }
-                    case EXHAUSTED -> {
-                        entries.remove(battleId, entry);
-                        metrics.activity(ActivityEvent.EXHAUSTED);
-                        log.error("活动局结果重发用尽，摘除（副本仍在 Redis） battle_id={}", Long.toUnsignedString(battleId));
-                    }
-                    case RESEND -> {
-                        entry.resent++;
-                        metrics.activity(ActivityEvent.RESEND);
-                        publish(entry.event);
-                    }
+                    return;
                 }
-                stopTimerIfIdle();
+                onVerifiedPresence(battleId, entry, present);
             });
+        }
+        stopTimerIfIdle();
+    }
+
+    private void verifyOriginal(long battleId, Entry entry) {
+        entry.probing = true;
+        CompletableFuture<byte[]> original;
+        try {
+            original = store.readOriginal(battleId);
+        } catch (RuntimeException failure) {
+            original = CompletableFuture.failedFuture(failure);
+        }
+        onOutbox(original, (bytes, error) -> {
+            if (entries.get(battleId) != entry) {
+                return;
+            }
+            entry.probing = false;
+            if (error != null || bytes == null || !entry.payload.equals(ByteString.copyFrom(bytes))) {
+                metrics.activity(ActivityEvent.PROBE_ERROR);
+                return;
+            }
+            onVerifiedPresence(battleId, entry, true);
+        });
+    }
+
+    private void onVerifiedPresence(long battleId, Entry entry, boolean present) {
+        switch (ActivityRetryRules.classify(present, entry.resent)) {
+            case ACKED -> {
+                entries.remove(battleId, entry);
+                metrics.activity(ActivityEvent.ACKED);
+            }
+            case EXHAUSTED -> {
+                entries.remove(battleId, entry);
+                metrics.activity(ActivityEvent.EXHAUSTED);
+                log.error("活动结果重发用尽，停止内存重投，未删除 Redis 原件 battle_id={}", Long.toUnsignedString(battleId));
+            }
+            case RESEND -> {
+                entry.resent++;
+                metrics.activity(ActivityEvent.RESEND);
+                publish(entry.event);
+            }
         }
         stopTimerIfIdle();
     }

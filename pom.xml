@@ -13,10 +13,12 @@
 
     <modules>
         <module>game-proto</module>
+        <module>game-contract-check</module>
         <module>game-table-codegen</module>
         <module>game-table</module>
         <module>game-net</module>
         <module>game-common</module>
+        <module>game-navigation</module>
         <module>game-battle-engine</module>
         <module>game-pbmysql</module>
         <module>game-api</module>

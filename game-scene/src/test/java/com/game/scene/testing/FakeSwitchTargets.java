@@ -10,7 +10,8 @@ public final class FakeSwitchTargets implements RemoteSwitchTargets {
 
     /** 一次挂起的选目标请求。 */
     public record PendingSelect(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId,
-                                boolean clientChannelPick, Consumer<Selection> callback) {
+                                boolean clientChannelPick, int fallbackConfigId, boolean excludeSourceNode,
+                                com.game.scene.world.SwitchReason reason, Consumer<Selection> callback) {
 
         public void complete(Selection selection) {
             callback.accept(selection);
@@ -36,7 +37,13 @@ public final class FakeSwitchTargets implements RemoteSwitchTargets {
     @Override
     public void select(long playerId, long fromSceneId, long wantSceneId, int wantSceneConfigId,
                        boolean clientChannelPick, Consumer<Selection> onDone) {
-        pending.add(new PendingSelect(playerId, fromSceneId, wantSceneId, wantSceneConfigId, clientChannelPick, onDone));
+        select(playerId, fromSceneId, new Request(wantSceneId, wantSceneConfigId, 0, false,
+                com.game.scene.world.SwitchReason.PLAYER, clientChannelPick), onDone);
+    }
+
+    @Override public void select(long playerId, long fromSceneId, Request intent, Consumer<Selection> onDone) {
+        pending.add(new PendingSelect(playerId, fromSceneId, intent.sceneId(), intent.configId(),
+                intent.clientChannelPick(), intent.fallbackConfigId(), intent.excludeSourceNode(), intent.reason(), onDone));
     }
 
     /** 取出最早一个挂起的请求。 */

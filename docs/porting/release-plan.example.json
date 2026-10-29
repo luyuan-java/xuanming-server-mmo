@@ -1,0 +1,201 @@
+{
+  "format": 1,
+  "version": "v2.10.0",
+  "javaCommit": "0000000000000000000000000000000000000000",
+  "contractCommit": "1111111111111111111111111111111111111111",
+  "mapsCommit": "2222222222222222222222222222222222222222",
+  "namespace": "release1",
+  "routeGeneration": "11000000-0000-0000-0000-000000000001",
+  "directoryProtocol": "directory-v2-epoch-instance-retired",
+  "rolloutStrategy": "maintenance-all-services",
+  "jars": {
+    "game-scene-manager": "game-scene-manager/target/game-scene-manager-0.1.0-SNAPSHOT.jar",
+    "game-login": "game-login/target/game-login-0.1.0-SNAPSHOT.jar",
+    "game-friend": "game-friend/target/game-friend-0.1.0-SNAPSHOT.jar",
+    "game-chat": "game-chat/target/game-chat-0.1.0-SNAPSHOT.jar",
+    "game-mail": "game-mail/target/game-mail-0.1.0-SNAPSHOT.jar",
+    "game-rank": "game-rank/target/game-rank-0.1.0-SNAPSHOT.jar",
+    "game-match": "game-match/target/game-match-0.1.0-SNAPSHOT.jar",
+    "game-team": "game-team/target/game-team-0.1.0-SNAPSHOT.jar",
+    "game-guild": "game-guild/target/game-guild-0.1.0-SNAPSHOT.jar",
+    "game-mall": "game-mall/target/game-mall-0.1.0-SNAPSHOT.jar",
+    "game-trade": "game-trade/target/game-trade-0.1.0-SNAPSHOT.jar",
+    "game-data": "game-data/target/game-data-0.1.0-SNAPSHOT.jar",
+    "game-inbox": "game-inbox/target/game-inbox-0.1.0-SNAPSHOT.jar",
+    "game-scene": "game-scene/target/game-scene-0.1.0-SNAPSHOT.jar",
+    "game-battle": "game-battle/target/game-battle-0.1.0-SNAPSHOT.jar",
+    "game-gate": "game-gate/target/game-gate-0.1.0-SNAPSHOT.jar",
+    "game-gateway": "game-gateway/target/game-gateway-0.1.0-SNAPSHOT.jar"
+  },
+  "settings": {
+    "game-scene-manager": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never"
+    },
+    "game-login": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.player-store.require-tidb": "true",
+      "game.login.mode": "prod"
+    },
+    "game-friend": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.friend.require-tidb": "true"
+    },
+    "game-chat": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.chat.require-tidb": "true"
+    },
+    "game-mail": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.mail.require-tidb": "true"
+    },
+    "game-rank": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.rank.require-tidb": "true"
+    },
+    "game-match": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.match.global.enabled": "true",
+      "game.match.global.require-ti-db": "true"
+    },
+    "game-team": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.team.require-tidb": "true"
+    },
+    "game-guild": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.guild.activity.require-tidb": "true"
+    },
+    "game-mall": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.mall.require-tidb": "true",
+      "game.mall.mock-payment-enabled": "false"
+    },
+    "game-trade": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never"
+    },
+    "game-data": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.player-store.require-tidb": "true",
+      "game.audit.enabled": "true",
+      "game.audit.topic-generation": "1",
+      "game.audit.replication-factor": "3",
+      "game.audit.min-in-sync-replicas": "2"
+    },
+    "game-inbox": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.inbox.require-tidb": "true"
+    },
+    "game-scene": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never",
+      "game.player-store.require-tidb": "true",
+      "game.audit.enabled": "true",
+      "game.audit.topic-generation": "1",
+      "game.audit.replication-factor": "3",
+      "game.audit.min-in-sync-replicas": "2"
+    },
+    "game-battle": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod"
+    },
+    "game-gate": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod"
+    },
+    "game-gateway": {
+      "game.namespace": "release1",
+      "game.run-mode": "prod",
+      "spring.datasource.url": "jdbc:mysql://db.example:4000/release1?sslMode=VERIFY_IDENTITY&connectTimeout=3000&socketTimeout=10000",
+      "spring.datasource.username": "release1_app",
+      "spring.sql.init.mode": "never"
+    }
+  },
+  "secretVersions": {
+    "GAME_MYSQL_PASSWORD": "replace-with-reviewed-version",
+    "GAME_DUBBO_SECRET": "replace-with-reviewed-version",
+    "GAME_GATE_TOKEN_SECRET": "replace-with-reviewed-version",
+    "GAME_NODE_LINK_SECRET": "replace-with-reviewed-version",
+    "GAME_BATTLE_TOKEN_SECRET": "replace-with-reviewed-version",
+    "GAME_ADMIN_TOKEN": "replace-with-reviewed-version",
+    "GAME_GM_ADMIN_SECRET": "replace-with-reviewed-version",
+    "GAME_ASSET_OP_SECRET_GUILD": "replace-with-reviewed-version",
+    "GAME_ASSET_OP_SECRET_MAIL": "replace-with-reviewed-version",
+    "GAME_ASSET_OP_SECRET_TRADE": "replace-with-reviewed-version",
+    "GAME_MALL_GATEWAY_SECRET": "replace-with-reviewed-version",
+    "GAME_MALL_PAYMENT_SECRET": "replace-with-reviewed-version",
+    "GAME_MALL_DELIVERY_SECRET": "replace-with-reviewed-version",
+    "GAME_MALL_ADMIN_SECRET": "replace-with-reviewed-version"
+  },
+  "migrationPlans": {
+    "game-scene-manager": "review-required-M14",
+    "game-login": "review-required-M14",
+    "game-friend": "review-required-M14",
+    "game-chat": "review-required-M14",
+    "game-mail": "review-required-M14",
+    "game-rank": "review-required-M14",
+    "game-match": "review-required-M14",
+    "game-team": "review-required-M14",
+    "game-guild": "review-required-M14",
+    "game-mall": "review-required-M14",
+    "game-trade": "review-required-M14",
+    "game-data": "review-required-M14",
+    "game-inbox": "review-required-M14",
+    "game-scene": "review-required-M14",
+    "game-gateway": "review-required-M14"
+  }
+}

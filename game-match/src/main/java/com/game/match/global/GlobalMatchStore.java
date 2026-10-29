@@ -955,10 +955,23 @@ public final class GlobalMatchStore {
         });
     }
     public void finish(GlobalFormationRow work, boolean success) {
+        finish(work,success,false);
+    }
+    /** 没有发房原件的安全出口：同一事务围栏工作代次、账号原件及全部票据，绝不创建终局行。 */
+    public GlobalFormationRow finishUncreated(GlobalFormationRow work){
+        return finish(work,false,true);
+    }
+    private GlobalFormationRow finish(GlobalFormationRow work,boolean success,boolean uncreatedOnly){
         long battle=work.getBattleId();
-        tx(c -> {
+        return tx(c -> {
             // COMPLETE可能早于Create回包。只读同一永久原件即可幂等返回，不能再锁/改已结束unit或下一局票据。
             var committed=db.findOneByPk(c,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+            if(uncreatedOnly){
+                var original=db.findOneByPk(c,GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElseThrow();
+                requireUncreated(original,work,committed.isPresent());
+                // SQL 已提交但回包丢失：只重读原失败，不锁/改之后的新票，更不能重开同 battle_id。
+                if(original.getState()==5)return original;
+            }
             if(committed.isPresent()&&committed.get().getAdoptedOutcomeObserved()&&committed.get().getAdoptedOutcomeProtocolVersion()!=1)
                 throw new SecurityException("真实adopted非v1，不能完成或中止");
             if(committed.isPresent()&&committed.get().getTerminalDecision()!=0) {
@@ -970,7 +983,7 @@ public final class GlobalMatchStore {
                         ||!committed.get().getPlacementOperationId().equals(work.getOperationId())
                         ||!committed.get().getTargetInstanceId().equals(work.getInstanceId()))throw new SecurityException("迟到finish原局身份不同");
                 if(success!=(committed.get().getTerminalDecision()==1))throw new IllegalStateException("迟到finish与永久SQL终局相反");
-                return null;
+                return original;
             }
             List<GlobalTicketRow> originals=new ArrayList<>();
             for(var member:work.getMembersList())originals.add(db.findOneByPk(c,GlobalTicketRow.newBuilder().setPlayerId(member.getPlayerId()).build()).orElseThrow());
@@ -979,6 +992,7 @@ public final class GlobalMatchStore {
             Map<Long,GlobalTicketRow> lockedTickets=new HashMap<>();for(var original:originals.stream().sorted((a,b)->Long.compareUnsigned(a.getPlayerId(),b.getPlayerId())).toList())lockedTickets.put(original.getPlayerId(),locked(c,original.getPlayerId()));
             var f = db.findOneByPkForUpdate(c,GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElseThrow();
             var terminal=db.findOneByPkForUpdate(c,com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+            if(uncreatedOnly)requireUncreated(f,work,terminal.isPresent());
             if(terminal.isPresent()&&terminal.get().getOutcomeProtocolVersion()==1
                     &&(terminal.get().getAdoptedOutcomeObserved()&&terminal.get().getAdoptedOutcomeProtocolVersion()!=1
                         ||success&&!terminal.get().getAdoptedOutcomeObserved()&&terminal.get().getTerminalDecision()!=1))
@@ -989,7 +1003,7 @@ public final class GlobalMatchStore {
                         ||terminal.get().getTerminalDecision()!=1&&terminal.get().getTerminalDecision()!=2)
                     throw new SecurityException("并发终局不是原finish所属原件");
                 if(success!=(terminal.get().getTerminalDecision()==1))throw new IllegalStateException("迟到finish与永久SQL终局相反");
-                return null;
+                return f;
             }
             if(!success&&terminal.isPresent()&&terminal.get().getOutcomeProtocolVersion()==1)
                 throw new IllegalStateException("已有v1 Create但尚无SQL ABORT，保留原票且禁止重排");
@@ -1005,8 +1019,14 @@ public final class GlobalMatchStore {
                 db.updateByPk(c,next.build());regions.replace(c,next.build(),stamp);after.add(next.build());
             }
             units.finished(c,f,after,success,stamp);
-            db.updateByPk(c,f.toBuilder().setState(success ? 4 : 5).build()); return null;
+            var finished=f.toBuilder().setState(success ? 4 : 5).build();
+            db.updateByPk(c,finished);return finished;
         });
+    }
+    private static void requireUncreated(GlobalFormationRow original,GlobalFormationRow work,boolean hasCompletion){
+        if(!original.getOperationId().equals(work.getOperationId())||!original.getInstanceId().equals(work.getInstanceId())
+                ||!original.getMembersList().equals(work.getMembersList())||!original.getCreateRequest().isEmpty()||hasCompletion)
+            throw new SecurityException("无发房出口必须核同一成局原件为空且没有终局来源");
     }
     public void releaseReady(long player, String ticket, long battle) {
         tx(c -> { var original=db.findOneByPk(c,GlobalTicketRow.newBuilder().setPlayerId(player).build()).orElseThrow();

@@ -37,12 +37,17 @@ public record DirectoryView(Map<Integer, Node> nodes) {
      * @param appliedPlanVersion 节点已应用的计划版本（0 = 还没应用过 / 旧版本节点）
      * @param scenes             场景号 → 场景（无符号升序）
      */
-    public record Node(int nodeId, String instanceId, long appliedPlanVersion, Map<Long, Scene> scenes) {
+    public record Node(int nodeId, String instanceId, long appliedPlanVersion, Map<Long, Scene> scenes,
+                       boolean evacuating, long leaseEpoch) {
 
         public Node {
             TreeMap<Long, Scene> sorted = new TreeMap<>(Long::compareUnsigned);
             sorted.putAll(scenes);
             scenes = Collections.unmodifiableSortedMap(sorted);
+        }
+
+        public Node(int nodeId, String instanceId, long appliedPlanVersion, Map<Long, Scene> scenes) {
+            this(nodeId, instanceId, appliedPlanVersion, scenes, false, 0);
         }
 
         /** 节点上报里有这个场景、且没在排空（「已建出且可分配」）。 */
@@ -100,7 +105,8 @@ public record DirectoryView(Map<Integer, Node> nodes) {
                         Integer.toUnsignedLong(entry.getPlayerCount()), entry.getDraining(), entry.getKind(),
                         entry.getSourceSceneId()));
             }
-            nodes.put(info.getNodeId(), new Node(info.getNodeId(), info.getInstanceId(), info.getAppliedPlanVersion(), scenes));
+            nodes.put(info.getNodeId(), new Node(info.getNodeId(), info.getInstanceId(), info.getAppliedPlanVersion(), scenes,
+                    info.getEvacuating(), info.getLeaseEpoch()));
         }
         return new DirectoryView(nodes);
     }

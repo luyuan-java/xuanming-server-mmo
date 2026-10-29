@@ -84,4 +84,46 @@ class ZoneMergeSqlAuthorityTiDbTest {
             try(var writer=db.dataSource.getConnection()){writer.setAutoCommit(false);assertThatThrownBy(()->PlayerRouteAuthority.lock(writer,List.of(2L),3)).isInstanceOf(SQLException.class);writer.rollback();}
         }finally{executor.shutdownNow();assertThat(executor.awaitTermination(5,TimeUnit.SECONDS)).isTrue();}
     }
+    @Test void 热退休只接受finish未release的同世代原run_原hash闭区与全服已释放缺一即拒绝()throws Exception{
+        String key=UUID.randomUUID().toString();var frozen=store.freeze(key,1,2,1,"operator");var planned=plan(key);
+        var called=new java.util.concurrent.atomic.AtomicInteger();
+        assertThatThrownBy(()->store.withRetirementProof(key,hash(planned),frozen.getGeneration(),(proof,budget)->called.incrementAndGet())).isInstanceOf(SQLException.class);
+        var done=complete(key,planned);
+        assertThatThrownBy(()->store.withRetirementProof(key,"f".repeat(64),frozen.getGeneration(),(proof,budget)->called.incrementAndGet())).isInstanceOf(SQLException.class);
+        assertThatThrownBy(()->store.withRetirementProof(key,hash(done),UUID.randomUUID().toString(),(proof,budget)->called.incrementAndGet())).isInstanceOf(SQLException.class);
+        db.jdbc().update("UPDATE zone_config SET manual_status=1 WHERE zone_id=1");
+        assertThatThrownBy(()->store.withRetirementProof(key,hash(done),frozen.getGeneration(),(proof,budget)->called.incrementAndGet())).isInstanceOf(SQLException.class);
+        db.jdbc().update("UPDATE zone_config SET manual_status=2 WHERE zone_id=1");
+        db.jdbc().update("UPDATE player SET owner_released=0,owner_lease_until=1 WHERE player_id=2");
+        assertThatThrownBy(()->store.withRetirementProof(key,hash(done),frozen.getGeneration(),(proof,budget)->called.incrementAndGet())).isInstanceOf(SQLException.class);
+        db.jdbc().update("UPDATE player SET owner_released=1 WHERE player_id=2");
+        assertThat(called).hasValue(0);
+        int observed=store.withRetirementProof(key,hash(done),frozen.getGeneration(),(proof,budget)->{budget.check();return proof.getSourceZone();});assertThat(observed).isEqualTo(1);
+        store.release(key,hash(done),frozen.getGeneration(),"reviewer");
+        assertThatThrownBy(()->store.withRetirementProof(key,hash(done),frozen.getGeneration(),(proof,budget)->called.incrementAndGet())).isInstanceOf(SQLException.class);
+        assertThat(called).hasValue(0);
+    }
+    @Test void 热维护回调失败保持原冻结_不自动release()throws Exception {
+        String key=UUID.randomUUID().toString();var frozen=store.freeze(key,1,2,1,"operator");var done=complete(key,plan(key));
+        assertThatThrownBy(()->store.withRetirementProof(key,hash(done),frozen.getGeneration(),(proof,budget)->{throw new SQLException("Redis outcome unknown");})).hasMessageContaining("Redis outcome unknown");
+        assertThat(n("SELECT writable FROM route_meta")).isZero();assertThat(n("SELECT COUNT(*) FROM zone_merge_fence WHERE run_id=?",key)).isEqualTo(128);
+        assertThat(store.read(key).getState()).isEqualTo(5);
+    }
+    @Test void 热维护回调期间release必须等待原SQL围栏()throws Exception {
+        String key=UUID.randomUUID().toString();var frozen=store.freeze(key,1,2,1,"operator");var done=complete(key,plan(key));
+        var executor=Executors.newSingleThreadExecutor();
+        var pending=new java.util.concurrent.atomic.AtomicReference<Future<ZoneMergeRunRow>>();
+        try {
+            store.withRetirementProof(key,hash(done),frozen.getGeneration(),(proof,budget)->{
+                var entered=new CountDownLatch(1);
+                Future<ZoneMergeRunRow> release=executor.submit(()->{entered.countDown();return store.release(key,hash(done),frozen.getGeneration(),"reviewer");});
+                pending.set(release);
+                try {assertThat(entered.await(2,TimeUnit.SECONDS)).isTrue();assertThatThrownBy(()->release.get(100,TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);}
+                catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw new SQLException(interrupted);}
+                return true;
+            });
+            assertThat(pending.get().get(5,TimeUnit.SECONDS).getState()).isEqualTo(6);
+        }
+        finally{executor.shutdownNow();assertThat(executor.awaitTermination(5,TimeUnit.SECONDS)).isTrue();}
+    }
 }

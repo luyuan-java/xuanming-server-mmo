@@ -78,6 +78,16 @@ final class SceneShutdown {
     private SceneShutdown() {
     }
 
+    /** 链路失败回调可能继续提交归属释放；先等回调，再等仓储，二者共用剩余预算。 */
+    static TransferSettlement writesThenTransfers(TransferSettlement writes, TransferSettlement transfers, LongSupplier clock) {
+        return timeout -> {
+            long deadline = clock.getAsLong() + Math.max(0, timeout);
+            int pendingWrites = writes.await(Math.max(0, timeout));
+            int pendingTransfers = transfers.await(Math.max(0, deadline - clock.getAsLong()));
+            return pendingWrites + pendingTransfers;
+        };
+    }
+
     /**
      * @param logic         场景逻辑线程
      * @param writeBack     在逻辑线程上执行：写回全部在场玩家（交给存储线程池）并关链路，返回人数

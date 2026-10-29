@@ -35,6 +35,9 @@ import java.util.function.Consumer;
  */
 public interface PlayerRepository {
 
+    /** 新的自动改派只在存储队列有余量时开始；不参与 SQL 归属判定。 */
+    default boolean evacuationCapacityAvailable() { return true; }
+
     /** 仅装配迁移期间保留旧签名；生产入口必须传预期 epoch，不得借旧加载绕过最终准入。 */
     @Deprecated
     void load(long playerId, Consumer<LoadResult> onLoaded);

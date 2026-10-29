@@ -23,6 +23,7 @@ import com.game.match.ticket.TicketRedisFixture;
 import com.game.proto.match.BattleWatchSummary;
 import com.game.proto.match.ListWatchableBattlesResponse;
 import com.game.proto.match.WatchBattleResponse;
+import com.game.proto.BattleRouting;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
@@ -113,10 +114,10 @@ class SpectateFlowRedisIntegrationTest {
 
     // ================================================================ 摆状态
 
-    /** 真存储 + 真落点存储 + 真票据存储（它就是票据的只读口）；nonce 是生产的随机 nonce；复查的两次读在调用线程上依次做。 */
+    /** 真存储 + 真落点存储 + 真票据存储；每次生成规范 UUID；复查的两次读在调用线程上依次做。 */
     private WatchBattleService service(PlayerStatusReader statusReader) {
         return new WatchBattleService(fx.store, fx.placements, statusReader, fx.tickets.store, observers, metrics,
-                () -> randoms.isEmpty() ? 0.0 : randoms.poll(), SpectateRules::newNonce, Runnable::run)
+                () -> randoms.isEmpty() ? 0.0 : randoms.poll(), () -> java.util.UUID.randomUUID().toString(), Runnable::run)
                 .withPublicNames((player, deadline) -> "公开观众" + id(player));
     }
 
@@ -174,13 +175,16 @@ class SpectateFlowRedisIntegrationTest {
         assertThat(response.getErrorMessage().getParameters(0).getBytes(StandardCharsets.UTF_8)).isEqualTo(text.getBytes(StandardCharsets.UTF_8));
     }
 
-    /** 这名玩家此刻的标记指向的战斗；断言它是 163 写的那种形状（{@code <battle_id>:<16 位十六进制 nonce>}）且带 360 s 以内的 TTL。 */
+    /** 标记必须能还原完整原件，且带 360 s 以内的 TTL。 */
     private long markedBattle(long playerId) {
         Optional<String> raw = fx.markOf(playerId);
         assertThat(raw).as("player %s 有观战标记", id(playerId)).isPresent();
         Optional<SpectateRules.Mark> mark = SpectateRules.decodeMark(raw.get());
         assertThat(mark).as("标记值可解析: %s", raw.get()).isPresent();
-        assertThat(raw.get()).matches(id(mark.get().battleId()) + ":[0-9a-f]{16}");
+        assertThat(LocalObserverOperation.decode(raw.get())).get().satisfies(original -> {
+            assertThat(original.playerId()).isEqualTo(playerId);
+            assertThat(original.mark()).isEqualTo(raw.get());
+        });
         assertThat(fx.markTtlMs(playerId)).as("标记的 TTL").isBetween(300_000L, 360_000L);
         return mark.get().battleId();
     }
@@ -268,7 +272,7 @@ class SpectateFlowRedisIntegrationTest {
     // ================================================================ 重看同一场、换场
 
     @Test
-    void 重看同一场只换标记不发Remove_换场先同步清退旧场再登记新场_标记始终只有一个() {
+    void 重看同一场和换场都先同步取消旧操作再登记新操作_标记始终只有一个() {
         long now = fx.nowMs();
         long x = fx.battle(1);
         long y = fx.battle(2);
@@ -279,22 +283,25 @@ class SpectateFlowRedisIntegrationTest {
         assertAccepted(watch(viewer, x), x);
         String first = fx.markOf(viewer).orElseThrow();
 
-        // 显式重看同一场：旧标记按原值删、不发 RemoveObserver，再抢一个新值（nonce 不同），登记请求的路由与第一次相同（battle 的幂等分支靠它）
+        // 显式重看同一场：确认旧 UUID 取消后再抢新值，路由可相同，操作 UUID 必须不同。
         assertAccepted(watch(viewer, x), x);
         String second = fx.markOf(viewer).orElseThrow();
         assertThat(markedBattle(viewer)).isEqualTo(x);
-        assertThat(second).as("每次抢标记一个新的 nonce").isNotEqualTo(first);
-        assertThat(observers.calls).extracting(Call::kind).containsExactly(Kind.ADD, Kind.ADD);
-        assertThat(observers.adds().get(1).request()).as("重看的登记请求与第一次逐字段相同").isEqualTo(observers.adds().get(0).request());
+        assertThat(second).as("每次抢标记一个新的 UUID").isNotEqualTo(first);
+        assertThat(observers.calls).extracting(Call::kind).containsExactly(Kind.ADD, Kind.REMOVE, Kind.ADD);
+        assertThat(observers.adds().get(1).request()).as("新操作不能重用旧操作原件").isNotEqualTo(observers.adds().get(0).request());
+        assertThat(observers.adds().get(1).request().getRouting()).isEqualTo(observers.adds().get(0).request().getRouting());
+        assertThat(observers.removes().get(0).request()).isEqualTo(observers.adds().get(0).request());
 
         // 换场：读旧场落点 → 同步 RemoveObserver(rewatch) → 删旧标记 → 抢新标记 → AddObserver
         assertAccepted(watch(viewer, y), y);
         assertThat(markedBattle(viewer)).isEqualTo(y);
-        assertThat(events).containsExactly("observer.add:" + id(x) + ":" + id(viewer), "observer.add:" + id(x) + ":" + id(viewer),
+        assertThat(events).containsExactly("observer.add:" + id(x) + ":" + id(viewer),
+                "observer.remove:" + id(x) + ":" + id(viewer) + ":rewatch", "observer.add:" + id(x) + ":" + id(viewer),
                 "observer.remove:" + id(x) + ":" + id(viewer) + ":rewatch", "observer.add:" + id(y) + ":" + id(viewer));
-        assertThat(observers.removes()).singleElement().satisfies(remove -> assertThat(remove.placement()).isEqualTo(placementX));
+        assertThat(observers.removes()).hasSize(2).allSatisfy(remove -> assertThat(remove.placement()).isEqualTo(placementX));
         assertThat(observers.adds().get(2).placement()).isEqualTo(placementY);
-        assertThat(evictions("rewatch", "removed")).as("重看同一场不计清退，换场计一次").isEqualTo(1.0);
+        assertThat(evictions("rewatch", "removed")).as("同场重看与换场各取消一次").isEqualTo(2.0);
         assertThat(outcomes()).containsExactly(Map.entry("ok", 3.0));
     }
 
@@ -492,7 +499,7 @@ class SpectateFlowRedisIntegrationTest {
     // ================================================================ 开局钩子的各种标记
 
     @Test
-    void 开局清退_脏标记按原串删不发RPC_旧场落点已不在不发RPC_公开只认最终的attempt() {
+    void 开局清退_旧格式按原串删_完整原件即使落点已不在仍按原端点取消_公开只认最终的attempt() {
         long now = fx.nowMs();
         long x = fx.battle(1);
         long gone = fx.battle(2);
@@ -501,23 +508,26 @@ class SpectateFlowRedisIntegrationTest {
         long dirty = fx.pid(2);
         long leftover = fx.pid(3);
         long clean = fx.pid(4);
-        fx.putMark(watching, SpectateRules.encodeMark(x, SpectateRules.newNonce()));
+        BattleRouting routing = BattleRouting.newBuilder().setGateNodeId(1).setGateInstanceId("gate-test").setSessionId(7).build();
+        fx.putMark(watching, LocalObserverOperation.create(placement, watching, routing, "甲",
+                java.util.UUID.randomUUID().toString(), now).mark());
         // 基线那种只有 battle_id 的旧值：解析不了，按读到的原串删
         fx.putMark(dirty, id(x));
-        // 标记指向一场落点已经不在的战斗（早已收尾）：标记只是残留
-        fx.putMark(leftover, SpectateRules.encodeMark(gone, SpectateRules.newNonce()));
+        // 索引里已没有落点，但标记里的原地址仍是取消目标。
+        fx.putMark(leftover, LocalObserverOperation.create(placement(gone, now - 5_000, 1), leftover, routing, "乙",
+                java.util.UUID.randomUUID().toString(), now).mark());
 
         hooks.beforePrepare(List.of(clean, dirty, leftover, watching));
 
-        assertThat(observers.calls).as("只有落点还在的那一名观众需要找 battle").singleElement().satisfies(remove -> {
+        assertThat(observers.calls).as("两份完整原件各按自己的固定端点取消").hasSize(2).allSatisfy(remove -> {
             assertThat(remove.kind()).isEqualTo(Kind.REMOVE);
-            assertThat(remove.placement()).isEqualTo(placement);
-            assertThat(remove.observerId()).isEqualTo(watching);
+            assertThat(remove.placement()).isIn(placement, placement(gone, now - 5_000, 1));
+            assertThat(remove.observerId()).isIn(watching, leftover);
         });
         assertThat(List.of(fx.markOf(watching), fx.markOf(dirty), fx.markOf(leftover), fx.markOf(clean))).as("三个标记都按原值删掉了").containsOnly(Optional.empty());
-        assertThat(evictions("enter_gather", "removed")).isEqualTo(1.0);
+        assertThat(evictions("enter_gather", "removed")).isEqualTo(2.0);
         assertThat(evictions("enter_gather", "invalid_mark")).isEqualTo(1.0);
-        assertThat(evictions("enter_gather", "no_record")).isEqualTo(1.0);
+        assertThat(evictions("enter_gather", "no_record")).isZero();
         assertThat(anomalies()).isEmpty();
 
         // 公开：钩子拿到的落点若不是 Redis 里最终的那一次（attempt 对不上），不进索引，只计一次异常

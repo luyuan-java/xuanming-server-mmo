@@ -192,6 +192,22 @@ class BattleNodeTest {
         assertThat(infra.rooms.calls).doesNotContain("createBattle");
     }
 
+    @Test void 停服在原终局排空完成前保持控制面和租约_未知报告后仍有界退出()throws Exception{
+        node().start();infra.events.clear();
+        var entered=new java.util.concurrent.CountDownLatch(1);
+        var done=new CompletableFuture<com.game.battle.room.BattleRoomService.ShutdownReport>();
+        infra.rooms.shutdownAction=()->{assertThat(admission.phase()).isEqualTo(AdmissionPhase.CLOSED);entered.countDown();return done;};
+        var stopping=CompletableFuture.runAsync(node::stop);
+        assertThat(entered.await(3,TimeUnit.SECONDS)).isTrue();
+        assertThat(infra.events).doesNotContain("rpc.close","lease.close","rooms.abortAll:node_shutdown@closed");
+        assertThat(stopping).isNotDone();
+        done.complete(new com.game.battle.room.BattleRoomService.ShutdownReport(List.of(
+                new com.game.battle.room.BattleRoomService.UnconfirmedOutcome(77,"原操作","原实例",2,true))));
+        stopping.get(5,TimeUnit.SECONDS);
+        assertThat(infra.events).containsExactly("directory.remove","rooms.abortAll:node_shutdown@closed","edge.stopAccepting",
+                "edge.drainAndClose:300ms","rpc.close","lease.close");
+    }
+
     @Test
     void 开闸之后的建房走到房间服务() throws Exception {
         node().start();

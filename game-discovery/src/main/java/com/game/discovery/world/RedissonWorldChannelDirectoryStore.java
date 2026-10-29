@@ -12,6 +12,7 @@ import org.redisson.client.codec.ByteArrayCodec;
 /** 目录字节原样保存；发布键与领导锁、计划版本共用 zone hash tag。 */
 public final class RedissonWorldChannelDirectoryStore implements WorldChannelDirectoryStore {
     static final String PUBLISH = """
+            if redis.call('EXISTS',KEYS[4])==1 then return 0 end
             if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
             if (redis.call('GET', KEYS[2]) or '0') ~= ARGV[2] then return 0 end
             redis.call('SET', KEYS[3], ARGV[3], 'PX', ARGV[4])
@@ -30,8 +31,8 @@ public final class RedissonWorldChannelDirectoryStore implements WorldChannelDir
         requireIds(zoneId, configId);
         // READ_WRITE 强制访问主节点，避免刚发布/过期时读副本旧值。
         return redis.getScript(ByteArrayCodec.INSTANCE).eval(RScript.Mode.READ_WRITE,
-                "return redis.call('GET', KEYS[1])", RScript.ReturnType.VALUE,
-                List.of(keys.worldChannelDirectory(zoneId, configId)));
+                "if redis.call('EXISTS',KEYS[2])==1 then return nil end; return redis.call('GET', KEYS[1])", RScript.ReturnType.VALUE,
+                List.of(keys.worldChannelDirectory(zoneId, configId),keys.worldRetirement(zoneId)));
     }
 
     @Override
@@ -42,7 +43,7 @@ public final class RedissonWorldChannelDirectoryStore implements WorldChannelDir
         }
         Long result = redis.getScript(ByteArrayCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, PUBLISH,
                 RScript.ReturnType.INTEGER,
-                List.of(keys.worldLeader(zoneId), keys.worldPlanVersion(zoneId), keys.worldChannelDirectory(zoneId, configId)),
+                List.of(keys.worldLeader(zoneId), keys.worldPlanVersion(zoneId), keys.worldChannelDirectory(zoneId, configId),keys.worldRetirement(zoneId)),
                 bytes(leaderToken), bytes(Long.toString(planVersion)), payload, bytes(Long.toString(ttl.toMillis())));
         if (result == null || result != 0L && result != 1L) throw new IllegalStateException("目录发布没有确认");
         return result == 1L;

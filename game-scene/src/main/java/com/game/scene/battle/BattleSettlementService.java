@@ -118,7 +118,9 @@ public final class BattleSettlementService {
         player.battle().setApplying(true);
         try{
             long now=currency.nowSeconds(),gold=settlement.getGoldGain();
-            if(gold<0||gold>0&&currency.checkAdd(player,Wallet.GOLD,gold,now)!=0)
+            int goldTip=gold>0?currency.checkAdd(player,Wallet.GOLD,gold,now):0;
+            // 产出封禁是明确跳过该奖励的业务决定；冻结、溢出等仍须整笔延后，不能丢掉应补发的金币。
+            if(gold<0||goldTip!=0&&goldTip!=Wallet.BLOCKED)
                 return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_CURRENCY);
             // 未知/损坏的持久组件仍整笔拒绝；合法空组件不等于损坏。
             var petState=player.pets().toState();
@@ -156,8 +158,12 @@ public final class BattleSettlementService {
             var bag=bags.prepareBattle(player,consumed,gained);
             if(bag.tip()!=0)return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
             // 正常业务拒绝已全部预检。普通异常交给组合根不存盘隔离，绝不逐步catch后登记APPLIED。
-            if(gold>0&&!currency.add(player,Wallet.GOLD,gold,AssetAudit.Reason.BATTLE_REWARD,settlement.getBattleId(),now).ok())
-                throw new IllegalStateException("战斗金币预检与同任务提交不一致");
+            if(gold>0){
+                var change=currency.add(player,Wallet.GOLD,gold,AssetAudit.Reason.BATTLE_REWARD,settlement.getBattleId(),now);
+                if(change.tipId()!=goldTip)throw new IllegalStateException("战斗金币预检与同任务提交不一致");
+                if(goldTip==Wallet.BLOCKED)log.warn("战斗金币奖励按产出封禁跳过，其它结算仍应用 battle={} player={} gold={}",
+                        Long.toUnsignedString(settlement.getBattleId()),Long.toUnsignedString(player.playerId()),gold);
+            }
             bag.commitBattle(settlement.getBattleId());applyVitals(player,settlement);
             pets.applyBattleSettlement(player,applicablePets);
             shortfalls.forEach((config,missing)->{

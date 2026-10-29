@@ -324,14 +324,14 @@ class MatchMetricsTest {
         }
         assertThat(meters.find("game.match.list.watchable").counters()).hasSize(3);
 
-        List<String> evictReasons = List.of("enter_gather", "rewatch", "concurrent_queue");
+        List<String> evictReasons = List.of("enter_gather", "rewatch", "concurrent_queue", "watch_outcome_unknown");
         List<String> evictResults = List.of("removed", "no_record", "invalid_mark", "read_failed", "rpc_failed");
         for (String reason : evictReasons) {
             for (String result : evictResults) {
                 assertThat(count("game.match.spectate.evictions", "reason", reason, "result", result)).as(reason + "/" + result).isZero();
             }
         }
-        assertThat(meters.find("game.match.spectate.evictions").counters()).hasSize(15);
+        assertThat(meters.find("game.match.spectate.evictions").counters()).hasSize(20);
 
         List<String> indexReasons = List.of("room_missing", "dead_node", "stale", "missing_record", "invalid_member", "sweep");
         for (String reason : indexReasons) {
@@ -448,6 +448,7 @@ class MatchMetricsTest {
         assertThat(MatchMetrics.tag(EvictReason.REWATCH)).isEqualTo(SpectateRules.REASON_REWATCH).isEqualTo("rewatch");
         assertThat(MatchMetrics.tag(EvictReason.ENTER_GATHER)).isEqualTo(SpectateRules.REASON_ENTER_GATHER).isEqualTo("enter_gather");
         assertThat(MatchMetrics.tag(EvictReason.CONCURRENT_QUEUE)).isEqualTo(SpectateRules.REASON_CONCURRENT_QUEUE).isEqualTo("concurrent_queue");
+        assertThat(MatchMetrics.tag(EvictReason.WATCH_OUTCOME_UNKNOWN)).isEqualTo(SpectateRules.REASON_OUTCOME_UNKNOWN).isEqualTo("watch_outcome_unknown");
     }
 
     @Test

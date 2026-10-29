@@ -270,23 +270,20 @@ public final class MatchMetrics {
 
     /**
      * 清退的起因（{@code game_match_spectate_evictions_total{reason}}）；标签值与发给 battle 的 {@code RemoveObserverRequest.reason} 逐字相同
-     * （{@code spectate.SpectateRules.REASON_*}）：{@code ENTER_GATHER} = 开局前清退参战者；{@code REWATCH} = 163 入口处清掉旧标记（换场 / 随机）；
-     * {@code CONCURRENT_QUEUE} = 163 的自我清退：登记成功后的复查命中票据或战斗锁；或「重看同一场」删掉旧标记之后、抢新标记时发现已有票据
-     * （那时观众登记还在、标记已无）。
+     * （{@code spectate.SpectateRules.REASON_*}）：{@code ENTER_GATHER} = 开局前清退参战者；{@code REWATCH} = 163 取消旧操作（含同场重看）；
+     * {@code CONCURRENT_QUEUE} = 登记成功后的复查命中票据或战斗锁；{@code WATCH_OUTCOME_UNKNOWN} = Add 未知后的原件补偿。
      */
-    public enum EvictReason { ENTER_GATHER, REWATCH, CONCURRENT_QUEUE }
+    public enum EvictReason { ENTER_GATHER, REWATCH, CONCURRENT_QUEUE, WATCH_OUTCOME_UNKNOWN }
 
     /**
      * 一次清退的结局（{@code game_match_spectate_evictions_total{result}}；每处理一条旧标记记一个）：
      * <ul>
-     *   <li>{@code REMOVED}：RemoveObserver 调通了（battle 应答了；房间里没有这名观众时 battle 幂等、同样算）；</li>
-     *   <li>{@code NO_RECORD}：那一场已经不在了——没有落点记录，或直拨判定所在进程已被别的进程接手（{@code Dead}）：只删标记；</li>
-     *   <li>{@code INVALID_MARK}：标记值解析不了：只删标记；</li>
-     *   <li>{@code READ_FAILED}：读落点失败或记录损坏：不发 RPC（标记照删；开局清退读全员标记失败是另一回事，记
-     *       {@code watchable_anomalies{reason="mark_read_failed"}}）；</li>
-     *   <li>{@code RPC_FAILED}：RemoveObserver 没调通（没送达 / 超时 / 断开）：只记日志，名单里的残留随那一场结束清理。</li>
+     *   <li>{@code REMOVED}：已验证 cancelled、原操作 UUID、原 battle 实例三要素的取消证明；</li>
+     *   <li>{@code NO_RECORD}、{@code READ_FAILED}：保留既有指标序列，新原件路径不依赖后续落点读取；</li>
+     *   <li>{@code INVALID_MARK}：原件解析失败；旧格式按值清除，版本化损坏/未知版本保留；</li>
+     *   <li>{@code RPC_FAILED}：未获完整取消证明（含没送达、超时、断开和目录判死），保留原件供后续恢复。</li>
      * </ul>
-     * 163「显式重看同一场」只删标记、不发 Remove，不算清退，不计（随后抢标记发现有票而补发的自我清退按 {@code CONCURRENT_QUEUE} 计）。
+     * 同场重看和换场采用相同取消证明规则，均计 {@code REWATCH}。
      */
     public enum EvictResult { REMOVED, NO_RECORD, INVALID_MARK, READ_FAILED, RPC_FAILED }
 

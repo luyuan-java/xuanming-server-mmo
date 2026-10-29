@@ -121,6 +121,15 @@ public final class StoragePlayerRepository implements PlayerRepository {
 
     private final PlayerStore store;
     private final ExecutorService storageExecutor;
+
+    @Override
+    public boolean evacuationCapacityAvailable() {
+        if (storageExecutor.isShutdown()) return false;
+        if (!(storageExecutor instanceof ThreadPoolExecutor pool)) return true;
+        var queue = pool.getQueue();
+        int queued = queue.size();
+        return queued == 0 || queued < queue.remainingCapacity();
+    }
     private final Executor logicExecutor;
     private final RetryPolicy retry;
     private final HandOffSettings handOff;

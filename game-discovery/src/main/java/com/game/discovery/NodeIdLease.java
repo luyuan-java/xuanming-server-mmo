@@ -2,6 +2,7 @@ package com.game.discovery;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -19,8 +20,8 @@ import org.slf4j.LoggerFactory;
  * <p>节点号用于雪花 worker 与 gate 的 session 高位，所以同一 (节点类型, zone) 内同一时刻只能有一个持有者：
  * <ul>
  *   <li>续期是「值仍是本实例才续」的原子 Lua，不会续到别人的号上；每 TTL/3 续一次；</li>
- *   <li>续期连续失败超过一个 TTL（按单调时钟计），或发现号已被别人占用，即回调 {@code onLost}，
- *       调用方必须停止用这个号发号 / 接客（fail-closed）；</li>
+ *   <li>普通租约连续失败超过一个 TTL 或发现号被占用时回调 {@code onLost}；可恢复租约在网络未知时挂起，
+ *       同号重获必须产生新代次，只有确认被其他实例占用才永久失效。挂起时也不得发号 / 接客；</li>
  *   <li>{@link #close()} 只删除仍属于本实例的键。</li>
  * </ul>
  *
@@ -39,38 +40,71 @@ public final class NodeIdLease implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(NodeIdLease.class);
 
     private static final String RENEW_LUA =
-            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end";
+            "local owner = redis.call('get', KEYS[1]); "
+            + "if owner == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) "
+            + "elseif not owner then return 0 else return -1 end";
     private static final String RELEASE_LUA =
             "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
 
     private final RedissonClient redis;
     private final String key;
     private final int nodeId;
-    private final long leaseEpoch;
+    private volatile long leaseEpoch;
+    private final String epochKey;
     private final String instanceId;
     private final Duration ttl;
     private final long validityNanos;
     private final Runnable onLost;
+    private final RecoveryListener recovery;
     private final LongSupplier nanoClock;
     private final ScheduledFuture<?> renewTask;
     private final AtomicBoolean lost = new AtomicBoolean();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private volatile boolean suspended;
+    private volatile boolean epochRequired;
     /** 最近一次成功占号 / 续期的命令<b>发出前</b>的单调时钟读数。 */
     private volatile long lastRenewedNanos;
 
-    private NodeIdLease(RedissonClient redis, String key, int nodeId, long leaseEpoch, String instanceId, Duration ttl,
-                        Runnable onLost, ScheduledExecutorService scheduler, LongSupplier nanoClock, long acquiredAtNanos) {
+    private NodeIdLease(RedissonClient redis, String key, String epochKey, int nodeId, long leaseEpoch, String instanceId, Duration ttl,
+                        Runnable onLost, RecoveryListener recovery, ScheduledExecutorService scheduler,
+                        LongSupplier nanoClock, long acquiredAtNanos) {
         this.redis = redis;
         this.key = key;
         this.nodeId = nodeId;
         this.leaseEpoch = leaseEpoch;
+        this.epochKey = epochKey;
         this.instanceId = instanceId;
         this.ttl = ttl;
         this.validityNanos = ttl.toNanos() / 3 * 2;
         this.onLost = onLost;
+        this.recovery = recovery;
         this.nanoClock = nanoClock;
         this.lastRenewedNanos = acquiredAtNanos;
         long periodMs = Math.max(1, ttl.toMillis() / 3);
         this.renewTask = scheduler.scheduleAtFixedRate(this::renew, periodMs, periodMs, TimeUnit.MILLISECONDS);
+    }
+
+    /** 可恢复身份的生命周期。回调在续期线程执行，不得阻塞等待自身调度器。 */
+    public interface RecoveryListener {
+        void onSuspended();
+        void onResumed();
+        void onRegained(long leaseEpoch);
+        void onTaken();
+    }
+
+    /** 仅需要保留原节点身份的进程使用；键空闲时复占，网络未知时挂起，发现其他持有者才永久退出。 */
+    public static NodeIdLease acquireRecoverable(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler,
+            String nodeType, int zoneId, int minId, int maxId, String instanceId, Duration ttl, RecoveryListener listener) {
+        return acquireRecoverable(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl, listener,
+                System::nanoTime);
+    }
+
+    static NodeIdLease acquireRecoverable(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler,
+            String nodeType, int zoneId, int minId, int maxId, String instanceId, Duration ttl, RecoveryListener listener,
+            LongSupplier nanoClock) {
+        Objects.requireNonNull(listener, "listener");
+        return acquire(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl,
+                listener::onTaken, listener, nanoClock);
     }
 
     /**
@@ -87,6 +121,12 @@ public final class NodeIdLease implements AutoCloseable {
     static NodeIdLease acquire(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler, String nodeType, int zoneId,
                                int minId, int maxId, String instanceId, Duration ttl, Runnable onLost,
                                LongSupplier nanoClock) {
+        return acquire(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl, onLost, null, nanoClock);
+    }
+
+    private static NodeIdLease acquire(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler, String nodeType,
+            int zoneId, int minId, int maxId, String instanceId, Duration ttl, Runnable onLost,
+            RecoveryListener recovery, LongSupplier nanoClock) {
         for (int id = minId; id <= maxId; id++) {
             String key = keys.nodeId(nodeType, zoneId, id);
             long sentAt = nanoClock.getAsLong();
@@ -95,7 +135,8 @@ public final class NodeIdLease implements AutoCloseable {
                 long epoch = nextLeaseEpoch(redis, key, instanceId, keys.nodeIdEpoch(nodeType, zoneId, id));
                 log.info("节点号租约已获取 type={} zone={} nodeId={} leaseEpoch={} instance={}",
                         nodeType, zoneId, id, epoch, instanceId);
-                return new NodeIdLease(redis, key, id, epoch, instanceId, ttl, onLost, scheduler, nanoClock, sentAt);
+                return new NodeIdLease(redis, key, keys.nodeIdEpoch(nodeType, zoneId, id), id, epoch, instanceId, ttl,
+                        onLost, recovery, scheduler, nanoClock, sentAt);
             }
         }
         throw new IllegalStateException("节点号已占满 type=" + nodeType + " zone=" + zoneId + " 区间=[" + minId + "," + maxId + "]");
@@ -140,12 +181,15 @@ public final class NodeIdLease implements AutoCloseable {
      * 为假时调用方必须拒绝用号（fail-closed）；续期恢复后会重新为真，除非已丢失。
      */
     public boolean isValid() {
-        return !lost.get() && nanoClock.getAsLong() - lastRenewedNanos < validityNanos;
+        return !closed.get() && !lost.get() && !suspended && !epochRequired
+                && nanoClock.getAsLong() - lastRenewedNanos < validityNanos;
     }
 
+    public boolean isSuspended() { return suspended; }
+
     /** 续期一次（调度线程上周期执行；包内可见供测试直接驱动）。 */
-    void renew() {
-        if (lost.get()) {
+    synchronized void renew() {
+        if (closed.get() || lost.get()) {
             return;
         }
         long sentAt = nanoClock.getAsLong();
@@ -153,13 +197,27 @@ public final class NodeIdLease implements AutoCloseable {
             Long renewed = redis.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, RENEW_LUA,
                     RScript.ReturnType.INTEGER, List.of(key), instanceId, Long.toString(ttl.toMillis()));
             if (renewed != null && renewed == 1L) {
+                if (epochRequired) {
+                    confirmNewEpoch(sentAt);
+                    return;
+                }
                 lastRenewedNanos = sentAt;
+                if (suspended) {
+                    suspended = false;
+                    notifyListener(recovery::onResumed);
+                }
+                return;
+            }
+            if (recovery != null && renewed != null && renewed == 0L) {
+                reacquire(sentAt);
                 return;
             }
             markLost("号已不属于本实例");
         } catch (RuntimeException e) {
             // Redis 暂时不可达：还在 TTL 内就等下一轮（期间 isValid 可能已为假），超过 TTL 视为丢失。
-            if (nanoClock.getAsLong() - lastRenewedNanos > ttl.toNanos()) {
+            if (recovery != null && nanoClock.getAsLong() - lastRenewedNanos >= ttl.toNanos()) {
+                suspend("续期结果未知: " + e);
+            } else if (nanoClock.getAsLong() - lastRenewedNanos > ttl.toNanos()) {
                 markLost("续期失败超过 TTL: " + e);
             } else {
                 log.warn("节点号续期失败，下一轮重试 key={}", key, e);
@@ -167,16 +225,62 @@ public final class NodeIdLease implements AutoCloseable {
         }
     }
 
+    private void reacquire(long sentAt) {
+        // 先关闭本地发号门，INCR 或占号失败时绝不继续沿用旧防护代次。
+        suspend("租约已过期，正在复占原号");
+        epochRequired = true;
+        boolean acquired = redis.<String>getBucket(key, StringCodec.INSTANCE).setIfAbsent(instanceId, ttl);
+        if (!acquired) {
+            markLost("复占原号时发现其他持有者");
+            return;
+        }
+        confirmNewEpoch(sentAt);
+    }
+
+    private void confirmNewEpoch(long sentAt) {
+        long nextEpoch = nextLeaseEpoch(redis, key, instanceId, epochKey);
+        // INCR 是另一个 Redis 键；其往返可能跨过 TTL，必须再次确认本实例仍持有原号。
+        Long held = redis.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, RENEW_LUA,
+                RScript.ReturnType.INTEGER, List.of(key), instanceId, Long.toString(ttl.toMillis()));
+        if (held == null || held != 1L) {
+            if (held != null && held == -1L) markLost("领取新代次期间原号被占用");
+            return;
+        }
+        leaseEpoch = nextEpoch;
+        lastRenewedNanos = sentAt;
+        epochRequired = false;
+        suspended = false;
+        log.warn("节点号原号复占成功 key={} leaseEpoch={}", key, nextEpoch);
+        notifyListener(() -> recovery.onRegained(nextEpoch));
+    }
+
+    private void suspend(String reason) {
+        if (!suspended) {
+            suspended = true;
+            log.warn("节点号身份挂起 key={} 原因={}", key, reason);
+            notifyListener(recovery::onSuspended);
+        }
+    }
+
+    private void notifyListener(Runnable callback) {
+        try {
+            callback.run();
+        } catch (RuntimeException e) {
+            log.error("节点号生命周期回调失败 key={}", key, e);
+        }
+    }
+
     private void markLost(String reason) {
         if (lost.compareAndSet(false, true)) {
             log.error("节点号租约丢失 key={} 原因={}", key, reason);
             renewTask.cancel(false);
-            onLost.run();
+            notifyListener(onLost);
         }
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
+        if (!closed.compareAndSet(false, true)) return;
         renewTask.cancel(false);
         if (lost.get()) {
             return;

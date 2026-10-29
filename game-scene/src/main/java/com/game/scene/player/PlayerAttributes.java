@@ -98,6 +98,11 @@ public final class PlayerAttributes {
 
     // ---- 不落库，每次加载重算
     private Derived derived = Derived.ZERO;
+    private com.game.scene.equip.EquipmentBonuses equipment = com.game.scene.equip.EquipmentBonuses.NONE;
+
+    public com.game.scene.equip.EquipmentBonuses equipment() { return equipment; }
+    public void setEquipment(com.game.scene.equip.EquipmentBonuses equipment) { this.equipment = equipment; }
+    public com.game.proto.CombatAttributes combat() { return equipment.combat(); }
     // ---- 当前气血 / 法力（uint64，读档时大于 2^63 的饱和到 Long.MAX_VALUE，反正都会被上限夹住）
     private long health;
     private long mana;

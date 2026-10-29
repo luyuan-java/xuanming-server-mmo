@@ -46,6 +46,22 @@ class GatePropertiesTest {
         return new Binder(new MapConfigurationPropertySource(values)).bindOrCreate("game.gate", GateProperties.class);
     }
 
+    @Test
+    void 链路探活及换代默认值_绑定校验拒绝无效窗口() {
+        GateProperties defaults = bind(Map.of());
+        assertThat(defaults.linkPingInterval()).isEqualTo(Duration.ofSeconds(5));
+        assertThat(defaults.linkIdleTimeout()).isEqualTo(Duration.ofSeconds(15));
+        assertThat(defaults.linkSupersedeCheckInterval()).isEqualTo(Duration.ofSeconds(5));
+        assertThat(defaults.linkSupersededGrace()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(bind(Map.of("game.gate.link-ping-interval", "1s", "game.gate.link-idle-timeout", "3s",
+                "game.gate.link-superseded-grace", "20s")).linkIdleTimeout()).isEqualTo(Duration.ofSeconds(3));
+        for (var invalid : List.of(Map.of("game.gate.link-ping-interval", "999ms"),
+                Map.of("game.gate.link-ping-interval", "31s"), Map.of("game.gate.link-idle-timeout", "14s"),
+                Map.of("game.gate.link-superseded-grace", "19s"), Map.of("game.gate.link-supersede-check-interval", "0ms"))) {
+            assertThatThrownBy(() -> bind(invalid)).isInstanceOf(BindException.class).hasRootCauseInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
     /**
      * 批次 5.4 先行件：{@code game.gate.redirect-linger}（已重定向会话的收口时限）缺省 60 s，短于 15 s 拒启。
      * 走 Spring Boot 真实的构造器绑定，只构造记录、不起容器。

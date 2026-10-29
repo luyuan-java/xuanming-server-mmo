@@ -88,6 +88,14 @@ public final class SwitchTargetSelector {
         long playerId = request.getPlayerId();
         long wantSceneId = request.getWantSceneId();
         int wantConfigId = request.getWantSceneConfigId();
+        boolean evacuate = request.getReason() == com.game.api.proto.SwitchTargetReason.SWITCH_TARGET_EVACUATE;
+        if (request.getReason() == com.game.api.proto.SwitchTargetReason.UNRECOGNIZED
+                || request.getExcludeFromNode() && request.getFromSceneNodeId() == 0
+                || evacuate && (wantSceneId != 0 || !request.getExcludeFromNode() || request.getClientChannelPick())
+                || !evacuate && request.getFallbackSceneConfigId() != 0
+                || request.getFallbackSceneConfigId() != 0 && !worldConfigs.isWorld(request.getFallbackSceneConfigId())) {
+            return reject(Result.BAD_REQUEST, SceneAssigner.TIP_BAD_REQUEST);
+        }
         if (zoneId == 0 || playerId == 0 || (wantSceneId == 0 && wantConfigId == 0)) {
             log.warn("换图选目标请求参数不全 zone={} player={} wantScene={} wantConfig={}",
                     zoneId, playerId, Long.toUnsignedString(wantSceneId), wantConfigId);
@@ -113,6 +121,9 @@ public final class SwitchTargetSelector {
             }
         } else {
             nodes = source.list(zoneId).stream().filter(n -> SceneAssigner.isUsable(n, zoneId)).toList();
+        }
+        if (request.getExcludeFromNode()) {
+            nodes = nodes.stream().filter(n -> n.getNodeId() != request.getFromSceneNodeId()).toList();
         }
         Selection selected = wantSceneId != 0
                 ? selectExplicit(request, nodes)
@@ -170,6 +181,10 @@ public final class SwitchTargetSelector {
         int wantConfigId = request.getWantSceneConfigId();
         Optional<ChannelSelector.Choice> best =
                 selector.select(request.getZoneId(), nodes, wantConfigId, request.getFromSceneId(), request.getPlayerId());
+        if (best.isEmpty() && request.getFallbackSceneConfigId() != 0) {
+            best = selector.select(request.getZoneId(), nodes, request.getFallbackSceneConfigId(),
+                    request.getFromSceneId(), request.getPlayerId());
+        }
         if (best.isEmpty()) {
             log.info("换图没有可选的频道 zone={} player={} wantConfig={} from={}/{} nodes={}", request.getZoneId(),
                     request.getPlayerId(), wantConfigId, request.getFromSceneNodeId(),

@@ -44,6 +44,8 @@ enum DrainReason {
   DRAIN_REBALANCE = 2;
   // World 表里已没有这张图（orphan_cleanup.go:42-90）。
   DRAIN_ORPHAN = 3;
+  // 节点主动疏散；排空超时不恢复承载，由其它节点在同批计划中补建容量。
+  DRAIN_EVACUATE = 4;
 }
 
 // game:world:{z:<zone>}:ch 的一个值。(scene_id, node_id) 终生不变：频道换节点 = 新建一条（新号）+ 旧的排空（D4）。

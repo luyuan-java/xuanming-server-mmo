@@ -1,5 +1,6 @@
 package com.game.data.rollback;
 
+import com.game.data.snapshot.ItemInstanceDiff;
 import com.game.data.store.PersistedPlayer;
 import com.game.data.store.PlayerSnapshotEntry;
 import com.game.player.store.state.BagItemState;
@@ -212,7 +213,11 @@ public final class RestoreBuilder {
                     changed++;
                 }
             }
-            detail.put("items", Map.of("added", added, "removed", removed, "stackChanged", changed));
+            // 快照为恢复目标，当前为现档；同 UUID 的属性变化不产生数量流水，但必须进入预演与作业明细。
+            ItemInstanceDiff.Result instances = ItemInstanceDiff.compare(restored.getBag(), cur.getBag());
+            detail.put("items", Map.of("added", added, "removed", removed, "stackChanged", changed,
+                    "instanceChangedCount", instances.changedCount(), "instanceChanged", instances.instances(),
+                    "instanceChangesTruncated", instances.truncated()));
             detail.put("pets", List.of(cur.getPets().getPetsCount(), restored.getPets().getPetsCount()));
         } else if (assets) {
             detail.put("txlogSkipped", "现档损坏：前后余额无从得知，不写回档流水");

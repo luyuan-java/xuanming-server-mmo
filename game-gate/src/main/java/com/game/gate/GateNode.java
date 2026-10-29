@@ -19,6 +19,7 @@ import com.game.gate.link.LinkSettings;
 import com.game.gate.link.NettyLinkConnector;
 import com.game.gate.link.SceneLinkManager;
 import com.game.gate.link.SceneNodeResolver;
+import com.game.gate.link.SupersessionSweep;
 import com.game.gate.metrics.GateMetrics;
 import com.game.gate.session.ClientDispatcher;
 import com.game.gate.session.ClientPipeline;
@@ -103,6 +104,8 @@ public final class GateNode {
      */
     private final long startedAtMs;
     private final NodeDirectory<GateNodeInfo> gateDirectory;
+    /** 发布与正常摘除互斥；停服不能越过已经开始的发布后再被该发布复活。 */
+    private final Object directoryIoLock = new Object();
 
     private boolean started;
     private volatile boolean stopped;
@@ -114,6 +117,7 @@ public final class GateNode {
     /** 租约丢失回调在调度线程上读它，所以 volatile。 */
     private volatile SessionRegistry registry;
     private SceneLinkManager links;
+    private SupersessionSweep supersessionSweep;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
     private EventLoopGroup linkGroup;
@@ -187,9 +191,10 @@ public final class GateNode {
         // 建链会顶掉新持有者的链路。握手帧带上本次占号的防护代次，scene 拒绝代次更低的旧持有者。
         NodeIdLease heldLease = lease;
         links = new SceneLinkManager(
-                new LinkHellos(identity.nodeId(), instanceId, zoneId, heldLease.leaseEpoch(), linkAuth, InstantSource.system()),
+                new LinkHellos(identity.nodeId(), instanceId, zoneId, heldLease.leaseEpoch(), linkAuth, InstantSource.system(), properties.linkPingInterval()),
                 new NettyLinkConnector(resolver, linkResolver, linkGroup, properties.linkConnectTimeout()),
-                new LinkSettings(properties.linkHelloTimeout(), properties.linkMaxQueuedFrames()),
+                new LinkSettings(properties.linkHelloTimeout(), properties.linkMaxQueuedFrames(), properties.linkPingInterval(),
+                        properties.linkIdleTimeout(), properties.linkSupersededGrace()),
                 heldLease::isValid, metrics);
 
         // gate 自己组包下发的两个推送：23 tip 与 124 重定向通知（批次 5.4）。号按名字解析，缺一个即启动失败
@@ -200,6 +205,8 @@ public final class GateNode {
                 new GateLimits(properties.maxPendingRequests(), properties.illegalPacketThreshold(), properties.handshakeTimeout(),
                         messageLimits, runMode.allowsGmCommands(), properties.redirectLinger()), metrics, presence);
         links.bindListener(new SceneEventRouter(registry, dispatcher));
+        supersessionSweep = new SupersessionSweep(() -> sceneDirectory.list(zoneId), links);
+        supersessionSweep.start(scheduler, linkResolver, properties.linkSupersedeCheckInterval());
         // 服务端 → 玩家推送：订阅本 gate 的频道（任何服务按在线目录找到本 gate 后发布到这里）。
         pushSubscriber = new GatePushSubscriber(
                 redis.getTopic(keys.gatePushTopic(zoneId, identity.nodeId()), ByteArrayCodec.INSTANCE),
@@ -268,6 +275,11 @@ public final class GateNode {
      */
     static GateNodeInfo directoryEntry(int zoneId, int nodeId, String instanceId, String clientHost, int clientPort,
                                        int playerCount, long startedAtMs) {
+        return directoryEntry(zoneId, nodeId, instanceId, clientHost, clientPort, playerCount, startedAtMs, 0);
+    }
+
+    static GateNodeInfo directoryEntry(int zoneId, int nodeId, String instanceId, String clientHost, int clientPort,
+                                       int playerCount, long startedAtMs, long leaseEpoch) {
         return GateNodeInfo.newBuilder()
                 .setZoneId(zoneId)
                 .setNodeId(nodeId)
@@ -277,20 +289,21 @@ public final class GateNode {
                 .setPlayerCount(playerCount)
                 .setDraining(false)
                 .setStartedAtMs(startedAtMs)
+                .setLeaseEpoch(leaseEpoch)
                 .build();
     }
 
     /** 每 5s 刷新一次节点目录条目（TTL 15s）。在后台线程上执行，阻塞 Redis 调用不碰 I/O 线程。 */
     private void publish() {
-        if (acceptingStopped) {
-            return;
-        }
-        GateNodeInfo info = directoryEntry(zoneId, lease.nodeId(), instanceId, advertiseHost, properties.advertisePort(),
-                registry.size(), startedAtMs);
-        try {
-            gateDirectory.publish(zoneId, lease.nodeId(), info, DIRECTORY_TTL);
-        } catch (RuntimeException e) {
-            log.warn("刷新 gate 节点目录失败，下一轮重试 node_id={}", lease.nodeId(), e);
+        synchronized (directoryIoLock) {
+            if (acceptingStopped) return;
+            GateNodeInfo info = directoryEntry(zoneId, lease.nodeId(), instanceId, advertiseHost, properties.advertisePort(),
+                    registry.size(), startedAtMs, lease.leaseEpoch());
+            try {
+                gateDirectory.publish(zoneId, lease.nodeId(), info, DIRECTORY_TTL);
+            } catch (RuntimeException e) {
+                log.warn("刷新 gate 节点目录失败，下一轮重试 node_id={}", lease.nodeId(), e);
+            }
         }
     }
 
@@ -310,6 +323,7 @@ public final class GateNode {
             sessions.closeAll();
         }
         stopPresence();
+        if (supersessionSweep != null) supersessionSweep.close();
     }
 
     private void stopAccepting(boolean removeDirectoryEntry) {
@@ -322,11 +336,13 @@ public final class GateNode {
         if (server != null) {
             server.close().syncUninterruptibly();
         }
-        if (removeDirectoryEntry && lease != null && !lease.isLost()) {
-            try {
-                gateDirectory.remove(zoneId, lease.nodeId());
-            } catch (RuntimeException e) {
-                log.warn("从节点目录摘除 gate 失败（TTL 到期后自动消失） node_id={}", lease.nodeId(), e);
+        synchronized (directoryIoLock) {
+            if (removeDirectoryEntry && lease != null && !lease.isLost()) {
+                try {
+                    gateDirectory.remove(zoneId, lease.nodeId());
+                } catch (RuntimeException e) {
+                    log.warn("从节点目录摘除 gate 失败（TTL 到期后自动消失） node_id={}", lease.nodeId(), e);
+                }
             }
         }
     }
@@ -353,6 +369,7 @@ public final class GateNode {
         }
         stopPresence();
         if (links != null) {
+            if (supersessionSweep != null) supersessionSweep.close();
             links.close();
         }
         shutdownGroup(workerGroup);

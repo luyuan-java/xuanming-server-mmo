@@ -72,6 +72,10 @@ public final class BattleSnapshots {
                 .setRouting(routing)
                 .setTeamIndex(0)
                 .setTableFingerprint(tables.fingerprint());
+        // 无装备战斗属性时保持旧快照的缺省 presence；消费者按 0 处理。
+        if (!attributes.combat().equals(com.game.proto.CombatAttributes.getDefaultInstance())) {
+            snapshot.setCombat(attributes.combat());
+        }
         for (int skill : player.skills()) {
             // 原顺序；跳过 0 与查不到行的；剔除被动 / 持续施法 / 开关（引擎再过滤一次）
             if (skill != 0 && tables.skillExists(skill) && tables.castable(skill)) {

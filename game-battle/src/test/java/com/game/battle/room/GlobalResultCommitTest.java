@@ -121,6 +121,51 @@ class GlobalResultCommitTest {
                 .setAction(RoomHarness.skill(FakeBattleData.SKILL_NUKE, MONSTER)).build());
     }
 
+    @Test void 停服立即补交非在途原件_COMPLETE后排空且原字节不变(){
+        h.create(v1(42201));h.connect(42201,A,eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT);resolveV1(42201);
+        sqlDecisions.getFirst().completeExceptionally(new IllegalStateException("COMMIT回包丢失"));h.scheduler.runPending();h.log.clear();
+        var drained=h.service().beginShutdown("停服",java.time.Duration.ofSeconds(3));
+        assertThat(drained).isNotDone();assertThat(sqlDecisions).hasSize(2);
+        assertThat(sqlCreates.get(1)).isSameAs(sqlCreates.getFirst());assertThat(sqlOriginals.get(1)).isSameAs(sqlOriginals.getFirst());
+        assertThat(sqlEvents.get(1)).isSameAs(sqlEvents.getFirst());
+        sqlDecisions.get(1).complete(BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE);h.scheduler.runPending();
+        assertThat(drained.join().unconfirmed()).isEmpty();assertThat(h.service().room(42201)).isNull();
+        h.scheduler.advance(30_000);assertThat(sqlDecisions).hasSize(2);assertThat(h.settlementsOut()).isEmpty();assertThat(events).isEmpty();
+        assertThat(h.outs(RoomHarness.Kind.FRAME)).isEmpty();
+    }
+
+    @Test void 停服不打断在途提交_失败后继续原件重试_ABORT同样完成排空(){
+        h.create(v1(42202));resolveV1(42202);h.log.clear();
+        var drained=h.service().beginShutdown("停服",java.time.Duration.ofSeconds(3));
+        assertThat(sqlDecisions).hasSize(1);assertThat(drained).isNotDone();
+        sqlDecisions.getFirst().completeExceptionally(new IllegalStateException("网络断开不能证明回滚"));h.scheduler.runPending();
+        h.scheduler.advance(999);assertThat(sqlDecisions).hasSize(1);
+        h.scheduler.advance(1);assertThat(sqlDecisions).hasSize(2);assertThat(sqlOriginals.get(1)).isSameAs(sqlOriginals.getFirst());
+        sqlDecisions.get(1).complete(BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_ABORT);h.scheduler.runPending();
+        assertThat(drained.join().unconfirmed()).isEmpty();assertThat(h.service().room(42202)).isNull();
+        assertThat(h.outs(RoomHarness.Kind.FRAME)).isEmpty();assertThat(h.settlementsOut()).isEmpty();
+    }
+
+    @Test void 预算耗尽逐局保留UNKNOWN原身份_迟到回包不得产生公开终局(){
+        h.create(v1(42203));h.create(v1(42204));resolveV1(42203);resolveV1(42204);h.log.clear();
+        var drained=h.service().beginShutdown("停服",java.time.Duration.ofMillis(50));
+        assertThat(h.service().attachDirect(42203,A,eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT,h.new FakeLink(A))).isEmpty();
+        assertThat(h.service().issueBattleTicket(com.game.proto.IssueBattleTicketRequest.newBuilder().setBattleId(42203).setPlayerId(A).build()).hasErrorMessage()).isTrue();
+        assertThat(h.service().addObserver(com.game.proto.AddObserverRequest.newBuilder().setBattleId(42203).setObserverPlayerId(RoomHarness.B).build()).hasErrorMessage()).isTrue();
+        assertThat(h.service().beginShutdown("重复停服",java.time.Duration.ofSeconds(30))).isSameAs(drained);
+        h.scheduler.advance(49);assertThat(drained).isNotDone();h.scheduler.advance(1);
+        assertThat(drained.join().unconfirmed()).extracting(BattleRoomService.UnconfirmedOutcome::battleId)
+                .containsExactlyInAnyOrder(42203L,42204L);
+        assertThat(drained.join().unconfirmed()).allSatisfy(p->{assertThat(p.operationId()).isEqualTo("902df74e-3843-48e0-bd72-05ed824a4f12");
+            assertThat(p.instanceId()).isEqualTo(RoomHarness.INSTANCE);assertThat(p.inFlight()).isTrue();});
+        assertThat(h.service().room(42203)).isNotNull();
+        sqlDecisions.getFirst().complete(BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE);
+        sqlDecisions.get(1).completeExceptionally(new IllegalStateException("退出后未知"));h.scheduler.runPending();h.scheduler.advance(30_000);
+        assertThat(sqlDecisions).hasSize(2);assertThat(h.outs(RoomHarness.Kind.FRAME)).isEmpty();assertThat(h.settlementsOut()).isEmpty();
+        h.service().abortAll("拆房");assertThat(h.service().roomCount()).isZero();
+        assertThat(drained.join().unconfirmed()).hasSize(2);
+    }
+
     @Test void v1SQLCOMPLETE前所有公开面保持非终态_COMPLETE后不走旧个人直投或Kafka出口() {
         var original = v1(42101).build();
         var response = h.create(original.toBuilder());

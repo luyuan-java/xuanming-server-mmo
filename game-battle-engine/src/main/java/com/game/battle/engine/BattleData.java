@@ -60,7 +60,7 @@ public interface BattleData {
         return 0;
     }
 
-    /** 技能伤害公式 {@code Skill.damage}，参数 {@code level = casterLevel}（{@code GetSkillDamage}）。引擎只在查到行之后调用。 */
+    /** 技能伤害公式 {@code Skill.damage}，参数为原等级加装备技能等级加成（uint64 饱和后换 double），不改单位等级。 */
     double skillDamage(int skillTableId, double casterLevel);
 
     /**

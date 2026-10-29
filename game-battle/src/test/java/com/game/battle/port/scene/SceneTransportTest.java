@@ -88,17 +88,23 @@ class SceneTransportTest {
         when(redis.getMapCache(eq(REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, ZONE)), any(Codec.class)))
                 .thenReturn((RMapCache) sceneDirectory);
         when(sceneDirectory.getAsync(Integer.toString(NODE))).thenAnswer(call -> new CompletableFutureWrapper<>(node.toByteArray()));
-        when(sceneDirectory.readAllValues()).thenAnswer(call -> {
+        when(sceneDirectory.readAllMapAsync()).thenAnswer(call -> {
             RuntimeException failure = listingFailure;
             if (failure != null) {
                 throw failure;
             }
-            return listing;
+            var entries=new java.util.LinkedHashMap<String,byte[]>();int sequence=0;
+            for(byte[] bytes:listing)entries.put(Integer.toString(++sequence),bytes);
+            return new CompletableFutureWrapper<>(entries);
         });
         RScript scripts = mock(RScript.class, call -> {
             if (!"evalAsync".equals(call.getMethod().getName())) {
                 return Mockito.RETURNS_DEFAULTS.answer(call);
             }
+            List<Object> keys=call.getArgument(3);
+            if(keys.equals(List.of(REDIS_KEYS.worldRetirement(ZONE))))return new CompletableFutureWrapper<>(0L);
+            if(keys.contains(REDIS_KEYS.zoneNodeDirectory(NodeTypes.SCENE,ZONE)))
+                return new CompletableFutureWrapper<Object>(List.of(0L,List.of(),List.of()));
             // BattleRedis：evalAsync(mode, script, returnType, keys, args...)
             CompletableFuture<Object> reply = new CompletableFuture<>();
             scriptCalls.add(new ScriptCall(List.copyOf(call.<List<Object>>getArgument(3)), reply));

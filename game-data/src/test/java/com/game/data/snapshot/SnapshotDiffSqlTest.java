@@ -11,6 +11,7 @@ import com.game.data.txlog.TransactionLogSink;
 import com.game.player.store.state.BagItemState;
 import com.game.player.store.state.BagState;
 import com.game.player.store.state.CurrencyState;
+import com.game.player.store.state.EquipmentState;
 import com.game.player.store.state.Facing;
 import com.game.player.store.state.PetEntry;
 import com.game.player.store.state.PetState;
@@ -74,6 +75,25 @@ class SnapshotDiffSqlTest {
 
     private static TransactionLogRow itemRow(long txId, long timeMs, long from, long to, long uuid, int qty, int reason) {
         return new TransactionLogRow(txId, timeMs, reason, 2, from, to, 0, 0, 0, 0, uuid, 501, qty, 0, "", 1);
+    }
+
+    @Test
+    void 同UUID数量不变的装备强化必须出现在实际快照差异应答() {
+        var old = item(11, 501, 1, 0).toBuilder().setEquipment(EquipmentState.newBuilder().setEnhanceLevel(1)).build();
+        var now = old.toBuilder().setEquipment(old.getEquipment().toBuilder().setEnhanceLevel(2)).build();
+        var before = PlayerState.newBuilder().setBag(BagState.newBuilder().addItems(old)).build();
+        var after = PlayerState.newBuilder().setBag(BagState.newBuilder().addItems(now)).build();
+        db.insertPlayer(PLAYER, 1, 12, 1002, 4, true, 0, 100, 9_000);
+        db.putState(PLAYER, after.toByteArray(), 4, 8_000);
+        snapshot(500, PLAYER, 1_000, SnapshotCauses.LOGOUT, before);
+
+        Map<String, Object> items = map(service.diff(PLAYER, 500L, null), "items");
+        assertThat(list(items, "byConfig")).isEmpty();
+        assertThat(list(items, "stackChanged")).isEmpty();
+        assertThat(items).containsEntry("instanceChangedCount", 1).containsEntry("instanceChangesTruncated", false);
+        assertThat(list(list(items, "instanceChanged").getFirst(), "changes")).singleElement().satisfies(change ->
+                assertThat(change).containsEntry("path", "bag.items{11}.equipment.enhance_level")
+                        .containsEntry("snapshot", "1").containsEntry("current", "2"));
     }
 
     @Test

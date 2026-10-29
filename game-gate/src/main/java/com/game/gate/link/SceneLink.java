@@ -4,13 +4,16 @@ import com.game.api.proto.LinkHello;
 import com.game.api.proto.LinkHelloAck;
 import com.game.api.proto.NodeLinkFrame;
 import com.game.api.proto.PlayerEnter;
+import com.game.api.proto.SceneNodeInfo;
 import com.game.gate.metrics.GateMetrics.LinkDrop;
 import com.game.gate.metrics.GateMetrics.LinkEvent;
 import io.netty.channel.Channel;
+import io.netty.handler.timeout.IdleStateHandler;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ScheduledFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,6 +55,52 @@ public final class SceneLink {
     private Channel channel;
     /** 本连接发出的握手帧（每次建链现生成：鉴权时间戳取建链时刻）；ack 的 zone 与它比对。 */
     private LinkHello sentHello;
+    private SceneNodeInfo resolved;
+    private String peerInstance;
+    private long peerLeaseEpoch;
+    private boolean superseded;
+    private ScheduledFuture<?> heartbeat;
+    private long pingSequence;
+
+    record Peer(String instanceId, long leaseEpoch) { }
+    synchronized Peer peer() { return state == State.READY ? new Peer(peerInstance, peerLeaseEpoch) : null; }
+    synchronized void updateLeaseEpoch(long epoch) {
+        if (Long.compareUnsigned(epoch, peerLeaseEpoch) > 0) peerLeaseEpoch = epoch;
+    }
+    synchronized boolean markSuperseded() {
+        if (state != State.READY || superseded) return false;
+        superseded = true;
+        return true;
+    }
+
+    synchronized boolean cancelQueuedEnter(PlayerEnter enter) {
+        NodeLinkFrame frame = NodeLinkFrame.newBuilder().setPlayerEnter(enter).build();
+        if (!queue.remove(frame)) return false;
+        // 进场被取消后，其后尚未发出的业务帧也不能泄漏到一个从未承接该玩家的 scene。
+        queue.removeIf(queued -> queued.hasClientForward()
+                && queued.getClientForward().getSessionId() == enter.getSessionId()
+                && queued.getClientForward().getPlayerId() == enter.getPlayerId()
+                || queued.hasPlayerLeave() && queued.getPlayerLeave().getSessionId() == enter.getSessionId()
+                && queued.getPlayerLeave().getPlayerId() == enter.getPlayerId());
+        return true;
+    }
+
+    /** 目录 I/O 已结束，在真正建 TCP 之前固定这次连接的目标身份。 */
+    boolean resolved(SceneNodeInfo info) {
+        if (info.getNodeId() != nodeId || info.getInstanceId().isBlank()) {
+            fail("目录目标身份无效");
+            return false;
+        }
+        if (!manager.acceptDirectoryIdentity(info)) {
+            fail("目录目标身份过期", EnterFailure.CONNECT_UNAVAILABLE);
+            return false;
+        }
+        synchronized (this) {
+            if (state != State.CONNECTING) return false;
+            resolved = info;
+            return true;
+        }
+    }
 
     SceneLink(int nodeId, long generation, SceneLinkManager manager) {
         this.nodeId = nodeId;
@@ -81,20 +130,24 @@ public final class SceneLink {
      * 返回 0：宁可断链，也不让出站缓冲无限增长。
      */
     long offer(NodeLinkFrame frame) {
+        return offer(frame, true);
+    }
+
+    long offer(NodeLinkFrame frame, boolean newBinding) {
         boolean startConnect = false;
         boolean overWaterMark = false;
+        boolean written = false;
         PlayerEnter overflowed = null;
-        synchronized (this) {
-            if (state == State.DEAD) {
+        try { synchronized (this) {
+            if (state == State.DEAD || newBinding && superseded) {
                 return 0;
             }
             if (state == State.READY) {
                 if (channel.isWritable()) {
+                    written = true; // 调用 write 之前即判为未知/已发；异常也绝不转为 undeliverable。
                     channel.writeAndFlush(frame);
                     manager.metrics().linkFrameOut(frame.getBodyCase());
-                    return generation;
-                }
-                overWaterMark = true;
+                } else overWaterMark = true;
             } else {
                 if (state == State.NEW) {
                     state = State.CONNECTING;
@@ -108,7 +161,12 @@ public final class SceneLink {
                     overflowed = frame.hasPlayerEnter() ? frame.getPlayerEnter() : null;
                 }
             }
+        } } catch (RuntimeException failure) {
+            fail("链路写调用失败（结果未知）");
+        } finally {
+            if (written && frame.hasPlayerEnter()) manager.listener().onEnterDispatched(nodeId, generation, frame.getPlayerEnter());
         }
+        if (written) return generation;
         if (overWaterMark) {
             // 回调监听器一律在锁外：fail 自己加锁、摘除并回报断链。
             fail("出站缓冲超过高水位（scene 读不动）");
@@ -151,7 +209,7 @@ public final class SceneLink {
         if (timeoutMs > 0) {
             ch.eventLoop().schedule(() -> {
                 if (state() == State.CONNECTING) {
-                    fail("等待 LinkHelloAck 超时");
+                    fail("等待 LinkHelloAck 超时", EnterFailure.CONNECT_UNAVAILABLE);
                 }
             }, timeoutMs, TimeUnit.MILLISECONDS);
         }
@@ -171,6 +229,7 @@ public final class SceneLink {
         manager.metrics().linkFrameIn(frame.getBodyCase());
         switch (frame.getBodyCase()) {
             case HELLO_ACK -> onHelloAck(frame.getHelloAck());
+            case PONG -> { /* IdleStateHandler 已按任何入站帧重置计时，无需业务回调。 */ }
             case TO_CLIENT -> {
                 if (handshaken()) {
                     manager.listener().onToClient(nodeId, generation, frame.getToClient());
@@ -202,8 +261,10 @@ public final class SceneLink {
 
     private void onHelloAck(LinkHelloAck ack) {
         LinkHello hello;
+        SceneNodeInfo directory;
         synchronized (this) {
             hello = sentHello;
+            directory = resolved;
         }
         String reject = null;
         if (hello == null) {
@@ -214,32 +275,69 @@ public final class SceneLink {
             reject = "对端节点号不符: " + ack.getSceneNodeId();
         } else if (ack.getZoneId() != hello.getZoneId()) {
             reject = "对端 zone 不符: " + ack.getZoneId();
+        } else if (directory != null && (!ack.getSceneInstanceId().equals(directory.getInstanceId())
+                || directory.getLeaseEpoch() != 0 && ack.getSceneLeaseEpoch() != 0
+                && Long.compareUnsigned(ack.getSceneLeaseEpoch(), directory.getLeaseEpoch()) < 0)) {
+            reject = "对端实例与目录不符";
+        } else if (ack.getPingIntervalMs() != 0 && (ack.getPingIntervalMs() != hello.getPingIntervalMs()
+                || ack.getPingIntervalMs() < 1000 || ack.getPingIntervalMs() > 30_000)) {
+            reject = "心跳协商值不符";
         }
         if (reject != null) {
             fail(reject);
             return;
         }
         int flushed;
-        synchronized (this) {
+        List<PlayerEnter> dispatched = new ArrayList<>();
+        try { synchronized (this) {
             if (state != State.CONNECTING) {
                 return;
             }
             state = State.READY;
             handshaken = true;
+            peerInstance = ack.getSceneInstanceId();
+            peerLeaseEpoch = ack.getSceneLeaseEpoch();
+            if (ack.getPingIntervalMs() != 0) startHeartbeat(channel, ack.getPingIntervalMs());
             flushed = queue.size();
-            for (NodeLinkFrame queued : queue) {
+            NodeLinkFrame queued;
+            while ((queued = queue.poll()) != null) {
+                // 与 cancelQueuedEnter 共用锁；先从待发队列摘除，再调用 write，异常不可恢复其重试资格。
+                if (queued.hasPlayerEnter()) dispatched.add(queued.getPlayerEnter());
                 channel.write(queued);
                 manager.metrics().linkFrameOut(queued.getBodyCase());
             }
-            queue.clear();
             channel.flush();
+        } } finally {
+            for (PlayerEnter enter : dispatched) manager.listener().onEnterDispatched(nodeId, generation, enter);
         }
         manager.metrics().linkEvent(LinkEvent.READY);
+        manager.observeLeaseEpoch(nodeId, ack.getSceneLeaseEpoch());
         log.info("scene 链路就绪 node={} gen={} instance={} 补发={}", nodeId, generation, ack.getSceneInstanceId(), flushed);
+    }
+
+    private void startHeartbeat(Channel ch, int interval) {
+        ch.pipeline().addBefore(ch.pipeline().context(SceneLinkHandler.class).name(), "sceneLinkIdle",
+                new IdleStateHandler(manager.settings().idleTimeout().toMillis(), 0, 0, TimeUnit.MILLISECONDS));
+        heartbeat = ch.eventLoop().scheduleAtFixedRate(() -> {
+            synchronized (this) {
+                if (state != State.READY || channel != ch) return;
+            }
+            offer(NodeLinkFrame.newBuilder().setPing(com.game.api.proto.LinkPing.newBuilder().setSeq(++pingSequence)).build(), false);
+        }, interval, interval, TimeUnit.MILLISECONDS);
+    }
+
+    void readIdle() {
+        synchronized (this) { if (state != State.READY || heartbeat == null) return; }
+        manager.metrics().linkIdleTimeout();
+        fail("心跳超时");
     }
 
     /** 链路判死（幂等）：摘除 → 关连接 → 回报排队中的进场帧 → 若曾就绪则回报断链。 */
     void fail(String reason) {
+        fail(reason, EnterFailure.PERMANENT);
+    }
+
+    void fail(String reason, EnterFailure failure) {
         List<PlayerEnter> undeliverable = new ArrayList<>();
         boolean wasReady;
         int discarded;
@@ -259,6 +357,7 @@ public final class SceneLink {
             queue.clear();
             ch = channel;
             channel = null;
+            if (heartbeat != null) { heartbeat.cancel(false); heartbeat = null; }
         }
         manager.metrics().linkEvent(wasReady ? LinkEvent.DOWN : LinkEvent.CONNECT_FAILED);
         manager.metrics().linkDropped(LinkDrop.LINK_FAILED, discarded);
@@ -273,10 +372,10 @@ public final class SceneLink {
         }
         SceneLinkListener listener = manager.listener();
         for (PlayerEnter enter : undeliverable) {
-            listener.onEnterUndeliverable(nodeId, generation, enter);
+            listener.onEnterUndeliverable(nodeId, generation, enter, failure);
         }
         if (wasReady) {
-            listener.onLinkDown(nodeId, generation);
+            listener.onLinkDown(nodeId, generation, superseded);
         }
     }
 }

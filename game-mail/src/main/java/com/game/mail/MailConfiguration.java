@@ -20,7 +20,13 @@ import org.springframework.context.annotation.*;
 @Configuration(proxyBeanMethods = false)
 public class MailConfiguration {
     @Bean
-    static StrongTiDbConnectionPolicy connectionPolicy(@Value("${game.mail.require-tidb:true}") boolean require) {
+    static StrongTiDbConnectionPolicy connectionPolicy(org.springframework.core.env.Environment environment) {
+        // BPP 早于普通配置 bean 装配；从 Spring Environment 取值，禁止生产通过显式 false 降级。
+        boolean require = environment.getProperty("game.mail.require-tidb", Boolean.class, true);
+        if (!require && com.game.common.RunMode.parse(environment.getProperty("game.run-mode"))
+                == com.game.common.RunMode.PROD) {
+            throw new IllegalStateException("生产邮件必须启用 game.mail.require-tidb 的 TiDB 强读门禁");
+        }
         return new StrongTiDbConnectionPolicy("mail", require);
     }
     @Bean

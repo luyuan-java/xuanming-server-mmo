@@ -15,7 +15,13 @@ import java.util.function.Consumer;
  * @param channels      5.6 共享目录读取与成功后冷却写入；两种 IO 均异步回到逻辑线程
  */
 public record CrossNodeSwitch(int localNodeId, RemoteSwitchTargets targets, Consumer<OwnedPlayer> renewSoon,
-                              Duration resolveTimeout, Duration tombstoneTtl, PlayerChannels channels) {
+                              Duration resolveTimeout, Duration tombstoneTtl, PlayerChannels channels,
+                              EvacuationPolicy evacuation) {
+
+    public CrossNodeSwitch(int localNodeId, RemoteSwitchTargets targets, Consumer<OwnedPlayer> renewSoon,
+                           Duration resolveTimeout, Duration tombstoneTtl, PlayerChannels channels) {
+        this(localNodeId, targets, renewSoon, resolveTimeout, tombstoneTtl, channels, EvacuationPolicy.DEFAULT);
+    }
 
     public CrossNodeSwitch(int localNodeId, RemoteSwitchTargets targets, Consumer<OwnedPlayer> renewSoon,
                            Duration resolveTimeout, Duration tombstoneTtl) {
@@ -31,6 +37,7 @@ public record CrossNodeSwitch(int localNodeId, RemoteSwitchTargets targets, Cons
         Objects.requireNonNull(resolveTimeout, "resolveTimeout");
         Objects.requireNonNull(tombstoneTtl, "tombstoneTtl");
         Objects.requireNonNull(channels, "channels");
+        Objects.requireNonNull(evacuation, "evacuation");
         if (targets != null && localNodeId <= 0) {
             throw new IllegalArgumentException("启用跨节点换图时本节点号必须为正: " + localNodeId);
         }

@@ -11,7 +11,7 @@ import com.game.proto.eBattleEventType;
  *   <li>{@link #append} 只写 event_type / source_id / target_id，并盖上当前的 group_id / hit_index；其余字段由调用方在返回的
  *       builder 上补（同基线返回事件指针后再 set）。</li>
  *   <li>{@link #beginGroup()}：{@code ++group; hit = 0}。每回合开始时 {@link #startRound} 归零，所以组号每回合从 1 起。</li>
- *   <li>hit_index 只在技能逐目标落地时被设成目标序，结束后归 0（{@code engine.cpp:847-855}）。</li>
+ *   <li>hit_index 用于技能目标序与普攻连击段序，结束后归 0；反击另开组，反震留在受击的原段。</li>
  * </ul>
  * 事件写进当前的「接收者」（本回合的 {@link TurnResultS2C.Builder}）。不在结算中时接收者是一个丢弃用的 builder，
  * 测试钩子 {@code addBuffForTest} 也借此丢弃事件（同基线友元用局部 {@code TurnResultS2C}，{@code test.cpp:26-38}）。

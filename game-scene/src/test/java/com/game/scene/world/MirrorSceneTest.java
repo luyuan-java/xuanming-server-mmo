@@ -423,6 +423,48 @@ class MirrorSceneTest {
 
     @ParameterizedTest
     @MethodSource("lateMirrorResults")
+    void 镜像取号被远端疏散取代_迟到结局不覆盖疏散槽也不发包(InstanceIds.Result result) {
+        var remote = new InstanceFixture(InstanceFixture.Settings.DEFAULT.withCrossNode());
+        var player = remote.enter(11, 1001, A);
+        remote.requestMirror(player, M);
+        var create = remote.ids.take();
+
+        remote.world.beginNodeEvacuation(NodeEvacuation.Cause.ADMIN, java.time.Duration.ofSeconds(15));
+        var evacuation = player.switching();
+        assertThat(evacuation).isNotNull();
+        assertThat(evacuation.reason()).isEqualTo(SwitchReason.EVACUATE);
+        assertThat(evacuation.purpose()).isEqualTo(PlayerSwitch.Purpose.REMOTE_SWITCH);
+        assertThat(player.frozen()).isFalse();
+        assertThat(remote.targets.pendingCount()).isEqualTo(1);
+        remote.sink.clear();
+
+        create.complete(result);
+        remote.world.drainStep();
+
+        assertThat(player.switching()).isSameAs(evacuation);
+        assertThat(player.scene()).isSameAs(remote.scene(A));
+        assertThat(remote.targets.pendingCount()).as("已有疏散选点不能重复发起").isEqualTo(1);
+        assertThat(remote.repo.pendingHandOffs()).isZero();
+        assertThat(remote.messageIds(player)).isEmpty();
+        assertThat(remote.world.instanceCount()).isZero();
+        assertThat(remote.resolves("stale")).isEqualTo(1);
+    }
+
+    @Test
+    void 没有可改派目标时不提前抹掉镜像取号槽() {
+        f.requestMirror(a, M);
+        var pending = a.switching();
+
+        f.plan(draining(A, 1), draining(B, 1), draining(C, 2));
+
+        assertThat(a.scene()).isSameAs(f.scene(A));
+        assertThat(a.switching()).isSameAs(pending);
+        assertThat(a.switchPhase()).isEqualTo(SwitchPhase.RESOLVING);
+        assertThat(f.world.instanceCount()).isZero();
+    }
+
+    @ParameterizedTest
+    @MethodSource("lateMirrorResults")
     void 权威换图后又回源频道_旧镜像完成仍静默且不复活(InstanceIds.Result result) {
         f.requestMirror(a, M);
         FakeInstanceIds.PendingCreate create = f.ids.take();

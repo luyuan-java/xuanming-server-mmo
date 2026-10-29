@@ -9,7 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 启动期核对审计 topic：不存在就按规格创建（谁先启动谁建），存在就核对分区数，不符抛 {@link AuditTopicContractException}。
+ * 启动期核对 topic：不存在就按规格创建（谁先启动谁建），存在就核对分区数；审计入口另校验显式的副本与 minISR 下限。
+ * 契约不符抛 {@link AuditTopicContractException}。
  * {@link Mode#OWN}（消费方）还会把保留策略等 topic 配置校正到规格并读回确认。连不上 broker 抛 {@link AuditBrokerUnavailableException}。
  *
  * <p>broker 若开着自动建 topic，生产方在核对通过之前不得发送（自动建出来的是默认分区数）——见 scene 的审计管线。
@@ -23,7 +24,6 @@ public final class AuditTopicInitializer {
     /** 审计 topic 的代次环境变量名（分区数不符时的报错里提示它）。 */
     public static final String AUDIT_GENERATION_ENV = "GAME_AUDIT_TOPIC_GENERATION";
     /** 日志与报错里对这组 topic 的称呼。 */
-    private static final String AUDIT_LABEL = "审计 topic";
     private static final String GENERIC_LABEL = "Kafka topic";
 
     /** 核对方式。 */
@@ -42,11 +42,11 @@ public final class AuditTopicInitializer {
     /** 核对审计 topic（资产流水、玩家快照）。分区数不符时的报错指向 {@value #AUDIT_GENERATION_ENV}。 */
     public static void ensure(TopicAdmin admin, List<TopicSpec> specs, Mode mode, short replicationFactor,
                               Duration timeout) {
-        ensureLabeled(admin, specs, mode, replicationFactor, timeout, AUDIT_LABEL, AUDIT_GENERATION_ENV);
+        AuditTopicDurability.ensure(admin, specs, mode, replicationFactor, timeout);
     }
 
     /**
-     * 核对别的 topic（规格见各自的常量类）：行为与上面完全相同，只是日志与报错不再写「审计」，分区数不符时提示的代次环境变量是
+     * 核对别的 topic 的分区与主人配置（规格见各自的常量类）；副本持久性由各规格类自行核验。日志与报错不写「审计」，分区数不符时提示的代次环境变量是
      * {@code generationEnv}——否则运维会照着报错去升审计的代次（match-spec 评审问题 7）。对局结果 topic 直接用
      * {@link BattleResultTopics#ensure}（它带上自己的称呼与 {@link BattleResultTopics#GENERATION_ENV}）。
      *

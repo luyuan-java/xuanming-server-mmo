@@ -17,6 +17,7 @@ import com.game.match.testing.InMemoryPlacementStore;
 import com.game.match.testing.InMemorySpectateStore;
 import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.ManualRedisClock;
+import com.game.proto.BattleRouting;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -29,8 +30,8 @@ import org.junit.jupiter.api.Test;
 /**
  * 开局钩子（spectate-spec §4.6、§10.3 的 {@code SpectateGatherHooksTest} 一段）。
  * <ul>
- *   <li>{@code beforePrepare}：有标记有落点 → 发往<b>落点地址</b>的 {@code remove(reason = enter_gather)} → 按值删标记；无落点 → 只删；标记值非法 → 删；
- *       读落点出错 / 记录损坏 → 不发 RPC、删；读全员标记出错 → 全部跳过、标记保留；RPC 失败 / 超时都不抛；每人一个截止，读落点 + RPC + 删标记都算在内。</li>
+ *   <li>{@code beforePrepare}：完整原件 → 原端点取消 → 取消正证明后按值删标记；后来的落点缺失、损坏或读失败不改原端点。
+ *       读全员标记出错 → 全部跳过、标记保留；RPC 未知保留原件；每人一个截止，RPC + 删标记共用预算。</li>
  *   <li>{@code onStarted}：落点的 attempt 一致才登记进索引；登记不上只计数。</li>
  * </ul>
  * 对照基线 {@code spectate_test.go:448}（StopWatchingIfAnyPaths）、{@code :824}（WithCorruptRecordStillClearsMark），
@@ -73,9 +74,15 @@ class SpectateGatherHooksTest {
 
     /** 只摆标记（不摆落点）。 */
     private String mark(long playerId, long battleId) {
-        String value = SpectateRules.encodeMark(battleId, NONCE);
+        String value = original(playerId, battleId).mark();
         store.putMark(playerId, value);
         return value;
+    }
+
+    private static LocalObserverOperation original(long playerId, long battleId) {
+        return LocalObserverOperation.create(placement(battleId, 1), playerId,
+                BattleRouting.newBuilder().setGateNodeId(1).setGateInstanceId("gate-test").setSessionId(7).build(),
+                "观众", java.util.UUID.randomUUID().toString(), T0);
     }
 
     private double evictions(String result) {
@@ -111,9 +118,9 @@ class SpectateGatherHooksTest {
             assertThat(call.hardStopRemainingMs()).as("硬截止就是这名成员的 3 s 截止").isBetween(1_000L, 3_000L);
         });
         assertThat(store.markOf(7301)).isEmpty();
-        assertThat(store.calls).as("一次读全员标记；只为有标记的人读落点；删标记按读到的原值").containsExactly("marksOf([7301, 7302])", "read(880110)",
+        assertThat(store.calls).as("一次读全员标记；原件自带端点；删标记按读到的原值").containsExactly("marksOf([7301, 7302])",
                 "release(7301," + value + ")");
-        assertThat(events).as("先读落点、再清退、最后删标记").containsExactly("spectate.read:880110", "observer.remove:880110:7301:enter_gather",
+        assertThat(events).as("按原件清退、获证明后删标记").containsExactly("observer.remove:880110:7301:enter_gather",
                 "spectate.release:7301");
         assertThat(placements.stored(880110)).as("清退不动那一场的落点与索引").contains(placement(880110, 1));
         assertThat(evictions("removed")).isEqualTo(1.0);
@@ -121,15 +128,15 @@ class SpectateGatherHooksTest {
     }
 
     @Test
-    void 那一场已收尾_落点不在_只删标记_不找battle() {
+    void 落点不在_仍按原件固定端点取消_获证明后删标记() {
         String value = mark(7302, 880111);
 
         hooks.beforePrepare(List.of(7302L));
 
-        assertThat(dialer.calls).isEmpty();
+        assertThat(dialer.calls).singleElement().satisfies(call -> assertThat(call.placement()).isEqualTo(placement(880111, 1)));
         assertThat(store.markOf(7302)).isEmpty();
-        assertThat(store.calls).containsExactly("marksOf([7302])", "read(880111)", "release(7302," + value + ")");
-        assertThat(evictions("no_record")).isEqualTo(1.0);
+        assertThat(store.calls).containsExactly("marksOf([7302])", "release(7302," + value + ")");
+        assertThat(evictions("removed")).isEqualTo(1.0);
         assertThat(allEvictions()).isEqualTo(1.0);
     }
 
@@ -144,6 +151,20 @@ class SpectateGatherHooksTest {
         assertThat(dialer.calls).isEmpty();
         assertThat(store.markCount()).isZero();
         assertThat(store.calls).containsExactly("marksOf([7303, 7304])", "release(7303,oops)", "release(7304,880112)");
+        assertThat(evictions("invalid_mark")).isEqualTo(2.0);
+    }
+
+    @Test
+    void 未来版本与损坏原件均保留_不发无原件取消() {
+        store.putMark(7303, "observer-v2:future:payload");
+        store.putMark(7304, "observer-v1:broken");
+
+        hooks.beforePrepare(List.of(7303L, 7304L));
+
+        assertThat(dialer.calls).isEmpty();
+        assertThat(store.markOf(7303)).contains("observer-v2:future:payload");
+        assertThat(store.markOf(7304)).contains("observer-v1:broken");
+        assertThat(store.calls).containsExactly("marksOf([7303, 7304])");
         assertThat(evictions("invalid_mark")).isEqualTo(2.0);
     }
 
@@ -172,30 +193,31 @@ class SpectateGatherHooksTest {
     // ================================================================ beforePrepare：读失败
 
     @Test
-    void 读落点出错_不发RemoveObserver_标记照删() {
+    void 落点存储读失败不影响按原件取消_确认后删标记() {
         String value = watching(7310, 880120);
         store.faults.failNext("read");
 
         hooks.beforePrepare(List.of(7310L));
 
-        assertThat(dialer.calls).as("读不出落点就没有地址可拨").isEmpty();
-        assertThat(store.markOf(7310)).as("标记必须清掉：不清，他既不能被下一次开局正确清退，标记也白占 360 s").isEmpty();
-        assertThat(store.calls).containsExactly("marksOf([7310])", "read(880120)", "release(7310," + value + ")");
-        assertThat(evictions("read_failed")).isEqualTo(1.0);
+        assertThat(dialer.calls).as("不依赖后来的落点读取").hasSize(1);
+        assertThat(store.markOf(7310)).as("原件取消已确认").isEmpty();
+        assertThat(store.calls).containsExactly("marksOf([7310])", "release(7310," + value + ")");
+        assertThat(evictions("removed")).isEqualTo(1.0);
         assertThat(allEvictions()).isEqualTo(1.0);
     }
 
     @Test
-    void 落点记录损坏_不拿脏数据去battle摘观众_标记照删_落点不动() {
+    void 落点记录损坏_只按持久原件寻址取消_损坏落点不动() {
         watching(7311, 880300);
         placements.corrupt(880300);
 
         hooks.beforePrepare(List.of(7311L));
 
-        assertThat(dialer.calls).as("记录读不成一条好记录，就不该拿它的地址去找 battle").isEmpty();
+        assertThat(dialer.calls).as("不读损坏记录，使用标记内原端点").singleElement()
+                .satisfies(call -> assertThat(call.placement()).isEqualTo(placement(880300, 1)));
         assertThat(store.markOf(7311)).isEmpty();
         assertThat(placements.corrupted(880300)).as("清退不删落点").isTrue();
-        assertThat(evictions("read_failed")).isEqualTo(1.0);
+        assertThat(evictions("removed")).isEqualTo(1.0);
     }
 
     @Test
@@ -217,18 +239,18 @@ class SpectateGatherHooksTest {
     // ================================================================ beforePrepare：RPC 的结局
 
     @Test
-    void RemoveObserver的各种结局_都不抛_标记都删_指标各归各类() {
+    void RemoveObserver的各种结局_都不抛_只有完整取消证明才删标记() {
         Map<Outcome, String> expected = Map.of(
                 new Outcome.Replied(0), "removed",
-                new Outcome.Replied(1004), "removed", // battle 应答了就算调通：房间里没有这名观众时它幂等
-                new Outcome.Dead(), "no_record", // 那一场所在的进程已被别的进程接手：等同已收尾
+                new Outcome.Replied(1004), "rpc_failed", // 非零业务码不能替代完整取消证明
+                new Outcome.Dead(), "rpc_failed", // 目录判死不能替代原操作的取消证明
                 new Outcome.NotDelivered("连不上"), "rpc_failed",
                 new Outcome.Unknown("超时"), "rpc_failed");
         long playerId = 7400;
         for (Map.Entry<Outcome, String> entry : expected.entrySet()) {
             playerId++;
             long battleId = 880_000 + playerId;
-            watching(playerId, battleId);
+            String mark = watching(playerId, battleId);
             dialer.nextRemove(entry.getKey());
             double before = evictions(entry.getValue());
             int callsBefore = dialer.calls.size();
@@ -237,7 +259,9 @@ class SpectateGatherHooksTest {
             assertThatCode(() -> hooks.beforePrepare(List.of(pid))).as("%s", entry.getKey()).doesNotThrowAnyException();
 
             assertThat(dialer.calls).as("%s：只发一次，不重试", entry.getKey()).hasSize(callsBefore + 1);
-            assertThat(store.markOf(pid)).as("%s：标记照删（清退路径上结局不明也删）", entry.getKey()).isEmpty();
+            assertThat(store.markOf(pid)).as("%s：仅证明取消后删除", entry.getKey())
+                    .isEqualTo(entry.getKey() instanceof Outcome.Replied replied && replied.tipId() == 0
+                            ? java.util.Optional.empty() : java.util.Optional.of(mark));
             assertThat(evictions(entry.getValue()) - before).as("%s → %s", entry.getKey(), entry.getValue()).isEqualTo(1.0);
             assertThat(placements.stored(battleId)).as("%s：不剔除那一场", entry.getKey()).isPresent();
         }
@@ -255,9 +279,9 @@ class SpectateGatherHooksTest {
         assertThat(dialer.calls).extracting(Call::observerId).containsExactly(7003L, 7001L, 7002L);
         assertThat(dialer.calls).extracting(Call::battleId).containsExactly(880140L, 880141L, 880140L);
         assertThat(events).containsExactly(
-                "spectate.read:880140", "observer.remove:880140:7003:enter_gather", "spectate.release:7003",
-                "spectate.read:880141", "observer.remove:880141:7001:enter_gather", "spectate.release:7001",
-                "spectate.read:880140", "observer.remove:880140:7002:enter_gather", "spectate.release:7002");
+                "observer.remove:880140:7003:enter_gather", "spectate.release:7003",
+                "observer.remove:880141:7001:enter_gather", "spectate.release:7001",
+                "observer.remove:880140:7002:enter_gather", "spectate.release:7002");
         assertThat(store.calls.get(0)).as("全员的标记一次读出，不是每人一条").isEqualTo("marksOf([7003, 7004, 7001, 7002])");
         assertThat(store.calls.stream().filter(call -> call.startsWith("marksOf")).count()).isEqualTo(1);
         assertThat(store.markCount()).isZero();
@@ -279,7 +303,7 @@ class SpectateGatherHooksTest {
     @Test
     void 删标记按读到的值_清退期间并发的163刚抢到的新标记不会被删() {
         String old = watching(7330, 880160);
-        String fresh = SpectateRules.encodeMark(880161, "fedcba9876543210");
+        String fresh = original(7330, 880161).mark();
         dialer.beforeRemove = call -> store.putMark(7330, fresh); // 清退在途时，同一玩家的另一条 163 换了标记
 
         hooks.beforePrepare(List.of(7330L));
@@ -295,7 +319,7 @@ class SpectateGatherHooksTest {
 
         assertThatCode(() -> hooks.beforePrepare(List.of(7340L))).doesNotThrowAnyException();
 
-        assertThat(store.calls).containsExactly("marksOf([7340])", "read(880170)", "release(7340," + value + ")", "releaseAsync(7340," + value + ")");
+        assertThat(store.calls).containsExactly("marksOf([7340])", "release(7340," + value + ")", "releaseAsync(7340," + value + ")");
         assertThat(store.markOf(7340)).isEmpty();
         assertThat(evictions("removed")).as("清退本身调通了：结局不受删标记影响").isEqualTo(1.0);
     }
@@ -337,13 +361,13 @@ class SpectateGatherHooksTest {
 
         shortHooks().beforePrepare(List.of(7355L));
 
-        assertThat(store.calls).containsExactly("marksOf([7355])", "read(880185)", "releaseAsync(7355," + value + ")");
+        assertThat(store.calls).containsExactly("marksOf([7355])", "releaseAsync(7355," + value + ")");
         assertThat(store.markOf(7355)).isEmpty();
         assertThat(evictions("removed")).as("RPC 是调通了的").isEqualTo(1.0);
     }
 
     @Test
-    void 读落点花掉的时间从RemoveObserver的超时里扣_两步共用这名成员的一个截止() {
+    void 取消使用持久原件_不再消耗读取后续落点的预算() {
         // 让读落点慢 300 ms：事件序列在存储读的那一刻记，借它拖时间
         List<String> slowEvents = new CopyOnWriteArrayList<>() {
             @Override
@@ -357,19 +381,20 @@ class SpectateGatherHooksTest {
         InMemoryPlacementStore slowPlacements = new InMemoryPlacementStore(slowEvents);
         InMemorySpectateStore slowStore = new InMemorySpectateStore(clock, new InMemoryTicketStore(clock), slowPlacements, slowEvents);
         slowPlacements.put(placement(880180, 1));
-        slowStore.putMark(7350, SpectateRules.encodeMark(880180, NONCE));
+        slowStore.putMark(7350, original(7350, 880180).mark());
 
         new SpectateGatherHooks(slowStore, dialer, metrics).beforePrepare(List.of(7350L));
 
         assertThat(dialer.calls).singleElement().satisfies(call -> {
-            assertThat(call.timeout()).as("3 s 减去读落点已用掉的至少 300 ms").isLessThanOrEqualTo(Duration.ofMillis(2_700))
+            assertThat(call.timeout()).as("RPC 使用每人的 3 秒预算，不等待无关落点读取").isLessThanOrEqualTo(Duration.ofMillis(3_000))
                     .isGreaterThan(Duration.ofMillis(500));
-            assertThat(call.hardStopRemainingMs()).isLessThanOrEqualTo(2_700L).isGreaterThan(500L);
+            assertThat(call.hardStopRemainingMs()).isLessThanOrEqualTo(3_000L).isGreaterThan(500L);
         });
+        assertThat(slowEvents).noneMatch(event -> event.startsWith("spectate.read:"));
     }
 
     @Test
-    void RemoveObserver迟迟不回_到这名成员的时限就放弃_标记改为异步删_下一人照常清退() {
+    void RemoveObserver迟迟不回_到时限保留原件_下一人照常清退() {
         String first = watching(7360, 880190);
         String second = watching(7361, 880191);
         dialer.hangRemove();
@@ -388,18 +413,18 @@ class SpectateGatherHooksTest {
         assertThat(dialer.calls).extracting(Call::observerId).as("第二人没有被第一人的超时连累").containsExactly(7360L, 7361L);
         assertThat(dialer.calls.get(0).timeout()).isLessThanOrEqualTo(Duration.ofMillis(SHORT_BUDGET_MS));
         assertThat(dialer.calls.get(0).hardStopRemainingMs()).isLessThanOrEqualTo(SHORT_BUDGET_MS);
-        assertThat(store.calls).as("第一人的时限已用完：不再同步等 Redis，改发异步删除；然后才轮到第二人").startsWith("marksOf([7360, 7361])",
-                "read(880190)", "releaseAsync(7360," + first + ")", "read(880191)");
-        assertThat(store.calls).hasSize(5);
+        assertThat(store.calls).as("第一人未获证明，不删除其原件；第二人正常取消").startsWith("marksOf([7360, 7361])");
+        assertThat(store.calls).hasSize(2);
         // 第二人的时限是他自己的、从轮到他时起算：正常是同步删；这台机器若恰好卡了一下把他的 200 ms 也耗掉，走异步同样正确
-        assertThat(store.calls.get(4)).isIn("release(7361," + second + ")", "releaseAsync(7361," + second + ")");
-        assertThat(store.markCount()).isZero();
+        assertThat(store.calls.get(1)).isIn("release(7361," + second + ")", "releaseAsync(7361," + second + ")");
+        assertThat(store.markCount()).isEqualTo(1);
+        assertThat(store.markOf(7360)).contains(first);
         assertThat(evictions("rpc_failed")).isEqualTo(1.0);
         assertThat(evictions("removed")).isEqualTo(1.0);
     }
 
     @Test
-    void 读落点迟迟不回_到这名成员的时限就放弃_不发RemoveObserver_标记改为异步删() {
+    void 落点读取挂起不影响持久原件取消_确认后删标记() {
         String value = watching(7370, 880200);
         store.hang("read");
         long started = System.nanoTime();
@@ -408,11 +433,11 @@ class SpectateGatherHooksTest {
 
         long took = elapsedMs(started);
         store.resume("read");
-        assertThat(took).isGreaterThanOrEqualTo(SHORT_BUDGET_MS - 20).isLessThan(NOT_STUCK_MS);
-        assertThat(dialer.calls).as("时限已用在读落点上：不再去发一个注定超时的调用").isEmpty();
-        assertThat(store.calls).containsExactly("marksOf([7370])", "read(880200)", "releaseAsync(7370," + value + ")");
+        assertThat(took).isGreaterThanOrEqualTo(0).isLessThan(NOT_STUCK_MS);
+        assertThat(dialer.calls).as("不触发挂起的落点读取").hasSize(1);
+        assertThat(store.calls).containsExactly("marksOf([7370])", "release(7370," + value + ")");
         assertThat(store.markOf(7370)).isEmpty();
-        assertThat(evictions("read_failed")).isEqualTo(1.0);
+        assertThat(evictions("removed")).isEqualTo(1.0);
     }
 
     @Test
@@ -453,7 +478,7 @@ class SpectateGatherHooksTest {
     }
 
     @Test
-    void 一名成员身上的意外不连累后面的人_存储或直拨器违约抛运行时异常_他按读失败或没调通收场_标记照删() {
+    void 直拨器异常保留原件而不连累后人_落点读故障不参与取消() {
         // 第一人：读落点时存储抛了约定之外的异常；第二人：直拨器抛异常；第三人：一切正常
         watching(7392, 880222);
         watching(7393, 880223);
@@ -467,11 +492,11 @@ class SpectateGatherHooksTest {
 
         assertThatCode(() -> hooks.beforePrepare(List.of(7392L, 7393L, 7394L))).doesNotThrowAnyException();
 
-        assertThat(dialer.calls).extracting(Call::observerId).as("第一人没有落点可拨；后两人都拨了").containsExactly(7393L, 7394L);
-        assertThat(store.markCount()).as("三个人的标记都删了").isZero();
-        assertThat(evictions("read_failed")).isEqualTo(1.0);
+        assertThat(dialer.calls).extracting(Call::observerId).as("三人均按原件寻址").containsExactly(7392L, 7393L, 7394L);
+        assertThat(store.markCount()).as("只保留取消未知的第二人原件").isEqualTo(1);
+        assertThat(evictions("read_failed")).isZero();
         assertThat(evictions("rpc_failed")).isEqualTo(1.0);
-        assertThat(evictions("removed")).isEqualTo(1.0);
+        assertThat(evictions("removed")).isEqualTo(2.0);
         assertThat(allEvictions()).isEqualTo(3.0);
     }
 

@@ -3,6 +3,7 @@ package com.game.match.testing;
 import com.game.common.deadline.Deadline;
 import com.game.match.proto.BattlePlacement;
 import com.game.match.spectate.ObserverDialer;
+import com.game.match.spectate.LocalObserverOperation;
 import com.game.proto.AddObserverRequest;
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -206,8 +207,9 @@ public final class FakeObserverDialer implements ObserverDialer {
     }
 
     @Override
-    public Outcome remove(BattlePlacement placement, long observerId, String reason, Duration timeout, Deadline hardStop) {
-        Call call = new Call(Kind.REMOVE, placement, observerId, reason, null, timeout, hardStop.remainingMillis());
+    public Outcome remove(LocalObserverOperation original, String reason, Duration timeout, Deadline hardStop) {
+        BattlePlacement placement = original.placement(); long observerId = original.playerId();
+        Call call = new Call(Kind.REMOVE, placement, observerId, reason, original.add(), timeout, hardStop.remainingMillis());
         calls.add(call);
         events.add("observer.remove:" + Long.toUnsignedString(placement.getBattleId()) + ":" + Long.toUnsignedString(observerId) + ":" + reason);
         if (hardStop.expired()) {
@@ -224,8 +226,9 @@ public final class FakeObserverDialer implements ObserverDialer {
     }
 
     @Override
-    public CompletableFuture<Outcome> removeAsync(BattlePlacement placement, long observerId, String reason) {
-        calls.add(new Call(Kind.REMOVE_ASYNC, placement, observerId, reason, null, null, -1));
+    public CompletableFuture<Outcome> removeAsync(LocalObserverOperation original, String reason) {
+        BattlePlacement placement = original.placement(); long observerId = original.playerId();
+        calls.add(new Call(Kind.REMOVE_ASYNC, placement, observerId, reason, original.add(), null, -1));
         events.add("observer.removeAsync:" + Long.toUnsignedString(placement.getBattleId()) + ":" + Long.toUnsignedString(observerId) + ":" + reason);
         Outcome outcome = decide(removeByBattle, removeScript, placement.getBattleId());
         if (!asyncHung) {

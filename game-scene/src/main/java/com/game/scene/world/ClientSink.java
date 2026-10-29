@@ -12,6 +12,9 @@ import java.util.List;
  */
 public interface ClientSink {
 
+    /** 停服须等待改绑 / 重定向帧的写结果回到逻辑线程；同步测试出口默认没有在途写。 */
+    default int pendingTransferWrites() { return 0; }
+
     /**
      * 把同一条 {@code MessageContent} 下发给同一链路上的若干会话。链路已断开时静默丢弃
      * （gate 侧这些会话已随链路失效）。

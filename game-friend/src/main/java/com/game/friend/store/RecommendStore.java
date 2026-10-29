@@ -7,20 +7,18 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.function.LongBinaryOperator;
 import javax.sql.DataSource;
 
 /**
- * 好友推荐的 SQL 侧（mmorpg go/friend internal/data/recommend_repo.go，friend-spec.md §5.1）。两条 SQL <b>逐字照搬</b>，
- * 包括优化器提示与字面量 {@code status = 1}，每一处写法都是承重的：
+ * 好友推荐的 JDBC 仓储（friend-spec.md §5.1）。查询结构与方言提示由 {@link RecommendSql} 定义：
  * <ul>
  *   <li>{@code STRAIGHT_JOIN} 钉住「先 f1（我的好友）后 f2（好友的好友）」——统计陈旧时优化器会翻成 f2 全索引扫描驱动；</li>
- *   <li>五条 NOT EXISTS 按方向拆开、每条都是完整主键等值；{@code SEMIJOIN(FIRSTMATCH)} 承重、{@code FORCE INDEX (PRIMARY)} 是防线，
+ *   <li>五条 NOT EXISTS 按方向拆开、每条都是完整主键等值；MySQL FIRSTMATCH / TiDB INL_JOIN 与主键提示，
  *       一起把每条排除钉成「每个候选一次主键单行点查」，扫描量与全服 pending 数、「拉黑我的人数」无关；</li>
- *   <li>外层列一律写别名（{@code f2.friend_player_id} / {@code c.player_id}）：裸列名会先解析到子查询自己的表上，排除静默失效；</li>
- *   <li>随机兜底的派生表 LIMIT（窗口 1024 个去重玩家）就是扫描上界本身，不回绕、不越窗：结果可能少于 want（可能为空）。</li>
+ *   <li>共同好友排名先物化前 1024 人，随机兜底先物化锚点后 1024 个去重玩家；排除只在窗口内执行，可少于 want；</li>
+ *   <li>随机兜底只对返回行数真实共同好友，按候选自己的好友主键前缀定位，不按共同数重排。</li>
  * </ul>
  * <b>纯读</b>：系统读取不进事务；客户端绑定视图在短事务首锁 P 验证原会话，关系查询仍为普通读、允许轻微陈旧。
  * 绝不能被复用成 AddFriend 的前置判定。候选池只有「至少有一条好友边的玩家」。
@@ -28,70 +26,45 @@ import javax.sql.DataSource;
  */
 public final class RecommendStore implements RecommendSource {
 
-    /** 一条推荐候选；随机兜底的 {@code mutualFriends} 恒为 0。 */
+    /** 一条推荐候选；两种来源均报告真实共同好友数。 */
     public record Candidate(long playerId, int mutualFriends) {
     }
 
-    /** 随机兜底一次最多检视的候选池玩家数（pivot 起按 player_id 升序的前 W 个去重 id；预算账见 spec §5.1）。 */
+    /** 两种来源在关系排除前最多保留的候选数；排名窗口 / pivot 窗口的预算账见 spec §5.1。 */
     public static final int ANCHOR_WINDOW = 1024;
-
-    static final String MUTUAL_BASE = """
-            SELECT f2.friend_player_id, COUNT(*) AS mutual
-            FROM friend f1 FORCE INDEX (PRIMARY)
-            STRAIGHT_JOIN friend f2 FORCE INDEX (PRIMARY) ON f2.player_id = f1.friend_player_id
-            WHERE f1.player_id = ?
-              AND f2.friend_player_id <> ?
-              AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend f FORCE INDEX (PRIMARY)
-                    WHERE f.player_id = ? AND f.friend_player_id = f2.friend_player_id)
-              AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_block b_out FORCE INDEX (PRIMARY)
-                    WHERE b_out.player_id = ? AND b_out.blocked_player_id = f2.friend_player_id)
-              AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_block b_in FORCE INDEX (PRIMARY)
-                    WHERE b_in.player_id = f2.friend_player_id AND b_in.blocked_player_id = ?)
-              AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_request r_out FORCE INDEX (PRIMARY)
-                    WHERE r_out.from_player_id = ? AND r_out.to_player_id = f2.friend_player_id AND r_out.status = 1)
-              AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_request r_in FORCE INDEX (PRIMARY)
-                    WHERE r_in.from_player_id = f2.friend_player_id AND r_in.to_player_id = ? AND r_in.status = 1)""";
-
-    static final String ANCHOR_BASE = """
-            SELECT c.player_id, 0 AS mutual
-            FROM (SELECT DISTINCT player_id FROM friend FORCE INDEX (PRIMARY)
-                  WHERE player_id >= ?
-                  ORDER BY player_id
-                  LIMIT ?) AS c
-            WHERE c.player_id <> ?
-              AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend f FORCE INDEX (PRIMARY)
-                    WHERE f.player_id = ? AND f.friend_player_id = c.player_id)
-              AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_block b_out FORCE INDEX (PRIMARY)
-                    WHERE b_out.player_id = ? AND b_out.blocked_player_id = c.player_id)
-              AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_block b_in FORCE INDEX (PRIMARY)
-                    WHERE b_in.player_id = c.player_id AND b_in.blocked_player_id = ?)
-              AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_request r_out FORCE INDEX (PRIMARY)
-                    WHERE r_out.from_player_id = ? AND r_out.to_player_id = c.player_id AND r_out.status = 1)
-              AND NOT EXISTS (SELECT /*+ SEMIJOIN(FIRSTMATCH) */ 1 FROM friend_request r_in FORCE INDEX (PRIMARY)
-                    WHERE r_in.from_player_id = c.player_id AND r_in.to_player_id = ? AND r_in.status = 1)""";
 
     static final String ID_RANGE = "SELECT MIN(player_id), MAX(player_id) FROM friend";
 
     private final DataSource dataSource;
     private final int queryTimeoutSeconds;
-    /** {@code (lo, span) -> lo + [0, span)} 的随机 pivot（测试注入固定值）；span 按无符号解释。 */
+    /** {@code (lo, span) -> [0, span)} 的随机偏移，调用方再加 lo；span 按无符号解释。 */
     private final LongBinaryOperator pivotPicker;
     private final FriendActor actor;
+    private final RecommendSql queries;
 
     public RecommendStore(DataSource dataSource, int queryTimeoutSeconds, LongBinaryOperator pivotPicker) {
-        this(dataSource, queryTimeoutSeconds, pivotPicker, null);
+        this(dataSource, queryTimeoutSeconds, pivotPicker, new RecommendSql(RecommendSql.Dialect.MYSQL), null);
     }
 
-    private RecommendStore(DataSource dataSource, int queryTimeoutSeconds, LongBinaryOperator pivotPicker, FriendActor actor) {
+    /** 生产装配在启动时确认实际方言；旧构造器仅供显式 MySQL/纯分发夹具。 */
+    public static RecommendStore forDatabase(DataSource source, int timeout, LongBinaryOperator pivot) throws SQLException {
+        try (Connection connection = source.getConnection()) {
+            return new RecommendStore(source, timeout, pivot, new RecommendSql(RecommendSql.detect(connection, timeout)), null);
+        }
+    }
+
+    private RecommendStore(DataSource dataSource, int queryTimeoutSeconds, LongBinaryOperator pivotPicker,
+                           RecommendSql queries, FriendActor actor) {
         this.dataSource = dataSource;
         this.queryTimeoutSeconds = queryTimeoutSeconds;
         this.pivotPicker = pivotPicker;
         this.actor = actor;
+        this.queries = queries;
     }
 
     @Override
     public RecommendSource forActor(long playerId, String originalAccount, long originalRevision) {
-        return new RecommendStore(dataSource, queryTimeoutSeconds, pivotPicker,
+        return new RecommendStore(dataSource, queryTimeoutSeconds, pivotPicker, queries,
                 new FriendActor(playerId, originalAccount, originalRevision));
     }
 
@@ -101,19 +74,11 @@ public final class RecommendStore implements RecommendSource {
         read(deadline, c -> null);
     }
 
-    /** 好友的好友：按共同好友数降序、同数随机，至多 {@code limit} 个。参数：me × 7 → exclude… → limit。 */
+    /** 好友的好友：排名窗口内排除，按共同好友数降序、同数使用同一个物化随机键。 */
     @Override
     public List<Candidate> mutual(long me, List<Long> exclude, int limit, Deadline deadline) throws SQLException {
         if (actor != null) actor.requirePlayer(me);
-        String sql = MUTUAL_BASE + excludeClause("f2.friend_player_id", exclude.size())
-                + "\nGROUP BY f2.friend_player_id\nORDER BY mutual DESC, RAND()\nLIMIT ?";
-        List<Object> args = new ArrayList<>();
-        for (int i = 0; i < 7; i++) {
-            args.add(JdbcFriendStore.uid(me));
-        }
-        exclude.forEach(id -> args.add(JdbcFriendStore.uid(id)));
-        args.add((long) limit);
-        return query(sql, args, deadline);
+        return query(queries.mutual(me, exclude, limit), deadline);
     }
 
     /**
@@ -147,34 +112,20 @@ public final class RecommendStore implements RecommendSource {
         return anchor(me, exclude, pivot, limit, deadline);
     }
 
-    /** 参数：pivot → 窗口 W → me × 6 → exclude… → limit。 */
+    /** 参数：me（返回行共同数）→ pivot → 窗口 W → me × 6 → exclude… → limit。 */
     List<Candidate> anchor(long me, List<Long> exclude, long pivot, int limit, Deadline deadline) throws SQLException {
         if (actor != null) actor.requirePlayer(me);
-        String sql = ANCHOR_BASE + excludeClause("c.player_id", exclude.size()) + "\nORDER BY c.player_id\nLIMIT ?";
-        List<Object> args = new ArrayList<>();
-        args.add(JdbcFriendStore.uid(pivot));
-        args.add((long) ANCHOR_WINDOW);
-        for (int i = 0; i < 6; i++) {
-            args.add(JdbcFriendStore.uid(me));
-        }
-        exclude.forEach(id -> args.add(JdbcFriendStore.uid(id)));
-        args.add((long) limit);
-        return query(sql, args, deadline);
+        return query(queries.anchor(me, exclude, pivot, limit), deadline);
     }
 
-    /** exclude 为空时不拼（空的 {@code NOT IN ()} 是语法错误）；条数已由上层按 RecommendMaxExclude 封顶。 */
-    static String excludeClause(String column, int count) {
-        if (count == 0) {
-            return "";
-        }
-        return "\n  AND " + column + " NOT IN (" + String.join(",", Collections.nCopies(count, "?")) + ")";
-    }
-
-    private List<Candidate> query(String sql, List<Object> args, Deadline deadline) throws SQLException {
+    private List<Candidate> query(RecommendSql.Query query, Deadline deadline) throws SQLException {
         return read(deadline, c -> {
-            try (PreparedStatement ps = prepare(c, sql, args, deadline); ResultSet rs = ps.executeQuery()) {
+            try (PreparedStatement ps = prepare(c, query.sql(), query.arguments(), deadline); ResultSet rs = ps.executeQuery()) {
                 List<Candidate> out = new ArrayList<>();
-                while (rs.next()) out.add(new Candidate(JdbcFriendStore.readUid(rs, 1), (int) rs.getLong(2)));
+                while (rs.next()) {
+                    FriendActor.timeout(deadline, queryTimeoutSeconds);
+                    out.add(new Candidate(JdbcFriendStore.readUid(rs, 1), (int) rs.getLong(2)));
+                }
                 return out;
             }
         });
@@ -189,7 +140,11 @@ public final class RecommendStore implements RecommendSource {
     private <T> T read(Deadline deadline, ReadBody<T> body) throws SQLException {
         FriendActor.timeout(deadline, queryTimeoutSeconds);
         try (Connection c = dataSource.getConnection()) {
-            if (actor == null) return body.run(c);
+            if (actor == null) {
+                T result = body.run(c);
+                FriendActor.timeout(deadline, queryTimeoutSeconds);
+                return result;
+            }
             boolean autoCommit = c.getAutoCommit();
             int isolation = c.getTransactionIsolation();
             c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
@@ -220,7 +175,8 @@ public final class RecommendStore implements RecommendSource {
         if (queryTimeoutSeconds > 0) {
             timeout = Math.min(timeout, queryTimeoutSeconds);
         }
-        PreparedStatement ps = c.prepareStatement(sql);
+        long serverBudget = queryTimeoutSeconds > 0 ? Math.min(remaining, queryTimeoutSeconds * 1000L) : remaining;
+        PreparedStatement ps = c.prepareStatement(RecommendSql.timed(sql, serverBudget));
         try {
             ps.setQueryTimeout(timeout);
             for (int i = 0; i < args.size(); i++) {

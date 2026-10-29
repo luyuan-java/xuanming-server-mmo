@@ -101,6 +101,11 @@ final class PlayerSwitch {
                 resolveDeadlineNanos);
     }
 
+    static PlayerSwitch evacuate(long token, int wantConfigId, long resolveDeadlineNanos) {
+        return new PlayerSwitch(token, SwitchReason.EVACUATE, Purpose.REMOTE_SWITCH, SwitchPhase.RESOLVING,
+                0, wantConfigId, 0, null, resolveDeadlineNanos);
+    }
+
     private PlayerSwitch(long token, SwitchReason reason, Purpose purpose, SwitchPhase phase, long wantSceneId, int wantConfigId,
                          int toZoneId, DeferredReply deferred, long deadlineNanos) {
         this.token = token;

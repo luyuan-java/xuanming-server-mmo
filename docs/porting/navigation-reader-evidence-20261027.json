@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "status": "candidate_not_compiled_or_java_tested",
+  "sourceCommit": "92952c84b00f5dd45bf3b05ed4d08b9d7b5bd1b5",
+  "ue5navmeshCommit": "aacf2f82af2e24c56474855fce057018928735bb",
+  "abi": {
+    "byteOrder": "LITTLE_ENDIAN",
+    "msetVersion": 1,
+    "tileVersion": 7,
+    "realBits": 64,
+    "referenceBits": 64,
+    "msetHeaderBytes": 96,
+    "tileRecordHeaderBytes": 16,
+    "meshHeaderBytes": 80,
+    "segmentAlignmentBytes": 8,
+    "segmentLinks": false,
+    "clusterLinks": false
+  },
+  "verification": {
+    "fixedGitObjectsRead": true,
+    "sixBlobsReadOnlyParsed": true,
+    "javaExecuted": false,
+    "javaCompiled": false,
+    "javaTestsExecuted": false,
+    "cppExecuted": false,
+    "syntheticTestMethods": 30,
+    "optInFixedArtifactTestMethods": 1
+  },
+  "covered": ["bounded_mset_read", "immutable_geometry", "canonical_local_references", "internal_static_adjacency", "portal_direction_and_plane", "detail_surface_structure", "bv_structure_and_coverage", "point_off_mesh_local_structure"],
+  "notCovered": ["nearest_point", "raycast", "find_path", "find_straight_path", "partial_path_semantics", "dynamic_cross_tile_portal_matching", "off_mesh_snapping", "layer_connections", "scene_registration", "spawn_probe", "remaining_six_scene_configurations", "baking", "cpp_java_query_differential", "full_client_contract_gate", "persistent_schema_ledger"],
+  "artifacts": [
+    {"file":"main_scene.bin","bytes":121728,"tiles":55,"polygons":599,"vertices":1134,"detailTriangles":994,"sha256":"8a3243a2480419c06e0dbf7ce802eb68b121d9790f9bd6e9f115306873ddf1f5"},
+    {"file":"penglai_scene.bin","bytes":113936,"tiles":40,"polygons":551,"vertices":1117,"detailTriangles":1000,"sha256":"97de694834d8d64ae291058bd8ccb356545e72a7e27c88017c6c0536e471bf83"},
+    {"file":"donghai_scene.bin","bytes":124888,"tiles":47,"polygons":616,"vertices":1189,"detailTriangles":1075,"sha256":"6fc006672b4c63d9a042ee0a3a94905a7dd42fecdf477e0accf73e31df64df87"},
+    {"file":"lanxian_scene.bin","bytes":102088,"tiles":45,"polygons":486,"vertices":1006,"detailTriangles":900,"sha256":"191afe6382d9ec7b3ad94eca572cc05f865e6d93a9347600ff01cee3363ef2da"},
+    {"file":"dungeon_scene.bin","bytes":175024,"tiles":61,"polygons":848,"vertices":1676,"detailTriangles":1534,"sha256":"07f11490a9de3fd25ed5fc2b251a1d64b0c5ccf57ab4d5e0eec83880a9a239a4"},
+    {"file":"mirror_scene.bin","bytes":175024,"tiles":61,"polygons":848,"vertices":1676,"detailTriangles":1534,"sha256":"07f11490a9de3fd25ed5fc2b251a1d64b0c5ccf57ab4d5e0eec83880a9a239a4"}
+  ]
+}

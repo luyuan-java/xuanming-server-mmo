@@ -13,6 +13,7 @@ import com.game.match.proto.BattlePlacement;
 import com.game.match.spectate.ObserverDialer.Outcome;
 import com.game.match.spectate.SpectateGatherHooks;
 import com.game.match.spectate.SpectateRules;
+import com.game.match.spectate.LocalObserverOperation;
 import com.game.match.spectate.SpectateStore;
 import com.game.match.testing.FakeBattleNode;
 import com.game.match.testing.FakeObserverDialer;
@@ -23,6 +24,7 @@ import com.game.match.ticket.TicketState;
 import com.game.proto.AddObserverRequest;
 import com.game.proto.AddObserverResponse;
 import com.game.proto.BattleActivityContext;
+import com.game.proto.BattleRouting;
 import com.game.proto.CreateBattleRequest;
 import com.game.proto.DestroyBattleRequest;
 import com.game.proto.Empty;
@@ -79,7 +81,9 @@ class GatherHooksCallSiteTest {
                     .setCreatedAtMs(T0 - 10_000).setDeadlineMs(T0 + 290_000).build();
             f.placements.put(old);
             spectate.putWatchable(OLD_BATTLE, T0 - 10_000);
-            String mark = SpectateRules.encodeMark(OLD_BATTLE, "0123456789abcdef");
+            String mark = LocalObserverOperation.create(old, playerId,
+                    BattleRouting.newBuilder().setGateNodeId(1).setGateInstanceId("gate-test").setSessionId(7).build(),
+                    "旧观众", java.util.UUID.randomUUID().toString(), T0).mark();
             spectate.putMark(playerId, mark);
             return mark;
         }
@@ -121,8 +125,8 @@ class GatherHooksCallSiteTest {
             assertThat(result.ok()).as(entry).isTrue();
             String battle = id(result.battleId());
             List<String> events = rig.f.events;
-            // 清退的三步是整次 gather 最早的三个事件：读旧场落点 → RemoveObserver → 删标记；之后才是第一次备战
-            assertThat(events.subList(0, 4)).as("%s：清退排在任何备战之前", entry).containsExactly("spectate.read:" + id(OLD_BATTLE),
+            // 持久原件自带旧场端点：RemoveObserver → 删标记；之后才是第一次备战
+            assertThat(events.subList(0, 3)).as("%s：清退排在任何备战之前", entry).containsExactly(
                     "observer.remove:" + id(OLD_BATTLE) + ":1001:enter_gather", "spectate.release:1001",
                     "scene.prepare:" + id(plan.members().get(0)));
             assertThat(rig.spectate.calls.get(0)).as("%s：一次读出整个名单的标记，顺序就是 gather 的成员顺序", entry)
@@ -160,8 +164,8 @@ class GatherHooksCallSiteTest {
                 .containsExactly(tuple(OLD_BATTLE, A, "enter_gather"));
         assertThat(rig.observers.adds()).as("清退不会把谁登记成观众").isEmpty();
         assertThat(rig.spectate.markOf(A)).isEmpty();
-        assertThat(rig.spectate.calls.stream().filter(call -> call.startsWith("read(")).toList()).as("B 没在观战：不为他读任何落点")
-                .containsExactly("read(" + id(OLD_BATTLE) + ")");
+        assertThat(rig.spectate.calls.stream().filter(call -> call.startsWith("read(")).toList()).as("清退使用持久原件，不重读落点")
+                .isEmpty();
 
         BattlePlacement started = rig.f.placements.stored(result.battleId()).orElseThrow();
         assertThat(started.getBattleNodeId()).isEqualTo(1);
@@ -358,12 +362,12 @@ class GatherHooksCallSiteTest {
 
     @Test
     void 清退的RemoveObserver没调通_读标记失败_直拨器抛异常_开局都照常() {
-        // 1) RPC 结局不明：标记照删，开局照常
+        // 1) RPC 结局不明：保留原件以便重试，开局照常
         Rig unknown = new Rig();
-        unknown.watchingOldBattle(A);
+        String unknownMark = unknown.watchingOldBattle(A);
         unknown.observers.nextRemove(new Outcome.Unknown("超时"));
         assertThat(unknown.run(unknown.f.popped(ONE_V_ONE, 0, A, B)).ok()).isTrue();
-        assertThat(unknown.spectate.markOf(A)).isEmpty();
+        assertThat(unknown.spectate.markOf(A)).contains(unknownMark);
         assertThat(unknown.f.count(EVICTIONS, "reason", "enter_gather", "result", "rpc_failed")).isEqualTo(1.0);
 
         // 2) 读全员标记失败：不清退、标记保留，开局照常
@@ -378,7 +382,7 @@ class GatherHooksCallSiteTest {
 
         // 3) 直拨器违约抛异常：钩子自己吞掉，开局照常
         Rig broken = new Rig();
-        broken.watchingOldBattle(A);
+        String brokenMark = broken.watchingOldBattle(A);
         broken.observers.beforeRemove = call -> {
             throw new IllegalStateException("直拨器的 bug");
         };
@@ -386,7 +390,7 @@ class GatherHooksCallSiteTest {
         assertThat(result.ok()).isTrue();
         assertThat(broken.f.scene.frozen()).containsOnlyKeys(A, B);
         assertThat(broken.spectate.isWatchable(result.battleId())).isTrue();
-        assertThat(broken.spectate.markOf(A)).as("按没调通收场：标记照删").isEmpty();
+        assertThat(broken.spectate.markOf(A)).as("未获取消证明：保留原件").contains(brokenMark);
         assertThat(broken.f.count(EVICTIONS, "reason", "enter_gather", "result", "rpc_failed")).isEqualTo(1.0);
     }
 

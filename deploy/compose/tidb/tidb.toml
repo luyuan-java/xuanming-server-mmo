@@ -1,0 +1,3 @@
+# 与固定基线相同，支持玩家大行；不改变事务强读语义。
+[performance]
+txn-entry-size-limit = 33554432

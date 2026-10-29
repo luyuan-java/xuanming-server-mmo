@@ -20,4 +20,11 @@ import java.util.List;
 public interface SceneNodeSource {
 
     List<SceneNodeInfo> list(int zoneId);
+
+    /** 单节点严格读取；生产覆盖为目录单条查询，坏原件和读取故障不得冒充不存在。 */
+    default java.util.Optional<SceneNodeInfo> find(int zoneId, int nodeId) {
+        var matches = list(zoneId).stream().filter(node -> node.getNodeId() == nodeId).toList();
+        if (matches.size() > 1) throw new IllegalStateException("同节点号存在多个目录原件");
+        return matches.stream().findFirst();
+    }
 }

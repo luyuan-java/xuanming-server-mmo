@@ -265,7 +265,7 @@ class SettlementOutboxTest {
     }
 
     @Test
-    void 落库失败_只投一次_不登记_计not_durable_之后没有任何重投与探测() {
+    void 落库未知_首投并登记_空记录保持未知_不会盲目重投或计销账() {
         locator.online(P, ZONE, 3, "scene-3");
         store.stores.failWith(new TimeoutException("Redis 响应超时"));
 
@@ -273,27 +273,27 @@ class SettlementOutboxTest {
 
         assertThat(journal.entries()).as("投递仍排在落库的结局（明确降级）之后").containsExactly(
                 "store:" + key(P, B), "store-done:" + key(P, B) + "=error", "locate:" + P, "deliver:" + key(P, B) + "@scene-3#0");
-        assertThat(outbox.size()).isZero();
-        assertThat(scheduler.scheduledCount()).as("没登记就不开表").isZero();
+        assertThat(outbox.size()).isEqualTo(1);
+        assertThat(scheduler.scheduledCount()).as("未知结局也登记探测").isEqualTo(1);
         assertThat(outbox.inFlight()).isZero();
         assertThat(events()).containsOnly(entry("not_durable", 1), entry("delivered", 1));
-        assertThat(entriesGauge()).isZero();
+        assertThat(entriesGauge()).isEqualTo(1);
 
         scheduler.advance(10 * ROUND_MS);
         assertThat(transport.sent).as("只投一次").hasSize(1);
-        assertThat(journal.count("exists:")).isZero();
+        assertThat(journal.count("exists:")).isEqualTo(10);
     }
 
     @Test
-    void Redis不可用_落库端口同步抛异常_同样只投一次不登记() {
+    void Redis不可用_端口未提供确定未发送证明_首投并登记未知() {
         locator.online(P, ZONE, 3, "scene-3");
         store.stores.throwing(new IllegalStateException("Redis 不可用"));
 
         dispatch(P, B);
 
         assertThat(attemptsSent()).containsExactly(0);
-        assertThat(outbox.size()).isZero();
-        assertThat(scheduler.scheduledCount()).isZero();
+        assertThat(outbox.size()).isEqualTo(1);
+        assertThat(scheduler.scheduledCount()).isEqualTo(1);
         assertThat(outbox.inFlight()).isZero();
         assertThat(events()).containsOnly(entry("not_durable", 1), entry("delivered", 1));
     }
@@ -310,13 +310,13 @@ class SettlementOutboxTest {
         assertThat(events()).as("定位出错").containsOnly(entry("not_durable", 2), entry("locate_error", 1));
 
         assertThat(transport.sent).isEmpty();
-        assertThat(outbox.size()).isZero();
+        assertThat(outbox.size()).isEqualTo(2);
         assertThat(outbox.inFlight()).isZero();
-        assertThat(scheduler.scheduledCount()).isZero();
+        assertThat(scheduler.scheduledCount()).isEqualTo(1);
     }
 
     @Test
-    void 落库没有结论_空结果或空future_不当落库成功_按not_durable只投一次() {
+    void 落库没有结论_空结果或空future_按not_durable首投并登记() {
         locator.online(P, ZONE, 3, "scene-3");
 
         store.stores.replyWith(null);
@@ -325,9 +325,9 @@ class SettlementOutboxTest {
         dispatch(P, B + 1);
 
         assertThat(events()).containsOnly(entry("not_durable", 2), entry("delivered", 2));
-        assertThat(outbox.size()).isZero();
+        assertThat(outbox.size()).isEqualTo(2);
         assertThat(outbox.inFlight()).isZero();
-        assertThat(scheduler.scheduledCount()).isZero();
+        assertThat(scheduler.scheduledCount()).isEqualTo(1);
     }
 
     @Test

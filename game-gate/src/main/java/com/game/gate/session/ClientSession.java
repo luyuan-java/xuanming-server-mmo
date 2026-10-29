@@ -85,6 +85,8 @@ public final class ClientSession {
      * 由进场结果、未送达回报、链路断开、断线四条路径之一终结（后三条经 {@code unbindScene}）。
      */
     boolean transferEntering;
+    /** 本地尚未 write 的限时进场；第一次 write、取消或失败收口即清理。 */
+    PendingSceneEntry pendingSceneEntry;
     /**
      * scene 已确认进场，{@link #scenePlayerId} 已登记进玩家在线目录（{@link PresenceRecorder#online}）；
      * 场景绑定结束或会话关闭时撤销。服务端推送（{@code GatePush}）只发给这种状态下、玩家对得上的会话。
