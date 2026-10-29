@@ -495,7 +495,8 @@ class GuildActivityStoreTiDbTest {
         assertEquals(1,count("SELECT COUNT(*) FROM guild_activity_reward_owed WHERE player_id=? AND status=0",PLAYER));
         assertEquals(0,count("SELECT COUNT(*) FROM guild_asset_op WHERE player_id=?",PLAYER));
         exec("UPDATE player SET trade_listing_id=0 WHERE player_id=?",PLAYER);
-        assertEquals(1,store.enqueueRewards(NOW+20_007,budget()));
+        assertEquals(0,store.enqueueRewards(NOW+21_005,budget()));
+        assertEquals(1,store.enqueueRewards(NOW+21_006,budget()));
         assertEquals(1,count("SELECT COUNT(*) FROM guild_asset_op WHERE player_id=? AND status=1",PLAYER));
     }
 
