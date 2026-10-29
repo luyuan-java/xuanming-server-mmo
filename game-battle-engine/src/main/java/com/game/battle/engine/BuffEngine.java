@@ -48,6 +48,7 @@ final class BuffEngine {
      *   <li>{@code depth > 8} 或目标已死 → 返回（深度 0..8 共 9 层都生效）；</li>
      *   <li>表行缺失 → 返回；</li>
      *   <li>免疫 → 返回，不出任何事件；</li>
+     *   <li>敌方施加的映射异常按装备抵抗率判定，成功发 RESIST 后返回；</li>
      *   <li>驱散（新 buff 的 dispel_tag 命中现存条目的 tag）；</li>
      *   <li>纯驱散(35) → 返回：不落地、不出 ADD；</li>
      *   <li>叠层 / 刷新命中 → 返回；</li>
@@ -70,6 +71,15 @@ final class BuffEngine {
         BuffTable row = buffRow.get();
         if (isImmuneToBuff(target, row)) {
             return;
+        }
+        // 免疫先于抵抗；抵抗成功必须早于驱散、叠层和子 buff，不能让没挂上的异常产生副作用。
+        BattleUnit caster = ctx.findActor(casterId);
+        if (caster != null && caster.teamIndex() != target.teamIndex()) {
+            var resist = EquipmentCombatRules.ailmentResistance(target.combat(), caster.combat(), row.getBuffType());
+            if (resist.isPresent() && ctx.rng().rollPercent(resist.getAsLong())) {
+                ctx.events().append(eBattleEventType.BATTLE_EVENT_RESIST, casterId, target.actorId()).setBuffTableId(buffTableId);
+                return;
+            }
         }
         dispelBuffsByTag(target, row);
         if (row.getBuffType() == BattleConstants.BUFF_TYPE_DISPEL) {
@@ -105,7 +115,7 @@ final class BuffEngine {
         }
 
         if (row.getTargetSubBuffCount() > 0) {
-            BattleUnit caster = ctx.findActor(casterId);
+            caster = ctx.findActor(casterId);
             if (caster != null && !caster.isDead()) {
                 for (int targetSubBuffId : row.getTargetSubBuffList()) {
                     addBuffToActor(caster, targetSubBuffId, target.actorId(), depth + 1);

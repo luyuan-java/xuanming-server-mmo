@@ -79,6 +79,17 @@ public interface BattleRoomService {
      */
     void abortAll(String reason);
 
+    /** 停服有界补交已算出的 SQL v1 原终局；在逻辑线程启动，调用方在逻辑线程外等待。 */
+    default java.util.concurrent.CompletableFuture<ShutdownReport> beginShutdown(String reason,java.time.Duration budget){
+        return java.util.concurrent.CompletableFuture.completedFuture(new ShutdownReport(java.util.List.of()));
+    }
+
+    /** 预算耗尽只说明仍未知，不能伪造 COMPLETE/ABORT；保留原身份供 SQL 对账。 */
+    record UnconfirmedOutcome(long battleId,String operationId,String instanceId,int failures,boolean inFlight) { }
+    record ShutdownReport(java.util.List<UnconfirmedOutcome> unconfirmed){
+        public ShutdownReport { unconfirmed=java.util.List.copyOf(unconfirmed); }
+    }
+
     /** 补签票据（§2.6）：player 为 0 / 房间不在 / 非成员 → 1005；参战者优先；签不出 → 1003 且不带 assignment。 */
     IssueBattleTicketResponse issueBattleTicket(IssueBattleTicketRequest request);
 

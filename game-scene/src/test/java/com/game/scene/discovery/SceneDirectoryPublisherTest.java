@@ -81,6 +81,35 @@ class SceneDirectoryPublisherTest {
         verify(directory, never()).remove(anyInt(), anyInt());
     }
 
+    @Test void 快照期间身份失效_既不发布也不删除新持有者条目() {
+        var valid = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var publisher = new SceneDirectoryPublisher(directory, IDENTITY, () -> {
+            valid.set(false);
+            return new Snapshot(List.of(ENTRY), 9, true, 8);
+        }, valid::get);
+        publisher.publishOnce();
+        publisher.stop(true);
+        verify(directory, never()).publish(anyInt(), anyInt(), any(), any());
+        verify(directory, never()).remove(anyInt(), anyInt());
+    }
+
+    @Test void 挂起可恢复_恢复后同时发布疏散状态和最新代次() {
+        var epoch = new AtomicLong(8);
+        var publisher = new SceneDirectoryPublisher(directory, IDENTITY,
+                () -> new Snapshot(List.of(DRAINING), 9, true, epoch.get()), () -> true);
+        publisher.pause();
+        publisher.publishOnce();
+        verify(directory, never()).publish(anyInt(), anyInt(), any(), any());
+        epoch.set(9);
+        publisher.resume();
+        publisher.publishOnce();
+        var published = ArgumentCaptor.forClass(SceneNodeInfo.class);
+        verify(directory).publish(eq(1), eq(3), published.capture(), any());
+        assertThat(published.getValue().getEvacuating()).isTrue();
+        assertThat(published.getValue().getLeaseEpoch()).isEqualTo(9);
+        assertThat(published.getValue().getScenesList()).containsExactly(DRAINING);
+    }
+
     @Test
     void 取快照失败_本轮不发布() {
         SceneDirectoryPublisher publisher = new SceneDirectoryPublisher(directory, IDENTITY, () -> {

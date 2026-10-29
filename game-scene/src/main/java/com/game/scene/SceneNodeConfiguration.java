@@ -50,7 +50,7 @@ import org.springframework.core.env.Environment;
  * {@link RedissonClient} 来自 game-discovery，{@link PlayerStore} 来自 game-player-store 的自动装配。
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({SceneNodeProperties.class, AuditProperties.class})
+@EnableConfigurationProperties({SceneNodeProperties.class, AuditProperties.class, EvacuationProperties.class})
 public class SceneNodeConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(SceneNodeConfiguration.class);
@@ -144,9 +144,19 @@ public class SceneNodeConfiguration {
                                BagTables bagTables, MissionTables missionTables, SkillTables skillTables,
                                PetTables petTables, NodeLinkAuth nodeLinkAuth,
                                SceneMetrics sceneMetrics, AuditProperties audit, KafkaNames kafkaNames,
-                               SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source,com.game.common.sql.WriterAuthority boot) {
+                               SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source,
+                               com.game.common.sql.WriterAuthority boot,
+                               EvacuationProperties evacuation, GmShutdownController.ProcessExit processExit) {
+        if (audit.enabled()) audit.validateFor(RunMode.parse(props.runMode()));
         return new SceneNode(props, redis, redisKeys, playerStore, playerTrades, registry, tables, attributeTables, bagTables, missionTables,
-                skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, kafkaNames, sceneBattleTables, sceneBattleMetrics,source).withMaintenanceBoot(boot);
+                skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, kafkaNames, sceneBattleTables, sceneBattleMetrics,
+                source, evacuation, processExit::exitSoon).withMaintenanceBoot(boot);
+    }
+
+    @Bean
+    public org.springframework.boot.actuate.health.HealthIndicator sceneIdentityHealthIndicator(SceneNode node) {
+        return () -> node.ready() ? org.springframework.boot.actuate.health.Health.up().build()
+                : org.springframework.boot.actuate.health.Health.down().withDetail("identity", node.identityState()).build();
     }
 
     /** GM 签名停机的校验（密钥只从环境变量 GAME_GM_ADMIN_SECRET 读，没配一律拒）。 */

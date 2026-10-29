@@ -113,7 +113,8 @@ public class DataConfiguration {
     @Bean
     public DataNode dataNode(AuditProperties audit, DataProperties props, KafkaNames names, TransactionLogMapper transactionLog,
                              PlayerSnapshotMapper playerSnapshot, PlatformTransactionManager transactionManager,
-                             DataMetrics metrics, Clock clock) {
+                             DataMetrics metrics, Clock clock, @Value("${game.run-mode:prod}") String runMode) {
+        audit.validateFor(com.game.common.RunMode.parse(runMode));
         String adminClientId = names.dataAdminClientId();
         return new DataNode(audit, props, names, transactionLog, playerSnapshot, new TransactionTemplate(transactionManager),
                 metrics, () -> new KafkaTopicAdmin(audit.bootstrapServers(), adminClientId), clock);

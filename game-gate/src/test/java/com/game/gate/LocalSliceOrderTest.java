@@ -58,9 +58,9 @@ class LocalSliceOrderTest {
     }
 
     @Test
-    void 清单解析得对_十六个进程_gate与gateway在后段_battle最后() {
+    void 清单解析得对_十七个进程_gate与gateway在后段_battle最后() {
         assertThat(startOrder).containsExactly("game-scene-manager", "game-login", "game-friend", "game-chat", "game-match", "game-team", "game-guild",
-                "game-trade", "game-mail", "game-rank", "game-data", "game-inbox", "game-scene", "game-gate", "game-gateway", "game-battle");
+                "game-mall", "game-trade", "game-mail", "game-rank", "game-data", "game-inbox", "game-scene", "game-gate", "game-gateway", "game-battle");
         assertThat(startOrder).doesNotHaveDuplicates();
     }
 
@@ -117,18 +117,18 @@ class LocalSliceOrderTest {
     }
 
     @Test
-    void 停止次序_匹配最先_战斗其次_其余按启动的逆序_启动清单里的进程一个不漏() {
+    void 停止次序_战斗先提交终局_匹配随后_其余按启动的逆序_启动清单里的进程一个不漏() {
         Matcher loop = Pattern.compile("(?m)^for name in ([a-z0-9 -]+); do$").matcher(stopSlice);
         assertThat(loop.find()).as("stop-slice.sh 的停止清单").isTrue();
         List<String> stopOrder = List.of(loop.group(1).trim().split(" +"));
 
-        // game-match 是 game-battle 与 game-scene 的调用方：先停它，后面的进程停下时没有开到一半的局
-        assertThat(stopOrder).startsWith("game-match", "game-battle");
+        // Battle 先关闭准入并有界提交，期间 Match 的 SQL v1 原终局接口必须还可调用。
+        assertThat(stopOrder).startsWith("game-battle", "game-match");
         // 其余：启动清单去掉这两个之后的逆序；game-scene 展开成 game-scene-2（第二个节点，可能不存在）在前、game-scene 在后
         List<String> rest = new ArrayList<>(startOrder);
         rest.remove("game-match");
         rest.remove("game-battle");
-        List<String> expected = new ArrayList<>(List.of("game-match", "game-battle"));
+        List<String> expected = new ArrayList<>(List.of("game-battle", "game-match"));
         for (int i = rest.size() - 1; i >= 0; i--) {
             if (rest.get(i).equals("game-scene")) {
                 expected.add("game-scene-2");

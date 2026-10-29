@@ -329,6 +329,10 @@ public final class SnapshotDiffService {
         out.put("onlyInSnapshot", onlyInSnapshot);
         out.put("onlyInCurrent", onlyInCurrent);
         out.put("stackChanged", stackChanged);
+        ItemInstanceDiff.Result instances = ItemInstanceDiff.compare(s.getBag(), c.getBag());
+        out.put("instanceChangedCount", instances.changedCount());
+        out.put("instanceChanged", instances.instances());
+        out.put("instanceChangesTruncated", instances.truncated());
         out.put("evidenceTruncated", evidenceTruncated);
         out.put("capacities", pair(s.getBag().getCapacitiesList(), c.getBag().getCapacitiesList()));
         return out;

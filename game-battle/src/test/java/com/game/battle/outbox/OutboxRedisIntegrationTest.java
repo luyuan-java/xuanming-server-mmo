@@ -209,7 +209,7 @@ class OutboxRedisIntegrationTest {
         outbox.dispatch(routing(), player, settlement(player, X));
         await().atMost(PATIENCE).until(() -> transport.sent.size() == 1 && outbox.inFlight() == 0);
         assertThat(count(SettlementEvent.NOT_DURABLE)).isEqualTo(1);
-        assertThat(sizeOf(outbox)).as("不登记").isZero();
+        assertThat(sizeOf(outbox)).as("存储未知也登记，但空记录不作为销账证明").isEqualTo(1);
 
         // scene 在线应用、落盘、销账：没有记录可删（位掩码 0），但留下墓碑
         assertThat(get(scripts.ack(player, X))).isZero();
@@ -249,6 +249,110 @@ class OutboxRedisIntegrationTest {
     }
 
     // ================================================================== 活动结果通道
+
+    @Test
+    void 结算真实store已执行但回包丢失_读原件恢复_被改写后不得重投旧字节() throws Exception {
+        long player = newPlayer();
+        locator.online(player, 1, 3, "scene-3");
+        SettlementOutbox.Store real = SettlementOutbox.Store.redis(scripts);
+        AtomicLong stores = new AtomicLong();
+        SettlementOutbox.Store lostReply = new SettlementOutbox.Store() {
+            @Override
+            public CompletableFuture<Long> store(long playerId, long battleId, byte[] payload) {
+                stores.incrementAndGet();
+                return real.store(playerId, battleId, payload).thenCompose(result ->
+                        CompletableFuture.failedFuture(new TimeoutException("真实写入已完成，丢弃响应")));
+            }
+
+            @Override
+            public CompletableFuture<Boolean> exists(long playerId, long battleId) {
+                return real.exists(playerId, battleId);
+            }
+
+            @Override
+            public CompletableFuture<byte[]> readOriginal(long playerId, long battleId) {
+                return real.readOriginal(playerId, battleId);
+            }
+
+            @Override
+            public CompletableFuture<Long> ackIfSuperseded(long playerId, long battleId) {
+                return real.ackIfSuperseded(playerId, battleId);
+            }
+        };
+        SettlementOutbox outbox = outbox(lostReply);
+        outbox.dispatch(routing(), player, settlement(player, X));
+        await().atMost(PATIENCE).until(() -> transport.sent.size() == 1 && outbox.inFlight() == 0);
+        assertThat(get(scripts.readSettlement(player, X))).isEqualTo(wire(player, X));
+        assertThat(count(SettlementEvent.NOT_DURABLE)).isEqualTo(1);
+        assertThat(count(SettlementEvent.STORED)).isZero();
+
+        loop.execute(outbox::tick);
+        await().atMost(PATIENCE).until(() -> transport.sent.size() == 2);
+        assertThat(transport.sent).allSatisfy(sent -> assertThat(sent.call().getBody().toByteArray()).isEqualTo(wire(player, X)));
+        assertThat(transport.sent).extracting(sent -> sent.call().getAttempt()).containsExactly(0, 1);
+        assertThat(stores.get()).isEqualTo(1);
+
+        byte[] changed = {7, 8, 9};
+        assertThat(get(scripts.storeSettlement(player, X, changed, BattleRedis.SETTLEMENT_TTL_SEC))).isEqualTo(1L);
+        loop.execute(outbox::tick);
+        await().atMost(PATIENCE).until(() -> count(SettlementEvent.PROBE_ERROR) == 1);
+        assertThat(transport.sent).hasSize(2);
+        assertThat(get(scripts.readSettlement(player, X))).isEqualTo(changed);
+        assertThat(sizeOf(outbox)).isEqualTo(1);
+        assertThat(count(SettlementEvent.ACKED)).isZero();
+        assertThat(count(SettlementEvent.RESEND)).isEqualTo(1);
+        assertThat(stores.get()).isEqualTo(1);
+    }
+
+    @Test
+    void 活动真实store已执行但回包丢失_读原件恢复_删除不算未知写入已销账() throws Exception {
+        long battle = BATTLE_BASE + 100 + sequence.incrementAndGet();
+        written.add(REDIS_KEYS.battleActivityResult(battle));
+        BattleResultEvent event = BattleResultEvent.newBuilder().setBattleId(battle).setTotalRounds(4).build();
+        ActivityResultOutbox.Store real = ActivityResultOutbox.Store.redis(scripts);
+        AtomicLong stores = new AtomicLong();
+        ActivityResultOutbox.Store lostReply = new ActivityResultOutbox.Store() {
+            @Override
+            public CompletableFuture<Long> store(long battleId, byte[] payload) {
+                stores.incrementAndGet();
+                return real.store(battleId, payload).thenCompose(result ->
+                        CompletableFuture.failedFuture(new TimeoutException("真实写入已完成，丢弃响应")));
+            }
+
+            @Override
+            public CompletableFuture<Boolean> exists(long battleId) {
+                return real.exists(battleId);
+            }
+
+            @Override
+            public CompletableFuture<byte[]> readOriginal(long battleId) {
+                return real.readOriginal(battleId);
+            }
+        };
+        List<BattleResultEvent> published = new CopyOnWriteArrayList<>();
+        ActivityResultOutbox outbox = new ActivityResultOutbox(scheduler, lostReply, (e, channel) -> published.add(e),
+                metrics, () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()));
+        outbox.dispatch(event);
+        await().atMost(PATIENCE).until(() -> published.size() == 1);
+        assertThat(get(scripts.readActivityResult(battle))).isEqualTo(event.toByteArray());
+        assertThat(count(ActivityEvent.NOT_DURABLE)).isEqualTo(1);
+        assertThat(count(ActivityEvent.STORED)).isZero();
+
+        loop.execute(outbox::tick);
+        await().atMost(PATIENCE).until(() -> published.size() == 2);
+        assertThat(published).containsExactly(event, event);
+        assertThat(stores.get()).isEqualTo(1);
+        assertThat(count(ActivityEvent.RESEND)).isEqualTo(1);
+
+        assertThat(redis.getKeys().delete(REDIS_KEYS.battleActivityResult(battle))).isEqualTo(1);
+        assertThat(get(scripts.readActivityResult(battle))).isNull();
+        loop.execute(outbox::tick);
+        await().atMost(PATIENCE).until(() -> count(ActivityEvent.PROBE_ERROR) == 1);
+        assertThat(loop.submit((Callable<Integer>) outbox::size).get(5, TimeUnit.SECONDS)).isEqualTo(1);
+        assertThat(count(ActivityEvent.ACKED)).isZero();
+        assertThat(published).hasSize(2);
+        assertThat(stores.get()).isEqualTo(1);
+    }
 
     @Test
     void 活动结果_落库后发布同一份字节_副本在就重发_消费方删掉后摘除() throws Exception {

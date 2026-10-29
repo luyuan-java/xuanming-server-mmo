@@ -20,28 +20,35 @@ public final class LeaseGatedSnowflake {
 
     private static final Logger log = LoggerFactory.getLogger(LeaseGatedSnowflake.class);
 
-    private final Snowflake snowflake;
-    private final BooleanSupplier leaseValid;
+    private record Source(Snowflake snowflake, BooleanSupplier leaseValid) { }
+    private volatile Source source;
 
     /** @param leaseValid 租约当前是否可用来发号（每次发号前调用） */
     public LeaseGatedSnowflake(Snowflake snowflake, BooleanSupplier leaseValid) {
-        this.snowflake = snowflake;
-        this.leaseValid = leaseValid;
+        this.source = new Source(java.util.Objects.requireNonNull(snowflake), java.util.Objects.requireNonNull(leaseValid));
     }
 
     /** 租约当前是否可用来发号（与 {@link #tryNext()} 的前置检查同一个判定；给调用方提前跳过整批新建用）。 */
     public boolean leaseValid() {
-        return leaseValid.getAsBoolean();
+        return source.leaseValid().getAsBoolean();
+    }
+
+    /** 旧租约已失效时换到新 worker；与发号互斥，不创建两个可并发使用的发号源。 */
+    public synchronized void replace(Snowflake snowflake, BooleanSupplier leaseValid) {
+        if (source.leaseValid().getAsBoolean()) throw new IllegalStateException("不能替换仍有效的发号租约");
+        if (!leaseValid.getAsBoolean()) throw new IllegalArgumentException("新发号租约无效");
+        source = new Source(java.util.Objects.requireNonNull(snowflake), java.util.Objects.requireNonNull(leaseValid));
     }
 
     /** 发一个号；租约无效、时钟回拨超出容忍或发出 0 时为空。 */
-    public OptionalLong tryNext() {
-        if (!leaseValid.getAsBoolean()) {
+    public synchronized OptionalLong tryNext() {
+        Source held = source;
+        if (!held.leaseValid().getAsBoolean()) {
             return OptionalLong.empty();
         }
         long id;
         try {
-            id = snowflake.nextId();
+            id = held.snowflake().nextId();
         } catch (IllegalStateException e) {
             log.warn("发号失败：{}", e.getMessage());
             return OptionalLong.empty();

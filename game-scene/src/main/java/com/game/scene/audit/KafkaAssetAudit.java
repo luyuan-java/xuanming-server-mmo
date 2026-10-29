@@ -102,6 +102,9 @@ public final class KafkaAssetAudit implements AssetAudit {
             case ITEM_DESTROY -> TransactionReason.TX_ITEM_DESTROY;
             case BATTLE_REWARD -> TransactionReason.TX_BATTLE_REWARD;
             case ITEM_AWARD -> TransactionReason.TX_ITEM_AWARD;
+            case EQUIP_ENHANCE -> TransactionReason.TX_EQUIP_ENHANCE;
+            case EQUIP_INLAY -> TransactionReason.TX_EQUIP_INLAY;
+            case EQUIP_GEM_REMOVE -> TransactionReason.TX_EQUIP_GEM_REMOVE;
         };
     }
 }

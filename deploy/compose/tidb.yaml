@@ -1,0 +1,33 @@
+# 固定 C++ 基线 92952c84b 的 TiDB 8.5.2 开发夹具。单 PD / TiKV 不提供故障耐久验收。
+# 不发布 SQL 端口；由 tidb-init 完成真实 SQL 就绪检查与部署命名空间初始化。
+services:
+  pd:
+    image: pingcap/pd:v8.5.2@sha256:6d7a25550c58905a2b938f4d9f8b44e373811e9a0b84ca7ad85dfdfeaaa91811
+    command: ["--name=pd", "--data-dir=/data", "--client-urls=http://0.0.0.0:2379", "--advertise-client-urls=http://pd:2379", "--peer-urls=http://0.0.0.0:2380", "--advertise-peer-urls=http://pd:2380", "--initial-cluster=pd=http://pd:2380", "--config=/etc/pd.toml"]
+    volumes: ["pd-data:/data", "./tidb/pd.toml:/etc/pd.toml:ro"]
+  tikv:
+    image: pingcap/tikv:v8.5.2@sha256:3ec043d2eddbd5a39be046e37271bab53e9819c6bf1de716b4ead38e0cb16678
+    command: ["--pd=pd:2379", "--addr=0.0.0.0:20160", "--advertise-addr=tikv:20160", "--data-dir=/data", "--config=/etc/tikv.toml"]
+    volumes: ["tikv-data:/data", "./tidb/tikv.toml:/etc/tikv.toml:ro"]
+    depends_on: [pd]
+  tidb:
+    image: pingcap/tidb:v8.5.2@sha256:8719349fd679099c92db83c1d4b70c6f67cb8b54e80061ccfadd843ded2a82f3
+    command: ["--store=tikv", "--path=pd:2379", "--advertise-address=tidb", "--config=/etc/tidb.toml"]
+    volumes: ["./tidb/tidb.toml:/etc/tidb.toml:ro"]
+    depends_on: [tikv]
+  tidb-init:
+    image: mysql:8.4.11@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
+    entrypoint: ["bash", "/init-tidb.sh"]
+    environment:
+      GAME_NAMESPACE: ${GAME_NAMESPACE:?必须显式设置部署命名空间}
+      GAME_MYSQL_PASSWORD: ${GAME_MYSQL_PASSWORD:?必须设置独立数据库口令}
+    volumes:
+      - ./tidb/init.sh:/init-tidb.sh:ro
+      - ../../game-mall/src/main/resources/db/migration/V1__official_sku.sql:/mall-fresh-install.sql:ro
+      - ../../game-common/src/main/resources/db/game-route-authority-schema.sql:/route-schema.sql:ro
+      - ../../game-player-store/src/main/resources/db/game-player-schema.sql:/player-schema.sql:ro
+    depends_on: [tidb]
+    restart: "no"
+volumes:
+  pd-data: {}
+  tikv-data: {}

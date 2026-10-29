@@ -15,5 +15,7 @@ public enum DrainCause {
     PLAN,
     IDLE,
     CASCADE,
-    ADMIN
+    ADMIN,
+    /** 整节点疏散；只有运维疏散撤销时可恢复，其他场景排空原因不受影响。 */
+    NODE
 }

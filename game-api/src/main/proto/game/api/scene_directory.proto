@@ -44,6 +44,16 @@ message SelectSwitchTargetRequest {
   // 仅客户端显式指定主世界 scene_id 时置位；登录、跟随、疏散、自动选图与交接重放不置位。
   // 只读校验主动切线政策；预检拒绝不写冷却或预占，通过后保留既有软预占，冷却仍由成功交接写入。
   bool client_channel_pick = 7;
+  // 节点疏散或服务器改派时，禁止选回来源节点（包括来源节点的其他频道）。
+  bool exclude_from_node = 8;
+  // 服务器改派的最后回落地图；主目标没有候选时才使用，0 表示不回落。
+  uint32 fallback_scene_config_id = 9;
+  SwitchTargetReason reason = 10;
+}
+
+enum SwitchTargetReason {
+  SWITCH_TARGET_PLAYER = 0;
+  SWITCH_TARGET_EVACUATE = 1;
 }
 
 message SelectSwitchTargetResponse {
@@ -78,6 +88,9 @@ message CreateInstanceRequest {
   uint32 mirror_config_id = 7;
   // DUNGEON 必填；MIRROR 必须为 0（镜像的 dungeon_config_id 恒 0，同基线 scene_node_client.go:108-113）。
   uint32 dungeon_config_id = 8;
+  // 请求方占号实例与代次；管理器和同一拍目录核对，避免迟到的旧进程请求借用新持有者的准入。
+  string requester_instance_id = 9;
+  uint64 requester_lease_epoch = 10;
 }
 
 message CreateInstanceResponse {

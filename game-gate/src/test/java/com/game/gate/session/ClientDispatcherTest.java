@@ -1427,6 +1427,7 @@ class ClientDispatcherTest {
         other.runPendingTasks();
 
         assertThat(ch.isOpen()).isFalse();
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
         assertThat(other.isOpen()).as("没进这条链路的会话不受影响").isTrue();
         assertThat(links.sent.stream().noneMatch(s -> s.frame().hasPlayerLeave())).isTrue();
         assertThat(login.closed).hasSize(1);
@@ -1438,6 +1439,21 @@ class ClientDispatcherTest {
         router.onLinkDown(SCENE_NODE, links.generation - 1);
         ch.runPendingTasks();
         assertThat(ch.isOpen()).isTrue();
+        assertThat((Object) ch.readOutbound()).isNull();
+    }
+
+    @Test
+    void 旧实例宽限到期_只关闭仍绑定该代次的会话_先推1003并记独立原因() {
+        EmbeddedChannel ch = enteredScene();
+        EmbeddedChannel other = verified2();
+        router.onLinkDown(SCENE_NODE, links.generation, true);
+        ch.runPendingTasks(); other.runPendingTasks();
+        assertThat(tipOf(ch.readOutbound())).isEqualTo(1003);
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(other.isOpen()).isTrue();
+        assertThat(links.sent.stream().noneMatch(s -> s.frame().hasPlayerLeave())).isTrue();
+        assertThat(disconnects("scene_link_superseded")).isEqualTo(1);
+        assertThat(disconnects("scene_link_down")).isZero();
     }
 
     // ================================================================ 进场失败回到「已登录、未进游戏」（可重试 / 换角色 / 建角）
@@ -1933,6 +1949,7 @@ class ClientDispatcherTest {
         ch.runPendingTasks();
 
         assertThat(ch.isOpen()).isFalse();
+        assertThat((Object) ch.readOutbound()).as("5.2 F11 未确认的交出进场仍仅断开").isNull();
         assertThat(sentSince(framesBefore)).as("链路已断，不发 PlayerLeave").isEmpty();
         assertThat(disconnects("scene_link_down")).isEqualTo(1);
     }

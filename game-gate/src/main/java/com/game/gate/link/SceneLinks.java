@@ -1,6 +1,7 @@
 package com.game.gate.link;
 
 import com.game.api.proto.NodeLinkFrame;
+import com.game.api.proto.PlayerEnter;
 
 /**
  * gate → scene 节点链路的发送面（architecture.md §4.2）。
@@ -18,4 +19,10 @@ import com.game.api.proto.NodeLinkFrame;
 public interface SceneLinks {
 
     long send(int sceneNodeId, NodeLinkFrame frame);
+
+    /** 既有绑定只能向指定代次发送，不得借断链重建偷偷改绑；找不到返回 0。 */
+    long send(int sceneNodeId, long generation, NodeLinkFrame frame);
+
+    /** 与首次 write 同锁竞争；true 表示已移除且以后不会发，false 必须按已发或未知处理。 */
+    default boolean cancelQueuedEnter(int nodeId, long generation, PlayerEnter enter) { return false; }
 }

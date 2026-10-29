@@ -32,6 +32,37 @@ class GateLinksTest {
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final GateLinks links = new GateLinks(new SceneMetrics(meters), Runnable::run);
 
+    @Test void 写成功也要等逻辑线程收回计数_异步冲刷前不得报告排空() throws Exception {
+        List<Runnable> tasks = new ArrayList<>();
+        var queued = new GateLinks(new SceneMetrics(meters), tasks::add);
+        var promise = new java.util.concurrent.atomic.AtomicReference<ChannelPromise>();
+        var channel = new EmbeddedChannel(new ChannelOutboundHandlerAdapter() {
+            @Override public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise written) { promise.set(written); }
+        });
+        queued.register(1, 5, "gate", 1, channel);
+        assertThat(queued.playerTransfer(1, 11, 1001, 4, 5, 7, 900_001,
+                () -> { throw new AssertionError("成功写不应走失败善后"); })).isTrue();
+        assertThat(queued.pendingTransferWrites()).isEqualTo(1);
+        assertThat(queued.awaitTransferWrites(0)).isEqualTo(1);
+        promise.get().setSuccess();
+        channel.runPendingTasks();
+        assertThat(queued.pendingTransferWrites()).isEqualTo(1);
+        tasks.getFirst().run();
+        assertThat(queued.awaitTransferWrites(0)).isZero();
+        channel.finishAndReleaseAll();
+    }
+
+    @Test void 成功回执无法投递时保留未结计数_不得假称干净停机() throws Exception {
+        var stopped = new GateLinks(new SceneMetrics(meters), ignored -> { throw new RejectedExecutionException(); });
+        var channel = new EmbeddedChannel();
+        stopped.register(1, 5, "gate", 1, channel);
+        assertThat(stopped.playerTransfer(1, 11, 1001, 4, 5, 7, 900_001, () -> { })).isTrue();
+        channel.runPendingTasks();
+        assertThat(stopped.pendingTransferWrites()).isEqualTo(1);
+        assertThat(stopped.awaitTransferWrites(0)).isEqualTo(1);
+        channel.finishAndReleaseAll();
+    }
+
     @Test
     void 同一gate节点号_代次更低的新链路被拒_相同或更高的顶替() {
         EmbeddedChannel a = new EmbeddedChannel();

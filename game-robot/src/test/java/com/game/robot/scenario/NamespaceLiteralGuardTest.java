@@ -136,6 +136,11 @@ class NamespaceLiteralGuardTest {
             Map.entry("game-data/src/main/java/com/game/data/rollback/DubboGuildInternalClient.java", Set.of("game-data-guild-check")),
             // 同仓SQL夹具读取兄弟模块的正式player DDL；这是仓库目录身份，不是共享中间件名称。
             Map.entry("game-common/src/main/java/com/game/common/sql/testing/AuthoritySqlFixture.java", Set.of("game-player-store")),
+            // 离线发布原件的 Maven 模块 / jar 身份；不是 Redis / Kafka 名称，不随部署命名空间变化。
+            Map.entry("game-data/src/main/java/com/game/data/tools/release/ReleaseService.java", Set.of(
+                    "game-scene-manager", "game-login", "game-friend", "game-chat", "game-mail", "game-rank",
+                    "game-match", "game-team", "game-guild", "game-mall", "game-trade", "game-data", "game-inbox",
+                    "game-scene", "game-battle", "game-gate", "game-gateway", "game-robot")),
             // 存进去的值（发号租约的持有者 id 前缀），不是名字
             Map.entry("game-data/src/main/java/com/game/data/DataConfiguration.java", Set.of("game-data-")),
             Map.entry("game-data/src/main/java/com/game/data/tools/AuditFallbackReplay.java", Set.of("game-audit-replay-")));
@@ -176,6 +181,7 @@ class NamespaceLiteralGuardTest {
             "game-discovery/src/main/java/com/game/discovery/namespace/GameNamespaceAutoConfiguration.java",
             "game-discovery/src/main/java/com/game/discovery/namespace/GameNamespaceBinder.java",
             "game-data/src/main/java/com/game/data/tools/AuditFallbackReplay.java",
+            "game-data/src/main/java/com/game/data/tools/RetireZoneHotState.java",
             "game-data/src/main/java/com/game/data/tools/playerbundle/PlayerBundleExport.java",
             "game-guild/src/main/java/com/game/guild/asset/fix/AssetOpFixEnvironment.java",
             "game-common/src/main/java/com/game/common/GameNamespace.java",

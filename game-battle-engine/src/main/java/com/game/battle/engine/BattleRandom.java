@@ -33,6 +33,13 @@ final class BattleRandom {
         return (double) (mt.next() >>> 11) * 0x1.0p-53;
     }
 
+    /** 新装备概率：0 和 ≥100 不耗随机数；必杀沿旧规则，不能改用本方法。 */
+    boolean rollPercent(long percent) {
+        if (percent == 0) return false;
+        if (Long.compareUnsigned(percent, 100) >= 0) return true;
+        return rand01() * 100.0 < (double) percent;
+    }
+
     /** 至今的总抽数（randIndex 与 rand01 各计一次）。 */
     long draws() {
         return draws;

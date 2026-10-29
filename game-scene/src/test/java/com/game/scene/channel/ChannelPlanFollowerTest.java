@@ -22,6 +22,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -43,6 +44,8 @@ class ChannelPlanFollowerTest {
         RuntimeException registerFailure;
         int versionReads;
         int planReads;
+        Runnable afterVersionRead = () -> { };
+        Runnable afterPlanRead = () -> { };
         final List<Integer> registered = new ArrayList<>();
 
         @Override
@@ -52,7 +55,9 @@ class ChannelPlanFollowerTest {
             if (failure != null) {
                 throw failure;
             }
-            return version;
+            long result = version;
+            afterVersionRead.run();
+            return result;
         }
 
         @Override
@@ -62,7 +67,9 @@ class ChannelPlanFollowerTest {
             if (failure != null) {
                 throw failure;
             }
-            return new WorldPlan(version, channels);
+            WorldPlan result = new WorldPlan(version, channels);
+            afterPlanRead.run();
+            return result;
         }
 
         @Override
@@ -235,6 +242,90 @@ class ChannelPlanFollowerTest {
         assertThat(store.planReads).isEqualTo(2);
         assertThat(applied).extracting(Applied::version).containsExactly(6L);
         assertThat(follower.appliedVersion()).isEqualTo(6);
+    }
+
+    @Test
+    void 读计划期间身份失效_旧拍不应用不推进版本_恢复后重新读同版() {
+        var epoch = new AtomicLong(7);
+        var synchronizedEpochs = new ArrayList<Long>();
+        follower = new ChannelPlanFollower(store, ZONE, NODE, leaseValid::get, epoch::get,
+                (version, mine, original) -> applied.add(new Applied(version, mine)), publishes::incrementAndGet,
+                new SceneMetrics(meters), synchronizedEpochs::add);
+        store.version = 6;
+        store.afterPlanRead = () -> leaseValid.set(false);
+
+        assertThat(follower.syncOnce()).isFalse();
+        assertThat(applied).isEmpty();
+        assertThat(follower.appliedVersion()).isEqualTo(-1);
+        assertThat(publishes).hasValue(0);
+        assertThat(synchronizedEpochs).isEmpty();
+
+        leaseValid.set(true);
+        store.afterPlanRead = () -> { };
+        assertThat(follower.syncOnce()).isTrue();
+        assertThat(store.planReads).isEqualTo(2);
+        assertThat(applied).containsExactly(new Applied(6, List.of()));
+        assertThat(synchronizedEpochs).containsExactly(7L);
+    }
+
+    @Test
+    void 读计划期间原号复占新代次即使valid为真_旧拍仍拒绝() {
+        var epoch = new AtomicLong(7);
+        var synchronizedEpochs = new ArrayList<Long>();
+        follower = new ChannelPlanFollower(store, ZONE, NODE, leaseValid::get, epoch::get,
+                (version, mine, original) -> applied.add(new Applied(version, mine)), publishes::incrementAndGet,
+                new SceneMetrics(meters), synchronizedEpochs::add);
+        store.version = 6;
+        store.afterPlanRead = () -> epoch.set(8);
+
+        assertThat(follower.syncOnce()).isFalse();
+        assertThat(applied).isEmpty();
+        assertThat(follower.appliedVersion()).isEqualTo(-1);
+        assertThat(publishes).hasValue(0);
+        assertThat(synchronizedEpochs).isEmpty();
+
+        assertThat(follower.syncOnce()).isTrue();
+        assertThat(applied).containsExactly(new Applied(6, List.of()));
+        assertThat(synchronizedEpochs).containsExactly(8L);
+    }
+
+    @Test
+    void 版本不变的快路径也不得用旧代次读结果宣布恢复() {
+        var epoch = new AtomicLong(7);
+        var synchronizedEpochs = new ArrayList<Long>();
+        follower = new ChannelPlanFollower(store, ZONE, NODE, leaseValid::get, epoch::get,
+                (version, mine, original) -> applied.add(new Applied(version, mine)), publishes::incrementAndGet,
+                new SceneMetrics(meters), synchronizedEpochs::add);
+        store.version = 6;
+        assertThat(follower.syncOnce()).isTrue();
+        store.afterVersionRead = () -> epoch.set(8);
+
+        assertThat(follower.syncOnce()).isFalse();
+        assertThat(store.planReads).isEqualTo(1);
+        assertThat(synchronizedEpochs).containsExactly(7L);
+        assertThat(follower.appliedVersion()).isEqualTo(6);
+        assertThat(follower.syncOnce()).isTrue();
+        assertThat(synchronizedEpochs).containsExactly(7L, 8L);
+    }
+
+    @Test
+    void Redis读完后逻辑兑现被原件围栏拒绝_不推进版本不发布不宣布恢复() {
+        var epoch = new AtomicLong(7);
+        var synchronizedEpochs = new ArrayList<Long>();
+        follower = new ChannelPlanFollower(store, ZONE, NODE, leaseValid::get, epoch::get,
+                (version, mine, original) -> {
+                    assertThat(original).isEqualTo(7);
+                    // 模拟排入逻辑线程后才换代；真实兑现围栏由 SceneNode 测试核验。
+                    epoch.set(8);
+                    throw new IllegalStateException("原件已经换代");
+                }, publishes::incrementAndGet, new SceneMetrics(meters), synchronizedEpochs::add);
+        store.version = 6;
+
+        assertThat(follower.syncOnce()).isFalse();
+        assertThat(follower.appliedVersion()).isEqualTo(-1);
+        assertThat(applied).isEmpty();
+        assertThat(publishes).hasValue(0);
+        assertThat(synchronizedEpochs).isEmpty();
     }
 
     @Test

@@ -88,6 +88,11 @@ public final class KafkaNames {
         return name("data-admin");
     }
 
+    /** game-data 的独立只读组位点探针，不能复用消费线程或 topic 管理客户端。 */
+    public String dataAuditProbeClientId() {
+        return name("data-audit-probe");
+    }
+
     /** game-data 的消费者 {@code <ns>-data-<group>}（例：{@code game-data-game-data-transaction-log}）；group 是实际生效的消费组（可能是显式配置的值）。 */
     public String dataConsumerClientId(String group) {
         return client("data-" + group);

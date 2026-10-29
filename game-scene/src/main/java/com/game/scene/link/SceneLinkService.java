@@ -62,7 +62,7 @@ public final class SceneLinkService implements LinkInbound {
             world.onLinkClosed(replaced.linkId());
             replaced.channel().close();
         }
-        channel.writeAndFlush(identity.ack(true, ""));
+        channel.writeAndFlush(identity.ack(true, "", hello.getPingIntervalMs()));
         metrics.linkFrameOut(NodeLinkFrame.BodyCase.HELLO_ACK);
     }
 

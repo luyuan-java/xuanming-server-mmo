@@ -36,6 +36,7 @@ final class MemoryBattleData implements BattleData {
     private final Map<Integer, List<Integer>> dungeonMonsterIds = new HashMap<>();
     private final Map<Integer, Integer> monstersPerPlayer = new HashMap<>();
     private final Map<Integer, Double> skillDamageValues = new HashMap<>();
+    private final Map<Integer, java.util.function.DoubleUnaryOperator> skillDamageFunctions = new HashMap<>();
     private final Map<Integer, Double> buffRegenValues = new HashMap<>();
 
     // ---- 数据装配（对应 AddXxx / SetXxx） ----
@@ -94,6 +95,11 @@ final class MemoryBattleData implements BattleData {
         skillDamageValues.put(skillTableId, damage);
     }
 
+    /** 只在需要核对传入等级的用例中替换求值器，既有定值夹具保持原样。 */
+    void setSkillDamageFunction(int skillTableId, java.util.function.DoubleUnaryOperator function) {
+        skillDamageFunctions.put(skillTableId, function);
+    }
+
     /** buff 回血定值（忽略等级与损血）。 */
     void setBuffRegen(int buffTableId, double regen) {
         buffRegenValues.put(buffTableId, regen);
@@ -143,6 +149,8 @@ final class MemoryBattleData implements BattleData {
 
     @Override
     public double skillDamage(int skillTableId, double casterLevel) {
+        var function = skillDamageFunctions.get(skillTableId);
+        if (function != null) return function.applyAsDouble(casterLevel);
         return skillDamageValues.getOrDefault(skillTableId, 0.0);
     }
 

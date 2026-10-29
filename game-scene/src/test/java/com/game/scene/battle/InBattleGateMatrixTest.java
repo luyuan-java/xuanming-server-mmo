@@ -100,7 +100,8 @@ import org.junit.jupiter.params.provider.MethodSource;
  *       夹具的功能清单必须覆盖主代码里全部 {@code SceneFeature} 实现类（新功能类绕不过这张表）；</li>
  *   <li>每个已注册方法 × PREPARING / FIGHTING 各打一遍：GATED 回基线码且状态不变、DROP 静默丢且位置不变、STOP_ONLY 只清速度、
  *       ALLOW「照常」= 对照玩家（配置相同、不在战斗）办得成，在途玩家得到同样的结果（钉住不闸）；每条请求在
- *       {@code gate_rejects{gate}} 上恰好计在自己那个闸上一次（ALLOW 的不计）；解冻后同一条请求恢复成对照玩家的结果；</li>
+ *       {@code gate_rejects{gate}} 上恰好计在自己那个闸上一次（ALLOW 的不计；装备扩展计 equipment）；
+ *       解冻后同一条请求恢复成对照玩家的结果；</li>
  *   <li>表格之外的口径：63 的 3023 先于换图在途的 3014；84 的 7004 在 1001 之后、目标 7002 与 7001 分开；192 类型合法后才判；
  *       资产通道 debit / credit 回 RETRY 27002 且账本不变、abort 照常；没声明策略的方法缺省 REJECT（应答内 1005）。</li>
  * </ul>
@@ -129,6 +130,9 @@ class InBattleGateMatrixTest {
     private static final int PET_IN_BATTLE = 26008;
     private static final int ASSET_IN_BATTLE = 27002;
     private static final int ZONE_TRAVEL_IN_BATTLE = 3025;
+    private static final int EQUIPMENT_IN_BATTLE = 28007;
+    private static final java.util.Set<String> EQUIPMENT_METHODS = java.util.Set.of(
+            "EquipItem", "UnequipItem", "GmGrantItem", "EnhanceEquip", "InlayGem", "RemoveGem");
     /** 226 的目标：别的 zone（夹具的本 zone 是 {@link BattleFixture#ZONE}）。 */
     private static final int OTHER_ZONE = BattleFixture.ZONE + 1;
 
@@ -184,6 +188,13 @@ class InBattleGateMatrixTest {
             new Row(189, PET, "RenamePet", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(187, PET, "GmGrantPet", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(192, BAG, "SortBag", BattlePolicy.GATED, INVALID_PARAMETER),
+            // 装备 2.11：六个入口均由装备业务闸拒绝，每次计 equipment 一次。
+            new Row(246, BAG, "UnequipItem", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
+            new Row(247, BAG, "GmGrantItem", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
+            new Row(249, BAG, "EquipItem", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
+            new Row(250, BAG, "InlayGem", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
+            new Row(251, BAG, "EnhanceEquip", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
+            new Row(252, BAG, "RemoveGem", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
             // 批次 5.4：226 跨 zone 传送自己判战斗在途（基线 kZoneTravelInBattle，player_lifecycle.cpp:2784-2788），计在 zone_travel 闸上
             new Row(226, SCENE, "TravelToZone", BattlePolicy.GATED, ZONE_TRAVEL_IN_BATTLE),
             // ALLOW：只读
@@ -219,9 +230,11 @@ class InBattleGateMatrixTest {
         return out;
     }
 
-    /** 被探测的一方：所在的那套装配、玩家、出战中的宝宝、没出战的宝宝。 */
-    private record Subject(BattleFixture world, ScenePlayer player, long activePet, long sparePet) {
+    /** 被探测的一方：装配、玩家、两只宝宝，以及只为装备六行准备的资产。 */
+    private record Subject(BattleFixture world, ScenePlayer player, long activePet, long sparePet, EquipmentProbe equipment) {
     }
+
+    private record EquipmentProbe(long itemId, int configId, int gemConfigId, int socket) { }
 
     /** 一条请求引出的全部可见结果：发给本人的消息号序列、应答里的码（没有应答为 null）、所在场景、位置、速度。 */
     private record Outcome(List<Integer> messageIds, Integer tip, long sceneId, Vec3 position, Vec3 velocity) {
@@ -279,7 +292,8 @@ class InBattleGateMatrixTest {
         // 规格按号列：逐类再用号核一遍
         assertThat(List.of(134, 132)).allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).isEqualTo(BattlePolicy.DROP));
         assertThat(f.handler.battlePolicy(131)).isEqualTo(BattlePolicy.STOP_ONLY);
-        assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226))
+        assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226,
+                246, 247, 249, 250, 251, 252))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.GATED));
         assertThat(List.of(43, 77, 54, 167, 181, 190, 191, 193, 173, 188, 37, 49, 94, 95, 194, 195))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.ALLOW));
@@ -291,7 +305,7 @@ class InBattleGateMatrixTest {
     /**
      * 「遍历注册表」遍历的是夹具装配出来的那张表，所以夹具得把主代码里的玩法功能装全：扫一遍主代码编译产物里全部 {@link SceneFeature} 实现类，
      * 必须个个都在夹具的功能清单里。以后新加一个功能类而没放进夹具（它的方法就绕过了上面两条核对）会先红在这里；放进去之后它的方法又必须进
-     * §7.13 的表与探测。（{@code SceneNode} 的清单是手写的同样七个，那一份没有单测，靠 robot 端到端。）
+     * §7.13 的表与后续装备扩展探测。（{@code SceneNode} 的清单是手写的，那一份没有单测，靠 robot 端到端。）
      */
     @Test
     void 夹具装配覆盖主代码里全部玩法功能类_新功能不进夹具即失败() throws Exception {
@@ -310,7 +324,7 @@ class InBattleGateMatrixTest {
             }
         }
 
-        assertThat(implementors).as("扫到了主代码里的功能类").hasSizeGreaterThanOrEqualTo(7);
+        assertThat(implementors).as("扫到了主代码里的功能类").hasSizeGreaterThanOrEqualTo(8);
         assertThat(f.features.stream().map(feature -> feature.getClass().getName()).toList())
                 .as("夹具的功能清单 = 主代码里全部 SceneFeature 实现类").containsExactlyInAnyOrderElementsOf(implementors);
     }
@@ -437,8 +451,8 @@ class InBattleGateMatrixTest {
         assertThat(row).as("%s 已注册，但不在 §7.13 的闸表里", key).isNotNull();
         Function<Subject, Message> request = requests().get(key);
         assertThat(request).as("%s 没有探测请求（新加方法要在 requests() 里补一行）", key).isNotNull();
-        Subject subject = subject(f);
-        Subject twin = subject(control);
+        Subject subject = subject(f, row);
+        Subject twin = subject(control, row);
         f.advance(1_000);
         control.advance(1_000);
         Outcome normal = send(twin, row, request);
@@ -477,7 +491,7 @@ class InBattleGateMatrixTest {
                 assertThat(BattleFixture.persistentState(player)).as("被闸拒的请求不改任何可持久化状态").isEqualTo(stateBefore);
                 assertThat(player.scene()).isSameAs(sceneBefore);
                 assertThat(inBattle.position()).isEqualTo(START);
-                assertThat(gateRejected).as("%s 恰好计一次 gate_rejects{%s}，别的闸不计（规格 §9）", key, gateOf(row))
+                assertThat(gateRejected).as("%s 恰好计一次 gate_rejects{%s}，别的闸不计（规格 §9 与装备扩展）", key, gateOf(row))
                         .isEqualTo(Map.of(gateOf(row), 1.0));
             }
         }
@@ -531,6 +545,14 @@ class InBattleGateMatrixTest {
 
         out.put(BAG + "GetBag", s -> GetBagRequest.newBuilder().setBagType(BagType.INVENTORY.code()).build());
         out.put(BAG + "SortBag", s -> SortBagRequest.newBuilder().setBagType(BagType.INVENTORY.code()).build());
+        out.put(BAG + "EquipItem", s -> com.game.proto.EquipItemRequest.newBuilder().setItemId(s.equipment().itemId()).build());
+        out.put(BAG + "UnequipItem", s -> com.game.proto.UnequipItemRequest.newBuilder().setItemId(s.equipment().itemId()).build());
+        out.put(BAG + "GmGrantItem", s -> com.game.proto.GmGrantItemRequest.newBuilder().setConfigId(s.equipment().configId()).setCount(1).build());
+        out.put(BAG + "EnhanceEquip", s -> com.game.proto.EnhanceEquipRequest.newBuilder().setItemId(s.equipment().itemId()).build());
+        out.put(BAG + "InlayGem", s -> com.game.proto.InlayGemRequest.newBuilder().setItemId(s.equipment().itemId())
+                .setSocket(s.equipment().socket()).setGemConfigId(s.equipment().gemConfigId()).build());
+        out.put(BAG + "RemoveGem", s -> com.game.proto.RemoveGemRequest.newBuilder().setItemId(s.equipment().itemId())
+                .setSocket(s.equipment().socket()).build());
 
         out.put(MISSION + "GetMissionList", s -> GetMissionListRequest.getDefaultInstance());
         // 接一条还没接过的任务；领的是已经做完、待领的那条（见 subject）
@@ -886,7 +908,51 @@ class InBattleGateMatrixTest {
         assertThat(player.missions().isAccepted(FRESH_MISSION)).isFalse();
         w.sink.clear();
         w.locks.clearCalls();
-        return new Subject(w, player, active, spare);
+        return new Subject(w, player, active, spare, null);
+    }
+
+    /** 装备探测只为对应六行准备合法资产；其他旧矩阵行的玩家状态保持原样。 */
+    private static Subject subject(BattleFixture w, Row row) {
+        Subject subject = subject(w);
+        if (!EQUIPMENT_METHODS.contains(row.method())) return subject;
+        ScenePlayer player = subject.player();
+        var tables = w.equipment.rules().tables();
+        var weapon = BattleFixture.CONFIG.item().all().stream().filter(item -> item.getEquipKind() != 0
+                && item.getMaxStackSize() == 1 && Integer.compareUnsigned(item.getEquipLevel(), LEVEL) <= 0
+                && (item.getEquipClass() == 0 || item.getEquipClass() == player.classId())
+                && !w.bags.tables().equipSlots(item.getEquipKind()).isEmpty()
+                && !tables.sockets(item.getEquipKind()).isEmpty()).findFirst().orElseThrow();
+        var socket = tables.sockets(weapon.getEquipKind()).stream().filter(candidate -> BattleFixture.CONFIG.equipGem().all().stream()
+                .anyMatch(gem -> gem.getGemType() != 0 && (candidate.getGemType() == 0 || candidate.getGemType() == gem.getGemType())))
+                .findFirst().orElseThrow();
+        var gem = BattleFixture.CONFIG.equipGem().all().stream().filter(candidate -> candidate.getGemType() != 0
+                && (socket.getGemType() == 0 || socket.getGemType() == candidate.getGemType())).findFirst().orElseThrow();
+        long itemId = grantProbeItem(w, player, weapon.getId(), 1);
+        if (row.method().equals("UnequipItem")) assertThat(w.equipment.equip(player, itemId).tip()).isZero();
+        if (row.method().equals("EnhanceEquip")) {
+            var enhance = tables.enhance(1);
+            assertThat(enhance).as("正式表提供可成功探测的第一档强化").isNotNull();
+            assertThat(enhance.getSuccessRate()).isNotZero();
+            if (enhance.getCostGold() > w.gold(player)) {
+                assertThat(w.currency.add(player, Wallet.GOLD, enhance.getCostGold() - w.gold(player), Reason.GM_GRANT).ok()).isTrue();
+            }
+            if (enhance.getMaterialId() != 0 && enhance.getMaterialCount() != 0) {
+                grantProbeItem(w, player, enhance.getMaterialId(), Integer.toUnsignedLong(enhance.getMaterialCount()));
+            }
+        }
+        if (row.method().equals("InlayGem") || row.method().equals("RemoveGem")) {
+            grantProbeItem(w, player, gem.getId(), 1);
+            if (row.method().equals("RemoveGem")) assertThat(w.equipment.inlay(player, itemId, socket.getSocket(), gem.getId()).tip()).isZero();
+        }
+        w.sink.clear();
+        return new Subject(w, player, subject.activePet(), subject.sparePet(),
+                new EquipmentProbe(itemId, weapon.getId(), gem.getId(), socket.getSocket()));
+    }
+
+    private static long grantProbeItem(BattleFixture w, ScenePlayer player, int config, long count) {
+        var result = w.bags.addItems(player, BagType.INVENTORY, Map.of(config, count), Reason.GM_GRANT, 0, "");
+        assertThat(result.tip()).as("装备探测资产入包 config=%s", config).isZero();
+        return result.written().getFirst().guids().getFirst();
     }
 
     private void freeze(ScenePlayer player, Phase phase) {
@@ -999,7 +1065,7 @@ class InBattleGateMatrixTest {
             case SKILL -> "skill";
             case ATTRIBUTE -> "attribute";
             case PET -> "pet";
-            case BAG -> "bag_sort";
+            case BAG -> EQUIPMENT_METHODS.contains(row.method()) ? "equipment" : "bag_sort";
             default -> throw new AssertionError(row.key() + " 是 GATED，但没有登记它计在哪个闸上（规格 §9 的 gate 取值）");
         };
     }

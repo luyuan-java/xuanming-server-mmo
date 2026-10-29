@@ -35,6 +35,7 @@ public final class WorldChannelMetrics {
     static final String TICK = "game.scene_manager.world.tick";
     static final String DIRECTORY_PUBLISH = "game.scene_manager.channel.directory_publish";
     static final String CHANNELS = "game.scene_manager.world.channels";
+    static final String NODES = "game.scene_manager.world.nodes";
     static final String AUTOSCALE = "game.scene_manager.world.autoscale";
     static final String REBALANCE_PENDING = "game.scene_manager.rebalance.pending";
     static final String REBALANCE_MIGRATIONS = "game.scene_manager.rebalance.migrations";
@@ -81,9 +82,17 @@ public final class WorldChannelMetrics {
     private final Map<Integer, Map<Integer, ChannelCounts>> channelsByZone = new ConcurrentHashMap<>();
     /** zone → [node_gone, better_home] 积压。 */
     private final Map<Integer, int[]> pendingByZone = new ConcurrentHashMap<>();
+    private final Map<Integer, int[]> nodesByZone = new ConcurrentHashMap<>();
 
     /** @param worldConfIds World 表的世界地图（{@code scene_config} 标签的全集，另加 {@code other}） */
     public WorldChannelMetrics(MeterRegistry registry, List<Integer> worldConfIds) {
+        String[] states = {"active", "evacuating", "stuck"};
+        for (int i = 0; i < states.length; i++) {
+            final int slot = i;
+            Gauge.builder(NODES, nodesByZone, values -> values.values().stream().mapToInt(counts -> counts[slot]).sum())
+                    .description("本副本领导区的节点状态；stuck为缺席过短宽限且租约仍持有或未知")
+                    .tag("state", states[i]).register(registry);
+        }
         Gauge.builder(LEADER_ZONES, leaderZones, AtomicInteger::get)
                 .description("本副本领导的 zone 数（0 = 跟随者）")
                 .register(registry);
@@ -181,6 +190,15 @@ public final class WorldChannelMetrics {
     public void clearZone(int zoneId) {
         channelsByZone.remove(zoneId);
         pendingByZone.remove(zoneId);
+        nodesByZone.remove(zoneId);
+    }
+
+    void nodes(int zoneId, DirectoryView directory, Map<Integer, Long> absent,
+               Map<Integer, Boolean> held, long deadGraceNanos) {
+        int[] counts = new int[3];
+        for (var node : directory.nodes().values()) counts[node.evacuating() ? 1 : 0]++;
+        absent.forEach((node, nanos) -> { if (nanos >= deadGraceNanos && held.getOrDefault(node, true)) counts[2]++; });
+        nodesByZone.put(zoneId, counts);
     }
 
     private void registerChannelGauges(MeterRegistry registry, int confKey, String confTag) {

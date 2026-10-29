@@ -16,14 +16,16 @@ import java.util.Map;
  * @param rebalanceDue      本拍要跑择机迁移（{@code coverage=hash}、预算 &gt; 0，且活节点集合变化或距上次满 {@code rebalance.interval}）
  * @param reservationCounts 择机迁移候选的未到期预占数（scene_id → 条数，{@link WorldRebalancePlanner#probe} 的结果去 Redis 读回）；
  *                          缺一个就不迁那一个（fail-closed）
+ * @param leaseHeld         缺席过短宽限的节点租约证据；false仅代表明确不存在，缺项与读错都按仍持有
  */
 public record PlanInput(int zoneId, WorldPlanSnapshot snapshot, DirectoryView directory, Map<Integer, Long> absentNanos,
                         List<Integer> liveNodes, boolean autoscaleDue, boolean rebalanceDue,
-                        Map<Long, Long> reservationCounts) {
+                        Map<Long, Long> reservationCounts, Map<Integer, Boolean> leaseHeld) {
 
     public PlanInput {
         absentNanos = Map.copyOf(absentNanos);
         liveNodes = ChannelPlacement.sortNodes(liveNodes);
         reservationCounts = Map.copyOf(reservationCounts);
+        leaseHeld = Map.copyOf(leaseHeld);
     }
 }

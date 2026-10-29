@@ -219,9 +219,9 @@ public class FriendConfiguration {
     /** 推荐（mutual / random 两条 SQL）与在线目录（SCAN {@code <ns>:presence:*} + player 表）。 */
     @Bean
     public RecommendService recommendService(DataSource dataSource, RedissonClient redis, RedisKeys keys, PlayerProfiles profiles,
-                                             PlayerPresenceDirectory presence, FriendMetrics metrics, FriendProperties props) {
+                                             PlayerPresenceDirectory presence, FriendMetrics metrics, FriendProperties props) throws SQLException {
         int queryTimeout = (int) Math.max(1, props.queryTimeout().toSeconds());
-        RecommendStore store = new RecommendStore(dataSource, queryTimeout, RecommendPivot::pick);
+        RecommendStore store = RecommendStore.forDatabase(dataSource, queryTimeout, RecommendPivot::pick);
         OnlineDirectory directory = new OnlineDirectory(new RedissonDirectoryRedis(redis, keys.presencePrefix()),
                 keys.presencePrefix(), profiles::loadStrictOnce);
         FriendProperties.Recommend r = props.recommend();

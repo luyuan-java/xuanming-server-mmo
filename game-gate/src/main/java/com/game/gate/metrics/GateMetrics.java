@@ -148,6 +148,8 @@ public final class GateMetrics {
         KICKED,
         /** 会话所在的 scene 链路断开。 */
         SCENE_LINK_DOWN,
+        SCENE_LINK_SUPERSEDED,
+        SCENE_ENTRY_FAILED,
         /** 服务端经推送通道踢下线（GatePush.kick_tip_id）。 */
         SERVER_KICK,
         /**
@@ -274,6 +276,8 @@ public final class GateMetrics {
     }
 
     private final MeterRegistry registry;
+    private final Counter linkIdleTimeouts;
+    private final Counter linksSuperseded;
     private final Map<HandshakeResult, Counter> handshakes;
     private final Map<DisconnectReason, Counter> disconnects;
     private final Map<ClientFrameException.Reason, Counter> invalidFrames;
@@ -292,6 +296,8 @@ public final class GateMetrics {
 
     public GateMetrics(MeterRegistry registry) {
         this.registry = registry;
+        linkIdleTimeouts = registry.counter("game.gate.link.idle.timeouts");
+        linksSuperseded = registry.counter("game.gate.scene.links.superseded");
         this.handshakes = counters(HandshakeResult.class, HANDSHAKES, "result", "gate 令牌握手结果");
         this.disconnects = counters(DisconnectReason.class, DISCONNECTS, "reason", "gate 主动断开的客户端连接");
         this.invalidFrames = counters(ClientFrameException.Reason.class, INVALID_FRAMES, "reason",
@@ -440,9 +446,19 @@ public final class GateMetrics {
         linkEvents.get(event).increment();
     }
 
+    public void linkIdleTimeout() { linkIdleTimeouts.increment(); }
+    public void linkSuperseded() { linksSuperseded.increment(); }
+
     /** 跨节点换图改绑的一个结局（见 {@link SceneTransferResult} 的计数口径）。 */
     public void sceneTransfer(SceneTransferResult result) {
         sceneTransfers.get(result).increment();
+    }
+
+    public enum EntryRetryOutcome { DEFERRED, RECOVERED, EXHAUSTED, CANCELLED }
+
+    /** 每个结果仅一个低基数标签，不带玩家、会话、节点身份。 */
+    public void entryRetry(EntryRetryOutcome outcome) {
+        registry.counter("game.gate.scene.entry.retries", "result", outcome.name().toLowerCase(java.util.Locale.ROOT)).increment();
     }
 
     /** 一次重定向的结局（{@code game.gate.redirects{source, result}}，见 {@link RedirectResult} 的计数口径）。 */

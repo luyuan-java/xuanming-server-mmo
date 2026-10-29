@@ -65,4 +65,14 @@ public final class AuditTopics {
     public List<TopicSpec> all(int generation) {
         return List.of(transactionLog(generation), playerSnapshot(generation));
     }
+
+    /** 单 broker 保留原规格；多同步副本显式声明持久性，不能依赖 broker 的缺省值。 */
+    public List<TopicSpec> all(int generation, int minInSyncReplicas) {
+        if (minInSyncReplicas < 1) throw new IllegalArgumentException("minInSyncReplicas 必须至少为 1");
+        if (minInSyncReplicas == 1) return all(generation);
+        Map<String, String> configs = new java.util.HashMap<>(RETENTION);
+        configs.put(AuditTopicDurability.MIN_ISR, Integer.toString(minInSyncReplicas));
+        configs.put(AuditTopicDurability.UNCLEAN_ELECTION, "false");
+        return all(generation).stream().map(spec -> new TopicSpec(spec.name(), spec.partitions(), configs)).toList();
+    }
 }

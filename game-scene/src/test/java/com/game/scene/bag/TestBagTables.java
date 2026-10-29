@@ -13,4 +13,9 @@ public final class TestBagTables {
     public static BagTables of(Map<Integer, ItemSpec> items, Map<Integer, List<Integer>> equipSlots) {
         return new BagTables(items, equipSlots);
     }
+
+    public static BagTables of(Map<Integer, ItemSpec> items, Map<Integer, List<Integer>> equipSlots,
+                               com.game.scene.equip.EquipmentRules equipment) {
+        return new BagTables(items, equipSlots, java.util.Set.of(), equipment);
+    }
 }

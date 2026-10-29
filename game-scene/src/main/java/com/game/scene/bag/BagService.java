@@ -47,6 +47,24 @@ public final class BagService {
         return tables;
     }
 
+    /** 装备取石只准备候选入包，沿用封禁、铸号与容量规则；此处不写玩家、不发审计。 */
+    public Bag.AddResult prepareEquipmentReturn(ScenePlayer player, com.game.scene.player.PlayerBags candidate, int config) {
+        if (!writable(player) || globalBlocks.blocksItem(config)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
+        return candidate.bag(BagType.INVENTORY).add(Map.of(config, 1L), tables, guids);
+    }
+
+    /** 完整候选已提交后的材料/宝石流水；旁路失败不能把成功的资产变更误报成可重试。 */
+    public void auditEquipment(ScenePlayer player, java.util.List<Bag.Drawn> removed, java.util.List<Bag.Written> gained,
+                               AssetAudit.Reason reason, long equipmentId, String extra) {
+        for (var row : removed) try {
+            audit.itemDestroyed(player.playerId(), row.guid(), row.configId(), row.count(), reason, equipmentId, extra);
+        } catch (RuntimeException failure) { transferAuditFailure(equipmentId, failure); }
+        for (var row : gained) try {
+            audit.itemGained(player.playerId(), row.guids().getFirst(), row.configId(), row.count(), reason, equipmentId, extra);
+            anomalies.itemGained(player, row.configId(), row.count());
+        } catch (RuntimeException failure) { transferAuditFailure(equipmentId, failure); }
+    }
+
     /** 多种叠加物和完整唯一实例一起规划；失败不改变玩家，成功后由资产通道在同一逻辑线程提交。 */
     public final class PreparedTransfer {
         private final ScenePlayer player;
@@ -99,7 +117,8 @@ public final class BagService {
         if (!writable(player)) return failedTransfer(player, REFUSED);
         for (var entry : counts.entrySet()) {
             var spec = tables.item(entry.getKey());
-            if (spec == null || !spec.stackable() || entry.getValue() <= 0 || bag.total(entry.getKey()) < entry.getValue()) {
+            if (spec == null || !spec.stackable() || entry.getValue() <= 0 || bag.total(entry.getKey()) < entry.getValue()
+                    || bag.items().stream().anyMatch(item -> item.configId() == entry.getKey() && item.equipment() != null)) {
                 return failedTransfer(player, com.game.table.AssetErrorTip.asset_error.kAssetInvalidBundle_VALUE);
             }
         }
@@ -159,7 +178,7 @@ public final class BagService {
         }
         // 不把未来版本实例当普通数量扣减；无关opaque实例仍由原候选逐字保留。
         for(var item:snapshot.getItemsList())if(consumed.containsKey(item.getConfigId())
-                &&(!item.getUnknownFields().asMap().isEmpty()||item.getItemUuid()==0||item.getItemUuid()==-1L||item.getStackSize()==0))
+                &&(item.hasEquipment()||!item.getUnknownFields().asMap().isEmpty()||item.getItemUuid()==0||item.getItemUuid()==-1L||item.getStackSize()==0))
             return failedTransfer(player,Bag.INVALID_PARAM);
         var candidate=com.game.scene.player.PlayerBags.restore(snapshot);candidate.normalize(tables);
         var inventory=candidate.bag(BagType.INVENTORY);

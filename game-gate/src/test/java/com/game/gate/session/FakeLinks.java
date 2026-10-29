@@ -13,6 +13,14 @@ final class FakeLinks implements SceneLinks {
 
     final List<Sent> sent = new ArrayList<>();
     long generation = 11;
+    long lastRequestedGeneration;
+
+    @Override
+    public long send(int sceneNodeId, long expectedGeneration, NodeLinkFrame frame) {
+        lastRequestedGeneration = expectedGeneration;
+        if (expectedGeneration != generation) return 0;
+        return send(sceneNodeId, frame);
+    }
 
     @Override
     public long send(int sceneNodeId, NodeLinkFrame frame) {

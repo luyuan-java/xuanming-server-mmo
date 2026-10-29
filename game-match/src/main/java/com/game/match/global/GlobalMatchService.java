@@ -525,7 +525,13 @@ public final class GlobalMatchService implements AutoCloseable {
             default -> {try{store.unknown(f);}catch(RuntimeException stale){log.debug("全球工作租约已转移");}}
         }
     }
-    private void abort(GlobalFormationRow f)throws Exception {
+    void abort(GlobalFormationRow f)throws Exception {
+        if(f.getCreateRequest().isEmpty()){
+            // 空内存快照不是证明。Store 在同一 SQL 事务核工作代次和原件后收尾，失租旧 worker 再也写不出 Create。
+            var uncreated=store.finishUncreated(f);
+            cancelPrepared(uncreated);
+            return;
+        }
         store.checkWork(f);
         invoke(f,s->s.destroyBattle(DestroyBattleRequest.newBuilder().setBattleId(f.getBattleId()).setPlacementOperationId(f.getOperationId())
                 .setTargetInstanceId(f.getInstanceId()).setReason("global_match_abort_if_absent").build()));
@@ -539,9 +545,13 @@ public final class GlobalMatchService implements AutoCloseable {
         store.checkWork(f);
         var latest=store.formation(f.getBattleId());
         // 只有固定执行端确认墓碑后才能解冻、回队或结束票据。
-        for(var endpoint:latest.getPreparedList())scenes.cancel(endpoint.getPlayerId(),f.getBattleId(),new ScenePreparer.Endpoint(endpoint.getZoneId(),
-                endpoint.getNodeId(),new NodeRpcClients.Target(endpoint.getHost(),endpoint.getPort(),endpoint.getInstanceId())));
+        cancelPrepared(latest);
         store.finish(f,false);
+    }
+    private void cancelPrepared(GlobalFormationRow f){
+        // 已持久原端点 + 原 battle_id；失败由备战期限 reaper 收尾，迟到取消不能解开新局。
+        for(var endpoint:f.getPreparedList())scenes.cancel(endpoint.getPlayerId(),f.getBattleId(),new ScenePreparer.Endpoint(endpoint.getZoneId(),
+                endpoint.getNodeId(),new NodeRpcClients.Target(endpoint.getHost(),endpoint.getPort(),endpoint.getInstanceId())));
     }
     private QueryBattleCreationResponse query(GlobalFormationRow f)throws Exception {
         return invoke(f,s->s.queryBattleCreation(QueryBattleCreationRequest.newBuilder().setBattleId(f.getBattleId()).setPlacementOperationId(f.getOperationId())

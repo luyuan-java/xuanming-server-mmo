@@ -31,7 +31,8 @@ import java.util.function.Function;
  * <ol>
  *   <li><b>P1 孤儿 conf</b>（{@code cleanup-orphans}）：World 表里没有的图，其 ACTIVE 记录转 DRAINING(ORPHAN)，期望数 / 冷却字段删除
  *       （基线 orphan_cleanup.go:42-90、:201-204 是直接删整组 + DestroyScene；Java 走排空，节点把在场玩家同节点改派到默认大世界）。</li>
- *   <li><b>P2 死节点</b>：缺席满 {@code dead-node-grace} 的节点，删掉它名下全部记录（D12）；容量由 P5 用新号在活节点补出（D4）。</li>
+ *   <li><b>P2 缺席节点</b>：短宽限后要有租约不存在的正面证据；仍持有/未知等长宽限。只重铺容量，不接管玩家。</li>
+ *   <li><b>P2b 疏散节点</b>：在场且 evacuating 的 ACTIVE 记录转 DRAIN_EVACUATE，P5同批补建。</li>
  *   <li><b>P3 排空推进</b>（与扩缩容开关无关，D19，修 B6）：节点已应用到这条记录的版本、且目录里已没有这个场景 → 删记录（收尾）；
  *       排空满 {@code autoscale.drain-timeout}：缩容排空回滚 ACTIVE 并期望数 +1（D10、Q5，修 B4），其它原因只告警。</li>
  *   <li><b>P4 自动扩缩容</b>（开启且到期）：{@link WorldAutoscaler}。放在补建之前，扩容新增的期望数在同一次写入里就被 P5 实现。</li>
@@ -45,6 +46,7 @@ import java.util.function.Function;
  * <p>线程安全：无可变字段，可在任意线程调用（实际只在控制面 tick 线程上用）。
  */
 public final class WorldChannelPlanner {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(WorldChannelPlanner.class);
 
     private final WorldChannelProperties props;
     private final List<Integer> worldConfs;
@@ -91,6 +93,7 @@ public final class WorldChannelPlanner {
         }
         orphans(draft);
         deadNodes(draft);
+        evacuatingNodes(draft);
         drains(draft);
         MirrorSources mirrors = mirrorSources.apply(input.directory());
         if (input.autoscaleDue() && props.autoscale().enabled()) {
@@ -137,7 +140,10 @@ public final class WorldChannelPlanner {
             if (absent == null) {
                 continue;
             }
-            if (absent >= graceNanos) {
+            boolean held = draft.input.leaseHeld().getOrDefault(channel.getNodeId(), true);
+            if (absent >= graceNanos && (!held || absent >= props.stuckNodeGrace().toNanos())) {
+                if (held) log.error("节点长时间缺席但租约仍在或未知，仅重铺容量、不接管玩家 zone={} node={} scene={}",
+                        draft.input.zoneId(), channel.getNodeId(), Long.toUnsignedString(channel.getSceneId()));
                 draft.finish(channel, true);
             } else {
                 draft.nodeGonePending++;
@@ -146,6 +152,17 @@ public final class WorldChannelPlanner {
     }
 
     // ---------------------------------------------------------------- P3
+
+    /** P2b：疏散节点仍在目录中，不能当作死亡；转排空后 P5 在同一个 CAS 批次补建。 */
+    private void evacuatingNodes(PlanDraft draft) {
+        for (WorldChannel channel : List.copyOf(draft.channels.values())) {
+            DirectoryView.Node node = draft.directory().node(channel.getNodeId());
+            if (node != null && node.evacuating() && channel.getState() == ChannelState.CHANNEL_ACTIVE
+                    && draft.writable(channel)) {
+                draft.put(draft.draining(channel, DrainReason.DRAIN_EVACUATE));
+            }
+        }
+    }
 
     private void drains(PlanDraft draft) {
         long timeoutMs = props.autoscale().drainTimeout().toMillis();
@@ -168,7 +185,8 @@ public final class WorldChannelPlanner {
             }
             int conf = channel.getSceneConfigId();
             if (channel.getDrainReason() == DrainReason.DRAIN_SCALE_IN && draft.isWorld(conf)) {
-                revert(draft, channel);
+                if (node.evacuating()) draft.put(channel.toBuilder().setDrainReason(DrainReason.DRAIN_EVACUATE).build());
+                else revert(draft, channel);
             } else {
                 draft.anomalies.add("排空超时仍未收尾 scene=" + Long.toUnsignedString(channel.getSceneId()) + " "
                         + PlanDraft.shortText(channel) + "（不可分配，等节点排空或宽限期后清理）");

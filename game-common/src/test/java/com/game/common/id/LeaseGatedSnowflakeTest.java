@@ -9,6 +9,19 @@ import org.junit.jupiter.api.Test;
 
 class LeaseGatedSnowflakeTest {
 
+    @Test void 换worker必须先失去旧租约_换后仅使用新worker() {
+        var oldValid = new AtomicBoolean(true);
+        var ids = new LeaseGatedSnowflake(new Snowflake(7), oldValid::get);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> ids.replace(new Snowflake(8), () -> true))
+                .isInstanceOf(IllegalStateException.class);
+        oldValid.set(false);
+        assertThat(ids.tryNext()).isEmpty();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> ids.replace(new Snowflake(8), () -> false))
+                .isInstanceOf(IllegalArgumentException.class);
+        ids.replace(new Snowflake(8), () -> true);
+        assertThat(Snowflake.workerOf(ids.tryNext().orElseThrow())).isEqualTo(8);
+    }
+
     @Test
     void 租约有效时发号_带租约的_worker() {
         AtomicLong clock = new AtomicLong(Snowflake.DEFAULT_EPOCH_MS + 1000);

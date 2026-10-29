@@ -169,6 +169,9 @@ validate_namespace() {
 export GAME_NAMESPACE="${GAME_NAMESPACE-game}"
 validate_namespace "$GAME_NAMESPACE" || exit 1
 echo "部署命名空间 GAME_NAMESPACE=$GAME_NAMESPACE"
+# 全部 Java 服务共享同一事务权威库；不让旧模块的 3306 默认与新模块的 4000 默认分裂。
+# 本机 TiDB 与该部署库必须先初始化；已有外部连接串原样保留，不关闭强读门禁。
+export SPRING_DATASOURCE_URL="${SPRING_DATASOURCE_URL:-jdbc:mysql://127.0.0.1:4000/${GAME_NAMESPACE}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=10000&useAffectedRows=true}"
 
 # 本检出里已有切片在跑（run/pids/*.pid 里有活进程）就拒绝启动，在写 run/game-namespace 与任何 PID 文件之前。否则：t1 的切片正在跑时，
 # 在一个新开、没设 GAME_NAMESPACE 的 shell 里误执行本脚本，记录先被改成 game，第一个进程随后因端口冲突退出（它的 PID 文件也被覆盖），
@@ -263,6 +266,19 @@ fi
 unset battle_secret_trimmed gate_secret_trimmed
 export GAME_BATTLE_TOKEN_SECRET
 
+# 新域的调用密钥各自生成，调用方与提供方继承同一值；商城四个信任域不得共用。
+for secret_name in GAME_ASSET_OP_SECRET_MAIL GAME_ASSET_OP_SECRET_TRADE MAIL_PRODUCER_SECRET_RANK RANK_PRODUCER_SECRET_MATCH \
+    MMORPG_INTERNAL_SECRET_SCENE GAME_MALL_GATEWAY_SECRET GAME_MALL_PAYMENT_SECRET GAME_MALL_DELIVERY_SECRET GAME_MALL_ADMIN_SECRET; do
+  if [[ -z "${!secret_name:-}" ]]; then
+    printf -v "$secret_name" '%s' "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    (umask 077; printf '%s' "${!secret_name}" > "run/${secret_name,,}")
+  fi
+  export "$secret_name"
+done
+export GAME_TRADE_MALL_ENABLED="${GAME_TRADE_MALL_ENABLED:-true}"
+export GAME_TRADE_COMMERCE_ENABLED="${GAME_TRADE_COMMERCE_ENABLED:-true}"
+export GAME_DATA_MALL_ADMIN_URL="${GAME_DATA_MALL_ADMIN_URL:-http://127.0.0.1:18120}"
+
 # 对局结果 topic 的代次（批次 6.4，match-spec §5.4）：game-battle 往 game-battle-result-g<代次> 生产、game-match 从同一个 topic 消费后更新评分，
 # 两边各自读这个变量、缺省都是 1；这里显式导出，免得只给其中一个进程设了别的值（两边不一致 = 结果发进一个没人消费的 topic，评分静默不更新）。
 export GAME_BATTLE_RESULT_TOPIC_GENERATION="${GAME_BATTLE_RESULT_TOPIC_GENERATION:-1}"
@@ -309,6 +325,7 @@ SERVICES=(
                           # Dubbo 提供方，必须排在两者之前（文件头「启动次序的一条硬约束」）
   "game-team 20885"
   "game-guild 20886"
+  "game-mall 18120"         # 商城独立进程，冷库先显式执行其全新安装迁移；先于交易的商城交付调用方
   "game-trade 20887"        # 聚宝斋；播种接口在管理端口 18111（Tomcat 先于 Dubbo 暴露就绪，等 20887 即可）
   "game-mail 20916"         # 邮件：先等 gate 直连的 Dubbo 端口
   "game-rank 20917"         # 排行榜：先于 gate 启动

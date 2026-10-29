@@ -84,8 +84,8 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
     private final TravelRouting travelRouting;
     private final MeterRegistry meterRegistry;
     private final Map<AssignResult, Timer> timers = new EnumMap<>(AssignResult.class);
-    private final Map<SwitchTargetSelector.Result, Timer> switchTimers = new EnumMap<>(SwitchTargetSelector.Result.class);
-    private final Timer switchErrorTimer;
+    private record SwitchMetric(String reason, String result) { }
+    private final Map<SwitchMetric, Timer> switchTimers = new HashMap<>();
     /** 种类标签 → 结果标签 → 计时器（3 × 5 个，启动时全部注册，序列稳定）。 */
     private final Map<String, Map<String, Timer>> instanceTimers = new HashMap<>();
 
@@ -107,10 +107,13 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
                     .serviceLevelObjectives(LATENCY_BUCKETS)
                     .register(meterRegistry));
         }
-        for (SwitchTargetSelector.Result result : SwitchTargetSelector.Result.values()) {
-            switchTimers.put(result, switchTimer(result.name().toLowerCase(Locale.ROOT)));
+        for (String reason : List.of("player", "evacuate")) {
+            for (SwitchTargetSelector.Result result : SwitchTargetSelector.Result.values()) {
+                String outcome = result.name().toLowerCase(Locale.ROOT);
+                switchTimers.put(new SwitchMetric(reason, outcome), switchTimer(reason, outcome));
+            }
+            switchTimers.put(new SwitchMetric(reason, SWITCH_ERROR), switchTimer(reason, SWITCH_ERROR));
         }
-        switchErrorTimer = switchTimer(SWITCH_ERROR);
         for (String kind : List.of(kindTag(ChannelKind.CHANNEL_KIND_MIRROR), kindTag(ChannelKind.CHANNEL_KIND_DUNGEON), KIND_OTHER)) {
             Map<String, Timer> byResult = new HashMap<>();
             for (InstanceIdIssuer.Result result : InstanceIdIssuer.Result.values()) {
@@ -140,10 +143,11 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
         };
     }
 
-    private Timer switchTimer(String result) {
+    private Timer switchTimer(String reason, String result) {
         return Timer.builder(SWITCH_METRIC)
                 .description("在线换图选跨节点目标的结果与耗时（含一次场景目录读取与软预占）")
                 .tag("result", result)
+                .tag("reason", reason)
                 .serviceLevelObjectives(LATENCY_BUCKETS)
                 .register(meterRegistry);
     }
@@ -171,12 +175,13 @@ public class SceneDirectoryProvider implements SceneDirectoryService {
     @Override
     public CompletableFuture<SelectSwitchTargetResponse> selectSwitchTarget(SelectSwitchTargetRequest request) {
         Timer.Sample sample = Timer.start(meterRegistry);
+        String reason = request.getReason() == com.game.api.proto.SwitchTargetReason.SWITCH_TARGET_EVACUATE ? "evacuate" : "player";
         try {
             SwitchTargetSelector.Selection selection = switchSelector.select(request);
-            sample.stop(switchTimers.get(selection.result()));
+            sample.stop(switchTimers.get(new SwitchMetric(reason, selection.result().name().toLowerCase(Locale.ROOT))));
             return CompletableFuture.completedFuture(selection.response());
         } catch (RuntimeException e) {
-            sample.stop(switchErrorTimer);
+            sample.stop(switchTimers.get(new SwitchMetric(reason, SWITCH_ERROR)));
             log.error("换图选目标失败：场景目录或预占存储不可用 zone={} player={}", request.getZoneId(), request.getPlayerId(), e);
             return CompletableFuture.failedFuture(
                     new IllegalStateException("场景目录暂不可用: " + e.getClass().getSimpleName()));

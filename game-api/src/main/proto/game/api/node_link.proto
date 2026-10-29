@@ -20,6 +20,8 @@ message NodeLinkFrame {
     ToClient to_client = 7;
     PlayerKicked player_kicked = 8;
     PlayerTransfer player_transfer = 9;
+    LinkPing ping = 10;
+    LinkPong pong = 11;
   }
 }
 
@@ -36,6 +38,8 @@ message LinkHello {
   // gate 节点号租约的防护代次（fencing token）：同一 (zone, gate 节点号) 每被占用一次单调加一（Redis INCR）。
   // scene 对同一 gate 节点号只接受代次不低于现有链路的新链路：丢了租约的旧 gate 进程顶不掉新持有者的链路。
   uint64 lease_epoch = 6;
+  // 0 为旧版本；双方回显后才启用应用层心跳和读空闲。
+  uint32 ping_interval_ms = 7;
 }
 
 // scene → gate：握手结果；鉴权失败、zone 不符等情况 accepted=false 并随后断开。
@@ -45,7 +49,12 @@ message LinkHelloAck {
   uint32 zone_id = 3;
   bool accepted = 4;
   string reason = 5;
+  uint64 scene_lease_epoch = 6;
+  uint32 ping_interval_ms = 7;
 }
+
+message LinkPing { uint64 seq = 1; }
+message LinkPong { uint64 seq = 1; }
 
 // gate → scene：把会话上的玩家送进场景。
 message PlayerEnter {

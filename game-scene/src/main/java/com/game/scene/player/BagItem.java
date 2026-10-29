@@ -1,6 +1,7 @@
 package com.game.scene.player;
 
 import com.google.protobuf.UnknownFieldSet;
+import com.game.player.store.state.EquipmentState;
 import java.util.Comparator;
 
 /**
@@ -19,6 +20,7 @@ public final class BagItem {
     private final UnknownFieldSet unknownFields;
     private long size;
     private int slot;
+    private EquipmentState equipment;
 
     BagItem(long guid, int configId, long size, long acquireSeq, UnknownFieldSet unknownFields) {
         this.guid = guid;
@@ -28,6 +30,11 @@ public final class BagItem {
         this.unknownFields = unknownFields;
         this.slot = -1;
     }
+
+    /** 不可变存档值；null 与空值严格区分，空值代表已完成初始化。 */
+    public EquipmentState equipment() { return equipment; }
+
+    public void equipment(EquipmentState equipment) { this.equipment = equipment; }
 
     public long guid() {
         return guid;

@@ -14,7 +14,7 @@
 #      game-scene 的 reaper 间隔是切片缺省的 2s（battle-after-store 等的就是它；生产缺省 30s 时要多等半分钟）。
 #   2. 在**启动切片的同一个 shell**里执行，或导出同一组环境变量：GAME_GATE_TOKEN_SECRET、GAME_LOGIN_DEV_PASSWORD、
 #      GAME_NODE_LINK_SECRET、GAME_DUBBO_SECRET，以及当时显式设过的任何一个 GAME_*（运行模式、reaper 间隔……）。SQL 凭据由每个新 boot 的私有目录及完整 runtime 配置提供。重启出来的进程读的是本脚本的环境，
-#      环境不同它就和被杀的那个不是同一种配置。start-slice.sh 自己生成的四个秘密（运维令牌、GM 停机密钥、帮会资产签名密钥、战斗票据密钥）
+#      环境不同它就和被杀的那个不是同一种配置。start-slice.sh 自己生成的秘密（运维令牌、GM 停机密钥、各域签名密钥、战斗票据密钥）
 #      当时没设环境变量的话，本脚本从 run/ 下的文件读回同一个值；当时是从环境变量来的，这里也必须有同一个环境变量。
 #      部署命名空间 GAME_NAMESPACE 不靠环境：start-slice.sh 把切片生效的值写在 run/game-namespace，本脚本读回；这里设了而与它不同、
 #      或两头都没有时拒绝（退出 2），不会以缺省的 game 重启另一个命名空间的切片。
@@ -142,6 +142,9 @@ export GAME_RUN_MODE="${GAME_RUN_MODE:-dev}"
 export GAME_SCENE_MIRROR_IDLE_TIMEOUT="${GAME_SCENE_MIRROR_IDLE_TIMEOUT:-5s}"
 export GAME_SCENE_INSTANCE_RECLAIM_GRACE="${GAME_SCENE_INSTANCE_RECLAIM_GRACE:-10s}"
 export GAME_SCENE_BATTLE_REAPER_INTERVAL="${GAME_SCENE_BATTLE_REAPER_INTERVAL:-2s}"
+export GAME_TRADE_MALL_ENABLED="${GAME_TRADE_MALL_ENABLED:-true}"
+export GAME_TRADE_COMMERCE_ENABLED="${GAME_TRADE_COMMERCE_ENABLED:-true}"
+export GAME_DATA_MALL_ADMIN_URL="${GAME_DATA_MALL_ADMIN_URL:-http://127.0.0.1:18120}"
 # 对局结果 topic 的代次（game-battle 生产、game-match 消费）：重启出来的 game-battle 必须与还在跑的 game-match 用同一个代次
 export GAME_BATTLE_RESULT_TOPIC_GENERATION="${GAME_BATTLE_RESULT_TOPIC_GENERATION:-1}"
 export GAME_DATA_OPS_ENABLED="${GAME_DATA_OPS_ENABLED:-true}"
@@ -175,6 +178,12 @@ load_secret GAME_ADMIN_TOKEN run/game-admin-token || exit 2
 load_secret GAME_GM_ADMIN_SECRET run/game-gm-admin-secret || exit 2
 load_secret GAME_ASSET_OP_SECRET_GUILD run/game-asset-op-secret-guild || exit 2
 load_secret GAME_BATTLE_TOKEN_SECRET run/game-battle-token-secret || exit 2
+
+# 与 start-slice 的新域秘密清单一致；只读回原值，不能为重启进程重新生成签名密钥。
+for secret_name in GAME_ASSET_OP_SECRET_MAIL GAME_ASSET_OP_SECRET_TRADE MAIL_PRODUCER_SECRET_RANK RANK_PRODUCER_SECRET_MATCH \
+    MMORPG_INTERNAL_SECRET_SCENE GAME_MALL_GATEWAY_SECRET GAME_MALL_PAYMENT_SECRET GAME_MALL_DELIVERY_SECRET GAME_MALL_ADMIN_SECRET; do
+  load_secret "$secret_name" "run/${secret_name,,}" || exit 2
+done
 
 # ---------------------------------------------------------------- 与 start-slice.sh 逐字相同的部分（端口表、启动与就绪判断）
 

@@ -166,8 +166,9 @@ class BagFeatureTest {
 
         assertThat(bag.getItemsList()).extracting(BagItemInfo::getItemId)
                 .containsExactly(3L, 1L << 60 | 77, -5L);
-        assertThat(bag.getItems(0)).isEqualTo(BagItemInfo.newBuilder().setItemId(3).setConfigId(1).setCount(1)
-                .setMaxStack(1).setEquipKind(1).build());
+        var expected = BagItemInfo.newBuilder().setItemId(3).setConfigId(1).setCount(1).setMaxStack(1).setEquipKind(1);
+        new com.game.scene.equip.EquipmentDisplay(tables.equipmentRules()).item(player().bags().bag(BagType.INVENTORY).item(3), expected);
+        assertThat(bag.getItems(0)).isEqualTo(expected.build());
         assertThat(bag.getItems(1).getMaxStack()).isZero();
         assertThat(bag.getItems(1).getEquipKind()).isZero();
         assertThat(bag.getItems(2).getMaxStack()).isEqualTo(999);
@@ -262,12 +263,11 @@ class BagFeatureTest {
     }
 
     /**
-     * 批次 0.3（契约同步到 mmorpg 73b852f3）新增的 EquipItem / UnequipItem / GmGrantItem（GM 指令，夹具是 dev 放行）Java 还没实现
-     * （PARITY「装备属性系统」行，Java 待做）：走分发入口的缺省处理——回显请求号、应答内 {@code error_message{1006}}、不带 bag / equipment，
-     * 背包与装备栏都不动。实现时把这条换成真实用例。
+     * 只装 BagFeature 的组件边界：装备方法由独立 EquipmentFeature 注册。
+     * 缺该 feature 时仍走缺省处理，完整装备分发链另由 EquipmentFeatureTest 覆盖。
      */
     @Test
-    void 装备穿脱与GM发物品尚未实现_回应答内1006_背包不动() throws Exception {
+    void 仅注册背包Feature时装备方法回应答内1006_背包不动() throws Exception {
         start(null);
         give(BagType.INVENTORY, Map.of(1, 1L));
         BagInfo before = getBag(0).getBag();

@@ -83,7 +83,7 @@ class SceneDirectoryProviderTest {
     }
 
     private long switches(String result) {
-        return meters.get(SceneDirectoryProvider.SWITCH_METRIC).tag("result", result).timer().count();
+        return meters.get(SceneDirectoryProvider.SWITCH_METRIC).tag("reason", "player").tag("result", result).timer().count();
     }
 
     private SceneDirectoryProvider provider(SceneNodeSource source) {
@@ -203,12 +203,19 @@ class SceneDirectoryProviderTest {
         provider(zone -> List.of());
 
         assertThat(meters.get(SceneDirectoryProvider.SWITCH_METRIC).timers())
+                .filteredOn(t -> "player".equals(t.getId().getTag("reason")))
                 .extracting(t -> t.getId().getTag("result"))
                 .containsExactlyInAnyOrder("ok", "not_found", "draining", "bad_request", "error",
                         "channel_closing", "channel_conf_mismatch", "channel_disabled", "channel_full",
                         "channel_cooldown", "channel_unavailable", "channel_read_error");
         assertThat(meters.get(SceneDirectoryProvider.SWITCH_METRIC).timers())
-                .allSatisfy(t -> assertThat(t.getId().getTags()).hasSize(1));
+                .hasSize(24).allSatisfy(t -> assertThat(t.getId().getTags()).hasSize(2));
+        assertThat(meters.get(SceneDirectoryProvider.SWITCH_METRIC).timers())
+                .filteredOn(t -> "evacuate".equals(t.getId().getTag("reason")))
+                .extracting(t -> t.getId().getTag("result"))
+                .containsExactlyInAnyOrder("ok", "not_found", "draining", "bad_request", "error",
+                        "channel_closing", "channel_conf_mismatch", "channel_disabled", "channel_full",
+                        "channel_cooldown", "channel_unavailable", "channel_read_error");
     }
 
     // ---------- 镜像 / 副本实例取号（批次 5.3，dungeon-mirror-spec §6.6、§8.2、§12.3 SceneDirectoryProviderTest） ----------

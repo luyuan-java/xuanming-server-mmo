@@ -76,6 +76,7 @@ class ObserverRpcLoopbackTest {
     static final class ScriptedBattle implements BattleNodeService {
         final List<AddObserverRequest> adds = new CopyOnWriteArrayList<>();
         final List<RemoveObserverRequest> removes = new CopyOnWriteArrayList<>();
+        final AtomicReference<com.game.proto.RemoveObserverResponse> removeOverride = new AtomicReference<>();
 
         @Override
         public CompletableFuture<AddObserverResponse> addObserver(AddObserverRequest request) {
@@ -93,6 +94,7 @@ class ObserverRpcLoopbackTest {
         @Override
         public CompletableFuture<com.game.proto.RemoveObserverResponse> removeObserver(RemoveObserverRequest request) {
             removes.add(request);
+            if (removeOverride.get() != null) return CompletableFuture.completedFuture(removeOverride.get());
             return request.getBattleId() == HANGING_BATTLE ? new CompletableFuture<>() : CompletableFuture.completedFuture(com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(request.getSpectatorOperationId()).setTargetInstanceId(request.getTargetInstanceId()).build());
         }
 
@@ -234,9 +236,14 @@ class ObserverRpcLoopbackTest {
     private static AddObserverRequest add(long battleId) {
         return AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(OBSERVER)
                 .setRouting(BattleRouting.newBuilder().setSessionId(4242).setGateNodeId(1).setGateInstanceId("gate-inst-z2").setZoneId(2))
-                .setObserverName("acc-1001").build();
+                .setObserverName("acc-1001").setSpectatorOperationId("5ed1cb26-e53c-4e42-8d85-ea8dc6f8129c")
+                .setAdmitBeforeMs(1_800_000_025_000L).setTargetInstanceId("inst-a").build();
     }
 
+    private static LocalObserverOperation original(BattlePlacement placement) {
+        return new LocalObserverOperation(placement, add(placement.getBattleId()).toBuilder()
+                .setTargetInstanceId(placement.getBattleInstanceId()).build());
+    }
     private double count(String method, String result) {
         return meters.get("game.match.observer.rpc").tag("method", method).tag("result", result).counter().count();
     }
@@ -283,17 +290,38 @@ class ObserverRpcLoopbackTest {
         BattlePlacement placement = placement(LIVE_BATTLE, port, "inst-a");
 
         Outcome sync = onVirtualThread(
-                () -> dialer.remove(placement, OBSERVER, SpectateRules.REASON_ENTER_GATHER, Duration.ofSeconds(3), Deadline.after(3_000)));
-        Outcome async = dialer.removeAsync(placement, OBSERVER, SpectateRules.REASON_CONCURRENT_QUEUE).get(30, TimeUnit.SECONDS);
+                () -> dialer.remove(original(placement), SpectateRules.REASON_ENTER_GATHER, Duration.ofSeconds(3), Deadline.after(3_000)));
+        Outcome async = dialer.removeAsync(original(placement), SpectateRules.REASON_CONCURRENT_QUEUE).get(30, TimeUnit.SECONDS);
 
         assertThat(sync).isEqualTo(new Outcome.Replied(0));
         assertThat(async).isEqualTo(new Outcome.Replied(0));
         assertThat(removed()).containsExactly(
-                RemoveObserverRequest.newBuilder().setBattleId(LIVE_BATTLE).setObserverPlayerId(OBSERVER).setReason("enter_gather").build(),
-                RemoveObserverRequest.newBuilder().setBattleId(LIVE_BATTLE).setObserverPlayerId(OBSERVER).setReason("concurrent_queue").build());
+                original(placement).remove("enter_gather"),
+                original(placement).remove("concurrent_queue"));
         assertThat(count("remove", "replied")).isEqualTo(2.0);
     }
 
+    @Test
+    void 真Triple回包缺少或错配原操作证明_不能被适配成取消成功() throws Exception {
+        var target = placement(LIVE_BATTLE, port, "inst-a");
+        var original = original(target);
+        var valid = com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true)
+                .setSpectatorOperationId(original.add().getSpectatorOperationId()).setTargetInstanceId("inst-a").build();
+        try {
+            for (var invalid : List.of(valid.toBuilder().setCancelled(false).build(),
+                    valid.toBuilder().setSpectatorOperationId("old-operation").build(),
+                    valid.toBuilder().setTargetInstanceId("new-instance").build())) {
+                battle.removeOverride.set(invalid);
+                var result = onVirtualThread(() -> dialer().remove(original, "rewatch", Duration.ofSeconds(3), Deadline.after(4_000)));
+                assertThat(result).isInstanceOf(Outcome.Unknown.class);
+            }
+            assertThat(removed()).hasSize(3).allSatisfy(request -> assertThat(request).isEqualTo(original.remove("rewatch")));
+            assertThat(count("remove", "unknown")).isEqualTo(3.0);
+            assertThat(count("remove", "replied")).isZero();
+        } finally {
+            battle.removeOverride.set(null);
+        }
+    }
     // ================================================================ 缺 MAC：被拒
 
     @Test
@@ -311,7 +339,7 @@ class ObserverRpcLoopbackTest {
 
         Outcome add = onVirtualThread(() -> dialer.add(placement, add(LIVE_BATTLE), Duration.ofSeconds(3), Deadline.after(4_300)));
         Outcome remove = onVirtualThread(
-                () -> dialer.remove(placement, OBSERVER, SpectateRules.REASON_REWATCH, Duration.ofSeconds(3), Deadline.after(3_000)));
+                () -> dialer.remove(original(placement), SpectateRules.REASON_REWATCH, Duration.ofSeconds(3), Deadline.after(3_000)));
 
         assertThat(add).as("对端回的传输层错误：%s", add).isInstanceOf(Outcome.Unknown.class);
         assertThat(remove).as("%s", remove).isInstanceOf(Outcome.Unknown.class);
@@ -335,7 +363,7 @@ class ObserverRpcLoopbackTest {
         long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
         directory.add(FakeBattleNodes.node(9, "inst-dead", deadPort));
         Outcome sameInstance = onVirtualThread(
-                () -> dialer.remove(placement, OBSERVER, SpectateRules.REASON_ENTER_GATHER, Duration.ofSeconds(3), Deadline.after(3_000)));
+                () -> dialer.remove(original(placement), SpectateRules.REASON_ENTER_GATHER, Duration.ofSeconds(3), Deadline.after(3_000)));
 
         assertThat(absent).as("建连失败，目录里没有 9 号：%s", absent).isInstanceOf(Outcome.NotDelivered.class);
         assertThat(sameInstance).as("9 号还是记录里的那个实例：%s", sameInstance).isInstanceOf(Outcome.NotDelivered.class);
@@ -401,7 +429,7 @@ class ObserverRpcLoopbackTest {
         // 超时故意给得很长（30 s），与硬截止（2 s）拉开距离：断言不依赖窄的时间窗；2 s 也足够请求到达对端
         long startedNanos = System.nanoTime();
         Outcome remove = onVirtualThread(
-                () -> dialer.remove(placement, OBSERVER, SpectateRules.REASON_ENTER_GATHER, Duration.ofSeconds(30), Deadline.after(2_000)));
+                () -> dialer.remove(original(placement), SpectateRules.REASON_ENTER_GATHER, Duration.ofSeconds(30), Deadline.after(2_000)));
         long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
 
         assertThat(remove).as("%s", remove).isInstanceOf(Outcome.Unknown.class);

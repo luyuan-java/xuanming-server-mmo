@@ -371,16 +371,16 @@ class SceneMetricsTest {
             }
             String[] transferResults = {"handed_off", "lease_too_short", "fenced", "aborted_in_place",
                     "lost_unknown", "left", "taken_over", "link_gone", "superseded"};
-            for (String reason : new String[] {"player", "travel"}) {
+            for (String reason : new String[] {"player", "travel", "evacuate"}) {
                 for (String result : transferResults) {
                     assertThat(before).contains(
                             "game_scene_transfers_total{reason=\"" + reason + "\",result=\"" + result + "\"} 0");
                 }
             }
             assertThat(before.lines().filter(line -> line.startsWith("game_scene_transfers_total{")).count())
-                    .as("两个 reason × 九个 result，不多不少").isEqualTo(2L * transferResults.length);
+                    .as("三个 reason × 九个 result，不多不少").isEqualTo(3L * transferResults.length);
             assertThat(SceneMetrics.TransferResult.values()).hasSize(transferResults.length);
-            assertThat(SceneMetrics.TransferReason.values()).hasSize(2);
+            assertThat(SceneMetrics.TransferReason.values()).hasSize(3);
             for (String result : new String[] {"ok", "failed"}) {
                 assertThat(before).contains("game_scene_transfer_enters_total{result=\"" + result + "\"} 0");
             }
@@ -416,7 +416,7 @@ class SceneMetricsTest {
                     "game_scene_transfer_enters_total{result=\"ok\"} 1",
                     "game_scene_transfer_post_freeze_mutations_total 1");
             assertThat(after.lines().filter(line -> line.startsWith("game_scene_transfers_total{")).count())
-                    .as("发射不新增时间序列").isEqualTo(2L * transferResults.length);
+                    .as("发射不新增时间序列").isEqualTo(3L * transferResults.length);
             assertThat(labelNames(after, "game_scene_transfer")).containsExactlyInAnyOrder("reason", "result", "le");
             assertThat(labelNames(after, "game_scene_transfers_total")).as("交出结局只有 reason 与 result 两个标签")
                     .containsExactlyInAnyOrder("reason", "result");
@@ -483,17 +483,17 @@ class SceneMetricsTest {
      * 6.3 是八个闸；批次 5.4 加第九个 {@code zone_travel}（226 被战斗在途拒回 3025，码与 63 的 3023 不同，裁决 J4）。
      */
     @Test
-    void 战斗在途闸指标_九个闸启动即注册_现有指标补的in_battle取值() {
+    void 战斗在途闸指标_十个闸启动即注册_现有指标补的in_battle取值() {
         PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
         try {
             SceneMetrics exported = new SceneMetrics(prometheus);
             String before = prometheus.scrape();
-            String[] gates = {"enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default", "zone_travel"};
+            String[] gates = {"enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default", "zone_travel", "equipment"};
             for (String gate : gates) {
                 assertThat(before).contains("game_scene_battle_gate_rejects_total{gate=\"" + gate + "\"} 0");
             }
             assertThat(before.lines().filter(line -> line.startsWith("game_scene_battle_gate_rejects_total{")).count())
-                    .as("恰好规格列的八个闸加 5.4 的 zone_travel").isEqualTo(gates.length);
+                    .as("恰好规格列的八个闸加 zone_travel 与 equipment 扩展").isEqualTo(gates.length);
             assertThat(SceneMetrics.BattleGate.values()).hasSize(gates.length);
             assertThat(before).contains(
                     "game_scene_moves_total{result=\"in_battle\"} 0",

@@ -229,7 +229,7 @@ public final class WorldChannelCoordinator {
         Map<Integer, Long> absent = state.absence.update(referenced, view.nodes().keySet(), now);
         List<Integer> live = new ArrayList<>();
         for (int nodeId : view.nodes().keySet()) {
-            if (availability.acceptsNewChannels(zoneId, nodeId)) {
+            if (!view.node(nodeId).evacuating() && availability.acceptsNewChannels(zoneId, nodeId)) {
                 live.add(nodeId);
             }
         }
@@ -239,9 +239,20 @@ public final class WorldChannelCoordinator {
                 && (!state.autoscaleRan || now - state.lastAutoscaleNanos >= props.autoscale().checkInterval().toNanos());
         boolean rebalanceDue = rebalanceDue(state, live, now);
         Map<Long, Long> reservations = rebalanceDue ? reservationCounts(zoneId, snapshot, view, live) : Map.of();
+        Map<Integer, Boolean> leaseHeld = new HashMap<>();
+        for (var missing : absent.entrySet()) {
+            if (missing.getValue() < props.deadNodeGrace().toNanos()) continue;
+            boolean held = true;
+            try { held = store.sceneNodeLeaseHeld(zoneId, missing.getKey()); }
+            catch (RuntimeException failure) {
+                log.warn("缺席节点租约读失败，按仍持有保留至stuck宽限 zone={} node={}",
+                        Integer.toUnsignedString(zoneId), Integer.toUnsignedString(missing.getKey()), failure);
+            }
+            leaseHeld.put(missing.getKey(), held);
+        }
 
         PlanResult result = planner.plan(new PlanInput(zoneId, snapshot, view, absent, live, autoscaleDue, rebalanceDue,
-                reservations));
+                reservations, leaseHeld));
         reportAnomalies(zoneId, state, result.anomalies());
 
         if (!result.batch().isEmpty()) {
@@ -273,6 +284,7 @@ public final class WorldChannelCoordinator {
             }
         }
         commit(zoneId, state, result, now, autoscaleDue, rebalanceDue, live);
+        metrics.nodes(zoneId, view, absent, leaseHeld, props.deadNodeGrace().toNanos());
         if (result.noLease()) {
             return TickResult.NO_LEASE;
         }

@@ -107,6 +107,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     private final AtomicInteger roomCount = new AtomicInteger();
     private final RoomTable<BattleRoom> rooms;
     private final ObserverOperationLedger observerOperations;
+    private CompletableFuture<ShutdownReport> shutdown;
+    private Cancellable shutdownTimeout=Cancellable.NONE;
+    private boolean outcomeCommitsStopped;
 
     public BattleRoomServiceImpl(RoomDependencies deps) {
         this.deps = Objects.requireNonNull(deps, "deps");
@@ -152,6 +155,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         long battleId = request.getBattleId();
         // battle_id 在第一行就回填，每条路径都带（room.cpp:490）
         CreateBattleResponse.Builder response = CreateBattleResponse.newBuilder().setBattleId(battleId);
+        if(shutdown!=null)return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
 
         // 0 幂等：match 补偿路径可能重试；不比较请求内容、零副作用（B7）
         if (rooms.find(battleId) != null) {
@@ -289,6 +293,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     @Override
     public void abortAll(String reason) {
         scheduler.assertInLoop();
+        if(shutdown!=null&&!shutdown.isDone())finishShutdown();
         if (rooms.isEmpty()) {
             return;
         }
@@ -309,9 +314,60 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
 
     @Override
+    public CompletableFuture<ShutdownReport> beginShutdown(String reason,java.time.Duration budget){
+        scheduler.assertInLoop();
+        if(budget.isNegative())throw new IllegalArgumentException("停服预算不得为负");
+        if(shutdown!=null)return shutdown;
+        shutdown=new CompletableFuture<>();
+        log.info("停服补交原SQL终局 rooms={} reason={} budget={}",rooms.size(),reason,budget);
+        // 先停止普通回合和直连；v1 待确认原件保留在房间内，不能借停服把未知改成作废。
+        for(long battleId:rooms.ids()){
+            var room=rooms.find(battleId);if(room==null)continue;
+            room.cancelTimers();
+            if(room.pendingCompletion==null)notifySpectateEndAndClose(room,eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED,
+                    eBattleOutcome.BATTLE_OUTCOME_ONGOING,Disconnect.SHUTDOWN);
+            closeDirectConnections(room,Disconnect.SHUTDOWN);
+            if(room.pendingCompletion!=null&&room.originalCreate.getOutcomeProtocolVersion()==1){
+                if(!budget.isZero())attemptResultCommit(room,room.pendingCompletion);
+            }else{
+                eraseRoom(room,RoomEnd.ABORTED);
+            }
+        }
+        if(budget.isZero()||pendingSqlOutcomes().isEmpty())finishShutdown();
+        else shutdownTimeout=scheduler.after(budget.toMillis(),this::finishShutdown);
+        return shutdown;
+    }
+
+    private List<UnconfirmedOutcome> pendingSqlOutcomes(){
+        List<UnconfirmedOutcome> pending=new ArrayList<>();
+        for(long battleId:rooms.ids()){
+            var room=rooms.find(battleId);
+            if(room!=null&&room.pendingCompletion!=null&&room.originalCreate.getOutcomeProtocolVersion()==1){
+                var p=room.pendingCompletion;
+                pending.add(new UnconfirmedOutcome(battleId,room.originalCreate.getPlacementOperationId(),
+                        room.originalCreate.getTargetInstanceId(),p.failures,p.inFlight));
+            }
+        }
+        return pending;
+    }
+
+    private void finishShutdown(){
+        if(shutdown==null||shutdown.isDone())return;
+        outcomeCommitsStopped=true;shutdownTimeout.cancel();
+        var pending=pendingSqlOutcomes();
+        for(var original:pending){
+            var room=rooms.find(original.battleId());room.cancelTimers();
+            log.error("停服终局仍未知 battle_id={} operation_id={} target_instance={} failures={} in_flight={}，保留SQL权威裁决，不宣布作废",
+                    Long.toUnsignedString(original.battleId()),original.operationId(),original.instanceId(),original.failures(),original.inFlight());
+        }
+        shutdown.complete(new ShutdownReport(pending));
+    }
+
+    @Override
     public IssueBattleTicketResponse issueBattleTicket(IssueBattleTicketRequest request) {
         scheduler.assertInLoop();
         IssueBattleTicketResponse.Builder response = IssueBattleTicketResponse.newBuilder();
+        if(shutdown!=null)return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
         long playerId = request.getPlayerId();
         if(!request.getTargetInstanceId().isEmpty()&&!deps.identity().instanceId().equals(request.getTargetInstanceId()))return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
         if (playerId == 0) {
@@ -351,6 +407,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     public AddObserverResponse addObserver(AddObserverRequest request) {
         scheduler.assertInLoop();
         AddObserverResponse.Builder response = AddObserverResponse.newBuilder();
+        if(shutdown!=null)return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
         long battleId = request.getBattleId();
         long observerId = request.getObserverPlayerId();
         try{
@@ -524,7 +581,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
 
     @Override public boolean currentDirect(com.game.proto.BattleTicketPayload payload,DirectLink link){
         scheduler.assertInLoop();
-        if(payload==null||link==null||!deps.identity().instanceId().equals(payload.getBattleInstanceId()))return false;
+        if(shutdown!=null||payload==null||link==null||!deps.identity().instanceId().equals(payload.getBattleInstanceId()))return false;
         var room=rooms.find(payload.getBattleId());
         if(room==null||room.directByPlayer.get(payload.getPlayerId())!=link)return false;
         return switch(payload.getRole()){
@@ -552,6 +609,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
     private OptionalInt attachDirectChecked(long battleId,long playerId,eBattleTicketRole role,DirectLink link){
         scheduler.assertInLoop();
+        if(shutdown!=null)return OptionalInt.empty();
         BattleRoom room = rooms.find(battleId);
         if (room == null || link == null) {
             return OptionalInt.empty();
@@ -861,7 +919,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
 
     private void attemptResultCommit(BattleRoom room,BattleRoom.PendingCompletion pending){
-        if(!isCurrent(room)||room.pendingCompletion!=pending||pending.inFlight)return;
+        if(outcomeCommitsStopped||!isCurrent(room)||room.pendingCompletion!=pending||pending.inFlight)return;
         pending.inFlight=true;
         CompletableFuture<Void> acknowledged;
         try{
@@ -889,14 +947,15 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
 
     private void onResultCommit(BattleRoom room,BattleRoom.PendingCompletion pending,Throwable error){
         scheduler.assertInLoop();
-        if(!isCurrent(room)||room.pendingCompletion!=pending)return;
+        if(outcomeCommitsStopped||!isCurrent(room)||room.pendingCompletion!=pending)return;
         pending.inFlight=false;
         Throwable actual=error;
         while(actual instanceof java.util.concurrent.CompletionException&&actual.getCause()!=null)actual=actual.getCause();
         if(actual instanceof com.game.battle.port.BattleResultSink.OutcomeAborted){
             // SQL围栏已胜出。不得个人直投、公开奖励或重算结果；房间可以安全摘除。
-            notifySpectateEndAndClose(room,eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED,eBattleOutcome.BATTLE_OUTCOME_ONGOING,Disconnect.BATTLE_CLOSED);
-            closeDirectConnections(room,Disconnect.BATTLE_CLOSED);eraseRoom(room,pending.endReason);return;
+            if(shutdown==null)notifySpectateEndAndClose(room,eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED,eBattleOutcome.BATTLE_OUTCOME_ONGOING,Disconnect.BATTLE_CLOSED);
+            closeDirectConnections(room,Disconnect.BATTLE_CLOSED);eraseRoom(room,pending.endReason);
+            if(shutdown!=null&&pendingSqlOutcomes().isEmpty())finishShutdown();return;
         }
         if(error!=null){
             int delaySeconds=Math.min(30,1<<Math.min(pending.failures,5));
@@ -908,9 +967,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 if(self!=null&&target!=null)self.attemptResultCommit(target,pending);
             });return;
         }
-        if(pending.finalTurn!=null)broadcastTurnResult(room,pending.finalTurn);
-        finishBattle(room,pending.event.getOutcome(),pending.spectateReason,pending.event);
+        if(shutdown==null){
+            if(pending.finalTurn!=null)broadcastTurnResult(room,pending.finalTurn);
+            finishBattle(room,pending.event.getOutcome(),pending.spectateReason,pending.event);
+        }else log.info("停服原终局已获SQL COMPLETE battle_id={}，个人奖励由权威Inbox继续投递",Long.toUnsignedString(room.battleId));
         eraseRoom(room,pending.endReason);
+        if(shutdown!=null&&pendingSqlOutcomes().isEmpty())finishShutdown();
     }
 
     /**

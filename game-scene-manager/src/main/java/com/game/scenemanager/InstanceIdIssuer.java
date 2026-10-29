@@ -11,7 +11,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * 镜像 / 副本实例的取号与放置（批次 5.3，dungeon-mirror-spec §6.6；对应基线 SM createInstance 的「选点 + 发号」两步，
- * go/scene_manager/internal/logic/createscenelogic.go:454-472、:546-551）。<b>无状态</b>：不读也不写 Redis（发号租约的续期在
+ * go/scene_manager/internal/logic/createscenelogic.go:454-472、:546-551）。<b>无状态</b>：经可用性读侧核对单节点目录，不写 Redis（发号租约的续期在
  * {@link SceneIdAllocator} 自己的线程上）、不写软预占、不调 scene，没有可回滚的东西（D1、D3）。
  *
  * <ol>
@@ -20,7 +20,7 @@ import org.slf4j.LoggerFactory;
  *       {@code player_id} 或带了 {@code dungeon_config_id}；DUNGEON 缺 {@code dungeon_config_id} 或带了 {@code source_scene_id} / {@code mirror_config_id}。
  *       <b>不复核配表与源</b>：节点是权威，已在逻辑线程上校验过；再读可能过时的目录只会多出误拒（与 5.2 {@code selectSwitchTarget} 的「只做选择」口径一致）。</li>
  *   <li><b>放置</b>：恒为发起节点（D2：发起节点就是源节点，它当然活着；基线缺省配置下同样恒共置）。5.5 的节点级排空标记接在
- *       {@link NodeAvailability}：发起节点不接新实例时回 {@link #TIP_NODE_UNAVAILABLE}（5.3 装配 {@link NodeAvailability#ALL}，不会出现）。</li>
+ *       {@link NodeAvailability}：发起节点疏散或目录不存在时回 {@link #TIP_NODE_UNAVAILABLE}，读取故障作为调用失败。</li>
  *   <li><b>发号</b>：{@link SceneIdSource#tryNext()}（生产 = {@link SceneIdAllocator}，与主世界频道同一个全服租约 worker，Q8）；
  *       为空（租约无效 / 已丢失）→ {@link Result#NO_LEASE}，提供方把它转成调用失败（scene 推 23 {1003}，Q12），不是业务拒绝。</li>
  * </ol>
@@ -58,7 +58,7 @@ public final class InstanceIdIssuer {
 
     /**
      * @param ids          全服 scene_id 发号（生产 {@link SceneIdAllocator}）
-     * @param availability 节点能否接新实例（5.3 用 {@link NodeAvailability#ALL}；实现须线程安全，这里在 Dubbo 业务线程上调）
+     * @param availability 节点能否接新实例（生产单条有界目录读取；实现须线程安全，这里在 Dubbo 业务线程上调）
      */
     public InstanceIdIssuer(SceneIdSource ids, NodeAvailability availability) {
         this.ids = ids;
@@ -76,7 +76,8 @@ public final class InstanceIdIssuer {
             return reject(Result.BAD_REQUEST, SceneAssigner.TIP_BAD_REQUEST);
         }
         int nodeId = request.getRequesterSceneNodeId();
-        if (!availability.acceptsNewChannels(request.getZoneId(), nodeId)) {
+        if (!availability.acceptsNewInstance(request.getZoneId(), nodeId,
+                request.getRequesterInstanceId(), request.getRequesterLeaseEpoch())) {
             log.info("发起节点不接新实例，拒绝取号 zone={} node={} player={} kind={}", Integer.toUnsignedString(request.getZoneId()),
                     Integer.toUnsignedString(nodeId), Long.toUnsignedString(request.getPlayerId()), request.getKind());
             return reject(Result.NODE_UNAVAILABLE, TIP_NODE_UNAVAILABLE);

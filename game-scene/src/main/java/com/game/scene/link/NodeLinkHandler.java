@@ -8,6 +8,9 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.handler.timeout.IdleState;
+import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.handler.timeout.IdleStateHandler;
 import java.time.Duration;
 import java.time.InstantSource;
 import java.util.concurrent.Executor;
@@ -63,6 +66,8 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
     private long linkId;
     private ScheduledFuture<?> handshakeTimer;
     private boolean readPaused;
+    private int pingInterval;
+    private static final String IDLE_HANDLER = "gateLinkIdle";
 
     // 背压计数：I/O 线程加、逻辑线程减。
     private final AtomicInteger pendingFrames = new AtomicInteger();
@@ -121,6 +126,15 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
                     ctx.close();
                     return;
                 }
+                if (frame.hasPing()) {
+                    if (pingInterval != 0) {
+                        if (!ctx.channel().isWritable()) { ctx.close(); return; }
+                        ctx.writeAndFlush(NodeLinkFrame.newBuilder().setPong(com.game.api.proto.LinkPong.newBuilder()
+                                .setSeq(frame.getPing().getSeq())).build());
+                        metrics.linkFrameOut(NodeLinkFrame.BodyCase.PONG);
+                    }
+                    return;
+                }
                 long id = linkId;
                 postFrame(ctx,frame.toByteArray(), () -> inbound.frameReceived(id, frame));
             }
@@ -154,6 +168,11 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
         }
         cancelHandshakeTimer();
         state = State.OPEN;
+        pingInterval = LinkIdentity.negotiatedPing(hello.getPingIntervalMs());
+        if (hello.getPingIntervalMs() != 0 && pingInterval == 0)
+            log.warn("gate 心跳间隔超出 [1000,30000]，不启用读空闲 gate_node={} interval={}",
+                    hello.getGateNodeId(), Integer.toUnsignedString(hello.getPingIntervalMs()));
+        if (pingInterval != 0) installIdle(ctx);
         linkId = linkIds.incrementAndGet();
         long id = linkId;
         Channel channel = ctx.channel();
@@ -186,6 +205,20 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         log.warn("gate 链路异常，断开 link={} remote={}", linkId, ctx.channel().remoteAddress(), cause);
         ctx.close();
+    }
+
+    private void installIdle(ChannelHandlerContext ctx) {
+        ctx.pipeline().addBefore(ctx.name(), IDLE_HANDLER, new IdleStateHandler(3L * pingInterval, 0, 0, TimeUnit.MILLISECONDS));
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object event) throws Exception {
+        if (event instanceof IdleStateEvent idle && idle.state() == IdleState.READER_IDLE && state == State.OPEN && pingInterval != 0) {
+            if (readPaused) metrics.linkIdleIgnored();
+            else { metrics.linkIdleClosed(); ctx.close(); }
+            return;
+        }
+        super.userEventTriggered(ctx, event);
     }
 
     /** 当前已投递、逻辑线程还没执行完的业务帧数（测试与诊断用）。 */
@@ -238,6 +271,11 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
         if (readPaused && pendingFrames.get() <= resumePendingFrames) {
             readPaused = false;
             pausedFlag = false;
+            // 重新开始完整的空闲预算，不能在恢复读和下一次 readComplete 之间沿用暂停前的过期时钟。
+            if (pingInterval != 0 && ctx.pipeline().get(IDLE_HANDLER) != null) {
+                ctx.pipeline().remove(IDLE_HANDLER);
+                installIdle(ctx);
+            }
             ctx.channel().config().setAutoRead(true);
             log.info("场景逻辑线程积压回落，恢复读取 gate 链路 link={} 积压帧={}", linkId, pendingFrames.get());
         }

@@ -37,4 +37,15 @@ class FriendPropertiesTest {
         assertThatThrownBy(() -> new FriendProperties.Sweep("", null, null, null)).hasMessageContaining("sweep.mode");
         assertThatThrownBy(() -> new FriendProperties.Sweep(null, null, 36501, null)).hasMessageContaining("retention-days");
     }
+
+    @Test
+    void 推荐默认排除预算与所需返回数放得进固定窗口() {
+        FriendProperties p = props(null, null, null);
+        // 自己、好友、双向申请、自己的拉黑、客户端 exclude、上一级已选最多 limit-1 人，再留够 limit。
+        long needed = 1L + p.maxFriends() + p.maxPendingRequests() + p.maxIncomingRequests() + p.maxBlocks()
+                + p.recommend().maxExclude() + (p.recommend().maxLimit() - 1) + p.recommend().maxLimit();
+        assertThat(needed).isEqualTo(754);
+        assertThat(needed).isLessThanOrEqualTo(com.game.friend.store.RecommendStore.ANCHOR_WINDOW);
+        // 拉黑我的人数没有上限，因此这不是必然凑满的承诺，不能用继续扫描来补足。
+    }
 }

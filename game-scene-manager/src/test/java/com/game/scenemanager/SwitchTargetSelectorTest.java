@@ -314,6 +314,49 @@ class SwitchTargetSelectorTest {
         assertRejected(byMap(17, 1, 101), Result.NOT_FOUND, SceneAssigner.TIP_NO_SCENE);
     }
 
+    @Test void 疏散剔除整个来源节点_先同图再默认图且只预占最终选中的一个() {
+        nodes.add(node(1, scene(101, 2, 0), scene(102, 2, 0), scene(103, 1, 0)));
+        nodes.add(node(2, scene(201, 1, 0)));
+        var evacuation = request(0, 2, 1, 101).toBuilder().setExcludeFromNode(true)
+                .setFallbackSceneConfigId(1).setReason(com.game.api.proto.SwitchTargetReason.SWITCH_TARGET_EVACUATE).build();
+        assertChosen(selector.select(evacuation), 2, 201, 1);
+        assertThat(store.reservationCount(ZONE, 102)).isZero();
+        assertThat(store.reservationCount(ZONE, 103)).isZero();
+        assertThat(store.reservationCount(ZONE, 201)).isEqualTo(1);
+        nodes.add(node(3, scene(301, 2, 20)));
+        assertChosen(selector.select(evacuation), 3, 301, 2);
+        assertThat(store.reservationCount(ZONE, 301)).isEqualTo(1);
+        assertThat(store.reservationCount(ZONE, 201)).isEqualTo(1);
+    }
+
+    @Test void 疏散所有目标都没有时不预占也不退回源节点() {
+        nodes.add(node(1, scene(101, 2, 0), scene(102, 1, 0)));
+        var evacuation = request(0, 2, 1, 101).toBuilder().setExcludeFromNode(true)
+                .setFallbackSceneConfigId(1).setReason(com.game.api.proto.SwitchTargetReason.SWITCH_TARGET_EVACUATE).build();
+        assertRejected(selector.select(evacuation), Result.NOT_FOUND, SceneAssigner.TIP_NO_SCENE);
+        assertThat(store.reservationCount(ZONE, 101)).isZero();
+        assertThat(store.reservationCount(ZONE, 102)).isZero();
+    }
+
+    @Test void 疏散参数与普通切线意图不能混用_校验先于读取() {
+        var base = request(0, 2, 1, 101).toBuilder().setExcludeFromNode(true)
+                .setReason(com.game.api.proto.SwitchTargetReason.SWITCH_TARGET_EVACUATE);
+        for (var bad : List.of(base.clone().setWantSceneId(202).build(), base.clone().setClientChannelPick(true).build(),
+                base.clone().setExcludeFromNode(false).build(), base.clone().setFromSceneNodeId(0).build(),
+                base.clone().setFallbackSceneConfigId(3).build(), base.clone().setReasonValue(99).build(),
+                request(0, 2, 1, 101).toBuilder().setFallbackSceneConfigId(1).build())) {
+            assertRejected(selector.select(bad), Result.BAD_REQUEST, SceneAssigner.TIP_BAD_REQUEST);
+        }
+        assertThat(directoryReads).isZero();
+    }
+
+    @Test void 节点疏散中玩家显式指定本地场景也被exclude剔除() {
+        nodes.add(node(1, scene(101, 1, 0), scene(102, 1, 0)));
+        assertRejected(selector.select(request(102, 1, 1, 101).toBuilder().setExcludeFromNode(true).build()),
+                Result.NOT_FOUND, SceneAssigner.TIP_NO_SCENE);
+        assertThat(store.reservationCount(ZONE, 102)).isZero();
+    }
+
     // ---------- helpers ----------
 
     private static SceneEntry mirror(long sceneId, int configId, long source, boolean draining) {

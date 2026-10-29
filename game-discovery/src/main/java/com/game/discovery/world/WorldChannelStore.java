@@ -77,4 +77,9 @@ public interface WorldChannelStore {
 
     /** {@code SMEMBERS game:world:zones}，按无符号升序；解析不了的成员跳过并告警。 */
     List<Integer> zones();
+
+    /** 缺席节点的独立租约证据；默认未知按仍持有处理。生产逐键读取，不参加世界计划的同槽写入。 */
+    default boolean sceneNodeLeaseHeld(int zoneId, int nodeId) {
+        return true;
+    }
 }

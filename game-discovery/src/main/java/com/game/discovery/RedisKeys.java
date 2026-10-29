@@ -111,6 +111,11 @@ public final class RedisKeys {
         return prefix + "gate-drained:" + zoneId + ":" + nodeId;
     }
 
+    /** 场景节点运维疏散标记：Redis TIME 秒:实例，必须带 TTL，game-data 写、scene 读。 */
+    public String sceneEvacuating(int zoneId, int nodeId) {
+        return prefix + "scene-evacuating:" + zoneId + ":" + nodeId;
+    }
+
     /**
      * 好友列表缓存 {@code game:friend:{<player_id>}:list}（game-friend 读写）：JSON 数组 {@code [{friend_player_id, since_ms}]}，
      * 带 TTL；同一玩家的键共用 hash tag，上 Cluster 时两条 Lua 碰到的键同槽。玩家号按无符号十进制。
@@ -314,6 +319,26 @@ public final class RedisKeys {
     public String worldPlanVersion(int zoneId) {
         return worldZonePrefix(zoneId) + "ver";
     }
+
+    /** 永久退役原件，与本区计划、目录和预占同槽；不设TTL、不作为可删除热数据。 */
+    public String worldRetirement(int zoneId) { return worldZonePrefix(zoneId) + "retired"; }
+
+    /** 已支持永久退役协议的目录版本；用于维护工具的部署前置核验。 */
+    public String zoneDirectoryFormat(int zoneId) { return worldZonePrefix(zoneId) + "directory-format"; }
+
+    public String zoneNodeDirectory(String nodeType, int zoneId) { return worldZonePrefix(zoneId) + "nodes:" + nodeType; }
+
+    public String zoneNodeExpiry(String nodeType, int zoneId) { return worldZonePrefix(zoneId) + "node-expiry:" + nodeType; }
+
+    /** 已迁入v2的节点号水位；条目过期也不恢复旧目录原件，不清理。 */
+    public String zoneNodeSeen(String nodeType, int zoneId) { return worldZonePrefix(zoneId) + "node-seen:" + nodeType; }
+
+    /** 所有曾使用v2目录的类型，退休脚本核对完整集合后同拍检查各类型活节点。 */
+    public String zoneNodeTypes(int zoneId) { return worldZonePrefix(zoneId) + "node-types"; }
+
+    public String worldZoneKeysPrefix(int zoneId) { return worldZonePrefix(zoneId); }
+
+    public String nodeIdsInZone(int zoneId) { return prefix + "node-id:*:" + zoneId + ":*"; }
 
     /**
      * 频道计划的分 zone 领导锁 {@code game:world:{z:<zone>}:leader}（STRING：持有者令牌 {@code <instanceId>:<uuid>}，PX = 锁 TTL，持有者续期）。

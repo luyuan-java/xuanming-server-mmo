@@ -72,6 +72,10 @@ final class TransferFixture {
     }
 
     TransferFixture(TeamFollow teamFollow, PlayerChannels channels) {
+        this(teamFollow, channels, EvacuationPolicy.DEFAULT);
+    }
+
+    TransferFixture(TeamFollow teamFollow, PlayerChannels channels, EvacuationPolicy evacuation) {
         PlayerLocations recording = new PlayerLocations() {
             @Override
             public void entered(ScenePlayer player) {
@@ -100,7 +104,7 @@ final class TransferFixture {
         world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, sink, repo, new AtomicLong(5000)::incrementAndGet,
                 clock, new SceneMetrics(meters), PlayerInitializer.NONE,
                 (save, cause) -> snapshots.add(new Snapshot(save.playerId(), save.ownerEpoch(), cause)), recording,
-                teamFollow, new CrossNodeSwitch(LOCAL_NODE, targets, renewed::add, RESOLVE_TIMEOUT, TOMBSTONE_TTL, channels));
+                teamFollow, new CrossNodeSwitch(LOCAL_NODE, targets, renewed::add, RESOLVE_TIMEOUT, TOMBSTONE_TTL, channels, evacuation));
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS);
         scene1 = world.createScene(1);
         scene2 = world.createScene(2);

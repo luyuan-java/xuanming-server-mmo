@@ -56,6 +56,11 @@ game:
     database: 12
   data:
     admin-token: ${GAME_ADMIN_TOKEN:}
+    # 一致性巡检使用独立只读账号；未配置时报告 UNKNOWN，不借用业务数据源。
+    consistency:
+      jdbc-url: ${GAME_DATA_CONSISTENCY_JDBC_URL:}
+      username: ${GAME_DATA_CONSISTENCY_USERNAME:}
+      password: ${GAME_DATA_CONSISTENCY_PASSWORD:}
     # 仅固定商城目录命令与只读订单；签名密钥留在服务端，未配置地址不影响其他运维接口。
     mall-admin:
       base-url: ${GAME_DATA_MALL_ADMIN_URL:}

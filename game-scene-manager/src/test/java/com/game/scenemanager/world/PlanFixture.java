@@ -31,6 +31,7 @@ final class PlanFixture {
     final Map<Integer, Long> cooldown = new HashMap<>();
     final Map<Integer, DirectoryView.Node> nodes = new HashMap<>();
     final Map<Integer, Long> absentNanos = new HashMap<>();
+    final Map<Integer, Boolean> nodeLeases = new HashMap<>();
     final Map<Long, Long> reservations = new HashMap<>();
     /** null = 目录在场的全部节点。 */
     List<Integer> live;
@@ -104,6 +105,7 @@ final class PlanFixture {
 
     PlanFixture absent(int nodeId, Duration forHowLong) {
         absentNanos.put(nodeId, forHowLong.toNanos());
+        nodeLeases.put(nodeId, false); // 原判死用例明确提供租约已不在的证据；仍持有/未知由新用例覆盖。
         return this;
     }
 
@@ -161,9 +163,9 @@ final class PlanFixture {
 
     PlanInput input() {
         WorldPlanSnapshot snapshot = new WorldPlanSnapshot(version, now, channels, desired, cooldown);
-        List<Integer> liveNodes = live != null ? live : new ArrayList<>(nodes.keySet());
+        List<Integer> liveNodes = live != null ? live : nodes.values().stream().filter(n -> !n.evacuating()).map(DirectoryView.Node::nodeId).toList();
         return new PlanInput(1, snapshot, new DirectoryView(nodes), absentNanos, liveNodes, autoscaleDue, rebalanceDue,
-                reservations);
+                reservations, nodeLeases);
     }
 
     PlanResult plan() {

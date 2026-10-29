@@ -24,4 +24,10 @@ public final class RedisSceneNodeSource implements SceneNodeSource {
     public List<SceneNodeInfo> list(int zoneId) {
         return directory.list(zoneId);
     }
+
+    @Override
+    public java.util.Optional<SceneNodeInfo> find(int zoneId, int nodeId) {
+        // Dubbo 业务线程上的只读准入查询，独立有界；不是场景逻辑线程。
+        return directory.findAsync(zoneId, nodeId).orTimeout(3, java.util.concurrent.TimeUnit.SECONDS).join();
+    }
 }

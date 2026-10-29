@@ -193,6 +193,44 @@ class BattleInboxLifecycleTest {
         assertThat(player.bags().toState().getItemsList().stream().filter(i->i.getItemUuid()==700001).findFirst().orElseThrow()).isEqualTo(kept);
     }
 
+    @Test void 本人及全服金币封禁只跳金币_其它奖励消费水位同存盘_解封重登原ID不补发(){
+        for(boolean global:List.of(false,true)){
+            var f=new Fixture();var player=f.enter(PlayerState.getDefaultInstance());
+            assertThat(f.bags.addItems(player,BagType.INVENTORY,java.util.Map.of(10,2L),AssetAudit.Reason.SYSTEM_GRANT,0,"").ok()).isTrue();
+            assertThat(f.missions.accept(player,0,7)).isZero();
+            if(global)f.currency.applyGlobalBlocks(new com.game.scene.gainblock.GlobalGainBlocks(java.util.Set.of(Wallet.GOLD),java.util.Set.of()));
+            else assertThat(f.currency.block(player,Wallet.GOLD)).isZero();
+            var settlement=source(24,10).toBuilder().addItemsConsumed(BattleItemEntry.newBuilder().setItemTableId(10).setCount(1))
+                    .addItemsGained(BattleItemEntry.newBuilder().setItemTableId(11).setCount(1))
+                    .addDefeatedMonsters(com.game.proto.BattleMonsterDefeat.newBuilder().setMonsterConfigId(1).setCount(1)).build();
+            f.fetch().reply(item(1,24,settlement));
+            assertThat(player.wallet().balance(Wallet.GOLD)).isZero();
+            assertThat(player.bags().bag(BagType.INVENTORY).total(10)).isEqualTo(1);
+            assertThat(player.bags().bag(BagType.INVENTORY).total(11)).isEqualTo(1);
+            assertThat(player.attributes().health()).isEqualTo(10);assertThat(player.attributes().mana()).isEqualTo(10);
+            assertThat(player.missions().active(7).progress(0)).isEqualTo(1);
+            assertThat(player.inboxLedger().decidedThrough(DOMAIN)).isEqualTo(1);assertThat(f.transport.acks).isEmpty();
+            f.repo.takeProgress().complete(PlayerRepository.ProgressResult.SAVED);
+            assertThat(f.transport.acks).singleElement().satisfies(ack->assertThat(ack.getDecisions(0).getOutcome()).isEqualTo(PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED));
+            var next=new Fixture();next.guids.set(f.guids.get());var reloaded=next.enter(player.persistedState());
+            reloaded.wallet().unblock(Wallet.GOLD);var before=reloaded.persistentState();
+            next.fetch().reply(item(1,24,settlement));assertThat(reloaded.persistentState()).isEqualTo(before);
+            assertThat(reloaded.wallet().balance(Wallet.GOLD)).isZero();assertThat(next.repo.pendingProgress()).isZero();
+        }
+    }
+
+    @Test void 金币溢出仍整笔延后_封禁不绕过整包候选失败(){
+        var overflow=new Fixture();var player=overflow.enter(PlayerState.getDefaultInstance());
+        player.wallet().add(Wallet.GOLD,Long.MAX_VALUE);var before=player.persistentState();
+        assertThat(overflow.battle.applyInbox(player,source(25,1)).outcome()).isEqualTo(BattleSettlementService.Outcome.DEFERRED);
+        assertThat(player.persistentState()).isEqualTo(before);
+        var blocked=new Fixture();var other=blocked.enter(PlayerState.getDefaultInstance());other.wallet().block(Wallet.GOLD);blocked.failMint=true;
+        var original=other.persistentState();var reward=source(26,10).toBuilder()
+                .addItemsGained(BattleItemEntry.newBuilder().setItemTableId(11).setCount(1)).build();
+        assertThat(blocked.battle.applyInbox(other,reward).outcome()).isEqualTo(BattleSettlementService.Outcome.DEFERRED);
+        assertThat(other.persistentState()).isEqualTo(original);
+    }
+
     @Test void 消耗相关unknown实例与损坏宠物均在首副作用前拒绝() {
         var unknown=com.google.protobuf.UnknownFieldSet.newBuilder().addField(900,com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(1).build()).build();
         var f=new Fixture();ScenePlayer player=f.enter(PlayerState.newBuilder().setBag(com.game.player.store.state.BagState.newBuilder()
@@ -236,11 +274,11 @@ class BattleInboxLifecycleTest {
 
     @Test void 未知物品表行不得被已知投影普通化扣减_其它配置和装备槽保持() {
         var unknown=com.google.protobuf.UnknownFieldSet.newBuilder().addField(900,com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(1).build()).build();
-        var config=org.mockito.Mockito.mock(com.game.table.ConfigTables.class);
+        // 只覆写本用例关心的 Item 行，其余装备配置仍取完整正式表。
+        var config=org.mockito.Mockito.spy(BattleFixture.CONFIG);
         var items=org.mockito.Mockito.mock(com.game.table.ItemRows.class);
         var rows=BattleFixture.CONFIG.item().all().stream().map(row->row.getId()==10?row.toBuilder().setUnknownFields(unknown).build():row).toList();
-        org.mockito.Mockito.when(config.item()).thenReturn(items);org.mockito.Mockito.when(items.all()).thenReturn(rows);
-        org.mockito.Mockito.when(config.equipSlot()).thenReturn(BattleFixture.CONFIG.equipSlot());
+        org.mockito.Mockito.doReturn(items).when(config).item();org.mockito.Mockito.when(items.all()).thenReturn(rows);
         var tables=BagTables.from(config);assertThat(tables.hasUnknownItemSchema(10)).isTrue();assertThat(tables.hasUnknownItemSchema(11)).isFalse();
         assertThat(tables.item(10)).isEqualTo(BagTables.from(BattleFixture.CONFIG).item(10));
         assertThat(tables.equipSlots(1)).isEqualTo(BagTables.from(BattleFixture.CONFIG).equipSlots(1));

@@ -19,15 +19,17 @@ public final class SpectateRules {
 
     // ---------------------------------------------------------------- 清退的原因（写进 RemoveObserverRequest.reason，battle 只记日志）
 
-    /** 163 入口处清掉旧标记（换场 / 随机观战）。与指标 {@code EvictReason.REWATCH} 的标签值逐字相同。 */
+    /** 163 入口处取消旧操作（同场重看 / 换场 / 随机观战）。与指标 {@code EvictReason.REWATCH} 的标签值逐字相同。 */
     public static final String REASON_REWATCH = "rewatch";
     /** 开局前清退正在观战的参战者。与 {@code EvictReason.ENTER_GATHER} 的标签值逐字相同。 */
     public static final String REASON_ENTER_GATHER = "enter_gather";
     /**
-     * 163 的自我清退：登记成功后的复查命中票据或战斗锁；或重看同一场时抢标记发现已有票据（旧标记已删、观众登记还在）。
+     * 163 的自我清退：登记成功后的复查命中票据或战斗锁。
      * 与 {@code EvictReason.CONCURRENT_QUEUE} 的标签值逐字相同。
      */
     public static final String REASON_CONCURRENT_QUEUE = "concurrent_queue";
+    /** Add 的回包未知：按原件补取消，墓碑封闭先 Remove 后到的 Add。 */
+    public static final String REASON_OUTCOME_UNKNOWN = "watch_outcome_unknown";
 
     /** 标记值里 nonce 的长度：16 位小写十六进制（64 位随机数）。 */
     public static final int NONCE_LENGTH = 16;
@@ -139,16 +141,16 @@ public final class SpectateRules {
     // ---------------------------------------------------------------- 观战标记
 
     /**
-     * 一个观战标记解出来的两段。
+     * 一个观战标记的兼容摘要；新标记的完整恢复必须使用 LocalObserverOperation。
      *
      * @param battleId 这名玩家可能正在看的战斗（非 0）
-     * @param nonce    写下这个标记的那一次 163 的随机串（{@value #NONCE_LENGTH} 位小写十六进制）
+     * @param nonce    旧标记的随机串，或新原件的操作 UUID
      */
     public record Mark(long battleId, String nonce) {
     }
 
     /**
-     * 标记的值：{@code "<battle_id 无符号十进制>:<nonce>"}。带 nonce 是为了两件事：抢标记的脚本被 Redis 客户端重发时认得出自己写的值（不误报 16016）；
+     * 旧格式兼容工具：{@code "<battle_id 无符号十进制>:<nonce>"}，新写者使用 LocalObserverOperation.mark。带 nonce 是为了两件事：抢标记的脚本被 Redis 客户端重发时认得出自己写的值（不误报 16016）；
      * 删标记按整串比较，两条并发 163 不会删掉对方刚抢到的标记（W3）。
      *
      * @throws IllegalArgumentException {@code battleId} 为 0，或 {@code nonce} 不是 {@link #newNonce} 的形状
@@ -164,10 +166,14 @@ public final class SpectateRules {
     }
 
     /**
-     * {@link #encodeMark} 的逆。只认它写出来的形状；其余（空串、没有冒号、battle_id 不是规范的非 0 十进制、nonce 形状不对、
-     * 基线那种只有 battle_id 的旧值）一律为空——调用方把这样的标记当脏值，按读到的<b>原串</b>删掉（163 第 7 行「值非法 → 删」）。
+     * 新原件与 {@link #encodeMark} 旧格式的兼容摘要解析。解析失败不能推断旧操作已经取消，
+     * 删除前必须按 LocalObserverOperation 的版本族规则保留未知或损坏的版本化原件。
      */
     public static Optional<Mark> decodeMark(String value) {
+        var original = LocalObserverOperation.decode(value);
+        if (original.isPresent()) {
+            return Optional.of(new Mark(original.get().battleId(), original.get().add().getSpectatorOperationId()));
+        }
         if (value == null) {
             return Optional.empty();
         }

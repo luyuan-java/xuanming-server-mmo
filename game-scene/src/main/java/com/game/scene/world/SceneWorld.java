@@ -248,6 +248,12 @@ public final class SceneWorld {
     /** 帧内视野变化的复用缓冲（只在 {@link #step()} 里用）。 */
     private final ViewChanges viewChanges = new ViewChanges();
     private boolean acceptingEnters = true;
+    private NodeEvacuation nodeEvacuation;
+    private List<WorldChannel> latestChannelPlan = List.of();
+    private final EvacuationRetries evacuationRetries = new EvacuationRetries();
+    private final Map<ScenePlayer, PlayerSwitch> evacuationsInFlight = new java.util.IdentityHashMap<>();
+    private int evacuationStorageFailures;
+    private boolean resumingEvacuations;
     /** 已应用的频道计划版本（节点目录的 applied_plan_version；0 = 还没应用过）。 */
     private long appliedPlanVersion;
     /** 停服开始后不再做周期存盘（最终写回由 {@link #shutdown()} 统一做）。 */
@@ -538,7 +544,7 @@ public final class SceneWorld {
                         Integer.toUnsignedString(record.getSceneConfigId()), record.getState(), record.getKind());
                 continue;
             }
-            if (record.getState() == ChannelState.CHANNEL_ACTIVE) {
+            if (record.getState() == ChannelState.CHANNEL_ACTIVE && !nodeEvacuating()) {
                 if (local == null) {
                     addScene(SceneInfoComp.newBuilder()
                             .setSceneConfigId(record.getSceneConfigId())
@@ -569,6 +575,7 @@ public final class SceneWorld {
             }
         }
         appliedPlanVersion = version;
+        latestChannelPlan = List.copyOf(records);
         metrics.channelPlanApply(ChannelPlanApply.APPLIED);
         publishChannels();
         log.info("应用频道计划 version={} 本节点记录={} 新建={} 转排空={} 改回承载={} 拒绝={}", Long.toUnsignedString(version),
@@ -626,7 +633,8 @@ public final class SceneWorld {
      */
     public int drainStep() {
         Deque<Scene> work = new ArrayDeque<>();
-        for (Scene scene : scenes.values()) {
+        for (Scene scene : scenes.values().stream()
+                .sorted((left, right) -> Long.compareUnsigned(left.sceneId(), right.sceneId())).toList()) {
             if (scene.draining()) {
                 work.add(scene);
             }
@@ -662,7 +670,7 @@ public final class SceneWorld {
         }
         List<ScenePlayer> movable = new ArrayList<>(from.playerCount());
         for (ScenePlayer player : from.players()) {
-            if (player.frozen()) {
+            if (relocationSwitchInFlight(player)) {
                 // 跨节点换图冻结中（scene-handoff-spec §5.5）：冻结快照与内存必须一致，这次不改派；交出结局出来后实例离开或解冻，下一次推进再看
                 metrics.channelRelocation(ChannelRelocation.SWITCHING);
             } else if (player.inBattle()) {
@@ -672,31 +680,96 @@ public final class SceneWorld {
                 movable.add(player);
             }
         }
-        for (int i = 0; i < movable.size(); i++) {
-            ScenePlayer player = movable.get(i);
-            if (player.scene() != from) {
+        movable.sort((left, right) -> Long.compareUnsigned(left.playerId(), right.playerId()));
+        for (ScenePlayer player : movable) {
+            if (player.scene() != from || relocationSwitchInFlight(player) || player.inBattle()) {
                 continue;
             }
-            Scene to = relocationTarget(from);
-            if (to == null) {
-                // 去向只取决于本节点的频道，与玩家无关：一个找不到，剩下的也找不到
-                for (int j = i; j < movable.size(); j++) {
-                    metrics.channelRelocation(ChannelRelocation.BLOCKED);
+            long now = clock.nanoTime();
+            int wanted = relocationConfigId(from);
+            Scene local = nodeEvacuating() ? null : leastLoadedActive(wanted, from);
+            if (local != null) {
+                relocateLocally(player, local);
+            } else if (crossNode.enabled() && wanted != 0) {
+                if (!evacuationRetries.ready(player, now)) {
+                    metrics.channelRelocation(ChannelRelocation.DEFERRED);
+                    continue;
                 }
-                if (from.firstRelocationBlocked()) {
-                    log.warn("排空频道找不到改派目标（本节点没有同图与默认大世界的承载中频道），原地不动、每秒重试 scene_id={} "
-                            + "scene_config_id={} 在场={}", Long.toUnsignedString(from.sceneId()), from.configId(),
-                            from.playerCount());
+                if (evacuationsInFlight.size() >= crossNode.evacuation().maxInFlight()) {
+                    metrics.channelRelocation(ChannelRelocation.DEFERRED_CAP);
+                    return;
                 }
-                return;
+                if (!repository.evacuationCapacityAvailable() || !evacuationRetries.storageReady(now)) {
+                    metrics.channelRelocation(ChannelRelocation.DEFERRED_STORAGE);
+                    return;
+                }
+                int fallback = defaultWorldConfigId();
+                if (fallback == wanted || !nodeEvacuating() && leastLoadedActive(fallback, from) != null) fallback = 0;
+                beginEvacuationSwitch(player, wanted, fallback);
+            } else {
+                retryEvacuationOrUseLocalFallback(player);
             }
-            from.relocationUnblocked();
-            ChannelRelocation kind = to.configId() == from.configId() ? ChannelRelocation.SAME_MAP
-                    : ChannelRelocation.DEFAULT_WORLD;
-            metrics.channelRelocation(kind);
-            log.info("排空改派 player={} {} -> {}（{}）", Long.toUnsignedString(player.playerId()),
-                    Long.toUnsignedString(from.sceneId()), Long.toUnsignedString(to.sceneId()), kind);
-            switchScene(player, to);
+        }
+    }
+
+    /** 镜像取号永不冻结，可以被权威改派取代；普通选点、传送和已有疏散仍然等待自己的结局。 */
+    private boolean relocationSwitchInFlight(ScenePlayer player) {
+        if (!switchInFlight(player)) return false;
+        return player.frozen() || player.switching().purpose() != PlayerSwitch.Purpose.MIRROR_CREATE;
+    }
+
+    private int defaultWorldConfigId() {
+        List<Integer> maps = tables.worldSceneConfigIds();
+        return maps.isEmpty() ? 0 : maps.getFirst();
+    }
+
+    private int relocationConfigId(Scene from) {
+        return from.kind() != SceneKind.DUNGEON && tables.worldSceneConfigIds().contains(from.configId())
+                ? from.configId() : defaultWorldConfigId();
+    }
+
+    private void relocateLocally(ScenePlayer player, Scene target) {
+        evacuationRetries.forget(player);
+        metrics.channelRelocation(target.configId() == player.scene().configId()
+                ? ChannelRelocation.SAME_MAP : ChannelRelocation.DEFAULT_WORLD);
+        switchScene(player, target);
+    }
+
+    private void retryEvacuationOrUseLocalFallback(ScenePlayer player) {
+        if (playersById.get(player.playerId()) != player || !player.scene().draining()) return;
+        Scene fallback = nodeEvacuating() || player.frozen() || player.inBattle()
+                ? null : leastLoadedActive(defaultWorldConfigId(), player.scene());
+        if (fallback != null) {
+            relocateLocally(player, fallback);
+        } else {
+            metrics.channelRelocation(ChannelRelocation.BLOCKED);
+            if (crossNode.enabled()) evacuationRetries.failed(player, clock.nanoTime(), crossNode.evacuation());
+        }
+    }
+
+    private void beginEvacuationSwitch(ScenePlayer player, int configId, int fallbackConfigId) {
+        PlayerSwitch sw = PlayerSwitch.evacuate(++switchTokens, configId,
+                clock.nanoTime() + crossNode.resolveTimeout().toNanos() + RESOLVE_SLOT_GRACE_NANOS);
+        player.setSwitching(sw);
+        evacuationsInFlight.put(player, sw);
+        Scene source = player.scene();
+        metrics.channelRelocation(ChannelRelocation.REMOTE);
+        crossNode.targets().select(player.playerId(), source.sceneId(),
+                RemoteSwitchTargets.Request.evacuate(configId, fallbackConfigId),
+                selection -> onSwitchTargetSelected(player, source, sw, selection));
+    }
+
+    /** 补位只发起改派，不在回调栈中销毁场景；同步替身回调也不能递归耗尽栈。 */
+    private void resumeEvacuations() {
+        if (resumingEvacuations) return;
+        resumingEvacuations = true;
+        try {
+            for (Scene scene : scenes.values().stream().filter(Scene::draining)
+                    .sorted((left, right) -> Long.compareUnsigned(left.sceneId(), right.sceneId())).toList()) {
+                if (scene.drainCause() != DrainCause.IDLE) relocateResidents(scene);
+            }
+        } finally {
+            resumingEvacuations = false;
         }
     }
 
@@ -757,6 +830,7 @@ public final class SceneWorld {
                 case IDLE -> InstanceEvent.DESTROYED_IDLE;
                 case CASCADE -> InstanceEvent.DESTROYED_CASCADE;
                 case ADMIN -> InstanceEvent.DESTROYED_ADMIN;
+                case NODE -> InstanceEvent.DESTROYED_NODE;
                 case NONE, PLAN -> null;
             };
             if (event == null) {
@@ -1192,6 +1266,10 @@ public final class SceneWorld {
             return;
         }
         int sceneConfigId = map.getAsInt();
+        if (!acceptingEnters) {
+            result.complete(dungeonResult(ENTER_FAILED));
+            return;
+        }
         if (!instances.enabled()) {
             result.complete(dungeonResult(SERVICE_UNAVAILABLE));
             return;
@@ -1792,6 +1870,10 @@ public final class SceneWorld {
                 concludeExpiredTravel(player, sw);
             }
             player.setSwitching(null);
+            if (sw.reason() == SwitchReason.EVACUATE) {
+                evacuationsInFlight.remove(player, sw);
+                evacuationRetries.failed(player, clock.nanoTime(), crossNode.evacuation());
+            }
             return false;
         }
         return true;
@@ -1848,7 +1930,8 @@ public final class SceneWorld {
         log.info("跨节点换图：请 scene-manager 选目标 player={} token={} 当前 scene_id={} 指定 scene_id={} scene_config_id={}",
                 Long.toUnsignedString(player.playerId()), token, Long.toUnsignedString(player.scene().sceneId()),
                 Long.toUnsignedString(wantSceneId), wantConfigId);
-        crossNode.targets().select(player.playerId(), source.sceneId(), wantSceneId, wantConfigId, clientChannelPick,
+        crossNode.targets().select(player.playerId(), source.sceneId(), new RemoteSwitchTargets.Request(
+                        wantSceneId, wantConfigId, 0, nodeEvacuating(), SwitchReason.PLAYER, clientChannelPick),
                 selection -> onSwitchTargetSelected(player, source, sw, selection));
     }
 
@@ -1856,9 +1939,17 @@ public final class SceneWorld {
     private void onSwitchTargetSelected(ScenePlayer player, Scene source, PlayerSwitch sw, Selection selection) {
         if (playersById.get(player.playerId()) != player || player.switching() != sw
                 || sw.phase() != SwitchPhase.RESOLVING) {
+            if (sw.reason() == SwitchReason.EVACUATE) evacuationsInFlight.remove(player, sw);
             metrics.switchResolve(SwitchResolve.STALE);
             log.debug("选目标的结果回来时实例已离开 / 已重新进场 / 换图已作废，丢弃 player={} token={}",
                     Long.toUnsignedString(player.playerId()), sw.token());
+            return;
+        }
+        if (sw.reason() == SwitchReason.EVACUATE && (player.scene() != source || !source.draining())) {
+            player.setSwitching(null);
+            evacuationsInFlight.remove(player, sw);
+            evacuationRetries.forget(player);
+            metrics.switchResolve(SwitchResolve.STALE);
             return;
         }
         if (sw.clientChannelPick() && player.scene() != source) {
@@ -1873,7 +1964,10 @@ public final class SceneWorld {
                 metrics.switchResolve(SwitchResolve.ERROR);
                 log.warn("选目标调用失败，留在原地 player={} token={}: {}", Long.toUnsignedString(player.playerId()),
                         sw.token(), failed.reason());
-                pushTip(player, ENTER_SERVER_BUSY);
+                if (sw.reason() == SwitchReason.EVACUATE) {
+                    evacuationsInFlight.remove(player, sw);
+                    retryEvacuationOrUseLocalFallback(player);
+                } else pushTip(player, ENTER_SERVER_BUSY);
             }
             case Selection.Refused refused -> {
                 player.setSwitching(null);
@@ -1881,14 +1975,26 @@ public final class SceneWorld {
                 // 玩家预检拒绝只记低基数结果，不把正常冷却 / 满员当作告警。
                 if (!sw.clientChannelPick()) log.info("scene-manager 拒绝换图目标，留在原地 player={} token={} tip={}",
                         Long.toUnsignedString(player.playerId()), sw.token(), refused.tipId());
-                pushTip(player, ENTER_FAILED);
+                if (sw.reason() == SwitchReason.EVACUATE) {
+                    evacuationsInFlight.remove(player, sw);
+                    retryEvacuationOrUseLocalFallback(player);
+                } else pushTip(player, ENTER_FAILED);
             }
             case Selection.Chosen chosen -> onSwitchTargetChosen(player, sw, chosen);
         }
+        if (sw.reason() == SwitchReason.EVACUATE) resumeEvacuations();
     }
 
     private void onSwitchTargetChosen(ScenePlayer player, PlayerSwitch sw, Selection.Chosen chosen) {
-        sw.channelCooldownSeconds(chosen.switchCooldownSeconds());
+        if (sw.reason() == SwitchReason.EVACUATE && (chosen.sceneNodeId() == 0 || chosen.sceneId() == 0
+                || chosen.sceneNodeId() == crossNode.localNodeId() || scenes.containsKey(chosen.sceneId()))) {
+            player.setSwitching(null);
+            evacuationsInFlight.remove(player, sw);
+            metrics.switchResolve(SwitchResolve.REJECTED);
+            retryEvacuationOrUseLocalFallback(player);
+            return;
+        }
+        sw.channelCooldownSeconds(sw.reason() == SwitchReason.PLAYER ? chosen.switchCooldownSeconds() : 0);
         if (chosen.sceneNodeId() == 0 || chosen.sceneId() == 0) {
             player.setSwitching(null);
             metrics.switchResolve(SwitchResolve.ERROR);
@@ -1944,7 +2050,10 @@ public final class SceneWorld {
         if (player.inBattle()) {
             player.setSwitching(null);
             metrics.switchResolve(SwitchResolve.IN_BATTLE);
-            pushTip(player, ENTER_FAILED);
+            if (sw.reason() == SwitchReason.EVACUATE) {
+                evacuationsInFlight.remove(player, sw);
+                evacuationRetries.failed(player, clock.nanoTime(), crossNode.evacuation());
+            } else pushTip(player, ENTER_FAILED);
             return;
         }
         metrics.switchResolve(SwitchResolve.REMOTE);
@@ -1981,6 +2090,7 @@ public final class SceneWorld {
                     Long.toUnsignedString(player.playerId()), sw.token(), outcome);
             return;
         }
+        if (sw.reason() == SwitchReason.EVACUATE && !(outcome instanceof HandOffOutcome.Failed)) evacuationStorageFailures = 0;
         switch (outcome) {
             case HandOffOutcome.HandedOff handedOff -> onHandedOff(player, sw, handedOff.newEpoch());
             case HandOffOutcome.LeaseTooShort ignored -> unfreezeInPlace(player, sw, TransferResult.LEASE_TOO_SHORT);
@@ -1989,6 +2099,10 @@ public final class SceneWorld {
             // 后果与 Fenced 完全相同（移除、不写回、踢 2017）——它不是「本次已提交」的证据，不写待落点、不发重定向帧，只是另计一个结局
             case HandOffOutcome.Superseded ignored -> onTransferFenced(player, sw, TransferResult.SUPERSEDED);
             case HandOffOutcome.Failed failed -> {
+                if (sw.reason() == SwitchReason.EVACUATE && ++evacuationStorageFailures >= 3) {
+                    evacuationRetries.storageUncertain(clock.nanoTime(), crossNode.evacuation());
+                    evacuationStorageFailures = 0;
+                }
                 // 结局不明（重试用尽 / 线程池拒绝）：加锁读探测，截止前给出确定结论；仍然冻结
                 log.warn("交出结局不明，探测归属 player={} token={} epoch={} 尝试={}",
                         Long.toUnsignedString(player.playerId()), sw.token(), player.ownerEpoch(),
@@ -1996,6 +2110,7 @@ public final class SceneWorld {
                 repository.probe(failed, probed -> onProbeDone(player, sw, probed));
             }
         }
+        if (sw.reason() == SwitchReason.EVACUATE) resumeEvacuations();
     }
 
     /** 交出探测的结局（逻辑线程）。 */
@@ -2005,6 +2120,7 @@ public final class SceneWorld {
                     Long.toUnsignedString(player.playerId()), sw.token(), outcome);
             return;
         }
+        if (sw.reason() == SwitchReason.EVACUATE && !(outcome instanceof ProbeOutcome.Lost)) evacuationStorageFailures = 0;
         switch (outcome) {
             case ProbeOutcome.NotCommitted ignored -> unfreezeInPlace(player, sw, TransferResult.ABORTED_IN_PLACE);
             case ProbeOutcome.HandedOff handedOff -> onHandedOff(player, sw, handedOff.newEpoch());
@@ -2012,6 +2128,7 @@ public final class SceneWorld {
             case ProbeOutcome.Superseded ignored -> onTransferFenced(player, sw, TransferResult.SUPERSEDED);
             case ProbeOutcome.Lost ignored -> onTransferLost(player, sw);
         }
+        if (sw.reason() == SwitchReason.EVACUATE) resumeEvacuations();
     }
 
     /**
@@ -2151,7 +2268,9 @@ public final class SceneWorld {
                 log.info("交出没提交，原地解冻 player={} token={} 结局={} 用途={}", Long.toUnsignedString(player.playerId()),
                         sw.token(), result, sw.reason());
                 // 跨 zone 传送推 3027（基线跨 zone 兜底码），跨节点换图推 3023
-                pushTip(player, sw.reason() == SwitchReason.TRAVEL ? TRAVEL_FAILED : ENTER_FAILED);
+                if (sw.reason() == SwitchReason.EVACUATE) {
+                    evacuationRetries.failed(player, clock.nanoTime(), crossNode.evacuation());
+                } else pushTip(player, sw.reason() == SwitchReason.TRAVEL ? TRAVEL_FAILED : ENTER_FAILED);
                 // 冻结期间到达的确认只续了锁、没挂冻结，到达的结算被延后，销账回来也没 forget 账本（scene-battle-spec §7.7、§7.10、§7.12）：
                 // 原地解冻后重跑一次完整的进场恢复（第 1 步起，不是只补「锁步骤」；同规格 §7.8 末段、§10.5，D34）。期间 recovery = PENDING：
                 // 备战 1006、结算 DEFERRED，读失败由 reaper 重试
@@ -2183,6 +2302,9 @@ public final class SceneWorld {
      * 等租约过期）或已被夺。会话已离开的不踢。
      */
     private void onTransferLost(ScenePlayer player, PlayerSwitch sw) {
+        if (sw.reason() == SwitchReason.EVACUATE) {
+            evacuationRetries.storageUncertain(clock.nanoTime(), crossNode.evacuation());
+        }
         finishTransfer(player, sw, TransferResult.LOST_UNKNOWN);
         if (sw.detached()) {
             return;
@@ -2197,13 +2319,19 @@ public final class SceneWorld {
 
     /** 一次交出终结：摘掉换图状态（之后 removePlayer 不再把它当「冻结中被移出」）、计结局与冻结时长。 */
     private void finishTransfer(ScenePlayer player, PlayerSwitch sw, TransferResult result) {
+        if (sw.reason() == SwitchReason.EVACUATE) evacuationsInFlight.remove(player, sw);
+        if (sw.reason() == SwitchReason.EVACUATE && result == TransferResult.HANDED_OFF) evacuationStorageFailures = 0;
         if (player.switching() == sw) {
             player.setSwitching(null);
         }
         transfersInFlight--;
         metrics.transfersInFlight(transfersInFlight);
         // 批次 5.4 起带用途标签（§0.6 裁决 16）：63 的跨节点换图一律 player，226 的跨 zone 传送是 travel
-        metrics.transfer(sw.reason() == SwitchReason.TRAVEL ? TransferReason.TRAVEL : TransferReason.PLAYER, result,
+        metrics.transfer(switch (sw.reason()) {
+            case PLAYER -> TransferReason.PLAYER;
+            case TRAVEL -> TransferReason.TRAVEL;
+            case EVACUATE -> TransferReason.EVACUATE;
+        }, result,
                 clock.nanoTime() - sw.frozenAtNanos());
     }
 
@@ -3307,6 +3435,8 @@ public final class SceneWorld {
     private void removePlayer(ScenePlayer player, boolean save) {
         PlayerSave finalSnapshot=save?beginFinalExit(player):null;
         PlayerSwitch sw = player.switching();
+        evacuationRetries.forget(player);
+        if (sw == null || sw.phase() != SwitchPhase.FREEZING) evacuationsInFlight.remove(player);
         if (sw != null && sw.phase() == SwitchPhase.FREEZING) {
             sw.detach();
         }
@@ -3431,9 +3561,59 @@ public final class SceneWorld {
 
     // ------------------------------------------------------------------ 停服 / 失去节点号
 
+    public boolean nodeEvacuating() { return nodeEvacuation != null; }
+
+    public NodeEvacuation nodeEvacuation() { return nodeEvacuation; }
+
+    /** 不先销毁玩家；交出仍由既有 SQL 事务确认，新进场立即失败并释放认领。 */
+    public void beginNodeEvacuation(NodeEvacuation.Cause cause, java.time.Duration budget) {
+        long now = clock.nanoTime();
+        nodeEvacuation = nodeEvacuation == null ? NodeEvacuation.begin(cause, now, budget)
+                : nodeEvacuation.upgrade(cause, now, budget);
+        acceptingEnters = false;
+        for (PendingEnter pending : List.copyOf(pendingEnters.values())) {
+            failEnter(pending, "本节点开始疏散");
+        }
+        pendingEnters.clear();
+        for (Scene scene : scenes.values()) {
+            if (!scene.draining()) scene.beginDrain(DrainCause.NODE, now);
+        }
+        publishChannels();
+        drainStep();
+    }
+
+    /** 只有原运维疏散可撤销；停服或身份冲突不能被迟到的撤销标记重新打开。 */
+    public boolean endNodeEvacuation() {
+        if (nodeEvacuation == null || nodeEvacuation.cause() != NodeEvacuation.Cause.ADMIN) return false;
+        nodeEvacuation = null;
+        acceptingEnters = true;
+        for (Scene scene : scenes.values()) {
+            if (scene.drainCause() == DrainCause.NODE) scene.stopDraining();
+        }
+        evacuationRetries.clearPlayers();
+        long version = appliedPlanVersion;
+        if (version != 0) {
+            appliedPlanVersion = 0;
+            applyChannelPlan(version, latestChannelPlan);
+        }
+        publishChannels();
+        return true;
+    }
+
+    /** 包含尚未冲刷的 gate 帧，不能只凭玩家实体已经移出就宣称排空。 */
+    public boolean nodeEvacuated() {
+        return playersById.isEmpty() && pendingEnters.isEmpty() && transfersInFlight == 0
+                && evacuationsInFlight.isEmpty() && travelFramesPending() == 0 && sink.pendingTransferWrites() == 0;
+    }
+
     /** 不再接收新玩家（节点号租约丢失时）：已在场的玩家照常服务直到离开。 */
     public void stopAcceptingEnters() {
         acceptingEnters = false;
+    }
+
+    /** 身份恢复且已同步计划后调用；节点疏散中的拒绝接客不被恢复回调撤销。 */
+    public void resumeAcceptingEnters() {
+        if (!nodeEvacuating() && !periodicSaveStopped) acceptingEnters = true;
     }
 
     /**
@@ -3448,6 +3628,8 @@ public final class SceneWorld {
      */
     public int shutdown() {
         acceptingEnters = false;
+        evacuationRetries.clear();
+        evacuationsInFlight.entrySet().removeIf(entry -> entry.getValue().phase() != SwitchPhase.FREEZING);
         periodicSaveStopped = true;
         for (PendingEnter pending : pendingEnters.values()) {
             releaseClaim(pending);

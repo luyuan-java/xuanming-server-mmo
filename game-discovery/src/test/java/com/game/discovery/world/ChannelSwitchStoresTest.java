@@ -28,7 +28,7 @@ class ChannelSwitchStoresTest {
         assertThat(store.read(1, 7)).isNull();
         byte[] bytes = {0, -1, -128, 10};
         when(script.<byte[]>eval(eq(RScript.Mode.READ_WRITE), anyString(), eq(RScript.ReturnType.VALUE),
-                eq(List.of(keys.worldChannelDirectory(1, 7))))).thenReturn(bytes);
+                eq(List.of(keys.worldChannelDirectory(1, 7),keys.worldRetirement(1))))).thenReturn(bytes);
         assertThat(store.read(1, 7)).containsExactly(bytes);
         when(script.eval(eq(RScript.Mode.READ_WRITE), anyString(), eq(RScript.ReturnType.VALUE), anyList()))
                 .thenThrow(new IllegalStateException("down"));
@@ -41,7 +41,7 @@ class ChannelSwitchStoresTest {
         when(script.<Long>eval(eq(RScript.Mode.READ_WRITE), eq(RedissonWorldChannelDirectoryStore.PUBLISH),
                 eq(RScript.ReturnType.INTEGER), anyList(), any(), any(), any(), any())).thenAnswer(invocation -> {
             assertThat(invocation.<List<String>>getArgument(3)).containsExactly(keys.worldLeader(1),
-                    keys.worldPlanVersion(1), keys.worldChannelDirectory(1, 7));
+                    keys.worldPlanVersion(1), keys.worldChannelDirectory(1, 7),keys.worldRetirement(1));
             assertThat(invocation.<byte[]>getArgument(4)).isEqualTo("leader".getBytes(java.nio.charset.StandardCharsets.UTF_8));
             assertThat(invocation.<byte[]>getArgument(5)).isEqualTo("9007199254740993".getBytes(java.nio.charset.StandardCharsets.UTF_8));
             assertThat(invocation.<byte[]>getArgument(6)).containsExactly((byte) 0, (byte) -1);

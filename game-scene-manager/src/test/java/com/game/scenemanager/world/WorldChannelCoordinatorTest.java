@@ -76,6 +76,47 @@ class WorldChannelCoordinatorTest {
     }
 
     @Test
+    void 缺席租约读取故障按stuck保留_到长宽限才重铺_失领导清指标() {
+        host(10, 0);
+        host(20, 0);
+        var c = coordinator();
+        c.tick();
+        host(10, 0);
+        directory.remove(20);
+        store.failNodeLeaseRead = true;
+        c.tick();
+        nanos += Duration.ofSeconds(20).toNanos();
+        c.tick();
+        assertThat(channelsOn(20)).hasSize(2);
+        assertThat(gauge(WorldChannelMetrics.NODES, "state", "stuck")).isEqualTo(1);
+        nanos += Duration.ofSeconds(99).toNanos();
+        c.tick();
+        assertThat(channelsOn(20)).hasSize(2);
+        nanos += Duration.ofSeconds(1).toNanos();
+        c.tick();
+        assertThat(channelsOn(20)).isEmpty();
+        store.zone(ZONE).leader = "new-leader";
+        c.renewLeaders();
+        assertThat(gauge(WorldChannelMetrics.NODES, "state", "stuck")).isZero();
+    }
+
+    @Test
+    void 控制面从同拍目录过滤疏散节点且保留其记录直到收尾() {
+        host(10, 0);
+        host(20, 0);
+        var c = coordinator();
+        c.tick();
+        host(10, 0);
+        host(20, 0);
+        directory.put(10, directory.get(10).toBuilder().setEvacuating(true).setLeaseEpoch(8).build());
+        c.tick();
+        assertThat(channelsOn(10)).allSatisfy(channel -> assertThat(channel.getDrainReason())
+                .isEqualTo(com.game.api.proto.DrainReason.DRAIN_EVACUATE));
+        assertThat(gauge(WorldChannelMetrics.NODES, "state", "evacuating")).isEqualTo(1);
+        assertThat(gauge(WorldChannelMetrics.NODES, "state", "active")).isEqualTo(1);
+    }
+
+    @Test
     void 当选后立即跑一拍_按覆盖铺好_计ok() {
         host(10, 0);
         WorldChannelCoordinator c = coordinator();

@@ -329,6 +329,11 @@ public final class BattleRedis {
             return redis.call('EXISTS', KEYS[1])
             """;
 
+    /** 只读活动结果原件；不存在不是销账证明。 */
+    static final String READ_ACTIVITY_RESULT = """
+            return redis.call('GET', KEYS[1])
+            """;
+
     // ------------------------------------------------------------------ 结果形状
 
     /**
@@ -584,6 +589,12 @@ public final class BattleRedis {
     public CompletableFuture<Boolean> activityResultExists(long battleId) {
         return integer("PROBE_ACTIVITY_RESULT", PROBE_ACTIVITY_RESULT, List.of(redisKeys.battleActivityResult(battleId)))
                 .thenApply(n -> n != 0);
+    }
+
+    /** 读主库的活动结果原字节；没有为 null，错误以异常完成。 */
+    public CompletableFuture<byte[]> readActivityResult(long battleId) {
+        return this.<byte[]>eval(READ_ACTIVITY_RESULT, RScript.ReturnType.VALUE,
+                List.of(redisKeys.battleActivityResult(battleId)));
     }
 
     // ------------------------------------------------------------------ 内部

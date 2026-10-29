@@ -29,10 +29,10 @@ class OutboxMetricsTest {
     }
 
     @Test
-    void 结算发件箱事件_规格的13个取值加already_settled与fields_overflow_全部以0预建() {
+    void 结算发件箱事件_16个取值全部以0预建() {
         assertThat(lower(SettlementEvent.values())).containsExactlyInAnyOrder("stored", "not_durable", "delivered", "resend",
                 "skip_no_target", "superseded", "acked", "exhausted", "exhausted_offline", "expired", "probe_error", "locate_error",
-                "serialize_failed", "already_settled", "fields_overflow");
+                "serialize_failed", "already_settled", "fields_overflow", "payload_conflict");
 
         String scrape = registry.scrape();
         for (String event : lower(SettlementEvent.values())) {
@@ -52,9 +52,9 @@ class OutboxMetricsTest {
     }
 
     @Test
-    void 活动结果通道事件_8个取值以0预建() {
+    void 活动结果通道事件_9个取值以0预建() {
         assertThat(lower(ActivityEvent.values())).containsExactlyInAnyOrder("stored", "not_durable", "resend", "acked", "exhausted",
-                "expired", "probe_error", "serialize_failed");
+                "expired", "probe_error", "serialize_failed", "payload_conflict");
 
         String scrape = registry.scrape();
         for (String event : lower(ActivityEvent.values())) {
@@ -94,6 +94,6 @@ class OutboxMetricsTest {
                 .collect(Collectors.toSet());
 
         assertThat(tagKeys).containsExactlyInAnyOrder("event", "result");
-        assertThat(registry.getMeters()).as("15 + 7 + 8 个计数器 + 1 个 gauge").hasSize(31);
+        assertThat(registry.getMeters()).as("16 + 7 + 9 个计数器 + 1 个 gauge").hasSize(33);
     }
 }

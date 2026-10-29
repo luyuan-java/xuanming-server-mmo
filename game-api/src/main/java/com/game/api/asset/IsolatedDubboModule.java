@@ -50,7 +50,8 @@ public final class IsolatedDubboModule implements AutoCloseable {
         try {
             ApplicationModel application = framework.newApplication();
             application.modelEnvironment().updateAppConfigMap(
-                    Map.of(SHUTDOWN_WAIT_KEY, Long.toString(Math.max(0, shutdownWait.toMillis()))));
+                    Map.of(SHUTDOWN_WAIT_KEY, Long.toString(Math.max(0, shutdownWait.toMillis())),
+                            "dubbo.shutdownHook.listenIgnore", "true"));
             ApplicationConfig config = new ApplicationConfig(applicationName);
             config.setQosEnable(false);
             config.setLogger("slf4j");

@@ -90,8 +90,8 @@ class RecommendAndSweepMysqlTest {
         return Deadline.after(30_000);
     }
 
-    private static RecommendStore recommend(long pivotOffset) {
-        return new RecommendStore(dataSource, 10, (lo, span) -> pivotOffset);
+    private static RecommendStore recommend(long pivotOffset) throws SQLException {
+        return RecommendStore.forDatabase(dataSource, 10, (lo, span) -> pivotOffset);
     }
 
     private static void edge(long a, long b) throws SQLException {

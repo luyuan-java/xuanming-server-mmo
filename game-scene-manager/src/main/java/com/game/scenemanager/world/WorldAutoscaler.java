@@ -15,11 +15,11 @@ import org.slf4j.LoggerFactory;
 
 /**
  * 规划步骤 P4：按人数自动扩缩容（缺省关；scene-channels-spec §4.7）。判定照搬基线 {@code autoscaleOneWorldMap}
- * （mmorpg world_autoscale.go:177-257），Java 收紧三处（D9）：
+ * （mmorpg world_autoscale.go:177-257），余量按实际改派落点计算：
  * <ol>
  *   <li>负载集只取「ACTIVE、节点在场、目录里已建出且没在排空」的频道，人数取节点上报（节点权威计数，不含预占）；</li>
- *   <li>缩容牺牲者必须有<b>同节点同图</b>的 ACTIVE 兄弟（per-node 模式强制；hash 模式下牺牲者 0 人可免）——5.1 的改派只能落同节点；</li>
- *   <li>余量只算同节点兄弟（基线算全图余量，:259-274）。</li>
+ *   <li>per-node必须保留同节点同图兄弟；hash开启跨节点改派时允许没有本地兄弟；</li>
+ *   <li>有本地兄弟只算本地余量，没有才算远端同图余量；不能借远端容量掩盖本地落点已满。</li>
  * </ol>
  * 冷却读不到 = 快照失败、整拍不动（比基线「读错当不在冷却」保守，:491-494，B15）。缩容开始只改计划：记录转 DRAINING(SCALE_IN)、
  * 期望数 −1、打冷却；节点拉到计划后同节点改派、空了销毁，领导者在 P3 收尾（D19）。扩容只改期望数 +1 与冷却，同一次写入里 P5 把新频道补出来。
@@ -90,7 +90,7 @@ final class WorldAutoscaler {
 
         // ── 缩容（基线 :214-229）
         if (loads.size() > minCh && lightest.players() < cfg.scaleInPlayers()) {
-            Load victim = pickScaleInVictim(loads, cfg, draft.props.coverage(), mirrors);
+            Load victim = pickScaleInVictim(loads, cfg, draft.props.coverage(), mirrors, draft.props.crossNodeRelocation());
             if (victim != null) {
                 int base = draft.scalingBase(conf);
                 draft.put(draft.draining(victim.channel(), DrainReason.DRAIN_SCALE_IN));
@@ -128,10 +128,11 @@ final class WorldAutoscaler {
 
     /**
      * 按升序找第一个可以安全排空的频道（同基线 pickScaleInVictim 的骨架，world_autoscale.go:295-322）：
-     * 人数 &lt; 缩容线（遇到 ≥ 即停）、不是镜像源（查询出错按「是」）、有同节点兄弟（per-node 强制；hash 下 0 人可免）、同节点余量够。
+     * 人数 &lt; 缩容线（遇到 ≥ 即停）、不是镜像源（查询出错按「是」）、有实际改派落点且其余量足够。
      * 没有返回 null。
      */
-    static Load pickScaleInVictim(List<Load> loads, Autoscale cfg, Coverage coverage, MirrorSources mirrors) {
+    static Load pickScaleInVictim(List<Load> loads, Autoscale cfg, Coverage coverage, MirrorSources mirrors,
+                                 boolean crossNodeRelocation) {
         for (Load candidate : loads) {
             if (candidate.players() >= cfg.scaleInPlayers()) {
                 break; // 升序，后面只会更多人
@@ -147,8 +148,11 @@ final class WorldAutoscaler {
                 }
             }
             boolean siblingExempt = coverage == Coverage.HASH && candidate.players() == 0;
-            if (siblings.isEmpty() && !siblingExempt) {
-                continue;
+            if (siblings.isEmpty()) {
+                if (coverage == Coverage.HASH && crossNodeRelocation) {
+                    // 没有本地兄弟才实际跨节点改派；有本地兄弟时不能借远端余量放行。
+                    siblings.addAll(loads.stream().filter(other -> other.nodeId() != candidate.nodeId()).toList());
+                } else if (!siblingExempt) continue;
             }
             if (!hasHeadroomFor(siblings, candidate, cfg.scaleOutPlayers())) {
                 continue;
@@ -160,7 +164,7 @@ final class WorldAutoscaler {
 
     /**
      * 把牺牲者的人并进 {@code others} 后会不会把某个频道推过扩容线（基线 hasHeadroomFor，world_autoscale.go:259-274）：
-     * 余量 = Σ max(0, 扩容线 − 人数) ≥ 牺牲者人数。Java 只把同节点兄弟传进来。
+     * 余量 = Σ max(0, 扩容线 − 人数) ≥ 牺牲者人数。调用者按是否有本地兄弟选择真正会落到的集合。
      */
     static boolean hasHeadroomFor(List<Load> others, Load victim, long scaleOutThreshold) {
         long headroom = 0;

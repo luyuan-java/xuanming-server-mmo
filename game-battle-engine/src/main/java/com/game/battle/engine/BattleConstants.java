@@ -83,6 +83,11 @@ public final class BattleConstants {
 
     /** 普攻的基础伤害（普攻没有 SkillTable 行，{@code constants.h:76}）。 */
     public static final double BASIC_ATTACK_BASE_DAMAGE = 10.0;
+    /** 装备 D3 / D5 / D6：连击只追加一段，反震按实扣，必杀倍率保持旧值。 */
+    public static final int MAX_COMBO_EXTRA_HITS = 1;
+    public static final int COMBO_DAMAGE_PERCENT = 50;
+    public static final int REFLECT_DAMAGE_PERCENT = 50;
+    public static final double CRITICAL_DAMAGE_MULTIPLIER = 2.0;
     /** 非 PVE 对局里直接伤害（普攻 / 技能）再乘的系数；周期伤害不乘（{@code constants.h:84}）。 */
     public static final double PVP_DAMAGE_SCALE = 0.3;
     /** 逃跑基础成功率（{@code constants.h:89}）。 */

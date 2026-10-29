@@ -165,6 +165,7 @@ public final class BattleFixture {
     public final SceneBattleMetrics battleMetrics = new SceneBattleMetrics(meters);
     public final CurrencyService currency;
     public final BagService bags;
+    public final com.game.scene.equip.EquipmentService equipment;
     public final AttributeService attributes;
     public final PetService pets;
     public final MissionService missions;
@@ -173,7 +174,7 @@ public final class BattleFixture {
     public final BattleSettlementService settlements;
     public final PlayerBattleService battle;
     public final SceneWorld world;
-    /** 注册进 {@link #handler} 的全部玩法功能（与 {@code SceneNode} 的那份清单同样的七个；在途闸矩阵据此核对「主代码里的功能类都在夹具里」）。 */
+    /** 注册进 {@link #handler} 的全部玩法功能；在途闸矩阵据此核对「主代码里的功能类都在夹具里」。 */
     public final List<SceneFeature> features;
     public final ClientRequestHandler handler;
     public final Scene scene1;
@@ -223,8 +224,11 @@ public final class BattleFixture {
             teamFollow = teamFollowFactory.apply(new Wiring(logic, sceneMetrics, clock));
         }
         currency = new CurrencyService(audit, GainAnomalyDetector.off(), sceneMetrics, clock);
-        bags = new BagService(BagTables.from(CONFIG), guids, audit, GainAnomalyDetector.off(), sceneMetrics);
-        attributes = new AttributeService(AttributeTables.from(CONFIG), clock, currency, sceneMetrics);
+        // 与 SceneNode 共享同一装备规则；固定随机源使矩阵双方完全可比较。
+        var equipmentRules = new com.game.scene.equip.EquipmentRules(com.game.scene.equip.EquipmentTables.from(CONFIG), bound -> 0);
+        bags = new BagService(BagTables.from(CONFIG, equipmentRules), guids, audit, GainAnomalyDetector.off(), sceneMetrics);
+        attributes = new AttributeService(AttributeTables.from(CONFIG), clock, currency, sceneMetrics, equipmentRules);
+        equipment = new com.game.scene.equip.EquipmentService(equipmentRules, bags, currency, attributes, sceneMetrics);
         missions = new MissionService(MissionTables.from(CONFIG), bags, clock);
         skills = new SkillService(SkillTables.from(CONFIG), clock, sceneMetrics, Contracts.IDS);
         pets = new PetService(PetTables.from(CONFIG), currency, guids, clock, new SplittableRandom(7), sceneMetrics);
@@ -248,13 +252,15 @@ public final class BattleFixture {
         // 226 的在队检查缺省经逻辑线程回「不在队」（drain 之后才回，同真实现的投递）；选目标缺省挂起
         teamChecks.replyWith(logic, call -> TeamCheck.NOT_IN_TEAM);
         battle.attach(world);
+        BagFeature bagFeature = new BagFeature(bags);
         features = List.of(
                 new CurrencyFeature(currency),
                 new AttributeFeature(attributes, Contracts.REGISTRY, call -> {
                     petFeature.onOwnerLevelChanged(call);
                     missions.onLevelChanged(call.player());
                 }),
-                new BagFeature(bags), new MissionFeature(missions), new ActivityFeature(missions), new SkillFeature(skills),
+                bagFeature, new com.game.scene.equip.EquipmentFeature(equipment, bagFeature, attributes, Contracts.REGISTRY),
+                new MissionFeature(missions), new ActivityFeature(missions), new SkillFeature(skills),
                 petFeature);
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV, features);
         scene1 = world.createScene(1);

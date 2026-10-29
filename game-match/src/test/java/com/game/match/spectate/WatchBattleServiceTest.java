@@ -60,7 +60,7 @@ import org.junit.jupiter.params.provider.MethodSource;
  * 用例名里的「第 n 行」是规格 §3.1 的行号；括号里的 {@code :行号} 是对照的基线用例（{@code spectate_test.go} / {@code watchbattle_create_window_test.go}）。
  *
  * <p>替身：内存版观战存储（与内存票据 / 落点存储、手拨的 Redis 时钟共享状态）、可脚本化的观众 RPC、内存里的战斗锁与在线目录。
- * 随机数与 nonce 都是给定值（nonce 依次是 {@code 0000000000000001}、{@code …0002}……），复查的两次读缺省在调用线程上依次做。
+ * 随机数与操作 UUID 都是给定值，复查的两次读缺省在调用线程上依次做。
  */
 class WatchBattleServiceTest {
 
@@ -105,14 +105,29 @@ class WatchBattleServiceTest {
     // ================================================================ 摆状态
 
     private static String nonce(int n) {
-        return String.format("%016x", n);
+        return new java.util.UUID(0, n).toString();
     }
 
-    /** 本测试里第 n 次抢标记写下的值。 */
-    private static String markValue(long battleId, int n) {
-        return SpectateRules.encodeMark(battleId, nonce(n));
+    /** 明确核对存储值等于发送的完整原 Add；未发送前用固定夹具重建预期原件。 */
+    private String markValue(long battleId, int n) {
+        for (Call call : observers.adds()) {
+            if (call.battleId() == battleId && call.request().getSpectatorOperationId().equals(nonce(n))) {
+                return new LocalObserverOperation(call.placement(), call.request()).mark();
+            }
+        }
+        return operation(battleId, nonce(n)).mark();
     }
 
+    private String oldMark(long battleId, String seed) {
+        return operation(battleId, java.util.UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8)).toString()).mark();
+    }
+
+    private LocalObserverOperation operation(long battleId, String operation) {
+        BattlePlacement target = placements.stored(battleId).orElseGet(() -> placement(battleId, clock.peekMs()));
+        BattleRouting route = BattleRouting.newBuilder().setGateNodeId(1).setGateInstanceId("gate-inst-1")
+                .setSessionId((int) PLAYER).setZoneId(1).build();
+        return LocalObserverOperation.create(target, PLAYER, route, "", operation, clock.peekMs());
+    }
     private static SessionContext session(long playerId) {
         return SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId("gate-inst-1").setSessionId(7).setZoneId(1).setPlayerId(playerId)
                 .setAccount("acc-" + playerId).build();
@@ -167,8 +182,9 @@ class WatchBattleServiceTest {
     private static void assertAccepted(WatchBattleResponse response, long battleId) {
         assertThat(response.hasErrorMessage()).as("成功不带 error_message").isFalse();
         assertThat(response.getBattleId()).isEqualTo(battleId);
-        assertThat(response.toByteString()).as("成功应答只有 battle_id 一个字段")
-                .isEqualTo(WatchBattleResponse.newBuilder().setBattleId(battleId).build().toByteString());
+        assertThat(response.toByteString()).as("成功应答携带战斗号与规范操作 UUID")
+                .isEqualTo(WatchBattleResponse.newBuilder().setBattleId(battleId)
+                        .setSpectatorOperationId(java.util.UUID.fromString(response.getSpectatorOperationId()).toString()).build().toByteString());
     }
 
     /** 非 0 的计数器：标签值 → 计数。 */
@@ -346,11 +362,24 @@ class WatchBattleServiceTest {
     }
 
     @Test
+    void 未来版本或损坏的版本化原件_拒绝但保留_不能当脏旧nonce删除() {
+        online();
+        open(X);
+        for (String value : List.of("observer-v2:future:payload", "observer-v1:broken")) {
+            spectate.putMark(PLAYER, value);
+            assertRejected(watch(X), 16004, BUSY);
+            assertThat(spectate.markOf(PLAYER)).contains(value);
+        }
+        assertThat(observers.calls).isEmpty();
+        assertThat(spectate.calls).noneMatch(call -> call.startsWith("release"));
+    }
+
+    @Test
     void 第7行_换场_旧场落点在_同步RemoveObserver_rewatch_发往旧场落点_完成后才删旧标记再登记新场() {
         online();
         BattlePlacement old = open(X);
         BattlePlacement fresh = open(Y);
-        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        String oldMark = oldMark(X, "aaaaaaaaaaaaaaaa");
         spectate.putMark(PLAYER, oldMark);
 
         // 预算给得宽（10 s），下面对「3 s」的断言才不受机器快慢影响；生产是 4.5 s，同一个公式
@@ -380,7 +409,7 @@ class WatchBattleServiceTest {
         online();
         open(X);
         open(Y);
-        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        String oldMark = oldMark(X, "aaaaaaaaaaaaaaaa");
         spectate.putMark(PLAYER, oldMark);
         observers.hangRemove();
 
@@ -403,7 +432,7 @@ class WatchBattleServiceTest {
     void 第7行_随机模式有旧标记_一律先清退旧场_随后又挑中旧场就重新登记() {
         online();
         BattlePlacement only = open(X);
-        spectate.putMark(PLAYER, SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa"));
+        spectate.putMark(PLAYER, oldMark(X, "aaaaaaaaaaaaaaaa"));
 
         WatchBattleResponse response = watch(0);
 
@@ -417,84 +446,84 @@ class WatchBattleServiceTest {
     }
 
     @Test
-    void 第7行_显式重看同一场_只删旧标记_不发RemoveObserver_Add走battle的幂等分支_不计清退() {
+    void 第7行_显式重看同一场_先取消旧操作_再按新UUID登记() {
         online();
         open(X);
-        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        String oldMark = oldMark(X, "aaaaaaaaaaaaaaaa");
         spectate.putMark(PLAYER, oldMark);
 
         WatchBattleResponse response = watch(X);
 
         assertAccepted(response, X);
-        assertThat(observers.removes()).as("发了 Remove 就会给仍活着的旧会话推一条假的 166（:431）").isEmpty();
-        assertThat(callKinds()).containsExactly(Kind.ADD);
+        assertThat(observers.removes()).as("重看同场也必须取消旧 UUID").hasSize(1);
+        assertThat(callKinds()).containsExactly(Kind.REMOVE, Kind.ADD);
         assertThat(spectate.calls).as("旧标记按值删").contains("release(1001," + oldMark + ")");
         assertThat(spectate.markOf(PLAYER)).as("标记换成了本次请求的值").contains(markValue(X, 1));
-        assertThat(evictionsTotal()).as("重看同一场不算清退").isZero();
+        assertThat(evictionsTotal()).as("旧操作取消计一次清退").isEqualTo(1.0);
         assertThat(outcomes()).isEqualTo(Map.of("ok", 1.0));
     }
 
     @Test
-    void 第7行_旧场已收尾没有落点_只删标记_不发RPC() {
+    void 第7行_旧场没有后续落点_仍按持久原件取消() {
         online();
         open(Y);
-        spectate.putMark(PLAYER, SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa"));
+        spectate.putMark(PLAYER, oldMark(X, "aaaaaaaaaaaaaaaa"));
 
         WatchBattleResponse response = watch(Y);
 
         assertAccepted(response, Y);
-        assertThat(observers.removes()).isEmpty();
-        assertThat(evictions("rewatch", "no_record")).isEqualTo(1.0);
+        assertThat(observers.removes()).hasSize(1);
+        assertThat(evictions("rewatch", "removed")).isEqualTo(1.0);
         assertThat(evictionsTotal()).isEqualTo(1.0);
         assertThat(markedBattle()).contains(Y);
     }
 
     @Test
-    void 第7行_读旧场落点出错或记录损坏_只记日志_不发RPC_标记照删_继续登记新场() {
+    void 第7行_旧场落点读取失败或损坏_仍按原件取消_证明后继续登记新场() {
         online();
         open(X);
         open(Y);
-        spectate.putMark(PLAYER, SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa"));
+        spectate.putMark(PLAYER, oldMark(X, "aaaaaaaaaaaaaaaa"));
         placements.readFailed = true;
 
         WatchBattleResponse readFailed = watch(Y);
 
         assertAccepted(readFailed, Y);
-        assertThat(observers.removes()).as("读不出旧场的地址：不发 RemoveObserver").isEmpty();
-        assertThat(evictions("rewatch", "read_failed")).isEqualTo(1.0);
+        assertThat(observers.removes()).as("原件自带固定端点").hasSize(1);
+        assertThat(evictions("rewatch", "removed")).isEqualTo(1.0);
 
-        // 旧场的记录损坏（:824）：同样只删标记
+        // 后续落点损坏不改变已经持久化的原件。
         placements.readFailed = false;
         placements.corrupt(Y);
         open(Z);
         WatchBattleResponse corrupt = watch(Z);
 
         assertAccepted(corrupt, Z);
-        assertThat(observers.removes()).isEmpty();
-        assertThat(evictions("rewatch", "read_failed")).isEqualTo(2.0);
+        assertThat(observers.removes()).hasSize(2);
+        assertThat(evictions("rewatch", "removed")).isEqualTo(2.0);
         assertThat(markedBattle()).contains(Z);
         assertThat(outcomes()).isEqualTo(Map.of("ok", 2.0));
     }
 
     @Test
-    void 第7行_旧场的Remove没调通_只记日志与指标_旧标记照删_新场照常登记() {
+    void 第7行_旧场Remove没有取消证明_保留旧原件_不登记任何新操作() {
         online();
         open(X);
         open(Y);
         open(Z);
-        spectate.putMark(PLAYER, SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa"));
+        spectate.putMark(PLAYER, oldMark(X, "aaaaaaaaaaaaaaaa"));
         observers.nextRemove(new Outcome.Unknown("超时"), new Outcome.NotDelivered("连不上"), new Outcome.Dead());
 
-        assertAccepted(watch(Y), Y);
-        assertAccepted(watch(Z), Z);
-        assertAccepted(watch(X), X);
+        assertRejected(watch(Y), 16004, BUSY);
+        assertRejected(watch(Z), 16004, BUSY);
+        assertRejected(watch(X), 16004, BUSY);
 
-        assertThat(callKinds()).containsExactly(Kind.REMOVE, Kind.ADD, Kind.REMOVE, Kind.ADD, Kind.REMOVE, Kind.ADD);
-        assertThat(evictions("rewatch", "rpc_failed")).as("超时与没送达").isEqualTo(2.0);
-        assertThat(evictions("rewatch", "no_record")).as("旧场所在的进程已被接手：视同那一场不在了").isEqualTo(1.0);
+        assertThat(callKinds()).containsExactly(Kind.REMOVE, Kind.REMOVE, Kind.REMOVE);
+        assertThat(evictions("rewatch", "rpc_failed")).as("超时、没送达、目录判死均不是正证明").isEqualTo(3.0);
+        assertThat(evictions("rewatch", "no_record")).as("目录判死不冒充取消成功").isZero();
         assertThat(evictionsTotal()).isEqualTo(3.0);
         assertThat(markedBattle()).contains(X);
-        assertThat(outcomes()).isEqualTo(Map.of("ok", 3.0));
+        assertThat(outcomes()).isEqualTo(Map.of("internal", 3.0));
     }
 
     @Test
@@ -502,7 +531,7 @@ class WatchBattleServiceTest {
         online();
         open(X);
         open(Y);
-        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        String oldMark = oldMark(X, "aaaaaaaaaaaaaaaa");
         spectate.putMark(PLAYER, oldMark);
 
         WatchBattleResponse response = watch(Y, 1_500);
@@ -516,17 +545,17 @@ class WatchBattleServiceTest {
     }
 
     @Test
-    void 预算不足以换场_但旧场已收尾不需要发Remove_照常删标记往下走() {
+    void 预算不足以取消旧原件_即使后续落点缺失也保留并拒绝() {
         online();
         open(Y);
-        spectate.putMark(PLAYER, SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa"));
+        spectate.putMark(PLAYER, oldMark(X, "aaaaaaaaaaaaaaaa"));
 
-        // 2.1 s < 2.2 s，但没有旧场的落点：不用发 Remove，只剩 Add 这一跳（需要 ≥ 1 s）
+        // 2.1 s < 2.2 s：后续落点缺失不能绕过旧操作取消预算。
         WatchBattleResponse response = watch(Y, 2_100);
 
-        assertAccepted(response, Y);
-        assertThat(callKinds()).containsExactly(Kind.ADD);
-        assertThat(evictions("rewatch", "no_record")).isEqualTo(1.0);
+        assertRejected(response, 16004, BUSY);
+        assertThat(callKinds()).isEmpty();
+        assertThat(evictions("rewatch", "no_record")).isZero();
     }
 
     @Test
@@ -534,7 +563,7 @@ class WatchBattleServiceTest {
         online();
         open(X);
         open(Y);
-        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        String oldMark = oldMark(X, "aaaaaaaaaaaaaaaa");
         spectate.putMark(PLAYER, oldMark);
         spectate.faults.failNext("release");
 
@@ -548,20 +577,20 @@ class WatchBattleServiceTest {
     }
 
     @Test
-    void 第7行_重看同一场时删旧标记失败_16004_旧标记原样留着_不补发异步删除() {
+    void 第7行_同场旧操作已取消但删标记失败_16004_补发按原值异步删除() {
         online();
         open(X);
-        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        String oldMark = oldMark(X, "aaaaaaaaaaaaaaaa");
         spectate.putMark(PLAYER, oldMark);
         spectate.faults.failNext("release");
 
         WatchBattleResponse response = watch(X);
 
         assertRejected(response, 16004, BUSY);
-        assertThat(observers.calls).as("重看同一场不发 Remove，也没有走到 Add").isEmpty();
-        assertThat(spectate.calls).as("他仍登记在 X：标记删掉的话开局清退就摘不到他了（基线在同样的故障下标记也还在）")
-                .noneMatch(call -> call.startsWith("releaseAsync"));
-        assertThat(spectate.markOf(PLAYER)).contains(oldMark);
+        assertThat(observers.calls).as("旧操作已确认取消，没有走到 Add").hasSize(1);
+        assertThat(spectate.calls).as("取消已确认，按原值异步补删无害")
+                .contains("releaseAsync(1001," + oldMark + ")");
+        assertThat(spectate.markOf(PLAYER)).isEmpty();
         assertThat(spectate.calls).noneMatch(call -> call.startsWith("acquire"));
         assertThat(outcomes()).isEqualTo(Map.of("internal", 1.0));
     }
@@ -570,7 +599,7 @@ class WatchBattleServiceTest {
     void 判定顺序_旧标记的清退先于在线检查_不在线的玩家旧场照样被清退再回16019() {
         open(X);
         open(Y);
-        spectate.putMark(PLAYER, SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa"));
+        spectate.putMark(PLAYER, oldMark(X, "aaaaaaaaaaaaaaaa"));
         // 没有调 online()：在线目录没有条目
 
         WatchBattleResponse response = watch(Y);
@@ -631,7 +660,7 @@ class WatchBattleServiceTest {
     // ================================================================ 第 15 行：成功
 
     @Test
-    void 第15行_成功_只带battle_id_路由四个字段都取在线目录_scene字段为空_observer_name是账号_标记先于登记() {
+    void 第15行_成功带battle_id与操作UUID_路由取在线目录_scene为空_无公开名字时不用私有账号_标记先于登记() {
         // 会话上下文里是 zone 1，在线目录里是 zone 2 的 1 号 gate：路由取在线目录（W11；两个 zone 都有 1 号 gate，只凭节点号会推错）
         players.presence(PLAYER, PlayerPresence.newBuilder().setPlayerId(PLAYER).setZoneId(2).setGateNodeId(1).setGateInstanceId("gate-inst-z2")
                 .setSessionId(4242).setOwnerEpoch(9).build());
@@ -649,6 +678,10 @@ class WatchBattleServiceTest {
         assertThat(add.placement()).as("发往落点记录").isEqualTo(placement);
         assertThat(add.request().getBattleId()).isEqualTo(X);
         assertThat(add.request().getObserverPlayerId()).isEqualTo(PLAYER);
+        assertThat(add.request().getSpectatorOperationId()).isEqualTo(nonce(1));
+        assertThat(add.request().getAdmitBeforeMs()).isEqualTo(clock.peekMs() + 25_000);
+        assertThat(add.request().getTargetInstanceId()).isEqualTo(placement.getBattleInstanceId());
+        assertThat(response.getSpectatorOperationId()).isEqualTo(add.request().getSpectatorOperationId());
         assertThat(add.request().getObserverName()).as("缺公开名字时为空，不能泄露私有登录账号").isEmpty();
         assertThat(add.request().getRouting()).as(":294").isEqualTo(BattleRouting.newBuilder().setSessionId(4242).setGateNodeId(1)
                 .setGateInstanceId("gate-inst-z2").setZoneId(2).build());
@@ -692,7 +725,8 @@ class WatchBattleServiceTest {
 
         assertAccepted(explicit, HUGE);
         assertAccepted(random, HUGE);
-        assertThat(spectate.markOf(PLAYER)).hasValueSatisfying(mark -> assertThat(mark).startsWith("17293822569102704641:"));
+        assertThat(spectate.markOf(PLAYER)).hasValueSatisfying(mark ->
+                assertThat(Long.toUnsignedString(LocalObserverOperation.decode(mark).orElseThrow().battleId())).isEqualTo("17293822569102704641"));
         assertThat(observers.adds()).extracting(call -> call.request().getBattleId()).containsExactly(HUGE, HUGE);
     }
 
@@ -937,7 +971,7 @@ class WatchBattleServiceTest {
     void 第13行_抢标记时被并发的另一条163占着_16016已在观战另一场战斗_不调battle_对方的标记不动() {
         online();
         open(X);
-        String theirs = SpectateRules.encodeMark(Y, "bbbbbbbbbbbbbbbb");
+        String theirs = oldMark(Y, "bbbbbbbbbbbbbbbb");
         // 入口检查之后、抢占之前，同一玩家的另一条 163 抢先写了标记（基线 beforeAcquireWatchingHook，:694）
         spectate.beforeAcquire = playerId -> spectate.putMark(playerId, theirs);
 
@@ -985,49 +1019,49 @@ class WatchBattleServiceTest {
     }
 
     @Test
-    void 第13行_重看同一场_删掉旧标记之后才建出票据_抢标记回有票_补一条自我清退_否则开局清退摘不到仍登记着的他() {
+    void 第13行_同场旧操作已先取消_抢新标记时有票_不再重复清退() {
         online();
         BattlePlacement placement = open(X);
         // 玩家正登记在 X 的观众名单里，旧标记指着它
-        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        String oldMark = oldMark(X, "aaaaaaaaaaaaaaaa");
         spectate.putMark(PLAYER, oldMark);
-        // 入口读到「无票、有旧标记」→ 同场分支只删标记、不发 Remove → 这之后 157 才建出票据
+        // 入口按原件取消并删旧标记，这之后 157 才建出票据。
         spectate.beforeAcquire = this::enqueue;
 
         WatchBattleResponse response = watch(X);
 
         assertRejected(response, 16014, QUEUED);
-        assertThat(callKinds()).as("不调 AddObserver；但旧标记已删、观众登记还在，开局清退只认标记——补一条自我清退（基线在同一交错下靠复查摘掉他）")
-                .containsExactly(Kind.REMOVE_ASYNC);
+        assertThat(callKinds()).as("旧操作已取消；新操作未 Add，不补无意义的第二次取消")
+                .containsExactly(Kind.REMOVE);
         Call evict = observers.calls.get(0);
         assertThat(evict.placement()).as("发往这一场的落点").isEqualTo(placement);
         assertThat(evict.observerId()).isEqualTo(PLAYER);
-        assertThat(evict.reason()).isEqualTo("concurrent_queue");
+        assertThat(evict.reason()).isEqualTo("rewatch");
         assertThat(spectate.markOf(PLAYER)).as("新旧标记都不留").isEmpty();
         assertThat(spectate.calls).as("旧标记按值删；本次的值也按值释放一次（命令被重发时首轮可能已写入）")
                 .contains("release(1001," + oldMark + ")", "release(1001," + markValue(X, 1) + ")");
-        assertThat(events).as("入口先删旧标记，抢占回有票之后才自我清退")
-                .containsSubsequence("spectate.release:1001", "observer.removeAsync:" + X + ":1001:concurrent_queue");
-        assertThat(evictions("concurrent_queue", "removed")).isEqualTo(1.0);
-        assertThat(evictionsTotal()).as("重看同一场本身不算清退；只有这一条自我清退").isEqualTo(1.0);
+        assertThat(events).as("原操作先取消，确认后才按值删除")
+                .containsSubsequence("observer.remove:" + X + ":1001:rewatch", "spectate.release:1001");
+        assertThat(evictions("rewatch", "removed")).isEqualTo(1.0);
+        assertThat(evictionsTotal()).as("只有旧操作取消这一次").isEqualTo(1.0);
         assertThat(outcomes()).isEqualTo(Map.of("queued", 1.0));
     }
 
     @Test
-    void 第13行_重看同一场时补发的自我清退没调通_只记指标_应答与标记不变() {
+    void 第13行_同场取消未知_尚未走到抢新标记_保留旧原件() {
         online();
         open(X);
-        spectate.putMark(PLAYER, SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa"));
+        spectate.putMark(PLAYER, oldMark(X, "aaaaaaaaaaaaaaaa"));
         spectate.beforeAcquire = this::enqueue;
         observers.nextRemove(new Outcome.Unknown("超时"));
 
         WatchBattleResponse response = watch(X);
 
-        assertRejected(response, 16014, QUEUED);
-        assertThat(callKinds()).containsExactly(Kind.REMOVE_ASYNC);
-        assertThat(evictions("concurrent_queue", "rpc_failed")).isEqualTo(1.0);
-        assertThat(spectate.markOf(PLAYER)).isEmpty();
-        assertThat(outcomes()).isEqualTo(Map.of("queued", 1.0));
+        assertRejected(response, 16004, BUSY);
+        assertThat(callKinds()).containsExactly(Kind.REMOVE);
+        assertThat(evictions("rewatch", "rpc_failed")).isEqualTo(1.0);
+        assertThat(spectate.markOf(PLAYER)).contains(oldMark(X, "aaaaaaaaaaaaaaaa"));
+        assertThat(outcomes()).isEqualTo(Map.of("internal", 1.0));
     }
 
     @Test
@@ -1035,7 +1069,7 @@ class WatchBattleServiceTest {
         online();
         BattlePlacement old = open(X);
         open(Y);
-        spectate.putMark(PLAYER, SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa"));
+        spectate.putMark(PLAYER, oldMark(X, "aaaaaaaaaaaaaaaa"));
         spectate.beforeAcquire = this::enqueue;
 
         WatchBattleResponse response = watch(Y);
@@ -1082,7 +1116,7 @@ class WatchBattleServiceTest {
         assertThat(evict.observerId()).isEqualTo(PLAYER);
         assertThat(evict.reason()).isEqualTo("concurrent_queue");
         assertThat(spectate.markOf(PLAYER)).isEmpty();
-        assertThat(spectate.calls).contains("release(1001," + markValue(X, 1) + ")");
+        assertThat(spectate.calls).contains("releaseAsync(1001," + markValue(X, 1) + ")");
         assertThat(spectate.isWatchable(X)).as("索引不动").isTrue();
         assertThat(evictions("concurrent_queue", "removed")).isEqualTo(1.0);
         assertThat(evictionsTotal()).isEqualTo(1.0);
@@ -1157,12 +1191,13 @@ class WatchBattleServiceTest {
 
         assertRejected(response, 16014, QUEUED);
         assertThat(callKinds()).containsExactly(Kind.ADD, Kind.REMOVE_ASYNC);
-        assertThat(spectate.markOf(PLAYER)).as("标记不等 Remove 的结果就删").isEmpty();
+        assertThat(spectate.markOf(PLAYER)).as("未获取消证明之前保留原件").contains(markValue(X, 1));
         assertThat(evictionsTotal()).as("Remove 还没有结局").isZero();
 
         observers.releaseRemoveAsync();
 
         assertThat(evictions("concurrent_queue", "removed")).isEqualTo(1.0);
+        assertThat(spectate.markOf(PLAYER)).as("迟到正证明到达后按值删除").isEmpty();
         assertThat(outcomes()).isEqualTo(Map.of("queued", 1.0));
     }
 
@@ -1177,7 +1212,7 @@ class WatchBattleServiceTest {
 
         assertRejected(response, 16014, QUEUED);
         assertThat(evictions("concurrent_queue", "rpc_failed")).isEqualTo(1.0);
-        assertThat(spectate.markOf(PLAYER)).isEmpty();
+        assertThat(spectate.markOf(PLAYER)).contains(markValue(X, 1));
     }
 
     @Test
@@ -1652,36 +1687,76 @@ class WatchBattleServiceTest {
     }
 
     @Test
-    void 第17行_W4_AddObserver结局不明_保留标记_不补发Remove_16018当前无法观战() {
+    void 第17行_Add未知_按原件补取消_取消也未知则保留原件() {
         online();
         open(X);
         observers.nextAdd(new Outcome.Unknown("TIMEOUT: 本地等待超时"));
+        observers.nextRemove(new Outcome.Unknown("取消也超时"));
 
         WatchBattleResponse response = watch(X);
 
         assertRejected(response, 16018, NOT_WATCHABLE);
         assertThat(spectate.markOf(PLAYER)).as("battle 可能已登记这名观众：标记留着，开局清退才摘得到他").contains(markValue(X, 1));
         assertThat(spectate.calls).noneMatch(call -> call.startsWith("release"));
-        assertThat(callKinds()).as("不补发 RemoveObserver：它可能先于在途的 Add 到达").containsExactly(Kind.ADD);
+        assertThat(callKinds()).as("先到的 Remove 墓碑封闭同 UUID 的迟到 Add").containsExactly(Kind.ADD, Kind.REMOVE_ASYNC);
         assertThat(spectate.isWatchable(X)).isTrue();
         assertThat(indexEvictions()).isEmpty();
         assertThat(outcomes()).isEqualTo(Map.of("rejected", 1.0));
     }
 
     @Test
-    void W4_结局不明之后再发163同一场_只删标记_不发Remove_Add走幂等_成功() {
+    void Add未知但原件取消已确认_按原值异步释放标记() {
+        online();
+        open(X);
+        observers.nextAdd(new Outcome.Unknown("回包丢失"));
+
+        assertRejected(watch(X), 16018, NOT_WATCHABLE);
+
+        assertThat(callKinds()).containsExactly(Kind.ADD, Kind.REMOVE_ASYNC);
+        assertThat(observers.removes().get(0).request()).isEqualTo(observers.adds().get(0).request());
+        assertThat(observers.removes().get(0).reason()).isEqualTo("watch_outcome_unknown");
+        assertThat(spectate.calls).contains("releaseAsync(1001," + markValue(X, 1) + ")");
+        assertThat(spectate.markOf(PLAYER)).isEmpty();
+        assertThat(evictions("watch_outcome_unknown", "removed")).isEqualTo(1.0);
+    }
+
+    @Test
+    void Add未知的迟到取消证明不能删掉后来操作的标记() {
+        online();
+        open(X);
+        open(Y);
+        observers.nextAdd(new Outcome.Unknown("回包丢失"));
+        observers.hangRemoveAsync();
+
+        assertRejected(watch(X), 16018, NOT_WATCHABLE);
+        String original = markValue(X, 1);
+        assertThat(spectate.markOf(PLAYER)).contains(original);
+        String fresh = oldMark(Y, "后来操作");
+        spectate.putMark(PLAYER, fresh);
+        observers.releaseRemoveAsync();
+
+        assertThat(spectate.calls).contains("releaseAsync(1001," + original + ")");
+        assertThat(spectate.markOf(PLAYER)).contains(fresh);
+        assertThat(observers.removes()).singleElement().satisfies(call ->
+                assertThat(call.request()).isEqualTo(observers.adds().get(0).request()));
+    }
+
+    @Test
+    void Add未知且取消未知_再次同场观战先确认旧UUID取消再登记新操作() {
         online();
         open(X);
         observers.nextAdd(new Outcome.Unknown("超时"));
+        observers.nextRemove(new Outcome.Unknown("取消超时"));
         assertRejected(watch(X), 16018, NOT_WATCHABLE);
 
         WatchBattleResponse again = watch(X);
 
         assertAccepted(again, X);
-        assertThat(callKinds()).as("两次都只有 Add").containsExactly(Kind.ADD, Kind.ADD);
+        assertThat(callKinds()).as("先补偿，下一次先重放旧取消再发新 Add")
+                .containsExactly(Kind.ADD, Kind.REMOVE_ASYNC, Kind.REMOVE, Kind.ADD);
         assertThat(spectate.calls).as("上一次留下的标记按值删").contains("release(1001," + markValue(X, 1) + ")");
         assertThat(spectate.markOf(PLAYER)).contains(markValue(X, 2));
-        assertThat(evictionsTotal()).isZero();
+        assertThat(evictionsTotal()).isEqualTo(2.0);
         assertThat(outcomes()).isEqualTo(Map.of("rejected", 1.0, "ok", 1.0));
     }
 
@@ -1837,21 +1912,21 @@ class WatchBattleServiceTest {
     }
 
     @Test
-    void J行_重看同一场_Add之前剩余预算不足1秒_16004_保留刚抢到的标记_仍登记着的他才摘得到() {
+    void J行_同场重看预算不足_不碰旧原件也不发取消或新Add() {
         online();
         open(X);
-        // 玩家正登记在 X 的观众名单里；同场分支在入口只删旧标记、不发 Remove
-        String oldMark = SpectateRules.encodeMark(X, "aaaaaaaaaaaaaaaa");
+        // 玩家正登记在 X 的观众名单里，旧原件取消需要完整预算。
+        String oldMark = oldMark(X, "aaaaaaaaaaaaaaaa");
         spectate.putMark(PLAYER, oldMark);
 
-        // 900 ms < 1 s：必定走 J 行；又留足时间让入口的几步内存操作在截止之前做完
+        // 900 ms 不足旧取消与新 Add 预算，入口即返回。
         WatchBattleResponse response = watch(X, 900);
 
         assertRejected(response, 16004, BUSY);
-        assertThat(observers.calls).as("不发 AddObserver，也不发 Remove（那会给仍活着的旧会话推一条假的 166）").isEmpty();
-        assertThat(spectate.markOf(PLAYER)).as("回滚的话就成了「在名单、无标记」，开局清退摘不到他：标记留着（W4 的口径）").contains(markValue(X, 1));
-        assertThat(spectate.calls).filteredOn(call -> call.startsWith("release")).as("只按值删了旧标记，本次的值没有释放")
-                .containsExactly("release(1001," + oldMark + ")");
+        assertThat(observers.calls).as("不发任何可能半途超时的旧取消或新 Add").isEmpty();
+        assertThat(spectate.markOf(PLAYER)).as("保留旧原件供后续恢复").contains(oldMark);
+        assertThat(spectate.calls).filteredOn(call -> call.startsWith("release")).as("没有取消证明，不做删除")
+                .isEmpty();
         assertThat(evictionsTotal()).isZero();
         assertThat(outcomes()).isEqualTo(Map.of("internal", 1.0));
     }
@@ -1900,7 +1975,7 @@ class WatchBattleServiceTest {
     void W3_回滚只删自己写下的值_标记期间换成了别的请求的值_不被本次的回滚删掉(String name, Outcome outcome, int code) {
         online();
         open(X);
-        String theirs = SpectateRules.encodeMark(X, "cccccccccccccccc");
+        String theirs = oldMark(X, "cccccccccccccccc");
         // AddObserver 在途期间：本次的标记没了（被开局清退按值删掉），同一玩家的另一条 163 抢到了新的标记
         observers.beforeAdd = call -> spectate.putMark(PLAYER, theirs);
         observers.nextAdd(outcome);
@@ -1916,7 +1991,7 @@ class WatchBattleServiceTest {
     void W3_复查命中后的自我清退同样按值删_别的请求的标记不动() {
         online();
         open(X);
-        String theirs = SpectateRules.encodeMark(Y, "cccccccccccccccc");
+        String theirs = oldMark(Y, "cccccccccccccccc");
         observers.beforeAdd = call -> {
             spectate.putMark(PLAYER, theirs);
             enqueue(PLAYER);

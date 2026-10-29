@@ -284,7 +284,7 @@ class WorldPlanRedisIntegrationTest {
         int zone = newZone();
         String token = leader(zone, "sm:" + zone);
         List<Object> keys = List.of(REDIS_KEYS.worldLeader(zone), REDIS_KEYS.worldChannels(zone), REDIS_KEYS.worldDesired(zone),
-                REDIS_KEYS.worldCooldown(zone), REDIS_KEYS.worldPlanVersion(zone));
+                REDIS_KEYS.worldCooldown(zone), REDIS_KEYS.worldPlanVersion(zone),REDIS_KEYS.worldRetirement(zone));
         RScript script = redis.getScript(ByteArrayCodec.INSTANCE);
         assertThatThrownBy(() -> script.eval(RScript.Mode.READ_WRITE, RedissonWorldChannelStore.WRITE,
                 RScript.ReturnType.INTEGER, keys, ascii(token), ascii("0"), ascii("1"),

@@ -28,4 +28,7 @@ public interface ItemCatalog {
 
     /** 某部位的装备槽号（EquipSlot.id），按表序；没有为空列表。 */
     List<Integer> equipSlots(int equipKind);
+
+    /** 只在新铸实例提交前调用；既有实例与读档不经过这里。 */
+    default com.game.player.store.state.EquipmentState createEquipment(int configId) { return null; }
 }

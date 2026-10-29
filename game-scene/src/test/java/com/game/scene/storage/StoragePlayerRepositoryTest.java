@@ -65,6 +65,25 @@ class StoragePlayerRepositoryTest {
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final SceneMetrics metrics = new SceneMetrics(meters);
 
+    @Test void 疏散水位在队列达到一半时关闭_恢复后开启_停池永不再接() {
+        var queue = new java.util.concurrent.LinkedBlockingQueue<Runnable>(4);
+        var pool = new java.util.concurrent.ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, queue);
+        try {
+            var repository = new StoragePlayerRepository(store, pool, logic, metrics);
+            assertThat(repository.evacuationCapacityAvailable()).isTrue();
+            queue.add(() -> { });
+            assertThat(repository.evacuationCapacityAvailable()).isTrue();
+            queue.add(() -> { });
+            assertThat(repository.evacuationCapacityAvailable()).isFalse();
+            queue.remove();
+            assertThat(repository.evacuationCapacityAvailable()).isTrue();
+            pool.shutdown();
+            assertThat(repository.evacuationCapacityAvailable()).isFalse();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     private RoleAdmissionIdentity original() {
         return RoleAdmissionIdentity.newBuilder().setPlayerId(1001).setOwnerEpoch(6).setOwnerRevision(3)
                 .setGeneration(6).setLoginGeneration(5).setSceneNodeId("9").setSceneInstanceId("scene-original")

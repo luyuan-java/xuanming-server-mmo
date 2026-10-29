@@ -12,6 +12,8 @@ import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.Channel;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.handler.timeout.IdleStateHandler;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.InstantSource;
@@ -241,6 +243,98 @@ class NodeLinkHandlerTest {
         assertThat(inbound.events).containsExactly("opened:1:5", "frame:1:PLAYER_LEAVE", "frame:1:PLAYER_LEAVE",
                 "frame:1:PLAYER_LEAVE", "frame:1:PLAYER_LEAVE");
         assertThat(pauses()).as("恢复不计，只计暂停").isEqualTo(1);
+    }
+
+    @Test
+    void 心跳直接在IO回显序号_不等待逻辑线程不占背压计数() {
+        List<Runnable> logicQueue = new ArrayList<>();
+        NodeLinkHandler handler = new NodeLinkHandler(IDENTITY, AUTH,
+                InstantSource.fixed(Instant.ofEpochSecond(NOW)), inbound, logicQueue::add, new AtomicLong(),
+                Duration.ofSeconds(10), 4, metrics);
+        EmbeddedChannel channel = new EmbeddedChannel(handler);
+        channel.writeInbound(heartbeatHello(1000));
+        assertThat(logicQueue).hasSize(1);
+        channel.writeInbound(NodeLinkFrame.newBuilder().setPing(com.game.api.proto.LinkPing.newBuilder().setSeq(-1L)).build());
+        NodeLinkFrame pong = channel.readOutbound();
+        assertThat(pong.hasPong()).isTrue();
+        assertThat(pong.getPong().getSeq()).isEqualTo(-1L);
+        assertThat(handler.pendingFrames()).isZero();
+        assertThat(logicQueue).hasSize(1);
+        assertThat(inbound.events).isEmpty();
+        assertThat(frames("in", "ping")).isEqualTo(1);
+        assertThat(frames("out", "pong")).isEqualTo(1);
+        assertThat(channel.pipeline().get(IdleStateHandler.class).getReaderIdleTimeInMillis()).isEqualTo(3000);
+        logicQueue.removeFirst().run();
+        channel.pipeline().fireUserEventTriggered(IdleStateEvent.FIRST_READER_IDLE_STATE_EVENT);
+        assertThat(channel.isOpen()).isFalse();
+        logicQueue.removeFirst().run();
+        assertThat(inbound.events).containsExactly("opened:1:5", "closed:1");
+        assertThat(meters.get("game.scene.link.idle.closes").counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    void 旧握手及越界间隔不启用读空闲_有效边界可协商() {
+        for (int interval : new int[]{0, 1, 999, 30001, -1}) {
+            EmbeddedChannel channel = newChannel(Duration.ofSeconds(10));
+            channel.writeInbound(heartbeatHello(interval));
+            assertThat(channel.pipeline().get(IdleStateHandler.class)).isNull();
+            channel.pipeline().fireUserEventTriggered(IdleStateEvent.READER_IDLE_STATE_EVENT);
+            channel.writeInbound(NodeLinkFrame.newBuilder().setPing(com.game.api.proto.LinkPing.newBuilder().setSeq(1)).build());
+            assertThat(channel.isOpen()).isTrue();
+            assertThat((Object) channel.readOutbound()).isNull();
+            assertThat(IDENTITY.ack(true, "", interval).getHelloAck().getPingIntervalMs()).isZero();
+            channel.close();
+        }
+        for (int interval : new int[]{1000, 30000}) {
+            EmbeddedChannel channel = newChannel(Duration.ofSeconds(10));
+            channel.writeInbound(heartbeatHello(interval));
+            assertThat(channel.pipeline().get(IdleStateHandler.class).getReaderIdleTimeInMillis()).isEqualTo(3L * interval);
+            assertThat(IDENTITY.ack(true, "", interval).getHelloAck().getPingIntervalMs()).isEqualTo(interval);
+            channel.close();
+        }
+    }
+
+    @Test
+    void 背压期间读空闲忽略_恢复时替换时钟预算_恢复后空闲照常断开() {
+        List<Runnable> logicQueue = new ArrayList<>();
+        EmbeddedChannel channel = new EmbeddedChannel(new NodeLinkHandler(IDENTITY, AUTH,
+                InstantSource.fixed(Instant.ofEpochSecond(NOW)), inbound, logicQueue::add, new AtomicLong(),
+                Duration.ofSeconds(10), 4, metrics));
+        channel.writeInbound(heartbeatHello(1000));
+        logicQueue.removeFirst().run();
+        IdleStateHandler beforePause = channel.pipeline().get(IdleStateHandler.class);
+        NodeLinkFrame leave = NodeLinkFrame.newBuilder().setPlayerLeave(PlayerLeave.newBuilder().setSessionId(11)).build();
+        for (int i = 0; i < 4; i++) channel.writeInbound(leave);
+        assertThat(channel.config().isAutoRead()).isFalse();
+        channel.pipeline().fireUserEventTriggered(IdleStateEvent.FIRST_READER_IDLE_STATE_EVENT);
+        assertThat(channel.isOpen()).isTrue();
+        assertThat(meters.get("game.scene.link.idle.ignored").counter().count()).isEqualTo(1);
+        assertThat(meters.find("game.scene.link.idle.closes").counter()).as("忽略期间没有关闭计数").isNull();
+        logicQueue.removeFirst().run(); logicQueue.removeFirst().run(); channel.runPendingTasks();
+        assertThat(channel.config().isAutoRead()).isTrue();
+        IdleStateHandler resumed = channel.pipeline().get(IdleStateHandler.class);
+        assertThat(resumed).isNotSameAs(beforePause);
+        assertThat(resumed.getReaderIdleTimeInMillis()).isEqualTo(3000);
+        channel.pipeline().fireUserEventTriggered(IdleStateEvent.READER_IDLE_STATE_EVENT);
+        assertThat(channel.isOpen()).isFalse();
+        assertThat(meters.get("game.scene.link.idle.closes").counter().count()).isEqualTo(1);
+        logicQueue.forEach(Runnable::run);
+        assertThat(inbound.events).containsExactly("opened:1:5", "frame:1:PLAYER_LEAVE", "frame:1:PLAYER_LEAVE",
+                "frame:1:PLAYER_LEAVE", "frame:1:PLAYER_LEAVE", "closed:1");
+    }
+
+    @Test
+    void 握手应答读取最新scene租约代次_拒绝握手不启用心跳() {
+        AtomicLong lease = new AtomicLong(4);
+        LinkIdentity identity = new LinkIdentity(7, "scene-instance", 1, lease::get);
+        assertThat(identity.ack(true, "", 1000).getHelloAck().getSceneLeaseEpoch()).isEqualTo(4);
+        lease.set(5);
+        assertThat(identity.ack(true, "", 1000).getHelloAck().getSceneLeaseEpoch()).isEqualTo(5);
+        assertThat(identity.ack(false, "rejected", 1000).getHelloAck().getPingIntervalMs()).isZero();
+    }
+
+    private static NodeLinkFrame heartbeatHello(int interval) {
+        return NodeLinkFrame.newBuilder().setHello(hello(5, 1, NOW).getHello().toBuilder().setPingIntervalMs(interval)).build();
     }
 
     // ------------------------------------------------------------------ 工具

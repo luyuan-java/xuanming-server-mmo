@@ -24,6 +24,12 @@ import java.util.TreeSet;
  * 可注入故障与强制写入结局。线程安全（synchronized），够单测用。
  */
 public final class FakeWorldChannelStore implements WorldChannelStore {
+    final Map<Integer, Boolean> nodeLeases = new HashMap<>();
+    boolean failNodeLeaseRead;
+    @Override public boolean sceneNodeLeaseHeld(int zoneId, int nodeId) {
+        if (failNodeLeaseRead) throw new IllegalStateException("lease read unavailable");
+        return nodeLeases.getOrDefault(nodeId, false);
+    }
 
     public static final class Zone {
         public long version;

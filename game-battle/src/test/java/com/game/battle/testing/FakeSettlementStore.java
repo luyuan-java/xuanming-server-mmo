@@ -24,6 +24,7 @@ public final class FakeSettlementStore implements SettlementOutbox.Store {
 
     public final Scripted<Long> stores = new Scripted<>();
     public final Scripted<Boolean> probes = new Scripted<>();
+    public final Scripted<byte[]> originals = new Scripted<>();
     public final Scripted<Long> supersedes = new Scripted<>();
 
     private final CallJournal journal;
@@ -65,6 +66,13 @@ public final class FakeSettlementStore implements SettlementOutbox.Store {
         String key = key(playerId, battleId);
         journal.add("exists:" + key);
         return probes.invoke("exists:" + key, () -> hasRecord(playerId, battleId));
+    }
+
+    @Override
+    public CompletableFuture<byte[]> readOriginal(long playerId, long battleId) {
+        String key = key(playerId, battleId);
+        journal.add("original:" + key);
+        return originals.invoke("original:" + key, () -> record(playerId, battleId));
     }
 
     @Override

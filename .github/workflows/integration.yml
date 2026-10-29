@@ -2,7 +2,7 @@
 # 跑 -Dgame.it.* 打开的全量 verify，再用 TestReport --require-it-executed 证明集成测试真的执行了（标志传错时不会「全部跳过还是绿」）。
 # 本机没有 Docker，compose 文件除了这里不会在任何地方执行：让集成测试用它起依赖，等于每天自测一遍这个文件；
 # 依赖版本、关闭自动建 topic、Kafka 双监听也只写在 infra.yaml 一处（不另写一份 services: 服务容器）。
-# 整栈冒烟（stack job：镜像构建、整栈 up、robot、停机断言）随批次 7.1b 加进来（§4.5）。
+# 整栈冒烟见 stack job：17 个 Java 服务共享 TiDB 开发权威域，另有 robot 工具镜像。
 # 共同约定（runner、权限、action 钉 SHA、失败转 annotation）见 ci.yml 文件头。
 name: Integration
 
@@ -153,3 +153,34 @@ jobs:
         if: ${{ always() }}
         # compose 对任何子命令都先做变量插值：秘密那一步没跑到时给个占位值，免得 down 本身因 :? 失败
         run: GAME_MYSQL_PASSWORD="${GAME_MYSQL_PASSWORD:-unused}" docker compose -f "$INFRA" down -v
+
+  stack:
+    name: Java 整栈与真实客户端冒烟
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: 本次 CI 独立密钥与构建原件
+        run: bash deploy/ci/stack-secrets.sh
+      - name: 构建全部进程 jar
+        run: >-
+          ./mvnw -B -ntp -DskipTests package
+          -Dgame.build.commit=${{ env.GAME_BUILD_COMMIT }}
+          -Dgame.build.contract=${{ env.GAME_BUILD_CONTRACT }}
+      - name: 镜像、TiDB 整栈与 robot
+        run: bash deploy/ci/stack-smoke.sh
+      - name: 保留客户端与服务端验收证据
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: java-stack-evidence
+          path: ci-logs/
+          retention-days: 14
+          if-no-files-found: warn

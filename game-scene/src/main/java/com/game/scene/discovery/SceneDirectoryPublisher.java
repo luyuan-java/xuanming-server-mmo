@@ -11,6 +11,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,7 +45,11 @@ public final class SceneDirectoryPublisher {
      * @param scenes             场景列表（{@code SceneWorld.sceneEntries}）
      * @param appliedPlanVersion 已应用的频道计划版本（{@code SceneWorld.appliedPlanVersion}）
      */
-    public record Snapshot(List<SceneEntry> scenes, long appliedPlanVersion) {
+    public record Snapshot(List<SceneEntry> scenes, long appliedPlanVersion, boolean evacuating, long leaseEpoch) {
+
+        public Snapshot(List<SceneEntry> scenes, long appliedPlanVersion) {
+            this(scenes, appliedPlanVersion, false, 0);
+        }
 
         public Snapshot {
             scenes = List.copyOf(scenes);
@@ -54,6 +59,8 @@ public final class SceneDirectoryPublisher {
     private final NodeDirectory<SceneNodeInfo> directory;
     private final SceneNodeInfo identity;
     private final Callable<Snapshot> snapshot;
+    private final BooleanSupplier leaseValid;
+    private volatile boolean paused;
     /** 有没发出去的变化（请求立即补发或周期到点时置位，发布任务取快照前清掉）。 */
     private final AtomicBoolean dirty = new AtomicBoolean();
     /** 有发布任务在跑或已排队（单飞：同一时刻至多一个）。 */
@@ -73,9 +80,22 @@ public final class SceneDirectoryPublisher {
      */
     public SceneDirectoryPublisher(NodeDirectory<SceneNodeInfo> directory, SceneNodeInfo identity,
                                    Callable<Snapshot> snapshot) {
+        this(directory, identity, snapshot, () -> true);
+    }
+
+    public SceneDirectoryPublisher(NodeDirectory<SceneNodeInfo> directory, SceneNodeInfo identity,
+                                   Callable<Snapshot> snapshot, BooleanSupplier leaseValid) {
         this.directory = directory;
         this.identity = identity;
         this.snapshot = snapshot;
+        this.leaseValid = java.util.Objects.requireNonNull(leaseValid, "leaseValid");
+    }
+
+    /** 身份未知时保留已有 TTL 条目；恢复后先应用频道计划，再调用 resume。 */
+    public void pause() { paused = true; }
+
+    public void resume() {
+        if (!stopped) { paused = false; requestPublishNow(); }
     }
 
     public synchronized void start(ScheduledExecutorService scheduler) {
@@ -141,6 +161,7 @@ public final class SceneDirectoryPublisher {
 
     /** 取一次快照并发布（调度线程；单飞保证同一时刻至多一个在跑）。已停止则不发布。 */
     void publishOnce() {
+        if (paused || stopped || !leaseValid.getAsBoolean()) return;
         Snapshot s;
         try {
             s = snapshot.call();
@@ -155,9 +176,11 @@ public final class SceneDirectoryPublisher {
                 .clearScenes()
                 .addAllScenes(s.scenes())
                 .setAppliedPlanVersion(s.appliedPlanVersion())
+                .setEvacuating(s.evacuating())
+                .setLeaseEpoch(s.leaseEpoch())
                 .build();
         synchronized (ioLock) {
-            if (stopped) {
+            if (stopped || paused || !leaseValid.getAsBoolean()) {
                 return;
             }
             try {
@@ -183,7 +206,7 @@ public final class SceneDirectoryPublisher {
         }
         // 锁序 this → ioLock（publishOnce 只拿 ioLock，requestPublishNow 什么锁都不拿）：等在途的一次写结束，之后的发布都会看到 stopped
         synchronized (ioLock) {
-            if (removeEntry) {
+            if (removeEntry && leaseValid.getAsBoolean()) {
                 try {
                     directory.remove(identity.getZoneId(), identity.getNodeId());
                 } catch (RuntimeException e) {

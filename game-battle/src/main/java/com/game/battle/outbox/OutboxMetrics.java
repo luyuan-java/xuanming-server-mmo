@@ -34,7 +34,9 @@ public final class OutboxMetrics {
         /** 落库时这一局已销账（已销账墓碑还在，脚本没有写入）：不登记、不投递。 */
         ALREADY_SETTLED,
         /** 落库后玩家的待结算字段数超过告警阈值（正常为 1；同时打 ERROR）。 */
-        FIELDS_OVERFLOW
+        FIELDS_OVERFLOW,
+        /** 同一原ID已有在途或登记原件，收到不同字节；拒绝覆盖。 */
+        PAYLOAD_CONFLICT
     }
 
     /** 一次结算投递的应答（只计数，不改发件箱状态，D16）。 */
@@ -44,7 +46,7 @@ public final class OutboxMetrics {
 
     /** 活动结果发件箱的事件。 */
     public enum ActivityEvent {
-        STORED, NOT_DURABLE, RESEND, ACKED, EXHAUSTED, EXPIRED, PROBE_ERROR, SERIALIZE_FAILED
+        STORED, NOT_DURABLE, RESEND, ACKED, EXHAUSTED, EXPIRED, PROBE_ERROR, SERIALIZE_FAILED, PAYLOAD_CONFLICT
     }
 
     private final Map<SettlementEvent, Counter> settlementEvents = new EnumMap<>(SettlementEvent.class);

@@ -50,7 +50,7 @@ class AdminEndpointSecurityTest {
             GameNamespaceAutoConfiguration.class})
     // gate 排空运维接口：上下文里没有 Redis 客户端也能起来（Redis 懒加载，第一次调用这些接口时才建）；键的出处 RedisKeys 来自
     // game-discovery 的部署命名空间自动配置（与生产同一个来源）
-    @Import({AuditQueryController.class, GateDrainAdminController.class, SnapshotAdminController.class,
+    @Import({AuditQueryController.class, GateDrainAdminController.class, SceneEvacuationAdminController.class, SnapshotAdminController.class,
             PlayerOpsAdminController.class, ItemAdminController.class, RecallAdminController.class, OpsErrorAdvice.class})
     static class App {
 
@@ -119,6 +119,9 @@ class AdminEndpointSecurityTest {
         assertThat(status("/admin/player-snapshots?player=1", false)).isEqualTo(401);
         assertThat(status("/%61dmin/player-snapshots?player=1", false)).isEqualTo(401);
         assertThat(status("/%61dmin/gates/1", false)).as("gate 排空运维接口同样要令牌").isEqualTo(401);
+        assertThat(status("/%61dmin/scenes/1", false)).isEqualTo(401);
+        assertThat(post("/admin;x=1/scenes/evacuate", false)).isEqualTo(401);
+        assertThat(delete("/%61dmin/scenes/evacuate/1/2", false)).isEqualTo(401);
         // 批次 7.2a 的运维面（T-J1 的鉴权部分）
         assertThat(status("/admin/player-snapshots/1", false)).isEqualTo(401);
         assertThat(status("/%61dmin/players/1/snapshot-diff?atMs=1", false)).isEqualTo(401);
@@ -134,6 +137,9 @@ class AdminEndpointSecurityTest {
         assertThat(status("/admin/items/1/trace", true)).isEqualTo(200);
         assertThat(post("/admin/recalls", true)).as("过了鉴权，请求体校验回 400").isEqualTo(400);
         assertThat(post("/admin/player-snapshots", true)).as("过了鉴权，缺幂等键回 400").isEqualTo(400);
+        assertThat(post("/admin/scenes/evacuate", true)).as("场景疏散请求体校验").isEqualTo(400);
+        assertThat(status("/admin/scenes/1", true)).as("Redis 缺失只在请求时返回 503").isEqualTo(503);
+        assertThat(delete("/admin/scenes/evacuate/1/2", true)).isEqualTo(503);
     }
 
     private int post(String rawPath, boolean withToken) throws Exception {
@@ -142,6 +148,12 @@ class AdminEndpointSecurityTest {
         if (withToken) {
             request.header(AdminAuthFilter.TOKEN_HEADER, "secret").header(AdminAuthFilter.OPERATOR_HEADER, "ops");
         }
+        return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.discarding()).statusCode();
+    }
+
+    private int delete(String rawPath, boolean withToken) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + rawPath)).DELETE();
+        if (withToken) request.header(AdminAuthFilter.TOKEN_HEADER, "secret").header(AdminAuthFilter.OPERATOR_HEADER, "ops");
         return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.discarding()).statusCode();
     }
 }

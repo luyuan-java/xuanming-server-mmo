@@ -135,6 +135,33 @@ class SliceScriptsTest {
     }
 
     @Test
+    void 动态导出的新域秘密_故障重启从同一文件读回且不重新生成() {
+        // export "$secret_name" 不会被上面的字面量 export 扫描捕获，须单独守住完整循环。
+        Pattern loop = Pattern.compile("(?ms)^for secret_name in (.*?)^done$");
+        Matcher generated = loop.matcher(startSlice);
+        Matcher recovered = loop.matcher(crashWindow);
+        assertThat(generated.find()).as("start-slice 的新域秘密生成循环").isTrue();
+        assertThat(recovered.find()).as("故障重启的秘密恢复循环").isTrue();
+        String source = generated.group(1);
+        String recovery = recovered.group(1);
+        String names = source.substring(0, source.indexOf("; do"));
+        assertThat(names.replace("\\\n", " ").trim().split("\\s+")).containsExactly(
+                "GAME_ASSET_OP_SECRET_MAIL", "GAME_ASSET_OP_SECRET_TRADE", "MAIL_PRODUCER_SECRET_RANK",
+                "RANK_PRODUCER_SECRET_MATCH", "MMORPG_INTERNAL_SECRET_SCENE", "GAME_MALL_GATEWAY_SECRET",
+                "GAME_MALL_PAYMENT_SECRET", "GAME_MALL_DELIVERY_SECRET", "GAME_MALL_ADMIN_SECRET");
+        assertThat(recovery.substring(0, recovery.indexOf("; do"))).as("两端名单与顺序逐字相同").isEqualTo(names);
+        assertThat(source).contains("printf '%s' \"${!secret_name}\" > \"run/${secret_name,,}\"", "export \"$secret_name\"");
+        assertThat(recovery).contains("load_secret \"$secret_name\" \"run/${secret_name,,}\" || exit 2")
+                .doesNotContain("/dev/urandom").doesNotContain("printf -v");
+        assertThat(recovered.find()).as("不能有第二份分叉的秘密恢复循环").isFalse();
+        assertThat(crashWindow.indexOf("load_secret \"$secret_name\""))
+                .as("恢复失败必须在任何故障破坏动作之前退出").isLessThan(crashWindow.indexOf("kill_at_breakpoint()"));
+        assertThat(function(crashWindow, "load_secret")).containsSubsequence(
+                "if [[ -n \"${!name:-}\" ]]; then", "export \"$name\"", "return 0", "if [[ ! -s \"$file\" ]]; then", "return 1",
+                "export \"$name=$(cat \"$file\")\"");
+    }
+
+    @Test
     void 必需的环境变量与start_slice相同() {
         List<String> required = matches(startSlice, "^: \"\\$\\{(GAME_[A-Z_]+):\\?");
         assertThat(required).containsExactly("GAME_GATE_TOKEN_SECRET", "GAME_LOGIN_DEV_PASSWORD", "GAME_NODE_LINK_SECRET",
@@ -439,15 +466,15 @@ class SliceScriptsTest {
     void 区2的实例表_端口与别的实例都不相同_不并进区1的节点表与启动清单() throws IOException {
         assertThat(startSlice).contains("\nZONE2_ID=2\nZONE2_SCENE_NODE=\"game-scene-z2 21010 21110 18115\"\nZONE2_GATE=\"game-gate-z2 11010 18123\"\n");
 
-        // 区 1 的节点表仍然只有两行（故障变体脚本按「第 1 / 2 行 = 区 1 的两个节点」取用）；启动清单十六项，没有区 2 的实例
+        // 区 1 的节点表仍然只有两行（故障变体脚本按「第 1 / 2 行 = 区 1 的两个节点」取用）；含商城的启动清单十七项，没有区 2 的实例
         String nodes = block(startSlice, "SCENE_NODES");
         String services = block(startSlice, "SERVICES");
         assertThat(nodes).isNotNull().doesNotContain("z2");
         assertThat(nodes.lines().count()).isEqualTo(2);
         assertThat(services).isNotNull();
-        assertThat(matches(services, "^\\s*\"(game-[a-z0-9-]+)")).hasSize(16).containsExactly(
+        assertThat(matches(services, "^\\s*\"(game-[a-z0-9-]+)")).hasSize(17).containsExactly(
                 "game-scene-manager", "game-login", "game-friend", "game-chat", "game-match", "game-team", "game-guild",
-                "game-trade", "game-mail", "game-rank", "game-data", "game-inbox", "game-scene", "game-gate", "game-gateway", "game-battle")
+                "game-mall", "game-trade", "game-mail", "game-rank", "game-data", "game-inbox", "game-scene", "game-gate", "game-gateway", "game-battle")
                 .doesNotContain("game-scene-z2", "game-gate-z2");
         assertThat(services).contains("\"game-inbox 20918\"");
         // Inbox 复用通用服务路径：等它的端口就绪后，循环才能开始任何 scene 实例。
@@ -642,9 +669,9 @@ class SliceScriptsTest {
 
     @Test
     void 停止脚本_区2的实例紧挨着区1的同类先停_Inbox在全部scene之后停止() {
-        // game-gate 的 LocalSliceOrderTest 逐项钉着清单那一行（= 启动清单的逆序）；区 2 的两个实例在循环体里带上
+        // game-gate 的 LocalSliceOrderTest 逐项钉着清单：battle 先向仍在线的 match 补交终局，其余按启动逆序；区 2 在循环体带上
         // scene-z2 在 game-scene-2 分支先停，两个区 1 scene 随后停，Inbox 最后停且早于 game-data。
-        assertThat(stopSlice).contains("\nfor name in game-match game-battle game-gateway game-gate game-scene-2 game-scene game-inbox game-data game-rank game-mail game-trade game-guild game-team game-chat "
+        assertThat(stopSlice).contains("\nfor name in game-battle game-match game-gateway game-gate game-scene-2 game-scene game-inbox game-data game-rank game-mail game-trade game-mall game-guild game-team game-chat "
                 + "game-friend game-login game-scene-manager; do\n"
                 + "  case \"$name\" in\n"
                 + "    game-gate) stop_one game-gate-z2 ;;\n"

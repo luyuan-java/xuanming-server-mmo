@@ -21,6 +21,7 @@ import com.game.api.proto.ZoneRedirect;
 import com.game.common.killswitch.KillSwitch;
 import com.game.common.token.GateTokens;
 import com.game.gate.link.SceneLinks;
+import com.game.gate.link.EnterFailure;
 import com.game.gate.metrics.GateMetrics;
 import com.game.gate.metrics.GateMetrics.DisconnectReason;
 import com.game.gate.metrics.GateMetrics.HandshakeResult;
@@ -48,6 +49,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
@@ -729,7 +731,7 @@ public final class ClientDispatcher {
     }
 
     private void enterScene(ClientSession s, EnterScene enter) {
-        if (enter.getPlayerId() == 0 || enter.getSceneNodeId() == 0 || enter.getOwnerEpoch() <= 0
+        if (enter.getPlayerId() == 0 || enter.getSceneNodeId() == 0 || enter.getSceneId() == 0 || enter.getOwnerEpoch() <= 0
                 || enter.getOwnerRevision() <= 0 || s.account.isBlank()) {
             log.error("login 下发的 EnterScene 非法 session={} player_id={} scene_node_id={}",
                     sid(s), enter.getPlayerId(), enter.getSceneNodeId());
@@ -756,7 +758,7 @@ public final class ClientDispatcher {
                 .setOwnerRevision(s.ownerRevision)
                 .setLoginGeneration(s.loginGeneration)
                 .build();
-        long gen = links.send(enter.getSceneNodeId(), NodeLinkFrame.newBuilder().setPlayerEnter(playerEnter).build());
+        long gen = beginSceneEntry(s, enter.getSceneNodeId(), playerEnter);
         if (gen == 0) {
             abandonEnter(s, enter.getPlayerId(), enter.getOwnerEpoch(), "链路层不可用");
             failEnter(s, TIP_ENTER_SCENE_FAILED);
@@ -824,7 +826,7 @@ public final class ClientDispatcher {
                 .setBody(request.getBody())
                 .setRequestId(request.getId())
                 .build();
-        long gen = links.send(s.sceneNodeId, NodeLinkFrame.newBuilder().setClientForward(forward).build());
+        long gen = links.send(s.sceneNodeId, s.sceneLinkGen, NodeLinkFrame.newBuilder().setClientForward(forward).build());
         if (gen == 0) {
             // 链路层没受理这一帧（确定未发出）：回带请求 id 的信封 1003，客户端当场按请求 id 对上失败、重试安全。
             // 以前什么都不回，客户端只能等自己的 15 s 超时；对齐 mmorpg HandleTcpNodeMessage 的「RpcClient 未挂」
@@ -862,6 +864,7 @@ public final class ClientDispatcher {
                     result.getPlayerId(), result.getOwnerEpoch(), s.sceneOwnerEpoch, result.getTipId());
             return;
         }
+        clearPendingSceneEntry(s); // scene 回包已证明 write 发生，不能再按本地未发送重试。
         if (s.transferEntering) {
             onTransferEnterResult(s, sceneNodeId, result);
             return;
@@ -902,11 +905,37 @@ public final class ClientDispatcher {
     }
 
     /**
-     * 进场帧没能送到 scene（建链失败 / 排队溢出）：scene 从未见过它，<b>一律</b>告诉 login 释放这次进场的归属——
-     * 不要求会话仍绑定在这次进场上、会话已关闭也一样（修 G10：之前会话已关闭时那份归属只能等租约过期）。
-     * 会话仍在这次进场上时：普通进场回到未进游戏；交出进场推 23 {3023} 后断开。
+     * 兼容不可重试的未送达回报（如排队溢出）：告诉 login 释放原 E；不要求会话仍在（G10）。
+     * 生产临时故障经带 EnterFailure 的重载，在固定原身份与预算内补发；同 E 的旧尝试回调不能释放新尝试。
+     * 不可重试时普通进场回到未进游戏；交出进场推 23 {3023} 后断开。补发预算耗尽则两者均关闭。
      */
     public void onEnterUndeliverable(ClientSession s, int sceneNodeId, long linkGen, PlayerEnter enter) {
+        onEnterUndeliverable(s, sceneNodeId, linkGen, enter, EnterFailure.PERMANENT);
+    }
+
+    public void onEnterUndeliverable(ClientSession s, int sceneNodeId, long linkGen, PlayerEnter enter, EnterFailure failure) {
+        PendingSceneEntry pending = s.pendingSceneEntry;
+        if (pending != null && pending.enter.getPlayerId() == enter.getPlayerId()
+                && pending.enter.getOwnerEpoch() == enter.getOwnerEpoch() && !pending.matches(sceneNodeId, linkGen, enter)) {
+            return; // 旧尝试的重复回调不能释放新尝试仍持有的同一份 E。
+        }
+        if (pending == null && !s.closed && s.scenePlayerId == enter.getPlayerId() && s.sceneOwnerEpoch == enter.getOwnerEpoch()
+                && s.sceneNodeId != 0) return; // 已派发或已确认的原 E 不再有本地未发送凭据。
+        if (pending != null && pending.matches(sceneNodeId, linkGen, enter) && !s.closed && !s.closing && !s.redirected) {
+            if (pending.knownUnsent) return; // 同一尝试只安排一次退避，重复回调既不重发也不释放。
+            pending.knownUnsent = true;
+            long delay = pending.retryDelay(failure, nanoClock.getAsLong());
+            if (failure.retryable() && delay >= 0) {
+                metrics.entryRetry(GateMetrics.EntryRetryOutcome.DEFERRED);
+                armEntryExpiry(s, pending);
+                try {
+                    pending.retry = s.channel().eventLoop().schedule(() -> retrySceneEntry(s, pending), delay, TimeUnit.NANOSECONDS);
+                } catch (RejectedExecutionException stopped) { expireSceneEntry(s, pending); }
+                return;
+            }
+            if (failure.retryable()) { expireSceneEntry(s, pending); return; }
+            clearPendingSceneEntry(s);
+        }
         boolean current = !s.closed && s.boundTo(sceneNodeId, linkGen) && s.scenePlayerId == enter.getPlayerId()
                 && s.sceneOwnerEpoch == enter.getOwnerEpoch();
         abandonEnter(s, enter.getPlayerId(), enter.getOwnerEpoch(), current ? "建链失败" : "建链失败（会话已不在这次进场上）");
@@ -1040,7 +1069,7 @@ public final class ClientDispatcher {
                 .setLoginGeneration(s.loginGeneration)
                 .setTransfer(true)
                 .build();
-        long gen = links.send(targetNode, NodeLinkFrame.newBuilder().setPlayerEnter(enter).build());
+        long gen = beginSceneEntry(s, targetNode, enter);
         if (gen == 0) {
             log.warn("跨节点换图改绑后到目标 scene 的链路层不可用，断开 session={} player_id={} 目标 node={} epoch={}", sid(s),
                     enter.getPlayerId(), targetNode, enter.getOwnerEpoch());
@@ -1301,16 +1330,26 @@ public final class ClientDispatcher {
     }
 
     public void onSceneLinkDown(ClientSession s, int sceneNodeId, long linkGen) {
+        onSceneLinkDown(s, sceneNodeId, linkGen, false);
+    }
+
+    public void onSceneLinkDown(ClientSession s, int sceneNodeId, long linkGen, boolean superseded) {
         if (s.closed || !s.boundTo(sceneNodeId, linkGen)) {
             return;
         }
+        if (s.pendingSceneEntry != null && s.pendingSceneEntry.knownUnsent
+                && s.pendingSceneEntry.generation == linkGen) return; // 该帧已被未发送回调认领，正在退避补发。
         // scene 那一侧已随链路丢掉这个会话（并负责释放 / 写回）；gate 关闭连接，客户端重连后重新进场。链路已断，不发 PlayerLeave。
         log.info("scene 链路断开，关闭其上的会话 session={} player_id={} node={}", sid(s), s.scenePlayerId, sceneNodeId);
+        boolean transferPending = s.transferEntering;
         unbindScene(s);
-        if (!s.closing) {
-            metrics.disconnected(DisconnectReason.SCENE_LINK_DOWN);
-        }
-        closeNow(s);
+        if (s.closing) return;
+        metrics.disconnected(superseded ? DisconnectReason.SCENE_LINK_SUPERSEDED : DisconnectReason.SCENE_LINK_DOWN);
+        s.closing = true;
+        discardPending(s, RequestResult.DROPPED);
+        // 交出进场尚未确认沿用 5.2 F11：仅断开，不能把未知进场结局当成可重试的普通服务错误。
+        if (transferPending) s.close();
+        else s.sendThenClose(tip(TIP_SERVICE_UNAVAILABLE));
     }
 
     // ================================================================ 内部
@@ -1326,6 +1365,17 @@ public final class ClientDispatcher {
     }
 
     private void leaveScene(ClientSession s, boolean voluntary) {
+        PendingSceneEntry pending = s.pendingSceneEntry;
+        if (pending != null) {
+            boolean cancelled = pending.knownUnsent || links.cancelQueuedEnter(pending.nodeId, pending.generation, pending.enter);
+            clearPendingSceneEntry(s);
+            if (cancelled) {
+                metrics.entryRetry(GateMetrics.EntryRetryOutcome.CANCELLED);
+                abandonEnter(s, pending.enter.getPlayerId(), pending.enter.getOwnerEpoch(), "客户端离开，撤销尚未发送的进场");
+                unbindScene(s);
+                return;
+            }
+        }
         if (s.sceneNodeId == 0) {
             return;
         }
@@ -1334,12 +1384,13 @@ public final class ClientDispatcher {
                 .setPlayerId(s.scenePlayerId)
                 .setVoluntary(voluntary)
                 .build();
-        links.send(s.sceneNodeId, NodeLinkFrame.newBuilder().setPlayerLeave(leave).build());
+        links.send(s.sceneNodeId, s.sceneLinkGen, NodeLinkFrame.newBuilder().setPlayerLeave(leave).build());
         unbindScene(s);
     }
 
     /** 解绑场景：场景绑定结束的唯一出口，在线目录同时撤销（离场、进场失败、被踢、链路断开、断线都经过这里）。 */
     private void unbindScene(ClientSession s) {
+        clearPendingSceneEntry(s);
         if (s.presenceOnline) {
             s.presenceOnline = false;
             presence.offline(s.scenePlayerId, s.sessionId());
@@ -1349,6 +1400,96 @@ public final class ClientDispatcher {
         s.scenePlayerId = 0;
         s.sceneOwnerEpoch = 0;
         s.transferEntering = false;
+    }
+
+    /** 每次只保存一份原进场；与 scene 交出的 SQL E、登录代、账号修订完全一致。 */
+    private long beginSceneEntry(ClientSession s, int node, PlayerEnter enter) {
+        clearPendingSceneEntry(s);
+        PendingSceneEntry pending = new PendingSceneEntry(node, enter, nanoClock.getAsLong());
+        s.pendingSceneEntry = pending;
+        long generation = submitSceneEntry(s, pending);
+        if (generation == 0) clearPendingSceneEntry(s);
+        else armEntryExpiry(s, pending);
+        return generation;
+    }
+
+    private long submitSceneEntry(ClientSession s, PendingSceneEntry pending) {
+        pending.attempts++;
+        pending.knownUnsent = false;
+        long generation = links.send(pending.nodeId, NodeLinkFrame.newBuilder().setPlayerEnter(pending.enter).build());
+        pending.generation = generation;
+        s.sceneLinkGen = generation;
+        if (generation == 0) pending.knownUnsent = true;
+        return generation;
+    }
+
+    private void retrySceneEntry(ClientSession s, PendingSceneEntry pending) {
+        pending.retry = null;
+        if (!currentEntry(s, pending)) { cancelStaleSceneEntry(s, pending); return; }
+        if (nanoClock.getAsLong() - pending.deadline >= 0 || pending.attempts >= PendingSceneEntry.MAX_ATTEMPTS) {
+            expireSceneEntry(s, pending); return;
+        }
+        if (submitSceneEntry(s, pending) == 0) expireSceneEntry(s, pending);
+    }
+
+    private void armEntryExpiry(ClientSession s, PendingSceneEntry pending) {
+        if (pending.expiry != null) pending.expiry.cancel(false);
+        try {
+            pending.expiry = s.channel().eventLoop().schedule(() -> expireSceneEntry(s, pending),
+                    Math.max(0, pending.deadline - nanoClock.getAsLong()), TimeUnit.NANOSECONDS);
+        } catch (RejectedExecutionException stopped) { expireSceneEntry(s, pending); }
+    }
+
+    private static boolean currentEntry(ClientSession s, PendingSceneEntry pending) {
+        return s.pendingSceneEntry == pending && !s.closed && !s.closing && !s.redirected
+                && s.scenePlayerId == pending.enter.getPlayerId() && s.sceneOwnerEpoch == pending.enter.getOwnerEpoch()
+                && s.ownerRevision == pending.enter.getOwnerRevision() && s.loginGeneration == pending.enter.getLoginGeneration()
+                && s.ownerAccount.equals(pending.enter.getAccount()) && s.sceneNodeId == pending.nodeId;
+    }
+
+    private void expireSceneEntry(ClientSession s, PendingSceneEntry pending) {
+        if (!currentEntry(s, pending)) { cancelStaleSceneEntry(s, pending); return; }
+        boolean cancelled = pending.knownUnsent || links.cancelQueuedEnter(pending.nodeId, pending.generation, pending.enter);
+        // false 也可能是 fail 已摘队列、未发送回调尚在本 EventLoop 排队；保留原件等其证明，不能误吞该回调。
+        if (!cancelled) return; // flush 赢了竞态则等 dispatched 清理；不重试、不释放 E、不引入应答超时。
+        clearPendingSceneEntry(s);
+        metrics.entryRetry(GateMetrics.EntryRetryOutcome.EXHAUSTED);
+        abandonEnter(s, pending.enter.getPlayerId(), pending.enter.getOwnerEpoch(), "进场本地补发预算用尽");
+        log.warn("进场补发放弃 session={} player={} node={} attempts={} elapsed_ms={}", sid(s),
+                pending.enter.getPlayerId(), pending.nodeId, pending.attempts,
+                TimeUnit.NANOSECONDS.toMillis(nanoClock.getAsLong() - pending.started));
+        unbindScene(s);
+        if (pending.enter.getTransfer()) closeForTransfer(s, TIP_ENTER_SCENE_FAILED);
+        else if (!s.closing) {
+            metrics.disconnected(DisconnectReason.SCENE_ENTRY_FAILED);
+            s.closing = true;
+            discardPending(s, RequestResult.DROPPED);
+            s.sendThenClose(tip(TIP_ENTER_SCENE_FAILED));
+        }
+    }
+
+    public void onEnterDispatched(ClientSession s, int node, long generation, PlayerEnter enter) {
+        PendingSceneEntry pending = s.pendingSceneEntry;
+        if (pending != null && pending.matches(node, generation, enter)) {
+            if (pending.attempts > 1) metrics.entryRetry(GateMetrics.EntryRetryOutcome.RECOVERED);
+            clearPendingSceneEntry(s);
+        }
+    }
+
+    private void cancelStaleSceneEntry(ClientSession s, PendingSceneEntry pending) {
+        if (s.pendingSceneEntry != pending) return;
+        boolean cancelled = pending.knownUnsent || links.cancelQueuedEnter(pending.nodeId, pending.generation, pending.enter);
+        clearPendingSceneEntry(s);
+        if (cancelled) {
+            metrics.entryRetry(GateMetrics.EntryRetryOutcome.CANCELLED);
+            abandonEnter(s, pending.enter.getPlayerId(), pending.enter.getOwnerEpoch(), "原进场身份已被会话替换");
+        }
+    }
+
+    private static void clearPendingSceneEntry(ClientSession s) {
+        PendingSceneEntry pending = s.pendingSceneEntry;
+        s.pendingSceneEntry = null;
+        if (pending != null) pending.cancelTimers();
     }
 
     private void abandonEnter(ClientSession s, long playerId, long ownerEpoch, String reason) {

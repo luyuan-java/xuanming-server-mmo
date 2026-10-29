@@ -16,6 +16,19 @@ server:
   error:
     include-message: never
     include-stacktrace: never
+management:
+  server:
+    port: ${GAME_MALL_MANAGEMENT_PORT:18121}
+    address: ${GAME_MANAGEMENT_ADDRESS:127.0.0.1}
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
 game:
   run-mode: ${GAME_RUN_MODE:prod}
   mall:

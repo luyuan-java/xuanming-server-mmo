@@ -1,6 +1,7 @@
 package com.game.battle.engine;
 
 import com.game.common.combat.CombatDamageRules;
+import com.game.common.math.Unsigned;
 import com.game.proto.BaseAttributesComp;
 import com.game.proto.BattleAction;
 import com.game.proto.BattleActorState;
@@ -16,6 +17,7 @@ import com.game.proto.TurnResultS2C;
 import com.game.proto.eBattleActionType;
 import com.game.proto.eBattleActorType;
 import com.game.proto.eBattleEventType;
+import com.game.proto.eBattleHitKind;
 import com.game.proto.eBattleOutcome;
 import com.game.table.DungeonTable;
 import com.game.table.MonsterTable;
@@ -219,6 +221,8 @@ public final class TurnBattleEngine {
                     .setMagicAttack(snapshot.getMagicAttack())
                     .setDefense(snapshot.getDefense())
                     .setFormationSlot(ctx.nextFormationSlot(snapshot.getTeamIndex()));
+            // 只复制明确提供的玩家加成；缺省子消息不能因读取而产生 presence，宝宝与怪物不继承主人的装备。
+            if (snapshot.hasCombat()) actor.setCombat(snapshot.getCombat());
             // 参战 buff 原样拷贝；实例号也纳入局内自增域，避免与新加 buff 撞号
             for (BattleBuffEntry buff : snapshot.getBuffsList()) {
                 actor.addBuffs(buff);
@@ -634,27 +638,65 @@ public final class TurnBattleEngine {
 
         ctx.events().append(eBattleEventType.BATTLE_EVENT_ATTACK, actor.actorId(), targetId);
 
+        if (!resolveBasicAttackHit(actor, target, eBattleHitKind.BATTLE_HIT_NORMAL)) return;
+        for (int hit = 1; hit <= BattleConstants.MAX_COMBO_EXTRA_HITS; hit++) {
+            if (!actor.isActive() || !target.isActive() || !ctx.rng().rollPercent(actor.combat().getComboRate())) break;
+            ctx.events().setHitIndex(hit);
+            resolveBasicAttackHit(actor, target, eBattleHitKind.BATTLE_HIT_COMBO);
+        }
+        ctx.events().setHitIndex(0);
+        tryCounterAttack(actor, target);
+    }
+
+    /** 普攻每段独立命中 / 必杀；仅连击段乘 50%，普通段不额外乘除，保住旧回放浮点末位。 */
+    private boolean resolveBasicAttackHit(BattleUnit actor, BattleUnit target, eBattleHitKind kind) {
         if (!ctx.rollHit(actor, target)) {
-            ctx.events().append(eBattleEventType.BATTLE_EVENT_MISS, actor.actorId(), targetId)
+            ctx.events().append(eBattleEventType.BATTLE_EVENT_MISS, actor.actorId(), target.actorId())
                     .setValue(0)
                     .setTargetHealthAfter(target.health())
-                    .setTargetManaAfter(target.mana());
-            return;
+                    .setTargetManaAfter(target.mana()).setHitKind(kind);
+            return false;
         }
 
         BattleContext.FinalDamage finalDamage = ctx.calculateFinalDamage(actor, target,
-                BattleConstants.BASIC_ATTACK_BASE_DAMAGE, actor.physicalAttack(), 1.0);
-        long dealt = target.applyDamage(finalDamage.value());
+                BattleConstants.BASIC_ATTACK_BASE_DAMAGE, actor.physicalAttack(), 1.0, CombatDamageRules.PHYSICAL_DAMAGE);
+        double damage = finalDamage.value();
+        if (kind == eBattleHitKind.BATTLE_HIT_COMBO) damage *= BattleConstants.COMBO_DAMAGE_PERCENT / 100.0;
+        long dealt = target.applyDamage(damage);
 
-        ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), targetId)
+        ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
                 .setValue(dealt)
                 .setIsCritical(finalDamage.critical())
                 .setTargetHealthAfter(target.health())
-                .setTargetManaAfter(target.mana());
+                .setTargetManaAfter(target.mana()).setHitKind(kind);
 
         if (target.health() == 0) {
             ctx.handleDeath(target, actor.actorId());
         }
+        if (kind != eBattleHitKind.BATTLE_HIT_COUNTER) tryReflectDamage(actor, target, dealt);
+        return true;
+    }
+
+    private void tryReflectDamage(BattleUnit attacker, BattleUnit defender, long dealt) {
+        if (dealt == 0 || !attacker.isActive() || !defender.isActive()
+                || !ctx.rng().rollPercent(defender.combat().getReflectRate())) return;
+        // 用整数实扣计算，不再过抗性 / 必杀 / 防御姿态；ceil 在 uint64 上也不溢出。
+        long reflected = EquipmentCombatRules.percentCeil(dealt, BattleConstants.REFLECT_DAMAGE_PERCENT);
+        reflected = Unsigned.minUnsigned(attacker.health(), reflected == 0 ? 1 : reflected);
+        attacker.setHealth(attacker.health() - reflected);
+        ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, defender.actorId(), attacker.actorId())
+                .setValue(reflected).setHitKind(eBattleHitKind.BATTLE_HIT_REFLECT)
+                .setTargetHealthAfter(attacker.health()).setTargetManaAfter(attacker.mana());
+        if (attacker.health() == 0) ctx.handleDeath(attacker, defender.actorId());
+    }
+
+    private void tryCounterAttack(BattleUnit attacker, BattleUnit defender) {
+        if (!attacker.isActive() || !defender.isActive() || checks.checkState(defender) != ActionChecks.SUCCESS
+                || !ctx.rng().rollPercent(defender.combat().getCounterRate())) return;
+        ctx.events().beginGroup();
+        ctx.events().append(eBattleEventType.BATTLE_EVENT_ATTACK, defender.actorId(), attacker.actorId())
+                .setHitKind(eBattleHitKind.BATTLE_HIT_COUNTER);
+        resolveBasicAttackHit(defender, attacker, eBattleHitKind.BATTLE_HIT_COUNTER);
     }
 
     /**
@@ -715,7 +757,7 @@ public final class TurnBattleEngine {
 
         consumeSkillMana(actor, row, action.getSkillTableId());
 
-        double baseDamage = ctx.data().skillDamage(action.getSkillTableId(), (double) Integer.toUnsignedLong(actor.level()));
+        double baseDamage = ctx.data().skillDamage(action.getSkillTableId(), EquipmentCombatRules.skillLevel(actor.level(), actor.combat()));
 
         for (int hitIndex = 0; hitIndex < targetIds.length; hitIndex++) {
             BattleUnit target = ctx.findActor(targetIds[hitIndex]);
@@ -748,7 +790,7 @@ public final class TurnBattleEngine {
             long attack = CombatDamageRules.selectAttack(row.getDamageType(),
                     actor.physicalAttack(), actor.magicAttack());
             BattleContext.FinalDamage finalDamage = ctx.calculateFinalDamage(actor, target, baseDamage, attack,
-                    row.getAttackMultiplier());
+                    row.getAttackMultiplier(), row.getDamageType());
             long dealt = target.applyDamage(finalDamage.value());
 
             ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
@@ -1003,6 +1045,11 @@ public final class TurnBattleEngine {
             }
         }
         return state.build();
+    }
+
+    /** 下发前清除引擎专用概率；调用方传自己的副本 builder，不分本人、敌方、观众。 */
+    public static void stripEngineOnlyState(BattleStateS2C.Builder state) {
+        for (BattleActorState.Builder actor : state.getActorsBuilderList()) actor.clearCombat();
     }
 
     /** 该玩家剩余的战斗道具（规格 §6.3）：余量非 0 的条目按 item_table_id 升序（稳定排序，D6）；不在本局的玩家返回空列表。 */

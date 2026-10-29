@@ -180,26 +180,26 @@ final class BattleContext {
     /**
      * 最终伤害（{@code CalculateFinalDamage}，{@code engine.cpp:1317-1343}；规格 §3.7）：
      * <ol>
-     *   <li>暴击率 = clamp(critchance / 100, 0, 1)，critchance 是 uint64；</li>
-     *   <li>与实时侧共用的暴击前伤害（目标等级：玩家 / 宝宝取快照等级，怪物取参考等级）；</li>
+     *   <li>暴击率 = clamp((基础 + 对应伤害类型装备加成) / 100, 0, 1)，加法按 uint64 饱和；</li>
+     *   <li>与实时侧共用的暴击前伤害，目标基础抗性叠加对应装备抗性，护甲 / 防御 / 抗性共用 60% 减伤封顶；</li>
      *   <li>非 PVE 先乘 0.3；</li>
      *   <li>暴击率 &gt; 0 时掷一次 Rand01（R4），严格小于即暴击 ×2；暴击率为 0 不耗随机数；</li>
      *   <li>{@code std::max(d, 0.0)}，即 {@code d < 0.0 ? 0.0 : d}（NaN 原样）。</li>
      * </ol>
      */
     FinalDamage calculateFinalDamage(BattleUnit caster, BattleUnit target, double baseDamage, long attack,
-                                     double attackMultiplier) {
+                                     double attackMultiplier, int damageType) {
         // std::clamp(v, 0.0, 1.0) = v < 0 ? 0 : (1 < v ? 1 : v)；不用 Math.clamp，以免 NaN / -0.0 行为不同
-        double critChance = Unsigned.toDouble(caster.critChance()) / 100.0;
+        double critChance = Unsigned.toDouble(EquipmentCombatRules.criticalRate(caster.critChance(), caster.combat(), damageType)) / 100.0;
         critChance = critChance < 0.0 ? 0.0 : (1.0 < critChance ? 1.0 : critChance);
         double finalDamage = CombatDamageRules.damageBeforeCritical(baseDamage, caster.strength(), attack, attackMultiplier,
-                target.armor(), target.defense(), target.resistance(), target.level());
+                target.armor(), target.defense(), EquipmentCombatRules.resistance(target.resistance(), target.combat(), damageType), target.level());
         if (!pve) {
             finalDamage *= BattleConstants.PVP_DAMAGE_SCALE;
         }
         boolean critical = false;
         if (critChance > 0.0 && rng.rand01() < critChance) {
-            finalDamage *= 2;
+            finalDamage *= BattleConstants.CRITICAL_DAMAGE_MULTIPLIER;
             critical = true;
         }
         return new FinalDamage(finalDamage < 0.0 ? 0.0 : finalDamage, critical);

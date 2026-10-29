@@ -5,7 +5,6 @@ import com.game.discovery.RedisKeys;
 import com.game.discovery.world.WorldChannelStore;
 import com.game.discovery.world.ChannelSwitchCooldown;
 import com.game.scenemanager.world.ChannelSwitchProperties;
-import com.game.scenemanager.world.NodeAvailability;
 import com.game.scenemanager.world.WorldChannelProperties;
 import com.game.table.ConfigTables;
 import java.nio.file.Path;
@@ -83,12 +82,11 @@ public class SceneManagerConfiguration {
     }
 
     /**
-     * 镜像 / 副本实例取号（批次 5.3，dungeon-mirror-spec §6.6）：无状态，放置恒为发起节点。节点可用性用 {@link NodeAvailability#ALL}
-     * （5.5 的节点级排空标记接在这里）。
+     * 镜像 / 副本实例取号：放置恒为发起节点；有界读取单条目录，疏散或不存在时不发新号。
      */
     @Bean
-    public InstanceIdIssuer instanceIdIssuer(SceneIdAllocator sceneIdAllocator) {
-        return new InstanceIdIssuer(sceneIdAllocator, NodeAvailability.ALL);
+    public InstanceIdIssuer instanceIdIssuer(SceneIdAllocator sceneIdAllocator, SceneNodeSource source) {
+        return new InstanceIdIssuer(sceneIdAllocator, new com.game.scenemanager.world.DirectoryNodeAvailability(source));
     }
 
     /**

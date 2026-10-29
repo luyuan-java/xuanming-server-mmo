@@ -4,6 +4,7 @@ import com.game.common.combat.CombatDamageRules;
 import com.game.common.math.Unsigned;
 import com.game.proto.BaseAttributesComp;
 import com.game.proto.BattleActorState;
+import com.game.proto.CombatAttributes;
 import com.game.proto.eBattleActorType;
 
 /**
@@ -140,6 +141,11 @@ final class BattleUnit {
 
     long defense() {
         return state.getDefense();
+    }
+
+    /** 未提供 combat 时返回 proto 缺省值，不创建子消息 presence。 */
+    CombatAttributes combat() {
+        return state.getCombat();
     }
 
     // ---- 状态位 ----

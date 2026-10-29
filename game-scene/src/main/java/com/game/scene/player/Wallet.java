@@ -108,6 +108,15 @@ public final class Wallet {
     /** 存档里本版本不认识的字段（更新版本写的）：原样带回，滚动升级 / 回滚时不被旧节点抹掉。 */
     private final UnknownFieldSet unknownFields;
 
+    /** 提交同一逻辑线程预检完成的纯扣款；不改变欠款、封禁或未知字段。 */
+    public void commitDeduction(Change prepared) {
+        if (!prepared.ok() || !known(prepared.type()) || balances[prepared.type()] != prepared.before()
+                || Long.compareUnsigned(prepared.after(), prepared.before()) > 0) {
+            throw new IllegalStateException("钱包候选已过期或不是扣款");
+        }
+        balances[prepared.type()] = prepared.after();
+    }
+
     private Wallet(long[] balances, List<Integer> blocked, TreeMap<Integer, Debt> debts, UnknownFieldSet unknownFields) {
         this.balances = balances;
         this.blocked = blocked;

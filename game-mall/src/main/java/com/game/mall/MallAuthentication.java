@@ -68,6 +68,14 @@ public final class MallAuthentication extends OncePerRequestFilter {
     }
 
     @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) {
+        // 独立管理端口的两条只读探针不属于交易 HMAC 域；其余路径继续逐请求验签。
+        String path = request.getRequestURI();
+        return "GET".equals(request.getMethod()) && request.getQueryString() == null
+                && ("/actuator/health/readiness".equals(path) || "/actuator/health/liveness".equals(path));
+    }
+
+    @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         HttpServletRequest authenticated;

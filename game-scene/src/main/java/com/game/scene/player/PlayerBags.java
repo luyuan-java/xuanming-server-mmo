@@ -161,8 +161,10 @@ public final class PlayerBags {
         long nextSeq = maxSeq + 1;
         for (BagItemState entry : entries) {
             long seq = entry.getAcquireSeq() != 0 ? entry.getAcquireSeq() : nextSeq++;
-            items.add(new BagItem(entry.getItemUuid(), entry.getConfigId(), Integer.toUnsignedLong(entry.getStackSize()),
-                    seq, entry.getUnknownFields()));
+            BagItem item = new BagItem(entry.getItemUuid(), entry.getConfigId(), Integer.toUnsignedLong(entry.getStackSize()),
+                    seq, entry.getUnknownFields());
+            if (entry.hasEquipment()) item.equipment(entry.getEquipment());
+            items.add(item);
             savedSlots.add(entry.getPos());
         }
         // 第一轮：存档里的格子能用就用（装备栏还要是本部位的槽）；第二轮：其余的重新落位
@@ -235,14 +237,16 @@ public final class PlayerBags {
         }
         for (BagType type : BagType.values()) {
             for (BagItem item : bags.get(type).items()) {
-                state.addItems(BagItemState.newBuilder()
+                BagItemState.Builder stored = BagItemState.newBuilder()
                         .setItemUuid(item.guid())
                         .setConfigId(item.configId())
                         .setStackSize((int) item.size())
                         .setPos(item.slot())
                         .setBagType(type.code())
                         .setAcquireSeq(item.acquireSeq())
-                        .setUnknownFields(item.unknownFields()));
+                        .setUnknownFields(item.unknownFields());
+                if (item.equipment() != null) stored.setEquipment(item.equipment());
+                state.addItems(stored);
             }
         }
         state.addAllItems(quarantine);

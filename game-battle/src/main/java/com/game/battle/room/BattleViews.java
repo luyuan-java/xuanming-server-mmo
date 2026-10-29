@@ -3,6 +3,7 @@ package com.game.battle.room;
 import com.game.proto.BattleActorState;
 import com.game.proto.BattleItemEntry;
 import com.game.proto.BattleStateS2C;
+import com.game.battle.engine.TurnBattleEngine;
 import java.util.List;
 
 /**
@@ -11,6 +12,7 @@ import java.util.List;
  *
  * <ul>
  *   <li>先清 {@code self_items}（不依赖「引擎快照恰好不填它」这一外部事实）；</li>
+ *   <li>所有单位的 {@code combat} 一律清除，包括本人；装备概率仅在引擎全知状态保留；</li>
  *   <li>「自己的单位」= {@code viewer ≠ 0} 且（{@code actor_id == viewer} 或 {@code owner_player_id == viewer}），不是自己的单位清
  *       {@code skill_cooldown_rounds}；<b>buff 不裁剪</b>；</li>
  *   <li>参战者再填本人的 {@code self_items}（引擎 {@code selfItems}，按 id 升序）；观众（viewer = 0）全清冷却、不填道具。</li>
@@ -44,6 +46,7 @@ final class BattleViews {
 
     private static BattleStateS2C.Builder redact(BattleStateS2C full, long viewer) {
         BattleStateS2C.Builder state = full.toBuilder().clearSelfItems();
+        TurnBattleEngine.stripEngineOnlyState(state);
         for (BattleActorState.Builder actor : state.getActorsBuilderList()) {
             boolean own = viewer != 0 && (actor.getActorId() == viewer || actor.getOwnerPlayerId() == viewer);
             if (!own) {

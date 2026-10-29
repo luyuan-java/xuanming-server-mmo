@@ -14,6 +14,7 @@ import java.io.DataOutputStream;
 import java.security.MessageDigest;
 import java.sql.*;
 import java.util.*;
+import java.util.function.LongSupplier;
 import javax.sql.DataSource;
 
 /**
@@ -25,24 +26,56 @@ import javax.sql.DataSource;
 public final class ZoneMergeStore {
     public static final int BATCH=16;
     private final DataSource source;private final String operatorPrincipal;
-    public ZoneMergeStore(DataSource source){this(source,System.getenv("MMORPG_SQL_OPERATOR_PRINCIPAL"));}
-    public ZoneMergeStore(DataSource source,String operatorPrincipal){this.source=Objects.requireNonNull(source);this.operatorPrincipal=operatorPrincipal;}
+    private final LongSupplier nanoClock;
+    public ZoneMergeStore(DataSource source){this(source,System.getenv("MMORPG_SQL_OPERATOR_PRINCIPAL"),System::nanoTime);}
+    public ZoneMergeStore(DataSource source,String operatorPrincipal){this(source,operatorPrincipal,System::nanoTime);}
+    ZoneMergeStore(DataSource source,LongSupplier nanoClock){this(source,System.getenv("MMORPG_SQL_OPERATOR_PRINCIPAL"),nanoClock);}
+    ZoneMergeStore(DataSource source,String operatorPrincipal,LongSupplier nanoClock){this.source=Objects.requireNonNull(source);this.operatorPrincipal=operatorPrincipal;this.nanoClock=Objects.requireNonNull(nanoClock);}
     @FunctionalInterface private interface Work<T>{T run(Sql sql)throws SQLException;}
     @FunctionalInterface private interface Row<T>{T map(ResultSet row)throws SQLException;}
     private <T>T tx(Work<T> work)throws SQLException{
+        long until=nanoClock.getAsLong()+30_000_000_000L;
         try(var c=source.getConnection()){
-            c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);c.setAutoCommit(false);
-            int network=c.getNetworkTimeout();c.setNetworkTimeout(Runnable::run,30_000);
-            try{var sql=new Sql(c);T result=work.run(sql);sql.left();c.commit();return result;}
-            catch(SQLException|RuntimeException failure){try{c.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
+            int network=c.getNetworkTimeout();var sql=new Sql(c,nanoClock,until,network);
+            try{
+                sql.left();c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                sql.left();c.setAutoCommit(false);
+                T result=work.run(sql);sql.left();c.commit();return result;
+            }
+            catch(SQLException|RuntimeException failure){
+                try{sql.limitRollback();}
+                catch(SQLException limitFailure){
+                    // 连清理时限都不能设置时丢弃连接，不能在旧的长时限下继续阻塞回滚。
+                    failure.addSuppressed(limitFailure);
+                    try{c.abort(Runnable::run);}catch(SQLException abortFailure){failure.addSuppressed(abortFailure);}
+                    throw failure;
+                }
+                try{c.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure;
+            }
             finally{if(!c.isClosed())c.setNetworkTimeout(Runnable::run,network);}
         }
     }
     private static final class Sql {
-        final Connection c;final long until=System.nanoTime()+30_000_000_000L;
-        Sql(Connection c){this.c=c;}
-        int left()throws SQLTimeoutException{long n=until-System.nanoTime();if(n<=0||Thread.currentThread().isInterrupted())throw new SQLTimeoutException("合区批次预算耗尽，保留原冻结");return (int)Math.max(1,(n+999_999_999)/1_000_000_000);}
-        PreparedStatement statement(String query,Object...args)throws SQLException{var p=c.prepareStatement(query);p.setQueryTimeout(left());for(int i=0;i<args.length;i++)p.setObject(i+1,args[i]);return p;}
+        final Connection c;final LongSupplier clock;final long until;final int originalNetwork;
+        Sql(Connection c,LongSupplier clock,long until,int originalNetwork){this.c=c;this.clock=clock;this.until=until;this.originalNetwork=originalNetwork;}
+        int left()throws SQLException{
+            long n=until-clock.getAsLong();
+            if(n<=0||Thread.currentThread().isInterrupted())throw new SQLTimeoutException("合区批次预算耗尽，保留原冻结");
+            // queryTimeout 只有秒精度且不覆盖 COMMIT；每次 JDBC I/O 都收紧套接字剩余预算。
+            network(n);
+            return (int)Math.max(1,(n+999_999_999)/1_000_000_000);
+        }
+        private void network(long remaining)throws SQLException{
+            int millis=(int)Math.max(1,Math.min(30_000,(remaining+999_999)/1_000_000));
+            if(originalNetwork>0)millis=Math.min(millis,originalNetwork);
+            c.setNetworkTimeout(Runnable::run,millis);
+        }
+        void limitRollback()throws SQLException{network(Math.max(0,until-clock.getAsLong()));}
+        PreparedStatement statement(String query,Object...args)throws SQLException{
+            left();var p=c.prepareStatement(query);
+            try{p.setQueryTimeout(left());for(int i=0;i<args.length;i++)p.setObject(i+1,args[i]);return p;}
+            catch(SQLException|RuntimeException failure){try{p.close();}catch(SQLException close){failure.addSuppressed(close);}throw failure;}
+        }
         <T>List<T> list(String query,Row<T> mapper,Object...args)throws SQLException{try(var p=statement(query,args);var r=p.executeQuery()){var values=new ArrayList<T>();while(r.next())values.add(mapper.map(r));return values;}}
         <T>T one(String query,Row<T> mapper,Object...args)throws SQLException{var all=list(query,mapper,args);if(all.size()>1)throw new SQLException("维护原件唯一键损坏");return all.isEmpty()?null:all.getFirst();}
         int update(String query,Object...args)throws SQLException{try(var p=statement(query,args)){return p.executeUpdate();}}
@@ -188,6 +221,27 @@ public final class ZoneMergeStore {
         });
     }
     public ZoneMergeRunRow read(String key)throws SQLException{uuid(key);return tx(sql->{var result=run(sql,key,false);require(result!=null,"维护原run不存在");return result;});}
+
+    /** 外部热状态维护只能在这段持有SQL原围栏的有界回调内推进；绝不自行release。 */
+    @FunctionalInterface public interface RetiredWork<T> { T run(ZoneMergeRunRow proof, RetirementBudget budget)throws SQLException; }
+    @FunctionalInterface public interface RetirementBudget { void check()throws SQLException; }
+    public <T>T withRetirementProof(String key,String hash,String generation,RetiredWork<T> work)throws SQLException {
+        uuid(key);uuid(generation);Objects.requireNonNull(work);
+        return tx(sql->{
+            var proof=held(sql,key);approvedHash(proof,hash);
+            require(proof.getMode()==1&&proof.getState()==5&&proof.getGeneration().equals(generation),
+                    "热退休只接受原世代中已finish且未release的正向合服");
+            require(proof.getSourceZone()!=0&&proof.getTargetZone()!=0&&proof.getSourceZone()!=proof.getTargetZone(),"退休区号无效");
+            require(sql.count("SELECT COUNT(*) FROM zone_merged_into WHERE zone_id=? AND target_zone=? AND run_id=?",
+                    Integer.toUnsignedLong(proof.getSourceZone()),Integer.toUnsignedLong(proof.getTargetZone()),key)==1,"退役marker与原合服不符");
+            require(sql.count("SELECT COUNT(*) FROM zone_config WHERE zone_id=? AND manual_status=2",
+                    Integer.toUnsignedLong(proof.getSourceZone()))==1,"源区未永久关闭");
+            verifyItems(sql,proof);
+            require(sql.count("SELECT COUNT(*) FROM player WHERE owner_released IS NULL OR owner_released<>1")==0,"仍存在SQL玩家持有者，禁止清热状态");
+            require(sql.count("SELECT COUNT(*) FROM player_final_save WHERE status IS NULL OR BINARY status NOT IN ('OPEN','APPLIED')")==0,"最终存盘尚未安全终结");
+            return work.run(proof,()->{sql.left();});
+        });
+    }
     private static void lockPeople(Sql sql,Collection<Long> players)throws SQLException{
         var ids=new TreeSet<Long>(Long::compareUnsigned);ids.addAll(players);for(long player:ids)require(sql.one("SELECT player_id FROM player WHERE player_id=? FOR UPDATE",r->unsigned(r,"player_id"),id(player))!=null,"计划角色已经缺失");
     }
@@ -276,7 +330,9 @@ public final class ZoneMergeStore {
     public ZoneMergeRunRow abort(String key,String hash,String approvedBy)throws SQLException{uuid(key);operator(approvedBy);return tx(sql->{held(sql,key);var r=run(sql,key,true);approvedHash(r,hash);require(List.of(1,2,3,7).contains(r.getState())&&sql.count("SELECT COUNT(*) FROM zone_merge_item WHERE run_id=? AND state<>1",key)==0,"已写实体不得放弃，必须续跑原run后按原件撤销");if(r.getState()!=7)sql.update("UPDATE zone_merge_run SET state=7,approved_by=?,updated_ms=? WHERE run_id=?",approvedBy,sql.now(),key);return run(sql,key,false);});}
     /** P7/P8同一维护事务复核真实域终局；不发控制授权、不清围栏、不执行补偿。 */
     public static ZoneMergeRunRow auditReleased(Connection connection,String key)throws SQLException{
-        uuid(key);require(!connection.getAutoCommit(),"合区审核必须在控制器已有事务中");var sql=new Sql(connection);String generation=meta(sql,0);
+        uuid(key);require(!connection.getAutoCommit(),"合区审核必须在控制器已有事务中");
+        int network=connection.getNetworkTimeout();var sql=new Sql(connection,System::nanoTime,System.nanoTime()+30_000_000_000L,network);
+        try{String generation=meta(sql,0);
         byte[] operation=runBytes(key);byte[] actual=sql.one("SELECT freeze_run_id FROM route_meta WHERE id=1",r->r.getBytes(1));require(Arrays.equals(operation,actual),"域审核不是同一冻结run");
         var run=run(sql,key,true);require(run!=null&&run.getState()==6&&run.getGeneration().equals(generation)&&!run.getReleasedBy().isBlank(),"域run尚无真实显式release终局");
         require(sql.count("SELECT COUNT(*) FROM zone_merge_fence WHERE zone_id IN(?,?) AND run_id=''",Integer.toUnsignedLong(run.getSourceZone()),Integer.toUnsignedLong(run.getTargetZone()))==128,"两区完整围栏尚未按域终局清理");
@@ -293,6 +349,7 @@ public final class ZoneMergeStore {
             else require(original==0&&sql.count("SELECT COUNT(*) FROM zone_config WHERE zone_id=? AND manual_status=1",Integer.toUnsignedLong(run.getTargetZone()))==1,"撤销目录未恢复到维护态");
         }else require(done==0&&(run.getMode()==1?merged==0:original==1),"安全放弃的原目录被改变");
         return run;
+        }finally{if(!connection.isClosed())connection.setNetworkTimeout(Runnable::run,network);}
     }
     /** 只解除本域围栏并固定域完成收据；全局SQL保持FROZEN，由唯一operator后续显式release。 */
     public ZoneMergeRunRow release(String key,String hash,String generation,String releasedBy)throws SQLException{uuid(key);uuid(generation);operator(releasedBy);return tx(sql->{

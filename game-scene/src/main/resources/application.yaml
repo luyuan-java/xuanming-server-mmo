@@ -19,7 +19,7 @@ spring:
     # 只为管理端点起一个 Servlet 容器（Tomcat）；gate 节点链路（Netty）不经过它（architecture.md §11）。
     web-application-type: servlet
   lifecycle:
-    # 停服写回（game.scene.shutdown-save-timeout）要在这个上限之内完成
+    # 同步SmartLifecycle.stop不受这个等待值强制中断；进程管理器须另给至少60s停机宽限。
     timeout-per-shutdown-phase: 30s
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -54,6 +54,13 @@ server:
       min-spare: 1
 
 management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,sceneIdentity
   endpoints:
     web:
       exposure:
@@ -77,6 +84,13 @@ game:
     address: redis://127.0.0.1:6379
     database: 12
   scene:
+    # 先保持链路/归属续约疏散，预算到期再最终写回；单节点或无目标时直接写回。
+    evacuation:
+      max-in-flight: 32
+      retry-initial: 1s
+      retry-maximum: 30s
+      budget: 15s
+      evacuate-before-shutdown: true
     # git 跟踪消费能力；上游 enqueue-types 仍为空。false 可维护停用，运输不可达时保留 PENDING，不伪造持久确认。
     inbox:
       consumer-enabled: true

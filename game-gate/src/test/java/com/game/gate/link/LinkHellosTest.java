@@ -6,6 +6,7 @@ import com.game.api.proto.LinkHello;
 import com.game.common.token.NodeLinkAuth;
 import java.time.Instant;
 import java.time.InstantSource;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
@@ -39,5 +40,17 @@ class LinkHellosTest {
         assertThat(hellos.get().getAuthTimestamp()).isEqualTo(NOW);
         seconds.addAndGet(3600);
         assertThat(hellos.get().getAuthTimestamp()).isEqualTo(NOW + 3600);
+    }
+
+    @Test
+    void 生产握手声明心跳且仍使用原鉴权契约_旧构造器保持零值() {
+        NodeLinkAuth auth = NodeLinkAuth.ofUtf8("link-secret");
+        InstantSource clock = InstantSource.fixed(Instant.ofEpochSecond(NOW));
+        LinkHello current = new LinkHellos(3, "gate", 1, 8, auth, clock, Duration.ofSeconds(5)).get();
+        LinkHello legacy = new LinkHellos(3, "gate", 1, 8, auth, clock).get();
+        assertThat(current.getPingIntervalMs()).isEqualTo(5000);
+        assertThat(legacy.getPingIntervalMs()).isZero();
+        assertThat(current.getAuthMac()).isEqualTo(legacy.getAuthMac());
+        assertThat(auth.verify(3, "gate", 1, 8, NOW, current.getAuthMac(), NOW)).isEqualTo(NodeLinkAuth.Verdict.OK);
     }
 }

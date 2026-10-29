@@ -75,6 +75,12 @@ game:
     link-connect-timeout: 3s
     link-hello-timeout: 5s
     link-max-queued-frames: 10000
+    # 新旧版本通过 Hello/Ack 协商；只有双方支持才启用。idle 必须至少为 ping 的三倍。
+    link-ping-interval: 5s
+    link-idle-timeout: 15s
+    link-supersede-check-interval: 5s
+    # 同号新实例接管后旧链路的宽限；至少 20s，部署时应覆盖 scene 疏散预算与最终存盘时间。
+    link-superseded-grace: 30s
     shutdown-drain-timeout: 3s
     # 已重定向的会话（给客户端推过 124 RedirectToGateNotify：226 跨 zone 传送、登录期重定向，批次 5.4）最多再留多久；
     # 客户端通常连上目标 gate 后自己断开，到点仍在的由 gate 关闭（不推 tip）。短于 15s 拒启（客户端探测目标 gate 5s + 验票 10s）。

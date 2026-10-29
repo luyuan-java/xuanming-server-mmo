@@ -1,0 +1,3 @@
+# 仅单机开发夹具；生产使用至少三故障域，不能带此设置。
+[replication]
+max-replicas = 1

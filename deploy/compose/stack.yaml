@@ -1,0 +1,539 @@
+# 完整 Java 开发栈：同一 TiDB 权威域，全部 17 个服务进程 + robot 工具镜像。
+# dev 固定在本文件；不可把单 PD/TiKV/Redis/Kafka 形态当成生产或故障耐久验收。
+# docker compose -f deploy/compose/stack.yaml --profile tools build
+# docker compose -f deploy/compose/stack.yaml up -d --wait --wait-timeout 600
+include:
+  - infra.yaml
+  - tidb.yaml
+
+x-java: &java
+  init: false
+  restart: "no"
+  stop_grace_period: 60s
+  mem_limit: 768m
+  cpus: 2.0
+  security_opt: ["no-new-privileges:true"]
+x-common-env: &common-env
+  GAME_NAMESPACE: "${GAME_NAMESPACE:?必须显式设置部署命名空间}"
+  GAME_RUN_MODE: "dev"
+  GAME_MANAGEMENT_ADDRESS: "0.0.0.0"
+  GAME_REDIS_ADDRESS: "redis://redis:6379"
+  GAME_KAFKA_BOOTSTRAP_SERVERS: "kafka:19092"
+  MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+  MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: "health,prometheus,info"
+  JDK_JAVA_OPTIONS: "-Xms64m -Xmx384m -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError"
+x-db-env: &db-env
+  SPRING_DATASOURCE_URL: "jdbc:mysql://tidb:4000/${GAME_NAMESPACE:?}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=10000&useAffectedRows=true"
+  SPRING_DATASOURCE_USERNAME: "${GAME_NAMESPACE:?}_app"
+  SPRING_DATASOURCE_PASSWORD: "${GAME_MYSQL_PASSWORD:?}"
+x-health: &health
+  interval: 5s
+  timeout: 5s
+  start_period: 60s
+  retries: 60
+
+services:
+  route-init:
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-data:${GAME_IMAGE_TAG:?}
+    entrypoint: ["java", "-cp", "/app/app.jar:/app/lib/*", "com.game.data.tools.InitializeRouteAuthority"]
+    command: ["--initialize-from-sql-player", "--generation", "${GAME_ROUTE_GENERATION:?必须保存独立路由世代UUID}", "--zones", "${GAME_INITIAL_ZONES:-1}", "--expect-database", "${GAME_NAMESPACE:?}"]
+    environment:
+      GAME_NAMESPACE: ${GAME_NAMESPACE:?}
+      GAME_MYSQL_USER: ${GAME_NAMESPACE:?}_app
+      GAME_MYSQL_PASSWORD: ${GAME_MYSQL_PASSWORD:?}
+      GAME_ROUTE_INIT_JDBC: "jdbc:mysql://tidb:4000/${GAME_NAMESPACE:?}?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"
+      JDK_JAVA_OPTIONS: "-Xms32m -Xmx128m -XX:+ExitOnOutOfMemoryError"
+    depends_on:
+      tidb-init: {condition: service_completed_successfully}
+    mem_limit: 256m
+    restart: "no"
+
+  game-scene-manager:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-scene-manager:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-scene-manager
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-scene-manager"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_GATE_TOKEN_SECRET: "${GAME_GATE_TOKEN_SECRET:?缺少 GAME_GATE_TOKEN_SECRET}"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18102/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-scene-manager/20882'"]
+
+  game-login:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-login:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-login
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-login"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_LOGIN_DEV_PASSWORD: "${GAME_LOGIN_DEV_PASSWORD:?缺少 GAME_LOGIN_DEV_PASSWORD}"
+      GAME_DUBBO_SCENEMANAGERURL: "tri://game-scene-manager:20882"
+      GAME_LOGIN_MODE: "dev"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-scene-manager: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18101/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-login/20881'"]
+
+  game-friend:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-friend:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-friend
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-friend"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_FRIEND_REQUIRETIDB: "true"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-login: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18107/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-friend/20883'"]
+
+  game-chat:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-chat:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-chat
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-chat"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-login: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18108/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-chat/20884'"]
+
+  game-mail:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-mail:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-mail
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-mail"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      MAIL_PRODUCER_SECRET_RANK: "${MAIL_PRODUCER_SECRET_RANK:?缺少 MAIL_PRODUCER_SECRET_RANK}"
+      GAME_ASSET_OP_SECRET_MAIL: "${GAME_ASSET_OP_SECRET_MAIL:?缺少 GAME_ASSET_OP_SECRET_MAIL}"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-login: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18116/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-mail/20916'"]
+
+  game-rank:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-rank:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-rank
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-rank"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      RANK_PRODUCER_SECRET_MATCH: "${RANK_PRODUCER_SECRET_MATCH:?缺少 RANK_PRODUCER_SECRET_MATCH}"
+      GAME_RANK_MAILURL: "tri://game-mail:20916"
+      MAIL_PRODUCER_SECRET_RANK: "${MAIL_PRODUCER_SECRET_RANK:?缺少 MAIL_PRODUCER_SECRET_RANK}"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-mail: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18117/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-rank/20917'"]
+
+  game-match:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-match:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-match
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-match"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_ADMIN_TOKEN: "${GAME_ADMIN_TOKEN:?缺少 GAME_ADMIN_TOKEN}"
+      GAME_RANK_RPC_HOST: "game-rank"
+      RANK_PRODUCER_SECRET_MATCH: "${RANK_PRODUCER_SECRET_MATCH:?}"
+      GLOBAL_MATCH_ENABLED: "false"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-rank: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18113/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-match/20888'"]
+
+  game-team:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-team:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-team
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-team"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_DUBBO_MATCHURL: "tri://game-match:20888"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-match: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18109/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-team/20885'"]
+
+  game-guild:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-guild:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-guild
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-guild"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_ASSET_OP_SECRET_GUILD: "${GAME_ASSET_OP_SECRET_GUILD:?缺少 GAME_ASSET_OP_SECRET_GUILD}"
+      GAME_MATCH_URL: "tri://game-match:20888"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-match: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18110/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-guild/20886'"]
+
+  game-mall:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-mall:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-mall
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-mall"
+      GAME_MALL_GATEWAY_SECRET: "${GAME_MALL_GATEWAY_SECRET:?缺少 GAME_MALL_GATEWAY_SECRET}"
+      GAME_MALL_PAYMENT_SECRET: "${GAME_MALL_PAYMENT_SECRET:?缺少 GAME_MALL_PAYMENT_SECRET}"
+      GAME_MALL_DELIVERY_SECRET: "${GAME_MALL_DELIVERY_SECRET:?缺少 GAME_MALL_DELIVERY_SECRET}"
+      GAME_MALL_ADMIN_SECRET: "${GAME_MALL_ADMIN_SECRET:?缺少 GAME_MALL_ADMIN_SECRET}"
+      GAME_MALL_BIND_ADDRESS: "0.0.0.0"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-login: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18121/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-mall/18120'"]
+
+  game-trade:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-trade:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-trade
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-trade"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_ADMIN_TOKEN: "${GAME_ADMIN_TOKEN:?缺少 GAME_ADMIN_TOKEN}"
+      GAME_MALL_GATEWAY_SECRET: "${GAME_MALL_GATEWAY_SECRET:?缺少 GAME_MALL_GATEWAY_SECRET}"
+      GAME_MALL_DELIVERY_SECRET: "${GAME_MALL_DELIVERY_SECRET:?缺少 GAME_MALL_DELIVERY_SECRET}"
+      GAME_PLAYER_TRADE_URL: "tri://game-login:20881"
+      GAME_TRADE_MALL_URL: "http://game-mall:18120"
+      GAME_TRADE_MALL_ENABLED: "true"
+      GAME_TRADE_COMMERCE_ENABLED: "true"
+      GAME_ASSET_OP_SECRET_TRADE: "${GAME_ASSET_OP_SECRET_TRADE:?缺少 GAME_ASSET_OP_SECRET_TRADE}"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-login: {condition: service_healthy}
+      game-mall: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18111/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-trade/20887'"]
+
+  game-data:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-data:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-data
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-data"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_ADMIN_TOKEN: "${GAME_ADMIN_TOKEN:?缺少 GAME_ADMIN_TOKEN}"
+      GAME_MALL_ADMIN_SECRET: "${GAME_MALL_ADMIN_SECRET:?缺少 GAME_MALL_ADMIN_SECRET}"
+      GAME_DATA_OPS_ENABLED: "true"
+      GAME_DUBBO_GUILD_URL: "tri://game-guild:20886"
+      GAME_DATA_MALL_ADMIN_URL: "http://game-mall:18120"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-guild: {condition: service_healthy}
+      game-mall: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18106/actuator/health/readiness > /dev/null"]
+
+  game-inbox:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-inbox:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-inbox
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-inbox"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      MMORPG_INTERNAL_SECRET_SCENE: "${MMORPG_INTERNAL_SECRET_SCENE:?缺少 MMORPG_INTERNAL_SECRET_SCENE}"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-login: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18118/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-inbox/20918'"]
+
+  game-scene:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-scene:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-scene
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-scene"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_NODE_LINK_SECRET: "${GAME_NODE_LINK_SECRET:?缺少 GAME_NODE_LINK_SECRET}"
+      GAME_ASSET_OP_SECRET_GUILD: "${GAME_ASSET_OP_SECRET_GUILD:?缺少 GAME_ASSET_OP_SECRET_GUILD}"
+      GAME_ASSET_OP_SECRET_MAIL: "${GAME_ASSET_OP_SECRET_MAIL:?缺少 GAME_ASSET_OP_SECRET_MAIL}"
+      MMORPG_INTERNAL_SECRET_SCENE: "${MMORPG_INTERNAL_SECRET_SCENE:?缺少 MMORPG_INTERNAL_SECRET_SCENE}"
+      GAME_ADMIN_TOKEN: "${GAME_ADMIN_TOKEN:?缺少 GAME_ADMIN_TOKEN}"
+      GAME_GM_ADMIN_SECRET: "${GAME_GM_ADMIN_SECRET:?缺少 GAME_GM_ADMIN_SECRET}"
+      GAME_SCENE_LINKBINDHOST: "0.0.0.0"
+      GAME_SCENE_SCENEMANAGERURL: "tri://game-scene-manager:20882"
+      GAME_SCENE_INBOX_URL: "tri://game-inbox:20918"
+      GAME_ASSET_OP_SECRET_TRADE: "${GAME_ASSET_OP_SECRET_TRADE:?缺少 GAME_ASSET_OP_SECRET_TRADE}"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-scene-manager: {condition: service_healthy}
+      game-login: {condition: service_healthy}
+      game-guild: {condition: service_healthy}
+      game-inbox: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18104/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-scene/21000' && timeout 2 bash -c 'exec 3<>/dev/tcp/game-scene/21100'"]
+
+  game-battle:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-battle:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-battle
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: *common-env
+      GAME_ADVERTISE_HOST: "game-battle"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_BATTLE_TOKEN_SECRET: "${GAME_BATTLE_TOKEN_SECRET:?缺少 GAME_BATTLE_TOKEN_SECRET}"
+      GAME_ADMIN_TOKEN: "${GAME_ADMIN_TOKEN:?缺少 GAME_ADMIN_TOKEN}"
+      GAME_BATTLE_CLIENT_ADVERTISE_HOST: "${GAME_BATTLE_CLIENT_ADVERTISE_HOST:-game-battle}"
+      GLOBAL_MATCH_ENABLED: "false"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-match: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18112/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-battle/12000' && timeout 2 bash -c 'exec 3<>/dev/tcp/game-battle/21200'"]
+    ports: ["127.0.0.1:${GAME_BATTLE_HOST_PORT:-12000}:12000"]
+
+  game-gate:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-gate:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-gate
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: *common-env
+      GAME_ADVERTISE_HOST: "${GAME_GATE_ADVERTISE_HOST:-game-gate}"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_GATE_TOKEN_SECRET: "${GAME_GATE_TOKEN_SECRET:?缺少 GAME_GATE_TOKEN_SECRET}"
+      GAME_NODE_LINK_SECRET: "${GAME_NODE_LINK_SECRET:?缺少 GAME_NODE_LINK_SECRET}"
+      GAME_GM_ADMIN_SECRET: "${GAME_GM_ADMIN_SECRET:?缺少 GAME_GM_ADMIN_SECRET}"
+      GAME_DUBBO_LOGINURL: "tri://game-login:20881"
+      GAME_DUBBO_FRIENDURL: "tri://game-friend:20883"
+      GAME_DUBBO_CHATURL: "tri://game-chat:20884"
+      GAME_DUBBO_TEAMURL: "tri://game-team:20885"
+      GAME_DUBBO_GUILDURL: "tri://game-guild:20886"
+      GAME_DUBBO_TRADEURL: "tri://game-trade:20887"
+      GAME_DUBBO_MAILURL: "tri://game-mail:20916"
+      GAME_DUBBO_RANKURL: "tri://game-rank:20917"
+      GAME_DUBBO_MATCHURL: "tri://game-match:20888"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-login: {condition: service_healthy}
+      game-friend: {condition: service_healthy}
+      game-chat: {condition: service_healthy}
+      game-team: {condition: service_healthy}
+      game-guild: {condition: service_healthy}
+      game-trade: {condition: service_healthy}
+      game-mail: {condition: service_healthy}
+      game-rank: {condition: service_healthy}
+      game-match: {condition: service_healthy}
+      game-scene: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18103/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-gate/11000'"]
+    ports: ["127.0.0.1:${GAME_GATE_HOST_PORT:-11000}:11000"]
+
+  game-gateway:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-gateway:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-gateway
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-gateway"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_GATE_TOKEN_SECRET: "${GAME_GATE_TOKEN_SECRET:?缺少 GAME_GATE_TOKEN_SECRET}"
+      GAME_DUBBO_LOGINURL: "tri://game-login:20881"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-login: {condition: service_healthy}
+      game-gate: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18105/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-gateway/18081'"]
+    ports: ["127.0.0.1:${GAME_GATEWAY_HOST_PORT:-18081}:18081"]
+
+  game-robot:
+    profiles: [tools]
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-robot:${GAME_IMAGE_TAG:?}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-robot
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?}
+    environment:
+      GAME_LOGIN_DEV_PASSWORD: ${GAME_LOGIN_DEV_PASSWORD:?}
+      GAME_ADMIN_TOKEN: ${GAME_ADMIN_TOKEN:?}
+      GAME_ASSET_OP_SECRET_GUILD: ${GAME_ASSET_OP_SECRET_GUILD:?}
+      JDK_JAVA_OPTIONS: "-Xms32m -Xmx256m -XX:+ExitOnOutOfMemoryError"
+    command: ["smoke", "--gateway", "http://game-gateway:18081"]
+    mem_limit: 512m
+    restart: "no"
