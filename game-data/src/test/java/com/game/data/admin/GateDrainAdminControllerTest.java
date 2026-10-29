@@ -95,4 +95,38 @@ class GateDrainAdminControllerTest {
         assertThat(controller.undrain(1, 3, request).getStatusCode().value()).isEqualTo(204);
         verify(marks).clear(1, 3);
     }
+
+    @Test
+    void 排空运维正十进制高位区的列表打标撤销与响应() throws Exception {
+        var mvc = org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(controller).build();
+        for (long value : new long[] {2147483647L, 2147483648L, 4294967295L}) {
+            int bits = (int) value;
+            when(directory.list(bits)).thenReturn(List.of(gate(1, 0).toBuilder().setZoneId(bits).build()));
+            when(marks.draining(eq(bits), any())).thenReturn(Map.of());
+            when(marks.drained(eq(bits), any())).thenReturn(Map.of());
+            when(marks.mark(eq(bits), eq(1), eq("i1"), any(), isNull())).thenReturn(MarkResult.MARKED);
+            mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/admin/gates/" + value))
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+            mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/admin/gates/drain")
+                            .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                            .content("{\"zone_id\":" + value + ",\"node_id\":1,\"force\":true}"))
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.zone_id").value(value));
+            mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete("/admin/gates/drain/" + value + "/1"))
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNoContent());
+            verify(marks).clear(bits, 1);
+        }
+    }
+
+    @Test
+    void 排空zone浮点与溢出在访问Redis前400() throws Exception {
+        var mvc = org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(controller).build();
+        for (String invalid : new String[] {"-1", "0", "-0.5", "4294967295.5", "4294967296"}) {
+            mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/admin/gates/drain")
+                            .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                            .content("{\"zone_id\":" + invalid + ",\"node_id\":1}"))
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isBadRequest());
+        }
+        org.mockito.Mockito.verifyNoInteractions(directory, marks);
+    }
 }

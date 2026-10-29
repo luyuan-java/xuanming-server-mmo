@@ -46,7 +46,7 @@ class CatalogAdminStoreTest {
         try (var f = new CatalogFixture()) {
             var replicas = List.of(admin(f), admin(f));
             var create = new CatalogAdminApi.Create("create-once-001", 1, terms(125, 10, 2, "旧条款"), 7);
-            var created = parallel(4, index -> replicas.get(index % 2).create(ACTOR, create));
+            var created = parallel(f, 4, index -> replicas.get(index % 2).create(ACTOR, create));
             var first = created.getFirst();
             for (var response : created) { assertEquals(first, response); }
             assertEquals(1, first.skuId());
@@ -58,7 +58,7 @@ class CatalogAdminStoreTest {
             assertEquals(1, f.count("commerce_admin_command"));
 
             var increase = new CatalogAdminApi.AdjustStock("stock-once-001", 1, 1, 3);
-            var increased = parallel(4, index -> replicas.get(index % 2).adjustStock(ACTOR, increase));
+            var increased = parallel(f, 4, index -> replicas.get(index % 2).adjustStock(ACTOR, increase));
             var original = increased.getFirst();
             for (var response : increased) { assertEquals(original, response); }
             assertEquals(2, original.revision());
@@ -111,7 +111,7 @@ class CatalogAdminStoreTest {
             var commands = List.of(
                 new CatalogAdminApi.Update("race-update-001", 1, 1, terms(200, 20, 2, "竞争甲")),
                 new CatalogAdminApi.Update("race-update-002", 1, 1, terms(300, 30, 3, "竞争乙")));
-            var responses = parallel(2, index -> {
+            var responses = parallel(f, 2, index -> {
                 try { return replicas.get(index).update(ACTOR, commands.get(index)); }
                 catch (MallException conflict) { assertEquals(409, conflict.status()); return null; }
             });
@@ -447,7 +447,7 @@ class CatalogAdminStoreTest {
         assertEquals(status, assertThrows(MallException.class, command).status());
     }
 
-    private static <T> List<T> parallel(int count, IntFunction<T> command) throws Exception {
+    private static <T> List<T> parallel(CatalogFixture fixture, int count, IntFunction<T> command) throws Exception {
         var executor = Executors.newFixedThreadPool(count);
         var ready = new CountDownLatch(count);
         var start = new CountDownLatch(1);
@@ -455,7 +455,9 @@ class CatalogAdminStoreTest {
         List<T> results = new ArrayList<>();
         List<Executable> failures = new ArrayList<>();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        Throwable primary = null;
         try {
+            fixture.trackActors(executor);
             for (int i = 0; i < count; i++) {
                 int index = i;
                 futures.add(executor.submit(() -> {
@@ -469,100 +471,86 @@ class CatalogAdminStoreTest {
             for (var future : futures) {
                 try { results.add(future.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)); }
                 catch (ExecutionException failed) {
+                    if (MockPaymentTestDatabase.unknownActorFailure(failed)) fixture.retainUnknownActors(failed);
                     Throwable cause = failed.getCause();
                     failures.add(() -> { throw cause; });
                 } catch (TimeoutException timedOut) {
+                    fixture.retainUnknownActors(timedOut);
                     future.cancel(true);
                     failures.add(() -> { throw timedOut; });
                 }
             }
             assertAll("主线程收集全部并发断言与执行错误", failures);
             return results;
+        } catch (Exception | Error failure) {
+            primary = failure;
+            if (MockPaymentTestDatabase.unknownActorFailure(failure)) fixture.retainUnknownActors(failure);
+            throw failure;
         } finally {
             start.countDown();
-            for (var future : futures) { if (!future.isDone()) { future.cancel(true); } }
-            executor.shutdownNow();
-            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS), "本例executor未在期限内清理");
+            Throwable cleanup = null;
+            boolean interrupted = Thread.interrupted() || primary instanceof InterruptedException;
+            for (var future : futures) try { if (!future.isDone()) future.cancel(true); }
+            catch (RuntimeException | Error failure) { cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+            try { executor.shutdownNow(); } catch (RuntimeException | Error failure) { cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+            try { assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS), "本例executor未在期限内清理"); }
+            catch (Exception | Error failure) { if (failure instanceof InterruptedException) interrupted = true; cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+            finally { if (interrupted) Thread.currentThread().interrupt(); }
+            if (cleanup != null) {
+                fixture.retainUnknownActors(cleanup);
+                if (primary != null) { if (cleanup != primary) primary.addSuppressed(cleanup); }
+                else MockPaymentTestDatabase.raiseFailure(cleanup);
+            }
         }
     }
 
-    /** 只接受本机无库名的TiDB端点；每例拥有随机库，生产连接策略与DDL安装预算分开。 */
+    /** H2原分支不变；真库复用同一owned producer和NORMAL physical接缝。 */
     private static final class CatalogFixture implements AutoCloseable {
         final MallTestDatabase h2;
+        final MockPaymentTestDatabase owned;
         final DataSource source;
         final JdbcTemplate jdbc;
         final DataSourceTransactionManager manager;
         final MallOrderStore store;
-        final String endpoint;
-        final String database;
-        final Properties credentials = new Properties();
+        private Throwable h2ActorUnknown;
+        private final java.util.Set<java.util.concurrent.ExecutorService> h2Actors = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        synchronized void trackActors(java.util.concurrent.ExecutorService executor) throws SQLException {
+            if (owned != null) { owned.trackActors(executor); return; }
+            if (h2ActorUnknown != null) throw new SQLException("目录H2 actor结局未知");
+            h2Actors.add(executor);
+        }
+        synchronized void retainUnknownActors(Throwable failure) {
+            if (owned != null) owned.retainUnknownActors(failure);
+            else if (h2ActorUnknown == null) h2ActorUnknown = failure;
+        }
 
         CatalogFixture() {
-            endpoint = System.getProperty("game.it.mysql");
-            if (endpoint == null) {
+            if (System.getProperty("game.it.mysql") == null) {
                 h2 = new MallTestDatabase();
+                owned = null;
                 source = h2.source;
                 jdbc = h2.jdbc;
                 manager = new DataSourceTransactionManager(source);
                 store = h2.store;
-                database = null;
                 return;
             }
-            if (!endpoint.matches("jdbc:mysql://(127\\.0\\.0\\.1|localhost):4000/?")) {
-                throw new IllegalArgumentException("目录管理真库测试仅接受本机4000端口且不得指定已有库");
-            }
             h2 = null;
-            database = "mallcatalog" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-            credentials.setProperty("user", System.getenv().getOrDefault("GAME_MYSQL_USER", "root"));
-            credentials.setProperty("password", System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""));
-            credentials.setProperty("connectTimeout", "3000");
-            credentials.setProperty("socketTimeout", "30000");
-            HikariDataSource pool = null;
-            try {
-                createOwnedDatabase();
-                String url = endpoint.replaceAll("/$", "") + "/" + database;
-                var installer = new DriverManagerDataSource(url);
-                installer.setConnectionProperties(credentials);
-                new ResourceDatabasePopulator(new ClassPathResource("db/migration/V1__official_sku.sql")).execute(installer);
-                var properties = MallTestDatabase.properties(true);
-                var data = new DataSourceProperties();
-                data.setUrl(url);
-                data.setUsername(credentials.getProperty("user"));
-                data.setPassword(credentials.getProperty("password"));
-                pool = (HikariDataSource) new MallDatabaseConfiguration().dataSource(data, properties, "test");
-                new MallSchemaVerifier(pool, properties).verify();
-                source = pool;
-                jdbc = new JdbcTemplate(source);
-                manager = new DataSourceTransactionManager(source);
-                store = new MallOrderStore(jdbc, manager, CLOCK, properties);
-            } catch (Exception failure) {
-                if (pool != null) { pool.close(); }
-                try { dropOwnedDatabase(); } catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
-                throw new IllegalStateException("目录管理隔离TiDB夹具初始化失败", failure);
-            }
+            owned = new MockPaymentTestDatabase("mallcatalog", MallTestDatabase.properties(true));
+            source = owned.source;
+            jdbc = owned.jdbc;
+            manager = new DataSourceTransactionManager(source);
+            store = new MallOrderStore(jdbc, manager, CLOCK, owned.props);
         }
 
         int count(String table) { return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class); }
 
-        private void createOwnedDatabase() { executeOwnedDDL("CREATE DATABASE"); }
-        private void dropOwnedDatabase() { executeOwnedDDL("DROP DATABASE"); }
-        private void executeOwnedDDL(String command) {
-            if (database == null || !database.matches("mallcatalog[0-9a-f]{16}")) {
-                throw new IllegalStateException("禁止操作非本用例新建目录管理库");
+        @Override public synchronized void close() {
+            if (h2 != null) {
+                for (var executor : h2Actors) if (!executor.isTerminated()) retainUnknownActors(new IllegalStateException("目录H2 actor未终结"));
+                if (h2ActorUnknown != null) throw new IllegalStateException("目录H2 actor结局未知，拒绝SHUTDOWN", h2ActorUnknown);
+                h2.close(); return;
             }
-            try (Connection connection = DriverManager.getConnection(endpoint.replaceAll("/$", "") + "/", credentials);
-                 var statement = connection.createStatement()) {
-                statement.setQueryTimeout(30);
-                statement.execute(command + " `" + database + "`");
-            } catch (SQLException failure) {
-                throw new IllegalStateException("目录管理专属测试库DDL失败: " + database, failure);
-            }
-        }
-
-        @Override public void close() {
-            if (h2 != null) { h2.close(); return; }
-            ((HikariDataSource) source).close();
-            dropOwnedDatabase();
+            owned.close();
         }
     }
 }

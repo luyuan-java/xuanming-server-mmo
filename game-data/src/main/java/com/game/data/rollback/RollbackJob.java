@@ -467,126 +467,168 @@ public final class RollbackJob implements JobBody {
                     divergenceRows, unprovable.size());
         }
 
-        // ---------------------------------------------------------------- 5 写
-        // 成功和异常都可能已经提交；只有正常返回明确的未写结局才可排除（COMMIT 确认丢失不能证明回滚）。
-        List<Long> possiblyWritten = new ArrayList<>();
-        List<Long> unconfirmedWrites = new ArrayList<>();
-        int consecutiveFailures = 0;
-        boolean stopped = false;
-        for (Long playerId : List.copyOf(claimed.keySet())) {
-            if (possiblyWritten.isEmpty()) {
-                ctx.checkpoint();
-            } else if (ctx.aborted() || Thread.currentThread().isInterrupted()) {
-                // 已有可能写入的玩家时停止继续写，但不能抛出后直接跳过复查（同基线 WithoutCancel）。
-                stopped = true;
-            }
-            if (!stopped && ctx.timedOut()) {
-                // 写阶段超时：写完当前玩家后停，剩下的 not_executed；结果码记 job_timeout（一个没写成时作业 FAILED，见 finish）
-                stopped = true;
-                writeTimedOut = true;
-            }
-            if (stopped) {
-                setOutcome(ctx, playerId, NOT_EXECUTED);
-                continue;
-            }
-            if (d.ownership().epochOf(playerId).isEmpty()) {
-                setOutcome(ctx, playerId, RollbackWriter.FENCE_LOST);
-                continue;
-            }
-            Target t = byPlayer.get(playerId);
-            String outcome;
-            try {
-                outcome = d.writer().write(ctx.jobId(), ctx.operator(), playerId, t.snapshot().getSnapshotId(),
-                        claimed.get(playerId), req.sections());
-            } catch (RuntimeException e) {
-                log.error("回档作业 job={} 写玩家 {} 未获提交确认（可能已写，纳入写后复查）", ctx.jobIdText(), Long.toUnsignedString(playerId), e);
-                possiblyWritten.add(playerId);
-                unconfirmedWrites.add(playerId);
-                outcome = FAILED;
-            }
-            if (RollbackWriter.RESTORED.equals(outcome)) {
-                restored++;
-                consecutiveFailures = 0;
-                possiblyWritten.add(playerId);
-                outcomes.put(playerId, outcome);
-                d.metrics().opsPlayer(KIND, METRIC_RESTORED);
-                audit.info("[Rollback] WRITE job={} player={} snapshot={} epoch={}", ctx.jobIdText(),
-                        Long.toUnsignedString(playerId), Long.toUnsignedString(t.snapshot().getSnapshotId()),
-                        Long.toUnsignedString(claimed.get(playerId)));
-                continue;
-            }
-            setOutcome(ctx, playerId, outcome);
-            if (FAILED.equals(outcome) || RollbackWriter.ID_UNAVAILABLE.equals(outcome)) {
-                writeFailures++;
-                consecutiveFailures++;
-                if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES || RollbackWriter.ID_UNAVAILABLE.equals(outcome)) {
+        // 仅本次执行线程持有；未完成的SQL或authority UNKNOWN不会因暂清中断而被恢复。
+        var completionInterrupts = new PostWriteInterrupts();
+        try {
+            // ---------------------------------------------------------------- 5 写
+            // 成功和异常都可能已经提交；只有正常返回明确的未写结局才可排除（COMMIT 确认丢失不能证明回滚）。
+            List<Long> possiblyWritten = new ArrayList<>();
+            List<Long> unconfirmedWrites = new ArrayList<>();
+            int consecutiveFailures = 0;
+            boolean stopped = false;
+            for (Long playerId : List.copyOf(claimed.keySet())) {
+                if (possiblyWritten.isEmpty()) {
+                    ctx.checkpoint();
+                    if (Thread.currentThread().isInterrupted()) {
+                        throw new com.game.data.ops.OpsJobRunner.JobAbortedException("第一笔可能提交的写之前收到中断，不执行玩家写入");
+                    }
+                } else {
+                    // 标志只在玩家写已经返回的边界暂清；已观察的中断永久停止本轮后续玩家。
+                    boolean interruptedAfterWrite = completionInterrupts.capture();
+                    if (ctx.aborted() || interruptedAfterWrite) stopped = true;
+                }
+                if (!stopped && ctx.timedOut()) {
+                    // 写阶段超时：写完当前玩家后停，剩下的 not_executed；结果码记 job_timeout（一个没写成时作业 FAILED，见 finish）
+                    stopped = true;
+                    writeTimedOut = true;
+                }
+                if (stopped) {
+                    setOutcome(ctx, playerId, NOT_EXECUTED);
+                    continue;
+                }
+                if (d.ownership().epochOf(playerId).isEmpty()) {
+                    setOutcome(ctx, playerId, RollbackWriter.FENCE_LOST);
+                    continue;
+                }
+                // checkpoint不检查线程标志；在进入下一笔玩家事务前再核一次。
+                if (Thread.currentThread().isInterrupted()) {
+                    if (possiblyWritten.isEmpty()) {
+                        throw new com.game.data.ops.OpsJobRunner.JobAbortedException("玩家写调用前收到中断，不执行玩家写入");
+                    }
+                    completionInterrupts.capture();
+                    stopped = true;
+                    setOutcome(ctx, playerId, NOT_EXECUTED);
+                    continue;
+                }
+                Target t = byPlayer.get(playerId);
+                String outcome;
+                try {
+                    outcome = d.writer().write(ctx.jobId(), ctx.operator(), playerId, t.snapshot().getSnapshotId(),
+                            claimed.get(playerId), req.sections());
+                } catch (RuntimeException e) {
+                    log.error("回档作业 job={} 写玩家 {} 未获提交确认（可能已写，纳入写后复查）", ctx.jobIdText(), Long.toUnsignedString(playerId), e);
+                    possiblyWritten.add(playerId);
+                    unconfirmedWrites.add(playerId);
+                    outcome = FAILED;
+                }
+                // COMMIT确认丢失也属于可能已写；必须先保存中断再写明细或事件，不能把取消送入NORMAL连接。
+                if (Thread.currentThread().isInterrupted()) {
+                    if (possiblyWritten.isEmpty() && !RollbackWriter.RESTORED.equals(outcome)) {
+                        throw new com.game.data.ops.OpsJobRunner.JobAbortedException("玩家写明确未提交时收到中断，不继续写玩家");
+                    }
+                    completionInterrupts.capture();
                     stopped = true;
                 }
-            }
-        }
-        Map<String, Object> writeEvent = new LinkedHashMap<>();
-        writeEvent.put("restored", restored);
-        writeEvent.put("failed", writeFailures);
-        writeEvent.put("stopped", stopped);
-        writeEvent.put("timedOut", writeTimedOut);
-        ctx.eventQuietly(OpsJobEventType.OPS_JOB_EVENT_WRITE, writeEvent);
-
-        // ---------------------------------------------------------------- 6 写后复查
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("plan", planSummary);
-        summary.put("battleLock", lockView);
-        summary.put("check", check);
-        summary.put("restored", restored);
-        summary.put("outcomes", countOutcomes());
-        summary.put("unconfirmedWrites", unconfirmedWrites.size());
-        summary.put("unconfirmedWritePlayers", unconfirmedWrites.stream().limit(GuildDivergenceGate.SAMPLE)
-                .map(Long::toUnsignedString).toList());
-        if (writeTimedOut) {
-            summary.put("timedOut", true);
-        }
-        String code = null;
-        if (!possiblyWritten.isEmpty()) {
-            Map<Long, Long> recheckSince = new LinkedHashMap<>();
-            for (Long p : possiblyWritten) {
-                recheckSince.put(p, sinceByPlayer.get(p));
-            }
-            GuildDivergenceGate.Result recheck = recheckAfterWrite(recheckSince, guild);
-            Set<Long> seen = new HashSet<>();
-            guildResult.rows().forEach(op -> seen.add(op.getOpId()));
-            List<GuildAssetOpBrief> fresh = recheck.rows().stream().filter(op -> !seen.contains(op.getOpId())).toList();
-            Map<String, Object> recheckView = new LinkedHashMap<>(recheck.view());
-            recheckView.put("newRows", fresh.size());
-            recheckView.put("newSample", fresh.stream().limit(GuildDivergenceGate.SAMPLE).map(GuildDivergenceGate::opView)
-                    .toList());
-            ctx.eventQuietly(OpsJobEventType.OPS_JOB_EVENT_RECHECK, recheckView);
-            summary.put("recheck", recheckView);
-            if (recheck.checkFailed()) {
-                d.metrics().divergenceCheck("guild", "post_write_failed");
-                log.error("回档作业 job={} 写后复查问不到帮会（{}）：可能已写的 {} 人转人工核对", ctx.jobIdText(), recheck.failure(),
-                        possiblyWritten.size());
-                code = POST_WRITE_UNVERIFIED;
-            } else if (!fresh.isEmpty()) {
-                d.metrics().divergenceCheck("guild", "post_write_diverged");
-                for (GuildAssetOpBrief op : fresh) {
-                    log.error("[Rollback][DivergedAfterWrite] job={} player={} op_id={} guild={} updated_ms={}（紧急：不自动撤销，"
-                                    + "用 PRE_ROLLBACK 撤销或人工补偿）", ctx.jobIdText(), Long.toUnsignedString(op.getPlayerId()),
-                            Long.toUnsignedString(op.getOpId()), Long.toUnsignedString(op.getGuildId()),
-                            Long.toUnsignedString(op.getUpdatedMs()));
+                if (RollbackWriter.RESTORED.equals(outcome)) {
+                    restored++;
+                    consecutiveFailures = 0;
+                    possiblyWritten.add(playerId);
+                    outcomes.put(playerId, outcome);
+                    d.metrics().opsPlayer(KIND, METRIC_RESTORED);
+                    audit.info("[Rollback] WRITE job={} player={} snapshot={} epoch={}", ctx.jobIdText(),
+                            Long.toUnsignedString(playerId), Long.toUnsignedString(t.snapshot().getSnapshotId()),
+                            Long.toUnsignedString(claimed.get(playerId)));
+                    continue;
                 }
-                return new JobResult(OpsJobStatus.OPS_JOB_DIVERGED_AFTER_WRITE, DIVERGED_AFTER_WRITE, targets.size(),
-                        restored, targets.size() - restored - reportOnly(), divergenceRows, unprovable.size(),
-                        acceptedDivergence, acceptedReversal, finalizeLeftovers(ctx, summary, NOT_EXECUTED));
-            } else {
-                d.metrics().divergenceCheck("guild", "post_write_clean");
+                setOutcome(ctx, playerId, outcome);
+                if (FAILED.equals(outcome) || RollbackWriter.ID_UNAVAILABLE.equals(outcome)) {
+                    writeFailures++;
+                    consecutiveFailures++;
+                    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES || RollbackWriter.ID_UNAVAILABLE.equals(outcome)) {
+                        stopped = true;
+                    }
+                }
             }
+            if (!possiblyWritten.isEmpty()) completionInterrupts.capture();
+            Map<String, Object> writeEvent = new LinkedHashMap<>();
+            writeEvent.put("restored", restored);
+            writeEvent.put("failed", writeFailures);
+            writeEvent.put("stopped", stopped);
+            writeEvent.put("timedOut", writeTimedOut);
+            ctx.eventQuietly(OpsJobEventType.OPS_JOB_EVENT_WRITE, writeEvent);
+    
+            // ---------------------------------------------------------------- 6 写后复查
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("plan", planSummary);
+            summary.put("battleLock", lockView);
+            summary.put("check", check);
+            summary.put("restored", restored);
+            summary.put("outcomes", countOutcomes());
+            summary.put("unconfirmedWrites", unconfirmedWrites.size());
+            summary.put("unconfirmedWritePlayers", unconfirmedWrites.stream().limit(GuildDivergenceGate.SAMPLE)
+                    .map(Long::toUnsignedString).toList());
+            if (writeTimedOut) {
+                summary.put("timedOut", true);
+            }
+            String code = null;
+            if (!possiblyWritten.isEmpty()) {
+                Map<Long, Long> recheckSince = new LinkedHashMap<>();
+                for (Long p : possiblyWritten) {
+                    recheckSince.put(p, sinceByPlayer.get(p));
+                }
+                GuildDivergenceGate.Result recheck = recheckAfterWrite(recheckSince, guild, completionInterrupts);
+                // 客户端检查失败也可能重新置中断；RECHECK和后续明细之前必须收回到同一局部记录。
+                completionInterrupts.capture();
+                Set<Long> seen = new HashSet<>();
+                guildResult.rows().forEach(op -> seen.add(op.getOpId()));
+                List<GuildAssetOpBrief> fresh = recheck.rows().stream().filter(op -> !seen.contains(op.getOpId())).toList();
+                Map<String, Object> recheckView = new LinkedHashMap<>(recheck.view());
+                recheckView.put("newRows", fresh.size());
+                recheckView.put("newSample", fresh.stream().limit(GuildDivergenceGate.SAMPLE).map(GuildDivergenceGate::opView)
+                        .toList());
+                ctx.eventQuietly(OpsJobEventType.OPS_JOB_EVENT_RECHECK, recheckView);
+                summary.put("recheck", recheckView);
+                if (recheck.checkFailed()) {
+                    d.metrics().divergenceCheck("guild", "post_write_failed");
+                    log.error("回档作业 job={} 写后复查问不到帮会（{}）：可能已写的 {} 人转人工核对", ctx.jobIdText(), recheck.failure(),
+                            possiblyWritten.size());
+                    code = POST_WRITE_UNVERIFIED;
+                } else if (!fresh.isEmpty()) {
+                    d.metrics().divergenceCheck("guild", "post_write_diverged");
+                    for (GuildAssetOpBrief op : fresh) {
+                        log.error("[Rollback][DivergedAfterWrite] job={} player={} op_id={} guild={} updated_ms={}（紧急：不自动撤销，"
+                                        + "用 PRE_ROLLBACK 撤销或人工补偿）", ctx.jobIdText(), Long.toUnsignedString(op.getPlayerId()),
+                                Long.toUnsignedString(op.getOpId()), Long.toUnsignedString(op.getGuildId()),
+                                Long.toUnsignedString(op.getUpdatedMs()));
+                    }
+                    return new JobResult(OpsJobStatus.OPS_JOB_DIVERGED_AFTER_WRITE, DIVERGED_AFTER_WRITE, targets.size(),
+                            restored, targets.size() - restored - reportOnly(), divergenceRows, unprovable.size(),
+                            acceptedDivergence, acceptedReversal, finalizeLeftovers(ctx, summary, NOT_EXECUTED));
+                } else {
+                    d.metrics().divergenceCheck("guild", "post_write_clean");
+                }
+            }
+            if (!possiblyWritten.isEmpty()) completionInterrupts.capture();
+            return finish(ctx, summary, code, divergenceRows, unprovable.size(), acceptedDivergence, acceptedReversal,
+                    targets.size());
+        } finally {
+            // run返回给Runner时显式移交原标志；Runner仅在自己的有界收尾阶段再次暂清。
+            completionInterrupts.restore();
         }
-        return finish(ctx, summary, code, divergenceRows, unprovable.size(), acceptedDivergence, acceptedReversal,
-                targets.size());
     }
 
-    /** 写后复查有独立预算；作业取消 / 写请求中断不能让已经可能提交的玩家跳过它。 */
-    private GuildDivergenceGate.Result recheckAfterWrite(Map<Long, Long> sinceByPlayer, DataProperties.Guild guild) {
-        boolean interrupted = Thread.interrupted();
+    /** 只在本次data-ops执行线程上使用，不跨作业共享；不改变authority或事务结局。 */
+    private static final class PostWriteInterrupts {
+        private boolean interrupted;
+        boolean capture() { interrupted |= Thread.interrupted(); return interrupted; }
+        void record() { interrupted = true; }
+        void restore() { if (interrupted) Thread.currentThread().interrupt(); }
+    }
+
+    /** 写后复查仍用原delay与budget；期间的中断交run最外层finally恢复，不交给后续SQL。 */
+    private GuildDivergenceGate.Result recheckAfterWrite(Map<Long, Long> sinceByPlayer, DataProperties.Guild guild,
+                                                       PostWriteInterrupts interrupts) {
+        interrupts.capture();
         try {
             long until = System.nanoTime() + guild.recheckDelay().toNanos();
             long remaining;
@@ -594,12 +636,12 @@ public final class RollbackJob implements JobBody {
                 try {
                     java.util.concurrent.TimeUnit.NANOSECONDS.sleep(remaining);
                 } catch (InterruptedException e) {
-                    interrupted = true;
+                    interrupts.record();
                 }
             }
             return d.guild().check(sinceByPlayer, guild.recheckBudget());
         } finally {
-            if (interrupted) Thread.currentThread().interrupt();
+            interrupts.capture();
         }
     }
 

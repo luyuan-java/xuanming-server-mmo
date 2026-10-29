@@ -88,10 +88,17 @@ class RecoverTradeAdmissionTest {
                 .setSceneInstanceId(source).setGeneration(7).setSceneNodeId("node").setSceneId(41).setZoneId(7)
                 .setSessionId(2).setLoginGeneration(3).build();
     }
+    /** 维护目标是夹具原件：发布前建表，使真实SQL的NORMAL账号获得同表的正式授权。 */
+    private static DataSqlFixture createFixture()throws Exception {
+        return DataSqlFixture.create((connection,principal)->{
+            try(var statement=connection.createStatement()){
+                statement.execute("CREATE TABLE maintenance_recovery_target(purpose VARBINARY(16) NOT NULL,zone_id INT UNSIGNED NOT NULL,schema_name VARBINARY(64) NOT NULL,target_nonce VARBINARY(32) NOT NULL,physical_addr VARBINARY(255) NOT NULL,PRIMARY KEY(purpose,zone_id,schema_name))");
+            }
+        });
+    }
     private static void setup(DataSqlFixture f) { setup(f,true); }
     private static void setup(DataSqlFixture f,boolean admitted) {
-        var targetSql=new JdbcTemplate(f.dataSource);
-        targetSql.execute("CREATE TABLE maintenance_recovery_target(purpose VARBINARY(16) NOT NULL,zone_id INT UNSIGNED NOT NULL,schema_name VARBINARY(64) NOT NULL,target_nonce VARBINARY(32) NOT NULL,physical_addr VARBINARY(255) NOT NULL,PRIMARY KEY(purpose,zone_id,schema_name))");
+        var targetSql=f.schemaJdbc();
         targetSql.update("INSERT INTO maintenance_recovery_target VALUES(?,?,?,?,?)","admission".getBytes(java.nio.charset.StandardCharsets.US_ASCII),7,
                 f.database.getBytes(java.nio.charset.StandardCharsets.US_ASCII),NONCE.getBytes(java.nio.charset.StandardCharsets.US_ASCII),
                 "127.0.0.1:24000".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
@@ -126,7 +133,7 @@ class RecoverTradeAdmissionTest {
     }
 
     @Test void 正式Store默认计划零写_显式apply永久收据_同计划可重查(@TempDir Path dir) throws Exception {
-        try(var f=DataSqlFixture.create()) {
+        try(var f=createFixture()) {
             setup(f);var sql=new JdbcTemplate(f.dataSource);var closed=new AtomicInteger();var c=connection(f,INSTANCE,closed);
             Path p=dir.resolve("plan.json");assertEquals(0,run(plan(p,f.database),env(f.database),c));
             assertEquals(0,sql.queryForObject("SELECT COUNT(*) FROM player_trade_admission_recovery",Integer.class));
@@ -143,7 +150,7 @@ class RecoverTradeAdmissionTest {
     }
 
     @Test void 错实例_错库_篡改计划SHA均不退休原OPEN(@TempDir Path dir) throws Exception {
-        try(var f=DataSqlFixture.create()) {
+        try(var f=createFixture()) {
             setup(f);var sql=new JdbcTemplate(f.dataSource);var closed=new AtomicInteger();Path p=dir.resolve("plan.json");
             assertEquals(1,run(plan(dir.resolve("wrong-instance"),f.database),env(f.database),connection(f,"wrong-instance",closed)));
             assertEquals(1,run(plan(dir.resolve("wrong-database"),"wrong_database"),env(f.database),connection(f,INSTANCE,closed)));
@@ -157,7 +164,7 @@ class RecoverTradeAdmissionTest {
     }
 
     @Test void 无current入场的CLI计划固定SQL_NO_ADMISSION_显式apply只封闭未使用E不造APPLIED(@TempDir Path dir) throws Exception {
-        try(var f=DataSqlFixture.create()) {
+        try(var f=createFixture()) {
             setup(f,false);var sql=new JdbcTemplate(f.dataSource);var c=connection(f,INSTANCE,new AtomicInteger());
             byte[] state=sql.queryForObject("SELECT data FROM player_state WHERE player_id=1",byte[].class);
             long saved=sql.queryForObject("SELECT saved_epoch FROM player_state WHERE player_id=1",Long.class);
@@ -182,10 +189,10 @@ class RecoverTradeAdmissionTest {
     }
 
     @Test void 非回环精确维护目标可计划_改nonce与namespace均在首效果前拒绝(@TempDir Path dir) throws Exception {
-        try(var f=DataSqlFixture.create()) {
+        try(var f=createFixture()) {
             setup(f);var sql=new JdbcTemplate(f.dataSource);
             String address="maintenance-db.example:3306";
-            sql.update("UPDATE maintenance_recovery_target SET physical_addr=?",address.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            f.schemaJdbc().update("UPDATE maintenance_recovery_target SET physical_addr=?",address.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
             var remote=new java.util.HashMap<>(env(f.database));remote.put("GAME_TRADE_RECOVERY_JDBC","jdbc:mysql://"+address+"/"+f.database);
             var c=connection(f,INSTANCE,new AtomicInteger());Path p=dir.resolve("remote-plan.json");
             assertEquals(0,run(plan(p,f.database),remote,c));
@@ -205,16 +212,16 @@ class RecoverTradeAdmissionTest {
     }
 
     @Test void 只有debug标记不授维护权_事务连接换实例拒绝_旧计划不能绕过新闸(@TempDir Path dir) throws Exception {
-        try(var f=DataSqlFixture.create()) {
+        try(var f=createFixture()) {
             setup(f);var sql=new JdbcTemplate(f.dataSource);Path p=dir.resolve("plan.json");
-            sql.execute("DROP TABLE maintenance_recovery_target");
-            sql.execute("CREATE TABLE debug_import_local_target(marker VARBINARY(32))");
-            sql.update("INSERT INTO debug_import_local_target VALUES(?)",NONCE.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            f.schemaJdbc().execute("DROP TABLE maintenance_recovery_target");
+            f.schemaJdbc().execute("CREATE TABLE debug_import_local_target(marker VARBINARY(32))");
+            f.schemaJdbc().update("INSERT INTO debug_import_local_target VALUES(?)",NONCE.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
             assertEquals(1,run(plan(p,f.database),env(f.database),connection(f,INSTANCE,new AtomicInteger())));
             assertFalse(Files.exists(p));
             assertEquals(1,sql.queryForObject("SELECT COUNT(*) FROM player_final_save WHERE owner_epoch=1",Integer.class));
         }
-        try(var f=DataSqlFixture.create()) {
+        try(var f=createFixture()) {
             setup(f);var reads=new AtomicInteger();var c=new RecoverTradeAdmission.Connections() {
                 public DataSource open(String url,String user,String password){return f.dataSource;}
                 public String identity(java.sql.Connection ignored){return reads.incrementAndGet()==1?INSTANCE:"different-instance";}

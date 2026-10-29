@@ -29,8 +29,9 @@ class AuditFallbackReplayNamespaceTest {
     private final ByteArrayOutputStream err = new ByteArrayOutputStream();
 
     private int run(List<String> argv, Map<String, String> env) {
-        return AuditFallbackReplay.run(argv, env, new PrintStream(out, true, StandardCharsets.UTF_8),
-                new PrintStream(err, true, StandardCharsets.UTF_8));
+        // 本类只验证真实库名与建表前拒绝，连接外部依赖使用H2；正式入口仍自行取得NORMAL资格。
+        return AuditFallbackReplay.run(argv, env, Map.of(), new PrintStream(out, true, StandardCharsets.UTF_8),
+                new PrintStream(err, true, StandardCharsets.UTF_8), (url, variables) -> DriverManager.getConnection(url));
     }
 
     private String err() {

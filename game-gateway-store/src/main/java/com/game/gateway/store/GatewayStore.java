@@ -112,7 +112,7 @@ public final class GatewayStore {
     }
 
     private static void checkZone(ZoneRow zone) {
-        if (zone.zoneId() <= 0) {
+        if (zone.zoneId() == 0) {
             throw new IllegalArgumentException("zone_id 必须大于 0");
         }
         if (zone.name() == null || zone.name().isBlank() || tooLong(zone.name(), NAME_MAX) || hasControl(zone.name())) {
@@ -141,7 +141,7 @@ public final class GatewayStore {
 
     /** 加入（幂等，备注以最后一次为准）。返回库里的那一行。 */
     public WhitelistRow addWhitelist(int zoneId, String account, String note) {
-        if (zoneId <= 0) {
+        if (zoneId == 0) {
             throw new IllegalArgumentException("zone_id 必须大于 0");
         }
         if (account == null || account.isBlank() || tooLong(account, ACCOUNT_MAX) || hasControl(account)) {

@@ -71,4 +71,54 @@ class OfficialOrderOwnershipTest {
             assertEquals(0,f.count("commerce_delivery_receipt"));
         }
     }
+    @Test void 原身份Schema缺列使启动和付款明确失败且不留下付款副作用() {
+        try (var f = new MockPaymentTestDatabase()) {
+            f.sku(1, 5, 100);
+            var order = f.store.create("91", create("broken-schema-owner", ACCOUNT, REVISION));
+            f.schemaJdbc.execute("DROP INDEX idx_official_owner ON commerce_official_owner");
+            f.schemaJdbc.execute("ALTER TABLE commerce_official_owner DROP COLUMN buyer_owner_revision");
+            var schemaFailure = assertThrows(java.sql.SQLException.class,
+                    () -> new MallSchemaVerifier(f.source, f.props).verify());
+            assertTrue(schemaFailure.getSQLState().startsWith("42"));
+            assertThrows(org.springframework.dao.DataAccessException.class, () -> f.store.recordTrustedPayment(
+                    new MallApi.Payment(order.orderId(), "test", "broken-schema-payment", 100, "CNY")));
+            assertEquals(0, f.count("commerce_payment_receipt"));
+            assertEquals(0, f.count("commerce_delivery_intent"));
+            assertEquals(5, f.value("pms_sku_stock", "stock"));
+            assertEquals(1, f.value("pms_sku_stock", "lock_stock"));
+        }
+    }
+
+    @Test void 持久原修订损坏不得补权_付款交付整体拒绝且原件不变() {
+        try (var f = new MockPaymentTestDatabase()) {
+            f.sku(1, 5, 100);
+            var order = f.store.create("91", create("corrupt-stored-owner", ACCOUNT, REVISION));
+            for (String revision : new String[]{"", "0", "01", "+1", "-1", "18446744073709551616"}) {
+                byte[] invalid = revision.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                assertEquals(1, f.schemaJdbc.update("UPDATE commerce_official_owner SET buyer_owner_revision=? WHERE order_sn=?",
+                        invalid, order.orderId()));
+                assertEquals(503, assertThrows(MallException.class, () -> f.store.get("91", owned(order.orderId()))).status());
+                assertEquals(503, assertThrows(MallException.class, () -> f.store.recordTrustedPayment(
+                        new MallApi.Payment(order.orderId(), "test", "corrupt-owner-payment", 100, "CNY"))).status());
+                assertArrayEquals(invalid, f.jdbc.queryForObject("SELECT buyer_owner_revision FROM commerce_official_owner WHERE order_sn=?",
+                        byte[].class, order.orderId()));
+                assertEquals(0, f.count("commerce_payment_receipt")); assertEquals(0, f.count("commerce_delivery_intent"));
+                assertEquals(5, f.value("pms_sku_stock", "stock")); assertEquals(1, f.value("pms_sku_stock", "lock_stock"));
+            }
+            f.schemaJdbc.update("UPDATE commerce_official_owner SET buyer_owner_revision=? WHERE order_sn=?",
+                    REVISION.getBytes(java.nio.charset.StandardCharsets.US_ASCII), order.orderId());
+            f.store.recordTrustedPayment(new MallApi.Payment(order.orderId(), "test", "repaired-owner-payment", 100, "CNY"));
+            f.schemaJdbc.update("UPDATE commerce_official_owner SET buyer_owner_revision=? WHERE order_sn=?",
+                    "01".getBytes(java.nio.charset.StandardCharsets.US_ASCII), order.orderId());
+            var delivery = new DeliveryStore(f.jdbc, f.manager, f.props, com.game.common.RunMode.TEST);
+            assertEquals(503, assertThrows(MallException.class, () -> delivery.poll(20)).status());
+            assertArrayEquals("01".getBytes(java.nio.charset.StandardCharsets.US_ASCII),
+                    f.jdbc.queryForObject("SELECT buyer_owner_revision FROM commerce_official_owner WHERE order_sn=?", byte[].class, order.orderId()));
+            assertEquals(503, assertThrows(MallException.class, () -> delivery.receipt(
+                    new DeliveryApi.Receipt(order.orderId(), "101", "DELIVERED", "a".repeat(64)))).status());
+            assertArrayEquals("01".getBytes(java.nio.charset.StandardCharsets.US_ASCII),
+                    f.jdbc.queryForObject("SELECT buyer_owner_revision FROM commerce_official_owner WHERE order_sn=?", byte[].class, order.orderId()));
+            assertEquals(1, f.count("commerce_payment_receipt")); assertEquals(0, f.count("commerce_delivery_receipt"));
+        }
+    }
 }

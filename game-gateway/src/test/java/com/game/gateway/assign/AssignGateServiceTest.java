@@ -59,4 +59,26 @@ class AssignGateServiceTest {
         nanos.addAndGet(ZoneDirectory.TTL.toNanos());
         assertThat(service.assign(1).error()).isEqualTo("zone_closed");
     }
+
+    @Test
+    void 高位指定区不当缺省_零从令牌取区_错区仍拒绝且Assign零仍未知区() {
+        var directory = new ZoneDirectory(() -> List.of(
+                new ZoneRow(-1, "最大区", 0, 100, "", null, false, 0, 0, 0),
+                new ZoneRow(Integer.MIN_VALUE, "另一高位区", 0, 100, "", null, false, 0, 0, 0)), System::nanoTime);
+        var queue = mock(com.game.gateway.queue.LoginQueue.class);
+        var tokens = new com.game.gateway.queue.QueueTokens("unit-only-queue-key".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String id = com.game.gateway.queue.QueueTokens.newQueueId();
+        String token = tokens.sign(id, -1, 200);
+        org.mockito.Mockito.when(queue.lookup(-1, id)).thenReturn(new com.game.gateway.queue.LoginQueue.Waiting(2, 3));
+        var service = new AssignGateService(directory, gates, issuer,
+                new AssignGateService.Queueing(queue, null, tokens, 1000),
+                java.time.Clock.fixed(java.time.Instant.ofEpochSecond(100), java.time.ZoneOffset.UTC));
+        assertThat(service.queueStatus(0, token).code()).isEqualTo(100);
+        assertThat(service.queueStatus(-1, token).code()).isEqualTo(100);
+        assertThat(service.queueStatus(Integer.MIN_VALUE, token).error()).isEqualTo("queue_token_expired");
+        assertThat(service.assign(0).error()).isEqualTo("zone_not_found");
+        org.mockito.Mockito.verify(queue, org.mockito.Mockito.times(2)).lookup(-1, id);
+        org.mockito.Mockito.verify(queue, org.mockito.Mockito.never()).lookup(org.mockito.ArgumentMatchers.eq(Integer.MIN_VALUE), org.mockito.ArgumentMatchers.anyString());
+        verifyNoInteractions(gates, issuer);
+    }
 }

@@ -2,6 +2,7 @@ package com.game.gateway.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -68,5 +69,21 @@ class GatewayStoreTest {
         assertThatThrownBy(() -> store.upsertZone(new ZoneRow(1, "一区", 0, 5000, "", null, false, 0, 0, 0)))
                 .isInstanceOf(DeadlockLoserDataAccessException.class);
         verify(mapper, never()).upsertZone(any(), anyLong());
+    }
+
+    @Test
+    void uint32高位目录及白名单不按负数拒绝_零仍在副作用前拒绝() {
+        for (int bits : new int[] {Integer.MIN_VALUE, -1}) {
+            ZoneRow row = new ZoneRow(bits, "高位", 0, 5000, "", null, false, -1, 1000, 1000);
+            when(mapper.selectZone(bits)).thenReturn(row);
+            when(mapper.selectWhitelistEntry(bits, "a")).thenReturn(new WhitelistRow(bits, "a", ""));
+            assertThat(store.upsertZone(row)).isEqualTo(row);
+            assertThat(store.addWhitelist(bits, "a", "").zoneId()).isEqualTo(bits);
+        }
+        assertThatThrownBy(() -> store.upsertZone(new ZoneRow(0, "零", 0, 1, "", null, false, 0, 0, 0)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> store.addWhitelist(0, "a", "")).isInstanceOf(IllegalArgumentException.class);
+        verify(mapper, never()).selectZone(0);
+        verify(mapper, never()).upsertWhitelist(eq(0), anyString(), anyString());
     }
 }

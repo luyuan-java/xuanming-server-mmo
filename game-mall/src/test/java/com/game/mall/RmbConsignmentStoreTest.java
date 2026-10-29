@@ -146,7 +146,7 @@ class RmbConsignmentStoreTest {
     @Test void 并发提现不重复分配_同请求重放_本地出款原件与原金额唯一绑定() throws Exception {
         try (var f = new Fixture()) {
             f.earned("1001", 101); f.clock.add(1_000);
-            var outcomes = parallel(() -> outcome(() -> f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "withdraw-race-001", 70))),
+            var outcomes = parallel(f.db, () -> outcome(() -> f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "withdraw-race-001", 70))),
                     () -> outcome(() -> f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "withdraw-race-002", 70))));
             assertEquals(List.of(200, 409), outcomes.stream().map(Outcome::status).sorted().toList());
             var winner = outcomes.stream().filter(value -> value.status() == 200).findFirst().orElseThrow().withdrawal();
@@ -280,7 +280,7 @@ class RmbConsignmentStoreTest {
             f.db.sku(1, 5, 125);
             var original = f.orders.create("1", new MallApi.CreateOrder("migration-official-order", 1, 2, "fixture-account", "1"));
             for (String table : List.of("commerce_official_owner", "commerce_mock_payout", "commerce_consignment_return", "commerce_withdrawal_receipt", "commerce_withdrawal_allocation", "commerce_withdrawal", "commerce_seller_income", "commerce_seller_guard", "commerce_consignment_order", "commerce_consignment")) {
-                f.db.jdbc.execute("DROP TABLE " + table);
+                f.db.schemaJdbc.execute("DROP TABLE " + table);
             }
             assertThrows(Exception.class, () -> new MallSchemaVerifier(f.db.source, f.db.props).verify());
             f.db.migrate("db/migration/V5__rmb_consignment.sql");
@@ -324,20 +324,41 @@ class RmbConsignmentStoreTest {
     }
     private static byte[] ascii(String value) { return value.getBytes(StandardCharsets.US_ASCII); }
     private static void rejects(int status, Executable action) { assertEquals(status, assertThrows(MallException.class, action).status()); }
-    private static <T> List<T> parallel(Callable<T> first, Callable<T> second) throws Exception {
+    private static <T> List<T> parallel(MockPaymentTestDatabase fixture, Callable<T> first, Callable<T> second) throws Exception {
         var pool = Executors.newFixedThreadPool(2); var ready = new CountDownLatch(2); var start = new CountDownLatch(1);
         List<Future<T>> futures = new ArrayList<>(); List<T> results = new ArrayList<>(); List<Executable> errors = new ArrayList<>();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        Throwable primary = null;
         try {
+            fixture.trackActors(pool);
             for (var action : List.of(first, second)) { futures.add(pool.submit(() -> { ready.countDown(); if (!start.await(5, TimeUnit.SECONDS)) { throw new AssertionError("并发起跑超时"); } return action.call(); })); }
             assertTrue(ready.await(5, TimeUnit.SECONDS)); start.countDown();
             for (var future : futures) {
                 try { results.add(future.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)); }
-                catch (ExecutionException error) { errors.add(() -> { throw error.getCause(); }); }
-                catch (java.util.concurrent.TimeoutException error) { future.cancel(true); errors.add(() -> { throw error; }); }
+                catch (ExecutionException error) { if (MockPaymentTestDatabase.unknownActorFailure(error)) fixture.retainUnknownActors(error); errors.add(() -> { throw error.getCause(); }); }
+                catch (java.util.concurrent.TimeoutException error) { fixture.retainUnknownActors(error); future.cancel(true); errors.add(() -> { throw error; }); }
             }
             assertAll("所有Future由主线程收集", errors); return results;
-        } finally { start.countDown(); futures.forEach(future -> { if (!future.isDone()) { future.cancel(true); } }); pool.shutdownNow(); assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS)); }
+        } catch (Exception | Error failure) {
+            primary = failure;
+            if (MockPaymentTestDatabase.unknownActorFailure(failure)) fixture.retainUnknownActors(failure);
+            throw failure;
+        } finally {
+            start.countDown();
+            Throwable cleanup = null;
+            boolean interrupted = Thread.interrupted() || primary instanceof InterruptedException;
+            for (var future : futures) try { if (!future.isDone()) future.cancel(true); }
+            catch (RuntimeException | Error failure) { cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+            try { pool.shutdownNow(); } catch (RuntimeException | Error failure) { cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+            try { assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS)); }
+            catch (Exception | Error failure) { if (failure instanceof InterruptedException) interrupted = true; cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+            finally { if (interrupted) Thread.currentThread().interrupt(); }
+            if (cleanup != null) {
+                fixture.retainUnknownActors(cleanup);
+                if (primary != null) { if (cleanup != primary) primary.addSuppressed(cleanup); }
+                else MockPaymentTestDatabase.raiseFailure(cleanup);
+            }
+        }
     }
 
     private static final class MutableClock extends Clock {
@@ -347,6 +368,82 @@ class RmbConsignmentStoreTest {
         @Override public Clock withZone(ZoneId zone) { if (!ZoneOffset.UTC.equals(zone)) { throw new IllegalArgumentException("仅供本例UTC时钟"); } return this; }
         @Override public Instant instant() { return Instant.ofEpochMilli(now.get()); }
         @Override public long millis() { return now.get(); }
+    }
+    @Test void 两独立出款worker并发同一提现只提交原流水和原分配() throws Exception {
+        try (var f = new Fixture()) {
+            f.earned("8001", 101); f.clock.add(1_000);
+            var withdrawal = f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "two-worker-withdrawal", 70));
+            var second = new MockPayoutStore(f.db.jdbc, f.db.manager, f.db.props,
+                    f.provider.getBeanProvider(RmbConsignmentStore.class), f.clock, RunMode.TEST, () -> 0L);
+            var command = new MockPayoutStore.Pay(withdrawal.withdrawalId(), "two-worker-provider-request");
+            var results = parallel(f.db, () -> f.payouts.pay(command), () -> second.pay(command));
+            assertEquals(results.get(0), results.get(1));
+            assertEquals("PAID", results.get(0).state());
+            assertEquals(70, results.get(0).amountFen());
+            assertEquals(1, f.db.count("commerce_mock_payout"));
+            assertEquals(1, f.db.count("commerce_withdrawal_receipt"));
+            assertEquals(70, f.db.value("commerce_seller_income", "paid_fen"));
+            assertEquals(0, f.db.value("commerce_seller_income", "reserved_fen"));
+            assertEquals(1, f.db.jdbc.queryForObject("SELECT applied FROM commerce_mock_payout WHERE withdrawal_id=?",
+                    Integer.class, withdrawal.withdrawalId()));
+            assertEquals(results.get(0), second.pay(command));
+            assertEquals(1, f.db.count("commerce_mock_payout"));
+        }
+    }
+
+    @Test void 出款扫描真实SQL异常不前移_恢复后沿原流水结算一次() {
+        try (var f = new Fixture()) {
+            f.earned("8002", 101); f.clock.add(1_000);
+            var withdrawal = f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "scan-sql-withdrawal", 70));
+            var command = new MockPayoutStore.Pay(withdrawal.withdrawalId(), "scan-sql-provider-request");
+            // 提供方事实先独立提交，真实结算SQL因本owner的故障表名失败；不mock SQL或业务Store。
+            f.db.schemaJdbc.execute("ALTER TABLE commerce_seller_income RENAME TO commerce_seller_income_fault");
+            try { assertThrows(DataAccessException.class, () -> f.payouts.pay(command)); }
+            finally { f.db.schemaJdbc.execute("ALTER TABLE commerce_seller_income_fault RENAME TO commerce_seller_income"); }
+            byte[] original = f.db.jdbc.queryForObject("SELECT transaction_id FROM commerce_mock_payout WHERE withdrawal_id=?",
+                    byte[].class, withdrawal.withdrawalId());
+            assertEquals(0, f.db.jdbc.queryForObject("SELECT applied FROM commerce_mock_payout WHERE withdrawal_id=?",
+                    Integer.class, withdrawal.withdrawalId()));
+            assertEquals(0, f.db.count("commerce_withdrawal_receipt"));
+            var worker = new MockPayoutStore(f.db.jdbc, f.db.manager, f.db.props,
+                    f.provider.getBeanProvider(RmbConsignmentStore.class), f.clock, RunMode.TEST, () -> 0L);
+            f.db.schemaJdbc.execute("ALTER TABLE commerce_mock_payout RENAME TO commerce_mock_payout_fault");
+            try {
+                var failed = worker.reconcile();
+                assertEquals(0, failed.attempted()); assertEquals(0, failed.succeeded()); assertEquals(0, failed.failed());
+                assertEquals(1, failed.scanFailures()); assertFalse(failed.budgetExhausted());
+            } finally { f.db.schemaJdbc.execute("ALTER TABLE commerce_mock_payout_fault RENAME TO commerce_mock_payout"); }
+            var recovered = worker.reconcile();
+            assertEquals(1, recovered.attempted()); assertEquals(1, recovered.succeeded());
+            assertEquals(0, recovered.failed()); assertEquals(0, recovered.scanFailures());
+            assertArrayEquals(original, f.db.jdbc.queryForObject("SELECT transaction_id FROM commerce_mock_payout WHERE withdrawal_id=?",
+                    byte[].class, withdrawal.withdrawalId()));
+            assertEquals(1, f.db.count("commerce_mock_payout")); assertEquals(1, f.db.count("commerce_withdrawal_receipt"));
+            assertEquals(70, f.db.value("commerce_seller_income", "paid_fen"));
+            assertEquals(0, f.db.value("commerce_seller_income", "reserved_fen"));
+        }
+    }
+    @Test void 本地出款默认关闭且prod拒绝_缺列必须在启动验证失败() {
+        try (var f = new Fixture()) {
+            f.earned("8003", 101); f.clock.add(1_000);
+            var withdrawal = f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "disabled-payout-withdrawal", 70));
+            var command = new MockPayoutStore.Pay(withdrawal.withdrawalId(), "disabled-payout-request");
+            var disabled = new MallProperties(f.db.props.requireTidb(), MallTestDatabase.GATEWAY_KEY,
+                    MallTestDatabase.PAYMENT_KEY, null, null);
+            var closed = new MockPayoutStore(f.db.jdbc, f.db.manager, disabled,
+                    f.provider.getBeanProvider(RmbConsignmentStore.class), f.clock, RunMode.TEST, () -> 0L);
+            rejects(503, () -> closed.pay(command));
+            var production = new MockPayoutStore(f.db.jdbc, f.db.manager, f.db.props,
+                    f.provider.getBeanProvider(RmbConsignmentStore.class), f.clock, RunMode.PROD, () -> 0L);
+            rejects(503, () -> production.pay(command));
+            assertEquals(0, f.db.count("commerce_mock_payout")); assertEquals(0, f.db.count("commerce_withdrawal_receipt"));
+            assertEquals(70, f.db.value("commerce_seller_income", "reserved_fen"));
+            f.db.schemaJdbc.execute("DROP INDEX idx_mock_payout_pending ON commerce_mock_payout");
+            f.db.schemaJdbc.execute("ALTER TABLE commerce_mock_payout DROP COLUMN applied");
+            var schemaFailure = assertThrows(java.sql.SQLException.class,
+                    () -> new MallSchemaVerifier(f.db.source, f.db.props).verify());
+            assertTrue(schemaFailure.getSQLState().startsWith("42"));
+        }
     }
     private static final class Fixture implements AutoCloseable {
         final MockPaymentTestDatabase db = new MockPaymentTestDatabase();

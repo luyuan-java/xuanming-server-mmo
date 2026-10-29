@@ -11,7 +11,7 @@ import com.game.player.store.PlayerStore;
 import java.util.function.LongSupplier;
 import com.game.data.store.PersistedPlayerMapper;
 import com.game.data.store.PlayerSnapshotMapper;
-import com.game.data.store.PlayerSnapshotRow;
+import com.game.data.snapshot.PlayerSnapshotRow;
 import com.game.data.store.TransactionLogMapper;
 import com.game.pbmysql.PbMysql;
 import com.game.pbmysql.TableSchema;
@@ -225,6 +225,8 @@ public final class DataSqlFixture implements AutoCloseable {
 
     /** 仅SQL合区回归前置，不是完整P0-P9或真实非SQL证据。 */
     public void seedNormalFrozenSqlSeam(String run)throws Exception{if(authority==null)throw new SQLException("SQL seam冻结必须真实隔离fixture");authority.seedNormalFrozenSqlSeam(run);}
+    /** 仅显式SQL-seam释放；旧NORMAL池继续持有原来已封闭的boot。 */
+    public void releaseNormalFrozenSqlSeam(String run)throws Exception{if(authority==null)throw new SQLException("SQL seam释放必须真实隔离fixture");authority.releaseNormalFrozenSqlSeam(run);}
     public DataSource schemaDataSource(){if(h2Authority!=null)h2Authority.schemaSource();return schemaSource;}
     public Connection schemaConnection()throws SQLException{return schemaDataSource().getConnection();}
     /** 业务SQL观测使用normal，和tx()/MyBatis/PbMysql是同一个DataSource。 */

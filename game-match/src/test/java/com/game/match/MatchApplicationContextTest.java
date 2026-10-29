@@ -178,7 +178,7 @@ class MatchApplicationContextTest {
             QueueConfiguration.class, MatcherConfiguration.class, GatherConfiguration.class, PlacementConfiguration.class,
             ReissueConfiguration.class, RatingConfiguration.class, ChallengeConfiguration.class, PrecheckConfiguration.class,
             ActivityConfiguration.class, MatchTeamServiceImpl.class, MatchInternalServiceImpl.class,
-            DevRatingController.class, DevActivityBattleController.class,
+            DevRatingController.class, DevActivityBattleController.class, com.game.match.admin.MatchMaintenanceController.class,
             // 批次 6.5 观战：存储、163 + 观众 RPC + 在途口、164 + 开局钩子 + 清扫
             SpectateStoreConfiguration.class, WatchBattleConfiguration.class, WatchableConfiguration.class);
 

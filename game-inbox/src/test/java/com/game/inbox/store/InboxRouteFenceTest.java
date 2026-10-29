@@ -110,7 +110,7 @@ final class InboxRouteFenceTest {
                 memory.setUser("sa");memory.setPassword("");
                 memory.setURL("jdbc:h2:mem:inbox_route_"+UUID.randomUUID()+";MODE=MySQL;DB_CLOSE_DELAY=-1");
                 try { h2Authority=new H2Authority(memory);source=h2Authority.normalSource(); }
-                catch(Exception|Error failure){try{if(h2Authority!=null)h2Authority.seal();new org.springframework.jdbc.core.JdbcTemplate(memory).execute("SHUTDOWN");}catch(Exception|Error cleanup){failure.addSuppressed(cleanup);}throw failure;}
+                catch(Exception|Error failure){try{if(h2Authority!=null)h2Authority.seal();try(var cleanupConnection=memory.getConnection();var cleanupStatement=cleanupConnection.createStatement()){cleanupStatement.execute("SHUTDOWN");}}catch(Exception|Error cleanup){failure.addSuppressed(cleanup);}throw failure;}
             } else {
                 requireEndpoint(endpoint);
                 String password=System.getenv().getOrDefault("GAME_TEST_MYSQL_PASSWORD", "");

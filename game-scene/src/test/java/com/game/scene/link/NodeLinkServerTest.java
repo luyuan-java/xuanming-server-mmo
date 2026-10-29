@@ -22,7 +22,12 @@ class NodeLinkServerTest {
         ChannelDuplexHandler blocker=new ChannelDuplexHandler(){@Override public void channelActive(ChannelHandlerContext context)throws Exception{child.set(context.channel());accepted.countDown();super.channelActive(context);}@Override public void close(ChannelHandlerContext context,ChannelPromise promise){/* 显式挂起关闭，模拟尚未完成的实际IO；测试finally移除后正常清理。 */}};
         int port=server.start("127.0.0.1",0,()->blocker);
         try(Socket client=new Socket("127.0.0.1",port)){
-            assertThat(accepted.await(5,TimeUnit.SECONDS)).isTrue();assertThat(server.closeAndJoin(Duration.ofSeconds(1))).isFalse();assertThat(child.get().isOpen()).isTrue();
-        }finally{if(child.get()!=null)child.get().pipeline().remove(blocker);server.closeAndJoin(Duration.ofSeconds(6));server.shutdown();}
+            try {
+                assertThat(accepted.await(5,TimeUnit.SECONDS)).isTrue();assertThat(server.closeAndJoin(Duration.ofSeconds(1))).isFalse();assertThat(child.get().isOpen()).isTrue();
+            } finally {
+                // 先解除服务端关闭阻挡，再由Socket自动关闭；否则对端EOF会先销毁pipeline。
+                if(child.get()!=null)child.get().pipeline().remove(blocker);
+            }
+        }finally{server.closeAndJoin(Duration.ofSeconds(6));server.shutdown();}
     }
 }

@@ -1,5 +1,7 @@
 package com.game.gateway.zone;
 
+import com.game.common.zone.ZoneIds;
+
 import com.game.gateway.store.ZoneManualStatus;
 import com.game.gateway.store.ZoneRow;
 
@@ -16,12 +18,12 @@ import com.game.gateway.store.ZoneRow;
  * @param maintenanceMsg 维护文案，缺省空
  * @param openTime       PREVIEW 区的开放时刻（Unix 秒），缺省无
  */
-public record SeedZone(int zoneId, String name, ZoneManualStatus status, boolean recommended, Integer capacity,
+public record SeedZone(long zoneId, String name, ZoneManualStatus status, boolean recommended, Integer capacity,
                        Integer sortOrder, String maintenanceMsg, Long openTime) {
 
     public SeedZone {
-        if (zoneId <= 0) {
-            throw new IllegalArgumentException("game.gateway.seed-zones：区服号必须大于 0：zone_id=" + zoneId);
+        if (zoneId <= 0 || zoneId > ZoneIds.MAX) {
+            throw new IllegalArgumentException("game.gateway.seed-zones：区服号须在 1–4294967295：zone_id=" + zoneId);
         }
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("game.gateway.seed-zones：区服缺少名字：zone_id=" + zoneId);
@@ -36,6 +38,6 @@ public record SeedZone(int zoneId, String name, ZoneManualStatus status, boolean
     }
 
     public ZoneRow toRow() {
-        return new ZoneRow(zoneId, name, status.code(), capacity, maintenanceMsg, openTime, recommended, sortOrder, 0, 0);
+        return new ZoneRow(ZoneIds.requiredBits(zoneId), name, status.code(), capacity, maintenanceMsg, openTime, recommended, sortOrder, 0, 0);
     }
 }

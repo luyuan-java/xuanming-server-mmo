@@ -68,6 +68,12 @@ public final class AuditFallbackReplay {
     record Args(Path file, boolean dryRun, String urlEnv, String redis, int redisDatabase, String expectDatabase) {
     }
 
+    /** 外部连接接缝：同步打开连接，由run负责关闭；默认仍使用正式NORMAL工厂。 */
+    @FunctionalInterface
+    interface ConnectionOpener {
+        Connection open(String url, Map<String, String> env) throws SQLException;
+    }
+
     private AuditFallbackReplay() {
     }
 
@@ -86,6 +92,12 @@ public final class AuditFallbackReplay {
      * @param systemProperties 系统属性（部署命名空间 {@code -Dgame.namespace}）
      */
     static int run(List<String> argv, Map<String, String> env, Map<?, ?> systemProperties, PrintStream out, PrintStream err) {
+        return run(argv, env, systemProperties, out, err,
+                (url, variables) -> com.game.common.sql.AuthorityDataSource.fromEnvironment(url, variables).getConnection());
+    }
+
+    static int run(List<String> argv, Map<String, String> env, Map<?, ?> systemProperties, PrintStream out, PrintStream err,
+                   ConnectionOpener connections) {
         Args args;
         try {
             args = parse(argv);
@@ -124,7 +136,7 @@ public final class AuditFallbackReplay {
         }
         // 不起 Spring 的入口：按取到的命名空间自己构造键的出处（只用于节点号租约）
         RedisKeys keys = new RedisKeys(namespace);
-        try (Connection conn = com.game.common.sql.AuthorityDataSource.fromEnvironment(url,env).getConnection();
+        try (Connection conn = connections.open(url, env);
              LazyIds ids = new LazyIds(keys, args.redis(), args.redisDatabase(), env.get(REDIS_PASSWORD_ENV), err)) {
             // 建运维表（OpsTables.sync）之前核对库名：命名空间与库必须属于同一个部署
             String mismatch = NamespaceDatabaseCheck.verify(conn, args.expectDatabase(), namespace, EXPECT_DATABASE_HINT);

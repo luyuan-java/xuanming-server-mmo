@@ -261,7 +261,18 @@ class PbMysqlMysqlIntegrationTest {
             });
             // 新 code 列的默认值都是空串：唯一索引必须明确失败，不能把 DDL 的部分成功伪装成整轮成功。
             assertThatThrownBy(() -> v2.upgradeUnpublishedSchema(lease)).isInstanceOf(SQLException.class)
-                    .hasMessageContaining("补齐索引失败");
+                    .hasMessageContaining("补齐索引失败")
+                    .hasCauseInstanceOf(java.sql.SQLIntegrityConstraintViolationException.class)
+                    .satisfies(failure -> {
+                        SQLException wrapper = (SQLException) failure;
+                        SQLException duplicate = (SQLException) wrapper.getCause();
+                        assertThat(wrapper.getSQLState()).isEqualTo("23000");
+                        assertThat(wrapper.getErrorCode()).isEqualTo(1062);
+                        assertThat(wrapper.getSuppressed()).isEmpty();
+                        assertThat(duplicate.getSQLState()).isEqualTo("23000");
+                        assertThat(duplicate.getErrorCode()).isEqualTo(1062);
+                        assertThat(duplicate.getSuppressed()).isEmpty();
+                    });
             assertThatThrownBy(() -> {
                 try (var unexpected = lease.publish()) {
                     throw new AssertionError("索引升级未完成时不能发布");
@@ -653,11 +664,16 @@ class PbMysqlMysqlIntegrationTest {
             GolangTest key = GolangTest.newBuilder().setId(1).build();
             assertThatThrownBy(() -> db.findOneByPkForUpdate(setup, key)).isInstanceOf(IllegalStateException.class);
 
-            try (Connection holder = connect(); Connection other = connect()) {
+            try (Connection holder = connect();
+                 Connection other = fixture.normalDataSource(PARAMS + "&sessionVariables=innodb_lock_wait_timeout=1").getConnection()) {
                 holder.setAutoCommit(false);
                 assertThat(db.findOneByPkForUpdate(holder, key).orElseThrow().getIp()).isEqualTo("10.0.0.1");
-                try (Statement st = other.createStatement()) {
-                    st.execute("SET SESSION innodb_lock_wait_timeout = 1");
+                try (Statement st = other.createStatement();
+                     ResultSet timeout = st.executeQuery("SELECT @@SESSION.innodb_lock_wait_timeout")) {
+                    assertThat(timeout.next()).isTrue();
+                    assertThat(timeout.getLong(1)).isEqualTo(1);
+                    assertThat(timeout.wasNull()).isFalse();
+                    assertThat(timeout.next()).isFalse();
                 }
                 assertThatThrownBy(() -> db.updateFieldsByPk(other, key.toBuilder().setPort(2).build(), "port"))
                         .isInstanceOf(SQLException.class)

@@ -1,5 +1,9 @@
 package com.game.data.admin;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.game.common.zone.ZoneIdJsonDeserializer;
+import com.game.common.zone.ZoneIds;
+
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import com.game.api.proto.GateNodeInfo;
@@ -78,7 +82,7 @@ public class GateDrainAdminController {
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record DrainBody(Long zoneId, Long nodeId, Long ttlSec, Boolean force) {
+    public record DrainBody(@JsonDeserialize(using = ZoneIdJsonDeserializer.class) Long zoneId, Long nodeId, Long ttlSec, Boolean force) {
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
@@ -87,11 +91,12 @@ public class GateDrainAdminController {
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record DrainResult(int zoneId, int nodeId, String instanceId, boolean marked, Long drainingSince) {
+    public record DrainResult(long zoneId, int nodeId, String instanceId, boolean marked, Long drainingSince) {
     }
 
     @GetMapping(PATH + "/{zoneId}")
-    public List<GateView> list(@PathVariable("zoneId") int zoneId) {
+    public List<GateView> list(@PathVariable("zoneId") long zoneNumber) {
+        int zoneId = ZoneAdminController.requiredZone(zoneNumber);
         return redis(() -> {
             List<GateNodeInfo> list = gateDirectory.get().list(zoneId);
             List<Integer> nodes = list.stream().map(GateNodeInfo::getNodeId).toList();
@@ -115,16 +120,16 @@ public class GateDrainAdminController {
         if (body.zoneId() == null || body.nodeId() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 与 node_id 必填");
         }
-        if (body.zoneId() <= 0 || body.zoneId() > Integer.MAX_VALUE
+        if (body.zoneId() <= 0 || body.zoneId() > ZoneIds.MAX
                 || body.nodeId() <= 0 || body.nodeId() > Integer.MAX_VALUE) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id / node_id 须在 1–2147483647");
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 须在 1–4294967295；node_id 须在 1–2147483647");
         }
         long ttl = body.ttlSec() == null ? DEFAULT_TTL_SECONDS : body.ttlSec();
         if (ttl < minTtlSeconds || ttl > MAX_TTL_SECONDS) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "ttl_sec 须在 " + minTtlSeconds + "–" + MAX_TTL_SECONDS
                     + "（须长于 gateway 的排空 deadline）");
         }
-        int zoneId = body.zoneId().intValue();
+        int zoneId = ZoneIds.requiredBits(body.zoneId());
         int nodeId = body.nodeId().intValue();
         boolean force = Boolean.TRUE.equals(body.force());
         return redis(() -> {
@@ -150,14 +155,15 @@ public class GateDrainAdminController {
                         + "（不会过期），先 DELETE 再打");
             }
             GateDrainMarks.Mark mark = drainMarks.get().draining(zoneId, List.of(nodeId)).get(nodeId);
-            return new DrainResult(zoneId, nodeId, target.getInstanceId(), result == GateDrainMarks.MarkResult.MARKED,
+            return new DrainResult(Integer.toUnsignedLong(zoneId), nodeId, target.getInstanceId(), result == GateDrainMarks.MarkResult.MARKED,
                     mark == null ? null : mark.markedAtSec());
         });
     }
 
     @DeleteMapping(PATH + "/drain/{zoneId}/{nodeId}")
-    public ResponseEntity<Void> undrain(@PathVariable("zoneId") int zoneId, @PathVariable("nodeId") int nodeId,
+    public ResponseEntity<Void> undrain(@PathVariable("zoneId") long zoneNumber, @PathVariable("nodeId") int nodeId,
                                         HttpServletRequest request) {
+        int zoneId = ZoneAdminController.requiredZone(zoneNumber);
         redis(() -> {
             drainMarks.get().clear(zoneId, nodeId);
             return null;

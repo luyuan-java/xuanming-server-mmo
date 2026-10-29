@@ -51,6 +51,6 @@ public class ServerListController {
         String msg = status == ZoneStatus.MAINTENANCE || status == ZoneStatus.CLOSED ? zone.maintenanceMsg() : null;
         Long openTime = manual == ZoneManualStatus.PREVIEW ? zone.openTime() : null;
         boolean isNew = zone.createdAt() > nowMs - NEW_ZONE_WINDOW.toMillis();
-        return new ZoneInfo(zone.zoneId(), zone.name(), status, load, msg, openTime, isNew, zone.recommended());
+        return new ZoneInfo(Integer.toUnsignedLong(zone.zoneId()), zone.name(), status, load, msg, openTime, isNew, zone.recommended());
     }
 }

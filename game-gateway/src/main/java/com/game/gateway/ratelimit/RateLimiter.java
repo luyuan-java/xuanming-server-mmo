@@ -99,7 +99,7 @@ public final class RateLimiter {
         try {
             RateLimitStore.Admission admission = store.admit(
                     new RateLimitStore.Bucket(redisKeys.rateLimitIp(ip), settings.ipRps(), settings.ipBurst()),
-                    zoneBucket && zoneId > 0 ? new RateLimitStore.Bucket(redisKeys.rateLimitZone(zoneId),
+                    zoneBucket && zoneId != 0 ? new RateLimitStore.Bucket(redisKeys.rateLimitZone(zoneId),
                             settings.zoneRps(zoneId), settings.zoneBurst(zoneId)) : null);
             if (until != 0) {
                 bypassUntilMs.set(0);

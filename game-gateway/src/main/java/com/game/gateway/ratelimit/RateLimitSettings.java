@@ -1,5 +1,7 @@
 package com.game.gateway.ratelimit;
 
+import com.game.common.zone.ZoneIds;
+
 import java.util.List;
 import java.util.Map;
 
@@ -17,12 +19,20 @@ import java.util.Map;
  * @param wave              分波开放
  */
 public record RateLimitSettings(boolean enabled, Long zoneDefaultRps, Long zoneDefaultBurst,
-                                Map<Integer, ZoneLimit> zoneOverrides, Long ipRps, Long ipBurst, Long accountCooldownMs,
+                                Map<Long, ZoneLimit> zoneOverrides, Long ipRps, Long ipBurst, Long accountCooldownMs,
                                 List<String> trustedProxies, Wave wave) {
 
     public RateLimitSettings {
         zoneDefaultRps = positive(zoneDefaultRps, 500, "zone-default-rps");
         zoneDefaultBurst = positive(zoneDefaultBurst, 1000, "zone-default-burst");
+        if (zoneOverrides != null) {
+            for (Long zone : zoneOverrides.keySet()) {
+                if (zone == null) {
+                    throw new IllegalArgumentException("zone-overrides 的区号不能为 null");
+                }
+                ZoneIds.requiredBits(zone);
+            }
+        }
         zoneOverrides = zoneOverrides == null ? Map.of() : Map.copyOf(zoneOverrides);
         ipRps = positive(ipRps, 5, "ip-rps");
         ipBurst = positive(ipBurst, 20, "ip-burst");
@@ -40,12 +50,12 @@ public record RateLimitSettings(boolean enabled, Long zoneDefaultRps, Long zoneD
 
     /** 区的令牌桶参数（覆盖值非正时取缺省）。 */
     public long zoneRps(int zoneId) {
-        ZoneLimit o = zoneOverrides.get(zoneId);
+        ZoneLimit o = zoneOverrides.get(Integer.toUnsignedLong(zoneId));
         return o != null && o.rps() != null && o.rps() > 0 ? o.rps() : zoneDefaultRps;
     }
 
     public long zoneBurst(int zoneId) {
-        ZoneLimit o = zoneOverrides.get(zoneId);
+        ZoneLimit o = zoneOverrides.get(Integer.toUnsignedLong(zoneId));
         return o != null && o.burst() != null && o.burst() > 0 ? o.burst() : zoneDefaultBurst;
     }
 
@@ -71,6 +81,13 @@ public record RateLimitSettings(boolean enabled, Long zoneDefaultRps, Long zoneD
     public record WaveStep(long offsetSec, List<Long> allowZones) {
 
         public WaveStep {
+            if (allowZones != null) {
+                for (Long zone : allowZones) {
+                    if (zone == null || (zone != -1L && (zone <= 0 || zone > ZoneIds.MAX))) {
+                        throw new IllegalArgumentException("allow-zones 仅允许 -1（全部）或 1–4294967295");
+                    }
+                }
+            }
             allowZones = allowZones == null ? List.of() : List.copyOf(allowZones);
         }
     }

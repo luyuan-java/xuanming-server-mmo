@@ -205,9 +205,16 @@ class AssetOpFixMainTest {
     @Test
     void 配置读取_缺省读jar里的application_yaml_环境变量占位符照常解析() throws Exception {
         var env = AssetOpFixEnvironment.load(null);
+        // 仅给默认yaml的占位符解析提供局部测试输入，不读取真实部署主体或口令。
+        env.getPropertySources().addFirst(new org.springframework.core.env.MapPropertySource(
+                "assetopfix-test-sql-credentials", java.util.Map.of(
+                        "MMORPG_SQL_USERNAME", "assetopfix_test_user",
+                        "MMORPG_SQL_PASSWORD", "not-a-real-password")));
         assertThat(env.getProperty("spring.datasource.url")).contains("useAffectedRows=true")
                 .contains("innodb_lock_wait_timeout=1");
         assertThat(env.getProperty("game.redis.database", Integer.class)).isEqualTo(12);
         assertThat(env.getProperty("spring.datasource.username")).isNotBlank();
+        assertThat(env.getProperty("spring.datasource.username")).isEqualTo("assetopfix_test_user");
+        assertThat(env.getProperty("spring.datasource.password")).isEqualTo("not-a-real-password");
     }
 }

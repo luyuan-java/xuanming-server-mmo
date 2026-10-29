@@ -152,7 +152,7 @@ public final class AssignGateService {
         }
         if (queueing == null) {
             // 同基线顺序：带了区先过准入，再报排队关闭
-            if (zoneId > 0) {
+            if (zoneId != 0) {
                 AssignGateResponse rejected = admission(zoneId);
                 if (rejected != null) {
                     return rejected;
@@ -161,7 +161,7 @@ public final class AssignGateService {
             return AssignGateResponse.rejected(AssignGateResponse.CODE_QUEUE_EXPIRED, AssignGateResponse.ERR_QUEUE_DISABLED);
         }
         int zone = zoneId;
-        if (zone <= 0) {
+        if (zone == 0) {
             Optional<QueueTokens.Claims> claims = queueing.tokens().verify(queueToken, clock.millis() / 1000);
             if (claims.isEmpty()) {
                 return expired();

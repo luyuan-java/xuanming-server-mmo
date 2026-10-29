@@ -226,4 +226,16 @@ class LoginHttpServiceTest {
         assertThat(parsed).isEqualTo(new HttpLoginRequest(1, "robot_0001", "p", "access_token", "t", "d"));
         assertThat(json.readValue("{\"refresh_token\":\"x\"}", HttpRefreshTokenRequest.class).refreshToken()).isEqualTo("x");
     }
+
+    @Test
+    void 登录高位区正常查询目录_超uint32不触达上游() {
+        var high = new ZoneDirectory(() -> List.of(new ZoneRow(-1, "最大区", 0, 1, "", null, false, 0, 0, 0)), System::nanoTime);
+        var service = new LoginHttpService(login, high, new LoginHttpMetrics(meters));
+        when(login.login(any())).thenReturn(CompletableFuture.completedFuture(LoginResponse.newBuilder().build()));
+        assertThat(service.login(password(4294967295L)).join().code()).isZero();
+        verify(login).login(any());
+        org.mockito.Mockito.clearInvocations(login);
+        assertThat(service.login(password(4294967296L)).join().code()).isEqualTo(500);
+        verify(login, never()).login(any());
+    }
 }

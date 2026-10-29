@@ -1,5 +1,8 @@
 package com.game.gateway.assign;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.game.common.zone.ZoneIdJsonDeserializer;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 /**
@@ -11,5 +14,5 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
  * @param zoneId 目标区服；缺省为 0。mmorpg 里 0 表示「由服务端挑区」，本批未实现，按未知区服处理
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record AssignGateRequest(int zoneId, String account, String deviceId, String queueToken) {
+public record AssignGateRequest(@JsonDeserialize(using = ZoneIdJsonDeserializer.class) long zoneId, String account, String deviceId, String queueToken) {
 }

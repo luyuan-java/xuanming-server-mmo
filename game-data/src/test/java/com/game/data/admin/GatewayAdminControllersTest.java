@@ -129,4 +129,56 @@ class GatewayAdminControllersTest {
         mvc.perform(delete("/admin/whitelist/1/robot_0001")).andExpect(status().isNoContent());
         verify(store).removeWhitelist(1, "robot_0001");
     }
+
+    @Test
+    void 目录白名单三边界HTTP全操作_响应不输出负区号() throws Exception {
+        for (long value : new long[] {2147483647L, 2147483648L, 4294967295L}) {
+            int bits = (int) value;
+            ZoneRow row = new ZoneRow(bits, "高位", 0, 5000, "", null, false, -7, 10, 20);
+            when(store.zone(bits)).thenReturn(Optional.of(row));
+            when(store.zones()).thenReturn(List.of(row));
+            when(store.upsertZone(any())).thenReturn(row);
+            when(store.updateZone(eq(bits), any())).thenReturn(Optional.of(row));
+            when(store.setZoneStatus(eq(bits), any(), any())).thenReturn(Optional.of(row));
+            when(store.deleteZone(bits)).thenReturn(true);
+            when(store.addWhitelist(bits, "a", "n")).thenReturn(new WhitelistRow(bits, "a", "n"));
+            when(store.whitelist(bits)).thenReturn(List.of(new WhitelistRow(bits, "a", "n")));
+            mvc.perform(get("/admin/zones/" + value)).andExpect(status().isOk())
+                    .andExpect(jsonPath("$.zone_id").value(value));
+            mvc.perform(get("/admin/zones")).andExpect(jsonPath("$[0].zone_id").value(value));
+            mvc.perform(post("/admin/zones").contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"zone_id\":" + value + ",\"name\":\"高位\"}"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.zone_id").value(value));
+            mvc.perform(put("/admin/zones/" + value).contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"zone_id\":1,\"name\":\"路径\"}"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.zone_id").value(value));
+            mvc.perform(post("/admin/zones/" + value + "/maintenance")).andExpect(status().isOk());
+            mvc.perform(post("/admin/zones/" + value + "/open")).andExpect(status().isOk());
+            mvc.perform(delete("/admin/zones/" + value)).andExpect(status().isNoContent());
+            mvc.perform(post("/admin/whitelist").contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"zone_id\":" + value + ",\"account\":\"a\",\"note\":\"n\"}"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.zone_id").value(value));
+            mvc.perform(get("/admin/whitelist/" + value)).andExpect(jsonPath("$[0].zone_id").value(value));
+            mvc.perform(delete("/admin/whitelist/" + value + "/a")).andExpect(status().isNoContent());
+            verify(store).zone(bits);
+            verify(store).removeWhitelist(bits, "a");
+        }
+    }
+
+    @Test
+    void 运维zone的浮点负值及溢出请求在任何store调用前400() throws Exception {
+        for (String invalid : new String[] {"-1", "0", "-0.5", "4294967295.5", "4294967296"}) {
+            mvc.perform(post("/admin/zones").contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"zone_id\":" + invalid + ",\"name\":\"拒绝\"}"))
+                    .andExpect(status().isBadRequest());
+            mvc.perform(post("/admin/whitelist").contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"zone_id\":" + invalid + ",\"account\":\"a\"}"))
+                    .andExpect(status().isBadRequest());
+        }
+        for (String invalid : new String[] {"-1", "0", "4294967296", "4294967295.5"}) {
+            mvc.perform(get("/admin/zones/" + invalid)).andExpect(status().isBadRequest());
+            mvc.perform(delete("/admin/whitelist/" + invalid + "/a")).andExpect(status().isBadRequest());
+        }
+        org.mockito.Mockito.verifyNoInteractions(store);
+    }
 }

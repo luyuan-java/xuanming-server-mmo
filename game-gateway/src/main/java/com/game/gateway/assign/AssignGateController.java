@@ -1,5 +1,7 @@
 package com.game.gateway.assign;
 
+import com.game.common.zone.ZoneIds;
+
 import com.game.gateway.ratelimit.ClientIpResolver;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -27,7 +29,7 @@ public class AssignGateController {
 
     @PostMapping("/assign-gate")
     public AssignGateResponse assignGate(@RequestBody AssignGateRequest request, HttpServletRequest http) {
-        AssignGateResponse response = service.assign(request.zoneId(), request.queueToken(),
+        AssignGateResponse response = service.assign(ZoneIds.optionalBits(request.zoneId()), request.queueToken(),
                 ipResolver.resolve(http), request.account());
         metrics.record(response);
         return response;
@@ -36,7 +38,7 @@ public class AssignGateController {
     /** 排队轮询：形状同 assign-gate 的应答（100 继续排、0 带 gate 令牌、410 从 assign-gate 重来）。不过开服限流（同基线）。 */
     @PostMapping("/queue-status")
     public AssignGateResponse queueStatus(@RequestBody QueueStatusRequest request) {
-        AssignGateResponse response = service.queueStatus(request.zoneId(), request.queueToken());
+        AssignGateResponse response = service.queueStatus(ZoneIds.optionalBits(request.zoneId()), request.queueToken());
         metrics.recordQueueStatus(response);
         return response;
     }

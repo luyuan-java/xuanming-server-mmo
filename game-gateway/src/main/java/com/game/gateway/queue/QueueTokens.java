@@ -43,7 +43,7 @@ public final class QueueTokens {
     }
 
     public String sign(String queueId, int zoneId, long expireEpochSec) {
-        byte[] body = (VERSION + "." + queueId + "." + zoneId + "." + expireEpochSec).getBytes(StandardCharsets.US_ASCII);
+        byte[] body = (VERSION + "." + queueId + "." + Integer.toUnsignedString(zoneId) + "." + expireEpochSec).getBytes(StandardCharsets.US_ASCII);
         Base64.Encoder b64 = Base64.getUrlEncoder().withoutPadding();
         return b64.encodeToString(body) + "." + b64.encodeToString(hmac(key, body));
     }
@@ -76,9 +76,9 @@ public final class QueueTokens {
             return Optional.empty();
         }
         try {
-            int zoneId = Integer.parseInt(parts[2]);
+            int zoneId = Integer.parseUnsignedInt(parts[2]);
             long expire = Long.parseLong(parts[3]);
-            if (zoneId <= 0 || nowEpochSec > expire) {
+            if (zoneId == 0 || nowEpochSec > expire) {
                 return Optional.empty();
             }
             return Optional.of(new Claims(parts[1], zoneId, expire));

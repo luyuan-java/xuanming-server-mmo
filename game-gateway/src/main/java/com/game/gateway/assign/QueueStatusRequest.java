@@ -1,5 +1,8 @@
 package com.game.gateway.assign;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.game.common.zone.ZoneIdJsonDeserializer;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 /**
@@ -9,5 +12,5 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
  * @param zoneId     区（基线用来把轮询路由回签发令牌的 login 实例；Java 拿它做区服准入，没带就取令牌里的区）
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record QueueStatusRequest(String queueToken, int zoneId) {
+public record QueueStatusRequest(String queueToken, @JsonDeserialize(using = ZoneIdJsonDeserializer.class) long zoneId) {
 }

@@ -8,7 +8,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
@@ -27,77 +26,75 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties;
 import org.springframework.context.ConfigurableApplicationContext;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
-import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /** 显式启用的真实TiDB验证，随机namespace与库一一对应，仅销毁本类新建的专属库。 */
 @EnabledIfSystemProperty(named = "game.mall.tidb-test", matches = "true")
 class MallTiDbIntegrationTest {
     static final String DATABASE = "mallit" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
-    static final String JDBC_BASE = "jdbc:mysql://127.0.0.1:" + tiDbTestPort() + "/";
-    static final String ADMIN_URL = JDBC_BASE + "?connectTimeout=3000&socketTimeout=6000";
+    static String JDBC_BASE;
+    static com.game.common.sql.testing.AuthoritySqlFixture fixture;
     static ConfigurableApplicationContext context;
     static HikariDataSource pool;
     static JdbcTemplate jdbc;
     static MallOrderStore first;
     static MallOrderStore second;
-    static boolean created;
-
-    /** 只配置本机TiDB测试端口，非法数值必须在连接前失败。 */
-    private static int tiDbTestPort() {
-        int port = Integer.parseInt(System.getProperty("game.it.tidb.port", "4000"));
-        if (port < 1 || port > 65535)
-            throw new IllegalArgumentException("game.it.tidb.port必须在1..65535");
-        return port;
+    @org.springframework.boot.test.context.TestConfiguration(proxyBeanMethods = false)
+    static class OwnedAuthorityConfiguration {
+        @org.springframework.context.annotation.Bean
+        @org.springframework.context.annotation.Primary
+        com.game.common.sql.WriterAuthority mallOwnedWriterAuthority() { return fixture.writerBoot(); }
     }
+
     @BeforeAll
     static void start() throws Exception {
         assertThat(DATABASE).matches("mallit[a-z0-9]{20}");
-        try (Connection admin = DriverManager.getConnection(ADMIN_URL, "root", ""); var sql = admin.createStatement()) {
-            sql.execute("CREATE DATABASE `" + DATABASE + "`");
-            created = true;
-        }
         try {
-            DriverManagerDataSource migration = new DriverManagerDataSource(JDBC_BASE + DATABASE
-                    + "?connectTimeout=3000&socketTimeout=6000", "root", "");
-            new ResourceDatabasePopulator(new ClassPathResource("db/migration/V1__official_sku.sql")).execute(migration);
-            SpringApplication app = new SpringApplication(MallApplication.class);
-            app.setWebApplicationType(WebApplicationType.NONE);
+            var options = MockPaymentTestDatabase.ownedOptions("mallit");
+            JDBC_BASE = options.root().replaceAll("/$", "") + "/";
+            fixture = MockPaymentTestDatabase.createOwned(options, MallTestDatabase.properties(true),
+                    GameNamespace.of(DATABASE));
+            SpringApplication app = new SpringApplication(MallApplication.class, OwnedAuthorityConfiguration.class);
+            app.setWebApplicationType(WebApplicationType.SERVLET);
             context = app.run("--game.namespace=" + DATABASE, "--game.run-mode=prod", "--game.mall.require-tidb=true",
-                    "--game.mall.allowed-payment-channels=test-channel",
+                    "--game.mall.allowed-payment-channels=test-channel", "--server.address=127.0.0.1", "--server.port=0",
                     "--game.mall.gateway-secret=" + MallTestDatabase.GATEWAY_KEY,
                     "--game.mall.payment-secret=" + MallTestDatabase.PAYMENT_KEY,
-                    "--spring.datasource.url=" + JDBC_BASE + DATABASE,
-                    "--spring.datasource.username=root", "--spring.datasource.password=", "--spring.sql.init.mode=never");
+                    "--spring.datasource.url=" + fixture.jdbcUrl(""),
+                    "--spring.datasource.username=" + fixture.normalUser(),
+                    "--spring.datasource.password=" + fixture.normalPassword(), "--spring.sql.init.mode=never");
             assertThat(context.getBean(GameNamespace.class).value()).isEqualTo(DATABASE);
             pool = context.getBean(HikariDataSource.class);
             jdbc = context.getBean(JdbcTemplate.class);
             first = context.getBean(MallOrderStore.class);
             second = new MallOrderStore(new JdbcTemplate(pool), new DataSourceTransactionManager(pool),
                     Clock.systemUTC(), context.getBean(MallProperties.class));
-        } catch (Exception | AssertionError failure) {
-            stop();
+        } catch (Exception | Error failure) {
+            try { stop(); } catch (Exception | Error cleanup) { if (cleanup != failure) failure.addSuppressed(cleanup); }
             throw failure;
         }
     }
 
     @AfterAll
     static void stop() throws Exception {
-        if (context != null) context.close();
-        if (created) {
-            if (!DATABASE.matches("mallit[a-z0-9]{20}")) throw new IllegalStateException("拒绝清理非本用例随机库");
-            try (Connection admin = DriverManager.getConnection(ADMIN_URL, "root", ""); var sql = admin.createStatement()) {
-                sql.execute("DROP DATABASE `" + DATABASE + "`");
-            }
-            created = false;
+        if (fixture != null) fixture.requireNormalActorsTerminated();
+        Throwable failure = null;
+        try { if (context != null) context.close(); }
+        catch (RuntimeException | Error cleanup) {
+            failure = cleanup;
+            if (fixture != null) fixture.retainUnknownActorOutcome(cleanup);
         }
+        finally { context = null; }
+        try { if (fixture != null) fixture.close(); }
+        catch (Exception | Error cleanup) {
+            failure = MockPaymentTestDatabase.combineFailure(failure, cleanup);
+        } finally { fixture = null; }
+        if (failure instanceof Error error) throw error;
+        if (failure instanceof Exception exception) throw exception;
     }
-
     @Test
     void 真TiDB装配核对namespace与每物理连接强读事务() throws Exception {
         DataSourceProperties properties = new DataSourceProperties();
@@ -108,6 +105,7 @@ class MallTiDbIntegrationTest {
         properties.setPassword(pool.getPassword());
         try (var overridden = (HikariDataSource) new MallDatabaseConfiguration()
                 .dataSource(properties, context.getBean(MallProperties.class), "prod")) {
+            MockPaymentTestDatabase.protectPool(overridden, fixture);
             List<Connection> held = new ArrayList<>();
             try {
                 for (int i = 0; i < 4; i++) {
@@ -131,23 +129,42 @@ class MallTiDbIntegrationTest {
             } finally { for (Connection connection : held) connection.close(); }
         }
         context.getBean(MallSchemaVerifier.class).verify();
+        assertThat(pool.getDataSource()).isInstanceOf(com.game.common.sql.AuthorityDataSource.class);
+        try (var connection = pool.getConnection(); var sql = connection.createStatement();
+             var actual = sql.executeQuery("SELECT CURRENT_USER()")) {
+            assertThat(actual.next()).isTrue();
+            assertThat(actual.getString(1)).isEqualTo(fixture.normalUser() + "@%");
+            assertThat(actual.next()).isFalse();
+        }
     }
 
     @ParameterizedTest @ValueSource(strings = {"weak", "snapshot"})
     void 弱一致或历史快照会话必须拒绝启动(String setting) throws Exception {
         String snapshot = currentSnapshot();
-        try (Connection connection = pool.getConnection(); var sql = connection.createStatement()) {
+        // 只在本owner的独立故障会话造弱读；NORMAL池仍保持正式强读与SQL门禁。
+        fixture.withOwnerSchema(connection -> {
+        try (var sql = connection.createStatement()) {
             sql.setQueryTimeout(5);
             var single = new SingleConnectionDataSource(connection, true);
+            Throwable verificationFailure = null;
             try {
                 sql.execute("weak".equals(setting) ? "SET SESSION tidb_read_consistency='weak'"
                         : "SET SESSION tidb_snapshot='" + snapshot + "'");
                 assertThatThrownBy(new MallSchemaVerifier(single, context.getBean(MallProperties.class))::verify)
                         .isInstanceOf(IllegalStateException.class);
+            } catch (Exception | Error failure) {
+                verificationFailure = failure;
+                throw failure;
             } finally {
-                sql.execute("SET SESSION tidb_snapshot='',tidb_read_consistency='strict'");
+                try { sql.execute("SET SESSION tidb_snapshot='',tidb_read_consistency='strict'"); }
+                catch (Exception | Error cleanup) {
+                    if (verificationFailure == null) throw cleanup;
+                    if (cleanup != verificationFailure) verificationFailure.addSuppressed(cleanup);
+                }
             }
         }
+        return null;
+        });
     }
 
     private static String currentSnapshot() {
@@ -160,12 +177,16 @@ class MallTiDbIntegrationTest {
     @Test
     void 两实例同请求并发只占一次且未付额度不会超发() throws Exception {
         sku(101, 50);
-        try (var workers = Executors.newFixedThreadPool(8)) {
+        var workers = Executors.newFixedThreadPool(8);
+        List<Future<?>> actors = new ArrayList<>();
+        Throwable actorFailure = null;
+        try {
+            fixture.trackNormalActors(workers);
             CountDownLatch start = new CountDownLatch(1);
             List<Future<MallApi.Order>> replies = new ArrayList<>();
             for (int i = 0; i < 16; i++) {
                 MallOrderStore service = i % 2 == 0 ? first : second;
-                replies.add(workers.submit(() -> { assertThat(start.await(5, TimeUnit.SECONDS)).isTrue(); return service.create("18446744073709551615", new MallApi.CreateOrder("tidb-same-001", 101, 1, "fixture-account", "1")); }));
+                replies.add(submitTracked(workers, actors, () -> { assertThat(start.await(5, TimeUnit.SECONDS)).isTrue(); return service.create("18446744073709551615", new MallApi.CreateOrder("tidb-same-001", 101, 1, "fixture-account", "1")); }));
             }
             start.countDown();
             String id = replies.getFirst().get(15, TimeUnit.SECONDS).orderId();
@@ -175,7 +196,7 @@ class MallTiDbIntegrationTest {
             List<Future<Boolean>> capped = new ArrayList<>();
             for (int i = 0; i < 12; i++) {
                 int index = i;
-                capped.add(workers.submit(() -> { assertThat(capStart.await(5, TimeUnit.SECONDS)).isTrue(); try {
+                capped.add(submitTracked(workers, actors, () -> { assertThat(capStart.await(5, TimeUnit.SECONDS)).isTrue(); try {
                     (index % 2 == 0 ? first : second).create("123", new MallApi.CreateOrder("tidb-cap-00" + index, 101, 1, "fixture-account", "1")); return true;
                 } catch (MallException failure) { assertThat(failure.status()).isEqualTo(429); return false; } }));
             }
@@ -184,20 +205,28 @@ class MallTiDbIntegrationTest {
             for (var reply : capped) if (reply.get(15, TimeUnit.SECONDS)) success++;
             assertThat(success).isEqualTo(5);
             assertThat(stock(101, "lock_stock")).isEqualTo(6);
-        }
+        } catch (Exception | Error failure) {
+            actorFailure = failure;
+            if (MockPaymentTestDatabase.unknownActorFailure(failure)) fixture.retainUnknownActorOutcome(failure);
+            throw failure;
+        } finally { finishMallActors(workers, actors, actorFailure); }
     }
 
     @Test
     void 真事务付款取消竞争_收据重放_失败回滚() throws Exception {
         sku(102, 20);
-        try (var workers = Executors.newFixedThreadPool(2)) {
+        var workers = Executors.newFixedThreadPool(2);
+        List<Future<?>> actors = new ArrayList<>();
+        Throwable actorFailure = null;
+        try {
+            fixture.trackNormalActors(workers);
             for (int i = 0; i < 6; i++) {
                 String buyer = Integer.toString(200 + i);
                 MallApi.Order order = first.create(buyer, new MallApi.CreateOrder("tidb-race-00" + i, 102, 1, "fixture-account", "1"));
                 CountDownLatch start = new CountDownLatch(1);
                 String transaction = "tidb-race-pay-" + i;
-                var paid = workers.submit(() -> compete(start, () -> first.recordTrustedPayment(payment(order, transaction))));
-                var cancelled = workers.submit(() -> compete(start, () -> second.cancel(buyer, owned(order.orderId()))));
+                var paid = submitTracked(workers, actors, () -> compete(start, () -> first.recordTrustedPayment(payment(order, transaction))));
+                var cancelled = submitTracked(workers, actors, () -> compete(start, () -> second.cancel(buyer, owned(order.orderId()))));
                 start.countDown();
                 assertThat(paid.get(15, TimeUnit.SECONDS)).isTrue();
                 boolean cancelledFirst=cancelled.get(15,TimeUnit.SECONDS);
@@ -208,7 +237,11 @@ class MallTiDbIntegrationTest {
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_delivery_intent WHERE order_sn=?", Integer.class, order.orderId())).isEqualTo(cancelledFirst?0:1);
                 assertThat(second.recordTrustedPayment(payment(order, transaction))).isEqualTo(actual);
             }
-        }
+        } catch (Exception | Error failure) {
+            actorFailure = failure;
+            if (MockPaymentTestDatabase.unknownActorFailure(failure)) fixture.retainUnknownActorOutcome(failure);
+            throw failure;
+        } finally { finishMallActors(workers, actors, actorFailure); }
         assertThat(stock(102, "lock_stock")).isZero();
         MallApi.Order rollback = first.create("300", new MallApi.CreateOrder("tidb-rollback", 102, 1, "fixture-account", "1"));
         jdbc.update("INSERT INTO commerce_delivery_intent(order_sn,buyer_id,sku_id,quantity,status,created_ms) VALUES (?,'300',102,1,'PENDING',0)", rollback.orderId());
@@ -228,6 +261,10 @@ class MallTiDbIntegrationTest {
         long now = System.currentTimeMillis();
         String nonce = UUID.randomUUID().toString();
         firstNonce.claim("gateway", nonce, now);
+        String upper = "A" + nonce, lower = "a" + nonce;
+        firstNonce.claim("gateway", upper, now); otherNonce.claim("gateway", lower, now);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_request_nonce WHERE caller_role='gateway' AND nonce IN (?,?)",
+                Integer.class, upper.getBytes(StandardCharsets.US_ASCII), lower.getBytes(StandardCharsets.US_ASCII))).isEqualTo(2);
         assertThatThrownBy(() -> otherNonce.claim("gateway", nonce, now)).isInstanceOfSatisfying(MallException.class, failure -> assertThat(failure.status()).isEqualTo(409));
         assertThatThrownBy(() -> otherNonce.claim("gateway", UUID.randomUUID().toString(), now - 600_000)).isInstanceOfSatisfying(MallException.class, failure -> assertThat(failure.status()).isEqualTo(401));
         assertThatThrownBy(() -> otherNonce.claim("gateway", UUID.randomUUID().toString(), now + 600_000)).isInstanceOfSatisfying(MallException.class, failure -> assertThat(failure.status()).isEqualTo(401));
@@ -338,6 +375,155 @@ class MallTiDbIntegrationTest {
                     .isInstanceOfSatisfying(MallException.class, failure -> assertThat(failure.status()).isEqualTo(400));
     }
 
+    @Test
+    void 不同买家竞争最后库存仅一笔成功_失败事务不留订单() throws Exception {
+        sku(99001, 1);
+        var childrenBefore = orderWriteCounts();
+        var workers = Executors.newFixedThreadPool(2);
+        List<Future<?>> actors = new ArrayList<>();
+        Throwable actorFailure = null;
+        try {
+            fixture.trackNormalActors(workers);
+            var start = new CountDownLatch(1);
+            var left = submitTracked(workers, actors, () -> compete(start, () -> first.create("99001",
+                    new MallApi.CreateOrder("last-stock-left", 99001, 1, "left-account", "1"))));
+            var right = submitTracked(workers, actors, () -> compete(start, () -> second.create("99002",
+                    new MallApi.CreateOrder("last-stock-right", 99001, 1, "right-account", "1"))));
+            start.countDown();
+            assertThat(List.of(left.get(15, TimeUnit.SECONDS), right.get(15, TimeUnit.SECONDS)))
+                    .containsExactlyInAnyOrder(true, false);
+            assertThat(stock(99001, "stock")).isEqualTo(1);
+            assertThat(stock(99001, "lock_stock")).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM oms_order WHERE sku_id=99001", Integer.class)).isEqualTo(1);
+            String winner = jdbc.queryForObject("SELECT order_sn FROM oms_order WHERE sku_id=99001", String.class);
+            boolean leftWon = left.get(0, TimeUnit.NANOSECONDS);
+            String buyer = leftWon ? "99001" : "99002", account = leftWon ? "left-account" : "right-account";
+            assertThat(jdbc.queryForObject("SELECT buyer_id FROM oms_order WHERE order_sn=?", String.class, winner)).isEqualTo(buyer);
+            assertThat(jdbc.queryForObject("SELECT buyer_account FROM commerce_official_owner WHERE order_sn=?", byte[].class, winner))
+                    .containsExactly(account.getBytes(StandardCharsets.UTF_8));
+            assertThat(jdbc.queryForObject("SELECT buyer_owner_revision FROM commerce_official_owner WHERE order_sn=?", byte[].class, winner))
+                    .containsExactly("1".getBytes(StandardCharsets.US_ASCII));
+            var item = jdbc.queryForMap("SELECT product_id,product_sku_id,product_sku_code,product_quantity,product_price_minor FROM oms_order_item WHERE order_sn=?", winner);
+            assertThat(((Number)item.get("product_id")).longValue()).isEqualTo(99001);
+            assertThat(((Number)item.get("product_sku_id")).longValue()).isEqualTo(99001);
+            assertThat(item.get("product_sku_code")).isEqualTo("tidb-99001");
+            assertThat(((Number)item.get("product_quantity")).intValue()).isEqualTo(1);
+            assertThat(((Number)item.get("product_price_minor")).longValue()).isEqualTo(1250);
+            var grant = jdbc.queryForMap("SELECT item_config_id,count_per_unit,title FROM commerce_order_grant WHERE order_sn=?", winner);
+            assertThat(((Number)grant.get("item_config_id")).intValue()).isEqualTo(10);
+            assertThat(((Number)grant.get("count_per_unit")).intValue()).isEqualTo(1);
+            assertThat(grant.get("title")).isEqualTo("玄铁");
+            var childrenAfter = orderWriteCounts();
+            for (String table : childrenBefore.keySet()) assertThat(childrenAfter.get(table)).as(table).isEqualTo(childrenBefore.get(table) + 1);
+        } catch (Exception | Error failure) {
+            actorFailure = failure;
+            if (MockPaymentTestDatabase.unknownActorFailure(failure)) fixture.retainUnknownActorOutcome(failure);
+            throw failure;
+        } finally { finishMallActors(workers, actors, actorFailure); }
+    }
+
+    @Test
+    void 无发物映射或交付数量越界拒绝且库存订单原子回滚() {
+        sku(99002, 10);
+        var childrenBefore = orderWriteCounts();
+        jdbc.update("DELETE FROM commerce_sku_grant WHERE sku_id=99002");
+        assertThatThrownBy(() -> first.create("99003", new MallApi.CreateOrder("no-grant-order", 99002, 1, "fixture-account", "1")))
+                .isInstanceOfSatisfying(MallException.class, failure -> assertThat(failure.status()).isEqualTo(409));
+        assertThat(stock(99002, "lock_stock")).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM oms_order WHERE sku_id=99002", Integer.class)).isZero();
+        assertThat(orderWriteCounts()).isEqualTo(childrenBefore);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_buyer_guard WHERE buyer_id='99003'", Integer.class)).isEqualTo(1);
+        jdbc.update("INSERT INTO commerce_sku_grant(sku_id,item_config_id,count_per_unit,title) VALUES(99002,10,4096,'越界夹具')");
+        assertThatThrownBy(() -> second.create("99003", new MallApi.CreateOrder("overflow-grant-order", 99002, 2, "fixture-account", "1")))
+                .isInstanceOfSatisfying(MallException.class, failure -> assertThat(failure.status()).isEqualTo(409));
+        assertThat(stock(99002, "stock")).isEqualTo(10);
+        assertThat(stock(99002, "lock_stock")).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM oms_order WHERE sku_id=99002", Integer.class)).isZero();
+        assertThat(orderWriteCounts()).isEqualTo(childrenBefore);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_buyer_guard WHERE buyer_id='99003'", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void 真实签名HTTP经同ownerNORMAL提交订单和付款_未冒游戏到账() throws Exception {
+        sku(99003, 3);
+        var json = context.getBean(com.fasterxml.jackson.databind.ObjectMapper.class);
+        String buyer = "99004";
+        String body = json.writeValueAsString(new MallApi.CreateOrder("real-tidb-http-order", 99003, 2, "fixture-account", "1"));
+        var request = signedHttp("gateway", buyer, "/api/orders", body, UUID.randomUUID().toString());
+        try (var client = java.net.http.HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(3)).build()) {
+        var response = client.send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).isEqualTo(200);
+        var order = json.readTree(response.body());
+        String id = order.get("orderId").asText();
+        assertThat(order.get("buyerId").asText()).isEqualTo(buyer);
+        assertThat(order.get("amountMinor").asLong()).isEqualTo(2500);
+        assertThat(order.get("state").asText()).isEqualTo("AWAITING_PAYMENT");
+        assertThat(client.send(request, java.net.http.HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(409);
+        var replay = client.send(signedHttp("gateway", buyer, "/api/orders", body, UUID.randomUUID().toString()),
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+        assertThat(replay.statusCode()).isEqualTo(200);
+        assertThat(json.readTree(replay.body()).get("orderId").asText()).isEqualTo(id);
+        var payment = new MallApi.Payment(id, "test-channel", "real-tidb-http-payment", 2500, "CNY");
+        var forbidden = client.send(signedHttp("gateway", buyer, "/internal/payments", json.writeValueAsString(payment), UUID.randomUUID().toString()),
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+        assertThat(forbidden.statusCode()).isEqualTo(401);
+        var paid = client.send(signedHttp("payment", "payment-adapter", "/internal/payments", json.writeValueAsString(payment), UUID.randomUUID().toString()),
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+        assertThat(paid.statusCode()).isEqualTo(200);
+        assertThat(json.readTree(paid.body()).get("state").asText()).isEqualTo("DELIVERY_PENDING");
+        assertThat(first.get(buyer, owned(id)).state()).isEqualTo("DELIVERY_PENDING");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM oms_order WHERE sku_id=99003", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_payment_receipt WHERE order_sn=?", Integer.class, id)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_delivery_intent WHERE order_sn=?", Integer.class, id)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_delivery_receipt WHERE order_sn=?", Integer.class, id)).isZero();
+        assertThat(stock(99003, "stock")).isEqualTo(1);
+        assertThat(stock(99003, "lock_stock")).isZero();
+        } catch (Exception | Error failure) {
+            if (MockPaymentTestDatabase.unknownActorFailure(failure)) fixture.retainUnknownActorOutcome(failure);
+            throw failure;
+        }
+    }
+
+    /** 全表计数含孤儿子行；不以JOIN已回滚的父表掩盖错误残留。buyer_guard按正式契约独立预建。 */
+    private static java.util.Map<String,Integer> orderWriteCounts() {
+        var counts = new java.util.LinkedHashMap<String,Integer>();
+        for (String table : List.of("oms_order", "commerce_official_owner", "oms_order_item", "commerce_order_grant"))
+            counts.put(table, jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class));
+        return java.util.Map.copyOf(counts);
+    }
+
+    private static <T> Future<T> submitTracked(java.util.concurrent.ExecutorService executor, List<Future<?>> actors,
+                                             java.util.concurrent.Callable<T> command) {
+        Future<T> future = executor.submit(command); actors.add(future); return future;
+    }
+    private static void finishMallActors(java.util.concurrent.ExecutorService executor, List<Future<?>> actors,
+                                         Throwable primary) throws Exception {
+        Throwable cleanup = null;
+        boolean interrupted = Thread.interrupted() || primary instanceof InterruptedException;
+        for (var future : actors) try { if (!future.isDone()) future.cancel(true); }
+        catch (RuntimeException | Error failure) { cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+        try { executor.shutdownNow(); } catch (RuntimeException | Error failure) { cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+        try { assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).as("Mall actor须在原清理期限内终结").isTrue(); }
+        catch (Exception | Error failure) { if (failure instanceof InterruptedException) interrupted = true; cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+        finally { if (interrupted) Thread.currentThread().interrupt(); }
+        if (cleanup != null) {
+            fixture.retainUnknownActorOutcome(cleanup);
+            if (primary != null) { if (cleanup != primary) primary.addSuppressed(cleanup); }
+            else MockPaymentTestDatabase.raiseFailure(cleanup);
+        }
+    }
+
+    private static java.net.http.HttpRequest signedHttp(String role, String subject, String path, String body, String nonce) {
+        String timestamp = Long.toString(System.currentTimeMillis());
+        String secret = role.equals("payment") ? MallTestDatabase.PAYMENT_KEY : MallTestDatabase.GATEWAY_KEY;
+        String signature = MallAuthentication.sign(secret, role, subject, timestamp, nonce, "POST", path, body.getBytes(StandardCharsets.UTF_8));
+        int port = ((org.springframework.boot.web.context.WebServerApplicationContext) context).getWebServer().getPort();
+        return java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:" + port + path))
+                .timeout(java.time.Duration.ofSeconds(10)).header("Content-Type", "application/json")
+                .header("X-Commerce-Subject", subject).header("X-Commerce-Timestamp", timestamp)
+                .header("X-Commerce-Nonce", nonce).header("X-Commerce-Signature", signature)
+                .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body)).build();
+    }
     /** 仅为 SQL 扫描夹具写入已冻结的原意图，不声称经过真实付款或资产到账。 */
     private static void seedDelivery(String order, long created) {
         new TransactionTemplate(new DataSourceTransactionManager(pool)).executeWithoutResult(status -> {
@@ -360,4 +546,5 @@ class MallTiDbIntegrationTest {
         try { operation.run(); return true; }
         catch (MallException failure) { assertThat(failure.status()).isEqualTo(409); return false; }
     }
+
 }

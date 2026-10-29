@@ -1,5 +1,9 @@
 package com.game.data.admin;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.game.common.zone.ZoneIdJsonDeserializer;
+import com.game.common.zone.ZoneIds;
+
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import com.game.gateway.store.GatewayStore;
@@ -51,7 +55,7 @@ public class ZoneAdminController {
 
     /** 请求体（未给的列取缺省值：状态 0 OPEN、容量 5000、文案空、不推荐、排序 0）。 */
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record ZoneBody(Long zoneId, String name, Integer manualStatus, Integer capacity, String maintenanceMsg,
+    public record ZoneBody(@JsonDeserialize(using = ZoneIdJsonDeserializer.class) Long zoneId, String name, Integer manualStatus, Integer capacity, String maintenanceMsg,
                            Long openTime, Boolean recommended, Integer sortOrder) {
 
         ZoneRow toRow(int zoneId) {
@@ -67,11 +71,11 @@ public class ZoneAdminController {
 
     /** 应答（列名同表，snake_case）。 */
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record ZoneView(int zoneId, String name, int manualStatus, int capacity, String maintenanceMsg, Long openTime,
+    public record ZoneView(long zoneId, String name, int manualStatus, int capacity, String maintenanceMsg, Long openTime,
                            boolean recommended, int sortOrder, long createdAt, long updatedAt) {
 
         static ZoneView of(ZoneRow z) {
-            return new ZoneView(z.zoneId(), z.name(), z.manualStatus(), z.capacity(), z.maintenanceMsg(), z.openTime(),
+            return new ZoneView(Integer.toUnsignedLong(z.zoneId()), z.name(), z.manualStatus(), z.capacity(), z.maintenanceMsg(), z.openTime(),
                     z.recommended(), z.sortOrder(), z.createdAt(), z.updatedAt());
         }
     }
@@ -82,8 +86,8 @@ public class ZoneAdminController {
     }
 
     @GetMapping(PATH + "/{zoneId}")
-    public ResponseEntity<ZoneView> get(@PathVariable("zoneId") int zoneId) {
-        return okOrNotFound(store.zone(zoneId));
+    public ResponseEntity<ZoneView> get(@PathVariable("zoneId") long zoneId) {
+        return okOrNotFound(store.zone(requiredZone(zoneId)));
     }
 
     @PostMapping(PATH)
@@ -91,46 +95,46 @@ public class ZoneAdminController {
         if (body.zoneId() == null || body.name() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 与 name 必填");
         }
-        if (body.zoneId() <= 0 || body.zoneId() > Integer.MAX_VALUE) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 须在 1–2147483647");
+        if (body.zoneId() <= 0 || body.zoneId() > ZoneIds.MAX) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 须在 1–4294967295");
         }
-        ZoneRow stored = checked(() -> store.upsertZone(body.toRow(body.zoneId().intValue())));
-        audit.warn("zone upsert zone_id={} status={} operator={}", stored.zoneId(), stored.manualStatus(),
+        ZoneRow stored = checked(() -> store.upsertZone(body.toRow(ZoneIds.requiredBits(body.zoneId()))));
+        audit.warn("zone upsert zone_id={} status={} operator={}", Integer.toUnsignedLong(stored.zoneId()), stored.manualStatus(),
                 operator(request));
         return ZoneView.of(stored);
     }
 
     @PutMapping(PATH + "/{zoneId}")
-    public ResponseEntity<ZoneView> update(@PathVariable("zoneId") int zoneId, @RequestBody ZoneBody body,
+    public ResponseEntity<ZoneView> update(@PathVariable("zoneId") long zoneId, @RequestBody ZoneBody body,
                                            HttpServletRequest request) {
         if (body.name() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name 必填");
         }
-        Optional<ZoneRow> stored = checked(() -> store.updateZone(zoneId, body.toRow(zoneId)));
+        Optional<ZoneRow> stored = checked(() -> store.updateZone(requiredZone(zoneId), body.toRow(requiredZone(zoneId))));
         audit.warn("zone update zone_id={} found={} operator={}", zoneId, stored.isPresent(), operator(request));
         return okOrNotFound(stored);
     }
 
     @DeleteMapping(PATH + "/{zoneId}")
-    public ResponseEntity<Void> delete(@PathVariable("zoneId") int zoneId, HttpServletRequest request) {
-        boolean deleted = store.deleteZone(zoneId);
+    public ResponseEntity<Void> delete(@PathVariable("zoneId") long zoneId, HttpServletRequest request) {
+        boolean deleted = store.deleteZone(requiredZone(zoneId));
         audit.warn("zone delete zone_id={} deleted={} operator={}", zoneId, deleted, operator(request));
         return deleted ? ResponseEntity.noContent().build() : ResponseEntity.notFound().build();
     }
 
     @PostMapping(PATH + "/{zoneId}/maintenance")
-    public ResponseEntity<ZoneView> maintenance(@PathVariable("zoneId") int zoneId,
+    public ResponseEntity<ZoneView> maintenance(@PathVariable("zoneId") long zoneId,
                                                 @RequestBody(required = false) MaintenanceBody body,
                                                 HttpServletRequest request) {
         String msg = body == null ? null : body.maintenanceMsg();
-        Optional<ZoneRow> stored = checked(() -> store.setZoneStatus(zoneId, ZoneManualStatus.MAINTENANCE, msg));
+        Optional<ZoneRow> stored = checked(() -> store.setZoneStatus(requiredZone(zoneId), ZoneManualStatus.MAINTENANCE, msg));
         audit.warn("zone maintenance zone_id={} found={} operator={}", zoneId, stored.isPresent(), operator(request));
         return okOrNotFound(stored);
     }
 
     @PostMapping(PATH + "/{zoneId}/open")
-    public ResponseEntity<ZoneView> open(@PathVariable("zoneId") int zoneId, HttpServletRequest request) {
-        Optional<ZoneRow> stored = store.setZoneStatus(zoneId, ZoneManualStatus.OPEN, "");
+    public ResponseEntity<ZoneView> open(@PathVariable("zoneId") long zoneId, HttpServletRequest request) {
+        Optional<ZoneRow> stored = store.setZoneStatus(requiredZone(zoneId), ZoneManualStatus.OPEN, "");
         audit.warn("zone open zone_id={} found={} operator={}", zoneId, stored.isPresent(), operator(request));
         return okOrNotFound(stored);
     }
@@ -140,6 +144,10 @@ public class ZoneAdminController {
     }
 
     /** 存储层的参数校验失败回 400（带原因）。 */
+    static int requiredZone(long value) {
+        return checked(() -> ZoneIds.requiredBits(value));
+    }
+
     static <T> T checked(Supplier<T> call) {
         try {
             return call.get();

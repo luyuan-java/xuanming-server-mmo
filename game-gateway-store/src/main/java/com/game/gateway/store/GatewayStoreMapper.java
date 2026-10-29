@@ -1,6 +1,10 @@
 package com.game.gateway.store;
 
 import java.util.List;
+import org.apache.ibatis.annotations.Arg;
+import org.apache.ibatis.annotations.ConstructorArgs;
+import org.apache.ibatis.annotations.ResultMap;
+import org.apache.ibatis.annotations.Results;
 import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
@@ -16,19 +20,34 @@ import org.apache.ibatis.annotations.Update;
 @Mapper
 public interface GatewayStoreMapper {
 
+    String U32 = "typeHandler=com.game.gateway.store.UnsignedZoneIdTypeHandler";
+
     String ZONE_COLUMNS = "zone_id, name, manual_status, capacity, maintenance_msg, open_time, recommended, sort_order,"
             + " created_at, updated_at";
 
     // ------------------------------------------------------------------ 区服目录
 
+    @Results(id = "zoneRow")
+    @ConstructorArgs({
+            @Arg(column = "zone_id", javaType = int.class, typeHandler = UnsignedZoneIdTypeHandler.class, id = true),
+            @Arg(column = "name", javaType = String.class),
+            @Arg(column = "manual_status", javaType = int.class),
+            @Arg(column = "capacity", javaType = int.class),
+            @Arg(column = "maintenance_msg", javaType = String.class),
+            @Arg(column = "open_time", javaType = Long.class),
+            @Arg(column = "recommended", javaType = boolean.class),
+            @Arg(column = "sort_order", javaType = int.class),
+            @Arg(column = "created_at", javaType = long.class),
+            @Arg(column = "updated_at", javaType = long.class)})
     @Select("SELECT " + ZONE_COLUMNS + " FROM zone_config ORDER BY sort_order, zone_id")
     List<ZoneRow> selectZones();
 
-    @Select("SELECT " + ZONE_COLUMNS + " FROM zone_config WHERE zone_id = #{zoneId}")
+    @ResultMap("zoneRow")
+    @Select("SELECT " + ZONE_COLUMNS + " FROM zone_config WHERE zone_id = #{zoneId," + U32 + "}")
     ZoneRow selectZone(@Param("zoneId") int zoneId);
 
     /** 创建或整行覆盖业务列（保留 created_at），同基线 create 的 upsert 语义。 */
-    @Insert("INSERT INTO zone_config (" + ZONE_COLUMNS + ") VALUES (#{z.zoneId}, #{z.name}, #{z.manualStatus},"
+    @Insert("INSERT INTO zone_config (" + ZONE_COLUMNS + ") VALUES (#{z.zoneId," + U32 + "}, #{z.name}, #{z.manualStatus},"
             + " #{z.capacity}, #{z.maintenanceMsg}, #{z.openTime}, #{z.recommended}, #{z.sortOrder}, #{now}, #{now})"
             + " ON DUPLICATE KEY UPDATE name = VALUES(name), manual_status = VALUES(manual_status),"
             + " capacity = VALUES(capacity), maintenance_msg = VALUES(maintenance_msg), open_time = VALUES(open_time),"
@@ -36,37 +55,43 @@ public interface GatewayStoreMapper {
     int upsertZone(@Param("z") ZoneRow zone, @Param("now") long nowMs);
 
     /** 只在不存在时插入（启动时按配置播种，已有的不动）。 */
-    @Insert("INSERT IGNORE INTO zone_config (" + ZONE_COLUMNS + ") VALUES (#{z.zoneId}, #{z.name}, #{z.manualStatus},"
+    @Insert("INSERT IGNORE INTO zone_config (" + ZONE_COLUMNS + ") VALUES (#{z.zoneId," + U32 + "}, #{z.name}, #{z.manualStatus},"
             + " #{z.capacity}, #{z.maintenanceMsg}, #{z.openTime}, #{z.recommended}, #{z.sortOrder}, #{now}, #{now})")
     int insertZoneIfAbsent(@Param("z") ZoneRow zone, @Param("now") long nowMs);
 
     @Update("UPDATE zone_config SET name = #{z.name}, manual_status = #{z.manualStatus}, capacity = #{z.capacity},"
             + " maintenance_msg = #{z.maintenanceMsg}, open_time = #{z.openTime}, recommended = #{z.recommended},"
-            + " sort_order = #{z.sortOrder}, updated_at = #{now} WHERE zone_id = #{zoneId}")
+            + " sort_order = #{z.sortOrder}, updated_at = #{now} WHERE zone_id = #{zoneId," + U32 + "}")
     int updateZone(@Param("zoneId") int zoneId, @Param("z") ZoneRow values, @Param("now") long nowMs);
 
     /** 只改状态与（给了的）文案；文案为 null 保留原文案。 */
     @Update("UPDATE zone_config SET manual_status = #{status}, maintenance_msg = COALESCE(#{msg}, maintenance_msg),"
-            + " updated_at = #{now} WHERE zone_id = #{zoneId}")
+            + " updated_at = #{now} WHERE zone_id = #{zoneId," + U32 + "}")
     int updateZoneStatus(@Param("zoneId") int zoneId, @Param("status") int status, @Param("msg") String maintenanceMsg,
                          @Param("now") long nowMs);
 
-    @Delete("DELETE FROM zone_config WHERE zone_id = #{zoneId}")
+    @Delete("DELETE FROM zone_config WHERE zone_id = #{zoneId," + U32 + "}")
     int deleteZone(@Param("zoneId") int zoneId);
 
     // ------------------------------------------------------------------ 白名单
 
-    @Select("SELECT zone_id, account, note FROM zone_whitelist WHERE zone_id = #{zoneId} ORDER BY account")
+    @Results(id = "whitelistRow")
+    @ConstructorArgs({
+            @Arg(column = "zone_id", javaType = int.class, typeHandler = UnsignedZoneIdTypeHandler.class, id = true),
+            @Arg(column = "account", javaType = String.class, id = true),
+            @Arg(column = "note", javaType = String.class)})
+    @Select("SELECT zone_id, account, note FROM zone_whitelist WHERE zone_id = #{zoneId," + U32 + "} ORDER BY account")
     List<WhitelistRow> selectWhitelist(@Param("zoneId") int zoneId);
 
-    @Select("SELECT zone_id, account, note FROM zone_whitelist WHERE zone_id = #{zoneId} AND account = #{account}")
+    @ResultMap("whitelistRow")
+    @Select("SELECT zone_id, account, note FROM zone_whitelist WHERE zone_id = #{zoneId," + U32 + "} AND account = #{account}")
     WhitelistRow selectWhitelistEntry(@Param("zoneId") int zoneId, @Param("account") String account);
 
-    @Insert("INSERT INTO zone_whitelist (zone_id, account, note) VALUES (#{zoneId}, #{account}, #{note})"
+    @Insert("INSERT INTO zone_whitelist (zone_id, account, note) VALUES (#{zoneId," + U32 + "}, #{account}, #{note})"
             + " ON DUPLICATE KEY UPDATE note = VALUES(note)")
     int upsertWhitelist(@Param("zoneId") int zoneId, @Param("account") String account, @Param("note") String note);
 
-    @Delete("DELETE FROM zone_whitelist WHERE zone_id = #{zoneId} AND account = #{account}")
+    @Delete("DELETE FROM zone_whitelist WHERE zone_id = #{zoneId," + U32 + "} AND account = #{account}")
     int deleteWhitelist(@Param("zoneId") int zoneId, @Param("account") String account);
 
     // ------------------------------------------------------------------ 公告

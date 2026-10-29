@@ -72,4 +72,25 @@ class GatewayConfigurationTest {
         runner.withPropertyValues(GatewayConfiguration.TOKEN_SECRET_ENV + "=s")
                 .run(ctx -> assertThat(ctx).hasNotFailed());
     }
+
+    @Test
+    void 高位正十进制播种与覆盖配置可绑定_非法区值拒绝启动() {
+        runner.withPropertyValues(GatewayConfiguration.TOKEN_SECRET_ENV + "=s",
+                        "game.gateway.seed-zones[0].zone-id=4294967295",
+                        "game.gateway.seed-zones[0].name=最大区", "game.gateway.seed-zones[0].status=open",
+                        "game.gateway.rate-limit.zone-overrides[4294967295].rps=7")
+                .run(ctx -> {
+                    assertThat(ctx).hasNotFailed();
+                    var properties = ctx.getBean(GatewayProperties.class);
+                    assertThat(properties.seedZones().get(0).zoneId()).isEqualTo(4294967295L);
+                    assertThat(properties.seedZones().get(0).toRow().zoneId()).isEqualTo(-1);
+                    assertThat(properties.rateLimit().zoneRps(-1)).isEqualTo(7);
+                });
+        for (String invalid : new String[] {"0", "-1", "4294967296", "4294967295.5"}) {
+            runner.withPropertyValues(GatewayConfiguration.TOKEN_SECRET_ENV + "=s",
+                            "game.gateway.seed-zones[0].zone-id=" + invalid,
+                            "game.gateway.seed-zones[0].name=非法", "game.gateway.seed-zones[0].status=open")
+                    .run(ctx -> assertThat(ctx).hasFailed());
+        }
+    }
 }

@@ -147,7 +147,7 @@ class RollbackWriterSqlTest {
     }
 
     private int count(String sql, Object... args) {
-        Integer n = db.jdbc().queryForObject(sql, Integer.class, args);
+        Integer n = db.normalJdbc().queryForObject(sql, Integer.class, args);
         return n == null ? 0 : n;
     }
 
@@ -160,12 +160,12 @@ class RollbackWriterSqlTest {
     }
 
     private long savedEpoch() {
-        Long epoch = db.jdbc().queryForObject("SELECT saved_epoch FROM player_state WHERE player_id = ?", Long.class, P);
+        Long epoch = db.normalJdbc().queryForObject("SELECT saved_epoch FROM player_state WHERE player_id = ?", Long.class, P);
         return epoch == null ? -1 : epoch;
     }
 
     private String detailOutcome() {
-        return db.jdbc().queryForObject("SELECT outcome FROM ops_job_player WHERE job_id = ? AND player_id = ?", String.class,
+        return db.normalJdbc().queryForObject("SELECT outcome FROM ops_job_player WHERE job_id = ? AND player_id = ?", String.class,
                 JOB, P);
     }
 

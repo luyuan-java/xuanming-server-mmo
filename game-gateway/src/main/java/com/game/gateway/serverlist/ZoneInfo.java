@@ -15,7 +15,7 @@ import com.game.gateway.zone.ZoneStatus;
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record ZoneInfo(
-        int zoneId,
+        long zoneId,
         String name,
         ZoneStatus status,
         LoadLevel loadLevel,

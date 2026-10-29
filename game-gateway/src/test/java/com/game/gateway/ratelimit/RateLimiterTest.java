@@ -71,12 +71,12 @@ class RateLimiterTest {
         }
     }
 
-    private static RateLimitSettings settings(Map<Integer, RateLimitSettings.ZoneLimit> overrides,
+    private static RateLimitSettings settings(Map<Long, RateLimitSettings.ZoneLimit> overrides,
                                               RateLimitSettings.Wave wave) {
         return settings(overrides, wave, 2L);
     }
 
-    private static RateLimitSettings settings(Map<Integer, RateLimitSettings.ZoneLimit> overrides,
+    private static RateLimitSettings settings(Map<Long, RateLimitSettings.ZoneLimit> overrides,
                                               RateLimitSettings.Wave wave, long ipBurst) {
         return new RateLimitSettings(true, 500L, 100L, overrides, 2L, ipBurst, 5000L, List.of(), wave);
     }
@@ -93,7 +93,7 @@ class RateLimiterTest {
     @Test
     void 区桶空了排队_带补一个令牌要等的毫秒() {
         MemoryStore store = new MemoryStore();
-        RateLimiter limiter = new RateLimiter(settings(Map.of(1, new RateLimitSettings.ZoneLimit(1L, 2L)), null), store,
+        RateLimiter limiter = new RateLimiter(settings(Map.of(1L, new RateLimitSettings.ZoneLimit(1L, 2L)), null), store,
                 REDIS_KEYS, now::get);
         assertThat(limiter.check(1, "10.0.0.1", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         assertThat(limiter.check(1, "10.0.0.2", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
@@ -164,7 +164,7 @@ class RateLimiterTest {
     @Test
     void 先判IP桶再判区桶_被IP拒掉的请求不吃区令牌() {
         MemoryStore store = new MemoryStore();
-        RateLimiter limiter = new RateLimiter(settings(Map.of(1, new RateLimitSettings.ZoneLimit(1L, 3L)), null), store,
+        RateLimiter limiter = new RateLimiter(settings(Map.of(1L, new RateLimitSettings.ZoneLimit(1L, 3L)), null), store,
                 REDIS_KEYS, now::get);
         for (int i = 0; i < 10; i++) {
             limiter.check(1, "6.6.6.6", null, RateLimiter.Scope.ASSIGN);
@@ -176,7 +176,7 @@ class RateLimiterTest {
     @Test
     void 区桶空时排队不吃IP令牌_同一NAT后面等区桶的人不会被429() {
         MemoryStore store = new MemoryStore();
-        RateLimiter limiter = new RateLimiter(settings(Map.of(1, new RateLimitSettings.ZoneLimit(1L, 1L)), null), store,
+        RateLimiter limiter = new RateLimiter(settings(Map.of(1L, new RateLimitSettings.ZoneLimit(1L, 1L)), null), store,
                 REDIS_KEYS, now::get);
         assertThat(limiter.check(1, "9.9.9.9", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         for (int i = 0; i < 5; i++) {
@@ -223,5 +223,38 @@ class RateLimiterTest {
                 .check(1, "1.1.1.1", "robot_0001", RateLimiter.Scope.LOGIN);
         assertThat(other.buckets.keySet()).containsExactlyInAnyOrder("nstest:rl:ip:1.1.1.1", "nstest:rl:zone:1");
         assertThat(other.cooldowns.keySet()).containsExactly("nstest:rl:cd:login:" + digest + ":1.1.1.1");
+    }
+
+    @Test
+    void 高位区照判区桶且覆盖配置用正数key_内部Redis键保持原格式() {
+        var store = new MemoryStore();
+        var config = settings(Map.of(4294967295L, new RateLimitSettings.ZoneLimit(1L, 1L)), null, 1000L);
+        var limiter = new RateLimiter(config, store, REDIS_KEYS, now::get);
+        assertThat(config.zoneRps(-1)).isEqualTo(1);
+        assertThat(config.zoneBurst(-1)).isEqualTo(1);
+        assertThat(limiter.check(-1, "10.1.1.1", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
+        assertThat(limiter.check(-1, "10.1.1.2", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.QUEUE);
+        assertThat(store.buckets).containsKey(REDIS_KEYS.rateLimitZone(-1));
+        assertThat(REDIS_KEYS.rateLimitZone(-1)).endsWith(":-1");
+    }
+
+    @Test
+    void Wave最大区是指定区_负一Long才是全区哨兵_无效列表与覆盖拒绝() {
+        var onlyMax = new WaveSchedule(new RateLimitSettings.Wave(true, 100L,
+                List.of(new RateLimitSettings.WaveStep(0, List.of(4294967295L)))));
+        assertThat(onlyMax.isOpen(-1, 100)).isTrue();
+        assertThat(onlyMax.isOpen(1, 100)).isFalse();
+        var all = new WaveSchedule(new RateLimitSettings.Wave(true, 100L,
+                List.of(new RateLimitSettings.WaveStep(0, List.of(-1L)))));
+        assertThat(all.isOpen(1, 100)).isTrue();
+        assertThat(all.isOpen(Integer.MIN_VALUE, 100)).isTrue();
+        for (Long invalid : java.util.Arrays.asList(0L, -2L, 4294967296L, null)) {
+            assertThatThrownBy(() -> new RateLimitSettings.WaveStep(0, java.util.Arrays.asList(invalid)))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+        for (long invalid : new long[] {-1, 0, 4294967296L}) {
+            assertThatThrownBy(() -> settings(Map.of(invalid, new RateLimitSettings.ZoneLimit(1L, 1L)), null))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
     }
 }

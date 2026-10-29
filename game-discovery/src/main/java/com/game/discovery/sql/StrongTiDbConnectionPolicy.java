@@ -62,6 +62,11 @@ public final class StrongTiDbConnectionPolicy implements BeanPostProcessor, Orde
 
     private static void verifyWithinBudget(Connection connection, boolean requireTiDb, Deadline deadline) throws SQLException {
         constrainNetworkTimeout(connection, deadline);
+        // 显式开发夹具的真实H2不支持MySQL版本探测；生产TiDB要求仍在此拒绝。
+        if ("H2".equals(connection.getMetaData().getDatabaseProductName())) {
+            if (requireTiDb) throw new SQLException("权威库要求TiDB");
+            return;
+        }
         String version;
         try (var statement=connection.createStatement();var rows=statement.executeQuery("SELECT VERSION()")) {
             if (!rows.next()) throw new SQLException("无法确认权威库类型");

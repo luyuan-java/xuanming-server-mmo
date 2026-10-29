@@ -1,5 +1,7 @@
 package com.game.gateway.login;
 
+import com.game.common.zone.ZoneIds;
+
 import com.game.api.AccountLoginService;
 import com.game.gateway.ratelimit.RateLimitDecision;
 import com.game.gateway.ratelimit.RateLimiter;
@@ -70,7 +72,7 @@ public final class LoginHttpService {
     public CompletableFuture<HttpLoginResponse> login(HttpLoginRequest request, String clientIp) {
         boolean known;
         boolean verified = true;
-        if (request.zoneId() <= 0 || request.zoneId() > Integer.MAX_VALUE) {
+        if (request.zoneId() <= 0 || request.zoneId() > ZoneIds.MAX) {
             known = false;
         } else {
             try {

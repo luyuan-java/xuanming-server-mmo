@@ -36,4 +36,20 @@ class QueueTokensTest {
         assertThat(tokens.verify(tokens.sign("not-a-uuid", 3, 1_000), 0)).isEmpty();
         assertThat(tokens.verify(tokens.sign(queueId, 0, 1_000), 0)).as("区号 0").isEmpty();
     }
+
+    @Test
+    void uint32高位令牌用正十进制往返_低半区正文逐字兼容() {
+        for (int bits : new int[] {Integer.MAX_VALUE, Integer.MIN_VALUE, -1}) {
+            String token = tokens.sign(queueId, bits, 1000);
+            String body = new String(Base64.getUrlDecoder().decode(token.substring(0, token.indexOf('.'))),
+                    StandardCharsets.US_ASCII);
+            assertThat(body).isEqualTo("v1." + queueId + "." + Integer.toUnsignedString(bits) + ".1000");
+            assertThat(tokens.verify(token, 1000)).contains(new QueueTokens.Claims(queueId, bits, 1000));
+            assertThat(tokens.verify(token, 1001)).isEmpty();
+        }
+        String low = tokens.sign(queueId, 3, 1000);
+        assertThat(new String(Base64.getUrlDecoder().decode(low.substring(0, low.indexOf('.'))),
+                StandardCharsets.US_ASCII)).isEqualTo("v1." + queueId + ".3.1000");
+        assertThat(tokens.verify(tokens.sign(queueId, 0, 1000), 0)).isEmpty();
+    }
 }

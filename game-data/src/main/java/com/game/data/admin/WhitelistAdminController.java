@@ -1,5 +1,9 @@
 package com.game.data.admin;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.game.common.zone.ZoneIdJsonDeserializer;
+import com.game.common.zone.ZoneIds;
+
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import com.game.gateway.store.GatewayStore;
@@ -40,20 +44,20 @@ public class WhitelistAdminController {
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record WhitelistBody(Long zoneId, String account, String note) {
+    public record WhitelistBody(@JsonDeserialize(using = ZoneIdJsonDeserializer.class) Long zoneId, String account, String note) {
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record WhitelistView(int zoneId, String account, String note) {
+    public record WhitelistView(long zoneId, String account, String note) {
 
         static WhitelistView of(WhitelistRow w) {
-            return new WhitelistView(w.zoneId(), w.account(), w.note());
+            return new WhitelistView(Integer.toUnsignedLong(w.zoneId()), w.account(), w.note());
         }
     }
 
     @GetMapping(PATH + "/{zoneId}")
-    public List<WhitelistView> list(@PathVariable("zoneId") int zoneId) {
-        return store.whitelist(zoneId).stream().map(WhitelistView::of).toList();
+    public List<WhitelistView> list(@PathVariable("zoneId") long zoneId) {
+        return store.whitelist(ZoneAdminController.requiredZone(zoneId)).stream().map(WhitelistView::of).toList();
     }
 
     @PostMapping(PATH)
@@ -61,21 +65,21 @@ public class WhitelistAdminController {
         if (body.zoneId() == null || body.account() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 与 account 必填");
         }
-        if (body.zoneId() <= 0 || body.zoneId() > Integer.MAX_VALUE) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 须在 1–2147483647");
+        if (body.zoneId() <= 0 || body.zoneId() > ZoneIds.MAX) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 须在 1–4294967295");
         }
         WhitelistRow stored = ZoneAdminController.checked(
-                () -> store.addWhitelist(body.zoneId().intValue(), body.account(), body.note()));
-        audit.warn("whitelist add zone_id={} account={} operator={}", stored.zoneId(), stored.account(),
+                () -> store.addWhitelist(ZoneIds.requiredBits(body.zoneId()), body.account(), body.note()));
+        audit.warn("whitelist add zone_id={} account={} operator={}", Integer.toUnsignedLong(stored.zoneId()), stored.account(),
                 ZoneAdminController.operator(request));
         return WhitelistView.of(stored);
     }
 
     @DeleteMapping(PATH + "/{zoneId}/{account}")
-    public ResponseEntity<Void> remove(@PathVariable("zoneId") int zoneId, @PathVariable("account") String account,
+    public ResponseEntity<Void> remove(@PathVariable("zoneId") long zoneId, @PathVariable("account") String account,
                                        HttpServletRequest request) {
         ZoneAdminController.checked(() -> {
-            store.removeWhitelist(zoneId, account);
+            store.removeWhitelist(ZoneAdminController.requiredZone(zoneId), account);
             return null;
         });
         audit.warn("whitelist remove zone_id={} account={} operator={}", zoneId, account,

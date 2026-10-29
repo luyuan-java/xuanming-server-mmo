@@ -259,31 +259,45 @@ public final class OpsJobRunner implements SmartLifecycle {
             summary.put("exception", e.getClass().getName());
             result = JobResult.of(OpsJobStatus.OPS_JOB_FAILED, OpsException.SNAPSHOT_DB_ERROR, summary);
         }
-        ResultWrite written = writeResult(ctx, result);
+        // RESULT脱离调用方取消，但只沿原RESULT重试期限、原释放/SQL期限收尾。
+        var completionInterrupts = new CompletionInterrupts();
+        completionInterrupts.capture();
         try {
-            body.afterResult(ctx);
-        } catch (RuntimeException e) {
-            log.error("运维作业 job={} 收尾（释放归属）出错", ctx.jobIdText(), e);
-        }
-        if (written != ResultWrite.NOT_WRITTEN) {
-            // 只删属于本作业的那一行：槽早被收走（心跳丢失）时是空操作；开始执行就被拒、槽仍归本作业时把它让出来
+            ResultWrite written = writeResult(ctx, result, completionInterrupts);
+            completionInterrupts.capture();
             try {
-                jobs.deleteActive(ctx.jobId());
+                body.afterResult(ctx);
             } catch (RuntimeException e) {
-                log.error("运维作业 job={} 让出单飞槽失败（心跳停止后由清扫器收走）", ctx.jobIdText(), e);
+                log.error("运维作业 job={} 收尾（释放归属）出错", ctx.jobIdText(), e);
+            }
+            completionInterrupts.capture();
+            if (written != ResultWrite.NOT_WRITTEN) {
+                // 只删属于本作业的那一行：槽早被收走（心跳丢失）时是空操作；开始执行就被拒、槽仍归本作业时把它让出来
+                try {
+                    jobs.deleteActive(ctx.jobId());
+                } catch (RuntimeException e) {
+                    log.error("运维作业 job={} 让出单飞槽失败（心跳停止后由清扫器收走）", ctx.jobIdText(), e);
+                }
+            }
+            String outcome = ctx.aborted() ? "interrupted" : outcomeName(result.status());
+            if (written == ResultWrite.FINALIZED) {
+                // 谁把作业行改成终态谁记结局指标：清扫器改的由清扫器记，同一个作业不重复计数
+                metrics.opsJob(kind, outcome, System.nanoTime() - startNanos);
+            }
+            audit.info("[OpsJob] RESULT job={} kind={} status={} code={} planned={} affected={} failed={} row={} operator={}",
+                    ctx.jobIdText(), kind, result.status().name(), result.resultCode(), result.playersPlanned(),
+                    result.playersAffected(), result.playersFailed(), written.name().toLowerCase(Locale.ROOT),
+                    printable(queuedJob.getOperator()));
+        } finally {
+            current = null;
+            try {
+                metrics.opsJobRunning(false);
+            } finally {
+                // Error、结果写失败和释放失败也必须把原中断交还执行线程。
+                completionInterrupts.capture();
+                completionInterrupts.restore();
             }
         }
-        current = null;
-        metrics.opsJobRunning(false);
-        String outcome = ctx.aborted() ? "interrupted" : outcomeName(result.status());
-        if (written == ResultWrite.FINALIZED) {
-            // 谁把作业行改成终态谁记结局指标：清扫器改的由清扫器记，同一个作业不重复计数
-            metrics.opsJob(kind, outcome, System.nanoTime() - startNanos);
-        }
-        audit.info("[OpsJob] RESULT job={} kind={} status={} code={} planned={} affected={} failed={} row={} operator={}",
-                ctx.jobIdText(), kind, result.status().name(), result.resultCode(), result.playersPlanned(),
-                result.playersAffected(), result.playersFailed(), written.name().toLowerCase(Locale.ROOT),
-                printable(queuedJob.getOperator()));
     }
 
     /**
@@ -306,7 +320,7 @@ public final class OpsJobRunner implements SmartLifecycle {
      * 不改回已被清扫器写成的 INTERRUPTED）。心跳丢失时：作业行本应已被清扫器改成 INTERRUPTED；还没终结（清扫器没改到）就由这里兜底改成
      * INTERRUPTED，免得作业行永远停在 RUNNING。
      */
-    private ResultWrite writeResult(JobContext ctx, JobResult r) {
+    private ResultWrite writeResult(JobContext ctx, JobResult r, CompletionInterrupts interrupts) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("status", r.status().name());
         payload.put("code", r.resultCode());
@@ -325,6 +339,12 @@ public final class OpsJobRunner implements SmartLifecycle {
         long deadline = System.nanoTime() + resultRetryBudget.toNanos();
         long backoffMs = 200;
         for (int attempt = 1; ; attempt++) {
+            interrupts.capture();
+            if (attempt > 1 && System.nanoTime() >= deadline) {
+                log.error("运维作业 job={} 的RESULT原重试期限已到，不开始下一次写入：结果={}", ctx.jobIdText(), payloadJson);
+                ctx.stopHeartbeat();
+                return ResultWrite.NOT_WRITTEN;
+            }
             try {
                 long now = clock.millis();
                 OpsJobRow finished = ctx.job.toBuilder()
@@ -367,6 +387,7 @@ public final class OpsJobRunner implements SmartLifecycle {
                     ctx.stopHeartbeat();
                     return ResultWrite.NOT_WRITTEN;
                 }
+                interrupts.capture();
                 resyncSeq(ctx);
             } catch (RuntimeException e) {
                 if (System.nanoTime() > deadline) {
@@ -377,7 +398,7 @@ public final class OpsJobRunner implements SmartLifecycle {
                 }
                 log.warn("运维作业 job={} 写 RESULT 失败（第 {} 次），{} ms 后重试：{}", ctx.jobIdText(), attempt, backoffMs,
                         e.toString());
-                sleepQuietly(backoffMs);
+                sleepQuietly(backoffMs, deadline, interrupts);
                 backoffMs = Math.min(backoffMs * 2, 5000);
             }
         }
@@ -546,11 +567,27 @@ public final class OpsJobRunner implements SmartLifecycle {
         return value == null ? null : value.replaceAll("\\p{Cntrl}", "?");
     }
 
-    private static void sleepQuietly(long ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+    /** 仅本次execute收尾线程拥有；不会向下一次业务写提供继续执行的资格。 */
+    private static final class CompletionInterrupts {
+        private boolean interrupted;
+        void capture() { interrupted |= Thread.interrupted(); }
+        void record() { interrupted = true; }
+        void restore() { if (interrupted) Thread.currentThread().interrupt(); }
+    }
+
+    private static void sleepQuietly(long ms, long deadline, CompletionInterrupts interrupts) {
+        interrupts.capture();
+        long now = System.nanoTime();
+        long remaining = deadline - now;
+        if (remaining <= 0) return;
+        long until = now + Math.min(TimeUnit.MILLISECONDS.toNanos(ms), remaining);
+        while ((remaining = until - System.nanoTime()) > 0) {
+            try {
+                TimeUnit.NANOSECONDS.sleep(remaining);
+            } catch (InterruptedException e) {
+                // 不重置退避或RESULT截止时刻，也不在下一次审计SQL之前恢复标志。
+                interrupts.record();
+            }
         }
     }
 }

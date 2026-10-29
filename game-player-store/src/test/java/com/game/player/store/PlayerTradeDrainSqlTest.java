@@ -22,8 +22,15 @@ class PlayerTradeDrainSqlTest {
     private static PlayerTradeStore.RecoveryTarget target(PlayerTradeStoreTest.Fixture f) {
         return new PlayerTradeStore.RecoveryTarget(MAINTENANCE_NONCE,7,f.database,MAINTENANCE_ADDRESS,MAINTENANCE_INSTANCE);
     }
+    private static PlayerTradeStoreTest.Fixture fixture() throws Exception {
+        return new PlayerTradeStoreTest.Fixture((connection,principal)->{
+            // 标记表先于NORMAL注册建立；schema主体只在原建表阶段持有连接。
+            try(var statement=connection.createStatement()){
+                statement.execute("CREATE TABLE maintenance_recovery_target(purpose VARBINARY(16) NOT NULL,zone_id INT UNSIGNED NOT NULL,schema_name VARBINARY(64) NOT NULL,target_nonce VARBINARY(32) NOT NULL,physical_addr VARBINARY(255) NOT NULL,PRIMARY KEY(purpose,zone_id,schema_name))");
+            }
+        });
+    }
     private static void maintenance(PlayerTradeStoreTest.Fixture f) {
-        f.sql.execute("CREATE TABLE maintenance_recovery_target(purpose VARBINARY(16) NOT NULL,zone_id INT UNSIGNED NOT NULL,schema_name VARBINARY(64) NOT NULL,target_nonce VARBINARY(32) NOT NULL,physical_addr VARBINARY(255) NOT NULL,PRIMARY KEY(purpose,zone_id,schema_name))");
         f.sql.update("INSERT INTO maintenance_recovery_target VALUES(?,?,?,?,?)",ascii("admission"),7,ascii(f.database),
                 ascii(MAINTENANCE_NONCE),ascii(MAINTENANCE_ADDRESS));
     }
@@ -40,7 +47,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 无OPEN的旧受理入场在同锁永久封E_撤单后只允许更高E进入() throws Exception {
-        try (var f = new PlayerTradeStoreTest.Fixture()) {
+        try (var f = fixture()) {
             f.player(1, "seller");
             assertEquals(new PlayerStore.ClaimResult.Claimed(1), f.players.claimOwnership(1, "seller", 1, BUDGET));
             var request = new FreezeRequest(101, 1, "seller", 1);
@@ -62,7 +69,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 撤单必须等RAM排空ACK和真实APPLIED_原scene退出后SQL补偿仍可按原请求完成() throws Exception {
-        try (var f = new PlayerTradeStoreTest.Fixture()) {
+        try (var f = fixture()) {
             f.player(1, "seller");
             assertEquals(new PlayerStore.ClaimResult.Claimed(1), f.players.claimOwnership(1, BUDGET));
             assertTrue(f.players.loadForScene(1, 1, SOURCE, BUDGET).isPresent());
@@ -92,7 +99,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 接管和伪APPLIED标记不能确认_必须原摘要实际字节和标量都一致() throws Exception {
-        try (var f = new PlayerTradeStoreTest.Fixture()) {
+        try (var f = fixture()) {
             f.player(1, "seller"); f.players.claimOwnership(1, BUDGET);
             f.players.loadForScene(1, 1, SOURCE, BUDGET);
             var request = new FreezeRequest(101, 1, "seller", 1);
@@ -122,7 +129,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 更旧OPEN来源未排空时不能假定没有在线实体_不拿租约超时清锁() throws Exception {
-        try (var f = new PlayerTradeStoreTest.Fixture()) {
+        try (var f = fixture()) {
             f.player(1, "seller"); f.players.claimOwnership(1, BUDGET);
             f.players.loadForScene(1, 1, "old-source", BUDGET);
             f.clock.addAndGet(PlayerStore.OWNER_LEASE.toMillis() * 2);
@@ -166,7 +173,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 旧OPEN默认计划零写_同事务退休原件并永久认重_不冒APPLIED() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=recovery(f,true);refuses(Code.NOT_READY,()->r.store().confirmFreeze(r.freeze(),BUDGET));
             var plan=r.store().planOpenRecovery(r.request(),BUDGET);notRecovered(f);
             assertEquals(2,plan.currentEpoch());assertEquals(64,plan.requestDigest().length());
@@ -194,7 +201,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 旧OPEN恢复拒PENDING_未知终局_假APPLIED及缺失实际state_不丢原待办() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=recovery(f,false);
             byte[] pending=f.sql.queryForObject("SELECT data FROM player_final_save WHERE player_id=1 AND owner_epoch=2",byte[].class);
             refuses(Code.NOT_READY,()->r.store().planOpenRecovery(r.request(),BUDGET));notRecovered(f);
@@ -211,7 +218,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 旧OPEN恢复计划绑定route及完整旧准入_任何漂移不删原行() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=recovery(f,true);var plan=r.store().planOpenRecovery(r.request(),BUDGET);
             f.sql.update("UPDATE zone_merge_fence SET revision=revision+1 WHERE zone_id=7 AND shard=0");
             refuses(Code.CONFLICT,()->r.store().applyOpenRecovery(plan,BUDGET));notRecovered(f);
@@ -222,7 +229,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 旧OPEN无完整原件或SQL_NO_ADMISSION不能维护追认_删后ABSENT不是成功() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=recovery(f,true);var plan=r.store().planOpenRecovery(r.request(),BUDGET);
             f.sql.update("UPDATE player_final_save SET admission_proto=NULL WHERE player_id=1 AND owner_epoch=1");
             refuses(Code.NOT_READY,()->r.store().planOpenRecovery(r.request(),BUDGET));notRecovered(f);
@@ -237,7 +244,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 旧OPEN并发两恢复UUID最多一个提交_同原件重建对象可查永久结果() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=recovery(f,true);var first=r.store().planOpenRecovery(r.request(),BUDGET);
             var second=r.store().planOpenRecovery(new PlayerTradeStore.RecoveryRequest(java.util.UUID.randomUUID().toString(),r.freeze(),1,"old-source"),BUDGET);
             var start=new java.util.concurrent.CountDownLatch(1);var executor=java.util.concurrent.Executors.newFixedThreadPool(2);
@@ -259,7 +266,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 恢复原件schema缺唯一原代索引时拒启动() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             try(var connection=f.source.getConnection()) {
                 String drop="H2".equals(connection.getMetaData().getDatabaseProductName())
                         ? "ALTER TABLE player_trade_admission_recovery DROP CONSTRAINT uk_trade_admission_recovery_epoch"
@@ -293,7 +300,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 仅claim未load的更高E可按真实SQL_NO_ADMISSION封闭_计划不提前释放或造APPLIED() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=unusedEpoch(f,1,true);assertEquals(0,released(f));
             byte[] before=f.sql.queryForObject("SELECT data FROM player_state WHERE player_id=1",byte[].class);
             long saved=f.sql.queryForObject("SELECT saved_epoch FROM player_state WHERE player_id=1",Long.class);
@@ -329,7 +336,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 多旧OPEN固定剩余原件集与last语义_较早退休不提前释放_漂移后原计划拒绝() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=unusedEpoch(f,2,true);
             var first=r.store().planOpenRecovery(r.requests().get(0),BUDGET);
             var secondBefore=r.store().planOpenRecovery(r.requests().get(1),BUDGET);
@@ -352,14 +359,14 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void load先取得P就必须已有OPEN而拒无准入恢复_冻结先取得P则迟load永不建RAM() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=unusedEpoch(f,1,false);
             assertTrue(f.players.loadForScene(identity(2,SOURCE),"seller",BUDGET).isPresent(),"load先持P，返回快照之前已经提交OPEN");
             r.store().beginFreeze(r.freeze(),BUDGET);
             refuses(Code.NOT_READY,()->r.store().planOpenRecovery(r.requests().getFirst(),BUDGET));
             assertEquals(2,f.count("player_final_save"));assertEquals(0,f.count("player_trade_admission_recovery"));assertEquals(0,released(f));
         }
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=unusedEpoch(f,1,true);var plan=r.store().planOpenRecovery(r.requests().getFirst(),BUDGET);
             var start=new java.util.concurrent.CountDownLatch(1);var executor=java.util.concurrent.Executors.newFixedThreadPool(2);
             try {
@@ -373,7 +380,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 无准入恢复仍拒缺行损坏及未来savedE_不造初始存档也不清旧OPEN() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=unusedEpoch(f,1,true);
             var plan=r.store().planOpenRecovery(r.requests().getFirst(),BUDGET);
             f.sql.update("UPDATE player_state SET saved_epoch=99 WHERE player_id=1");
@@ -387,7 +394,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 默认Store恢复拒无独立目标_普通冻结操作不要求维护标记() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=recovery(f,true);
             var ordinary=new PlayerTradeStore(f.source,f.manager,f.clock::get,5,PlayerTradeStore.sqlFreezeVerifier(),(sql,request)->{});
             refuses(Code.NOT_READY,()->ordinary.planOpenRecovery(r.request(),BUDGET));notRecovered(f);
@@ -401,7 +408,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 专用标记必须同nonce目的区库地址与实例_仅debug标记零效果() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=recovery(f,true);var correct=target(f);
             for(var wrong:java.util.List.of(
                     new PlayerTradeStore.RecoveryTarget("b".repeat(32),7,f.database,MAINTENANCE_ADDRESS,MAINTENANCE_INSTANCE),
@@ -424,7 +431,7 @@ class PlayerTradeDrainSqlTest {
     }
 
     @Test void 永久标记无TTL_提交与原收据重放均锁内复核_换标记不丢原件() throws Exception {
-        try(var f=new PlayerTradeStoreTest.Fixture()) {
+        try(var f=fixture()) {
             var r=recovery(f,true);var plan=r.store().planOpenRecovery(r.request(),BUDGET);
             f.sql.update("UPDATE maintenance_recovery_target SET target_nonce=?",ascii("c".repeat(32)));
             refuses(Code.CONFLICT,()->r.store().applyOpenRecovery(plan,BUDGET));notRecovered(f);

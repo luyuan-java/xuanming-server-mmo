@@ -118,12 +118,14 @@ class MallAdminHttpTest {
         byte[] upstreamBody = bytes("{ \"skuId\":9223372036854775806, \"lockedStock\":2, \"priceMinor\":125 }");
         UPSTREAM.response.set(new Reply(409, upstreamBody));
         String firstNonce = null;
+        long responseObservationUntil = 0;
         for (String command : List.of("skus/list", "skus/create", "skus/update", "skus/stock", "order-view", "skus/stock")) {
             var response = post("/admin/mall/" + command, original, TOKEN, "运营甲");
             assertEquals(409, response.statusCode());
             assertArrayEquals(upstreamBody, response.body());
             assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow());
-            var captured = UPSTREAM.requests.poll(2, TimeUnit.SECONDS);
+            responseObservationUntil = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            var captured = UPSTREAM.requests.poll(Math.max(0, responseObservationUntil - System.nanoTime()), TimeUnit.NANOSECONDS);
             assertNotNull(captured);
             assertEquals("/mall/rpc/internal/admin/" + command, captured.path());
             assertArrayEquals(original, captured.body());
@@ -134,6 +136,13 @@ class MallAdminHttpTest {
             else { assertNotEquals(firstNonce, captured.nonce()); }
         }
         assertEquals(6, UPSTREAM.calls.get(), "冲突/未知响应不得自动重复提交");
+        // 响应正文可能先于服务端finally；与末次抓包共享原2s观察期限，不追加等待预算。
+        var counter = meters.find("game.data.admin.requests").tag("op", "mall_catalog").tag("result", "409").counter();
+        long remaining;
+        while ((counter == null || counter.count() < 6) && (remaining = responseObservationUntil - System.nanoTime()) > 0) {
+            TimeUnit.NANOSECONDS.sleep(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(5)));
+            counter = meters.find("game.data.admin.requests").tag("op", "mall_catalog").tag("result", "409").counter();
+        }
         assertTrue(meters.get("game.data.admin.requests").tag("op", "mall_catalog").tag("result", "409").counter().count() >= 6);
 
         for (String invalid : List.of("[]", "null", "{} garbage", "{} {}")) {

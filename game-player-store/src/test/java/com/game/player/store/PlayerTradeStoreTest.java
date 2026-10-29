@@ -306,7 +306,7 @@ class PlayerTradeStoreTest {
 
     static final class Fixture implements AutoCloseable {
         final String endpoint = System.getProperty("game.it.mysql");
-        final String database = "playertrade" + UUID.randomUUID().toString().replace("-", "");
+        final String database;
         final DataSource source;
         AuthoritySqlFixture fixture;
         private JdbcDataSource memory;
@@ -317,9 +317,13 @@ class PlayerTradeStoreTest {
         final PlayerMapper mapper;
         final AtomicLong clock = new AtomicLong(1_000_000);
         Fixture() throws Exception {
+            this(null);
+        }
+        Fixture(AuthoritySqlFixture.SchemaBuilder additionalSchema) throws Exception {
             DruidDataSource pool = null;
             try {
                 if (endpoint == null) {
+                    database = "playertrade" + UUID.randomUUID().toString().replace("-", "");
                     var h2 = new JdbcDataSource();
                     h2.setUser("sa"); h2.setPassword(""); memory = h2;
                     h2.setURL("jdbc:h2:mem:" + database + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=5000");
@@ -331,7 +335,9 @@ class PlayerTradeStoreTest {
                             "playertrade",false,List.of(1,2,3,7,9,11)),(connection,principal)->{
                         new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql"),
                                 new ClassPathResource("db/role-pending-fence-fixture.sql")).populate(connection);
+                        if(additionalSchema!=null)additionalSchema.create(connection,principal);
                     });
+                    database = fixture.database();
                     pool = new DruidDataSource();
                     pool.setUrl(fixture.jdbcUrl("?connectTimeout=3000&socketTimeout=30000"));
                     pool.setUsername(fixture.normalUser());pool.setPassword(fixture.normalPassword());
@@ -345,6 +351,7 @@ class PlayerTradeStoreTest {
                     try(var connection=memory.getConnection();var statement=connection.createStatement();var identity=statement.executeQuery("SELECT CURRENT_USER()")){
                         if(!identity.next())throw new java.sql.SQLException("H2 schema主体缺失");
                         com.game.common.player.RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(1,2,3,7,9,11),identity.getString(1));
+                        if(additionalSchema!=null)additionalSchema.create(connection,identity.getString(1));
                     }
                 }
                 try (var connection = source.getConnection()) {

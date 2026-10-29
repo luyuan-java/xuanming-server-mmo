@@ -71,7 +71,7 @@ class MockPaymentStoreTest {
             f.jdbc.update("UPDATE commerce_sku_grant SET item_config_id=20,count_per_unit=3,title='新条款' WHERE sku_id=1");
             var worker = worker(f);
             var command = new MockPaymentApi.Pay(order.orderId(), "mock-request-001");
-            var results = parallel(() -> worker.pay(command), () -> worker(f).pay(command));
+            var results = parallel(f, () -> worker.pay(command), () -> worker(f).pay(command));
             assertEquals(results.get(0), results.get(1));
             assertEquals(results.getFirst(), worker(f).pay(command));
             assertEquals(250, results.getFirst().amountMinor());
@@ -263,7 +263,7 @@ class MockPaymentStoreTest {
             var order = create(f, 1, "parallel-refund-order");
             f.store.cancel("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1"));
             worker(f).pay(new MockPaymentApi.Pay(order.orderId(), "parallel-refund-request"));
-            var results = parallel(() -> worker(f).reconcile(), () -> worker(f).reconcile());
+            var results = parallel(f, () -> worker(f).reconcile(), () -> worker(f).reconcile());
             for (var result : results) {
                 assertEquals(0, result.failed()); assertEquals(0, result.scanFailures()); assertFalse(result.busy());
             }
@@ -281,7 +281,7 @@ class MockPaymentStoreTest {
             var order = create(f, 1, "parallel-refund-replay-order");
             f.store.cancel("1", new MallApi.OwnedOrder(order.orderId(), "fixture-account", "1"));
             worker(f).pay(new MockPaymentApi.Pay(order.orderId(), "parallel-refund-replay-request"));
-            var results = parallel(() -> worker(f).reconcile(),
+            var results = parallel(f, () -> worker(f).reconcile(),
                 () -> worker(f).pay(new MockPaymentApi.Pay(order.orderId(), "parallel-refund-replay-request")));
             var result = (MockPaymentApi.Reconcile) results.getFirst();
             assertEquals(0, result.failed()); assertEquals(0, result.scanFailures()); assertFalse(result.busy());
@@ -295,7 +295,7 @@ class MockPaymentStoreTest {
 
     @Test void 扫描存储错误不伪装成功且未知项游标不前移() {
         try (var f = fixture()) {
-            f.jdbc.execute("DROP TABLE commerce_mock_transaction");
+            f.schemaJdbc.execute("DROP TABLE commerce_mock_transaction");
             var result = worker(f).reconcile();
             assertEquals(0, result.attempted()); assertEquals(0, result.succeeded()); assertEquals(0, result.failed());
             assertEquals(2, result.scanFailures()); assertTrue(result.unavailable());
@@ -308,9 +308,9 @@ class MockPaymentStoreTest {
             var order = f.store.create("1", new MallApi.CreateOrder("mock-migration-order", 1, 2, "fixture-account", "1"));
             var grant = f.jdbc.queryForMap("SELECT * FROM commerce_order_grant WHERE order_sn=?", order.orderId());
             // 本例尚无退款数据，退回V3形状；不操作任何既有共享库。
-            f.jdbc.execute("DROP TABLE commerce_mock_transaction");
-            f.jdbc.execute("DROP TABLE commerce_refund_intent");
-            f.jdbc.execute("CREATE TABLE commerce_refund_intent(order_sn VARCHAR(36) PRIMARY KEY,status VARCHAR(24) NOT NULL,channel VARCHAR(32) NULL,transaction_id VARCHAR(128) NULL)");
+            f.schemaJdbc.execute("DROP TABLE commerce_mock_transaction");
+            f.schemaJdbc.execute("DROP TABLE commerce_refund_intent");
+            f.schemaJdbc.execute("CREATE TABLE commerce_refund_intent(order_sn VARCHAR(36) PRIMARY KEY,status VARCHAR(24) NOT NULL,channel VARCHAR(32) NULL,transaction_id VARCHAR(128) NULL)");
             assertThrows(Exception.class, () -> new MallSchemaVerifier(f.source, f.props).verify());
             f.migrate("db/migration/V4__mock_payment.sql");
             new MallSchemaVerifier(f.source, f.props).verify();
@@ -341,12 +341,14 @@ class MockPaymentStoreTest {
     private static byte[] ascii(String value) { return value.getBytes(StandardCharsets.US_ASCII); }
     private static void rejects(int status, Executable action) { assertEquals(status, assertThrows(MallException.class, action).status()); }
 
-    private static <T> List<T> parallel(java.util.concurrent.Callable<T> first, java.util.concurrent.Callable<T> second) throws Exception {
+    private static <T> List<T> parallel(MockPaymentTestDatabase fixture, java.util.concurrent.Callable<T> first, java.util.concurrent.Callable<T> second) throws Exception {
         var executor = Executors.newFixedThreadPool(2);
         var ready = new CountDownLatch(2); var start = new CountDownLatch(1);
         List<Future<T>> futures = new ArrayList<>(); List<T> results = new ArrayList<>(); List<Executable> errors = new ArrayList<>();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        Throwable primary = null;
         try {
+            fixture.trackActors(executor);
             for (var action : List.of(first, second)) {
                 futures.add(executor.submit(() -> {
                     ready.countDown();
@@ -357,16 +359,30 @@ class MockPaymentStoreTest {
             assertTrue(ready.await(5, TimeUnit.SECONDS)); start.countDown();
             for (var future : futures) {
                 try { results.add(future.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)); }
-                catch (ExecutionException failure) { errors.add(() -> { throw failure.getCause(); }); }
-                catch (java.util.concurrent.TimeoutException timeout) { future.cancel(true); errors.add(() -> { throw timeout; }); }
+                catch (ExecutionException failure) { if (MockPaymentTestDatabase.unknownActorFailure(failure)) fixture.retainUnknownActors(failure); errors.add(() -> { throw failure.getCause(); }); }
+                catch (java.util.concurrent.TimeoutException timeout) { fixture.retainUnknownActors(timeout); future.cancel(true); errors.add(() -> { throw timeout; }); }
             }
             assertAll("全部Future错误在主线程收集", errors);
             return results;
+        } catch (Exception | Error failure) {
+            primary = failure;
+            if (MockPaymentTestDatabase.unknownActorFailure(failure)) fixture.retainUnknownActors(failure);
+            throw failure;
         } finally {
             start.countDown();
-            for (var future : futures) { if (!future.isDone()) { future.cancel(true); } }
-            executor.shutdownNow();
-            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS), "本例executor清理超时");
+            Throwable cleanup = null;
+            boolean interrupted = Thread.interrupted() || primary instanceof InterruptedException;
+            for (var future : futures) try { if (!future.isDone()) future.cancel(true); }
+            catch (RuntimeException | Error failure) { cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+            try { executor.shutdownNow(); } catch (RuntimeException | Error failure) { cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+            try { assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS), "本例executor清理超时"); }
+            catch (Exception | Error failure) { if (failure instanceof InterruptedException) interrupted = true; cleanup = MockPaymentTestDatabase.combineFailure(cleanup, failure); }
+            finally { if (interrupted) Thread.currentThread().interrupt(); }
+            if (cleanup != null) {
+                fixture.retainUnknownActors(cleanup);
+                if (primary != null) { if (cleanup != primary) primary.addSuppressed(cleanup); }
+                else MockPaymentTestDatabase.raiseFailure(cleanup);
+            }
         }
     }
 }

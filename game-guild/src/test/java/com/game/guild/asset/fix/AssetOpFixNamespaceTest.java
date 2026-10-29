@@ -127,13 +127,21 @@ class AssetOpFixNamespaceTest {
     @Test
     void 连库失败的报错只带库名不带连接串(@TempDir Path dir) throws Exception {
         Path yaml = dir.resolve("assetopfix.yaml");
-        Files.writeString(yaml, "spring:\n  datasource:\n    url: jdbc:unknown-driver://secret-host/x?password=TOPSECRET\n");
-        assertThat(run(AssetOpFixEnvironment.OPENER, "-f", yaml.toString(), "list")).isEqualTo(AssetOpFixMain.EXIT_ERROR);
-        assertThat(err()).contains("库 game").doesNotContain("TOPSECRET").doesNotContain("secret-host");
-        out.reset();
-        err.reset();
-        assertThat(run(AssetOpFixEnvironment.OPENER, "-f", yaml.toString(), "-expect-database", "legacy_db", "list"))
-                .isEqualTo(AssetOpFixMain.EXIT_ERROR);
-        assertThat(err()).contains("库 legacy_db");
+        Files.writeString(yaml, "spring:\n  datasource:\n    url: jdbc:unknown-driver://secret-host/x?password=TOPSECRET\n    username: assetopfix_test_user\n    password: not-a-real-password\n");
+        // 此例只核无效driver的库名报错与秘密不外泄，不证明NORMAL启动资格。
+        // 仅替身外部boot消费；真实Druid、保护策略、Driver与SQL路径不作替身。
+        var authority = org.mockito.Mockito.mock(com.game.common.sql.WriterAuthority.class);
+        try (var externalBoot = org.mockito.Mockito.mockStatic(com.game.common.sql.WriterAuthority.class)) {
+            externalBoot.when(com.game.common.sql.WriterAuthority::consumeEnvironment).thenReturn(authority);
+            assertThat(run(AssetOpFixEnvironment.OPENER, "-f", yaml.toString(), "list")).isEqualTo(AssetOpFixMain.EXIT_ERROR);
+            assertThat(err()).contains("库 game").doesNotContain("TOPSECRET").doesNotContain("secret-host");
+            out.reset();
+            err.reset();
+            assertThat(run(AssetOpFixEnvironment.OPENER, "-f", yaml.toString(), "-expect-database", "legacy_db", "list"))
+                    .isEqualTo(AssetOpFixMain.EXIT_ERROR);
+            assertThat(err()).contains("库 legacy_db");
+            externalBoot.verify(com.game.common.sql.WriterAuthority::consumeEnvironment, org.mockito.Mockito.times(2));
+            org.mockito.Mockito.verifyNoInteractions(authority);
+        }
     }
 }

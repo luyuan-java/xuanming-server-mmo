@@ -51,6 +51,6 @@ public final class WaveSchedule {
     }
 
     private static boolean allows(RateLimitSettings.WaveStep step, int zoneId) {
-        return step.allowZones().contains(-1L) || step.allowZones().contains((long) zoneId);
+        return step.allowZones().contains(-1L) || step.allowZones().contains(Integer.toUnsignedLong(zoneId));
     }
 }

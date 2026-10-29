@@ -3,7 +3,7 @@ package com.game.gateway.store;
 /**
  * {@code zone_config} 的一行。
  *
- * @param zoneId         区服号（&gt; 0）
+ * @param zoneId         区服号（uint32 位模式；0 非法，上半区按负 int 保存）
  * @param name           展示名（1–64 字符）
  * @param manualStatus   运维手工状态的数值（{@link ZoneManualStatus}）
  * @param capacity       负载档的分母

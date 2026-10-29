@@ -64,12 +64,17 @@ class ZoneMergeSqlAuthorityTiDbTest {
         // 正式域release只释放本域，不能冒作全局SQL release。
         assertThat(n("SELECT writer_epoch FROM route_meta WHERE id=1")).isEqualTo(2);
         assertThat(n("SELECT writable FROM route_meta WHERE id=1")).isZero();
+        for(int zone:new int[]{1,2})assertThatThrownBy(()->{try(var c=db.schemaConnection()){PlayerRouteAuthority.fenced(c,zone,3);}}).isInstanceOf(SQLException.class).hasMessage("SQL路由写者冻结或围栏分片契约不符");
+        db.releaseNormalFrozenSqlSeam(key);
+        assertThat(n("SELECT writer_epoch FROM route_meta WHERE id=1")).isEqualTo(3);
+        assertThat(n("SELECT writable FROM route_meta WHERE id=1")).isEqualTo(1);
         try(var c=db.schemaConnection()){assertThat(PlayerRouteAuthority.fenced(c,1,3)).isTrue();assertThat(PlayerRouteAuthority.fenced(c,2,3)).isFalse();}
         String undo=UUID.randomUUID().toString();var reverse=freeze(undo,2,1,1,"operator",key);
         assertSqlFreezeRound(undo,reverse.getGeneration(),3,4);
         assertThat(n("SELECT COUNT(*) FROM writer_registry")).isEqualTo(2);
         assertThat(n("SELECT COUNT(*) FROM writer_registry WHERE state=2")).isEqualTo(2);
         assertThat(n("SELECT COUNT(DISTINCT instance_id) FROM writer_registry")).isEqualTo(2);
+        assertThat(n("SELECT COUNT(DISTINCT sql_principal) FROM writer_registry")).isEqualTo(2);
         assertThat(n("SELECT COUNT(*) FROM writer_lifecycle_receipt WHERE kind=1")).isEqualTo(2);
         assertThat(n("SELECT COUNT(*) FROM writer_lifecycle_receipt WHERE kind=1 AND previous_epoch=3 AND resulting_epoch=3")).isEqualTo(1);
         assertThat(n("SELECT COUNT(*) FROM writer_slot WHERE state=2 AND writer_epoch=1")).isEqualTo(64);
