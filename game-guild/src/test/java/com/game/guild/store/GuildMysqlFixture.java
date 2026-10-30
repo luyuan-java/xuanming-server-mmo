@@ -97,6 +97,11 @@ public final class GuildMysqlFixture implements AutoCloseable {
         startup(GuildTxListener.NONE).ensureGlobalInsertGuard(NOW, d());
     }
 
+    /** 仅供已发布夹具的元数据、死锁历史和 EXPLAIN 诊断；业务必须继续使用 dataSource。 */
+    public javax.sql.DataSource schemaDataSource() {
+        return authority.schemaDataSource();
+    }
+
     public GuildTx tx(GuildTxListener listener) {
         return new GuildTx(dataSource::getConnection, 10, listener);
     }
@@ -105,6 +110,22 @@ public final class GuildMysqlFixture implements AutoCloseable {
         // 旧帮会协议夹具只测 G/S/M/A；角色外部资格显式替身，不代表生产 player 锁验收。
         // 新 RoleMembershipInterlockMysqlTest 使用生产构造和真实 player 行锁验证接缝。
         return new JdbcGuildStore(tx(listener), hooks, (sql, player) -> true);
+    }
+
+    /** 仅供启动哨兵的既有等待回归：同一 normal 身份、writer boot 与 SQL 守卫，网络边界缩至 200 ms。 */
+    public DruidDataSource guardShortSocketDataSource() throws SQLException {
+        DruidDataSource source = new DruidDataSource();
+        try {
+            source.setUrl(authority.jdbcUrl(PARAMS + "&socketTimeout=200"));
+            source.setUsername(authority.normalUser());
+            source.setPassword(authority.normalPassword());
+            source.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            AuthorityDataSourcePolicy.protectDruid(source, authority.writerBoot(), Boolean.getBoolean("game.it.require-tidb"));
+            return source;
+        } catch (SQLException | RuntimeException failure) {
+            source.close();
+            throw failure;
+        }
     }
 
     public GuildStartupChecks startup(GuildTxListener listener) {

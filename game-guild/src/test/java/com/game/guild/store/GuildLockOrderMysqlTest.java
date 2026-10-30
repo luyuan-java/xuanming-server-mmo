@@ -3,7 +3,6 @@ package com.game.guild.store;
 import static com.game.guild.store.GuildMysqlFixture.NOW;
 import static com.game.guild.store.GuildMysqlFixture.RULES;
 import static com.game.guild.store.GuildMysqlFixture.TTL;
-import static com.game.guild.store.GuildMysqlFixture.assertRejectIn;
 import static com.game.guild.store.GuildMysqlFixture.async;
 import static com.game.guild.store.GuildMysqlFixture.concurrently;
 import static com.game.guild.store.GuildMysqlFixture.d;
@@ -45,9 +44,8 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 @EnabledIfSystemProperty(named = "game.it.mysql", matches = ".+")
 class GuildLockOrderMysqlTest {
 
-    /** 缺省部署命名空间与它的建哨兵行命名锁名（临时库 game_guild_it_* 上照样用这个名字抢锁，见 GuildStartupChecks#insertGuardInitLockName）。 */
+    /** 缺省部署命名空间；保留启动检查的构造接口。哨兵首建由同一 schema 的主键原子仲裁。 */
     private static final GameNamespace NAMESPACE = GameNamespace.of("game");
-    private static final String LOCK_NAME = GuildStartupChecks.insertGuardInitLockName(NAMESPACE);
     /** 无编排的对撞轮数：单轮不撞是运气，几十轮都不撞才说明取锁顺序真的一致。 */
     private static final int ROUNDS = 30;
     /** 带「先卡住一方」编排的轮数（每轮有几百毫秒的有界等待）。 */
@@ -78,6 +76,257 @@ class GuildLockOrderMysqlTest {
         recorder = new Recorder();
         hooks = new GateHooks();
         store = db.store(recorder, hooks);
+    }
+
+    /** 异常仍必失败；保留原始 cause 链，避免断言格式化截断最内层 SQL 错误。 */
+    private static void assertRejectIn(Result result, GuildReject... allowed) {
+        if (result.error() != null) {
+            String message = "不许抛异常";
+            var seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Throwable, Boolean>());
+            for (Throwable cause = result.error(); cause != null && seen.add(cause); cause = cause.getCause()) {
+                if (cause instanceof SQLException sql) {
+                    message += " [errorCode=" + sql.getErrorCode() + ", SQLState=" + sql.getSQLState() + "]";
+                    break;
+                }
+            }
+            throw new AssertionError(message, result.error());
+        }
+        GuildMysqlFixture.assertRejectIn(result, allowed);
+    }
+
+    /** 只保留当前一轮的固定时间槽；失败时附一条摘要，不输出主体、SQL 或原始结果。 */
+    private static final class KickCollisionObservation {
+        private final int round;
+        private final long epoch = System.nanoTime();
+        // 0/1：seed 完成、join 完成；每参与者四槽：start、首次 O 进入、末次 O 退出、end。
+        private final java.util.concurrent.atomic.AtomicLongArray moments =
+                new java.util.concurrent.atomic.AtomicLongArray(18);
+        private final java.util.concurrent.atomic.AtomicLongArray hookCalls =
+                new java.util.concurrent.atomic.AtomicLongArray(4);
+        private final ThreadLocal<Integer> participant = new ThreadLocal<>();
+
+        // 每参与者只保留最后 16 个边界事件；溢出明确记数，不存 SQL、参数或主体标识。
+        private static final int TRACE_CAPACITY = 16;
+        private final java.util.concurrent.atomic.AtomicIntegerArray connectionSequence =
+                new java.util.concurrent.atomic.AtomicIntegerArray(4);
+        private final java.util.concurrent.atomic.AtomicIntegerArray traceCount =
+                new java.util.concurrent.atomic.AtomicIntegerArray(4);
+        private final java.util.concurrent.atomic.AtomicLongArray traceTime =
+                new java.util.concurrent.atomic.AtomicLongArray(4 * TRACE_CAPACITY);
+        private final java.util.concurrent.atomic.AtomicIntegerArray traceConnection =
+                new java.util.concurrent.atomic.AtomicIntegerArray(4 * TRACE_CAPACITY);
+        private final java.util.concurrent.atomic.AtomicIntegerArray tracePhase =
+                new java.util.concurrent.atomic.AtomicIntegerArray(4 * TRACE_CAPACITY);
+        private final java.util.concurrent.atomic.AtomicIntegerArray traceErrorCode =
+                new java.util.concurrent.atomic.AtomicIntegerArray(4 * TRACE_CAPACITY);
+        private final java.util.concurrent.atomic.AtomicReferenceArray<String> traceSqlState =
+                new java.util.concurrent.atomic.AtomicReferenceArray<>(4 * TRACE_CAPACITY);
+
+        private KickCollisionObservation(int round) {
+            this.round = round;
+            for (int i = 0; i < moments.length(); i++) {
+                moments.set(i, -1);
+            }
+        }
+
+        private long micros() {
+            return java.util.concurrent.TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - epoch);
+        }
+
+        private void seedCompleted() {
+            moments.set(0, micros());
+        }
+
+        private void joined() {
+            moments.set(1, micros());
+        }
+
+        private <T> TxOutcome<T> run(int ordinal, java.util.concurrent.Callable<TxOutcome<T>> work) throws Exception {
+            participant.set(ordinal);
+            moments.set(2 + 4 * ordinal, micros());
+            try {
+                return work.call();
+            } finally {
+                moments.set(5 + 4 * ordinal, micros());
+                participant.remove();
+            }
+        }
+
+        private void trace(int ordinal, int connection, int phase, Throwable failure) {
+            int sequence = traceCount.getAndIncrement(ordinal);
+            int slot = ordinal * TRACE_CAPACITY + sequence % TRACE_CAPACITY;
+            traceConnection.set(slot, connection);
+            tracePhase.set(slot, phase);
+            traceErrorCode.set(slot, failure instanceof SQLException sql ? sql.getErrorCode() : 0);
+            String state = failure instanceof SQLException sql ? sql.getSQLState() : null;
+            traceSqlState.set(slot, state != null && state.matches("[0-9A-Za-z]{5}") ? state : "-");
+            traceTime.set(slot, micros());
+        }
+
+        private static Object invokeNormal(Object target, java.lang.reflect.Method method, Object[] arguments)
+                throws Throwable {
+            try {
+                return method.invoke(target, arguments);
+            } catch (java.lang.reflect.InvocationTargetException failure) {
+                throw failure.getCause();
+            }
+        }
+
+        private Connection connection(long waitMillis) throws SQLException {
+            Integer ordinal = participant.get();
+            if (ordinal == null) {
+                return db.dataSource.getConnection(waitMillis);
+            }
+            int sequence = connectionSequence.incrementAndGet(ordinal);
+            trace(ordinal, sequence, 1, null);
+            Connection normal;
+            try {
+                normal = db.dataSource.getConnection(waitMillis);
+                trace(ordinal, sequence, 2, null);
+            } catch (SQLException | RuntimeException | Error failure) {
+                trace(ordinal, sequence, 3, failure);
+                throw failure;
+            }
+            var g1Issued = new java.util.concurrent.atomic.AtomicBoolean();
+            try {
+                return (Connection) java.lang.reflect.Proxy.newProxyInstance(
+                        GuildLockOrderMysqlTest.class.getClassLoader(), new Class<?>[] {Connection.class},
+                        (proxy, method, arguments) -> {
+                            int boundary = g1Issued.get() && method.getParameterCount() == 0
+                                    ? method.getName().equals("commit") ? 7 : method.getName().equals("rollback") ? 10 : 0
+                                    : 0;
+                            if (boundary != 0) {
+                                trace(ordinal, sequence, boundary, null);
+                                try {
+                                    Object result = invokeNormal(normal, method, arguments);
+                                    trace(ordinal, sequence, boundary + 1, null);
+                                    return result;
+                                } catch (Throwable failure) {
+                                    trace(ordinal, sequence, boundary + 2, failure);
+                                    throw failure;
+                                }
+                            }
+                            Object result = invokeNormal(normal, method, arguments);
+                            // 在 GuildJdbc 的原 prepare 参数边界识别；底层 filter 即使加 hint 也不影响本标记。
+                            if (method.getName().equals("prepareStatement") && arguments != null
+                                    && arguments.length > 0 && JdbcGuildStore.LOCK_GUILD.equals(arguments[0])
+                                    && result instanceof java.sql.PreparedStatement statement) {
+                                try {
+                                    return java.lang.reflect.Proxy.newProxyInstance(
+                                            GuildLockOrderMysqlTest.class.getClassLoader(),
+                                            new Class<?>[] {java.sql.PreparedStatement.class},
+                                            (statementProxy, statementMethod, statementArguments) -> {
+                                                if (statementMethod.getName().equals("executeQuery")
+                                                        && statementMethod.getParameterCount() == 0) {
+                                                    g1Issued.set(true);
+                                                    trace(ordinal, sequence, 4, null);
+                                                    try {
+                                                        Object rows = invokeNormal(statement, statementMethod,
+                                                                statementArguments);
+                                                        trace(ordinal, sequence, 5, null);
+                                                        return rows;
+                                                    } catch (Throwable failure) {
+                                                        trace(ordinal, sequence, 6, failure);
+                                                        throw failure;
+                                                    }
+                                                }
+                                                return invokeNormal(statement, statementMethod, statementArguments);
+                                            });
+                                } catch (RuntimeException | Error failure) {
+                                    try {
+                                        statement.close();
+                                    } catch (SQLException cleanup) {
+                                        failure.addSuppressed(cleanup);
+                                    }
+                                    throw failure;
+                                }
+                            }
+                            return result;
+                        });
+            } catch (RuntimeException | Error failure) {
+                try {
+                    normal.close();
+                } catch (SQLException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+                throw failure;
+            }
+        }
+
+        private static String tracePhaseName(int phase) {
+            return switch (phase) {
+                case 1 -> "C+";
+                case 2 -> "C-";
+                case 3 -> "C!";
+                case 4 -> "G+";
+                case 5 -> "G-";
+                case 6 -> "G!";
+                case 7 -> "T+";
+                case 8 -> "T-";
+                case 9 -> "T!";
+                case 10 -> "R+";
+                case 11 -> "R-";
+                case 12 -> "R!";
+                default -> "?";
+            };
+        }
+
+        private void appendTrace(StringBuilder summary, int ordinal) {
+            int count = traceCount.get(ordinal);
+            summary.append(" trace_last16 dropped=").append(Math.max(0, count - TRACE_CAPACITY));
+            for (int index = Math.max(0, count - TRACE_CAPACITY); index < count; index++) {
+                int slot = ordinal * TRACE_CAPACITY + index % TRACE_CAPACITY;
+                summary.append(" c").append(traceConnection.get(slot)).append(tracePhaseName(tracePhase.get(slot)))
+                        .append('@').append(traceTime.get(slot)).append('/').append(traceErrorCode.get(slot))
+                        .append('/').append(traceSqlState.get(slot));
+            }
+        }
+
+        private GuildTxHooks wrap(GuildTxHooks delegate) {
+            return new GuildTxHooks() {
+                @Override
+                public void accelerateDonationDeadlines(GuildJdbc tx, long guildId, List<Long> playerIds, long nowMs)
+                        throws SQLException {
+                    Integer ordinal = participant.get();
+                    if (ordinal != null) {
+                        moments.compareAndSet(3 + 4 * ordinal, -1, micros());
+                        hookCalls.incrementAndGet(ordinal);
+                    }
+                    try {
+                        delegate.accelerateDonationDeadlines(tx, guildId, playerIds, nowMs);
+                    } finally {
+                        if (ordinal != null) {
+                            moments.set(4 + 4 * ordinal, micros());
+                        }
+                    }
+                }
+
+                @Override
+                public void deleteGuildActivityProgress(GuildJdbc tx, long guildId) throws SQLException {
+                    delegate.deleteGuildActivityProgress(tx, guildId);
+                }
+            };
+        }
+
+        private void attach(AssertionError failure) {
+            StringBuilder summary = new StringBuilder(1024);
+            summary.append("Kick观测 round=").append(round).append(" unit=us seed=").append(moments.get(0))
+                    .append(" join=").append(moments.get(1))
+                    .append(" slots=start/O_first/O_last/end; -1=未到; p0=disband,p1=kick,p2=leave,p3=kick");
+            for (int ordinal = 0; ordinal < 4; ordinal++) {
+                summary.append(" p").append(ordinal).append('=');
+                for (int phase = 0; phase < 4; phase++) {
+                    if (phase > 0) {
+                        summary.append('/');
+                    }
+                    summary.append(moments.get(2 + 4 * ordinal + phase));
+                }
+                summary.append(" O_calls=").append(hookCalls.get(ordinal));
+                appendTrace(summary, ordinal);
+            }
+            summary.append(" legend=C:checkout,G:G1_executeQuery,T:G1_connection_commit,R:G1_connection_rollback; +enter,-return,!throw; c仅本参与者连接序号");
+            failure.addSuppressed(new AssertionError(summary.toString()));
+        }
     }
 
     /** 申请成功时必须是新插入（在 p 的守卫下读不到活行）；否则当成失败带出（并发参与者里不做断言，结局交回主线程）。 */
@@ -264,6 +513,10 @@ class GuildLockOrderMysqlTest {
         db.seedGuild(other, zone, 50, 8659);
         long[] people = {leader, officer, m1, m2, m3};
         for (int round = 0; round < ROUNDS; round++) {
+            KickCollisionObservation observation = new KickCollisionObservation(round);
+            // 沿原 fixture.store 的 normal 池、10 秒上限及原角色替身，只在连接返回处加委托观测。
+            store = new JdbcGuildStore(new GuildTx(observation::connection, 10, recorder), observation.wrap(hooks),
+                    (sql, player) -> true);
             long now = NOW + round;
             db.exec("DELETE FROM guild WHERE guild_id = ?", g);
             db.exec("DELETE FROM guild_member WHERE guild_id = ?", g);
@@ -278,22 +531,29 @@ class GuildLockOrderMysqlTest {
             }
             db.seedApplication(g, outsider, now, now + TTL);
 
-            List<Result> r = concurrently(
-                    () -> store.disbandGuild(g, leader, now, null, d()),
-                    () -> store.kickMember(g, leader, m1, now, d()),
-                    () -> store.leaveGuild(g, m2, now, d()),
-                    () -> store.kickMember(g, officer, m3, now, d()));
-            assertThat(r.get(0).ok()).as("round %d 解散 %s", round, r).isTrue();
-            for (Result x : r.subList(1, 4)) {
-                // 解散先提交：帮会行已经没了（踢人的事务外预读也可能先看到帮会不在）
-                assertRejectIn(x, GuildReject.GUILD_GONE);
+            observation.seedCompleted();
+            try {
+                List<Result> r = concurrently(
+                        () -> observation.run(0, () -> store.disbandGuild(g, leader, now, null, d())),
+                        () -> observation.run(1, () -> store.kickMember(g, leader, m1, now, d())),
+                        () -> observation.run(2, () -> store.leaveGuild(g, m2, now, d())),
+                        () -> observation.run(3, () -> store.kickMember(g, officer, m3, now, d())));
+                observation.joined();
+                assertThat(r.get(0).ok()).as("round %d 解散 %s", round, r).isTrue();
+                for (Result x : r.subList(1, 4)) {
+                    // 解散先提交：帮会行已经没了（踢人的事务外预读也可能先看到帮会不在）
+                    assertRejectIn(x, GuildReject.GUILD_GONE);
+                }
+                assertThat(db.guildRows(g)).isZero();
+                for (long p : people) {
+                    assertThat(db.memberships(p)).as("round %d player %d", round, p).isZero();
+                    assertThat(db.playerApplications(p)).as("round %d player %d：I3", round, p).isZero();
+                }
+                assertThat(db.application(g, outsider)).isZero();
+            } catch (AssertionError failure) {
+                observation.attach(failure);
+                throw failure;
             }
-            assertThat(db.guildRows(g)).isZero();
-            for (long p : people) {
-                assertThat(db.memberships(p)).as("round %d player %d", round, p).isZero();
-                assertThat(db.playerApplications(p)).as("round %d player %d：I3", round, p).isZero();
-            }
-            assertThat(db.application(g, outsider)).isZero();
         }
         recorder.assertNoDeadlocks("Disband(G) ‖ Kick / Leave(G 的成员)");
     }
@@ -613,47 +873,93 @@ class GuildLockOrderMysqlTest {
         return null;
     }
 
+    // 保留既有 CaseID；normal SQL 守卫禁止命名锁，等待对象改为未提交的同一哨兵主键。
     @Test
     void 哨兵行_等命名锁超过连接URL的socketTimeout也不断连_持锁者建好后照常启动() throws Exception {
         db.exec("DELETE FROM guild_player_state WHERE player_id = 0");
-        com.alibaba.druid.pool.DruidDataSource shortSocket = new com.alibaba.druid.pool.DruidDataSource();
-        shortSocket.setUrl(GuildMysqlFixture.BASE_URL + "/" + db.database + GuildMysqlFixture.PARAMS + "&socketTimeout=1000");
-        shortSocket.setUsername(GuildMysqlFixture.USER);
-        shortSocket.setPassword(GuildMysqlFixture.PASSWORD);
-        // 持锁方用独立的非池化连接：关连接即结束会话、命名锁随之释放，失败也不会把锁留给后面的用例
-        try (Connection holder = java.sql.DriverManager.getConnection(
-                GuildMysqlFixture.BASE_URL + "/" + db.database + GuildMysqlFixture.PARAMS, GuildMysqlFixture.USER,
-                GuildMysqlFixture.PASSWORD)) {
-            try (var ps = holder.prepareStatement("SELECT GET_LOCK(?, 5)")) {
-                ps.setString(1, LOCK_NAME);
-                try (var rs = ps.executeQuery()) {
-                    assertThat(rs.next() && rs.getLong(1) == 1).as("持锁方先拿到命名锁").isTrue();
+        com.alibaba.druid.pool.DruidDataSource shortSocket = db.guardShortSocketDataSource();
+        var upsertStarted = new java.util.concurrent.CountDownLatch(1);
+        // 只观察精确首建 SQL 的执行起点；追加 filter，不替换现有预算 filter 或 normal driver。
+        shortSocket.getProxyFilters().add(new com.alibaba.druid.filter.FilterAdapter() {
+            @Override
+            public int preparedStatement_executeUpdate(com.alibaba.druid.filter.FilterChain chain,
+                    com.alibaba.druid.proxy.jdbc.PreparedStatementProxy statement) throws SQLException {
+                if (GuildStartupChecks.ENSURE_GLOBAL_INSERT_GUARD.equals(statement.getSql())) {
+                    upsertStarted.countDown();
                 }
+                return chain.preparedStatement_executeUpdate(statement);
             }
-            // 持锁 1.5 s（超过 socketTimeout=1000）后建好哨兵行再放锁：等锁的一方应在拿到锁后复读、照常成功
-            CompletableFuture<Void> release = CompletableFuture.runAsync(() -> {
-                sleep(1_500);
-                try {
-                    execOn(holder, "INSERT IGNORE INTO guild_player_state (player_id, updated_ms) VALUES (0, ?)", NOW + 30);
-                    execOn(holder, "SELECT RELEASE_LOCK(?)", LOCK_NAME);
-                } catch (SQLException e) {
-                    throw new IllegalStateException(e);
-                }
-            });
-            GuildStartupChecks startup = new GuildStartupChecks(new GuildTx(shortSocket::getConnection, 10, recorder), NAMESPACE);
-            Throwable failure = null;
+        });
+        // holder 与等待方均为当前 fixture 的受保护 normal 连接，无 DriverManager / schema 主体旁路。
+        try (Connection holder = db.begin()) {
+            Throwable primaryFailure = null;
+            CompletableFuture<Void> release = null;
             try {
-                startup.ensureGlobalInsertGuard(NOW + 31, d());
-            } catch (RuntimeException e) {
-                failure = e;
+                try (var ps = holder.prepareStatement(
+                        "INSERT INTO guild_player_state (player_id, updated_ms) VALUES (0, ?)")) {
+                    ps.setLong(1, NOW + 30);
+                    assertThat(ps.executeUpdate()).as("持锁方先插入尚未提交的哨兵行").isEqualTo(1);
+                }
+                // 原 1500/1000 ms 同比例缩为 300/200 ms：仍验证超过网络边界，且不提高原 1 s 行锁等待上限。
+                // 观察到精确 upsert 执行起点后才开始持锁间隔，避免建连或前置普通读吃掉交错。
+                release = CompletableFuture.runAsync(() -> {
+                    try {
+                        if (!upsertStarted.await(1, java.util.concurrent.TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("未在原持锁时间内观察到首建 upsert 起跑");
+                        }
+                        sleep(300);
+                        holder.commit();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(e);
+                    } catch (SQLException e) {
+                        throw new IllegalStateException(e);
+                    }
+                });
+                GuildStartupChecks startup = new GuildStartupChecks(new GuildTx(shortSocket::getConnection, 10, recorder), NAMESPACE);
+                Throwable failure = null;
+                try {
+                    startup.ensureGlobalInsertGuard(NOW + 31, d());
+                } catch (RuntimeException e) {
+                    failure = e;
+                }
+                assertThatCode(release::join).as("持锁方提交首建哨兵行").doesNotThrowAnyException();
+                assertThat(failure).as("等锁方").isNull();
+            } catch (Exception | Error failure) {
+                primaryFailure = failure;
+                throw failure;
+            } finally {
+                try {
+                    if (release != null) {
+                        release.join(); // 起跑失败也在原 1 s 上界内结束，汇合后另一线程不再访问 holder
+                    }
+                } catch (RuntimeException | Error completion) {
+                    if (primaryFailure != null) {
+                        primaryFailure.addSuppressed(completion);
+                    } else {
+                        primaryFailure = completion;
+                        throw completion;
+                    }
+                } finally {
+                    try {
+                        if (!holder.isClosed()) {
+                            finish(holder, false); // 成功 commit 后也显式回滚空事务、恢复 autoCommit 并关闭
+                        }
+                    } catch (SQLException | RuntimeException cleanup) {
+                        if (primaryFailure != null) {
+                            primaryFailure.addSuppressed(cleanup);
+                        } else {
+                            throw cleanup;
+                        }
+                    }
+                }
             }
-            assertThatCode(release::join).as("持锁方建行与放锁").doesNotThrowAnyException();
-            assertThat(failure).as("等锁方").isNull();
         } finally {
             shortSocket.close();
         }
         assertThat(db.stateRows(0)).isEqualTo(1);
         assertThat(guardUpdatedMs()).as("持锁者建的那一行").isEqualTo(NOW + 30);
+        recorder.assertNoDeadlocks("启动期单行原子 upsert 等待首次提交");
     }
 
     @Test
@@ -676,7 +982,7 @@ class GuildLockOrderMysqlTest {
             }
         }
         assertThat(db.stateRows(0)).isEqualTo(1);
-        recorder.assertNoDeadlocks("启动期建哨兵：首插者回滚（建哨兵者在命名锁下串行）");
+        recorder.assertNoDeadlocks("启动期建哨兵：首插者回滚（同一主键原子 upsert）");
     }
 
     @Test

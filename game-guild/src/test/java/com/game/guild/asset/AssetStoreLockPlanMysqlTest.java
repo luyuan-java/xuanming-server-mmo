@@ -76,7 +76,7 @@ class AssetStoreLockPlanMysqlTest {
         int outcomeRetry = AssetOutcome.ASSET_OUTCOME_RETRY_VALUE;
         int outcomeUnknown = AssetOutcome.ASSET_OUTCOME_UNKNOWN_VALUE;
         String op = "guild_asset_op";
-        LockPlans.assertPrimaryKeyPointOperations(db, List.of(
+        LockPlans.assertPrimaryKeyPointOperations(db, db.schemaDataSource(), List.of(
                 // guild（位置 1）：终结 DONATE APPLIED 的对侧账
                 new PlanCase("G14 LOCK_GUILD_FUNDS", JdbcGuildAssetStore.LOCK_GUILD_FUNDS, List.of(GUILD), "guild", LOCK_READ),
                 new PlanCase("G15 CREDIT_GUILD_FUNDS", JdbcGuildAssetStore.CREDIT_GUILD_FUNDS, List.of(1000L, GUILD), "guild",

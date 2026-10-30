@@ -1542,9 +1542,9 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 ### 7.10 归属区、名字、在线、推送
 
 - **归属区**（D3）：`player.zone_id`（`game-player-store/src/main/resources/db/game-player-schema.sql`），由建角的 login 按自己的 `game.zone-id` 写入。
-  用 `PlayerProfiles.loadStrict(List.of(pid), deadline)`（`PlayerProfiles.java:62-73`）：查不到行或 `zone_id == 0` → 14012；SQL 出错或预算用完 → `DependencyException`（信封 1003）。
-  审批通过：`loadStrict([actor, applicant])` 一条 `IN` 查询；先按审批人结果判 14012、再判闸门、再按申请人结果判 14018（申请人缺行或 zone 0）。
-  与基线的唯一差别：基线两次查询独立，审批人查询成功而申请人查询失败时先回闸门结果；合并后 SQL 失败直接是故障（闸门在 Java 4.4 恒放行，无可见差异）。
+  用共享 `PlayerHomeZones.homeZones`，生产查询由 `PlayerRouteAuthority.readCurrentHomes` 在同一事务内封装 CURRENT slot 门禁、meta 原件校验、有效 zone 的 64 片围栏与无符号 P 锁重核（见 [zone-merge-spec.md §2.4](zone-merge-spec.md)）；稳定缺行或 `zone_id == 0` → 缺项，由调用方回 14012。
+  SQL NULL、负值或超 uint32 属损坏；CURRENT、meta / zone 围栏、预算或 SQL 失败仍抛 `DependencyException`（信封 1003），不把依赖故障转成业务缺项。原写 `lock` / `extraZones` 继续严格拒绝 zero。
+  审批仍先按审批人结果判 14012、再判闸门、再按申请人缺项判 14018；同次查询 SQL 失败直接是故障。建帮 E2E 的 14012 断言保持。
 - **名字**（D5）、**在线**（D6）、**推送**（D7）：见 §4.5–§4.7。
 
 ### 7.11 启动顺序（照 `guild.go:85-375`）
@@ -1552,7 +1552,7 @@ DELIVERY_DONE 只推本人，要一个单收件人入口（`PlayerPushes.pushToP
 1. 配表校验（`validateGuildTables`），失败拒启；
 2. pbmysql `syncAll` 建表 / 核对；
 3. 数据库版本检查（`SELECT VERSION()`，规则同 §1.1），失败拒启；
-4. 在命名锁 `GET_LOCK('game_guild_insert_guard_init:game', 5)` 下确保哨兵行 `guild_player_state(0)`（§1.7），失败拒启；
+4. Java 在普通受管连接上确保哨兵行 `guild_player_state(0)`：普通读已存在即返回、不排数据锁；缺失时以主键原子 `INSERT INTO guild_player_state (player_id, updated_ms) VALUES (0, ?) ON DUPLICATE KEY UPDATE player_id = player_id` 首建，重复键保留原 `updated_ms`，不调用会话命名锁。保留原 10 s 启动预算内对 1213 / 9007 的有界重试，1205 或其他 SQL 故障拒启；语句完成后复读确认 row 0 存在，缺失拒启。§1.7 保留 Go 基线的历史机制；
 5. 申领发号租约；
 6. 从 MySQL 全量重建排行（§5.9），失败拒启；
 7. 最后才暴露 Dubbo。
@@ -1746,7 +1746,7 @@ label **绝不**放 player_id / guild_id（`guild_manage_repo.go:356-357`；`pus
 |---|---|---|---|---|
 | D1 | 独立进程 game-guild（Dubbo group `guild`，端口 20886，管理端口 18110） | 路线图要求每个服务一个进程（`roadmap.md:48`）；端口顺延 team | 否 | 否 |
 | D2 | 表在 `game`，不建独占库；表定义是 Java 自有 `guild_tables.proto` + game-pbmysql，没有 schemamigrate / `-migrate` / `Schema.AutoMigrate`；pbmysql **补建**缺失的普通索引（基线拒启） | `AGENTS.md` §3；`roadmap.md:50-53`；friend 先例（`PARITY.md:97`）。DDL 与 `guild_db.proto` 逐字相同 | 否 | 否 |
-| D3 | 归属区取 `player.zone_id`，代替 data_service 的 `player:zone` 映射；查不到行或为 0 → 14012，SQL 故障 → 信封 1003 | Java 没有 data_service；同 team D5 | 否 | 否 |
+| D3 | 归属区取 `player.zone_id`，由共享 CURRENT 只读入口返回非零 home；稳定缺行或为 0 → 14012，损坏 / 围栏 / SQL / 预算失败 → 信封 1003；原写 guard 不放宽（§7.10、[共享说明](zone-merge-spec.md) §2.4） | Java 没有 data_service；同 team D5 | 否 | 否 |
 | D4 | 合服闸门只留接口，4.4 用恒放行的 `MergeFence.NONE`；事务内闸门检查点照样保留（解散） | Java 首批不做合服（`architecture.md:617-620`）；14013 在 Java 暂不出现 | 否 | 否 |
 | D5 | 展示名读 `game.player`（name 恒非空），代替 `BatchGetPlayerName`；每批 64；失败留空 | 同 friend D4、team D4 | 是：名字恒非空 | 否 |
 | D6 | 在线态取 `game:presence`（gate 写，TTL 60 s，断线即删），代替 `player:session` 的 ONLINE；批量读带独立 800 ms 上限，超时按离线 | `architecture.md:128-140`；基线 MGET 无独立超时（§9.1 第 11 条） | 否（只在 Redis 卡住时） | 否 |

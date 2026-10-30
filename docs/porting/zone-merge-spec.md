@@ -334,6 +334,10 @@ game-data 自己的 `PlayerStore` bean（现状 `DataApplication.java:14` 排除
   5.4 起归属区取会话 zone（`zone-travel-spec.md:411-414`）。
 - **读者每次现读、无缓存**：组队 / 帮会 / 交易经 `PlayerHomeZones`（`game-common/.../player/PlayerHomeZones.java:12-19`），好友经 `PlayerProfiles`（`OnlineDirectory.java:255`、`FriendService.java:321`），
   login 角色列表直读这一列（`zone-travel-spec.md:415`）。改完这一列，各服务下一次请求立即看到新归属。
+- **CURRENT home 只读查询**：`PlayerRouteAuthority.readCurrentHomes` 在受管显式事务内封装 CURRENT slot 门禁 → meta 原件校验 → 已知有效非零 zone 的 64 片围栏 → 无符号 P 锁后逐一重核；预算和取消仍沿原截止时间，每一步失败回滚。
+  `AuthorityConnection.require` 触发原 `WriterAuthority.begin` 的本 boot CURRENT slot 门禁，维护依靠 slot 围栏；现 `requireMeta(..., true)` 只是 SELECT 原件校验，`shared` 参数不产生 `route_meta` 共享行锁，不能把它记成已取得 meta 行锁。
+  稳定 zero 与缺行仅在这个查询结果中省略，合法 uint32 保留位模式；SQL NULL、负值或超 uint32 仍拒绝。预读到 P 锁之间 home 变化回 40001 / 9007，不能返回未锁的新 home；即使全是缺项，CURRENT / meta 冻结与预算门禁也不跳过。
+  该入口不授予业务写权限：原公开写 `lock` / `extraZones` 的 zero 拒绝和原锁序保持。`PlayerHomeZones` 只消费同事务的不可变非零映射，SQL / 围栏故障仍是依赖错误，不从 Redis 或缓存补权。
 - **7.3 新增的唯一写者**：合服 / 撤销作业，在围栏之下按清单分批改（§7.3 A8、§7.4 U5）。不变量 **I-Z1**：zone 列只有创建时写入与合服 / 撤销作业改写；`architecture.md` §7 写明。
   帮会 `guild.zone_id`、聚宝斋 `trade_listing.market_zone` 同理（只在建帮 / 上架时写，§4.1）。
 

@@ -6,6 +6,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import javax.sql.DataSource;
 
 /**
  * InnoDB 自己记下的「最近一次死锁」（SHOW ENGINE INNODB STATUS 的 LATEST DETECTED DEADLOCK 一段；照 mmorpg economy_repo_test.go:559-638
@@ -20,26 +21,29 @@ public final class InnoDbDeadlockWatch {
     private static final String HEADER = "LATEST DETECTED DEADLOCK";
 
     private final GuildMysqlFixture db;
+    private final DataSource diagnostics;
     private final String before;
     private final TiDbSnapshot beforeTiDb;
 
-    private InnoDbDeadlockWatch(GuildMysqlFixture db, String before) {
+    private InnoDbDeadlockWatch(GuildMysqlFixture db, DataSource diagnostics, String before) {
         this.db = db;
+        this.diagnostics = diagnostics;
         this.before = before;
         this.beforeTiDb = null;
     }
 
-    public static InnoDbDeadlockWatch start(GuildMysqlFixture db) throws SQLException {
+    /** 诊断源由夹具显式注入，版本识别和业务事务仍使用普通连接。 */
+    public static InnoDbDeadlockWatch start(GuildMysqlFixture db, DataSource diagnostics) throws SQLException {
         try (Connection c = db.dataSource.getConnection(); Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("SELECT VERSION()")) {
             assertThat(rs.next()).isTrue();
             String version = rs.getString(1);
             assertThat(ServerVersion.rejection(version)).isNull();
             if (version.toLowerCase(java.util.Locale.ROOT).contains("tidb")) {
-                return new InnoDbDeadlockWatch(db, latestTiDb(db));
+                return new InnoDbDeadlockWatch(db, diagnostics, latestTiDb(diagnostics));
             }
         }
-        return new InnoDbDeadlockWatch(db, latest(db));
+        return new InnoDbDeadlockWatch(db, diagnostics, latest(diagnostics));
     }
 
     /** 全部并发结束之后在主线程调用。 */
@@ -48,7 +52,7 @@ public final class InnoDbDeadlockWatch {
             assertNoTiDbDeadlock(what);
             return;
         }
-        String after = latest(db);
+        String after = latest(diagnostics);
         if (after.equals(before)) {
             return;
         }
@@ -64,17 +68,18 @@ public final class InnoDbDeadlockWatch {
     private record TiDbSnapshot(String instance, int capacity, java.util.Set<TiDbDeadlock> rows) {
     }
 
-    private InnoDbDeadlockWatch(GuildMysqlFixture db, TiDbSnapshot beforeTiDb) {
+    private InnoDbDeadlockWatch(GuildMysqlFixture db, DataSource diagnostics, TiDbSnapshot beforeTiDb) {
         this.db = db;
+        this.diagnostics = diagnostics;
         this.before = "";
         this.beforeTiDb = beforeTiDb;
     }
 
     /** 沿真实后端读取原生历史；配置缺失、采集关闭或历史窗口已满都不能冒充「没有死锁」。 */
-    private static TiDbSnapshot latestTiDb(GuildMysqlFixture db) throws SQLException {
+    private static TiDbSnapshot latestTiDb(DataSource diagnostics) throws SQLException {
         java.util.Map<String, String> config = new java.util.HashMap<>();
         String instance = null;
-        try (Connection c = db.dataSource.getConnection(); Statement st = c.createStatement();
+        try (Connection c = diagnostics.getConnection(); Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("SELECT INSTANCE, `KEY`, VALUE FROM INFORMATION_SCHEMA.CLUSTER_CONFIG"
                      + " WHERE TYPE='tidb' AND `KEY` IN ('pessimistic-txn.deadlock-history-capacity',"
                      + "'pessimistic-txn.deadlock-history-collect-retryable')")) {
@@ -94,7 +99,7 @@ public final class InnoDbDeadlockWatch {
         java.util.Set<TiDbDeadlock> rows = new java.util.HashSet<>();
         java.util.Set<String> events = new java.util.HashSet<>();
         // KEY_INFO 仅在 SQL 内取结构字段，不读出原始业务键、SQL 文本或参数。
-        try (Connection c = db.dataSource.getConnection(); Statement st = c.createStatement();
+        try (Connection c = diagnostics.getConnection(); Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("SELECT DEADLOCK_ID, OCCUR_TIME, TRY_LOCK_TRX_ID, TRX_HOLDING_LOCK, RETRYABLE,"
                      + " JSON_UNQUOTE(JSON_EXTRACT(KEY_INFO,'$.db_name')) AS db_name,"
                      + " JSON_UNQUOTE(JSON_EXTRACT(KEY_INFO,'$.table_name')) AS table_name"
@@ -127,7 +132,7 @@ public final class InnoDbDeadlockWatch {
     }
 
     private void assertNoTiDbDeadlock(String what) throws SQLException {
-        TiDbSnapshot after = latestTiDb(db);
+        TiDbSnapshot after = latestTiDb(diagnostics);
         assertThat(after.instance()).isEqualTo(beforeTiDb.instance());
         assertThat(after.capacity()).isEqualTo(beforeTiDb.capacity());
         java.util.Set<java.util.List<String>> beforeEvents = beforeTiDb.rows().stream()
@@ -145,8 +150,8 @@ public final class InnoDbDeadlockWatch {
         if (!added.isEmpty()) System.out.println("[InnoDbDeadlockWatch] " + what + "：期间记录了别库死锁，原本库断言保留");
     }
 
-    private static String latest(GuildMysqlFixture db) throws SQLException {
-        try (Connection c = db.dataSource.getConnection(); Statement st = c.createStatement();
+    private static String latest(DataSource diagnostics) throws SQLException {
+        try (Connection c = diagnostics.getConnection(); Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("SHOW ENGINE INNODB STATUS")) {
             assertThat(rs.next()).as("SHOW ENGINE INNODB STATUS 没有返回行：测试账号需要 PROCESS 权限").isTrue();
             String status = rs.getString(3);

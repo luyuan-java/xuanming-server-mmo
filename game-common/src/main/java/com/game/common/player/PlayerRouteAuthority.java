@@ -59,6 +59,37 @@ public final class PlayerRouteAuthority {
         }
         left(until);
     }
+    /**
+     * 仅查询当前home：同一受管显式事务内完成CURRENT门禁、meta、有效zone围栏与无符号P锁重核。
+     * 稳定的缺行或zero只在本查询结果中省略；SQL NULL、负值及超uint32仍是损坏。
+     * 返回不可变的非零home映射（uint32位模式）；调用方持有本事务并负责提交/回滚。
+     * 本入口不授予业务写权限；写者仍必须调用上面的严格lock/extraZones入口。
+     */
+    public static Map<Long,Integer> readCurrentHomes(Connection connection,Collection<Long> players,int timeout)throws SQLException{
+        if(connection.getAutoCommit()||timeout<=0||players.isEmpty()||players.size()>MAX_PLAYERS)throw new SQLException("归属查询缺少有界事务或完整角色集合");
+        var ordered=new TreeSet<Long>(Long::compareUnsigned);ordered.addAll(players);
+        if(ordered.contains(0L))throw new SQLException("角色零号不能查询路由权威");
+        com.game.common.sql.AuthorityConnection.require(connection);
+        long until=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(timeout);
+        requireMeta(connection,left(until),true);
+        var homes=new TreeMap<Long,Long>(Long::compareUnsigned);var zones=new TreeSet<Long>();
+        for(long player:ordered){
+            Long home=home(connection,player,left(until),false);homes.put(player,home);
+            if(home!=null){
+                if(home<0||home>0xffff_ffffL)throw new SQLException("SQL角色归属区损坏");
+                if(home!=0)zones.add(home);
+            }
+        }
+        for(long zone:zones)lockZone(connection,zone,left(until));
+        var result=new TreeMap<Long,Integer>(Long::compareUnsigned);
+        for(var entry:homes.entrySet()){
+            Long current=home(connection,entry.getKey(),left(until),true);
+            if(!java.util.Objects.equals(entry.getValue(),current))throw new SQLException("归属区锁集合已经变化，须重新开始完整查询事务","40001",9007);
+            if(current!=null&&current!=0)result.put(entry.getKey(),current.intValue());
+        }
+        left(until);return Map.copyOf(result);
+    }
+
     private static int left(long until)throws java.sql.SQLTimeoutException{long nanos=until-System.nanoTime();if(nanos<=0||Thread.currentThread().isInterrupted())throw new java.sql.SQLTimeoutException("路由事务预算耗尽或已取消");return (int)Math.max(1,java.util.concurrent.TimeUnit.NANOSECONDS.toSeconds(nanos+999_999_999L));}
     public static void requireMeta(Connection connection,int timeout,boolean shared)throws SQLException{
         try(var statement=connection.prepareStatement("SELECT generation,writable,fence_shards FROM route_meta WHERE id=1")){

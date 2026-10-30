@@ -322,4 +322,61 @@ class AuthorityConnectionTest {
         }
     }
 
+
+    @Test void TiDB推荐有限提示保持normal原SQL且不改期限边界()throws Exception{
+        String join="INL_JOIN(f@qb_f, b_out@qb_b_out, b_in@qb_b_in, r_out@qb_r_out, r_in@qb_r_in)";
+        // 复用现RecommendSql产生的两种hint头；真实优化计划与SHOW WARNINGS另由owned诊断会话验收。
+        for(String sql:java.util.List.of(
+                "SELECT /*+ MAX_EXECUTION_TIME(1000) "+join+" INL_JOIN(@qb_fof f2) */ c.player_id FROM "
+                        +"(SELECT /*+ QB_NAME(qb_fof) */ f2.player_id FROM friend f2) c WHERE NOT EXISTS "
+                        +"(SELECT /*+ QB_NAME(qb_f) */ 1 FROM friend f WHERE f.player_id=c.player_id)",
+                "SELECT /*+ "+join+" */ player_id FROM friend",
+                "SELECT /*+ MAX_EXECUTION_TIME("+Integer.MAX_VALUE+") "+join+" */ player_id FROM friend")){
+            var f=fixture();PreparedStatement driver=mock(PreparedStatement.class);
+            when(f.raw.prepareStatement(sql)).thenReturn(driver);
+            try(var managed=f.managed.prepareStatement(sql)){
+                assertNotSame(driver,managed);
+                assertEquals(AuthoritySql.Kind.READ,AuthoritySql.validate(sql));
+                verify(f.raw).prepareStatement(sql);
+                verify(driver,never()).executeQuery();
+            }
+        }
+    }
+
+    @Test void TiDB提示仍拒注入错位超界期限与normal控制SQL()throws Exception{
+        for(String sql:java.util.List.of(
+                "SELECT /*+ QB_NAME() */ 1",
+                "SELECT /*+ QB_NAME('qb_f') */ 1",
+                "SELECT /*+ QB_NAME(qb_f, qb_g) */ 1",
+                "SELECT /*+ QB_NAME(abcdefghijklmnopqrstuvwxyzabcdefg) */ 1",
+                "SELECT /*+ INL_JOIN() */ 1",
+                "SELECT /*+ INL_JOIN(f@qb_f,) */ 1",
+                "SELECT /*+ INL_JOIN(f@qb_f, g@qb_g, h@qb_h, i@qb_i, j@qb_j, k@qb_k) */ 1",
+                "SELECT /*+ INL_JOIN(f@qb_f) INL_JOIN(@qb_fof f2) INL_JOIN(@qb_more f3) */ 1",
+                "SELECT /*+ INL_JOIN(f@qb_f) SET_VAR(tidb_snapshot='old') */ 1",
+                "SELECT /*+ QB_NAME(qb_f) SET_VAR(sql_mode='ANSI_QUOTES') */ 1",
+                "SELECT /*+ QB_NAME(qb_f; DROP) */ 1",
+                "SELECT /*+ QB_NAME(qb_f) */ /*+ QB_NAME(qb_g) */ 1",
+                "SELECT /* + QB_NAME(qb_f) */ 1",
+                "SELECT /*+\u00a0QB_NAME(qb_f) */ 1",
+                "SELECT 1 /*+ QB_NAME(qb_f) */",
+                "/*+ QB_NAME(qb_f) */ SELECT 1",
+                "UPDATE /*+ QB_NAME(qb_f) */ business SET v=1",
+                "SELECT (SELECT /*+ MAX_EXECUTION_TIME(1) INL_JOIN(f@qb_f) */ 1)",
+                "SELECT /*+ MAX_EXECUTION_TIME(0) INL_JOIN(f@qb_f) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(2147483648) INL_JOIN(f@qb_f) */ 1",
+                "SELECT /*+ MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) INL_JOIN(f@qb_f) */ 1",
+                "SELECT /*+ INL_JOIN(f@qb_f) */ 1; DELETE FROM business",
+                "SELECT /*+ QB_NAME(qb_f) */ GET_LOCK('x',1)",
+                "SELECT /*+ QB_NAME(qb_f) */ 1 INTO OUTFILE 'x'",
+                "SELECT /*+ QB_NAME(qb_f) */ /*!50000 SQL_NO_CACHE */ 1",
+                "SHOW WARNINGS",
+                "EXPLAIN SELECT v FROM business",
+                "SET SESSION tidb_stats_load_sync_wait=10000")){
+            var f=fixture();
+            assertEquals("42000",assertThrows(SQLException.class,()->f.managed.prepareStatement(sql),sql).getSQLState());
+            verify(f.raw,never()).prepareStatement(anyString());
+        }
+    }
+
 }

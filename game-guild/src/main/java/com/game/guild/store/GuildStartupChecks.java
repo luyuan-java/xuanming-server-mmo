@@ -19,43 +19,32 @@ import org.slf4j.LoggerFactory;
  *   <li>{@link #ensureGlobalInsertGuard}：确保全局插入守卫哨兵行 guild_player_state(0) 存在；</li>
  *   <li>{@link #checkAffectedRowsSemantics}（4.5）：连接池必须是「实际改动行数」语义（useAffectedRows=true）。</li>
  * </ol>
- * 预算照基线：版本检查 5 s、建哨兵行 10 s（guild.go:124-142；后者必须明显长于 GET_LOCK 的 5 s 等待）。
- * 建哨兵行那条专用连接上不设语句超时上限（GET_LOCK 要等满 5 s，超过 {@code game.guild.query-timeout}）。阻塞 JDBC；只在启动线程上调用。
+ * 预算照基线：版本检查 5 s、建哨兵行 10 s（guild.go:124-142）。
+ * 建哨兵行使用普通受管连接上的单行原子 upsert；不使用会话命名锁。阻塞 JDBC；只在启动线程上调用。
  */
 public final class GuildStartupChecks {
 
     private static final Logger log = LoggerFactory.getLogger(GuildStartupChecks.class);
 
-    /** GET_LOCK 的等待上限（秒），必须明显短于调用方预算（基线给整步 10 s）。 */
-    static final int INSERT_GUARD_INIT_LOCK_WAIT_SECONDS = 5;
-
-    /** RELEASE_LOCK 的独立超时：调用方预算可能已到期，锁仍然要放。 */
-    static final long INSERT_GUARD_INIT_RELEASE_TIMEOUT_MS = 2_000L;
-    /** 放宽网络超时时在剩余启动预算之外再留的余量（让 GET_LOCK 的 0 结果先于驱动断连回来）。 */
+    /** 保留原剩余启动预算之外的网络超时余量，不扩大整步预算。 */
     static final int NETWORK_TIMEOUT_MARGIN_MS = 1_000;
 
     static final String SELECT_VERSION = "SELECT VERSION()";
-    static final String GET_LOCK = "SELECT GET_LOCK(?, ?)";
-    static final String RELEASE_LOCK = "SELECT RELEASE_LOCK(?)";
+    // 唯一主键原子仲裁首建；重复键走排他更新路径，保留首建的 updated_ms。
+    static final String ENSURE_GLOBAL_INSERT_GUARD = "INSERT INTO guild_player_state (player_id, updated_ms) VALUES (?, ?)"
+            + " ON DUPLICATE KEY UPDATE player_id = player_id";
 
     private final GuildTx tx;
-    /** 本部署建哨兵行用的命名锁名（{@link #insertGuardInitLockName}）。 */
-    private final String initLockName;
 
-    /** @param namespace 部署命名空间（装配方注入的 bean；决定命名锁名的尾段） */
+    /** @param namespace 保留装配调用面的非空部署标识；数据隔离由连接绑定的 schema 保证。 */
     public GuildStartupChecks(GuildTx tx, GameNamespace namespace) {
         this.tx = tx;
-        this.initLockName = insertGuardInitLockName(namespace);
+        Objects.requireNonNull(namespace, "namespace");
     }
 
     /**
-     * 建哨兵行的会话级命名锁名（死锁复核 C1，guild_manage_repo.go:841-845）。GET_LOCK 的名字在整个 MySQL 实例内共用、不分库，所以尾段是
-     * <b>部署命名空间</b>（{@code game.namespace}，缺省 {@code game}，与库名一一对应）：共用同一个 MySQL 实例的两个部署互不排队；
-     * 前段 {@code game_guild_insert_guard_init:} 是代码身份，不随命名空间变。缺省命名空间下整串与以前逐字节相同。纯函数。
-     *
-     * <p>与 pbmysql 的结构同步咨询锁 {@code proto2mysql:sync:<fnv32(DATABASE())>} 口径不同：那把按运行时的实际库名，这把按命名空间——
-     * 集成测试（GuildLockOrderMysqlTest）在临时库 {@code game_guild_it_*} 上拿这个名字抢锁，按 DATABASE() 取名会让它失效。
-     * 两把锁不同名，在启动期先后获取、从不嵌套。
+     * 保留原命名锁名的纯函数兼容接口与 golden 向量；当前初始化不获取会话命名锁。
+     * 多部署数据按各自 schema 中的哨兵主键隔离。
      */
     public static String insertGuardInitLockName(GameNamespace namespace) {
         return "game_guild_insert_guard_init:" + Objects.requireNonNull(namespace, "namespace").value();
@@ -78,21 +67,20 @@ public final class GuildStartupChecks {
     }
 
     /**
-     * 保证全局插入守卫哨兵行存在（EnsureGlobalInsertGuard，guild_manage_repo.go:865-949）；幂等，多实例同时首建也不会死锁。
+     * 保证全局插入守卫哨兵行存在；幂等，多实例同时首建由同一主键上的原子 upsert 仲裁。
      *
      * <ol>
-     *   <li>普通读：行已在（常态）就返回，不取任何锁——运行中的实例可能正持着它，新实例启动不该排在后面；</li>
-     *   <li>缺行：在一条专用连接上 {@code GET_LOCK(name, 5)}；结果不是 1 → 复读一次，行已在算成功，否则拒启（绝不无锁插入）；</li>
-     *   <li>同一连接上复读，仍缺就自动提交 {@code INSERT IGNORE (0, now)}（1213 / 9007 有界重跑，op = insert_guard；1205 拒启），
-     *       插完再读一次确认（INSERT IGNORE 会把非重复类异常降级成告警，不能只看返回值）；</li>
-     *   <li>最后 {@code RELEASE_LOCK}（独立 2 s 超时，失败只记日志：连接断开时服务端也会释放）。</li>
+     *   <li>普通读：行已在就返回，不取数据锁，运行实例持有哨兵行时也不排队；</li>
+     *   <li>缺行：普通受管连接执行单行 {@code INSERT ... ON DUPLICATE KEY UPDATE player_id = player_id}；
+     *       不使用被 normal SQL 守卫禁止的 GET_LOCK / RELEASE_LOCK，也不使用 INSERT IGNORE 的重复键共享锁路径；</li>
+     *   <li>1213 / 9007 仍在原预算内有界重跑（op = insert_guard），1205 拒启；</li>
+     *   <li>原子语句自动提交后复读确认，重复首建不改写最早已提交的 updated_ms。</li>
      * </ol>
-     * 复读、INSERT、确认都走同一条连接：命名锁是会话级的，语句落到池里别的连接上就不在锁下。
      *
-     * @param nowMs 只写进 updated_ms（诊断用）
+     * @param nowMs 只写进首次建行的 updated_ms（诊断用）
      * @throws GuildStoreException 行仍缺（{@link GuildStoreException.Kind#GLOBAL_INSERT_GUARD_MISSING}）
      * @throws IllegalStateException 建行遇 1205 或死锁重跑用尽
-     * @throws DependencyException   SQL 故障
+     * @throws DependencyException SQL 故障
      */
     public void ensureGlobalInsertGuard(long nowMs, Deadline deadline) {
         List<Long> guard = List.of(JdbcGuildStore.GLOBAL_INSERT_GUARD_PLAYER_ID);
@@ -100,31 +88,12 @@ public final class GuildStartupChecks {
             return;
         }
         try (Connection c = tx.connections().get(Math.max(1, deadline.remainingMillis()))) {
-            // GET_LOCK 要能等满 5 s 拿到 0 再复读（基线 insertGuardInitLockWaitSeconds 必须明显短于调用方 ctx）：
-            // 连接池按 URL 的 socketTimeout（4 s）给每条物理连接设了网络超时，等锁期间服务端不回任何字节，
-            // 不放宽的话驱动 4 s 就断连、复读分支永远走不到。放宽到剩余启动预算，还回池前恢复（同 GuildTables.sync）。
+            // 普通行锁等待仍受原启动预算约束；暂时放宽请求连接的 socketTimeout，归还前恢复。
             int socketTimeout = c.getNetworkTimeout();
             c.setNetworkTimeout(Runnable::run, (int) Math.max(1, deadline.remainingMillis()) + NETWORK_TIMEOUT_MARGIN_MS);
             try {
-                // 不设查询超时上限：GET_LOCK 要等到 5 s，超过 game.guild.query-timeout
                 GuildJdbc db = new GuildJdbc(c, deadline, 0);
-                Long got = db.one(GET_LOCK, rs -> {
-                    long v = rs.getLong(1);
-                    return rs.wasNull() ? null : v;
-                }, initLockName, INSERT_GUARD_INIT_LOCK_WAIT_SECONDS);
-                if (got == null || got != 1) {
-                    if (JdbcGuildStore.missingPlayerStateRows(db, guard).isEmpty()) {
-                        return; // 持锁者已建好、只是还没放锁
-                    }
-                    throw new GuildStoreException(GuildStoreException.Kind.GLOBAL_INSERT_GUARD_MISSING,
-                            "命名锁 " + initLockName + " 在 " + INSERT_GUARD_INIT_LOCK_WAIT_SECONDS
-                                    + " s 内没拿到（结果 " + got + "），哨兵行仍缺失");
-                }
-                try {
-                    insertGuardUnderLock(db, guard, nowMs, deadline);
-                } finally {
-                    releaseInitLock(c);
-                }
+                insertGuardAtomically(db, guard, nowMs, deadline);
             } finally {
                 if (!c.isClosed()) {
                     c.setNetworkTimeout(Runnable::run, socketTimeout);
@@ -176,14 +145,14 @@ public final class GuildStartupChecks {
             + " (player_id, counter_kind, ref_id, period_key, used_count, updated_ms) VALUES (?, ?, 0, 0, 0, 0)"
             + " ON DUPLICATE KEY UPDATE used_count = used_count";
 
-    private void insertGuardUnderLock(GuildJdbc db, List<Long> guard, long nowMs, Deadline deadline) throws SQLException {
+    private void insertGuardAtomically(GuildJdbc db, List<Long> guard, long nowMs, Deadline deadline) throws SQLException {
         if (JdbcGuildStore.missingPlayerStateRows(db, guard).isEmpty()) {
-            return; // 前一个持锁者已经建好并提交
+            return; // 另一个首建者已经提交，避免再排重复键更新锁
         }
         GuildTxListener listener = tx.listener();
         for (int attempt = 1; ; attempt++) {
             try {
-                db.update(JdbcGuildStore.ENSURE_PLAYER_STATE, JdbcGuildStore.GLOBAL_INSERT_GUARD_PLAYER_ID, nowMs);
+                db.update(ENSURE_GLOBAL_INSERT_GUARD, JdbcGuildStore.GLOBAL_INSERT_GUARD_PLAYER_ID, nowMs);
                 break;
             } catch (SQLException e) {
                 if (GuildSqlErrors.isLockWaitTimeout(e)) {
@@ -211,17 +180,9 @@ public final class GuildStartupChecks {
         }
         if (!JdbcGuildStore.missingPlayerStateRows(db, guard).isEmpty()) {
             throw new GuildStoreException(GuildStoreException.Kind.GLOBAL_INSERT_GUARD_MISSING,
-                    "INSERT IGNORE 之后哨兵行仍缺失");
+                    "原子 upsert 之后哨兵行仍缺失");
         }
         log.info("已建全局插入守卫哨兵行 guild_player_state(0)");
     }
 
-    private void releaseInitLock(Connection c) {
-        try {
-            new GuildJdbc(c, Deadline.after(INSERT_GUARD_INIT_RELEASE_TIMEOUT_MS), 0)
-                    .one(RELEASE_LOCK, rs -> rs.getObject(1) == null ? 0L : rs.getLong(1), initLockName);
-        } catch (SQLException | RuntimeException e) {
-            log.error("释放命名锁 {} 失败（连接关闭时服务端会释放）: {}", initLockName, e.toString());
-        }
-    }
 }

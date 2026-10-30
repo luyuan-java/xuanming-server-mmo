@@ -6,7 +6,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.common.deadline.Deadline;
-import com.game.common.player.RouteAuthorityInitializer;
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
 import com.game.friend.store.RecommendStore.Candidate;
 import com.game.friend.store.pb.FriendBlockRow;
 import com.game.friend.store.pb.FriendCapacityRow;
@@ -24,14 +25,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.UUID;
 import java.util.stream.Stream;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * 两种真实方言的条件验收：默认跳过，设置 game.it.mysql / game.it.tidb 后运行。
- * TiDB 严格验收另设 game.it.tidb.required=true，缺入口必须失败。每例只操作随机独立库。
+ * TiDB 严格验收另设 game.it.tidb.required=true，缺入口必须失败。每例使用有归属原件的随机独立 fixture。
+ * seed / Schema / 统计维护走 fixture owner5；计划与会话读数走 owner 诊断，业务推荐走受保护的 normal 池。
  * 计划测试覆盖新鲜 / 空表陈旧统计；不把离线 SQL 文本断言或 MySQL 结果当作 TiDB 验收。
  */
 class RecommendDatabaseTest {
@@ -115,7 +116,7 @@ class RecommendDatabaseTest {
                 RecommendSql sql = new RecommendSql(target.dialect);
                 var mutual = sql.mutual(1, List.of(10_000L), 20);
                 var anchor = sql.anchor(1, List.of(10_000L), 10_000, 20);
-                try (Connection c = db.pool.getConnection()) {
+                try (Connection c = db.diagnosticConnection()) {
                     assertPlan(c, target.dialect, mutual, "f2");
                     assertPlan(c, target.dialect, anchor, "m2");
                     if (target.dialect == RecommendSql.Dialect.MYSQL) {
@@ -216,59 +217,79 @@ class RecommendDatabaseTest {
     }
 
     private static final class Database implements AutoCloseable {
-        private final String name = "game_friend_rec_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        private final String server;
-        private final String user;
         private final String password = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
         private static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=35000";
-        private final DruidDataSource pool = new DruidDataSource();
+        private final DruidDataSource normalPool = new DruidDataSource();
         private final Target target;
+        private AuthoritySqlFixture fixture;
         Database(Target target, String configured) throws Exception {
             this.target = target;
             if (!configured.startsWith("jdbc:mysql://")) throw new IllegalArgumentException("只接受 MySQL JDBC 入口");
             URI address = URI.create(configured.substring(5));
             if (address.getRawUserInfo() != null || address.getRawQuery() != null || address.getHost() == null)
                 throw new IllegalArgumentException("测试入口仅提供服务器地址，凭据从环境注入");
-            server = "jdbc:mysql://" + address.getHost() + (address.getPort() > 0 ? ":" + address.getPort() : "");
-            user = System.getProperty("game.it." + target.property + ".user", System.getProperty("game.it.mysql.user", "root"));
-            try (var c = DriverManager.getConnection(server + "/" + PARAMS, user, password); var st = c.createStatement()) {
+            String server = "jdbc:mysql://" + address.getHost() + (address.getPort() > 0 ? ":" + address.getPort() : "");
+            String user = System.getProperty("game.it." + target.property + ".user", System.getProperty("game.it.mysql.user", "root"));
+            // 保留原只读方言断言；这里不执行库 / 表 DDL。
+            try (var c = DriverManager.getConnection(server + "/" + PARAMS, user, password)) {
                 assertThat(RecommendSql.detect(c, 3)).as("入口必须确实连接声明的方言").isEqualTo(target.dialect);
-                st.execute("CREATE DATABASE `" + name + "`");
             }
             try {
-                pool.setUrl(server + "/" + name + PARAMS); pool.setUsername(user); pool.setPassword(password); pool.setMaxActive(4);
-                pool.setConnectionInitSqls(List.of(target.dialect == RecommendSql.Dialect.TIDB
-                        ? "SET SESSION tidb_snapshot='',tidb_read_staleness=0,tidb_low_resolution_tso=OFF,tidb_read_consistency='strict',tidb_replica_read='leader',tidb_txn_mode='pessimistic',transaction_isolation='READ-COMMITTED'"
-                        : "SET SESSION transaction_isolation='READ-COMMITTED'"));
                 PbMysql schema = new PbMysql();
                 schema.register(FriendEdgeRow.getDefaultInstance()); schema.register(FriendRequestRow.getDefaultInstance());
                 schema.register(FriendCapacityRow.getDefaultInstance()); schema.register(FriendBlockRow.getDefaultInstance());
-                try (var c = pool.getConnection()) { schema.syncAll(c); }
-                execute("CREATE TABLE player (player_id BIGINT UNSIGNED PRIMARY KEY, account VARBINARY(191) NOT NULL, owner_revision BIGINT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0, zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
-                new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/game-route-authority-schema.sql")).execute(pool);
-                try (var c = pool.getConnection()) { RouteAuthorityInitializer.initialize(c, UUID.randomUUID().toString(), List.of(1)); }
+                fixture = AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(
+                        server + "/", user, password, "game_friend_rec",
+                        target.dialect == RecommendSql.Dialect.MYSQL, List.of(1)), (c, principal) -> {
+                    schema.initializeFresh(c, principal);
+                    try (var st = c.createStatement()) {
+                        st.setQueryTimeout(5);
+                        st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED PRIMARY KEY, account VARBINARY(191) NOT NULL, owner_revision BIGINT UNSIGNED NOT NULL, trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0, zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
+                    }
+                });
+                normalPool.setUrl(fixture.jdbcUrl(PARAMS)); normalPool.setUsername(fixture.normalUser()); normalPool.setPassword(fixture.normalPassword()); normalPool.setMaxActive(4);
+                normalPool.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                AuthorityDataSourcePolicy.protectDruid(normalPool, fixture.writerBoot(), target.dialect == RecommendSql.Dialect.TIDB);
+                try (var c = diagnosticConnection()) { schema.syncAll(c); }
             } catch (Exception | Error failure) {
-                try { close(); } catch (Exception cleanup) { failure.addSuppressed(cleanup); }
+                try { close(); } catch (Exception | Error cleanup) { if (failure != cleanup) failure.addSuppressed(cleanup); }
                 throw failure;
             }
         }
-        RecommendStore store() throws SQLException { return RecommendStore.forDatabase(pool, 10, (lo, span) -> 0); }
-        void execute(String sql, Object... args) throws SQLException {
-            try (var c = pool.getConnection(); var ps = c.prepareStatement(sql)) {
-                ps.setQueryTimeout(30);
-                for (int i = 0; i < args.length; i++) ps.setObject(i + 1, args[i]);
-                ps.execute();
+        RecommendStore store() throws SQLException { return RecommendStore.forDatabase(normalPool, 10, (lo, span) -> 0); }
+        // 仅供计划 / SHOW / Handler_read诊断；既有schemaDataSource保owner归属门禁及network5，不借normal或unwrap。
+        Connection diagnosticConnection() throws SQLException { return fixture.schemaDataSource().getConnection(); }
+        private void ownerWork(AuthoritySqlFixture.OwnerSchemaWork<Void> work) throws SQLException {
+            try {
+                fixture.withOwnerSchema(work);
+            } catch (SQLException | RuntimeException failure) {
+                throw failure;
+            } catch (Exception failure) {
+                throw new SQLException("推荐夹具 owner 工作未确认", failure);
             }
         }
-        void edges(long... pairs) throws SQLException {
-            try (var c = pool.getConnection(); var ps = c.prepareStatement("INSERT INTO friend (player_id,friend_player_id,since_ms) VALUES (?,?,1)")) {
-                ps.setQueryTimeout(30);
-                for (int i = 0; i < pairs.length; i += 2) {
-                    ps.setObject(1, uid(pairs[i])); ps.setObject(2, uid(pairs[i + 1])); ps.addBatch();
-                    ps.setObject(1, uid(pairs[i + 1])); ps.setObject(2, uid(pairs[i])); ps.addBatch();
+        void execute(String sql, Object... args) throws SQLException {
+            ownerWork(c -> {
+                try (var ps = c.prepareStatement(sql)) {
+                    ps.setQueryTimeout(5);
+                    for (int i = 0; i < args.length; i++) ps.setObject(i + 1, args[i]);
+                    ps.execute();
                 }
-                ps.executeBatch();
-            }
+                return null;
+            });
+        }
+        void edges(long... pairs) throws SQLException {
+            ownerWork(c -> {
+                try (var ps = c.prepareStatement("INSERT INTO friend (player_id,friend_player_id,since_ms) VALUES (?,?,1)")) {
+                    ps.setQueryTimeout(5);
+                    for (int i = 0; i < pairs.length; i += 2) {
+                        ps.setObject(1, uid(pairs[i])); ps.setObject(2, uid(pairs[i + 1])); ps.addBatch();
+                        ps.setObject(1, uid(pairs[i + 1])); ps.setObject(2, uid(pairs[i])); ps.addBatch();
+                    }
+                    ps.executeBatch();
+                }
+                return null;
+            });
         }
         void request(long from, long to, int status) throws SQLException {
             execute("INSERT INTO friend_request(from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (?,?,1,?,1)", uid(from), uid(to), status);
@@ -282,30 +303,50 @@ class RecommendDatabaseTest {
             }
             for (int i = 0; i < 32; i++) { pairs.add(50_000L + i); pairs.add(10L + i % 16); }
             edges(pairs.stream().mapToLong(Long::longValue).toArray());
-            if (blockTop) try (var c = pool.getConnection(); var ps = c.prepareStatement("INSERT INTO friend_block VALUES (?,1,1)")) {
-                for (long id = 10_000; id < 11_024; id++) { ps.setLong(1, id); ps.addBatch(); }
-                ps.executeBatch();
-            }
+            if (blockTop) ownerWork(c -> {
+                try (var ps = c.prepareStatement("INSERT INTO friend_block VALUES (?,1,1)")) {
+                    ps.setQueryTimeout(5);
+                    for (long id = 10_000; id < 11_024; id++) { ps.setLong(1, id); ps.addBatch(); }
+                    ps.executeBatch();
+                }
+                return null;
+            });
         }
         void noise() throws SQLException {
-            try (var c = pool.getConnection(); var block = c.prepareStatement("INSERT INTO friend_block VALUES (?,1,1)");
-                 var pending = c.prepareStatement("INSERT INTO friend_request(from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (?,2,1,1,1),(?,1,1,3,1)")) {
-                for (int i = 0; i < 4000; i++) {
-                    block.setLong(1, 1_000_000L + i); block.addBatch();
-                    pending.setLong(1, 2_000_000L + i); pending.setLong(2, 3_000_000L + i); pending.addBatch();
+            ownerWork(c -> {
+                try (var block = c.prepareStatement("INSERT INTO friend_block VALUES (?,1,1)");
+                     var pending = c.prepareStatement("INSERT INTO friend_request(from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (?,2,1,1,1),(?,1,1,3,1)")) {
+                    block.setQueryTimeout(5); pending.setQueryTimeout(5);
+                    for (int i = 0; i < 4000; i++) {
+                        block.setLong(1, 1_000_000L + i); block.addBatch();
+                        pending.setLong(1, 2_000_000L + i); pending.setLong(2, 3_000_000L + i); pending.addBatch();
+                    }
+                    block.executeBatch(); pending.executeBatch();
                 }
-                block.executeBatch(); pending.executeBatch();
-            }
+                return null;
+            });
         }
         @Override public void close() throws SQLException {
+            Throwable failure = null;
             try {
-                if (target.dialect == RecommendSql.Dialect.TIDB) execute("UNLOCK STATS " + TABLES);
-            } finally {
-                pool.close();
-                try (var c = DriverManager.getConnection(server + "/" + PARAMS, user, password); var st = c.createStatement()) {
-                    st.execute("DROP DATABASE IF EXISTS `" + name + "`");
-                }
+                if (fixture != null && target.dialect == RecommendSql.Dialect.TIDB) execute("UNLOCK STATS " + TABLES);
+            } catch (Exception | Error cleanup) {
+                failure = cleanup;
             }
+            try {
+                normalPool.close();
+            } catch (Exception | Error cleanup) {
+                if (failure == null) failure = cleanup; else if (failure != cleanup) failure.addSuppressed(cleanup);
+            }
+            try {
+                if (fixture != null) fixture.close();
+            } catch (Exception | Error cleanup) {
+                if (failure == null) failure = cleanup; else if (failure != cleanup) failure.addSuppressed(cleanup);
+            }
+            if (failure instanceof SQLException sql) throw sql;
+            if (failure instanceof RuntimeException runtime) throw runtime;
+            if (failure instanceof Error error) throw error;
+            if (failure != null) throw new SQLException("推荐夹具关闭未确认", failure);
         }
     }
 }

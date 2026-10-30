@@ -75,10 +75,8 @@ public final class PlayerHomeZones implements HomeZones {
             connection.setNetworkTimeout(Runnable::run,(int)Math.max(1,Math.min(3000,budget.remainingMillis())));
             connection.setTransactionIsolation(java.sql.Connection.TRANSACTION_READ_COMMITTED);connection.setAutoCommit(false);
             try{
-                int timeout=(int)Math.max(1,Math.min(3,(budget.remainingMillis()+999)/1000));PlayerRouteAuthority.lock(connection,players,timeout);
-                var zones=new HashMap<Long,Integer>();try(var statement=connection.prepareStatement("SELECT zone_id FROM player WHERE player_id=?")){
-                    statement.setQueryTimeout(timeout);for(long player:players){statement.setObject(1,PlayerRouteAuthority.u64(player));try(var rows=statement.executeQuery()){if(rows.next()){long zone=rows.getLong(1);if(rows.wasNull()||zone==0||zone>0xffff_ffffL)throw new java.sql.SQLException("SQLhome原件无效");zones.put(player,(int)zone);}}}
-                }
+                int timeout=(int)Math.max(1,Math.min(3,(budget.remainingMillis()+999)/1000));
+                Map<Long,Integer> zones=PlayerRouteAuthority.readCurrentHomes(connection,players,timeout);
                 if(budget.expired())throw new java.sql.SQLException("home查询预算已经耗尽");connection.commit();return Map.copyOf(zones);
             }catch(java.sql.SQLException|RuntimeException failure){try{connection.rollback();}catch(java.sql.SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
             finally{if(!connection.isClosed()){connection.setAutoCommit(auto);connection.setTransactionIsolation(isolation);connection.setNetworkTimeout(Runnable::run,network);}}

@@ -58,7 +58,7 @@ class EconomyLockPlanMysqlTest {
     @Test
     void 经济仓储的锁定语句都是完整主键点操作() throws SQLException {
         int pending = GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING_VALUE;
-        LockPlans.assertPrimaryKeyPointOperations(db, List.of(
+        LockPlans.assertPrimaryKeyPointOperations(db, db.schemaDataSource(), List.of(
                 // guild（锁序位置 1）：升级锁帮会、升一级（funds >= cost 对夹具行成立）
                 new PlanCase("G12 LOCK_GUILD_FOR_UPGRADE", JdbcEconomyStore.LOCK_GUILD_FOR_UPGRADE, List.of(GUILD), "guild",
                         LOCK_READ),

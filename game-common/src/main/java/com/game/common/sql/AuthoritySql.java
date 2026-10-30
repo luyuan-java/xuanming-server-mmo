@@ -20,6 +20,15 @@ public final class AuthoritySql {
     private static final long MAX_DEADLINE_MILLIS = Integer.MAX_VALUE;
     private static final java.util.regex.Pattern SELECT_HINT = java.util.regex.Pattern.compile(
             "\\+\\s+(?:MAX_EXECUTION_TIME\\(([1-9][0-9]{0,9})\\)(?:\\s+SEMIJOIN\\(FIRSTMATCH\\))?|SEMIJOIN\\(FIRSTMATCH\\)(?:\\s+MAX_EXECUTION_TIME\\(([1-9][0-9]{0,9})\\))?)\\s*", java.util.regex.Pattern.CASE_INSENSITIVE);
+    // 只接现TiDB生产者的QB_NAME与两段INL_JOIN形状；参数为有限ASCII标识符/@/逗号/空白。
+    private static final String QUERY_BLOCK_HINT_ID = "[A-Za-z_][A-Za-z0-9_]{0,31}";
+    private static final java.util.regex.Pattern TIDB_SELECT_HINT = java.util.regex.Pattern.compile(
+            "\\+\\s+(?:QB_NAME\\(" + QUERY_BLOCK_HINT_ID + "\\)"
+            + "|(?:MAX_EXECUTION_TIME\\(([1-9][0-9]{0,9})\\)\\s+)?INL_JOIN\\("
+            + QUERY_BLOCK_HINT_ID + "@" + QUERY_BLOCK_HINT_ID
+            + "(?:,\\s*" + QUERY_BLOCK_HINT_ID + "@" + QUERY_BLOCK_HINT_ID + "){0,4}\\)"
+            + "(?:\\s+INL_JOIN\\(@" + QUERY_BLOCK_HINT_ID + "\\s+" + QUERY_BLOCK_HINT_ID + "\\))?)\\s*",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
     private AuthoritySql() {}
     static Kind validate(String sql) throws SQLException {
         List<Token> tokens = scan(sql);
@@ -92,8 +101,13 @@ public final class AuthoritySql {
     }
     private static boolean selectHint(String body,boolean allowDeadline) {
         var match=SELECT_HINT.matcher(body);
-        if(!match.matches())return false;
-        String deadline=match.group(1)!=null?match.group(1):match.group(2);
+        if(match.matches()){
+            String deadline=match.group(1)!=null?match.group(1):match.group(2);
+            return deadline==null||allowDeadline&&Long.parseLong(deadline)<=MAX_DEADLINE_MILLIS;
+        }
+        var tidb=TIDB_SELECT_HINT.matcher(body);
+        if(!tidb.matches())return false;
+        String deadline=tidb.group(1);
         return deadline==null||allowDeadline&&Long.parseLong(deadline)<=MAX_DEADLINE_MILLIS;
     }
     private static boolean word(List<Token> t,int i,String value) {
@@ -116,7 +130,7 @@ public final class AuthoritySql {
                     // root必须仍是SELECT；每个SELECT头只消费一条完整有限hint，不全局禁掉后续子查询头。
                     if(sql.charAt(i+2)!='+'||ended||!word(tokens,0,"SELECT")||selectHead!=tokens.size()-1
                             ||!word(tokens,selectHead,"SELECT")||!selectHint(body,depth==0&&selectHead==0))
-                        throw denied("仅允许SELECT头的单个有限MAX_EXECUTION_TIME/SEMIJOIN(FIRSTMATCH)提示");
+                        throw denied("仅允许SELECT头的单个有限期限/SEMIJOIN/INL_JOIN/QB_NAME提示");
                     selectHead=-1;
                 } else {
                     selectHead=-1;

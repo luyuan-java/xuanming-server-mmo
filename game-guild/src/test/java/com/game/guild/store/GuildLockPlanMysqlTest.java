@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -66,6 +67,7 @@ class GuildLockPlanMysqlTest {
 
     @Test
     void 锁定语句都是完整主键的点操作() throws SQLException {
+        DataSource diagnostics = db.schemaDataSource();
         List<String> lockRead = List.of("const");
         List<String> pointWrite = List.of("range", "const");
         List<PlanCase> cases = List.of(
@@ -102,19 +104,19 @@ class GuildLockPlanMysqlTest {
 
         Map<String, String> keyLen = new HashMap<>();
         for (String table : GuildTables.NAMES) {
-            keyLen.put(table, primaryKeyLen(table));
+            keyLen.put(table, primaryKeyLen(diagnostics, table));
         }
         assertThat(keyLen).containsEntry("guild", "8").containsEntry("guild_player_state", "8")
                 .containsEntry("guild_member", "16").containsEntry("guild_application", "16");
 
         if (LockPlans.isTiDb(db)) {
-            LockPlans.assertPrimaryKeyPointOperations(db, cases.stream().map(c -> new LockPlans.PlanCase(
+            LockPlans.assertPrimaryKeyPointOperations(db, diagnostics, cases.stream().map(c -> new LockPlans.PlanCase(
                     c.name(), c.sql(), c.args(), c.table(), c.types())).toList());
             return;
         }
         for (PlanCase c : cases) {
             String stmt = inline(c.sql(), c.args());
-            Map<String, String> plan = explain(stmt);
+            Map<String, String> plan = explain(diagnostics, stmt);
             assertThat(plan.get("table")).as("%s 的计划行不是 %s（Extra=%s）：夹具行缺失或参数与夹具对不上。SQL: %s",
                     c.name(), c.table(), plan.get("Extra"), stmt).isEqualTo(c.table());
             assertThat(plan.get("key")).as("%s 没有走主键（possible_keys=%s type=%s）。SQL: %s", c.name(),
@@ -144,8 +146,8 @@ class GuildLockPlanMysqlTest {
         return out;
     }
 
-    private static Map<String, String> explain(String stmt) throws SQLException {
-        try (Connection c = db.dataSource.getConnection(); Statement st = c.createStatement();
+    private static Map<String, String> explain(DataSource diagnostics, String stmt) throws SQLException {
+        try (Connection c = diagnostics.getConnection(); Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("EXPLAIN FORMAT=TRADITIONAL " + stmt)) {
             assertThat(rs.next()).as("EXPLAIN 没有返回任何行: %s", stmt).isTrue();
             ResultSetMetaData meta = rs.getMetaData();
@@ -158,9 +160,9 @@ class GuildLockPlanMysqlTest {
     }
 
     /** 「用满主键全部列」时的 key_len：逐列按整数类型取定长，可空列再加 1 字节（基线 lockPlanPrimaryKeyLen）。 */
-    private static String primaryKeyLen(String table) throws SQLException {
+    private static String primaryKeyLen(DataSource diagnostics, String table) throws SQLException {
         List<String> columns = new ArrayList<>();
-        try (Connection c = db.dataSource.getConnection();
+        try (Connection c = diagnostics.getConnection();
              PreparedStatement ps = c.prepareStatement("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS"
                      + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX")) {
             ps.setString(1, table);

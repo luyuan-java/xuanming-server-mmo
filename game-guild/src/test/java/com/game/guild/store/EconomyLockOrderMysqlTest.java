@@ -175,7 +175,7 @@ class EconomyLockOrderMysqlTest {
         long guildId = 7961, leader = 8961, donor = 8962, opBase = 9_960_000;
         int rounds = 200;
         db.seedGuild(guildId, 2, 1, 50, leader, Map.of(donor, GuildRoles.MEMBER));
-        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db);
+        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db, db.schemaDataSource());
         LinkedBlockingQueue<Long> handoff = new LinkedBlockingQueue<>();
         long done = -1;
         CompletableFuture<Outcome> reserver = async(() -> {
@@ -225,7 +225,7 @@ class EconomyLockOrderMysqlTest {
         int oldPerRound = 200;
         long roundStep = 10_000;
         db.seedGuild(guildId, 2, 1, 50, leader, Map.of(donor, GuildRoles.MEMBER));
-        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db);
+        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db, db.schemaDataSource());
         ByteString payload = EconomyFixtures.donatePayload(100);
         for (int round = 0; round < ROUNDS; round++) {
             long now = NOW + round * roundStep;
@@ -279,7 +279,7 @@ class EconomyLockOrderMysqlTest {
     void 首次建seq行的建行者在成员行上串行() throws Exception {
         long guildId = 7985, leader = 8987, player = 8985;
         db.seedGuild(guildId, 2, 1, 50, leader, Map.of(player, GuildRoles.MEMBER));
-        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db);
+        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db, db.schemaDataSource());
         Connection first = db.begin();
         CompletableFuture<Outcome> b;
         CompletableFuture<Outcome> c;
@@ -318,7 +318,7 @@ class EconomyLockOrderMysqlTest {
         setContribution(db, guildId, player, 1000, 1000);
         EconomyFixtures.ensureSeqRow(db, player, DEBIT, NOW);
         EconomyFixtures.ensureSeqRow(db, player, CREDIT, NOW);
-        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db);
+        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db, db.schemaDataSource());
         ByteString payload = EconomyFixtures.donatePayload(100);
         for (int round = 0; round < ROUNDS; round++) {
             long now = NOW + round * roundStep;
@@ -397,7 +397,7 @@ class EconomyLockOrderMysqlTest {
         long roundStep = 10_000;
         db.seedGuild(guildId, 2, 1, 50, leader, Map.of(donor, GuildRoles.MEMBER));
         EconomyFixtures.ensureSeqRow(db, donor, DEBIT, NOW);
-        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db);
+        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db, db.schemaDataSource());
         int reservedRounds = 0;
         for (int round = 0; round < ROUNDS; round++) {
             long now = NOW + round * roundStep;
@@ -451,7 +451,7 @@ class EconomyLockOrderMysqlTest {
         assertThat(guilds.leaveGuild(oldGuild, buyer, NOW + orphans, roomy()).isOk()).as("离开 A（商店指令不被提前截止）").isTrue();
         db.seedMember(newGuild, buyer, GuildRoles.MEMBER);
         setContribution(db, newGuild, buyer, balance, balance);
-        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db);
+        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db, db.schemaDataSource());
 
         for (int i = 0; i < orphans; i++) {
             ShopReserve order = shopOrder(newBase + i, buyer, newGuild, 1, cost, limit, NOW + 1000 + i * 10L);
@@ -491,7 +491,7 @@ class EconomyLockOrderMysqlTest {
         db.seedApplication(g2, p, NOW, NOW + TTL);
         DonationReserve pendingDonation = donation(9_671_001, q, g, NOW);
         assertThat(econ.reserveDonation(pendingDonation, roomy()).isOk()).isTrue();
-        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db);
+        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db, db.schemaDataSource());
 
         // 一个 RR 事务先做一次一致性读建出读视图，挡住 purge：否则 (p,gOld) 的删除标记项随时可能被清掉
         Connection reader = db.dataSource.getConnection();

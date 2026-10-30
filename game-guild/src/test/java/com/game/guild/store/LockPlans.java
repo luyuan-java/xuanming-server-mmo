@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
+import javax.sql.DataSource;
 
 /**
  * 锁定语句执行计划回归的公共助手（照 mmorpg economy_lock_plan_mysql_test.go:230-319 的 lockPlanExplain / lockPlanInline /
@@ -54,10 +55,10 @@ public final class LockPlans {
     }
 
     /** TiDB 直接读取原生产 SQL 的全部计划节点，不伪造 MySQL 的 key/type/key_len 列。 */
-    private static void assertTiDbPointOperation(GuildMysqlFixture db, PlanCase planCase) throws SQLException {
+    private static void assertTiDbPointOperation(DataSource diagnostics, PlanCase planCase) throws SQLException {
         List<String> primary = new ArrayList<>();
         String pkType;
-        try (Connection c = db.dataSource.getConnection();
+        try (Connection c = diagnostics.getConnection();
              PreparedStatement ps = c.prepareStatement("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS"
                      + " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME='PRIMARY' ORDER BY SEQ_IN_INDEX")) {
             ps.setString(1, planCase.table());
@@ -75,7 +76,7 @@ public final class LockPlans {
         }
         String statement = inline(planCase.sql(), planCase.args());
         List<Map<String, String>> nodes = new ArrayList<>();
-        try (Connection c = db.dataSource.getConnection(); Statement st = c.createStatement();
+        try (Connection c = diagnostics.getConnection(); Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("EXPLAIN FORMAT=TRADITIONAL " + statement)) {
             while (rs.next()) {
                 Map<String, String> row = new HashMap<>();
@@ -160,20 +161,20 @@ public final class LockPlans {
     }
 
     /** 逐条 EXPLAIN 并断言（夹具行必须存在且满足语句里的其余条件，否则 table / key 都是 NULL，用例因夹具而红）。 */
-    public static void assertPrimaryKeyPointOperations(GuildMysqlFixture db, List<PlanCase> cases) throws SQLException {
+    public static void assertPrimaryKeyPointOperations(GuildMysqlFixture db, DataSource diagnostics, List<PlanCase> cases) throws SQLException {
         Map<String, String> keyLen = new HashMap<>();
         for (PlanCase c : cases) {
             if (!keyLen.containsKey(c.table())) {
-                keyLen.put(c.table(), primaryKeyLen(db, c.table()));
+                keyLen.put(c.table(), primaryKeyLen(diagnostics, c.table()));
             }
         }
         if (isTiDb(db)) {
-            for (PlanCase c : cases) assertTiDbPointOperation(db, c);
+            for (PlanCase c : cases) assertTiDbPointOperation(diagnostics, c);
             return;
         }
         for (PlanCase c : cases) {
             String stmt = inline(c.sql(), c.args());
-            Map<String, String> plan = explain(db, stmt);
+            Map<String, String> plan = explain(diagnostics, stmt);
             assertThat(plan.get("table")).as("%s 的计划行不是 %s（Extra=%s）：夹具行缺失或参数与夹具对不上。SQL: %s",
                     c.name(), c.table(), plan.get("Extra"), stmt).isEqualTo(c.table());
             assertThat(plan.get("key")).as("%s 没有走主键（possible_keys=%s type=%s）：走二级索引就是「先二级后主键」，与按主键删行的事务"
@@ -211,8 +212,8 @@ public final class LockPlans {
     }
 
     /** EXPLAIN FORMAT=TRADITIONAL 的第一行（被测语句都是单表）。 */
-    public static Map<String, String> explain(GuildMysqlFixture db, String stmt) throws SQLException {
-        try (Connection c = db.dataSource.getConnection(); Statement st = c.createStatement();
+    public static Map<String, String> explain(DataSource diagnostics, String stmt) throws SQLException {
+        try (Connection c = diagnostics.getConnection(); Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("EXPLAIN FORMAT=TRADITIONAL " + stmt)) {
             assertThat(rs.next()).as("EXPLAIN 没有返回任何行: %s", stmt).isTrue();
             ResultSetMetaData meta = rs.getMetaData();
@@ -225,9 +226,9 @@ public final class LockPlans {
     }
 
     /** 「用满主键全部列」时的 key_len：逐列按整数类型取定长，可空列再加 1 字节。 */
-    public static String primaryKeyLen(GuildMysqlFixture db, String table) throws SQLException {
+    public static String primaryKeyLen(DataSource diagnostics, String table) throws SQLException {
         List<String> columns = new ArrayList<>();
-        try (Connection c = db.dataSource.getConnection();
+        try (Connection c = diagnostics.getConnection();
              PreparedStatement ps = c.prepareStatement("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS"
                      + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX")) {
             ps.setString(1, table);

@@ -97,7 +97,7 @@ class AssetStoreLockOrderMysqlTest {
         // 同步投递期间的形状：握着租约，next_attempt_ms = 租约到期时刻 > now（提前截止的 LEAST 真的会改 idx_0）
         EconomyFixtures.insertOp(db, EconomyFixtures.donateRecord(opId, PLAYER, GUILD, NOW, seq,
                 EconomyFixtures.donatePayload(100)).setLeaseToken(TOKEN).setLeaseUntilMs(NOW + LEASE_MS).build());
-        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db);
+        InnoDbDeadlockWatch watch = InnoDbDeadlockWatch.start(db, db.schemaDataSource());
         long acceleratedAt = NOW + 1;
         Connection writer = db.begin();
         CompletableFuture<Object> done;

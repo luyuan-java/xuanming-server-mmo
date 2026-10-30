@@ -525,12 +525,16 @@ class GuildEconomyChannelIntegrationTest {
             assertThat(ps.executeUpdate()).isEqualTo(1);
         }
         AssetOpLoop loop = runtime.loop().orElseThrow();
+        // 同一计数器也包含前序在线SQL证明；这里只核本次离线tick的精确增量。
+        double finalizedLedgerReadsBeforeTick = meters.get("game.guild.assetop.ledger.read")
+                .tag("result", "finalized").counter().count();
         assertThat(loop.tick()).isEqualTo(1);
         row = assetStore.getOp(opId, Deadline.after(2_000)).orElseThrow();
         assertThat(row.getStatus()).isEqualTo(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_APPLIED);
         assertThat(row.getDurable()).isEqualTo(1);
         assertThat(guildFunds(g)).isEqualTo(13_000);
-        assertThat(meters.get("game.guild.assetop.ledger.read").tag("result", "finalized").counter().count()).isEqualTo(1);
+        assertThat(meters.get("game.guild.assetop.ledger.read").tag("result", "finalized").counter().count()
+                - finalizedLedgerReadsBeforeTick).isEqualTo(1);
         // 后台终结推 FUNDS_CHANGED 只推本人（玩家离线：计 offline；推送是异步的，等它落指标）
         long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (meters.get("game.guild.pushes").tag("kind", "funds_changed").tag("outcome", "offline").counter().count() < 1
