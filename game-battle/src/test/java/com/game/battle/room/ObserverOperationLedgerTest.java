@@ -38,6 +38,15 @@ class ObserverOperationLedgerTest {
         var ledger=new ObserverOperationLedger(INSTANCE,clock::get,1);var original=add(1);assertTrue(ledger.begin(original));ledger.activate(original.getSpectatorOperationId());clock.addAndGet(30_001);assertEquals(1,ledger.size());
         assertTrue(ledger.cancel(remove(original)));assertThrows(ObserverOperationLedger.Full.class,()->ledger.begin(add(2)));ledger.detached(original.getSpectatorOperationId());assertEquals(0,ledger.size());assertTrue(ledger.begin(add(2)));
     }
+    @Test void 首次拒绝码先写为准_取消不抹掉_被Remove封闭的没有记录_未登记的操作不能记拒绝(){
+        var ledger=new ObserverOperationLedger(INSTANCE,clock::get,3);var request=add(1);String operation=request.getSpectatorOperationId();
+        assertTrue(ledger.begin(request));assertEquals(0,ledger.firstRejection(operation));
+        ledger.reject(operation,16021);assertFalse(ledger.begin(request),"拒绝即终态");assertEquals(16021,ledger.firstRejection(operation));
+        ledger.reject(operation,1003);assertEquals(16021,ledger.firstRejection(operation),"先写为准");
+        assertTrue(ledger.cancel(remove(request)));assertEquals(16021,ledger.firstRejection(operation),"恢复循环补发的 Remove 不抹掉首次结论");
+        var removedFirst=add(2);assertTrue(ledger.cancel(remove(removedFirst)));assertFalse(ledger.begin(removedFirst));assertEquals(0,ledger.firstRejection(removedFirst.getSpectatorOperationId()));
+        assertThrows(IllegalStateException.class,()->ledger.reject(UUID.randomUUID().toString(),1003));
+    }
     @Test void 过期堆每次最多处理128项_不会在一个请求遍扫全部取消表(){
         var ledger=new ObserverOperationLedger(INSTANCE,clock::get,130);for(int p=1;p<=130;p++)ledger.cancel(remove(add(p)));clock.addAndGet(30_001);
         assertEquals(2,ledger.size());assertEquals(0,ledger.size());

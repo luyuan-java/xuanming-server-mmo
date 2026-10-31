@@ -58,12 +58,12 @@ class WatchableConfigurationTest {
     private static BattlePlacement placement(long battleId, long createdAtMs) {
         return BattlePlacement.newBuilder().setBattleId(battleId).setBattleNodeId(7).setBattleInstanceId("inst-7").setRpcHost("127.0.0.1")
                 .setRpcPort(21207).setAttempt(1).setMode(3).addPlayerNames("甲").setCreatedAtMs(createdAtMs).setDeadlineMs(createdAtMs + 300_000)
-                .build();
+                .setSpectateVisibility(com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC_VALUE).build();
     }
 
     @Test
     void 处理器是真的164_不当场回_不带自己的执行器_接在给它的存储上() throws Exception {
-        MatchMethodHandler handler = configuration.listWatchableBattlesHandler(configuration.watchableListService(store, metrics), metrics);
+        MatchMethodHandler handler = configuration.listWatchableBattlesHandler(new WatchableListService(store, metrics), metrics);
         placements.put(placement(880500, T0));
         store.putWatchable(880500, T0);
 

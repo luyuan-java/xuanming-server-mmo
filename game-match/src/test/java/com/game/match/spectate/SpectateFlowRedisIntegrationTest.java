@@ -137,7 +137,8 @@ class SpectateFlowRedisIntegrationTest {
     private static BattlePlacement placement(long battleId, long createdAtMs, int attempt) {
         return BattlePlacement.newBuilder().setBattleId(battleId).setBattleNodeId(7).setBattleInstanceId("inst-a").setRpcHost("10.1.1.1")
                 .setRpcPort(21200).setAttempt(attempt).setMode(1).setBattleConfigId(1).addPlayerNames("甲").addPlayerNames("乙")
-                .setCreatedAtMs(createdAtMs).setDeadlineMs(createdAtMs + 300_000).build();
+                .setCreatedAtMs(createdAtMs).setDeadlineMs(createdAtMs + 300_000)
+                .setSpectateVisibility(com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC_VALUE).build();
     }
 
     /** gather 的写法：先写落点（真写者），开局成功后经<b>真钩子</b>公开。返回落点。 */

@@ -29,7 +29,8 @@ class AuditGroupProbeTest {
     @Test void 装配只登记UNKNOWN_启动后独立两目标_停止关闭自己的reader() {
         AtomicInteger created = new AtomicInteger();
         AtomicInteger closed = new AtomicInteger();
-        try (var meters = new SimpleMeterRegistry()) {
+        var meters = new SimpleMeterRegistry();
+        try {
             var probe = new AuditGroupProbe(targets, properties, () -> {
                 created.incrementAndGet();
                 return new GroupOffsetReader() {
@@ -52,6 +53,8 @@ class AuditGroupProbeTest {
             assertThat(closed).hasValue(2);
             assertThat(probe.isRunning()).isFalse();
             assertThat(probe.views()).allSatisfy(view -> assertThat(view.status()).isEqualTo(AuditProbeState.Status.STOPPED));
+        } finally {
+            meters.close();
         }
     }
 
@@ -59,7 +62,8 @@ class AuditGroupProbeTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger closes = new AtomicInteger();
-        try (var meters = new SimpleMeterRegistry()) {
+        var meters = new SimpleMeterRegistry();
+        try {
             var probe = new AuditGroupProbe(targets, properties, () -> new GroupOffsetReader() {
                 final AtomicBoolean once = new AtomicBoolean();
                 @Override public AuditOffsetSnapshot read(AuditOffsetSnapshot.Target target, AuditProbeBudget budget) {
@@ -83,11 +87,14 @@ class AuditGroupProbeTest {
                 assertThat(view.status()).isEqualTo(AuditProbeState.Status.STOPPED);
                 assertThat(view.lastSample()).isNull();
             });
+        } finally {
+            meters.close();
         }
     }
 
     @Test void 一个目标失败不把另一个目标置零或阻止观测() {
-        try (var meters = new SimpleMeterRegistry()) {
+        var meters = new SimpleMeterRegistry();
+        try {
             var probe = new AuditGroupProbe(targets, properties, () -> new GroupOffsetReader() {
                 @Override public AuditOffsetSnapshot read(AuditOffsetSnapshot.Target target, AuditProbeBudget budget) {
                     if (target.consumer() == AuditOffsetSnapshot.ConsumerName.TRANSACTION_LOG) {
@@ -106,6 +113,8 @@ class AuditGroupProbeTest {
                     assertThat(probe.views().get(1).lag()).isEqualTo(20);
                 });
             } finally { probe.stop(); }
+        } finally {
+            meters.close();
         }
     }
 }

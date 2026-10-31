@@ -11,6 +11,7 @@ import com.game.match.testing.InMemoryPlacementStore;
 import com.game.match.testing.InMemorySpectateStore;
 import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.ManualRedisClock;
+import com.game.proto.eSpectateVisibility;
 import com.game.proto.match.BattleWatchSummary;
 import com.game.proto.match.ListWatchableBattlesResponse;
 import com.game.proto.match.MatchMode;
@@ -46,10 +47,12 @@ class WatchableListServiceTest {
         return Deadline.after(2_000);
     }
 
+    /** 公开局的落点（列表只认落点里冻结的可见性，不按 mode 重算：mode 只是摘要字段）。 */
     private static BattlePlacement placement(long battleId, long createdAtMs, String... names) {
         return BattlePlacement.newBuilder().setBattleId(battleId).setBattleNodeId(7).setBattleInstanceId("inst-7").setRpcHost("127.0.0.1")
                 .setRpcPort(21207).setAttempt(1).setMode(ONE_V_ONE).setBattleConfigId(0).addAllPlayerNames(List.of(names))
-                .setCreatedAtMs(createdAtMs).setDeadlineMs(createdAtMs + 300_000).build();
+                .setCreatedAtMs(createdAtMs).setDeadlineMs(createdAtMs + 300_000)
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC_VALUE).build();
     }
 
     /** 一场已公开的战斗：落点记录 + 索引成员（分数 = created_at_ms）。 */
@@ -178,6 +181,30 @@ class WatchableListServiceTest {
     }
 
     @Test
+    void 可见性闸_私密局与漏填可见性的老落点不进列表_只摘索引成员_落点留给补签() {
+        register(880290, T0 - 1, "公开场");
+        BattlePlacement hidden = placement(880291, T0 - 2, "私密场").toBuilder()
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE_VALUE).build();
+        placements.put(hidden);
+        store.putWatchable(880291, T0 - 2); // 开局钩子不公开私密局：在索引里就是残留
+        BattlePlacement legacy = placement(880292, T0 - 3, "老落点").toBuilder().clearSpectateVisibility().build();
+        placements.put(legacy);
+        store.putWatchable(880292, T0 - 3);
+
+        ListWatchableBattlesResponse response = list(0);
+
+        assertThat(ids(response)).as("只列公开局").containsExactly(880290L);
+        assertThat(store.watchable()).as("两个非公开的残留成员已摘").containsExactly("880290");
+        assertThat(placements.stored(880291)).as("私密局的落点不删（179 补签靠它定位 battle）").contains(hidden);
+        assertThat(placements.stored(880292)).contains(legacy);
+        assertThat(store.calls).as("无条件只摘成员的原语（与非法成员同一个），不是删落点的 Dead / Stale").containsExactly("list(20)",
+                "readPlacements([880290, 880291, 880292])", "evictAsync([Invalid[member=880291], Invalid[member=880292]])");
+        assertThat(evicted("private")).isEqualTo(2.0);
+        assertThat(evicted("invalid_member")).isZero();
+        assertThat(listed("ok")).isEqualTo(1.0);
+    }
+
+    @Test
     void 不回填_这一页剔除之后列表可以短于limit_后面的好场次留给下一次请求() {
         register(880260, T0 - 1, "一");
         store.putWatchable(880261, T0 - 2); // 孤儿
@@ -207,7 +234,8 @@ class WatchableListServiceTest {
         long battleId = 0xF000_0000_0000_0001L; // 无符号 64 位：高位为 1
         BattlePlacement stored = BattlePlacement.newBuilder().setBattleId(battleId).setBattleNodeId(3).setBattleInstanceId("inst-3")
                 .setRpcHost("10.0.0.3").setRpcPort(21203).setAttempt(2).setMode(99).setBattleConfigId(7).addPlayerNames("丙").addPlayerNames("甲")
-                .addPlayerNames("乙").setCreatedAtMs(T0 - 5_000).setDeadlineMs(T0 + 295_000).build();
+                .addPlayerNames("乙").setCreatedAtMs(T0 - 5_000).setDeadlineMs(T0 + 295_000)
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC_VALUE).build();
         placements.put(stored);
         store.putWatchable(battleId, T0 - 4_000); // 分数与落点里的时间故意不同
         register(880280, T0 - 9_000, "发起者", "应战者");
@@ -374,5 +402,79 @@ class WatchableListServiceTest {
         assertThat(listed("ok")).isEqualTo(3.0);
         assertThat(listed("error")).isEqualTo(1.0);
         assertThat(listed("overloaded")).as("过载由处理器记").isZero();
+    }
+
+    // ================================================================ 赛事局（mmorpg battle-spectate-tiered-fanout.md §15.6）
+
+    @Test
+    void 赛事局排最前并回填标记_同组内保持索引次序_没标记的不带() {
+        com.game.match.testing.InMemorySpectateTierStore tiers = new com.game.match.testing.InMemorySpectateTierStore();
+        WatchableListService withFeatured = new WatchableListService(store, metrics).withFeatured(tiers);
+        for (long battleId : List.of(880601L, 880602L, 880603L)) {
+            placements.put(placement(battleId, T0 + battleId - 880600L, "局" + battleId));
+            store.putWatchable(battleId, T0 + battleId - 880600L);
+        }
+        tiers.setFeatured(880601L, true, d());
+
+        WatchableListService.Result result = withFeatured.list(0, d());
+
+        var battles = ((WatchableListService.Result.Listed) result).response().getBattlesList();
+        assertThat(battles).extracting(com.game.proto.match.BattleWatchSummary::getBattleId).as("索引次序是新的在前，赛事局插到最前").containsExactly(880601L, 880603L, 880602L);
+        assertThat(battles).extracting(com.game.proto.match.BattleWatchSummary::getFeatured).containsExactly(true, false, false);
+    }
+
+    @Test
+    void 赛事局被新局挤出第一页也排最前_总数不超过limit_后标记的在前() {
+        com.game.match.testing.InMemorySpectateTierStore tiers = new com.game.match.testing.InMemorySpectateTierStore();
+        WatchableListService withFeatured = new WatchableListService(store, metrics).withFeatured(tiers);
+        for (long battleId : List.of(880621L, 880622L, 880623L, 880624L, 880625L)) {
+            placements.put(placement(battleId, T0 + battleId - 880620L, "局" + battleId));
+            store.putWatchable(battleId, T0 + battleId - 880620L);
+        }
+        tiers.setFeatured(880622L, true, d());
+        tiers.setFeatured(880621L, true, d());
+
+        WatchableListService.Result result = withFeatured.list(3, d());
+
+        var battles = ((WatchableListService.Result.Listed) result).response().getBattlesList();
+        assertThat(battles).extracting(com.game.proto.match.BattleWatchSummary::getBattleId).as("两场赛事局都不在最新的三场里").containsExactly(880621L, 880622L, 880625L);
+        assertThat(battles).extracting(com.game.proto.match.BattleWatchSummary::getFeatured).containsExactly(true, true, false);
+    }
+
+    @Test
+    void 赛事局同时在这一页里_只出现一次() {
+        com.game.match.testing.InMemorySpectateTierStore tiers = new com.game.match.testing.InMemorySpectateTierStore();
+        placements.put(placement(880631L, T0, "局"));
+        store.putWatchable(880631L, T0);
+        tiers.setFeatured(880631L, true, d());
+
+        WatchableListService.Result result = new WatchableListService(store, metrics).withFeatured(tiers).list(0, d());
+
+        assertThat(((WatchableListService.Result.Listed) result).response().getBattlesList())
+                .extracting(com.game.proto.match.BattleWatchSummary::getBattleId).containsExactly(880631L);
+    }
+
+    @Test
+    void 赛事局的落点已不在_列表跳过_摘掉标记() {
+        com.game.match.testing.InMemorySpectateTierStore tiers = new com.game.match.testing.InMemorySpectateTierStore();
+        tiers.setFeatured(880641L, true, d());
+
+        WatchableListService.Result result = new WatchableListService(store, metrics).withFeatured(tiers).list(0, d());
+
+        assertThat(((WatchableListService.Result.Listed) result).response().getBattlesList()).isEmpty();
+        assertThat(tiers.featured(880641L)).isFalse();
+    }
+
+    @Test
+    void 读赛事局标记失败_列表照常回_不带标记_不回1003() {
+        com.game.match.testing.InMemorySpectateTierStore tiers = new com.game.match.testing.InMemorySpectateTierStore();
+        placements.put(placement(880611L, T0, "局"));
+        store.putWatchable(880611L, T0);
+        tiers.failing = true;
+
+        WatchableListService.Result result = new WatchableListService(store, metrics).withFeatured(tiers).list(0, d());
+
+        assertThat(((WatchableListService.Result.Listed) result).response().getBattlesList())
+                .extracting(com.game.proto.match.BattleWatchSummary::getBattleId).containsExactly(880611L);
     }
 }

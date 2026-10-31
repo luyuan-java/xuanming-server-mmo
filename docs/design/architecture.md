@@ -1337,6 +1337,7 @@ JDK 21、离线、单线程、两个处理器及 512 MiB 堆执行：集成 `cle
   不随库升级漂移。没有选更小的值：Redisson 一条命令从借到连接起占着它、应答回来才归还，池上限就是本进程同时在途的命令数上限，池满时命令排队、等不到即
   `RedisTimeoutException`（「Unable to acquire connection!」）；没有压测数据支撑收小，而总账在缺省值下离上限还远（§6.1）。最小空闲是建客户端时就建好的常驻连接，只影响总账的常驻值、不影响峰值。
   校验：两个池上限至少 1，最小空闲在 0 与池上限之间（只把池调到 24 以下时要一并设最小空闲，否则拒启）；订阅连接的最小空闲不开放（库缺省 1）。
+  `game.redis.subscriptions-per-connection`（默认 5，同库缺省）是每条订阅连接承载的频道数，进程能同时订的频道数 = 订阅池上限 × 它；只有 game-gate 的 yaml 配成 500（按场订观战频道，50 × 500 = 25000，库缺省只够 250，到顶后新一场的观众当场收 `SOURCE_LOST`，指标 `game.gate.spectate.channel.failures`）。
   环境变量按 Spring 宽松绑定覆盖（如 `GAME_REDIS_CONNECTIONPOOLSIZE`）。只管经 `RedisAutoConfiguration` 建的客户端；另外自建 Redisson 的三处
   （game-login 的 Sa-Token 客户端、命令行工具 AuditFallbackReplay 与 assetopfix）仍用库缺省池，总账按库缺省记它们。
 - **Redis 的部署约束**（回合制战斗落地后新增，批次 6.3）：
@@ -1391,6 +1392,7 @@ JDK 21、离线、单线程、两个处理器及 512 MiB 堆执行：集成 `cle
   改池参数、加进程模块或 7.1b 的 `stack.yaml` 落地时同步改。
   - **口径**（每个 Redisson 客户端）：常驻 = 命令最小空闲 + 订阅最小空闲 = 24 + 1 = **25**；峰值 = 命令池上限 + 订阅池上限 = 64 + 50 = **114**（启动日志的「最多占连接」）。
     每个进程经 `RedisAutoConfiguration` 只有一个客户端（单例、懒创建）；game-data 只在运维接口里经 `ObjectProvider` 取用，第一次用到之前不连 Redis。
+    game-gate 把 `subscriptions-per-connection` 配成 500 不改变这笔账：池上限还是 50，同样多的观战频道占的订阅连接反而更少（250 个频道从 50 条降到 1 条）。
   - **进程**（`tools/local/start-slice.sh`，宿主上起、连 compose 的那台 Redis）：单 zone 13 个都用 Redis——scene-manager、login、friend、chat、match、team、guild、trade、data、scene、gate、gateway、battle；
     `GAME_SCENE_NODES=2` 加 game-scene-2，`GAME_ZONES=2` 加 game-scene-z2 / game-gate-z2，最多 16 个。还没登记进切片的模块：game-mail 用 Redis（登记后 +1 个客户端），
     game-rank / game-mall 的 main 代码不取 `RedissonClient`，不连。
@@ -2206,6 +2208,7 @@ scene-manager `SceneDirectoryProvider`（跨 zone 选路的两个计时器在 `t
 | match | `game_match_spectate_evictions_total` | Counter | `reason`=enter_gather / rewatch / concurrent_queue，`result`=removed / no_record / invalid_mark / read_failed / rpc_failed | 清退观众的结局，每处理一条观战标记记一个（基线只有日志）：enter_gather = 开局前清退；rewatch = 163 入口收拾旧标记（换场 / 随机 / 脏标记；显式重看同一场只删标记、不计）；concurrent_queue = 163 的自我清退（登记后复查命中，或重看同一场时抢标记发现已有票据），在异步 RemoveObserver 的结局回来时才记。removed = RemoveObserver 调通（battle 幂等，房间里没有这名观众也算）；no_record = 没有落点或直拨判死；invalid_mark = 标记值解析不了；read_failed = 读落点失败或损坏（不发 RPC）；rpc_failed = 没送达或结局不明（开局清退时标记照删） |
 | match | `game_match_watchable_index_evictions_total`、`game_match_watchable_anomalies_total` | Counter | 前者 `reason`=room_missing / dead_node / stale / missing_record / invalid_member / sweep；后者 `reason`=corrupt_record / record_read_failed / publish_failed / mark_read_failed | 从可观战索引里摘掉的成员数：163 的同步剔除（room_missing / dead_node / missing_record / invalid_member）只在存储回报真的摘了时计，164 的异步剔除（invalid_member / stale / missing_record）按发出的条数计，sweep 按清扫脚本返回的条数计。观战数据异常：corrupt_record = 163 / 164 读到损坏的落点（跳过、不剔除）；record_read_failed = 164 批读落点失败；publish_failed = 开局后登记索引失败（抛异常，或落点不在 / 已不是这一次的 attempt）；mark_read_failed = 开局清退读全员标记失败（整次跳过清退）。长期非 0 要排查 |
 | match | `game_match_observer_rpc_total` | Counter | `method`=add / remove，`result`=replied / dead / not_delivered / unknown | 发给 battle 的观众 RPC（`addObserver` / `removeObserver`）的结局，每次调用一个，异步的自我清退记在 remove：replied = 调通了（含 battle 的业务拒绝）；dead = 判死的三条证据都成立；not_delivered = 请求确定没送达但判不了死（含硬截止已到、超时 ≤ 0 时不发调用）；unknown = 超时、连上之后断开、对端回了传输层错误 |
+| match | `game_match_watch_unproven_close_total`、`game_match_watch_requests_purged_total` | Counter | 前者 `reason`=formation_ended / instance_replaced；后者无标签 | 全球观战原件拿不到取消证明、因原实例已不在而关闭（实例崩溃时涨一波，平时持续增长要查 battle 为什么回不了 Remove）；观战请求历史按 7 天保留期删掉的行数 |
 | match | `game_match_watchable_battles`、`game_match_spectate_inflight` | Gauge | — | 可观战索引的成员数（清扫每轮采样一次 ZCARD，含已结束不足 360 s 的场次；第一轮在一个间隔之后，所以启动后头 10 s 读数为 0，采样失败时停在上一次的读数。**每个实例各自采样同一把全服 ZSET，多实例时看板与告警取 max、不能求和**）；在途的 163 数（上限 `spectate.max-inflight`；每实例的真实值，求和才有意义） |
 | match | `executor_*{name="match-worker"}`、`{name="match-db"}`、`{name="match-push"}` | Micrometer 标准线程池指标 | — | 请求工作池（队列满见 `game_match_requests_seconds{result="overloaded"}`）/ 读评分的池 / 推送回调执行器 |
 

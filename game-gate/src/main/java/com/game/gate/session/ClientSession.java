@@ -4,6 +4,7 @@ import com.game.api.proto.SessionContext;
 import com.game.net.limit.MessageRateLimiter;
 import com.game.proto.ClientRequest;
 import com.google.protobuf.Message;
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import java.time.Duration;
@@ -161,6 +162,25 @@ public final class ClientSession {
     /** 连接已关时写入静默失败（断线流程由 channelInactive 驱动，不靠写失败）。 */
     void send(Message message) {
         channel.writeAndFlush(message);
+    }
+
+    /**
+     * 写一份已编码的客户端帧（观战扇出）。任意线程可调：只用 Netty 线程安全的 API，不碰会话状态。
+     *
+     * <p>写缓冲已积到 {@code softLimitBytes}（或连接已不可写）就跳过这一帧：观战帧每帧都带全量状态，丢一帧下一帧自愈；不能等写缓冲越过 2 MB 高水位——
+     * {@link ClientChannelHandler#channelWritabilityChanged} 会把整条大厅连接断掉。
+     *
+     * @param frame 所有权移交：写成功、写失败、跳过都由这里或 Netty 释放
+     * @return false = 跳过了这一帧
+     */
+    public boolean writeEncodedBelow(ByteBuf frame, long softLimitBytes) {
+        long pending = channel.config().getWriteBufferHighWaterMark() - channel.bytesBeforeUnwritable();
+        if (!channel.isWritable() || pending >= softLimitBytes) {
+            frame.release();
+            return false;
+        }
+        channel.writeAndFlush(frame);
+        return true;
     }
 
     /** 发完这条再关（给客户端一个收到原因的窗口）。 */

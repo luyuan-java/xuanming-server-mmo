@@ -31,7 +31,10 @@ class PlayerTradeDrainSqlTest {
         });
     }
     private static void maintenance(PlayerTradeStoreTest.Fixture f) {
-        f.sql.update("INSERT INTO maintenance_recovery_target VALUES(?,?,?,?,?)",ascii("admission"),7,ascii(f.database),
+        marker(f,7);
+    }
+    private static void marker(PlayerTradeStoreTest.Fixture f,int zone) {
+        f.sql.update("INSERT INTO maintenance_recovery_target VALUES(?,?,?,?,?)",ascii("admission"),zone,ascii(f.database),
                 ascii(MAINTENANCE_NONCE),ascii(MAINTENANCE_ADDRESS));
     }
     private static byte[] ascii(String value){return value.getBytes(java.nio.charset.StandardCharsets.US_ASCII);}
@@ -150,9 +153,13 @@ class PlayerTradeDrainSqlTest {
                 .setSceneId(41).setZoneId(7).setSessionId(2).setLoginGeneration(3).build();
     }
     private static RecoverySetup recovery(PlayerTradeStoreTest.Fixture f,boolean complete) {
+        return recovery(f,complete,7);
+    }
+    /** @param oldSceneZone 旧OPEN原入场的区号；夹具角色 home 恒为 7，不等于 7 即跨 zone 传送后在别区 Scene 上的旧持有者 */
+    private static RecoverySetup recovery(PlayerTradeStoreTest.Fixture f,boolean complete,int oldSceneZone) {
         maintenance(f);
         f.player(1,"seller");assertEquals(new PlayerStore.ClaimResult.Claimed(1),f.players.claimOwnership(1,BUDGET));
-        assertTrue(f.players.loadForScene(identity(1,"old-source"),"seller",BUDGET).isPresent());
+        assertTrue(f.players.loadForScene(identity(1,"old-source").toBuilder().setZoneId(oldSceneZone).build(),"seller",BUDGET).isPresent());
         f.clock.addAndGet(PlayerStore.OWNER_LEASE.toMillis()*2);
         assertEquals(new PlayerStore.ClaimResult.Claimed(2),f.players.claimOwnership(1,BUDGET));
         assertTrue(f.players.loadForScene(identity(2,SOURCE),"seller",BUDGET).isPresent());
@@ -448,6 +455,52 @@ class PlayerTradeDrainSqlTest {
             for(String nonce:java.util.List.of("0".repeat(32),"A".repeat(32),"short")) {
                 refuses(Code.INVALID,()->maintenanceStore(f,new PlayerTradeStore.RecoveryTarget(nonce,7,f.database,MAINTENANCE_ADDRESS,MAINTENANCE_INSTANCE),connection->MAINTENANCE_INSTANCE));
             }
+        }
+    }
+
+    @Test void 跨zone旧OPEN两区标记齐全才可恢复_缺入场区标记零副作用() throws Exception {
+        try(var f=fixture()) {
+            // home=7（夹具 player.zone_id），旧OPEN的原入场在跨 zone 传送后的区 9；维护目标仍是 home
+            var r=recovery(f,true,9);
+            refuses(Code.CONFLICT,()->r.store().planOpenRecovery(r.request(),BUDGET));notRecovered(f);
+            marker(f,9);
+            var plan=r.store().planOpenRecovery(r.request(),BUDGET);notRecovered(f);
+            assertEquals(9,com.game.proto.common.base.RoleAdmissionIdentity.parseFrom(java.util.HexFormat.of().parseHex(plan.admissionHex())).getZoneId());
+            // 维护目标必须是 home：拿入场区当目标，即使两条标记都在也拒绝
+            var sceneTarget=maintenanceStore(f,new PlayerTradeStore.RecoveryTarget(MAINTENANCE_NONCE,9,f.database,MAINTENANCE_ADDRESS,MAINTENANCE_INSTANCE),
+                    connection->MAINTENANCE_INSTANCE);
+            refuses(Code.CONFLICT,()->sceneTarget.planOpenRecovery(r.request(),BUDGET));notRecovered(f);
+            f.sql.update("DELETE FROM maintenance_recovery_target WHERE zone_id=9");
+            refuses(Code.CONFLICT,()->r.store().applyOpenRecovery(plan,BUDGET));notRecovered(f);
+            marker(f,9);
+            var receipt=r.store().applyOpenRecovery(plan,BUDGET);
+            assertEquals("RETIRED_BY_SQL_SUCCESSOR",receipt.status());assertEquals(0,oldOpen(f));
+            assertEquals(1,f.count("player_trade_admission_recovery"));
+            // 永久收据只读重放同样要两区标记都在；缺一区拒绝且不动收据
+            f.sql.update("DELETE FROM maintenance_recovery_target WHERE zone_id=9");
+            refuses(Code.CONFLICT,()->trades(f).applyOpenRecovery(plan,BUDGET));assertEquals(1,f.count("player_trade_admission_recovery"));
+            marker(f,9);
+            assertEquals(receipt,trades(f).applyOpenRecovery(plan,BUDGET));
+        }
+    }
+
+    @Test void 已提交恢复重做计划返回已提交状态_不报未完成() throws Exception {
+        try(var f=fixture()) {
+            var r=recovery(f,true);var plan=r.store().planOpenRecovery(r.request(),BUDGET);
+            var receipt=r.store().applyOpenRecovery(plan,BUDGET);assertEquals(0,oldOpen(f));
+            var same=assertThrows(PlayerTradeStore.RecoveryCommitted.class,()->r.store().planOpenRecovery(r.request(),BUDGET));
+            assertEquals(r.request().recoveryId(),same.recoveryId());assertEquals(receipt.proofMode(),same.proofMode());
+            assertEquals(Code.CONFLICT,same.code());
+            // 同角色同旧代已被另一 UUID 退休：同样是已提交，并指回原恢复 UUID
+            var another=new PlayerTradeStore.RecoveryRequest(java.util.UUID.randomUUID().toString(),r.freeze(),1,"old-source");
+            assertEquals(r.request().recoveryId(),assertThrows(PlayerTradeStore.RecoveryCommitted.class,
+                    ()->r.store().planOpenRecovery(another,BUDGET)).recoveryId());
+            // 同 UUID 换了原请求字段：UUID 已绑定另一原件，是冲突不是已提交
+            var drifted=new PlayerTradeStore.RecoveryRequest(r.request().recoveryId(),r.freeze(),1,"different-source");
+            var conflict=assertThrows(Failure.class,()->r.store().planOpenRecovery(drifted,BUDGET));
+            assertEquals(Code.CONFLICT,conflict.code());assertFalse(conflict instanceof PlayerTradeStore.RecoveryCommitted);
+            assertEquals(1,f.count("player_trade_admission_recovery"));
+            assertEquals(receipt,r.store().applyOpenRecovery(plan,BUDGET),"已提交原件仍按原计划只读重放");
         }
     }
 }

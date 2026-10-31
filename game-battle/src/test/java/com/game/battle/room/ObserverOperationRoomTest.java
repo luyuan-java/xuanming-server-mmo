@@ -129,4 +129,22 @@ class ObserverOperationRoomTest {
         assertTrue(h.service().removeObserver(remove(late)).getCancelled());
         assertFalse(h.service().addObserver(original(9922,C)).hasErrorMessage(),"墓碑只封原操作：新操作有空位照常准入");
     }
+    /** match 的前台请求与后台恢复可能并发发同一个 op，SQL 提交失败后也会重发同一个 op：同一请求必须得到同一结论，否则这次观战转不了大厅档。 */
+    @Test void 同op同请求的重放回首次拒绝码_有空位之后也一样_改了内容仍回参数错误_被Remove封闭的回暂不可用(){
+        h.create(h.pvp(9923,A,B));
+        for(long observer=6000;observer<6000+RoomConstants.MAX_OBSERVERS_PER_ROOM;observer++)assertFalse(h.service().addObserver(original(9923,observer)).hasErrorMessage());
+        var full=original(9923,C);
+        assertEquals(BattleRoomServiceImpl.SPECTATE_FULL,h.service().addObserver(full).getErrorMessage().getId());
+        assertEquals(BattleRoomServiceImpl.SPECTATE_FULL,h.service().addObserver(full).getErrorMessage().getId(),"满员时重放");
+        assertFalse(h.service().stopWatch(6000,StopWatchBattleRequest.newBuilder().setBattleId(9923).build()).hasErrorMessage());
+        assertEquals(BattleRoomServiceImpl.SPECTATE_FULL,h.service().addObserver(full).getErrorMessage().getId(),"有空位之后重放：仍是首次结论，也不翻成准入");
+        assertFalse(h.service().room(9923).isObserver(C));
+        assertEquals(BattleRoomServiceImpl.INVALID_PARAMETER,h.service().addObserver(full.toBuilder().setObserverName("改了").build()).getErrorMessage().getId(),"不是同一请求");
+        var gone=original(404,C);
+        assertEquals(BattleRoomServiceImpl.ENTITY_IS_NULL,h.service().addObserver(gone).getErrorMessage().getId());
+        assertEquals(BattleRoomServiceImpl.ENTITY_IS_NULL,h.service().addObserver(gone).getErrorMessage().getId(),"1004 也一样：match 据此懒剔除");
+        var removed=original(9923,C);
+        assertTrue(h.service().removeObserver(remove(removed)).getCancelled());
+        assertEquals(BattleRoomServiceImpl.SERVICE_UNAVAILABLE,h.service().addObserver(removed).getErrorMessage().getId(),"不是被拒关闭：没有首次拒绝码");
+    }
 }

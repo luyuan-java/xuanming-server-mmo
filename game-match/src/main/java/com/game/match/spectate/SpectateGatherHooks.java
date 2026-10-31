@@ -23,7 +23,8 @@ import org.slf4j.LoggerFactory;
  * 新格式损坏/玩家身份错配保留并记 invalid_mark；无法通过当前 battle 账本的旧格式可按值清除。
  *
  * <p>本地兼容链仍为尽力清退，不用异常阻断既有 gather；日志和指标明确未确认，不能据此声称观战/参战强事务互斥。
- * SQL 全球分支维持已有许可事务。开局成功后的公开逻辑保持 attempt 守护，失败只影响随机/列表可见性。
+ * SQL 全球分支维持已有许可事务。开局成功后的公开逻辑保持 attempt 守护，失败只影响随机/列表可见性；
+ * 落点记录里冻结的可见性不是 PUBLIC 的局（{@link SpectateVisibilityPolicy}）只留记录、不公开。
  * 没有读回最新落点然后无原件 Remove 的分支，也没有“RPC 失败但标记照删”的分支。
  */
 public final class SpectateGatherHooks implements GatherHooks {
@@ -162,6 +163,13 @@ public final class SpectateGatherHooks implements GatherHooks {
     private void publish(BattlePlacement placement) {
         Objects.requireNonNull(placement, "placement");
         String battle = Long.toUnsignedString(placement.getBattleId());
+        if (!SpectateVisibilityPolicy.isPublic(placement)) {
+            // 可见性闸（§10 第 6 条）：私密局只留落点记录（179 补签靠它定位 battle），不进可观战索引——列表与随机观战都挑不到它，
+            // 163 按 id 也只回「不存在或已结束」。这是正常出口，不计 publish_failed
+            log.info("[spectate] 战斗不公开观战，只留落点记录、不登记可观战索引 battle_id={} mode={} visibility={}", battle,
+                    Integer.toUnsignedString(placement.getMode()), Integer.toUnsignedString(placement.getSpectateVisibility()));
+            return;
+        }
         boolean published;
         try {
             published = store.publish(placement, Deadline.after(smallOpBudgetMs));

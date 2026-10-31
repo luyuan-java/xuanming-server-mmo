@@ -2,6 +2,7 @@ package com.game.guild;
 
 import com.game.common.sql.testing.AuthoritySqlFixture;
 import com.game.discovery.sql.AuthorityDataSourcePolicy;
+import com.game.discovery.sql.StrongTiDbConnectionPolicy;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -260,6 +261,7 @@ class GuildEconomyChannelIntegrationTest {
         dataSource.setMaxActive(16);
         dataSource.setMaxWait(10_000);
         dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        StrongTiDbConnectionPolicy.forGuild("guild-economy-fixture", false).postProcessBeforeInitialization(dataSource, "guild-economy-fixture");
         AuthorityDataSourcePolicy.protectDruid(dataSource, fixture.writerBoot(), false);
         Config config = new Config();
         config.useSingleServer().setAddress(System.getProperty("game.it.redis")).setDatabase(10);

@@ -34,12 +34,17 @@ public class SpectateStoreConfiguration {
     }
     @Bean(initMethod="start",destroyMethod="close")
     @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
-    public SqlSpectateStore sqlSpectateStore(com.game.match.global.GlobalWatchAuthority authority,com.game.match.placement.PlacementDialer dialer){return new SqlSpectateStore(authority,dialer);}
+    public SqlSpectateStore sqlSpectateStore(com.game.match.global.GlobalWatchAuthority authority,com.game.match.placement.PlacementDialer dialer,
+                                             com.game.match.gather.BattleNodes battleNodes,com.game.match.metrics.MatchMetrics metrics){
+        return new SqlSpectateStore(authority,dialer,battleNodes,metrics);
+    }
     @Bean
     @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
-    public GlobalWatchService globalWatchService(SqlSpectateStore store,com.game.match.port.PlayerStatusReader players,ObserverDialer observers,javax.sql.DataSource source){
+    public GlobalWatchService globalWatchService(SqlSpectateStore store,com.game.match.port.PlayerStatusReader players,ObserverDialer observers,javax.sql.DataSource source,
+                                                 org.springframework.beans.factory.ObjectProvider<SpectateRelay> relay){
         com.game.common.player.PlayerProfiles.ConnectionSource connections=source instanceof com.alibaba.druid.pool.DruidDataSource pool?pool::getConnection:wait->source.getConnection();
         var profiles=new com.game.common.player.PlayerProfiles(connections,1);
-        return new GlobalWatchService(store,players,observers,(player,deadline)->{var profile=profiles.load(java.util.List.of(player),deadline).get(player);return profile==null?"":profile.name();});
+        return new GlobalWatchService(store,players,observers,(player,deadline)->{var profile=profiles.load(java.util.List.of(player),deadline).get(player);return profile==null?"":profile.name();})
+                .withRelay(relay.getIfAvailable(SpectateRelay::disabled));
     }
 }

@@ -73,7 +73,7 @@ class SceneBattleMetricsTest {
         out.put("game_scene_battle_reconnect_hints_total", Map.entry("trigger", List.of("confirm", "late_confirm", "login", "carried")));
         out.put("game_scene_battle_recovery_total", Map.entry("result", List.of("ready", "retry", "error")));
         out.put("game_scene_battle_items_total", Map.entry("kind", List.of("consume_clamped", "consume_rejected", "drop_overflow",
-                "drop_lost")));
+                "drop_lost", "consume_config_missing", "drop_config_missing", "consume_clamped_unfrozen")));
         return out;
     }
 

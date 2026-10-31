@@ -43,7 +43,7 @@ public class ActivityConfiguration {
         boolean require = environment.getProperty("game.guild.activity.require-tidb", Boolean.class, true);
         if (!require && RunMode.parse(environment.getProperty("game.run-mode", "prod")) == RunMode.PROD)
             throw new IllegalStateException("生产帮会权威库不得关闭TiDB强读门禁");
-        return new StrongTiDbConnectionPolicy("guild-activity", require);
+        return StrongTiDbConnectionPolicy.forGuild("guild-activity", require);
     }
     public record Ready() {}
     @Bean

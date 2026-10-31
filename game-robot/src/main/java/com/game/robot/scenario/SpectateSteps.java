@@ -599,8 +599,8 @@ final class SpectateSteps {
     // ---------------------------------------------------------------- 大厅上不该出现的战斗帧
 
     /**
-     * 大厅连接上战斗帧（139 / 158 / 161 / 166）的条数：这四种只走直连，没有活直连时直接丢弃、<b>不回落</b>大厅（battle-node-spec §5.7；
-     * spectate-spec §10.7 S9）。
+     * 大厅连接上战斗帧（139 / 158 / 161 / 166）的条数：直连席的观众与参战者这四种只走直连，没有活直连时直接丢弃、<b>不回落</b>大厅（battle-node-spec §5.7；
+     * spectate-spec §10.7 S9）。只用于直连档：{@code delivery = LOBBY} 的观众大厅上就该有 158 / 161 / 166（mmorpg battle-spectate-tiered-fanout.md §15.2）。
      */
     static long lobbyBattleFrames(List<Received> lobby, BattleIds ids) {
         return lobby.stream().filter(r -> r.messageId() == ids.turnResult() || r.messageId() == ids.spectateTurnResult()

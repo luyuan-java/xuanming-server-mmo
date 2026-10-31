@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
@@ -28,23 +29,45 @@ import java.util.TreeMap;
  * <p><b>v1 的执行器只有封锁 / 解封货币获取</b>。挂欠款（{@code GM_ATTACH_CURRENCY_DEBT}）在 v1 不开放（收件箱入箱启动即拒，PARITY 第 ⑪ 条），
  * Java 版也没有它的执行器：万一收到（版本错位），按「本二进制不认识的类型」在这一条停下、停用该域、不记 REJECTED，运维挂 VOID 即可解开——
  * 欠款的合并语义、撤销类型与单笔上限一起做完之后再补执行器（同 mmorpg 解禁顺序）。
+ *
+ * <p>战斗结算域（{@link #withBattle}）的执行器结局只有 APPLIED / DEFER / 版本错位三种，没有 REJECTED：永久终局只能由真实应用终结。
  */
 public final class InboxConsumers {
 
     /** 执行器的结局。 */
-    public sealed interface ExecResult permits Applied, Rejected, Deferred {
+    public sealed interface ExecResult permits Applied, Rejected, Deferred, VersionSkew {
     }
 
     /** 已生效：记 APPLIED。 */
     public record Applied() implements ExecResult {
     }
 
-    /** 确定性拒绝（参数 / 状态不可能成功）：记 REJECTED(reason)。认识的类型但载荷解码失败按 REJECTED(kPlayerInboxPayloadInvalid)。 */
+    /** 确定性拒绝（参数 / 状态不可能成功）：记 REJECTED(reason)。GM 域认识的类型但载荷解码失败按 REJECTED(kPlayerInboxPayloadInvalid)。 */
     public record Rejected(int reason) implements ExecResult {
     }
 
-    /** 暂时做不了（本地缺陷，不能钉成终态）：在这一条停下，剩下的本地退避后续做。v1 的执行器不会返回它。 */
-    public record Deferred(int reason) implements ExecResult {
+    /**
+     * 暂时做不了（会随状态变化自愈，不能钉成终态）：在这一条停下，剩下的本地退避后续做（{@code inbox_deferred reason=executor_defer}）。
+     * GM 域的两个执行器不会返回它；战斗域在交出冻结、金币溢出、持久组件暂不可写等情况下返回它。
+     *
+     * @param cause 低基数的原因标签，只进 WARN 日志（例如战斗结算的 {@code deferred_frozen} / {@code deferred_currency} / {@code deferred_ledger}）
+     */
+    public record Deferred(int reason, String cause) implements ExecResult {
+        public Deferred {
+            cause = cause == null || cause.isBlank() ? "unspecified" : cause;
+        }
+
+        public Deferred(int reason) {
+            this(reason, "unspecified");
+        }
+    }
+
+    /**
+     * 版本错位（同 mmorpg C++ {@code PlayerInboxExecKind::kVersionSkew}）：载荷本二进制解不开或带本版本不认识的字段，本地重试永远不会成功。
+     * 与「不认识的类型」同口径：在这一条停下、不记账、不确认这一条，停用该域（{@code inbox_halted reason=version_skew}），已定前缀照常确认；
+     * 绝不能当成终态的 REJECTED，也不走 DEFER 的本地续做——这一行留在服务端 PENDING，实例在新版本节点上重建后重拉。
+     */
+    public record VersionSkew(int reason) implements ExecResult {
     }
 
     /** 执行一条新条目（场景逻辑线程上；效果与记账在同一个任务里）。 */
@@ -96,19 +119,43 @@ public final class InboxConsumers {
         return new InboxConsumers(table);
     }
 
-    /** 保留GM域并加入Battle域；坏来源或暂态失败只能DEFER，不能消费成REJECTED。 */
+    /** 战斗结算载荷的上限（同 game-inbox 规格与 game-match 的个人终局 16 KiB 上限，同 C++ {@code ApplyInboxSettlement}）。 */
+    static final int BATTLE_PAYLOAD_MAX_BYTES = 16 * 1024;
+
+    /**
+     * 保留 GM 域并加入战斗域（同 mmorpg C++ {@code PlayerBattleSystem::ApplyInboxSettlement}）。战斗结局只能是 APPLIED，执行器绝不返回 REJECTED：
+     * <ul>
+     *   <li>载荷超限、解码失败、带（含嵌套的）未知字段、结局不是已结束的合法枚举 → {@link VersionSkew}：本二进制永远解不对，停用该域，留待新版本节点；</li>
+     *   <li>应用返回非 APPLIED（交出冻结、金币溢出、持久组件暂不可写……）→ {@link Deferred}，cause 是结算结论的指标口径，退避后续做。</li>
+     * </ul>
+     */
     public static InboxConsumers withBattle(CurrencyService currency,com.game.scene.battle.PlayerBattleService battle) {
         var table=new EnumMap<PlayerInboxMessageType,Executor>(PlayerInboxMessageType.class);
         table.putAll(gmSanction(currency).executors);
-        table.put(PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT,(player,payload)->{
-            try{
-                var settlement=com.game.proto.BattleSettlementData.parseFrom(payload);
-                if(unknown(settlement))return new Deferred(PAYLOAD_INVALID);
-                var result=battle.applyInbox(player,settlement);
-                return result.outcome()==com.game.scene.battle.BattleSettlementService.Outcome.APPLIED?new Applied():new Deferred(PAYLOAD_INVALID);
-            }catch(InvalidProtocolBufferException invalid){return new Deferred(PAYLOAD_INVALID);}
-        });
+        table.put(PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT,(player,payload)->battleSettlement(battle,player,payload));
         return new InboxConsumers(table);
+    }
+
+    static ExecResult battleSettlement(com.game.scene.battle.PlayerBattleService battle, ScenePlayer player, ByteString payload) {
+        if (payload.size() > BATTLE_PAYLOAD_MAX_BYTES) {
+            return new VersionSkew(PAYLOAD_INVALID);
+        }
+        com.game.proto.BattleSettlementData settlement;
+        try {
+            settlement = com.game.proto.BattleSettlementData.parseFrom(payload);
+        } catch (InvalidProtocolBufferException invalid) {
+            return new VersionSkew(PAYLOAD_INVALID);
+        }
+        com.game.proto.eBattleOutcome outcome = settlement.getOutcome();
+        if (unknown(settlement) || outcome == com.game.proto.eBattleOutcome.UNRECOGNIZED
+                || outcome == com.game.proto.eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
+            return new VersionSkew(PAYLOAD_INVALID);
+        }
+        var result = battle.applyInbox(player, settlement);
+        if (result.outcome() == com.game.scene.battle.BattleSettlementService.Outcome.APPLIED) {
+            return new Applied();
+        }
+        return new Deferred(0, result.reason().name().toLowerCase(Locale.ROOT));
     }
     private static boolean unknown(com.google.protobuf.Message message) {
         if(!message.getUnknownFields().asMap().isEmpty())return true;

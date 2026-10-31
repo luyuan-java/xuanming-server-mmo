@@ -218,6 +218,32 @@ message BattleMonsterDefeat {
   uint32 count = 2;
 }
 
+// 货币类型沿用 CurrencyType：0 金币、1 钻石、2 绑定钻石。
+message BattleCurrencyGain {
+  uint32 currency_type = 1;
+  uint64 amount = 2;
+}
+
+// 每场、每名合格玩家的奖励，不乘人数或击杀数。
+message BattleRandomItemReward {
+  uint32 item_table_id = 1;
+  uint32 count = 2;
+  uint32 weight = 3;
+}
+
+message BattleRewardProfile {
+  uint32 battle_config_id = 1; // 0 为未单独配置副本的默认档。
+  string strategy_key = 2; // 空为通用档；由服务端战斗策略识别入口选择。
+  uint64 exp_gain = 3;
+  repeated BattleCurrencyGain currencies = 4;
+  uint32 item_draws = 5; // 每人固定抽取次数，有放回抽取。
+  repeated BattleRandomItemReward random_items = 6;
+}
+
+message BattleRewardConfig {
+  repeated BattleRewardProfile profiles = 1;
+}
+
 message BattleSettlementData {
   uint64 battle_id = 1;
   uint64 player_id = 2;
@@ -235,6 +261,8 @@ message BattleSettlementData {
   repeated BattlePetSettlementData pets = 14;  // 该玩家出战宝宝的战后终值(scene 回写实例)
   // battle 根据真实阵亡怪物生成，scene 用于任务进度；客户端不能上报。
   repeated BattleMonsterDefeat defeated_monsters = 15;
+  // 新结算仅填此集合；非空时忽略旧 gold_gain，历史空集合仍读 gold_gain。
+  repeated BattleCurrencyGain currency_gains = 16;
 }
 
 // ---- 出战宝宝的结算数据(随主人的 BattleSettlementData 一起回 scene)----
@@ -263,4 +291,21 @@ message BattleActivityContext {
   uint64 initiator_player_id = 5;   // 发起人;match 校验它等于 StartActivityBattleRequest.member_player_ids[0]
   uint32 guild_period_key = 6;      // 确认开战时的帮会期键(activity.GuildPeriodKey;历练即游戏日),用于每日计资金胜场上限
   uint64 launch_request_id = 7;     // 同道历练开战前持久原件；match/battle原样复制回结果，不包含账号
+}
+
+// 观战可见性(docs/design/battle-spectate-tiered-fanout.md §10 第 6 条 / §10.2):战斗创建时由 match 按
+// 单一策略表决定、随 CreateBattleRequest 冻结,之后不变。match 的登记公开、两条 WatchBattle 路径、
+// 观战列表与 battle 的 AddObserver 四处都按它执法。默认拒绝:未填(UNSPECIFIED)与 PRIVATE 一样不可观战。
+enum eSpectateVisibility {
+  SPECTATE_VISIBILITY_UNSPECIFIED = 0;  // 视同私密(老发送方 / 漏填一律 fail-closed)
+  SPECTATE_VISIBILITY_PRIVATE = 1;      // 不可观战:计分局、切磋、活动局、自定义房间与未知模式
+  SPECTATE_VISIBILITY_PUBLIC = 2;       // 任何在线玩家可观战,进观战列表与随机观战
+}
+
+// 观战投递档位(battle-spectate-tiered-fanout.md §3 / §15):按场只升不降,match 是档位的记账方,
+// battle 只认「挂了哪些中继 gate」与「是否已升广播」两件事。
+enum eSpectateTier {
+  SPECTATE_TIER_DIRECT = 0;     // L0:观众凭票直连 battle(直连席未满)
+  SPECTATE_TIER_RELAY = 1;      // L1:直连席已满,battle 每回合给每台挂了观众的 gate 各发一条中继帧
+  SPECTATE_TIER_BROADCAST = 2;  // L2:全服广播,battle 每回合只往广播 topic 发一条,所有 gate 都读
 }

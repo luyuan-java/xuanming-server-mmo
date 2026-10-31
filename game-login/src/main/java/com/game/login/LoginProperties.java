@@ -29,8 +29,9 @@ import org.springframework.boot.context.properties.bind.ConstructorBinding;
  * @param deviceSessionTtl      一次设备登记的有效期（基线 SessionExpireMin = 30 分钟；没注销干净的按它自愈）
  * @param refreshReuseGrace     旧 refresh token 被轮换后仍可重放的宽限窗口（基线 TokenConfig.RefreshReuseGrace，缺省 30s）：
  *                              窗口内同一旧 token 再来，返回同一对新令牌；0 = 严格一次性；上限
- *                              {@link RedisLoginTokens#MAX_REFRESH_REUSE_GRACE}，越界拒绝启动
- * @param refreshReuseRevoke    窗口外重放已轮换的旧 refresh 时吊销它所在的令牌家族（基线 TokenConfig.RefreshReuseRevoke，缺省 true）；
+ *                              {@link RedisLoginTokens#MAX_REFRESH_REUSE_GRACE}、整毫秒，越界拒绝启动
+ * @param refreshReuseRevoke    已轮换的旧 refresh 再次出现（窗口外，或窗口内而它的后继已被轮换走）时吊销它所在的令牌家族
+ *                              （基线 TokenConfig.RefreshReuseRevoke，缺省 true）；
  *                              false = 只观测（照常检测、记日志，不吊销）。refresh 有效期不得短于 access：家族记录跟着 refresh 走，
  *                              家族结束后它签出的 access 会被提前判无效
  */
@@ -90,6 +91,8 @@ public record LoginProperties(
         } else if (refreshReuseGrace.isNegative() || refreshReuseGrace.compareTo(RedisLoginTokens.MAX_REFRESH_REUSE_GRACE) > 0) {
             throw new IllegalArgumentException("game.login.refresh-reuse-grace 必须在 [0, "
                     + RedisLoginTokens.MAX_REFRESH_REUSE_GRACE + "] 内: " + refreshReuseGrace);
+        } else if (refreshReuseGrace.toNanos() % 1_000_000L != 0) {
+            throw new IllegalArgumentException("game.login.refresh-reuse-grace 必须是整毫秒: " + refreshReuseGrace);
         }
         if (refreshReuseRevoke == null) {
             refreshReuseRevoke = Boolean.TRUE;

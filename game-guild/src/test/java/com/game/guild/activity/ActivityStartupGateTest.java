@@ -10,6 +10,7 @@ import com.game.audit.TopicAdmin;
 import com.game.audit.TopicSpec;
 import com.game.common.GameNamespace;
 import com.game.common.KafkaNames;
+import com.game.common.sql.AuthorityDataSource;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory;
 import com.game.discovery.sql.StrongTiDbConnectionPolicy;
@@ -73,7 +74,8 @@ class ActivityStartupGateTest {
         sqlPolicy().withPropertyValues("game.run-mode=" + mode, "game.guild.activity.require-tidb=false")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    assertThat(((DruidDataSource) context.getBean(DataSource.class)).getConnectionInitSqls()).isEmpty();
+                    assertThat(((DruidDataSource) context.getBean(DataSource.class)).getConnectionInitSqls())
+                            .containsExactly(AuthorityDataSource.GUILD_FAIR_LOCKING_OFF_SQL);
                 });
     }
 
@@ -82,7 +84,8 @@ class ActivityStartupGateTest {
         sqlPolicy().run(context -> {
             assertThat(context).hasNotFailed();
             assertThat(((DruidDataSource) context.getBean(DataSource.class)).getConnectionInitSqls())
-                    .contains(StrongTiDbConnectionPolicy.SESSION_SQL);
+                    .containsExactlyInAnyOrder(StrongTiDbConnectionPolicy.SESSION_SQL,
+                            AuthorityDataSource.GUILD_FAIR_LOCKING_OFF_SQL);
         });
     }
 

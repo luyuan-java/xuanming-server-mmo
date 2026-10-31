@@ -509,8 +509,10 @@ RecoverTradeAdmission 的维护权限来自有权运维者显式执行及只覆�
       PRIMARY KEY (purpose, zone_id, schema_name)
     );
 
-表必须是无TTL的永久目标表；维护账号只读并持行锁，不拥有其DDL或写权限。purpose本入口固定为admission，zone_id必须等于原完整入场身份及计划时真实角色的区号，schema_name逐字等实际DATABASE。--maintenance-target-nonce 为独立非全零32位小写hex，--zone-id 显式固定原区号；physical_addr逐字等本次纯JDBC配置的无凭据host:port，不解析DNS、不据端口/名字/debug标记推导资格。nonce无TTL，时间推移不撤销或放宽维护目标；撤销须由运维改变或移除原标记。此合同不新造TiDB跨版本TTL元数据探针，也不涉及Redis/PTTL。
+表必须是无TTL的永久目标表；维护账号只读并持行锁，不拥有其DDL或写权限。purpose本入口固定为admission，zone_id必须等于计划时真实角色的home区号（player.zone_id）；原完整入场身份的区号与home不同（跨zone传送后在别区Scene入场）时，另需该入场区一条同nonce/同物理地址/同库的标记（2026-10-30补，见本节末），schema_name逐字等实际DATABASE。--maintenance-target-nonce 为独立非全零32位小写hex，--zone-id 显式固定角色home区号；physical_addr逐字等本次纯JDBC配置的无凭据host:port，不解析DNS、不据端口/名字/debug标记推导资格。nonce无TTL，时间推移不撤销或放宽维护目标；撤销须由运维改变或移除原标记。此合同不新造TiDB跨版本TTL元数据探针，也不涉及Redis/PTTL。
 
 外层计划升为 player-trade-open-recovery-plan-v3，固定命名空间、实例、库、nonce、zone和物理地址；旧外层v2计划须重新生成。领域RecoveryPlan、player-trade-open-retirement/v2编码、原请求摘要、永久恢复表和原plan_bytes不变。每次plan、apply及永久收据重放，都先在实际SQL事务的同一连接重核强会话/库/实例，按purpose,zone_id,schema_name用FOR UPDATE锁住专用标记，随后保持原route→P→账号→listing/最终写锁序；提交或回滚前不能替换目标。只有debug标记、缺行、错scope/nonce/地址/实例均在领域副作用前拒绝。普通游戏Store构造和交易API不新增维护前提，只有恢复方法默认拒未配置独立目标；永久收据重放仍不查新玩家身份来改绑原请求。
 
 本次不自动建库/迁移、不授予任意PITR能力、不制造SCENE_ACK/APPLIED、不删除pending或交易终局。H2/真实TiDB、正式main身份与A/B流程分别记实际证据；源码与夹具修改不是运行通过。
+
+2026-10-30补（源码候选，未编译、未运行）：Java已做跨zone传送，旧OPEN的持有者可能在别区Scene上。维护目标仍是角色home区；原入场区不同时，plan/apply/永久收据只读重放都在同一事务内对{home区, 原入场区}去重后按区号升序逐条FOR UPDATE核验标记（仍先于route→P→账号），两区相同只核一次，缺任一条即CONFLICT且零副作用；计划锁前只做一次普通读取原入场区号以决定锁哪几条，锁内重核原件，区号不在已锁集合同样拒绝。已提交的同一旧OPEN（同UUID原请求，或同角色同旧代的另一UUID）再plan不再报NOT_READY：CLI退出码3、不写新计划、提示用那次原计划按原请求--apply只读重放；同UUID换了原请求字段仍是CONFLICT。CLI对Store的业务拒绝只输出分类与固定说明（退出码1），不输出异常正文。

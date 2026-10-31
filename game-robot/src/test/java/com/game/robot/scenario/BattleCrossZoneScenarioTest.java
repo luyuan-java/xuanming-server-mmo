@@ -78,7 +78,8 @@ class BattleCrossZoneScenarioTest {
             String prefix = "Z" + step + " ";
             assertThat(names).as(prefix).anyMatch(n -> n.startsWith(prefix));
         }
-        assertThat(names).as("第二局不带观众：没有第二条 163 的检查").filteredOn(n -> n.contains("发 163(battle_id)")).hasSize(1);
+        assertThat(names).as("跨区观战的正向只在公开局上走一次").filteredOn(n -> n.contains("发 163(battle_id)")).hasSize(1);
+        assertThat(names).as("计分局 1V1 的 163 被可见性闸拒绝").anyMatch(n -> n.startsWith("Z5 区 2 的 C 对计分局 1V1 发 163"));
         assertThat(names).filteredOn(n -> n.startsWith("Z9 第二局 ")).as("第二局重复排队、公告、直连、打完、大厅 150、评分").hasSizeGreaterThanOrEqualTo(9);
 
         Matcher line = OK_LINE.matcher(scenario.resultLine());
@@ -93,8 +94,8 @@ class BattleCrossZoneScenarioTest {
 
         // 请求确实发了、没有多发
         MatchSupport.Ids ids = MatchSupport.Ids.resolve(world.registry());
-        assertThat(world.receivedCount(ids.joinQueue())).as("157：两局各两条（假服务端的锁在大厅 150 之前就放了，第二局不用重试）").isEqualTo(4);
-        assertThat(world.receivedCount(ids.watchBattle())).as("163：只有第一局的 C").isEqualTo(1);
+        assertThat(world.receivedCount(ids.joinQueue())).as("157：两局各两条（假服务端的锁在大厅 150 之前就放了，第二局不用重试），公开局一条").isEqualTo(5);
+        assertThat(world.receivedCount(ids.watchBattle())).as("163：第一局的 C 被拒一条，公开局一条").isEqualTo(2);
         assertThat(world.eventually(() -> world.receivedCount(ids.cancelQueue()) == 2)).as("收尾给 A、B 各发一条 148").isTrue();
         assertThat(world.lockedPlayers()).isZero();
         assertThat(world.queuedTickets()).isZero();
@@ -249,7 +250,7 @@ class BattleCrossZoneScenarioTest {
         assertThat(failed(report)).hasSize(2);
         assertThat(failed(report).get(0)).startsWith("Z5 C 直连后握手应答紧跟 161 {observer_count = 1}").contains("技能冷却没有清空");
         assertThat(failed(report).get(1)).startsWith("Z6 C 的直连上 ≥ 1 条 158");
-        assertThat(scenario.resultLine()).startsWith("CROSS_ZONE_MATCH_FAIL step=z5-direct-watch ");
+        assertThat(scenario.resultLine()).startsWith("CROSS_ZONE_MATCH_FAIL step=z5-public-watch ");
     }
 
     @Test
@@ -261,6 +262,17 @@ class BattleCrossZoneScenarioTest {
 
         assertThat(failed(report).get(0)).startsWith("Z5 区 2 的 C 发 163(battle_id) → 应答 battle_id 正确、没有 error_message")
                 .contains("不得带 error_message 字段");
+        assertThat(scenario.resultLine()).startsWith("CROSS_ZONE_MATCH_FAIL step=z5-public-watch ");
+    }
+
+    @Test
+    void 计分局的观战被可见性闸拒绝_假服务端放行时Z5失败() {
+        world.faults.add(Fault.WATCH_DUEL_ALLOWED);
+        BattleCrossZoneScenario scenario = scenario("priv", world.admin());
+
+        CheckReport report = scenario.run();
+
+        assertThat(failed(report).get(0)).startsWith("Z5 区 2 的 C 对计分局 1V1 发 163");
         assertThat(scenario.resultLine()).startsWith("CROSS_ZONE_MATCH_FAIL step=z5-direct-watch ");
     }
 

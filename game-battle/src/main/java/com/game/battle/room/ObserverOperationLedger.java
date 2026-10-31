@@ -18,6 +18,8 @@ final class ObserverOperationLedger {
     private static final class Entry {
         final String operation;final long battle,player,deadline;
         byte[] digest;boolean cancelled,active;
+        /** 本操作首次被拒的 tip；0 = 不是被拒关闭，而是被 Remove / 回收封闭。 */
+        int rejectTip;
         Entry(String operation,long battle,long player,long deadline){this.operation=operation;this.battle=battle;this.player=player;this.deadline=deadline;}
     }
     private final String instance;
@@ -59,6 +61,13 @@ final class ObserverOperationLedger {
     }
     /** StopWatch、签票失败及房间终结使用已登记原件，不能制造新的准入身份。 */
     boolean cancelKnown(String operation){var e=entries.get(operation);if(e==null)return false;e.cancelled=true;return true;}
+    /** AddObserver 的拒绝出口：写墓碑并记下首次拒绝码（先写为准）。{@code begin} 通过之后才调，原操作一定已登记。 */
+    void reject(String operation,int tip){var e=entries.get(operation);if(e==null)throw new IllegalStateException("被拒观战缺少原操作账本");e.cancelled=true;if(e.rejectTip==0)e.rejectTip=tip;}
+    /**
+     * 这个原操作首次被拒的 tip，0 = 没有记录。match 的前台请求与后台恢复可能并发发同一个 op，或 SQL 提交失败后重发同一个 op：
+     * 重放必须得到同一结论，否则首次回满员、重放回别的码，这次观战会被记成「无法观战」而不是转大厅档。
+     */
+    int firstRejection(String operation){var e=entries.get(operation);return e==null?0:e.rejectTip;}
     boolean queryValid(com.game.proto.QueryObserverRequest request){
         try{validate(request.getSpectatorOperationId(),request.getBattleId(),request.getObserverPlayerId(),1,request.getTargetInstanceId());}
         catch(IllegalArgumentException invalid){return false;}

@@ -21,7 +21,7 @@ class MatchProtoTest {
         Descriptor d = BattlePlacement.getDescriptor();
 
         assertThat(d.getFullName()).isEqualTo("game.match.BattlePlacement");
-        assertThat(d.getFields()).hasSize(11);
+        assertThat(d.getFields()).hasSize(12);
         assertField(d, "battle_id", 1, FieldDescriptor.Type.UINT64);
         assertField(d, "battle_node_id", 2, FieldDescriptor.Type.UINT32);
         assertField(d, "battle_instance_id", 3, FieldDescriptor.Type.STRING);
@@ -33,6 +33,7 @@ class MatchProtoTest {
         assertField(d, "player_names", 9, FieldDescriptor.Type.STRING);
         assertField(d, "created_at_ms", 10, FieldDescriptor.Type.UINT64);
         assertField(d, "deadline_ms", 11, FieldDescriptor.Type.UINT64);
+        assertField(d, "spectate_visibility", 12, FieldDescriptor.Type.UINT32);
         assertThat(d.findFieldByName("player_names").isRepeated()).isTrue();
     }
 

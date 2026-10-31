@@ -4,6 +4,8 @@
 #                         scene-manager 签跨 zone 重定向票据，批次 5.4；全部 zone 的 gate 共用同一把）
 #   GAME_NODE_LINK_SECRET   gate → scene 节点链路握手密钥，须与 game-scene 一致
 #   GAME_DUBBO_SECRET       Dubbo 调用方鉴权密钥，须与 gate 调用的全部 Dubbo 后端一致（login / friend / chat / team / guild / trade / match）
+#   GAME_SPECTATE_TOKEN_SECRET 观战订阅凭证密钥，须与 game-match 一致（match 签、gate 验；去首尾空白后 ≥ 32 字节，不得与 gate / battle 令牌密钥相同）。
+#                         prod 缺失或不合规拒启；dev / test 只告警，空密钥时一切 SubscribeSpectate 都被拒
 spring:
   application:
     name: game-gate
@@ -48,6 +50,9 @@ game:
   redis:
     address: redis://127.0.0.1:6379
     database: 12
+    # 观战按场订分片频道（有本机观众的场次才订，观众走后 linger 30 s）：能同时订多少场 = 订阅池上限（缺省 50）× 这个值 = 25000。
+    # 库缺省的 5 只够 250 场，到顶后新一场的观众当场收 SOURCE_LOST（game.gate.spectate.channel.failures）。连接总账见 architecture.md §6.1。
+    subscriptions-per-connection: 500
   dubbo:
     login-url: tri://127.0.0.1:20881
     # 好友后端 game-friend（Dubbo group friend）

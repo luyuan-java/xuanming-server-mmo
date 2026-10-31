@@ -12,6 +12,8 @@
 # 没设时本脚本生成本机随机值写进 run/game-asset-op-secret-guild，并把同一个值传给两者。
 # GAME_BATTLE_TOKEN_SECRET 是战斗直连票据的签名密钥（只有 game-battle 读；去首尾空白后至少 32 字节、不得与 GAME_GATE_TOKEN_SECRET 相同）；
 # 没设时本脚本生成本机随机值写进 run/game-battle-token-secret。game-battle 的客户端直连面在 12000、控制面在 21200、管理端口 18112。
+# GAME_SPECTATE_TOKEN_SECRET 是观战凭证的签名密钥（game-match 签、game-gate 验；去首尾空白后至少 32 字节、不得与 gate / battle 令牌密钥相同）；
+# 没设时本脚本生成本机随机值写进 run/game-spectate-token-secret。大厅档缺省开（满员转大厅档，要 Redis 7+），要关时在起切片的 shell 里设 GAME_MATCH_SPECTATE_RELAY_ENABLED=false。
 # game-match（批次 6.4：排队、凑单、开局、评分、切磋、补签）的 Dubbo 在 20888（GAME_MATCH_RPC_PORT）、管理端口 18113（actuator 与 dev 管理口
 # /admin/match/dev/*，令牌同 GAME_ADMIN_TOKEN）。它的评分表在 MySQL 库 <ns>（启动时自建），所以也读 GAME_MYSQL_PASSWORD。
 # GAME_BATTLE_RESULT_TOPIC_GENERATION 是对局结果 topic game-battle-result-g<代次> 的代次（game-battle 生产、game-match 消费，两边必须一致），缺省 1；
@@ -265,6 +267,27 @@ if [[ "$battle_secret_trimmed" == "$gate_secret_trimmed" ]]; then
 fi
 unset battle_secret_trimmed gate_secret_trimmed
 export GAME_BATTLE_TOKEN_SECRET
+
+# 观战凭证签名密钥（game-match 签、game-gate 验，mmorpg battle-spectate-tiered-fanout.md §15.7；三把密钥分域）：没设就生成 32 字节本机随机密钥
+# 写进 run/game-spectate-token-secret（只有本用户可读）。太短或与另两把相同时 dev 只告警、prod 拒启——本机切片两种模式都提前拦下（与进程同口径：去首尾空白后比较、按字节数计）。
+if [[ -z "${GAME_SPECTATE_TOKEN_SECRET:-}" ]]; then
+  GAME_SPECTATE_TOKEN_SECRET=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  (umask 077; printf "%s" "$GAME_SPECTATE_TOKEN_SECRET" > run/game-spectate-token-secret)
+  chmod 600 run/game-spectate-token-secret
+fi
+spectate_secret_trimmed=$(printf "%s" "$GAME_SPECTATE_TOKEN_SECRET" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+if (( $(printf "%s" "$spectate_secret_trimmed" | LC_ALL=C wc -c) < 32 )); then
+  echo "GAME_SPECTATE_TOKEN_SECRET 去首尾空白后不足 32 字节；取消这个环境变量让脚本生成，或换一个更长的值" >&2
+  exit 1
+fi
+for other_secret in "$GAME_GATE_TOKEN_SECRET" "$GAME_BATTLE_TOKEN_SECRET"; do
+  if [[ "$spectate_secret_trimmed" == "$(printf "%s" "$other_secret" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" ]]; then
+    echo "GAME_SPECTATE_TOKEN_SECRET 不能与 GAME_GATE_TOKEN_SECRET / GAME_BATTLE_TOKEN_SECRET 相同（分域：拿到另两把的人不能伪造观战凭证）；取消它让脚本生成" >&2
+    exit 1
+  fi
+done
+unset spectate_secret_trimmed other_secret
+export GAME_SPECTATE_TOKEN_SECRET
 
 # 新域的调用密钥各自生成，调用方与提供方继承同一值；商城四个信任域不得共用。
 for secret_name in GAME_ASSET_OP_SECRET_MAIL GAME_ASSET_OP_SECRET_TRADE MAIL_PRODUCER_SECRET_RANK RANK_PRODUCER_SECRET_MATCH \

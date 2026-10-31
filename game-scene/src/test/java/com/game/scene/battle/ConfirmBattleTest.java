@@ -53,9 +53,14 @@ class ConfirmBattleTest {
     private static final long X = 7;
     private static final long Y = 8;
     private static final int NODE = BattleFixture.BATTLE_NODE;
-    /** 备战锁的 TTL（备战时长 60 s + 余量 60 s）与正式期限的 TTL（战斗时长 300 s + 60 s）。 */
+    /**
+     * 备战锁的 TTL（备战时长 60 s + 余量 60 s）与正式期限的 TTL（战斗时长 300 s + 终局宽限 60 s + 投递余量 60 s + 余量 60 s：FIGHTING 锁按
+     * 有效期限续，{@link BattleFreeze#fightingReleaseAtMs}）。
+     */
     private static final long PREPARE_TTL = BattleFixture.PREPARE_MILLIS / 1000 + BattleRedis.LOCK_EXTRA_TTL_SEC;
-    private static final long FIGHT_TTL = BattleFixture.BATTLE_MILLIS / 1000 + BattleRedis.LOCK_EXTRA_TTL_SEC;
+    private static final long FIGHT_TTL = BattleFixture.FIGHTING_LOCK_TTL_SEC;
+    /** FIGHTING 锁 TTL 比「期限剩余 + 60 s」多出的窗口（秒）。 */
+    private static final long WINDOW_SEC = BattleFixture.OUTCOME_WINDOW_MILLIS / 1000;
     private static final List<String> RESULTS = List.of("upgraded", "idempotent", "reextended", "mismatch", "rebuilt",
             "frozen_extended", "offline_extended", "offline_miss", "ledger_hit", "invalid", "error");
     private static final List<String> HINT_TRIGGERS = List.of("confirm", "late_confirm", "login", "carried");
@@ -143,13 +148,14 @@ class ConfirmBattleTest {
         assertThat(freeze.phase()).isEqualTo(Phase.FIGHTING);
         assertThat(freeze.deadlineMs()).isEqualTo(deadline);
         assertThat(freeze.prepareDeadlineMs()).as("备战期限不动").isEqualTo(prepareDeadline);
-        assertThat(freeze.effectiveDeadlineMs()).as("FIGHTING 的有效期限看战斗期限").isEqualTo(deadline);
+        assertThat(freeze.effectiveDeadlineMs()).as("FIGHTING 的有效期限 = 战斗期限 + 终局宽限 + 投递余量")
+                .isEqualTo(deadline + BattleFixture.OUTCOME_WINDOW_MILLIS);
         assertThat(freeze.lockExtended()).as("续期结局还没回来").isFalse();
         Call extend = f.locks.take(Op.CONFIRM);
         assertThat(extend.playerId()).isEqualTo(PLAYER);
         assertThat(extend.battleId()).isEqualTo(X);
         assertThat(extend.longArg("deadline")).isEqualTo(deadline);
-        assertThat(extend.longArg("ttl")).as("(d − now) / 1000 + 60").isEqualTo(250 + 60);
+        assertThat(extend.longArg("ttl")).as("(d + 窗口 − now) / 1000 + 60；锁里的 d 仍是原始期限").isEqualTo(250 + WINDOW_SEC + 60);
         assertThat(f.locks.lockState(PLAYER)).as("脚本还没执行").isEqualTo("P");
 
         extend.complete();
@@ -159,7 +165,7 @@ class ConfirmBattleTest {
         assertThat(freeze.lockExtended()).isTrue();
         assertThat(f.locks.lock(PLAYER)).containsEntry("b", "7").containsEntry("n", String.valueOf(NODE)).containsEntry("s", "F")
                 .containsEntry("d", String.valueOf(deadline)).containsEntry("p", String.valueOf(prepareDeadline));
-        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(310);
+        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(250 + WINDOW_SEC + 60);
         assertThat(f.locks.ops()).as("只有一段续期").containsExactly(Op.CONFIRM);
         assertThat(f.messageIds(player)).as("本实例备战的冻结：确认不给客户端推任何东西").isEmpty();
         assertThat(hintsTotal()).isZero();
@@ -186,12 +192,15 @@ class ConfirmBattleTest {
         assertThat(freeze.lockExtended()).isTrue();
         assertThat(f.locks.lockState(PLAYER)).isEqualTo("F");
         assertThat(f.locks.lock(PLAYER)).containsEntry("d", String.valueOf(deadline));
-        assertThat(f.locks.lockTtlSec(PLAYER)).as("从备战 TTL 续到正式期限 + 60").isEqualTo(FIGHT_TTL);
+        assertThat(f.locks.lockTtlSec(PLAYER)).as("从备战 TTL 续到有效期限 + 60").isEqualTo(FIGHT_TTL);
     }
 
-    /** 期限已经过了的确认（钟差 / 极迟到）：照常升级，锁的 TTL 取 60 s 余量（{@code lockTtlSec}：期限已过 → 60）。 */
+    /**
+     * 期限已经过了的确认（钟差 / 极迟到）：照常升级；锁 TTL 按有效期限（期限 + 终局宽限 + 投递余量）的剩余 + 60 s 算——期限刚过时窗口还剩差不多一整段，
+     * 锁照样覆盖它（Match 仍可能提交 COMPLETE）；连窗口也过了才只剩 60 s 余量（{@code lockTtlSec} 的下限）。
+     */
     @Test
-    void 事件期限已过_照常升级_锁TTL取60秒余量() {
+    void 事件期限已过_照常升级_锁TTL按有效期限剩余算() {
         ScenePlayer player = f.enter(SESSION, PLAYER);
         f.prepared(PLAYER, X);
         long past = f.clock.epochMillis() - 1;
@@ -199,9 +208,19 @@ class ConfirmBattleTest {
         f.confirm(PLAYER, X, past);
         f.drain();
 
+        long expected = (BattleFixture.OUTCOME_WINDOW_MILLIS - 1) / 1000 + BattleRedis.LOCK_EXTRA_TTL_SEC;
         assertThat(player.battle().freeze().deadlineMs()).isEqualTo(past);
-        assertThat(f.locks.last(Op.CONFIRM).longArg("ttl")).isEqualTo(BattleRedis.LOCK_EXTRA_TTL_SEC);
-        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(60);
+        assertThat(f.locks.last(Op.CONFIRM).longArg("ttl")).as("窗口剩余（整秒截断）+ 60").isEqualTo(expected);
+        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(expected);
+
+        ScenePlayer late = f.enter(SESSION + 1, 1002);
+        f.prepared(1002, X);
+        long beyond = f.clock.epochMillis() - BattleFixture.OUTCOME_WINDOW_MILLIS - 1;
+        f.confirm(1002, X, beyond);
+        f.drain();
+        assertThat(late.battle().freeze().deadlineMs()).isEqualTo(beyond);
+        assertThat(f.locks.last(Op.CONFIRM).longArg("ttl")).as("窗口也过了：只剩 60 s 余量").isEqualTo(BattleRedis.LOCK_EXTRA_TTL_SEC);
+        assertThat(f.locks.lockTtlSec(1002)).isEqualTo(60);
     }
 
     @Test
@@ -398,11 +417,11 @@ class ConfirmBattleTest {
         assertThat(script.playerId()).isEqualTo(ABSENT);
         assertThat(script.battleId()).isEqualTo(X);
         assertThat(script.longArg("deadline")).isEqualTo(deadline);
-        assertThat(script.longArg("ttl")).isEqualTo(305 + 60);
+        assertThat(script.longArg("ttl")).as("离线只续锁也覆盖终局宽限 + 投递余量").isEqualTo(305 + WINDOW_SEC + 60);
         assertThat(f.locks.ops()).as("一次往返").containsExactly(Op.CONFIRM);
         assertThat(f.locks.lock(ABSENT)).containsEntry("s", "F").containsEntry("d", String.valueOf(deadline))
                 .containsEntry("n", String.valueOf(NODE)).containsEntry("p", String.valueOf(prepareDeadline));
-        assertThat(f.locks.lockTtlSec(ABSENT)).isEqualTo(365);
+        assertThat(f.locks.lockTtlSec(ABSENT)).isEqualTo(305 + WINDOW_SEC + 60);
         assertThat(confirmCounts()).containsExactly(Map.entry("offline_extended", 1.0));
     }
 
@@ -542,7 +561,7 @@ class ConfirmBattleTest {
         assertThat(player.inBattle()).as("CONFIRM 没回来之前不挂冻结").isFalse();
         Call script = f.locks.take(Op.CONFIRM);
         assertThat(script.longArg("deadline")).isEqualTo(deadline);
-        assertThat(script.longArg("ttl")).isEqualTo(365);
+        assertThat(script.longArg("ttl")).isEqualTo(305 + WINDOW_SEC + 60);
         script.complete();
         f.drain();
 
@@ -564,7 +583,7 @@ class ConfirmBattleTest {
         WorldTestAccess.assertStoppedMove(f.pushes(watcher, Contracts.IDS.notifyActorMove()), player);
         assertThat(f.reconnectHints(player)).containsExactly(X);
         assertThat(f.locks.lockState(PLAYER)).isEqualTo("F");
-        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(365);
+        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(305 + WINDOW_SEC + 60);
         assertThat(f.locks.ops()).as("一段 Lua，不做第二次复核（D10）").containsExactly(Op.CONFIRM);
         assertThat(confirmCounts()).containsExactly(Map.entry("rebuilt", 1.0));
         assertThat(f.rebuilds("late_confirm", "rebuilt")).isEqualTo(1);

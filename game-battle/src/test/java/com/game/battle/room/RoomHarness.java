@@ -26,6 +26,7 @@ import com.game.proto.MessageContent;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.eBattleActionType;
 import com.game.proto.eBattleTicketRole;
+import com.game.proto.eSpectateVisibility;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Parser;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -108,6 +109,8 @@ final class RoomHarness {
     final List<Out> log = new ArrayList<>();
     BattleTickets tickets = BattleTickets.ofUtf8(SECRET);
     FingerprintMode fingerprintMode = FingerprintMode.WARN;
+    /** 观众席节点配额：缺省同生产口径（缺省连接上限 4096 → 1024）；第一次调 {@link #service()} 之前可以换成小值。 */
+    int observerSeatQuota = RoomDependencies.observerSeatQuotaFor(com.game.battle.BattleProperties.DEFAULT_MAX_CONNECTIONS);
     private BattleRoomServiceImpl service;
     private final java.util.Map<String,com.game.proto.AddObserverRequest> observerIntents=new java.util.HashMap<>();
 
@@ -136,11 +139,20 @@ final class RoomHarness {
         log.add(new Out(Kind.RESULT, 0, 0, event));
     };
 
-    /** 房间服务（第一次调用时按当前的 tickets / fingerprintMode 构造）。 */
+    /** 观战中继端口收到的帧（按发布顺序；不进 {@link #log}：既有用例的 {@link #trace()} 不受影响）。 */
+    final List<com.game.proto.contracts.kafka.SpectateFrameEvent> relayFrames = new ArrayList<>();
+    /** 观战中继端口：缺省是记录型的；第一次调 {@link #service()} 之前可以换成别的实现。 */
+    com.game.battle.port.SpectateFrameSink spectateFrames = frame -> {
+        relayFrames.add(frame);
+        return java.util.concurrent.CompletableFuture.completedFuture(null);
+    };
+
+    /** 房间服务（第一次调用时按当前的 tickets / fingerprintMode / observerSeatQuota 构造）。 */
     BattleRoomServiceImpl service() {
         if (service == null) {
             service = new BattleRoomServiceImpl(new RoomDependencies(data, NODE_FINGERPRINT, fingerprintMode, scheduler,
-                    scheduler.clock(), identity, tickets, ids, lobby, sceneEvents, settlements, activityResults, results, metrics));
+                    scheduler.clock(), identity, tickets, ids, lobby, sceneEvents, settlements, activityResults, results, metrics,
+                    observerSeatQuota, spectateFrames));
         }
         return service;
     }
@@ -187,6 +199,11 @@ final class RoomHarness {
                 .setRouting(routing(playerId));
     }
 
+    /*
+     * 三个建房夹具都标 PUBLIC：battle 不按模式判可见性，只认建房原件里 match 冻结的值（第二道闸）；房间侧的观战用例要的是「可观战的房间」。
+     * 私密局的用例显式改写 spectate_visibility。
+     */
+
     /** PVE 单人：A 打一只兜底怪（300 hp、速度 60）；A 速度 100 先手。期限 = now + 300 s。 */
     CreateBattleRequest.Builder pve(long battleId, long playerId) {
         return CreateBattleRequest.newBuilder()
@@ -195,6 +212,7 @@ final class RoomHarness {
                 .setMatchMode(PVE_SOLO)
                 .setSeed(42)
                 .setDeadlineMs(now() + 300_000)
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC)
                 .addPlayers(player(playerId, 0, 1000, 100));
     }
 
@@ -205,7 +223,8 @@ final class RoomHarness {
                 .setBattleConfigId(FakeBattleData.DUNGEON_NONE)
                 .setMatchMode(PVE_TEAM)
                 .setSeed(42)
-                .setDeadlineMs(now() + 300_000);
+                .setDeadlineMs(now() + 300_000)
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         for (long playerId : playerIds) {
             request.addPlayers(player(playerId, 0, 1000, 100));
         }
@@ -220,6 +239,7 @@ final class RoomHarness {
                 .setMatchMode(PVP_1V1)
                 .setSeed(7)
                 .setDeadlineMs(now() + 300_000)
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC)
                 .addPlayers(player(first, 0, 1_000_000, 100))
                 .addPlayers(player(second, 1, 1_000_000, 90));
     }

@@ -61,6 +61,7 @@ public final class BattleMetrics {
     static final String ROUNDS = "game.battle.rounds";
     static final String ROUND_RESOLVE = "game.battle.round.resolve";
     static final String OBSERVER_RECLAIMED = "game.battle.observer.reclaimed";
+    static final String SPECTATE_RELAY_FRAMES = "game.battle.spectate.relay.frames";
     static final String DIRECT_CONNECTIONS = "game.battle.direct.connections";
     static final String HANDSHAKES = "game.battle.handshakes";
     static final String CLIENT_REQUESTS = "game.battle.client.requests";
@@ -297,7 +298,9 @@ public final class BattleMetrics {
         ISSUE_BATTLE_TICKET("issueBattleTicket"),
         ADD_OBSERVER("addObserver"),
         QUERY_OBSERVER("queryObserver"),
-        REMOVE_OBSERVER("removeObserver");
+        REMOVE_OBSERVER("removeObserver"),
+        ATTACH_RELAY_GATE("attachRelayGate"),
+        PROMOTE_SPECTATE_BROADCAST("promoteSpectateBroadcast");
 
         private final String label;
 
@@ -518,6 +521,12 @@ public final class BattleMetrics {
     /** 一名观众的座位因宽限到期被回收。 */
     public void observerReclaimed(ObserverReclaim reason) {
         observerReclaims.get(reason).increment();
+    }
+
+    /** 一帧观战中继帧发布的结局（{@code game_battle_spectate_relay_frames_total{result}}；至多一次，失败靠下一帧自愈）。不带 battle_id。 */
+    public void spectateRelayFrame(boolean ok) {
+        Counter.builder(SPECTATE_RELAY_FRAMES).description("观战中继帧发布到 Redis 的结局").tag("result", ok ? "ok" : "failed")
+                .register(registry).increment();
     }
 
     // ---------------------------------------------------------------- 直连面

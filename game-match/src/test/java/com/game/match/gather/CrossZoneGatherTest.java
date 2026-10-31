@@ -74,6 +74,8 @@ class CrossZoneGatherTest {
     /** 观众。 */
     private static final long C = 1003;
     private static final QueueRef QUEUE = new QueueRef(ONE_V_ONE, 1);
+    /** 一个会被公开观战的队列（PVE 组队人数档）：Z12 的观战用它。 */
+    private static final QueueRef PUBLIC_QUEUE = new QueueRef(GatherFixture.PVE_TEAM, 1);
     /** 两个 zone 的 1 号 gate 发出的第一个会话号：{@code 1 << 17 | 1}。 */
     private static final int SAME_SESSION = (1 << 17) | 1;
     private static final NodeRpcClients.Target Z1_SCENE_1 = new NodeRpcClients.Target("127.0.0.1", 21100, "scene-z1-inst");
@@ -208,19 +210,24 @@ class CrossZoneGatherTest {
          * @param zoneByPlayer 名单顺序（第一个是锚点）→ 入队时的 zone
          */
         GatherPlan popped(Map<Long, Integer> zoneByPlayer) {
+            return popped(QUEUE, zoneByPlayer);
+        }
+
+        /** 同 {@link #popped(Map)}，换一个队列（Z12 观战要一局公开局：1V1 是计分局，建房时冻结为私密，不可观战）。 */
+        GatherPlan popped(QueueRef queue, Map<Long, Integer> zoneByPlayer) {
             List<Long> members = new ArrayList<>(zoneByPlayer.keySet());
             List<TicketRef> refs = new ArrayList<>();
             Map<Long, String> ticketIds = new LinkedHashMap<>();
             zoneByPlayer.forEach((playerId, zoneId) -> {
                 inZone(playerId, zoneId);
-                f.tickets.enqueue(playerId, GatherFixture.ticketId(playerId), QUEUE, zoneId, 150_000, QUEUED_TTL_MS, GatherFixture.d());
+                f.tickets.enqueue(playerId, GatherFixture.ticketId(playerId), queue, zoneId, 150_000, QUEUED_TTL_MS, GatherFixture.d());
                 refs.add(new TicketRef(playerId, GatherFixture.ticketId(playerId)));
                 ticketIds.put(playerId, GatherFixture.ticketId(playerId));
             });
-            f.tickets.pop(QUEUE, "pop-" + members.get(0), refs, TimeUnit.SECONDS.toMillis(MatchBudgets.matchedTicketTtlSeconds(members.size())),
+            f.tickets.pop(queue, "pop-" + members.get(0), refs, TimeUnit.SECONDS.toMillis(MatchBudgets.matchedTicketTtlSeconds(members.size())),
                     GatherFixture.d());
             f.tickets.calls.clear();
-            return GatherPlan.popped(QUEUE, members, ticketIds);
+            return GatherPlan.popped(queue, members, ticketIds);
         }
 
         /** A 在 zone 1、B 在 zone 2 排的队，A 是锚点。 */
@@ -531,7 +538,8 @@ class CrossZoneGatherTest {
         Map<Long, Integer> bothInZone1 = new LinkedHashMap<>();
         bothInZone1.put(A, 1);
         bothInZone1.put(B, 1);
-        long battleId = rig.f.pipeline().run(rig.popped(bothInZone1)).battleId();
+        // 观战只对公开局开放（可见性闸）：跨区 1V1 是计分局、建房时冻结为私密，这里用 PVE 组队人数档的凑单看「观战不分 zone」
+        long battleId = rig.f.pipeline().run(rig.popped(PUBLIC_QUEUE, bothInZone1)).battleId();
         assertThat(dialer.calls).as("两名参战者都没有在观战：开局前的清退不找 battle").isEmpty();
         // 观众 C：在线目录挂在 zone 2 的 1 号 gate（会话号、gate 节点号与两名参战者全部相同）；位置记录却还指着 zone 1（传送途中两者可以不等）
         rig.f.players.presence(C, presence(C, 2));

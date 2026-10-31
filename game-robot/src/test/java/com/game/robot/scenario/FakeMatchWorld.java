@@ -209,6 +209,8 @@ final class FakeMatchWorld implements AutoCloseable {
         CHALLENGE_ENDS_AFTER_FIRST_WATCH,
         /** 163 成功的应答带了一个 id = 0 的空 error_message。 */
         WATCH_OK_WITH_EMPTY_TIP,
+        /** 可见性闸没生效：计分局 1V1 也能观战。 */
+        WATCH_DUEL_ALLOWED,
         /** 1V1 把两名玩家的直连票签到了不同的节点实例上。 */
         DUEL_TICKETS_DIFFERENT_INSTANCE,
         /** 结算落地后不经大厅补推 150。 */
@@ -902,6 +904,12 @@ final class FakeMatchWorld implements AutoCloseable {
         if (player.lock != 0) {
             watchRejected(ch, request, "in_battle", SpectateSteps.TIP_IN_BATTLE, SpectateSteps.TEXT_IN_BATTLE);
             endChallengeAfterFirstWatch(player);
+            return;
+        }
+        // 可见性闸：计分局 / 切磋不可观战，回的与「不存在」逐字节相同，且不清退旧观战（mmorpg battle-spectate-tiered-fanout.md §10 第 6 条）
+        Battle specified = requested == 0 ? null : battles.get(requested);
+        if (specified != null && specified.mode != MODE_PVE_SOLO && specified.mode != MODE_PVE_TEAM && !faults.contains(Fault.WATCH_DUEL_ALLOWED)) {
+            watchRejected(ch, request, "not_found", SpectateSteps.TIP_NOT_WATCHABLE, SpectateSteps.TEXT_NOT_FOUND);
             return;
         }
         if (player.watching != 0) {

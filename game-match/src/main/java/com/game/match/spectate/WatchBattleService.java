@@ -48,6 +48,11 @@ import org.slf4j.LoggerFactory;
  * <p>既有判定顺序、随机两次上限、建房窗口/attempt 守护、复查票据和锁的方向、4.5 秒请求预算保持。
  * 同场重看先推旧观战结束，再新操作分配；成功应答返回新 spectator_operation_id。全球 SQL 观战仍走 GlobalWatchService。
  * 此路径依旧是本地兼容链，Redis TTL、开局尽力清退与跨存储复查不是全球 SQL 事务互斥的证明。
+ *
+ * <p>可见性闸（mmorpg battle-spectate-tiered-fanout.md §10 第 6 条，与 Go 版 watchbattlelogic 同口径）：指定场在互斥检查之后、
+ * 任何副作用（清退旧观战、写标记、调 battle）之前用一次原子读选定，落点记录里冻结的可见性不是 PUBLIC（{@link SpectateVisibilityPolicy}）
+ * 就回与「记录不在」逐字节相同的 16018「该战斗不存在或已结束」，两者都不清退旧观战——否则「旧观战有没有被拆」会成为探测私密局是否存在的旁路；
+ * 随机模式挑到私密局（本不该在索引里）只摘成员、换下一场。私密局的落点记录一律不删（179 补签靠它定位 battle）。
  */
 public final class WatchBattleService {
 
@@ -67,6 +72,9 @@ public final class WatchBattleService {
     private final Executor recheckThreads;
     private GlobalWatchService global;
     public WatchBattleService withGlobal(GlobalWatchService global){this.global=global;return this;}
+    /** 大厅档准入（缺省关闭：观众只走直连席，满了回 16021）。装配时设一次。 */
+    private SpectateRelay relay = SpectateRelay.disabled();
+    public WatchBattleService withRelay(SpectateRelay relay){this.relay=Objects.requireNonNull(relay,"relay");return this;}
     private java.util.function.BiFunction<Long,Deadline,String> publicNames=(player,deadline)->"";
     public WatchBattleService withPublicNames(java.util.function.BiFunction<Long,Deadline,String> names){publicNames=Objects.requireNonNull(names);return this;}
     public WatchBattleResponse watch(SessionContext session,com.game.proto.match.WatchBattleRequest request,Deadline deadline){
@@ -186,6 +194,35 @@ public final class WatchBattleService {
             return rejected(WatchOutcome.IN_BATTLE, MatchTip.WATCH_IN_BATTLE);
         }
 
+        // 可见性闸：指定场在互斥检查之后、任何副作用（清退旧观战、写标记、调 battle）之前用一次原子读选定。放在互斥检查之后，
+        // 排队中 / 战斗中的玩家不论指定哪一场都先得到同一个互斥结论，不额外暴露目标场的信息；这次读到的快照留给下面的登记循环用
+        boolean randomMode = requestedBattleId == 0;
+        SpectateStore.Snapshot specified = null;
+        if (!randomMode) {
+            try {
+                specified = store.read(requestedBattleId, d);
+            } catch (Deadline.DependencyException e) {
+                return busy("读落点记录", player, e);
+            }
+            switch (classify(player, requestedBattleId, specified, specified.published(), d)) {
+                case WATCHABLE -> {
+                    // 往下清退旧场、登记
+                }
+                case ABSENT -> {
+                    log.info("[spectate] 指定观战的战斗没有落点记录 player={} battle_id={} published={}", player, id(requestedBattleId),
+                            specified.published());
+                    return rejected(WatchOutcome.NOT_FOUND, MatchTip.WATCH_NOT_FOUND);
+                }
+                case PRIVATE -> {
+                    // 与「记录不在」逐字节同一个应答，只在指标上区分
+                    return rejected(WatchOutcome.PRIVATE, MatchTip.WATCH_NOT_FOUND);
+                }
+                case CORRUPT -> {
+                    return rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
+                }
+            }
+        }
+
         // 第 7 行：已有标记不拒绝，先收拾旧场
         if (entry.mark().isPresent()) {
             Verdict stop = clearPreviousMark(playerId, player, entry.mark().get(), requestedBattleId, d, pending);
@@ -211,11 +248,12 @@ public final class WatchBattleService {
         }
         BattleRouting routing = BattleRoutings.gatePart(presence.get());
 
-        // 选场 + 登记：随机两轮、指定一轮
-        boolean randomMode = requestedBattleId == 0;
+        // 选场 + 登记：随机两轮、指定一轮（指定场已在副作用之前选定，这里复用那次原子读）
         int rounds = randomMode ? MatchBudgets.RANDOM_WATCH_ROUNDS : 1;
         for (int round = 0; round < rounds; round++) {
             long battleId = requestedBattleId;
+            // 「是否已公开 + 落点 + 时刻」一次原子读：建房窗口判定的三个输入不得晚于读落点（W6）
+            SpectateStore.Snapshot snapshot = specified;
             if (randomMode) {
                 try {
                     battleId = pickRandom(d);
@@ -225,38 +263,49 @@ public final class WatchBattleService {
                 if (battleId == 0) {
                     break; // 没有可看的场
                 }
+                try {
+                    snapshot = store.read(battleId, d);
+                } catch (Deadline.DependencyException e) {
+                    return busy("读落点记录", player, e);
+                }
+                // 随机挑出来的就是索引成员，按已公开处理（同基线）
+                switch (classify(player, battleId, snapshot, true, d)) {
+                    case WATCHABLE -> {
+                        // 往下登记
+                    }
+                    case ABSENT, PRIVATE -> {
+                        continue; // 成员已摘（落点不动），换下一场
+                    }
+                    case CORRUPT -> {
+                        return rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
+                    }
+                }
             }
             String battle = id(battleId);
-
-            // 「是否已公开 + 落点 + 时刻」一次原子读：建房窗口判定的三个输入不得晚于读落点（W6）
-            SpectateStore.Snapshot snapshot;
-            try {
-                snapshot = store.read(battleId, d);
-            } catch (Deadline.DependencyException e) {
-                return busy("读落点记录", player, e);
-            }
-            // 随机挑出来的就是索引成员，按已公开处理（同基线）
             boolean published = randomMode || snapshot.published();
-            BattlePlacement placement;
-            switch (snapshot.record()) {
-                case SpectateStore.Record.Corrupt corrupt -> {
-                    // BW9：损坏的记录回 16004、不剔除（删掉它会毁掉补签的定位）；计数告警
-                    metrics.watchableAnomaly(WatchAnomaly.CORRUPT_RECORD);
-                    log.error("[spectate] WatchBattle 落点记录损坏（不剔除） player={} battle_id={}: {}", player, battle, corrupt.why());
-                    return rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
-                }
-                case SpectateStore.Record.Absent absent -> {
-                    // 只摘索引里的残留成员，永不删落点：读到「没有」之后才预写的记录（一场正在建房的战斗）不能动
-                    if (published) {
-                        evict(new Eviction.Missing(battleId), IndexEviction.MISSING_RECORD, d);
+            if (!(snapshot.record() instanceof SpectateStore.Record.Found found)) {
+                // classify 只对好记录回 WATCHABLE：走到这里是程序缺陷
+                throw new IllegalStateException("可观战判定之后落点记录不是好记录 battle_id=" + battle);
+            }
+            BattlePlacement placement = found.placement();
+
+            // 大厅档（mmorpg battle-spectate-tiered-fanout.md §15.6）：已是中继档的场不撞直连席，不调 battle、不写标记，只签凭证
+            try {
+                if (relay.relayed(battleId, d)) {
+                    SpectateRelay.Admission admission = relay.lobby(placement, playerId, snapshot.redisNowMs(), d);
+                    if (admission instanceof SpectateRelay.Admission.Rejected refused && refused.tip() == MatchTip.WATCH_NOT_FOUND) {
+                        // 来源实例已换，房间随它没了：与 battle 回 1004 同口径懒剔除（按 attempt 守护），随机模式换下一场
+                        if (placement.getAttempt() != 0) {
+                            evict(new Eviction.Dead(battleId, placement.getAttempt()), IndexEviction.DEAD_NODE, d);
+                        }
+                        if (randomMode) {
+                            continue;
+                        }
                     }
-                    if (randomMode) {
-                        continue;
-                    }
-                    log.info("[spectate] 指定观战的战斗没有落点记录 player={} battle_id={} published={}", player, battle, published);
-                    return rejected(WatchOutcome.NOT_FOUND, MatchTip.WATCH_NOT_FOUND);
+                    return settle(player, battleId, admission);
                 }
-                case SpectateStore.Record.Found found -> placement = found.placement();
+            } catch (Deadline.DependencyException e) {
+                return busy("读观战档位", player, e);
             }
 
             // 第 13 行：原子完成「没有票据 ∧ 没有标记 → 写标记」。标记必须先于观众登记生效
@@ -323,8 +372,10 @@ public final class WatchBattleService {
                 case Outcome.Replied replied when replied.tipId() == MatchTips.SPECTATE_FULL -> {
                     // 第 17a 行：观众席已满，明确拒绝（battle 留了墓碑，同一次登记不会迟到翻成准入）：回滚标记；随机模式也不换场
                     releaseMark(playerId, player, mark, d, pending);
-                    log.info("[spectate] battle 观众席已满 player={} battle_id={} node={}", player, battle, node(placement));
-                    return rejected(WatchOutcome.FULL, MatchTip.WATCH_FULL);
+                    log.info("[spectate] battle 观众席已满 player={} battle_id={} node={} relay={}", player, battle, node(placement), relay.enabled());
+                    // 开关开着就转大厅档，这次不算满员；关着回 16021
+                    return relay.enabled() ? settle(player, battleId, relay.escalate(placement, playerId, snapshot.redisNowMs(), d))
+                            : rejected(WatchOutcome.FULL, MatchTip.WATCH_FULL);
                 }
                 case Outcome.Replied replied -> {
                     // 是参战者 / 签不出票：明确拒绝，回滚标记；随机模式也不换场（BW6）
@@ -377,6 +428,76 @@ public final class WatchBattleService {
 
         // 第 18 行
         return rejected(WatchOutcome.NO_BATTLE, MatchTip.WATCH_NO_BATTLE);
+    }
+
+    /**
+     * 大厅档准入的结局 → 出口。大厅档的观众在 match 没有逐人状态（§15.1）：标记此刻一定不是本次写下的。
+     * 每名观众一行的日志只到 DEBUG：大厅档没有每房 20 席的上限，热门场开播时 INFO 会随观众数线性增长；趋势看 {@code game.match.watch.battle{outcome=lobby}}。
+     */
+    private Verdict settle(String player, long battleId, SpectateRelay.Admission admission) {
+        return switch (admission) {
+            case SpectateRelay.Admission.Lobby lobby -> {
+                log.debug("[spectate] 观战转大厅档 player={} battle_id={}", player, id(battleId));
+                yield new Verdict(WatchOutcome.LOBBY, lobby.response());
+            }
+            case SpectateRelay.Admission.Rejected refused -> rejected(refused.outcome(), refused.tip());
+            case SpectateRelay.Admission.Unavailable unavailable -> rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
+        };
+    }
+
+    // ================================================================ 可见性闸：选中的一场能不能看
+
+    /** 选中的一场（指定场或随机挑中的索引成员）能不能看。 */
+    private enum Target {
+        /** 好记录且冻结的可见性是 PUBLIC：往下登记。 */
+        WATCHABLE,
+        /** 落点记录不在：客户端看到「不存在或已结束」。 */
+        ABSENT,
+        /** 非公开局：客户端看到的与 {@link #ABSENT} 逐字节相同，不泄露私密局存在与否。 */
+        PRIVATE,
+        /** 记录在但损坏：16004，不剔除（BW9：删掉它会毁掉补签的定位）。 */
+        CORRUPT
+    }
+
+    /**
+     * 判定选中的一场能不能看（指定场与随机模式共用这一判定），并做判定附带的收尾：
+     * <ul>
+     *   <li>记录损坏：计 {@code anomalies{corrupt_record}}，不剔除；</li>
+     *   <li>记录不在：只摘读之前已在索引里的成员，且落点此刻仍不存在才摘（{@link Eviction.Missing}），永不删落点——读到「没有」之后才预写的
+     *       记录（一场正在建房的战斗）不能动；</li>
+     *   <li>私密局：同样只摘读之前已在索引里的成员（开局钩子不公开私密局，在就是残留），落点留给 179 补签。</li>
+     * </ul>
+     * 不碰观战标记、不调 battle，所以能放在 163 的一切副作用之前。
+     *
+     * @param published 读的那一刻是否已在可观战索引里（随机选场挑出来的成员恒为 true）
+     */
+    private Target classify(String player, long battleId, SpectateStore.Snapshot snapshot, boolean published, Deadline d) {
+        return switch (snapshot.record()) {
+            case SpectateStore.Record.Corrupt corrupt -> {
+                metrics.watchableAnomaly(WatchAnomaly.CORRUPT_RECORD);
+                log.error("[spectate] WatchBattle 落点记录损坏（不剔除） player={} battle_id={}: {}", player, id(battleId), corrupt.why());
+                yield Target.CORRUPT;
+            }
+            case SpectateStore.Record.Absent absent -> {
+                if (published) {
+                    evict(new Eviction.Missing(battleId), IndexEviction.MISSING_RECORD, d);
+                }
+                yield Target.ABSENT;
+            }
+            case SpectateStore.Record.Found found -> {
+                if (SpectateVisibilityPolicy.isPublic(found.placement())) {
+                    yield Target.WATCHABLE;
+                }
+                if (published) {
+                    // 无条件只摘成员（与非法成员同一个存储原语），不删落点
+                    log.warn("[spectate] 可观战索引里有非公开局（残留），只摘成员、不删落点 battle_id={} visibility={}", id(battleId),
+                            Integer.toUnsignedString(found.placement().getSpectateVisibility()));
+                    evict(new Eviction.Invalid(SpectateRules.member(battleId)), IndexEviction.PRIVATE, d);
+                }
+                log.info("[spectate] 拒绝观战非公开局 player={} battle_id={}", player, id(battleId));
+                yield Target.PRIVATE;
+            }
+        };
     }
 
     // ================================================================ 第 7 行：旧标记

@@ -11,6 +11,7 @@ import com.game.battle.room.DirectLink;
 import com.game.proto.BattleAssignedS2C;
 import com.game.proto.BattleStartS2C;
 import com.game.proto.MessageContent;
+import com.game.proto.SpectateEndS2C;
 import com.game.proto.TurnResultS2C;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.ArrayList;
@@ -57,8 +58,134 @@ class BattleOutboundTest {
         }
     }
 
+    /** 记下共享帧的产出与写出；{@link #share} 产出的共享帧记下被释放了几次。 */
+    private static class SharingLink implements DirectLink {
+        boolean live = true;
+        int shares;
+        RuntimeException failOnSend;
+        final List<SharedFrame> sharedSent = new ArrayList<>();
+
+        @Override
+        public boolean isLive() {
+            return live;
+        }
+
+        @Override
+        public void send(MessageContent frame) {
+            throw new AssertionError("扇出不该逐条写原帧");
+        }
+
+        @Override
+        public SharedFrame share(MessageContent frame) {
+            shares++;
+            return new TrackedFrame(frame);
+        }
+
+        @Override
+        public void send(SharedFrame frame) {
+            if (failOnSend != null) {
+                throw failOnSend;
+            }
+            sharedSent.add(frame);
+        }
+
+        @Override
+        public void closeGracefully(Disconnect reason) {
+            live = false;
+        }
+
+        @Override
+        public void closeNow(Disconnect reason) {
+            live = false;
+        }
+
+        @Override
+        public String peer() {
+            return "sharing";
+        }
+    }
+
+    private static final class TrackedFrame implements DirectLink.SharedFrame {
+        final MessageContent content;
+        int closes;
+
+        TrackedFrame(MessageContent content) {
+            this.content = content;
+        }
+
+        @Override
+        public MessageContent content() {
+            return content;
+        }
+
+        @Override
+        public void close() {
+            closes++;
+        }
+    }
+
     private double pushes(String category, String route, String message) {
         return registry.get("game.battle.pushes").tag("category", category).tag("route", route).tag("message", message).counter().count();
+    }
+
+    // ================================================================ 观众帧扇出（编码一次）
+
+    @Test
+    void 观众帧扇出_借第一条活直连编码一次_每条活直连写同一份_扇出结束释放一次_无活直连的丢弃并计数() {
+        SharingLink first = new SharingLink();
+        SharingLink second = new SharingLink();
+        SharingLink dead = new SharingLink();
+        dead.live = false;
+        MessageContent frame = outbound.frame(Notify.SPECTATE_TURN_RESULT, TurnResultS2C.getDefaultInstance());
+
+        outbound.pushBattleFrameToAll(1, List.of(new BattleOutbound.Recipient(11, null), new BattleOutbound.Recipient(12, first),
+                new BattleOutbound.Recipient(13, dead), new BattleOutbound.Recipient(14, second)), Notify.SPECTATE_TURN_RESULT, frame);
+
+        assertThat(first.shares + second.shares + dead.shares).as("只编码一次").isEqualTo(1);
+        assertThat(first.shares).as("借的是第一条活直连的分配器").isEqualTo(1);
+        assertThat(first.sharedSent).hasSize(1);
+        assertThat(second.sharedSent).as("写的是同一份共享帧").containsExactlyElementsOf(first.sharedSent);
+        assertThat(dead.sharedSent).isEmpty();
+        TrackedFrame shared = (TrackedFrame) first.sharedSent.get(0);
+        assertThat(shared.content).isSameAs(frame);
+        assertThat(shared.closes).as("扇出结束恰好释放一次原件").isEqualTo(1);
+        assertThat(pushes("battle_frame", "direct", "NotifySpectateTurnResult")).as("每个收件人恰好计一次").isEqualTo(2);
+        assertThat(pushes("battle_frame", "dropped", "NotifySpectateTurnResult")).isEqualTo(2);
+        assertThat(announced).as("战斗帧绝不回落 gate").isEmpty();
+    }
+
+    @Test
+    void 观众帧扇出_一条活直连都没有就不编码_写出途中抛异常也释放原件() {
+        SharingLink dead = new SharingLink();
+        dead.live = false;
+        MessageContent end = outbound.frame(Notify.SPECTATE_END, SpectateEndS2C.getDefaultInstance());
+
+        outbound.pushBattleFrameToAll(1, List.of(new BattleOutbound.Recipient(11, dead), new BattleOutbound.Recipient(12, null)),
+                Notify.SPECTATE_END, end);
+
+        assertThat(dead.shares).isZero();
+        assertThat(pushes("battle_frame", "dropped", "NotifySpectateEnd")).isEqualTo(2);
+
+        SharingLink first = new SharingLink();
+        SharingLink broken = new SharingLink();
+        broken.failOnSend = new IllegalStateException("测试：直连实现违约");
+        assertThatThrownBy(() -> outbound.pushBattleFrameToAll(1, List.of(new BattleOutbound.Recipient(21, first),
+                new BattleOutbound.Recipient(22, broken)), Notify.SPECTATE_END, end)).isInstanceOf(IllegalStateException.class);
+        assertThat(((TrackedFrame) first.sharedSent.get(0)).closes).as("异常也不漏释放原件").isEqualTo(1);
+    }
+
+    @Test
+    void 观众帧扇出_不支持共享编码的直连按原帧逐条写() {
+        Link a = new Link();
+        Link b = new Link();
+        MessageContent frame = outbound.frame(Notify.SPECTATE_TURN_RESULT, TurnResultS2C.getDefaultInstance());
+
+        outbound.pushBattleFrameToAll(1, List.of(new BattleOutbound.Recipient(11, a), new BattleOutbound.Recipient(12, b)),
+                Notify.SPECTATE_TURN_RESULT, frame);
+
+        assertThat(a.sent).containsExactly(frame);
+        assertThat(b.sent).as("同一个 MessageContent 对象写给每条直连（§11 N15）").singleElement().isSameAs(frame);
+        assertThat(pushes("battle_frame", "direct", "NotifySpectateTurnResult")).isEqualTo(2);
     }
 
     @Test
@@ -128,5 +255,7 @@ class BattleOutboundTest {
         assertThatThrownBy(() -> outbound.announcement(Notify.TURN_RESULT, TurnResultS2C.getDefaultInstance()))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> outbound.pushLobby(1, 2, null, List.of())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> outbound.pushBattleFrameToAll(1, List.of(), Notify.BATTLE_START, frame))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

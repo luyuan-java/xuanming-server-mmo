@@ -40,6 +40,9 @@ class RedisPropertiesTest {
                 .isEqualTo(library.getConnectionMinimumIdleSize());
         assertThat(props.subscriptionConnectionPoolSize()).isEqualTo(50)
                 .isEqualTo(library.getSubscriptionConnectionPoolSize());
+        assertThat(props.subscriptionsPerConnection()).isEqualTo(5)
+                .as("升级 Redisson 后库缺省变了：决定是否跟随，并同步 architecture.md §6.1 的频道容量")
+                .isEqualTo(library.getSubscriptionsPerConnection());
         assertThat(library.getSubscriptionConnectionMinimumIdleSize())
                 .as("订阅池上限的下限 1 依赖订阅最小空闲的库缺省 1").isEqualTo(1);
         assertThat(props.maxConnections()).isEqualTo(64 + 50);
@@ -63,15 +66,16 @@ class RedisPropertiesTest {
     }
 
     @Test
-    void 连接池三项写进Redisson单机配置() {
-        // 三个值都与库缺省不同，接线漏掉任何一项都会读到库缺省而失败
-        RedisProperties props = new RedisProperties(null, null, null, null, null, null, null, 16, 4, 8);
+    void 连接池四项写进Redisson单机配置() {
+        // 四个值都与库缺省不同，接线漏掉任何一项都会读到库缺省而失败
+        RedisProperties props = new RedisProperties(null, null, null, null, null, null, null, 16, 4, 8, 40);
 
         SingleServerConfig server = RedisAutoConfiguration.configure(new Config().useSingleServer(), props);
 
         assertThat(server.getConnectionPoolSize()).isEqualTo(16);
         assertThat(server.getConnectionMinimumIdleSize()).isEqualTo(4);
         assertThat(server.getSubscriptionConnectionPoolSize()).isEqualTo(8);
+        assertThat(server.getSubscriptionsPerConnection()).isEqualTo(40);
         assertThat(server.getSubscriptionConnectionMinimumIdleSize()).as("不开放，保持库缺省").isEqualTo(1);
         assertThat(props.maxConnections()).isEqualTo(16 + 8);
     }
@@ -82,13 +86,15 @@ class RedisPropertiesTest {
                 "game.redis.timeout-ms", "1500",
                 "game.redis.connection-pool-size", "32",
                 "game.redis.connection-minimum-idle-size", "0",
-                "game.redis.subscription-connection-pool-size", "1")))
+                "game.redis.subscription-connection-pool-size", "1",
+                "game.redis.subscriptions-per-connection", "500")))
                 .bind("game.redis", Bindable.of(RedisProperties.class)).get();
 
         assertThat(props.timeoutMs()).isEqualTo(1500);
         assertThat(props.connectionPoolSize()).isEqualTo(32);
         assertThat(props.connectionMinimumIdleSize()).isZero();
         assertThat(props.subscriptionConnectionPoolSize()).isEqualTo(1);
+        assertThat(props.subscriptionsPerConnection()).isEqualTo(500);
         assertThat(props.address()).as("没给的键取缺省").isEqualTo("redis://127.0.0.1:6379");
     }
 
@@ -101,6 +107,7 @@ class RedisPropertiesTest {
         assertThat(props.connectionPoolSize()).isEqualTo(RedisProperties.DEFAULT_CONNECTION_POOL_SIZE);
         assertThat(props.connectionMinimumIdleSize()).isEqualTo(RedisProperties.DEFAULT_CONNECTION_MINIMUM_IDLE_SIZE);
         assertThat(props.subscriptionConnectionPoolSize()).isEqualTo(RedisProperties.DEFAULT_SUBSCRIPTION_CONNECTION_POOL_SIZE);
+        assertThat(props.subscriptionsPerConnection()).isEqualTo(RedisProperties.DEFAULT_SUBSCRIPTIONS_PER_CONNECTION);
     }
 
     @Test
@@ -128,6 +135,8 @@ class RedisPropertiesTest {
                 .hasMessageContaining("connection-minimum-idle-size");
         assertThatThrownBy(() -> pool(16, null, null)).as("只调小池上限、最小空闲仍是缺省 24")
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new RedisProperties(null, null, null, null, null, null, null, null, null, null, 0))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("subscriptions-per-connection");
     }
 
     @Test
@@ -146,6 +155,6 @@ class RedisPropertiesTest {
     }
 
     private static RedisProperties pool(Integer size, Integer minIdle, Integer subscriptionSize) {
-        return new RedisProperties(null, null, null, null, null, null, null, size, minIdle, subscriptionSize);
+        return new RedisProperties(null, null, null, null, null, null, null, size, minIdle, subscriptionSize, null);
     }
 }

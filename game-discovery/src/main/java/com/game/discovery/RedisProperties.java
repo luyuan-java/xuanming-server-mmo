@@ -23,6 +23,9 @@ import org.springframework.boot.context.properties.bind.ConstructorBinding;
  * 显式写出是为了让连接总账读配置、不随库升级漂移，取值本身没有压测依据，不改变现有行为。订阅连接的最小空闲不开放，
  * 用库缺省 1，所以订阅池上限至少是 1。
  *
+ * <p>一个进程能同时订多少频道 = 订阅池上限 × 每条订阅连接的频道数。缺省 50 × 5 = 250 个对一般进程绰绰有余；game-gate 按场订观战频道，够不到容量时
+ * 新一场的订阅直接失败（{@code SpectateHub} 给观众发 {@code SOURCE_LOST}），所以它的 yaml 把每条连接的频道数配大（architecture.md §6.1）。
+ *
  * @param connectTimeoutMs               建立 TCP 连接的超时（毫秒），默认 2000
  * @param timeoutMs                      命令发出后等响应的超时（毫秒），默认 2000
  * @param retryAttempts                  命令失败后的重试次数（不含首次），默认 1；0 = 不重试
@@ -30,12 +33,13 @@ import org.springframework.boot.context.properties.bind.ConstructorBinding;
  * @param connectionPoolSize             命令连接池上限，默认 64；至少 1
  * @param connectionMinimumIdleSize      命令连接最小空闲数，默认 24；0 ~ {@code connectionPoolSize}
  * @param subscriptionConnectionPoolSize 订阅（Pub/Sub）连接池上限，默认 50；至少 1
+ * @param subscriptionsPerConnection     每条订阅连接最多承载的频道数，默认 5；至少 1
  */
 @ConfigurationProperties("game.redis")
 public record RedisProperties(String address, Integer database, String password,
                               Integer connectTimeoutMs, Integer timeoutMs, Integer retryAttempts, Integer retryDelayMs,
                               Integer connectionPoolSize, Integer connectionMinimumIdleSize,
-                              Integer subscriptionConnectionPoolSize) {
+                              Integer subscriptionConnectionPoolSize, Integer subscriptionsPerConnection) {
 
     /** 命令连接池上限的缺省值（= Redisson 3.50.0 库缺省，RedisPropertiesTest 钉住）。 */
     public static final int DEFAULT_CONNECTION_POOL_SIZE = 64;
@@ -43,6 +47,8 @@ public record RedisProperties(String address, Integer database, String password,
     public static final int DEFAULT_CONNECTION_MINIMUM_IDLE_SIZE = 24;
     /** 订阅连接池上限的缺省值（= Redisson 3.50.0 库缺省）。 */
     public static final int DEFAULT_SUBSCRIPTION_CONNECTION_POOL_SIZE = 50;
+    /** 每条订阅连接的频道数的缺省值（= Redisson 3.50.0 库缺省）。 */
+    public static final int DEFAULT_SUBSCRIPTIONS_PER_CONNECTION = 5;
 
     /** 记录有两个公开构造器，Spring Boot 不再自行推断绑定哪一个，在这里指明。 */
     @ConstructorBinding
@@ -65,6 +71,8 @@ public record RedisProperties(String address, Integer database, String password,
                 ? DEFAULT_CONNECTION_MINIMUM_IDLE_SIZE : connectionMinimumIdleSize;
         subscriptionConnectionPoolSize = subscriptionConnectionPoolSize == null
                 ? DEFAULT_SUBSCRIPTION_CONNECTION_POOL_SIZE : subscriptionConnectionPoolSize;
+        subscriptionsPerConnection = subscriptionsPerConnection == null
+                ? DEFAULT_SUBSCRIPTIONS_PER_CONNECTION : subscriptionsPerConnection;
         if (connectTimeoutMs <= 0 || timeoutMs <= 0) {
             throw new IllegalArgumentException("game.redis.connect-timeout-ms / timeout-ms 必须为正: "
                     + connectTimeoutMs + " / " + timeoutMs);
@@ -76,6 +84,9 @@ public record RedisProperties(String address, Integer database, String password,
         if (connectionPoolSize <= 0 || subscriptionConnectionPoolSize <= 0) {
             throw new IllegalArgumentException("game.redis.connection-pool-size / subscription-connection-pool-size 必须为正: "
                     + connectionPoolSize + " / " + subscriptionConnectionPoolSize);
+        }
+        if (subscriptionsPerConnection <= 0) {
+            throw new IllegalArgumentException("game.redis.subscriptions-per-connection 必须为正: " + subscriptionsPerConnection);
         }
         // Redisson 建客户端时也会拒绝最小空闲大于池上限，这里在绑定时就报出配置键。
         // 不把缺省最小空闲悄悄压到池上限：把池调到 24 以下的人要同时决定常驻几条
@@ -89,7 +100,7 @@ public record RedisProperties(String address, Integer database, String password,
     /** 只给地址、超时与重试，连接池取缺省值：供只关心命令时延的调用点与测试使用。 */
     public RedisProperties(String address, Integer database, String password,
                            Integer connectTimeoutMs, Integer timeoutMs, Integer retryAttempts, Integer retryDelayMs) {
-        this(address, database, password, connectTimeoutMs, timeoutMs, retryAttempts, retryDelayMs, null, null, null);
+        this(address, database, password, connectTimeoutMs, timeoutMs, retryAttempts, retryDelayMs, null, null, null, null);
     }
 
     /** 按上述公式算出的单条命令最坏阻塞时间（毫秒），供启动日志与测试使用。 */

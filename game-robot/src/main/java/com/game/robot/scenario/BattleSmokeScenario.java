@@ -600,6 +600,8 @@ public final class BattleSmokeScenario {
                 "S9 SB 的直连上 ≥ 1 条 158（观众版：冷却为空）→ 166 {FINISHED(1), outcome = SA 那条 150 的 outcome} → FIN",
                 "158 × " + sbEnd.turns() + " 166 {" + sbEnd.end().getReason() + ", " + sbEnd.end().getOutcome() + "} 关闭方式=" + sbEnd.closed(),
                 SPECTATE_REF + " S9");
+        // SB 在 S3 走的是直连席（一场只有他一两个观众，坐不满 20 席；走到这里说明 177 与直连都成了），所以这条断言只对直连档成立：
+        // 大厅档（delivery = LOBBY）的观众才会在大厅上收 158 / 161 / 166（mmorpg battle-spectate-tiered-fanout.md §15.2），本场景不走那一档
         long stray = SpectateSteps.lobbyBattleFrames(sb.connection().inbox().snapshot(0), battleIds);
         report.check(stray == 0, "S9 SB 的大厅连接上 139 / 158 / 161 / 166 的条数都是 0（战斗帧只走直连，不回落大厅）", stray + " 条",
                 SPECTATE_REF + " S9；battle-node-spec §5.7");

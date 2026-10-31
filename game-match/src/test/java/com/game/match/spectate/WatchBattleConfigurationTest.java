@@ -168,7 +168,8 @@ class WatchBattleConfigurationTest {
         runner(null).run(context -> {
             MatchMethodHandler handler = context.getBean(MatchMethodHandler.class);
             BattlePlacement placement = BattlePlacement.newBuilder().setBattleId(X).setBattleNodeId(7).setBattleInstanceId("inst-a")
-                    .setRpcHost("10.1.1.1").setRpcPort(21200).setAttempt(1).setMode(1).setCreatedAtMs(clock.peekMs()).build();
+                    .setRpcHost("10.1.1.1").setRpcPort(21200).setAttempt(1).setMode(1).setCreatedAtMs(clock.peekMs())
+                    .setSpectateVisibility(com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC_VALUE).build();
             placements.put(placement);
             spectate.putWatchable(X, placement.getCreatedAtMs());
             battle.room(CreateBattleRequest.newBuilder().setBattleId(X).build());

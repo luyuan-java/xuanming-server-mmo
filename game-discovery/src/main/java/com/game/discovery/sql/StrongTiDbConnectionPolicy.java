@@ -1,6 +1,7 @@
 package com.game.discovery.sql;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.game.common.sql.AuthorityDataSource;
 import com.game.common.deadline.Deadline;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -19,18 +20,29 @@ public final class StrongTiDbConnectionPolicy implements BeanPostProcessor, Orde
             + "sql_mode=CONCAT(@@SESSION.sql_mode,',STRICT_TRANS_TABLES')";
     private final boolean requireTiDb;
     private final String domain;
+    private final boolean guildFairLockingOff;
     public StrongTiDbConnectionPolicy(String domain, boolean requireTiDb) {
+        this(domain, requireTiDb, false);
+    }
+    private StrongTiDbConnectionPolicy(String domain, boolean requireTiDb, boolean guildFairLockingOff) {
         this.domain = java.util.Objects.requireNonNull(domain);
         this.requireTiDb = requireTiDb;
+        this.guildFairLockingOff = guildFairLockingOff;
+    }
+    /** 公会独占的固定物理连接策略；开发分支也声明，由adapter按真实数据库类型消费。 */
+    public static StrongTiDbConnectionPolicy forGuild(String domain, boolean requireTiDb) {
+        return new StrongTiDbConnectionPolicy(domain, requireTiDb, true);
     }
     @Override public Object postProcessBeforeInitialization(Object bean, String name) {
-        if (!requireTiDb || !(bean instanceof DataSource)) return bean;
+        if (!(bean instanceof DataSource) || (!requireTiDb && !guildFairLockingOff)) return bean;
         if (!(bean instanceof DruidDataSource pool) || pool.isInited()) {
             throw new IllegalStateException(domain + "权威库必须使用尚未初始化的Druid池，不能保证物理连接策略时拒启");
         }
         var init = pool.getConnectionInitSqls() == null ? new ArrayList<String>() : new ArrayList<>(pool.getConnectionInitSqls());
         // 玩家库与邮件/交易库可能共用同一个池；多个领域复用此策略时只安装一次。
-        if (!init.contains(SESSION_SQL)) init.add(SESSION_SQL);
+        if (requireTiDb && !init.contains(SESSION_SQL)) init.add(SESSION_SQL);
+        if (guildFairLockingOff && !init.contains(AuthorityDataSource.GUILD_FAIR_LOCKING_OFF_SQL))
+            init.add(AuthorityDataSource.GUILD_FAIR_LOCKING_OFF_SQL);
         pool.setConnectionInitSqls(init);
         if (pool.getProxyFilters().stream().noneMatch(StatementBudgetFilter.class::isInstance)) {
             pool.getProxyFilters().add(new StatementBudgetFilter());

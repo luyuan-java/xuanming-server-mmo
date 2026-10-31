@@ -2,6 +2,7 @@ package com.game.battle.room;
 
 import com.game.battle.metrics.BattleMetrics;
 import com.game.proto.MessageContent;
+import java.util.Objects;
 
 /**
  * 一条<b>已验证</b>的客户端直连在房间一侧的视图（room ↔ edge 的接口；battle-node-spec §7.3、§7.4、§7.6）。由直连面
@@ -37,6 +38,52 @@ public interface DirectLink {
      * 同一个 {@code MessageContent} 对象可以写给多条直连（观众版回合帧每回合只构造一次，§11 N15）。
      */
     void send(MessageContent frame);
+
+    /**
+     * 一帧只编码一次、写给同一次扇出里多条直连的共享帧（mmorpg battle-spectate-tiered-fanout.md §10 第 3 条：观众版 158 与收尾 166）。
+     * 由扇出里第一条活直连的 {@link DirectLink#share} 产出，交给每条直连的 {@link DirectLink#send(SharedFrame)}，扇出结束由调用方 {@link #close()} 一次。
+     * 只在逻辑线程上用，不跨扇出保留：编码出的字节的引用计数由直连面实现管理，房间不接触 Netty。
+     */
+    interface SharedFrame extends AutoCloseable {
+
+        /** 原帧：不支持共享编码的实现（测试替身）逐条写它。 */
+        MessageContent content();
+
+        /** 释放原件（幂等）；已经交给各连接的那几份引用由各自的写出流程释放，写成功、写失败都一样。 */
+        @Override
+        void close();
+
+        /** 不编码的共享帧：{@link DirectLink#send(SharedFrame)} 的缺省实现据此逐条写原帧，{@link #close()} 什么也不做。 */
+        static SharedFrame unencoded(MessageContent frame) {
+            Objects.requireNonNull(frame, "frame");
+            return new SharedFrame() {
+                @Override
+                public MessageContent content() {
+                    return frame;
+                }
+
+                @Override
+                public void close() {
+                }
+            };
+        }
+    }
+
+    /**
+     * 为一次扇出把 {@code frame} 编码一次（用本连接的分配器）；调用方用完必须 {@link SharedFrame#close()}。
+     * 缺省实现不编码：{@link #send(SharedFrame)} 退回逐条写原帧（测试替身用）。
+     */
+    default SharedFrame share(MessageContent frame) {
+        return SharedFrame.unencoded(frame);
+    }
+
+    /**
+     * 写一份共享帧并 flush（同 {@link #send(MessageContent)} 的顺序保证）；不是 {@link #isLive()} 时静默丢弃。
+     * 缺省实现退回 {@link #send(MessageContent)}。
+     */
+    default void send(SharedFrame frame) {
+        send(frame.content());
+    }
 
     /**
      * 优雅关闭（R3；终局、退出观战、观众被清退、销毁、停机作废）：

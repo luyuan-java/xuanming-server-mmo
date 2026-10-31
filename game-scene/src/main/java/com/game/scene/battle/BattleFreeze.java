@@ -1,5 +1,6 @@
 package com.game.scene.battle;
 
+import com.game.api.match.MatchBudgets;
 import com.game.discovery.battle.BattleRedis;
 import java.util.Map;
 
@@ -9,13 +10,37 @@ import java.util.Map;
  *
  * <p>异步回调按「实例 + 冻结对象」双重核对：回调回来时 {@code player.battle().freeze() != 这个对象} 就丢弃，所以同一局在新实例上沿用时
  * 复制成一个新对象（{@link #carriedCopy}），不搬同一个。
+ *
+ * <p><b>FIGHTING 的到期判据</b>（2026-10-30，与 mmorpg C++ 同批）：不是战斗期限本身，而是 {@link #fightingReleaseAtMs}「期限 + Match 终局宽限
+ * {@link MatchBudgets#TERMINAL_OUTCOME_GRACE_MS} + 收件箱投递余量 {@link #INBOX_DELIVERY_MARGIN_MS}」。Match 在期限之后的宽限内仍接受原局 COMPLETE，
+ * 个人结算随后才经收件箱到达；冻结若在此之前解开，资产通道（只看冻结）就会放行，玩家可先把本局消耗的物品转走、结算到达时消耗被夹紧，
+ * 形成可逐局重复的有界资产复制。{@link #effectiveDeadlineMs()} 对 FIGHTING 就返回这个时刻，reaper 的宽限 / 判废与锁 TTL 都按它算
+ * （锁 TTL = 它的剩余 + 60 s，锁仍比冻结多活 60 s）；锁里的 {@code d} 照旧写原始战斗期限。PREPARING 不变。
  */
 public final class BattleFreeze {
+
+    /**
+     * COMPLETE 之后个人结算到达 scene 并应用的余量：Match 个人发件箱的首投 / 回执退避与 scene 收件箱的拉取节拍之和的上界（取整到 60 s）。
+     * 与 {@link MatchBudgets#TERMINAL_OUTCOME_GRACE_MS} 一起构成 FIGHTING 冻结在战斗期限之后还要保持的窗口。
+     */
+    public static final long INBOX_DELIVERY_MARGIN_MS = 60_000L;
 
     /** 阶段（锁的 {@code s}：P / F）。 */
     public enum Phase {
         PREPARING,
         FIGHTING
+    }
+
+    /**
+     * FIGHTING 冻结的到期时刻：战斗期限 + {@link MatchBudgets#TERMINAL_OUTCOME_GRACE_MS} + {@link #INBOX_DELIVERY_MARGIN_MS}（饱和加法）。
+     * 期限 ≤ 0（缺失 / 损坏）原样返回，不凭空给出窗口。确认续锁、按锁重建复核、reaper 判到期都用它，锁 TTL 按它的剩余 + 60 s。
+     */
+    public static long fightingReleaseAtMs(long deadlineMs) {
+        if (deadlineMs <= 0) {
+            return deadlineMs;
+        }
+        long window = MatchBudgets.TERMINAL_OUTCOME_GRACE_MS + INBOX_DELIVERY_MARGIN_MS;
+        return deadlineMs > Long.MAX_VALUE - window ? Long.MAX_VALUE : deadlineMs + window;
     }
 
     private final long battleId;
@@ -53,7 +78,8 @@ public final class BattleFreeze {
      * <ol>
      *   <li>字段缺失或不是无符号十进制 → 按 0（{@code n} 缺失 = 节点号 0）；battle_id 以调用方给的为准（锁的 {@code b} 已由调用方核对过）；</li>
      *   <li>{@code s} 只有等于 {@code P} 才是备战，缺失或不认识一律按 FIGHTING（保守：宁可多冻、不放过一场在打的局）；</li>
-     *   <li>{@code d} 为 0 → 按锁的剩余 TTL 反推：{@code now + max(ttl, 0) × 1000}（TTL 为 -1 / -2 时取 now）；</li>
+     *   <li>{@code d} 为 0 → 按锁的剩余 TTL 反推：{@code now + max(ttl, 0) × 1000}（TTL 为 -1 / -2 时取 now）。FIGHTING 的锁 TTL 已经覆盖了
+     *       终局宽限 + 投递余量 + 60 s，反推出来的「期限」再经 {@link #effectiveDeadlineMs()} 叠加一次窗口——偏保守（多冻一会儿），不会提前解冻；</li>
      *   <li>备战且 {@code p} 为 0 → 取 {@code d}；FIGHTING 的 {@code p} 原样（可以是 0）。</li>
      * </ol>
      * 结果 {@code preparedHere = false}（不是本实例备战的，确认 / 复核时还要推 144）、{@code lockExtended = (阶段 == FIGHTING)}
@@ -98,12 +124,15 @@ public final class BattleFreeze {
         return prepareDeadlineMs;
     }
 
-    /** 有效期限：PREPARING 看备战期限（0 时退回战斗期限），FIGHTING 看战斗期限。 */
+    /**
+     * 有效期限（reaper 判到期、锁 TTL 的基准）：PREPARING 看备战期限（0 时退回战斗期限）；FIGHTING 看 {@link #fightingReleaseAtMs}（战斗期限 +
+     * 终局宽限 + 收件箱投递余量），不是战斗期限本身——见类注释。
+     */
     public long effectiveDeadlineMs() {
         if (phase == Phase.PREPARING) {
             return prepareDeadlineMs != 0 ? prepareDeadlineMs : deadlineMs;
         }
-        return deadlineMs;
+        return fightingReleaseAtMs(deadlineMs);
     }
 
     public boolean preparedHere() {

@@ -77,11 +77,14 @@ class AuditProbeStateTest {
         assertThat(mixed.view().status()).isEqualTo(AuditProbeState.Status.RETENTION_GAP);
         assertThat(mixed.view().retentionGap()).isNaN();
         assertThat(mixed.view().confirmedGapLowerBound()).isEqualTo(7);
-        try (var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT)) {
+        var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
             new AuditProbeMetrics(registry, Map.of(target.consumer(), mixed));
             assertThat(registry.scrape())
                     .contains("game_data_audit_retention_gap{consumer=\"transaction_log\"} NaN")
                     .contains("game_data_audit_retention_gap_lowerbound{consumer=\"transaction_log\"} 7.0");
+        } finally {
+            registry.close();
         }
     }
 
@@ -113,7 +116,8 @@ class AuditProbeStateTest {
     }
 
     @Test void Prometheus名称与未知过期缺口指标闭环_无高基数label() {
-        try (var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT)) {
+        var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
             var metrics = new AuditProbeMetrics(registry, Map.of(target.consumer(), state));
             assertThat(registry.scrape())
                     .contains("game_data_audit_group_lag{consumer=\"transaction_log\"} NaN")
@@ -130,6 +134,8 @@ class AuditProbeStateTest {
             assertThat(registry.getMeters()).allSatisfy(meter ->
                     assertThat(meter.getId().getTags()).allSatisfy(tag ->
                             assertThat(tag.getKey()).isIn("consumer", "status", "outcome")));
+        } finally {
+            registry.close();
         }
     }
 }

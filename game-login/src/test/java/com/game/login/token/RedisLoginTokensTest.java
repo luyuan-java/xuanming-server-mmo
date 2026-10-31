@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 
 import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
+import com.game.login.token.RedisLoginTokens.Kind;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -28,7 +29,7 @@ import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.StringCodec;
 
 /**
- * 不连 Redis 的部分：令牌格式闸与家族号编解码、键的 hash tag、值与轮换记录的解码、宽限窗口与 TTL 的取值范围、
+ * 不连 Redis 的部分：令牌格式闸、家族号与类型位的编解码、键的 hash tag、值与轮换记录的解码、宽限窗口与 TTL 的取值范围、
  * 存储异常不带原消息、轮换脚本前的截止检查、access 校验对脚本结果的映射。
  */
 class RedisLoginTokensTest {
@@ -42,12 +43,17 @@ class RedisLoginTokensTest {
                 Duration.ofSeconds(30), new SecureRandom());
     }
 
-    /** 一枚属于 familyBytes 的规范令牌（家族号 16 字节 ‖ 随机 16 字节）。 */
-    private static String tokenOf(byte[] familyBytes) {
+    /** 一枚属于 familyBytes、类型为 kind 的规范令牌（家族号 16 字节 ‖ 随机 16 字节，随机半段首字节最高位是类型位）。 */
+    private static String tokenOf(byte[] familyBytes, Kind kind) {
         byte[] bytes = Arrays.copyOf(familyBytes, RedisLoginTokens.TOKEN_BYTES);
         byte[] tail = new byte[RedisLoginTokens.TOKEN_BYTES - RedisLoginTokens.FAMILY_BYTES];
         new SecureRandom().nextBytes(tail);
         System.arraycopy(tail, 0, bytes, RedisLoginTokens.FAMILY_BYTES, tail.length);
+        if (kind == Kind.ACCESS) {
+            bytes[RedisLoginTokens.FAMILY_BYTES] |= (byte) RedisLoginTokens.ACCESS_KIND_BIT;
+        } else {
+            bytes[RedisLoginTokens.FAMILY_BYTES] &= (byte) ~RedisLoginTokens.ACCESS_KIND_BIT;
+        }
         return ENCODER.encodeToString(bytes);
     }
 
@@ -74,9 +80,12 @@ class RedisLoginTokensTest {
     void 格式不对或非规范编码的令牌不碰Redis直接无效() {
         RedissonClient redis = mock(RedissonClient.class);
         RedisLoginTokens tokens = tokens(redis);
-        String valid = tokenOf(randomFamily());
+        String refresh = tokenOf(randomFamily(), Kind.REFRESH);
+        String access = tokenOf(randomFamily(), Kind.ACCESS);
         for (String bad : new String[] {null, "", "a".repeat(42), "a".repeat(44), "a".repeat(42) + "=",
-                "x\nforged log line " + "a".repeat(25), "a".repeat(42) + "/", nonCanonical(valid)}) {
+                "x\nforged log line " + "a".repeat(25), "a".repeat(42) + "/", nonCanonical(refresh), nonCanonical(access),
+                refresh + "\n", refresh + "\r\n", "\r\n" + refresh, refresh.substring(0, 20) + "\r" + refresh.substring(20),
+                access + "\n", access.substring(0, 20) + "\n" + access.substring(21)}) {
             assertThat(tokens.validateAccess(bad)).isEmpty();
             assertThat(tokens.refresh(bad)).isEmpty();
         }
@@ -85,21 +94,36 @@ class RedisLoginTokensTest {
     }
 
     @Test
-    void 令牌嵌家族号_只认规范编码() {
+    void 类型位不对_把access当refresh或反过来_不碰Redis直接无效() {
+        RedissonClient redis = mock(RedissonClient.class);
+        RedisLoginTokens tokens = tokens(redis);
+        byte[] family = randomFamily();
+        assertThat(tokens.refresh(tokenOf(family, Kind.ACCESS))).as("access 当 refresh 发来：普通无效，不当成重用").isEmpty();
+        assertThat(tokens.validateAccess(tokenOf(family, Kind.REFRESH))).as("refresh 当 access 用").isEmpty();
+        verifyNoInteractions(redis);
+    }
+
+    @Test
+    void 令牌嵌家族号与类型_只认规范编码() {
         byte[] family = randomFamily();
         String familyId = ENCODER.encodeToString(family);
-        String token = tokenOf(family);
+        String refresh = tokenOf(family, Kind.REFRESH);
+        String access = tokenOf(family, Kind.ACCESS);
         assertThat(familyId).hasSize(22).matches("[A-Za-z0-9_-]{22}");
-        assertThat(RedisLoginTokens.familyOf(token)).contains(familyId);
-        assertThat(RedisLoginTokens.tokenOfFamily(token, familyId)).isTrue();
-        assertThat(RedisLoginTokens.tokenOfFamily(token, ENCODER.encodeToString(randomFamily()))).isFalse();
-        assertThat(RedisLoginTokens.familyOf(nonCanonical(token))).isEmpty();
+        assertThat(RedisLoginTokens.parse(refresh)).contains(new RedisLoginTokens.Parsed(familyId, Kind.REFRESH));
+        assertThat(RedisLoginTokens.parse(access)).contains(new RedisLoginTokens.Parsed(familyId, Kind.ACCESS));
+        assertThat(RedisLoginTokens.familyOf(access)).contains(familyId);
+        assertThat(RedisLoginTokens.tokenOfFamily(refresh, familyId, Kind.REFRESH)).isTrue();
+        assertThat(RedisLoginTokens.tokenOfFamily(refresh, familyId, Kind.ACCESS)).as("类型不对").isFalse();
+        assertThat(RedisLoginTokens.tokenOfFamily(access, familyId, Kind.ACCESS)).isTrue();
+        assertThat(RedisLoginTokens.tokenOfFamily(refresh, ENCODER.encodeToString(randomFamily()), Kind.REFRESH)).isFalse();
+        assertThat(RedisLoginTokens.familyOf(nonCanonical(refresh))).isEmpty();
     }
 
     @Test
     void 一个家族的键同在一个Cluster_slot_账号索引不带tag() {
         String familyId = ENCODER.encodeToString(randomFamily());
-        String token = tokenOf(Base64.getUrlDecoder().decode(familyId));
+        String token = tokenOf(Base64.getUrlDecoder().decode(familyId), Kind.REFRESH);
         for (String key : List.of(REDIS_KEYS.loginAccessToken(familyId, token), REDIS_KEYS.loginRefreshToken(familyId, token),
                 REDIS_KEYS.loginRefreshFamily(familyId), REDIS_KEYS.loginRefreshRotated(familyId, token))) {
             assertThat(hashTagOf(key)).as(key).isEqualTo(familyId);
@@ -116,14 +140,17 @@ class RedisLoginTokensTest {
     }
 
     @Test
-    void 重放宽限窗口越界拒绝构造() {
+    void 重放宽限窗口越界或不是整毫秒拒绝构造() {
         RedissonClient redis = mock(RedissonClient.class);
-        for (Duration grace : new Duration[] {Duration.ofMillis(-1), RedisLoginTokens.MAX_REFRESH_REUSE_GRACE.plusMillis(1)}) {
+        for (Duration grace : new Duration[] {Duration.ofMillis(-1), RedisLoginTokens.MAX_REFRESH_REUSE_GRACE.plusMillis(1),
+                Duration.ofNanos(500_000), Duration.ofNanos(30), Duration.ofNanos(1_500_000)}) {
             assertThatThrownBy(() -> new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(2),
                     Duration.ofHours(720), grace, new SecureRandom()))
                     .as("grace=%s", grace).isInstanceOf(IllegalArgumentException.class);
         }
         new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(2), Duration.ofHours(720), Duration.ZERO,
+                new SecureRandom());
+        new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(2), Duration.ofHours(720), Duration.ofMillis(1),
                 new SecureRandom());
         new RedisLoginTokens(redis, REDIS_KEYS, Clock.systemUTC(), Duration.ofHours(2), Duration.ofHours(720),
                 RedisLoginTokens.MAX_REFRESH_REUSE_GRACE, false, new SecureRandom());
@@ -143,11 +170,11 @@ class RedisLoginTokensTest {
     }
 
     @Test
-    void 轮换记录_缺字段_家族不符_令牌不属于家族_解不开都按无效() {
+    void 轮换记录_缺字段_家族不符_令牌不属于家族或类型不对_解不开都按无效() {
         byte[] family = randomFamily();
         String familyId = ENCODER.encodeToString(family);
-        String access = tokenOf(family);
-        String refresh = tokenOf(family);
+        String access = tokenOf(family, Kind.ACCESS);
+        String refresh = tokenOf(family, Kind.REFRESH);
         RedisLoginTokens.RotationRecord rec = new RedisLoginTokens.RotationRecord("robot_1", familyId, access, refresh, 10, 20, 5);
         String json = RedisLoginTokens.encode(rec);
         assertThat(json).contains("\"family_id\":\"" + familyId + "\"").contains("\"access_token\":\"" + access + "\"")
@@ -155,9 +182,15 @@ class RedisLoginTokensTest {
                 .contains("\"refresh_expire\":20").contains("\"rotated_at\":5");
         assertThat(RedisLoginTokens.decodeRotation(json, familyId)).contains(rec);
         assertThat(RedisLoginTokens.decodeRotation(json, ENCODER.encodeToString(randomFamily()))).isEmpty();
-        String foreign = tokenOf(randomFamily());
+        String foreign = tokenOf(randomFamily(), Kind.REFRESH);
         assertThat(RedisLoginTokens.decodeRotation(RedisLoginTokens.encode(
                 new RedisLoginTokens.RotationRecord("robot_1", familyId, access, foreign, 10, 20, 5)), familyId)).isEmpty();
+        assertThat(RedisLoginTokens.decodeRotation(RedisLoginTokens.encode(
+                new RedisLoginTokens.RotationRecord("robot_1", familyId, refresh, refresh, 10, 20, 5)), familyId))
+                .as("access 位置放了 refresh").isEmpty();
+        assertThat(RedisLoginTokens.decodeRotation(RedisLoginTokens.encode(
+                new RedisLoginTokens.RotationRecord("robot_1", familyId, access, access, 10, 20, 5)), familyId))
+                .as("refresh 位置放了 access").isEmpty();
         assertThat(RedisLoginTokens.decodeRotation(RedisLoginTokens.encode(
                 new RedisLoginTokens.RotationRecord("", familyId, access, refresh, 10, 20, 5)), familyId)).isEmpty();
         assertThat(RedisLoginTokens.decodeRotation(null, familyId)).isEmpty();
@@ -179,7 +212,7 @@ class RedisLoginTokensTest {
                     + family + "}", familyId)).as("family_id=%s", family).isEmpty();
         }
         assertThat(RedisLoginTokens.decode("{\"account\":\"robot_1\",\"auth_type\":\"password\",\"created_at\":7}", familyId))
-                .as("没有家族号的旧数据").isEmpty();
+                .as("没有家族号的数据").isEmpty();
         assertThat(RedisLoginTokens.decode(RedisLoginTokens.encode(new TokenData("", "password", "", 7, familyId)), familyId)).isEmpty();
         assertThat(RedisLoginTokens.decode(RedisLoginTokens.encode(new TokenData("robot_1", "", "", 7, familyId)), familyId)).isEmpty();
         assertThat(RedisLoginTokens.decode(RedisLoginTokens.encode(new TokenData("robot_1", "password", "", 0, familyId)), familyId)).isEmpty();
@@ -194,7 +227,7 @@ class RedisLoginTokensTest {
         RBucket<String> oldBucket = mock(RBucket.class);
         byte[] family = randomFamily();
         String familyId = ENCODER.encodeToString(family);
-        String old = tokenOf(family);
+        String old = tokenOf(family, Kind.REFRESH);
         when(redis.<String>getBucket(REDIS_KEYS.loginRefreshToken(familyId, old), StringCodec.INSTANCE)).thenReturn(oldBucket);
         when(oldBucket.get()).thenReturn(RedisLoginTokens.encode(new TokenData("robot_1", "password", "", 7, familyId)));
         RedisLoginTokens tokens = tokens(redis);
@@ -237,7 +270,7 @@ class RedisLoginTokensTest {
         RScript script = mock(RScript.class);
         byte[] family = randomFamily();
         String familyId = ENCODER.encodeToString(family);
-        String access = tokenOf(family);
+        String access = tokenOf(family, Kind.ACCESS);
         String payload = RedisLoginTokens.encode(new TokenData("robot_1", "password", "", 7, familyId));
         when(redis.getScript(StringCodec.INSTANCE)).thenReturn(script);
         when(script.<List<Object>>eval(eq(RScript.Mode.READ_ONLY), anyString(), eq(RScript.ReturnType.MULTI), anyList()))

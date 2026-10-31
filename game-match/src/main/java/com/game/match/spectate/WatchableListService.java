@@ -8,12 +8,15 @@ import com.game.match.metrics.MatchMetrics.WatchAnomaly;
 import com.game.match.spectate.SpectateStore.Eviction;
 import com.game.match.spectate.SpectateStore.Record;
 import com.game.match.spectate.SpectateStore.Scored;
+import com.game.proto.match.BattleWatchSummary;
 import com.game.proto.match.ListWatchableBattlesResponse;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,7 +30,8 @@ import org.slf4j.LoggerFactory;
  *       （{@link Result.IndexUnavailable}）：空列表在客户端等同于「当前没有可观战的战斗」，不能拿它冒充故障。</li>
  *   <li>逐条判定（次序即基线的次序）：成员不是合法的 battle_id → 剔除、跳过；分数早于过期分界 → 剔除（连同落点）、跳过；
  *       其余的一次批读落点（{@link SpectateStore#readPlacements}）：记录不在 → 剔除、跳过；记录损坏 → <b>跳过、不剔除</b>、计
- *       {@code anomalies{corrupt_record}}（W15：对一条在场的落点做删除会毁掉 179 的定位）；好记录 → 原样映射成摘要。
+ *       {@code anomalies{corrupt_record}}（W15：对一条在场的落点做删除会毁掉 179 的定位）；好记录里冻结的可见性不是 PUBLIC（私密局本不该在索引里）
+ *       → 跳过、只摘成员、不删落点（{@link SpectateVisibilityPolicy}）；其余好记录 → 原样映射成摘要。
  *       <b>批读整批失败</b> → 这一批每条都按「读记录出错」处理（跳过、不剔除），回变短的列表、<b>不回 1003</b>，计
  *       {@code anomalies{record_read_failed}}——对齐的是基线逐条 GET 出错时客户端看到的结果。</li>
  *   <li>应答组好<b>之后</b>把要剔除的成员一批交给 {@link SpectateStore#evictAsync}（发出即返回）：剔除不阻塞应答，它的结果也不影响本次列表。
@@ -35,7 +39,7 @@ import org.slf4j.LoggerFactory;
  *       尤其「记录不在」只摘成员、<b>永不删落点</b>：批读之后才预写的记录（一场正在建房的战斗）不能动。</li>
  * </ol>
  * <b>不回填</b>（BW5）：剔除 / 跳过之后列表可以短于 {@code limit}，下一次请求自然补齐。列表里会有已结束不足 360 s 的战斗（BW7）、
- * 满员的房间、请求者自己参战的局，同基线。次序 = 索引的次序（分数降序、同分按成员字符串降序），两版都在 Redis 里排。
+ * 满员的房间、请求者自己参战的局，同基线。次序 = 赛事局（{@link #featuredBattles}，带 {@code featured}）在前，其余按索引的次序（分数降序、同分按成员字符串降序），两版都在 Redis 里排。
  *
  * <p>指标：{@code game_match_list_watchable_total{result}} 每个请求恰好一次（{@code ok} 含空列表与批读失败后变短的列表；{@code error} =
  * 读索引失败，以及流程里未预期的异常；过载由处理器记）。剔除的成员数按<b>发出</b>计进 {@code game_match_watchable_index_evictions_total}
@@ -65,10 +69,18 @@ public final class WatchableListService {
 
     private final SpectateStore store;
     private final MatchMetrics metrics;
+    /** 赛事局标记（{@link #withFeatured(SpectateTierStore)}）；null = 列表不带标记。 */
+    private SpectateTierStore tiers;
 
     public WatchableListService(SpectateStore store, MatchMetrics metrics) {
         this.store = Objects.requireNonNull(store, "store");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
+    }
+
+    /** 接上赛事局标记（装配时调用一次；null = 不接）。 */
+    public WatchableListService withFeatured(SpectateTierStore tiers) {
+        this.tiers = tiers;
+        return this;
     }
 
     /**
@@ -95,11 +107,12 @@ public final class WatchableListService {
             return new Result.IndexUnavailable();
         }
 
-        // 第一遍：只看成员与分数就能定的两种（非法成员、过期），其余的留给批读
+        // 第一遍：只看成员与分数就能定的两种（非法成员、过期），其余的留给批读。赛事局排最前，且不从这一页里挑：见 featuredBattles
+        Set<Long> featured = featuredBattles(limit, deadline);
         long nowMs = page.redisNowMs();
         long cutoffMs = SpectateRules.staleCutoff(nowMs);
         List<Eviction> evictions = new ArrayList<>();
-        List<Long> candidates = new ArrayList<>(page.members().size());
+        List<Long> candidates = new ArrayList<>(featured);
         int invalid = 0;
         int stale = 0;
         for (Scored member : page.members()) {
@@ -111,22 +124,38 @@ public final class WatchableListService {
             } else if (SpectateRules.stale(member.score(), nowMs)) {
                 evictions.add(new Eviction.Stale(battleId.getAsLong(), cutoffMs));
                 stale++;
-            } else {
+            } else if (!featured.contains(battleId.getAsLong())) {
                 candidates.add(battleId.getAsLong());
             }
         }
+        // 赛事局占了位置的，这一页最旧的几场留给下一页（批读与应答都不超过 limit）
+        List<Long> wanted = candidates.size() > limit ? candidates.subList(0, limit) : candidates;
 
-        // 第二遍：批读落点，按索引的次序组摘要
-        Map<Long, Record> records = readRecords(candidates, deadline);
+        // 第二遍：批读落点，按「赛事局、索引」的次序组摘要
+        Map<Long, Record> records = readRecords(wanted, deadline);
         ListWatchableBattlesResponse.Builder response = ListWatchableBattlesResponse.newBuilder();
         int missing = 0;
+        int hidden = 0;
         if (records != null) {
-            for (long battleId : candidates) {
+            for (long battleId : wanted) {
                 switch (records.get(battleId)) {
-                    case Record.Found found -> response.addBattles(SpectateRules.summaryOf(found.placement()));
+                    case Record.Found found when SpectateVisibilityPolicy.isPublic(found.placement()) -> {
+                        BattleWatchSummary summary = SpectateRules.summaryOf(found.placement());
+                        response.addBattles(featured.contains(battleId) ? summary.toBuilder().setFeatured(true).build() : summary);
+                    }
+                    case Record.Found found -> {
+                        // 可见性闸：私密局不进列表。开局钩子不公开私密局，它在索引里就是残留——只摘成员、不删落点（179 补签靠它定位）
+                        log.warn("[spectate] 可观战索引里有非公开局，列表跳过并只摘成员 battle_id={} visibility={}", Long.toUnsignedString(battleId),
+                                Integer.toUnsignedString(found.placement().getSpectateVisibility()));
+                        evictions.add(new Eviction.Invalid(SpectateRules.member(battleId)));
+                        hidden++;
+                    }
                     case Record.Absent absent -> {
                         evictions.add(new Eviction.Missing(battleId));
                         missing++;
+                        if (featured.contains(battleId)) {
+                            unmarkFeatured(battleId, deadline);
+                        }
                     }
                     case Record.Corrupt corrupt -> {
                         log.warn("[spectate] 落点记录损坏，列表跳过这一场（不剔除） battle_id={}: {}", Long.toUnsignedString(battleId), corrupt.why());
@@ -145,10 +174,36 @@ public final class WatchableListService {
             metrics.watchableIndexEvicted(IndexEviction.INVALID_MEMBER, invalid);
             metrics.watchableIndexEvicted(IndexEviction.STALE, stale);
             metrics.watchableIndexEvicted(IndexEviction.MISSING_RECORD, missing);
-            log.debug("[spectate] 列表里懒剔除 {} 个成员（非法 {} / 过期 {} / 落点不在 {}）", evictions.size(), invalid, stale, missing);
+            metrics.watchableIndexEvicted(IndexEviction.PRIVATE, hidden);
+            log.debug("[spectate] 列表里懒剔除 {} 个成员（非法 {} / 过期 {} / 落点不在 {} / 非公开 {}）", evictions.size(), invalid, stale, missing, hidden);
         }
         metrics.listWatchable(ListResult.OK);
         return new Result.Listed(built);
+    }
+
+    /**
+     * 这一次要排在最前的赛事局（mmorpg battle-spectate-tiered-fanout.md §15.6；后标记的在前）。从赛事局索引取，不从可观战索引的这一页里挑：那一页按开局倒序，比赛开打几分钟就被新局挤出去，
+     * 只在页内排序的话赛事局恰恰看不到。标记只影响展示：读失败只记日志，回不带标记的列表，不回 1003。
+     */
+    private Set<Long> featuredBattles(int limit, Deadline deadline) {
+        if (tiers == null) {
+            return Set.of();
+        }
+        try {
+            return new LinkedHashSet<>(tiers.activeFeatured(limit, deadline));
+        } catch (Deadline.DependencyException e) {
+            log.warn("[spectate] 读赛事局索引失败，这一页不带标记: {}", e.toString());
+            return Set.of();
+        }
+    }
+
+    /** 落点已不在的赛事局从索引里摘掉（尽力而为：摘不掉也随到期清理，只是多占一个位置）。 */
+    private void unmarkFeatured(long battleId, Deadline deadline) {
+        try {
+            tiers.setFeatured(battleId, false, deadline);
+        } catch (Deadline.DependencyException e) {
+            log.warn("[spectate] 摘赛事局标记失败（随到期清理） battle_id={}: {}", Long.toUnsignedString(battleId), e.toString());
+        }
     }
 
     /** 批读这一页候选的落点记录；整批失败回 null（调用方把每一条都当读失败：跳过、不剔除）。没有候选时不发命令。 */

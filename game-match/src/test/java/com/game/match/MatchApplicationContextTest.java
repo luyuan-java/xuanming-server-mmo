@@ -180,7 +180,9 @@ class MatchApplicationContextTest {
             ActivityConfiguration.class, MatchTeamServiceImpl.class, MatchInternalServiceImpl.class,
             DevRatingController.class, DevActivityBattleController.class, com.game.match.admin.MatchMaintenanceController.class,
             // 批次 6.5 观战：存储、163 + 观众 RPC + 在途口、164 + 开局钩子 + 清扫
-            SpectateStoreConfiguration.class, WatchBattleConfiguration.class, WatchableConfiguration.class);
+            SpectateStoreConfiguration.class, WatchBattleConfiguration.class, WatchableConfiguration.class,
+            // 观战大厅档：档位存储、中继开关、准入与启动门禁、赛事局运营入口
+            com.game.match.spectate.SpectateRelayConfiguration.class, com.game.match.admin.SpectateFeaturedController.class);
 
     private final LeaseOnlyRedis redis = new LeaseOnlyRedis();
     private final List<String> events = new CopyOnWriteArrayList<>();
@@ -424,6 +426,16 @@ class MatchApplicationContextTest {
                 .containsExactlyInAnyOrderElementsOf(PROCESS.stream().map(Class::getName).toList());
     }
 
+    @Test
+    void 观战中继缺省打开_配了密钥就生效_非prod空密钥按关闭_可以显式关闭() {
+        Class<com.game.match.spectate.SpectateRelay> relay = com.game.match.spectate.SpectateRelay.class;
+        runner.run(context -> assertThat(context.getBean(relay).enabled()).as("缺省打开，但运行模式 test 的空密钥：告警并按关闭").isFalse());
+        runner.withPropertyValues("game.match.spectate.ticket-secret=context-test-spectate-secret-0123456789")
+                .run(context -> assertThat(context.getBean(relay).enabled()).as("没配开关：缺省打开").isTrue());
+        runner.withPropertyValues("game.match.spectate.relay-enabled=false", "game.match.spectate.ticket-secret=context-test-spectate-secret-0123456789")
+                .run(context -> assertThat(context.getBean(relay).enabled()).as("显式关闭").isFalse());
+    }
+
     // ================================================================ 拒绝启动：门禁
 
     @Test
@@ -608,7 +620,8 @@ class MatchApplicationContextTest {
 
     @Test
     void 运行模式写错_按prod并告警_缺全球权威时拒启(CapturedOutput output) {
-        runner.withPropertyValues("game.run-mode=develop").run(context -> {
+        // 这里只钉全球权威这道闸：观战中继缺省打开，prod 下空密钥也拒启，两道闸的先后取决于 bean 创建顺序
+        runner.withPropertyValues("game.run-mode=develop", "game.match.spectate.relay-enabled=false").run(context -> {
             assertThat(context).hasFailed();
             assertThat(rootCause(context.getStartupFailure())).hasMessageContaining("生产匹配必须启用全球 SQL 权威");
         });
@@ -652,8 +665,8 @@ class MatchApplicationContextTest {
                 assertThat(adminStatus(context, path, null)).isEqualTo(401);
             }
         });
-        // 此处只验证管理口权限；完整生产装配缺 TiDB 权威时另有拒启断言。
-        without(com.game.match.global.GlobalMatchConfiguration.class).withPropertyValues("GAME_ADMIN_TOKEN=tok-for-context-test", "game.run-mode=prod").run(context -> {
+        // 此处只验证管理口权限；完整生产装配缺 TiDB 权威时另有拒启断言，prod 下观战中继缺密钥的拒启见 SpectateFeaturedServiceTest。
+        without(com.game.match.global.GlobalMatchConfiguration.class).withPropertyValues("GAME_ADMIN_TOKEN=tok-for-context-test", "game.run-mode=prod", "game.match.spectate.relay-enabled=false").run(context -> {
             for (String path : List.of(rating, activity)) {
                 assertThat(adminStatus(context, path, "tok-for-context-test")).as("prod：dev 口 403 %s", path).isEqualTo(403);
                 assertThat(adminStatus(context, path, "wrong")).as("令牌仍是第一道闸").isEqualTo(401);

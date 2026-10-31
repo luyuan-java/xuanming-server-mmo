@@ -411,50 +411,64 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         long battleId = request.getBattleId();
         long observerId = request.getObserverPlayerId();
         try{
-            if(!observerOperations.begin(request))return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
+            if(!observerOperations.begin(request)){
+                // 同 op、同请求的重放回首次拒绝码；不是被拒而是被 Remove / 回收封闭的没有记录，按暂不可用
+                int first=observerOperations.firstRejection(request.getSpectatorOperationId());
+                return response.setErrorMessage(tip(first!=0?first:SERVICE_UNAVAILABLE)).build();
+            }
         }catch(ObserverOperationLedger.Full full){return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();}
         catch(IllegalArgumentException invalid){return response.setErrorMessage(tip(INVALID_PARAMETER)).build();}
         BattleRoom room = rooms.find(battleId);
         if (room == null) {
-            observerOperations.cancelKnown(request.getSpectatorOperationId());
             // 1004 是 match 懒剔除观战索引的信号，不能换 tip
             log.info("AddObserver 房间不存在 battle_id={} observer={}", Long.toUnsignedString(battleId), Long.toUnsignedString(observerId));
-            return response.setErrorMessage(tip(ENTITY_IS_NULL)).build();
+            return rejectAdd(request, ENTITY_IS_NULL);
         }
         if (observerId == 0 || request.getRouting().getGateInstanceId().isEmpty()) {
-            observerOperations.cancelKnown(request.getSpectatorOperationId());
             log.error("AddObserver 参数非法 battle_id={} observer={} gate_instance_id={}", Long.toUnsignedString(battleId),
                     Long.toUnsignedString(observerId), request.getRouting().getGateInstanceId());
-            return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
+            return rejectAdd(request, INVALID_PARAMETER);
         }
         // 单槽互斥：参战者不能观战自己这局
         if (room.isParticipant(observerId)) {
-            observerOperations.cancelKnown(request.getSpectatorOperationId());
             log.warn("AddObserver 观众是参战者 battle_id={} observer={}", Long.toUnsignedString(battleId), Long.toUnsignedString(observerId));
-            return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
+            return rejectAdd(request, INVALID_PARAMETER);
         }
 
         BattleRouting existing = room.routingByObserver.get(observerId);
         if (existing != null) {
             if(!request.getSpectatorOperationId().equals(room.observerOperations.get(observerId))){
-                observerOperations.cancelKnown(request.getSpectatorOperationId());return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
+                return rejectAdd(request, SERVICE_UNAVAILABLE);
             }
             return addExistingObserver(room, observerId, existing, request, response);
         }
 
+        // 可见性第二道闸（mmorpg battle-spectate-tiered-fanout.md §10 第 6 条）：排在幂等之后、席位判定之前。可见性随建房原件冻结，
+        // 非公开局一律拒绝，回参数错误——不能回 1004，那是 match 懒剔除可观战索引的信号。拒绝即终态：墓碑保留，同 op 迟到的 Add 也翻不成准入
+        if (!room.spectatePublic()) {
+            log.warn("AddObserver 房间不公开观战 battle_id={} observer={}", Long.toUnsignedString(battleId), Long.toUnsignedString(observerId));
+            return rejectAdd(request, INVALID_PARAMETER);
+        }
+
         // 满员判定排在幂等之后（room.cpp:865-871）。拒绝即终态：墓碑保留，同 op 迟到的 Add 不能在有空位之后翻成准入
         if (room.routingByObserver.size() >= RoomConstants.MAX_OBSERVERS_PER_ROOM) {
-            observerOperations.cancelKnown(request.getSpectatorOperationId());
             log.info("AddObserver 观众已满 battle_id={} observer={} cap={}", Long.toUnsignedString(battleId),
                     Long.toUnsignedString(observerId), RoomConstants.MAX_OBSERVERS_PER_ROOM);
-            return response.setErrorMessage(tip(SPECTATE_FULL)).build();
+            return rejectAdd(request, SPECTATE_FULL);
+        }
+        // 观众席节点配额（§10 第 4 条）：观众直连与参战者共用连接上限，全节点已登记的观众席（含待建直连、宽限中的）到配额就不再收，
+        // 与房间满员同码——语义都是「直连席已满」。AddObserver 不是热路径，按房间求和（KISS，不另维护计数器）
+        long seats = rooms.sum(r -> r.routingByObserver.size());
+        if (seats >= deps.observerSeatQuota()) {
+            log.info("AddObserver 节点观众席已满 battle_id={} observer={} seats={} quota={}", Long.toUnsignedString(battleId),
+                    Long.toUnsignedString(observerId), seats, deps.observerSeatQuota());
+            return rejectAdd(request, SPECTATE_FULL);
         }
         // fail-closed：登记之前签票，签不出不登记
         Optional<BattleAssignedS2C> assigned = issuer.issue(battleId, observerId, room.deadlineMs,
                 eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER, TicketPath.OBSERVER,request.getSpectatorOperationId());
         if (assigned.isEmpty()) {
-            observerOperations.cancelKnown(request.getSpectatorOperationId());
-            return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
+            return rejectAdd(request, SERVICE_UNAVAILABLE);
         }
         observerOperations.activate(request.getSpectatorOperationId());
         room.observerOperations.put(observerId,request.getSpectatorOperationId());
@@ -467,6 +481,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         log.info("AddObserver 成功 battle_id={} observer={} name={} observers={}", Long.toUnsignedString(battleId),
                 Long.toUnsignedString(observerId), request.getObserverName(), room.routingByObserver.size());
         return response.build();
+    }
+
+    /** AddObserver 的拒绝出口：写墓碑（同 op 迟到的 Add 不能翻成准入）并记下首次拒绝码（同 op、同请求的重放回同一结论）。 */
+    private AddObserverResponse rejectAdd(AddObserverRequest request, int tipId) {
+        observerOperations.reject(request.getSpectatorOperationId(), tipId);
+        return AddObserverResponse.newBuilder().setErrorMessage(tip(tipId)).build();
     }
 
     /** AddObserver 的幂等路径（{@code room.cpp:812-860}）：先重签（签不出就摘除 + 关直连 + 1003），再按会话是否变化分别处理。 */
@@ -523,6 +543,94 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         log.info("RemoveObserver 完成 battle_id={} observer={} reason={}", Long.toUnsignedString(room.battleId),
                 Long.toUnsignedString(observerId), request.getReason());
         return proof;
+    }
+
+    // ===================================================================================== 观战中继（Java 版中继档与广播档合成一个开关）
+
+    @Override
+    public com.game.proto.AttachRelayGateResponse attachRelayGate(com.game.proto.AttachRelayGateRequest request) {
+        scheduler.assertInLoop();
+        var response = com.game.proto.AttachRelayGateResponse.newBuilder();
+        int rejected = relayRejection(request.getTargetInstanceId(), request.getBattleId());
+        if (rejected != 0) {
+            return response.setErrorMessage(tip(rejected)).build();
+        }
+        BattleRoom room = rooms.find(request.getBattleId());
+        enableSpectateRelay(room);
+        return response.setBattleInstanceId(deps.identity().instanceId()).setDeadlineMs(room.deadlineMs).build();
+    }
+
+    @Override
+    public com.game.proto.PromoteSpectateBroadcastResponse promoteSpectateBroadcast(com.game.proto.PromoteSpectateBroadcastRequest request) {
+        scheduler.assertInLoop();
+        var response = com.game.proto.PromoteSpectateBroadcastResponse.newBuilder();
+        int rejected = relayRejection(request.getTargetInstanceId(), request.getBattleId());
+        if (rejected != 0) {
+            return response.setErrorMessage(tip(rejected)).build();
+        }
+        BattleRoom room = rooms.find(request.getBattleId());
+        enableSpectateRelay(room);
+        return response.setBattleInstanceId(deps.identity().instanceId()).setDeadlineMs(room.deadlineMs).build();
+    }
+
+    /** 中继开关的校验（§15.4）：0 = 通过，否则是要回的 tip。1004 仍是 match 懒剔除的信号，所以「不是公开局」不能借用它。 */
+    private int relayRejection(String targetInstance, long battleId) {
+        if (shutdown != null) {
+            return SERVICE_UNAVAILABLE;
+        }
+        if (!deps.identity().instanceId().equals(targetInstance)) {
+            return INVALID_PARAMETER;
+        }
+        BattleRoom room = rooms.find(battleId);
+        if (room == null) {
+            return ENTITY_IS_NULL;
+        }
+        return room.spectatePublic() ? 0 : INVALID_PARAMETER;
+    }
+
+    /** 幂等：已打开什么也不做。第一次打开发布一帧 STATE（161，{@code observer_count = 0}：大厅档的人数未知），gate 的首个订阅者从最新帧键读到它。 */
+    private void enableSpectateRelay(BattleRoom room) {
+        if (room.spectateRelayEnabled) {
+            return;
+        }
+        room.spectateRelayEnabled = true;
+        ViewerState view = BattleViews.forObserver(fullState(room));
+        publishSpectateFrame(room, com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_STATE, view.state().getRoundIndex(),
+                outbound.frame(Notify.SPECTATE_STATE, view.toSpectateState(0)));
+        log.info("观战中继已打开 battle_id={} round={}", Long.toUnsignedString(room.battleId), view.state().getRoundIndex());
+    }
+
+    /**
+     * 发布一帧观众帧：{@code client_frame} 是与直连同一份的客户端 {@code MessageContent}，gate 只加自己的帧头。
+     *
+     * <p>按场串行（{@link BattleRoom#spectateTail}）：上一帧有结局（失败也算）才发这一帧，所以同一场的帧到达 gate 的顺序就是这里的调用顺序。逻辑线程不等：上一帧还没结局时，
+     * 这一帧在它的 Redisson 回调线程上发出。回调链只捕获帧与端口、不捕获房间，房间收尾之后还没发完的帧（含 END）照常发完。
+     * Redis 故障时积压有上界：单帧的结局最长约 2 × {@code worstCaseCommandMillis}（8.4 s），回合不短于 2 s、整场不超过期限，一场至多积压约 150 帧。
+     */
+    private void publishSpectateFrame(BattleRoom room, com.game.proto.contracts.kafka.eSpectateFrameKind kind, int round, MessageContent frame) {
+        room.lastSpectateRound = round;
+        com.game.proto.contracts.kafka.SpectateFrameEvent event = com.game.proto.contracts.kafka.SpectateFrameEvent.newBuilder()
+                .setBattleId(room.battleId)
+                .setBattleInstanceId(deps.identity().instanceId())
+                .setRoundIndex(round)
+                .setKind(kind)
+                .setClientFrame(frame.toByteString())
+                .setDeadlineMs(room.deadlineMs)
+                .build();
+        com.game.battle.port.SpectateFrameSink frames = deps.spectateFrames();
+        room.spectateTail = room.spectateTail.<Void>handle((ignored, previousFailure) -> null)
+                .thenCompose(ignored -> publishQuietly(frames, event));
+    }
+
+    /** 端口约定不抛，这里再兜一层：外部缺陷不能打断回合推进，也不能断了这一场后面的帧。 */
+    private static java.util.concurrent.CompletionStage<Void> publishQuietly(com.game.battle.port.SpectateFrameSink frames,
+                                                                             com.game.proto.contracts.kafka.SpectateFrameEvent event) {
+        try {
+            return frames.publish(event);
+        } catch (RuntimeException e) {
+            log.error("观战中继端口抛出异常（已吞掉，下一帧自愈） battle_id={} kind={}", Long.toUnsignedString(event.getBattleId()), event.getKind(), e);
+            return CompletableFuture.completedFuture(null);
+        }
     }
 
     /** 观众摘除的唯一收口（Remove / StopWatch / 幂等签票失败 / 宽限回收 / 房间收尾全经这里）：先撤宽限计时器，再写墓碑。 */
@@ -887,7 +995,10 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 room.routingByPlayer.size(), room.confirmResendsLeft);
     }
 
-    /** 每个参战者一份裁剪过的 139；有观众时另做<b>一份</b>观众版 158，同一帧写给全部观众（§11 N15）。 */
+    /**
+     * 每个参战者一份裁剪过的 139；有观众时另做<b>一份</b>观众版 158（§11 N15），连同客户端帧字节都只编码一次，写给全部有活直连的观众
+     * （mmorpg battle-spectate-tiered-fanout.md §10 第 3 条）。
+     */
     private void broadcastTurnResult(BattleRoom room, TurnResultS2C result) {
         BattleStateS2C full = result.getState();
         for (long playerId : room.routingByPlayer.keySet()) {
@@ -895,12 +1006,26 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             outbound.pushBattleFrame(room.battleId, playerId, room.directOf(playerId), Notify.TURN_RESULT,
                     outbound.frame(Notify.TURN_RESULT, view.toTurnResult(result)));
         }
-        if (!room.routingByObserver.isEmpty()) {
-            MessageContent spectate = outbound.frame(Notify.SPECTATE_TURN_RESULT, BattleViews.forObserver(full).toTurnResult(result));
-            for (long observerId : room.routingByObserver.keySet()) {
-                outbound.pushBattleFrame(room.battleId, observerId, room.directOf(observerId), Notify.SPECTATE_TURN_RESULT, spectate);
-            }
+        if (room.routingByObserver.isEmpty() && !room.spectateRelayEnabled) {
+            return;
         }
+        // 直连席与中继共用这一份观众版帧（只序列化一次）
+        MessageContent spectate = outbound.frame(Notify.SPECTATE_TURN_RESULT, BattleViews.forObserver(full).toTurnResult(result));
+        if (!room.routingByObserver.isEmpty()) {
+            outbound.pushBattleFrameToAll(room.battleId, observerRecipients(room), Notify.SPECTATE_TURN_RESULT, spectate);
+        }
+        if (room.spectateRelayEnabled) {
+            publishSpectateFrame(room, com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_TURN, result.getRoundIndex(), spectate);
+        }
+    }
+
+    /** 观众名单（按 player_id 无符号升序）连同各自直连槽里的连接（没有时 null），给观众帧扇出用。 */
+    private static List<BattleOutbound.Recipient> observerRecipients(BattleRoom room) {
+        List<BattleOutbound.Recipient> recipients = new ArrayList<>(room.routingByObserver.size());
+        for (long observerId : room.routingByObserver.keySet()) {
+            recipients.add(new BattleOutbound.Recipient(observerId, room.directOf(observerId)));
+        }
+        return recipients;
     }
 
     private void beginResultCommit(BattleRoom room,eBattleOutcome outcome,eSpectateEndReason reason,
@@ -1013,10 +1138,13 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 event.getFledPlayerIdsCount(), event.getDeadPlayerIdsCount(), room.origin, room.activityContext.getKindValue());
     }
 
-    /** 观众收 166 后关其直连，然后清空观众表（{@code room.cpp:1297-1325}）；166 每次只构造一帧。 */
+    /**
+     * 观众收 166 后关其直连，然后清空观众表（{@code room.cpp:1297-1325}）；166 每次只构造一帧、客户端帧字节只编码一次。
+     * 先给全部观众写出 166、再逐个优雅关闭：每条连接上仍是「166 → FIN」，关闭之后的直连不再收帧。
+     */
     private void notifySpectateEndAndClose(BattleRoom room, eSpectateEndReason reason, eBattleOutcome outcome, Disconnect disconnect) {
         for(long observer:List.copyOf(room.observerOperations.keySet()))cancelObserverOperation(room,observer);
-        if (room.routingByObserver.isEmpty()) {
+        if (room.routingByObserver.isEmpty() && !room.spectateRelayEnabled) {
             return;
         }
         MessageContent end = outbound.frame(Notify.SPECTATE_END, SpectateEndS2C.newBuilder()
@@ -1024,8 +1152,15 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 .setOutcome(outcome)
                 .setReason(reason)
                 .build());
+        // 与直连观众同一处收口：停机且结果未落定的房间不走这里，中继观众靠 gate 的空闲超时收尾（§15.4）
+        if (room.spectateRelayEnabled) {
+            publishSpectateFrame(room, com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_END, room.lastSpectateRound, end);
+        }
+        if (room.routingByObserver.isEmpty()) {
+            return;
+        }
+        outbound.pushBattleFrameToAll(room.battleId, observerRecipients(room), Notify.SPECTATE_END, end);
         for (long observerId : room.routingByObserver.keySet()) {
-            outbound.pushBattleFrame(room.battleId, observerId, room.directOf(observerId), Notify.SPECTATE_END, end);
             closeDirectOf(room, observerId, disconnect);
         }
         log.info("观战清退 battle_id={} observers={} reason={}", Long.toUnsignedString(room.battleId), room.routingByObserver.size(), reason);

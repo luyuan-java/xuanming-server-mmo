@@ -111,4 +111,15 @@ class GatePropertiesTest {
         assertThat(bind(Map.of("game.gate.redirect-linger", properties.getProperty("game.gate.redirect-linger"))).redirectLinger())
                 .isEqualTo(GateLimits.DEFAULT_REDIRECT_LINGER);
     }
+
+    /** gate 按场订观战频道：库缺省的单连接 5 个频道、订阅池 50 条只够 250 场，到顶之后新一场的观众当场收 SOURCE_LOST。 */
+    @Test
+    void 缺省配置文件给gate配够观战频道容量() {
+        YamlPropertiesFactoryBean yaml = new YamlPropertiesFactoryBean();
+        yaml.setResources(new ClassPathResource("application.yaml"));
+        Properties properties = yaml.getObject();
+
+        assertThat(properties).isNotNull();
+        assertThat(properties.getProperty("game.redis.subscriptions-per-connection")).isEqualTo("500");
+    }
 }

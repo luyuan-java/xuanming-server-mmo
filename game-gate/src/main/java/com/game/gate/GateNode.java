@@ -6,12 +6,14 @@ import com.game.api.proto.SceneNodeInfo;
 import com.game.common.RunMode;
 import com.game.common.token.GateTokens;
 import com.game.common.token.NodeLinkAuth;
+import com.game.common.token.SpectateTickets;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeIdLease;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.presence.PlayerPresenceDirectory;
+import com.game.discovery.spectate.SpectateFrameChannel;
 import com.game.gate.presence.GatePresence;
 import com.game.gate.presence.GatePushSubscriber;
 import com.game.gate.link.LinkHellos;
@@ -30,6 +32,7 @@ import com.game.gate.session.PushMessageIds;
 import com.game.gate.session.SceneEventRouter;
 import com.game.gate.session.SessionIdAllocator;
 import com.game.gate.session.SessionRegistry;
+import com.game.gate.spectate.SpectateHub;
 import com.game.net.limit.MessageLimits;
 import com.game.net.limit.TableMessageLimits;
 import io.netty.bootstrap.ServerBootstrap;
@@ -78,6 +81,8 @@ public final class GateNode {
     static final Duration LEASE_TTL = Duration.ofSeconds(15);
     static final Duration DIRECTORY_TTL = Duration.ofSeconds(15);
     static final Duration PUBLISH_PERIOD = Duration.ofSeconds(5);
+    /** 观战空闲 / 过期巡检的间隔（远小于 30 s 的空闲上限；收尾最多晚这么久）。 */
+    static final Duration SPECTATE_SWEEP_PERIOD = Duration.ofSeconds(5);
     /** 客户端写缓冲高水位（C++ kClientHighWaterMark = 2MB），越过即断开。 */
     private static final WriteBufferWaterMark CLIENT_WATER_MARK = new WriteBufferWaterMark(1 << 20, 2 << 20);
 
@@ -127,6 +132,16 @@ public final class GateNode {
     private volatile GatePresence presence;
     /** 本 gate 的服务端推送频道订阅。 */
     private volatile GatePushSubscriber pushSubscriber;
+    /** 观战订阅凭证的验签（{@link #withSpectateTickets}；缺省一律拒绝）。 */
+    private SpectateTickets spectateTickets = SpectateTickets.disabled();
+    private ExecutorService spectateThread;
+    private volatile SpectateHub spectateHub;
+
+    /** 接上观战凭证的验签（装配时调用一次，启动之前）。 */
+    public GateNode withSpectateTickets(SpectateTickets tickets) {
+        this.spectateTickets = Objects.requireNonNull(tickets, "tickets");
+        return this;
+    }
 
     /**
      * @param keys     本部署命名空间的键名
@@ -205,6 +220,12 @@ public final class GateNode {
                 new GateLimits(properties.maxPendingRequests(), properties.illegalPacketThreshold(), properties.handshakeTimeout(),
                         messageLimits, runMode.allowsGmCommands(), properties.redirectLinger()), metrics, presence);
         links.bindListener(new SceneEventRouter(registry, dispatcher));
+        // 观战订阅：hub 独占一条线程（Redis 回调只投递任务，扇出不占 Redisson 与 gate-bg 的线程）。频道是 hub 按需订阅的，这里不碰 Redis
+        spectateThread = Executors.newSingleThreadExecutor(Thread.ofPlatform().name("gate-spectate").daemon(true).factory());
+        spectateHub = new SpectateHub(spectateThread, SpectateHub.of(new SpectateFrameChannel(redis, keys)),
+                SpectateHub.MessageIds.resolve(messageIdRegistry), metrics, System::nanoTime, System::currentTimeMillis);
+        dispatcher.withSpectate(spectateTickets, spectateHub);
+        scheduler.scheduleWithFixedDelay(spectateHub::sweepLater, SPECTATE_SWEEP_PERIOD.toMillis(), SPECTATE_SWEEP_PERIOD.toMillis(), TimeUnit.MILLISECONDS);
         supersessionSweep = new SupersessionSweep(() -> sceneDirectory.list(zoneId), links);
         supersessionSweep.start(scheduler, linkResolver, properties.linkSupersedeCheckInterval());
         // 服务端 → 玩家推送：订阅本 gate 的频道（任何服务按在线目录找到本 gate 后发布到这里）。
@@ -368,6 +389,7 @@ public final class GateNode {
             awaitSessionsDrained(properties.shutdownDrainTimeout());
         }
         stopPresence();
+        stopSpectate();
         if (links != null) {
             if (supersessionSweep != null) supersessionSweep.close();
             links.close();
@@ -399,6 +421,17 @@ public final class GateNode {
         GatePresence p = presence;
         if (p != null) {
             p.stop();
+        }
+    }
+
+    /** 会话都断开之后：退订全部观战频道，停 hub 线程（投递过的任务跑完；之后到达的帧被线程池拒收、丢弃）。 */
+    private void stopSpectate() {
+        SpectateHub hub = spectateHub;
+        if (hub != null) {
+            hub.close();
+        }
+        if (spectateThread != null) {
+            spectateThread.shutdown();
         }
     }
 

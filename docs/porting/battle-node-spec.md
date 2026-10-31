@@ -12,7 +12,7 @@ StopWatch 直连退出、幂等签票失败、正常终结、销毁及停机都�
 
 观众票 `BattleTicketPayload.spectator_operation_id=7` 与原准入操作绑定；参战票该字段必须空。观众补签请求同时带原操作及固定实例，房内核对当前操作后才签票。Edge 验签后把完整票据交房间再次核当前操作；旧观战票不能在同角色的新观战槽上重用。原只传 battle/player/role 的房间挂接入口拒绝观众，避免剥掉票内身份。dev 清退接口返回 200 的正规 PB 证明，调用者自行保留原操作和截止，不由管理入口代造旧原件。
 
-Java Native 冻结/删除/导入与 Match 观战准入共用 P；`match_global_watching` state 1/2/3/4、0/unknown/NULL 均阻止，只有已获取取消证明的 closed=5 放行。角色 owner 修订、原操作和固定实例由 Match SQL 保存；battle 进程内账本不从当前目录补权。
+Java Native 冻结/删除/导入与 Match 观战准入共用 P；`match_global_watching` state 1/2/3/4、0/unknown/NULL 均阻止，只有 closed=5 放行（已获取取消证明；或原实例已不在：成局已终态、已过期限 + 终局宽限、目录同节点号已是别的实例，见 `GlobalWatchAuthority.settled`）。角色 owner 修订、原操作和固定实例由 Match SQL 保存；battle 进程内账本不从当前目录补权。
 
 新增确定时钟账本与真实房间回归源码，覆盖取消先到、房间缺失、迟到 Add、原文篡改、相反操作清退、过期活动项、容量与时钟回退、StopWatch/终局、Query 的 UNKNOWN/ACTIVE/ABSENT、票据及补签原操作绑定。此批按任务限制未生成、未编译、未运行测试/进程；测试源码与静态检查不能替代运行证据。
 

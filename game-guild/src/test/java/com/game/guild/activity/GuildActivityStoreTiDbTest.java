@@ -118,6 +118,7 @@ class GuildActivityStoreTiDbTest {
         pool.setPassword(fixture.normalPassword());
         pool.setMaxActive(16);
         pool.setMaxWait(5000);
+        StrongTiDbConnectionPolicy.forGuild("guild-activity-fixture", true).postProcessBeforeInitialization(pool, "guild-activity-fixture");
         AuthorityDataSourcePolicy.protectDruid(pool, fixture.writerBoot(), true);
         try (var first = pool.getConnection(); var second = pool.getConnection()) {
             StrongTiDbConnectionPolicy.verify(first, true);

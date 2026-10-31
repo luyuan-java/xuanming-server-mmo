@@ -2,6 +2,7 @@ package com.game.guild;
 
 import com.game.common.sql.testing.AuthoritySqlFixture;
 import com.game.discovery.sql.AuthorityDataSourcePolicy;
+import com.game.discovery.sql.StrongTiDbConnectionPolicy;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -154,6 +155,7 @@ class GuildEndToEndIntegrationTest {
         dataSource.setMaxActive(16);
         dataSource.setMaxWait(10_000);
         dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        StrongTiDbConnectionPolicy.forGuild("guild-e2e-fixture", false).postProcessBeforeInitialization(dataSource, "guild-e2e-fixture");
         AuthorityDataSourcePolicy.protectDruid(dataSource, fixture.writerBoot(), false);
         try(var connection=fixture.schemaConnection();var ps=connection.prepareStatement("UPDATE player SET zone_id=0 WHERE player_id=?")){ps.setObject(1,new BigInteger(Long.toUnsignedString(c)));ps.executeUpdate();}
         Config config = new Config();

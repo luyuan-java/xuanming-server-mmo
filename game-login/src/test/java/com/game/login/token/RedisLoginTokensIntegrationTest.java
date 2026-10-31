@@ -9,6 +9,7 @@ import static org.mockito.Mockito.mock;
 
 import com.game.common.GameNamespace;
 import com.game.discovery.RedisKeys;
+import com.game.login.token.RedisLoginTokens.Kind;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -16,6 +17,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -32,8 +34,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.redisson.Redisson;
 import org.redisson.api.RBucket;
+import org.redisson.api.RKeys;
 import org.redisson.api.RMap;
 import org.redisson.api.RScoredSortedSet;
+import org.redisson.api.RType;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.StringCodec;
 import org.redisson.config.Config;
@@ -97,6 +101,10 @@ class RedisLoginTokensIntegrationTest {
         return REDIS_KEYS.loginRefreshFamily(familyId(pair));
     }
 
+    private String rotatedKey(TokenPair pair) {
+        return REDIS_KEYS.loginRefreshRotated(familyId(pair), pair.refreshToken());
+    }
+
     private RMap<String, String> family(TokenPair pair) {
         return redis.getMap(familyKey(pair), StringCodec.INSTANCE);
     }
@@ -150,16 +158,26 @@ class RedisLoginTokensIntegrationTest {
 
     private Map<String, String> familySnapshot(TokenPair pair) {
         return snapshot(accessKey(pair), refreshKey(pair), familyKey(pair), REDIS_KEYS.loginAccountRefresh(account),
-                REDIS_KEYS.loginRefreshRotated(familyId(pair), pair.refreshToken()));
+                rotatedKey(pair));
+    }
+
+    /** 等真实 PX 过期（有上限的等待），不靠本地时钟判断。 */
+    private void awaitGone(String key, Duration limit) throws InterruptedException {
+        long deadline = System.nanoTime() + limit.toNanos();
+        while (exists(key) && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertThat(exists(key)).as("键按 TTL 过期").isFalse();
     }
 
     @Test
-    void 签发_43字符_两枚令牌同家族_家族记录与头同TTL_索引记家族() {
+    void 签发_43字符_两枚令牌同家族_类型位分开_家族记录与头同TTL_索引记家族() {
         TokenPair pair = issue();
         String id = familyId(pair);
 
         assertThat(pair.accessToken()).hasSize(43).matches("[A-Za-z0-9_-]{43}").isNotEqualTo(pair.refreshToken());
-        assertThat(RedisLoginTokens.familyOf(pair.accessToken())).contains(id);
+        assertThat(RedisLoginTokens.parse(pair.accessToken())).contains(new RedisLoginTokens.Parsed(id, Kind.ACCESS));
+        assertThat(RedisLoginTokens.parse(pair.refreshToken())).contains(new RedisLoginTokens.Parsed(id, Kind.REFRESH));
         assertThat(Base64.getUrlDecoder().decode(id)).hasSize(16);
         assertThat(pair.accessExpireSeconds()).isEqualTo(NOW.getEpochSecond() + 7200);
         assertThat(pair.refreshExpireSeconds()).isEqualTo(NOW.getEpochSecond() + 720 * 3600);
@@ -177,13 +195,18 @@ class RedisLoginTokensIntegrationTest {
     }
 
     @Test
-    void 校验access_refresh不能当access用() {
+    void 校验access_refresh不能当access用_access不能当refresh用() {
         TokenPair pair = issue();
         assertThat(tokens.validateAccess(pair.accessToken()))
                 .contains(new TokenData(account, "password", "", NOW.getEpochSecond(), familyId(pair)));
         assertThat(tokens.validateAccess(pair.refreshToken())).isEmpty();
         assertThat(tokens.validateAccess("")).isEmpty();
         assertThat(tokens.validateAccess("nope")).isEmpty();
+
+        Map<String, String> before = familySnapshot(pair);
+        assertThat(refresh(pair.accessToken())).as("access 当 refresh 发来：普通无效，不当成重用").isEmpty();
+        assertThat(familySnapshot(pair)).isEqualTo(before);
+        assertThat(refresh(pair.refreshToken())).isPresent();
     }
 
     @Test
@@ -217,7 +240,7 @@ class RedisLoginTokensIntegrationTest {
         TokenPair first = issue();
         TokenPair second = refresh(first.refreshToken()).orElseThrow();
 
-        var record = redis.getBucket(REDIS_KEYS.loginRefreshRotated(familyId(first), first.refreshToken()), StringCodec.INSTANCE);
+        var record = redis.getBucket(rotatedKey(first), StringCodec.INSTANCE);
         assertThat(record.remainTimeToLive()).isBetween(GRACE.toMillis() - 5_000, GRACE.toMillis());
         Map<String, String> before = familySnapshot(second);
         assertThat(refresh(first.refreshToken())).as("回包丢失后拿原 token 重试").contains(second);
@@ -226,17 +249,60 @@ class RedisLoginTokensIntegrationTest {
         assertThat(refresh(second.refreshToken())).as("重放拿到的 refresh 照常能轮换").isPresent();
     }
 
+    /**
+     * 窗口内重放、而它的后继已经被轮换走、家族还活着：不是丢了回包的重试（拿到后继的一方已经用过它），说明有两方在用同一条链，
+     * 按重用吊销。堵住「攻击者在窗口内连续轮换两次，合法方的重放就只得到普通无效」的绕过。
+     */
     @Test
-    void 新refresh用过之后_窗口内重放旧refresh只拒绝不吊销() {
+    void 新refresh被轮换走之后_窗口内重放旧refresh即重用_吊销家族() {
         TokenPair first = issue();
         TokenPair second = refresh(first.refreshToken()).orElseThrow();
         TokenPair third = refresh(second.refreshToken()).orElseThrow();
 
-        assertThat(exists(REDIS_KEYS.loginRefreshRotated(familyId(first), first.refreshToken()))).as("仍在窗口内").isTrue();
-        assertThat(refresh(first.refreshToken())).as("合法客户端用上新 refresh 后不会再拿旧的重试").isEmpty();
-        assertThat(exists(familyKey(first))).as("窗口内永不吊销").isTrue();
-        assertThat(tokens.validateAccess(third.accessToken())).isPresent();
-        assertThat(refresh(second.refreshToken())).contains(third);
+        assertThat(exists(rotatedKey(first))).as("仍在窗口内").isTrue();
+        assertThat(refresh(first.refreshToken())).isEmpty();
+        assertThat(exists(familyKey(first))).as("家族已吊销").isFalse();
+        assertThat(exists(refreshKey(third))).as("家族头一并删除").isFalse();
+        assertThat(tokens.validateAccess(third.accessToken())).isEmpty();
+        assertThat(refresh(second.refreshToken())).as("窗口内重放第二枚：家族已不在").isEmpty();
+        assertThat(refresh(third.refreshToken())).as("持有家族头的一方随之出局").isEmpty();
+    }
+
+    @Test
+    void 宽限窗口内重放_新refresh的键过期或被删而家族头仍指着它_普通无效_不写() {
+        TokenPair first = issue();
+        TokenPair second = refresh(first.refreshToken()).orElseThrow();
+        redis.getKeys().delete(refreshKey(second));
+        Map<String, String> before = familySnapshot(second);
+        Map<String, String> record = snapshot(rotatedKey(first));
+
+        assertThat(refresh(first.refreshToken())).isEmpty();
+        assertThat(familySnapshot(second)).as("不是两方在用，不吊销、不写").isEqualTo(before);
+        assertThat(snapshot(rotatedKey(first))).isEqualTo(record);
+        assertThat(tokens.validateAccess(second.accessToken())).isPresent();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void 轮换记录在GET之后刚好过期_按没有记录处理_交给重用检测() {
+        TokenPair first = issue();
+        TokenPair second = refresh(first.refreshToken()).orElseThrow();
+        String key = rotatedKey(first);
+        RBucket<String> realRecord = redis.getBucket(key, StringCodec.INSTANCE);
+        RedissonClient forwarding = mock(RedissonClient.class, delegatesTo(redis));
+        RBucket<String> expiring = mock(RBucket.class, delegatesTo(realRecord));
+        doReturn(expiring).when(forwarding).getBucket(key, StringCodec.INSTANCE);
+        doAnswer(invocation -> {
+            String value = realRecord.get();
+            realRecord.delete();
+            return value;
+        }).when(expiring).get();
+        tokens = new RedisLoginTokens(forwarding, REDIS_KEYS, Clock.fixed(NOW, ZoneOffset.UTC), ACCESS, REFRESH, GRACE,
+                new SecureRandom());
+
+        assertThat(refresh(first.refreshToken())).isEmpty();
+        assertThat(exists(familyKey(second))).as("后继还活着、头不是旧 token：重用，吊销").isFalse();
+        assertThat(tokens.validateAccess(second.accessToken())).isEmpty();
     }
 
     @Test
@@ -257,13 +323,8 @@ class RedisLoginTokensIntegrationTest {
         TokenPair second = refresh(first.refreshToken()).orElseThrow();
         TokenPair other = issue();
 
-        // 窗口靠记录的 PX 过期实现：等它真的过期（有上限的等待），不靠本地时钟判断
-        var record = redis.getBucket(REDIS_KEYS.loginRefreshRotated(familyId(first), first.refreshToken()));
-        long deadline = System.nanoTime() + Duration.ofSeconds(3).toNanos();
-        while (record.isExists() && System.nanoTime() < deadline) {
-            Thread.sleep(50);
-        }
-        assertThat(record.isExists()).as("轮换记录按窗口过期").isFalse();
+        // 窗口靠记录的 PX 过期实现
+        awaitGone(rotatedKey(first), Duration.ofSeconds(3));
 
         assertThat(refresh(first.refreshToken())).isEmpty();
         assertThat(exists(familyKey(first))).as("家族已吊销").isFalse();
@@ -282,22 +343,29 @@ class RedisLoginTokensIntegrationTest {
         tokens = with(Duration.ZERO, true);
         TokenPair first = issue();
         TokenPair second = refresh(first.refreshToken()).orElseThrow();
-        assertThat(exists(REDIS_KEYS.loginRefreshRotated(familyId(first), first.refreshToken()))).as("窗口为 0 不写轮换记录").isFalse();
+        assertThat(exists(rotatedKey(first))).as("窗口为 0 不写轮换记录").isFalse();
 
         assertThat(refresh(first.refreshToken())).isEmpty();
         assertThat(tokens.validateAccess(second.accessToken())).isEmpty();
         assertThat(refresh(second.refreshToken())).isEmpty();
     }
 
+    /**
+     * 至多一份签出新的一对，另一份就是重用，家族随之吊销。赢家要么在吊销之前已经返回（它拿到的那一对随即失效），要么在续索引时
+     * 看到家族已被吊销而改回无效；无论哪种，都不会留下可用的令牌。后一种交错下没交出去的那一对 access 留到 TTL（DB 13，2h）。
+     */
     @Test
-    void 宽限为零_并发轮换同一个refresh_恰好一个成功_随后被当作重用吊销() throws Exception {
+    void 宽限为零_并发轮换同一个refresh_至多一个成功_家族随后被吊销() throws Exception {
         tokens = with(Duration.ZERO, true);
         TokenPair pair = issue();
         List<Optional<TokenPair>> results = race(pair.refreshToken(), 8);
         List<TokenPair> won = results.stream().flatMap(Optional::stream).toList();
-        assertThat(won).hasSize(1);
+        assertThat(won).hasSizeLessThanOrEqualTo(1);
         assertThat(exists(familyKey(pair))).isFalse();
-        assertThat(tokens.validateAccess(won.get(0).accessToken())).isEmpty();
+        for (TokenPair winner : won) {
+            assertThat(tokens.validateAccess(winner.accessToken())).isEmpty();
+            assertThat(refresh(winner.refreshToken())).isEmpty();
+        }
     }
 
     @Test
@@ -314,11 +382,25 @@ class RedisLoginTokensIntegrationTest {
     }
 
     @Test
+    void 判定为重用但吊销失败_抛存储异常_不带令牌_家族仍在() {
+        TokenPair first = issue();
+        TokenPair second = refresh(first.refreshToken()).orElseThrow();
+        // 让吊销脚本明确拒绝（家族记录缺账号字段 = 归属对不上），并去掉轮换记录，直接走重用检测
+        family(second).remove("account");
+        redis.getKeys().delete(rotatedKey(first));
+
+        assertThatThrownBy(() -> tokens.refresh(first.refreshToken())).isInstanceOf(TokenStoreException.class)
+                .hasMessageNotContaining(first.refreshToken()).hasMessageNotContaining(familyId(first)).hasNoCause();
+        assertThat(exists(familyKey(first))).as("没能吊销：家族还活着，等运维处理").isTrue();
+    }
+
+    @Test
     void 伪造家族号加任意字节_等同重放旧成员_吊销该家族() {
         TokenPair pair = issue();
         byte[] forged = new byte[32];
         new SecureRandom().nextBytes(forged);
         System.arraycopy(Base64.getUrlDecoder().decode(familyId(pair)), 0, forged, 0, 16);
+        forged[RedisLoginTokens.FAMILY_BYTES] &= (byte) ~RedisLoginTokens.ACCESS_KIND_BIT;
         String token = Base64.getUrlEncoder().withoutPadding().encodeToString(forged);
 
         assertThat(refresh(token)).isEmpty();
@@ -409,16 +491,24 @@ class RedisLoginTokensIntegrationTest {
         }
     }
 
+    /**
+     * 轮换记录的剩余 TTL：被 PERSIST、或超过 60s 硬上限，按损坏无效（不能借它延长窗口）；落在（当前窗口, 硬上限] 之间
+     * （窗口刚调小后的过渡期）按窗口外普通无效。三种都不写、不吊销。
+     */
     @Test
-    void 轮换记录被PERSIST或续长_不能延长宽限窗口() {
+    void 轮换记录被PERSIST_续过硬上限_或比当前窗口长_都不能延长宽限窗口() {
         TokenPair first = issue();
         TokenPair second = refresh(first.refreshToken()).orElseThrow();
-        var record = redis.getBucket(REDIS_KEYS.loginRefreshRotated(familyId(first), first.refreshToken()), StringCodec.INSTANCE);
-        assertThat(record.clearExpire()).isTrue();
-        assertThat(refresh(first.refreshToken())).isEmpty();
-        assertThat(record.expire(GRACE.plusMinutes(1))).isTrue();
-        assertThat(refresh(first.refreshToken())).isEmpty();
-        assertThat(tokens.validateAccess(second.accessToken())).as("拒绝不吊销").isPresent();
+        var record = redis.getBucket(rotatedKey(first), StringCodec.INSTANCE);
+        for (Runnable mutate : List.<Runnable>of(() -> assertThat(record.clearExpire()).isTrue(),
+                () -> assertThat(record.expire(RedisLoginTokens.MAX_REFRESH_REUSE_GRACE.plusSeconds(30))).isTrue(),
+                () -> assertThat(record.expire(GRACE.plusSeconds(15))).isTrue())) {
+            mutate.run();
+            Map<String, String> before = familySnapshot(second);
+            assertThat(refresh(first.refreshToken())).isEmpty();
+            assertThat(familySnapshot(second)).as("不写").isEqualTo(before);
+            assertThat(tokens.validateAccess(second.accessToken())).as("拒绝不吊销").isPresent();
+        }
     }
 
     @Test
@@ -442,11 +532,11 @@ class RedisLoginTokensIntegrationTest {
         assertThat(refresh(first.refreshToken())).isEmpty();
         assertThat(originalBucket.get()).isEqualTo(replacement);
         assertThat(family(first).readAllMap()).isEqualTo(beforeFamily);
-        assertThat(exists(REDIS_KEYS.loginRefreshRotated(familyId(first), first.refreshToken()))).isFalse();
+        assertThat(exists(rotatedKey(first))).isFalse();
     }
 
     @Test
-    void 账号索引类型损坏_签发在写任何键之前拒绝_轮换不依赖索引() {
+    void 账号索引类型损坏_签发在写任何键之前拒绝_轮换不依赖索引也不给坏键续期() {
         TokenPair pair = issue();
         String indexKey = REDIS_KEYS.loginAccountRefresh(account);
         redis.getKeys().delete(indexKey);
@@ -465,6 +555,8 @@ class RedisLoginTokensIntegrationTest {
         assertThat(generated).as("拒绝发生在造任何令牌之前").isEmpty();
         assertThat(redis.getBucket(indexKey, StringCodec.INSTANCE).get()).isEqualTo("wrong-type");
         assertThat(refresh(pair.refreshToken())).as("索引只是二级索引，令牌照常轮换").isPresent();
+        assertThat(redis.getBucket(indexKey, StringCodec.INSTANCE).get()).as("续 score 的脚本先核类型，不碰坏键").isEqualTo("wrong-type");
+        assertThat(redis.getBucket(indexKey).remainTimeToLive()).as("也不给坏键续期").isEqualTo(-1L);
     }
 
     @Test
@@ -476,24 +568,121 @@ class RedisLoginTokensIntegrationTest {
         assertThat(index(account).getScore(familyId(pair))).isEqualTo((double) next.refreshExpireSeconds());
     }
 
+    /**
+     * 同一组参数的签发再来一次（等同驱动对超时的重发：固定时钟 + 固定随机数让两次的内容逐字节相同）按已写入返回同一对；
+     * 内容不同而键撞上，报撞键，不覆盖、不撤回已有的键。
+     */
+    @Test
+    void 签发的重发按已写入返回_撞上别人的键报错且不动已有键() {
+        byte[] pattern = new byte[16];
+        new SecureRandom().nextBytes(pattern);
+        SecureRandom repeating = new SecureRandom() {
+            @Override
+            public void nextBytes(byte[] bytes) {
+                for (int i = 0; i < bytes.length; i++) {
+                    bytes[i] = pattern[i % pattern.length];
+                }
+            }
+        };
+        tokens = new RedisLoginTokens(redis, REDIS_KEYS, Clock.fixed(NOW, ZoneOffset.UTC), ACCESS, REFRESH, GRACE, repeating);
+        TokenPair first = issue();
+        assertThat(issue()).as("同一次签发的重发").isEqualTo(first);
+        assertThat(index(account).readAll()).containsExactly(familyId(first));
+
+        Map<String, String> before = familySnapshot(first);
+        assertThatThrownBy(() -> tokens.issue(account, "satoken", "")).as("内容不同：撞键").isInstanceOf(TokenStoreException.class)
+                .hasNoCause();
+        assertThat(familySnapshot(first)).as("撞键不覆盖、不撤回已有键").isEqualTo(before);
+        assertThat(tokens.validateAccess(first.accessToken())).isPresent();
+    }
+
+    /** 家族写入之后、登记索引之前索引坏了：签发失败，并按值撤回刚写的三个键（它们没有交给任何人）。 */
+    @Test
+    void 登记索引失败_签发失败并撤回刚写的家族() {
+        TokenPair existing = issue();
+        String indexKey = REDIS_KEYS.loginAccountRefresh(account);
+        redis.getKeys().delete(indexKey);
+        redis.getBucket(indexKey, StringCodec.INSTANCE).set("wrong-type");
+        List<byte[]> random = new ArrayList<>();
+        SecureRandom recording = new SecureRandom() {
+            @Override
+            public void nextBytes(byte[] bytes) {
+                super.nextBytes(bytes);
+                random.add(bytes.clone());
+            }
+        };
+        // 让签发前的类型预检看到 zset，脚本写完家族之后登记索引才失败
+        RedissonClient forwarding = mock(RedissonClient.class, delegatesTo(redis));
+        RKeys realKeys = redis.getKeys();
+        RKeys keys = mock(RKeys.class, delegatesTo(realKeys));
+        doReturn(RType.ZSET).when(keys).getType(indexKey);
+        doReturn(keys).when(forwarding).getKeys();
+        tokens = new RedisLoginTokens(forwarding, REDIS_KEYS, Clock.fixed(NOW, ZoneOffset.UTC), ACCESS, REFRESH, GRACE, recording);
+
+        assertThatThrownBy(() -> tokens.issue(account, "password", "")).isInstanceOf(TokenStoreException.class);
+        assertThat(random).as("家族号、access 随机半段、refresh 随机半段").hasSize(3);
+        String familyId = Base64.getUrlEncoder().withoutPadding().encodeToString(random.get(0));
+        String access = tokenFrom(random.get(0), random.get(1), Kind.ACCESS);
+        String refresh = tokenFrom(random.get(0), random.get(2), Kind.REFRESH);
+        List<String> written = List.of(REDIS_KEYS.loginAccessToken(familyId, access), REDIS_KEYS.loginRefreshToken(familyId, refresh),
+                REDIS_KEYS.loginRefreshFamily(familyId));
+        touched.addAll(written);
+        for (String key : written) {
+            assertThat(exists(key)).as("没交出去的家族已撤回").isFalse();
+        }
+        assertThat(tokens.validateAccess(existing.accessToken())).as("已有家族不受影响").isPresent();
+    }
+
+    /** 同 {@code RedisLoginTokens#newToken} 的格式：家族号 16 字节 ‖ 随机 16 字节，随机半段首字节最高位是类型位。 */
+    private static String tokenFrom(byte[] family, byte[] tail, Kind kind) {
+        byte[] bytes = Arrays.copyOf(family, RedisLoginTokens.TOKEN_BYTES);
+        System.arraycopy(tail, 0, bytes, RedisLoginTokens.FAMILY_BYTES, tail.length);
+        if (kind == Kind.ACCESS) {
+            bytes[RedisLoginTokens.FAMILY_BYTES] |= (byte) RedisLoginTokens.ACCESS_KIND_BIT;
+        } else {
+            bytes[RedisLoginTokens.FAMILY_BYTES] &= (byte) ~RedisLoginTokens.ACCESS_KIND_BIT;
+        }
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
+    /** 轮换提交之后、续索引核对之前家族被并发吊销：这对令牌已经无效，不交出去，索引里也不留死成员。 */
+    @Test
+    void 轮换提交后家族被并发吊销_这一对不交出去_索引不留死成员() {
+        TokenPair first = issue();
+        String famKey = familyKey(first);
+        RedissonClient forwarding = mock(RedissonClient.class, delegatesTo(redis));
+        RKeys realKeys = redis.getKeys();
+        RKeys keys = mock(RKeys.class, delegatesTo(realKeys));
+        doAnswer(invocation -> {
+            realKeys.delete(famKey);
+            return realKeys.countExists(famKey);
+        }).when(keys).countExists(famKey);
+        doReturn(keys).when(forwarding).getKeys();
+        tokens = new RedisLoginTokens(forwarding, REDIS_KEYS, Clock.fixed(NOW, ZoneOffset.UTC), ACCESS, REFRESH, GRACE,
+                new SecureRandom());
+
+        assertThat(refresh(first.refreshToken())).isEmpty();
+        assertThat(index(account).contains(familyId(first))).isFalse();
+        // 没交出去的那一对写在轮换记录里：登记它的键，留给 tearDown 清理
+        RedisLoginTokens.decodeRotation(redis.<String>getBucket(rotatedKey(first), StringCodec.INSTANCE).get(), familyId(first))
+                .ifPresent(rec -> {
+                    touched.add(REDIS_KEYS.loginAccessToken(familyId(first), rec.accessToken()));
+                    touched.add(REDIS_KEYS.loginRefreshToken(familyId(first), rec.refreshToken()));
+                });
+    }
+
     @Test
     void 家族真实TTL到期_access还有值也拒绝() throws Exception {
         tokens = new RedisLoginTokens(redis, REDIS_KEYS, Clock.fixed(NOW, ZoneOffset.UTC), ACCESS, Duration.ofMillis(600), GRACE,
                 new SecureRandom());
         TokenPair first = issue();
-        long deadline = System.nanoTime() + Duration.ofSeconds(4).toNanos();
-        while (exists(familyKey(first)) && System.nanoTime() < deadline) {
-            Thread.sleep(20);
-        }
-        assertThat(exists(familyKey(first))).isFalse();
+        awaitGone(familyKey(first), Duration.ofSeconds(4));
         assertThat(exists(accessKey(first))).isTrue();
         assertThat(tokens.validateAccess(first.accessToken())).isEmpty();
     }
 
-    @Test
-    void 每账号活家族封顶32_吊销最久没轮换的连同其头与access_过期成员按分数清掉() {
-        // 时钟每次签发前进 1 秒：分数各不相同，「最旧」就是最早签的那几个
-        AtomicReference<Instant> now = new AtomicReference<>(NOW);
+    /** 时钟可前进：分数各不相同，「最旧」就是最早签的那几个。 */
+    private RedisLoginTokens movingClock(AtomicReference<Instant> now) {
         Clock moving = new Clock() {
             @Override
             public ZoneId getZone() {
@@ -510,7 +699,13 @@ class RedisLoginTokensIntegrationTest {
                 return now.get();
             }
         };
-        tokens = new RedisLoginTokens(redis, REDIS_KEYS, moving, ACCESS, REFRESH, GRACE, new SecureRandom());
+        return new RedisLoginTokens(redis, REDIS_KEYS, moving, ACCESS, REFRESH, GRACE, new SecureRandom());
+    }
+
+    @Test
+    void 每账号活家族封顶32_吊销最久没轮换的连同其头与access_过期成员按分数清掉() {
+        AtomicReference<Instant> now = new AtomicReference<>(NOW);
+        tokens = movingClock(now);
         index(account).add(NOW.getEpochSecond() - 1, "dead-member");
         List<TokenPair> pairs = new ArrayList<>();
         pairs.add(issue());
@@ -530,19 +725,73 @@ class RedisLoginTokensIntegrationTest {
     }
 
     @Test
-    void 账号索引混进别人的家族_封顶不动别人的家族() {
-        TokenPair foreign = issue(account + "_other");
+    void 封顶先摘掉家族记录已不在的成员_不计入活家族() {
+        AtomicReference<Instant> now = new AtomicReference<>(NOW);
+        tokens = movingClock(now);
+        List<TokenPair> pairs = new ArrayList<>();
         for (int i = 0; i < RedisLoginTokens.MAX_FAMILIES_PER_ACCOUNT; i++) {
-            issue();
+            now.set(now.get().plusSeconds(1));
+            pairs.add(issue());
         }
-        index(account).add(0, familyId(foreign));
-        issue();
-        assertThat(exists(familyKey(foreign))).isTrue();
-        assertThat(tokens.validateAccess(foreign.accessToken())).isPresent();
+        // 家族记录不在了（外部删除 / 吊销后没摘掉索引）而分数还没过期
+        redis.getKeys().delete(familyKey(pairs.get(5)));
+        now.set(now.get().plusSeconds(1));
+        TokenPair fresh = issue();
+
+        assertThat(index(account).contains(familyId(pairs.get(5)))).as("死成员被摘掉").isFalse();
+        assertThat(index(account).size()).isEqualTo(RedisLoginTokens.MAX_FAMILIES_PER_ACCOUNT);
+        for (int i = 0; i < pairs.size(); i++) {
+            if (i != 5) {
+                assertThat(exists(familyKey(pairs.get(i)))).as("活家族没超额，第 %d 个不被吊销", i).isTrue();
+            }
+        }
+        assertThat(tokens.validateAccess(fresh.accessToken())).isPresent();
     }
 
-    /** n 路同时拿同一个 refresh 轮换。 */
-    private List<Optional<TokenPair>> race(String refreshToken, int n) throws Exception {
+    @Test
+    void 封顶永不吊销本次签发的家族() {
+        List<TokenPair> pairs = new ArrayList<>();
+        for (int i = 0; i < RedisLoginTokens.MAX_FAMILIES_PER_ACCOUNT; i++) {
+            pairs.add(issue());
+        }
+        // 已有家族的分数都比新家族大：新家族是分数最小的那个
+        for (int i = 0; i < pairs.size(); i++) {
+            index(account).add(NOW.getEpochSecond() + REFRESH.toSeconds() + 100 + i, familyId(pairs.get(i)));
+        }
+        TokenPair fresh = issue();
+
+        assertThat(tokens.validateAccess(fresh.accessToken())).as("本次签发的家族不在候选里").isPresent();
+        assertThat(exists(familyKey(pairs.get(0)))).as("吊销的是其余家族里分数最小的").isFalse();
+        for (int i = 1; i < pairs.size(); i++) {
+            assertThat(exists(familyKey(pairs.get(i)))).as("第 %d 个家族", i).isTrue();
+        }
+    }
+
+    /**
+     * 被损坏的账号索引里混进别人的家族：封顶吊销它会被脚本拒绝（归属对不上），别人的家族原样保留；
+     * 本账号照样封顶（坏候选占着一个名额，宁可多吊销一个本账号的家族）。分数取 NOW：不会被签发时的过期清理先摘掉。
+     */
+    @Test
+    void 账号索引混进别人的家族_封顶不动别人的家族_本账号照样封顶() {
+        TokenPair foreign = issue(account + "_other");
+        List<TokenPair> own = new ArrayList<>();
+        for (int i = 0; i < RedisLoginTokens.MAX_FAMILIES_PER_ACCOUNT; i++) {
+            own.add(issue());
+        }
+        index(account).add(NOW.getEpochSecond(), familyId(foreign));
+        TokenPair last = issue();
+        own.add(last);
+
+        assertThat(exists(familyKey(foreign))).isTrue();
+        assertThat(tokens.validateAccess(foreign.accessToken())).isPresent();
+        assertThat(own.stream().filter(pair -> exists(familyKey(pair))).count())
+                .as("33 个本账号家族里吊销两个").isEqualTo(RedisLoginTokens.MAX_FAMILIES_PER_ACCOUNT - 1L);
+        assertThat(tokens.validateAccess(last.accessToken())).isPresent();
+    }
+
+    /** n 路同时拿同一个 refresh 轮换；先登记轮换记录、再等全部跑完，断言失败也不漏清理。 */
+    private List<Optional<TokenPair>> race(String refreshToken, int n) {
+        RedisLoginTokens.familyOf(refreshToken).ifPresent(f -> touched.add(REDIS_KEYS.loginRefreshRotated(f, refreshToken)));
         CountDownLatch start = new CountDownLatch(1);
         List<CompletableFuture<Optional<TokenPair>>> racers = new ArrayList<>();
         for (int i = 0; i < n; i++) {
@@ -556,13 +805,16 @@ class RedisLoginTokensIntegrationTest {
             }));
         }
         start.countDown();
+        CompletableFuture.allOf(racers.toArray(CompletableFuture[]::new)).exceptionally(e -> null).join();
         List<Optional<TokenPair>> results = new ArrayList<>();
         for (CompletableFuture<Optional<TokenPair>> racer : racers) {
-            Optional<TokenPair> result = racer.get();
-            result.ifPresent(this::track);
-            results.add(result);
+            if (!racer.isCompletedExceptionally()) {
+                Optional<TokenPair> result = racer.join();
+                result.ifPresent(this::track);
+                results.add(result);
+            }
         }
-        RedisLoginTokens.familyOf(refreshToken).ifPresent(f -> touched.add(REDIS_KEYS.loginRefreshRotated(f, refreshToken)));
+        assertThat(racers).as("并发轮换不抛存储异常").noneMatch(CompletableFuture::isCompletedExceptionally);
         return results;
     }
 }

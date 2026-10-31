@@ -138,6 +138,15 @@ public final class BattleFixture {
     /** 缺省的战斗时长与备战时长（{@link #deadline()} / {@link #prepareDeadline()}）。 */
     public static final long BATTLE_MILLIS = 300_000;
     public static final long PREPARE_MILLIS = 60_000;
+    /**
+     * FIGHTING 冻结在战斗期限之后还要保持的窗口 = Match 终局宽限 + 收件箱投递余量（{@link BattleFreeze#fightingReleaseAtMs}）：
+     * 有效期限 = 期限 + 它，reaper 的宽限 / 判废与 FIGHTING 锁 TTL 都按有效期限算。
+     */
+    public static final long OUTCOME_WINDOW_MILLIS = com.game.api.match.MatchBudgets.TERMINAL_OUTCOME_GRACE_MS
+            + BattleFreeze.INBOX_DELIVERY_MARGIN_MS;
+    /** 进战斗那一刻（期限 = 现在 + {@link #BATTLE_MILLIS}）确认续出的 FIGHTING 锁 TTL（秒）= 有效期限的剩余 + 60 s。 */
+    public static final long FIGHTING_LOCK_TTL_SEC = (BATTLE_MILLIS + OUTCOME_WINDOW_MILLIS) / 1000
+            + com.game.discovery.battle.BattleRedis.LOCK_EXTRA_TTL_SEC;
     public static final int TIP = 23;
 
     /** 正式配表（与 mmorpg 逐字节一致），全部测试共用一份。 */

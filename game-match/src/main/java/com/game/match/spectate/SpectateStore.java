@@ -194,7 +194,10 @@ public interface SpectateStore {
         /** 这一次剔除针对的索引成员。 */
         String member();
 
-        /** 非法成员（不是规范的 battle_id）：无条件 {@code ZREM} 这个成员。不碰任何落点记录。 */
+        /**
+         * 不该在索引里的成员：无条件 {@code ZREM} 这个成员，不碰任何落点记录。用于非法成员（不是规范的 battle_id，按原串摘），
+         * 以及落点记录里冻结的可见性不是 PUBLIC 的残留成员（按规范写法摘；私密局的落点要留给 179 补签）。
+         */
         record Invalid(String member) implements Eviction {
 
             public Invalid {

@@ -142,9 +142,13 @@ public final class SceneBattleMetrics {
         READY, RETRY, ERROR
     }
 
-    /** 结算道具的异常路径（§7.11 h / i 步）。 */
+    /**
+     * 结算道具的异常路径（§7.11 h / i 步）。{@code CONSUME_CONFIG_MISSING} / {@code DROP_CONFIG_MISSING}：收件箱结算里消耗 / 掉落的物品配置行已被
+     * 新版本删掉，跳过这一项、其余照常应用；{@code CONSUME_CLAMPED_UNFROZEN}：战斗冻结已释放之后结算才到达、消耗仍被夹紧（物品可能已在解冻后
+     * 转走，非 0 要告警对账）。
+     */
     public enum ItemKind {
-        CONSUME_CLAMPED, CONSUME_REJECTED, DROP_OVERFLOW, DROP_LOST
+        CONSUME_CLAMPED, CONSUME_REJECTED, DROP_OVERFLOW, DROP_LOST, CONSUME_CONFIG_MISSING, DROP_CONFIG_MISSING, CONSUME_CLAMPED_UNFROZEN
     }
 
     private final Map<Prepare, Counter> prepares;

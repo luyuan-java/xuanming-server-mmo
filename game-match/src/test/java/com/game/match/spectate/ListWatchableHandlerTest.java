@@ -62,7 +62,8 @@ class ListWatchableHandlerTest {
     private void register(long battleId, long createdAtMs, String... names) {
         placements.put(BattlePlacement.newBuilder().setBattleId(battleId).setBattleNodeId(7).setBattleInstanceId("inst-7").setRpcHost("127.0.0.1")
                 .setRpcPort(21207).setAttempt(1).setMode(MatchMode.MATCH_MODE_PVE_SOLO_VALUE).setBattleConfigId(1).addAllPlayerNames(List.of(names))
-                .setCreatedAtMs(createdAtMs).setDeadlineMs(createdAtMs + 300_000).build());
+                .setCreatedAtMs(createdAtMs).setDeadlineMs(createdAtMs + 300_000)
+                .setSpectateVisibility(com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC_VALUE).build());
         store.putWatchable(battleId, createdAtMs);
     }
 

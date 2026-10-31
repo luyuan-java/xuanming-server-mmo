@@ -15,6 +15,8 @@ public final class AuthorityDataSource implements DataSource {
             +"tidb_low_resolution_tso=OFF,tidb_read_consistency='strict',tidb_replica_read='leader',"
             +"tidb_txn_mode='pessimistic',transaction_isolation='READ-COMMITTED',"
             +"sql_mode=CONCAT(@@SESSION.sql_mode,',STRICT_TRANS_TABLES')";
+    /** 仅由公会池显式声明；业务SQL通道仍拒绝会话SET。 */
+    public static final String GUILD_FAIR_LOCKING_OFF_SQL="SET SESSION tidb_pessimistic_txn_fair_locking=OFF";
     private static final String MALL_INIT="SET SESSION tidb_snapshot='',tidb_txn_mode='pessimistic',tidb_replica_read='leader',tidb_read_consistency='strict',"
             +"tidb_read_staleness=0,tidb_low_resolution_tso=OFF,"
             +"sql_mode=CONCAT(@@SESSION.sql_mode,',STRICT_TRANS_TABLES'),innodb_lock_wait_timeout=5";
@@ -44,7 +46,7 @@ public final class AuthorityDataSource implements DataSource {
     public static List<String> checkedInitialization(Collection<String> sqls)throws SQLException {
         List<String> result=new ArrayList<>();
         for(String sql:sqls){
-            if(!Set.of(STRONG_SESSION_SQL,MALL_INIT,MALL_MYSQL).contains(sql))throw new SQLException("未批准的池初始化SQL，不能在受管前执行");
+            if(!Set.of(STRONG_SESSION_SQL,MALL_INIT,MALL_MYSQL,GUILD_FAIR_LOCKING_OFF_SQL).contains(sql))throw new SQLException("未批准的池初始化SQL，不能在受管前执行");
             if(!result.contains(sql))result.add(sql);
         }
         return List.copyOf(result);
@@ -95,7 +97,7 @@ public final class AuthorityDataSource implements DataSource {
         if(!h2)try(var s=raw.createStatement();var r=s.executeQuery("SELECT VERSION()")){tidb=r.next()&&r.getString(1).toLowerCase(Locale.ROOT).contains("tidb");}
         if(requireTiDb&&!tidb)throw new SQLException("normal生产连接必须是真实TiDB");
         for(String sql:accepted){
-            if(sql.equals(STRONG_SESSION_SQL))continue;
+            if(sql.equals(STRONG_SESSION_SQL)||sql.equals(GUILD_FAIR_LOCKING_OFF_SQL))continue;
             if(h2)throw new SQLException("H2 fixture不能伪执行TiDB初始化");
             if(!tidb&&sql.contains("tidb_"))throw new SQLException("非TiDB不能接受TiDB会话初始化");
             try(var statement=raw.createStatement()){statement.execute(sql);}
@@ -107,6 +109,16 @@ public final class AuthorityDataSource implements DataSource {
                         ||!"strict".equalsIgnoreCase(r.getString(4))||!"leader".equalsIgnoreCase(r.getString(5))
                         ||!"pessimistic".equalsIgnoreCase(r.getString(6))||!"READ-COMMITTED".equalsIgnoreCase(r.getString(7)))
                     throw new SQLException("physical强会话初始化没有精确读回");
+            }
+            // 公会固定策略只在真实TiDB新physical上执行；MySQL/H2不发送此变量。
+            if(accepted.contains(GUILD_FAIR_LOCKING_OFF_SQL)){
+                try(var statement=raw.createStatement()){statement.execute(GUILD_FAIR_LOCKING_OFF_SQL);}
+                try(var statement=raw.createStatement();var rows=statement.executeQuery("SELECT @@SESSION.tidb_pessimistic_txn_fair_locking")){
+                    if(!rows.next())throw new SQLException("公会公平锁初始化缺少唯一读回");
+                    String fair=rows.getString(1);
+                    if(!("0".equals(fair)||"OFF".equalsIgnoreCase(fair)||"FALSE".equalsIgnoreCase(fair))||rows.next())
+                        throw new SQLException("公会物理连接公平锁未关闭或读回不唯一");
+                }
             }
         }
     }

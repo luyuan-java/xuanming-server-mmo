@@ -184,9 +184,11 @@ public final class BattleNode implements SmartLifecycle {
             BattleScheduler s = scheduler;
             return s == null ? 0 : s.pendingTasks();
         });
+        // 观众席节点配额在装配时由直连面的有效连接上限算出、显式注入（房间服务不读配置）
         BattleRoomService roomService = infra.rooms(new RoomDependencies(tables.data(), tables.fingerprint(),
                 props.tableFingerprintMode(), logic, clock, id, tickets, tables.messageIds(), outbound.lobby(),
-                outbound.sceneEvents(), outbound.settlements(), outbound.activityResults(), outbound.results(), metrics));
+                outbound.sceneEvents(), outbound.settlements(), outbound.activityResults(), outbound.results(), metrics,
+                RoomDependencies.observerSeatQuotaFor(props.effectiveMaxConnections()), outbound.spectateFrames()));
         rooms = roomService;
         metrics.bindRooms(() -> {
             BattleRoomService r = rooms;

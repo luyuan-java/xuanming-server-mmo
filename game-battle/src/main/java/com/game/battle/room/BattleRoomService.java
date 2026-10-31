@@ -94,14 +94,31 @@ public interface BattleRoomService {
     IssueBattleTicketResponse issueBattleTicket(IssueBattleTicketRequest request);
 
     /**
-     * 登记观众（§5.5，Q1 放进 6.2）：判定顺序 1004 → 1005 → 1005 → 幂等重签 / 重推 → 满员码 {@code MatchErrorTip.kMatchSpectateFull}
-     * （满 20；拒绝留墓碑，同一原操作迟到的 Add 有空位后也不准入）→ 新观众签票、登记、推 177。
+     * 登记观众（§5.5，Q1 放进 6.2）：判定顺序 1004 → 1005 → 1005 → 幂等重签 / 重推 → 房间可见性不是 PUBLIC 回 1005（第二道闸；
+     * 可见性随建房原件冻结，不回 1004）→ 满员码 {@code MatchErrorTip.kMatchSpectateFull}（每房满 20，或全节点已登记观众席达到
+     * {@code RoomDependencies.observerSeatQuota}；拒绝留墓碑，同一原操作迟到的 Add 有空位后也不准入）→ 新观众签票、登记、推 177。
      * 新登记起算 {@code RoomConstants.OBSERVER_ATTACH_GRACE_MS}：到期仍未建直连即回收座位（不推 166）；幂等重试与补签票不延长。
      */
     AddObserverResponse addObserver(AddObserverRequest request);
 
     /** 原UUID/固定实例取消：先写管理器墓碑，再清原操作槽；房间不存在也留墓碑，未知不回成功证明。 */
     RemoveObserverResponse removeObserver(RemoveObserverRequest request);
+
+    /**
+     * 观战中继（mmorpg battle-spectate-tiered-fanout.md §15.4、§15.7）：校验 {@code target_instance_id} 是本实例（否则 1005）→ 房间存在（否则 1004）→ 房间公开（否则 1005）后，
+     * 幂等地打开本场的中继开关（只升不降），第一次打开时发布一帧 STATE；回本实例 UUID 与战斗期限。开关打开后每回合把观众版 158 发布一次，
+     * 收尾发布 166。旧替身回 1003。
+     */
+    default com.game.proto.AttachRelayGateResponse attachRelayGate(com.game.proto.AttachRelayGateRequest request) {
+        return com.game.proto.AttachRelayGateResponse.newBuilder().setErrorMessage(com.game.proto.TipInfoMessage.newBuilder()
+                .setId(com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE)).build();
+    }
+
+    /** 升全服广播：Java 版与中继同一个开关（见 {@link #attachRelayGate}），校验与回包同它。 */
+    default com.game.proto.PromoteSpectateBroadcastResponse promoteSpectateBroadcast(com.game.proto.PromoteSpectateBroadcastRequest request) {
+        return com.game.proto.PromoteSpectateBroadcastResponse.newBuilder().setErrorMessage(com.game.proto.TipInfoMessage.newBuilder()
+                .setId(com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE)).build();
+    }
 
     // ---------------------------------------------------------------- 直连面（逻辑线程）
 

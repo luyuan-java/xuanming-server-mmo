@@ -44,11 +44,14 @@ class LoginPropertiesTest {
     }
 
     @Test
-    void refresh重放宽限窗口_0到60秒() {
+    void refresh重放宽限窗口_0到60秒_整毫秒() {
         assertThat(grace(Duration.ZERO).refreshReuseGrace()).as("0 = 严格一次性").isZero();
         assertThat(grace(Duration.ofSeconds(60)).refreshReuseGrace()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(grace(Duration.ofMillis(1)).refreshReuseGrace()).isEqualTo(Duration.ofMillis(1));
         assertThatThrownBy(() -> grace(Duration.ofSeconds(61))).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> grace(Duration.ofSeconds(-1))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> grace(Duration.ofNanos(500_000))).as("亚毫秒：脚本按 0 处理").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> grace(Duration.ofNanos(1_500_000))).isInstanceOf(IllegalArgumentException.class);
     }
 
     private static LoginProperties grace(Duration refreshReuseGrace) {

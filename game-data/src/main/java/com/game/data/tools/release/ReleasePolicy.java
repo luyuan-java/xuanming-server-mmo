@@ -15,7 +15,7 @@ import java.util.UUID;
 /** 小而封闭的生产门禁配置：直接生成 Spring canonical properties，不解析任意脚本或猜测有效配置。 */
 final class ReleasePolicy {
     static final Set<String> SECRETS = Set.of("GAME_MYSQL_PASSWORD", "GAME_DUBBO_SECRET", "GAME_GATE_TOKEN_SECRET",
-            "GAME_NODE_LINK_SECRET", "GAME_BATTLE_TOKEN_SECRET", "GAME_ADMIN_TOKEN", "GAME_GM_ADMIN_SECRET",
+            "GAME_NODE_LINK_SECRET", "GAME_BATTLE_TOKEN_SECRET", "GAME_SPECTATE_TOKEN_SECRET", "GAME_ADMIN_TOKEN", "GAME_GM_ADMIN_SECRET",
             "GAME_ASSET_OP_SECRET_GUILD", "GAME_ASSET_OP_SECRET_MAIL", "GAME_ASSET_OP_SECRET_TRADE",
             "GAME_MALL_GATEWAY_SECRET", "GAME_MALL_PAYMENT_SECRET", "GAME_MALL_DELIVERY_SECRET", "GAME_MALL_ADMIN_SECRET");
     static final String PROTOCOL = "directory-v2-epoch-instance-retired";

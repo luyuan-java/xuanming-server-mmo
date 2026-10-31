@@ -27,6 +27,7 @@ import com.game.match.ticket.Ticket;
 import com.game.match.ticket.TicketReader;
 import com.game.match.ticket.TicketState;
 import com.game.proto.BattleRouting;
+import com.game.proto.eSpectateVisibility;
 import com.game.proto.match.WatchBattleResponse;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -133,10 +134,23 @@ class WatchBattleServiceTest {
                 .setAccount("acc-" + playerId).build();
     }
 
+    /** 一条公开局的落点记录（观战用例要的是「可观战的局」；可见性随建房冻结，163 只读这个值，不按 mode 重算）。 */
     private static BattlePlacement placement(long battleId, long createdAtMs) {
         return BattlePlacement.newBuilder().setBattleId(battleId).setBattleNodeId(7).setBattleInstanceId("inst-a").setRpcHost("10.1.1.1")
                 .setRpcPort(21200).setAttempt(1).setMode(1).setBattleConfigId(1).addPlayerNames("甲").addPlayerNames("乙")
-                .setCreatedAtMs(createdAtMs).setDeadlineMs(createdAtMs + 300_000).build();
+                .setCreatedAtMs(createdAtMs).setDeadlineMs(createdAtMs + 300_000)
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC_VALUE).build();
+    }
+
+    /** 一场已开局的私密局：落点照写（补签靠它）；{@code inIndex} 模拟本不该出现的残留索引成员。 */
+    private BattlePlacement openPrivate(long battleId, long scoreOffsetMs, boolean inIndex) {
+        BattlePlacement placement = placement(battleId, clock.peekMs() + scoreOffsetMs).toBuilder()
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE_VALUE).build();
+        placements.put(placement);
+        if (inIndex) {
+            spectate.putWatchable(battleId, placement.getCreatedAtMs());
+        }
+        return placement;
     }
 
     /** 一场已开局并公开的战斗：落点在、在可观战索引里（分数 = 此刻的 Redis 时间 + {@code scoreOffsetMs}）。 */
@@ -183,7 +197,7 @@ class WatchBattleServiceTest {
         assertThat(response.hasErrorMessage()).as("成功不带 error_message").isFalse();
         assertThat(response.getBattleId()).isEqualTo(battleId);
         assertThat(response.toByteString()).as("成功应答携带战斗号与规范操作 UUID")
-                .isEqualTo(WatchBattleResponse.newBuilder().setBattleId(battleId)
+                .isEqualTo(WatchBattleResponse.newBuilder().setBattleId(battleId).setDelivery(com.game.proto.match.eSpectateDelivery.SPECTATE_DELIVERY_DIRECT)
                         .setSpectatorOperationId(java.util.UUID.fromString(response.getSpectatorOperationId()).toString()).build().toByteString());
     }
 
@@ -640,7 +654,9 @@ class WatchBattleServiceTest {
         assertRejected(disconnected, 16019, OFFLINE);
         assertThat(observers.calls).as(":268、:716").isEmpty();
         assertThat(spectate.markOf(PLAYER)).isEmpty();
-        assertThat(spectate.calls).as("不在线就不选场").noneMatch(call -> call.startsWith("read") || call.startsWith("pickRandom"));
+        // 指定场的可见性闸排在一切副作用之前、在线检查之前：只读一次落点；随机模式不在线就不选场；两种都不写任何东西
+        assertThat(spectate.calls).as("指定场在互斥检查之后只读一次").filteredOn(call -> call.startsWith("read")).containsExactly("read(" + X + ")");
+        assertThat(spectate.calls).as("不在线就不选场、不抢标记").noneMatch(call -> call.startsWith("pickRandom") || call.startsWith("acquire"));
         assertThat(outcomes()).isEqualTo(Map.of("offline", 2.0));
     }
 
@@ -879,6 +895,95 @@ class WatchBattleServiceTest {
         assertThat(observers.calls).isEmpty();
         assertThat(indexEvictions()).as("存储回报没有摘到东西：不计数").isEmpty();
         assertThat(outcomes()).isEqualTo(Map.of("not_found", 1.0));
+    }
+
+    // ================================================================ 可见性闸（mmorpg battle-spectate-tiered-fanout.md §10 第 6 条）
+
+    @Test
+    void 可见性闸_指定观战私密局_回与不存在相同的16018_在任何副作用之前_旧观战旧标记都不动_计private() {
+        online();
+        BattlePlacement watching = open(Y);
+        String oldMark = oldMark(Y, "aaaaaaaaaaaaaaaa");
+        spectate.putMark(PLAYER, oldMark);
+        BattlePlacement hidden = openPrivate(X, 0, false);
+
+        WatchBattleResponse response = watch(X);
+
+        assertRejected(response, 16018, NOT_FOUND);
+        assertThat(observers.calls).as("不清退正在看的那场，也不打 battle").isEmpty();
+        assertThat(spectate.markOf(PLAYER)).as("正在看 Y 的标记原样").contains(oldMark);
+        assertThat(spectate.calls).as("只读了一次落点").noneMatch(call -> call.startsWith("acquire") || call.startsWith("release")
+                || call.startsWith("evict"));
+        assertThat(placements.stored(X)).as("私密局的落点留给补签").contains(hidden);
+        assertThat(placements.stored(Y)).contains(watching);
+        assertThat(players.reads).as("互斥检查之后就判定：不读在线目录").containsExactly("lock:1001");
+        assertThat(evictionsTotal()).isZero();
+        assertThat(outcomes()).as("客户端看到的与不存在逐字节相同，只在指标上区分").isEqualTo(Map.of("private", 1.0));
+    }
+
+    @Test
+    void 可见性闸_指定观战没有落点的场_同样在清退旧观战之前回16018_旧标记不动_不留探测私密局的旁路() {
+        online();
+        open(Y);
+        String oldMark = oldMark(Y, "aaaaaaaaaaaaaaaa");
+        spectate.putMark(PLAYER, oldMark);
+
+        WatchBattleResponse absent = watch(X);
+        openPrivate(Z, 0, false);
+        WatchBattleResponse hidden = watch(Z);
+
+        assertThat(absent.toByteString()).as("记录不在与私密局对客户端逐字节相同").isEqualTo(hidden.toByteString());
+        assertRejected(absent, 16018, NOT_FOUND);
+        assertThat(observers.calls).as("两种都不清退旧观战：旧观战有没有被拆不能成为探测私密局是否存在的旁路").isEmpty();
+        assertThat(spectate.markOf(PLAYER)).contains(oldMark);
+        assertThat(outcomes()).isEqualTo(Map.of("not_found", 1.0, "private", 1.0));
+    }
+
+    @Test
+    void 可见性闸_私密局残留在索引里_指定观战时只摘成员_落点照留() {
+        online();
+        BattlePlacement hidden = openPrivate(X, 0, true);
+
+        WatchBattleResponse response = watch(X);
+
+        assertRejected(response, 16018, NOT_FOUND);
+        assertThat(spectate.isWatchable(X)).as("开局钩子不公开私密局：在索引里就是残留，摘掉").isFalse();
+        assertThat(spectate.calls).as("无条件只摘成员的原语，不是删落点的 Dead / Stale").contains("evict(Invalid[member=" + X + "])")
+                .noneMatch(call -> call.startsWith("evict(Dead") || call.startsWith("evict(Stale") || call.startsWith("evict(Missing"));
+        assertThat(placements.stored(X)).contains(hidden);
+        assertThat(indexEvictions()).isEqualTo(Map.of("private", 1.0));
+        assertThat(observers.calls).isEmpty();
+        assertThat(outcomes()).isEqualTo(Map.of("private", 1.0));
+    }
+
+    @Test
+    void 可见性闸_随机观战挑中私密局的残留成员_只摘成员不删落点_换下一场() {
+        online();
+        BattlePlacement hidden = openPrivate(X, -1_000, true); // 分数更低：r = 0 时先挑中它
+        BattlePlacement shown = open(Y);
+
+        WatchBattleResponse response = watch(0);
+
+        assertAccepted(response, Y);
+        assertThat(observers.adds()).extracting(Call::battleId).as("私密局不打 battle").containsExactly(Y);
+        assertThat(observers.adds().get(0).placement()).isEqualTo(shown);
+        assertThat(spectate.watchable()).containsExactly(Long.toUnsignedString(Y));
+        assertThat(placements.stored(X)).as("私密局的落点留给补签").contains(hidden);
+        assertThat(indexEvictions()).isEqualTo(Map.of("private", 1.0));
+        assertThat(outcomes()).isEqualTo(Map.of("ok", 1.0));
+    }
+
+    @Test
+    void 可见性闸_漏填可见性的老落点按私密处理() {
+        online();
+        BattlePlacement legacy = placement(X, clock.peekMs()).toBuilder().clearSpectateVisibility().build();
+        placements.put(legacy);
+
+        WatchBattleResponse response = watch(X);
+
+        assertRejected(response, 16018, NOT_FOUND);
+        assertThat(observers.calls).isEmpty();
+        assertThat(outcomes()).isEqualTo(Map.of("private", 1.0));
     }
 
     /** 原样转发的观战存储，只在剔除到达存储之前多调一次钩子（模拟读与剔除之间别的写者动了数据）。 */

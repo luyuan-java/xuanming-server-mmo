@@ -32,10 +32,27 @@ import org.springframework.transaction.support.TransactionTemplate;
 public final class PlayerTradeStore {
     public enum Status { FREEZING, FROZEN, UNLOCKED, TRANSFERRED }
     public enum Code { INVALID, NOT_FOUND, CONFLICT, FULL, NOT_READY, TIMED_OUT, CORRUPT }
-    public static final class Failure extends RuntimeException {
+    /** 业务拒绝；只有 {@link RecoveryCommitted} 一个子类型（封闭层级，Code 枚举不扩：它的名字经 game-login 上线）。 */
+    public static sealed class Failure extends RuntimeException permits RecoveryCommitted {
         private final Code code;
         public Failure(Code code, String message) { super(message); this.code = code; }
         public Code code() { return code; }
+    }
+    /**
+     * 计划时发现这条旧OPEN已由永久恢复原件退休（同UUID原请求，或同角色同旧代的另一UUID）：既不是新计划也不是未完成，
+     * 运维须用该次原计划文件按原请求 apply 只读重放取回原收据。code 记 CONFLICT（新计划被拒）；只携带已校验格式的非敏感字段。
+     */
+    public static final class RecoveryCommitted extends Failure {
+        private final String recoveryId;
+        private final String proofMode;
+        private RecoveryCommitted(String recoveryId, String proofMode) {
+            super(Code.CONFLICT, "旧OPEN已由永久恢复原件退休，只能按原计划只读重放");
+            this.recoveryId = recoveryId; this.proofMode = proofMode;
+        }
+        /** 已提交的那次恢复UUID（规范小写UUID）。 */
+        public String recoveryId() { return recoveryId; }
+        /** 原收据的证明方式（SCENE_ACK / SQL_NO_ADMISSION）。 */
+        public String proofMode() { return proofMode; }
     }
     public record FreezeRequest(long listingId, long playerId, String sellerAccount, long ownerRevision) {}
     public record FreezeReceipt(long listingId, long playerId, String sellerAccount, long ownerRevision,
@@ -505,15 +522,23 @@ public final class PlayerTradeStore {
     public record RecoveryReceipt(String recoveryId,String requestDigest,String status,String proofMode,
                                   int otherOpenAdmissions,boolean unadmittedEpochSealed) {}
     private static final String RECOVERED_OPEN="RETIRED_BY_SQL_SUCCESSOR";
+    /** 领域计划原件的编码域（{@link #recoveryBytes} 的首字段；永久收据 plan_bytes 以它开头）。 */
+    private static final String RECOVERY_PLAN_FORMAT="player-trade-open-retirement/v2";
 
-    /** 默认纯计划：同原路由/P锁读取真实SQL，不改OPEN、待投、角色数据或交易终局。 */
+    /**
+     * 默认纯计划：同原路由/P锁读取真实SQL，不改OPEN、待投、角色数据或交易终局。
+     * 维护标记先于路由/P锁：维护目标区（= home）与原入场区各一条，见 {@link #lockRecoveryTargets}。
+     * 这条旧OPEN已由永久恢复原件退休时抛 {@link RecoveryCommitted}（不是未完成），提示按原计划只读重放。
+     */
     public RecoveryPlan planOpenRecovery(RecoveryRequest request,Duration timeout) {
         validateRecoveryRequest(request);
         requireRecoveryTarget();
         return transaction(timeout,()->{
-            lockRecoveryTarget();
+            // 身份核验之后的一次普通读只决定要锁哪几个区的标记，不授予任何权限；锁内仍逐字重核原件与区号
+            var locked=lockRecoveryTargets(()->admissionZoneHint(request));
+            requireNotCommitted(request);
             routeLock(request.freeze().playerId());lockAccounts(request.freeze().sellerAccount());
-            return recoveryPlanLocked(request);
+            return recoveryPlanLocked(request,locked);
         });
     }
 
@@ -521,15 +546,15 @@ public final class PlayerTradeStore {
     public RecoveryReceipt applyOpenRecovery(RecoveryPlan approved,Duration timeout) {
         validateRecoveryPlan(approved);
         requireRecoveryTarget();
-        requireRecoveryTargetZone(java.util.HexFormat.of().parseHex(approved.admissionHex()));
+        long admissionZone=admissionZone(java.util.HexFormat.of().parseHex(approved.admissionHex()));
         return transaction(timeout,()->{
-            lockRecoveryTarget();
-            // 永久收据只读重放仍核独立维护目标，不借当前角色/下一代身份。
+            var locked=lockRecoveryTargets(()->java.util.OptionalLong.of(admissionZone));
+            // 永久收据只读重放仍核独立维护目标（含原入场区标记），不借当前角色/下一代身份。
             var replay=readRecovery(approved,false);if(replay!=null)return replay;
             var request=approved.request();
             routeLock(request.freeze().playerId());lockAccounts(request.freeze().sellerAccount());
             var repeated=readRecovery(approved,true);if(repeated!=null)return repeated;
-            var actual=recoveryPlanLocked(request);
+            var actual=recoveryPlanLocked(request,locked);
             if(!approved.equals(actual))throw fail(Code.CONFLICT,"恢复计划原件已改变，原OPEN与所有待办保持不变");
             byte[] encoded=recoveryBytes(approved);
             int inserted=sql.update("INSERT INTO player_trade_admission_recovery(recovery_id,listing_id,player_id,old_epoch,proof_mode,request_digest,plan_bytes,status,created_ms) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -551,7 +576,8 @@ public final class PlayerTradeStore {
         });
     }
 
-    private RecoveryPlan recoveryPlanLocked(RecoveryRequest request) {
+    /** @param lockedZones 本事务已在路由/P锁之前持锁核验维护标记的区号（{@link #lockRecoveryTargets} 的返回值） */
+    private RecoveryPlan recoveryPlanLocked(RecoveryRequest request,java.util.Set<Long> lockedZones) {
         var wanted=request.freeze();var listing=freeze(wanted.listingId());
         match(listing,wanted,digest("freeze",wanted.listingId(),wanted.playerId(),wanted.ownerRevision(),wanted.sellerAccount()));
         if(terminal(listing.receipt().status()))throw fail(Code.CONFLICT,"终局交易不能补原OPEN恢复");
@@ -594,19 +620,22 @@ public final class PlayerTradeStore {
                 ||original.get("pos_y")!=null||original.get("pos_z")!=null
                 ||!(original.get("admission_proto") instanceof byte[] admission))
             throw fail(Code.NOT_READY,"旧OPEN来源、协议或完整入场原件不符");
+        final long admissionZone;
         try {
             var identity=com.game.proto.common.base.RoleAdmissionIdentity.parseFrom(admission);
             if(identity.getPlayerId()!=wanted.playerId()||identity.getOwnerEpoch()!=request.oldEpoch()
                     ||identity.getOwnerRevision()!=wanted.ownerRevision()||!identity.getSceneInstanceId().equals(request.sourceInstance())
                     ||!Arrays.equals(admission,com.game.common.player.SceneAdmissionAuthority.original(identity)))
                 throw fail(Code.CORRUPT,"旧完整入场身份不是原角色/来源/归属代");
+            admissionZone=Integer.toUnsignedLong(identity.getZoneId());
         } catch(com.google.protobuf.InvalidProtocolBufferException | SecurityException invalid){throw fail(Code.CORRUPT,"旧入场原件无法解析或不完整");}
         var connection=org.springframework.jdbc.datasource.DataSourceUtils.getConnection(source);
         try {
             String catalog=connection.getCatalog();if(catalog==null||catalog.isBlank())throw fail(Code.NOT_READY,"无法确定真实业务库");
+            // 维护目标区号仍是角色唯一home（player.zone_id）；跨zone传送后入场的Scene区可以不同，但它的标记必须已在本事务先于路由/P锁持锁核验
             long zone=sql.queryForObject("SELECT zone_id FROM player WHERE player_id=?",Long.class,wanted.playerId());
             if(zone!=recoveryTarget.zoneId())throw fail(Code.CONFLICT,"维护目标区号与原角色不符");
-            requireRecoveryTargetZone(admission);
+            if(!lockedZones.contains(admissionZone))throw fail(Code.CONFLICT,"原入场区号的维护标记没有在本事务持锁核验（并发改动或缺标记）");
             String generation=sql.queryForObject("SELECT generation FROM route_meta WHERE id=1",String.class);
             String route=digestHex("recovery-route",rawRows("SELECT * FROM route_meta WHERE id=1"),
                     rawRows("SELECT * FROM zone_merge_fence WHERE zone_id=? ORDER BY shard",zone));
@@ -654,29 +683,99 @@ public final class PlayerTradeStore {
         if(recoveryTarget==null||recoveryIdentity==null)throw fail(Code.NOT_READY,"恢复必须显式提供独立维护目标");
         validateRecoveryTarget(recoveryTarget);
     }
-    /** 标记行锁在路由/P锁之前取得；运维在维护命令之外预置，不设TTL或自动创建。 */
-    private void lockRecoveryTarget() {
+    /**
+     * 标记行锁在路由/P锁之前取得；运维在维护命令之外预置，不设TTL或自动创建。跨zone（Java 已做跨 zone 传送，holder 可能在别的 zone 的 Scene 上）时，
+     * 维护目标区（= 角色 home）与原入场区各要一条同nonce/同物理地址/同库的标记：去重后按区号升序逐条 FOR UPDATE（所有维护事务同一顺序，不成环），
+     * 两区相同只核一次；缺任一条即拒绝，此时尚无任何领域读写锁与副作用。库/实例身份照旧只在本连接核一次。
+     *
+     * @param admissionZone 原入场区号（无符号 uint32），在本连接的库/实例身份核验之后才取；为空 = 计划前置普通读没取到原件，
+     *                      只锁维护目标区，交由锁内原件校验按原规则拒绝
+     * @return 本事务已持锁核验的区号集合（升序、不可变）
+     */
+    private java.util.SortedSet<Long> lockRecoveryTargets(Supplier<java.util.OptionalLong> admissionZone) {
         requireRecoveryTarget();
         var connection=org.springframework.jdbc.datasource.DataSourceUtils.getConnection(source);
         try {
             if(!recoveryTarget.database().equals(connection.getCatalog())
                     ||!recoveryTarget.instance().equals(recoveryIdentity.read(connection)))
                 throw fail(Code.CONFLICT,"事务内实际库或实例身份改变");
-            var markers=sql.query("SELECT target_nonce,physical_addr FROM maintenance_recovery_target WHERE purpose=? AND zone_id=? AND schema_name=? FOR UPDATE",
-                    (rs,ignored)->new byte[][]{rs.getBytes(1),rs.getBytes(2)},ascii("admission"),recoveryTarget.zoneId(),ascii(recoveryTarget.database()));
-            if(markers.size()!=1||!Arrays.equals(markers.getFirst()[0],ascii(recoveryTarget.nonce()))
-                    ||!Arrays.equals(markers.getFirst()[1],ascii(recoveryTarget.physicalAddress())))
-                throw fail(Code.CONFLICT,"专用维护标记缺失或scope/nonce/物理地址不同");
+            var zones=new java.util.TreeSet<Long>();
+            zones.add(recoveryTarget.zoneId());
+            admissionZone.get().ifPresent(zones::add);
+            for(long zone:zones) {
+                var markers=sql.query("SELECT target_nonce,physical_addr FROM maintenance_recovery_target WHERE purpose=? AND zone_id=? AND schema_name=? FOR UPDATE",
+                        (rs,ignored)->new byte[][]{rs.getBytes(1),rs.getBytes(2)},ascii("admission"),zone,ascii(recoveryTarget.database()));
+                if(markers.size()!=1||!Arrays.equals(markers.getFirst()[0],ascii(recoveryTarget.nonce()))
+                        ||!Arrays.equals(markers.getFirst()[1],ascii(recoveryTarget.physicalAddress())))
+                    throw fail(Code.CONFLICT,"专用维护标记缺失或scope/nonce/物理地址不同");
+            }
+            return java.util.Collections.unmodifiableSortedSet(zones);
         } catch(Failure failure){throw failure;}
         catch(Exception unreadable){throw fail(Code.NOT_READY,"事务内维护目标无法核验");}
         finally{org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(connection,source);}
     }
-    private void requireRecoveryTargetZone(byte[] admission) {
+    /** 原完整入场身份里的区号（无符号）；原件无法解析即 CORRUPT。 */
+    private static long admissionZone(byte[] admission) {
         try {
-            var original=com.game.proto.common.base.RoleAdmissionIdentity.parseFrom(admission);
-            if(Integer.toUnsignedLong(original.getZoneId())!=recoveryTarget.zoneId())
-                throw fail(Code.CONFLICT,"维护目标不属于原入场区号");
+            return Integer.toUnsignedLong(com.game.proto.common.base.RoleAdmissionIdentity.parseFrom(admission).getZoneId());
         } catch(com.google.protobuf.InvalidProtocolBufferException invalid){throw fail(Code.CORRUPT,"原入场区号无法解析");}
+    }
+    /**
+     * 计划在标记锁之前的一次普通读（不加锁）：只用来决定还要锁哪个区的维护标记，不授予任何权限。读不到 / NULL / 解析失败都返回空，
+     * 交给锁内的原件校验按原规则报 NOT_READY / CORRUPT；锁内读到的区号若不在已锁集合里（并发改动）同样拒绝。
+     */
+    private java.util.OptionalLong admissionZoneHint(RecoveryRequest request) {
+        try {
+            var rows=sql.queryForList("SELECT admission_proto FROM player_final_save WHERE player_id=? AND owner_epoch=? AND "+PlayerMapper.EXACT_OPEN,
+                    request.freeze().playerId(),request.oldEpoch());
+            if(rows.size()!=1||!(rows.getFirst().get("admission_proto") instanceof byte[] admission))return java.util.OptionalLong.empty();
+            return java.util.OptionalLong.of(Integer.toUnsignedLong(com.game.proto.common.base.RoleAdmissionIdentity.parseFrom(admission).getZoneId()));
+        } catch(com.google.protobuf.InvalidProtocolBufferException | org.springframework.dao.DataAccessException unreadable) {
+            return java.util.OptionalLong.empty();
+        }
+    }
+    /**
+     * 计划先认永久恢复原件（标记锁之后、路由/P锁之前，与 apply 的只读重放同序；只读，不改任何行）：
+     * 同 UUID 已提交且原请求逐字段一致 → {@link RecoveryCommitted}；同 UUID 绑定了另一原请求 → CONFLICT；
+     * 同角色同旧代已被另一 UUID 退休 → {@link RecoveryCommitted}（带那次的 UUID，运维用那次原计划重放）。
+     * 否则旧 OPEN 已消失时会落到「指定旧OPEN缺失」的 NOT_READY，被误读成恢复未完成。
+     */
+    private void requireNotCommitted(RecoveryRequest request) {
+        var byId=sql.queryForList("SELECT listing_id,player_id,old_epoch,proof_mode,status,plan_bytes FROM player_trade_admission_recovery WHERE recovery_id=?",
+                ascii(request.recoveryId()));
+        if(byId.size()>1)throw fail(Code.CORRUPT,"永久恢复原件不唯一");
+        if(byId.size()==1) {
+            var row=byId.getFirst();
+            if(!committedFor(row,request))throw fail(Code.CONFLICT,"恢复UUID已绑定另一原件或永久收据损坏");
+            throw new RecoveryCommitted(request.recoveryId(),proofModeOf(row));
+        }
+        var byEpoch=sql.queryForList("SELECT recovery_id,proof_mode,status FROM player_trade_admission_recovery WHERE player_id=? AND old_epoch=?",
+                request.freeze().playerId(),request.oldEpoch());
+        if(byEpoch.size()>1)throw fail(Code.CORRUPT,"永久恢复原件不唯一");
+        if(byEpoch.isEmpty())return;
+        var row=byEpoch.getFirst();
+        if(!RECOVERED_OPEN.equals(row.get("status"))||!(row.get("recovery_id") instanceof byte[] raw))throw fail(Code.CORRUPT,"永久恢复收据损坏");
+        String original=new String(raw,StandardCharsets.US_ASCII);
+        try{if(!UUID.fromString(original).toString().equals(original))throw new IllegalArgumentException();}
+        catch(IllegalArgumentException invalid){throw fail(Code.CORRUPT,"永久恢复收据UUID损坏");}
+        throw new RecoveryCommitted(original,proofModeOf(row));
+    }
+    private static String proofModeOf(java.util.Map<String,Object> row) {
+        Object mode=row.get("proof_mode");
+        if(!"SCENE_ACK".equals(mode)&&!"SQL_NO_ADMISSION".equals(mode))throw fail(Code.CORRUPT,"永久恢复收据证明方式损坏");
+        return (String)mode;
+    }
+    /** 永久收据是否就是本次原请求：列与 plan_bytes 前缀（{@link #recoveryBytes} 的请求部分，同写入顺序）逐字段一致。 */
+    private static boolean committedFor(java.util.Map<String,Object> row,RecoveryRequest request) {
+        var wanted=request.freeze();
+        if(((Number)row.get("listing_id")).longValue()!=wanted.listingId()||((Number)row.get("player_id")).longValue()!=wanted.playerId()
+                ||((Number)row.get("old_epoch")).longValue()!=request.oldEpoch()||!RECOVERED_OPEN.equals(row.get("status"))
+                ||!(row.get("plan_bytes") instanceof byte[] plan))return false;
+        try(var in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(plan))) {
+            return RECOVERY_PLAN_FORMAT.equals(in.readUTF())&&request.recoveryId().equals(in.readUTF())
+                    &&in.readLong()==wanted.listingId()&&in.readLong()==wanted.playerId()&&wanted.sellerAccount().equals(in.readUTF())
+                    &&in.readLong()==wanted.ownerRevision()&&in.readLong()==request.oldEpoch()&&request.sourceInstance().equals(in.readUTF());
+        } catch(java.io.IOException corrupt){return false;}
     }
     private static void validateRecoveryRequest(RecoveryRequest request) {
         if(request==null||request.freeze()==null)throw fail(Code.INVALID,"恢复缺少原冻结请求");
@@ -707,7 +806,7 @@ public final class PlayerTradeStore {
     private static byte[] recoveryBytes(RecoveryPlan p) {
         try {
             var bytes=new ByteArrayOutputStream();var out=new DataOutputStream(bytes);var r=p.request();var f=r.freeze();
-            out.writeUTF("player-trade-open-retirement/v2");
+            out.writeUTF(RECOVERY_PLAN_FORMAT);
             out.writeUTF(r.recoveryId());out.writeLong(f.listingId());out.writeLong(f.playerId());out.writeUTF(f.sellerAccount());
             out.writeLong(f.ownerRevision());out.writeLong(r.oldEpoch());out.writeUTF(r.sourceInstance());out.writeUTF(p.database());
             out.writeLong(p.currentEpoch());out.writeUTF(p.admissionHex());out.writeUTF(p.proofMode());out.writeBoolean(p.sealUnusedEpoch());

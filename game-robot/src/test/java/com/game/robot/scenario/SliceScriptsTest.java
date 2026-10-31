@@ -124,9 +124,11 @@ class SliceScriptsTest {
         Set<String> withDefault = new LinkedHashSet<>(matches(startSlice, "^export (GAME_[A-Z_]+)=\"\\$\\{"));
         Set<String> generated = new LinkedHashSet<>(exported);
         generated.removeAll(withDefault);
-        assertThat(generated).containsExactly("GAME_ADMIN_TOKEN", "GAME_GM_ADMIN_SECRET", "GAME_ASSET_OP_SECRET_GUILD", "GAME_BATTLE_TOKEN_SECRET");
+        assertThat(generated).containsExactly("GAME_ADMIN_TOKEN", "GAME_GM_ADMIN_SECRET", "GAME_ASSET_OP_SECRET_GUILD", "GAME_BATTLE_TOKEN_SECRET",
+                "GAME_SPECTATE_TOKEN_SECRET");
         Map<String, String> files = Map.of("GAME_ADMIN_TOKEN", "run/game-admin-token", "GAME_GM_ADMIN_SECRET", "run/game-gm-admin-secret",
-                "GAME_ASSET_OP_SECRET_GUILD", "run/game-asset-op-secret-guild", "GAME_BATTLE_TOKEN_SECRET", "run/game-battle-token-secret");
+                "GAME_ASSET_OP_SECRET_GUILD", "run/game-asset-op-secret-guild", "GAME_BATTLE_TOKEN_SECRET", "run/game-battle-token-secret",
+                "GAME_SPECTATE_TOKEN_SECRET", "run/game-spectate-token-secret");
         for (String name : generated) {
             String file = files.get(name);
             assertThat(startSlice).as("start-slice.sh 把 %s 写进 %s", name, file).contains("printf \"%s\" \"$" + name + "\" > " + file);

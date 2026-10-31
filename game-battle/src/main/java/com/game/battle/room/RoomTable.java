@@ -5,6 +5,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.ToIntFunction;
 
 /**
  * 房间表（基线 {@code battle_room_table.h RoomTable}；battle-node-spec §4.2、§7.6）：房间的增删与生命周期回调绑在一起。
@@ -68,6 +69,15 @@ final class RoomTable<R> {
 
     int size() {
         return rooms.size();
+    }
+
+    /** 对全部房间求和（不拷贝、不排序；只读统计用，如全节点已登记的观众席数）。{@code count} 里不得增删房间：遍历的是底层容器本身。 */
+    long sum(ToIntFunction<R> count) {
+        long total = 0;
+        for (R room : rooms.values()) {
+            total += count.applyAsInt(room);
+        }
+        return total;
     }
 
     boolean isEmpty() {

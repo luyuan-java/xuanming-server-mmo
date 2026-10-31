@@ -20,6 +20,7 @@ import com.game.api.proto.SessionDirective;
 import com.game.api.proto.ZoneRedirect;
 import com.game.common.killswitch.KillSwitch;
 import com.game.common.token.GateTokens;
+import com.game.common.token.SpectateTickets;
 import com.game.gate.link.SceneLinks;
 import com.game.gate.link.EnterFailure;
 import com.game.gate.metrics.GateMetrics;
@@ -38,9 +39,16 @@ import com.game.proto.ClientTokenVerifyRequest;
 import com.game.proto.ClientTokenVerifyResponse;
 import com.game.proto.MessageContent;
 import com.game.proto.RedirectToGateNotify;
+import com.game.proto.SubscribeSpectateRequest;
+import com.game.proto.SubscribeSpectateResponse;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.UnsubscribeSpectateRequest;
+import com.game.proto.UnsubscribeSpectateResponse;
 import com.game.table.CommonErrorTip;
+import com.game.table.MatchErrorTip;
 import com.game.table.SceneErrorTip;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.Message;
 import io.micrometer.core.instrument.Timer;
 import java.time.InstantSource;
 import java.util.ArrayDeque;
@@ -103,6 +111,12 @@ public final class ClientDispatcher {
 
     static final String DOMAIN_LOGIN = DubboGroups.LOGIN;
     static final String DOMAIN_SCENE = "scene";
+    /** gate 本地处理的消息域（{@link MessageRoutes#GATE_LOCAL_SERVICES}）。 */
+    static final String DOMAIN_GATE = "gate";
+    private static final String SUBSCRIBE_SPECTATE_METHOD = "GateClientSpectate.SubscribeSpectate";
+    private static final String UNSUBSCRIBE_SPECTATE_METHOD = "GateClientSpectate.UnsubscribeSpectate";
+    static final int TIP_SPECTATE_TICKET_INVALID = MatchErrorTip.match_error.kMatchSpectateTicketInvalid_VALUE;
+    static final int TIP_REQUEST_PARSE_ERROR = CommonErrorTip.common_error.kRequestMessageParseError_VALUE;
 
     static final int TIP_SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     static final int TIP_FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
@@ -156,6 +170,9 @@ public final class ClientDispatcher {
     private final GateMetrics metrics;
     private final PresenceRecorder presence;
     private final AtomicLong securityRejections = new AtomicLong();
+    /** 观战订阅的验签与订阅表（{@link #withSpectate}）；没装配时凭证一律被拒。 */
+    private SpectateTickets spectateTickets = SpectateTickets.disabled();
+    private SpectateSubscriptions spectate = SpectateSubscriptions.NONE;
 
     /**
      * @param tipMessageId 服务端推 tip 用的消息号（{@code SceneClientPlayerCommon.SendTipToClient}，现为 23）
@@ -235,6 +252,13 @@ public final class ClientDispatcher {
                 metrics.registerRequest(route.domain(), route.method(), RequestResult.BATTLE_REJECTED);
             }
         }
+    }
+
+    /** 接上观战订阅（进程装配时、客户端端口打开之前调用一次）。 */
+    public ClientDispatcher withSpectate(SpectateTickets tickets, SpectateSubscriptions subscriptions) {
+        this.spectateTickets = java.util.Objects.requireNonNull(tickets, "tickets");
+        this.spectate = java.util.Objects.requireNonNull(subscriptions, "subscriptions");
+        return this;
     }
 
     /** 同一会话层的指标（{@link ClientChannelHandler} / {@link ClientPipeline} 的连接级事件也记在这里）。 */
@@ -373,6 +397,11 @@ public final class ClientDispatcher {
             s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
             return;
         }
+        if (DOMAIN_GATE.equals(route.domain())) {
+            // gate 本地处理（mmorpg battle-spectate-tiered-fanout.md §15.2）：体积 / 限频 / GM / 热关停都已过，不转发、不进任何后端队列
+            onSpectateRequest(s, route, request);
+            return;
+        }
         if (backends.containsKey(route.domain())) {
             enqueueBackend(s, route, request);
             return;
@@ -400,6 +429,7 @@ public final class ClientDispatcher {
         s.closed = true;
         s.closing = true;
         s.cancelHandshakeTimeout();
+        spectate.drop(s);
         // 客户端先关（已重定向的会话正常就是这样收场）：收口定时器作废
         s.cancelRedirectLinger();
         // 后端 lane 的延后放行一并作废：排队项随断线丢弃，不再发出
@@ -443,6 +473,66 @@ public final class ClientDispatcher {
                 s.send(envelopeError(p.request(), TIP_SERVICE_UNAVAILABLE));
             }
         }
+    }
+
+    // ================================================================ 观战订阅（gate 本地处理）
+
+    private void onSpectateRequest(ClientSession s, MessageRoute route, ClientRequest request) {
+        countRequest(route, RequestResult.LOCAL);
+        switch (route.method()) {
+            case SUBSCRIBE_SPECTATE_METHOD -> subscribeSpectate(s, request);
+            case UNSUBSCRIBE_SPECTATE_METHOD -> unsubscribeSpectate(s, request);
+            default -> {
+                // 契约新增了这个服务的方法而 gate 还没实现：与未接入的后端域同形
+                log.warn("gate 本地服务的方法没有实现 session={} method={}", sid(s), route.method());
+                s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
+            }
+        }
+    }
+
+    /**
+     * 验凭证（match 签、gate 验，只绑玩家与场次，不绑会话）→ 回执 → 订阅。回执先写：hub 线程随后才可能下发首帧 161，
+     * 客户端看到的恒是「回执 → 161」。任何一项不符一律回同一个码，不告诉客户端错在哪；原因只进指标。
+     */
+    private void subscribeSpectate(ClientSession s, ClientRequest request) {
+        SubscribeSpectateRequest body;
+        try {
+            body = SubscribeSpectateRequest.parseFrom(request.getBody());
+        } catch (InvalidProtocolBufferException e) {
+            s.send(envelopeError(request, TIP_REQUEST_PARSE_ERROR));
+            return;
+        }
+        SpectateTickets.Verdict verdict = spectateTickets.verify(body.getSpectateTicket(), s.playerId, body.getBattleId(), clock.instant().toEpochMilli());
+        if (!verdict.ok()) {
+            metrics.spectateTicketRejected(verdict.failure());
+            log.debug("观战凭证被拒 session={} battle_id={} reason={}", sid(s), Long.toUnsignedString(body.getBattleId()), verdict.failure());
+            s.send(envelopeError(request, TIP_SPECTATE_TICKET_INVALID));
+            return;
+        }
+        s.send(localReply(request, SubscribeSpectateResponse.getDefaultInstance()));
+        spectate.subscribe(s, verdict.payload());
+    }
+
+    /** 幂等：场次与当前订阅不符什么也不做，照样回成功。 */
+    private void unsubscribeSpectate(ClientSession s, ClientRequest request) {
+        UnsubscribeSpectateRequest body;
+        try {
+            body = UnsubscribeSpectateRequest.parseFrom(request.getBody());
+        } catch (InvalidProtocolBufferException e) {
+            s.send(envelopeError(request, TIP_REQUEST_PARSE_ERROR));
+            return;
+        }
+        spectate.unsubscribe(s, body.getBattleId());
+        s.send(localReply(request, UnsubscribeSpectateResponse.getDefaultInstance()));
+    }
+
+    /** gate 自己回的应答：{@code message_id} 与 {@code id} 回显请求（应答体 0 字节时同样回包，见 {@link #replyToClient}）。 */
+    private static MessageContent localReply(ClientRequest request, Message body) {
+        return MessageContent.newBuilder()
+                .setMessageId(request.getMessageId())
+                .setId(request.getId())
+                .setSerializedMessage(body.toByteString())
+                .build();
     }
 
     // ================================================================ login 以外的后端（friend ……）
@@ -1391,6 +1481,8 @@ public final class ClientDispatcher {
     /** 解绑场景：场景绑定结束的唯一出口，在线目录同时撤销（离场、进场失败、被踢、链路断开、断线都经过这里）。 */
     private void unbindScene(ClientSession s) {
         clearPendingSceneEntry(s);
+        // 观战凭证绑的是玩家：玩家绑定结束（离开游戏、被踢、重定向……）订阅随之结束；跨节点换图不经这里，订阅不受影响
+        spectate.drop(s);
         if (s.presenceOnline) {
             s.presenceOnline = false;
             presence.offline(s.scenePlayerId, s.sessionId());

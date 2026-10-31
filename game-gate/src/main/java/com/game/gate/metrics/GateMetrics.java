@@ -2,6 +2,7 @@ package com.game.gate.metrics;
 
 import com.game.api.proto.NodeLinkFrame;
 import com.game.common.token.GateTokens;
+import com.game.common.token.SpectateTickets;
 import com.game.net.client.ClientFrameException;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
@@ -42,6 +43,13 @@ public final class GateMetrics {
     static final String PUSHES = "game.gate.pushes";
     static final String SCENE_TRANSFERS = "game.gate.scene.transfers";
     static final String REDIRECTS = "game.gate.redirects";
+    static final String SPECTATE_SUBSCRIBERS = "game.gate.spectate.subscribers";
+    static final String SPECTATE_ENTRIES = "game.gate.spectate.entries";
+    static final String SPECTATE_FRAMES = "game.gate.spectate.frames";
+    static final String SPECTATE_FANOUT = "game.gate.spectate.fanout";
+    static final String SPECTATE_TICKET_REJECTS = "game.gate.spectate.ticket.rejects";
+    static final String SPECTATE_SOURCE_LOST = "game.gate.spectate.source.lost";
+    static final String SPECTATE_CHANNEL_FAILURES = "game.gate.spectate.channel.failures";
 
     /** 不在客户端白名单里的消息号（以及没有路由的请求）统一用的标签值。 */
     public static final String UNKNOWN = "unknown";
@@ -86,6 +94,8 @@ public final class GateMetrics {
     public enum RequestResult {
         /** 已交给后端（login 调用已发出 / scene 帧已被链路层受理）。login 调用的结果另见 {@code game.gate.backend.calls}。 */
         FORWARDED,
+        /** gate 本地处理（观战订阅 {@code GateClientSpectate}）：不转发。凭证被拒另见 {@code game.gate.spectate.ticket.rejects}。 */
+        LOCAL,
         /** scene 域消息，但会话不在场景里：回带请求 id 的信封 1003（2026-10-15 起，原为推 23 {1003}；mmorpg client-request-ordering.md O6）。 */
         NOT_IN_SCENE,
         /** scene 链路层不可用（帧未被受理）：回带请求 id 的信封 1003（2026-10-15 起，原为不回任何回执；对齐 mmorpg 的「RpcClient 未挂」）。 */
@@ -263,6 +273,13 @@ public final class GateMetrics {
         INVALID
     }
 
+    /**
+     * 从观战频道（含最新帧键）收到的一帧在 hub 里的去向（{@code game.gate.spectate.frames{result}}）：
+     * {@code ACCEPTED} = 更新了缓存（TURN / END 还扇出了）；{@code DUPLICATE} = 回合号没有前进（pub/sub 重投、读键与频道重叠）；
+     * {@code STALE_INSTANCE} = 不是凭证登记的 battle 实例（僵尸帧）；{@code INVALID} = 解析失败或种类不认识。
+     */
+    public enum SpectateFrameResult { ACCEPTED, DUPLICATE, STALE_INSTANCE, INVALID }
+
     /** 没发出去的链路帧（{@code game.gate.link.dropped{reason}}）。 */
     public enum LinkDrop {
         /** 本 gate 节点号租约无效，不新建链路。 */
@@ -286,6 +303,12 @@ public final class GateMetrics {
     private final Map<PushKind, Map<PushResult, Counter>> pushes;
     private final Map<SceneTransferResult, Counter> sceneTransfers;
     private final Map<RedirectSource, Map<RedirectResult, Counter>> redirects;
+    private final Map<SpectateFrameResult, Counter> spectateFrames;
+    private final Map<SpectateTickets.Failure, Counter> spectateTicketRejects;
+    private final Counter spectateDelivered;
+    private final Counter spectateSkipped;
+    private final Counter spectateSourceLost;
+    private final Counter spectateChannelFailures;
     private final Map<NodeLinkFrame.BodyCase, Counter> framesOut;
     private final Map<NodeLinkFrame.BodyCase, Counter> framesIn;
     private final Map<LoginCall, Timer> loginCallsOk;
@@ -331,6 +354,13 @@ public final class GateMetrics {
             }
             redirects.put(source, byResult);
         }
+        this.spectateFrames = counters(SpectateFrameResult.class, SPECTATE_FRAMES, "result", "从观战频道收到的帧在 hub 里的去向");
+        this.spectateTicketRejects = counters(SpectateTickets.Failure.class, SPECTATE_TICKET_REJECTS, "reason", "观战订阅凭证被拒");
+        this.spectateDelivered = Counter.builder(SPECTATE_FANOUT).description("观战帧扇出，按会话计").tag("result", "delivered").register(registry);
+        this.spectateSkipped = Counter.builder(SPECTATE_FANOUT).description("观战帧扇出，按会话计").tag("result", "skipped").register(registry);
+        this.spectateSourceLost = Counter.builder(SPECTATE_SOURCE_LOST).description("源站失联（空闲超时、过期或频道订阅失败）由 gate 本地收尾的观战条目").register(registry);
+        this.spectateChannelFailures = Counter.builder(SPECTATE_CHANNEL_FAILURES)
+                .description("观战频道订阅失败（持续增长多半是订阅容量到顶：game.redis.subscription-connection-pool-size × subscriptions-per-connection）").register(registry);
         this.framesOut = frameCounters("out");
         this.framesIn = frameCounters("in");
         this.loginCallsOk = loginTimers("ok");
@@ -474,6 +504,42 @@ public final class GateMetrics {
         if (frames > 0) {
             linkDrops.get(reason).increment(frames);
         }
+    }
+
+    // ================================================================ 观战订阅（mmorpg battle-spectate-tiered-fanout.md §15.5；不带 battle_id / player_id）
+
+    /** 本机订阅会话数与条目数（{@code game.gate.spectate.subscribers} / {@code entries}）。在抓取线程上调用，必须线程安全、不阻塞。 */
+    public void bindSpectate(IntSupplier subscribers, IntSupplier entries) {
+        Gauge.builder(SPECTATE_SUBSCRIBERS, () -> subscribers.getAsInt()).description("本 gate 上订阅观战的会话数").register(registry);
+        Gauge.builder(SPECTATE_ENTRIES, () -> entries.getAsInt()).description("本 gate 上的观战条目数（含 linger 与终局墓碑）").register(registry);
+    }
+
+    public void spectateFrame(SpectateFrameResult result) {
+        spectateFrames.get(result).increment();
+    }
+
+    /** 一次扇出的结局（按会话计）：{@code skipped} = 写缓冲过了软水位，跳过这一帧，不断开大厅连接。 */
+    public void spectateFanout(int delivered, int skipped) {
+        if (delivered > 0) {
+            spectateDelivered.increment(delivered);
+        }
+        if (skipped > 0) {
+            spectateSkipped.increment(skipped);
+        }
+    }
+
+    public void spectateTicketRejected(SpectateTickets.Failure reason) {
+        spectateTicketRejects.get(reason).increment();
+    }
+
+    /** 一个条目因源站失联（空闲超时、过了战斗期限或频道订阅失败）被 gate 本地收尾。 */
+    public void spectateSourceLost() {
+        spectateSourceLost.increment();
+    }
+
+    /** 一次观战频道订阅失败。 */
+    public void spectateChannelFailed() {
+        spectateChannelFailures.increment();
     }
 
     // ================================================================ 内部

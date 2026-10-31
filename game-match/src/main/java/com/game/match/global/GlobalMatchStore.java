@@ -13,8 +13,11 @@ import javax.sql.DataSource;
 
 /** TiDB是票据、邀请、成局和原请求的唯一权威。提交先unsigned全员P，再领域原件/票；finish先P再F及原票，单独工作租约只锁F。 */
 public final class GlobalMatchStore {
-    /** 原deadline仍约束运行；只给终局提交留固定60秒，随后才可竞争永久ABORT。 */
-    static final long TERMINAL_OUTCOME_GRACE_MS = 60_000L;
+    /**
+     * 原deadline仍约束运行；只给终局提交留固定60秒，随后才可竞争永久ABORT。与 scene FIGHTING 冻结的到期判据共用
+     * {@link com.game.api.match.MatchBudgets#TERMINAL_OUTCOME_GRACE_MS} 这一个常量（改它要连带核对 scene 的冻结与锁 TTL）。
+     */
+    static final long TERMINAL_OUTCOME_GRACE_MS = com.game.api.match.MatchBudgets.TERMINAL_OUTCOME_GRACE_MS;
     private final java.util.concurrent.locks.ReentrantReadWriteLock publication=new java.util.concurrent.locks.ReentrantReadWriteLock(true);
     private final java.util.concurrent.atomic.AtomicLong rootAccepted=new java.util.concurrent.atomic.AtomicLong(),rootSettled=new java.util.concurrent.atomic.AtomicLong();
     private final ThreadLocal<long[]> rootWork=new ThreadLocal<>();
@@ -770,7 +773,9 @@ public final class GlobalMatchStore {
             var old = db.findOneByPkForUpdate(c,GlobalFormationRow.newBuilder().setBattleId(formation.getBattleId()).build()).orElseThrow();
             requireWork(c,old,formation);
             if (old.getState() == 1) {
-                old = old.toBuilder().setCreateRequest(ByteString.copyFrom(request)).build();
+                // 观战可见性列与建房原件同一笔写入：列表与随机选场按这一列过滤，不解码原件
+                old = old.toBuilder().setCreateRequest(ByteString.copyFrom(request))
+                        .setSpectatePublic(com.game.match.spectate.SpectateVisibilityPolicy.createRequestPublic(ByteString.copyFrom(request))).build();
                 // prepared 全集合与创建意图同时持久化；最后只允许首个创建者写入。
                 old = old.toBuilder().clearPrepared().addAllPrepared(formation.getPreparedList()).setState(2).build();
                 db.updateByPk(c,old);
@@ -798,7 +803,8 @@ public final class GlobalMatchStore {
                     .setFormatVersion(1).setPlacementOperationId(old.getOperationId()).setTargetInstanceId(old.getInstanceId())
                     .setOutcomeProtocolVersion(1).setPreflightSupportedVersion(1).setPreflightInstanceId(preflight.getTargetInstanceId()).build();
             db.insert(c,terminal);
-            var saved=old.toBuilder().setCreateRequest(ByteString.copyFrom(request)).clearPrepared()
+            var saved=old.toBuilder().setCreateRequest(ByteString.copyFrom(request))
+                    .setSpectatePublic(com.game.match.spectate.SpectateVisibilityPolicy.isPublic(create.getSpectateVisibility())).clearPrepared()
                     .addAllPrepared(formation.getPreparedList()).setState(2).build();
             db.updateByPk(c,saved);return saved;
         });

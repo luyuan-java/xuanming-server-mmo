@@ -257,13 +257,34 @@ public record MatchProperties(
      *                      读路径（随机选场、列表）自己按分数过滤，所以它只是兜底，不必更勤（W9）
      * @param maxInflight   同时在途的 163 上限（缺省 128；必须 ≥ 1）：163 每个请求一条虚拟线程、要同步等 battle 的 RPC，超限的请求当场回
      *                      in-band 16004「服务器繁忙,请稍后再试」（W10）
+     * @param relayEnabled  观战中继开关（缺省 true；mmorpg battle-spectate-tiered-fanout.md §15.1）：打开后直连席满了转大厅档，关闭时满了回 16021。
+     *                      打开时必须配 {@code ticketSecret}，门禁见 {@code SpectateRelayConfiguration}。Java 全栈共用一套 Redis，没有 C++ / Go 版跨 Kafka 集群的顾虑，
+     *                      前提是 battle、gate、match 指向同一个 Redis 且版本不低于 7（分片 pub/sub）
+     * @param ticketSecret  观战凭证的 HMAC 密钥（match 签、gate 验；只从环境变量 {@code GAME_SPECTATE_TOKEN_SECRET} 注入，不写进仓库）。{@link #toString()} 不打印它
+     * @param ticketTtlSeconds 凭证有效期（缺省 60 s；只决定「能不能订阅」，订阅建立后的寿命由战斗终局 / 期限 / 会话决定）
      */
-    public record Spectate(Duration sweepInterval, Integer maxInflight) {
+    public record Spectate(Duration sweepInterval, Integer maxInflight, Boolean relayEnabled, String ticketSecret, Integer ticketTtlSeconds) {
 
+        /** 只配观战的基础两项（中继取缺省）。 */
+        public Spectate(Duration sweepInterval, Integer maxInflight) {
+            this(sweepInterval, maxInflight, null, null, null);
+        }
+
+        @org.springframework.boot.context.properties.bind.ConstructorBinding
         public Spectate {
             sweepInterval = positiveOr(sweepInterval, Duration.ofSeconds(10), "spectate.sweep-interval");
             requireWholeMillis(sweepInterval, "spectate.sweep-interval");
             maxInflight = positiveOr(maxInflight, 128, "spectate.max-inflight");
+            relayEnabled = relayEnabled == null || relayEnabled;
+            ticketSecret = ticketSecret == null ? "" : ticketSecret;
+            ticketTtlSeconds = positiveOr(ticketTtlSeconds, 60, "spectate.ticket-ttl-seconds");
+        }
+
+        /** 配置对象可能进日志与异常：密钥只报有没有配。 */
+        @Override
+        public String toString() {
+            return "Spectate[sweepInterval=" + sweepInterval + ", maxInflight=" + maxInflight + ", relayEnabled=" + relayEnabled + ", ticketSecret="
+                    + (ticketSecret.isEmpty() ? "<unset>" : "<set>") + ", ticketTtlSeconds=" + ticketTtlSeconds + "]";
         }
     }
 

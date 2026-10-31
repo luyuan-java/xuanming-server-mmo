@@ -50,7 +50,7 @@ class LocalObserverRpcLoopbackTest {
         rooms = new BattleRoomServiceImpl(new RoomDependencies(fixture.data, RoomHarness.NODE_FINGERPRINT,
                 FingerprintMode.WARN, scheduler, () -> RoomHarness.T0, fixture.identity, fixture.tickets,
                 fixture.ids, fixture.lobby, fixture.sceneEvents, fixture.settlements, fixture.activityResults,
-                fixture.results, fixture.metrics));
+                fixture.results, fixture.metrics, fixture.observerSeatQuota));
         var admission = new AdmissionGate();
         admission.open();
         var provider = new BattleNodeServiceImpl(admission, scheduler, rooms, replies, 8, fixture.metrics);

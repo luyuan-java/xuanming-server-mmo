@@ -48,6 +48,20 @@ public interface BattleNodeService {
         return CompletableFuture.completedFuture(com.game.proto.QueryBattleCreationResponse.getDefaultInstance());
     }
 
+    /**
+     * 观战中继（mmorpg battle-spectate-tiered-fanout.md §15.4、§15.7）：校验 {@code target_instance_id} 是本实例（否则 1005）、房间存在（否则 1004）、房间公开（否则 1005）后，
+     * 幂等地打开本场的中继开关，回本实例 UUID 与战斗期限。Java 版没有逐 gate 挂接：开关打开后每帧只发布一次到这一场的 Redis 分片频道，
+     * 有本机观众的 gate 自己订阅，所以 {@code gate_node_id} / {@code gate_instance_id} 不读、{@code broadcast} 恒为 false。
+     */
+    default CompletableFuture<com.game.proto.AttachRelayGateResponse> attachRelayGate(com.game.proto.AttachRelayGateRequest request) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("观战中继尚未装配"));
+    }
+
+    /** 本场升为全服广播：Java 版中继与广播是同一个开关（见 {@link #attachRelayGate}），校验与回包同它。 */
+    default CompletableFuture<com.game.proto.PromoteSpectateBroadcastResponse> promoteSpectateBroadcast(com.game.proto.PromoteSpectateBroadcastRequest request) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("观战中继尚未装配"));
+    }
+
     /** 建房（含节点级准入判定）。 */
     CompletableFuture<CreateBattleResult> createBattle(CreateBattleRequest request);
 

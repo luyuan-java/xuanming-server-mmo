@@ -44,13 +44,16 @@ class AuditProbeAdminControllerTest {
         request.addHeader(AdminAuthFilter.TOKEN_HEADER, "secret");
         request.addHeader(AdminAuthFilter.OPERATOR_HEADER, "ops");
         AtomicReference<List<AuditProbeAdminController.ProbeView>> result = new AtomicReference<>();
-        try (var registry = new SimpleMeterRegistry()) {
+        var registry = new SimpleMeterRegistry();
+        try {
             new AdminAuthFilter("secret", new DataMetrics(registry)).doFilter(request, new MockHttpServletResponse(),
                     (req, res) -> result.set(controller.view((HttpServletRequest) req)));
             String json = new ObjectMapper().writeValueAsString(result.get());
             assertThat(json).contains("\"status\":\"STALE\"", "\"end\":\"9007199254740993\"");
             assertThat(json).doesNotContain("secret");
             assertThat(registry.get("game.data.admin.requests").tag("op", "audit_consumer_probes").counter().count()).isEqualTo(1);
+        } finally {
+            registry.close();
         }
         verify(probe).views();
         verifyNoMoreInteractions(probe);

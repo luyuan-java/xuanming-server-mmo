@@ -22,7 +22,8 @@ class AuditProbeConfigurationTest {
                 .bindOrCreate("game.data", DataProperties.class);
         DataNode data = new DataNode(null, props, names, null, null, null, null, null, null);
         var audit = new AuditProperties(true, "not-a-reachable-host.invalid:9092", 9, (short) 1, Duration.ofSeconds(1));
-        try (var meters = new SimpleMeterRegistry()) {
+        var meters = new SimpleMeterRegistry();
+        try {
             var probe = new AuditProbeConfiguration().auditGroupProbe(data, audit, names,
                     new AuditProbeProperties(Duration.ofSeconds(30), Duration.ofSeconds(10), Duration.ofSeconds(90)),
                     Clock.systemUTC(), meters);
@@ -35,6 +36,8 @@ class AuditProbeConfigurationTest {
             assertThat(probe.views().get(1).target().group()).isEqualTo("nstest-data-player-snapshot");
             assertThat(probe.views().get(1).target().partitionCount()).isEqualTo(3);
             assertThat(names.dataAuditProbeClientId()).isEqualTo("nstest-data-audit-probe");
+        } finally {
+            meters.close();
         }
     }
 }

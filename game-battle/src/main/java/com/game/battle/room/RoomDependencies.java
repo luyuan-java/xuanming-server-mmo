@@ -7,6 +7,7 @@ import com.game.battle.port.ActivityResultSink;
 import com.game.battle.port.BattleResultSink;
 import com.game.battle.port.SceneBattleEvents;
 import com.game.battle.port.SettlementSink;
+import com.game.battle.port.SpectateFrameSink;
 import com.game.battle.protocol.BattleMessageIds;
 import com.game.battle.push.LobbyAnnouncer;
 import com.game.common.token.BattleTickets;
@@ -29,6 +30,9 @@ import java.util.Objects;
  * @param activityResults  活动局结果出站端口（dev 房间不调）
  * @param results          普通局结果出站端口（dev 房间不调）
  * @param metrics          指标
+ * @param observerSeatQuota 全节点观众席配额（≥ 1）：各房间已登记观众（含待建直连、断线宽限中的）之和达到它时，新观众回满员码。
+ *                          生产由装配方按 {@link #observerSeatQuotaFor} 从有效连接上限算出；测试可注入小值
+ * @param spectateFrames   观战中继帧的出站端口（mmorpg battle-spectate-tiered-fanout.md §15.7）
  */
 public record RoomDependencies(
         BattleData data,
@@ -44,7 +48,31 @@ public record RoomDependencies(
         SettlementSink settlements,
         ActivityResultSink activityResults,
         BattleResultSink results,
-        BattleMetrics metrics) {
+        BattleMetrics metrics,
+        int observerSeatQuota,
+        SpectateFrameSink spectateFrames) {
+
+    /** 不接观战中继（不关心中继的装配）。 */
+    public RoomDependencies(BattleData data, String tableFingerprint, FingerprintMode fingerprintMode, BattleScheduler scheduler, BattleClock clock,
+                            BattleIdentity identity, BattleTickets tickets, BattleMessageIds messageIds, LobbyAnnouncer lobby, SceneBattleEvents sceneEvents,
+                            SettlementSink settlements, ActivityResultSink activityResults, BattleResultSink results, BattleMetrics metrics,
+                            int observerSeatQuota) {
+        this(data, tableFingerprint, fingerprintMode, scheduler, clock, identity, tickets, messageIds, lobby, sceneEvents, settlements, activityResults,
+                results, metrics, observerSeatQuota, SpectateFrameSink.NONE);
+    }
+
+    /**
+     * 生产口径的观众席节点配额 = max(每房观众上限, 有效连接上限 / 4)（mmorpg battle-spectate-tiered-fanout.md §10 第 4 条，与 C++ 版同式）。
+     * 观众直连与参战者共用同一个连接上限，不封顶的话热门节点的观众会把参战者的直连挤掉；取每房上限做下限，连接上限很小时也至少容得下一间满员房。
+     *
+     * @param effectiveMaxConnections 直连面实际生效的并发连接上限（{@code BattleProperties.effectiveMaxConnections()}，≥ 1）
+     */
+    public static int observerSeatQuotaFor(int effectiveMaxConnections) {
+        if (effectiveMaxConnections < 1) {
+            throw new IllegalArgumentException("有效连接上限必须为正: " + effectiveMaxConnections);
+        }
+        return Math.max(RoomConstants.MAX_OBSERVERS_PER_ROOM, effectiveMaxConnections / 4);
+    }
 
     public RoomDependencies {
         Objects.requireNonNull(data, "data");
@@ -61,5 +89,9 @@ public record RoomDependencies(
         Objects.requireNonNull(activityResults, "activityResults");
         Objects.requireNonNull(results, "results");
         Objects.requireNonNull(metrics, "metrics");
+        Objects.requireNonNull(spectateFrames, "spectateFrames");
+        if (observerSeatQuota < 1) {
+            throw new IllegalArgumentException("观众席节点配额必须为正: " + observerSeatQuota);
+        }
     }
 }

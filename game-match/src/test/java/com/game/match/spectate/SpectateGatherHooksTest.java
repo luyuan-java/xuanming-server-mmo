@@ -18,6 +18,7 @@ import com.game.match.testing.InMemorySpectateStore;
 import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.ManualRedisClock;
 import com.game.proto.BattleRouting;
+import com.game.proto.eSpectateVisibility;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -60,10 +61,11 @@ class SpectateGatherHooksTest {
         return new SpectateGatherHooks(store, dialer, metrics, SHORT_BUDGET_MS, SHORT_BUDGET_MS);
     }
 
+    /** 公开局的落点（开局钩子只公开落点里冻结为 PUBLIC 的局，不按 mode 重算）。 */
     private static BattlePlacement placement(long battleId, int attempt) {
         return BattlePlacement.newBuilder().setBattleId(battleId).setBattleNodeId(7).setBattleInstanceId("inst-7").setRpcHost("10.0.0.7")
                 .setRpcPort(21207).setAttempt(attempt).setMode(3).addPlayerNames("旧甲").addPlayerNames("旧乙").setCreatedAtMs(T0 - 1_234)
-                .setDeadlineMs(T0 + 298_766).build();
+                .setDeadlineMs(T0 + 298_766).setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC_VALUE).build();
     }
 
     /** 摆一场在打的旧战斗（落点在）并让这名玩家带着它的观战标记；返回标记的值。 */
@@ -537,6 +539,23 @@ class SpectateGatherHooksTest {
 
         assertThat(store.isWatchable(880230)).isTrue();
         assertThat(store.calls).containsExactly("publish(880230#2)");
+    }
+
+    @Test
+    void 可见性闸_私密局与漏填可见性的局只留落点_不登记可观战索引_不计publish_failed() {
+        BattlePlacement hidden = placement(880235, 1).toBuilder().setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE_VALUE).build();
+        BattlePlacement legacy = placement(880236, 1).toBuilder().clearSpectateVisibility().build();
+        placements.put(hidden);
+        placements.put(legacy);
+
+        assertThatCode(() -> hooks.onStarted(hidden)).doesNotThrowAnyException();
+        assertThatCode(() -> hooks.onStarted(legacy)).doesNotThrowAnyException();
+
+        assertThat(store.watchable()).as("列表与随机观战都挑不到它").isEmpty();
+        assertThat(store.calls).as("根本不发登记").noneMatch(call -> call.startsWith("publish("));
+        assertThat(placements.stored(880235)).as("落点照留：179 补签靠它定位 battle").contains(hidden);
+        assertThat(placements.stored(880236)).contains(legacy);
+        assertThat(anomalies("publish_failed")).as("不公开是正常出口，不是登记失败").isZero();
     }
 
     @Test

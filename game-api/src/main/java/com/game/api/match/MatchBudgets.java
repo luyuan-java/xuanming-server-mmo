@@ -70,6 +70,14 @@ public final class MatchBudgets {
 
     /** 战斗最长时限：177 的 {@code expire_at_ms} = gather 起点 + 它（客户端可见）。 */
     public static final int BATTLE_MAX_DURATION_SECONDS = 300;
+
+    /**
+     * 全球局 v1 终局宽限（毫秒，与 mmorpg Go {@code terminalOutcomeGraceMs} 同值）：战斗期限之后这么久之内 game-match 仍接受原局的 COMPLETE，
+     * 过了它截止巡检才能竞争唯一 SQL ABORT（{@code GlobalMatchStore}）。game-scene 的 FIGHTING 冻结与战斗锁 TTL 必须覆盖
+     * 「期限 + 它 + 收件箱投递余量」——COMPLETE 之后个人结算才经收件箱到达，提前解冻会让资产通道在结算之前放行（消耗被夹紧，可刷物品）。
+     * 两边引用这一个常量，不各写 60000。
+     */
+    public static final long TERMINAL_OUTCOME_GRACE_MS = 60_000L;
     /** 落点记录的 TTL = 战斗最长时限 + 60 s。 */
     public static final int PLACEMENT_TTL_SECONDS = BATTLE_MAX_DURATION_SECONDS + 60;
 

@@ -334,12 +334,13 @@ java -jar game-robot/target/game-robot-0.1.0-SNAPSHOT.jar battle-cross-zone --zo
 - Z2（`z2-baseline`）：抓 game-match 指标与 A、B 的评分作基数。
 - Z3（`z3-queue`）：A 发 157 `{mode = 3 1V1, config = 1}`，**A 的回包到了** B 才发（A 一定是锚点）；两个回包都受理、票号是 UUID。
 - Z4（`z4-announce`）：两侧大厅上 177 都在 143 之前、同一个非 0 的 battle_id；两张票的 `host:port`、签发节点与实例相同，`player_id` 各是自己；143 里 A 在 0 队、B 在 1 队。
-- Z5（`z5-direct-watch`）：A、B 各自直连（握手的 battle_id 一致、补拉 140 成功），都不开自动；`--visit-zone` 的 C 发 163(该局) → 成功 → 177 `{role = 2}` 经那个区的 gate 到达 → 直连 → 161 `{observer_count = 1}`。
-- Z6（`z6-fight`）：A、B 开自动打到 150：两侧同一个终局（胜 / 负 / 平之一，不断言谁赢）、`total_rounds` 相同、直连回合数 ≥ 1、大厅上没有 139；C 收到 ≥ 1 条 158，然后 166 `{FINISHED, 同一个终局}` 后 FIN。
+- Z5（`z5-direct-watch`）：A、B 各自直连（握手的 battle_id 一致、补拉 140 成功），都不开自动；`--visit-zone` 的 C 发 163(该局) → 1V1 是计分局，可见性闸拒绝 → `{16018, 该战斗不存在或已结束}`。
+- Z6（`z6-fight`）：A、B 开自动打到 150：两侧同一个终局（胜 / 负 / 平之一，不断言谁赢）、`total_rounds` 相同、直连回合数 ≥ 1、大厅上没有 139。
 - Z7（`z7-lobby-end`）：两侧各等**大厅**上这一局的 150（scene 应用结算之后才推，证明结算回到了各自所在区的 scene），上限是直连 150 之后 25 s。
 - Z8（`z8-rating`）：收到 150 后 10 s 内经 game-match 的 dev 评分接口查到 games 各 + 1；胜负且不满 30 回合时两人的增量互为相反数、绝对值 16，平局或打满 30 回合都是 0（新号都从 1500 起）。
 - Z9（`z9-second-queue` / `-announce` / `-direct` / `-fight` / `-lobby-end` / `-rating` / `-battle`）：立即再排打第二局（16000 按过渡态每 1 s 重试、上限 20 s，**不得**出现 16001），重复 Z4、Z6、Z7 与评分，不带观众；
   第二局的 battle_id 与第一局不同、games 再各 + 1。它覆盖「连续对局」的三处：0 血带入下一局、ready 残留挡住再排、把上一局迟到的 150 当成本局的。
+- 公开局的跨区观战（`z5-public-watch`，第二局之后）：A 排 PVE_SOLO 并直连；`--visit-zone` 的 C 发 163(该局) → 成功 → 177 `{role = 2}` 经那个区的 gate 到达 → 直连 → 161 `{observer_count = 1}`；A 开自动打完，C 收到 ≥ 1 条 158，然后 166 `{FINISHED, 同一个终局}` 后 FIN。结果行的 `c_spectate_turns` 取这一局。
 - Z10（`z10-metrics`）：game-match 指标本轮的增量——`game_match_gather_zone_mix_total{mix="cross"}`（对 `mode` 求和）≥ 2、`game_match_watch_battle_total{outcome="ok"}` ≥ 1。
 - Z11（`z11-leave`）：三人 LeaveGame。收尾（含失败路径）给 A、B 各发一条 148(`""`)，免得把排队票留在全服共享的队列里凑走下一遍的 A。
 

@@ -98,11 +98,13 @@ public class WatchBattleConfiguration {
     @Bean
     public WatchBattleService watchBattleService(MatchProperties props, SpectateStore spectateStore, PlacementStore placements,
                                                  PlayerStatusReader players, TicketReader tickets, ObserverDialer observerDialer,
-                                                 MatchMetrics metrics,org.springframework.beans.factory.ObjectProvider<GlobalWatchService> global,javax.sql.DataSource source) {
+                                                 MatchMetrics metrics,org.springframework.beans.factory.ObjectProvider<GlobalWatchService> global,javax.sql.DataSource source,
+                                                 org.springframework.beans.factory.ObjectProvider<SpectateRelay> relay) {
         budgetWarning(props.requestBudget()).ifPresent(warning -> log.warn("[spectate] {}", warning));
         com.game.common.player.PlayerProfiles.ConnectionSource connections=source instanceof com.alibaba.druid.pool.DruidDataSource pool?pool::getConnection:wait->source.getConnection();
         var profiles=new com.game.common.player.PlayerProfiles(connections,1);
-        return new WatchBattleService(spectateStore, placements, players, tickets, observerDialer, metrics).withGlobal(global.getIfAvailable()).withPublicNames((player,deadline)->{
+        return new WatchBattleService(spectateStore, placements, players, tickets, observerDialer, metrics).withGlobal(global.getIfAvailable())
+                .withRelay(relay.getIfAvailable(SpectateRelay::disabled)).withPublicNames((player,deadline)->{
             var profile=profiles.load(java.util.List.of(player),deadline).get(player);return profile==null?"":profile.name();});
     }
 

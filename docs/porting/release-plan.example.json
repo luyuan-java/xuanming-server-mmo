@@ -171,6 +171,7 @@
     "GAME_GATE_TOKEN_SECRET": "replace-with-reviewed-version",
     "GAME_NODE_LINK_SECRET": "replace-with-reviewed-version",
     "GAME_BATTLE_TOKEN_SECRET": "replace-with-reviewed-version",
+    "GAME_SPECTATE_TOKEN_SECRET": "replace-with-reviewed-version",
     "GAME_ADMIN_TOKEN": "replace-with-reviewed-version",
     "GAME_GM_ADMIN_SECRET": "replace-with-reviewed-version",
     "GAME_ASSET_OP_SECRET_GUILD": "replace-with-reviewed-version",

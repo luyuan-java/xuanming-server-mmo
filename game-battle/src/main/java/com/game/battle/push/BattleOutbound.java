@@ -22,7 +22,7 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>{@link #pushBattleFrame}（139 / 150 / 158 / 161 / 166）：有活直连就直写，否则<b>丢弃</b>，按消息号采样打
  *       {@code metric=battle_frame_dropped_no_direct}（每个号第一次必打，之后每 1024 次一行，{@code room.cpp:124-136}）；
- *       直连是战斗帧的唯一通路，不回落 gate。</li>
+ *       直连是战斗帧的唯一通路，不回落 gate。同一帧写给一组观众（158 / 166）走 {@link #pushBattleFrameToAll}：帧只编码一次。</li>
  *   <li>{@link #pushLobby}（177 / 143）：有活直连就按序直写；否则一组公告<b>一次</b>交给 {@link LobbyAnnouncer}（一条
  *       {@code GatePush{message_batch}}，177 先于 143，R5）。判定理论上不会得出「丢弃」，万一得出就打 ERROR。</li>
  * </ul>
@@ -79,16 +79,57 @@ public final class BattleOutbound {
      * @return 实际走的路由（{@link PushRoute#DIRECT} 或 {@link PushRoute#DROP}）
      */
     public PushRoute pushBattleFrame(long battleId, long playerId, DirectLink link, Notify notify, MessageContent frame) {
-        if (notify.category() != PushCategory.BATTLE_FRAME) {
-            throw new IllegalArgumentException("不是战斗帧: " + notify);
-        }
+        requireBattleFrame(notify);
         PushRoute route = PushPolicy.decide(PushCategory.BATTLE_FRAME, live(link));
         if (route == PushRoute.DIRECT) {
             link.send(frame);
             metrics.push(PushCategory.BATTLE_FRAME, PushRoute.DIRECT, notify);
             return PushRoute.DIRECT;
         }
-        // 战斗帧的判定不会产出 VIA_GATE（PushPolicyTest 钉住）；本出口也没有路由可回落，防御性按丢弃处理
+        dropBattleFrame(battleId, playerId, notify);
+        return PushRoute.DROP;
+    }
+
+    /** 同一战斗帧的一名收件人：玩家与他直连槽里的连接（没有时 null）。 */
+    public record Recipient(long playerId, DirectLink link) {
+    }
+
+    /**
+     * 同一战斗帧推给一组收件人（观众版 158 与收尾 166；mmorpg battle-spectate-tiered-fanout.md §10 第 3 条「编码一次」）：借第一条活直连
+     * 把帧编码一次（{@link DirectLink#share}），每条活直连写同一份字节的引用，扇出结束释放原件——中途抛异常也释放；没有活直连的收件人
+     * 同 {@link #pushBattleFrame} 丢弃并采样记日志。写出顺序 = {@code recipients} 的顺序，每个收件人恰好计一次推送指标；一条活直连都没有时不编码。
+     */
+    public void pushBattleFrameToAll(long battleId, List<Recipient> recipients, Notify notify, MessageContent frame) {
+        requireBattleFrame(notify);
+        DirectLink.SharedFrame shared = null;
+        try {
+            for (Recipient recipient : recipients) {
+                DirectLink link = recipient.link();
+                if (PushPolicy.decide(PushCategory.BATTLE_FRAME, live(link)) != PushRoute.DIRECT) {
+                    dropBattleFrame(battleId, recipient.playerId(), notify);
+                    continue;
+                }
+                if (shared == null) {
+                    shared = link.share(frame);
+                }
+                link.send(shared);
+                metrics.push(PushCategory.BATTLE_FRAME, PushRoute.DIRECT, notify);
+            }
+        } finally {
+            if (shared != null) {
+                shared.close();
+            }
+        }
+    }
+
+    private static void requireBattleFrame(Notify notify) {
+        if (notify.category() != PushCategory.BATTLE_FRAME) {
+            throw new IllegalArgumentException("不是战斗帧: " + notify);
+        }
+    }
+
+    /** 战斗帧没有活直连：丢弃并计数（判定不会产出 VIA_GATE，PushPolicyTest 钉住；本出口也没有路由可回落，防御性按丢弃处理）。 */
+    private void dropBattleFrame(long battleId, long playerId, Notify notify) {
         metrics.push(PushCategory.BATTLE_FRAME, PushRoute.DROP, notify);
         long count = droppedByMessage.merge(notify, 1L, Long::sum);
         if (((count - 1) & DROP_LOG_MASK) == 0) {
@@ -96,7 +137,6 @@ public final class BattleOutbound {
                             + "玩家无活直连，战斗帧不回落 gate（直连就绪后 GetBattleState 补拉）",
                     notify.method(), count, Long.toUnsignedString(battleId), Long.toUnsignedString(playerId));
         }
-        return PushRoute.DROP;
     }
 
     /**

@@ -9,6 +9,7 @@ import com.game.match.proto.BattlePlacement;
 import com.game.match.spectate.ObserverDialer;
 import com.game.match.spectate.SpectateRules;
 import com.game.match.spectate.SpectateStore;
+import com.game.match.spectate.SpectateVisibilityPolicy;
 import com.game.pbmysql.PbMysql;
 import com.game.proto.AddObserverRequest;
 import com.game.proto.RemoveObserverResponse;
@@ -20,8 +21,18 @@ import java.sql.SQLException;
 import java.util.*;
 import javax.sql.DataSource;
 
-/** 观战原件与匹配票共享TiDB和P首锁；网络只在原Add提交以后发，取消未知不终结。 */
+/**
+ * 观战原件与匹配票共享TiDB和P首锁；网络只在原Add提交以后发，取消未知不终结。
+ *
+ * <p>观战可见性在建房原件里冻结（{@code create_request} 的 {@code spectate_visibility}），同一笔事务写进成局的 {@code spectate_public} 列（{@code GlobalMatchStore.saveIntent}）：
+ * 列表与随机选场在 SQL 里按这一列过滤（索引 {@code state,spectate_public,created_ms,battle_id}），不解码原件；按 id 读出的落点记录带上原件里的可见性交给调用方判定，
+ * 原 Add 提交点再按原件复核一次。
+ */
 public final class GlobalWatchAuthority {
+    /** {@link #list} 入参的上限。 */
+    static final int LIST_MAX_ROWS = 100;
+    /** 可观战的成局：已建房、公开、没过期（参数是过期分界）。 */
+    private static final String WATCHABLE = "state=4 AND spectate_public=1 AND created_ms>=?";
     private final AuthorityJdbc sql;
     private final GlobalMatchStore publication;
     private final PbMysql db=new PbMysql();
@@ -82,11 +93,15 @@ public final class GlobalWatchAuthority {
             db.updateByPk(c.connection(),prior.toBuilder().setBattleId(battle).build());return battle;});
     }
     public WatchBattleResponse respond(SessionContext actor,String request,WatchBattleResponse response,Deadline deadline) {
-        return tx(actor,deadline,c->{var prior=history(c,actor,request);
-            if(!prior.getResponsePayload().isEmpty()) {
-                try{return WatchBattleResponse.parseFrom(prior.getResponsePayload());}catch(com.google.protobuf.InvalidProtocolBufferException bad){throw new SQLException("观战回执损坏",bad);}
-            }
-            db.updateByPk(c.connection(),prior.toBuilder().setResponsePayload(response.toByteString()).build());return response;});
+        return tx(actor,deadline,c->receipt(c,actor,request,response));
+    }
+    /** 写永久回执（先写为准）：已有回执就读回首答。调用方已在持 P 锁的事务里。 */
+    private WatchBattleResponse receipt(AuthorityJdbc.Session c,SessionContext actor,String request,WatchBattleResponse response)throws SQLException {
+        var prior=history(c,actor,request);
+        if(!prior.getResponsePayload().isEmpty()) {
+            try{return WatchBattleResponse.parseFrom(prior.getResponsePayload());}catch(com.google.protobuf.InvalidProtocolBufferException bad){throw new SQLException("观战回执损坏",bad);}
+        }
+        db.updateByPk(c.connection(),prior.toBuilder().setResponsePayload(response.toByteString()).build());return response;
     }
     private GlobalWatchingRow row(AuthorityJdbc.Session c,long player,boolean lock)throws SQLException {
         var key=GlobalWatchingRow.newBuilder().setPlayerId(player).build();
@@ -134,6 +149,8 @@ public final class GlobalWatchAuthority {
             if(formation.getState()!=4||formation.getBattleId()!=request.getBattleId()||request.getObserverPlayerId()!=player
                     ||placement.getBattleId()!=formation.getBattleId()||!placement.getBattleInstanceId().equals(formation.getInstanceId())
                     ||!placement.getRpcHost().equals(formation.getHost())||placement.getRpcPort()!=formation.getPort())throw new SecurityException("观战原固定落点已改变");
+            // 提交点按同一份建房原件复核可见性（入口已拒私密局，这里是许可 Add 前的最后一道）
+            if(!SpectateVisibilityPolicy.createRequestPublic(formation.getCreateRequest()))throw new SecurityException("观战目标不是公开局");
             long stamp=now(c),admit=stamp+Math.max(1,Math.min(30_000,deadline.remainingMillis()));
             var original=request.toBuilder().setSpectatorOperationId(current.getOperationId()).setAdmitBeforeMs(admit).setTargetInstanceId(formation.getInstanceId()).build();
             if(!receipt.getOriginalAdd().isEmpty())throw new SQLException("原Add只能许可一次");
@@ -144,10 +161,26 @@ public final class GlobalWatchAuthority {
     }
     public void observed(SessionContext actor,long player,String mark,ObserverDialer.Outcome outcome,Deadline deadline) {
         subject(actor,player);tx(actor,deadline,c->{var current=row(c,player,true);sameOwner(current,actor);
-            if(current==null||!current.getMark().equals(mark)||current.getState()!=2)return null;
-            if(outcome instanceof ObserverDialer.Outcome.Unknown)return null;
-            boolean accepted=outcome instanceof ObserverDialer.Outcome.Replied replied&&replied.tipId()==0;
-            db.updateByPk(c.connection(),current.toBuilder().setState(accepted?3:4).setRetryMs(now(c)+1000).build());return null;});
+            applyObserved(c,current,mark,outcome);return null;});
+    }
+    /**
+     * battle 回「直连席已满」且中继可用：原件转待取消（恢复循环凭原 Remove 关闭）与 LOBBY 回执<b>同一笔事务</b>落库（mmorpg battle-spectate-tiered-fanout.md §15.6）。
+     * 分两笔的话，中间失败时恢复循环会先把原件关掉（置 cancelled），同 UUID 重试只能得到「当前无法观战」，这次请求就再也转不了大厅档。
+     * 打开中继与签凭证都在这之后做，成败只影响本次应答：重放按 LOBBY 回执重新准入。
+     *
+     * @param lobby 不带凭证的 LOBBY 回执（凭证有 TTL，不进回执）
+     * @return 持久回执（并发先落的首答优先）
+     */
+    public WatchBattleResponse observedFull(SessionContext actor,long player,String mark,ObserverDialer.Outcome outcome,WatchBattleResponse lobby,Deadline deadline) {
+        subject(actor,player);return tx(actor,deadline,c->{var current=row(c,player,true);sameOwner(current,actor);
+            applyObserved(c,current,mark,outcome);
+            return receipt(c,actor,mark.substring(mark.indexOf(':')+1),lobby);});
+    }
+    private void applyObserved(AuthorityJdbc.Session c,GlobalWatchingRow current,String mark,ObserverDialer.Outcome outcome)throws SQLException {
+        if(current==null||!current.getMark().equals(mark)||current.getState()!=2)return;
+        if(outcome instanceof ObserverDialer.Outcome.Unknown)return;
+        boolean accepted=outcome instanceof ObserverDialer.Outcome.Replied replied&&replied.tipId()==0;
+        db.updateByPk(c.connection(),current.toBuilder().setState(accepted?3:4).setRetryMs(now(c)+1000).build());
     }
     public boolean active(SessionContext actor,long player,String mark,Deadline deadline) {
         subject(actor,player);return tx(actor,deadline,c->{var current=row(c,player,true);sameOwner(current,actor);return current!=null&&current.getMark().equals(mark)&&current.getState()==3;});
@@ -211,24 +244,32 @@ public final class GlobalWatchAuthority {
         try {
             var p=BattlePlacement.newBuilder().setBattleId(f.getBattleId()).setMode(f.getMode()).setBattleConfigId(f.getConfigId()).setCreatedAtMs(f.getCreatedMs())
                 .setDeadlineMs(f.getDeadlineMs()).setBattleNodeId(f.getNodeId()).setBattleInstanceId(f.getInstanceId()).setRpcHost(f.getHost()).setRpcPort(f.getPort()).setAttempt(1);
-            com.game.proto.CreateBattleRequest.parseFrom(f.getCreateRequest()).getPlayersList().forEach(v->p.addPlayerNames(v.getPlayerName()));return p.build();
+            var create=com.game.proto.CreateBattleRequest.parseFrom(f.getCreateRequest());
+            create.getPlayersList().forEach(v->p.addPlayerNames(v.getPlayerName()));
+            // 带上建房原件里冻结的可见性：163 按 id 观战与 164 列表据此拒私密局
+            return p.setSpectateVisibility(create.getSpectateVisibilityValue()).build();
         }catch(com.google.protobuf.InvalidProtocolBufferException bad){throw new SQLException("SQL固定建房原件损坏",bad);}
     }
     public SpectateStore.Listed list(int limit,Deadline deadline) {
-        if(limit<1||limit>100)throw new IllegalArgumentException("观战列表超出上限");
-        return tx(null,deadline,c->{long stamp=now(c);var rows=db.findAll(c.connection(),GlobalFormationRow.class,"state=4 AND created_ms>=? ORDER BY created_ms DESC,battle_id DESC LIMIT "+limit,SpectateRules.staleCutoff(stamp));
+        if(limit<1||limit>LIST_MAX_ROWS)throw new IllegalArgumentException("观战列表超出上限");
+        // 私密局不进列表：SQL 直接按冻结的可见性列过滤，私密局再多也不占位
+        return tx(null,deadline,c->{long stamp=now(c);var rows=db.findAll(c.connection(),GlobalFormationRow.class,WATCHABLE+" ORDER BY created_ms DESC,battle_id DESC LIMIT "+limit,SpectateRules.staleCutoff(stamp));
             return new SpectateStore.Listed(rows.stream().map(f->new SpectateStore.Scored(Long.toUnsignedString(f.getBattleId()),f.getCreatedMs())).toList(),stamp);});
     }
     public SpectateStore.Pick pick(double random,Deadline deadline) {
         if(!(random>=0&&random<1))throw new IllegalArgumentException("观战随机数范围无效");
         return tx(null,deadline,c->{long stamp=now(c),cutoff=SpectateRules.staleCutoff(stamp);
-            long count=c.count("SELECT COUNT(*) FROM match_global_formation WHERE state=4 AND created_ms>=?",cutoff);
+            long count=c.count("SELECT COUNT(*) FROM match_global_formation WHERE "+WATCHABLE,cutoff);
             if(count==0)return new SpectateStore.Pick.None(stamp);
             long offset=Math.min((long)(random*count),count-1);
-            var rows=db.findAll(c.connection(),GlobalFormationRow.class,"state=4 AND created_ms>=? ORDER BY created_ms,battle_id LIMIT 1 OFFSET "+offset,cutoff);
-            return rows.isEmpty()?new SpectateStore.Pick.None(stamp):new SpectateStore.Pick.Member(Long.toUnsignedString(rows.getFirst().getBattleId()),rows.getFirst().getCreatedMs(),stamp);});
+            var rows=db.findAll(c.connection(),GlobalFormationRow.class,WATCHABLE+" ORDER BY created_ms,battle_id LIMIT 1 OFFSET "+offset,cutoff);
+            // 两条语句之间这一行可能刚好过了分界：按挑不到收场，客户端重试
+            if(rows.isEmpty())return new SpectateStore.Pick.None(stamp);
+            var f=rows.get(0);
+            return new SpectateStore.Pick.Member(Long.toUnsignedString(f.getBattleId()),f.getCreatedMs(),stamp);});
     }
-    public long watchableCount(Deadline deadline) {return tx(null,deadline,c->c.count("SELECT COUNT(*) FROM match_global_formation WHERE state=4 AND created_ms>=?",SpectateRules.staleCutoff(now(c))));}
+    /** 规模采样（{@code game_match_watchable_battles}）：只数公开局，与列表同口径。 */
+    public long watchableCount(Deadline deadline) {return tx(null,deadline,c->c.count("SELECT COUNT(*) FROM match_global_formation WHERE "+WATCHABLE,SpectateRules.staleCutoff(now(c))));}
     public Map<Long,String> marks(List<Long> players,Deadline deadline) {
         if(players.size()>10)throw new IllegalArgumentException("观战原名单超过10人");
         try{return sql.read(deadline,c->{Map<Long,String> result=new LinkedHashMap<>();for(long player:new LinkedHashSet<>(players)){var row=row(c,player,false);if(row!=null&&row.getState()!=5)result.put(player,row.getMark());}return result;});}
@@ -259,17 +300,103 @@ public final class GlobalWatchAuthority {
             var work=current.toBuilder().setState(current.getState()==3&&current.getExpiresMs()>stamp?3:4).setLeaseVersion(Math.addExact(current.getLeaseVersion(),1)).setLeaseUntilMs(stamp+5000).setRetryMs(stamp+5000).build();
             db.updateByPk(c.connection(),work);return work;});
     }
-    public void settled(GlobalWatchingRow work,boolean stillActive,RemoveObserverResponse proof,Deadline deadline) {
-        tx(original(work),deadline,c->{var current=row(c,work.getPlayerId(),true);long stamp=now(c);
+    /** 一次取消尝试的结局。 */
+    public enum Settlement {
+        /** 还不能关：原实例说观众还在，或者没有证明、也不能确定原实例已不在。 */
+        PENDING,
+        /** 拿到了原实例的取消正证明，已关闭。 */
+        PROVEN,
+        /** 没有证明，但成局已终态或已过期限 + 终局宽限（房间必已收尾），已关闭。 */
+        FORMATION_ENDED,
+        /** 没有证明，但目录里同节点号已是别的实例（房间随原进程没了），已关闭。 */
+        INSTANCE_REPLACED
+    }
+    /**
+     * 结算一次取消尝试：原 Remove 的正证明优先；拿不到证明时，原实例已不在也关闭（mmorpg battle-spectate-tiered-fanout.md §15.9）。原实例不在了就永远拿不到证明：
+     * 实例不符的 Remove 回空应答，旧地址的 RPC 只会报错；不放宽的话这名玩家的观战、排队、交易冻结、维护排空都要等人工改库。放宽是安全的：观众对战斗状态零写权，
+     * 不带证明关闭碰不到资产；原 Add 带 {@code target_instance_id}，新实例不接纳旧 op，旧 op 不会复活；实例其实还活着（丢了租约的僵尸）时最坏只是它多发几帧。
+     * 原实例明确回 ACTIVE（{@code stillActive}）时不算不在。关闭点与判定在同一笔持 P 锁的事务里；{@code closed} 置 {@code cancelled}，排队与角色退出的 {@code provedClosed} 随之放行。
+     *
+     * @param instanceReplaced 目录里同节点号已是别的实例（查不到不算）。在事务外查好传进来：不在持 P 锁的事务里等 Redis
+     */
+    public Settlement settled(GlobalWatchingRow work,boolean stillActive,RemoveObserverResponse proof,boolean instanceReplaced,Deadline deadline) {
+        return tx(original(work),deadline,c->{var current=row(c,work.getPlayerId(),true);long stamp=now(c);
             if(current==null||!current.getMark().equals(work.getMark())||current.getLeaseVersion()!=work.getLeaseVersion()||current.getLeaseUntilMs()<=stamp||(current.getState()!=4&&current.getState()!=3))
                 throw new IllegalStateException("原观战取消租约已失效");
-            String instance;
-            try{instance=AddObserverRequest.parseFrom(current.getAddRequest()).getTargetInstanceId();}catch(com.google.protobuf.InvalidProtocolBufferException bad){throw new SQLException("原Add损坏",bad);}
-            boolean cancelled=proof!=null&&proof.getCancelled()&&proof.getSpectatorOperationId().equals(current.getOperationId())&&proof.getTargetInstanceId().equals(instance);
-            // ACTIVE/UNKNOWN均不能凭TTL释放；只有原Remove正证明才能closed。
-            int next=cancelled?5:current.getState();
-            if(cancelled)closed(c,current);
-            db.updateByPk(c.connection(),current.toBuilder().setState(next).setLeaseUntilMs(0).setRetryMs(stamp+1000).build());return null;});
+            AddObserverRequest add;
+            try{add=AddObserverRequest.parseFrom(current.getAddRequest());}catch(com.google.protobuf.InvalidProtocolBufferException bad){throw new SQLException("原Add损坏",bad);}
+            boolean cancelled=proof!=null&&proof.getCancelled()&&proof.getSpectatorOperationId().equals(current.getOperationId())&&proof.getTargetInstanceId().equals(add.getTargetInstanceId());
+            Settlement result=cancelled?Settlement.PROVEN:stillActive?Settlement.PENDING:sourceGone(c,add.getBattleId(),stamp,instanceReplaced);
+            boolean close=result!=Settlement.PENDING;
+            if(close)closed(c,current);
+            db.updateByPk(c.connection(),current.toBuilder().setState(close?5:current.getState()).setLeaseUntilMs(0).setRetryMs(stamp+1000).build());return result;});
+    }
+    private Settlement sourceGone(AuthorityJdbc.Session c,long battle,long stamp,boolean instanceReplaced)throws SQLException {
+        var formation=db.findOneByPk(c.connection(),GlobalFormationRow.newBuilder().setBattleId(battle).build());
+        if(formation.isPresent()&&formationEnded(formation.get(),stamp))return Settlement.FORMATION_ENDED;
+        return instanceReplaced?Settlement.INSTANCE_REPLACED:Settlement.PENDING;
+    }
+    /** 成局的房间必已不在：已确认中止（state 5），或已过权威期限 + 终局宽限（与 {@code GlobalMatchStore} 竞争 ABORT 同一分界）。期限 0 = 没有期限，证明不了什么。{@code stamp} 取 SQL 时钟。 */
+    static boolean formationEnded(GlobalFormationRow formation,long stamp) {
+        if(formation.getState()==5)return true;
+        long limit=formation.getDeadlineMs();
+        return limit>0&&stamp>=limit&&stamp-limit>=MatchBudgets.TERMINAL_OUTCOME_GRACE_MS;
+    }
+
+    /** 请求历史的保留期：同 UUID 重放窗口是秒级（客户端重试、大厅重连），战斗最长约 1 小时，7 天之后不会再有合法重放。代价：极旧的 UUID 重放会被当成新请求。 */
+    static final long REQUEST_RETENTION_MS=7L*24*3600*1000;
+    /** 保留期清理的翻页位置。 */
+    public record RequestCursor(long createdMs,long player,String request) {
+        public static final RequestCursor START=new RequestCursor(0,0,"");
+    }
+    /** @param next 下一页从哪开始（扫到末尾回到 {@link RequestCursor#START}） @param deleted 这一页删掉的行数 */
+    public record RequestPurge(RequestCursor next,int deleted) {}
+    /**
+     * 这名玩家有捕获过退出原件、还没走完的准入（pending 票 state 0 = Join / direct；Join 意图未完结；Team 角色未释放）：退出原件存在意图与 launch 的 bytes 里，SQL 按行比不了，按玩家从严，
+     * 这名玩家的历史一行都不删（{@code ObserverExitAuthority.provedClosed} 缺行会抛异常，这些准入就再也走不完）。
+     */
+    private static final String NO_PENDING_EXIT=
+            " AND NOT EXISTS(SELECT 1 FROM match_global_ticket t WHERE t.player_id=match_global_watch_request.player_id AND t.state=0)"
+            +" AND NOT EXISTS(SELECT 1 FROM match_global_join_intent j WHERE j.player_id=match_global_watch_request.player_id AND j.admission_prepared=1 AND j.admission_completed=0)"
+            +" AND NOT EXISTS(SELECT 1 FROM team_launch_role r WHERE r.player_id=match_global_watch_request.player_id AND (r.state IS NULL OR r.state<>2))";
+    /**
+     * 按保留期删一页请求历史：创建超过 7 天、已有回执或已取消、不是请求头、不是当前观战原件、这名玩家没有待退出准入（{@link #NO_PENDING_EXIT}）的行。
+     * 大厅档观众每个新 UUID 留一行，不删的话存储无界增长。
+     *
+     * <p>按 (created_ms, 主键) 翻页：删不掉的行（每名玩家的请求头）会一直留在索引前端，每轮从头取前 N 条的话后面的行永远轮不到。幂等，多副本同时跑无害。不持玩家锁也不会误删：
+     * 退出捕获只捕获请求头与当前观战原件；请求头只会移到全新的 UUID，不是请求头、不是当前原件的行不会再变成它们；行被删后旧 UUID 重放重新插入的行 created_ms 是新的，DELETE 上的条件挡住它。
+     *
+     * @param limit 这一页最多看多少行
+     */
+    public RequestPurge purgeRequests(RequestCursor after,int limit,Deadline deadline) {
+        return tx(null,deadline,c->{
+            long cutoff=now(c)-REQUEST_RETENTION_MS;
+            // created_ms>= 是给优化器的范围下界，元组比较才是精确的翻页条件
+            var page=c.list("SELECT created_ms,player_id,request_id FROM match_global_watch_request WHERE created_ms<? AND created_ms>=? AND (created_ms,player_id,request_id)>(?,?,?) ORDER BY created_ms,player_id,request_id LIMIT "+limit,
+                    row->new RequestCursor(row.getLong(1),AuthorityJdbc.u64(row,2),row.getString(3)),cutoff,after.createdMs(),after.createdMs(),AuthorityJdbc.u64(after.player()),after.request());
+            if(page.isEmpty())return new RequestPurge(RequestCursor.START,0);
+            var candidates=withoutHeadsAndCurrent(c,page);
+            int deleted=candidates.isEmpty()?0:deleteRequests(c,candidates,cutoff);
+            return new RequestPurge(page.size()<limit?RequestCursor.START:page.getLast(),deleted);
+        });
+    }
+    /** 去掉请求头与当前观战原件。这两列是 MEDIUMTEXT（表缺省 unicode_ci），请求行的主键列是 0900_bin：在 Java 里比，不依赖 SQL 混用排序规则时的取舍。 */
+    private static List<RequestCursor> withoutHeadsAndCurrent(AuthorityJdbc.Session c,List<RequestCursor> page)throws SQLException {
+        var players=new LinkedHashSet<Long>();
+        for(var row:page)players.add(row.player());
+        var ids=new ArrayList<Object>();
+        for(long player:players)ids.add(AuthorityJdbc.u64(player));
+        String in=String.join(",",Collections.nCopies(ids.size(),"?"));
+        AuthorityJdbc.Row<String> key=row->AuthorityJdbc.u64(row,1)+":"+row.getString(2);
+        var referenced=new HashSet<String>(c.list("SELECT player_id,request_id FROM match_global_watch_head WHERE player_id IN ("+in+")",key,ids.toArray()));
+        referenced.addAll(c.list("SELECT player_id,operation_id FROM match_global_watching WHERE player_id IN ("+in+") AND (state IS NULL OR state<>5)",key,ids.toArray()));
+        return page.stream().filter(row->!referenced.contains(row.player()+":"+row.request())).toList();
+    }
+    private static int deleteRequests(AuthorityJdbc.Session c,List<RequestCursor> rows,long cutoff)throws SQLException {
+        var args=new ArrayList<Object>();
+        for(var row:rows){args.add(AuthorityJdbc.u64(row.player()));args.add(row.request());}
+        args.add(cutoff);
+        return c.update("DELETE FROM match_global_watch_request WHERE (player_id,request_id) IN ("+String.join(",",Collections.nCopies(rows.size(),"(?,?)"))+") AND created_ms<? AND (cancelled=1 OR OCTET_LENGTH(response_payload)>0)"+NO_PENDING_EXIT,args.toArray());
     }
     public String reissue(SessionContext actor,long battle,Deadline deadline) {
         subject(actor,actor.getPlayerId());return tx(actor,deadline,c->{

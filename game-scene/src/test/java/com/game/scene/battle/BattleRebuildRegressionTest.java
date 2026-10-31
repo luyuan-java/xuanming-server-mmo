@@ -44,14 +44,14 @@ class BattleRebuildRegressionTest {
     @Test
     void 重建FIGHTING_复核命中_推144一次_在进场下行之后() {
         f.locks.hold(Op.TOUCH);
-        ScenePlayer player = loadWithLock(BattleRedis.STATE_FIGHTING, 360);
+        ScenePlayer player = loadWithLock(BattleRedis.STATE_FIGHTING, BattleFixture.FIGHTING_LOCK_TTL_SEC);
         f.drain();
         BattleFreeze freeze = player.battle().freeze();
         assertThat(freeze.phase()).isEqualTo(Phase.FIGHTING);
         assertThat(f.reconnectHints(player)).as("复核结局回来之前不推").isEmpty();
         Call touch = f.locks.take(Op.TOUCH);
         assertThat(touch.args()).containsEntry("state", "F").containsEntry("deadline", freeze.deadlineMs())
-                .containsEntry("prepareDeadline", freeze.prepareDeadlineMs()).containsEntry("ttl", BattleFixture.BATTLE_MILLIS / 1000 + 60);
+                .containsEntry("prepareDeadline", freeze.prepareDeadlineMs()).containsEntry("ttl", BattleFixture.FIGHTING_LOCK_TTL_SEC);
 
         touch.complete();
         f.drain();
@@ -80,7 +80,7 @@ class BattleRebuildRegressionTest {
     @Test
     void 重建FIGHTING_复核出错_冻结保留_144照样推一次_下一次确认再续一次锁() {
         f.locks.hold(Op.TOUCH);
-        ScenePlayer player = loadWithLock(BattleRedis.STATE_FIGHTING, 360);
+        ScenePlayer player = loadWithLock(BattleRedis.STATE_FIGHTING, BattleFixture.FIGHTING_LOCK_TTL_SEC);
         f.drain();
         BattleFreeze freeze = player.battle().freeze();
 
@@ -142,7 +142,7 @@ class BattleRebuildRegressionTest {
         assertThat(f.reconnectHints(player)).containsExactly(X);
         assertThat(f.locks.lockState(PLAYER)).isEqualTo("F");
         long extendedTtl = f.locks.lockTtlSec(PLAYER);
-        assertThat(extendedTtl).isEqualTo(BattleFixture.BATTLE_MILLIS / 1000 + 60);
+        assertThat(extendedTtl).as("按有效期限（期限 + 终局宽限 + 投递余量）续").isEqualTo(BattleFixture.FIGHTING_LOCK_TTL_SEC);
 
         Call touch = f.locks.take(Op.TOUCH).complete();
         f.drain();
@@ -205,7 +205,7 @@ class BattleRebuildRegressionTest {
         ScenePlayer player = f.load(SESSION, PLAYER, 1, f.scene1, PlayerState.getDefaultInstance());
         Call read = f.locks.take(Op.ENTER_READ).execute();
         // 快照之后、TOUCH 之前，锁被标成 F 并续到正式期限（旧节点的离线确认）
-        f.locks.putLock(PLAYER, X, NODE, BattleRedis.STATE_FIGHTING, f.deadline(), f.prepareDeadline(), 360);
+        f.locks.putLock(PLAYER, X, NODE, BattleRedis.STATE_FIGHTING, f.deadline(), f.prepareDeadline(), BattleFixture.FIGHTING_LOCK_TTL_SEC);
         read.reply();
         f.drain();
         BattleFreeze freeze = player.battle().freeze();
@@ -221,7 +221,7 @@ class BattleRebuildRegressionTest {
         assertThat(f.rebuilds("login", "rebuilt")).isEqualTo(1);
         assertThat(f.rebuilds("login", "reverted")).isZero();
         assertThat(f.locks.lockState(PLAYER)).isEqualTo("F");
-        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(360);
+        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(BattleFixture.FIGHTING_LOCK_TTL_SEC);
 
         f.confirm(PLAYER, X, f.deadline());
         f.drain();
@@ -233,7 +233,7 @@ class BattleRebuildRegressionTest {
     @Test
     void 重建后复核没命中_撤销冻结_锁不动() {
         f.locks.hold(Op.TOUCH);
-        ScenePlayer player = loadWithLock(BattleRedis.STATE_FIGHTING, 360);
+        ScenePlayer player = loadWithLock(BattleRedis.STATE_FIGHTING, BattleFixture.FIGHTING_LOCK_TTL_SEC);
         f.drain();
         assertThat(player.inBattle()).isTrue();
         // 锁在快照之后被别的局顶掉了
@@ -336,13 +336,13 @@ class BattleRebuildRegressionTest {
         assertThat(freeze.lockExtended()).as("补的那次续期还没回来，不能算已确认").isFalse();
         assertThat(f.reconnectHints(player)).containsExactly(X);
         Call second = f.locks.take(Op.CONFIRM);
-        assertThat(second.args()).containsEntry("deadline", lockDeadline).containsEntry("ttl", BattleFixture.BATTLE_MILLIS / 1000 + 60);
+        assertThat(second.args()).containsEntry("deadline", lockDeadline).containsEntry("ttl", BattleFixture.FIGHTING_LOCK_TTL_SEC);
 
         second.complete();
         f.drain();
 
         assertThat(freeze.lockExtended()).isTrue();
-        assertThat(f.locks.lockTtlSec(PLAYER)).as("锁 TTL 不短于正式期限剩余 + 60").isEqualTo(BattleFixture.BATTLE_MILLIS / 1000 + 60);
+        assertThat(f.locks.lockTtlSec(PLAYER)).as("锁 TTL 不短于有效期限剩余 + 60").isEqualTo(BattleFixture.FIGHTING_LOCK_TTL_SEC);
         assertThat(f.locks.count(Op.CONFIRM)).isEqualTo(2);
     }
 
@@ -363,7 +363,7 @@ class BattleRebuildRegressionTest {
 
         assertThat(f.confirms("reextended")).isEqualTo(1);
         assertThat(freeze.lockExtended()).isTrue();
-        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(BattleFixture.BATTLE_MILLIS / 1000 + 60);
+        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(BattleFixture.FIGHTING_LOCK_TTL_SEC);
         assertThat(f.reconnectHints(player)).hasSize(1);
     }
 

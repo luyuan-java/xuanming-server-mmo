@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.common.sql.testing.AuthoritySqlFixture;
 import com.game.discovery.sql.AuthorityDataSourcePolicy;
+import com.game.discovery.sql.StrongTiDbConnectionPolicy;
 import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.guild.rules.GuildReject;
@@ -77,6 +78,7 @@ public final class GuildMysqlFixture implements AutoCloseable {
             });
             DruidDataSource ds=new DruidDataSource();
             try{ds.setUrl(authority.jdbcUrl(PARAMS));ds.setUsername(authority.normalUser());ds.setPassword(authority.normalPassword());ds.setMaxActive(96);ds.setMaxWait(10_000);ds.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                StrongTiDbConnectionPolicy.forGuild("guild-fixture",!options.allowMySql()).postProcessBeforeInitialization(ds,"guild-fixture");
                 AuthorityDataSourcePolicy.protectDruid(ds,authority.writerBoot(),!options.allowMySql());
                 GuildTables.sync(ds,java.time.Duration.ofMinutes(1));return new GuildMysqlFixture(authority.database(),ds,authority);
             }catch(Exception failure){ds.close();try{authority.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
@@ -120,6 +122,7 @@ public final class GuildMysqlFixture implements AutoCloseable {
             source.setUsername(authority.normalUser());
             source.setPassword(authority.normalPassword());
             source.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            StrongTiDbConnectionPolicy.forGuild("guild-fixture-short-socket",Boolean.getBoolean("game.it.require-tidb")).postProcessBeforeInitialization(source,"guild-fixture-short-socket");
             AuthorityDataSourcePolicy.protectDruid(source, authority.writerBoot(), Boolean.getBoolean("game.it.require-tidb"));
             return source;
         } catch (SQLException | RuntimeException failure) {

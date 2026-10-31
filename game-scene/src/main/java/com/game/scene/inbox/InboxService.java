@@ -2,6 +2,7 @@ package com.game.scene.inbox;
 
 import com.game.player.store.inbox.InboxLedgerRules;
 import com.game.player.store.state.InboxDecisionState;
+import com.game.player.store.state.InboxDomainCursorState;
 import com.game.player.store.state.PlayerState;
 import com.game.proto.player_inbox.AckPlayerInboxRequest;
 import com.game.proto.player_inbox.AckPlayerInboxResponse;
@@ -10,14 +11,17 @@ import com.game.proto.player_inbox.FetchPlayerInboxResponse;
 import com.game.proto.player_inbox.PlayerInboxAckItem;
 import com.game.proto.player_inbox.PlayerInboxAckResult;
 import com.game.proto.player_inbox.PlayerInboxDecisionReport;
+import com.game.proto.player_inbox.PlayerInboxDirective;
 import com.game.proto.player_inbox.PlayerInboxDomain;
 import com.game.proto.player_inbox.PlayerInboxFenceVerdict;
 import com.game.proto.player_inbox.PlayerInboxItem;
+import com.game.proto.player_inbox.PlayerInboxMessageType;
 import com.game.proto.player_inbox.PlayerInboxOutcome;
 import com.game.scene.inbox.InboxConsumers.Applied;
 import com.game.scene.inbox.InboxConsumers.Deferred;
 import com.game.scene.inbox.InboxConsumers.ExecResult;
 import com.game.scene.inbox.InboxConsumers.Rejected;
+import com.game.scene.inbox.InboxConsumers.VersionSkew;
 import com.game.scene.inbox.InboxRules.Classified;
 import com.game.scene.inbox.InboxRules.Durability;
 import com.game.scene.inbox.InboxRules.ItemAction;
@@ -653,6 +657,41 @@ public final class InboxService implements InboxHooks {
         return true;
     }
 
+    private static boolean battleDomain(DomainState state) {
+        return state.domain == PlayerInboxDomain.PLAYER_INBOX_DOMAIN_SCENE_BATTLE_SETTLEMENT_VALUE;
+    }
+
+    /**
+     * 战斗域的一条投递能不能按「原 APPLIED 结局」处理（同 C++ 战斗域守卫）：类型必须是战斗结算、指令必须是 NONE（战斗终局不接受 VOID），
+     * 水位下已出环（只能报 UNKNOWN）不行，回放时环里的原结局必须是 APPLIED。新条目（EXECUTE）与 MISMATCH 交给后面的原有路径。
+     */
+    private static boolean originalBattleOutcome(int msgType, int directive, ItemAction action, Classified classified) {
+        if (msgType != PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT_VALUE
+                || directive != PlayerInboxDirective.PLAYER_INBOX_DIRECTIVE_NONE_VALUE || action == ItemAction.ACK_UNKNOWN) {
+            return false;
+        }
+        return action != ItemAction.REPLAY
+                || classified.recorded().getOutcome() == PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED_VALUE;
+    }
+
+    /**
+     * 本域最近结局环里同一局（request_id = battle_id）已记 APPLIED 的那一条；没有为 null。只看环（内存账本，含本实例尚未落盘、与效果同一份状态的结局），
+     * 不看已挤出环的历史——有界缓解，见调用处。
+     */
+    private static InboxDecisionState appliedBattleRequest(InboxLedger ledger, int domain, long requestId) {
+        InboxDomainCursorState cursor = ledger.cursor(domain);
+        if (cursor == null || requestId == 0) {
+            return null;
+        }
+        for (InboxDecisionState recent : cursor.getRecentList()) {
+            if (recent.getRequestId() == requestId && recent.getMsgType() == PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT_VALUE
+                    && recent.getOutcome() == PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED_VALUE) {
+                return recent;
+            }
+        }
+        return null;
+    }
+
     /** 水位已过这一条、原结局已不在环里时报的 UNKNOWN 结局。 */
     private static InboxDecisionState unknownDecisionFor(PlayerInboxItem item) {
         return InboxDecisionState.newBuilder()
@@ -697,6 +736,18 @@ public final class InboxService implements InboxHooks {
             // 先按账本分类，只有新条目才看指令，执行器最后才查（评审 M1）
             Classified classified = InboxRules.classify(ledger.cursor(state.domain), seq, requestId, msgType);
             ItemAction action = InboxRules.plan(classified.deliveryClass(), item.getDirectiveValue());
+
+            if (battleDomain(state) && !originalBattleOutcome(msgType, item.getDirectiveValue(), action, classified)) {
+                // 战斗域守卫（同 C++ player_inbox_system.cpp 的同名守卫）：永久终局只能由原 APPLIED 结局终结。类型 / 指令不符、水位下已出环（只能报
+                // UNKNOWN）、回放的原结局不是 APPLIED，都不能确认——确认了服务端就把一局未应用的奖励永久销账。按版本错位停在这一条、不确认，
+                // 已定前缀照常确认；这一行留在服务端 PENDING，等实例重建后由人工核对处置。
+                log.error("[PlayerInbox] Battle delivery is not an original APPLIED outcome player_id={} domain={} seq={} msg_type={} directive={} "
+                                + "action={} request_id={}", Long.toUnsignedString(playerId), state.domain, Long.toUnsignedString(seq), msgType,
+                        item.getDirectiveValue(), action, Long.toUnsignedString(requestId));
+                halt(state, playerId, HaltReason.VERSION_SKEW, "battle outcome requires original APPLIED decision");
+                afterBatchDecided(player, state, recorded, now);
+                return;
+            }
 
             if (action == ItemAction.REPLAY) {
                 // 重复投递：按 (seq, request_id, msg_type) 核对后回放原结局（IB-9），不需要执行器、不看指令
@@ -749,15 +800,36 @@ public final class InboxService implements InboxHooks {
                     afterBatchDecided(player, state, recorded, now);
                     return;
                 }
-                ExecResult result = executor.execute(player, item.getPayload());
+                InboxDecisionState appliedBefore = battleDomain(state) ? appliedBattleRequest(ledger, state.domain, requestId) : null;
+                ExecResult result = appliedBefore != null ? new Applied() : executor.execute(player, item.getPayload());
+                if (appliedBefore != null) {
+                    // 同一局（request_id = battle_id）换了新 seq 再投：收件箱库回档后 Match 首投回包丢失、重投拿到新 seq。本域最近结局环里已有
+                    // 这一局的 APPLIED，奖励已随那一次落盘，不再执行，只为新 seq 记 APPLIED 并照常确认。这是有界缓解：只能看见环里（至多
+                    // InboxLedgerRules.RECENT_CAPACITY 条）的结局，原结局已被挤出环时识别不了，仍会重复应用——根治要靠收件箱不回档或跨库对账。
+                    log.warn("[PlayerInbox] metric=inbox_battle_duplicate_request player_id={} domain={} seq={} request_id={} original_seq={}; "
+                                    + "the battle was already applied under an earlier seq, recording APPLIED without executing it again",
+                            Long.toUnsignedString(playerId), state.domain, Long.toUnsignedString(seq), Long.toUnsignedString(requestId),
+                            Long.toUnsignedString(appliedBefore.getSeq()));
+                }
                 if (result instanceof Applied) {
                     decision.setOutcome(PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED_VALUE).setReason(0);
                 } else if (result instanceof Rejected rejected) {
                     decision.setOutcome(PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_REJECTED_VALUE).setReason(rejected.reason());
+                } else if (result instanceof VersionSkew skew) {
+                    // 版本错位（同 C++ kVersionSkew）：与未知类型同口径——停在这一条、不记账、不确认这一条，停用该域，已定前缀照常确认。
+                    // 不走 DEFER 的本地续做：错位不会在本实例里消失，续做只会空转；按旧本地副本续做也看不到服务端之后挂的 VOID。
+                    // 告警走 halt 打的 metric=inbox_halted reason=version_skew，这一行补条目上下文。
+                    log.error("[PlayerInbox] Executor reported version skew player_id={} domain={} seq={} type={} request_id={} reason={}",
+                            Long.toUnsignedString(playerId), state.domain, Long.toUnsignedString(seq), InboxConsumers.typeName(msgType),
+                            Long.toUnsignedString(requestId), Integer.toUnsignedString(skew.reason()));
+                    halt(state, playerId, HaltReason.VERSION_SKEW, "seq=" + Long.toUnsignedString(seq));
+                    afterBatchDecided(player, state, recorded, now);
+                    return;
                 } else {
                     // DEFER：严格顺序，停在这一条；已处理的前缀从本地缓存摘掉，剩下的按退避续做，不重新 Fetch（续做时仍先过前置闸）
-                    log.warn("[PlayerInbox] Executor deferred player_id={} domain={} seq={} type={} reason={}", Long.toUnsignedString(playerId),
-                            state.domain, Long.toUnsignedString(seq), InboxConsumers.typeName(msgType), ((Deferred) result).reason());
+                    Deferred deferred = (Deferred) result;
+                    log.warn("[PlayerInbox] Executor deferred player_id={} domain={} seq={} type={} reason={} cause={}", Long.toUnsignedString(playerId),
+                            state.domain, Long.toUnsignedString(seq), InboxConsumers.typeName(msgType), deferred.reason(), deferred.cause());
                     state.pendingItems.subList(0, consumed).clear();
                     if (recorded) {
                         requestPersist(player, state, now);

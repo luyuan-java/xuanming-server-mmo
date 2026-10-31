@@ -108,7 +108,7 @@ message GlobalPolicyRow {
   uint32 policy_id = 1;
   bytes fingerprint = 2;
 }
-// 全局观战准入不按TTL删除，原operation取消正证明之后才能closed。
+// 全局观战准入不按TTL删除：拿到原operation取消正证明，或原实例已不在（GlobalWatchAuthority.settled）才能closed。
 message GlobalWatchingRow {
   option (proto2mysql.table_name) = "match_global_watching";
   option (proto2mysql.primary_key) = "player_id";
@@ -129,10 +129,11 @@ message GlobalWatchingRow {
   uint64 lease_until_ms = 13;
   uint64 expires_ms = 14; // 只触发取消，不能作为终局证明。
 }
-// 永久UUID回执与当前观战分开；重放旧UUID不能清退/复活更新的一轮。
+// UUID回执与当前观战分开；重放旧UUID不能清退/复活更新的一轮。创建满7天且不再被引用的行由低频任务删除（GlobalWatchAuthority.purgeRequests，索引供它翻页）。
 message GlobalWatchRequestRow {
   option (proto2mysql.table_name) = "match_global_watch_request";
   option (proto2mysql.primary_key) = "player_id,request_id";
+  option (proto2mysql.index) = "created_ms,player_id,request_id";
   uint64 player_id = 1;
   string request_id = 2;
   string owner_account = 3;
@@ -222,7 +223,7 @@ message GlobalDirectStartOriginal {
 message GlobalFormationRow {
   option (proto2mysql.table_name) = "match_global_formation";
   option (proto2mysql.primary_key) = "battle_id";
-  option (proto2mysql.index) = "state,retry_ms;state,created_ms,battle_id";
+  option (proto2mysql.index) = "state,retry_ms;state,spectate_public,created_ms,battle_id";
   uint64 battle_id = 1;
   string operation_id = 2;
   // 1 已成组待备战；2 已持久化完整建房意图；3 结局未知；4 已建房；5 已确认中止。
@@ -243,6 +244,8 @@ message GlobalFormationRow {
   bool requeue_on_failure = 17;
   // 备战端点也持久化，恢复取消不能依赖玩家当前在线位置。
   repeated GlobalPreparedEndpoint prepared = 18;
+  // 建房原件里冻结的观战可见性是否 PUBLIC：与 create_request 同一笔事务写入，之后不变。观战列表与随机选场在 SQL 里直接过滤（索引带它），不解码原件。
+  bool spectate_public = 19;
 }
 message GlobalPreparedEndpoint {
   uint64 player_id = 1;

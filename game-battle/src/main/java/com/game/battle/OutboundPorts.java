@@ -4,6 +4,7 @@ import com.game.battle.port.ActivityResultSink;
 import com.game.battle.port.BattleResultSink;
 import com.game.battle.port.SceneBattleEvents;
 import com.game.battle.port.SettlementSink;
+import com.game.battle.port.SpectateFrameSink;
 import com.game.battle.push.LobbyAnnouncer;
 import java.util.Objects;
 
@@ -16,13 +17,21 @@ import java.util.Objects;
  * @param settlements     结算 → scene（dev 房间不调）
  * @param activityResults 活动局结果（dev 房间不调）
  * @param results         普通局结果 → match（dev 房间不调）
+ * @param spectateFrames  观战中继帧 → Redis 分片频道（mmorpg battle-spectate-tiered-fanout.md §15.7）
  */
 public record OutboundPorts(
         LobbyAnnouncer lobby,
         SceneBattleEvents sceneEvents,
         SettlementSink settlements,
         ActivityResultSink activityResults,
-        BattleResultSink results) {
+        BattleResultSink results,
+        SpectateFrameSink spectateFrames) {
+
+    /** 不接观战中继（不关心中继的装配）。 */
+    public OutboundPorts(LobbyAnnouncer lobby, SceneBattleEvents sceneEvents, SettlementSink settlements, ActivityResultSink activityResults,
+                         BattleResultSink results) {
+        this(lobby, sceneEvents, settlements, activityResults, results, SpectateFrameSink.NONE);
+    }
 
     public OutboundPorts {
         Objects.requireNonNull(lobby, "lobby");
@@ -30,5 +39,6 @@ public record OutboundPorts(
         Objects.requireNonNull(settlements, "settlements");
         Objects.requireNonNull(activityResults, "activityResults");
         Objects.requireNonNull(results, "results");
+        Objects.requireNonNull(spectateFrames, "spectateFrames");
     }
 }

@@ -489,6 +489,9 @@ public final class GlobalMatchService implements AutoCloseable {
                     .setTargetInstanceId(f.getInstanceId()).setAdmitBeforeMs(Math.min(f.getCreatedMs()+120_000,f.getRetryMs()-1000))
                     .setOutcomeProtocolVersion(1);
             if(!f.getActivityContext().isEmpty())request.setActivityContext(BattleActivityContext.parseFrom(f.getActivityContext()));
+            // 观战可见性建房时决定一次，随 formation 持久的 create_request 冻结；之后观战各处只读这份原件，不按模式重算
+            request.setSpectateVisibility(com.game.match.spectate.SpectateVisibilityPolicy.decide(MatchMode.forNumber(f.getMode()),
+                    request.hasActivityContext()?request.getActivityContext():null));
             var preflight=query(f);
             f=store.saveIntent(f,NetworkProbes.bytes(request.build()),preflight);
             return create(f);
@@ -564,6 +567,8 @@ public final class GlobalMatchService implements AutoCloseable {
         var p=BattlePlacement.newBuilder().setBattleId(f.getBattleId()).setMode(f.getMode()).setBattleConfigId(f.getConfigId()).setCreatedAtMs(f.getCreatedMs())
                 .setDeadlineMs(f.getDeadlineMs()).setBattleNodeId(f.getNodeId()).setBattleInstanceId(f.getInstanceId()).setRpcHost(f.getHost()).setRpcPort(f.getPort()).setAttempt(1);
         request.getPlayersList().forEach(s->p.addPlayerNames(s.getPlayerName()));
+        // 投影抄建房原件里冻结的可见性：开局钩子据此只公开公开局（私密局的投影照写，补签靠它定位）
+        p.setSpectateVisibility(request.getSpectateVisibilityValue());
         projections.write(p.build());try{hooks.onStarted(p.build());}catch(RuntimeException e){log.warn("观战展示投影稍后恢复",e);}
     }
     public RequestBattleTicketResponse reissue(long player,long battle) {

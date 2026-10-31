@@ -239,4 +239,39 @@ class RecoverTradeAdmissionTest {
         }
         assertEquals("[2001:db8::1]:3306",RecoverTradeAdmission.recoveryJdbcAddress("jdbc:mysql://[2001:db8::1]:3306/game","game"));
     }
+
+    @Test void 已提交后再计划退出码3_提示按原计划只读重放_不写新计划(@TempDir Path dir) throws Exception {
+        try(var f=createFixture()) {
+            setup(f);var sql=new JdbcTemplate(f.dataSource);var c=connection(f,INSTANCE,new AtomicInteger());
+            Path p=dir.resolve("plan.json");assertEquals(0,run(plan(p,f.database),env(f.database),c));
+            String digest=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(p)));
+            assertEquals(0,run(apply(dir.resolve("applied.json"),p,digest,f.database),env(f.database),c));
+            out.reset();err.reset();
+            Path again=dir.resolve("again.json");
+            assertEquals(3,run(plan(again,f.database),env(f.database),c));
+            assertFalse(Files.exists(again),"已提交时不生成新计划");
+            String printed=out.toString();
+            assertTrue(printed.contains("已由永久恢复原件退休"));assertTrue(printed.contains("recovery_id="+ID));
+            assertTrue(printed.contains("--apply"));assertFalse(printed.contains("must-not-appear"));
+            assertFalse(err.toString().contains("未完成"),"已提交不是恢复未完成");
+            assertEquals(1,sql.queryForObject("SELECT COUNT(*) FROM player_trade_admission_recovery",Integer.class));
+            assertEquals(0,run(apply(dir.resolve("replayed.json"),p,digest,f.database),env(f.database),c),"按原计划只读重放取回原收据");
+        }
+    }
+
+    @Test void 计划前置不满足按受控分类输出_不含口令与连接(@TempDir Path dir) throws Exception {
+        try(var f=createFixture()) {
+            setup(f);var c=connection(f,INSTANCE,new AtomicInteger());
+            // 当前SQL归属代就是2：拿它当旧代没有更高代可证明旧持有者已被接替，Store 报 NOT_READY
+            var args=new ArrayList<>(plan(dir.resolve("not-ready.json"),f.database));
+            args.set(args.indexOf("--old-epoch")+1,"2");
+            assertEquals(1,run(args,env(f.database),c));
+            String printed=err.toString();
+            assertTrue(printed.contains("分类=NOT_READY"),printed);assertFalse(printed.contains("异常类型="));
+            assertFalse(printed.contains("must-not-appear"));assertFalse(printed.contains("127.0.0.1"));assertFalse(printed.contains("jdbc:"));
+            assertFalse(Files.exists(dir.resolve("not-ready.json")));
+            assertEquals(0,new JdbcTemplate(f.dataSource).queryForObject("SELECT COUNT(*) FROM player_trade_admission_recovery",Integer.class));
+            assertEquals(1,new JdbcTemplate(f.dataSource).queryForObject("SELECT COUNT(*) FROM player_final_save WHERE owner_epoch=1",Integer.class));
+        }
+    }
 }

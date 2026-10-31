@@ -153,6 +153,10 @@ public final class BattleSettlementService {
             }
             for(var item:settlement.getItemsGainedList())if(item.getItemTableId()!=0&&item.getCount()!=0)
                 gained.merge(item.getItemTableId(),clampCount(item.getCount()),(a,b)->Math.min(a+b,UINT32_MAX));
+            // 配置行已被新版本删掉的掉落 / 消耗：只剔除这一项（记 ERROR 与计数），其余照常应用——同宠物缺配置只跳子效果。否则整包候选恒失败、
+            // 永久 DEFER，这一局的金币和其余奖励永远到不了账。全服产出封禁不在此列：被封禁的物品配置行还在，照旧走整包候选失败（口径待定，不改）。
+            dropRetiredItems(settlement.getBattleId(),consumed,ItemKind.CONSUME_CONFIG_MISSING);
+            dropRetiredItems(settlement.getBattleId(),gained,ItemKind.DROP_CONFIG_MISSING);
             Map<Integer,Long> shortfalls=new TreeMap<>(Integer::compareUnsigned);
             consumed.forEach((config,wanted)->{long held=player.bags().bag(BagType.INVENTORY).total(config);if(held<wanted)shortfalls.put(config,wanted-held);});
             var bag=bags.prepareBattle(player,consumed,gained);
@@ -166,16 +170,43 @@ public final class BattleSettlementService {
             }
             bag.commitBattle(settlement.getBattleId());applyVitals(player,settlement);
             pets.applyBattleSettlement(player,applicablePets);
+            // 应用时战斗冻结已不在（判废期限已过才到达）：本局消耗的物品可能已在解冻之后经交易 / 帮会托管转走。夹紧照旧（不能扣成负数），
+            // 另记专用计数与 WARN 供对账——它说明「冻结覆盖 Match 终局宽限 + 收件箱投递余量」这条不变量被打破了。
+            boolean released=!shortfalls.isEmpty()&&player.battle().freeze()==null;
             shortfalls.forEach((config,missing)->{
                 metrics.item(ItemKind.CONSUME_CLAMPED);
                 log.error("战斗消耗按原持有夹紧 reason=held_shortfall battle={} item={} missing={}",
                         Long.toUnsignedString(settlement.getBattleId()),Integer.toUnsignedString(config),missing);
+                if(released){
+                    metrics.item(ItemKind.CONSUME_CLAMPED_UNFROZEN);
+                    log.warn("战斗冻结已释放后结算才到达，消耗按当时持有夹紧 reason=clamped_after_freeze_release battle={} player={} item={} missing={}",
+                            Long.toUnsignedString(settlement.getBattleId()),Long.toUnsignedString(player.playerId()),
+                            Integer.toUnsignedString(config),missing);
+                }
             });
             for(var defeat:settlement.getDefeatedMonstersList())missions.onMonsterKilled(player,defeat.getMonsterConfigId(),defeat.getCount());
             // 自动领奖失败的claimable仍在同份玩家状态，不删资格；经验产品边界仍不冒已到账。
             if(settlement.getExpGain()!=0)metrics.expIgnored();
             return Result.APPLIED;
         }finally{player.battle().setApplying(false);}
+    }
+
+    /**
+     * 剔除物品配置行已不存在的条目（新版本删了这一行）：剩下的照常进整包候选。只认「表里没有这一行」；行还在但语义未知（未知字段、堆叠上限 0）
+     * 仍由整包候选拒绝、整笔延后，不在这里放过。每剔除一项记一次 {@code kind}（低基数）与一行 ERROR。
+     */
+    private void dropRetiredItems(long battleId, Map<Integer, Long> counts, ItemKind kind) {
+        for (var it = counts.entrySet().iterator(); it.hasNext(); ) {
+            var entry = it.next();
+            if (bags.tables().item(entry.getKey()) != null) {
+                continue;
+            }
+            it.remove();
+            metrics.item(kind);
+            log.error("战斗结算的物品配置行已不存在，跳过这一项、其余照常应用 reason=item_config_missing kind={} battle={} item={} count={}",
+                    kind.name().toLowerCase(java.util.Locale.ROOT), Long.toUnsignedString(battleId), Integer.toUnsignedString(entry.getKey()),
+                    entry.getValue());
+        }
     }
 
     private Result applyOnce(SceneWorld world, ScenePlayer player, BattleSettlementData settlement) {

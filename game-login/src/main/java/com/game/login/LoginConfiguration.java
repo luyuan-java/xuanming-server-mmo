@@ -109,6 +109,10 @@ public class LoginConfiguration {
     /** access / refresh 令牌（Redis；全服共用、不分 zone）。 */
     @Bean
     public LoginTokens loginTokens(RedissonClient redis, RedisKeys redisKeys, LoginProperties props) {
+        if (props.refreshReuseGrace().isZero() && props.refreshReuseRevoke()) {
+            // 合法但危险：同一刷新请求重复一次（客户端重发、Redisson 对超时的重发）就会吊销刚签出的那一对
+            log.error("game.login.refresh-reuse-grace=0 且 refresh-reuse-revoke=true：同一刷新请求重复一次就会吊销整次登录的令牌家族");
+        }
         return new RedisLoginTokens(redis, redisKeys, Clock.systemUTC(), props.accessTokenTtl(), props.refreshTokenTtl(),
                 props.refreshReuseGrace(), props.refreshReuseRevoke(), new SecureRandom());
     }

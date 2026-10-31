@@ -134,6 +134,13 @@ game:
       sweep-interval: 10s
       # 同时在途的 163 上限（≥ 1，否则拒启）：163 每个请求一条虚拟线程、同步等 battle 的 RPC；超限当场回 in-band 16004。
       max-inflight: 128
+      # 观战中继（mmorpg battle-spectate-tiered-fanout.md §15.7）：打开后直连席满了转大厅档（gate 经 Redis 分片频道扇出，要 Redis 7+）；关闭时满了回 16021。
+      # 缺省打开：prod 下没配 GAME_SPECTATE_TOKEN_SECRET 会拒启；不要大厅档的部署显式设 GAME_MATCH_SPECTATE_RELAY_ENABLED=false。
+      relay-enabled: ${GAME_MATCH_SPECTATE_RELAY_ENABLED:true}
+      # 观战凭证密钥（match 签、gate 验）：与 gate / battle 令牌分域；中继打开时 prod 下为空、太短（< 32 字节）或与它们相同都拒启。
+      ticket-secret: ${GAME_SPECTATE_TOKEN_SECRET:}
+      # 凭证有效期：只决定能不能订阅，订阅建立后的寿命由战斗终局 / 期限 / 会话决定。
+      ticket-ttl-seconds: 60
     # 对局结果 topic（game-battle 生产）：代次必须与 game-battle 一致。启动第 9 步（Dubbo 已导出之后）同步核对一次，至多等 init-timeout：
     # 分区数与契约不符拒绝启动（要升代次）；Kafka 不可达照常启动，之后每 30 s 后台重试。
     kafka:

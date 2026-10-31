@@ -1,6 +1,7 @@
 package com.game.match.gather;
 
 import static com.game.match.gather.GatherFixture.ONE_V_ONE;
+import static com.game.match.gather.GatherFixture.PVE_TEAM;
 import static com.game.match.gather.GatherFixture.TARGET_A;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
@@ -32,6 +33,7 @@ import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
 import com.game.proto.RemoveObserverRequest;
 import com.game.proto.eBattleActivityKind;
+import com.game.proto.eSpectateVisibility;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -92,6 +94,14 @@ class GatherHooksCallSiteTest {
             return f.pipeline().run(plan);
         }
 
+        /**
+         * 一局会被公开的凑单（PVE 组队人数档）。1V1 是计分局，建房时冻结为私密、只留落点不进可观战索引（可见性闸）；
+         * 钉「开局成功后公开」这一半的用例改用它，失败路径的用例仍用 1V1。
+         */
+        GatherPlan publicPopped() {
+            return f.popped(PVE_TEAM, 1, A, B);
+        }
+
         List<String> spectateWrites() {
             return f.events.stream().filter(event -> event.startsWith("spectate.publish:") || event.startsWith("spectate.release:")
                     || event.startsWith("spectate.evict:")).toList();
@@ -105,7 +115,7 @@ class GatherHooksCallSiteTest {
     // ================================================================ 五个入口
 
     @Test
-    void 五个入口的成员若正在观战_都在第一次备战之前被清退_开局成功后新的一局登记进索引() {
+    void 五个入口的成员若正在观战_都在第一次备战之前被清退_开局成功后公开局登记进索引_私密局只留落点() {
         BattleActivityContext activity = BattleActivityContext.newBuilder().setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_TRIAL)
                 .setGuildId(555).setActivityId(3).setPeriodKey(20261006).setInitiatorPlayerId(A).setGuildPeriodKey(20261006).build();
         Map<String, Function<GatherFixture, GatherPlan>> entries = Map.of(
@@ -114,6 +124,8 @@ class GatherHooksCallSiteTest {
                 "切磋", f -> f.challenge(B, A),
                 "整队", f -> f.team(B, A, C),
                 "活动", f -> f.activity(8_888_888L, activity, A, B));
+        // 可见性闸：PVE 公开；1V1 计分局、点名切磋与活动局在建房时冻结为私密
+        Map<String, Boolean> shown = Map.of("凑单", false, "PVE_SOLO", true, "切磋", false, "整队", true, "活动", false);
 
         entries.forEach((entry, planOf) -> {
             Rig rig = new Rig();
@@ -140,13 +152,21 @@ class GatherHooksCallSiteTest {
             });
             assertThat(rig.spectate.calls).as("%s：删的是读到的那个值", entry).contains("release(1001," + mark + ")");
             assertThat(rig.spectate.markCount()).as(entry).isZero();
-            // 开局成功：补写落点之后公开，是整次 gather 的最后一步
-            assertThat(events.subList(events.size() - 2, events.size())).as("%s：先有最终落点、再进索引", entry)
-                    .containsExactly("placement.write:" + battle + "#1", "spectate.publish:" + battle);
-            assertThat(rig.spectate.watchable()).as("%s：旧场 + 新场，新场的分数是它的 created_at_ms", entry).containsExactly(battle, id(OLD_BATTLE));
-            assertThat(rig.spectate.scoreOf(battle)).hasValue(rig.f.placements.stored(result.battleId()).orElseThrow().getCreatedAtMs());
+            BattlePlacement stored = rig.f.placements.stored(result.battleId()).orElseThrow();
+            if (shown.get(entry)) {
+                // 开局成功：补写落点之后公开，是整次 gather 的最后一步
+                assertThat(events.subList(events.size() - 2, events.size())).as("%s：先有最终落点、再进索引", entry)
+                        .containsExactly("placement.write:" + battle + "#1", "spectate.publish:" + battle);
+                assertThat(rig.spectate.watchable()).as("%s：旧场 + 新场，新场的分数是它的 created_at_ms", entry).containsExactly(battle, id(OLD_BATTLE));
+                assertThat(rig.spectate.scoreOf(battle)).hasValue(stored.getCreatedAtMs());
+            } else {
+                assertThat(events.get(events.size() - 1)).as("%s：补写落点就是最后一步，私密局不公开", entry).isEqualTo("placement.write:" + battle + "#1");
+                assertThat(rig.spectate.watchable()).as("%s：私密局不进索引，只剩旧场", entry).containsExactly(id(OLD_BATTLE));
+                assertThat(stored.getSpectateVisibility()).as("%s：落点照写（补签靠它），带着冻结的私密", entry)
+                        .isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE_VALUE);
+            }
             assertThat(rig.f.count(EVICTIONS, "reason", "enter_gather", "result", "removed")).as(entry).isEqualTo(1.0);
-            assertThat(rig.f.count(ANOMALIES, "reason", "publish_failed")).as(entry).isZero();
+            assertThat(rig.f.count(ANOMALIES, "reason", "publish_failed")).as("%s：不公开私密局不是登记失败", entry).isZero();
         });
     }
 
@@ -155,7 +175,7 @@ class GatherHooksCallSiteTest {
         Rig rig = new Rig();
         rig.watchingOldBattle(A);
         rig.f.scene.name(A, "甲").name(B, "乙");
-        GatherPlan plan = rig.f.popped(ONE_V_ONE, 0, A, B);
+        GatherPlan plan = rig.publicPopped();
 
         GatherResult result = rig.run(plan);
 
@@ -169,7 +189,8 @@ class GatherHooksCallSiteTest {
 
         BattlePlacement started = rig.f.placements.stored(result.battleId()).orElseThrow();
         assertThat(started.getBattleNodeId()).isEqualTo(1);
-        assertThat(started.getMode()).isEqualTo(ONE_V_ONE);
+        assertThat(started.getMode()).isEqualTo(PVE_TEAM);
+        assertThat(started.getSpectateVisibility()).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC_VALUE);
         assertThat(started.getPlayerNamesList()).containsExactly("甲", "乙");
         assertThat(rig.spectate.watchable()).as("旧场 + 新场").containsExactly(id(result.battleId()), id(OLD_BATTLE));
         assertThat(rig.spectate.calls).contains("publish(" + id(result.battleId()) + "#1)");
@@ -268,7 +289,7 @@ class GatherHooksCallSiteTest {
     @Test
     void 落点在建房期间被懒剔除_开局成功后的补写把它找回来_并照常登记进索引() {
         Rig rig = new Rig();
-        GatherPlan plan = rig.f.popped(ONE_V_ONE, 0, A, B);
+        GatherPlan plan = rig.publicPopped();
         // 建房窗口里有人按 battle_id 观战、battle 回房间不存在、163 把落点与成员一起剔除了（attempt 守护命中的那种剔除）
         rig.f.battleCalls.register(TARGET_A, new DuringCreate(rig.f.battleA, request -> {
             long battleId = request.getBattleId();
@@ -293,7 +314,7 @@ class GatherHooksCallSiteTest {
     void 换节点重试成功_公开的是改写到新节点之后的那条落点() {
         Rig rig = new Rig();
         rig.f.addBattleB();
-        GatherPlan plan = rig.f.popped(ONE_V_ONE, 0, A, B);
+        GatherPlan plan = rig.publicPopped();
         rig.f.battleA.nextCreate(FakeBattleNode.notAllocatable("closed"));
 
         GatherResult result = rig.run(plan);
@@ -311,7 +332,7 @@ class GatherHooksCallSiteTest {
     @Test
     void 登记索引失败_仍是成功开局_票据ready_落点在_只是不进列表() {
         Rig rig = new Rig();
-        GatherPlan plan = rig.f.popped(ONE_V_ONE, 0, A, B);
+        GatherPlan plan = rig.publicPopped();
         rig.spectate.faults.failNext("publish");
 
         GatherResult result = rig.run(plan);
@@ -348,7 +369,7 @@ class GatherHooksCallSiteTest {
                 return rig.f.placements.read(battleId, d);
             }
         };
-        GatherPlan plan = rig.f.popped(ONE_V_ONE, 0, A, B);
+        GatherPlan plan = rig.publicPopped();
 
         GatherResult result = rig.run(plan);
 
@@ -374,7 +395,7 @@ class GatherHooksCallSiteTest {
         Rig unreadable = new Rig();
         String mark = unreadable.watchingOldBattle(A);
         unreadable.spectate.faults.failNext("marksOf");
-        assertThat(unreadable.run(unreadable.f.popped(ONE_V_ONE, 0, A, B)).ok()).isTrue();
+        assertThat(unreadable.run(unreadable.publicPopped()).ok()).isTrue();
         assertThat(unreadable.spectate.markOf(A)).contains(mark);
         assertThat(unreadable.observers.calls).isEmpty();
         assertThat(unreadable.f.count(ANOMALIES, "reason", "mark_read_failed")).isEqualTo(1.0);
@@ -386,7 +407,7 @@ class GatherHooksCallSiteTest {
         broken.observers.beforeRemove = call -> {
             throw new IllegalStateException("直拨器的 bug");
         };
-        GatherResult result = broken.run(broken.f.popped(ONE_V_ONE, 0, A, B));
+        GatherResult result = broken.run(broken.publicPopped());
         assertThat(result.ok()).isTrue();
         assertThat(broken.f.scene.frozen()).containsOnlyKeys(A, B);
         assertThat(broken.spectate.isWatchable(result.battleId())).isTrue();

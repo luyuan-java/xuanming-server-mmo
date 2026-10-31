@@ -53,6 +53,8 @@ import java.util.function.IntSupplier;
  *       <td>可观战索引：摘掉的成员数 / 数据异常 / 索引大小（每个实例各自采样同一个全局 ZSET，看板取 max、不能 sum）</td></tr>
  *   <tr><td>{@code game_match_observer_rpc_total{method, result}} / {@code game_match_spectate_inflight}</td><td>Counter / Gauge</td>
  *       <td>发给 battle 的观众 RPC 的结局 / 在途的 163 数（上限 {@code game.match.spectate.max-inflight}；每实例的真实值，求和才有意义）</td></tr>
+ *   <tr><td>{@code game_match_watch_unproven_close_total{reason}} / {@code game_match_watch_requests_purged_total}</td><td>Counter</td>
+ *       <td>全球观战原件拿不到取消证明、因原实例已不在而关闭 / 观战请求历史按保留期删掉的行数</td></tr>
  * </table>
  *
  * <p><b>标签</b>：取值全部来自本类的枚举或 {@link MetricLabels} 的净化结果，没有任何客户端能直接控制的值；不以玩家 / 战斗 / 切磋 / 队伍的号或 zone 作标签
@@ -95,6 +97,8 @@ public final class MatchMetrics {
     static final String WATCHABLE_BATTLES = "game.match.watchable.battles";
     static final String OBSERVER_RPC = "game.match.observer.rpc";
     static final String SPECTATE_INFLIGHT = "game.match.spectate.inflight";
+    static final String WATCH_UNPROVEN_CLOSE = "game.match.watch.unproven.close";
+    static final String WATCH_REQUESTS_PURGED = "game.match.watch.requests.purged";
 
     /** 请求耗时：与 gate / login / trade 同一套 SLO 桶（5 ms～10 s）。 */
     static final Duration[] REQUEST_BUCKETS = {
@@ -256,11 +260,14 @@ public final class MatchMetrics {
      *       {@code spectate_evictions{reason="rewatch"}}（W14；基线把两者混在一起）；</li>
      *   <li>{@code NO_BATTLE}：16017；{@code NOT_FOUND}：16018「不存在或已结束」；{@code REJECTED}：16018「当前无法观战」；</li>
      *   <li>{@code FULL}：battle 回观众席已满（满员专用码「观战人数已满」）；</li>
-     *   <li>{@code OVERLOADED}：在途已满（在处理器的 {@code onOverload()} 里记；这时没有进过处理流程）。Java 新增。</li>
+     *   <li>{@code PRIVATE}：本地路径按 id 观战一场非公开局（可见性闸）。客户端看到的与 {@code NOT_FOUND} 逐字节相同（不泄露私密局存在与否），
+     *       只在指标上区分；全球路径的回执只存 tip，重放无从区分，统一记 {@code NOT_FOUND}（同 mmorpg Go 全局路径）；</li>
+     *   <li>{@code OVERLOADED}：在途已满（在处理器的 {@code onOverload()} 里记；这时没有进过处理流程）。Java 新增；</li>
+     *   <li>{@code LOBBY}：回 {@code delivery = LOBBY} + 观战凭证（中继档，mmorpg battle-spectate-tiered-fanout.md §15.6）；{@code OK} 只计直连席。</li>
      * </ul>
      * 本地与全球两条路径口径相同；全球路径重放已存回执时按回执的 tip 反查，与首答记同一个出口。
      */
-    public enum WatchOutcome { OK, INTERNAL, QUEUED, IN_BATTLE, ALREADY_WATCHING, OFFLINE, NO_BATTLE, NOT_FOUND, REJECTED, FULL, OVERLOADED }
+    public enum WatchOutcome { OK, INTERNAL, QUEUED, IN_BATTLE, ALREADY_WATCHING, OFFLINE, NO_BATTLE, NOT_FOUND, REJECTED, FULL, OVERLOADED, PRIVATE, LOBBY }
 
     /**
      * 164 的出口（{@code game_match_list_watchable_total{result}}）：{@code OK} = 回了列表（含空列表、含批读落点整批失败后变短的列表）；
@@ -291,10 +298,11 @@ public final class MatchMetrics {
      * 可观战索引里摘掉成员的原因（{@code game_match_watchable_index_evictions_total{reason}}；计的是<b>摘掉的成员数</b>）：
      * {@code ROOM_MISSING} = 163 登记时 battle 回「房间不存在」且已出建房窗口；{@code DEAD_NODE} = 同上但依据是直拨判死；
      * {@code MISSING_RECORD} = 落点记录已不在（163 / 164 读到）；{@code STALE} = 164 读到分数已过期的成员；
-     * {@code INVALID_MEMBER} = 成员不是合法的 battle_id；{@code SWEEP} = 定时清扫摘掉的过期成员。
+     * {@code INVALID_MEMBER} = 成员不是合法的 battle_id；{@code SWEEP} = 定时清扫摘掉的过期成员；{@code PRIVATE} = 163 / 164 读到索引里有
+     * 非公开局（开局钩子不公开私密局，出现即残留，只摘成员、不删落点）。
      * 同步的剔除只在存储回报「真的摘了」时计；164 的异步剔除等不到结果，按<b>发出</b>计。
      */
-    public enum IndexEviction { ROOM_MISSING, DEAD_NODE, STALE, MISSING_RECORD, INVALID_MEMBER, SWEEP }
+    public enum IndexEviction { ROOM_MISSING, DEAD_NODE, STALE, MISSING_RECORD, INVALID_MEMBER, SWEEP, PRIVATE }
 
     /**
      * 观战数据的异常（{@code game_match_watchable_anomalies_total{reason}}；长期非 0 需要排查）：{@code CORRUPT_RECORD} = 落点记录在但损坏
@@ -312,6 +320,12 @@ public final class MatchMetrics {
      * {@code NOT_DELIVERED} = 请求确定没送达但判不了死；{@code UNKNOWN} = 超时或连上之后失败（结局不明）。
      */
     public enum ObserverResult { REPLIED, DEAD, NOT_DELIVERED, UNKNOWN }
+
+    /**
+     * 全球观战原件拿不到取消证明、不带证明关闭的依据（{@code game_match_watch_unproven_close_total{reason}}）：{@code FORMATION_ENDED} = 成局已终态或已过期限 + 终局宽限，
+     * 房间必已收尾；{@code INSTANCE_REPLACED} = 目录里同节点号已是别的实例。实例崩溃时会涨一波，平时持续增长要查 battle 为什么回不了 Remove。
+     */
+    public enum UnprovenClose { FORMATION_ENDED, INSTANCE_REPLACED }
 
     // ================================================================ 状态
 
@@ -438,6 +452,10 @@ public final class MatchMetrics {
                 observerCounter(method, result);
             }
         }
+        for (UnprovenClose reason : UnprovenClose.values()) {
+            unprovenCloseCounter(reason);
+        }
+        purgedRequestsCounter();
     }
 
     // ================================================================ 请求
@@ -643,6 +661,18 @@ public final class MatchMetrics {
         observerCounter(method, result).increment();
     }
 
+    /** 一条全球观战原件不带取消证明关闭（口径见 {@link UnprovenClose}）。 */
+    public void watchUnprovenClose(UnprovenClose reason) {
+        unprovenCloseCounter(reason).increment();
+    }
+
+    /** 观战请求历史按保留期删掉了 {@code rows} 行（≤ 0 不计）。 */
+    public void watchRequestsPurged(long rows) {
+        if (rows > 0) {
+            purgedRequestsCounter().increment(rows);
+        }
+    }
+
     /** 接上在途 163 数的来源（163 的执行器启动时调一次；没接之前读数恒为 0）。 */
     public void bindSpectateInflight(IntSupplier inflight) {
         this.inflightWatches = Objects.requireNonNull(inflight, "inflight");
@@ -720,6 +750,14 @@ public final class MatchMetrics {
     private Counter observerCounter(ObserverMethod method, ObserverResult result) {
         return counter(OBSERVER_RPC, "发给 battle 的观众 RPC（addObserver / removeObserver）的结局；replied 含 battle 的业务拒绝", "method", tag(method),
                 "result", tag(result));
+    }
+
+    private Counter unprovenCloseCounter(UnprovenClose reason) {
+        return counter(WATCH_UNPROVEN_CLOSE, "全球观战原件拿不到取消证明、因原实例已不在而关闭", "reason", tag(reason));
+    }
+
+    private Counter purgedRequestsCounter() {
+        return counter(WATCH_REQUESTS_PURGED, "观战请求历史按 7 天保留期删掉的行数");
     }
 
     /** 取（或第一次时建）一个计数器。{@code tags} 是「键, 值, 键, 值…」。 */

@@ -32,9 +32,12 @@ public final class PlayerInboxRuntime {
         }
     }
 
-    /** 停用原因（{@code metric=inbox_halted reason=}）。停用到实例下次在本节点新建为止。 */
+    /**
+     * 停用原因（{@code metric=inbox_halted reason=}）。停用到实例下次在本节点新建为止。{@code VERSION_SKEW}（同 C++ {@code kVersionSkew}）：
+     * 执行器判载荷本版本解不对，或战斗域收到不是「原 APPLIED 结局」的投递（类型 / 指令不符、水位下已出环、回放原结局不是 APPLIED）。
+     */
     public enum HaltReason {
-        NONE, EPOCH_REQUIRED, EPOCH_AHEAD, UNKNOWN_TYPE, REPLAY_MISMATCH, BATCH_MALFORMED, LEDGER_WRITE, ACK_ANOMALY;
+        NONE, EPOCH_REQUIRED, EPOCH_AHEAD, UNKNOWN_TYPE, REPLAY_MISMATCH, BATCH_MALFORMED, LEDGER_WRITE, ACK_ANOMALY, VERSION_SKEW;
 
         public String label() {
             return name().toLowerCase(Locale.ROOT);

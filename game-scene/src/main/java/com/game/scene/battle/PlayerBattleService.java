@@ -450,7 +450,9 @@ public final class PlayerBattleService implements BattleHooks {
             return;
         }
         ScenePlayer player = world.playerById(playerId);
-        long ttl = deadline == 0 ? 0 : BattleRedis.lockTtlSec(deadline, clock.epochMillis());
+        // FIGHTING 锁按「期限 + 终局宽限 + 收件箱投递余量」续（BattleFreeze#fightingReleaseAtMs）：离线 / 交出期间只续锁的这几条路径同样要覆盖窗口，
+        // 窗口内重登才能按锁重建冻结。锁里的 d 仍写原始战斗期限
+        long ttl = deadline == 0 ? 0 : BattleRedis.lockTtlSec(BattleFreeze.fightingReleaseAtMs(deadline), clock.epochMillis());
         if (player == null) {
             if (deadline == 0) {
                 metrics.confirm(Confirm.OFFLINE_MISS);
@@ -506,11 +508,14 @@ public final class PlayerBattleService implements BattleHooks {
                 error));
     }
 
-    /** FIGHTING 的条件续期（标 F、写正式期限、续 TTL）；成功置 {@code lockExtended}。 */
+    /**
+     * FIGHTING 的条件续期（标 F、写正式期限、续 TTL）；成功置 {@code lockExtended}。TTL 按冻结的有效期限（期限 + 终局宽限 + 收件箱投递余量）算，
+     * {@code d} 写原始战斗期限。
+     */
     private void extendFighting(ScenePlayer player, BattleFreeze freeze) {
         long playerId = player.playerId();
         long deadline = freeze.deadlineMs();
-        onLogic(locks.confirm(playerId, freeze.battleId(), deadline, BattleRedis.lockTtlSec(deadline, clock.epochMillis())),
+        onLogic(locks.confirm(playerId, freeze.battleId(), deadline, BattleRedis.lockTtlSec(freeze.effectiveDeadlineMs(), clock.epochMillis())),
                 (fields, error) -> {
                     if (error != null) {
                         metrics.confirm(Confirm.ERROR);
@@ -893,21 +898,26 @@ public final class PlayerBattleService implements BattleHooks {
         metrics.frozen(preparing, fighting);
     }
 
+    /**
+     * FIGHTING 的到期处理。基准是冻结的有效期限 = 战斗期限 + 终局宽限 + 收件箱投递余量（{@link BattleFreeze#effectiveDeadlineMs()}），不是战斗期限本身：
+     * Match 在期限之后的终局宽限内仍接受 COMPLETE，个人结算随后才经收件箱到达，在此之前判废会让资产通道在结算之前放行（消耗被夹紧，可刷物品）。
+     * 有效期限之后再等 D21 宽限才读本局记录（rescue），过了有效期限 + 60 s 不读直接判废。
+     */
     private void reapFighting(ScenePlayer player, BattleFreeze freeze, long now) {
-        long deadline = freeze.deadlineMs();
+        long deadline = freeze.effectiveDeadlineMs();
         if (now > deadline + BattleRedis.LOCK_EXTRA_TTL_SEC * 1000) {
-            // 期限 + 60 s 仍读不到本局记录（锁也已过期）：不读、直接判废
+            // 有效期限 + 60 s 仍读不到本局记录（锁也已过期）：不读、直接判废
             clearFreeze(player, LockAction.DELETE_IF_MATCH);
             metrics.rescue(Rescue.GAVE_UP);
             metrics.freezeExpired(SceneBattleMetrics.Phase.FIGHTING);
-            log.warn("战斗期限 + 60 s 仍未结算，判废 player={} battle_id={}", Long.toUnsignedString(player.playerId()),
-                    Long.toUnsignedString(freeze.battleId()));
+            log.warn("战斗期限 + 终局宽限 + 投递余量 + 60 s 仍未结算，判废 player={} battle_id={} deadline={}",
+                    Long.toUnsignedString(player.playerId()), Long.toUnsignedString(freeze.battleId()), freeze.deadlineMs());
             return;
         }
         if (now <= deadline + BattleRedis.FIGHTING_EXPIRY_GRACE.toMillis() || freeze.rescuing()) {
             return;
         }
-        // D21：过了宽限，判废前先读本局记录
+        // D21：过了有效期限的宽限，判废前先读本局记录
         freeze.setRescuing(true);
         long playerId = player.playerId();
         onLogic(locks.readSettlement(playerId, freeze.battleId()), (bytes, error) -> onRescueRead(player, freeze, bytes, error));
@@ -954,7 +964,7 @@ public final class PlayerBattleService implements BattleHooks {
         clearFreeze(player, LockAction.DELETE_IF_MATCH);
         metrics.rescue(reason);
         metrics.freezeExpired(SceneBattleMetrics.Phase.FIGHTING);
-        log.info("战斗期限 + 宽限已过、没有可应用的本局记录（{}），判废 player={} battle_id={}", reason,
+        log.info("战斗有效期限（期限 + 终局宽限 + 投递余量）+ 宽限已过、没有可应用的本局记录（{}），判废 player={} battle_id={}", reason,
                 Long.toUnsignedString(player.playerId()), Long.toUnsignedString(freeze.battleId()));
     }
 

@@ -8,6 +8,7 @@ import com.game.proto.BattleStateS2C;
 import com.game.proto.TurnResultS2C;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.eSpectateEndReason;
+import com.game.proto.eSpectateVisibility;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -61,6 +62,18 @@ final class BattleRoom {
     /** 从表里移除之前置位：迟到的计时器回调据此识别出房间已死（§11 N14，配合对象身份比较）。 */
     boolean closed;
     boolean requiresResultConfirmation;
+    /**
+     * 观战中继开关（只升不降；mmorpg battle-spectate-tiered-fanout.md §15.4、§15.7）：打开后每帧观众帧发布一次到这一场的 Redis 分片频道，
+     * 并写最新帧键。Java 版中继档与广播档是同一个开关。
+     */
+    boolean spectateRelayEnabled;
+    /** 最近发布的观战帧的回合（终局帧的 {@code round_index} 取它）。 */
+    int lastSpectateRound;
+    /**
+     * 这一场最后一帧观战帧的发布结局（只在逻辑线程上读写，随房间回收）：下一帧接在它后面发。Redisson 紧挨着发出的命令走不同的连接、没有先后可言，
+     * 不等上一帧的话 END 会越过最后一回合的 TURN，166 不带状态，观众就再也看不到那一回合。
+     */
+    java.util.concurrent.CompletionStage<Void> spectateTail = java.util.concurrent.CompletableFuture.completedFuture(null);
     /** 原建房完整正文，包含不可替换的operation/instance和实际采用的终局协议。 */
     com.game.proto.CreateBattleRequest originalCreate=com.game.proto.CreateBattleRequest.getDefaultInstance();
     PendingCompletion pendingCompletion;
@@ -100,6 +113,14 @@ final class BattleRoom {
 
     boolean isObserver(long playerId) {
         return routingByObserver.containsKey(playerId);
+    }
+
+    /**
+     * 这局能不能被观战：只读建房原件里冻结的 {@code spectate_visibility}（match 建房时按单一策略表决定一次，battle 不按模式重算）。
+     * 只认 PUBLIC：漏填（老发送方）与私密一律不可观战，AddObserver 的第二道闸据此拒绝。
+     */
+    boolean spectatePublic() {
+        return originalCreate.getSpectateVisibility() == eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC;
     }
 
     /** 槽里的直连（没有时 null；是否「活」由出口判定）。 */

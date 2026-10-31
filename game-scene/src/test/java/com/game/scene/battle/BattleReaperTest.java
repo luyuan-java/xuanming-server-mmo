@@ -33,12 +33,14 @@ import org.junit.jupiter.api.Test;
  * reaper（scene-battle-spec §7.9；基线 {@code pb.cpp:2090-2195}；§13.2 {@code BattleReaperTest} 一行逐条）：
  * <ul>
  *   <li>PREPARING 过了备战期限（0 时退回战斗期限）只解冻、锁保留到 TTL；</li>
- *   <li>FIGHTING 在期限后 10 s 内不动；过了宽限先读本局记录（rescue）：有 → 应用 + 150 + 销账；没有 / 应用被延后 → 解冻并条件删锁（判废）；
- *       <b>读出错不判废</b>、下一轮再读，过了期限 + 60 s 才不读直接判废；{@code recovery ≠ READY} / 交出冻结时得 DEFERRED → 判废但记录保留；
- *       rescue 在途不重复；</li>
+ *   <li>FIGHTING 按<b>有效期限</b>（战斗期限 + Match 终局宽限 + 收件箱投递余量，{@link BattleFreeze#fightingReleaseAtMs}；2026-10-30 起）判：
+ *       有效期限后 10 s 内不动；过了宽限先读本局记录（rescue）：有 → 应用 + 150 + 销账；没有 / 应用被延后 → 解冻并条件删锁（判废）；
+ *       <b>读出错不判废</b>、下一轮再读，过了有效期限 + 60 s 才不读直接判废；{@code recovery ≠ READY} / 交出冻结时得 DEFERRED → 判废但记录保留；
+ *       rescue 在途不重复；战斗期限与有效期限之间（Match 仍可提交 COMPLETE、收件箱结算尚在路上）一律不解冻；</li>
  *   <li>账本排空（已落盘 → 销账，没落盘 → 压存盘）；遍历时不改集合；一名玩家出错不影响其余；冻结人数指标。</li>
  * </ul>
- * 时间线（{@link BattleFixture#fighting}）：战斗期限 = 进战斗时刻 + 300 s，锁 TTL = 360 s（期限 + 60 s）；宽限 10 s。
+ * 时间线（{@link BattleFixture#fighting}）：战斗期限 = 进战斗时刻 + 300 s，有效期限 = 期限 + 120 s（{@link #EXPIRY}），
+ * 锁 TTL = 480 s（有效期限 + 60 s，{@link BattleFixture#FIGHTING_LOCK_TTL_SEC}）；宽限 10 s。
  * 相邻用例：恢复待重试的玩家本轮只重启恢复、不排空账本（{@code BattleStaleReadTest}）；写锁在途时备战到期（{@code PrepareBattleTest}）。
  */
 class BattleReaperTest {
@@ -52,6 +54,8 @@ class BattleReaperTest {
     private static final long PREPARE = BattleFixture.PREPARE_MILLIS;
     private static final long GRACE = 10_000;
     private static final long LOCK_EXTRA = 60_000;
+    /** FIGHTING 冻结的有效期限相对进战斗时刻的偏移 = 战斗时长 + 终局宽限 + 收件箱投递余量。 */
+    private static final long EXPIRY = BATTLE + BattleFixture.OUTCOME_WINDOW_MILLIS;
 
     private final BattleFixture f = new BattleFixture();
 
@@ -181,16 +185,16 @@ class BattleReaperTest {
     // ------------------------------------------------------------------ FIGHTING：宽限
 
     @Test
-    void 战斗期限后10秒宽限内不动_过了宽限才读本局记录() {
+    void 有效期限后10秒宽限内不动_过了宽限才读本局记录() {
         ScenePlayer player = fightingPlayer();
         BattleFreeze freeze = player.battle().freeze();
 
-        f.advance(BATTLE - 1);
+        f.advance(EXPIRY - 1);
         f.reap();
         f.advance(1 + GRACE);
         f.reap();
 
-        assertThat(player.battle().freeze()).as("期限 + 10 s 那一刻还在宽限内").isSameAs(freeze);
+        assertThat(player.battle().freeze()).as("有效期限 + 10 s 那一刻还在宽限内").isSameAs(freeze);
         assertThat(f.locks.calls()).as("宽限内零 Redis 调用").isEmpty();
         assertThat(freeze.rescuing()).isFalse();
         assertThat(frozen(f, "fighting")).isEqualTo(1);
@@ -218,7 +222,7 @@ class BattleReaperTest {
         ScenePlayer player = fightingPlayer();
         BattleSettlementData settlement = settlement(PLAYER, X);
         f.store(settlement);
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
 
         f.reap();
 
@@ -256,7 +260,7 @@ class BattleReaperTest {
     @Test
     void 过了宽限_没有本局记录_解冻并条件删锁_删完才补跟随() {
         ScenePlayer player = fightingPlayer();
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
         f.locks.hold(Op.DELETE_IF_MATCH);
 
         f.reap();
@@ -288,7 +292,7 @@ class BattleReaperTest {
     @Test
     void 判废删锁在途时同epoch重进_锁是这次删掉的_给新实例补一次跟随() {
         ScenePlayer old = fightingPlayer();
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
         f.locks.hold(Op.DELETE_IF_MATCH, Op.ENTER_READ);
         f.reap();
         assertThat(old.inBattle()).as("判废：冻结已摘，删锁在途").isFalse();
@@ -317,7 +321,7 @@ class BattleReaperTest {
     @Test
     void 判废删锁在途时同epoch重进_这次没有删到锁_不给新实例补跟随() {
         ScenePlayer old = fightingPlayer();
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
         f.locks.hold(Op.DELETE_IF_MATCH, Op.ENTER_READ);
         f.reap();
         ScenePlayer fresh = f.reenter(SESSION + 1, PLAYER, 1, f.scene1);
@@ -336,7 +340,7 @@ class BattleReaperTest {
     @Test
     void 判废删锁在途时玩家离场_删到了锁_没有现任实例不补跟随() {
         fightingPlayer();
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
         f.locks.hold(Op.DELETE_IF_MATCH);
         f.reap();
         f.world.onPlayerLeave(BattleFixture.LINK, PlayerLeave.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER)
@@ -364,7 +368,7 @@ class BattleReaperTest {
         f.locks.storeSettlement(PLAYER, X, "不是 protobuf".getBytes(StandardCharsets.UTF_8));
         f.locks.storeSettlement(1002, X, FakeBattleLocks.record(settlement(2002, X)));
         f.locks.storeSettlement(1003, X, FakeBattleLocks.record(settlement(1003, 99)));
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
 
         f.reap();
 
@@ -382,14 +386,14 @@ class BattleReaperTest {
 
     /**
      * 评审修订第 8 条：rescue <b>读出错不判废</b>（判废删锁后，随后到达的重投会落进「无冻结、锁不在」被丢弃并销账——一次读错就丢奖）。
-     * 本轮只计 {@code rescues{error}}、清掉在途标记，下一轮再读；直到过了期限 + 60 s（锁也已过期）仍读不到，才不读直接判废。
+     * 本轮只计 {@code rescues{error}}、清掉在途标记，下一轮再读；直到过了有效期限 + 60 s（锁也已过期）仍读不到，才不读直接判废。
      */
     @Test
-    void 读本局记录出错_不判废_下一轮再读_过了期限加60秒才不读直接判废() {
+    void 读本局记录出错_不判废_下一轮再读_过了有效期限加60秒才不读直接判废() {
         ScenePlayer player = fightingPlayer();
         BattleFreeze freeze = player.battle().freeze();
         f.locks.failAlways(Op.READ_SETTLEMENT, new RuntimeException("Redis 超时"));
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
 
         f.reap();
 
@@ -407,7 +411,7 @@ class BattleReaperTest {
         assertThat(f.rescues("error")).isEqualTo(2);
         assertThat(player.battle().freeze()).isSameAs(freeze);
 
-        // 期限 + 60 s 那一刻还读
+        // 有效期限 + 60 s 那一刻还读
         f.advance(LOCK_EXTRA - GRACE - 1 - 30_000);
         f.reap();
         assertThat(f.locks.count(Op.READ_SETTLEMENT)).isEqualTo(3);
@@ -416,7 +420,7 @@ class BattleReaperTest {
         f.advance(1);
         f.reap();
 
-        assertThat(f.locks.count(Op.READ_SETTLEMENT)).as("过了期限 + 60 s：不再读").isEqualTo(3);
+        assertThat(f.locks.count(Op.READ_SETTLEMENT)).as("过了有效期限 + 60 s：不再读").isEqualTo(3);
         assertThat(player.inBattle()).isFalse();
         assertThat(f.rescues("gave_up")).isEqualTo(1);
         assertThat(f.rescues("miss")).isZero();
@@ -434,7 +438,7 @@ class BattleReaperTest {
         ScenePlayer player = fightingPlayer();
         f.store(settlement(PLAYER, X));
         f.locks.failNext(Op.READ_SETTLEMENT, new RuntimeException("Redis 超时"));
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
         f.reap();
         assertThat(player.inBattle()).isTrue();
         assertThat(f.gold(player)).isZero();
@@ -466,7 +470,7 @@ class BattleReaperTest {
         f.store(settlement(PLAYER, X));
         f.locks.clearCalls();
         f.sink.clear();
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
 
         f.reap();
 
@@ -497,7 +501,7 @@ class BattleReaperTest {
     void rescue读到记录但玩家在交出冻结_判废_记录保留_资产不动() {
         ScenePlayer player = fightingPlayer();
         f.store(settlement(PLAYER, X));
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
         f.locks.hold(Op.READ_SETTLEMENT);
         f.reap();
         WorldTestAccess.startFreezing(player);
@@ -524,7 +528,7 @@ class BattleReaperTest {
         BattleSettlementData settlement = settlement(PLAYER, X);
         f.store(settlement);
         assertThat(f.currency.block(player, Wallet.GOLD)).isZero();
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
 
         f.reap();
 
@@ -554,10 +558,10 @@ class BattleReaperTest {
         assertThat(f.settlements.apply(f.world, player, settlement)).isEqualTo(Result.APPLIED);
         f.store(settlement);
         long deadline = f.deadline();
-        f.locks.putLock(PLAYER, X, NODE, BattleRedis.STATE_FIGHTING, deadline, 0, 360);
+        f.locks.putLock(PLAYER, X, NODE, BattleRedis.STATE_FIGHTING, deadline, 0, BattleFixture.FIGHTING_LOCK_TTL_SEC);
         BattleFreeze freeze = new BattleFreeze(X, NODE, Phase.FIGHTING, deadline, 0, true);
         BattleFixture.setFreeze(player, freeze);
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
 
         f.reap();
 
@@ -576,7 +580,7 @@ class BattleReaperTest {
     void rescue在途_之后的轮次不重复发读_读回来后才处理() {
         ScenePlayer player = fightingPlayer();
         BattleFreeze freeze = player.battle().freeze();
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
         f.locks.hold(Op.READ_SETTLEMENT);
 
         f.reap();
@@ -598,13 +602,13 @@ class BattleReaperTest {
     }
 
     /**
-     * rescue 读一直不回来：在途标记挡得住重复发读，挡不住上限——过了期限 + 60 s 照样直接判废。迟到的读结果（哪怕带着记录）回来时冻结已不是那个对象，
+     * rescue 读一直不回来：在途标记挡得住重复发读，挡不住上限——过了有效期限 + 60 s 照样直接判废。迟到的读结果（哪怕带着记录）回来时冻结已不是那个对象，
      * 丢弃、不应用（记录还在，留给进场恢复）。
      */
     @Test
-    void rescue读一直不回来_过了期限加60秒照样判废_迟到的读结果被丢弃() {
+    void rescue读一直不回来_过了有效期限加60秒照样判废_迟到的读结果被丢弃() {
         ScenePlayer player = fightingPlayer();
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
         f.locks.hold(Op.READ_SETTLEMENT);
         f.reap();
         Call read = f.locks.take(Op.READ_SETTLEMENT);
@@ -634,7 +638,7 @@ class BattleReaperTest {
         ScenePlayer player = fightingPlayer();
         BattleSettlementData settlement = settlement(PLAYER, X);
         f.store(settlement);
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
         f.locks.hold(Op.READ_SETTLEMENT);
         f.reap();
 
@@ -740,7 +744,7 @@ class BattleReaperTest {
         f.store(settlement(PLAYER, X));
         f.locks.clearCalls();
         f.sink.clear();
-        f.advance(BATTLE + GRACE + 1);
+        f.advance(EXPIRY + GRACE + 1);
 
         f.reap();
 

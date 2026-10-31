@@ -7,6 +7,7 @@ import com.game.proto.eBattleOutcome;
 import com.game.proto.eSpectateEndReason;
 import com.game.proto.login.LeaveGameRequest;
 import com.game.proto.match.JoinQueueResponse;
+import com.game.proto.match.MatchMode;
 import com.game.proto.match.WatchBattleResponse;
 import com.game.robot.client.AdminClient;
 import com.game.robot.client.BattleFrame;
@@ -48,15 +49,16 @@ import java.util.Set;
  *   <li>Z3 A 发 157 {1V1, config = 1, zone_id = 本区}，<b>A 的回包到了</b> B 才发（A 是锚点）；两个回包都受理、票号是 UUID；</li>
  *   <li>Z4 两侧大厅上 177 都在 143 之前、同一个非 0 的 battle_id；两张票的 {@code host:port}、签发节点与实例相同，player_id 各是自己；
  *       143 里 A 在 0 队、B 在 1 队；</li>
- *   <li>Z5 A、B 各自直连（握手 battle_id 一致、补拉 140 成功），都不开自动；区 B 的 C 发 163(battle_id)：成功 → 177（role = 2）经区 B 的 gate
- *       到达 → 直连 → 161 {observer_count = 1}；</li>
- *   <li>Z6 A、B 开自动打到 150：两侧 outcome 相同且是胜 / 负 / 平，直连回合数 ≥ 1，大厅上没有 139；C：≥ 1 条 158 → 166 {FINISHED, 同一个
- *       outcome} → FIN；</li>
+ *   <li>Z5 A、B 各自直连（握手 battle_id 一致、补拉 140 成功），都不开自动；区 B 的 C 对这一局发 163：1V1 是计分局，可见性闸拒绝 → {16018, 该战斗不存在或已结束}
+ *       （mmorpg battle-spectate-tiered-fanout.md §10 第 6 条；跨区观战的正向覆盖改用下面的公开局）；</li>
+ *   <li>Z6 A、B 开自动打到 150：两侧 outcome 相同且是胜 / 负 / 平，直连回合数 ≥ 1，大厅上没有 139；</li>
  *   <li>Z7 两侧各等<b>大厅</b>上的 150（scene 应用结算后才推，证明结算回到了各自所在区的 scene）；</li>
  *   <li>Z8 评分（经 {@link MatchAdminClient}）：games 各 + 1；胜负且不满 30 回合 Δ 互为相反数、|Δ| = 16，平局或打满 Δ = 0；
  *       没有运维令牌 → 失败（{@code step=z8-admin-token}），不静默跳过；</li>
  *   <li>Z9 第二局：按 Z3 再排（16000 按过渡态重试、<b>不得</b> 16001）→ 重复 Z4、Z6、Z7（不带观众）与评分：battle_id 不同、games 再各 + 1——
  *       覆盖基线「连续对局」暴露过的三处：0 血带入、ready 残留、把上一局迟到的 150 当成本局的；</li>
+ *   <li>公开局的跨区观战（第二局之后，步骤 {@code z5-public-watch}）：A 排 PVE_SOLO（公开局）→ 直连、不开自动 → 区 B 的 C 发 163(battle_id)：成功 → 177（role = 2）经区 B 的 gate
+ *       到达 → 直连 → 161 {observer_count = 1} → A 开自动打到 150 → C：≥ 1 条 158 → 166 {FINISHED, 同一个 outcome} → FIN；</li>
  *   <li>Z10 game-match 指标增量：{@code gather_zone_mix{mix="cross"}} ≥ 2（对 mode 求和）、{@code watch_battle{outcome="ok"}} ≥ 1；</li>
  *   <li>Z11 三人 LeaveGame；结果行 {@code CROSS_ZONE_MATCH_OK battle_id=… zone_a=… zone_b=… a_turns=… b_turns=… a_direct_turns=…
  *       b_direct_turns=… observer_zone=… c_spectate_turns=… second_battle_id=…}，失败是 {@code CROSS_ZONE_MATCH_FAIL step=… reason=…}。</li>
@@ -211,7 +213,7 @@ public final class BattleCrossZoneScenario {
         List<Rating> ratings = List.of(admin.rating(a.id()), admin.rating(b.id()));
         report.note("赛前评分 A " + ratings.get(0) + "，B " + ratings.get(1));
 
-        // ---- Z3–Z8：第一局，带区 B 的观众 C ----
+        // ---- Z3–Z8：第一局，区 B 的 C 想观战被可见性闸拒绝 ----
         Round first = fight(1, a, b, c, ratings);
         battleId = first.battleId();
         aTurns = first.aTurns();
@@ -223,6 +225,9 @@ public final class BattleCrossZoneScenario {
         steps.step("z9-second-battle", report);
         report.check(second.battleId() != first.battleId(), "Z9 第二局的 battle_id 与第一局不同（没有把上一局迟到的公告当成本局的）",
                 uid(first.battleId()) + " → " + uid(second.battleId()), REF + " Z9");
+
+        // ---- 公开局的跨区观战：1V1 是计分局不可观战，正向覆盖放在 PVE 上 ----
+        crossZoneWatch(a, c);
 
         // ---- Z10：指标（全局计数，只取下界） ----
         steps.step("z10-metrics", report);
@@ -246,10 +251,10 @@ public final class BattleCrossZoneScenario {
     }
 
     /**
-     * 打一局：排队 → 开局公告 → 直连（第一局另有观众）→ 开自动打完 → 大厅 150 → 评分。
+     * 打一局：排队 → 开局公告 → 直连（第一局另核对计分局不可观战）→ 开自动打完 → 大厅 150 → 评分。
      *
      * @param round    1 = 第一局（Z3–Z8），2 = 第二局（Z9）
-     * @param observer 观众 C；null = 不带观众
+     * @param observer 对这一局发 163、应当被拒的 C；null = 不核对
      * @param before   赛前评分（A、B）
      */
     private Round fight(int round, Bot a, Bot b, Bot observer, List<Rating> before) throws RobotException {
@@ -299,27 +304,18 @@ public final class BattleCrossZoneScenario {
         report.check(sidesA == null && sidesB == null, step + "143 的阵营里 A（先受理，是锚点）在 0 队、B 在 1 队（两人各自收到的 143 都如此）",
                 sidesA != null ? "A 的 143：" + sidesA : sidesB != null ? "B 的 143：" + sidesB : "", REF + " Z4");
 
-        // ---- 直连（都不开自动）；观众入场 ----
+        // ---- 直连（都不开自动）；计分局不可观战 ----
         steps.step(first ? "z5-direct-watch" : "z9-second-direct", report);
         Direct directA = connect(homeClient, a.name, startA.assigned());
         Direct directB = connect(visitClient, b.name, startB.assigned());
         report.pass((first ? "Z5 " : z) + "A、B 各自凭票直连同一个 battle 节点：握手成功且 battle_id 与票一致、补拉 140 成功",
                 startA.assigned().getHost() + ":" + startA.assigned().getPort(), REF + " Z5");
-        Watching watching = null;
         if (observer != null) {
-            int mark = observer.mark();
+            // 可见性闸（mmorpg battle-spectate-tiered-fanout.md §10 第 6 条）：1V1 是计分局，不可观战，回的与「不存在」逐字节相同
             WatchBattleResponse watched = SpectateSteps.watch(observer, ids, battle);
-            must(SpectateSteps.acceptedProblem(watched, battle) == null, "Z5 区 " + zoneB + " 的 C 发 163(battle_id) → 应答 battle_id 正确、没有 error_message",
-                    orDescribe(SpectateSteps.acceptedProblem(watched, battle), SpectateSteps.describe(watched)));
-            Received r177 = SpectateSteps.awaitObserverTicket(observer.name, observer.connection(), mark, battle, battleIds, timing.ticketTimeout());
-            BattleAssignedS2C ticket = r177.parse(BattleAssignedS2C.parser());
-            checkNull(SpectateSteps.observerTicketProblem(ticket, battle, observer.id(), startA.assigned().getExpireAtMs()),
-                    "Z5 C 的 177（role = 2）经区 " + zoneB + " 的 gate 到达（观众的路由取在线目录：区 " + zoneB + " 的同号 gate，不是区 " + zoneA + " 的）",
-                    "endpoint=" + ticket.getHost() + ":" + ticket.getPort(), REF + " Z5；§2.8");
-            watching = SpectateSteps.connectObserver(visitClient, observer.name, ticket, battleIds, timing.firstFrameTimeout());
-            closeables.add(watching.direct());
-            checkNull(SpectateSteps.firstFrameProblem(watching.direct().since(0), battleIds, battle, 1),
-                    "Z5 C 直连后握手应答紧跟 161 {observer_count = 1}", watching.direct().labelsSince(0), REF + " Z5");
+            checkNull(SpectateSteps.rejectedProblem(watched, SpectateSteps.TIP_NOT_WATCHABLE, SpectateSteps.TEXT_NOT_FOUND),
+                    "Z5 区 " + zoneB + " 的 C 对计分局 1V1 发 163 → {16018, " + SpectateSteps.TEXT_NOT_FOUND + "}（可见性闸生效）",
+                    SpectateSteps.describe(watched), REF + " Z5");
         }
 
         // ---- 都开自动，打到 150 ----
@@ -342,14 +338,6 @@ public final class BattleCrossZoneScenario {
                 "A 139 × " + endA.turns() + "，B 139 × " + endB.turns() + "，大厅 139 × " + lobbyTurns, REF + " Z6");
         report.check(endA.fin() && endB.fin() && endA.autoAccepted() && endB.autoAccepted(), step + "都开自动（162 被受理）→ 150 之后服务端 FIN",
                 "A 关闭=" + endA.closed() + endA.autoNote() + "；B 关闭=" + endB.closed() + endB.autoNote(), REF + " Z6");
-        if (watching != null) {
-            Ended spectated = SpectateSteps.awaitEnd(watching.direct(), battle, battleIds, timing.endTimeout());
-            watching.direct().close();
-            spectateTurns = spectated.turns();
-            checkNull(SpectateSteps.endProblem(spectated, battleIds, eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED, outcome, 1),
-                    "Z6 C 的直连上 ≥ 1 条 158，最后 166 {FINISHED, outcome 同上} → FIN",
-                    "158 × " + spectated.turns() + " 166 {" + spectated.end().getReason() + ", " + spectated.end().getOutcome() + "}", REF + " Z6");
-        }
 
         // ---- 大厅上的 150：结算回到了各自所在区的 scene ----
         steps.step(first ? "z7-lobby-end" : "z9-second-lobby-end", report);
@@ -369,6 +357,50 @@ public final class BattleCrossZoneScenario {
                 rating == null ? "A " + before.get(0) + " → " + after.get(0) + "；B " + before.get(1) + " → " + after.get(1) : rating,
                 REF + " Z8；match-spec §5.1");
         return new Round(battle, endA.turns(), endB.turns(), after);
+    }
+
+    /**
+     * 公开局的跨区观战：A（区 A）开一场 PVE_SOLO，区 B 的 C 观战。观众票经区 B 的 gate 到达（路由取在线目录），直连握手后紧跟 161，收尾 158 → 166 → FIN。
+     * 这里只验跨区寻址与直连席；大厅档（LOBBY）要 robot 先支持 SubscribeSpectate，不在本场景。
+     */
+    private void crossZoneWatch(Bot a, Bot c) throws RobotException {
+        steps.step("z5-public-watch", report);
+        JoinAttempts queue = MatchSupport.joinRetrying(a, ids, MatchMode.MATCH_MODE_PVE_SOLO, BattleSmokeScenario.PVE_CONFIG, Set.of(BattleSmokeChecks.TIP_IN_BATTLE), tempo);
+        must(BattleSmokeChecks.joinAcceptedProblem(queue.response()) == null, "Z5 公开局：A 发 157 PVE_SOLO 受理（1V1 结算落地之前的 16000 按过渡态重试）",
+                orDescribe(BattleSmokeChecks.joinAcceptedProblem(queue.response()), queue.describe()));
+        Started start = MatchSupport.awaitBattle(a.name, a.connection(), queue.mark(), 0, battleIds, tempo.battleStartTimeout());
+        long battle = start.battleId();
+        Direct direct = connect(homeClient, a.name, start.assigned());
+
+        int mark = c.mark();
+        WatchBattleResponse watched = SpectateSteps.watch(c, ids, battle);
+        must(SpectateSteps.acceptedProblem(watched, battle) == null, "Z5 区 " + zoneB + " 的 C 发 163(battle_id) → 应答 battle_id 正确、没有 error_message",
+                orDescribe(SpectateSteps.acceptedProblem(watched, battle), SpectateSteps.describe(watched)));
+        Received r177 = SpectateSteps.awaitObserverTicket(c.name, c.connection(), mark, battle, battleIds, timing.ticketTimeout());
+        BattleAssignedS2C ticket = r177.parse(BattleAssignedS2C.parser());
+        checkNull(SpectateSteps.observerTicketProblem(ticket, battle, c.id(), start.assigned().getExpireAtMs()),
+                "Z5 C 的 177（role = 2）经区 " + zoneB + " 的 gate 到达（观众的路由取在线目录：区 " + zoneB + " 的同号 gate，不是区 " + zoneA + " 的）",
+                "endpoint=" + ticket.getHost() + ":" + ticket.getPort(), REF + " Z5；§2.8");
+        Watching watching = SpectateSteps.connectObserver(visitClient, c.name, ticket, battleIds, timing.firstFrameTimeout());
+        closeables.add(watching.direct());
+        checkNull(SpectateSteps.firstFrameProblem(watching.direct().since(0), battleIds, battle, 1),
+                "Z5 C 直连后握手应答紧跟 161 {observer_count = 1}", watching.direct().labelsSince(0), REF + " Z5");
+
+        AutoRequest auto = MatchSupport.enableAuto(direct, battle, battleIds);
+        Finished end = MatchSupport.awaitEnd(direct, battle, battleIds, MatchSupport.BATTLE_END_TIMEOUT, auto);
+        long endedNanos = endNanos(direct, battle);
+        direct.close();
+        Ended spectated = SpectateSteps.awaitEnd(watching.direct(), battle, battleIds, timing.endTimeout());
+        watching.direct().close();
+        spectateTurns = spectated.turns();
+        checkNull(SpectateSteps.endProblem(spectated, battleIds, eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED, end.end().getOutcome(), 1),
+                "Z6 C 的直连上 ≥ 1 条 158，最后 166 {FINISHED, outcome 同 A 的 150} → FIN",
+                "158 × " + spectated.turns() + " 166 {" + spectated.end().getReason() + ", " + spectated.end().getOutcome() + "}", REF + " Z6");
+        // 下线之前等这局的结算落到 scene：否则 battle 的结算发件箱要对着离线玩家重投。等不到只记观察，大厅 150 的判据由两局 1V1 负责
+        String settled = awaitLobbyEnd(a, queue.mark(), battle, endedNanos);
+        if (settled != null) {
+            report.note("公开局的结算没有等到大厅 150：" + settled);
+        }
     }
 
     /** 发 157（带本侧的 zone_id）；应答是过渡态的码时每 1 s 重试，直到受理、遇到别的码或到上限。 */

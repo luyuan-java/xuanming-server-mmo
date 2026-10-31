@@ -298,15 +298,26 @@ class MatchTipsTest {
     }
 
     @Test
-    void 观战成功_只有battle_id_不带error_message_无符号大号原样() {
+    void 观战成功_只有battle_id与delivery_不带error_message_无符号大号原样() {
         WatchBattleResponse accepted = MatchTips.watchAccepted(77);
         WatchBattleResponse big = MatchTips.watchAccepted(Long.MIN_VALUE + 5);
 
         assertThat(accepted.getBattleId()).isEqualTo(77);
         assertThat(accepted.hasErrorMessage()).as("成功应答里绝不能有 error_message").isFalse();
-        assertThat(accepted.toByteArray()).as("字段 1（varint）= 77").isEqualTo(new byte[] {0x08, 77});
+        assertThat(accepted.toByteArray()).as("字段 1（varint）= 77，字段 4（varint）= DIRECT").isEqualTo(new byte[] {0x08, 77, 0x20, 1});
         assertThat(Long.toUnsignedString(big.getBattleId())).isEqualTo("9223372036854775813");
         assertThatThrownBy(() -> MatchTips.watchAccepted(0)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void 观战转大厅档_delivery是LOBBY_带凭证_不带error_message() {
+        WatchBattleResponse lobby = MatchTips.watchLobby(77, com.google.protobuf.ByteString.copyFromUtf8("ticket"));
+
+        assertThat(lobby.getBattleId()).isEqualTo(77);
+        assertThat(lobby.getDelivery()).isEqualTo(com.game.proto.match.eSpectateDelivery.SPECTATE_DELIVERY_LOBBY);
+        assertThat(lobby.getSpectateTicket().toStringUtf8()).isEqualTo("ticket");
+        assertThat(lobby.hasErrorMessage()).isFalse();
+        assertThatThrownBy(() -> MatchTips.watchLobby(0, com.google.protobuf.ByteString.EMPTY)).isInstanceOf(IllegalArgumentException.class);
     }
 
     private static TipInfoMessage tip(int id, String text) {

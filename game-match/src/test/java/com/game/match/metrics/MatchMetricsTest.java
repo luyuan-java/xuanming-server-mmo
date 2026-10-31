@@ -101,7 +101,10 @@ class MatchMetricsTest {
                 "game.match.watchable.anomalies",
                 "game.match.watchable.battles",
                 "game.match.observer.rpc",
-                "game.match.spectate.inflight");
+                "game.match.spectate.inflight",
+                // 全球观战原件的收尾与请求历史的保留期（mmorpg battle-spectate-tiered-fanout.md §15.9）
+                "game.match.watch.unproven.close",
+                "game.match.watch.requests.purged");
         assertThat(meters.get("game.match.starved.anchor.wait").gauge().getId().getBaseUnit()).as("导出成 …_wait_seconds").isEqualTo("seconds");
         assertThat(meters.get("game.match.wait").summary().getId().getBaseUnit()).isEqualTo("seconds");
     }
@@ -313,11 +316,11 @@ class MatchMetricsTest {
     @Test
     void 观战_各计数的标签取值与规格表逐个相同_启动即预建为0() {
         List<String> outcomes = List.of("ok", "internal", "queued", "in_battle", "already_watching", "offline", "no_battle", "not_found", "rejected",
-                "full", "overloaded");
+                "full", "overloaded", "private", "lobby");
         for (String outcome : outcomes) {
             assertThat(count("game.match.watch.battle", "outcome", outcome)).as(outcome).isZero();
         }
-        assertThat(meters.find("game.match.watch.battle").counters()).as("163 的出口恰好十一种").hasSize(outcomes.size());
+        assertThat(meters.find("game.match.watch.battle").counters()).as("163 的出口恰好十三种").hasSize(outcomes.size());
 
         for (String result : List.of("ok", "error", "overloaded")) {
             assertThat(count("game.match.list.watchable", "result", result)).as(result).isZero();
@@ -333,7 +336,7 @@ class MatchMetricsTest {
         }
         assertThat(meters.find("game.match.spectate.evictions").counters()).hasSize(20);
 
-        List<String> indexReasons = List.of("room_missing", "dead_node", "stale", "missing_record", "invalid_member", "sweep");
+        List<String> indexReasons = List.of("room_missing", "dead_node", "stale", "missing_record", "invalid_member", "sweep", "private");
         for (String reason : indexReasons) {
             assertThat(count("game.match.watchable.index.evictions", "reason", reason)).as(reason).isZero();
         }

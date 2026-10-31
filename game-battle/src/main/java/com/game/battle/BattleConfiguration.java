@@ -176,6 +176,14 @@ public class BattleConfiguration {
         return new PresenceLobbyAnnouncer(new PlayerPushes(redis, redisKeys, new PlayerPresenceDirectory(redis, redisKeys)), battleMetrics);
     }
 
+    /** 观战中继帧：Redis 分片 pub/sub + 最新帧键（mmorpg battle-spectate-tiered-fanout.md §15.7），房间打开中继开关之后才有帧。 */
+    @Bean
+    @ConditionalOnMissingBean(com.game.battle.port.SpectateFrameSink.class)
+    public com.game.battle.port.SpectateFrameSink battleSpectateFrames(RedissonClient redis, RedisKeys redisKeys, BattleMetrics battleMetrics) {
+        return new com.game.battle.port.RedisSpectateFrameSink(new com.game.discovery.spectate.SpectateFrameChannel(redis, redisKeys), BattleClock.SYSTEM,
+                battleMetrics);
+    }
+
     /** battle 侧发件箱与结算投递的指标（scene-battle-spec §9）。 */
     @Bean
     public OutboxMetrics battleOutboxMetrics(MeterRegistry meterRegistry) {
@@ -279,7 +287,7 @@ public class BattleConfiguration {
     public BattleNode battleNode(BattleProperties props, RunMode battleRunMode, @Value("${game.advertise-host}") String advertiseHost,
                                  BattleTables battleTables, BattleTickets battleTickets, LobbyAnnouncer lobby,
                                  SceneBattleEvents sceneEvents, SettlementSink settlements, ActivityResultSink activityResults,
-                                 BattleResultSink results, AdmissionGate battleAdmissionGate, BattleMetrics battleMetrics,
+                                 BattleResultSink results, com.game.battle.port.SpectateFrameSink spectateFrames, AdmissionGate battleAdmissionGate, BattleMetrics battleMetrics,
                                  BattleInfrastructure battleInfrastructure, DubboCallAuth battleDubboCallAuth,GlobalBattleProperties global,
                                  @org.springframework.beans.factory.annotation.Qualifier("battleOutcomeClient")
                                  ObjectProvider<org.apache.dubbo.config.ReferenceConfig<com.game.api.MatchInternalService>> outcomeClient,
@@ -289,7 +297,7 @@ public class BattleConfiguration {
         if(global.enabled())results=new SignedOutcomeSink(results,outcomeClient.getObject().get(),
                 outcomeSecret);
         return new BattleNode(props, battleRunMode, advertiseHost, battleTables, battleTickets,
-                new OutboundPorts(lobby, sceneEvents, settlements, activityResults, results), battleAdmissionGate, battleMetrics,
+                new OutboundPorts(lobby, sceneEvents, settlements, activityResults, results, spectateFrames), battleAdmissionGate, battleMetrics,
                 BattleClock.SYSTEM, battleInfrastructure).withGlobal(global);
     }
 

@@ -23,11 +23,16 @@ import java.util.regex.Pattern;
  * <ol>
  *   <li>HTTP {@code /api/login} 口令登录：code 0、角色列表在、两枚 43 字符 base64url 令牌、过期秒 ≈ now + 2h / 720h；错口令 401、未知区 500；</li>
  *   <li>TCP {@code Login{auth_type:"access_token"}}：账号取令牌里的（请求里的 account 忽略）、不签新令牌（字段 3–6 空），会话已绑定（建角成功）；</li>
- *   <li>127 RefreshToken 轮换：新的一对；宽限窗口内重放旧 refresh 回同一对，新 refresh 用过之后再重放回 2000；
- *       HTTP {@code /api/refresh-token} 轮换成功、窗口内重放回同一对、新 refresh 用过之后重放 401、空的 401；
- *       轮换不作废旧 access（另一条连接仍能用它登录）。要求 login 的 {@code refresh-reuse-grace} 是缺省 30s（配成 0 时重放项不成立）；</li>
- *   <li>设备数上限：同一账号处于「已登录、未进游戏」窗口的连接到 3 个后第 4 个回 2024，断开一个之后第 4 个能登录。</li>
+ *   <li>127 RefreshToken 轮换：新的一对；宽限窗口内重放旧 refresh（它换出的新 refresh 还没用过）回同一对；
+ *       HTTP {@code /api/refresh-token} 轮换成功、窗口内重放回同一对、空的 401；TCP 再轮换一次照常成功；</li>
+ *   <li>轮换不作废旧 access（另一条连接仍能用它登录）；设备数上限：同一账号处于「已登录、未进游戏」窗口的连接到 3 个后第 4 个回 2024，
+ *       断开一个之后第 4 个能登录；</li>
+ *   <li>重用吊销：已轮换、且它换出的新 refresh 也已被轮换走的旧 refresh 再次出现，回 2000 并吊销这次登录的整个令牌家族——
+ *       家族的当前 refresh（TCP 2000、HTTP 401）与 access 一并失效；同账号另一次口令登录签出的令牌不受影响。放在最后：吊销之后
+ *       这条令牌线就不能再用了。</li>
  * </ol>
+ * 要求 login 的 {@code refresh-reuse-grace} 是缺省 30s（配成 0 时重放项不成立）、{@code refresh-reuse-revoke} 是缺省 true
+ * （只观测时吊销项不成立）。
  */
 public final class TokenScenario {
 
@@ -141,22 +146,17 @@ public final class TokenScenario {
         JsonNode httpRotated = http.refresh(rotated.getRefreshToken());
         report.check(httpRotated.get("code").asInt() == 0 && TOKEN.matcher(text(httpRotated, "refresh_token")).matches(),
                 "HTTP /api/refresh-token 轮换成功", "code=" + httpRotated.get("code"), REF);
-        RefreshTokenResponse reused = first.call(refreshToken, RefreshTokenRequest.newBuilder()
-                .setRefreshToken(refresh1).build(), RefreshTokenResponse.parser(), requestTimeout);
-        report.check(reused.getErrorMessage().getId() == TIP_ACCOUNT_NOT_FOUND,
-                "新 refresh 用过之后再重放旧 refresh 回 2000（窗口内也不行）", "error=" + reused.getErrorMessage().getId(), REF);
         JsonNode httpReplayed = http.refresh(rotated.getRefreshToken());
         report.check(httpReplayed.get("code").asInt() == 0
                         && text(httpRotated, "refresh_token").equals(text(httpReplayed, "refresh_token")),
                 "HTTP 宽限窗口内重放回同一对", "code=" + httpReplayed.get("code"), REF);
         RefreshTokenResponse rotatedAgain = first.call(refreshToken, RefreshTokenRequest.newBuilder()
                 .setRefreshToken(text(httpRotated, "refresh_token")).build(), RefreshTokenResponse.parser(), requestTimeout);
-        JsonNode httpReused = http.refresh(rotated.getRefreshToken());
         JsonNode httpEmpty = http.refresh(null);
-        report.check(!rotatedAgain.hasErrorMessage() && httpReused.get("code").asInt() == 401
+        report.check(!rotatedAgain.hasErrorMessage() && TOKEN.matcher(rotatedAgain.getRefreshToken()).matches()
                         && httpEmpty.get("code").asInt() == 401 && "empty_refresh_token".equals(text(httpEmpty, "message")),
-                "HTTP 新 refresh 用过之后重放回 401、空 refresh 回 401 empty_refresh_token",
-                "rotate=" + rotatedAgain.getErrorMessage().getId() + " reused=" + httpReused.get("code") + " empty=" + httpEmpty, REF);
+                "TCP 再轮换一次成功、空 refresh 回 401 empty_refresh_token",
+                "rotate=" + rotatedAgain.getErrorMessage().getId() + " empty=" + httpEmpty, REF);
 
         // 4. 旧 access 不随轮换作废；设备数上限
         GameConnection second = connect();
@@ -181,6 +181,31 @@ public final class TokenScenario {
         } while (retried.hasErrorMessage() && System.nanoTime() < deadline);
         report.check(!retried.hasErrorMessage(), "断开一个连接后第 4 个连接能登录（断线注销设备）",
                 "error=" + retried.getErrorMessage().getId(), REF);
+
+        // 5. 重用吊销（最后做：吊销之后 HTTP 登录签出的这条令牌线就不能再用了）。refresh1 已轮换、它换出的新 refresh 也已被
+        // 轮换走：无论还在不在宽限窗口内，再出现都是「两方在用同一条链」。
+        RefreshTokenResponse reused = first.call(refreshToken, RefreshTokenRequest.newBuilder()
+                .setRefreshToken(refresh1).build(), RefreshTokenResponse.parser(), requestTimeout);
+        report.check(reused.getErrorMessage().getId() == TIP_ACCOUNT_NOT_FOUND,
+                "重放后继已被轮换走的旧 refresh 回 2000（判定为重用）", "error=" + reused.getErrorMessage().getId(), REF);
+        RefreshTokenResponse headAfterRevoke = first.call(refreshToken, RefreshTokenRequest.newBuilder()
+                .setRefreshToken(rotatedAgain.getRefreshToken()).build(), RefreshTokenResponse.parser(), requestTimeout);
+        JsonNode httpHeadAfterRevoke = http.refresh(rotatedAgain.getRefreshToken());
+        report.check(headAfterRevoke.getErrorMessage().getId() == TIP_ACCOUNT_NOT_FOUND
+                        && httpHeadAfterRevoke.get("code").asInt() == 401,
+                "吊销之后家族的当前 refresh 也失效（TCP 2000、HTTP 401）",
+                "tcp=" + headAfterRevoke.getErrorMessage().getId() + " http=" + httpHeadAfterRevoke.get("code"), REF);
+        // 在已登录的连接上再登一次（不新占设备名额）
+        LoginResponse revokedAccess = fourth.call(login, LoginRequest.newBuilder().setAuthType("access_token")
+                .setAuthToken(access1).build(), LoginResponse.parser(), requestTimeout);
+        report.check(revokedAccess.getErrorMessage().getId() == TIP_ACCOUNT_NOT_FOUND,
+                "吊销之后家族签过的 access 不能再登录（回 2000，不必等 2h 过期）",
+                "error=" + revokedAccess.getErrorMessage().getId(), REF);
+        RefreshTokenResponse otherFamily = third.call(refreshToken, RefreshTokenRequest.newBuilder()
+                .setRefreshToken(thirdLogin.getRefreshToken()).build(), RefreshTokenResponse.parser(), requestTimeout);
+        report.check(!thirdLogin.getRefreshToken().isEmpty() && !otherFamily.hasErrorMessage()
+                        && TOKEN.matcher(otherFamily.getRefreshToken()).matches(),
+                "同账号另一次口令登录的令牌不受影响（照常轮换）", "error=" + otherFamily.getErrorMessage().getId(), REF);
     }
 
     private GameConnection connect() throws RobotException {

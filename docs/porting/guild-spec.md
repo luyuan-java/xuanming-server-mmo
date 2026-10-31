@@ -1897,3 +1897,12 @@ launch 原件和摘要不可改写；SQL PREPARED 不因邀请 TTL、客户端�
 结果结算与 POISON 均先读永久 launch 原件，再全员 P 升序验证原账号修订，再 G（可已删除）及 launch/投影/原战斗锁，严格核 roster、活动上下文、battle 与 launch request。缺原件拒绝，不能静默跳奖或解除投影。有效 SETTLED/POISON 同事务终结 launch 与 ACTIVE；EXPIRED 仍允许迟到结果，始终保留 ACTIVE。奖励 owed 与资产 op 延续原可靠投递并在角色冻结/维护 guard 阻止提前过户；帮会解散只影响是否能追加帮会内奖励，不删除 launch 原件。
 
 新增表沿现有 PbMysql 用主契约私有消息及 TableOption 登记，不手改共享生成产物、不另造并行 PB。角色 Begin 与受控 Import 在已持 P 时拒绝 ACTIVE 投影，不以 requireGuildExit 关闭跳过该检查。重置只在既有显式本地维护路径加入新表；运行 worker 不按 TTL 清持久 launch/ACTIVE。测试覆盖原同意/ABA/冻结、提交顺序、未知结果、已签取消/伪签/换原件、结果重放/过期/解散、角色维护拒绝及正常终局释放。本轮源码与静态证据分别登记，生成、编译、真实 TiDB、双区均由主控统一验证。
+### 2026-10-30 公会物理连接的删除后多等待者兼容策略（已运行）
+
+当前验收 TiDB 构建 `849a85c3795c3472b46f59a8f2917b880d7ee923` 中，READ COMMITTED、1 秒锁等待下，占锁事务删除帮会行并提交后，公平锁开启的三组双等待者各出现一个 1105；同一编译产物仅改连接初始化为 OFF，九个观察均正常返回不存在，再改回 ON 又复现三个 1105。单等待者均正常；首个成功等待者回滚并归还连接后，另一个仍报错。尚未据此定位服务器内部错误分支，不把泛化 1105 当作帮会不存在或可重试错误。
+
+公会通过 `StrongTiDbConnectionPolicy.forGuild` 声明固定 OFF 初始化项；`AuthorityDataSource` 只在真实 TiDB 的新物理连接上设置并读回唯一 false，失配即由既有适配器关闭连接，不能进入池。普通业务连接仍不能执行该 SET，其他 Java 领域不继承此项；真实 MySQL/H2 不发送此变量。Spring 公会池、资产修复 CLI、公共夹具及三个独立业务 IT 池使用同一工厂。原事务预算、RC、1 秒锁等待、死锁重试和业务断言均保持。
+
+修复前，原 `GuildLockOrderMysqlTest#解散_与踢人退帮同帮对撞` 真正进入测试并以 1105 失败，新增删除后双等待者回归也失败。修复后两者通过，原用例完整执行 30 轮；物理读回接口测试 3 项、重连接口测试 2 项及启动门禁 20 项全部通过，总计 27 项、零跳过。两项并发测试使用真实 TiDB；接口替身和启动上下文测试不冒充真库测试。13 个显式源实际编译、34 个新 class 校验覆盖旧同族类。未单独执行连接 ID 级别的同池复借测试；本结论不等于 Java 全量构建、Go 公会或双区联验通过。
+
+证据位于服务端仓 `build/verification/guild-fair-postfix-minimal-compile-20261030-r1/RESULT.guild-concurrency-repair.five-cases.actual.json`（SHA256 `57C14038E5265829C3A898BDBE9009029CFD2B141168A65BBA57D93F8CF5F904`）。先前独立 JUnit 入口缺输出目录 provider 的两次失败均保留，只计入口失败，不计业务红证据。

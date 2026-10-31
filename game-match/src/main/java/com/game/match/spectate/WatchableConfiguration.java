@@ -32,8 +32,9 @@ public class WatchableConfiguration {
 
     /** 164 的流程。 */
     @Bean
-    public WatchableListService watchableListService(SpectateStore spectateStore, MatchMetrics metrics) {
-        return new WatchableListService(spectateStore, metrics);
+    public WatchableListService watchableListService(SpectateStore spectateStore, MatchMetrics metrics,
+                                                     org.springframework.beans.factory.ObjectProvider<SpectateTierStore> tiers) {
+        return new WatchableListService(spectateStore, metrics).withFeatured(tiers.getIfAvailable());
     }
 
     /** 164 的处理器。 */

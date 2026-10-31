@@ -29,13 +29,17 @@ import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.CreateBattleRequest;
 import com.game.proto.PrepareBattleRequest;
 import com.game.proto.eBattleActivityKind;
+import com.game.proto.eSpectateVisibility;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import org.apache.dubbo.rpc.RpcException;
 import org.apache.dubbo.rpc.TriRpcStatus;
 import org.junit.jupiter.api.Test;
@@ -124,6 +128,7 @@ class GatherPipelineTest {
         assertThat(create.getCreatedAtMs()).isEqualTo(T0 + 1_234);
         assertThat(create.getTableFingerprint()).as("全员一致的指纹透传").isEqualTo("fp-1");
         assertThat(create.hasActivityContext()).isFalse();
+        assertThat(create.getSpectateVisibility()).as("1V1 是计分局：建房时冻结为私密").isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);
         assertThat(create.getPlayersList()).extracting(BattlePlayerSnapshot::getPlayerId).containsExactly(A, B);
         assertThat(create.getPlayersList()).extracting(BattlePlayerSnapshot::getTeamIndex).as("锚点在 0 队").containsExactly(0, 1);
         assertThat(f.battleCalls.calls).singleElement().satisfies(call -> {
@@ -133,10 +138,11 @@ class GatherPipelineTest {
         assertThat(f.battleA.destroys).isEmpty();
         assertThat(f.battleNodes.picks).containsExactly(Set.of());
 
-        // 落点记录：建房之前写一次，成功后同值补写一次
+        // 落点记录：建房之前写一次，成功后同值补写一次；可见性抄自同一份建房请求
         BattlePlacement expected = BattlePlacement.newBuilder().setBattleId(battleId).setBattleNodeId(1).setBattleInstanceId("inst-a")
                 .setRpcHost("127.0.0.1").setRpcPort(21200).setAttempt(1).setMode(ONE_V_ONE).setBattleConfigId(0).addPlayerNames("甲")
-                .addPlayerNames("乙").setCreatedAtMs(T0 + 1_234).setDeadlineMs(T0 + 300_000).build();
+                .addPlayerNames("乙").setCreatedAtMs(T0 + 1_234).setDeadlineMs(T0 + 300_000)
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE_VALUE).build();
         assertThat(f.placements.writes).containsExactly(expected, expected);
         assertThat(f.placements.stored(battleId)).contains(expected);
         assertThat(f.placements.deletes).isEmpty();
@@ -165,6 +171,38 @@ class GatherPipelineTest {
         assertThat(f.ratings.loads).as("1V1 不重读评分").isEmpty();
         assertThat(f.count("game.match.gather.zone.mix", "mode", "MATCH_MODE_1V1", "mix", "single")).isEqualTo(1.0);
         assertThat(f.count("game.match.gather.zone.mix", "mode", "MATCH_MODE_1V1", "mix", "cross")).isZero();
+    }
+
+    @Test
+    void 可见性在建房时决定一次_建房请求与落点记录带同一份冻结值_PVE公开_计分局切磋与活动局私密() {
+        BattleActivityContext trial = BattleActivityContext.newBuilder().setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_TRIAL)
+                .setGuildId(555).setActivityId(3).setPeriodKey(20261006).setInitiatorPlayerId(A).setGuildPeriodKey(20261006).build();
+        Map<String, Function<GatherFixture, GatherPlan>> entries = new LinkedHashMap<>();
+        entries.put("PVE_SOLO", fx -> fx.solo(A));
+        entries.put("整队 PVE_TEAM", fx -> fx.team(A, B));
+        entries.put("凑单 1V1", fx -> fx.popped(ONE_V_ONE, 0, A, B));
+        entries.put("切磋", fx -> fx.challenge(A, B));
+        entries.put("帮会历练", fx -> fx.activity(8_888_888L, trial, A, B));
+        Map<String, eSpectateVisibility> expected = Map.of(
+                "PVE_SOLO", eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC,
+                "整队 PVE_TEAM", eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC,
+                "凑单 1V1", eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE,
+                "切磋", eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE,
+                "帮会历练", eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);
+
+        entries.forEach((entry, planOf) -> {
+            GatherFixture fx = new GatherFixture();
+
+            GatherResult result = fx.pipeline().run(planOf.apply(fx));
+
+            assertThat(result.ok()).as(entry).isTrue();
+            CreateBattleRequest create = fx.battleA.creates.get(0);
+            assertThat(create.getSpectateVisibility()).as(entry).isEqualTo(expected.get(entry));
+            assertThat(fx.placements.writes).as("%s：建房前与成功后的两次落点写都抄同一份冻结值", entry).hasSize(2)
+                    .allSatisfy(written -> assertThat(written.getSpectateVisibility()).isEqualTo(create.getSpectateVisibilityValue()));
+            assertThat(fx.hooks.started).as("%s：交给开局钩子的也是它", entry).singleElement()
+                    .satisfies(started -> assertThat(started.getSpectateVisibility()).isEqualTo(create.getSpectateVisibilityValue()));
+        });
     }
 
     @Test

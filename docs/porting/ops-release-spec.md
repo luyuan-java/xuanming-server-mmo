@@ -4,7 +4,7 @@
 > 本稿用到的 `deploy/**`、`tools/scripts/**`（含 `lib/`、`tests/`）、`.github/workflows/**`、`docs/ops/**`、`docs/design/**`、`java/gateway_node/**`、`go/*/etc/**`、
 > `cpp/libs/engine/**` 都已检出。缺的目录与处理：
 > - **`bin/` 没有检出**。`k8s_deploy.ps1` 与 `release_preflight.ps1` 都读 `bin/etc/base_deploy_config.yaml`，用 `git show HEAD:bin/etc/base_deploy_config.yaml` 读到：
->   `:5-6`（KeepaliveInterval 1 s、NodeTTLSeconds 180）、`:25`（`LogLevel: 2` 即 WARN）、`:92-93`（命令 topic 256 分区、第 2 代）、`:110`（`GateTokenSecret` 是仓库里的开发值）、
+>   `:5-6`（KeepaliveInterval 1 s、NodeTTLSeconds 180）、`:25`（`LogLevel: 2` 即 WARN；**2026-10-30 更正**：按 muduo 枚举 2 = INFO，mmorpg 2026-10-22 起注释已改正、键现在 `:31`）、`:92-93`（命令 topic 256 分区、第 2 代）、`:110`（`GateTokenSecret` 是仓库里的开发值）、
 >   `:126`（GateMaxConnections 20000）、`:136`（BattleMaxConnections 4096）。
 > - **`third_party/` 没有检出**。「muduo 日志滚动不删旧文件」只引用了脚本注释（`mm:tools/scripts/k8s_deploy.ps1:267-268`），没有核对源码；不影响任何 Java 结论。
 > - Unity 客户端是另一个稀疏克隆 `D:\work\mmorpg-client`，本批用不到：7.6 不改客户端契约，只改 gate / battle 通告地址的**取值**。assign-gate 应答形状见
@@ -406,7 +406,7 @@ external 形态下客户端连的是每序号 Service（`lib:864-913`），Pod N
 | D | `kafka.brokers.{cpp,login,db,locator}`；`kafka.partition.match` | 4 个文件 | broker ≥3；login 与 db 的 PartitionCnt 相等 | 同密钥类；FAIL |
 | E | `locator.lease.disconnect`、`locator.lease.etcd` | player_locator | ≥30 s | FAIL |
 | F | `ratelimit.{zone.rps,zone.burst,ip.rps,queue.timeout,burst.ge.rps,enabled.declared}` | gateway `gate.rate-limit.*` | ≥1；≥1000 ms；burst ≥ rps；键必须存在，false 只 WARN | FAIL / WARN |
-| G | `debug.jpa.showsql`、`debug.login.devpassword`、`debug.actuator.exposure`、`debug.cpp.loglevel` | gateway / login / base_deploy_config | 不得 true；不得含 `* env heapdump threaddump configprops beans shutdown loggers`；C++ `LogLevel ≥1` | FAIL |
+| G | `debug.jpa.showsql`、`debug.login.devpassword`、`debug.actuator.exposure`、`debug.cpp.loglevel` | gateway / login / base_deploy_config | 不得 true；不得含 `* env heapdump threaddump configprops beans shutdown loggers`；C++ `LogLevel ≥1`（**2026-10-30 更正**：mmorpg 2026-10-22 起下界为 2，1 = DEBUG） | FAIL |
 | H | `release.{version,changelog,artifact.dir,artifact.sha256sums,buildinfo.version,buildinfo.clean,manifest,imagetag.commit}`；`release.buildinfo.commit` | 给了 `-ReleaseVersion` 时 | 版本、CHANGELOG 段、sha256sums、build-info；**manifest 的 digests 为空也 PASS**；commit ≠ HEAD 只 WARN | FAIL（commit 一项 WARN） |
 
 各节出处：A `:252-289`，B `:291-299`，C `:301-338`，D `:340-363`，E `:365-374`，F `:376-410`，G `:412-448`，H `:452-610`，汇总 `:614-656`。
@@ -469,7 +469,7 @@ external 形态下客户端连的是每序号 Service（`lib:864-913`），Pod N
 
 - Java gateway：`logging.structured.format.console: logstash`，字段 `@timestamp / level / logger_name / thread_name / message / stack_trace`（`java/gateway_node/src/main/resources/application.yaml:133-140`）；
   liveness / readiness 分组不含 DB / Redis（`:113-131`）；actuator 只暴露 `health,info`，没有 prometheus（`:108-112`）。
-- Go：go-zero logx 缺省 JSON 到 stdout。C++：muduo 文本，`LogLevel: 2` 即 WARN。
+- Go：go-zero logx 缺省 JSON 到 stdout。C++：muduo 文本，`LogLevel: 2` 即 WARN。**（2026-10-30 更正：按 muduo 枚举 2 = INFO；mmorpg 的 K8s node-config 原先写死 1 = DEBUG，2026-10-22 起从 `bin/etc` 镜像为 2）**
 
 ### 3.5 值班用的日志查询（不会自动告警）
 

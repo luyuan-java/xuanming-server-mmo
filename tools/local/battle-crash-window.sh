@@ -178,6 +178,7 @@ load_secret GAME_ADMIN_TOKEN run/game-admin-token || exit 2
 load_secret GAME_GM_ADMIN_SECRET run/game-gm-admin-secret || exit 2
 load_secret GAME_ASSET_OP_SECRET_GUILD run/game-asset-op-secret-guild || exit 2
 load_secret GAME_BATTLE_TOKEN_SECRET run/game-battle-token-secret || exit 2
+load_secret GAME_SPECTATE_TOKEN_SECRET run/game-spectate-token-secret || exit 2
 
 # 与 start-slice 的新域秘密清单一致；只读回原值，不能为重启进程重新生成签名密钥。
 for secret_name in GAME_ASSET_OP_SECRET_MAIL GAME_ASSET_OP_SECRET_TRADE MAIL_PRODUCER_SECRET_RANK RANK_PRODUCER_SECRET_MATCH \

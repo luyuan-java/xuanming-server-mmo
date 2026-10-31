@@ -483,7 +483,8 @@ public final class RedisKeys {
 
     /**
      * refresh 轮换记录：{@code game:login:refresh-rotated:{<family>}:<旧 token>}，值为那次轮换换出的一对（JSON），TTL = 重放宽限窗口
-     * （≤ 60s）。窗口内同一旧 token 再来、且新 refresh 仍未用过、家族仍在时据此返回同一对（基线 {@code refresh_rotated:{<fid>}:<token>}）。
+     * （≤ 60s）。窗口内同一旧 token 再来、且新 refresh 仍未用过、家族仍在时据此返回同一对；新 refresh 已被轮换走而家族还活着，
+     * 按重用吊销家族（基线 {@code refresh_rotated:{<fid>}:<token>}）。
      */
     public String loginRefreshRotated(String familyId, String token) {
         return prefix + "login:refresh-rotated:{" + familyId + "}:" + token;
@@ -500,7 +501,7 @@ public final class RedisKeys {
 
     /**
      * 账号的令牌家族索引：{@code game:login:account-refresh:<account>}，ZSET，成员是家族号、分数是家族的过期 Unix 秒。
-     * 只做单键操作（不进任何多键脚本），用于每账号家族数封顶与吊销全部；家族本身的有效性只看家族记录。
+     * 只做单键操作（不进任何多键脚本），只用于每账号家族数封顶；家族本身的有效性只看家族记录。
      */
     public String loginAccountRefresh(String account) {
         return prefix + "login:account-refresh:" + account;
@@ -685,6 +686,38 @@ public final class RedisKeys {
      */
     public String matchWatchable() {
         return matchPrefix + "watchable";
+    }
+
+    /**
+     * 观战档位 {@code game:{match}:spectate-tier:<battle_id>}（mmorpg battle-spectate-tiered-fanout.md §15.6；STRING：{@code eSpectateTier} 的数值，只升不降，由 game-match 的 Lua 比较后设置；
+     * TTL 同落点记录）。不存在 = DIRECT。
+     */
+    public String matchSpectateTier(long battleId) {
+        return matchPrefix + "spectate-tier:" + Long.toUnsignedString(battleId);
+    }
+
+    /**
+     * 赛事局索引 {@code game:{match}:spectate-featured}（ZSET：成员 = battle_id 的无符号十进制，分数 = 到期毫秒，寿命同落点记录）。运营入口写，观战列表读。
+     * 全服一个键：赛事局要从这里取，不能从可观战索引的第一页里挑——那一页按开局倒序，比赛开打几分钟就被新局挤出去。
+     */
+    public String matchSpectateFeatured() {
+        return matchPrefix + "spectate-featured";
+    }
+
+    /**
+     * 观战中继的 Redis 分片 pub/sub 频道 {@code game:spectate:{<battle_id>}}（§15.7 Java 口径：一场一个频道；消息 = 契约 {@code contracts.kafka.SpectateFrameEvent} 字节）。
+     * battle 每帧发布一次；只有有本机观众的 gate 才订阅。与 {@link #spectateState} 共用 hash tag，上 Cluster 时在同一个分片。
+     */
+    public String spectateChannel(long battleId) {
+        return prefix + "spectate:{" + Long.toUnsignedString(battleId) + "}";
+    }
+
+    /**
+     * 这场最新的观战帧 {@code game:spectate:state:{<battle_id>}}（STRING，同样是 {@code SpectateFrameEvent} 字节，带 TTL = 战斗期限 + 余量）：
+     * gate 的首个本机订阅者到来时读它发首帧；终局帧也写进来，迟到的订阅者直接收 166。battle 写，gate 读。
+     */
+    public String spectateState(long battleId) {
+        return prefix + "spectate:state:{" + Long.toUnsignedString(battleId) + "}";
     }
 
     private static String queueSuffix(int mode, int config) {

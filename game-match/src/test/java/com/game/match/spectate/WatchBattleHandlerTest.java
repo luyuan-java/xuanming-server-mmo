@@ -106,8 +106,10 @@ class WatchBattleHandlerTest {
     }
 
     private BattlePlacement open(long battleId) {
+        // 公开局（163 只读落点里冻结的可见性）
         BattlePlacement placement = BattlePlacement.newBuilder().setBattleId(battleId).setBattleNodeId(7).setBattleInstanceId("inst-a")
-                .setRpcHost("10.1.1.1").setRpcPort(21200).setAttempt(1).setMode(1).setCreatedAtMs(clock.peekMs()).build();
+                .setRpcHost("10.1.1.1").setRpcPort(21200).setAttempt(1).setMode(1).setCreatedAtMs(clock.peekMs())
+                .setSpectateVisibility(com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC_VALUE).build();
         placements.put(placement);
         spectate.putWatchable(battleId, placement.getCreatedAtMs());
         return placement;
@@ -185,7 +187,8 @@ class WatchBattleHandlerTest {
         ClientReply reply = reply(future);
 
         assertThat(reply.getTipId()).isZero();
-        assertThat(reply.getBody()).as("成功应答只有 battle_id").isEqualTo(WatchBattleResponse.newBuilder().setBattleId(X).build().toByteString());
+        assertThat(reply.getBody()).as("成功应答只有 battle_id 与 delivery").isEqualTo(WatchBattleResponse.newBuilder().setBattleId(X)
+                .setDelivery(com.game.proto.match.eSpectateDelivery.SPECTATE_DELIVERY_DIRECT).build().toByteString());
         assertThat(ranOn).singleElement().satisfies(thread -> {
             assertThat(thread.isVirtual()).as("163 的处理流程在虚拟线程上").isTrue();
             assertThat(thread.getName()).startsWith("match-spectate-");

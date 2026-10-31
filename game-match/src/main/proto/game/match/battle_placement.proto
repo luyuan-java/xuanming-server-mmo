@@ -35,4 +35,8 @@ message BattlePlacement {
   uint64 created_at_ms = 10;
   // 整场期限（Unix 毫秒）= gather 起点的 Redis TIME + 300 s，即 177 的 expire_at_ms。
   uint64 deadline_ms = 11;
+  // 观战可见性：eSpectateVisibility 的数值（与 mode 同样存数值，不 import 同步来的 proto）。建房时由 SpectateVisibilityPolicy 决定一次，
+  // 抄自同一份 CreateBattleRequest.spectate_visibility（单一来源，之后不按模式重算）。非 PUBLIC 的记录照写（179 补签靠它定位 battle），
+  // 但不进可观战索引，也不能被 163 按 id 观战；0（漏填 / 老写者）按私密处理。
+  uint32 spectate_visibility = 12;
 }

@@ -16,6 +16,7 @@ import com.game.proto.CreateBattleRequest;
 import com.game.proto.CreateBattleResponse;
 import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
+import com.game.proto.eSpectateVisibility;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -175,6 +176,10 @@ final class E2eSupport {
                 .build();
     }
 
+    /*
+     * 两个建房夹具都标 PUBLIC：battle 只认建房原件里冻结的可见性（AddObserver 第二道闸），端到端用例里的观众要能登记上。
+     */
+
     static CreateBattleRequest pve(long battleId, long deadlineMs, BattlePlayerSnapshot hero) {
         return CreateBattleRequest.newBuilder()
                 .setBattleId(battleId)
@@ -182,6 +187,7 @@ final class E2eSupport {
                 .setMatchMode(MATCH_MODE_PVE)
                 .setSeed(20261005)
                 .setDeadlineMs(deadlineMs)
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC)
                 .addPlayers(hero)
                 .build();
     }
@@ -192,6 +198,7 @@ final class E2eSupport {
                 .setMatchMode(MATCH_MODE_PVP)
                 .setSeed(7)
                 .setDeadlineMs(deadlineMs)
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC)
                 .addPlayers(a)
                 .addPlayers(b)
                 .build();

@@ -3,6 +3,7 @@ package com.game.battle.edge;
 import com.game.battle.metrics.BattleMetrics;
 import com.game.battle.metrics.BattleMetrics.Disconnect;
 import com.game.battle.room.DirectLink;
+import com.game.net.client.ClientFrames;
 import com.game.net.limit.MessageRateLimiter;
 import com.game.proto.MessageContent;
 import com.game.proto.eBattleTicketRole;
@@ -94,6 +95,38 @@ final class DirectSession implements DirectLink {
         }
         requireOwnerThread(ch);
         ch.writeAndFlush(frame);
+    }
+
+    /** 用本连接的分配器把帧编码一次（与 pipeline 编码器逐字节相同），供同一次扇出的各条直连共享。连接已断就退回不编码的共享帧。 */
+    @Override
+    public SharedFrame share(MessageContent frame) {
+        Objects.requireNonNull(frame, "frame");
+        Channel ch = channel;
+        if (ch == null) {
+            return SharedFrame.unencoded(frame);
+        }
+        requireOwnerThread(ch);
+        return new EncodedFrame(frame, ClientFrames.encode(ch.alloc(), frame));
+    }
+
+    /**
+     * 写一份共享字节的引用：pipeline 里的 {@code ClientFrameEncoder} 只编码 protobuf 消息，{@code ByteBuf} 原样过，所以线上字节与逐条
+     * {@link #send(MessageContent)} 相同。交给 {@code writeAndFlush} 的那份引用由 Netty 在写完或写失败时释放；不是活直连时什么都不占。
+     * 不是本直连面产出的共享帧（测试替身）按原帧逐条写。
+     */
+    @Override
+    public void send(SharedFrame frame) {
+        Objects.requireNonNull(frame, "frame");
+        if (!(frame instanceof EncodedFrame encoded)) {
+            send(frame.content());
+            return;
+        }
+        Channel ch = channel;
+        if (state != State.VERIFIED || closeRequested || ch == null || !ch.isActive()) {
+            return;
+        }
+        requireOwnerThread(ch);
+        ch.writeAndFlush(encoded.retainedBytes());
     }
 
     /**

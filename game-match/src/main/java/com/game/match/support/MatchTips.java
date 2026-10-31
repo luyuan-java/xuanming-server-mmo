@@ -5,8 +5,10 @@ import com.game.proto.match.ChallengePlayerResponse;
 import com.game.proto.match.JoinQueueResponse;
 import com.game.proto.match.RespondChallengeResponse;
 import com.game.proto.match.WatchBattleResponse;
+import com.game.proto.match.eSpectateDelivery;
 import com.game.table.CommonErrorTip;
 import com.game.table.MatchErrorTip;
+import com.google.protobuf.ByteString;
 
 /**
  * 匹配的 tip 码与「按 tip 组装各应答体」的小工厂（match-spec §8.1、§8.2；基线 {@code go/match/internal/constants/errors.go}）。
@@ -137,11 +139,22 @@ public final class MatchTips {
         return WatchBattleResponse.newBuilder().setErrorMessage(tip.proto()).build();
     }
 
-    /** 163 成功：只有 {@code battle_id}（随机模式回填实际挑中的那一场），<b>不带</b> {@code error_message}。 */
+    /** 163 成功（直连席，L0）：{@code battle_id}（随机模式回填实际挑中的那一场）+ {@code delivery = DIRECT}，<b>不带</b> {@code error_message}。 */
     public static WatchBattleResponse watchAccepted(long battleId) {
         if (battleId == 0) {
             throw new IllegalArgumentException("观战成功的应答必须带 battle_id");
         }
-        return WatchBattleResponse.newBuilder().setBattleId(battleId).build();
+        return WatchBattleResponse.newBuilder().setBattleId(battleId).setDelivery(eSpectateDelivery.SPECTATE_DELIVERY_DIRECT).build();
+    }
+
+    /**
+     * 163 成功（大厅档，mmorpg battle-spectate-tiered-fanout.md §15.2）：{@code delivery = LOBBY}；客户端把 {@code spectate_ticket} 原样交给 gate 的 SubscribeSpectate，
+     * 观战帧 161 / 158 / 166 经大厅连接下发。{@code ticket} 为空只出现在持久回执里：凭证有 TTL，重放时重新签发。
+     */
+    public static WatchBattleResponse watchLobby(long battleId, ByteString ticket) {
+        if (battleId == 0) {
+            throw new IllegalArgumentException("观战成功的应答必须带 battle_id");
+        }
+        return WatchBattleResponse.newBuilder().setBattleId(battleId).setDelivery(eSpectateDelivery.SPECTATE_DELIVERY_LOBBY).setSpectateTicket(ticket).build();
     }
 }

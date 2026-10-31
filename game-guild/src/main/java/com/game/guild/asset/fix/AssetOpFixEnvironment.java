@@ -111,8 +111,12 @@ final class AssetOpFixEnvironment {
         dataSource.setDefaultTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         String databaseLabel = expectDatabase == null ? namespace.value() : expectDatabase;
         String mismatch;
-        try{com.game.discovery.sql.AuthorityDataSourcePolicy.protectDruid(dataSource,com.game.common.sql.WriterAuthority.consumeEnvironment(),true);}
+        try{
+            com.game.discovery.sql.StrongTiDbConnectionPolicy.forGuild("guild-assetopfix",true).postProcessBeforeInitialization(dataSource,"guild-assetopfix");
+            com.game.discovery.sql.AuthorityDataSourcePolicy.protectDruid(dataSource,com.game.common.sql.WriterAuthority.consumeEnvironment(),true);
+        }
         catch(java.io.IOException invalid){dataSource.close();throw new IllegalStateException("NORMAL CLI启动grant缺失",invalid);}
+        catch(java.sql.SQLException|RuntimeException invalid){dataSource.close();throw invalid;}
         try (Connection conn = dataSource.getConnection(PING_TIMEOUT_MS)) {
             if (!conn.isValid((int) (PING_TIMEOUT_MS / 1000))) {
                 throw new IllegalStateException("连接无效");

@@ -86,6 +86,19 @@ class MessageRoutesTest {
     }
 
     @Test
+    void 观战订阅的两个号是gate本地处理_不进后端表_有应答_不是只走直连() {
+        for (String method : List.of("SubscribeSpectate", "UnsubscribeSpectate")) {
+            MessageRoute route = routes.clientRoute(registry.requireId("GateClientSpectate", method));
+            assertThat(route).as(method).isNotNull();
+            assertThat(route.domain()).isEqualTo(ClientDispatcher.DOMAIN_GATE);
+            assertThat(route.directOnly()).isFalse();
+            assertThat(route.hasResponse()).isTrue();
+            assertThat(route.method()).isEqualTo("GateClientSpectate." + method);
+        }
+        assertThat(MessageRoutes.SERVICE_BACKENDS).doesNotContainKey("GateClientSpectate");
+    }
+
+    @Test
     void 现行契约里的客户端服务都有去向_没有落到缺省分支的_后端表里的服务名契约里都有() {
         // 6.4 把 MatchService 接进来之后契约里已经没有「未接入」的客户端服务了：原来这里有一条取真样本的用例
         // （「Java版未接入的客户端服务路由到unsupported」），按它自己的说明删掉，缺省分支由下一条用例用假想的服务名钉住。
@@ -94,7 +107,8 @@ class MessageRoutesTest {
         List<String> notPorted = registry.all().stream()
                 .filter(m -> m.clientService() && !m.playerService()
                         && !MessageRoutes.SERVICE_BACKENDS.containsKey(m.serviceName())
-                        && !MessageRoutes.DIRECT_ONLY_SERVICES.contains(m.serviceName()))
+                        && !MessageRoutes.DIRECT_ONLY_SERVICES.contains(m.serviceName())
+                        && !MessageRoutes.GATE_LOCAL_SERVICES.contains(m.serviceName()))
                 .map(MessageMethod::serviceName).distinct().toList();
         assertThat(notPorted)
                 .as("契约里出现了 Java 版还没接入的客户端服务：它的号会走 dispatcher 的缺省分支（回带请求 id 的信封 1003）。"

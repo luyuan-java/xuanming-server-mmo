@@ -169,6 +169,18 @@ public final class BattleNodeServiceImpl implements BattleNodeService {
                 response -> response.getCancelled()?RpcResult.OK:RpcResult.BUSINESS_ERROR);
     }
 
+    @Override
+    public CompletableFuture<com.game.proto.AttachRelayGateResponse> attachRelayGate(com.game.proto.AttachRelayGateRequest request) {
+        return submit(RpcMethod.ATTACH_RELAY_GATE, request, rooms::attachRelayGate,
+                response -> resultOf(response.hasErrorMessage(), response.getErrorMessage()));
+    }
+
+    @Override
+    public CompletableFuture<com.game.proto.PromoteSpectateBroadcastResponse> promoteSpectateBroadcast(com.game.proto.PromoteSpectateBroadcastRequest request) {
+        return submit(RpcMethod.PROMOTE_SPECTATE_BROADCAST, request, rooms::promoteSpectateBroadcast,
+                response -> resultOf(response.hasErrorMessage(), response.getErrorMessage()));
+    }
+
     // ---------------------------------------------------------------- 进程内入口（dev 管理接口）
 
     /**

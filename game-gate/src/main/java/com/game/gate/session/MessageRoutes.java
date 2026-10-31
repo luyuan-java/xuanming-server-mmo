@@ -50,6 +50,13 @@ public interface MessageRoutes {
     Set<String> DIRECT_ONLY_SERVICES = Set.of("BattleClientPlayer");
 
     /**
+     * gate 本地处理、不转发给任何后端的客户端服务（服务裸名）：观战订阅 {@code GateClientSpectate}（mmorpg battle-spectate-tiered-fanout.md §15.2，
+     * 基线按 {@code targetNodeType == GateNodeService} 判定，Java 按服务裸名，理由同 {@link #DIRECT_ONLY_SERVICES}）。路由的域是
+     * {@link ClientDispatcher#DOMAIN_GATE}，它不在 {@link #SERVICE_BACKENDS} 里：没有 Dubbo 后端，也不进任何后端队列。
+     */
+    Set<String> GATE_LOCAL_SERVICES = Set.of("GateClientSpectate");
+
+    /**
      * 非玩家服务的客户端服务 → 后端。新接入一个后端就在这里加一行。
      * 帮会服务名是 {@code GuildService}（{@code message_id.txt} 的前缀，如 {@code 8=GuildServiceUpdateGuildScore}）：
      * 28 个号整体转给 game-guild，含只对内部开放的 8 与推送占位 220，由后端按方法回信封 1003（guild-spec §7.2、§7.3）。
@@ -127,6 +134,9 @@ public interface MessageRoutes {
     static String backendOf(MessageMethod method) {
         if (method.playerService()) {
             return ClientDispatcher.DOMAIN_SCENE;
+        }
+        if (GATE_LOCAL_SERVICES.contains(method.serviceName())) {
+            return ClientDispatcher.DOMAIN_GATE;
         }
         return SERVICE_BACKENDS.getOrDefault(method.serviceName(), BACKEND_UNSUPPORTED);
     }

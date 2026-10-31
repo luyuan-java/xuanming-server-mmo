@@ -8,6 +8,8 @@ import com.game.common.token.GmRequestAuth;
 import com.game.common.token.GmShutdownHandler;
 import com.game.common.RunMode;
 import com.game.common.token.NodeLinkAuth;
+import com.game.common.token.SpectateSecretPolicy;
+import com.game.common.token.SpectateTickets;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.RedisKeys;
 import com.game.gate.admin.GmShutdownController;
@@ -42,6 +44,10 @@ public class GateConfiguration {
 
     /** 环境变量名：gateway 用同一密钥签发令牌，gate 验签。 */
     static final String TOKEN_SECRET_ENV = "GAME_GATE_TOKEN_SECRET";
+    /** 环境变量名：game-match 用同一密钥签观战订阅凭证，gate 验签。 */
+    static final String SPECTATE_SECRET_ENV = "GAME_SPECTATE_TOKEN_SECRET";
+    /** battle 票据密钥（进程能看到时才比较：观战凭证密钥不得与它相同）。 */
+    static final String BATTLE_SECRET_ENV = "GAME_BATTLE_TOKEN_SECRET";
 
     @Bean
     public MessageIdRegistry messageIdRegistry() {
@@ -55,6 +61,24 @@ public class GateConfiguration {
             throw new IllegalStateException("缺少环境变量 " + TOKEN_SECRET_ENV + "（gate 令牌密钥，须与 game-gateway、game-scene-manager 一致）");
         }
         return GateTokens.ofUtf8(secret);
+    }
+
+    /**
+     * 观战订阅凭证的验签（mmorpg battle-spectate-tiered-fanout.md §15.7）。密钥只从环境变量读，与 gate / battle 令牌分域：prod 下缺失、太短或与它们相同拒启；
+     * dev / test 放行并 WARN，空密钥时一切 SubscribeSpectate 都被拒（fail-closed）。
+     */
+    @Bean
+    public SpectateTickets gateSpectateTickets(Environment environment, @Value("${game.run-mode:prod}") String runMode) {
+        String secret = environment.getProperty(SPECTATE_SECRET_ENV);
+        SpectateSecretPolicy.Verdict verdict = SpectateSecretPolicy.check(secret, RunMode.parse(runMode), environment.getProperty(TOKEN_SECRET_ENV),
+                environment.getProperty(BATTLE_SECRET_ENV));
+        if (verdict.refused()) {
+            throw new IllegalStateException("拒绝启动：" + verdict.describe(SPECTATE_SECRET_ENV));
+        }
+        if (verdict.problem() != SpectateSecretPolicy.Problem.NONE) {
+            LoggerFactory.getLogger(GateConfiguration.class).warn("安全告警：{}；只因运行模式不是 prod 才放行", verdict.describe(SPECTATE_SECRET_ENV));
+        }
+        return verdict.problem() == SpectateSecretPolicy.Problem.MISSING ? SpectateTickets.disabled() : SpectateTickets.ofUtf8(secret);
     }
 
     /** gate → scene 链路握手鉴权。密钥只从环境变量 {@code GAME_NODE_LINK_SECRET} 读，缺失即启动失败。 */
@@ -214,6 +238,7 @@ public class GateConfiguration {
                              @Qualifier("matchClientMessageService") ClientMessageService matchClientMessageService,
                              @Qualifier("mailClientMessageService") ClientMessageService mailClientMessageService,
                              @Qualifier("rankClientMessageService") ClientMessageService rankClientMessageService,
+                             SpectateTickets gateSpectateTickets,
                              GateProperties properties, GateMetrics gateMetrics, @Value("${game.zone-id:1}") int zoneId,
                              @Value("${game.advertise-host:127.0.0.1}") String advertiseHost,
                              @Value("${game.table-dir:config-data/tables}") String tableDir,
@@ -225,7 +250,7 @@ public class GateConfiguration {
         return new GateNode(redis, keys, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService,
                 backends(friendClientMessageService, chatClientMessageService, teamClientMessageService,
                         guildClientMessageService, tradeClientMessageService, matchClientMessageService, mailClientMessageService, rankClientMessageService),
-                properties, zoneId, advertiseHost, Path.of(tableDir), gateMetrics, RunMode.parse(runMode));
+                properties, zoneId, advertiseHost, Path.of(tableDir), gateMetrics, RunMode.parse(runMode)).withSpectateTickets(gateSpectateTickets);
     }
 
     /** GM 签名停机的校验（密钥只从环境变量 GAME_GM_ADMIN_SECRET 读，没配一律拒）。 */

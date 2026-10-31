@@ -405,7 +405,36 @@ class GlobalMatchStoreIntegrationTest {
     private WatchBattleRequest watchRequest(long battle){return WatchBattleRequest.newBuilder().setBattleId(battle).setRequestId(UUID.randomUUID().toString()).build();}
     private void watchable(long battle)throws Exception{
         var pb=new com.game.pbmysql.PbMysql();pb.register(GlobalFormationRow.getDefaultInstance());
-        try(var c=fixture.schemaConnection()){pb.insert(c,formation(battle).toBuilder().setState(4).setCreatedMs(store.now()).setCreateRequest(com.game.proto.CreateBattleRequest.getDefaultInstance().toByteString()).build());}
+        // 已建房的公开局：观战只认 create_request 里冻结的可见性（原 Add 提交点也按它复核）
+        var create=com.game.proto.CreateBattleRequest.newBuilder().setSpectateVisibility(com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC).build();
+        try(var c=fixture.schemaConnection()){pb.insert(c,formation(battle).toBuilder().setState(4).setCreatedMs(store.now()).setCreateRequest(create.toByteString()).setSpectatePublic(true).build());}
+    }
+    private void builtWith(long battle,long createdMs,com.game.proto.eSpectateVisibility visibility)throws Exception{
+        var pb=new com.game.pbmysql.PbMysql();pb.register(GlobalFormationRow.getDefaultInstance());
+        var create=com.game.proto.CreateBattleRequest.newBuilder().setSpectateVisibility(visibility).build();
+        try(var c=fixture.schemaConnection()){pb.insert(c,formation(battle).toBuilder().setState(4).setCreatedMs(createdMs).setCreateRequest(create.toByteString())
+                .setSpectatePublic(visibility==com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC).build());}
+    }
+    @Test void 可见性闸_SQL列表与随机选场按可见性列过滤_私密局再多也不占位_按id读回带冻结可见性_原Add提交点拒绝私密局()throws Exception{
+        long now=store.now();
+        builtWith(3401,now-3000,com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
+        builtWith(3402,now-2000,com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);
+        builtWith(3403,now-1000,com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_UNSPECIFIED);
+        var sql=watches();
+        // 较新的两局都不公开：列表从更早的公开局补，不因私密局占位而回空
+        assertEquals(List.of("3401"),sql.list(2,budget()).members().stream().map(com.game.match.spectate.SpectateStore.Scored::member).toList());
+        for(double random:new double[]{0.0,0.5,0.99}){
+            var picked=sql.pick(random,budget());
+            assertInstanceOf(com.game.match.spectate.SpectateStore.Pick.Member.class,picked,"SQL 只在公开局里挑");
+            assertEquals("3401",((com.game.match.spectate.SpectateStore.Pick.Member)picked).member());
+        }
+        var hidden=((com.game.match.spectate.SpectateStore.Record.Found)sql.formation(3402,budget()).record()).placement();
+        assertEquals(com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE_VALUE,hidden.getSpectateVisibility());
+        seedPlayer(940);var request=watchRequest(3402);String mark="3402:"+request.getRequestId();
+        sql.begin(actor(940),request,budget());sql.select(actor(940),request.getRequestId(),3402,budget());
+        assertEquals(com.game.match.spectate.SpectateStore.Acquire.OK,sql.reserve(actor(940),940,mark,budget()));
+        assertThrows(RuntimeException.class,()->sql.prepare(actor(940),940,mark,hidden,
+                com.game.proto.AddObserverRequest.newBuilder().setBattleId(3402).setObserverPlayerId(940).build(),budget()),"提交点按同一份建房原件复核");
     }
     @Test void watchUuidHistoryNeverClearsNewerOperationAndDoesNotRebindOwner()throws Exception{
         seedPlayer(901);var sql=watches();var first=watchRequest(800);var second=watchRequest(801);
@@ -432,10 +461,10 @@ class GlobalMatchStoreIntegrationTest {
         assertEquals(add,sql.prepare(actor(902),902,mark,placement,base.toBuilder().setObserverName("迟到的新名字").build(),com.game.common.deadline.Deadline.after(3000)));
         var cancelled=sql.cancel(null,902,mark,com.game.common.deadline.Deadline.after(3000));
         var work=sql.lease(cancelled,com.game.common.deadline.Deadline.after(3000));
-        sql.settled(work,false,com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(UUID.randomUUID().toString()).setTargetInstanceId("instance").build(),com.game.common.deadline.Deadline.after(3000));
+        sql.settled(work,false,com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(UUID.randomUUID().toString()).setTargetInstanceId("instance").build(),false,com.game.common.deadline.Deadline.after(3000));
         assertEquals(4,sql.read(902,com.game.common.deadline.Deadline.after(3000)).getState());
         work=sql.lease(sql.read(902,com.game.common.deadline.Deadline.after(3000)),com.game.common.deadline.Deadline.after(3000));
-        sql.settled(work,false,com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(request.getRequestId()).setTargetInstanceId("instance").build(),com.game.common.deadline.Deadline.after(3000));
+        sql.settled(work,false,com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(request.getRequestId()).setTargetInstanceId("instance").build(),false,com.game.common.deadline.Deadline.after(3000));
         assertEquals(5,sql.read(902,com.game.common.deadline.Deadline.after(3000)).getState());
         assertThrows(RuntimeException.class,()->sql.prepare(actor(902),902,mark,placement,base,com.game.common.deadline.Deadline.after(3000)));
         assertEquals(com.game.match.spectate.SpectateStore.Acquire.BUSY,sql.reserve(actor(902),902,mark,com.game.common.deadline.Deadline.after(3000)));
@@ -493,11 +522,161 @@ class GlobalMatchStoreIntegrationTest {
         var request=joinRequest(3002);var original=store.prepareJoin(actor(3002),request,2,1,150000,"s");var exit=com.game.proto.ObserverExitOriginal.parseFrom(original.getObserverExits(0));assertEquals(add,exit.getAdd());
         assertThrows(RuntimeException.class,()->store.join(actor(3002),request.getRequestId(),request.getNetworkPlanId(),"s",3,1,2,1,150000));
         var pending=sql.cancelExit(exit,budget());var work=sql.lease(pending,budget());
-        sql.settled(work,false,com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(watch.getRequestId()).setTargetInstanceId("instance").build(),budget());
+        sql.settled(work,false,com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(watch.getRequestId()).setTargetInstanceId("instance").build(),false,budget());
         assertNull(sql.cancelExit(exit,budget()));
         try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE match_global_profile SET expires_ms=1 WHERE player_id=3002");}
         assertTrue(store.closeObsoleteJoin(original,budget()));assertEquals(4,store.ticket(3002).getState());assertTrue(store.requestCancelled(actor(3002),request.getRequestId()));
         assertThrows(RuntimeException.class,()->store.prepareJoin(actor(3002),request,2,1,150000,"s"));
+    }
+    // ---------------------------------------------------------------- 观战原件不带证明关闭、满员转 LOBBY、请求历史保留期（mmorpg battle-spectate-tiered-fanout.md §15.9）
+
+    private record AdmittedWatch(GlobalWatchAuthority sql,WatchBattleRequest request,String mark){}
+    /** 走到「原 Add 已持久」（state 2）的一条观战。 */
+    private AdmittedWatch admittedWatch(long player,long battle)throws Exception {
+        seedPlayer(player);watchable(battle);var sql=watches();var request=watchRequest(battle);String mark=battle+":"+request.getRequestId();
+        sql.begin(actor(player),request,budget());sql.select(actor(player),request.getRequestId(),battle,budget());
+        assertEquals(com.game.match.spectate.SpectateStore.Acquire.OK,sql.reserve(actor(player),player,mark,budget()));
+        var placement=((com.game.match.spectate.SpectateStore.Record.Found)sql.formation(battle,budget()).record()).placement();
+        sql.prepare(actor(player),player,mark,placement,com.game.proto.AddObserverRequest.newBuilder().setBattleId(battle).setObserverPlayerId(player).build(),budget());
+        return new AdmittedWatch(sql,request,mark);
+    }
+    private static com.game.proto.RemoveObserverResponse cancelProof(String operation){
+        return com.game.proto.RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(operation).setTargetInstanceId("instance").build();
+    }
+    private int watchState(GlobalWatchAuthority sql,long player){return sql.read(player,budget()).getState();}
+
+    @Test void 观战原件没有取消证明_成局中止才关闭_置cancelled_之后能重新观战()throws Exception {
+        var w=admittedWatch(3401,3402);var sql=w.sql();var empty=com.game.proto.RemoveObserverResponse.getDefaultInstance();
+        var work=sql.lease(sql.cancel(null,3401,w.mark(),budget()),budget());
+        assertEquals(GlobalWatchAuthority.Settlement.PENDING,sql.settled(work,false,empty,false,budget()),"新实例回空应答、三条都不满足：不关");
+        assertEquals(4,watchState(sql,3401));
+        execute("UPDATE match_global_formation SET state=5 WHERE battle_id=3402");
+        work=sql.lease(sql.read(3401,budget()),budget());
+        assertEquals(GlobalWatchAuthority.Settlement.FORMATION_ENDED,sql.settled(work,false,empty,false,budget()));
+        assertEquals(5,watchState(sql,3401));
+        assertTrue(sql.begin(actor(3401),w.request(),budget()).original().getCancelled(),"closed 置 cancelled：退出与排队的 provedClosed 随之放行");
+        assertTrue(sql.entry(actor(3401),3401,budget()).mark().isEmpty(),"不再挡新观战与排队");
+    }
+    @Test void 观战原件没有取消证明_过了成局期限加终局宽限才关闭()throws Exception {
+        var w=admittedWatch(3403,3404);var sql=w.sql();
+        long now=store.now();
+        execute("UPDATE match_global_formation SET deadline_ms=? WHERE battle_id=3404",now);
+        var work=sql.lease(sql.cancel(null,3403,w.mark(),budget()),budget());
+        assertEquals(GlobalWatchAuthority.Settlement.PENDING,sql.settled(work,false,null,false,budget()),"期限刚到：房间可能还在提交终局");
+        execute("UPDATE match_global_formation SET deadline_ms=? WHERE battle_id=3404",now-GlobalMatchStore.TERMINAL_OUTCOME_GRACE_MS-1000);
+        work=sql.lease(sql.read(3403,budget()),budget());
+        assertEquals(GlobalWatchAuthority.Settlement.FORMATION_ENDED,sql.settled(work,false,null,false,budget()));
+        assertEquals(5,watchState(sql,3403));
+    }
+    @Test void 观战原件没有取消证明_目录里同节点号已是别的实例才关闭()throws Exception {
+        var w=admittedWatch(3405,3406);var sql=w.sql();
+        var work=sql.lease(sql.cancel(null,3405,w.mark(),budget()),budget());
+        assertEquals(GlobalWatchAuthority.Settlement.INSTANCE_REPLACED,sql.settled(work,false,null,true,budget()));
+        assertEquals(5,watchState(sql,3405));
+    }
+    @Test void 原实例明确回ACTIVE_成局中止也不关_取消证明优先于其它判据()throws Exception {
+        var w=admittedWatch(3407,3408);var sql=w.sql();
+        sql.observed(actor(3407),3407,w.mark(),new com.game.match.spectate.ObserverDialer.Outcome.Replied(0),budget());
+        execute("UPDATE match_global_formation SET state=5 WHERE battle_id=3408");
+        execute("UPDATE match_global_watching SET retry_ms=1 WHERE player_id=3407");
+        var work=sql.lease(sql.read(3407,budget()),budget());
+        assertEquals(3,work.getState());
+        assertEquals(GlobalWatchAuthority.Settlement.PENDING,sql.settled(work,true,null,true,budget()));
+        assertEquals(3,watchState(sql,3407));
+        execute("UPDATE match_global_watching SET retry_ms=1 WHERE player_id=3407");
+        work=sql.lease(sql.read(3407,budget()),budget());
+        assertEquals(GlobalWatchAuthority.Settlement.PROVEN,sql.settled(work,false,cancelProof(w.request().getRequestId()),true,budget()));
+        assertEquals(5,watchState(sql,3407));
+    }
+    @Test void 满员转LOBBY_结论与原Add转待取消同一笔事务_恢复关闭之后同UUID重放仍是LOBBY()throws Exception {
+        var w=admittedWatch(3421,3422);var sql=w.sql();var lobby=com.game.match.support.MatchTips.watchLobby(3422,com.google.protobuf.ByteString.EMPTY);
+        var full=new com.game.match.spectate.ObserverDialer.Outcome.Replied(com.game.match.support.MatchTips.SPECTATE_FULL);
+        assertEquals(lobby,sql.observedFull(actor(3421),3421,w.mark(),full,lobby,budget()));
+        assertEquals(4,watchState(sql,3421));
+        var replay=sql.begin(actor(3421),w.request(),budget());
+        assertEquals(lobby,WatchBattleResponse.parseFrom(replay.original().getResponsePayload()),"还没关闭也读得到结论，不会走到 prepare 的 16004");
+        var work=sql.lease(sql.read(3421,budget()),budget());
+        assertEquals(GlobalWatchAuthority.Settlement.PROVEN,sql.settled(work,false,cancelProof(w.request().getRequestId()),false,budget()));
+        replay=sql.begin(actor(3421),w.request(),budget());
+        assertTrue(replay.original().getCancelled());
+        assertEquals(lobby,WatchBattleResponse.parseFrom(replay.original().getResponsePayload()),"恢复循环关闭不改回执");
+        var other=com.game.match.support.MatchTips.watchRejected(com.game.match.support.MatchTip.WATCH_ALREADY);
+        assertEquals(lobby,sql.observedFull(actor(3421),3421,w.mark(),full,other,budget()),"先写为准");
+    }
+
+    private void ageRequest(WatchBattleRequest request)throws Exception {
+        execute("UPDATE match_global_watch_request SET created_ms=1 WHERE request_id=?",request.getRequestId());
+    }
+    private WatchBattleRequest answeredRequest(GlobalWatchAuthority sql,long player){
+        var request=watchRequest(1);sql.begin(actor(player),request,budget());
+        sql.respond(actor(player),request.getRequestId(),com.game.match.support.MatchTips.watchRejected(com.game.match.support.MatchTip.WATCH_NOT_FOUND),budget());return request;
+    }
+    private boolean requestExists(WatchBattleRequest request)throws Exception {
+        try(var c=fixture.schemaConnection();var q=c.prepareStatement("SELECT 1 FROM match_global_watch_request WHERE request_id=?")){
+            q.setString(1,request.getRequestId());try(var r=q.executeQuery()){return r.next();}
+        }
+    }
+    private int purge(GlobalWatchAuthority sql){return sql.purgeRequests(GlobalWatchAuthority.RequestCursor.START,1000,budget()).deleted();}
+
+    @Test void 请求历史保留期_只删超期且有回执或已取消且不是head的行_幂等()throws Exception {
+        seedPlayer(3501);var sql=watches();
+        var old=answeredRequest(sql,3501);ageRequest(old);
+        var oldCancelled=watchRequest(1);sql.begin(actor(3501),oldCancelled,budget());ageRequest(oldCancelled);
+        execute("UPDATE match_global_watch_request SET cancelled=1 WHERE request_id=?",oldCancelled.getRequestId());
+        var unanswered=watchRequest(1);sql.begin(actor(3501),unanswered,budget());ageRequest(unanswered);
+        var recent=answeredRequest(sql,3501);
+        var head=answeredRequest(sql,3501);ageRequest(head);
+
+        assertEquals(2,purge(sql));
+
+        assertFalse(requestExists(old));assertFalse(requestExists(oldCancelled));
+        assertTrue(requestExists(unanswered),"没有回执也没取消：不在清理范围");
+        assertTrue(requestExists(recent),"没到 7 天");
+        assertTrue(requestExists(head),"请求头：读路径按它取回执");
+        assertEquals(0,purge(sql),"幂等");
+    }
+    @Test void 请求历史保留期_当前观战原件不删_关闭之后才删()throws Exception {
+        var w=admittedWatch(3511,3512);var sql=w.sql();
+        sql.begin(actor(3511),watchRequest(3512),budget());
+        sql.respond(actor(3511),w.request().getRequestId(),com.game.match.support.MatchTips.watchRejected(com.game.match.support.MatchTip.WATCH_ALREADY),budget());
+        ageRequest(w.request());
+
+        assertEquals(0,purge(sql),"closed 还要读它");
+        assertTrue(requestExists(w.request()));
+
+        execute("UPDATE match_global_watching SET state=5 WHERE player_id=3511");
+        assertEquals(1,purge(sql));
+    }
+    @Test void 请求历史保留期_Team角色未释放的玩家一行都不删()throws Exception {
+        seedPlayer(3521);var sql=watches();var old=answeredRequest(sql,3521);ageRequest(old);sql.begin(actor(3521),watchRequest(1),budget());
+        String launch=UUID.randomUUID().toString();
+        execute("INSERT INTO team_launch(request_id,state) VALUES(?,1)",launch);execute("INSERT INTO team_launch_role(player_id,request_id,state) VALUES(3521,?,1)",launch);
+
+        assertEquals(0,purge(sql),"launch 里的退出原件还要证明");
+
+        execute("UPDATE team_launch_role SET state=2 WHERE player_id=3521");
+        assertEquals(1,purge(sql));
+    }
+    @Test void 请求历史保留期_未完结Join的玩家一行都不删_完结之后才删()throws Exception {
+        var previous=join(3531);store.cancel(actor(3531),previous.getTicket(),previous.getRequestId());
+        var sql=watches();var old=answeredRequest(sql,3531);ageRequest(old);sql.begin(actor(3531),watchRequest(1),budget());
+        var request=joinRequest(3531);store.prepareJoin(actor(3531),request,2,1,150000,"s");
+        assertEquals(0,store.ticket(3531).getState());
+
+        assertEquals(0,purge(sql),"退出原件还要证明，缺行会抛异常");
+
+        assertEquals(1,store.join(actor(3531),request.getRequestId(),request.getNetworkPlanId(),"s",3,1,2,1,150000).getState());
+        assertEquals(1,purge(sql));
+    }
+    @Test void 请求历史保留期_翻页越过删不掉的请求头_扫到末尾回到起点()throws Exception {
+        var sql=watches();
+        for(long player=3541;player<=3544;player++){seedPlayer(player);ageRequest(answeredRequest(sql,player));}
+        var deletable=answeredRequest(sql,3544);answeredRequest(sql,3544);ageRequest(deletable);
+        // 3544 的第一行也不再是请求头：两行可删，其余三名玩家的请求头一直留在索引前端
+        var cursor=GlobalWatchAuthority.RequestCursor.START;int deleted=0;int rounds=0;
+        do{var page=sql.purgeRequests(cursor,1,budget());deleted+=page.deleted();cursor=page.next();rounds++;}while(!cursor.equals(GlobalWatchAuthority.RequestCursor.START)&&rounds<20);
+        assertEquals(2,deleted,"每页一行，也走得到请求头后面的行");
+        assertEquals(GlobalWatchAuthority.RequestCursor.START,cursor);
     }
     @Test void Join恢复固定高水位推进第九项_新到达不延长本轮()throws Exception {
         for(long player=3101;player<=3109;player++){var old=join(player);store.cancel(actor(player),old.getTicket(),old.getRequestId());store.prepareJoin(actor(player),joinRequest(player),2,1,150000,"s");}

@@ -61,7 +61,10 @@ class BattleRecoveryTest {
     private static final long PLAYER = 1001;
     private static final long X = 7;
     private static final int NODE = BattleFixture.BATTLE_NODE;
-    private static final int FIGHTING_TTL = (int) (BattleFixture.BATTLE_MILLIS / 1000 + 60);
+    /** FIGHTING 锁的 TTL：有效期限（战斗期限 + 终局宽限 + 投递余量）的剩余 + 60 s。 */
+    private static final int FIGHTING_TTL = (int) BattleFixture.FIGHTING_LOCK_TTL_SEC;
+    /** 有效期限就是战斗期限的锁（缺备战期限的 PREPARING）的 TTL：战斗期限的剩余 + 60 s。 */
+    private static final int BATTLE_DEADLINE_TTL = (int) (BattleFixture.BATTLE_MILLIS / 1000 + 60);
     private static final int PREPARING_TTL = (int) (BattleFixture.PREPARE_MILLIS / 1000 + 60);
     private static final int ENTER_FAILED = 3023;
     private static final int FEATURE_UNAVAILABLE = 1006;
@@ -427,7 +430,8 @@ class BattleRecoveryTest {
 
     /**
      * §1.2 的取值规则接进重建流程：锁上只有 {@code b}（没有 s / d / p / n）→ 按战斗态重建，期限按锁的剩余 TTL 反推（现在 + TTL），节点号 0；
-     * 复核（TOUCH）带的是<b>反推出来的</b>值，命中后把它们写回锁上、TTL 续成「反推的期限 + 60 s」。
+     * 复核（TOUCH）带的是<b>反推出来的</b>值，命中后把它们写回锁上、TTL 续成「反推的期限 + 终局宽限 + 投递余量 + 60 s」（FIGHTING 的有效期限；
+     * 反推本身已经偏保守，再叠一次窗口只会多冻，不会提前解冻）。
      */
     @Test
     void 锁缺字段_按战斗态重建_期限按剩余TTL反推_复核把反推的值写回锁上() {
@@ -445,13 +449,14 @@ class BattleRecoveryTest {
         assertThat(freeze.prepareDeadlineMs()).isZero();
         assertThat(freeze.battleNodeId()).isZero();
         Call touch = f.locks.last(Op.TOUCH);
+        long touchTtl = 100 + BattleFixture.OUTCOME_WINDOW_MILLIS / 1000 + 60;
         assertThat(touch.args()).containsEntry("state", "F").containsEntry("deadline", inferred).containsEntry("prepareDeadline", 0L)
-                .containsEntry("ttl", 160L);
+                .containsEntry("ttl", touchTtl);
         assertThat(touch.lastReply()).isEqualTo(BattleRedis.TOUCH_HIT);
         assertThat(f.locks.lock(PLAYER)).containsEntry(BattleRedis.FIELD_STATE, "F")
                 .containsEntry(BattleRedis.FIELD_DEADLINE, Long.toUnsignedString(inferred))
                 .containsEntry(BattleRedis.FIELD_PREPARE_DEADLINE, "0");
-        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(160);
+        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(touchTtl);
         assertThat(f.reconnectHints(player)).as("按战斗态重建的照常推 144").containsExactly(X);
         assertThat(f.rebuilds("login", "rebuilt")).isEqualTo(1);
     }
@@ -474,8 +479,8 @@ class BattleRecoveryTest {
         assertThat(freeze.battleNodeId()).isEqualTo(NODE);
         Call touch = f.locks.last(Op.TOUCH);
         assertThat(touch.args()).containsEntry("state", "P").containsEntry("deadline", deadline).containsEntry("prepareDeadline", deadline)
-                .containsEntry("ttl", (long) FIGHTING_TTL);
-        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(FIGHTING_TTL);
+                .containsEntry("ttl", (long) BATTLE_DEADLINE_TTL);
+        assertThat(f.locks.lockTtlSec(PLAYER)).as("PREPARING 不叠加终局窗口").isEqualTo(BATTLE_DEADLINE_TTL);
         assertThat(f.reconnectHints(player)).isEmpty();
 
         f.advance(BattleFixture.PREPARE_MILLIS + 1);
@@ -671,7 +676,7 @@ class BattleRecoveryTest {
         assertThat(f.rebuilds("login", "rebuilt")).isZero();
     }
 
-    /** 登录补应用不看锁、不要求冻结匹配：离线期间打完、锁早已过期的局照常补发（锁 TTL 只有期限 + 60 s，记录活 7 天）。 */
+    /** 登录补应用不看锁、不要求冻结匹配：离线期间打完、锁早已过期的局照常补发（锁 TTL 只到有效期限 + 60 s，记录活 7 天）。 */
     @Test
     void 待结算记录的应用不看锁_锁不在或是别的局都照常补发() {
         f.store(settlement(PLAYER, 7, 100, 200));
@@ -792,8 +797,8 @@ class BattleRecoveryTest {
         ScenePlayer old = f.enter(SESSION, PLAYER);
         f.fighting(PLAYER, X);
         BattleFreeze original = old.battle().freeze();
-        // 让旧冻结带上运行态标记：reaper 的 rescue 读在途
-        f.advance(BattleFixture.BATTLE_MILLIS + 10_001);
+        // 让旧冻结带上运行态标记：reaper 的 rescue 读在途（过了有效期限 + 宽限）
+        f.advance(BattleFixture.BATTLE_MILLIS + BattleFixture.OUTCOME_WINDOW_MILLIS + 10_001);
         f.locks.hold(Op.READ_SETTLEMENT);
         f.reap();
         assertThat(original.rescuing()).isTrue();

@@ -14,6 +14,7 @@ import com.game.match.port.NodeCalls;
 import com.game.match.port.RedisClock;
 import com.game.match.proto.BattlePlacement;
 import com.game.match.rating.RatingReader;
+import com.game.match.spectate.SpectateVisibilityPolicy;
 import com.game.match.ticket.TicketRef;
 import com.game.match.ticket.TicketStore;
 import com.game.proto.BattlePlayerSnapshot;
@@ -53,7 +54,7 @@ import org.slf4j.LoggerFactory;
  * 3    逐人<b>串行</b>备战（定位 scene → prepareBattle 3 s）；任何一人失败 → 该人是肇事者，no_location / prepare_failed
  * 3.5  组内 zone 组成（只作观测）
  * 3.6  配表指纹比对（off / warn / enforce）
- * 4    种子（SecureRandom）；再读一次 Redis 时间作 created_at_ms；组建房请求
+ * 4    种子（SecureRandom）；再读一次 Redis 时间作 created_at_ms；组建房请求（观战可见性在这里决定一次、随建房原件冻结）
  * 4.1  <b>先写落点记录</b>（attempt = 1），写不进去就不建房 → index_failed
  * 4.2  createBattle（5 s）；节点级拒绝 → 排除它再选一个节点、把记录改写到新节点（attempt = 2）、<b>只重试一次</b>
  * 4.3  最后一次的结局：仍是节点级拒绝 → not_allocatable；已受理但明确拒绝 → create_rejected；建房请求<b>确定没有送达</b>
@@ -337,7 +338,10 @@ public final class GatherPipeline {
             if (plan.activityContext() != null) {
                 create.setActivityContext(plan.activityContext());
             }
+            // 观战可见性在建房时决定一次、随建房原件冻结（battle 第二道闸只认它）；落点记录抄同一份冻结值，不按模式另算
+            create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext()));
             CreateBattleRequest createRequest = create.build();
+            record.setSpectateVisibility(createRequest.getSpectateVisibilityValue());
 
             // 4.1 先写落点记录，再建房
             BattlePlacement placement = pointAt(record, node, 1);
