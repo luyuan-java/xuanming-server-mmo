@@ -38,6 +38,8 @@ message MatchSpectatorRecord {
 message MatchSpectatorIntentRecord {
   option (OptionTableName) = "match_spectator_intent";
   option (OptionPrimaryKey) = "player_id,request_high,request_low";
+  // 保留期清理按 (created_ms, 主键) 翻页读已关闭的行(authority.PurgeClosedSpectatorIntents)，只索引读，不扫全表。
+  option (OptionIndex) = "state,created_ms,player_id,request_high,request_low";
   uint64 player_id = 1;
   uint64 request_high = 2;
   uint64 request_low = 3;
@@ -51,6 +53,8 @@ message MatchSpectatorIntentRecord {
   // (state=5、close_tip=0、delivery=2)；重放时重新做幂等的中继 / 广播准入并签新凭证(battle-spectate-tiered-fanout.md §15.6)。
   // 0 = 未以 LOBBY 结案(L0 观众与业务拒绝)。
   uint32 delivery = 10;
+  // 意图创建时刻(TiDB 时钟，Unix 毫秒)。只供保留期清理：state=5、不是请求头、超过保留期的行分批删除。
+  uint64 created_ms = 11;
 }
 message MatchSpectatorHeadRecord {
   option (OptionTableName) = "match_spectator_head";
@@ -92,6 +96,20 @@ message MatchAuthorityTicketRecord {
   uint32 preferred_region = 17; // 签名测量最低RTT机房；同RTT按机房编号，不随节点暂时下线改本区。
   string owner_account = 18;
   uint64 owner_revision = 19;
+}
+
+// 帮会历练的战斗入口占用(docs/design/horizontal-scale-logical-db.md §4)。写者都先持本库 role_fence 行锁，
+// 和入场、冻结同一个串行点。到期视为空闲；开局之后留到 guild 释放或到期，票终局之后结算之前也不放新入场。
+message MatchRoleOccupancyRecord {
+  option (OptionTableName) = "match_role_occupancy";
+  option (OptionPrimaryKey) = "player_id";
+  option (OptionIndex) = "owner_kind,owner_id,player_id";
+  uint64 player_id = 1;
+  uint32 owner_kind = 2;  // 1 帮会历练大厅
+  uint64 owner_id = 3;    // 大厅号
+  string account = 4;
+  uint64 owner_revision = 5;
+  uint64 expires_ms = 6;  // match 库的时钟
 }
 
 // 仅作可重建候选索引，票与完整签名profile仍是提交点真相。
@@ -233,6 +251,7 @@ message MatchRatingRecord {
   int64 rating_centi = 2;
   uint64 games = 3;
   uint64 updated_ms = 4;
+  uint64 score_changed_ms = 5; // 分数最后一次变化的时刻,进批次的 achieved_ms。榜上同分决胜用它,不看批次到达顺序
 }
 message MatchRatingAppliedRecord {
   option (OptionTableName) = "match_rating_applied";
@@ -241,23 +260,26 @@ message MatchRatingAppliedRecord {
   bytes payload_digest = 2;
   uint64 applied_ms = 3;
 }
-// 停写标记与最终游标和每次评分事务争同一行锁；不依赖墙钟猜最后一批。
+// 评级投榜来源,按对局 id 拆片(shard = battle_id % 64,片数建表后不可改):每局只锁自己那一片。
+// 停写标记与最终游标和本片的评分事务争同一行锁；停写逐片取锁，不依赖墙钟猜最后一批。
 message MatchRankSourceRecord {
   option (OptionTableName) = "match_rank_source";
-  option (OptionPrimaryKey) = "source_epoch";
+  option (OptionPrimaryKey) = "source_epoch,shard";
   uint64 source_epoch = 1;
   uint64 produced_cursor = 2;
   uint64 committed_cursor = 3;
   uint64 board_id = 4;
   bool stopped = 5;
+  uint32 shard = 6;
 }
 message MatchRankOutboxRecord {
   option (OptionTableName) = "match_rank_outbox";
-  option (OptionPrimaryKey) = "source_epoch,source_cursor";
+  option (OptionPrimaryKey) = "source_epoch,shard,source_cursor";
   uint64 source_epoch = 1;
   uint64 source_cursor = 2;
   uint64 request_id = 3;
   bytes entries = 4; // 确定性序列化 SubmitRankScoresRequest（未签名）；重投只重签 auth。
+  uint32 shard = 5;
 }
 
 enum MatchBattleCompletionSourceKind {

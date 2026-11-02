@@ -28,8 +28,7 @@ class RedisKeysMatchTest {
         assertThat(REDIS_KEYS.matchSpectateFeatured()).isEqualTo("game:{match}:spectate-featured");
         assertThat(REDIS_KEYS.spectateChannel(BIG)).isEqualTo("game:spectate:{" + BIG_TEXT + "}");
         assertThat(REDIS_KEYS.spectateState(BIG)).isEqualTo("game:spectate:state:{" + BIG_TEXT + "}");
-        assertThat(CRC16.crc16(REDIS_KEYS.spectateChannel(BIG).getBytes(StandardCharsets.UTF_8)) % 16384)
-                .isEqualTo(CRC16.crc16(REDIS_KEYS.spectateState(BIG).getBytes(StandardCharsets.UTF_8)) % 16384);
+        assertThat(slotOf(REDIS_KEYS.spectateChannel(BIG))).isEqualTo(slotOf(REDIS_KEYS.spectateState(BIG)));
         assertThat(new RedisKeys(GameNamespace.of("other")).spectateChannel(1)).isEqualTo("other:spectate:{1}");
     }
 

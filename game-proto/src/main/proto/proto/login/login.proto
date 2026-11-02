@@ -85,39 +85,8 @@ message EnterGameResponse
   TipInfoMessage error_message = 1;
   uint64 player_id  = 2;
 
-  // ─── Post-merge one-shot signals (server-merge-gap-fixes.md §1 / §5) ───
-  //
-  // These two fields are non-zero **only on the first successful EnterGame
-  // after a server merge**. They drive client UI:
-  //
-  //   • post_merge_notice_ts > 0  →  client SHOULD show a one-shot
-  //     "Your zone was merged into <new_zone_name> on <date>" notice.
-  //     The timestamp is the merge wall-clock millis (set by
-  //     tools/merge_zone/post_merge_stamp.go), useful for the notice
-  //     copy. Login server clears the underlying Redis flag before
-  //     returning, so the value is non-zero exactly once per merge.
-  //
-  //   • force_rename_required = true  →  client MUST show a forced-rename
-  //     UI before letting the player into the world. Set when the
-  //     player's name collided with an existing name in the merge
-  //     target zone.
-  //
-  //     2026-09 现状更新:角色名已经落地(CreatePlayerRequest.name),
-  //     真源是 data_service 全局库的 player_name 表,名字**全服唯一**
-  //     (docs/design/guild-phase2/03-names.md)。正因为是全服唯一,合服时
-  //     不可能再出现"两个区重名"——force_rename 这条管线因此保持未启用:
-  //     merge 工具仍可盖标记、login 仍原样下发,但正常运营不会置位。
-  //     将来若真的做改名 RPC,由它在改名成功后 DEL
-  //     `player_force_rename:{player_id}` Redis key —— login 不在 EnterGame 清,
-  //     否则客户端把改名 UI 关掉就绕过了这道闸
-  //     (见 go/login/.../entergamelogic.go::consumePostMergeFlags)。
-  //
-  // Wire compat: pre-this-field clients ignore both — they still enter
-  // the game; they just don't see the notice / rename UI. That's fine
-  // for staged rollout: server starts populating the fields whenever
-  // the post_merge_stamp lands, no client gate needed.
-  int64 post_merge_notice_ts    = 3;
-  bool  force_rename_required   = 4;
+  // 3 / 4 是合服一次性提示:合服不再碰玩家数据,这两个字段没有来源,已删除。
+  reserved 3, 4;
 }
 
 message LeaveGameRequest
@@ -232,19 +201,39 @@ service LoginPreGate {
 
 // ── Admin-only RPCs (internal, not client-facing) ──────────────
 
+// 孤儿 = 目录里有归属、路由还在、player_store 里没有写权行的角色:进不了场,白占账号的角色名额。
+// 墓碑不可逆,所以证明不了是孤儿的回 NOT_ORPHAN,什么都不改。
+enum RemovePlayerOutcome {
+  REMOVE_PLAYER_UNSPECIFIED = 0;
+  REMOVE_PLAYER_REMOVED = 1;     // 已写墓碑,或 dry_run 时确认可以摘
+  REMOVE_PLAYER_NOT_FOUND = 2;   // 目录里没有,或已经删过了
+  REMOVE_PLAYER_NOT_ORPHAN = 3;  // 有存档,或者路由缺失证明不了
+  REMOVE_PLAYER_CONFLICT = 4;    // 有未结束的业务(资产指令、帮会、组队),或归属变了,或还在线。令牌已清,处理掉再重跑
+  REMOVE_PLAYER_RETRY = 5;       // 这次没做完(读失败、参与者不可达、本次预算用完),同参数重跑。重跑幂等
+}
+
+message RemovePlayerResult {
+  uint64 player_id = 1;
+  RemovePlayerOutcome outcome = 2;
+}
+
 message RemovePlayersFromAccountsRequest {
-  repeated uint64 player_ids = 1; // orphan player IDs to remove from their accounts
+  repeated uint64 player_ids = 1; // 候选孤儿,一次最多 100 个
+  string operator = 2;            // 必填,≤ 64 字节
+  string reason = 3;              // 必填,≤ 256 字节
+  bool dry_run = 4;               // true = 只核对,不写墓碑
 }
 
 message RemovePlayersFromAccountsResponse {
-  uint32 removed_count = 1;    // players successfully removed from accounts
-  uint32 not_found_count = 2;  // players whose reverse mapping was missing
-  uint32 failed_count = 3;     // players that failed to remove
+  uint32 removed_count = 1;    // 已写墓碑(dry_run 时是可以摘的个数)
+  uint32 not_found_count = 2;  // 目录里没有,或已经删过了
+  uint32 failed_count = 3;     // CONFLICT + RETRY,看 results
+  uint32 not_orphan_count = 4;
+  repeated RemovePlayerResult results = 5; // 按请求去重后的顺序
 }
 
 service LoginAdmin {
-  // Remove orphan characters from their accounts' SimplePlayers lists.
-  // Called by admin tools after zone rollback to clean up orphan characters.
-  // Uses player_to_account:{player_id} reverse mapping to find the owning account.
+  // 摘孤儿角色:走目录的删角流程(data_service.RemoveAccountRoles,全部参与者通过才写墓碑)。
+  // 只给运维工具用,要 x-admin-token;login 没配 AdminToken 就停用。名字不释放:按日志带 token 调 ReleasePlayerName。
   rpc RemovePlayersFromAccounts (RemovePlayersFromAccountsRequest) returns (RemovePlayersFromAccountsResponse);
 }

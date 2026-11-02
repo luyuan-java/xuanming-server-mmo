@@ -123,7 +123,11 @@ final class RedisKeysSamples {
                 new Sample("matchChallengeDone", k -> k.matchChallengeDone(3), "game:{match}:challenge-done:3"),
                 new Sample("matchBattlePlacement", k -> k.matchBattlePlacement(9), "game:{match}:battle:9"),
                 new Sample("matchWatching", k -> k.matchWatching(5), "game:{match}:watching:5"),
-                new Sample("matchWatchable", RedisKeys::matchWatchable, "game:{match}:watchable"));
+                new Sample("matchWatchable", RedisKeys::matchWatchable, "game:{match}:watchable"),
+                new Sample("matchSpectateTier", k -> k.matchSpectateTier(9), "game:{match}:spectate-tier:9"),
+                new Sample("matchSpectateFeatured", RedisKeys::matchSpectateFeatured, "game:{match}:spectate-featured"),
+                new Sample("spectateChannel", k -> k.spectateChannel(9), "game:spectate:{9}"),
+                new Sample("spectateState", k -> k.spectateState(9), "game:spectate:state:{9}"));
     }
 
     /** 样例覆盖到的方法名。 */
