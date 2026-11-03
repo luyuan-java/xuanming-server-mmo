@@ -237,7 +237,9 @@ class GuildEconomyChannelIntegrationTest {
                 "需要 surefire 注入的 GAME_ASSET_OP_SECRET_GUILD");
         fixture = AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(
                 MYSQL.replaceAll("/$", "") + "/", USER, PASSWORD, "game_guild_econ", true, List.of(zone)), (conn, principal) -> {
-            com.game.guild.store.GuildTables.registry().initializeFresh(conn, principal);
+            var registry = com.game.guild.store.GuildTables.registry();
+            registry.register(com.game.guild.activity.pb.ActivityProgressRow.getDefaultInstance());
+            registry.initializeFresh(conn, principal);
             try (Statement st = conn.createStatement()) {
             st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, name VARCHAR(64) NOT NULL,"
                     + " level INT UNSIGNED NOT NULL DEFAULT 1, class_id INT UNSIGNED NOT NULL DEFAULT 0,"

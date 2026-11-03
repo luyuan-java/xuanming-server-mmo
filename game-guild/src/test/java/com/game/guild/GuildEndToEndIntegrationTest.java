@@ -134,7 +134,9 @@ class GuildEndToEndIntegrationTest {
     void setUp() throws Exception {
         fixture = AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(
                 MYSQL.replaceAll("/$", "") + "/", USER, PASSWORD, "game_guild_e2e", true, List.of(ZONE)), (conn, principal) -> {
-            com.game.guild.store.GuildTables.registry().initializeFresh(conn, principal);
+            var registry = com.game.guild.store.GuildTables.registry();
+            registry.register(com.game.guild.activity.pb.ActivityProgressRow.getDefaultInstance());
+            registry.initializeFresh(conn, principal);
             try (Statement st = conn.createStatement()) {
             st.execute("CREATE TABLE player (player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, name VARCHAR(64) NOT NULL,"
                     + " level INT UNSIGNED NOT NULL DEFAULT 1, class_id INT UNSIGNED NOT NULL DEFAULT 0,"

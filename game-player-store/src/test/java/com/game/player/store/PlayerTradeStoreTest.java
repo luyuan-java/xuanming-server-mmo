@@ -330,13 +330,19 @@ class PlayerTradeStoreTest {
                     h2Authority = new H2Authority(h2);
                     source = h2Authority.normalSource();
                 } else {
-                    fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(endpoint,
+                    var options=AuthoritySqlFixture.Options.fromEnvironment(endpoint,
                             System.getProperty("game.it.mysql.user", "root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""),
-                            "playertrade",false,List.of(1,2,3,7,9,11)),(connection,principal)->{
-                        new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql"),
-                                new ClassPathResource("db/role-pending-fence-fixture.sql")).populate(connection);
-                        if(additionalSchema!=null)additionalSchema.create(connection,principal);
-                    });
+                            "playertrade",false,List.of(1,2,3,7,9,11));
+                    // owner建表逐句沿用既有DDL期限；发布NORMAL前撤销独立Schema会话。
+                    try(var schemaLease=AuthoritySqlFixture.beginUnpublished(options)){
+                        schemaLease.withSchema((connection,principal,schemaDatabase)->{
+                            new ResourceDatabasePopulator(new ClassPathResource("db/game-player-schema.sql"),
+                                    new ClassPathResource("db/role-pending-fence-fixture.sql")).populate(connection);
+                            if(additionalSchema!=null)additionalSchema.create(connection,principal);
+                            return null;
+                        });
+                        fixture=schemaLease.publish();
+                    }
                     database = fixture.database();
                     pool = new DruidDataSource();
                     pool.setUrl(fixture.jdbcUrl("?connectTimeout=3000&socketTimeout=30000"));

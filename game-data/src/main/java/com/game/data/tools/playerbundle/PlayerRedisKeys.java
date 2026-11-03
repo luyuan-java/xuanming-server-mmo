@@ -3,7 +3,6 @@ package com.game.data.tools.playerbundle;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.proto.PlayerLocation;
 import com.game.discovery.proto.PlayerPresence;
-import com.game.proto.BattleSettlementEvent;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import com.google.protobuf.util.JsonFormat;
@@ -49,8 +48,8 @@ final class PlayerRedisKeys {
                         "战斗锁（hash b=battle_id、n=节点、s=P 备战 / F 战斗中、d / p=期限）：存在 = 处于备战或战斗，进场会恢复冻结",
                         null, null, null),
                 new Spec(keys.battleSettlements(playerId),
-                        "待结算战斗奖励（hash 字段=battle_id，值=BattleSettlementEvent，7 天）：battle 已落、scene 还没应用并销账的奖励（资产）",
-                        null, null, BattleSettlementEvent::parseFrom),
+                        "旧待结算战斗奖励（hash 字段=battle_id；已退休，非资产权威）：BattleSettlementEvent 契约已删除，值仅按原字节保留（UTF-8 或 base64）",
+                        null, null, null),
                 new Spec(keys.teamPlayer(playerId), "组队归属（hash tid=队伍号、epoch）", null, null, null),
                 new Spec(keys.teamInvite(playerId), "待处理的组队邀请（zset 成员=队伍号，分数=到期时刻）", null, null, null),
                 new Spec(keys.guildOfPlayer(playerId), "玩家所属帮会缓存（0 = 无帮会也缓存）", null, null, null),

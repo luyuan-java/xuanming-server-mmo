@@ -29,11 +29,7 @@ class AssetOpSqlProofTiDbTest {
         var options = AuthoritySqlFixture.Options.fromEnvironment(base,
                 System.getProperty("game.it.mysql.user", "root"),
                 System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""), "guild_proof", false, List.of(17));
-        try (var fixture = AuthoritySqlFixture.prepare(options, (connection, principal) -> {
-            try (var statement = connection.createStatement()) {
-                statement.execute("CREATE TABLE player_state(player_id BIGINT UNSIGNED PRIMARY KEY,data MEDIUMBLOB NOT NULL)");
-            }
-        }); var pool = new DruidDataSource()) {
+        try (var fixture = AuthoritySqlFixture.prepareWithPlayerSchema(options, (connection, principal) -> {}); var pool = new DruidDataSource()) {
             pool.setUrl(fixture.jdbcUrl("?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true"));
             pool.setUsername(fixture.normalUser());
             pool.setPassword(fixture.normalPassword());
@@ -75,9 +71,10 @@ class AssetOpSqlProofTiDbTest {
                     PersistedLedgerReader.of(pool), AssetOpMetrics.NONE, clock::get, Runnable::run, Runnable::run, new Random(7),
                     () -> 0.5);
             try (var transaction = pool.getConnection();
-                    var insert = transaction.prepareStatement("INSERT INTO player_state(player_id,data) VALUES(7,?)")) {
+                    var insert = transaction.prepareStatement("INSERT INTO player_state(player_id,data,saved_epoch,updated_at) VALUES(7,?,1,?)")) {
                 transaction.setAutoCommit(false);
                 insert.setBytes(1, snapshot);
+                insert.setLong(2, clock.get());
                 insert.executeUpdate();
                 var first = loop.claim(1).orElseThrow();
                 assertFalse(loop.processClaimed(first).finalized(), "RPC durable不能替代未提交的玩家SQL");
