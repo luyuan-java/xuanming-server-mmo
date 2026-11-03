@@ -8,11 +8,14 @@ import org.junit.jupiter.api.Test;
 /** 生产资格回调与 beginFreeze 同事务，逐次拒绝必须整笔回滚，不能遗留半个锁或收据。 */
 class PlayerTradeEligibilityTest {
     @Test void 缺资格验证器拒绝_有帮派或未终局合同也拒绝_清理后才可冻结() throws Exception {
-        try (var f = new PlayerTradeStoreTest.Fixture()) {
+        try (var f = new PlayerTradeStoreTest.Fixture((connection, principal) -> {
+            try (var statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE guild_player_state(player_id BIGINT PRIMARY KEY)");
+                statement.execute("CREATE TABLE guild_member(player_id BIGINT PRIMARY KEY,guild_id BIGINT NOT NULL)");
+            }
+        })) {
             f.player(1, "seller");
             // 复用Fixture统一的跨域投影DDL，不重复建trade_commerce掩盖资格断言。
-            f.sql.execute("CREATE TABLE guild_player_state(player_id BIGINT PRIMARY KEY)");
-            f.sql.execute("CREATE TABLE guild_member(player_id BIGINT PRIMARY KEY,guild_id BIGINT NOT NULL)");
             var request = new FreezeRequest(101, 1, "seller", 1); var timeout = Duration.ofSeconds(5);
             var missing = new PlayerTradeStore(f.source, f.manager, f.clock::get, 5, null);
             assertEquals(Code.NOT_READY, assertThrows(Failure.class, () -> missing.beginFreeze(request, timeout)).code());
