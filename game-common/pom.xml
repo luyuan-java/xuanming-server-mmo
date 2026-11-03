@@ -35,6 +35,12 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- 黑洞握手回归使用与真库测试一致的驱动；公共库运行时仍由服务选择驱动。 -->
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
     <build><resources><resource><directory>src/main/resources</directory></resource><resource><directory>${project.build.directory}/generated-resources/sql-authority</directory><targetPath>META-INF/sql-authority</targetPath></resource></resources><plugins><plugin><groupId>io.github.ascopes</groupId><artifactId>protobuf-maven-plugin</artifactId><version>${protobuf-maven-plugin.version}</version>
  <executions><execution><id>default</id><goals><goal>generate</goal></goals><configuration>

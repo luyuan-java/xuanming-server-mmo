@@ -4,14 +4,14 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.api.proto.*;
+import com.game.common.sql.testing.AuthoritySqlFixture;
+import com.game.discovery.sql.AuthorityDataSourcePolicy;
 import com.game.discovery.sql.StrongTiDbConnectionPolicy;
 import com.game.guild.store.pb.GuildAssetOpKind;
 import com.game.player.store.state.*;
-import java.sql.DriverManager;
 import java.time.Duration;
 import java.util.List;
 import java.util.Random;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Assumptions;
@@ -26,24 +26,25 @@ class AssetOpSqlProofTiDbTest {
             assertNotEquals("1", System.getenv("MAIL_RANK_REQUIRE_TESTS"), "真库门禁要求DSN");
             Assumptions.assumeTrue(false, "未提供TiDB夹具");
         }
-        String database = "guild_proof_it_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-        Class.forName("com.mysql.cj.jdbc.Driver");
-        var pool = new DruidDataSource();
-        try {
-            try (var c = DriverManager.getConnection(base, "root", ""); var s = c.createStatement()) {
-                s.execute("CREATE DATABASE " + database);
+        var options = AuthoritySqlFixture.Options.fromEnvironment(base,
+                System.getProperty("game.it.mysql.user", "root"),
+                System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""), "guild_proof", false, List.of(17));
+        try (var fixture = AuthoritySqlFixture.prepare(options, (connection, principal) -> {
+            try (var statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE player_state(player_id BIGINT UNSIGNED PRIMARY KEY,data MEDIUMBLOB NOT NULL)");
             }
-            pool.setUrl(base + database + "?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true");
-            pool.setUsername("root");
-            pool.setPassword("");
+        }); var pool = new DruidDataSource()) {
+            pool.setUrl(fixture.jdbcUrl("?useSSL=false&allowPublicKeyRetrieval=true&useAffectedRows=true"));
+            pool.setUsername(fixture.normalUser());
+            pool.setPassword(fixture.normalPassword());
             pool.setMaxActive(4);
             pool.setInitialSize(2);
-            pool.setConnectionInitSqls(List.of(StrongTiDbConnectionPolicy.SESSION_SQL));
+            StrongTiDbConnectionPolicy.forGuild("guild-proof-fixture", true).postProcessBeforeInitialization(pool, "guild-proof-fixture");
+            AuthorityDataSourcePolicy.protectDruid(pool, fixture.writerBoot(), true);
             pool.init();
-            try (var first = pool.getConnection(); var second = pool.getConnection(); var s = first.createStatement()) {
+            try (var first = pool.getConnection(); var second = pool.getConnection()) {
                 StrongTiDbConnectionPolicy.verify(first, true);
                 StrongTiDbConnectionPolicy.verify(second, true);
-                s.execute("CREATE TABLE player_state(player_id BIGINT UNSIGNED PRIMARY KEY,data MEDIUMBLOB NOT NULL)");
             }
             long epoch = 1_700_000_000_000L;
             var bundle = AssetBundle.newBuilder().addItems(AssetItem.newBuilder().setConfigId(9).setCount(1)).build();
@@ -88,12 +89,6 @@ class AssetOpSqlProofTiDbTest {
                 var result = loop.processClaimed(retried);
                 assertTrue(result.finalized());
                 assertEquals(AssetOpStatus.APPLIED_PARTIAL, result.status());
-            }
-        } finally {
-            pool.close();
-            assertTrue(database.matches("guild_proof_it_[0-9a-f]{16}"));
-            try (var c = DriverManager.getConnection(base, "root", ""); var s = c.createStatement()) {
-                s.execute("DROP DATABASE IF EXISTS " + database);
             }
         }
     }

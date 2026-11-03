@@ -116,7 +116,7 @@ public final class AuthoritySqlFixture implements AutoCloseable {
                     statement.execute("GRANT CREATE,ALTER,INDEX ON "+name(fixture.database)+".* TO "+literal(schemaUser)+"@'%'");
                     fixture.unknown=false;
                 }
-                schema=DriverManager.getConnection(fixture.jdbcUrl(""),schemaUser,schemaPassword);
+                schema=openFixtureConnection(fixture.jdbcUrl(""),schemaUser,schemaPassword);
                 AuthorityDataSource.initialize(schema,!fixture.options.allowMySql(),List.of());
                 schema.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
                 schema.setNetworkTimeout(Runnable::run,5000);
@@ -260,7 +260,7 @@ public final class AuthoritySqlFixture implements AutoCloseable {
         private void dropConfirmedSchemaUser()throws Exception{
             if(!schemaUserCreated)return;
             verifyUnpublishedOwner();
-            try(var account=DriverManager.getConnection(fixture.jdbcUrl(""),schemaUser,schemaPassword)){
+            try(var account=openFixtureConnection(fixture.jdbcUrl(""),schemaUser,schemaPassword)){
                 if(!configuredPrincipal.equals(currentUser(account)))throw new SQLException("待撤销Schema账号归属不同");
             }
             try(var admin=fixture.admin("");var statement=admin.createStatement()){
@@ -760,10 +760,10 @@ public final class AuthoritySqlFixture implements AutoCloseable {
             try(var input=AuthoritySqlFixture.class.getResourceAsStream("/db/game-route-authority-schema.sql")){
                 if(input==null)throw new SQLException("缺同源正式authority DDL");String ddl=new String(input.readAllBytes(),StandardCharsets.UTF_8);
                 // 只执行本仓固定资源，不接受外部脚本或第二份控制表schema。
-                for(String sql:ddl.split(";"))if(!sql.isBlank())try(var statement=admin.createStatement()){statement.setQueryTimeout(5);fixture.unknown=true;statement.execute(sql);fixture.unknown=false;}
+                for(String sql:ddl.split(";"))if(!sql.isBlank())try(var statement=admin.createStatement()){statement.setQueryTimeout(5);fixture.unknown=true;executeOwnerDdl(admin,statement,()->statement.execute(sql));fixture.unknown=false;}
             }
             if(playerSchema!=null){
-                for(String sql:playerSchema)try(var statement=admin.createStatement()){statement.setQueryTimeout(5);fixture.unknown=true;statement.execute(sql);fixture.unknown=false;}
+                for(String sql:playerSchema)try(var statement=admin.createStatement()){statement.setQueryTimeout(5);fixture.unknown=true;executeOwnerDdl(admin,statement,()->statement.execute(sql));fixture.unknown=false;}
                 fixture.unknown=true;schema.create(admin,principal);fixture.unknown=false;
             }
             fixture.unknown=true;RouteAuthorityInitializer.initialize(admin,UUID.randomUUID().toString(),options.zones(),principal);fixture.unknown=false;fixture.register(admin);return fixture;
@@ -814,7 +814,7 @@ public final class AuthoritySqlFixture implements AutoCloseable {
     /** 只用于新池的显式装配；旧池仍绑定旧boot，不随SQL-seam再登记换绑。 */ public synchronized String normalPassword(){return activeNormalAccount==null?password:activeNormalAccount.password();}
     public String jdbcUrl(String parameters){if(!parameters.isEmpty()&&!parameters.startsWith("?"))throw new IllegalArgumentException("参数形状非法");return options.root().replaceAll("/$","")+"/"+database+parameters;}
     public synchronized WriterAuthority writerBoot(){if(boot==null||closed)throw new IllegalStateException("fixture主体未就绪或已关闭");return boot;}
-    public synchronized DataSource normalDataSource(String parameters)throws SQLException{Properties p=new Properties();p.setProperty("user",normalUser());p.setProperty("password",normalPassword());return new AuthorityDataSource(jdbcUrl(parameters),p,writerBoot(),!options.allowMySql(),List.of());}
+    public synchronized DataSource normalDataSource(String parameters)throws SQLException{return new AuthorityDataSource(jdbcUrl(parameters),fixtureConnectionProperties(normalUser(),normalPassword()),writerBoot(),!options.allowMySql(),List.of());}
     /** 只供本夹具seed/故障注入，业务构造器必须接normalDataSource或普通池。 */
     public DataSource schemaDataSource(){return new DataSource(){
         public Connection getConnection()throws SQLException{return schemaConnection();}
@@ -825,7 +825,17 @@ public final class AuthoritySqlFixture implements AutoCloseable {
         public <T>T unwrap(Class<T> type)throws SQLException{throw new SQLException("fixture不允许unwrap");}public boolean isWrapperFor(Class<?> type){return false;}
     };}
     private Connection schemaConnectionInternal()throws SQLException{if(closed||unknown||!owned)throw new SQLException("fixture schema不可用");return admin(database);}
-    private Connection admin(String db)throws SQLException{var connection=DriverManager.getConnection(options.root().replaceAll("/$","")+"/"+db,options.adminUser(),options.adminPassword());try{AuthorityDataSource.initialize(connection,!options.allowMySql(),List.of());connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);connection.setNetworkTimeout(Runnable::run,5000);return connection;}catch(SQLException|RuntimeException failure){try{connection.close();}catch(SQLException cleanup){failure.addSuppressed(cleanup);}throw failure;}}
+    private static Properties fixtureConnectionProperties(String user,String password){
+        Properties properties=new Properties();
+        properties.setProperty("user",user);properties.setProperty("password",password);
+        // setNetworkTimeout只能约束已建立的连接；TCP建立与初始握手也必须在调用前限定。
+        properties.setProperty("connectTimeout","5000");properties.setProperty("socketTimeout","5000");
+        return properties;
+    }
+    static Connection openFixtureConnection(String url,String user,String password)throws SQLException{
+        return DriverManager.getConnection(url,fixtureConnectionProperties(user,password));
+    }
+    private Connection admin(String db)throws SQLException{var connection=openFixtureConnection(options.root().replaceAll("/$","")+"/"+db,options.adminUser(),options.adminPassword());try{AuthorityDataSource.initialize(connection,!options.allowMySql(),List.of());connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);connection.setNetworkTimeout(Runnable::run,5000);return connection;}catch(SQLException|RuntimeException failure){try{connection.close();}catch(SQLException cleanup){failure.addSuppressed(cleanup);}throw failure;}}
     private static String currentUser(Connection connection)throws SQLException{try(var s=connection.createStatement();var r=s.executeQuery("SELECT CURRENT_USER()")){if(!r.next())throw new SQLException("缺实际主体");String value=r.getString(1);if(value==null||value.isBlank()||r.next())throw new SQLException("实际主体不唯一");return value;}}
     private void registerInternal(Connection admin)throws Exception{
         // 正式registry保留退役主体的唯一性；每个新boot必须实际创建独立SQL账号。
@@ -847,7 +857,7 @@ public final class AuthoritySqlFixture implements AutoCloseable {
             for(String table:tables)if(!table.equals("__sql_fixture_owner")){unknown=true;statement.execute("GRANT "+((CONTROL.contains(table)||table.equals("maintenance_recovery_target"))?"SELECT":"SELECT,INSERT,UPDATE,DELETE")+" ON "+name(database)+"."+name(table)+" TO "+literal(nextUser)+"@'%'");unknown=false;}
             if(options.primitive().equals("LOCK_TOUCH")){unknown=true;statement.execute("GRANT UPDATE(lock_touch) ON "+name(database)+".writer_slot TO "+literal(nextUser)+"@'%'");unknown=false;}
         }
-        unknown=true;String principal;try(var normal=DriverManager.getConnection(jdbcUrl(""),nextUser,nextPassword)){
+        unknown=true;String principal;try(var normal=openFixtureConnection(jdbcUrl(""),nextUser,nextPassword)){
             principal=currentUser(normal);if(!account.principal().equals(principal))throw new SQLException("fixture新boot的实际SQL主体不同","08007");
         }
         update(admin,"UPDATE __sql_fixture_owner SET normal_principal=? WHERE id=1 AND owner_nonce=?",principal.getBytes(StandardCharsets.UTF_8),nonce);unknown=false;
@@ -948,7 +958,7 @@ public final class AuthoritySqlFixture implements AutoCloseable {
                 if(!r.next()||!MessageDigest.isEqual(nonce,r.getBytes(1))||!MessageDigest.isEqual(options.physical(),r.getBytes(2)))throw new SQLException("fixture schema归属不同");byte[] principal=r.getBytes(3);if(r.next())throw new SQLException("fixture归属不唯一");
                 if(userCreated != !normalAccounts.isEmpty())throw new SQLException("fixture实际创建账号清单不符");
                 if(userCreated&&!MessageDigest.isEqual(principal,normalAccounts.get(normalAccounts.size()-1).principal().getBytes(StandardCharsets.UTF_8)))throw new SQLException("fixture当前账号归属不同");
-                for(var account:normalAccounts)try(var normal=DriverManager.getConnection(jdbcUrl(""),account.user(),account.password())){
+                for(var account:normalAccounts)try(var normal=openFixtureConnection(jdbcUrl(""),account.user(),account.password())){
                     if(!account.principal().equals(currentUser(normal)))throw new SQLException("fixture实际账号主体已变化");
                 }
             }
