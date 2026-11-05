@@ -446,3 +446,11 @@ Java 0.1.0-SNAPSHOT 的公会池及 CLI 固定新 TiDB 物理连接公平锁 OFF
 ### 2026-11-01 第 4 项最小 A9 实际验证未通过
 
 正式本仓以当前31d9be5975ae45d4c13a8932379c47a9d7bf00d4加已同步R/2b8184428契约运行默认clean install（9模块+根，未开启额外Redis/MySQL profile）。实际711项：573通过、3失败、1错误、134条件跳过；617项输入前后一致。根和proto/table-codegen/table/common/api成功；discovery与gateway-store失败，mall/gateway依赖跳过，三个运行JAR本轮未产出。discovery三项是观战协调键金样/同槽测试配套；gateway-store为真实TiDB夹具publish初始化查询超时并回滚通讯失败，UNKNOWN现场保留，不冒称业务负控失败根因已知。按负责人只验证安排交原改码窗口，不改断言、不重跑。结果、完整新XML、跳过清单及诊断在主仓build/verification/stage4-resume-20261101-r1/java-a9-r3/与java-a9-failures-diagnosis.json。数据库同CID新PD恢复及新锁资格已经真实复核，不能以该项替代本次失败、双区联验或全量Java/SQL428。
+
+### 2026-11-05 Gate 原认证账号修复与本地真 TiDB 验证
+
+Codex 根据本轮授权修复 Gate：已绑定角色的 SessionContext 固定取入场时的 ownerAccount，未选角仍使用登录账号；新连接不继承旧身份。新增原账号被后续登录字段覆盖的回归，先复现失败再通过。恢复因 OOM 停止的本机 TiKV 原容器（不清数据），使用主仓正式 sql_fixture_env.ps1 的本地隔离夹具运行 game-gate 及依赖模块；该夹具不是全系列 SQL 资格原件。
+
+阻塞修复：GameNamespaceAutoConfigurationTest 的三处实际 SpringApplication 显式使用 UTF-8 控制台编码；GM 不可路由测试对齐已退役协议的 reserved 墓碑，同时继续检查编号不可复用、活动运维方法非客户端入口与实际拒绝转发。没有跳测试或放宽业务准入。
+
+实际命令：mvnw.cmd -B -pl game-gate -am test，显式使用本机 protoc 35.1 并配置隔离 TiDB JDBC。结果 BUILD SUCCESS；game-gate 348/348，game-discovery 358 项中 224 通过、134 条件跳过，其中 AuthorityPoolTiDbTest 4/4 实际通过。其他 reactor 模块也成功。本轮不代表整个 Java 系列、双区联验或线上滚动升级验收。日志及容器世代前后证据在主仓 build/verification/enter-game-20261105-build-r1/java-local-fixture-green.log 与同名 public.json；用户无需为本修复修改客户端。

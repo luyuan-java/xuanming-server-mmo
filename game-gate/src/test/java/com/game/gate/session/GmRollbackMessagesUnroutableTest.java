@@ -38,8 +38,9 @@ class GmRollbackMessagesUnroutableTest {
     private final MessageRoutes routes = MessageRoutes.of(ids);
 
     @Test
-    void 三个服务的每个方法都不可路由_也都不是客户端协议服务() {
-        for (String service : SERVICES) {
+    void 运维服务方法不可路由_已删除的回档服务不再注册() {
+        assertThat(ids.all()).noneMatch(m -> m.serviceName().equals("SceneRollbackClientPlayer"));
+        for (String service : List.of("DataService", "LoginAdmin")) {
             List<MessageMethod> methods = ids.all().stream().filter(m -> m.serviceName().equals(service)).toList();
             assertThat(methods).as("契约里 " + service + " 的方法").isNotEmpty();
             for (MessageMethod m : methods) {
@@ -50,15 +51,35 @@ class GmRollbackMessagesUnroutableTest {
     }
 
     @Test
-    void 消息号96到117全部属于这三个服务且不可路由() {
+    void 消息号96到117保留当前运维方法和墓碑且全部不可路由() throws Exception {
+        Map<Integer, String> active = Map.of(97, "DataServiceListPlayerSnapshots",
+                108, "DataServiceBatchRecallItems", 111, "LoginAdminRemovePlayersFromAccounts",
+                114, "DataServiceQueryTransactionLog");
+        // 已删除的方法只留下墓碑；同时检查注册表和原始契约，避免放过编号被复用。
+        Map<Integer, String> contract = new java.util.HashMap<>();
+        try (var stream = getClass().getClassLoader().getResourceAsStream(MessageIdRegistry.MESSAGE_ID_RESOURCE)) {
+            assertThat(stream).isNotNull();
+            for (String line : new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).lines().toList()) {
+                String[] parts = line.split("=", 2);
+                if (parts.length == 2) contract.put(Integer.parseInt(parts[0]), parts[1]);
+            }
+        }
         for (int id = 96; id <= 117; id++) {
-            MessageMethod m = ids.byId(id).orElseThrow();
-            assertThat(SERVICES).as("号 " + id + " = " + m.key()).contains(m.serviceName());
+            if (active.containsKey(id)) {
+                MessageMethod m = ids.byId(id).orElseThrow();
+                assertThat(m.key()).isEqualTo(active.get(id));
+                assertThat(m.clientService()).isFalse();
+            } else {
+                assertThat(ids.byId(id)).as("墓碑号 " + id + " 不得重新注册").isEmpty();
+                assertThat(contract.get(id)).as("号 " + id + " 必须保留墓碑").startsWith("reserved:");
+                String tombstone = contract.get(id);
+                assertThat(SERVICES).anyMatch(service -> tombstone.startsWith("reserved:" + service));
+            }
             assertThat(routes.clientRoute(id)).as("号 " + id).isNull();
         }
-        assertThat(ids.requireId("SceneRollbackClientPlayer", "GmExecuteRollback")).isEqualTo(112);
-        assertThat(ids.requireId("SceneRollbackClientPlayer", "GmListSnapshots")).isEqualTo(115);
-        assertThat(ids.requireId("SceneRollbackClientPlayer", "GmQueryTransactionLog")).isEqualTo(117);
+        assertThat(contract.get(112)).isEqualTo("reserved:SceneRollbackClientPlayerGmExecuteRollback");
+        assertThat(contract.get(115)).isEqualTo("reserved:SceneRollbackClientPlayerGmListSnapshots");
+        assertThat(contract.get(117)).isEqualTo("reserved:SceneRollbackClientPlayerGmQueryTransactionLog");
     }
 
     @Test

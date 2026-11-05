@@ -147,7 +147,7 @@ class GameNamespaceAutoConfigurationTest {
     @Test
     void 真SpringApplication_非法值输出标准的绑定校验报告(CapturedOutput output) {
         assertThatThrownBy(() -> new SpringApplicationBuilder(Minimal.class).web(WebApplicationType.NONE)
-                .properties("spring.main.banner-mode=off").run("--game.namespace=Bad").close())
+                .properties("spring.main.banner-mode=off", "logging.charset.console=UTF-8").run("--game.namespace=Bad").close())
                 .hasRootCauseInstanceOf(BindValidationException.class);
         assertThat(output).contains("APPLICATION FAILED TO START").contains("Property: game.namespace").contains("Value: \"Bad\"")
                 .contains("Origin: \"game.namespace\" from property source \"commandLineArgs\"").contains("Reason: " + GameNamespace.RULE);
@@ -156,14 +156,14 @@ class GameNamespaceAutoConfigurationTest {
     @Test
     void 真SpringApplication_合法值打出命名空间行(CapturedOutput output) {
         new SpringApplicationBuilder(Minimal.class).web(WebApplicationType.NONE)
-                .properties("spring.main.banner-mode=off").run("--game.namespace=t1").close();
+                .properties("spring.main.banner-mode=off", "logging.charset.console=UTF-8").run("--game.namespace=t1").close();
         assertThat(output).contains("部署命名空间 game.namespace=t1（Redis 前缀 t1:，Kafka 前缀 t1-，MySQL 库 t1）");
     }
 
     @Test
     void 真SpringApplication_应急开关给空值_同样是标准的绑定校验报告(CapturedOutput output) {
         assertThatThrownBy(() -> new SpringApplicationBuilder(Minimal.class).web(WebApplicationType.NONE)
-                .properties("spring.main.banner-mode=off").run("--game.mysql.expect-database=").close())
+                .properties("spring.main.banner-mode=off", "logging.charset.console=UTF-8").run("--game.mysql.expect-database=").close())
                 .hasRootCauseInstanceOf(BindValidationException.class);
         assertThat(output).contains("APPLICATION FAILED TO START").contains("Property: game.mysql.expectDatabase").contains("Value: \"\"")
                 .contains("Origin: \"game.mysql.expect-database\" from property source \"commandLineArgs\"")

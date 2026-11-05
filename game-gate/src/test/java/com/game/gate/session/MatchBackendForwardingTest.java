@@ -81,6 +81,24 @@ class MatchBackendForwardingTest {
     private final AtomicLong nanos = new AtomicLong(1);
 
     @Test
+    void 在线请求保持入场原账号_新连接不会继承旧身份() {
+        EmbeddedChannel old = verified(Map.of(DubboGroups.MATCH, match));
+        enterGame(old);
+        session().account = "later-login-account";
+        old.writeInbound(request(90, ids.requireId("MatchService", "JoinQueue"), "queue"));
+        assertThat(match.calls).hasSize(1);
+        assertThat(match.calls.getFirst().getSession().getAccount()).isEqualTo("fixture-original");
+        assertThat(match.calls.getFirst().getSession().getOwnerRevision()).isEqualTo(1);
+        old.close();
+        old.runPendingTasks();
+        EmbeddedChannel fresh = verified(Map.of(DubboGroups.MATCH, match));
+        assertThat(session().account).isEmpty();
+        assertThat(session().ownerAccount).isEmpty();
+        assertThat(session().playerId).isZero();
+        fresh.close();
+    }
+
+    @Test
     void 十二个号都转给match后端_带请求号与会话身份_应答体原样回_148与两个推送占位不回包() {
         EmbeddedChannel ch = verified(Map.of(DubboGroups.MATCH, match, DubboGroups.FRIEND, friend));
         enterGame(ch);

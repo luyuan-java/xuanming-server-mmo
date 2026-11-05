@@ -1666,7 +1666,8 @@ public final class ClientDispatcher {
                 .setGateInstanceId(identity.instanceId())
                 .setSessionId(s.sessionId())
                 .setZoneId(identity.zoneId())
-                .setAccount(s.account)
+                // 角色权限必须沿用入场时认证的主体，不能被后续登录态覆盖。
+                .setAccount(s.playerId != 0 ? s.ownerAccount : s.account)
                 .setPlayerId(s.playerId)
                 .setOwnerRevision(s.ownerRevision)
                 .setClientIp(s.clientIp())
