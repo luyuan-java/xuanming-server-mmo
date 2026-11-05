@@ -454,3 +454,9 @@ Codex 根据本轮授权修复 Gate：已绑定角色的 SessionContext 固定�
 阻塞修复：GameNamespaceAutoConfigurationTest 的三处实际 SpringApplication 显式使用 UTF-8 控制台编码；GM 不可路由测试对齐已退役协议的 reserved 墓碑，同时继续检查编号不可复用、活动运维方法非客户端入口与实际拒绝转发。没有跳测试或放宽业务准入。
 
 实际命令：mvnw.cmd -B -pl game-gate -am test，显式使用本机 protoc 35.1 并配置隔离 TiDB JDBC。结果 BUILD SUCCESS；game-gate 348/348，game-discovery 358 项中 224 通过、134 条件跳过，其中 AuthorityPoolTiDbTest 4/4 实际通过。其他 reactor 模块也成功。本轮不代表整个 Java 系列、双区联验或线上滚动升级验收。日志及容器世代前后证据在主仓 build/verification/enter-game-20261105-build-r1/java-local-fixture-green.log 与同名 public.json；用户无需为本修复修改客户端。
+
+### 2026-11-05 节点链路恢复与业务状态解耦（Java 范围核对）
+
+C++ 版以 `7ec726ce1` 为基线实施内部 RPC0 链路整理：同进程重连保留状态所有者，握手仅恢复通信绑定与就绪状态，不通过握手成功钩子驱动进场恢复；未改客户端契约。Java 版本仍为 `0.1.0-SNAPSHOT`：NodeLink 握手成功没有对应的业务恢复钩子，无需复制本次 C++ 结构调整。
+
+Java 既有断链策略仍会关闭 Gate 会话，并由 Scene 移除玩家、写回；“节点间短暂断线保留玩家内存、恢复只替换通信绑定”尚待独立设计和实现，本批不承诺解决，也不标记为双版已对齐。此次只核对并登记，未修改 Java 代码、未运行 Java 构建或测试。
