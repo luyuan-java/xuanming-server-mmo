@@ -552,3 +552,11 @@ mmorpg 侧:`cpp/libs/services/scene/player/system/save_timing_stats.h`、`player
 5. **验证命令**(按 Java 仓 AGENTS.md §4):`./mvnw -B -pl game-scene -am test`。
 
 本条只登记待做,未修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-05 共同客户端：损坏的帮会资产恢复记录可确认作废
+
+Java 版本仍为 `0.1.0-SNAPSHOT`。本项修改两版共用的 `mmorpg-client`，对应主仓 `docs/design/guild-phase2/05-economy.md` §5.44.2；Go / Java 服务端协议与源码均无新增修改，本轮未重跑服务端验证，不改变前述双服务端验证的范围。
+
+损坏记录首次只警告原请求可能已经到账，仍显示该警告时再次恢复才按同一存储实例、角色及原始字节快照确认作废；文件已替换时重新确认。旧损坏或超窗警告之后槽位换成合法新请求，本次确认也不会借机重发，需下一次主动恢复。读取、锁或删除失败保留槽位并撤销已有确认；成功清除后只读刷新本人帮会，不自动生成新请求号，也不把清除解释为未到账。换角、重连、提示变化和在途推送均按本轮恢复约束处理。
+
+Unity 最终 EditMode 501/501 通过，零失败、零跳过，进程退出 0；其中 `GuildEconomyRecoveryTests` 83/83、`DurableRequestFileStoreTests` 12/12。目标源码测试前后 SHA-256 一致。证据：客户端 `Logs/guild-corrupt-recovery-20261105/final-tests.xml`、`final-exitcode.txt`、`final-sources-before.json` 与 `final-sources-after.json`。本条不代表真实客户端联机、服务端真库或跨区域验收；未提交或推送。
