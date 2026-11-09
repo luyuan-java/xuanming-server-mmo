@@ -50,7 +50,7 @@ import org.springframework.core.env.Environment;
  * {@link RedissonClient} 来自 game-discovery，{@link PlayerStore} 来自 game-player-store 的自动装配。
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({SceneNodeProperties.class, AuditProperties.class, EvacuationProperties.class})
+@EnableConfigurationProperties({SceneNodeProperties.class, AuditProperties.class, EvacuationProperties.class, FestivalTestProperties.class})
 public class SceneNodeConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(SceneNodeConfiguration.class);
@@ -72,9 +72,10 @@ public class SceneNodeConfiguration {
     }
 
     @Bean
-    public SceneTables sceneTables(ConfigTables tables, SceneNodeProperties props) {
+    public SceneTables sceneTables(ConfigTables tables, SceneNodeProperties props, FestivalTestProperties festival) {
         Path configRoot = Path.of(props.tableDir()).toAbsolutePath().normalize().getParent();
-        return ConfigSceneTables.from(tables, configRoot.resolve("navmesh/current_maps"));
+        Path festivalRoot = festival.festivalRoot(RunMode.parse(props.runMode()));
+        return ConfigSceneTables.from(tables, festival.currentRoot(configRoot.resolve("navmesh/current_maps")), festivalRoot);
     }
 
     @Bean

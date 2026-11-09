@@ -42,6 +42,11 @@ public final class ConfigSceneTables implements SceneTables {
 
     /** World 表为空时直接失败（没有可创建的主世界）。 */
     public static ConfigSceneTables from(ConfigTables tables, Path navigationRoot) {
+        return from(tables, navigationRoot, null);
+    }
+
+    /** festivalRoot 只能由显式 dev/test 装配提供；普通启动遇到候选节庆表直接拒启。 */
+    public static ConfigSceneTables from(ConfigTables tables, Path navigationRoot, Path festivalRoot) {
         Set<Integer> world = new LinkedHashSet<>();
         for (WorldTable row : tables.world().all()) {
             if (row.getSceneId() != 0) {
@@ -65,6 +70,22 @@ public final class ConfigSceneTables implements SceneTables {
         Map<Integer, CurrentMapNavigation> navigation = new HashMap<>();
         for (BaseSceneTable row : tables.baseScene().all()) {
             String nav = row.getNavBinFile().replace('\\', '/');
+            String festivalId = FestivalMapNavigation.paddedId(row.getId());
+            if (festivalId != null || nav.contains("/festival_maps/")) {
+                if (festivalRoot == null || festivalId == null
+                        || !nav.equals("data/scene_nav_bin/festival_maps/" + festivalId + "/scene.bin")) {
+                    throw new IllegalStateException("节庆地图需要显式开发配置及匹配的导航映射: " + row.getId());
+                }
+                CurrentMapNavigation grid = FestivalMapNavigation.load(festivalRoot, festivalId);
+                Vec3 spawn = new Vec3(row.getSpawnX(), row.getSpawnY(), row.getSpawnZ());
+                // XLSX 十进制往返可改变最后一位 double；容许纳米级表示差，不容许实际落点漂移。
+                if (!spawn.isFinite() || spawn.z() != grid.spawn().z()
+                        || grid.spawn().horizontalDistance(spawn) > 1e-9 || !grid.isWalkable(spawn)) {
+                    throw new IllegalStateException("BaseScene 出生点与节庆导航不一致: " + row.getId());
+                }
+                navigation.put(row.getId(), grid);
+                continue;
+            }
             String key = switch (nav.substring(nav.lastIndexOf('/') + 1)) {
                 case "main_scene.bin" -> "main";
                 case "penglai_scene.bin" -> "island";
