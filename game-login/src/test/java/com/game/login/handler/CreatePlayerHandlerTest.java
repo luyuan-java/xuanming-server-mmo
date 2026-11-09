@@ -250,15 +250,16 @@ class CreatePlayerHandlerTest {
         assertError(create(CreatePlayerRequest.newBuilder().setGender(-1).build()), unknown);
         assertError(create(CreatePlayerRequest.newBuilder().setClassId(-1).build()), unknown);
         assertError(create(CreatePlayerRequest.newBuilder().setAppearanceId("99_unknown").build()), unknown);
+        assertError(create(CreatePlayerRequest.newBuilder().setAppearanceId("06_thunder_caster_boy").build()), unknown);
         verify(store, never()).createPlayer(any());
     }
 
     @Test
-    void 十二个可选外观按完整身份存入并返回() throws Exception {
+    void 十一个可选外观按完整身份存入并返回() throws Exception {
         List<String> appearances = List.of(
                 "00_reference_topright_boy", "01_ice_sword_girl", "02_fire_talisman_boy",
                 "03_lotus_healer_girl", "04_mountain_guardian_boy", "05_celestial_musician_girl",
-                "06_thunder_caster_boy", "08_alchemy_prodigy_boy", "09_bamboo_archer_girl",
+                "08_alchemy_prodigy_boy", "09_bamboo_archer_girl",
                 "10_crimson_spear_girl", "15_water_dragon_scholar_boy", "17_ghost_script_calligrapher_boy");
         for (String appearance : appearances) {
             var response = create(CreatePlayerRequest.newBuilder().setName("新角色").setAppearanceId(appearance).build());

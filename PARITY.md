@@ -1091,3 +1091,7 @@ mvn -o -B -fae $protocSpec compile
 | 12 个正式外观的新建名单、退役外观和空 ID 兼容 | Go login 在既有全局 SQL 角色目录事务前检查名单。07、14、20 仅在本账号已有同名且职业、性别、外观均匹配的记录时只读恢复建角响应。 | `0.1.0-SNAPSHOT` 的 game-login 同样限制新建名单。已有记录从 Java 自身角色表读回，匹配规则和不写入的边界与 Go 相同，满额时也允许退役外观的精确重试。两版均原样保留空外观和已有身份。 | Go 创角包 128 个顶层用例通过。Java Maven 定向 `verify` 10 个 reactor 成功，203 项通过、7 项条件跳过。包含名单、建角回包、登录角色列表、入场及存储定向测试。未进行 Java 真服务联调。 |
 
 核对两版的 `CreatePlayerRequest.appearance_id = 4`、`AccountSimplePlayer.appearance_id = 6`、`ActorCreateS2C.appearance_id = 6` 和消息号 14／21／26／47／48 均一致。此次调整沿用现有协议，未修改生成物、表或已存档记录。Java 定向构建产物 `game-login-0.1.0-SNAPSHOT.jar` SHA-256 为 `3f463035e221ed17cf2db2e1dc19810268ceccb48cf3f50fc96b7f9d4e323325`，来自当时的本机工作区。
+
+### 2026-11-09 雷法少年退出创角
+
+Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`，新建请求及该身份的旧建角响应重试均拒绝。其余 11 个外观、空外观兼容及其他退役角色的精确重试规则保留。Go 创角定向测试通过，Java `CreatePlayerHandlerTest` 的 35 项通过。本次未修改客户端协议；持久化记录清理由实际运行环境单独核对。

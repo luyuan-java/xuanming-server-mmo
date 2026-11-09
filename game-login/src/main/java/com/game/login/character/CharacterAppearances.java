@@ -15,7 +15,6 @@ public final class CharacterAppearances {
             "03_lotus_healer_girl",
             "04_mountain_guardian_boy",
             "05_celestial_musician_girl",
-            "06_thunder_caster_boy",
             "08_alchemy_prodigy_boy",
             "09_bamboo_archer_girl",
             "10_crimson_spear_girl",
