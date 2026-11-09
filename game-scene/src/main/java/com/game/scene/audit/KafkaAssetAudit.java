@@ -87,6 +87,7 @@ public final class KafkaAssetAudit implements AssetAudit {
             case GM_DEDUCT -> TransactionReason.TX_GM_DEDUCT;
             case ATTRIBUTE_RESET -> TransactionReason.TX_ATTRIBUTE_RESET;
             case ATTRIBUTE_SCHEME_CREATE -> TransactionReason.TX_ATTRIBUTE_SCHEME_CREATE;
+            case SKILL_UPGRADE -> TransactionReason.TX_SKILL_UPGRADE;
             case PET_RESET -> TransactionReason.TX_PET_RESET;
             case PET_RENAME -> TransactionReason.TX_PET_RENAME;
             case DEFERRED_CLAWBACK -> TransactionReason.TX_DEFERRED_CLAWBACK;

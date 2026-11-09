@@ -4,12 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.common.GameNamespace;
 import com.game.common.NamespaceDatabaseCheck;
+import com.game.common.sql.AuthorityDataSource;
+import com.game.common.sql.testing.AuthoritySqlFixture;
 import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.Statement;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Properties;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.boot.env.YamlPropertySourceLoader;
@@ -19,10 +21,10 @@ import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.io.ClassPathResource;
 
 /**
- * 真 MySQL 上的缺省库名（{@code -Dgame.it.mysql=jdbc:mysql://127.0.0.1:3306}，缺省跳过）：同一个 JVM 里按两个命名空间解析 game-data 的
- * application.yaml——不设 {@code game.namespace} 时 JDBC URL 的库名是 game；设成 nstest 时解析成 nstest，{@code createDatabaseIfNotExist}
- * 建出 nstest 库，{@code SELECT DATABASE()} 为 nstest，按 nstest 核对通过、按 game 核对不通过。只换掉 URL 的主机端口段（取 {@code game.it.mysql}），
- * 只连 nstest 库；本测试建出的库在结束时删掉（之前就有的不删）。
+ * 真 MySQL / TiDB 上的命名空间库名（{@code -Dgame.it.mysql}，缺省跳过）：解析真实 application.yaml，
+ * 未配置时库名为 game，随机合法命名空间解析成同名库；两者均不得开启连接时自动建库。
+ * fixture 显式创建并发布本例专属库，再以独立 NORMAL 主体连接解析后的 YAML URL，验证实际 DATABASE()。
+ * 结束时由 fixture 校验归属并精确清理，不连接或接管已有 nstest 库。
  */
 @EnabledIfSystemProperty(named = "game.it.mysql", matches = ".+")
 class NamespaceMysqlDatabaseIntegrationTest {
@@ -32,16 +34,7 @@ class NamespaceMysqlDatabaseIntegrationTest {
     private static final String PASSWORD = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
     private static final String HINT = "--expect-database <库名>";
 
-    private static boolean databaseExists(Connection conn, String name) throws Exception {
-        try (PreparedStatement ps = conn.prepareStatement("SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?")) {
-            ps.setString(1, name);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
-            }
-        }
-    }
-
-    /** 按给定的 {@code game.namespace}（null = 不设）解析 application.yaml 里的 JDBC URL；不看本机的系统属性与环境变量。 */
+    /** 按给定的 game.namespace 解析真实 YAML；不读取本机系统属性及环境变量。 */
     private static String yamlUrl(String namespace) throws Exception {
         StandardEnvironment environment = new StandardEnvironment();
         environment.getPropertySources().remove(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME);
@@ -56,30 +49,33 @@ class NamespaceMysqlDatabaseIntegrationTest {
     }
 
     @Test
-    void yaml的库名解析成命名空间_建库并核对通过() throws Exception {
+    void yaml解析命名空间且不自动建库_显式发布后实际库名正反核对() throws Exception {
         GameNamespace game = GameNamespace.of("game");
-        GameNamespace nstest = GameNamespace.of("nstest");
-        assertThat(yamlUrl(null)).startsWith(YAML_BASE + "/game?");
-        String yamlUrl = yamlUrl("nstest");
-        assertThat(yamlUrl).startsWith(YAML_BASE + "/nstest?").contains("createDatabaseIfNotExist=true");
-        String url = System.getProperty("game.it.mysql") + yamlUrl.substring(YAML_BASE.length());
+        GameNamespace namespace = GameNamespace.of("nsit" + UUID.randomUUID().toString().replace("-", "").substring(0, 20));
+        String defaultUrl = yamlUrl(null);
+        assertThat(defaultUrl).startsWith(YAML_BASE + "/game?");
+        assertThat(defaultUrl.toLowerCase(Locale.ROOT)).doesNotContain("createdatabaseifnotexist");
+        String namespacedUrl = yamlUrl(namespace.value());
+        assertThat(namespacedUrl).startsWith(YAML_BASE + "/" + namespace.value() + "?");
+        assertThat(namespacedUrl.toLowerCase(Locale.ROOT)).doesNotContain("createdatabaseifnotexist");
 
-        boolean existedBefore;
-        try (Connection admin = DriverManager.getConnection(System.getProperty("game.it.mysql") + "/?useSSL=false&allowPublicKeyRetrieval=true",
-                USER, PASSWORD)) {
-            existedBefore = databaseExists(admin, "nstest");
-        }
-        try (Connection conn = DriverManager.getConnection(url, USER, PASSWORD)) {
-            assertThat(NamespaceDatabaseCheck.currentDatabase(conn)).isEqualTo("nstest");
-            assertThat(NamespaceDatabaseCheck.verify(conn, null, nstest, HINT)).isNull();
-            assertThat(NamespaceDatabaseCheck.verify(conn, null, game, HINT)).as("另一个命名空间的库名核对不过")
-                    .contains("DATABASE()=nstest").contains("期望 game");
-        } finally {
-            if (!existedBefore) {
-                try (Connection admin = DriverManager.getConnection(System.getProperty("game.it.mysql") + "/?useSSL=false&allowPublicKeyRetrieval=true",
-                        USER, PASSWORD); Statement st = admin.createStatement()) {
-                    st.execute("DROP DATABASE IF EXISTS `nstest`");
-                }
+        String root = System.getProperty("game.it.mysql");
+        var options = AuthoritySqlFixture.Options.fromEnvironment(root, USER, PASSWORD, "namespace", true, List.of(1));
+        // 保留 YAML 的库名与全部连接参数；只替换固定的主机端口段，不能由 fixture 重新拼一份被测 URL。
+        String url = root.replaceAll("/$", "") + namespacedUrl.substring(YAML_BASE.length());
+        // 正式 authority 发布需要 HOME 基表；沿用 fixture 的固定源装配，不复制一份临时 player DDL。
+        try (var lease = AuthoritySqlFixture.beginUnpublishedWithPlayerBaseSchema(options, namespace);
+             var fixture = lease.publish()) {
+            assertThat(fixture.database()).isEqualTo(namespace.value());
+            Properties credentials = new Properties();
+            credentials.setProperty("user", fixture.normalUser());
+            credentials.setProperty("password", fixture.normalPassword());
+            var source = new AuthorityDataSource(url, credentials, fixture.writerBoot(), false, List.of());
+            try (Connection conn = source.getConnection()) {
+                assertThat(NamespaceDatabaseCheck.currentDatabase(conn)).isEqualTo(namespace.value());
+                assertThat(NamespaceDatabaseCheck.verify(conn, null, namespace, HINT)).isNull();
+                assertThat(NamespaceDatabaseCheck.verify(conn, null, game, HINT)).as("另一个命名空间的库名核对不过")
+                        .contains("DATABASE()=" + namespace.value()).contains("期望 game");
             }
         }
     }

@@ -217,11 +217,12 @@ class TeamFollowBattleTest {
         assertThat(follow("battle_lock")).isZero();
     }
 
-    /** reaper 判废（FIGHTING 过了期限 + 宽限、没有本局记录）走条件删锁：同样等删锁完成才补跟随。 */
+    /** reaper 判废（FIGHTING 过了有效期限 + 宽限、没有本局记录）走条件删锁：同样等删锁完成才补跟随。 */
     @Test
     void reaper判废_条件删锁完成后才补跟随() {
         ScenePlayer member = memberInBattleWithLeaderElsewhere(Phase.FIGHTING);
-        f.advance(BattleFixture.BATTLE_MILLIS + BattleRedis.FIGHTING_EXPIRY_GRACE.toMillis() + 1);
+        f.advance(BattleFixture.BATTLE_MILLIS + BattleFixture.OUTCOME_WINDOW_MILLIS
+                + BattleRedis.FIGHTING_EXPIRY_GRACE.toMillis() + 1);
         f.locks.hold(Op.DELETE_IF_MATCH);
 
         f.reap();

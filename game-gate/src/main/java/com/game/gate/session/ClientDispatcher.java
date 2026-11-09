@@ -35,6 +35,8 @@ import com.game.gate.metrics.GateMetrics.SceneTransferResult;
 import com.game.gate.session.ClientSession.BackendPending;
 import com.game.gate.session.ClientSession.PendingRequest;
 import com.game.proto.ClientRequest;
+import com.game.proto.ClientHeartbeatRequest;
+import com.game.proto.ClientHeartbeatResponse;
 import com.game.proto.ClientTokenVerifyRequest;
 import com.game.proto.ClientTokenVerifyResponse;
 import com.game.proto.MessageContent;
@@ -50,6 +52,7 @@ import com.game.table.SceneErrorTip;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import io.micrometer.core.instrument.Timer;
+import java.lang.ref.WeakReference;
 import java.time.InstantSource;
 import java.util.ArrayDeque;
 import java.util.List;
@@ -148,7 +151,12 @@ public final class ClientDispatcher {
      */
     static final long BACKEND_RESULT_UNKNOWN_HOLD_NANOS = TimeUnit.MILLISECONDS.toNanos(5000);
 
-    private static final ClientTokenVerifyResponse VERIFY_OK = ClientTokenVerifyResponse.newBuilder().setSuccess(true).build();
+    static final int HEARTBEAT_INTERVAL_MS = 10_000;
+    static final int HEARTBEAT_TIMEOUT_MS = 30_000;
+    private static final long HEARTBEAT_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_INTERVAL_MS);
+    private static final long HEARTBEAT_TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_TIMEOUT_MS);
+    private static final ClientTokenVerifyResponse VERIFY_OK = ClientTokenVerifyResponse.newBuilder().setSuccess(true)
+            .setHeartbeatIntervalMs(HEARTBEAT_INTERVAL_MS).setHeartbeatTimeoutMs(HEARTBEAT_TIMEOUT_MS).build();
 
     private final GateIdentity identity;
     private final GateTokens tokens;
@@ -269,19 +277,31 @@ public final class ClientDispatcher {
     // ================================================================ 连接生命周期
 
     public void onConnected(ClientSession s) {
-        s.scheduleHandshakeTimeout(limits.handshakeTimeout(), () -> {
-            if (!s.verified && !s.closed) {
-                logRejection("handshake_timeout", s);
-                if (!s.closing) {
-                    metrics.handshake(HandshakeResult.TIMEOUT);
-                    metrics.disconnected(DisconnectReason.HANDSHAKE_TIMEOUT);
-                }
-                closeNow(s);
+        if (!limits.handshakeTimeout().isZero()) scheduleHandshakeCheck(s, limits.handshakeTimeout());
+    }
+
+    private void scheduleHandshakeCheck(ClientSession s, java.time.Duration delay) {
+        WeakReference<ClientSession> owner = new WeakReference<>(s);
+        long due = nanoClock.getAsLong() + delay.toNanos();
+        s.scheduleHandshakeTimeout(delay, () -> {
+            ClientSession current = owner.get();
+            if (current == null || current.verified || current.closed || current.closing
+                    || registry.get(current.sessionId()) != current) return;
+            if (nanoClock.getAsLong() - due > TimeUnit.SECONDS.toNanos(2)) {
+                metrics.heartbeat(GateMetrics.HeartbeatResult.DEFERRED);
+                scheduleHandshakeCheck(current, java.time.Duration.ofSeconds(1));
+                return;
             }
+            logRejection("handshake_timeout", current);
+            metrics.handshake(HandshakeResult.TIMEOUT);
+            metrics.disconnected(DisconnectReason.HANDSHAKE_TIMEOUT);
+            metrics.heartbeat(GateMetrics.HeartbeatResult.HANDSHAKE_TIMEOUTS);
+            closeNow(current);
         });
     }
 
     public void onTokenVerify(ClientSession s, ClientTokenVerifyRequest request) {
+        noteInboundFrame(s);
         if (s.closing || s.closed) {
             return;
         }
@@ -291,7 +311,7 @@ public final class ClientDispatcher {
         }
         if (s.verified) {
             // 已验证的会话再次 verify 直接回成功（C++ 同）；不重新验票，会话上的票据字段也不被覆盖。
-            s.send(VERIFY_OK);
+            sendVerified(s);
             return;
         }
         GateTokens.Verdict verdict = tokens.verify(request.getPayload(), request.getSignature(),
@@ -315,10 +335,75 @@ public final class ClientDispatcher {
         s.ticketTargetZoneId = verdict.payload().getTargetZoneId();
         s.cancelHandshakeTimeout();
         metrics.handshake(HandshakeResult.OK);
+        sendVerified(s);
+    }
+
+    private void sendVerified(ClientSession s) {
+        if (!s.livenessTracked) {
+            s.livenessTracked = true;
+            s.lastInboundNanos = nanoClock.getAsLong();
+            metrics.heartbeat(GateMetrics.HeartbeatResult.TRACKED);
+            scheduleIdleCheck(s, s.lastInboundNanos, HEARTBEAT_TIMEOUT_NANOS);
+        }
         s.send(VERIFY_OK);
     }
 
+    private void noteInboundFrame(ClientSession s) {
+        if (s.livenessTracked && !s.closing && !s.closed) s.lastInboundNanos = nanoClock.getAsLong();
+    }
+
+    /** 公网按完整帧判活：零碎字节不续期；每条连接仅在检查点到期时重新排一次 Netty 定时器。 */
+    private void scheduleIdleCheck(ClientSession s, long now, long delay) {
+        WeakReference<ClientSession> owner = new WeakReference<>(s);
+        long due = now + delay;
+        s.scheduleIdleTimeout(delay, () -> {
+            ClientSession current = owner.get();
+            if (current == null || current.closed || current.closing || registry.get(current.sessionId()) != current) return;
+            long checked = nanoClock.getAsLong();
+            if (checked - due > TimeUnit.SECONDS.toNanos(2)) {
+                // EventLoop 迟到时给积压的入站帧一次处理机会，不把本端卡顿算成客户端掉线。
+                metrics.heartbeat(GateMetrics.HeartbeatResult.DEFERRED);
+                scheduleIdleCheck(current, checked, TimeUnit.SECONDS.toNanos(1));
+            } else {
+                long remaining = HEARTBEAT_TIMEOUT_NANOS - (checked - current.lastInboundNanos);
+                if (remaining > 0) {
+                    scheduleIdleCheck(current, checked, remaining);
+                } else {
+                    metrics.heartbeat(GateMetrics.HeartbeatResult.IDLE_CLOSED);
+                    metrics.disconnected(DisconnectReason.CLIENT_IDLE);
+                    closeNow(current);
+                }
+            }
+        });
+    }
+
+    public void onHeartbeat(ClientSession s, ClientHeartbeatRequest request) {
+        noteInboundFrame(s);
+        if (s.closing || s.closed) return;
+        if (!s.verified) {
+            metrics.heartbeat(GateMetrics.HeartbeatResult.BEFORE_VERIFY);
+            metrics.disconnected(DisconnectReason.NO_HANDSHAKE);
+            logRejection("heartbeat_before_token_verify", s);
+            closeNow(s);
+            return;
+        }
+        long now = nanoClock.getAsLong();
+        if (s.heartbeatAnswersInWindow == 0 || now - s.heartbeatWindowStartNanos >= HEARTBEAT_INTERVAL_NANOS) {
+            s.heartbeatWindowStartNanos = now;
+            s.heartbeatAnswersInWindow = 0;
+        }
+        if (s.heartbeatAnswersInWindow >= 3) {
+            metrics.heartbeat(GateMetrics.HeartbeatResult.EXCESS);
+            registerIllegal(s, "heartbeat_over_rate", 0);
+            return;
+        }
+        s.heartbeatAnswersInWindow++;
+        metrics.heartbeat(GateMetrics.HeartbeatResult.ANSWERED);
+        s.send(ClientHeartbeatResponse.newBuilder().setSeq(request.getSeq()).build());
+    }
+
     public void onRequest(ClientSession s, ClientRequest request) {
+        noteInboundFrame(s);
         if (s.closing || s.closed) {
             if (s.verified) {
                 countRequest(routes.clientRoute(request.getMessageId()), RequestResult.DROPPED);
@@ -429,6 +514,7 @@ public final class ClientDispatcher {
         s.closed = true;
         s.closing = true;
         s.cancelHandshakeTimeout();
+        s.cancelIdleTimeout();
         spectate.drop(s);
         // 客户端先关（已重定向的会话正常就是这样收场）：收口定时器作废
         s.cancelRedirectLinger();

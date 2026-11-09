@@ -130,8 +130,7 @@ class EnterGameHandlerTest {
         EnterGameResponse response = response(reply);
         assertThat(response.hasErrorMessage()).isFalse();
         assertThat(response.getPlayerId()).isEqualTo(PLAYER);
-        assertThat(response.getPostMergeNoticeTs()).isZero();
-        assertThat(response.getForceRenameRequired()).isFalse();
+        assertThat(response).isEqualTo(EnterGameResponse.newBuilder().setPlayerId(PLAYER).build());
         assertThat(reply.directives()).hasSize(1);
         assertThat(reply.directives().get(0).getEnterScene()).isEqualTo(EnterScene.newBuilder()
                 .setPlayerId(PLAYER).setSceneNodeId(4).setSceneId(99_000_001L).setOwnerEpoch(5).setOwnerRevision(1).build());

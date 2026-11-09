@@ -182,7 +182,7 @@ class BattleSettleChecksTest {
 
     // ------------------------------------------------------------------ 第 13 步：逐闸的指标
 
-    /** 一次抓取的 Prometheus 文本：六个本场景会打到的闸各给一个值，外加两个打不到的闸与一条别的指标。 */
+    /** 一次抓取的 Prometheus 文本：六个本场景会打到的闸各给一个值，外加四个打不到的闸与一条别的指标。 */
     private static String scrape(double enterScene, double attribute, double pet, double bagSort, double skill, double move) {
         return "# HELP game_scene_battle_gate_rejects_total 回合制战斗在途闸挡掉的操作\n"
                 + "# TYPE game_scene_battle_gate_rejects_total counter\n"
@@ -195,6 +195,7 @@ class BattleSettleChecksTest {
                 + "game_scene_battle_gate_rejects_total{gate=\"asset\"} 0.0\n"
                 + "game_scene_battle_gate_rejects_total{gate=\"default\"} 4.0\n"
                 + "game_scene_battle_gate_rejects_total{gate=\"zone_travel\"} 0.0\n"
+                + "game_scene_battle_gate_rejects_total{gate=\"equipment\"} 0.0\n"
                 + "game_scene_battle_settlements_total{path=\"online\",result=\"applied\"} 2.0\n";
     }
 
@@ -207,7 +208,8 @@ class BattleSettleChecksTest {
                 .containsExactly(Map.entry("enter_scene", 2.0), Map.entry("attribute", 1.0), Map.entry("pet", 2.0), Map.entry("bag_sort", 1.0),
                         Map.entry("skill", 2.0), Map.entry("move", 1.0));
         assertThat(BattleSettleChecks.gateRejectDeltas(before, after, BattleSettleChecks.UNEXERCISED_GATES))
-                .containsExactly(Map.entry("asset", 0.0), Map.entry("default", 0.0), Map.entry("zone_travel", 0.0));
+                .containsExactly(Map.entry("asset", 0.0), Map.entry("default", 0.0), Map.entry("zone_travel", 0.0),
+                        Map.entry("equipment", 0.0));
     }
 
     @Test

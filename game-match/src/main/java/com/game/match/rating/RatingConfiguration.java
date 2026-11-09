@@ -102,9 +102,9 @@ public class RatingConfiguration {
     @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     public BattleCompletionReplay battleCompletionReplay(BattleCompletionStore source,com.game.match.global.GlobalMatchStore formations,OutcomePublisher publisher,
             @org.springframework.beans.factory.annotation.Qualifier("matchBattleInboxClient")
-            org.apache.dubbo.config.ReferenceConfig<com.game.api.PlayerInboxService> inbox) {
+            org.apache.dubbo.config.ReferenceConfig<com.game.api.PlayerInboxService> inbox, MatchMetrics metrics) {
         return new BattleCompletionReplay(source,formations,inbox.get(),publisher,
-                System.getenv(com.game.api.PlayerInboxService.BATTLE_SECRET_ENV),System::currentTimeMillis);
+                System.getenv(com.game.api.PlayerInboxService.BATTLE_SECRET_ENV),System::currentTimeMillis,metrics);
     }
 
     /** COMPLETE同TX留下的全局去向，和个人Inbox投递独立；仅原字节的RF3/all ACK后标记已投。 */

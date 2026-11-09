@@ -576,7 +576,7 @@ class ConsistencyExtraSqlPlansTest {
         return (sql, parameters, limit, budget) -> {
             budget.check();
             var result = new ArrayList<Map<String, Object>>();
-            try (var statement = db.prepareStatement(sql)) {
+            try (var statement = db.prepareStatement(H2ConsistencySql.forDatabase(db, sql))) {
                 for (int i = 0; i < parameters.size(); i++) {
                     statement.setObject(i + 1, parameters.get(i));
                 }

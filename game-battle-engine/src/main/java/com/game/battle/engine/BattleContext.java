@@ -7,6 +7,7 @@ import com.game.proto.BattleMonsterDefeat;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.eBattleEventType;
 import com.game.table.BuffTable;
+import com.game.table.SkillTable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -37,6 +38,7 @@ final class BattleContext {
     private final BattleData data;
     private final boolean pve;
     private final BattleRandom rng;
+    private final ClassSkillCombat classSkills;
     private final EventLog events = new EventLog();
     private final List<BattleUnit> units = new ArrayList<>();
     private final List<BattleMonsterDefeat> defeatedMonsters = new ArrayList<>();
@@ -52,6 +54,7 @@ final class BattleContext {
         this.data = data;
         this.pve = matchMode == BattleConstants.MATCH_MODE_PVE_SOLO || matchMode == BattleConstants.MATCH_MODE_PVE_TEAM;
         this.rng = new BattleRandom(seed);
+        this.classSkills = new ClassSkillCombat(data);
     }
 
     BattleData data() {
@@ -134,8 +137,9 @@ final class BattleContext {
                 continue;
             }
             // std::max(maxSpeed, speed) = maxSpeed < speed ? speed : maxSpeed（uint64）
-            if (Long.compareUnsigned(maxSpeed, other.speed()) < 0) {
-                maxSpeed = other.speed();
+            long speed = effectiveSpeed(other);
+            if (Long.compareUnsigned(maxSpeed, speed) < 0) {
+                maxSpeed = speed;
             }
         }
         return maxSpeed;
@@ -166,6 +170,18 @@ final class BattleContext {
 
     // ---- 战斗原语 ----
 
+    long effectivePhysicalAttack(BattleUnit actor) { return classSkills.effectivePhysicalAttack(actor); }
+
+    long effectiveDefense(BattleUnit actor) { return classSkills.effectiveDefense(actor); }
+
+    long effectiveSpeed(BattleUnit actor) { return classSkills.effectiveSpeed(actor); }
+
+    double outgoingHealBonus(BattleUnit actor) { return classSkills.outgoingHealBonus(actor); }
+
+    double classSkillHealAmount(BattleUnit caster, SkillTable skill, int rank, BattleUnit target) {
+        return classSkills.healAmount(caster, skill, rank, target);
+    }
+
     /**
      * 命中判定骨架（{@code RollHit}，{@code engine.cpp:1790-1802}）：命中率固定 {@link BattleConstants#BASE_HIT_RATE} = 100，
      * 短路返回、不耗随机数。二期接表时在这里减去闪避并掷骰（位于暴击掷骰之前，接入要同步刷新回放基线）；骨架照基线保留。
@@ -181,7 +197,7 @@ final class BattleContext {
      * 最终伤害（{@code CalculateFinalDamage}，{@code engine.cpp:1317-1343}；规格 §3.7）：
      * <ol>
      *   <li>暴击率 = clamp((基础 + 对应伤害类型装备加成) / 100, 0, 1)，加法按 uint64 饱和；</li>
-     *   <li>与实时侧共用的暴击前伤害，目标基础抗性叠加对应装备抗性，护甲 / 防御 / 抗性共用 60% 减伤封顶；</li>
+     *   <li>与实时侧共用的暴击前伤害，目标基础抗性叠加对应装备抗性，护甲 / 职业增减益后的有效防御 / 抗性共用 60% 减伤封顶；</li>
      *   <li>非 PVE 先乘 0.3；</li>
      *   <li>暴击率 &gt; 0 时掷一次 Rand01（R4），严格小于即暴击 ×2；暴击率为 0 不耗随机数；</li>
      *   <li>{@code std::max(d, 0.0)}，即 {@code d < 0.0 ? 0.0 : d}（NaN 原样）。</li>
@@ -189,20 +205,39 @@ final class BattleContext {
      */
     FinalDamage calculateFinalDamage(BattleUnit caster, BattleUnit target, double baseDamage, long attack,
                                      double attackMultiplier, int damageType) {
-        // std::clamp(v, 0.0, 1.0) = v < 0 ? 0 : (1 < v ? 1 : v)；不用 Math.clamp，以免 NaN / -0.0 行为不同
-        double critChance = Unsigned.toDouble(EquipmentCombatRules.criticalRate(caster.critChance(), caster.combat(), damageType)) / 100.0;
-        critChance = critChance < 0.0 ? 0.0 : (1.0 < critChance ? 1.0 : critChance);
-        double finalDamage = CombatDamageRules.damageBeforeCritical(baseDamage, caster.strength(), attack, attackMultiplier,
-                target.armor(), target.defense(), EquipmentCombatRules.resistance(target.resistance(), target.combat(), damageType), target.level());
-        if (!pve) {
-            finalDamage *= BattleConstants.PVP_DAMAGE_SCALE;
-        }
+        double finalDamage = damageBeforeCriticalRoll(caster, target, baseDamage, attack, attackMultiplier, damageType);
+        double critChance = criticalChance(caster, damageType);
         boolean critical = false;
+        // 满暴击依然掷一次，零概率短路；纯计算拆分不能平移本局后续 RNG 序列。
         if (critChance > 0.0 && rng.rand01() < critChance) {
             finalDamage *= BattleConstants.CRITICAL_DAMAGE_MULTIPLIER;
             critical = true;
         }
         return new FinalDamage(finalDamage < 0.0 ? 0.0 : finalDamage, critical);
+    }
+
+    /** 只算暴击前伤害，不落血、不掷骰，供执行路径及后续选择器共用。 */
+    double damageBeforeCriticalRoll(BattleUnit caster, BattleUnit target, double baseDamage, long attack,
+                                    double attackMultiplier, int damageType) {
+        double damage = CombatDamageRules.damageBeforeCritical(baseDamage, caster.strength(), attack, attackMultiplier,
+                target.armor(), effectiveDefense(target),
+                EquipmentCombatRules.resistance(target.resistance(), target.combat(), damageType), target.level());
+        if (!pve) damage *= BattleConstants.PVP_DAMAGE_SCALE;
+        return damage;
+    }
+
+    /** 对应伤害类型的暴击概率；读取装备和基础值，不消耗 RNG。 */
+    double criticalChance(BattleUnit caster, int damageType) {
+        // std::clamp(v, 0.0, 1.0) = v < 0 ? 0 : (1 < v ? 1 : v)；不用 Math.clamp，以免 NaN / -0.0 行为不同
+        double critChance = Unsigned.toDouble(EquipmentCombatRules.criticalRate(caster.critChance(), caster.combat(), damageType)) / 100.0;
+        return critChance < 0.0 ? 0.0 : (1.0 < critChance ? 1.0 : critChance);
+    }
+
+    /** 自动选技使用暴击期望原始伤害；防御姿态、剩余气血夹限由收益计算处理，不提前掷骰。 */
+    double expectedDamage(BattleUnit caster, BattleUnit target, double baseDamage, long attack,
+                          double attackMultiplier, int damageType) {
+        double damage = damageBeforeCriticalRoll(caster, target, baseDamage, attack, attackMultiplier, damageType);
+        return damage * (1.0 + criticalChance(caster, damageType) * (BattleConstants.CRITICAL_DAMAGE_MULTIPLIER - 1.0));
     }
 
     /**

@@ -155,6 +155,8 @@ class TurnBattleSkillTest {
         assertThat(manaEvent.getTargetId()).isEqualTo(PLAYER_A);
         assertThat(manaEvent.getSkillTableId()).isEqualTo(SKILL_DAMAGE);
         assertThat(manaEvent.getValue()).isEqualTo(30);
+        assertThat(manaEvent.hasManaDelta()).isTrue();
+        assertThat(manaEvent.getManaDelta()).isEqualTo(-30);
         assertThat(manaEvent.getTargetManaAfter()).isEqualTo(70);
         assertThat(manaEvent.getGroupId()).isEqualTo(skillEvent.getGroupId());
         assertThat(countEvents(result, BATTLE_EVENT_MANA)).isEqualTo(1);

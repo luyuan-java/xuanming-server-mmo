@@ -76,7 +76,7 @@ game:
     link-threads: 2
     max-pending-requests: 64
     illegal-packet-threshold: 50
-    handshake-timeout: 30s
+    handshake-timeout: 10s
     link-connect-timeout: 3s
     link-hello-timeout: 5s
     link-max-queued-frames: 10000

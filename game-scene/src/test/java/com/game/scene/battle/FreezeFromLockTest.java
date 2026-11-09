@@ -2,6 +2,7 @@ package com.game.scene.battle;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.api.match.MatchBudgets;
 import com.game.discovery.battle.BattleRedis;
 import com.game.scene.battle.BattleFreeze.Phase;
 import java.util.LinkedHashMap;
@@ -39,14 +40,15 @@ class FreezeFromLockTest {
     }
 
     @Test
-    void 战斗锁字段齐全_重建FIGHTING_有效期限看战斗期限() {
+    void 战斗锁字段齐全_重建FIGHTING_原期限不变_有效期限覆盖终局与投递窗口() {
         BattleFreeze freeze = BattleFreeze.fromLock(BATTLE, lock("b", Long.toUnsignedString(BATTLE), "n", "21", "s", "F",
                 "d", String.valueOf(NOW + 300_000), "p", String.valueOf(NOW + 60_000)), 360, NOW);
 
         assertThat(freeze.phase()).isEqualTo(Phase.FIGHTING);
         assertThat(freeze.deadlineMs()).isEqualTo(NOW + 300_000);
         assertThat(freeze.prepareDeadlineMs()).as("FIGHTING 的 p 原样带着").isEqualTo(NOW + 60_000);
-        assertThat(freeze.effectiveDeadlineMs()).isEqualTo(NOW + 300_000);
+        assertThat(freeze.effectiveDeadlineMs()).isEqualTo(NOW + 300_000
+                + MatchBudgets.TERMINAL_OUTCOME_GRACE_MS + BattleFreeze.INBOX_DELIVERY_MARGIN_MS);
     }
 
     @Test
@@ -109,11 +111,13 @@ class FreezeFromLockTest {
     }
 
     @Test
-    void 战斗锁缺p_保持0_有效期限仍是战斗期限() {
+    void 战斗锁缺p_保持0_有效期限仍覆盖终局与投递窗口() {
         BattleFreeze freeze = BattleFreeze.fromLock(BATTLE, lock("s", "F", "d", String.valueOf(NOW + 300_000)), 360, NOW);
 
         assertThat(freeze.prepareDeadlineMs()).isZero();
-        assertThat(freeze.effectiveDeadlineMs()).isEqualTo(NOW + 300_000);
+        assertThat(freeze.deadlineMs()).isEqualTo(NOW + 300_000);
+        assertThat(freeze.effectiveDeadlineMs()).isEqualTo(NOW + 300_000
+                + MatchBudgets.TERMINAL_OUTCOME_GRACE_MS + BattleFreeze.INBOX_DELIVERY_MARGIN_MS);
     }
 
     @Test

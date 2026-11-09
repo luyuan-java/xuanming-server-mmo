@@ -324,6 +324,26 @@ public final class RatingTestDatabase implements AutoCloseable {
         }
     }
 
+    /** 仅测试观察器用owner连接读取真实等待边；业务NORMAL账号不获得PROCESS权限。 */
+    long lockWaiterCount(boolean tidb) {
+        if(authority==null)throw new IllegalStateException("真实等待边观察器需要独立SQL夹具");
+        String sql=tidb
+                ? "SELECT COUNT(*) FROM information_schema.data_lock_waits w"
+                    + " JOIN information_schema.tidb_trx t ON t.id=w.trx_id"
+                    + " WHERE t.state='LockWaiting' AND t.db=DATABASE()"
+                : "SELECT COUNT(*) FROM information_schema.innodb_trx t JOIN information_schema.processlist p"
+                    + " ON p.id=t.trx_mysql_thread_id WHERE t.trx_state='LOCK WAIT' AND p.db=DATABASE()";
+        try(Connection connection=authority.schemaConnection();PreparedStatement statement=connection.prepareStatement(sql)) {
+            statement.setQueryTimeout(1);
+            try(ResultSet rows=statement.executeQuery()) {
+                if(!rows.next())throw new SQLException("缺少真实锁等待观察结果");
+                return rows.getLong(1);
+            }
+        } catch(SQLException failure) {
+            throw new IllegalStateException("测试观察器无法读取真实锁等待边",failure);
+        }
+    }
+
     @FunctionalInterface
     public interface RowReader<T> {
         T read(ResultSet rs) throws SQLException;

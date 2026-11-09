@@ -38,6 +38,6 @@ public interface SceneBattleService {
     /** 开局确认：body = 契约 {@code BattleConfirmedEvent}。 */
     CompletableFuture<SceneBattleReply> confirmBattle(SceneBattleCall call);
 
-    /** 结算投递：body = 契约 {@code BattleSettlementEvent}（与 Redis 待结算记录逐字节相同）。 */
+    /** 兼容结算投递：body = {@link com.game.api.battle.LegacyBattleSettlementCodec} 旧信封（与 Redis 原记录逐字节相同）。 */
     CompletableFuture<SceneBattleReply> applySettlement(SceneBattleCall call);
 }

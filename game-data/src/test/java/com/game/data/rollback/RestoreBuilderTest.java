@@ -16,6 +16,8 @@ import com.game.player.store.state.CurrencyState;
 import com.game.player.store.state.EquipmentGemState;
 import com.game.player.store.state.EquipmentState;
 import com.game.player.store.state.PlayerState;
+import com.game.player.store.state.PlayerSkillBookState;
+import com.game.player.store.state.PlayerSkillEntry;
 import com.game.player.store.state.Vitals;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.UnknownFieldSet;
@@ -27,6 +29,54 @@ import org.junit.jupiter.api.Test;
 
 /** 恢复内容（T-R2，data-ops-spec §4.5）：FULL 整份替换、封禁保留、SECTIONS 以现档为底、未知字段、资产变化。 */
 class RestoreBuilderTest {
+
+    @Test
+    void 技能修习随银两一起回档_不会返还费用却保留新重数() {
+        var unknown = UnknownFieldSet.newBuilder()
+                .addField(901, UnknownFieldSet.Field.newBuilder().addVarint(77).build()).build();
+        var oldBook = PlayerSkillBookState.newBuilder().setUnknownFields(unknown)
+                .addEntries(PlayerSkillEntry.newBuilder().setSkillId(101).setRank(1).setUnknownFields(unknown)).build();
+        var newBook = oldBook.toBuilder().setEntries(0, oldBook.getEntries(0).toBuilder().setRank(2)).build();
+        var before = PlayerState.newBuilder().setSkills(oldBook)
+                .setCurrency(CurrencyState.newBuilder().addBalances(1000)).build();
+        var after = before.toBuilder().setSkills(newBook)
+                .setCurrency(CurrencyState.newBuilder().addBalances(500).addBlockedTypes(0)).build();
+
+        assertThat(RollbackSection.ASSET_FIELDS).contains(PlayerState.SKILLS_FIELD_NUMBER);
+        for (Set<RollbackSection> sections : List.of(Set.<RollbackSection>of(), Set.of(RollbackSection.ASSETS))) {
+            var restored = RestoreBuilder.build(snapshot(before), current(after.toByteArray()), sections);
+            assertThat(restored.state().getSkills()).isEqualTo(oldBook);
+            assertThat(restored.state().getCurrency().getBalancesList()).containsExactly(1000L);
+            assertThat(restored.state().getCurrency().getBlockedTypesList()).containsExactly(0);
+            assertThat(restored.currency()).containsExactly(new CurrencyChange(0, 500, 1000));
+        }
+    }
+
+    @Test
+    void 技能字段上线前快照回档_清除修习与费用保持同一时点() {
+        var before = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(1000)).build();
+        var after = before.toBuilder().setCurrency(CurrencyState.newBuilder().addBalances(500))
+                .setSkills(PlayerSkillBookState.newBuilder()
+                        .addEntries(PlayerSkillEntry.newBuilder().setSkillId(101).setRank(2))).build();
+        for (Set<RollbackSection> sections : List.of(Set.<RollbackSection>of(), Set.of(RollbackSection.ASSETS))) {
+            var restored = RestoreBuilder.build(snapshot(before), current(after.toByteArray()), sections);
+            assertThat(restored.state().hasSkills()).isFalse();
+            assertThat(restored.state().getCurrency().getBalancesList()).containsExactly(1000L);
+        }
+    }
+
+    @Test
+    void 仅回档等级时保留技能存储重数及已扣银两_生效上限由场景重算() {
+        var before = PlayerState.newBuilder().setCurrency(CurrencyState.newBuilder().addBalances(1000)).build();
+        var after = before.toBuilder().setCurrency(CurrencyState.newBuilder().addBalances(500))
+                .setSkills(PlayerSkillBookState.newBuilder()
+                        .addEntries(PlayerSkillEntry.newBuilder().setSkillId(101).setRank(2))).build();
+        var restored = RestoreBuilder.build(snapshot(before), current(after.toByteArray()), Set.of(RollbackSection.LEVEL));
+        assertThat(restored.state().getSkills()).isEqualTo(after.getSkills());
+        assertThat(restored.state().getCurrency()).isEqualTo(after.getCurrency());
+        assertThat(restored.currency()).isEmpty();
+        assertThat(restored.level()).isEqualTo(5);
+    }
 
     @Test
     @SuppressWarnings("unchecked")

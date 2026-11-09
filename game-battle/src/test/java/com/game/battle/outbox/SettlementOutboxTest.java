@@ -31,7 +31,7 @@ import com.game.discovery.location.SceneAssetLocator.ResolveResult;
 import com.game.discovery.proto.PlayerLocation;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleSettlementData;
-import com.game.proto.BattleSettlementEvent;
+import com.game.api.battle.LegacyBattleSettlementCodec;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.DefaultEventLoop;
 import io.netty.util.concurrent.DefaultThreadFactory;
@@ -104,7 +104,7 @@ class SettlementOutboxTest {
 
     /** 落库 / 投递的字节：{@code BattleSettlementEvent{settlement}}。 */
     private static byte[] wire(long playerId, long battleId) {
-        return BattleSettlementEvent.newBuilder().setSettlement(settlement(playerId, battleId)).build().toByteArray();
+        return LegacyBattleSettlementCodec.encode(settlement(playerId, battleId));
     }
 
     private static String key(long playerId, long battleId) {

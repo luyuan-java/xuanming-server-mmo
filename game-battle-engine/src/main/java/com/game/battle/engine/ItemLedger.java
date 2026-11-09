@@ -2,6 +2,7 @@ package com.game.battle.engine;
 
 import com.game.common.math.Unsigned;
 import com.game.proto.BattleAction;
+import com.game.proto.BattleEventItem;
 import com.game.proto.BattleItemEntry;
 import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.BattleSettlementData;
@@ -98,9 +99,8 @@ final class ItemLedger {
      *   <li>表行 / 副本条目 / 目标任一缺失就返回（最后防线，{@code :966-972}）；</li>
      *   <li>先扣副本、计次数，再记消耗账（记在<strong>用药者</strong>名下，给队友用也一样），最后落效果：
      *       满血时也扣药并出 value = 0 的事件（{@code :974-991}）；</li>
-     *   <li>回血走 {@link BattleUnit#applyHeal}；回蓝 {@code after = min(max_mana, before + heal_mp)}（uint64 加法可回绕），
-     *       {@code restored = after - before}（当前法力超上限时回绕成巨大值，基线行为）（{@code :993-1004}）；</li>
-     *   <li>ITEM 事件：value 取回血量，没回血时取回蓝量（{@code :1006-1011}）。</li>
+     *   <li>回血走 {@link BattleUnit#applyHeal}；回蓝走 {@link BattleUnit#restoreMana}，只补实际缺口，避免 uint64 加法回绕；</li>
+     *   <li>ITEM 事件：value 取回血量，没回血时取回蓝量；药品配置了回蓝时携带 mana_delta，满蓝也显式为零。</li>
      * </ol>
      */
     void executeItem(BattleUnit actor, BattleAction action, ActionChecks checks) {
@@ -142,18 +142,13 @@ final class ItemLedger {
         consumed.setCount(consumed.getCount() + 1);
 
         long healed = row.getBattleHealHp() != 0 ? target.applyHeal(Unsigned.toDouble(row.getBattleHealHp())) : 0;
-        long restoredMana = 0;
-        if (row.getBattleHealMp() != 0 && !target.isDead()) {
-            long manaBefore = target.mana();
-            long manaAfter = Unsigned.minUnsigned(target.maxMana(), manaBefore + row.getBattleHealMp());
-            restoredMana = manaAfter - manaBefore;
-            target.setMana(manaAfter);
-        }
+        long restoredMana = row.getBattleHealMp() != 0 ? target.restoreMana(row.getBattleHealMp()) : 0;
 
-        ctx.events().append(eBattleEventType.BATTLE_EVENT_ITEM, actor.actorId(), target.actorId())
+        BattleEventItem.Builder event = ctx.events().append(eBattleEventType.BATTLE_EVENT_ITEM, actor.actorId(), target.actorId())
                 .setItemTableId(effective.getItemTableId())
                 .setValue(healed != 0 ? healed : restoredMana)
                 .setTargetHealthAfter(target.health())
                 .setTargetManaAfter(target.mana());
+        if (row.getBattleHealMp() != 0) event.setManaDelta(EventLog.signedManaDelta(restoredMana, true));
     }
 }

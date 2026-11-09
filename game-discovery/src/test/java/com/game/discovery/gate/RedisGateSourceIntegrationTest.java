@@ -10,6 +10,7 @@ import com.game.discovery.RedisKeys;
 import com.game.discovery.drain.GateDrainMarks;
 import com.game.discovery.drain.GateDrainMarks.MarkResult;
 import java.time.Duration;
+import java.util.UUID;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
@@ -30,7 +31,7 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedisGateSourceIntegrationTest {
 
-    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+    private final RedisKeys redisKeys = new RedisKeys(GameNamespace.of("rgsit" + UUID.randomUUID().toString().replace("-", "").substring(0, 20)));
 
     private static RedissonClient redis;
     private final int zone = 900_000 + ThreadLocalRandom.current().nextInt(90_000);
@@ -51,9 +52,15 @@ class RedisGateSourceIntegrationTest {
 
     @AfterEach
     void cleanup() {
-        for (int node = 1; node <= 3; node++) {
-            directory.remove(zone, node);
-            marks.clear(zone, node);
+        try {
+            for (int node = 1; node <= 3; node++) {
+                if (directory != null) directory.remove(zone, node);
+                if (marks != null) marks.clear(zone, node);
+            }
+        } finally {
+            redis.getKeys().delete(redisKeys.zoneNodeDirectory(NodeTypes.GATE, zone),
+                    redisKeys.zoneNodeExpiry(NodeTypes.GATE, zone), redisKeys.zoneNodeSeen(NodeTypes.GATE, zone),
+                    redisKeys.zoneDirectoryFormat(zone), redisKeys.zoneNodeTypes(zone));
         }
     }
 
@@ -64,13 +71,13 @@ class RedisGateSourceIntegrationTest {
 
     @Test
     void 同地址只认最新启动的条目_排空标记照旧叠加() {
-        directory = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.GATE, GateNodeInfo.parser());
-        marks = new GateDrainMarks(redis, REDIS_KEYS);
+        directory = new NodeDirectory<>(redis, redisKeys, NodeTypes.GATE, GateNodeInfo.parser());
+        marks = new GateDrainMarks(redis, redisKeys);
         // 节点 1：崩溃前的旧进程（人数最少、条目还没过期）；节点 2：同一地址重启后的新进程；节点 3：另一台
         directory.publish(zone, 1, gate(1, "10.9.0.1", 11000, 0, 1_000L), Duration.ofSeconds(30));
         directory.publish(zone, 2, gate(2, "10.9.0.1", 11000, 40, 2_000L), Duration.ofSeconds(30));
         directory.publish(zone, 3, gate(3, "10.9.0.3", 11000, 60, 500L), Duration.ofSeconds(30));
-        RedisGateSource source = new RedisGateSource(redis, REDIS_KEYS);
+        RedisGateSource source = new RedisGateSource(redis, redisKeys);
 
         List<GateNodeInfo> listed = source.listGates(zone);
         assertThat(listed).extracting(GateNodeInfo::getNodeId).containsExactlyInAnyOrder(1, 2, 3);

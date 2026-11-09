@@ -67,7 +67,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * 属性加点端到端（分发入口 → 处理器 → 面板），用仓库里同步来的真实配表，数值逐项对照基线公式与 robot attribute_smoke 的断言。
- * 新号默认职业 1（破军：力量收益比例 +30%，其余维度走 class_id=0 兜底行）。
+ * 新号默认职业 1（破军：力量满投物伤 +125%，其余维度走 class_id=0 兜底行）。
  */
 class AttributeFeatureTest {
 
@@ -244,7 +244,7 @@ class AttributeFeatureTest {
     // ------------------------------------------------------------------ 自动加点 / 加点
 
     @Test
-    void 自动加点只算不落_破军全投力量_回显池号() throws Exception {
+    void 自动加点只算不落_破军4力1体_回显池号() throws Exception {
         start();
         setLevel(30);
 
@@ -254,7 +254,7 @@ class AttributeFeatureTest {
 
         assertThat(auto.getErrorMessage().getId()).isZero();
         assertThat(auto.getPoolId()).isEqualTo(1);
-        assertThat(auto.getSuggestedMap()).containsExactlyInAnyOrderEntriesOf(Map.of(101, 0, 102, 0, 103, 150, 104, 0));
+        assertThat(auto.getSuggestedMap()).containsExactlyInAnyOrderEntriesOf(Map.of(101, 30, 102, 0, 103, 120, 104, 0));
         assertThat(panel().getPools(0).getRemaining()).isEqualTo(150);
     }
 
@@ -276,14 +276,15 @@ class AttributeFeatureTest {
     }
 
     @Test
-    void 加点_按建议全投_剩余归零_物伤按破军比例公式_幂等重发回25014_减点回25004() throws Exception {
+    void 加点_手动全投力量_剩余归零_物伤按破军比例公式_幂等重发回25014_减点回25004() throws Exception {
         start();
         setLevel(30);
 
         AttributePanelInfo panel = allocate(Map.of(103, 150));
 
         assertThat(panel.getPools(0).getRemaining()).isZero();
-        assertDerived(panel, 2000, 2000, 1901, 1200, 1320, 1800);
+        // 当前表 bonus=0：85级标准物伤 4250 × 满投比例 1.25 × 150/425，加30级自然物伤1500。
+        assertDerived(panel, 2000, 2000, 3375, 1200, 1320, 1800);
         assertThat(panel.getDimensions(2).getValue()).as("30 点自然成长 + 150 点分配").isEqualTo(180);
         assertThat(allocateTip(1, Map.of(103, 150))).isEqualTo(25014);
         assertThat(allocateTip(1, Map.of(103, 149))).isEqualTo(25004);
@@ -313,8 +314,10 @@ class AttributeFeatureTest {
 
         AttributePanelInfo panel = allocate(Map.of(101, 150));
 
-        assertThat(panel.getDerived().getMaxHealth()).as("丹心体质 +25%").isEqualTo(2373);
-        assertThat(panel.getDerived().getHealth()).isEqualTo(1000L * 2373 / 2000);
+        // 当前表 bonus=0：floor(2000 + 4750 × 2.5 × 150/425) = 6191；防御 = 1800 + 5100 × 150/425。
+        assertDerived(panel, 6191, 2000, 1500, 1200, 1320, 3600);
+        assertThat(panel.getDerived().getHealth()).as("保持加点前的半血比例，向下取整").isEqualTo(3095);
+        assertThat(panel.getDerived().getMana()).isEqualTo(2000);
     }
 
     @Test
@@ -429,7 +432,7 @@ class AttributeFeatureTest {
         clock.advanceMillis(1_000);
         AttributePanelInfo back = switchTo(1);
         assertThat(back.getDimensions(2).getAllocated()).isEqualTo(150);
-        assertThat(back.getDerived().getPhysicalAttack()).isEqualTo(1901);
+        assertThat(back.getDerived().getPhysicalAttack()).isEqualTo(3375);
         assertThat(back.getDerived().getHealth()).isEqualTo(back.getDerived().getMaxHealth());
     }
 

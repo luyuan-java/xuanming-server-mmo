@@ -16,13 +16,15 @@ public final class CharacterAppearances {
             "04_mountain_guardian_boy",
             "05_celestial_musician_girl",
             "06_thunder_caster_boy",
-            "07_moon_shadow_assassin_girl",
             "08_alchemy_prodigy_boy",
             "09_bamboo_archer_girl",
             "10_crimson_spear_girl",
-            "14_short_hair_snow_summoner_girl",
             "15_water_dragon_scholar_boy",
-            "17_ghost_script_calligrapher_boy",
+            "17_ghost_script_calligrapher_boy");
+
+    private static final Set<String> RETIRED = Set.of(
+            "07_moon_shadow_assassin_girl",
+            "14_short_hair_snow_summoner_girl",
             "20_star_formation_master_girl");
 
     private CharacterAppearances() {
@@ -30,5 +32,10 @@ public final class CharacterAppearances {
 
     public static boolean isAllowed(String appearanceId) {
         return appearanceId.isEmpty() || ALLOWED.contains(appearanceId);
+    }
+
+    /** 退役身份只用于确认已提交建角的丢应答重试。 */
+    public static boolean isRetired(String appearanceId) {
+        return RETIRED.contains(appearanceId);
     }
 }

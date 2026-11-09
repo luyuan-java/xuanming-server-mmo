@@ -16,6 +16,16 @@ public final class BattleRules {
     private BattleRules() {
     }
 
+    /** class_id=0 的通用技能保留原规则；职业重数与费用只有非零职业行才生效。 */
+    public static boolean isClassSkill(SkillTable skill) {
+        return skill.getClassId() != 0;
+    }
+
+    /** 职业技能按最大法力的比例收费；通用技能仍累加原 cost_resource。 */
+    public static long skillManaCost(SkillTable skill, long maxMana) {
+        return isClassSkill(skill) ? ClassSkillRules.manaCost(maxMana, skill.getManaPercent()) : skillManaCost(skill);
+    }
+
     /**
      * 毫秒换回合，同 C++ {@code RoundsFromMilliseconds}（返回值是 uint32 位模式）：
      * <ol>

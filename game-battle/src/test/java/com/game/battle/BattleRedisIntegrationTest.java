@@ -34,6 +34,7 @@ import com.game.proto.BattleRouting;
 import com.game.proto.CreateBattleRequest;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
+import java.util.UUID;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -203,25 +204,38 @@ class BattleRedisIntegrationTest {
 
     @Test
     void dev路由补全_读在线目录_位置记录_scene目录() throws Exception {
-        new PlayerPresenceDirectory(redis, REDIS_KEYS).putAsync(PlayerPresence.newBuilder().setPlayerId(PLAYER).setZoneId(1)
-                .setGateNodeId(2).setGateInstanceId("gate-inst").setSessionId(33).build()).toCompletableFuture()
-                .get(5, TimeUnit.SECONDS);
-        new PlayerLocationDirectory(redis, REDIS_KEYS).putAsync(PlayerLocation.newBuilder().setPlayerId(PLAYER).setZoneId(1)
-                .setSceneNodeId(4).setSceneId(99).setOwnerEpoch(1).build(), 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
-        new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.SCENE, SceneNodeInfo.parser()).publish(1, 4, SceneNodeInfo.newBuilder()
-                .setZoneId(1).setNodeId(4).setInstanceId("scene-inst").build(), Duration.ofSeconds(15));
+        // 仅本路由用例使用独占目录；另两项默认game键/作用域0断言保持原样。
+        var routingKeys = new RedisKeys(GameNamespace.of("brit" + UUID.randomUUID().toString().replace("-", "").substring(0, 20)));
+        var scenes = new NodeDirectory<>(redis, routingKeys, NodeTypes.SCENE, SceneNodeInfo.parser());
+        try {
+            new PlayerPresenceDirectory(redis, routingKeys).putAsync(PlayerPresence.newBuilder().setPlayerId(PLAYER).setZoneId(1)
+                    .setGateNodeId(2).setGateInstanceId("gate-inst").setSessionId(33).build()).toCompletableFuture()
+                    .get(5, TimeUnit.SECONDS);
+            new PlayerLocationDirectory(redis, routingKeys).putAsync(PlayerLocation.newBuilder().setPlayerId(PLAYER).setZoneId(1)
+                    .setSceneNodeId(4).setSceneId(99).setOwnerEpoch(1).build(), 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
+            scenes.publish(1, 4, SceneNodeInfo.newBuilder()
+                    .setZoneId(1).setNodeId(4).setInstanceId("scene-inst").build(), Duration.ofSeconds(15));
 
-        DevRoutingResolver.Resolution<CreateBattleRequest> r = DevRoutingResolver.redis(redis, REDIS_KEYS).fillCreate(
-                CreateBattleRequest.newBuilder().setBattleId(1).addPlayers(BattlePlayerSnapshot.newBuilder().setPlayerId(PLAYER))
-                        .build());
+            DevRoutingResolver.Resolution<CreateBattleRequest> r = DevRoutingResolver.redis(redis, routingKeys).fillCreate(
+                    CreateBattleRequest.newBuilder().setBattleId(1).addPlayers(BattlePlayerSnapshot.newBuilder().setPlayerId(PLAYER))
+                            .build());
 
-        assertThat(r.ok()).isTrue();
-        assertThat(r.request().getPlayers(0).getRouting()).isEqualTo(BattleRouting.newBuilder().setSessionId(33)
-                .setGateNodeId(2).setGateInstanceId("gate-inst").setZoneId(1).setSceneNodeId(4).setSceneInstanceId("scene-inst")
-                .build());
+            assertThat(r.ok()).isTrue();
+            assertThat(r.request().getPlayers(0).getRouting()).isEqualTo(BattleRouting.newBuilder().setSessionId(33)
+                    .setGateNodeId(2).setGateInstanceId("gate-inst").setZoneId(1).setSceneNodeId(4).setSceneInstanceId("scene-inst")
+                    .build());
 
-        DevRoutingResolver.Resolution<CreateBattleRequest> offline = DevRoutingResolver.redis(redis, REDIS_KEYS).fillCreate(
-                CreateBattleRequest.newBuilder().addPlayers(BattlePlayerSnapshot.newBuilder().setPlayerId(PLAYER + 1)).build());
-        assertThat(offline.ok()).isFalse();
+            DevRoutingResolver.Resolution<CreateBattleRequest> offline = DevRoutingResolver.redis(redis, routingKeys).fillCreate(
+                    CreateBattleRequest.newBuilder().addPlayers(BattlePlayerSnapshot.newBuilder().setPlayerId(PLAYER + 1)).build());
+            assertThat(offline.ok()).isFalse();
+        } finally {
+            try {
+                scenes.remove(1, 4);
+            } finally {
+                redis.getKeys().delete(routingKeys.presence(PLAYER), routingKeys.playerLocation(PLAYER),
+                        routingKeys.zoneNodeDirectory(NodeTypes.SCENE, 1), routingKeys.zoneNodeExpiry(NodeTypes.SCENE, 1),
+                        routingKeys.zoneNodeSeen(NodeTypes.SCENE, 1), routingKeys.zoneDirectoryFormat(1), routingKeys.zoneNodeTypes(1));
+            }
+        }
     }
 }

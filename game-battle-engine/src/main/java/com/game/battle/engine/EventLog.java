@@ -18,6 +18,12 @@ import com.game.proto.eBattleEventType;
  */
 final class EventLog {
 
+    /** value 保留完整 uint64；显示用 sint64 越界时饱和，不能把恢复显示成消耗。 */
+    static long signedManaDelta(long amount, boolean restored) {
+        if (amount < 0) return restored ? Long.MAX_VALUE : Long.MIN_VALUE;
+        return restored ? amount : -amount;
+    }
+
     private TurnResultS2C.Builder sink = TurnResultS2C.newBuilder();
     /** uint32；基线 {@code currentGroupId}。 */
     private int groupId;

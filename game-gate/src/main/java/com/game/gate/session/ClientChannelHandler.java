@@ -2,6 +2,7 @@ package com.game.gate.session;
 
 import com.game.gate.metrics.GateMetrics.DisconnectReason;
 import com.game.proto.ClientRequest;
+import com.game.proto.ClientHeartbeatRequest;
 import com.game.proto.ClientTokenVerifyRequest;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
@@ -61,6 +62,8 @@ public final class ClientChannelHandler extends ChannelInboundHandlerAdapter {
             dispatcher.onRequest(session, request);
         } else if (msg instanceof ClientTokenVerifyRequest verify) {
             dispatcher.onTokenVerify(session, verify);
+        } else if (msg instanceof ClientHeartbeatRequest heartbeat) {
+            dispatcher.onHeartbeat(session, heartbeat);
         } else {
             ReferenceCountUtil.release(msg);
         }

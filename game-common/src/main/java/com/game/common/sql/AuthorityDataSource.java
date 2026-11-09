@@ -15,6 +15,8 @@ public final class AuthorityDataSource implements DataSource {
             +"tidb_low_resolution_tso=OFF,tidb_read_consistency='strict',tidb_replica_read='leader',"
             +"tidb_txn_mode='pessimistic',transaction_isolation='READ-COMMITTED',"
             +"sql_mode=CONCAT(@@SESSION.sql_mode,',STRICT_TRANS_TABLES')";
+    /** 好友与全球匹配已有的固定短锁等待策略；只许可完整等集，不开放任意 SET。 */
+    public static final String STRONG_SHORT_LOCK_WAIT_SQL=STRONG_SESSION_SQL+",innodb_lock_wait_timeout=3";
     /** 仅由公会池显式声明；业务SQL通道仍拒绝会话SET。 */
     public static final String GUILD_FAIR_LOCKING_OFF_SQL="SET SESSION tidb_pessimistic_txn_fair_locking=OFF";
     private static final String MALL_INIT="SET SESSION tidb_snapshot='',tidb_txn_mode='pessimistic',tidb_replica_read='leader',tidb_read_consistency='strict',"
@@ -46,7 +48,7 @@ public final class AuthorityDataSource implements DataSource {
     public static List<String> checkedInitialization(Collection<String> sqls)throws SQLException {
         List<String> result=new ArrayList<>();
         for(String sql:sqls){
-            if(!Set.of(STRONG_SESSION_SQL,MALL_INIT,MALL_MYSQL,GUILD_FAIR_LOCKING_OFF_SQL).contains(sql))throw new SQLException("未批准的池初始化SQL，不能在受管前执行");
+            if(!Set.of(STRONG_SESSION_SQL,STRONG_SHORT_LOCK_WAIT_SQL,MALL_INIT,MALL_MYSQL,GUILD_FAIR_LOCKING_OFF_SQL).contains(sql))throw new SQLException("未批准的池初始化SQL，不能在受管前执行");
             if(!result.contains(sql))result.add(sql);
         }
         return List.copyOf(result);
@@ -109,6 +111,12 @@ public final class AuthorityDataSource implements DataSource {
                         ||!"strict".equalsIgnoreCase(r.getString(4))||!"leader".equalsIgnoreCase(r.getString(5))
                         ||!"pessimistic".equalsIgnoreCase(r.getString(6))||!"READ-COMMITTED".equalsIgnoreCase(r.getString(7)))
                     throw new SQLException("physical强会话初始化没有精确读回");
+            }
+            if(accepted.contains(STRONG_SHORT_LOCK_WAIT_SQL)){
+                try(var statement=raw.createStatement();var rows=statement.executeQuery("SELECT @@SESSION.innodb_lock_wait_timeout")){
+                    if(!rows.next()||rows.getLong(1)!=3||rows.wasNull()||rows.next())
+                        throw new SQLException("物理连接短锁等待策略未精确生效");
+                }
             }
             // 公会固定策略只在真实TiDB新physical上执行；MySQL/H2不发送此变量。
             if(accepted.contains(GUILD_FAIR_LOCKING_OFF_SQL)){

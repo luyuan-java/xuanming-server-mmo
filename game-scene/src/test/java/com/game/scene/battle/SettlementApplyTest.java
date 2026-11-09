@@ -282,7 +282,7 @@ class SettlementApplyTest {
         BattleSettlementData old = base(X).build();
         f.store(old);
         long deadline = f.deadline();
-        f.locks.putLock(PLAYER, 702, NODE, BattleRedis.STATE_FIGHTING, deadline, 0, 360);
+        f.locks.putLock(PLAYER, 702, NODE, BattleRedis.STATE_FIGHTING, deadline, 0, BattleFixture.FIGHTING_LOCK_TTL_SEC);
 
         ScenePlayer player = f.load(SESSION, PLAYER, 1, f.scene1, saved);
         f.drain();
@@ -305,7 +305,7 @@ class SettlementApplyTest {
         assertThat(f.reconnectHints(player)).containsExactly(702L);
         assertThat(f.locks.lockBattleId(PLAYER)).isEqualTo(702);
         assertThat(f.locks.lockState(PLAYER)).isEqualTo("F");
-        assertThat(f.locks.lockTtlSec(PLAYER)).as("701 的 HOLD 没碰 702 的锁").isEqualTo(360);
+        assertThat(f.locks.lockTtlSec(PLAYER)).as("701 的 HOLD 没碰 702 的锁").isEqualTo(BattleFixture.FIGHTING_LOCK_TTL_SEC);
         assertThat(player.battle().recovery()).isEqualTo(Recovery.READY);
 
         // 发件箱的再一次投递（两次）：玩家已在下一局，丢弃并销账，不动 702
@@ -591,8 +591,8 @@ class SettlementApplyTest {
         f.fighting(PLAYER, X);
         BattleSettlementData settlement = base(X).build();
         f.store(settlement);
-        // 让锁的剩余 TTL 短于 180 s，看得出 HOLD 把它续上来了
-        f.advance(BattleFixture.BATTLE_MILLIS - 5_000);
+        // 推进到终局与投递窗口结束前 5 s，剩余 TTL 为 65 s，严格证明 HOLD 续到 180 s
+        f.advance(BattleFixture.BATTLE_MILLIS + BattleFixture.OUTCOME_WINDOW_MILLIS - 5_000);
         assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(65);
         f.locks.clearCalls();
 

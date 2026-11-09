@@ -42,22 +42,12 @@ final class BattleInboxRecoveryTest {
                 .setExpectedOwnerRevision(1).setIssuedAtMs(NOW).setSettlementPayload(value.toByteString()).build();
     }
     private static final class Fixture implements AutoCloseable {
-        final InboxRouteFenceTest.Fixture base=new InboxRouteFenceTest.Fixture();
+        final InboxRouteFenceTest.Fixture base=new InboxRouteFenceTest.Fixture(true);
         final AtomicLong clock=new AtomicLong(NOW);
         final InboxStore store;
         Fixture()throws Exception{
             try{
-                for(String column:List.of("fence_epoch BIGINT NOT NULL DEFAULT 0","open_count INT NOT NULL DEFAULT 0",
-                        "created_ms BIGINT NOT NULL DEFAULT 0","updated_ms BIGINT NOT NULL DEFAULT 0"))base.sql("ALTER TABLE player_inbox_stream ADD COLUMN "+column);
-                base.sql("CREATE TABLE player_inbox_item(shard INT NOT NULL,player_id BIGINT NOT NULL,domain INT NOT NULL,seq BIGINT NOT NULL,"
-                        +"msg_type INT NOT NULL,producer_kind INT NOT NULL,request_id BIGINT NOT NULL,content_sha256 BINARY(32) NOT NULL,payload BLOB NOT NULL,"
-                        +"state INT,directive INT NOT NULL,void_reason INT NOT NULL,delivery_count INT NOT NULL,last_delivered_epoch BIGINT NOT NULL,last_delivered_ms BIGINT NOT NULL,"
-                        +"outcome_reason INT NOT NULL,finalized_by INT NOT NULL,decided_epoch BIGINT NOT NULL,issued_at_ms BIGINT NOT NULL,created_ms BIGINT NOT NULL,updated_ms BIGINT NOT NULL,"
-                        +"operator_name VARCHAR(64) NOT NULL,note VARCHAR(256) NOT NULL,owner_account VARCHAR(64),owner_revision BIGINT,PRIMARY KEY(shard,player_id,domain,seq),"
-                        +"UNIQUE(shard,player_id,producer_kind,request_id),INDEX by_role(shard,player_id,state))");
-                base.sql("CREATE TABLE player_final_save(player_id BIGINT NOT NULL,owner_epoch BIGINT NOT NULL,source_instance VARCHAR(64) NOT NULL,save_seq BIGINT NOT NULL,"
-                        +"protocol_version INT NOT NULL,status VARCHAR(16) NOT NULL,admission_proto BLOB,PRIMARY KEY(player_id,owner_epoch))");
-                base.sql("CREATE TABLE player_state(player_id BIGINT PRIMARY KEY,data BLOB NOT NULL)");
+
                 try(var c=base.source.getConnection();var q=c.prepareStatement("INSERT INTO player_final_save VALUES(1,1,'battle-inbox-scene',1,1,'OPEN',?)")){
                     q.setBytes(1,SceneAdmissionAuthority.original(identity()));assertEquals(1,q.executeUpdate());
                 }

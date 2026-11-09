@@ -12,7 +12,7 @@ import com.game.battle.testing.RecordingSceneTransport;
 import com.game.discovery.battle.BattleRedis;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleSettlementData;
-import com.game.proto.BattleSettlementEvent;
+import com.game.api.battle.LegacyBattleSettlementCodec;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -56,7 +56,7 @@ class OutboxUnknownStoreTest {
     }
 
     private static byte[] settlementBytes() {
-        return BattleSettlementEvent.newBuilder().setSettlement(settlement()).build().toByteArray();
+        return LegacyBattleSettlementCodec.encode(settlement());
     }
 
     private static BattleResultEvent activity() {
@@ -284,7 +284,7 @@ class OutboxUnknownStoreTest {
         settlements.stores.auto();
         settlementOutbox.dispatch(ROUTING, PLAYER, changed);
         scheduler.runPending();
-        byte[] changedBytes = BattleSettlementEvent.newBuilder().setSettlement(changed).build().toByteArray();
+        byte[] changedBytes = LegacyBattleSettlementCodec.encode(changed);
         assertThat(settlements.record(PLAYER, BATTLE)).isEqualTo(changedBytes);
         assertThat(journal.count("store:")).isEqualTo(3);
         assertThat(transport.sent).hasSize(2);

@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Properties;
 import java.util.stream.Stream;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -40,7 +41,24 @@ class RecommendDatabaseTest {
     private static final String TABLES = "friend,friend_block,friend_request";
 
     static Stream<Target> targets() {
-        return Stream.of(new Target("mysql", RecommendSql.Dialect.MYSQL), new Target("tidb", RecommendSql.Dialect.TIDB));
+        return targets(System.getProperties());
+    }
+
+    /** CI按实际后端拆阶段；显式选择缺入口时直接失败，不能产生被跳过的参数。 */
+    static Stream<Target> targets(Properties properties) {
+        String backend = properties.getProperty("game.it.friend.recommend.backend", "").trim();
+        if (backend.isEmpty()) {
+            return Stream.of(new Target("mysql", RecommendSql.Dialect.MYSQL), new Target("tidb", RecommendSql.Dialect.TIDB));
+        }
+        RecommendSql.Dialect dialect = switch (backend) {
+            case "mysql" -> RecommendSql.Dialect.MYSQL;
+            case "tidb" -> RecommendSql.Dialect.TIDB;
+            default -> throw new IllegalArgumentException("Recommendation test backend must be mysql or tidb");
+        };
+        if (properties.getProperty("game.it." + backend, "").isBlank()) {
+            throw new IllegalStateException("The selected recommendation test backend requires its actual JDBC endpoint");
+        }
+        return Stream.of(new Target(backend, dialect));
     }
 
     @ParameterizedTest(name = "{0}：排名和随机都不能穿透被排除的 1024 人窗口")
@@ -280,13 +298,19 @@ class RecommendDatabaseTest {
         }
         void edges(long... pairs) throws SQLException {
             ownerWork(c -> {
-                try (var ps = c.prepareStatement("INSERT INTO friend (player_id,friend_player_id,since_ms) VALUES (?,?,1)")) {
-                    ps.setQueryTimeout(5);
-                    for (int i = 0; i < pairs.length; i += 2) {
-                        ps.setObject(1, uid(pairs[i])); ps.setObject(2, uid(pairs[i + 1])); ps.addBatch();
-                        ps.setObject(1, uid(pairs[i + 1])); ps.setObject(2, uid(pairs[i])); ps.addBatch();
+                // 每条语句至多128条有向边；仍由owner管理事务和5秒期限，保留原对称关系。
+                for (int offset = 0; offset < pairs.length; offset += 128) {
+                    int end = Math.min(offset + 128, pairs.length);
+                    try (var ps = c.prepareStatement("INSERT INTO friend (player_id,friend_player_id,since_ms) VALUES "
+                            + String.join(",", java.util.Collections.nCopies(end - offset, "(?,?,1)")))) {
+                        ps.setQueryTimeout(5);
+                        int parameter = 1;
+                        for (int i = offset; i < end; i += 2) {
+                            ps.setObject(parameter++, uid(pairs[i])); ps.setObject(parameter++, uid(pairs[i + 1]));
+                            ps.setObject(parameter++, uid(pairs[i + 1])); ps.setObject(parameter++, uid(pairs[i]));
+                        }
+                        ps.executeUpdate();
                     }
-                    ps.executeBatch();
                 }
                 return null;
             });
@@ -304,24 +328,35 @@ class RecommendDatabaseTest {
             for (int i = 0; i < 32; i++) { pairs.add(50_000L + i); pairs.add(10L + i % 16); }
             edges(pairs.stream().mapToLong(Long::longValue).toArray());
             if (blockTop) ownerWork(c -> {
-                try (var ps = c.prepareStatement("INSERT INTO friend_block VALUES (?,1,1)")) {
-                    ps.setQueryTimeout(5);
-                    for (long id = 10_000; id < 11_024; id++) { ps.setLong(1, id); ps.addBatch(); }
-                    ps.executeBatch();
+                for (long first = 10_000; first < 11_024; first += 128) {
+                    int count = (int) Math.min(128, 11_024 - first);
+                    try (var ps = c.prepareStatement("INSERT INTO friend_block VALUES "
+                            + String.join(",", java.util.Collections.nCopies(count, "(?,1,1)")))) {
+                        ps.setQueryTimeout(5);
+                        for (int i = 0; i < count; i++) ps.setLong(i + 1, first + i);
+                        ps.executeUpdate();
+                    }
                 }
                 return null;
             });
         }
         void noise() throws SQLException {
             ownerWork(c -> {
-                try (var block = c.prepareStatement("INSERT INTO friend_block VALUES (?,1,1)");
-                     var pending = c.prepareStatement("INSERT INTO friend_request(from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES (?,2,1,1,1),(?,1,1,3,1)")) {
-                    block.setQueryTimeout(5); pending.setQueryTimeout(5);
-                    for (int i = 0; i < 4000; i++) {
-                        block.setLong(1, 1_000_000L + i); block.addBatch();
-                        pending.setLong(1, 2_000_000L + i); pending.setLong(2, 3_000_000L + i); pending.addBatch();
+                // 每批64条屏蔽和128条请求；只合并装载语句，不减少噪声或改变状态分布。
+                for (int offset = 0; offset < 4000; offset += 64) {
+                    int count = Math.min(64, 4000 - offset);
+                    try (var block = c.prepareStatement("INSERT INTO friend_block VALUES "
+                                + String.join(",", java.util.Collections.nCopies(count, "(?,1,1)")));
+                         var pending = c.prepareStatement("INSERT INTO friend_request(from_player_id,to_player_id,request_time_ms,status,updated_ms) VALUES "
+                                + String.join(",", java.util.Collections.nCopies(count, "(?,2,1,1,1),(?,1,1,3,1)")))) {
+                        block.setQueryTimeout(5); pending.setQueryTimeout(5);
+                        for (int i = 0; i < count; i++) {
+                            block.setLong(i + 1, 1_000_000L + offset + i);
+                            pending.setLong(2 * i + 1, 2_000_000L + offset + i);
+                            pending.setLong(2 * i + 2, 3_000_000L + offset + i);
+                        }
+                        block.executeUpdate(); pending.executeUpdate();
                     }
-                    block.executeBatch(); pending.executeBatch();
                 }
                 return null;
             });

@@ -13,8 +13,19 @@ import org.springframework.context.annotation.Configuration;
 
 /** 全部是现有game-data进程内组件；巡检不执行领域DDL或创建权威原件。 */
 @Configuration(proxyBeanMethods=false)
-@EnableConfigurationProperties(ConsistencyProperties.class)
+@EnableConfigurationProperties({ConsistencyProperties.class, ExpiredFormationAuditProperties.class,
+        TerminalOutboxBacklogProperties.class})
 public class ConsistencyConfiguration {
+    @Bean(initMethod="start", destroyMethod="close")
+    TerminalOutboxBacklogAudit terminalOutboxBacklogAudit(ObjectProvider<JdbcConsistencyReader> sql,
+            TerminalOutboxBacklogProperties properties, io.micrometer.core.instrument.MeterRegistry metrics) {
+        return new TerminalOutboxBacklogAudit(sql.getIfAvailable(), properties, metrics);
+    }
+    @Bean(initMethod="start", destroyMethod="close")
+    ExpiredFormationAudit expiredFormationAudit(ObjectProvider<JdbcConsistencyReader> sql,
+            ExpiredFormationAuditProperties properties, io.micrometer.core.instrument.MeterRegistry metrics) {
+        return new ExpiredFormationAudit(sql.getIfAvailable(), properties, metrics);
+    }
     @Bean(destroyMethod="close")
     JdbcConsistencyReader consistencySqlReader(ConsistencyProperties properties,GameNamespace namespace,
             @Value("${game.run-mode:prod}")String mode) {

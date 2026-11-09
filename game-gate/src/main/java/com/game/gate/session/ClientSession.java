@@ -115,6 +115,12 @@ public final class ClientSession {
     int leaveGameRequests;
     /** 非法包计数（未知消息号、超长、超频、运行模式不放行的 GM 指令），达到阈值断开。 */
     int illegalPackets;
+    /** 验签回包之后按完整入站帧判活；状态与定时器都归本连接的 EventLoop。 */
+    boolean livenessTracked;
+    long lastInboundNanos;
+    long heartbeatWindowStartNanos;
+    int heartbeatAnswersInWindow;
+    private ScheduledFuture<?> idleTimeout;
     /** 按消息号的发送频率限制（C++ MessageLimiter 同义；与 battle 直连面共用 game-net 的实现）。 */
     final MessageRateLimiter rateLimiter = new MessageRateLimiter();
     private ScheduledFuture<?> handshakeTimeout;
@@ -203,6 +209,17 @@ public final class ClientSession {
         if (handshakeTimeout != null) {
             handshakeTimeout.cancel(false);
             handshakeTimeout = null;
+        }
+    }
+
+    void scheduleIdleTimeout(long delayNanos, Runnable onTimeout) {
+        idleTimeout = channel.eventLoop().schedule(onTimeout, delayNanos, TimeUnit.NANOSECONDS);
+    }
+
+    void cancelIdleTimeout() {
+        if (idleTimeout != null) {
+            idleTimeout.cancel(false);
+            idleTimeout = null;
         }
     }
 

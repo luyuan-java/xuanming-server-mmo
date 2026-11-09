@@ -76,7 +76,8 @@ final class ActionChecks {
 
     /**
      * SKILL 校验链（{@code engine.cpp:403-436}；规格 §4.2），顺序固定、命中第一条即返回：
-     * 表行缺失（含 id 0）1001 → 不在本人技能列表里 1005 → 黑名单类型 7004 → 目标 7001 → 冷却 7003 → 等级（桩）→
+     * 表行缺失（含 id 0）1001 → 不在本人技能列表里 1005 → 黑名单类型 7004 → 职业技能无有效重数 1005 →
+     * 目标校验（职业技能区分敌方/友方/自身）→ 冷却 7003 → 等级（职业上限已在开局折算）→
      * 沉默许可 1002 或格值 → 法力 7004。
      */
     private int checkSkill(BattleUnit actor, BattleAction action) {
@@ -93,7 +94,12 @@ final class ActionChecks {
         if (!BattleRules.isTurnBattleCastableSkill(row)) {
             return SKILL_CANNOT_CAST_IN_STATE;
         }
-        int result = validateSkillTarget(row, action.getTargetId());
+        if (BattleRules.isClassSkill(row) && ClassSkillExecution.rank(actor, row) == 0) {
+            return INVALID_PARAMETER;
+        }
+        int result = BattleRules.isClassSkill(row)
+                ? ClassSkillExecution.validateTarget(ctx, actor, row, action.getTargetId())
+                : validateSkillTarget(row, action.getTargetId());
         if (result != SUCCESS) {
             return result;
         }
@@ -196,15 +202,20 @@ final class ActionChecks {
 
     /**
      * 冷却（{@code CheckCooldown}，{@code engine.cpp:535-550}；规格 §4.4）：冷却 map 里任一项同时满足「剩余回合 ≠ 0、该技能有表行、
-     * 其 cooldown_id 等于待施放技能的 cooldown_id」→ 7003。结果只是「存在与否」，与遍历顺序无关。
+     * 其 cooldown_id 等于待施放技能的 cooldown_id」→ 7003。职业技能只看自己的 id，且不参与通用技能的共享冷却组。
+     * 结果只是「存在与否」，与遍历顺序无关。
      */
     private int checkCooldown(BattleUnit actor, SkillTable row) {
+        if (BattleRules.isClassSkill(row)) {
+            return actor.state().getSkillCooldownRoundsOrDefault(row.getId(), 0) == 0 ? SUCCESS : SKILL_COOLDOWN_NOT_READY;
+        }
         for (Map.Entry<Integer, Integer> cooling : actor.state().getSkillCooldownRoundsMap().entrySet()) {
             if (cooling.getValue() == 0) {
                 continue;
             }
             Optional<SkillTable> coolingRow = ctx.data().skill(cooling.getKey());
-            if (coolingRow.isPresent() && coolingRow.get().getCooldownId() == row.getCooldownId()) {
+            if (coolingRow.isPresent() && !BattleRules.isClassSkill(coolingRow.get())
+                    && coolingRow.get().getCooldownId() == row.getCooldownId()) {
                 return SKILL_COOLDOWN_NOT_READY;
             }
         }
@@ -254,7 +265,7 @@ final class ActionChecks {
 
     /** 法力：技能耗蓝（uint64）&gt; 当前法力（无符号比较）→ 7004（{@code CheckSkillCost}，{@code engine.cpp:495-503}）。 */
     private int checkSkillCost(BattleUnit actor, SkillTable row) {
-        if (Long.compareUnsigned(BattleRules.skillManaCost(row), actor.mana()) > 0) {
+        if (Long.compareUnsigned(BattleRules.skillManaCost(row, actor.maxMana()), actor.mana()) > 0) {
             return SKILL_CANNOT_CAST_IN_STATE;
         }
         return SUCCESS;

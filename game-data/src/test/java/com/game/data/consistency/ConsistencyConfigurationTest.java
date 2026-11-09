@@ -21,8 +21,11 @@ class ConsistencyConfigurationTest {
         var redisStarts = new AtomicInteger();
         new ApplicationContextRunner()
                 .withUserConfiguration(ConsistencyConfiguration.class)
+                .withBean(io.micrometer.core.instrument.MeterRegistry.class, io.micrometer.core.instrument.simple.SimpleMeterRegistry::new)
                 .withPropertyValues("game.data.consistency.jdbc-url=",
-                        "game.data.consistency.username=", "game.data.consistency.password=")
+                        "game.data.consistency.username=", "game.data.consistency.password=",
+                        "game.data.consistency.expired-formations.enabled=false",
+                        "game.data.consistency.terminal-backlog.enabled=false")
                 .withBean(GameNamespace.class, () -> namespace)
                 .withBean(RedisKeys.class, () -> new RedisKeys(namespace))
                 .withBean(DataSource.class, () -> businessDataSource)

@@ -14,7 +14,7 @@ import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.BattleReconnectS2C;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleSettlementData;
-import com.game.proto.BattleSettlementEvent;
+import com.game.api.battle.LegacyBattleSettlementCodec;
 import com.game.proto.CancelBattlePrepareRequest;
 import com.game.proto.PrepareBattleRequest;
 import com.game.proto.PrepareBattleResponse;
@@ -1389,8 +1389,7 @@ public final class PlayerBattleService implements BattleHooks {
             return null;
         }
         try {
-            BattleSettlementEvent event = BattleSettlementEvent.parseFrom(bytes);
-            return event.hasSettlement() ? event.getSettlement() : null;
+            return LegacyBattleSettlementCodec.decode(bytes).orElse(null);
         } catch (InvalidProtocolBufferException e) {
             return null;
         }

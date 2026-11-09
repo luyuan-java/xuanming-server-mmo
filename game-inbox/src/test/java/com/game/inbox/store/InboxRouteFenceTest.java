@@ -101,7 +101,9 @@ final class InboxRouteFenceTest {
         private H2Authority h2Authority;
         final SimpleMeterRegistry metrics=new SimpleMeterRegistry();
         final AuthorityJdbc jdbc;
-        Fixture() throws Exception {
+        Fixture() throws Exception { this(false); }
+        // 必须在正式fixture发布/按表授权前创建完整消费投影，不能靠发布后的管理员补表继承权限。
+        Fixture(boolean admissionTables) throws Exception {
             String endpoint=System.getProperty("inbox.it.tidb", "");
             if ("1".equals(System.getProperty("inbox.it.require")) && endpoint.isEmpty())
                 throw new IllegalStateException("真库门禁缺少inbox.it.tidb，不得降级成H2");
@@ -116,7 +118,7 @@ final class InboxRouteFenceTest {
                 String password=System.getenv().getOrDefault("GAME_TEST_MYSQL_PASSWORD", "");
                 fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment("jdbc:mysql://"+endpoint+"/",
                         System.getProperty("game.it.mysql.user", "root"),password,"inbox_route",false,List.of(7)),(connection,principal)->{
-                    try(var statement=connection.createStatement()) { createDomain(connection,statement); }
+                    try(var statement=connection.createStatement()) { createDomain(connection,statement); if(admissionTables)createAdmissionTables(statement); }
                 });
                 nativePool=new DruidDataSource();
                 try {
@@ -135,7 +137,7 @@ final class InboxRouteFenceTest {
                     String ddl=new String(input.readAllBytes(),StandardCharsets.UTF_8).replaceAll("(?i)ENGINE\\s*=\\s*InnoDB[^;]*","");
                     for(String sql:ddl.split(";")) if(!sql.isBlank()) statement.execute(sql);
                 }
-                createDomain(connection,statement);
+                createDomain(connection,statement); if(admissionTables)createAdmissionTables(statement);
                 String principal;try(var identity=statement.executeQuery("SELECT CURRENT_USER()")){assertTrue(identity.next());principal=identity.getString(1);}
                 RouteAuthorityInitializer.initialize(connection,UUID.randomUUID().toString(),List.of(7),principal);
             }
@@ -154,8 +156,23 @@ final class InboxRouteFenceTest {
                     insert.setInt(1,InboxShards.rowShard(1));insert.setInt(2,DOMAIN.getNumber());insert.executeUpdate();
                 }
         }
+        private static void createAdmissionTables(java.sql.Statement statement)throws SQLException {
+                for(String column:List.of("fence_epoch BIGINT NOT NULL DEFAULT 0","open_count INT NOT NULL DEFAULT 0",
+                        "created_ms BIGINT NOT NULL DEFAULT 0","updated_ms BIGINT NOT NULL DEFAULT 0"))
+                    statement.execute("ALTER TABLE player_inbox_stream ADD COLUMN "+column);
+                statement.execute("CREATE TABLE player_inbox_item(shard INT NOT NULL,player_id BIGINT NOT NULL,domain INT NOT NULL,seq BIGINT NOT NULL,"
+                        +"msg_type INT NOT NULL,producer_kind INT NOT NULL,request_id BIGINT NOT NULL,content_sha256 BINARY(32) NOT NULL,payload BLOB NOT NULL,"
+                        +"state INT,directive INT NOT NULL,void_reason INT NOT NULL,delivery_count INT NOT NULL,last_delivered_epoch BIGINT NOT NULL,last_delivered_ms BIGINT NOT NULL,"
+                        +"outcome_reason INT NOT NULL,finalized_by INT NOT NULL,decided_epoch BIGINT NOT NULL,issued_at_ms BIGINT NOT NULL,created_ms BIGINT NOT NULL,updated_ms BIGINT NOT NULL,"
+                        +"operator_name VARCHAR(64) NOT NULL,note VARCHAR(256) NOT NULL,owner_account VARCHAR(64),owner_revision BIGINT,PRIMARY KEY(shard,player_id,domain,seq),"
+                        +"UNIQUE(shard,player_id,producer_kind,request_id),INDEX by_role(shard,player_id,state))");
+                statement.execute("CREATE TABLE player_final_save(player_id BIGINT NOT NULL,owner_epoch BIGINT NOT NULL,source_instance VARCHAR(64) NOT NULL,save_seq BIGINT NOT NULL,"
+                        +"protocol_version INT NOT NULL,status VARCHAR(16) NOT NULL,admission_proto BLOB,PRIMARY KEY(player_id,owner_epoch))");
+                statement.execute("CREATE TABLE player_state(player_id BIGINT PRIMARY KEY,data BLOB NOT NULL)");
+        }
         void sql(String sql) throws SQLException {try(var connection=schemaConnection();var statement=connection.createStatement()){statement.execute(sql);}}
-        long due() throws SQLException {try(var connection=source.getConnection();var statement=connection.createStatement();var rows=statement.executeQuery("SELECT notify_due_ms FROM player_inbox_stream")){assertTrue(rows.next());return rows.getLong(1);}}
+        // 冻结之后只用owner诊断读核实原件未改；被测clear/维护调用仍使用NORMAL并必须拒绝。
+        long due() throws SQLException {try(var connection=schemaConnection();var statement=connection.createStatement();var rows=statement.executeQuery("SELECT notify_due_ms FROM player_inbox_stream")){assertTrue(rows.next());return rows.getLong(1);}}
         boolean clear() throws SQLException {return InboxStore.clearNotifyDue(Deadline.after(3000),jdbc,1,DOMAIN,2);}
         @Override public void close() throws SQLException {
             metrics.close();

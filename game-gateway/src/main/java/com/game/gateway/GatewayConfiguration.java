@@ -14,6 +14,7 @@ import com.game.discovery.gate.RedisGateSource;
 import com.game.gateway.drain.GateDrainMonitor;
 import com.game.gateway.assign.AssignGateMetrics;
 import com.game.gateway.assign.AssignGateService;
+import com.game.gateway.hotfix.HotfixConfiguration;
 import com.game.gateway.login.LoginHttpMetrics;
 import com.game.gateway.login.LoginHttpService;
 import com.game.gateway.queue.LoginQueue;
@@ -45,6 +46,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
 import org.springframework.core.env.Environment;
 
 /**
@@ -56,6 +58,7 @@ import org.springframework.core.env.Environment;
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(GatewayProperties.class)
+@Import(HotfixConfiguration.class)
 public class GatewayConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(GatewayConfiguration.class);

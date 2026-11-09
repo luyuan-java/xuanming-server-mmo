@@ -611,7 +611,9 @@ class BattleConfigurationTest {
 
     /**
      * 生产装配连真 Kafka（{@code -Dgame.it.kafka=127.0.0.1:9092}，缺省跳过）：{@code BattleConfiguration} 自己建的幂等生产者与 topic 管理，
-     * 房间交来的结果真的落到 topic 上。用 game-battle 测试专用的代次（同 {@code KafkaBattleResultSinkIntegrationTest}），唯一的 battle_id 与消费组。
+     * 房间交来的结果真的落到 topic 上。全球模式要求至少三个真实 broker、RF3 / minISR2；保持生产门禁。
+     * 用独立代次 9673，不能与旧兼容 {@code KafkaBattleResultSinkIntegrationTest} 的 RF1 代次 9671 共用。
+     * 唯一的 battle_id 与消费组只读取本次事件，不删除或重配旧 topic。
      */
     @Test
     @EnabledIfSystemProperty(named = "game.it.kafka", matches = ".+")
@@ -620,11 +622,11 @@ class BattleConfigurationTest {
         long battleId = System.currentTimeMillis() * 1000 + 777;
         BattleResultEvent event = result(battleId);
 
-        realKafkaClients.withPropertyValues("game.battle.result.bootstrap-servers=" + bootstrap, "game.battle.result.topic-generation=9671",
+        realKafkaClients.withPropertyValues("game.battle.result.bootstrap-servers=" + bootstrap, "game.battle.result.topic-generation=9673",
                 "game.battle.result.init-timeout=20s").run(ctx -> {
             assertThat(ctx).hasNotFailed();
             KafkaBattleResultSink sink = ctx.getBean(KafkaBattleResultSink.class);
-            assertThat(sink.topic()).isEqualTo("game-battle-result-g9671");
+            assertThat(sink.topic()).isEqualTo("game-battle-result-g9673");
             assertThat(sink.verified()).isTrue();
             MeterRegistry meters = ctx.getBean(MeterRegistry.class);
 
@@ -643,7 +645,7 @@ class BattleConfigurationTest {
         List<ConsumerRecord<String, byte[]>> own = new ArrayList<>();
         long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
         try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props, new StringDeserializer(), new ByteArrayDeserializer())) {
-            consumer.subscribe(List.of("game-battle-result-g9671"));
+            consumer.subscribe(List.of("game-battle-result-g9673"));
             while (own.isEmpty() && System.nanoTime() < deadline) {
                 for (ConsumerRecord<String, byte[]> record : consumer.poll(Duration.ofMillis(500))) {
                     if (Long.toUnsignedString(battleId).equals(record.key())) {

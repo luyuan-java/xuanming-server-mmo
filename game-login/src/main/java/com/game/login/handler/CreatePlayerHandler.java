@@ -38,8 +38,9 @@ import org.slf4j.LoggerFactory;
  * <ol>
  *   <li>无会话 → 2018；会话未登录，或已经进了游戏（mmorpg 进游戏后清登录会话）→ 2028；</li>
  *   <li>同账号建角在途（本进程内）→ 2005；</li>
- *   <li>角色数 ≥ 上限（默认 5）→ 2001（这里先按快照快速拒绝；权威判定在第 9 步的数据库事务里）；</li>
- *   <li>class_id：0 取 Class 表第一行；不存在 → 2015。gender：0 取 1；&gt; 2 → 2015。appearance_id 不在白名单 → 2015；</li>
+ *   <li>角色数 ≥ 上限（默认 5）→ 2001（快照快速拒绝新建；权威判定在第 9 步的数据库事务里）；</li>
+ *   <li>class_id：0 取 Class 表第一行；不存在 → 2015。gender：0 取 1；&gt; 2 → 2015。appearance_id 不在白名单 → 2015。
+ *       退役外观只有精确匹配本账号已建角色时返回原列表，满额时也允许只读重试；</li>
  *   <li>RoleNameRule 读不出或不合法 → 2020；</li>
  *   <li>名字：敏感 → 2034；不合法 → 2032（parameters = [min, max]）；为空 → 服务端生成候选名（max_generate_attempts 个）；</li>
  *   <li>归属区（{@link #homeZoneRefused}）：新角色的归属区 = <b>会话所在的 zone</b>（gate 填的 {@code SessionContext.zone_id}），
@@ -190,14 +191,15 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
                                         long createDeadline) {
         // 快照预检只用于快速拒绝（不持锁、不发号）；权威判定在 createPlayerWithinCap 的事务里。
         List<PlayerRow> snapshot = store.listPlayers(account);
-        if (snapshot.size() >= maxPlayersPerAccount) {
+        String appearanceId = request.getAppearanceId();
+        boolean retiredAppearance = CharacterAppearances.isRetired(appearanceId);
+        if (!retiredAppearance && snapshot.size() >= maxPlayersPerAccount) {
             log.info("角色数已达上限 account={} count={}", account, snapshot.size());
             return error(LoginErrorTip.login_error.kLoginAccountPlayerFull_VALUE);
         }
 
         int classId = request.getClassId();
         int gender = request.getGender() == 0 ? 1 : request.getGender();
-        String appearanceId = request.getAppearanceId();
         RoleNameRules nameRules;
         try {
             if (classId == 0) {
@@ -210,7 +212,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
                 log.info("建角拒绝：性别非法 account={} gender={}", account, Integer.toUnsignedLong(gender));
                 return error(LoginErrorTip.login_error.kLoginUnknownError_VALUE);
             }
-            if (!CharacterAppearances.isAllowed(appearanceId)) {
+            if (!CharacterAppearances.isAllowed(appearanceId) && !retiredAppearance) {
                 log.info("建角拒绝：外观不在白名单 account={} appearance_len={}", account, appearanceId.length());
                 return error(LoginErrorTip.login_error.kLoginUnknownError_VALUE);
             }
@@ -221,6 +223,14 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         }
 
         PlayerNames.Normalized name = PlayerNames.normalize(request.getName(), nameRules);
+        if (retiredAppearance) {
+            // 列表和角色行来自同一权威库；确认重试无需发号、区服围栏或建角事务。
+            if (name.verdict() == PlayerNames.Verdict.OK
+                    && isLostResponseRetry(snapshot, name.display(), classId, gender, appearanceId)) {
+                return success(snapshot);
+            }
+            return error(LoginErrorTip.login_error.kLoginUnknownError_VALUE);
+        }
         switch (name.verdict()) {
             case SENSITIVE -> {
                 log.info("建角拒绝：名字命中敏感词 account={} name={}", account, name.display());
@@ -306,7 +316,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     }
 
     private CreatePlayerResponse nameTaken(String account, PlayerRow row, List<PlayerRow> existing) {
-        if (isLostResponseRetry(existing, row)) {
+        if (isLostResponseRetry(existing, row.getName(), row.getClassId(), row.getGender(), row.getAppearanceId())) {
             log.info("建角重试命中已建角色（上次应答丢失）account={} name={} 本次作废 id={}",
                     account, row.getName(), row.getPlayerId());
             return success(existing);
@@ -321,18 +331,17 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     }
 
     /**
-     * 名字被占，且占用者就在本账号里、展示名逐字相同、职业 / 性别 / 外观与本次请求都相同 → 上次建角其实成功、只是应答丢了。
-     * 名字唯一索引建在 {@link PlayerStore#nameKey}（大小写不敏感）上，所以按唯一键找占用者：本账号里同键的那一行就是它；
-     * 同键但写法不同（「Alice」占着、这次请求「alice」）不是重试，是撞名。
+     * 本账号存在展示名逐字相同、职业 / 性别 / 外观相同的角色时，返回上次已提交的结果。
+     * 名字唯一键不区分大小写，重试仍须用原展示名。
      */
-    static boolean isLostResponseRetry(List<PlayerRow> existing, PlayerRow attempted) {
-        String attemptedKey = PlayerStore.nameKey(attempted.getName());
+    private static boolean isLostResponseRetry(List<PlayerRow> existing, String name, int classId, int gender,
+                                               String appearanceId) {
         for (PlayerRow player : existing) {
-            if (attemptedKey.equals(PlayerStore.nameKey(player.getName()))) {
-                return attempted.getName().equals(player.getName())
-                        && player.getClassId() == attempted.getClassId()
-                        && player.getGender() == attempted.getGender()
-                        && attempted.getAppearanceId().equals(player.getAppearanceId());
+            if (name.equals(player.getName())
+                    && player.getClassId() == classId
+                    && player.getGender() == gender
+                    && appearanceId.equals(player.getAppearanceId())) {
+                return true;
             }
         }
         return false;

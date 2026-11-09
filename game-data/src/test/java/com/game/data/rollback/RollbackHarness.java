@@ -238,9 +238,16 @@ final class RollbackHarness implements AutoCloseable {
         return Long.parseUnsignedLong((String) out.get("jobId"));
     }
 
-    /** 等作业终结（至多 20 s）。 */
+    /** 常规用例等作业终结（至多20秒）。 */
     OpsJobRow await(long jobId) throws InterruptedException {
-        long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+        return await(jobId, Duration.ofSeconds(20));
+    }
+
+    /** 多玩家真SQL用例显式指定测试观察窗；不修改作业、夺权或SQL的生产截止。 */
+    OpsJobRow await(long jobId, Duration observationTimeout) throws InterruptedException {
+        if (observationTimeout == null || observationTimeout.isNegative() || observationTimeout.isZero())
+            throw new IllegalArgumentException("Observation timeout must be positive");
+        long deadline = System.nanoTime() + observationTimeout.toNanos();
         while (System.nanoTime() < deadline) {
             OpsJobRow job = jobs.findJob(jobId).orElseThrow();
             if (job.getStatus() != OpsJobStatus.OPS_JOB_QUEUED && job.getStatus() != OpsJobStatus.OPS_JOB_RUNNING
@@ -249,7 +256,7 @@ final class RollbackHarness implements AutoCloseable {
             }
             Thread.sleep(20);
         }
-        throw new AssertionError("作业 " + jobId + " 20 s 内没有终结：" + jobs.findJob(jobId));
+        throw new AssertionError("作业 " + jobId + " 在测试观察窗 " + observationTimeout + " 内没有终结：" + jobs.findJob(jobId));
     }
 
     List<String> eventTypes(long jobId) {

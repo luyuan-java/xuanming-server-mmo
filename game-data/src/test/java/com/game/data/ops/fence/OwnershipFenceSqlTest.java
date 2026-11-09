@@ -127,7 +127,7 @@ class OwnershipFenceSqlTest {
     }
 
     @Test
-    void kick_每次重试都重发让出请求_持有者一直不放_Busy() {
+    void kick_短预算已发布让出请求_到点Busy且归属原样() {
         player(5, false, System.currentTimeMillis() + 60_000);
         Claim claim = ownership.claim(P, true, Duration.ofMillis(200), d -> {
             try {
@@ -137,8 +137,12 @@ class OwnershipFenceSqlTest {
             }
         });
         assertThat(claim).isEqualTo(new Claim.Busy(5));
-        assertThat(calls.size()).isGreaterThan(1);
+        // 200ms总预算不保证多轮真实SQL；逐轮重发见AdminOwnershipRetryTest，真Redis重发仍有独立用例。
+        assertThat(calls).isNotEmpty();
         assertThat(calls).allMatch(c -> c.equals("takeover:1001:5"));
+        assertThat(owner().ownerEpoch()).isEqualTo(5);
+        assertThat(owner().released()).isFalse();
+        assertThat(ownership.heldCount()).isZero();
     }
 
     @Test

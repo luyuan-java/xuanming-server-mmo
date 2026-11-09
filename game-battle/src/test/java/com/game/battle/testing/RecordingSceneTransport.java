@@ -6,7 +6,8 @@ import com.game.api.proto.SceneBattleReply;
 import com.game.api.proto.SceneBattleStatus;
 import com.game.api.proto.SettlementDisposition;
 import com.game.proto.BattleConfirmedEvent;
-import com.game.proto.BattleSettlementEvent;
+import com.game.api.battle.LegacyBattleSettlementCodec;
+import com.game.proto.BattleSettlementData;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -57,7 +58,8 @@ public final class RecordingSceneTransport {
     public CompletableFuture<SceneBattleReply> applySettlement(SceneAssetEndpoint endpoint, SceneBattleCall call) {
         String battle;
         try {
-            battle = Long.toUnsignedString(BattleSettlementEvent.parseFrom(call.getBody()).getSettlement().getBattleId());
+            battle = Long.toUnsignedString(LegacyBattleSettlementCodec.decode(call.getBody())
+                    .orElse(BattleSettlementData.getDefaultInstance()).getBattleId());
         } catch (InvalidProtocolBufferException e) {
             battle = "?";
         }

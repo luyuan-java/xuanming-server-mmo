@@ -34,6 +34,9 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 class BattleTerminalRecoveryTest {
     private static final String SECRET = "终局回归独立密钥只用于本机夹具0123456789abcdef";
 
+    private final com.game.match.metrics.MatchMetrics deliveryMetrics = new com.game.match.metrics.MatchMetrics(
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), new com.game.match.metrics.MetricLabels(id -> false));
+
     private final List<Memory> memoryFixtures = new ArrayList<>();
     @AfterEach void closeMemoryFixtures() throws Exception {
         Exception failure = null;
@@ -63,7 +66,7 @@ class BattleTerminalRecoveryTest {
         var original = f.seed(802);
         try (var replay = new BattleCompletionReplay(f.store, noDeadlines(), inbox, (event, raw) -> {
             published.add(raw); return CompletableFuture.completedFuture(null);
-        }, SECRET, () -> 1_000_000)) {
+        }, SECRET, () -> 1_000_000, deliveryMetrics)) {
             replay.round();
             assertEquals(List.of(original), published); assertEquals(2, inbox.enqueued.size());
             assertTrue(f.store.pendingResults(0).isEmpty());
@@ -80,14 +83,14 @@ class BattleTerminalRecoveryTest {
 
     @Test void 离线或未知回复不堵后来成员_不换原owner时间正文_重启从永久seq查询() throws Exception {
         var f = new Memory(); f.seed(803); var inbox = new Inbox(); inbox.unavailable = 1;
-        try (var replay = new BattleCompletionReplay(f.store, noDeadlines(), inbox, (event, raw) -> CompletableFuture.completedFuture(null), SECRET, () -> 1_000_000)) {
+        try (var replay = new BattleCompletionReplay(f.store, noDeadlines(), inbox, (event, raw) -> CompletableFuture.completedFuture(null), SECRET, () -> 1_000_000, deliveryMetrics)) {
             replay.round();
             var rows = f.store.pendingPlayers(0, 0);
             assertEquals(0, rows.stream().filter(row -> row.getPlayerId() == 1).findFirst().orElseThrow().getInboxSeq());
             assertTrue(rows.stream().filter(row -> row.getPlayerId() == 2).findFirst().orElseThrow().getInboxSeq() > 0);
         }
         inbox.unavailable = 0; inbox.applied = true;f.makeDue();
-        try (var restarted = new BattleCompletionReplay(f.store, noDeadlines(), inbox, (event, raw) -> CompletableFuture.completedFuture(null), SECRET, () -> 1_000_001)) {
+        try (var restarted = new BattleCompletionReplay(f.store, noDeadlines(), inbox, (event, raw) -> CompletableFuture.completedFuture(null), SECRET, () -> 1_000_001, deliveryMetrics)) {
             restarted.round();
             assertEquals(1, inbox.lookedUp.size());
             assertTrue(f.store.pendingPlayers(0, 0).isEmpty());
@@ -100,7 +103,7 @@ class BattleTerminalRecoveryTest {
         try(var f=new Memory(true)){for(int i=0;i<10;i++)f.seed(1000+i);
         try(var c=f.schemaConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET inbox_seq=10+player_id WHERE battle_id>=1005");}
         var inbox=new Inbox();
-        try(var replay=new BattleCompletionReplay(f.store,noDeadlines(),inbox,(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000)){
+        try(var replay=new BattleCompletionReplay(f.store,noDeadlines(),inbox,(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000,deliveryMetrics)){
             replay.round();assertEquals(8,inbox.enqueued.size());assertEquals(8,inbox.lookedUp.size());
             // 连续新首投不挤占等待APPLIED的份额，也不扩大已固定的旧轮上界。
             f.seed(1010);replay.round();assertEquals(10,inbox.enqueued.size());assertEquals(10,inbox.lookedUp.size());
@@ -123,7 +126,7 @@ class BattleTerminalRecoveryTest {
         assertFalse(f.store.claimInboxAttempt(original));
         try(var c=f.schemaConnection();var s=c.createStatement()){s.executeUpdate("UPDATE match_battle_player_completion SET applied=1 WHERE player_id=2");}
         var inbox=new Inbox();inbox.applied=true;
-        try(var replay=new BattleCompletionReplay(f.store,noDeadlines(),inbox,(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000)){
+        try(var replay=new BattleCompletionReplay(f.store,noDeadlines(),inbox,(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000,deliveryMetrics)){
             replay.round();assertTrue(inbox.enqueued.isEmpty());assertTrue(inbox.lookedUp.isEmpty());
             f.makeDue();replay.round();assertTrue(inbox.enqueued.isEmpty());assertEquals(1,inbox.lookedUp.size());
             assertEquals(known.getInboxSeq(),10+inbox.lookedUp.getFirst().getPlayerId());assertTrue(f.store.pendingPlayers(0,0).isEmpty());
@@ -134,7 +137,7 @@ class BattleTerminalRecoveryTest {
         var f = new Memory(); f.seed(804); var inbox = new Inbox();
         var request = BattleSettlementInboxRequest.newBuilder().setPlayerId(1).setBattleId(804).setExpectedOwnerAccount("account-1")
                 .setExpectedOwnerRevision(1).setIssuedAtMs(123).setSettlementPayload(BattleCompletionStoreCases.complete(804).getSettlements(0).toByteString()).build();
-        try (var replay = new BattleCompletionReplay(f.store, noDeadlines(), inbox, (event, raw) -> CompletableFuture.completedFuture(null), SECRET, () -> 1_000_000)) {
+        try (var replay = new BattleCompletionReplay(f.store, noDeadlines(), inbox, (event, raw) -> CompletableFuture.completedFuture(null), SECRET, () -> 1_000_000, deliveryMetrics)) {
             var valid = inbox.receipt(PlayerInboxService.BATTLE_ENQUEUE_METHOD, request);
             assertDoesNotThrow(() -> replay.verifyReceipt(PlayerInboxService.BATTLE_ENQUEUE_METHOD, request, valid, valid.getSeq()));
             assertThrows(SecurityException.class, () -> replay.verifyReceipt(PlayerInboxService.BATTLE_LOOKUP_METHOD, request, valid, valid.getSeq()));
@@ -182,7 +185,7 @@ class BattleTerminalRecoveryTest {
         org.mockito.Mockito.when(formations.resolveTerminalAfterDeadline(1)).thenThrow(new SecurityException("真实adopted0仍未知"));
         org.mockito.Mockito.when(formations.resolveTerminalAfterDeadline(2)).thenReturn(0);
         org.mockito.Mockito.when(formations.resolveTerminalAfterDeadline(17)).thenReturn(2);
-        try(var replay=new BattleCompletionReplay(f.store,formations,new Inbox(),(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000)) {
+        try(var replay=new BattleCompletionReplay(f.store,formations,new Inbox(),(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000,deliveryMetrics)) {
             replay.round();
             org.mockito.Mockito.verify(formations,org.mockito.Mockito.never()).resolveTerminalAfterDeadline(17);
             replay.round();
@@ -291,8 +294,12 @@ class BattleTerminalRecoveryTest {
             root = RatingTestDatabase.tidbRoot(System.getenv("MATCH_IT_TIDB"));
             fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(root,RatingTestDatabase.MYSQL_USER,
                     RatingTestDatabase.MYSQL_PASSWORD,"jterminal",false,List.of(1,2)),(c,principal)->{
-                GlobalMatchStore.registry().initializeFresh(c,principal);
-                BattleCompletionStore.registry().initializeFresh(c,principal);
+                // 普通构造器还会登记完整匹配单位；必须在授予NORMAL前用schema主体发布这两张表。
+                var matchSchema = GlobalMatchStore.registry();
+                matchSchema.register(com.game.match.global.pb.GlobalQueueUnitRow.getDefaultInstance());
+                matchSchema.register(com.game.match.global.pb.GlobalQueueUnitRegionRow.getDefaultInstance());
+                matchSchema.initializeFresh(c,principal);
+                // GlobalMatchStore.registry已包含两张完成来源表，不重复fresh建表。
                 try(var s=c.createStatement()) {
                 s.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARCHAR(255) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
                 s.execute("CREATE TABLE team_launch(request_id VARCHAR(36) PRIMARY KEY,state INT UNSIGNED NOT NULL,active BOOLEAN NOT NULL DEFAULT TRUE,team_id BIGINT UNSIGNED NOT NULL DEFAULT 0,team_version BIGINT UNSIGNED NOT NULL DEFAULT 0,lock_token VARCHAR(36) NOT NULL DEFAULT '',actor_player_id BIGINT UNSIGNED NOT NULL DEFAULT 0,owner_account VARCHAR(255) NOT NULL DEFAULT '',owner_revision BIGINT UNSIGNED NOT NULL DEFAULT 0,request_proto MEDIUMBLOB,record_proto MEDIUMBLOB,battle_id BIGINT UNSIGNED NOT NULL DEFAULT 0,updated_ms BIGINT UNSIGNED NOT NULL DEFAULT 0,original_proto MEDIUMBLOB)");
@@ -304,11 +311,21 @@ class BattleTerminalRecoveryTest {
                 s.execute("CREATE TABLE guild_activity_slot(player_id BIGINT UNSIGNED PRIMARY KEY,lobby_id BIGINT UNSIGNED,expires_ms BIGINT UNSIGNED)");
                 s.execute("CREATE TABLE guild_trial_lobby(lobby_id BIGINT UNSIGNED PRIMARY KEY,state INT,view_proto MEDIUMBLOB,guild_id BIGINT UNSIGNED,activity_id INT UNSIGNED)");
                 }
-                c.setAutoCommit(false);com.game.common.team.TeamPolicyAuthority.ensure(c,false,3);c.commit();c.setAutoCommit(true);
             });
             data = new DruidDataSource();data.setUrl(fixture.jdbcUrl("?useSSL=false&socketTimeout=4000&connectTimeout=3000"));
             data.setUsername(fixture.normalUser());data.setPassword(fixture.normalPassword());data.setMaxActive(8);data.setMaxWait(3000);
             AuthorityDataSourcePolicy.protectDruid(data,fixture.writerBoot(),true);
+            // 正式发布和NORMAL授权完成后，才走需要route_meta的策略事务。
+            try(var connection=data.getConnection()) {
+                connection.setAutoCommit(false);
+                try {
+                    com.game.common.team.TeamPolicyAuthority.ensure(connection,false,3);
+                    connection.commit();
+                } catch(java.sql.SQLException | RuntimeException | Error failure) {
+                    try { connection.rollback(); } catch(java.sql.SQLException rollback) { failure.addSuppressed(rollback); }
+                    throw failure;
+                }
+            }
             store = new GlobalMatchStore(data, new GlobalMatchProperties(true, true, 30, 180, 120, SECRET));
         }
         @AfterEach void close() throws Exception {
@@ -408,7 +425,7 @@ class BattleTerminalRecoveryTest {
             }
             var complete=prepare(919);store.commitOutcome(outcome(complete));
             var completion=new BattleCompletionStore(data);
-            try(var replay=new BattleCompletionReplay(completion,store,new Inbox(),(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000)) {
+            try(var replay=new BattleCompletionReplay(completion,store,new Inbox(),(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000,deliveryMetrics)) {
                 replay.round();
                 for(var f:originals) {
                     assertEquals(2,store.terminal(f.getBattleId()).getTerminalDecision());
@@ -427,9 +444,9 @@ class BattleTerminalRecoveryTest {
             assertThrows(RuntimeException.class,()->store.adopted(observed,0,observed.getInstanceId()));expire(observed);
             var future=prepare(923,30,3,2);
             var completion=new BattleCompletionStore(data);
-            try(var first=new BattleCompletionReplay(completion,store,new Inbox(),(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000);
+            try(var first=new BattleCompletionReplay(completion,store,new Inbox(),(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000,deliveryMetrics);
                 var second=new BattleCompletionReplay(completion,new GlobalMatchStore(data,new GlobalMatchProperties(true,true,30,180,120,SECRET)),
-                        new Inbox(),(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000);
+                        new Inbox(),(event,raw)->CompletableFuture.completedFuture(null),SECRET,()->1_000_000,deliveryMetrics);
                 var workers=Executors.newFixedThreadPool(2)) {
                 var start=new CyclicBarrier(2);
                 var a=workers.submit(()->{start.await();first.round();return null;});

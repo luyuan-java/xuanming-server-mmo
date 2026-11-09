@@ -4,6 +4,9 @@ import com.game.api.PlayerInboxService;
 import com.game.discovery.serviceauth.ServiceCallSignatures;
 import com.game.match.completion.pb.BattleCompletionRow;
 import com.game.match.global.GlobalMatchStore;
+import com.game.match.metrics.MatchMetrics;
+import com.game.match.metrics.MatchMetrics.TerminalDeliveryKind;
+import com.game.match.metrics.MatchMetrics.TerminalDeliveryOutcome;
 import com.game.match.completion.pb.BattlePlayerCompletionRow;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.player_inbox.BattleSettlementInboxRequest;
@@ -36,16 +39,19 @@ public final class BattleCompletionReplay implements AutoCloseable {
     private final String secret;
     private final ServiceCallSignatures replies;
     private final LongSupplier clock;
+    private final MatchMetrics metrics;
     private final ScheduledExecutorService worker=Executors.newSingleThreadScheduledExecutor(
             Thread.ofPlatform().name("battle-terminal-replay").daemon(true).factory());
     private final java.util.concurrent.locks.ReentrantLock turn=new java.util.concurrent.locks.ReentrantLock();
     private volatile boolean quiesced;
     private long deadlineCursor,deadlineUpper,resultCursor;
     private final PlayerScanCursor firstPlayers=new PlayerScanCursor(),waitingPlayers=new PlayerScanCursor();
-    public BattleCompletionReplay(BattleCompletionStore store,GlobalMatchStore formations,PlayerInboxService inbox,Results results,String secret,LongSupplier clock) {
+    public BattleCompletionReplay(BattleCompletionStore store,GlobalMatchStore formations,PlayerInboxService inbox,Results results,
+                                  String secret,LongSupplier clock,MatchMetrics metrics) {
         this.store=Objects.requireNonNull(store);this.formations=Objects.requireNonNull(formations);
         this.inbox=Objects.requireNonNull(inbox);this.results=Objects.requireNonNull(results);
         this.secret=secret;this.clock=Objects.requireNonNull(clock);
+        this.metrics=Objects.requireNonNull(metrics);
         this.replies=new ServiceCallSignatures(Map.of("inbox",secret),clock);
     }
     public void start(){worker.scheduleWithFixedDelay(this::roundSafely,0,500,TimeUnit.MILLISECONDS);}
@@ -81,7 +87,7 @@ public final class BattleCompletionReplay implements AutoCloseable {
         var batch=store.pendingInbox(first,cursor.battle,cursor.player,cursor.upper);cursor.upper=batch.upperBattle();
         if(batch.sources().isEmpty()){cursor.battle=0;cursor.player=0;cursor.upper=0;}
         for(var source:batch.sources()) {
-            try{if(store.claimInboxAttempt(source))deliver(source);}
+            try{deliver(source);}
             catch(InterruptedException stopped){Thread.currentThread().interrupt();return;}
             catch(Exception failure){log.warn("个人终局未取得Inbox永久APPLIED，保留来源和ready票，类别={}",failure.getClass().getSimpleName());}
             finally{cursor.battle=source.getBattleId();cursor.player=source.getPlayerId();}
@@ -89,30 +95,64 @@ public final class BattleCompletionReplay implements AutoCloseable {
         }
     }
     private void publish(BattleCompletionRow source)throws Exception {
-        if(source.getTerminalDecision()!=1||source.getOutcomeProtocolVersion()!=1||source.getSourceKind()!=2
-                ||!source.getOriginalDigest().equals(BattleCompletionStore.digest(source.getOriginal())))
-            throw new SecurityException("全局终局持久原件无效");
-        var event=BattleResultEvent.parseFrom(source.getOriginal());BattleCompletionStore.validateTerminal(source.getOriginal());
-        if(event.getBattleId()!=source.getBattleId())throw new SecurityException("全局终局身份不同");
-        var acknowledgement=results.publish(event,source.getOriginal());
-        if(acknowledgement==null)throw new IllegalStateException("全局结果发布没有确认句柄");
-        acknowledgement.get(3250,TimeUnit.MILLISECONDS);store.resultPublished(source);
+        var outcome = TerminalDeliveryOutcome.CORRUPT;
+        try {
+            if(source.getTerminalDecision()!=1||source.getOutcomeProtocolVersion()!=1||source.getSourceKind()!=2
+                    ||!source.getOriginalDigest().equals(BattleCompletionStore.digest(source.getOriginal())))
+                throw new SecurityException("全局终局持久原件无效");
+            var event=BattleResultEvent.parseFrom(source.getOriginal());BattleCompletionStore.validateTerminal(source.getOriginal());
+            if(event.getBattleId()!=source.getBattleId())throw new SecurityException("全局终局身份不同");
+            outcome = TerminalDeliveryOutcome.FAILED;
+            var acknowledgement=results.publish(event,source.getOriginal());
+            if(acknowledgement==null)throw new IllegalStateException("全局结果发布没有确认句柄");
+            acknowledgement.get(3250,TimeUnit.MILLISECONDS);
+            outcome = TerminalDeliveryOutcome.STORE_ERROR;
+            store.resultPublished(source);
+            outcome = TerminalDeliveryOutcome.PUBLISHED;
+        } finally {
+            observeDelivery(TerminalDeliveryKind.RESULT, outcome);
+        }
     }
     private void deliver(BattlePlayerCompletionRow source)throws Exception {
-        if(source.getOwnerAccount().isBlank()||source.getOwnerRevision()==0||source.getIssuedAtMs()<=0
-                ||!source.getOriginalDigest().equals(BattleCompletionStore.digest(source.getOriginal())))
-            throw new SecurityException("个人终局原身份或正文损坏");
         boolean first=source.getInboxSeq()==0;
-        String method=first?PlayerInboxService.BATTLE_ENQUEUE_METHOD:PlayerInboxService.BATTLE_LOOKUP_METHOD;
-        var request=BattleSettlementInboxRequest.newBuilder().setPlayerId(source.getPlayerId()).setBattleId(source.getBattleId())
-                .setExpectedOwnerAccount(source.getOwnerAccount()).setExpectedOwnerRevision(source.getOwnerRevision())
-                .setIssuedAtMs(source.getIssuedAtMs()).setSettlementPayload(source.getOriginal()).build();
-        var signed=ServiceCallSignatures.sign(method,request,"match",secret,clock.getAsLong());
-        var pending=first?inbox.enqueueBattleSettlement(signed):inbox.lookupBattleSettlement(signed);
-        if(pending==null)throw new IllegalStateException("Inbox未返回确认句柄");
-        var response=pending.get(3250,TimeUnit.MILLISECONDS);
-        verifyReceipt(method,request,response,source.getInboxSeq());
-        store.inboxReceipt(source,response.getSeq(),response.getState()==PlayerInboxItemState.PLAYER_INBOX_ITEM_APPLIED);
+        var kind = first ? TerminalDeliveryKind.FIRST : TerminalDeliveryKind.WAITING;
+        var outcome = TerminalDeliveryOutcome.STORE_ERROR;
+        try {
+            // 沿用原顺序：先在原 owner/行锁下领取退避，再校验原件和发 RPC。
+            if (!store.claimInboxAttempt(source)) {
+                outcome = TerminalDeliveryOutcome.CLAIM_LOST;
+                return;
+            }
+            outcome = TerminalDeliveryOutcome.CORRUPT;
+            if(source.getOwnerAccount().isBlank()||source.getOwnerRevision()==0||source.getIssuedAtMs()<=0
+                    ||!source.getOriginalDigest().equals(BattleCompletionStore.digest(source.getOriginal())))
+                throw new SecurityException("个人终局原身份或正文损坏");
+            outcome = TerminalDeliveryOutcome.FAILED;
+            String method=first?PlayerInboxService.BATTLE_ENQUEUE_METHOD:PlayerInboxService.BATTLE_LOOKUP_METHOD;
+            var request=BattleSettlementInboxRequest.newBuilder().setPlayerId(source.getPlayerId()).setBattleId(source.getBattleId())
+                    .setExpectedOwnerAccount(source.getOwnerAccount()).setExpectedOwnerRevision(source.getOwnerRevision())
+                    .setIssuedAtMs(source.getIssuedAtMs()).setSettlementPayload(source.getOriginal()).build();
+            var signed=ServiceCallSignatures.sign(method,request,"match",secret,clock.getAsLong());
+            var pending=first?inbox.enqueueBattleSettlement(signed):inbox.lookupBattleSettlement(signed);
+            if(pending==null)throw new IllegalStateException("Inbox未返回确认句柄");
+            var response=pending.get(3250,TimeUnit.MILLISECONDS);
+            verifyReceipt(method,request,response,source.getInboxSeq());
+            boolean applied = response.getState()==PlayerInboxItemState.PLAYER_INBOX_ITEM_APPLIED;
+            outcome = TerminalDeliveryOutcome.STORE_ERROR;
+            store.inboxReceipt(source,response.getSeq(),applied);
+            outcome = applied ? TerminalDeliveryOutcome.APPLIED : TerminalDeliveryOutcome.PENDING;
+        } finally {
+            observeDelivery(kind, outcome);
+        }
+    }
+
+    /** 指标注册或记录故障不能覆盖原投递结局、改变中断处理，或阻断后续来源。 */
+    private void observeDelivery(TerminalDeliveryKind kind, TerminalDeliveryOutcome outcome) {
+        try {
+            metrics.terminalDelivery(kind, outcome);
+        } catch (RuntimeException failure) {
+            log.warn("终局投递指标记录失败，类别={}", failure.getClass().getSimpleName());
+        }
     }
     /** 回复必须绑定本次方法、原全文摘要、永久seq和内容摘要，单独passed或seq非零不授予到账。 */
     public void verifyReceipt(String method,BattleSettlementInboxRequest request,BattleSettlementInboxResponse response,long knownSeq) {

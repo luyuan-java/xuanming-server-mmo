@@ -77,6 +77,8 @@ public final class BattleSnapshots {
             snapshot.setCombat(attributes.combat());
         }
         for (int skill : player.skills()) {
+            int rank = player.skillCatalog().effectiveRank(player.classId(), player.level(), player.learnedSkills(), skill);
+            if (rank != 0) snapshot.putSkillRanks(skill, rank);
             // 原顺序；跳过 0 与查不到行的；剔除被动 / 持续施法 / 开关（引擎再过滤一次）
             if (skill != 0 && tables.skillExists(skill) && tables.castable(skill)) {
                 snapshot.addSkillTableIds(skill);

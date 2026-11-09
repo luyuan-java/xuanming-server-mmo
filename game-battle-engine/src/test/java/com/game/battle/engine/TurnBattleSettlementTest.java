@@ -425,6 +425,8 @@ class TurnBattleSettlementTest {
         BattleEventItem itemEvent = firstEvent(result, BATTLE_EVENT_ITEM);
         assertThat(itemEvent).isNotNull();
         assertThat(itemEvent.getValue()).as("纯回蓝药：value 取回蓝量").isEqualTo(30);
+        assertThat(itemEvent.hasManaDelta()).isTrue();
+        assertThat(itemEvent.getManaDelta()).isEqualTo(30);
         assertThat(itemEvent.getTargetManaAfter()).as("10 + 30").isEqualTo(40);
     }
 

@@ -16,6 +16,13 @@
 
     <dependencies>
         <dependency>
+            <!-- 构建期检查本版持久字段历史，不进入服务运行时依赖。 -->
+            <groupId>com.game</groupId>
+            <artifactId>game-contract-check</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <!-- 复用唯一的 TiDB 强读会话判据；本模块不复制数据库一致性策略。 -->
             <groupId>com.game</groupId>
             <artifactId>game-discovery</artifactId>

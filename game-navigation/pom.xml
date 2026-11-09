@@ -10,7 +10,7 @@
     </parent>
     <artifactId>game-navigation</artifactId>
     <name>game-navigation</name>
-    <description>无框架、无查询工作区的固定 UE MSET 导航网格读取库</description>
+    <description>纯 Java 固定 UE MSET 导航网格读取与有界地表查询库</description>
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>

@@ -26,6 +26,8 @@ public interface AssetAudit {
         ATTRIBUTE_RESET,
         /** 开新加点方案的金币（同上）。 */
         ATTRIBUTE_SCHEME_CREATE,
+        /** 职业技能修习。 */
+        SKILL_UPGRADE,
         /** 宝宝洗点的金币（同上）。 */
         PET_RESET,
         /** 宝宝改名的金币（同上）。 */

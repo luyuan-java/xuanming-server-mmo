@@ -35,7 +35,7 @@ import org.redisson.config.Config;
 
 /**
  * 同号节点跨 zone 碰撞在<b>真 Redis</b> 上的备战定位（spectate-spec §10.4 末条、Z3；缺省跳过：{@code -Dgame.it.redis=redis://127.0.0.1:6379}）：
- * 位置记录（{@code game:location:<pid>}）与 scene 目录（{@code game:nodes:scene:<zone>}）都经生产用的类写进 Redis——scene 节点自己发布目录、
+ * 位置记录（{@code game:location:<pid>}）与 scene v2 目录（{@code game:world:{z:<zone>}:nodes:scene}）都经生产用的类写进 Redis——scene 节点自己发布目录、
  * 写位置用的就是这两个类——再由生产装配的 {@link SceneAssetLocator} 读出来；只有 scene 的 Dubbo 入口是替身。钉的是键的形状：
  * 两个 zone 的目录是<b>两把不同的键</b>、字段名都是 {@code "1"}，读错键就会打到另一个 zone 的同号节点。
  *
@@ -103,7 +103,11 @@ class ScenePreparerRedisIntegrationTest {
             redis.getKeys().delete(REDIS_KEYS.playerLocation(playerId));
         }
         for (int zone : new int[] {zone1, zone2, zone3}) {
-            // RMapCache 除了哈希本身还有记 TTL 的伴生键：整个对象一起删
+            // 随机 zone 只属于本夹具；v2 原件、过期索引、水位及目录登记都一并清理。
+            redis.getKeys().delete(REDIS_KEYS.zoneNodeDirectory(NodeTypes.SCENE, zone),
+                    REDIS_KEYS.zoneNodeExpiry(NodeTypes.SCENE, zone), REDIS_KEYS.zoneNodeSeen(NodeTypes.SCENE, zone),
+                    REDIS_KEYS.zoneDirectoryFormat(zone), REDIS_KEYS.zoneNodeTypes(zone));
+            // 兼容目录的 RMapCache 可能有伴生键，仍按对象清理本夹具的旧入口。
             redis.getMapCache(REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, zone), StringCodec.INSTANCE).delete();
         }
     }
@@ -151,11 +155,15 @@ class ScenePreparerRedisIntegrationTest {
         assertThat(sceneZ1.calls).extracting(FakeSceneBattle.Call::targetInstanceId).containsExactly("it-scene-z1");
         assertThat(sceneZ2.calls).extracting(FakeSceneBattle.Call::targetInstanceId).containsExactly("it-scene-z2");
         // 碰撞是存储里真实存在的：两把键、同一个字段名
-        String keyZ1 = REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, zone1);
-        String keyZ2 = REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, zone2);
+        String keyZ1 = REDIS_KEYS.zoneNodeDirectory(NodeTypes.SCENE, zone1);
+        String keyZ2 = REDIS_KEYS.zoneNodeDirectory(NodeTypes.SCENE, zone2);
         assertThat(keyZ1).isNotEqualTo(keyZ2);
-        assertThat(redis.<String, byte[]>getMapCache(keyZ1, StringCodec.INSTANCE).readAllKeySet()).containsExactly("1");
-        assertThat(redis.<String, byte[]>getMapCache(keyZ2, StringCodec.INSTANCE).readAllKeySet()).containsExactly("1");
+        assertThat(redis.<String, byte[]>getMap(keyZ1, StringCodec.INSTANCE).readAllKeySet()).containsExactly("1");
+        assertThat(redis.<String, byte[]>getMap(keyZ2, StringCodec.INSTANCE).readAllKeySet()).containsExactly("1");
+        assertThat(redis.getBucket(REDIS_KEYS.zoneDirectoryFormat(zone1), StringCodec.INSTANCE).get()).isEqualTo("2");
+        assertThat(redis.getBucket(REDIS_KEYS.zoneDirectoryFormat(zone2), StringCodec.INSTANCE).get()).isEqualTo("2");
+        assertThat(redis.getMapCache(REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, zone1), StringCodec.INSTANCE).readAllKeySet()).isEmpty();
+        assertThat(redis.getMapCache(REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, zone2), StringCodec.INSTANCE).readAllKeySet()).isEmpty();
         assertThat(scenes.list(zone1)).extracting(SceneNodeInfo::getInstanceId).containsExactly("it-scene-z1");
         assertThat(scenes.list(zone2)).extracting(SceneNodeInfo::getInstanceId).containsExactly("it-scene-z2");
     }

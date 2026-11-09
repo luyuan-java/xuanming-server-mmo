@@ -218,23 +218,29 @@ final class BattleUnit {
     }
 
     /**
-     * 回血（{@code ApplyHeal}，{@code engine.cpp:1361-1371}）：{@code after = min(max_health, (uint64)(当前 + raw))}，
-     * 返回 {@code after - before}（uint64 减法）。当前气血超过上限时差值回绕成巨大值，是基线行为，照搬（规格 §11.1 第 8 条）。
-     *
-     * <p>有意差异 D5：C++ 对 NaN、无穷与 ≥ 2^64 的和做 {@code static_cast<uint64_t>} 是未定义行为；这里非有限的 raw 按 0 处理
-     * （不回血、返回 0），和 ≥ 2^64 时饱和到 UINT64_MAX 再与上限取小。
+     * 预测实际回血量（固定源 993b6da9 的 {@code LandedHeal}），不改单位状态。
+     * 只截断本次正的有限治疗量，再与精确的 uint64 缺口取小；已有气血不转 double。
+     * 满血、超上限或已死亡时为零，不能因治疗把气血拉低或把负差回绕成巨大收益。
      */
+    long landedHeal(double rawHeal) {
+        if (!(rawHeal > 0) || !Double.isFinite(rawHeal) || isDead()) return 0;
+        long missing = Long.compareUnsigned(maxHealth(), health()) > 0 ? maxHealth() - health() : 0;
+        return Unsigned.minUnsigned(missing, Unsigned.fromDoubleSaturating(rawHeal));
+    }
+
+    /** 职业技能、药品和周期治疗共用实际落血，预测与执行使用同一缺口口径。 */
     long applyHeal(double rawHeal) {
-        if (rawHeal <= 0 || state.getIsDead()) {
-            return 0;
-        }
-        if (!Double.isFinite(rawHeal)) {
-            return 0; // D5
-        }
-        long healthBefore = attributes.getHealth();
-        long healthAfter = Unsigned.minUnsigned(state.getMaxHealth(),
-                Unsigned.fromDoubleSaturating(Unsigned.toDouble(healthBefore) + rawHeal));
-        attributes.setHealth(healthAfter);
-        return healthAfter - healthBefore;
+        long healed = landedHeal(rawHeal);
+        if (healed != 0) attributes.setHealth(health() + healed);
+        return healed;
+    }
+
+    /** 回蓝只补精确的 uint64 缺口；先封顶再相加，超上限保持原值，不复活死亡单位。 */
+    long restoreMana(long amount) {
+        if (isDead()) return 0;
+        long missing = Long.compareUnsigned(maxMana(), mana()) > 0 ? maxMana() - mana() : 0;
+        long restored = Unsigned.minUnsigned(missing, amount);
+        if (restored != 0) attributes.setMana(mana() + restored);
+        return restored;
     }
 }

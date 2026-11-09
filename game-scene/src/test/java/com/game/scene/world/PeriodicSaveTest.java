@@ -31,7 +31,7 @@ class PeriodicSaveTest {
     private static final long LINK = 1;
     private static final Vec3 SAVED_AT = new Vec3(10, 20, 0);
     private static final PlayerState FACING_EAST =
-            PlayerState.newBuilder().setFacing(Facing.newBuilder().setZ(90)).build();
+            SceneWorldTest.INITIAL_STATE.toBuilder().setFacing(Facing.newBuilder().setZ(90)).build();
 
     private RecordingSink sink;
     private FakePlayerRepository repo;
@@ -85,6 +85,21 @@ class PeriodicSaveTest {
         assertThat(world.saveDuePlayers(1)).isZero();
         assertThat(repo.pendingProgress()).isZero();
         assertThat(periodic("unchanged")).isEqualTo(1);
+    }
+
+    @Test
+    void 旧存档缺少技能书时补种子并只写一次() {
+        PlayerState stored = FACING_EAST.toBuilder().clearSkills().build();
+        repo.put(new PlayerData(1000, 1, 2, 0, "", 5, 1, SAVED_AT, stored));
+        ScenePlayer player = enter(11, 1000);
+        assertThat(player.persistedState()).isEqualTo(stored);
+        assertThat(player.persistentState()).isEqualTo(FACING_EAST);
+        assertThat(world.requestSave(player)).isEqualTo(SceneWorld.SaveRequest.WRITTEN);
+        PendingProgress pending = repo.takeProgress();
+        assertThat(pending.save().state()).isEqualTo(FACING_EAST);
+        pending.complete(ProgressResult.SAVED);
+        assertThat(world.requestSave(player)).isEqualTo(SceneWorld.SaveRequest.UNCHANGED);
+        assertThat(repo.pendingProgress()).isZero();
     }
 
     @Test

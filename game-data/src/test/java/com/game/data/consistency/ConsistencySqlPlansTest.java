@@ -101,7 +101,7 @@ class ConsistencySqlPlansTest {
     private static ConsistencyService service(Connection db){
         ConsistencySqlReader reader=(sql,parameters,limit,budget)->{
             var results=new ArrayList<Map<String,Object>>();
-            try(var statement=db.prepareStatement(sql)) {
+            try(var statement=db.prepareStatement(H2ConsistencySql.forDatabase(db,sql))) {
                 for(int i=0;i<parameters.size();i++)statement.setObject(i+1,parameters.get(i));
                 try(var rows=statement.executeQuery()){
                     var metadata=rows.getMetaData();

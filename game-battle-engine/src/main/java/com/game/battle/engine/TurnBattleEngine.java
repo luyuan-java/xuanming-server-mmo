@@ -24,7 +24,6 @@ import com.game.table.MonsterTable;
 import com.game.table.Monsterdrop;
 import com.game.table.SkillTable;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -49,15 +48,6 @@ import java.util.TreeMap;
  */
 public final class TurnBattleEngine {
 
-    /**
-     * 出手序：speed 降序，平手时 actor_id 升序，<strong>两个键都按无符号比较</strong>（{@code BuildTurnOrder}，{@code engine.cpp:697-703}）。
-     * 怪物 / 宝宝的 actor_id 在 long 里是负数，有符号比较会让同速的怪物排到玩家前面（规格 §3.3 的 G-TIE）。
-     * actor_id 唯一，键构成全序，所以基线的不稳定 {@code std::sort} 与这里的稳定排序结果相同。
-     */
-    private static final Comparator<BattleUnit> TURN_ORDER = (lhs, rhs) -> lhs.speed() != rhs.speed()
-            ? Long.compareUnsigned(rhs.speed(), lhs.speed())
-            : Long.compareUnsigned(lhs.actorId(), rhs.actorId());
-
     /** 默认行动：普攻，目标 0（结算时必然重选，{@code FillDefaultActions}，{@code engine.cpp:681-685}）。 */
     private static final BattleAction DEFAULT_ACTION = BattleAction.newBuilder()
             .setActionType(eBattleActionType.BATTLE_ACTION_ATTACK)
@@ -73,6 +63,8 @@ public final class TurnBattleEngine {
     private final ItemLedger ledger;
     private final ActionChecks checks;
     private final BuffEngine buffs;
+    private final ClassSkillExecution classSkills;
+    private final AutoClassSkillSelector autoClassSkills;
     /** actor_id → 本回合行动；按 actor_id 无符号升序（基线 {@code std::map}）。现在只做查找，用有序容器防止日后有人遍历它。 */
     private final NavigableMap<Long, BattleAction> pendingActions = new TreeMap<>(Long::compareUnsigned);
     /** uint32；回合上限（{@code engine.h:228}）。 */
@@ -88,6 +80,8 @@ public final class TurnBattleEngine {
         this.ledger = new ItemLedger(ctx, request);
         this.checks = new ActionChecks(ctx, ledger);
         this.buffs = new BuffEngine(ctx);
+        this.classSkills = new ClassSkillExecution(ctx, buffs, checks);
+        this.autoClassSkills = new AutoClassSkillSelector(ctx, checks, classSkills, buffs);
     }
 
     // =====================================================================================================
@@ -228,12 +222,19 @@ public final class TurnBattleEngine {
                 actor.addBuffs(buff);
                 buffs.reserveSnapshotBuffId(buff.getBuffId());
             }
-            // 技能只收回合制可施放的（引擎侧兜底，快照来自另一进程，不能只信它）
+            // 职业重数按当前职业和等级重新夹取；被动也保留有效重数，供治疗被动使用。
+            snapshot.getSkillRanksMap().forEach((skillId, storedRank) -> ctx.data().skill(skillId).ifPresent(skill -> {
+                if (!BattleRules.isClassSkill(skill) || skill.getClassId() != actor.getClassId()) return;
+                int rank = ClassSkillRules.effectiveRank(storedRank, actor.getLevel(), skill.getUnlockLevel(), skill.getMaxRank());
+                if (rank != 0) actor.putSkillRanks(skillId, rank);
+            }));
+            // 技能只收回合制可施放且已具有有效职业重数的；外来快照不能授予未学技能。
             for (int skillTableId : snapshot.getSkillTableIdsList()) {
                 Optional<SkillTable> skillRow = ctx.data().skill(skillTableId);
                 if (skillRow.isEmpty() || !BattleRules.isTurnBattleCastableSkill(skillRow.get())) {
                     continue;
                 }
+                if (BattleRules.isClassSkill(skillRow.get()) && actor.getSkillRanksOrDefault(skillTableId, 0) == 0) continue;
                 actor.addSkillTableIds(skillTableId);
             }
             ctx.units().add(new BattleUnit(actor));
@@ -543,7 +544,8 @@ public final class TurnBattleEngine {
 
     /**
      * 按单位插入序，给每个存活、未逃、还没有行动的单位补一条「普攻，目标 0」（{@code FillDefaultActions}，{@code engine.cpp:673-687}）：
-     * 玩家与怪物仍用普攻；宝宝按快照技能顺序尝试首个通过原校验链的技能，目标按单位插入序取存活敌方。
+     * 挂机玩家先尝试有净收益的职业技能；非挂机玩家和怪物仍用普攻。
+     * 宝宝按快照技能顺序尝试首个通过原校验链的技能，目标按单位插入序取存活敌方。
      * 没有可用技能则普攻，也包括被眩晕的单位（执行时被跳过）。选技能与目标不耗随机数。
      */
     private void fillDefaultActions() {
@@ -552,7 +554,10 @@ public final class TurnBattleEngine {
                 continue;
             }
             if (!pendingActions.containsKey(unit.actorId())) {
-                pendingActions.put(unit.actorId(), unit.isPet() ? defaultPetAction(unit) : DEFAULT_ACTION);
+                BattleAction action = unit.isPet() ? defaultPetAction(unit)
+                        : unit.isPlayer() && unit.isAuto() ? autoClassSkills.select(unit).orElse(DEFAULT_ACTION)
+                        : DEFAULT_ACTION;
+                pendingActions.put(unit.actorId(), action);
             }
         }
     }
@@ -575,7 +580,7 @@ public final class TurnBattleEngine {
         return DEFAULT_ACTION;
     }
 
-    /** 回合开始时存活未逃的单位，按 {@link #TURN_ORDER} 排序（{@code BuildTurnOrder}，{@code engine.cpp:689-711}）。 */
+    /** 回合开始时固定出手序：可施放职业技能的 initiative、有效速度降序，最后按无符号 actor_id 升序。 */
     private List<Long> buildTurnOrder() {
         List<BattleUnit> ordered = new ArrayList<>(ctx.units().size());
         for (BattleUnit unit : ctx.units()) {
@@ -583,12 +588,25 @@ public final class TurnBattleEngine {
                 ordered.add(unit);
             }
         }
-        ordered.sort(TURN_ORDER);
+        ordered.sort((left, right) -> {
+            int initiative = Integer.compare(actionInitiative(right), actionInitiative(left));
+            if (initiative != 0) return initiative;
+            int speed = Long.compareUnsigned(ctx.effectiveSpeed(right), ctx.effectiveSpeed(left));
+            return speed != 0 ? speed : Long.compareUnsigned(left.actorId(), right.actorId());
+        });
         List<Long> order = new ArrayList<>(ordered.size());
         for (BattleUnit unit : ordered) {
             order.add(unit.actorId());
         }
         return List.copyOf(order);
+    }
+
+    private int actionInitiative(BattleUnit actor) {
+        BattleAction action = pendingActions.get(actor.actorId());
+        if (action == null || action.getActionType() != eBattleActionType.BATTLE_ACTION_SKILL) return 0;
+        Optional<SkillTable> skill = ctx.data().skill(action.getSkillTableId());
+        if (skill.isEmpty() || !BattleRules.isClassSkill(skill.get()) || skill.get().getInitiative() == 0) return 0;
+        return checks.checkActionPrerequisites(actor, action) == ActionChecks.SUCCESS ? skill.get().getInitiative() : 0;
     }
 
     /**
@@ -659,7 +677,7 @@ public final class TurnBattleEngine {
         }
 
         BattleContext.FinalDamage finalDamage = ctx.calculateFinalDamage(actor, target,
-                BattleConstants.BASIC_ATTACK_BASE_DAMAGE, actor.physicalAttack(), 1.0, CombatDamageRules.PHYSICAL_DAMAGE);
+                BattleConstants.BASIC_ATTACK_BASE_DAMAGE, ctx.effectivePhysicalAttack(actor), 1.0, CombatDamageRules.PHYSICAL_DAMAGE);
         double damage = finalDamage.value();
         if (kind == eBattleHitKind.BATTLE_HIT_COMBO) damage *= BattleConstants.COMBO_DAMAGE_PERCENT / 100.0;
         long dealt = target.applyDamage(damage);
@@ -713,6 +731,13 @@ public final class TurnBattleEngine {
      * </ol>
      */
     private void executeSkill(BattleUnit actor, BattleAction action) {
+        Optional<SkillTable> classRow = ctx.data().skill(action.getSkillTableId());
+        if (classRow.isPresent() && BattleRules.isClassSkill(classRow.get())) {
+            if (classSkills.execute(actor, action, classRow.get()) == ClassSkillExecution.Outcome.FALLBACK_ATTACK) {
+                executeAttack(actor, action.getTargetId());
+            }
+            return;
+        }
         if (checks.checkActionPrerequisites(actor, action) != ActionChecks.SUCCESS) {
             executeAttack(actor, action.getTargetId());
             return;
@@ -788,7 +813,7 @@ public final class TurnBattleEngine {
 
         if (baseDamage > 0) {
             long attack = CombatDamageRules.selectAttack(row.getDamageType(),
-                    actor.physicalAttack(), actor.magicAttack());
+                    ctx.effectivePhysicalAttack(actor), actor.magicAttack());
             BattleContext.FinalDamage finalDamage = ctx.calculateFinalDamage(actor, target, baseDamage, attack,
                     row.getAttackMultiplier(), row.getDamageType());
             long dealt = target.applyDamage(finalDamage.value());
@@ -814,7 +839,7 @@ public final class TurnBattleEngine {
 
     /**
      * 扣蓝（{@code ConsumeSkillMana}，{@code engine.cpp:924-940}；规格 §4.6）：耗蓝为 0 不出事件；{@code after = before > cost ? before - cost : 0}
-     * （uint64）；MANA 事件 source = target = 施法者，带 skill_table_id，value = 实耗，hp_after = 施法者气血，mana_after = after。
+     * （uint64）；MANA 事件 source = target = 施法者，value = 实耗，mana_delta 为负的实际量，越过 sint64 时饱和显示。
      */
     private void consumeSkillMana(BattleUnit actor, SkillTable row, int skillTableId) {
         long manaCost = BattleRules.skillManaCost(row);
@@ -828,6 +853,7 @@ public final class TurnBattleEngine {
         ctx.events().append(eBattleEventType.BATTLE_EVENT_MANA, actor.actorId(), actor.actorId())
                 .setSkillTableId(skillTableId)
                 .setValue(manaBefore - manaAfter)
+                .setManaDelta(EventLog.signedManaDelta(manaBefore - manaAfter, false))
                 .setTargetHealthAfter(actor.health())
                 .setTargetManaAfter(manaAfter);
     }
@@ -849,7 +875,7 @@ public final class TurnBattleEngine {
     private void executeFlee(BattleUnit actor) {
         boolean success = false;
         if (ctx.isPve()) {
-            double chance = BattleRules.fleeChance(actor.speed(), ctx.maxAliveEnemySpeed(actor));
+            double chance = BattleRules.fleeChance(ctx.effectiveSpeed(actor), ctx.maxAliveEnemySpeed(actor));
             success = ctx.rng().rand01() < chance;
         }
         ctx.events().append(eBattleEventType.BATTLE_EVENT_FLEE, actor.actorId(), actor.actorId())

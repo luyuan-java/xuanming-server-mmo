@@ -141,6 +141,7 @@ public final class GateMetrics {
 
     /** gate 主动断开连接的原因（{@code game.gate.disconnects{reason}}），每次主动断开恰好计一次；客户端自己断开、停服 / 丢租约的批量关闭不计。 */
     public enum DisconnectReason {
+        CLIENT_IDLE,
         HANDSHAKE_TIMEOUT,
         HANDSHAKE_REJECTED,
         NO_HANDSHAKE,
@@ -293,6 +294,9 @@ public final class GateMetrics {
     }
 
     private final MeterRegistry registry;
+    /** 公网连接心跳的结果标签固定，不携带玩家、会话或地址。 */
+    public enum HeartbeatResult { ANSWERED, EXCESS, BEFORE_VERIFY, TRACKED, IDLE_CLOSED, HANDSHAKE_TIMEOUTS, DEFERRED }
+    private final Map<HeartbeatResult, Counter> heartbeats;
     private final Counter linkIdleTimeouts;
     private final Counter linksSuperseded;
     private final Map<HandshakeResult, Counter> handshakes;
@@ -319,6 +323,7 @@ public final class GateMetrics {
 
     public GateMetrics(MeterRegistry registry) {
         this.registry = registry;
+        this.heartbeats = counters(HeartbeatResult.class, "game.gate.client.heartbeat", "result", "客户端心跳与连接期限");
         linkIdleTimeouts = registry.counter("game.gate.link.idle.timeouts");
         linksSuperseded = registry.counter("game.gate.scene.links.superseded");
         this.handshakes = counters(HandshakeResult.class, HANDSHAKES, "result", "gate 令牌握手结果");
@@ -392,6 +397,10 @@ public final class GateMetrics {
 
     public void handshake(HandshakeResult result) {
         handshakes.get(result).increment();
+    }
+
+    public void heartbeat(HeartbeatResult result) {
+        heartbeats.get(result).increment();
     }
 
     public void disconnected(DisconnectReason reason) {

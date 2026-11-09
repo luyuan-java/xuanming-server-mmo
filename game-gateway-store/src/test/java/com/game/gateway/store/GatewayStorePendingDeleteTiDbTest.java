@@ -62,7 +62,7 @@ class GatewayStorePendingDeleteTiDbTest {
     /** 固定真实AuthorityConnection，不包Connection；TM与MyBatis共用同一DataSource键。 */
     private static final class Pinned extends AbstractDataSource implements SmartDataSource,AutoCloseable{
         final Connection c;final Budget budget;private Thread thread;private boolean closed;
-        Pinned(Connection c,Budget b){this.c=c;budget=b;}
+        Pinned(Connection c,Budget b)throws SQLException{this.c=tightenNormalConnection(c);budget=b;}
         @Override public synchronized Connection getConnection()throws SQLException{
             if(closed)throw new SQLException("NORMAL固定会话已关闭");
             if(budget.armed()){if(thread==null)thread=Thread.currentThread();else if(thread!=Thread.currentThread())throw new SQLException("NORMAL会话禁止跨worker");budget.check();}if(c.getNetworkTimeout()!=3000)throw new SQLException("NORMAL原网络上限不为3秒","08007");return c;
@@ -71,9 +71,36 @@ class GatewayStorePendingDeleteTiDbTest {
         @Override public boolean shouldClose(Connection ignored){return false;}
         @Override public synchronized void close()throws SQLException{if(!closed){c.close();closed=true;}}
     }
+    /**
+     * fixture 的 supplied Properties 为建连/初始化保留 5 秒，会覆盖 URL 中的 3000。
+     * 仅在本 harness 开始争用前把已受管的 NORMAL 连接收紧至原 3 秒并读回；不改 admin 或 fixture 全局预算。
+     */
+    static Connection tightenNormalConnection(Connection connection)throws SQLException{
+        try{
+            connection.setNetworkTimeout(Runnable::run,3000);
+            if(connection.getNetworkTimeout()!=3000)throw new SQLException("NORMAL原网络上限未收紧至3秒","08007");
+            return connection;
+        }catch(SQLException|RuntimeException|Error failure){
+            try{connection.close();}catch(SQLException|RuntimeException|Error close){if(close!=failure)failure.addSuppressed(close);}
+            throw failure;
+        }
+    }
     private record SqlError(String type,String state,int vendor,int suppressed){}
     private record ReadBack(long ordinal,String role,Object value){}
     private record Done(String role,Object value,boolean success,String failureType,List<SqlError> errors){}
+    /** 只在原登记断言失败时收集已完成结果；不追加等待，不读取运行中 worker 的可变 Trace 或打印 SQL/凭据。 */
+    private static String actorStatus(Future<Done> actor,Worker worker){
+        String prefix=worker.role+" attempts="+worker.trace.attempts.get();
+        if(actor==null)return prefix+" state=NOT_SUBMITTED";
+        if(!actor.isDone())return prefix+" state=RUNNING";
+        try{
+            Done done=actor.get(0,TimeUnit.NANOSECONDS);
+            return prefix+" state=DONE success="+done.success()+" failureType="+done.failureType()+" SQL="+done.errors();
+        }catch(InterruptedException interrupted){Thread.currentThread().interrupt();return prefix+" state=INTERRUPTED";}
+        catch(CancellationException cancelled){return prefix+" state=CANCELLED";}
+        catch(TimeoutException pending){return prefix+" state=RUNNING";}
+        catch(ExecutionException failed){return prefix+" state=FAILED type="+failed.getCause().getClass().getName();}
+    }
     private record Edge(String waiter,String holder,String table,String lockKind,String keyIdentity){}
     private record KeyMatch(String lockKind,String keyIdentity){}
     private static final class Trace{
@@ -159,7 +186,9 @@ class GatewayStorePendingDeleteTiDbTest {
             try{
                 delete(budget);sessions.put("holder",connectionId(holder,budget,5));threads=Executors.newFixedThreadPool(2);workersTerminated=false;fixture.trackNormalActors(threads);
                 a=threads.submit(()->first.execute(plain));b=threads.submit(()->second.execute(plain));
-                assertTrue(registered.await(budget.nanos(),TimeUnit.NANOSECONDS),"两个owned NORMAL事务必须登记");
+                Future<Done> registeredFirst=a,registeredSecond=b;
+                assertTrue(registered.await(budget.nanos(),TimeUnit.NANOSECONDS),()->"两个owned NORMAL事务必须登记；"
+                        +actorStatus(registeredFirst,first)+"；"+actorStatus(registeredSecond,second));
                 List<Edge> observed=awaitGraph(a,b);
                 System.out.println("gateway_pending_owned_graph kind="+kind+" plain="+plain+" consistent_samples=2 edges="+observed);
                 budget.check();holder.commit();holderReleased=true;budget.check();

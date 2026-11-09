@@ -39,6 +39,25 @@ star 数为 2026-09-29 GitHub API 实测（CI、本地编排、依赖镜像、�
 | 部署命名空间（多个游戏共用中间件时的名字隔离） | 自有的不可变值类型 `GameNamespace` + `@ConfigurationProperties`（`GameNamespaceProperties`）加 Bean Validation（`@Validated` + `@Pattern`）绑定校验 + 自动配置注册的名字类 bean（Redis `RedisKeys` 的 `<ns>:`、Kafka `KafkaNames` 的 `<ns>-`），经构造器注入；JDBC URL 写 `${game.namespace:game}`。非法值由 Spring Boot 自带的绑定校验失败报告（`BindValidationFailureAnalyzer`）拒启，不写自定义 EnvironmentPostProcessor / FailureAnalyzer，没有进程级全局值 | — | 进程级静态全局值（5df849e 的做法：EnvironmentPostProcessor 定格 + 自写 FailureAnalyzer + 测试按系统属性分 surefire 执行，2026-10-12 换掉）；Redisson `NameMapper`；Spring Cloud 一类的多租户框架 | 与 Spring Session 的 `spring.session.redis.namespace`、Spring Cache 的 `key-prefix` 同构（一个配置项 → 注入的唯一键工厂统一加前缀）。测试直接构造任意命名空间的实例，同一个 JVM 里可以并存。**不用 Redisson NameMapper**：它只映射对象名，管不到 Lua 里经 ARGV 拼的键前缀与 SCAN 模式，会静默读到别的部署（本仓库有三处这样的 Lua）。见 architecture.md §6.2 |
 | 配置校验（`@ConfigurationProperties` 的 `@Validated`） | Hibernate Validator 8.0.3.Final（Bean Validation 3.0 实现，经 `spring-boot-starter-validation` 引入，版本由 Spring Boot BOM 管理） | Boot 自带 | 自写校验（让属性类实现 Spring 的 `Validator`，同样产生 BindValidationException；作为离线时的退路保留在设计里，没有采用） | Spring Boot 自带的 starter，视为事实标准，不受 star 门槛约束。目前只有 game-discovery 的 `GameNamespaceProperties` 用到（13 个进程都经 game-discovery 带上它）；传递依赖 jakarta.validation-api 3.0.2、jboss-logging、classmate 与 `tomcat-embed-el`（消息插值用的 EL） |
 
+## 2026-11-06 接续移植的标准库选择
+
+本轮继续优先使用 JDK 和现有 Spring 管理的依赖，不为 C++ 的容器、ECS、数值工具或调度器建立平行 Java 框架：
+
+| 移植职责 | 采用方式 | 原因 |
+|---|---|---|
+| 职业技能、玩家存档与规则结果 | 领域对象、不可变 record、`List/Map/Set`、构造器注入 | 持久重数和当前生效视图分开；场景逻辑线程拥有可变状态。 |
+| uint64 比例、治疗与耗蓝 | JDK `BigInteger`、无符号比较与精确缺口计算 | 不依赖浮点表达完整 uint64，不新增数值库。 |
+| 导航寻路与服务器坐标 | JDK `PriorityQueue`、不可变网格与独立查询工作区 | 保留既有 UE double/uint64 ABI；未证明兼容前不换成另一种 MSET 读取器。 |
+| 存档字段演进 | 现有 protobuf descriptor API、JDK NIO/SHA-256、JUnit | 使用真实生成类导出两代台账，普通 Maven 测试执行门禁；不引入源码解析器。 |
+
+2026-11-06 从官方 GitHub API 重新核验：Spring Boot 81,738、Guava 51,923、Dubbo 41,572、Netty 35,072、Redisson 24,422 stars。均未归档，继续沿用现有依赖；没有借本批工作升级版本。候选 recast4j 293 stars，且其 float 参数不能直接替代本项目 UE double 格式，本次不引入。来源、时间与尚未移植的真实差距见 [本轮依赖与差距核对](../porting/java-native-library-audit-20261106.md)。
+
+## 2026-11-06 消费停滞监控候选
+
+Java 采样端沿用现有 Kafka `AdminClient`、Micrometer 与 JDK 定时执行器，不增加 Maven 依赖。部署候选使用 [Prometheus](https://github.com/prometheus/prometheus) 与同项目的 [Alertmanager](https://github.com/prometheus/alertmanager)：2026-11-06 官方仓页面分别约 67.0K、8.7K stars。Alertmanager 低于通常的 20K 优先线，此处作为 Prometheus 官方告警去重、分组和路由组件记录例外，避免在 Java 中自建通知与重试服务；它不是新的 Java 依赖。
+
+官方 `promtool` 3.13.5、`amtool` 0.34.2 已在仓外安装并校验发布摘要；候选的配置、8 条规则、15 组语义样例和 Compose 展开均实际通过。监控服务尚未启动，未发送通知，也尚未完成实际指标抓取验收；离线校验不能代表告警闭环已上线。
+
 ## 传递依赖说明
 
 - Dubbo 3.3.6 会传递引入 fastjson2（alibaba/fastjson2，约 4K star），用于其内部元数据 / 配置序列化。本仓库代码不直接使用它，

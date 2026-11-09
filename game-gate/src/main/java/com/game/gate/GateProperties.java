@@ -61,7 +61,7 @@ public record GateProperties(
         linkThreads = linkThreads == null ? 2 : linkThreads;
         maxPendingRequests = maxPendingRequests == null ? 64 : maxPendingRequests;
         illegalPacketThreshold = illegalPacketThreshold == null ? 50 : illegalPacketThreshold;
-        handshakeTimeout = handshakeTimeout == null ? Duration.ofSeconds(30) : handshakeTimeout;
+        handshakeTimeout = handshakeTimeout == null ? Duration.ofSeconds(10) : handshakeTimeout;
         linkConnectTimeout = linkConnectTimeout == null ? Duration.ofSeconds(3) : linkConnectTimeout;
         linkHelloTimeout = linkHelloTimeout == null ? Duration.ofSeconds(5) : linkHelloTimeout;
         linkMaxQueuedFrames = linkMaxQueuedFrames == null ? 10_000 : linkMaxQueuedFrames;

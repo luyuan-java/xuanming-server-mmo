@@ -45,8 +45,6 @@ class RatingStoreSqlTest extends RatingStoreCases {
      * 都是一看到对方进入 LOCK WAIT（{@link #awaitLockWaiter}，每 {@value #LOCK_WAIT_POLL_MS} ms 轮询一次）就立刻放锁 / 成环，不让等待拖到 3 s。
      */
     private static final int LOCK_WAIT_SECONDS = 10;
-    private static final String LOCK_WAITERS = "SELECT COUNT(*) FROM information_schema.innodb_trx t JOIN information_schema.processlist p"
-            + " ON p.id = t.trx_mysql_thread_id WHERE t.trx_state = 'LOCK WAIT' AND p.db = DATABASE()";
     /**
      * 轮询 {@code INNODB_TRX} 的间隔，<b>必须大于 100 ms</b>：InnoDB 给这张表的是一份缓存快照，只有「距上一次被读已超过 0.1 s」才会刷新
      * （{@code trx0i_s.cc} 的 {@code CACHE_MIN_IDLE_TIME}，而每次读都会把「上一次被读」推后）。轮询得比它密，缓存永远刷新不了，读到的一直是
@@ -56,10 +54,6 @@ class RatingStoreSqlTest extends RatingStoreCases {
 
     private static RatingTestDatabase shared;
     private static boolean tidb;
-    // TiDB_TRX 的 LockWaiting 也可能只是正在取锁；必须与 TiKV 实际等待边联合，不能仅凭状态猜已阻塞。
-    private static final String TIDB_LOCK_WAITERS = "SELECT COUNT(*) FROM information_schema.data_lock_waits w"
-            + " JOIN information_schema.tidb_trx t ON t.id = w.trx_id"
-            + " WHERE t.state = 'LockWaiting' AND t.db = DATABASE()";
 
     @BeforeAll
     static void createDatabase() throws SQLException {
@@ -108,10 +102,7 @@ class RatingStoreSqlTest extends RatingStoreCases {
     private void awaitLockWaiter(Future<Result> expectedWaiter) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
         while (System.nanoTime() < deadline) {
-            long waiters = db.query(tidb ? TIDB_LOCK_WAITERS : LOCK_WAITERS, rs -> {
-                rs.next();
-                return rs.getLong(1);
-            });
+            long waiters = db.lockWaiterCount(tidb);
             if (waiters > 0) {
                 return;
             }
@@ -401,11 +392,19 @@ class RatingStoreSqlTest extends RatingStoreCases {
     private void seedFillerRows(long firstPlayerId, int count) throws SQLException {
         try (Connection c = db.dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement("INSERT INTO match_rating (player_id, rating_centi, games, updated_at_ms) VALUES (?, 150000, 0, 0)")) {
-            for (int i = 0; i < count; i++) {
-                ps.setLong(1, firstPlayerId + i);
-                ps.addBatch();
+            // NORMAL批量写显式组成一笔事务，不要求驱动改写逐元素自动提交语义。
+            c.setAutoCommit(false);
+            try {
+                for (int i = 0; i < count; i++) {
+                    ps.setLong(1, firstPlayerId + i);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+                c.commit();
+            } catch(SQLException | RuntimeException | Error failure) {
+                try { c.rollback(); } catch(SQLException rollback) { failure.addSuppressed(rollback); }
+                throw failure;
             }
-            ps.executeBatch();
         }
     }
 }

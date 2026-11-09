@@ -270,6 +270,8 @@ public final class BattleFixture {
                 }),
                 bagFeature, new com.game.scene.equip.EquipmentFeature(equipment, bagFeature, attributes, Contracts.REGISTRY),
                 new MissionFeature(missions), new ActivityFeature(missions), new SkillFeature(skills),
+                new com.game.scene.skill.ClassSkillFeature(new com.game.scene.skill.ClassSkillService(currency, attributes),
+                        attributes, Contracts.REGISTRY),
                 petFeature);
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV, features);
         scene1 = world.createScene(1);

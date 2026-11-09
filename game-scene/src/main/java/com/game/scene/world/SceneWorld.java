@@ -1633,7 +1633,7 @@ public final class SceneWorld {
             log.warn("存档等级超出上限，压回 {} player={} 存档等级={}", level, playerId, Integer.toUnsignedLong(data.level()));
         }
         PlayerState state = data.state();
-        List<Integer> skills = tables.initialSkills();
+        List<Integer> skills = tables.initialSkills(data.classId());
         if (previous != null) {
             // 本节点上还挂着这个玩家的旧实例，而库里的归属已经被这次进场夺走——只会发生在旧实例失去归属之后
             // （续约失败、租约过期被强制夺权，续约检测还没来得及移除它）。它的 epoch 已过期，写回只会被围栏拒绝，所以不写。
@@ -1646,7 +1646,7 @@ public final class SceneWorld {
                 savedPosition = previous.position();
                 level = previous.level();
                 state = previous.persistentState();
-                skills = previous.skills();
+                // 持久技能已包含在 previous.persistentState()；只补本职业种子。
             } else {
                 // 期间别的节点夺过归属并写过库（或旧实例上次存盘结局不明）：库里那份才是权威，沿用旧内存会把别人已落库的改动
                 // （含资产通道已回报 durable 的结局）整个盖掉。旧实例没落库的改动随之作废，与宕机丢失同等。
@@ -1661,7 +1661,7 @@ public final class SceneWorld {
 
         ScenePlayer player = new ScenePlayer(playerId, actorEntity, key, epoch, data.classId(),
                 data.gender(), data.appearanceId(), level, skills,
-                resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime());
+                resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime(), tables.classSkills());
         player.setName(data.name());
         if (pending.admission() != null) player.bindAdmission(pending.admission());
         if (previous != null && previous.ownerEpoch() == epoch) {

@@ -26,7 +26,11 @@ class GlobalMatchStoreIntegrationTest {
         fixture=AuthoritySqlFixture.prepare(AuthoritySqlFixture.Options.fromEnvironment(jdbcRoot,
                 com.game.match.rating.RatingTestDatabase.MYSQL_USER,com.game.match.rating.RatingTestDatabase.MYSQL_PASSWORD,
                 "jmatch",false,List.of(1,2)),(c,principal)->{
-            GlobalMatchStore.registry().initializeFresh(c,principal);
+            // 普通构造器还会登记完整匹配单位；必须在授予NORMAL前用schema主体发布这两张表。
+            var matchSchema = GlobalMatchStore.registry();
+            matchSchema.register(com.game.match.global.pb.GlobalQueueUnitRow.getDefaultInstance());
+            matchSchema.register(com.game.match.global.pb.GlobalQueueUnitRegionRow.getDefaultInstance());
+            matchSchema.initializeFresh(c,principal);
             com.game.match.rating.MatchRatingTables.registry().initializeFresh(c,principal);
             try(var q=c.createStatement()){
             q.execute("CREATE TABLE player(player_id BIGINT UNSIGNED PRIMARY KEY,account VARCHAR(255) NOT NULL,owner_revision BIGINT UNSIGNED NOT NULL,trade_listing_id BIGINT UNSIGNED NOT NULL DEFAULT 0,zone_id INT UNSIGNED NOT NULL DEFAULT 1)");
@@ -39,12 +43,22 @@ class GlobalMatchStoreIntegrationTest {
             q.execute("CREATE TABLE guild_activity_slot(player_id BIGINT UNSIGNED PRIMARY KEY,lobby_id BIGINT UNSIGNED,expires_ms BIGINT UNSIGNED)");
             q.execute("CREATE TABLE guild_trial_lobby(lobby_id BIGINT UNSIGNED PRIMARY KEY,state INT,view_proto MEDIUMBLOB,guild_id BIGINT UNSIGNED,activity_id INT UNSIGNED)");
             }
-            c.setAutoCommit(false);com.game.common.team.TeamPolicyAuthority.ensure(c,false,3);c.commit();c.setAutoCommit(true);
         });
         database=fixture.database();
         data=new DruidDataSource();data.setUrl(fixture.jdbcUrl("?useSSL=false&socketTimeout=4000&connectTimeout=3000"));
         data.setUsername(fixture.normalUser());data.setPassword(fixture.normalPassword());data.setMaxActive(8);data.setMaxWait(3000);
         AuthorityDataSourcePolicy.protectDruid(data,fixture.writerBoot(),true);
+        // 正式发布和NORMAL授权完成后，才走需要route_meta的策略事务。
+        try(var connection=data.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                com.game.common.team.TeamPolicyAuthority.ensure(connection,false,3);
+                connection.commit();
+            } catch(SQLException | RuntimeException | Error failure) {
+                try { connection.rollback(); } catch(SQLException rollback) { failure.addSuppressed(rollback); }
+                throw failure;
+            }
+        }
         store=new GlobalMatchStore(data,new GlobalMatchProperties(true,true,30,180,120,GlobalRegionPolicyTest.CONFIG.probeSecret()));
     }
     @AfterEach void close()throws Exception{if(data!=null)data.close();if(fixture!=null)fixture.close();}

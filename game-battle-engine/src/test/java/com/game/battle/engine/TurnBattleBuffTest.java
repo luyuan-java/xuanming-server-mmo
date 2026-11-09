@@ -446,9 +446,9 @@ class TurnBattleBuffTest {
         assertThat(engine.rngDrawsForTest()).as("被眩晕的默认普攻不选目标").isZero();
     }
 
-    // 规格 §3.7 / §11.1 第 8 条：当前气血超过上限时，回血量按 uint64 回绕成巨大值，当前值被拉低到上限（基线行为，照搬）
+    // 固定源 993b6da9 的 LandedHeal 已改为缺口封顶；取代早期规格的超上限回绕行为。
     @Test
-    void 气血超过上限时回血量回绕() {
+    void 气血超过上限时周期治疗不降血也不产生虚假回血事件() {
         CreateBattleRequest.Builder request = request(9638, PVE_SOLO, 1);
         BattlePlayerSnapshot.Builder snapshot = addPlayer(request, PLAYER_A, 0, 300, 200, 0, 100, 0, 120);
         snapshot.addBuffs(entry(901, BUFF_REGEN, 1, 2, 0));
@@ -456,12 +456,12 @@ class TurnBattleBuffTest {
 
         engine.submitAction(PLAYER_A, action(BATTLE_ACTION_DEFEND));
         TurnResultS2C result = engine.resolveCurrentRound();
-        // 怪物 15 × 1560/1660 × 0.5 = 7.05 → 8，300 → 292；回血后 min(200, 317) = 200，回血量 200 − 292 回绕成 2^64 − 92
+        // 怪物 15 × 1560/1660 × 0.5 = 7.05 → 8，300 → 292；超过上限 200，缺口为零。
         assertThat(describeAll(result)).containsExactly(
                 "g1 DEFEND 5001->5001",
                 "g2 ATTACK M0->5001",
-                "g2 DAMAGE M0->5001 v8 hp292",
-                "g3 BUFF_TICK 0->5001 buff240 v18446744073709551524 hp200");
-        assertThat(EngineTestSupport.health(result.getState(), PLAYER_A)).isEqualTo(200);
+                "g2 DAMAGE M0->5001 v8 hp292");
+        assertThat(countEvents(result, BATTLE_EVENT_BUFF_TICK)).isZero();
+        assertThat(EngineTestSupport.health(result.getState(), PLAYER_A)).isEqualTo(292);
     }
 }

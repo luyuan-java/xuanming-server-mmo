@@ -491,7 +491,8 @@ public class SceneNode implements SmartLifecycle {
                     missions.onLevelChanged(call.player());
                 }), bagFeature, new EquipmentFeature(equipment, bagFeature, attributes, registry),
                         new MissionFeature(missions), new ActivityFeature(missions),
-                        new SkillFeature(skills), pets));
+                        new SkillFeature(skills), new com.game.scene.skill.ClassSkillFeature(
+                                new com.game.scene.skill.ClassSkillService(currency, attributes), attributes, registry), pets));
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
         // 主世界频道（批次 5.1，scene-channels-spec §4.10.5）：节点不再自己发号建场景（D18），按 scene-manager 写在 Redis 的频道计划建。
         // 先登记 zone、同步拉一次计划并在逻辑线程上应用（启动时本地没有场景，只会建出 ACTIVE 记录），再起周期拉取。

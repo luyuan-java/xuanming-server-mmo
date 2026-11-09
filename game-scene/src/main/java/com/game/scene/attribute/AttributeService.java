@@ -82,7 +82,7 @@ public final class AttributeService {
      * </ul>
      * {@code LOAD} 与 {@code LEVEL_CHANGED} 还会先做「已分配 &gt; 总量」的收敛。
      */
-    enum RecalcReason { LOAD, LEVEL_CHANGED, ALLOCATE, SCHEME_SWITCH, RESET, EQUIPMENT }
+    enum RecalcReason { LOAD, LEVEL_CHANGED, ALLOCATE, SCHEME_SWITCH, RESET, EQUIPMENT, SKILL }
 
     /** 自动加点结果：成功时 {@code suggested} 是该池全部维度的建议目标已分配（含已分配部分）。 */
     public record AutoAllocation(int tipId, Map<Integer, Long> suggested) {
@@ -119,6 +119,9 @@ public final class AttributeService {
 
     /** 装备变更保持当前血蓝比例，不提供穿脱回血入口。 */
     public void equipmentChanged(ScenePlayer player) { recalculate(player, RecalcReason.EQUIPMENT); }
+
+    /** 修习被动与换装同样按比例保留当前血蓝。 */
+    public void skillsChanged(ScenePlayer player) { recalculate(player, RecalcReason.SKILL); }
 
     // ------------------------------------------------------------------ 加载
 
@@ -182,6 +185,22 @@ public final class AttributeService {
         acc.maxHealth += flat.maxHealth(); acc.maxMana += flat.maxMana();
         acc.physicalAttack += flat.physicalAttack(); acc.magicAttack += flat.magicAttack();
         acc.speed += flat.speed(); acc.defense += flat.defense();
+        var catalog = player.skillCatalog();
+        var learned = player.learnedSkills();
+        java.util.function.ToDoubleFunction<com.game.battle.engine.ClassSkillRules.PassiveStat> passive =
+                stat -> catalog.passive(player.classId(), player.level(), learned, stat);
+        acc.maxHealth *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAX_HEALTH);
+        acc.maxMana *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAX_MANA);
+        acc.physicalAttack *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.PHYSICAL_ATTACK);
+        acc.magicAttack *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAGIC_ATTACK);
+        acc.speed *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.SPEED);
+        acc.defense *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.DEFENSE);
+        long crit = floor(passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.CRIT) * 100 + 1e-9);
+        var combat = equipmentBonus.combat();
+        if (crit > 0) combat = combat.toBuilder()
+                .setPhysicalCritRate(addUnsignedSaturating(combat.getPhysicalCritRate(), crit))
+                .setMagicCritRate(addUnsignedSaturating(combat.getMagicCritRate(), crit)).build();
+        attributes.setCombat(combat);
         Derived old = attributes.derived();
         Derived derived = new Derived(Math.max(floor(acc.maxHealth), 1), floor(acc.maxMana),
                 floor(acc.physicalAttack), floor(acc.magicAttack), floor(acc.speed), floor(acc.defense));
@@ -241,6 +260,11 @@ public final class AttributeService {
             acc.addLinear(dimension, (double) Integer.toUnsignedLong(dimension.getBasePerLevel()) * PlayerLevels.MAX_LEVEL);
         }
         return acc;
+    }
+
+    private static long addUnsignedSaturating(long value, long addition) {
+        long sum = value + addition;
+        return Long.compareUnsigned(sum, value) < 0 ? -1L : sum;
     }
 
     private static long floor(double value) {

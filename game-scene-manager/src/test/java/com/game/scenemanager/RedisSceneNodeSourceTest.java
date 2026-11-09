@@ -12,8 +12,11 @@ import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import java.time.Duration;
 import java.util.Set;
+import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.redisson.Redisson;
@@ -23,13 +26,14 @@ import org.redisson.config.Config;
 /**
  * 真 Redis 集成测试：scene 节点按 game-scene 的方式写目录，scene-manager 读出来并完成分配。
  * 默认跳过；显式开启：{@code -Dgame.it.redis=redis://127.0.0.1:6379}。
- * 用 DB 13 与一个不会被真实节点使用的 zone 号隔离，结束时删除自己写的条目。
+ * 用 DB 13、每次用例独占的随机命名空间与测试 zone 隔离，结束时只清自己的精确键。
  */
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class RedisSceneNodeSourceTest {
 
-    /** 缺省部署命名空间 game 的键名。 */
-    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+    private RedisKeys redisKeys;
+    /** 摘除必须复用实际发布对象的原代次和序号，不能另建空的发布器。 */
+    private NodeDirectory<SceneNodeInfo> directory;
 
     /** 远离真实 zone 的测试 zone 号。 */
     private static final int ZONE = 900_001;
@@ -43,21 +47,38 @@ class RedisSceneNodeSourceTest {
         redis = Redisson.create(config);
     }
 
+    @BeforeEach
+    void ownDirectory() {
+        // v2永久保存发布水位；重复测试不能复用旧实例的sequence=1和过期TTL。
+        redisKeys = new RedisKeys(GameNamespace.of("smtest" + UUID.randomUUID().toString().replace("-", "").substring(0, 20)));
+        directory = new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser());
+    }
+
+    @AfterEach
+    void cleanup() {
+        if (directory == null) return;
+        try {
+            directory.remove(ZONE, 1);
+            directory.remove(ZONE, 2);
+        } finally {
+            // 只销毁本次随机命名空间内实际创建的五个键，不扫描或清空共享DB。
+            redis.getKeys().delete(redisKeys.zoneNodeDirectory(NodeTypes.SCENE, ZONE),
+                    redisKeys.zoneNodeExpiry(NodeTypes.SCENE, ZONE), redisKeys.zoneNodeSeen(NodeTypes.SCENE, ZONE),
+                    redisKeys.zoneDirectoryFormat(ZONE), redisKeys.zoneNodeTypes(ZONE));
+        }
+    }
+
     @AfterAll
-    static void cleanup() {
-        NodeDirectory<SceneNodeInfo> dir = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.SCENE, SceneNodeInfo.parser());
-        dir.remove(ZONE, 1);
-        dir.remove(ZONE, 2);
-        redis.shutdown();
+    static void disconnect() {
+        if (redis != null) redis.shutdown();
     }
 
     @Test
     void 读到scene节点上报的目录并选人数最少的场景() {
-        NodeDirectory<SceneNodeInfo> dir = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.SCENE, SceneNodeInfo.parser());
-        dir.publish(ZONE, 1, node(1, 1001, 20), Duration.ofSeconds(15));
-        dir.publish(ZONE, 2, node(2, 2001, 5), Duration.ofSeconds(15));
+        directory.publish(ZONE, 1, node(1, 1001, 20), Duration.ofSeconds(15));
+        directory.publish(ZONE, 2, node(2, 2001, 5), Duration.ofSeconds(15));
 
-        RedisSceneNodeSource source = new RedisSceneNodeSource(redis, REDIS_KEYS);
+        RedisSceneNodeSource source = new RedisSceneNodeSource(redis, redisKeys);
         assertThat(source.list(ZONE)).extracting(SceneNodeInfo::getNodeId).containsExactlyInAnyOrder(1, 2);
 
         AssignSceneResponse resp = new SceneAssigner(source, new WorldSceneConfigs(1, Set.of(1)))

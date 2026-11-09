@@ -20,8 +20,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>守卫事务骨架</b>（Add / Accept / Remove / Block 共用，{@link #guarded}）：
  * <ol>
- *   <li>守卫事务外、独立 RC 事务：按玩家号无符号升序给双方补容量行（{@link #ensureCapacityRows}：权威边数 COUNT + INSERT ODKU，绝不猜 0；
- *       遇 1213 整对重跑至多 3 遍）——并入守卫事务会与别的事务互持新插行、抢同一接收者的行，形成插入意向锁死锁；</li>
+ *   <li>守卫事务外、独立 RC 事务：按玩家号无符号升序给双方补容量行（{@link #ensureCapacityRows}：权威边数 COUNT + INSERT，绝不猜 0；已有行只持锁，不再执行无效更新；
+ *       缺行并发创建的 1062 回滚后重读；系统补行 1213 按原预算重跑，至多 3 遍）——并入守卫事务会与别的事务互持新插行、抢同一接收者的行，形成插入意向锁死锁；</li>
  *   <li>客户端绑定视图在每个事务首先按 unsigned 升序锁双方 player 行，核原账号、原修订、未冻结；随后 READ COMMITTED
  *       事务按升序 {@code SELECT friend_count ... FOR UPDATE} 锁双方容量行（守卫）。系统入口不带会话、保留原容量锁首位。缺行（被回收）
  *       绝不当 0 继续：回滚、回到第 1 步重补，至多 3 遍，用尽 fail-closed；</li>
@@ -35,7 +35,7 @@ import org.slf4j.LoggerFactory;
  * 不再重试，守卫事务在提交前再查一次（过了就回滚）——gate 已经判超时、客户端看到失败的请求，不会在之后落库（否则重试撞「已申请」）。
  * Reject / Unblock 的单条写同样放进显式事务、提交前查预算（{@link #singleStatementWrite}）：查询超时只能按秒向上取整，自动提交的语句
  * 在锁等待里可以越过截止近 1 s 才自行提交，那时 gate 可能已放行同一会话的下一条（mmorpg client-request-ordering.md §6.1）。
- * 事务外补容量行（INSERT ODKU，从不覆盖已有行，之后的每个写者都先补行）独立提交；客户端视图先在独立事务验证 P，系统入口仍按玩家独立提交。
+ * 事务外补容量行（INSERT，从不覆盖已有行，之后的每个写者都先核容量行）独立提交；客户端视图先在独立事务验证 P，系统入口仍按玩家独立提交。
  *
  * <p>玩家号按无符号 64 位：绑定参数用 {@link #uid}，读回用 {@link #readUid}，排序用 {@link Long#compareUnsigned}。
  * 连接池须是会话级 READ COMMITTED（自动提交语句不经事务，隔离级别来自会话），{@code innodb_lock_wait_timeout} 设短。
@@ -51,11 +51,11 @@ public final class JdbcFriendStore implements FriendStore {
     static final int CAPACITY_GUARD_MAX_ATTEMPTS = 3;
     static final int ENSURE_DEADLOCK_MAX_ATTEMPTS = 3;
     static final int MYSQL_DEADLOCK = 1213;
+    private static final int MYSQL_DUPLICATE_KEY = 1062;
 
     // S1 / S2：补容量行（事务外）
     static final String COUNT_FRIENDS = "SELECT COUNT(*) FROM friend WHERE player_id = ?";
-    static final String ENSURE_CAPACITY = "INSERT INTO friend_capacity (player_id, friend_count, created_ms) VALUES (?, ?, ?)"
-            + " ON DUPLICATE KEY UPDATE player_id = player_id";
+    static final String ENSURE_CAPACITY = "INSERT INTO friend_capacity (player_id, friend_count, created_ms) VALUES (?, ?, ?)";
     // S3：守卫
     static final String LOCK_CAPACITY = "SELECT friend_count FROM friend_capacity WHERE player_id = ? FOR UPDATE";
     // S4 / S5 / S6：守卫之后的主键点锁
@@ -104,7 +104,7 @@ public final class JdbcFriendStore implements FriendStore {
     static final String LIST_BLOCKS = "SELECT blocked_player_id, since_ms FROM friend_block WHERE player_id = ?"
             + " ORDER BY blocked_player_id LIMIT ?";
 
-    /** 事件回调（指标）：守卫缺行重试、ensure 死锁重试、计数下溢被拦。 */
+    /** 事件回调（指标）：守卫缺行、补行死锁/并发创建重试、计数下溢被拦。 */
     public interface Events {
         void guardRetry(String kind);
 
@@ -538,20 +538,34 @@ public final class JdbcFriendStore implements FriendStore {
         return counts;
     }
 
+    /** 只标记容量 INSERT 的重复主键；其他语句的 1062 不获得重试资格。 */
+    private static final class CapacityInsertRace extends SQLException {
+        CapacityInsertRace(SQLException cause) {
+            super("Concurrent friend capacity creation", cause);
+        }
+    }
+
     /**
-     * 守卫事务外补容量行：在既有独立 RC 事务中先点锁容量行，再 COUNT 权威边数与 ODKU，沿用守卫的取锁先后。
-     * 缺行允许继续创建，不把缺失当作零。系统分支仍只在 1213 时按原预算重跑该玩家完整补行步骤，至多 3 遍；会话分支由 read 持有 P 后提交。
+     * 在独立 RC 事务按无符号顺序点锁；已有容量行立即返回，不再 COUNT 或更新主键。
+     * 缺行只发普通 INSERT，避免 ODKU 更新已有记录时反转 TiDB 主键索引/行锁顺序。
+     * 并发创建只在容量 INSERT 明确回 1062 时回滚重读，至多三遍，共享原请求预算。
      */
     private void ensureCapacityRows(long[] ids, Deadline deadline) {
         if (actor != null) {
-            // 仍在守卫事务之外独立提交；先验 P 再补行，失效会话不能留下容量副作用。
-            read(deadline, ids, db -> {
-                for (long id : ids) {
-                    ensureCapacityRow(db, id);
+            // 整个补行事务先核原会话 P；重跑必须重新核验，不带旧锁或旧计数进入下一遍。
+            for (int attempt = 1; ; attempt++) {
+                try {
+                    read(deadline, ids, db -> {
+                        for (long id : ids) ensureCapacityRow(db, id);
+                        return null;
+                    });
+                    return;
+                } catch (FriendStoreException e) {
+                    if (!isCapacityInsertRace(e) || attempt >= ENSURE_DEADLOCK_MAX_ATTEMPTS) throw e;
+                    events.guardRetry("ensure_duplicate");
+                    log.debug("Friend capacity creation raced; retrying actor transaction attempt={}", attempt);
                 }
-                return null;
-            });
-            return;
+            }
         }
         try (Connection c = dataSource.getConnection()) {
             boolean autoCommit = c.getAutoCommit();
@@ -569,11 +583,16 @@ public final class JdbcFriendStore implements FriendStore {
                             requireBudget(deadline,"补容量提交");c.commit();break;
                         } catch (SQLException e) {
                             c.rollback();
-                            if (!isDeadlock(e) || attempt >= ENSURE_DEADLOCK_MAX_ATTEMPTS) {
-                                throw e;
+                            boolean duplicate = isCapacityInsertRace(e);
+                            if ((!duplicate && !isDeadlock(e)) || attempt >= ENSURE_DEADLOCK_MAX_ATTEMPTS) throw e;
+                            events.guardRetry(duplicate ? "ensure_duplicate" : "ensure_deadlock");
+                            if (duplicate) {
+                                log.debug("Friend capacity creation raced; retrying attempt={} player={}",
+                                        attempt, Long.toUnsignedString(id));
+                            } else {
+                                log.warn("Friend capacity deadlock; retrying attempt={} player={}",
+                                        attempt, Long.toUnsignedString(id));
                             }
-                            events.guardRetry("ensure_deadlock");
-                            log.warn("补容量行遇死锁（1213），整对重跑 第 {} 遍 player={}", attempt, Long.toUnsignedString(id));
                         }
                     }
                 }
@@ -586,16 +605,25 @@ public final class JdbcFriendStore implements FriendStore {
         }
     }
 
-    /**
-     * 在调用者已开启的事务内，先点锁已有容量行，再按权威边数补行。
-     * 缺行仍继续创建；关闭查询游标不提前提交或释放已取得的事务锁。
-     */
+    /** 已有行持锁到事务结束；缺行按权威边数插入，不能覆盖并发创建者的计数或时间。 */
     private void ensureCapacityRow(Db db, long id) throws SQLException {
         try (PreparedStatement ps = prepare(db, LOCK_CAPACITY, uid(id)); ResultSet rs = ps.executeQuery()) {
-            rs.next();
+            if (rs.next()) return;
         }
         long edges = count(db, COUNT_FRIENDS, uid(id));
-        update(db, ENSURE_CAPACITY, uid(id), edges, nowMs.getAsLong());
+        try {
+            update(db, ENSURE_CAPACITY, uid(id), edges, nowMs.getAsLong());
+        } catch (SQLException e) {
+            if (e.getErrorCode() == MYSQL_DUPLICATE_KEY) throw new CapacityInsertRace(e);
+            throw e;
+        }
+    }
+
+    private static boolean isCapacityInsertRace(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof CapacityInsertRace) return true;
+        }
+        return false;
     }
 
     private boolean blockedEitherWay(Db db, long a, long b) throws SQLException {

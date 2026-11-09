@@ -86,6 +86,7 @@ public final class FriendMetrics implements JdbcFriendStore.Events {
     private final Counter invalidationFailures;
     private final Counter guardMissingRow;
     private final Counter guardEnsureDeadlock;
+    private final Counter guardEnsureDuplicate;
     private final Counter countUnderflows;
     private final Map<QuotaOutcome, Counter> directoryQuota = new EnumMap<>(QuotaOutcome.class);
     /** 清理积压（受 batch-limit 封顶）：键 = 模式（report_only / delete），启动即建为 0。 */
@@ -126,11 +127,14 @@ public final class FriendMetrics implements JdbcFriendStore.Events {
         this.invalidationFailures = Counter.builder(CACHE_INVALIDATION_FAILURES)
                 .description("写已提交但缓存失效失败的键数（该键最多陈旧一个 cache-ttl）").register(registry);
         this.guardMissingRow = Counter.builder(GUARD_RETRIES)
-                .description("容量守卫的重试：missing_row = 守卫缺行（回收竞态），ensure_deadlock = 补容量行遇 1213；正常运行时应恒为 0")
+                .description("容量守卫重试：missing_row = 回收竞态，ensure_deadlock = 补行死锁，ensure_duplicate = 并发创建")
                 .tag("kind", "missing_row").register(registry);
         this.guardEnsureDeadlock = Counter.builder(GUARD_RETRIES)
-                .description("容量守卫的重试：missing_row = 守卫缺行（回收竞态），ensure_deadlock = 补容量行遇 1213；正常运行时应恒为 0")
+                .description("容量守卫重试：missing_row = 回收竞态，ensure_deadlock = 补行死锁，ensure_duplicate = 并发创建")
                 .tag("kind", "ensure_deadlock").register(registry);
+        this.guardEnsureDuplicate = Counter.builder(GUARD_RETRIES)
+                .description("容量守卫重试：missing_row = 回收竞态，ensure_deadlock = 补行死锁，ensure_duplicate = 并发创建")
+                .tag("kind", "ensure_duplicate").register(registry);
         this.countUnderflows = Counter.builder(COUNT_UNDERFLOWS)
                 .description("friend_count 减到 0 以下被拦截的次数（计数与边数已脱节，需要人工排查）").register(registry);
         for (QuotaOutcome outcome : QuotaOutcome.values()) {
@@ -212,7 +216,12 @@ public final class FriendMetrics implements JdbcFriendStore.Events {
 
     @Override
     public void guardRetry(String kind) {
-        ("ensure_deadlock".equals(kind) ? guardEnsureDeadlock : guardMissingRow).increment();
+        switch (kind) {
+            case "ensure_deadlock" -> guardEnsureDeadlock.increment();
+            case "ensure_duplicate" -> guardEnsureDuplicate.increment();
+            case "missing_row" -> guardMissingRow.increment();
+            default -> throw new IllegalArgumentException("Unknown friend guard retry kind");
+        }
     }
 
     @Override

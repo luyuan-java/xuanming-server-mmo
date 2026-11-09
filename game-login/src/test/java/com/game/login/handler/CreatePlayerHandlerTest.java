@@ -254,6 +254,58 @@ class CreatePlayerHandlerTest {
     }
 
     @Test
+    void 十二个可选外观按完整身份存入并返回() throws Exception {
+        List<String> appearances = List.of(
+                "00_reference_topright_boy", "01_ice_sword_girl", "02_fire_talisman_boy",
+                "03_lotus_healer_girl", "04_mountain_guardian_boy", "05_celestial_musician_girl",
+                "06_thunder_caster_boy", "08_alchemy_prodigy_boy", "09_bamboo_archer_girl",
+                "10_crimson_spear_girl", "15_water_dragon_scholar_boy", "17_ghost_script_calligrapher_boy");
+        for (String appearance : appearances) {
+            var response = create(CreatePlayerRequest.newBuilder().setName("新角色").setAppearanceId(appearance).build());
+            assertThat(response.hasErrorMessage()).isFalse();
+            assertThat(response.getPlayers(0).getPlayer().getAppearanceId()).isEqualTo(appearance);
+        }
+        var inserted = ArgumentCaptor.forClass(PlayerRow.class);
+        verify(store, times(appearances.size())).createPlayer(inserted.capture());
+        assertThat(inserted.getAllValues()).extracting(PlayerRow::getAppearanceId)
+                .containsExactlyElementsOf(appearances);
+    }
+
+    @Test
+    void 退役外观拒绝新建_满额时仍可读回参数完全匹配的已建角色() throws Exception {
+        int unknown = LoginErrorTip.login_error.kLoginUnknownError_VALUE;
+        for (String appearance : List.of("07_moon_shadow_assassin_girl",
+                "14_short_hair_snow_summoner_girl", "20_star_formation_master_girl")) {
+            when(store.listPlayers(ACCOUNT)).thenReturn(List.of());
+            var request = CreatePlayerRequest.newBuilder().setName("OldHero").setGender(2).setAppearanceId(appearance);
+            assertError(create(request.build()), unknown);
+
+            PlayerRow old = LoginHandlerTest.row(100, ACCOUNT, "OldHero");
+            old.setGender(2);
+            old.setAppearanceId(appearance);
+            List<PlayerRow> five = new ArrayList<>(List.of(old));
+            for (int i = 1; i < 5; i++) {
+                five.add(LoginHandlerTest.row(100 + i, ACCOUNT, "角色" + i));
+            }
+            when(store.listPlayers(ACCOUNT)).thenReturn(five);
+            assertError(create(request.clone().setName("oldhero").build()), unknown);
+            assertError(create(request.clone().setName("NewHero").build()), unknown);
+            assertError(create(request.clone().setGender(1).build()), unknown);
+            assertError(create(request.clone().clearName().build()), unknown);
+
+            var response = create(sessionIn(2), request.setName(" ＯｌｄＨｅｒｏ ").build());
+            assertThat(response.hasErrorMessage()).isFalse();
+            assertThat(response.getPlayersCount()).isEqualTo(5);
+            var recovered = response.getPlayers(0).getPlayer();
+            assertThat(recovered.getPlayerId()).isEqualTo(100);
+            assertThat(recovered.getZoneId()).isEqualTo(1);
+            assertThat(recovered.getAppearanceId()).isEqualTo(appearance);
+        }
+        assertThat(events).isEmpty();
+        assertNothingMintedOrInserted();
+    }
+
+    @Test
     void 配表规则不可用回2020() throws Exception {
         when(rules.roleNameRules()).thenThrow(new IllegalStateException("缺行"));
         assertError(create(CreatePlayerRequest.getDefaultInstance()),

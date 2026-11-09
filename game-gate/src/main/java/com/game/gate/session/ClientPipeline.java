@@ -6,6 +6,7 @@ import com.game.net.client.ClientFrameDecoder;
 import com.game.net.client.ClientFrameEncoder;
 import com.game.net.client.ClientFrames;
 import com.game.proto.ClientRequest;
+import com.game.proto.ClientHeartbeatRequest;
 import com.game.proto.ClientTokenVerifyRequest;
 import com.google.protobuf.Message;
 import io.netty.channel.ChannelPipeline;
@@ -15,7 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 客户端连接的 pipeline：帧解码（上行只收握手与 ClientRequest）→ 帧编码 → 会话 handler。
+ * 客户端连接的 pipeline：帧解码（上行收握手、心跳与 ClientRequest）→ 帧编码 → 会话 handler。
  * 服务端与单测共用同一份装配，单测里的线上字节与生产一致。
  *
  * <p>解码器逐帧分发（game-net {@link ClientFrameDecoder}，基线 {@code codec.cpp:158-191}）：同一次读里先到的合法帧先处理、先回包，
@@ -29,6 +30,7 @@ public final class ClientPipeline {
     /** 上行白名单（protobuf 全名 → 默认实例）。其余类型一律按非法帧断开。 */
     static final Map<String, Message> ACCEPTED = Map.of(
             ClientTokenVerifyRequest.getDescriptor().getFullName(), ClientTokenVerifyRequest.getDefaultInstance(),
+            ClientHeartbeatRequest.getDescriptor().getFullName(), ClientHeartbeatRequest.getDefaultInstance(),
             ClientRequest.getDescriptor().getFullName(), ClientRequest.getDefaultInstance());
 
     private static final AtomicLong BAD_FRAMES = new AtomicLong();

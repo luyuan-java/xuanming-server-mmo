@@ -25,11 +25,12 @@ class MetricLabelsTest {
         assertThat(MetricLabels.mode(4)).isEqualTo("MATCH_MODE_PVE_SOLO");
         assertThat(MetricLabels.mode(5)).isEqualTo("MATCH_MODE_PVE_TEAM");
         assertThat(MetricLabels.mode(6)).isEqualTo("MATCH_MODE_PVP_CHALLENGE");
+        assertThat(MetricLabels.mode(7)).isEqualTo("MATCH_MODE_PVP_TEAM");
     }
 
     @Test
     void 模式_契约里没有的值一律unknown_不输出数字串() {
-        assertThat(MetricLabels.mode(7)).isEqualTo("unknown");
+        assertThat(MetricLabels.mode(8)).isEqualTo("unknown");
         assertThat(MetricLabels.mode(-1)).isEqualTo("unknown");
         assertThat(MetricLabels.mode(Integer.MAX_VALUE)).isEqualTo("unknown");
         assertThat(MetricLabels.mode(MatchMode.UNRECOGNIZED)).isEqualTo("unknown");
@@ -38,12 +39,14 @@ class MetricLabelsTest {
     }
 
     @Test
-    void 模式标签的取值集合有界_扫遍全部int也只有八个() {
+    void 模式标签的取值集合有界_扫描已知和非法值严格只有九种() {
         Set<String> seen = new HashSet<>();
         for (int mode = -1000; mode <= 1000; mode++) {
             seen.add(MetricLabels.mode(mode));
         }
-        assertThat(seen).hasSize(8).contains("unknown");
+        assertThat(seen).containsExactlyInAnyOrder("MATCH_MODE_UNSPECIFIED", "MATCH_MODE_5V5", "MATCH_MODE_3V3",
+                "MATCH_MODE_1V1", "MATCH_MODE_PVE_SOLO", "MATCH_MODE_PVE_TEAM", "MATCH_MODE_PVP_CHALLENGE",
+                "MATCH_MODE_PVP_TEAM", "unknown");
     }
 
     @Test

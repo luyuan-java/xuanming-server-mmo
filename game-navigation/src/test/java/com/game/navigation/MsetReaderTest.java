@@ -269,6 +269,41 @@ class MsetReaderTest {
     }
 
     @Test
+    void acceptsFlatRedundantTrianglesOnlyWithACompleteTriangulation() throws Exception {
+        // 固定 main/donghai/dungeon/mirror 各有一个同型平面：原生 detail 包含完整剖分及额外覆盖三角。
+        Fixture redundant = surfaceFixture(square(), new double[0][],
+                new int[][]{{0, 1, 2}, {0, 2, 3}, {0, 1, 3}});
+        NavMesh mesh = reader.read(redundant.bytes());
+        assertEquals(3, mesh.tiles().getFirst().detailTriangles().size());
+        var query = new NavMeshQuery(mesh);
+        var point = query.nearestPoint(new Vec3(1, .5, 1), new Vec3(2, 4, 2), NavMeshQuery.Filter.walkable());
+        assertEquals(NavMeshQuery.NearestStatus.FOUND, point.status());
+        assertEquals(new Vec3(1, 0, 1), point.surface().orElseThrow().position());
+    }
+
+    @Test
+    void rejectsFlatRedundantTrianglesThatLeaveACornerUncovered() {
+        double[][] hexagon = {{1, 0, 0}, {3, 0, 0}, {4, 0, 2}, {3, 0, 4}, {1, 0, 4}, {0, 0, 2}};
+        Fixture missingCorner = surfaceFixture(hexagon, new double[0][],
+                new int[][]{{0, 1, 2}, {0, 2, 3}, {0, 3, 4}, {0, 1, 3}, {1, 2, 3}});
+        reject(missingCorner.bytes(), ADJACENCY);
+    }
+
+    @Test
+    void rejectsRedundantTrianglesWithConflictingGroundHeights() {
+        double[][] raised = square();
+        raised[1][1] = .25;
+        reject(surfaceFixture(raised, new double[0][],
+                new int[][]{{0, 1, 2}, {0, 2, 3}, {0, 1, 3}}).bytes(), ADJACENCY);
+    }
+
+    @Test
+    void stillRejectsExactDuplicateTrianglesOnFlatRedundantSurface() {
+        reject(surfaceFixture(square(), new double[0][],
+                new int[][]{{0, 1, 2}, {0, 2, 3}, {0, 1, 2}}).bytes(), FORMAT);
+    }
+
+    @Test
     void rejectsFlippedDegenerateAndOutsideDetailGeometry() {
         reject(surfaceFixture(square(), new double[0][], new int[][]{{0, 2, 1}, {0, 2, 3}}).bytes(), FORMAT);
         reject(surfaceFixture(square(), new double[][]{{1, 0, 0}},

@@ -13,7 +13,7 @@ import com.game.discovery.location.SceneAssetLocator.Found;
 import com.game.discovery.location.SceneAssetLocator.Resolution;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleSettlementData;
-import com.game.proto.BattleSettlementEvent;
+import com.game.api.battle.LegacyBattleSettlementCodec;
 import com.google.protobuf.ByteString;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -210,7 +210,7 @@ public final class SettlementOutbox implements SettlementSink {
         long battleId = settlement.getBattleId();
         byte[] payload;
         try {
-            payload = BattleSettlementEvent.newBuilder().setSettlement(settlement).build().toByteArray();
+            payload = LegacyBattleSettlementCodec.encode(settlement);
         } catch (RuntimeException e) {
             metrics.settlement(SettlementEvent.SERIALIZE_FAILED);
             log.error("结算序列化失败，什么都不发 battle_id={} player={}", Long.toUnsignedString(battleId), Long.toUnsignedString(playerId), e);

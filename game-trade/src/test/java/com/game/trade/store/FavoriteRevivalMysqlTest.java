@@ -112,6 +112,7 @@ class FavoriteRevivalMysqlTest {
     }
 
     private static TradeMysqlFixture db;
+    private static Connection lockObservation;
     private static final ExecutorService POOL = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "trade-favorite-it");
         t.setDaemon(true);
@@ -126,12 +127,14 @@ class FavoriteRevivalMysqlTest {
     @BeforeAll
     static void createDatabase() throws SQLException {
         db = TradeMysqlFixture.create();
+        // 占锁前取得owner只读诊断连接；NORMAL账号不授予performance_schema权限。
+        lockObservation = db.schemaConnection();
     }
 
     @AfterAll
     static void dropDatabase() throws SQLException {
-        if (db != null) {
-            db.close();
+        try (TradeMysqlFixture owned = db; Connection observer = lockObservation) {
+            // 逆序关闭：先退出锁观察，再清理拥有原件的一次性库。
         }
     }
 
@@ -180,9 +183,14 @@ class FavoriteRevivalMysqlTest {
      * 用带 WHERE 的普通查询：它一定走 row_search_mvcc、一定分配 read view。
      */
     private void openPurgeBlocker(long player) throws SQLException {
-        Connection c = begin(Connection.TRANSACTION_REPEATABLE_READ);
+        // 只读purge挡板属于测试诊断：不占用产品writer的64槽，避免200轮后轮转撞上它。
+        // 写入持锁方和全部产品收藏仍走NORMAL；RR read view与删除标记编排保持不变。
+        Connection c = db.schemaConnection();
         holders.add(c);
+        c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+        c.setAutoCommit(false);
         try (PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM trade_favorite WHERE `player_id` = ?")) {
+            ps.setQueryTimeout(5);
             ps.setObject(1, player);
             ps.executeQuery().close();
         }
@@ -268,8 +276,13 @@ class FavoriteRevivalMysqlTest {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_BUDGET_MS);
         long seen = 0;
         while (true) {
-            try {
-                seen = db.count(LOCK_WAITERS_QUERY, TradeTables.FAVORITE);
+            try (PreparedStatement query = lockObservation.prepareStatement(LOCK_WAITERS_QUERY)) {
+                query.setQueryTimeout(5);
+                query.setString(1, TradeTables.FAVORITE);
+                try (var rows = query.executeQuery()) {
+                    if (!rows.next()) throw new SQLException("锁等待诊断COUNT缺少结果");
+                    seen = rows.getLong(1);
+                }
             } catch (SQLException e) {
                 if (isLockWaitsUnobservable(e)) {
                     throw new LockWaitsUnobservable(e);
@@ -422,6 +435,15 @@ class FavoriteRevivalMysqlTest {
             holder.commit();
             for (int i = 0; i < workers; i++) {
                 Throwable error = results.get(i).get(WAIT_BUDGET_MS, TimeUnit.MILLISECONDS);
+                if (error != null) {
+                    // 原零错误断言不变；完整保留cause和SQLState，不能只剩AssertJ截断的三帧。
+                    log.error("第 {} 轮收藏 #{} 完整异常", round, i, error);
+                    var seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Throwable, Boolean>());
+                    for (Throwable cause = error; cause != null && seen.add(cause); cause = cause.getCause()) {
+                        if (cause instanceof SQLException sql)
+                            log.error("第 {} 轮收藏 #{} SQLState={} errorCode={}", round, i, sql.getSQLState(), sql.getErrorCode());
+                    }
+                }
                 if (error != null && JdbcListingStore.errorCode(error) == JdbcListingStore.ER_LOCK_DEADLOCK) {
                     fail("第 %d 轮收藏 #%d 返回 1213，连重试上限都用尽了：收藏写入又在删除标记记录上 S→X 互等 —— %s", round, i, error);
                 }

@@ -82,10 +82,13 @@ class WatchableConfigurationTest {
     }
 
     @Test
-    void 开局钩子是真的_开局前按落点清退观众_开局后登记进索引() {
+    void 开局钩子是真的_开局前按完整原件清退观众_开局后登记进索引() {
         GatherHooks hooks = configuration.gatherHooks(store, dialer, metrics);
-        placements.put(placement(880510, T0 - 5_000));
-        store.putMark(1001, SpectateRules.encodeMark(880510, "0123456789abcdef"));
+        var original = LocalObserverOperation.create(placement(880510, T0 - 5_000), 1001,
+                com.game.proto.BattleRouting.newBuilder().setGateNodeId(1).setGateInstanceId("gate-original").setSessionId(8).build(),
+                "公开观众1001", "acafe001-1234-4567-8901-123456789abc", T0 - 5_000);
+        placements.put(original.placement());
+        store.putMark(1001, original.mark());
         BattlePlacement started = placement(880511, T0);
         placements.put(started);
 
@@ -98,6 +101,8 @@ class WatchableConfigurationTest {
             assertThat(call.battleId()).isEqualTo(880510L);
             assertThat(call.observerId()).isEqualTo(1001L);
             assertThat(call.reason()).isEqualTo("enter_gather");
+            assertThat(call.placement()).isEqualTo(original.placement());
+            assertThat(call.request()).isEqualTo(original.add());
         });
         assertThat(store.markOf(1001)).isEmpty();
         assertThat(store.watchable()).containsExactly("880511");

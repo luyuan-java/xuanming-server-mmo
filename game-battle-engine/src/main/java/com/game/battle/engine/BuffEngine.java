@@ -61,6 +61,11 @@ final class BuffEngine {
      * </ol>
      */
     void addBuffToActor(BattleUnit target, int buffTableId, long casterId, int depth) {
+        addBuffToActor(target, buffTableId, casterId, depth, 0.0);
+    }
+
+    /** 职业技能的有符号幅度只赋给本次显式效果；递归子 buff 继续走零幅度入口。 */
+    void addBuffToActor(BattleUnit target, int buffTableId, long casterId, int depth, double statPercent) {
         if (Integer.compareUnsigned(depth, BattleConstants.MAX_SUB_BUFF_DEPTH) > 0 || target.isDead()) {
             return;
         }
@@ -85,7 +90,7 @@ final class BuffEngine {
         if (row.getBuffType() == BattleConstants.BUFF_TYPE_DISPEL) {
             return;
         }
-        if (stackOrRefreshExistingBuff(target, row, casterId)) {
+        if (stackOrRefreshExistingBuff(target, row, casterId, statPercent)) {
             return;
         }
 
@@ -99,12 +104,16 @@ final class BuffEngine {
             remainRounds = 1; // 瞬时 buff：驱散 / 子 buff 照样生效，条目本身随后立即移除
         }
         // 只经由 add 建条目、不留 builder 引用：下面的递归可能把它驱散掉，之后一律按 newBuffId 重查（engine.cpp:1448-1451）
-        target.state().addBuffs(BattleBuffEntry.newBuilder()
+        var entry = BattleBuffEntry.newBuilder()
                 .setBuffId(newBuffId)
                 .setBuffTableId(buffTableId)
                 .setLayer(1)
                 .setRemainRounds(remainRounds)
-                .setCasterId(casterId));
+                .setCasterId(casterId);
+        if (statPercent != 0.0) {
+            entry.setStatPercent(statPercent).setAppliedRound(ctx.roundIndex());
+        }
+        target.state().addBuffs(entry.build());
 
         ctx.events().append(eBattleEventType.BATTLE_EVENT_BUFF_ADD, casterId, target.actorId())
                 .setBuffTableId(buffTableId)
@@ -135,7 +144,7 @@ final class BuffEngine {
      * 免疫（{@code IsImmuneToBuff}，{@code engine.cpp:1482-1497}）：目标任一现存条目（其表行存在）的 immune_tag 包含新 buff 任一 tag 的
      * <strong>键</strong>（忽略 bool 值）。靠的是任意类型 buff 的 immune_tag，类型 34 本身没有特殊逻辑。
      */
-    private boolean isImmuneToBuff(BattleUnit target, BuffTable row) {
+    boolean isImmuneToBuff(BattleUnit target, BuffTable row) {
         int count = target.state().getBuffsCount();
         for (int index = 0; index < count; index++) {
             Optional<BuffTable> existingRow = ctx.data().buff(target.state().getBuffsOrBuilder(index).getBuffTableId());
@@ -183,9 +192,10 @@ final class BuffEngine {
      * 叠层 / 刷新（{@code StackOrRefreshExistingBuff}，{@code engine.cpp:1525-1551}）：按列表顺序找<strong>第一个</strong>表 id 相同、并且
      * （no_caster ≠ 0 或施法者相同）的条目。找到后：{@code layer < max_layer}（uint32）时加一层（max_layer 为 0 时永不加层）；
      * 有限条目且表 duration &gt; 0 时剩余回合重挂满；出 BUFF_ADD（source = 本次 casterId，value = 加层后的层数）。
+     * 非零职业幅度按绝对值保留更强的一项，并记录本次施加回合；零幅度入口不覆盖已有职业幅度或施加回合。
      * 不触发子 buff，也不改条目原来的施法者。
      */
-    private boolean stackOrRefreshExistingBuff(BattleUnit target, BuffTable row, long casterId) {
+    private boolean stackOrRefreshExistingBuff(BattleUnit target, BuffTable row, long casterId, double statPercent) {
         int count = target.state().getBuffsCount();
         for (int index = 0; index < count; index++) {
             BattleBuffEntryOrBuilder existing = target.state().getBuffsOrBuilder(index);
@@ -201,6 +211,11 @@ final class BuffEngine {
             }
             if (entry.getRemainRounds() != 0 && row.getDuration() > 0) {
                 entry.setRemainRounds(BattleRules.roundsFromSeconds(row.getDuration()));
+            }
+            if (statPercent != 0.0) {
+                // 弱幅度仍刷新持续时间，但不覆盖强幅度；原施法者与实例号保持不变。
+                if (Math.abs(statPercent) > Math.abs(entry.getStatPercent())) entry.setStatPercent(statPercent);
+                entry.setAppliedRound(ctx.roundIndex());
             }
             ctx.events().append(eBattleEventType.BATTLE_EVENT_BUFF_ADD, casterId, target.actorId())
                     .setBuffTableId(row.getId())
@@ -221,6 +236,33 @@ final class BuffEngine {
         target.state().removeBuffs(buffIndex);
         ctx.events().append(eBattleEventType.BATTLE_EVENT_BUFF_REMOVE, casterId, target.actorId())
                 .setBuffTableId(buffTableId);
+    }
+
+    /** 职业净化按挂载先后移除减益；不同于旧 dispel_tag 的逆序删除，不消耗随机数。 */
+    int dispelDebuffs(BattleUnit target, int count) {
+        int removed = 0;
+        for (int index = 0; index < target.state().getBuffsCount() && Integer.compareUnsigned(removed, count) < 0;) {
+            if (isDebuffEntry(target.state().getBuffsOrBuilder(index))) {
+                removeBuffAt(target, index);
+                removed++;
+            } else {
+                index++;
+            }
+        }
+        return removed;
+    }
+
+    boolean isDebuffEntry(BattleBuffEntryOrBuilder entry) {
+        if (entry.getStatPercent() < 0.0) return true;
+        var row = ctx.data().buff(entry.getBuffTableId());
+        if (row.isEmpty()) return false;
+        if (row.get().containsTag("Debuff")) return true;
+        return switch (row.get().getBuffType()) {
+            case BattleConstants.BUFF_TYPE_POISON, BattleConstants.BUFF_TYPE_BURN,
+                 BattleConstants.BUFF_TYPE_STUN, BattleConstants.BUFF_TYPE_SILENCE,
+                 BattleConstants.BUFF_TYPE_FREEZE -> true;
+            default -> false;
+        };
     }
 
     // ---- 回合末 tick（engine.cpp:1037-1167） ----
@@ -244,7 +286,7 @@ final class BuffEngine {
      *       表时长回合 − remain + 1 : 1（用<strong>表时长</strong>，不是条目的初始剩余）；无限条目 elapsed = 全局回合号；
      *       {@code elapsed % k == 0} 且（interval_count 为 0 或 {@code elapsed / k <= interval_count}）时结算周期效果；</li>
      *   <li>结算后单位已死：本单位 tick 立即结束（死亡已清空 buff）；</li>
-     *   <li>按实例号重查：remain 0 不动；1 移除（出 BUFF_REMOVE）；否则减 1。</li>
+     *   <li>按实例号重查：remain 0 不动；职业幅度本回合新挂或刷新时不递减；其余 1 移除（出 BUFF_REMOVE），否则减 1。</li>
      * </ol>
      * 有意差异 D5：k 被截成 0（秒换回合的结果 ≥ 2^32）时 C++ 是 {@code % 0}（x86 上 SIGFPE）；Java 不结算周期效果、递减照常。
      */
@@ -303,6 +345,10 @@ final class BuffEngine {
             int remainRounds = actor.state().getBuffsOrBuilder(index).getRemainRounds();
             if (remainRounds == 0) {
                 continue;
+            }
+            int appliedRound = actor.state().getBuffsOrBuilder(index).getAppliedRound();
+            if (appliedRound != 0 && appliedRound == ctx.roundIndex()) {
+                continue; // 本回合新挂或刷新的职业增减益不扣持续；周期效果已按原规则执行。
             }
             if (remainRounds == 1) {
                 removeBuffAt(actor, index);
@@ -372,7 +418,7 @@ final class BuffEngine {
      * 按快照顺序处理，保留的条目保持相对顺序：
      * <ol>
      *   <li>表行缺失 → 丢弃；类型为眩晕 / 冰冻 / 沉默 → 丢弃；瞬时（非无限且 duration ≤ 0）→ 丢弃；</li>
-     *   <li>施法者非 0 且本局查不到（查找范围含怪物与宝宝）→ 施法者置 0；</li>
+     *   <li>清除局内职业幅度和施加回合；施法者非 0 且本局查不到（查找范围含怪物与宝宝）→ 施法者置 0；</li>
      *   <li>有限条目：remain 为 0 或大于表时长回合（uint32）→ 改成表时长回合；无限条目保留快照里的 remain；</li>
      *   <li>layer 不夹（0 层在毒伤里按 1 层算，超过 max_layer 的层数原样保留）。</li>
      * </ol>
@@ -394,6 +440,8 @@ final class BuffEngine {
                 continue;
             }
             BattleBuffEntry.Builder entry = buff.toBuilder();
+            // 幅度与施加回合是局内权威字段，外部快照不能带入属性加成或延期到期。
+            entry.clearStatPercent().clearAppliedRound();
             if (entry.getCasterId() != 0 && ctx.findActor(entry.getCasterId()) == null) {
                 entry.setCasterId(0);
             }

@@ -9,7 +9,6 @@ import static org.assertj.core.api.Assertions.within;
 import com.game.api.proto.ClientForward;
 import com.game.player.store.PlayerStore.HandOffMode;
 import com.game.player.store.state.Facing;
-import com.game.player.store.state.PlayerState;
 import com.game.proto.ActorBaseAttributesS2C;
 import com.game.proto.ActorDestroyS2C;
 import com.game.proto.ActorListCreateS2C;
@@ -516,7 +515,7 @@ class MovementSyncTest extends MovementFixture {
 
         assertThat(velocityAtSave).as("写回时速度已清零").containsExactly(Vec3.ORIGIN);
         assertThat(repo.saves()).as("朝向随写回一起持久化").containsExactly(new PlayerSave(1001, 1, 1, 1, atLeave,
-                PlayerState.newBuilder().setFacing(Facing.newBuilder().setZ(90)).build()));
+                SceneWorldTest.INITIAL_STATE.toBuilder().setFacing(Facing.newBuilder().setZ(90)).build()));
         assertThat(sink.messageIdsTo(LINK, 12)).containsExactly(51);
         assertThat(ActorDestroyS2C.parseFrom(sink.to(LINK, 12).get(0).getSerializedMessage()).getEntity())
                 .isEqualTo(a.entity());

@@ -132,7 +132,7 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class GuildEconomyChannelIntegrationTest {
 
-    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+    private final RedisKeys redisKeys = new RedisKeys(GameNamespace.of("gect" + UUID.randomUUID().toString().replace("-", "").substring(0, 20)));
 
     private static final String MYSQL = System.getProperty("game.it.mysql");
     private static final String USER = System.getProperty("game.it.mysql.user", "root");
@@ -287,10 +287,10 @@ class GuildEconomyChannelIntegrationTest {
                 }
             }
         }
-        scenes = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.SCENE, SceneNodeInfo.parser());
+        scenes = new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser());
         scenes.publish(zone, SCENE_NODE, SceneNodeInfo.newBuilder().setZoneId(zone).setNodeId(SCENE_NODE)
                 .setInstanceId("fake-scene").setRpcHost("127.0.0.1").setRpcPort(port).build(), Duration.ofMinutes(2));
-        locations = new PlayerLocationDirectory(redis, REDIS_KEYS);
+        locations = new PlayerLocationDirectory(redis, redisKeys);
         locations.putAsync(PlayerLocation.newBuilder().setPlayerId(a).setZoneId(zone).setSceneNodeId(SCENE_NODE)
                 .setOwnerEpoch(OWNER_EPOCH).build(), 1).toCompletableFuture().get(5, TimeUnit.SECONDS);
 
@@ -303,39 +303,39 @@ class GuildEconomyChannelIntegrationTest {
         ConfigTables tables = wiring.guildConfigTables(tableDir());
         PbMysql synced = wiring.guildTables(dataSource, tables);
         GuildTx tx = wiring.guildTx(dataSource, props, metrics);
-        GuildConfiguration.SchemaReady ready = wiring.guildSchemaReady(tx, synced, REDIS_KEYS.namespace());
+        GuildConfiguration.SchemaReady ready = wiring.guildSchemaReady(tx, synced, redisKeys.namespace());
         GuildStore store = wiring.guildStore(tx, ready);
         EconomyStore economyStore = wiring.economyStore(tx, ready);
         leaseScheduler = wiring.guildLeaseScheduler();
-        lease = wiring.guildIdLease(redis, REDIS_KEYS, leaseScheduler, ready);
+        lease = wiring.guildIdLease(redis, redisKeys, leaseScheduler, ready);
         GuildIds ids = wiring.guildIds(lease);
         background = wiring.guildBackgroundScheduler();
         GuildCache.CacheRedis cacheRedis = wiring.guildCacheRedis(redis);
-        GuildCacheInvalidator invalidator = wiring.guildCacheInvalidator(cacheRedis, REDIS_KEYS, props, background, metrics);
-        GuildCache cache = wiring.guildCache(cacheRedis, REDIS_KEYS, props, store, invalidator, metrics);
-        PlayerPresenceDirectory presence = wiring.playerPresenceDirectory(redis, REDIS_KEYS);
-        PlayerPushes playerPushes = wiring.playerPushes(redis, REDIS_KEYS, presence);
+        GuildCacheInvalidator invalidator = wiring.guildCacheInvalidator(cacheRedis, redisKeys, props, background, metrics);
+        GuildCache cache = wiring.guildCache(cacheRedis, redisKeys, props, store, invalidator, metrics);
+        PlayerPresenceDirectory presence = wiring.playerPresenceDirectory(redis, redisKeys);
+        PlayerPushes playerPushes = wiring.playerPushes(redis, redisKeys, presence);
         PlayerProfiles profiles = wiring.playerProfiles(dataSource, props);
         GuildPushes pushes = wiring.guildPushes(playerPushes, metrics, props, REGISTRY);
         BackgroundTx backgroundTx = wiring.guildBackgroundTx(dataSource, props);
         EconomyAssetEffects effects = wiring.economyAssetEffects(invalidator, pushes, metrics);
-        assetStore = wiring.guildAssetStore(backgroundTx, effects, ready, redis, REDIS_KEYS);
+        assetStore = wiring.guildAssetStore(backgroundTx, effects, ready, redis, redisKeys);
         EconomyTables.Lookup economyTables = wiring.economyTables(tables);
         settlePool = wiring.guildAssetSettlePool(props, dataSource, redis);
         workerPool = wiring.guildAssetWorkerPool(props, dataSource, redis);
         timer = wiring.guildAssetTimer();
         clients = wiring.sceneAssetOpClients();
-        runtime = wiring.guildAssetRuntime(props, tables, assetStore, dataSource, redis, REDIS_KEYS, metrics, settlePool, workerPool, timer,
+        runtime = wiring.guildAssetRuntime(props, tables, assetStore, dataSource, redis, redisKeys, metrics, settlePool, workerPool, timer,
                 clients, lease);
         assertThat(runtime.loop()).isPresent();
-        GuildRanks ranks = wiring.guildRanks(redis, REDIS_KEYS, background, metrics, store, lease, runtime,dataSource);
-        ApplyPushCooldown cooldown = wiring.guildApplyPushCooldown(redis, REDIS_KEYS);
+        GuildRanks ranks = wiring.guildRanks(redis, redisKeys, background, metrics, store, lease, runtime,dataSource);
+        ApplyPushCooldown cooldown = wiring.guildApplyPushCooldown(redis, redisKeys);
         GuildTableLookup lookup = wiring.guildTableLookup(tables);
         GuildAccess access = wiring.guildAccess(cache, profiles, invalidator, metrics,dataSource);
         GuildViews views = wiring.guildViews(presence, profiles, metrics, props, lookup, store);
         GuildService guilds = wiring.guildService(store, cache, access, views, ranks, pushes, ids, lookup);
         GuildManageService manage = wiring.guildManageService(store, cache, access, views, pushes, cooldown, lookup,
-                wiring.guildApplyQuota(redis, REDIS_KEYS, props, meters));
+                wiring.guildApplyQuota(redis, redisKeys, props, meters));
         GuildRankService rankService = wiring.guildRankService(ranks, cache, access, views);
         pool = wiring.guildWorkerPool(props, dataSource);
         GuildEconomyService economy = wiring.guildEconomyService(economyStore, cache, access, views, economyTables, pushes,
@@ -415,7 +415,7 @@ class GuildEconomyChannelIntegrationTest {
         if (lease != null) {
             int node = lease.nodeId();
             lease.close();
-            redis.getKeys().delete(REDIS_KEYS.nodeIdEpoch(NodeTypes.GUILD, 0, node));
+            redis.getKeys().delete(redisKeys.nodeIdEpoch(NodeTypes.GUILD, 0, node));
         }
         if (leaseScheduler != null) {
             leaseScheduler.shutdownNow();
@@ -423,17 +423,24 @@ class GuildEconomyChannelIntegrationTest {
         if (redis != null) {
             List<String> keys = new ArrayList<>();
             for (long id : guildIds) {
-                keys.add(REDIS_KEYS.guildSnapshot(id));
-                keys.add(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildSnapshot(id)));
+                keys.add(redisKeys.guildSnapshot(id));
+                keys.add(redisKeys.cacheGeneration(redisKeys.guildSnapshot(id)));
             }
-            keys.add(REDIS_KEYS.guildOfPlayer(a));
-            keys.add(REDIS_KEYS.guildApplyQuota(a));
-            keys.add(REDIS_KEYS.cacheGeneration(REDIS_KEYS.guildOfPlayer(a)));
-            keys.add(REDIS_KEYS.guildRankAll());
-            keys.add(REDIS_KEYS.guildRankZone(zone));
-            keys.add(REDIS_KEYS.guildRankZones());
-            keys.add(REDIS_KEYS.playerLocation(a));
-            keys.add(REDIS_KEYS.nodeDirectory(NodeTypes.SCENE, zone));
+            keys.add(redisKeys.guildOfPlayer(a));
+            keys.add(redisKeys.guildApplyQuota(a));
+            keys.add(redisKeys.cacheGeneration(redisKeys.guildOfPlayer(a)));
+            keys.add(redisKeys.guildRankAll());
+            keys.add(redisKeys.guildRankZone(zone));
+            keys.add(redisKeys.guildRankZones());
+            keys.add(redisKeys.playerLocation(a));
+            keys.add(redisKeys.nodeDirectory(NodeTypes.SCENE, zone));
+            // 本用例独占namespace；v2水位不能随着随机zone留给后续用例。
+            if (scenes != null) scenes.remove(zone, SCENE_NODE);
+            keys.add(redisKeys.zoneNodeDirectory(NodeTypes.SCENE, zone));
+            keys.add(redisKeys.zoneNodeExpiry(NodeTypes.SCENE, zone));
+            keys.add(redisKeys.zoneNodeSeen(NodeTypes.SCENE, zone));
+            keys.add(redisKeys.zoneDirectoryFormat(zone));
+            keys.add(redisKeys.zoneNodeTypes(zone));
             redis.getKeys().delete(keys.toArray(String[]::new));
             redis.shutdown();
         }

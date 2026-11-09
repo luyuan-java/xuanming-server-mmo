@@ -242,25 +242,28 @@ class MessageRoutesTest {
     }
 
     @Test
-    void 匹配服务12个号都路由到match域_148与两个推送占位不回包_探测走同一权威域_内部服务不在白名单() {
-        // match-spec §1.4 / §9.2 / §15.3：MatchService 标了 OptionIsClientProtocolService、没标 OptionIsPlayerService，10 个号整体转给
+    void 匹配服务14个号都路由到match域_148与两个推送占位不回包_探测战报走同一权威域_内部服务不在白名单() {
+        // MatchService 标了 OptionIsClientProtocolService、没标 OptionIsPlayerService，14 个号整体转给
         // game-match（Dubbo group match）。148 CancelQueue 与两个推送占位 154 / 156 的应答类型是 Empty → tip 为 0 时 gate 不回包（§8.1、M4；
-        // tip ≠ 0 照样回信封）；其余 7 个都带 in-band 的 error_message / error_code → 一律回包（全默认值的应答是 0 字节也要回）。
+        // tip ≠ 0 照样回信封）；其余方法一律回包（全默认值的应答是 0 字节也要回）。
         List<String> noReply = List.of("CancelQueue", "NotifyChallengeInvite", "NotifyChallengeResult");
         List<String> replied = List.of("JoinQueue", "GetQueueStatus", "ChallengePlayer", "RespondChallenge", "WatchBattle",
-                "ListWatchableBattles", "RequestBattleTicket", "GetNetworkProbePlan", "CommitNetworkProbe");
+                "ListWatchableBattles", "RequestBattleTicket", "GetNetworkProbePlan", "CommitNetworkProbe",
+                "ListBattleReports", "GetBattleReport");
         List<MessageMethod> match = registry.all().stream().filter(m -> m.serviceName().equals("MatchService")).toList();
         assertThat(match).as("契约里 MatchService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.concat(noReply.stream(), replied.stream()).toList());
-        // 10 个号逐个钉住（message_id.txt；match-spec §1.4 的表）：发号漂移或增删方法时这里先失败
+        // 14 个号逐个钉住（正式同步的 message_id.txt）：发号漂移或增删方法时这里先失败。
         assertThat(match).extracting(MessageMethod::messageId)
-                .containsExactlyInAnyOrder(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275);
+                .containsExactlyInAnyOrder(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380);
         assertThat(Map.of("CancelQueue", 148, "RespondChallenge", 151, "ChallengePlayer", 152, "GetQueueStatus", 153,
                 "NotifyChallengeResult", 154, "NotifyChallengeInvite", 156, "JoinQueue", 157, "WatchBattle", 163,
                 "ListWatchableBattles", 164, "RequestBattleTicket", 179))
                 .allSatisfy((name, id) -> assertThat(registry.requireId("MatchService", name)).as(name).isEqualTo(id));
         assertThat(registry.requireId("MatchService","GetNetworkProbePlan")).isEqualTo(275);
         assertThat(registry.requireId("MatchService","CommitNetworkProbe")).isEqualTo(265);
+        assertThat(registry.requireId("MatchService", "ListBattleReports")).isEqualTo(379);
+        assertThat(registry.requireId("MatchService", "GetBattleReport")).isEqualTo(380);
         for (MessageMethod method : match) {
             assertThat(method.clientService()).as(method.key()).isTrue();
             assertThat(method.playerService()).as(method.key() + " 不是玩家服务：走后端表，不走 scene").isFalse();
@@ -280,9 +283,9 @@ class MessageRoutesTest {
         assertThat(routes.clientRoute(148).hasResponse()).as("148 CancelQueue 应答是 Empty").isFalse();
         assertThat(routes.clientRoute(157).hasResponse()).as("157 JoinQueue 应答是 JoinQueueResponse").isTrue();
         assertThat(routes.clientRoute(179).hasResponse()).as("179 应答消息定义在 battle 包，照样回包").isTrue();
-        // match 域里只有这 10 个号：别的服务（尤其是战斗服务）没有被带进来
+        // match 域里只有这 14 个号：别的服务（尤其是战斗服务）没有被带进来。
         assertThat(routes.all().stream().filter(r -> r.domain().equals(DubboGroups.MATCH)).map(MessageRoute::messageId))
-                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179,265,275);
+                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380);
         assertThat(MessageRoutes.SERVICE_BACKENDS).containsEntry("MatchService", DubboGroups.MATCH);
 
         // MatchInternal（帮会活动开战，match_internal.proto）是内部服务：刻意没标客户端协议服务，也不在后端表里。

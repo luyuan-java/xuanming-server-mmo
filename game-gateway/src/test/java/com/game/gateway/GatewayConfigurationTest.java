@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
 import com.game.api.AccountLoginService;
 import com.game.discovery.namespace.GameNamespaceAutoConfiguration;
 import com.game.gateway.assign.AssignGateService;
+import com.game.gateway.hotfix.HotfixCheckService;
 import com.game.gateway.login.LoginHttpService;
 import com.game.gateway.store.GatewayStore;
 import com.game.gateway.store.ZoneManualStatus;
@@ -65,7 +66,7 @@ class GatewayConfigurationTest {
                 .withPropertyValues(GatewayConfiguration.TOKEN_SECRET_ENV + "=s")
                 .run(ctx -> {
                     assertThat(ctx).hasNotFailed().hasSingleBean(AssignGateService.class).hasSingleBean(LoginHttpService.class)
-                            .hasSingleBean(ZoneDirectory.class);
+                            .hasSingleBean(ZoneDirectory.class).hasSingleBean(HotfixCheckService.class);
                     assertThat(ctx.getBean(GatewayProperties.class).seedZones().get(0).status())
                             .isEqualTo(ZoneManualStatus.OPEN);
                 });

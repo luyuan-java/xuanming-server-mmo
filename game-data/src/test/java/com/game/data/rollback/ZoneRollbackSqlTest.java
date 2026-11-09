@@ -298,7 +298,8 @@ class ZoneRollbackSqlTest {
         h.guildAnswers.add(r -> com.game.api.proto.ListAppliedAssetOpsSinceResponse.newBuilder()
                 .setResult(com.game.api.proto.ListAppliedResult.LIST_APPLIED_RESULT_ERROR).setDetail("查询超时").build());
 
-        OpsJobRow job = h.await(h.submit(zonesAccepting(target), "k1"));
+        // 101人逐项计划/夺权/账本核验/拒绝明细/释放都执行真实SQL；仅扩测试观察窗。
+        OpsJobRow job = h.await(h.submit(zonesAccepting(target), "k1"), java.time.Duration.ofMinutes(2));
 
         assertThat(job.getStatus()).isEqualTo(OpsJobStatus.OPS_JOB_FAILED);
         assertThat(job.getResultCode()).isEqualTo("rollback_guild_check_failed");

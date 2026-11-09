@@ -39,6 +39,18 @@ message PlayerState {
   // 每个域「按 seq 升序已处理到哪」与最近 32 条结局，与 GM 处置的效果（currency.blocked_types 等）同一份记录、同一次围栏写。
   // 没有这段 = 从没消费过收件箱。回档不改它（与 blocked_types 同口径：处置状态不是资产，见 game-data RestoreBuilder）。
   InboxLedgerState inbox_ledger = 10;
+  // 已学技能与真实存储重数；与货币在同一 PlayerState、同一 owner_epoch 围栏事务提交。
+  PlayerSkillBookState skills = 11;
+}
+
+message PlayerSkillBookState {
+  repeated PlayerSkillEntry entries = 1;
+}
+
+message PlayerSkillEntry {
+  uint32 skill_id = 1;
+  // 原样保留，生效时按本版职业、等级与表上限解释；未知技能和零重数不删除。
+  uint32 rank = 2;
 }
 
 // 收件箱消费账本：每个域一条游标，按 domain 无符号升序写出（周期存盘按值比对，顺序必须确定；查找一律按 domain 字段，不靠下标）。

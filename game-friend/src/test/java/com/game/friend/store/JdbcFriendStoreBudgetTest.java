@@ -148,14 +148,13 @@ class JdbcFriendStoreBudgetTest {
 
         assertThatThrownBy(() -> store.remove(22, 33, deadline)).isInstanceOf(FriendStoreException.class);
 
-        assertThat(updates).as("体内的写都在截止之前发出").containsExactly(JdbcFriendStore.ENSURE_CAPACITY, JdbcFriendStore.ENSURE_CAPACITY,
-                JdbcFriendStore.DELETE_EDGE, JdbcFriendStore.DECREMENT_COUNT, JdbcFriendStore.DELETE_EDGE, JdbcFriendStore.DECREMENT_COUNT);
+        assertThat(updates).as("体内的写都在截止之前发出").containsExactly(JdbcFriendStore.DELETE_EDGE, JdbcFriendStore.DECREMENT_COUNT, JdbcFriendStore.DELETE_EDGE, JdbcFriendStore.DECREMENT_COUNT);
         assertThat(queries).containsExactly(JdbcFriendStore.EDGE_EXISTS_EITHER,
-                READ_ROUTE_META, JdbcFriendStore.LOCK_CAPACITY, JdbcFriendStore.COUNT_FRIENDS,
-                READ_ROUTE_META, JdbcFriendStore.LOCK_CAPACITY, JdbcFriendStore.COUNT_FRIENDS,
+                READ_ROUTE_META, JdbcFriendStore.LOCK_CAPACITY,
+                READ_ROUTE_META, JdbcFriendStore.LOCK_CAPACITY,
                 READ_ROUTE_META, JdbcFriendStore.LOCK_CAPACITY, JdbcFriendStore.LOCK_CAPACITY);
         assertDeadlineExpiredInWrite();
-        // 补容量是先行独立提交；不能把它们混进之后越过截止的好友事务，也不能漏记这些真实提交。
+        // 已有容量只锁不写，仍独立提交；记录器按该连接实际语句区分容量与业务事务。
         assertThat(capacityCommits).hasValue(2);
         assertThat(capacityRollbacks).hasValue(1);
         assertThat(commits).as("好友事务截止之后不发 COMMIT").hasValue(0);
@@ -179,6 +178,7 @@ class JdbcFriendStoreBudgetTest {
     private Connection connection() throws SQLException {
         Connection c = mock(Connection.class);
         List<String> connectionWrites = new CopyOnWriteArrayList<>();
+        List<String> connectionQueries = new CopyOnWriteArrayList<>();
         when(c.getMetaData()).thenReturn(metadata);
         AtomicBoolean autoCommit = new AtomicBoolean(true);
         AtomicInteger isolation = new AtomicInteger(Connection.TRANSACTION_READ_COMMITTED);
@@ -193,27 +193,29 @@ class JdbcFriendStoreBudgetTest {
             return null;
         }).when(c).setTransactionIsolation(anyInt());
         doAnswer(ignored -> {
-            if (capacityOnly(connectionWrites)) capacityCommits.incrementAndGet();
+            if (capacityOnly(connectionWrites, connectionQueries)) capacityCommits.incrementAndGet();
             else commits.incrementAndGet();
             return null;
         }).when(c).commit();
         doAnswer(ignored -> {
-            if (capacityOnly(connectionWrites)) capacityRollbacks.incrementAndGet();
+            if (capacityOnly(connectionWrites, connectionQueries)) capacityRollbacks.incrementAndGet();
             else rollbacks.incrementAndGet();
             return null;
         }).when(c).rollback();
-        when(c.prepareStatement(anyString())).thenAnswer(call -> statement(call.getArgument(0), connectionWrites));
+        when(c.prepareStatement(anyString())).thenAnswer(call -> statement(call.getArgument(0), connectionWrites, connectionQueries));
         return c;
     }
 
-    private static boolean capacityOnly(List<String> connectionWrites) {
-        return !connectionWrites.isEmpty() && connectionWrites.stream().allMatch(JdbcFriendStore.ENSURE_CAPACITY::equals);
+    private static boolean capacityOnly(List<String> connectionWrites, List<String> connectionQueries) {
+        return connectionQueries.contains(JdbcFriendStore.LOCK_CAPACITY)
+                && connectionWrites.stream().allMatch(JdbcFriendStore.ENSURE_CAPACITY::equals);
     }
 
-    private PreparedStatement statement(String sql, List<String> connectionWrites) throws SQLException {
+    private PreparedStatement statement(String sql, List<String> connectionWrites, List<String> connectionQueries) throws SQLException {
         PreparedStatement ps = mock(PreparedStatement.class);
         when(ps.executeQuery()).thenAnswer(ignored -> {
             queries.add(sql);
+            connectionQueries.add(sql);
             return resultSet(queryRows.getOrDefault(sql, List.of()));
         });
         when(ps.executeUpdate()).thenAnswer(ignored -> {

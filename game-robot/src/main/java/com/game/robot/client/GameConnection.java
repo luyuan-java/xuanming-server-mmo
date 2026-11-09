@@ -3,6 +3,7 @@ package com.game.robot.client;
 import com.game.net.client.ClientFrameDecoder;
 import com.game.net.client.ClientFrameEncoder;
 import com.game.proto.ClientRequest;
+import com.game.proto.ClientHeartbeatResponse;
 import com.game.proto.ClientTokenVerifyRequest;
 import com.game.proto.ClientTokenVerifyResponse;
 import com.game.proto.MessageContent;
@@ -35,8 +36,8 @@ import java.util.function.Predicate;
  * 到 gate 的一条客户端 TCP 连接（robot 契约 §3）：
  * <ul>
  *   <li>帧格式复用 {@code game-net} 的 {@link ClientFrameEncoder} / {@link ClientFrameDecoder}（typeName = 全名 + 1 字节终止符）；</li>
- *   <li>上行只有 {@code ClientTokenVerifyRequest}（首帧握手）与 {@code ClientRequest}；
- *       下行只接受 {@code ClientTokenVerifyResponse} 与 {@code MessageContent}，其它类型即非法帧、断开；</li>
+ *   <li>上行包含首帧握手、业务请求与验签通告后的心跳；
+ *       下行只接受握手应答、心跳应答与 {@code MessageContent}，其它类型即非法帧、断开；</li>
  *   <li>{@code ClientRequest.id} 每条连接从 1 起自增；应答按 {@code (message_id, id)} 对上，推送（{@code id=0}）留在 {@link Inbox}。</li>
  * </ul>
  * 发送可在任意线程调用（Netty 保证写入串行）；等待方法阻塞调用线程，不得在 EventLoop 上调用。
@@ -51,6 +52,7 @@ public final class GameConnection implements AutoCloseable {
 
     static final Map<String, Message> ACCEPTED_DOWNSTREAM = Map.of(
             MessageContent.getDescriptor().getFullName(), MessageContent.getDefaultInstance(),
+            ClientHeartbeatResponse.getDescriptor().getFullName(), ClientHeartbeatResponse.getDefaultInstance(),
             ClientTokenVerifyResponse.getDescriptor().getFullName(), ClientTokenVerifyResponse.getDefaultInstance());
 
     private static final Duration WRITE_TIMEOUT = Duration.ofSeconds(10);

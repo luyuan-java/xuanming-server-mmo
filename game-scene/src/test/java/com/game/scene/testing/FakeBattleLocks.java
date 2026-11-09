@@ -4,7 +4,7 @@ import com.game.discovery.battle.BattleRedis;
 import com.game.discovery.battle.BattleRedis.EnterRead;
 import com.game.discovery.battle.BattleRedis.SettlementField;
 import com.game.proto.BattleSettlementData;
-import com.game.proto.BattleSettlementEvent;
+import com.game.api.battle.LegacyBattleSettlementCodec;
 import com.game.scene.battle.BattleLocks;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
@@ -637,7 +637,7 @@ public final class FakeBattleLocks implements BattleLocks {
 
     /** 一份结算在 Redis 里的字节（{@code BattleSettlementEvent{settlement}}，与 battle 落库、Dubbo 投递的 body 逐字节相同）。 */
     public static byte[] record(BattleSettlementData settlement) {
-        return BattleSettlementEvent.newBuilder().setSettlement(settlement).build().toByteArray();
+        return LegacyBattleSettlementCodec.encode(settlement);
     }
 
     // ================================================================== 内部

@@ -192,20 +192,30 @@ class WatchBattleConfigurationTest {
             assertThat(done.await(20, TimeUnit.SECONDS)).isTrue();
 
             assertThat(result.get()).isInstanceOf(Reply.Body.class);
-            assertThat(bytes((Reply) result.get())).as("成功：只有 battle_id，不是 6.4 的 1006")
-                    .isEqualTo(WatchBattleResponse.newBuilder().setBattleId(X).build().toByteString());
+            assertThat(battle.addObservers).hasSize(1);
+            String operation = battle.addObservers.get(0).getSpectatorOperationId();
+            assertThat(operation).isEqualTo(java.util.UUID.fromString(operation).toString())
+                    .isNotEqualTo(new java.util.UUID(0, 0).toString());
+            assertThat(bytes((Reply) result.get())).as("成功应答严格绑定实际 Add 的操作 UUID 与 direct delivery")
+                    .isEqualTo(WatchBattleResponse.newBuilder().setBattleId(X).setSpectatorOperationId(operation)
+                            .setDelivery(com.game.proto.match.eSpectateDelivery.SPECTATE_DELIVERY_DIRECT).build().toByteString());
             assertThat(battle.addObservers).singleElement().satisfies(add -> {
                 assertThat(add.getBattleId()).isEqualTo(X);
                 assertThat(add.getObserverPlayerId()).isEqualTo(PLAYER);
                 assertThat(add.getObserverName()).isEqualTo("公开观众1001").isNotEqualTo(SESSION.getAccount());
                 assertThat(add.getRouting().getGateInstanceId()).isEqualTo("gate-inst-1");
+                assertThat(add.getTargetInstanceId()).isEqualTo(placement.getBattleInstanceId());
+                assertThat(add.getAdmitBeforeMs()).isEqualTo(clock.peekMs() + LocalObserverOperation.ADMISSION_MS);
             });
             assertThat(placementDialer.dials).singleElement().satisfies(dialed -> {
                 assertThat(dialed.placement()).isEqualTo(placement);
                 assertThat(dialed.hardStop()).as("观众 RPC 用带硬截止的重载（裁决 3）").isNotNull();
                 assertThat(dialed.timeout()).isEqualTo(Duration.ofSeconds(3));
             });
-            assertThat(spectate.markOf(PLAYER).flatMap(SpectateRules::decodeMark).map(SpectateRules.Mark::battleId)).contains(X);
+            assertThat(spectate.markOf(PLAYER).flatMap(LocalObserverOperation::decode)).hasValueSatisfying(original -> {
+                assertThat(original.placement()).isEqualTo(placement);
+                assertThat(original.add()).isEqualTo(battle.addObservers.get(0));
+            });
             assertThat(meters.get("game.match.watch.battle").tag("outcome", "ok").counter().count()).isEqualTo(1.0);
             assertThat(meters.get("game.match.observer.rpc").tag("method", "add").tag("result", "replied").counter().count()).isEqualTo(1.0);
             assertThat(context.getBean(SpectateExecutor.class).awaitIdle(Duration.ofSeconds(20))).isTrue();

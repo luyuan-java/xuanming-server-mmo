@@ -11,6 +11,7 @@ import com.game.api.proto.AssetOpRequest;
 import com.game.api.proto.AssetOpResponse;
 import com.game.api.proto.AssetOutcome;
 import com.game.api.proto.AssetStream;
+import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
 import com.game.discovery.battle.BattleRedis;
 import com.game.player.store.state.PlayerState;
@@ -108,21 +109,30 @@ class FightingOutcomeWindowTest {
         assertThat(expired(g)).isEqualTo(1);
     }
 
-    /** 期限 + 90 s 离场重登（实例已移除，同 epoch）：锁的 TTL 覆盖窗口，进场恢复按锁重建出 FIGHTING 冻结，之后同样按有效期限判。 */
+    /** 期限 + 90 s 最终离场后以新 epoch 重登：锁的 TTL 覆盖窗口，进场恢复按锁重建出 FIGHTING 冻结，之后同样按有效期限判。 */
     @Test
     void 窗口内重登按锁重建FIGHTING冻结() {
-        fightingPlayer();
-        long deadline = f.world.playerById(PLAYER).battle().freeze().deadlineMs();
+        ScenePlayer player = fightingPlayer();
+        PlayerState saved = BattleFixture.persistentState(player);
+        long deadline = player.battle().freeze().deadlineMs();
         f.world.onPlayerLeave(BattleFixture.LINK, PlayerLeave.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER)
                 .setVoluntary(true).build());
         assertThat(f.world.playerById(PLAYER)).isNull();
+
+        // 最终离场封闭旧 epoch；即使重放同一份进场原件，也不得把旧角色实例复活。
+        f.world.onPlayerEnter(BattleFixture.LINK, PlayerEnter.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER)
+                .setSceneId(f.scene1.sceneId()).setOwnerEpoch(1).build());
+        f.repo.completeAll();
+        f.drain();
+        assertThat(f.world.playerById(PLAYER)).as("最终离场后的旧 epoch 不得复活").isNull();
 
         f.advance(BATTLE + 90_000);
         assertThat(f.locks.lockBattleId(PLAYER)).as("期限 + 90 s：旧口径（期限 + 60 s）锁早已过期，新口径仍在").isEqualTo(X);
         assertThat(f.locks.lockState(PLAYER)).isEqualTo("F");
 
-        ScenePlayer back = f.enter(SESSION + 1, PLAYER, 1, f.scene1, PlayerState.getDefaultInstance());
+        ScenePlayer back = f.enter(SESSION + 1, PLAYER, 2, f.scene1, saved);
 
+        assertThat(back.ownerEpoch()).isEqualTo(2);
         assertThat(back.inBattle()).as("按锁重建").isTrue();
         BattleFreeze rebuilt = back.battle().freeze();
         assertThat(rebuilt.phase()).isEqualTo(Phase.FIGHTING);

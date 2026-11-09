@@ -15,6 +15,7 @@ import com.game.discovery.location.SceneAssetLocator.NoHolder;
 import com.game.discovery.location.SceneAssetLocator.ResolveResult;
 import com.game.discovery.proto.PlayerLocation;
 import java.time.Duration;
+import java.util.UUID;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
@@ -39,7 +40,7 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class SceneAssetLocationIntegrationTest {
 
-    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("salit" + UUID.randomUUID().toString().replace("-", "").substring(0, 20)));
 
     private static final long BASE = Long.MIN_VALUE + (1L << 52) + ThreadLocalRandom.current().nextLong(1L << 40);
     /** 随机 zone：节点目录键 game:nodes:scene:{zone} 只属于本测试。 */
@@ -66,8 +67,15 @@ class SceneAssetLocationIntegrationTest {
         for (long i = 0; i < 20; i++) {
             redis.getKeys().delete(REDIS_KEYS.playerLocation(BASE + i));
         }
-        redis.getKeys().delete(REDIS_KEYS.nodeDirectory(TYPE, ZONE));
-        redis.getKeys().delete(REDIS_KEYS.nodeDirectory(TYPE, OTHER_ZONE));
+        for (int zone : new int[] {ZONE, OTHER_ZONE}) {
+            try {
+                for (int node : new int[] {1, 11, 13, 14, 21}) scenes.remove(zone, node);
+            } finally {
+                redis.getKeys().delete(REDIS_KEYS.nodeDirectory(TYPE, zone), REDIS_KEYS.zoneNodeDirectory(TYPE, zone),
+                        REDIS_KEYS.zoneNodeExpiry(TYPE, zone), REDIS_KEYS.zoneNodeSeen(TYPE, zone),
+                        REDIS_KEYS.zoneDirectoryFormat(zone), REDIS_KEYS.zoneNodeTypes(zone));
+            }
+        }
         redis.shutdown();
     }
 

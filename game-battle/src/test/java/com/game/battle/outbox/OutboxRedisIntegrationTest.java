@@ -16,7 +16,7 @@ import com.game.discovery.battle.BattleRedis;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleSettlementData;
-import com.game.proto.BattleSettlementEvent;
+import com.game.api.battle.LegacyBattleSettlementCodec;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.eBattleActivityKind;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -124,7 +124,7 @@ class OutboxRedisIntegrationTest {
     }
 
     private static byte[] wire(long playerId, long battleId) {
-        return BattleSettlementEvent.newBuilder().setSettlement(settlement(playerId, battleId)).build().toByteArray();
+        return LegacyBattleSettlementCodec.encode(settlement(playerId, battleId));
     }
 
     private SettlementOutbox outbox(SettlementOutbox.Store store) {

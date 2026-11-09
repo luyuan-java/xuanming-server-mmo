@@ -6,9 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.game.api.proto.ClientForward;
 import com.game.common.RunMode;
-import com.game.contract.MessageMethod;
-import com.game.proto.GmExecuteRollbackRequest;
-import com.game.proto.GmQueryTransactionLogRequest;
+import com.game.contract.MessageIdRegistry;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
@@ -16,16 +14,17 @@ import com.game.scene.testing.FakeSceneTables;
 import com.game.scene.testing.ManualClock;
 import com.game.scene.testing.RecordingSink;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Message;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * 批次 7.2a 回归（data-ops-spec §6.2、§12.1 T-S1）：scene 侧 GM 指令 102–117（{@code SceneRollbackClientPlayer}）在 Java 版<b>没有桩</b>。
- * 服务标了玩家服务、没标客户端协议服务：伪造的 {@code ClientForward} 带这些号被丢弃、不回包；在 scene 注册它们启动即抛。
- * 基线 scene 上是 12 个 {@code TODO(P1-B)} 空桩（{@code player_rollback_handler.cpp}），只经节点路由可达；Java 没有那条入口，
- * 这组操作走 game-data 的运维面（玩家必须离线 / 由运维持有归属后做）。
+ * 旧 SceneRollbackClientPlayer 服务已从共享协议删除，12 个消息号保留墓碑，不得重新注册或复用。
+ * 伪造 ClientForward 携带这些号或仍存的内部运维号，均在解析请求前丢弃且不回包。
+ * Java 回档操作沿 game-data 的运维面执行；此测试只检查 scene 不会开放已删除的入口。
  */
 class GmRollbackRpcNotRegisteredTest {
 
@@ -53,40 +52,60 @@ class GmRollbackRpcNotRegisteredTest {
     }
 
     @Test
-    void SceneRollbackClientPlayer是玩家服务但不是客户端协议服务() {
-        List<MessageMethod> methods = Contracts.REGISTRY.all().stream()
-                .filter(m -> m.serviceName().equals("SceneRollbackClientPlayer")).toList();
-        assertThat(methods).as("12 个 GM 指令（102 / 103 / 104 / 106 / 107 / 109 / 110 / 112 / 113 / 115 / 116 / 117）").hasSize(12);
-        assertThat(methods).allSatisfy(m -> {
-            assertThat(m.playerService()).as(m.key()).isTrue();
-            assertThat(m.clientService()).as(m.key()).isFalse();
-        });
+    void 已删除回档服务没有注册且十二个消息号保留原名墓碑() throws Exception {
+        assertThat(Contracts.REGISTRY.all()).noneMatch(m -> m.serviceName().equals("SceneRollbackClientPlayer"));
+        List<String> tombstones = List.of(
+                "102=reserved:SceneRollbackClientPlayerGmAttachDebt",
+                "103=reserved:SceneRollbackClientPlayerGmCreateSnapshot",
+                "104=reserved:SceneRollbackClientPlayerGmTraceItem",
+                "106=reserved:SceneRollbackClientPlayerGmWaiveDebt",
+                "107=reserved:SceneRollbackClientPlayerGmQueryDebt",
+                "109=reserved:SceneRollbackClientPlayerGmFreezeDebt",
+                "110=reserved:SceneRollbackClientPlayerGmClawbackItem",
+                "112=reserved:SceneRollbackClientPlayerGmExecuteRollback",
+                "113=reserved:SceneRollbackClientPlayerGmAdjustDebt",
+                "115=reserved:SceneRollbackClientPlayerGmListSnapshots",
+                "116=reserved:SceneRollbackClientPlayerGmPreviewRollback",
+                "117=reserved:SceneRollbackClientPlayerGmQueryTransactionLog");
+        try (var stream = getClass().getClassLoader().getResourceAsStream(MessageIdRegistry.MESSAGE_ID_RESOURCE)) {
+            assertThat(stream).isNotNull();
+            assertThat(new String(stream.readAllBytes(), StandardCharsets.UTF_8).lines().toList()).containsAll(tombstones);
+        }
+        for (String tombstone : tombstones) {
+            int messageId = Integer.parseInt(tombstone.substring(0, tombstone.indexOf('=')));
+            assertThat(Contracts.REGISTRY.byId(messageId)).as(tombstone).isEmpty();
+        }
     }
 
     @Test
     void 伪造的ClientForward带96到117一律丢弃_不回包() {
         long requestId = 1;
         for (int messageId = 96; messageId <= 117; messageId++) {
-            ByteString body = messageId == 112 ? GmExecuteRollbackRequest.getDefaultInstance().toByteString()
-                    : messageId == 117 ? GmQueryTransactionLogRequest.getDefaultInstance().toByteString() : ByteString.EMPTY;
-            handler.onClientForward(LINK, ClientForward.newBuilder().setSessionId(11).setPlayerId(1001)
-                    .setMessageId(messageId).setBody(body).setRequestId(requestId++).build());
+            for (ByteString body : List.of(ByteString.EMPTY, ByteString.copyFrom(new byte[] {(byte) 0xFF}))) {
+                handler.onClientForward(LINK, ClientForward.newBuilder().setSessionId(11).setPlayerId(1001)
+                        .setMessageId(messageId).setBody(body).setRequestId(requestId++).build());
+            }
         }
 
         assertThat(sink.events()).as("没有处理器、没有应答、没有 1006 / 1005").isEmpty();
     }
 
     @Test
-    void 在scene注册112或117启动即抛() {
-        SceneFeature rollback = r -> r.on("SceneRollbackClientPlayer", "GmExecuteRollback", GmExecuteRollbackRequest.class,
-                (call, req) -> { });
-        SceneFeature txlog = r -> r.on("SceneRollbackClientPlayer", "GmQueryTransactionLog",
-                GmQueryTransactionLogRequest.class, (call, req) -> { });
-
-        for (SceneFeature feature : List.of(rollback, txlog)) {
+    void 在scene注册已删除的回档或流水方法启动即抛() {
+        for (String method : List.of("GmExecuteRollback", "GmQueryTransactionLog")) {
+            // Message 仅为注册接口的类型占位；服务查号即失败，不需要恢复已删除的 proto 类型。
+            SceneFeature feature = r -> r.on("SceneRollbackClientPlayer", method, Message.class, (call, req) -> { });
             assertThatThrownBy(() -> new ClientRequestHandler(world, Contracts.REGISTRY, IDS, RunMode.DEV, List.of(feature)))
                     .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("不是 scene 的客户端玩家服务");
+                    .hasMessageContaining("message_id.txt 中没有 SceneRollbackClientPlayer." + method);
         }
+    }
+
+    @Test
+    void 在scene注册仍存的非客户端运维方法启动即抛() {
+        SceneFeature feature = r -> r.on("DataService", "QueryTransactionLog", Message.class, (call, req) -> { });
+        assertThatThrownBy(() -> new ClientRequestHandler(world, Contracts.REGISTRY, IDS, RunMode.DEV, List.of(feature)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("不是 scene 的客户端玩家服务");
     }
 }

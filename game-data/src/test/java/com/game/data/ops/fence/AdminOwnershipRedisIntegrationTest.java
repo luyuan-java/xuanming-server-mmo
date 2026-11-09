@@ -195,7 +195,9 @@ class AdminOwnershipRedisIntegrationTest {
 
             assertThat(claim).isEqualTo(new Claim.Busy(5));
             assertThat(owner(p)).isEqualTo(new OwnerState(5, false, leaseBefore));
-            await().atMost(Duration.ofSeconds(5)).until(() -> received.size() >= 2);
+            // Busy 已证明读到旧归属并发出让出请求；400ms 总预算不保证完成两轮真实 SQL。
+            // 重试重发由上一个用例在收到第二条后才释放归属来验证，这里只验证发布和到点不夺权。
+            await().atMost(Duration.ofSeconds(5)).until(() -> !received.isEmpty());
             assertThat(received).allSatisfy(takeover -> assertThat(takeover.getOwnerEpoch()).isEqualTo(5));
             assertThat(ownership.heldCount()).isZero();
         } finally {

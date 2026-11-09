@@ -101,8 +101,10 @@ public final class PlayerAttributes {
     private com.game.scene.equip.EquipmentBonuses equipment = com.game.scene.equip.EquipmentBonuses.NONE;
 
     public com.game.scene.equip.EquipmentBonuses equipment() { return equipment; }
-    public void setEquipment(com.game.scene.equip.EquipmentBonuses equipment) { this.equipment = equipment; }
-    public com.game.proto.CombatAttributes combat() { return equipment.combat(); }
+    public void setEquipment(com.game.scene.equip.EquipmentBonuses equipment) { this.equipment = equipment; this.combat = equipment.combat(); }
+    private com.game.proto.CombatAttributes combat = com.game.proto.CombatAttributes.getDefaultInstance();
+    public com.game.proto.CombatAttributes combat() { return combat; }
+    public void setCombat(com.game.proto.CombatAttributes combat) { this.combat = combat; }
     // ---- 当前气血 / 法力（uint64，读档时大于 2^63 的饱和到 Long.MAX_VALUE，反正都会被上限夹住）
     private long health;
     private long mana;

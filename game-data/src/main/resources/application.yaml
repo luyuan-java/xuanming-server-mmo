@@ -61,6 +61,20 @@ game:
       jdbc-url: ${GAME_DATA_CONSISTENCY_JDBC_URL:}
       username: ${GAME_DATA_CONSISTENCY_USERNAME:}
       password: ${GAME_DATA_CONSISTENCY_PASSWORD:}
+      # 只观察已过终局宽限的成局；未配独立只读账号时为 UNKNOWN，不借业务池。
+      expired-formations:
+        enabled: ${GAME_DATA_EXPIRED_FORMATION_AUDIT_ENABLED:true}
+        interval: 60s
+        budget: 3s
+        stale-after: 150s
+        page-size: 128
+        max-rows: 1024
+      # 三类终局库存由同一只读语句采样；失败/过期为 UNKNOWN/STALE，副本间按 max 聚合。
+      terminal-backlog:
+        enabled: ${GAME_DATA_TERMINAL_BACKLOG_AUDIT_ENABLED:true}
+        interval: 60s
+        budget: 3s
+        stale-after: 150s
     # 仅固定商城目录命令与只读订单；签名密钥留在服务端，未配置地址不影响其他运维接口。
     mall-admin:
       base-url: ${GAME_DATA_MALL_ADMIN_URL:}

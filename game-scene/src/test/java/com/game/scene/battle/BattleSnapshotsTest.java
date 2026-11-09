@@ -269,16 +269,20 @@ class BattleSnapshotsTest {
 
     /**
      * 技能保持玩家技能表的原顺序；跳过 0 与表里查不到行的；skill_type 任一位号是被动 0 / 持续施法 2 / 开关 3 就剔除（位号不是掩码）；
-     * 空 skill_type 保留。基线不去重，Java 也不去重。
+     * 空 skill_type 保留；加载技能聚合时零号丢弃、重复号保留首条（基线 SanitizeSkillList）。
      */
     @Test
-    void 技能_剔除被动开关持续施法_空skill_type保留_0与无表行跳过_保持原顺序() {
+    void 技能_剔除被动开关持续施法_空skill_type保留_0与无表行跳过_保持首见顺序() {
         List<Integer> owned = List.of(OTHER, 0, PASSIVE, NORMAL, NO_ROW, TOGGLE, EMPTY_TYPE, CHANNEL, NORMAL_AND_PASSIVE,
                 OTHER_AND_TOGGLE, OTHER_AND_CHANNEL, NORMAL);
 
-        BattlePlayerSnapshot snapshot = build(player(3, 37, owned, PlayerState.getDefaultInstance()));
+        ScenePlayer player = player(3, 37, owned, PlayerState.getDefaultInstance());
+        BattlePlayerSnapshot snapshot = build(player);
 
-        assertThat(snapshot.getSkillTableIdsList()).containsExactly(OTHER, NORMAL, EMPTY_TYPE, NORMAL);
+        assertThat(player.skills()).as("技能聚合规整零号与重复号，但不按战斗施放条件删存档")
+                .containsExactly(OTHER, PASSIVE, NORMAL, NO_ROW, TOGGLE, EMPTY_TYPE, CHANNEL, NORMAL_AND_PASSIVE,
+                        OTHER_AND_TOGGLE, OTHER_AND_CHANNEL);
+        assertThat(snapshot.getSkillTableIdsList()).containsExactly(OTHER, NORMAL, EMPTY_TYPE);
     }
 
     @Test

@@ -60,6 +60,7 @@ public final class GuildMysqlFixture implements AutoCloseable {
     public final String database;
     public final DruidDataSource dataSource;
     private final AuthoritySqlFixture authority;
+    private GuildLockWaitObserver lockWaitObserver;
 
     private GuildMysqlFixture(String database, DruidDataSource dataSource,AuthoritySqlFixture authority) {
         this.authority=authority;
@@ -87,16 +88,38 @@ public final class GuildMysqlFixture implements AutoCloseable {
 
     @Override
     public void close() throws SQLException {
-        dataSource.close();authority.close();
+        try (AuthoritySqlFixture owned = authority; GuildLockWaitObserver observation = lockWaitObserver) {
+            dataSource.close();
+        }
     }
 
     /** 清空全部表（GuildTables.NAMES）、按启动顺序重建哨兵行（updated_ms = NOW）。 */
     public void reset() throws SQLException {
-        for (String table : GuildTables.NAMES) {
-            try(var connection=authority.schemaConnection();var sql=connection.createStatement()){sql.execute("TRUNCATE TABLE `"+table+"`");}
+        // 这些正式 proto 表没有自增列；清空行即可恢复用例初态，无须每轮发 TiDB 结构变更。
+        // 仍使用真实 owner 的 admin5 受限回调；期限与 UNKNOWN 门禁不放宽，失败不继续播种。
+        try {
+            authority.withOwnerSchema(connection -> {
+                for (String table : GuildTables.NAMES) {
+                    try (var sql = connection.createStatement()) {
+                        sql.setQueryTimeout(5);
+                        sql.executeUpdate("DELETE FROM `" + table + "`");
+                    }
+                }
+                try (var sql = connection.createStatement()) {
+                    sql.setQueryTimeout(5);
+                    sql.executeUpdate("DELETE FROM guild_activity_progress");
+                }
+                return null;
+            });
+        } catch (SQLException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new SQLException("Guild fixture reset failed", failure);
         }
-        try(var connection=authority.schemaConnection();var sql=connection.createStatement()){sql.execute("TRUNCATE TABLE guild_activity_progress");}
         startup(GuildTxListener.NONE).ensureGlobalInsertGuard(NOW, d());
+        // 占锁编排之前开独立只读诊断连接；持锁区间绝不新借NORMAL连接。
+        if (lockWaitObserver != null) lockWaitObserver.close();
+        lockWaitObserver = new GuildLockWaitObserver(authority.schemaConnection(), database);
     }
 
     /** 仅供已发布夹具的元数据、死锁历史和 EXPLAIN 诊断；业务必须继续使用 dataSource。 */
@@ -291,24 +314,13 @@ public final class GuildMysqlFixture implements AutoCloseable {
     }
 
     /**
-     * 等到本库上至少 n 个事务处于锁等待（INNODB_TRX，需 PROCESS 权限），最多等 limit 毫秒（基线 lockOrderAwaitLockWaits）。
-     * 只用来把「先让一方卡住、再放另一方」的交错摆出来，不影响判据；查询报错就退化成固定等待。
+     * 尽力观察本库锁等待；连接已在reset中准备，网络与SQL限时共用limitMillis。
+     * 诊断不支持或超时只做剩余的有界等待，不能把它当已观察到TiDB锁等待的证明。
+     * JDBC毫秒粒度、线程调度和关闭仍有实际开销；不声称硬实时的墙钟上限。
      */
     public void awaitLockWaits(int n, long limitMillis) {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(limitMillis);
-        String sql = "SELECT COUNT(*) FROM information_schema.INNODB_TRX t JOIN information_schema.PROCESSLIST p"
-                + " ON p.ID = t.trx_mysql_thread_id WHERE t.trx_state = 'LOCK WAIT' AND p.DB = ?";
-        while (System.nanoTime() < deadline) {
-            try {
-                if (count(sql, database) >= n) {
-                    return;
-                }
-            } catch (SQLException e) {
-                sleep(TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()));
-                return;
-            }
-            sleep(5);
-        }
+        if (lockWaitObserver == null) throw new IllegalStateException("锁观察连接尚未在fixture reset中准备");
+        lockWaitObserver.await(n, limitMillis);
     }
 
     public static void sleep(long millis) {

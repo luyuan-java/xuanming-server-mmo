@@ -159,6 +159,7 @@ class InBattleGateMatrixTest {
     private static final int SAME_AS_NOT_IN_BATTLE = -1;
     private static final int DROPPED = -2;
     private static final int STOPPED_ONLY = -3;
+    private static final int INVALID_UPGRADE_COUNT = -4;
 
     /** 规格 §7.13 闸表的一行：按消息号列（号与名一并钉住），{@code inBattle} 是战斗中的预期。 */
     private record Row(int specId, String service, String method, BattlePolicy policy, int inBattle) {
@@ -175,6 +176,8 @@ class InBattleGateMatrixTest {
             new Row(131, MOVE, "MoveStop", BattlePolicy.STOP_ONLY, STOPPED_ONLY),
             new Row(63, SCENE, "EnterScene", BattlePolicy.GATED, ENTER_FAILED),
             new Row(84, SKILL, "ReleaseSkill", BattlePolicy.GATED, SKILL_CANNOT_CAST),
+            // 旧通用技能夹具的非法次数在忙碌闸之前拒绝；真实职业的忙碌/冻结矩阵见 ClassSkillSceneTest。
+            new Row(317, SKILL, "UpgradeSkill", BattlePolicy.GATED, INVALID_UPGRADE_COUNT),
             new Row(168, ATTRIBUTE, "AllocateAttributePoints", BattlePolicy.GATED, ATTRIBUTE_IN_BATTLE),
             new Row(172, ATTRIBUTE, "ResetAttributePoints", BattlePolicy.GATED, ATTRIBUTE_IN_BATTLE),
             new Row(174, ATTRIBUTE, "CreateAttributeScheme", BattlePolicy.GATED, ATTRIBUTE_IN_BATTLE),
@@ -293,7 +296,7 @@ class InBattleGateMatrixTest {
         assertThat(List.of(134, 132)).allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).isEqualTo(BattlePolicy.DROP));
         assertThat(f.handler.battlePolicy(131)).isEqualTo(BattlePolicy.STOP_ONLY);
         assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226,
-                246, 247, 249, 250, 251, 252))
+                246, 247, 249, 250, 251, 252, 317))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.GATED));
         assertThat(List.of(43, 77, 54, 167, 181, 190, 191, 193, 173, 188, 37, 49, 94, 95, 194, 195))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.ALLOW));
@@ -475,6 +478,12 @@ class InBattleGateMatrixTest {
                 assertThat(inBattle).as("%s 在战斗中照常（不得加闸）", key).isEqualTo(normal);
                 assertThat(gateRejected).as("%s 不闸：gate_rejects 的哪个闸都不计", key).isEmpty();
             }
+            case INVALID_UPGRADE_COUNT -> {
+                assertThat(normal.tip()).isEqualTo(7009);
+                assertThat(inBattle).isEqualTo(normal);
+                assertThat(BattleFixture.persistentState(player)).isEqualTo(stateBefore);
+                assertThat(gateRejected).isEmpty();
+            }
             case DROPPED, STOPPED_ONLY -> {
                 assertThat(normal.position()).as("对照：不在战斗时这条移动被收下").isNotEqualTo(START);
                 assertThat(inBattle.messageIds()).as("静默：不回包、不纠偏").isEmpty();
@@ -523,6 +532,7 @@ class InBattleGateMatrixTest {
         // 不在队（夹具的在队检查缺省回「不在队」）：不在战斗时受理 {0}，之后挂在选目标上
         out.put(SCENE + "TravelToZone", s -> TravelToZoneRequest.newBuilder().setTargetZoneId(OTHER_ZONE).build());
         // 技能 2：范围技能、无前摇无冷却（正式配表），不在战斗时一定放得出
+        out.put(SKILL + "UpgradeSkill", s -> com.game.proto.UpgradeSkillRequest.newBuilder().setCount(2).build());
         out.put(SKILL + "ReleaseSkill", s -> ReleaseSkillRequest.newBuilder().setSkillTableId(2).setTargetId(s.player().entity())
                 .setPosition(Vector3.newBuilder().setX(1).setY(2).setZ(3)).build());
         out.put(SKILL + "ListSkills", s -> ListSkillsRequest.getDefaultInstance());
@@ -1036,9 +1046,9 @@ class InBattleGateMatrixTest {
         return f.count("game.scene.battle.gate.rejects", "gate", gate);
     }
 
-    /** 规格 §9 的八个闸（{@code game_scene_battle_gate_rejects_total{gate}}）。 */
+    /** 包含跨区与装备扩展的全部十个闸（{@code game_scene_battle_gate_rejects_total{gate}}）。 */
     private static final List<String> GATES = List.of("enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default",
-            "zone_travel");
+            "zone_travel", "equipment");
 
     private Map<String, Double> gateRejectsByGate() {
         Map<String, Double> out = new TreeMap<>();

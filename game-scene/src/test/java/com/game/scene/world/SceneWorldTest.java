@@ -7,6 +7,8 @@ import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
 import com.game.api.proto.SceneEntry;
 import com.game.player.store.state.CurrencyState;
+import com.game.player.store.state.PlayerSkillBookState;
+import com.game.player.store.state.PlayerSkillEntry;
 import com.game.player.store.state.PlayerState;
 import com.game.proto.MessageContent;
 import com.game.proto.Vector3;
@@ -34,6 +36,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class SceneWorldTest {
+
+    /** FakeSceneTables 的三个通用种子会随新技能聚合持久化；通用技能没有职业重数。 */
+    static final PlayerState INITIAL_STATE = PlayerState.newBuilder().setSkills(PlayerSkillBookState.newBuilder()
+            .addEntries(PlayerSkillEntry.newBuilder().setSkillId(1))
+            .addEntries(PlayerSkillEntry.newBuilder().setSkillId(2))
+            .addEntries(PlayerSkillEntry.newBuilder().setSkillId(13))).build();
 
     private static final long LINK = 1;
     private static final long OTHER_LINK = 2;
@@ -190,7 +198,7 @@ class SceneWorldTest {
         ActorDestroyS2C destroy = ActorDestroyS2C.parseFrom(sink.to(LINK, 11).get(0).getSerializedMessage());
         assertThat(destroy.getEntity()).isEqualTo(entityB);
         assertThat(sink.to(LINK, 12)).isEmpty();
-        assertThat(repo.saves()).containsExactly(new PlayerSave(1002, 4, 1, 1, new Vec3(180, 200, 0)));
+        assertThat(repo.saves()).containsExactly(new PlayerSave(1002, 4, 1, 1, new Vec3(180, 200, 0), INITIAL_STATE));
         assertThat(world.playerCount()).isEqualTo(1);
         assertThat(scene.playerCount()).isEqualTo(1);
     }
@@ -205,7 +213,7 @@ class SceneWorldTest {
         world.onPlayerLeave(LINK, leave(11, 1001));
 
         // 这份写回落库并释放之后，下一次夺权（epoch 2）才能成功，新实例读到的就是它（PlayerStoreSqlTest 覆盖库侧顺序）。
-        assertThat(repo.saves()).containsExactly(new PlayerSave(1001, 1, 1, 2, FakeSceneTables.SPAWN_2));
+        assertThat(repo.saves()).containsExactly(new PlayerSave(1001, 1, 1, 2, FakeSceneTables.SPAWN_2, INITIAL_STATE));
     }
 
     @Test
@@ -533,7 +541,7 @@ class SceneWorldTest {
 
         world.onTakeoverRequested(1001, 3);
 
-        assertThat(repo.saves()).containsExactly(new PlayerSave(1001, 3, 1, 1, new Vec3(180, 200, 0)));
+        assertThat(repo.saves()).containsExactly(new PlayerSave(1001, 3, 1, 1, new Vec3(180, 200, 0), INITIAL_STATE));
         assertThat(sink.kicks()).containsExactly(new Kicked(LINK, 11, 1001, 3, KICKED));
         assertThat(ActorDestroyS2C.parseFrom(sink.to(LINK, 12).get(0).getSerializedMessage()).getEntity())
                 .isEqualTo(entity);

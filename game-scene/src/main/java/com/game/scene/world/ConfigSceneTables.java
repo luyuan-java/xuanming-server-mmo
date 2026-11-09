@@ -26,6 +26,7 @@ public final class ConfigSceneTables implements SceneTables {
     public static final Vec3 DEFAULT_SPAWN = new Vec3(180.0, 200.0, 0.0);
 
     private final ConfigTables tables;
+    private final com.game.scene.skill.ClassSkillCatalog classSkills;
     private final List<Integer> worldSceneConfigIds;
     private final List<Integer> initialSkills;
     private final Map<Integer, CurrentMapNavigation> navigation;
@@ -33,6 +34,7 @@ public final class ConfigSceneTables implements SceneTables {
     private ConfigSceneTables(ConfigTables tables, List<Integer> worldSceneConfigIds, List<Integer> initialSkills,
                               Map<Integer, CurrentMapNavigation> navigation) {
         this.tables = tables;
+        this.classSkills = com.game.scene.skill.ClassSkillCatalog.from(tables);
         this.worldSceneConfigIds = worldSceneConfigIds;
         this.initialSkills = initialSkills;
         this.navigation = Map.copyOf(navigation);
@@ -105,6 +107,14 @@ public final class ConfigSceneTables implements SceneTables {
     public List<Integer> initialSkills() {
         return initialSkills;
     }
+
+    @Override
+    public List<Integer> initialSkills(int classId) {
+        return tables.classTable().find(classId).map(ClassTable::getSkillList).orElse(List.of());
+    }
+
+    @Override
+    public com.game.scene.skill.ClassSkillCatalog classSkills() { return classSkills; }
 
     @Override
     public boolean skillExists(int skillTableId) {

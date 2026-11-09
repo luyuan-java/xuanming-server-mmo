@@ -422,7 +422,8 @@ class ClientRequestHandlerTest {
     @Test
     void 派发前丢弃_请求号为0_应答Empty_未知号与非客户端协议的号_都不回() {
         byte[] truncated = {0x0a, 0x05};
-        int rollback = Contracts.REGISTRY.requireId("SceneRollbackClientPlayer", "GmExecuteRollback");
+        int internal = Contracts.REGISTRY.requireId("DataService", "QueryTransactionLog");
+        assertThat(Contracts.REGISTRY.byId(internal).orElseThrow().clientService()).isFalse();
 
         forward(99, 1001, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 0);
         forward(11, 2002, IDS.listSkills(), ListSkillsRequest.getDefaultInstance(), 0);
@@ -435,8 +436,8 @@ class ClientRequestHandlerTest {
 
         forward(11, 1001, 999_999, ByteString.EMPTY, 5);
         forward(99, 1001, 999_999, ByteString.EMPTY, 6);
-        forward(11, 1001, rollback, ByteString.EMPTY, 7);
-        forward(99, 1001, rollback, ByteString.EMPTY, 8);
+        forward(11, 1001, internal, ByteString.EMPTY, 7);
+        forward(99, 1001, internal, ByteString.EMPTY, 8);
 
         assertThat(sink.events()).isEmpty();
     }

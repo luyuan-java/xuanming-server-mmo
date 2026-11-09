@@ -173,7 +173,7 @@ class SceneBattleMetricsTest {
         assertThat(keys).containsExactlyInAnyOrder("result", "reason", "phase", "trigger", "state", "method", "path", "kind");
         assertThat(values).as("取值是枚举名的小写（没有数字 = 没有玩家号 / 战斗号 / 会话 / 节点号）").allMatch(v -> v.matches("[a-z_]+"));
         assertThat(scrape()).as("时间序列总数是常数，不随玩家 / 战斗数增长").hasSize(specSeries(true).size());
-        assertThat(specSeries(true)).hasSize(11 + 9 + 11 + 2 + 6 + 4 + 3 + 4 + 21 + 20 + 44 + 20 + 3 + 2);
+        assertThat(specSeries(true)).hasSize(11 + 9 + 11 + 2 + 6 + 4 + 3 + 7 + 21 + 20 + 44 + 20 + 3 + 2);
     }
 
     /** 每个枚举取值各发射一次：每条计数器恰好是 1（没有两个取值落到同一条、没有哪条没有发射入口），之后序列集合不变。 */

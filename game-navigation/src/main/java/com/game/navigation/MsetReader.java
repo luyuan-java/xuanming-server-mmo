@@ -332,7 +332,9 @@ public final class MsetReader {
 
     /**
      * 检查三角分段构成 polygon 的完整曲面：内部边反向配对，单边在 polygon 边界上，
-     * 三角同向且非退化，面积一致。只在本次校验中分配局部拓扑表。
+     * 三角同向且非退化，面积一致。固定原生产物另有同高、无新增顶点的冗余三角：
+     * 这类仅在现有三角中能选出完整凸面剖分时接受，冗余覆盖不会引入不同高度或曲面缺口。
+     * 只在本次校验中分配局部拓扑表。
      */
     private static void validateDetailSurface(Tile tile, int polygonIndex, double direction, long offset)
             throws NavMeshFormatException {
@@ -342,6 +344,9 @@ public final class MsetReader {
         Map<Integer, int[]> edges = new HashMap<>();
         Set<Integer> triangleKeys = new HashSet<>();
         Vec3 origin = tile.detailVertex(polygonIndex, 0);
+        boolean flatRedundant = detail.vertexCount() == 0 && detail.triangleCount() > n - 2;
+        for (int vertex = 1; vertex < n && flatRedundant; vertex++)
+            flatRedundant = tile.detailVertex(polygonIndex, vertex).y() == origin.y();
         double polygonArea = 0, triangleArea = 0, perimeter = 0;
         for (int e = 0; e < n; e++) {
             Vec3 a = tile.detailVertex(polygonIndex, e), b = tile.detailVertex(polygonIndex, (e + 1) % n);
@@ -383,6 +388,7 @@ public final class MsetReader {
                 }
                 require(((triangle.edgeFlags() >>> (e * 2)) & 1) == (boundaryFlag ? 1 : 0),
                         ADJACENCY, offset, "detail triangle 边界标志与固定 Recast 几何规则不符");
+                if (flatRedundant) continue;
                 int key = (Math.min(from, to) << 8) | Math.max(from, to);
                 int[] edge = edges.get(key);
                 if (edge == null) edges.put(key, new int[]{from, to, 1});
@@ -392,6 +398,11 @@ public final class MsetReader {
                     edge[2]++;
                 }
             }
+        }
+        if (flatRedundant) {
+            require(hasCompleteTriangulation(n, triangleKeys), ADJACENCY, offset,
+                    "同高冗余 detail triangle 不含完整凸面剖分");
+            return;
         }
         for (int[] edge : edges.values()) {
             if (edge[2] == 2) continue;
@@ -406,6 +417,25 @@ public final class MsetReader {
         double tolerance = Math.max(perimeter * 1e-8, Math.ulp(polygonArea) * 64);
         require(Double.isFinite(triangleArea) && Math.abs(triangleArea - polygonArea) <= tolerance,
                 FORMAT, offset, "detail 曲面面积与 polygon 不一致");
+    }
+
+    /** polygon 至多六个顶点；区间 DP 证明存在无重叠、无缺口的完整剖分，不能仅凭面积和放行。 */
+    private static boolean hasCompleteTriangulation(int vertexCount, Set<Integer> triangles) {
+        boolean[][] covered = new boolean[vertexCount][vertexCount];
+        for (int i = 0; i + 1 < vertexCount; i++) covered[i][i + 1] = true;
+        for (int span = 2; span < vertexCount; span++) {
+            for (int from = 0; from + span < vertexCount; from++) {
+                int to = from + span;
+                for (int middle = from + 1; middle < to; middle++) {
+                    if (covered[from][middle] && covered[middle][to]
+                            && triangles.contains((from << 16) | (middle << 8) | to)) {
+                        covered[from][to] = true;
+                        break;
+                    }
+                }
+            }
+        }
+        return covered[0][vertexCount - 1];
     }
 
     private static double cross(Vec3 a, Vec3 b, Vec3 c) {

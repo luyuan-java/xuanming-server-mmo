@@ -53,8 +53,9 @@ public final class ScenePlayer {
     private final String appearanceId;
     /** 等级（存档列 player.level；加载时已压回上限）。只经属性系统改（GM 设等级），规则见 PlayerLevels。 */
     private int level;
-    /** 拥有的技能（skill_table_id，保序）。首批不持久化技能，每次进场按配表发放，见 SceneWorld 注释。 */
-    private final List<Integer> skills;
+    /** 持久技能与不可变的本版本配置；瞬时施法状态另存 skillState。 */
+    private final com.game.scene.player.PlayerSkills learnedSkills;
+    private final com.game.scene.skill.ClassSkillCatalog skillCatalog;
     private final MoveGuard moveGuard;
     private Scene scene;
     /** SQL 成员关系的运行时提示；仅供 AOI 排序，不作为玩法或资产授权，随本次进场实例销毁。 */
@@ -130,6 +131,13 @@ public final class ScenePlayer {
     ScenePlayer(long playerId, long entity, SessionKey session, long ownerEpoch, int classId, int gender,
                 String appearanceId, int level, List<Integer> skills, Vec3 position, PlayerState state,
                 long nowNanos) {
+        this(playerId, entity, session, ownerEpoch, classId, gender, appearanceId, level, skills, position, state,
+                nowNanos, com.game.scene.skill.ClassSkillCatalog.generic(skills));
+    }
+
+    ScenePlayer(long playerId, long entity, SessionKey session, long ownerEpoch, int classId, int gender,
+                String appearanceId, int level, List<Integer> seeds, Vec3 position, PlayerState state,
+                long nowNanos, com.game.scene.skill.ClassSkillCatalog skillCatalog) {
         this.playerId = playerId;
         this.entity = entity;
         this.session = session;
@@ -138,7 +146,9 @@ public final class ScenePlayer {
         this.gender = gender;
         this.appearanceId = appearanceId;
         this.level = level;
-        this.skills = List.copyOf(skills);
+        this.skillCatalog = java.util.Objects.requireNonNull(skillCatalog);
+        this.learnedSkills = com.game.scene.player.PlayerSkills.restore(state.getSkills());
+        skillCatalog.grantSeeds(classId, level, learnedSkills, seeds);
         this.position = position;
         this.moveGuard = new MoveGuard(position, nowNanos);
         if (state.hasFacing()) {
@@ -221,11 +231,11 @@ public final class ScenePlayer {
     }
 
     public List<Integer> skills() {
-        return skills;
+        return skillCatalog.usableIds(classId, level, learnedSkills);
     }
 
     public boolean hasSkill(int skillTableId) {
-        return skills.contains(skillTableId);
+        return skillCatalog.usable(classId, level, learnedSkills, skillTableId);
     }
 
     public Scene scene() {
@@ -407,6 +417,7 @@ public final class ScenePlayer {
         if (rotation != null) {
             state.setFacing(Facing.newBuilder().setX(rotation.getX()).setY(rotation.getY()).setZ(rotation.getZ()));
         }
+        if (!learnedSkills.isPristine()) state.setSkills(learnedSkills.toState());
         if (!wallet.isPristine()) {
             state.setCurrency(wallet.toState());
         }
@@ -458,6 +469,10 @@ public final class ScenePlayer {
     }
 
     /** 玩家的技能运行态（逻辑线程上读写；写入只经技能服务）。 */
+    public com.game.scene.player.PlayerSkills learnedSkills() { return learnedSkills; }
+
+    public com.game.scene.skill.ClassSkillCatalog skillCatalog() { return skillCatalog; }
+
     public PlayerSkillState skillState() {
         return skillState;
     }

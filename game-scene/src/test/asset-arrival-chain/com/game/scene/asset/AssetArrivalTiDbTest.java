@@ -182,13 +182,15 @@ class AssetArrivalTiDbTest {
     private <T> T onLogic(Callable<T> action) throws Exception { return logic.submit(action).get(8, TimeUnit.SECONDS); }
 
     private void enter(long player, long epoch, int session) throws Exception {
+        var previous = onLogic(() -> world.playerById(player));
         onLogic(() -> {
             world.onPlayerEnter(1, PlayerEnter.newBuilder().setPlayerId(player).setOwnerEpoch(epoch)
                     .setSessionId(session).setSceneId(scene.sceneId()).setAccount("asset_arrival").setOwnerRevision(1).setLoginGeneration(epoch).build());
             return null;
         });
         await().atMost(Duration.ofSeconds(8)).pollInterval(Duration.ofMillis(20)).until(() ->
-                onLogic(() -> world.playerById(player) != null && world.playerById(player).ownerEpoch() == epoch
+                onLogic(() -> world.playerById(player) != null && world.playerById(player) != previous
+                        && world.playerById(player).ownerEpoch() == epoch
                         && world.playerById(player).session().sessionId() == session));
     }
 
@@ -357,7 +359,8 @@ class AssetArrivalTiDbTest {
         var first = credit(1, 10);
         assertThat(endpoint.submit(AssetRpc.CREDIT, signed(first)).get(5, TimeUnit.SECONDS).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
         storage.awaitHeld();
-        enter(BUYER, 1, 222);
+        // 同代重投必须复用完整原进场身份；enter 还须等到实际替换旧实体，不能把旧实例当成功。
+        enter(BUYER, 1, 22);
         assertThat(endpoint.submit(AssetRpc.CREDIT, signed(credit(2, 20))).get(5, TimeUnit.SECONDS).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
         assertThat(onLogic(() -> world.requestSave(world.playerById(BUYER)))).isEqualTo(SceneWorld.SaveRequest.IN_FLIGHT);
         storage.releaseHeld();

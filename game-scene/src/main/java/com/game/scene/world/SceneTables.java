@@ -28,10 +28,18 @@ public interface SceneTables {
     }
 
     /**
-     * 新玩家的初始技能（{@code skill_table_id} 列表）：Class 表<b>所有行</b>的 {@code skill} 数组按顺序拼接，
-     * 跳过 0、Skill 表里不存在的 id 与重复 id。与职业无关（基线 PlayerSkillSystem::RegisterPlayer 的行为）。
+     * 旧通用表适配和配置检查使用的种子并集。生产加载调用 {@link #initialSkills(int)} 按职业取单行，
+     * 再由职业技能目录按当前等级验证，不把全表并集授予玩家。
      */
     List<Integer> initialSkills();
+
+    /** 当前职业的种子；正式表按 Class 的单行投影。 */
+    default List<Integer> initialSkills(int classId) { return initialSkills(); }
+
+    /** 旧通用技能适配表；生产实现必须提供完整职业技能目录。 */
+    default com.game.scene.skill.ClassSkillCatalog classSkills() {
+        return com.game.scene.skill.ClassSkillCatalog.generic(initialSkills());
+    }
 
     boolean skillExists(int skillTableId);
 

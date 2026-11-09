@@ -37,14 +37,15 @@ Java 代码不得依赖这套目录，具体做法：
 | `game-table-codegen` | 库（编译期） | javac 注解处理器：读 protoc 描述符集，按 schema 生成类型安全的表访问代码；不进运行时 |
 | `game-common` | 库 | 雪花 ID、节点号租约、gate 令牌签名与签发（`com.game.common.token.GateTokenIssuer`：普通令牌 + 批次 5.4 的跨 zone 重定向票据 `issueRedirect`，从 game-gateway 下沉，gateway 与 scene-manager 共用）、battle 直连票据签名与密钥强度判定（`BattleTickets` / `BattleSecretPolicy`）、时间源、无符号数换算（`Unsigned`）等无框架公共件 |
 | `game-net` | 库 | Netty：客户端帧编解码（兼容 C++ `ProtobufCodec`，逐帧分发，§3）、节点链路编解码；按消息号限频（`com.game.net.limit`，读 MessageLimiter 表，gate 与 battle 直连面共用） |
-| `game-battle-engine` | 库（纯 Java） | 回合制战斗确定性引擎（批次 6.1）：开局、行动校验、出手序、普攻 / 防御 / 逃跑、技能、buff 回合化、道具、掉落、结算、快照，随机数逐位照搬 mt19937_64；战斗配表指纹。不依赖 Spring / Netty / Redis / 日志，单线程对象（由 6.2 的房间串行驱动）；6.3 的 scene 只用 `BattleRules` 与指纹。规格 `docs/porting/battle-engine-spec.md` |
+| `game-battle-engine` | 库（纯 Java） | 回合制战斗确定性引擎：开局、行动校验、出手序、普攻 / 防御 / 逃跑、技能、buff、道具、掉落、结算与快照，种子化 mt19937_64；战斗配表指纹。2026-11-06 补职业重数、职业执行、属性增减益和挂机选技，scene 已接真实持久重数、修习与快照，见 [场景技能链](../porting/class-skill-scene-20261106.md)。通用/职业/药品治疗与回蓝共用精确缺口计算。不依赖 Spring / Netty / Redis / 日志，每局由房间串行驱动。原规格 `docs/porting/battle-engine-spec.md` |
+| `game-navigation` | 库（纯 Java） | 固定 UE MSET 读取与不可变几何、最近可行走点、地表 raycast、flags 过滤、A* 与走廊内路径拉直；服务器坐标边界提供落位、墙前回缩与路径换轴，每次调用独立有界工作区。95 项模块测试含六份固定资产通过；尚未接 scene 移动裁决或 off-mesh 跳跃。边界见 [服务器坐标](../porting/navigation-server-coordinates-20261106.md) 与 [路径](../porting/navigation-path-20261106.md) |
 | `game-pbmysql` | 库（纯 JDBC） | proto → MySQL 表映射（用户自有 proto2mysql 的 Java 实现）：建表 DDL、只扩不缩的结构同步、按消息 CRUD（§7） |
 | `game-api` | 库 | Dubbo 服务接口、调用方鉴权过滤器（§4.1）与内部 protobuf 消息（包 `game.api`，只在 Java 版内部使用）；按节点直连的通用 Dubbo 客户端 `com.game.api.rpc.NodeRpcClients<S>`（批次 6.3 的 battle → scene 先用到，§4.23）；批次 6.4 的匹配端口 `MatchTeamService` / `MatchInternalService`（消息在 `game/api/match_control.proto`）、跨进程时限常量 `com.game.api.match.MatchBudgets` 与预算附件 `MatchRpcAttachments`（§4.24） |
 | `game-discovery` | 库 | Redis（Redisson）上的节点号租约、游戏节点在线目录、玩家在线目录与服务端推送（含同一会话按序的批量推送 `MessageBatch`，§4.3）；回合制战斗的 Redis 键、全部 Lua 与跨进程常量（`com.game.discovery.battle`：`BattleRedis`、`BattleLockReader`，scene 与 battle 共用，§4.23）；匹配的键名（`RedisKeys` 的 `match*` 一组，全部带 hash tag `{match}`；批次 6.5 加观战的两个键 `matchWatching` / `matchWatchable`）与节点类型 `NodeTypes.MATCH`（§4.24；匹配的 Lua 在 game-match 自己的包里）；批次 6.5 的 `com.game.discovery.battle.BattleRoutings`（在线目录 → 观众路由的 gate 部分，game-match 的 163 与 game-battle 的 dev 接口共用，§4.24.1）；批次 5.4 的 gate 目录读与选 gate `com.game.discovery.gate.{GateSource, RedisGateSource, GatePicker}`（从 game-gateway 下沉，gateway 与 scene-manager 共用；同一客户端地址只留最新启动的一条，§6）、合服围栏接口 `com.game.discovery.zone.ZoneMergeFence`（7.3 之前只有恒放行的 `OPEN`，§7）、待落点写口 `PlayerLocationDirectory.awaitPlacementAsync`（§7） |
 | `game-player-store` | 库 | 账号 / 玩家持久化（MyBatis）与玩家归属围栏（含跨节点换图的原子交出与探测，§7 第 6 步） |
 | `game-gateway-store` | 库 | 区服目录 / 白名单 / 登录公告的库表与读写（MyBatis）：game-gateway 建表并读，game-data 运维接口写 |
 | `game-audit` | 库 | 资产审计管线的共享件：Java 自有的流水消息格式（包 `game.audit`）、Kafka topic 规格（带代次后缀）与启动期核对（§4.5）；批次 6.4 起对局结果 topic 的规格件 `BattleResultTopics` 也放在这里（game-battle 生产、game-match 消费，§4.24） |
-| `game-gateway` | 进程（Spring Boot Web + Dubbo 调用方） | 区服列表（区服目录 + 健康探测）、分配 gate 并签发 gate 令牌（区服准入）、HTTP 登录与刷新令牌（经 Dubbo 调 game-login）、登录公告 |
+| `game-gateway` | 进程（Spring Boot Web + Dubbo 调用方） | 区服列表（区服目录 + 健康探测）、分配 gate 并签发 gate 令牌（区服准入）、HTTP 登录与刷新令牌（经 Dubbo 调 game-login）、登录公告；2026-11-06 接入 `POST /api/hotfix-check`，以不可变平台发布线提供建议/强制更新判断，配置键 `game.gateway.hotfix.platforms`，源码待编译测试，见 [热更检查移植](../porting/gateway-hotfix-20261106.md) |
 | `game-login` | 进程（Spring Boot + Dubbo） | 登录（含 access / refresh 令牌、设备数上限）、建角（归属区取会话 zone）、进游戏（批次 5.4 起含持票者校验、按票据与位置记录定去向、登录期重定向 GO-5，§8.2）、离开 / 断线 |
 | `game-friend` | 进程（Spring Boot + Dubbo） | 好友：申请 / 同意 / 拒绝 / 删除 / 列表 / 黑名单与好友事件推送（Dubbo group `friend`，端口 20883；四张表经 game-pbmysql，§4.13） |
 | `game-chat` | 进程（Spring Boot + Dubbo） | 世界频道与私聊的SQL权威发言、永久成功收据、原会话授权与强读历史（Dubbo group `chat`，端口 20884；§4.14；本批源码待编译/真库验证） |
@@ -80,9 +81,15 @@ Java 代码不得依赖这套目录，具体做法：
 - **逐帧分发**（同 C++ `codec.cpp:164-191`，批次 6.2 起）：每次至多解一帧，交给处理器处理完（应答已写出）才解下一帧；
   会话已决定关闭时，剩余字节直接丢弃、不解析、不计非法帧（`ClientFrameDecoder` 的 `keepDecoding` 钩子）。所以同一次读里先到的
   合法帧照常处理、回包，后面的坏帧才导致断开。
-- 上行只接受 `ClientTokenVerifyRequest`（首包握手）与 `ClientRequest`；下行是 `ClientTokenVerifyResponse` 与 `MessageContent`。
+- 大厅上行接受 `ClientTokenVerifyRequest`（首包握手）、`ClientHeartbeatRequest` 与 `ClientRequest`；下行是验签应答、心跳应答与 `MessageContent`。
   battle 直连面用同一套帧格式，上行只接受 `BattleTokenVerifyRequest` 与 `ClientRequest`，下行是 `BattleTokenVerifyResponse` 与 `MessageContent`（§4.22）。
 - 握手签名：`HMAC-SHA256(gate_token_secret, GateTokenPayload 字节)` 的 **64 字节小写 hex ASCII**（不是 proto 注释里的 32 字节原值）。
+- 大厅连接握手默认限时 10 秒，收到零碎字节不续期。验签成功通告 `heartbeat_interval_ms=10000`、`heartbeat_timeout_ms=30000`，
+  从验签回包起按完整入站帧判活；连续 30 秒没有完整帧就关连接，交给原断线流程处理。每条连接只有一个空闲检查定时器，
+  收包只更新时间，到检查点才在 Netty EventLoop 重新排期；检查迟到超过 2 秒时，握手与空闲判定都先宽限 1 秒，让积压输入先处理。
+  心跳验签前强关；每 10 秒窗口最多回显 3 个 seq，超额静默并计非法包。`game.gate.client.heartbeat{result}` 是固定低基数指标。
+  Java robot 在收到非零通告后立即首发，随后由连接的 EventLoop 按固定延迟发送，断开或移除 handler 时取消；回包不进入业务收件箱。
+  未通告的 gate 不发心跳。robot 不做客户端侧的 gate 读超时判死，真实端到端断线保留接回仍由集成冒烟验证。
 
 实现：`game-net` 的 `ClientFrameDecoder` / `ClientFrameEncoder`，单测固化 golden bytes。
 

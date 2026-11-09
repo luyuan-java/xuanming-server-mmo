@@ -76,6 +76,11 @@ message BindSessionEvent {
   // 本次登录链铸造的登录代次。gate 在按 lastSceneRoute 补发登录进场之前写进会话:Bind 先于本次路由
   // 到达时,补发带的必须是本次登录的代次(docs/design/scene-enter-session-fence.md §4)。
   uint64 login_generation = 5;
+  // 本次入场从原连接登录态捕获的账号、连接代次和归属修订；三者必须完整。
+  // gate 只接受本进程 UUID 信封及同一 incarnation 的绑定，旧连接迟到事件不得补权。
+  string authenticated_account = 6;
+  uint64 session_incarnation = 7;
+  uint64 owner_revision = 8;
 }
 
 // Sent by SceneManager to Gate when a player requests a cross-zone scene.
@@ -89,6 +94,20 @@ message RedirectToGateEvent {
   bytes  token_payload = 5;    // serialized GateTokenPayload for target gate
   bytes  token_signature = 6;  // HMAC-SHA256 signature
   int64  token_deadline = 7;   // unix seconds
+}
+
+// login 发给正在排空的 gate:按给定速率把本 gate 上已登录的连接迁到同 zone 的其他 gate
+// (docs/design/gate-drain-session-migration.md §4.3、§4.4)。
+// 每个 login 副本在排空判定的每一拍都重发一次(电平触发,gate 侧幂等);gate 在 lease_ms 内没收到新的一条就停。
+// 经 GateCommand.payload 下发,信封字段照填;target_instance_id 必填(AGENTS.md §7.2)。
+message GateDrainMigrationEvent {
+  option (OptionKafkaIngress) = true;
+  // gate:{id}:draining 的值(标记时刻,Unix 秒)。只用于日志与区分不同的排空轮次,不参与判定。
+  int64  drain_marked_at = 1;
+  // 每秒最多发起多少个迁移请求;0 = 停止迁移。
+  uint32 rate_per_second = 2;
+  // 迁移许可的有效时长,从 gate 收到本条起按 gate 自己的单调时钟计。
+  uint32 lease_ms = 3;
 }
 
 // Go service pushes a single message to a player's client via Gate.

@@ -96,6 +96,8 @@ public final class AuthoritySqlFixture implements AutoCloseable {
         private Phase phase=Phase.HELD;
         private SchemaScope activeWork;
         private final List<UnpublishedSchemaWork<Void>> completionChecks=new ArrayList<>();
+        // 仅记本 lease 已确认的具名授权；失败响应不能加入，也不能靠后续回调重试。
+        private final Set<String> grantedBusinessTables=new HashSet<>();
         private UnpublishedSchemaLease(AuthoritySqlFixture fixture){
             this.fixture=fixture;
             schemaUser="ws_"+fixture.user.substring(3);
@@ -163,17 +165,23 @@ public final class AuthoritySqlFixture implements AutoCloseable {
             }
         }
         private void grantExistingBusinessRows()throws Exception{
-            try(var admin=fixture.admin(fixture.database);var statement=admin.createStatement();
+            try(var admin=fixture.admin(fixture.database)){grantExistingBusinessRows(admin);}
+        }
+        /** 同一 lease 的成功授权只做一次；管理员仍用原有5秒连接，不重试未知GRANT。 */
+        private void grantExistingBusinessRows(Connection admin)throws Exception{
+            requireHeld();
+            try(var statement=admin.createStatement();
                     var query=admin.prepareStatement("SELECT table_name FROM information_schema.tables WHERE table_schema=? AND table_type='BASE TABLE' ORDER BY table_name")){
                 query.setString(1,fixture.database);
                 var tables=new ArrayList<String>();
                 try(var rows=query.executeQuery()){while(rows.next())tables.add(rows.getString(1));}
-                for(String table:tables)if(!CONTROL.contains(table.toLowerCase(Locale.ROOT))){
+                for(String table:tables)if(!CONTROL.contains(table.toLowerCase(Locale.ROOT))&&!grantedBusinessTables.contains(table)){
                     fixture.unknown=true;
                     statement.execute("GRANT SELECT,INSERT,UPDATE,DELETE ON "+name(fixture.database)+"."+name(table)+" TO "+literal(schemaUser)+"@'%'");
+                    grantedBusinessTables.add(table);
                     fixture.unknown=false;
                 }
-            }
+            }catch(Exception|Error failure){failUnknown(failure);throw failure;}
         }
         /** CREATE已成功且DDL会话无事务后，先补真实业务表权限，再允许调用方读取列和索引元数据。 */
         private void grantBusinessRowsAfterCreate()throws SQLException{
@@ -756,7 +764,7 @@ public final class AuthoritySqlFixture implements AutoCloseable {
         var fixture=new AuthoritySqlFixture(options);
         try(var admin=fixture.admin(fixture.database)){
             String principal=currentUser(admin);
-            if(playerSchema==null){fixture.unknown=true;schema.create(admin,principal);fixture.unknown=false;}
+            if(playerSchema==null){fixture.unknown=true;createInitialSchema(admin,schema,principal);fixture.unknown=false;}
             try(var input=AuthoritySqlFixture.class.getResourceAsStream("/db/game-route-authority-schema.sql")){
                 if(input==null)throw new SQLException("缺同源正式authority DDL");String ddl=new String(input.readAllBytes(),StandardCharsets.UTF_8);
                 // 只执行本仓固定资源，不接受外部脚本或第二份控制表schema。
@@ -764,11 +772,91 @@ public final class AuthoritySqlFixture implements AutoCloseable {
             }
             if(playerSchema!=null){
                 for(String sql:playerSchema)try(var statement=admin.createStatement()){statement.setQueryTimeout(5);fixture.unknown=true;executeOwnerDdl(admin,statement,()->statement.execute(sql));fixture.unknown=false;}
-                fixture.unknown=true;schema.create(admin,principal);fixture.unknown=false;
+                fixture.unknown=true;createInitialSchema(admin,schema,principal);fixture.unknown=false;
             }
             fixture.unknown=true;RouteAuthorityInitializer.initialize(admin,UUID.randomUUID().toString(),options.zones(),principal);fixture.unknown=false;fixture.register(admin);return fixture;
         }catch(Exception failure){if(!fixture.unknown)try{fixture.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
     }
+    /** prepare的旧SchemaBuilder也只给单条CREATE/ALTER TABLE使用既有DDL期限。 */
+    private static void createInitialSchema(Connection connection,SchemaBuilder builder,String principal)throws Exception{
+        var scope=new PrepareSchemaScope(connection);Throwable failure=null;
+        try{builder.create((Connection)scope.view(connection),principal);}
+        catch(Exception|Error caught){failure=caught;}
+        finally{
+            try{scope.close();}catch(Exception|Error cleanup){failure=mergeFixtureFailure(failure,cleanup);}
+        }
+        failure=mergeFixtureFailure(failure,scope.firstUnknown);
+        if(failure!=null)UnpublishedSchemaLease.raise(failure);
+    }
+    /** 不改变普通SQL期限，也不重试结果未知的DDL；离开同步回调后撤销派生视图。 */
+    private static final class PrepareSchemaScope implements AutoCloseable{
+        private final Connection connection;
+        private final Thread thread=Thread.currentThread();
+        private final IdentityHashMap<Object,Object> views=new IdentityHashMap<>();
+        private final List<AutoCloseable> resources=new ArrayList<>();
+        private final Set<Object> preparedDdl=Collections.newSetFromMap(new IdentityHashMap<Object,Boolean>());
+        private boolean active=true;
+        private Throwable firstUnknown;
+        private PrepareSchemaScope(Connection connection){this.connection=connection;}
+        private Object view(Object target){
+            if(target==null)return null;
+            Object prior=views.get(target);if(prior!=null)return prior;
+            Class<?> type=null;
+            if(target instanceof Connection)type=Connection.class;
+            else if(target instanceof CallableStatement)type=CallableStatement.class;
+            else if(target instanceof PreparedStatement)type=PreparedStatement.class;
+            else if(target instanceof Statement)type=Statement.class;
+            else if(target instanceof ResultSet)type=ResultSet.class;
+            else if(target instanceof DatabaseMetaData)type=DatabaseMetaData.class;
+            else if(target instanceof ResultSetMetaData)type=ResultSetMetaData.class;
+            else if(target instanceof ParameterMetaData)type=ParameterMetaData.class;
+            if(type==null)return target;
+            Object proxy=java.lang.reflect.Proxy.newProxyInstance(AuthoritySqlFixture.class.getClassLoader(),new Class<?>[]{type},
+                    (object,method,args)->invoke(target,object,method,args));
+            views.put(target,proxy);
+            if(target instanceof Statement statement)resources.add(statement);
+            else if(target instanceof ResultSet rows)resources.add(rows);
+            return proxy;
+        }
+        private Object invoke(Object target,Object proxy,java.lang.reflect.Method method,Object[] args)throws Throwable{
+            String name=method.getName();
+            if(method.getDeclaringClass()==Object.class){
+                if(name.equals("toString"))return "prepare Schema JDBC视图";
+                if(name.equals("hashCode"))return System.identityHashCode(proxy);
+                if(name.equals("equals"))return proxy==args[0];
+            }
+            if(!active||Thread.currentThread()!=thread)throw new SQLException("prepare Schema能力已撤销或跨线程使用","0A000");
+            if(firstUnknown!=null)throw new SQLException("prepare Schema结果未知，禁止继续执行","08007",firstUnknown);
+            if(name.equals("unwrap"))throw new SQLFeatureNotSupportedException("prepare Schema禁止unwrap","0A000");
+            if(name.equals("isWrapperFor"))return false;
+            boolean sqlArgument=args!=null&&args.length>0&&args[0] instanceof String;
+            boolean ddl=sqlArgument?(SchemaScope.createsTable((String)args[0])||SchemaScope.altersTable((String)args[0])):preparedDdl.contains(target);
+            if(target instanceof Statement&&name.equals("addBatch")&&ddl)
+                throw new SQLFeatureNotSupportedException("prepare Schema的CREATE/ALTER TABLE必须逐条执行","0A000");
+            boolean executeDdl=target instanceof Statement&&ddl
+                    &&(name.equals("execute")||name.equals("executeUpdate")||name.equals("executeLargeUpdate"));
+            try{
+                Object result=executeDdl?executeOwnerDdl(connection,(Statement)target,()->SchemaScope.invokeDdl(target,method,args))
+                        :SchemaScope.invokeDdl(target,method,args);
+                if(target instanceof Connection&&result instanceof Statement statement){
+                    preparedDdl.remove(statement);
+                    if((name.equals("prepareStatement")||name.equals("prepareCall"))&&ddl)preparedDdl.add(statement);
+                }
+                return view(result);
+            }catch(Exception|Error failure){
+                if(isUnknownFixtureOutcome(failure))firstUnknown=mergeFixtureFailure(firstUnknown,failure);
+                throw failure;
+            }
+        }
+        @Override public void close()throws Exception{
+            active=false;Throwable failure=null;
+            for(int index=resources.size()-1;index>=0;index--)try{resources.get(index).close();}
+            catch(Exception|Error cleanup){failure=mergeFixtureFailure(failure,cleanup);}
+            resources.clear();views.clear();preparedDdl.clear();
+            if(failure!=null)UnpublishedSchemaLease.raise(failure);
+        }
+    }
+
     private static List<String> readFixedPlayerSchema()throws Exception{
         Path source=Path.of("").toAbsolutePath().normalize().resolveSibling("game-player-store").resolve("src/main/resources/db/game-player-schema.sql");
         if(!Files.isRegularFile(source,LinkOption.NOFOLLOW_LINKS))throw new SQLException("缺本测试模块同级正式player DDL源");

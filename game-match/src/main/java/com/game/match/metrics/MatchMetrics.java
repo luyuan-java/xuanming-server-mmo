@@ -43,6 +43,7 @@ import java.util.function.IntSupplier;
  *   <tr><td>{@code game_match_activity_battles_total{kind, result}} / {@code game_match_team_calls_total{method, result}}</td><td>Counter</td><td>两个内部接口</td></tr>
  *   <tr><td>{@code game_match_rating_updates_total{mode, outcome}} / {@code game_match_rating_round_cap_draws_total{mode}} /
  *       {@code game_match_rating_consumer_paused}</td><td>Counter / Counter / Gauge</td><td>评分回流</td></tr>
+ *   <tr><td>{@code game_match_outcome_outbox_delivery_total{kind, outcome}}</td><td>Counter</td><td>终局发件箱逐行处理结局；各副本计数求和</td></tr>
  *   <tr><td>{@code game_match_battle_nodes{state}} / {@code game_match_lease_lost}</td><td>Gauge</td><td>battle 目录概况 / 发号租约是否已丢失（1 = 需要重启）</td></tr>
  *   <tr><td>{@code game_match_admin_requests_total{op, status}}</td><td>Counter</td><td>dev 管理口的 HTTP 审计</td></tr>
  *   <tr><td>{@code game_match_watch_battle_total{outcome}} / {@code game_match_list_watchable_total{result}}</td><td>Counter</td>
@@ -86,6 +87,7 @@ public final class MatchMetrics {
     static final String RATING_UPDATES = "game.match.rating.updates";
     static final String RATING_ROUND_CAP_DRAWS = "game.match.rating.round.cap.draws";
     static final String RATING_CONSUMER_PAUSED = "game.match.rating.consumer.paused";
+    static final String OUTCOME_OUTBOX_DELIVERY = "game.match.outcome.outbox.delivery";
     static final String BATTLE_NODES = "game.match.battle.nodes";
     static final String LEASE_LOST = "game.match.lease.lost";
     static final String ADMIN_REQUESTS = "game.match.admin.requests";
@@ -245,6 +247,15 @@ public final class MatchMetrics {
      * </ul>
      */
     public enum RatingOutcome { APPLIED, DUPLICATE, IGNORED, ERROR, DECODE_ERROR, REJECTED }
+
+    /** 终局发件箱去向：整局 Kafka、个人首次入箱、已入箱等待 APPLIED。 */
+    public enum TerminalDeliveryKind { RESULT, FIRST, WAITING }
+
+    /**
+     * 同固定源 993b6da9 的封闭词汇；成功只能在对应 SQL 回写确认后记录。
+     * DEFERRED 保留源词汇，当前 Java 串行恢复没有认领总预算，不产生此结局。
+     */
+    public enum TerminalDeliveryOutcome { PUBLISHED, PENDING, APPLIED, FAILED, CORRUPT, CLAIM_LOST, DEFERRED, STORE_ERROR }
 
     /** dev 管理口的接口（其余路径一律 {@code other}）。 */
     public enum AdminOp { RATING, ACTIVITY_BATTLE, OTHER }
@@ -425,6 +436,11 @@ public final class MatchMetrics {
             roundCapCounter(MetricLabels.mode(mode));
         }
         ratingCounter(MetricLabels.UNKNOWN, RatingOutcome.DECODE_ERROR);
+        for (TerminalDeliveryKind kind : TerminalDeliveryKind.values()) {
+            for (TerminalDeliveryOutcome outcome : TerminalDeliveryOutcome.values()) {
+                terminalDeliveryCounter(kind, outcome);
+            }
+        }
         for (AdminOp op : AdminOp.values()) {
             for (String status : ADMIN_STATUSES) {
                 adminCounter(op, status);
@@ -603,6 +619,11 @@ public final class MatchMetrics {
         ratingCounter(MetricLabels.mode(mode), outcome).increment();
     }
 
+    /** 一次逐行处理记一个结局；未知回执不能记成功，指标本身不授予交付或到账证明。 */
+    public void terminalDelivery(TerminalDeliveryKind kind, TerminalDeliveryOutcome outcome) {
+        terminalDeliveryCounter(kind, outcome).increment();
+    }
+
     /** 一局胜负结果因「回合打满」被改按平局结算。 */
     public void ratingRoundCapDraw(int mode) {
         roundCapCounter(MetricLabels.mode(mode)).increment();
@@ -716,6 +737,11 @@ public final class MatchMetrics {
 
     private Counter ratingCounter(String mode, RatingOutcome outcome) {
         return counter(RATING_UPDATES, "对局结果的入账结局", "mode", mode, "outcome", tag(outcome));
+    }
+
+    private Counter terminalDeliveryCounter(TerminalDeliveryKind kind, TerminalDeliveryOutcome outcome) {
+        return counter(OUTCOME_OUTBOX_DELIVERY, "终局发件箱逐行处理结局；published/pending/applied 仅在对应持久回写确认后记录；各副本求和",
+                "kind", tag(kind), "outcome", tag(outcome));
     }
 
     private Counter roundCapCounter(String mode) {

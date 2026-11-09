@@ -494,6 +494,123 @@ class JdbcFriendStoreMysqlTest {
         assertInvariants();
     }
 
+    @Test
+    void 已有容量行只点锁_不再计数或更新主键_保留原计数与时间() throws Exception {
+        exec("INSERT INTO friend_capacity(player_id,friend_count,created_ms) VALUES (171,1,777),(172,1,778),(173,0,779)");
+        exec("INSERT INTO friend(player_id,friend_player_id,since_ms) VALUES (171,172,1),(172,171,1)");
+        DataSource checked = interceptStoreSql(sql -> {
+            if (sql.equals(JdbcFriendStore.COUNT_FRIENDS) || sql.equals(JdbcFriendStore.ENSURE_CAPACITY)) {
+                throw new SQLException("Existing capacity must not be rebuilt or updated");
+            }
+        }, sql -> {});
+        JdbcFriendStore s = new JdbcFriendStore(checked, LIMITS, System::currentTimeMillis, 10,
+                JdbcFriendStore.Events.NONE, REQUEST_IDS::incrementAndGet);
+        assertThat(s.addRequest(171,173,d()).result()).isEqualTo(AddResult.OK);
+        assertThat(capacity(171)).isEqualTo(1);
+        assertThat(capacity(172)).isEqualTo(1);
+        assertThat(capacity(173)).isZero();
+        assertThat(createdMs(171)).isEqualTo(777);
+        assertThat(createdMs(172)).isEqualTo(778);
+        assertThat(createdMs(173)).isEqualTo(779);
+        assertInvariants();
+    }
+
+    @Test
+    void 容量缺行读取后另一真实连接先插入_系统与原会话均回滚重读且保留赢家原件() throws Exception {
+        for (boolean session : List.of(false,true)) {
+            long from = session ? 181 : 191;
+            long to = from + 1;
+            if (session) exec("INSERT INTO player(player_id,account,owner_revision) VALUES (181,'original',7),(182,'peer',3)");
+            var raced = new java.util.concurrent.atomic.AtomicBoolean();
+            AtomicInteger duplicates = new AtomicInteger();
+            DataSource checked = interceptStoreSql(sql -> {}, sql -> {
+                if (sql.equals(JdbcFriendStore.ENSURE_CAPACITY) && raced.compareAndSet(false,true)) {
+                    // 被测连接已经读取缺行；另一个 NORMAL 物理连接先提交，制造真实唯一键冲突。
+                    try (Connection concurrent = dataSource.getConnection()) {
+                        concurrent.setAutoCommit(false);
+                        try (PreparedStatement insert = concurrent.prepareStatement(
+                                "INSERT INTO friend_capacity(player_id,friend_count,created_ms) VALUES (?,0,777)")) {
+                            insert.setLong(1,from);
+                            insert.setQueryTimeout(3);
+                            assertThat(insert.executeUpdate()).isEqualTo(1);
+                            concurrent.commit();
+                        }
+                    }
+                }
+            });
+            JdbcFriendStore.Events events = new JdbcFriendStore.Events() {
+                @Override public void guardRetry(String kind) {
+                    assertThat(kind).isEqualTo("ensure_duplicate");
+                    duplicates.incrementAndGet();
+                }
+                @Override public void countUnderflow() { throw new AssertionError("Unexpected underflow"); }
+            };
+            JdbcFriendStore system = new JdbcFriendStore(checked,LIMITS,System::currentTimeMillis,10,
+                    events,REQUEST_IDS::incrementAndGet);
+            FriendStore s = session ? system.forActor(from,"original",7) : system;
+            assertThat(s.addRequest(from,to,d()).result()).isEqualTo(AddResult.OK);
+            assertThat(raced).isTrue();
+            assertThat(duplicates).hasValue(1);
+            assertThat(createdMs(from)).isEqualTo(777);
+            assertThat(capacity(from)).isZero();
+            assertThat(system.pendingRequests(to,10,d())).hasSize(1);
+            assertInvariants();
+        }
+    }
+
+    @Test
+    void 好友业务写的1062不重试且不留下申请_容量并发恢复不扩大业务重试范围() throws Exception {
+        AtomicInteger writes = new AtomicInteger();
+        AtomicInteger duplicates = new AtomicInteger();
+        DataSource checked = interceptStoreSql(sql -> {}, sql -> {
+            if (sql.equals(JdbcFriendStore.UPSERT_REQUEST)) {
+                writes.incrementAndGet();
+                throw new SQLException("Injected unrelated business duplicate key","23000",1062);
+            }
+        });
+        JdbcFriendStore.Events events = new JdbcFriendStore.Events() {
+            @Override public void guardRetry(String kind) { duplicates.incrementAndGet(); }
+            @Override public void countUnderflow() { throw new AssertionError("Unexpected underflow"); }
+        };
+        JdbcFriendStore s = new JdbcFriendStore(checked,LIMITS,System::currentTimeMillis,10,
+                events,REQUEST_IDS::incrementAndGet);
+        assertThatThrownBy(() -> s.addRequest(201,202,d())).isInstanceOf(FriendStoreException.class)
+                .hasRootCauseMessage("Injected unrelated business duplicate key");
+        assertThat(writes).hasValue(1);
+        assertThat(duplicates).hasValue(0);
+        assertThat(countRows("friend_request")).isZero();
+        assertThat(countRows("friend_capacity")).isEqualTo(2);
+        assertInvariants();
+    }
+
+    @FunctionalInterface
+    private interface SqlHook { void run(String sql) throws SQLException; }
+
+    /** 真实连接与语句，只在明确边界安排另一个写者或注入指定业务故障。 */
+    private static DataSource interceptStoreSql(SqlHook prepareHook, SqlHook writeHook) throws SQLException {
+        DataSource intercepted = mock(DataSource.class);
+        when(intercepted.getConnection()).thenAnswer(ignored -> {
+            Connection actual = dataSource.getConnection();
+            Connection connection = mock(Connection.class,delegatesTo(actual));
+            doAnswer(call -> {
+                String sql = call.getArgument(0);
+                prepareHook.run(sql);
+                PreparedStatement actualStatement = actual.prepareStatement(sql);
+                if (!sql.equals(JdbcFriendStore.ENSURE_CAPACITY) && !sql.equals(JdbcFriendStore.UPSERT_REQUEST)) {
+                    return actualStatement;
+                }
+                PreparedStatement statement = mock(PreparedStatement.class,delegatesTo(actualStatement));
+                doAnswer(update -> {
+                    writeHook.run(sql);
+                    return actualStatement.executeUpdate();
+                }).when(statement).executeUpdate();
+                return statement;
+            }).when(connection).prepareStatement(anyString());
+            return connection;
+        });
+        return intercepted;
+    }
+
     // ================================================================ 并发（全程不得出现 1213）
 
     @Test

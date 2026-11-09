@@ -26,11 +26,29 @@ public final class CurrencyService {
         private final ScenePlayer player;
         private final Wallet.Change change;
         private final com.game.player.store.state.BagState originalBags;
+        private final com.game.player.store.state.PlayerSkillBookState originalSkills;
         private boolean committed;
         private PreparedDeduction(ScenePlayer player, Wallet.Change change) {
             this.player = player; this.change = change; this.originalBags = player.bags().toState();
+            this.originalSkills = player.learnedSkills().toState();
         }
         public int tipId() { return change.tipId(); }
+        /** 两份候选一次提交；审计异常不得把扣款和技能升级拆开。 */
+        public void commitSkills(com.game.scene.player.PlayerSkills candidate, AssetAudit.Reason reason, long skillId) {
+            if (committed || !change.ok() || player.frozen() || player.inBattle()
+                    || !originalSkills.equals(player.learnedSkills().toState()))
+                throw new IllegalStateException("stale skill upgrade candidate");
+            player.wallet().commitDeduction(change);
+            player.learnedSkills().commitPrepared(candidate);
+            committed = true;
+            try { audit.currencyChanged(player.playerId(), change.type(), change.after() - change.before(),
+                    change.before(), change.after(), reason, skillId); }
+            catch (RuntimeException failure) {
+                org.slf4j.LoggerFactory.getLogger(CurrencyService.class)
+                        .error("Skill upgrade committed but audit failed skill={}", skillId, failure);
+            }
+        }
+
         public void commit(com.game.scene.player.PlayerBags candidate, AssetAudit.Reason reason, long correlation, String extra) {
             if (committed || !change.ok() || !candidate.normalized() || player.frozen()
                     || !originalBags.equals(player.bags().toState())) throw new IllegalStateException("非法或已过期的装备资产候选");

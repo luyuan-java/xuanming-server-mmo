@@ -53,6 +53,24 @@ class MatchMetricsTest {
     }
 
     @Test
+    void 终局投递只预建固定三类八结局_重复记录不扩展标签() {
+        String name = "game.match.outcome.outbox.delivery";
+        for (String kind : List.of("result", "first", "waiting")) {
+            for (String outcome : List.of("published", "pending", "applied", "failed", "corrupt", "claim_lost", "deferred", "store_error")) {
+                assertThat(count(name, "kind", kind, "outcome", outcome)).isZero();
+            }
+        }
+        for (int attempt = 0; attempt < 100; attempt++) {
+            metrics.terminalDelivery(MatchMetrics.TerminalDeliveryKind.FIRST, MatchMetrics.TerminalDeliveryOutcome.PENDING);
+        }
+        metrics.terminalDelivery(MatchMetrics.TerminalDeliveryKind.WAITING, MatchMetrics.TerminalDeliveryOutcome.APPLIED);
+        assertThat(count(name, "kind", "first", "outcome", "pending")).isEqualTo(100);
+        assertThat(count(name, "kind", "waiting", "outcome", "applied")).isEqualTo(1);
+        assertThat(meters.get(name).counters()).hasSize(24).allSatisfy(counter ->
+                assertThat(counter.getId().getTags()).extracting(tag -> tag.getKey()).containsExactlyInAnyOrder("kind", "outcome"));
+    }
+
+    @Test
     void 指标名与规格表一致() {
         Set<String> names = new TreeSet<>();
         metrics.queueDepth(3, 0, 1);
@@ -90,6 +108,7 @@ class MatchMetricsTest {
                 "game.match.rating.updates",
                 "game.match.rating.round.cap.draws",
                 "game.match.rating.consumer.paused",
+                "game.match.outcome.outbox.delivery",
                 "game.match.battle.nodes",
                 "game.match.lease.lost",
                 "game.match.admin.requests",

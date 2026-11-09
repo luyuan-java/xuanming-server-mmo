@@ -89,6 +89,28 @@ final class ConsistencySqlPlans {
             default -> ConsistencyExtraSqlPlans.forCheck(id);
         };
     }
+    /** 周期观察只分页已经过 Java 终局宽限且带 Create 的候选，旧终态海量行不占扫描名额。 */
+    private static String expiredScope() {
+        return "state IN (2,3,4) AND deadline_ms>0 AND OCTET_LENGTH(create_request)>0"
+                + " AND deadline_ms<=CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS SIGNED)-"
+                + MatchExpiredShape.TERMINAL_OUTCOME_GRACE_MILLIS
+                + " AND NOT EXISTS (SELECT 1 FROM match_battle_completion completed"
+                + " WHERE completed.battle_id=match_global_formation.battle_id AND completed.terminal_decision IN (1,2))";
+    }
+    static Query expiredUpper() {
+        return new Query("SELECT battle_id AS k1,0 AS k2 FROM match_global_formation WHERE " + expiredScope()
+                + " ORDER BY battle_id DESC LIMIT 1", List.of());
+    }
+    static Query expiredPage(Key cursor, Key upper, int size) {
+        if (size < 1 || size > 256 || upper == null) throw new IllegalArgumentException("到期巡检分页参数非法");
+        var args = new ArrayList<Object>();
+        String after = "";
+        if (cursor != null) { after = " AND battle_id>?"; args.add(cursor.first()); }
+        args.add(upper.first());
+        Plan plan = forCheck("match.expired_unrecoverable").getFirst();
+        return new Query(plan.select(" WHERE " + expiredScope() + after
+                + " AND battle_id<=? ORDER BY battle_id LIMIT " + size), List.copyOf(args));
+    }
     private static Plan zone(String id, String table, String pk) {
         return new Plan(id, table, pk, null, pk + ",zone_id", "LEFT JOIN zone_config z ON z.zone_id=d.zone_id "
                 + "LEFT JOIN zone_merged_into m ON m.zone_id=d.zone_id",

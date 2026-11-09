@@ -94,7 +94,7 @@ class GatePropertiesTest {
 
         assertThat(limits.redirectLinger()).isEqualTo(Duration.ofSeconds(15)).isEqualTo(GateLimits.MIN_REDIRECT_LINGER);
         assertThat(props.clientPort()).isEqualTo(11000);
-        assertThat(props.handshakeTimeout()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(props.handshakeTimeout()).isEqualTo(Duration.ofSeconds(10));
         assertThat(props.maxPendingRequests()).isEqualTo(64);
         assertThat(props.shutdownDrainTimeout()).isEqualTo(Duration.ofSeconds(3));
     }

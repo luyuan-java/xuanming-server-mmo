@@ -6,7 +6,8 @@ import com.game.api.proto.SceneBattleReply;
 import com.game.api.proto.SceneBattleStatus;
 import com.game.api.proto.SettlementDisposition;
 import com.game.proto.BattleConfirmedEvent;
-import com.game.proto.BattleSettlementEvent;
+import com.game.api.battle.LegacyBattleSettlementCodec;
+import com.game.proto.BattleSettlementData;
 import com.game.proto.CancelBattlePrepareRequest;
 import com.game.proto.PrepareBattleRequest;
 import com.game.proto.PrepareBattleResponse;
@@ -125,15 +126,15 @@ public final class SceneBattleProvider implements SceneBattleService {
     @Override
     public CompletableFuture<SceneBattleReply> applySettlement(SceneBattleCall call) {
         return submit(RpcMethod.SETTLEMENT, call, (svc, body) -> {
-            BattleSettlementEvent event;
+            BattleSettlementData settlement;
             try {
-                event = BattleSettlementEvent.parseFrom(body.getBody());
+                settlement = LegacyBattleSettlementCodec.decode(body.getBody()).orElse(BattleSettlementData.getDefaultInstance());
             } catch (InvalidProtocolBufferException e) {
                 log.error("结算投递解析失败（丢弃，不销账） player={}", Long.toUnsignedString(body.getPlayerId()));
                 return CompletableFuture.completedFuture(SceneBattleReply.newBuilder().setStatus(SceneBattleStatus.SCENE_BATTLE_HANDLED)
                         .setSettlement(SettlementDisposition.SETTLEMENT_DISCARDED).build());
             }
-            return onLogic(() -> svc.deliver(body.getPlayerId(), event.getSettlement()));
+            return onLogic(() -> svc.deliver(body.getPlayerId(), settlement));
         });
     }
 

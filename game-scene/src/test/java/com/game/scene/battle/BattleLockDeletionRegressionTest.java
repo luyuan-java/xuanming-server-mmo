@@ -83,7 +83,7 @@ class BattleLockDeletionRegressionTest {
         assertThat(delete.lastReply()).as("是本局但已 F：拒绝").isEqualTo(BattleRedis.PREPARING_DELETE_FIGHTING);
         assertThat(f.locks.lockBattleId(PLAYER)).as("在打的局的锁还在").isEqualTo(X);
         assertThat(f.locks.lockState(PLAYER)).isEqualTo("F");
-        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(BattleFixture.BATTLE_MILLIS / 1000 + 60);
+        assertThat(f.locks.lockTtlSec(PLAYER)).isEqualTo(BattleFixture.FIGHTING_LOCK_TTL_SEC);
         assertThat(player.battle().freeze().phase()).isEqualTo(Phase.FIGHTING);
         assertThat(cancelled).isCompleted();
         assertThat(f.follows.freezeCleared).as("玩家又在战斗中了，不补跟随").isEmpty();
@@ -96,7 +96,8 @@ class BattleLockDeletionRegressionTest {
         ScenePlayer player = f.enter(SESSION, PLAYER);
         f.fighting(PLAYER, X);
         f.locks.clearCalls();
-        f.advance(BattleFixture.BATTLE_MILLIS + BattleRedis.FIGHTING_EXPIRY_GRACE.toMillis() + 1);
+        f.advance(BattleFixture.BATTLE_MILLIS + BattleFixture.OUTCOME_WINDOW_MILLIS
+                + BattleRedis.FIGHTING_EXPIRY_GRACE.toMillis() + 1);
 
         f.reap();
 

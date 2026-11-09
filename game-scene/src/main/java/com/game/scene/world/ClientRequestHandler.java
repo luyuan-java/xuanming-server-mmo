@@ -362,11 +362,7 @@ public final class ClientRequestHandler {
      * 77：{@code skill_list} 必须存在（没有技能也要是空列表，robot 靠它发就绪信号）；{@code error_message} 存在且 id=0。
      */
     private void listSkills(PlayerCall call) {
-        PlayerSkillListComp.Builder list = PlayerSkillListComp.newBuilder();
-        for (int skillTableId : call.player().skills()) {
-            list.addSkillList(PlayerSkillComp.newBuilder().setSkillTableId(skillTableId));
-        }
-        call.reply(ListSkillsResponse.newBuilder().setErrorMessage(tip(0)).setSkillList(list).build());
+        call.reply(com.game.scene.skill.ClassSkillService.book(call.player()));
     }
 
     /**

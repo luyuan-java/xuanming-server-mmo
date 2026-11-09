@@ -12,6 +12,7 @@ import com.game.discovery.drain.GateDrainMarks.MarkResult;
 import com.game.discovery.gate.RedisGateSource;
 import com.game.gateway.store.ZoneRow;
 import java.time.Duration;
+import java.util.UUID;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
@@ -33,8 +34,8 @@ import org.redisson.config.Config;
 @EnabledIfSystemProperty(named = "game.it.redis", matches = ".+")
 class GateDrainIntegrationTest {
 
-    /** 缺省部署命名空间 game 的键名。 */
-    private static final RedisKeys REDIS_KEYS = new RedisKeys(GameNamespace.of("game"));
+    /** 本用例独占的命名空间，避免永久发布水位跨执行复用。 */
+    private final RedisKeys redisKeys = new RedisKeys(GameNamespace.of("gdit" + UUID.randomUUID().toString().replace("-", "").substring(0, 20)));
 
     private static RedissonClient redis;
     private final int zone = 900_000 + ThreadLocalRandom.current().nextInt(90_000);
@@ -55,9 +56,15 @@ class GateDrainIntegrationTest {
 
     @AfterEach
     void cleanup() {
-        for (int node = 1; node <= 2; node++) {
-            directory.remove(zone, node);
-            marks.clear(zone, node);
+        try {
+            for (int node = 1; node <= 2; node++) {
+                if (directory != null) directory.remove(zone, node);
+                if (marks != null) marks.clear(zone, node);
+            }
+        } finally {
+            redis.getKeys().delete(redisKeys.zoneNodeDirectory(NodeTypes.GATE, zone),
+                    redisKeys.zoneNodeExpiry(NodeTypes.GATE, zone), redisKeys.zoneNodeSeen(NodeTypes.GATE, zone),
+                    redisKeys.zoneDirectoryFormat(zone), redisKeys.zoneNodeTypes(zone));
         }
     }
 
@@ -68,45 +75,45 @@ class GateDrainIntegrationTest {
 
     @Test
     void 打标记_叠加到目录_判定写drained_旧实例标记被清_撤销后清残留() {
-        directory = new NodeDirectory<>(redis, REDIS_KEYS, NodeTypes.GATE, GateNodeInfo.parser());
-        marks = new GateDrainMarks(redis, REDIS_KEYS);
+        directory = new NodeDirectory<>(redis, redisKeys, NodeTypes.GATE, GateNodeInfo.parser());
+        marks = new GateDrainMarks(redis, redisKeys);
         directory.publish(zone, 1, gate(1, "a1", 0), Duration.ofSeconds(30));
         directory.publish(zone, 2, gate(2, "a2", 9), Duration.ofSeconds(30));
 
-        redis.getBucket(REDIS_KEYS.gateDrained(zone, 1), StringCodec.INSTANCE).set("deadline");
+        redis.getBucket(redisKeys.gateDrained(zone, 1), StringCodec.INSTANCE).set("deadline");
         assertThat(marks.mark(zone, 1, "a1", Duration.ofSeconds(60), Map.of(2, "a2"))).isEqualTo(MarkResult.MARKED);
-        assertThat(redis.getBucket(REDIS_KEYS.gateDrained(zone, 1)).isExists()).as("打标记先清残留 drained").isFalse();
+        assertThat(redis.getBucket(redisKeys.gateDrained(zone, 1)).isExists()).as("打标记先清残留 drained").isFalse();
         GateDrainMarks.Mark mark = marks.draining(zone, List.of(1)).get(1);
         assertThat(mark.markedAtSec()).isBetween(marks.serverTimeSec() - 5, marks.serverTimeSec());
         assertThat(mark.instanceId()).isEqualTo("a1");
         assertThat(marks.mark(zone, 1, "a1", Duration.ofSeconds(600), Map.of(2, "a2"))).isEqualTo(MarkResult.ALREADY_DRAINING);
-        assertThat(redis.getKeys().remainTimeToLive(REDIS_KEYS.gateDraining(zone, 1))).as("TTL 不续").isLessThanOrEqualTo(60_000);
+        assertThat(redis.getKeys().remainTimeToLive(redisKeys.gateDraining(zone, 1))).as("TTL 不续").isLessThanOrEqualTo(60_000);
         assertThat(marks.mark(zone, 2, "a2", Duration.ofSeconds(60), Map.of(1, "a1")))
                 .as("打上之后没有接客的 gate").isEqualTo(MarkResult.LAST_GATE);
         assertThat(marks.draining(zone, List.of(2))).isEmpty();
 
-        List<GateNodeInfo> listed = new RedisGateSource(redis, REDIS_KEYS).listGates(zone);
+        List<GateNodeInfo> listed = new RedisGateSource(redis, redisKeys).listGates(zone);
         assertThat(listed).filteredOn(GateNodeInfo::getDraining).extracting(GateNodeInfo::getNodeId).containsExactly(1);
 
         GateDrainMonitor monitor = new GateDrainMonitor(() -> List.of(new ZoneRow(zone, "z", 0, 100, "", null, true, 1, 0, 0)),
                 directory::list, marks, GateDrainSettings.defaults(), marks::serverTimeSec);
         monitor.tick();
         assertThat(marks.drained(zone, List.of(1, 2))).containsOnlyKeys(1).containsEntry(1, "below_threshold");
-        long drainedTtl = redis.getKeys().remainTimeToLive(REDIS_KEYS.gateDrained(zone, 1));
-        assertThat(drainedTtl).isBetween(1L, redis.getKeys().remainTimeToLive(REDIS_KEYS.gateDraining(zone, 1)) + 50);
+        long drainedTtl = redis.getKeys().remainTimeToLive(redisKeys.gateDrained(zone, 1));
+        assertThat(drainedTtl).isBetween(1L, redis.getKeys().remainTimeToLive(redisKeys.gateDraining(zone, 1)) + 50);
 
         // 节点号 1 被新实例 b1 复用：旧标记不再让它排空，判定循环清掉旧标记
         directory.publish(zone, 1, gate(1, "b1", 0), Duration.ofSeconds(30));
-        assertThat(new RedisGateSource(redis, REDIS_KEYS).listGates(zone)).noneMatch(GateNodeInfo::getDraining);
+        assertThat(new RedisGateSource(redis, redisKeys).listGates(zone)).noneMatch(GateNodeInfo::getDraining);
         monitor.tick();
         assertThat(marks.draining(zone, List.of(1))).as("旧实例的标记被清掉").isEmpty();
         assertThat(marks.drained(zone, List.of(1))).isEmpty();
 
         assertThat(marks.mark(zone, 1, "b1", Duration.ofSeconds(60), null)).isEqualTo(MarkResult.MARKED);
-        redis.getKeys().delete(REDIS_KEYS.gateDraining(zone, 1));
+        redis.getKeys().delete(redisKeys.gateDraining(zone, 1));
         monitor.tick();
         assertThat(marks.drained(zone, List.of(1))).as("取消排空后清掉残留 drained").isEmpty();
-        redis.getBucket(REDIS_KEYS.gateDraining(zone, 1), StringCodec.INSTANCE).set("1:b1");
+        redis.getBucket(redisKeys.gateDraining(zone, 1), StringCodec.INSTANCE).set("1:b1");
         assertThat(marks.mark(zone, 1, "b1", Duration.ofSeconds(60), null)).as("已有标记没有 TTL")
                 .isEqualTo(MarkResult.EXISTING_INVALID);
         assertThat(marks.markDrained(zone, 1, marks.draining(zone, List.of(1)).get(1), "below_threshold"))

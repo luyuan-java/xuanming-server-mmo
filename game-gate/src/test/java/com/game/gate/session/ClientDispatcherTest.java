@@ -123,7 +123,8 @@ class ClientDispatcherTest {
     void 握手通过回成功_重复握手再回成功() {
         EmbeddedChannel ch = connect();
         ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
-        assertThat((Object) ch.readOutbound()).isEqualTo(ClientTokenVerifyResponse.newBuilder().setSuccess(true).build());
+        assertThat((Object) ch.readOutbound()).isEqualTo(ClientTokenVerifyResponse.newBuilder().setSuccess(true)
+                .setHeartbeatIntervalMs(10_000).setHeartbeatTimeoutMs(30_000).build());
 
         ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
         ClientTokenVerifyResponse again = ch.readOutbound();

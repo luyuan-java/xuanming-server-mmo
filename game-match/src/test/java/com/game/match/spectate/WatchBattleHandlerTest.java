@@ -60,9 +60,9 @@ class WatchBattleHandlerTest {
     private final FakeObserverDialer observers = new FakeObserverDialer(events);
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> false));
-    private final AtomicInteger nonceSeq = new AtomicInteger();
+    private final AtomicInteger operationSeq = new AtomicInteger();
     private final WatchBattleService service = new WatchBattleService(spectate, placements, players, tickets, observers, metrics, () -> 0.0,
-            () -> String.format("%016x", nonceSeq.incrementAndGet()), Runnable::run)
+            () -> new java.util.UUID(0, operationSeq.incrementAndGet()).toString(), Runnable::run)
             .withPublicNames((player, deadline) -> "公开观众" + player);
     /** 共用的工作池：163 一次都不该投到它上面。 */
     private final List<Runnable> sharedPool = new CopyOnWriteArrayList<>();
@@ -187,8 +187,13 @@ class WatchBattleHandlerTest {
         ClientReply reply = reply(future);
 
         assertThat(reply.getTipId()).isZero();
-        assertThat(reply.getBody()).as("成功应答只有 battle_id 与 delivery").isEqualTo(WatchBattleResponse.newBuilder().setBattleId(X)
+        assertThat(reply.getBody()).as("成功应答带 battle_id、原操作 UUID 与 direct delivery").isEqualTo(WatchBattleResponse.newBuilder().setBattleId(X)
+                .setSpectatorOperationId(new java.util.UUID(0, 1).toString())
                 .setDelivery(com.game.proto.match.eSpectateDelivery.SPECTATE_DELIVERY_DIRECT).build().toByteString());
+        assertThat(observers.adds()).singleElement().satisfies(add ->
+                assertThat(add.request().getSpectatorOperationId()).isEqualTo(new java.util.UUID(0, 1).toString()));
+        assertThat(spectate.markOf(1001).flatMap(LocalObserverOperation::decode)).hasValueSatisfying(original ->
+                assertThat(original.add()).isEqualTo(observers.adds().get(0).request()));
         assertThat(ranOn).singleElement().satisfies(thread -> {
             assertThat(thread.isVirtual()).as("163 的处理流程在虚拟线程上").isTrue();
             assertThat(thread.getName()).startsWith("match-spectate-");
@@ -386,12 +391,15 @@ class WatchBattleHandlerTest {
         assertThat(WatchBattleResponse.parseFrom(reply(dispatcher.dispatch(watch(1001, X))).getBody()).getBattleId()).isEqualTo(X);
         awaitInflight(0);
 
-        // 3 超时：AddObserver 挂到它的硬截止（请求截止 − 200 ms）才返回，结局不明 → 16018「当前无法观战」，标记保留
+        // 3 超时：先确认取消上次操作；新 Add 到硬截止仍未知，补偿取消也明确模拟未知，原件须保留。
+        observers.nextRemove(new Outcome.Replied(0), new Outcome.Unknown("补偿取消没有正证明"));
         observers.hangAdd();
         assertInBand(reply(dispatcher.dispatch(watch(1001, X))), 16018, "该战斗当前无法观战");
         observers.releaseAdd();
         awaitInflight(0);
-        assertThat(spectate.markOf(1001)).as("结局不明：标记保留（W4）").isPresent();
+        assertThat(spectate.markOf(1001).flatMap(LocalObserverOperation::decode))
+                .as("Add 与补偿取消均未知：保留可恢复的完整原件")
+                .hasValueSatisfying(original -> assertThat(original.add()).isEqualTo(observers.adds().get(1).request()));
 
         // 4 未预期异常
         observers.beforeAdd = call -> {
