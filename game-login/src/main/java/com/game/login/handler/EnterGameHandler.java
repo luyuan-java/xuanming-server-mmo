@@ -287,6 +287,9 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
             return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));
         }
         PlayerRow row = found.get();
+        if ("06_thunder_caster_boy".equals(row.getAppearanceId())) {
+            return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));
+        }
         if (row.getTradeListingId() != 0 || row.getOwnerRevision() <= 0) {
             return done(error(LoginErrorTip.login_error.kLoginInProgress_VALUE));
         }

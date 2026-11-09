@@ -86,6 +86,16 @@ class EnterGameHandlerTest {
     }
 
     @Test
+    void 已删除外观在入口拒绝_不分配场景不发起夺权() throws Exception {
+        var row = LoginHandlerTest.row(PLAYER, ACCOUNT, "已删除外观");
+        row.setAppearanceId("06_thunder_caster_boy");
+        when(store.findPlayer(PLAYER)).thenReturn(Optional.of(row));
+        assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE);
+        verify(scenes, never()).assign(any());
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
+    }
+
+    @Test
     void 已冻结角色在入口拒绝_不分配场景不发起夺权() throws Exception {
         var row = LoginHandlerTest.row(PLAYER, ACCOUNT, "冻结角色");
         row.setTradeListingId(101);

@@ -28,7 +28,9 @@ public final class PlayerViews {
     public static List<AccountSimplePlayerWrapper> wrapAll(List<PlayerRow> rows) {
         List<AccountSimplePlayerWrapper> out = new ArrayList<>(rows.size());
         for (PlayerRow row : rows) {
-            out.add(wrap(row));
+            if (!"06_thunder_caster_boy".equals(row.getAppearanceId())) {
+                out.add(wrap(row));
+            }
         }
         return out;
     }
