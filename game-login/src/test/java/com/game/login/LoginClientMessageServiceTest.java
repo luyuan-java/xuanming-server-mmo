@@ -1,7 +1,10 @@
 package com.game.login;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -18,6 +21,7 @@ import com.game.api.proto.UnbindPlayer;
 import com.game.api.proto.ZoneRedirect;
 import com.game.api.proto.Ack;
 import com.game.api.proto.SessionContext;
+import com.game.common.deadline.Deadline;
 import com.game.login.account.AccountLogin;
 import com.game.login.auth.LoginAuthenticator;
 import com.game.login.dispatch.ClientMessageDispatcher;
@@ -27,9 +31,13 @@ import com.game.login.testing.InMemoryLoginTokens;
 import com.game.player.store.PlayerStore;
 import com.game.table.LoginErrorTip;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import org.apache.dubbo.common.constants.CommonConstants;
+import org.apache.dubbo.rpc.RpcContext;
+import org.apache.dubbo.rpc.TimeoutCountDown;
 import org.junit.jupiter.api.Test;
 
 class LoginClientMessageServiceTest {
@@ -98,6 +106,28 @@ class LoginClientMessageServiceTest {
         assertThat(abandonedCount("overloaded")).isEqualTo(1);
     }
 
+    // ------------------------------------------------------------------ 调用方截止
+
+    @Test
+    void handle在入口读gate传来的截止交给派发器_剩余已尽时交的是已过期的截止() {
+        // gate 在 handle 上开 Dubbo 超时倒计时：提供方 ContextFilter 把它放在服务端附件上。剩余不超过传播余量 → 交下去的截止一开始就过期，
+        // 处理器据此在发号 / 夺权 / 轮换之前放弃（CreatePlayerHandlerTest 等钉住处理器那一侧）
+        ClientCall call = ClientCall.newBuilder().setSession(LOGGED_IN).setMessageId(14).build();
+        when(dispatcher.dispatch(eq(call), any())).thenReturn(CompletableFuture.completedFuture(ClientReply.getDefaultInstance()));
+        try {
+            RpcContext.getServerAttachment().setObjectAttachment(CommonConstants.TIME_COUNTDOWN_KEY,
+                    TimeoutCountDown.newCountDown(Deadline.CALLER_MARGIN_MILLIS, TimeUnit.MILLISECONDS));
+            service.handle(call).join();
+        } finally {
+            RpcContext.removeServerAttachment();
+        }
+        verify(dispatcher).dispatch(eq(call), argThat(caller -> caller.isPresent() && caller.get().expired()));
+
+        // 没有倒计时（旧 gate）：交空，处理器只看本地预算
+        service.handle(call).join();
+        verify(dispatcher).dispatch(call, Optional.empty());
+    }
+
     // ------------------------------------------------------------------ 设备数登记的注销
 
     private static final SessionContext LOGGED_IN = SessionContext.newBuilder().setGateNodeId(3).setGateInstanceId("g")
@@ -107,13 +137,13 @@ class LoginClientMessageServiceTest {
     void 应答带进场指令即进游戏成功_注销设备_别的应答不动() {
         devices.admit("robot_0001", "g/9");
         ClientCall call = ClientCall.newBuilder().setSession(LOGGED_IN).setMessageId(48).build();
-        when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(ClientReply.getDefaultInstance()));
+        when(dispatcher.dispatch(call, Optional.empty())).thenReturn(CompletableFuture.completedFuture(ClientReply.getDefaultInstance()));
         service.handle(call).join();
         assertThat(devices.of("robot_0001")).containsExactly("g/9");
 
         ClientReply entered = ClientReply.newBuilder().addDirectives(SessionDirective.newBuilder()
                 .setEnterScene(EnterScene.getDefaultInstance())).build();
-        when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(entered));
+        when(dispatcher.dispatch(call, Optional.empty())).thenReturn(CompletableFuture.completedFuture(entered));
         assertThat(service.handle(call).join()).isSameAs(entered);
         assertThat(devices.of("robot_0001")).isEmpty();
     }
@@ -126,7 +156,7 @@ class LoginClientMessageServiceTest {
         ClientReply redirected = ClientReply.newBuilder().addDirectives(SessionDirective.newBuilder()
                 .setRedirectToGate(RedirectToGate.newBuilder().setRedirect(ZoneRedirect.newBuilder()
                         .setTargetZoneId(2).setGateHost("10.0.0.2").setGatePort(11010)))).build();
-        when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(redirected));
+        when(dispatcher.dispatch(call, Optional.empty())).thenReturn(CompletableFuture.completedFuture(redirected));
 
         assertThat(service.handle(call).join()).isSameAs(redirected);
         assertThat(devices.of("robot_0001")).isEmpty();
@@ -138,7 +168,7 @@ class LoginClientMessageServiceTest {
         ClientCall call = ClientCall.newBuilder().setSession(LOGGED_IN).setMessageId(17).build();
         ClientReply unbound = ClientReply.newBuilder().addDirectives(SessionDirective.newBuilder()
                 .setUnbindPlayer(UnbindPlayer.getDefaultInstance())).build();
-        when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(unbound));
+        when(dispatcher.dispatch(call, Optional.empty())).thenReturn(CompletableFuture.completedFuture(unbound));
 
         service.handle(call).join();
         assertThat(devices.of("robot_0001")).containsExactly("g/9");
@@ -184,7 +214,7 @@ class LoginClientMessageServiceTest {
         ClientCall call = ClientCall.newBuilder().setSession(LOGGED_IN).setMessageId(26).build();
         ClientReply entered = ClientReply.newBuilder().addDirectives(SessionDirective.newBuilder()
                 .setEnterScene(EnterScene.getDefaultInstance())).build();
-        when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(entered));
+        when(dispatcher.dispatch(call, Optional.empty())).thenReturn(CompletableFuture.completedFuture(entered));
         service.handle(call).join();
         assertThat(devices.closed).containsExactly("g/9");
         assertThat(accountLogin.renewDevice(LOGGED_IN)).isEqualTo(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE);
@@ -196,7 +226,7 @@ class LoginClientMessageServiceTest {
         ClientCall call = ClientCall.newBuilder().setSession(LOGGED_IN).setMessageId(26).build();
         ClientReply entered = ClientReply.newBuilder().addDirectives(SessionDirective.newBuilder()
                 .setEnterScene(EnterScene.getDefaultInstance())).build();
-        when(dispatcher.dispatch(call)).thenReturn(CompletableFuture.completedFuture(entered));
+        when(dispatcher.dispatch(call, Optional.empty())).thenReturn(CompletableFuture.completedFuture(entered));
 
         service.handle(call).join();
 

@@ -5,6 +5,7 @@ import com.game.api.proto.ClientReply;
 import com.game.chat.metrics.ChatMetrics;
 import com.game.chat.metrics.ChatMetrics.RequestResult;
 import com.game.chat.service.ChatService;
+import com.game.common.deadline.Deadline;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
 import com.game.proto.TipInfoMessage;
@@ -65,18 +66,30 @@ public final class ChatDispatcher {
         return Set.of(sendId, pullId);
     }
 
+    /** 没有调用方截止的派发（单测、进程内直调）：截止只看本地预算。 */
     public CompletableFuture<ClientReply> dispatch(ClientCall call) {
+        return dispatch(call, Optional.empty());
+    }
+
+    /**
+     * @param caller 调用方（gate）的截止：{@code ClientMessageService#handle} 入口在 Dubbo 线程上用 {@code CallerDeadline.fromRpcContext()} 读出，
+     *               gate 过了它就放行同一会话的下一条请求（mmorpg client-request-ordering.md §6.1）；为空时只看本地预算。
+     *               交给 {@link ChatService} 的预算 = min(本地预算, 它的剩余)，向下取整到毫秒；服务层在同一线程上做完纯校验就据此建截止，
+     *               两步之间的偏差在微秒级，远小于调用方截止里已扣的传播余量
+     */
+    public CompletableFuture<ClientReply> dispatch(ClientCall call, Optional<Deadline> caller) {
         Timer.Sample sample = metrics.startTimer();
         int messageId = call.getMessageId();
+        long budget = Deadline.within(budgetMillis, caller).remainingMillis();
         try {
             if (messageId == sendId) {
                 SendChatRequest request = SendChatRequest.parseFrom(call.getBody());
-                return service.send(call.getSession(), request, budgetMillis).toCompletableFuture()
+                return service.send(call.getSession(), request, budget).toCompletableFuture()
                         .handle((response, error) -> finish(sample, SEND, response, error));
             }
             if (messageId == pullId) {
                 PullChatHistoryRequest request = PullChatHistoryRequest.parseFrom(call.getBody());
-                return service.pull(call.getSession(), request, budgetMillis).toCompletableFuture()
+                return service.pull(call.getSession(), request, budget).toCompletableFuture()
                         .handle((response, error) -> finish(sample, PULL, response, error));
             }
         } catch (InvalidProtocolBufferException e) {

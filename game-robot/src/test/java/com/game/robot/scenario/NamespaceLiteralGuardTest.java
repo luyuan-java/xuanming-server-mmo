@@ -377,7 +377,8 @@ class NamespaceLiteralGuardTest {
                     + "&socketTimeout=4000"),
             Map.entry("game-trade", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
-                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=2"));
+                    + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=2"
+                    + ",lock_wait_timeout=2"));
 
     private static final Pattern JDBC_URL_LINE = Pattern.compile("^\\s+url:\\s+\"?(jdbc:mysql://[^\"\\s]+)\"?\\s*$");
 

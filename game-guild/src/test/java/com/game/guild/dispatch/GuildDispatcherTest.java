@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
+import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.contract.GuildContractFixtures;
 import com.game.contract.MessageIdRegistry;
@@ -26,6 +27,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -295,6 +297,19 @@ class GuildDispatcherTest {
         assertThat(GetPlayerGuildResponse.parseFrom(reply.getBody()).getErrorMessage())
                 .isEqualTo(GuildTip.OVERLOADED.proto());
         assertThat(requests(GuildMethods.GET_PLAYER_GUILD, "overloaded")).isEqualTo(1);
+    }
+
+    @Test
+    void 调用方截止已尽_本地预算还很充足_不调处理不碰库_回in_band_14021() throws Exception {
+        // gate 传来的剩余已经用完（CallerDeadline，已扣传播余量）：gate 随时放行同一会话的下一条，这时建帮会与下一条交错。
+        // 替身存储对没给脚本的写一律抛 AssertionError（会从 Runnable::run 漏出来让本用例失败）：不碰库本身就是断言
+        ClientReply reply = dispatcher().dispatch(call(id(GuildMethods.CREATE_GUILD), ME,
+                CreateGuildRequest.newBuilder().setName("迟到的帮").build().toByteString()),
+                Optional.of(Deadline.fromCallerRemaining(0))).join();
+
+        assertThat(reply.getTipId()).isZero();
+        assertThat(CreateGuildResponse.parseFrom(reply.getBody()).getErrorMessage()).isEqualTo(GuildTip.OVERLOADED.proto());
+        assertThat(requests(GuildMethods.CREATE_GUILD, "overloaded")).isEqualTo(1);
     }
 
     @Test

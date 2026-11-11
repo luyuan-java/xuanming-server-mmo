@@ -408,7 +408,15 @@ public final class GlobalMatchService implements AutoCloseable {
         }
         return members;
     }
-    public GlobalFormationRow reserveTeam(TeamTicketsRequest request) {
+    /**
+     * 整队开战的 match 一侧（team 的 createTeamTickets 一跳）。每个事务都受 {@code deadline} 约束（过了就不开、不提交）：team 在这一跳上
+     * 只等「每跳超时」，过了就回客户端、gate 随即放行同一会话的下一条；之后再提交的准入 / 建票会与下一条交错（mmorpg client-request-ordering.md §6.1）。
+     * 中途到期时已提交的前几步（首次准入的 prepared 意图）不回滚：它们按 request_id 幂等，同一 request_id 的重试（team 的
+     * {@code resumeLaunch} → 再调 createTeamTickets）从 {@code teamReplay} / {@code prepareTeam} 续上。
+     *
+     * @param deadline 调用方带来的截止（{@code MatchRpcAttachments.deadlineFromCall}）
+     */
+    public GlobalFormationRow reserveTeam(TeamTicketsRequest request, Deadline deadline) {
         try {
             var original=GlobalTeamLaunchAuthority.original(request.getLaunchOriginal());
             var ordered=original.getMembersList().stream().sorted(Comparator.comparingInt(com.game.proto.team.TeamLaunchMember::getRosterOrder)).toList();
@@ -420,18 +428,18 @@ public final class GlobalMatchService implements AutoCloseable {
                     ||!request.getClientRequest().equals(original.getRequest().toByteString())||!request.getRosterList().equals(roster)
                     ||!request.getTicketIdsMap().equals(tickets)||!request.getZonesMap().equals(original.getZonesMap()))throw new SecurityException("整队RPC与完整持久launch原件不同");
             var key=GlobalMatchStore.directUuidKey(1,request.getInitiatorPlayerId(),request.getRequestId()).toBuilder().setOwnerAccount(request.getOwnerAccount()).setOwnerRevision(request.getOwnerRevision()).build();
-            var replay=store.teamReplay(key,request.getClientRequest(),request.getLaunchOriginal());if(replay!=null)return replay;
+            var replay=store.teamReplay(key,request.getClientRequest(),request.getLaunchOriginal(),deadline);if(replay!=null)return replay;
             long stamp=store.now();int mode=MatchMode.MATCH_MODE_PVE_TEAM_VALUE;
             int target=original.getRequest().getTargetTeamSize();
             if(target>props.pveTeamSizeFor(request.getBattleConfigId())||target!=0&&target<roster.size())throw new IllegalArgumentException("整队目标人数超出副本范围");
             var prior=store.direct(key);GlobalDirectIntentRow prepared;
-            if(prior!=null&&prior.getAdmissionPrepared()&&prior.hasStartOriginal())prepared=store.prepareTeam(key,request.getLaunchOriginal(),prior.getStartOriginal().getTicketsList(),prior.getStartOriginal().getFormation());
+            if(prior!=null&&prior.getAdmissionPrepared()&&prior.hasStartOriginal())prepared=store.prepareTeam(key,request.getLaunchOriginal(),prior.getStartOriginal().getTicketsList(),prior.getStartOriginal().getFormation(),deadline);
             else {var initial=directMembers(mode,request.getBattleConfigId(),roster,tickets,request.getTeamId(),stamp).stream().map(member->member.toBuilder().setZoneId(original.getZonesOrThrow(member.getPlayerId())).build()).toList();
-                prepared=store.prepareTeam(key,request.getLaunchOriginal(),initial,target>roster.size()?GlobalFormationRow.getDefaultInstance():directFormation(initial,mode,request.getBattleConfigId(),stamp).build());}
-            var members=prepared.getStartOriginal().getTicketsList();exitSpectators(original.getObserverExitsList(),Deadline.after(3000));
-            if(store.closeObsoleteTeam(prepared,Deadline.after(3000))){var closed=store.teamReplay(key,request.getClientRequest(),request.getLaunchOriginal());if(closed==null)throw new IllegalStateException("Team终局证明尚未确认");return closed;}
-            if(target>roster.size())return store.enqueueTeam(key,request.getLaunchOriginal(),members);
-            return store.reserveTeam(key,request.getClientRequest(),request.getLaunchOriginal(),members,prepared.getStartOriginal().getFormation());
+                prepared=store.prepareTeam(key,request.getLaunchOriginal(),initial,target>roster.size()?GlobalFormationRow.getDefaultInstance():directFormation(initial,mode,request.getBattleConfigId(),stamp).build(),deadline);}
+            var members=prepared.getStartOriginal().getTicketsList();exitSpectators(original.getObserverExitsList(),deadline);
+            if(store.closeObsoleteTeam(prepared,deadline)){var closed=store.teamReplay(key,request.getClientRequest(),request.getLaunchOriginal(),deadline);if(closed==null)throw new IllegalStateException("Team终局证明尚未确认");return closed;}
+            if(target>roster.size())return store.enqueueTeam(key,request.getLaunchOriginal(),members,deadline);
+            return store.reserveTeam(key,request.getClientRequest(),request.getLaunchOriginal(),members,prepared.getStartOriginal().getFormation(),deadline);
         }catch(Exception e){throw new Deadline.DependencyException("整队SQL原launch仍待确认",e);}
     }
     private GlobalFormationRow.Builder directFormation(List<GlobalTicketRow> members,int mode,int configId,long stamp) {

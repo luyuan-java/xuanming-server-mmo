@@ -22,6 +22,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -254,6 +255,34 @@ class MatchDispatcherTest {
 
         reply(future);
         assertThat(join.deadline.get().remainingMillis()).as("排了 300 ms 的队：剩下的预算不到 4200 ms").isBetween(3000L, 4200L);
+    }
+
+    @Test
+    void 调用方截止已尽_本地预算还很充足_轮到执行时也不调处理_按过载应答回() throws Exception {
+        // gate 传来的剩余已经用完（CallerDeadline，已扣传播余量）：gate 随时放行同一会话的下一条，这时建票 / 入队会与下一条交错
+        Handler join = new Handler(MatchMethods.JOIN_QUEUE, false);
+        join.overloadReply = Reply.body(MatchTips.joinRejected(MatchTip.BUSY));
+        CompletableFuture<ClientReply> future = dispatcher(4500, join)
+                .dispatch(call(157, ByteString.EMPTY), Optional.of(Deadline.fromCallerRemaining(0)));
+
+        workers.runAll();
+
+        assertThat(JoinQueueResponse.parseFrom(reply(future).getBody()).getErrorCode()).isEqualTo(16004);
+        assertThat(join.handled).as("不调处理：什么都不写").hasValue(0);
+        assertThat(join.overloads).hasValue(1);
+    }
+
+    @Test
+    void 调用方剩余比本地预算短_处理器拿到的截止按调用方收口() throws Exception {
+        Handler join = new Handler(MatchMethods.JOIN_QUEUE, false);
+        CompletableFuture<ClientReply> future = dispatcher(4500, join)
+                .dispatch(call(157, ByteString.EMPTY), Optional.of(Deadline.fromCallerRemaining(TimeUnit.MILLISECONDS.toNanos(1_500))));
+
+        workers.runAll();
+
+        reply(future);
+        assertThat(join.deadline.get().remainingMillis()).as("1500 ms − 传播余量以内，远小于本地的 4500 ms")
+                .isBetween(1L, 1_500L - Deadline.CALLER_MARGIN_MILLIS);
     }
 
     @Test

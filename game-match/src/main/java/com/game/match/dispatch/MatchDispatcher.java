@@ -16,6 +16,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
@@ -32,7 +33,7 @@ import org.slf4j.LoggerFactory;
  * 「派发器对一次调用做的事」那几条，逐条对应：
  * <ol>
  *   <li>没有处理器的号（含契约里没有的号）→ 信封 1003；</li>
- *   <li>截止 = 受理时刻 + 请求预算（含之后的排队时间）；</li>
+ *   <li>截止 = min(受理时刻 + 请求预算, 调用方截止)（含之后的排队时间；调用方截止见 {@link #dispatch(ClientCall, Optional)}）；</li>
  *   <li>{@link MatchMethodHandler#inline()} 的处理器在调用线程（Dubbo 线程）上当场执行；其余投到一个执行器上——处理器经
  *       {@link MatchMethodHandler#executor()} 给了自己的就用它（163 观战：虚拟线程 + 在途上限），没给（null）就是 {@link MatchWorkers}；</li>
  *   <li>执行器拒收（工作池满 / 163 的在途已满）、或轮到执行时预算已用完 → 不调 {@code handle}，按 {@link MatchMethodHandler#onOverload()} 回（M29）；</li>
@@ -106,7 +107,16 @@ public final class MatchDispatcher {
         return Collections.unmodifiableSet(missing);
     }
 
+    /** 没有调用方截止的派发（单测、进程内直调）：截止只看本地预算。 */
     public CompletableFuture<ClientReply> dispatch(ClientCall call) {
+        return dispatch(call, Optional.empty());
+    }
+
+    /**
+     * @param caller 调用方（gate）的截止：{@code ClientMessageService#handle} 入口在 Dubbo 线程上用 {@code CallerDeadline.fromRpcContext()} 读出，
+     *               gate 过了它就放行同一会话的下一条请求（mmorpg client-request-ordering.md §6.1）；为空时只看本地预算
+     */
+    public CompletableFuture<ClientReply> dispatch(ClientCall call, Optional<Deadline> caller) {
         Timer.Sample sample = metrics.startTimer();
         MatchMethodHandler handler = handlers.get(call.getMessageId());
         if (handler == null) {
@@ -114,7 +124,7 @@ public final class MatchDispatcher {
             metrics.requestCompleted(sample, null, RequestResult.UNSUPPORTED);
             return CompletableFuture.completedFuture(envelope(MatchTips.SERVICE_UNAVAILABLE));
         }
-        Deadline deadline = Deadline.after(budgetMillis); // 受理时刻起算，含排队
+        Deadline deadline = Deadline.within(budgetMillis, caller); // 受理时刻起算，含排队；不晚于调用方截止
         if (leaseLost.getAsBoolean()) {
             MatchMethodHandler refusal = refusals.refusalFor(handler.method()).orElse(null);
             if (refusal != null) {

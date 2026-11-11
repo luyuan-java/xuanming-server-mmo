@@ -3,6 +3,7 @@ package com.game.login.dispatch;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
+import com.game.common.deadline.Deadline;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
 import com.game.login.metrics.LoginMetrics;
@@ -44,9 +45,9 @@ import org.slf4j.LoggerFactory;
  * 每个请求按处理器方法名与上述结果计一次耗时（{@code game.login.requests}，见 {@link LoginMetrics}）。
  * 返回的 future 永不异常完成。所有处理都在 login 工作线程池上执行，调用线程（Dubbo 线程）只负责投递。
  *
- * <p>受理时刻在 Dubbo 线程上、投递之前取；处理器拿到的是这条请求在工作队列里排了多久
- * （{@link ClientMessageHandler#handle(SessionContext, Message, long)}），有请求预算的处理器据此把截止算成「受理时刻 + 预算」：
- * gate 调 login 的超时从它发出请求就开始计，积压时排队本身就可能耗掉大半等待。
+ * <p>受理时刻在 Dubbo 线程上、投递之前取；处理器拿到的是这条请求在工作队列里排了多久，以及调用方（gate）截止在开始处理时还剩多久
+ * （{@link ClientMessageHandler#handle(SessionContext, Message, long, long)}），有请求预算的处理器据此把截止算成
+ * min(受理时刻 + 预算, 调用方截止)：gate 调 login 的超时从它发出请求就开始计，积压时排队本身就可能耗掉大半等待，过了它 gate 就放行下一条。
  */
 public final class ClientMessageDispatcher {
 
@@ -107,7 +108,16 @@ public final class ClientMessageDispatcher {
         return routes.keySet();
     }
 
+    /** 没有调用方截止的派发（单测、进程内直调）：处理器只看本地预算。 */
     public CompletableFuture<ClientReply> dispatch(ClientCall call) {
+        return dispatch(call, Optional.empty());
+    }
+
+    /**
+     * @param caller 调用方（gate）的截止：{@code LoginClientMessageService#handle} 入口在 Dubbo 线程上用 {@code CallerDeadline.fromRpcContext()} 读出，
+     *               gate 过了它就放行同一会话的下一条请求（mmorpg client-request-ordering.md §6.1）；为空时处理器只看本地预算
+     */
+    public CompletableFuture<ClientReply> dispatch(ClientCall call, Optional<Deadline> caller) {
         Timer.Sample sample = metrics.startTimer();
         int messageId = call.getMessageId();
         Route<?> route = routes.get(messageId);
@@ -121,7 +131,8 @@ public final class ClientMessageDispatcher {
         CompletableFuture<Outcome> outcome;
         try {
             outcome = CompletableFuture.supplyAsync(
-                    () -> route.invoke(call, Math.max(0, nanoClock.getAsLong() - acceptedNanos)), executor)
+                    () -> route.invoke(call, Math.max(0, nanoClock.getAsLong() - acceptedNanos),
+                            caller.map(Deadline::remainingNanos).orElse(ClientMessageHandler.NO_CALLER_DEADLINE)), executor)
                     .thenCompose(Function.identity());
         } catch (RejectedExecutionException e) {
             log.warn("login 工作队列已满，拒绝请求 message_id={} {}", messageId, describe(call.getSession()));
@@ -187,8 +198,11 @@ public final class ClientMessageDispatcher {
     /** 一个消息号的派发目标。{@code prototype} 来自契约注册表，构造时已核对其类型就是 {@code R}。 */
     private record Route<R extends Message>(ClientMessageHandler<R> handler, Message prototype) {
 
-        /** @param queuedNanos 受理到开始处理之间在工作队列里排了多久（≥ 0） */
-        CompletableFuture<Outcome> invoke(ClientCall call, long queuedNanos) {
+        /**
+         * @param queuedNanos          受理到开始处理之间在工作队列里排了多久（≥ 0）
+         * @param callerRemainingNanos 调用方截止在开始处理时还剩多久（≥ 0；没有调用方截止时为 {@link ClientMessageHandler#NO_CALLER_DEADLINE}）
+         */
+        CompletableFuture<Outcome> invoke(ClientCall call, long queuedNanos, long callerRemainingNanos) {
             R request;
             try {
                 request = handler.requestType().cast(prototype.getParserForType().parseFrom(call.getBody()));
@@ -198,7 +212,7 @@ public final class ClientMessageDispatcher {
                         .setTipId(CommonErrorTip.common_error.kRequestMessageParseError_VALUE)
                         .build(), RequestResult.BAD_REQUEST));
             }
-            return handler.handle(call.getSession(), request, queuedNanos)
+            return handler.handle(call.getSession(), request, queuedNanos, callerRemainingNanos)
                     .thenApply(reply -> new Outcome(toClientReply(reply), resultOf(reply)));
         }
 

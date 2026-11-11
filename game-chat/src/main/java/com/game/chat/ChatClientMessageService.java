@@ -1,5 +1,6 @@
 package com.game.chat;
 
+import com.game.api.CallerDeadline;
 import com.game.api.ClientMessageService;
 import com.game.api.DubboGroups;
 import com.game.api.proto.AbandonedEnter;
@@ -23,9 +24,10 @@ public class ChatClientMessageService implements ClientMessageService {
         this.dispatcher = dispatcher;
     }
 
+    /** 调用方截止只能在这里（Dubbo 线程、入口处）读：之后的工作在别的线程上，读不到了。 */
     @Override
     public CompletableFuture<ClientReply> handle(ClientCall call) {
-        return dispatcher.dispatch(call);
+        return dispatcher.dispatch(call, CallerDeadline.fromRpcContext());
     }
 
     @Override

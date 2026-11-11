@@ -130,6 +130,30 @@ class GateConfigurationTest {
         });
     }
 
+    /** handle 开了超时倒计时、把截止传给后端的域（mmorpg client-request-ordering.md §5、§6.1）；mail / rank 的派发器还没读传入截止，暂不开。 */
+    private static final Set<String> CALLER_DEADLINE_GROUPS = Set.of(DubboGroups.LOGIN, DubboGroups.FRIEND, DubboGroups.CHAT,
+            DubboGroups.TEAM, DubboGroups.GUILD, DubboGroups.TRADE, DubboGroups.MATCH);
+
+    @Test
+    void 七个后端域的handle开超时倒计时_把gate的调用超时作为剩余时长传给后端() {
+        Set<String> enabled = new TreeSet<>();
+        for (Method method : GateConfiguration.class.getDeclaredMethods()) {
+            DubboReference reference = method.getAnnotation(DubboReference.class);
+            if (reference == null) {
+                continue;
+            }
+            for (org.apache.dubbo.config.annotation.Method handle : reference.methods()) {
+                List<String> parameters = Arrays.asList(handle.parameters());
+                int key = parameters.indexOf(org.apache.dubbo.common.constants.CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY);
+                if (handle.name().equals("handle") && key >= 0 && key % 2 == 0 && key + 1 < parameters.size()
+                        && parameters.get(key + 1).equals("true")) {
+                    enabled.add(reference.group());
+                }
+            }
+        }
+        assertThat(enabled).containsExactlyInAnyOrderElementsOf(CALLER_DEADLINE_GROUPS);
+    }
+
     @Test
     void gateNode按bean名注入每个域的引用_匹配后端也在其中() throws NoSuchMethodException {
         Method gateNode = Arrays.stream(GateConfiguration.class.getDeclaredMethods())

@@ -252,6 +252,27 @@ class JdbcChatAuthorityTest {
         }
     }
 
+    @Test void 正式Dispatcher_调用方截止已尽_本地预算还很充足_不提交聊天_回1003() throws Exception {
+        // gate 传来的剩余已经用完（CallerDeadline，已扣传播余量）：gate 随时放行同一会话的下一条，这时发言会与下一条交错
+        try (var f = new ChatSqlFixture(rules())) {
+            f.player(7, "A", 7); var original = actor("A", 7);
+            var registry = MessageIdRegistry.loadFromClasspath();
+            var dispatcher = new ChatDispatcher(registry, service(f, rules()), new ChatMetrics(new SimpleMeterRegistry()), 3500);
+            var call = ClientCall.newBuilder().setSession(original).setMessageId(registry.requireId("ClientPlayerChat", "SendChat"))
+                    .setBody(request("late", "hello", 0).toByteString()).build();
+
+            var late = SendChatResponse.parseFrom(result(dispatcher.dispatch(call,
+                    java.util.Optional.of(Deadline.fromCallerRemaining(0)))).getBody());
+            assertEquals(CommonErrorTip.common_error.kServiceUnavailable_VALUE, late.getErrorMessage().getId());
+            assertEquals(0, count(f), "不提交");
+
+            // 对照：没有调用方截止（旧 gate）照常提交；同一 request_id 没被上一次占掉
+            assertEquals(0, SendChatResponse.parseFrom(result(dispatcher.dispatch(call, java.util.Optional.empty())).getBody())
+                    .getErrorMessage().getId());
+            assertEquals(1, count(f));
+        }
+    }
+
     @Test void 正式索引缺失及原件损坏明确失败_不跳条不降级缓存() throws Exception {
         try (var f = new ChatSqlFixture(rules())) {
             f.player(7, "A", 7); send(f, actor("A", 7), request("id", "hello", 0));

@@ -634,6 +634,33 @@ class CreatePlayerHandlerTest {
     }
 
     @Test
+    void 调用方截止已尽_本地预算还很充足_也不发号不进事务_回2020() throws Exception {
+        // gate 传来的剩余已经用完（gate 的超时调得比本地预算短、或请求在 gate 与 login 之间耽搁了）：gate 随时放行同一会话的下一条，
+        // 这时建角会晚于下一条请求落库。截止取 min(本地预算, 调用方剩余)，与本地预算无关。
+        CreatePlayerRequest request = CreatePlayerRequest.newBuilder().setName("张三").build();
+
+        assertError(response(handler.handle(SESSION, request, 0, 0).get(5, TimeUnit.SECONDS)), TIP_2020);
+        assertNothingMintedOrInserted();
+    }
+
+    @Test
+    void 调用方剩余比本地预算短_建角事务的时限按调用方剩余收口() throws Exception {
+        when(store.listPlayers(ACCOUNT)).thenAnswer(inv -> {
+            nanos[0] += Duration.ofMillis(500).toNanos();
+            return List.of();
+        });
+        CreatePlayerRequest request = CreatePlayerRequest.newBuilder().setName("张三").build();
+
+        CreatePlayerResponse ok = response(handler.handle(SESSION, request, 0, Duration.ofMillis(1200).toNanos())
+                .get(5, TimeUnit.SECONDS));
+
+        assertThat(ok.hasErrorMessage()).isFalse();
+        ArgumentCaptor<Duration> timeout = ArgumentCaptor.forClass(Duration.class);
+        verify(store).createPlayerWithinCap(any(), anyInt(), anyList(), timeout.capture());
+        assertThat(timeout.getValue()).as("调用方剩余 1200 ms − 快照读 500 ms").isEqualTo(Duration.ofMillis(700));
+    }
+
+    @Test
     void 请求预算在发号前还剩1ms_照常提交() throws Exception {
         when(store.listPlayers(ACCOUNT)).thenAnswer(inv -> {
             nanos[0] += BUDGET.minusMillis(1).toNanos();

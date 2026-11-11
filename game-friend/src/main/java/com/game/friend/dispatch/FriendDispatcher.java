@@ -48,7 +48,8 @@ import org.slf4j.LoggerFactory;
  * </ul>
  * 请求体解析失败回信封 1003（与基线客户端所见一致；login 的惯例是 1014，spec D11）。工作队列满 / 处理器异常回 in-band 1003 应答体。
  *
- * <p>每个请求以受理时刻 + 预算为截止时刻（含排队）；全部处理在工作线程池上执行，Dubbo 线程只投递。返回的 future 永不异常完成。
+ * <p>每个请求以 min(受理时刻 + 预算, 调用方截止) 为截止时刻（含排队；调用方截止见 {@link #dispatch(ClientCall, Optional)}）；
+ * 全部处理在工作线程池上执行，Dubbo 线程只投递。返回的 future 永不异常完成。
  */
 public final class FriendDispatcher {
 
@@ -135,7 +136,16 @@ public final class FriendDispatcher {
         return notifyMessageId;
     }
 
+    /** 没有调用方截止的派发（单测、进程内直调）：截止只看本地预算。 */
     public CompletableFuture<ClientReply> dispatch(ClientCall call) {
+        return dispatch(call, Optional.empty());
+    }
+
+    /**
+     * @param caller 调用方（gate）的截止：{@code ClientMessageService#handle} 入口在 Dubbo 线程上用 {@code CallerDeadline.fromRpcContext()} 读出，
+     *               gate 过了它就放行同一会话的下一条请求（mmorpg client-request-ordering.md §6.1）；为空时只看本地预算
+     */
+    public CompletableFuture<ClientReply> dispatch(ClientCall call, Optional<Deadline> caller) {
         var sample = metrics.startTimer();
         int messageId = call.getMessageId();
         if (messageId == notifyMessageId) {
@@ -154,7 +164,7 @@ public final class FriendDispatcher {
             metrics.requestCompleted(sample, route.method(), RequestResult.UNAUTHENTICATED);
             return CompletableFuture.completedFuture(envelope(CommonErrorTip.common_error.kServiceUnavailable_VALUE));
         }
-        Deadline deadline = Deadline.after(budgetMillis);
+        Deadline deadline = Deadline.within(budgetMillis, caller);
         CompletableFuture<ClientReply> reply = new CompletableFuture<>();
         try {
             executor.execute(() -> reply.complete(handle(route, session, call, deadline, sample)));

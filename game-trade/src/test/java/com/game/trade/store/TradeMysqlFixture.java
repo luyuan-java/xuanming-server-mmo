@@ -21,18 +21,21 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 口令取环境变量 GAME_MYSQL_PASSWORD；先例 game-guild GuildMysqlFixture、game-friend JdbcFriendStoreMysqlTest）。
  *
  * <p>每个测试类建一个一次性库 {@code game_trade_it_<随机>}（两张表经 {@link TradeTables#sync} 建，与生产同一条路径），结束时删掉；绝不碰 game。
- * 连接串与生产同口径：会话级 READ COMMITTED、{@code STRICT_TRANS_TABLES}、{@code innodb_lock_wait_timeout=2}（Q7）、{@code useAffectedRows=true}
- * （不这样开池就等于在验一个与线上不同的数据库会话）。夹具行直接用 SQL 造或走 {@link JdbcListingStore#insertListing}（基线集成测试同样直接调
- * InsertListing，listing_repo_integration_test.go:136-139）。
+ * 连接串与生产同口径：会话级 READ COMMITTED、{@code STRICT_TRANS_TABLES}、{@code innodb_lock_wait_timeout=2}（Q7）、
+ * {@code lock_wait_timeout=2}（元数据锁，与行锁同值）、{@code useAffectedRows=true}
+ * （不这样开池就等于在验一个与线上不同的数据库会话；{@link #SESSION_VARIABLES} 与 application.yaml 逐字节相同，由 TradeConnectionPoolContractTest 钉住）。
+ * 夹具行直接用 SQL 造或走 {@link JdbcListingStore#insertListing}（基线集成测试同样直接调 InsertListing，listing_repo_integration_test.go:136-139）。
  */
 final class TradeMysqlFixture implements AutoCloseable {
 
     static final String BASE_URL = System.getProperty("game.it.mysql");
     static final String USER = System.getProperty("game.it.mysql.user", "root");
     static final String PASSWORD = System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", "");
+    /** 连接串里 {@code sessionVariables=} 之后的部分，必须与生产 {@code spring.datasource.url} 的同一段相同。 */
+    static final String SESSION_VARIABLES = "transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout="
+            + TradeLimits.LOCK_WAIT_TIMEOUT_SECONDS + ",lock_wait_timeout=" + TradeLimits.LOCK_WAIT_TIMEOUT_SECONDS;
     static final String PARAMS = "?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&useAffectedRows=true"
-            + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout="
-            + TradeLimits.LOCK_WAIT_TIMEOUT_SECONDS;
+            + "&sessionVariables=" + SESSION_VARIABLES;
 
     final String database;
     final DruidDataSource dataSource;
@@ -81,7 +84,10 @@ final class TradeMysqlFixture implements AutoCloseable {
         }
     }
 
-    /** 新开一条独立连接（锁模式编排用：每个参与者一条、自己管事务），会话参数同连接池，但锁等待放宽到 {@code lockWaitSeconds}。 */
+    /**
+     * 新开一条独立连接（锁模式编排用：每个参与者一条、自己管事务），会话参数同连接池，但行锁等待（{@code innodb_lock_wait_timeout}）
+     * 放宽到 {@code lockWaitSeconds}；元数据锁等待 {@code lock_wait_timeout} 不变（编排只排行锁）。
+     */
     Connection connect(int lockWaitSeconds) throws SQLException {
         String params = PARAMS.replace("innodb_lock_wait_timeout=" + TradeLimits.LOCK_WAIT_TIMEOUT_SECONDS,
                 "innodb_lock_wait_timeout=" + lockWaitSeconds);

@@ -812,6 +812,15 @@ class GlobalMatchStoreIntegrationTest {
         assertTrue(store.closeObsoleteTeam(first,budget()));assertEquals(5,store.teamIntent(group.key(),group.original().getRequest().toByteString()).getState());
         assertTrue(store.direct(group.key()).getCancelled());for(var member:group.members())assertEquals(4,store.ticket(member.getPlayerId()).getState());
     }
+    /** 整队开战的 match 一侧受 team 那一跳的截止约束：过了就不开事务、不提交（mmorpg client-request-ordering.md §6.1）。 */
+    @Test void 整队准入与排队在请求截止之后不提交_同一原件带足预算照常()throws Exception {
+        var group=party(5400,5401,5402);var expired=com.game.common.deadline.Deadline.after(0);
+        assertThrows(com.game.common.deadline.Deadline.DependencyException.class,()->store.prepareTeam(group.key(),group.original().toByteString(),group.members(),GlobalFormationRow.getDefaultInstance(),expired));
+        assertNull(store.direct(group.key()),"截止已过：不写首次准入意图");
+        assertThrows(com.game.common.deadline.Deadline.DependencyException.class,()->store.enqueueTeam(group.key(),group.original().toByteString(),group.members(),expired));
+        assertTrue(store.unitCandidates(0,"").stream().noneMatch(u->u.getTeamId()==5400),"截止已过：不排队");
+        assertEquals(2,store.enqueueTeam(group.key(),group.original().toByteString(),group.members(),budget()).getState());
+    }
     @Test void 排队后home改变不能由修复任务覆盖原单位()throws Exception {
         var group=party(5300,5301,5302);var unit=queued(group);
         try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE player SET zone_id=2 WHERE player_id=5301");}

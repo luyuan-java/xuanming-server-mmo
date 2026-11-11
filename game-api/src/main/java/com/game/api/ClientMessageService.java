@@ -18,7 +18,7 @@ import java.util.concurrent.CompletableFuture;
  *       所以业务错误绝不能只放在 {@code tip_id}；成功应答体里也绝不能出现 {@code error_message}。</li>
  *   <li><b>传输层失败</b>（后端没能按方法处理这次调用：消息号不认识、请求体解析失败等）才用
  *       {@link ClientReply#getTipId()}，gate 放进 {@code MessageContent.error_message}。</li>
- *   <li><b>调用失败</b>（超时、后端不可用）：future 异常完成，gate 推通用的「服务不可用」tip。</li>
+ *   <li><b>调用失败</b>（超时、后端不可用）：future 异常完成，gate 回带请求 id 的信封 1003（2026-10-15 起，原为推通用的「服务不可用」tip）。</li>
  * </ul>
  *
  * <p>是否回包由 gate 按契约里该方法的应答类型决定，不看 body 是否为空：应答类型不是 {@code Empty} 的方法一律回包，
@@ -27,7 +27,12 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>其他契约：
  * <ul>
- *   <li>同一会话的调用由 gate 串行发出（上一个完成才发下一个），后端不需要为同一会话做并发控制。</li>
+ *   <li>同一会话的调用由 gate 串行发出：上一个<b>在 gate 看来</b>完成才发下一个。「完成」包括调用超时与调用以错误结束——gate 放行下一条时，
+ *       后端的上一条可能还在跑（后端的处理不会因调用方放弃而停下）。所以后端不能假定同一会话没有并发，而要保证<b>截止之后不提交</b>：
+ *       截止取 min(本地预算, 调用方剩余)（{@link com.game.common.deadline.Deadline#within}），调用方剩余在 {@code handle} 入口、Dubbo 线程上
+ *       用 {@link CallerDeadline#fromRpcContext()} 读（gate 在 {@code handle} 上开 Dubbo 的超时倒计时，传的是这一次调用的超时、相对值），
+ *       每个提交点之前检查它（mmorpg {@code docs/design/client-request-ordering.md} §5、§6.1）。截止前一刻已发出、晚落地的那一条写
+ *       由业务栅栏兜底（版本 CAS、幂等键、owner_epoch）。跨会话的并发（同账号多连接）同样由后端自己控制。</li>
  *   <li>后端只信任 {@link ClientCall#getSession()} 里 gate 填的字段。</li>
  * </ul>
  */

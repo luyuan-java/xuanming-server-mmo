@@ -345,6 +345,17 @@ class EnterGameHandlerTest {
     }
 
     @Test
+    void 调用方截止已尽_本地预算还很充足_也不分配不夺权() throws Exception {
+        // gate 传来的剩余已经用完：gate 随时放行同一会话的下一条，这时夺权会与下一条交错。截止取 min(本地预算, 调用方剩余)。
+        EnterGameRequest request = EnterGameRequest.newBuilder().setPlayerId(PLAYER).build();
+
+        assertError(handler.handle(SESSION, request, 0, 0).orTimeout(5, TimeUnit.SECONDS).join(),
+                SceneErrorTip.scene_error.kEnterSceneFailed_VALUE);
+        verify(scenes, never()).assign(any());
+        verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
+    }
+
+    @Test
     void 角色不存在或不属于本账号回2011() throws Exception {
         when(store.findPlayer(PLAYER)).thenReturn(Optional.empty());
         assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE);

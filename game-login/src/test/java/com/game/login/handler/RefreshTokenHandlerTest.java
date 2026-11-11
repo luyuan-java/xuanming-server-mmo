@@ -101,6 +101,19 @@ class RefreshTokenHandlerTest {
     }
 
     @Test
+    void 调用方截止已尽_本地预算还很充足_也不轮换_回1003_旧refresh仍可用() throws Exception {
+        // gate 传来的剩余已经用完：截止取 min(本地预算, 调用方剩余)，轮换会落在 gate 放行同一会话的下一条请求之后。
+        TokenPair first = tokens.issue("robot_0001", "password", "");
+
+        RefreshTokenResponse abandoned = RefreshTokenResponse.parseFrom(handler.handle(SessionContext.getDefaultInstance(),
+                request(first.refreshToken()), 0, 0).join().body().orElseThrow().toByteString());
+
+        assertThat(tip(abandoned)).isEqualTo(CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+        assertThat(tokens.refresh).as("旧 refresh 没被作废").containsKey(first.refreshToken());
+        assertThat(tokens.issued).as("没签新的一对").isEqualTo(1);
+    }
+
+    @Test
     void 读旧refresh慢到把预算用完_轮换前那一刻看截止_不轮换() throws Exception {
         // 截止在提交点那一刻看，不是只在入口看一次：入口时预算充足，读旧 refresh 的那一步把预算正好用完。
         LoginTokens slowRead = new LoginTokens() {

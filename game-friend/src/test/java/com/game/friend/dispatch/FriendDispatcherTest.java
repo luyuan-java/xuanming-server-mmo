@@ -29,6 +29,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -45,6 +46,8 @@ class FriendDispatcherTest {
 
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final FriendMetrics metrics = new FriendMetrics(registry);
+    /** 替身存储收到的发申请写入次数。 */
+    private final java.util.concurrent.atomic.AtomicInteger addWrites = new java.util.concurrent.atomic.AtomicInteger();
 
     private FriendDispatcher dispatcher(Executor executor, FriendStore.AddResult addResult) {
         FriendStore store = new FriendStore() {
@@ -58,6 +61,7 @@ class FriendDispatcherTest {
 
             @Override
             public AddOutcome addRequest(long from, long to, Deadline deadline) {
+                addWrites.incrementAndGet();
                 return new AddOutcome(addResult, addResult == AddResult.OK ? 123 : 0, true);
             }
 
@@ -191,6 +195,24 @@ class FriendDispatcherTest {
         reply = ok.dispatch(call(LIST, 5, ByteString.EMPTY)).join();
         assertThat(GetFriendListResponse.parseFrom(reply.getBody()).getErrorMessage().getId()).isEqualTo(1003);
         assertThat(requests("GetFriendList", "internal_error")).isEqualTo(1);
+    }
+
+    @Test
+    void 调用方截止已尽_本地预算还很充足_不调处理不写库_回应答体1003() throws Exception {
+        // gate 传来的剩余已经用完（CallerDeadline，已扣传播余量）：gate 随时放行同一会话的下一条，这时发申请会与下一条交错
+        FriendDispatcher d = dispatcher(Runnable::run, FriendStore.AddResult.OK);
+        ByteString body = AddFriendRequest.newBuilder().setTargetPlayerId(7).build().toByteString();
+
+        ClientReply reply = d.dispatch(call(ADD, 5, body), Optional.of(Deadline.fromCallerRemaining(0))).join();
+
+        assertThat(reply.getTipId()).isZero();
+        assertThat(AddFriendResponse.parseFrom(reply.getBody()).getErrorMessage().getId()).isEqualTo(1003);
+        assertThat(addWrites).as("不写库").hasValue(0);
+        assertThat(requests("AddFriend", "overloaded")).isEqualTo(1);
+
+        // 对照：没有调用方截止（旧 gate）照常受理
+        assertThat(AddFriendResponse.parseFrom(d.dispatch(call(ADD, 5, body), Optional.empty()).join().getBody()).hasErrorMessage()).isFalse();
+        assertThat(addWrites).hasValue(1);
     }
 
     @Test

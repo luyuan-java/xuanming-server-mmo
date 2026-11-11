@@ -11,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
+import com.game.common.deadline.Deadline;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
 import com.game.contract.TradeContractFixtures;
@@ -34,6 +35,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -284,6 +286,35 @@ class TradeDispatcherTest {
 
         assertThat(inBandTip(reply, GetMyShelfResponse.getDefaultInstance()).getId()).isEqualTo(TradeTips.SERVICE_UNAVAILABLE);
         assertThat(requests(TradeMethods.GET_MY_SHELF, "overloaded")).isEqualTo(1);
+        assertThat(f.store.calls).isEmpty();
+    }
+
+    @Test
+    void 调用方截止已尽_本地预算还很充足_不调服务不写收藏_回in_band1003() throws Exception {
+        // gate 传来的剩余已经用完（CallerDeadline，已扣传播余量）：gate 随时放行同一会话的下一条，这时写收藏会与下一条交错
+        f.store.listings.put(11L, onSale(11, PLAYER_A, ZONE_A));
+
+        ClientReply favorite = done(dispatcher().dispatch(call(TradeMethods.SET_FAVORITE, PLAYER_B,
+                SetFavoriteRequest.newBuilder().setListingId(11).setFavorite(true).build()), Optional.of(Deadline.fromCallerRemaining(0))));
+
+        assertThat(inBandTip(favorite, SetFavoriteResponse.getDefaultInstance()).getId()).isEqualTo(TradeTips.SERVICE_UNAVAILABLE);
+        assertThat(SetFavoriteResponse.parseFrom(favorite.getBody()).getListingId()).isEqualTo(11);
+        assertThat(requests(TradeMethods.SET_FAVORITE, "overloaded")).isEqualTo(1);
+        assertThat(f.store.calls).as("不碰库").isEmpty();
+    }
+
+    @Test
+    void 调用方剩余不够锁等待减写入预留_同样不调服务() throws Exception {
+        // 预算 3500 ms：写入预留 1000 ms、锁等待上限 2 s，请求截止要比调用方截止早 1 s。调用方还剩 500 ms（扣过传播余量）时
+        // 收藏写入若照发，最坏在调用方截止之后约 1.5 s 才落定（落在 gate 放行的下一条之后）
+        f.store.listings.put(11L, onSale(11, PLAYER_A, ZONE_A));
+        long callerRemainingNanos = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(Deadline.CALLER_MARGIN_MILLIS + 500);
+
+        ClientReply favorite = done(dispatcher().dispatch(call(TradeMethods.SET_FAVORITE, PLAYER_B,
+                SetFavoriteRequest.newBuilder().setListingId(11).setFavorite(true).build()),
+                Optional.of(Deadline.fromCallerRemaining(callerRemainingNanos))));
+
+        assertThat(inBandTip(favorite, SetFavoriteResponse.getDefaultInstance()).getId()).isEqualTo(TradeTips.SERVICE_UNAVAILABLE);
         assertThat(f.store.calls).isEmpty();
     }
 

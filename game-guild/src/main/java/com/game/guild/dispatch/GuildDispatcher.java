@@ -82,7 +82,8 @@ import org.slf4j.LoggerFactory;
  * 才计 {@code game.guild.requests} 的耗时；future 异常完成（只可能是实现 bug）按处理器异常回信封 1003。经济号不在派发层查归属区（economy_logic.go:8-11）。
  * 信封一律不带 parameters（同路由服 rejected，forwardlogic.go:225-232）；in-band tip 带基线英文原因串。
  *
- * <p>每个请求以受理时刻 + 预算（缺省 3500 ms）为截止时刻（含排队）；Dubbo 线程只做解析、身份检查与投递，处理全在工作线程上执行
+ * <p>每个请求以 min(受理时刻 + 预算（缺省 3500 ms）, 调用方截止) 为截止时刻（含排队；调用方截止见 {@link #dispatch(ClientCall, Optional)}）；
+ * Dubbo 线程只做解析、身份检查与投递，处理全在工作线程上执行
  * （AGENTS.md §3）。返回的 future 永不异常完成。启动时校验 28 个方法都在 {@code message_id.txt} 里、契约里的 GuildService 没有本类不认识的方法、
  * 21 个处理器的请求类型与契约一致、除 220 外每个应答都有 {@code error_message} 字段、220 的应答是 Empty；不符即启动失败。
  */
@@ -266,7 +267,16 @@ public final class GuildDispatcher {
         return ids;
     }
 
+    /** 没有调用方截止的派发（单测、进程内直调）：截止只看本地预算。 */
     public CompletableFuture<ClientReply> dispatch(ClientCall call) {
+        return dispatch(call, Optional.empty());
+    }
+
+    /**
+     * @param caller 调用方（gate）的截止：{@code ClientMessageService#handle} 入口在 Dubbo 线程上用 {@code CallerDeadline.fromRpcContext()} 读出，
+     *               gate 过了它就放行同一会话的下一条请求（mmorpg client-request-ordering.md §6.1）；为空时只看本地预算
+     */
+    public CompletableFuture<ClientReply> dispatch(ClientCall call, Optional<Deadline> caller) {
         Timer.Sample sample = metrics.startTimer();
         Route route = routes.get(call.getMessageId());
         if (route == null) {
@@ -299,7 +309,7 @@ public final class GuildDispatcher {
                 // 往下走
             }
         }
-        Deadline deadline = Deadline.after(budgetMillis);
+        Deadline deadline = Deadline.within(budgetMillis, caller);
         CompletableFuture<ClientReply> reply = new CompletableFuture<>();
         try {
             executor.execute(() -> {

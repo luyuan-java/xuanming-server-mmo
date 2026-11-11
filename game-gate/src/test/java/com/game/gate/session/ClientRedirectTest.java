@@ -618,7 +618,7 @@ class ClientRedirectTest {
     }
 
     @Test
-    void 推124时排队中的请求一律丢弃计redirected_在途调用的应答照常下发_之后不再转发() {
+    void 推124时排队中的请求逐条先回带id的1003再推124_计redirected_在途调用的应答照常下发_之后不再转发() {
         Client c = inScene();
         c.ch().writeInbound(request(2, LOGIN_MSG, "in-flight"));
         c.ch().writeInbound(request(3, SCENE_MSG, "queued"));
@@ -630,6 +630,10 @@ class ClientRedirectTest {
 
         router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, frame);
         c.ch().runPendingTasks();
+        // 排队项永远不会再发出：逐条明确回「没有执行」，且都在 124 之前（客户端收到 124 就换连接，之后的回执可能读不到）
+        assertNotExecuted(c.ch().readOutbound(), 3, SCENE_MSG);
+        assertNotExecuted(c.ch().readOutbound(), 4, LOGIN_MSG);
+        assertNotExecuted(c.ch().readOutbound(), 6, FRIEND_MSG);
         assertRedirectNotify(c.ch().readOutbound(), frame.getRedirect());
 
         login.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("login-resp")).build());
@@ -649,6 +653,49 @@ class ClientRedirectTest {
         assertThat(requests("friend", FRIEND_MSG, "forwarded")).isEqualTo(1);
         assertThat(requests("scene", SCENE_MSG, "dropped") + requests("login", LOGIN_MSG, "dropped")
                 + requests("friend", FRIEND_MSG, "dropped")).as("每个请求只计一次去向").isZero();
+    }
+
+    @Test
+    void 登录期重定向时排队中的请求_顺序是EnterGame应答_带id的1003_124() {
+        Client c = verified(normalToken());
+        ZoneRedirect redirect = zoneRedirect();
+        c.ch().writeInbound(request(1, ENTER_GAME_MSG, "enter"));
+        // EnterGame 在途：同一条 login / scene 队列上的后续请求排在它后面
+        c.ch().writeInbound(request(2, LOGIN_MSG, "queued"));
+        c.ch().writeInbound(request(3, SCENE_MSG, "queued"));
+
+        login.complete(redirectReply(redirect));
+        c.ch().runPendingTasks();
+
+        assertThat(((MessageContent) c.ch().readOutbound()).getMessageId()).as("26 应答恒在最前").isEqualTo(ENTER_GAME_MSG);
+        assertNotExecuted(c.ch().readOutbound(), 2, LOGIN_MSG);
+        assertNotExecuted(c.ch().readOutbound(), 3, SCENE_MSG);
+        assertRedirectNotify(c.ch().readOutbound(), redirect);
+        assertThat((Object) c.ch().readOutbound()).isNull();
+        assertThat(login.calls).as("排队的不再发给 login").hasSize(1);
+        assertThat(links.sent).isEmpty();
+        assertThat(requests("login", LOGIN_MSG, "redirected")).isEqualTo(1);
+        assertThat(requests("scene", SCENE_MSG, "redirected")).isEqualTo(1);
+        assertThat(redirects("login", "sent")).isEqualTo(1);
+    }
+
+    @Test
+    void 推124时排队中的LeaveGame回1003_不再记作排队中的离开() {
+        Client c = inScene();
+        c.ch().writeInbound(request(2, LOGIN_MSG, "in-flight"));
+        c.ch().writeInbound(request(3, LEAVE_MSG, ""));
+        assertThat(registry.get(c.sid()).leaveGameRequests).isEqualTo(1);
+        PlayerTransfer frame = travel(c.sid(), 5, 6);
+
+        router.onPlayerTransfer(SCENE_NODE, SOURCE_GEN, frame);
+        c.ch().runPendingTasks();
+
+        assertNotExecuted(c.ch().readOutbound(), 3, LEAVE_MSG);
+        assertRedirectNotify(c.ch().readOutbound(), frame.getRedirect());
+        assertThat(registry.get(c.sid()).leaveGameRequests).as("确定没有执行的 17 不再算排队或在途").isZero();
+        assertThat(login.calls).as("进游戏一次 + 在途一次；17 没有发出").hasSize(2);
+        assertThat(meters.get("game.gate.client.requests").tag("route", "login").tag("method", "ClientPlayerLogin.LeaveGame")
+                .tag("result", "redirected").counter().count()).isEqualTo(1);
     }
 
     // ================================================================ 工具
@@ -776,6 +823,17 @@ class ClientRedirectTest {
         assertThat(notify.getTokenSignature()).isEqualTo(expected.getTokenSignature());
         assertThat(notify.getTokenDeadline()).isEqualTo(expected.getTokenDeadline());
         assertThat(notify.getUnknownFields().asMap()).isEmpty();
+    }
+
+    /** 「没有执行」的 gate 级失败回执：{@code MessageContent{message_id = 请求号, id = 请求 id, error_message{1003}}}，不带应答体。 */
+    private static void assertNotExecuted(Object outbound, long requestId, int messageId) {
+        assertThat(outbound).isInstanceOf(MessageContent.class);
+        MessageContent content = (MessageContent) outbound;
+        assertThat(content.getId()).isEqualTo(requestId);
+        assertThat(content.getMessageId()).isEqualTo(messageId);
+        assertThat(content.hasErrorMessage()).isTrue();
+        assertThat(content.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(content.getSerializedMessage().isEmpty()).isTrue();
     }
 
     private static EnterScene enterScene() {

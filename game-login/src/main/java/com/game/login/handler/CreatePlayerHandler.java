@@ -160,10 +160,20 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         return handle(session, request, 0);
     }
 
-    /** 截止 = 受理时刻 + 请求预算：排队（{@code queuedNanos}）同样耗着 gate 的等待，从预算里扣掉（见类注释「请求预算」）。 */
+    /** 没有调用方截止（测试）：只看本地预算。 */
     @Override
     public CompletableFuture<HandlerReply> handle(SessionContext session, CreatePlayerRequest request, long queuedNanos) {
-        long createDeadline = nanoClock.getAsLong() - queuedNanos + createBudget.toNanos();
+        return handle(session, request, queuedNanos, NO_CALLER_DEADLINE);
+    }
+
+    /**
+     * 截止 = min(受理时刻 + 请求预算, 调用方截止)：排队（{@code queuedNanos}）同样耗着 gate 的等待，从预算里扣掉；gate 过了它自己的截止
+     * 就放行同一会话的下一条请求（见类注释「请求预算」与 {@link ClientMessageHandler#deadlineNanos}）。
+     */
+    @Override
+    public CompletableFuture<HandlerReply> handle(SessionContext session, CreatePlayerRequest request, long queuedNanos,
+                                                  long callerRemainingNanos) {
+        long createDeadline = ClientMessageHandler.deadlineNanos(nanoClock.getAsLong(), createBudget, queuedNanos, callerRemainingNanos);
         if (session.getSessionId() == 0) {
             return done(error(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE));
         }

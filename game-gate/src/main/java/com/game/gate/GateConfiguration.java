@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.time.Duration;
 import java.util.concurrent.locks.LockSupport;
+import org.apache.dubbo.common.constants.CommonConstants;
 import org.apache.dubbo.config.annotation.DubboReference;
 import org.apache.dubbo.config.annotation.Method;
 import org.apache.dubbo.config.spring.ReferenceBean;
@@ -100,10 +101,15 @@ public class GateConfiguration {
      * login 后端（Dubbo group = proto 域 login）。local profile 直连 {@code game.dubbo.login-url}，nacos profile 该值置空走注册中心。
      * {@code handle} 不重试：客户端消息不幂等（建角、加好友……），Dubbo 缺省的 failover 会在超时后重发同一次调用；
      * 断线通知（sessionClosed）幂等，保留缺省重试。
+     *
+     * <p><b>截止传播</b>（本类 login 与六个后端域的引用都一样；mmorpg {@code docs/design/client-request-ordering.md} §5、§6.1）：{@code handle} 开
+     * Dubbo 3 的超时倒计时（{@code enable-timeout-countdown}），每次调用把这一次的超时（{@code dubbo.consumer.timeout}，相对值）带给后端，
+     * 后端经 game-api 的 {@code CallerDeadline} 读出、截止取 min(本地预算, 传入剩余)。gate 在这个超时之后就放行同一会话的下一条请求，
+     * 后端据此不在那之后提交。mail / rank 两个域暂未接（它们的派发器还没读传入截止）。
      */
     @Bean
     @DubboReference(group = DubboGroups.LOGIN, check = false, url = "${game.dubbo.login-url:}",
-            methods = @Method(name = "handle", retries = 0))
+            methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> loginClientMessageService() {
         return new ReferenceBean<>();
     }
@@ -114,7 +120,7 @@ public class GateConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.FRIEND, check = false, url = "${game.dubbo.friend-url:}",
-            methods = @Method(name = "handle", retries = 0))
+            methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> friendClientMessageService() {
         return new ReferenceBean<>();
     }
@@ -122,7 +128,7 @@ public class GateConfiguration {
     /** 聊天后端（Dubbo group = proto 域 chat，game-chat 提供）；直连 {@code game.dubbo.chat-url}，nacos profile 置空走注册中心。 */
     @Bean
     @DubboReference(group = DubboGroups.CHAT, check = false, url = "${game.dubbo.chat-url:}",
-            methods = @Method(name = "handle", retries = 0))
+            methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> chatClientMessageService() {
         return new ReferenceBean<>();
     }
@@ -133,7 +139,7 @@ public class GateConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.TEAM, check = false, url = "${game.dubbo.team-url:}",
-            methods = @Method(name = "handle", retries = 0))
+            methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> teamClientMessageService() {
         return new ReferenceBean<>();
     }
@@ -144,7 +150,7 @@ public class GateConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.GUILD, check = false, url = "${game.dubbo.guild-url:}",
-            methods = @Method(name = "handle", retries = 0))
+            methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> guildClientMessageService() {
         return new ReferenceBean<>();
     }
@@ -156,7 +162,7 @@ public class GateConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.TRADE, check = false, url = "${game.dubbo.trade-url:}",
-            methods = @Method(name = "handle", retries = 0))
+            methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> tradeClientMessageService() {
         return new ReferenceBean<>();
     }
@@ -183,7 +189,7 @@ public class GateConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.MATCH, check = false, url = "${game.dubbo.match-url:}",
-            methods = @Method(name = "handle", retries = 0))
+            methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> matchClientMessageService() {
         return new ReferenceBean<>();
     }

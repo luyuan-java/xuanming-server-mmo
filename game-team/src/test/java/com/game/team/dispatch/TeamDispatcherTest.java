@@ -39,6 +39,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
@@ -305,6 +306,21 @@ class TeamDispatcherTest {
         assertThat(r.hasTeam()).isFalse();
         assertThat(requests(TeamMethods.GET_MY_TEAM, "overloaded")).isEqualTo(1);
         assertThat(redisCalls).hasValue(0);
+    }
+
+    @Test
+    void 调用方截止已尽_本地预算还很充足_不调处理不碰存储_回in_band4030() throws Exception {
+        // gate 传来的剩余已经用完（CallerDeadline，已扣传播余量）：gate 随时放行同一会话的下一条，这时建队 / 开战会与下一条交错
+        TeamDispatcher d = dispatcher(Mode.NO_TEAM);
+
+        ClientReply reply = d.dispatch(call(id(TeamMethods.CREATE_TEAM), ME, ByteString.EMPTY),
+                Optional.of(Deadline.fromCallerRemaining(0))).join();
+
+        assertThat(reply.getTipId()).isZero();
+        assertThat(TeamResponse.parseFrom(reply.getBody())).isEqualTo(TeamResponse.newBuilder()
+                .setErrorMessage(com.game.proto.TipInfoMessage.newBuilder().setId(TeamTips.INTERNAL)).build());
+        assertThat(requests(TeamMethods.CREATE_TEAM, "overloaded")).isEqualTo(1);
+        assertThat(redisCalls).as("不碰存储").hasValue(0);
     }
 
     @Test

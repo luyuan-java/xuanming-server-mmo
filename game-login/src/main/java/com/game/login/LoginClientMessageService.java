@@ -1,5 +1,6 @@
 package com.game.login;
 
+import com.game.api.CallerDeadline;
 import com.game.api.ClientMessageService;
 import com.game.api.DubboGroups;
 import com.game.api.proto.AbandonedEnter;
@@ -63,9 +64,10 @@ public class LoginClientMessageService implements ClientMessageService {
         this.metrics = metrics;
     }
 
+    /** 调用方截止只能在这里（Dubbo 线程、入口处）读：派发器把工作投到 login 工作线程之后就读不到了。 */
     @Override
     public CompletableFuture<ClientReply> handle(ClientCall call) {
-        return dispatcher.dispatch(call).thenApply(reply -> {
+        return dispatcher.dispatch(call, CallerDeadline.fromRpcContext()).thenApply(reply -> {
             if (reply.getDirectivesList().stream().anyMatch(LoginClientMessageService::leavesDeviceWindow)) {
                 onWorker(call.getSession(), accountLogin::leaveDeviceWindow);
             }

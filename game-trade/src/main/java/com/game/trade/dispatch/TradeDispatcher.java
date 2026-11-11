@@ -17,6 +17,7 @@ import com.game.proto.trade.SetFavoriteRequest;
 import com.game.proto.trade.SetFavoriteResponse;
 import com.game.trade.metrics.TradeMetrics;
 import com.game.trade.metrics.TradeMetrics.RequestResult;
+import com.game.trade.rules.TradeLimits;
 import com.game.trade.rules.TradeTip;
 import com.game.trade.rules.TradeTips;
 import com.game.trade.service.JubaozhaiService;
@@ -54,7 +55,8 @@ import org.slf4j.LoggerFactory;
  * 解析之后的所有 in-band 失败都按该方法的拒绝形状回包：SetFavorite 回填请求里的 {@code listing_id}（jubaozhai_logic.go:273-276）。
  * 信封与 in-band tip 一律<b>不带 parameters</b>（tipOf，jubaozhai_logic.go:420-422；N5 不采纳）。
  *
- * <p>每个请求以受理时刻 + 预算（缺省 3500 ms = 基线 Timeout − 500）为截止时刻（含排队）；Dubbo 线程只做解析、身份检查与投递，处理全在工作线程上执行
+ * <p>每个请求以受理时刻 + 预算（缺省 3500 ms = 基线 Timeout − 500）为截止时刻（含排队），且不晚于调用方截止减提前量（{@link #dispatch(ClientCall, Optional)}）；
+ * Dubbo 线程只做解析、身份检查与投递，处理全在工作线程上执行
  * （AGENTS.md §3）。返回的 future 永不异常完成。启动时校验：4 个方法与 199 都在 {@code message_id.txt} 里、契约里的 {@code ClientPlayerJubaozhai}
  * 没有本类不认识的方法、请求 / 应答类型与处理器一致、每个应答都有 {@code error_message}；不符即启动失败。
  */
@@ -96,6 +98,12 @@ public final class TradeDispatcher {
     private final Executor executor;
     private final TradeMetrics metrics;
     private final long budgetMillis;
+    /**
+     * 调用方截止换成请求截止时再提前多少（毫秒）= 锁等待上限 − 写入预留（{@link TradeLimits#writeReserveMillis}）。调用方截止已扣过传播余量，
+     * 本身就是收藏写入的落定时限；收藏写入最晚在「请求截止 − 写入预留」发出、之后库端还可能等满锁等待，所以请求截止要比它早这么多。
+     * 预算 3500 ms 时为 1000 ms：gate 超时 5 s 时调用方截止 ≈ 受理 + 4.5 s，提前之后 ≈ 受理 + 3.5 s，与本地预算相同，只在 gate 的超时调小时起作用。
+     */
+    private final long callerLeadMillis;
     private final com.game.trade.commerce.CommerceClientService commerce;
 
     /**
@@ -113,6 +121,7 @@ public final class TradeDispatcher {
         this.executor = executor;
         this.metrics = metrics;
         this.budgetMillis = budgetMillis;
+        this.callerLeadMillis = Math.max(0, TradeLimits.LOCK_WAIT_TIMEOUT_SECONDS * 1000L - TradeLimits.writeReserveMillis(budgetMillis));
         this.commerce = commerce;
         Map<Integer, Route> byId = new HashMap<>();
         client(byId, TradeMethods.BROWSE_LISTINGS, BrowseListingsRequest.class, BrowseListingsResponse.class,
@@ -184,9 +193,20 @@ public final class TradeDispatcher {
         return ids;
     }
 
+    /** 没有调用方截止的派发（单测、进程内直调）：截止只看本地预算。 */
     public CompletableFuture<ClientReply> dispatch(ClientCall call) {
+        return dispatch(call, Optional.empty());
+    }
+
+    /**
+     * @param caller 调用方（gate）的截止：{@code ClientMessageService#handle} 入口在 Dubbo 线程上用 {@code CallerDeadline.fromRpcContext()} 读出，
+     *               gate 过了它就放行同一会话的下一条请求（mmorpg client-request-ordering.md §6.1）；为空时只看本地预算。
+     *               收藏写入按「请求截止 − 写入预留」停发、发出后还可能等满锁等待，所以拿它收口之前先提前 {@link #callerLeadMillis}
+     */
+    public CompletableFuture<ClientReply> dispatch(ClientCall call, Optional<Deadline> caller) {
         Timer.Sample sample = metrics.startTimer();
-        Deadline deadline = Deadline.after(budgetMillis); // 受理时刻起算，含排队（§5.4）
+        // 受理时刻起算，含排队（§5.4）；不晚于「调用方截止 − 提前量」
+        Deadline deadline = Deadline.within(budgetMillis, caller.map(c -> c.minusMillis(callerLeadMillis)));
         Route route = routes.get(call.getMessageId());
         if (route == null) {
             metrics.requestCompleted(sample, TradeMetrics.UNROUTED, RequestResult.UNSUPPORTED);

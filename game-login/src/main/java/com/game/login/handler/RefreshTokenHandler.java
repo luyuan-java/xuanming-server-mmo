@@ -92,10 +92,20 @@ public final class RefreshTokenHandler implements ClientMessageHandler<RefreshTo
         return handle(session, request, 0);
     }
 
-    /** 客户端路径：截止 = 受理时刻 + 请求预算（排队 {@code queuedNanos} 从预算里扣掉，见类注释「请求预算」）。 */
+    /** 没有调用方截止（测试）：只看本地预算。 */
     @Override
     public CompletableFuture<HandlerReply> handle(SessionContext session, RefreshTokenRequest request, long queuedNanos) {
-        long deadline = nanoClock.getAsLong() - queuedNanos + refreshBudget.toNanos();
+        return handle(session, request, queuedNanos, NO_CALLER_DEADLINE);
+    }
+
+    /**
+     * 客户端路径：截止 = min(受理时刻 + 请求预算, 调用方截止)（排队 {@code queuedNanos} 从预算里扣掉，见类注释「请求预算」与
+     * {@link ClientMessageHandler#deadlineNanos}）。
+     */
+    @Override
+    public CompletableFuture<HandlerReply> handle(SessionContext session, RefreshTokenRequest request, long queuedNanos,
+                                                  long callerRemainingNanos) {
+        long deadline = ClientMessageHandler.deadlineNanos(nanoClock.getAsLong(), refreshBudget, queuedNanos, callerRemainingNanos);
         return CompletableFuture.completedFuture(HandlerReply.of(
                 rotate(request, () -> deadline - nanoClock.getAsLong() <= 0)));
     }

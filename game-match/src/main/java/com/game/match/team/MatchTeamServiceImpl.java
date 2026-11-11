@@ -128,7 +128,7 @@ public class MatchTeamServiceImpl implements MatchTeamService {
             var original=parseTeamRequest(request.getClientRequest());
             if(request.getInitiatorPlayerId()==0||request.getRequestId().isEmpty()||!original.getRequestId().equals(request.getRequestId())
                     ||original.getExpectedTeamId()!=request.getTeamId()||original.getBattleConfigId()!=request.getBattleConfigId())return notAttempted();
-            var result=global.reserveTeam(request);
+            var result=global.reserveTeam(request,d); // 每个事务都受调用方这一跳的截止约束（team 过了它就回客户端）
             if(result.getState()==5)return notAttempted();
             return TeamTicketsReply.newBuilder().setStatus(result.getBattleId()==0&&result.getState()==2?TeamTicketsStatus.TEAM_TICKETS_QUEUED:TeamTicketsStatus.TEAM_TICKETS_CREATED).build();
         },

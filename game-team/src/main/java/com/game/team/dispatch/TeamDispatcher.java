@@ -58,7 +58,8 @@ import org.slf4j.LoggerFactory;
  *   <li>投递到 {@code team-worker} 有界池；队列满、排队已超预算、处理器抛异常 → in-band 4030，不带视图、不带 parameters（D12）。</li>
  * </ol>
  *
- * <p>每个请求以受理时刻 + 预算（缺省 3500 ms）为截止时刻（含排队）；Dubbo 线程只做解析、身份检查与投递，处理全在工作线程上执行。
+ * <p>每个请求以 min(受理时刻 + 预算（缺省 3500 ms）, 调用方截止) 为截止时刻（含排队；调用方截止见 {@link #dispatch(ClientCall, Optional)}）；
+ * Dubbo 线程只做解析、身份检查与投递，处理全在工作线程上执行。
  * 返回的 future 永不异常完成。启动时校验 15 个方法都在 {@code message_id.txt} 里、请求类型与契约一致、12 个 C2S 应答都有
  * {@code error_message} 字段、3 个推送占位的应答是 Empty；缺号或不符即启动失败（同步产物与代码脱节）。
  */
@@ -182,7 +183,16 @@ public final class TeamDispatcher {
         return pushRoutes.keySet();
     }
 
+    /** 没有调用方截止的派发（单测、进程内直调）：截止只看本地预算。 */
     public CompletableFuture<ClientReply> dispatch(ClientCall call) {
+        return dispatch(call, Optional.empty());
+    }
+
+    /**
+     * @param caller 调用方（gate）的截止：{@code ClientMessageService#handle} 入口在 Dubbo 线程上用 {@code CallerDeadline.fromRpcContext()} 读出，
+     *               gate 过了它就放行同一会话的下一条请求（mmorpg client-request-ordering.md §6.1）；为空时只看本地预算
+     */
+    public CompletableFuture<ClientReply> dispatch(ClientCall call, Optional<Deadline> caller) {
         Timer.Sample sample = metrics.startTimer();
         int messageId = call.getMessageId();
         PushRoute push = pushRoutes.get(messageId);
@@ -211,7 +221,7 @@ public final class TeamDispatcher {
             metrics.requestCompleted(sample, route.method(), RequestResult.UNAUTHENTICATED);
             return CompletableFuture.completedFuture(route.inBand(TeamTips.PLAYER_ID));
         }
-        Deadline deadline = Deadline.after(budgetMillis);
+        Deadline deadline = Deadline.within(budgetMillis, caller);
         CompletableFuture<ClientReply> reply = new CompletableFuture<>();
         try {
             executor.execute(() -> {

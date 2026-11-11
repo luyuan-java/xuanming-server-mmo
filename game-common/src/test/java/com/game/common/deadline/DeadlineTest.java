@@ -3,6 +3,7 @@ package com.game.common.deadline;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
@@ -27,6 +28,42 @@ class DeadlineTest {
         assertThat(d.expired()).isTrue();
         assertThat(d.remainingMillis()).isZero();
         assertThat(d.remainingNanos()).isZero();
+    }
+
+    @Test
+    void 调用方剩余换成本地截止_扣掉传播余量() {
+        Deadline d = Deadline.fromCallerRemaining(TimeUnit.MILLISECONDS.toNanos(2_000));
+        assertThat(d.expired()).isFalse();
+        assertThat(d.remainingMillis()).isBetween(0L, 2_000L - Deadline.CALLER_MARGIN_MILLIS);
+    }
+
+    @Test
+    void 调用方剩余不超过余量_一开始就到期() {
+        assertThat(Deadline.fromCallerRemaining(TimeUnit.MILLISECONDS.toNanos(Deadline.CALLER_MARGIN_MILLIS)).expired()).isTrue();
+        assertThat(Deadline.fromCallerRemaining(0).expired()).isTrue();
+        assertThat(Deadline.fromCallerRemaining(-1).expired()).isTrue();
+    }
+
+    @Test
+    void within取本地预算与调用方截止的较早者_没有调用方截止就是本地预算() {
+        Deadline shortCaller = Deadline.fromCallerRemaining(TimeUnit.MILLISECONDS.toNanos(1_500));
+        assertThat(Deadline.within(3_500, Optional.of(shortCaller))).as("调用方更早").isSameAs(shortCaller);
+
+        Deadline longCaller = Deadline.fromCallerRemaining(TimeUnit.SECONDS.toNanos(60));
+        Deadline local = Deadline.within(3_500, Optional.of(longCaller));
+        assertThat(local).as("本地预算更早").isNotSameAs(longCaller);
+        assertThat(local.remainingMillis()).isBetween(0L, 3_500L);
+
+        assertThat(Deadline.within(3_500, Optional.empty()).remainingMillis()).isBetween(0L, 3_500L);
+        assertThat(Deadline.within(3_500, Optional.of(Deadline.fromCallerRemaining(0))).expired()).as("调用方剩余已尽").isTrue();
+    }
+
+    @Test
+    void minusMillis提前截止_负数拒绝() {
+        Deadline d = Deadline.after(1_000);
+        assertThat(d.minusMillis(1_000).expired()).isTrue();
+        assertThat(d.minusMillis(400).remainingMillis()).isBetween(0L, 600L);
+        assertThatThrownBy(() -> d.minusMillis(-1)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

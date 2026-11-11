@@ -238,10 +238,20 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         return handle(session, request, 0);
     }
 
-    /** 截止 = 受理时刻 + 时间预算：排队（{@code queuedNanos}）同样耗着 gate 的等待，从预算里扣掉（见类注释「时间预算」）。 */
+    /** 没有调用方截止（测试）：只看本地预算。 */
     @Override
     public CompletableFuture<HandlerReply> handle(SessionContext session, EnterGameRequest request, long queuedNanos) {
-        long enterDeadline = nanoClock.getAsLong() - queuedNanos + enterBudget.toNanos();
+        return handle(session, request, queuedNanos, NO_CALLER_DEADLINE);
+    }
+
+    /**
+     * 截止 = min(受理时刻 + 时间预算, 调用方截止)：排队（{@code queuedNanos}）同样耗着 gate 的等待，从预算里扣掉；gate 过了它自己的截止
+     * 就放行同一会话的下一条请求（见类注释「时间预算」与 {@link ClientMessageHandler#deadlineNanos}）。
+     */
+    @Override
+    public CompletableFuture<HandlerReply> handle(SessionContext session, EnterGameRequest request, long queuedNanos,
+                                                  long callerRemainingNanos) {
+        long enterDeadline = ClientMessageHandler.deadlineNanos(nanoClock.getAsLong(), enterBudget, queuedNanos, callerRemainingNanos);
         if (session.getSessionId() == 0) {
             return done(error(LoginErrorTip.login_error.kLoginSessionIdNotFound_VALUE));
         }

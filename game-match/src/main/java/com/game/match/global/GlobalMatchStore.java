@@ -596,8 +596,11 @@ public final class GlobalMatchStore {
         if(key.getKind()<1||key.getKind()>3||key.getOwnerId()==0||(key.getRequestHigh()==0&&key.getRequestLow()==0)||payload.isEmpty()||members.isEmpty()||members.size()>10)throw new IllegalArgumentException("直接开局原意图无效");
         return tx(c->reserveDirect(c,key,payload,members,formation));
     }
-    public GlobalFormationRow teamReplay(GlobalDirectIntentRow key,ByteString payload,ByteString launch) {
-        return tx(c->{
+    /** 独立 3 s 预算，目前只有测试在用；请求路径（整队开战）一律用带截止的重载，否则调用方放弃之后仍会提交。 */
+    public GlobalFormationRow teamReplay(GlobalDirectIntentRow key,ByteString payload,ByteString launch) {return teamReplay(key,payload,launch,Deadline.after(3000));}
+    /** @param deadline 请求截止（整队开战：team 那一跳带来的剩余预算），过了就不开事务、不提交（mmorpg client-request-ordering.md §6.1） */
+    public GlobalFormationRow teamReplay(GlobalDirectIntentRow key,ByteString payload,ByteString launch,Deadline deadline) {
+        return tx(deadline,c->{
             owner(c,key.getOwnerId(),key.getOwnerAccount(),key.getOwnerRevision());
             var originalLaunch=GlobalTeamLaunchAuthority.original(launch);GlobalTeamLaunchAuthority.bind(key,originalLaunch,payload);
             var queued=units.find(c,GlobalQueueUnits.teamId(originalLaunch),false);
@@ -617,8 +620,11 @@ public final class GlobalMatchStore {
             return db.findOneByPk(c,GlobalFormationRow.newBuilder().setBattleId(prior.get().getBattleId()).build()).orElseThrow();
         });
     }
-    public GlobalDirectIntentRow prepareTeam(GlobalDirectIntentRow key,ByteString raw,List<GlobalTicketRow> members,GlobalFormationRow formation){
-        var launch=GlobalTeamLaunchAuthority.original(raw);GlobalTeamLaunchAuthority.bind(key,launch,launch.getRequest().toByteString());return tx(c->{owners(c,members);
+    /** 独立 3 s 预算，目前只有测试在用；请求路径（整队开战）一律用带截止的重载，否则调用方放弃之后仍会提交。 */
+    public GlobalDirectIntentRow prepareTeam(GlobalDirectIntentRow key,ByteString raw,List<GlobalTicketRow> members,GlobalFormationRow formation){return prepareTeam(key,raw,members,formation,Deadline.after(3000));}
+    /** @param deadline 请求截止，过了就不开事务、不提交（同 {@link #teamReplay(GlobalDirectIntentRow, ByteString, ByteString, Deadline)}） */
+    public GlobalDirectIntentRow prepareTeam(GlobalDirectIntentRow key,ByteString raw,List<GlobalTicketRow> members,GlobalFormationRow formation,Deadline deadline){
+        var launch=GlobalTeamLaunchAuthority.original(raw);GlobalTeamLaunchAuthority.bind(key,launch,launch.getRequest().toByteString());return tx(deadline,c->{owners(c,members);
             if(GlobalTeamLaunchAuthority.lock(c,launch,raw,members)>=4)throw new SQLException("终局Team不能首次准备准入");
             var prior=db.findOneByPkForUpdate(c,key);
             if(prior.isPresent()){
@@ -648,10 +654,15 @@ public final class GlobalMatchStore {
             try(var q=c.prepareStatement("UPDATE team_launch SET state=5,battle_id=?,updated_ms=? WHERE request_id=? AND original_proto=?")){q.setQueryTimeout(3);q.setObject(1,PbMysql.uint64(f.getBattleId()));q.setLong(2,stamp);q.setString(3,launch.getRequest().getRequestId());q.setBytes(4,start.getTeamLaunchOriginal().toByteArray());if(q.executeUpdate()!=1)throw new SQLException("失效Team原launch不同");}
         }return true;
     });}
+    /** 独立 3 s 预算，目前只有测试在用；请求路径（整队开战）一律用带截止的重载，否则调用方放弃之后仍会提交。 */
     public GlobalFormationRow reserveTeam(GlobalDirectIntentRow key,ByteString payload,ByteString launch,List<GlobalTicketRow> members,GlobalFormationRow formation) {
+        return reserveTeam(key,payload,launch,members,formation,Deadline.after(3000));
+    }
+    /** @param deadline 请求截止，过了就不开事务、不提交（同 {@link #teamReplay(GlobalDirectIntentRow, ByteString, ByteString, Deadline)}） */
+    public GlobalFormationRow reserveTeam(GlobalDirectIntentRow key,ByteString payload,ByteString launch,List<GlobalTicketRow> members,GlobalFormationRow formation,Deadline deadline) {
         var original=GlobalTeamLaunchAuthority.original(launch);
         GlobalTeamLaunchAuthority.bind(key,original,payload);
-        return tx(c->{owners(c,members);int state=GlobalTeamLaunchAuthority.lock(c,original,launch,members);
+        return tx(deadline,c->{owners(c,members);int state=GlobalTeamLaunchAuthority.lock(c,original,launch,members);
             if(state>=4&&db.findOneByPk(c,key).isEmpty())throw new IllegalStateException("已终局整队launch不能创建新Match意图");
             for(var exit:original.getObserverExitsList())if(!com.game.common.player.ObserverExitAuthority.provedClosed(c,exit,3))throw new SQLException("整队直开缺少永久退出正证明");
             return reserveDirect(c,key,payload,members,formation);});
@@ -659,10 +670,13 @@ public final class GlobalMatchStore {
     public void validateTeamLaunch(ByteString launch,List<GlobalTicketRow> members){
         var original=GlobalTeamLaunchAuthority.original(launch);tx(c->{owners(c,members);if(GlobalTeamLaunchAuthority.lock(c,original,launch,members)>=4)throw new SQLException("整队原launch已终局");return null;});
     }
-    public GlobalFormationRow enqueueTeam(GlobalDirectIntentRow key,ByteString launch,List<GlobalTicketRow> members) {
+    /** 独立 3 s 预算，目前只有测试在用；请求路径（整队开战）一律用带截止的重载，否则调用方放弃之后仍会提交。 */
+    public GlobalFormationRow enqueueTeam(GlobalDirectIntentRow key,ByteString launch,List<GlobalTicketRow> members) {return enqueueTeam(key,launch,members,Deadline.after(3000));}
+    /** @param deadline 请求截止，过了就不开事务、不提交（同 {@link #teamReplay(GlobalDirectIntentRow, ByteString, ByteString, Deadline)}） */
+    public GlobalFormationRow enqueueTeam(GlobalDirectIntentRow key,ByteString launch,List<GlobalTicketRow> members,Deadline deadline) {
         var original=GlobalTeamLaunchAuthority.original(launch);GlobalTeamLaunchAuthority.bind(key,original,original.getRequest().toByteString());int target=original.getRequest().getTargetTeamSize();
         if(target<=members.size()||target>com.game.common.team.TeamPolicyContract.CAPACITY)throw new IllegalArgumentException("整队补位目标无效");
-        return tx(c->{
+        return tx(deadline,c->{
             owners(c,members);for(var member:members)noWatching(c,member.getPlayerId());
             if(GlobalTeamLaunchAuthority.lock(c,original,launch,members)>=4)throw new IllegalStateException("终局launch不得重新排队");
             String unitId=GlobalQueueUnits.teamId(original);var prior=units.find(c,unitId,false);

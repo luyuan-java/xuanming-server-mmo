@@ -10,6 +10,7 @@ import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionContext;
 import com.game.api.proto.SessionDirective;
+import com.game.common.deadline.Deadline;
 import com.game.contract.MessageIdRegistry;
 import com.game.login.account.AccountLogin;
 import com.game.login.auth.DevPasswordRule;
@@ -71,6 +72,8 @@ class ClientMessageDispatcherTest {
         final List<R> received = new CopyOnWriteArrayList<>();
         /** 分发器交来的排队时长（纳秒），按调用次序。 */
         final List<Long> queued = new CopyOnWriteArrayList<>();
+        /** 分发器交来的调用方剩余（纳秒），按调用次序。 */
+        final List<Long> callerRemaining = new CopyOnWriteArrayList<>();
         Function<R, CompletableFuture<HandlerReply>> behavior = r -> CompletableFuture.completedFuture(HandlerReply.none());
 
         StubHandler(String method, Class<R> requestType, Class<? extends Message> responseType,
@@ -106,6 +109,12 @@ class ClientMessageDispatcherTest {
         public CompletableFuture<HandlerReply> handle(SessionContext session, R request, long queuedNanos) {
             queued.add(queuedNanos);
             return handle(session, request);
+        }
+
+        @Override
+        public CompletableFuture<HandlerReply> handle(SessionContext session, R request, long queuedNanos, long callerRemainingNanos) {
+            callerRemaining.add(callerRemainingNanos);
+            return handle(session, request, queuedNanos);
         }
 
         @Override
@@ -193,6 +202,25 @@ class ClientMessageDispatcherTest {
 
         assertThat(create.queued).containsExactly(Duration.ofMillis(1200).toNanos());
         assertThat(create.received).hasSize(1);
+    }
+
+    @Test
+    void 调用方截止的剩余在开始处理时交给处理器_已尽交0_没有调用方截止不设上限() {
+        // gate 传来的截止（CallerDeadline，已扣传播余量）：处理器的截止取 min(受理时刻 + 预算, 它)，剩余已尽时建角 / 进游戏 / 轮换都不再提交
+        ClientMessageDispatcher dispatcher = dispatcher(DIRECT);
+        ClientCall create14 = call(14, CreatePlayerRequest.getDefaultInstance());
+
+        dispatcher.dispatch(create14, Optional.of(Deadline.fromCallerRemaining(0))).join();
+        dispatcher.dispatch(create14, Optional.empty()).join();
+        dispatcher.dispatch(create14).join();
+        dispatcher.dispatch(create14, Optional.of(Deadline.fromCallerRemaining(Duration.ofSeconds(2).toNanos()))).join();
+
+        assertThat(create.callerRemaining).hasSize(4);
+        assertThat(create.callerRemaining.get(0)).as("剩余已尽").isZero();
+        assertThat(create.callerRemaining.get(1)).isEqualTo(ClientMessageHandler.NO_CALLER_DEADLINE);
+        assertThat(create.callerRemaining.get(2)).as("一参版本 = 没有调用方截止").isEqualTo(ClientMessageHandler.NO_CALLER_DEADLINE);
+        assertThat(create.callerRemaining.get(3)).as("2 s − 传播余量以内")
+                .isBetween(1L, Duration.ofSeconds(2).minusMillis(Deadline.CALLER_MARGIN_MILLIS).toNanos());
     }
 
     @Test

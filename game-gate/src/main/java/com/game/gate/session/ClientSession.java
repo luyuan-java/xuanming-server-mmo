@@ -45,6 +45,7 @@ public final class ClientSession {
     int ticketTargetZoneId;
     /**
      * 已重定向（REDIRECTED，批次 5.4）：已给客户端推过 124 {@code RedirectToGateNotify}，请它改连别的 zone 的 gate。
+     * 推 124 时还在排队的请求先逐条回带请求 id 的信封 1003（写在 124 之前，{@code ClientDispatcher.failQueuedOnRedirect}）；
      * 此后客户端的一切请求静默丢弃（不回包、不推 tip）；此前转出、此后才回来的 login / 后端应答照常下发，但其中的会话指令一律忽略；
      * 没有场景绑定（推 124 之前已解绑或本就没有）。会话一直停在这个状态，直到客户端自己断开或收口时限到点由 gate 关闭。
      */
@@ -110,7 +111,10 @@ public final class ClientSession {
     boolean backendInFlight;
     /**
      * 有一个 LeaveGame（17）排队或在途、还没回来：这时断线按主动离开通知 scene（客户端约定「发完 17 即关连接、不等应答」，
-     * 不能把这次干净登出当成断线、留 30 s 重连租约）。LeaveGame 的调用回来后减掉（关闭途中成功的不减，留给断线流程按主动离开发）。
+     * 不能把这次干净登出当成断线、留 30 s 重连租约）。LeaveGame 的调用回来后减掉（关闭途中成功的不减，留给断线流程按主动离开发）；
+     * 排队中的 17 因转入已重定向回了 1003（确定没有执行）时也减掉。
+     * 收包即计是有意的：它只决定断线时 {@code PlayerLeave.voluntary} 的取值；让 scene 放掉玩家只在 login 回 UnbindPlayer 之后发生，
+     * 所以排队中的 17 被作废不会留下「scene 已退出、login 仍在游戏」的半截状态（与 mmorpg client-request-ordering.md 的对照核实，2026-11-10）。
      */
     int leaveGameRequests;
     /** 非法包计数（未知消息号、超长、超频、运行模式不放行的 GM 指令），达到阈值断开。 */
