@@ -42,6 +42,7 @@ import com.game.robot.flow.RedirectFollower.Followed;
 import com.game.robot.flow.RoleZone;
 import com.game.robot.flow.Timings;
 import com.game.robot.scenario.TravelLedger.Window;
+import com.game.table.CommonErrorTip;
 import com.game.table.ConfigTables;
 import com.game.table.CrossServerErrorTip;
 import com.game.table.LoginErrorTip;
@@ -74,7 +75,7 @@ import java.util.Optional;
  *   <li>T5 226 {@code {V, --travel-scene-config}}：应答 {@code {0}}（字节 {@code 0a 00}）先于 124；B 收到 A 的 51（同场景时）；恰好一条 124，
  *       票据 {@code player_id == A}、{@code target_zone_id == zone_id == V}、到期 ∈ (now, now + 305]；跟随（握手成功后<b>晚</b>关旧连接）→
  *       严格重登（列表必须有 A、绝不建角）→ 角色列表里 A 的 {@code zone_id} 仍是 H、79 晚于 124、新连接的 gate 就是 124 给的；金币 G0，
- *       GM +7 → G0 + 7；T5a 晚关的那段时间里旧连接上发 77 没有回包（REDIRECTED）；</li>
+ *       GM +7 → G0 + 7；T5a 晚关的那段时间里旧连接上发 77 恰好回一条带请求 id 的信封 1003、不执行（REDIRECTED）；</li>
  *   <li>T6 停留 {@code --dwell-ms}：没有 23 / 34 / 124；金币 G0 + 7；</li>
  *   <li>T7 GO-5：记下 V 的场景与坐标 → 直接关 TCP → 经 H 的入口重连：26 无错、随后恰好一条 124（目标 V、持票者 A）→ 跟随 → 回到原实例、
  *       坐标误差 &lt; 1 m、金币 G0 + 7；T7b 再关 TCP → 经 V 的入口直连：无 124、原实例；随后在 V 做一次移动探针（同基线，不判定）；</li>
@@ -111,6 +112,8 @@ public final class TravelScenario {
     static final int TIP_TRAVEL_FAILED = SceneErrorTip.scene_error.kZoneTravelTargetBusy_VALUE;
     static final int TIP_IN_TRANSFER = CrossServerErrorTip.cross_server_error.kSceneTransferInProgress_VALUE;
     static final int TIP_TICKET_HOLDER = LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE;
+    /** 已重定向的旧连接上发的请求：gate 回带请求 id 的信封 1003（确定没有执行，T5a）。 */
+    static final int TIP_SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     /** 目标 gate 拒绝他区票据的文案（§1.7 第 6 步，五条文案之一，逐字保持）。 */
     static final String WRONG_ZONE_TEXT = "token not for this zone";
     /** World 表里一定没有的地图（uint32，按位放进 int）。 */
@@ -397,7 +400,8 @@ public final class TravelScenario {
         }
         Followed followed = follow(new RedirectFollower(visitClient), connA, out.target(), CloseOld.AFTER_VERIFY, tempo.lateClose(), "A-visit");
         loggedIn.remove(connA);
-        // T5a：晚关的那段时间里，旧连接上的请求不该有回包（gate 已把它置为 REDIRECTED）
+        // T5a：晚关的那段时间里，旧连接上的请求不该被执行（gate 已把它置为 REDIRECTED）：恰好回一条带请求 id 的信封 1003
+        // （2026-11-11 起，原为不回包；mmorpg client-request-ordering.md O4 / O9）
         int oldMark = connA.inbox().size();
         long probeId = 0;
         String probeError = null;
@@ -430,12 +434,15 @@ public final class TravelScenario {
         steps.step("t5a-old-connection", report);
         List<Received> late = connA.inbox().snapshot(oldMark);
         long answerId = probeId;
-        boolean answered = late.stream().anyMatch(r -> r.messageId() == ids.listSkills() && r.requestId() == answerId && answerId != 0);
+        List<Received> probeReplies = late.stream()
+                .filter(r -> r.messageId() == ids.listSkills() && r.requestId() == answerId && answerId != 0).toList();
+        boolean refused = probeReplies.size() == 1 && probeReplies.get(0).envelopeTipId() == TIP_SERVICE_UNAVAILABLE;
         List<Integer> lateTips = tips(late);
-        report.check(probeError == null && !answered && lateTips.isEmpty() && oldClosed,
-                "T5a 握手成功后晚 " + tempo.lateClose().toMillis() + " ms 关旧连接，期间旧连接上发 77：没有回包、没有 23（会话已 REDIRECTED，X8）",
+        report.check(probeError == null && refused && lateTips.isEmpty() && oldClosed,
+                "T5a 握手成功后晚 " + tempo.lateClose().toMillis() + " ms 关旧连接，期间旧连接上发 77：恰好回一条带请求 id 的信封 "
+                        + TIP_SERVICE_UNAVAILABLE + "（没有执行）、没有 23（会话已 REDIRECTED，X8）",
                 probeError != null ? "旧连接上发 77 失败：" + probeError
-                        : (answered ? "收到了 77 的应答" : "") + (lateTips.isEmpty() ? "" : " 收到 23 " + lateTips)
+                        : (refused ? "" : describeProbeReplies(probeReplies)) + (lateTips.isEmpty() ? "" : " 收到 23 " + lateTips)
                         + (oldClosed ? "" : " 旧连接到点没关"), REF + " T5a");
 
         // ---- T6：停留 ----
@@ -1088,6 +1095,18 @@ public final class TravelScenario {
             }
         }
         return out;
+    }
+
+    /** T5a 不合格时说明旧连接上的探针收到了什么：没有回执、回执不止一条，或回的不是信封 1003（例如被照常执行）。 */
+    private static String describeProbeReplies(List<Received> replies) {
+        if (replies.isEmpty()) {
+            return "77 没有收到回执";
+        }
+        List<String> shapes = new ArrayList<>();
+        for (Received r : replies) {
+            shapes.add(r.envelopeTipId() != 0 ? "信封 " + r.envelopeTipId() : "应答体（被执行了）");
+        }
+        return "77 收到 " + replies.size() + " 条回执 " + shapes;
     }
 
     private void must(boolean passed, String name, String detail) throws RobotException {

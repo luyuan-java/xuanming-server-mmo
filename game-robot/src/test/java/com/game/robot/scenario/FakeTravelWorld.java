@@ -96,7 +96,7 @@ final class FakeTravelWorld implements AutoCloseable {
         SWAPPED_DOUBLE_REPLY,
         /** login 没有 GO-5：位置在别区也就地进场。 */
         NO_GO5,
-        /** 推出 124 之后旧会话照常处理请求。 */
+        /** 推出 124 之后旧会话照常处理请求（不回信封 1003）。 */
         REDIRECTED_STILL_ANSWERS,
         /** gate 拒绝带 player_id 的票据（124 给的那种，握手回 token not for this gate）：跟随在握手这一步失败。 */
         REJECT_REDIRECT_TICKET
@@ -320,7 +320,12 @@ final class FakeTravelWorld implements AutoCloseable {
             Conn conn = (Conn) session.attachment;
             synchronized (FakeTravelWorld.this) {
                 received.merge(request.getMessageId(), 1, Integer::sum);
-                if (conn == null || (conn.redirected && !faults.contains(Fault.REDIRECTED_STILL_ANSWERS))) {
+                if (conn == null) {
+                    return;
+                }
+                if (conn.redirected && !faults.contains(Fault.REDIRECTED_STILL_ANSWERS)) {
+                    // 同 Java gate（ClientDispatcher.onRequest，2026-11-11 起）：已重定向的会话不执行请求，回带请求 id 的信封 1003
+                    session.replyEnvelopeError(request, TravelScenario.TIP_SERVICE_UNAVAILABLE);
                     return;
                 }
                 handle(conn, request);

@@ -99,7 +99,8 @@ import org.slf4j.LoggerFactory;
  *   <li>跨 zone 重定向（批次 5.4，zone-travel-spec §5.7）：源 scene 发来带 {@code redirect} 的 {@code PlayerTransfer}（226 传送），
  *       或 login 在 EnterGame 应答里带 {@code RedirectToGate} 指令（登录期重定向 GO-5，应答先发）：解绑场景（不发 PlayerLeave、撤在线登记），
  *       推 124 {@code RedirectToGateNotify}（{@code MessageContent} 不设 id），<b>不断开</b>；此刻还在排队的请求先逐条回带请求 id 的信封 1003
- *       （写在 124 之前；mmorpg client-request-ordering.md O9，两版同批），会话转入已重定向状态，之后的请求静默丢弃，
+ *       （写在 124 之前；mmorpg client-request-ordering.md O9，两版同批），会话转入已重定向状态，之后到达的请求同样回带请求 id 的
+ *       信封 1003、不转发（未知消息号不回包；2026-11-11 起，原为静默丢弃，与 C++ 版 gate 路由 lane 对齐），
  *       客户端在收口时限（{@code game.gate.redirect-linger}）内没自己断开就由 gate 关闭（不推 tip）。重定向载荷非法推 23 {3027} 后断开。</li>
  *   <li>握手时出示的票据里的持票者与目标 zone 存进会话，随每个转 login / 后端的调用交出（{@code SessionContext} 8 / 9 号字段）；gate 只存不判。</li>
  * </ul>
@@ -307,7 +308,8 @@ public final class ClientDispatcher {
             return;
         }
         if (s.redirected) {
-            // 已重定向：客户端的一切上行都静默丢弃（含再次握手），等它自己断开或收口时限到
+            // 已重定向：再次握手静默丢弃（握手帧不带请求 id，没有可对上的回执；业务请求见 onRequest，回带 id 的 1003），
+            // 等客户端自己断开或收口时限到
             return;
         }
         if (s.verified) {
@@ -412,9 +414,15 @@ public final class ClientDispatcher {
             return;
         }
         if (s.redirected) {
-            // 已重定向（推过 124）：一切请求静默丢弃——不回包（也不回「未进场景」的信封 1003）、不计非法包、不限频、不转发
-            // （zone-travel-spec §5.7；合规客户端此刻正在换连接，几秒内自己关闭）
-            countRequest(routes.clientRoute(request.getMessageId()), RequestResult.REDIRECTED);
+            // 已重定向（推过 124）：不转发、不计非法包、不限频；合法消息号回带请求 id 的信封 1003（确定没有执行，客户端到新 gate
+            // 重试安全），未知消息号同正常路径不回包。与推 124 时排队项的回执（failQueuedOnRedirect）同形，也与 C++ 版 gate 路由 lane
+            // 重定向之后的准入（kRejectedRedirected）一致：mmorpg client-request-ordering.md O4「每个请求恰好一个回执」、O6「gate 级失败
+            // 一律带请求 id」、O9。2026-11-11 起，原为静默丢弃（zone-travel-spec §5.7 已同步）。合规客户端此刻正在换连接，几秒内自己关闭。
+            MessageRoute redirectedRoute = routes.clientRoute(request.getMessageId());
+            countRequest(redirectedRoute, RequestResult.REDIRECTED);
+            if (redirectedRoute != null) {
+                s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
+            }
             return;
         }
         if (!s.verified) {
@@ -1798,7 +1806,8 @@ public final class ClientDispatcher {
      * （明确「没有执行」，客户端重试安全），计 {@code redirected}（每个请求在 gate 只计一次去向）。
      * 回执写在推 124 之前：客户端收到 124 就去换连接，排在 124 之后的回执可能读不到，只能等自己的 15 s 请求超时。
      * 与 C++ 版 {@code gate_lane::OnSessionRedirected} 同批同形（mmorpg client-request-ordering.md O6「所有 gate 级失败回执都带请求 id」、
-     * O9；以前只计数、不回执）。推过 124 之后新到的请求仍静默丢弃（{@link #onRequest}）。
+     * O9；以前只计数、不回执）。推过 124 之后新到的请求同样回带请求 id 的信封 1003、计 {@code redirected}（{@link #onRequest}；
+     * 2026-11-11 起，原为静默丢弃，C++ 版对应 {@code gate_lane::Admit} 的 {@code kRejectedRedirected}）。
      * 排队中的 LeaveGame 已明确告知没有执行，从 {@link ClientSession#leaveGameRequests} 里减掉（它只记排队或在途、还没回来的 17）。
      */
     private void failQueuedOnRedirect(ClientSession s) {

@@ -35,7 +35,7 @@ public sealed interface EnterOutcome permits EnterOutcome.Entered, EnterOutcome.
      * 被重定向：26 无错，随后来的是 124。接下来由调用方决定跟不跟（{@link RedirectFollower#follow} 之后在新连接上
      * {@link PlayerFlow#reenter}）；{@code connection} 仍然打开，由调用方或跟随件关闭。
      *
-     * @param connection 收到 124 的那条连接（入口区的 gate；推出 124 之后它上面的请求不再有回包）
+     * @param connection 收到 124 的那条连接（入口区的 gate；推出 124 之后它上面的请求不再执行，只回带请求 id 的信封 1003）
      * @param playerId   26 进的角色
      * @param target     124 的内容
      * @param frame      那条 124 本身（到达序号与到达时刻：核对「26 的应答在前、124 在后」）

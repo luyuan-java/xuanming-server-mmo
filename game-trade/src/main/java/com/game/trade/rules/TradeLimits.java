@@ -63,8 +63,16 @@ public final class TradeLimits {
     // ---- 连接 ----
 
     /**
-     * 连接级 {@code innodb_lock_wait_timeout}（秒；Q7 已拍板取 2，对齐单次 SQL 上限）。基线不设锁等待，但每次调用被 2000 ms 的 ctx 截断；
-     * friend 取 3、guild 取 1。只有收藏写入会等锁。写在连接串的 sessionVariables 里（application.yaml），这里只是单一事实源与测试夹具用。
+     * 连接级锁等待上限（秒；Q7 已拍板取 2，对齐单次 SQL 上限）。连接串的 sessionVariables（application.yaml）把两种等待都设成这个值：
+     * <ul>
+     *   <li>{@code innodb_lock_wait_timeout}：行锁等待。基线不设锁等待，但每次调用被 2000 ms 的 ctx 截断；friend 取 3、guild 取 1。
+     *       只有收藏写入会等行锁；</li>
+     *   <li>{@code lock_wait_timeout}：元数据锁等待（MySQL 缺省 31536000 s 即一年）。语句排在一条 DDL 的元数据锁后面时由库端以 1205 中止，
+     *       不靠客户端读超时断开（断开撤不回已发出的语句，库端拿到锁后照样执行，成了迟到写；mmorpg client-request-ordering.md §6.1）。
+     *       TiDB 把它当只接受不生效的兼容变量，同一串连接串两档都能用。</li>
+     * </ul>
+     * 启动检查（{@code TradeStartupChecks}）两项都读回：行锁等待不等于本值告警；元数据锁等待只在 MySQL 档判，不等于本值告警。
+     * 这里只是单一事实源与测试夹具用，改值要同改连接串。
      */
     public static final int LOCK_WAIT_TIMEOUT_SECONDS = 2;
 

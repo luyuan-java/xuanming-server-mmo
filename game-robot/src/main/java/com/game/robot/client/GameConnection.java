@@ -233,9 +233,10 @@ public final class GameConnection implements AutoCloseable {
      * 超时说明：连接是否已关闭、这段时间收到的 23 tip 与 124。gate 级失败现在一律回带请求 id 的信封（后端调用失败 2026-10-14 起，
      * 未进场景、未接入的域 2026-10-15 起；mmorpg client-request-ordering.md O6），由 {@link #call} 当场按信封错误抛出、走不到这里；
      * 这里还能看到的 23 是推送类（进场失败 3023、被顶号 2017 等），不带上它排查时只看得到「超时」。
-     * 124 同理（批次 5.4）：推出 124 之后这条连接上的请求一律没有回包，登录期重定向下
-     * 进游戏成功却等不到 79——文案里写明「收到了 124」与它的目标，不然看起来只是超时。124 在 {@code fromIndex} 之前就到了
-     * 也要说（请求是在它之后发的，正是没有回包的原因）。
+     * 124 同理（批次 5.4）：推出 124 之后这条连接不再执行任何请求——推 124 时还在排队的请求逐条回带请求 id 的信封 1003（先于 124），
+     * 之后发的请求也回带 id 的 1003（2026-11-11 起，原为不回包；mmorpg client-request-ordering.md O4 / O9），都由 {@link #call}
+     * 当场按信封错误抛出；等的若是推送（登录期重定向下进游戏成功却等不到 79），就只会超时——文案里写明「收到了 124」与它的目标，
+     * 不然看起来只是超时。124 在 {@code fromIndex} 之前就到了也要说（等的东西是在它之后才要的，正是等不到的原因）。
      */
     public String describeSince(int fromIndex) {
         StringBuilder out = new StringBuilder();
@@ -262,11 +263,11 @@ public final class GameConnection implements AutoCloseable {
         }
         if (!redirects.isEmpty()) {
             out.append("；期间收到了 124 RedirectToGate（目标 ").append(String.join("、", redirects))
-                    .append("）：服务端让这条连接改连别的 gate，之后本连接上的请求不再有回包");
+                    .append("）：服务端让这条连接改连别的 gate，之后本连接上的请求不再执行（只回 1003）");
         }
         if (!earlierRedirects.isEmpty()) {
             out.append("；这条连接此前已收到了 124 RedirectToGate（目标 ").append(String.join("、", earlierRedirects))
-                    .append("）：它之后发的请求不会有回包");
+                    .append("）：它之后发的请求不会执行（只回 1003）");
         }
         return out.toString();
     }

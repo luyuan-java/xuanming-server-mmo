@@ -133,8 +133,10 @@ public final class GateMetrics {
         /** 会话已在关闭，排队中或迟到的请求被丢弃。 */
         DROPPED,
         /**
-         * 会话已被重定向（推过 124 RedirectToGateNotify，批次 5.4）：之后收到的请求一律丢弃、<b>不回包</b>、不计非法包，
-         * 等客户端自己断开或收口时限到（zone-travel-spec §5.7）。
+         * 会话已被重定向（推过 124 RedirectToGateNotify，批次 5.4，zone-travel-spec §5.7）：请求不再发出，回带请求 id 的信封 1003
+         * （确定没有执行，客户端到新 gate 重试安全），不计非法包。两种来源都计在这里：推 124 时还在排队的请求，回执逐条写在 124 之前；
+         * 推过 124 之后新到的请求，当场回执（未知消息号不回包，只计数）。2026-11-11 起，原为一律不回包
+         * （mmorpg client-request-ordering.md O4 / O6 / O9，与 C++ 版 gate 路由 lane 同形）。
          */
         REDIRECTED
     }

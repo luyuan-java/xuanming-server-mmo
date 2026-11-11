@@ -46,7 +46,8 @@ public final class ClientSession {
     /**
      * 已重定向（REDIRECTED，批次 5.4）：已给客户端推过 124 {@code RedirectToGateNotify}，请它改连别的 zone 的 gate。
      * 推 124 时还在排队的请求先逐条回带请求 id 的信封 1003（写在 124 之前，{@code ClientDispatcher.failQueuedOnRedirect}）；
-     * 此后客户端的一切请求静默丢弃（不回包、不推 tip）；此前转出、此后才回来的 login / 后端应答照常下发，但其中的会话指令一律忽略；
+     * 此后到达的请求不转发，合法消息号一律回带请求 id 的信封 1003（{@code ClientDispatcher.onRequest}，2026-11-11 起，原为静默丢弃），
+     * 再次握手静默丢弃；此前转出、此后才回来的 login / 后端应答照常下发，但其中的会话指令一律忽略；
      * 没有场景绑定（推 124 之前已解绑或本就没有）。会话一直停在这个状态，直到客户端自己断开或收口时限到点由 gate 关闭。
      */
     boolean redirected;

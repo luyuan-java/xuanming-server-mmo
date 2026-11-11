@@ -24,7 +24,7 @@ import java.util.function.LongSupplier;
  * <ul>
  *   <li>{@link CloseOld#AFTER_VERIFY}（缺省）：握手<b>成功之后</b>才关。握手失败（连不上、被拒、超时）时旧连接原样保留。可以带一个延迟：
  *       {@code follow} 在握手成功后立即返回，旧连接留到延迟到点（或调用方 {@link Followed#closeOldNow()}）才关——这段时间里两条连接
- *       同时开着，旧连接已被服务端置为「已重定向」，发上去的请求不该有回包；</li>
+ *       同时开着，旧连接已被服务端置为「已重定向」，发上去的请求不会执行（只回带请求 id 的信封 1003）；</li>
  *   <li>{@link CloseOld#BEFORE_VERIFY}：连上新 gate 之后、<b>发握手之前</b>就关旧连接。真实客户端走的是这一种（Unity 在打开新连接后、
  *       验票前就重置旧连接；Go robot 的 {@code SwapConn} 同）。握手失败时旧连接已经没了，这次会话就此作废。</li>
  * </ul>

@@ -118,7 +118,7 @@
 | 5 | 合服围栏读侧 | 归属区稿：5.4 接真实现（`game:merge-fence:{zone}`，读失败封锁）；Java 设计稿：只留检查点，随 7.3 | **只留检查点、恒放行**（Q6） | 帮会 4.4 已有同一先例（`game-guild/.../zone/MergeFence.java:18-31`、`GuildConfiguration.java:437` 用 `MergeFence.NONE`）；7.3 之前没有写者，提前接读侧只会给每次 EnterGame 加一条 fail-closed 的 Redis 依赖，客户端所见零差别 |
 | 6 | `RedirectOnEnter` | 归属区稿：本批做（缺省关）；Java 设计稿：随 7.3 | **随 7.3**（Q16） | 基线缺省关（`login.yaml:211`；`config.go:198-215` 注明依赖客户端实现），唯一用途是合服后把源区登录的人送去目标区 |
 | 7 | GO-5 的 SM 接口 | 归属区稿：`AssignSceneRequest` 加 `gate_zone_id`、应答加 `redirect`；Java 设计稿：新方法 `redirectToZone` | **新方法** | `assign` 保持「选一个场景」的单一职责（`SceneDirectoryService.java:17-18`）；重定向不解析场景、不预占，与 assign 没有共享步骤 |
-| 8 | login 发起 124 之后旧连接的状态 | 归属区稿：保持「已登录、未进游戏」，可再发 EnterGame；Java 设计稿：REDIRECTED，丢弃一切请求 | **两种来源统一 REDIRECTED** | 基线重定向分支是 EnterGame 的成功出口（`entergamelogic.go:767-775`），成功即删登录会话（`PARITY.md:35`），旧连接本来就进不了游戏；统一后 gate 只有一种收口 |
+| 8 | login 发起 124 之后旧连接的状态 | 归属区稿：保持「已登录、未进游戏」，可再发 EnterGame；Java 设计稿：REDIRECTED，丢弃一切请求（2026-11-11 起改为回带请求 id 的信封 1003，见 §5.7） | **两种来源统一 REDIRECTED** | 基线重定向分支是 EnterGame 的成功出口（`entergamelogic.go:767-775`），成功即删登录会话（`PARITY.md:35`），旧连接本来就进不了游戏；统一后 gate 只有一种收口 |
 | 9 | 2011 持票者校验的位置 | 两份分稿都放在 2018 / 2028 之后、在途闸门之前 | **放在 2018 之后、2028 之前** | 基线在取账号（2028）之前就判（`entergamelogic.go:82` 早于 `:89-95`） |
 | 10 | 会话 zone 为 0 时建角 | 归属区稿：2020；Java 设计稿：回落配置 zone | **2020**（fail-closed） | 基线 zone 为 0 视为调用方 bug、拒绝登记（`homezone.go:184-186`）→ 建角回 2020（`createplayerlogic.go:257-268`）；AGENTS.md §3 归属路径默认 fail-closed |
 | 11 | 本机切片 zone 2 端口 | 归属区稿：gate 11001、scene 21002 / 21102 / 18124；Java 设计稿：gate 11010 / 18113、scene 21010 / 21110 / 18115 | **gate 11010 / 18123、scene 21010 / 21110 / 18115** | 21002 / 18124 已被 5.1 规划给第三个 scene 节点（`scene-channels-spec.md:1169`）；18113 已被 6.4 的 game-match 规划为管理端口（`docs/porting/match-spec.md:35`、`:916`），gate-z2 改用 18123；6.2 的 game-battle 占 12000 / 21200 / 18112（`battle-node-spec.md:818-820`、`:1412`），不冲突 |
@@ -512,7 +512,7 @@ handoff 标记 SET 是「不可回头点」：SET 发出之前一律可以解冻
 | 运维热关停 226 | 基线 226 走 C++ scene，Go 侧 killswitch 管不到 | gate 按方法查 `game:killswitch`，命中回**信封** 1003（`architecture.md:428-430`），不进 scene | Java 独有的运维能力；只在运维打开时可见 |
 | 受理到出结论上界 | 约 71 s | 约 25 s（§5.12） | X12 |
 | 受理后到冻结 | 受理即冻结 | 受理后到选中目标（≤ 4 s）照常可玩 | X5 |
-| 推出 124 的旧连接 | 保持（哑连接） | 丢弃一切请求，60 s 后 gate 关闭 | X8 |
+| 推出 124 的旧连接 | 保持（哑连接） | 不再执行请求：推 124 时排队中的与之后到达的请求都回带请求 id 的信封 1003（排队项的回执先于 124；2026-11-11 起，原为丢弃不回包），60 s 后 gate 关闭 | X8 |
 | 第二条腿持票者不符 | 26 {2011} | 同 | 无 |
 | 第二条腿进场失败 | 26 成功 + 23 {3023} | 26 应答内 tip（既有差异 `PARITY.md:27`）/ 链路层失败 23 {3023}（`PARITY.md:36`） | 既有 |
 | 他区同号 gate 验票 | `token not for this zone` | 同 | 无 |
@@ -770,13 +770,13 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
   2. 校验：`gate_host` 非空、`1 ≤ gate_port ≤ 65535`、`token_payload` / `token_signature` 非空、`target_scene_node_id == 0`、`to_epoch > from_epoch` → 不过：计 `redirects{invalid}`，
      `unbindScene` 后推 23 {3027} 并断开（对应基线隐患「空 payload 兜底会推出空地址的 124」，`gate.md:321`）。
   3. `unbindScene(s)`：不发 `PlayerLeave`（源已移除实例）、撤在线目录（工作树 `:921-932`）。
-  4. `s.redirected = true`；丢弃排队中的请求；组装 `RedirectToGateNotify` → `MessageContent{message_id = 124}`（**不设 id**）下发。消息号经 `MessageIdRegistry` 取
+  4. `s.redirected = true`；排队中的请求不再发出，逐条回带请求 id 的信封 1003（写在 124 之前，计 `redirected`；落地见下面的订正）；组装 `RedirectToGateNotify` → `MessageContent{message_id = 124}`（**不设 id**）下发。消息号经 `MessageIdRegistry` 取
      `SceneClientPlayerCommon.RedirectToGate`，同 `GateNode.java:182` 取 23 的做法。
   5. 挂 `game.gate.redirect-linger`（缺省 60 s）定时器：到点会话还在就直接关闭（`DisconnectReason.REDIRECT_LINGER`，**不推任何 tip**：客户端此刻要么已在新连接上，要么根本没实现 RedirectFlow）；
      客户端先关则定时器作废。定时器任务只捕获会话号，到点先查会话仍在、仍是 REDIRECTED 再关（AGENTS.md §3 回调生命周期）。
 - **`RedirectToGate` 会话指令**（login 的 GO-5，`applyDirectives`，工作树 `:483-496`）：先回 EnterGame 应答（`replyToClient` 先于 `applyDirectives`，`:454-455`）→ 执行 2、4、5 步
   （会话本就没有场景绑定）。迟到的应答（会话已断，`recordIdentity`）忽略该指令。
-- **REDIRECTED 会话**：之后的一切客户端请求静默丢弃（计 `RequestResult.REDIRECTED`），不走「未进场景推 23 {1003}」（`:588-592`；2026-10-15 起这一支改为回带请求 id 的信封 1003，mmorpg client-request-ordering.md O6，REDIRECTED 会话同样不走）。断线照常：`sessionClosed` 通知 login 注销设备窗口；
+- **REDIRECTED 会话**：之后到达的客户端请求不转发、不计非法包、不限频，合法消息号回带请求 id 的信封 1003（确定没有执行，客户端到新 gate 重试安全），未知消息号不回包，都计 `RequestResult.REDIRECTED`；不走「未进场景」那一支（`:588-592`；那一支 2026-10-15 起也回带请求 id 的信封 1003，mmorpg client-request-ordering.md O6），计数与它分开。**订正（2026-11-11）**：原稿写「一切请求静默丢弃」，按 mmorpg client-request-ordering.md O4「每个请求恰好一个回执」、O6「gate 级失败一律带请求 id」、O9 改为回 1003，与 C++ 版 gate 路由 lane 重定向之后的准入（`kRejectedRedirected`）同形；推 124 时还在排队的请求同样逐条回 1003，且都写在 124 之前（`failQueuedOnRedirect`）。断线照常：`sessionClosed` 通知 login 注销设备窗口；
   没有场景绑定，不发 `PlayerLeave`。
 - **REDIRECTED 之前已转出、之后才回来的调用**（评审补；例：传送提交时客户端恰好发了 17 LeaveGame）：login / 后端的应答**照常下发**（`replyToClient`，合规客户端已在换连接，无害），
   应答里的会话指令**一律忽略**（`applyDirectives` 遇 REDIRECTED 直接返回：会话已没有场景绑定，`UnbindPlayer` / `EnterScene` 都不能再生效；`CloseSession` 由收口定时器覆盖）。
@@ -786,7 +786,7 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 > **落地（2026-10-11，W4 `de19d45`；先行件 c `f7143b0`）**：`ClientDispatcher.onPlayerTransfer` 先按 `hasRedirect()` 分流到 `onTravelRedirect`，login 的指令走 `redirectByLogin`，两者共用 `invalidRedirect` 与 `enterRedirected`；
 > 收口定时器 `onRedirectLingerExpired` 只捕获会话号、到点重新查表；路由层是 `onPlayerTransferWithoutSession`。124 的消息号由新记录 `PushMessageIds`（23 与 124，按名字从契约解析）带进会话层；
 > `game.gate.redirect-linger` 在 `GateLimits` / `GateProperties` 里校验 ≥ 15 s。规格没写死处的取舍：非法重定向（两种来源）的断开原因计 `disconnects{transfer_failed}`，来源由 `redirects{source, invalid}` 区分；
-> 已重定向的会话再次 `ClientTokenVerify` 也静默丢弃（未重定向的已验证会话仍按基线回成功、不覆盖票据字段）；转入 REDIRECTED 时排队中的请求计请求去向 `redirected`（不是 dropped）；
+> 已重定向的会话再次 `ClientTokenVerify` 也静默丢弃（未重定向的已验证会话仍按基线回成功、不覆盖票据字段）；转入 REDIRECTED 时排队中的请求计请求去向 `redirected`（不是 dropped；2026-11-11 起另逐条回带请求 id 的信封 1003，写在 124 之前，原为只计数不回执）；
 > 已重定向会话上又来的、或关闭途中遇到的 `RedirectToGate` 指令计 `redirects{login, stale}`，保持「每条重定向指令恰好计一次」；没装配 124 消息号（只收 tip 号的旧构造器）时一律按内容非法收口，绝不发消息号为 0 的包；
 > 防御：login 若对仍挂着场景的会话下发重定向（不会发生，EnterGame 对这种会话回 2028），先按断线离场再重定向；`gate_host` 用 `isBlank` 判空。login 来源的指令内容非法时，EnterGame 应答已先发出，再推 23 {3027} 并断开。
 
@@ -859,7 +859,7 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 ### 5.10 冻结闸与客户端请求
 
 - 复用 5.2 §5.9（`scene-handoff-spec.md:920-938`）：只在 FREEZING 生效，PRECHECK / RESOLVING 不冻结。冻结中再发 226 回 13000、63 回 3014；资产通道 RETRY 27003。
-- 交出提交后实例已移除：`PlayerTransfer` 到 gate 之前发到源节点的请求按「玩家不在」静默丢弃；gate 进入 REDIRECTED 后在 gate 侧丢弃。
+- 交出提交后实例已移除：`PlayerTransfer` 到 gate 之前发到源节点的请求按「玩家不在」静默丢弃；gate 进入 REDIRECTED 后在 gate 侧拦下、不转发，回带请求 id 的信封 1003（§5.7）。
 
 ### 5.11 线程所有权
 
@@ -996,7 +996,7 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 | scene | `game_scene_battle_gate_rejects_total`（6.3） | Counter | `gate` 加 zone_travel（226 被战斗在途拒，3025；**落地**：只在同步段计，在队检查 / 选目标回来时复查到战斗的分别计 `travel_requests{in_battle}` / `travel_resolves{in_battle}`，不计本指标） |
 | gate | `game_gate_redirects_total` | Counter | `source` = travel / login；`result` = sent / invalid / stale / orphan（2 × 4 全量预建；orphan 只出现在 travel；login 的 stale 含迟到的应答与已重定向会话上又来的指令） |
 | gate | `game_gate_disconnects_total` | Counter | `reason` 加 redirect_linger；**落地**：非法重定向（两种来源）推 23 {3027} 后断开计 transfer_failed |
-| gate | `game_gate_client_requests_total` | Counter | `result` 加 redirected（REDIRECTED 会话丢弃，含转入 REDIRECTED 时还在排队的请求）。**落地**：原写 `game_gate_requests_total`，实际沿用既有的 `game_gate_client_requests_total` |
+| gate | `game_gate_client_requests_total` | Counter | `result` 加 redirected（REDIRECTED 会话上不发出的请求，含转入 REDIRECTED 时还在排队的请求；2026-11-11 起两类都回带请求 id 的信封 1003，原为丢弃不回包）。**落地**：原写 `game_gate_requests_total`，实际沿用既有的 `game_gate_client_requests_total` |
 | gate | `game_gate_handshakes_total` | Counter | 复用（`WRONG_ZONE` 覆盖他区同号 gate 的票据，`GateMetrics.java:57-67`） |
 | scene-manager | `game_scene_manager_travel_seconds` | Timer | `result` = ok / no_gate / no_map / **fenced**（落地：F4 命中或读不到，7.3 之前恒为 0）/ bad_request / error。Micrometer 名 `game.scene_manager.travel` |
 | scene-manager | `game_scene_manager_redirect_seconds` | Timer | `result` = ok / no_gate / no_scene / bad_request / error。Micrometer 名 `game.scene_manager.redirect` |
@@ -1114,7 +1114,7 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 | X5 | 受理后、选到目标前不冻结（同 5.2 RESOLVING）；基线受理即冻结 | 冻结只覆盖库事务；客户端此时显示「传送中」遮罩（转述） | 是：最多约 4 s 内输入照常生效 | 否 |
 | X6 | SM 不可达是「应答 `{0}` 后 23 {3027}」；基线没注册 SM 时同步 3027 | 直连 URL 无法同步得知（同 5.2 D12） | 是：码同、时机不同 | 否 |
 | X7 | 交出后失败（Lost）23 {3027} 后断开，不发 34；被接管 23 {2017} 后断开；基线 23 + 34 {3027} | 与 Java「不发 34」口径一致（5.2 D5，`architecture.md:126`） | 是：少一条 34，Unity 按 34 的 reason 选文案（`travel.md:442`），没有 34 时显示通用断线文案（B-7、R-T13） | 否 |
-| X8 | 推出 124 后旧会话转 REDIRECTED：丢弃之后一切请求，60 s 内客户端没关就由 gate 关；基线不关 | 不留半开空闲连接；合规客户端几秒内自己关（`redirect.go:160-163`） | 是：仅不合规客户端 | mmorpg 可选 |
+| X8 | 推出 124 后旧会话转 REDIRECTED：之后的请求不再执行、回带请求 id 的信封 1003（2026-11-11 起，原为丢弃），60 s 内客户端没关就由 gate 关；基线不关 | 不留半开空闲连接；合规客户端几秒内自己关（`redirect.go:160-163`） | 是：仅不合规客户端 | mmorpg 可选 |
 | X9 | 重定向选 gate 剔除排空中的 gate；基线不看排空 | 与 gateway 分配同规则（`GatePicker.java:10-19`），不把旅客送进要下线的 gate | 否：只影响落到哪台 | mmorpg 可选 |
 | X10 | 不查归属区映射：没有「未映射拒传送」、没有「归属区不可用」20；合服 21 随 7.3 | `player.zone_id` 建角同行写入、恒有值；单库无需按归属区路由存盘 | 否（今天） | 否 |
 | X11 | GO-5 签票失败（目标 zone 没 gate / 没 scene 节点）时落入口 zone；基线 SM 回错、login 推 3023，租约到期前每次都失败 | 归属全服一行，跨 zone 落地只是一次接管，不会串档；可用性优先 | 是：仅故障时 | mmorpg 可选 |
@@ -1242,8 +1242,8 @@ client    gate G1(z1)                源 scene S(z1)                 scene-manag
 
 - **握手**：票据的 `player_id` / `target_zone_id` 进 `ClientSession`，并出现在之后**每一个** login 与后端域调用的 `SessionContext`；再次 verify 不覆盖；普通令牌 `ticket_player_id = 0`；
   他区同号 gate 的票据 → `WRONG_ZONE`、断开、文案 `token not for this zone`。
-- **`onPlayerTransfer` 带 redirect**：绑定对上 → 解绑（不发 `PlayerLeave`、撤在线登记）、下发 124（`message_id = 124`、`id = 0`、五项逐字段等于帧）、会话 REDIRECTED；之后请求被丢弃
-  （不推 1003）；60 s 后关闭、原因 `redirect_linger`；客户端先关 → 定时器作废。
+- **`onPlayerTransfer` 带 redirect**：绑定对上 → 解绑（不发 `PlayerLeave`、撤在线登记）、下发 124（`message_id = 124`、`id = 0`、五项逐字段等于帧）、会话 REDIRECTED；之后的请求不转发，
+  回带请求 id 的信封 1003（2026-11-11 起，原为丢弃、不推 1003；推 124 时排队中的请求逐条回 1003，先于 124）；60 s 后关闭、原因 `redirect_linger`；客户端先关 → 定时器作废。
 - **过期 / 会话正在关 / 绑定不符** → 只计 `stale`、不调 `abandonEnter`；路由层找不到会话 → 只计 `orphan`（`SceneEventRouter` 单测）。
 - **非法 redirect**（空 host / 端口 0 或越界 / 空 payload / 空签名 / 同时带目标节点）→ 23 {3027}、断开。
 - **迟到帧**：REDIRECTED 后源节点迟到的 `ToClient` / `PlayerKicked` 因绑定已清被丢弃；`PlayerTransfer` 之前的 226 应答照常先到。
@@ -1339,7 +1339,7 @@ tip 用生成的表枚举断言，不写数字；请求间隔 1.1 s（避开按�
 | T3 | A 建一人队 → 226 `{2}` → 解散 | 应答 3026（同步）；无 124 | X4 |
 | T4 | 226 `{U}`，U = 9000 + runTag 散列 % 1000（未部署的区） | 应答 `{0}`，10 s 内 23 {3027}；无 124；随后 77 正常应答、坐标不变 | runbook D1；基线 robot 未覆盖 |
 | T5 | 226 `{2, conf}` | 应答 `{0}` **先于** 124；B 收到 A 的 51（同场景时）；恰好一条 124：`player_id == A`、`target_zone_id == 2`、`zone_id == 2`、`deadline ∈ (now, now + 305]`；跟随后角色列表里 A 的 `zone_id` **仍是 1**；26 `player_id == A`；79 在 124 之后、gate 地址 == 124 的目标；金币 == G0；GM +7 → G0 + 7 | `:278-291`、`:824-859` |
-| T5a | T5 跟随时晚 3 s 关旧连接，期间在旧连接上发 77 | 无回包（REDIRECTED） | X8 |
+| T5a | T5 跟随时晚 3 s 关旧连接，期间在旧连接上发 77 | 恰好一条带请求 id 的信封 1003、没有 23（REDIRECTED；2026-11-11 起，原为无回包） | X8 |
 | T6 | 停留 `--dwell`（缺省 35 s，可设 0）后读金币 | 无 23 / 34 / 124；金币 G0 + 7 | `:293-340` |
 | T7 | **GO-5 窗口内经 home 入口重连**：记 z2 的 scene_id 与坐标 → 直接关 TCP（不发 17）→ assign-gate(1) → 握手 → 48 → 26 | 26 无错；随后恰好一条 124（目标 2、`player_id == A`）；跟随后 79 的 scene_id == 记下的值（原实例），坐标误差 < 1 m；金币 G0 + 7 | `travel.md:832-835`（基线 robot 未覆盖） |
 | T7b | 再关 TCP → assign-gate(2) 直连 | 无 124；79 的 scene_id 同上 | R3 |

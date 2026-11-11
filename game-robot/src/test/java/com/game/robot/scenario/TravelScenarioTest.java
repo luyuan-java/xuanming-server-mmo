@@ -327,7 +327,7 @@ class TravelScenarioTest {
         CheckReport report = scenario.run();
 
         assertThat(scenario.resultLine()).startsWith("TRAVEL_SMOKE_FAIL step=t5a-old-connection reason=T5a");
-        assertThat(failed(report)).singleElement().asString().contains("收到了 77 的应答");
+        assertThat(failed(report)).singleElement().asString().contains("77 收到 1 条回执 [应答体（被执行了）]");
     }
 
     // ---------------------------------------------------------------- 子模式、消息号、tip 与节奏的约定

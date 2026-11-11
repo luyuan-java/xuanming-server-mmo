@@ -22,7 +22,11 @@ import org.slf4j.LoggerFactory;
  *   <li><b>会话隔离级别</b>必须是 {@code READ-COMMITTED}（连接池漏了 {@code transaction_isolation} 时，取消收藏的自动提交 DELETE 会落回 RR、拿间隙锁，
  *       §1.9）；</li>
  *   <li><b>sql_mode</b> 必须含 {@code STRICT_TRANS_TABLES}（在连接层兜底「超长文本被静默截断」，§1.1）；</li>
- *   <li>{@code innodb_lock_wait_timeout} 不等于 {@value TradeLimits#LOCK_WAIT_TIMEOUT_SECONDS}（Q7）只告警：单条 SQL 另有 2000 ms 的查询超时兜底。</li>
+ *   <li>{@code innodb_lock_wait_timeout}（行锁等待）不等于 {@value TradeLimits#LOCK_WAIT_TIMEOUT_SECONDS}（Q7）只告警：单条 SQL 另有 2000 ms 的查询超时兜底；</li>
+ *   <li>{@code lock_wait_timeout}（元数据锁等待）在 MySQL 档不等于 {@value TradeLimits#LOCK_WAIT_TIMEOUT_SECONDS} 只告警：连接串漏了它
+ *       （例如部署用 {@code SPRING_DATASOURCE_URL} 整串覆盖、没带 sessionVariables）时缺省是一年，语句排在 DDL 的元数据锁后面会一直等，
+ *       客户端读超时断开也撤不回，库端拿到锁后照样执行，成了 gate 放行同会话下一条之后的迟到写（mmorpg client-request-ordering.md §6.1）。
+ *       TiDB 档不判：TiDB 把它当只接受不生效的兼容变量（pingcap/tidb {@code pkg/sessionctx/variable/noop.go}），读回的值不说明任何事。</li>
  * </ol>
  * 阻塞 JDBC；只在启动线程上调用。
  */
@@ -34,10 +38,16 @@ public final class TradeStartupChecks {
     static final int[] MIN_MYSQL = {8, 0, 0};
 
     static final String SELECT_SESSION = "SELECT VERSION(), @@session.transaction_isolation, @@session.sql_mode,"
-            + " @@session.innodb_lock_wait_timeout";
+            + " @@session.innodb_lock_wait_timeout, @@session.lock_wait_timeout";
 
-    /** 读到的会话参数。 */
-    public record Session(String version, String isolation, String sqlMode, long lockWaitTimeoutSeconds) {
+    /**
+     * 读到的会话参数。
+     *
+     * @param lockWaitTimeoutSeconds         {@code innodb_lock_wait_timeout}（行锁等待，秒）
+     * @param metadataLockWaitTimeoutSeconds {@code lock_wait_timeout}（元数据锁等待，秒；TiDB 档只接受不生效）
+     */
+    public record Session(String version, String isolation, String sqlMode, long lockWaitTimeoutSeconds,
+                          long metadataLockWaitTimeoutSeconds) {
     }
 
     private TradeStartupChecks() {
@@ -60,6 +70,11 @@ public final class TradeStartupChecks {
             log.warn("数据库会话 innodb_lock_wait_timeout={} s，不是约定的 {} s（spring.datasource.url 的 sessionVariables）；单条 SQL 仍有 {} ms 上限",
                     session.lockWaitTimeoutSeconds(), TradeLimits.LOCK_WAIT_TIMEOUT_SECONDS, TradeLimits.STORE_OP_TIMEOUT_MS);
         }
+        if (metadataLockWaitOffContract(session)) {
+            log.warn("Database session lock_wait_timeout={} s is not the agreed {} s (sessionVariables in spring.datasource.url);"
+                    + " a statement queued behind a DDL metadata lock may still run after the request deadline",
+                    session.metadataLockWaitTimeoutSeconds(), TradeLimits.LOCK_WAIT_TIMEOUT_SECONDS);
+        }
         return session;
     }
 
@@ -70,7 +85,7 @@ public final class TradeStartupChecks {
                 if (!rs.next()) {
                     throw new SQLException("读会话参数没有返回行");
                 }
-                return new Session(rs.getString(1), rs.getString(2), rs.getString(3), rs.getLong(4));
+                return new Session(rs.getString(1), rs.getString(2), rs.getString(3), rs.getLong(4), rs.getLong(5));
             }
         }
     }
@@ -92,6 +107,18 @@ public final class TradeStartupChecks {
             return "数据库会话 sql_mode=\"" + session.sqlMode() + "\" 不含 STRICT_TRANS_TABLES（超长文本会被静默截断），拒绝启动";
         }
         return null;
+    }
+
+    /**
+     * 元数据锁等待是否偏离约定、要告警：只在 MySQL 档判（TiDB 档该变量只接受不生效）。只告警不拒启，与行锁等待同一口径。
+     */
+    static boolean metadataLockWaitOffContract(Session session) {
+        return !isTidb(session.version()) && session.metadataLockWaitTimeoutSeconds() != TradeLimits.LOCK_WAIT_TIMEOUT_SECONDS;
+    }
+
+    /** 版本串含 {@code TiDB}（不分大小写）即 TiDB 档；与 {@link #versionRejection} 的放行判据相同。 */
+    static boolean isTidb(String version) {
+        return version != null && version.toLowerCase(Locale.ROOT).contains("tidb");
     }
 
     /** 版本判定（同 game-guild ServerVersion 的写法，下限不同）：null = 通过。 */

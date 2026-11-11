@@ -7,6 +7,7 @@ import com.game.proto.ClientRequest;
 import com.game.proto.ClientTokenVerifyRequest;
 import com.game.proto.ClientTokenVerifyResponse;
 import com.game.proto.MessageContent;
+import com.game.proto.TipInfoMessage;
 import com.google.protobuf.Message;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
@@ -128,6 +129,12 @@ public final class FakeGate implements AutoCloseable {
         public void reply(ClientRequest request, Message body) {
             channel.writeAndFlush(MessageContent.newBuilder().setMessageId(request.getMessageId()).setId(request.getId())
                     .setSerializedMessage(body.toByteString()).build());
+        }
+
+        /** 回一条 gate 级失败信封：消息号与请求相同、{@code id} 回显、{@code error_message{tip}}，不带应答体。 */
+        public void replyEnvelopeError(ClientRequest request, int tipId) {
+            channel.writeAndFlush(MessageContent.newBuilder().setMessageId(request.getMessageId()).setId(request.getId())
+                    .setErrorMessage(TipInfoMessage.newBuilder().setId(tipId)).build());
         }
 
         /** 推一条下行（{@code id = 0}）。 */

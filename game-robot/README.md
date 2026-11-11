@@ -397,7 +397,7 @@ java -jar game-robot/target/game-robot-0.1.0-SNAPSHOT.jar travel-long
 - T5（`t5-travel`）：226 `{--visit-zone, --travel-scene-config}` → 应答 `{0}`（`0a 00`）**先于** 124；B 收到 A 的 51；124 本地可用，票据 `player_id == A`、
   `target_zone_id == zone_id == --visit-zone`、到期 ∈ (now, now + 305] 且等于 `token_deadline`、不带会话密钥；跟随（握手成功后**晚 3 s** 关旧连接）→
   严格重登（角色列表必须有 A、**绝不建角**）：新连接连的是 124 给的 gate、角色列表里 A 的 `zone_id` 仍是 `--zone`、79 晚于 124；旧连接上恰好一条 124；金币 == G0，GM +7 → G0 + 7。
-- T5a（`t5a-old-connection`）：晚关的那 3 s 里在旧连接上发 77：没有回包、没有 23（会话已 REDIRECTED）。
+- T5a（`t5a-old-connection`）：晚关的那 3 s 里在旧连接上发 77：恰好回一条带请求 id 的信封 1003（没有执行）、没有 23（会话已 REDIRECTED；2026-11-11 起，原为不回包）。
 - T6（`t6-dwell`）：停留 `--dwell-ms`：没有 23 / 34 / 124，连接仍在；金币 G0 + 7。
 - T7（`t7-reconnect-home`）GO-5：记下访客区的场景与坐标 → 直接关 TCP（不发 17）→ assign-gate(`--zone`) → 握手 → 48 → 26：26 无错、**26 的应答先于** 124，
   恰好一条 124（目标 `--visit-zone`、持票者 A）→ 跟随（握手成功即关旧连接）→ 回到原实例、坐标误差 < 1 m、金币 G0 + 7。

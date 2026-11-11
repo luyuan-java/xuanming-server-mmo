@@ -241,7 +241,7 @@ class RedirectFollowerTest {
         track(followed.connection());
 
         assertThat(followed.oldClosed()).isFalse();
-        assertThat(usable(old)).as("旧连接还开着（真服务端这时已把它置为已重定向，请求不会有回包）").isTrue();
+        assertThat(usable(old)).as("旧连接还开着（真服务端这时已把它置为已重定向，请求不会执行、只回 1003）").isTrue();
         assertThat(usable(followed.connection())).isTrue();
         assertThat(events.indexOf("old closed#0")).isNegative();
 

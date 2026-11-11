@@ -160,10 +160,10 @@ class GameConnectionRedirectTest {
             assertThat(connection.await(0, r -> r.messageId() == REDIRECT, SHORT)).isPresent();
 
             assertThat(connection.describeSince(0)).as("124 在所问的区间里")
-                    .isEqualTo("；期间收到了 124 RedirectToGate（目标 10.0.0.7:11010）：服务端让这条连接改连别的 gate，之后本连接上的请求不再有回包");
+                    .isEqualTo("；期间收到了 124 RedirectToGate（目标 10.0.0.7:11010）：服务端让这条连接改连别的 gate，之后本连接上的请求不再执行（只回 1003）");
             int mark = connection.inbox().size();
             assertThat(connection.describeSince(mark)).as("124 在所问的区间之前：照样点出来")
-                    .isEqualTo("；这条连接此前已收到了 124 RedirectToGate（目标 10.0.0.7:11010）：它之后发的请求不会有回包");
+                    .isEqualTo("；这条连接此前已收到了 124 RedirectToGate（目标 10.0.0.7:11010）：它之后发的请求不会执行（只回 1003）");
 
             // 124 之后再发请求（这里发一个假 gate 不回包的号）：等应答超时的文案带上它
             assertThatThrownBy(() -> connection.call(IDS.createPlayer(), ListSkillsRequest.getDefaultInstance(), ListSkillsResponse.parser(),

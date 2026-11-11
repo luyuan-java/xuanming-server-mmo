@@ -223,7 +223,7 @@ class ClientRedirectTest {
     }
 
     @Test
-    void 已重定向之后客户端请求一律静默丢弃_不回包不推1003_不计非法包_计redirected() {
+    void 已重定向之后的请求逐条回带id的1003_不转发_未知号与再次握手不回包_不计非法包_计redirected() {
         Client c = redirectedByTravel();
         int framesBefore = links.sent.size();
 
@@ -237,7 +237,12 @@ class ClientRedirectTest {
         }
         c.ch().writeInbound(verify(normalToken()));
 
-        assertThat((Object) c.ch().readOutbound()).as("一切上行无回包（含再次握手）").isNull();
+        // 每个合法请求恰好一个回执：确定没有执行（O4 / O6 / O9，与 C++ 版 gate 路由 lane 重定向之后的准入同形）
+        assertNotExecuted(c.ch().readOutbound(), 10, SCENE_MSG);
+        assertNotExecuted(c.ch().readOutbound(), 11, TRAVEL_MSG);
+        assertNotExecuted(c.ch().readOutbound(), 12, LOGIN_MSG);
+        assertNotExecuted(c.ch().readOutbound(), 13, FRIEND_MSG);
+        assertThat((Object) c.ch().readOutbound()).as("未知消息号与再次握手无回包").isNull();
         assertThat(c.ch().isOpen()).isTrue();
         assertThat(sentSince(framesBefore)).isEmpty();
         assertThat(login.calls).as("只有进游戏那一次").hasSize(1);
@@ -480,7 +485,8 @@ class ClientRedirectTest {
         assertThat(redirects("travel", "sent")).isZero();
 
         c.ch().writeInbound(request(2, ENTER_GAME_MSG, "again"));
-        assertThat(login.calls).as("之后的请求丢弃").hasSize(1);
+        assertThat(login.calls).as("之后的请求不再转发").hasSize(1);
+        assertNotExecuted(c.ch().readOutbound(), 2, ENTER_GAME_MSG);
         assertThat((Object) c.ch().readOutbound()).isNull();
 
         c.ch().advanceTimeBy(LINGER.toMillis(), TimeUnit.MILLISECONDS);
