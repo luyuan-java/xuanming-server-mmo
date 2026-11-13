@@ -2074,3 +2074,51 @@ Java 版按同一口径要做的事(只登记,没改 Java 代码):
 `MessageReceivedUnderAPreviousRouteIsStaleOnlyIfSceneBound`、`SceneServiceIsListedPerMethod`。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-13 分配 gate 凭 access token 鉴权,不再收自报的账号名(主仓已落码未编译,Java 待做)
+
+主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。说明见主仓 `docs/design/login-queue-2026-05.md` §5 末尾「2026-11-12 更正」,
+验证命令见主仓 `docs/PROGRESS.md` 2026-11-13「分配 gate 凭 access token 鉴权」。
+
+**客户端契约(两版同批)**:`POST /api/assign-gate` 的请求体去掉 `account`,改带 `access_token`(`/api/login` 签发的那一个);排队重入照旧带 `queue_token`。
+令牌不能用(格式不对、未知、过期、所在令牌家族已吊销)回 **HTTP 401**,客户端提示重新登录、不重试;令牌存储故障回 500(可重试)。
+Unity 客户端已按这个契约改(`GameClient.BuildAssignGateRequest`、`AssignGateResult.CodeAuthRejected = 401`),Java 版网关要同批改,否则新客户端分配 gate 一律走匿名。
+
+**要对齐的行为**:
+
+1. 分配 gate 时的账号只从 access token 解出,不信请求正文。「已有在线会话、免排队」的判定与排队身份都用这个账号。原来按自报的账号名判,报出别人的账号名就能插队。
+2. 不带令牌 = 匿名分配,只在旧 gate 凭据登录(主仓 `LegacyGateLoginEnabled`)开着时允许;匿名分配不免排队,排队身份为空。旧路径关了就回 401。
+3. 令牌被拒与令牌存储故障分开:前者 401,后者 500。主仓在令牌校验里加了专门的拒绝错误(`token.ErrAccessRejected`),用 access token 登录的 provider 也按它分类,存储故障不再被当成「凭证无效」。
+4. 网关账号冷却键改用 access token 的 SHA-256 摘要(`tok:` + 前 16 字节十六进制)@IP,不把令牌原文放进内存键;匿名分配没有冷却键。
+5. 指标:按鉴权结果计数(已鉴权 / 匿名 / 匿名被拒 / 令牌被拒 / 故障),关旧路径之前看匿名降到零。
+
+**验证**(Java 仓口径):对应主仓 `go/login/internal/logic/loginpregate/assigngate_auth_test.go`(令牌账号、匿名开关、令牌被拒、存储故障)、
+`go/login/internal/logic/pkg/token/access_rejected_test.go`(拒绝与故障分开),以及本仓 `java/gateway_node` 的 `AssignGateServiceAuthTest`、`AssignGateRequestProtoTest`。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-13 Apple / Google 登录(主仓已落码未编译,Java 待做)
+
+主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/third-party-login-end-to-end-design.md` §十二,
+联调手册见主仓 `docs/ops/wechat-qq-sandbox-runbook.md` §I,验证命令见主仓 `docs/PROGRESS.md` 2026-11-13「Apple / Google 登录」。
+
+**客户端契约(两版同批)**:`POST /api/login` 的 `auth_type` 新增 `apple` / `google`,`auth_token` 是平台 SDK 拿到的身份令牌(JWT)原文。回包、错误码与现有第三方登录相同。
+
+| auth_type | auth_token | 账号名 |
+|---|---|---|
+| `apple` | `ASAuthorizationAppleIDCredential.identityToken` | `apple_<sub>` |
+| `google` | Google 登录 SDK 的 `idToken`(客户端用服务端 OAuth 客户端 ID 请求) | `google_<sub>` |
+
+**要对齐的行为**:
+
+1. 只接受 RS256,不信令牌头部声明的算法(拒绝 `none`、`HS256` 等);先按 `kid` 取公钥验签名,签名对了才看声明。
+2. 公钥:Apple `https://appleid.apple.com/auth/keys`,Google `https://www.googleapis.com/oauth2/v3/certs`。`iss`:Apple `https://appleid.apple.com`,Google `https://accounts.google.com` 或 `accounts.google.com`;沙箱只换取公钥的地址,不换 `iss`。
+3. `aud` 必须包含配置的 ClientId(Apple 是 Bundle ID,Google 是服务端 OAuth 客户端 ID,必须以 `.apps.googleusercontent.com` 结尾);`exp`、`iat`、`nbf` 容忍 1 分钟时钟偏差;`sub` 非空;不足 2048 位的公钥不用;令牌超过 16 KiB 不解析。
+4. 公钥缓存:新鲜期 1 小时,过期后认识的 `kid` 先用旧公钥、后台换新;不认识的 `kid` 等一次重拉,但离上次拉取不足 1 分钟不拉、按凭证无效拒绝;拉取失败时 24 小时内的旧公钥照用;并发请求共用一次拉取,各自按自己的期限等待。
+5. 错误分类:令牌本身的问题按凭证无效;取不到公钥(网络、非 2xx、超限、不可解析、一把可用公钥都没有、等公钥超时)与没配 ClientId 按渠道故障。错误文案与日志不带令牌原文。
+6. 配置没有密钥;生产只收 https 的取公钥地址(公钥被换掉就能伪造令牌)。
+
+**验证**(Java 仓口径):对应主仓 `go/login/internal/logic/pkg/auth/idtoken_test.go`(算法混淆、篡改、声明逐项、kid 重拉限速、旧公钥兜底、并发共用拉取、等待期限)、
+`go/login/internal/config/auth_providers_idtoken_test.go`(门禁)、`go/login/cmd/sandbox_mock/idtoken_test.go`(对着 mock 端到端)。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
