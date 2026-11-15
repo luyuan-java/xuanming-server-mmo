@@ -6,10 +6,6 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Base64;
-import java.util.HexFormat;
 import java.util.Map;
 
 /** 固定九图的开发联调读取器；来源原字节仍保留 clientOnly，不代表正式激活。 */
@@ -41,47 +37,20 @@ public final class FestivalMapNavigation {
         Path folder = root.resolve(paddedId);
         try {
             byte[] sourceBytes = Files.readAllBytes(folder.resolve("source.json"));
-            if (!expected.equals(sha256(sourceBytes))) {
+            if (!expected.equals(CurrentMapNavigation.sha256(sourceBytes))) {
                 throw new IllegalArgumentException("节庆 source.json SHA256 不匹配冻结交接: " + paddedId);
             }
             JsonNode source = new ObjectMapper().readTree(sourceBytes);
-            byte[] text = Files.readAllBytes(folder.resolve("walkmask.txt"));
-            byte[] mask = Base64.getDecoder().decode(text);
             if (source.path("schemaVersion").asInt() != 2
                     || !source.path("clientOnly").asBoolean()
                     || source.path("authoritativeServerRegistered").asBoolean()
                     || source.path("sceneId").asInt() != Integer.parseInt(paddedId)
-                    || !("map" + paddedId).equals(source.path("key").asText())
-                    || !sha256(text).equals(source.path("walkmaskSha256").asText())
-                    || !sha256(mask).equals(source.path("walkmaskPackedSha256").asText())) {
-                throw new IllegalArgumentException("节庆导航合同或 SHA256 不一致: " + paddedId);
+                    || !("map" + paddedId).equals(source.path("key").asText())) {
+                throw new IllegalArgumentException("节庆导航合同不一致: " + paddedId);
             }
-            JsonNode world = source.path("worldRect"), effective = source.path("effectiveWorldRect");
-            double x = world.path("x").asDouble(), z = world.path("y").asDouble();
-            double size = source.path("cellSize").asDouble();
-            int columns = source.path("walkmaskColumns").asInt(), rows = source.path("walkmaskRows").asInt();
-            if (columns != (int) Math.ceil(world.path("width").asDouble() / size)
-                    || rows != (int) Math.ceil(world.path("height").asDouble() / size)) {
-                throw new IllegalArgumentException("节庆导航宽高不匹配: " + paddedId);
-            }
-            JsonNode spawn = source.path("spawnWorld");
-            return new CurrentMapNavigation(mask,
-                    new Vec3(spawn.path("z").asDouble(), spawn.path("x").asDouble(), spawn.path("y").asDouble()),
-                    columns, rows, size, x, z,
-                    Math.max(x, effective.path("x").asDouble()),
-                    Math.max(z, effective.path("y").asDouble()),
-                    Math.min(x + world.path("width").asDouble(), effective.path("x").asDouble() + effective.path("width").asDouble()),
-                    Math.min(z + world.path("height").asDouble(), effective.path("y").asDouble() + effective.path("height").asDouble()));
+            return CurrentMapNavigation.loadRectangular(source, Files.readAllBytes(folder.resolve("walkmask.txt")), folder);
         } catch (IOException e) {
             throw new UncheckedIOException("读取节庆导航失败: " + folder, e);
-        }
-    }
-
-    private static String sha256(byte[] bytes) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
         }
     }
 }

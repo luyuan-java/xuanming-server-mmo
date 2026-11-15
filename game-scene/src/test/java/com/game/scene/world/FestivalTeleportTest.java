@@ -13,10 +13,12 @@ import com.game.scene.testing.FakeSceneTables;
 import com.game.scene.testing.ManualClock;
 import com.game.scene.testing.RecordingSink;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIf;
 
 /** 从真实进场走统一瞬移入口；失败不能改坐标、移动锚点或发送成功瞬移消息。 */
 class FestivalTeleportTest {
@@ -71,6 +73,23 @@ class FestivalTeleportTest {
         assertThat(oldGrid.isWalkable(oldBlockedTarget)).isFalse();
         assertThat(legacy.world.teleportWithinScene(legacy.player, oldBlockedTarget, null, ADMIN)).isEqualTo(TELEPORTED);
         assertThat(legacy.player.position()).isEqualTo(oldBlockedTarget);
+    }
+
+    @Test
+    @EnabledIf("com.game.scene.world.CurrentMapNavigationTest#yuexiDataPresent")
+    void 月汐湾场景3可归队到码头但停在海上被拒绝_旧版场景3仍保留范围规则() {
+        Path root = CurrentMapNavigationTest.navigationRoot();
+        Vec3 ocean = new Vec3(40.275, 75.9375, 0);
+        Fixture yuexi = enter(3, CurrentMapNavigation.loadYuexi(root));
+        assertThat(yuexi.world.teleportWithinScene(yuexi.player, ocean, null, ADMIN)).isEqualTo(INVALID_TARGET);
+        assertThat(yuexi.sink.to(1, 11)).isEmpty();
+        Vec3 dock = new Vec3(44.4375, 59.34375, 0.05);
+        assertThat(yuexi.world.teleportWithinScene(yuexi.player, dock, null, TEAM_REGROUP)).isEqualTo(TELEPORTED);
+        assertThat(yuexi.player.position()).isEqualTo(new Vec3(dock.x(), dock.y(), 0));
+
+        Fixture legacy = enter(3, CurrentMapNavigation.load(root, "village"));
+        assertThat(legacy.world.teleportWithinScene(legacy.player, ocean, null, ADMIN)).isEqualTo(TELEPORTED);
+        assertThat(legacy.player.position()).isEqualTo(ocean);
     }
 
     private record Fixture(SceneWorld world, ScenePlayer player, RecordingSink sink) { }

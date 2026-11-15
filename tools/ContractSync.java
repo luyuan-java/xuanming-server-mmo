@@ -83,6 +83,7 @@ public final class ContractSync {
     private static final String TIP_FAULTS_OUT = "game-table/src/main/java/com/game/table/tip/TipFaults.java";
     private static final String TABLE_DATA_OUT = "config-data/tables";
     private static final String NAVIGATION_OUT = "config-data/navmesh/current_maps";
+    private static final String YUEXI_NAVIGATION = "village/yuexi-bay-20261115";
     private static final String SOURCE_INFO_OUT = "contract/SOURCE.properties";
     private static final List<String> MANAGED = List.of(PROTO_OUT, REGISTRY_OUT, TABLE_PROTO_OUT, TABLE_CONSTANTS_OUT,
             TIP_FAULTS_OUT, TABLE_DATA_OUT, SOURCE_INFO_OUT);
@@ -249,11 +250,15 @@ public final class ContractSync {
 
         Path navigationOut = out.resolve(NAVIGATION_OUT);
         cleanDir(navigationOut);
-        for (String map : List.of("main", "island", "village")) {
+        Path navigationSource = source.resolve("data/scene_nav_bin/current_maps");
+        List<String> maps = new ArrayList<>(List.of("main", "island", "village"));
+        // 历史来源的渔村仍走旧栅格；新版包与旧包并存，不能覆盖复用 donghai_scene 的场景。
+        if (Files.exists(navigationSource.resolve(YUEXI_NAVIGATION))) maps.add(YUEXI_NAVIGATION);
+        for (String map : maps) {
             for (String name : List.of("source.json", "walkmask.txt")) {
                 Path target = navigationOut.resolve(map).resolve(name);
                 Files.createDirectories(target.getParent());
-                Files.copy(source.resolve("data/scene_nav_bin/current_maps").resolve(map).resolve(name), target);
+                Files.copy(navigationSource.resolve(map).resolve(name), target);
                 info.put("maps." + map + "." + name + ".sha256", sha256(target));
             }
         }

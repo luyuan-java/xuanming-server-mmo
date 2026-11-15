@@ -11,9 +11,20 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class CurrentMapNavigationTest {
+    static Path configRoot() {
+        String override = System.getProperty("game.currentMapsTestConfigDir");
+        if (override != null) return Path.of(override);
+        // surefire 的工作目录是模块目录；从仓库根目录跑时也能找到。
+        return Files.isDirectory(Path.of("../config-data/tables")) ? Path.of("../config-data") : Path.of("config-data");
+    }
+
     static Path navigationRoot() {
-        return Files.isDirectory(Path.of("../config-data/navmesh/current_maps"))
-                ? Path.of("../config-data/navmesh/current_maps") : Path.of("config-data/navmesh/current_maps");
+        return configRoot().resolve("navmesh/current_maps");
+    }
+
+    static boolean yuexiDataPresent() {
+        return System.getProperty("game.currentMapsTestConfigDir") != null
+                || Files.isRegularFile(navigationRoot().resolve(CurrentMapNavigation.YUEXI_FOLDER).resolve("source.json"));
     }
 
     @Test

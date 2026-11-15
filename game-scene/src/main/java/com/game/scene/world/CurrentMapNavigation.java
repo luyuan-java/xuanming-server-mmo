@@ -13,6 +13,9 @@ import java.util.HexFormat;
 
 /** 与客户端共用的保守矩形栅格。服务器 (x,y,z) = Unity (z,x,y)。 */
 public final class CurrentMapNavigation implements SceneNavigation {
+    private static final String YUEXI_REVISION = "yuexi-bay-20261115";
+    private static final String YUEXI_SOURCE_SHA = "99fec92614867c04f1c3cdd6bcf6e8bd0d3235d3b44409c3db6a3174951c8a86";
+    static final String YUEXI_FOLDER = "village/" + YUEXI_REVISION;
     private static final int RESOLUTION = 150;
     private static final double CELL_SIZE = 2;
     private static final double BACKOFF = 0.05;
@@ -22,14 +25,66 @@ public final class CurrentMapNavigation implements SceneNavigation {
     private final double originX, originZ, cellSize;
     private final double minX, minZ, maxX, maxZ;
     private final int[] connectedDomains;
+    private final boolean requiresConnectedTeleport;
 
     CurrentMapNavigation(byte[] mask, Vec3 spawn) {
         this(mask, spawn, RESOLUTION, RESOLUTION, CELL_SIZE, 50, 0, 50, 0, 350, 300);
     }
 
+    /** 场景 3 只有引用正式版本化资源路径时才切换到月汐湾矩形栅格。 */
+    static CurrentMapNavigation loadYuexi(Path root) {
+        Path folder = root.resolve(YUEXI_FOLDER);
+        try {
+            byte[] sourceBytes = Files.readAllBytes(folder.resolve("source.json"));
+            if (!YUEXI_SOURCE_SHA.equals(sha256(sourceBytes))) {
+                throw new IllegalArgumentException("月汐湾 source.json SHA256 不匹配正式交接: " + folder);
+            }
+            JsonNode source = new ObjectMapper().readTree(sourceBytes);
+            if (!source.path("schemaVersion").isIntegralNumber() || source.path("schemaVersion").intValue() != 2
+                    || !source.path("sceneId").isIntegralNumber() || source.path("sceneId").intValue() != 3
+                    || !"village".equals(source.path("key").asText())
+                    || !YUEXI_REVISION.equals(source.path("revision").asText())
+                    || !"base64-msb-first-row-major-top-to-bottom".equals(source.path("maskEncoding").asText())
+                    || !rectangleEquals(source.path("worldRect"), 0, 0, 86.4, 72)
+                    || !rectangleEquals(source.path("effectiveWorldRect"), 0, 0, 72, 72)
+                    || coordinate(source, "cellSize") != 0.5) {
+                throw new IllegalArgumentException("月汐湾导航身份或世界矩形不一致: " + folder);
+            }
+            CurrentMapNavigation map = loadRectangular(source, Files.readAllBytes(folder.resolve("walkmask.txt")), folder);
+            int count = 0;
+            for (int row = 0; row < map.rows; row++) {
+                for (int col = 0; col < map.columns; col++) {
+                    if (!map.cell(col, row)) continue;
+                    int label = map.connectedDomains[row * map.columns + col];
+                    if (label != 1) {
+                        throw new IllegalArgumentException("月汐湾导航含有效范围外或与出生点断开的可走格: " + folder);
+                    }
+                    count++;
+                }
+            }
+            if (count != positiveInteger(source, "walkableCellCount")) {
+                throw new IllegalArgumentException("月汐湾可走格计数不一致: " + folder);
+            }
+            return map;
+        } catch (IOException e) {
+            throw new UncheckedIOException("读取月汐湾导航失败: " + folder, e);
+        }
+    }
+
+    private static boolean rectangleEquals(JsonNode rect, double x, double z, double width, double height) {
+        return coordinate(rect, "x") == x && coordinate(rect, "y") == z
+                && coordinate(rect, "width") == width && coordinate(rect, "height") == height;
+    }
+
     /** 矩形栅格使用世界原点定位；有效区域可截断末行、末列，不能扩张到整格。 */
     CurrentMapNavigation(byte[] mask, Vec3 spawn, int columns, int rows, double cellSize,
                          double originX, double originZ, double minX, double minZ, double maxX, double maxZ) {
+        this(mask, spawn, columns, rows, cellSize, originX, originZ, minX, minZ, maxX, maxZ, false);
+    }
+
+    private CurrentMapNavigation(byte[] mask, Vec3 spawn, int columns, int rows, double cellSize,
+                                 double originX, double originZ, double minX, double minZ, double maxX, double maxZ,
+                                 boolean requiresConnectedTeleport) {
         long cells = (long) columns * rows;
         if (columns <= 0 || rows <= 0 || cells > 1_000_000 || mask.length != (cells + 7) / 8
                 || !Double.isFinite(cellSize) || cellSize <= 0
@@ -49,6 +104,7 @@ public final class CurrentMapNavigation implements SceneNavigation {
         this.minZ = minZ;
         this.maxX = maxX;
         this.maxZ = maxZ;
+        this.requiresConnectedTeleport = requiresConnectedTeleport;
         this.mask = mask.clone();
         this.spawn = spawn;
         if (!isWalkable(spawn) || spawn.z() != 0) {
@@ -105,7 +161,49 @@ public final class CurrentMapNavigation implements SceneNavigation {
         }
     }
 
-    private static String sha256(byte[] data) {
+    /** schema 2 为新版主世界与隔离联调地图共用的矩形和位图格式。 */
+    static CurrentMapNavigation loadRectangular(JsonNode source, byte[] text, Path folder) {
+        byte[] mask = Base64.getDecoder().decode(text);
+        if (!sha256(text).equals(source.path("walkmaskSha256").asText())
+                || !sha256(mask).equals(source.path("walkmaskPackedSha256").asText())) {
+            throw new IllegalArgumentException("导航位图 SHA256 不一致: " + folder);
+        }
+
+        JsonNode world = source.path("worldRect"), effective = source.path("effectiveWorldRect");
+        double x = coordinate(world, "x"), z = coordinate(world, "y");
+        double width = coordinate(world, "width"), height = coordinate(world, "height");
+        double size = coordinate(source, "cellSize");
+        int columns = positiveInteger(source, "walkmaskColumns"), rows = positiveInteger(source, "walkmaskRows");
+        if (width <= 0 || height <= 0 || size <= 0
+                || columns != Math.ceil(width / size) || rows != Math.ceil(height / size)) {
+            throw new IllegalArgumentException("导航栅格与世界矩形宽高不匹配: " + folder);
+        }
+        double ex = coordinate(effective, "x"), ez = coordinate(effective, "y");
+        double ew = coordinate(effective, "width"), eh = coordinate(effective, "height");
+        JsonNode spawn = source.path("spawnWorld");
+        return new CurrentMapNavigation(mask,
+                new Vec3(coordinate(spawn, "z"), coordinate(spawn, "x"), coordinate(spawn, "y")),
+                columns, rows, size, x, z, Math.max(x, ex), Math.max(z, ez),
+                Math.min(x + width, ex + ew), Math.min(z + height, ez + eh), true);
+    }
+
+    private static double coordinate(JsonNode object, String key) {
+        JsonNode node = object.path(key);
+        if (!node.isNumber() || !Double.isFinite(node.doubleValue())) {
+            throw new IllegalArgumentException("导航坐标必须为有限数值: " + key);
+        }
+        return node.doubleValue();
+    }
+
+    private static int positiveInteger(JsonNode object, String key) {
+        JsonNode node = object.path(key);
+        if (!node.isIntegralNumber() || !node.canConvertToInt() || node.intValue() <= 0) {
+            throw new IllegalArgumentException("导航维度必须为正整数: " + key);
+        }
+        return node.intValue();
+    }
+
+    static String sha256(byte[] data) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(data));
         } catch (NoSuchAlgorithmException e) {
@@ -114,6 +212,8 @@ public final class CurrentMapNavigation implements SceneNavigation {
     }
 
     public Vec3 spawn() { return spawn; }
+
+    boolean requiresConnectedTeleport() { return requiresConnectedTeleport; }
 
     /** 瞬移只比较可达域，不要求两点间直线可走；四连通不会把对角相触的平台合并。 */
     boolean sameConnectedDomain(Vec3 from, Vec3 to) {

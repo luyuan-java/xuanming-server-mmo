@@ -3,10 +3,10 @@ package com.game.scene.world;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.table.ConfigTables;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIf;
 
 /** 用仓库里同步来的真实配置表（config-data/tables）核对契约文档给出的数值。 */
 class ConfigSceneTablesTest {
@@ -15,11 +15,8 @@ class ConfigSceneTablesTest {
 
     @BeforeAll
     static void load() {
-        // surefire 的工作目录是模块目录；从仓库根目录跑时也能找到。
-        Path dir = Files.isDirectory(Path.of("../config-data/tables"))
-                ? Path.of("../config-data/tables")
-                : Path.of("config-data/tables");
-        tables = ConfigSceneTables.from(ConfigTables.load(dir), dir.getParent().resolve("navmesh/current_maps"));
+        Path dir = CurrentMapNavigationTest.configRoot().resolve("tables");
+        tables = ConfigSceneTables.from(ConfigTables.load(dir), CurrentMapNavigationTest.navigationRoot());
     }
 
     @Test
@@ -37,7 +34,9 @@ class ConfigSceneTablesTest {
         assertThat(tables.worldSceneConfigIds()).first().isEqualTo(1);
         assertThat(tables.spawnPoint(1)).isEqualTo(new Vec3(133, 199, 0));
         assertThat(tables.spawnPoint(2)).isEqualTo(new Vec3(173, 195, 0));
-        assertThat(tables.spawnPoint(3)).isEqualTo(new Vec3(147, 201, 0));
+        Vec3 villageSpawn = CurrentMapNavigationTest.yuexiDataPresent()
+                ? new Vec3(36.73125, 20.19375, 0) : new Vec3(147, 201, 0);
+        assertThat(tables.spawnPoint(3)).isEqualTo(villageSpawn);
         for (int id = 1; id <= 16; id++) {
             if (id == 4) continue;
             assertThat(tables.navigation(id).isWalkable(tables.spawnPoint(id))).isTrue();
@@ -45,6 +44,19 @@ class ConfigSceneTablesTest {
         }
         assertThat(tables.navigation(4)).isSameAs(SceneNavigation.NONE);
         assertThat(tables.navigation(17)).isSameAs(SceneNavigation.NONE);
+    }
+
+    @Test
+    @EnabledIf("com.game.scene.world.CurrentMapNavigationTest#yuexiDataPresent")
+    void 月汐湾只替换场景3且旧渔村出生点仍由旧版遮罩读取() {
+        assertThat(tables.worldSceneConfigIds()).contains(3);
+        CurrentMapNavigation grid = (CurrentMapNavigation) tables.navigation(3);
+        assertThat(grid.spawn()).isEqualTo(tables.spawnPoint(3));
+        Vec3 legacySpawn = new Vec3(147, 201, 0);
+        assertThat(grid.isWalkable(legacySpawn)).isFalse();
+        assertThat(grid.trace(legacySpawn, grid.spawn())).isEqualTo(new SceneNavigation.Move(grid.spawn(), true));
+        assertThat(CurrentMapNavigation.load(CurrentMapNavigationTest.navigationRoot(), "village").spawn())
+                .isEqualTo(legacySpawn);
     }
 
     @Test

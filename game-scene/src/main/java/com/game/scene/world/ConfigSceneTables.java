@@ -24,6 +24,7 @@ public final class ConfigSceneTables implements SceneTables {
 
     /** 基线常量 {@code kTianyongSpawn}（mmorpg {@code spatial/constants/nav.h}）：BaseScene 没有有效出生点时的兜底。 */
     public static final Vec3 DEFAULT_SPAWN = new Vec3(180.0, 200.0, 0.0);
+    private static final String CURRENT_NAV_PREFIX = "data/scene_nav_bin/current_maps/";
 
     private final ConfigTables tables;
     private final com.game.scene.skill.ClassSkillCatalog classSkills;
@@ -70,6 +71,7 @@ public final class ConfigSceneTables implements SceneTables {
         Map<Integer, CurrentMapNavigation> navigation = new HashMap<>();
         for (BaseSceneTable row : tables.baseScene().all()) {
             String nav = row.getNavBinFile().replace('\\', '/');
+            Vec3 spawn = new Vec3(row.getSpawnX(), row.getSpawnY(), row.getSpawnZ());
             String festivalId = FestivalMapNavigation.paddedId(row.getId());
             if (festivalId != null || nav.contains("/festival_maps/")) {
                 if (festivalRoot == null || festivalId == null
@@ -77,11 +79,22 @@ public final class ConfigSceneTables implements SceneTables {
                     throw new IllegalStateException("节庆地图需要显式开发配置及匹配的导航映射: " + row.getId());
                 }
                 CurrentMapNavigation grid = FestivalMapNavigation.load(festivalRoot, festivalId);
-                Vec3 spawn = new Vec3(row.getSpawnX(), row.getSpawnY(), row.getSpawnZ());
                 // XLSX 十进制往返可改变最后一位 double；容许纳米级表示差，不容许实际落点漂移。
                 if (!spawn.isFinite() || spawn.z() != grid.spawn().z()
                         || grid.spawn().horizontalDistance(spawn) > 1e-9 || !grid.isWalkable(spawn)) {
                     throw new IllegalStateException("BaseScene 出生点与节庆导航不一致: " + row.getId());
+                }
+                navigation.put(row.getId(), grid);
+                continue;
+            }
+            if (nav.startsWith(CURRENT_NAV_PREFIX)) {
+                if (row.getId() != 3 || !nav.equals(CURRENT_NAV_PREFIX + CurrentMapNavigation.YUEXI_FOLDER + "/scene.bin")) {
+                    throw new IllegalStateException("新版主世界导航与 BaseScene 不匹配: " + row.getId());
+                }
+                CurrentMapNavigation grid = CurrentMapNavigation.loadYuexi(navigationRoot);
+                if (!spawn.isFinite() || spawn.z() != grid.spawn().z()
+                        || grid.spawn().horizontalDistance(spawn) > 1e-9 || !grid.isWalkable(spawn)) {
+                    throw new IllegalStateException("BaseScene 出生点与月汐湾导航不一致: " + row.getId());
                 }
                 navigation.put(row.getId(), grid);
                 continue;
@@ -94,7 +107,6 @@ public final class ConfigSceneTables implements SceneTables {
             };
             if (key == null) continue;
             CurrentMapNavigation grid = loaded.computeIfAbsent(key, k -> CurrentMapNavigation.load(navigationRoot, k));
-            Vec3 spawn = new Vec3(row.getSpawnX(), row.getSpawnY(), row.getSpawnZ());
             if (!grid.spawn().equals(spawn)) {
                 throw new IllegalStateException("BaseScene 出生点与当前地图导航不一致: " + row.getId());
             }

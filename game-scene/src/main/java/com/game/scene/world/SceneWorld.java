@@ -2830,7 +2830,7 @@ public final class SceneWorld {
     /**
      * 逻辑线程上同步瞬移；step 期间禁止调用，以免改动帧正在遍历的兴趣集合。
      * facing 为 null 表示保持原朝向（Java 管理口扩展）。旧图保持世界范围校验；
-     * 未验收节庆图仅允许在已加载导航的同一可达域内落位，归队不能自动连通独立平台。
+     * 矩形版本化导航及隔离节庆图仅允许在已加载导航的同一可达域内落位，归队不能自动连通独立平台。
      */
     public TeleportResult teleportWithinScene(ScenePlayer player, Vec3 target, Rotation facing, TeleportReason reason) {
         if (stepping) throw new IllegalStateException("场景帧内不能瞬移");
@@ -2842,14 +2842,17 @@ public final class SceneWorld {
         else if (target == null || !MovementRules.insideWorld(target)
                 || facing != null && (!Double.isFinite(facing.getX()) || !Double.isFinite(facing.getY())
                 || !Double.isFinite(facing.getZ()))) rejected = TeleportResult.INVALID_TARGET;
-        if (rejected == null && FestivalMapNavigation.paddedId(player.scene().configId()) != null) {
-            SceneNavigation navigation = tables.navigation(player.scene().configId());
-            if (!(navigation instanceof CurrentMapNavigation grid) || Math.abs(target.z()) > 0.2
-                    || !grid.sameConnectedDomain(player.position(), target)) {
-                rejected = TeleportResult.INVALID_TARGET;
-            } else {
-                // 与该图普通移动一致，权威落点使用平面高度；不改变旧图的高度规则。
-                target = grid.trace(target, target).position();
+        if (rejected == null) {
+            int configId = player.scene().configId();
+            SceneNavigation navigation = tables.navigation(configId);
+            CurrentMapNavigation grid = navigation instanceof CurrentMapNavigation current ? current : null;
+            if (FestivalMapNavigation.paddedId(configId) != null || grid != null && grid.requiresConnectedTeleport()) {
+                if (grid == null || Math.abs(target.z()) > 0.2 || !grid.sameConnectedDomain(player.position(), target)) {
+                    rejected = TeleportResult.INVALID_TARGET;
+                } else {
+                    // 与该图普通移动一致，权威落点使用平面高度；不改变旧图的高度规则。
+                    target = grid.trace(target, target).position();
+                }
             }
         }
         if (rejected != null) {
