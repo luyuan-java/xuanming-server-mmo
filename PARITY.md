@@ -2139,3 +2139,15 @@ Unity 客户端已按这个契约改(`GameClient.BuildAssignGateRequest`、`Assi
 - 新增购买回执的私有 `PetState` 字段 3–6；持久 schema 台账只追加 `0003.schema`，保留前两代原件。领域测试覆盖加载、改名、候选提交与存盘后的未知字段和购买回执保留；未知宠物 / 属性池表字段阻止新购买与捕捉。
 - Java 验证：按 `-pl game-scene,game-battle-engine -am clean install` 分段恢复完成。battle-engine 2,395 项（跳过 1）、player-store 211 项（跳过 8）、audit 38 项（跳过 1）、scene 1,975 项（跳过 9）均零失败、零错误；最终 `TurnBattleCaptureTest` 再跑 5/5。重点包含 `PetServiceTest` 43、`InBattleGateMatrixTest` 148、`FreezeGateTest` 11、`SettlementApplyValuesTest` 39。
 - 环境限制：缺少真实 TiDB fixture，明确排除 `AuthorityPoolTiDbTest` 和 `SceneMaintenanceDrainTiDbTest`；未将这两项记为通过。完整日志位于 `.codex-artifacts/pet-acquisition/java-clean-install*.log` 与 `java-capture-final.log`。C++ 编译 / 测试结果另记主仓 `docs/PROGRESS.md`。
+
+### 2026-11-17 独立 JeecgBoot 网页 GM 与七项在线玩家操作（主仓实现，独立 Java 版待适配）
+
+主仓 main 工作区未提交。用户选择 JeecgBoot 配套 Vue 3 与 Java 后台作为独立管理系统，并要求现有各种 GM 逻辑都能接入；运行中的 scene 留到代码实现和检查完成后的最后联调阶段再重建。
+
+- 主仓 `java/gm_admin` 已实现原生管理员登录/角色权限、独立管理库、玩家及区服查询、个人邮件补偿、冻结命令和持久审计；另将既有七项 GM（增加/扣除货币、封禁/解禁货币获取、设置等级、发宝宝、发物品）接入网页。
+- 新增内部 `scene_node.SceneNodeGrpc/GmExecutePlayerCommand`，复用七个已有请求类型和域逻辑，保留 dev/test 模式限制，验证真实目标玩家的在线会话、归属及可变状态。专用签名覆盖完整命令、节点、操作人及五分钟冻结时效；Java 根据可信定位和部署地址映射转发，不伪装客户端会话。
+- 七项操作分别授权；直接 GM 一旦开始发送，UNKNOWN/SENDING 均禁止同单重发，EXECUTED 只返回原结果。邮件依赖邮件服务的持久幂等可同号重试；两类命令不可混用。币种来自权威 proto，64 位 ID/金额在浏览器保持字符串。
+- 当前主仓证据：Java 全套 41/41、最终适配器 8/8、C++ GM/既有门禁 12/12、网页 21 项玩家 GM 与 18 项邮件检查通过，原生 Vue 与 JeecgBoot 后台打包通过。Scene 整节点最终链接/容器联调另记录主仓 `docs/PROGRESS.md`，此条不宣称已部署或已完成真实发放。
+- 独立 Java 全服务版本尚未实现对应管理适配，不与主仓混部；须按本版内部 RPC、玩家所有权及领域服务实现同等行为。内部新增协议不改变客户端契约，本轮未手改同步产物、未运行本仓构建或测试。
+
+设计入口：主仓 `docs/design/jeecg-gm-administration.md`。
