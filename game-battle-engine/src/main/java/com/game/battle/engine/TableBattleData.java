@@ -113,6 +113,11 @@ public final class TableBattleData implements BattleData {
         return tables.item().find(itemTableId);
     }
 
+    @Override
+    public Optional<com.game.table.PetTable> pet(int petTableId) {
+        return tables.pet().find(petTableId);
+    }
+
     /** {@code CooldownTable.duration} 是 uint32 毫秒，按无符号扩成 uint64；缺行返回 0。 */
     @Override
     public long cooldownDurationMs(int cooldownTableId) {

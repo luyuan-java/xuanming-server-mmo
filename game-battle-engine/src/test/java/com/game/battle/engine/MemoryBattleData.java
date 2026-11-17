@@ -31,6 +31,7 @@ final class MemoryBattleData implements BattleData {
     private final Map<Integer, SkillPermissionTable.Builder> permissionRows = new HashMap<>();
     private final Map<Integer, DungeonTable.Builder> dungeonRows = new HashMap<>();
     private final Map<Integer, MonsterTable.Builder> monsterRows = new HashMap<>();
+    private final Map<Integer, com.game.table.PetTable.Builder> petRows = new HashMap<>();
     private final Map<Integer, ItemTable.Builder> itemRows = new HashMap<>();
     private final Map<Integer, Long> cooldownDurations = new HashMap<>();
     private final Map<Integer, List<Integer>> dungeonMonsterIds = new HashMap<>();
@@ -55,6 +56,15 @@ final class MemoryBattleData implements BattleData {
 
     DungeonTable.Builder addDungeon(int dungeonTableId) {
         return dungeonRows.computeIfAbsent(dungeonTableId, id -> DungeonTable.newBuilder()).setId(dungeonTableId);
+    }
+
+    com.game.table.PetTable.Builder addPet(int id) {
+        return petRows.computeIfAbsent(id, key -> com.game.table.PetTable.newBuilder().setId(key));
+    }
+
+    @Override
+    public Optional<com.game.table.PetTable> pet(int id) {
+        return Optional.ofNullable(petRows.get(id)).map(com.game.table.PetTable.Builder::build);
     }
 
     MonsterTable.Builder addMonster(int monsterTableId) {

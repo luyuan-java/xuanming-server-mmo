@@ -27,10 +27,12 @@ public final class CurrencyService {
         private final Wallet.Change change;
         private final com.game.player.store.state.BagState originalBags;
         private final com.game.player.store.state.PlayerSkillBookState originalSkills;
+        private final com.game.player.store.state.PetState originalPets;
         private boolean committed;
         private PreparedDeduction(ScenePlayer player, Wallet.Change change) {
             this.player = player; this.change = change; this.originalBags = player.bags().toState();
             this.originalSkills = player.learnedSkills().toState();
+            this.originalPets = player.pets().toState();
         }
         public int tipId() { return change.tipId(); }
         /** 两份候选一次提交；审计异常不得把扣款和技能升级拆开。 */
@@ -46,6 +48,23 @@ public final class CurrencyService {
             catch (RuntimeException failure) {
                 org.slf4j.LoggerFactory.getLogger(CurrencyService.class)
                         .error("Skill upgrade committed but audit failed skill={}", skillId, failure);
+            }
+        }
+
+        /** 钱包、宠物和购买回执同步提交，审计异常不拆散已提交状态。 */
+        public void commitPets(com.game.scene.player.PlayerPets candidate, long petId) {
+            if (committed || !change.ok() || player.frozen() || player.inBattle()
+                    || !originalPets.equals(player.pets().toState()))
+                throw new IllegalStateException("stale pet purchase candidate");
+            player.wallet().commitDeduction(change);
+            player.pets().commitPrepared(candidate);
+            committed = true;
+            try {
+                audit.currencyChanged(player.playerId(), change.type(), change.after() - change.before(),
+                        change.before(), change.after(), AssetAudit.Reason.PET_BUY, petId);
+            } catch (RuntimeException failure) {
+                org.slf4j.LoggerFactory.getLogger(CurrencyService.class)
+                        .error("Pet purchase committed but audit failed pet={}", petId, failure);
             }
         }
 

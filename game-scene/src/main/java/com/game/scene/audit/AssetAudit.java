@@ -32,6 +32,8 @@ public interface AssetAudit {
         PET_RESET,
         /** 宝宝改名的金币（同上）。 */
         PET_RENAME,
+        /** 宠物商店扣款。 */
+        PET_BUY,
         /** 任务奖励（基线 TX_QUEST_REWARD）。 */
         QUEST_REWARD,
         /** 系统发放的物品（基线 TX_SYSTEM_GRANT：没有更具体来源的入包）。 */

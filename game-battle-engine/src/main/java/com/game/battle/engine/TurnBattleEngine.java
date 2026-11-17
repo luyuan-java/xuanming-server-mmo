@@ -79,6 +79,7 @@ public final class TurnBattleEngine {
         this.ctx = new BattleContext(data, request.getMatchMode(), request.getSeed());
         this.ledger = new ItemLedger(ctx, request);
         this.checks = new ActionChecks(ctx, ledger);
+        this.checks.setCaptureRequest(request);
         this.buffs = new BuffEngine(ctx);
         this.classSkills = new ClassSkillExecution(ctx, buffs, checks);
         this.autoClassSkills = new AutoClassSkillSelector(ctx, checks, classSkills, buffs);
@@ -393,6 +394,15 @@ public final class TurnBattleEngine {
                     .setSpeed(BattleConstants.MONSTER_DEFAULT_SPEED);
             actor.setMaxHealth(BattleConstants.MONSTER_DEFAULT_HEALTH);
         }
+        var dungeon = ctx.data().dungeon(request.getBattleConfigId());
+        var pet = monsterRow.flatMap(row -> ctx.data().pet(row.getCapturePetTableId()));
+        if (ctx.isPve() && request.getActivityContext().getKindValue() == 0 && dungeon.isPresent() &&
+                dungeon.get().getAllowPetCapture() == 1 && monsterRow.isPresent() && monsterRow.get().getHealth() != 0 &&
+                pet.isPresent() && pet.get().getAcquisitionTier() == 0 &&
+                Integer.toUnsignedLong(monsterRow.get().getCaptureRate()) > 0 &&
+                Integer.toUnsignedLong(monsterRow.get().getCaptureRate()) <= 10000) {
+            actor.setCapturePetTableId(pet.get().getId()).setCaptureMinLevel(pet.get().getUnlockLevel()).setName(pet.get().getName());
+        }
         ctx.units().add(new BattleUnit(actor));
     }
 
@@ -623,6 +633,7 @@ public final class TurnBattleEngine {
             case eBattleActionType.BATTLE_ACTION_SKILL_VALUE -> executeSkill(actor, action);
             case eBattleActionType.BATTLE_ACTION_DEFEND_VALUE -> executeDefend(actor);
             case eBattleActionType.BATTLE_ACTION_ITEM_VALUE -> ledger.executeItem(actor, action, checks);
+            case eBattleActionType.BATTLE_ACTION_CAPTURE_VALUE -> executeCapture(actor, action);
             case eBattleActionType.BATTLE_ACTION_FLEE_VALUE -> executeFlee(actor);
             default -> {
                 // 未知类型：什么也不做
@@ -865,6 +876,26 @@ public final class TurnBattleEngine {
     private void executeDefend(BattleUnit actor) {
         actor.setDefending(true);
         ctx.events().append(eBattleEventType.BATTLE_EVENT_DEFEND, actor.actorId(), actor.actorId());
+    }
+
+    /** 捕获后离场并登记本人的待结算宠物；目标失效仍消耗行动。 */
+    private void executeCapture(BattleUnit actor, BattleAction action) {
+        var event = ctx.events().append(eBattleEventType.BATTLE_EVENT_CAPTURE, actor.actorId(), action.getTargetId());
+        if (checks.checkCapture(actor, action.getTargetId()) != ActionChecks.SUCCESS) return;
+        BattleUnit target = ctx.findActor(action.getTargetId());
+        var row = ctx.data().monster(target.state().getMonsterTableId());
+        if (row.isEmpty() || target.maxHealth() == 0) return;
+        double lostRatio = 1.0 - com.game.common.math.Unsigned.toDouble(target.health()) /
+                com.game.common.math.Unsigned.toDouble(target.maxHealth());
+        double chance = Math.min(1.0, Integer.toUnsignedLong(row.get().getCaptureRate()) / 10000.0 * (1.0 + 2.0 * lostRatio));
+        boolean success = chance >= 1.0 || ctx.rng().rand01() < chance;
+        event.setSuccess(success).setValue(Integer.toUnsignedLong(target.state().getCapturePetTableId()))
+                .setTargetHealthAfter(target.health());
+        if (!success) return;
+        target.state().setCapturedByPlayerId(actor.actorId());
+        target.markFled();
+        ctx.settlements().computeIfAbsent(actor.actorId(), ignored -> BattleSettlementData.newBuilder())
+                .addCapturedPetTableIds(target.state().getCapturePetTableId());
     }
 
     /**

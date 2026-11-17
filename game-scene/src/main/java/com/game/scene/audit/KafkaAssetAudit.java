@@ -90,6 +90,7 @@ public final class KafkaAssetAudit implements AssetAudit {
             case SKILL_UPGRADE -> TransactionReason.TX_SKILL_UPGRADE;
             case PET_RESET -> TransactionReason.TX_PET_RESET;
             case PET_RENAME -> TransactionReason.TX_PET_RENAME;
+            case PET_BUY -> TransactionReason.TX_SHOP_BUY;
             case DEFERRED_CLAWBACK -> TransactionReason.TX_DEFERRED_CLAWBACK;
             case GUILD_DONATE -> TransactionReason.TX_GUILD_DONATE;
             case GUILD_SHOP -> TransactionReason.TX_GUILD_SHOP;

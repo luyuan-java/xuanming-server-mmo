@@ -43,6 +43,8 @@ public interface BattleData {
     /** ItemTable 行；引擎只读 battle_usable / battle_heal_hp / battle_heal_mp（{@code FindItem}）。 */
     Optional<ItemTable> item(int itemTableId);
 
+    default Optional<com.game.table.PetTable> pet(int petTableId) { return Optional.empty(); }
+
     /** 冷却时长毫秒（uint64，按无符号解释）；查不到返回 0（{@code GetCooldownDurationMs}）。 */
     long cooldownDurationMs(int cooldownTableId);
 

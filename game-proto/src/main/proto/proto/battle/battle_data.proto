@@ -24,7 +24,10 @@ message BattleRouting {
 
 // ---- 参战 buff(时间维度已换算为回合,见设计文档 §5.1 换算策略) ----
 message BattleBuffEntry {
-  uint64 buff_id = 1;        // buff 实例 SnowFlake id
+  // buff 实例 id,只在所属单位的 buff 列表里用来认出这一条,不跨重启:快照带来的沿用 scene 的进程内临时号
+  // (tlsIdGeneratorManager.buffIdGenerator,[node_id][seq] 拼成),战斗内新加的由引擎在局内自增域里接着往上发
+  // (turn_battle_engine 的 nextBuffInstanceId)。不是 SnowFlake,也不是发号器的永久 ID,不要解析。
+  uint64 buff_id = 1;
   uint32 buff_table_id = 2;  // BuffTable 表 id
   uint32 layer = 3;          // 叠层数
   uint32 remain_rounds = 4;  // 剩余回合(0 = 无限持续)
@@ -73,6 +76,7 @@ message BattlePlayerSnapshot {
   // scene 按职业 / 角色等级夹好再填,引擎再按同一规则复核一次。旧通用技能不进这里。
   // 被动的属性加成 scene 已算进上面的派生属性,引擎只消费战斗专用被动(治疗加成),不重复叠加。
   map<uint32, uint32> skill_ranks = 21;
+  uint32 pet_capture_slots = 22; // scene 核定的本局可捕捉数量；旧快照缺省为0。
 }
 
 // ---- 宝宝战斗快照:与主人同队、独立行动的战斗单位(设计文档 player-pet.md §5)----
@@ -136,6 +140,9 @@ message BattleActorState {
   CombatAttributes combat = 27;
   // 本局职业技能生效等级(来自快照 skill_ranks,引擎复核后的值;怪物 / 宝宝为空)。
   map<uint32, uint32> skill_ranks = 28;
+  uint32 capture_pet_table_id = 29; // 仅可捕捉的普通野怪填写，0表示不可捕捉。
+  uint64 captured_by_player_id = 30; // 成功捕捉者；不计为击杀，不产生怪物掉落。
+  uint32 capture_min_level = 31;
 }
 
 // ---- 玩家行动指令 ----
@@ -146,6 +153,7 @@ enum eBattleActionType {
   BATTLE_ACTION_DEFEND = 3;  // 防御:本回合受伤减半
   BATTLE_ACTION_ITEM = 4;    // 使用战斗道具(从快照副本扣,结算回写)
   BATTLE_ACTION_FLEE = 5;    // 逃跑(PVE 可用;成功率基于速度差)
+  BATTLE_ACTION_CAPTURE = 6; // 捕捉消耗本回合行动，由服务端判定。
 }
 
 message BattleAction {
@@ -173,6 +181,7 @@ enum eBattleEventType {
   BATTLE_EVENT_BLOCK = 13;     // 格挡(预留,一期不产出)
   BATTLE_EVENT_MANA = 14;      // 法力变化:value=变化绝对值,is_negative 由 target_health_after 之外的 mana_after 表达
   BATTLE_EVENT_RESIST = 15;    // 异常状态被抵抗:source=施加者,target=抵抗者,buff_table_id=被抵抗的 buff;老客户端忽略
+  BATTLE_EVENT_CAPTURE = 16; // success为成功结果；成功后目标离场，结算发放宠物。
 }
 
 // 一段伤害 / 出手是怎么来的(equipment-attributes.md §4.5)。0 = 普通,老客户端不读也不影响演出。
@@ -210,6 +219,10 @@ enum eBattleOutcome {
   BATTLE_OUTCOME_SIDE_A_WIN = 1; // team_index 0 胜
   BATTLE_OUTCOME_SIDE_B_WIN = 2;
   BATTLE_OUTCOME_DRAW = 3;       // 回合打满等平局情形(PVE 中进攻方判负走 SIDE_B_WIN)
+  // 作废:Match 为这一局写了唯一的 ABORT(执行进程失效、截止作废、帮会取消、人工处置等),全员没有任何效果。
+  // 只由 Match 在 ABORT 事务里写进「作废结算」,battle 引擎永远不产出;客户端收到后退出战斗、提示本局作废
+  // (docs/design/battle-instance-loss-early-abort.md §5、§6)。
+  BATTLE_OUTCOME_VOID = 4;
 }
 
 // ---- 单个玩家的结算数据(battle -> scene,scene 是唯一应用者) ----
@@ -271,6 +284,7 @@ message BattleSettlementData {
   // scene 写进本人近期战斗结果,供列表展示与按 battle_id 查回放;不参与任何结算判定。0 = 来源没盖。
   uint32 match_mode = 18;
   uint32 battle_config_id = 19;
+  repeated uint32 captured_pet_table_ids = 20; // 本人捕捉的宠物种类，随整笔结算原子落库和去重。
 }
 
 // ---- 出战宝宝的结算数据(随主人的 BattleSettlementData 一起回 scene)----
@@ -293,7 +307,7 @@ enum eBattleActivityKind {
 
 message BattleActivityContext {
   eBattleActivityKind kind = 1;     // 非 NONE 才是活动对局;match 拒绝 NONE(INVALID_ARGUMENT)
-  uint64 guild_id = 2;              // 发起帮会(SnowFlake 17-bit 布局);guild 写、guild 读
+  uint64 guild_id = 2;              // 发起帮会(发号器永久 ID,biz_tag=guild,只当身份用);guild 写、guild 读
   uint32 activity_id = 3;           // GuildActivity 表 id;guild 写、guild 读
   uint32 period_key = 4;            // 确认开战时的游戏日键 YYYYMMDD(gameday.DayKey,UTC+8 05:00 换日),用于个人每日次数
   uint64 initiator_player_id = 5;   // 发起人;match 校验它等于 StartActivityBattleRequest.member_player_ids[0]

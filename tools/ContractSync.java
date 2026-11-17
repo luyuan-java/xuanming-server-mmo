@@ -67,7 +67,8 @@ import java.util.stream.Stream;
 public final class ContractSync {
 
     /** proto 源同步时排除的目录：etcd 的 proto 是 Go 端为 etcd 客户端生成用的，Java 版不连 etcd。 */
-    private static final List<String> EXCLUDED_PROTO_DIRS = List.of("proto/etcd/");
+    // OpenTelemetry 是 C++ 遥测传输的第三方协议，Java 使用自己的 SDK，不属于游戏客户端契约。
+    private static final List<String> EXCLUDED_PROTO_DIRS = List.of("proto/etcd/", "proto/opentelemetry/");
 
     private static final String PROTO_JAVA_PACKAGE_ROOT = "com.game.proto";
     private static final String TABLE_JAVA_PACKAGE = "com.game.table";

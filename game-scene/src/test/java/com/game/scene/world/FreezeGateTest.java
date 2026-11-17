@@ -30,6 +30,8 @@ import com.game.proto.GetCurrencyListRequest;
 import com.game.proto.GetCurrencyListResponse;
 import com.game.proto.GetMissionListRequest;
 import com.game.proto.GetPetListRequest;
+import com.game.proto.GetPetShopRequest;
+import com.game.proto.BuyPetRequest;
 import com.game.proto.GmAddCurrencyRequest;
 import com.game.proto.GmBlockCurrencyRequest;
 import com.game.proto.GmDeductCurrencyRequest;
@@ -299,8 +301,9 @@ class FreezeGateTest {
         expected.put("SceneMissionClientPlayerClaimMissionReward", FreezePolicy.GATED);
         expected.put("SceneActivityClientPlayerGetActivityList", FreezePolicy.READ_ONLY);
         expected.put("ScenePetClientPlayerGetPetList", FreezePolicy.READ_ONLY);
+        expected.put("ScenePetClientPlayerGetPetShop", FreezePolicy.READ_ONLY);
         for (String write : List.of("SummonPet", "RecallPet", "AllocatePetPoints", "ResetPetPoints",
-                "AutoAllocatePetPoints", "RenamePet", "GmGrantPet")) {
+                "AutoAllocatePetPoints", "RenamePet", "GmGrantPet", "BuyPet")) {
             expected.put("ScenePetClientPlayer" + write, FreezePolicy.GATED);
         }
 
@@ -549,6 +552,8 @@ class FreezeGateTest {
         probes.add(new Probe(petSvc, "AutoAllocatePetPoints",
                 AutoAllocatePetPointsRequest.newBuilder().setPetId(petId).build(), PASSED));
         probes.add(new Probe(petSvc, "GetPetList", GetPetListRequest.getDefaultInstance(), 0));
+        probes.add(new Probe(petSvc, "GetPetShop", GetPetShopRequest.getDefaultInstance(), 0));
+        probes.add(new Probe(petSvc, "BuyPet", BuyPetRequest.newBuilder().setPetTableId(1).setPurchaseSequence(1).setPriceGold(1000).build(), 1005));
 
         probes.add(new Probe("SceneSkillClientPlayer", "ReleaseSkill", ReleaseSkillRequest.newBuilder()
                 .setSkillTableId(1).setTargetId(player.entity())

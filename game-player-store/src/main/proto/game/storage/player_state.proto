@@ -132,6 +132,11 @@ message PetState {
   repeated PetEntry pets = 1;
   // 出战中的宝宝；0 = 未出战。
   uint64 active_pet_id = 2;
+  // 最近一次成功购买的持久回执，重试只返原结果。
+  uint64 last_purchase_sequence = 3;
+  uint32 last_purchase_pet_table_id = 4;
+  uint64 last_purchase_pet_id = 5;
+  uint64 last_purchase_price_gold = 6;
 }
 
 // 一只宝宝（mmorpg PetInstance 的 Java 自有对应）。

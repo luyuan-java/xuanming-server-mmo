@@ -1,6 +1,8 @@
 package com.game.scene.pet;
 
 import com.game.proto.BaseAttributesComp;
+import com.game.proto.GetPetShopResponse;
+import com.game.proto.PetShopOffer;
 import com.game.proto.BattlePetSettlementData;
 import com.game.proto.BattlePetSnapshot;
 import com.game.proto.PetDerivedInfo;
@@ -467,7 +469,15 @@ public final class PetService {
             log.error("铸宝宝号失败（全服号源不可用） player={}", player.playerId());
             return new Grant(ID_GENERATE_FAILED, 0);
         }
-        Pet pet = new Pet(minted[0], petTableId,
+        Pet pet = newPet(player, row, minted[0]);
+        pets.add(pet);
+        log.info("发放宝宝 player={} pet_id={} pet_table_id={} level={}", player.playerId(),
+                Long.toUnsignedString(pet.petId()), Integer.toUnsignedString(petTableId), pet.level());
+        return new Grant(OK, pet.petId());
+    }
+
+    private Pet newPet(ScenePlayer player, PetTable row, long petId) {
+        Pet pet = new Pet(petId, row.getId(),
                 PetRules.effectiveLevel(ownerLevel(player), Integer.toUnsignedLong(row.getLevelCap())),
                 clock.epochMillis() / 1000);
         List<AttributeDimensionTable> dimensions = tables.dimensions();
@@ -477,10 +487,104 @@ public final class PetService {
         Derived derived = derived(pet, row);
         pet.setHealth(derived.maxHealth());
         pet.setMana(derived.maxMana());
-        pets.add(pet);
-        log.info("发放宝宝 player={} pet_id={} pet_table_id={} level={}", player.playerId(),
-                Long.toUnsignedString(pet.petId()), Integer.toUnsignedString(petTableId), pet.level());
+        return pet;
+    }
+
+    public long nextPurchaseSequence(ScenePlayer player) {
+        long sequence = player.pets().lastPurchaseSequence();
+        return sequence == -1L ? 0 : sequence + 1;
+    }
+
+    public GetPetShopResponse shop(ScenePlayer player) {
+        var response = GetPetShopResponse.newBuilder();
+        if (!player.pets().acquisitionStateValid()) {
+            return response.setErrorMessage(com.game.scene.world.SceneMessageIds.tip(
+                    CommonErrorTip.common_error.kServiceUnavailable_VALUE)).build();
+        }
+        if (tables.pool() == null || !tables.pool().getUnknownFields().asMap().isEmpty()) {
+            return response.setErrorMessage(com.game.scene.world.SceneMessageIds.tip(INVALID_TABLE_DATA)).build();
+        }
+        for (PetTable row : tables.shopRows()) {
+            response.addOffers(PetShopOffer.newBuilder().setPetTableId(row.getId()).setName(row.getName())
+                    .setModelId(row.getModelId()).setUnlockLevel(row.getUnlockLevel()).setPriceGold(row.getShopPriceGold()).setDesc(row.getDesc()));
+        }
+        return response.setGold(player.wallet().balance(Wallet.GOLD))
+                .setNextPurchaseSequence(nextPurchaseSequence(player)).build();
+    }
+
+    /** 成功的同序号同参数重试复用持久回执，报价变化必须重新查询。 */
+    public Grant buy(ScenePlayer player, int petTableId, long sequence, long priceGold) {
+        int writable = checkWritable(player);
+        if (writable != OK) return new Grant(writable, 0);
+        PlayerPets current = player.pets();
+        if (!current.acquisitionStateValid()) return new Grant(CommonErrorTip.common_error.kServiceUnavailable_VALUE, 0);
+        if (sequence == 0) return new Grant(INVALID_PARAMETER, 0);
+        if (sequence == current.lastPurchaseSequence()) {
+            if (petTableId != current.lastPurchasePetTableId() || priceGold != current.lastPurchasePriceGold())
+                return new Grant(INVALID_PARAMETER, 0);
+            return new Grant(current.lastPurchasePetId() != 0 ? OK : CommonErrorTip.common_error.kServiceUnavailable_VALUE,
+                    current.lastPurchasePetId());
+        }
+        if (sequence != nextPurchaseSequence(player)) return new Grant(INVALID_PARAMETER, 0);
+        PetTable row = tables.pet(petTableId);
+        if (row == null) return new Grant(TABLE_ROW_MISSING, 0);
+        if (!row.getUnknownFields().asMap().isEmpty()) return new Grant(INVALID_TABLE_DATA, 0);
+        if (row.getAcquisitionTier() != 0 || row.getShopPriceGold() == 0)
+            return new Grant(CommonErrorTip.common_error.kFeatureUnavailable_VALUE, 0);
+        if (priceGold != row.getShopPriceGold()) return new Grant(INVALID_PARAMETER, 0);
+        if (priceGold < 0 || tables.pool() == null || !tables.pool().getUnknownFields().asMap().isEmpty())
+            return new Grant(INVALID_TABLE_DATA, 0);
+        if (ownerLevel(player) < Integer.toUnsignedLong(row.getUnlockLevel())) return new Grant(OWNER_LEVEL_NOT_ENOUGH, 0);
+        if (current.size() >= tables.maxPets()) return new Grant(SLOT_FULL, 0);
+        if (Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), priceGold) < 0)
+            return new Grant(GOLD_NOT_ENOUGH, 0);
+        var deduction = currency.prepareDeduction(player, Wallet.GOLD, priceGold);
+        if (deduction.tipId() != 0) return new Grant(deduction.tipId(), 0);
+        long[] minted = guids.tryMint(1);
+        if (minted == null) return new Grant(ID_GENERATE_FAILED, 0);
+        Pet pet = newPet(player, row, minted[0]);
+        PlayerPets candidate = PlayerPets.restore(current.toState());
+        candidate.add(pet);
+        candidate.recordPurchase(sequence, petTableId, pet.petId(), priceGold);
+        deduction.commitPets(candidate, pet.petId());
         return new Grant(OK, pet.petId());
+    }
+
+    public int availableCaptureSlots(ScenePlayer player) {
+        if (!player.pets().acquisitionStateValid() || tables.pool() == null
+                || !tables.pool().getUnknownFields().asMap().isEmpty()) return 0;
+        return (int) Math.max(0, Math.min(Integer.MAX_VALUE, tables.maxPets() - player.pets().size()));
+    }
+
+    /** 完整候选由结算调用方在全部资产校验后提交。 */
+    public record PreparedCaptures(int tip, List<Pet> pets) { }
+
+    public PreparedCaptures prepareCapturedPets(ScenePlayer player, List<Integer> tableIds) {
+        if (tableIds.isEmpty()) return new PreparedCaptures(OK, List.of());
+        if (!player.pets().acquisitionStateValid())
+            return new PreparedCaptures(CommonErrorTip.common_error.kServiceUnavailable_VALUE, List.of());
+        if (tables.pool() == null || !tables.pool().getUnknownFields().asMap().isEmpty())
+            return new PreparedCaptures(INVALID_TABLE_DATA, List.of());
+        if (tableIds.size() > availableCaptureSlots(player)) return new PreparedCaptures(SLOT_FULL, List.of());
+        for (int id : tableIds) {
+            PetTable row = tables.pet(id);
+            if (row == null) return new PreparedCaptures(TABLE_ROW_MISSING, List.of());
+            if (!row.getUnknownFields().asMap().isEmpty()) return new PreparedCaptures(INVALID_TABLE_DATA, List.of());
+            if (row.getAcquisitionTier() != 0)
+                return new PreparedCaptures(CommonErrorTip.common_error.kFeatureUnavailable_VALUE, List.of());
+            if (ownerLevel(player) < Integer.toUnsignedLong(row.getUnlockLevel()))
+                return new PreparedCaptures(OWNER_LEVEL_NOT_ENOUGH, List.of());
+        }
+        long[] minted = guids.tryMint(tableIds.size());
+        if (minted == null) return new PreparedCaptures(ID_GENERATE_FAILED, List.of());
+        List<Pet> candidates = new ArrayList<>();
+        for (int i = 0; i < tableIds.size(); i++) candidates.add(newPet(player, tables.pet(tableIds.get(i)), minted[i]));
+        return new PreparedCaptures(OK, List.copyOf(candidates));
+    }
+
+    public void commitCapturedPets(ScenePlayer player, PreparedCaptures prepared) {
+        if (prepared.tip() != OK) throw new IllegalArgumentException("invalid capture candidate");
+        for (Pet pet : prepared.pets()) player.pets().add(pet);
     }
 
     /**

@@ -29,6 +29,8 @@ import com.game.proto.GetCurrencyListRequest;
 import com.game.proto.GetCurrencyListResponse;
 import com.game.proto.GetMissionListRequest;
 import com.game.proto.GetPetListRequest;
+import com.game.proto.GetPetShopRequest;
+import com.game.proto.BuyPetRequest;
 import com.game.proto.GmAddCurrencyRequest;
 import com.game.proto.GmBlockCurrencyRequest;
 import com.game.proto.GmDeductCurrencyRequest;
@@ -190,6 +192,7 @@ class InBattleGateMatrixTest {
             new Row(182, PET, "ResetPetPoints", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(189, PET, "RenamePet", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(187, PET, "GmGrantPet", BattlePolicy.GATED, PET_IN_BATTLE),
+            new Row(403, PET, "BuyPet", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(192, BAG, "SortBag", BattlePolicy.GATED, INVALID_PARAMETER),
             // 装备 2.11：六个入口均由装备业务闸拒绝，每次计 equipment 一次。
             new Row(246, BAG, "UnequipItem", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
@@ -206,6 +209,7 @@ class InBattleGateMatrixTest {
             new Row(54, CURRENCY, "GetCurrencyList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(167, ATTRIBUTE, "GetAttributePanel", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(181, PET, "GetPetList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(402, PET, "GetPetShop", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(190, ACTIVITY, "GetActivityList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(191, BAG, "GetBag", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(193, MISSION, "GetMissionList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -571,6 +575,8 @@ class InBattleGateMatrixTest {
         out.put(ACTIVITY + "GetActivityList", s -> GetActivityListRequest.getDefaultInstance());
 
         out.put(PET + "GetPetList", s -> GetPetListRequest.getDefaultInstance());
+        out.put(PET + "GetPetShop", s -> GetPetShopRequest.getDefaultInstance());
+        out.put(PET + "BuyPet", s -> BuyPetRequest.newBuilder().setPetTableId(1).setPurchaseSequence(1).setPriceGold(1000).build());
         out.put(PET + "SummonPet", s -> SummonPetRequest.newBuilder().setPetId(s.sparePet()).build());
         out.put(PET + "RecallPet", s -> RecallPetRequest.getDefaultInstance());
         out.put(PET + "AllocatePetPoints", s -> AllocatePetPointsRequest.newBuilder().setPetId(s.activePet())

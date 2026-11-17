@@ -174,6 +174,10 @@ public final class PlayerPets {
 
     private final List<Pet> pets = new ArrayList<>();
     private long activePetId;
+    private long lastPurchaseSequence;
+    private int lastPurchasePetTableId;
+    private long lastPurchasePetId;
+    private long lastPurchasePriceGold;
     private final UnknownFieldSet unknownFields;
 
     private PlayerPets(UnknownFieldSet unknownFields) {
@@ -191,6 +195,10 @@ public final class PlayerPets {
             restored.pets.add(Pet.of(entry));
         }
         restored.activePetId = state.getActivePetId();
+        restored.lastPurchaseSequence = state.getLastPurchaseSequence();
+        restored.lastPurchasePetTableId = state.getLastPurchasePetTableId();
+        restored.lastPurchasePetId = state.getLastPurchasePetId();
+        restored.lastPurchasePriceGold = state.getLastPurchasePriceGold();
         return restored;
     }
 
@@ -233,6 +241,32 @@ public final class PlayerPets {
         pets.clear();
         pets.addAll(candidate.pets);
         activePetId = candidate.activePetId;
+        lastPurchaseSequence = candidate.lastPurchaseSequence;
+        lastPurchasePetTableId = candidate.lastPurchasePetTableId;
+        lastPurchasePetId = candidate.lastPurchasePetId;
+        lastPurchasePriceGold = candidate.lastPurchasePriceGold;
+    }
+
+    public long lastPurchaseSequence() { return lastPurchaseSequence; }
+    public int lastPurchasePetTableId() { return lastPurchasePetTableId; }
+    public long lastPurchasePetId() { return lastPurchasePetId; }
+    public long lastPurchasePriceGold() { return lastPurchasePriceGold; }
+
+    public void recordPurchase(long sequence, int petTableId, long petId, long priceGold) {
+        lastPurchaseSequence = sequence;
+        lastPurchasePetTableId = petTableId;
+        lastPurchasePetId = petId;
+        lastPurchasePriceGold = priceGold;
+    }
+
+    public boolean acquisitionStateValid() {
+        if (!unknownFields.asMap().isEmpty()) return false;
+        var ids = new java.util.HashSet<Long>();
+        for (Pet pet : pets) {
+            if (!pet.unknownFields.asMap().isEmpty() || pet.petId() == 0 || pet.petTableId() == 0
+                    || pet.level() == 0 || !ids.add(pet.petId())) return false;
+        }
+        return activePetId == 0 || ids.contains(activePetId);
     }
 
     /** 出战中的宝宝号；0 = 未出战。 */
@@ -246,11 +280,14 @@ public final class PlayerPets {
 
     /** 没有宝宝、未出战、没有不认识的字段：持久化时整段省略。 */
     public boolean isPristine() {
-        return pets.isEmpty() && activePetId == 0 && unknownFields.asMap().isEmpty();
+        return pets.isEmpty() && activePetId == 0 && lastPurchaseSequence == 0 && lastPurchasePetTableId == 0
+                && lastPurchasePetId == 0 && lastPurchasePriceGold == 0 && unknownFields.asMap().isEmpty();
     }
 
     public PetState toState() {
-        PetState.Builder state = PetState.newBuilder().setActivePetId(activePetId).setUnknownFields(unknownFields);
+        PetState.Builder state = PetState.newBuilder().setActivePetId(activePetId).setUnknownFields(unknownFields)
+                .setLastPurchaseSequence(lastPurchaseSequence).setLastPurchasePetTableId(lastPurchasePetTableId)
+                .setLastPurchasePetId(lastPurchasePetId).setLastPurchasePriceGold(lastPurchasePriceGold);
         for (Pet pet : pets) {
             state.addPets(pet.toEntry());
         }

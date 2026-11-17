@@ -235,7 +235,8 @@ public final class PlayerBattleService implements BattleHooks {
                     Long.toUnsignedString(battleId));
             return prepareRejected(SESSION_NOT_FOUND, Prepare.NOT_HERE);
         }
-        BattlePlayerSnapshot snapshot = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route);
+        BattlePlayerSnapshot snapshot = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route).toBuilder()
+                .setPetCaptureSlots(pets.availableCaptureSlots(player)).build();
         // 快照构建后，在冻结提交点再次校验原工作代次截止。
         if(Long.compareUnsigned(prepareDeadline,clock.epochMillis())<=0)return prepareRejected(INVALID_PARAMETER,Prepare.INVALID);
         BattleFreeze freeze = new BattleFreeze(battleId, request.getBattleNodeId(), Phase.PREPARING, deadline, prepareDeadline, true);

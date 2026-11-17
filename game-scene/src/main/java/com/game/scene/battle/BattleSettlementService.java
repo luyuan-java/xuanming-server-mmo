@@ -161,6 +161,8 @@ public final class BattleSettlementService {
             consumed.forEach((config,wanted)->{long held=player.bags().bag(BagType.INVENTORY).total(config);if(held<wanted)shortfalls.put(config,wanted-held);});
             var bag=bags.prepareBattle(player,consumed,gained);
             if(bag.tip()!=0)return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+            var captured = pets.prepareCapturedPets(player, settlement.getCapturedPetTableIdsList());
+            if (captured.tip() != 0) return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
             // 正常业务拒绝已全部预检。普通异常交给组合根不存盘隔离，绝不逐步catch后登记APPLIED。
             if(gold>0){
                 var change=currency.add(player,Wallet.GOLD,gold,AssetAudit.Reason.BATTLE_REWARD,settlement.getBattleId(),now);
@@ -169,6 +171,11 @@ public final class BattleSettlementService {
                         Long.toUnsignedString(settlement.getBattleId()),Long.toUnsignedString(player.playerId()),gold);
             }
             bag.commitBattle(settlement.getBattleId());applyVitals(player,settlement);
+            pets.commitCapturedPets(player, captured);
+            if (!captured.pets().isEmpty()) {
+                world.sendTo(player, push(notifyPetListChanged,
+                        PetListChangedS2C.newBuilder().setPets(pets.buildList(player)).build()));
+            }
             pets.applyBattleSettlement(player,applicablePets);
             // 应用时战斗冻结已不在（判废期限已过才到达）：本局消耗的物品可能已在解冻之后经交易 / 帮会托管转走。夹紧照旧（不能扣成负数），
             // 另记专用计数与 WARN 供对账——它说明「冻结覆盖 Match 终局宽限 + 收件箱投递余量」这条不变量被打破了。
@@ -232,6 +239,8 @@ public final class BattleSettlementService {
                     Long.toUnsignedString(battleId), ledger.invalidReason());
             return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
         }
+        var captured = pets.prepareCapturedPets(player, settlement.getCapturedPetTableIdsList());
+        if (captured.tip() != 0) return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
         // d. 金币先行（唯一会正常失败的入账，之前不得有任何副作用）
         long gold = settlement.getGoldGain();
         if (gold < 0) {
@@ -249,6 +258,7 @@ public final class BattleSettlementService {
         }
         // e–j：金币已入账，之后任何一步出错都不得让整笔失败；k 在 finally 里登记账本
         try {
+            pets.commitCapturedPets(player, captured);
             step("气血法力", player, battleId, () -> applyVitals(player, settlement));
             step("宝宝", player, battleId, () -> applyPets(world, player, settlement));
             step("经验", player, battleId, () -> {
@@ -311,7 +321,7 @@ public final class BattleSettlementService {
 
     /** f：宝宝逐个回写（不经 checkWritable），有条目时推一次 184。 */
     private void applyPets(SceneWorld world, ScenePlayer player, BattleSettlementData settlement) {
-        if (settlement.getPetsCount() == 0) {
+        if (settlement.getPetsCount() == 0 && settlement.getCapturedPetTableIdsCount() == 0) {
             return;
         }
         pets.applyBattleSettlement(player, settlement.getPetsList());

@@ -10,6 +10,8 @@ option go_package = "player_store/player_store";
 option cc_generic_services = false;
 
 import "proto/common/base/service_call_auth.proto";
+import "proto/common/rollback/player_snapshot.proto";
+import "proto/common/rollback/transaction_log.proto";
 import "proto/db/proto_option.proto";
 
 // 玩家存盘直接提交 TiDB 的协议,规格见 docs/design/player-save-direct-commit.md。
@@ -33,8 +35,9 @@ service PlayerStore {
 //
 // 1、2 是 2026-11-05 退役的 HOT、ASSET:字段拆到了 CHARACTER、WALLET、BAG、LOCATION、PROFILE。
 // 5 是随 player_database_1 一起删掉的 LEGACY1(规格 §1.2)。退役号不复用,
-// 旧库残留的 1、2、5 行按未知 kind 拒绝加载,不会被当成新行误读(项目未上线,遇到就清库)。
-// 新加一行取下一个空闲号,不回填空号。
+// 旧库残留的 1、2、5 行拒绝加载,不会被当成新行误读(项目未上线,遇到就清库)。
+// 新加一行取下一个空闲号,不回填空号。所以号比读方认识的都大的行一定是更新版本加的:
+// 旧 scene 不读也不写它,库里那一行原样留着(混版本设计 §4.2)。新行里只能放新字段,已有字段不许换行。
 enum PlayerStoreKind {
   reserved 1, 2, 5;
   reserved "PLAYER_STORE_KIND_HOT", "PLAYER_STORE_KIND_ASSET", "PLAYER_STORE_KIND_LEGACY1";
@@ -69,8 +72,8 @@ enum SavePlayerResult {
   SAVE_PLAYER_NOT_HOLDER = 6;        // 同代次,但持有者不是这个实例
   SAVE_PLAYER_UNCLAIMED = 7;         // 代次更高,但持有者不是这个实例,没有认领过
   SAVE_PLAYER_OLDER_SEQ = 8;         // 迟到的旧序号
-  SAVE_PLAYER_SCHEMA_REGRESSED = 9;  // 世代低于库里的世代
-  SAVE_PLAYER_SCHEMA_TOO_NEW = 10;   // 世代高于 go/db 认识的世代,发布顺序问题
+  SAVE_PLAYER_SCHEMA_REGRESSED = 9;  // 带着数据行,世代却低于库里的世代:写方没把加载到的内容和世代带回来
+  SAVE_PLAYER_SCHEMA_TOO_NEW = 10;   // 世代高于 go/db 认识的世代,或带了 go/db 不认识的行种:发布顺序问题,可重试
   SAVE_PLAYER_TOO_LARGE = 11;        // payload 超预算
 }
 
@@ -84,12 +87,30 @@ message SavePlayerRequest {
   bytes instance_id = 7;             // scene_instance_id
   repeated PlayerStoreRow rows = 8;  // 有变化的片段,可以为空
   bool release = 9;                  // 最终存盘:提交后释放写权
+  // 审计发件箱(docs/design/player-audit-outbox.md,断线重连 R13):这名玩家水位不大于这份快照的审计记录。
+  // COMMITTED 时 go/db 在提交存档的同一个事务里把它们写进本存档库的 player_audit_outbox,再由转发循环投 Kafka。
+  // 审计内容不会让存盘被拒:坏的单条记录跳过并计数(设计 §6.3)。
+  repeated TransactionLogEntry transaction_logs = 10;  // 原样进发件箱,tx_id 是去重键
+  // 快照请求:只用 snapshot_id、trigger、schema_version、zone_id。player_database_blob、snapshot_time、total_bytes、
+  // player_id 由 go/db 按这一笔写完之后的全部数据行在事务里填,请求里带了也会被覆盖。
+  repeated PlayerSnapshotEntry audit_snapshots = 11;
 }
 
 message SavePlayerResponse {
   SavePlayerResult result = 1;
   uint64 row_owner_epoch = 2;  // 拒绝时带回库里的值
   uint64 row_save_seq = 3;
+  // 认识字段 10、11 的 go/db 在 COMMITTED、EQUAL 时置真。只为新旧混跑兜底:旧 go/db 不认识审计字段,存档照样提交、审计静默丢掉,
+  // scene 看到带了审计却没置真就不放行这些记录,随下一笔再交(设计 §4、§5.2)。
+  bool audit_outbox_written = 4;
+}
+
+// player_audit_outbox.kind 的取值(表声明在 proto/common/database/mysql_database_table.proto)。
+// 号只增不复用;转发循环只读自己认识的 kind,滚动升级时新版本写的新 kind 留给新版本投。
+enum PlayerAuditKind {
+  PLAYER_AUDIT_KIND_UNSPECIFIED = 0;
+  PLAYER_AUDIT_KIND_TRANSACTION_LOG = 1;   // 序列化的 TransactionLogEntry,投 transaction_log_topic
+  PLAYER_AUDIT_KIND_PLAYER_SNAPSHOT = 2;   // 序列化的 PlayerSnapshotEntry,投 player_snapshot_topic
 }
 
 enum LoadAndClaimResult {
@@ -99,7 +120,7 @@ enum LoadAndClaimResult {
   LOAD_AND_CLAIM_INVALID = 3;        // 请求不合法:E 或实例为空
   LOAD_AND_CLAIM_STALE_OWNER = 4;    // 路由过期,候选代次比库里低
   LOAD_AND_CLAIM_NOT_HOLDER = 5;     // 同代次已被别的实例持有
-  LOAD_AND_CLAIM_SCHEMA_TOO_NEW = 6; // 库里的世代比本进程新,拒绝加载
+  LOAD_AND_CLAIM_SCHEMA_TOO_NEW = 6; // 库里的世代或 scene 的世代比 go/db 认识的新:不认领、不抬代次。库里的世代比 scene 新不拦
 }
 
 message LoadAndClaimRequest {

@@ -8,6 +8,10 @@ import com.game.proto.AllocatePetPointsResponse;
 import com.game.proto.AutoAllocatePetPointsRequest;
 import com.game.proto.AutoAllocatePetPointsResponse;
 import com.game.proto.GetPetListRequest;
+import com.game.proto.GetPetShopRequest;
+import com.game.proto.BuyPetRequest;
+import com.game.proto.BuyPetResponse;
+import com.game.scene.player.Wallet;
 import com.game.proto.GetPetListResponse;
 import com.game.proto.GmGrantPetRequest;
 import com.game.proto.GmGrantPetResponse;
@@ -52,6 +56,19 @@ public final class PetFeature implements SceneFeature {
     public void register(Registrar r) {
         r.on(SERVICE, "GetPetList", GetPetListRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, (call, request) -> call.reply(
                 GetPetListResponse.newBuilder().setErrorMessage(tip(0)).setPets(pets.buildList(call.player())).build()));
+        r.on(SERVICE, "GetPetShop", GetPetShopRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                (call, request) -> call.reply(pets.shop(call.player())));
+        r.on(SERVICE, "BuyPet", BuyPetRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
+            PetService.Grant grant = pets.buy(call.player(), request.getPetTableId(), request.getPurchaseSequence(), request.getPriceGold());
+            var response = BuyPetResponse.newBuilder().setErrorMessage(tip(grant.tip()))
+                    .setGold(call.player().wallet().balance(Wallet.GOLD))
+                    .setNextPurchaseSequence(pets.nextPurchaseSequence(call.player()));
+            if (grant.tip() == 0) {
+                response.setPetId(grant.petId()).setPets(pets.buildList(call.player()));
+                call.world().requestSave(call.player());
+            }
+            call.reply(response.build());
+        });
         r.on(SERVICE, "SummonPet", SummonPetRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
             int result = pets.summon(call.player(), request.getPetId());
             SummonPetResponse.Builder response = SummonPetResponse.newBuilder().setErrorMessage(tip(result));

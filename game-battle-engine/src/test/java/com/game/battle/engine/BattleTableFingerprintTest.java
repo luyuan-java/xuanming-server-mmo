@@ -11,6 +11,8 @@ import com.game.table.CooldownTable;
 import com.game.table.DungeonRows;
 import com.game.table.DungeonTable;
 import com.game.table.ItemRows;
+import com.game.table.PetRows;
+import com.game.table.PetTable;
 import com.game.table.ItemTable;
 import com.game.table.MonsterRows;
 import com.game.table.MonsterTable;
@@ -45,7 +47,7 @@ class BattleTableFingerprintTest {
     /** 本稿基线：mmorpg 26ceb70ca（{@code contract/SOURCE.properties} 的 mmorpg.commit）。 */
     private static final String BASELINE_MMORPG_COMMIT = "26ceb70ca5771c5ab055c2ec7144c1e55f32c528";
 
-    /** 七张表的行（对应基线夹具的 {@code TableSet}）；可变，用例就地改一列再算。 */
+    /** 八张表的行（对应基线夹具的 {@code TableSet}）；可变，用例就地改一列再算。 */
     private static final class TableSet {
         final List<SkillTable.Builder> skill = new ArrayList<>();
         final List<BuffTable.Builder> buff = new ArrayList<>();
@@ -54,6 +56,7 @@ class BattleTableFingerprintTest {
         final List<DungeonTable.Builder> dungeon = new ArrayList<>();
         final List<MonsterTable.Builder> monster = new ArrayList<>();
         final List<ItemTable.Builder> item = new ArrayList<>();
+        final List<PetTable.Builder> pet = new ArrayList<>();
 
         String fingerprint() {
             return BattleTableFingerprint.computeFrom(
@@ -63,7 +66,8 @@ class BattleTableFingerprintTest {
                     permission.stream().map(SkillPermissionTable.Builder::build).toList(),
                     dungeon.stream().map(DungeonTable.Builder::build).toList(),
                     monster.stream().map(MonsterTable.Builder::build).toList(),
-                    item.stream().map(ItemTable.Builder::build).toList());
+                    item.stream().map(ItemTable.Builder::build).toList(),
+                    pet.stream().map(PetTable.Builder::build).toList());
         }
     }
 
@@ -110,10 +114,11 @@ class BattleTableFingerprintTest {
     }
 
     @Test
-    void 七张表任一字段变化都改变指纹() {
+    void 八张表任一字段变化都改变指纹() {
         // 【C++ 断言】fp_test.cpp:112-160，九种改法
         String base = makeTables().fingerprint();
         assertChanges(base, "skill 字段", t -> t.skill.get(0).setCooldownId(10));
+        assertChanges(base, "pet 获取类别", t -> t.pet.add(PetTable.newBuilder().setId(1).setAcquisitionTier(1)));
         assertChanges(base, "item 字段", t -> t.item.get(0).setBattleHealHp(301));
         assertChanges(base, "monster 掉落槽", t -> t.monster.get(0).getDropBuilder(0).setDropRate(5000));
         assertChanges(base, "buff 字段", t -> t.buff.get(0).setMaxLayer(4));
@@ -150,26 +155,26 @@ class BattleTableFingerprintTest {
     @Test
     void 空表指纹与语言无关() {
         // 【复核】每段是「表名 + NUL + 8 个零字节」；规格用 printf + sha256sum 独立算出，C++ 必然同值
-        assertThat(new TableSet().fingerprint()).isEqualTo("fad2935e5c749630621c18c616048e32");
+        assertThat(new TableSet().fingerprint()).isEqualTo("2cdc7cfce1ce0867e7c3ca95b3d68eb8");
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        for (String name : List.of("skill", "buff", "cooldown", "skillpermission", "dungeon", "monster", "item")) {
+        for (String name : List.of("skill", "buff", "cooldown", "skillpermission", "dungeon", "monster", "item", "pet")) {
             buffer.writeBytes(name.getBytes(StandardCharsets.US_ASCII));
             buffer.write(0);
             buffer.writeBytes(new byte[8]);
         }
-        assertThat(sha256Hex(buffer.toByteArray()).substring(0, 32)).isEqualTo("fad2935e5c749630621c18c616048e32");
+        assertThat(sha256Hex(buffer.toByteArray()).substring(0, 32)).isEqualTo("2cdc7cfce1ce0867e7c3ca95b3d68eb8");
     }
 
     @Test
     void 基线夹具表的指纹向量() {
         // 【派生】只由 Java 算出；需要在 mmorpg 的 fp_test.cpp 加同值断言确认（规格 §13.9）
-        assertThat(makeTables().fingerprint()).isEqualTo("11ca1a2d9b625cceb3ce199148d03133");
+        assertThat(makeTables().fingerprint()).isEqualTo("041a3d77069ad9e175237b441f3c6e79");
         TableSet onlySkill = new TableSet();
         onlySkill.skill.add(SkillTable.newBuilder().setId(1));
-        assertThat(onlySkill.fingerprint()).isEqualTo("e1c97a64990a49b717cf32748fe0e84f");
+        assertThat(onlySkill.fingerprint()).isEqualTo("ee5385113e0a802876267d027b90d113");
         TableSet onlyBuff = new TableSet();
         onlyBuff.buff.add(BuffTable.newBuilder().setId(1));
-        assertThat(onlyBuff.fingerprint()).isEqualTo("4635b07869db163d304ed141dba96c19");
+        assertThat(onlyBuff.fingerprint()).isEqualTo("ae91a8abbb0a4ee43e32627a1f0eb380");
     }
 
     @Test
@@ -182,7 +187,7 @@ class BattleTableFingerprintTest {
 
     @Test
     void 正式表的指纹值() throws IOException {
-        // 【复核】规格 §13.2：Java 重序列化 = 对七个 .pb 原始字节求哈希。只对本稿基线的表数据成立：
+        // 【复核】规格 §13.2：Java 重序列化 = 对八个 .pb 原始字节求哈希。只对本稿基线的表数据成立：
         // 同步表之后这里会跳过，确认上一个用例仍绿后把新值抄过来（可与 mmorpg scene 启动日志里的指纹对照）
         assumeTrue(BASELINE_MMORPG_COMMIT.equals(contractSource().getProperty("mmorpg.commit")),
                 "config-data 已不是本稿基线 mmorpg 26ceb70ca 的数据，跳过固定指纹值");
@@ -191,7 +196,7 @@ class BattleTableFingerprintTest {
 
     // ---- 工具 ----
 
-    /** 直接对七个 .pb 原始字节按 fp.cpp 的拼接格式求指纹（不经过解析与重序列化）。 */
+    /** 直接对八个 .pb 原始字节按 fp.cpp 的拼接格式求指纹（不经过解析与重序列化）。 */
     private static String rawFingerprint() throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         String[][] sections = {
@@ -202,6 +207,7 @@ class BattleTableFingerprintTest {
                 {"dungeon", DungeonRows.DATA_FILE},
                 {"monster", MonsterRows.DATA_FILE},
                 {"item", ItemRows.DATA_FILE},
+                {"pet", PetRows.DATA_FILE},
         };
         for (String[] section : sections) {
             byte[] bytes = Files.readAllBytes(TABLES.resolve(section[1]));

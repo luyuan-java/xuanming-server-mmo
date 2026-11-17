@@ -2128,3 +2128,14 @@ Unity 客户端已按这个契约改(`GameClient.BuildAssignGateRequest`、`Assi
 `go/login/internal/config/auth_providers_idtoken_test.go`(门禁)、`go/login/cmd/sandbox_mock/idtoken_test.go`(对着 mock 端到端)。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-15 普通宠物商店与野外捕捉（C++ / Java 已落码，Java 编译和相关测试通过）
+
+主仓和 Java 均为当前未提交工作区，Java 版本 `0.1.0-SNAPSHOT`。客户端契约与配表由主仓生成后通过 ContractSync 同步；本条不代表线上部署完成。
+
+- 新增普通玩家 `GetPetShop`（402）和 `BuyPet`（403）。价格、携带等级和宠物种类由服务端表控制；金币不足、报价过期、序号不符、容量不足、战斗中或换图冻结时拒绝购买。金币、宠物实例与最后一笔购买回执一起写入玩家状态；相同序号和参数重试不重复扣款或发宠物。
+- `Pet.acquisition_tier` 与已有品质字段独立：0 为普通、1 为变异、2 为神兽。当前已有 22 种暂按普通配置。商店和捕捉均只接受 0；变异令牌兑换、充值抽奖尚未给定分类与规则，保持不发放。商店售价 0 表示停售。
+- 普通 PvE 按副本开关与怪物捕捉配置开放捕捉，校验等级和剩余宠物位。成功后目标离场、只归一次捕捉者、不重复计为击杀；战斗结算先预检全部宠物候选，再与其他资产和结算回执一起提交。PvP、活动及兜底怪物不开放捕捉。
+- 新增购买回执的私有 `PetState` 字段 3–6；持久 schema 台账只追加 `0003.schema`，保留前两代原件。领域测试覆盖加载、改名、候选提交与存盘后的未知字段和购买回执保留；未知宠物 / 属性池表字段阻止新购买与捕捉。
+- Java 验证：按 `-pl game-scene,game-battle-engine -am clean install` 分段恢复完成。battle-engine 2,395 项（跳过 1）、player-store 211 项（跳过 8）、audit 38 项（跳过 1）、scene 1,975 项（跳过 9）均零失败、零错误；最终 `TurnBattleCaptureTest` 再跑 5/5。重点包含 `PetServiceTest` 43、`InBattleGateMatrixTest` 148、`FreezeGateTest` 11、`SettlementApplyValuesTest` 39。
+- 环境限制：缺少真实 TiDB fixture，明确排除 `AuthorityPoolTiDbTest` 和 `SceneMaintenanceDrainTiDbTest`；未将这两项记为通过。完整日志位于 `.codex-artifacts/pet-acquisition/java-clean-install*.log` 与 `java-capture-final.log`。C++ 编译 / 测试结果另记主仓 `docs/PROGRESS.md`。

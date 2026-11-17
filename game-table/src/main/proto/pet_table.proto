@@ -20,6 +20,8 @@ message PetTable {
   option (cfg_sheet)       = "Pet";
   option (cfg_source_file) = "Pet.xlsx";
   option (cfg_primary_key) = "id";
+  // 行 id 只增不删:宝宝存档、在途的资产通道指令按种类 id 引用(混版本持久字段保护设计 §13 第 10 条)。
+  option (cfg_ids_permanent) = true;
 
   // 宝宝种类 id
   uint32 id = 1;
@@ -47,4 +49,8 @@ message PetTable {
   repeated uint32 aptitude_max = 12 [(cfg_slots) = 4];
   // 自带技能(SkillTable id)
   repeated uint32 skill = 13 [(cfg_slots) = 4];
+  // 宠物商店银两售价，0 表示不上架。
+  uint64 shop_price_gold = 14;
+  // 获取类别：0普通（银两/捕捉），1变异（令牌兑换），2神兽（充值抽奖）。
+  uint32 acquisition_tier = 15;
 }

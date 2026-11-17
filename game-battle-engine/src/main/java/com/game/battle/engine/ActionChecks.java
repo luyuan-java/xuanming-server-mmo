@@ -39,6 +39,9 @@ final class ActionChecks {
 
     private final BattleContext ctx;
     private final ItemLedger ledger;
+    private com.game.proto.CreateBattleRequest captureRequest = com.game.proto.CreateBattleRequest.getDefaultInstance();
+
+    void setCaptureRequest(com.game.proto.CreateBattleRequest request) { captureRequest = request; }
 
     ActionChecks(BattleContext ctx, ItemLedger ledger) {
         this.ctx = ctx;
@@ -58,6 +61,9 @@ final class ActionChecks {
         switch (action.getActionTypeValue()) {
             case eBattleActionType.BATTLE_ACTION_ATTACK_VALUE, eBattleActionType.BATTLE_ACTION_DEFEND_VALUE -> {
                 return SUCCESS;
+            }
+            case eBattleActionType.BATTLE_ACTION_CAPTURE_VALUE -> {
+                return checkCapture(actor, action.getTargetId());
             }
             case eBattleActionType.BATTLE_ACTION_FLEE_VALUE -> {
                 return ctx.isPve() ? SUCCESS : INVALID_PARAMETER;
@@ -80,6 +86,22 @@ final class ActionChecks {
      * 目标校验（职业技能区分敌方/友方/自身）→ 冷却 7003 → 等级（职业上限已在开局折算）→
      * 沉默许可 1002 或格值 → 法力 7004。
      */
+    int checkCapture(BattleUnit actor, long targetId) {
+        BattleUnit target = ctx.findActor(targetId);
+        if (!ctx.isPve() || !actor.isPlayer() || actor.teamIndex() != 0 || target == null ||
+                target.state().getActorType() != com.game.proto.eBattleActorType.BATTLE_ACTOR_TYPE_MONSTER ||
+                target.teamIndex() == actor.teamIndex() || !target.isActive() ||
+                target.state().getCapturePetTableId() == 0 ||
+                Integer.compareUnsigned(actor.level(), target.state().getCaptureMinLevel()) < 0) return INVALID_PARAMETER;
+        var settlement = ctx.settlements().get(actor.actorId());
+        int count = settlement == null ? 0 : settlement.getCapturedPetTableIdsCount();
+        for (var snapshot : captureRequest.getPlayersList()) {
+            if (snapshot.getPlayerId() == actor.actorId())
+                return Integer.compareUnsigned(count, snapshot.getPetCaptureSlots()) < 0 ? SUCCESS : INVALID_PARAMETER;
+        }
+        return INVALID_PARAMETER;
+    }
+
     private int checkSkill(BattleUnit actor, BattleAction action) {
         Optional<SkillTable> skillRow = ctx.data().skill(action.getSkillTableId());
         if (skillRow.isEmpty()) {

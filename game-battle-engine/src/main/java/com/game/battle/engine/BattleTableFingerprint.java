@@ -5,6 +5,7 @@ import com.game.table.ConfigTables;
 import com.game.table.CooldownTable;
 import com.game.table.DungeonTable;
 import com.game.table.ItemTable;
+import com.game.table.PetTable;
 import com.game.table.MonsterTable;
 import com.game.table.SkillPermissionTable;
 import com.game.table.SkillTable;
@@ -20,10 +21,10 @@ import java.util.HexFormat;
 import java.util.List;
 
 /**
- * 战斗配表指纹（基线 {@code battle_table_fingerprint.{h,cpp}}，规格 §9.5–§9.6）：七张战斗表内容的短摘要，随快照携带，
+ * 战斗配表指纹（基线 {@code battle_table_fingerprint.{h,cpp}}，规格 §9.5–§9.6）：八张战斗表内容的短摘要，随快照携带，
  * 让出快照的 scene、凑局的 match 与开局的 battle 节点确认读的是同一份战斗配表（确定性的前提）。
  *
- * <p>算法（逐字节同基线 {@code fp.cpp:34-86}）：按固定表序 skill、buff、cooldown、skillpermission、dungeon、monster、item，
+ * <p>算法（逐字节同基线 {@code fp.cpp:34-86}）：按固定表序 skill、buff、cooldown、skillpermission、dungeon、monster、item、pet，
  * 每张表做确定性序列化（map 按键排序），拼成 {@code 表名 + '\0' + 8 字节大端段长 + 字节}，整体 sha256 后取小写 hex 前 32 位。
  * 表序是契约，新表只能往尾部追加。
  *
@@ -32,7 +33,7 @@ import java.util.List;
  * 构造时算好），热更换快照时自然重算（规格 D3）。
  *
  * <p>跨语言边角（规格 §9.8，现有数据都不涉及）：Java 确定性序列化对整数键 map 按有符号排序、字符串键按 UTF-16 排序，
- * C++ 分别按无符号、UTF-8 字节排序；七张战斗表只有 {@code map<string, bool>} 且键全是 ASCII。
+ * C++ 分别按无符号、UTF-8 字节排序；八张战斗表只有 {@code map<string, bool>} 且键全是 ASCII。
  */
 public final class BattleTableFingerprint {
 
@@ -45,13 +46,13 @@ public final class BattleTableFingerprint {
     /** 对一份配置表快照计算指纹。 */
     public static String compute(ConfigTables tables) {
         return computeFrom(tables.skill().all(), tables.buff().all(), tables.cooldown().all(), tables.skillPermission().all(),
-                tables.dungeon().all(), tables.monster().all(), tables.item().all());
+                tables.dungeon().all(), tables.monster().all(), tables.item().all(), tables.pet().all());
     }
 
-    /** 对七张表的行（各自按表序）计算指纹；纯函数，单测直接构造行（对应基线 {@code ComputeFrom}）。 */
+    /** 对八张表的行（各自按表序）计算指纹；纯函数，单测直接构造行（对应基线 {@code ComputeFrom}）。 */
     static String computeFrom(List<SkillTable> skill, List<BuffTable> buff, List<CooldownTable> cooldown,
                               List<SkillPermissionTable> skillPermission, List<DungeonTable> dungeon,
-                              List<MonsterTable> monster, List<ItemTable> item) {
+                              List<MonsterTable> monster, List<ItemTable> item, List<PetTable> pet) {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         // 表序固定：改顺序 = 改指纹契约；新表只能追加在末尾
         appendSection(buffer, "skill", skill);
@@ -61,6 +62,7 @@ public final class BattleTableFingerprint {
         appendSection(buffer, "dungeon", dungeon);
         appendSection(buffer, "monster", monster);
         appendSection(buffer, "item", item);
+        appendSection(buffer, "pet", pet);
         return HexFormat.of().formatHex(sha256(buffer.toByteArray())).substring(0, HEX_LENGTH);
     }
 

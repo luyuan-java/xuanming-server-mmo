@@ -945,4 +945,38 @@ class SettlementApplyValuesTest {
         assertThat(f.count("game.scene.battle.gate.rejects", "gate", "attribute")).as("没有经过带 25011 的闸").isEqualTo(attributeRejects);
         assertThat(f.count("game.scene.battle.gate.rejects", "gate", "pet")).as("没有经过带 26008 的闸").isEqualTo(petRejects);
     }
+    @Test
+    void 捕获批次后续种类缺失时宠物金币血量均不变() {
+        var player = f.enter(SESSION, PLAYER);
+        var before = BattleFixture.persistentState(player);
+        var result = apply(player, vitals(X, 80, 20).setGoldGain(12)
+                .addCapturedPetTableIds(1).addCapturedPetTableIds(Integer.MAX_VALUE).build());
+        assertThat(result.outcome()).isEqualTo(Outcome.DEFERRED);
+        assertThat(BattleFixture.persistentState(player)).isEqualTo(before);
+    }
+
+    @Test
+    void 捕获容量不足时整笔结算延后() {
+        var player = f.enter(SESSION, PLAYER);
+        var before = BattleFixture.persistentState(player);
+        var settlement = vitals(X, 80, 20).setGoldGain(12);
+        for (int i = 0; i <= f.pets.availableCaptureSlots(player); ++i) settlement.addCapturedPetTableIds(1);
+        assertThat(apply(player, settlement.build()).outcome()).isEqualTo(Outcome.DEFERRED);
+        assertThat(BattleFixture.persistentState(player)).isEqualTo(before);
+    }
+
+    @Test
+    void 捕获正常发放且重复结算保持同一实例() {
+        var player = f.enter(SESSION, PLAYER);
+        var settlement = vitals(X, 80, 20).addCapturedPetTableIds(1).build();
+        assertThat(apply(player, settlement)).isEqualTo(Result.APPLIED);
+        var pets = player.pets().toState();
+        assertThat(pets.getPetsList()).singleElement().satisfies(pet -> {
+            assertThat(pet.getPetTableId()).isEqualTo(1);
+            assertThat(pet.getPetId()).isNotZero();
+        });
+        assertThat(apply(player, settlement)).isEqualTo(Result.ALREADY);
+        assertThat(player.pets().toState()).isEqualTo(pets);
+    }
+
 }

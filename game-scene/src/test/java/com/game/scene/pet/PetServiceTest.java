@@ -414,4 +414,121 @@ class PetServiceTest {
         assertThat(restored.activePetId()).isEqualTo(petId);
         assertThat(restored.find(petId).name()).isEqualTo("小白");
     }
+
+    @Test
+    void 宠物领域加载改名与存盘保留未知字段及购买回执() {
+        var future = com.google.protobuf.UnknownFieldSet.newBuilder().addField(999,
+                com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(73).build()).build();
+        var saved = PetState.newBuilder().setUnknownFields(future)
+                .setLastPurchaseSequence(41).setLastPurchasePetTableId(1).setLastPurchasePetId(991)
+                .setLastPurchasePriceGold(1000)
+                .addPets(PetEntry.newBuilder().setPetId(991).setPetTableId(1).setLevel(1)
+                        .setHealth(100).setMana(30).setUnknownFields(future)).build();
+        player = WorldTestAccess.player(PLAYER, 1, PlayerState.newBuilder().setPets(saved).build());
+        service.initializeOnLoad(player);
+        player.wallet().add(Wallet.GOLD, 200);
+        assertThat(service.rename(player, 991, "小白")).isZero();
+        var stored = WorldTestAccess.persistentState(player).getPets();
+        assertThat(stored.getUnknownFields()).isEqualTo(future);
+        assertThat(stored.getPets(0).getUnknownFields()).isEqualTo(future);
+        assertThat(stored.getPets(0).getName()).isEqualTo("小白");
+        assertThat(stored.getLastPurchaseSequence()).isEqualTo(41);
+        assertThat(stored.getLastPurchasePetTableId()).isEqualTo(1);
+        assertThat(stored.getLastPurchasePetId()).isEqualTo(991);
+        assertThat(stored.getLastPurchasePriceGold()).isEqualTo(1000);
+        var candidate = PlayerPets.restore(stored);
+        candidate.recordPurchase(42, 1, 992, 1000);
+        player.pets().commitPrepared(candidate);
+        assertThat(WorldTestAccess.persistentState(player).getPets().getUnknownFields()).isEqualTo(future);
+        assertThat(WorldTestAccess.persistentState(player).getPets().getLastPurchaseSequence()).isEqualTo(42);
+    }
+
+    @Test
+    void 普通购买扣款与宠物和回执一起落存档_同请求重登重试不重复消费() {
+        player.wallet().add(Wallet.GOLD, 100_000);
+        var shop = service.shop(player);
+        var offer = shop.getOffersList().stream().filter(row -> row.getPetTableId() == 1).findFirst().orElseThrow();
+        var result = service.buy(player, 1, shop.getNextPurchaseSequence(), offer.getPriceGold());
+        assertThat(result.tip()).isZero();
+        assertThat(result.petId()).isNotZero();
+        long gold = player.wallet().balance(Wallet.GOLD);
+        assertThat(gold).isEqualTo(100_000 - offer.getPriceGold());
+        assertThat(player.pets().size()).isEqualTo(1);
+        var saved = WorldTestAccess.persistentState(player);
+        var reloaded = WorldTestAccess.player(PLAYER, player.level(), saved);
+        var replay = service.buy(reloaded, 1, 1, offer.getPriceGold());
+        assertThat(replay).isEqualTo(result);
+        assertThat(reloaded.pets().size()).isEqualTo(1);
+        assertThat(reloaded.wallet().balance(Wallet.GOLD)).isEqualTo(gold);
+        assertThat(audit.currencies).hasSize(1);
+        assertThat(service.nextPurchaseSequence(reloaded)).isEqualTo(2);
+        assertThat(service.buy(reloaded, 1, 1, offer.getPriceGold() + 1).tip()).isNotZero();
+    }
+
+    @Test
+    void 购买报价序号资金和号源错误都不扣钱不发宠物() {
+        long price = tables.pet(1).getShopPriceGold();
+        var before = WorldTestAccess.persistentState(player);
+        assertThat(service.buy(player, 1, 1, price).tip()).isNotZero();
+        assertThat(WorldTestAccess.persistentState(player)).isEqualTo(before);
+        player.wallet().add(Wallet.GOLD, 100_000);
+        before = WorldTestAccess.persistentState(player);
+        assertThat(service.buy(player, 1, 2, price).tip()).isEqualTo(PetService.INVALID_PARAMETER);
+        assertThat(service.buy(player, 1, 1, price + 1).tip()).isEqualTo(PetService.INVALID_PARAMETER);
+        guidBudget = 0;
+        assertThat(service.buy(player, 1, 1, price).tip()).isEqualTo(PetService.ID_GENERATE_FAILED);
+        assertThat(WorldTestAccess.persistentState(player)).isEqualTo(before);
+        assertThat(audit.currencies).isEmpty();
+    }
+
+    @Test
+    void 变异神兽即使误配售价也不能购买或捕捉() {
+        player.wallet().add(Wallet.GOLD, 100_000);
+        for (int tier : List.of(1, 2)) {
+            var restricted = tables.pet(1).toBuilder().setAcquisitionTier(tier).setShopPriceGold(1000).build();
+            var restrictedTables = new PetTables(Map.of(1, restricted),
+                    com.game.table.PetRuleTable.newBuilder().setMaxPets(22).build(), tables.pool(), tables.dimensions(), tables.autoPlan());
+            var restrictedService = new PetService(restrictedTables, new CurrencyService(audit),
+                    count -> new long[] { 12345 }, clock, LOWEST);
+            assertThat(restrictedService.shop(player).getOffersList()).isEmpty();
+            assertThat(restrictedService.buy(player, 1, 1, 1000).tip()).isNotZero();
+            assertThat(restrictedService.prepareCapturedPets(player, List.of(1)).tip()).isNotZero();
+            assertThat(player.pets().size()).isZero();
+            assertThat(player.wallet().balance(Wallet.GOLD)).isEqualTo(100_000);
+        }
+    }
+
+    @Test
+    void 捕捉候选先检查全组容量与种类_提交前不改玩家() {
+        var before = player.pets().toState();
+        var prepared = service.prepareCapturedPets(player, List.of(1, 1));
+        assertThat(prepared.tip()).isZero();
+        assertThat(player.pets().toState()).isEqualTo(before);
+        assertThat(service.prepareCapturedPets(player, List.of(1, Integer.MAX_VALUE)).tip()).isNotZero();
+        assertThat(player.pets().toState()).isEqualTo(before);
+        service.commitCapturedPets(player, prepared);
+        assertThat(player.pets().size()).isEqualTo(2);
+        assertThat(service.availableCaptureSlots(player)).isEqualTo(20);
+    }
+
+    @Test
+    void 宠物或属性池含新版本未知规则时不售卖不捕捉且不消耗号源() {
+        player.wallet().add(Wallet.GOLD, 100_000);
+        var future = com.google.protobuf.UnknownFieldSet.newBuilder().addField(999,
+                com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(1).build()).build();
+        var before = WorldTestAccess.persistentState(player);
+        for (boolean unknownPool : List.of(false, true)) {
+            var row = unknownPool ? tables.pet(1) : tables.pet(1).toBuilder().setUnknownFields(future).build();
+            var pool = unknownPool ? tables.pool().toBuilder().setUnknownFields(future).build() : tables.pool();
+            var futureTables = new PetTables(Map.of(1, row),
+                    com.game.table.PetRuleTable.newBuilder().setMaxPets(22).build(), pool, tables.dimensions(), tables.autoPlan());
+            var futureService = new PetService(futureTables, new CurrencyService(audit),
+                    count -> { throw new AssertionError("unknown acquisition rules must not consume IDs"); }, clock, LOWEST);
+            assertThat(futureService.shop(player).getOffersList()).isEmpty();
+            assertThat(futureService.buy(player, 1, 1, row.getShopPriceGold()).tip()).isEqualTo(PetService.INVALID_TABLE_DATA);
+            assertThat(futureService.prepareCapturedPets(player, List.of(1)).tip()).isEqualTo(PetService.INVALID_TABLE_DATA);
+            assertThat(WorldTestAccess.persistentState(player)).isEqualTo(before);
+        }
+    }
+
 }

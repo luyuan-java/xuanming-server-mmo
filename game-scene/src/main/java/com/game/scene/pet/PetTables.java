@@ -78,6 +78,12 @@ public final class PetTables {
         return pets.get(petTableId);
     }
 
+    List<PetTable> shopRows() {
+        return pets.values().stream().filter(row -> row.getUnknownFields().asMap().isEmpty()
+                        && row.getAcquisitionTier() == 0 && row.getShopPriceGold() > 0)
+                .sorted(Comparator.comparingLong(row -> Integer.toUnsignedLong(row.getId()))).toList();
+    }
+
     /** 宝宝池；表里没有 owner_type = 1 的池为 null（宝宝属性无法计算）。 */
     AttributePoolTable pool() {
         return pool;
