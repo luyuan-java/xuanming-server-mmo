@@ -163,7 +163,7 @@ class GatewayStorePendingDeleteTiDbTest {
         Harness(Kind kind)throws Exception{
             this.kind=kind;
             try{
-                String root=System.getProperty("game.it.authority.jdbc",System.getProperty("game.it.mysql"));if(root==null||root.isBlank())throw new IllegalStateException("缺真实Gateway TiDB配置");
+                String root=System.getProperty("game.it.authority.jdbc",System.getProperty("game.it.mysql"));org.junit.jupiter.api.Assumptions.assumeTrue(root!=null&&!root.isBlank(),"未配置真实Gateway TiDB");
                 var options=AuthoritySqlFixture.Options.fromEnvironment(root,System.getProperty("game.it.mysql.user","root"),System.getenv().getOrDefault("GAME_MYSQL_PASSWORD",""),"jgw_pending",false,List.of(ZONE));
                 try(var lease=AuthoritySqlFixture.beginUnpublishedWithPlayerBaseSchema(options)){
                     lease.withSchema((c,principal,database)->{new ResourceDatabasePopulator(new ClassPathResource("db/game-gateway-schema.sql")).populate(c);return null;});fixture=lease.publish();

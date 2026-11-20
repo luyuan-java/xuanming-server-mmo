@@ -209,7 +209,7 @@ class PetServiceTest {
             assertThat(snapshot.getPetTableId()).isEqualTo(petTableId);
             assertThat(snapshot.getPetName()).isEqualTo(pet.getName());
             assertThat(snapshot.getSkillTableIdsList())
-                    .isEqualTo(petTableId == 2 || petTableId == 3 ? List.of() : List.of(14));
+                    .isEqualTo(tables.pet(petTableId).getSkillList());
             assertThat(snapshot.getBaseAttributes().getHealth()).isEqualTo(pet.getDerived().getMaxHealth());
             assertThat(snapshot.getBaseAttributes().getMana()).isEqualTo(pet.getDerived().getMaxMana());
         });
@@ -531,4 +531,55 @@ class PetServiceTest {
         }
     }
 
+
+    @Test
+    void independentEntriesRedistributeAndDurableReceiptSurvivesRelog() {
+        long id = grant(1);
+        var read = service.entries(player,id).getEntries();
+        assertThat(read.getTotalPoints()).isEqualTo(20); assertThat(read.getEntriesCount()).isEqualTo(21);
+        var request = com.game.proto.SavePetEntriesRequest.newBuilder().setPetId(id).setStateVersion(read.getStateVersion())
+                .setConfigVersion(read.getConfigVersion()).setRequestId("entry-request-0001").putTarget(501,4).build();
+        var saved = service.saveEntries(player,request);
+        assertThat(saved.getErrorMessage().getId()).isZero(); assertThat(saved.getEntries().getEffects().getPhysicalDamageBps()).isEqualTo(200);
+        var state = player.pets().toState();
+        player = WorldTestAccess.player(PLAYER,1,PlayerState.newBuilder().setPets(state).build());
+        service.initializeOnLoad(player);
+        var replay = service.saveEntries(player,request);
+        assertThat(replay.getReplayed()).isTrue(); assertThat(replay.getEntries().getStateVersion()).isEqualTo(2);
+        assertThat(service.saveEntries(player,request.toBuilder().putTarget(501,5).build()).getErrorMessage().getId()).isNotZero();
+        var decrease = request.toBuilder().setStateVersion(2).setRequestId("entry-request-0002").putTarget(501,1).putTarget(502,2).build();
+        var changed = service.saveEntries(player,decrease);
+        assertThat(changed.getErrorMessage().getId()).isZero(); assertThat(changed.getEntries().getRemainingPoints()).isEqualTo(17);
+        assertThat(player.pets().find(id).allocatedView()).isEmpty();
+    }
+    @Test
+    void entryPreviewRangeOwnershipAndVersionAreAuthoritative() {
+        long id = grant(1);var current=service.entries(player,id).getEntries();
+        var preview = com.game.proto.PreviewPetEntriesRequest.newBuilder().setPetId(id).setStateVersion(current.getStateVersion())
+                .setConfigVersion(current.getConfigVersion()).putTarget(501,2).build();
+        assertThat(service.previewEntries(player,preview).getEntries().getEffects().getPhysicalDamageBps()).isEqualTo(100);
+        assertThat(player.pets().find(id).entryAllocated()).isEmpty();
+        assertThat(service.previewEntries(player,preview.toBuilder().putTarget(501,-1).build()).getErrorMessage().getId()).isEqualTo(PetService.DIMENSION_CAP_EXCEEDED);
+        assertThat(service.previewEntries(player,preview.toBuilder().setStateVersion(99).build()).getErrorMessage().getId()).isEqualTo(PetService.INVALID_PARAMETER);
+        assertThat(service.entries(player,id+1).getErrorMessage().getId()).isEqualTo(PetService.NOT_FOUND);
+    }
+    @Test
+    void fiveTierIdentityNeverDerivesFromQualityAndPersistsAsIndependentState() {
+        long id=grant(1);assertThat(info(id).getCultivationTier()).isEqualTo(1);
+        player.pets().find(id).setCultivationTier(4);service.initializeOnLoad(player);
+        assertThat(info(id).getCultivationTierName()).isEqualTo("神兽");
+        var restored=PlayerPets.restore(player.pets().toState());assertThat(restored.find(id).cultivationTier()).isEqualTo(4);
+        assertThat(info(id).getQuality()).isEqualTo(tables.pet(1).getQuality());
+    }
+
+    @Test
+    void unavailableModernChannelsAreVisibleAsLockedAndRejectInvestment() {
+        long id=grant(1);var current=service.entries(player,id).getEntries();
+        var heal=current.getEntriesList().stream().filter(e->e.getId()==503).findFirst().orElseThrow();
+        assertThat(heal.getCap()).isZero();assertThat(heal.getPerPointBps()).isZero();assertThat(heal.getDesc()).contains("尚未接入");
+        var request=com.game.proto.SavePetEntriesRequest.newBuilder().setPetId(id).setStateVersion(current.getStateVersion())
+                .setConfigVersion(current.getConfigVersion()).setRequestId("entry-request-0003").putTarget(503,1).build();
+        assertThat(service.saveEntries(player,request).getErrorMessage().getId()).isEqualTo(PetService.DIMENSION_CAP_EXCEEDED);
+        assertThat(player.pets().find(id).entryAllocated()).isEmpty();
+    }
 }

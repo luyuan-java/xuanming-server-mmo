@@ -121,14 +121,14 @@ final class ClassSkillExecution {
                 long attack = CombatDamageRules.selectAttack(skill.getDamageType(), ctx.effectivePhysicalAttack(actor), actor.magicAttack());
                 BattleContext.FinalDamage damage = ctx.calculateFinalDamage(actor, target, baseDamage, attack,
                         skill.getAttackMultiplier(), skill.getDamageType());
-                long dealt = target.applyDamage(damage.value() * ClassSkillRules.damageRankFactor(rank));
+                long dealt = target.applyDamage(damage.value() * ClassSkillRules.damageRankFactor(rank) * (1 + PetCultivationRules.damageBonus(actor, skill.getDamageType())));
                 event(eBattleEventType.BATTLE_EVENT_DAMAGE, actor, target, skill).setValue(dealt).setIsCritical(damage.critical());
                 if (target.health() == 0) ctx.handleDeath(target, actor.actorId());
             }
         }
         if (target.isDead()) return;
         if (skill.getHealMultiplier() > 0 || skill.getHealPerLevel() > 0) {
-            long healed = target.applyHeal(ctx.classSkillHealAmount(actor, skill, rank, target));
+            long healed = target.applyHeal(ctx.classSkillHealAmount(actor, skill, rank, target) * (1 + PetCultivationRules.healBonus(actor)));
             event(eBattleEventType.BATTLE_EVENT_HEAL, actor, target, skill).setValue(healed);
         }
         if (skill.getRestoreManaPercent() > 0) {

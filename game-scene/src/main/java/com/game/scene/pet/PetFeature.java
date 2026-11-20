@@ -8,6 +8,9 @@ import com.game.proto.AllocatePetPointsResponse;
 import com.game.proto.AutoAllocatePetPointsRequest;
 import com.game.proto.AutoAllocatePetPointsResponse;
 import com.game.proto.GetPetListRequest;
+import com.game.proto.GetPetEntriesRequest;
+import com.game.proto.PreviewPetEntriesRequest;
+import com.game.proto.SavePetEntriesRequest;
 import com.game.proto.GetPetShopRequest;
 import com.game.proto.BuyPetRequest;
 import com.game.proto.BuyPetResponse;
@@ -54,6 +57,15 @@ public final class PetFeature implements SceneFeature {
      */
     @Override
     public void register(Registrar r) {
+        r.on(SERVICE, "GetPetEntries", GetPetEntriesRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                (call, request) -> call.reply(pets.entries(call.player(), request.getPetId())));
+        r.on(SERVICE, "PreviewPetEntries", PreviewPetEntriesRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                (call, request) -> call.reply(pets.previewEntries(call.player(), request)));
+        r.on(SERVICE, "SavePetEntries", SavePetEntriesRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
+            var response = pets.saveEntries(call.player(), request);
+            if (response.getErrorMessage().getId() == 0) call.world().requestSave(call.player());
+            call.reply(response);
+        });
         r.on(SERVICE, "GetPetList", GetPetListRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, (call, request) -> call.reply(
                 GetPetListResponse.newBuilder().setErrorMessage(tip(0)).setPets(pets.buildList(call.player())).build()));
         r.on(SERVICE, "GetPetShop", GetPetShopRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,

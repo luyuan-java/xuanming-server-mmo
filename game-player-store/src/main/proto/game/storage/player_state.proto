@@ -160,6 +160,14 @@ message PetEntry {
   uint64 created_at = 9;
   // 实例学会的技能（技能书是二期，恒空；种类自带技能不抄进实例）。
   repeated uint32 skill_table_ids = 10;
+  // 条目点和四维分离；序号回执与分配同一玩家事务持久化。
+  map<uint32, uint32> entry_allocated = 12;
+  uint64 entry_state_version = 13;
+  string entry_last_request_id = 14;
+  uint64 entry_last_base_version = 15;
+  uint32 entry_last_config_version = 16;
+  map<uint32, uint32> entry_last_target = 17;
+  uint32 cultivation_tier = 18;
 }
 
 // 当前气血 / 法力。health == 0 = 阵亡：进场按上限回满（基础复活）；活着的进场只按新上限往下夹，不补。

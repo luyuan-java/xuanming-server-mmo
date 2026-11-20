@@ -8,6 +8,11 @@ import com.game.proto.BattlePetSnapshot;
 import com.game.proto.PetDerivedInfo;
 import com.game.proto.PetDimensionInfo;
 import com.game.proto.PetInfo;
+import com.game.proto.GetPetEntriesResponse;
+import com.game.proto.PreviewPetEntriesRequest;
+import com.game.proto.PreviewPetEntriesResponse;
+import com.game.proto.SavePetEntriesRequest;
+import com.game.proto.SavePetEntriesResponse;
 import com.game.proto.PetListInfo;
 import com.game.scene.attribute.AttributeRules;
 import com.game.scene.attribute.AttributeRules.AllocError;
@@ -123,6 +128,9 @@ public final class PetService {
     /** 进场景前：纠正悬空的出战号、清掉表里已不属于宝宝池的维度、同步等级并按新上限处理当前值。 */
     public void initializeOnLoad(ScenePlayer player) {
         PlayerPets pets = player.pets();
+        for (Pet pet : pets.pets()) if (pet.cultivationTier() == 0) {
+            var row = tables.pet(pet.petTableId()); if (row != null) pet.setCultivationTier(row.getCultivationTier());
+        }
         if (pets.activePetId() != 0 && pets.find(pets.activePetId()) == null) {
             log.warn("出战号指向不存在的宝宝，已清空 player={} active_pet_id={}", player.playerId(),
                     Long.toUnsignedString(pets.activePetId()));
@@ -205,6 +213,27 @@ public final class PetService {
         pet.setMana(mana);
     }
 
+    public GetPetEntriesResponse entries(ScenePlayer player, long petId) {
+        var pet = player.pets().find(petId);
+        var out = GetPetEntriesResponse.newBuilder();
+        if (pet == null) return out.setErrorMessage(com.game.scene.world.SceneMessageIds.tip(NOT_FOUND)).build();
+        if (!PetEntries.enabled(tables)) return out.setErrorMessage(com.game.scene.world.SceneMessageIds.tip(INVALID_TABLE_DATA)).build();
+        return out.setEntries(PetEntries.info(tables, pet)).build();
+    }
+    public PreviewPetEntriesResponse previewEntries(ScenePlayer player, PreviewPetEntriesRequest request) {
+        var pet = player.pets().find(request.getPetId());
+        return pet == null ? PreviewPetEntriesResponse.newBuilder().setErrorMessage(com.game.scene.world.SceneMessageIds.tip(NOT_FOUND)).build()
+                : PetEntries.preview(tables, pet, request);
+    }
+    public SavePetEntriesResponse saveEntries(ScenePlayer player, SavePetEntriesRequest request) {
+        var pet = player.pets().find(request.getPetId()); int error = pet == null ? NOT_FOUND : checkWritable(player);
+        if (error != 0) {
+            var out = SavePetEntriesResponse.newBuilder().setRequestId(request.getRequestId()).setErrorMessage(com.game.scene.world.SceneMessageIds.tip(error));
+            if (pet != null) out.setEntries(PetEntries.info(tables, pet)); return out.build();
+        }
+        return PetEntries.save(tables, pet, request);
+    }
+
     // ------------------------------------------------------------------ 列表
 
     /** 面板全量（客户端零配表：维度名 / 说明 / 上限 / 剩余点 / 资质 / 成长率都在这里）。 */
@@ -234,6 +263,11 @@ public final class PetService {
                 .setIsActive(pets.activePetId() == pet.petId())
                 .setPoolId(pool.getId());
         PetTable row = tables.pet(pet.petTableId());
+        int tierId = pet.cultivationTier() != 0 ? pet.cultivationTier() : row == null ? 0 : row.getCultivationTier();
+        info.setCultivationTier(tierId);
+        var tier = tables.tier(tierId);
+        if (tier != null) info.setCultivationTierName(tier.getName()).setCultivationArtKey(tier.getArtKey());
+        if (PetEntries.enabled(tables)) info.setEntries(PetEntries.info(tables, pet));
         info.setName(!pet.name().isEmpty() ? pet.name() : (row != null ? row.getName() : ""));
         if (row != null) {
             info.setQuality(row.getQuality()).setModelId(row.getModelId()).setDesc(row.getDesc());
@@ -480,6 +514,7 @@ public final class PetService {
         Pet pet = new Pet(petId, row.getId(),
                 PetRules.effectiveLevel(ownerLevel(player), Integer.toUnsignedLong(row.getLevelCap())),
                 clock.epochMillis() / 1000);
+        pet.setCultivationTier(row.getCultivationTier());
         List<AttributeDimensionTable> dimensions = tables.dimensions();
         for (int i = 0; i < dimensions.size(); i++) {
             pet.setAptitude(dimensions.get(i).getId(), rollAptitude(row, i));
@@ -642,6 +677,7 @@ public final class PetService {
         long health = Math.min(pet.health(), derived.maxHealth());
         long mana = derived.maxMana() > 0 ? Math.min(pet.mana(), derived.maxMana()) : pet.mana();
         return List.of(BattlePetSnapshot.newBuilder()
+                .setPetCultivation(PetEntries.info(tables, pet).getEffects())
                 .setPetId(pet.petId())
                 .setOwnerPlayerId(player.playerId())
                 .setPetName(!pet.name().isEmpty() ? pet.name() : row.getName())

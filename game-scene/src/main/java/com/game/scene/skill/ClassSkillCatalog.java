@@ -77,8 +77,9 @@ public final class ClassSkillCatalog {
     public int durationRounds(SkillTable row) {
         for (int id : row.getEffectList()) {
             BuffTable buff = buffs.get(id);
-            if (buff != null && buff.getInfiniteDuration() == 0 && buff.getDuration() > 0)
-                return BattleRules.roundsFromSeconds(buff.getDuration());
+            if (buff == null || buff.getInfiniteDuration() != 0) continue;
+            if (buff.getBattleOp() != 0 && buff.getDurationRounds() > 0) return buff.getDurationRounds();
+            if (buff.getDuration() > 0) return BattleRules.roundsFromSeconds(buff.getDuration());
         }
         return 0;
     }

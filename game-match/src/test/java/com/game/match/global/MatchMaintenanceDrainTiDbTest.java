@@ -19,8 +19,8 @@ import org.junit.jupiter.api.Test;
 class MatchMaintenanceDrainTiDbTest {
     @Test void futureRetryAndUnappliedSourcesStillBlockTheRealSqlDrain() throws Exception {
         String root = System.getProperty("game.it.authority.jdbc",System.getProperty("game.it.mysql"));
-        if (root == null || root.isBlank())
-            throw new IllegalArgumentException("必须通过game.it.authority.jdbc（兼容game.it.mysql）显式指定本机TiDB根URL");
+        org.junit.jupiter.api.Assumptions.assumeTrue(root != null && !root.isBlank(),
+                "未配置本机TiDB根URL：game.it.authority.jdbc（兼容game.it.mysql）");
         var options = AuthoritySqlFixture.Options.fromEnvironment(root,
                 System.getProperty("game.it.mysql.user", "root"),
                 System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""),

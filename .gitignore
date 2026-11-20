@@ -16,3 +16,5 @@ deploy/compose/.env
 
 # build outputs
 build/
+/.codex-artifacts/
+

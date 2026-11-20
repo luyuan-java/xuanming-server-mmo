@@ -373,7 +373,7 @@
 | 单玩家排障导出与本地复现（player-bundle：按玩家只读导出库行与 Redis 键并判读「在线与否 / 最近一次存盘是否落库」，带来源实例身份、操作人与原因；导入本地隔离环境走真实加载链路，本机地址 + 实例身份闸门，中途失败 fail-closed、可重跑；2026-10-19） | `go/data_service/cmd/{debugutil,debug_fetch,debug_import}`（`debug_fetch -mode player-bundle`、`debug_import -file`）、`docs/ops/online-debug-data-fetch.md` | `1fc103dce` 之后（工作区未提交；未编译、未测试，待 Codex） | game-data（`com.game.data.tools.playerbundle`）、game-robot（`NamespaceLiteralGuardTest` 登记构造入口）；AGENTS.md §3 命令行工具名单 | 0.1.0-SNAPSHOT | 已对齐（能力对齐、实现按 Java 契约；H2 单测通过，未连真库 / 真 Redis 运行） | 两版存储与归属契约不同，只对齐「能拉、能复现、写本地有闸门」三个能力，设计与手册见 `docs/design/player-bundle-debug.md`。**导出** `PlayerBundleExport`：一个只读可重复读事务里读 `player`、`player_state`（原字节 + sha256 + `StateJson` 解码）、`account`（口令哈希只判空、不出库）、最近快照（元数据 + sha256）、资产流水（两个方向各走索引后合并，另数晚于 `player_state.updated_at` 的条数）、`ops_job_player`、`recall_source`；Redis 读位置记录、在线目录、战斗锁、待结算战斗奖励、组队 / 帮会 / 匹配的玩家级键（全部经 `RedisKeys`，每键一条只读 Lua，不 SCAN、不读令牌键）；不覆盖已有文件、不许落在 git 工作区。**判读的等价物**：基线看存盘屏障 pending / 两表 ACK，Java 看 `player` 归属三列与 `saved_epoch`（RELEASED / HELD / HELD_LEASE_EXPIRED / IMPORT_HOLD），写者失联时把晚于最后落盘的流水标为首要嫌疑。**导入** `PlayerBundleImport`：缺省只预览不连接；闸门为本机回环（不解析 DNS，docker 服务名 `--allow-target-host` 显式放行）、`DATABASE()` = 命名空间、目标 MySQL `server_uuid`（TiDB 取 `CLUSTER_INFO` 的 PD 地址）与 Redis `run_id` 分别与包里同类来源身份比对且两侧都必须取得到、本地同号在线拒绝、名字冲突拒绝、包 sha 校验。三段写入：① 一个事务写 `player`（`account` = 本地账号、epoch = max(线上, 本地) + 1、未释放、租约 = BIGINT 最大值占位）与 `player_state`（线上没有则删本地旧行）；② 删本地位置记录 / 战斗锁 / 待结算奖励；③ 条件 UPDATE 发布。①之后中断，登录夺权拿不到归属（2005），带 `--replace` 重跑收敛。**有意差异**：基线导入重铸 (epoch, save_seq) 屏障、写 `player_to_account` 反向索引并登记 home_zone；Java 没有屏障与反向索引，改写 `player.account`、只重铸 epoch。**残余**：Redis `run_id` 随重启变化，导出后线上 Redis 重启过就认不出来源（靠本机地址闸门，且只删该玩家三把键）。**验证**：2026-10-19 本机 JDK 21 离线 Maven（`-pl game-data,game-robot -am test`）：新增 `BundleAnalyzerTest` 9、`LocalTargetsTest` 7、`PlayerBundleSqlTest` 13（H2）与 `NamespaceLiteralGuardTest` 9 通过，game-data 全部 354 项 0 失败（26 项既有门控跳过）；Redisson 只读脚本与 `INFO server`、MySQL `@@server_uuid` / TiDB `CLUSTER_INFO`、TiDB 上的只读事务设置、本地全套服务的登录进场景都未实测。该工具首版文件曾被并行会话随 `e8d97f6` / `291c7e8` 提交，之后的修正（同类身份比对、缺字段包拒绝、Redis 小连接池）在工作区未提交。 |
 | 战斗结算三处丢数据修复（审计 §2.4：号段暂缺整笔延后、金币封禁只跳过金币、全球模式个人 pending 先于结果发送落库；2026-10-19） | `cpp/libs/services/scene/battle/system/player_battle.cpp`、`cpp/libs/modules/bag/bag_service.{h,cpp}`（`MaxNewInstancesFor`）、`cpp/libs/services/battle/system/result_commit.h`、`cpp/nodes/battle/logic/battle_room_manager.{h,cpp}`；设计 `docs/design/data-overwrite-rollback-audit-20261018.md` §2.4、`cross-zone-matchmaking.md` §13.6「2026-10-19 更正」 | 工作区未提交（未编译、未测试，待 Codex 验证） | game-scene（BattleSettlementService、Wallet）、game-battle（BattleRoomServiceImpl） | 0.1.0-SNAPSHOT | Java 待做 | 只读核实，三条 Java 都有同样问题。① `BattleSettlementService` 先入账金币，掉落由 `step("掉落")` 吞错，`applyGained` 不区分发号失败（6004）与满包，finally 照常 `ledger.record`；要在金币之前按掉落新实例数上界预检号段，不够就整笔 DEFERRED。② 金币 `!change.ok()` 一律整笔 DEFERRED（第 134 行 B7、`SettlementApplyTest` t141）；要改为 BLOCKED 只跳过金币、其余照常应用并记账本，冻结等暂时失败仍延后，t141 的期望随之改。③ `BattleRoomServiceImpl.onResultCommit` 回执之后才 `finishBattle` → `dispatchSettlement` 落 pending，`abortAll` 对 pendingCompletion 房间只删房；要改为结果第一次发送之前全员 pending 落库，回执后只派发、不改写 pending。落库时同时满足 mmorpg 第二轮审计 r2-battle#1/#4 的修复（2026-10-20，见 mmorpg `docs/design/cross-zone-matchmaking.md` §13.6）：按成员记落库结论、重试只写没落定的成员；用本局落库标记判重，已落定的成员不再写，防止已被 scene 销账的 pending 复活、重登重复发奖；锁属于别的局时不写，锁不在而 pending 槽已属于别的局时也不写（防旧局覆盖新局）；落库轮次与墙钟跨度都有上限，用尽后保留房间并告警，不得放弃落库直接发结果。客户端可见契约无变化，不需要 ContractSync。 |
 | 单玩家排障工具 Codex 回归补验（2026-10-19） | 对应既有 player-bundle 功能；本轮仅补 PROGRESS 验证记录，无 C++/Go 业务改动 | 既有功能源提交不变；本轮无提交 | game-data、game-robot（NamespaceLiteralGuardTest） | 0.1.0-SNAPSHOT | Java 代码完成、所选回归通过；真实环境冒烟待 Codex（Docker 启动阻塞） | JDK 21.0.12.1+1 / Maven 3.9.9，交接命令 14 reactor SUCCESS、退出 0；game-data 328 通过、26 既有环境跳过、0 失败/错误，玩家包 29 项全过，守卫 9 项全过；执行前后输入 SHA256 一致。真实实例身份/Redis Lua 与 INFO/TiDB 只读事务/导入后 Login48→EnterGame26 均未验。Docker Desktop 一次启动因 Secrets Engine socket 无法访问而崩溃；按 mmorpg AGENTS §10.2 未重置或重试。证据在 C++/Go 仓 build/verification/playerbundle-20261019-082657714/；细节见 player-bundle-debug.md §7。 |
-| 共享 Redis 按用途拆实例、单元化与单元内 Redis Cluster 按 `{player_id}` 分片（G4a 2026-10-18 修订稿；mmorpg 仍是设计，各批未落码） | `docs/design/shared-redis-split-by-purpose.md` §18~§20、§24~§26 | 设计稿，未落码（随 mmorpg `c35e1133d` 入库，2026-10-22 回填） | game-discovery 等（待盘点） | 0.1.0-SNAPSHOT | Java 待做 | 待做内容：Java 现为 Redisson 单实例（`RedisAutoConfiguration` 的 `useSingleServer`），按用途拆实例、单元化与单元内分片都还没做；mmorpg 各批落码时，按 Java 自己的键族重新盘点并同批评估。两版同批评审项：friend 在线目录游标（`RecommendFriendsResponse.next_cursor`）若因逐节点 SCAN 改格式，客户端与两版同批评审（proto 写明是不透明游标，Java 只需语义一致）；单元化若把跨单元旅行改成「转区」（未拍板），客户端可见体验变化要两版同批评审（G4a §25.2 第 20 条）。账号目录落库 Java 已在 MySQL，结论写在 G4a §26，不在本行。**2026-11-12 补**：mmorpg 改按「全部 Redis 上 Cluster」（主仓 `docs/design/redis-cluster-all-domains-20261110.md`，取代上面的 G4a 拆实例口径）分批落码，第 1、2a、4 批已落码未编译；第 4 批把登录排队、准入与放行锁的键按 zone 打 tag `{q:<zone>}`、gate 排空 / 停写标记打 `{gm:<zone>}`，放行流水线改发给队列槽所在主节点，网关限流拆成「扣 IP 桶 → 扣区桶 → 区桶空时退还 IP 令牌」三段单键脚本、Lettuce 按 `spring.data.redis.cluster.nodes` 选集群客户端。这些都是服务端内部键与客户端，客户端契约（帧格式、协议、tip、`RetryAfterMs` 的语义）不变。Java 待做：Java 版上 Redis Cluster 时按自己的键族同样核对「多键操作同 tag」，尤其排队（入队 / 轮询 / 放行）与限流两个桶不得放在一段跨槽脚本里。**2026-11-12 再补（第 3 批，未生成协议、未编译；mmorpg PROGRESS 同日「全部 Redis 上 Cluster 第 3 批」与「第 3 批 Go 部分」）**：C++ scene 的两个单实例 Redis 句柄合成一个控制集群句柄，gate、battle 不再连 Redis；落地唤醒从普通 `PUBLISH assetop:wake` 改成 64 个分片频道 `SPUBLISH assetop:wake:{aw:<player_id % 64>}`，订阅方按 slot 分组 SSUBSCRIBE，断线、迁槽（服务端推 `sunsubscribe`）或 `-MOVED` 时关掉整条订阅、重读拓扑后重订（不用 go-redis 的自动重订，它在集群上会连错节点、静默失聪）；节点侧建场景请求带 `zone_id`，节点 zone 不符就拒建（归属对账只按本节点的 zone 拼键）。客户端契约不变。Java 待做：Java 版若有同类的「落地唤醒」发布 / 订阅，上 Cluster 时改分片 Pub/Sub（集群里普通 PUBLISH 经总线广播到全部节点），并核对订阅在迁槽、切主之后能重订；若场景节点按 zone 核对场景归属，建场景时同样核对 zone。 |
+| 共享 Redis 按用途拆实例、单元化与单元内 Redis Cluster 按 `{player_id}` 分片（G4a 2026-10-18 修订稿；mmorpg 仍是设计，各批未落码） | `docs/design/shared-redis-split-by-purpose.md` §18~§20、§24~§26 | 设计稿，未落码（随 mmorpg `c35e1133d` 入库，2026-10-22 回填） | game-discovery 等（待盘点） | 0.1.0-SNAPSHOT | Java 待做 | 待做内容：Java 现为 Redisson 单实例（`RedisAutoConfiguration` 的 `useSingleServer`），按用途拆实例、单元化与单元内分片都还没做；mmorpg 各批落码时，按 Java 自己的键族重新盘点并同批评估。两版同批评审项：friend 在线目录游标（`RecommendFriendsResponse.next_cursor`）若因逐节点 SCAN 改格式，客户端与两版同批评审（proto 写明是不透明游标，Java 只需语义一致）；单元化若把跨单元旅行改成「转区」（未拍板），客户端可见体验变化要两版同批评审（G4a §25.2 第 20 条）。账号目录落库 Java 已在 MySQL，结论写在 G4a §26，不在本行。**2026-11-12 补**：mmorpg 改按「全部 Redis 上 Cluster」（主仓 `docs/design/redis-cluster-all-domains-20261110.md`，取代上面的 G4a 拆实例口径）分批落码，第 1、2a、4 批已落码未编译；第 4 批把登录排队、准入与放行锁的键按 zone 打 tag `{q:<zone>}`、gate 排空 / 停写标记打 `{gm:<zone>}`，放行流水线改发给队列槽所在主节点，网关限流拆成「扣 IP 桶 → 扣区桶 → 区桶空时退还 IP 令牌」三段单键脚本、Lettuce 按 `spring.data.redis.cluster.nodes` 选集群客户端。这些都是服务端内部键与客户端，客户端契约（帧格式、协议、tip、`RetryAfterMs` 的语义）不变。Java 待做：Java 版上 Redis Cluster 时按自己的键族同样核对「多键操作同 tag」，尤其排队（入队 / 轮询 / 放行）与限流两个桶不得放在一段跨槽脚本里。**2026-11-12 再补（第 3 批，未生成协议、未编译；mmorpg PROGRESS 同日「全部 Redis 上 Cluster 第 3 批」与「第 3 批 Go 部分」）**：C++ scene 的两个单实例 Redis 句柄合成一个控制集群句柄，gate、battle 不再连 Redis；落地唤醒从普通 `PUBLISH assetop:wake` 改成 64 个分片频道 `SPUBLISH assetop:wake:{aw:<player_id % 64>}`，订阅方按 slot 分组 SSUBSCRIBE，断线、迁槽（服务端推 `sunsubscribe`）或 `-MOVED` 时关掉整条订阅、重读拓扑后重订（不用 go-redis 的自动重订，它在集群上会连错节点、静默失聪）；节点侧建场景请求带 `zone_id`，节点 zone 不符就拒建（归属对账只按本节点的 zone 拼键）。客户端契约不变。Java 待做：Java 版若有同类的「落地唤醒」发布 / 订阅，上 Cluster 时改分片 Pub/Sub（集群里普通 PUBLISH 经总线广播到全部节点），并核对订阅在迁槽、切主之后能重订；若场景节点按 zone 核对场景归属，建场景时同样核对 zone。**2026-11-19 再补（mmorpg PROGRESS 同日「全部 Redis 上 Cluster 第 3 批收尾」，未编译）**：唤醒订阅按重投的分工表只订本副本负责的片（跨 zone 处理的服务另开全服成员表），每条唤醒只投给每个服务的一个副本，新指标 `assetop_wake_subscribed_shards`。Java 待做：Java 版的唤醒订阅同样按自己的重投分工只订负责的片，不让投递份数随副本数、zone 数增长。 |
 
 | 通用最终SAVE失败的SQL持久补偿（2026-10-19实现候选，覆盖旧63行缺口的代码，尚待运行验收） | Go/C++既有归属围栏与SQL ACK；不以Java意图替代Go父屏障 | 工作区候选 | game-player-store、game-scene，复用login/data全部PlayerStore门禁 | 0.1.0-SNAPSHOT | Java私有完整补丁已实现，未构建/未测试/未切换，整体尚未完成 | TX1持久登记、TX2原bytes同事务应用与释放；player同锁拦全部PENDING越过；OPEN允许无intent正常TTL恢复；本地最终墓碑拒同E晚加载；停机未登记明确unclean；PENDING永不删除，旧E终态有界清理。资产durable仍仅player_state同操作收据。需排空旧writer/claimer的M14迁移，不宣称未确认RAM崩溃零丢。两版真实宿主旧实例/延迟ACK演练及本批H2/真TiDB仍须各自实际验收。 |
 | 混版本持久字段保护：未知字段随对象携带、持久 schema 世代戳与加载 / 写入校验、持久值域保留（2026-10-19 补登；mmorpg 第 1 批已验证，第 2 批主体构建通过，3a / 3a′ / 第 5 批未编译，3b / 4 进行中） | `docs/design/mixed-version-persist-field-protection.md`；交接 `docs/handoff/mixed-version-persist-handoff-20261019.md` | 第 2 批主体随 `53361d055`；其余在工作区、未提交 | game-player-store、game-scene | 0.1.0-SNAPSHOT | Java 待做 | Java 玩家状态整份存在 `player_state.data` 一个 BLOB：机制三（go/db 按列写、C0 / C1 / C1b / C2）不适用。机制一（对象内携带未知字段 + 往返一致性测试 + 合堆 / 合并 / 逻辑重置守卫，守卫拒绝属版本错位，调用方延后、不记终态）、机制二（世代戳 + 加载 / 写入校验）与第 5 批的持久值域保留（越界包类型原样携带、查不到表的技能保留但不生效）都要按 Java 自己的存储形态实现，不照抄 C++。第 1 批落码时就该登记，本行为补登。2026-10-20 补：mmorpg 3b / 4 已落码（未编译）；写入校验只在"上一次写方不是本次加载实体"时比较（mmorpg 用每个加载实体一个随机令牌判，不用 owner 代次：同一实体会换代次、同一代次也会先后加载出两个实体，设计 §5.2 v0.6），倒退 warn 照写计数、enforce 拒写，世代记录只升不降；Java 实现机制二时同样要避开"只比第一次写入"的写法（S-A 误报）。 2026-10-30 补：mmorpg 设计 §12.2 把其余持久值域也改成「加载不改写、原样携带、按本版本生效」（未编译）：存储等级原样携带、玩法读 `CappedLevel`（Java `SceneWorld` 加载时 `PlayerLevels.clampStored` 压回等级，同属待做）；角色 / 宝宝加点里本版本不认识的维度计入已用、不生效、洗点不清，超额的池整池不生效、免费洗点；职业技能重数不按 `max_rank` 压回、rank 0 不删。Java 实现时按同一口径，不照抄 C++。 2026-10-30 补（mmorpg 第 6 批：10-23 部分已入库，10-30 部分未编译）：① 判"带新版本字段"只认台账没有退役的字段号，退役字段的残留不算；② 按 config 计数与扣数量跳过带新版本字段的单位，预检三态（够 / 版本错位 / 确定不足，不足优先），版本错位一律非终态：资产通道 RETRY + 1006 不记账，强化、镶嵌回 1006；③ 币种取值表唯一来源 `proto/common/base/currency_type.proto`（客户端契约，两版同批），服务端各入口按完整取值表拒绝写错的值，scene 遇到不认识的币种：收件箱回版本错位停用本域，资产通道 RETRY；④ 聚宝斋卖家在托管阶段可撤单（材料订单的托管扣款没有截止，RETRY 时否则没有出口）。Java 待做，按 Java 存储形态实现，不照抄 C++。 2026-11-05 补（mmorpg 第 7 批，未编译）：① 世代台账加「封存」——发布前记下最大世代及其字段行摘要，此后已封存世代的字段集合不得增删，生成与发布预检机械核对（保证同一世代号的所有二进制认识同一组字段）；Java 实现机制二时同样需要这条门禁；② 战斗结算的奖励币种不认识时按版本错位处理（停用该域、不当终态），坏载荷先判；③ 收件箱域停用后按 5 分钟补打停用日志，告警在实体存活期间一直亮着。Java 待做。 2026-11-11 补（mmorpg 第 8 批，未编译；交接 §24）：① 收件箱载荷、资产通道请求带本版本不认识的字段时（逐层判，reserved 段里的退役字段不算，bytes 里原样携带的实例不往里解），一律按版本错位处理：收件箱停用该域、不执行，资产通道 RETRY + 1006 不记账，不再照常执行后记已生效；② Item / Pet 表行 id 只增不删，由导表器 `(cfg_ids_permanent)` 门禁守住（两版共用同一份导表产物，Java 不另做）；资产通道遇到本节点表里查不到的物品 / 宝宝配置改判版本错位（RETRY、不记账），配置号 0 仍是坏包；③ 战斗结算对查不到表的掉落 / 消耗应整笔延后、不剔除（mmorpg 2026-11-11 已改，未编译，交接 §25）。2026-11-12 补：玩家带进这一局的宝宝，种类在本节点 Pet 表里查不到时同样整笔延后，不再只跳过这只宝宝的战后终值；宝宝已不在身上、宝宝属性池缺配仍只跳过这一只。延后不是版本错位：不停用该域，本地退避重试，这一行热更到本节点之后续做即成功。Java 待做。 2026-11-12 再补（mmorpg 未编译，设计 v0.15）：旧版本可以接手更新世代写过的存档。go/db 认领只在存档或 scene 的世代高于自己认识的时候拒绝，旧 scene 原样带回不认识的内容：一行里不认识的顶层字段由存盘状态机按行保管、写这一行时接回去，更新版本才有的行不读不写，存盘世代取 max(自己的, 加载到的)；不带数据行的空行释放不判世代倒退。Java 整份 BLOB 用 parseFrom / toByteArray 原样读写时未知字段本来就保留，要核的是有没有按已知字段重拼再写回的地方，以及加载时有没有因为世代比自己新就拒绝。Java 待做。 |
@@ -1838,11 +1838,23 @@ robot `killswitch` 端到端补两项:type 范围关停 gate 上的一个客户�
 4. **下单时不预检获取封禁**(主仓定案):预检挡不住下单之后才生效的封禁,提交点的判定与退回反正都得有。代价是被封禁的买家买到寄售时,这单寄售会被撤下。
 5. **收件箱单人对账读完全部行**:Java `InboxAdminStore.reconcilePlayer` 一次至多读 5000 行(`PLAYER_ITEMS_LIMIT`),超出时只打日志、回不完整的结论。
    主仓改成按主键 (domain, seq) 键集翻页读完,读不完回错误、不回半份。条目行永久保留,老玩家的行数会超过上限。
+6. **人工处置与第 2 条同批改**(2026-11-20 主仓独立评审补,见主仓 `docs/PROGRESS.md` 2026-11-20「数据覆写审计 r2 修复批次 S、T、U 的独立评审与修正」):
+   交付阶段转人工时,卖家所得还压着、没发出。
+   - 人工处置补记结局时放过它:按角色认卖家所得,不看买家那条此刻到没到账。不放过的话,每种人工动作都因「还有腿没发出」被拒,合同出不了人工。
+   - 整单退回(含作废拍卖)把它一并标成被退回取代。不标的话,合同停在退回阶段一直等它;放行它就是双付。
+   - 有发放腿部分到账过的合同不许整单退回(会把已交出的部分再退一遍),缺口按补发处理。这一条与先买家后卖家无关,Java 若已有人工整单退回,现在就要核对。
+7. **退回只认付回托管者本人**(2026-11-20 主仓补,见主仓 `docs/PROGRESS.md` 2026-11-20「数据覆写审计 r2 批 S、T、U 评审可选项全部落码」):
+   - 每条发放腿记下付出的是谁托管的资产(主仓 `TradeCommerceLeg.escrow_owner_id`,建腿时记,补发照抄,人工改绑只换收件人)。
+   - 只有付回托管者本人才算第 1 条的「退回」、不判获取封禁;改绑到同账号另一名角色之后,按成交所得判。
+   - 撮合子单的托管者取两张母单各自扣出腿上的角色,不取下单人(母单改绑过时下单人已换)。
+   - 人工整单退回发给合同上这一方现在的角色(改绑目标),不发给已经换主的原角色。
+8. **拍卖由出价退款前,再核对赢家一点没到货**:拍品按撤单结案,而买家交付腿在途、到账或部分到账时,是自相矛盾,出价按坏数据转人工,不自动退款。
+9. **收件箱单人对账只读判定列**:第 5 条翻页时只读对账判定要用的列,不读载荷(单行最大 16KiB)。否则整次对账的调用预算装不下战斗行多的老玩家。
 
-**验证**(Java 仓口径):对应主仓 `go/trade/internal/commerce/delivery_order_test.go`、`delivery_order_db_test.go`、`leg_tx_type_test.go`、
+**验证**(Java 仓口径):对应主仓 `go/trade/internal/commerce/delivery_order_test.go`(含 11-20 补的三条人工处置用例与 `TestHeldBidKeepsFundsOnlyWhenTheWinnerGotNothing`、`TestFillLegsRecordTheEscrowOwnerFromTheParentDebits`)、`manual_test.go` 的 `TestRefundAfterRedirectGoesToTheCurrentParty`、`delivery_order_db_test.go`、`leg_tx_type_test.go`(含 `TestLegTxTypeReturnsOnlyToTheEscrowOwner`)、
 `schedule_test.go` 的 `TestFinishedLotBid`,C++ `cpp/tests/currency_test/asset_op_system_test.cpp` 的 `TradeReturnOfOwnEscrowIgnoresGainBlocks`、
 `cpp/tests/bag_test/player_item_gain_block_test.cpp` 的 `TradeReturnOfOwnEscrowIsNotAGain`,收件箱 `TestIntegrationPlayerItemsPagingReadsEveryRow`
-(被拒整单退回、货款不发、退回带退回类型、拍卖由出价退款且只退一次、补发过的腿转人工、分页不漏不重)。
+(被拒整单退回、货款不发、退回带退回类型、拍卖由出价退款且只退一次、补发过的腿转人工、交付阶段转人工后人工动作照常可做且整单退回不双付、分页不漏不重)。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
@@ -2029,7 +2041,13 @@ Java 版 `0.1.0-SNAPSHOT` 按同一口径要做的事（只登记，没改 Java 
 - **网关**：区服整行更新改为乐观并发（版本列、ETag、If-Match，不符回 412，缺失回 428）。管理面错误统一用 ProblemDetail，带原因码与字段。
 - **混版世代闸（r2-ps#11）**：存档服务遇到本版本不认识的行种，回可重试的「版本太新」，不当成非法请求。发布顺序先存档服务、后场景服务。
 - **交易托管与获取封禁（r2-trade#1）**：退回本人托管的资产不受获取封禁约束，交付顺序与被拒后自动退回按主仓批 T。资产入账做溢出预检，判定按净额。
-- **登录**：断线收尾以会话头里的会话号为准，请求体里的值不一致就拒绝。
+- **登录**：断线收尾以会话头里的会话号为准；请求体里的值不一致时记严重日志、照常按会话头收尾（2026-11-19 主仓评审改：断线通知只发一次，拒绝会让玩家一直停在在线）。
+
+2026-11-19 主仓对这几批做了独立评审，又补了下面几条（主仓 `docs/PROGRESS.md` 2026-11-19 标题以「评审修正·」开头的条目）：
+
+- **消费组**：维护排空时交还的记录，只有交还时组在该分区已有已提交位点，才能按组内位点结清，否则 HOLD（组从没提交过的分区上，新属主从日志起点读起，越过它的位点证明不了它被处理过）。收尾核对按单调时钟有整体时间上限，不能只按轮数。组在分区上从没提交过时，消费第一条记录之前先把它的 offset 提交成组内位点，提交不成功不消费（负责人 2026-11-19 定）：之后被保留期删掉的记录在打开时报越过保留范围，不会被新属主从日志起点静默越过。
+- **账号与角色名**：核账工具收孤儿名字前先看这名角色的 ref：任一账号上有 ACTIVE 的 ref 只报告；没有路由行却有 ref 也只报告（核不全）。删名字缓存有自己的短时限，不占删角收尾的时间预算。
+- **网关**：改已有区服行的种子或脚本也要让版本加一。
 
 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
 
@@ -2043,7 +2061,9 @@ Java 版按同一口径要做的事(只登记,没改 Java 代码):
 - **同事务写发件箱**:场景服务改动货币、物品时记的流水与快照请求,随这名玩家的存档一起交给存档服务;存档服务在提交存档的同一个事务里写进这名玩家存档库的发件箱表。
   不在内存改动当下直接发 Kafka,也不在提交之后另发(Kafka 不可用超过生产者超时就丢)。快照由存档服务按提交后的行拼,内容就是库里某一笔提交。
 - **一条流水只指名一名玩家**:两名玩家之间的转移记成转出、转入两条,同一个关联号,各随各的存档提交;没有单一玩家、或进程不接存档的流水拒收并计数。
-- **一笔存档带不完就分笔**:审计记录按单笔字节上限带,剩下的由紧接着的续笔带,释放与回调留给最后一笔;续笔只在前一笔提交之后排。每人排队的上限只为封住内存。
+- **一笔存档带完,不分笔**(2026-11-19 主仓改):到期的审计记录一笔全部带上,和存档同一个事务提交,释放与回调就在这一笔上。每人排队的上限(主仓 8 MiB,
+  到了丢最旧的并计数)同时是一笔里审计记录的上限,存档请求的传输上限要装得下它加上行预算(主仓 16 MiB)。不分笔的原因:分笔时前一笔的改动已经提交、
+  剩下的记录还在内存里,这时场景服务崩溃就丢了已提交改动的流水。
 - **转发**:按(存档库, 片)在全部稳定副本之间分工、每片互斥,投 Kafka 全副本确认之后按主键删除;消费端按 `tx_id` / `snapshot_guid` 去重。有暂停转发的部署开关,审计 topic 换代时用,不停服。
 - **计数与告警**:积压年龄两级、跳过的坏记录、转发全停、有分片没人负责、转发循环活性;场景服务一侧丢弃(内存上限、单条超限、没有单一玩家、没开发件箱、号段没号)与存档服务太旧,按原因计数并告警。
 - **资产变动存盘通知**:跟着资产变动走,流水被拒收时也请求一次尽快存盘(同日「资产变动约 1 秒内提交」一行已补这一句)。
@@ -2158,3 +2178,422 @@ Unity 客户端已按这个契约改(`GameClient.BuildAssignGateRequest`、`Assi
 - 主仓最新自有 Java 测试为 44/44，网页玩家 GM 检查 25 项，原生 Vue 生产构建与 JeecgBoot 后台打包通过。已完成真实验证码登录、退出重登、十二项角色权限与七项操作目录检查，以及真实 DataService 不存在角色查询；没有对已有玩家发放资产。此前 41/41 等数字为过程记录，不能替代本次最终自有模块证据。
 - 主仓独立网页地址为 http://127.0.0.1:3101/。用户最新要求先完成 GM 代码和构建，Scene 等装备、技能统一验收后再重建；因此邮件和玩家命令写通道仍关闭。本轮没有重建现役 Scene、修改装备/技能表挂载或执行运行期 Scene 探针，正式 Linux 构建结果另记主仓进度。
 - 此项仍只接主仓 C++/Go/Java 网关混合服务端。独立 Java 全服务版的内部管理适配尚未实现；本条仅登记差异，未修改本版业务代码、同步契约或执行本版构建/测试，未执行提交推送。此前记录原文保留。
+
+## 2026-11-18 人物辅助来源契约与持续回合字段
+
+C++/Unity正在补齐人物治疗、独立护盾来源与中立预览契约，ContractSync统一同步新增客户端消息。Java `ClassSkillCatalog.durationRounds`已补现代Buff的duration_rounds优先读取，保留旧秒数回退及常驻状态语义；本批正式同步后的 `SupportCatalogDurationTest` 1/1 通过，场景编译与 install 通过，日志见 `.codex-artifacts/pet-entries-20261118/maven-scene-final.log`。
+
+Java当前仍只有职业技能执行和旧装备CombatAttributes。现代69项Skill.effect/init_effect机制、V1 EquipmentEffects/条件法宝及A10/A40独立曲线没有对应完整消费者，因此本批不能把读取新字段宣称为现代战斗功能已对齐。人物新来源与预览字段维持缺省未知，不能伪造总计或与不存在的现代结算算法声称一致；完整现代运行时前置需继续移植。本条只登记真实边界，不声称真实Java服务或双端联机通过。
+
+## 2026-11-18 宝宝独立条目点与五阶身份
+
+| 范围 | Java 当前实现 | C++ 与验证边界 |
+|---|---|---|
+| 五阶独立身份 | Pet 表显式 `cultivation_tier`，旧存档仅缺省时迁移，持久化/交易/列表保留，不推导自 quality 或 acquisition_tier | 同一正式 Pet/PetTier 表。现有 22 种无明确高阶证据，显式首测普通；其他阶的身份目录已定义。 |
+| 条目点与回执 | 20 点独立共享预算、整份可减目标、状态/配置版本、持久化请求回执、归属和战斗/冻结闸、预览/保存 RPC 已接。501/502 物/法直伤消费已接。 | C++ 提供完整 21 方向。Java 现代 Buff 消费者尚未移植，另外 19 项显示说明且 cap=0/收益=0，非零投入服务端拒绝；不可宣称全方向等价。 |
+| 验证 | 官方 ContractSync 与双来源 --check 通过。13 模块 clean install 首轮完成全部编译，场景旧数据基线因硬编码技能14产生22例失败；改为核对权威Pet表技能列表后，场景 install 与 PetServiceTest 47/47、SupportCatalogDurationTest 1/1通过，PetCultivationRulesTest 2/2通过。 | 地图继续来自 d74bbeb17db4e58515df775af250b825c1b719d5；契约来自 CPP 当前正式脏树。日志 `.codex-artifacts/pet-entries-20261118/maven-pet-test.log` 与 `maven-scene-final.log`，Surefire XML在对应模块target/surefire-reports。未运行本版真实服务、未宣称现代69项/全部21方向联机通过。C++本轮测试由父任务统一执行。 |
+
+### 2026-11-19 组队跟随间距 3 米、玩家视野 ×5(Java 待做)
+
+C++ 版已落码(主仓 main,未编译、未测试),说明见主仓 `docs/PROGRESS.md` 2026-11-19 两条(先放大到 4.2,随后改定 3 米)。**客户端可见**,两版要同批:
+
+1. **视野**:进视野距离 ≤ 50 m(原 10,含等号),出视野距离 > 100 m(离开半径 = 视野半径 × 2,原 20)。主仓 `cpp/libs/services/scene/spatial/constants/view.h`;AOI 候选格子尺寸同时由 20 放大到 50(格子不能小于视野半径)。Java 的 AOI 口径文档 `docs/reference/mmorpg-client-contract-aoi.md` §8 随实现一起改。
+2. **组队跟随**:沿路槽位间距 3 米(原 1.4);归队阈值 24(原 8);加入时最长走路 48(原 16)。属于 11-06「组队跟随:服务器沿队长轨迹驱动队员」待做条目的参数,常量以主仓 `team_follow_formation.h`、`player_team.h`、`team_follow_system.cpp` 为准。
+3. **验证**(Java 仓口径):AOI 进出视野与滞后区间的用例按新半径改;移植主仓 `aoi_delivery_test.cpp` 距离重判那组的新几何。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 真钱支付接入(主仓已落码未编译,Java 待做)
+
+主仓 commit:main(11-13 快照已含大部分,11-19 一批未提交);Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计与实现记录见主仓 `docs/design/payment-recharge.md` §22。
+
+两版共享的客户端契约(改动时必须同批):
+
+1. **协议**:`proto/payment/payment.proto` 的 `ClientPlayerPayment`(`ListPayChannels` 396、`CreatePayIntent` 397、`GetPayIntent` 398、`SubmitPurchase` 399),目标节点 `PaymentNodeService = 19`。
+2. **tip 码**:`data/tip/Tip.xlsx` 新段 `//payment_error base=31000`,8 个码(渠道不可用、订单不存在、订单不能付款、订单超时、渠道不一致、币种不支持、支付繁忙、需重新登录)。
+3. **订单状态**:`proto/trade/commerce.proto` 的 `CommerceOrderState` 新增 `REVERSING = 12`、`REVERSED = 13`(付款被渠道撤销后的发放收敛)。
+4. **流水类型**:`TX_PAYMENT_REVERSAL = 31`(交易扣出流,扣回已发放的物品或货币)。
+
+Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修订号、向商城记账与同步修订、退款)、商城与交易侧的扣回收敛(主仓 §22.5、§22.6)、货币发放的官方 SKU(§22.7)。渠道与服务端内部实现按 Java 惯用方式做,不照抄主仓。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 组队开局回执:无战斗回执口径、过户前的原件给确定结论(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。说明见主仓 `docs/PROGRESS.md` 2026-11-19「组队开局回执两处收尾」与 `docs/design/cross-zone-matchmaking.md` §13.2「整队」。**客户端可见**,两版要同批:
+
+1. **`TeamMatchIntent.state` 口径**(`proto/team/team.proto`,字段不变):带 battle_id 时取原 formation 的状态(1/2/3 仍在恢复,4 已建房,5 已确认中止);不带 battle_id 时取整队原件的状态:1 待提交、2 已入队、5 未成局即关闭(含 CancelQueue 在首次提交前立下的原 UUID 墓碑)。2 和 5 是确定结论,客户端据此释放本机原意图。这一口径由主仓 11-15 PVP 修复批引入,当时没有登记。
+2. **新值 6**:会话已按角色护栏核对为角色现主人,原件却记着过户前的主人。GetMyTeam 照常回码 0 与调用者视图并带 `state=6`;StartTeamMatch 沿这个请求号重发回 `kInvalidParameter` 加同一回执,不为现主人建第二份原件。会话本身已不归现主人时不给 6,仍按原会话失效处理。
+3. **同批服务端内部行为**(Java 按惯用方式做):整队排队维护时,任一成员的原票已结束(state=4、未成局,原票号、原角色身份、模式、副本、人数都对得上)就关闭整队并通知全队,不能让排队原件永久挡住下一次匹配。
+4. **同批 PVE 经验**:结算把经验整笔计入角色累计经验并持久化(主仓 `LevelComp.total_exp`,字段 2),近期战斗结果记本局实计经验(`PlayerBattleResult.exp_gain`,字段 18,客户端补弹结算时显示);重投靠收件箱永久水位去重。升级曲线未配置,入账不改等级。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 链路追踪阶段三:span 导出到 Tempo(主仓已落码未编译,Java 待做)
+
+主仓说明见 `docs/PROGRESS.md` 2026-11-19「分布式日志阶段三」,设计见 `docs/design/distributed-tracing.md` §10.3,运维口径见 `docs/ops/grafana-loki-local-logs.md` §0、§6.3。主仓 commit:main 工作区未提交(C++ 接缝与第一版导出器在 `6914a1af8`);Java 版 `0.1.0-SNAPSHOT` 待做,本轮不写 Java 代码。服务端内部与部署侧改动,不涉及客户端契约。
+
+- **主仓做法**:三种语言都用 OTLP 把 span 送本机(K8s 上是本节点)的 Alloy。Go 用 go-zero 自带的 OTLP/gRPC(4317);Java 用 Spring Boot 的 OTLP/HTTP(4318);C++ 在 muduo 上自写 OTLP/HTTP protobuf 导出器,挂主 EventLoop,参数取 BatchSpanProcessor 默认值(队列 2048、每批 512、5 秒一批、超时 30 秒),失败丢批计数、不重试。头部全采;Alloy 尾部采样:有错误的 trace 全留、总耗时 ≥ 1 秒的全留、其余按 trace_id 留 10%(`decision_wait` 30s、`num_traces` 50000)。K8s 上节点级 Alloy 按 trace_id 分给网关级 Alloy 采样,再写 Tempo(保留 7 天)。Grafana 里 Loki 的 `trace_id` 跳 Tempo,Tempo 的 trace 跳回 Loki。
+- **span 口径**:入站是 server / consumer span,出站是 client / producer span;名字用 `服务/方法`、gRPC 的 `pkg.Svc/Method`、Kafka 的 topic、gate 的客户端消息名(建连 / 断线 / 验 token 分别是 `gate.connect` / `gate.disconnect` / `gate.token_verify`);名字和属性都不带玩家 id 这类高基数值;异步回调原样装回发起时的上下文,回调里发起的调用挂在发起时的 span 下面。server span 量到回复发出为止(延后回复、异步守护段之后再处理的都算);gRPC 服务端只把服务端故障码(UNKNOWN、DEADLINE_EXCEEDED、UNIMPLEMENTED、INTERNAL、UNAVAILABLE、DATA_LOSS)标成错误;本地确定没发出的调用也记一个标错的 client span(主仓 2026-11-19「分布式日志阶段三收尾」)。
+- **Java 待做**:Java 版各服务接 OTLP 导出(Spring Boot / Micrometer 自带的导出器即可),span 名与类型按上面的口径;采集器、尾部采样与 Tempo 若与主仓共用一套部署,就不再单独做。核对结论是「已有等价」就不再单独登记。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 battle 直连准入:accept 处拒绝并发 RST、新建连接速率闸、连接类指标(主仓已落码未编译,Java 待做)
+
+主仓说明见 `docs/PROGRESS.md` 2026-11-19「battle 直连准入前移到 Acceptor」,设计见主仓 `docs/design/gate-connection-admission-control.md`「P1-1 ~ P1-4 · battle 直连面」与 `docs/design/turn-based-battle-server.md` D27,运维口径见主仓 `docs/ops/gate-kernel-tuning-runbook.md` §3.3。主仓 commit:main 工作区未提交;Java 版 `0.1.0-SNAPSHOT` 待做,本轮不写 Java 代码。不改客户端协议;客户端可见的只有被拒的直连是连接被重置(RST),与 2026-11-12「gate 连接准入」一条相同,客户端按断线重连处理。
+
+- **主仓做法**:把 2026-11-12「gate 连接准入」一条的做法原样搬到 battle 直连面。判定在每连接对象建出来之前,顺序「关源 → 总量(`BattleMaxConnections`,参战者与观众共用)→ 新建速率」;被拒发 RST,已建立的直连关闭仍走正常关闭;全局 GCRA 速率闸,缺省与 gate 同一推导(上限 4096 时 100 条/秒、桶深 4096),环境变量 `BATTLE_ACCEPT_RATE_PER_SECOND` / `BATTLE_ACCEPT_BURST` 覆盖,写错拒启;停机与维护关源时同步关准入闸,计划排空不关源(打着的房间还要接重连)。
+- **指标**(用同名,两版共用 `deploy/k8s/battle-connection-alerts.yaml`):`battle_connections_current`、`battle_connections_max`、`battle_unauthenticated_connections`(既没完成票据握手、也没出示有效网络探测授权的直连)、`battle_accepted_total`、`battle_rejected_total{reason}`(`capacity` / `accept_rate` / `shutting_down` / `no_token_secret`,与 gate 同义取值相同)、`battle_accept_rate_limit_per_second`、`battle_accept_burst`、`battle_handshake_duration_ms`(直方图,桶 10 ~ 10000 毫秒)、`battle_preauth_reaped_total`。标签只有 `reason`。
+- **Java 待做**:`game-battle` 的 `BattleEdgeServer` / `BattleEdgeHandler`(Netty)按上面对齐;核对后已有等价机制就把本条改成已对齐。另有一条两版共有的风险:全服匹配的网络探测每个机房只打到 NodeId 最小的那一台 battle,探测量大时速率要按运维手册 §3.3 调高。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 账号注销与 Apple / Google 身份令牌一次性消费(主仓已落码未编译,Java 待做)
+
+主仓说明见 `docs/PROGRESS.md` 2026-11-19「账号注销」条目,设计见主仓 `docs/design/account-deletion.md`(负责人 11-19 定:Apple 撤销用「申请时当场换票撤销」、身份令牌一次性消费不做挑战式 nonce、冷静期 7 天)。
+
+- **客户端可见契约(两版必须同批)**:`POST /api/account/delete`(`zone_id` + 与 `/api/login` 同义的凭据,Apple 另带 `authorization_code`)、`POST /api/account/delete/cancel`(`zone_id`、`access_token`),应答 `code`、`message`、`tip`、`state`、`execute_after`、`blockers[]{player_id, reason}`;`/api/login` 应答多 `account_deletion_state`、`account_deletion_execute_after`、`previous_account_deleted_at`。tip 码 2038~2041(`kLoginAccountDeletionPending` / `Blocked` / `InProgress` / `ReauthRequired`)由 `data/tip/Tip.xlsx` 导表。
+- **服务端语义**:账号行状态 0 正常 / 1 冷静期 / 2 执行中;申请要重新认证并预检全部角色(挂起原因回给玩家,帮主另加 `guild_leader`);冷静期内能登录、只能撤销,建角与过户买入按名额满拒绝,进游戏拒绝;到期由执行者认领、吊销令牌、踢线、逐名删角,角色删完写只存账号摘要的回执并删账号行;删角收尾清存档与各参与者的个人数据。Apple / Google 身份令牌验签后一次性消费。
+- **Java 待做**:登录服务、目录与各参与者按上面对齐;Apple 撤销同样不长期保存 Apple 令牌。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 gate 未验签连接预算:独立预算、LRU 淘汰最老的未验签连接、按概率早拒(主仓已落码未编译,Java 待做)
+
+主仓 gate 准入设计 P0-2 的后一半,接在 2026-11-12「gate 连接准入」一条之后。主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
+规格见主仓 `docs/design/gate-connection-admission-control.md` P0-2 与 §9.6,运维口径见主仓 `docs/ops/gate-kernel-tuning-runbook.md` §3.2,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「gate 未验签连接预算」。
+
+不改客户端协议。客户端可见的只有两种断开:被预算或早拒拒掉的连接是连接被重置(RST,与 2026-11-12 一条相同);被淘汰的未验签连接是已建出来的连接被正常关闭。两种都按普通断线退避重连。
+
+**主仓的做法**(Java 版 `game-gate` 按 Netty 惯用方式对齐;已有等价机制就把这一节改成已对齐):
+
+1. **未验签连接单独一个池**,大小就是 11-12 那一条的 RAII 占位数。池上有早拒起点 S 与预算 B:B = 缺省持续速率 × 握手期限(上限 20000 时 2000,上限不到 1 万时 1000),S = B / 2。判定排在总量之后、速率之前,被它拒掉的连接不消耗速率名额。
+2. **承压时先淘汰、后早拒**:n ≥ S 且最老的一条未验签连接已建连满 3 秒,就淘汰它、放行新连接;没有够老的,n ≥ B 时拒(`preauth_budget`),S ≤ n < B 时按概率 (n − S)/(B − S) 拒(`preauth_early_drop`)。
+3. **淘汰**:按建连先后的索引取最老的,按会话代次核对、跳过已验签的;先收回占位,再关连接,会话由正常的断开路径删;只在新连接最终被放行时才淘汰。Netty 里对应的是在子 channel 的准入 handler 里关掉最老那条未验签 channel,不在别的 channel 的事件里同步改会话表。
+4. **早拒的随机源可注入**,单测用定值。
+5. **指标**(同名,两版共用一份告警):`gate_rejected_total{reason}` 多 `preauth_budget` / `preauth_early_drop`,新增 `gate_preauth_evicted_total`、`gate_preauth_budget`、`gate_preauth_early_drop_start`。告警 `GateUnauthenticatedConnectionsHigh` 改为按早拒起点算占比,新增 `GatePreauthBudgetRejecting`(主仓 `deploy/k8s/gate-connection-alerts.yaml`)。
+
+**验证**(Java 仓口径):移植主仓 `cpp/nodes/gate/tests/connection_admission_test.cpp` 里 `ConnectionAdmissionPolicy.*`(预算推导、先淘汰后早拒、早拒概率恰好线性、只在放行时淘汰)、`ConnectionAdmission.*` 与 `ConnectionAdmissionEviction.*`(按建连先后淘汰、跳过已验签与会话号被复用的、真实连接上被淘汰的那条关掉)的同名场景。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 节点时钟告警与服务启动时钟核对(主仓已落码未编译,Java 待做)
+
+主仓负责人反映过线上运维把机器时间调回一年前又调回来、没有被发现。主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
+运维口径见主仓 `docs/ops/clock-sync-runbook.md`,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「节点时钟告警与服务启动时钟核对」。
+
+不改客户端协议,客户端看不到变化。
+
+1. **启动核对**:每个服务进程启动时,把本机时钟和 Kubernetes API server 回应里的 `Date` 头比一次(`GET /version`,不要 RBAC 权限,状态码不论;TLS 用 Pod 挂载的集群 CA 核对)。偏差取「请求前后本机时间的中点」减「Date 那一秒的中点」。差 30 秒以上拒启、退出码非 0;读不到参照只告警、照常启动;不在 Kubernetes 里不核。
+2. **应急开关**:环境变量 `MMORPG_CLOCK_CHECK_MODE=warn`(只认小写)时超限只告警、照常启动,两版同名。
+3. **告警**:按节点报,两版共用主仓 `deploy/k8s/clock-alerts.yaml`,Java 版不用另写。
+
+**验证**(Java 仓口径):移植主仓 `go/shared/clockcheck/clockcheck_test.go` 与 `java/gateway_node/src/test/java/com/game/gateway/ClockCheckTest.java` 的同名场景(偏差取两个中点之差;30 秒以内放行、超出拒启、只有小写 warn 放行)。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 实名认证与未成年人防沉迷(主仓已落码未编译,Java 待做)
+
+主仓设计稿 `docs/design/real-name-anti-addiction.md`。小游戏渠道(`wechat_minigame` / `douyin_minigame`)由平台实名并执行限制,服务端只对其余渠道(App 形态的微信 / QQ、口令等)生效;部署开关 `AntiAddiction.Enabled`,海外部署关闭。
+
+**两版共享的客户端契约**(要同批):
+1. `POST /api/real-name`:请求 `{access_token, name, id_number, zone_id}`;应答 `{code, message, tip, anti_addiction}`,code 0 成功、401 令牌不能用、422 实名没通过(tip 给原因)、429 限流、500 故障。
+2. `/api/login` 应答新增 `anti_addiction{real_name_required, minor, play_deadline_ms}`(login.proto `LoginResponse` 第 10 号字段 `AntiAddictionStatus`)。
+3. tip 码(Tip.xlsx login 段):`kLoginRealNameRequired`、`kLoginRealNameInvalid`、`kLoginRealNamePending`、`kLoginRealNameTooManyAttempts`、`kLoginRealNameAlreadyBound`、`kLoginRealNameServiceUnavailable`(fault)、`kLoginMinorNotInPlayTime`、`kLoginMinorPlayTimeOver`。
+4. 踢线原因:`KickPlayerEvent.reason_tip`(第 4 号字段),到点下线时客户端收到的 `GameKickPlayerRequest.reason` 是 `kLoginMinorPlayTimeOver`。
+
+**服务端行为**(Java 版按自己的惯用方式实现):
+1. 账号目录加 `real_name_pi`(国家系统的 pi,只写一次;前 6 位是 26 进制出生日期,年龄由它算;不存姓名和身份证号)。
+2. 实名提交:本地预检(身份证校验码、出生日期、姓名长度)→ 每账号每日次数上限(缺省 5)→ 调国家系统(AES-128-GCM + SHA-256 签名,技术规范 V1.9)→ 成功写 pi;认证中记下 ai,下一次 /api/login 时查询收尾。
+3. 拦截点只在 gate 上的 Login(写登录态之前):本渠道要实名而没有 pi 拒绝;未成年人只在周五、周六、周日与 `ExtraPlayDays` 的 20:00–21:00(北京时间)放行。
+4. 到点下线:续租间隔缩到截止时刻,到点发带原因的踢线。
+5. 上下线上报:自有渠道的会话在绑定时报上线、会话收尾时报下线,每批 ≤128 条,每副本 ≤1 QPS。
+6. 充值限额的数据接口 `GetAccountRealName(player_id)` 只认 payment;限额闸本身在主仓也还没接(见主仓 PROGRESS 同日条目)。
+
+**验证**(Java 仓口径):移植主仓 `go/shared/antiaddiction` 的出生日期解码(规范样例 `1hpfml` = 2010-01-01)、可玩时段、身份证校验码用例,`go/login/internal/logic/pkg/nppa` 的规范加密与签名样例,`realname` 的每日上限与认证中收尾用例。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 角色换主人之后本机待确认记录作废:进游戏应答带归属修订号、排队查询给确定结论(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。说明见主仓 `docs/PROGRESS.md` 同日同名条目与 `docs/design/cross-zone-matchmaking.md` §13.2 末条。**客户端可见**,两版要同批:
+
+1. **`EnterGameResponse.owner_revision = 5`**(`proto/login/login.proto`):受理 EnterGame 时回这名角色的归属修订号(账号目录的 owner_revision,过户一次加一),只在受理时填,0 = 未知。客户端把它记在本机待确认记录的首行(单人排队、整队开局、组队操作、活动领奖、装备打造、材料选择、帮会经济、商城);记录与当前修订号都已知且不同,就按不存在处理,不恢复也不重发。Java 的进场受理同样要填这个字段。
+2. **`GetQueueStatusResponse.request_cancelled` 口径扩展**(`proto/match/match_service.proto`,字段不变):除了撤销墓碑已提交,请求号的原件属于角色此前的归属(过户前留下)也回 true,因为现主人不能沿它入队。CancelQueue 点名前主人的票、Join 意图或整队原件时回成功,原件不动。会话本身已不归现主人时不给这些结论,仍按原会话失效处理。
+3. 与同日上一条(整队开局回执 `state=6`)是同一件事的两半,前提相同:过户、删角之前护栏要求这名角色的在途操作全部了结,所以换主人之前留下的原请求对新主人都是确定的「不可恢复」。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 实时技能冷却与 Buff 跨重登保留(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。规则见主仓 `docs/design/realtime-cooldown-buff-persistence.md`,验证步骤见主仓 `docs/PROGRESS.md` 同日同名条目。客户端不可见,不涉及协议;配置表的新列两版共用。要对齐的行为:
+
+1. **技能冷却全部随玩家存档保留**,不设时长阈值。存冷却组号 + 开始时刻(UTC 毫秒),就绪时刻 = 开始时刻 + Cooldown 表 `duration`,离线期间照常走。下线重登、换节点、跨 zone 后冷却接着算,不能靠重登清冷却。加载时开始时刻晚于本机当前时刻的压到当前时刻。
+2. **Buff 只保留 Buff 表 `keep_on_logout = 1` 的行**(新列,字段号 54,只服务端读,现有行全是 0)。存表号、层数、到期时刻(UTC 毫秒,永久记 0);其余 Buff 实体重建即清。
+3. **恢复按加载时的表裁剪**:表里没有或改成 0 的丢弃;已到期的丢弃;层数夹到 `[1, max_layer]`;剩余时长不超过表里的时长;存档时永久、表改成有时限的从现在起算一个整时长。恢复不重跑免疫、驱散、叠层判断,按系统施加(没有施法者)处理。
+4. 保留的行在线时也不按施法者分条(按 `no_caster = 1` 叠层);挂在别的 Buff 子项表里的条目不单独存,由父项恢复后重新挂。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 全服匹配网络探测目标在机房内按玩家分散(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。说明见主仓 `docs/PROGRESS.md` 同日同名条目与 `docs/design/global-match-hierarchical-pools.md` §5.1「探测目标」。客户端契约不变:`NetworkProbeTarget`、授权字段与 battle 的校验都没改,只改服务端内部给每个机房选哪一台。
+
+1. 两版原来一样,每个机房只探 NodeId 最小的一台(Java:`game-match` 的 `GlobalMatchService.plan`)。全服的探测都打到这一台,新建连接速率随全服排队人数涨,碰上 battle 直连的新建速率闸就被 RST。同日「battle 直连准入」一条里登记的「两版共有的风险」,主仓已修。
+2. 主仓做法:每个机房在可探测节点上按玩家做最高随机权重哈希(键 = player_id,成员 = 实例 UUID,打分与主仓 `shared/workshard.Owner` 相同)。要对齐的是三条性质,打分不必与主仓逐位一致:各台均摊;节点集合不变时同一玩家总落同一台;节点增减只挪动相关玩家。机房先后(按机房里最小的可探测节点号)与 16 个上限不变。
+3. 可探测条件:主仓新加「自报 CLOSED 的不探」。Java 的 `plan` 本来就只取 `accepting` 的节点,这一条两版已经一致,不用改。
+4. Java 待做:`GlobalMatchService.plan` 把「每个机房取第一台」改成按玩家选台;单测对齐主仓 `go/match/internal/logic/network_probe_target_test.go` 的四条:分散、稳定且增减只挪相关玩家、每个机房一台时与原来相同、过滤条件。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 网关前置限流:排队提示加下限与随机量、排队重试只扣 0.1 个 IP 令牌(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交。Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。说明见主仓 `docs/PROGRESS.md` 同日同名条目,以及 `docs/design/open-server-rate-limit-design.md` §二「排队提示」。
+
+**客户端可见**:retry_after_ms 的取值变了,字段与格式没变。客户端照字段等待就兼容新旧两版。
+
+1. `game-gateway` 的 `RateLimiter` 有两种排队提示:波次未开,以及区桶空。目前两种都原样下发原始等待:距开放的秒数 × 1000,或补到一个令牌的毫秒。区桶这一种在 2000 rps 时只有 1ms。
+   - 要改为 max(下限, 原始等待),再加 [0, 抖动上界) 的均匀随机量。
+   - 缺省下限 2000ms、抖动 2000ms,下限必须为正。
+2. 区桶空时 IP 令牌要改成只退还「1 个减去 0.1 个」,不再全额退还。主仓的属性是 `queue-retry-ip-cost-milli`,取值 0~1000,缺省 100。
+   - 目的:不守提示的单个 IP 最多 ip-rps × 10 次/秒就被 429,刷不动区桶热键。
+   - 代价:同一出口 IP 后面约 150 人同时排队才会碰到 IP 桶。
+3. 主仓 Unity 客户端在两处排队等待里自己加了下限与抖动:max(retry_after_ms, 2s),再加 [0, 20%]。所以 Java 版没改之前,Unity 客户端也不会紧循环。原样等待提示的客户端仍会紧循环,例如主仓 Go robot 的无票分支。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 小游戏客户端经 WebSocket 连接 gate 与 battle(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区(一部分随 `9824368eb` 入库,其余未提交);Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/minigame-websocket-gate.md`(W1–W10),验证步骤见主仓 `docs/PROGRESS.md` 2026-11-19「小游戏 WebSocket 入口」。背景:微信 / 抖音小游戏的长连接只有 WebSocket(抖音没有 TCP 接口),小游戏登录(上面 2026-11-12 那一条)之后要连得上 gate 与 battle。
+
+**客户端契约(两版同批)**:
+
+1. gate 与 battle 的客户端端口同时接两种连接。首字节是 `G` 的按 HTTP 升级握手走 WebSocket(RFC 6455,版本 13;不协商扩展与子协议,不查 Origin,路径不校验);其余照旧是原始 TCP 帧。握手失败回 400,版本不符回 426。
+2. 升级之后,一条二进制 WebSocket 消息承载一个现有客户端帧,字节与 TCP 上完全相同。入站按字节流拼接:分片消息、一条消息里装多个客户端帧都要接上。服务端发出的帧不加掩码,每个客户端帧一条消息。
+3. 违规帧的关闭码:文本帧 1003;没加掩码、RSV 位非 0、保留操作码、控制帧分片、续帧顺序不对 1002;单帧载荷超过客户端帧上限 1009。Ping 回 Pong,不算活跃;握手期限、应用层心跳与空闲超时都不变。
+4. 同一批数据里排在 Close 之前的客户端帧先处理,再回 Close(回显状态码)。服务端主动断开(踢线、空闲超时、停机)直接关连接,不补发 Close。
+5. 新增的地址字段,都是可选,原生客户端不读;值是节点自报的 `wss://<边缘域名>/ws/<节点地址>/<端口>`,空 = 这台节点不接小游戏:
+   - `/api/assign-gate`、`/api/queue-status` 应答的 `gate_ws_url`(proto `AssignGateResponse.ws_url = 12`、`QueryQueueStatusResponse.ws_url = 11`);
+   - msg 124 `RedirectToGateNotify.target_ws_url = 6`;
+   - `BattleAssignedS2C.ws_url = 8`;
+   - 地域测速目标 `NetworkProbeTarget.ws_url = 5`。
+6. TLS 不在 gate / battle 里做:wss 由前面的边缘(主仓用 nginx)终止,按路径转到指定的那台实例。原生客户端仍然 TCP 直连。
+
+**要对齐的实现点**:
+
+- 帧映射与关闭码按上面的契约;拆帧用 Java 版自己网络库的 WebSocket 支持即可,不必照抄主仓的手写实现。
+- 节点登记里加 WebSocket 地址,随登录分配、排队放行、重定向(含 gate 排空迁移)、战斗分配与补签、测速计划下发。
+- 广播对 WebSocket 连接仍然只编码一次(每帧只多一个不带掩码的帧头)。
+- 边缘怎么部署由 Java 版自己定,只要下发的地址能把小游戏连接送到指定的 gate / battle,且边缘不能被用来连别的内部端口。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 断线重连待确认五条(主仓断线通知至少送达一次、match 撞车不误记 HOLD、内部 gRPC keepalive、rank 不阻塞启动已落码未编译,Java 待核对)
+
+主仓规则见 `docs/design/infra-reconnect-overview.md` §4 末尾「原待确认的五条」,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「断线重连待确认五条」「断线通知至少送达一次」两条。本次没有改 Java 代码。下面几项按 Java 版自己的组件核对，同类缺口就照主仓口径修:
+
+1. **断线通知至少送达一次**:主仓 gate 持有发给 login 的断线通知，按退避重发(1s 起翻倍、封顶 30s、带抖动)直到 login 确认;login 只在关栅栏、player_locator 挂上断线租约都成功后才回成功，自己不再重试;各接收方对重放幂等，按(gate 实例，会话号，会话代次)认会话。核对 Java 网关 / 登录服的断线通知是否只发一次、丢了是否有自动兜底;没有就照此做。
+2. **成局提交失败只在结局未知时记排空 HOLD**:主仓 match 原来按白名单判「正常撞车」,漏掉的拒绝(整队已被先成的局占住等)每次都记一个要人工处理的永久 HOLD,现改成只在 SQL 守卫判结局未知时 HOLD。核对 Java 匹配服的排空判定是否同样按白名单。
+3. **服务间长连接的半开检测**:主仓 Go 调 Go 走 K8s Service 地址的四条调用，原来没开 keepalive,对端整机掉电后要等内核重传超时约 15 分钟;现开 keepalive(Time 5 分钟、Timeout 20 秒，即 TCP_USER_TIMEOUT 20 秒)。核对 Java 服务间(Dubbo / gRPC)的心跳与半开检测时长。
+4. **依赖没起来时不阻塞启动**:主仓 rank 依赖 mail 时原来阻塞拨号，mail 没起来 rank 就启动失败(K8s 冷启动连锁 CrashLoop),现改成不阻塞。核对 Java 各服务启动时对下游 RPC 的 `check` 设置。
+
+### 2026-11-19 分布式日志阶段一与收尾:三种语言用同一条 traceparent 串起日志(主仓已落码,大部分未验证;Java 待做)
+
+主仓说明见 `docs/PROGRESS.md` 2026-11-06~11-12 的「分布式日志第 1~7 批」「补尾」「清尾」「收尾」与 2026-11-19「错误汇总缓冲收尾」;设计见 `docs/design/distributed-tracing.md` §3~§9、§13,错误汇总见 `docs/design/error-reporting.md`「切片状态与定案」。主仓 commit `9824368eb` 及之后的工作区改动。阶段二、三另见上面两节。
+
+- **主仓做法**:
+  - 约定:线上一律 W3C `traceparent`(小写,全零无效)。日志字段 `trace_id` / `span_id` / `player_id` 在日志库里同名同口径,`player_id` 写十进制字符串。
+  - 根从哪开:gate 对每条客户端消息、建连、断线各开一条根,客户端帧不带 trace。公网 HTTP 入口(网关)不采信外部传播头,内网服务照常接收。
+  - 传播面:节点间 RPC、gRPC(出站拦截与派发钩子)、Kafka 消息头(键 `traceparent`,同名取最后一个)、调本方服务的 HTTP 出站(trade 调商城、网关调商城后台)。
+  - 异步续接:回包回调、协程恢复、一次性投递都装回发起时的 trace;周期任务不捕获;Redis 回调在客户端提交处统一续接。
+  - 请求返回后还在跑的工作从请求 ctx 派生、只去掉取消(Go 的 `context.WithoutCancel`),不从空 ctx 起,否则整条后台链丢 trace 与 player_id。
+  - 错误汇总缓冲的事件带 trace / player_id,计数进 `/metrics`(`error_reporter_events_total`、`error_reporter_dropped_events_total`、`error_reporter_buffered_events`);集中查看走日志库,不另做推送。
+  - 定案:高频消息不设关闭名单;trace_id 不回给客户端。
+- **Java 待做**:
+  - Java 版服务之间的内部 RPC、消息队列与日志按同一约定接:入站接续 `traceparent`,出站写入,日志带三个字段(Spring 用 Micrometer Tracing 放进 MDC 的值,键名映射成上面三个)。对外入口不采信外部传播头。
+  - 异步回调、定时任务与请求返回后还在跑的工作,按上面的续接口径处理。
+  - 客户端契约不变,不需要和主仓同批改。
+- **验证(Java 做完后)**:按 Java 仓 AGENTS.md 跑单测;端到端在日志库里用一个 trace_id 查到一次请求在 Java 版各服务的行,用 player_id 查到这个玩家的各段。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 未验签预算收尾与按来源前缀限速(主仓已落码未编译,Java 待做)
+
+接在同日「gate 未验签连接预算」一条之后。主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
+规格见主仓 `docs/design/gate-connection-admission-control.md` P0-2(「覆盖变量」「battle 直连同一套」两段)、P2-2 与 §9.6,
+运维口径见主仓 `docs/ops/gate-kernel-tuning-runbook.md` §3.2、§3.3,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「未验签预算收尾」。
+
+不改客户端协议;客户端可见的仍只有被拒是 RST、被淘汰是正常关闭。
+
+**主仓的做法**(Java 版 `game-gate` 按 Netty 惯用方式对齐;已有等价机制就把这一节改成已对齐):
+
+1. **本端事件循环刚卡过时不淘汰**:用一个 1 秒节拍判卡顿。还没打过拍、上一拍本身迟到、距上一拍超过两个节拍都算卡过,这时只按概率早拒或到预算拒。
+2. **预算可覆盖**:三个变量:预算、早拒起点、可淘汰年龄(毫秒,短于 10 秒握手期限)。只设预算时起点取一半,起点不能大于预算,写错拒启。主仓变量名是 `GATE_PREAUTH_*`;Java 版用自己的配置方式给同样的缺省值和覆盖口子。
+3. **战斗直连也有同一套预算**:池是没完成票据握手、也没出示探测授权的直连。主仓 battle 每次 accept 扫一遍会话表挑最老的;Java 若有战斗直连面,按同一口径接上。
+4. **按来源前缀限速**:
+   - 缺省关闭,设了速率才开;开了也只在承压时生效:未验签池过了早拒起点,或全局速率闸最近 10 秒内拒过连接。
+   - 按 IPv4 /24、IPv6 /64 聚合,限速率不限总量,不封来源。推荐速率是全局缺省持续速率的 1/10,桶深是它的 10 秒量。
+   - 判定阶段只问桶,所有闸都放行之后才记账。
+   - 前缀表满(65536)时新前缀不登记、直接放行(fail-open),并计数、告警。
+   - 只在网关看得到玩家真实源地址的部署形态里开。
+5. **指标**(同名,两版共用告警):
+   - gate 新增 `gate_preauth_evictable_age_ms`、`gate_source_rate_limit_per_second`、`gate_source_burst`、`gate_source_rate_active`、`gate_source_tracked`、`gate_source_untracked_total`,以及 reason `source_rate`;
+   - 告警 `GateSourceRateLimited`、`GateSourceTableFull`。
+
+**验证**(Java 仓口径):移植主仓 `cpp/nodes/gate/tests/connection_admission_test.cpp` 里下面这些同名场景:
+- `SourceRateGate.*`;
+- `ConnectionAdmission.NoEvictionRightAfterTheLoopStalled`、`PerSourceLimitingAppliesOnlyUnderPressure`、`AGlobalRateRejectionEngagesPerSourceLimitingForOneHandshakeDeadline`;
+- 覆盖变量的两条 Policy 用例。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 未成年人充值限额闸(主仓已落码未编译,Java 待做)
+
+接在同日「真钱支付接入」「实名认证与未成年人防沉迷」两条之后。主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
+规格见主仓 `docs/design/real-name-anti-addiction.md` §5.6,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「未成年人充值限额闸」与「…收尾」两条。
+
+**两版共享的客户端契约**(要同批):Tip.xlsx payment 段新加 5 个码,都不是故障:`kPaymentRealNameRequired`、`kPaymentMinorNotAllowed`、`kPaymentMinorSingleLimit`、`kPaymentMinorDailyLimit`、`kPaymentMinorMonthlyLimit`。`CreatePayIntent` 被闸拒绝时在 `error_message` 里回它们;共享客户端 `PaymentClient.DescribeTip` 已带上这 5 条文案。
+
+**服务端行为**(Java 版的支付服务按自己的惯用方式实现):
+1. 开关 `MinorSpendingGate`:`none` 时生产环境不许开 App 内的四个真钱渠道;`realname`(中国大陆)时建意图前按买家账号的 pi 判年龄,这时才许开;`overseas`(大陆以外的部署)不读实名,App 渠道照开。
+2. 闸开着时每个新意图都读实名。App 内的渠道(含以后新加的)没实名就拒绝;两个小游戏渠道上没实名的账号交给平台、放行,有实名的照样判、一起计额(法规按企业合并计算)。
+3. 判定顺序:读不到实名回繁忙(小游戏也一样);没实名回 `kPaymentRealNameRequired`(小游戏放行);成年放行、不计额;未满 8 周岁拒绝;非人民币订单拒绝;单笔超过单次上限(8–16 周岁 50 元、16–18 周岁 100 元)拒绝;最后核对月、日累计。
+4. 累计口径:按 pi(同一个人的多个账号合并)、北京时间的自然月与自然日。还在等付款的意图不分月份全额占额度,已付的按转已付的时刻计入当月当日,过期关闭、被渠道撤销的不占。核对式「本月起已付 + 全部在途 + 本次 ≤ 每月上限(200 / 400 元)」;单日上限按配置,0 = 不设,数字待负责人定。同一个人的核对与预占在一把行锁下排队。
+5. 意图关闭之后才到的钱在同一把锁下复核:迟到的付款超限不发货、转人工;App Store 撤回退款照样计入,超限记合规事件。
+6. 退款按净额:只有订单绑定的那笔钱(已绑定、还没报给商城,或取消后才到账)的渠道翻转才改意图状态,重复付款、金额币种不符的被撤销不释放额度;商城退款待办的原因是 `CANCELLED_LATE`、`DELIVERY_REJECTED` 时,渠道退成之后关意图、释放额度。
+7. 记账后按这笔钱改意图(2026-11-20):转人工的、金额或币种与意图冻结的对不上的不算订单的付款,不记已付、不占额度;我们定价的渠道一个商户单号只能付成一次,意图直接关掉(否则后台查单会对它无限重复),商店渠道不动意图。客户端轮询查单记账后重读意图。
+
+**验证**(Java 仓口径):移植主仓 `go/payment/internal/data/spend_test.go` 的计额分支、`go/payment/internal/core/minor_test.go` 的判定分支、`record_test.go` 的记账第二步,以及 `spend_tidb_test.go` 里「同一个人并发 8 个 50 元只成 4 个」的真库用例。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 挂机月卡开通入口(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
+规格见主仓 `docs/design/afk-monthly-card.md`,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「挂机月卡开通入口」。
+接在 11-06 起各条「离线托管」(断线保留 + 月卡)之后:那几条只认 `player:afk_pass:{<player_id>}`,这一条给它加上获得入口与落库方式。
+
+**两版共享的客户端契约**(要同批):
+1. 新服务 `SceneAfkPassClientPlayer`(`proto/scene/player_afk_pass.proto`):`GetAfkPass`、`BuyAfkPass`(`client_request_id` 必须非 0,带 `expected_currency_type` / `expected_price` 报价)、
+   `GmSetAfkPass`(只在 dev / test 放行)。应答里的 `AfkPassInfo`:到期 Unix 秒、服务器此刻、售价与币种、天数、叠加上限天数、提前提醒小时数、余额。
+2. Tip.xlsx 新段 `//afk_pass_error base=32000`:`kAfkPassPriceChanged`、`kAfkPassCurrencyNotEnough`、`kAfkPassStackLimit`、`kAfkPassFrozen`、`kAfkPassUnavailable`(故障)。
+3. 配置表 `AfkPassRule`(单行):30 天、灵石 300、剩余上限 180 天、提前 72 小时提醒。
+
+**服务端行为**(Java 版按自己的惯用方式实现):
+1. 月卡是角色存档里的一个到期时刻,不是物品;唯一写入方是开通与 GM。和扣的灵石同一次存盘提交。
+2. 开通:先查幂等键(重放回当前状态并标 `replayed`,同键换参数拒绝),再查规则、报价、冻结、叠加上限、余额;到期 = max(现在, 原到期) + 天数;
+   扣钱、写到期、记键在同一次处理里,不让出线程。真钱经现有充值档位买灵石,不做月卡商品。
+3. 投影 `player:afk_pass:{<player_id>}`(值 = 到期秒,`SET … EXAT`,过期或清除时 `DEL`)只写**已提交**的值:存档提交回来且值变了、加载进场后按库里的值重建、
+   离线托管期间随在场心跳补写。托管判定读本进程内存里的那份,不读投影;租约续期一侧读投影。
+
+**验证**(Java 仓口径):移植主仓 `cpp/tests/bag_test/afk_pass_test.cpp` 的规则与开通用例(`AfkPassRulesTest.*`、`AfkPassSystemTest.*`),
+以及 `robot/afk_pass_follow_smoke_scenario.go` 的冒烟口径(开通 → 断线 → 队长同节点、跨节点各换一次线 → 托管的队员跟过去)。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-19 补充:探测计划没有合格目标时回 16023,不再回故障码(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。接上一节「全服匹配网络探测目标在机房内按玩家分散」,说明见主仓 `docs/PROGRESS.md` 同日「补充『全服匹配网络探测目标在机房内分散』」条目与 `docs/design/global-match-hierarchical-pools.md` §5.1「探测目标」、§9。**客户端可见**(回码),不新增 tip 码:
+
+1. 主仓:battle 注册镜像已同步、确实没有合格的探测目标(都没注册、缺客户端地址,或全部不接新房间,比如维护、整机房排空)时,`GetNetworkProbePlanResponse.error_message` 回 `MatchNoRegionWithinLatency`(16023,业务拒绝);镜像还没同步过时仍回 `MatchInternal`(16004,fault)。原来一律回 16004,会把正常维护计成服务端故障。
+2. Java 待做:`GlobalMatchService.plan` 现在在没有目标时抛 `IllegalStateException("没有合格的探测机房")`。改成按 Java 目录自己的语义区分:目录读得到但没有合格节点回 16023;目录读不到(依赖不可用)回 16004。
+3. 客户端 `RegionProbeClient` 对计划里任何非 0 码都提示同一句「地域探测暂不可用,请重试。」,两版回码对齐后客户端不用改。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-20 账号注销收尾:帮主自动让位、注销下线结束托管、摘评级榜、剧本清理、拒收已删角色的邮件(主仓已落码未编译,Java 待做)
+
+接在 2026-11-19「账号注销与 Apple / Google 身份令牌一次性消费」一条之后。主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
+设计见主仓 `docs/design/account-deletion.md` §6.2、§6.3、§7.2、§7.4 与 §10「收尾批」,验证命令见主仓 `docs/PROGRESS.md` 2026-11-20「账号注销收尾批」。
+
+- **客户端可见契约(两版必须同批)**:
+  1. 注销下线带原因:申请成功后踢掉在线设备用 `kLoginAccountDeletionPending`(2038),到期执行时用 `kLoginAccountDeletionInProgress`(2040),走 `GameKickPlayerRequest.reason`;客户端显示原因、不自动重连。
+  2. 新 tip `kMailRecipientDeleted`(mail 段,导表后应为 17011):个人邮件的收件人角色已注销。客户端不处理(发件方都是服务端)。
+  3. 预检的 `guild_leader` 只在申请时出现;执行时不再因帮主卡住。
+- **服务端语义**:
+  1. 帮主:申请时(试探)仍拦,让玩家自己转让;执行删角时收尾自动让位给职位最高、累计帮贡最多、入帮最早的成员,帮里只剩他就解散;转让帮主拒绝冻结中 / 已删除的目标。提交后再失效缓存、摘帮会榜、推送。
+  2. 下线:踢 gate 之后再按正常登出结束会话(删会话、离场释放),否则有挂机月卡的角色会转成离线托管留在世界里,删角一直等。同地域各区共用会话存储与命令通道,任一区都踢得到。
+  3. 评级榜:删角收尾按他有评分的模式写待摘榜行(事务发件箱),投榜方调 `RemoveRankEntry` 摘掉并立墓碑;榜单奖励邮件收件人已注销时直接放弃、不报人工。
+  4. 玩家写的战斗剧本与选用随角色删,审核流水按审计保留。
+  5. 注销范围是本地域的账号:账号目录按地域各一份,别的地域的同一渠道身份是另一个账号。
+- **Java 待做**:按上面对齐登录服务的下线(注意 Java 版托管 / 断线保留的等价机制)、帮会删角收尾、评级榜摘除、剧本清理与邮件拒收;Java 已有等价机制就把对应项改成已对齐。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-20 实时 Buff 再施加刷新时长、带进回合战斗按剩余时长换算(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。是 11-19「实时技能冷却与 Buff 跨重登保留」的补充,说明见主仓 `docs/design/realtime-cooldown-buff-persistence.md` §2.6 与 `docs/PROGRESS.md` 同日条目。要对齐的行为:
+
+1. 同一施法者再施加同一条实时 Buff:层数照旧加,剩余时长回到表里的整时长(重挂满时),与回合战斗刷新持续回合同一口径;永久与瞬时的不动。
+2. 带进回合战斗的实时 Buff 按这条剩下的时间换算回合(`max(1, ceil(ms / 6000))`),不按表里的全量时长;已经到点的不带。客户端在战斗里看到的剩余回合因此变准,协议不变。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-20 活动中心的活跃度领取与领取记录保留规则(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。Java 仓目前没有活动中心与活跃度领取的实现(只有生成的表与协议类),这一项此前也没有登记。
+合同见主仓 `docs/design/player-features-ui.md`「2026-10-22 活动中心:权威目录、活跃与恢复合同」,验证命令见主仓 `docs/PROGRESS.md` 2026-11-20「活跃度领取记录按周期裁剪」与「玩家存档集合收尾」(后一条更正前一条的拒绝码与积分来源规则)。
+
+- **客户端可见契约(两版必须一致)**:`SceneActivityClientPlayer` 的 `GetActivityList` 与 `ClaimActivityVitalityReward`;同一 `request_id` 重放回首次结果;同一规则、周期、档位只领一次。
+- **新提示码(两版必须同批认)**:`kRewardPeriodEnded`(Tip.xlsx `//reward_error` 组,导表后应为 12001,业务拒绝),文案「本期活跃已结束，不能再领取；已领到的奖励以背包为准」。请求是当前规则、周期早于当前周期、又没有对得上的原领取记录时回它;其余身份不符仍回 `kInvalidParameter`。客户端按枚举显示这句文案并清掉本机待确认记录。
+- **保留规则**:领取记录只对「当前规则、周期已结束」的部分裁剪,留其中最新的 64 条;当前周期的、别的规则的记录不删。窗口外的原请求重放回上面的 `kRewardPeriodEnded`,不再回首次结果。积分来源只留当前规则的当前周期;一次性任务「已经记过积分」另记一个按任务位序的位图做永久去重,来源删了也不会再记。
+- **Java 待做**:实现活动目录与活跃度领取时按上面对齐;存储按 Java 惯用方式,只要求账本不随时间增长(领取记录有窗口、积分来源只留当期、去重按任务而不按条累积)、重放窗口不小于主仓。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-20 剧本审核流水保留 180 天后删(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。接 2026-11-12「战斗剧本」与 2026-11-20「账号注销收尾」(那条第 4 点「审核流水按审计保留」现在有了期限)。说明见主仓 `docs/design/battle-script.md` §6.4,验证命令见主仓 `docs/PROGRESS.md` 2026-11-20「剧本审核流水保留期清理」。
+
+- 审核流水(主仓 `match_battle_script_review`)按审核时刻保留 180 天,到期分批删除;保留期可配(主仓 `BattleScript.ReviewRetentionDays`,缺省 180,0 = 缺省,非 0 越出 30~365 拒启)。删角收尾仍不删流水,到期与别人的流水一起删。
+- 不是客户端契约,两版各按自己的存储实现;要求一样:保留期写明且有上下限、到期一定删、多副本重复删除无害、清理按时间索引翻页读,不扫全表;清理失败要有计数与告警,到期没删掉(最老一行比保留期还老一天以上)要有告警。主仓同批把观战意图的保留期清理改成一轮连续清多页并接上同一条失败告警(主仓 `docs/PROGRESS.md` 2026-11-20「保留期清理的失败与逾期告警」)。
+- **Java 待做**:Java 版还没有战斗剧本;实现剧本审核时按上面一并做保留期清理。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-20 连接准入收尾:battle 未认证池 O(1)、battle 按来源前缀限速、按来源限速只对公网源地址生效(主仓已落码未编译,Java 待做)
+
+主仓说明见 `docs/PROGRESS.md` 2026-11-20「battle 直连准入收尾」,设计见主仓 `docs/design/gate-connection-admission-control.md` 的 P0-2「battle 直连同一套」与 P2-2,运维口径见主仓 `docs/ops/gate-kernel-tuning-runbook.md` §3.2 / §3.3。主仓 commit:main 工作区未提交;Java 版 `0.1.0-SNAPSHOT` 待做,本轮不写 Java 代码。不改客户端协议。
+
+- **主仓做法**:
+  1. battle 直连的未认证池(没完成票据握手、也没出示探测授权的直连)改成按连接序号有序的集合:每次 accept 只读池大小,最老一条只在承压时才找,不再每次扫会话表。准入判定排在速率闸前面,被拒的洪水也要走它,不能按直连数付代价。
+  2. battle 直连接上与 gate 同一份的按来源前缀限速(IPv4 /24、IPv6 /64,缺省关闭,`BATTLE_SOURCE_RATE_PER_SECOND` / `BATTLE_SOURCE_BURST` 打开,只在承压时生效,所有闸都放行之后才记账,前缀表满时放行并计数)。
+  3. gate 与 battle 都只对公网源地址按来源限速:私网、回环、链路本地、100.64/10、0/8 与 IPv6 的 ::/64、fc00::/7、fe80::/10 不限。经代理 / LB / 小游戏边缘 nginx 进来的连接在 accept 时只看得到前面那一跳的内网地址,按它限速会把后面所有玩家当成一个来源;那一段的按来源限速归边缘。
+- **指标**(用同名,两版共用 `deploy/k8s/battle-connection-alerts.yaml`):新增 `battle_rejected_total{reason="source_rate"}`、`battle_source_rate_limit_per_second`、`battle_source_burst`、`battle_source_rate_active`、`battle_source_tracked`、`battle_source_untracked_total`;告警 `BattleSourceRateLimited`、`BattleSourceTableFull`。
+- **Java 待做**:`game-gate` 与 `game-battle`(`BattleEdgeServer` / `BattleEdgeHandler`)的按来源限速若已有,补上「只限公网来源」;battle 直连的未认证计数若是遍历连接表算的,改成随状态变化维护的计数。核对后已有等价机制就把本条改成已对齐。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-20 更正:实时 Buff 存档恢复时「表里查不到这一行」改为原样带回(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。更正 11-19「实时技能冷却与 Buff 跨重登保留」第 3 条里「表里没有……的丢弃」:
+
+1. 本节点表里查不到行的保留 Buff 条目(更新版本加的行,或还没热更到)不生效,但原样带回存档(连未知字段),过了它自己的到期时刻才丢;表里有这一行而标记是 0 的,照旧丢弃。
+2. 冷却列表里没有记录、只带着更新版本字段时,也照样保留那些字段。
+3. 恢复出来的到期时刻与存档里的一字不差,重建多少次都不漂移。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-20 scene 按 (gate 实例, session_id) 认会话、login 跨实例同号改回踢线(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。不改客户端协议。设计见主仓 `docs/design/scene-enter-chain-residuals.md` §14(§10 第 1 条「e 方案 C」),验证命令见主仓 `docs/PROGRESS.md` 2026-11-20「scene 按 gate 实例认会话」。
+
+- **主仓问题**:gate 会话号是 `node_id<<17 | 序号`。同一 node_id 短暂有两个 gate 进程(新进程接走号、老进程还没关停)时,同一名玩家可能在两边拿到同一个会话号。老进程关闭旧连接时迟到的 ExitGame 被 scene 当成新会话的断线,新会话进入断线保留、25s 后退出、要重登(不丢数据)。老进程迟到的入场、旧客户端照发的消息是同一类问题的另两面。
+- **主仓做法**:
+  1. RPC0 入站侧握手成功时把对端 node_uuid 记在这条连接上,handler 经调用上下文读;不信消息体自报的实例号。
+  2. scene 的「同一会话」改为同一 (gate 实例, session_id):入场栅栏按它判(老进程迟到的同号入场按登录代次拒);客户端消息(含 gate 代发的 ExitGame)出自另一个 gate 进程时不派发;被拒入场的提示只推给请求出自的那个进程。
+  3. login 顶号时,会话号相同、gate 实例不同的旧连接照踢(此前只计数不踢)。
+- **Java 待做**:Java 网关不走 RPC0 握手,会话号与归属模型也不同(顶号走归属协议让出,见本表「顶号」行)。核对三点:Java 的会话号会不会在两个网关进程之间撞号;scene 认会话时是否只看会话号;老网关进程迟到的退出、入场、客户端消息能否落到新会话上。有同类窗口就按「会话 = (网关实例, 会话号),实例取自连接、不信消息自报」修;已有等价机制就把本条改成已对齐。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-20 scene → gate 的回推与 scene 自发的 EnterScene 按会话所在的 gate 进程找 gate(主仓已落码未编译,Java 待做)
+
+主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。不改客户端协议。设计见主仓 `docs/design/scene-enter-chain-residuals.md` §14.7(上一条 §14.6 的第二条残余),验证命令见主仓 `docs/PROGRESS.md` 2026-11-20「scene → gate 的回推与自发 EnterScene 按会话所在的 gate 进程找 gate」。
+
+- **主仓问题**:scene 按会话号里的 node_id 找 gate,取第一个匹配的节点实体。同一 node_id 短暂有两个 gate 进程、两者在 scene 上都有实体时(老进程断线重连后重新登记,或开了摘除宽限期),绑在新进程上的会话的回推投到老进程,scene 自发的 EnterScene 也带成老进程的实例。只伤活性。
+- **主仓做法**:会话绑定时记下了 gate 实例就只按实例找 gate(推送、广播、按会话直推、自发请求的 gate 实例号都一样),找不到就当 gate 不在,不退回按 node_id 投给同一 node_id 上的另一个进程;实例未知才按 node_id。
+- **Java 待做**:随上一条一起核对:Java 的 scene 回推与自发的进场请求按什么找网关;两个网关进程能否同时持有同一个会话号或同一个路由键。有同类窗口就按「会话所在的网关实例」投递、找不到不改投;已有等价机制就把本条改成已对齐。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。

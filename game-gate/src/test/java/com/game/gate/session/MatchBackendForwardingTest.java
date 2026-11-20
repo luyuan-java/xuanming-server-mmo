@@ -103,7 +103,7 @@ class MatchBackendForwardingTest {
         EmbeddedChannel ch = verified(Map.of(DubboGroups.MATCH, match, DubboGroups.FRIEND, friend));
         enterGame(ch);
         assertThat(matchMethods).extracting(MessageMethod::messageId)
-                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380);
+                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392);
 
         long requestId = 100;
         for (MessageMethod method : matchMethods) {

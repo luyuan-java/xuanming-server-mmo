@@ -14,14 +14,12 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** 正式三表DDL与真实owned TiDB；无H2替身、无跳过分支，资源与NORMAL权限沿用唯一夹具。 */
+/** 正式三表DDL与真实owned TiDB；无H2替身，未配夹具时按 AGENTS.md §4 默认跳过（记为跳过、不算通过），资源与NORMAL权限沿用唯一夹具。 */
 class GatewayStoreUnsignedZoneTiDbTest {
     @Test
     void 正式TiDB_UINT32三边界_目录白名单全CRUD与公告实际MyBatis往返() throws Exception {
         String root = System.getProperty("game.it.authority.jdbc", System.getProperty("game.it.mysql"));
-        if (root == null || root.isBlank()) {
-            throw new IllegalStateException("缺少真实fixture配置：game.it.authority.jdbc");
-        }
+        org.junit.jupiter.api.Assumptions.assumeTrue(root != null && !root.isBlank(), "未配置真实fixture：game.it.authority.jdbc");
         List<Integer> ids = List.of(Integer.MAX_VALUE, Integer.MIN_VALUE, -1);
         var options = AuthoritySqlFixture.Options.fromEnvironment(root, System.getProperty("game.it.mysql.user", "root"),
                 System.getenv().getOrDefault("GAME_MYSQL_PASSWORD", ""), "jgw_u32", false, ids);

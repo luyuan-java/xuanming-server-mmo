@@ -110,13 +110,15 @@ class MessageRoutesTest {
                         && !MessageRoutes.DIRECT_ONLY_SERVICES.contains(m.serviceName())
                         && !MessageRoutes.GATE_LOCAL_SERVICES.contains(m.serviceName()))
                 .map(MessageMethod::serviceName).distinct().toList();
+        // ClientPlayerPayment（396–399）随契约同步、Java 尚未接入（PARITY「真钱支付」Java 待做）：按本条说明钉住清单，接入后删掉
         assertThat(notPorted)
                 .as("契约里出现了 Java 版还没接入的客户端服务：它的号会走 dispatcher 的缺省分支（回带请求 id 的信封 1003）。"
                         + "这一批就要接的，照 MatchService 的做法加进 SERVICE_BACKENDS 与 GateConfiguration；留到以后的，把这条断言改成"
                         + "钉住那份清单（containsExactlyInAnyOrder），并在 PARITY.md 登记")
-                .isEmpty();
-        // 落到 unsupported 域的客户端路由只剩只走直连的那 12 个战斗号
-        assertThat(routes.all().stream().filter(r -> r.domain().equals(MessageRoutes.BACKEND_UNSUPPORTED)))
+                .containsExactlyInAnyOrder("ClientPlayerPayment");
+        // 落到 unsupported 域的客户端路由：只走直连的那 12 个战斗号，加上未接入的 ClientPlayerPayment 4 个号
+        assertThat(routes.all().stream().filter(r -> r.domain().equals(MessageRoutes.BACKEND_UNSUPPORTED)
+                        && !r.method().startsWith("ClientPlayerPayment.")))
                 .hasSize(12).allSatisfy(r -> assertThat(r.directOnly()).as(r.method()).isTrue());
         // 反过来：后端表里的每个服务名契约里都真有、是客户端协议服务且不是玩家服务（拼错的、契约里已删掉的服务名不会悄悄留在表里）
         for (Map.Entry<String, String> backend : MessageRoutes.SERVICE_BACKENDS.entrySet()) {
@@ -249,13 +251,15 @@ class MessageRoutesTest {
         List<String> noReply = List.of("CancelQueue", "NotifyChallengeInvite", "NotifyChallengeResult");
         List<String> replied = List.of("JoinQueue", "GetQueueStatus", "ChallengePlayer", "RespondChallenge", "WatchBattle",
                 "ListWatchableBattles", "RequestBattleTicket", "GetNetworkProbePlan", "CommitNetworkProbe",
-                "ListBattleReports", "GetBattleReport");
+                "ListBattleReports", "GetBattleReport",
+                // 战斗剧本 389–392：gate 照转，game-match 尚无处理器（PARITY「战斗剧本」Java 待做）
+                "ListBattleScripts", "SubmitBattleScript", "DeleteBattleScript", "SetBattleScriptLoadout");
         List<MessageMethod> match = registry.all().stream().filter(m -> m.serviceName().equals("MatchService")).toList();
         assertThat(match).as("契约里 MatchService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.concat(noReply.stream(), replied.stream()).toList());
         // 14 个号逐个钉住（正式同步的 message_id.txt）：发号漂移或增删方法时这里先失败。
         assertThat(match).extracting(MessageMethod::messageId)
-                .containsExactlyInAnyOrder(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380);
+                .containsExactlyInAnyOrder(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392);
         assertThat(Map.of("CancelQueue", 148, "RespondChallenge", 151, "ChallengePlayer", 152, "GetQueueStatus", 153,
                 "NotifyChallengeResult", 154, "NotifyChallengeInvite", 156, "JoinQueue", 157, "WatchBattle", 163,
                 "ListWatchableBattles", 164, "RequestBattleTicket", 179))

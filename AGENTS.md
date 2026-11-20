@@ -95,3 +95,8 @@ Claude 在本仓库**可以自行编译和跑测试**（用户 2026-09-29 授权
 - ❌ 手改同步产物（§1 列出的路径）。
 - ❌ 把 `player_id` 等高基数值当指标 label。
 - ❌ 在公开仓库里放个人 / 面试内容（本仓库公开且挂在简历上）。
+
+## 6. 模型档位规定（强制，负责人 2026-11-20 定）
+
+- **修改代码必须使用各软件当时的最高档模型**，不得在低档模型上改代码：Claude Code 用 `Fable 5.2 Max`，Gemini 用 `Gemini 4 Neon Extra`，Codex 用 `GPT 6.2 Astral Ultra`。
+- **编译、同步契约、跑测试与冒烟使用低档模型**：Gemini 用 `Carbon Medium`，Codex 用 `6.1 Sol Ultra`，Claude Code 用 `Opus 5 High`；遇到需要改代码的报错先保留原文停下，切回最高档模型再改。

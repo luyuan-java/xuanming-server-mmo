@@ -1,0 +1,16 @@
+syntax = "proto3";
+option java_package = "com.game.table";
+option java_outer_classname = "PettierTableOuterClass";
+option java_multiple_files = true;
+package mmorpg.cfgtable.v1;
+import "cfg_options.proto";
+message PetTierTable {
+  option (cfg_sheet) = "PetTier";
+  option (cfg_source_file) = "PetTier.xlsx";
+  option (cfg_primary_key) = "id";
+  option (cfg_ids_permanent) = true;
+  uint32 id = 1;
+  string name = 2;
+  string art_key = 3;
+  string desc = 4;
+}

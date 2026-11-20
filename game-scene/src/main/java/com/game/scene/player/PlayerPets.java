@@ -31,6 +31,26 @@ public final class PlayerPets {
         private final long createdAt;
         private final List<Integer> skillTableIds;
         private final UnknownFieldSet unknownFields;
+        private final Map<Integer, Integer> entryAllocated = new TreeMap<>(Integer::compareUnsigned);
+        private final Map<Integer, Integer> entryLastTarget = new TreeMap<>(Integer::compareUnsigned);
+        private long entryStateVersion, entryLastBaseVersion;
+        private int entryLastConfigVersion, cultivationTier;
+        private String entryLastRequestId = "";
+        public Map<Integer,Integer> entryAllocated() { return Collections.unmodifiableMap(entryAllocated); }
+        public long entryStateVersion() { return entryStateVersion == 0 ? 1 : entryStateVersion; }
+        public String entryLastRequestId() { return entryLastRequestId; }
+        public long entryLastBaseVersion() { return entryLastBaseVersion; }
+        public int entryLastConfigVersion() { return entryLastConfigVersion; }
+        public Map<Integer,Integer> entryLastTarget() { return Collections.unmodifiableMap(entryLastTarget); }
+        public int cultivationTier() { return cultivationTier; }
+        public void setCultivationTier(int value) { cultivationTier = value; }
+        public void commitEntries(Map<Integer,Integer> values, long version, String requestId, long baseVersion,
+                                  int configVersion, Map<Integer,Integer> target) {
+            entryAllocated.clear(); entryAllocated.putAll(values); entryStateVersion = version;
+            entryLastRequestId = requestId; entryLastBaseVersion = baseVersion; entryLastConfigVersion = configVersion;
+            entryLastTarget.clear(); entryLastTarget.putAll(target);
+        }
+
 
         public Pet(long petId, int petTableId, long level, long createdAt) {
             this(petId, petTableId, "", level, new TreeMap<>(Integer::compareUnsigned),
@@ -147,6 +167,10 @@ public final class PlayerPets {
                     .setMana(mana)
                     .setCreatedAt(createdAt)
                     .addAllSkillTableIds(skillTableIds)
+                    .putAllEntryAllocated(entryAllocated).setEntryStateVersion(entryStateVersion)
+                    .setEntryLastRequestId(entryLastRequestId).setEntryLastBaseVersion(entryLastBaseVersion)
+                    .setEntryLastConfigVersion(entryLastConfigVersion).putAllEntryLastTarget(entryLastTarget)
+                    .setCultivationTier(cultivationTier)
                     .setUnknownFields(unknownFields);
             allocated.forEach((dimension, points) -> entry.putAllocated(dimension, (int) (long) points));
             aptitude.forEach((dimension, value) -> entry.putAptitude(dimension, (int) (long) value));
@@ -162,9 +186,13 @@ public final class PlayerPets {
             });
             TreeMap<Integer, Long> aptitude = new TreeMap<>(Integer::compareUnsigned);
             entry.getAptitudeMap().forEach((dimension, value) -> aptitude.put(dimension, Integer.toUnsignedLong(value)));
-            return new Pet(entry.getPetId(), entry.getPetTableId(), entry.getName(),
+            Pet restored = new Pet(entry.getPetId(), entry.getPetTableId(), entry.getName(),
                     Integer.toUnsignedLong(entry.getLevel()), allocated, aptitude, saturate(entry.getHealth()),
                     saturate(entry.getMana()), entry.getCreatedAt(), entry.getSkillTableIdsList(), entry.getUnknownFields());
+            restored.commitEntries(entry.getEntryAllocatedMap(), entry.getEntryStateVersion(), entry.getEntryLastRequestId(),
+                    entry.getEntryLastBaseVersion(), entry.getEntryLastConfigVersion(), entry.getEntryLastTargetMap());
+            restored.setCultivationTier(entry.getCultivationTier());
+            return restored;
         }
 
         private static long saturate(long unsigned) {

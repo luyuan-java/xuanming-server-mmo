@@ -278,15 +278,15 @@ public final class GuildScenario {
         // ---- 第 1 步：A 建帮，zone 由服务端按归属区决定 ----
         String nonce = nonce();
         String guildName = "烟测" + nonce;
-        int spoofedZone = zoneId + 1000;
-        CreateGuildResponse created = a.call(create, CreateGuildRequest.newBuilder().setName(guildName).setZoneId(spoofedZone)
+        // 契约已删请求体 zone_id / player_id（reserved），伪造面不复存在，只核对服务端按归属区落帮
+        CreateGuildResponse created = a.call(create, CreateGuildRequest.newBuilder().setName(guildName)
                 .build(), CreateGuildResponse.parser());
         GuildInfo guild = created.getGuild();
         long gid = guild.getGuildId();
         must(tipOf(created) == 0 && gid != 0 && guild.getLeaderId() == a.id() && roleOf(guild, a.id()) == ROLE_LEADER
                         && guild.getName().equals(guildName),
                 "第 1 步 A 建帮：受理，A 是帮主、帮名原样", describe(created));
-        report.check(guild.getZoneId() == zoneId, "第 1 步 帮会 zone_id == A 的归属区（忽略请求体 zone_id=" + spoofedZone + "）",
+        report.check(guild.getZoneId() == zoneId, "第 1 步 帮会 zone_id == A 的归属区",
                 "zone_id=" + guild.getZoneId() + "，期望 " + zoneId, REF);
 
         // ---- 第 2 步：已在帮会里不能再建 ----
@@ -310,14 +310,14 @@ public final class GuildScenario {
         report.check(tipOf(sameZone) == 0 && sameZone.getEntry().getRank() != 0 && sameZone.getEntry().getName().equals(guildName),
                 "第 3 步 B 在本区榜上看到帮会（名次 ≠ 0、名字对）", describe(sameZone), REF);
 
-        // Java 增项：页长夹到 50、0 回显 20、page 0 回显 1；请求体 zone_id 被归属区覆盖（伪造的区没有帮会，total 必 ≥ 1）
+        // Java 增项：页长夹到 50、0 回显 20、page 0 回显 1；榜按归属区取，本区榜里有该帮
         GetGuildRankResponse page60 = b.call(getRank, GetGuildRankRequest.newBuilder().setPage(1).setPageSize(60)
-                .setZoneId(spoofedZone).build(), GetGuildRankResponse.parser());
+                .build(), GetGuildRankResponse.parser());
         boolean listed = page60.getEntriesList().stream().anyMatch(en -> en.getGuildId() == gid);
         report.check(tipOf(page60) == 0 && page60.getPageSize() == MAX_RANK_PAGE_SIZE && page60.getPage() == 1
                         && page60.getEntriesCount() <= MAX_RANK_PAGE_SIZE && page60.getTotalCount() >= 1
                         && (listed || page60.getTotalCount() > MAX_RANK_PAGE_SIZE),
-                "GetGuildRank 页长 60 → 回显 50；请求体 zone 被忽略、本区榜里有该帮", describe(page60) + " 含本帮=" + listed, REF);
+                "GetGuildRank 页长 60 → 回显 50；本区榜里有该帮", describe(page60) + " 含本帮=" + listed, REF);
         GetGuildRankResponse page0 = b.call(getRank, GetGuildRankRequest.getDefaultInstance(), GetGuildRankResponse.parser());
         report.check(tipOf(page0) == 0 && page0.getPageSize() == DEFAULT_RANK_PAGE_SIZE && page0.getPage() == 1,
                 "GetGuildRank 页长 0 / 页 0 → 回显 20 / 1", describe(page0), REF);
@@ -369,10 +369,10 @@ public final class GuildScenario {
                         .setAnnouncement("x".repeat(OVERSIZE_ANNOUNCEMENT_BYTES)).build(), SetAnnouncementResponse.parser(),
                 TIP_ANNOUNCEMENT_TOO_LONG, "第 7 步 " + OVERSIZE_ANNOUNCEMENT_BYTES + " 字节公告 → 14011");
 
-        // ---- 第 8 步：请求体伪造 player_id 不生效 ----
-        LeaveGuildResponse spoofLeave = b.call(leave, LeaveGuildRequest.newBuilder().setPlayerId(a.id()).build(),
+        // ---- 第 8 步：退帮按会话身份（契约已删请求体 player_id） ----
+        LeaveGuildResponse spoofLeave = b.call(leave, LeaveGuildRequest.getDefaultInstance(),
                 LeaveGuildResponse.parser());
-        must(tipOf(spoofLeave) == 0, "第 8 步 B 伪造帮主 A 的 player_id 退帮 → 按会话身份让 B 退出（不是 14004）",
+        must(tipOf(spoofLeave) == 0, "第 8 步 B 退帮 → 按会话身份让 B 退出（不是 14004）",
                 describeTip(spoofLeave) + (tipOf(spoofLeave) == TIP_LEADER_CANT_LEAVE ? "：服务端按请求体身份处理了" : ""));
         expect(b, getPlayerGuild, GetPlayerGuildRequest.getDefaultInstance(), GetPlayerGuildResponse.parser(), TIP_NOT_IN_GUILD,
                 "第 8 步 B 退帮后查自己的帮会 → 14002");

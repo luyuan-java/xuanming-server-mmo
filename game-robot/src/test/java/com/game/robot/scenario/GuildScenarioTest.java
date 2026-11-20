@@ -90,7 +90,7 @@ class GuildScenarioTest {
 
     @Test
     void 超长公告大于服务端600字节_整包仍小于gate的1KB() {
-        SetAnnouncementRequest body = SetAnnouncementRequest.newBuilder().setGuildId(-1L).setPlayerId(-1L)
+        SetAnnouncementRequest body = SetAnnouncementRequest.newBuilder().setGuildId(-1L)
                 .setAnnouncement("x".repeat(GuildScenario.OVERSIZE_ANNOUNCEMENT_BYTES)).build();
         ClientRequest frame = ClientRequest.newBuilder().setId(Long.MAX_VALUE).setMessageId(Integer.MAX_VALUE)
                 .setBody(body.toByteString()).build();

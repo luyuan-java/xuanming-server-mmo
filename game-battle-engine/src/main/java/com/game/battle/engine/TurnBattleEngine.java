@@ -281,6 +281,7 @@ public final class TurnBattleEngine {
                 BattleActorState.Builder actor = BattleActorState.newBuilder()
                         .setActorId(actorId)
                         .setPetId(pet.getPetId())
+                        .setPetCultivation(pet.getPetCultivation())
                         .setActorType(eBattleActorType.BATTLE_ACTOR_TYPE_PET)
                         .setTeamIndex(snapshot.getTeamIndex())
                         .setOwnerPlayerId(snapshot.getPlayerId())
@@ -690,6 +691,7 @@ public final class TurnBattleEngine {
         BattleContext.FinalDamage finalDamage = ctx.calculateFinalDamage(actor, target,
                 BattleConstants.BASIC_ATTACK_BASE_DAMAGE, ctx.effectivePhysicalAttack(actor), 1.0, CombatDamageRules.PHYSICAL_DAMAGE);
         double damage = finalDamage.value();
+        if (kind != eBattleHitKind.BATTLE_HIT_COUNTER) damage *= 1 + PetCultivationRules.damageBonus(actor, CombatDamageRules.PHYSICAL_DAMAGE);
         if (kind == eBattleHitKind.BATTLE_HIT_COMBO) damage *= BattleConstants.COMBO_DAMAGE_PERCENT / 100.0;
         long dealt = target.applyDamage(damage);
 
@@ -827,7 +829,7 @@ public final class TurnBattleEngine {
                     ctx.effectivePhysicalAttack(actor), actor.magicAttack());
             BattleContext.FinalDamage finalDamage = ctx.calculateFinalDamage(actor, target, baseDamage, attack,
                     row.getAttackMultiplier(), row.getDamageType());
-            long dealt = target.applyDamage(finalDamage.value());
+            long dealt = target.applyDamage(finalDamage.value() * (1 + PetCultivationRules.damageBonus(actor, row.getDamageType())));
 
             ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
                     .setSkillTableId(action.getSkillTableId())
@@ -1106,7 +1108,7 @@ public final class TurnBattleEngine {
 
     /** 下发前清除引擎专用概率；调用方传自己的副本 builder，不分本人、敌方、观众。 */
     public static void stripEngineOnlyState(BattleStateS2C.Builder state) {
-        for (BattleActorState.Builder actor : state.getActorsBuilderList()) actor.clearCombat();
+        for (BattleActorState.Builder actor : state.getActorsBuilderList()) { actor.clearCombat(); actor.clearPetCultivation(); }
     }
 
     /** 该玩家剩余的战斗道具（规格 §6.3）：余量非 0 的条目按 item_table_id 升序（稳定排序，D6）；不在本局的玩家返回空列表。 */

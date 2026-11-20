@@ -7,6 +7,8 @@ import com.game.table.AttributePoolTable;
 import com.game.table.ConfigTables;
 import com.game.table.PetRuleTable;
 import com.game.table.PetTable;
+import com.game.table.PetEntryTable;
+import com.game.table.PetTierTable;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -34,9 +36,23 @@ public final class PetTables {
     private final AttributePoolTable pool;
     private final List<AttributeDimensionTable> dimensions;
     private final AttributeAutoPlanTable autoPlan;
+    private final List<PetEntryTable> entries;
+    private final List<PetTierTable> tiers;
+    List<PetEntryTable> entries() { return entries; }
+    PetTierTable tier(int id) { return tiers.stream().filter(t -> t.getId() == id).findFirst().orElse(null); }
+    int entryVersion() { return rule == null ? 0 : rule.getEntryConfigVersion(); }
+    long entryBudget() { return rule == null ? 0 : Integer.toUnsignedLong(rule.getEntryTotalPoints()); }
+    long entryDirections() { return rule == null ? 0 : Integer.toUnsignedLong(rule.getEntryMaxDirections()); }
+
 
     PetTables(Map<Integer, PetTable> pets, PetRuleTable rule, AttributePoolTable pool,
               List<AttributeDimensionTable> dimensions, AttributeAutoPlanTable autoPlan) {
+        this(pets, rule, pool, dimensions, autoPlan, List.of(), List.of());
+    }
+    private PetTables(Map<Integer, PetTable> pets, PetRuleTable rule, AttributePoolTable pool,
+                      List<AttributeDimensionTable> dimensions, AttributeAutoPlanTable autoPlan,
+                      List<PetEntryTable> entries, List<PetTierTable> tiers) {
+        this.entries = List.copyOf(entries); this.tiers = List.copyOf(tiers);
         this.pets = Map.copyOf(pets);
         this.rule = rule;
         this.pool = pool;
@@ -70,7 +86,7 @@ public final class PetTables {
                 }
             }
         }
-        return new PetTables(pets, rules.isEmpty() ? null : rules.get(0), pool, dimensions, plan);
+        return new PetTables(pets, rules.isEmpty() ? null : rules.get(0), pool, dimensions, plan, tables.petEntry().all(), tables.petTier().all());
     }
 
     /** 种类行；表里没有为 null。 */
