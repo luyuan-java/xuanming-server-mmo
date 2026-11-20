@@ -27,6 +27,7 @@ import com.game.login.character.PlayerIdGenerator;
 import com.game.login.character.TableCharacterRules;
 import com.game.login.dispatch.ClientMessageDispatcher;
 import com.game.login.dispatch.ClientMessageHandler;
+import com.game.login.dispatch.InFlightKeys;
 import com.game.login.dispatch.LoginWorkerPool;
 import com.game.login.handler.CreatePlayerHandler;
 import com.game.login.handler.DisconnectHandler;
@@ -78,6 +79,7 @@ public class LoginConfiguration {
     static final int WORKER_MAX = Snowflake.MAX_WORKER;
     static final Duration LEASE_TTL = Duration.ofSeconds(15);
     static final Duration WORKER_DRAIN_TIMEOUT = Duration.ofSeconds(15);
+    static final Duration IN_FLIGHT_TTL = Duration.ofSeconds(15);
 
     /**
      * Dubbo 调用本身 3s 超时、不重试（重试会把总耗时拖过客户端预算）；scene-manager 不在时不影响 login 启动。
@@ -267,11 +269,12 @@ public class LoginConfiguration {
         return new PlayerIdGenerator(new Snowflake(playerIdLease.nodeId()), playerIdLease::isValid);
     }
 
-    /** 登录主流程（TCP 48 与 HTTP 登录共用，同一份账号在途闸门）。 */
+    /** 登录主流程（TCP 48 与 HTTP 登录共用，同一份跨实例账号在途闸门）。 */
     @Bean
     public AccountLogin accountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens loginTokens,
-                                     LoginDevices loginDevices) {
-        return new AccountLogin(authenticator, store, loginTokens, loginDevices);
+                                     LoginDevices loginDevices, RedissonClient redis, RedisKeys redisKeys) {
+        return new AccountLogin(authenticator, store, loginTokens, loginDevices,
+                InFlightKeys.distributed(redis, account -> redisKeys.loginInFlight("account", account), IN_FLIGHT_TTL));
     }
 
     @Bean
@@ -301,10 +304,12 @@ public class LoginConfiguration {
     public CreatePlayerHandler createPlayerHandler(PlayerStore store, CharacterRules characterRules,
                                                    PlayerIdGenerator playerIds, LoginProperties props,
                                                    LoginMetrics loginMetrics, AccountLogin accountLogin,
-                                                   ZoneMergeFence zoneMergeFence) {
+                                                   ZoneMergeFence zoneMergeFence, RedissonClient redis,
+                                                   RedisKeys redisKeys) {
         SecureRandom random = new SecureRandom();
         return new CreatePlayerHandler(store, characterRules, playerIds, () -> random.nextInt(256),
-                zoneMergeFence, props.maxPlayersPerAccount(), loginMetrics, accountLogin::renewDevice);
+                zoneMergeFence, props.maxPlayersPerAccount(), loginMetrics, accountLogin::renewDevice,
+                InFlightKeys.distributed(redis, account -> redisKeys.loginInFlight("create", account), IN_FLIGHT_TTL));
     }
 
     /** 归属接管请求（Redis pub/sub，全部 scene 节点订阅）。 */
@@ -323,9 +328,15 @@ public class LoginConfiguration {
                                              RedisKeys redisKeys, LoginWorkerPool loginWorkerPool, LoginProperties props,
                                              LoginMetrics loginMetrics, AccountLogin accountLogin,
                                              ZoneMergeFence zoneMergeFence, @Value("${game.zone-id:1}") int zoneId) {
+        Duration enterLockTtl = props.enterGameBudget().plusSeconds(10);
+        if (enterLockTtl.compareTo(IN_FLIGHT_TTL) < 0) {
+            enterLockTtl = IN_FLIGHT_TTL;
+        }
         return new EnterGameHandler(store, sceneDirectory, ownerTakeovers, loginWorkerPool, zoneId,
                 props.sceneAssignTimeout(), props.ownerClaimWait(), loginMetrics, accountLogin::renewDevice,
-                new PlayerLocationDirectory(redis, redisKeys)::find, zoneMergeFence, props.enterGameBudget());
+                new PlayerLocationDirectory(redis, redisKeys)::find, zoneMergeFence, props.enterGameBudget(),
+                InFlightKeys.distributed(redis, playerId -> redisKeys.loginInFlight("enter", Long.toUnsignedString(playerId)),
+                        enterLockTtl));
     }
 
     /**

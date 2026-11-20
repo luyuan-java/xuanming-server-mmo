@@ -7,6 +7,7 @@ import com.game.player.store.asset.AssetSeqState;
 import com.game.player.store.asset.PersistedAssetLedgerReader;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
@@ -34,11 +35,21 @@ public final class MailDeliveryWorker implements SmartLifecycle, AutoCloseable {
     private void tick() {
         if (!running.get())
             return;
+        pollDue(running::get);
+    }
+    void pollDue() {
+        pollDue(() -> true);
+    }
+    private void pollDue(BooleanSupplier active) {
         try {
             for (long id : store.due(Deadline.after(2000), System.currentTimeMillis())) {
-                if (!running.get())
+                if (!active.getAsBoolean())
                     break;
-                process(id);
+                try {
+                    process(id);
+                } catch (Exception failure) {
+                    LOG.warn("邮件资产单条投递失败，下轮保留原操作恢复，opId={}，类型={}", id, failure.getClass().getSimpleName());
+                }
             }
         } catch (Exception failure) {
             LOG.warn("邮件资产扫描失败，下轮保留原操作恢复，类型={}", failure.getClass().getSimpleName());
@@ -49,14 +60,28 @@ public final class MailDeliveryWorker implements SmartLifecycle, AutoCloseable {
         var op = store.lease(Deadline.after(2000), id, System.currentTimeMillis(), token);
         if (op == null)
             return;
-        var response = delivery.deliver(AssetRpc.CREDIT, op.request(), Deadline.after(2500)).get(3, TimeUnit.SECONDS);
+        ReliableAssetDelivery.Delivery response = null;
+        try {
+            response = delivery.deliver(AssetRpc.CREDIT, op.request(), Deadline.after(2500)).get(3, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            LOG.warn("邮件资产投递被中断，将保持原操作重试，opId={}", id);
+        } catch (Exception unknown) {
+            LOG.warn("邮件资产投递未确认，将保持原操作重试，opId={}，类型={}", id, unknown.getClass().getSimpleName());
+        }
         com.game.player.store.asset.PersistedAssetLedger committed = null;
-        var read = ledger.read(op.player());
+        PersistedAssetLedgerReader.Read read = null;
+        try {
+            read = ledger.read(op.player());
+        } catch (Exception unknown) {
+            LOG.warn("邮件资产账本读取失败，将保持原操作重试，opId={}，类型={}", id, unknown.getClass().getSimpleName());
+        }
         if (read instanceof PersistedAssetLedgerReader.Read.Loaded loaded) {
             var proof = loaded.ledger().outcomeOf(5, op.epoch(), op.seq());
             if (proof.conclusive() && loaded.ledger().identityMatches(5, op.epoch(), op.seq(), op.id(),
                     com.game.api.asset.AssetOpSignatures.requestDigest(op.request()))) {
-                if (response.answered() && (response.response().getOutcomeValue() == 1 || response.response().getOutcomeValue() == 2)
+                if (response != null && response.answered()
+                        && (response.response().getOutcomeValue() == 1 || response.response().getOutcomeValue() == 2)
                         && ((proof.state() == AssetSeqState.APPLIED) != (response.response().getOutcomeValue() == 1)))
                     throw new IllegalStateException("资产SQL结局与在线结局翻转");
                 committed = loaded.ledger();

@@ -41,9 +41,10 @@ class GuildRankServiceTest {
         f.close();
     }
 
+    // shortcut: zone 参数已无处可放（契约删了请求体 zone_id），保留形参只为不改各调用点；服务端恒用归属区
     private GetGuildRankResponse page(int page, int pageSize, int zone) {
         return f.rankService.getGuildRank(ME,
-                GetGuildRankRequest.newBuilder().setPage(page).setPageSize(pageSize).setZoneId(zone).build(), d());
+                GetGuildRankRequest.newBuilder().setPage(page).setPageSize(pageSize).build(), d());
     }
 
     @Test
@@ -119,7 +120,7 @@ class GuildRankServiceTest {
         f.store.put(guild(99, ZONE + 1, 5));
         f.rankRedis.put(REDIS_KEYS.guildRankZone(ZONE + 1), 99, 100);
         assertThat(f.rankService.getGuildRankByGuild(ME,
-                GetGuildRankByGuildRequest.newBuilder().setGuildId(99).setZoneId(ZONE + 1).build(), d()).getErrorMessage())
+                GetGuildRankByGuildRequest.newBuilder().setGuildId(99).build(), d()).getErrorMessage())
                 .isEqualTo(GuildTip.NOT_RANKED.proto());
         assertThat(f.rankService.getGuildRankByGuild(ME,
                 GetGuildRankByGuildRequest.newBuilder().setGuildId(0).build(), d()).getErrorMessage())

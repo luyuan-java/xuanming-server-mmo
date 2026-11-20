@@ -1,5 +1,19 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-20 基线转绿：契约 4aaf5e646e 已同步、Java 尚未实现的客户端面
+
+`f8bf1131` / `ff1e5265` 同步契约后主干构建不过；本批只让现有实现跟上契约（删掉帮会请求体已退役的 `player_id` / `zone_id` 用法、宝宝条目 410–412 补冻结与战斗中闸表、快照用例跟新技能表与 `pet_cultivation`、PetEntry 第四代持久台账、TiDB 用例缺夹具改为跳过），下列契约面明确登记为 Java 待做，gate / 派发器的现状由测试钉住：
+
+| 契约面 | C++ / Go 位置 | Java 现状 | 状态 |
+|---|---|---|---|
+| 战报列表 / 详情（379 / 380） | `go/match` 战报 | gate 转给 game-match，派发器无处理器回信封 1003；`MatchMethodsTest` 钉住 | Java 待做 |
+| 战斗剧本（389–392，含内部审核 387 / 388） | `go/match` 战斗剧本 | 同上 | Java 待做 |
+| `ClientPlayerPayment`（396–399） | `go/payment` | gate 未接入，落缺省分支回信封 1003；`MessageRoutesTest` 钉住清单 | Java 待做 |
+| 收件箱 GM 物品获取封锁 / 解封（类型 5 / 6） | `GainBlockService`、`player_item_gain_block_comp` | 注册表有载荷校验（`item_config_id ≠ 0`），列入 `V1_DISABLED`，配置进白名单即拒启 | Java 待做 |
+| 帮会 `score_version`（库表列已随 DDL 生成） | `go/guild/internal/data/guild_repo.go` 写分同事务 +1、按版本重建榜 | `GuildRow` 已加列 12，未按版本写分 / 重建榜 | Java 待做 |
+| 帮会历练对局被 match 作废回 14042 | `go/guild/internal/data/trial_launch_repo.go`、`constants.go:180` | `GuildTips.TRIAL_BATTLE_ABORTED` 已登记，历练链路未改用 | Java 待做 |
+| `guild_asset_op` 认领覆盖索引 | `guild_db.proto:167` | `idx_guild_asset_op_0` 改为 (status,next_attempt_ms,op_id,player_id)，与基线 DDL 逐字节一致；已有库需重建该索引 | 已对齐 |
+
 ## 2026-11-15 月汐湾春节与中秋场景 3
 
 | 范围 | Java 当前实现 | C++ 与验证边界 |
@@ -2597,3 +2611,94 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 - **Java 待做**:随上一条一起核对:Java 的 scene 回推与自发的进场请求按什么找网关;两个网关进程能否同时持有同一个会话号或同一个路由键。有同类窗口就按「会话所在的网关实例」投递、找不到不改投;已有等价机制就把本条改成已对齐。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+
+### 2026-11-20 边缘精确滑动窗口限流与路由层按实例三态熔断（主仓 C++/Go 与客户端已落码，Java 待做）
+
+主仓 `xuanming-server-mmo-cpp` `main` 工作区与客户端 `mmorpg-client` `main` 工作区已完成落码（不改协议、不改玩家数据）；Java 版本 `0.1.0-SNAPSHOT` 仅登记待做，本轮不改 Java 代码、不跑 Java 构建或测试。
+
+- **主仓 C++ 改动（`cpp/libs/engine/core/message_limiter/message_limiter.{h,cpp}`）**：gate 与 battle 直连共用的 `MessageLimiter` 由墙钟整秒（`TimeSystem::NowSeconds()`）+ `>` + `boost::circular_buffer::resize` 升级为 `std::chrono::steady_clock` 毫秒精确滑动窗口（`>=`）+ `std::deque<uint64_t>`，支持 `max_requests == 0` 无限与配表热更，并补齐确定性毫秒边界单测（`message_limiter_test.cpp`）。此项已与 Java 现有的 `com.game.net.limit.MessageRateLimiter`（单调纳秒 `>=` + `unlimited()`）语义对齐，消除了原先「基线按整秒导致实际窗口最长 2 秒」的差异。
+- **主仓 Go 改动（`go/shared/circuitbreaker/breaker.go`、`go/client_rpc_router`）**：新增并发安全、无状态可水平扩展的三态熔断器（`Closed` / `Open` / `HalfOpen`，单探测锁，`ReleaseProbe` 忽略调用方取消）与按 endpoint 隔离的 `EndpointSet`；接入 `client_rpc_router`（默认连续 5 次拨号/转发失败打开 10 秒），`NodeWatcher` 选点自动跳过熔断实例切流向健康节点，全员熔断时快速回信封 `1003`（`outcome="circuit_open"`），实例下线随 `onRemove` 自动清理避免内存增长。Go 单测 `go test ./circuitbreaker/...` 与 `client_rpc_router` 全包已通过。
+- **客户端改动（`mmorpg-client`）**：`GameClient` 与 `BattleDirectLink` 两条 `IRpcChannel` 统一接入 `RpcGuard`（`SlidingWindowLimiter` + 三态 `SimpleCircuitBreaker`，读 `MessageLimiterTableManager` 并支持热更，默认窗口随服务端精确化收紧到 `1.5s = 1.0s + 0.5s` 抖动余量，`1008` 永不触发熔断）。
+- **Java 待做**：
+  1. 核对 `game-net` `MessageRateLimiter` 与 `TableMessageLimits` 在配表热更时是否按新上限生效（窗口口径已与新 C++ 一致，无需改窗口算法）。
+  2. 在 `game-gate` 后端路由 / Dubbo 调用层补齐与 Go `client_rpc_router` 等价的**按后端实例（endpoint）隔离的三态熔断**（默认连续 5 次连接/超时/不可用故障打开 10 秒，`HalfOpen` 单探测，选点优先跳过熔断实例，全员熔断快速回带请求号的信封 `1003` 且不计非法包；不将业务拒绝或 `1008` 计入熔断）。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+
+### 2026-11-20 登录排队与开服限流标准收口（`PlayerSession.gate_zone_id`、`/api/refresh-token` 共享 IP 限流、清理死键 `queue-timeout-ms`；主仓与 Unity 已落码，Java 待做）
+
+主仓 `xuanming-server-mmo-cpp` `main` 工作区与客户端 `mmorpg-client` `main` 工作区已完成代码与单测落码（未编译、未运行，交 Codex 执行 proto 生成、编译与单测）；Java 版本 `0.1.0-SNAPSHOT` 仅登记待做，本轮不改 Java 代码、不跑 Java 构建或测试。
+
+- **主仓 Go 改动（`proto/player_locator/player_locator.proto`、`go/player_locator`、`go/login`）**：
+  - `PlayerSession` 新增 `uint32 gate_zone_id = 16`，`ReconnectRequest` 新增 `uint32 gate_zone_id = 11`；`EnterGameLogic` 在 `SetSession` 与 `Reconnect` 时写入本区号（`config.AppConfig.Node.ZoneId`），不继承旧会话区号。
+  - `AssignGateLogic.findReconnectingPlayer` 在 `gate_zone_id != 0` 时以 `gate_zone_id == zoneID` 为权威（0 次 gate 列表读），闭环合服并入角色原 gate 掉线被误排队与本区角色跨区在线误免本区排队两类缺陷；`gate_zone_id == 0` 保留旧会话兜底。
+- **主仓 Java Gateway 改动（`java/gateway_node`、`tools/scripts/release_preflight.ps1`）**：
+  - `AssignGateRateLimiter` 新增 `checkIpOnly(String clientIp)`，接入 `RefreshTokenController`（`/api/refresh-token` 仅过共享 IP 令牌桶与 fail-open 熔断，跳过波次、区桶与账号冷却，超限回 HTTP 200 `code=429` `IP_RATE_LIMIT`）。
+  - 删除无消费方的死配置 `queue-timeout-ms` / `queueTimeoutMs`，`release_preflight.ps1` 改为校验 `gate.rate-limit.queue-retry-min-ms` 下限。
+- **客户端改动（`mmorpg-client`）**：`GameClient.EnterZone` 补齐续期后总预算复核、可随 `_pipelineGen` 与总预算即时中断的 `WaitQueueMs`，修复 `GatewayHttpClient.PostJson` 空 `req.error` 回落 `"HTTP " + responseCode`，并补齐 `LoginQueueFlowTests` 与 `GameClientReconnectTests`（`100 ratelimit`）EditMode 单测。
+- **Java 独立全服务版待做**：
+  1. 核对 `game-gateway` / `game-login` 重连免排队判定是否已按「会话所在 gate 的区号」判定（合服并入角色原 gate 掉线与跨区访问场景），未覆盖则补齐同语义记录与判定。
+  2. 为 Java 版 `/api/refresh-token` 接入同口径共享 IP 令牌桶限流（跳过波次、区桶与账号冷却，超限回 HTTP 200 `code=429` `IP_RATE_LIMIT`）。
+  3. 同步前置已登记的 `queue-retry-min-ms` / `queue-retry-jitter-ms` / `queue-retry-ip-cost-milli` 排队提示规则，并核对并清理同类未消费死配置键。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+
+### 2026-11-20 冷启动目录回滚、寄售标题审核、角色/帮会改名、联系方式识别与微信/抖音内容安全 + 世界频道异步撤回/举报/防刷（主仓与 Unity 已落码，Java 待做）
+
+主仓 `xuanming-server-mmo-cpp` `main` 工作区与客户端 `mmorpg-client` `main` 工作区已完成服务端、数据库、部署脚本与客户端代码及单测落码（未执行协议代码生成、编译与运行，交 Codex 执行）；Java 独立全服务版 `0.1.0-SNAPSHOT` 仅登记待做，本轮未改 Java 代码、不跑 Java 构建或测试。
+
+- **主仓与客户端本次闭环内容**：
+  1. **冷启动 SQL Catalog 回滚与重试**：`go/shared/authoritysql`、`go/data_service/cmd/writer_authority` 支持冷启动未生成 catalog 时的事务回滚与重试。
+  2. **人民币寄售标题内容审核**：`go/trade`、`go/content_guard` 接入 `CreateRmbConsignmentRequest.title` 的 `TEXT_SCENE_TRADE_TITLE` 强一致审核与拒绝提示。
+  3. **角色改名与帮会改名全链路**：
+     - 角色改名：`SceneClientPlayerCommon.RenamePlayer` / `NotifyPlayerRenamed`（`PlayerRenameSystem` C++、`DataService.RenameRole`、Unity `GameClient.RoleRename` + `AttributeUiRoot` / `CharacterSupportWindow` + `RoleRenameClientTests`）。
+     - 帮会改名：`GuildService.RenameGuild` / `GUILD_CHANGE_KIND_RENAMED` / `GuildNameHoldRecord`（`go/guild` + Unity `GuildClient.Rename` + `GuildWindow`/`GuildUiRoot` 帮主改名入口 + `GuildRenameClientTests`）。
+  4. **渠道身份档案与外部平台内容安全审核**：
+     - `account_channel_identity` 表与 `DataService.{UpsertAccountChannelIdentity, GetPlayerChannelIdentity}`，由 `go/login` 在登录解析后写入 `(account, channel, open_id)` 并向 `content_guard` 与 `chat` 提供查询。
+     - `go/content_guard` 新增混淆广告/联系方式启发式识别（`internal/contact`）、微信 `msgSecCheck` v2 与抖音 `antidirt` 适配器（含 token 自动刷新重试，密钥只经环境变量注入）、以及 `CheckPlatformText` RPC 与 `AsyncPlatform`/`PendingPlatformReview` 协议字段；`k8s_deploy.ps1` 与 `etc/content_guard.yaml` 已将 `CheckPlatformText` 纳入 `StatConf.IgnoreContentMethods`。
+  5. **聊天防刷、举报与世界频道异步撤回（无 Redis 依赖，追加写 SQL）**：
+     - `go/chat` 新增 append-only 表 `chat_world_retraction`、`chat_report`、`chat_repeat_event`、`chat_private_daily_target`（TiDB TTL + 运行账号 `SELECT, INSERT` 最小权限，`deploy/sql/chat_runtime_role.sql` 同步），实现世界频道最低等级门槛（`WorldMinLevel`）、跨副本归一化摘要重复刷屏拦截（`DuplicateSpamWindowMs`/`MaxSenders`/`MaxPerSender`）、新账号每日私聊人数上限（`NewAccountAgeHours`/`NewAccountDailyPrivateLimit`）、消息举报（`ReportChat`）、世界频道消息撤回（`RetractWorldChat` + `NotifyWorldChatRetracted` 经 `chat-world-bcast` 全服推客户端移除）及 `content_guard` 短超时后后台 `safego` 异步补审自动撤回。
+     - Unity 客户端：`SocialState`、`SocialClient`、`RpcGuard`、`SocialWindow` / `SocialWindow.Fidelity`、`SocialUiRoot` 接入 `NotifyWorldChatRetracted` 实时移除、世界消息「举报」按钮与原因弹窗及全部 `chat_error` 提示映射，新增 `SocialTests` EditMode 用例；并生成 `apple_signin_button` / `apple_logo` 与 `google_signin_button` / `google_logo` 精灵资源更新 `QdaoServerSelectView.Visuals.cs`。
+- **Java 独立全服务版待做**：
+  1. `game-data` / `game-login`：落地 `account_channel_identity` 表与 `Upsert`/`GetPlayerChannelIdentity` 等价接口，登录流程落库渠道与 `open_id`。
+  2. `game-content-guard`（或同职责审核模块）：补齐混淆联系方式/URL 启发式检测、微信 `msgSecCheck` v2 与抖音 `antidirt` 外部复审，以及世界频道短超时先放行后异步复审语义；配置寄售标题审核与 `CheckPlatformText` 日志脱敏。
+  3. `game-guild` / `game-scene` / `game-chat`：对齐帮会改名、角色改名冷却/占位窗口、`chat` 最小等级门槛、跨副本重复摘要防刷屏、新号每日私聊上限、`ReportChat` 举报持久化、以及 `RetractWorldChat` + `NotifyWorldChatRetracted` 全服推送移除（沿用 Java 的 Dubbo/Redis 架构语义并保持强一致）。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+
+### 2026-11-20 战斗状态机 / 行为树 / 位图互斥矩阵 / 规范化状态表 / 副本怪物 AI 三端对齐（C++ / Go / Java 源码与单测已全部落码，待 Codex 导表同步与构建验收）
+
+主仓 `xuanming-server-mmo-cpp`（C++ + Go `main` 工作区）与本仓 `xuanming-server-mmo`（Java `main` 工作区，`0.1.0-SNAPSHOT`）已同步落码并补齐单元测试；均未执行导表生成、`ContractSync`、MSBuild、Go test 或 Maven 构建，交 Codex 按序验证。Unity 客户端经核对零引用 `ActorActionState` / `ActorActionCombatState`，无需改动。
+
+- **纯标准库通用战斗 AI 与状态机底座（三端零第三方依赖，语义逐位对齐）**：
+  - C++：`cpp/libs/modules/combat_ai/{state_mutex_matrix.h,fsm.h,hfsm.h,behavior_tree.h,monster_utility_ai.h}`；
+  - Go：`go/shared/combatai/{state_mutex_matrix.go,fsm.go,hfsm.go,behavior_tree.go,monster_utility_ai.go,dungeon_monster_ai.go,combatai_test.go}`（已登记进 `go/test.ps1` L1 套件）；
+  - Java：`game-common/src/main/java/com/game/common/combatai/{StateMutexMatrix.java,Fsm.java,Hfsm.java,BehaviorTree.java,MonsterUtilityAi.java}` + `CombatAiTest.java`（不引入 SLF4J 等任何外部依赖，满足 `game-battle-engine` 纯库约束）。
+  - 能力清单：64 位 O(1) `StateMutexMatrix`（规范化规则 + 引用计数位图 + `StateExitHookRegistry` + 两阶段零副作用 `tryPerform`）；完整移植 `looplab/fsm` 的 `Fsm`（多源 `EventDesc`、5 阶段回调、`Cancel(errCode)`、`Async()` 两阶段提交、`AvailableTransitions`、`ExportMermaid`、有界重入延迟队列）；`HFSM2` 思想的扁平 `Hfsm`（自动下潜、LCA 切换、事件冒泡、64 位活跃祖先位图）；`BehaviorTree.CPP` + `behavior3go` 思想的共享不可变 `BehaviorTree`（扁平索引、整型键黑板、`Reactive*` 抢占级联 `Halt`、tick 冷却、三色检环）；定点万分比（`10000`）`MonsterUtilityAi`（线性/2 层量化 MLP 确定性推理 + 离线 Bradley-Terry 成对逻辑回归 SGD，三端统一 half-away-from-zero 舍入与 `score desc → formationSlot asc → targetId asc → actionId asc` 同分决胜）。
+- **配置表规范化与场景两阶段施法门禁（含契约表结构升级，需先在主仓 `dev.bat gen` 再在本仓 `ContractSync`）**：
+  - 权威 schema 与 Excel：`data/schema/actoractionstate_table.proto`、`data/schema/actoractioncombatstate_table.proto`、`data/ActorActionState.xlsx`、`data/ActorActionCombatState.xlsx` 去掉定长 `repeated state [(cfg_slots)=3]`，改为规范化多行表 `(id [cfg_multi], state_id, state_mode, state_tip [cfg_tip_ref])`，并统一两表模式口径为 `0=Block / 1=Allow / 2=Interrupt`。
+  - Java `game-scene`：`PlayerSkillState` 增加同步维护的 64 位 `actionStateMask` / `combatStateMask`；`SkillTables` 加载期编译为 `StateMutexMatrix`（保留 `BLOCK` 填 `1000` 放行、`0` fail-closed 映射 `1002`）；`SkillRules` 改为位图 O(1) 校验与退出钩子派发；`SkillService` 升级为阶段一纯只读预检 + 阶段二提交副作用（修复原「被状态表拒绝仍提前推 33 取消旧施法」的缺陷）、以 `Fsm` 驱动施法相位迁移、提供 `interruptActiveCast` 与 `SceneNode` 默认 `STATE_COMBAT(INTERRUPTED)` 退出钩子；同步更新 `ConfigTablesTest`、`SkillRulesTest`、`SkillFeatureTest`。注：Java 服务端驱动的 `TeamFollowC2S` 尾随系统尚未移植（见上文 11-06 条目），`SkillService` 已暴露 `registerActionStateExitHook` / `tryPerformAction` / `removeActionState` 供后续接入直接复用。
+- **回合制副本怪物智能 AI（`game-battle-engine` 与 C++ `TurnBattleEngine` 对齐）**：
+  - 新增 `DungeonMonsterAi.java`（Boss `Hfsm` `Opening/Enrage/Desperate/Dead` + 进程共享 `BehaviorTree` 绝境冷却防御与效用选招 + 相同 6 维特征与 8 条基准训练样本）。
+  - `TurnBattleEngine` 新增 3 参 `start(request, data, monsterAiProfiles)`（2 参入口原样委托 `Map.of()`，未配置 AI 的存量对局行为与 RNG 消耗零变化）及 `monsterAiPhaseOf(actorId)`；开局按零耗蓝非职业可施放技能闸门挂载怪物技能，回合 `fillDefaultActions` 开头执行确定性 AI 决策，零 RNG 消耗；新增 `DungeonMonsterAiTest.java`。
+
+
+### 2026-11-20 Ponytail 全仓代码审计与安全/强一致/热路径修复收口（主仓与 Unity 已全量落码，Java 平行服第一轮已修、其余主仓项登记待做）
+
+主仓 `xuanming-server-mmo-cpp` `main` 工作区与客户端 `mmorpg-client` `main` 工作区已完成本轮审计全部高优安全、数据强一致、并发扩展与热路径代码及单测落盘（不改 `.proto`、不改配表、不建分支、未提交；构建/测试/冒烟交 Codex）。Java 独立全服务版 `0.1.0-SNAPSHOT` 在第一轮已完成 10 项高危修复并通过对应模块单测（`MailDeliveryWorker` 单条隔离退避、`game-rank`/`game-guild`/`game-trade` Nacos 清空 `127.0.0.1`、`GateConfiguration` 补齐 `mail`/`rank` 超时、`MallNonceStore` 单条有界 `DELETE LIMIT 128`、`game-chat`/`game-scene` JDBC 超时与隔离级别、`game-login` Redisson 分布式 `InFlightKeys`、删根 `pom.xml` 无用 `guava` 与 `InboxShards` 透传壳、6 份 `*AdminAuthFilter` 收口到共享 `AdminTokenAuthFilter`），其余第二轮主仓安全/一致性/热路径收口留登记待做，本轮不再新增 Java 平行服改动。
+
+- **主仓 C++/Go/Java/Tools 与客户端已落码摘要**：
+  1. **安全与边界**：主服 `gateway_node` 删除公网票据伪造预言机 `/api/cdn-sign` 并在 `GateTokenSecretGuard` 强制校验 prod `admin.api-key`；C++ Gate 补齐 `GateTokenPayload.zone_id` 校验并修正直连 `ApplyLoginTransition` 时机；Battle `websocket.cpp`/`battle_client_edge.cpp` 补 `forceCloseWithDelay(0.1)` 与超龄半关未认证连接淘汰（200ms 宽限）；`go/login` 设备上限校验前移至会话落写前、去除空口令配额前 64MiB Argon2id；`go/payment` Google JWKS 锁外拉取+singleflight+60s 冷却、Apple ISO-4217 0/2/3 位小数金额换算、`sameFact` 补 `PaidAmountMinor`/`PaidCurrency` 核对、`workers.go` 防时钟回拨下溢；`gm_admin` 收紧用户名校验并删 `springboot_satoken_auth_starter` 6 个缺陷死类；`k8s_deploy.ps1` 非 dev `Remove-Zone`/`Remove-Infra` 强制环境变量确认、YAML 解析处理行尾注释并 fail-closed。
+  2. **强一致与可水平扩展**：C++ Scene 统一 `PlayerLastPersistedSnapshotComp::IsCommittedForOwner`（覆盖 `asset_op_system`/`player_activity` 等）与 7 处客户端写入入口统一接入 `player_mutability::IsPlayerMutable`；`go/shared/{callerauth,roleidentity}` 指标切 `prometheus/promauto`；`go/guild` 与 `go/friend` 改为 `[256]sync.Mutex` 条带锁且回填 Redis 失败仍返回权威 MySQL 结果；`go/player_inbox` 补 `rows.Err()`；`go/match` 修复并发槽位泄漏；`tools/data_consistency_check` 去除 `ORDER BY RAND()` 与无用 `CountPlayers` 并支持环境变量 DSN。
+  3. **热路径与玩法/客户端修复**：C++ 删 `>4KB` RPC 死解码、删 5 档零字段 `ActorStateAttributeSyncSystem` 并过滤 NPC 观察者、修无目标/AoE 技能与回血 Buff 下溢及瞬移 `acceptedLocation`、修 `CurrencySystem::GetBalance` 只读副作用与 `GridLayout::PlaceAt` 失败回滚及 `AOI` 空桶回收、`Bag::MutationVersion()` 替代 5 次整包序列化、缓存 `player_equipment_v1` `BuildDefinition()`、`AnomalyDetector` 单调时钟/饱和加法/告警冷却/空桶裁剪、删 `buff.cpp` 空方法查找、修 `recast.cpp` `dtFree` 泄漏、`sha256.cpp` 复用 BoringSSL `EVP_Digest`；Unity 修复小游戏 `MinigamePayBridges` 非泛型回调与 `.jslib` `try/catch`、`StorePayBridge`/`PaymentClient` 弹窗断线防丢单、`GameClient.DisconnectInternal` 同步重置 `Pets`/`Spectate` 与 `JubaozhaiUiRoot` 换角重置 `PaymentClient`、`GameClientBattleTransport` 去协程重入、名牌/邮件 GC、15 份 `*UiRoot` 收口 `CityPanelRegistry`、9 个 QA/FX 脚本加 `#if` 隔离、`manifest.json` 瘦身、`AttributeClient`/`PetClient` 共享 `DescribeAssetTip`、`BattleArtCatalog.ReleaseTransientBattleCaches()`。
+- **Java 独立全服务版待做**：
+  1. `game-gate`：核对普通登录票据验签是否已强制校验 `zone_id`（非 0 且不等于本区号即拒），以及 WebSocket 拒绝升级/异常踢线是否具短时 `forceClose` 与超龄半关未认证连接淘汰。
+  2. `game-scene`：核对 7 类客户端写入入口（装备/属性/宠物/神秘商店/挂机通行证/任务/技能）是否均走同一可写门禁（拒绝跨区交接/退场/冻结/无归属代次），以及快照落盘确认是否同时校验 `committed_owner_epoch` 与 `committed_save_seq`；核对无目标/AoE 技能、回血 Buff 上溢/下溢保护、瞬移吸附落位坐标。
+  3. `game-payment`（待移植支付服务时）：直接落地 Google JWKS 锁外拉取+60s 冷却、Apple ISO-4217 0/2/3 位小数换算、渠道回调事实核对 `PaidAmountMinor`/`PaidCurrency` 与时钟回拨保护。
+  4. 后续结构瘦身待做（可选）：按审计报告评估合并轻量社交微服务进程、移出 `AuthoritySqlFixture` 出生产 JAR、评估退役零消费 `game-navigation`。
+
+本条只登记待做,本轮未再修改 Java 独立仓代码,也没有运行 Java 构建或测试。

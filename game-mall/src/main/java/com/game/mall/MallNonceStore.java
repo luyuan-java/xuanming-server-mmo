@@ -13,6 +13,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 public final class MallNonceStore {
     private final JdbcTemplate jdbc;
     private final String databaseNow;
+    private final String purgeExpiredSql;
     private final TransactionTemplate transaction;
     private final AtomicInteger calls = new AtomicInteger();
 
@@ -27,6 +28,9 @@ public final class MallNonceStore {
         databaseNow = h2 ? "CAST(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP())*1000 AS BIGINT)"
                 : properties.requireTidb() ? "(TIDB_CURRENT_TSO() >> 18)"
                 : "CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS SIGNED)";
+        purgeExpiredSql = h2
+                ? "DELETE FROM commerce_request_nonce WHERE expires_ms<? LIMIT 128"
+                : "DELETE FROM commerce_request_nonce WHERE expires_ms<? ORDER BY expires_ms LIMIT 128";
         jdbc.setQueryTimeout(5);
     }
 
@@ -44,12 +48,8 @@ public final class MallNonceStore {
             throw new MallException(503, "认证数据库时钟不可用");
         }
         if ((calls.getAndIncrement() & 63) == 0) {
-            long now = transactionNow;
             // 一次最多128行，索引是启动门禁；过签名窗口后额外保留10分钟，覆盖数据库锁等待。
-            for (Expired expired : jdbc.query("SELECT caller_role,nonce FROM commerce_request_nonce WHERE expires_ms<? ORDER BY expires_ms,caller_role,nonce LIMIT 128",
-                    (row, index) -> new Expired(row.getString(1), row.getBytes(2)), now)) {
-                jdbc.update("DELETE FROM commerce_request_nonce WHERE caller_role=? AND nonce=? AND expires_ms<?", expired.role(), expired.nonce(), now);
-            }
+            jdbc.update(purgeExpiredSql, transactionNow);
         }
         try {
             int changed = jdbc.update("INSERT INTO commerce_request_nonce(caller_role,nonce,expires_ms) SELECT ?,?,? WHERE ?>="
@@ -62,6 +62,4 @@ public final class MallNonceStore {
             throw new MallException(409, "签名请求已使用，请以新nonce重试原业务请求号");
         }
     }
-
-    private record Expired(String role, byte[] nonce) { }
 }

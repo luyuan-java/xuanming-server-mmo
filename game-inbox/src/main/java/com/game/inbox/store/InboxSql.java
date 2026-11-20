@@ -3,7 +3,7 @@ package com.game.inbox.store;
 import com.game.discovery.sql.AuthorityJdbc;
 import com.game.common.deadline.Deadline;
 import com.game.common.player.PlayerRouteAuthority;
-import com.game.inbox.rules.InboxShards;
+import com.game.common.inbox.InboxShards;
 import com.game.proto.player_inbox.PlayerInboxItemState;
 import com.game.proto.player_inbox.player_inbox_item_row;
 import com.game.proto.player_inbox.player_inbox_stream;

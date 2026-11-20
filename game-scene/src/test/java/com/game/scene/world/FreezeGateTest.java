@@ -302,8 +302,10 @@ class FreezeGateTest {
         expected.put("SceneActivityClientPlayerGetActivityList", FreezePolicy.READ_ONLY);
         expected.put("ScenePetClientPlayerGetPetList", FreezePolicy.READ_ONLY);
         expected.put("ScenePetClientPlayerGetPetShop", FreezePolicy.READ_ONLY);
+        expected.put("ScenePetClientPlayerGetPetEntries", FreezePolicy.READ_ONLY);
+        expected.put("ScenePetClientPlayerPreviewPetEntries", FreezePolicy.READ_ONLY);
         for (String write : List.of("SummonPet", "RecallPet", "AllocatePetPoints", "ResetPetPoints",
-                "AutoAllocatePetPoints", "RenamePet", "GmGrantPet", "BuyPet")) {
+                "AutoAllocatePetPoints", "RenamePet", "GmGrantPet", "BuyPet", "SavePetEntries")) {
             expected.put("ScenePetClientPlayer" + write, FreezePolicy.GATED);
         }
 
@@ -554,6 +556,13 @@ class FreezeGateTest {
         probes.add(new Probe(petSvc, "GetPetList", GetPetListRequest.getDefaultInstance(), 0));
         probes.add(new Probe(petSvc, "GetPetShop", GetPetShopRequest.getDefaultInstance(), 0));
         probes.add(new Probe(petSvc, "BuyPet", BuyPetRequest.newBuilder().setPetTableId(1).setPurchaseSequence(1).setPriceGold(1000).build(), 1005));
+        // 宝宝条目 410–412：读与预览只读放行（预览带当前版本，避免把版本不符的 1005 误当闸门），保存是写、冻结闸住
+        int entryVersion = config.petRule().all().getFirst().getEntryConfigVersion();
+        probes.add(new Probe(petSvc, "GetPetEntries", com.game.proto.GetPetEntriesRequest.newBuilder().setPetId(petId).build(), PASSED));
+        probes.add(new Probe(petSvc, "PreviewPetEntries", com.game.proto.PreviewPetEntriesRequest.newBuilder().setPetId(petId)
+                .setStateVersion(1).setConfigVersion(entryVersion).build(), PASSED));
+        probes.add(new Probe(petSvc, "SavePetEntries", com.game.proto.SavePetEntriesRequest.newBuilder().setPetId(petId)
+                .setStateVersion(1).setConfigVersion(entryVersion).setRequestId("freeze-probe-0000001").build(), INVALID_PARAMETER));
 
         probes.add(new Probe("SceneSkillClientPlayer", "ReleaseSkill", ReleaseSkillRequest.newBuilder()
                 .setSkillTableId(1).setTargetId(player.entity())

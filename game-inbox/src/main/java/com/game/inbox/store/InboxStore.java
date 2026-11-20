@@ -24,7 +24,7 @@ import com.game.inbox.registry.InboxRegistry;
 import com.game.inbox.rules.FenceRules;
 import com.game.inbox.rules.InboxLabels;
 import com.game.inbox.rules.InboxRules;
-import com.game.inbox.rules.InboxShards;
+import com.game.common.inbox.InboxShards;
 import com.game.inbox.rules.InboxTips;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.player_inbox.AckPlayerInboxRequest;

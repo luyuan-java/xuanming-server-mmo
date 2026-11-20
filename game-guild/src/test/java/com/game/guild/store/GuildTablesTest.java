@@ -68,6 +68,7 @@ class GuildTablesTest {
                 "  `score` bigint NOT NULL DEFAULT 0 COMMENT 'pb:9',",
                 "  `funds` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:10',",
                 "  `name_norm` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL DEFAULT '' COMMENT 'pb:11',",
+                "  `score_version` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:12',",
                 "  PRIMARY KEY (`guild_id`) /*T![clustered_index] NONCLUSTERED */,",
                 "  INDEX `idx_guild_0` (`zone_id`),",
                 "  INDEX `idx_guild_1` (`leader_id`),",
@@ -162,7 +163,7 @@ class GuildTablesTest {
                 .doesNotContain("INDEX").doesNotContain("UNIQUE");
         assertThat(ddl(java, GuildAssetOpRow.class))
                 .contains("PRIMARY KEY (`op_id`) /*T![clustered_index] NONCLUSTERED */")
-                .contains("INDEX `idx_guild_asset_op_0` (`status`,`next_attempt_ms`)")
+                .contains("INDEX `idx_guild_asset_op_0` (`status`,`next_attempt_ms`,`op_id`,`player_id`)")
                 .contains("INDEX `idx_guild_asset_op_1` (`guild_id`,`op_id`)")
                 .contains("INDEX `idx_guild_asset_op_2` (`player_id`,`stream`,`stream_epoch`,`status`,`seq`)")
                 .contains("UNIQUE KEY `uk_guild_asset_op` (`player_id`,`stream`,`stream_epoch`,`seq`)")

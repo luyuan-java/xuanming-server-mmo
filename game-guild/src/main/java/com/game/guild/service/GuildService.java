@@ -94,7 +94,6 @@ public final class GuildService {
      * 不推送（帮里只有建帮者，他手上的响应就是最新状态）；回包用内存构造的帮会（不重读库）。
      */
     public CreateGuildResponse createGuild(long me, CreateGuildRequest request, Deadline deadline) {
-        bodyIdentity("CreateGuild", me, request.getPlayerId());
         String name = GuildNames.displayName(request.getName());
         if (name == null) {
             return createTip(GuildTip.INVALID_GUILD_NAME);
@@ -218,7 +217,6 @@ public final class GuildService {
      * 客户端拉 GetPlayerGuild 刷新即可）。0 = 旧客户端，以上流程逐字不变。
      */
     public LeaveGuildResponse leaveGuild(long me, LeaveGuildRequest request, Deadline deadline) {
-        bodyIdentity("LeaveGuild", me, request.getPlayerId());
         ZoneCheck zone = access.clientWrite(me, deadline);
         if (zone.rejected()) {
             return LeaveGuildResponse.newBuilder().setErrorMessage(zone.tip().proto()).build();
@@ -270,7 +268,6 @@ public final class GuildService {
      * （NOT_MEMBER 与 RANK_TOO_LOW 一样回 14005，{@link com.game.guild.rules.GuildTips#forDisbandReject}）。
      */
     public DisbandGuildResponse disbandGuild(long me, DisbandGuildRequest request, Deadline deadline) {
-        bodyIdentity("DisbandGuild", me, request.getPlayerId());
         ZoneCheck zone = access.clientWrite(me, deadline);
         if (zone.rejected()) {
             return DisbandGuildResponse.newBuilder().setErrorMessage(zone.tip().proto()).build();
@@ -313,7 +310,6 @@ public final class GuildService {
      * 提交后无条件失效（写同样的文本也算一次成功），推 ANNOUNCEMENT_CHANGED（target = 0）给快照除操作者；回包是事务内快照。
      */
     public SetAnnouncementResponse setAnnouncement(long me, SetAnnouncementRequest request, Deadline deadline) {
-        bodyIdentity("SetAnnouncement", me, request.getPlayerId());
         if (GuildAnnouncements.tooLong(request.getAnnouncement())) {
             return SetAnnouncementResponse.newBuilder().setErrorMessage(GuildTip.ANNOUNCEMENT_TOO_LONG.proto()).build();
         }

@@ -166,4 +166,17 @@ class GuildPropertiesTest {
         assertThatThrownBy(() -> DubboCallAuth.requireFromEnvValue(null)).isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> DubboCallAuth.requireFromEnvValue("")).isInstanceOf(IllegalStateException.class);
     }
+
+    @Test
+    void nacos配置清空帮会活动直连匹配地址_本机缺省保持直连() {
+        var nacos = new org.springframework.beans.factory.config.YamlPropertiesFactoryBean();
+        nacos.setResources(new org.springframework.core.io.ClassPathResource("application-nacos.yaml"));
+        var nacosProps = nacos.getObject();
+        assertThat(nacosProps).containsKey("game.guild.activity.match-url");
+        assertThat(nacosProps.getProperty("game.guild.activity.match-url")).isEmpty();
+
+        var local = new org.springframework.beans.factory.config.YamlPropertiesFactoryBean();
+        local.setResources(new org.springframework.core.io.ClassPathResource("application.yaml"));
+        assertThat(local.getObject().getProperty("game.guild.activity.match-url")).contains("127.0.0.1:20888");
+    }
 }

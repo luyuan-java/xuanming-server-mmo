@@ -59,4 +59,18 @@ class BattleAdminAuthFilterTest {
         assertThat(BattleAdminAuthFilter.operator("   ")).isNull();
         assertThat(BattleAdminAuthFilter.printable("a\nb")).isEqualTo("a?b");
     }
+
+    @Test
+    void 仅在过滤器链路内提供authenticatedOperator标记() throws Exception {
+        BattleAdminAuthFilter filter = new BattleAdminAuthFilter("tok");
+        MockHttpServletRequest req = request("tok", "op");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> BattleAdminAuthFilter.authenticatedOperator(req))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        java.util.concurrent.atomic.AtomicReference<String> seen = new java.util.concurrent.atomic.AtomicReference<>();
+        filter.doFilter(req, new MockHttpServletResponse(),
+                (r, w) -> seen.set(BattleAdminAuthFilter.authenticatedOperator((jakarta.servlet.http.HttpServletRequest) r)));
+        assertThat(seen.get()).isEqualTo("op");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> BattleAdminAuthFilter.authenticatedOperator(req))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+    }
 }

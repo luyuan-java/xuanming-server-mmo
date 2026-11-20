@@ -298,12 +298,14 @@ class BattleSnapshotsTest {
     void 正式技能表_可施放集合与引擎判据一致_快照只带能施放的() {
         SceneBattleTables real = SceneBattleTables.from(BattleFixture.CONFIG);
         List<Integer> all = BattleFixture.CONFIG.skill().all().stream().map(SkillTable::getId).sorted().toList();
-        assertThat(all).as("正式技能表的行（变了就要重看下面的期望）").containsExactly(
+        List<Integer> legacy = List.of(
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
                 1101, 1102, 1103, 1104, 1105, 1106, 1107, 1108,
                 1201, 1202, 1203, 1204, 1205, 1206, 1207, 1208,
                 1301, 1302, 1303, 1304, 1305, 1306, 1307, 1308,
                 1401, 1402, 1403, 1404, 1405, 1406, 1407, 1408);
+        // 契约 4aaf5e646e 起技能表追加了 1xxxx 辅助 / 宠物技能：老行逐个钉住，新行按引擎判据核对
+        assertThat(all).as("正式技能表的老行（变了就要重看下面的期望）").containsAll(legacy);
         for (SkillTable row : BattleFixture.CONFIG.skill().all()) {
             assertThat(real.skillExists(row.getId())).isTrue();
             assertThat(real.castable(row.getId())).as("技能 %s skill_type=%s", row.getId(), row.getSkillTypeList())
@@ -316,10 +318,12 @@ class BattleSnapshotsTest {
         ScenePlayer everything = player(3, 37, all, PlayerState.getDefaultInstance());
         BattlePlayerSnapshot snapshot = BattleSnapshots.build(everything, real, List.of(), ROUTING);
 
-        assertThat(snapshot.getSkillTableIdsList()).containsExactly(
+        assertThat(snapshot.getSkillTableIdsList().stream().filter(legacy::contains).toList()).containsExactly(
                 1, 2, 5, 7, 8, 9, 10, 11, 13, 14,
                 1101, 1102, 1103, 1104, 1105, 1201, 1202, 1203, 1204, 1205,
                 1301, 1302, 1303, 1304, 1305, 1401, 1402, 1403, 1404, 1405);
+        assertThat(snapshot.getSkillTableIdsList()).containsExactlyElementsOf(BattleFixture.CONFIG.skill().all().stream()
+                .filter(BattleRules::isTurnBattleCastableSkill).map(SkillTable::getId).sorted().toList());
     }
 
     // ------------------------------------------------------------------ 道具

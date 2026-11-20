@@ -2,7 +2,7 @@ package com.game.inbox.maintenance;
 
 import com.game.common.deadline.Deadline;
 import com.game.inbox.metrics.InboxMetrics;
-import com.game.inbox.rules.InboxShards;
+import com.game.common.inbox.InboxShards;
 import com.game.inbox.rules.LedgerProofs;
 import com.game.inbox.rules.LedgerProofs.FinalizedRef;
 import com.game.inbox.rules.LedgerProofs.LedgerGap;

@@ -83,7 +83,7 @@ class LoginHomeZoneWiringTest {
             return new CreateOutcome(CreateStatus.CREATED, List.of());
         });
         return configuration.createPlayerHandler(store, rules, ids, props, new LoginMetrics(new SimpleMeterRegistry()),
-                accountLogin, fence);
+                accountLogin, fence, mock(RedissonClient.class), REDIS_KEYS);
     }
 
     private static CreatePlayerResponse create(CreatePlayerHandler handler, SessionContext session) throws Exception {

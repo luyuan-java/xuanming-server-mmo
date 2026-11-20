@@ -168,7 +168,7 @@ class GuildServiceTest {
         f.names.put(ME, "建帮者");
         f.store.create = g -> TxOutcome.ok(new Created(g.guildId(), ME, g.zoneId()));
         CreateGuildResponse r = f.guilds.createGuild(ME,
-                CreateGuildRequest.newBuilder().setPlayerId(777).setName("  青云门 ").setZoneId(99).build(), d());
+                CreateGuildRequest.newBuilder().setName("  青云门 ").build(), d());
 
         assertThat(r.hasErrorMessage()).isFalse();
         GuildInfo info = r.getGuild();
@@ -405,9 +405,9 @@ class GuildServiceTest {
         f.store.put(before);
         GuildData after = guild(G, ZONE, 5, 7);
         f.store.leave = g -> TxOutcome.ok(new Left(after, ME));
-        LeaveGuildResponse r = f.guilds.leaveGuild(ME, LeaveGuildRequest.newBuilder().setPlayerId(5).build(), d());
+        LeaveGuildResponse r = f.guilds.leaveGuild(ME, LeaveGuildRequest.getDefaultInstance(), d());
         assertThat(r.hasErrorMessage()).isFalse();
-        assertThat(f.journal).contains("store.leave g=10 p=42"); // 请求体里伪造的帮主 id 不起作用
+        assertThat(f.journal).contains("store.leave g=10 p=42"); // 身份只取会话
         GuildServiceFixture.Push push = f.onlyPush();
         assertThat(push.change().getKind()).isEqualTo(GuildChangeKind.GUILD_CHANGE_KIND_MEMBER_LEFT);
         assertThat(push.change().getGuildId()).isEqualTo(G);

@@ -289,7 +289,7 @@ class MessageRoutesTest {
         assertThat(routes.clientRoute(179).hasResponse()).as("179 应答消息定义在 battle 包，照样回包").isTrue();
         // match 域里只有这 14 个号：别的服务（尤其是战斗服务）没有被带进来。
         assertThat(routes.all().stream().filter(r -> r.domain().equals(DubboGroups.MATCH)).map(MessageRoute::messageId))
-                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380);
+                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392);
         assertThat(MessageRoutes.SERVICE_BACKENDS).containsEntry("MatchService", DubboGroups.MATCH);
 
         // MatchInternal（帮会活动开战，match_internal.proto）是内部服务：刻意没标客户端协议服务，也不在后端表里。

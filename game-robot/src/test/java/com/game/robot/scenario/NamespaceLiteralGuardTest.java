@@ -342,7 +342,9 @@ class NamespaceLiteralGuardTest {
 
     /** JDBC 完整模板金样：七个已切独立建库入口的NORMAL进程移除自动建库参数，其余主机、端口、参数和库名占位符逐字节守住。 */
     private static final Map<String, String> GOLDEN_JDBC_URLS = Map.ofEntries(
-            Map.entry("game-chat", "jdbc:mysql://127.0.0.1:3306/game?useUnicode=true&characterEncoding=UTF-8"),
+            Map.entry("game-chat", "jdbc:mysql://127.0.0.1:3306/game?useUnicode=true&characterEncoding=UTF-8"
+                    + "&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true"
+                    + "&sessionVariables=transaction_isolation='READ-COMMITTED'"),
             Map.entry("game-data", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000"
                     + "&socketTimeout=30000&useAffectedRows=true"),
             Map.entry("game-friend", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true"
@@ -369,7 +371,7 @@ class NamespaceLiteralGuardTest {
             Map.entry("game-rank", "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&characterEncoding=utf8&connectTimeout=2000&socketTimeout=4000&useAffectedRows=true"
                     + "&sessionVariables=transaction_isolation='READ-COMMITTED',sql_mode='STRICT_TRANS_TABLES',innodb_lock_wait_timeout=1"),
-            Map.entry("game-scene", "jdbc:mysql://127.0.0.1:3306/game?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+            Map.entry("game-scene", "jdbc:mysql://127.0.0.1:3306/game?useSSL=false&allowPublicKeyRetrieval=true"
                     + "&connectTimeout=3000&socketTimeout=10000"),
             Map.entry("game-scene-manager", "jdbc:mysql://127.0.0.1:4000/game?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8"
                     + "&connectTimeout=3000&socketTimeout=5000"),

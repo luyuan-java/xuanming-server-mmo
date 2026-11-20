@@ -524,6 +524,11 @@ public final class RedisKeys {
         return prefix + "login:device-session:" + sessionKey;
     }
 
+    /** 登录 / 建角 / 进游戏的跨实例在途闸门 {@code game:login:inflight:<scope>:<key>}（STRING：持有者令牌，SET NX PX，按令牌释放）。 */
+    public String loginInFlight(String scope, String key) {
+        return prefix + "login:inflight:" + scope + ":" + key;
+    }
+
     /**
      * 回合制战斗锁（scene-battle-spec §7.2，D2）：{@code game:battle:{<player_id>}:lock}，Hash——{@code b} battle_id（无符号十进制）、
      * {@code n} battle 节点号、{@code s} 阶段 {@code P} / {@code F}、{@code d} 战斗期限毫秒、{@code p} 备战期限毫秒；带 TTL。

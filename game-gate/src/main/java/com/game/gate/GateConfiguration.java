@@ -102,10 +102,10 @@ public class GateConfiguration {
      * {@code handle} 不重试：客户端消息不幂等（建角、加好友……），Dubbo 缺省的 failover 会在超时后重发同一次调用；
      * 断线通知（sessionClosed）幂等，保留缺省重试。
      *
-     * <p><b>截止传播</b>（本类 login 与六个后端域的引用都一样；mmorpg {@code docs/design/client-request-ordering.md} §5、§6.1）：{@code handle} 开
+     * <p><b>截止传播</b>（本类 login 与八个后端域的引用都一样；mmorpg {@code docs/design/client-request-ordering.md} §5、§6.1）：{@code handle} 开
      * Dubbo 3 的超时倒计时（{@code enable-timeout-countdown}），每次调用把这一次的超时（{@code dubbo.consumer.timeout}，相对值）带给后端，
      * 后端经 game-api 的 {@code CallerDeadline} 读出、截止取 min(本地预算, 传入剩余)。gate 在这个超时之后就放行同一会话的下一条请求，
-     * 后端据此不在那之后提交。mail / rank 两个域暂未接（它们的派发器还没读传入截止）。
+     * 后端据此不在那之后提交。
      */
     @Bean
     @DubboReference(group = DubboGroups.LOGIN, check = false, url = "${game.dubbo.login-url:}",
@@ -167,10 +167,12 @@ public class GateConfiguration {
         return new ReferenceBean<>();
     }
     @Bean
-    @DubboReference(group = DubboGroups.MAIL, check = false, url = "${game.dubbo.mail-url:}", methods = @Method(name = "handle", retries = 0))
+    @DubboReference(group = DubboGroups.MAIL, check = false, url = "${game.dubbo.mail-url:}",
+            methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> mailClientMessageService() { return new ReferenceBean<>(); }
     @Bean
-    @DubboReference(group = DubboGroups.RANK, check = false, url = "${game.dubbo.rank-url:}", methods = @Method(name = "handle", retries = 0))
+    @DubboReference(group = DubboGroups.RANK, check = false, url = "${game.dubbo.rank-url:}",
+            methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> rankClientMessageService() { return new ReferenceBean<>(); }
 
     /**

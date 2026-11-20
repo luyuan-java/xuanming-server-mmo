@@ -109,4 +109,21 @@ class TradeAdminAuthFilterTest {
         assertThat(TradeAdminAuthFilter.printable("a\nb\u0000c")).isEqualTo("a?b?c");
         assertThat(TradeAdminAuthFilter.printable(null)).isNull();
     }
+
+    @Test
+    void 仅在过滤器链路内提供authenticatedOperator标记() throws Exception {
+        TradeAdminAuthFilter filter = new TradeAdminAuthFilter("secret", new TradeMetrics(meters));
+        MockHttpServletRequest req = new MockHttpServletRequest("POST", SeedListingController.PATH);
+        req.setServletPath(SeedListingController.PATH);
+        req.addHeader(TradeAdminAuthFilter.TOKEN_HEADER, "secret");
+        req.addHeader(TradeAdminAuthFilter.OPERATOR_HEADER, "ops");
+        assertThatThrownBy(() -> TradeAdminAuthFilter.authenticatedOperator(req))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        java.util.concurrent.atomic.AtomicReference<String> seen = new java.util.concurrent.atomic.AtomicReference<>();
+        filter.doFilter(req, new MockHttpServletResponse(),
+                (r, w) -> seen.set(TradeAdminAuthFilter.authenticatedOperator((jakarta.servlet.http.HttpServletRequest) r)));
+        assertThat(seen.get()).isEqualTo("ops");
+        assertThatThrownBy(() -> TradeAdminAuthFilter.authenticatedOperator(req))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+    }
 }

@@ -52,8 +52,9 @@ class MatchMethodsTest {
                 assertThat(method.clientService()).as(method.key() + " 标了客户端服务").isTrue();
             }
         }
-        // 战斗剧本四个号（389–392）已随契约同步、Java 尚未实现（PARITY「战斗剧本」Java 待做）：gate 照转，派发器无处理器回信封 1003。
-        Set<String> deferred = Set.of("ListBattleScripts", "SubmitBattleScript", "DeleteBattleScript", "SetBattleScriptLoadout");
+        // 战报 379/380 与战斗剧本 389–392 已随契约同步、Java 尚未实现（PARITY「战报回放」「战斗剧本」Java 待做）：gate 照转，派发器无处理器回信封 1003。
+        Set<String> deferred = Set.of("ListBattleReports", "GetBattleReport",
+                "ListBattleScripts", "SubmitBattleScript", "DeleteBattleScript", "SetBattleScriptLoadout");
         Set<String> expected = new TreeSet<>(MatchMethods.ALL);
         expected.addAll(deferred);
         assertThat(inContract).containsExactlyInAnyOrderElementsOf(expected);

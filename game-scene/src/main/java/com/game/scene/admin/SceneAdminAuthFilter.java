@@ -12,7 +12,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
  * scene 管理端口运维接口（{@code /admin/**}，dev 实例与玩家瞬移管理口 {@link SceneAdminController}）的鉴权。
@@ -35,6 +37,8 @@ public final class SceneAdminAuthFilter extends OncePerRequestFilter {
     public static final String OPERATOR_HEADER = "X-Game-Operator";
     static final String AUDIT_LOGGER = "game.audit.admin";
     static final int MAX_OPERATOR_CHARS = 64;
+    private static final String AUTHENTICATED = SceneAdminAuthFilter.class.getName() + ".authenticated";
+    private record Authentication(String operator) {}
 
     private static final Logger audit = LoggerFactory.getLogger(AUDIT_LOGGER);
 
@@ -70,10 +74,12 @@ public final class SceneAdminAuthFilter extends OncePerRequestFilter {
                 status = HttpServletResponse.SC_BAD_REQUEST;
                 response.sendError(status, "缺少操作人（" + OPERATOR_HEADER + "，UTF-8，1–64 字符）");
             } else {
+                request.setAttribute(AUTHENTICATED, new Authentication(operator));
                 chain.doFilter(request, response);
                 status = response.getStatus();
             }
         } finally {
+            request.removeAttribute(AUTHENTICATED);
             audit.info("admin operator={} method={} path={} query={} remote={} status={}",
                     operator == null ? "<invalid>" : operator, request.getMethod(), printable(path),
                     printable(request.getQueryString()), request.getRemoteAddr(), status);
@@ -130,5 +136,13 @@ public final class SceneAdminAuthFilter extends OncePerRequestFilter {
 
     private boolean matches(String presented) {
         return presented != null && MessageDigest.isEqual(token, presented.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** 控制器二次核验过滤器留下的私有类型标记，不接受任何客户端头作为认证事实。 */
+    public static String authenticatedOperator(HttpServletRequest request) {
+        if (request.getAttribute(AUTHENTICATED) instanceof Authentication authentication) {
+            return authentication.operator();
+        }
+        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "运维认证失败");
     }
 }

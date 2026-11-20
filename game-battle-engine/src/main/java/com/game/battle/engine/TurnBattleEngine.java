@@ -1,6 +1,7 @@
 package com.game.battle.engine;
 
 import com.game.common.combat.CombatDamageRules;
+import com.game.common.combatai.MonsterUtilityAi;
 import com.game.common.math.Unsigned;
 import com.game.proto.BaseAttributesComp;
 import com.game.proto.BattleAction;
@@ -30,6 +31,7 @@ import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * 回合制战斗确定性引擎：一场战斗一个实例（基线 {@code turn_battle_engine.{h,cpp}}，规格 docs/porting/battle-engine-spec.md）。
@@ -67,6 +69,9 @@ public final class TurnBattleEngine {
     private final AutoClassSkillSelector autoClassSkills;
     /** actor_id → 本回合行动；按 actor_id 无符号升序（基线 {@code std::map}）。现在只做查找，用有序容器防止日后有人遍历它。 */
     private final NavigableMap<Long, BattleAction> pendingActions = new TreeMap<>(Long::compareUnsigned);
+    /** 副本怪物 HFSM + 行为树 + 定点效用 AI 控制器（有序容器保确定性，不消耗 RNG）。 */
+    private final NavigableMap<Long, DungeonMonsterAi.Controller> monsterAiControllers =
+            new TreeMap<>(Long::compareUnsigned);
     /** uint32；回合上限（{@code engine.h:228}）。 */
     private int maxRounds = BattleConstants.DEFAULT_MAX_ROUNDS;
     private eBattleOutcome outcome = eBattleOutcome.BATTLE_OUTCOME_ONGOING;
@@ -99,6 +104,15 @@ public final class TurnBattleEngine {
      * @param data 表数据源，整局绑定；不得为 null
      */
     public static BattleStart start(CreateBattleRequest request, BattleData data) {
+        return start(request, data, Map.of());
+    }
+
+    /**
+     * 同 {@link #start(CreateBattleRequest, BattleData)}，可选传入副本怪物 AI 配置（key = {@code monster_table_id}，
+     * 0 为缺省兜底配置）。传入空 map 时与两参入口完全一致，保持存量无 AI 对局的逐字节确定性回放。
+     */
+    public static BattleStart start(CreateBattleRequest request, BattleData data,
+                                    Map<Integer, DungeonMonsterAi.Profile> monsterAiProfiles) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(data, "data");
         if (request.getBattleId() == 0) {
@@ -168,6 +182,7 @@ public final class TurnBattleEngine {
                 engine.buffs.sanitizeSnapshotBuffs(unit);
             }
         }
+        engine.bindDungeonMonsterAis(monsterAiProfiles);
         return new BattleStart.Started(engine);
     }
 
@@ -553,13 +568,154 @@ public final class TurnBattleEngine {
         return result.setState(buildStateSnapshot()).build();
     }
 
+    /** 只读查询指定怪物当前的 Boss HFSM 阶段（未绑定 AI 时返回空）。 */
+    public Optional<DungeonMonsterAi.BossPhaseId> monsterAiPhaseOf(long actorId) {
+        DungeonMonsterAi.Controller ctrl = monsterAiControllers.get(actorId);
+        return ctrl == null ? Optional.empty() : Optional.of(ctrl.currentPhase());
+    }
+
+    private void bindDungeonMonsterAis(Map<Integer, DungeonMonsterAi.Profile> profiles) {
+        monsterAiControllers.clear();
+        if (profiles == null || profiles.isEmpty()) {
+            return;
+        }
+        DungeonMonsterAi.Profile fallback = profiles.get(0);
+        for (BattleUnit unit : ctx.units()) {
+            if (!unit.isMonster()) {
+                continue;
+            }
+            DungeonMonsterAi.Profile profile = profiles.get(unit.monsterTableId());
+            if (profile == null) {
+                profile = fallback;
+            }
+            if (profile == null) {
+                continue;
+            }
+            // 与 C++ 保持同一闸门：怪物只能携带零耗蓝且回合制可施放的非职业老技能（升序去重）。
+            TreeSet<Integer> validSkills = new TreeSet<>(Integer::compareUnsigned);
+            for (int skillId : profile.monsterSkillIds()) {
+                if (skillId == 0) {
+                    continue;
+                }
+                Optional<SkillTable> row = ctx.data().skill(skillId);
+                if (row.isEmpty() || BattleRules.isClassSkill(row.get())
+                        || !BattleRules.isTurnBattleCastableSkill(row.get())
+                        || BattleRules.skillManaCost(row.get()) != 0L) {
+                    continue;
+                }
+                validSkills.add(skillId);
+            }
+            for (int skillId : validSkills) {
+                if (!unit.state().getSkillTableIdsList().contains(skillId)) {
+                    unit.state().addSkillTableIds(skillId);
+                }
+            }
+            monsterAiControllers.put(unit.actorId(), new DungeonMonsterAi.Controller(profile));
+        }
+    }
+
+    private void fillDungeonMonsterAiActions() {
+        if (monsterAiControllers.isEmpty()) {
+            return;
+        }
+        for (BattleUnit actor : ctx.units()) {
+            if (!actor.isMonster()) {
+                continue;
+            }
+            DungeonMonsterAi.Controller ctrl = monsterAiControllers.get(actor.actorId());
+            if (ctrl == null) {
+                continue;
+            }
+            if (!actor.isActive()) {
+                ctrl.notifyDead();
+                continue;
+            }
+            if (pendingActions.containsKey(actor.actorId())) {
+                continue;
+            }
+
+            int selfHpPermyriad;
+            if (actor.maxHealth() != 0L) {
+                long clampedHp = Unsigned.minUnsigned(actor.health(), actor.maxHealth());
+                selfHpPermyriad = clampedHp == actor.maxHealth()
+                        ? MonsterUtilityAi.UTILITY_SCALE
+                        : (int) Long.divideUnsigned(clampedHp * MonsterUtilityAi.UTILITY_SCALE, actor.maxHealth());
+            } else {
+                selfHpPermyriad = 0;
+            }
+
+            long rawMaxSpeed = ctx.maxAliveEnemySpeed(actor);
+            long maxEnemySpeed = Long.compareUnsigned(rawMaxSpeed, 1L) > 0 ? rawMaxSpeed : 1L;
+            List<DungeonMonsterAi.Candidate> candidates = new ArrayList<>();
+
+            for (BattleUnit target : ctx.units()) {
+                if (target.teamIndex() == actor.teamIndex() || !target.isActive()) {
+                    continue;
+                }
+                int missingHp = 0;
+                if (target.maxHealth() != 0L && Long.compareUnsigned(target.maxHealth(), target.health()) > 0) {
+                    long missing = target.maxHealth() - target.health();
+                    missingHp = (int) Long.divideUnsigned(missing * MonsterUtilityAi.UTILITY_SCALE, target.maxHealth());
+                }
+                boolean controlled = ctx.actorHasBuffOfType(target, BattleConstants.BUFF_TYPE_STUN)
+                        || ctx.actorHasBuffOfType(target, BattleConstants.BUFF_TYPE_SILENCE)
+                        || ctx.actorHasBuffOfType(target, BattleConstants.BUFF_TYPE_FREEZE);
+                int uncontrolled = controlled ? 0 : MonsterUtilityAi.UTILITY_SCALE;
+                long effSpeed = ctx.effectiveSpeed(target);
+                int threat = (int) Unsigned.minUnsigned(
+                        MonsterUtilityAi.UTILITY_SCALE,
+                        Long.divideUnsigned(effSpeed * MonsterUtilityAi.UTILITY_SCALE, maxEnemySpeed));
+                int targetIsPlayer = target.isPlayer() ? MonsterUtilityAi.UTILITY_SCALE : 3000;
+
+                BattleAction attackAction = BattleAction.newBuilder()
+                        .setActionType(eBattleActionType.BATTLE_ACTION_ATTACK)
+                        .setTargetId(target.actorId())
+                        .build();
+                pushMonsterCandidateIfLegal(actor, target, attackAction, missingHp, uncontrolled, threat,
+                        0, targetIsPlayer, candidates);
+
+                for (int skillId : actor.state().getSkillTableIdsList()) {
+                    BattleAction skillAction = BattleAction.newBuilder()
+                            .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                            .setSkillTableId(skillId)
+                            .setTargetId(target.actorId())
+                            .build();
+                    pushMonsterCandidateIfLegal(actor, target, skillAction, missingHp, uncontrolled, threat,
+                            MonsterUtilityAi.UTILITY_SCALE, targetIsPlayer, candidates);
+                }
+            }
+
+            DungeonMonsterAi.DecisionInput input = new DungeonMonsterAi.DecisionInput(
+                    ctx.roundIndex(), selfHpPermyriad, true, true, candidates);
+            ctrl.decideAction(input).ifPresent(decided -> pendingActions.put(actor.actorId(), decided));
+        }
+    }
+
+    private void pushMonsterCandidateIfLegal(BattleUnit actor, BattleUnit target, BattleAction action,
+                                             int missingHp, int uncontrolled, int threat, int isSkillFlag,
+                                             int targetIsPlayer, List<DungeonMonsterAi.Candidate> out) {
+        if (checks.checkActionPrerequisites(actor, action) != ActionChecks.SUCCESS) {
+            return;
+        }
+        int[] features = new int[DungeonMonsterAi.FEATURE_COUNT];
+        features[DungeonMonsterAi.FEATURE_TARGET_MISSING_HP] = missingHp;
+        features[DungeonMonsterAi.FEATURE_TARGET_UNCONTROLLED] = uncontrolled;
+        features[DungeonMonsterAi.FEATURE_TARGET_THREAT] = threat;
+        features[DungeonMonsterAi.FEATURE_IS_SKILL] = isSkillFlag;
+        features[DungeonMonsterAi.FEATURE_PHASE_URGENCY] = 0; // 由行为树按当前 HFSM 阶段回填
+        features[DungeonMonsterAi.FEATURE_TARGET_IS_PLAYER] = targetIsPlayer;
+        out.add(new DungeonMonsterAi.Candidate(action, target.state().getFormationSlot(), features));
+    }
+
     /**
      * 按单位插入序，给每个存活、未逃、还没有行动的单位补一条「普攻，目标 0」（{@code FillDefaultActions}，{@code engine.cpp:673-687}）：
-     * 挂机玩家先尝试有净收益的职业技能；非挂机玩家和怪物仍用普攻。
+     * 配置了副本 AI 的怪物先走 HFSM + 行为树 + 定点效用打分；
+     * 挂机玩家先尝试有净收益的职业技能；非挂机玩家和未配置 AI 的怪物仍用普攻。
      * 宝宝按快照技能顺序尝试首个通过原校验链的技能，目标按单位插入序取存活敌方。
      * 没有可用技能则普攻，也包括被眩晕的单位（执行时被跳过）。选技能与目标不耗随机数。
      */
     private void fillDefaultActions() {
+        fillDungeonMonsterAiActions();
         for (BattleUnit unit : ctx.units()) {
             if (!unit.isActive()) {
                 continue;

@@ -127,4 +127,21 @@ class SceneAdminAuthFilterTest {
         assertThat(counted(SceneMetrics.ADMIN_OP_PLAYER_TELEPORT, "200")).isEqualTo(1);
         assertThat(meters.find("game.scene.admin.requests").tag("op", SceneMetrics.ADMIN_OP_OTHER).counter()).isNull();
     }
+
+    @Test
+    void 仅在过滤器链路内提供authenticatedOperator标记() throws Exception {
+        SceneAdminAuthFilter filter = new SceneAdminAuthFilter("secret", new SceneMetrics(meters));
+        MockHttpServletRequest req = new MockHttpServletRequest("POST", SceneAdminController.CREATE_PATH);
+        req.setServletPath(SceneAdminController.CREATE_PATH);
+        req.addHeader(SceneAdminAuthFilter.TOKEN_HEADER, "secret");
+        req.addHeader(SceneAdminAuthFilter.OPERATOR_HEADER, "ops");
+        assertThatThrownBy(() -> SceneAdminAuthFilter.authenticatedOperator(req))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        java.util.concurrent.atomic.AtomicReference<String> seen = new java.util.concurrent.atomic.AtomicReference<>();
+        filter.doFilter(req, new MockHttpServletResponse(),
+                (r, w) -> seen.set(SceneAdminAuthFilter.authenticatedOperator((jakarta.servlet.http.HttpServletRequest) r)));
+        assertThat(seen.get()).isEqualTo("ops");
+        assertThatThrownBy(() -> SceneAdminAuthFilter.authenticatedOperator(req))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+    }
 }

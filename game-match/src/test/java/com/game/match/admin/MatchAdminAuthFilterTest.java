@@ -206,4 +206,17 @@ class MatchAdminAuthFilterTest {
         assertThat(MatchAdminAuthFilter.AUDIT_LOGGER).isEqualTo("game.audit.admin");
         assertThat(MatchAdminAuthFilter.DEV_PREFIX).isEqualTo("/admin/match/dev/");
     }
+
+    @Test
+    void 仅在过滤器链路内提供authenticatedOperator标记() throws Exception {
+        MatchAdminAuthFilter filter = filter("tok", RunMode.DEV);
+        MockHttpServletRequest req = request("GET", RATING, "tok", "op");
+        assertThatThrownBy(() -> MatchAdminAuthFilter.authenticatedOperator(req))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        java.util.concurrent.atomic.AtomicReference<String> seen = new java.util.concurrent.atomic.AtomicReference<>();
+        run(filter, req, (r, w) -> seen.set(MatchAdminAuthFilter.authenticatedOperator((jakarta.servlet.http.HttpServletRequest) r)));
+        assertThat(seen.get()).isEqualTo("op");
+        assertThatThrownBy(() -> MatchAdminAuthFilter.authenticatedOperator(req))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+    }
 }

@@ -130,12 +130,12 @@ class GateConfigurationTest {
         });
     }
 
-    /** handle 开了超时倒计时、把截止传给后端的域（mmorpg client-request-ordering.md §5、§6.1）；mail / rank 的派发器还没读传入截止，暂不开。 */
+    /** handle 开了超时倒计时、把截止传给后端的域（mmorpg client-request-ordering.md §5、§6.1）：全部后端域统一开启。 */
     private static final Set<String> CALLER_DEADLINE_GROUPS = Set.of(DubboGroups.LOGIN, DubboGroups.FRIEND, DubboGroups.CHAT,
-            DubboGroups.TEAM, DubboGroups.GUILD, DubboGroups.TRADE, DubboGroups.MATCH);
+            DubboGroups.TEAM, DubboGroups.GUILD, DubboGroups.TRADE, DubboGroups.MATCH, DubboGroups.MAIL, DubboGroups.RANK);
 
     @Test
-    void 七个后端域的handle开超时倒计时_把gate的调用超时作为剩余时长传给后端() {
+    void 全部后端域的handle开超时倒计时_把gate的调用超时作为剩余时长传给后端() {
         Set<String> enabled = new TreeSet<>();
         for (Method method : GateConfiguration.class.getDeclaredMethods()) {
             DubboReference reference = method.getAnnotation(DubboReference.class);

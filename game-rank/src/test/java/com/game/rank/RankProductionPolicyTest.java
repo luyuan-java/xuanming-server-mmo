@@ -27,4 +27,12 @@ class RankProductionPolicyTest {
         assertThat(RankConfiguration.connectionPolicy(new MockEnvironment()
                 .withProperty("game.run-mode", "prod").withProperty("game.rank.require-tidb", "true"))).isNotNull();
     }
+
+    @Test void nacos配置清空直连邮件地址以走注册中心发现() {
+        var yaml = new org.springframework.beans.factory.config.YamlPropertiesFactoryBean();
+        yaml.setResources(new org.springframework.core.io.ClassPathResource("application-nacos.yaml"));
+        var props = yaml.getObject();
+        assertThat(props).containsKey("game.rank.mail-url");
+        assertThat(props.getProperty("game.rank.mail-url")).isEmpty();
+    }
 }

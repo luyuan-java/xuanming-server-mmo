@@ -10,7 +10,7 @@ import com.game.inbox.gate.ConsumerGate;
 import com.game.inbox.metrics.InboxMetrics;
 import com.game.inbox.notify.Notifier;
 import com.game.inbox.registry.InboxRegistry;
-import com.game.inbox.rules.InboxShards;
+import com.game.common.inbox.InboxShards;
 import com.game.inbox.rules.InboxTips;
 import com.game.proto.BattleItemEntry;
 import com.game.proto.BattleSettlementData;

@@ -15,7 +15,7 @@ spring:
   # 与玩家归属/路由在同一SQL域；先显式安装db/chat-authority.sql及既有player/route迁移。
   datasource:
     type: com.alibaba.druid.pool.DruidDataSource
-    url: jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?useUnicode=true&characterEncoding=UTF-8
+    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?useUnicode=true&characterEncoding=UTF-8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED'"
     username: ${GAME_MYSQL_USERNAME:root}
     password: ${GAME_MYSQL_PASSWORD:}
     druid:

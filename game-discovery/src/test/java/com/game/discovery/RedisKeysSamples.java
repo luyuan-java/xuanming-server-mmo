@@ -107,6 +107,7 @@ final class RedisKeysSamples {
                 new Sample("loginAccountRefresh", k -> k.loginAccountRefresh("acc"), "game:login:account-refresh:acc"),
                 new Sample("loginDevices", k -> k.loginDevices("acc"), "game:login:devices:acc"),
                 new Sample("loginDeviceSession", k -> k.loginDeviceSession("s1"), "game:login:device-session:s1"),
+                new Sample("loginInFlight", k -> k.loginInFlight("enter", "42"), "game:login:inflight:enter:42"),
                 new Sample("battleLock", k -> k.battleLock(42), "game:battle:{42}:lock"),
                 new Sample("battleSettlements", k -> k.battleSettlements(42), "game:battle:{42}:settlement"),
                 new Sample("battleSettled", k -> k.battleSettled(42, 9), "game:battle:{42}:settled:9"),

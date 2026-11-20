@@ -193,6 +193,8 @@ class InBattleGateMatrixTest {
             new Row(189, PET, "RenamePet", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(187, PET, "GmGrantPet", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(403, PET, "BuyPet", BattlePolicy.GATED, PET_IN_BATTLE),
+            // 宝宝条目保存：战斗只读（pet-entries-first-test.md），写前置 checkWritable 回 kPetInBattle
+            new Row(412, PET, "SavePetEntries", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(192, BAG, "SortBag", BattlePolicy.GATED, INVALID_PARAMETER),
             // 装备 2.11：六个入口均由装备业务闸拒绝，每次计 equipment 一次。
             new Row(246, BAG, "UnequipItem", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
@@ -210,6 +212,8 @@ class InBattleGateMatrixTest {
             new Row(167, ATTRIBUTE, "GetAttributePanel", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(181, PET, "GetPetList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(402, PET, "GetPetShop", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(410, PET, "GetPetEntries", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(411, PET, "PreviewPetEntries", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(190, ACTIVITY, "GetActivityList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(191, BAG, "GetBag", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(193, MISSION, "GetMissionList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -576,6 +580,13 @@ class InBattleGateMatrixTest {
 
         out.put(PET + "GetPetList", s -> GetPetListRequest.getDefaultInstance());
         out.put(PET + "GetPetShop", s -> GetPetShopRequest.getDefaultInstance());
+        // 条目预览 / 保存带当前版本（正式 PetRule.entry_config_version），否则版本不符回 1005，对照组就不是成功
+        int entryVersion = BattleFixture.CONFIG.petRule().all().getFirst().getEntryConfigVersion();
+        out.put(PET + "GetPetEntries", s -> com.game.proto.GetPetEntriesRequest.newBuilder().setPetId(s.activePet()).build());
+        out.put(PET + "PreviewPetEntries", s -> com.game.proto.PreviewPetEntriesRequest.newBuilder().setPetId(s.activePet())
+                .setStateVersion(1).setConfigVersion(entryVersion).build());
+        out.put(PET + "SavePetEntries", s -> com.game.proto.SavePetEntriesRequest.newBuilder().setPetId(s.activePet())
+                .setStateVersion(1).setConfigVersion(entryVersion).setRequestId("battle-probe-00000001").build());
         out.put(PET + "BuyPet", s -> BuyPetRequest.newBuilder().setPetTableId(1).setPurchaseSequence(1).setPriceGold(1000).build());
         out.put(PET + "SummonPet", s -> SummonPetRequest.newBuilder().setPetId(s.sparePet()).build());
         out.put(PET + "RecallPet", s -> RecallPetRequest.getDefaultInstance());

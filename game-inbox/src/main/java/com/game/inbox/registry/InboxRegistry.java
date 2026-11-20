@@ -4,6 +4,7 @@ import com.game.inbox.rules.InboxRules;
 import com.game.inbox.rules.InboxTips;
 import com.game.proto.player_inbox.GmCurrencyDebtPayload;
 import com.game.proto.player_inbox.GmCurrencyGainPayload;
+import com.game.proto.player_inbox.GmItemGainPayload;
 import com.game.proto.player_inbox.PlayerInboxClass;
 import com.game.proto.player_inbox.PlayerInboxDomain;
 import com.game.proto.player_inbox.PlayerInboxDomainSpec;
@@ -74,6 +75,10 @@ public final class InboxRegistry {
             new PayloadRule(GmCurrencyGainPayload.getDefaultInstance(), InboxRegistry::validateGain),
             PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_ATTACH_CURRENCY_DEBT,
             new PayloadRule(GmCurrencyDebtPayload.getDefaultInstance(), InboxRegistry::validateDebt),
+            PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_BLOCK_ITEM_GAIN,
+            new PayloadRule(GmItemGainPayload.getDefaultInstance(), InboxRegistry::validateItemGain),
+            PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_UNBLOCK_ITEM_GAIN,
+            new PayloadRule(GmItemGainPayload.getDefaultInstance(), InboxRegistry::validateItemGain),
             PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT,
             new PayloadRule(com.game.proto.BattleSettlementData.getDefaultInstance(), message -> {
                 var value = (com.game.proto.BattleSettlementData) message;
@@ -99,7 +104,9 @@ public final class InboxRegistry {
      * GmSanctionPlayer 对它照常回 kPlayerInboxDisabled（不在白名单里）；类型注册不动，解禁时删掉这一项。
      */
     public static final Map<PlayerInboxMessageType, String> V1_DISABLED = Map.of(
-            PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_ATTACH_CURRENCY_DEBT, "欠款合并语义与撤销路径未就绪（mmorpg 交接 §6 M2 / M3）");
+            PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_ATTACH_CURRENCY_DEBT, "欠款合并语义与撤销路径未就绪（mmorpg 交接 §6 M2 / M3）",
+            PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_BLOCK_ITEM_GAIN, "Java scene 尚无物品获取封锁执行器（PARITY Java 待做）",
+            PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_UNBLOCK_ITEM_GAIN, "Java scene 尚无物品获取封锁执行器（PARITY Java 待做）");
 
     private final Map<PlayerInboxDomain, PlayerInboxDomainSpec> domains;
     private final Map<PlayerInboxMessageType, TypeEntry> types;
@@ -254,6 +261,11 @@ public final class InboxRegistry {
     /** 封锁 / 解封只有 currency_type。币种取值表在 scene（Wallet），这里不复制一份；越界由 scene 执行器给 REJECTED（设计 §7.6）。 */
     static String validateGain(Message message) {
         return message instanceof GmCurrencyGainPayload ? null : "want GmCurrencyGainPayload";
+    }
+
+    /** 物品获取封锁 / 解封：item_config_id 必须非 0（契约注释）；是否存在于 Item 表由 scene 执行器判。 */
+    static String validateItemGain(Message message) {
+        return message instanceof GmItemGainPayload item && item.getItemConfigId() != 0 ? null : "item_config_id 必须非 0";
     }
 
     /** 欠款：owe_amount ∈ (0, INT64_MAX]；reason ≤ 256B；gm_operator 非空且 ≤ 64B（服务端用 operator 覆盖）；expires_at 是 Unix 秒。 */

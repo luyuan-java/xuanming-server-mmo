@@ -128,7 +128,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     private final Function<SessionContext, Integer> deviceRenewal;
     private final PlayerLocationLookup locations;
     private final ZoneMergeFence fence;
-    private final InFlightKeys<Long> playersInFlight = new InFlightKeys<>();
+    private final InFlightKeys<Long> playersInFlight;
 
     /**
      * @param takeovers     归属仍被持有时请持有者让出
@@ -167,8 +167,17 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
                             LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
                             PlayerLocationLookup locations, ZoneMergeFence fence, Duration enterBudget) {
         this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics,
+                deviceRenewal, locations, fence, enterBudget, new InFlightKeys<>());
+    }
+
+    public EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
+                            Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
+                            LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
+                            PlayerLocationLookup locations, ZoneMergeFence fence, Duration enterBudget,
+                            InFlightKeys<Long> playersInFlight) {
+        this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics,
                 delay -> CompletableFuture.delayedExecutor(delay.toMillis(), TimeUnit.MILLISECONDS),
-                System::nanoTime, deviceRenewal, locations, fence, enterBudget);
+                System::nanoTime, deviceRenewal, locations, fence, enterBudget, playersInFlight);
     }
 
     /**
@@ -198,6 +207,15 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
                      LoginMetrics metrics, Function<Duration, Executor> timer, LongSupplier nanoClock,
                      Function<SessionContext, Integer> deviceRenewal, PlayerLocationLookup locations,
                      ZoneMergeFence fence, Duration enterBudget) {
+        this(store, sceneDirectory, takeovers, executor, defaultZoneId, assignTimeout, claimWait, metrics, timer,
+                nanoClock, deviceRenewal, locations, fence, enterBudget, new InFlightKeys<>());
+    }
+
+    EnterGameHandler(PlayerStore store, SceneDirectoryService sceneDirectory, OwnerTakeovers takeovers,
+                     Executor executor, int defaultZoneId, Duration assignTimeout, Duration claimWait,
+                     LoginMetrics metrics, Function<Duration, Executor> timer, LongSupplier nanoClock,
+                     Function<SessionContext, Integer> deviceRenewal, PlayerLocationLookup locations,
+                     ZoneMergeFence fence, Duration enterBudget, InFlightKeys<Long> playersInFlight) {
         if (enterBudget.isNegative() || enterBudget.isZero()) {
             throw new IllegalArgumentException("进游戏的时间预算必须为正: " + enterBudget);
         }
@@ -215,6 +233,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         this.timer = timer;
         this.nanoClock = nanoClock;
         this.fence = Objects.requireNonNull(fence, "fence");
+        this.playersInFlight = Objects.requireNonNull(playersInFlight, "playersInFlight");
     }
 
     @Override

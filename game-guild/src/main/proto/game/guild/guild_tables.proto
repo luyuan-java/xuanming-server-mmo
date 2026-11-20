@@ -8,7 +8,7 @@
 // 同步来的那份是契约产物、不许手改，Java 的库表也不该随 mmorpg 漂移（先例 game-friend/src/main/proto/game/friend/friend_tables.proto）。
 //
 // 改表纪律（guild_db.proto:11-12）：字段只追加、字段号永不复用（删字段用 reserved 占住，pbmysql 按列注释 pb:N 识别字段）；
-// index 组只能追加到末尾，不得调序（idx_<表>_<序号> 按位置命名）。追加区：GuildRow 从 12、GuildPlayerStateRow 从 3、
+// index 组只能追加到末尾，不得调序（idx_<表>_<序号> 按位置命名）。追加区：GuildRow 从 13、GuildPlayerStateRow 从 3、
 // GuildMemberRow 从 8、GuildApplicationRow 从 5 起。
 //
 // message 的声明顺序就是全库表间锁序（tables.go:15-21）：G guild < S guild_player_state < M guild_member < A guild_application；
@@ -48,7 +48,9 @@ message GuildRow {
   int64 score = 9;            // 排行分的权威副本，ZSET 由它重建（绝对值写入）
   uint64 funds = 10;          // 帮会资金：建帮写 0，4.5 起写入
   string name_norm = 11;      // NFKC → TrimSpace → 逐码点小写，≤ 48 码点；不声明 max_length，保持缺省 VARCHAR(191)（与 Go DDL 逐字相同）
-  // 追加区：从 12 起。
+  // 写分版本（guild_db.proto:48，2026-11-10）：基线在写 score 的同一事务里 +1、按版本重建榜；Java 暂只建列（PARITY Java 待做）。
+  uint64 score_version = 12;
+  // 追加区：从 13 起。
 }
 
 // S：玩家串行化守卫行（guild_db.proto:42-53）。每玩家一行，只作锁行；player_id = 0 是全局插入守卫哨兵行（启动期建好、永不删除）。
@@ -155,7 +157,8 @@ message GuildAssetOpRow {
   option (proto2mysql.unique_key) = "player_id,stream,stream_epoch,seq";  // uk_guild_asset_op：同一序号至多一条指令
   // idx_guild_asset_op_0 = 到期领取 / 终态清理 / 回档前检查；idx_guild_asset_op_1 = 按帮查；
   // idx_guild_asset_op_2 = 未决行普通读、离帮提前截止候选、本人待结算列表。索引名从 0 起编号，组只能追加、不得调序。
-  option (proto2mysql.index) = "status,next_attempt_ms;guild_id,op_id;player_id,stream,stream_epoch,status,seq";
+  // idx_guild_asset_op_0 随基线 guild_db.proto:167 扩成覆盖索引 (status,next_attempt_ms,op_id,player_id)，认领扫描不回表
+  option (proto2mysql.index) = "status,next_attempt_ms,op_id,player_id;guild_id,op_id;player_id,stream,stream_epoch,status,seq";
   option (proto2mysql.tidb_nonclustered_pk) = true;
   option (proto2mysql.tidb_shard_row_id_bits) = 4;
   option (proto2mysql.tidb_pre_split_regions) = 4;

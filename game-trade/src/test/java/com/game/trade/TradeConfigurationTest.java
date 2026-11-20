@@ -40,4 +40,17 @@ class TradeConfigurationTest {
                 .isInstanceOf(DependencyException.class).hasMessageContaining("写入预留");
         assertThat(touched).as("不取连接、不发语句").isEmpty();
     }
+
+    @Test
+    void nacos配置清空角色交易直连地址_本机缺省保持直连() {
+        var nacos = new org.springframework.beans.factory.config.YamlPropertiesFactoryBean();
+        nacos.setResources(new org.springframework.core.io.ClassPathResource("application-nacos.yaml"));
+        var nacosProps = nacos.getObject();
+        assertThat(nacosProps).containsKey("game.dubbo.player-trade-url");
+        assertThat(nacosProps.getProperty("game.dubbo.player-trade-url")).isEmpty();
+
+        var local = new org.springframework.beans.factory.config.YamlPropertiesFactoryBean();
+        local.setResources(new org.springframework.core.io.ClassPathResource("application.yaml"));
+        assertThat(local.getObject().getProperty("game.dubbo.player-trade-url")).contains("127.0.0.1:20881");
+    }
 }

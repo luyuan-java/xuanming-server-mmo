@@ -206,6 +206,8 @@ class PetBattleSnapshotTest {
                 .setMagicAttack(55)
                 .setDefense(77)
                 .addAllSkillTableIds(List.of(3, 4, 22))
+                // 培养效果恒带（条目未启用时为空效果，C++ 读法同缺省）
+                .setPetCultivation(com.game.proto.PetCultivationEffects.getDefaultInstance())
                 .build());
     }
 
@@ -358,7 +360,10 @@ class PetBattleSnapshotTest {
 
         List<BattlePetSnapshot> snapshots = service.buildBattleSnapshot(player);
 
-        assertThat(snapshots).containsExactly(BattlePetSnapshot.newBuilder()
+        // 正式表 4aaf5e646e 起灵狐携带技能换成 10006；条目已启用但未投点：培养效果各方向都在、全为 0
+        assertThat(snapshots).hasSize(1);
+        BattlePetSnapshot snapshot = snapshots.getFirst();
+        assertThat(snapshot.toBuilder().clearPetCultivation().build()).isEqualTo(BattlePetSnapshot.newBuilder()
                 .setPetId(grant.petId())
                 .setOwnerPlayerId(PLAYER)
                 .setPetName("灵狐")
@@ -370,8 +375,12 @@ class PetBattleSnapshotTest {
                 .setPhysicalAttack(28)
                 .setMagicAttack(33)
                 .setDefense(36)
-                .addSkillTableIds(14)
+                .addSkillTableIds(10006)
                 .build());
+        var cultivation = snapshot.getPetCultivation();
+        assertThat(cultivation.getPhysicalDamageBps() + cultivation.getMagicDamageBps()).isZero();
+        assertThat(cultivation.getAilmentHitBpsMap().values()).allMatch(v -> v == 0);
+        assertThat(cultivation.getAilmentResistBpsMap().values()).allMatch(v -> v == 0);
 
         assertThat(service.recall(player)).isZero();
         assertThat(service.buildBattleSnapshot(player)).as("收回后不带").isEmpty();

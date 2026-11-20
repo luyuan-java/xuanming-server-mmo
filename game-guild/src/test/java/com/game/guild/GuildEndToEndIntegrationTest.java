@@ -294,7 +294,7 @@ class GuildEndToEndIntegrationTest {
     void 建帮到解散的完整流程() throws Exception {
         String name = "青云门" + Long.toHexString(base & 0xFFFFF);
         CreateGuildResponse created = call(a, GuildMethods.CREATE_GUILD,
-                CreateGuildRequest.newBuilder().setName(" " + name + " ").setZoneId(99).build(), CreateGuildResponse.parser());
+                CreateGuildRequest.newBuilder().setName(" " + name + " ").build(), CreateGuildResponse.parser());
         assertThat(created.hasErrorMessage()).isFalse();
         GuildInfo info = created.getGuild();
         long g = info.getGuildId();

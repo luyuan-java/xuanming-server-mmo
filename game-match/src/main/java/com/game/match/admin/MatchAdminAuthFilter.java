@@ -16,7 +16,9 @@ import java.util.Locale;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
  * game-match 管理端口运维接口（{@code /admin/**}；6.4 只有 dev / test 专用的 {@code /admin/match/dev/*}：读评分、活动开战）的鉴权
@@ -52,6 +54,8 @@ public final class MatchAdminAuthFilter extends OncePerRequestFilter {
     public static final String DEV_ACTIVITY_BATTLE_PATH = DEV_PREFIX + "activity-battle";
 
     static final int MAX_OPERATOR_CHARS = 64;
+    private static final String AUTHENTICATED = MatchAdminAuthFilter.class.getName() + ".authenticated";
+    private record Authentication(String operator) {}
 
     private static final Logger audit = LoggerFactory.getLogger(AUDIT_LOGGER);
 
@@ -100,10 +104,12 @@ public final class MatchAdminAuthFilter extends OncePerRequestFilter {
                 status = HttpServletResponse.SC_FORBIDDEN;
                 response.sendError(status, "dev 管理口只在运行模式 dev / test 下开放（当前 " + runMode.name().toLowerCase(Locale.ROOT) + "）");
             } else {
+                request.setAttribute(AUTHENTICATED, new Authentication(operator));
                 chain.doFilter(request, response);
                 status = response.getStatus();
             }
         } finally {
+            request.removeAttribute(AUTHENTICATED);
             audit.info("admin operator={} method={} path={} query={} remote={} status={}",
                     operator == null ? "<invalid>" : operator, request.getMethod(), printable(path),
                     printable(request.getQueryString()), request.getRemoteAddr(), status);
@@ -159,5 +165,13 @@ public final class MatchAdminAuthFilter extends OncePerRequestFilter {
 
     private boolean matches(String presented) {
         return presented != null && MessageDigest.isEqual(token, presented.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** 控制器二次核验过滤器留下的私有类型标记，不接受任何客户端头作为认证事实。 */
+    public static String authenticatedOperator(HttpServletRequest request) {
+        if (request.getAttribute(AUTHENTICATED) instanceof Authentication authentication) {
+            return authentication.operator();
+        }
+        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "运维认证失败");
     }
 }

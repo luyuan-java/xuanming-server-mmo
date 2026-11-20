@@ -14,7 +14,7 @@ import com.game.inbox.metrics.InboxMetrics;
 import com.game.inbox.metrics.InboxMetrics.ScanGauges;
 import com.game.inbox.notify.Notifier;
 import com.game.inbox.notify.NotifyResult;
-import com.game.inbox.rules.InboxShards;
+import com.game.common.inbox.InboxShards;
 import com.game.inbox.rules.LedgerProofs.FinalizedRef;
 import com.game.proto.player_inbox.PlayerInboxDomain;
 import com.game.proto.player_inbox.PlayerInboxFinalizer;

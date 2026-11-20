@@ -3,7 +3,7 @@ package com.game.inbox.maintenance;
 import com.game.inbox.metrics.InboxMetrics;
 import com.game.inbox.metrics.InboxMetrics.ScanGauges;
 import com.game.inbox.notify.NotifyResult;
-import com.game.inbox.rules.InboxShards;
+import com.game.common.inbox.InboxShards;
 import com.game.inbox.store.InboxMaintenanceStore;
 import com.game.inbox.store.InboxMaintenanceStore.NotifyDue;
 import com.game.inbox.store.LedgerReader;

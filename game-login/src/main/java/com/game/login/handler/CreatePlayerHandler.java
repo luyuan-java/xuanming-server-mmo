@@ -89,7 +89,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     private final Function<SessionContext, Integer> deviceRenewal;
     private final LongSupplier nanoClock;
     private final Duration createBudget;
-    private final InFlightKeys<String> accountsInFlight = new InFlightKeys<>();
+    private final InFlightKeys<String> accountsInFlight;
 
     /**
      * @param randomByte           生成名用的随机字节源（生产为 SecureRandom），见 {@link PlayerNames#generate}
@@ -110,8 +110,15 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     public CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
                                IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
                                LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal) {
+        this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, new InFlightKeys<>());
+    }
+
+    public CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
+                               IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
+                               LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
+                               InFlightKeys<String> accountsInFlight) {
         this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, System::nanoTime,
-                DEFAULT_CREATE_BUDGET);
+                DEFAULT_CREATE_BUDGET, accountsInFlight);
     }
 
     /**
@@ -124,6 +131,14 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
                         IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
                         LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
                         LongSupplier nanoClock, Duration createBudget) {
+        this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, nanoClock,
+                createBudget, new InFlightKeys<>());
+    }
+
+    CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
+                        IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
+                        LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
+                        LongSupplier nanoClock, Duration createBudget, InFlightKeys<String> accountsInFlight) {
         if (createBudget.isNegative() || createBudget.isZero()) {
             throw new IllegalArgumentException("建角的请求预算必须为正: " + createBudget);
         }
@@ -137,6 +152,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         this.fence = Objects.requireNonNull(fence, "fence");
         this.maxPlayersPerAccount = maxPlayersPerAccount;
         this.metrics = metrics;
+        this.accountsInFlight = Objects.requireNonNull(accountsInFlight, "accountsInFlight");
     }
 
     @Override

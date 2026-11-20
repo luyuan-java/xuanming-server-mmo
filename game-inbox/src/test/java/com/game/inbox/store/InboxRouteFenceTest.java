@@ -10,7 +10,7 @@ import com.game.common.player.RouteAuthorityInitializer;
 import com.game.discovery.sql.AuthorityJdbc;
 import com.game.inbox.metrics.InboxMetrics;
 import com.game.inbox.notify.Notifier;
-import com.game.inbox.rules.InboxShards;
+import com.game.common.inbox.InboxShards;
 import com.game.proto.player_inbox.PlayerInboxDomain;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;

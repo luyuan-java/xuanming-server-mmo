@@ -78,6 +78,7 @@ class GuildTipsTest {
         codes.put("TRIAL_INVITE_DECLINED", GuildTips.TRIAL_INVITE_DECLINED);
         codes.put("TRIAL_INVITE_COOLDOWN", GuildTips.TRIAL_INVITE_COOLDOWN);
         codes.put("TRIAL_SERVICE_BUSY", GuildTips.TRIAL_SERVICE_BUSY);
+        codes.put("TRIAL_BATTLE_ABORTED", GuildTips.TRIAL_BATTLE_ABORTED);
         return codes;
     }
 

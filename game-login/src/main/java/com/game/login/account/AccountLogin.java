@@ -43,13 +43,19 @@ public final class AccountLogin {
     private final PlayerStore store;
     private final LoginTokens tokens;
     private final LoginDevices devices;
-    private final InFlightKeys<String> accountsInFlight = new InFlightKeys<>();
+    private final InFlightKeys<String> accountsInFlight;
 
     public AccountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens tokens, LoginDevices devices) {
+        this(authenticator, store, tokens, devices, new InFlightKeys<>());
+    }
+
+    public AccountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens tokens, LoginDevices devices,
+                        InFlightKeys<String> accountsInFlight) {
         this.authenticator = authenticator;
         this.store = store;
         this.tokens = tokens;
         this.devices = devices;
+        this.accountsInFlight = java.util.Objects.requireNonNull(accountsInFlight, "accountsInFlight");
     }
 
     /**

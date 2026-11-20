@@ -1,6 +1,6 @@
 package com.game.inbox.store;
 
-import com.game.inbox.rules.InboxShards;
+import com.game.common.inbox.InboxShards;
 import com.game.pbmysql.PbMysql;
 import com.game.proto.player_inbox.player_inbox_audit;
 import com.game.proto.player_inbox.player_inbox_item_row;

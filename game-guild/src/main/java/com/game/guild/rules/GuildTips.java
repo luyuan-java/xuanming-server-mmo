@@ -88,6 +88,11 @@ public final class GuildTips {
     public static final int TRIAL_INVITE_COOLDOWN = GuildErrorTip.guild_error.kGuildTrialInviteCooldown_VALUE;
     /** match 不可用 / 超时 / 出错，或剩余预算不够调它：活动段唯一的 in-band 故障码。 */
     public static final int TRIAL_SERVICE_BUSY = GuildErrorTip.guild_error.kGuildTrialServiceBusy_VALUE;
+    /**
+     * 历练已登记对局、之后被 match 作废（开局后 SQL ABORT 或发房前中止）：业务拒绝（基线 constants.go:180 ErrTrialBattleAborted，
+     * 2026-11-11）。Java 历练链路尚未改用它（仍按旧口径处理），PARITY 登记 Java 待做。
+     */
+    public static final int TRIAL_BATTLE_ABORTED = GuildErrorTip.guild_error.kGuildTrialBattleAborted_VALUE;
 
     // ---- 通用段（tip_text.json） ----
 

@@ -68,7 +68,7 @@ final class InboxOwnerAdmissionTest {
                 request,clock.get(),GmCurrencyGainPayload.newBuilder().setCurrencyType(1).build().toByteArray(),"fixture", "",null);}
         InboxStore.EnqueueResult enqueue(long request)throws SQLException{return store.enqueue(budget(),params(request));}
         player_inbox_item_row item(long request)throws SQLException{return base.jdbc.read(budget(),s->InboxStore.readItemByRequest(s,
-                com.game.inbox.rules.InboxShards.rowShard(1),1,PlayerInboxProducerKind.PLAYER_INBOX_PRODUCER_GM,request));}
+                com.game.common.inbox.InboxShards.rowShard(1),1,PlayerInboxProducerKind.PLAYER_INBOX_PRODUCER_GM,request));}
         FetchPlayerInboxRequest request(RoleAdmissionIdentity original){return FetchPlayerInboxRequest.newBuilder().setPlayerId(1).setDomain(DOMAIN)
                 .setOwnerEpoch(original.getOwnerEpoch()).setCorrelationId(17).setMaxItems(16).setSceneNodeId(5).setAdmission(original).build();}
         FetchPlayerInboxResponse fetch(RoleAdmissionIdentity original)throws SQLException{return store.fetch(budget(),sign(InboxCallContract.FETCH,request(original)),"fixture");}
