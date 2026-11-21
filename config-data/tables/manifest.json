@@ -287,6 +287,8 @@
     },
     {
       "name": "BaseScene",
+      "hot_reload": false,
+      "ids_permanent": false,
       "rows": 21,
       "source": {
         "file": "BaseScene.xlsx",
