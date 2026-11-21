@@ -57,6 +57,8 @@ public final class TipFaults {
             new Fault(2031, "login_error", "LoginTimeout"),
             new Fault(2035, "login_error", "LoginAuthProviderUnavailable"),
             new Fault(2036, "login_error", "LoginTokenIssueFailed"),
+            new Fault(2047, "login_error", "LoginRealNameServiceUnavailable"),
+            new Fault(2050, "login_error", "RoleNameCheckUnavailable"),
             new Fault(3003, "scene_error", "EnterNodeUnavailable"),
             new Fault(3010, "scene_error", "EnterSceneGsInfoNull"),
             new Fault(3012, "scene_error", "EnterSceneYourSceneIsNull"),
@@ -71,14 +73,18 @@ public final class TipFaults {
             new Fault(9000, "entity_error", "EntityTransformNotFound"),
             new Fault(14008, "guild_error", "GuildIdGenUnavailable"),
             new Fault(14041, "guild_error", "GuildTrialServiceBusy"),
+            new Fault(14045, "guild_error", "GuildTextCheckUnavailable"),
             new Fault(16004, "match_error", "MatchInternal"),
+            new Fault(18001, "chat_error", "ChatContentCheckUnavailable"),
+            new Fault(20017, "trade_error", "TradeTextCheckUnavailable"),
             new Fault(26016, "pet_error", "PetIdGenerateFailed"),
             new Fault(27004, "asset_error", "AssetInvalidBundle"),
             new Fault(27007, "asset_error", "AssetPartialApplied"),
             new Fault(27008, "asset_error", "AssetAuthFailed"),
             new Fault(28010, "equip_error", "EquipInternalError"),
             new Fault(29014, "player_inbox_error", "PlayerInboxStoreUnavailable"),
-            new Fault(30011, "mystery_merchant_error", "MysteryMerchantInternalError")
+            new Fault(30011, "mystery_merchant_error", "MysteryMerchantInternalError"),
+            new Fault(32004, "afk_pass_error", "AfkPassUnavailable")
     );
 
     /** 由 FAULTS 派生,不单独生成第二份字面量。 */

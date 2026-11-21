@@ -171,13 +171,13 @@ class ConfigTablesTest {
                 rows -> rows.set(0, ((MessageLimiterTable) rows.get(0)).toBuilder().setTipMessage(987654).build()));
         rewriteRows(dir, ActorActionStateRows.SHEET, ActorActionStateRows.DATA_FILE, ActorActionStateTable.parser(),
                 rows -> rows.set(0, ((ActorActionStateTable) rows.get(0)).toBuilder()
-                        .addState(ActorActionStatestate.newBuilder().setStateTip(-1)).build()));
+                        .setStateTip(-1).build()));
         assertThatThrownBy(() -> ConfigTables.load(dir))
                 .isInstanceOf(TableLoadException.class)
                 .hasMessageContaining("tip 引用校验失败")
                 .hasMessageContaining("MessageLimiter.tip_message")
                 .hasMessageContaining("987654")
-                .hasMessageContaining("ActorActionState.state.state_tip")
+                .hasMessageContaining("ActorActionState.state_tip")
                 .hasMessageContaining("4294967295");
     }
 

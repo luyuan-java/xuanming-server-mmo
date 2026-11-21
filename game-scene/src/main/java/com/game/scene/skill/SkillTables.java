@@ -1,24 +1,29 @@
 package com.game.scene.skill;
 
+import com.game.common.combatai.StateMutexMatrix;
+import com.game.common.combatai.StateMutexMatrix.StateMode;
 import com.game.table.ActorActionCombatStateTable;
-import com.game.table.ActorActionCombatStatestate;
 import com.game.table.ActorActionStateTable;
-import com.game.table.ActorActionStatestate;
 import com.game.table.ConfigTables;
 import com.game.table.CooldownTable;
 import com.game.table.SkillPermissionTable;
 import com.game.table.SkillTable;
-import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * 技能用到的配表视图（Skill / Cooldown / ActorActionState / ActorActionCombatState / SkillPermission）。不可变，加载后任意线程可读。
- * 时长在加载时换成纳秒：Skill 的 cast_point / recovery_time 是秒（double，schema 注释写的毫秒是错的，基线按秒用），
+ *
+ * <p>时长在加载时换成纳秒：Skill 的 cast_point / recovery_time 是秒（double，schema 注释写的毫秒是错的，基线按秒用），
  * channel_finish 是秒（uint32），Cooldown.duration 是毫秒（uint32）。表是同步来的契约，加载只告警、不拒绝。
+ *
+ * <p>{@code ActorActionState} 与 {@code ActorActionCombatState} 已规范化为 {@code (id, state_id, state_mode, state_tip)}
+ * 并统一模式口径（{@code 0=Block / 1=Allow / 2=Interrupt}），加载期一次性编译为 64 位 O(1) {@link StateMutexMatrix}。
  */
 public final class SkillTables {
 
@@ -49,22 +54,19 @@ public final class SkillTables {
         }
     }
 
-    /** 行为互斥 / 战斗状态表的一格。 */
-    public record StateCell(int mode, int tip) {
-    }
-
     private final Map<Integer, SkillDef> skills;
     private final Map<Integer, Long> cooldownNanos;
-    private final Map<Integer, List<StateCell>> actionStates;
-    private final Map<Integer, List<StateCell>> combatStates;
+    private final StateMutexMatrix actionStateMatrix;
+    private final StateMutexMatrix combatStateMatrix;
     private final Map<Integer, List<Integer>> skillPermissions;
 
-    SkillTables(Map<Integer, SkillDef> skills, Map<Integer, Long> cooldownNanos, Map<Integer, List<StateCell>> actionStates,
-                Map<Integer, List<StateCell>> combatStates, Map<Integer, List<Integer>> skillPermissions) {
+    SkillTables(Map<Integer, SkillDef> skills, Map<Integer, Long> cooldownNanos,
+                StateMutexMatrix actionStateMatrix, StateMutexMatrix combatStateMatrix,
+                Map<Integer, List<Integer>> skillPermissions) {
         this.skills = Map.copyOf(skills);
         this.cooldownNanos = Map.copyOf(cooldownNanos);
-        this.actionStates = Map.copyOf(actionStates);
-        this.combatStates = Map.copyOf(combatStates);
+        this.actionStateMatrix = actionStateMatrix;
+        this.combatStateMatrix = combatStateMatrix;
         this.skillPermissions = Map.copyOf(skillPermissions);
     }
 
@@ -86,27 +88,62 @@ public final class SkillTables {
             }
             skills.put(def.id(), def);
         }
-        Map<Integer, List<StateCell>> action = new HashMap<>();
+
+        StateMutexMatrix actionMatrix = new StateMutexMatrix();
+        Set<Long> seenActionPairs = new HashSet<>();
         for (ActorActionStateTable row : tables.actorActionState().all()) {
-            List<StateCell> cells = new ArrayList<>();
-            for (ActorActionStatestate cell : row.getStateList()) {
-                cells.add(new StateCell(cell.getStateMode(), cell.getStateTip()));
-            }
-            action.put(row.getId(), List.copyOf(cells));
+            compileMatrixRow("ActorActionState", actionMatrix, seenActionPairs,
+                    row.getId(), row.getStateId(), row.getStateMode(), row.getStateTip());
         }
-        Map<Integer, List<StateCell>> combat = new HashMap<>();
+
+        StateMutexMatrix combatMatrix = new StateMutexMatrix();
+        Set<Long> seenCombatPairs = new HashSet<>();
         for (ActorActionCombatStateTable row : tables.actorActionCombatState().all()) {
-            List<StateCell> cells = new ArrayList<>();
-            for (ActorActionCombatStatestate cell : row.getStateList()) {
-                cells.add(new StateCell(cell.getStateMode(), cell.getStateTip()));
-            }
-            combat.put(row.getId(), List.copyOf(cells));
+            compileMatrixRow("ActorActionCombatState", combatMatrix, seenCombatPairs,
+                    row.getId(), row.getStateId(), row.getStateMode(), row.getStateTip());
         }
+
         Map<Integer, List<Integer>> permissions = new HashMap<>();
         for (SkillPermissionTable row : tables.skillPermission().all()) {
             permissions.put(row.getId(), List.copyOf(row.getSkillTypeList()));
         }
-        return new SkillTables(skills, cooldowns, action, combat, permissions);
+        return new SkillTables(skills, cooldowns, actionMatrix, combatMatrix, permissions);
+    }
+
+    /**
+     * 编译一条规范化互斥规则进矩阵：保留 Java 侧 {@link SkillRules#tableTip(int)} 口径——
+     * {@code BLOCK} 格填 {@code kSuccess(1000)} 归一化为放行，填 {@code 0} 按配置错 fail-closed 映射为 {@code 1002}。
+     */
+    static void compileMatrixRow(String tableName, StateMutexMatrix matrix, Set<Long> seenPairs,
+                                 int actionId, int stateId, int modeRaw, int rawTip) {
+        matrix.ensureAction(actionId);
+        if (Integer.compareUnsigned(stateId, StateMutexMatrix.MAX_MUTEX_STATES) >= 0) {
+            log.warn("{} state_id 越界已忽略 action={} state_id={}",
+                    tableName, Integer.toUnsignedString(actionId), Integer.toUnsignedString(stateId));
+            return;
+        }
+        StateMode mode = StateMode.fromCode(modeRaw);
+        if (mode == null) {
+            log.warn("{} state_mode 非法已忽略 action={} state_id={} state_mode={}",
+                    tableName, Integer.toUnsignedString(actionId), Integer.toUnsignedString(stateId),
+                    Integer.toUnsignedString(modeRaw));
+            return;
+        }
+        long pairKey = (Integer.toUnsignedLong(actionId) << 32) | Integer.toUnsignedLong(stateId);
+        if (seenPairs != null && !seenPairs.add(pairKey)) {
+            log.warn("{} 存在重复规则已覆盖 action={} state_id={}",
+                    tableName, Integer.toUnsignedString(actionId), Integer.toUnsignedString(stateId));
+        }
+        if (mode == StateMode.BLOCK) {
+            int normalizedTip = SkillRules.tableTip(rawTip);
+            if (normalizedTip == SkillRules.OK) {
+                matrix.setRule(actionId, stateId, StateMode.ALLOW, SkillRules.OK);
+            } else {
+                matrix.setRule(actionId, stateId, StateMode.BLOCK, normalizedTip);
+            }
+            return;
+        }
+        matrix.setRule(actionId, stateId, mode, SkillRules.OK);
     }
 
     private static long seconds(int skillId, String column, double seconds) {
@@ -127,14 +164,14 @@ public final class SkillTables {
         return cooldownNanos.getOrDefault(cooldownId, 0L);
     }
 
-    /** ActorActionState 的一行（行号 = 行为：0 放技能、1 跟随、2 上坐骑、3 下坐骑）；没有为 null。 */
-    public List<StateCell> actionStateRow(int action) {
-        return actionStates.get(action);
+    /** 预编译的行为互斥矩阵（行号 = 行为：0 放技能、1 跟随、2 上坐骑、3 下坐骑）。 */
+    public StateMutexMatrix actionStateMatrix() {
+        return actionStateMatrix;
     }
 
-    /** ActorActionCombatState 的一行（行号同上）；没有为 null。 */
-    public List<StateCell> combatStateRow(int action) {
-        return combatStates.get(action);
+    /** 预编译的战斗异常状态互斥矩阵（行号同上）。 */
+    public StateMutexMatrix combatStateMatrix() {
+        return combatStateMatrix;
     }
 
     /** SkillPermission 的一行（行号 = 战斗状态，格子按技能类型位序号）；没有为 null。 */

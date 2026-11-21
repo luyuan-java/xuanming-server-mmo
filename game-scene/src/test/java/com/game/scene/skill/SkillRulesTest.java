@@ -2,20 +2,24 @@ package com.game.scene.skill;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.game.common.combatai.StateMutexMatrix;
+import com.game.common.combatai.StateMutexMatrix.StateExitHookRegistry;
+import com.game.common.combatai.StateMutexMatrix.StateExitReason;
+import com.game.common.combatai.StateMutexMatrix.StateMode;
+import com.game.scene.player.PlayerSkillState;
 import com.game.scene.player.PlayerSkillState.Cast;
 import com.game.scene.player.PlayerSkillState.Phase;
 import com.game.scene.skill.SkillTables.SkillDef;
-import com.game.scene.skill.SkillTables.StateCell;
 import com.game.table.ConfigTables;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
 import org.junit.jupiter.api.Test;
 
-/** 放技能的纯规则与配表视图：目标方式、表提示码、行为互斥、战斗状态、技能许可、阶段结算。 */
+/** 放技能的纯规则与配表视图：目标方式、表提示码、位图行为互斥与退出钩子、战斗状态、技能许可、阶段结算。 */
 class SkillRulesTest {
 
     private static SkillDef skill(List<Integer> types, List<Integer> modes) {
@@ -23,7 +27,7 @@ class SkillRulesTest {
     }
 
     @Test
-    void 正式表_技能行与冷却按秒和毫秒换成纳秒() {
+    void 正式表_技能行与冷却按秒和毫秒换成纳秒_规范化互斥矩阵预编译生效() {
         Path dir = Files.isDirectory(Path.of("../config-data/tables"))
                 ? Path.of("../config-data/tables")
                 : Path.of("config-data/tables");
@@ -44,7 +48,17 @@ class SkillRulesTest {
         assertThat(three.channelFinishNanos()).isEqualTo(1_000_000_000L);
         assertThat(tables.skill(4).general() || tables.skill(4).channel()).as("开关技能没有施法阶段").isFalse();
         assertThat(tables.skill(0)).isNull();
-        assertThat(tables.actionStateRow(0)).extracting(StateCell::mode).containsOnly(1);
+
+        StateMutexMatrix actionMatrix = tables.actionStateMatrix();
+        assertThat(actionMatrix.hasAction(SkillService.ACTION_USE_SKILL)).isTrue();
+        long followAndMount = (1L << SkillService.STATE_TEAM_FOLLOW) | (1L << SkillService.STATE_MOUNTED);
+        var evalUseSkill = actionMatrix.evaluate(followAndMount, SkillService.ACTION_USE_SKILL,
+                SkillRules.OK, SkillRules.INVALID_TABLE_ID);
+        assertThat(evalUseSkill.allowed()).isTrue();
+        assertThat(evalUseSkill.interruptMask()).isEqualTo(followAndMount);
+        assertThat(actionMatrix.canPerform(1L << SkillService.STATE_COMBAT, 1,
+                SkillRules.OK, SkillRules.INVALID_TABLE_ID)).as("战斗中禁止跟随").isEqualTo(7004);
+        assertThat(tables.combatStateMatrix().hasAction(SkillService.ACTION_USE_SKILL)).isTrue();
         assertThat(tables.skillPermissionRow(1)).hasSize(6).containsOnly(1000);
     }
 
@@ -72,40 +86,60 @@ class SkillRulesTest {
     }
 
     @Test
-    void 行为互斥_行缺失1001_互斥格按提示码_越界放行_打断格删状态_最后加成功状态() {
-        TreeSet<Integer> states = new TreeSet<>();
-        assertThat(SkillRules.tryPerformAction(null, states, 0)).isEqualTo(1001);
-        assertThat(states).isEmpty();
+    void 行为互斥_行缺失1001_互斥格按提示码_打断格先摘态再触发退出钩子_最后加成功状态() {
+        PlayerSkillState state = new PlayerSkillState();
+        StateExitHookRegistry<String> hooks = new StateExitHookRegistry<>();
+        assertThat(SkillRules.tryPerformAction(null, state, 0, 0, "p1", hooks)).isEqualTo(1001);
+        assertThat(state.actionStates()).isEmpty();
 
-        List<StateCell> row = List.of(new StateCell(1, 1000), new StateCell(0, 1000), new StateCell(2, 0));
-        states.addAll(Set.of(1, 2, 5));
-        assertThat(SkillRules.tryPerformAction(row, states, 0)).isZero();
-        assertThat(states).as("互斥但提示 1000 放行；打断格（2）删掉；越界的 5 不动；加上 0").containsExactly(0, 1, 5);
+        StateMutexMatrix matrix = new StateMutexMatrix();
+        // BLOCK 配 1000 经 compileMatrixRow 归一化为放行，INTERRUPT 删状态并触发退出钩子
+        SkillTables.compileMatrixRow("test", matrix, null, 0, 0, StateMode.ALLOW.code(), 1000);
+        SkillTables.compileMatrixRow("test", matrix, null, 0, 1, StateMode.BLOCK.code(), 1000);
+        SkillTables.compileMatrixRow("test", matrix, null, 0, 2, StateMode.INTERRUPT.code(), 0);
 
-        List<StateCell> mutex = List.of(new StateCell(1, 1000), new StateCell(0, 10000));
-        assertThat(SkillRules.tryPerformAction(mutex, states, 2)).isEqualTo(10000);
-        assertThat(states).as("被拒不改状态").containsExactly(0, 1, 5);
+        state.addActionState(1);
+        state.addActionState(2);
+        state.addActionState(5);
+        List<String> hookLog = new ArrayList<>();
+        hooks.register(2, (owner, reason) -> {
+            assertThat(state.hasActionState(2)).as("钩子触发前状态必须已移除").isFalse();
+            hookLog.add(owner + ":" + reason);
+        });
 
-        TreeSet<Integer> huge = new TreeSet<>(Set.of(-1));
-        assertThat(SkillRules.tryPerformAction(row, huge, 0)).as("uint32 极大状态号越界放行，不抛").isZero();
-        assertThat(huge).containsExactly(-1, 0);
+        assertThat(SkillRules.tryPerformAction(matrix, state, 0, 0, "p1", hooks)).isZero();
+        assertThat(state.actionStates()).as("互斥但提示 1000 放行；打断格（2）删掉；越界的 5 不动；加上 0")
+                .containsExactly(0, 1, 5);
+        assertThat(state.actionStateMask()).isEqualTo((1L << 0) | (1L << 1) | (1L << 5));
+        assertThat(hookLog).containsExactly("p1:" + StateExitReason.INTERRUPTED);
+
+        StateMutexMatrix mutex = new StateMutexMatrix();
+        SkillTables.compileMatrixRow("test", mutex, null, 0, 0, StateMode.ALLOW.code(), 1000);
+        SkillTables.compileMatrixRow("test", mutex, null, 0, 1, StateMode.BLOCK.code(), 10000);
+        assertThat(SkillRules.tryPerformAction(mutex, state, 0, 2, "p1", hooks)).isEqualTo(10000);
+        assertThat(state.actionStates()).as("被拒不改状态").containsExactly(0, 1, 5);
+
+        assertThat(SkillRules.tryPerformAction(matrix, state, 0, SkillRules.ACTOR_STATE_MAX, "p1", hooks))
+                .as("非法成功入态拒绝且无副作用").isEqualTo(SkillRules.INVALID_PARAMETER);
     }
 
     @Test
-    void 战斗状态互斥_没有状态放行_第一个互斥格就返回() {
-        List<StateCell> row = List.of(new StateCell(1, 1000), new StateCell(1, 7005));
-        assertThat(SkillRules.validateCombatStates(null, Set.of())).isZero();
-        assertThat(SkillRules.validateCombatStates(null, Set.of(1))).isEqualTo(1001);
-        assertThat(SkillRules.validateCombatStates(row, new TreeSet<>(Set.of(1)))).isEqualTo(7005);
-        assertThat(SkillRules.validateCombatStates(row, new TreeSet<>(Set.of(0, 1)))).as("状态 0 的互斥格提示 1000：放行并结束")
-                .isZero();
-        assertThat(SkillRules.validateCombatStates(row, Set.of(9))).as("越界跳过").isZero();
-        assertThat(SkillRules.validateCombatStates(row, Set.of(-1))).as("uint32 极大状态号越界跳过，不抛").isZero();
+    void 战斗状态互斥_没有状态放行_按最小状态号返回互斥提示码() {
+        StateMutexMatrix matrix = new StateMutexMatrix();
+        SkillTables.compileMatrixRow("combat", matrix, null, 0, 0, StateMode.BLOCK.code(), 1000);
+        SkillTables.compileMatrixRow("combat", matrix, null, 0, 1, StateMode.BLOCK.code(), 7005);
+
+        assertThat(SkillRules.validateCombatStates(null, 0L, 0)).isZero();
+        assertThat(SkillRules.validateCombatStates(null, 1L << 1, 0)).isEqualTo(1001);
+        assertThat(SkillRules.validateCombatStates(matrix, 1L << 1, 0)).isEqualTo(7005);
+        assertThat(SkillRules.validateCombatStates(matrix, (1L << 0) | (1L << 1), 0))
+                .as("状态 0 填 1000 归一化为放行，状态 1 仍正确触发 7005").isEqualTo(7005);
+        assertThat(SkillRules.validateCombatStates(matrix, 1L << 9, 0)).as("未配置状态位放行").isZero();
     }
 
     @Test
     void 技能许可_行缺失1001_类型位越界1002_格子按提示码() {
-        SkillTables tables = new SkillTables(Map.of(), Map.of(), Map.of(), Map.of(),
+        SkillTables tables = new SkillTables(Map.of(), Map.of(), new StateMutexMatrix(), new StateMutexMatrix(),
                 Map.of(1, List.of(1000, 1000, 7005)));
         assertThat(SkillRules.checkSkillPermission(tables, skill(List.of(1), List.of()), Set.of())).isZero();
         assertThat(SkillRules.checkSkillPermission(tables, skill(List.of(1), List.of()), Set.of(1))).isZero();
@@ -127,7 +161,7 @@ class SkillRulesTest {
         assertThat(SkillService.settle(channel, 3_000)).isEqualTo(new Cast(3, Phase.RECOVERY, 3_500, 2_000, 500));
         assertThat(SkillService.settle(channel, 9_999)).as("很久之后一次结算到底").isNull();
 
-        Cast zero = new Cast(2, Phase.CASTING, 1_000, -1, 0);
+        Cast zero = new Cast(1, Phase.CASTING, 1_000, -1, 0);
         assertThat(SkillService.settle(zero, 1_000)).as("0 长度的后摇不算进行中").isNull();
         assertThat(SkillService.settle(null, 5)).isNull();
     }

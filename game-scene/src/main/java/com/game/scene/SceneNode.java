@@ -459,6 +459,11 @@ public class SceneNode implements SmartLifecycle {
         battleService = battle;
         links = gateLinks;
         world = sceneWorld;
+        skills.registerActionStateExitHook(SkillService.STATE_COMBAT, (player, reason) -> {
+            if (reason == com.game.common.combatai.StateMutexMatrix.StateExitReason.INTERRUPTED) {
+                skills.interruptActiveCast(sceneWorld, player, 0);
+            }
+        });
         battle.withInboxFailureHandler((player,failure)->sceneWorld.discardUnpersistedBattleEffect(player,player.ownerEpoch(),failure));
         repository.onFinalApplied(sceneWorld::onFinalApplied);
         repository.startFinalRecovery(scheduler);

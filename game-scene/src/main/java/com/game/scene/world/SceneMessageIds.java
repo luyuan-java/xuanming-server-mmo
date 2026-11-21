@@ -31,7 +31,8 @@ public record SceneMessageIds(
         int notifyActorMoveList,
         int notifyTeleport,
         int sendTipToClient,
-        int travelToZone) {
+        int travelToZone,
+        int notifySelfActorStateFlags) {
 
     private static final String SCENE_SERVICE = "SceneSceneClientPlayer";
     private static final String SKILL_SERVICE = "SceneSkillClientPlayer";
@@ -62,7 +63,8 @@ public record SceneMessageIds(
                 registry.requireId(MOVEMENT_SERVICE, "NotifyActorMoveList"),
                 registry.requireId(MOVEMENT_SERVICE, "NotifyTeleport"),
                 registry.requireId(COMMON_SERVICE, "SendTipToClient"),
-                registry.requireId(SCENE_SERVICE, "TravelToZone"));
+                registry.requireId(SCENE_SERVICE, "TravelToZone"),
+                registry.requireId(COMMON_SERVICE, "NotifySelfActorStateFlags"));
     }
 
     /** 服务端主动推送：{@code MessageContent.id} 不设（0），与基线 GateSendMessageToPlayer 一致。 */

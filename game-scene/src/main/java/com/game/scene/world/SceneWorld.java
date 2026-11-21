@@ -25,6 +25,7 @@ import com.game.proto.MoveAckS2C;
 import com.game.proto.Rotation;
 import com.game.proto.SceneInfoComp;
 import com.game.proto.SceneInfoS2C;
+import com.game.proto.SelfActorStateFlagsS2C;
 import com.game.proto.TravelToZoneResponse;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.BattleGate;
@@ -1751,12 +1752,34 @@ public final class SceneWorld {
 
         ActorCreateS2C self = player.toActorCreate();
         sendTo(player, push(ids.notifyEnterScene(), EnterSceneS2C.newBuilder().setSceneInfo(scene.info()).build()));
+        resendSelfStateFlagsAfterEntry(player);
         sendTo(player, push(ids.notifyActorCreate(), self));
         if (!entered.seen().isEmpty()) {
             sendTo(player, push(ids.notifyActorListCreate(), actorList(entered.seen())));
             catchUpMoves(player, entered.seen());
         }
         broadcast(entered.seers(), push(ids.notifyActorCreate(), self));
+    }
+
+    /**
+     * 进场 / 同节点换场景落地后补推主角状态互斥位图：客户端收到 {@code EnterSceneS2C} 已将本地位清零，
+     * 此处重置推送基线并在存在非零状态（且未冻结）时立刻单播一次；首次进场全 0 时不发多余包。
+     */
+    private void resendSelfStateFlagsAfterEntry(ScenePlayer player) {
+        var skillState = player.skillState();
+        skillState.resetSyncedStateBaseline();
+        if (player.frozen()) {
+            return;
+        }
+        long seq = skillState.nextStateSyncSeqIfChanged();
+        if (seq == 0L) {
+            return;
+        }
+        sendTo(player, push(ids.notifySelfActorStateFlags(), SelfActorStateFlagsS2C.newBuilder()
+                .setActionStateMask(skillState.actionStateMask())
+                .setCombatStateMask(skillState.combatStateMask())
+                .setStateSeq(seq)
+                .build()));
     }
 
     /**

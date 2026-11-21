@@ -16,6 +16,7 @@ message BuffTable {
   option (cfg_sheet)       = "Buff";
   option (cfg_source_file) = "Buff.xlsx";
   option (cfg_primary_key) = "id";
+  option (cfg_hot_reload)  = true;
 
   uint32 id = 1;
   reserved 9001; // designer：cfg_owner = "designer"，不进服务端产物（ContractSync 改写）
@@ -152,5 +153,5 @@ message BuffTable {
   // 下线保留:1 = 随玩家存档保留(下线重登、换节点、跨 zone 都不丢),按到期时刻存,离线期间照常走;0 = 实体重建即清(战斗类短效状态)。
   // 只配分钟级以上、非战斗、与施法者无关的增益或惩罚(经验加成、料理、死亡惩罚等);控制、伤害、护盾、隐身、子 Buff 不配。
   // 存档不记施法者,配 1 的行按 no_caster=1 叠层。规则见 docs/design/realtime-cooldown-buff-persistence.md。
-  reserved 54; // keep_on_logout：schema 已声明、本批导表产物里还没有（ContractSync 改写）
+  uint32 keep_on_logout = 54 [(cfg_owner) = "server"];
 }

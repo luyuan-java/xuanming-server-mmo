@@ -6,14 +6,17 @@ import com.game.api.proto.ClientForward;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerLeave;
 import com.game.common.RunMode;
+import com.game.common.combatai.StateMutexMatrix;
+import com.game.common.combatai.StateMutexMatrix.StateExitReason;
+import com.game.common.combatai.StateMutexMatrix.StateMode;
 import com.game.proto.MessageContent;
 import com.game.proto.ReleaseSkillRequest;
 import com.game.proto.ReleaseSkillResponse;
+import com.game.proto.SelfActorStateFlagsS2C;
 import com.game.proto.SkillInterruptedS2C;
 import com.game.proto.SkillUsedS2C;
 import com.game.proto.Vector3;
 import com.game.scene.metrics.SceneMetrics;
-import com.game.scene.skill.SkillTables.StateCell;
 import com.game.scene.testing.Contracts;
 import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakeSceneTables;
@@ -22,14 +25,15 @@ import com.game.scene.testing.RecordingSink;
 import com.game.scene.world.ClientRequestHandler;
 import com.game.scene.world.PlayerSnapshots;
 import com.game.scene.world.Scene;
-import com.game.scene.world.SceneWorld;
 import com.game.scene.world.ScenePlayer;
+import com.game.scene.world.SceneWorld;
 import com.game.scene.world.WorldTestAccess;
 import com.game.table.ConfigTables;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,9 +52,10 @@ class SkillFeatureTest {
     private static final int A = 11;
     private static final int B = 12;
     private static final int C = 13;
-    private static final int NOTIFY_USED = 70;
-    private static final int NOTIFY_INTERRUPTED = 33;
-    private static final int RELEASE = 84;
+    private static final int NOTIFY_USED = Contracts.IDS.notifySkillUsed();
+    private static final int NOTIFY_INTERRUPTED = Contracts.IDS.notifySkillInterrupted();
+    private static final int NOTIFY_SELF_STATE_FLAGS = Contracts.IDS.notifySelfActorStateFlags();
+    private static final int RELEASE = Contracts.IDS.releaseSkill();
     private static SkillTables shipped;
 
     private final RecordingSink sink = new RecordingSink();
@@ -58,6 +63,7 @@ class SkillFeatureTest {
     private final ManualClock clock = new ManualClock();
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private SceneWorld world;
+    private SkillService service;
     private ClientRequestHandler handler;
     private Scene scene1;
     private Scene scene2;
@@ -74,7 +80,7 @@ class SkillFeatureTest {
         FakeSceneTables sceneTables = new FakeSceneTables();
         world = new SceneWorld(sceneTables, Contracts.IDS, sink, repo, new AtomicLong(5000)::incrementAndGet, clock,
                 SceneMetrics.noop(), player -> { }, PlayerSnapshots.NONE);
-        SkillService service = new SkillService(tables, clock, new SceneMetrics(meters), Contracts.IDS);
+        service = new SkillService(tables, clock, new SceneMetrics(meters), Contracts.IDS);
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV,
                 List.of(new SkillFeature(service)));
         scene1 = world.createScene(1);
@@ -164,14 +170,21 @@ class SkillFeatureTest {
     }
 
     @Test
-    void 成功先广播70给自己与看得见的人再回应答_加上战斗状态() throws Exception {
+    void 成功先向主角单播状态位图再广播70与应答_旁观者只收70() throws Exception {
         start();
 
         assertThat(release(1, entity(B))).isZero();
 
-        assertThat(sink.messageIdsTo(LINK, A)).containsExactly(NOTIFY_USED, RELEASE);
+        assertThat(sink.messageIdsTo(LINK, A)).containsExactly(NOTIFY_SELF_STATE_FLAGS, NOTIFY_USED, RELEASE);
         assertThat(sink.messageIdsTo(LINK, B)).containsExactly(NOTIFY_USED);
         assertThat(sink.messageIdsTo(LINK, C)).as("另一个场景看不见").isEmpty();
+
+        SelfActorStateFlagsS2C flags = SelfActorStateFlagsS2C.parseFrom(
+                sink.to(LINK, A).getFirst().getSerializedMessage());
+        assertThat(flags.getActionStateMask()).isEqualTo(1L << SkillService.STATE_COMBAT);
+        assertThat(flags.getCombatStateMask()).isZero();
+        assertThat(flags.getStateSeq()).isEqualTo(1L);
+
         SkillUsedS2C used = SkillUsedS2C.parseFrom(sink.to(LINK, B).getFirst().getSerializedMessage());
         assertThat(used.getEntity()).isEqualTo(entity(A));
         assertThat(used.getTargetEntityList()).containsExactly(entity(B));
@@ -195,6 +208,7 @@ class SkillFeatureTest {
 
         assertThat(release(1, entity(B))).as("700ms：冷却 500ms 已过，前摇 1s 还没完，技能 1 可打断").isZero();
 
+        // 已处于 STATE_COMBAT，不再重复推状态位图
         assertThat(sink.messageIdsTo(LINK, A)).containsExactly(NOTIFY_INTERRUPTED, NOTIFY_USED, RELEASE);
         assertThat(sink.messageIdsTo(LINK, B)).containsExactly(NOTIFY_INTERRUPTED, NOTIFY_USED);
         SkillInterruptedS2C interrupted = SkillInterruptedS2C.parseFrom(
@@ -212,21 +226,22 @@ class SkillFeatureTest {
     }
 
     @Test
-    void 打断先于状态表的拒绝_33已发出旧施法已取消() throws Exception {
-        Map<Integer, List<StateCell>> action = new HashMap<>();
-        action.put(SkillService.ACTION_USE_SKILL, List.of(new StateCell(SkillRules.ACTION_MUTEX, 7777)));
-        start(withActionStates(action));
+    void 两阶段零副作用_状态表拒绝时不提前推33也不取消旧施法() throws Exception {
+        StateMutexMatrix action = new StateMutexMatrix();
+        SkillTables.compileMatrixRow("test", action, null, SkillService.ACTION_USE_SKILL,
+                SkillService.STATE_COMBAT, StateMode.BLOCK.code(), 7777);
+        start(withActionMatrix(action));
         assertThat(release(1, entity(B))).as("没有任何状态：加上战斗状态，进入前摇").isZero();
         clock.advanceMillis(700);
         sink.clear();
 
-        assertThat(release(1, entity(B))).as("可打断：先推 33、取消旧施法，再被行为互斥拒绝").isEqualTo(7777);
+        assertThat(release(1, entity(B))).as("阶段一状态表拒绝：零副作用，不得提前推 33 取消旧施法").isEqualTo(7777);
 
-        assertThat(sink.messageIdsTo(LINK, A)).containsExactly(NOTIFY_INTERRUPTED, RELEASE);
-        assertThat(sink.messageIdsTo(LINK, B)).containsExactly(NOTIFY_INTERRUPTED);
-        assertThat(player(A).skillState().cast()).isNull();
-        assertThat(meters.find("game.scene.skill.interrupts").counter().count()).isEqualTo(1);
-        assertThat(release(2, entity(B))).as("旧施法已取消：技能 2 不再被前摇挡，只被互斥挡").isEqualTo(7777);
+        assertThat(sink.messageIdsTo(LINK, A)).containsExactly(RELEASE);
+        assertThat(sink.messageIdsTo(LINK, B)).isEmpty();
+        assertThat(player(A).skillState().cast()).as("旧施法保持完整").isNotNull();
+        assertThat(meters.find("game.scene.skill.interrupts").counter().count()).isZero();
+        assertThat(release(2, entity(B))).as("旧施法仍在，技能 2 先被不可打断挡住").isEqualTo(7000);
     }
 
     @Test
@@ -329,31 +344,106 @@ class SkillFeatureTest {
         assertThat(release(1, entity(B))).as("冷却也清空了").isZero();
     }
 
-    // ------------------------------------------------------------------ 状态表
+    // ------------------------------------------------------------------ 状态表与即时同步
 
     @Test
     void 行为互斥表拒绝_回表里的提示码_不广播不记冷却_提示码0按配置错1002() throws Exception {
-        Map<Integer, List<StateCell>> action = new HashMap<>();
-        action.put(SkillService.ACTION_USE_SKILL, List.of(new StateCell(SkillRules.ACTION_MUTEX, 7777)));
-        start(withActionStates(action));
+        StateMutexMatrix blocked = new StateMutexMatrix();
+        SkillTables.compileMatrixRow("test", blocked, null, SkillService.ACTION_USE_SKILL,
+                SkillService.STATE_COMBAT, StateMode.BLOCK.code(), 7777);
+        start(withActionMatrix(blocked));
 
         assertThat(release(2, entity(B))).as("没有任何状态时直接加上战斗状态").isZero();
         assertThat(release(2, entity(B))).as("战斗状态与放技能互斥").isEqualTo(7777);
         assertThat(counter("state_rejected")).isEqualTo(1);
 
-        action.put(SkillService.ACTION_USE_SKILL, List.of(new StateCell(SkillRules.ACTION_MUTEX, 0)));
-        start(withActionStates(action));
+        StateMutexMatrix zeroTip = new StateMutexMatrix();
+        SkillTables.compileMatrixRow("test", zeroTip, null, SkillService.ACTION_USE_SKILL,
+                SkillService.STATE_COMBAT, StateMode.BLOCK.code(), 0);
+        start(withActionMatrix(zeroTip));
         assertThat(release(2, entity(B))).isZero();
         sink.clear();
         assertThat(release(2, entity(B))).isEqualTo(1002);
         assertThat(sink.messageIdsTo(LINK, B)).isEmpty();
     }
 
-    private static SkillTables withActionStates(Map<Integer, List<StateCell>> action) {
+    @Test
+    void 放技能自动打断跟随与骑乘_按序触发退出钩子并合并单播一次状态位图() throws Exception {
+        start();
+        ScenePlayer caster = player(A);
+        service.addActionState(world, caster, SkillService.STATE_TEAM_FOLLOW);
+        service.addActionState(world, caster, SkillService.STATE_MOUNTED);
+        sink.clear();
+
+        List<String> exited = new ArrayList<>();
+        service.registerActionStateExitHook(SkillService.STATE_TEAM_FOLLOW, (p, reason) -> exited.add("follow:" + reason));
+        service.registerActionStateExitHook(SkillService.STATE_MOUNTED, (p, reason) -> exited.add("mounted:" + reason));
+
+        assertThat(release(2, entity(B))).isZero();
+
+        assertThat(exited).containsExactly(
+                "follow:" + StateExitReason.INTERRUPTED,
+                "mounted:" + StateExitReason.INTERRUPTED);
+        assertThat(caster.skillState().actionStates()).containsExactly(SkillService.STATE_COMBAT);
+
+        // 打断 2 个旧态 + 进入 Combat：整轮只向主角单播 1 次合并后的状态位图，旁观者 B 不收该推送。
+        assertThat(sink.messageIdsTo(LINK, A)).containsExactly(NOTIFY_SELF_STATE_FLAGS, NOTIFY_USED, RELEASE);
+        assertThat(sink.messageIdsTo(LINK, B)).containsExactly(NOTIFY_USED);
+        SelfActorStateFlagsS2C flags = SelfActorStateFlagsS2C.parseFrom(
+                sink.to(LINK, A).getFirst().getSerializedMessage());
+        assertThat(flags.getActionStateMask()).isEqualTo(1L << SkillService.STATE_COMBAT);
+        assertThat(flags.getCombatStateMask()).isZero();
+        assertThat(flags.getStateSeq()).isEqualTo(3L);
+    }
+
+    @Test
+    void 战斗异常状态引用计数与入场重推_只在位实变时单播主角() throws Exception {
+        start();
+        ScenePlayer caster = player(A);
+
+        // 叠两个沉默来源：只在 0->1 推一次，第二个来源不推
+        assertThat(service.addCombatState(world, caster, SkillService.COMBAT_STATE_SILENCE, 101L)).isTrue();
+        assertThat(service.addCombatState(world, caster, SkillService.COMBAT_STATE_SILENCE, 102L)).isFalse();
+        assertThat(sink.messageIdsTo(LINK, A)).containsExactly(NOTIFY_SELF_STATE_FLAGS);
+        assertThat(sink.messageIdsTo(LINK, B)).isEmpty();
+        SelfActorStateFlagsS2C first = SelfActorStateFlagsS2C.parseFrom(
+                sink.to(LINK, A).getFirst().getSerializedMessage());
+        assertThat(first.getActionStateMask()).isZero();
+        assertThat(first.getCombatStateMask()).isEqualTo(1L << SkillService.COMBAT_STATE_SILENCE);
+        assertThat(first.getStateSeq()).isEqualTo(1L);
+
+        // 移第一个来源不推，移最后一个来源 (1->0) 立即推一次
+        sink.clear();
+        assertThat(service.removeCombatState(world, caster, SkillService.COMBAT_STATE_SILENCE, 101L)).isFalse();
+        assertThat(sink.messageIdsTo(LINK, A)).isEmpty();
+        assertThat(service.removeCombatState(world, caster, SkillService.COMBAT_STATE_SILENCE, 102L)).isTrue();
+        assertThat(sink.messageIdsTo(LINK, A)).containsExactly(NOTIFY_SELF_STATE_FLAGS);
+        SelfActorStateFlagsS2C cleared = SelfActorStateFlagsS2C.parseFrom(
+                sink.to(LINK, A).getFirst().getSerializedMessage());
+        assertThat(cleared.getCombatStateMask()).isZero();
+        assertThat(cleared.getStateSeq()).isEqualTo(2L);
+
+        // 入场补推：全 0 态不发多余包；挂上非零态后重推递增序号
+        sink.clear();
+        service.resendStateFlagsAfterEntry(world, caster);
+        assertThat(sink.messageIdsTo(LINK, A)).isEmpty();
+
+        service.addActionState(world, caster, SkillService.STATE_MOUNTED);
+        sink.clear();
+        service.resendStateFlagsAfterEntry(world, caster);
+        assertThat(sink.messageIdsTo(LINK, A)).containsExactly(NOTIFY_SELF_STATE_FLAGS);
+        SelfActorStateFlagsS2C resent = SelfActorStateFlagsS2C.parseFrom(
+                sink.to(LINK, A).getFirst().getSerializedMessage());
+        assertThat(resent.getActionStateMask()).isEqualTo(1L << SkillService.STATE_MOUNTED);
+        assertThat(resent.getStateSeq()).isEqualTo(4L);
+    }
+
+    private static SkillTables withActionMatrix(StateMutexMatrix action) {
         Map<Integer, SkillTables.SkillDef> skills = new HashMap<>();
         for (int id : new int[] {1, 2, 13}) {
             skills.put(id, shipped.skill(id));
         }
-        return new SkillTables(skills, Map.of(1, 500_000_000L, 5, 2_000_000_000L), action, Map.of(), Map.of());
+        return new SkillTables(skills, Map.of(1, 500_000_000L, 5, 2_000_000_000L),
+                action, new StateMutexMatrix(), Map.of());
     }
 }

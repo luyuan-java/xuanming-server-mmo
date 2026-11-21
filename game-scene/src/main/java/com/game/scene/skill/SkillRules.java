@@ -1,12 +1,14 @@
 package com.game.scene.skill;
 
+import com.game.common.combatai.StateMutexMatrix;
+import com.game.common.combatai.StateMutexMatrix.StateExitHookRegistry;
+import com.game.common.combatai.StateMutexMatrix.StateExitReason;
+import com.game.scene.player.PlayerSkillState;
 import com.game.scene.skill.SkillTables.SkillDef;
-import com.game.scene.skill.SkillTables.StateCell;
 import com.game.table.CommonErrorTip;
 import com.game.table.SkillErrorTip;
 import java.util.List;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.function.LongPredicate;
 
 /**
@@ -22,6 +24,7 @@ final class SkillRules {
     static final int TABLE_SUCCESS = CommonErrorTip.common_error.kSuccess_VALUE;
     static final int INVALID_TABLE_ID = CommonErrorTip.common_error.kInvalidTableId_VALUE;
     static final int INVALID_TABLE_DATA = CommonErrorTip.common_error.kInvalidTableData_VALUE;
+    static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
     static final int INVALID_TARGET_ID = SkillErrorTip.skill_error.kSkillInvalidTargetId_VALUE;
     /** 目标在回合制战斗中（基线 kSkillInvalidTarget，skill.cpp:410-414）。 */
     static final int TARGET_IN_BATTLE = SkillErrorTip.skill_error.kSkillInvalidTarget_VALUE;
@@ -32,11 +35,8 @@ final class SkillRules {
     static final int TARGET_NONE = 0;
     static final int TARGET_SINGLE = 1;
     static final int TARGET_AREA = 2;
-    /** 行为互斥表的模式：0 互斥、1 允许、2 打断（基线 eActionStateMode）。 */
-    static final int ACTION_MUTEX = 0;
-    static final int ACTION_INTERRUPT = 2;
-    /** 战斗状态表的模式：0 允许、1 互斥（基线 eCombatStateMode，与行为互斥表相反）。 */
-    static final int COMBAT_MUTEX = 1;
+    /** 行为状态上限（eActorState: 0=Combat, 1=TeamFollow, 2=Mounted）。 */
+    static final int ACTOR_STATE_MAX = 3;
 
     private SkillRules() {
     }
@@ -107,53 +107,66 @@ final class SkillRules {
         return OK;
     }
 
-    /**
-     * 行为互斥（基线 TryPerformAction）：行缺失 1001；没有任何状态时直接加上成功状态；否则按状态号升序检查冲突
-     * （互斥格按 {@link #tableTip} 判，越界的状态放行；状态号同基线按 uint32 比），再删掉「打断」格对应的状态，最后加上成功状态。
-     * 只有通过才改状态。
-     */
-    static int tryPerformAction(List<StateCell> row, TreeSet<Integer> states, int successState) {
-        if (row == null) {
+    /** 纯只读行为互斥预检（O(1) 位运算，零副作用），用于两阶段施法门禁阶段一。 */
+    static int canPerformAction(StateMutexMatrix matrix, long activeMask, int action, int successState) {
+        if (matrix == null || !matrix.hasAction(action)) {
             return INVALID_TABLE_ID;
         }
-        for (int state : states) {
-            if (Integer.compareUnsigned(state, row.size()) >= 0) {
-                continue;
-            }
-            StateCell cell = row.get(state);
-            if (cell.mode() == ACTION_MUTEX) {
-                int tip = tableTip(cell.tip());
-                if (tip != OK) {
-                    return tip;
-                }
-            }
+        if (successState != StateMutexMatrix.NO_MUTEX_STATE
+                && Integer.compareUnsigned(successState, ACTOR_STATE_MAX) >= 0) {
+            return INVALID_PARAMETER;
         }
-        states.removeIf(state -> Integer.compareUnsigned(state, row.size()) < 0
-                && row.get(state).mode() == ACTION_INTERRUPT);
-        states.add(successState);
-        return OK;
+        return matrix.canPerform(activeMask, action, OK, INVALID_TABLE_ID);
     }
 
     /**
-     * 战斗状态互斥（基线 ValidateSkillUsage）：没有战斗状态放行；行缺失 1001；按状态号升序，
-     * 第一个互斥格就返回它的提示（1000 = 放行并结束检查），越界的状态跳过。
+     * 两阶段行为互斥执行（O(1) 位运算）：先校验入态合法性与互斥冲突，全部通过后按状态编号升序
+     * 移除被「打断」的状态并触发退出钩子（先摘状态再回调，防止重入循环），最后进入成功状态。
      */
-    static int validateCombatStates(List<StateCell> row, Set<Integer> combatStates) {
-        if (combatStates.isEmpty()) {
-            return OK;
-        }
-        if (row == null) {
+    static <E> int tryPerformAction(StateMutexMatrix matrix, PlayerSkillState state, int action, int successState,
+                                    E owner, StateExitHookRegistry<E> exitHooks) {
+        if (matrix == null || !matrix.hasAction(action)) {
             return INVALID_TABLE_ID;
         }
-        for (int state : combatStates) {
-            if (Integer.compareUnsigned(state, row.size()) >= 0) {
-                continue;
-            }
-            StateCell cell = row.get(state);
-            if (cell.mode() == COMBAT_MUTEX) {
-                return tableTip(cell.tip());
-            }
+        return matrix.tryPerform(
+                state.actionStateMask(),
+                action,
+                successState,
+                ACTOR_STATE_MAX,
+                OK,
+                INVALID_TABLE_ID,
+                INVALID_PARAMETER,
+                interruptedState -> {
+                    if (state.removeActionState(interruptedState) && exitHooks != null) {
+                        exitHooks.notifyExited(owner, interruptedState, StateExitReason.INTERRUPTED);
+                    }
+                },
+                state::addActionState);
+    }
+
+    /** 显式移除行为状态；仅当原先处于激活态时派发 {@link StateExitReason#REMOVED} 退出钩子。 */
+    static <E> boolean removeActionState(PlayerSkillState state, int actorState, E owner,
+                                         StateExitHookRegistry<E> exitHooks) {
+        if (!state.removeActionState(actorState)) {
+            return false;
         }
-        return OK;
+        if (exitHooks != null) {
+            exitHooks.notifyExited(owner, actorState, StateExitReason.REMOVED);
+        }
+        return true;
+    }
+
+    /**
+     * 战斗状态互斥（基线 CombatStateSystem::ValidateSkillUsage）：没有战斗状态直接放行；
+     * 动作行缺失 1001；存在互斥状态时按最小状态编号稳定返回提示码。
+     */
+    static int validateCombatStates(StateMutexMatrix matrix, long combatMask, int action) {
+        if (combatMask == 0L) {
+            return OK;
+        }
+        if (matrix == null || !matrix.hasAction(action)) {
+            return INVALID_TABLE_ID;
+        }
+        return matrix.canPerform(combatMask, action, OK, INVALID_TABLE_ID);
     }
 }
