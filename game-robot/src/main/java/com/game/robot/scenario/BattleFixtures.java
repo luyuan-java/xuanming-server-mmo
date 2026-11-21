@@ -6,6 +6,7 @@ import com.game.proto.BattleItemEntry;
 import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.ClientRequest;
 import com.game.proto.CreateBattleRequest;
+import com.game.proto.eSpectateVisibility;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.Message;
@@ -90,6 +91,7 @@ final class BattleFixtures {
                 .setSeed(SEED)
                 .setCreatedAtMs(System.currentTimeMillis())
                 .setDeadlineMs(deadlineMs)
+                .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC)
                 .addPlayers(player)
                 .build();
     }

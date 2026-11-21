@@ -923,6 +923,7 @@ public final class StoragePlayerRepository implements PlayerRepository {
         row.setPosX(position.x());
         row.setPosY(position.y());
         row.setPosZ(position.z());
+        row.setAppearanceId(save.appearanceId());
         return row;
     }
 }

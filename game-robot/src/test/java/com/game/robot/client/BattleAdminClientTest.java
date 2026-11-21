@@ -14,6 +14,7 @@ import com.game.proto.DestroyBattleRequest;
 import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
 import com.game.proto.RemoveObserverRequest;
+import com.game.proto.RemoveObserverResponse;
 import com.game.proto.TipInfoMessage;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
@@ -131,25 +132,35 @@ class BattleAdminClientTest {
     }
 
     @Test
-    void 销毁与清退期望204_补签与登记观众解析200应答() throws Exception {
+    void 销毁期望204_补签登记与清退解析200应答() throws Exception {
         status.set(204);
         client("tok").destroy(7, "robot");
-        client("tok").removeObserver(7, 9, "robot");
         status.set(200);
+        String op = java.util.UUID.randomUUID().toString();
+        long admitBefore = System.currentTimeMillis() + 25_000L;
+        responseBody.set(RemoveObserverResponse.newBuilder().setCancelled(true).setSpectatorOperationId(op).build().toByteArray());
+        RemoveObserverResponse removed = client("tok").removeObserver(7, 9, "robot", op, admitBefore);
+        assertThat(removed.getCancelled()).isTrue();
+        assertThat(removed.getSpectatorOperationId()).isEqualTo(op);
         BattleAssignedS2C assignment = BattleAssignedS2C.newBuilder().setBattleId(7).setHost("h").setPort(12000).build();
         responseBody.set(IssueBattleTicketResponse.newBuilder().setAssignment(assignment).build().toByteArray());
         assertThat(client("tok").issueTicket(7, 8).getAssignment()).isEqualTo(assignment);
         responseBody.set(AddObserverResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder().setId(1004)).build().toByteArray());
-        assertThat(client("tok").addObserver(7, 9, "C").getErrorMessage().getId()).isEqualTo(1004);
+        assertThat(client("tok").addObserver(7, 9, "C", op, admitBefore).getErrorMessage().getId()).isEqualTo(1004);
 
         assertThat(captured).extracting(Captured::path).containsExactly(BattleAdminClient.DESTROY, BattleAdminClient.REMOVE_OBSERVER,
                 BattleAdminClient.ISSUE_TICKET, BattleAdminClient.ADD_OBSERVER);
         assertThat(DestroyBattleRequest.parseFrom(captured.get(0).body())).isEqualTo(DestroyBattleRequest.newBuilder().setBattleId(7)
                 .setReason("robot").build());
-        assertThat(RemoveObserverRequest.parseFrom(captured.get(1).body()).getObserverPlayerId()).isEqualTo(9);
+        RemoveObserverRequest rem = RemoveObserverRequest.parseFrom(captured.get(1).body());
+        assertThat(rem.getObserverPlayerId()).isEqualTo(9);
+        assertThat(rem.getSpectatorOperationId()).isEqualTo(op);
+        assertThat(rem.getAdmitBeforeMs()).isEqualTo(admitBefore);
         assertThat(IssueBattleTicketRequest.parseFrom(captured.get(2).body()).getPlayerId()).isEqualTo(8);
         AddObserverRequest add = AddObserverRequest.parseFrom(captured.get(3).body());
         assertThat(add.getObserverName()).isEqualTo("C");
+        assertThat(add.getSpectatorOperationId()).isEqualTo(op);
+        assertThat(add.getAdmitBeforeMs()).isEqualTo(admitBefore);
         assertThat(add.hasRouting()).as("路由留空，由接口按在线目录补全").isFalse();
     }
 

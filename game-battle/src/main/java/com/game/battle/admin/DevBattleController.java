@@ -163,7 +163,14 @@ public class DevBattleController {
             audit(http, "dev-add-observer", parsed.request().getBattleId(), "unresolved_routing");
             return text(HttpStatus.UNPROCESSABLE_ENTITY, "观众路由补不全，不登记：" + String.join("；", filled.unresolved()));
         }
-        Outcome<AddObserverResponse> outcome = call(plane -> plane.addObserver(filled.request()));
+        AddObserverRequest baseRequest = filled.request();
+        Outcome<AddObserverResponse> outcome = call(plane -> {
+            AddObserverRequest req = baseRequest;
+            if (req.getTargetInstanceId().isEmpty() && !plane.instanceId().isEmpty()) {
+                req = req.toBuilder().setTargetInstanceId(plane.instanceId()).build();
+            }
+            return plane.addObserver(req);
+        });
         if (outcome.failure() != null) {
             audit(http, "dev-add-observer", parsed.request().getBattleId(), "failed");
             return outcome.failure();
@@ -178,7 +185,14 @@ public class DevBattleController {
         if (parsed.rejection() != null) {
             return parsed.rejection();
         }
-        Outcome<RemoveObserverResponse> outcome = call(plane -> plane.removeObserver(parsed.request()));
+        RemoveObserverRequest baseRequest = parsed.request();
+        Outcome<RemoveObserverResponse> outcome = call(plane -> {
+            RemoveObserverRequest req = baseRequest;
+            if (req.getTargetInstanceId().isEmpty() && !plane.instanceId().isEmpty()) {
+                req = req.toBuilder().setTargetInstanceId(plane.instanceId()).build();
+            }
+            return plane.removeObserver(req);
+        });
         audit(http, "dev-remove-observer", parsed.request().getBattleId(), outcome.failure() == null ? "cancelled="+outcome.value().getCancelled() : "failed");
         return outcome.failure() != null ? outcome.failure() : protobuf(outcome.value().toByteArray());
     }

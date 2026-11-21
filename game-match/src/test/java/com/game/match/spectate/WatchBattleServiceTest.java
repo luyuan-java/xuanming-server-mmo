@@ -130,7 +130,8 @@ class WatchBattleServiceTest {
         return LocalObserverOperation.create(target, PLAYER, route, "", operation, clock.peekMs());
     }
     private static SessionContext session(long playerId) {
-        return SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId("gate-inst-1").setSessionId(7).setZoneId(1).setPlayerId(playerId)
+        return SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId(FakePlayerStatus.GATE_INSTANCE)
+                .setSessionId(FakePlayerStatus.sessionIdOf(playerId)).setZoneId(1).setPlayerId(playerId)
                 .setAccount("acc-" + playerId).build();
     }
 
@@ -610,19 +611,26 @@ class WatchBattleServiceTest {
     }
 
     @Test
-    void 判定顺序_旧标记的清退先于在线检查_不在线的玩家旧场照样被清退再回16019() {
+    void 跨会话栅栏_在线与会话校验先于清退旧标记_不在线或旧会话不拆新会话的观战() {
         open(X);
         open(Y);
-        spectate.putMark(PLAYER, oldMark(X, "aaaaaaaaaaaaaaaa"));
-        // 没有调 online()：在线目录没有条目
+        String activeMark = oldMark(X, "aaaaaaaaaaaaaaaa");
+        spectate.putMark(PLAYER, activeMark);
+        // 不在线：不拆旧标记，直接回 16019
+        WatchBattleResponse offline = watch(Y);
+        assertRejected(offline, 16019, OFFLINE);
+        assertThat(callKinds()).as("在线检查先于第 7 行：不发 Remove").isEmpty();
+        assertThat(spectate.markOf(PLAYER)).contains(activeMark);
 
-        WatchBattleResponse response = watch(Y);
-
-        assertRejected(response, 16019, OFFLINE);
-        assertThat(callKinds()).as("第 7 行在第 8、9 行之前").containsExactly(Kind.REMOVE);
-        assertThat(spectate.markOf(PLAYER)).isEmpty();
-        assertThat(players.reads).containsExactly("lock:1001", "presence:1001");
-        assertThat(outcomes()).isEqualTo(Map.of("offline", 1.0));
+        // 重连后会话号或 gate 实例已换：旧会话迟到的 163 同样不得拆新会话的观战
+        online();
+        SessionContext staleSession = session(PLAYER).toBuilder().setSessionId(FakePlayerStatus.sessionIdOf(PLAYER) + 1).build();
+        SessionContext staleGate = session(PLAYER).toBuilder().setGateInstanceId("gate-inst-old").build();
+        assertRejected(service.watch(staleSession, Y, Deadline.after(BUDGET_MS)), 16019, OFFLINE);
+        assertRejected(service.watch(staleGate, Y, Deadline.after(BUDGET_MS)), 16019, OFFLINE);
+        assertThat(callKinds()).as("旧会话不能清退新会话的观战").isEmpty();
+        assertThat(spectate.markOf(PLAYER)).contains(activeMark);
+        assertThat(outcomes()).isEqualTo(Map.of("offline", 3.0));
     }
 
     // ================================================================ 第 8 – 10 行：在线目录
@@ -685,7 +693,8 @@ class WatchBattleServiceTest {
         observers.beforeAdd = call -> markAtAdd.set(spectate.markOf(PLAYER));
 
         // 预算给得宽（10 s），下面对「3 s」的断言才不受机器快慢影响；生产是 4.5 s，同一个公式
-        WatchBattleResponse response = watch(X, 10_000);
+        SessionContext matchedSession = session(PLAYER).toBuilder().setGateInstanceId("gate-inst-z2").setSessionId(4242).build();
+        WatchBattleResponse response = service.watch(matchedSession, X, Deadline.after(10_000));
 
         assertAccepted(response, X);
         Call add = observers.calls.get(0);

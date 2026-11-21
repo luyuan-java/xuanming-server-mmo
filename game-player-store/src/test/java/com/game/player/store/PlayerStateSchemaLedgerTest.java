@@ -11,9 +11,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** 正常 Maven test/verify 的持久字段门禁；不写台账，不在缺少原件时自动重新建立基线。 */
 class PlayerStateSchemaLedgerTest {
-    // 第一代来自技能扩展前的真实生成类；第二代追加技能，第三代追加宠物购买回执，第四代追加宝宝条目与培养阶，历史原件不得覆盖。
+    // 第一代来自技能扩展前的真实生成类；第二代追加技能，第三代追加宠物购买回执，第四代追加宝宝条目与培养阶，第五代追加角色形象试用位图与幂等回执，历史原件不得覆盖。
     private static final String GENESIS_SHA256 = "3cd2f18d61634eaabe7d5805df027877451816242bb41ff5aecb704177d7877d";
-    private static final String HEAD_SHA256 = "84ead30b7ad6070946b6fac2001449b657bbfb85043786fdcb5586ee7dcd1c7c";
+    private static final String HEAD_SHA256 = "8e4f23a3b4a9b505f581149595b0b41b90a57a54327a19c3145fb7b9bae824df";
 
     // 仅登记已经存在的领域 restore→修改→toState 未知字段往返证据；protobuf 自己的 parse/serialize 不能替代它。
     private static final Set<String> ALLOW_ADDITIONS = Set.of(
@@ -23,14 +23,15 @@ class PlayerStateSchemaLedgerTest {
             "game.storage.PetEntry", // PlayerPetsUnknownFieldsTest：宝宝实例恢复、改名、存盘保留未知字段与条目回执。
             "game.storage.BattleLedgerState", "game.storage.BattleLedgerEntry", // BattleLedgerTest / BattleLedgerEntryFieldsTest。
             "game.storage.AssetOpLedgerState", "game.storage.AssetOpStreamLedgerState",
-            "game.storage.AssetOpRejectionState"); // AssetOpLedgerTest：各层记账前后保留。
+            "game.storage.AssetOpRejectionState", // AssetOpLedgerTest：各层记账前后保留。
+            "game.storage.AppearanceState"); // PlayerAppearanceTest：试用位图、未知高位与未知字段往返保留。
     // 当前根闭包没有 enum；未来 enum 新值须另有原始数值往返证据，不能沿用 unknown fields 证明。
 
     @Test void playerStateDescriptorMatchesRegisteredPersistentHistory() throws Exception {
         var current = PersistentSchemaSnapshot.capture(PlayerState.getDescriptor());
         int generation = verifyRegisteredSchema(Path.of("src/test/resources/persistent-schema"),
                 GENESIS_SHA256, HEAD_SHA256, current, ALLOW_ADDITIONS);
-        assertThat(generation).isEqualTo(4);
+        assertThat(generation).isEqualTo(5);
     }
 
     /** 已合法退役为不可达的类型仍须保留历史解冻政策，不能只用当前闭包判定策略名有效。 */

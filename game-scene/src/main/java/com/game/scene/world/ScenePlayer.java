@@ -19,6 +19,7 @@ import com.game.scene.inbox.PlayerInboxRuntime;
 import com.game.scene.player.GainWindows;
 import com.game.scene.player.PlayerBags;
 import com.game.scene.player.PlayerAttributes;
+import com.game.scene.player.PlayerAppearance;
 import com.game.scene.player.PlayerMissions;
 import com.game.scene.player.PlayerPets;
 import com.game.scene.player.PlayerSkillState;
@@ -50,7 +51,9 @@ public final class ScenePlayer {
     private RoleAdmissionIdentity admission;
     private final int classId;
     private final int gender;
-    private final String appearanceId;
+    /** 角色唯一永久形象（存档列 player.appearance_id；切形象扣卡覆盖）。 */
+    private String appearanceId;
+    private boolean appearanceIdDirty;
     /** 等级（存档列 player.level；加载时已压回上限）。只经属性系统改（GM 设等级），规则见 PlayerLevels。 */
     private int level;
     /** 持久技能与不可变的本版本配置；瞬时施法状态另存 skillState。 */
@@ -95,6 +98,8 @@ public final class ScenePlayer {
      * mmorpg player-inbox-service.md §4.4）。
      */
     private final InboxLedger inboxLedger;
+    /** 角色形象 1 小时试用位图、在途试用态与幂等回执（永久形象在 appearanceId）。 */
+    private final PlayerAppearance appearance;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -167,6 +172,7 @@ public final class ScenePlayer {
         this.assetLedger = state.hasAssetLedger() ? AssetOpLedger.restore(state.getAssetLedger()) : AssetOpLedger.empty();
         this.battleLedger = state.hasBattleLedger() ? BattleLedger.restore(state.getBattleLedger()) : BattleLedger.empty();
         this.inboxLedger = state.hasInboxLedger() ? InboxLedger.restore(state.getInboxLedger()) : InboxLedger.empty();
+        this.appearance = state.hasAppearance() ? PlayerAppearance.restore(state.getAppearance()) : PlayerAppearance.empty();
     }
 
     public long playerId() {
@@ -219,6 +225,24 @@ public final class ScenePlayer {
 
     public String appearanceId() {
         return appearanceId;
+    }
+
+    /** 只供角色形象系统调用：消耗形象卡后覆盖角色唯一永久形象。 */
+    public void setPermanentAppearanceId(String appearanceId) {
+        String next = appearanceId == null ? "" : appearanceId;
+        if (!next.equals(this.appearanceId)) {
+            this.appearanceId = next;
+            this.appearanceIdDirty = true;
+        }
+    }
+
+    /** 此刻实际生效对外展示的外观 ID：试用有效期内取试用形象，否则取永久形象。 */
+    public String effectiveAppearanceId(long nowSec) {
+        return appearance.effectiveAppearance(appearanceId, nowSec);
+    }
+
+    public PlayerAppearance appearance() {
+        return appearance;
     }
 
     public int level() {
@@ -358,7 +382,7 @@ public final class ScenePlayer {
                 .setTransform(movementTransform())
                 .setActorType(ActorType.ACTOR_TYPE_PLAYER)
                 .setGuid(playerId)
-                .setAppearanceId(appearanceId)
+                .setAppearanceId(effectiveAppearanceId(java.time.Instant.now().getEpochSecond()))
                 .setClassId(classId)
                 .setGender(gender)
                 .build();
@@ -408,7 +432,8 @@ public final class ScenePlayer {
     }
 
     PlayerSave toSave() {
-        return new PlayerSave(playerId, ownerEpoch, level, scene.configId(), position, persistentState());
+        return new PlayerSave(playerId, ownerEpoch, level, scene.configId(), position, persistentState(),
+                appearanceIdDirty ? appearanceId : "");
     }
 
     /** 当前内存状态里需要持久化的玩法数据。新增玩法数据时在这里写、在构造器里恢复。 */
@@ -444,6 +469,9 @@ public final class ScenePlayer {
         }
         if (!inboxLedger.isPristine()) {
             state.setInboxLedger(inboxLedger.toState());
+        }
+        if (!appearance.isPristine()) {
+            state.setAppearance(appearance.toState());
         }
         return state.build();
     }

@@ -97,6 +97,11 @@ public final class BattleNodeServiceImpl implements BattleNodeService {
             REASON_NOT_STARTED, new AtomicLong(), REASON_CLOSED, new AtomicLong(),
             REASON_CLOSED_IN_LOOP, new AtomicLong(), REASON_OVERLOADED, new AtomicLong());
 
+    /** 本节点进程实例 id（不可变，dev 管理接口补全 {@code target_instance_id} 时读）。 */
+    public String instanceId() {
+        return rooms.instanceId();
+    }
+
     /**
      * @param admission   建房准入闸（与 {@code BattleNode} 共用）
      * @param logic       battle 逻辑线程（房间服务的唯一执行线程）

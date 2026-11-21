@@ -58,7 +58,7 @@ public final class BattleSnapshots {
         BattlePlayerSnapshot.Builder snapshot = BattlePlayerSnapshot.newBuilder()
                 .setPlayerId(player.playerId())
                 .setPlayerName(player.name())
-                .setAppearanceId(player.appearanceId())
+                .setAppearanceId(player.effectiveAppearanceId(java.time.Instant.now().getEpochSecond()))
                 .setGender(player.gender())
                 .setClassId(player.classId())
                 .setLevel(Math.max(player.level(), 1))

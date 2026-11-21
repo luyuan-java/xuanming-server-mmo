@@ -41,6 +41,23 @@ message PlayerState {
   InboxLedgerState inbox_ledger = 10;
   // 已学技能与真实存储重数；与货币在同一 PlayerState、同一 owner_epoch 围栏事务提交。
   PlayerSkillBookState skills = 11;
+  // 角色形象 1 小时免费试用位图、在途试用态与幂等回执（永久形象存于 player.appearance_id，同事务围栏提交）。
+  AppearanceState appearance = 12;
+}
+
+message AppearanceState {
+  bytes trial_used_bits = 1;
+  string trial_appearance_id = 2;
+  uint64 trial_expires_at = 3;
+  uint64 switch_seq = 4;
+  repeated AppearanceRequestReceipt recent_requests = 5;
+}
+
+message AppearanceRequestReceipt {
+  uint64 client_request_id = 1;
+  uint32 kind = 2; // 1 = SwitchAppearance, 2 = StartAppearanceTrial
+  string target_appearance_id = 3;
+  uint64 seq = 4;
 }
 
 message PlayerSkillBookState {

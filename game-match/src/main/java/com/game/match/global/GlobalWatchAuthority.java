@@ -31,13 +31,15 @@ import javax.sql.DataSource;
 public final class GlobalWatchAuthority {
     /** {@link #list} 入参的上限。 */
     static final int LIST_MAX_ROWS = 100;
-    /** 可观战的成局：已建房、公开、没过期（参数是过期分界）。 */
-    private static final String WATCHABLE = "state=4 AND spectate_public=1 AND created_ms>=?";
+    /** 可观战的成局：已建房、公开、没过期且终局尚未落定（参数是过期分界）。 */
+    private static final String WATCHABLE = "state=4 AND spectate_public=1 AND created_ms>=?"
+            + " AND NOT EXISTS(SELECT 1 FROM match_battle_completion t WHERE t.battle_id=match_global_formation.battle_id AND t.terminal_decision<>0)";
     private final AuthorityJdbc sql;
     private final GlobalMatchStore publication;
     private final PbMysql db=new PbMysql();
     public GlobalWatchAuthority(DataSource source,GlobalMatchStore schema) {
         this.publication=Objects.requireNonNull(schema);sql=new AuthorityJdbc(source);db.register(GlobalWatchingRow.getDefaultInstance());db.register(GlobalTicketRow.getDefaultInstance());db.register(GlobalFormationRow.getDefaultInstance());
+        db.register(com.game.match.completion.pb.BattleCompletionRow.getDefaultInstance());
         db.register(GlobalWatchRequestRow.getDefaultInstance());db.register(GlobalWatchHeadRow.getDefaultInstance());
     }
     private static SessionContext original(GlobalWatchingRow row){return SessionContext.newBuilder().setPlayerId(row.getPlayerId()).setAccount(row.getOwnerAccount()).setOwnerRevision(row.getOwnerRevision()).build();}
@@ -146,7 +148,7 @@ public final class GlobalWatchAuthority {
             if(current==null||!current.getMark().equals(mark)||current.getState()!=1||queued(c,player))throw new IllegalStateException("观战原保留已取消或已有匹配票");
             long battle=Long.parseUnsignedLong(mark.substring(0,mark.indexOf(':')));
             var formation=db.findOneByPk(c.connection(),GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElseThrow();
-            if(formation.getState()!=4||formation.getBattleId()!=request.getBattleId()||request.getObserverPlayerId()!=player
+            if(formation.getState()!=4||outcomeDecided(c,battle)||formation.getBattleId()!=request.getBattleId()||request.getObserverPlayerId()!=player
                     ||placement.getBattleId()!=formation.getBattleId()||!placement.getBattleInstanceId().equals(formation.getInstanceId())
                     ||!placement.getRpcHost().equals(formation.getHost())||placement.getRpcPort()!=formation.getPort())throw new SecurityException("观战原固定落点已改变");
             // 提交点按同一份建房原件复核可见性（入口已拒私密局，这里是许可 Add 前的最后一道）
@@ -237,7 +239,7 @@ public final class GlobalWatchAuthority {
     }
     public SpectateStore.Snapshot formation(long battle,Deadline deadline) {
         return tx(null,deadline,c->{long stamp=now(c);var f=db.findOneByPk(c.connection(),GlobalFormationRow.newBuilder().setBattleId(battle).build());
-            if(f.isEmpty()||f.get().getState()!=4)return new SpectateStore.Snapshot(false,new SpectateStore.Record.Absent(),stamp);
+            if(f.isEmpty()||f.get().getState()!=4||outcomeDecided(c,battle))return new SpectateStore.Snapshot(false,new SpectateStore.Record.Absent(),stamp);
             return new SpectateStore.Snapshot(true,new SpectateStore.Record.Found(placement(f.get())),stamp);});
     }
     public static BattlePlacement placement(GlobalFormationRow f)throws SQLException {
@@ -333,8 +335,13 @@ public final class GlobalWatchAuthority {
     }
     private Settlement sourceGone(AuthorityJdbc.Session c,long battle,long stamp,boolean instanceReplaced)throws SQLException {
         var formation=db.findOneByPk(c.connection(),GlobalFormationRow.newBuilder().setBattleId(battle).build());
-        if(formation.isPresent()&&formationEnded(formation.get(),stamp))return Settlement.FORMATION_ENDED;
+        if(formation.isPresent()&&(formationEnded(formation.get(),stamp)||outcomeDecided(c,battle)))return Settlement.FORMATION_ENDED;
         return instanceReplaced?Settlement.INSTANCE_REPLACED:Settlement.PENDING;
+    }
+    /** 终局已落定（COMPLETE=1 或 ABORT=2）：成局行在 COMPLETE 时仍保持 state 4，须查 match_battle_completion 才能认出已结束（§15.10）。 */
+    private boolean outcomeDecided(AuthorityJdbc.Session c,long battle)throws SQLException {
+        var terminal=db.findOneByPk(c.connection(),com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+        return terminal.isPresent()&&terminal.get().getTerminalDecision()!=0;
     }
     /** 成局的房间必已不在：已确认中止（state 5），或已过权威期限 + 终局宽限（与 {@code GlobalMatchStore} 竞争 ABORT 同一分界）。期限 0 = 没有期限，证明不了什么。{@code stamp} 取 SQL 时钟。 */
     static boolean formationEnded(GlobalFormationRow formation,long stamp) {

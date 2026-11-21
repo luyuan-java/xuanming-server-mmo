@@ -43,6 +43,15 @@ final class RoomConstants {
     /** 观众直连断开后的重连宽限：宽限内重连照常观战，到期仍未重连就回收座位（与 C++ 版同值）。 */
     static final long OBSERVER_RECONNECT_GRACE_MS = 30_000;
 
+    /**
+     * 观战中继通道心跳间隔（mmorpg battle-spectate-tiered-fanout.md §15.4 / §15.10）：
+     * 距上一帧满 10 s 补一帧冻结 STATE（161），使 gate 30 s 空闲超时（{@code SpectateHub.SOURCE_IDLE}）与手动行动窗口及 SQL 提交等待解耦。
+     */
+    static final long SPECTATE_CHANNEL_KEEPALIVE_MS = 10_000;
+
+    /** 观战心跳在整场期限之后的宽限（与 gate {@code SpectateHub.DEADLINE_GRACE} 同值：过期限 + 60 s 停发心跳）。 */
+    static final long SPECTATE_KEEPALIVE_DEADLINE_GRACE_MS = 60_000;
+
     private RoomConstants() {
     }
 }

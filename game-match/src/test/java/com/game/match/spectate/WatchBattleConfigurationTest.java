@@ -57,7 +57,8 @@ class WatchBattleConfigurationTest {
 
     private static final long PLAYER = 1001;
     private static final long X = 7_000_000_163L;
-    private static final SessionContext SESSION = SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId("gate-inst-1").setSessionId(7)
+    private static final SessionContext SESSION = SessionContext.newBuilder().setGateNodeId(1)
+            .setGateInstanceId(FakePlayerStatus.GATE_INSTANCE).setSessionId(FakePlayerStatus.sessionIdOf(PLAYER))
             .setZoneId(1).setPlayerId(PLAYER).setAccount("acc-1001").build();
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();

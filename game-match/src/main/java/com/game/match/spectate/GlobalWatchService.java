@@ -88,6 +88,12 @@ public final class GlobalWatchService {
             // 同一 UUID 已经写过占用行（上一次走到一半）：照直连路径把原 Add 走完，否则原件成了没人收尾的直连席
             boolean ownReservation=entry.mark().isPresent()&&entry.mark().get().endsWith(":"+request.getRequestId());
             if(!ownReservation&&relay.relayed(battle,deadline))return settle(actor,request,relay.lobby(found.placement(),actor.getPlayerId(),snapshot.redisNowMs(),deadline),deadline);
+            // L0 落原件前由目录正面确认原实例在线（§15.10）：同节点号已换实例按房间不存在结案；查不到不落原件、不关请求，回 16004 留给同 UUID 重试
+            if(!ownReservation){
+                var lookup=store.instanceLookup(found.placement(),deadline);
+                if(lookup==com.game.match.gather.BattleNodes.Lookup.OTHER_INSTANCE)return answer(actor,request,MatchTips.watchRejected(MatchTip.WATCH_NOT_FOUND),deadline);
+                if(lookup!=com.game.match.gather.BattleNodes.Lookup.SAME_INSTANCE)return verdict(MatchTips.watchRejected(MatchTip.BUSY));
+            }
             String mark=Long.toUnsignedString(battle)+":"+request.getRequestId();
             var acquired=authority.reserve(actor,actor.getPlayerId(),mark,deadline);
             if(acquired!=SpectateStore.Acquire.OK)return answer(actor,request,MatchTips.watchRejected(acquired==SpectateStore.Acquire.QUEUED?MatchTip.WATCH_QUEUED:MatchTip.WATCH_ALREADY),deadline);

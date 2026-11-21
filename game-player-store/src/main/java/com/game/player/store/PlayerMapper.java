@@ -111,7 +111,9 @@ public interface PlayerMapper {
     @Update("""
             UPDATE player
                SET level = #{level}, scene_config_id = (CASE WHEN #{sceneConfigId}<0 THEN #{sceneConfigId}+4294967296 ELSE #{sceneConfigId} END),
-                   pos_x = #{posX}, pos_y = #{posY}, pos_z = #{posZ}, owner_released = 1, updated_at = #{updatedAt}
+                   pos_x = #{posX}, pos_y = #{posY}, pos_z = #{posZ},
+                   appearance_id = COALESCE(NULLIF(#{appearanceId}, ''), appearance_id),
+                   owner_released = 1, updated_at = #{updatedAt}
              WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch} AND owner_released = 0
             """)
     int updateStateAndRelease(PlayerRow row);
@@ -123,7 +125,9 @@ public interface PlayerMapper {
     @Update("""
             UPDATE player
                SET level = #{level}, scene_config_id = (CASE WHEN #{sceneConfigId}<0 THEN #{sceneConfigId}+4294967296 ELSE #{sceneConfigId} END),
-                   pos_x = #{posX}, pos_y = #{posY}, pos_z = #{posZ}, updated_at = #{updatedAt}
+                   pos_x = #{posX}, pos_y = #{posY}, pos_z = #{posZ},
+                   appearance_id = COALESCE(NULLIF(#{appearanceId}, ''), appearance_id),
+                   updated_at = #{updatedAt}
              WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch} AND owner_released = 0
             """)
     int updateStateHeld(PlayerRow row);
@@ -143,6 +147,7 @@ public interface PlayerMapper {
             UPDATE player
                SET level = #{row.level}, scene_config_id = (CASE WHEN #{row.sceneConfigId}<0 THEN #{row.sceneConfigId}+4294967296 ELSE #{row.sceneConfigId} END),
                    pos_x = #{row.posX}, pos_y = #{row.posY}, pos_z = #{row.posZ},
+                   appearance_id = COALESCE(NULLIF(#{row.appearanceId}, ''), appearance_id),
                    owner_epoch = owner_epoch + 1, owner_released = #{released}, owner_lease_until = #{leaseUntil},
                    updated_at = #{row.updatedAt}
              WHERE player_id = #{row.playerId} AND owner_epoch = #{row.ownerEpoch} AND owner_released = 0 AND trade_listing_id=0

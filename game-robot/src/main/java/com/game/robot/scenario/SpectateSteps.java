@@ -1,5 +1,6 @@
 package com.game.robot.scenario;
 
+import com.game.contract.MessageIdRegistry;
 import com.game.proto.BattleAssignedS2C;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.BattleTicketPayload;
@@ -7,8 +8,12 @@ import com.game.proto.SpectateEndS2C;
 import com.game.proto.SpectateStateS2C;
 import com.game.proto.StopWatchBattleRequest;
 import com.game.proto.StopWatchBattleResponse;
+import com.game.proto.SubscribeSpectateRequest;
+import com.game.proto.SubscribeSpectateResponse;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.TurnResultS2C;
+import com.game.proto.UnsubscribeSpectateRequest;
+import com.game.proto.UnsubscribeSpectateResponse;
 import com.game.proto.eBattleOutcome;
 import com.game.proto.eBattleTicketRole;
 import com.game.proto.eSpectateEndReason;
@@ -17,6 +22,8 @@ import com.game.proto.match.ListWatchableBattlesRequest;
 import com.game.proto.match.ListWatchableBattlesResponse;
 import com.game.proto.match.WatchBattleRequest;
 import com.game.proto.match.WatchBattleResponse;
+import com.game.proto.match.eSpectateDelivery;
+import com.google.protobuf.ByteString;
 import com.game.robot.client.BattleDirectConnection;
 import com.game.robot.client.BattleFrame;
 import com.game.robot.client.BattleIds;
@@ -62,6 +69,7 @@ final class SpectateSteps {
     static final int TIP_NOT_WATCHABLE = MatchErrorTip.match_error.kMatchBattleNotWatchable_VALUE;
     static final int TIP_OFFLINE = MatchErrorTip.match_error.kMatchSpectateOffline_VALUE;
     static final int TIP_FULL = MatchErrorTip.match_error.kMatchSpectateFull_VALUE;
+    static final int TIP_TICKET_INVALID = MatchErrorTip.match_error.kMatchSpectateTicketInvalid_VALUE;
 
     // ---- parameters[0]（逐字节；半角逗号） ----
     static final String TEXT_QUEUED = "匹配中无法观战";
@@ -605,6 +613,151 @@ final class SpectateSteps {
     static long lobbyBattleFrames(List<Received> lobby, BattleIds ids) {
         return lobby.stream().filter(r -> r.messageId() == ids.turnResult() || r.messageId() == ids.spectateTurnResult()
                 || r.messageId() == ids.spectateState() || r.messageId() == ids.spectateEnd()).count();
+    }
+
+    // ---------------------------------------------------------------- 大厅档中继订阅（351 / 352，battle-spectate-tiered-fanout.md §15.2）
+
+    /** 大厅档订阅消息号（按服务裸名解析，不写死数字）。 */
+    record LobbyIds(int subscribe, int unsubscribe) {
+        static LobbyIds resolve(MessageIdRegistry registry) {
+            return new LobbyIds(
+                    registry.requireId("GateClientSpectate", "SubscribeSpectate"),
+                    registry.requireId("GateClientSpectate", "UnsubscribeSpectate"));
+        }
+    }
+
+    /** 163 应答是否走大厅档（{@code delivery = LOBBY} 且带非空凭证）。 */
+    static boolean isLobbyDelivery(WatchBattleResponse response) {
+        return accepted(response) && response.getDelivery() == eSpectateDelivery.SPECTATE_DELIVERY_LOBBY
+                && !response.getSpectateTicket().isEmpty();
+    }
+
+    /** 大厅档 163 应答判据：满足 {@link #acceptedProblem}，且 {@code delivery = LOBBY}、{@code spectate_ticket} 非空。null = 没问题。 */
+    static String lobbyAcceptedProblem(WatchBattleResponse response, long expectedBattleId) {
+        String base = acceptedProblem(response, expectedBattleId);
+        if (base != null) {
+            return base;
+        }
+        if (response.getDelivery() != eSpectateDelivery.SPECTATE_DELIVERY_LOBBY) {
+            return "期望 delivery=SPECTATE_DELIVERY_LOBBY，实得 " + response.getDelivery();
+        }
+        if (response.getSpectateTicket().isEmpty()) {
+            return "LOBBY 应答缺少 spectate_ticket";
+        }
+        return null;
+    }
+
+    /** 351：在大厅连接上向 gate 订阅本场观战帧流（不建 battle 直连）。 */
+    static SubscribeSpectateResponse subscribeLobby(MatchSupport.Caller bot, LobbyIds ids, long battleId, ByteString spectateTicket)
+            throws RobotException {
+        return bot.call(ids.subscribe(), SubscribeSpectateRequest.newBuilder()
+                .setBattleId(battleId).setSpectateTicket(spectateTicket).build(), SubscribeSpectateResponse.parser());
+    }
+
+    /** 352：在大厅连接上向 gate 退订本场观战帧流（幂等）。 */
+    static UnsubscribeSpectateResponse unsubscribeLobby(MatchSupport.Caller bot, LobbyIds ids, long battleId) throws RobotException {
+        return bot.call(ids.unsubscribe(), UnsubscribeSpectateRequest.newBuilder().setBattleId(battleId).build(),
+                UnsubscribeSpectateResponse.parser());
+    }
+
+    /** 等大厅连接上本场的首帧 161。 */
+    static Received awaitLobbyState(String name, GameConnection lobby, int from, long battleId, BattleIds ids, Duration timeout)
+            throws RobotException {
+        return lobby.await(from, r -> {
+            if (r.messageId() != ids.spectateState() || r.requestId() != 0) {
+                return false;
+            }
+            SpectateStateS2C state = r.parseOrNull(SpectateStateS2C.parser());
+            return state != null && state.getState().getBattleId() == battleId;
+        }, timeout).orElseThrow(() -> new RobotException(name + "：" + timeout.toSeconds()
+                + " s 内大厅没有收到 battle_id=" + uid(battleId) + " 的首帧 161" + lobby.describeSince(from)));
+    }
+
+    /** 等大厅连接上本场的终局 166。 */
+    static Received awaitLobbyEnd(String name, GameConnection lobby, int from, long battleId, BattleIds ids, Duration timeout)
+            throws RobotException {
+        return lobby.await(from, r -> {
+            if (r.messageId() != ids.spectateEnd() || r.requestId() != 0) {
+                return false;
+            }
+            SpectateEndS2C end = r.parseOrNull(SpectateEndS2C.parser());
+            return end != null && end.getBattleId() == battleId;
+        }, timeout).orElseThrow(() -> new RobotException(name + "：" + timeout.toSeconds()
+                + " s 内大厅没有收到 battle_id=" + uid(battleId) + " 的终局 166" + lobby.describeSince(from)));
+    }
+
+    /**
+     * 大厅档观战帧流判据：至少一条观众版 161、至少 {@code minTurns} 条观众版 158、恰好一条符合 {@code reason}（及非 SOURCE_LOST 时的 {@code outcome}）
+     * 的 166，且顺序满足 首帧 161 先于首条 158（如有）、全部 158 先于 166，不包含 139 / 150。null = 没问题。
+     */
+    static String lobbyStreamProblem(List<Received> frames, BattleIds ids, long battleId, eSpectateEndReason reason,
+                                     eBattleOutcome outcome, int minTurns) {
+        List<String> problems = new ArrayList<>();
+        int firstState = -1;
+        int firstTurn = -1;
+        int lastTurn = -1;
+        int turns = 0;
+        int endCount = 0;
+        int endIndex = -1;
+        SpectateEndS2C end = null;
+        for (int i = 0; i < frames.size(); i++) {
+            Received r = frames.get(i);
+            if (r.requestId() != 0) {
+                continue;
+            }
+            if (r.messageId() == ids.turnResult() || r.messageId() == ids.battleEnd()) {
+                problems.add("大厅观战流出现了参战者帧 message_id=" + r.messageId());
+            } else if (r.messageId() == ids.spectateState()) {
+                SpectateStateS2C s = r.parseOrNull(SpectateStateS2C.parser());
+                if (s != null && s.getState().getBattleId() == battleId) {
+                    if (firstState < 0) {
+                        firstState = i;
+                    }
+                    String redacted = redactedProblem(s.getState());
+                    if (redacted != null) {
+                        problems.add("大厅 161 #" + i + " " + redacted);
+                    }
+                }
+            } else if (r.messageId() == ids.spectateTurnResult()) {
+                TurnResultS2C t = r.parseOrNull(TurnResultS2C.parser());
+                if (t != null && t.getBattleId() == battleId) {
+                    if (firstTurn < 0) {
+                        firstTurn = i;
+                    }
+                    lastTurn = i;
+                    turns++;
+                    String redacted = redactedProblem(t.getState());
+                    if (redacted != null) {
+                        problems.add("大厅 158 #" + i + " " + redacted);
+                    }
+                }
+            } else if (r.messageId() == ids.spectateEnd()) {
+                SpectateEndS2C e = r.parseOrNull(SpectateEndS2C.parser());
+                if (e != null && e.getBattleId() == battleId) {
+                    endCount++;
+                    endIndex = i;
+                    end = e;
+                }
+            }
+        }
+        if (firstState < 0) {
+            problems.add("大厅观战流缺少首帧 161");
+        }
+        if (turns < minTurns) {
+            problems.add("大厅观战流只有 " + turns + " 条 158（期望 ≥ " + minTurns + "）");
+        }
+        if (endCount != 1) {
+            problems.add("大厅 166 应恰好一条，实际 " + endCount + " 条");
+        } else if (end.getReason() != reason || (reason != eSpectateEndReason.SPECTATE_END_SOURCE_LOST && end.getOutcome() != outcome)) {
+            problems.add("大厅 166 {reason=" + end.getReason() + ", outcome=" + end.getOutcome() + "}（期望 {" + reason + ", " + outcome + "}）");
+        }
+        if (firstState >= 0 && firstTurn >= 0 && firstState > firstTurn) {
+            problems.add("大厅首帧 161(#" + firstState + ") 晚于首条 158(#" + firstTurn + ")");
+        }
+        if (endIndex >= 0 && lastTurn >= 0 && lastTurn > endIndex) {
+            problems.add("大厅 158(#" + lastTurn + ") 晚于终局 166(#" + endIndex + ")");
+        }
+        return problems.isEmpty() ? null : String.join("；", problems);
     }
 
     private static String uid(long id) {

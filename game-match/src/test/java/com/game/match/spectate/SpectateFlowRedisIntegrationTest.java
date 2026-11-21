@@ -130,7 +130,7 @@ class SpectateFlowRedisIntegrationTest {
     }
 
     private static SessionContext session(long playerId) {
-        return SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId("gate-inst-1").setSessionId(7).setZoneId(1).setPlayerId(playerId)
+        return SessionContext.newBuilder().setGateNodeId(1).setGateInstanceId("gate-inst-z2").setSessionId(131073).setZoneId(2).setPlayerId(playerId)
                 .setAccount("acc-" + id(playerId)).build();
     }
 

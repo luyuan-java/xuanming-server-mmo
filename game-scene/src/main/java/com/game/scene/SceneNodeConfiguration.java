@@ -16,6 +16,7 @@ import com.game.player.store.PlayerTradeStore;
 import com.game.scene.admin.GmShutdownController;
 import com.game.scene.admin.SceneAdminAuthFilter;
 import com.game.scene.admin.SceneAdminController;
+import com.game.scene.appearance.AppearanceTables;
 import com.game.scene.attribute.AttributeTables;
 import com.game.scene.bag.BagTables;
 import com.game.scene.mission.MissionTables;
@@ -103,6 +104,11 @@ public class SceneNodeConfiguration {
         return PetTables.from(tables);
     }
 
+    @Bean
+    public AppearanceTables appearanceTables(ConfigTables tables) {
+        return AppearanceTables.from(tables);
+    }
+
     /** gate 链路握手鉴权。密钥只从环境变量 {@code GAME_NODE_LINK_SECRET} 读，缺失即启动失败（不允许无鉴权的链路）。 */
     @Bean
     public NodeLinkAuth nodeLinkAuth(Environment environment) {
@@ -143,7 +149,7 @@ public class SceneNodeConfiguration {
     public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, RedisKeys redisKeys, PlayerStore playerStore, PlayerTradeStore playerTrades,
                                MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
                                BagTables bagTables, MissionTables missionTables, SkillTables skillTables,
-                               PetTables petTables, NodeLinkAuth nodeLinkAuth,
+                               PetTables petTables, AppearanceTables appearanceTables, NodeLinkAuth nodeLinkAuth,
                                SceneMetrics sceneMetrics, AuditProperties audit, KafkaNames kafkaNames,
                                SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source,
                                com.game.common.sql.WriterAuthority boot,
@@ -151,7 +157,7 @@ public class SceneNodeConfiguration {
         if (audit.enabled()) audit.validateFor(RunMode.parse(props.runMode()));
         return new SceneNode(props, redis, redisKeys, playerStore, playerTrades, registry, tables, attributeTables, bagTables, missionTables,
                 skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, kafkaNames, sceneBattleTables, sceneBattleMetrics,
-                source, evacuation, processExit::exitSoon).withMaintenanceBoot(boot);
+                source, evacuation, processExit::exitSoon).withAppearanceTables(appearanceTables).withMaintenanceBoot(boot);
     }
 
     @Bean

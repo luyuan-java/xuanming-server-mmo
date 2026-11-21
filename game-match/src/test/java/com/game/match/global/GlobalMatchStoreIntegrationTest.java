@@ -649,6 +649,35 @@ class GlobalMatchStoreIntegrationTest {
         assertTrue(requestExists(head),"请求头：读路径按它取回执");
         assertEquals(0,purge(sql),"幂等");
     }
+    @Test void 成局COMPLETE终局落定后不可观战且无证明关闭算FORMATION_ENDED()throws Exception {
+        var w=admittedWatch(3451,3452);var sql=w.sql();
+        assertTrue(sql.formation(3452,budget()).published());
+        assertTrue(sql.list(20,budget()).members().stream().anyMatch(m->m.member().equals("3452")));
+        assertEquals(1,sql.watchableCount(budget()));
+
+        // COMPLETE 时 match_global_formation.state 仍为 4，仅 match_battle_completion.terminal_decision 置为 1
+        execute("INSERT INTO match_battle_completion(battle_id,terminal_decision) VALUES(3452,1) ON DUPLICATE KEY UPDATE terminal_decision=1");
+
+        assertFalse(sql.formation(3452,budget()).published(),"COMPLETE 后按 id 读成局返回不在");
+        assertTrue(sql.list(20,budget()).members().stream().noneMatch(m->m.member().equals("3452")),"COMPLETE 后不再出现在可观战列表");
+        assertEquals(0,sql.watchableCount(budget()),"COMPLETE 后不再计入可观战总数");
+        assertTrue(sql.pick(0.0,budget()) instanceof com.game.match.spectate.SpectateStore.Pick.None,"COMPLETE 后随机选场跳过");
+
+        // 已取消的原件即使拿不到 Remove 证明，也能凭 COMPLETE 关闭为 FORMATION_ENDED
+        var work=sql.lease(sql.cancel(null,3451,w.mark(),budget()),budget());
+        assertEquals(GlobalWatchAuthority.Settlement.FORMATION_ENDED,sql.settled(work,false,null,false,budget()));
+        assertEquals(5,watchState(sql,3451));
+    }
+    @Test void 启动核对观战意图清理索引_缺created_ms复合索引拒绝启动()throws Exception {
+        String indexName=null;
+        try(var c=fixture.schemaConnection();var q=c.prepareStatement(
+                "SELECT INDEX_NAME FROM information_schema.statistics WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='match_global_watch_request' AND NON_UNIQUE=1 GROUP BY INDEX_NAME HAVING GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)='created_ms,player_id,request_id'")){
+            try(var r=q.executeQuery()){if(r.next())indexName=r.getString(1);}
+        }
+        assertNotNull(indexName,"fresh-schema 必须建出 (created_ms,player_id,request_id) 索引");
+        execute("ALTER TABLE match_global_watch_request DROP INDEX `"+indexName+"`");
+        assertThrows(SQLException.class,()->new GlobalMatchStore(data,new GlobalMatchProperties(true,true,30,180,120,GlobalRegionPolicyTest.CONFIG.probeSecret())));
+    }
     @Test void 请求历史保留期_当前观战原件不删_关闭之后才删()throws Exception {
         var w=admittedWatch(3511,3512);var sql=w.sql();
         sql.begin(actor(3511),watchRequest(3512),budget());

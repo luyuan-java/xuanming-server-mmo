@@ -14,6 +14,7 @@ import com.game.proto.BattleTokenVerifyResponse;
 import com.game.proto.CreateBattleRequest;
 import com.game.proto.GetBattleStateRequest;
 import com.game.proto.IssueBattleTicketResponse;
+import com.game.proto.RemoveObserverResponse;
 import com.game.proto.SetAutoBattleRequest;
 import com.game.proto.SetAutoBattleResponse;
 import com.game.proto.SpectateEndS2C;
@@ -548,12 +549,18 @@ public final class BattleScenario {
                 "battle-node-spec §5.8 O8");
 
         // 再登记 → 直连 → dev 清退：166 {REMOVED, ONGOING} → FIN
-        BattleAssignedS2C removeTicket = addObserver("第 16 步（清退）", second, c);
+        String removeOp = java.util.UUID.randomUUID().toString();
+        long removeAdmitBefore = System.currentTimeMillis() + 25_000L;
+        BattleAssignedS2C removeTicket = addObserver("第 16 步（清退）", second, c, removeOp, removeAdmitBefore);
         Direct removed = open("C#removed", removeTicket);
         removed.handshake(removeTicket);
         removed.awaitPush(0, ids.spectateState(), requestTimeout);
         int removeMark = removed.mark();
-        admin.removeObserver(second, c.id(), "robot_battle");
+        RemoveObserverResponse removeReply = admin.removeObserver(second, c.id(), "robot_battle", removeOp, removeAdmitBefore);
+        report.check(removeReply.getCancelled() && removeOp.equals(removeReply.getSpectatorOperationId()),
+                "第 16 步 dev 清退观众回取消正证明",
+                "cancelled=" + removeReply.getCancelled() + " op=" + removeReply.getSpectatorOperationId(),
+                "battle-node-spec §5.5");
         List<BattleFrame> removeTail = removed.untilClosed(removeMark, Duration.ofSeconds(3));
         String removeProblem = BattleOrder.exactly(removeTail, List.of("push:" + ids.spectateEnd(), BattleOrder.FIN));
         SpectateEndS2C kicked = removeProblem == null ? removeTail.get(0).parse(SpectateEndS2C.parser()) : null;
@@ -566,8 +573,13 @@ public final class BattleScenario {
 
     /** dev 登记观众并等大厅上的 177（role = 2）。 */
     private BattleAssignedS2C addObserver(String step, long battleId, LobbyBot observer) throws RobotException {
+        return addObserver(step, battleId, observer, java.util.UUID.randomUUID().toString(), System.currentTimeMillis() + 25_000L);
+    }
+
+    private BattleAssignedS2C addObserver(String step, long battleId, LobbyBot observer, String operationId, long admitBeforeMs)
+            throws RobotException {
         int mark = observer.mark();
-        AddObserverResponse added = admin.addObserver(battleId, observer.id(), observer.name);
+        AddObserverResponse added = admin.addObserver(battleId, observer.id(), observer.name, operationId, admitBeforeMs);
         report.check(!added.hasErrorMessage(), step + " dev 登记观众 " + observer.name, "tip=" + added.getErrorMessage().getId(), "battle-node-spec §5.5");
         BattleAssignedS2C ticket = observer.awaitAssigned(mark, battleId).parse(BattleAssignedS2C.parser());
         report.check(ticket.getRole() == eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER && BattleFixtures.isLowerHex64(ticket.getTokenSignature()),

@@ -594,4 +594,46 @@ class SpectateStepsTest {
             fighterDirect.close();
         }
     }
+
+    @Test
+    void 大厅档契约_解析351与352_校验LOBBY应答与帧流顺序含SOURCE_LOST() {
+        SpectateSteps.LobbyIds lobbyIds = SpectateSteps.LobbyIds.resolve(MessageIdRegistry.loadFromClasspath());
+        assertThat(lobbyIds.subscribe()).isEqualTo(351);
+        assertThat(lobbyIds.unsubscribe()).isEqualTo(352);
+        assertThat(SpectateSteps.TIP_TICKET_INVALID).isEqualTo(16024);
+
+        WatchBattleResponse lobbyOk = WatchBattleResponse.newBuilder()
+                .setBattleId(X)
+                .setDelivery(com.game.proto.match.eSpectateDelivery.SPECTATE_DELIVERY_LOBBY)
+                .setSpectateTicket(ByteString.copyFromUtf8("signed-ticket"))
+                .build();
+        assertThat(SpectateSteps.isLobbyDelivery(lobbyOk)).isTrue();
+        assertThat(SpectateSteps.lobbyAcceptedProblem(lobbyOk, X)).isNull();
+        assertThat(SpectateSteps.lobbyAcceptedProblem(lobbyOk.toBuilder().clearSpectateTicket().build(), X)).contains("spectate_ticket");
+        assertThat(SpectateSteps.lobbyAcceptedProblem(WatchBattleResponse.newBuilder().setBattleId(X).build(), X)).contains("SPECTATE_DELIVERY_LOBBY");
+
+        List<Received> normalStream = List.of(
+                lobby(0, IDS.spectateState(), 0, SpectateStateS2C.newBuilder().setState(state(X, false, false)).build()),
+                lobby(1, IDS.spectateTurnResult(), 0, TurnResultS2C.newBuilder().setBattleId(X).setRoundIndex(1).setState(state(X, false, false)).build()),
+                lobby(2, IDS.spectateEnd(), 0, SpectateEndS2C.newBuilder().setBattleId(X)
+                        .setReason(eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED).setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN).build()));
+        assertThat(SpectateSteps.lobbyStreamProblem(normalStream, IDS, X, eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED,
+                eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 1)).isNull();
+
+        List<Received> sourceLostStream = List.of(
+                lobby(0, IDS.spectateState(), 0, SpectateStateS2C.newBuilder().setState(state(X, false, false)).build()),
+                lobby(1, IDS.spectateEnd(), 0, SpectateEndS2C.newBuilder().setBattleId(X)
+                        .setReason(eSpectateEndReason.SPECTATE_END_SOURCE_LOST).setOutcome(eBattleOutcome.BATTLE_OUTCOME_ONGOING).build()));
+        assertThat(SpectateSteps.lobbyStreamProblem(sourceLostStream, IDS, X, eSpectateEndReason.SPECTATE_END_SOURCE_LOST,
+                eBattleOutcome.BATTLE_OUTCOME_ONGOING, 0)).isNull();
+
+        // 顺序颠倒（158 先于 161）报错
+        List<Received> outOfOrder = List.of(
+                lobby(0, IDS.spectateTurnResult(), 0, TurnResultS2C.newBuilder().setBattleId(X).setRoundIndex(1).setState(state(X, false, false)).build()),
+                lobby(1, IDS.spectateState(), 0, SpectateStateS2C.newBuilder().setState(state(X, false, false)).build()),
+                lobby(2, IDS.spectateEnd(), 0, SpectateEndS2C.newBuilder().setBattleId(X)
+                        .setReason(eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED).setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN).build()));
+        assertThat(SpectateSteps.lobbyStreamProblem(outOfOrder, IDS, X, eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED,
+                eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 1)).contains("晚于首条 158");
+    }
 }

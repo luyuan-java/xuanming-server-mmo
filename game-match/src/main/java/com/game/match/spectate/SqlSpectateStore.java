@@ -40,6 +40,10 @@ public final class SqlSpectateStore implements SpectateStore,AutoCloseable {
         this.authority=authority;this.dialer=dialer;this.nodes=nodes;this.metrics=metrics;
     }
     public GlobalWatchAuthority authority(){return authority;}
+    /** 查询落点所在节点此刻的实例身份：用于 L0 写原件前的目录核对（mmorpg battle-spectate-tiered-fanout.md §15.10）。 */
+    public BattleNodes.Lookup instanceLookup(BattlePlacement placement,Deadline d){
+        return nodes.lookup(placement.getBattleNodeId(),placement.getBattleInstanceId(),d);
+    }
     public void start(){
         timer.scheduleWithFixedDelay(this::recover,1000,1000,TimeUnit.MILLISECONDS);
         timer.scheduleWithFixedDelay(this::purgeRequests,REQUEST_PURGE_PERIOD_MS,REQUEST_PURGE_PERIOD_MS,TimeUnit.MILLISECONDS);

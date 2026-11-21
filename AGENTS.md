@@ -1,25 +1,41 @@
 # xuanming-server-mmo（Java 版）规范与 AI 协作守则
 
-> 本仓库是 mmorpg（C++ 节点 + Go 微服务，`github.com/luyuan-cpp/xuanming-server-mmo`）的 **Java 版**，两版并行演进。
-> `CLAUDE.md` 只通过 `@AGENTS.md` 导入本文件。通用工程原则沿用 mmorpg `AGENTS.md` §11（正确性 / 数据一致性优先、
-> SRP、KISS、YAGNI、显式依赖、面向接口测试等），本文件只写 Java 版特有的规则。
+> 本文件是本仓库对 AI Agent（Claude Code / Codex / Gemini / Cursor / Copilot 等）和人类开发者的**唯一规范总入口**。
+> 本仓库是 mmorpg（C++ 节点 + Go 微服务，`https://github.com/luyuan-cpp/xuanming-server-mmo`）的 **Java 版**，两版并行演进。
+> `CLAUDE.md` 与 `.github/copilot-instructions.md` 只通过 `@AGENTS.md` 单行导入本文件，不在多处重复维护规则；通用分章细则见 `docs/rules/`。
 
 ## 会话启动门禁
 
-1. 本文件；2. `PARITY.md`（两版对齐状态）；3. `docs/design/architecture.md` 与 `tech-stack.md`；
-4. `docs/reference/`（从 mmorpg 提取的客户端契约，做客户端可见功能前必读）；5. `git log -20 --oneline`。
+0. **新电脑 / 新 AI Agent 环境必先安装必装 Skills**（`mattpocock/skills`、`DietrichGebert/ponytail` 及精选 ≥2 万 Star 代码工程 Skills，共 8 仓 618 项），清单与一键复原脚本见 → [docs/rules/required-skills.md](docs/rules/required-skills.md)
+1. 本文件及任务涉及的 `docs/rules/*.md` 分章细则；
+2. `PARITY.md`（两版对齐状态）；
+3. `docs/design/architecture.md` 与 `tech-stack.md`；
+4. `docs/reference/`（从 mmorpg 提取的客户端契约，做客户端可见功能前必读）；
+5. `git log -20 --oneline`。
+
+## 规范分章索引（`docs/rules/`）
+
+| 领域 | 核心约束摘要 | 完整规范文档 |
+|---|---|---|
+| 必装 Skills | 新电脑 / 新 Agent 必装 8 仓 618 个 Skills（含一键脚本与逐项明细） | [docs/rules/required-skills.md](docs/rules/required-skills.md) |
+| 工程设计与编码原则 | SOLID、KISS/YAGNI、**系统/模块间 Actor 消息通信（不可变消息、禁过度拆内部函数）**、**23 种设计模式主动采用并说明原因**、**高 Star 开源库（门槛按语言与领域生态浮动）交程序决定并说明原因**、实例与布局分层、线程/连接生命周期 | [docs/rules/engineering-principles.md](docs/rules/engineering-principles.md) |
+| 位图（Bit）与删表 ID | 纯布尔完成/领取状态优先 bit 存储、领取归属业务表、删表 ID 策划与程序红线 | [docs/rules/bit-storage-and-table-ids.md](docs/rules/bit-storage-and-table-ids.md) |
+| 命名与权限边界 | 命名清晰准确带单位、关联 GitHub 仓库清单、硬禁令与 push 授权边界 | [docs/rules/naming-and-boundaries.md](docs/rules/naming-and-boundaries.md) |
+| AI 协作与模型档位 | 构建测试权限、无证据禁称通过、强制高低档模型切换、设计方案强制落盘 `.md` | [docs/rules/ai-workflow.md](docs/rules/ai-workflow.md) |
 
 ## 当前开发分支（用户 2026-11-08 要求）
 
 Java 续移植统一在主仓库的 `main` 分支进行，不再为本任务创建并行工作树或临时本地分支。
 清理已有工作树之前，先归并未提交改动并保存恢复快照；未执行的候选和历史失败证据不能记为验证通过。
 
-## 通用工程原则（用户补充）
+## 通用工程原则（用户补充，完整细则见 `docs/rules/`）
 
 - **未上线阶段前提**：游戏尚未上线，玩家数据可完全清空；按最标准的方式实现与重构，不保留不必要的历史兼容层。
-- **质量与架构要求**：保证**数据强一致性**、代码可读易懂、**可水平扩展**；严格遵守**单一职责（SRP）**等软件开发原则，适合用 23 种设计模式优化的结构主动采用并说明。
+- **质量与架构要求**：保证**数据强一致性**、命名清晰准确易懂、**可水平扩展**；严格遵守**单一职责（SRP）**等软件开发原则，适合用 23 种设计模式优化的结构主动采用并向程序说明原因。
+- **系统 / 模块间消息通信（Actor 隔离）**：跨系统、跨线程、跨进程交互一律通过**不可变消息**（Mailbox / 事件 / RPC / Kafka）通信，各模块独占状态、禁止传递可变对象引用或借全局单例绕过通道；仅限跨模块/跨边界使用，单个模块内部保持正常直接方法调用，严禁把内部普通函数过度拆成消息（详见 [docs/rules/engineering-principles.md](docs/rules/engineering-principles.md)）。
+- **位图存储优先**：玩家对表 ID 的纯布尔完成/领取/解锁状态优先用位图存储，严守删表 ID 的策划与程序红线（见 [docs/rules/bit-storage-and-table-ids.md](docs/rules/bit-storage-and-table-ids.md)）。
 - **问题当场闭环**：排查出的问题与合理标准直接按最优方案落地，不留“等压测/等以后再修”的债务。
-- **分工约定**：只负责业务代码实现时，协议生成、编译与冒烟验证可交由 Codex 执行。
+- **分工约定**：只负责业务代码实现时，协议生成、编译与冒烟验证可交由 Codex 执行（见 [docs/rules/ai-workflow.md](docs/rules/ai-workflow.md)）。
 
 ## 1. 双版本纪律（强制）
 
@@ -41,8 +57,8 @@ Java 续移植统一在主仓库的 `main` 分支进行，不再为本任务创�
 
 ## 2. 选型（强制）
 
-第三方库优先 GitHub ≥ 2 万 star，**同类取 star 最高**；JDK 与 Spring Boot 自带组件视为事实标准。
-新增依赖前先查 star，写进 `docs/design/tech-stack.md`；安全 > star（例：不用 fastjson 1.x）。
+第三方库优先同类头部高 Star 成熟项目（Java 主流通用库参考 GitHub ≥ 2 万 Star、**同类取 Star 最高**；细分/垂直领域按对应语言生态体量浮动，不机械死卡 2 万）；JDK 与 Spring Boot 自带组件视为事实标准。
+新增依赖前先查 Star 与维护状态、交由程序决定并说明原因，确认后写进 `docs/design/tech-stack.md`；安全 > Star（例：不用 fastjson 1.x）。
 
 ## 3. 编码约定
 
@@ -103,7 +119,8 @@ Claude 在本仓库**可以自行编译和跑测试**（用户 2026-09-29 授权
 - ❌ 把 `player_id` 等高基数值当指标 label。
 - ❌ 在公开仓库里放个人 / 面试内容（本仓库公开且挂在简历上）。
 
-## 6. 模型档位规定（强制，负责人 2026-11-20 定）
+## 6. 模型档位与设计落盘规定（强制，负责人 2026-11-20 定，2026-11-21 补充）
 
-- **修改代码必须使用各软件当时的最高档模型**，不得在低档模型上改代码：Claude Code 用 `Fable 5.2 Max`，Gemini 用 `Gemini 4 Neon Extra`，Codex 用 `GPT 6.2 Astral Ultra`。
-- **编译、同步契约、跑测试与冒烟使用低档模型**：Gemini 用 `Carbon Medium`，Codex 用 `6.1 Sol Ultra`，Claude Code 用 `Opus 5 High`；遇到需要改代码的报错先保留原文停下，切回最高档模型再改。
+- **写/修改代码，以及需求分析、设计分析、思想分析、漏洞分析、步骤分析、执行步骤，必须使用各软件当时的最高档模型**，不得在低档模型上执行：Claude Code 用 `Fable 5.2 Max`，Gemini 用 `Gemini 4 Neon Extra`，Codex 用 `GPT 6.2 Astral Ultra`。
+- **设计方案强制落盘 `.md`**：以后编写设计方案时，Claude Code（及其他 AI Agent）写好设计后必须将**需求分析、设计分析、思想分析、漏洞分析、步骤分析、执行步骤**及完整方案保存到 `docs/design/<主题>.md`（或既有对应设计文档），不得只留在对话中。
+- **仅编译、同步契约、跑测试与冒烟使用低档模型**：Gemini 用 `Carbon Medium`，Codex 用 `6.1 Sol Ultra`，Claude Code 用 `Opus 5 High`；遇到需要改代码或需做上述分析/步骤设计的报错先保留原文停下，切回最高档模型再处理。

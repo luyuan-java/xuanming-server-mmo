@@ -223,15 +223,7 @@ public final class WatchBattleService {
             }
         }
 
-        // 第 7 行：已有标记不拒绝，先收拾旧场
-        if (entry.mark().isPresent()) {
-            Verdict stop = clearPreviousMark(playerId, player, entry.mark().get(), requestedBattleId, d, pending);
-            if (stop != null) {
-                return stop;
-            }
-        }
-
-        // 第 8、9、10 行：观众必须在线——路由四个字段都取在线目录（W11），177 也按在线目录推
+        // 跨会话栅栏与在线目录（先于清退旧标记）：重连后旧会话上还在途的 163 不得拆掉新会话的观战，再用新会话的路由挂旧请求选的场
         Optional<PlayerPresence> presence;
         try {
             presence = players.presence(playerId, d);
@@ -246,7 +238,22 @@ public final class WatchBattleService {
                     Integer.toUnsignedString(presence.get().getGateNodeId()), Integer.toUnsignedString(presence.get().getZoneId()));
             return rejected(WatchOutcome.INTERNAL, MatchTip.BUSY);
         }
+        if (session.getSessionId() == 0 || session.getGateInstanceId().isEmpty()
+                || presence.get().getSessionId() != session.getSessionId()
+                || !presence.get().getGateInstanceId().equals(session.getGateInstanceId())) {
+            log.info("[spectate] WatchBattle 来自已被取代的会话，拒绝且不清退旧观战 player={} request_session={} current_session={}", player,
+                    Integer.toUnsignedString(session.getSessionId()), Integer.toUnsignedString(presence.get().getSessionId()));
+            return rejected(WatchOutcome.OFFLINE, MatchTip.WATCH_OFFLINE);
+        }
         BattleRouting routing = BattleRoutings.gatePart(presence.get());
+
+        // 第 7 行：已有标记不拒绝，先收拾旧场
+        if (entry.mark().isPresent()) {
+            Verdict stop = clearPreviousMark(playerId, player, entry.mark().get(), requestedBattleId, d, pending);
+            if (stop != null) {
+                return stop;
+            }
+        }
 
         // 选场 + 登记：随机两轮、指定一轮（指定场已在副作用之前选定，这里复用那次原子读）
         int rounds = randomMode ? MatchBudgets.RANDOM_WATCH_ROUNDS : 1;

@@ -10,6 +10,7 @@ import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
 import com.game.proto.PrepareBattleResponse;
 import com.game.proto.RemoveObserverRequest;
+import com.game.proto.RemoveObserverResponse;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
@@ -239,10 +240,17 @@ public final class BattleAdminClient {
         }
     }
 
-    /** dev 登记观众（观众路由留空由接口按在线目录补全）。 */
+    /** dev 登记观众（观众路由与 target_instance_id 由 dev 接口按在线目录与本进程实例补全）。 */
     public AddObserverResponse addObserver(long battleId, long observerPlayerId, String observerName) throws RobotException {
+        return addObserver(battleId, observerPlayerId, observerName, java.util.UUID.randomUUID().toString(),
+                System.currentTimeMillis() + 25_000L);
+    }
+
+    /** dev 登记观众（显式带规范 UUID 与准入截止，便于后续清退复用同一原件）。 */
+    public AddObserverResponse addObserver(long battleId, long observerPlayerId, String observerName,
+                                           String spectatorOperationId, long admitBeforeMs) throws RobotException {
         byte[] body = expect(ADD_OBSERVER, AddObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observerPlayerId)
-                .setObserverName(observerName).build(), 200).body();
+                .setObserverName(observerName).setSpectatorOperationId(spectatorOperationId).setAdmitBeforeMs(admitBeforeMs).build(), 200).body();
         try {
             return AddObserverResponse.parseFrom(body);
         } catch (InvalidProtocolBufferException e) {
@@ -250,10 +258,16 @@ public final class BattleAdminClient {
         }
     }
 
-    /** dev 清退观众（幂等，204）。 */
-    public void removeObserver(long battleId, long observerPlayerId, String reason) throws RobotException {
-        expect(REMOVE_OBSERVER, RemoveObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observerPlayerId)
-                .setReason(reason).build(), 204);
+    /** dev 清退观众（200 + RemoveObserverResponse；带原操作 UUID 与准入截止，target_instance_id 由 dev 接口按本进程实例补全）。 */
+    public RemoveObserverResponse removeObserver(long battleId, long observerPlayerId, String reason,
+                                                 String spectatorOperationId, long admitBeforeMs) throws RobotException {
+        byte[] body = expect(REMOVE_OBSERVER, RemoveObserverRequest.newBuilder().setBattleId(battleId).setObserverPlayerId(observerPlayerId)
+                .setReason(reason).setSpectatorOperationId(spectatorOperationId).setAdmitBeforeMs(admitBeforeMs).build(), 200).body();
+        try {
+            return RemoveObserverResponse.parseFrom(body);
+        } catch (InvalidProtocolBufferException e) {
+            throw new RobotException("game-battle 清退观众接口的 200 应答体不是 RemoveObserverResponse：" + e.getMessage(), e);
+        }
     }
 
     /**

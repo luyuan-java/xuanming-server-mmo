@@ -306,7 +306,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             }
             room.cancelTimers();
             if(room.pendingCompletion==null)
-                notifySpectateEndAndClose(room, eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED, eBattleOutcome.BATTLE_OUTCOME_ONGOING,
+                notifySpectateEndAndClose(room, eSpectateEndReason.SPECTATE_END_SOURCE_LOST, eBattleOutcome.BATTLE_OUTCOME_ONGOING,
                         Disconnect.SHUTDOWN);
             closeDirectConnections(room, Disconnect.SHUTDOWN);
             eraseRoom(room, RoomEnd.ABORTED);
@@ -320,11 +320,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         if(shutdown!=null)return shutdown;
         shutdown=new CompletableFuture<>();
         log.info("停服补交原SQL终局 rooms={} reason={} budget={}",rooms.size(),reason,budget);
-        // 先停止普通回合和直连；v1 待确认原件保留在房间内，不能借停服把未知改成作废。
+        // 先停止普通回合和直连；还在打的房间（无待提交终局）发 166 SOURCE_LOST（不发 ABORTED，作废只由 match 持久 ABORT 宣布）；
+        // v1 待确认原件保留在房间内并维持中继心跳到拆除前，不能借停服把未知改成作废（§15.10）。
         for(long battleId:rooms.ids()){
             var room=rooms.find(battleId);if(room==null)continue;
             room.cancelTimers();
-            if(room.pendingCompletion==null)notifySpectateEndAndClose(room,eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED,
+            if(room.pendingCompletion==null)notifySpectateEndAndClose(room,eSpectateEndReason.SPECTATE_END_SOURCE_LOST,
                     eBattleOutcome.BATTLE_OUTCOME_ONGOING,Disconnect.SHUTDOWN);
             closeDirectConnections(room,Disconnect.SHUTDOWN);
             if(room.pendingCompletion!=null&&room.originalCreate.getOutcomeProtocolVersion()==1){
@@ -356,7 +357,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         outcomeCommitsStopped=true;shutdownTimeout.cancel();
         var pending=pendingSqlOutcomes();
         for(var original:pending){
-            var room=rooms.find(original.battleId());room.cancelTimers();
+            var room=rooms.find(original.battleId());room.cancelTimers();room.cancelSpectateKeepalive();
             log.error("停服终局仍未知 battle_id={} operation_id={} target_instance={} failures={} in_flight={}，保留SQL权威裁决，不宣布作废",
                     Long.toUnsignedString(original.battleId()),original.operationId(),original.instanceId(),original.failures(),original.inFlight());
         }
@@ -609,6 +610,11 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
      */
     private void publishSpectateFrame(BattleRoom room, com.game.proto.contracts.kafka.eSpectateFrameKind kind, int round, MessageContent frame) {
         room.lastSpectateRound = round;
+        if (kind == com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_END) {
+            room.cancelSpectateKeepalive();
+        } else {
+            armSpectateKeepalive(room);
+        }
         com.game.proto.contracts.kafka.SpectateFrameEvent event = com.game.proto.contracts.kafka.SpectateFrameEvent.newBuilder()
                 .setBattleId(room.battleId)
                 .setBattleInstanceId(deps.identity().instanceId())
@@ -620,6 +626,32 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         com.game.battle.port.SpectateFrameSink frames = deps.spectateFrames();
         room.spectateTail = room.spectateTail.<Void>handle((ignored, previousFailure) -> null)
                 .thenCompose(ignored -> publishQuietly(frames, event));
+    }
+
+    /** 观战中继通道心跳（§15.10）：距上一帧满 10 s 补一帧冻结 STATE，直到 END / 过期限 + 60 s / 拆除。 */
+    private void armSpectateKeepalive(BattleRoom room) {
+        room.cancelSpectateKeepalive();
+        if (!room.spectateRelayEnabled || room.closed || outcomeCommitsStopped) {
+            return;
+        }
+        try {
+            room.spectateKeepaliveTimer = scheduler.after(RoomConstants.SPECTATE_CHANNEL_KEEPALIVE_MS, () -> onSpectateKeepalive(room));
+        } catch (RejectedExecutionException closed) {
+            log.debug("逻辑线程已关闭，观战心跳计时器未挂 battle_id={}", Long.toUnsignedString(room.battleId));
+        }
+    }
+
+    private void onSpectateKeepalive(BattleRoom room) {
+        if (!isCurrent(room) || !room.spectateRelayEnabled || outcomeCommitsStopped) {
+            return;
+        }
+        if (room.deadlineMs > 0 && clock.epochMillis() >= room.deadlineMs + RoomConstants.SPECTATE_KEEPALIVE_DEADLINE_GRACE_MS) {
+            room.cancelSpectateKeepalive();
+            return;
+        }
+        ViewerState view = BattleViews.forObserver(fullState(room));
+        publishSpectateFrame(room, com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_STATE, view.state().getRoundIndex(),
+                outbound.frame(Notify.SPECTATE_STATE, view.toSpectateState(0)));
     }
 
     /** 端口约定不抛，这里再兜一层：外部缺陷不能打断回合推进，也不能断了这一场后面的帧。 */
@@ -1079,6 +1111,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         if(actual instanceof com.game.battle.port.BattleResultSink.OutcomeAborted){
             // SQL围栏已胜出。不得个人直投、公开奖励或重算结果；房间可以安全摘除。
             if(shutdown==null)notifySpectateEndAndClose(room,eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED,eBattleOutcome.BATTLE_OUTCOME_ONGOING,Disconnect.BATTLE_CLOSED);
+            else if(room.spectateRelayEnabled)publishSpectateFrame(room,com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_END,room.lastSpectateRound,
+                    outbound.frame(Notify.SPECTATE_END,SpectateEndS2C.newBuilder().setBattleId(room.battleId).setOutcome(eBattleOutcome.BATTLE_OUTCOME_ONGOING)
+                            .setReason(eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED).build()));
             closeDirectConnections(room,Disconnect.BATTLE_CLOSED);eraseRoom(room,pending.endReason);
             if(shutdown!=null&&pendingSqlOutcomes().isEmpty())finishShutdown();return;
         }
@@ -1095,7 +1130,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         if(shutdown==null){
             if(pending.finalTurn!=null)broadcastTurnResult(room,pending.finalTurn);
             finishBattle(room,pending.event.getOutcome(),pending.spectateReason,pending.event);
-        }else log.info("停服原终局已获SQL COMPLETE battle_id={}，个人奖励由权威Inbox继续投递",Long.toUnsignedString(room.battleId));
+        }else{
+            if(room.spectateRelayEnabled)publishSpectateFrame(room,com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_END,room.lastSpectateRound,
+                    outbound.frame(Notify.SPECTATE_END,SpectateEndS2C.newBuilder().setBattleId(room.battleId).setOutcome(pending.event.getOutcome())
+                            .setReason(pending.spectateReason).build()));
+            log.info("停服原终局已获SQL COMPLETE battle_id={}，个人奖励由权威Inbox继续投递",Long.toUnsignedString(room.battleId));
+        }
         eraseRoom(room,pending.endReason);
         if(shutdown!=null&&pendingSqlOutcomes().isEmpty())finishShutdown();
     }
@@ -1191,11 +1231,17 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
 
     /** 置 closed 后经唯一删除口移除（恰好一次 onRemoved），计房间结局。 */
     private void eraseRoom(BattleRoom room, RoomEnd reason) {
+        room.cancelSpectateKeepalive();
         for(long observer:List.copyOf(room.observerOperations.keySet()))cancelObserverOperation(room,observer);
         room.closed = true;
         if (rooms.find(room.battleId) == room && rooms.erase(room.battleId)) {
             metrics.roomEnd(reason);
         }
+    }
+
+    @Override
+    public String instanceId() {
+        return deps.identity().instanceId();
     }
 
     /** 全知快照 + battle_id + 当前回合截止（未裁剪：只能交给 {@link BattleViews}）。 */

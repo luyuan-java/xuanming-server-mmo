@@ -84,6 +84,7 @@ class GlobalWatchServiceTest {
         when(authority.begin(any(), any(), any())).thenReturn(new GlobalWatchAuthority.Request(history, true));
         when(authority.entry(any(), anyLong(), any())).thenReturn(new SpectateStore.Entry(false, Optional.empty()));
         when(store.read(eq(X), any())).thenReturn(formation(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC));
+        when(store.instanceLookup(any(), any())).thenReturn(com.game.match.gather.BattleNodes.Lookup.SAME_INSTANCE);
         when(authority.reserve(any(), anyLong(), anyString(), any())).thenReturn(SpectateStore.Acquire.OK);
         when(authority.prepare(any(), anyLong(), anyString(), any(), any(), any())).thenReturn(AddObserverRequest.newBuilder().setBattleId(X)
                 .setObserverPlayerId(PLAYER).setSpectatorOperationId(requestId).setTargetInstanceId("inst-a").build());
@@ -567,5 +568,36 @@ class GlobalWatchServiceTest {
 
         assertThat(verdict.response()).isEqualTo(MatchTips.watchRejected(MatchTip.WATCH_FULL));
         assertThat(verdict.outcome()).isEqualTo(WatchOutcome.FULL);
+    }
+
+    @Test
+    void L0落原件前目录确认同节点已换实例_按房间不存在持久化结案_不写原件不发Add() {
+        admissible();
+        when(store.instanceLookup(any(), any())).thenReturn(com.game.match.gather.BattleNodes.Lookup.OTHER_INSTANCE);
+        SessionContext actor = session(PLAYER);
+
+        GlobalWatchService.Verdict verdict = service.watch(actor, request(), budget());
+
+        assertThat(verdict.response()).isEqualTo(MatchTips.watchRejected(MatchTip.WATCH_NOT_FOUND));
+        assertThat(verdict.outcome()).isEqualTo(WatchOutcome.NOT_FOUND);
+        verify(authority).respond(eq(actor), eq(requestId), eq(MatchTips.watchRejected(MatchTip.WATCH_NOT_FOUND)), any());
+        verify(authority, never()).reserve(any(), anyLong(), anyString(), any());
+        verify(authority, never()).prepare(any(), anyLong(), anyString(), any(), any(), any());
+        assertThat(observers.calls).isEmpty();
+    }
+
+    @Test
+    void L0落原件前目录查不到原实例_回繁忙不持久化_不写原件不发Add_留给同UUID重试() {
+        admissible();
+        when(store.instanceLookup(any(), any())).thenReturn(com.game.match.gather.BattleNodes.Lookup.ABSENT);
+
+        GlobalWatchService.Verdict verdict = service.watch(session(PLAYER), request(), budget());
+
+        assertThat(verdict.response()).isEqualTo(MatchTips.watchRejected(MatchTip.BUSY));
+        assertThat(verdict.outcome()).isEqualTo(WatchOutcome.INTERNAL);
+        verify(authority, never()).respond(any(), anyString(), any(), any());
+        verify(authority, never()).reserve(any(), anyLong(), anyString(), any());
+        verify(authority, never()).prepare(any(), anyLong(), anyString(), any(), any(), any());
+        assertThat(observers.calls).isEmpty();
     }
 }

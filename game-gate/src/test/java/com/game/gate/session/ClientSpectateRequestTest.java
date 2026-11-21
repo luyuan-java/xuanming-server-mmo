@@ -200,4 +200,40 @@ class ClientSpectateRequestTest {
 
         assertThat(hub.calls).contains("drop");
     }
+
+    @Test
+    void LeaveGame解绑玩家时摘除订阅_旧角色凭证随后被拒_未绑定会话不收零号玩家推送() {
+        int leaveGameId = IDS.requireId("ClientPlayerLogin", "LeaveGame");
+        ClientSession s = session(PLAYER);
+        s.sceneNodeId = 5;
+        s.scenePlayerId = PLAYER;
+        s.presenceOnline = true;
+        dispatcher.onRequest(s, subscribe(31, BATTLE, ticket(PLAYER, BATTLE, NOW_MS + 60_000)));
+        assertThat(reply().hasErrorMessage()).isFalse();
+        hub.calls.clear();
+
+        // LeaveGame → login 回 UnbindPlayer
+        dispatcher.onRequest(s, ClientRequest.newBuilder().setId(32).setMessageId(leaveGameId).build());
+        login.complete(com.game.api.proto.ClientReply.newBuilder()
+                .addDirectives(com.game.api.proto.SessionDirective.newBuilder()
+                        .setUnbindPlayer(com.game.api.proto.UnbindPlayer.getDefaultInstance()))
+                .build());
+        channel.runPendingTasks();
+        assertThat(reply().getId()).isEqualTo(32);
+        assertThat(hub.calls).as("LeaveGame 解绑时摘除当前观战订阅").contains("drop");
+
+        // 解绑后、新角色绑定之前：旧角色凭证被拒
+        hub.calls.clear();
+        dispatcher.onRequest(s, subscribe(33, BATTLE, ticket(PLAYER, BATTLE, NOW_MS + 60_000)));
+        MessageContent rejected = reply();
+        assertThat(rejected.getId()).isEqualTo(33);
+        assertThat(rejected.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SPECTATE_TICKET_INVALID);
+        assertThat(hub.calls).isEmpty();
+
+        // 未绑定会话即使传入 playerId=0 也绝不放行服务端推送或服务端踢人
+        assertThat(dispatcher.deliverPush(s, 0, MessageContent.newBuilder().setMessageId(23).build()))
+                .isEqualTo(GateMetrics.PushResult.NOT_BOUND);
+        assertThat(dispatcher.kickByServer(s, 0, 2017))
+                .isEqualTo(GateMetrics.PushResult.NOT_BOUND);
+    }
 }

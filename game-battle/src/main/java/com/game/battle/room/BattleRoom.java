@@ -55,6 +55,8 @@ final class BattleRoom {
     Cancellable battleTimer = Cancellable.NONE;
     /** 确认补发计时器。 */
     Cancellable confirmResendTimer = Cancellable.NONE;
+    /** 观战中继通道心跳计时器（§15.10：停服待确认房间保持到拆除前，不随 {@link #cancelTimers()} 撤销）。 */
+    Cancellable spectateKeepaliveTimer = Cancellable.NONE;
     /** 当前回合截止（Unix ms），回填进各类 state 的 {@code action_deadline_ms}。 */
     long actionDeadlineMs;
     /** 确认事件剩余补发次数（§11 N19：计次代替墙钟窗口）。 */
@@ -134,5 +136,11 @@ final class BattleRoom {
         battleTimer.cancel();
         confirmResendTimer.cancel();
         if (pendingCompletion != null) pendingCompletion.retryTimer.cancel();
+    }
+
+    /** 撤销观战中继通道心跳（仅在发完 END、房间摘除或停机排空彻底结束时调用）。 */
+    void cancelSpectateKeepalive() {
+        spectateKeepaliveTimer.cancel();
+        spectateKeepaliveTimer = Cancellable.NONE;
     }
 }

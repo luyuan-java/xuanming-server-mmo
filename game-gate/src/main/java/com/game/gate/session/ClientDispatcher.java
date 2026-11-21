@@ -988,6 +988,8 @@ public final class ClientDispatcher {
     private void unbindPlayer(ClientSession s) {
         long playerId = s.playerId;
         int sceneNodeId = s.sceneNodeId;
+        // LeaveGame 解绑玩家角色：即使此刻尚未落进场景，也同步摘除原角色的观战订阅
+        spectate.drop(s);
         leaveScene(s, true);
         s.playerId = 0;
         s.ownerRevision = 0;
@@ -1511,7 +1513,7 @@ public final class ClientDispatcher {
     }
 
     private static boolean pushable(ClientSession s, long playerId) {
-        return !s.closed && !s.closing && s.presenceOnline && s.scenePlayerId == playerId;
+        return !s.closed && !s.closing && s.presenceOnline && playerId != 0 && s.scenePlayerId == playerId;
     }
 
     public void onSceneLinkDown(ClientSession s, int sceneNodeId, long linkGen) {

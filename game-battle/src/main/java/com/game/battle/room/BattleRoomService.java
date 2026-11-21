@@ -173,4 +173,9 @@ public interface BattleRoomService {
 
     /** 当前房间数（房间表 hooks 维护的原子量；目录发布与指标从别的线程读）。 */
     int roomCount();
+
+    /** 本 battle 节点进程实例 id（不可变，dev 管理接口补全 {@code target_instance_id} 时读）。 */
+    default String instanceId() {
+        return "";
+    }
 }

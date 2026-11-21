@@ -83,7 +83,8 @@ class FinishAndVoidTest {
         assertThat(a.closedWith).isEqualTo(com.game.battle.metrics.BattleMetrics.Disconnect.SHUTDOWN);
         assertThat(a.messageIds()).as("参战者不收帧").isEmpty();
         SpectateEndS2C end = d.parsed(166, SpectateEndS2C.parser()).get(0);
-        assertThat(end.getReason()).isEqualTo(eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED);
+        // 停机只发 SOURCE_LOST，作废只由 match 的持久 ABORT 宣布（battle-spectate-tiered-fanout.md §15.4 / §15.10）
+        assertThat(end.getReason()).isEqualTo(eSpectateEndReason.SPECTATE_END_SOURCE_LOST);
         assertThat(end.getOutcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_ONGOING);
         assertThat(d.closedWith).isEqualTo(com.game.battle.metrics.BattleMetrics.Disconnect.SHUTDOWN);
         assertThat(h.settlementsOut()).isEmpty();

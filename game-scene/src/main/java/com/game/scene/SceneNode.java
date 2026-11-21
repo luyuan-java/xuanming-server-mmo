@@ -189,6 +189,7 @@ public class SceneNode implements SmartLifecycle {
     private final MissionTables missionTables;
     private final SkillTables skillTables;
     private final PetTables petTables;
+    private com.game.scene.appearance.AppearanceTables appearanceTables;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
     private final AuditProperties audit;
@@ -203,6 +204,12 @@ public class SceneNode implements SmartLifecycle {
     private PublicationStart publicationStart;
     private com.game.player.store.state.SqlWriterMaintenanceReceipt.IssuerReadiness preparedSource,preparedSourceRequest;
     private com.game.player.store.state.SqlWriterMaintenanceReceipt.SourceOpenAck sourceOpenIntent,sourceOpenAck;
+    public synchronized SceneNode withAppearanceTables(com.game.scene.appearance.AppearanceTables appearanceTables) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.appearanceTables = java.util.Objects.requireNonNull(appearanceTables);
+        return this;
+    }
+
     public synchronized SceneNode withMaintenanceBoot(com.game.common.sql.WriterAuthority boot){
         if(running)throw new IllegalStateException("节点已启动");writerBoot=java.util.Objects.requireNonNull(boot);
         var bytes=java.nio.ByteBuffer.wrap(boot.instanceId());instanceId=new UUID(bytes.getLong(),bytes.getLong()).toString();
@@ -396,6 +403,8 @@ public class SceneNode implements SmartLifecycle {
         PetService petService = new PetService(petTables, currency, itemGuids(guids), SceneClock.SYSTEM,
                 new SplittableRandom(), metrics);
         PetFeature pets = new PetFeature(petService, registry);
+        com.game.scene.appearance.AppearanceService appearanceService = appearanceTables == null ? null
+                : new com.game.scene.appearance.AppearanceService(appearanceTables, bags, SceneClock.SYSTEM, registry);
         AuditPipeline pipeline = auditPipeline;
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
                 : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
@@ -446,6 +455,9 @@ public class SceneNode implements SmartLifecycle {
                     attributes.initializeOnLoad(player);
                     petService.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
+                    if (appearanceService != null) {
+                        appearanceService.initializeOnLoad(player);
+                    }
                     AssetOpService.checkLedgerOnLoad(player);
                     InboxService.checkLedgerOnLoad(player);
                     // 战斗结算账本损坏时大声报一次（结算一律延后、备战一律 1006，原样保留；scene-battle-spec §7.12，D24）
@@ -490,14 +502,18 @@ public class SceneNode implements SmartLifecycle {
         if (!RunMode.isRecognized(props.runMode())) {
             log.warn("game.run-mode（GAME_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
         }
-        ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, runMode,
-                List.of(new CurrencyFeature(currency), new AttributeFeature(attributes, registry, call -> {
+        java.util.List<com.game.scene.world.SceneFeature> features = new java.util.ArrayList<>(List.of(
+                new CurrencyFeature(currency), new AttributeFeature(attributes, registry, call -> {
                     pets.onOwnerLevelChanged(call);
                     missions.onLevelChanged(call.player());
                 }), bagFeature, new EquipmentFeature(equipment, bagFeature, attributes, registry),
-                        new MissionFeature(missions), new ActivityFeature(missions),
-                        new SkillFeature(skills), new com.game.scene.skill.ClassSkillFeature(
-                                new com.game.scene.skill.ClassSkillService(currency, attributes), attributes, registry), pets));
+                new MissionFeature(missions), new ActivityFeature(missions),
+                new SkillFeature(skills), new com.game.scene.skill.ClassSkillFeature(
+                        new com.game.scene.skill.ClassSkillService(currency, attributes), attributes, registry), pets));
+        if (appearanceService != null) {
+            features.add(new com.game.scene.appearance.AppearanceFeature(appearanceService));
+        }
+        ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, runMode, features);
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
         // 主世界频道（批次 5.1，scene-channels-spec §4.10.5）：节点不再自己发号建场景（D18），按 scene-manager 写在 Redis 的频道计划建。
         // 先登记 zone、同步拉一次计划并在逻辑线程上应用（启动时本地没有场景，只会建出 ACTIVE 记录），再起周期拉取。
@@ -519,6 +535,9 @@ public class SceneNode implements SmartLifecycle {
                     sceneWorld.stopAcceptingEnters();
                 }
                 sceneWorld.maintainScenes();
+                if (appearanceService != null) {
+                    appearanceService.tickExpiries(sceneWorld);
+                }
                 updateChannelReadiness(sceneWorld);
             } catch (RuntimeException e) {
                 log.error("场景维护（排空推进 / 实例回收）这一秒出错，下一秒照常", e);

@@ -298,4 +298,102 @@ class SpectateRelayRoomTest {
         assertThat(h.relayFrames).hasSize(1);
         assertThat(h.relayFrames.get(0).getClientFrame()).as("同一份观众帧").isEqualTo(link.frames.get(0).toByteString());
     }
+
+    @Test
+    void 优雅停机_普通房间推SOURCE_LOST_待提交终局房间不推并保持10秒心跳直到决策或超时() throws Exception {
+        List<CompletableFuture<com.game.proto.match.BattleOutcomeDecision>> sqlDecisions = new ArrayList<>();
+        h.results = new com.game.battle.port.BattleResultSink() {
+            @Override
+            public void publish(com.game.proto.contracts.kafka.BattleResultEvent event, Channel channel) {
+            }
+
+            @Override
+            public CompletableFuture<com.game.proto.match.BattleOutcomeDecision> commitOutcome(
+                    com.game.proto.CreateBattleRequest create, com.game.proto.contracts.kafka.BattleResultEvent event,
+                    com.google.protobuf.ByteString original) {
+                var decision = new CompletableFuture<com.game.proto.match.BattleOutcomeDecision>();
+                sqlDecisions.add(decision);
+                return decision;
+            }
+        };
+        long activeBattle = BATTLE;
+        long pendingBattle = BATTLE + 1;
+        h.create(h.pveTeam(activeBattle, A).setBattleConfigId(DUNGEON_TANK));
+        h.create(h.pve(pendingBattle, B).setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC)
+                .setPlacementOperationId("902df74e-3843-48e0-bd72-05ed824a4f12")
+                .setTargetInstanceId(INSTANCE).setOutcomeProtocolVersion(1));
+        attach(activeBattle, INSTANCE);
+        attach(pendingBattle, INSTANCE);
+        // 让 pendingBattle 算出胜负并进入等待 SQL 决定状态
+        h.service().submit(B, com.game.proto.SubmitBattleActionRequest.newBuilder().setBattleId(pendingBattle)
+                .setAction(RoomHarness.skill(com.game.battle.testing.FakeBattleData.SKILL_NUKE, RoomHarness.MONSTER)).build());
+        assertThat(sqlDecisions).hasSize(1);
+        h.relayFrames.clear();
+
+        var drained = h.service().beginShutdown("test-shutdown", java.time.Duration.ofSeconds(25));
+
+        assertThat(h.service().room(activeBattle)).as("非待提交终局房间立即拆房").isNull();
+        assertThat(h.service().room(pendingBattle)).as("待提交终局房间保留到决策").isNotNull();
+        assertThat(h.relayFrames).singleElement().satisfies(frame -> {
+            assertThat(frame.getBattleId()).isEqualTo(activeBattle);
+            assertThat(frame.getKind()).isEqualTo(eSpectateFrameKind.SPECTATE_FRAME_END);
+        });
+        SpectateEndS2C end = SpectateEndS2C.parseFrom(content(h.relayFrames.get(0)).getSerializedMessage());
+        assertThat(end.getReason()).as("优雅停机发 SOURCE_LOST 而非 BATTLE_ABORTED").isEqualTo(eSpectateEndReason.SPECTATE_END_SOURCE_LOST);
+        assertThat(attach(pendingBattle, INSTANCE).getErrorMessage().getId()).as("停机期拒开新中继").isEqualTo(BattleRoomServiceImpl.SERVICE_UNAVAILABLE);
+
+        // 等待 SQL 决定期间满 10 s 补发冻结的 STATE 心跳，防 gate 30 s 误判 SOURCE_LOST
+        h.relayFrames.clear();
+        h.scheduler.advance(RoomConstants.SPECTATE_CHANNEL_KEEPALIVE_MS - 1);
+        assertThat(h.relayFrames).isEmpty();
+        h.scheduler.advance(1);
+        assertThat(h.relayFrames).singleElement().satisfies(frame -> {
+            assertThat(frame.getBattleId()).isEqualTo(pendingBattle);
+            assertThat(frame.getKind()).isEqualTo(eSpectateFrameKind.SPECTATE_FRAME_STATE);
+        });
+        SpectateStateS2C frozen = SpectateStateS2C.parseFrom(content(h.relayFrames.get(0)).getSerializedMessage());
+        assertThat(frozen.getState().getOutcome()).as("冻结态不提前泄露未确认胜负").isEqualTo(eBattleOutcome.BATTLE_OUTCOME_ONGOING);
+
+        // 决策落地后排空并停止心跳
+        h.relayFrames.clear();
+        sqlDecisions.get(0).complete(com.game.proto.match.BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE);
+        h.scheduler.runPending();
+        assertThat(drained.join().unconfirmed()).isEmpty();
+        assertThat(h.relayFrames).extracting(SpectateFrameEvent::getKind).contains(eSpectateFrameKind.SPECTATE_FRAME_END);
+        int countAfterEnd = h.relayFrames.size();
+        h.scheduler.advance(RoomConstants.SPECTATE_CHANNEL_KEEPALIVE_MS * 2);
+        assertThat(h.relayFrames).as("END 之后不再发心跳").hasSize(countAfterEnd);
+    }
+
+    @Test
+    void 等待SQL决定超过期限加60秒_心跳自动停止() {
+        List<CompletableFuture<com.game.proto.match.BattleOutcomeDecision>> sqlDecisions = new ArrayList<>();
+        h.results = new com.game.battle.port.BattleResultSink() {
+            @Override
+            public void publish(com.game.proto.contracts.kafka.BattleResultEvent event, Channel channel) {
+            }
+
+            @Override
+            public CompletableFuture<com.game.proto.match.BattleOutcomeDecision> commitOutcome(
+                    com.game.proto.CreateBattleRequest create, com.game.proto.contracts.kafka.BattleResultEvent event,
+                    com.google.protobuf.ByteString original) {
+                var decision = new CompletableFuture<com.game.proto.match.BattleOutcomeDecision>();
+                sqlDecisions.add(decision);
+                return decision;
+            }
+        };
+        long deadline = h.now() + 5_000;
+        h.create(h.pve(BATTLE, A).setDeadlineMs(deadline).setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC)
+                .setPlacementOperationId("902df74e-3843-48e0-bd72-05ed824a4f12")
+                .setTargetInstanceId(INSTANCE).setOutcomeProtocolVersion(1));
+        attach(BATTLE, INSTANCE);
+        h.service().submit(A, com.game.proto.SubmitBattleActionRequest.newBuilder().setBattleId(BATTLE)
+                .setAction(RoomHarness.skill(com.game.battle.testing.FakeBattleData.SKILL_NUKE, RoomHarness.MONSTER)).build());
+        h.relayFrames.clear();
+
+        // 期限 5 s + 宽限 60 s = 65 s；每 10 s 一帧共 6 帧（10s..60s），70s 超过 65s 停止
+        h.scheduler.advance(RoomConstants.SPECTATE_KEEPALIVE_DEADLINE_GRACE_MS + 30_000);
+        assertThat(h.relayFrames).hasSize(6);
+        assertThat(h.relayFrames).allSatisfy(f -> assertThat(f.getKind()).isEqualTo(eSpectateFrameKind.SPECTATE_FRAME_STATE));
+    }
 }
