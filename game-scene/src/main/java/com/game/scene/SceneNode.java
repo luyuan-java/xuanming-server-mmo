@@ -509,7 +509,7 @@ public class SceneNode implements SmartLifecycle {
                 }), bagFeature, new EquipmentFeature(equipment, bagFeature, attributes, registry),
                 new MissionFeature(missions), new ActivityFeature(missions),
                 new SkillFeature(skills), new com.game.scene.skill.ClassSkillFeature(
-                        new com.game.scene.skill.ClassSkillService(currency, attributes), attributes, registry), pets));
+                        new com.game.scene.skill.ClassSkillService(currency, attributes, petService), attributes, registry, petService), pets));
         if (appearanceService != null) {
             features.add(new com.game.scene.appearance.AppearanceFeature(appearanceService));
         }

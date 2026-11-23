@@ -76,6 +76,8 @@ public final class BattleSnapshots {
         if (!attributes.combat().equals(com.game.proto.CombatAttributes.getDefaultInstance())) {
             snapshot.setCombat(attributes.combat());
         }
+        var equipment = attributes.equipment().effects();
+        if (!equipment.equals(com.game.proto.EquipmentEffects.getDefaultInstance())) snapshot.setEquipmentEffects(equipment);
         for (int skill : player.skills()) {
             int rank = player.skillCatalog().effectiveRank(player.classId(), player.level(), player.learnedSkills(), skill);
             if (rank != 0) snapshot.putSkillRanks(skill, rank);

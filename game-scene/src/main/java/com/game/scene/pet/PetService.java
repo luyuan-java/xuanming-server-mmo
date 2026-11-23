@@ -1,6 +1,10 @@
 package com.game.scene.pet;
 
 import com.game.proto.BaseAttributesComp;
+import com.game.battle.engine.BattleRules;
+import com.game.battle.engine.ClassSkillRules;
+import com.game.battle.engine.ClassSkillRules.PassiveStat;
+import com.game.scene.skill.ClassSkillCatalog;
 import com.game.proto.GetPetShopResponse;
 import com.game.proto.PetShopOffer;
 import com.game.proto.BattlePetSettlementData;
@@ -271,7 +275,7 @@ public final class PetService {
         info.setName(!pet.name().isEmpty() ? pet.name() : (row != null ? row.getName() : ""));
         if (row != null) {
             info.setQuality(row.getQuality()).setModelId(row.getModelId()).setDesc(row.getDesc());
-            info.addAllSkillTableIds(skills(pet, row));
+            info.addAllSkillTableIds(tables.skills.petSkills(pet, row).keySet());
         }
         long total = AttributeRules.totalPoints(tables.poolRule(), pet.level(), 0);
         long used = usedPoints(pet);
@@ -652,7 +656,7 @@ public final class PetService {
     /**
      * 出战宝宝的战斗快照（基线 {@code PetSystem::BuildBattleSnapshot}，{@code pet.cpp:867-912}）：没有出战宝宝、宝宝找不到、缺表行或缺池（WARN）、
      * 宝宝气血为 0（死宝宝不参战）→ 空表；否则恰好一只。属性按现算的二级属性：{@code base_attributes} 只填气血（夹到上限）、法力（上限 &gt; 0 才夹）、
-     * 速度；技能 = 种类自带 ∪ 已学（<b>不做可施放过滤</b>，B4，引擎只让宝宝普攻）。
+     * 速度；技能按宝宝主体、等级和生效重数投影，主动可施放列表与开场被动的重数分别下发。
      */
     public List<BattlePetSnapshot> buildBattleSnapshot(ScenePlayer player) {
         PlayerPets pets = player.pets();
@@ -676,21 +680,25 @@ public final class PetService {
         Derived derived = derived(pet, row);
         long health = Math.min(pet.health(), derived.maxHealth());
         long mana = derived.maxMana() > 0 ? Math.min(pet.mana(), derived.maxMana()) : pet.mana();
-        return List.of(BattlePetSnapshot.newBuilder()
-                .setPetCultivation(PetEntries.info(tables, pet).getEffects())
+        var snapshot = BattlePetSnapshot.newBuilder()
                 .setPetId(pet.petId())
                 .setOwnerPlayerId(player.playerId())
                 .setPetName(!pet.name().isEmpty() ? pet.name() : row.getName())
                 .setPetTableId(pet.petTableId())
-                .setLevel((int) pet.level())
+                .setLevel(ClassSkillCatalog.petLevel(pet, row))
                 .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(health).setMana(mana).setSpeed(derived.speed()))
                 .setMaxHealth(derived.maxHealth())
                 .setMaxMana(derived.maxMana())
                 .setPhysicalAttack(derived.physicalAttack())
                 .setMagicAttack(derived.magicAttack())
-                .setDefense(derived.defense())
-                .addAllSkillTableIds(skills(pet, row))
-                .build());
+                .setDefense(derived.defense());
+        if (PetEntries.enabled(tables)) snapshot.setPetCultivation(PetEntries.info(tables, pet).getEffects());
+        tables.skills.petSkills(pet, row).forEach((id, rank) -> {
+            var skill = tables.skills.row(id);
+            if (BattleRules.isTurnBattleCastableSkill(skill)) snapshot.addSkillTableIds(id);
+            if (skill.getBattleModel() == 1) snapshot.putSkillRanks(id, rank);
+        });
+        return List.of(snapshot.build());
     }
 
     /**
@@ -793,22 +801,6 @@ public final class PetService {
         return pool.getResetCostGold();
     }
 
-    /** 宝宝可用技能 = 种类自带 ∪ 实例已学（面板与战斗快照共用；种类自带不抄进实例）。 */
-    private static List<Integer> skills(Pet pet, PetTable row) {
-        List<Integer> skills = new ArrayList<>();
-        for (int skill : row.getSkillList()) {
-            if (skill != 0) {
-                skills.add(skill);
-            }
-        }
-        for (int skill : pet.skillTableIds()) {
-            if (skill != 0 && !skills.contains(skill)) {
-                skills.add(skill);
-            }
-        }
-        return skills;
-    }
-
     private List<DimensionInput> inputs(Pet pet) {
         List<DimensionInput> inputs = new ArrayList<>(tables.dimensions().size());
         for (AttributeDimensionTable dimension : tables.dimensions()) {
@@ -822,8 +814,38 @@ public final class PetService {
     }
 
     private Derived derived(Pet pet, PetTable row) {
-        return PetRules.computeDerived(new BaseValues(row.getInitHealth(), row.getInitMana(), row.getInitSpeed()),
-                inputs(pet), pet.level());
+        var base = PetRules.computeDerived(new BaseValues(row.getInitHealth(), row.getInitMana(), row.getInitSpeed()),
+                inputs(pet), ClassSkillCatalog.petLevel(pet, row));
+        var bonus = new java.util.EnumMap<PassiveStat,Double>(PassiveStat.class);
+        tables.skills.petSkills(pet, row).forEach((id, rank) -> {
+            var skill = tables.skills.row(id);
+            if (ClassSkillCatalog.forSubject(skill, 2) && !skill.getPassiveStat().isEmpty())
+                bonus.merge(ClassSkillRules.parsePassiveStat(skill.getPassiveStat()),
+                        skill.getPassivePercent() * ClassSkillRules.passiveRankFactor(rank), Double::sum);
+        });
+        return new Derived(Math.max(1, boosted(base.maxHealth(), bonus, PassiveStat.MAX_HEALTH)),
+                boosted(base.maxMana(), bonus, PassiveStat.MAX_MANA), boosted(base.physicalAttack(), bonus, PassiveStat.PHYSICAL_ATTACK),
+                boosted(base.magicAttack(), bonus, PassiveStat.MAGIC_ATTACK), boosted(base.speed(), bonus, PassiveStat.SPEED),
+                boosted(base.defense(), bonus, PassiveStat.DEFENSE));
+    }
+
+    /** 在候选宝宝上先重算上限和当前值，再与主人钱包一次提交。 */
+    public int commitSkillUpgrade(ScenePlayer player, long petId, int skillId, int rank, long cost) {
+        var candidate = PlayerPets.restore(player.pets().toState());
+        var pet = candidate.find(petId);
+        var species = pet == null ? null : tables.pet(pet.petTableId());
+        if (species == null || tables.pool() == null) return INVALID_TABLE_DATA;
+        var before = derived(pet, species);
+        pet.setSkillRank(skillId, rank);
+        recalculateOne(player, pet, RecalcReason.ALLOCATE, before);
+        var payment = currency.prepareDeduction(player, Wallet.GOLD, cost);
+        if (payment.tipId() != 0) return payment.tipId();
+        payment.commitPets(candidate, AssetAudit.Reason.SKILL_UPGRADE, Integer.toUnsignedLong(skillId));
+        return OK;
+    }
+
+    private static long boosted(long amount, Map<PassiveStat,Double> bonuses, PassiveStat stat) {
+        return ClassSkillRules.floorRatio(amount, 1 + bonuses.getOrDefault(stat, 0.0));
     }
 
     private static int allocError(AllocError error) {

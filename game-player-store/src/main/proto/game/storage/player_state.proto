@@ -177,6 +177,8 @@ message PetEntry {
   uint64 created_at = 9;
   // 实例学会的技能（技能书是二期，恒空；种类自带技能不抄进实例）。
   repeated uint32 skill_table_ids = 10;
+  // 旧存档种类技能及已学 ID 缺少等级时按一重。未知 ID 保留原值。
+  map<uint32, uint32> skill_ranks = 11;
   // 条目点和四维分离；序号回执与分配同一玩家事务持久化。
   map<uint32, uint32> entry_allocated = 12;
   uint64 entry_state_version = 13;
@@ -225,6 +227,11 @@ message EquipmentState {
   repeated EquipmentAffixState affixes = 1;
   uint32 enhance_level = 2;
   repeated EquipmentGemState gems = 3;
+  repeated EquipmentFixedAffixState fixed_affixes = 4;
+}
+message EquipmentFixedAffixState {
+  uint32 slot = 1;
+  uint32 affix_id = 2;
 }
 message EquipmentAffixState {
   uint32 attr_id = 1;

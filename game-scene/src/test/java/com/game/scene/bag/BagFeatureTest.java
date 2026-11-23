@@ -125,7 +125,7 @@ class BagFeatureTest {
     @Test
     void 新号四个包都是空的_布局总在_容量与可整理同基线_货币同54() throws Exception {
         start(null);
-        int[] capacities = {100, 200, 10, 200};
+        int[] capacities = {100, 200, 11, 200}; // 正式装备槽 0 至 10，含第二个法宝槽。
         for (int type = 0; type < 4; type++) {
             GetBagResponse response = getBag(type);
             assertThat(response.hasErrorMessage()).isTrue();

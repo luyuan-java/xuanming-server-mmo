@@ -26,6 +26,7 @@ public final class BagTables implements ItemCatalog {
     private final Map<Integer, ItemSpec> items;
     private final java.util.Set<Integer> unknownItemSchemas;
     private final Map<Integer, List<Integer>> slotsByKind;
+    private final int minimumEquipmentCapacity;
     private final com.game.scene.equip.EquipmentRules equipment;
 
     BagTables(Map<Integer, ItemSpec> items, Map<Integer, List<Integer>> slotsByKind) {
@@ -38,6 +39,12 @@ public final class BagTables implements ItemCatalog {
 
     BagTables(Map<Integer, ItemSpec> items, Map<Integer, List<Integer>> slotsByKind,
                       java.util.Set<Integer> unknownItemSchemas, com.game.scene.equip.EquipmentRules equipment) {
+        this(items, slotsByKind, unknownItemSchemas, equipment, 0);
+    }
+
+    private BagTables(Map<Integer, ItemSpec> items, Map<Integer, List<Integer>> slotsByKind,
+                      java.util.Set<Integer> unknownItemSchemas, com.game.scene.equip.EquipmentRules equipment, int minimumEquipmentCapacity) {
+        this.minimumEquipmentCapacity = minimumEquipmentCapacity;
         this.equipment = equipment;
         this.unknownItemSchemas = java.util.Set.copyOf(unknownItemSchemas);
         this.items = Map.copyOf(items);
@@ -62,18 +69,17 @@ public final class BagTables implements ItemCatalog {
             }
         }
         Map<Integer, List<Integer>> slotsByKind = new HashMap<>();
+        long minimumCapacity = BagType.EQUIPMENT.defaultCapacity();
         for (EquipSlotTable row : tables.equipSlot().all()) {
-            if (row.getEquipKind() == 0 || Integer.compareUnsigned(row.getId(), BagType.EQUIPMENT.defaultCapacity()) >= 0) {
-                log.warn("装备槽表的这一行永远用不上（部位为 0 或槽号不小于装备栏容量 {}） id={} equip_kind={}",
-                        BagType.EQUIPMENT.defaultCapacity(), Integer.toUnsignedString(row.getId()),
-                        Integer.toUnsignedString(row.getEquipKind()));
-            }
             if (row.getEquipKind() != 0) {
+                if (!row.getName().isEmpty()) minimumCapacity = Math.max(minimumCapacity, Integer.toUnsignedLong(row.getId()) + 1);
                 slotsByKind.computeIfAbsent(row.getEquipKind(), k -> new ArrayList<>()).add(row.getId());
             }
         }
-        return new BagTables(items, slotsByKind, unknownItemSchemas, equipment);
+        return new BagTables(items, slotsByKind, unknownItemSchemas, equipment, Math.toIntExact(minimumCapacity));
     }
+
+    @Override public int minimumEquipmentCapacity() { return minimumEquipmentCapacity; }
 
     @Override
     public com.game.player.store.state.EquipmentState createEquipment(int configId) {

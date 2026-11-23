@@ -174,6 +174,8 @@ public final class BattleFixture {
     public final SceneBattleMetrics battleMetrics = new SceneBattleMetrics(meters);
     public final CurrencyService currency;
     public final BagService bags;
+    final com.game.scene.appearance.AppearanceTables appearanceTables = com.game.scene.appearance.AppearanceTables.from(CONFIG);
+    final com.game.scene.appearance.AppearanceService appearance;
     public final com.game.scene.equip.EquipmentService equipment;
     public final AttributeService attributes;
     public final PetService pets;
@@ -262,7 +264,9 @@ public final class BattleFixture {
         teamChecks.replyWith(logic, call -> TeamCheck.NOT_IN_TEAM);
         battle.attach(world);
         BagFeature bagFeature = new BagFeature(bags);
+        appearance = new com.game.scene.appearance.AppearanceService(appearanceTables, bags, clock, Contracts.REGISTRY);
         features = List.of(
+                new com.game.scene.appearance.AppearanceFeature(appearance),
                 new CurrencyFeature(currency),
                 new AttributeFeature(attributes, Contracts.REGISTRY, call -> {
                     petFeature.onOwnerLevelChanged(call);

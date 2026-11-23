@@ -58,8 +58,19 @@ final class ActionChecks {
         if (stateResult != SUCCESS) {
             return stateResult;
         }
+        if (actor.isPet() && action.getActionType() != eBattleActionType.BATTLE_ACTION_ATTACK &&
+                action.getActionType() != eBattleActionType.BATTLE_ACTION_SKILL && action.getActionType() != eBattleActionType.BATTLE_ACTION_DEFEND) return INVALID_PARAMETER;
         switch (action.getActionTypeValue()) {
-            case eBattleActionType.BATTLE_ACTION_ATTACK_VALUE, eBattleActionType.BATTLE_ACTION_DEFEND_VALUE -> {
+            case eBattleActionType.BATTLE_ACTION_ATTACK_VALUE -> {
+                return ctx.configured.hasState(actor, BattleEffect.SEAL_PHYSICAL) ? SKILL_CANNOT_CAST_IN_STATE : SUCCESS;
+            }
+            case eBattleActionType.BATTLE_ACTION_RECALL_PET_VALUE -> {
+                BattleUnit pet = ctx.findActor(action.getTargetId());
+                return pet != null && pet.isPet() && actor.isPlayer() && pet.ownerPlayerId() == actor.actorId()
+                        && pet.fled() && !pet.isDead() && pet.state().getWithdrawUntilRound() != 0
+                        && ctx.roundIndex() >= pet.state().getWithdrawUntilRound() ? SUCCESS : INVALID_PARAMETER;
+            }
+            case eBattleActionType.BATTLE_ACTION_DEFEND_VALUE -> {
                 return SUCCESS;
             }
             case eBattleActionType.BATTLE_ACTION_CAPTURE_VALUE -> {
@@ -113,6 +124,10 @@ final class ActionChecks {
             return INVALID_PARAMETER;
         }
         // 第二道闸：开局已剔除不可施放的类型，这里防有人绕过 skill_table_ids
+        if (row.getBattleModel() == 1) {
+            int permission = checkBuff(actor,row);
+            return permission == SUCCESS ? ctx.configured.check(actor,action,row) : permission;
+        }
         if (!BattleRules.isTurnBattleCastableSkill(row)) {
             return SKILL_CANNOT_CAST_IN_STATE;
         }
@@ -178,6 +193,7 @@ final class ActionChecks {
 
     /** 已死或已逃 1009；身上有眩晕(30) 或冰冻(52) 类型的 buff 7006（{@code CheckState}，{@code engine.cpp:593-602}）。 */
     int checkState(BattleUnit actor) {
+        if (ctx.configured.hasState(actor,BattleEffect.FREEZE) || ctx.configured.hasState(actor,BattleEffect.SLEEP)) return SKILL_STUN_RESTRICTION;
         if (actor.isDead() || actor.fled()) {
             return ENTITY_INVALID;
         }

@@ -156,6 +156,7 @@ class InBattleGateMatrixTest {
     private static final String MISSION = "SceneMissionClientPlayer";
     private static final String ACTIVITY = "SceneActivityClientPlayer";
     private static final String PET = "ScenePetClientPlayer";
+    private static final String APPEARANCE = "SceneAppearanceClientPlayer";
 
     /** 战斗中的预期（除了正数 = 应答里的拒绝码之外的三种）。 */
     private static final int SAME_AS_NOT_IN_BATTLE = -1;
@@ -216,6 +217,10 @@ class InBattleGateMatrixTest {
             new Row(411, PET, "PreviewPetEntries", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(190, ACTIVITY, "GetActivityList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(191, BAG, "GetBag", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(442, APPEARANCE, "GetAppearanceInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(443, APPEARANCE, "SwitchAppearance", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(444, APPEARANCE, "StartAppearanceTrial", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(445, APPEARANCE, "CancelAppearanceTrial", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(193, MISSION, "GetMissionList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             // ALLOW：只给建议
             new Row(173, ATTRIBUTE, "AutoAllocateAttributePoints", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -242,7 +247,7 @@ class InBattleGateMatrixTest {
     }
 
     /** 被探测的一方：装配、玩家、两只宝宝，以及只为装备六行准备的资产。 */
-    private record Subject(BattleFixture world, ScenePlayer player, long activePet, long sparePet, EquipmentProbe equipment) {
+    private record Subject(BattleFixture world, ScenePlayer player, long activePet, long sparePet, String appearanceTarget, EquipmentProbe equipment) {
     }
 
     private record EquipmentProbe(long itemId, int configId, int gemConfigId, int socket) { }
@@ -529,6 +534,12 @@ class InBattleGateMatrixTest {
     /** 每个已注册方法一条探测请求：尽量是「不在战斗就会成」的（战斗中的码才说明是闸拒的，不是参数错）。 */
     private Map<String, Function<Subject, Message>> requests() {
         Map<String, Function<Subject, Message>> out = new LinkedHashMap<>();
+        out.put(APPEARANCE + "GetAppearanceInfo", s -> com.game.proto.GetAppearanceInfoRequest.getDefaultInstance());
+        out.put(APPEARANCE + "SwitchAppearance", s -> com.game.proto.SwitchAppearanceRequest.newBuilder()
+                .setAppearanceId(s.appearanceTarget()).setClientRequestId(100).build());
+        out.put(APPEARANCE + "StartAppearanceTrial", s -> com.game.proto.StartAppearanceTrialRequest.newBuilder()
+                .setAppearanceId(s.appearanceTarget()).setClientRequestId(101).build());
+        out.put(APPEARANCE + "CancelAppearanceTrial", s -> com.game.proto.CancelAppearanceTrialRequest.getDefaultInstance());
         out.put(MOVE + "MoveStart", s -> MoveStartC2S.newBuilder().setStartLocation(new Vec3(6, 5, 0).toLocation())
                 .setVelocity(new Vec3(1, 0, 0).toVelocity()).setInputSeq(1).build());
         out.put(MOVE + "MoveSync", s -> MoveSyncC2S.newBuilder().setLocation(new Vec3(6, 5, 0).toLocation())
@@ -935,12 +946,24 @@ class InBattleGateMatrixTest {
         assertThat(player.missions().isAccepted(FRESH_MISSION)).isFalse();
         w.sink.clear();
         w.locks.clearCalls();
-        return new Subject(w, player, active, spare, null);
+        String target = w.appearanceTables.enabledEntries().stream()
+                .map(com.game.scene.appearance.AppearanceTables.Entry::appearanceId)
+                .filter(id -> !id.equals(player.appearanceId())).findFirst().orElseThrow();
+        return new Subject(w, player, active, spare, target, null);
     }
 
-    /** 装备探测只为对应六行准备合法资产；其他旧矩阵行的玩家状态保持原样。 */
+    /** 各动作只准备其成功路径所需的资产与试用记录。 */
     private static Subject subject(BattleFixture w, Row row) {
         Subject subject = subject(w);
+        if (row.service().equals(APPEARANCE)) {
+            if (row.method().equals("SwitchAppearance")) {
+                var rule = w.appearanceTables.rule();
+                grantProbeItem(w, subject.player(), rule.cardItemId(), rule.cardItemCount());
+            } else if (row.method().equals("CancelAppearanceTrial")) {
+                var start = com.game.proto.StartAppearanceTrialRequest.newBuilder().setAppearanceId(subject.appearanceTarget()).setClientRequestId(102).build();
+                assertThat(w.appearance.startTrial(w.world, subject.player(), start).getErrorMessage().getId()).isZero();
+            }
+        }
         if (!EQUIPMENT_METHODS.contains(row.method())) return subject;
         ScenePlayer player = subject.player();
         var tables = w.equipment.rules().tables();
@@ -972,7 +995,7 @@ class InBattleGateMatrixTest {
             if (row.method().equals("RemoveGem")) assertThat(w.equipment.inlay(player, itemId, socket.getSocket(), gem.getId()).tip()).isZero();
         }
         w.sink.clear();
-        return new Subject(w, player, subject.activePet(), subject.sparePet(),
+        return new Subject(w, player, subject.activePet(), subject.sparePet(), subject.appearanceTarget(),
                 new EquipmentProbe(itemId, weapon.getId(), gem.getId(), socket.getSocket()));
     }
 

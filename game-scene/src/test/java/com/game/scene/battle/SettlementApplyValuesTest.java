@@ -57,7 +57,7 @@ import org.slf4j.LoggerFactory;
  * 金币越界、掉落改投临时格 / 丢失、抽取次序、三类流水、账本淘汰、某一步出错时其余照做、a–d 返回不登记账本、可应用闸是各内部闸的超集、
  * 战斗冻结还挂着时照常应用。「恰好一次」（重复、重登、落盘销账）在 {@code SettlementApplyTest}。
  *
- * <p>全部用正式配表：新号（职业 3、1 级）气血上限 550 / 法力上限 840；灵狐（种类 1，1 级、资质取基准）442 / 830，石灵（种类 2）742 / 350；
+ * <p>全部用正式配表：新号（职业 3、1 级）气血上限 550 / 法力上限 840；灵狐（种类 1，1 级、资质取基准）442 / 830，石灵（种类 2，P04 一重气血 +15%）853 / 350；
  * 物品 10 / 11 可叠加 999 且是战斗道具，3 不可叠加；人物背包 100 格、临时格 200 格；任务 7 = 击杀 1 号怪 8 次、完成后自动接任务 8（击杀 1 号怪 9 次）。
  * 配表同步后这些值变了，下面的断言会指出要重看。
  */
@@ -299,7 +299,7 @@ class SettlementApplyValuesTest {
         assertThat(result).isEqualTo(Result.APPLIED);
         assertThat(fox.health()).as("is_dead：气血回到上限").isEqualTo(442);
         assertThat(fox.mana()).as("法力也回到上限").isEqualTo(830);
-        assertThat(golem.health()).as("气血 0：同样回满").isEqualTo(742);
+        assertThat(golem.health()).as("气血 0：回到 P04 生效后的气血上限").isEqualTo(853);
         assertThat(golem.mana()).isEqualTo(350);
         assertThat(f.pets.buildBattleSnapshot(player)).as("回满后下一场能带进战斗").hasSize(1);
     }
@@ -339,7 +339,7 @@ class SettlementApplyValuesTest {
         assertThat(pets).extracting(PetInfo::getPetId).containsExactly(FOX, GOLEM);
         assertThat(pets.get(0).getDerived().getHealth()).isEqualTo(300);
         assertThat(pets.get(0).getDerived().getMana()).isEqualTo(200);
-        assertThat(pets.get(1).getDerived().getHealth()).as("阵亡的石灵已回满").isEqualTo(742);
+        assertThat(pets.get(1).getDerived().getHealth()).as("阵亡的石灵已回满").isEqualTo(853);
         assertThat(pets.get(1).getDerived().getMana()).isEqualTo(350);
         BattleEndS2C end = f.battleEnds(player).get(0);
         assertThat(end.getBattleId()).isEqualTo(X);
@@ -936,7 +936,7 @@ class SettlementApplyValuesTest {
         assertThat(player.attributes().mana()).isEqualTo(20);
         assertThat(player.pets().find(FOX).health()).as("宝宝回写").isEqualTo(300);
         assertThat(player.pets().find(FOX).mana()).isEqualTo(200);
-        assertThat(player.pets().find(GOLEM).health()).isEqualTo(742);
+        assertThat(player.pets().find(GOLEM).health()).isEqualTo(853);
         assertThat(f.gold(player)).isEqualTo(12);
         assertThat(inventory(player).total(POTION)).isEqualTo(3);
         assertThat(inventory(player).total(DROP)).isEqualTo(3);

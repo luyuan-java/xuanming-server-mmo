@@ -26,6 +26,8 @@ final class BuffEngine {
     /** uint64；基线 {@code nextBuffInstanceId = 1}（{@code engine.h:230}）。 */
     private long nextBuffInstanceId = 1;
 
+    long nextInstance() { return nextBuffInstanceId++; }
+
     BuffEngine(BattleContext ctx) {
         this.ctx = ctx;
     }
@@ -94,7 +96,7 @@ final class BuffEngine {
             return;
         }
 
-        long newBuffId = nextBuffInstanceId++;
+        long newBuffId = nextInstance();
         int remainRounds;
         if (row.getInfiniteDuration() != 0) {
             remainRounds = 0;
@@ -242,7 +244,7 @@ final class BuffEngine {
     int dispelDebuffs(BattleUnit target, int count) {
         int removed = 0;
         for (int index = 0; index < target.state().getBuffsCount() && Integer.compareUnsigned(removed, count) < 0;) {
-            if (isDebuffEntry(target.state().getBuffsOrBuilder(index))) {
+            if (!ctx.configured.listener(target.state().getBuffs(index)) && isDebuffEntry(target.state().getBuffsOrBuilder(index))) {
                 removeBuffAt(target, index);
                 removed++;
             } else {
@@ -257,6 +259,15 @@ final class BuffEngine {
         var row = ctx.data().buff(entry.getBuffTableId());
         if (row.isEmpty()) return false;
         if (row.get().containsTag("Debuff")) return true;
+        if (row.get().getBattleOp() != 0) {
+            if (row.get().containsTag("Buff")) return false;
+            return switch (row.get().getBattleOp()) {
+                case BattleEffect.CONTROL, BattleEffect.PERIODIC -> true;
+                case BattleEffect.MODIFIER, BattleEffect.AURA -> row.get().getModifierStat() == BattleEffect.MANA_COST
+                        || row.get().getModifierStat() == BattleEffect.IN_DAMAGE ? row.get().getRatio() > 0 : row.get().getRatio() < 0;
+                default -> false;
+            };
+        }
         return switch (row.get().getBuffType()) {
             case BattleConstants.BUFF_TYPE_POISON, BattleConstants.BUFF_TYPE_BURN,
                  BattleConstants.BUFF_TYPE_STUN, BattleConstants.BUFF_TYPE_SILENCE,
@@ -313,6 +324,7 @@ final class BuffEngine {
             }
             BuffTable row = buffRow.get();
 
+            if (row.getBattleOp() != 0) continue;
             if (row.getInterval() > 0) {
                 int intervalRounds = BattleRules.roundsFromSeconds(row.getInterval());
                 int elapsedRounds;
@@ -431,6 +443,7 @@ final class BuffEngine {
                 continue;
             }
             BuffTable row = buffRow.get();
+            if (row.getBattleOp() != 0) continue;
             int buffType = row.getBuffType();
             if (buffType == BattleConstants.BUFF_TYPE_STUN || buffType == BattleConstants.BUFF_TYPE_FREEZE
                     || buffType == BattleConstants.BUFF_TYPE_SILENCE) {

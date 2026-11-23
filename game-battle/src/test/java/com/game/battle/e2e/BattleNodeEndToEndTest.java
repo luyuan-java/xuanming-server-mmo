@@ -429,6 +429,73 @@ class BattleNodeEndToEndTest {
     }
 
     @Test
+    void modernShieldsAcrossPlayerAndPetConnections() throws Exception {
+        long owner = player(14), enemy = player(15), battleId = nextBattleId();
+        gate.online(owner, 214);
+        gate.online(enemy, 215);
+        var player = tank(owner, 0, routing(gate, 214)).toBuilder().setLevel(30).setMaxMana(10000)
+                .putSkillRanks(10040, 1).addSkillTableIds(10040);
+        player.getBaseAttributesBuilder().setMana(10000);
+        var equipment = player.getEquipmentEffectsBuilder().setShieldCapacityBps(1000).setSupportSourcesComplete(true);
+        equipment.addSupportSourcesBuilder().setItemId(501).setAffixId(1).setKind(1).setEffectKind(2)
+                .setName("护盾词条").setRawBonusBps(1000).setEffectiveBonusBps(1000);
+        var pet = player.addPetsBuilder().setOwnerPlayerId(owner).setPetId(41).setPetTableId(1).setLevel(30)
+                .setMaxHealth(10000).setMaxMana(10000).setMagicAttack(100).putSkillRanks(11005, 1).addSkillTableIds(11005);
+        pet.getBaseAttributesBuilder().setHealth(10000).setMana(10000).setSpeed(200);
+        pet.getPetCultivationBuilder().setShieldCapacityBps(1000);
+        createAdmitted(battle, pvp(battleId, System.currentTimeMillis() + 300000, player.build(), tank(enemy, 1, routing(gate, 215))));
+        try {
+            Delivery ownerLobby = gate.next(owner, Duration.ofSeconds(5));
+            Delivery enemyLobby = gate.next(enemy, Duration.ofSeconds(5));
+            var start = BattleStartS2C.parseFrom(ownerLobby.contents().get(1).getSerializedMessage()).getState();
+            var otherView = BattleStartS2C.parseFrom(enemyLobby.contents().get(1).getSerializedMessage()).getState();
+            var own = start.getActorsList().stream().filter(a -> a.getActorId() == owner).findFirst().orElseThrow();
+            long petActor = start.getActorsList().stream().filter(a -> a.getOwnerPlayerId() == owner).findFirst().orElseThrow().getActorId();
+            var preview = own.getSupportEffects().getPreviewsList().stream().filter(p -> p.getSkillTableId() == 10040).findFirst().orElseThrow();
+            assertThat(preview.getComplete()).isTrue();
+            assertThat(preview.getReferenceValue()).isEqualTo(528);
+            assertThat(own.getSupportEffects().getShield().getSourcesList()).anyMatch(s -> s.getItemId() == 501);
+            assertThat(otherView.getActorsList()).filteredOn(a -> a.getActorId() == owner).singleElement()
+                    .satisfies(a -> assertThat(a.hasSupportEffects()).isFalse());
+            try (DirectClient a = DirectClient.connectWith(assignedFrom(ownerLobby));
+                 DirectClient b = DirectClient.connectWith(assignedFrom(enemyLobby))) {
+                a.expect("verify-ok:" + battleId);
+                b.expect("verify-ok:" + battleId);
+                var petCommand = SubmitBattleActionRequest.newBuilder().setBattleId(battleId).setActorId(petActor)
+                        .setRoundIndex(start.getRoundIndex()).setAction(BattleAction.newBuilder()
+                                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL).setSkillTableId(11005).setTargetId(owner)).build();
+                b.request(SUBMIT_BATTLE_ACTION, petCommand);
+                var denied = SubmitBattleActionResponse.parseFrom(b.expect("reply:" + SUBMIT_BATTLE_ACTION).content().getSerializedMessage());
+                assertThat(denied.getErrorMessage().getId()).isEqualTo(TIP_INVALID_PARAMETER);
+                a.request(SUBMIT_BATTLE_ACTION, petCommand);
+                assertThat(a.expect("reply:" + SUBMIT_BATTLE_ACTION).content().getSerializedMessage()).isEmpty();
+                a.request(SUBMIT_BATTLE_ACTION, submit(battleId, BattleAction.newBuilder()
+                        .setActionType(eBattleActionType.BATTLE_ACTION_SKILL).setSkillTableId(10040).setTargetId(owner).build()));
+                assertThat(a.expect("reply:" + SUBMIT_BATTLE_ACTION).content().getSerializedMessage()).isEmpty();
+                b.request(SUBMIT_BATTLE_ACTION, submit(battleId, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build()));
+                var turn = TurnResultS2C.parseFrom(a.expect("push:" + NOTIFY_TURN_RESULT).content().getSerializedMessage());
+                var enemyTurn = TurnResultS2C.parseFrom(b.expect("push:" + NOTIFY_TURN_RESULT).content().getSerializedMessage());
+                assertThat(b.expect("reply:" + SUBMIT_BATTLE_ACTION).content().getSerializedMessage()).isEmpty();
+                assertThat(turn.getRoundIndex()).isEqualTo(start.getRoundIndex());
+                assertThat(enemyTurn.getEventsList()).isEqualTo(turn.getEventsList());
+                assertThat(enemyTurn.getState().getActorsList()).filteredOn(unit -> unit.getActorId() == owner).singleElement()
+                        .satisfies(unit -> assertThat(unit.hasSupportEffects()).isFalse());
+                assertThat(turn.getEventsList()).anyMatch(ev -> ev.getSourceId() == owner && ev.getSkillTableId() == 10040
+                        && ev.getEventType() == com.game.proto.eBattleEventType.BATTLE_EVENT_SKILL)
+                        .anyMatch(ev -> ev.getSourceId() == petActor && ev.getSkillTableId() == 11005
+                                && ev.getEventType() == com.game.proto.eBattleEventType.BATTLE_EVENT_SKILL);
+                assertThat(turn.getEventsList()).anyMatch(ev -> ev.getSourceId() == owner && ev.getTargetId() == owner
+                        && ev.getBuffTableId() == 100400 && ev.getShieldAfter() == preview.getReferenceValue())
+                        .anyMatch(ev -> ev.getSourceId() == petActor && ev.getTargetId() == owner
+                                && ev.getBuffTableId() == 110050 && ev.getShieldAfter() == 330);
+            }
+        } finally {
+            battle.destroyBattle(DestroyBattleRequest.newBuilder().setBattleId(battleId).setReason("e2e_modern_shields").build())
+                    .get(10, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
     void PVP_补签与开局票逐字节相同_非成员1005_幂等建房不重推_两人都交才结算_Destroy后参战者只见FIN() throws Exception {
         long a = player(11);
         long b = player(12);

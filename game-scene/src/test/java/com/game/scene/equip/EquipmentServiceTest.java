@@ -119,6 +119,7 @@ class EquipmentServiceTest {
         var f = new EquipmentFixture(); long id = f.grant(1, 1);
         var unknown = UnknownFieldSet.newBuilder().addField(99, UnknownFieldSet.Field.newBuilder().addVarint(123).build()).build();
         f.item(id).equipment(f.item(id).equipment().toBuilder().setEnhanceLevel(1).setUnknownFields(unknown)
+                .addFixedAffixes(EquipmentFixedAffixState.newBuilder().setSlot(1).setAffixId(103).setUnknownFields(unknown))
                 .addGems(EquipmentGemState.newBuilder().setSocket(0).setGemConfigId(11).setUnknownFields(unknown)).build());
         var original = f.item(id).equipment(); int rolls = f.rolls;
         var debit = f.bags.prepareDebit(f.player, Map.of(), List.of(id)); assertThat(debit.tip()).isZero();
@@ -195,13 +196,22 @@ class EquipmentServiceTest {
         var f = new EquipmentFixture(); long id = f.grant(1, 1);
         var unknown = UnknownFieldSet.newBuilder().addField(99, UnknownFieldSet.Field.newBuilder().addVarint(9).build()).build();
         var other = EquipmentGemState.newBuilder().setSocket(7).setGemConfigId(11).setUnknownFields(unknown).build();
+        var fixed = EquipmentFixedAffixState.newBuilder().setSlot(1).setAffixId(103).setUnknownFields(unknown).build();
         f.item(id).equipment(f.item(id).equipment().toBuilder().setUnknownFields(unknown)
+                .addFixedAffixes(fixed)
                 .addGems(EquipmentGemState.newBuilder().setSocket(0)).addGems(EquipmentGemState.newBuilder().setSocket(0).setGemConfigId(11))
                 .addGems(EquipmentGemState.newBuilder().setSocket(0).setGemConfigId(11)).addGems(other).build());
+        var restored = PlayerBags.restore(f.player.bags().toState());
+        restored.normalize(f.bags.tables());
+        f.player.bags().commitPrepared(restored);
         assertThat(f.equipment.removeGem(f.player, id, 0).tip()).isZero();
         assertThat(f.player.bags().bag(BagType.INVENTORY).total(11)).isEqualTo(1);
-        assertThat(f.item(id).equipment().getGemsList()).containsExactly(other);
-        assertThat(f.item(id).equipment().getUnknownFields()).isEqualTo(unknown);
+        var saved = PlayerBags.restore(f.player.bags().toState());
+        saved.normalize(f.bags.tables());
+        var equipment = saved.bag(BagType.INVENTORY).item(id).equipment();
+        assertThat(equipment.getGemsList()).containsExactly(other);
+        assertThat(equipment.getFixedAffixesList()).containsExactly(fixed);
+        assertThat(equipment.getUnknownFields()).isEqualTo(unknown);
     }
     @Test void 跨节点冻结快照保留整实例与owner围栏_目标新代恢复不重掷() throws Exception {
         var f = new EquipmentFixture(); long id = f.grant(1, 1); f.fund(); f.equipment.enhance(f.player, id);

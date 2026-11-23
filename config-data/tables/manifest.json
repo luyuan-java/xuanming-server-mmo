@@ -1,9 +1,9 @@
 {
   "schema_version": 2,
   "schema_digest": "df34cab01b3439aa",
-  "version": 47,
-  "content_digest": "3d5e3d899394050affee10129731e3042f2679700fec59d81c8c2a94ef37f26a",
-  "generated_at": "2026-11-21T07:51:01Z",
+  "version": 48,
+  "content_digest": "0037938128a92d7ee82eeaa05e945f0155fb15ae825c5fdf7ab41a31f69fe191",
+  "generated_at": "2026-11-21T08:13:57Z",
   "source_rev": {
     "commit": "345cc559f891b6c9a023a11d92d74ab6aea33e6d",
     "data_dirty": true
@@ -339,24 +339,24 @@
       "name": "Buff",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 98,
+      "rows": 88,
       "source": {
         "file": "Buff.xlsx",
-        "size": 12143,
-        "sha256": "e96131dc3c52576faa1d74e770fe75e5f019fa12e727d1ada8577ca184b3eb03"
+        "size": 11827,
+        "sha256": "a9fdfef947511ed5a89ed751bcccaa87951a6f110fd7ebe4def8319c76cde8dc"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "buff.json",
-          "size": 27255,
-          "sha256": "b9f29232a1b915ab67727743432425248eab708511e034e3872ce69f6db2c655"
+          "size": 25640,
+          "sha256": "9e8cf60af828884d7defddd2f0605368166cf89c8be98123b0c4322636584dde"
         },
         {
           "kind": "binary",
           "file": "buff.pb",
-          "size": 4957,
-          "sha256": "0f6fd3fe8ed9d8a4ad6f4ae998629312efe7757d8bd469c67e7e4a4f3aa452a7"
+          "size": 4650,
+          "sha256": "8e643ad3b024bd066b0f6a49a09365f2aac336c26afd1700e6a357face0f0209"
         }
       ]
     },
@@ -1264,24 +1264,24 @@
       "name": "Skill",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 115,
+      "rows": 107,
       "source": {
         "file": "Skill.xlsx",
-        "size": 24214,
-        "sha256": "0a28400f84746295b8c139cd61bab69f849621ffca2b487c51911fd88057437d"
+        "size": 23398,
+        "sha256": "1c78cdc9363f5a82d3f05d5717d85a4fafa98975cc937ca8115b16fdd24c59a8"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "skill.json",
-          "size": 114151,
-          "sha256": "f0e9784a0475826ecf63930580dd1e2988af2bb1abcc28809df03e141339396e"
+          "size": 109361,
+          "sha256": "ce8bc3d1a9dbe522279b085402fc52e4619811e78da4f2b69a44566dcf5b3c6b"
         },
         {
           "kind": "binary",
           "file": "skill.pb",
-          "size": 20755,
-          "sha256": "132c6bd2f369029a89b34fc7fefaeea696cc8deb520a7899027ba6f6f23dada4"
+          "size": 19363,
+          "sha256": "2850587d71c6a65a3474b0b483ee61af859240476ab81a63197cc5c8179dd7b3"
         }
       ]
     },

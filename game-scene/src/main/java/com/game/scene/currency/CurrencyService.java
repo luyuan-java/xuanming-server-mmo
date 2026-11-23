@@ -53,6 +53,10 @@ public final class CurrencyService {
 
         /** 钱包、宠物和购买回执同步提交，审计异常不拆散已提交状态。 */
         public void commitPets(com.game.scene.player.PlayerPets candidate, long petId) {
+            commitPets(candidate, AssetAudit.Reason.PET_BUY, petId);
+        }
+
+        public void commitPets(com.game.scene.player.PlayerPets candidate, AssetAudit.Reason reason, long correlation) {
             if (committed || !change.ok() || player.frozen() || player.inBattle()
                     || !originalPets.equals(player.pets().toState()))
                 throw new IllegalStateException("stale pet purchase candidate");
@@ -61,10 +65,10 @@ public final class CurrencyService {
             committed = true;
             try {
                 audit.currencyChanged(player.playerId(), change.type(), change.after() - change.before(),
-                        change.before(), change.after(), AssetAudit.Reason.PET_BUY, petId);
+                          change.before(), change.after(), reason, correlation);
             } catch (RuntimeException failure) {
                 org.slf4j.LoggerFactory.getLogger(CurrencyService.class)
-                        .error("Pet purchase committed but audit failed pet={}", petId, failure);
+                        .error("Pet update committed but audit failed correlation={}", correlation, failure);
             }
         }
 

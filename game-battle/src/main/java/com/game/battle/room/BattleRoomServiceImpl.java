@@ -832,7 +832,11 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
         }
         if(room.pendingCompletion!=null)return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
-        int validation = room.engine.validateAction(playerId, request.getAction());
+        long actorId = request.getActorId() == 0 ? playerId : request.getActorId();
+        int round = request.getRoundIndex();
+        if ((round != 0 && round != room.engine.currentRoundIndex()) || (round == 0 && actorId != playerId))
+            return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
+        int validation = room.engine.validateOwnedAction(playerId, actorId, request.getAction());
         if (validation != SUCCESS) {
             if (validation == 0) {
                 // 0 不是任何 tip，写进去客户端会读成成功却没落账
@@ -841,7 +845,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             }
             return response.setErrorMessage(tip(validation != 0 ? validation : INVALID_PARAMETER)).build();
         }
-        boolean allReady = room.engine.submitAction(playerId, request.getAction());
+        boolean allReady = room.engine.submitOwnedAction(playerId, actorId, request.getAction());
         // R8：应答在结算之前填完；结算可能当场删房
         SubmitBattleActionResponse built = response.build();
         if (allReady) {

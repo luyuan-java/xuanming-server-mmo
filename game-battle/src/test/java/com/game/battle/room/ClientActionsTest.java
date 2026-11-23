@@ -96,6 +96,27 @@ class ClientActionsTest {
         assertThat(response.toByteArray()).isEmpty();
     }
 
+    @Test
+    void 本人可在当前回合指挥自己的宝宝且来源只下发本人() {
+        var request = h.pvp(6030, A, B);
+        request.getPlayersBuilder(0).addPetsBuilder().setPetId(88).setOwnerPlayerId(A).setLevel(30)
+                .setMaxHealth(1000).getBaseAttributesBuilder().setHealth(1000);
+        h.create(request);
+        observe(6030, C);
+        var full = state(A, 6030);
+        long petId = full.getActorsList().stream().filter(a -> a.getOwnerPlayerId() == A).findFirst().orElseThrow().getActorId();
+        var command = SubmitBattleActionRequest.newBuilder().setBattleId(6030).setActorId(petId)
+                .setAction(RoomHarness.action(eBattleActionType.BATTLE_ACTION_DEFEND, 0));
+        assertThat(h.service().submit(A, command.build()).getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(h.service().submit(A, command.setRoundIndex(full.getRoundIndex() + 1).build()).getErrorMessage().getId()).isEqualTo(1005);
+        command.setRoundIndex(full.getRoundIndex());
+        assertThat(h.service().submit(B, command.build()).getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(h.service().submit(A, command.build()).hasErrorMessage()).isFalse();
+        assertThat(actor(full, A).hasSupportEffects()).isTrue();
+        assertThat(actor(state(B, 6030), A).hasSupportEffects()).isFalse();
+        assertThat(state(C, 6030).getActorsList()).noneMatch(BattleActorState::hasSupportEffects);
+    }
+
     // ---------------------------------------------------------------- 140
 
     @Test

@@ -45,7 +45,7 @@ public final class Bag {
     private static final long MAX_COUNT = 0xFFFF_FFFFL;
 
     private final BagType type;
-    private final BagItem[] cells;
+    private BagItem[] cells;
     private final Map<Long, BagItem> byGuid = new HashMap<>();
     private long nextAcquireSeq = 1;
 
@@ -56,6 +56,10 @@ public final class Bag {
 
     public BagType type() {
         return type;
+    }
+
+    void ensureCapacity(int minimum) {
+        if (cells.length < minimum) cells = java.util.Arrays.copyOf(cells, minimum);
     }
 
     public int capacity() {

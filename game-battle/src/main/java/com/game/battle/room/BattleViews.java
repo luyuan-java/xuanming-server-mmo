@@ -49,6 +49,7 @@ final class BattleViews {
         TurnBattleEngine.stripEngineOnlyState(state);
         for (BattleActorState.Builder actor : state.getActorsBuilderList()) {
             boolean own = viewer != 0 && (actor.getActorId() == viewer || actor.getOwnerPlayerId() == viewer);
+            if (viewer == 0 || actor.getActorId() != viewer) actor.clearSupportEffects();
             if (!own) {
                 actor.clearSkillCooldownRounds();
             }

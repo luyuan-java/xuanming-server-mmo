@@ -39,7 +39,8 @@ class ClassSkillSceneTest {
     @BeforeAll static void tables() {
         Path dir = Files.isDirectory(Path.of("../config-data/tables")) ? Path.of("../config-data/tables") : Path.of("config-data/tables");
         config = ConfigTables.load(dir);
-        catalog = ClassSkillCatalog.from(config);
+        // 本组守卫历史职业目录；正式自由目录另用完整加载路径回归。
+        catalog = new ClassSkillCatalog(config.skill().all().stream().filter(s -> s.getBattleModel() == 0).toList(), config.buff().all());
     }
 
     private ScenePlayer player(int classId, int level, PlayerState state) {

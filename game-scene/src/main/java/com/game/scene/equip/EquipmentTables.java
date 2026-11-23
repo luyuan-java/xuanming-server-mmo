@@ -7,6 +7,8 @@ import java.util.function.ToIntFunction;
 /** 装备配置的不可变视图；只含配表和索引，不持有玩家或进程级随机源。 */
 public final class EquipmentTables {
     private final Map<Integer, ItemTable> items;
+    private final Map<Integer, EquipV1AffixTable> fixedAffixes;
+    private final Map<Integer, EquipArtifactTable> artifacts;
     private final Map<Integer, EquipAttributeTable> attributes;
     private final Map<Integer, EquipAffixRuleTable> rules;
     private final Map<Integer, EquipEnhanceTable> enhancements;
@@ -21,6 +23,15 @@ public final class EquipmentTables {
             List<EquipAffixRuleTable> rules, List<EquipAffixPoolTable> pools, List<EquipAttributeCapTable> caps,
             List<EquipEnhanceTable> enhancements, List<EquipGemTable> gems,
             List<EquipGemSocketTable> sockets, List<EquipSlotTable> slots) {
+        this(items, attributes, rules, pools, caps, enhancements, gems, sockets, slots, List.of(), List.of());
+    }
+
+    private EquipmentTables(List<ItemTable> items, List<EquipAttributeTable> attributes,
+            List<EquipAffixRuleTable> rules, List<EquipAffixPoolTable> pools, List<EquipAttributeCapTable> caps,
+            List<EquipEnhanceTable> enhancements, List<EquipGemTable> gems, List<EquipGemSocketTable> sockets,
+            List<EquipSlotTable> slots, List<EquipV1AffixTable> fixedAffixes, List<EquipArtifactTable> artifacts) {
+        this.fixedAffixes = index(fixedAffixes, EquipV1AffixTable::getId);
+        this.artifacts = index(artifacts, EquipArtifactTable::getId);
         this.items = index(items, ItemTable::getId); this.attributes = index(attributes, EquipAttributeTable::getId);
         this.rules = index(rules, EquipAffixRuleTable::getId); this.enhancements = index(enhancements, EquipEnhanceTable::getId);
         this.gems = index(gems, EquipGemTable::getId); this.pools = List.copyOf(pools); this.caps = List.copyOf(caps);
@@ -33,7 +44,8 @@ public final class EquipmentTables {
     public static EquipmentTables from(ConfigTables t) {
         EquipmentTables result = new EquipmentTables(t.item().all(), t.equipAttribute().all(), t.equipAffixRule().all(),
                 t.equipAffixPool().all(), t.equipAttributeCap().all(), t.equipEnhance().all(),
-                t.equipGem().all(), t.equipGemSocket().all(), t.equipSlot().all());
+                t.equipGem().all(), t.equipGemSocket().all(), t.equipSlot().all(),
+                t.equipV1Affix().all(), t.equipArtifact().all());
         var log = org.slf4j.LoggerFactory.getLogger(EquipmentTables.class);
         result.validationIssues().forEach(issue -> log.warn("装备表校验：{}", issue));
         return result;
@@ -49,6 +61,8 @@ public final class EquipmentTables {
         return Collections.unmodifiableMap(result);
     }
     public ItemTable item(int id) { return items.get(id); }
+    EquipV1AffixTable fixedAffix(int id) { return fixedAffixes.get(id); }
+    EquipArtifactTable artifact(int id) { return artifacts.get(id); }
     public EquipAttributeTable attribute(int id) { return attributes.get(id); }
     public List<EquipAttributeTable> attributes() { return List.copyOf(attributes.values()); }
     public EquipAffixRuleTable rule(int id) { return rules.get(id); }

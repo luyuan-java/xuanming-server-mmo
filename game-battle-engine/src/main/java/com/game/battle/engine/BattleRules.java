@@ -57,6 +57,7 @@ public final class BattleRules {
      * 空列表且没有被动属性的旧技能仍能施放。开局过滤玩家技能、提交期校验、6.3 scene 出快照都用它。
      */
     public static boolean isTurnBattleCastableSkill(SkillTable skillRow) {
+        if (skillRow.getBattleModel() == 1) return skillRow.getAbilityKind() == 1;
         // 职业被动的位号 0 会被导表器当空槽省略；与 C++ 同样以正式 passive_stat 判定，不读展示分类。
         if (!skillRow.getPassiveStat().isEmpty()) {
             return false;

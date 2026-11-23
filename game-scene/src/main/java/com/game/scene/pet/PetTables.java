@@ -1,6 +1,7 @@
 package com.game.scene.pet;
 
 import com.game.scene.attribute.AttributeRules.PoolRule;
+import com.game.scene.skill.ClassSkillCatalog;
 import com.game.table.AttributeAutoPlanTable;
 import com.game.table.AttributeDimensionTable;
 import com.game.table.AttributePoolTable;
@@ -38,6 +39,7 @@ public final class PetTables {
     private final AttributeAutoPlanTable autoPlan;
     private final List<PetEntryTable> entries;
     private final List<PetTierTable> tiers;
+    final ClassSkillCatalog skills;
     List<PetEntryTable> entries() { return entries; }
     PetTierTable tier(int id) { return tiers.stream().filter(t -> t.getId() == id).findFirst().orElse(null); }
     int entryVersion() { return rule == null ? 0 : rule.getEntryConfigVersion(); }
@@ -47,11 +49,13 @@ public final class PetTables {
 
     PetTables(Map<Integer, PetTable> pets, PetRuleTable rule, AttributePoolTable pool,
               List<AttributeDimensionTable> dimensions, AttributeAutoPlanTable autoPlan) {
-        this(pets, rule, pool, dimensions, autoPlan, List.of(), List.of());
+        this(pets, rule, pool, dimensions, autoPlan, List.of(), List.of(),
+                ClassSkillCatalog.generic(pets.values().stream().flatMap(p -> p.getSkillList().stream()).toList()));
     }
     private PetTables(Map<Integer, PetTable> pets, PetRuleTable rule, AttributePoolTable pool,
                       List<AttributeDimensionTable> dimensions, AttributeAutoPlanTable autoPlan,
-                      List<PetEntryTable> entries, List<PetTierTable> tiers) {
+                      List<PetEntryTable> entries, List<PetTierTable> tiers, ClassSkillCatalog skills) {
+        this.skills = skills;
         this.entries = List.copyOf(entries); this.tiers = List.copyOf(tiers);
         this.pets = Map.copyOf(pets);
         this.rule = rule;
@@ -86,7 +90,8 @@ public final class PetTables {
                 }
             }
         }
-        return new PetTables(pets, rules.isEmpty() ? null : rules.get(0), pool, dimensions, plan, tables.petEntry().all(), tables.petTier().all());
+        return new PetTables(pets, rules.isEmpty() ? null : rules.get(0), pool, dimensions, plan,
+                tables.petEntry().all(), tables.petTier().all(), ClassSkillCatalog.from(tables));
     }
 
     /** 种类行；表里没有为 null。 */

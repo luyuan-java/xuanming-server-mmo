@@ -11,6 +11,9 @@ import com.game.proto.SkillCatalogEntry;
 import com.game.proto.UpgradeSkillRequest;
 import com.game.proto.UpgradeSkillResponse;
 import com.game.scene.attribute.AttributeService;
+import com.game.scene.pet.PetService;
+import com.game.table.PetErrorTip;
+import com.game.proto.SupportSkillPreview;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.currency.CurrencyService;
 import com.game.scene.player.PlayerLevels;
@@ -25,14 +28,20 @@ import com.game.table.SkillTable;
 public final class ClassSkillService {
     private final CurrencyService currency;
     private final AttributeService attributes;
+    private final PetService pets;
 
     public ClassSkillService(CurrencyService currency, AttributeService attributes) {
+        this(currency, attributes, null);
+    }
+
+    public ClassSkillService(CurrencyService currency, AttributeService attributes, PetService pets) {
+        this.pets = pets;
         this.currency = currency;
         this.attributes = attributes;
     }
 
     static int busy(ScenePlayer player) {
-        return player.inBattle() || player.switchPhase() != SwitchPhase.NONE
+        return player.inBattle() || player.frozen() || player.switchPhase() != SwitchPhase.NONE
                 ? kSkillUpgradeBusy_VALUE : 0;
     }
 
@@ -55,37 +64,69 @@ public final class ClassSkillService {
         for (int id : player.skills()) {
             SkillTable row = catalog.row(id);
             var entry = PlayerSkillComp.newBuilder().setSkillTableId(id);
-            if (row.getClassId() != 0) entry.setRank(owned.rank(id));
+            if (ClassSkillCatalog.ranked(row)) entry.setRank(owned.rank(id));
             list.addSkillList(entry);
         }
         var result = ListSkillsResponse.newBuilder().setErrorMessage(tip(0)).setSkillList(list)
                 .setClassId(player.classId()).setPlayerLevel(level).setCurrencyBalance(balance);
+        var previews = new java.util.HashMap<Integer, SupportSkillPreview>();
+        CharacterSupport.build(player).getPreviewsList().forEach(preview -> previews.put(preview.getSkillTableId(), preview));
         for (SkillTable row : catalog.classRows(player.classId())) {
-            int rank = owned.rank(row.getId());
-            int limit = ClassSkillRules.rankLimit(level, row.getUnlockLevel(), row.getMaxRank());
-            boolean full = Integer.compareUnsigned(rank, row.getMaxRank()) >= 0;
-            long cost = full ? 0 : ClassSkillRules.upgradeCost(rank + 1, row.getUnlockLevel());
-            int blocked = busy(player);
-            if (blocked == 0) blocked = full ? kSkillMaxRankReached_VALUE
-                    : Integer.compareUnsigned(rank, limit) >= 0 ? kSkillLevelNotEnough_VALUE
-                    : Long.compareUnsigned(cost, balance) > 0 ? kSkillGoldNotEnough_VALUE : 0;
-            result.addCatalog(SkillCatalogEntry.newBuilder().setSkillTableId(row.getId()).setName(row.getName())
-                    .setDescription(row.getDescription()).setIconKey(row.getIconKey()).setClassId(row.getClassId())
-                    .setCategory(row.getCategory()).setPassive(!row.getPassiveStat().isEmpty())
-                    .setTargetTeam(row.getTargetTeam()).setMaxTargets(row.getMaxTargets()).setUnlockLevel(row.getUnlockLevel())
-                    .setMaxRank(row.getMaxRank()).setRank(rank).setRankLimit(limit).setManaPercent(row.getManaPercent())
-                    .setCooldownRounds(row.getCooldownRounds()).setNextRankCost(cost).setUpgradeBlockTipId(blocked)
-                    .setDurationRounds(catalog.durationRounds(row)));
+            var view = catalogEntry(catalog, row, owned.rank(row.getId()), level, balance, busy(player), false);
+            var preview = previews.get(row.getId());
+            if (preview != null) view.setSupportPreview(preview);
+            result.addCatalog(view);
         }
         return result.build();
     }
 
+    public static ListSkillsResponse book(ScenePlayer player, long petId) {
+        if (petId == 0) return book(player);
+        var result = ListSkillsResponse.newBuilder().setPetId(petId);
+        var pet = player.pets().find(petId);
+        if (pet == null) return result.setErrorMessage(tip(PetErrorTip.pet_error.kPetNotFound_VALUE)).build();
+        var catalog = player.skillCatalog();
+        var species = catalog.species(pet.petTableId());
+        if (species == null) return result.setErrorMessage(tip(PetErrorTip.pet_error.kPetTableRowMissing_VALUE)).build();
+        int level = ClassSkillCatalog.petLevel(pet, species);
+        long balance = player.wallet().balance(Wallet.GOLD);
+        result.setPlayerLevel(level).setCurrencyBalance(balance).setErrorMessage(tip(0));
+        var owned = result.getSkillListBuilder();
+        catalog.petSkills(pet, species).forEach((id, rank) -> owned.addSkillList(PlayerSkillComp.newBuilder()
+                .setSkillTableId(id).setRank(ClassSkillCatalog.petStoredRank(pet, species, id))));
+        int blocked = busy(player);
+        if (blocked == 0 && PlayerLevels.effective(player.level()) < level) blocked = PetErrorTip.pet_error.kPetOwnerLevelNotEnough_VALUE;
+        for (var row : catalog.petRows())
+            result.addCatalog(catalogEntry(catalog, row, ClassSkillCatalog.petStoredRank(pet, species, row.getId()),
+                    level, balance, blocked, true));
+        return result.build();
+    }
+
+    private static SkillCatalogEntry.Builder catalogEntry(ClassSkillCatalog catalog, SkillTable row, int rank,
+            int level, long balance, int blocked, boolean pet) {
+        int limit = ClassSkillRules.rankLimit(level, row.getUnlockLevel(), row.getMaxRank());
+        boolean full = Integer.compareUnsigned(rank, row.getMaxRank()) >= 0;
+        long cost = full ? 0 : ClassSkillRules.upgradeCost(rank + 1, row.getUnlockLevel());
+        if (blocked == 0) blocked = full ? kSkillMaxRankReached_VALUE
+                : Integer.compareUnsigned(rank, limit) >= 0 ? kSkillLevelNotEnough_VALUE
+                : Long.compareUnsigned(cost, balance) > 0 ? kSkillGoldNotEnough_VALUE : 0;
+        return SkillCatalogEntry.newBuilder().setSkillTableId(row.getId()).setName(row.getName())
+                .setDescription(row.getDescription()).setIconKey(row.getIconKey()).setClassId(row.getClassId())
+                .setCategory(row.getCategory()).setPassive(ClassSkillCatalog.passive(row))
+                .setTargetTeam(row.getTargetTeam()).setMaxTargets(pet ? row.getPetMaxTargets() : row.getMaxTargets())
+                .setUnlockLevel(row.getUnlockLevel()).setMaxRank(row.getMaxRank()).setRank(rank).setRankLimit(limit)
+                .setManaPercent(row.getManaPercent()).setCooldownRounds(row.getCooldownRounds()).setNextRankCost(cost)
+                .setUpgradeBlockTipId(blocked).setDurationRounds(catalog.durationRounds(row)).setAllowDeadTarget(row.getAllowDeadTarget() != 0)
+                .setAbilityKind(row.getAbilityKind()).setCasterMask(row.getCasterMask()).setActionTags(row.getActionTags());
+    }
+
     public UpgradeSkillResponse upgrade(ScenePlayer player, UpgradeSkillRequest request) {
+        if (request.getPetId() != 0) return upgradePet(player, request);
         if (!ClassSkillRules.isValidUpgradeCount(request.getCount()))
             return rejected(player, kSkillUpgradeCountInvalid_VALUE);
         SkillTable row = player.skillCatalog().row(request.getSkillTableId());
         if (row == null) return rejected(player, CommonErrorTip.common_error.kInvalidTableId_VALUE);
-        if (row.getClassId() == 0 || row.getClassId() != player.classId())
+        if (!ClassSkillCatalog.characterCanLearn(row, player.classId()))
             return rejected(player, kSkillNotInClass_VALUE);
         int busy = busy(player);
         if (busy != 0) return rejected(player, busy);
@@ -101,9 +142,41 @@ public final class ClassSkillService {
         var payment = currency.prepareDeduction(player, Wallet.GOLD, plan.totalCost());
         if (payment.tipId() != 0) return rejected(player, payment.tipId());
         payment.commitSkills(candidate, AssetAudit.Reason.SKILL_UPGRADE, Integer.toUnsignedLong(row.getId()));
-        if (!row.getPassiveStat().isEmpty()) attributes.skillsChanged(player);
+        if (ClassSkillCatalog.passive(row)) attributes.skillsChanged(player);
         return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(0)).setState(book(player))
                 .setUpgradedCount(plan.steps()).setStopTipId(plan.steps() < request.getCount() ? stop(plan.stop()) : 0).build();
+    }
+
+    private UpgradeSkillResponse upgradePet(ScenePlayer player, UpgradeSkillRequest request) {
+        var response = UpgradeSkillResponse.newBuilder();
+        long petId = request.getPetId();
+        var pet = player.pets().find(petId);
+        var catalog = player.skillCatalog();
+        var species = pet == null ? null : catalog.species(pet.petTableId());
+        var row = catalog.row(request.getSkillTableId());
+        int error;
+        if (!ClassSkillRules.isValidUpgradeCount(request.getCount())) error = kSkillUpgradeCountInvalid_VALUE;
+        else if (pet == null) error = PetErrorTip.pet_error.kPetNotFound_VALUE;
+        else if (species == null || pets == null) error = CommonErrorTip.common_error.kInvalidTableData_VALUE;
+        else if (row == null) error = CommonErrorTip.common_error.kInvalidTableId_VALUE;
+        else if (!ClassSkillCatalog.forSubject(row, 2)) error = kSkillNotInClass_VALUE;
+        else if (busy(player) != 0) error = kSkillUpgradeBusy_VALUE;
+        else {
+            int level = ClassSkillCatalog.petLevel(pet, species);
+            int rank = ClassSkillCatalog.petStoredRank(pet, species, row.getId());
+            if (PlayerLevels.effective(player.level()) < level) error = PetErrorTip.pet_error.kPetOwnerLevelNotEnough_VALUE;
+            else if (rank != request.getExpectedRank()) error = kSkillRankChanged_VALUE;
+            else {
+                int limit = ClassSkillRules.rankLimit(level, row.getUnlockLevel(), row.getMaxRank());
+                var plan = ClassSkillRules.planUpgrade(rank, row.getMaxRank(), limit, row.getUnlockLevel(),
+                        player.wallet().balance(Wallet.GOLD), request.getCount());
+                error = plan.steps() == 0 ? stop(plan.stop()) : pets.commitSkillUpgrade(player, petId, row.getId(), plan.finalRank(), plan.totalCost());
+                if (error == 0) response.setUpgradedCount(plan.steps()).setStopTipId(plan.steps() < request.getCount() ? stop(plan.stop()) : 0);
+            }
+        }
+        var state = book(player, petId);
+        if (state.getErrorMessage().getId() == 0) response.setState(state);
+        return response.setErrorMessage(tip(error)).build();
     }
 
     private static UpgradeSkillResponse rejected(ScenePlayer player, int error) {

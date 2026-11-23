@@ -197,6 +197,11 @@ public final class ContractSync {
         cleanDir(registryOut);
         copyText(source.resolve("proto/message_id.txt"), registryOut.resolve("message_id.txt"));
         copyText(source.resolve("proto/event_id.txt"), registryOut.resolve("event_id.txt"));
+        // 正式技能退役清单同时约束客户端来源完整性与服务端读旧档的语义。
+        Path retiredSkills = source.resolve("cpp/libs/services/battle/constants/retired_skill_ids.inc");
+        if (Files.isRegularFile(retiredSkills)) {
+            copyText(retiredSkills, registryOut.resolve("retired_skill_ids.txt"));
+        }
         Path tableDataOut = out.resolve(TABLE_DATA_OUT);
         int tableDataCount = syncTableData(source.resolve("generated/tables"), tableDataOut);
         String manifest = readText(tableDataOut.resolve("manifest.json"));
@@ -217,6 +222,9 @@ public final class ContractSync {
         info.put("table.pending.sheets", String.join(",", tables.pendingSheets()));
         info.put("message_id.sha256", sha256(registryOut.resolve("message_id.txt")));
         info.put("event_id.sha256", sha256(registryOut.resolve("event_id.txt")));
+        if (Files.isRegularFile(retiredSkills)) {
+            info.put("retired_skill_ids.sha256", sha256(registryOut.resolve("retired_skill_ids.txt")));
+        }
         writeSourceInfo(out.resolve(SOURCE_INFO_OUT), info);
         return info;
     }

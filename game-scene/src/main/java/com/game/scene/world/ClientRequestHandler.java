@@ -139,7 +139,8 @@ public final class ClientRequestHandler {
                 (call, req) -> world.applyMove(call.player(), MoveInput.of(req)));
         register(ids.moveStop(), MoveStopC2S.class, FreezePolicy.DROP, BattlePolicy.STOP_ONLY,
                 (call, req) -> world.applyMove(call.player(), MoveInput.of(req)));
-        register(ids.listSkills(), Message.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, (call, req) -> listSkills(call));
+        register(ids.listSkills(), com.game.proto.ListSkillsRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                (call, req) -> call.reply(com.game.scene.skill.ClassSkillService.book(call.player(), req.getPetId())));
         // 63 自己判在途（选目标中 / 冻结中都回 3014），冻结闸对它放行
         // 63 自己判战斗在途（3023，先于换图在途 3014，scene-battle-spec §7.13）
         register(ids.enterScene(), EnterSceneC2SRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED, this::enterScene);
@@ -361,9 +362,6 @@ public final class ClientRequestHandler {
     /**
      * 77：{@code skill_list} 必须存在（没有技能也要是空列表，robot 靠它发就绪信号）；{@code error_message} 存在且 id=0。
      */
-    private void listSkills(PlayerCall call) {
-        call.reply(com.game.scene.skill.ClassSkillService.book(call.player()));
-    }
 
     /**
      * 63：按基线顺序校验（契约文档 §4.3；player_scene_handler.cpp:37-171），先回应答（无错 = 已受理、不代表已到达），再换场景：

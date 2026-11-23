@@ -209,7 +209,9 @@ class PetServiceTest {
             assertThat(snapshot.getPetTableId()).isEqualTo(petTableId);
             assertThat(snapshot.getPetName()).isEqualTo(pet.getName());
             assertThat(snapshot.getSkillTableIdsList())
-                    .isEqualTo(tables.pet(petTableId).getSkillList());
+                    .isEqualTo(tables.pet(petTableId).getSkillList().stream()
+                            .filter(id -> tables.skills.row(id).getAbilityKind() == 1).toList());
+            assertThat(snapshot.getSkillRanksMap().keySet()).containsExactlyInAnyOrderElementsOf(tables.pet(petTableId).getSkillList());
             assertThat(snapshot.getBaseAttributes().getHealth()).isEqualTo(pet.getDerived().getMaxHealth());
             assertThat(snapshot.getBaseAttributes().getMana()).isEqualTo(pet.getDerived().getMaxMana());
         });
@@ -563,23 +565,44 @@ class PetServiceTest {
         assertThat(service.previewEntries(player,preview.toBuilder().setStateVersion(99).build()).getErrorMessage().getId()).isEqualTo(PetService.INVALID_PARAMETER);
         assertThat(service.entries(player,id+1).getErrorMessage().getId()).isEqualTo(PetService.NOT_FOUND);
     }
-    @Test
-    void fiveTierIdentityNeverDerivesFromQualityAndPersistsAsIndependentState() {
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"1,普通", "2,变异", "3,灵兽", "4,神兽", "5,圣兽"})
+    void 五阶身份随存档和交易实例保存且独立于品质(int tier, String name) {
         long id=grant(1);assertThat(info(id).getCultivationTier()).isEqualTo(1);
-        player.pets().find(id).setCultivationTier(4);service.initializeOnLoad(player);
-        assertThat(info(id).getCultivationTierName()).isEqualTo("神兽");
-        var restored=PlayerPets.restore(player.pets().toState());assertThat(restored.find(id).cultivationTier()).isEqualTo(4);
+        player.pets().find(id).setCultivationTier(tier);service.initializeOnLoad(player);
+        assertThat(info(id).getCultivationTierName()).isEqualTo(name);
+        var restored=PlayerPets.restore(player.pets().toState());assertThat(restored.find(id).cultivationTier()).isEqualTo(tier);
+        var target = PlayerPets.empty(); target.putTransferred(restored.toState().getPets(0));
+        assertThat(target.find(id).cultivationTier()).isEqualTo(tier);
         assertThat(info(id).getQuality()).isEqualTo(tables.pet(1).getQuality());
     }
 
     @Test
-    void unavailableModernChannelsAreVisibleAsLockedAndRejectInvestment() {
-        long id=grant(1);var current=service.entries(player,id).getEntries();
-        var heal=current.getEntriesList().stream().filter(e->e.getId()==503).findFirst().orElseThrow();
-        assertThat(heal.getCap()).isZero();assertThat(heal.getPerPointBps()).isZero();assertThat(heal.getDesc()).contains("尚未接入");
-        var request=com.game.proto.SavePetEntriesRequest.newBuilder().setPetId(id).setStateVersion(current.getStateVersion())
-                .setConfigVersion(current.getConfigVersion()).setRequestId("entry-request-0003").putTarget(503,1).build();
-        assertThat(service.saveEntries(player,request).getErrorMessage().getId()).isEqualTo(PetService.DIMENSION_CAP_EXCEEDED);
-        assertThat(player.pets().find(id).entryAllocated()).isEmpty();
+    void 正式二十一方向各自保存预览并以同一数值进入宝宝快照() {
+        long id = grant(1);
+        assertThat(service.summon(player, id)).isZero();
+        var current = service.entries(player,id).getEntries();
+        assertThat(current.getEntriesCount()).isEqualTo(21);
+        for (var row : current.getEntriesList()) {
+            var request = com.game.proto.SavePetEntriesRequest.newBuilder().setPetId(id).setStateVersion(current.getStateVersion())
+                    .setConfigVersion(current.getConfigVersion()).setRequestId("entry-direction-" + row.getId()).putTarget(row.getId(),1).build();
+            var preview = service.previewEntries(player, com.game.proto.PreviewPetEntriesRequest.newBuilder().setPetId(id)
+                    .setStateVersion(current.getStateVersion()).setConfigVersion(current.getConfigVersion()).putTarget(row.getId(),1).build());
+            assertThat(preview.getErrorMessage().getId()).isZero();
+            var saved = service.saveEntries(player,request);
+            assertThat(saved.getErrorMessage().getId()).as("direction %s",row.getId()).isZero();
+            current = saved.getEntries();
+            assertThat(current.getRemainingPoints()).isEqualTo(19);
+            var effects = service.buildBattleSnapshot(player).getFirst().getPetCultivation();
+            assertThat(effects).isEqualTo(preview.getEntries().getEffects());
+            int bps = switch (row.getChannel()) {
+                case 1 -> effects.getPhysicalDamageBps(); case 2 -> effects.getMagicDamageBps();
+                case 3 -> effects.getOutgoingHealBps(); case 4 -> effects.getShieldCapacityBps();
+                case 5 -> effects.getAilmentHitBpsOrThrow(row.getStateKind()); case 6 -> effects.getAilmentResistBpsOrThrow(row.getStateKind());
+                case 7 -> effects.getPoisonDamageBps(); case 8 -> effects.getRetreatHitBps(); case 9 -> effects.getRetreatResistBps();
+                default -> throw new AssertionError(row.getChannel());
+            };
+            assertThat(bps).isEqualTo(row.getPerPointBps()).isPositive();
+        }
     }
 }

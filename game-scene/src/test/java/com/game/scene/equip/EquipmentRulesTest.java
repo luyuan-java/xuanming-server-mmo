@@ -14,6 +14,44 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class EquipmentRulesTest {
+    @Test void 正式装备来源按穿戴实例分开并在重登后保持_法宝另列条件() {
+        java.nio.file.Path dir = java.nio.file.Files.isDirectory(java.nio.file.Path.of("../config-data/tables"))
+                ? java.nio.file.Path.of("../config-data/tables") : java.nio.file.Path.of("config-data/tables");
+        var config = ConfigTables.load(dir);
+        var rules = new EquipmentRules(EquipmentTables.from(config), bound -> 0);
+        var slots = com.game.scene.bag.BagTables.from(config, rules);
+        var stored = BagState.newBuilder().addAllCapacities(List.of(0, 0, 10));
+        for (int i = 0; i < 2; i++) {
+            stored.addItems(BagItemState.newBuilder().setItemUuid(41 + i).setConfigId(3101 + i).setStackSize(1)
+                    .setBagType(BagType.EQUIPMENT.code()).setPos(3 + i).setEquipment(EquipmentState.newBuilder()
+                            .addFixedAffixes(EquipmentFixedAffixState.newBuilder().setSlot(1).setAffixId(103 + i))));
+        }
+        stored.addItems(BagItemState.newBuilder().setItemUuid(45).setConfigId(3304).setStackSize(1)
+                .setBagType(BagType.EQUIPMENT.code()).setPos(9).setEquipment(EquipmentState.getDefaultInstance()));
+        stored.addItems(BagItemState.newBuilder().setItemUuid(46).setConfigId(3305).setStackSize(1)
+                .setBagType(BagType.EQUIPMENT.code()).setPos(10).setEquipment(EquipmentState.getDefaultInstance()));
+        var bags = PlayerBags.restore(stored.build());
+        bags.normalize(slots);
+        assertThat(bags.bag(BagType.EQUIPMENT).capacity()).isEqualTo(11);
+        assertThat(bags.bag(BagType.EQUIPMENT).item(46).slot()).isEqualTo(10);
+        var fresh = PlayerBags.empty();
+        fresh.normalize(slots);
+        assertThat(fresh.bag(BagType.EQUIPMENT).capacity()).isEqualTo(11);
+        var effects = EquipmentBonuses.collect(bags, rules).effects();
+        assertThat(effects.getSupportSourcesComplete()).isTrue();
+        assertThat(effects.getOutgoingHealBps()).isEqualTo(800);
+        assertThat(effects.getShieldCapacityBps()).isEqualTo(800);
+        assertThat(effects.getSupportSourcesList()).extracting(s -> s.getItemId()).containsExactly(41L, 42L);
+        var summary = com.game.battle.engine.SupportEffectRules.begin(effects).build();
+        assertThat(summary.getHealing().getSourcesList()).hasSize(2);
+        assertThat(summary.getHealing().getSources(1).getConditional()).isTrue();
+        assertThat(summary.getShield().getSources(1).getItemId()).isEqualTo(46);
+        assertThat(summary.getHealing().getTotalBonusBps()).isEqualTo(800);
+        var restored = PlayerBags.restore(bags.toState());
+        restored.normalize(slots);
+        assertThat(EquipmentBonuses.collect(restored, rules).effects()).isEqualTo(effects);
+    }
+
     private static ItemTable weapon() {
         return ItemTable.newBuilder().setId(1).setEquipKind(1).setMaxStackSize(1).setEquipLevel(10).setAffixPool(1).setAffixRule(1).build();
     }

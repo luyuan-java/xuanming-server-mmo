@@ -322,6 +322,7 @@ class CreateTableSqlTest {
                 "  `funds` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:10',",
                 "  `name_norm` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL DEFAULT '' COMMENT 'pb:11',",
                 "  `score_version` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:12',",
+                "  `renamed_ms` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:13',",
                 "  PRIMARY KEY (`guild_id`) /*T![clustered_index] NONCLUSTERED */,",
                 "  INDEX `idx_guild_0` (`zone_id`),",
                 "  INDEX `idx_guild_1` (`leader_id`),",

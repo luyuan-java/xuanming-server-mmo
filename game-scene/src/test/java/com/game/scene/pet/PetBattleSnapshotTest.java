@@ -206,8 +206,6 @@ class PetBattleSnapshotTest {
                 .setMagicAttack(55)
                 .setDefense(77)
                 .addAllSkillTableIds(List.of(3, 4, 22))
-                // 培养效果恒带（条目未启用时为空效果，C++ 读法同缺省）
-                .setPetCultivation(com.game.proto.PetCultivationEffects.getDefaultInstance())
                 .build());
     }
 
@@ -297,12 +295,10 @@ class PetBattleSnapshotTest {
     // ------------------------------------------------------------------ 技能
 
     /**
-     * 技能 = 种类自带 ∪ 实例已学：先种类（表序，跳过 0）、后已学（实例里的次序，跳过 0、跳过种类已有的、已学里重复的只留第一个）。
-     * <b>不做可施放过滤</b>（B4）：正式技能表里 3 是持续施法、4 是开关，宝宝快照照带，由战斗引擎入场统一过滤；
-     * 表里查不到的技能号（22、9_999）也照带。
+     * 此夹具把种类技能 3/4/22 配成通用主动；实例内未配置的技能只保存在原档。
      */
     @Test
-    void 技能先种类后已学_去重_跳过0_不做可施放过滤() {
+    void 快照只带有表行的技能并升序去重_原档完整保留() {
         PlayerState state = PlayerState.newBuilder().setPets(PetState.newBuilder().setActivePetId(PET)
                 .addPets(PetEntry.newBuilder().setPetId(PET).setPetTableId(TURTLE).setLevel(5).setHealth(100).setMana(10)
                         .addAllSkillTableIds(List.of(4, 9, 0, 9_999, 3, 9, 1)))).build();
@@ -311,7 +307,8 @@ class PetBattleSnapshotTest {
 
         BattlePetSnapshot snapshot = service(SYNTHETIC).buildBattleSnapshot(player).get(0);
 
-        assertThat(snapshot.getSkillTableIdsList()).containsExactly(3, 4, 22, 9, 9_999, 1);
+        assertThat(snapshot.getSkillTableIdsList()).containsExactly(3, 4, 22);
+        assertThat(player.pets().find(PET).skillTableIds()).containsExactly(4, 9, 0, 9_999, 3, 9, 1);
     }
 
     @Test
@@ -376,6 +373,7 @@ class PetBattleSnapshotTest {
                 .setMagicAttack(33)
                 .setDefense(36)
                 .addSkillTableIds(10006)
+                .putSkillRanks(10006, 1)
                 .build());
         var cultivation = snapshot.getPetCultivation();
         assertThat(cultivation.getPhysicalDamageBps() + cultivation.getMagicDamageBps()).isZero();

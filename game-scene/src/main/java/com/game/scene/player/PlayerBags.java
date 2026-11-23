@@ -40,6 +40,7 @@ public final class PlayerBags {
     private final List<Integer> extraCapacities = new ArrayList<>();
     /** 还没规整的原样存档；规整后为 null。 */
     private BagState raw;
+    private int equipmentDefaultCapacity = BagType.EQUIPMENT.defaultCapacity();
     private UnknownFieldSet unknownFields = UnknownFieldSet.getDefaultInstance();
 
     private PlayerBags(BagState raw) {
@@ -76,6 +77,7 @@ public final class PlayerBags {
         if (!candidate.normalized()) throw new IllegalArgumentException("候选背包未规整");
         bags.clear();
         bags.putAll(candidate.bags);
+        equipmentDefaultCapacity = candidate.equipmentDefaultCapacity;
         quarantine.clear();
         quarantine.addAll(candidate.quarantine);
         extraCapacities.clear();
@@ -90,7 +92,11 @@ public final class PlayerBags {
      * @throws IllegalStateException 存档结构性损坏
      */
     public void normalize(ItemCatalog catalog) {
+        int namedSlots = catalog.minimumEquipmentCapacity();
+        if (namedSlots < 0 || namedSlots > MAX_CAPACITY) throw new IllegalStateException("invalid equipment slot capacity: " + namedSlots);
+        equipmentDefaultCapacity = Math.max(BagType.EQUIPMENT.defaultCapacity(), namedSlots);
         if (raw == null) {
+            bags.get(BagType.EQUIPMENT).ensureCapacity(namedSlots);
             return;
         }
         BagState state = raw;
@@ -101,7 +107,8 @@ public final class PlayerBags {
                 throw new IllegalStateException("背包容量离谱 bag_type=" + type.code() + " capacity="
                         + Integer.toUnsignedString(stored));
             }
-            capacities.put(type, stored == 0 ? type.defaultCapacity() : stored);
+            int capacity = stored == 0 ? type.defaultCapacity() : stored;
+            capacities.put(type, type == BagType.EQUIPMENT ? Math.max(capacity, namedSlots) : capacity);
         }
         EnumMap<BagType, List<BagItemState>> entries = new EnumMap<>(BagType.class);
         List<BagItemState> unknownBags = new ArrayList<>();
@@ -212,11 +219,15 @@ public final class PlayerBags {
             return raw.equals(BagState.getDefaultInstance());
         }
         for (Map.Entry<BagType, Bag> e : bags.entrySet()) {
-            if (e.getValue().itemCount() != 0 || e.getValue().capacity() != e.getKey().defaultCapacity()) {
+            if (e.getValue().itemCount() != 0 || e.getValue().capacity() != effectiveDefaultCapacity(e.getKey())) {
                 return false;
             }
         }
         return quarantine.isEmpty() && extraCapacities.isEmpty() && unknownFields.asMap().isEmpty();
+    }
+
+    private int effectiveDefaultCapacity(BagType type) {
+        return type == BagType.EQUIPMENT ? equipmentDefaultCapacity : type.defaultCapacity();
     }
 
     /** 存档形态：按 (bag_type, 格子) 升序写出，隔离条目原样排在最后；没规整过就原样返回。 */
@@ -226,12 +237,12 @@ public final class PlayerBags {
         }
         BagState.Builder state = BagState.newBuilder().setUnknownFields(unknownFields);
         boolean customCapacity = bags.entrySet().stream()
-                .anyMatch(e -> e.getValue().capacity() != e.getKey().defaultCapacity());
+                .anyMatch(e -> e.getValue().capacity() != effectiveDefaultCapacity(e.getKey()));
         if (customCapacity || !extraCapacities.isEmpty()) {
             // 缺省容量写 0（= 取当前版本的缺省），以后调高缺省对这些包仍然生效；不认识的包的容量原样接在后面
             for (BagType type : BagType.values()) {
                 int capacity = bags.get(type).capacity();
-                state.addCapacities(capacity == type.defaultCapacity() ? 0 : capacity);
+                state.addCapacities(capacity == effectiveDefaultCapacity(type) ? 0 : capacity);
             }
             state.addAllCapacities(extraCapacities);
         }

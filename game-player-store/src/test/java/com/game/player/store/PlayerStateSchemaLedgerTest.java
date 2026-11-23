@@ -11,9 +11,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** 正常 Maven test/verify 的持久字段门禁；不写台账，不在缺少原件时自动重新建立基线。 */
 class PlayerStateSchemaLedgerTest {
-    // 第一代来自技能扩展前的真实生成类；第二代追加技能，第三代追加宠物购买回执，第四代追加宝宝条目与培养阶，第五代追加角色形象试用位图与幂等回执，历史原件不得覆盖。
+    // 第一至五代登记技能、宠物回执、宝宝条目与培养阶、角色形象。第六代追加宝宝技能重数和装备固定词条。
     private static final String GENESIS_SHA256 = "3cd2f18d61634eaabe7d5805df027877451816242bb41ff5aecb704177d7877d";
-    private static final String HEAD_SHA256 = "8e4f23a3b4a9b505f581149595b0b41b90a57a54327a19c3145fb7b9bae824df";
+    private static final String HEAD_SHA256 = "f1cb170b27733e8c5a25627ecd50e3a64cf258f4d5f8d1e845614d6e1a9e0cb0";
 
     // 仅登记已经存在的领域 restore→修改→toState 未知字段往返证据；protobuf 自己的 parse/serialize 不能替代它。
     private static final Set<String> ALLOW_ADDITIONS = Set.of(
@@ -24,14 +24,15 @@ class PlayerStateSchemaLedgerTest {
             "game.storage.BattleLedgerState", "game.storage.BattleLedgerEntry", // BattleLedgerTest / BattleLedgerEntryFieldsTest。
             "game.storage.AssetOpLedgerState", "game.storage.AssetOpStreamLedgerState",
             "game.storage.AssetOpRejectionState", // AssetOpLedgerTest：各层记账前后保留。
-            "game.storage.AppearanceState"); // PlayerAppearanceTest：试用位图、未知高位与未知字段往返保留。
+            "game.storage.AppearanceState", // PlayerAppearanceTest：试用位图、未知高位与未知字段往返保留。
+            "game.storage.EquipmentState"); // EquipmentServiceTest：拆宝石、跨玩家搬运再存盘保留固定词条及嵌套未知字段。
     // 当前根闭包没有 enum；未来 enum 新值须另有原始数值往返证据，不能沿用 unknown fields 证明。
 
     @Test void playerStateDescriptorMatchesRegisteredPersistentHistory() throws Exception {
         var current = PersistentSchemaSnapshot.capture(PlayerState.getDescriptor());
         int generation = verifyRegisteredSchema(Path.of("src/test/resources/persistent-schema"),
                 GENESIS_SHA256, HEAD_SHA256, current, ALLOW_ADDITIONS);
-        assertThat(generation).isEqualTo(5);
+        assertThat(generation).isEqualTo(6);
     }
 
     /** 已合法退役为不可达的类型仍须保留历史解冻政策，不能只用当前闭包判定策略名有效。 */

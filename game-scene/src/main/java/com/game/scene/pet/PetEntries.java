@@ -22,8 +22,6 @@ final class PetEntries {
         }
         return true;
     }
-    // 当前 Java 引擎尚未移植现代 Buff 执行器，只开放已实际消费的物/法直伤。
-    static boolean available(PetEntryTable row) { return row.getChannel() == 1 || row.getChannel() == 2; }
     private static Set<Integer> known(PetTables t) { return t.entries().stream().map(PetEntryTable::getId).collect(Collectors.toSet()); }
     private static long unsigned(int value) { return Integer.toUnsignedLong(value); }
     static int validate(PetTables tables, Pet pet, Map<Integer,Integer> target) {
@@ -32,7 +30,7 @@ final class PetEntries {
         long directions = 0;
         for (var entry : target.entrySet()) {
             var row = rows.get(entry.getKey()); if (row == null) return PetService.DIMENSION_NOT_FOUND;
-            long value = unsigned(entry.getValue()); if ((!available(row) && value > 0) || value > unsigned(row.getCap())) return PetService.DIMENSION_CAP_EXCEEDED;
+            long value = unsigned(entry.getValue()); if (value > unsigned(row.getCap())) return PetService.DIMENSION_CAP_EXCEEDED;
             used += value; if (value > 0) directions++;
         }
         if (used > tables.entryBudget()) return PetService.POINTS_NOT_ENOUGH;
@@ -58,10 +56,10 @@ final class PetEntries {
                 .setMaxDirections((int)tables.entryDirections()).setUnknownUsedPoints(unknown).setEffective(effective).setLastRequestId(pet.entryLastRequestId());
         var effects = PetCultivationEffects.newBuilder();
         tables.entries().stream().sorted(Comparator.comparingLong(r -> unsigned(r.getSort()))).forEach(row -> {
-            int points = values.getOrDefault(row.getId(),0); int bps = effective && available(row) ? points*row.getPerPointBps() : 0;
-            out.addEntries(PetEntryInfo.newBuilder().setId(row.getId()).setName(row.getName()).setDesc(available(row) ? row.getDesc() : "当前 Java 战斗引擎尚未接入此方向，不能投入；已有点可移出。" + row.getDesc())
-                    .setCategory(row.getCategory()).setChannel(row.getChannel()).setStateKind(row.getStateKind()).setCap(available(row) ? row.getCap() : 0)
-                    .setPerPointBps(available(row) ? row.getPerPointBps() : 0).setAllocated(points).setEffectiveBps(bps).setSort(row.getSort()).setIcon(row.getIcon()));
+            int points = values.getOrDefault(row.getId(),0); int bps = effective ? points*row.getPerPointBps() : 0;
+            out.addEntries(PetEntryInfo.newBuilder().setId(row.getId()).setName(row.getName()).setDesc(row.getDesc())
+                    .setCategory(row.getCategory()).setChannel(row.getChannel()).setStateKind(row.getStateKind()).setCap(row.getCap())
+                    .setPerPointBps(row.getPerPointBps()).setAllocated(points).setEffectiveBps(bps).setSort(row.getSort()).setIcon(row.getIcon()));
             switch (row.getChannel()) {
                 case 1 -> effects.setPhysicalDamageBps(effects.getPhysicalDamageBps()+bps);
                 case 2 -> effects.setMagicDamageBps(effects.getMagicDamageBps()+bps);

@@ -189,11 +189,12 @@ public final class AttributeService {
         var learned = player.learnedSkills();
         java.util.function.ToDoubleFunction<com.game.battle.engine.ClassSkillRules.PassiveStat> passive =
                 stat -> catalog.passive(player.classId(), player.level(), learned, stat);
-        acc.maxHealth *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAX_HEALTH);
+        var effects = equipmentBonus.effects();
+        acc.maxHealth *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAX_HEALTH) + effects.getMaxHealthBps() / 10000.0;
         acc.maxMana *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAX_MANA);
-        acc.physicalAttack *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.PHYSICAL_ATTACK);
-        acc.magicAttack *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAGIC_ATTACK);
-        acc.speed *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.SPEED);
+        acc.physicalAttack *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.PHYSICAL_ATTACK) + effects.getPhysicalAttackBps() / 10000.0;
+        acc.magicAttack *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAGIC_ATTACK) + effects.getMagicAttackBps() / 10000.0;
+        acc.speed *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.SPEED) + effects.getSpeedBps() / 10000.0;
         acc.defense *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.DEFENSE);
         long crit = floor(passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.CRIT) * 100 + 1e-9);
         var combat = equipmentBonus.combat();
@@ -319,6 +320,7 @@ public final class AttributeService {
         Scheme scheme = attributes.activeScheme();
         int level = level(player);
         AttributePanelInfo.Builder panel = AttributePanelInfo.newBuilder()
+                .setSupportEffects(com.game.scene.skill.CharacterSupport.build(player))
                 .setLevel(level)
                 .setActiveSchemeId(attributes.activeSchemeId())
                 .setMaxSchemes(tables.maxSchemes())

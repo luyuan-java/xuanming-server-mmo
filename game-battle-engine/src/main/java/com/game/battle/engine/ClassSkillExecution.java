@@ -93,7 +93,7 @@ final class ClassSkillExecution {
                 BattleUnit target = targets.get(index);
                 if (!target.isActive()) continue;
                 ctx.events().setHitIndex(index);
-                apply(actor, target, skill, rank, baseDamage);
+                apply(actor, target, skill, rank, baseDamage, action.getTargetId() != 0 ? action.getTargetId() : targets.getFirst().actorId());
             }
         } finally {
             ctx.events().setHitIndex(0);
@@ -111,7 +111,7 @@ final class ClassSkillExecution {
                 .setManaDelta(EventLog.signedManaDelta(spent, false));
     }
 
-    private void apply(BattleUnit actor, BattleUnit target, SkillTable skill, int rank, double baseDamage) {
+    private void apply(BattleUnit actor, BattleUnit target, SkillTable skill, int rank, double baseDamage, long primary) {
         if (skill.getTargetTeam() == ENEMY) {
             if (!ctx.rollHit(actor, target)) {
                 event(eBattleEventType.BATTLE_EVENT_MISS, actor, target, skill).setValue(0);
@@ -121,15 +121,27 @@ final class ClassSkillExecution {
                 long attack = CombatDamageRules.selectAttack(skill.getDamageType(), ctx.effectivePhysicalAttack(actor), actor.magicAttack());
                 BattleContext.FinalDamage damage = ctx.calculateFinalDamage(actor, target, baseDamage, attack,
                         skill.getAttackMultiplier(), skill.getDamageType());
-                long dealt = target.applyDamage(damage.value() * ClassSkillRules.damageRankFactor(rank) * (1 + PetCultivationRules.damageBonus(actor, skill.getDamageType())));
-                event(eBattleEventType.BATTLE_EVENT_DAMAGE, actor, target, skill).setValue(dealt).setIsCritical(damage.critical());
-                if (target.health() == 0) ctx.handleDeath(target, actor.actorId());
+                double amount = damage.value() * ClassSkillRules.damageRankFactor(rank);
+                if (ctx.configured.activeFor(actor,target)) {
+                    var hit = new BattleEffect.Hit(skill.getId(),rank,BattleEffect.DIRECT,primary);
+                    hit.critical = damage.critical();
+                    ctx.configured.impact.damage(actor,target,amount,skill.getDamageType(),hit,com.game.proto.eBattleHitKind.BATTLE_HIT_NORMAL);
+                } else {
+                    long dealt = target.applyDamage(amount);
+                    event(eBattleEventType.BATTLE_EVENT_DAMAGE, actor, target, skill).setValue(dealt).setIsCritical(damage.critical());
+                    if (target.health() == 0) ctx.handleDeath(target, actor.actorId());
+                }
             }
         }
         if (target.isDead()) return;
         if (skill.getHealMultiplier() > 0 || skill.getHealPerLevel() > 0) {
-            long healed = target.applyHeal(ctx.classSkillHealAmount(actor, skill, rank, target) * (1 + PetCultivationRules.healBonus(actor)));
-            event(eBattleEventType.BATTLE_EVENT_HEAL, actor, target, skill).setValue(healed);
+            double amount = ctx.classSkillHealAmount(actor,skill,rank,target);
+            if (ctx.configured.hasEffects(actor) || ctx.configured.hasEffects(target)) {
+                ctx.configured.impact.heal(actor,target,amount,new BattleEffect.Hit(skill.getId(),rank,BattleEffect.DIRECT,primary),false,false);
+            } else {
+                long healed = target.applyHeal(amount);
+                event(eBattleEventType.BATTLE_EVENT_HEAL, actor, target, skill).setValue(healed);
+            }
         }
         if (skill.getRestoreManaPercent() > 0) {
             long amount = ClassSkillRules.ceilRatio(target.maxMana(), skill.getRestoreManaPercent() * ClassSkillRules.supportRankFactor(rank));

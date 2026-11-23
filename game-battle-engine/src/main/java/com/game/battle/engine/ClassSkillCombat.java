@@ -61,7 +61,9 @@ final class ClassSkillCombat {
     }
 
     /** 技能 map 的迭代顺序不是求和顺序；固定按 uint32 表 id 升序累加。 */
-    double outgoingHealBonus(BattleUnit actor) {
+    double outgoingHealBonus(BattleUnit actor) { return outgoingHealBonus(actor,null); }
+
+    double outgoingHealBonus(BattleUnit actor, com.game.proto.SupportEffectBreakdown.Builder sources) {
         var ranks = new TreeMap<Integer, Integer>(Integer::compareUnsigned);
         ranks.putAll(actor.state().getSkillRanksMap());
         double bonus = 0.0;
@@ -69,7 +71,10 @@ final class ClassSkillCombat {
             var row = data.skill(entry.getKey());
             if (row.isEmpty() || ClassSkillRules.parsePassiveStat(row.get().getPassiveStat())
                     != ClassSkillRules.PassiveStat.OUTGOING_HEAL) continue;
-            bonus += row.get().getPassivePercent() * ClassSkillRules.passiveRankFactor(entry.getValue());
+            double value = row.get().getPassivePercent() * ClassSkillRules.passiveRankFactor(entry.getValue());
+            bonus += value;
+            if (sources != null) sources.addSourcesBuilder().setKind(2).setSkillTableId(entry.getKey()).setEffectKind(1)
+                    .setName(row.get().getName()).setInfinite(true).setRawBonusBps(value * 10000).setEffectiveBonusBps(value * 10000);
         }
         return bonus;
     }

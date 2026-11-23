@@ -85,7 +85,7 @@ public final class TurnBattleEngine {
         this.ledger = new ItemLedger(ctx, request);
         this.checks = new ActionChecks(ctx, ledger);
         this.checks.setCaptureRequest(request);
-        this.buffs = new BuffEngine(ctx);
+        this.buffs = ctx.configured.legacy;
         this.classSkills = new ClassSkillExecution(ctx, buffs, checks);
         this.autoClassSkills = new AutoClassSkillSelector(ctx, checks, classSkills, buffs);
     }
@@ -182,6 +182,7 @@ public final class TurnBattleEngine {
                 engine.buffs.sanitizeSnapshotBuffs(unit);
             }
         }
+        engine.ctx.configured.initialize();
         engine.bindDungeonMonsterAis(monsterAiProfiles);
         return new BattleStart.Started(engine);
     }
@@ -232,6 +233,9 @@ public final class TurnBattleEngine {
                     .setDefense(snapshot.getDefense())
                     .setFormationSlot(ctx.nextFormationSlot(snapshot.getTeamIndex()));
             // 只复制明确提供的玩家加成；缺省子消息不能因读取而产生 presence，宝宝与怪物不继承主人的装备。
+            ctx.configured.equipment.inspectLearnedSkills(snapshot);
+            if (snapshot.hasEquipmentEffects() && !BattleEquipment.initialize(actor,snapshot.getEquipmentEffects()))
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,"装备快照非法");
             if (snapshot.hasCombat()) actor.setCombat(snapshot.getCombat());
             // 参战 buff 原样拷贝；实例号也纳入局内自增域，避免与新加 buff 撞号
             for (BattleBuffEntry buff : snapshot.getBuffsList()) {
@@ -240,7 +244,8 @@ public final class TurnBattleEngine {
             }
             // 职业重数按当前职业和等级重新夹取；被动也保留有效重数，供治疗被动使用。
             snapshot.getSkillRanksMap().forEach((skillId, storedRank) -> ctx.data().skill(skillId).ifPresent(skill -> {
-                if (!BattleRules.isClassSkill(skill) || skill.getClassId() != actor.getClassId()) return;
+                if (skill.getBattleModel() == 1 ? !ConfiguredBattle.subject(actor,skill)
+                        : !BattleRules.isClassSkill(skill) || skill.getClassId() != actor.getClassId()) return;
                 int rank = ClassSkillRules.effectiveRank(storedRank, actor.getLevel(), skill.getUnlockLevel(), skill.getMaxRank());
                 if (rank != 0) actor.putSkillRanks(skillId, rank);
             }));
@@ -250,7 +255,8 @@ public final class TurnBattleEngine {
                 if (skillRow.isEmpty() || !BattleRules.isTurnBattleCastableSkill(skillRow.get())) {
                     continue;
                 }
-                if (BattleRules.isClassSkill(skillRow.get()) && actor.getSkillRanksOrDefault(skillTableId, 0) == 0) continue;
+                if ((skillRow.get().getBattleModel() == 1 || BattleRules.isClassSkill(skillRow.get()))
+                        && actor.getSkillRanksOrDefault(skillTableId, 0) == 0) continue;
                 actor.addSkillTableIds(skillTableId);
             }
             ctx.units().add(new BattleUnit(actor));
@@ -312,12 +318,27 @@ public final class TurnBattleEngine {
                         .setFormationSlot(ctx.nextFormationSlot(snapshot.getTeamIndex()))
                         // 宝宝没有客户端行动权：标挂机，由默认行动路径代打，也不卡 allPlayersReady（engine.cpp:228-230）
                         .setIsAuto(true);
+                if (!BattleEquipment.validPet(pet.getPetCultivation()))
+                    return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,"宝宝条目快照非法");
+                pet.getSkillRanksMap().forEach((id,stored) -> ctx.data().skill(id).ifPresent(row -> {
+                    if (!ConfiguredBattle.subject(actor,row)) return;
+                    int rank = ClassSkillRules.effectiveRank(stored,actor.getLevel(),row.getUnlockLevel(),row.getMaxRank());
+                    if (rank != 0) actor.putSkillRanks(id,rank);
+                }));
                 for (int skillTableId : pet.getSkillTableIdsList()) {
                     Optional<SkillTable> skillRow = ctx.data().skill(skillTableId);
-                    if (skillRow.isPresent() && BattleRules.isTurnBattleCastableSkill(skillRow.get())) {
-                        actor.addSkillTableIds(skillTableId);
+                    if (skillRow.isEmpty() || !BattleRules.isTurnBattleCastableSkill(skillRow.get()) || BattleRules.isClassSkill(skillRow.get())) continue;
+                    var row = skillRow.get();
+                    if (row.getBattleModel() == 1) {
+                        if (!ConfiguredBattle.subject(actor,row)) continue;
+                        if (!actor.containsSkillRanks(skillTableId)) {
+                            if (pet.containsSkillRanks(skillTableId) || ClassSkillRules.rankLimit(actor.getLevel(),row.getUnlockLevel(),row.getMaxRank()) == 0) continue;
+                            actor.putSkillRanks(skillTableId,1);
+                        }
                     }
+                    actor.addSkillTableIds(skillTableId);
                 }
+                if (actor.getSkillRanksCount() > 0) actor.setIsAuto(false);
                 ctx.units().add(new BattleUnit(actor));
             }
         }
@@ -440,6 +461,22 @@ public final class TurnBattleEngine {
      * 零副作用的提交预检（{@code ValidateAction}，{@code engine.cpp:333-346}；规格 §2.2）：已结束 → 1005；单位不存在或不是玩家 → 1005；
      * 已死或已逃 → 1009；其余返回校验链结果。与 {@link #submitAction} 的接受条件逐条同源：{@code == 1000} 等价于这次提交会被收下。
      */
+    public int currentRoundIndex() { return ctx.roundIndex(); }
+
+    public int validateOwnedAction(long owner, long actorId, BattleAction action) {
+        BattleUnit unit = ctx.findActor(actorId);
+        if (outcome != eBattleOutcome.BATTLE_OUTCOME_ONGOING || unit == null ||
+                !(unit.isPlayer() && unit.actorId() == owner || unit.isPet() && unit.ownerPlayerId() == owner))
+            return ActionChecks.INVALID_PARAMETER;
+        return checks.checkActionPrerequisites(unit,action);
+    }
+
+    public boolean submitOwnedAction(long owner, long actorId, BattleAction action) {
+        if (validateOwnedAction(owner,actorId,action) != ActionChecks.SUCCESS) return false;
+        pendingActions.put(actorId,action);
+        return allPlayersReady();
+    }
+
     public int validateAction(long actorId, BattleAction action) {
         if (outcome != eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             return ActionChecks.INVALID_PARAMETER;
@@ -487,6 +524,9 @@ public final class TurnBattleEngine {
             return ActionChecks.ENTITY_INVALID;
         }
         actor.setAuto(enabled);
+        for (BattleUnit pet : ctx.units()) {
+            if (pet.isPet() && pet.ownerPlayerId() == actor.actorId() && pet.state().getSkillRanksCount() != 0) pet.setAuto(enabled);
+        }
         return ActionChecks.SUCCESS;
     }
 
@@ -496,7 +536,7 @@ public final class TurnBattleEngine {
      */
     public boolean allPlayersReady() {
         for (BattleUnit unit : ctx.units()) {
-            if (!unit.isPlayer() || !unit.isActive()) {
+            if ((!unit.isPlayer() && !unit.isPet()) || !unit.isActive()) {
                 continue;
             }
             if (unit.isAuto()) {
@@ -531,6 +571,7 @@ public final class TurnBattleEngine {
             return result.setState(buildStateSnapshot()).build();
         }
 
+        ctx.configured.beginRound();
         fillDefaultActions();
 
         ctx.events().startRound(result);
@@ -552,6 +593,7 @@ public final class TurnBattleEngine {
         }
 
         buffs.tickAtRoundEnd();
+        ctx.configured.endRound();
         decayCooldowns();
         // 防御只覆盖本回合（含刚结算的回合末周期伤害），此刻统一摘除（engine.cpp:652-655）
         for (BattleUnit unit : ctx.units()) {
@@ -721,7 +763,8 @@ public final class TurnBattleEngine {
                 continue;
             }
             if (!pendingActions.containsKey(unit.actorId())) {
-                BattleAction action = unit.isPet() ? defaultPetAction(unit)
+                BattleAction modern = unit.isPet() || (unit.isPlayer() && unit.isAuto()) ? ctx.configured.auto(unit,checks).orElse(null) : null;
+                BattleAction action = modern != null ? modern : unit.isPet() ? defaultPetAction(unit)
                         : unit.isPlayer() && unit.isAuto() ? autoClassSkills.select(unit).orElse(DEFAULT_ACTION)
                         : DEFAULT_ACTION;
                 pendingActions.put(unit.actorId(), action);
@@ -772,7 +815,7 @@ public final class TurnBattleEngine {
         BattleAction action = pendingActions.get(actor.actorId());
         if (action == null || action.getActionType() != eBattleActionType.BATTLE_ACTION_SKILL) return 0;
         Optional<SkillTable> skill = ctx.data().skill(action.getSkillTableId());
-        if (skill.isEmpty() || !BattleRules.isClassSkill(skill.get()) || skill.get().getInitiative() == 0) return 0;
+        if (skill.isEmpty() || (skill.get().getBattleModel() != 1 && !BattleRules.isClassSkill(skill.get())) || skill.get().getInitiative() == 0) return 0;
         return checks.checkActionPrerequisites(actor, action) == ActionChecks.SUCCESS ? skill.get().getInitiative() : 0;
     }
 
@@ -781,6 +824,7 @@ public final class TurnBattleEngine {
      * 否则按 action_type 的 int 值分派，未知类型什么也不做。
      */
     private void executeAction(BattleUnit actor, BattleAction action) {
+        if (ctx.configured.control(actor,action,checks)) return;
         if (ctx.actorHasBuffOfType(actor, BattleConstants.BUFF_TYPE_STUN)
                 || ctx.actorHasBuffOfType(actor, BattleConstants.BUFF_TYPE_FREEZE)) {
             return;
@@ -791,6 +835,13 @@ public final class TurnBattleEngine {
             case eBattleActionType.BATTLE_ACTION_DEFEND_VALUE -> executeDefend(actor);
             case eBattleActionType.BATTLE_ACTION_ITEM_VALUE -> ledger.executeItem(actor, action, checks);
             case eBattleActionType.BATTLE_ACTION_CAPTURE_VALUE -> executeCapture(actor, action);
+            case eBattleActionType.BATTLE_ACTION_RECALL_PET_VALUE -> {
+                if (checks.checkActionPrerequisites(actor,action) != ActionChecks.SUCCESS) return;
+                var pet = ctx.findActor(action.getTargetId());
+                pet.state().setFled(false).clearWithdrawUntilRound();
+                ctx.events().append(eBattleEventType.BATTLE_EVENT_PET_RETREAT,actor.actorId(),pet.actorId())
+                        .setValue(0).setSuccess(true).setTargetHealthAfter(pet.health());
+            }
             case eBattleActionType.BATTLE_ACTION_FLEE_VALUE -> executeFlee(actor);
             default -> {
                 // 未知类型：什么也不做
@@ -847,8 +898,18 @@ public final class TurnBattleEngine {
         BattleContext.FinalDamage finalDamage = ctx.calculateFinalDamage(actor, target,
                 BattleConstants.BASIC_ATTACK_BASE_DAMAGE, ctx.effectivePhysicalAttack(actor), 1.0, CombatDamageRules.PHYSICAL_DAMAGE);
         double damage = finalDamage.value();
-        if (kind != eBattleHitKind.BATTLE_HIT_COUNTER) damage *= 1 + PetCultivationRules.damageBonus(actor, CombatDamageRules.PHYSICAL_DAMAGE);
         if (kind == eBattleHitKind.BATTLE_HIT_COMBO) damage *= BattleConstants.COMBO_DAMAGE_PERCENT / 100.0;
+        if (ctx.configured.activeFor(actor,target)) {
+            var hit = new BattleEffect.Hit(0,1,kind == eBattleHitKind.BATTLE_HIT_COUNTER ? BattleEffect.MIRRORED : BattleEffect.DIRECT,target.actorId());
+            hit.critical = finalDamage.critical();
+            if (kind == eBattleHitKind.BATTLE_HIT_COMBO) hit.damageOrdinal = 1;
+            long landed = ctx.configured.impact.damage(actor,target,damage,CombatDamageRules.PHYSICAL_DAMAGE,hit,kind);
+            hit.actualDamage = landed;
+            if (landed != 0 && kind == eBattleHitKind.BATTLE_HIT_NORMAL && actor.isActive())
+                ctx.configured.trigger(actor,target,BattleEffect.AFTER_BASIC,CombatDamageRules.PHYSICAL_DAMAGE,hit);
+            if (kind != eBattleHitKind.BATTLE_HIT_COUNTER) tryReflectDamage(actor,target,landed);
+            return landed != 0;
+        }
         long dealt = target.applyDamage(damage);
 
         ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
@@ -901,6 +962,11 @@ public final class TurnBattleEngine {
      */
     private void executeSkill(BattleUnit actor, BattleAction action) {
         Optional<SkillTable> classRow = ctx.data().skill(action.getSkillTableId());
+        if (classRow.isPresent() && classRow.get().getBattleModel() == 1) {
+            if (checks.checkActionPrerequisites(actor,action) == ActionChecks.SUCCESS)
+                ctx.configured.cast(actor,classRow.get(),action.getTargetId(),BattleEffect.DIRECT,1);
+            return;
+        }
         if (classRow.isPresent() && BattleRules.isClassSkill(classRow.get())) {
             if (classSkills.execute(actor, action, classRow.get()) == ClassSkillExecution.Outcome.FALLBACK_ATTACK) {
                 executeAttack(actor, action.getTargetId());
@@ -959,7 +1025,7 @@ public final class TurnBattleEngine {
                 continue;
             }
             ctx.events().setHitIndex(hitIndex);
-            applySkillToTarget(actor, action, row, baseDamage, target);
+            applySkillToTarget(actor, action, row, baseDamage, target, primaryTargetId);
         }
         ctx.events().setHitIndex(0);
     }
@@ -970,7 +1036,7 @@ public final class TurnBattleEngine {
      * 基础伤害为 0、负数或 NaN 时整段跳过（没有 DAMAGE，也不掷暴击）。目标没死才按 effect[] 表序逐个挂 buff（施法者为出手者，深度 0）。
      */
     private void applySkillToTarget(BattleUnit actor, BattleAction action, SkillTable row, double baseDamage,
-                                    BattleUnit target) {
+                                    BattleUnit target, long primaryTargetId) {
         if (!ctx.rollHit(actor, target)) {
             ctx.events().append(eBattleEventType.BATTLE_EVENT_MISS, actor.actorId(), target.actorId())
                     .setSkillTableId(action.getSkillTableId())
@@ -985,7 +1051,12 @@ public final class TurnBattleEngine {
                     ctx.effectivePhysicalAttack(actor), actor.magicAttack());
             BattleContext.FinalDamage finalDamage = ctx.calculateFinalDamage(actor, target, baseDamage, attack,
                     row.getAttackMultiplier(), row.getDamageType());
-            long dealt = target.applyDamage(finalDamage.value() * (1 + PetCultivationRules.damageBonus(actor, row.getDamageType())));
+            if (ctx.configured.activeFor(actor,target)) {
+                var hit = new BattleEffect.Hit(row.getId(),1,BattleEffect.DIRECT,primaryTargetId);
+                hit.critical = finalDamage.critical();
+                ctx.configured.impact.damage(actor,target,finalDamage.value(),row.getDamageType(),hit,eBattleHitKind.BATTLE_HIT_NORMAL);
+            } else {
+            long dealt = target.applyDamage(finalDamage.value());
 
             ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
                     .setSkillTableId(action.getSkillTableId())
@@ -999,6 +1070,7 @@ public final class TurnBattleEngine {
             }
         }
 
+        }
         if (!target.isDead()) {
             for (int effectBuffId : row.getEffectList()) {
                 buffs.addBuffToActor(target, effectBuffId, actor.actorId(), 0);
@@ -1034,6 +1106,7 @@ public final class TurnBattleEngine {
     private void executeDefend(BattleUnit actor) {
         actor.setDefending(true);
         ctx.events().append(eBattleEventType.BATTLE_EVENT_DEFEND, actor.actorId(), actor.actorId());
+        ctx.configured.equipment.defend(actor);
     }
 
     /** 捕获后离场并登记本人的待结算宠物；目标失效仍消耗行动。 */
@@ -1244,11 +1317,12 @@ public final class TurnBattleEngine {
                 .setOutcome(outcome)
                 .setActionDeadlineMs(0);
         for (BattleUnit unit : ctx.units()) {
-            state.addActors(unit.snapshot());
+            var visible = state.addActorsBuilder().mergeFrom(unit.snapshot());
+            if (unit.isPlayer()) visible.setSupportEffects(ctx.configured.equipment.summary(unit));
         }
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             for (BattleUnit unit : ctx.units()) {
-                if (!unit.isPlayer() || !unit.isActive()) {
+                if ((!unit.isPlayer() && !unit.isPet()) || !unit.isActive()) {
                     continue;
                 }
                 if (unit.isAuto()) {
@@ -1264,7 +1338,10 @@ public final class TurnBattleEngine {
 
     /** 下发前清除引擎专用概率；调用方传自己的副本 builder，不分本人、敌方、观众。 */
     public static void stripEngineOnlyState(BattleStateS2C.Builder state) {
-        for (BattleActorState.Builder actor : state.getActorsBuilderList()) { actor.clearCombat(); actor.clearPetCultivation(); }
+        for (BattleActorState.Builder actor : state.getActorsBuilderList()) {
+            actor.clearCombat().clearPetCultivation().clearAbilityUseCounts().clearRoundEffectUsage().clearRuntimeSkills()
+                    .clearEquipmentEffects().clearArtifactStates().clearEntryMaxHealth().clearEntryMaxMana();
+        }
     }
 
     /** 该玩家剩余的战斗道具（规格 §6.3）：余量非 0 的条目按 item_table_id 升序（稳定排序，D6）；不在本局的玩家返回空列表。 */

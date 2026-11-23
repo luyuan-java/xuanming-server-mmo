@@ -39,6 +39,7 @@ final class BattleContext {
     private final boolean pve;
     private final BattleRandom rng;
     private final ClassSkillCombat classSkills;
+    final ConfiguredBattle configured;
     private final EventLog events = new EventLog();
     private final List<BattleUnit> units = new ArrayList<>();
     private final List<BattleMonsterDefeat> defeatedMonsters = new ArrayList<>();
@@ -55,6 +56,7 @@ final class BattleContext {
         this.pve = matchMode == BattleConstants.MATCH_MODE_PVE_SOLO || matchMode == BattleConstants.MATCH_MODE_PVE_TEAM;
         this.rng = new BattleRandom(seed);
         this.classSkills = new ClassSkillCombat(data);
+        this.configured = new ConfiguredBattle(this, new BuffEngine(this));
     }
 
     BattleData data() {
@@ -170,11 +172,20 @@ final class BattleContext {
 
     // ---- 战斗原语 ----
 
-    long effectivePhysicalAttack(BattleUnit actor) { return classSkills.effectivePhysicalAttack(actor); }
+    long effectivePhysicalAttack(BattleUnit actor) { return effective(actor, actor.physicalAttack(), ClassSkillCombat.Stat.PHYSICAL_ATTACK, BattleEffect.PHYSICAL_ATTACK); }
 
-    long effectiveDefense(BattleUnit actor) { return classSkills.effectiveDefense(actor); }
+    long effectiveDefense(BattleUnit actor) { return effective(actor, actor.defense(), ClassSkillCombat.Stat.DEFENSE, BattleEffect.DEFENSE); }
 
-    long effectiveSpeed(BattleUnit actor) { return classSkills.effectiveSpeed(actor); }
+    long effectiveSpeed(BattleUnit actor) { return effective(actor, actor.speed(), ClassSkillCombat.Stat.SPEED, BattleEffect.SPEED); }
+
+    private long effective(BattleUnit actor, long base, ClassSkillCombat.Stat stat, int modifier) {
+        double multiplier = classSkills.statMultiplier(actor, stat, 0) * Math.max(0.1, 1 + configured.modifier(actor, modifier));
+        return multiplier == 1 ? base : ClassSkillRules.floorRatio(base, multiplier);
+    }
+
+    double outgoingHealBonus(BattleUnit actor, com.game.proto.SupportEffectBreakdown.Builder sources) {
+        return classSkills.outgoingHealBonus(actor,sources);
+    }
 
     double outgoingHealBonus(BattleUnit actor) { return classSkills.outgoingHealBonus(actor); }
 
@@ -222,6 +233,16 @@ final class BattleContext {
         double damage = CombatDamageRules.damageBeforeCritical(baseDamage, caster.strength(), attack, attackMultiplier,
                 target.armor(), effectiveDefense(target),
                 EquipmentCombatRules.resistance(target.resistance(), target.combat(), damageType), target.level());
+        var equipment = target.state().getEquipmentEffects();
+        int typed = damageType == CombatDamageRules.PHYSICAL_DAMAGE ? equipment.getPhysicalResistBps()
+                : damageType == CombatDamageRules.MAGIC_DAMAGE ? equipment.getMagicResistBps() : 0;
+        if (typed != 0) {
+            long resistance = EquipmentCombatRules.resistance(target.resistance(),target.combat(),damageType);
+            double coefficient = 360.0 + 120.0 * Math.clamp(Integer.toUnsignedLong(target.level()),1,85);
+            double ratio = Math.max(0.4, coefficient / (Unsigned.toDouble(target.armor()) + Unsigned.toDouble(effectiveDefense(target)) + coefficient)
+                    * (1 - Math.clamp(Unsigned.toDouble(resistance) / 100 + typed / 10000.0,0,1)));
+            damage *= ratio / CombatDamageRules.receivedRatio(target.armor(),effectiveDefense(target),resistance,target.level());
+        }
         if (!pve) damage *= BattleConstants.PVP_DAMAGE_SCALE;
         return damage;
     }
@@ -230,6 +251,9 @@ final class BattleContext {
     double criticalChance(BattleUnit caster, int damageType) {
         // std::clamp(v, 0.0, 1.0) = v < 0 ? 0 : (1 < v ? 1 : v)；不用 Math.clamp，以免 NaN / -0.0 行为不同
         double critChance = Unsigned.toDouble(EquipmentCombatRules.criticalRate(caster.critChance(), caster.combat(), damageType)) / 100.0;
+        var equipment = caster.state().getEquipmentEffects();
+        critChance += (damageType == CombatDamageRules.PHYSICAL_DAMAGE ? equipment.getPhysicalCritBps()
+                : damageType == CombatDamageRules.MAGIC_DAMAGE ? equipment.getMagicCritBps() : 0) / 10000.0;
         return critChance < 0.0 ? 0.0 : (1.0 < critChance ? 1.0 : critChance);
     }
 
@@ -265,7 +289,13 @@ final class BattleContext {
         }
         target.state().setIsDead(true);
         target.setDefending(false);
-        target.state().clearBuffs();
+        for (var artifact : target.state().getArtifactStatesBuilderList()) artifact.clearPendingAilmentKind().clearPendingRound();
+        if (!configured.hasEffects(target)) target.state().clearBuffs();
+        else for (var entry : List.copyOf(target.state().getBuffsList())) {
+            var row = configured.row(entry);
+            if (row == null || (row.getKeepOnDeath() == 0 && !configured.listener(entry) && !row.containsTag("Passive")))
+                configured.remove(target,entry.getBuffId());
+        }
         events.append(eBattleEventType.BATTLE_EVENT_DEATH, target.actorId(), target.actorId());
     }
 }

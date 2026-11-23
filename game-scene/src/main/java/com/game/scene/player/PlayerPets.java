@@ -32,6 +32,9 @@ public final class PlayerPets {
         private final List<Integer> skillTableIds;
         private final UnknownFieldSet unknownFields;
         private final Map<Integer, Integer> entryAllocated = new TreeMap<>(Integer::compareUnsigned);
+        private final Map<Integer, Integer> skillRanks = new TreeMap<>(Integer::compareUnsigned);
+        public Map<Integer, Integer> skillRanks() { return Collections.unmodifiableMap(skillRanks); }
+        public void setSkillRank(int id, int rank) { skillRanks.put(id, rank); }
         private final Map<Integer, Integer> entryLastTarget = new TreeMap<>(Integer::compareUnsigned);
         private long entryStateVersion, entryLastBaseVersion;
         private int entryLastConfigVersion, cultivationTier;
@@ -152,7 +155,7 @@ public final class PlayerPets {
             return createdAt;
         }
 
-        /** 实例学会的技能（技能书是二期，恒空）。 */
+        /** 旧存档的已学 ID；缺少显式重数时按一重解释。 */
         public List<Integer> skillTableIds() {
             return skillTableIds;
         }
@@ -170,7 +173,7 @@ public final class PlayerPets {
                     .putAllEntryAllocated(entryAllocated).setEntryStateVersion(entryStateVersion)
                     .setEntryLastRequestId(entryLastRequestId).setEntryLastBaseVersion(entryLastBaseVersion)
                     .setEntryLastConfigVersion(entryLastConfigVersion).putAllEntryLastTarget(entryLastTarget)
-                    .setCultivationTier(cultivationTier)
+                    .setCultivationTier(cultivationTier).putAllSkillRanks(skillRanks)
                     .setUnknownFields(unknownFields);
             allocated.forEach((dimension, points) -> entry.putAllocated(dimension, (int) (long) points));
             aptitude.forEach((dimension, value) -> entry.putAptitude(dimension, (int) (long) value));
@@ -192,6 +195,7 @@ public final class PlayerPets {
             restored.commitEntries(entry.getEntryAllocatedMap(), entry.getEntryStateVersion(), entry.getEntryLastRequestId(),
                     entry.getEntryLastBaseVersion(), entry.getEntryLastConfigVersion(), entry.getEntryLastTargetMap());
             restored.setCultivationTier(entry.getCultivationTier());
+            restored.skillRanks.putAll(entry.getSkillRanksMap());
             return restored;
         }
 
