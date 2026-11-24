@@ -1,0 +1,50 @@
+spring:
+  application:
+    name: game-content-guard
+  main:
+    keep-alive: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+server:
+  port: 18119
+  address: ${GAME_MANAGEMENT_ADDRESS:127.0.0.1}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+
+game:
+  content-guard:
+    require-lexicon: false
+    max-text-bytes: 4096
+    lexicon-file: ""
+    platform:
+      sync-timeout-ms: 1500
+      world-timeout-ms: 250
+      async-timeout-ms: 2500
+      lookup-timeout-ms: 150
+      wechat-app-id: ${GAME_WECHAT_APP_ID:}
+      wechat-app-secret: ${GAME_WECHAT_APP_SECRET:}
+      wechat-base-url: https://api.weixin.qq.com
+      douyin-app-id: ${GAME_DOUYIN_APP_ID:}
+      douyin-app-secret: ${GAME_DOUYIN_APP_SECRET:}
+      douyin-base-url: https://developer.toutiao.com
+
+dubbo:
+  application:
+    name: game-content-guard
+    qos-enable: false
+    serialize-check-status: STRICT
+  protocol:
+    name: tri
+    port: 20919
+    serialization: protobuf
+  registry:
+    address: N/A
+  consumer:
+    check: false
+    retries: 0
+    timeout: 3500

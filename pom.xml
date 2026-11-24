@@ -36,6 +36,7 @@
         <module>game-trade</module>
         <module>game-mail</module>
         <module>game-rank</module>
+        <module>game-content-guard</module>
         <module>game-inbox</module>
         <module>game-mall</module>
         <module>game-match</module>

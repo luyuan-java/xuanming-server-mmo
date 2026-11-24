@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-23 内容安全微服务（`game-content-guard`，对齐 Go `content_guard`）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 内容安全服务（`ContentGuard.CheckText` / `CheckPlatformText`、本地 NFKD+繁简+压平字典树+白名单豁免+联系方式/引流广告启发式、微信 `msgSecCheck` v2 与抖音 `antidirt` 外部平台适配器） | `go/content_guard`（`textnorm`、`wordlist`、`contact`、`engine`、`platform`、`server`）+ 20 条双端共享向量 `testdata/vectors.json` | 新增无状态进程模块 `game-content-guard`（Dubbo Triple 端口 20919，group `content-guard`，管理端口 18119），实现 `ContentGuardService` 及编译期生成的 `ContentGuardHandler`；`AtomicReference` 无锁热切换不可变快照、压平原始数组 Trie、`t2s.txt`（2,481 对）、20 条共享向量 100% 通过、微信/抖音本地 HTTP 回环重试与世界频道异步 `PENDING` 全部单测通过；设计见 `docs/design/content-guard.md`（下游 login/guild/chat/scene 接线在下一批继续） | 已对齐（服务本体） |
+
 ## 2026-11-23 编译期协议代码生成（`game-proto-codegen`，对齐 C++ `protogen` 思想）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |

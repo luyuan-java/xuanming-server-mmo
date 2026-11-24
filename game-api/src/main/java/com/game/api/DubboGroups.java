@@ -71,6 +71,9 @@ public final class DubboGroups {
      */
     public static final String BATTLE_NODE = "battle-node";
 
+    /** 内容安全（{@code proto/content_guard/content_guard.proto}），由 game-content-guard 提供。 */
+    public static final String CONTENT_GUARD = "content-guard";
+
     private DubboGroups() {
     }
 }
