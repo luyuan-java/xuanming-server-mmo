@@ -196,6 +196,14 @@ public class GateConfiguration {
         return new ReferenceBean<>();
     }
 
+    /** 充值支付后端（Dubbo group = proto 域 payment，game-payment 提供）；直连 {@code game.dubbo.payment-url}，nacos profile 置空走注册中心。 */
+    @Bean
+    @DubboReference(group = DubboGroups.PAYMENT, check = false, url = "${game.dubbo.payment-url:}",
+            methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
+    public ReferenceBean<ClientMessageService> paymentClientMessageService() {
+        return new ReferenceBean<>();
+    }
+
     /**
      * login 以外的客户端消息后端表（消息域 → Dubbo 引用），交给 {@link GateNode}。它必须与 {@link MessageRoutes#SERVICE_BACKENDS} 对得上：
      * 路由表把某个服务指到一个域、这里却没有那个域的引用时，dispatcher 会把它当成「未接入」回带请求 id 的信封 1003（2026-10-15 起，原为推 23 {1003}）——接入新后端时两处漏改一处
@@ -206,7 +214,8 @@ public class GateConfiguration {
     static Map<String, ClientMessageService> backends(ClientMessageService friend, ClientMessageService chat,
                                                       ClientMessageService team, ClientMessageService guild,
                                                       ClientMessageService trade, ClientMessageService match,
-                                                      ClientMessageService mail, ClientMessageService rank) {
+                                                      ClientMessageService mail, ClientMessageService rank,
+                                                      ClientMessageService payment) {
         Map<String, ClientMessageService> backends = Map.of(
                 DubboGroups.FRIEND, friend,
                 DubboGroups.CHAT, chat,
@@ -215,7 +224,8 @@ public class GateConfiguration {
                 DubboGroups.TRADE, trade,
                 DubboGroups.MATCH, match,
                 DubboGroups.MAIL, mail,
-                DubboGroups.RANK, rank);
+                DubboGroups.RANK, rank,
+                DubboGroups.PAYMENT, payment);
         Set<String> routed = new TreeSet<>(MessageRoutes.SERVICE_BACKENDS.values());
         routed.remove(DubboGroups.LOGIN); // login 单独传给 GateNode：它的调用占会话唯一的在途位、还带会话指令
         if (!routed.equals(backends.keySet())) {
@@ -246,6 +256,7 @@ public class GateConfiguration {
                              @Qualifier("matchClientMessageService") ClientMessageService matchClientMessageService,
                              @Qualifier("mailClientMessageService") ClientMessageService mailClientMessageService,
                              @Qualifier("rankClientMessageService") ClientMessageService rankClientMessageService,
+                             @Qualifier("paymentClientMessageService") ClientMessageService paymentClientMessageService,
                              SpectateTickets gateSpectateTickets,
                              GateProperties properties, GateMetrics gateMetrics, @Value("${game.zone-id:1}") int zoneId,
                              @Value("${game.advertise-host:127.0.0.1}") String advertiseHost,
@@ -257,7 +268,8 @@ public class GateConfiguration {
         }
         return new GateNode(redis, keys, messageIdRegistry, gateTokens, nodeLinkAuth, loginClientMessageService,
                 backends(friendClientMessageService, chatClientMessageService, teamClientMessageService,
-                        guildClientMessageService, tradeClientMessageService, matchClientMessageService, mailClientMessageService, rankClientMessageService),
+                        guildClientMessageService, tradeClientMessageService, matchClientMessageService,
+                        mailClientMessageService, rankClientMessageService, paymentClientMessageService),
                 properties, zoneId, advertiseHost, Path.of(tableDir), gateMetrics, RunMode.parse(runMode)).withSpectateTickets(gateSpectateTickets);
     }
 

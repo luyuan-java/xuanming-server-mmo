@@ -1,5 +1,10 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-23 充值支付微服务（`game-payment`，`ClientPlayerPayment` 396–399）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 充值支付独立微服务（`ListPayChannels` 396、`CreatePayIntent` 397、`SubmitPayReceipt` 398、`GetPayIntent` 399；7 渠道适配器 DevPay / 微信支付 v3 / 支付宝 / 微信小游戏 / 抖音小游戏 / Apple App Store Server API v2 / Google Play；未成年人防沉迷充值限额事务闸门；商城 HMAC-SHA256 `v1` 对账/推进/退款闭环与 5 项后台推进器；`game-gate` 静态直连与切片编排） | `go/payment`（`service`/`store`/`channel`/`mall`/`notify`/`workers`）、`go/shared/antiaddiction` | `game-common` 新增 `AntiAddictionRules`（UTC+8 生日 `pi` 解码、单笔/月累限额、法定假日时段与 GB 11643 校验，`AntiAddictionRulesTest` 4/4 通过）；`game-api` 新增 `DubboGroups.PAYMENT`（101/101 通过）；新增独立 Spring Boot 进程模块 `game-payment`（Dubbo Triple 20920、对外渠道回调 `/notify/{channel}` 18122、独立管理端口 18125；`payment_intent`/`payment_spend`/`payment_txn`/`payment_channel_cursor` 权威 DDL；纯 JDK 21 JCA/JCE 实现 7 渠道签名/加解密与 Google JWKS 锁外拉取+singleflight+60s 冷却、Apple ISO-4217 0/2/3 位小数换算、`sameFact` 金额/币种核对与撤销墓碑；编译期生成 `ClientPlayerPaymentContractDispatcher` 零反射派发；`PaymentServiceAndStoreTest` + `PaymentChannelsAndMallHttpTest` 11/11 全绿）；`game-gate` 接入 `MessageRoutes` / `GateConfiguration` / `application*.yaml` 与 `tools/local/{start,stop}-slice.sh`（`game-gate` 367/367 全绿，`game-robot` `NamespaceLiteralGuardTest` 10/10、`SliceScriptsTest` 25/25 绿/3 skip）；设计见 `docs/design/payment.md` | 已对齐 |
 ## 2026-11-23 角色改名（428/429）与建角/宠物内容安全接入（`game-player-store`、`game-login`、`game-scene`）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |
@@ -49,7 +54,7 @@
 |---|---|---|---|
 | 战报列表 / 详情（379 / 380） | `go/match` 战报 | gate 转给 game-match，派发器无处理器回信封 1003；`MatchMethodsTest` 钉住 | Java 待做 |
 | 战斗剧本（389–392，含内部审核 387 / 388） | `go/match` 战斗剧本 | 同上 | Java 待做 |
-| `ClientPlayerPayment`（396–399） | `go/payment` | gate 未接入，落缺省分支回信封 1003；`MessageRoutesTest` 钉住清单 | Java 待做 |
+| `ClientPlayerPayment`（396–399） | `go/payment` | `game-payment` 独立进程与 `game-gate` 路由已完整接入（2026-11-23），`MessageRoutesTest` `notPorted` 已清零 | 已对齐 |
 | 收件箱 GM 物品获取封锁 / 解封（类型 5 / 6） | `GainBlockService`、`player_item_gain_block_comp` | 注册表有载荷校验（`item_config_id ≠ 0`），列入 `V1_DISABLED`，配置进白名单即拒启 | Java 待做 |
 | 帮会 `score_version`（库表列已随 DDL 生成） | `go/guild/internal/data/guild_repo.go` 写分同事务 +1、按版本重建榜 | `GuildRow` 已加列 12，未按版本写分 / 重建榜 | Java 待做 |
 | 帮会历练对局被 match 作废回 14042 | `go/guild/internal/data/trial_launch_repo.go`、`constants.go:180` | `GuildTips.TRIAL_BATTLE_ABORTED` 已登记，历练链路未改用 | Java 待做 |

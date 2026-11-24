@@ -74,6 +74,9 @@ public final class DubboGroups {
     /** 内容安全（{@code proto/content_guard/content_guard.proto}），由 game-content-guard 提供。 */
     public static final String CONTENT_GUARD = "content-guard";
 
+    /** 充值支付（{@code proto/payment/payment.proto}），由 game-payment 提供。 */
+    public static final String PAYMENT = "payment";
+
     private DubboGroups() {
     }
 }

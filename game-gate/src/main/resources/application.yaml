@@ -68,6 +68,7 @@ game:
     match-url: tri://127.0.0.1:20888
     mail-url: tri://127.0.0.1:20916
     rank-url: tri://127.0.0.1:20917
+    payment-url: tri://127.0.0.1:20920
   gate:
     client-port: 11000
     # 对外通告的客户端端口（经 NodePort / 端口映射对外时与 client-port 不同）；0 或不配 = client-port

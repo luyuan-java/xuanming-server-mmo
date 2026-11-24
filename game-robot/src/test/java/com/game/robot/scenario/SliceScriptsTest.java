@@ -468,15 +468,15 @@ class SliceScriptsTest {
     void 区2的实例表_端口与别的实例都不相同_不并进区1的节点表与启动清单() throws IOException {
         assertThat(startSlice).contains("\nZONE2_ID=2\nZONE2_SCENE_NODE=\"game-scene-z2 21010 21110 18115\"\nZONE2_GATE=\"game-gate-z2 11010 18123\"\n");
 
-        // 区 1 的节点表仍然只有两行（故障变体脚本按「第 1 / 2 行 = 区 1 的两个节点」取用）；含商城的启动清单十七项，没有区 2 的实例
+        // 区 1 的节点表仍然只有两行（故障变体脚本按「第 1 / 2 行 = 区 1 的两个节点」取用）；含商城与支付的启动清单十八项，没有区 2 的实例
         String nodes = block(startSlice, "SCENE_NODES");
         String services = block(startSlice, "SERVICES");
         assertThat(nodes).isNotNull().doesNotContain("z2");
         assertThat(nodes.lines().count()).isEqualTo(2);
         assertThat(services).isNotNull();
-        assertThat(matches(services, "^\\s*\"(game-[a-z0-9-]+)")).hasSize(17).containsExactly(
+        assertThat(matches(services, "^\\s*\"(game-[a-z0-9-]+)")).hasSize(18).containsExactly(
                 "game-scene-manager", "game-login", "game-friend", "game-chat", "game-match", "game-team", "game-guild",
-                "game-mall", "game-trade", "game-mail", "game-rank", "game-data", "game-inbox", "game-scene", "game-gate", "game-gateway", "game-battle")
+                "game-mall", "game-payment", "game-trade", "game-mail", "game-rank", "game-data", "game-inbox", "game-scene", "game-gate", "game-gateway", "game-battle")
                 .doesNotContain("game-scene-z2", "game-gate-z2");
         assertThat(services).contains("\"game-inbox 20918\"");
         // Inbox 复用通用服务路径：等它的端口就绪后，循环才能开始任何 scene 实例。
@@ -673,7 +673,7 @@ class SliceScriptsTest {
     void 停止脚本_区2的实例紧挨着区1的同类先停_Inbox在全部scene之后停止() {
         // game-gate 的 LocalSliceOrderTest 逐项钉着清单：battle 先向仍在线的 match 补交终局，其余按启动逆序；区 2 在循环体带上
         // scene-z2 在 game-scene-2 分支先停，两个区 1 scene 随后停，Inbox 最后停且早于 game-data。
-        assertThat(stopSlice).contains("\nfor name in game-battle game-match game-gateway game-gate game-scene-2 game-scene game-inbox game-data game-rank game-mail game-trade game-mall game-guild game-team game-chat "
+        assertThat(stopSlice).contains("\nfor name in game-battle game-match game-gateway game-gate game-scene-2 game-scene game-inbox game-data game-rank game-mail game-trade game-payment game-mall game-guild game-team game-chat "
                 + "game-friend game-login game-scene-manager; do\n"
                 + "  case \"$name\" in\n"
                 + "    game-gate) stop_one game-gate-z2 ;;\n"

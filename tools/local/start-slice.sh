@@ -349,6 +349,7 @@ SERVICES=(
   "game-team 20885"
   "game-guild 20886"
   "game-mall 18120"         # 商城独立进程，冷库先显式执行其全新安装迁移；先于交易的商城交付调用方
+  "game-payment 20920"      # 支付服务：紧随商城启动，先于 gate 直连（ClientPlayerPayment 396–399）
   "game-trade 20887"        # 聚宝斋；播种接口在管理端口 18111（Tomcat 先于 Dubbo 暴露就绪，等 20887 即可）
   "game-mail 20916"         # 邮件：先等 gate 直连的 Dubbo 端口
   "game-rank 20917"         # 排行榜：先于 gate 启动

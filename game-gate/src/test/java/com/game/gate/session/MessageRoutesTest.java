@@ -110,15 +110,13 @@ class MessageRoutesTest {
                         && !MessageRoutes.DIRECT_ONLY_SERVICES.contains(m.serviceName())
                         && !MessageRoutes.GATE_LOCAL_SERVICES.contains(m.serviceName()))
                 .map(MessageMethod::serviceName).distinct().toList();
-        // ClientPlayerPayment（396–399）随契约同步、Java 尚未接入（PARITY「真钱支付」Java 待做）：按本条说明钉住清单，接入后删掉
         assertThat(notPorted)
                 .as("契约里出现了 Java 版还没接入的客户端服务：它的号会走 dispatcher 的缺省分支（回带请求 id 的信封 1003）。"
                         + "这一批就要接的，照 MatchService 的做法加进 SERVICE_BACKENDS 与 GateConfiguration；留到以后的，把这条断言改成"
                         + "钉住那份清单（containsExactlyInAnyOrder），并在 PARITY.md 登记")
-                .containsExactlyInAnyOrder("ClientPlayerPayment");
-        // 落到 unsupported 域的客户端路由：只走直连的那 12 个战斗号，加上未接入的 ClientPlayerPayment 4 个号
-        assertThat(routes.all().stream().filter(r -> r.domain().equals(MessageRoutes.BACKEND_UNSUPPORTED)
-                        && !r.method().startsWith("ClientPlayerPayment.")))
+                .isEmpty();
+        // 落到 unsupported 域的客户端路由只剩只走直连的那 12 个战斗号
+        assertThat(routes.all().stream().filter(r -> r.domain().equals(MessageRoutes.BACKEND_UNSUPPORTED)))
                 .hasSize(12).allSatisfy(r -> assertThat(r.directOnly()).as(r.method()).isTrue());
         // 反过来：后端表里的每个服务名契约里都真有、是客户端协议服务且不是玩家服务（拼错的、契约里已删掉的服务名不会悄悄留在表里）
         for (Map.Entry<String, String> backend : MessageRoutes.SERVICE_BACKENDS.entrySet()) {
@@ -134,7 +132,8 @@ class MessageRoutesTest {
         assertThat(MessageRoutes.SERVICE_BACKENDS.values()).as("一个服务一个后端域，没有两个服务挤在同一个域里")
                 .doesNotHaveDuplicates()
                 .containsExactlyInAnyOrder(DubboGroups.LOGIN, DubboGroups.FRIEND, DubboGroups.CHAT, DubboGroups.TEAM,
-                        DubboGroups.GUILD, DubboGroups.TRADE, DubboGroups.MATCH,DubboGroups.MAIL,DubboGroups.RANK);
+                        DubboGroups.GUILD, DubboGroups.TRADE, DubboGroups.MATCH, DubboGroups.MAIL, DubboGroups.RANK,
+                        DubboGroups.PAYMENT);
     }
 
     @Test

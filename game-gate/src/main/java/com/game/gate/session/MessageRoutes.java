@@ -86,7 +86,8 @@ public interface MessageRoutes {
             "ClientPlayerJubaozhai", DubboGroups.TRADE,
             "ClientPlayerMail", DubboGroups.MAIL,
             "ClientPlayerRank", DubboGroups.RANK,
-            "MatchService", DubboGroups.MATCH);
+            "MatchService", DubboGroups.MATCH,
+            "ClientPlayerPayment", DubboGroups.PAYMENT);
 
     /** 客户端可发的消息号的路由；消息号不存在或不属于客户端协议服务时返回 null。 */
     MessageRoute clientRoute(int messageId);
@@ -98,7 +99,7 @@ public interface MessageRoutes {
         return List.of();
     }
 
-    /** 编译期节点类型 → 已接入后端 Dubbo group（未接入的节点类型如 PAYMENT 暂落 {@link #BACKEND_UNSUPPORTED}）。 */
+    /** 编译期节点类型 → 已接入后端 Dubbo group。 */
     Map<ContractNodeType, String> NODE_BACKENDS = Map.of(
             ContractNodeType.LOGIN, DubboGroups.LOGIN,
             ContractNodeType.FRIEND, DubboGroups.FRIEND,
@@ -108,7 +109,8 @@ public interface MessageRoutes {
             ContractNodeType.TRADE, DubboGroups.TRADE,
             ContractNodeType.MAIL, DubboGroups.MAIL,
             ContractNodeType.RANK, DubboGroups.RANK,
-            ContractNodeType.MATCH, DubboGroups.MATCH);
+            ContractNodeType.MATCH, DubboGroups.MATCH,
+            ContractNodeType.PAYMENT, DubboGroups.PAYMENT);
 
     /**
      * 从 {@code game-proto-codegen} 编译期生成的 {@link ContractRouteTable} 构建（零反射，生产默认入口）。

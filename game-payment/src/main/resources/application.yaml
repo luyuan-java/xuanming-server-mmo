@@ -1,0 +1,104 @@
+# game-payment 默认（local）配置：Dubbo Triple（20920）+ 对外渠道回调 HTTP（18122）+ 独立 Actuator 管理端口（18125）。
+# 全部渠道与商城密钥一律由环境变量注入，不写进仓库。
+spring:
+  application:
+    name: game-payment
+  main:
+    web-application-type: servlet
+    keep-alive: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    url: "jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED'"
+    username: ${GAME_MYSQL_USER:${GAME_MYSQL_USERNAME:root}}
+    password: ${GAME_MYSQL_PASSWORD:}
+    druid:
+      initial-size: 0
+      max-active: 16
+      max-wait: 1000
+      connect-timeout: 3000
+      socket-timeout: 5000
+  sql:
+    init:
+      mode: never
+
+# 渠道回调入口：/notify/{channel}（生产由公网负载均衡终结 TLS 后转发，不暴露 /actuator）
+server:
+  port: ${GAME_PAYMENT_NOTIFY_PORT:18122}
+  address: ${GAME_PAYMENT_NOTIFY_ADDRESS:127.0.0.1}
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+
+# 独立管理端口：http://127.0.0.1:18125/actuator/health 与 /actuator/prometheus（避开 zone2 gate 的 18123）
+management:
+  server:
+    port: ${GAME_PAYMENT_MANAGEMENT_PORT:18125}
+    address: ${GAME_MANAGEMENT_ADDRESS:127.0.0.1}
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+game:
+  run-mode: ${GAME_RUN_MODE:prod}
+  advertise-host: 127.0.0.1
+  payment:
+    workers-enabled: true
+    verify-schema: true
+    notify-base-url: ${GAME_PAYMENT_NOTIFY_BASE_URL:}
+    minor-spending-gate: ${GAME_PAYMENT_MINOR_SPENDING_GATE:none}
+    mall:
+      base-url: ${GAME_PAYMENT_MALL_BASE_URL:http://127.0.0.1:18120}
+      payment-subject: ${GAME_PAYMENT_MALL_SUBJECT:payment-adapter}
+      payment-secret: ${COMMERCE_PAYMENT_SECRET:${GAME_MALL_PAYMENT_SECRET:}}
+      timeout-ms: 2500
+    devpay:
+      enabled: ${GAME_PAYMENT_DEVPAY_ENABLED:false}
+      secret: ${PAYMENT_DEVPAY_SECRET:}
+    wechat-pay:
+      enabled: ${GAME_PAYMENT_WECHATPAY_ENABLED:false}
+      private-key: ${PAYMENT_WECHATPAY_PRIVATE_KEY:}
+      api-v3-key: ${PAYMENT_WECHATPAY_APIV3_KEY:}
+      platform-public-key: ${PAYMENT_WECHATPAY_PUBLIC_KEY:}
+    alipay:
+      enabled: ${GAME_PAYMENT_ALIPAY_ENABLED:false}
+      private-key: ${PAYMENT_ALIPAY_PRIVATE_KEY:}
+      public-key: ${PAYMENT_ALIPAY_PUBLIC_KEY:}
+    wechat-minigame:
+      enabled: ${GAME_PAYMENT_WECHAT_MINIGAME_ENABLED:false}
+      app-secret: ${PAYMENT_WECHAT_MINIGAME_APP_SECRET:}
+      app-key: ${PAYMENT_WECHAT_MINIGAME_APP_KEY:}
+      push-token: ${PAYMENT_WECHAT_MINIGAME_PUSH_TOKEN:}
+      encoding-aes-key: ${PAYMENT_WECHAT_MINIGAME_ENCODING_AES_KEY:}
+    douyin-minigame:
+      enabled: ${GAME_PAYMENT_DOUYIN_ENABLED:false}
+      push-token: ${PAYMENT_DOUYIN_PUSH_TOKEN:}
+    apple:
+      enabled: ${GAME_PAYMENT_APPLE_ENABLED:false}
+      private-key: ${PAYMENT_APPLE_PRIVATE_KEY:}
+      root-certificates: ${PAYMENT_APPLE_ROOT_CERTIFICATES:}
+    google:
+      enabled: ${GAME_PAYMENT_GOOGLE_ENABLED:false}
+      private-key: ${PAYMENT_GOOGLE_PRIVATE_KEY:}
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    logger: slf4j
+    qos-enable: false
+  protocol:
+    name: tri
+    port: 20920
+    host: ${game.advertise-host}
+  registry:
+    address: N/A
+  provider:
+    timeout: 5000
+  consumer:
+    check: false
