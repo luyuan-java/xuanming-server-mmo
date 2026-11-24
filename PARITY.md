@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-23 契约同步到 mmorpg 5c0a518a6（排位预设与规则表）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 排位预设与规则契约（`RankedPreset` / `RankedRule` 表、448–452 五个消息号、tip `16034–16036` / `4033–4034`） | `5c0a518a6` 已导表并生成协议（含 `MatchService` 448–451 与 `ClientPlayerTeam.ConfirmRankedPreset` 452） | `ContractSync` 全量同步且 `--check` 一致，33 模块 `clean install -DskipTests` 通过；gate 已按服务语义转发 448–452，game-match / game-team 业务处理器尚未实现 | Java 待做 |
+
 ## 2026-11-21 角色形象切换（10 元角色形象卡）与 1 小时免费试用（bit 存储）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |

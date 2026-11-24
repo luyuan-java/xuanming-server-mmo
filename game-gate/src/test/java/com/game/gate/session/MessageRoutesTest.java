@@ -156,7 +156,9 @@ class MessageRoutesTest {
         // 203 / 213 / 215 的应答类型是 Empty → gate 不回包（D13），12 个 C2S 的应答是 TeamResponse / ListMyInvitesResponse → 一律回包。
         List<String> pushes = List.of("NotifyTeamEvent", "NotifyTeamSnapshot", "NotifyTeamInvite");
         List<String> requests = List.of("CreateTeam", "GetMyTeam", "ApplyJoinTeam", "HandleApplication", "InviteToTeam",
-                "RespondInvite", "ListMyInvites", "LeaveTeam", "KickMember", "TransferLeader", "DisbandTeam", "StartTeamMatch");
+                "RespondInvite", "ListMyInvites", "LeaveTeam", "KickMember", "TransferLeader", "DisbandTeam", "StartTeamMatch",
+                // 排位预设确认 452：gate 照转，game-team 尚无处理器（PARITY「排位预设与规则」Java 待做）
+                "ConfirmRankedPreset");
         List<MessageMethod> team = registry.all().stream()
                 .filter(m -> m.serviceName().equals("ClientPlayerTeam")).toList();
         assertThat(team).as("契约里 ClientPlayerTeam 的方法").extracting(MessageMethod::methodName)
@@ -179,7 +181,7 @@ class MessageRoutesTest {
         List<String> core = List.of("CreateGuild", "GetGuild", "GetPlayerGuild", "LeaveGuild", "DisbandGuild",
                 "SetAnnouncement", "SetGuildMemberRole", "KickGuildMember", "TransferGuildLeader", "ApplyJoinGuild",
                 "CancelGuildApplication", "ListMyGuildApplications", "ListGuildApplications", "ReviewGuildApplication",
-                "GetGuildRank", "GetGuildRankByGuild");
+                "GetGuildRank", "GetGuildRankByGuild", "RenameGuild");
         List<String> internalAndPush = List.of("UpdateGuildScore", "NotifyGuildChanged");
         List<String> economyAndActivity = List.of("GetGuildDonateOptions", "DonateToGuild", "UpgradeGuild", "GetGuildShop",
                 "BuyGuildShopGoods", "GetGuildActivities", "LightGuildLantern", "ClaimGuildReunion", "StartGuildTrial",
@@ -188,7 +190,7 @@ class MessageRoutesTest {
         assertThat(guild).as("契约里 GuildService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.of(core, internalAndPush, economyAndActivity)
                         .flatMap(List::stream).toList())
-                .hasSize(28);
+                .hasSize(29);
         for (MessageMethod method : guild) {
             MessageRoute route = routes.clientRoute(method.messageId());
             assertThat(route).as(method.key()).isNotNull();
@@ -253,13 +255,15 @@ class MessageRoutesTest {
                 "ListWatchableBattles", "RequestBattleTicket", "GetNetworkProbePlan", "CommitNetworkProbe",
                 "ListBattleReports", "GetBattleReport",
                 // 战斗剧本 389–392：gate 照转，game-match 尚无处理器（PARITY「战斗剧本」Java 待做）
-                "ListBattleScripts", "SubmitBattleScript", "DeleteBattleScript", "SetBattleScriptLoadout");
+                "ListBattleScripts", "SubmitBattleScript", "DeleteBattleScript", "SetBattleScriptLoadout",
+                // 排位资料与预设 448–451：gate 照转，game-match 尚无处理器（PARITY「排位预设与规则」Java 待做）
+                "GetRankedProfile", "SaveRankedPreset", "UpdateRankedCosmetic", "GetRankedBattleResult");
         List<MessageMethod> match = registry.all().stream().filter(m -> m.serviceName().equals("MatchService")).toList();
         assertThat(match).as("契约里 MatchService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.concat(noReply.stream(), replied.stream()).toList());
         // 14 个号逐个钉住（正式同步的 message_id.txt）：发号漂移或增删方法时这里先失败。
         assertThat(match).extracting(MessageMethod::messageId)
-                .containsExactlyInAnyOrder(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392);
+                .containsExactlyInAnyOrder(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392, 448, 449, 450, 451);
         assertThat(Map.of("CancelQueue", 148, "RespondChallenge", 151, "ChallengePlayer", 152, "GetQueueStatus", 153,
                 "NotifyChallengeResult", 154, "NotifyChallengeInvite", 156, "JoinQueue", 157, "WatchBattle", 163,
                 "ListWatchableBattles", 164, "RequestBattleTicket", 179))
@@ -289,7 +293,7 @@ class MessageRoutesTest {
         assertThat(routes.clientRoute(179).hasResponse()).as("179 应答消息定义在 battle 包，照样回包").isTrue();
         // match 域里只有这 14 个号：别的服务（尤其是战斗服务）没有被带进来。
         assertThat(routes.all().stream().filter(r -> r.domain().equals(DubboGroups.MATCH)).map(MessageRoute::messageId))
-                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392);
+                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392, 448, 449, 450, 451);
         assertThat(MessageRoutes.SERVICE_BACKENDS).containsEntry("MatchService", DubboGroups.MATCH);
 
         // MatchInternal（帮会活动开战，match_internal.proto）是内部服务：刻意没标客户端协议服务，也不在后端表里。

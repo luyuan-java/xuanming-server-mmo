@@ -90,9 +90,22 @@ class TableBattleDataTest {
             assertThat(found.getGoldReward()).as("无金币奖励 id=%d", row.getId()).isNotZero();
         }
         assertThat(tables.dungeon().all()).as("Dungeon 表为空 = 没有可打的副本").isNotEmpty();
+        // PVP 玩法（如 PlayMode 6 = MATCH_MODE_PVP_TEAM 引用的 dungeon 5）不配怪物组；所有 PVE 副本必须有怪且每只怪存在
+        java.util.Set<Integer> pvpOnlyDungeons = tables.playMode().all().stream()
+                .filter(pm -> pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_PVP_TEAM_VALUE
+                        || pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_1V1_VALUE
+                        || pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_5V5_VALUE
+                        || pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_PVP_CHALLENGE_VALUE)
+                .map(com.game.table.PlayModeTable::getBattleConfigId).collect(java.util.stream.Collectors.toSet());
+        java.util.Set<Integer> pveDungeons = tables.playMode().all().stream()
+                .filter(pm -> pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_PVE_SOLO_VALUE
+                        || pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_PVE_TEAM_VALUE)
+                .map(com.game.table.PlayModeTable::getBattleConfigId).collect(java.util.stream.Collectors.toSet());
         for (DungeonTable dungeon : tables.dungeon().all()) {
             List<Integer> group = data.dungeonMonsterIds(dungeon.getId());
-            assertThat(group).as("dungeon %d 没配怪物组", dungeon.getId()).isNotEmpty();
+            if (!pvpOnlyDungeons.contains(dungeon.getId()) || pveDungeons.contains(dungeon.getId())) {
+                assertThat(group).as("PVE dungeon %d 没配怪物组", dungeon.getId()).isNotEmpty();
+            }
             for (int monsterId : group) {
                 assertThat(data.monster(monsterId)).as("dungeon %d 引用了不存在的怪物 %d", dungeon.getId(), monsterId).isPresent();
             }

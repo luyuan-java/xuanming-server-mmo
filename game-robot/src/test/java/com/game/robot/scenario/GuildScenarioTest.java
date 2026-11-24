@@ -109,7 +109,7 @@ class GuildScenarioTest {
     void 每个有应答的GuildService方法第1个字段都是error_message_tip按反射取() {
         MessageIdRegistry registry = MessageIdRegistry.loadFromClasspath();
         List<MessageMethod> guild = registry.all().stream().filter(m -> m.serviceName().equals("GuildService")).toList();
-        assertThat(guild).hasSize(28);
+        assertThat(guild).hasSize(29);
         for (MessageMethod method : guild) {
             Descriptors.Descriptor response = method.responsePrototype().getDescriptorForType();
             if (method.methodName().equals("NotifyGuildChanged")) {
