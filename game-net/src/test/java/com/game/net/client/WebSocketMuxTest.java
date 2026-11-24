@@ -183,6 +183,45 @@ class WebSocketMuxTest {
         assertThat(ch.isOpen()).isFalse();
     }
 
+    @Test
+    void 流水线残包释放已读分片且关闭后拒绝继续写出并释放ByteBuf() {
+        EmbeddedChannel ch = newChannel(WebSocketObserver.NOOP);
+        upgrade(ch);
+        // 连续投喂 10 条带 1 字节残余粘包的帧，验证 CompositeByteBuf 不会累积泄露已消费组件
+        ByteBuf encoded = ClientFrames.encode(ch.alloc(), ClientHeartbeatRequest.newBuilder().setSeq(1).build());
+        byte[] rawPayload = new byte[encoded.readableBytes()];
+        encoded.readBytes(rawPayload);
+        encoded.release();
+        byte[] oneFrame = clientFrame(true, 0x2, true, rawPayload);
+        byte[] tail = new byte[] {oneFrame[0]};
+        byte[] rest = java.util.Arrays.copyOfRange(oneFrame, 1, oneFrame.length);
+
+        ch.writeInbound(Unpooled.copiedBuffer(oneFrame, tail));
+        ClientHeartbeatRequest first = ch.readInbound();
+        assertThat(first).isNotNull();
+        for (int i = 0; i < 8; i++) {
+            ch.writeInbound(Unpooled.copiedBuffer(rest, tail));
+            assertThat((Object) ch.readInbound()).isInstanceOf(ClientHeartbeatRequest.class);
+        }
+        ch.writeInbound(Unpooled.copiedBuffer(rest));
+        assertThat((Object) ch.readInbound()).isInstanceOf(ClientHeartbeatRequest.class);
+
+        // 客户端发 Close 后，服务端禁止继续写出业务二进制帧，传入 ByteBuf 必须立即释放且 promise 失败
+        WebSocketBinaryCodec codec = ch.pipeline().get(WebSocketBinaryCodec.class);
+        var ctx = ch.pipeline().context(codec);
+        assertThat(codec).isNotNull();
+        ch.writeInbound(Unpooled.wrappedBuffer(clientFrame(true, 0x8, true, new byte[]{0x03, (byte) 0xE8})));
+        ByteBuf closeResp = ch.readOutbound();
+        if (closeResp != null) {
+            closeResp.release();
+        }
+        ByteBuf late = ch.alloc().buffer(4).writeInt(42);
+        var promise = ch.newPromise();
+        codec.write(ctx, late, promise);
+        assertThat(promise.isSuccess()).isFalse();
+        assertThat(late.refCnt()).isZero();
+    }
+
     private static void upgrade(EmbeddedChannel ch) {
         String req = "GET / HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                 + "Sec-WebSocket-Key: " + RFC_KEY + "\r\nSec-WebSocket-Version: 13\r\n\r\n";

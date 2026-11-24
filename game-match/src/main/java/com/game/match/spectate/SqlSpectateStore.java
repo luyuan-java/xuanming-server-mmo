@@ -25,8 +25,10 @@ public final class SqlSpectateStore implements SpectateStore,AutoCloseable {
     private final PlacementDialer dialer;
     private final BattleNodes nodes;
     private final MatchMetrics metrics;
-    private final ScheduledExecutorService timer=Executors.newSingleThreadScheduledExecutor(Thread.ofVirtual().name("match-watch-recovery-tick").factory());
-    private final ThreadPoolExecutor workers=new ThreadPoolExecutor(2,2,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(8),Thread.ofVirtual().name("match-watch-recovery-",0).factory(),new ThreadPoolExecutor.AbortPolicy());
+    private final ScheduledExecutorService timer=Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("match-watch-recovery-tick").daemon(true).factory());
+    /** JDK 21 虚拟线程按任务派生 + Semaphore 有界并发，避免池化虚拟线程反模式。 */
+    private final ExecutorService workers=Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("match-watch-recovery-",0).factory());
+    private final Semaphore workerPermits=new Semaphore(8);
     private long afterMs,afterPlayer;
     private long upperMs,upperPlayer;
     private boolean scanning;
@@ -65,7 +67,11 @@ public final class SqlSpectateStore implements SpectateStore,AutoCloseable {
         var row=authority.cancelExit(original,d);if(row==null||row.getState()==5)return;
         drive(row,d);if(authority.cancelExit(original,d)!=null)throw new Deadline.DependencyException("原参战意图退出观战仍待取消证明");
     }
-    @Override public void releaseAsync(long player,String mark){try{workers.execute(()->{try{release(player,mark,Deadline.after(4000));}catch(RuntimeException failure){log.warn("原观战异步取消留待SQL恢复",failure);}});}catch(RejectedExecutionException ignored){/* SQL原件留存，公平恢复继续处理。 */}}
+    @Override public void releaseAsync(long player,String mark){
+        if(!workerPermits.tryAcquire())return;
+        try{workers.execute(()->{try{release(player,mark,Deadline.after(4000));}catch(RuntimeException failure){log.warn("原观战异步取消留待SQL恢复",failure);}finally{workerPermits.release();}});}
+        catch(RejectedExecutionException ignored){workerPermits.release();}
+    }
     @Override public Map<Long,String> marksOf(List<Long> players,Deadline d){return authority.marks(players,d);}
     @Override public Snapshot read(long battle,Deadline d){return authority.formation(battle,d);}
     @Override public Pick pickRandom(double random,Deadline d){return authority.pick(random,d);}
@@ -80,14 +86,16 @@ public final class SqlSpectateStore implements SpectateStore,AutoCloseable {
     @Override public long sweep(Deadline d){return 0;}
     @Override public long watchableCount(Deadline d){return authority.watchableCount(d);}
 
-    private synchronized void recover(){
+    /** 单线程调度器独占执行：不加 synchronized，避免在 JDK 21 下固定载体线程或阻塞同锁调用。 */
+    private void recover(){
         try {
             if(!scanning){var tail=authority.pendingTail(Deadline.after(1000));if(tail==null)return;upperMs=tail.getRetryMs();upperPlayer=tail.getPlayerId();scanning=true;}
             var rows=authority.pending(afterMs,afterPlayer,upperMs,upperPlayer,Deadline.after(1000));
             if(rows.isEmpty()){afterMs=0;afterPlayer=0;scanning=false;return;}
             for(var row:rows){
-                try{workers.execute(()->{try{drive(row,Deadline.after(4000));}catch(RuntimeException failure){log.warn("原观战恢复保留未决记录",failure);}});}
-                catch(RejectedExecutionException full){break;}
+                if(!workerPermits.tryAcquire())break;
+                try{workers.execute(()->{try{drive(row,Deadline.after(4000));}catch(RuntimeException failure){log.warn("原观战恢复保留未决记录",failure);}finally{workerPermits.release();}});}
+                catch(RejectedExecutionException full){workerPermits.release();break;}
                 // 仅推进实际受理项；坏归属/未知RPC不能永久霸占头八项。
                 afterMs=row.getRetryMs();afterPlayer=row.getPlayerId();
             }

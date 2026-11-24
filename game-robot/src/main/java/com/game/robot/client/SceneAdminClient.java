@@ -148,7 +148,9 @@ public final class SceneAdminClient {
 
     /** 抓任一服务管理端口的 Prometheus 文本；非 200 抛出。 */
     public static String scrape(String metricsBaseUrl, Duration timeout) throws RobotException {
-        return scrape(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(), metricsBaseUrl, timeout);
+        try (HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()) {
+            return scrape(client, metricsBaseUrl, timeout);
+        }
     }
 
     private static String scrape(HttpClient http, String metricsBaseUrl, Duration timeout) throws RobotException {

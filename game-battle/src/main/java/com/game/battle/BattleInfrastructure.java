@@ -148,7 +148,9 @@ public interface BattleInfrastructure {
 
         @Override
         public DirectEdge edge(EdgeDependencies deps) {
-            return new BattleEdgeServer(deps);
+            int preAuthBudget = Math.max(1, Math.min(256, deps.properties().effectiveMaxConnections() / 4));
+            return new BattleEdgeServer(deps)
+                    .withSourcePrefixRateLimiter(new com.game.common.net.SourcePrefixRateLimiter(20.0, 200.0), preAuthBudget);
         }
     }
 }

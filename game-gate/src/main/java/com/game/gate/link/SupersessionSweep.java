@@ -40,12 +40,16 @@ public final class SupersessionSweep implements Runnable, AutoCloseable {
         if (timer != null || closed) throw new IllegalStateException("换代扫描已启动或关闭");
         if (period.toMillis() < 1) throw new IllegalArgumentException("扫描间隔不得短于 1ms");
         timer = scheduler.scheduleWithFixedDelay(() -> {
-            // 宽限清理只读内存，不依赖 Redis 扫描完成；目录阻塞时旧进程也不能无限续命。
-            if (!closed) links.expireSuperseded();
-            if (closed || !inFlight.compareAndSet(false, true)) return;
             try {
-                resolveExecutor.execute(() -> { try { run(); } finally { inFlight.set(false); } });
-            } catch (RejectedExecutionException rejected) { inFlight.set(false); }
+                // 宽限清理只读内存，不依赖 Redis 扫描完成；目录阻塞时旧进程也不能无限续命。
+                if (!closed) links.expireSuperseded();
+                if (closed || !inFlight.compareAndSet(false, true)) return;
+                try {
+                    resolveExecutor.execute(() -> { try { run(); } finally { inFlight.set(false); } });
+                } catch (RejectedExecutionException rejected) { inFlight.set(false); }
+            } catch (RuntimeException e) {
+                log.warn("scene 链路换代周期检查异常，下个周期重试", e);
+            }
         }, period.toMillis(), period.toMillis(), TimeUnit.MILLISECONDS);
     }
 

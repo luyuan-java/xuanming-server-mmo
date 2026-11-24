@@ -319,10 +319,14 @@ public final class SceneLink {
         ch.pipeline().addBefore(ch.pipeline().context(SceneLinkHandler.class).name(), "sceneLinkIdle",
                 new IdleStateHandler(manager.settings().idleTimeout().toMillis(), 0, 0, TimeUnit.MILLISECONDS));
         heartbeat = ch.eventLoop().scheduleAtFixedRate(() -> {
-            synchronized (this) {
-                if (state != State.READY || channel != ch) return;
+            try {
+                synchronized (this) {
+                    if (state != State.READY || channel != ch) return;
+                }
+                offer(NodeLinkFrame.newBuilder().setPing(com.game.api.proto.LinkPing.newBuilder().setSeq(++pingSequence)).build(), false);
+            } catch (RuntimeException e) {
+                log.warn("scene 链路心跳发送异常 node={} gen={}", nodeId, generation, e);
             }
-            offer(NodeLinkFrame.newBuilder().setPing(com.game.api.proto.LinkPing.newBuilder().setSeq(++pingSequence)).build(), false);
         }, interval, interval, TimeUnit.MILLISECONDS);
     }
 

@@ -193,7 +193,8 @@ public final class GateNode {
     }
 
     private void doStart() {
-        scheduler = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("gate-bg").daemon(true).factory());
+        // 至少 2 线程：避免 Redis 目录 publish 阻塞时饿死同池上的 NodeIdLease 租约续期
+        scheduler = Executors.newScheduledThreadPool(2, Thread.ofPlatform().name("gate-bg-", 0).daemon(true).factory());
         lease = NodeIdLease.acquire(redis, keys, scheduler, NodeTypes.GATE, zoneId,
                 SessionIdAllocator.MIN_NODE_ID, SessionIdAllocator.MAX_NODE_ID, instanceId, LEASE_TTL, this::onLeaseLost);
         GateIdentity identity = new GateIdentity(lease.nodeId(), instanceId, zoneId);

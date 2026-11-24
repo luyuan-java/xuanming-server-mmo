@@ -16,6 +16,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,6 +43,7 @@ public final class DouyinAdapter implements PlatformAdapter {
     private final Object tokenLock = new Object();
     private String cachedToken = "";
     private Instant tokenExpiresAt = Instant.EPOCH;
+    private CompletableFuture<String> inFlightRefresh;
 
     public DouyinAdapter(String appId, String appSecret, String baseUrl, HttpClient httpClient, ObjectMapper json, Clock clock) {
         this.appId = Objects.requireNonNull(appId, "appId");
@@ -123,40 +128,76 @@ public final class DouyinAdapter implements PlatformAdapter {
 
     private String accessToken(Duration timeout) throws IOException, InterruptedException {
         Instant now = clock.instant();
+        CompletableFuture<String> mine = null;
+        CompletableFuture<String> existing;
         synchronized (tokenLock) {
             if (!cachedToken.isEmpty() && now.plus(REFRESH_MARGIN).isBefore(tokenExpiresAt)) {
                 return cachedToken;
             }
+            existing = inFlightRefresh;
+            if (existing == null) {
+                mine = new CompletableFuture<>();
+                inFlightRefresh = mine;
+            }
         }
-        byte[] payload = json.writeValueAsBytes(Map.of(
-                "appid", appId,
-                "secret", appSecret,
-                "grant_type", "client_credential"));
-        HttpRequest req = HttpRequest.newBuilder(URI.create(baseUrl + "/api/apps/v2/token"))
-                .timeout(timeout)
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
-                .build();
-        HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
-        byte[] body = WeChatAdapter.readBounded(resp.body());
-        if (resp.statusCode() != 200) {
-            throw new IOException("douyin token http status " + resp.statusCode());
+        if (mine == null) {
+            try {
+                return existing.get(Math.max(100L, timeout.toMillis()), TimeUnit.MILLISECONDS);
+            } catch (ExecutionException e) {
+                throw e.getCause() instanceof IOException io ? io : new IOException(e.getCause());
+            } catch (TimeoutException e) {
+                throw new IOException("douyin token refresh wait timed out", e);
+            }
         }
-        JsonNode root = json.readTree(body);
-        int errNo = root.path("err_no").asInt(0);
-        String token = root.path("data").path("access_token").asText("");
-        if (errNo != 0 || token.isEmpty()) {
-            throw new IOException("douyin token err_no=" + errNo);
+        try {
+            byte[] payload = json.writeValueAsBytes(Map.of(
+                    "appid", appId,
+                    "secret", appSecret,
+                    "grant_type", "client_credential"));
+            HttpRequest req = HttpRequest.newBuilder(URI.create(baseUrl + "/api/apps/v2/token"))
+                    .timeout(timeout)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
+                    .build();
+            HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            byte[] body = WeChatAdapter.readBounded(resp.body());
+            if (resp.statusCode() != 200) {
+                throw new IOException("douyin token http status " + resp.statusCode());
+            }
+            JsonNode root = json.readTree(body);
+            int errNo = root.path("err_no").asInt(0);
+            String token = root.path("data").path("access_token").asText("");
+            if (errNo != 0 || token.isEmpty()) {
+                throw new IOException("douyin token err_no=" + errNo);
+            }
+            Duration ttl = Duration.ofSeconds(root.path("data").path("expires_in").asLong(0));
+            if (ttl.compareTo(REFRESH_MARGIN) <= 0) {
+                ttl = REFRESH_MARGIN.plusMinutes(1);
+            }
+            synchronized (tokenLock) {
+                cachedToken = token;
+                tokenExpiresAt = clock.instant().plus(ttl);
+                if (inFlightRefresh == mine) {
+                    inFlightRefresh = null;
+                }
+            }
+            mine.complete(token);
+            return token;
+        } catch (Throwable t) {
+            synchronized (tokenLock) {
+                if (inFlightRefresh == mine) {
+                    inFlightRefresh = null;
+                }
+            }
+            mine.completeExceptionally(t);
+            if (t instanceof IOException io) {
+                throw io;
+            }
+            if (t instanceof InterruptedException ie) {
+                throw ie;
+            }
+            throw new IOException(t);
         }
-        Duration ttl = Duration.ofSeconds(root.path("data").path("expires_in").asLong(0));
-        if (ttl.compareTo(REFRESH_MARGIN) <= 0) {
-            ttl = REFRESH_MARGIN.plusMinutes(1);
-        }
-        synchronized (tokenLock) {
-            cachedToken = token;
-            tokenExpiresAt = clock.instant().plus(ttl);
-        }
-        return token;
     }
 
     private void invalidateToken(String stale) {

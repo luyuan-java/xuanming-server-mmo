@@ -23,8 +23,10 @@ class NetProtectionTest {
         assertThat(breaker.isOpen("match")).isTrue();
         assertThat(breaker.tryAcquire("match")).isFalse();
 
-        // 10s 后进入 HALF_OPEN：仅允许单条探测
-        clock.addAndGet(Duration.ofSeconds(10).toNanos());
+        // OPEN 期间迟到的在途失败不得无限延长熔断窗口
+        clock.addAndGet(Duration.ofSeconds(6).toNanos());
+        breaker.recordFailure("match");
+        clock.addAndGet(Duration.ofSeconds(4).toNanos());
         assertThat(breaker.stateOf("match")).isEqualTo(EndpointCircuitBreaker.State.HALF_OPEN);
         assertThat(breaker.tryAcquire("match")).isTrue();
         assertThat(breaker.tryAcquire("match")).isFalse();
@@ -84,5 +86,13 @@ class NetProtectionTest {
         assertThat(limiter.trackedPrefixes()).isEqualTo(2);
         assertThat(limiter.tryAdmit(pub3, true)).isTrue();
         assertThat(limiter.untrackedTotal()).isEqualTo(1);
+
+        // 空闲过期后旧前缀自动淘汰，不再永久 fail-open，新前缀恢复限速跟踪
+        clock.addAndGet(SourcePrefixRateLimiter.DEFAULT_IDLE_EXPIRY.plusSeconds(1).toNanos());
+        assertThat(limiter.trackedPrefixes()).isZero();
+        assertThat(limiter.tryAdmit(pub3, true)).isTrue();
+        assertThat(limiter.tryAdmit(pub3, true)).isTrue();
+        assertThat(limiter.tryAdmit(pub3, true)).isFalse();
+        assertThat(limiter.trackedPrefixes()).isEqualTo(1);
     }
 }

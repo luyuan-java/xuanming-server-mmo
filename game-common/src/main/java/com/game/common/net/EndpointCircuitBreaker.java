@@ -150,7 +150,7 @@ public final class EndpointCircuitBreaker {
                 return;
             }
             if (entry.state == State.OPEN) {
-                entry.openedAtNanos = now;
+                // 已在 OPEN 期间到达的迟到在途失败不刷新 openedAtNanos，避免无限推迟半开恢复窗口
                 entry.probeInFlight = false;
                 return;
             }

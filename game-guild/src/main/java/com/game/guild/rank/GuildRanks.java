@@ -451,14 +451,18 @@ public final class GuildRanks {
             if (closed.get()) {
                 return;
             }
-            call(() -> redis.renewLock(redisKeys.guildRankLock(), token, lockTtlMillis)).whenComplete((held, error) -> {
-                if (error != null) {
-                    log.warn("[guild] 排行维护锁续期失败（下个周期再试）: {}", rootMessage(error));
-                } else if (!Boolean.TRUE.equals(held) && !closed.get()) {
-                    log.error("[guild] 排行维护锁已失效（过期后被接管），持有者的后续写会被令牌围栏拒绝");
-                    cancelRenewal();
-                }
-            });
+            try {
+                call(() -> redis.renewLock(redisKeys.guildRankLock(), token, lockTtlMillis)).whenComplete((held, error) -> {
+                    if (error != null) {
+                        log.warn("[guild] 排行维护锁续期失败（下个周期再试）: {}", rootMessage(error));
+                    } else if (!Boolean.TRUE.equals(held) && !closed.get()) {
+                        log.error("[guild] 排行维护锁已失效（过期后被接管），持有者的后续写会被令牌围栏拒绝");
+                        cancelRenewal();
+                    }
+                });
+            } catch (RuntimeException e) {
+                log.warn("[guild] 排行维护锁续期调度异常（下个周期再试）: {}", rootMessage(e));
+            }
         }
 
         private void cancelRenewal() {

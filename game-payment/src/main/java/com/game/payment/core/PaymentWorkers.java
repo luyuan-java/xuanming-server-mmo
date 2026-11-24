@@ -3,6 +3,7 @@ package com.game.payment.core;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -44,10 +45,15 @@ public final class PaymentWorkers implements SmartLifecycle {
             return;
         }
         if (kickQueued.compareAndSet(false, true)) {
-            exec.execute(() -> {
+            try {
+                exec.execute(() -> {
+                    kickQueued.set(false);
+                    runSafely("pushMall(kick)", service::pushMall);
+                });
+            } catch (RejectedExecutionException stopping) {
                 kickQueued.set(false);
-                runSafely("pushMall(kick)", service::pushMall);
-            });
+                log.debug("[payment] ignore pushMall kick during worker shutdown");
+            }
         }
     }
 

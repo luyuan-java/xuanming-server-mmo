@@ -17,6 +17,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,6 +45,7 @@ public final class WeChatAdapter implements PlatformAdapter {
     private final Object tokenLock = new Object();
     private String cachedToken = "";
     private Instant tokenExpiresAt = Instant.EPOCH;
+    private CompletableFuture<String> inFlightRefresh;
 
     public WeChatAdapter(String appId, String appSecret, String baseUrl, HttpClient httpClient, ObjectMapper json, Clock clock) {
         this.appId = Objects.requireNonNull(appId, "appId");
@@ -121,34 +126,70 @@ public final class WeChatAdapter implements PlatformAdapter {
 
     private String accessToken(Duration timeout) throws IOException, InterruptedException {
         Instant now = clock.instant();
+        CompletableFuture<String> mine = null;
+        CompletableFuture<String> existing;
         synchronized (tokenLock) {
             if (!cachedToken.isEmpty() && now.plus(REFRESH_MARGIN).isBefore(tokenExpiresAt)) {
                 return cachedToken;
             }
+            existing = inFlightRefresh;
+            if (existing == null) {
+                mine = new CompletableFuture<>();
+                inFlightRefresh = mine;
+            }
         }
-        URI uri = URI.create(baseUrl + "/cgi-bin/token?grant_type=client_credential&appid="
-                + urlEncode(appId) + "&secret=" + urlEncode(appSecret));
-        HttpRequest req = HttpRequest.newBuilder(uri).timeout(timeout).GET().build();
-        HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
-        byte[] body = readBounded(resp.body());
-        if (resp.statusCode() != 200) {
-            throw new IOException("wechat token http status " + resp.statusCode());
+        if (mine == null) {
+            try {
+                return existing.get(Math.max(100L, timeout.toMillis()), TimeUnit.MILLISECONDS);
+            } catch (ExecutionException e) {
+                throw e.getCause() instanceof IOException io ? io : new IOException(e.getCause());
+            } catch (TimeoutException e) {
+                throw new IOException("wechat token refresh wait timed out", e);
+            }
         }
-        JsonNode root = json.readTree(body);
-        int errCode = root.path("errcode").asInt(0);
-        String token = root.path("access_token").asText("");
-        if (errCode != 0 || token.isEmpty()) {
-            throw new IOException("wechat token errcode=" + errCode);
+        try {
+            URI uri = URI.create(baseUrl + "/cgi-bin/token?grant_type=client_credential&appid="
+                    + urlEncode(appId) + "&secret=" + urlEncode(appSecret));
+            HttpRequest req = HttpRequest.newBuilder(uri).timeout(timeout).GET().build();
+            HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            byte[] body = readBounded(resp.body());
+            if (resp.statusCode() != 200) {
+                throw new IOException("wechat token http status " + resp.statusCode());
+            }
+            JsonNode root = json.readTree(body);
+            int errCode = root.path("errcode").asInt(0);
+            String token = root.path("access_token").asText("");
+            if (errCode != 0 || token.isEmpty()) {
+                throw new IOException("wechat token errcode=" + errCode);
+            }
+            Duration ttl = Duration.ofSeconds(root.path("expires_in").asLong(0));
+            if (ttl.compareTo(REFRESH_MARGIN) <= 0) {
+                ttl = REFRESH_MARGIN.plusMinutes(1);
+            }
+            synchronized (tokenLock) {
+                cachedToken = token;
+                tokenExpiresAt = clock.instant().plus(ttl);
+                if (inFlightRefresh == mine) {
+                    inFlightRefresh = null;
+                }
+            }
+            mine.complete(token);
+            return token;
+        } catch (Throwable t) {
+            synchronized (tokenLock) {
+                if (inFlightRefresh == mine) {
+                    inFlightRefresh = null;
+                }
+            }
+            mine.completeExceptionally(t);
+            if (t instanceof IOException io) {
+                throw io;
+            }
+            if (t instanceof InterruptedException ie) {
+                throw ie;
+            }
+            throw new IOException(t);
         }
-        Duration ttl = Duration.ofSeconds(root.path("expires_in").asLong(0));
-        if (ttl.compareTo(REFRESH_MARGIN) <= 0) {
-            ttl = REFRESH_MARGIN.plusMinutes(1);
-        }
-        synchronized (tokenLock) {
-            cachedToken = token;
-            tokenExpiresAt = clock.instant().plus(ttl);
-        }
-        return token;
     }
 
     private void invalidateToken(String stale) {

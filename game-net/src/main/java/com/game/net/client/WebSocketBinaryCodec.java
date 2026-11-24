@@ -6,6 +6,7 @@ import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
+import java.nio.channels.ClosedChannelException;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -67,6 +68,11 @@ public final class WebSocketBinaryCodec extends ChannelDuplexHandler {
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
         if (!(msg instanceof ByteBuf payload)) {
             ctx.write(msg, promise);
+            return;
+        }
+        if (closing) {
+            payload.release();
+            promise.tryFailure(new ClosedChannelException());
             return;
         }
         int len = payload.readableBytes();
@@ -175,8 +181,13 @@ public final class WebSocketBinaryCodec extends ChannelDuplexHandler {
             cumulation.readBytes(mask);
             int pLen = (int) payloadLen;
             ByteBuf payload = ctx.alloc().buffer(pLen);
-            for (int i = 0; i < pLen; i++) {
-                payload.writeByte(cumulation.readByte() ^ mask[i & 3]);
+            try {
+                for (int i = 0; i < pLen; i++) {
+                    payload.writeByte(cumulation.readByte() ^ mask[i & 3]);
+                }
+            } catch (Throwable t) {
+                payload.release();
+                throw t;
             }
             compactIfEmpty();
 
@@ -272,9 +283,14 @@ public final class WebSocketBinaryCodec extends ChannelDuplexHandler {
     }
 
     private void compactIfEmpty() {
-        if (cumulation != null && !cumulation.isReadable()) {
+        if (cumulation == null) {
+            return;
+        }
+        if (!cumulation.isReadable()) {
             cumulation.release();
             cumulation = null;
+        } else if (cumulation instanceof CompositeByteBuf composite) {
+            composite.discardReadComponents();
         }
     }
 

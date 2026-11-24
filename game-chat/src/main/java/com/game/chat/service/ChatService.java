@@ -202,13 +202,15 @@ public final class ChatService implements AutoCloseable {
             this.ownedRecheckPool = null;
         } else if (textGuard != null && authority != null) {
             var seq = new AtomicInteger();
-            this.ownedRecheckPool = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.SECONDS,
-                    new ArrayBlockingQueue<>(64), r -> {
-                Thread t = new Thread(r, "chat-platform-recheck-" + seq.incrementAndGet());
+            ThreadPoolExecutor pool = new ThreadPoolExecutor(4, 16, 30L, TimeUnit.SECONDS,
+                    new ArrayBlockingQueue<>(256), r -> {
+                Thread t = new Thread(r, "chat-content-guard-" + seq.incrementAndGet());
                 t.setDaemon(true);
                 return t;
             }, new ThreadPoolExecutor.AbortPolicy());
-            this.recheckExecutor = this.ownedRecheckPool;
+            pool.allowCoreThreadTimeOut(true);
+            this.ownedRecheckPool = pool;
+            this.recheckExecutor = pool;
         } else {
             this.recheckExecutor = null;
             this.ownedRecheckPool = null;
@@ -331,19 +333,37 @@ public final class ChatService implements AutoCloseable {
         if (prepared.tip() != 0) return sendRejected(label, prepared.tip(), prepared.outcome());
         if (authority == null) return sendRejected(label, STORAGE, Outcome.STORAGE_ERROR);
 
-        SendChatRequest toStore = prepared.request();
+        SendChatRequest initialStore = prepared.request();
         String rawTrimmed = prepared.rawTrimmed();
-        int preRejectTip = 0;
-        boolean pendingPlatform = false;
-        if (textGuard != null) {
-            ReviewDecision reviewed = reviewContent(toStore.getMessage().getChannel(), sender, rawTrimmed);
-            preRejectTip = reviewed.rejectTip();
-            pendingPlatform = reviewed.pendingPlatform();
-            if (preRejectTip == 0 && !reviewed.displayContent().equals(rawTrimmed)) {
-                toStore = toStore.toBuilder().setMessage(
-                        toStore.getMessage().toBuilder().setContent(reviewed.displayContent())).build();
-            }
+        if (textGuard == null) {
+            return commitSend(original, label, initialStore, rawTrimmed, 0, false, budgetMs);
         }
+        // 内容安全 RPC 异步卸载到专用有界池，不阻塞 Dubbo I/O 线程；池满时 fail-closed 返回 18001
+        long startNanos = nanoClock.getAsLong();
+        try {
+            return CompletableFuture.supplyAsync(
+                            () -> reviewContent(initialStore.getMessage().getChannel(), sender, rawTrimmed),
+                            recheckExecutor)
+                    .thenCompose(reviewed -> {
+                        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(Math.max(0L, nanoClock.getAsLong() - startNanos));
+                        long remainingMs = Math.max(1L, budgetMs - elapsedMs);
+                        SendChatRequest toStore = initialStore;
+                        if (reviewed.rejectTip() == 0 && !reviewed.displayContent().equals(rawTrimmed)) {
+                            toStore = toStore.toBuilder().setMessage(
+                                    toStore.getMessage().toBuilder().setContent(reviewed.displayContent())).build();
+                        }
+                        return commitSend(original, label, toStore, rawTrimmed,
+                                reviewed.rejectTip(), reviewed.pendingPlatform(), remainingMs);
+                    });
+        } catch (RejectedExecutionException full) {
+            log.warn("[chat] content guard executor saturated sender={}", Long.toUnsignedString(sender));
+            return sendRejected(label, CONTENT_CHECK_UNAVAILABLE, Outcome.STORAGE_ERROR);
+        }
+    }
+
+    private CompletionStage<SendChatResponse> commitSend(SessionContext original, Channel label,
+                                                         SendChatRequest toStore, String rawTrimmed,
+                                                         int preRejectTip, boolean pendingPlatform, long budgetMs) {
         final boolean isWorld = toStore.getMessage().getChannel() == ChatChannelType.CHAT_CHANNEL_TYPE_WORLD;
         final boolean needAsyncRecheck = isWorld && pendingPlatform && textGuard != null;
         return authority.sendDetailed(original, toStore, rawTrimmed, preRejectTip, Deadline.after(budgetMs))
