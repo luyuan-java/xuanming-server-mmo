@@ -157,6 +157,29 @@ class ClientPipelineTest {
         assertThat(meters.get("game.gate.client.invalid.frames").tag("reason", "checksum").counter().count()).isZero();
     }
 
+    @Test
+    void 达到连接硬上限时直接拒连并计入max_connections() {
+        EmbeddedChannel first = new EmbeddedChannel(new ChannelInitializer<Channel>() {
+            @Override
+            protected void initChannel(Channel ch) {
+                ClientPipeline.install(ch.pipeline(), registry, dispatcher, 1, null);
+            }
+        });
+        assertThat(first.isOpen()).isTrue();
+        assertThat(registry.size()).isEqualTo(1);
+
+        EmbeddedChannel second = new EmbeddedChannel(new ChannelInitializer<Channel>() {
+            @Override
+            protected void initChannel(Channel ch) {
+                ClientPipeline.install(ch.pipeline(), registry, dispatcher, 1, null);
+            }
+        });
+        assertThat(second.isOpen()).isFalse();
+        assertThat(registry.size()).isEqualTo(1);
+        assertThat(meters.get("game.gate.disconnects").tag("reason", "max_connections").counter().count()).isEqualTo(1);
+        first.close();
+    }
+
     /**
      * 批次 5.4 先行件：生产装配走带 {@link PushMessageIds} 的新构造器（tip 与重定向通知两个号一起给）。握手与 tip 推送
      * 的字节与只给 tip 号的旧构造器完全一样——tip 用的仍是 {@code tip()}，不会因为多带了一个号而发错消息号。

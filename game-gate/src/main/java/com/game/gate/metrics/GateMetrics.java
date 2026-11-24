@@ -178,7 +178,11 @@ public final class GateMetrics {
         /**
          * 已重定向的会话（推过 124，批次 5.4）在收口时限（{@code game.gate.redirect-linger}）内没有自己断开：到点直接关，不推 tip。
          */
-        REDIRECT_LINGER
+        REDIRECT_LINGER,
+        /** 本 gate 当前连接数已达到 {@code game.gate.max-connections} 硬上限，拒连兜底。 */
+        MAX_CONNECTIONS,
+        /** 承压期命中公网来源前缀限速，拒连保护。 */
+        SOURCE_RATE_LIMITED
     }
 
     /** 重定向（给客户端推 124 RedirectToGateNotify，批次 5.4）的来源（{@code game.gate.redirects{source}}）。 */

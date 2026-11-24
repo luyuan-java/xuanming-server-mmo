@@ -22,5 +22,12 @@ public record ZoneInfo(
         String maintenanceMsg,
         Long openTime,
         @JsonProperty("is_new") boolean isNew,
-        boolean recommended) {
+        boolean recommended,
+        boolean createRoleClosed) {
+
+    /** 兼容既有 8 参构造（默认未暂停创角）。 */
+    public ZoneInfo(long zoneId, String name, ZoneStatus status, LoadLevel loadLevel, String maintenanceMsg,
+                    Long openTime, boolean isNew, boolean recommended) {
+        this(zoneId, name, status, loadLevel, maintenanceMsg, openTime, isNew, recommended, false);
+    }
 }

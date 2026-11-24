@@ -251,4 +251,55 @@ class GatePickerTest {
 
         assertThat(pickedNode(List.of(small, huge))).isEqualTo(2);
     }
+
+    @Test
+    void 水位容量与满载剔除及回落分档() {
+        assertThat(GatePicker.watermarkCapacity(0)).isZero();
+        assertThat(GatePicker.watermarkCapacity(1)).isEqualTo(1L);
+        assertThat(GatePicker.watermarkCapacity(20_000)).isEqualTo(18_000L);
+
+        GateNodeInfo full = gate(1, 18_000, false).toBuilder().setMaxConnections(20_000).build();
+        GateNodeInfo healthy = gate(2, 17_999, false).toBuilder().setMaxConnections(20_000).build();
+        GateNodeInfo draining = gate(3, 100, true).toBuilder().setMaxConnections(20_000).build();
+        GateNodeInfo unbounded = gate(4, 99_999, false).toBuilder().setMaxConnections(0).build();
+
+        assertThat(GatePicker.isFull(full)).isTrue();
+        assertThat(GatePicker.isFull(healthy)).isFalse();
+        assertThat(GatePicker.isFull(unbounded)).isFalse();
+
+        // 有完全合格候选时剔除满载与排空
+        assertThat(GatePicker.eligible(ZONE, List.of(full, healthy, draining))).containsExactly(healthy);
+        // 全部满载或排空时一次分档回落到全部可连集合
+        assertThat(GatePicker.eligible(ZONE, List.of(full, draining))).containsExactly(full, draining);
+
+        // admissionCapacity：2 台 20000 -> 36000，排空不计，未声明上限不封顶，无候选为 (0, true)
+        assertThat(GatePicker.admissionCapacity(ZONE, List.of(full, healthy, draining)))
+                .isEqualTo(new GatePicker.AdmissionCapacity(36_000L, true));
+        assertThat(GatePicker.admissionCapacity(ZONE, List.of(draining)))
+                .as("全排空时退到全部可连")
+                .isEqualTo(new GatePicker.AdmissionCapacity(18_000L, true));
+        assertThat(GatePicker.admissionCapacity(ZONE, List.of(healthy, unbounded)))
+                .isEqualTo(new GatePicker.AdmissionCapacity(0L, false));
+        assertThat(GatePicker.admissionCapacity(ZONE, List.of()))
+                .isEqualTo(new GatePicker.AdmissionCapacity(0L, true));
+    }
+
+    @Test
+    void 在途票记账摊开负载并在窗口到期后淘汰() {
+        long[] clock = {1_000_000_000L};
+        GateInflight inflight = new GateInflight(java.time.Duration.ofSeconds(20), () -> clock[0]);
+        GateNodeInfo g1 = gate(1, 10, false);
+        GateNodeInfo g2 = gate(2, 12, false);
+
+        // 原始 g1(10) < g2(12) -> 选 g1
+        assertThat(GatePicker.pick(ZONE, List.of(g1, g2), inflight, draws(0, 0)).orElseThrow().getNodeId()).isEqualTo(1);
+        // 给 g1 记 5 张在途票后有效负载 15 > g2(12) -> 选 g2
+        inflight.record(1, 5);
+        assertThat(GatePicker.pick(ZONE, List.of(g1, g2), inflight, draws(0, 0)).orElseThrow().getNodeId()).isEqualTo(2);
+        assertThat(inflight.count(1)).isEqualTo(5);
+        // 超过 20s 窗口自动过期 -> 恢复选 g1
+        clock[0] += java.time.Duration.ofSeconds(20).toNanos();
+        assertThat(inflight.count(1)).isZero();
+        assertThat(GatePicker.pick(ZONE, List.of(g1, g2), inflight, draws(0, 0)).orElseThrow().getNodeId()).isEqualTo(1);
+    }
 }

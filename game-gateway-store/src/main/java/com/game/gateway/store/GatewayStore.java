@@ -106,6 +106,41 @@ public final class GatewayStore {
         });
     }
 
+    /** 只改暂停创建新角色开关；不存在为空。 */
+    public Optional<ZoneRow> setCreateRoleClosed(int zoneId, boolean closed) {
+        long now = nowMs.getAsLong();
+        return tx.execute(txStatus -> {
+            route(zoneId);
+            mapper.updateCreateRoleClosed(zoneId, closed, now);
+            return zone(zoneId);
+        });
+    }
+
+    /** 只改本区注册角色软上限（0 = 不设上限）；负数拒绝，不存在为空。 */
+    public Optional<ZoneRow> setRoleCapacity(int zoneId, int roleCapacity) {
+        if (roleCapacity < 0) {
+            throw new IllegalArgumentException("role_capacity 不能为负");
+        }
+        long now = nowMs.getAsLong();
+        return tx.execute(txStatus -> {
+            route(zoneId);
+            mapper.updateRoleCapacity(zoneId, roleCapacity, now);
+            return zone(zoneId);
+        });
+    }
+
+    /** 比较并写自动关闭创角：仅当 role_capacity 等于判定时读到的正值且开关仍开着时关闭，返回是否实际由本调用关上。 */
+    public boolean closeCreateRoleIfCapacityReached(int zoneId, int expectedRoleCapacity) {
+        if (expectedRoleCapacity <= 0) {
+            return false;
+        }
+        long now = nowMs.getAsLong();
+        return Boolean.TRUE.equals(tx.execute(txStatus -> {
+            route(zoneId);
+            return mapper.closeCreateRoleIfRoleCapacityMatches(zoneId, expectedRoleCapacity, now) > 0;
+        }));
+    }
+
     /** @return 是否删了（不存在为 false） */
     public boolean deleteZone(int zoneId) {
         return Boolean.TRUE.equals(tx.execute(status->{route(zoneId);return mapper.deleteZone(zoneId)>0;}));
@@ -123,6 +158,9 @@ public final class GatewayStore {
         }
         if (zone.capacity() < 0) {
             throw new IllegalArgumentException("capacity 不能为负");
+        }
+        if (zone.roleCapacity() < 0) {
+            throw new IllegalArgumentException("role_capacity 不能为负");
         }
         if (zone.maintenanceMsg() == null || tooLong(zone.maintenanceMsg(), MAINTENANCE_MSG_MAX)
                 || hasControl(zone.maintenanceMsg())) {

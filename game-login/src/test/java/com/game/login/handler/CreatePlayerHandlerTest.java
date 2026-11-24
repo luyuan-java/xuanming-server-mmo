@@ -707,4 +707,27 @@ class CreatePlayerHandlerTest {
                 .when(store).createPlayerWithinCap(any(), anyInt(), anyList(), any(Duration.class));
         assertThat(create(CreatePlayerRequest.newBuilder().setName("张三").build()).hasErrorMessage()).isFalse();
     }
+
+    @Test
+    void 区服暂停创角在锁前直接回2037且不碰存储() throws Exception {
+        CreatePlayerHandler closedZoneHandler = new CreatePlayerHandler(store, rules, ids, randomByte, fence, 5,
+                new LoginMetrics(meters), session -> null, () -> nanos[0], BUDGET, new com.game.login.dispatch.InFlightKeys<>(),
+                null, zoneId -> zoneId == ZONE);
+
+        CreatePlayerResponse resp = response(closedZoneHandler.handle(SESSION,
+                CreatePlayerRequest.newBuilder().setName("新角色").build()).get(5, TimeUnit.SECONDS));
+
+        assertThat(resp.getErrorMessage().getId())
+                .isEqualTo(LoginErrorTip.login_error.kLoginZoneCreateRoleClosed_VALUE);
+        assertThat(resp.getPlayersList()).isEmpty();
+        org.mockito.Mockito.verifyNoInteractions(store);
+    }
+
+    @Test
+    void SqlCached读不到区服表时failOpen不拦建角() throws Exception {
+        javax.sql.DataSource broken = mock(javax.sql.DataSource.class);
+        when(broken.getConnection()).thenThrow(new java.sql.SQLException("zone_config missing"));
+        ZoneCreateRolePolicy policy = new ZoneCreateRolePolicy.SqlCached(broken, Duration.ofSeconds(2), () -> nanos[0]);
+        assertThat(policy.isCreateRoleClosed(1)).isFalse();
+    }
 }

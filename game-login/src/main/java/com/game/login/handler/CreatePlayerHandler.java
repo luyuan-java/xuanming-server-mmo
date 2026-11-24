@@ -99,6 +99,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     private final Duration createBudget;
     private final InFlightKeys<String> accountsInFlight;
     private final TextGuard textGuard;
+    private final ZoneCreateRolePolicy createRolePolicy;
 
     /**
      * @param randomByte           生成名用的随机字节源（生产为 SecureRandom），见 {@link PlayerNames#generate}
@@ -127,15 +128,24 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
                                LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
                                InFlightKeys<String> accountsInFlight) {
         this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal,
-                accountsInFlight, null);
+                accountsInFlight, null, ZoneCreateRolePolicy.OPEN);
     }
 
     public CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
                                IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
                                LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
                                InFlightKeys<String> accountsInFlight, TextGuard textGuard) {
+        this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal,
+                accountsInFlight, textGuard, ZoneCreateRolePolicy.OPEN);
+    }
+
+    public CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
+                               IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
+                               LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
+                               InFlightKeys<String> accountsInFlight, TextGuard textGuard,
+                               ZoneCreateRolePolicy createRolePolicy) {
         this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, System::nanoTime,
-                DEFAULT_CREATE_BUDGET, accountsInFlight, textGuard);
+                DEFAULT_CREATE_BUDGET, accountsInFlight, textGuard, createRolePolicy);
     }
 
     /**
@@ -149,7 +159,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
                         LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
                         LongSupplier nanoClock, Duration createBudget) {
         this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, nanoClock,
-                createBudget, new InFlightKeys<>(), null);
+                createBudget, new InFlightKeys<>(), null, ZoneCreateRolePolicy.OPEN);
     }
 
     CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
@@ -157,7 +167,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
                         LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
                         LongSupplier nanoClock, Duration createBudget, InFlightKeys<String> accountsInFlight) {
         this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, nanoClock,
-                createBudget, accountsInFlight, null);
+                createBudget, accountsInFlight, null, ZoneCreateRolePolicy.OPEN);
     }
 
     CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
@@ -165,6 +175,15 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
                         LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
                         LongSupplier nanoClock, Duration createBudget, InFlightKeys<String> accountsInFlight,
                         TextGuard textGuard) {
+        this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, nanoClock,
+                createBudget, accountsInFlight, textGuard, ZoneCreateRolePolicy.OPEN);
+    }
+
+    CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
+                        IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
+                        LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
+                        LongSupplier nanoClock, Duration createBudget, InFlightKeys<String> accountsInFlight,
+                        TextGuard textGuard, ZoneCreateRolePolicy createRolePolicy) {
         if (createBudget.isNegative() || createBudget.isZero()) {
             throw new IllegalArgumentException("建角的请求预算必须为正: " + createBudget);
         }
@@ -180,6 +199,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         this.metrics = metrics;
         this.accountsInFlight = Objects.requireNonNull(accountsInFlight, "accountsInFlight");
         this.textGuard = textGuard;
+        this.createRolePolicy = createRolePolicy == null ? ZoneCreateRolePolicy.OPEN : createRolePolicy;
     }
 
     @Override
@@ -227,6 +247,12 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         Integer refused = deviceRenewal.apply(session);
         if (refused != null) {
             return done(error(refused));
+        }
+        // 第 2b 步（建角锁之前）：区服已暂停创建新角色时直接拒绝，不碰任何玩家存储（已有角色照常进场）
+        if (session.getZoneId() != 0 && createRolePolicy.isCreateRoleClosed(session.getZoneId())) {
+            log.info("建角拒绝：区服已暂停创建新角色 account={} zone={}",
+                    account, Integer.toUnsignedLong(session.getZoneId()));
+            return done(error(LoginErrorTip.login_error.kLoginZoneCreateRoleClosed_VALUE));
         }
         if (!accountsInFlight.tryAcquire(account)) {
             log.info("同一账号建角在途，拒绝 account={} session={}", account, session.getSessionId());

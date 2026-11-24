@@ -27,8 +27,11 @@ public record HttpLoginResponse(int code, String message, Long retryAfterMs, Lon
                 refreshTokenExpire, null, null, null, null);
     }
 
-    /** 角色摘要。level 恒为 0：login 的角色列表（loginpb.AccountSimplePlayer）不带等级（基线同）。 */
-    public record PlayerInfo(long playerId, String name, int level) {
+    /** 角色摘要。level 恒为 0：login 的角色列表（loginpb.AccountSimplePlayer）不带等级（基线同）；zoneId 为归属区（0=未知）。 */
+    public record PlayerInfo(long playerId, String name, int level, long zoneId) {
+        public PlayerInfo(long playerId, String name, int level) {
+            this(playerId, name, level, 0L);
+        }
     }
 
     public static HttpLoginResponse ok(List<PlayerInfo> players, String accessToken, String refreshToken,

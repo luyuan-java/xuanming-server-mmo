@@ -3,6 +3,7 @@ package com.game.gateway.assign;
 import com.game.api.proto.GateNodeInfo;
 import com.game.common.token.GateTokenIssuer;
 import com.game.common.token.GateTokenIssuer.IssuedGateToken;
+import com.game.discovery.gate.GateInflight;
 import com.game.discovery.gate.GatePicker;
 import com.game.discovery.gate.GateSource;
 import com.game.gateway.queue.LoginQueue;
@@ -53,6 +54,7 @@ public final class AssignGateService {
     private final Queueing queueing;
     private final RateLimiter limiter;
     private final Clock clock;
+    private final GateInflight inflight;
 
     /** 不排队。 */
     public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer) {
@@ -62,7 +64,7 @@ public final class AssignGateService {
     /** @param queueing 排队依赖；为 null 表示排队关闭 */
     public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer, Queueing queueing,
                              Clock clock) {
-        this(zones, gates, issuer, queueing, null, clock);
+        this(zones, gates, issuer, queueing, null, clock, new GateInflight());
     }
 
     /**
@@ -71,12 +73,18 @@ public final class AssignGateService {
      */
     public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer, Queueing queueing,
                              RateLimiter limiter, Clock clock) {
+        this(zones, gates, issuer, queueing, limiter, clock, new GateInflight());
+    }
+
+    public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer, Queueing queueing,
+                             RateLimiter limiter, Clock clock, GateInflight inflight) {
         this.zones = zones;
         this.gates = gates;
         this.issuer = issuer;
         this.queueing = queueing;
         this.limiter = limiter;
         this.clock = clock;
+        this.inflight = inflight;
     }
 
     public AssignGateResponse assign(int zoneId) {
@@ -117,19 +125,19 @@ public final class AssignGateService {
             return AssignGateResponse.rejected(AssignGateResponse.CODE_INTERNAL,
                     AssignGateResponse.ERR_GATE_DIRECTORY_UNAVAILABLE);
         }
-        Optional<GateNodeInfo> picked = GatePicker.pick(zoneId, candidates);
+        Optional<GateNodeInfo> picked = GatePicker.pick(zoneId, candidates, inflight);
         if (picked.isEmpty()) {
             log.warn("没有可分配的 gate zone={} 目录条目数={}", zoneId, candidates.size());
             return AssignGateResponse.rejected(AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_NO_GATE_AVAILABLE);
         }
         if (queueing == null) {
-            return sign(zoneId, picked.get());
+            return signAndRecord(zoneId, picked.get());
         }
         try {
             ZoneRow zone = zones.find(zoneId).orElseThrow();
             if (queueing.queue().queueLength(zoneId) == 0
                     && queueing.queue().tryReserveFastPath(zoneId, queueing.capacity().budget(zone, candidates))) {
-                return sign(zoneId, picked.get());
+                return signAndRecord(zoneId, picked.get());
             }
             LoginQueue.Enqueued enqueued = queueing.queue().enqueue(zoneId);
             long expire = clock.millis() / 1000 + queueing.queue().entryTtl().toSeconds();
@@ -194,12 +202,46 @@ public final class AssignGateService {
         return switch (lookup) {
             case LoginQueue.Admitted admitted -> {
                 log.debug("排队放行取走 zone={} 等待 {} ms", zoneId, clock.millis() - admitted.enqueuedAtMs());
-                yield sign(zoneId, admitted.gate());
+                yield sign(zoneId, recheckAdmittedGate(zoneId, admitted.gate()));
             }
             case LoginQueue.Waiting waiting -> AssignGateResponse.loginQueueing(queueToken, waiting.rank(), waiting.total(),
                     queueing.retryAfterMs());
             case LoginQueue.Expired ignored -> expired();
         };
+    }
+
+    /**
+     * 排队领票时复核放行阶段选定的 gate（对齐权威主仓 loginqueue.NewAdmitSigner）：若目标 gate 已不在当前
+     * 合格集合（离线、排空或达 90% 水位）则按当前目录重挑并记在途票；目录读不到或无候选时照签原放行 gate。
+     */
+    private GateNodeInfo recheckAdmittedGate(int zoneId, GateNodeInfo admitted) {
+        List<GateNodeInfo> live;
+        try {
+            live = gates.listGates(zoneId);
+        } catch (RuntimeException e) {
+            log.warn("排队领票复核读 gate 目录失败，沿用原放行 gate zone={} node={}: {}",
+                    zoneId, admitted.getNodeId(), e.toString());
+            return admitted;
+        }
+        if (live == null || live.isEmpty()) {
+            return admitted;
+        }
+        List<GateNodeInfo> eligible = GatePicker.eligible(zoneId, live);
+        for (GateNodeInfo candidate : eligible) {
+            if (candidate.getNodeId() == admitted.getNodeId()) {
+                return candidate;
+            }
+        }
+        Optional<GateNodeInfo> repicked = GatePicker.pick(zoneId, live, inflight);
+        if (repicked.isEmpty()) {
+            return admitted;
+        }
+        if (inflight != null) {
+            inflight.record(repicked.get().getNodeId());
+        }
+        log.info("排队领票复核重挑 gate zone={} old_node={} new_node={}",
+                zoneId, admitted.getNodeId(), repicked.get().getNodeId());
+        return repicked.get();
     }
 
     /** 区服准入：放行回 null，否则回拒绝应答。 */
@@ -226,6 +268,14 @@ public final class AssignGateService {
                     AssignGateResponse.ERR_ZONE_NOT_OPEN);
             case OPEN -> null;
         };
+    }
+
+    private AssignGateResponse signAndRecord(int zoneId, GateNodeInfo gate) {
+        AssignGateResponse resp = sign(zoneId, gate);
+        if (inflight != null) {
+            inflight.record(gate.getNodeId());
+        }
+        return resp;
     }
 
     private AssignGateResponse sign(int zoneId, GateNodeInfo gate) {

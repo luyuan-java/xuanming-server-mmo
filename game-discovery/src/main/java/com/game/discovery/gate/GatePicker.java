@@ -12,45 +12,96 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 从 gate 目录里挑一个接新玩家的 gate。纯函数（只打日志；随机源可注入），规则与 mmorpg {@code loginqueue.PickGate}
- * （挑选规则在 {@code shared/gatepick.TwoChoices}）+ {@code clientendpoint.DedupeNewest} + {@code FilterDrainingGates} 一致：
+ * 从 gate 目录里挑一个接新玩家的 gate，并统一 90% 水位满载判定与区级承载封顶计算（对齐权威主仓
+ * {@code shared/gatepick} 的 {@code Eligible} / {@code TwoChoices} / {@code WatermarkCapacity} / {@code AdmissionCapacity}）。
+ *
  * <ol>
- *   <li>先剔除连不上的条目：zone 不符、节点号为 0、没有客户端地址（host 空或端口不在 1..65535）——
- *       把这种地址发给客户端只会让它连不上；</li>
- *   <li><b>同一个客户端地址（host:port）只留 {@code started_at_ms} 最大的一条</b>（批次 5.4，zone-travel-spec §5.4 第 4 步、Q10）：
- *       gate 崩溃后在同一地址重启、换了节点号，旧进程的条目要等目录 TTL 才消失；这段时间里旧条目的人数停在崩溃时（往往更少），
- *       按人数挑会挑中它，而签给旧节点号的令牌在新进程上验不过（{@code token not for this gate}）。缺这个字段的旧版本条目读出来是 0（最旧）。
- *       并列最大（含两条都缺字段）时都留下、交给第 4 条挑——没有依据判断哪条陈旧，宁可保持去重之前的行为；</li>
- *   <li>再剔除排空中的 gate；<b>全部都在排空时忽略排空标记</b>（与 mmorpg 同向：宁可放人进排空中的 gate，
- *       也不因误标整区而全服登不上），并告警；</li>
- *   <li><b>随机二选一</b>（2026-10-18 起，对齐 mmorpg {@code shared/gatepick.TwoChoices}）：随机抽两个不同的候选，
- *       取在线人数少的（uint32 按无符号比较），同人数取第一次抽中的；只有一个就是它，恰好两个时等于取最少。
- *       此前是按 (人数, 节点号) 确定性取最小：gate 人数要等下一次发布才更新，并发的分配互相看不到别人刚分出去的人，
- *       一个发布周期里的新连接会全部落到同一台。随机二选一在负载信息滞后时仍能摊开（滞后窗口里最闲那台最多拿 2/n）；
- *       同人数不按节点号定胜负，否则全部 0 人时节点号最大的那台一个都分不到。</li>
+ *   <li>剔除连不上的条目：zone 不符、节点号为 0、无客户端地址；</li>
+ *   <li>同一客户端地址只留 {@code started_at_ms}（无符号）最大的一条；</li>
+ *   <li><b>一次分档</b>（不分层各自回落）：
+ *       <ul>
+ *         <li>第一档（完全合格）：未排空且未到 90% 水位（{@code player_count < ceil(max_connections * 90%)}；{@code max_connections == 0} 视为不限）；</li>
+ *         <li>第二档（回落可连集合）：全部可连 gate 都在排空或已达 90% 水位时，保留全部可连 gate 并记告警（原因 {@code draining} / {@code full} / {@code mixed}）；</li>
+ *       </ul>
+ *   </li>
+ *   <li><b>随机二选一</b>：比较负载 {@code unsigned(player_count) + inflight}，同负载取第一次抽中者。</li>
  * </ol>
- * gateway 的登录分配与 scene-manager 的跨 zone 重定向用 {@link #pick}；登录排队的放行循环只用 {@link #eligible}，
- * 在一批里按自己记的已分配人数确定性地摊开（与 mmorpg dispatcher 的批内记账一致），不走随机二选一。
  */
 public final class GatePicker {
 
     private static final Logger log = LoggerFactory.getLogger(GatePicker.class);
 
     private static final int MAX_PORT = 65535;
+    /** 满载水位百分比（90%）：留出 10% 缓冲吸收 5s 目录上报滞后。 */
+    public static final int FULL_PERCENT = 90;
+
+    /**
+     * 一批 gate 到 90% 水位为止一共能接的人数；{@code bounded == false} 表示存在未声明上限的 gate，整体不封顶。
+     */
+    public record AdmissionCapacity(long capacity, boolean bounded) {
+    }
 
     private GatePicker() {
     }
 
-    /** @return 选中的 gate；没有任何可连接的条目时为空。随机源是 {@link ThreadLocalRandom}（并发安全）。 */
-    public static Optional<GateNodeInfo> pick(int zoneId, List<GateNodeInfo> gates) {
-        return pick(zoneId, gates, bound -> ThreadLocalRandom.current().nextInt(bound));
+    /**
+     * 返回自报上限为 {@code maxConnections} 的 gate 到达 90% 水位的人数（{@code ceil(max * 90 / 100)}）。
+     * {@code maxConnections == 0} 表示未声明上限，返回 0。
+     */
+    public static long watermarkCapacity(int maxConnections) {
+        if (maxConnections == 0) {
+            return 0L;
+        }
+        return (Integer.toUnsignedLong(maxConnections) * FULL_PERCENT + 99L) / 100L;
+    }
+
+    /** 按上报人数判该 gate 是否已达到 90% 水位（未声明上限时恒 false；不计本进程在途票）。 */
+    public static boolean isFull(GateNodeInfo gate) {
+        int max = gate.getMaxConnections();
+        return max != 0 && Integer.toUnsignedLong(gate.getPlayerCount()) >= watermarkCapacity(max);
     }
 
     /**
-     * 同 {@link #pick(int, List)}，随机源显式传入：{@code intn.applyAsInt(n)} 必须返回 [0, n) 上均匀分布的整数。
-     * 单测传固定序列钉住结果。
+     * 计算本区在接客的 gate 到 90% 水位一共能接的人数（总量，不扣在线人数）。
+     * 仅统计可连且同地址去重后的最高非空档：优先未排空 gate；若全在排空则统计全部可连 gate；无 gate 返回 {@code (0, true)}；
+     * 计入集合中任一 gate 未声明上限（{@code max_connections == 0}）则返回 {@code (0, false)} 不封顶。
      */
+    public static AdmissionCapacity admissionCapacity(int zoneId, List<GateNodeInfo> gates) {
+        List<GateNodeInfo> connectable = connectableNewest(zoneId, gates);
+        if (connectable.isEmpty()) {
+            return new AdmissionCapacity(0L, true);
+        }
+        List<GateNodeInfo> serving = connectable.stream().filter(g -> !g.getDraining()).toList();
+        List<GateNodeInfo> counted = serving.isEmpty() ? connectable : serving;
+        long total = 0L;
+        for (GateNodeInfo gate : counted) {
+            int max = gate.getMaxConnections();
+            if (max == 0) {
+                return new AdmissionCapacity(0L, false);
+            }
+            total += watermarkCapacity(max);
+        }
+        return new AdmissionCapacity(total, true);
+    }
+
+    /** @return 选中的 gate；没有任何可连接的条目时为空。随机源是 {@link ThreadLocalRandom}（并发安全）。 */
+    public static Optional<GateNodeInfo> pick(int zoneId, List<GateNodeInfo> gates) {
+        return pick(zoneId, gates, null, bound -> ThreadLocalRandom.current().nextInt(bound));
+    }
+
+    /** 带本进程在途票记账的随机二选一选台。 */
+    public static Optional<GateNodeInfo> pick(int zoneId, List<GateNodeInfo> gates, GateInflight inflight) {
+        return pick(zoneId, gates, inflight, bound -> ThreadLocalRandom.current().nextInt(bound));
+    }
+
+    /** 同 {@link #pick(int, List)}，随机源显式传入（测试用）。 */
     static Optional<GateNodeInfo> pick(int zoneId, List<GateNodeInfo> gates, IntUnaryOperator intn) {
+        return pick(zoneId, gates, null, intn);
+    }
+
+    /** 同 {@link #pick(int, List, GateInflight)}，随机源显式传入（测试用）。 */
+    public static Optional<GateNodeInfo> pick(int zoneId, List<GateNodeInfo> gates, GateInflight inflight,
+                                              IntUnaryOperator intn) {
         List<GateNodeInfo> candidates = eligible(zoneId, gates);
         int n = candidates.size();
         if (n == 0) {
@@ -59,37 +110,62 @@ public final class GatePicker {
         if (n == 1) {
             return Optional.of(candidates.get(0));
         }
+        Map<Integer, Integer> inflightCounts = inflight == null ? Map.of() : inflight.snapshot();
         int i = intn.applyAsInt(n);
         // 第二个从去掉 i 之后的 n-1 个里均匀抽，保证两个不同。
         int j = intn.applyAsInt(n - 1);
         if (j >= i) {
             j++;
         }
-        if (Integer.compareUnsigned(candidates.get(j).getPlayerCount(), candidates.get(i).getPlayerCount()) < 0) {
+        long loadI = effectiveLoad(candidates.get(i), inflightCounts);
+        long loadJ = effectiveLoad(candidates.get(j), inflightCounts);
+        if (Long.compareUnsigned(loadJ, loadI) < 0) {
             i = j;
         }
         return Optional.of(candidates.get(i));
     }
 
-    /** 规则 1–3 之后剩下的 gate（放行循环要在一批里按自己记的已分配人数摊开，所以单独给出）；没有时为空表。 */
+    private static long effectiveLoad(GateNodeInfo gate, Map<Integer, Integer> inflightCounts) {
+        return Integer.toUnsignedLong(gate.getPlayerCount()) + inflightCounts.getOrDefault(gate.getNodeId(), 0);
+    }
+
+    /**
+     * 规则 1–3 之后剩下的 gate（一次分档：完全合格 &gt; 回落全部可连 gate）；没有时为空表。
+     * 排队放行循环按它挑台并在批内叠加已分配人数与在途票。
+     */
     public static List<GateNodeInfo> eligible(int zoneId, List<GateNodeInfo> gates) {
-        List<GateNodeInfo> connectable = newestPerAddress(zoneId,
-                gates.stream().filter(g -> isConnectable(zoneId, g)).toList());
+        List<GateNodeInfo> connectable = connectableNewest(zoneId, gates);
         if (connectable.isEmpty()) {
             return List.of();
         }
-        List<GateNodeInfo> accepting = connectable.stream().filter(g -> !g.getDraining()).toList();
-        if (accepting.isEmpty()) {
-            log.warn("zone={} 的 {} 台 gate 全部标记为排空，忽略排空标记继续分配；请检查是否误把整区标成排空",
-                    zoneId, connectable.size());
-            accepting = connectable;
+        int drainingCount = 0;
+        int fullCount = 0;
+        List<GateNodeInfo> healthy = new ArrayList<>(connectable.size());
+        for (GateNodeInfo g : connectable) {
+            if (g.getDraining()) {
+                drainingCount++;
+            } else if (isFull(g)) {
+                fullCount++;
+            } else {
+                healthy.add(g);
+            }
         }
-        return accepting;
+        if (!healthy.isEmpty()) {
+            return healthy;
+        }
+        String reason = fullCount == 0 ? "draining" : drainingCount == 0 ? "full" : "mixed";
+        log.warn("zone={} 的 {} 台可连 gate 无完全合格候选（draining={} full={} reason={}），回落全部可连 gate 继续分配",
+                zoneId, connectable.size(), drainingCount, fullCount, reason);
+        return connectable;
+    }
+
+    /** 规则 1–2：过滤可连条目并按客户端地址去重只留最新启动者。 */
+    public static List<GateNodeInfo> connectableNewest(int zoneId, List<GateNodeInfo> gates) {
+        return newestPerAddress(zoneId, gates.stream().filter(g -> isConnectable(zoneId, g)).toList());
     }
 
     /**
      * 规则 2：同一客户端地址只留 {@code started_at_ms}（uint64，按无符号比较）最大的条目，并列最大的都留下。
-     * 地址按目录里的原串比较（host 与端口都不做规范化）；输出保持输入里各条目的相对顺序。
      */
     private static List<GateNodeInfo> newestPerAddress(int zoneId, List<GateNodeInfo> gates) {
         Map<String, Long> newest = new LinkedHashMap<>();
@@ -104,7 +180,6 @@ public final class GatePicker {
             if (gate.getStartedAtMs() == newest.get(address(gate))) {
                 out.add(gate);
             } else {
-                // 每次分配都会走到（直到旧条目过期，最多一个目录 TTL），所以同其它跳过一样只记 debug。
                 log.debug("跳过同一客户端地址上更早启动的 gate 条目（进程已重启、旧条目还没过期） zone={} node={} addr={} startedAt={} newest={}",
                         zoneId, gate.getNodeId(), address(gate), Long.toUnsignedString(gate.getStartedAtMs()),
                         Long.toUnsignedString(newest.get(address(gate))));

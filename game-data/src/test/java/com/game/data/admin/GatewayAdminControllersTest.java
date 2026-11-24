@@ -63,15 +63,41 @@ class GatewayAdminControllersTest {
                 .andExpect(status().isBadRequest());
         verify(store, never()).upsertZone(any());
 
-        when(store.upsertZone(new ZoneRow(5, "五区", 0, 5000, "", null, false, 0, 0, 0))).thenReturn(ZONE);
+        when(store.upsertZone(new ZoneRow(5, "五区", 0, ZoneRow.DEFAULT_CAPACITY, "", null, false, 0, 0, 0))).thenReturn(ZONE);
         mvc.perform(post("/admin/zones").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"zone_id\":5,\"name\":\"五区\"}"))
                 .andExpect(status().isOk());
 
-        when(store.upsertZone(new ZoneRow(6, "六区", 9, 5000, "", null, false, 0, 0, 0)))
+        when(store.upsertZone(new ZoneRow(6, "六区", 9, ZoneRow.DEFAULT_CAPACITY, "", null, false, 0, 0, 0)))
                 .thenThrow(new IllegalArgumentException("manual_status 只能是 0–3"));
         mvc.perform(post("/admin/zones").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"zone_id\":6,\"name\":\"六区\",\"manual_status\":9}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void 区服_暂停恢复创角与角色上限接口() throws Exception {
+        ZoneRow closed = new ZoneRow(1, "一区", 0, 45_000, "", null, true, 1, true, 30_000, 10, 20);
+        when(store.setCreateRoleClosed(1, true)).thenReturn(Optional.of(closed));
+        when(store.setCreateRoleClosed(1, false)).thenReturn(Optional.of(ZONE));
+        when(store.setCreateRoleClosed(9, true)).thenReturn(Optional.empty());
+        when(store.setRoleCapacity(1, 30_000)).thenReturn(Optional.of(closed));
+        when(store.setRoleCapacity(1, -1)).thenThrow(new IllegalArgumentException("role_capacity 不能为负"));
+
+        mvc.perform(post("/admin/zones/1/create-role/close")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.create_role_closed").value(true))
+                .andExpect(jsonPath("$.role_capacity").value(30_000));
+        mvc.perform(post("/admin/zones/1/create-role/open")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.create_role_closed").value(false));
+        mvc.perform(post("/admin/zones/9/create-role/close")).andExpect(status().isNotFound());
+        mvc.perform(put("/admin/zones/1/role-capacity").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"role_capacity\":30000}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.role_capacity").value(30_000));
+        mvc.perform(put("/admin/zones/1/role-capacity").contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isBadRequest());
+        mvc.perform(put("/admin/zones/1/role-capacity").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"role_capacity\":-1}"))
                 .andExpect(status().isBadRequest());
     }
 

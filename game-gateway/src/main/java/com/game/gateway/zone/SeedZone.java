@@ -32,7 +32,7 @@ public record SeedZone(long zoneId, String name, ZoneManualStatus status, boolea
             throw new IllegalArgumentException("game.gateway.seed-zones：区服缺少状态（OPEN / MAINTENANCE / CLOSED / PREVIEW）：zone_id="
                     + zoneId);
         }
-        capacity = capacity == null ? 5000 : capacity;
+        capacity = capacity == null ? ZoneRow.DEFAULT_CAPACITY : capacity;
         sortOrder = sortOrder == null ? 0 : sortOrder;
         maintenanceMsg = maintenanceMsg == null ? "" : maintenanceMsg;
     }

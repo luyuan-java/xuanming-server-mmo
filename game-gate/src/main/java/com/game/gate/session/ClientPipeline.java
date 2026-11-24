@@ -39,8 +39,13 @@ public final class ClientPipeline {
     }
 
     public static void install(ChannelPipeline pipeline, SessionRegistry registry, ClientDispatcher dispatcher) {
+        install(pipeline, registry, dispatcher, 0, null);
+    }
+
+    public static void install(ChannelPipeline pipeline, SessionRegistry registry, ClientDispatcher dispatcher,
+                               int maxConnections, com.game.common.net.SourcePrefixRateLimiter sourceRateLimiter) {
         GateMetrics metrics = dispatcher.metrics();
-        ClientChannelHandler handler = new ClientChannelHandler(registry, dispatcher);
+        ClientChannelHandler handler = new ClientChannelHandler(registry, dispatcher, maxConnections, sourceRateLimiter);
         pipeline.addLast("wsMux", new com.game.net.client.WebSocketMuxHandler(metrics.webSocketObserver()));
         pipeline.addLast("clientFrameDecoder", new ClientFrameDecoder(ACCEPTED, ClientFrames.DEFAULT_MAX_LEN,
                 handler::acceptsFrames, (ctx, e) -> {

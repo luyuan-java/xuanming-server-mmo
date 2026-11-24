@@ -43,7 +43,11 @@ public record GateProperties(
         Duration linkIdleTimeout,
         Duration linkSupersedeCheckInterval,
         Duration linkSupersededGrace,
-        String clientWsBaseUrl) {
+        String clientWsBaseUrl,
+        Integer maxConnections) {
+
+    /** 默认客户端连接上限（0 表示不限，如 dev）；90% 水位用于区服容量封顶与选台剔除。 */
+    public static final int DEFAULT_MAX_CONNECTIONS = 5000;
 
     public GateProperties(Integer clientPort, Integer advertisePort, Integer workerThreads, Integer linkThreads,
                           Integer maxPendingRequests, Integer illegalPacketThreshold, Duration handshakeTimeout,
@@ -51,7 +55,7 @@ public record GateProperties(
                           Duration shutdownDrainTimeout, Duration redirectLinger) {
         this(clientPort, advertisePort, workerThreads, linkThreads, maxPendingRequests, illegalPacketThreshold,
                 handshakeTimeout, linkConnectTimeout, linkHelloTimeout, linkMaxQueuedFrames, shutdownDrainTimeout,
-                redirectLinger, null, null, null, null, null);
+                redirectLinger, null, null, null, null, null, null);
     }
 
     public GateProperties(Integer clientPort, Integer advertisePort, Integer workerThreads, Integer linkThreads,
@@ -62,7 +66,20 @@ public record GateProperties(
                           Duration linkSupersedeCheckInterval, Duration linkSupersededGrace) {
         this(clientPort, advertisePort, workerThreads, linkThreads, maxPendingRequests, illegalPacketThreshold,
                 handshakeTimeout, linkConnectTimeout, linkHelloTimeout, linkMaxQueuedFrames, shutdownDrainTimeout,
-                redirectLinger, linkPingInterval, linkIdleTimeout, linkSupersedeCheckInterval, linkSupersededGrace, null);
+                redirectLinger, linkPingInterval, linkIdleTimeout, linkSupersedeCheckInterval, linkSupersededGrace, null, null);
+    }
+
+    public GateProperties(Integer clientPort, Integer advertisePort, Integer workerThreads, Integer linkThreads,
+                          Integer maxPendingRequests, Integer illegalPacketThreshold, Duration handshakeTimeout,
+                          Duration linkConnectTimeout, Duration linkHelloTimeout, Integer linkMaxQueuedFrames,
+                          Duration shutdownDrainTimeout, Duration redirectLinger,
+                          Duration linkPingInterval, Duration linkIdleTimeout,
+                          Duration linkSupersedeCheckInterval, Duration linkSupersededGrace,
+                          String clientWsBaseUrl) {
+        this(clientPort, advertisePort, workerThreads, linkThreads, maxPendingRequests, illegalPacketThreshold,
+                handshakeTimeout, linkConnectTimeout, linkHelloTimeout, linkMaxQueuedFrames, shutdownDrainTimeout,
+                redirectLinger, linkPingInterval, linkIdleTimeout, linkSupersedeCheckInterval, linkSupersededGrace,
+                clientWsBaseUrl, null);
     }
 
     @org.springframework.boot.context.properties.bind.ConstructorBinding
@@ -84,7 +101,11 @@ public record GateProperties(
         linkSupersedeCheckInterval = linkSupersedeCheckInterval == null ? Duration.ofSeconds(5) : linkSupersedeCheckInterval;
         linkSupersededGrace = linkSupersededGrace == null ? Duration.ofSeconds(30) : linkSupersededGrace;
         clientWsBaseUrl = com.game.common.net.ClientWsUrls.parseBaseUrl(clientWsBaseUrl);
+        maxConnections = maxConnections == null ? DEFAULT_MAX_CONNECTIONS : maxConnections;
         new com.game.gate.link.LinkSettings(linkHelloTimeout, linkMaxQueuedFrames, linkPingInterval, linkIdleTimeout, linkSupersededGrace);
+        if (maxConnections < 0) {
+            throw new IllegalArgumentException("game.gate.max-connections 不能为负: " + maxConnections);
+        }
         if (linkSupersedeCheckInterval.toMillis() < 1)
             throw new IllegalArgumentException("game.gate.link-supersede-check-interval 不得短于 1ms");
         if (clientPort <= 0 || clientPort > 65535) {

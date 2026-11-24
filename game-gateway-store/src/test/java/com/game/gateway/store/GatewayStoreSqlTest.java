@@ -145,5 +145,34 @@ class GatewayStoreSqlTest {
         assertThatThrownBy(() -> store.createAnnouncement("倒挂", null, null, 10L, 5L))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void 暂停创角与角色上限_独立修改且PUT不覆盖_CAS条件关仅匹配当前上限() {
+        store.upsertZone(new ZoneRow(1, "一区", 0, ZoneRow.DEFAULT_CAPACITY, "", null, true, 1, 0, 0));
+        assertThat(store.zone(1).orElseThrow()).satisfies(z -> {
+            assertThat(z.capacity()).isEqualTo(45_000);
+            assertThat(z.createRoleClosed()).isFalse();
+            assertThat(z.roleCapacity()).isZero();
+        });
+        assertThat(store.setRoleCapacity(1, 100).orElseThrow().roleCapacity()).isEqualTo(100);
+        assertThat(store.setCreateRoleClosed(1, true).orElseThrow().createRoleClosed()).isTrue();
+        // PUT 整行更新不得覆盖 create_role_closed 与 role_capacity
+        ZoneRow afterPut = store.updateZone(1, new ZoneRow(1, "一区·新", 0, 30_000, "", null, true, 2, 0, 0))
+                .orElseThrow();
+        assertThat(afterPut.createRoleClosed()).isTrue();
+        assertThat(afterPut.roleCapacity()).isEqualTo(100);
+        assertThat(afterPut.capacity()).isEqualTo(30_000);
+
+        // 重新打开后测试 CAS 自动关：上限不匹配不关，匹配时原子关且重复调返回 false
+        assertThat(store.setCreateRoleClosed(1, false).orElseThrow().createRoleClosed()).isFalse();
+        assertThat(store.closeCreateRoleIfCapacityReached(1, 99)).isFalse();
+        assertThat(store.zone(1).orElseThrow().createRoleClosed()).isFalse();
+        assertThat(store.closeCreateRoleIfCapacityReached(1, 100)).isTrue();
+        assertThat(store.zone(1).orElseThrow().createRoleClosed()).isTrue();
+        assertThat(store.closeCreateRoleIfCapacityReached(1, 100)).isFalse();
+        assertThatThrownBy(() -> store.setRoleCapacity(1, -1)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(store.setCreateRoleClosed(8, true)).isEmpty();
+        assertThat(store.setRoleCapacity(8, 10)).isEmpty();
+    }
     private static String schemaPrincipal(java.sql.Connection connection)throws java.sql.SQLException{try(var statement=connection.createStatement();var rows=statement.executeQuery("SELECT CURRENT_USER()")){if(!rows.next())throw new java.sql.SQLException("缺少实际schema主体");return rows.getString(1);}}
 }

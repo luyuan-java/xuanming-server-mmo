@@ -101,6 +101,14 @@ public class LoginAccountService implements AccountLoginService {
         return onWorkers(() -> handleCancelDeletion(request));
     }
 
+    @Override
+    public CompletableFuture<Long> countZoneRoles(int zoneId) {
+        if (store == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("player store not wired"));
+        }
+        return onWorkers(() -> store.countByZone(zoneId));
+    }
+
     /** 实名提交（对齐 {@code SubmitRealNameLogic}）：未开防沉迷回空应答；令牌无效回 2000，其余按带内 tip。 */
     SubmitRealNameResponse handleSubmitRealName(SubmitRealNameRequest req) {
         SubmitRealNameResponse.Builder resp = SubmitRealNameResponse.newBuilder();

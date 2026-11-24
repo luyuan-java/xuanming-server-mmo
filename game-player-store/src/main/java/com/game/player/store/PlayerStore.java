@@ -142,6 +142,11 @@ public class PlayerStore {
         return mapper.countByAccount(account);
     }
 
+    /** 统计该区历史上已建角色总数（含已删除角色，删角不减）。 */
+    public long countByZone(int zoneId) {
+        return mapper.countByZone(zoneId);
+    }
+
     public Optional<PlayerRow> findPlayer(long playerId) {
         return Optional.ofNullable(mapper.selectById(playerId));
     }

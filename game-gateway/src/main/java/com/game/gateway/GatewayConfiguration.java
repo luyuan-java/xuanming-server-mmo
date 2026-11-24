@@ -9,6 +9,7 @@ import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.drain.GateDrainMarks;
+import com.game.discovery.gate.GateInflight;
 import com.game.discovery.gate.GateSource;
 import com.game.discovery.gate.RedisGateSource;
 import com.game.gateway.drain.GateDrainMonitor;
@@ -27,12 +28,16 @@ import com.game.gateway.ratelimit.ClientIpResolver;
 import com.game.gateway.ratelimit.RateLimitSettings;
 import com.game.gateway.ratelimit.RateLimiter;
 import com.game.gateway.ratelimit.RedisRateLimitStore;
+import com.game.gateway.serverlist.ServerListController;
 import com.game.gateway.store.GatewayStore;
+import com.game.gateway.zone.RoleCapacityGuard;
 import com.game.gateway.zone.SeedZone;
 import com.game.gateway.zone.ZoneDirectory;
 import com.game.gateway.zone.ZoneHealthProbe;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.binder.MeterBinder;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Clock;
@@ -154,9 +159,15 @@ public class GatewayConfiguration {
     }
 
     @Bean
+    public GateInflight gateInflight() {
+        return new GateInflight();
+    }
+
+    @Bean
     public AssignGateService assignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer,
                                                GatewayProperties properties, LoginQueue queue, QueueCapacity capacity,
-                                               RateLimiter rateLimiter, Environment environment, Clock clock) {
+                                               RateLimiter rateLimiter, GateInflight gateInflight,
+                                               Environment environment, Clock clock) {
         QueueSettings settings = properties.queue();
         AssignGateService.Queueing queueing = null;
         if (settings.enabled()) {
@@ -165,7 +176,7 @@ public class GatewayConfiguration {
             log.info("登录排队已打开 条目有效期={} 放行有效期={} 软上限倍数={}", settings.entryTtl(), settings.admitTtl(),
                     settings.softCapMultiplier());
         }
-        return new AssignGateService(zones, gates, issuer, queueing, rateLimiter, clock);
+        return new AssignGateService(zones, gates, issuer, queueing, rateLimiter, clock, gateInflight);
     }
 
     /** 开服限流（关闭时 check 一律放行，不碰 Redis；存储出错 fail-open）。 */
@@ -191,14 +202,52 @@ public class GatewayConfiguration {
      */
     @Bean(destroyMethod = "close")
     public QueueDispatcherRunner queueDispatcher(LoginQueue queue, QueueCapacity capacity, ZoneDirectory zones,
-                                                 GateSource gates, RedissonClient redis, RedisKeys redisKeys,
-                                                 GatewayProperties properties, MeterRegistry meterRegistry) {
+                                                 GateSource gates, GateInflight gateInflight, RedissonClient redis,
+                                                 RedisKeys redisKeys, GatewayProperties properties,
+                                                 MeterRegistry meterRegistry) {
         if (!properties.queue().enabled()) {
             return QueueDispatcherRunner.idle();
         }
         Counter admits = Counter.builder("game.gateway.queue.admits").description("排队放行的人数").register(meterRegistry);
         return new QueueDispatcherRunner(redis, redisKeys, properties.queue().dispatchInterval(),
-                leadership -> new QueueDispatcher(queue, capacity, zones, gates, leadership, admits::increment));
+                leadership -> new QueueDispatcher(queue, capacity, zones, gates, leadership, admits::increment, gateInflight));
+    }
+
+    /** 开放区数 / 可建角区数指标（与区服列表同源，供「无区可建角」告警使用）。 */
+    @Bean
+    public MeterBinder newPlayerCapacityMetrics(ZoneDirectory zones, ZoneHealthProbe probe) {
+        return registry -> {
+            Gauge.builder("game.gateway.zones.open", () -> ServerListController.capacityCounts(zones, probe).openZones())
+                    .description("区服列表显示 OPEN 的区数").register(registry);
+            Gauge.builder("game.gateway.zones.accepting.new.players",
+                            () -> ServerListController.capacityCounts(zones, probe).acceptingNewPlayerZones())
+                    .description("区服列表显示 OPEN 且未暂停创角的区数").register(registry);
+        };
+    }
+
+    /** 按本区注册角色软上限自动暂停创角守卫（10 秒巡检，仅查 role_capacity > 0 且未关创角的区）。 */
+    @Bean
+    public RoleCapacityGuard roleCapacityGuard(ZoneDirectory zones, AccountLoginService accountLoginService,
+                                               GatewayStore store, MeterRegistry meterRegistry) {
+        return new RoleCapacityGuard(zones::zones, zoneId -> {
+            try {
+                return accountLoginService.countZoneRoles(zoneId).get(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted", e);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }, store, meterRegistry);
+    }
+
+    @Bean(destroyMethod = "shutdownNow")
+    public ScheduledExecutorService roleCapacityScheduler(RoleCapacityGuard guard) {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().name("gateway-role-capacity").daemon(true).factory());
+        long period = RoleCapacityGuard.INTERVAL.toMillis();
+        scheduler.scheduleWithFixedDelay(guard::tick, period, period, TimeUnit.MILLISECONDS);
+        return scheduler;
     }
 
     @Bean

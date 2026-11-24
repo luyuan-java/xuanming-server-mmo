@@ -27,6 +27,8 @@ message GateNodeInfo {
   uint64 lease_epoch = 9;
   // 小游戏客户端的 WebSocket 地址（CLIENT_WS_BASE_URL + /<ip>/<port>）；空串表示不接小游戏。
   string client_ws_url = 10;
+  // gate 自报客户端连接上限；0 表示未声明上限（dev 或旧版 gate，不触发水位剔除与区容量封顶）。
+  uint32 max_connections = 11;
 }
 
 message SceneNodeInfo {

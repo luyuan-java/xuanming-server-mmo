@@ -53,14 +53,14 @@ public class ZoneAdminController {
         this.store = store;
     }
 
-    /** 请求体（未给的列取缺省值：状态 0 OPEN、容量 5000、文案空、不推荐、排序 0）。 */
+    /** 请求体（未给的列取缺省值：状态 0 OPEN、容量 45000、文案空、不推荐、排序 0）。 */
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     public record ZoneBody(@JsonDeserialize(using = ZoneIdJsonDeserializer.class) Long zoneId, String name, Integer manualStatus, Integer capacity, String maintenanceMsg,
                            Long openTime, Boolean recommended, Integer sortOrder) {
 
         ZoneRow toRow(int zoneId) {
             return new ZoneRow(zoneId, name, manualStatus == null ? ZoneManualStatus.OPEN.code() : manualStatus,
-                    capacity == null ? 5000 : capacity, maintenanceMsg == null ? "" : maintenanceMsg, openTime,
+                    capacity == null ? ZoneRow.DEFAULT_CAPACITY : capacity, maintenanceMsg == null ? "" : maintenanceMsg, openTime,
                     recommended != null && recommended, sortOrder == null ? 0 : sortOrder, 0, 0);
         }
     }
@@ -69,14 +69,19 @@ public class ZoneAdminController {
     public record MaintenanceBody(String maintenanceMsg) {
     }
 
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    public record RoleCapacityBody(Integer roleCapacity) {
+    }
+
     /** 应答（列名同表，snake_case）。 */
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     public record ZoneView(long zoneId, String name, int manualStatus, int capacity, String maintenanceMsg, Long openTime,
-                           boolean recommended, int sortOrder, long createdAt, long updatedAt) {
+                           boolean recommended, int sortOrder, boolean createRoleClosed, int roleCapacity,
+                           long createdAt, long updatedAt) {
 
         static ZoneView of(ZoneRow z) {
             return new ZoneView(Integer.toUnsignedLong(z.zoneId()), z.name(), z.manualStatus(), z.capacity(), z.maintenanceMsg(), z.openTime(),
-                    z.recommended(), z.sortOrder(), z.createdAt(), z.updatedAt());
+                    z.recommended(), z.sortOrder(), z.createRoleClosed(), z.roleCapacity(), z.createdAt(), z.updatedAt());
         }
     }
 
@@ -136,6 +141,33 @@ public class ZoneAdminController {
     public ResponseEntity<ZoneView> open(@PathVariable("zoneId") long zoneId, HttpServletRequest request) {
         Optional<ZoneRow> stored = store.setZoneStatus(requiredZone(zoneId), ZoneManualStatus.OPEN, "");
         audit.warn("zone open zone_id={} found={} operator={}", zoneId, stored.isPresent(), operator(request));
+        return okOrNotFound(stored);
+    }
+
+    @PostMapping(PATH + "/{zoneId}/create-role/close")
+    public ResponseEntity<ZoneView> closeCreateRole(@PathVariable("zoneId") long zoneId, HttpServletRequest request) {
+        Optional<ZoneRow> stored = store.setCreateRoleClosed(requiredZone(zoneId), true);
+        audit.warn("zone create_role close zone_id={} found={} operator={}", zoneId, stored.isPresent(), operator(request));
+        return okOrNotFound(stored);
+    }
+
+    @PostMapping(PATH + "/{zoneId}/create-role/open")
+    public ResponseEntity<ZoneView> openCreateRole(@PathVariable("zoneId") long zoneId, HttpServletRequest request) {
+        Optional<ZoneRow> stored = store.setCreateRoleClosed(requiredZone(zoneId), false);
+        audit.warn("zone create_role open zone_id={} found={} operator={}", zoneId, stored.isPresent(), operator(request));
+        return okOrNotFound(stored);
+    }
+
+    @PutMapping(PATH + "/{zoneId}/role-capacity")
+    public ResponseEntity<ZoneView> setRoleCapacity(@PathVariable("zoneId") long zoneId,
+                                                    @RequestBody RoleCapacityBody body,
+                                                    HttpServletRequest request) {
+        if (body == null || body.roleCapacity() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "role_capacity 必填");
+        }
+        Optional<ZoneRow> stored = checked(() -> store.setRoleCapacity(requiredZone(zoneId), body.roleCapacity()));
+        audit.warn("zone role_capacity zone_id={} role_capacity={} found={} operator={}",
+                zoneId, body.roleCapacity(), stored.isPresent(), operator(request));
         return okOrNotFound(stored);
     }
 

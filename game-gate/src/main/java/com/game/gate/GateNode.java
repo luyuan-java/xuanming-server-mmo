@@ -249,6 +249,9 @@ public final class GateNode {
         bossGroup = new NioEventLoopGroup(1, new DefaultThreadFactory("gate-accept"));
         workerGroup = new NioEventLoopGroup(properties.workerThreads(), new DefaultThreadFactory("gate-io"));
         SessionRegistry sessions = registry;
+        com.game.common.net.SourcePrefixRateLimiter sourceRateLimiter =
+                new com.game.common.net.SourcePrefixRateLimiter(20.0, 200.0);
+        int maxConnections = properties.maxConnections();
         serverChannel = new ServerBootstrap()
                 .group(bossGroup, workerGroup)
                 .channel(NioServerSocketChannel.class)
@@ -258,7 +261,7 @@ public final class GateNode {
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
-                        ClientPipeline.install(ch.pipeline(), sessions, dispatcher);
+                        ClientPipeline.install(ch.pipeline(), sessions, dispatcher, maxConnections, sourceRateLimiter);
                     }
                 })
                 .bind(properties.clientPort())
@@ -314,6 +317,13 @@ public final class GateNode {
 
     static GateNodeInfo directoryEntry(int zoneId, int nodeId, String instanceId, String clientHost, int clientPort,
                                        int playerCount, long startedAtMs, long leaseEpoch, String clientWsUrl) {
+        return directoryEntry(zoneId, nodeId, instanceId, clientHost, clientPort, playerCount, startedAtMs, leaseEpoch,
+                clientWsUrl, 0);
+    }
+
+    static GateNodeInfo directoryEntry(int zoneId, int nodeId, String instanceId, String clientHost, int clientPort,
+                                       int playerCount, long startedAtMs, long leaseEpoch, String clientWsUrl,
+                                       int maxConnections) {
         GateNodeInfo.Builder b = GateNodeInfo.newBuilder()
                 .setZoneId(zoneId)
                 .setNodeId(nodeId)
@@ -323,7 +333,8 @@ public final class GateNode {
                 .setPlayerCount(playerCount)
                 .setDraining(false)
                 .setStartedAtMs(startedAtMs)
-                .setLeaseEpoch(leaseEpoch);
+                .setLeaseEpoch(leaseEpoch)
+                .setMaxConnections(Math.max(0, maxConnections));
         if (clientWsUrl != null && !clientWsUrl.isEmpty()) {
             b.setClientWsUrl(clientWsUrl);
         }
@@ -335,7 +346,7 @@ public final class GateNode {
         synchronized (directoryIoLock) {
             if (acceptingStopped) return;
             GateNodeInfo info = directoryEntry(zoneId, lease.nodeId(), instanceId, advertiseHost, properties.advertisePort(),
-                    registry.size(), startedAtMs, lease.leaseEpoch(), clientWsUrl);
+                    registry.size(), startedAtMs, lease.leaseEpoch(), clientWsUrl, properties.maxConnections());
             try {
                 gateDirectory.publish(zoneId, lease.nodeId(), info, DIRECTORY_TTL);
             } catch (RuntimeException e) {

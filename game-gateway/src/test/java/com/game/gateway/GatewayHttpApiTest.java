@@ -342,7 +342,8 @@ class GatewayHttpApiTest {
         assertThat(zones.size()).isEqualTo(4);
 
         JsonNode open = zones.get(0);
-        assertThat(keys(open)).containsExactlyInAnyOrder("zone_id", "name", "status", "is_new", "recommended");
+        assertThat(keys(open)).containsExactlyInAnyOrder("zone_id", "name", "status", "is_new", "recommended",
+                "create_role_closed");
         assertThat(open.get("zone_id").isInt()).isTrue();
         assertThat(open.get("zone_id").intValue()).isEqualTo(1);
         assertThat(open.get("name").asText()).isEqualTo("一区");
@@ -351,10 +352,11 @@ class GatewayHttpApiTest {
         assertThat(open.get("is_new").booleanValue()).isFalse();
         assertThat(open.get("recommended").isBoolean()).isTrue();
         assertThat(open.get("recommended").booleanValue()).isTrue();
+        assertThat(open.get("create_role_closed").booleanValue()).isFalse();
 
         JsonNode maintenance = zones.get(1);
         assertThat(keys(maintenance)).containsExactlyInAnyOrder(
-                "zone_id", "name", "status", "maintenance_msg", "is_new", "recommended");
+                "zone_id", "name", "status", "maintenance_msg", "is_new", "recommended", "create_role_closed");
         assertThat(maintenance.get("zone_id").intValue()).isEqualTo(2);
         assertThat(maintenance.get("status").asText()).isEqualTo("MAINTENANCE");
         assertThat(maintenance.get("maintenance_msg").asText()).isEqualTo("停服维护中");
@@ -362,18 +364,48 @@ class GatewayHttpApiTest {
 
         JsonNode closed = zones.get(2);
         assertThat(keys(closed)).as("同基线：关闭区文案为空也下发空串").containsExactlyInAnyOrder(
-                "zone_id", "name", "status", "maintenance_msg", "is_new", "recommended");
+                "zone_id", "name", "status", "maintenance_msg", "is_new", "recommended", "create_role_closed");
         assertThat(closed.get("zone_id").intValue()).isEqualTo(3);
         assertThat(closed.get("status").asText()).isEqualTo("CLOSED");
         assertThat(closed.get("maintenance_msg").asText()).isEmpty();
 
         JsonNode preview = zones.get(3);
         assertThat(keys(preview)).containsExactlyInAnyOrder("zone_id", "name", "status", "open_time", "is_new",
-                "recommended");
+                "recommended", "create_role_closed");
         assertThat(preview.get("status").asText()).isEqualTo("PREVIEW");
         assertThat(preview.get("open_time").isIntegralNumber()).isTrue();
         assertThat(preview.get("open_time").longValue()).isEqualTo(1_900_000_000L);
         assertThat(preview.get("is_new").booleanValue()).as("7 天内创建").isTrue();
+    }
+
+    @Test
+    void 区服列表_满员或暂停创角让出推荐_自动推荐负载率最低的开放可创角区() {
+        long now = System.currentTimeMillis();
+        var freshDir = new com.game.gateway.zone.ZoneDirectory(() -> List.of(
+                new ZoneRow(1, "爆满推荐区", 0, 45_000, "", null, true, 1, false, 0, 0, now),
+                new ZoneRow(2, "暂停创角区", 0, 45_000, "", null, true, 2, true, 100, 0, now),
+                new ZoneRow(3, "较忙区", 0, 45_000, "", null, false, 3, false, 0, 0, now),
+                new ZoneRow(4, "最空区", 0, 45_000, "", null, false, 4, false, 0, 0, now)), System::nanoTime);
+        ZoneHealthProbe freshProbe = org.mockito.Mockito.mock(ZoneHealthProbe.class);
+        when(freshProbe.health(anyInt())).thenReturn(ZoneHealthProbe.Health.HEALTHY);
+        when(freshProbe.loadLevel(1)).thenReturn(Optional.of(ZoneHealthProbe.LoadLevel.FULL));
+        when(freshProbe.loadLevel(2)).thenReturn(Optional.of(ZoneHealthProbe.LoadLevel.SMOOTH));
+        when(freshProbe.loadLevel(3)).thenReturn(Optional.of(ZoneHealthProbe.LoadLevel.BUSY));
+        when(freshProbe.loadLevel(4)).thenReturn(Optional.of(ZoneHealthProbe.LoadLevel.SMOOTH));
+        when(freshProbe.loadRatio(1)).thenReturn(java.util.OptionalDouble.of(0.95));
+        when(freshProbe.loadRatio(2)).thenReturn(java.util.OptionalDouble.of(0.10));
+        when(freshProbe.loadRatio(3)).thenReturn(java.util.OptionalDouble.of(0.60));
+        when(freshProbe.loadRatio(4)).thenReturn(java.util.OptionalDouble.of(0.20));
+
+        var controller = new com.game.gateway.serverlist.ServerListController(freshDir, freshProbe, java.time.Clock.systemUTC());
+        var list = controller.serverList().zones();
+        assertThat(list.get(0).recommended()).as("FULL 运维推荐区让出推荐").isFalse();
+        assertThat(list.get(1).recommended()).as("暂停创角区不推荐").isFalse();
+        assertThat(list.get(1).createRoleClosed()).isTrue();
+        assertThat(list.get(2).recommended()).isFalse();
+        assertThat(list.get(3).recommended()).as("自动补推负载率最低的可创角开放区").isTrue();
+        assertThat(controller.capacityCounts())
+                .isEqualTo(new com.game.gateway.serverlist.ServerListController.CapacityCounts(4.0, 3.0));
     }
 
     @Test
@@ -449,7 +481,7 @@ class GatewayHttpApiTest {
         when(accountLogin.login(org.mockito.ArgumentMatchers.any())).thenReturn(CompletableFuture.completedFuture(
                 LoginResponse.newBuilder()
                         .addPlayers(AccountSimplePlayerWrapper.newBuilder().setPlayer(AccountSimplePlayer.newBuilder()
-                                .setPlayerId(11).setName("道友aaaaaa")))
+                                .setPlayerId(11).setZoneId(1).setName("道友aaaaaa")))
                         .setAccessToken("a".repeat(43)).setRefreshToken("r".repeat(43))
                         .setAccessTokenExpire(100).setRefreshTokenExpire(200).build()));
 
@@ -461,8 +493,9 @@ class GatewayHttpApiTest {
         assertThat(resp.get("code").intValue()).isZero();
         assertThat(resp.get("access_token").asText()).hasSize(43);
         assertThat(resp.get("access_token_expire").isIntegralNumber()).isTrue();
-        assertThat(keys(resp.get("players").get(0))).containsExactlyInAnyOrder("player_id", "name", "level");
+        assertThat(keys(resp.get("players").get(0))).containsExactlyInAnyOrder("player_id", "name", "level", "zone_id");
         assertThat(resp.get("players").get(0).get("player_id").longValue()).isEqualTo(11);
+        assertThat(resp.get("players").get(0).get("zone_id").longValue()).isEqualTo(1);
     }
 
     @Test

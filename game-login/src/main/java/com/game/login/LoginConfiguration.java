@@ -386,6 +386,11 @@ public class LoginConfiguration {
      * 建角。新角色的归属区取<b>会话所在的 zone</b>（gate 填的），不取本进程的 {@code game.zone-id}：
      * login 不分 zone，一个进程服务全部 zone 的 gate。
      */
+    @Bean
+    public com.game.login.handler.ZoneCreateRolePolicy zoneCreateRolePolicy(javax.sql.DataSource source) {
+        return new com.game.login.handler.ZoneCreateRolePolicy.SqlCached(source);
+    }
+
     /** 兼容既有 9 参调用（如接线单测）。 */
     public CreatePlayerHandler createPlayerHandler(PlayerStore store, CharacterRules characterRules,
                                                    PlayerIdGenerator playerIds, LoginProperties props,
@@ -393,7 +398,8 @@ public class LoginConfiguration {
                                                    ZoneMergeFence zoneMergeFence, RedissonClient redis,
                                                    RedisKeys redisKeys) {
         return createPlayerHandler(store, characterRules, playerIds, props, loginMetrics, accountLogin,
-                zoneMergeFence, redis, redisKeys, (CreatePlayerHandler.TextGuard) null);
+                zoneMergeFence, redis, redisKeys, (CreatePlayerHandler.TextGuard) null,
+                com.game.login.handler.ZoneCreateRolePolicy.OPEN);
     }
 
     @Bean
@@ -402,21 +408,24 @@ public class LoginConfiguration {
                                                    LoginMetrics loginMetrics, AccountLogin accountLogin,
                                                    ZoneMergeFence zoneMergeFence, RedissonClient redis,
                                                    RedisKeys redisKeys,
-                                                   ObjectProvider<CreatePlayerHandler.TextGuard> textGuard) {
+                                                   ObjectProvider<CreatePlayerHandler.TextGuard> textGuard,
+                                                   ObjectProvider<com.game.login.handler.ZoneCreateRolePolicy> createRolePolicy) {
         return createPlayerHandler(store, characterRules, playerIds, props, loginMetrics, accountLogin,
-                zoneMergeFence, redis, redisKeys, textGuard.getIfAvailable());
+                zoneMergeFence, redis, redisKeys, textGuard.getIfAvailable(),
+                createRolePolicy.getIfAvailable(() -> com.game.login.handler.ZoneCreateRolePolicy.OPEN));
     }
 
     private CreatePlayerHandler createPlayerHandler(PlayerStore store, CharacterRules characterRules,
                                                     PlayerIdGenerator playerIds, LoginProperties props,
                                                     LoginMetrics loginMetrics, AccountLogin accountLogin,
                                                     ZoneMergeFence zoneMergeFence, RedissonClient redis,
-                                                    RedisKeys redisKeys, CreatePlayerHandler.TextGuard textGuard) {
+                                                    RedisKeys redisKeys, CreatePlayerHandler.TextGuard textGuard,
+                                                    com.game.login.handler.ZoneCreateRolePolicy createRolePolicy) {
         SecureRandom random = new SecureRandom();
         return new CreatePlayerHandler(store, characterRules, playerIds, () -> random.nextInt(256),
                 zoneMergeFence, props.maxPlayersPerAccount(), loginMetrics, accountLogin::renewDevice,
                 InFlightKeys.distributed(redis, account -> redisKeys.loginInFlight("create", account), IN_FLIGHT_TTL),
-                textGuard);
+                textGuard, createRolePolicy);
     }
 
     /** 显式开启 game.login.content-guard-enabled=true 时接入内容安全 Dubbo 服务。 */

@@ -38,4 +38,9 @@ public interface AccountLoginService {
     default CompletableFuture<AccountDeletionResponse> cancelAccountDeletion(CancelAccountDeletionRequest request) {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("cancelAccountDeletion not implemented"));
     }
+
+    /** 统计该区历史上已建角色总数（含已删除角色，删角不减；供网关按角色软上限自动暂停创角）。 */
+    default CompletableFuture<Long> countZoneRoles(int zoneId) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("countZoneRoles not implemented"));
+    }
 }

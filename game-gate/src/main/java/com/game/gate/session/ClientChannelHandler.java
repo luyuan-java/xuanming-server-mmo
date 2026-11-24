@@ -1,5 +1,6 @@
 package com.game.gate.session;
 
+import com.game.common.net.SourcePrefixRateLimiter;
 import com.game.gate.metrics.GateMetrics.DisconnectReason;
 import com.game.proto.ClientRequest;
 import com.game.proto.ClientHeartbeatRequest;
@@ -7,6 +8,7 @@ import com.game.proto.ClientTokenVerifyRequest;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.util.ReferenceCountUtil;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import org.slf4j.Logger;
@@ -22,16 +24,43 @@ public final class ClientChannelHandler extends ChannelInboundHandlerAdapter {
 
     private final SessionRegistry registry;
     private final ClientDispatcher dispatcher;
+    private final int maxConnections;
+    private final SourcePrefixRateLimiter sourceRateLimiter;
     private ClientSession session;
 
     public ClientChannelHandler(SessionRegistry registry, ClientDispatcher dispatcher) {
+        this(registry, dispatcher, 0, null);
+    }
+
+    public ClientChannelHandler(SessionRegistry registry, ClientDispatcher dispatcher,
+                                int maxConnections, SourcePrefixRateLimiter sourceRateLimiter) {
         this.registry = registry;
         this.dispatcher = dispatcher;
+        this.maxConnections = Math.max(0, maxConnections);
+        this.sourceRateLimiter = sourceRateLimiter;
     }
 
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
-        session = registry.open(ctx.channel(), peerIp(ctx.channel().remoteAddress()));
+        SocketAddress remote = ctx.channel().remoteAddress();
+        int current = registry.size();
+        if (maxConnections > 0 && current >= maxConnections) {
+            log.warn("客户端连接数已达上限 max={} current={}，拒绝新连接 peer={}", maxConnections, current, remote);
+            dispatcher.metrics().disconnected(DisconnectReason.MAX_CONNECTIONS);
+            ctx.close();
+            return;
+        }
+        if (sourceRateLimiter != null && sourceRateLimiter.enabled()) {
+            boolean underPressure = maxConnections > 0 && current >= (maxConnections * 8L) / 10L;
+            InetAddress inet = remote instanceof InetSocketAddress isa ? isa.getAddress() : null;
+            if (!sourceRateLimiter.tryAdmit(inet, underPressure)) {
+                log.warn("承压期公网来源前缀限速拒绝新连接 current={} max={} peer={}", current, maxConnections, remote);
+                dispatcher.metrics().disconnected(DisconnectReason.SOURCE_RATE_LIMITED);
+                ctx.close();
+                return;
+            }
+        }
+        session = registry.open(ctx.channel(), peerIp(remote));
         if (session == null) {
             log.warn("会话号已耗尽，拒绝新连接 peer={}", ctx.channel().remoteAddress());
             dispatcher.metrics().disconnected(DisconnectReason.SESSION_ID_EXHAUSTED);

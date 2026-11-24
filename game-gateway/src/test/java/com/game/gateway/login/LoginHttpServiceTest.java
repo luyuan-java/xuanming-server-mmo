@@ -89,7 +89,7 @@ class LoginHttpServiceTest {
         assertThat(response.refreshToken()).isNull();
         String json = new ObjectMapper().setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
                 .writeValueAsString(response);
-        assertThat(json).isEqualTo("{\"code\":0,\"players\":[{\"player_id\":11,\"name\":null,\"level\":0}],"
+        assertThat(json).isEqualTo("{\"code\":0,\"players\":[{\"player_id\":11,\"name\":null,\"level\":0,\"zone_id\":0}],"
                 + "\"access_token_expire\":0,\"refresh_token_expire\":0}");
     }
 
@@ -214,7 +214,7 @@ class LoginHttpServiceTest {
         ObjectMapper json = new ObjectMapper().setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
         String ok = json.writeValueAsString(HttpLoginResponse.ok(
                 List.of(new HttpLoginResponse.PlayerInfo(11, "n", 0)), "a", "r", 100, 200));
-        assertThat(ok).isEqualTo("{\"code\":0,\"players\":[{\"player_id\":11,\"name\":\"n\",\"level\":0}],"
+        assertThat(ok).isEqualTo("{\"code\":0,\"players\":[{\"player_id\":11,\"name\":\"n\",\"level\":0,\"zone_id\":0}],"
                 + "\"access_token\":\"a\",\"refresh_token\":\"r\",\"access_token_expire\":100,\"refresh_token_expire\":200}");
         assertThat(json.writeValueAsString(HttpLoginResponse.ok(List.of(), "", "", 0, 0))).contains("\"players\":[]");
         assertThat(json.writeValueAsString(HttpLoginResponse.error(401, "upstream_err=2000")))

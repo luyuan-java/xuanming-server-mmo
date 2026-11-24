@@ -238,7 +238,8 @@ public final class LoginHttpService {
         List<HttpLoginResponse.PlayerInfo> players = new ArrayList<>(response.getPlayersCount());
         for (AccountSimplePlayerWrapper wrapper : response.getPlayersList()) {
             AccountSimplePlayer player = wrapper.getPlayer();
-            players.add(new HttpLoginResponse.PlayerInfo(player.getPlayerId(), emptyToNull(player.getName()), 0));
+            players.add(new HttpLoginResponse.PlayerInfo(
+                    player.getPlayerId(), emptyToNull(player.getName()), 0, Integer.toUnsignedLong(player.getZoneId())));
         }
         HttpAntiAddictionStatus aa = response.hasAntiAddiction()
                 ? HttpAntiAddictionStatus.from(response.getAntiAddiction())

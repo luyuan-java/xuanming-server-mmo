@@ -48,6 +48,10 @@ public interface PlayerMapper {
     @Select("SELECT COUNT(*) FROM player WHERE account = #{account}")
     int countByAccount(@Param("account") String account);
 
+    /** 统计该区历史上已建角色总数（走 idx_player_zone，含已删除角色，删角不减）。 */
+    @Select("SELECT COUNT(*) FROM player WHERE zone_id = (CASE WHEN #{zoneId}<0 THEN #{zoneId}+4294967296 ELSE #{zoneId} END)")
+    long countByZone(@Param("zoneId") int zoneId);
+
     @Select("SELECT " + PLAYER_COLUMNS + " FROM player WHERE player_id = #{playerId}")
     PlayerRow selectById(@Param("playerId") long playerId);
 

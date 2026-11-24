@@ -23,7 +23,7 @@ public interface GatewayStoreMapper {
     String U32 = "typeHandler=com.game.gateway.store.UnsignedZoneIdTypeHandler";
 
     String ZONE_COLUMNS = "zone_id, name, manual_status, capacity, maintenance_msg, open_time, recommended, sort_order,"
-            + " created_at, updated_at";
+            + " create_role_closed, role_capacity, created_at, updated_at";
 
     // ------------------------------------------------------------------ 区服目录
 
@@ -37,6 +37,8 @@ public interface GatewayStoreMapper {
             @Arg(column = "open_time", javaType = Long.class),
             @Arg(column = "recommended", javaType = boolean.class),
             @Arg(column = "sort_order", javaType = int.class),
+            @Arg(column = "create_role_closed", javaType = boolean.class),
+            @Arg(column = "role_capacity", javaType = int.class),
             @Arg(column = "created_at", javaType = long.class),
             @Arg(column = "updated_at", javaType = long.class)})
     @Select("SELECT " + ZONE_COLUMNS + " FROM zone_config ORDER BY sort_order, zone_id")
@@ -46,9 +48,10 @@ public interface GatewayStoreMapper {
     @Select("SELECT " + ZONE_COLUMNS + " FROM zone_config WHERE zone_id = #{zoneId," + U32 + "}")
     ZoneRow selectZone(@Param("zoneId") int zoneId);
 
-    /** 创建或整行覆盖业务列（保留 created_at），同基线 create 的 upsert 语义。 */
+    /** 创建或整行覆盖基础业务列（保留 created_at、create_role_closed 与 role_capacity），同基线 create 的 upsert 语义。 */
     @Insert("INSERT INTO zone_config (" + ZONE_COLUMNS + ") VALUES (#{z.zoneId," + U32 + "}, #{z.name}, #{z.manualStatus},"
-            + " #{z.capacity}, #{z.maintenanceMsg}, #{z.openTime}, #{z.recommended}, #{z.sortOrder}, #{now}, #{now})"
+            + " #{z.capacity}, #{z.maintenanceMsg}, #{z.openTime}, #{z.recommended}, #{z.sortOrder},"
+            + " #{z.createRoleClosed}, #{z.roleCapacity}, #{now}, #{now})"
             + " ON DUPLICATE KEY UPDATE name = VALUES(name), manual_status = VALUES(manual_status),"
             + " capacity = VALUES(capacity), maintenance_msg = VALUES(maintenance_msg), open_time = VALUES(open_time),"
             + " recommended = VALUES(recommended), sort_order = VALUES(sort_order), updated_at = VALUES(updated_at)")
@@ -56,7 +59,8 @@ public interface GatewayStoreMapper {
 
     /** 只在不存在时插入（启动时按配置播种，已有的不动）。 */
     @Insert("INSERT IGNORE INTO zone_config (" + ZONE_COLUMNS + ") VALUES (#{z.zoneId," + U32 + "}, #{z.name}, #{z.manualStatus},"
-            + " #{z.capacity}, #{z.maintenanceMsg}, #{z.openTime}, #{z.recommended}, #{z.sortOrder}, #{now}, #{now})")
+            + " #{z.capacity}, #{z.maintenanceMsg}, #{z.openTime}, #{z.recommended}, #{z.sortOrder},"
+            + " #{z.createRoleClosed}, #{z.roleCapacity}, #{now}, #{now})")
     int insertZoneIfAbsent(@Param("z") ZoneRow zone, @Param("now") long nowMs);
 
     @Update("UPDATE zone_config SET name = #{z.name}, manual_status = #{z.manualStatus}, capacity = #{z.capacity},"
@@ -69,6 +73,22 @@ public interface GatewayStoreMapper {
             + " updated_at = #{now} WHERE zone_id = #{zoneId," + U32 + "}")
     int updateZoneStatus(@Param("zoneId") int zoneId, @Param("status") int status, @Param("msg") String maintenanceMsg,
                          @Param("now") long nowMs);
+
+    /** 只改暂停创角开关（不碰其它列）。 */
+    @Update("UPDATE zone_config SET create_role_closed = #{closed}, updated_at = #{now} WHERE zone_id = #{zoneId," + U32 + "}")
+    int updateCreateRoleClosed(@Param("zoneId") int zoneId, @Param("closed") boolean closed, @Param("now") long nowMs);
+
+    /** 只改本区注册角色软上限（0 = 不设上限）。 */
+    @Update("UPDATE zone_config SET role_capacity = #{roleCapacity}, updated_at = #{now} WHERE zone_id = #{zoneId," + U32 + "}")
+    int updateRoleCapacity(@Param("zoneId") int zoneId, @Param("roleCapacity") int roleCapacity, @Param("now") long nowMs);
+
+    /** 比较并写自动暂停创角：仅当 role_capacity 仍等于判定时读到的正值且开关未关闭时生效。 */
+    @Update("UPDATE zone_config SET create_role_closed = 1, updated_at = #{now}"
+            + " WHERE zone_id = #{zoneId," + U32 + "}"
+            + " AND role_capacity = #{expectedRoleCapacity} AND role_capacity > 0 AND create_role_closed = 0")
+    int closeCreateRoleIfRoleCapacityMatches(@Param("zoneId") int zoneId,
+                                             @Param("expectedRoleCapacity") int expectedRoleCapacity,
+                                             @Param("now") long nowMs);
 
     @Delete("DELETE FROM zone_config WHERE zone_id = #{zoneId," + U32 + "}")
     int deleteZone(@Param("zoneId") int zoneId);

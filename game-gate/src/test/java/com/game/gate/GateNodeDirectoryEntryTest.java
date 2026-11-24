@@ -86,6 +86,8 @@ class GateNodeDirectoryEntryTest {
         assertThat(published).extracting(GateNodeInfo::getLeaseEpoch).containsExactly(101L, 102L);
         assertThat(published.getLast()).isEqualTo(published.getFirst().toBuilder().setLeaseEpoch(102).build());
         assertThat(published.getFirst().getPlayerCount()).isEqualTo(42);
+        assertThat(published.getFirst().getMaxConnections()).isEqualTo(GateProperties.DEFAULT_MAX_CONNECTIONS);
+        assertThat(GateNodeInfo.getDescriptor().findFieldByName("max_connections").getNumber()).isEqualTo(11);
         assertThat(published.getFirst().getStartedAtMs()).isEqualTo(node.startedAtMs());
         assertThat(published.getFirst().getInstanceId()).isNotBlank();
     }

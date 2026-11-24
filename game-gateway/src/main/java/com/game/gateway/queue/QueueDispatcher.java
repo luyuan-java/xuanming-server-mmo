@@ -1,6 +1,7 @@
 package com.game.gateway.queue;
 
 import com.game.api.proto.GateNodeInfo;
+import com.game.discovery.gate.GateInflight;
 import com.game.discovery.gate.GatePicker;
 import com.game.discovery.gate.GateSource;
 import com.game.gateway.store.ZoneManualStatus;
@@ -45,17 +46,24 @@ public final class QueueDispatcher {
     private final GateSource gates;
     private final Leadership leadership;
     private final LongConsumer onAdmit;
+    private final GateInflight inflight;
     private boolean leader;
 
     /** @param onAdmit 每段放行后以放行人数调用（计数） */
     public QueueDispatcher(LoginQueue queue, QueueCapacity capacity, ZoneDirectory zones, GateSource gates,
                            Leadership leadership, LongConsumer onAdmit) {
+        this(queue, capacity, zones, gates, leadership, onAdmit, null);
+    }
+
+    public QueueDispatcher(LoginQueue queue, QueueCapacity capacity, ZoneDirectory zones, GateSource gates,
+                           Leadership leadership, LongConsumer onAdmit, GateInflight inflight) {
         this.queue = queue;
         this.capacity = capacity;
         this.zones = zones;
         this.gates = gates;
         this.leadership = leadership;
         this.onAdmit = onAdmit;
+        this.inflight = inflight;
     }
 
     /**
@@ -120,10 +128,12 @@ public final class QueueDispatcher {
         if (budget <= 0) {
             return;
         }
-        // 这一轮已分给各 gate 的人数（gate 目录里的人数要等 gate 下次发布才含这些人）
+        // 这一轮已分给各 gate 的人数 + 本进程 20s 窗口内前几拍/快速通道在途票（避免跨拍堆到同一台）
+        Map<Integer, Integer> inflightSnapshot = inflight == null ? Map.of() : inflight.snapshot();
         Map<Integer, Long> assigned = new HashMap<>();
         Comparator<GateNodeInfo> load = Comparator
                 .comparingLong((GateNodeInfo g) -> Integer.toUnsignedLong(g.getPlayerCount())
+                        + inflightSnapshot.getOrDefault(g.getNodeId(), 0)
                         + assigned.getOrDefault(g.getNodeId(), 0L))
                 .thenComparingLong(g -> Integer.toUnsignedLong(g.getNodeId()));
         int admitted = 0;
@@ -137,6 +147,9 @@ public final class QueueDispatcher {
             expired += d.expired();
             if (d.admitted() > 0) {
                 assigned.merge(gate.getNodeId(), (long) d.admitted(), Long::sum);
+                if (inflight != null) {
+                    inflight.record(gate.getNodeId(), d.admitted());
+                }
                 onAdmit.accept(d.admitted());
             }
             if (d.popped() < CHUNK) {

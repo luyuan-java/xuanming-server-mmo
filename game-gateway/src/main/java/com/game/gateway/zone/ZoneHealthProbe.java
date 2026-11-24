@@ -2,12 +2,14 @@ package com.game.gateway.zone;
 
 import com.game.api.proto.GateNodeInfo;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.discovery.gate.GatePicker;
 import com.game.gateway.store.ZoneRow;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.function.IntFunction;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -15,17 +17,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 区服健康探测与负载档（同 mmorpg ZoneHealthProbeService），只影响区服列表的展示，不影响准入：
+ * 区服健康探测与负载档（同 mmorpg ZoneHealthProbeService），只影响区服列表的展示与自动推荐，不影响准入：
  * <ul>
  *   <li>某区一台 gate 都没有 → {@link Health#DOWN}（列表里手工 OPEN 的区显示 MAINTENANCE）；有 gate 没 scene →
  *       {@link Health#DEGRADED}（仍显示 OPEN）；都有 → {@link Health#HEALTHY}；</li>
- *   <li>负载档 = 全区 gate 在线人数 / capacity：&lt; 0.5 SMOOTH、&lt; 0.8 BUSY、否则 FULL；capacity ≤ 0 → SMOOTH；</li>
- *   <li>一轮探测的结果作为一个不可变快照原子发布；探测失败（读区服表 / 节点目录出错）保留上一份，快照超过
- *       {@code statusTtl}（缺省 15 s）或从没成功过 → {@link Health#UNKNOWN}（不下发负载档、不降级显示）。连续 3 次失败升 ERROR。</li>
+ *   <li>负载档分母 = {@code min(zone.capacity, Σ 本区 gate 的 ceil(max_connections * 90%))}；目录容量 ≤ 0 时仅看 gate 水位和；
+ *       任一 gate 未声明上限（{@code max_connections == 0}）时不封顶。&lt; 0.5 SMOOTH、&lt; 0.8 BUSY、否则 FULL；分母 ≤ 0 → SMOOTH；</li>
+ *   <li>同时记录负载率 {@code online / effectiveCapacity} 供区服列表自动补推荐时按最空区排序。</li>
  * </ul>
- * 节点目录读失败抛异常、不当成「没有节点」（否则一次 Redis 抖动全服显示维护）。
- *
- * <p>{@link #probe()} 由单个调度线程周期调用；读方法线程安全。
  */
 public final class ZoneHealthProbe {
 
@@ -45,7 +44,8 @@ public final class ZoneHealthProbe {
         SMOOTH, BUSY, FULL
     }
 
-    private record Snapshot(Map<Integer, Health> health, Map<Integer, LoadLevel> load, long capturedAtMs) {
+    private record Snapshot(Map<Integer, Health> health, Map<Integer, LoadLevel> load,
+                            Map<Integer, Double> loadRatio, long capturedAtMs) {
     }
 
     private final Supplier<List<ZoneRow>> zones;
@@ -70,6 +70,7 @@ public final class ZoneHealthProbe {
         try {
             Map<Integer, Health> health = new HashMap<>();
             Map<Integer, LoadLevel> load = new HashMap<>();
+            Map<Integer, Double> ratios = new HashMap<>();
             for (ZoneRow zone : zones.get()) {
                 List<GateNodeInfo> zoneGates = gates.apply(zone.zoneId());
                 health.put(zone.zoneId(), zoneGates.isEmpty() ? Health.DOWN
@@ -78,9 +79,11 @@ public final class ZoneHealthProbe {
                 for (GateNodeInfo gate : zoneGates) {
                     online += Integer.toUnsignedLong(gate.getPlayerCount());
                 }
-                load.put(zone.zoneId(), loadLevel(online, zone.capacity()));
+                long cap = effectiveCapacity(zone, zoneGates);
+                load.put(zone.zoneId(), loadLevel(online, cap));
+                ratios.put(zone.zoneId(), cap <= 0 ? 0.0 : (double) online / cap);
             }
-            snapshot = new Snapshot(Map.copyOf(health), Map.copyOf(load), nowMs.getAsLong());
+            snapshot = new Snapshot(Map.copyOf(health), Map.copyOf(load), Map.copyOf(ratios), nowMs.getAsLong());
             consecutiveFailures = 0;
         } catch (RuntimeException e) {
             consecutiveFailures++;
@@ -93,7 +96,30 @@ public final class ZoneHealthProbe {
         }
     }
 
-    static LoadLevel loadLevel(long online, int capacity) {
+    /**
+     * 计算列表负载档的分母：取 {@code zone.capacity} 与本区全部可连 gate 到 90% 水位总承载的较小者；
+     * 目录容量 ≤ 0 时仅看 gate 水位和；任一 gate 未声明上限（0）时不封顶。
+     */
+    static long effectiveCapacity(ZoneRow zone, List<GateNodeInfo> zoneGates) {
+        List<GateNodeInfo> connectable = GatePicker.connectableNewest(zone.zoneId(), zoneGates);
+        long gateCap = 0L;
+        boolean gateBounded = !connectable.isEmpty();
+        for (GateNodeInfo gate : connectable) {
+            int max = gate.getMaxConnections();
+            if (max == 0) {
+                gateBounded = false;
+                break;
+            }
+            gateCap += GatePicker.watermarkCapacity(max);
+        }
+        long configured = zone.capacity();
+        if (gateBounded) {
+            return configured > 0 ? Math.min(configured, gateCap) : gateCap;
+        }
+        return configured;
+    }
+
+    static LoadLevel loadLevel(long online, long capacity) {
         if (capacity <= 0) {
             return LoadLevel.SMOOTH;
         }
@@ -113,6 +139,16 @@ public final class ZoneHealthProbe {
     public Optional<LoadLevel> loadLevel(int zoneId) {
         Snapshot current = snapshot;
         return fresh(current) ? Optional.ofNullable(current.load().get(zoneId)) : Optional.empty();
+    }
+
+    /** 负载率（online / effectiveCapacity）；快照过期 / 没有这个区为空。 */
+    public OptionalDouble loadRatio(int zoneId) {
+        Snapshot current = snapshot;
+        if (!fresh(current)) {
+            return OptionalDouble.empty();
+        }
+        Double r = current.loadRatio().get(zoneId);
+        return r == null ? OptionalDouble.empty() : OptionalDouble.of(r);
     }
 
     private boolean fresh(Snapshot current) {
