@@ -79,6 +79,11 @@ class GuildTipsTest {
         codes.put("TRIAL_INVITE_COOLDOWN", GuildTips.TRIAL_INVITE_COOLDOWN);
         codes.put("TRIAL_SERVICE_BUSY", GuildTips.TRIAL_SERVICE_BUSY);
         codes.put("TRIAL_BATTLE_ABORTED", GuildTips.TRIAL_BATTLE_ABORTED);
+        codes.put("NAME_SENSITIVE", GuildTips.NAME_SENSITIVE);
+        codes.put("ANNOUNCEMENT_SENSITIVE", GuildTips.ANNOUNCEMENT_SENSITIVE);
+        codes.put("TEXT_CHECK_UNAVAILABLE", GuildTips.TEXT_CHECK_UNAVAILABLE);
+        codes.put("RENAME_COOLDOWN", GuildTips.RENAME_COOLDOWN);
+        codes.put("RENAME_SAME_NAME", GuildTips.RENAME_SAME_NAME);
         return codes;
     }
 
@@ -133,14 +138,16 @@ class GuildTipsTest {
     void 只有发号器不可用与历练服务繁忙是故障() {
         guildCodes().forEach((name, code) ->
                 assertThat(GuildTips.isFault(code)).as("%s = %d 的 fault 分类", name, code)
-                        .isEqualTo(name.equals("ID_GEN_UNAVAILABLE") || name.equals("TRIAL_SERVICE_BUSY")));
-        assertThat(GuildTips.FAULTS).containsExactlyInAnyOrder(14008, 14041);
+                        .isEqualTo(name.equals("ID_GEN_UNAVAILABLE") || name.equals("TRIAL_SERVICE_BUSY")
+                                || name.equals("TEXT_CHECK_UNAVAILABLE")));
+        assertThat(GuildTips.FAULTS).containsExactlyInAnyOrder(14008, 14041, 14045);
         assertThat(GuildTips.isFault(GuildTips.OK)).isFalse();
         assertThat(GuildTips.isFault(GuildTips.SERVICE_UNAVAILABLE)).as("信封 1003 另计 internal_error").isFalse();
         for (GuildTip tip : GuildTip.values()) {
-            // 4.5：资产指令 op_id 发号失败同为 14008（economy_logic.go:386-401）
+            // 4.5：资产指令 op_id 发号失败同为 14008；内容安全不可用为 14045
             assertThat(tip.fault()).as(tip.name())
-                    .isEqualTo(tip == GuildTip.ID_GENERATOR_UNAVAILABLE || tip == GuildTip.ASSET_OP_ID_UNAVAILABLE);
+                    .isEqualTo(tip == GuildTip.ID_GENERATOR_UNAVAILABLE || tip == GuildTip.ASSET_OP_ID_UNAVAILABLE
+                            || tip == GuildTip.TEXT_CHECK_UNAVAILABLE);
         }
     }
 
@@ -199,6 +206,7 @@ class GuildTipsTest {
         want.put(GuildTip.GUILD_FULL, new Object[] {14003, "guild is full"});
         want.put(GuildTip.LEADER_CANT_LEAVE, new Object[] {14004, "leader cannot leave, disband or transfer instead"});
         want.put(GuildTip.NOT_GUILD_LEADER, new Object[] {14005, "not guild leader"});
+        want.put(GuildTip.NOT_LEADER_RENAME, new Object[] {14005, "only leader can rename guild"});
         want.put(GuildTip.NO_PERMISSION, new Object[] {14006, "no permission"});
         want.put(GuildTip.ROLE_NOT_ASSIGNABLE, new Object[] {14006, "role not assignable"});
         want.put(GuildTip.NOT_RANKED, new Object[] {14007, "guild not ranked"});
@@ -239,6 +247,11 @@ class GuildTipsTest {
         want.put(GuildTip.COUNT_EXCEEDS_MAX_BUY, new Object[] {14030, "count exceeds max buy count"});
         want.put(GuildTip.SHOP_LIMIT, new Object[] {14030, "shop purchase limit reached"});
         want.put(GuildTip.CONTRIBUTION_INSUFFICIENT, new Object[] {14031, "contribution insufficient"});
+        want.put(GuildTip.NAME_SENSITIVE, new Object[] {14043, "text refused"});
+        want.put(GuildTip.ANNOUNCEMENT_SENSITIVE, new Object[] {14044, "text refused"});
+        want.put(GuildTip.TEXT_CHECK_UNAVAILABLE, new Object[] {14045, "content check unavailable"});
+        want.put(GuildTip.RENAME_COOLDOWN, new Object[] {14046, "guild rename cooldown"});
+        want.put(GuildTip.RENAME_SAME_NAME, new Object[] {14047, "guild rename same name"});
         want.put(GuildTip.FEATURE_UNAVAILABLE, new Object[] {1006, "guild feature unavailable"});
         // 客户端幂等键（mmorpg 05-economy.md 顶部「客户端幂等键」覆盖块；基线 economy_logic.go clientRequestMismatch 的原因串）
         want.put(GuildTip.CLIENT_REQUEST_CONFLICT, new Object[] {1005, "client_request_id reused with different parameters"});
@@ -292,6 +305,8 @@ class GuildTipsTest {
         want.put(GuildReject.TOO_MANY_PENDING, tip(GuildTip.TOO_MANY_PENDING, MappingRepair.NONE));
         // 经济服务在映射之前拦下它；漏到映射时回「忙，请重试」，客户端带同一个键重发会在事务前的查重里拿到首次结果
         want.put(GuildReject.CLIENT_REQUEST_REPLAYED, tip(GuildTip.WRITE_CONFLICT, MappingRepair.NONE));
+        want.put(GuildReject.RENAME_COOLDOWN, tip(GuildTip.RENAME_COOLDOWN, MappingRepair.NONE));
+        want.put(GuildReject.RENAME_SAME_NAME, tip(GuildTip.RENAME_SAME_NAME, MappingRepair.NONE));
 
         assertThat(want.keySet()).as("每个 GuildReject 都要登记").isEqualTo(EnumSet.allOf(GuildReject.class));
         want.forEach((reject, reply) ->

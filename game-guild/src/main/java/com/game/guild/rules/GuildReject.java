@@ -72,7 +72,14 @@ public enum GuildReject {
      * 捐献 / 兑换预留在锁住本人成员行之后读到同一 (玩家, client_request_id) 的去重记录：首次请求已经写成了指令（基线
      * data.ErrClientRequestReplayed）。事务已回滚、什么都没写；不是业务拒绝也不是故障——经济服务在映射之前拦下它，按去重记录回首次结果。
      */
-    CLIENT_REQUEST_REPLAYED("guild client request already applied");
+    CLIENT_REQUEST_REPLAYED("guild client request already applied"),
+
+    // ---- 帮会改名 ----
+
+    /** 距上一次帮会改名尚未满 GuildRule.rename_cooldown_seconds。 */
+    RENAME_COOLDOWN("guild rename is in cooldown"),
+    /** 新帮会名规范化后与当前帮会名一致。 */
+    RENAME_SAME_NAME("guild rename target equals current name");
 
     private final String sentinel;
 

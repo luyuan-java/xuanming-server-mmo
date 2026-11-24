@@ -10,6 +10,7 @@ import com.game.guild.store.GuildStore.Created;
 import com.game.guild.store.GuildStore.Disbanded;
 import com.game.guild.store.GuildStore.Kicked;
 import com.game.guild.store.GuildStore.Left;
+import com.game.guild.store.GuildStore.Renamed;
 import com.game.guild.store.GuildStore.Reviewed;
 import com.game.guild.store.GuildStore.RoleChanged;
 import com.game.guild.store.GuildStore.Transferred;
@@ -51,6 +52,7 @@ class GuildStoreResultsTest {
         assertThat(new Disbanded(G, 2, LEADER, List.of(LEADER, OFFICER, MEMBER)).invalidation())
                 .isEqualTo(Invalidation.of(GuildTxOp.DISBAND, G, LEADER, OFFICER, MEMBER));
         assertThat(new AnnouncementUpdated(snap, OFFICER).invalidation()).isEqualTo(Invalidation.of(GuildTxOp.ANNOUNCEMENT, G));
+        assertThat(new Renamed(snap, LEADER, 10_000L).invalidation()).isEqualTo(Invalidation.of(GuildTxOp.RENAME, G));
     }
 
     @Test
@@ -68,6 +70,7 @@ class GuildStoreResultsTest {
         assertThat(new Disbanded(G, 2, LEADER, List.of(LEADER, OFFICER, MEMBER)).pushRecipients())
                 .containsExactly(OFFICER, MEMBER);
         assertThat(new AnnouncementUpdated(snap, OFFICER).pushRecipients()).containsExactly(LEADER, MEMBER);
+        assertThat(new Renamed(snap, LEADER, 10_000L).pushRecipients()).containsExactly(OFFICER, MEMBER);
     }
 
     @Test
@@ -111,7 +114,7 @@ class GuildStoreResultsTest {
         assertThat(GuildTxOp.APPLY.budgetMillis()).isEqualTo(1_500L);
         assertThat(java.util.Arrays.stream(GuildTxOp.values()).map(GuildTxOp::label)).containsExactly(
                 "create", "set_role", "kick", "transfer", "leave", "apply", "cancel", "review", "disband", "announcement",
-                "verify_mapping", "score", "upgrade", "asset_finalize", "activity", "trial_settle", "donate", "shop",
+                "rename", "verify_mapping", "score", "upgrade", "asset_finalize", "activity", "trial_settle", "donate", "shop",
                 "insert_guard");
     }
 }

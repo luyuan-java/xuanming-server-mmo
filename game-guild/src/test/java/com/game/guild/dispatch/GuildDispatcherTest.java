@@ -78,15 +78,15 @@ class GuildDispatcherTest {
     // ================================================================ 路由与启动校验
 
     @Test
-    void 接管GuildService的全部28个号() {
+    void 接管GuildService的全部29个号() {
         Set<Integer> expected = new HashSet<>();
         for (String method : GuildMethods.all()) {
             expected.add(id(method));
         }
-        assertThat(expected).hasSize(28);
+        assertThat(expected).hasSize(29);
         GuildDispatcher d = dispatcher();
         assertThat(d.routedMessageIds()).isEqualTo(expected);
-        assertThat(d.messageIdsOf(GuildMethods.CLIENT_REQUESTS)).hasSize(16);
+        assertThat(d.messageIdsOf(GuildMethods.CLIENT_REQUESTS)).hasSize(17);
         assertThat(d.messageIdsOf(GuildMethods.ECONOMY_REQUESTS)).containsExactlyInAnyOrder(53, 76, 120, 228, 233);
         assertThat(d.messageIdsOf(GuildMethods.FORBIDDEN)).containsExactlyInAnyOrder(8, 220);
         assertThat(d.messageIdsOf(GuildMethods.PLACEHOLDERS)).containsExactlyInAnyOrder(239, 240, 241, 242, 243);

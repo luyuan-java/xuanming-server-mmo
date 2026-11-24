@@ -129,7 +129,7 @@ class GuildPushesTest {
         }
         assertThat(GuildPushes.kindLabel(GuildChangeKind.GUILD_CHANGE_KIND_UNSPECIFIED)).isEqualTo("other");
         assertThat(GuildPushes.kindLabel(GuildChangeKind.UNRECOGNIZED)).isEqualTo("other");
-        assertThat(GuildPushes.KIND_LABELS).hasSize(14).doesNotHaveDuplicates();
+        assertThat(GuildPushes.KIND_LABELS).hasSize(15).doesNotHaveDuplicates();
         for (String kind : GuildPushes.KIND_LABELS) {
             for (String outcome : List.of("ok", "offline", "error", "session_error")) {
                 assertThat(count(kind, outcome)).isZero();

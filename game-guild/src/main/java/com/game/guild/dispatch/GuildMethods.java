@@ -28,6 +28,7 @@ public final class GuildMethods {
     public static final String LEAVE_GUILD = "LeaveGuild";
     public static final String DISBAND_GUILD = "DisbandGuild";
     public static final String SET_ANNOUNCEMENT = "SetAnnouncement";
+    public static final String RENAME_GUILD = "RenameGuild";
     public static final String SET_GUILD_MEMBER_ROLE = "SetGuildMemberRole";
     public static final String KICK_GUILD_MEMBER = "KickGuildMember";
     public static final String TRANSFER_GUILD_LEADER = "TransferGuildLeader";
@@ -58,9 +59,9 @@ public final class GuildMethods {
     public static final String RESPOND_GUILD_TRIAL_INVITE = "RespondGuildTrialInvite";
 
     public static final List<String> CLIENT_REQUESTS = List.of(CREATE_GUILD, GET_GUILD, GET_PLAYER_GUILD, LEAVE_GUILD,
-            DISBAND_GUILD, SET_ANNOUNCEMENT, SET_GUILD_MEMBER_ROLE, KICK_GUILD_MEMBER, TRANSFER_GUILD_LEADER, APPLY_JOIN_GUILD,
-            CANCEL_GUILD_APPLICATION, LIST_MY_GUILD_APPLICATIONS, LIST_GUILD_APPLICATIONS, REVIEW_GUILD_APPLICATION,
-            GET_GUILD_RANK, GET_GUILD_RANK_BY_GUILD);
+            DISBAND_GUILD, SET_ANNOUNCEMENT, RENAME_GUILD, SET_GUILD_MEMBER_ROLE, KICK_GUILD_MEMBER, TRANSFER_GUILD_LEADER,
+            APPLY_JOIN_GUILD, CANCEL_GUILD_APPLICATION, LIST_MY_GUILD_APPLICATIONS, LIST_GUILD_APPLICATIONS,
+            REVIEW_GUILD_APPLICATION, GET_GUILD_RANK, GET_GUILD_RANK_BY_GUILD);
 
     public static final List<String> ECONOMY_REQUESTS = List.of(GET_GUILD_DONATE_OPTIONS, DONATE_TO_GUILD, UPGRADE_GUILD,
             GET_GUILD_SHOP, BUY_GUILD_SHOP_GOODS);

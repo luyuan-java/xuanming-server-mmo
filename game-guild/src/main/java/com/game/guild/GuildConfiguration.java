@@ -2,8 +2,14 @@ package com.game.guild;
 
 import com.alibaba.druid.pool.DruidDataSource;
 import com.game.guild.activity.GuildActivityService;
+import com.game.api.ContentGuardService;
+import com.game.api.DubboGroups;
 import com.game.api.asset.SceneAssetOpClients;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.proto.content_guard.CheckTextRequest;
+import org.apache.dubbo.config.annotation.DubboReference;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import com.game.common.GameNamespace;
 import com.game.common.deadline.Deadline;
 import com.game.common.id.Snowflake;
@@ -454,11 +460,32 @@ public class GuildConfiguration {
                 System::currentTimeMillis);
     }
 
-    @Bean
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(name = "game.guild.content-guard-enabled", havingValue = "true")
+    static class ContentGuardClientConfiguration {
+        @DubboReference(group = DubboGroups.CONTENT_GUARD, check = false, timeout = 1500, retries = 0)
+        private ContentGuardService contentGuard;
+
+        @Bean
+        public GuildService.TextGuard guildTextGuard() {
+            return (scene, playerId, text) -> contentGuard.checkText(CheckTextRequest.newBuilder()
+                    .setScene(scene).setPlayerId(playerId).setText(text).build());
+        }
+    }
+
+    /** 保留给集成测试手装调用（不启用内容安全 RPC）。 */
     public GuildService guildService(GuildStore store, GuildCache cache, GuildAccess access, GuildViews views,
                                      GuildRanks ranks, GuildPushes pushes, GuildIds guildIds, GuildTableLookup tables) {
         return new GuildService(store, cache, access, views, ranks, pushes, guildIds::nextId, tables,
                 System::currentTimeMillis);
+    }
+
+    @Bean
+    public GuildService guildService(GuildStore store, GuildCache cache, GuildAccess access, GuildViews views,
+                                     GuildRanks ranks, GuildPushes pushes, GuildIds guildIds, GuildTableLookup tables,
+                                     ObjectProvider<GuildService.TextGuard> textGuardProvider) {
+        return new GuildService(store, cache, access, views, ranks, pushes, guildIds::nextId, tables,
+                System::currentTimeMillis, textGuardProvider.getIfAvailable());
     }
 
     @Bean

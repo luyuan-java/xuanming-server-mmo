@@ -3,6 +3,7 @@ package com.game.guild.service;
 import com.game.guild.rules.GuildTableRules;
 import com.game.guild.rules.GuildTableRules.ApplicationRules;
 import com.game.guild.rules.GuildTableRules.LevelDisplay;
+import com.game.guild.rules.GuildTableRules.RenameRules;
 import com.game.table.ConfigTables;
 import java.util.OptionalInt;
 import java.util.function.Supplier;
@@ -28,6 +29,11 @@ public interface GuildTableLookup {
     /** GuildLevel[level] 的两个展示字段；null = 缺该等级行。 */
     LevelDisplay levelDisplay(int level);
 
+    /** GuildRule[1] 换算成的帮会改名规则（缺行回落 7d/7d/1000，同基线 guildRenameRuleParams）。 */
+    default RenameRules renameRules() {
+        return RenameRules.DEFAULTS;
+    }
+
     /** 以配表快照为数据源（{@code tables} 每次调用现取，便于将来整体替换快照做热更）。 */
     static GuildTableLookup of(Supplier<ConfigTables> tables) {
         return new GuildTableLookup() {
@@ -49,6 +55,11 @@ public interface GuildTableLookup {
             @Override
             public LevelDisplay levelDisplay(int level) {
                 return GuildTableRules.levelDisplay(tables.get(), level);
+            }
+
+            @Override
+            public RenameRules renameRules() {
+                return GuildTableRules.renameRules(tables.get());
             }
         };
     }

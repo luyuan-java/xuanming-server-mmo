@@ -40,6 +40,7 @@ import com.game.proto.guild.KickGuildMemberRequest;
 import com.game.proto.guild.LeaveGuildRequest;
 import com.game.proto.guild.ListGuildApplicationsRequest;
 import com.game.proto.guild.ListMyGuildApplicationsRequest;
+import com.game.proto.guild.RenameGuildRequest;
 import com.game.proto.guild.ReviewGuildApplicationRequest;
 import com.game.proto.guild.SetAnnouncementRequest;
 import com.game.proto.guild.SetGuildMemberRoleRequest;
@@ -157,6 +158,7 @@ public final class GuildDispatcher {
         client(byId, GuildMethods.LEAVE_GUILD, LeaveGuildRequest.class, (session, request, deadline) -> guilds.forActor(session).leaveGuild(session.getPlayerId(), request, deadline));
         client(byId, GuildMethods.DISBAND_GUILD, DisbandGuildRequest.class, (session, request, deadline) -> guilds.forActor(session).disbandGuild(session.getPlayerId(), request, deadline));
         client(byId, GuildMethods.SET_ANNOUNCEMENT, SetAnnouncementRequest.class, (session, request, deadline) -> guilds.forActor(session).setAnnouncement(session.getPlayerId(), request, deadline));
+        client(byId, GuildMethods.RENAME_GUILD, RenameGuildRequest.class, (session, request, deadline) -> guilds.forActor(session).renameGuild(session.getPlayerId(), request, deadline));
         client(byId, GuildMethods.SET_GUILD_MEMBER_ROLE, SetGuildMemberRoleRequest.class, (session, request, deadline) -> manage.forActor(session).setGuildMemberRole(session.getPlayerId(), request, deadline));
         client(byId, GuildMethods.KICK_GUILD_MEMBER, KickGuildMemberRequest.class, (session, request, deadline) -> manage.forActor(session).kickGuildMember(session.getPlayerId(), request, deadline));
         client(byId, GuildMethods.TRANSFER_GUILD_LEADER, TransferGuildLeaderRequest.class, (session, request, deadline) -> manage.forActor(session).transferGuildLeader(session.getPlayerId(), request, deadline));

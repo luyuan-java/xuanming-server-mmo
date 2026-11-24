@@ -49,6 +49,8 @@ public enum GuildTip {
     LEADER_CANT_LEAVE(GuildTips.LEADER_CANT_LEAVE, "leader cannot leave, disband or transfer instead"),
     /** <b>只用于解散</b>：事务说职位不够（guild_logic.go:494-498）。 */
     NOT_GUILD_LEADER(GuildTips.NOT_LEADER, "not guild leader"),
+    /** 帮会改名：非帮主发起（guild_rename_logic.go:75）。 */
+    NOT_LEADER_RENAME(GuildTips.NOT_LEADER, "only leader can rename guild"),
     /** 公告：不在该帮或职位不足（guild_logic.go:544-546）。 */
     NO_PERMISSION(GuildTips.NO_PERMISSION, "no permission"),
     /** 任免的 role 不是 0 / 1（guild_manage_logic.go:384-386）。 */
@@ -151,6 +153,19 @@ public enum GuildTip {
     SHOP_LIMIT(GuildTips.SHOP_LIMIT, "shop purchase limit reached"),
     /** 帮贡预判与事务内（economy_logic.go:331-332、:1021-1022）。 */
     CONTRIBUTION_INSUFFICIENT(GuildTips.CONTRIBUTION_INSUFFICIENT, "contribution insufficient"),
+
+    // ---- 14043–14047 内容安全与帮会改名 ----
+
+    /** 建帮 / 改名命中敏感词（content_check.go:49）。 */
+    NAME_SENSITIVE(GuildTips.NAME_SENSITIVE, "text refused"),
+    /** 公告命中敏感词（content_check.go:49）。 */
+    ANNOUNCEMENT_SENSITIVE(GuildTips.ANNOUNCEMENT_SENSITIVE, "text refused"),
+    /** 内容安全服务不可达或超时（content_check.go:46；in-band 故障码 14045）。 */
+    TEXT_CHECK_UNAVAILABLE(GuildTips.TEXT_CHECK_UNAVAILABLE, "content check unavailable"),
+    /** 帮会改名冷却中（guild_rename_logic.go:67）。 */
+    RENAME_COOLDOWN(GuildTips.RENAME_COOLDOWN, "guild rename cooldown"),
+    /** 新帮名规范化后与当前帮名一致（guild_rename_logic.go:71）。 */
+    RENAME_SAME_NAME(GuildTips.RENAME_SAME_NAME, "guild rename same name"),
 
     // ---- 通用段 ----
 

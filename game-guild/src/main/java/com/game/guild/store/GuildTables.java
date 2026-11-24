@@ -5,6 +5,7 @@ import com.game.guild.store.pb.GuildAssetOpRow;
 import com.game.guild.store.pb.GuildClientRequestRow;
 import com.game.guild.store.pb.GuildDailyCounterRow;
 import com.game.guild.store.pb.GuildMemberRow;
+import com.game.guild.store.pb.GuildNameHoldRow;
 import com.game.guild.store.pb.GuildPlayerOpSeqRow;
 import com.game.guild.store.pb.GuildPlayerStateRow;
 import com.game.guild.store.pb.GuildRow;
@@ -33,21 +34,23 @@ public final class GuildTables {
     public static final String DAILY_COUNTER = "guild_daily_counter";
     /** guild_client_request（R，客户端幂等键的去重记录，排在 C 之后；2026-10-15）。 */
     public static final String CLIENT_REQUEST = "guild_client_request";
+    /** guild_name_hold（H，帮会改名旧名保护表，全序末尾）。 */
+    public static final String NAME_HOLD = "guild_name_hold";
 
     /**
-     * 表名，顺序即全库表间锁序 G &lt; S &lt; M &lt; A &lt; Q &lt; O &lt; C &lt; R（tables.go:15-21；R 只由捐献 / 兑换预留在事务最后插入、
-     * 由清理单行点删，见 guild_tables.proto）。4.6 往后追加 P。
+     * 表名，顺序即全库表间锁序 G &lt; S &lt; M &lt; A &lt; Q &lt; O &lt; C &lt; R &lt; H（tables.go:15-21；R 只由捐献 / 兑换预留在事务最后插入、
+     * 由清理单行点删，H 在改名 / 建帮写完 guild 之后查改，见 guild_tables.proto）。4.6 往后追加 P。
      * 手写 SQL 里的表名字面量必须与这里（= guild_tables.proto 的 table_name）一致，GuildTablesTest 钉住。
      */
     public static final List<String> NAMES = List.of("guild", "guild_player_state", "guild_member", "guild_application",
-            PLAYER_OP_SEQ, ASSET_OP, DAILY_COUNTER, CLIENT_REQUEST);
+            PLAYER_OP_SEQ, ASSET_OP, DAILY_COUNTER, CLIENT_REQUEST, NAME_HOLD);
 
     /** 与 {@link #NAMES} 一一对应的表消息原型。 */
     public static final List<Message> PROTOTYPES = List.of(GuildRow.getDefaultInstance(),
             GuildPlayerStateRow.getDefaultInstance(), GuildMemberRow.getDefaultInstance(),
             GuildApplicationRow.getDefaultInstance(), GuildPlayerOpSeqRow.getDefaultInstance(),
             GuildAssetOpRow.getDefaultInstance(), GuildDailyCounterRow.getDefaultInstance(),
-            GuildClientRequestRow.getDefaultInstance());
+            GuildClientRequestRow.getDefaultInstance(), GuildNameHoldRow.getDefaultInstance());
 
     private GuildTables() {
     }

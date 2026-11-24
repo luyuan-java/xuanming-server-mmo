@@ -81,10 +81,10 @@ public final class GuildPushes {
     /** 未知的 kind 一律归到这个标签（基线 changeKindLabel 的 default）。 */
     public static final String OTHER_KIND = "other";
 
-    /** kind 标签的固定集合：13 个有意义的值 + other（基线 push.go:232-269，含 4.5 / 4.6 的四个；指标启动即全部预建）。 */
+    /** kind 标签的固定集合：14 个有意义的值 + other（基线 push.go:232-269，含 4.5 / 4.6 与改名；指标启动即全部预建）。 */
     public static final List<String> KIND_LABELS = List.of("member_joined", "member_left", "member_kicked", "role_changed",
             "leader_transferred", "disbanded", "application_received", "application_rejected", "funds_changed", "level_up",
-            "announcement_changed", "activity_changed", "delivery_done", OTHER_KIND);
+            "announcement_changed", "activity_changed", "delivery_done", "renamed", OTHER_KIND);
 
     private final Pusher pusher;
     private final PushMetrics metrics;
@@ -266,6 +266,7 @@ public final class GuildPushes {
             case GUILD_CHANGE_KIND_ANNOUNCEMENT_CHANGED -> "announcement_changed";
             case GUILD_CHANGE_KIND_ACTIVITY_CHANGED -> "activity_changed";
             case GUILD_CHANGE_KIND_DELIVERY_DONE -> "delivery_done";
+            case GUILD_CHANGE_KIND_RENAMED -> "renamed";
             default -> OTHER_KIND;
         };
     }

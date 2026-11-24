@@ -7,6 +7,7 @@ import com.game.guild.store.pb.GuildAssetOpRow;
 import com.game.guild.store.pb.GuildClientRequestRow;
 import com.game.guild.store.pb.GuildDailyCounterRow;
 import com.game.guild.store.pb.GuildMemberRow;
+import com.game.guild.store.pb.GuildNameHoldRow;
 import com.game.guild.store.pb.GuildPlayerOpSeqRow;
 import com.game.guild.store.pb.GuildPlayerStateRow;
 import com.game.guild.store.pb.GuildRow;
@@ -16,6 +17,7 @@ import com.game.proto.guild.GuildAssetOpRecord;
 import com.game.proto.guild.GuildClientRequestRecord;
 import com.game.proto.guild.GuildDailyCounterRecord;
 import com.game.proto.guild.GuildMemberRecord;
+import com.game.proto.guild.GuildNameHoldRecord;
 import com.game.proto.guild.GuildPlayerOpSeqRecord;
 import com.game.proto.guild.GuildPlayerStateRecord;
 import com.game.proto.guild.GuildRecord;
@@ -69,6 +71,7 @@ class GuildTablesTest {
                 "  `funds` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:10',",
                 "  `name_norm` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL DEFAULT '' COMMENT 'pb:11',",
                 "  `score_version` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:12',",
+                "  `renamed_ms` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:13',",
                 "  PRIMARY KEY (`guild_id`) /*T![clustered_index] NONCLUSTERED */,",
                 "  INDEX `idx_guild_0` (`zone_id`),",
                 "  INDEX `idx_guild_1` (`leader_id`),",
@@ -104,7 +107,7 @@ class GuildTablesTest {
     @Test
     void 登记顺序就是表间锁序() {
         assertThat(GuildTables.NAMES).containsExactly("guild", "guild_player_state", "guild_member", "guild_application",
-                "guild_player_op_seq", "guild_asset_op", "guild_daily_counter", "guild_client_request");
+                "guild_player_op_seq", "guild_asset_op", "guild_daily_counter", "guild_client_request", "guild_name_hold");
         PbMysql db = GuildTables.registry();
         List<String> registered = GuildTables.PROTOTYPES.stream().map(m -> db.schema(m).tableName()).toList();
         assertThat(registered).isEqualTo(GuildTables.NAMES);
@@ -112,6 +115,15 @@ class GuildTablesTest {
         assertThat(GuildTables.ASSET_OP).isEqualTo(db.schema(GuildAssetOpRow.class).tableName());
         assertThat(GuildTables.DAILY_COUNTER).isEqualTo(db.schema(GuildDailyCounterRow.class).tableName());
         assertThat(GuildTables.CLIENT_REQUEST).isEqualTo(db.schema(GuildClientRequestRow.class).tableName());
+        assertThat(GuildTables.NAME_HOLD).isEqualTo(db.schema(GuildNameHoldRow.class).tableName());
+    }
+
+    @Test
+    void 改名保护表与同步来的guild_db逐字节相同() {
+        PbMysql java = GuildTables.registry();
+        PbMysql go = new PbMysql();
+        go.register(GuildNameHoldRecord.getDefaultInstance());
+        assertThat(ddl(java, GuildNameHoldRow.class)).isEqualTo(ddl(go, GuildNameHoldRecord.class));
     }
 
     /**

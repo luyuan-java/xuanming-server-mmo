@@ -149,7 +149,7 @@ class GuildCacheInvalidatorTest {
     void op标签与基线固定集合一致() {
         assertThat(java.util.Arrays.stream(InvalidationOp.values()).map(InvalidationOp::label)).containsExactly(
                 "create", "set_role", "kick", "transfer", "leave", "apply", "cancel", "review", "disband", "announcement",
-                "verify_mapping", "score", "upgrade", "asset_finalize", "activity", "trial_settle", "donate", "shop",
+                "rename", "verify_mapping", "score", "upgrade", "asset_finalize", "activity", "trial_settle", "donate", "shop",
                 "insert_guard");
         assertThat(InvalidationOp.ofLabel("verify_mapping")).isEqualTo(InvalidationOp.VERIFY_MAPPING);
         assertThatThrownBy(() -> InvalidationOp.ofLabel("nope")).isInstanceOf(IllegalArgumentException.class);

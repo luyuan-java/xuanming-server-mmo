@@ -50,7 +50,9 @@ message GuildRow {
   string name_norm = 11;      // NFKC → TrimSpace → 逐码点小写，≤ 48 码点；不声明 max_length，保持缺省 VARCHAR(191)（与 Go DDL 逐字相同）
   // 写分版本（guild_db.proto:48，2026-11-10）：基线在写 score 的同一事务里 +1、按版本重建榜；Java 暂只建列（PARITY Java 待做）。
   uint64 score_version = 12;
-  // 追加区：从 13 起。
+  // 上一次帮会改名成功的时刻 Unix 毫秒（0 = 从未改过名；冷却判定以此为准）。
+  uint64 renamed_ms = 13;
+  // 追加区：从 14 起。
 }
 
 // S：玩家串行化守卫行（guild_db.proto:42-53）。每玩家一行，只作锁行；player_id = 0 是全局插入守卫哨兵行（启动期建好、永不删除）。
@@ -236,4 +238,20 @@ message GuildClientRequestRow {
   uint64 op_id = 3;              // 首次写成的 guild_asset_op.op_id；种类与参数以那一行为准，本表不重复存
   uint64 created_ms = 4;         // = 那一行的 created_ms（预留事务的 now）；清理按它判龄
   // 追加区：从 5 起。
+}
+
+// H：帮会改名旧名保护表（锁序末尾，对齐 guild_db.proto GuildNameHoldRecord）。
+// 必须先写 guild（INSERT / UPDATE 持 uk_guild 锁）再查/改本表，防止并发抢注刚释放的旧名。
+message GuildNameHoldRow {
+  option (proto2mysql.table_name) = "guild_name_hold";
+  option (proto2mysql.primary_key) = "hold_id";
+  option (proto2mysql.unique_key) = "name_norm";
+  option (proto2mysql.tidb_nonclustered_pk) = true;
+  option (proto2mysql.tidb_shard_row_id_bits) = 4;
+  option (proto2mysql.tidb_pre_split_regions) = 4;
+
+  uint64 hold_id = 1;
+  string name_norm = 2;
+  uint64 guild_id = 3;
+  uint64 held_until_ms = 4;
 }

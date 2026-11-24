@@ -6,6 +6,7 @@ import com.game.guild.rules.GuildNames;
 import com.game.guild.rules.GuildReject;
 import com.game.guild.rules.GuildRoles;
 import com.game.guild.rules.GuildTableRules.ApplicationRules;
+import java.security.SecureRandom;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -15,6 +16,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -67,6 +69,25 @@ public final class JdbcGuildStore implements GuildStore {
     static final String UPDATE_LEADER = "UPDATE guild SET leader_id = ? WHERE guild_id = ?";
     /** G5：改公告（不检查 RowsAffected：写同样的文本是 0 行）。 */
     static final String UPDATE_ANNOUNCEMENT = "UPDATE guild SET announcement = ? WHERE guild_id = ?";
+    /** G6：改名锁 guild 行。 */
+    static final String LOCK_GUILD_FOR_RENAME =
+            "SELECT name_norm, leader_id, funds, renamed_ms FROM guild WHERE guild_id = ? FOR UPDATE";
+    /** G7：改名更新 name / name_norm（先抢 uk_guild 锁）。 */
+    static final String UPDATE_GUILD_NAME = "UPDATE guild SET name = ?, name_norm = ? WHERE guild_id = ?";
+    /** G11：改名扣资金并记改名时刻。 */
+    static final String DEDUCT_FUNDS_AND_STAMP_RENAME =
+            "UPDATE guild SET funds = funds - ?, renamed_ms = ? WHERE guild_id = ? AND funds >= ?";
+    /** H1：锁旧名保护行。 */
+    static final String LOCK_NAME_HOLD =
+            "SELECT hold_id, guild_id, held_until_ms FROM guild_name_hold WHERE name_norm = ? FOR UPDATE";
+    /** H2：删过期/本帮旧名保护行。 */
+    static final String DELETE_NAME_HOLD = "DELETE FROM guild_name_hold WHERE hold_id = ?";
+    /** H3：刷新旧名保护行。 */
+    static final String UPDATE_NAME_HOLD = "UPDATE guild_name_hold SET guild_id = ?, held_until_ms = ? WHERE hold_id = ?";
+    /** H4：插入旧名保护行。 */
+    static final String INSERT_NAME_HOLD =
+            "INSERT INTO guild_name_hold (hold_id, name_norm, guild_id, held_until_ms) VALUES (?, ?, ?, ?)";
+    private static final SecureRandom HOLD_ID_RANDOM = new SecureRandom();
     /** G8：归属区的非锁定读（authoritativeZoneID / readOperatorRole）。 */
     static final String SELECT_GUILD_ZONE = "SELECT zone_id FROM guild WHERE guild_id = ?";
     /** G9：loadGuild 的帮会行。 */
@@ -224,7 +245,7 @@ public final class JdbcGuildStore implements GuildStore {
             }
             // I2：成员行出现即清该玩家的全部申请（不清的话他日后离帮，72h 内的旧申请会按 I1「复活」）
             deleteApplicationsOfPlayer(t, leader.playerId());
-            // 最后一条写（登记例外）：之后只剩 COMMIT
+            // 最后一条写（登记例外）：之后检查旧名保护再 COMMIT
             try {
                 t.update(INSERT_GUILD, guild.guildId(), guild.name(), nameNorm, guild.leaderId(), guild.level(),
                         guild.announcement(), guild.createTimeMs(), guild.maxMembers(), guild.zoneId());
@@ -233,6 +254,9 @@ public final class JdbcGuildStore implements GuildStore {
                     return TxOutcome.reject(GuildReject.NAME_TAKEN);
                 }
                 throw e; // 撞主键等其它 1062：发号出了问题，按故障
+            }
+            if (!claimGuildNameHold(t, guild.guildId(), nameNorm, guild.createTimeMs())) {
+                return TxOutcome.reject(GuildReject.NAME_TAKEN);
             }
             return TxOutcome.ok(new Created(guild.guildId(), leader.playerId(), guild.zoneId()));
         });
@@ -653,6 +677,113 @@ public final class JdbcGuildStore implements GuildStore {
             return snapshot == null ? TxOutcome.reject(GuildReject.GUILD_GONE)
                     : TxOutcome.ok(new AnnouncementUpdated(snapshot, playerId));
         });
+    }
+
+    private record RenameLockRow(String oldNorm, long leaderId, long funds, long renamedMs) {
+    }
+
+    private record NameHoldRow(long holdId, long guildId, long heldUntilMs) {
+    }
+
+    @Override
+    public RenameOutcome renameGuild(long guildId, long leaderId, String newName, long cooldownMs, long holdMs,
+                                     long costFunds, long nowMs, Deadline deadline) {
+        String newNorm = GuildNames.nameNorm(newName);
+        if (newNorm == null) {
+            throw new IllegalArgumentException("帮会改名 " + id(guildId) + ": 帮名无法规范化");
+        }
+        AtomicLong rejectedNextAllowed = new AtomicLong(0L);
+        TxOutcome<Renamed> outcome = tx.run(GuildTxOp.RENAME, deadline, t -> {
+            RenameLockRow head = t.one(LOCK_GUILD_FOR_RENAME, rs -> new RenameLockRow(
+                    rs.getString(1) == null ? "" : rs.getString(1),
+                    GuildJdbc.u64(rs, 2), GuildJdbc.u64(rs, 3), GuildJdbc.u64(rs, 4)), guildId);
+            if (head == null) {
+                return TxOutcome.reject(GuildReject.GUILD_GONE);
+            }
+            Integer role = lockMemberRole(t, guildId, leaderId);
+            if (role == null) {
+                return TxOutcome.reject(GuildReject.NOT_MEMBER);
+            }
+            if (head.leaderId() != leaderId || GuildRoles.rank(role) != GuildRoles.Rank.LEADER) {
+                return TxOutcome.reject(GuildReject.RANK_TOO_LOW);
+            }
+            if (newNorm.equals(head.oldNorm())) {
+                return TxOutcome.reject(GuildReject.RENAME_SAME_NAME);
+            }
+            if (head.renamedMs() != 0 && cooldownMs > 0) {
+                long nextAllowed = head.renamedMs() + cooldownMs;
+                if (Long.compareUnsigned(nowMs, nextAllowed) < 0) {
+                    rejectedNextAllowed.set(nextAllowed);
+                    return TxOutcome.reject(GuildReject.RENAME_COOLDOWN);
+                }
+            }
+            if (Long.compareUnsigned(head.funds(), costFunds) < 0) {
+                return TxOutcome.reject(GuildReject.FUNDS_INSUFFICIENT);
+            }
+            // 先更新 guild 拿到 uk_guild 唯一索引锁，再查/写 guild_name_hold（防并发抢注与死锁）
+            try {
+                t.update(UPDATE_GUILD_NAME, newName, newNorm, guildId);
+            } catch (SQLException e) {
+                if (GuildSqlErrors.isDuplicateKeyOn(e, GUILD_NAME_UNIQUE_KEY)) {
+                    return TxOutcome.reject(GuildReject.NAME_TAKEN);
+                }
+                throw e;
+            }
+            if (!claimGuildNameHold(t, guildId, newNorm, nowMs)) {
+                return TxOutcome.reject(GuildReject.NAME_TAKEN);
+            }
+            if (holdMs > 0 && !head.oldNorm().isEmpty()) {
+                holdGuildName(t, guildId, head.oldNorm(), nowMs + holdMs);
+            }
+            int updated = t.update(DEDUCT_FUNDS_AND_STAMP_RENAME, costFunds, nowMs, guildId, costFunds);
+            if (updated != 1) {
+                throw new GuildStoreException(GuildStoreException.Kind.ROW_COUNT_MISMATCH,
+                        "帮会改名扣资金影响 " + updated + " 行 guild=" + id(guildId));
+            }
+            GuildData snapshot = loadGuild(t, guildId);
+            if (snapshot == null) {
+                return TxOutcome.reject(GuildReject.GUILD_GONE);
+            }
+            long nextAllowed = cooldownMs > 0 ? nowMs + cooldownMs : 0L;
+            return TxOutcome.ok(new Renamed(snapshot, leaderId, nextAllowed));
+        });
+        long nextAllowed = outcome instanceof TxOutcome.Ok<Renamed> ok ? ok.value().nextAllowedMs() : rejectedNextAllowed.get();
+        return new RenameOutcome(outcome, nextAllowed);
+    }
+
+    /** 校验新名是否被他帮未过期保护；属于本帮或已过期则顺手删掉。必须在已持 uk_guild 锁之后调用。 */
+    private static boolean claimGuildNameHold(GuildJdbc t, long guildId, String nameNorm, long nowMs) throws SQLException {
+        NameHoldRow hold = t.one(LOCK_NAME_HOLD, rs -> new NameHoldRow(
+                GuildJdbc.u64(rs, 1), GuildJdbc.u64(rs, 2), GuildJdbc.u64(rs, 3)), nameNorm);
+        if (hold == null) {
+            return true;
+        }
+        if (hold.guildId() != guildId && Long.compareUnsigned(hold.heldUntilMs(), nowMs) > 0) {
+            return false;
+        }
+        t.update(DELETE_NAME_HOLD, hold.holdId());
+        return true;
+    }
+
+    /** 将旧帮名写入保护表（同 name_norm 已有行则原地刷新）。 */
+    private static void holdGuildName(GuildJdbc t, long guildId, String oldNorm, long heldUntilMs) throws SQLException {
+        NameHoldRow existing = t.one(LOCK_NAME_HOLD, rs -> new NameHoldRow(
+                GuildJdbc.u64(rs, 1), GuildJdbc.u64(rs, 2), GuildJdbc.u64(rs, 3)), oldNorm);
+        if (existing != null) {
+            t.update(UPDATE_NAME_HOLD, guildId, heldUntilMs, existing.holdId());
+            return;
+        }
+        t.update(INSERT_NAME_HOLD, nextPositiveHoldId(), oldNorm, guildId, heldUntilMs);
+    }
+
+    private static long nextPositiveHoldId() {
+        for (int i = 0; i < 4; i++) {
+            long id = HOLD_ID_RANDOM.nextLong() & Long.MAX_VALUE;
+            if (id != 0L) {
+                return id;
+            }
+        }
+        return 1L;
     }
 
     // ================================================================ 读

@@ -39,8 +39,24 @@ public final class GuildTableRules {
     public static final int MAX_PENDING_PER_GUILD = 500;
     /** 至少容得下帮主 + 一个成员。 */
     public static final int MIN_GUILD_MAX_MEMBERS = 2;
+    /** 改名冷却与旧名保护期上限：365 天（基线 guild_rename_logic.go:17）。 */
+    public static final long MAX_RENAME_DURATION_SECONDS = 365L * 86_400L;
+    /** 改名消耗帮会资金上限（基线 guild_rename_logic.go:18）。 */
+    public static final long MAX_RENAME_COST_FUNDS = 1_000_000_000_000L;
 
     private static final long MILLIS_PER_HOUR = 3_600_000L;
+    private static final long MILLIS_PER_SECOND = 1_000L;
+
+    /**
+     * 帮会改名规则（基线 guild_rename_logic.go:22-30）。
+     *
+     * @param cooldownMs 改名冷却（毫秒；0 = 无冷却）
+     * @param nameHoldMs 旧名保护期（毫秒；0 = 不保护）
+     * @param costFunds  消耗帮会资金（uint64；0 = 免费）
+     */
+    public record RenameRules(long cooldownMs, long nameHoldMs, long costFunds) {
+        public static final RenameRules DEFAULTS = new RenameRules(7L * 86_400_000L, 7L * 86_400_000L, 1_000L);
+    }
 
     /**
      * 入帮申请的规则（guild_manage_logic.go:54-64 applicationRulesFromTable 的结果形态）。
@@ -98,6 +114,20 @@ public final class GuildTableRules {
                 MIN_PENDING_PER_PLAYER, MAX_PENDING_PER_PLAYER);
         checkRange("max_pending_applications_per_guild", rule.getMaxPendingApplicationsPerGuild(),
                 MIN_PENDING_PER_GUILD, MAX_PENDING_PER_GUILD);
+        long renameCooldownSec = Integer.toUnsignedLong(rule.getRenameCooldownSeconds());
+        if (renameCooldownSec > MAX_RENAME_DURATION_SECONDS) {
+            throw fail("GuildRule[%d].rename_cooldown_seconds=%d 越界,应在 [0,%d]",
+                    RULE_ROW_ID, renameCooldownSec, MAX_RENAME_DURATION_SECONDS);
+        }
+        long nameHoldSec = Integer.toUnsignedLong(rule.getNameHoldSeconds());
+        if (nameHoldSec > MAX_RENAME_DURATION_SECONDS) {
+            throw fail("GuildRule[%d].name_hold_seconds=%d 越界,应在 [0,%d]",
+                    RULE_ROW_ID, nameHoldSec, MAX_RENAME_DURATION_SECONDS);
+        }
+        if (Long.compareUnsigned(rule.getRenameCostFunds(), MAX_RENAME_COST_FUNDS) > 0) {
+            throw fail("GuildRule[%d].rename_cost_funds=%s 越界,应在 [0,%d]",
+                    RULE_ROW_ID, Long.toUnsignedString(rule.getRenameCostFunds()), MAX_RENAME_COST_FUNDS);
+        }
 
         if (levels == null || levels.isEmpty()) {
             throw fail("GuildLevel 表为空:建帮要读第 %d 级的 max_members", GuildLimits.DEFAULT_INIT_LEVEL);
@@ -169,6 +199,18 @@ public final class GuildTableRules {
         }
         return new ApplicationRules(Integer.toUnsignedLong(row.getApplicationExpireHours()) * MILLIS_PER_HOUR,
                 row.getMaxPendingApplicationsPerPlayer(), row.getMaxPendingApplicationsPerGuild());
+    }
+
+    /** 现查 GuildRule[1] 的帮会改名规则（缺行按基线回落默认值 7d/7d/1000）。 */
+    public static RenameRules renameRules(ConfigTables tables) {
+        GuildRuleTable row = tables.guildRule().find(RULE_ROW_ID).orElse(null);
+        if (row == null) {
+            return RenameRules.DEFAULTS;
+        }
+        return new RenameRules(
+                Integer.toUnsignedLong(row.getRenameCooldownSeconds()) * MILLIS_PER_SECOND,
+                Integer.toUnsignedLong(row.getNameHoldSeconds()) * MILLIS_PER_SECOND,
+                row.getRenameCostFunds());
     }
 
     /**

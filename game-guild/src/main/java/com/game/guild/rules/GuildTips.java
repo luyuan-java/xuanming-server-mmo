@@ -94,6 +94,19 @@ public final class GuildTips {
      */
     public static final int TRIAL_BATTLE_ABORTED = GuildErrorTip.guild_error.kGuildTrialBattleAborted_VALUE;
 
+    // ---- 内容安全与帮会改名（14043–14047） ----
+
+    /** 帮名命中敏感词。 */
+    public static final int NAME_SENSITIVE = GuildErrorTip.guild_error.kGuildNameSensitive_VALUE;
+    /** 公告命中敏感词。 */
+    public static final int ANNOUNCEMENT_SENSITIVE = GuildErrorTip.guild_error.kGuildAnnouncementSensitive_VALUE;
+    /** 内容安全服务不可达或超时（fault = 1）。 */
+    public static final int TEXT_CHECK_UNAVAILABLE = GuildErrorTip.guild_error.kGuildTextCheckUnavailable_VALUE;
+    /** 帮会改名冷却中。 */
+    public static final int RENAME_COOLDOWN = GuildErrorTip.guild_error.kGuildRenameCooldown_VALUE;
+    /** 新帮名与当前帮名相同。 */
+    public static final int RENAME_SAME_NAME = GuildErrorTip.guild_error.kGuildRenameSameName_VALUE;
+
     // ---- 通用段（tip_text.json） ----
 
     /** 信封故障：依赖故障、处理器异常、无会话、请求体非法、上行 8 / 220（§7.3）。 */
@@ -108,8 +121,8 @@ public final class GuildTips {
      */
     public static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
 
-    /** 帮会段内的 in-band 故障码集合（基线 faults.go:61-62：GuildIdGenUnavailable 与 4.6 的 GuildTrialServiceBusy）。 */
-    public static final Set<Integer> FAULTS = Set.of(ID_GEN_UNAVAILABLE, TRIAL_SERVICE_BUSY);
+    /** 帮会段内的 in-band 故障码集合（基线 faults.go：GuildIdGenUnavailable、GuildTrialServiceBusy、GuildTextCheckUnavailable）。 */
+    public static final Set<Integer> FAULTS = Set.of(ID_GEN_UNAVAILABLE, TRIAL_SERVICE_BUSY, TEXT_CHECK_UNAVAILABLE);
 
     /** 故障答复（ErrLeaderMismatch / ErrGuildLevelConfigMissing）的基线 gRPC 文案（guild_manage_logic.go:325）。 */
     public static final String INCONSISTENT_REASON = "guild data or configuration is inconsistent";
@@ -178,6 +191,8 @@ public final class GuildTips {
             // 经济服务在映射之前就拦下它（按去重记录回首次结果）；别的写事务不会产生它。万一漏到这里回「忙，请重试」：
             // 客户端带同一个键重发，会在事务前的查重里直接拿到首次结果，不会重复执行。
             case CLIENT_REQUEST_REPLAYED -> tip(GuildTip.WRITE_CONFLICT);
+            case RENAME_COOLDOWN -> tip(GuildTip.RENAME_COOLDOWN);
+            case RENAME_SAME_NAME -> tip(GuildTip.RENAME_SAME_NAME);
         };
     }
 

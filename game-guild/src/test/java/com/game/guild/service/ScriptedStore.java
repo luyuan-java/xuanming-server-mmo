@@ -49,6 +49,7 @@ public final class ScriptedStore implements GuildStore {
     BiFunction<Long, Boolean, TxOutcome<Reviewed>> review;
     Function<Long, TxOutcome<Disbanded>> disband;
     BiFunction<Long, String, TxOutcome<AnnouncementUpdated>> announce;
+    BiFunction<Long, String, RenameOutcome> rename;
 
     // ---- 记下的入参 ----
     volatile int lastApplyZone = -1;
@@ -141,6 +142,13 @@ public final class ScriptedStore implements GuildStore {
                                                              Deadline deadline) {
         journal.accept("store.announce g=" + guildId + " p=" + playerId);
         return script(announce, "updateAnnouncement").apply(guildId, announcement);
+    }
+
+    @Override
+    public RenameOutcome renameGuild(long guildId, long leaderId, String newName, long cooldownMs, long holdMs,
+                                     long costFunds, long nowMs, Deadline deadline) {
+        journal.accept("store.rename g=" + guildId + " leader=" + leaderId + " cost=" + costFunds);
+        return script(rename, "renameGuild").apply(guildId, newName);
     }
 
     // ================================================================ 读

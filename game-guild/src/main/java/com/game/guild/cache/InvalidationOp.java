@@ -18,6 +18,7 @@ public enum InvalidationOp {
     REVIEW("review"),
     DISBAND("disband"),
     ANNOUNCEMENT("announcement"),
+    RENAME("rename"),
     VERIFY_MAPPING("verify_mapping"),
     SCORE("score"),
     // 4.5 / 4.6 预留（guild_manage_repo.go:410-421）

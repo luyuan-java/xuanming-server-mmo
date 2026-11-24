@@ -237,9 +237,9 @@ public final class GuildMetrics implements GuildTxListener, GuildCacheMetrics, G
                 }
             }
         }
-        // in-band 14008：建帮发号与 op_id 发号（捐献 / 兑换）
-        for (String method : List.of(GuildMethods.CREATE_GUILD, GuildMethods.DONATE_TO_GUILD,
-                GuildMethods.BUY_GUILD_SHOP_GOODS)) {
+        // in-band 故障：发号（14008）与内容安全不可用（14045）
+        for (String method : List.of(GuildMethods.CREATE_GUILD, GuildMethods.SET_ANNOUNCEMENT, GuildMethods.RENAME_GUILD,
+                GuildMethods.DONATE_TO_GUILD, GuildMethods.BUY_GUILD_SHOP_GOODS)) {
             timer(method, RequestResult.FAULT);
         }
         for (String method : GuildMethods.FORBIDDEN) {

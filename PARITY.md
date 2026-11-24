@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-23 帮会改名（439）与内容安全接入（`game-guild`）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 帮会改名（`ClientPlayerGuild.RenameGuild` 439、冷却/原名保留/扣帮会资金、跨帮会重名保留表 `guild_name_hold`、改名推送 `GUILD_CHANGE_KIND_RENAMED`）与建帮/改公告/改名接入内容安全（tip 14043–14047） | `go/guild`（`guild_db.proto` `renamed_ms`/`guild_name_hold`、`guild_repo.go` `RenameGuild`/`claimGuildNameHold`/`holdGuildName`、`guild_service.go` `CheckText`） | `game-guild` 补齐 `GuildRow.renamed_ms = 13` 与 `GuildNameHoldRow`（`guild_name_hold`）、`GuildMethods.RENAME_GUILD`、`GuildDispatcher` 路由、`GuildTips` 14043–14047（14045 入 `FAULTS`）、`GuildTableRules.RenameRules`、`JdbcGuildStore.renameGuild`（按 `guild`→`guild_member`→`UPDATE guild`→`claimGuildNameHold`→`holdGuildName` 锁序）与 `GuildService.TextGuard` 事务外 fail-closed 接入（`game.guild.content-guard-enabled=true` 装配 Dubbo `ContentGuardService`）；解决 `game-guild` 主干阻断，703 项单测通过（含新增 `GuildRenameTest`，187 项 MySQL 夹具跳过）；设计见 `docs/design/rename-and-content-safety.md` | 已对齐 |
+
 ## 2026-11-23 内容安全微服务（`game-content-guard`，对齐 Go `content_guard`）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |

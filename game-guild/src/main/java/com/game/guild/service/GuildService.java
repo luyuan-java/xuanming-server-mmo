@@ -10,6 +10,7 @@ import com.game.guild.rules.GuildLimits;
 import com.game.guild.rules.GuildNames;
 import com.game.guild.rules.GuildReject;
 import com.game.guild.rules.GuildRoles;
+import com.game.guild.rules.GuildTableRules.RenameRules;
 import com.game.guild.rules.GuildTip;
 import com.game.guild.service.GuildAccess.BoundGuild;
 import com.game.guild.service.GuildAccess.ZoneCheck;
@@ -19,7 +20,12 @@ import com.game.guild.store.GuildStore.AnnouncementUpdated;
 import com.game.guild.store.GuildStore.Created;
 import com.game.guild.store.GuildStore.Disbanded;
 import com.game.guild.store.GuildStore.Left;
+import com.game.guild.store.GuildStore.RenameOutcome;
+import com.game.guild.store.GuildStore.Renamed;
 import com.game.guild.store.TxOutcome;
+import com.game.proto.content_guard.CheckTextResponse;
+import com.game.proto.content_guard.TextScene;
+import com.game.proto.content_guard.TextVerdict;
 import com.game.proto.guild.CreateGuildRequest;
 import com.game.proto.guild.CreateGuildResponse;
 import com.game.proto.guild.DisbandGuildRequest;
@@ -31,6 +37,8 @@ import com.game.proto.guild.GetPlayerGuildResponse;
 import com.game.proto.guild.GuildChangeKind;
 import com.game.proto.guild.LeaveGuildRequest;
 import com.game.proto.guild.LeaveGuildResponse;
+import com.game.proto.guild.RenameGuildRequest;
+import com.game.proto.guild.RenameGuildResponse;
 import com.game.proto.guild.SetAnnouncementRequest;
 import com.game.proto.guild.SetAnnouncementResponse;
 import java.util.List;
@@ -56,6 +64,12 @@ public final class GuildService {
 
     private static final Logger log = LoggerFactory.getLogger(GuildService.class);
 
+    /** 内容安全送检策略（Strategy 模式）：生产接 Dubbo {@code ContentGuardService}；null 表示未启用。 */
+    @FunctionalInterface
+    public interface TextGuard {
+        CheckTextResponse check(TextScene scene, long playerId, String text);
+    }
+
     private final GuildStore store;
     private final GuildCache cache;
     private final GuildAccess access;
@@ -65,6 +79,7 @@ public final class GuildService {
     private final LongSupplier guildIds;
     private final GuildTableLookup tables;
     private final LongSupplier clockMs;
+    private final TextGuard textGuard;
 
     /**
      * @param guildIds 发 guild_id（生产 {@code GuildIds::nextId}；抛异常或返回 0 = 发号器不可用 → 14008）
@@ -72,6 +87,12 @@ public final class GuildService {
      */
     public GuildService(GuildStore store, GuildCache cache, GuildAccess access, GuildViews views, GuildRanks ranks,
                         GuildPushes pushes, LongSupplier guildIds, GuildTableLookup tables, LongSupplier clockMs) {
+        this(store, cache, access, views, ranks, pushes, guildIds, tables, clockMs, null);
+    }
+
+    public GuildService(GuildStore store, GuildCache cache, GuildAccess access, GuildViews views, GuildRanks ranks,
+                        GuildPushes pushes, LongSupplier guildIds, GuildTableLookup tables, LongSupplier clockMs,
+                        TextGuard textGuard) {
         this.store = store;
         this.cache = cache;
         this.access = access;
@@ -81,11 +102,13 @@ public final class GuildService {
         this.guildIds = guildIds;
         this.tables = tables;
         this.clockMs = clockMs;
+        this.textGuard = textGuard;
     }
 
     // ================================================================ CreateGuild（15）
     public GuildService forActor(com.game.api.proto.SessionContext actor) {
-        return new GuildService(store.forActor(actor), cache, access, views, ranks, pushes, guildIds, tables, clockMs);
+        return new GuildService(store.forActor(actor), cache, access, views, ranks, pushes, guildIds, tables, clockMs,
+                textGuard);
     }
 
     /**
@@ -117,6 +140,10 @@ public final class GuildService {
         // 缓存预检只是省一次事务，不是判据：缓存说已入帮时先用 MySQL 复核（真正的判定在事务的唯一索引上）
         if (access.alreadyInGuild(me, deadline)) {
             return createTip(GuildTip.ALREADY_IN_GUILD);
+        }
+        GuildTip textTip = checkText(TextScene.TEXT_SCENE_GUILD_NAME, me, name, GuildTip.NAME_SENSITIVE);
+        if (textTip != null) {
+            return createTip(textTip);
         }
         long now = clockMs.getAsLong();
         long guildId = mintGuildId(me);
@@ -317,6 +344,11 @@ public final class GuildService {
         if (zone.rejected()) {
             return SetAnnouncementResponse.newBuilder().setErrorMessage(zone.tip().proto()).build();
         }
+        GuildTip textTip = checkText(TextScene.TEXT_SCENE_GUILD_ANNOUNCEMENT, me, request.getAnnouncement(),
+                GuildTip.ANNOUNCEMENT_SENSITIVE);
+        if (textTip != null) {
+            return SetAnnouncementResponse.newBuilder().setErrorMessage(textTip.proto()).build();
+        }
         long guildId = request.getGuildId();
         TxOutcome<AnnouncementUpdated> outcome = store.updateAnnouncement(guildId, me, request.getAnnouncement(), deadline);
         if (!(outcome instanceof TxOutcome.Ok<AnnouncementUpdated> ok)) {
@@ -327,6 +359,81 @@ public final class GuildService {
         access.invalidate(updated.invalidation(), deadline);
         pushes.notify(GuildChangeKind.GUILD_CHANGE_KIND_ANNOUNCEMENT_CHANGED, guildId, me, 0, updated.pushRecipients());
         return SetAnnouncementResponse.newBuilder().setGuild(views.guildInfo(updated.guild(), me, deadline)).build();
+    }
+
+    // ================================================================ RenameGuild（439）
+
+    /**
+     * 帮会改名（基线 guild_rename_logic.go）：仅帮主可操作；内容安全送检在事务外，单事务内按 G → M → uk_guild → guild_name_hold
+     * 改名、保护旧名并扣帮会资金，提交后失效缓存并向其余成员推 RENAMED(14)。
+     */
+    public RenameGuildResponse renameGuild(long me, RenameGuildRequest request, Deadline deadline) {
+        long guildId = request.getGuildId();
+        if (guildId == 0) {
+            return RenameGuildResponse.newBuilder().setErrorMessage(GuildTip.GUILD_NOT_FOUND.proto()).build();
+        }
+        String display = GuildNames.displayName(request.getName());
+        if (display == null) {
+            return RenameGuildResponse.newBuilder().setErrorMessage(GuildTip.INVALID_GUILD_NAME.proto()).build();
+        }
+        ZoneCheck zone = access.clientWrite(me, deadline);
+        if (zone.rejected()) {
+            return RenameGuildResponse.newBuilder().setErrorMessage(zone.tip().proto()).build();
+        }
+        GuildTip textTip = checkText(TextScene.TEXT_SCENE_GUILD_NAME, me, display, GuildTip.NAME_SENSITIVE);
+        if (textTip != null) {
+            return RenameGuildResponse.newBuilder().setErrorMessage(textTip.proto()).build();
+        }
+        RenameRules rule = tables.renameRules();
+        RenameOutcome outcome = store.renameGuild(guildId, me, display, rule.cooldownMs(), rule.nameHoldMs(),
+                rule.costFunds(), clockMs.getAsLong(), deadline);
+        if (!(outcome.tx() instanceof TxOutcome.Ok<Renamed> ok)) {
+            GuildReject reject = outcome.tx().rejection();
+            if (reject == GuildReject.RENAME_COOLDOWN) {
+                return RenameGuildResponse.newBuilder()
+                        .setErrorMessage(GuildTip.RENAME_COOLDOWN.proto())
+                        .setNextRenameTime(Long.divideUnsigned(outcome.nextAllowedMs(), 1_000L))
+                        .build();
+            }
+            if (reject == GuildReject.RANK_TOO_LOW) {
+                return RenameGuildResponse.newBuilder().setErrorMessage(GuildTip.NOT_LEADER_RENAME.proto()).build();
+            }
+            return RenameGuildResponse.newBuilder()
+                    .setErrorMessage(access.replyFor(me, guildId, guildId, reject, deadline).proto()).build();
+        }
+        Renamed renamed = ok.value();
+        access.invalidate(renamed.invalidation(), deadline);
+        pushes.notify(GuildChangeKind.GUILD_CHANGE_KIND_RENAMED, guildId, me, 0, renamed.pushRecipients());
+        return RenameGuildResponse.newBuilder()
+                .setGuild(views.guildInfo(renamed.guild(), me, deadline))
+                .setNextRenameTime(Long.divideUnsigned(renamed.nextAllowedMs(), 1_000L))
+                .build();
+    }
+
+    /** 内容安全送检（基线 content_check.go）：只认 PASS；命中/打码/未知回 rejectTip，不可达回 14045。日志绝不打原文。 */
+    private GuildTip checkText(TextScene scene, long playerId, String text, GuildTip rejectTip) {
+        if (textGuard == null || text == null || text.isEmpty()) {
+            return null;
+        }
+        CheckTextResponse resp;
+        try {
+            resp = textGuard.check(scene, playerId, text);
+        } catch (RuntimeException e) {
+            log.error("[guild] content guard unavailable, request refused scene={} player={}: {}",
+                    scene, Long.toUnsignedString(playerId), e.toString());
+            return GuildTip.TEXT_CHECK_UNAVAILABLE;
+        }
+        if (resp == null) {
+            log.error("[guild] content guard returned null response, request refused scene={} player={}",
+                    scene, Long.toUnsignedString(playerId));
+            return GuildTip.TEXT_CHECK_UNAVAILABLE;
+        }
+        if (resp.getVerdict() == TextVerdict.TEXT_VERDICT_PASS) {
+            return null;
+        }
+        log.info("[guild] text refused by content guard scene={} category={} player={}",
+                scene, resp.getCategory(), Long.toUnsignedString(playerId));
+        return rejectTip;
     }
 
     // ================================================================ 工具

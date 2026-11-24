@@ -195,6 +195,22 @@ public interface GuildStore {
         }
     }
 
+    /** 帮会改名结果（guild_rename_repo.go）。 */
+    record Renamed(GuildData guild, long actorId, long nextAllowedMs) {
+        public Invalidation invalidation() {
+            return Invalidation.of(GuildTxOp.RENAME, guild.guildId());
+        }
+
+        /** RENAMED(14) 的收件人：快照除帮主（guild_rename_logic.go:82-83）。 */
+        public List<Long> pushRecipients() {
+            return guild.memberIdsExcept(actorId);
+        }
+    }
+
+    /** 帮会改名事务结局：冷却拒绝时也携带 {@code nextAllowedMs} 供响应填写 {@code next_rename_time}。 */
+    record RenameOutcome(TxOutcome<Renamed> tx, long nextAllowedMs) {
+    }
+
     /** 本人视角的一条待审申请（ListMyApplications）。 */
     record ApplicationRow(long guildId, long applyMs, long expireMs) {
     }
@@ -283,6 +299,13 @@ public interface GuildStore {
      * 档位不到长老）/ WRITE_CONFLICT。
      */
     TxOutcome<AnnouncementUpdated> updateAnnouncement(long guildId, long playerId, String announcement, Deadline deadline);
+
+    /**
+     * 帮会改名（guild_rename_repo.go）：单事务内按 G → M → uk_guild → guild_name_hold 锁序完成改名、旧名保护与扣帮会资金。
+     * 拒绝：GUILD_GONE / NOT_MEMBER / RANK_TOO_LOW / RENAME_SAME_NAME / RENAME_COOLDOWN / FUNDS_INSUFFICIENT / NAME_TAKEN / WRITE_CONFLICT。
+     */
+    RenameOutcome renameGuild(long guildId, long leaderId, String newName, long cooldownMs, long holdMs, long costFunds,
+                              long nowMs, Deadline deadline);
 
     // ================================================================ 读（自动提交，不加锁）
 
