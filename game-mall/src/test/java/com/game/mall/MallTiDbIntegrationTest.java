@@ -281,8 +281,8 @@ class MallTiDbIntegrationTest {
         var receipt=new DeliveryApi.Receipt(order.orderId(),"9001","DELIVERED","a".repeat(64));one.receipt(receipt);two.receipt(receipt);assertThat(second.get("501",owned(order.orderId())).state()).isEqualTo("DELIVERED");
         assertThatThrownBy(()->two.receipt(new DeliveryApi.Receipt(order.orderId(),"9002","DELIVERED","a".repeat(64)))).isInstanceOf(MallException.class);
         var refund=first.create("502",new MallApi.CreateOrder("delivery-tidb-002", 501, 1, "fixture-account", "1"));first.recordTrustedPayment(payment(refund,"refund-tidb-pay"));one.receipt(new DeliveryApi.Receipt(refund.orderId(),"9003","REFUND_PENDING","b".repeat(64)));
-        assertThatThrownBy(()->two.refunded(new MallApi.Payment(refund.orderId(),"test-channel","refund-tidb-001",1,"CNY"))).isInstanceOf(MallException.class);
-        var channel=new MallApi.Payment(refund.orderId(),"test-channel","refund-tidb-001",refund.amountMinor(),refund.currency());one.refunded(channel);two.refunded(channel);assertThat(second.get("502",owned(refund.orderId())).state()).isEqualTo("REFUNDED");
+        assertThatThrownBy(()->two.refunded(new MallApi.Refund(refund.orderId(),"test-channel","refund-tidb-pay","refund-tidb-001",1,"CNY"))).isInstanceOf(MallException.class);
+        var channel=new MallApi.Refund(refund.orderId(),"test-channel","refund-tidb-pay","refund-tidb-001",refund.amountMinor(),refund.currency());one.refunded(channel);two.refunded(channel);assertThat(second.get("502",owned(refund.orderId())).state()).isEqualTo("REFUNDED");
     }
 
     @Test

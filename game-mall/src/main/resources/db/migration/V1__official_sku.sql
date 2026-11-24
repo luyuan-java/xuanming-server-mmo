@@ -47,11 +47,27 @@ CREATE TABLE IF NOT EXISTS oms_order_item (
 CREATE TABLE IF NOT EXISTS commerce_payment_receipt (
   channel VARBINARY(32) NOT NULL,
   transaction_id VARBINARY(128) NOT NULL,
-  order_sn VARCHAR(36) NOT NULL,
+  order_sn VARCHAR(36) NULL,
   amount_minor BIGINT NOT NULL,
   currency VARCHAR(16) NOT NULL,
+  revision INT NOT NULL DEFAULT 0,
+  fact VARCHAR(8) NOT NULL DEFAULT 'PAID',
   PRIMARY KEY (channel,transaction_id),
-  CONSTRAINT uk_mall_payment_order UNIQUE (order_sn)
+  CONSTRAINT uk_mall_payment_order UNIQUE (order_sn),
+  CHECK (revision >= 0),
+  CHECK (fact IN ('PAID','REVOKED')),
+  CHECK ((MOD(revision, 2) = 1 AND fact = 'REVOKED') OR (MOD(revision, 2) = 0 AND fact = 'PAID'))
+);
+CREATE TABLE IF NOT EXISTS commerce_abnormal_payment (
+  channel VARBINARY(32) NOT NULL,
+  transaction_id VARBINARY(128) NOT NULL,
+  order_sn VARCHAR(36) NOT NULL,
+  reason VARCHAR(24) NOT NULL,
+  created_ms BIGINT NOT NULL,
+  PRIMARY KEY (channel,transaction_id),
+  INDEX idx_commerce_abnormal_order (order_sn),
+  CHECK (reason IN ('DUPLICATE_PAYMENT','AMOUNT_MISMATCH','CURRENCY_MISMATCH')),
+  CHECK (created_ms >= 0)
 );
 CREATE TABLE IF NOT EXISTS commerce_delivery_intent (
   order_sn VARCHAR(36) PRIMARY KEY,
@@ -74,9 +90,46 @@ CREATE TABLE IF NOT EXISTS commerce_request_nonce (
 CREATE TABLE IF NOT EXISTS commerce_sku_grant (sku_id BIGINT PRIMARY KEY,item_config_id INT NOT NULL,count_per_unit INT NOT NULL,title VARCHAR(128) NOT NULL,CHECK (item_config_id>0),CHECK (count_per_unit>0 AND count_per_unit<=4096));
 CREATE TABLE IF NOT EXISTS commerce_order_grant (order_sn VARCHAR(36) PRIMARY KEY,item_config_id INT NOT NULL,count_per_unit INT NOT NULL,title VARCHAR(128) NOT NULL);
 CREATE TABLE IF NOT EXISTS commerce_delivery_receipt (order_sn VARCHAR(36) PRIMARY KEY,trade_order_id VARCHAR(20) NOT NULL,state VARCHAR(24) NOT NULL,proof VARCHAR(64) NOT NULL);
-CREATE TABLE IF NOT EXISTS commerce_refund_intent (order_sn VARCHAR(36) PRIMARY KEY,status VARCHAR(24) NOT NULL,channel VARCHAR(32) NULL,transaction_id VARCHAR(128) NULL,INDEX idx_commerce_refund_pending(status,order_sn));
-
-CREATE TABLE IF NOT EXISTS commerce_refund_receipt (order_sn VARCHAR(36) PRIMARY KEY,channel VARCHAR(32) NOT NULL,transaction_id VARCHAR(128) NOT NULL,amount_minor BIGINT NOT NULL,currency VARCHAR(16) NOT NULL,UNIQUE(channel,transaction_id));
+CREATE TABLE IF NOT EXISTS commerce_refund_intent (
+  channel VARBINARY(32) NOT NULL,
+  transaction_id VARBINARY(128) NOT NULL,
+  order_sn VARCHAR(36) NOT NULL,
+  source VARCHAR(24) NOT NULL,
+  status VARCHAR(24) NOT NULL,
+  close_reason VARCHAR(64) NULL,
+  PRIMARY KEY (channel,transaction_id),
+  INDEX idx_commerce_refund_pending (status,order_sn,channel,transaction_id),
+  CHECK (source IN ('CANCELLED_LATE','DELIVERY_REJECTED','DUPLICATE_PAYMENT','AMOUNT_MISMATCH','CURRENCY_MISMATCH')),
+  CHECK (status IN ('PENDING','REFUNDED','MANUAL','REVOKED'))
+);
+CREATE TABLE IF NOT EXISTS commerce_refund_receipt (
+  channel VARBINARY(32) NOT NULL,
+  payment_transaction_id VARBINARY(128) NOT NULL,
+  transaction_id VARBINARY(128) NOT NULL,
+  order_sn VARCHAR(36) NOT NULL,
+  amount_minor BIGINT NOT NULL,
+  currency VARCHAR(16) NOT NULL,
+  PRIMARY KEY (channel,payment_transaction_id),
+  UNIQUE (channel,transaction_id)
+);
+CREATE TABLE IF NOT EXISTS commerce_reversal_intent (
+  order_sn VARCHAR(36) PRIMARY KEY,
+  revision INT NOT NULL,
+  status VARCHAR(24) NOT NULL,
+  updated_ms BIGINT NOT NULL,
+  INDEX idx_commerce_reversal_pending (status,updated_ms,order_sn),
+  CHECK (revision > 0),
+  CHECK (status IN ('PENDING','REVERSED','DELIVERED','MANUAL')),
+  CHECK (updated_ms >= 0)
+);
+CREATE TABLE IF NOT EXISTS commerce_reversal_receipt (
+  order_sn VARCHAR(36) NOT NULL,
+  revision INT NOT NULL,
+  trade_order_id VARCHAR(20) NOT NULL,
+  state VARCHAR(24) NOT NULL,
+  proof VARCHAR(64) NOT NULL,
+  PRIMARY KEY (order_sn,revision)
+);
 -- 成功的目录命令与响应快照同事务提交，不允许后台覆写订单或支付终态。
 CREATE TABLE IF NOT EXISTS commerce_admin_command (
   actor VARBINARY(64) NOT NULL,
@@ -148,10 +201,11 @@ CREATE TABLE IF NOT EXISTS commerce_seller_income (
   net_fen BIGINT NOT NULL,
   reserved_fen BIGINT NOT NULL DEFAULT 0,
   paid_fen BIGINT NOT NULL DEFAULT 0,
+  forfeited_fen BIGINT NOT NULL DEFAULT 0,
   available_ms BIGINT NOT NULL,
   INDEX idx_seller_income(account,order_sn),
   CHECK(gross_fen>0), CHECK(fee_fen>=0 AND net_fen>=0), CHECK(fee_fen+net_fen=gross_fen),
-  CHECK(reserved_fen>=0 AND paid_fen>=0 AND reserved_fen+paid_fen<=net_fen)
+  CHECK(reserved_fen>=0 AND paid_fen>=0 AND forfeited_fen>=0 AND reserved_fen+paid_fen+forfeited_fen<=net_fen)
 );
 CREATE TABLE IF NOT EXISTS commerce_withdrawal (
   withdrawal_id VARCHAR(36) PRIMARY KEY,

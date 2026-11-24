@@ -178,20 +178,33 @@ class MallOrderStoreTest {
     }
 
     @Test
-    void 重放支付无重复扣减_跨订单盗用流水与错金额失败() {
+    void 重放支付无重复扣减_跨订单盗用流水失败_错金额与重复付款记入异常退款待办() {
         try (var db = new MallTestDatabase()) {
             db.sku(1, 10);
             MallApi.Order first = db.store.create(BUYER, new MallApi.CreateOrder("payment-first", 1, 1, "fixture-account", "1"));
             MallApi.Order second = db.store.create(BUYER, new MallApi.CreateOrder("payment-second", 1, 1, "fixture-account", "1"));
-            assertThatThrownBy(() -> db.store.recordTrustedPayment(new MallApi.Payment(first.orderId(), "test-channel", "Wrong", 1, "CNY"))).isInstanceOf(MallException.class);
-            assertThat(db.count("commerce_payment_receipt")).isZero();
+            // 金额不符：记录异常付款并入队退款待办（AMOUNT_MISMATCH），不绑定原订单、不改库存
+            MallApi.PaymentOutcome mismatch = db.store.recordTrustedPaymentOutcome(
+                    new MallApi.Payment(first.orderId(), "test-channel", "Wrong", 1, "CNY"));
+            assertThat(mismatch.order().state()).isEqualTo("AWAITING_PAYMENT");
+            assertThat(mismatch.refundReason()).isEqualTo(MallApi.RefundReason.AMOUNT_MISMATCH);
+            assertThat(db.count("commerce_abnormal_payment")).isEqualTo(1);
+            assertThat(db.count("commerce_refund_intent")).isEqualTo(1);
+            // 正常付款与同流水重放
             assertThat(db.store.recordTrustedPayment(payment(first, "TxSame")).state()).isEqualTo("DELIVERY_PENDING");
             assertThat(db.store.recordTrustedPayment(payment(first, "TxSame")).state()).isEqualTo("DELIVERY_PENDING");
-            assertThatThrownBy(() -> db.store.recordTrustedPayment(payment(second, "TxSame"))).isInstanceOf(MallException.class);
+            // 已付订单再来一笔不同流水：DUPLICATE_PAYMENT
+            MallApi.PaymentOutcome dup = db.store.recordTrustedPaymentOutcome(payment(first, "TxDuplicate"));
+            assertThat(dup.order().state()).isEqualTo("DELIVERY_PENDING");
+            assertThat(dup.refundReason()).isEqualTo(MallApi.RefundReason.DUPLICATE_PAYMENT);
+            // 跨订单复用同一流水仍报 409
+            assertThatThrownBy(() -> db.store.recordTrustedPayment(payment(second, "TxSame")))
+                    .isInstanceOfSatisfying(MallException.class, e -> assertThat(e.status()).isEqualTo(409));
             assertThat(db.stock(1, "stock")).isEqualTo(9);
             assertThat(db.stock(1, "lock_stock")).isEqualTo(1);
-            assertThat(db.count("commerce_payment_receipt")).isEqualTo(1);
+            assertThat(db.count("commerce_payment_receipt")).isEqualTo(3);
             assertThat(db.count("commerce_delivery_intent")).isEqualTo(1);
+            assertThat(db.count("commerce_refund_intent")).isEqualTo(2);
         }
     }
 

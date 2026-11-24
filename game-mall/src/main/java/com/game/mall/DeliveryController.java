@@ -1,17 +1,21 @@
 package com.game.mall;
+
 import jakarta.servlet.http.HttpServletRequest;
-import java.util.List;
 import org.springframework.web.bind.annotation.*;
+
 @RestController
 public final class DeliveryController {
     private final DeliveryStore store;
+
     public DeliveryController(DeliveryStore store) {
         this.store = store;
     }
+
     @GetMapping("/api/skus")
     public DeliveryApi.Skus skus() {
         return store.skus();
     }
+
     @PostMapping("/api/skus/list")
     public DeliveryApi.Skus skus(@RequestBody DeliveryApi.SkuPage page) {
         return store.skus(page);
@@ -22,27 +26,41 @@ public final class DeliveryController {
         check(request);
         return store.poll(input);
     }
+
     @PostMapping("/internal/deliveries/receipt")
     public void receipt(HttpServletRequest request, @RequestBody DeliveryApi.Receipt input) {
         check(request);
         store.receipt(input);
     }
+
     @PostMapping("/internal/refunds/poll")
-    public List<MallApi.Payment> refunds(HttpServletRequest request) {
+    public DeliveryApi.RefundPage refunds(HttpServletRequest request,
+                                          @RequestBody(required = false) DeliveryApi.RefundPoll input) {
         payment(request);
-        return store.refunds();
+        return store.refundsPage(input);
     }
+
     @PostMapping("/internal/refunds/receipt")
-    public void refunded(HttpServletRequest request, @RequestBody MallApi.Payment input) {
+    public void refunded(HttpServletRequest request, @RequestBody MallApi.Refund input) {
         payment(request);
         store.refunded(input);
     }
-    private void payment(HttpServletRequest request) {
-        if (!"payment".equals(request.getAttribute(MallAuthentication.ROLE)))
-            throw new MallException(401, "退款渠道调用方认证失败");
+
+    @PostMapping("/internal/refunds/close")
+    public void closeRefund(HttpServletRequest request, @RequestBody MallApi.RefundClosure input) {
+        payment(request);
+        store.closeRefund(input);
     }
+
+    private void payment(HttpServletRequest request) {
+        if (!"payment".equals(request.getAttribute(MallAuthentication.ROLE))) {
+            throw new MallException(401, "退款渠道调用方认证失败");
+        }
+    }
+
     private void check(HttpServletRequest request) {
-        if (!"delivery".equals(request.getAttribute(MallAuthentication.ROLE)))
+        if (!"delivery".equals(request.getAttribute(MallAuthentication.ROLE))) {
             throw new MallException(401, "交付调用方认证失败");
+        }
     }
 }

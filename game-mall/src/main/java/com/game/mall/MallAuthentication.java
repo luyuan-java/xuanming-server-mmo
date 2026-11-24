@@ -1,5 +1,6 @@
 package com.game.mall;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletException;
@@ -32,6 +33,7 @@ public final class MallAuthentication extends OncePerRequestFilter {
             Map.entry("/internal/payments", "payment"),
             Map.entry("/internal/payments/order-view", "payment"),
             Map.entry("/internal/payments/skus", "payment"),
+            Map.entry("/internal/payments/revision", "payment"),
             Map.entry("/internal/mock/pay", "payment"),
             Map.entry("/internal/mock/reconcile", "payment"),
             Map.entry("/internal/mock/withdraw", "payment"),
@@ -52,6 +54,7 @@ public final class MallAuthentication extends OncePerRequestFilter {
             Map.entry("/internal/consignments/withdrawals/get", "delivery"),
             Map.entry("/internal/refunds/poll", "payment"),
             Map.entry("/internal/refunds/receipt", "payment"),
+            Map.entry("/internal/refunds/close", "payment"),
             Map.entry("/internal/deliveries/poll", "delivery"),
             Map.entry("/internal/deliveries/receipt", "delivery"),
             Map.entry("/internal/admin/skus/list", "admin"),
@@ -59,6 +62,7 @@ public final class MallAuthentication extends OncePerRequestFilter {
             Map.entry("/internal/admin/skus/update", "admin"),
             Map.entry("/internal/admin/skus/stock", "admin"),
             Map.entry("/internal/admin/order-view", "admin"));
+    private static final ObjectMapper ERROR_JSON = new ObjectMapper();
     private final MallProperties properties;
     private final MallNonceStore nonces;
 
@@ -135,12 +139,13 @@ public final class MallAuthentication extends OncePerRequestFilter {
         } catch (MallException rejected) {
             response.setStatus(rejected.status());
             response.setContentType("application/json;charset=UTF-8");
-            response.getWriter().write("{\"error\":\"" + rejected.getMessage() + "\"}");
+            String msg = rejected.getMessage() == null ? "" : rejected.getMessage();
+            response.getWriter().write(ERROR_JSON.writeValueAsString(Map.of("error", msg)));
             return;
         } catch (DataAccessException unavailable) {
             response.setStatus(503);
             response.setContentType("application/json;charset=UTF-8");
-            response.getWriter().write("{\"error\":\"认证存储暂不可用\"}");
+            response.getWriter().write(ERROR_JSON.writeValueAsString(Map.of("error", "认证存储暂不可用")));
             return;
         }
         chain.doFilter(authenticated, response);

@@ -27,15 +27,19 @@ final class MallSchemaVerifier {
             Map.entry("oms_order", "id,order_sn,buyer_id,request_id,sku_id,quantity,pay_amount,currency,status,create_time_ms,payment_deadline_ms,payment_time_ms"),
             Map.entry("oms_order_item", "order_sn,product_id,product_sku_id,product_sku_code,product_quantity,product_price_minor"),
             Map.entry("commerce_official_owner", "order_sn,buyer_account,buyer_owner_revision"),
-            Map.entry("commerce_payment_receipt", "channel,transaction_id,order_sn,amount_minor,currency"),
+            Map.entry("commerce_payment_receipt", "channel,transaction_id,order_sn,amount_minor,currency,revision,fact"),
+            Map.entry("commerce_abnormal_payment", "channel,transaction_id,order_sn,reason,created_ms"),
             Map.entry("commerce_delivery_intent", "order_sn,buyer_id,sku_id,quantity,status,created_ms"),
-            Map.entry("commerce_refund_intent", "order_sn,status"),
+            Map.entry("commerce_refund_intent", "channel,transaction_id,order_sn,source,status,close_reason"),
+            Map.entry("commerce_refund_receipt", "channel,payment_transaction_id,transaction_id,order_sn,amount_minor,currency"),
+            Map.entry("commerce_reversal_intent", "order_sn,revision,status,updated_ms"),
+            Map.entry("commerce_reversal_receipt", "order_sn,revision,trade_order_id,state,proof"),
             Map.entry("commerce_mock_transaction", "kind,order_sn,request_id,transaction_id,payment_transaction_id,amount_minor,currency,created_ms,applied"),
             Map.entry("commerce_consignment", "listing_id,seller_player_id,seller_account,market_zone,asset_kind,asset_currency_type,escrow_reference,escrow_proof,request_digest,title,price_fen,fee_bps,cooling_ms,notice_end_ms,sale_end_ms,state,current_order_sn,created_ms"),
             Map.entry("commerce_consignment_order", "order_sn,listing_id,buyer_account,buyer_owner_revision,request_id,seller_account,escrow_reference,escrow_proof,fee_bps,cooling_ms"),
             Map.entry("commerce_consignment_return", "listing_id,return_proof"),
             Map.entry("commerce_seller_guard", "account"),
-            Map.entry("commerce_seller_income", "order_sn,account,gross_fen,fee_fen,net_fen,reserved_fen,paid_fen,available_ms"),
+            Map.entry("commerce_seller_income", "order_sn,account,gross_fen,fee_fen,net_fen,reserved_fen,paid_fen,forfeited_fen,available_ms"),
             Map.entry("commerce_withdrawal", "withdrawal_id,account,request_id,amount_fen,state,channel,transaction_id,created_ms"),
             Map.entry("commerce_withdrawal_allocation", "withdrawal_id,order_sn,amount_fen"),
             Map.entry("commerce_withdrawal_receipt", "withdrawal_id,channel,transaction_id,amount_fen,successful"),
@@ -100,7 +104,7 @@ final class MallSchemaVerifier {
                             }
                             if (column.equals("buyer_owner_revision") && metadata.getPrecision(i) != 20)
                                 throw new IllegalStateException("订单归属修订必须为规范uint64的VARBINARY(20)");
-                            if (Set.of("price_minor", "pay_amount", "amount_minor", "product_price_minor", "price_fen", "gross_fen", "fee_fen", "net_fen", "reserved_fen", "paid_fen", "amount_fen").contains(column) && metadata.getColumnType(i) != Types.BIGINT) {
+                            if (Set.of("price_minor", "pay_amount", "amount_minor", "product_price_minor", "price_fen", "gross_fen", "fee_fen", "net_fen", "reserved_fen", "paid_fen", "forfeited_fen", "amount_fen").contains(column) && metadata.getColumnType(i) != Types.BIGINT) {
                                 throw new IllegalStateException("商城金额必须为最小单位BIGINT：" + table.getKey() + "." + column);
                             }
                         }
@@ -116,6 +120,12 @@ final class MallSchemaVerifier {
             unique(connection, "commerce_official_owner", List.of("order_sn"));
             unique(connection, "commerce_payment_receipt", List.of("channel", "transaction_id"));
             unique(connection, "commerce_payment_receipt", List.of("order_sn"));
+            unique(connection, "commerce_abnormal_payment", List.of("channel", "transaction_id"));
+            unique(connection, "commerce_refund_intent", List.of("channel", "transaction_id"));
+            unique(connection, "commerce_refund_receipt", List.of("channel", "payment_transaction_id"));
+            unique(connection, "commerce_refund_receipt", List.of("channel", "transaction_id"));
+            unique(connection, "commerce_reversal_intent", List.of("order_sn"));
+            unique(connection, "commerce_reversal_receipt", List.of("order_sn", "revision"));
             unique(connection, "commerce_delivery_intent", List.of("order_sn"));
             if(indexes(connection,"commerce_delivery_intent",false).values().stream().noneMatch(cols->cols.size()>=3&&cols.subList(0,3).equals(List.of("status","created_ms","order_sn"))))throw new IllegalStateException("商城交付待办缺可恢复扫描索引");
             unique(connection, "commerce_request_nonce", List.of("caller_role", "nonce"));
@@ -144,7 +154,8 @@ final class MallSchemaVerifier {
             prefixIndex(connection, "commerce_withdrawal", List.of("state", "withdrawal_id"));
             prefixIndex(connection, "commerce_mock_payout", List.of("applied", "withdrawal_id"));
             prefixIndex(connection, "commerce_mock_transaction", List.of("kind", "applied", "order_sn"));
-            prefixIndex(connection, "commerce_refund_intent", List.of("status", "order_sn"));
+            prefixIndex(connection, "commerce_refund_intent", List.of("status", "order_sn", "channel", "transaction_id"));
+            prefixIndex(connection, "commerce_reversal_intent", List.of("status", "updated_ms", "order_sn"));
             prefixIndex(connection, "commerce_request_nonce", List.of("expires_ms"));
             prefixIndex(connection, "oms_order", List.of("buyer_id", "status"));
         }

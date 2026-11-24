@@ -11,11 +11,16 @@ import java.time.Clock;
 import java.util.Date;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -23,7 +28,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  * 同库提交只确认付款与持久交付意图；没有玩家资产持久回执，永不报告发货完成。
  */
 public final class MallOrderStore {
+    private static final Logger LOG = LoggerFactory.getLogger(MallOrderStore.class);
     static final long MAX_AMOUNT_MINOR = 9_000_000_000_000_000L;
+    private static final Set<Integer> PAID_STATES = Set.of(1, 2, 5, 6, 7, 8, 9);
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final Clock clock;
@@ -237,9 +244,21 @@ public final class MallOrderStore {
             return view(order);
     }
 
+    /** 兼容已有调用方直接取订单视图；HTTP 边界走 {@link #recordTrustedPaymentOutcome(MallApi.Payment)}。 */
     public MallApi.Order recordTrustedPayment(MallApi.Payment in) {
+        return recordTrustedPaymentOutcome(in).order();
+    }
+
+    /**
+     * 记一笔可信适配器报来的付款：支持正常绑单、取消后迟到（CANCELLED_LATE）、异常付款（DUPLICATE_PAYMENT /
+     * AMOUNT_MISMATCH / CURRENCY_MISMATCH）排入退款待办，以及同交易键幂等重放。
+     */
+    public MallApi.PaymentOutcome recordTrustedPaymentOutcome(MallApi.Payment in) {
         requireOrderId(in.orderId());
-        if (in.channel() == null || !in.channel().matches("[a-z][a-z0-9_-]{1,31}") || in.transactionId() == null || !in.transactionId().matches("[A-Za-z0-9_-]{1,128}") || in.amountMinor() <= 0 || in.amountMinor() > MAX_AMOUNT_MINOR || in.currency() == null) {
+        if (in.channel() == null || !in.channel().matches("[a-z][a-z0-9_-]{1,31}")
+                || in.transactionId() == null || !in.transactionId().matches("[A-Za-z0-9_-]{1,128}")
+                || in.amountMinor() <= 0 || in.amountMinor() > MAX_AMOUNT_MINOR
+                || in.currency() == null || !in.currency().matches("[A-Z][A-Z0-9_]{2,15}")) {
             throw new MallException(400, "支付回执参数非法");
         }
         try {
@@ -247,40 +266,124 @@ public final class MallOrderStore {
                 Stored order = byId(in.orderId(), true);
                 if (order == null) { throw new MallException(404, "订单不存在"); }
                 if (order.skuId() != 0) { officialOwner(in.orderId()); }
-                if (order.model().getPayAmount().longValueExact() != in.amountMinor() || !order.currency().equals(in.currency())) {
-                    throw new MallException(409, "支付金额或币种不匹配");
-                }
                 paymentPolicy.payment(in);
-                if (java.util.Set.of(1,2,5,6,7).contains(order.model().getStatus())) {
-                    Integer matches = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_payment_receipt WHERE order_sn=? AND channel=? AND transaction_id=? AND amount_minor=? AND currency=?", Integer.class,
-                            in.orderId(), ascii(in.channel()), ascii(in.transactionId()), in.amountMinor(), in.currency());
-                    if (matches != null && matches == 1) { return view(order); }
-                    throw new MallException(409, "该订单已有不同支付回执");
-                }
-                if (order.model().getStatus() == 4) {
-                    jdbc.update("INSERT INTO commerce_payment_receipt(channel,transaction_id,order_sn,amount_minor,currency) VALUES(?,?,?,?,?)",ascii(in.channel()),ascii(in.transactionId()),in.orderId(),in.amountMinor(),in.currency());
-                    jdbc.update("INSERT INTO commerce_refund_intent(order_sn,status) VALUES(?,'PENDING')",in.orderId());
-                    jdbc.update("UPDATE oms_order SET status=5 WHERE order_sn=? AND status=4",in.orderId());order.model().setStatus(5);return view(order);
-                }
-                if (order.model().getStatus() != 0) { throw new MallException(409, "订单状态冲突"); }
-                jdbc.update("INSERT INTO commerce_payment_receipt(channel,transaction_id,order_sn,amount_minor,currency) VALUES (?,?,?,?,?)",
-                        ascii(in.channel()), ascii(in.transactionId()), in.orderId(), in.amountMinor(), in.currency());
-                // 复用上游 stock/lock_stock 一并扣减结构；补足状态 CAS、幂等收据及非负条件。
-                if (order.skuId() == 0) {
-                    if (!consignments.paid(in.orderId())) { throw new MallException(503, "寄售订单关联缺失"); }
-                } else {
-                    int deducted = jdbc.update("UPDATE pms_sku_stock SET stock=stock-?,lock_stock=lock_stock-? WHERE id=? AND stock>=? AND lock_stock>=?",
-                        order.quantity(), order.quantity(), order.skuId(), order.quantity(), order.quantity());
-                    if (deducted != 1) { throw new MallException(409, "库存预占状态异常"); }
-                }
-                int changed = jdbc.update("UPDATE oms_order SET status=1,payment_time_ms=? WHERE order_sn=? AND status=0", clock.millis(), in.orderId());
-                if (changed != 1) { throw new MallException(409, "订单状态冲突"); }
-                jdbc.update("INSERT INTO commerce_delivery_intent(order_sn,buyer_id,sku_id,quantity,status,created_ms) VALUES (?,?,?,?,?,?)",
-                        in.orderId(), order.buyer(), order.skuId(), order.quantity(), "PENDING", clock.millis());
-                // 此提交只确认支付和交付意图；没有可信游戏资产持久回执，永不迁移到完成。
-                order.model().setStatus(1); return view(order);
+                KnownPayment known = knownPayment(in);
+                if (known != null) { return replay(order, in, known); }
+                MallApi.RefundReason mismatch = mismatch(order, in);
+                if (mismatch != null) { return abnormalPayment(order, in, mismatch); }
+                int state = order.model().getStatus();
+                if (PAID_STATES.contains(state)) { return abnormalPayment(order, in, MallApi.RefundReason.DUPLICATE_PAYMENT); }
+                if (state == 4) { return latePayment(order, in); }
+                if (state != 0) { throw new MallException(503, "订单状态无法处理"); }
+                return firstPayment(order, in);
             }));
-        } catch (DuplicateKeyException conflict) { throw new MallException(409, "支付流水已用于其他订单"); }
+        } catch (DuplicateKeyException conflict) {
+            throw duplicateKeyConflict(in);
+        }
+    }
+
+    private MallException duplicateKeyConflict(MallApi.Payment in) {
+        KnownPayment owner = knownPayment(in);
+        if (owner != null && owner.consistent() && !in.orderId().equals(owner.order())) {
+            return new MallException(409, "支付流水已用于其他订单");
+        }
+        LOG.error("payment insert hit an unexpected unique key, storage invariant broken: order={} channel={}", in.orderId(), in.channel());
+        return new MallException(503, "付款记录撞上未预期的唯一约束");
+    }
+
+    private static MallApi.RefundReason mismatch(Stored order, MallApi.Payment in) {
+        if (!order.currency().equals(in.currency())) { return MallApi.RefundReason.CURRENCY_MISMATCH; }
+        if (order.model().getPayAmount().longValueExact() != in.amountMinor()) { return MallApi.RefundReason.AMOUNT_MISMATCH; }
+        return null;
+    }
+
+    private MallApi.PaymentOutcome firstPayment(Stored order, MallApi.Payment in) {
+        jdbc.update("INSERT INTO commerce_payment_receipt(channel,transaction_id,order_sn,amount_minor,currency) VALUES (?,?,?,?,?)",
+                ascii(in.channel()), ascii(in.transactionId()), in.orderId(), in.amountMinor(), in.currency());
+        if (order.skuId() == 0) {
+            if (!consignments.paid(in.orderId())) { throw new MallException(503, "寄售订单关联缺失"); }
+        } else {
+            int deducted = jdbc.update("UPDATE pms_sku_stock SET stock=stock-?,lock_stock=lock_stock-? WHERE id=? AND stock>=? AND lock_stock>=?",
+                    order.quantity(), order.quantity(), order.skuId(), order.quantity(), order.quantity());
+            if (deducted != 1) { throw new MallException(503, "库存预占状态异常"); }
+        }
+        int changed = jdbc.update("UPDATE oms_order SET status=1,payment_time_ms=? WHERE order_sn=? AND status=0", clock.millis(), in.orderId());
+        if (changed != 1) { throw new MallException(503, "订单状态冲突"); }
+        jdbc.update("INSERT INTO commerce_delivery_intent(order_sn,buyer_id,sku_id,quantity,status,created_ms) VALUES (?,?,?,?,?,?)",
+                in.orderId(), order.buyer(), order.skuId(), order.quantity(), "PENDING", clock.millis());
+        order.model().setStatus(1);
+        return new MallApi.PaymentOutcome(view(order), null);
+    }
+
+    private MallApi.PaymentOutcome latePayment(Stored order, MallApi.Payment in) {
+        jdbc.update("INSERT INTO commerce_payment_receipt(channel,transaction_id,order_sn,amount_minor,currency) VALUES(?,?,?,?,?)",
+                ascii(in.channel()), ascii(in.transactionId()), in.orderId(), in.amountMinor(), in.currency());
+        queueRefund(in, MallApi.RefundReason.CANCELLED_LATE);
+        jdbc.update("UPDATE oms_order SET status=5 WHERE order_sn=? AND status=4", in.orderId());
+        order.model().setStatus(5);
+        return new MallApi.PaymentOutcome(view(order), MallApi.RefundReason.CANCELLED_LATE);
+    }
+
+    private MallApi.PaymentOutcome abnormalPayment(Stored order, MallApi.Payment in, MallApi.RefundReason reason) {
+        jdbc.update("INSERT INTO commerce_payment_receipt(channel,transaction_id,order_sn,amount_minor,currency) VALUES(?,?,NULL,?,?)",
+                ascii(in.channel()), ascii(in.transactionId()), in.amountMinor(), in.currency());
+        jdbc.update("INSERT INTO commerce_abnormal_payment(channel,transaction_id,order_sn,reason,created_ms) VALUES(?,?,?,?,?)",
+                ascii(in.channel()), ascii(in.transactionId()), in.orderId(), reason.name(), clock.millis());
+        queueRefund(in, reason);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override public void afterCommit() {
+                    LOG.warn("abnormal payment recorded and queued for refund: reason={} order={} channel={}", reason, in.orderId(), in.channel());
+                }
+            });
+        }
+        return new MallApi.PaymentOutcome(view(order), reason);
+    }
+
+    private void queueRefund(MallApi.Payment in, MallApi.RefundReason reason) {
+        jdbc.update("INSERT INTO commerce_refund_intent(channel,transaction_id,order_sn,source,status) VALUES(?,?,?,?,'PENDING')",
+                ascii(in.channel()), ascii(in.transactionId()), in.orderId(), reason.name());
+    }
+
+    private MallApi.PaymentOutcome replay(Stored order, MallApi.Payment in, KnownPayment known) {
+        if (!known.consistent()) {
+            throw new MallException(503, "付款回执与异常付款记录或退款待办不一致");
+        }
+        if (!in.orderId().equals(known.order())) {
+            throw new MallException(409, "支付流水已用于其他订单");
+        }
+        if (known.amountMinor() != in.amountMinor() || !known.currency().equals(in.currency())) {
+            throw new MallException(409, "支付流水已按不同金额或币种记录");
+        }
+        return new MallApi.PaymentOutcome(view(order), known.refundReason());
+    }
+
+    private record KnownPayment(String boundOrder, String abnormalOf, MallApi.RefundReason abnormalReason,
+                                long amountMinor, String currency, MallApi.RefundReason refundReason) {
+        String order() { return boundOrder != null ? boundOrder : abnormalOf; }
+
+        boolean consistent() {
+            if (boundOrder != null) {
+                return abnormalOf == null && (refundReason == null || refundReason.refundsOrdersOwnPayment());
+            }
+            return abnormalOf != null && abnormalReason != null && !abnormalReason.refundsOrdersOwnPayment()
+                    && abnormalReason == refundReason;
+        }
+    }
+
+    private KnownPayment knownPayment(MallApi.Payment in) {
+        var rows = jdbc.query("SELECT p.order_sn,a.order_sn,a.reason,p.amount_minor,p.currency,r.source FROM commerce_payment_receipt p "
+                        + "LEFT JOIN commerce_abnormal_payment a ON a.channel=p.channel AND a.transaction_id=p.transaction_id "
+                        + "LEFT JOIN commerce_refund_intent r ON r.channel=p.channel AND r.transaction_id=p.transaction_id "
+                        + "WHERE p.channel=? AND p.transaction_id=?",
+                (row, index) -> new KnownPayment(row.getString(1), row.getString(2), storedReason(row.getString(3)),
+                        row.getLong(4), row.getString(5), storedReason(row.getString(6))),
+                ascii(in.channel()), ascii(in.transactionId()));
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    private static MallApi.RefundReason storedReason(String value) {
+        return value == null ? null : MallApi.RefundReason.stored(value);
     }
 
     private Stored byRequest(String buyer, String requestId) {
@@ -289,7 +392,13 @@ public final class MallOrderStore {
     }
 
     private Stored byId(String orderId, boolean lock) {
-        List<Stored> rows = jdbc.query("SELECT * FROM oms_order WHERE order_sn=?" + (lock ? " FOR UPDATE" : ""), (rs, row) -> stored(rs), orderId);
+        if (lock) {
+            List<Stored> rows = jdbc.query("SELECT * FROM oms_order WHERE order_sn=? FOR UPDATE", (rs, row) -> stored(rs, -1), orderId);
+            return rows.isEmpty() ? null : rows.getFirst();
+        }
+        List<Stored> rows = jdbc.query("SELECT o.*,COALESCE(pr.revision,0) AS payment_revision FROM oms_order o "
+                        + "LEFT JOIN commerce_payment_receipt pr ON pr.order_sn=o.order_sn WHERE o.order_sn=?",
+                (rs, row) -> stored(rs, rs.getInt("payment_revision")), orderId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -326,8 +435,8 @@ public final class MallOrderStore {
         if (rows.size() != 1) { throw new MallException(503, "官方订单原身份缺失"); }
         return rows.getFirst();
     }
-    private MallApi.Order view(Stored order) {
-        String state = switch (order.model().getStatus()) {
+    static String stateName(int status) {
+        return switch (status) {
             case 0 -> "AWAITING_PAYMENT";
             case 1 -> "DELIVERY_PENDING";
             case 2 -> "DELIVERED";
@@ -335,10 +444,22 @@ public final class MallOrderStore {
             case 5 -> "REFUND_PENDING";
             case 6 -> "REFUNDED";
             case 7 -> "MANUAL";
+            case 8 -> "REVERSAL_PENDING";
+            case 9 -> "REVERSED";
             default -> throw new MallException(503, "订单状态无法处理");
         };
+    }
+
+    private MallApi.Order view(Stored order) {
+        int revision = order.paymentRevision();
+        if (revision < 0) {
+            var rev = jdbc.queryForList("SELECT revision FROM commerce_payment_receipt WHERE order_sn=?",
+                    Integer.class, order.model().getOrderSn());
+            revision = rev.isEmpty() ? 0 : rev.getFirst();
+        }
         return new MallApi.Order(order.model().getOrderSn(), order.buyer(), order.skuId(), order.quantity(),
-                order.model().getPayAmount().longValueExact(), order.currency(), state, order.deadline());
+                order.model().getPayAmount().longValueExact(), order.currency(),
+                stateName(order.model().getStatus()), order.deadline(), revision);
     }
 
     private static void requireOrderId(String id) {
@@ -359,6 +480,10 @@ public final class MallOrderStore {
     }
 
     private static Stored stored(ResultSet row) throws SQLException {
+        return stored(row, 0);
+    }
+
+    private static Stored stored(ResultSet row, int paymentRevision) throws SQLException {
         OmsOrder model = new OmsOrder();
         model.setId(row.getLong("id"));
         model.setOrderSn(row.getString("order_sn"));
@@ -366,7 +491,7 @@ public final class MallOrderStore {
         model.setStatus(row.getInt("status"));
         model.setCreateTime(new Date(row.getLong("create_time_ms")));
         return new Stored(model, row.getString("buyer_id"), row.getLong("sku_id"), row.getInt("quantity"),
-                row.getString("currency"), row.getLong("payment_deadline_ms"));
+                row.getString("currency"), row.getLong("payment_deadline_ms"), paymentRevision);
     }
 
     private static byte[] ascii(String value) {
@@ -374,5 +499,5 @@ public final class MallOrderStore {
     }
 
     private record Sku(PmsSkuStock model, String currency, boolean published) { }
-    private record Stored(OmsOrder model, String buyer, long skuId, int quantity, String currency, long deadline) { }
+    private record Stored(OmsOrder model, String buyer, long skuId, int quantity, String currency, long deadline, int paymentRevision) { }
 }

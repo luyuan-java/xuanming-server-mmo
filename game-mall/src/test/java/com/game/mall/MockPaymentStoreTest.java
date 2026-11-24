@@ -55,9 +55,8 @@ class MockPaymentStoreTest {
             var denied = assertThrows(MallException.class, () -> oldConstructor.recordTrustedPayment(
                     new MallApi.Payment(order.orderId(), "mock", "old-constructor-pay", 125, "CNY")));
             assertEquals(503, denied.status()); assertTrue(denied.getMessage().contains("运行模式"));
-            f.store.recordTrustedPayment(new MallApi.Payment(order.orderId(), "test", "explicit-test-pay", 125, "CNY"));
-            rejects(503, () -> new DeliveryStore(f.jdbc, f.manager).refunded(
-                    new MallApi.Payment(order.orderId(), "test", "old-constructor-refund", 125, "CNY")));
+            f.store.recordTrustedPayment(new MallApi.Payment(order.orderId(), "test", "explicit-test-pay", 125, "CNY")); delivery(f).receipt(new DeliveryApi.Receipt(order.orderId(), "9001", "REFUND_PENDING", "c".repeat(64)));
+            rejects(503, () -> new DeliveryStore(f.jdbc, f.manager).refunded(new MallApi.Refund(order.orderId(), "test", "explicit-test-pay", "old-constructor-refund", 125, "CNY")));
             assertEquals(0, f.count("commerce_refund_receipt"));
         }
     }
@@ -249,9 +248,10 @@ class MockPaymentStoreTest {
             var order = create(f, 1, "forged-mock-order");
             rejects(503, () -> f.store.recordTrustedPayment(new MallApi.Payment(order.orderId(), "mock", "mock-pay-" + order.orderId(), 100, "CNY")));
             worker(f).pay(new MockPaymentApi.Pay(order.orderId(), "forged-mock-request"));
+            var payFact = new PaymentPolicy(f.jdbc, f.props, RunMode.TEST).required("PAYMENT", order.orderId());
             delivery(f).receipt(new DeliveryApi.Receipt(order.orderId(), "123", "REFUND_PENDING", "b".repeat(64)));
-            rejects(503, () -> delivery(f).refunded(new MallApi.Payment(order.orderId(), "mock", "mock-refund-" + order.orderId(), 100, "CNY")));
-            rejects(409, () -> delivery(f).refunded(new MallApi.Payment(order.orderId(), "test", "foreign-refund", 100, "CNY")));
+            rejects(503, () -> delivery(f).refunded(new MallApi.Refund(order.orderId(), "mock", payFact.transactionId(), "mock-refund-" + order.orderId(), 100, "CNY")));
+            rejects(404, () -> delivery(f).refunded(new MallApi.Refund(order.orderId(), "test", payFact.transactionId(), "foreign-refund", 100, "CNY")));
             assertEquals(0, f.count("commerce_refund_receipt"));
             assertEquals(1, worker(f).reconcile().succeeded());
         }
@@ -310,7 +310,7 @@ class MockPaymentStoreTest {
             // 本例尚无退款数据，退回V3形状；不操作任何既有共享库。
             f.schemaJdbc.execute("DROP TABLE commerce_mock_transaction");
             f.schemaJdbc.execute("DROP TABLE commerce_refund_intent");
-            f.schemaJdbc.execute("CREATE TABLE commerce_refund_intent(order_sn VARCHAR(36) PRIMARY KEY,status VARCHAR(24) NOT NULL,channel VARCHAR(32) NULL,transaction_id VARCHAR(128) NULL)");
+            f.schemaJdbc.execute("CREATE TABLE commerce_refund_intent(channel VARBINARY(32) NOT NULL,transaction_id VARBINARY(128) NOT NULL,order_sn VARCHAR(36) NOT NULL,source VARCHAR(24) NOT NULL,status VARCHAR(24) NOT NULL,close_reason VARCHAR(64) NULL,PRIMARY KEY(channel,transaction_id))");
             assertThrows(Exception.class, () -> new MallSchemaVerifier(f.source, f.props).verify());
             f.migrate("db/migration/V4__mock_payment.sql");
             new MallSchemaVerifier(f.source, f.props).verify();

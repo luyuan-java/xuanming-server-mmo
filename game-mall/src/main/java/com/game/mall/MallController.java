@@ -33,10 +33,10 @@ public class MallController {
     @PostMapping("/api/orders/list") public java.util.List<MallApi.Order> list(HttpServletRequest request){return store.list(subject(request),input(request,DeliveryApi.OrderPage.class));}
     @PostMapping("/api/orders/cancel") public MallApi.Order cancel(HttpServletRequest request){return store.cancel(subject(request),input(request,MallApi.OwnedOrder.class));}
     @PostMapping("/api/orders/{orderId}/cancel") public MallApi.Order cancel(HttpServletRequest request, @PathVariable("orderId") String orderId) { return store.cancel(subject(request), orderId); }
-    @PostMapping("/internal/payments") public MallApi.Order payment(HttpServletRequest request, @Valid @RequestBody MallApi.Payment body) {
+    @PostMapping("/internal/payments") public MallApi.PaymentOutcome payment(HttpServletRequest request, @Valid @RequestBody MallApi.Payment body) {
         // 经济权限在提交入口再次检查，不能让容器路由前缀或未来路径适配改变信任边界。
         if (!"payment".equals(request.getAttribute(MallAuthentication.ROLE))) { throw new MallException(401, "支付调用方认证失败"); }
-        return store.recordTrustedPayment(body);
+        return store.recordTrustedPaymentOutcome(body);
     }
     private String subject(HttpServletRequest request) { return (String) request.getAttribute(MallAuthentication.SUBJECT); }
     private <T> T input(HttpServletRequest request, Class<T> type) {

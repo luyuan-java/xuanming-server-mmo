@@ -1,6 +1,7 @@
 package com.game.mall;
 
 import com.game.common.RunMode;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -15,6 +16,7 @@ final class PaymentPolicy {
     record Fact(String kind, String orderId, String requestId, String transactionId, String paymentTransactionId,
         long amountMinor, String currency, long createdMs, int applied) {
         MallApi.Payment receipt() { return new MallApi.Payment(orderId, "mock", transactionId, amountMinor, currency); }
+        MallApi.Refund refundReceipt() { return new MallApi.Refund(orderId, "mock", paymentTransactionId, transactionId, amountMinor, currency); }
     }
 
     Fact find(String kind, String orderId, boolean lock) {
@@ -63,18 +65,18 @@ final class PaymentPolicy {
         }
     }
 
-    void refund(MallApi.Payment input) {
+    void refund(MallApi.Refund input) {
         requireChannel(input.channel());
-        var original = jdbc.query("SELECT channel,transaction_id,amount_minor,currency FROM commerce_payment_receipt WHERE order_sn=?",
+        var original = jdbc.query("SELECT channel,transaction_id,amount_minor,currency FROM commerce_payment_receipt WHERE channel=? AND transaction_id=?",
             (row, index) -> new MallApi.Payment(input.orderId(), row.getString(1), row.getString(2), row.getLong(3), row.getString(4)),
-            input.orderId());
+            input.channel().getBytes(StandardCharsets.US_ASCII), input.paymentTransactionId().getBytes(StandardCharsets.US_ASCII));
         if (original.size() != 1 || !original.getFirst().channel().equals(input.channel())) {
             throw new MallException(409, "退款渠道与原付款不符");
         }
         if ("mock".equals(input.channel())) {
             var payment = required("PAYMENT", input.orderId());
             var refund = required("REFUND", input.orderId());
-            if (!payment.receipt().equals(original.getFirst()) || !refund.receipt().equals(input)
+            if (!payment.receipt().equals(original.getFirst()) || !refund.refundReceipt().equals(input)
                 || !refund.paymentTransactionId().equals(payment.transactionId())
                 || refund.amountMinor() != payment.amountMinor() || !refund.currency().equals(payment.currency())) {
                 throw new MallException(409, "mock退款与原付款事实不符");
@@ -82,7 +84,7 @@ final class PaymentPolicy {
         }
     }
 
-    private void requireChannel(String channel) {
+    void requireChannel(String channel) {
         if (props == null) { throw new MallException(503, "未装配支付渠道策略"); }
         props.requirePaymentChannel(channel, runMode);
     }
