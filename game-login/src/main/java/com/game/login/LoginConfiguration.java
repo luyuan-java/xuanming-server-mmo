@@ -1,5 +1,7 @@
 package com.game.login;
 
+import com.game.api.ContentGuardService;
+import com.game.api.DubboGroups;
 import com.game.api.SceneDirectoryService;
 import com.game.common.id.Snowflake;
 import com.game.common.token.DubboCallAuth;
@@ -43,7 +45,11 @@ import com.game.login.session.RedisLoginDevices;
 import com.game.login.token.LoginTokens;
 import com.game.login.token.RedisLoginTokens;
 import com.game.player.store.PlayerStore;
+import com.game.proto.content_guard.CheckTextRequest;
+import com.game.proto.content_guard.TextScene;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Clock;
@@ -300,16 +306,55 @@ public class LoginConfiguration {
      * 建角。新角色的归属区取<b>会话所在的 zone</b>（gate 填的），不取本进程的 {@code game.zone-id}：
      * login 不分 zone，一个进程服务全部 zone 的 gate。
      */
-    @Bean
+    /** 兼容既有 9 参调用（如接线单测）。 */
     public CreatePlayerHandler createPlayerHandler(PlayerStore store, CharacterRules characterRules,
                                                    PlayerIdGenerator playerIds, LoginProperties props,
                                                    LoginMetrics loginMetrics, AccountLogin accountLogin,
                                                    ZoneMergeFence zoneMergeFence, RedissonClient redis,
                                                    RedisKeys redisKeys) {
+        return createPlayerHandler(store, characterRules, playerIds, props, loginMetrics, accountLogin,
+                zoneMergeFence, redis, redisKeys, (CreatePlayerHandler.TextGuard) null);
+    }
+
+    @Bean
+    public CreatePlayerHandler createPlayerHandler(PlayerStore store, CharacterRules characterRules,
+                                                   PlayerIdGenerator playerIds, LoginProperties props,
+                                                   LoginMetrics loginMetrics, AccountLogin accountLogin,
+                                                   ZoneMergeFence zoneMergeFence, RedissonClient redis,
+                                                   RedisKeys redisKeys,
+                                                   ObjectProvider<CreatePlayerHandler.TextGuard> textGuard) {
+        return createPlayerHandler(store, characterRules, playerIds, props, loginMetrics, accountLogin,
+                zoneMergeFence, redis, redisKeys, textGuard.getIfAvailable());
+    }
+
+    private CreatePlayerHandler createPlayerHandler(PlayerStore store, CharacterRules characterRules,
+                                                    PlayerIdGenerator playerIds, LoginProperties props,
+                                                    LoginMetrics loginMetrics, AccountLogin accountLogin,
+                                                    ZoneMergeFence zoneMergeFence, RedissonClient redis,
+                                                    RedisKeys redisKeys, CreatePlayerHandler.TextGuard textGuard) {
         SecureRandom random = new SecureRandom();
         return new CreatePlayerHandler(store, characterRules, playerIds, () -> random.nextInt(256),
                 zoneMergeFence, props.maxPlayersPerAccount(), loginMetrics, accountLogin::renewDevice,
-                InFlightKeys.distributed(redis, account -> redisKeys.loginInFlight("create", account), IN_FLIGHT_TTL));
+                InFlightKeys.distributed(redis, account -> redisKeys.loginInFlight("create", account), IN_FLIGHT_TTL),
+                textGuard);
+    }
+
+    /** 显式开启 game.login.content-guard-enabled=true 时接入内容安全 Dubbo 服务。 */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(name = "game.login.content-guard-enabled", havingValue = "true")
+    static class ContentGuardClientConfiguration {
+
+        @org.apache.dubbo.config.annotation.DubboReference(group = DubboGroups.CONTENT_GUARD, check = false, timeout = 1500, retries = 0)
+        private ContentGuardService contentGuardService;
+
+        @Bean
+        CreatePlayerHandler.TextGuard loginRoleNameGuard() {
+            return (account, displayName) -> contentGuardService.checkText(CheckTextRequest.newBuilder()
+                    .setScene(TextScene.TEXT_SCENE_ROLE_NAME)
+                    .setAccount(account == null ? "" : account)
+                    .setText(displayName)
+                    .build());
+        }
     }
 
     /** 归属接管请求（Redis pub/sub，全部 scene 节点订阅）。 */

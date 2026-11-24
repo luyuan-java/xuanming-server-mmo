@@ -24,7 +24,7 @@ public interface PlayerMapper {
 
 
     // JDBC现有int API保留uint32位模式；SQL列始终存0..4294967295，回读先降为有符号int范围。
-    String PLAYER_COLUMNS = "player_id,account,owner_revision,trade_listing_id,CASE WHEN zone_id>2147483647 THEN CAST(zone_id AS DECIMAL(20,0))-4294967296 ELSE zone_id END AS zone_id,name,name_key,class_id,gender,appearance_id,level,"
+    String PLAYER_COLUMNS = "player_id,account,owner_revision,trade_listing_id,CASE WHEN zone_id>2147483647 THEN CAST(zone_id AS DECIMAL(20,0))-4294967296 ELSE zone_id END AS zone_id,name,name_key,class_id,gender,appearance_id,renamed_ms,level,"
             + "CASE WHEN scene_config_id>2147483647 THEN CAST(scene_config_id AS DECIMAL(20,0))-4294967296 ELSE scene_config_id END AS scene_config_id,"
             + "pos_x,pos_y,pos_z,owner_epoch,owner_released,owner_lease_until,created_at,updated_at";
 
@@ -50,6 +50,38 @@ public interface PlayerMapper {
 
     @Select("SELECT " + PLAYER_COLUMNS + " FROM player WHERE player_id = #{playerId}")
     PlayerRow selectById(@Param("playerId") long playerId);
+
+    @Select("SELECT player_id FROM player WHERE name_key = #{nameKey}")
+    Long selectPlayerIdByNameKey(@Param("nameKey") String nameKey);
+
+    /** 带归属围栏原子修改角色名与改名时间戳；交易冻结或失去归属时影响 0 行。 */
+    @Update("""
+            UPDATE player
+               SET name = #{newName}, name_key = #{newNameKey}, renamed_ms = #{now}, updated_at = #{now}
+             WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch} AND owner_released = 0 AND trade_listing_id = 0
+            """)
+    int updatePlayerName(@Param("playerId") long playerId, @Param("ownerEpoch") long ownerEpoch,
+                         @Param("newName") String newName, @Param("newNameKey") String newNameKey,
+                         @Param("now") long now);
+
+    @Select("SELECT owner_player_id, held_until_ms FROM player_name_hold WHERE name_key = #{nameKey} FOR UPDATE")
+    @ConstructorArgs({
+            @Arg(column = "owner_player_id", javaType = long.class),
+            @Arg(column = "held_until_ms", javaType = long.class)})
+    PlayerStore.NameHoldRow selectNameHoldForUpdate(@Param("nameKey") String nameKey);
+
+    @Delete("DELETE FROM player_name_hold WHERE name_key = #{nameKey}")
+    int deleteNameHold(@Param("nameKey") String nameKey);
+
+    @Insert("""
+            INSERT INTO player_name_hold (name_key, owner_player_id, held_until_ms, updated_at)
+            VALUES (#{nameKey}, #{ownerPlayerId}, #{heldUntilMs}, #{now})
+            ON DUPLICATE KEY UPDATE owner_player_id = VALUES(owner_player_id),
+                                    held_until_ms = VALUES(held_until_ms),
+                                    updated_at = VALUES(updated_at)
+            """)
+    int upsertNameHold(@Param("nameKey") String nameKey, @Param("ownerPlayerId") long ownerPlayerId,
+                       @Param("heldUntilMs") long heldUntilMs, @Param("now") long now);
 
     /** 调用者已持player主键锁；只读交易门禁，不复制账号或资产事实源。 */
     @Select("SELECT trade_listing_id FROM player WHERE player_id=#{playerId}")

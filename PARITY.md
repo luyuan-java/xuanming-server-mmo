@@ -1,5 +1,10 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-23 角色改名（428/429）与建角/宠物内容安全接入（`game-player-store`、`game-login`、`game-scene`）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 角色改名（`SceneClientPlayerCommon.RenamePlayer` 428 / `NotifyPlayerRenamed` 429、改名卡扣减、冷却与原名保留表 `player_name_hold`、事务围栏原子改名）与建角名 / 宠物改名内容安全接入 | `go/data_service`（`player_name_hold`/`RenameRole`）、`go/login`（`CreatePlayer` 接 `content_guard`）、`cpp/libs/services/scene/player`（`RenamePlayer`/`RenamePet` 接 `content_guard`） | `game-player-store` 新增 `player.renamed_ms` 与 `player_name_hold` 表及 `PlayerStore.renamePlayer`（`owner_epoch` / `owner_released=0` / `trade_listing_id=0` 围栏与旧名保护检查，`createPlayer` 同步拦他号保护期旧名）；`game-login` `CreatePlayerHandler` 接入可选 `TextGuard`（`game.login.content-guard-enabled=true` 装配 Dubbo `ContentGuardService`，fail-closed 回 2034/2050）；`game-scene` 新增 `PlayerRenameTables`/`PlayerRenameService`/`PlayerRenameFeature`（428/429，受冻结闸保护、战斗放行，异步审核+存储后切回逻辑线程扣改名卡并推 429）、`PetService`/`PetFeature` 异步内容审核（26017/1003）与 `SceneNodeConfiguration`（`game.scene.content-guard-enabled=true`）；验证：`game-player-store` 212 项全绿（8 项 MySQL 夹具跳过）、`game-login` 395 项全绿（44 项外部夹具跳过）、`game-scene` 定向 244 项全绿（含 `PlayerRenameAndPetGuardTest`/`InBattleGateMatrixTest`/`FreezeGateTest`/`PetServiceTest`/`PetFeatureTest`/`SceneAuditPolicyTest`；全模块 2,012/2,015 通过，另 3 项因同工作区未提交的 `basescene.pb` 变动失败）；设计见 `docs/design/rename-and-content-safety.md` | 已对齐 |
 ## 2026-11-23 聊天内容安全、举报（433）、世界撤回（434/435）与反刷屏（`game-chat`）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |

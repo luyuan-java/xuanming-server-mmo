@@ -190,6 +190,8 @@ public class SceneNode implements SmartLifecycle {
     private final SkillTables skillTables;
     private final PetTables petTables;
     private com.game.scene.appearance.AppearanceTables appearanceTables;
+    private com.game.scene.rename.PlayerRenameTables renameTables;
+    private com.game.scene.player.SceneTextGuard textGuard;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
     private final AuditProperties audit;
@@ -207,6 +209,18 @@ public class SceneNode implements SmartLifecycle {
     public synchronized SceneNode withAppearanceTables(com.game.scene.appearance.AppearanceTables appearanceTables) {
         if (running) throw new IllegalStateException("节点已启动");
         this.appearanceTables = java.util.Objects.requireNonNull(appearanceTables);
+        return this;
+    }
+
+    public synchronized SceneNode withRenameTables(com.game.scene.rename.PlayerRenameTables renameTables) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.renameTables = java.util.Objects.requireNonNull(renameTables);
+        return this;
+    }
+
+    public synchronized SceneNode withTextGuard(com.game.scene.player.SceneTextGuard textGuard) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.textGuard = textGuard;
         return this;
     }
 
@@ -402,9 +416,12 @@ public class SceneNode implements SmartLifecycle {
         SkillService skills = new SkillService(skillTables, SceneClock.SYSTEM, metrics, ids);
         PetService petService = new PetService(petTables, currency, itemGuids(guids), SceneClock.SYSTEM,
                 new SplittableRandom(), metrics);
-        PetFeature pets = new PetFeature(petService, registry);
+        PetFeature pets = new PetFeature(petService, registry, textGuard, storageExecutor, logic);
         com.game.scene.appearance.AppearanceService appearanceService = appearanceTables == null ? null
                 : new com.game.scene.appearance.AppearanceService(appearanceTables, bags, SceneClock.SYSTEM, registry);
+        com.game.scene.rename.PlayerRenameService renameService = renameTables == null ? null
+                : new com.game.scene.rename.PlayerRenameService(renameTables, bags, SceneClock.SYSTEM, registry,
+                        textGuard, storageExecutor, logic);
         AuditPipeline pipeline = auditPipeline;
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
                 : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
@@ -512,6 +529,9 @@ public class SceneNode implements SmartLifecycle {
                         new com.game.scene.skill.ClassSkillService(currency, attributes, petService), attributes, registry, petService), pets));
         if (appearanceService != null) {
             features.add(new com.game.scene.appearance.AppearanceFeature(appearanceService));
+        }
+        if (renameService != null) {
+            features.add(new com.game.scene.rename.PlayerRenameFeature(renameService));
         }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, runMode, features);
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");

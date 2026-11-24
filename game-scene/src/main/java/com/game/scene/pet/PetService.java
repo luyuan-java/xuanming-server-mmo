@@ -84,6 +84,8 @@ public final class PetService {
     static final int NO_AUTO_PLAN = PetErrorTip.pet_error.kPetNoAutoPlan_VALUE;
     static final int NOTHING_TO_CHANGE = PetErrorTip.pet_error.kPetNothingToChange_VALUE;
     static final int ID_GENERATE_FAILED = PetErrorTip.pet_error.kPetIdGenerateFailed_VALUE;
+    static final int NAME_SENSITIVE = PetErrorTip.pet_error.kPetNameSensitive_VALUE;
+    static final int SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     /** 回合制战斗在途（基线 kPetInBattle）。 */
     static final int IN_BATTLE = PetErrorTip.pet_error.kPetInBattle_VALUE;
 
@@ -456,8 +458,8 @@ public final class PetService {
         return new Suggestion(OK, suggested);
     }
 
-    /** 改名：名字非法 26007 → 找宝宝 → 名字没变 26015（不收钱）→ 扣改名金币 → 改。 */
-    public int rename(ScenePlayer player, long petId, String name) {
+    /** 改名纯前置检查（不扣金币、不改名）：供接入内容安全服务前在逻辑线程快速挡掉非法输入与余额不足。 */
+    public int checkRename(ScenePlayer player, long petId, String name) {
         int writable = checkWritable(player);
         if (writable != OK) {
             return writable;
@@ -477,6 +479,20 @@ public final class PetService {
         if (currentName.equals(name)) {
             return NOTHING_TO_CHANGE;
         }
+        long cost = tables.renameCostGold();
+        if (cost > 0 && Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), cost) < 0) {
+            return GOLD_NOT_ENOUGH;
+        }
+        return OK;
+    }
+
+    /** 改名：名字非法 26007 → 找宝宝 → 名字没变 26015（不收钱）→ 扣改名金币 → 改。 */
+    public int rename(ScenePlayer player, long petId, String name) {
+        int precheck = checkRename(player, petId, name);
+        if (precheck != OK) {
+            return precheck;
+        }
+        Pet pet = player.pets().find(petId);
         int paid = payGold(player, tables.renameCostGold(), AssetAudit.Reason.PET_RENAME);
         if (paid != OK) {
             return paid;

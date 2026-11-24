@@ -157,6 +157,7 @@ class InBattleGateMatrixTest {
     private static final String ACTIVITY = "SceneActivityClientPlayer";
     private static final String PET = "ScenePetClientPlayer";
     private static final String APPEARANCE = "SceneAppearanceClientPlayer";
+    private static final String COMMON = "SceneClientPlayerCommon";
 
     /** 战斗中的预期（除了正数 = 应答里的拒绝码之外的三种）。 */
     private static final int SAME_AS_NOT_IN_BATTLE = -1;
@@ -221,6 +222,7 @@ class InBattleGateMatrixTest {
             new Row(443, APPEARANCE, "SwitchAppearance", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(444, APPEARANCE, "StartAppearanceTrial", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(445, APPEARANCE, "CancelAppearanceTrial", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(428, COMMON, "RenamePlayer", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(193, MISSION, "GetMissionList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             // ALLOW：只给建议
             new Row(173, ATTRIBUTE, "AutoAllocateAttributePoints", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -607,6 +609,7 @@ class InBattleGateMatrixTest {
         out.put(PET + "RenamePet", s -> RenamePetRequest.newBuilder().setPetId(s.activePet()).setName("小冻").build());
         out.put(PET + "GmGrantPet", s -> GmGrantPetRequest.newBuilder().setPetTableId(1).build());
         out.put(PET + "AutoAllocatePetPoints", s -> AutoAllocatePetPointsRequest.newBuilder().setPetId(s.activePet()).build());
+        out.put(COMMON + "RenamePlayer", s -> com.game.proto.RenamePlayerRequest.newBuilder().setName("战中改名").build());
         return out;
     }
 
@@ -963,6 +966,10 @@ class InBattleGateMatrixTest {
                 var start = com.game.proto.StartAppearanceTrialRequest.newBuilder().setAppearanceId(subject.appearanceTarget()).setClientRequestId(102).build();
                 assertThat(w.appearance.startTrial(w.world, subject.player(), start).getErrorMessage().getId()).isZero();
             }
+        }
+        if (row.service().equals(COMMON) && row.method().equals("RenamePlayer")) {
+            var rule = w.renameTables.rule();
+            grantProbeItem(w, subject.player(), rule.renameItemId(), rule.renameItemCount());
         }
         if (!EQUIPMENT_METHODS.contains(row.method())) return subject;
         ScenePlayer player = subject.player();

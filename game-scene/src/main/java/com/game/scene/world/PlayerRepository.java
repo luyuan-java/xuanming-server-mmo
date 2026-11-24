@@ -99,6 +99,15 @@ public interface PlayerRepository {
     void saveProgress(PlayerSave save, Consumer<ProgressResult> onDone);
 
     /**
+     * 带 {@code owner_epoch} 围栏的原子角色改名（异步在存储线程执行，结局投递回场景逻辑线程）。
+     */
+    default void renamePlayer(long playerId, long ownerEpoch, String newName, long cooldownMs, long oldNameHoldMs,
+                              Consumer<com.game.player.store.PlayerStore.RenameOutcome> onDone) {
+        onDone.accept(new com.game.player.store.PlayerStore.RenameOutcome(
+                com.game.player.store.PlayerStore.RenameStatus.FENCED, "", 0L, 0L));
+    }
+
+    /**
      * 交出归属：带围栏写回冻结快照（{@code frozen.ownerEpoch()} = 本实例持有的 E），同一事务里把 epoch 加一到 E+1、给新租约。
      * 只有仍由 E 持有、未释放、且剩余租约不短于安全边际时才提交。{@code mode} 决定提交时 E+1 的释放标记：
      * <ul>

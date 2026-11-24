@@ -16,6 +16,7 @@ public class PlayerRow {
     private int classId;
     private int gender;
     private String appearanceId = "";
+    private long renamedMs;
     /** 列是 INT UNSIGNED：按 long 读（rs.getLong），≥ 2^31 的值不会让 JDBC 读 int 越界、整行加载失败。 */
     private long level = 1;
     private int sceneConfigId;
@@ -85,6 +86,14 @@ public class PlayerRow {
 
     public void setAppearanceId(String appearanceId) {
         this.appearanceId = appearanceId == null ? "" : appearanceId;
+    }
+
+    public long getRenamedMs() {
+        return renamedMs;
+    }
+
+    public void setRenamedMs(long renamedMs) {
+        this.renamedMs = renamedMs;
     }
 
     public long getLevel() {

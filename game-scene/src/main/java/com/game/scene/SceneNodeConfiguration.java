@@ -1,5 +1,7 @@
 package com.game.scene;
 
+import com.game.api.ContentGuardService;
+import com.game.api.DubboGroups;
 import com.game.api.proto.CreateDungeonInstanceResponse;
 import com.game.api.proto.DestroyInstanceResponse;
 import com.game.audit.AuditProperties;
@@ -21,6 +23,8 @@ import com.game.scene.attribute.AttributeTables;
 import com.game.scene.bag.BagTables;
 import com.game.scene.mission.MissionTables;
 import com.game.scene.pet.PetTables;
+import com.game.scene.player.SceneTextGuard;
+import com.game.scene.rename.PlayerRenameTables;
 import com.game.scene.skill.SkillTables;
 import com.game.scene.battle.SceneBattleTables;
 import com.game.scene.metrics.SceneBattleMetrics;
@@ -36,8 +40,10 @@ import java.util.concurrent.locks.LockSupport;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -109,6 +115,30 @@ public class SceneNodeConfiguration {
         return AppearanceTables.from(tables);
     }
 
+    @Bean
+    public PlayerRenameTables playerRenameTables(ConfigTables tables) {
+        return PlayerRenameTables.from(tables);
+    }
+
+    /** 显式开启 game.scene.content-guard-enabled=true 时接入内容安全 Dubbo 服务（角色改名与宝宝改名共用）。 */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(name = "game.scene.content-guard-enabled", havingValue = "true")
+    static class ContentGuardClientConfiguration {
+
+        @org.apache.dubbo.config.annotation.DubboReference(group = DubboGroups.CONTENT_GUARD, check = false, timeout = 1500, retries = 0)
+        private ContentGuardService contentGuardService;
+
+        @Bean
+        SceneTextGuard sceneTextGuard() {
+            return (scene, playerId, text) -> contentGuardService.checkText(
+                    com.game.proto.content_guard.CheckTextRequest.newBuilder()
+                            .setScene(scene)
+                            .setPlayerId(playerId)
+                            .setText(text)
+                            .build());
+        }
+    }
+
     /** gate 链路握手鉴权。密钥只从环境变量 {@code GAME_NODE_LINK_SECRET} 读，缺失即启动失败（不允许无鉴权的链路）。 */
     @Bean
     public NodeLinkAuth nodeLinkAuth(Environment environment) {
@@ -149,7 +179,9 @@ public class SceneNodeConfiguration {
     public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, RedisKeys redisKeys, PlayerStore playerStore, PlayerTradeStore playerTrades,
                                MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
                                BagTables bagTables, MissionTables missionTables, SkillTables skillTables,
-                               PetTables petTables, AppearanceTables appearanceTables, NodeLinkAuth nodeLinkAuth,
+                               PetTables petTables, AppearanceTables appearanceTables,
+                               PlayerRenameTables playerRenameTables,
+                               ObjectProvider<SceneTextGuard> textGuard, NodeLinkAuth nodeLinkAuth,
                                SceneMetrics sceneMetrics, AuditProperties audit, KafkaNames kafkaNames,
                                SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source,
                                com.game.common.sql.WriterAuthority boot,
@@ -157,7 +189,11 @@ public class SceneNodeConfiguration {
         if (audit.enabled()) audit.validateFor(RunMode.parse(props.runMode()));
         return new SceneNode(props, redis, redisKeys, playerStore, playerTrades, registry, tables, attributeTables, bagTables, missionTables,
                 skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, kafkaNames, sceneBattleTables, sceneBattleMetrics,
-                source, evacuation, processExit::exitSoon).withAppearanceTables(appearanceTables).withMaintenanceBoot(boot);
+                source, evacuation, processExit::exitSoon)
+                .withAppearanceTables(appearanceTables)
+                .withRenameTables(playerRenameTables)
+                .withTextGuard(textGuard.getIfAvailable())
+                .withMaintenanceBoot(boot);
     }
 
     @Bean

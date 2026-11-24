@@ -27,12 +27,23 @@ import com.game.proto.ResetPetPointsRequest;
 import com.game.proto.ResetPetPointsResponse;
 import com.game.proto.SummonPetRequest;
 import com.game.proto.SummonPetResponse;
+import com.game.proto.content_guard.CheckTextResponse;
+import com.game.proto.content_guard.TextScene;
+import com.game.proto.content_guard.TextVerdict;
+import com.game.scene.player.SceneTextGuard;
 import com.game.scene.world.BattlePolicy;
+import com.game.scene.world.DeferredReply;
 import com.game.scene.world.FreezePolicy;
 import com.game.scene.world.PlayerCall;
 import com.game.scene.world.SceneFeature;
+import com.game.scene.world.ScenePlayer;
+import com.game.scene.world.SceneWorld;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 宝宝的客户端方法（{@code ScenePetClientPlayer}：181 列表、183 出战、185 收回、186 加点、182 洗点、188 自动加点、189 改名、
@@ -41,14 +52,26 @@ import java.util.TreeMap;
  */
 public final class PetFeature implements SceneFeature {
 
+    private static final Logger log = LoggerFactory.getLogger(PetFeature.class);
     private static final String SERVICE = "ScenePetClientPlayer";
 
     private final PetService pets;
     private final int notifyPetListChanged;
+    private final SceneTextGuard textGuard;
+    private final Executor ioExecutor;
+    private final Executor logicExecutor;
 
     public PetFeature(PetService pets, MessageIdRegistry registry) {
+        this(pets, registry, null, null, null);
+    }
+
+    public PetFeature(PetService pets, MessageIdRegistry registry, SceneTextGuard textGuard,
+                      Executor ioExecutor, Executor logicExecutor) {
         this.pets = pets;
         this.notifyPetListChanged = registry.requireId(SERVICE, "NotifyPetListChanged");
+        this.textGuard = textGuard;
+        this.ioExecutor = ioExecutor;
+        this.logicExecutor = logicExecutor;
     }
 
     /**
@@ -116,14 +139,7 @@ public final class PetFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
-        r.on(SERVICE, "RenamePet", RenamePetRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
-            int result = pets.rename(call.player(), request.getPetId(), request.getName());
-            RenamePetResponse.Builder response = RenamePetResponse.newBuilder().setErrorMessage(tip(result));
-            if (result == 0) {
-                response.setPets(pets.buildList(call.player()));
-            }
-            call.reply(response.build());
-        });
+        r.on(SERVICE, "RenamePet", RenamePetRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, this::renamePet);
         r.on(SERVICE, "GmGrantPet", GmGrantPetRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
             PetService.Grant grant = pets.grant(call.player(), request.getPetTableId());
             GmGrantPetResponse.Builder response = GmGrantPetResponse.newBuilder().setErrorMessage(tip(grant.tip()));
@@ -132,6 +148,66 @@ public final class PetFeature implements SceneFeature {
             }
             call.reply(response.build());
         });
+    }
+
+    private void renamePet(PlayerCall call, RenamePetRequest request) {
+        if (textGuard == null || ioExecutor == null || logicExecutor == null) {
+            int result = pets.rename(call.player(), request.getPetId(), request.getName());
+            RenamePetResponse.Builder response = RenamePetResponse.newBuilder().setErrorMessage(tip(result));
+            if (result == 0) {
+                response.setPets(pets.buildList(call.player()));
+            }
+            call.reply(response.build());
+            return;
+        }
+        ScenePlayer player = call.player();
+        int pre = pets.checkRename(player, request.getPetId(), request.getName());
+        if (pre != 0) {
+            call.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(pre)).build());
+            return;
+        }
+        DeferredReply deferred = call.defer();
+        SceneWorld world = call.world();
+        long playerId = player.playerId();
+        long ownerEpoch = player.ownerEpoch();
+        long petId = request.getPetId();
+        String name = request.getName();
+        try {
+            ioExecutor.execute(() -> {
+                CheckTextResponse resp = null;
+                try {
+                    resp = textGuard.check(TextScene.TEXT_SCENE_PET_NAME, playerId, name);
+                } catch (RuntimeException e) {
+                    log.warn("Pet rename content guard failed player={}: {}",
+                            Long.toUnsignedString(playerId), e.getMessage());
+                }
+                CheckTextResponse finalResp = resp;
+                logicExecutor.execute(() -> {
+                    ScenePlayer current = world.playerById(playerId);
+                    if (current == null || current.ownerEpoch() != ownerEpoch) {
+                        deferred.cancel();
+                        return;
+                    }
+                    if (finalResp == null) {
+                        deferred.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(PetService.SERVICE_UNAVAILABLE)).build());
+                        return;
+                    }
+                    if (finalResp.getVerdict() != TextVerdict.TEXT_VERDICT_PASS) {
+                        deferred.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(PetService.NAME_SENSITIVE)).build());
+                        return;
+                    }
+                    int result = pets.rename(current, petId, name);
+                    RenamePetResponse.Builder response = RenamePetResponse.newBuilder().setErrorMessage(tip(result));
+                    if (result == 0) {
+                        response.setPets(pets.buildList(current));
+                    }
+                    deferred.reply(response.build());
+                });
+            });
+        } catch (RejectedExecutionException full) {
+            log.warn("Pet rename content guard executor full player={}", Long.toUnsignedString(playerId));
+            deferred.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(PetService.SERVICE_UNAVAILABLE)).build());
+        }
     }
 
     /** 186：宝宝号 0 或没带任何维度回 1005（同基线 handler 前置），其余交给服务。 */

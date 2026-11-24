@@ -178,21 +178,133 @@ public class PlayerStore {
         long now = clockMs.getAsLong();
         row.setCreatedAt(now);
         row.setUpdatedAt(now);
+        String key = nameKey(row.getName());
+        NameHoldRow hold = mapper.selectNameHoldForUpdate(key);
+        if (hold != null) {
+            if (hold.heldUntilMs() > now) {
+                return CreateResult.NAME_TAKEN;
+            }
+            mapper.deleteNameHold(key);
+        }
         try {
-            mapper.insertPlayer(row, nameKey(row.getName()));
+            mapper.insertPlayer(row, key);
         } catch (DuplicateKeyException e) {
-            String key = duplicatedKeyName(e);
-            if (NAME_KEY_INDEX.equals(key)) {
+            String dupKey = duplicatedKeyName(e);
+            if (NAME_KEY_INDEX.equals(dupKey)) {
                 return CreateResult.NAME_TAKEN;
             }
             // fail-closed：主键重复说明雪花发号撞号，回「重名」会掩盖它、让客户端换名重试时继续撞。
-            throw new IllegalStateException("建角撞到名字以外的唯一约束 key=" + key
+            throw new IllegalStateException("建角撞到名字以外的唯一约束 key=" + dupKey
                     + " player_id=" + Long.toUnsignedString(row.getPlayerId()), e);
         }
         if (mapper.insertInitialState(row.getPlayerId(), PlayerState.getDefaultInstance().toByteArray(), now) != 1) {
             throw new IllegalStateException("建角初始存档必须恰好插入一行");
         }
         return CreateResult.CREATED;
+    }
+
+    /** 角色改名旧名保护表的一行。 */
+    public record NameHoldRow(long ownerPlayerId, long heldUntilMs) {
+    }
+
+    /** {@link #renamePlayer} 的结果状态。 */
+    public enum RenameStatus {
+        OK,
+        NAME_TAKEN,
+        SAME_NAME,
+        COOLDOWN,
+        FROZEN,
+        FENCED,
+        NOT_FOUND,
+        TIMED_OUT
+    }
+
+    /** {@link #renamePlayer} 的权威结果（仅 OK 带最终展示名与时间戳；COOLDOWN 带 nextAllowedMs）。 */
+    public record RenameOutcome(RenameStatus status, String name, long renamedMs, long nextAllowedMs) {
+    }
+
+    /** 原子角色改名（无显式时限，供测试或外层事务调用）。 */
+    @Transactional
+    public RenameOutcome renamePlayer(long playerId, long ownerEpoch, String newName,
+                                      long cooldownMs, long oldNameHoldMs) {
+        return renameInTransaction(playerId, ownerEpoch, newName, cooldownMs, oldNameHoldMs);
+    }
+
+    /**
+     * 带时限与 {@code owner_epoch} 围栏的原子角色改名：单事务锁玩家行 → 校验归属/交易锁/同名/冷却 →
+     * 检查目标名唯一与旧名保护表（本人可改回自己保护期旧名、他人不可抢注）→ 更新 {@code player} → 写入原名保护记录。
+     */
+    public RenameOutcome renamePlayer(long playerId, long ownerEpoch, String newName,
+                                      long cooldownMs, long oldNameHoldMs, Duration timeout) {
+        return withinDeadline(timeout,
+                () -> renameInTransaction(playerId, ownerEpoch, newName, cooldownMs, oldNameHoldMs),
+                new RenameOutcome(RenameStatus.TIMED_OUT, "", 0, 0));
+    }
+
+    private RenameOutcome renameInTransaction(long playerId, long ownerEpoch, String newName,
+                                              long cooldownMs, long oldNameHoldMs) {
+        if (newName == null || newName.isBlank() || cooldownMs < 0 || oldNameHoldMs < 0) {
+            throw new IllegalArgumentException("角色改名参数非法");
+        }
+        OwnerState owner = lockedOwner(playerId);
+        if (owner == null) {
+            return new RenameOutcome(RenameStatus.NOT_FOUND, "", 0, 0);
+        }
+        if (owner.ownerEpoch() != ownerEpoch || owner.released()) {
+            return new RenameOutcome(RenameStatus.FENCED, "", 0, 0);
+        }
+        if (tradeLocked(playerId)) {
+            return new RenameOutcome(RenameStatus.FROZEN, "", 0, 0);
+        }
+        PlayerRow row = mapper.selectById(playerId);
+        if (row == null) {
+            return new RenameOutcome(RenameStatus.NOT_FOUND, "", 0, 0);
+        }
+        String newKey = nameKey(newName);
+        String oldKey = row.getName() == null ? "" : nameKey(row.getName());
+        if (newKey.equals(oldKey)) {
+            return new RenameOutcome(RenameStatus.SAME_NAME, "", 0, 0);
+        }
+        long now = clockMs.getAsLong();
+        if (cooldownMs > 0 && row.getRenamedMs() > 0) {
+            long nextAllowed = row.getRenamedMs() > Long.MAX_VALUE - cooldownMs
+                    ? Long.MAX_VALUE : row.getRenamedMs() + cooldownMs;
+            if (now < nextAllowed) {
+                return new RenameOutcome(RenameStatus.COOLDOWN, "", row.getRenamedMs(), nextAllowed);
+            }
+        }
+        NameHoldRow hold = mapper.selectNameHoldForUpdate(newKey);
+        if (hold != null) {
+            if (hold.heldUntilMs() > now && hold.ownerPlayerId() != playerId) {
+                return new RenameOutcome(RenameStatus.NAME_TAKEN, "", 0, 0);
+            }
+            mapper.deleteNameHold(newKey);
+        }
+        Long existingHolder = mapper.selectPlayerIdByNameKey(newKey);
+        if (existingHolder != null && existingHolder != playerId) {
+            return new RenameOutcome(RenameStatus.NAME_TAKEN, "", 0, 0);
+        }
+        int updated;
+        try {
+            updated = mapper.updatePlayerName(playerId, ownerEpoch, newName, newKey, now);
+        } catch (DuplicateKeyException e) {
+            String dupKey = duplicatedKeyName(e);
+            if (NAME_KEY_INDEX.equals(dupKey) || dupKey == null) {
+                return new RenameOutcome(RenameStatus.NAME_TAKEN, "", 0, 0);
+            }
+            throw e;
+        }
+        if (updated != 1) {
+            return new RenameOutcome(RenameStatus.FENCED, "", 0, 0);
+        }
+        if (oldNameHoldMs > 0 && !oldKey.isEmpty()) {
+            long heldUntil = now > Long.MAX_VALUE - oldNameHoldMs ? Long.MAX_VALUE : now + oldNameHoldMs;
+            mapper.upsertNameHold(oldKey, playerId, heldUntil, now);
+        }
+        long nextAllowed = cooldownMs > 0
+                ? (now > Long.MAX_VALUE - cooldownMs ? Long.MAX_VALUE : now + cooldownMs)
+                : 0L;
+        return new RenameOutcome(RenameStatus.OK, newName, now, nextAllowed);
     }
 
     /** {@link #createPlayerWithinCap} 的结果。 */

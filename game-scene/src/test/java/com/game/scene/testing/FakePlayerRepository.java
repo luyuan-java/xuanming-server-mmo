@@ -39,6 +39,54 @@ public final class FakePlayerRepository implements PlayerRepository {
 
     private final Deque<PendingLoad> loads = new ArrayDeque<>();
     private final Map<Long, PlayerData> rows = new HashMap<>();
+    private java.util.function.LongSupplier renameClockMs = () -> 1_700_000_000_000L;
+    private com.game.player.store.PlayerStore.RenameOutcome nextRenameOutcome;
+
+    public void setRenameClock(java.util.function.LongSupplier clockMs) {
+        this.renameClockMs = Objects.requireNonNull(clockMs);
+    }
+
+    public void setNextRenameOutcome(com.game.player.store.PlayerStore.RenameOutcome outcome) {
+        this.nextRenameOutcome = outcome;
+    }
+
+    @Override
+    public void renamePlayer(long playerId, long ownerEpoch, String newName, long cooldownMs, long oldNameHoldMs,
+                             Consumer<com.game.player.store.PlayerStore.RenameOutcome> onDone) {
+        if (nextRenameOutcome != null) {
+            var forced = nextRenameOutcome;
+            nextRenameOutcome = null;
+            onDone.accept(forced);
+            return;
+        }
+        PlayerData existing = rows.get(playerId);
+        if (existing == null) {
+            onDone.accept(new com.game.player.store.PlayerStore.RenameOutcome(
+                    com.game.player.store.PlayerStore.RenameStatus.NOT_FOUND, "", 0L, 0L));
+            return;
+        }
+        if (existing.ownerEpoch() != ownerEpoch) {
+            onDone.accept(new com.game.player.store.PlayerStore.RenameOutcome(
+                    com.game.player.store.PlayerStore.RenameStatus.FENCED, "", 0L, 0L));
+            return;
+        }
+        String newKey = com.game.player.store.PlayerStore.nameKey(newName);
+        for (PlayerData other : rows.values()) {
+            if (other.playerId() != playerId && !other.name().isEmpty()
+                    && com.game.player.store.PlayerStore.nameKey(other.name()).equals(newKey)) {
+                onDone.accept(new com.game.player.store.PlayerStore.RenameOutcome(
+                        com.game.player.store.PlayerStore.RenameStatus.NAME_TAKEN, "", 0L, 0L));
+                return;
+            }
+        }
+        long now = renameClockMs.getAsLong();
+        rows.put(playerId, new PlayerData(existing.playerId(), existing.ownerEpoch(), existing.classId(),
+                existing.gender(), existing.appearanceId(), existing.level(), existing.sceneConfigId(),
+                existing.position(), existing.state(), newName, now));
+        onDone.accept(new com.game.player.store.PlayerStore.RenameOutcome(
+                com.game.player.store.PlayerStore.RenameStatus.OK, newName, now,
+                cooldownMs > 0 ? now + cooldownMs : 0L));
+    }
     private final List<PlayerSave> saves = new ArrayList<>();
     private final List<Release> releases = new ArrayList<>();
     private record FinalKey(long player,long epoch) { }

@@ -899,7 +899,37 @@ public final class StoragePlayerRepository implements PlayerRepository {
         int level = (int) Math.min(row.getLevel(), Integer.MAX_VALUE);
         return new PlayerData(row.getPlayerId(), row.getOwnerEpoch(), row.getClassId(), row.getGender(),
                 row.getAppearanceId(), level, row.getSceneConfigId(),
-                new Vec3(row.getPosX(), row.getPosY(), row.getPosZ()), state, row.getName());
+                new Vec3(row.getPosX(), row.getPosY(), row.getPosZ()), state, row.getName(), row.getRenamedMs());
+    }
+
+    @Override
+    public void renamePlayer(long playerId, long ownerEpoch, String newName, long cooldownMs, long oldNameHoldMs,
+                             Consumer<PlayerStore.RenameOutcome> onDone) {
+        try {
+            storageExecutor.execute(() -> {
+                PlayerStore.RenameOutcome outcome;
+                try {
+                    outcome = store.renamePlayer(playerId, ownerEpoch, newName, cooldownMs, oldNameHoldMs,
+                            Duration.ofSeconds(3));
+                } catch (RuntimeException e) {
+                    log.error("角色改名 SQL 执行失败 player={} epoch={}", Long.toUnsignedString(playerId), ownerEpoch, e);
+                    outcome = new PlayerStore.RenameOutcome(PlayerStore.RenameStatus.TIMED_OUT, "", 0L, 0L);
+                }
+                deliverRename(playerId, onDone, outcome);
+            });
+        } catch (RejectedExecutionException e) {
+            log.error("存储线程池拒绝角色改名任务 player={}", Long.toUnsignedString(playerId));
+            deliverRename(playerId, onDone, new PlayerStore.RenameOutcome(PlayerStore.RenameStatus.TIMED_OUT, "", 0L, 0L));
+        }
+    }
+
+    private void deliverRename(long playerId, Consumer<PlayerStore.RenameOutcome> onDone,
+                               PlayerStore.RenameOutcome outcome) {
+        try {
+            logicExecutor.execute(() -> onDone.accept(outcome));
+        } catch (RejectedExecutionException e) {
+            log.warn("逻辑线程已关闭，丢弃角色改名回调 player={}", Long.toUnsignedString(playerId));
+        }
     }
 
     /**

@@ -1664,6 +1664,7 @@ public final class SceneWorld {
                 data.gender(), data.appearanceId(), level, skills,
                 resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime(), tables.classSkills());
         player.setName(data.name());
+        player.setRenamedMs(data.renamedMs());
         if (pending.admission() != null) player.bindAdmission(pending.admission());
         if (previous != null && previous.ownerEpoch() == epoch) {
             player.continueLocationSeq(previous.locationSeq());
@@ -3714,6 +3715,11 @@ public final class SceneWorld {
     /** 按 player_id 找本节点上的玩家（已进场的实例；加载中的不算）；没有为 null。 */
     public ScenePlayer playerById(long playerId) {
         return playersById.get(playerId);
+    }
+
+    /** 玩家存储入口（供改名等需要原子目录更新的场景服务调用；须只接收逻辑线程回调）。 */
+    public PlayerRepository repository() {
+        return repository;
     }
 
     /** 按场景实体号找本节点上的玩家（任意场景）；没有为 null。 */

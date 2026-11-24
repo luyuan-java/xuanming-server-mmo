@@ -106,6 +106,10 @@ public final class ScenePlayer {
     private final PlayerBattle battle = new PlayerBattle();
     /** 角色名（存档列 player.name；战斗快照的 player_name）。 */
     private String name = "";
+    /** 上次角色改名成功时刻（Unix 毫秒，存档列 player.renamed_ms；0 = 从未改名）。 */
+    private long renamedMs;
+    /** 角色改名在途标记（逻辑线程内存态，不持久化）。 */
+    private boolean renameInFlight;
     /** 获取滑动窗口（获取异常检测；不持久化，随实例清空）。 */
     private final GainWindows gainWindows = new GainWindows();
     /** 库里此刻的样子（最近一次确认落库的快照）：周期存盘的脏比对基准；null = 不确定（上次在线存盘失败），下次无条件写。 */
@@ -555,6 +559,29 @@ public final class ScenePlayer {
 
     void setName(String name) {
         this.name = name == null ? "" : name;
+    }
+
+    /** 上次角色改名成功时刻（Unix 毫秒；0 = 从未改名）。 */
+    public long renamedMs() {
+        return renamedMs;
+    }
+
+    void setRenamedMs(long renamedMs) {
+        this.renamedMs = renamedMs;
+    }
+
+    /** SQL 原子改名提交后更新内存角色名与冷却时间戳。 */
+    public void applyRename(String newName, long renamedMs) {
+        this.name = newName == null ? "" : newName;
+        this.renamedMs = renamedMs;
+    }
+
+    public boolean renameInFlight() {
+        return renameInFlight;
+    }
+
+    public void setRenameInFlight(boolean inFlight) {
+        this.renameInFlight = inFlight;
     }
 
     /**

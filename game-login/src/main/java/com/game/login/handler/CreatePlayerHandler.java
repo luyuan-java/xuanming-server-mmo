@@ -15,6 +15,8 @@ import com.game.login.metrics.LoginMetrics;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.content_guard.CheckTextResponse;
+import com.game.proto.content_guard.TextVerdict;
 import com.game.proto.login.CreatePlayerRequest;
 import com.game.proto.login.CreatePlayerResponse;
 import com.game.table.LoginErrorTip;
@@ -79,6 +81,12 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
      */
     public static final Duration DEFAULT_CREATE_BUDGET = Duration.ofMillis(3500);
 
+    /** 建角角色名内容安全送检策略（null = 未开启，只走内置本地词表；开启后只认 PASS，fail-closed）。 */
+    @FunctionalInterface
+    public interface TextGuard {
+        CheckTextResponse checkRoleName(String account, String displayName);
+    }
+
     private final PlayerStore store;
     private final CharacterRules rules;
     private final PlayerIdGenerator playerIds;
@@ -90,6 +98,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     private final LongSupplier nanoClock;
     private final Duration createBudget;
     private final InFlightKeys<String> accountsInFlight;
+    private final TextGuard textGuard;
 
     /**
      * @param randomByte           生成名用的随机字节源（生产为 SecureRandom），见 {@link PlayerNames#generate}
@@ -117,8 +126,16 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
                                IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
                                LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
                                InFlightKeys<String> accountsInFlight) {
+        this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal,
+                accountsInFlight, null);
+    }
+
+    public CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
+                               IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
+                               LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
+                               InFlightKeys<String> accountsInFlight, TextGuard textGuard) {
         this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, System::nanoTime,
-                DEFAULT_CREATE_BUDGET, accountsInFlight);
+                DEFAULT_CREATE_BUDGET, accountsInFlight, textGuard);
     }
 
     /**
@@ -132,13 +149,22 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
                         LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
                         LongSupplier nanoClock, Duration createBudget) {
         this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, nanoClock,
-                createBudget, new InFlightKeys<>());
+                createBudget, new InFlightKeys<>(), null);
     }
 
     CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
                         IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
                         LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
                         LongSupplier nanoClock, Duration createBudget, InFlightKeys<String> accountsInFlight) {
+        this(store, rules, playerIds, randomByte, fence, maxPlayersPerAccount, metrics, deviceRenewal, nanoClock,
+                createBudget, accountsInFlight, null);
+    }
+
+    CreatePlayerHandler(PlayerStore store, CharacterRules rules, PlayerIdGenerator playerIds,
+                        IntSupplier randomByte, ZoneMergeFence fence, int maxPlayersPerAccount,
+                        LoginMetrics metrics, Function<SessionContext, Integer> deviceRenewal,
+                        LongSupplier nanoClock, Duration createBudget, InFlightKeys<String> accountsInFlight,
+                        TextGuard textGuard) {
         if (createBudget.isNegative() || createBudget.isZero()) {
             throw new IllegalArgumentException("建角的请求预算必须为正: " + createBudget);
         }
@@ -153,6 +179,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         this.maxPlayersPerAccount = maxPlayersPerAccount;
         this.metrics = metrics;
         this.accountsInFlight = Objects.requireNonNull(accountsInFlight, "accountsInFlight");
+        this.textGuard = textGuard;
     }
 
     @Override
@@ -276,6 +303,22 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
         boolean requested = name.verdict() == PlayerNames.Verdict.OK;
         List<String> candidates;
         if (requested) {
+            if (textGuard != null) {
+                CheckTextResponse guardResp;
+                try {
+                    guardResp = textGuard.checkRoleName(account, name.display());
+                } catch (RuntimeException e) {
+                    log.warn("建角内容安全服务调用失败 account={}: {}", account, e.getMessage());
+                    return error(LoginErrorTip.login_error.kRoleNameCheckUnavailable_VALUE);
+                }
+                if (guardResp == null) {
+                    return error(LoginErrorTip.login_error.kRoleNameCheckUnavailable_VALUE);
+                }
+                if (guardResp.getVerdict() != TextVerdict.TEXT_VERDICT_PASS) {
+                    log.info("建角拒绝：名字未通过内容安全判定 account={} verdict={}", account, guardResp.getVerdict());
+                    return error(LoginErrorTip.login_error.kRoleNameSensitive_VALUE);
+                }
+            }
             candidates = List.of(name.display());
         } else {
             // 候选名在事务外先生成好：持锁期间只做 SQL，不做可能失败的配表 / 随机数逻辑。

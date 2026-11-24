@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS player (
     class_id         INT UNSIGNED    NOT NULL,
     gender           INT UNSIGNED    NOT NULL,
     appearance_id    VARCHAR(64)     NOT NULL DEFAULT '',
+    renamed_ms       BIGINT          NOT NULL DEFAULT 0 COMMENT '上次角色改名成功时刻（Unix 毫秒，用于冷却校验）',
     level            INT UNSIGNED    NOT NULL DEFAULT 1,
     scene_config_id  INT UNSIGNED    NOT NULL DEFAULT 0 COMMENT '上次所在场景配置；0 = 从未进过场景',
     pos_x            DOUBLE          NOT NULL DEFAULT 0,
@@ -135,4 +136,14 @@ CREATE TABLE IF NOT EXISTS player_trade_admission_recovery (
     created_ms BIGINT NOT NULL,
     PRIMARY KEY (recovery_id),
     UNIQUE KEY uk_trade_admission_recovery_epoch (player_id, old_epoch)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+-- 角色改名旧名保护表：改名后旧名在保护期内仅原主可改回，他人建角或改名均视为已占用。
+CREATE TABLE IF NOT EXISTS player_name_hold (
+    name_key        VARCHAR(64)     NOT NULL COMMENT '被保护旧名的唯一键（PlayerStore.nameKey）',
+    owner_player_id BIGINT UNSIGNED NOT NULL COMMENT '原主角色号',
+    held_until_ms   BIGINT          NOT NULL COMMENT '保护截止时刻（Unix 毫秒）',
+    updated_at      BIGINT          NOT NULL COMMENT 'Unix 毫秒',
+    PRIMARY KEY (name_key),
+    KEY idx_player_name_hold_until (held_until_ms)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
