@@ -12,6 +12,12 @@
 |---|---|---|---|
 | 赛季技能免费当季生效 + 单槽「赛季印」（`SeasonRule` / `SeasonSeal` 表、`Skill.season_id = 58` + 4 个 S1 技能 `15001–15004`、`Buff` `150010–150040`、`season_error` 34000–34011、`PlayerSeasonComp` 落 `player_database.season_component = 30`、`ClientRequestKind::kCatchupSeasonSeal = 9`、`TX_SEASON_SEAL_CATCHUP = 35`、`EquipmentEffects.season_seal`/`season_max_health_bps`/`season_defense_bps`、`BattlePlayerSnapshot.active_season_id = 24`、`BattleActorState.season_seal_state = 44`、`BattleEventItem.season_seal_id = 24`、`SkillCatalogEntry.season_id = 24`、`SceneSeasonClientPlayer` 453–455） | 已在 `xuanming-server-mmo-cpp` 落地并同步 `mmorpg-client`：`season_rules.h`、`player_season.{h,cpp}`、`player_season_handler.cpp`、`player_handoff_gate.h`、`player_database_loader.cpp`、`player_attribute.cpp`（仅气血/防御轻加成且硬上限 ≤ 5%，不碰速度/暴击/控制）、`player_equipment_v1.cpp`、`player_skill.cpp`、`player_battle.cpp`（正规排位/PVE 结算原子累计进度点）、`turn_battle_engine.cpp`、`equipment_battle_effects.cpp`；验证：`test_cpp*` 42/42 OK、`bag_test` `SeasonRulesTest`+`PlayerSeasonSystemTest` 8/8 通过、`turn_battle_engine_test` `SeasonBattleTest`+`ModernSkillCatalogTest`+`EquipmentV1BattleTest` 64/64 通过、`skill_test` 98/98 通过、`cross_zone_test` `*HandoffGate*:*Freeze*` 32/32 通过、`mmorpg-client` `client_compile_check` 0 错误；设计及 Codex UI 联调契约见 `xuanming-server-mmo-cpp/docs/design/season-skills-and-seal-design.md` | 尚未跑 `ContractSync` 同步 `SeasonRule`/`SeasonSeal`/453–455，也尚未在 `game-scene` / `game-battle` 实现对应逻辑 | Java 待做 |
 
+## 2026-11-24 运维脚本 Java 化（清零 Python）与全 36 模块最终验收
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 整栈 compose 配置与运行态守卫（`tools/StackCheck.java` 零依赖 JDK 21 单文件工具，1:1 替换仓库唯一 Python 脚本 `deploy/ci/check-stack.py` 及 `deploy/ci/stack-smoke.sh` 内联 Python 状态检查）+ 跨平台本地竖切启停巡检工具（`tools/LocalSlice.java`，与 `tools/local/{start,stop}-slice.sh` 共享 `run/pids` 与 18 模块依赖次序，保留 `.sh` 以兼容 CI/Linux 门禁） | `deploy/ci/check-stack.py` + `tools/local/{start,stop}-slice.sh` | 新增 `tools/StackCheck.java`（含 UTF-8 BOM 兼容 JSON 解析、XML POM Boot 模块核对与 `--status` JSONL 守卫，正反自检全过）与 `tools/LocalSlice.java`（`order`/`status`/`stop`/`start` 自检通过），移除 `deploy/ci/check-stack.py`（仓库追踪 `.py` 清零）；全量 36 模块（37 Reactor）`mvn -o -B test-compile` 0 错误通过，`PlayerStateSchemaLedgerTest` 1/1、`LocalSliceOrderTest` 5/5、`NamespaceLiteralGuardTest` 10/10、`SliceScriptsTest` 25/25（3 项仅 Linux 跳过）全部通过 | 已对齐 |
+
 ## 2026-11-24 神秘商人全链路（314–316 + 领导者调度）与装备打造 V1 / 材料自选领取（404–408）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |

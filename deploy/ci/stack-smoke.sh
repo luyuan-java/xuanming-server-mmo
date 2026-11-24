@@ -17,7 +17,7 @@ cleanup() {
   exit "$result"
 }
 trap cleanup EXIT
-"${compose[@]}" --profile tools config --format json | python3 deploy/ci/check-stack.py
+"${compose[@]}" --profile tools config --format json | java tools/StackCheck.java
 # 必填命名空间与秘密不得默默回落到本机默认配置。
 if env -u GAME_NAMESPACE docker compose -p "$project" -f deploy/compose/stack.yaml config -q >/dev/null 2>&1; then
   echo "::error::缺失部署命名空间仍通过配置检查"; exit 1
@@ -35,13 +35,5 @@ for scenario in smoke movement reconnect bag currency attribute; do
 done
 # 运行过真实客户端后再看状态，不能只以端口曾开放一次证明整栈仍存活。
 "${compose[@]}" ps --format json > ci-logs/stack-status.jsonl
-python3 - <<'PY'
-import json
-from pathlib import Path
-raw=Path("ci-logs/stack-status.jsonl").read_text()
-rows=json.loads(raw) if raw.lstrip().startswith("[") else [json.loads(line) for line in raw.splitlines() if line.strip()]
-apps=[row for row in rows if row["Service"].startswith("game-")]
-if len(apps)!=17 or any(row.get("State")!="running" or row.get("Health")!="healthy" for row in apps):
-    raise SystemExit("robot 后仍应有17个健康服务")
-PY
+java tools/StackCheck.java --status ci-logs/stack-status.jsonl --expected 17
 echo "JAVA_STACK_OK services=17 scenarios=6"
