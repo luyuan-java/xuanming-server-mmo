@@ -2,8 +2,12 @@ package com.game.scenemanager.world;
 
 import com.game.discovery.world.WorldChannels;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -42,9 +46,21 @@ public record WorldChannelProperties(
         Rebalance rebalance,
         Autoscale autoscale,
         Duration stuckNodeGrace,
-        Boolean crossNodeRelocation) {
+        Boolean crossNodeRelocation,
+        PickPolicy pickPolicy,
+        Integer softFillThreshold,
+        WorldMapPlay mapPlay) {
 
     private static final String PREFIX = "game.scene-manager.world.";
+    public static final int DEFAULT_SOFT_FILL_THRESHOLD = 200;
+
+    /** 自动选线策略（world-map-play-v2 §2.2）。 */
+    public enum PickPolicy {
+        /** 优先把低编号分线填至 {@code softFillThreshold} 再溢出，全线达到后退回最少人。 */
+        FILL_FIRST,
+        /** 纯最少人均衡（压测可选）。 */
+        LEAST_LOADED
+    }
 
     /** 频道放置模式（§4.6.3）。 */
     public enum Coverage {
@@ -82,11 +98,36 @@ public record WorldChannelProperties(
         WorldChannels.requireReservationTtlCovers(reservationTtl, loginOwnerClaimWait);
         rebalance = rebalance == null ? new Rebalance(null, null) : rebalance;
         autoscale = autoscale == null ? new Autoscale(null, null, null, null, null, null, null, null) : autoscale;
+        pickPolicy = pickPolicy == null ? PickPolicy.FILL_FIRST : pickPolicy;
+        if (softFillThreshold != null && softFillThreshold < 0) {
+            throw new IllegalArgumentException(PREFIX + "soft-fill-threshold 不能为负: " + softFillThreshold);
+        }
+        softFillThreshold = softFillThreshold == null || softFillThreshold == 0
+                ? DEFAULT_SOFT_FILL_THRESHOLD : softFillThreshold;
+        if (pickPolicy == PickPolicy.FILL_FIRST && autoscale.enabled()) {
+            int scaleIn = autoscale.scaleInPlayers();
+            int scaleOut = autoscale.scaleOutPlayers();
+            if (scaleIn > 0 && softFillThreshold < scaleIn * 2) {
+                throw new IllegalArgumentException(PREFIX + "soft-fill-threshold（" + softFillThreshold
+                        + "）必须 >= 2 * autoscale.scale-in-players（" + scaleIn + "），避免选线聚人与缩容振荡");
+            }
+            if (scaleOut > 0 && softFillThreshold >= scaleOut) {
+                throw new IllegalArgumentException(PREFIX + "soft-fill-threshold（" + softFillThreshold
+                        + "）必须 < autoscale.scale-out-players（" + scaleOut + "）");
+            }
+        }
+        mapPlay = mapPlay == null ? WorldMapPlay.defaults() : mapPlay;
     }
 
     /** 缺省配置（单测与不配任何 {@code game.scene-manager.world.*} 时）。 */
     public static WorldChannelProperties defaults() {
-        return new WorldChannelProperties(null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+        return new WorldChannelProperties(null, null, null, null, null, null, null, null, null, null, null, null,
+                null, null, null, null, null);
+    }
+
+    /** 生效的 Fill-First 软上限；0 表示纯 least_loaded。 */
+    public int effectiveSoftFillThreshold() {
+        return pickPolicy == PickPolicy.LEAST_LOADED ? 0 : softFillThreshold;
     }
 
     /**
@@ -170,6 +211,50 @@ public record WorldChannelProperties(
         public int effectiveMaxChannels() {
             return maxChannels > 0 ? Math.min(maxChannels, WorldChannels.MAX_CHANNELS_PER_MAP)
                     : WorldChannels.MAX_CHANNELS_PER_MAP;
+        }
+    }
+
+    /**
+     * 世界地图总览与双层潮汐配置（world-map-play-v2 §2.3–§2.4，与 Go 侧 WorldMapPlayConfig 同口径）。
+     */
+    public record WorldMapPlay(List<Integer> openWorldMapIds, List<Integer> tideCandidateMapIds,
+                               Duration tideInterval, Duration tideDuration, Integer crowdedPlayerThreshold) {
+        public static final List<Integer> DEFAULT_OPEN_WORLD_MAPS = List.of(1, 2, 5);
+        public static final List<Integer> DEFAULT_TIDE_CANDIDATES = List.of(2, 5);
+        public static final Duration DEFAULT_TIDE_INTERVAL = Duration.ofHours(1);
+        public static final Duration DEFAULT_TIDE_DURATION = Duration.ofMinutes(40);
+        public static final int DEFAULT_CROWDED_THRESHOLD = 8;
+        private static final Duration MIN_TIDE_INTERVAL = Duration.ofSeconds(60);
+        private static final Duration MAX_TIDE_INTERVAL = Duration.ofHours(24);
+        private static final Duration MIN_TIDE_DURATION = Duration.ofSeconds(30);
+
+        public WorldMapPlay {
+            openWorldMapIds = normalizeMapIds(openWorldMapIds, DEFAULT_OPEN_WORLD_MAPS);
+            tideCandidateMapIds = normalizeMapIds(tideCandidateMapIds, DEFAULT_TIDE_CANDIDATES);
+            Duration interval = tideInterval == null || tideInterval.isZero() ? DEFAULT_TIDE_INTERVAL : tideInterval;
+            if (interval.compareTo(MIN_TIDE_INTERVAL) < 0) interval = MIN_TIDE_INTERVAL;
+            if (interval.compareTo(MAX_TIDE_INTERVAL) > 0) interval = MAX_TIDE_INTERVAL;
+            tideInterval = interval;
+            Duration duration = tideDuration == null || tideDuration.isZero() ? DEFAULT_TIDE_DURATION : tideDuration;
+            if (duration.compareTo(MIN_TIDE_DURATION) < 0) duration = MIN_TIDE_DURATION;
+            if (duration.compareTo(interval) > 0) duration = interval;
+            tideDuration = duration;
+            crowdedPlayerThreshold = crowdedPlayerThreshold == null || crowdedPlayerThreshold <= 0
+                    ? DEFAULT_CROWDED_THRESHOLD : crowdedPlayerThreshold;
+        }
+
+        public static WorldMapPlay defaults() {
+            return new WorldMapPlay(null, null, null, null, null);
+        }
+
+        private static List<Integer> normalizeMapIds(List<Integer> raw, List<Integer> fallback) {
+            List<Integer> src = (raw == null || raw.isEmpty()) ? fallback : raw;
+            Set<Integer> dedup = new LinkedHashSet<>();
+            for (Integer id : src) {
+                if (id != null && id != 0) dedup.add(id);
+            }
+            if (dedup.isEmpty()) return fallback;
+            return List.copyOf(new ArrayList<>(dedup));
         }
     }
 

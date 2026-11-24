@@ -139,20 +139,36 @@ public final class FakeWorldChannelStore implements WorldChannelStore {
     @Override
     public synchronized ReservationPick reserve(int zoneId, List<ReservationCandidate> candidates, long playerId,
                                                 Duration ttl) {
+        return reserve(zoneId, candidates, playerId, ttl, 0);
+    }
+
+    @Override
+    public synchronized ReservationPick reserve(int zoneId, List<ReservationCandidate> candidates, long playerId,
+                                                Duration ttl, int softFillThreshold) {
         if (reserveFailure != null) {
             throw reserveFailure;
         }
         Zone z = zone(zoneId);
         int best = -1;
         long load = 0;
+        int leastBest = -1;
+        long leastLoad = 0;
         for (int i = 0; i < candidates.size(); i++) {
             Map<Long, Long> resv = live(z, candidates.get(i).sceneId());
             long l = Integer.toUnsignedLong(candidates.get(i).directoryPlayers()) + resv.size()
                     - (resv.containsKey(playerId) ? 1 : 0);
-            if (best < 0 || l < load) {
+            if (softFillThreshold > 0 && best < 0 && l < softFillThreshold) {
                 best = i;
                 load = l;
             }
+            if (leastBest < 0 || l < leastLoad) {
+                leastBest = i;
+                leastLoad = l;
+            }
+        }
+        if (best < 0) {
+            best = leastBest;
+            load = leastLoad;
         }
         for (int i = 0; i < candidates.size(); i++) {
             if (i != best) {

@@ -131,20 +131,26 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
             """;
 
     /**
-     * 选频道并软预占（§4.11）。KEYS[i] = 候选 i 的预占键；ARGV[1] = TTL 毫秒，ARGV[2] = player_id，ARGV[2 + i] = 候选 i 的目录人数。
-     * 负载 = 目录人数 + 未到期预占数 − 本玩家自己那条（同一玩家重复分配不改变选择）；严格小于才换（并列取靠前的）。
+     * 选频道并软预占（§4.11 + world-map-play-v2 §2.2）。KEYS[i] = 候选 i 的预占键；
+     * ARGV[1] = TTL 毫秒，ARGV[2] = player_id，ARGV[3] = softFillThreshold（>0 启用 Fill-First，<=0 纯 least_loaded），
+     * ARGV[3 + i] = 候选 i 的目录人数。
+     * 负载 = 目录人数 + 未到期预占数 − 本玩家自己那条（同一玩家重复分配不改变选择）。
      * 选定后撤掉本玩家在其它候选上的预占，再给选中者记一条并 PEXPIRE。回 {@code {best（从 1 起）, load}}。
      */
     static final String RESERVE = NOW_MS + """
             if redis.call('EXISTS',KEYS[#KEYS])==1 then return redis.error_reply('zone retired') end
             local ttl = tonumber(ARGV[1])
+            local softCap = tonumber(ARGV[3]) or 0
             local best, load
+            local leastBest, leastLoad
             for i = 1, #KEYS-1 do
               redis.call('ZREMRANGEBYSCORE', KEYS[i], '-inf', now)
-              local l = tonumber(ARGV[2 + i]) + redis.call('ZCARD', KEYS[i])
+              local l = tonumber(ARGV[3 + i]) + redis.call('ZCARD', KEYS[i])
               if redis.call('ZSCORE', KEYS[i], ARGV[2]) then l = l - 1 end
-              if best == nil or l < load then best, load = i, l end
+              if softCap > 0 and best == nil and l < softCap then best, load = i, l end
+              if leastBest == nil or l < leastLoad then leastBest, leastLoad = i, l end
             end
+            if best == nil then best, load = leastBest, leastLoad end
             for i = 1, #KEYS-1 do
               if i ~= best then redis.call('ZREM', KEYS[i], ARGV[2]) end
             end
@@ -243,13 +249,21 @@ public final class RedissonWorldChannelStore implements WorldChannelStore {
 
     @Override
     public ReservationPick reserve(int zoneId, List<ReservationCandidate> candidates, long playerId, Duration ttl) {
+        return reserve(zoneId, candidates, playerId, ttl, 0);
+    }
+
+    @Override
+    public ReservationPick reserve(int zoneId, List<ReservationCandidate> candidates, long playerId, Duration ttl,
+                                   int softFillThreshold) {
         if (candidates.isEmpty()) {
             throw new IllegalArgumentException("候选不能为空");
         }
-        List<Object> keys = new ArrayList<>(candidates.size());
-        List<byte[]> args = new ArrayList<>(candidates.size() + 2);
+        int effectiveSoftCap = Math.max(0, softFillThreshold);
+        List<Object> keys = new ArrayList<>(candidates.size() + 1);
+        List<byte[]> args = new ArrayList<>(candidates.size() + 3);
         args.add(millis(ttl));
         args.add(WorldPlanCodec.ascii(Long.toUnsignedString(playerId)));
+        args.add(WorldPlanCodec.ascii(Integer.toString(effectiveSoftCap)));
         for (ReservationCandidate candidate : candidates) {
             keys.add(redisKeys.worldReservations(zoneId, candidate.sceneId()));
             args.add(WorldPlanCodec.ascii(Integer.toUnsignedString(candidate.directoryPlayers())));

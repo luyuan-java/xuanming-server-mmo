@@ -8,6 +8,7 @@ import com.game.proto.ActorAppearanceChangedS2C;
 import com.game.proto.AppearanceStateNotify;
 import com.game.proto.CancelAppearanceTrialResponse;
 import com.game.proto.CharacterAppearanceEntry;
+import com.game.proto.CharacterAppearanceSeriesProgress;
 import com.game.proto.PlayerAppearanceInfo;
 import com.game.proto.StartAppearanceTrialRequest;
 import com.game.proto.StartAppearanceTrialResponse;
@@ -46,6 +47,9 @@ public final class AppearanceService {
     public static final int APPEARANCE_TRIAL_ALREADY_USED = AppearanceErrorTip.appearance_error.kAppearanceTrialAlreadyUsed_VALUE;
     public static final int APPEARANCE_NO_ACTIVE_TRIAL = AppearanceErrorTip.appearance_error.kAppearanceNoActiveTrial_VALUE;
     public static final int APPEARANCE_FROZEN = AppearanceErrorTip.appearance_error.kAppearanceFrozen_VALUE;
+    public static final int APPEARANCE_NOT_CARD_UNLOCKABLE = AppearanceErrorTip.appearance_error.kAppearanceNotCardUnlockable_VALUE;
+    public static final int APPEARANCE_ALREADY_OWNED = AppearanceErrorTip.appearance_error.kAppearanceAlreadyOwned_VALUE;
+    public static final int APPEARANCE_NOT_OWNED = AppearanceErrorTip.appearance_error.kAppearanceNotOwned_VALUE;
 
     private final AppearanceTables tables;
     private final BagService bags;
@@ -80,6 +84,20 @@ public final class AppearanceService {
         return buildInfo(player, nowSeconds());
     }
 
+    private boolean isOwned(ScenePlayer player, AppearanceTables.Entry entry) {
+        return player.appearanceId().equals(entry.appearanceId())
+                || player.appearance().isOwned(entry.bitIndex());
+    }
+
+    private byte[] effectiveOwnedBits(ScenePlayer player) {
+        byte[] bits = player.appearance().ownedBitsCopy();
+        AppearanceTables.Entry perm = tables.findAny(player.appearanceId());
+        if (perm != null) {
+            bits = PlayerAppearance.setBit(bits, perm.bitIndex());
+        }
+        return bits;
+    }
+
     public PlayerAppearanceInfo buildInfo(ScenePlayer player, long nowSec) {
         PlayerAppearance appearance = player.appearance();
         AppearanceTables.Rule rule = tables.rule();
@@ -89,6 +107,7 @@ public final class AppearanceService {
 
         long ownedCards = player.bags().bag(BagType.INVENTORY).total(rule.cardItemId());
         int clampedCards = (int) Math.min(ownedCards, Integer.MAX_VALUE);
+        byte[] ownedBits = effectiveOwnedBits(player);
 
         PlayerAppearanceInfo.Builder info = PlayerAppearanceInfo.newBuilder()
                 .setPermanentAppearanceId(permanent)
@@ -100,7 +119,8 @@ public final class AppearanceService {
                 .setTrialDurationSeconds(rule.trialDurationSeconds())
                 .setMallSkuId(rule.mallSkuId())
                 .setMallPriceFen(rule.mallPriceFen())
-                .setTrialUsedBits(ByteString.copyFrom(appearance.trialUsedBitsCopy()));
+                .setTrialUsedBits(ByteString.copyFrom(appearance.trialUsedBitsCopy()))
+                .setOwnedBits(ByteString.copyFrom(ownedBits));
         if (trialActive) {
             info.setTrialAppearanceId(appearance.trialAppearanceId())
                     .setTrialExpiresAt(appearance.trialExpiresAt());
@@ -112,7 +132,37 @@ public final class AppearanceService {
                     .setName(entry.name())
                     .setSortOrder(entry.sortOrder())
                     .setTrialUsed(appearance.isTrialUsed(entry.bitIndex()))
+                    .setOwned(isOwned(player, entry))
+                    .setCardUnlockable(entry.cardUnlockable())
+                    .setSeriesId(entry.seriesId())
                     .build());
+        }
+        for (AppearanceTables.Series series : tables.enabledSeries()) {
+            int total = 0;
+            int owned = 0;
+            CharacterAppearanceSeriesProgress.Builder progress = CharacterAppearanceSeriesProgress.newBuilder()
+                    .setSeriesId(series.seriesId())
+                    .setSeriesKey(series.seriesKey())
+                    .setName(series.name())
+                    .setSortOrder(series.sortOrder())
+                    .setCompletionBadgeName(series.completionBadgeName())
+                    .setEpilogueTitle(series.epilogueTitle());
+            for (AppearanceTables.Entry entry : tables.enabledEntries()) {
+                if (entry.seriesId() != series.seriesId()) {
+                    continue;
+                }
+                total++;
+                if (isOwned(player, entry)) {
+                    owned++;
+                }
+                progress.addMemberAppearanceIds(entry.appearanceId());
+            }
+            if (total > 0) {
+                progress.setOwnedCount(owned)
+                        .setTotalCount(total)
+                        .setCompleted(owned >= total);
+                info.addSeriesProgress(progress.build());
+            }
         }
         return info.build();
     }
@@ -121,11 +171,13 @@ public final class AppearanceService {
         long nowSec = nowSeconds();
         long clientRequestId = request.getClientRequestId();
         String target = request.getAppearanceId();
+        boolean expectFreeSwitch = request.getExpectFreeSwitch();
+        int receiptKind = expectFreeSwitch ? PlayerAppearance.KIND_FREE_SWITCH : PlayerAppearance.KIND_SWITCH;
         if (clientRequestId == 0) {
             return SwitchAppearanceResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER)).build();
         }
         PlayerAppearance appearance = player.appearance();
-        switch (appearance.checkIdempotency(clientRequestId, PlayerAppearance.KIND_SWITCH, target)) {
+        switch (appearance.checkIdempotency(clientRequestId, receiptKind, target)) {
             case REPLAY -> {
                 return SwitchAppearanceResponse.newBuilder()
                         .setErrorMessage(tip(0))
@@ -149,32 +201,75 @@ public final class AppearanceService {
             return SwitchAppearanceResponse.newBuilder().setErrorMessage(tip(APPEARANCE_ALREADY_CURRENT)).build();
         }
 
+        boolean alreadyOwned = isOwned(player, entry);
+        boolean consumeCard = false;
         AppearanceTables.Rule rule = tables.rule();
-        BagService.PreparedTransfer debit = bags.prepareDebit(
-                player, Map.of(rule.cardItemId(), (long) rule.cardItemCount()), List.of());
-        if (debit.tip() != 0) {
-            return SwitchAppearanceResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NO_CARD)).build();
+        if (!alreadyOwned) {
+            if (expectFreeSwitch) {
+                return SwitchAppearanceResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_OWNED)).build();
+            }
+            if (!entry.cardUnlockable()) {
+                return SwitchAppearanceResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_CARD_UNLOCKABLE)).build();
+            }
+            BagService.PreparedTransfer debit = bags.prepareDebit(
+                    player, Map.of(rule.cardItemId(), (long) rule.cardItemCount()), List.of());
+            if (debit.tip() != 0) {
+                return SwitchAppearanceResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NO_CARD)).build();
+            }
+            debit.commit(AssetAudit.Reason.ITEM_DESTROY, clientRequestId);
+            consumeCard = true;
         }
-        debit.commit(AssetAudit.Reason.ITEM_DESTROY, clientRequestId);
 
         String before = player.appearanceId();
+        AppearanceTables.Entry beforeEntry = tables.findAny(before);
+        if (beforeEntry != null) {
+            appearance.markOwned(beforeEntry.bitIndex());
+        }
+        appearance.markOwned(entry.bitIndex());
         player.setPermanentAppearanceId(target);
         appearance.clearTrial();
         appearance.incrementSwitchSeq();
-        appearance.rememberIdempotency(clientRequestId, PlayerAppearance.KIND_SWITCH, target);
+        appearance.rememberIdempotency(clientRequestId, receiptKind, target);
         if (world != null) {
             world.requestSave(player);
             broadcastChanged(world, player, target, false, 0);
         }
-        log.info("[PlayerAppearance] metric=appearance_switched player_id={} before={} after={} card_item_id={} client_request_id={}",
-                Long.toUnsignedString(player.playerId()), before, target, rule.cardItemId(),
-                Long.toUnsignedString(clientRequestId));
+        log.info("[PlayerAppearance] metric=appearance_switched player_id={} before={} after={} free_switch={} card_item_id={} client_request_id={}",
+                Long.toUnsignedString(player.playerId()), before, target, !consumeCard,
+                consumeCard ? rule.cardItemId() : 0, Long.toUnsignedString(clientRequestId));
 
         return SwitchAppearanceResponse.newBuilder()
                 .setErrorMessage(tip(0))
                 .setInfo(buildInfo(player, nowSec))
                 .setReplayed(false)
                 .build();
+    }
+
+    /** 服务端内部权威授形入口（供排位/副本/活动解锁调用）：置位永久拥有位图并推状态通知，不动当前永久或试用外观。 */
+    public int grantAppearance(SceneWorld world, ScenePlayer player, String targetAppearanceId) {
+        if (player.frozen()) {
+            return APPEARANCE_FROZEN;
+        }
+        AppearanceTables.Entry entry = tables.findEnabled(targetAppearanceId);
+        if (entry == null) {
+            return APPEARANCE_INVALID;
+        }
+        if (isOwned(player, entry)) {
+            return 0;
+        }
+        player.appearance().markOwned(entry.bitIndex());
+        long nowSec = nowSeconds();
+        if (world != null) {
+            world.requestSave(player);
+            AppearanceStateNotify notify = AppearanceStateNotify.newBuilder()
+                    .setInfo(buildInfo(player, nowSec))
+                    .setTrialExpired(false)
+                    .build();
+            world.sendTo(player, push(notifyAppearanceStateId, notify));
+        }
+        log.info("[PlayerAppearance] metric=appearance_granted player_id={} appearance_id={} config_id={}",
+                Long.toUnsignedString(player.playerId()), targetAppearanceId, entry.configId());
+        return 0;
     }
 
     public StartAppearanceTrialResponse startTrial(SceneWorld world, ScenePlayer player, StartAppearanceTrialRequest request) {
@@ -207,6 +302,9 @@ public final class AppearanceService {
         }
         if (player.appearanceId().equals(target)) {
             return StartAppearanceTrialResponse.newBuilder().setErrorMessage(tip(APPEARANCE_ALREADY_CURRENT)).build();
+        }
+        if (isOwned(player, entry)) {
+            return StartAppearanceTrialResponse.newBuilder().setErrorMessage(tip(APPEARANCE_ALREADY_OWNED)).build();
         }
         if (appearance.isTrialUsed(entry.bitIndex())) {
             return StartAppearanceTrialResponse.newBuilder().setErrorMessage(tip(APPEARANCE_TRIAL_ALREADY_USED)).build();

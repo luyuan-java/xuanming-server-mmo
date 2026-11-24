@@ -49,6 +49,28 @@ public final class RedissonWorldChannelDirectoryStore implements WorldChannelDir
         return result == 1L;
     }
 
+    @Override
+    public byte[] readOverview(int zoneId) {
+        if (zoneId == 0) throw new IllegalArgumentException("地图总览 zone 不能为零");
+        return redis.getScript(ByteArrayCodec.INSTANCE).eval(RScript.Mode.READ_WRITE,
+                "if redis.call('EXISTS',KEYS[2])==1 then return nil end; return redis.call('GET', KEYS[1])", RScript.ReturnType.VALUE,
+                List.of(keys.worldMapOverview(zoneId), keys.worldRetirement(zoneId)));
+    }
+
+    @Override
+    public boolean publishOverview(int zoneId, String leaderToken, long planVersion, byte[] payload, Duration ttl) {
+        if (zoneId == 0) throw new IllegalArgumentException("地图总览 zone 不能为零");
+        if (leaderToken == null || leaderToken.isBlank() || planVersion < 0 || payload == null || ttl == null || ttl.toMillis() <= 0) {
+            throw new IllegalArgumentException("地图总览发布需要令牌、非负版本、内容和正 TTL");
+        }
+        Long result = redis.getScript(ByteArrayCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, PUBLISH,
+                RScript.ReturnType.INTEGER,
+                List.of(keys.worldLeader(zoneId), keys.worldPlanVersion(zoneId), keys.worldMapOverview(zoneId), keys.worldRetirement(zoneId)),
+                bytes(leaderToken), bytes(Long.toString(planVersion)), payload, bytes(Long.toString(ttl.toMillis())));
+        if (result == null || result != 0L && result != 1L) throw new IllegalStateException("地图总览发布没有确认");
+        return result == 1L;
+    }
+
     private static byte[] bytes(String value) { return value.getBytes(StandardCharsets.UTF_8); }
     private static void requireIds(int zoneId, int configId) {
         if (zoneId == 0 || configId == 0) throw new IllegalArgumentException("目录 zone/config 不能为零");

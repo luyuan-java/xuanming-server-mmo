@@ -10,13 +10,15 @@ class PlayerViewsTest {
     void removedAppearanceIsHiddenWithoutChangingRows() {
         var removed = LoginHandlerTest.row(1, "robot", "removed");
         removed.setAppearanceId("06_thunder_caster_boy");
+        var removedAlso = LoginHandlerTest.row(4, "robot", "removed4");
+        removedAlso.setAppearanceId("17_ghost_script_calligrapher_boy");
         var legacy = LoginHandlerTest.row(2, "robot", "legacy");
         legacy.setAppearanceId(null);
         var active = LoginHandlerTest.row(3, "robot", "active");
-        active.setAppearanceId("08_alchemy_prodigy_boy");
-        var rows = List.of(removed, legacy, active);
+        active.setAppearanceId("05_celestial_musician_girl");
+        var rows = List.of(removed, removedAlso, legacy, active);
         assertThat(PlayerViews.wrapAll(rows)).extracting(v -> v.getPlayer().getPlayerId())
                 .containsExactly(2L, 3L);
-        assertThat(rows).hasSize(3);
+        assertThat(rows).hasSize(4);
     }
 }

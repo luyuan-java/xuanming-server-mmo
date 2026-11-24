@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-23 赛季技能与单槽赛季印（方案 A，`SceneSeasonClientPlayer` 453–455）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 赛季技能免费当季生效 + 单槽「赛季印」（`SeasonRule` / `SeasonSeal` 表、`Skill.season_id = 58` + 4 个 S1 技能 `15001–15004`、`Buff` `150010–150040`、`season_error` 34000–34011、`PlayerSeasonComp` 落 `player_database.season_component = 30`、`ClientRequestKind::kCatchupSeasonSeal = 9`、`TX_SEASON_SEAL_CATCHUP = 35`、`EquipmentEffects.season_seal`/`season_max_health_bps`/`season_defense_bps`、`BattlePlayerSnapshot.active_season_id = 24`、`BattleActorState.season_seal_state = 44`、`BattleEventItem.season_seal_id = 24`、`SkillCatalogEntry.season_id = 24`、`SceneSeasonClientPlayer` 453–455） | 已在 `xuanming-server-mmo-cpp` 落地并同步 `mmorpg-client`：`season_rules.h`、`player_season.{h,cpp}`、`player_season_handler.cpp`、`player_handoff_gate.h`、`player_database_loader.cpp`、`player_attribute.cpp`（仅气血/防御轻加成且硬上限 ≤ 5%，不碰速度/暴击/控制）、`player_equipment_v1.cpp`、`player_skill.cpp`、`player_battle.cpp`（正规排位/PVE 结算原子累计进度点）、`turn_battle_engine.cpp`、`equipment_battle_effects.cpp`；验证：`test_cpp*` 42/42 OK、`bag_test` `SeasonRulesTest`+`PlayerSeasonSystemTest` 8/8 通过、`turn_battle_engine_test` `SeasonBattleTest`+`ModernSkillCatalogTest`+`EquipmentV1BattleTest` 64/64 通过、`skill_test` 98/98 通过、`cross_zone_test` `*HandoffGate*:*Freeze*` 32/32 通过、`mmorpg-client` `client_compile_check` 0 错误；设计及 Codex UI 联调契约见 `xuanming-server-mmo-cpp/docs/design/season-skills-and-seal-design.md` | 尚未跑 `ContractSync` 同步 `SeasonRule`/`SeasonSeal`/453–455，也尚未在 `game-scene` / `game-battle` 实现对应逻辑 | Java 待做 |
+
 ## 2026-11-24 挂机月卡（430–432）、断线保留离线托管、服务器驱动组队跟随、小游戏同端口 WebSocket 与启动时钟核对
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |
@@ -17,11 +23,19 @@
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |
 |---|---|---|---|
 | 充值支付独立微服务（`ListPayChannels` 396、`CreatePayIntent` 397、`SubmitPayReceipt` 398、`GetPayIntent` 399；7 渠道适配器 DevPay / 微信支付 v3 / 支付宝 / 微信小游戏 / 抖音小游戏 / Apple App Store Server API v2 / Google Play；未成年人防沉迷充值限额事务闸门；商城 HMAC-SHA256 `v1` 对账/推进/退款闭环与 5 项后台推进器；`game-gate` 静态直连与切片编排） | `go/payment`（`service`/`store`/`channel`/`mall`/`notify`/`workers`）、`go/shared/antiaddiction` | `game-common` 新增 `AntiAddictionRules`（UTC+8 生日 `pi` 解码、单笔/月累限额、法定假日时段与 GB 11643 校验，`AntiAddictionRulesTest` 4/4 通过）；`game-api` 新增 `DubboGroups.PAYMENT`（101/101 通过）；新增独立 Spring Boot 进程模块 `game-payment`（Dubbo Triple 20920、对外渠道回调 `/notify/{channel}` 18122、独立管理端口 18125；`payment_intent`/`payment_spend`/`payment_txn`/`payment_channel_cursor` 权威 DDL；纯 JDK 21 JCA/JCE 实现 7 渠道签名/加解密与 Google JWKS 锁外拉取+singleflight+60s 冷却、Apple ISO-4217 0/2/3 位小数换算、`sameFact` 金额/币种核对与撤销墓碑；编译期生成 `ClientPlayerPaymentContractDispatcher` 零反射派发；`PaymentServiceAndStoreTest` + `PaymentChannelsAndMallHttpTest` 11/11 全绿）；`game-gate` 接入 `MessageRoutes` / `GateConfiguration` / `application*.yaml` 与 `tools/local/{start,stop}-slice.sh`（`game-gate` 367/367 全绿，`game-robot` `NamespaceLiteralGuardTest` 10/10、`SliceScriptsTest` 25/25 绿/3 skip）；设计见 `docs/design/payment.md` | 已对齐 |
+
 ## 2026-11-23 角色改名（428/429）与建角/宠物内容安全接入（`game-player-store`、`game-login`、`game-scene`）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |
 |---|---|---|---|
 | 角色改名（`SceneClientPlayerCommon.RenamePlayer` 428 / `NotifyPlayerRenamed` 429、改名卡扣减、冷却与原名保留表 `player_name_hold`、事务围栏原子改名）与建角名 / 宠物改名内容安全接入 | `go/data_service`（`player_name_hold`/`RenameRole`）、`go/login`（`CreatePlayer` 接 `content_guard`）、`cpp/libs/services/scene/player`（`RenamePlayer`/`RenamePet` 接 `content_guard`） | `game-player-store` 新增 `player.renamed_ms` 与 `player_name_hold` 表及 `PlayerStore.renamePlayer`（`owner_epoch` / `owner_released=0` / `trade_listing_id=0` 围栏与旧名保护检查，`createPlayer` 同步拦他号保护期旧名）；`game-login` `CreatePlayerHandler` 接入可选 `TextGuard`（`game.login.content-guard-enabled=true` 装配 Dubbo `ContentGuardService`，fail-closed 回 2034/2050）；`game-scene` 新增 `PlayerRenameTables`/`PlayerRenameService`/`PlayerRenameFeature`（428/429，受冻结闸保护、战斗放行，异步审核+存储后切回逻辑线程扣改名卡并推 429）、`PetService`/`PetFeature` 异步内容审核（26017/1003）与 `SceneNodeConfiguration`（`game.scene.content-guard-enabled=true`）；验证：`game-player-store` 212 项全绿（8 项 MySQL 夹具跳过）、`game-login` 395 项全绿（44 项外部夹具跳过）、`game-scene` 定向 244 项全绿（含 `PlayerRenameAndPetGuardTest`/`InBattleGateMatrixTest`/`FreezeGateTest`/`PetServiceTest`/`PetFeatureTest`/`SceneAuditPolicyTest`；全模块 2,012/2,015 通过，另 3 项因同工作区未提交的 `basescene.pb` 变动失败）；设计见 `docs/design/rename-and-content-safety.md` | 已对齐 |
+
+## 2026-11-23 大世界地图玩法 V2 M1（Fill-First 聚人选线、双层潮汐与世界地图总览读模型）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| `SceneInfoRequest.with_world_map_overview = 2`、`SceneInfoS2C.world_map_overview = 3`、`WorldMapOverview` / `WorldTideSnapshot` / `WorldMapOverviewEntry` / `WorldMapHeatLevel`、默认 `Fill-First` 软上限聚人选线（200 人，与自动缩容迟滞带校验）、确定性双层潮汐（每小时 40 分钟灵潮 + UTC+8 05:00 今日旺地）、世界地图总览读模型（`world_map_overview:{ctl:<zone>}` / `<ns>:world:{z:<zone>}:overview`）与 `MysteryMerchantSpot` 扩至场景 2/5 | `proto/scene/player_scene.proto`、`data/MysteryMerchantSpot.xlsx`（12 站位覆盖场景 1/2/5）、Go `scene_manager`（`WorldChannelRouting` / `WorldMapPlay`、`luaReserveBestWorldChannel`、线号排序、`world_map_overview.go`、神秘商人灵潮倾向）、C++ `scene`（`PlayerSceneSystem::WorldMapOverviewKey` + 同槽单次 `MGET` 转发）；Go `go vet` 与 M1 单测全部通过；设计见 `docs/design/world-map-play-v2.md` | `ContractSync` 全量同步（`proto=137`, `table=59`）；`game-discovery`（`RedisKeys.worldMapOverview` + `RedissonWorldChannelStore` Fill-First Lua + `RedissonWorldChannelDirectoryStore` 总览读写）、`game-scene-manager`（`WorldChannelProperties.PickPolicy/WorldMapPlay`、`ChannelSelector` 软上限选线、`WorldMapOverviewBuilder`、`ChannelDirectoryPublisher`）、`game-scene`（`PlayerChannels.sceneView`、`SharedPlayerChannels`、`SceneWorld.requestSceneInfo`、`ClientRequestHandler`）；`game-proto`/`game-table`/`game-discovery`/`game-scene-manager` `clean install` 全绿，`game-scene` `SharedPlayerChannelsTest` + `ChannelSwitchWorldTest` 25/25 通过（注：神秘商人调度本体 Java 尚待按既有项接入，故总览中 `has_mystery_merchant` 暂恒为 false） | 已对齐（M1 选线/总览/潮汐） |
+
 ## 2026-11-23 聊天内容安全、举报（433）、世界撤回（434/435）与反刷屏（`game-chat`）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |
@@ -39,6 +53,13 @@
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |
 |---|---|---|---|
 | 内容安全服务（`ContentGuard.CheckText` / `CheckPlatformText`、本地 NFKD+繁简+压平字典树+白名单豁免+联系方式/引流广告启发式、微信 `msgSecCheck` v2 与抖音 `antidirt` 外部平台适配器） | `go/content_guard`（`textnorm`、`wordlist`、`contact`、`engine`、`platform`、`server`）+ 20 条双端共享向量 `testdata/vectors.json` | 新增无状态进程模块 `game-content-guard`（Dubbo Triple 端口 20919，group `content-guard`，管理端口 18119），实现 `ContentGuardService` 及编译期生成的 `ContentGuardHandler`；`AtomicReference` 无锁热切换不可变快照、压平原始数组 Trie、`t2s.txt`（2,481 对）、20 条共享向量 100% 通过、微信/抖音本地 HTTP 回环重试与世界频道异步 `PENDING` 全部单测通过；设计见 `docs/design/content-guard.md`（下游 login/guild/chat/scene 接线在下一批继续） | 已对齐（服务本体） |
+
+## 2026-11-23 角色形象永久多人物收藏衣柜与建角收紧（批次二）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 人物收藏系列图鉴（批次二·续，纯外观与叙事分册，零数值加成：`AppearanceSeries` 3 册、`CharacterAppearance.series_id = 9` 外键、`CharacterAppearanceEntry.series_id = 8`、`PlayerAppearanceInfo.series_progress = 15`，零新存档字段） | `PlayerAppearanceSystem::ValidateTables` / `FillInfo` 实时按权威拥有位图派生 `series_progress`（试用不计入、空系列跳过、集齐返回印章名与合篇篇名）；单测 `SeriesProgressTracksOwnershipIgnoresTrialsAndCompletesSeries` 通过 | `ContractSync` 全量同步 59 表 + `AppearanceTables.Series` 强校验 + `AppearanceService.buildInfo` 同口径派生 `series_progress`；`AppearanceFeatureTest` 系列派生与集齐用例通过 | 已对齐 |
+| 永久收藏衣柜与免费切换（`CharacterAppearance` 8 现役角色新增 `starter_creatable`/`card_unlockable`、`PlayerProfileComp.appearance_owned_bits = 11`、`SwitchAppearanceRequest.expect_free_switch = 3`、`CharacterAppearanceEntry.owned/card_unlockable`、`PlayerAppearanceInfo.owned_bits = 14`、`appearance_error` 33007–33009；建角收紧为 2 名免费初始形象 `00`/`01`） | `PlayerAppearanceSystem`（已拥有免费切 0 扣卡、`expect_free_switch=true` fail-closed、未拥有按 `card_unlockable` 扣卡买断并自动保留旧永久位、已拥有禁试用 33008、内部权威 `GrantAppearance`）；Go `character_appearance.go` 仅放行 `""`/`00`/`01` 建角，其余 6 名现役移入丢响应重试集 | `ContractSync` 全量同步 + `PlayerState` 第 7 代持久台账 `AppearanceState.owned_bits = 6` + `PlayerAppearance` / `AppearanceTables` / `AppearanceService`（含 `grantAppearance`、`KIND_FREE_SWITCH=3` 幂等区分）+ `game-login` `CharacterAppearances`（`isAllowed`/`isRetired`/`isRemoved`）对齐 Go 建角与 4 名删档拦截 | 已对齐 |
 
 ## 2026-11-23 编译期协议代码生成（`game-proto-codegen`，对齐 C++ `protogen` 思想）
 

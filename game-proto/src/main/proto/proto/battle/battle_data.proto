@@ -177,6 +177,7 @@ message BattleActorState {
   PetCultivationEffects pet_cultivation = 41; // 宝宝独立条目贡献，开局快照冻结。
   SupportEffectSummary support_effects = 40; // 仅本人可见；来源及中立预览由本轮真实状态生成。
   bool competitive_temporary = 42; // true = 论剑排位临时竞技单位,结算不产出永久宠物回写项。
+  bool is_boss = 43; // true = 首领单位（来自 MonsterTable.is_boss）；不可被复制技能选中，客户端选目标阶段置灰。
 }
 
 // 法宝按物品实例记录次数；死亡不刷新已用次数，仅清除待用补偿。

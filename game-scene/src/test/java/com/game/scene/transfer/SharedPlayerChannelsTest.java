@@ -12,6 +12,8 @@ import static org.mockito.Mockito.when;
 import com.game.discovery.world.ChannelSwitchCooldown;
 import com.game.discovery.world.WorldChannelDirectoryStore;
 import com.game.proto.SceneChannelDirectory;
+import com.game.proto.WorldMapOverview;
+import com.game.scene.world.PlayerChannels;
 import com.game.player.store.OwnerState;
 import com.game.player.store.PlayerStore;
 import com.game.scene.metrics.SceneMetrics;
@@ -35,6 +37,7 @@ class SharedPlayerChannelsTest {
     private final Queue<Runnable> worker = new ArrayDeque<>();
     private final LinkedBlockingQueue<Runnable> logic = new LinkedBlockingQueue<>();
     private byte[] payload;
+    private byte[] overviewPayload;
     private RuntimeException failure;
     private int reads;
     private final List<Duration> writes = new ArrayList<>();
@@ -43,6 +46,11 @@ class SharedPlayerChannelsTest {
             assertThat(zone).isEqualTo(7); assertThat(config).isEqualTo(1); reads++;
             if (failure != null) throw failure;
             return payload;
+        }
+        @Override public byte[] readOverview(int zone) {
+            assertThat(zone).isEqualTo(7);
+            if (failure != null) throw failure;
+            return overviewPayload;
         }
         @Override public boolean publish(int zone, String token, long version, int config, byte[] data, Duration ttl) {
             throw new AssertionError("scene 只能读目录");
@@ -249,5 +257,26 @@ class SharedPlayerChannelsTest {
         worker.remove().run();
         assertThatThrownBy(() -> logic.remove().run()).isInstanceOf(IllegalStateException.class).hasMessage("续接失败");
         f.assertReleasedAfterSettlement();
+    }
+
+    @Test
+    void sceneView同时读取目录与世界地图总览_单项损坏或跨区互不影响() {
+        var expectedDir = SceneChannelDirectory.newBuilder().setZoneId(7).setSceneConfigId(1).setSwitchEnabled(true).build();
+        var expectedOverview = WorldMapOverview.newBuilder().setZoneId(7).setDailyHotspotSceneConfigId(5).build();
+        payload = expectedDir.toByteArray();
+        overviewPayload = expectedOverview.toByteArray();
+        List<PlayerChannels.SceneView> views = new ArrayList<>();
+        port(Duration.ofSeconds(3)).sceneView(1, true, true, views::add);
+        worker.remove().run();
+        logic.remove().run();
+        assertThat(views).containsExactly(new PlayerChannels.SceneView(expectedDir, expectedOverview));
+
+        // 总览跨区时置空，但不破坏有效目录
+        overviewPayload = WorldMapOverview.newBuilder().setZoneId(8).build().toByteArray();
+        views.clear();
+        port(Duration.ofSeconds(3)).sceneView(1, true, true, views::add);
+        worker.remove().run();
+        logic.remove().run();
+        assertThat(views).containsExactly(new PlayerChannels.SceneView(expectedDir, null));
     }
 }

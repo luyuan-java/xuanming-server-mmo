@@ -13,11 +13,13 @@ class PlayerAppearanceTest {
     @Test
     void 紧凑位图低位在前_置位已知位时保留未知高位与未知字段() throws Exception {
         byte[] rawBits = new byte[] { 0x00, 0x00, 0x02 }; // bit 17 (未知高位)
+        byte[] rawOwnedBits = new byte[] { 0x00, 0x00, 0x08 }; // bit 19 (未知高位)
         UnknownFieldSet unknown = UnknownFieldSet.newBuilder()
                 .addField(99, UnknownFieldSet.Field.newBuilder().addVarint(777L).build())
                 .build();
         AppearanceState persisted = AppearanceState.newBuilder()
                 .setTrialUsedBits(ByteString.copyFrom(rawBits))
+                .setOwnedBits(ByteString.copyFrom(rawOwnedBits))
                 .setUnknownFields(unknown)
                 .build();
         byte[] wire = persisted.toByteArray();
@@ -25,9 +27,12 @@ class PlayerAppearanceTest {
         PlayerAppearance restored = PlayerAppearance.restore(AppearanceState.parseFrom(wire));
         assertThat(restored.isTrialUsed(0)).isFalse();
         assertThat(restored.isTrialUsed(10)).isFalse();
+        assertThat(restored.isOwned(1)).isFalse();
 
         restored.startTrial("01_ice_sword_girl", 0, 1_800_003_600L);
         restored.markTrialUsed(10);
+        restored.markOwned(1);
+        restored.markOwned(9);
         restored.rememberIdempotency(101L, PlayerAppearance.KIND_START_TRIAL, "01_ice_sword_girl");
 
         AppearanceState saved = restored.toState();
@@ -36,6 +41,11 @@ class PlayerAppearanceTest {
         assertThat(savedBits[0] & 0xFF).isEqualTo(0x01); // bit 0
         assertThat(savedBits[1] & 0xFF).isEqualTo(0x04); // bit 10
         assertThat(savedBits[2] & 0xFF).isEqualTo(0x02); // bit 17 未知高位未丢
+        byte[] savedOwnedBits = saved.getOwnedBits().toByteArray();
+        assertThat(savedOwnedBits).hasSize(3);
+        assertThat(savedOwnedBits[0] & 0xFF).isEqualTo(0x02); // bit 1
+        assertThat(savedOwnedBits[1] & 0xFF).isEqualTo(0x02); // bit 9
+        assertThat(savedOwnedBits[2] & 0xFF).isEqualTo(0x08); // bit 19 未知高位未丢
         assertThat(saved.getUnknownFields().hasField(99)).isTrue();
         assertThat(saved.getUnknownFields().getField(99).getVarintList()).containsExactly(777L);
     }

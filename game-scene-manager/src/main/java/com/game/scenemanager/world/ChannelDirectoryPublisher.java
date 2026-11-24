@@ -2,10 +2,13 @@ package com.game.scenemanager.world;
 
 import com.game.discovery.world.WorldChannelDirectoryStore;
 import com.game.discovery.world.WorldChannelStore;
+import com.game.proto.SceneChannelDirectory;
 import com.game.scenemanager.SceneNodeSource;
 import com.game.scenemanager.world.WorldChannelMetrics.DirectoryPublishResult;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -50,16 +53,26 @@ public final class ChannelDirectoryPublisher {
             try {
                 var plan = plans.readPlan(zone);
                 var directory = nodes.list(zone);
+                long nowMs = millis.getAsLong();
+                Duration ttl = props.directoryTtl(world.tick());
                 boolean hasChannels = false;
                 boolean fenced = false;
+                Map<Integer, SceneChannelDirectory> byConfig = new LinkedHashMap<>();
                 for (int config : configs) {
-                    var model = ChannelDirectoryBuilder.build(zone, config, plan.channels(), directory, props, world,
-                            millis.getAsLong());
+                    var model = ChannelDirectoryBuilder.build(zone, config, plan.channels(), directory, props, world, nowMs);
                     hasChannels |= model.getChannelsCount() > 0;
                     // 成功读到确实为空的计划会发布空目录，使旧线路及时消失；失败/缺号绝不伪装成空目录。
-                    if (!directories.publish(zone, token, plan.version(), config, model.toByteArray(), props.directoryTtl(world.tick()))) {
+                    if (!directories.publish(zone, token, plan.version(), config, model.toByteArray(), ttl)) {
                         fenced = true;
                         break; // 任期/版本已变，本轮剩余地图也不能用这份快照发布。
+                    }
+                    byConfig.put(config, model);
+                }
+                if (!fenced) {
+                    var overview = WorldMapOverviewBuilder.build(zone, world.mapPlay(), byConfig, nowMs);
+                    if (overview.getMapsCount() > 0
+                            && !directories.publishOverview(zone, token, plan.version(), overview.toByteArray(), ttl)) {
+                        fenced = true;
                     }
                 }
                 metrics.directoryPublish(fenced ? DirectoryPublishResult.FENCED

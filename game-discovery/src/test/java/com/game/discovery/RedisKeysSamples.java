@@ -68,6 +68,7 @@ final class RedisKeysSamples {
                 new Sample("guildRankTmpZone", k -> k.guildRankTmpZone("t1", 2), "game:guild:{rank}:tmp:t1:zone:2"),
                 new Sample("worldChannels", k -> k.worldChannels(1), "game:world:{z:1}:ch"),
                 new Sample("worldChannelDirectory", k -> k.worldChannelDirectory(1, 2), "game:world:{z:1}:directory:2"),
+                new Sample("worldMapOverview", k -> k.worldMapOverview(1), "game:world:{z:1}:overview"),
                 new Sample("channelSwitchCooldown", k -> k.channelSwitchCooldown(3), "game:player:3:channel-switch-cooldown"),
                 new Sample("worldDesired", k -> k.worldDesired(1), "game:world:{z:1}:desired"),
                 new Sample("worldCooldown", k -> k.worldCooldown(1), "game:world:{z:1}:cooldown"),

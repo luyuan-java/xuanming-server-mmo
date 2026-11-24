@@ -52,8 +52,10 @@ public class SceneManagerConfiguration {
     @Bean
     public ChannelSelector channelSelector(SceneNodeSource source, WorldChannelStore worldChannelStore,
                                            WorldChannelProperties worldProps) {
-        log.info("进场软预占 TTL={}（0 = 关闭）", worldProps.reservationTtl());
-        return new ChannelSelector(source, worldChannelStore, worldProps.reservationTtl());
+        log.info("进场软预占 TTL={}（0 = 关闭） 选线策略={} 软上限={}", worldProps.reservationTtl(),
+                worldProps.pickPolicy(), worldProps.effectiveSoftFillThreshold());
+        return new ChannelSelector(source, worldChannelStore, worldProps.reservationTtl(),
+                worldProps.effectiveSoftFillThreshold());
     }
 
     @Bean

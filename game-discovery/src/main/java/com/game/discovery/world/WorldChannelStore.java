@@ -60,6 +60,15 @@ public interface WorldChannelStore {
      */
     ReservationPick reserve(int zoneId, List<ReservationCandidate> candidates, long playerId, Duration ttl);
 
+    /**
+     * 带软上限聚人阈值（Fill-First）的选频道并软预占：{@code softFillThreshold > 0} 时优先选按候选顺序第一条
+     * 有效负载 {@code < softFillThreshold} 的频道，全线达到软上限后回退至负载严格最小者；{@code <= 0} 退化为纯 least_loaded。
+     */
+    default ReservationPick reserve(int zoneId, List<ReservationCandidate> candidates, long playerId, Duration ttl,
+                                    int softFillThreshold) {
+        return reserve(zoneId, candidates, playerId, ttl);
+    }
+
     /** 给指定场景记一条预占（{@code player_id → now + ttl}，键 {@code PEXPIRE ttl}）：分配选中原实例时用，让并发分配看得见（§4.11 第 3 步）。 */
     void reserveScene(int zoneId, long sceneId, long playerId, Duration ttl);
 

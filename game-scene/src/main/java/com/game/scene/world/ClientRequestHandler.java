@@ -146,7 +146,8 @@ public final class ClientRequestHandler {
         register(ids.enterScene(), EnterSceneC2SRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED, this::enterScene);
         // 应答是 Empty 不回包，改推 31（基线 player_scene_handler.cpp SceneInfoC2S）。
         register(ids.sceneInfoC2S(), SceneInfoRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
-                (call, req) -> world.requestSceneInfo(call.player(), req.getWithChannelDirectory()));
+                (call, req) -> world.requestSceneInfo(call.player(), req.getWithChannelDirectory(),
+                        req.getWithWorldMapOverview()));
         // 226 跨 zone 传送（批次 5.4，zone-travel-spec §5.5）：自己判战斗在途（3025）与换图在途（冻结中 / 传送在途 13000，63 在途 3014），
         // 冻结闸与战斗闸都放行；应答可能是延迟应答（在队检查读回来才回）
         register(ids.travelToZone(), TravelToZoneRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED,

@@ -320,7 +320,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
             return done(error(LoginErrorTip.login_error.kLoginAccountDeletionPending_VALUE));
         }
         PlayerRow row = found.get();
-        if ("06_thunder_caster_boy".equals(row.getAppearanceId())) {
+        if (com.game.login.character.CharacterAppearances.isRemoved(row.getAppearanceId())) {
             return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));
         }
         if (row.getTradeListingId() != 0 || row.getOwnerRevision() <= 0) {

@@ -46,21 +46,33 @@ public final class ChannelSelector {
     private final SceneNodeSource source;
     private final WorldChannelStore store;
     private final Duration reservationTtl;
+    private final int softFillThreshold;
 
     /**
      * @param store          软预占的存储；{@code reservationTtl} 为 0 时可为 null
      * @param reservationTtl 预占 TTL；0 = 关闭预占
      */
     public ChannelSelector(SceneNodeSource source, WorldChannelStore store, Duration reservationTtl) {
+        this(source, store, reservationTtl, 0);
+    }
+
+    /**
+     * @param softFillThreshold Fill-First 软上限人数；{@code <= 0} 表示纯 least_loaded
+     */
+    public ChannelSelector(SceneNodeSource source, WorldChannelStore store, Duration reservationTtl, int softFillThreshold) {
         if (reservationTtl.isNegative()) {
             throw new IllegalArgumentException("预占 TTL 不能为负: " + reservationTtl);
         }
         if (!reservationTtl.isZero() && store == null) {
             throw new IllegalArgumentException("开启预占时必须给出预占存储");
         }
+        if (softFillThreshold < 0) {
+            throw new IllegalArgumentException("Fill-First 软上限不能为负: " + softFillThreshold);
+        }
         this.source = source;
         this.store = store;
         this.reservationTtl = reservationTtl;
+        this.softFillThreshold = softFillThreshold;
     }
 
     /** 不预占（只按目录人数选）。 */
@@ -102,13 +114,13 @@ public final class ChannelSelector {
         }
         candidates.sort(TIE_ORDER);
         if (!reservationsEnabled() || playerId == 0) {
-            return Optional.of(leastLoaded(candidates));
+            return Optional.of(pickWithoutReservations(candidates, softFillThreshold));
         }
         List<ReservationCandidate> keys = new ArrayList<>(candidates.size());
         for (Choice c : candidates) {
             keys.add(new ReservationCandidate(c.scene().getSceneId(), c.scene().getPlayerCount()));
         }
-        ReservationPick pick = store.reserve(zoneId, keys, playerId, reservationTtl);
+        ReservationPick pick = store.reserve(zoneId, keys, playerId, reservationTtl, softFillThreshold);
         if (pick.index() < 0 || pick.index() >= candidates.size()) {
             throw new IllegalStateException("预占脚本回了越界的下标 " + pick.index() + "（候选 " + candidates.size() + " 个）");
         }
@@ -125,8 +137,15 @@ public final class ChannelSelector {
         }
     }
 
-    /** 目录人数最少（uint32 无符号比较）；并列取排序靠前的。{@code sorted} 已按 {@link #TIE_ORDER} 排好、非空。 */
-    private static Choice leastLoaded(List<Choice> sorted) {
+    /** 不预占路径的选线：softFillThreshold > 0 优先填满排序靠前频道，全部达阈值后回退人数最少者。 */
+    private static Choice pickWithoutReservations(List<Choice> sorted, int softFillThreshold) {
+        if (softFillThreshold > 0) {
+            for (Choice c : sorted) {
+                if (Integer.compareUnsigned(c.scene().getPlayerCount(), softFillThreshold) < 0) {
+                    return c;
+                }
+            }
+        }
         Choice best = sorted.get(0);
         for (int i = 1; i < sorted.size(); i++) {
             Choice c = sorted.get(i);

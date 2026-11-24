@@ -10,7 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 玩家角色形象的 1 小时免费试用位图、在途试用态与幂等回执（永久形象存于 {@code player.appearance_id}）。
+ * 玩家角色形象的永久收藏位图、1 小时免费试用位图、在途试用态与幂等回执（当前永久形象存于 {@code player.appearance_id}）。
  *
  * <p>位图采用紧凑字节低位在前格式（第 i 位在 {@code bytes[i / 8]} 的 {@code 1 << (i % 8)}），
  * 与 C++ {@code bit_index_util.h} 完全一致；仅在置位时按需扩容，完整保留未知高位 bit 及消息级未知字段。
@@ -20,11 +20,13 @@ public final class PlayerAppearance {
     public static final int MAX_RECENT_REQUESTS = 32;
     public static final int KIND_SWITCH = 1;
     public static final int KIND_START_TRIAL = 2;
+    public static final int KIND_FREE_SWITCH = 3;
 
     public enum IdempotencyVerdict { NEW, REPLAY, MISMATCH }
 
     private record Receipt(long clientRequestId, int kind, String targetAppearanceId, long seq) { }
 
+    private byte[] ownedBits;
     private byte[] trialUsedBits;
     private String trialAppearanceId;
     private long trialExpiresAt;
@@ -33,9 +35,10 @@ public final class PlayerAppearance {
     private final Map<Long, Receipt> receipts;
     private final UnknownFieldSet unknownFields;
 
-    private PlayerAppearance(byte[] trialUsedBits, String trialAppearanceId, long trialExpiresAt,
+    private PlayerAppearance(byte[] ownedBits, byte[] trialUsedBits, String trialAppearanceId, long trialExpiresAt,
                              long switchSeq, Map<Long, Receipt> receipts, long nextReceiptSeq,
                              UnknownFieldSet unknownFields) {
+        this.ownedBits = ownedBits;
         this.trialUsedBits = trialUsedBits;
         this.trialAppearanceId = trialAppearanceId == null ? "" : trialAppearanceId;
         this.trialExpiresAt = trialExpiresAt;
@@ -46,7 +49,7 @@ public final class PlayerAppearance {
     }
 
     public static PlayerAppearance empty() {
-        return new PlayerAppearance(new byte[0], "", 0, 0, new LinkedHashMap<>(), 1, UnknownFieldSet.getDefaultInstance());
+        return new PlayerAppearance(new byte[0], new byte[0], "", 0, 0, new LinkedHashMap<>(), 1, UnknownFieldSet.getDefaultInstance());
     }
 
     public static PlayerAppearance restore(AppearanceState state) {
@@ -68,6 +71,7 @@ public final class PlayerAppearance {
             }
         }
         return new PlayerAppearance(
+                state.getOwnedBits().toByteArray(),
                 state.getTrialUsedBits().toByteArray(),
                 state.getTrialAppearanceId(),
                 state.getTrialExpiresAt(),
@@ -78,12 +82,17 @@ public final class PlayerAppearance {
     }
 
     public boolean isPristine() {
-        return trialUsedBits.length == 0
+        return ownedBits.length == 0
+                && trialUsedBits.length == 0
                 && trialAppearanceId.isEmpty()
                 && trialExpiresAt == 0
                 && switchSeq == 0
                 && receipts.isEmpty()
                 && unknownFields.asMap().isEmpty();
+    }
+
+    public byte[] ownedBitsCopy() {
+        return Arrays.copyOf(ownedBits, ownedBits.length);
     }
 
     public byte[] trialUsedBitsCopy() {
@@ -110,23 +119,38 @@ public final class PlayerAppearance {
         return isTrialActive(nowSec) ? trialAppearanceId : (permanentAppearanceId == null ? "" : permanentAppearanceId);
     }
 
-    public boolean isTrialUsed(int bitIndex) {
-        if (bitIndex < 0) {
+    public static boolean isBitSet(byte[] bits, int bitIndex) {
+        if (bitIndex < 0 || bits == null) {
             return false;
         }
         int byteIdx = bitIndex >>> 3;
-        return byteIdx < trialUsedBits.length && ((trialUsedBits[byteIdx] & (1 << (bitIndex & 7))) != 0);
+        return byteIdx < bits.length && ((bits[byteIdx] & (1 << (bitIndex & 7))) != 0);
     }
 
-    public void markTrialUsed(int bitIndex) {
+    public static byte[] setBit(byte[] bits, int bitIndex) {
         if (bitIndex < 0) {
             throw new IllegalArgumentException("bitIndex must be non-negative: " + bitIndex);
         }
         int byteIdx = bitIndex >>> 3;
-        if (trialUsedBits.length <= byteIdx) {
-            trialUsedBits = Arrays.copyOf(trialUsedBits, byteIdx + 1);
-        }
-        trialUsedBits[byteIdx] = (byte) (trialUsedBits[byteIdx] | (1 << (bitIndex & 7)));
+        byte[] out = bits.length <= byteIdx ? Arrays.copyOf(bits, byteIdx + 1) : bits;
+        out[byteIdx] = (byte) (out[byteIdx] | (1 << (bitIndex & 7)));
+        return out;
+    }
+
+    public boolean isOwned(int bitIndex) {
+        return isBitSet(ownedBits, bitIndex);
+    }
+
+    public void markOwned(int bitIndex) {
+        ownedBits = setBit(ownedBits, bitIndex);
+    }
+
+    public boolean isTrialUsed(int bitIndex) {
+        return isBitSet(trialUsedBits, bitIndex);
+    }
+
+    public void markTrialUsed(int bitIndex) {
+        trialUsedBits = setBit(trialUsedBits, bitIndex);
     }
 
     public void startTrial(String targetAppearanceId, int bitIndex, long expiresAtSec) {
@@ -171,6 +195,9 @@ public final class PlayerAppearance {
 
     public AppearanceState toState() {
         AppearanceState.Builder builder = AppearanceState.newBuilder().setUnknownFields(unknownFields);
+        if (ownedBits.length > 0) {
+            builder.setOwnedBits(ByteString.copyFrom(ownedBits));
+        }
         if (trialUsedBits.length > 0) {
             builder.setTrialUsedBits(ByteString.copyFrom(trialUsedBits));
         }

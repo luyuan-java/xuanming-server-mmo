@@ -1,16 +1,19 @@
 package com.game.scene.appearance;
 
 import com.game.table.AppearanceRuleTable;
+import com.game.table.AppearanceSeriesTable;
 import com.game.table.CharacterAppearanceTable;
 import com.game.table.ConfigTables;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * 角色形象切换与 1 小时免费试用的不可变配表视图（来自 {@code CharacterAppearance} 与 {@code AppearanceRule}）。
+ * 角色形象切换、永久收藏系列与 1 小时免费试用的不可变配表视图（来自 {@code CharacterAppearance}、{@code AppearanceSeries} 与 {@code AppearanceRule}）。
  *
  * <p>位索引按永久主键 {@code id - 1} 计算（与 {@code characterappearance_mapping.json} 一致：1..11 -> bit 0..10）。
  */
@@ -23,16 +26,25 @@ public final class AppearanceTables {
 
     public record Rule(int cardItemId, int cardItemCount, int trialDurationSeconds, long mallSkuId, long mallPriceFen) { }
 
-    public record Entry(int configId, int bitIndex, String appearanceId, String name, int sortOrder) { }
+    public record Series(int seriesId, String seriesKey, String name, int sortOrder,
+                         String completionBadgeName, String epilogueTitle) { }
+
+    public record Entry(int configId, int bitIndex, String appearanceId, String name, int sortOrder,
+                        boolean starterCreatable, boolean cardUnlockable, int seriesId) { }
 
     private final Rule rule;
     private final List<Entry> enabledEntries;
     private final Map<String, Entry> enabledByAppearanceId;
+    private final Map<String, Entry> allByAppearanceId;
+    private final List<Series> enabledSeries;
 
-    private AppearanceTables(Rule rule, List<Entry> enabledEntries, Map<String, Entry> enabledByAppearanceId) {
+    private AppearanceTables(Rule rule, List<Entry> enabledEntries, Map<String, Entry> enabledByAppearanceId,
+                             Map<String, Entry> allByAppearanceId, List<Series> enabledSeries) {
         this.rule = rule;
         this.enabledEntries = enabledEntries;
         this.enabledByAppearanceId = enabledByAppearanceId;
+        this.allByAppearanceId = allByAppearanceId;
+        this.enabledSeries = enabledSeries;
     }
 
     public static AppearanceTables from(ConfigTables tables) {
@@ -49,8 +61,34 @@ public final class AppearanceTables {
                 r.getMallPriceFen());
         validateRule(parsedRule, tables);
 
+        List<Series> seriesList = new ArrayList<>();
+        Set<Integer> enabledSeriesIds = new HashSet<>();
+        Set<String> enabledSeriesKeys = new HashSet<>();
+        for (AppearanceSeriesTable s : tables.appearanceSeries().all()) {
+            if (s.getId() <= 0 || s.getSeriesKey().isBlank() || s.getName().isBlank()) {
+                throw new IllegalStateException("AppearanceSeries 非法行: id=" + s.getId());
+            }
+            if (s.getEnabled() == 0) {
+                continue;
+            }
+            if (!enabledSeriesKeys.add(s.getSeriesKey())) {
+                throw new IllegalStateException("AppearanceSeries 重复启用 series_key=" + s.getSeriesKey());
+            }
+            enabledSeriesIds.add(s.getId());
+            seriesList.add(new Series(
+                    s.getId(),
+                    s.getSeriesKey(),
+                    s.getName(),
+                    s.getSortOrder(),
+                    s.getCompletionBadgeName(),
+                    s.getEpilogueTitle()));
+        }
+        seriesList.sort(Comparator.comparingInt(Series::sortOrder).thenComparingInt(Series::seriesId));
+
         List<Entry> entries = new ArrayList<>();
         Map<String, Entry> byAppearanceId = new LinkedHashMap<>();
+        Map<String, Entry> allById = new LinkedHashMap<>();
+        int starterCount = 0;
         for (CharacterAppearanceTable row : tables.characterAppearance().all()) {
             if (row.getId() <= 0) {
                 throw new IllegalStateException("CharacterAppearance.id 必须为正数: " + row.getId());
@@ -58,20 +96,38 @@ public final class AppearanceTables {
             if (row.getAppearanceId().isBlank()) {
                 throw new IllegalStateException("CharacterAppearance.appearance_id 不能为空: id=" + row.getId());
             }
+            Entry entry = new Entry(
+                    row.getId(),
+                    row.getId() - 1,
+                    row.getAppearanceId(),
+                    row.getName(),
+                    row.getSortOrder(),
+                    row.getStarterCreatable() != 0,
+                    row.getCardUnlockable() != 0,
+                    row.getSeriesId());
+            allById.putIfAbsent(entry.appearanceId(), entry);
             if (row.getEnabled() == 0) {
                 continue;
             }
-            Entry entry = new Entry(row.getId(), row.getId() - 1, row.getAppearanceId(), row.getName(), row.getSortOrder());
+            if (entry.seriesId() != 0 && !enabledSeriesIds.contains(entry.seriesId())) {
+                throw new IllegalStateException("CharacterAppearance id=" + entry.configId()
+                        + " 引用了不存在或未启用的 series_id=" + entry.seriesId());
+            }
             if (byAppearanceId.putIfAbsent(entry.appearanceId(), entry) != null) {
                 throw new IllegalStateException("CharacterAppearance 重复启用 appearance_id=" + entry.appearanceId());
             }
+            if (entry.starterCreatable()) {
+                starterCount++;
+            }
             entries.add(entry);
         }
-        if (entries.isEmpty()) {
-            throw new IllegalStateException("配置表 CharacterAppearance 没有启用的形象");
+        if (entries.isEmpty() || starterCount == 0) {
+            throw new IllegalStateException("配置表 CharacterAppearance 缺少启用或初始建角形象: enabled="
+                    + entries.size() + " starter=" + starterCount);
         }
         entries.sort(Comparator.comparingInt(Entry::sortOrder).thenComparingInt(Entry::configId));
-        return new AppearanceTables(parsedRule, List.copyOf(entries), Map.copyOf(byAppearanceId));
+        return new AppearanceTables(parsedRule, List.copyOf(entries), Map.copyOf(byAppearanceId),
+                Map.copyOf(allById), List.copyOf(seriesList));
     }
 
     private static void validateRule(Rule rule, ConfigTables tables) {
@@ -100,5 +156,13 @@ public final class AppearanceTables {
 
     public Entry findEnabled(String appearanceId) {
         return appearanceId == null ? null : enabledByAppearanceId.get(appearanceId);
+    }
+
+    public Entry findAny(String appearanceId) {
+        return appearanceId == null ? null : allByAppearanceId.get(appearanceId);
+    }
+
+    public List<Series> enabledSeries() {
+        return enabledSeries;
     }
 }

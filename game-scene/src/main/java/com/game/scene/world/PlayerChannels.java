@@ -1,12 +1,25 @@
 package com.game.scene.world;
 
 import com.game.proto.SceneChannelDirectory;
+import com.game.proto.WorldMapOverview;
 import java.util.function.Consumer;
 
-/** 玩家分线的异步读写端口；实现不得阻塞逻辑线程，回调在逻辑线程且恰好一次（停止时丢弃）。 */
+/** 玩家分线与世界地图总览的异步读写端口；实现不得阻塞逻辑线程，回调在逻辑线程且恰好一次（停止时丢弃）。 */
 public interface PlayerChannels {
+    /** 一次 SceneInfoC2S 异步拉取的结果快照（未请求或读失败的项为 null）。 */
+    record SceneView(SceneChannelDirectory directory, WorldMapOverview overview) { }
+
     /** 缺失、损坏、读失败或超时均以 null 返回，调用方仍发送不带目录的 31。 */
     void directory(int sceneConfigId, Consumer<SceneChannelDirectory> onDone);
+
+    /** 一次异步拉取分线目录与/或世界地图总览；未请求或单项失败时对应字段为 null。 */
+    default void sceneView(int sceneConfigId, boolean withDirectory, boolean withOverview, Consumer<SceneView> onDone) {
+        if (withDirectory) {
+            directory(sceneConfigId, dir -> onDone.accept(new SceneView(dir, null)));
+        } else {
+            onDone.accept(new SceneView(null, null));
+        }
+    }
 
     /** 仅在切换成功后调用；失败或超时也必须回调，不能回滚成功的切换。seconds 为 uint32 原始位。 */
     void switched(long playerId, int seconds, Runnable onDone);

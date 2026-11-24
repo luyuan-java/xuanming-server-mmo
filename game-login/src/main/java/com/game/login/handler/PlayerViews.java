@@ -1,5 +1,6 @@
 package com.game.login.handler;
 
+import com.game.login.character.CharacterAppearances;
 import com.game.player.store.PlayerRow;
 import com.game.proto.AccountSimplePlayer;
 import com.game.proto.login.AccountSimplePlayerWrapper;
@@ -28,7 +29,7 @@ public final class PlayerViews {
     public static List<AccountSimplePlayerWrapper> wrapAll(List<PlayerRow> rows) {
         List<AccountSimplePlayerWrapper> out = new ArrayList<>(rows.size());
         for (PlayerRow row : rows) {
-            if (!"06_thunder_caster_boy".equals(row.getAppearanceId())) {
+            if (!CharacterAppearances.isRemoved(row.getAppearanceId())) {
                 out.add(wrap(row));
             }
         }

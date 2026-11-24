@@ -136,7 +136,12 @@ class AppearanceFeatureTest {
         assertThat(infoResp.getErrorMessage().getId()).isZero();
         assertThat(infoResp.getInfo().getOwnedCardCount()).isEqualTo(1);
         assertThat(infoResp.getInfo().getMallPriceFen()).isEqualTo(1000L);
-        assertThat(infoResp.getInfo().getAppearancesCount()).isEqualTo(11);
+        assertThat(infoResp.getInfo().getAppearancesCount()).isEqualTo(8);
+        assertThat(infoResp.getInfo().getAppearancesList())
+                .allSatisfy(entry -> assertThat(entry.getCardUnlockable()).isTrue());
+        assertThat(infoResp.getInfo().getAppearancesList().stream()
+                .filter(e -> e.getOwned()).map(e -> e.getAppearanceId()).toList())
+                .containsExactly("00_reference_topright_boy");
 
         SwitchAppearanceRequest req = SwitchAppearanceRequest.newBuilder()
                 .setClientRequestId(5001L)
@@ -148,6 +153,9 @@ class AppearanceFeatureTest {
         assertThat(first.getReplayed()).isFalse();
         assertThat(first.getInfo().getPermanentAppearanceId()).isEqualTo("01_ice_sword_girl");
         assertThat(first.getInfo().getOwnedCardCount()).isZero();
+        assertThat(first.getInfo().getAppearancesList().stream()
+                .filter(e -> e.getOwned()).map(e -> e.getAppearanceId()).toList())
+                .containsExactly("00_reference_topright_boy", "01_ice_sword_girl");
         assertThat(sink.messageIdsTo(LINK, SESSION)).contains(NOTIFY_CHANGED);
         ActorAppearanceChangedS2C changed = ActorAppearanceChangedS2C.parseFrom(
                 sink.to(LINK, SESSION).stream().filter(m -> m.getMessageId() == NOTIFY_CHANGED)
@@ -161,26 +169,60 @@ class AppearanceFeatureTest {
         assertThat(replay.getErrorMessage().getId()).isZero();
         assertThat(replay.getReplayed()).isTrue();
 
-        // 同键换参：回 1005
+        // 同键换参或切换 expect_free_switch：回 1005
         SwitchAppearanceResponse mismatch = SwitchAppearanceResponse.parseFrom(
                 call("SwitchAppearance", SwitchAppearanceRequest.newBuilder()
                         .setClientRequestId(5001L).setAppearanceId("02_fire_talisman_boy").build())
                         .getSerializedMessage());
         assertThat(mismatch.getErrorMessage().getId()).isEqualTo(AppearanceService.INVALID_PARAMETER);
+        SwitchAppearanceResponse flippedFree = SwitchAppearanceResponse.parseFrom(
+                call("SwitchAppearance", SwitchAppearanceRequest.newBuilder()
+                        .setClientRequestId(5001L).setAppearanceId("01_ice_sword_girl")
+                        .setExpectFreeSwitch(true).build())
+                        .getSerializedMessage());
+        assertThat(flippedFree.getErrorMessage().getId()).isEqualTo(AppearanceService.INVALID_PARAMETER);
 
-        // 缺卡再切：回 kAppearanceNoCard
+        // 0 卡免费切回已拥有的初始形象 00_reference_topright_boy（expect_free_switch=true）
+        SwitchAppearanceResponse freeBack = SwitchAppearanceResponse.parseFrom(
+                call("SwitchAppearance", SwitchAppearanceRequest.newBuilder()
+                        .setClientRequestId(5004L).setAppearanceId("00_reference_topright_boy")
+                        .setExpectFreeSwitch(true).build())
+                        .getSerializedMessage());
+        assertThat(freeBack.getErrorMessage().getId()).isZero();
+        assertThat(freeBack.getInfo().getPermanentAppearanceId()).isEqualTo("00_reference_topright_boy");
+        assertThat(freeBack.getInfo().getOwnedCardCount()).isZero();
+
+        // 对已拥有的非当前形象发起试用：回 kAppearanceAlreadyOwned
+        StartAppearanceTrialResponse ownedTrial = StartAppearanceTrialResponse.parseFrom(
+                call("StartAppearanceTrial", StartAppearanceTrialRequest.newBuilder()
+                        .setClientRequestId(5005L).setAppearanceId("01_ice_sword_girl").build())
+                        .getSerializedMessage());
+        assertThat(ownedTrial.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_ALREADY_OWNED);
+
+        // expect_free_switch=true 切未拥有形象：fail-closed 回 kAppearanceNotOwned
+        SwitchAppearanceResponse notOwned = SwitchAppearanceResponse.parseFrom(
+                call("SwitchAppearance", SwitchAppearanceRequest.newBuilder()
+                        .setClientRequestId(5006L).setAppearanceId("02_fire_talisman_boy")
+                        .setExpectFreeSwitch(true).build())
+                        .getSerializedMessage());
+        assertThat(notOwned.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NOT_OWNED);
+
+        // 缺卡再切未拥有形象：回 kAppearanceNoCard
         SwitchAppearanceResponse noCard = SwitchAppearanceResponse.parseFrom(
                 call("SwitchAppearance", SwitchAppearanceRequest.newBuilder()
                         .setClientRequestId(5002L).setAppearanceId("02_fire_talisman_boy").build())
                         .getSerializedMessage());
         assertThat(noCard.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NO_CARD);
 
-        // 已退场角色被拒
-        SwitchAppearanceResponse invalid = SwitchAppearanceResponse.parseFrom(
-                call("SwitchAppearance", SwitchAppearanceRequest.newBuilder()
-                        .setClientRequestId(5003L).setAppearanceId("30_han_xiangzi").build())
-                        .getSerializedMessage());
-        assertThat(invalid.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_INVALID);
+        // 已退场/删除角色被拒
+        for (String removed : List.of("30_han_xiangzi", "04_mountain_guardian_boy",
+                "08_alchemy_prodigy_boy", "17_ghost_script_calligrapher_boy")) {
+            SwitchAppearanceResponse invalid = SwitchAppearanceResponse.parseFrom(
+                    call("SwitchAppearance", SwitchAppearanceRequest.newBuilder()
+                            .setClientRequestId(5010L + removed.length()).setAppearanceId(removed).build())
+                            .getSerializedMessage());
+            assertThat(invalid.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_INVALID);
+        }
     }
 
     @Test
@@ -189,10 +231,10 @@ class AppearanceFeatureTest {
         StartAppearanceTrialResponse started = StartAppearanceTrialResponse.parseFrom(
                 call("StartAppearanceTrial", StartAppearanceTrialRequest.newBuilder()
                         .setClientRequestId(6001L)
-                        .setAppearanceId("08_alchemy_prodigy_boy")
+                        .setAppearanceId("02_fire_talisman_boy")
                         .build()).getSerializedMessage());
         assertThat(started.getErrorMessage().getId()).isZero();
-        assertThat(started.getInfo().getActiveAppearanceId()).isEqualTo("08_alchemy_prodigy_boy");
+        assertThat(started.getInfo().getActiveAppearanceId()).isEqualTo("02_fire_talisman_boy");
         assertThat(started.getInfo().getPermanentAppearanceId()).isEqualTo("00_reference_topright_boy");
         assertThat(started.getInfo().getTrialExpiresAt()).isEqualTo(clock.epochMillis() / 1000L + 3600L);
 
@@ -200,15 +242,24 @@ class AppearanceFeatureTest {
         StartAppearanceTrialResponse dup = StartAppearanceTrialResponse.parseFrom(
                 call("StartAppearanceTrial", StartAppearanceTrialRequest.newBuilder()
                         .setClientRequestId(6002L)
-                        .setAppearanceId("08_alchemy_prodigy_boy")
+                        .setAppearanceId("02_fire_talisman_boy")
                         .build()).getSerializedMessage());
         assertThat(dup.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_TRIAL_ALREADY_USED);
+
+        // 内部授形 05_celestial_musician_girl：不中断当前试用且可 0 卡免费切换，重复授形幂等
+        ScenePlayer player = WorldTestAccess.player(world, LINK, SESSION);
+        sink.clear();
+        assertThat(appearanceService.grantAppearance(world, player, "05_celestial_musician_girl")).isZero();
+        assertThat(sink.messageIdsTo(LINK, SESSION)).contains(NOTIFY_STATE);
+        assertThat(player.effectiveAppearanceId(clock.epochMillis() / 1000L)).isEqualTo("02_fire_talisman_boy");
+        sink.clear();
+        assertThat(appearanceService.grantAppearance(world, player, "05_celestial_musician_girl")).isZero();
+        assertThat(sink.messageIdsTo(LINK, SESSION)).isEmpty();
 
         // 推进 1 小时，tickExpiries 自动还原永久形象并广播 + 推 AppearanceStateNotify(trial_expired=true)
         sink.clear();
         clock.advanceMillis(3600_000L);
         appearanceService.tickExpiries(world);
-        ScenePlayer player = WorldTestAccess.player(world, LINK, SESSION);
         assertThat(player.effectiveAppearanceId(clock.epochMillis() / 1000L)).isEqualTo("00_reference_topright_boy");
         assertThat(sink.messageIdsTo(LINK, SESSION)).contains(NOTIFY_CHANGED, NOTIFY_STATE);
         AppearanceStateNotify expiredNotify = AppearanceStateNotify.parseFrom(
@@ -234,5 +285,52 @@ class AppearanceFeatureTest {
         CancelAppearanceTrialResponse noTrial = CancelAppearanceTrialResponse.parseFrom(
                 call("CancelAppearanceTrial", CancelAppearanceTrialRequest.getDefaultInstance()).getSerializedMessage());
         assertThat(noTrial.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NO_ACTIVE_TRIAL);
+    }
+
+    @Test
+    void 人物收藏系列进度实时派生_试用不计入_集齐点亮印章与合篇() throws Exception {
+        start("00_reference_topright_boy", 1);
+        GetAppearanceInfoResponse init = GetAppearanceInfoResponse.parseFrom(
+                call("GetAppearanceInfo", GetAppearanceInfoRequest.getDefaultInstance()).getSerializedMessage());
+        assertThat(init.getInfo().getSeriesProgressCount()).isEqualTo(3);
+        var lantern = init.getInfo().getSeriesProgress(0);
+        assertThat(lantern.getSeriesId()).isEqualTo(1);
+        assertThat(lantern.getSeriesKey()).isEqualTo("lantern_courtyard");
+        assertThat(lantern.getOwnedCount()).isEqualTo(1);
+        assertThat(lantern.getTotalCount()).isEqualTo(3);
+        assertThat(lantern.getCompleted()).isFalse();
+        assertThat(lantern.getMemberAppearanceIdsList()).containsExactly(
+                "00_reference_topright_boy", "09_bamboo_archer_girl", "10_crimson_spear_girl");
+
+        // 试用同系列成员不计入系列拥有数
+        StartAppearanceTrialResponse trial = StartAppearanceTrialResponse.parseFrom(
+                call("StartAppearanceTrial", StartAppearanceTrialRequest.newBuilder()
+                        .setClientRequestId(7001L).setAppearanceId("09_bamboo_archer_girl").build())
+                        .getSerializedMessage());
+        assertThat(trial.getInfo().getSeriesProgress(0).getOwnedCount()).isEqualTo(1);
+        assertThat(trial.getInfo().getSeriesProgress(0).getCompleted()).isFalse();
+
+        // 形象卡解锁 09 + 内部授形 10 -> 留灯院旧友 3/3 集齐
+        SwitchAppearanceResponse unlocked = SwitchAppearanceResponse.parseFrom(
+                call("SwitchAppearance", SwitchAppearanceRequest.newBuilder()
+                        .setClientRequestId(7002L).setAppearanceId("09_bamboo_archer_girl").build())
+                        .getSerializedMessage());
+        assertThat(unlocked.getInfo().getSeriesProgress(0).getOwnedCount()).isEqualTo(2);
+        assertThat(unlocked.getInfo().getSeriesProgress(0).getCompleted()).isFalse();
+
+        ScenePlayer player = WorldTestAccess.player(world, LINK, SESSION);
+        sink.clear();
+        assertThat(appearanceService.grantAppearance(world, player, "10_crimson_spear_girl")).isZero();
+        AppearanceStateNotify grantedNotify = AppearanceStateNotify.parseFrom(
+                sink.to(LINK, SESSION).stream().filter(m -> m.getMessageId() == NOTIFY_STATE)
+                        .findFirst().orElseThrow().getSerializedMessage());
+        var done = grantedNotify.getInfo().getSeriesProgress(0);
+        assertThat(done.getOwnedCount()).isEqualTo(3);
+        assertThat(done.getTotalCount()).isEqualTo(3);
+        assertThat(done.getCompleted()).isTrue();
+        assertThat(done.getCompletionBadgeName()).isEqualTo("留灯同袍");
+        assertThat(done.getEpilogueTitle()).isEqualTo("灯下三碗面");
+        assertThat(grantedNotify.getInfo().getSeriesProgress(1).getOwnedCount()).isZero();
+        assertThat(grantedNotify.getInfo().getSeriesProgress(2).getOwnedCount()).isZero();
     }
 }

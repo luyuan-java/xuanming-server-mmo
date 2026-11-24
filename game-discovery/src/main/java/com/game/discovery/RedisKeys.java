@@ -290,6 +290,11 @@ public final class RedisKeys {
         return worldZonePrefix(zoneId) + "directory:" + Integer.toUnsignedString(configId);
     }
 
+    /** 本 zone 已开放大世界地图热度与灵潮总览读模型（protobuf STRING，短 TTL）；与该 zone 领导锁/计划同槽。 */
+    public String worldMapOverview(int zoneId) {
+        return worldZonePrefix(zoneId) + "overview";
+    }
+
     /** 玩家主动切线冷却（STRING，短 TTL）；全局 player 维度，跨节点/zone不重置。 */
     public String channelSwitchCooldown(long playerId) {
         return prefix + "player:" + Long.toUnsignedString(playerId) + ":channel-switch-cooldown";

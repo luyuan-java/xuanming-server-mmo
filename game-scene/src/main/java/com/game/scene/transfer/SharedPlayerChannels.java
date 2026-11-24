@@ -3,6 +3,7 @@ package com.game.scene.transfer;
 import com.game.discovery.world.ChannelSwitchCooldown;
 import com.game.discovery.world.WorldChannelDirectoryStore;
 import com.game.proto.SceneChannelDirectory;
+import com.game.proto.WorldMapOverview;
 import com.game.scene.world.PlayerChannels;
 import java.time.Duration;
 import java.util.Objects;
@@ -42,27 +43,57 @@ public final class SharedPlayerChannels implements PlayerChannels {
 
     @Override
     public void directory(int configId, Consumer<SceneChannelDirectory> onDone) {
-        CompletableFuture<SceneChannelDirectory> result = new CompletableFuture<>();
+        sceneView(configId, true, false, view -> onDone.accept(view.directory()));
+    }
+
+    @Override
+    public void sceneView(int configId, boolean withDirectory, boolean withOverview, Consumer<SceneView> onDone) {
+        if (!withDirectory && !withOverview) {
+            post(() -> onDone.accept(new SceneView(null, null)));
+            return;
+        }
+        CompletableFuture<SceneView> result = new CompletableFuture<>();
         result.orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS).whenComplete((value, error) -> {
-            if (error != null) log.debug("读分线目录失败 zone={} config={}: {}", zoneId, configId, error.toString());
-            post(() -> onDone.accept(error == null ? value : null));
+            if (error != null) log.debug("读分线/总览读模型失败 zone={} config={}: {}", zoneId, configId, error.toString());
+            post(() -> onDone.accept(error == null && value != null ? value : new SceneView(null, null)));
         });
         try {
             worker.execute(() -> {
                 if (result.isDone()) return;
-                try {
-                    byte[] bytes = directories.read(zoneId, configId);
-                    SceneChannelDirectory value = bytes == null ? null : SceneChannelDirectory.parseFrom(bytes);
-                    if (value != null && (value.getZoneId() != zoneId || value.getSceneConfigId() != configId)) {
-                        throw new IllegalStateException("分线目录所属区服或地图不符");
-                    }
-                    result.complete(value);
-                } catch (Exception error) {
-                    result.completeExceptionally(error);
-                }
+                SceneChannelDirectory dir = withDirectory ? readDirectory(configId) : null;
+                WorldMapOverview overview = withOverview ? readOverview() : null;
+                result.complete(new SceneView(dir, overview));
             });
         } catch (RuntimeException error) {
             result.completeExceptionally(error);
+        }
+    }
+
+    private SceneChannelDirectory readDirectory(int configId) {
+        try {
+            byte[] bytes = directories.read(zoneId, configId);
+            SceneChannelDirectory value = bytes == null ? null : SceneChannelDirectory.parseFrom(bytes);
+            if (value != null && (value.getZoneId() != zoneId || value.getSceneConfigId() != configId)) {
+                throw new IllegalStateException("分线目录所属区服或地图不符");
+            }
+            return value;
+        } catch (Exception error) {
+            log.debug("读分线目录失败 zone={} config={}: {}", zoneId, configId, error.toString());
+            return null;
+        }
+    }
+
+    private WorldMapOverview readOverview() {
+        try {
+            byte[] bytes = directories.readOverview(zoneId);
+            WorldMapOverview value = bytes == null ? null : WorldMapOverview.parseFrom(bytes);
+            if (value != null && value.getZoneId() != zoneId) {
+                throw new IllegalStateException("世界地图总览所属区服不符");
+            }
+            return value;
+        } catch (Exception error) {
+            log.debug("读世界地图总览失败 zone={}: {}", zoneId, error.toString());
+            return null;
         }
     }
 

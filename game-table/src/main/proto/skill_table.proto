@@ -145,4 +145,6 @@ message SkillTable {
   uint32 action_tags = 55;
   // 是否允许选择倒地目标。仅明确配置的复生印使用。
   uint32 allow_dead_target = 56;
+  // 1 = 禁止被复制技能（如 A41 玄镜映法）复制：用于 Boss 技能、复制技能自身、牺牲/资源转换/限次等特殊技能。
+  reserved 57; // forbid_copy：schema 已声明、本批导表产物里还没有（ContractSync 改写）
 }

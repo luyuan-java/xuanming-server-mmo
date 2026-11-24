@@ -250,17 +250,16 @@ class CreatePlayerHandlerTest {
         assertError(create(CreatePlayerRequest.newBuilder().setGender(-1).build()), unknown);
         assertError(create(CreatePlayerRequest.newBuilder().setClassId(-1).build()), unknown);
         assertError(create(CreatePlayerRequest.newBuilder().setAppearanceId("99_unknown").build()), unknown);
+        assertError(create(CreatePlayerRequest.newBuilder().setAppearanceId("04_mountain_guardian_boy").build()), unknown);
         assertError(create(CreatePlayerRequest.newBuilder().setAppearanceId("06_thunder_caster_boy").build()), unknown);
+        assertError(create(CreatePlayerRequest.newBuilder().setAppearanceId("08_alchemy_prodigy_boy").build()), unknown);
+        assertError(create(CreatePlayerRequest.newBuilder().setAppearanceId("17_ghost_script_calligrapher_boy").build()), unknown);
         verify(store, never()).createPlayer(any());
     }
 
     @Test
-    void 十一个可选外观按完整身份存入并返回() throws Exception {
-        List<String> appearances = List.of(
-                "00_reference_topright_boy", "01_ice_sword_girl", "02_fire_talisman_boy",
-                "03_lotus_healer_girl", "04_mountain_guardian_boy", "05_celestial_musician_girl",
-                "08_alchemy_prodigy_boy", "09_bamboo_archer_girl",
-                "10_crimson_spear_girl", "15_water_dragon_scholar_boy", "17_ghost_script_calligrapher_boy");
+    void 两个初始可选外观按完整身份存入并返回() throws Exception {
+        List<String> appearances = List.of("00_reference_topright_boy", "01_ice_sword_girl");
         for (String appearance : appearances) {
             var response = create(CreatePlayerRequest.newBuilder().setName("新角色").setAppearanceId(appearance).build());
             assertThat(response.hasErrorMessage()).isFalse();
@@ -273,9 +272,10 @@ class CreatePlayerHandlerTest {
     }
 
     @Test
-    void 退役外观拒绝新建_满额时仍可读回参数完全匹配的已建角色() throws Exception {
+    void 退役及非初始外观拒绝新建_满额时仍可读回参数完全匹配的已建角色() throws Exception {
         int unknown = LoginErrorTip.login_error.kLoginUnknownError_VALUE;
-        for (String appearance : List.of("07_moon_shadow_assassin_girl",
+        for (String appearance : List.of("02_fire_talisman_boy", "05_celestial_musician_girl",
+                "07_moon_shadow_assassin_girl",
                 "14_short_hair_snow_summoner_girl", "20_star_formation_master_girl")) {
             when(store.listPlayers(ACCOUNT)).thenReturn(List.of());
             var request = CreatePlayerRequest.newBuilder().setName("OldHero").setGender(2).setAppearanceId(appearance);

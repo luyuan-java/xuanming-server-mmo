@@ -1394,20 +1394,29 @@ public final class SceneWorld {
         return scenes.get(sceneId);
     }
 
-    /** 43：普通请求保持原有零 IO 路径；大世界显式请求目录时异步读取，失败仍推一条 31。 */
+    /** 43：普通请求保持原有零 IO 路径；显式请求目录或世界地图总览时异步读取，失败仍推一条 31。 */
     void requestSceneInfo(ScenePlayer player, boolean withDirectory) {
+        requestSceneInfo(player, withDirectory, false);
+    }
+
+    void requestSceneInfo(ScenePlayer player, boolean withDirectory, boolean withOverview) {
         Scene source = player.scene();
         SceneInfoS2C.Builder info = SceneInfoS2C.newBuilder().addSceneInfo(source.info());
-        if (!withDirectory || !source.isWorldChannel()) {
+        boolean wantDirectory = withDirectory && source.isWorldChannel();
+        boolean wantOverview = withOverview;
+        if (!wantDirectory && !wantOverview) {
             sendTo(player, push(ids.notifySceneInfo(), info.build()));
             return;
         }
         SessionKey session = player.session();
         long epoch = player.ownerEpoch();
-        crossNode.channels().directory(source.configId(), directory -> {
+        crossNode.channels().sceneView(source.configId(), wantDirectory, wantOverview, view -> {
             if (playerById(player.playerId()) != player || playerBySession(session) != player
                     || player.ownerEpoch() != epoch || player.scene() != source) return;
-            if (directory != null) info.setChannelDirectory(directory);
+            if (view != null) {
+                if (view.directory() != null) info.setChannelDirectory(view.directory());
+                if (view.overview() != null) info.setWorldMapOverview(view.overview());
+            }
             sendTo(player, push(ids.notifySceneInfo(), info.build()));
         });
     }
