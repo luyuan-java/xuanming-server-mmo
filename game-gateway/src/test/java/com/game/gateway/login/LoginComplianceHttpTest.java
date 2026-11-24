@@ -2,6 +2,7 @@ package com.game.gateway.login;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -82,6 +83,15 @@ class LoginComplianceHttpTest {
         assertThat(ok.code()).isEqualTo(HttpRealNameResponse.CODE_OK);
         assertThat(ok.tip()).isNull();
         assertThat(ok.antiAddiction()).isNotNull();
+
+        // 未知区号在限流前拒绝，不按任意 zoneId 创建 Redis 区桶键
+        RateLimiter limiter = mock(RateLimiter.class);
+        LoginHttpService limited = new LoginHttpService(login, ZONES, new LoginHttpMetrics(new SimpleMeterRegistry()), limiter);
+        HttpRealNameResponse unknownZone = limited.submitRealName(
+                new HttpRealNameRequest("acc_tok_secret", "张三", "11010519950501001X", 999), "1.2.3.4").join();
+        assertThat(unknownZone.code()).isEqualTo(HttpLoginResponse.CODE_INTERNAL);
+        assertThat(unknownZone.message()).isEqualTo("invalid_zone");
+        verify(limiter, never()).check(anyInt(), any(), any(), any());
 
         // 422 实名信息不合法
         when(login.submitRealName(any())).thenReturn(CompletableFuture.completedFuture(SubmitRealNameResponse.newBuilder()

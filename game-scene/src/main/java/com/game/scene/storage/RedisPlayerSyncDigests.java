@@ -42,22 +42,29 @@ public final class RedisPlayerSyncDigests implements PlayerSyncDigests {
         String key = keys.playerSyncDigest(playerId);
         try {
             RMap<String, String> map = redis.getMap(key, StringCodec.INSTANCE);
-            map.readAllMapAsync().whenComplete((fields, error) -> logic.execute(() -> {
-                if (error != null) {
-                    log.warn("[PlayerLanding] sync digest read failed; UNAVAILABLE pushed player_id={} err={}",
-                            Long.toUnsignedString(playerId), error.getMessage());
-                    onResultOnLogic.accept(SyncDigestParser.unavailable());
-                    return;
+            map.readAllMapAsync().whenComplete((fields, error) -> {
+                try {
+                    logic.execute(() -> {
+                        if (error != null) {
+                            log.warn("[PlayerLanding] sync digest read failed; UNAVAILABLE pushed player_id={} err={}",
+                                    Long.toUnsignedString(playerId), error.getMessage());
+                            onResultOnLogic.accept(SyncDigestParser.unavailable());
+                            return;
+                        }
+                        Optional<SyncDigestS2C> parsed = SyncDigestParser.parse(fields == null ? Map.of() : fields);
+                        if (parsed.isEmpty()) {
+                            log.error("[PlayerLanding] malformed sync digest hash; UNAVAILABLE pushed player_id={} fields={}",
+                                    Long.toUnsignedString(playerId), fields == null ? 0 : fields.size());
+                            onResultOnLogic.accept(SyncDigestParser.unavailable());
+                            return;
+                        }
+                        onResultOnLogic.accept(parsed.get());
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException stopped) {
+                    log.debug("[PlayerLanding] sync digest callback dropped during shutdown player_id={}",
+                            Long.toUnsignedString(playerId));
                 }
-                Optional<SyncDigestS2C> parsed = SyncDigestParser.parse(fields == null ? Map.of() : fields);
-                if (parsed.isEmpty()) {
-                    log.error("[PlayerLanding] malformed sync digest hash; UNAVAILABLE pushed player_id={} fields={}",
-                            Long.toUnsignedString(playerId), fields == null ? 0 : fields.size());
-                    onResultOnLogic.accept(SyncDigestParser.unavailable());
-                    return;
-                }
-                onResultOnLogic.accept(parsed.get());
-            }));
+            });
         } catch (RuntimeException e) {
             log.warn("[PlayerLanding] sync digest read dispatch failed; UNAVAILABLE pushed player_id={} err={}",
                     Long.toUnsignedString(playerId), e.getMessage());

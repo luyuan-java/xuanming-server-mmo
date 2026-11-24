@@ -138,6 +138,7 @@ public final class AccountLogin {
         try {
             boolean isAccessToken = "access_token".equals(request.getAuthType());
             String authType = authenticated.get().authType();
+            String channelAuthType = authenticated.get().channelAuthType();
             String deviceKey = session != null
                     ? LoginDevices.sessionKey(session.getGateInstanceId(), session.getSessionId())
                     : null;
@@ -149,13 +150,13 @@ public final class AccountLogin {
             }
             AccountLifecycle lifecycle = before.orElse(null);
 
-            // TCP 路径先判防沉迷，被拒时不占设备名额、不写会话账本
+            // TCP 路径先判防沉迷（按令牌保留的原始渠道判定自管/平台托管），被拒时不占设备名额、不写会话账本
             AntiAddictionGate.Verdict aaVerdict = AntiAddictionGate.Verdict.DISABLED;
             if (session != null && antiAddiction != null) {
                 String pi = lifecycle == null ? "" : lifecycle.realNamePi();
-                aaVerdict = antiAddiction.evaluate(authType, pi, antiAddiction.now());
+                aaVerdict = antiAddiction.evaluate(channelAuthType, pi, antiAddiction.now());
                 if (aaVerdict.rejectTip() != 0) {
-                    log.info("防沉迷拒绝绑定会话 account={} channel={} tip={}", account, authType, aaVerdict.rejectTip());
+                    log.info("防沉迷拒绝绑定会话 account={} channel={} tip={}", account, channelAuthType, aaVerdict.rejectTip());
                     return Outcome.failedWithAntiAddiction(aaVerdict.rejectTip(), aaVerdict.status());
                 }
             }
@@ -191,7 +192,7 @@ public final class AccountLogin {
                 }
                 throw e;
             }
-            recordChannelIdentityQuietly(account, authType);
+            recordChannelIdentityQuietly(account, channelAuthType);
 
             if (deviceKey != null && antiAddiction != null) {
                 try {
@@ -214,7 +215,7 @@ public final class AccountLogin {
             if (antiAddiction != null) {
                 if (session == null) {
                     AntiAddictionStatus status = antiAddiction.evaluateForHttpLogin(
-                            account, authType, lifecycle == null ? "" : lifecycle.realNamePi());
+                            account, channelAuthType, lifecycle == null ? "" : lifecycle.realNamePi());
                     if (status != null) {
                         response.setAntiAddiction(status);
                     }

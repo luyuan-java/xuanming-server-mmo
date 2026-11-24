@@ -35,9 +35,15 @@ public final class LoginAuthenticator {
     /**
      * 认证通过的结果。
      *
-     * @param authType 生效的认证方式（空串已归一成 {@code password}）
+     * @param authType        本次登录请求生效的认证方式（空串已归一成 {@code password}）
+     * @param channelAuthType 原始登录渠道（{@code access_token} 场景保留签发令牌时的原始渠道如 {@code wechat}/{@code qq}，
+     *                        供防沉迷与渠道身份判定使用；直登场景与 {@code authType} 相同）
      */
-    public record Authenticated(String account, String authType) {
+    public record Authenticated(String account, String authType, String channelAuthType) {
+
+        public Authenticated(String account, String authType) {
+            this(account, authType, authType);
+        }
 
         /** access token 登录不再签新令牌（基线：避免令牌搅动）。 */
         public boolean issuesTokens() {
@@ -114,7 +120,10 @@ public final class LoginAuthenticator {
                 log.warn("access token 校验时令牌存储出错，按认证失败处理 reason={}", e.getClass().getName());
                 return Optional.empty();
             }
-            return data.map(d -> new Authenticated(d.account(), AUTH_TYPE_ACCESS_TOKEN));
+            return data.map(d -> new Authenticated(
+                    d.account(),
+                    AUTH_TYPE_ACCESS_TOKEN,
+                    d.authType() == null || d.authType().isEmpty() ? AUTH_TYPE_ACCESS_TOKEN : d.authType()));
         }
         ExternalAuthProvider provider = external.get(authType);
         if (provider == null) {

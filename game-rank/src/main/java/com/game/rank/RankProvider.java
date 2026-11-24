@@ -39,11 +39,12 @@ public final class RankProvider implements RankAdminService, AutoCloseable {
             admin.execute(() -> {
                 try {
                     result.complete(work.run(caller, budget));
-                } catch (Exception failure) {
+                } catch (Throwable failure) {
                     var b = prototype.toBuilder();
                     b.setField(b.getDescriptorForType().findFieldByName("error_message"),
                             TipInfoMessage.newBuilder().setId(error(failure)).build());
                     result.complete((T) b.build());
+                    if (failure instanceof Error err) throw err;
                 }
             });
         } catch (Exception failure) {

@@ -19,7 +19,7 @@ import org.slf4j.LoggerFactory;
  * （HTTP 失败、坏 JSON、errcode=0 却没有 openid、{@link #PROVIDER_SIDE_ERRCODES}、缺必需的 unionid）抛
  * {@link AuthProviderUnavailableException}，登录回故障码。
  */
-public final class WeChatProvider implements ExternalAuthProvider {
+public final class WeChatProvider implements ExternalAuthProvider, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(WeChatProvider.class);
     static final String DEFAULT_ENDPOINT = "https://api.weixin.qq.com";
@@ -99,5 +99,10 @@ public final class WeChatProvider implements ExternalAuthProvider {
             return Optional.of("wx_" + openid);
         }
         return Optional.of("wx_" + unionid);
+    }
+
+    @Override
+    public void close() {
+        http.close();
     }
 }

@@ -52,7 +52,17 @@ class LoginAuthenticatorTest {
     void access_token认证_账号取令牌里的_忽略请求里的account_不再签令牌() {
         TokenPair pair = tokens.issue("robot_0001", "password", "");
         Authenticated authenticated = dev.authenticate(accessToken(pair.accessToken(), "robot_9999")).orElseThrow();
-        assertThat(authenticated).isEqualTo(new Authenticated("robot_0001", "access_token"));
+        assertThat(authenticated).isEqualTo(new Authenticated("robot_0001", "access_token", "password"));
+        assertThat(authenticated.issuesTokens()).isFalse();
+    }
+
+    @Test
+    void access_token认证保留签发时的平台渠道类型() {
+        TokenPair pair = tokens.issue("wx_user_1", "wechat", "");
+        Authenticated authenticated = dev.authenticate(accessToken(pair.accessToken(), "")).orElseThrow();
+        assertThat(authenticated.account()).isEqualTo("wx_user_1");
+        assertThat(authenticated.authType()).isEqualTo("access_token");
+        assertThat(authenticated.channelAuthType()).isEqualTo("wechat");
         assertThat(authenticated.issuesTokens()).isFalse();
     }
 

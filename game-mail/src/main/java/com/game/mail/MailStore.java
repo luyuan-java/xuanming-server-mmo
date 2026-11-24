@@ -508,13 +508,14 @@ public final class MailStore {
             lock(s, op.player);
             var state = s.one("SELECT current_op_id,claim_version,claim_state FROM mail_state WHERE player_id=? AND mail_id=? FOR UPDATE",
                     r -> new long[] {u64(r, 1), u64(r, 2), r.getLong(3)}, U(op.player), U(op.mail));
-            var lease = s.one("SELECT status,lease_token FROM mail_asset_op WHERE op_id=? FOR UPDATE",
-                    r -> new long[] {r.getLong(1), u64(r, 2)}, U(op.id));
+            var lease = s.one("SELECT status,lease_token,attempts FROM mail_asset_op WHERE op_id=? FOR UPDATE",
+                    r -> new long[] {r.getLong(1), u64(r, 2), r.getLong(3)}, U(op.id));
             if (lease == null || lease[0] != 1 || lease[1] != op.token)
                 return null;
             if (outcome == 0) {
+                long delayMs = Math.min(60_000L, 2_000L << Math.min(5, (int) Math.max(0L, lease[2])));
                 s.update("UPDATE mail_asset_op SET attempts=attempts+1,next_attempt_ms=?,lease_until_ms=0,updated_ms=? WHERE op_id=?",
-                        now + 2000, now, U(op.id));
+                        now + delayMs, now, U(op.id));
                 return null;
             }
             require(state != null && state[0] == op.id && state[1] == op.version && state[2] == 2, CONFLICT);

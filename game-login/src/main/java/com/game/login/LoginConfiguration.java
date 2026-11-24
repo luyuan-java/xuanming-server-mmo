@@ -325,7 +325,7 @@ public class LoginConfiguration {
             return new NppaRedisKeys(redisKeys);
         }
 
-        @Bean
+        @Bean(destroyMethod = "close")
         NppaClient nppaClient(ComplianceProperties compliance) {
             var aa = compliance.getAntiAddiction();
             String secretKey = System.getenv(ComplianceProperties.NPPA_SECRET_KEY_ENV);

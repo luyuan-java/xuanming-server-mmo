@@ -46,10 +46,14 @@ public class ContentGuardApplication {
         return engine;
     }
 
+    @Bean(destroyMethod = "close")
+    HttpClient contentGuardHttpClient() {
+        return HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+    }
+
     @Bean
-    PlatformReviewer platformReviewer(ContentGuardProperties props, ObjectMapper json) {
+    PlatformReviewer platformReviewer(ContentGuardProperties props, ObjectMapper json, HttpClient http) {
         ContentGuardProperties.PlatformProperties p = props.platform();
-        HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
         Clock clock = Clock.systemUTC();
         List<PlatformAdapter> adapters = new ArrayList<>();
         if (!p.wechatAppId().isBlank() && !p.wechatAppSecret().isBlank()) {

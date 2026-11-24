@@ -1570,6 +1570,14 @@ public final class SceneWorld {
         // 同归属代重连接回断线保留 / 离线托管中的实体（免读库，保持在场位置、队形与战斗态）
         ScenePlayer held = playersById.get(playerId);
         if (held != null && held.connectionLostHold() != null && held.ownerEpoch() == epoch) {
+            if (original != null && held.admission() != null && !original.equals(held.admission())) {
+                failEnter(pending, "同一持有代的准入原件冲突");
+                return;
+            }
+            PendingEnter replaced = pendingEnters.remove(key);
+            if (replaced != null && (replaced.playerId() != playerId || replaced.ownerEpoch() != epoch)) {
+                releaseClaim(replaced);
+            }
             resumeConnectionLostHold(held, key);
             return;
         }
@@ -3961,6 +3969,11 @@ public final class SceneWorld {
     }
 
     private void resumeConnectionLostHold(ScenePlayer player, SessionKey newSession) {
+        ScenePlayer sessionOccupant = playersBySession.get(newSession);
+        if (sessionOccupant != null && sessionOccupant != player) {
+            removePlayer(sessionOccupant, true);
+            locations.loggedOut(sessionOccupant);
+        }
         player.resumeConnectionLostHold(newSession);
         player.markActive(frame);
         playersBySession.put(newSession, player);
@@ -3969,7 +3982,7 @@ public final class SceneWorld {
         sendTo(player, push(ids.notifyEnterScene(), EnterSceneS2C.newBuilder().setSceneInfo(scene.info()).build()));
         resendSelfStateFlagsAfterEntry(player);
         sendTo(player, push(ids.notifyActorCreate(), self));
-        Set<ScenePlayer> visible = scene.watchers(player);
+        Set<ScenePlayer> visible = scene.watching(player);
         if (!visible.isEmpty()) {
             sendTo(player, push(ids.notifyActorListCreate(), actorList(visible)));
             catchUpMoves(player, visible);

@@ -271,6 +271,7 @@ public class SceneNode implements SmartLifecycle {
     private volatile AuditPipeline auditPipeline;
     private volatile DefaultEventLoop logicLoop;
     private volatile ThreadPoolExecutor storageExecutor;
+    private volatile ThreadPoolExecutor contentGuardExecutor;
     /** 玩家存储（停服时关存储线程池之前，等在途交出 / 探测的结局处理完）。 */
     private volatile StoragePlayerRepository playerRepository;
     private volatile TradeFreezeRecovery tradeFreezeRecovery;
@@ -448,12 +449,21 @@ public class SceneNode implements SmartLifecycle {
         SkillService skills = new SkillService(skillTables, SceneClock.SYSTEM, metrics, ids);
         PetService petService = new PetService(petTables, currency, itemGuids(guids), SceneClock.SYSTEM,
                 new SplittableRandom(), metrics);
-        PetFeature pets = new PetFeature(petService, registry, textGuard, storageExecutor, logic);
+        ThreadPoolExecutor guardPool = null;
+        if (textGuard != null) {
+            guardPool = new ThreadPoolExecutor(2, 8, 30L, TimeUnit.SECONDS,
+                    new java.util.concurrent.ArrayBlockingQueue<>(64),
+                    Thread.ofPlatform().name("scene-text-guard-", 0).daemon(true).factory(),
+                    new ThreadPoolExecutor.AbortPolicy());
+            guardPool.allowCoreThreadTimeOut(true);
+            contentGuardExecutor = guardPool;
+        }
+        PetFeature pets = new PetFeature(petService, registry, textGuard, guardPool, logic);
         com.game.scene.appearance.AppearanceService appearanceService = appearanceTables == null ? null
                 : new com.game.scene.appearance.AppearanceService(appearanceTables, bags, SceneClock.SYSTEM, registry);
         com.game.scene.rename.PlayerRenameService renameService = renameTables == null ? null
                 : new com.game.scene.rename.PlayerRenameService(renameTables, bags, SceneClock.SYSTEM, registry,
-                        textGuard, storageExecutor, logic);
+                        textGuard, guardPool, logic);
         com.game.scene.afkpass.AfkPassService afkPassService = afkPassTables == null ? null
                 : new com.game.scene.afkpass.AfkPassService(afkPassTables, currency, SceneClock.SYSTEM,
                         new com.game.scene.afkpass.AfkPassService.ProjectionSink() {
@@ -1189,6 +1199,11 @@ public class SceneNode implements SmartLifecycle {
         }
         if (server != null) {
             server.shutdown();
+        }
+        ThreadPoolExecutor guardPool = contentGuardExecutor;
+        if (guardPool != null) {
+            guardPool.shutdownNow();
+            contentGuardExecutor = null;
         }
         if (loop != null) {
             loop.shutdownGracefully(0, 2, TimeUnit.SECONDS).awaitUninterruptibly(5, TimeUnit.SECONDS);

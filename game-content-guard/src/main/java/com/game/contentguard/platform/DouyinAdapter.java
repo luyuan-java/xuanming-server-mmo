@@ -72,6 +72,10 @@ public final class DouyinAdapter implements PlatformAdapter {
             String token;
             try {
                 token = accessToken(timeout);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.error("[content_guard/douyin] token fetch interrupted");
+                return ReviewResult.unavailable(PROVIDER_DOUYIN);
             } catch (Exception e) {
                 log.error("[content_guard/douyin] token fetch failed: {}", e.getMessage());
                 return ReviewResult.unavailable(PROVIDER_DOUYIN);

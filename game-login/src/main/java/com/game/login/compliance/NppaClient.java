@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.common.compliance.AntiAddictionRules;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -23,6 +24,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
@@ -33,7 +38,7 @@ import javax.crypto.spec.SecretKeySpec;
  * <p>纯 JDK 21 实现：AES-128-GCM 加密请求体（{@code Base64(nonce12 || ciphertext || tag16)}）、SHA-256 请求头签名。
  * 错误消息绝不回显姓名、身份证号或密钥明文。
  */
-public final class NppaClient {
+public final class NppaClient implements AutoCloseable {
 
     public static final String DEFAULT_CHECK_URL = "https://api.wlc.nppa.gov.cn/idcard/authentication/check";
     public static final String DEFAULT_QUERY_URL = "http://api2.wlc.nppa.gov.cn/idcard/authentication/query";
@@ -104,10 +109,11 @@ public final class NppaClient {
     private final String queryUrl;
     private final String loginoutUrl;
     private final HttpClient http;
+    private final boolean ownsHttp;
     private final Clock clock;
 
     public NppaClient(Config cfg) {
-        this(cfg, HttpClient.newBuilder().connectTimeout(REQUEST_TIMEOUT).build(), Clock.systemUTC());
+        this(cfg, null, Clock.systemUTC());
     }
 
     public NppaClient(Config cfg, HttpClient http, Clock clock) {
@@ -134,8 +140,16 @@ public final class NppaClient {
         this.checkUrl = isBlank(cfg.checkUrl()) ? DEFAULT_CHECK_URL : cfg.checkUrl();
         this.queryUrl = isBlank(cfg.queryUrl()) ? DEFAULT_QUERY_URL : cfg.queryUrl();
         this.loginoutUrl = isBlank(cfg.loginoutUrl()) ? DEFAULT_LOGINOUT_URL : cfg.loginoutUrl();
+        this.ownsHttp = http == null;
         this.http = http == null ? HttpClient.newBuilder().connectTimeout(REQUEST_TIMEOUT).build() : http;
         this.clock = clock == null ? Clock.systemUTC() : clock;
+    }
+
+    @Override
+    public void close() {
+        if (ownsHttp) {
+            http.close();
+        }
     }
 
     /** 适配 {@link Verifier}。 */
@@ -296,21 +310,36 @@ public final class NppaClient {
     }
 
     private JsonNode execute(HttpRequest req) throws NppaException {
+        CompletableFuture<HttpResponse<InputStream>> pending = null;
         try {
-            HttpResponse<byte[]> resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
-            if (resp.statusCode() < 200 || resp.statusCode() > 299) {
-                throw new NppaException(ErrorKind.UNAVAILABLE, "nppa: http status " + resp.statusCode());
+            pending = http.sendAsync(req, HttpResponse.BodyHandlers.ofInputStream());
+            HttpResponse<InputStream> resp = pending.get(REQUEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            try (InputStream in = resp.body()) {
+                if (resp.statusCode() < 200 || resp.statusCode() > 299) {
+                    throw new NppaException(ErrorKind.UNAVAILABLE, "nppa: http status " + resp.statusCode());
+                }
+                byte[] raw = in.readNBytes(MAX_RESPONSE_BYTES + 1);
+                if (raw.length > MAX_RESPONSE_BYTES) {
+                    throw new NppaException(ErrorKind.UNAVAILABLE, "nppa: unreadable or oversized response");
+                }
+                return JSON.readTree(raw);
             }
-            byte[] raw = resp.body();
-            if (raw == null || raw.length > MAX_RESPONSE_BYTES) {
-                throw new NppaException(ErrorKind.UNAVAILABLE, "nppa: unreadable or oversized response");
-            }
-            return JSON.readTree(raw);
         } catch (NppaException e) {
             throw e;
         } catch (InterruptedException e) {
+            if (pending != null) {
+                pending.cancel(true);
+            }
             Thread.currentThread().interrupt();
             throw new NppaException(ErrorKind.UNAVAILABLE, "nppa: interrupted", e);
+        } catch (TimeoutException e) {
+            if (pending != null) {
+                pending.cancel(true);
+            }
+            throw new NppaException(ErrorKind.UNAVAILABLE, "nppa: timeout", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            throw new NppaException(ErrorKind.UNAVAILABLE, "nppa: io error " + cause.getClass().getSimpleName(), cause);
         } catch (IOException e) {
             throw new NppaException(ErrorKind.UNAVAILABLE, "nppa: io error " + e.getClass().getSimpleName(), e);
         }

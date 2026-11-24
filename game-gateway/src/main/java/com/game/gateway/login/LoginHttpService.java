@@ -78,28 +78,31 @@ public final class LoginHttpService {
         return login(request, null);
     }
 
+    private enum ZoneCheck {
+        VERIFIED, UNVERIFIED, UNKNOWN
+    }
+
+    private ZoneCheck checkZone(long zoneId, String operation) {
+        if (zoneId <= 0 || zoneId > ZoneIds.MAX) {
+            return ZoneCheck.UNKNOWN;
+        }
+        try {
+            return zones.find((int) zoneId).isPresent() ? ZoneCheck.VERIFIED : ZoneCheck.UNKNOWN;
+        } catch (RuntimeException e) {
+            log.warn("读取区服目录失败，{} 跳过区号核对 zone={}: {}", operation, zoneId, e.toString());
+            return ZoneCheck.UNVERIFIED;
+        }
+    }
+
     /** @param clientIp 客户端 IP（限流用） */
     public CompletableFuture<HttpLoginResponse> login(HttpLoginRequest request, String clientIp) {
-        boolean known;
-        boolean verified = true;
-        if (request.zoneId() <= 0 || request.zoneId() > ZoneIds.MAX) {
-            known = false;
-        } else {
-            try {
-                known = zones.find((int) request.zoneId()).isPresent();
-            } catch (RuntimeException e) {
-                verified = false;
-                // 读不到区服目录时不挡登录（基线 /api/login 根本不查区服表）：登录本身不放人进游戏，进场仍经 assign-gate 的 fail-closed 准入
-                log.warn("读取区服目录失败，HTTP 登录跳过区号核对 zone={}: {}", request.zoneId(), e.toString());
-                known = true;
-            }
-        }
-        if (!known) {
+        ZoneCheck zoneCheck = checkZone(request.zoneId(), "HTTP 登录");
+        if (zoneCheck == ZoneCheck.UNKNOWN) {
             return done(recordLogin(HttpLoginResponse.error(HttpLoginResponse.CODE_INTERNAL, UNKNOWN_ZONE)));
         }
         if (limiter != null) {
             // 区号没核对上（目录读不到）时不判区桶：不按请求里的任意区号建桶键（分波照判）
-            RateLimitDecision decision = verified
+            RateLimitDecision decision = zoneCheck == ZoneCheck.VERIFIED
                     ? limiter.check((int) request.zoneId(), clientIp, identity(request), RateLimiter.Scope.LOGIN)
                     : limiter.checkUnverifiedZone((int) request.zoneId(), clientIp, identity(request),
                             RateLimiter.Scope.LOGIN);
@@ -149,13 +152,17 @@ public final class LoginHttpService {
 
     /** {@code POST /api/real-name}：不记姓名与身份证号，映射 0 / 401 / 422 / 429 / 500。 */
     public CompletableFuture<HttpRealNameResponse> submitRealName(HttpRealNameRequest request, String clientIp) {
-        if (request.zoneId() <= 0 || request.zoneId() > ZoneIds.MAX) {
+        ZoneCheck zoneCheck = checkZone(request.zoneId(), "实名提交");
+        if (zoneCheck == ZoneCheck.UNKNOWN) {
             return done(recordRealName(HttpRealNameResponse.of(HttpLoginResponse.CODE_INTERNAL, "invalid_zone", null, null)));
         }
         if (limiter != null) {
-            RateLimitDecision decision = limiter.check((int) request.zoneId(), clientIp,
-                    request.accessToken() == null || request.accessToken().isBlank() ? null : "token:" + request.accessToken(),
-                    RateLimiter.Scope.REAL_NAME);
+            String identity = request.accessToken() == null || request.accessToken().isBlank()
+                    ? null : "token:" + request.accessToken();
+            RateLimitDecision decision = zoneCheck == ZoneCheck.VERIFIED
+                    ? limiter.check((int) request.zoneId(), clientIp, identity, RateLimiter.Scope.REAL_NAME)
+                    : limiter.checkUnverifiedZone((int) request.zoneId(), clientIp, identity,
+                            RateLimiter.Scope.REAL_NAME);
             if (decision.kind() != RateLimitDecision.Kind.PASS) {
                 String reason = decision.kind() == RateLimitDecision.Kind.DENY ? decision.reason() : "rate_limited";
                 return done(recordRealName(HttpRealNameResponse.of(HttpLoginResponse.CODE_RATE_LIMITED, reason, null, null)));
@@ -180,11 +187,17 @@ public final class LoginHttpService {
         if (invalid != null) {
             return done(recordDeletion(HttpAccountDeletionResponse.error(HttpLoginResponse.CODE_AUTH_REJECTED, invalid)));
         }
+        ZoneCheck zoneCheck = checkZone(request.zoneId(), "账号注销");
+        if (zoneCheck == ZoneCheck.UNKNOWN) {
+            return done(recordDeletion(HttpAccountDeletionResponse.error(HttpLoginResponse.CODE_INTERNAL, UNKNOWN_ZONE)));
+        }
         if (limiter != null) {
             String identity = (request.account() != null && !request.account().isBlank())
                     ? request.account()
                     : (request.authToken() != null && !request.authToken().isBlank() ? "token:" + request.authToken() : null);
-            RateLimitDecision decision = limiter.check((int) request.zoneId(), clientIp, identity, RateLimiter.Scope.LOGIN);
+            RateLimitDecision decision = zoneCheck == ZoneCheck.VERIFIED
+                    ? limiter.check((int) request.zoneId(), clientIp, identity, RateLimiter.Scope.LOGIN)
+                    : limiter.checkUnverifiedZone((int) request.zoneId(), clientIp, identity, RateLimiter.Scope.LOGIN);
             if (decision.kind() != RateLimitDecision.Kind.PASS) {
                 String reason = decision.kind() == RateLimitDecision.Kind.QUEUE ? "QUEUEING" : decision.reason();
                 return done(recordDeletion(HttpAccountDeletionResponse.error(HttpLoginResponse.CODE_RATE_LIMITED, reason)));
@@ -211,9 +224,15 @@ public final class LoginHttpService {
         if (invalid != null) {
             return done(recordDeletion(HttpAccountDeletionResponse.error(HttpLoginResponse.CODE_AUTH_REJECTED, invalid)));
         }
+        ZoneCheck zoneCheck = checkZone(request.zoneId(), "撤销注销");
+        if (zoneCheck == ZoneCheck.UNKNOWN) {
+            return done(recordDeletion(HttpAccountDeletionResponse.error(HttpLoginResponse.CODE_INTERNAL, UNKNOWN_ZONE)));
+        }
         if (limiter != null) {
-            RateLimitDecision decision = limiter.check((int) request.zoneId(), clientIp,
-                    "token:" + request.accessToken(), RateLimiter.Scope.LOGIN);
+            String identity = "token:" + request.accessToken();
+            RateLimitDecision decision = zoneCheck == ZoneCheck.VERIFIED
+                    ? limiter.check((int) request.zoneId(), clientIp, identity, RateLimiter.Scope.LOGIN)
+                    : limiter.checkUnverifiedZone((int) request.zoneId(), clientIp, identity, RateLimiter.Scope.LOGIN);
             if (decision.kind() != RateLimitDecision.Kind.PASS) {
                 String reason = decision.kind() == RateLimitDecision.Kind.QUEUE ? "QUEUEING" : decision.reason();
                 return done(recordDeletion(HttpAccountDeletionResponse.error(HttpLoginResponse.CODE_RATE_LIMITED, reason)));

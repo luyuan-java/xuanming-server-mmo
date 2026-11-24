@@ -38,7 +38,9 @@ import com.game.scene.world.PlayerCall;
 import com.game.scene.world.SceneFeature;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -60,6 +62,8 @@ public final class PetFeature implements SceneFeature {
     private final SceneTextGuard textGuard;
     private final Executor ioExecutor;
     private final Executor logicExecutor;
+    /** 仅场景逻辑线程读写：按玩家去重在途宝宝改名内容审核，防止单玩家并发刷满审核线程池。 */
+    private final Set<Long> renameInFlight = new HashSet<>();
 
     public PetFeature(PetService pets, MessageIdRegistry registry) {
         this(pets, registry, null, null, null);
@@ -166,9 +170,13 @@ public final class PetFeature implements SceneFeature {
             call.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(pre)).build());
             return;
         }
+        long playerId = player.playerId();
+        if (!renameInFlight.add(playerId)) {
+            call.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(PetService.SERVICE_UNAVAILABLE)).build());
+            return;
+        }
         DeferredReply deferred = call.defer();
         SceneWorld world = call.world();
-        long playerId = player.playerId();
         long ownerEpoch = player.ownerEpoch();
         long petId = request.getPetId();
         String name = request.getName();
@@ -182,29 +190,39 @@ public final class PetFeature implements SceneFeature {
                             Long.toUnsignedString(playerId), e.getMessage());
                 }
                 CheckTextResponse finalResp = resp;
-                logicExecutor.execute(() -> {
-                    ScenePlayer current = world.playerById(playerId);
-                    if (current == null || current.ownerEpoch() != ownerEpoch) {
-                        deferred.cancel();
-                        return;
-                    }
-                    if (finalResp == null) {
-                        deferred.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(PetService.SERVICE_UNAVAILABLE)).build());
-                        return;
-                    }
-                    if (finalResp.getVerdict() != TextVerdict.TEXT_VERDICT_PASS) {
-                        deferred.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(PetService.NAME_SENSITIVE)).build());
-                        return;
-                    }
-                    int result = pets.rename(current, petId, name);
-                    RenamePetResponse.Builder response = RenamePetResponse.newBuilder().setErrorMessage(tip(result));
-                    if (result == 0) {
-                        response.setPets(pets.buildList(current));
-                    }
-                    deferred.reply(response.build());
-                });
+                try {
+                    logicExecutor.execute(() -> {
+                        try {
+                            ScenePlayer current = world.playerById(playerId);
+                            if (current == null || current != player || current.ownerEpoch() != ownerEpoch) {
+                                deferred.cancel();
+                                return;
+                            }
+                            if (finalResp == null) {
+                                deferred.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(PetService.SERVICE_UNAVAILABLE)).build());
+                                return;
+                            }
+                            if (finalResp.getVerdict() != TextVerdict.TEXT_VERDICT_PASS) {
+                                deferred.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(PetService.NAME_SENSITIVE)).build());
+                                return;
+                            }
+                            int result = pets.rename(current, petId, name);
+                            RenamePetResponse.Builder response = RenamePetResponse.newBuilder().setErrorMessage(tip(result));
+                            if (result == 0) {
+                                response.setPets(pets.buildList(current));
+                            }
+                            deferred.reply(response.build());
+                        } finally {
+                            renameInFlight.remove(playerId);
+                        }
+                    });
+                } catch (RejectedExecutionException stopped) {
+                    log.debug("Pet rename callback dropped because scene logic loop stopped player={}",
+                            Long.toUnsignedString(playerId));
+                }
             });
         } catch (RejectedExecutionException full) {
+            renameInFlight.remove(playerId);
             log.warn("Pet rename content guard executor full player={}", Long.toUnsignedString(playerId));
             deferred.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(PetService.SERVICE_UNAVAILABLE)).build());
         }

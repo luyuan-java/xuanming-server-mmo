@@ -54,8 +54,9 @@ public final class ChatRoleAuthority implements AutoCloseable {
                         return action.apply(transaction);
                     });
                     result.complete(value);
-                } catch (Exception failure) {
+                } catch (Throwable failure) {
                     result.completeExceptionally(failure);
+                    if (failure instanceof Error err) throw err;
                 } finally {
                     pending.remove(result);
                 }
@@ -80,8 +81,9 @@ public final class ChatRoleAuthority implements AutoCloseable {
                         return action.apply(transaction);
                     });
                     result.complete(value);
-                } catch (Exception failure) {
+                } catch (Throwable failure) {
                     result.completeExceptionally(failure);
+                    if (failure instanceof Error err) throw err;
                 } finally {
                     pending.remove(result);
                 }

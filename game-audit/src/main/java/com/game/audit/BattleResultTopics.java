@@ -76,18 +76,26 @@ public final class BattleResultTopics {
         AuditTopicInitializer.ensureLabeled(admin,List.of(expected),mode==AuditTopicInitializer.Mode.OWN?AuditTopicInitializer.Mode.CREATE_AND_VERIFY:mode,
                 replicationFactor,remaining(deadline),"全球对局结果 topic",GENERATION_ENV);
         int minimum=admin.minimumReplicaCounts(List.of(expected.name()),remaining(deadline)).getOrDefault(expected.name(),0);
-        if(minimum<3)throw new AuditTopicContractException("全球结果日志实际副本不足3，须人工迁移副本，禁止自动降级");
+        if(minimum<replicationFactor)throw new AuditTopicContractException("全球结果日志实际副本不足配置要求(" + minimum + "<" + replicationFactor + ")，须人工迁移副本，禁止自动降级");
         var actual=admin.configs(expected.name(),configs.keySet(),remaining(deadline));
         if(mode==AuditTopicInitializer.Mode.OWN){
-            try{if(Integer.parseInt(actual.getOrDefault("min.insync.replicas","0"))>2)
-                configs.put("min.insync.replicas",actual.get("min.insync.replicas"));}catch(NumberFormatException ignored){/* 主人校正非法值。 */}
+            try{
+                int currentIsr=Integer.parseInt(actual.getOrDefault("min.insync.replicas","0"));
+                if(currentIsr>2&&currentIsr<=minimum)configs.put("min.insync.replicas",actual.get("min.insync.replicas"));
+            }catch(NumberFormatException ignored){/* 主人校正非法值。 */}
             admin.alterConfigs(expected.name(),configs,remaining(deadline));
             actual=admin.configs(expected.name(),configs.keySet(),remaining(deadline));
         }
         int minIsr;try{minIsr=Integer.parseInt(actual.getOrDefault("min.insync.replicas","0"));}
         catch(NumberFormatException invalid){throw new AuditTopicContractException("全球结果日志minISR配置无效");}
-        if(minIsr<2||!"false".equals(actual.get("unclean.leader.election.enable")))
-            throw new AuditTopicContractException("全球结果日志必须minISR至少2且禁止unclean leader election");
+        if(minIsr<2||minIsr>minimum||!"false".equals(actual.get("unclean.leader.election.enable")))
+            throw new AuditTopicContractException("全球结果日志必须minISR满足[2," + minimum + "]且禁止unclean leader election");
+        if(mode==AuditTopicInitializer.Mode.OWN){
+            for(var entry:RETENTION.entrySet()){
+                if(!entry.getValue().equals(actual.get(entry.getKey())))
+                    throw new AuditTopicContractException("全球结果日志保留配置未收敛: " + entry.getKey() + "=" + actual.get(entry.getKey()));
+            }
+        }
     }
     private static Duration remaining(long deadline){return Duration.ofNanos(Math.max(1,deadline-System.nanoTime()));}
 }

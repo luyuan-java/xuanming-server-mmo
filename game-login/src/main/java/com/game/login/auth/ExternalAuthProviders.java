@@ -29,6 +29,15 @@ public final class ExternalAuthProviders implements AutoCloseable {
 
     @Override
     public void close() {
+        for (ExternalAuthProvider provider : providers.values()) {
+            if (provider instanceof AutoCloseable closeable) {
+                try {
+                    closeable.close();
+                } catch (Exception ignored) {
+                    // 停机释放三方 HTTP 客户端，忽略个别关闭异常
+                }
+            }
+        }
         if (satokenRedis != null) {
             satokenRedis.shutdown();
         }

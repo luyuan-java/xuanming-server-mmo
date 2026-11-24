@@ -234,6 +234,21 @@ class LoginComplianceTest {
                 .setAccessToken(afterResolve.getAccessToken()).setName("王五").setIdNumber(VALID_ID).build()).join();
         assertThat(adultOk.hasErrorMessage()).isFalse();
         assertThat(adultOk.getAntiAddiction().getMinor()).isFalse();
+
+        // 8. 平台托管渠道（wechat）HTTP 换得 access_token 后走 TCP 绑定：沿用原渠道判定，不触发自管实名 2042
+        LoginAuthenticator oauthAuth = new LoginAuthenticator(
+                new DevPasswordRule(SECRET, List.of("dev_")),
+                tokens,
+                Map.of("wechat", code -> "wx_good".equals(code) ? java.util.Optional.of("wx_u99") : java.util.Optional.empty()));
+        AccountLogin oauthLogin = new AccountLogin(oauthAuth, store, tokens, devices, new InFlightKeys<>(), gate, true);
+        AccountLogin.Outcome wxHttp = oauthLogin.loginWithoutSession(
+                LoginRequest.newBuilder().setAuthType("wechat").setAuthToken("wx_good").build());
+        assertThat(wxHttp.succeeded()).isTrue();
+        assertThat(wxHttp.response().getAntiAddiction().getRealNameRequired()).isFalse();
+        SessionContext wxTcp = SessionContext.newBuilder().setGateInstanceId("g1").setSessionId(12).setZoneId(1).build();
+        AccountLogin.Outcome wxBound = oauthLogin.loginOnSession(wxTcp,
+                LoginRequest.newBuilder().setAuthType("access_token").setAuthToken(wxHttp.response().getAccessToken()).build());
+        assertThat(wxBound.succeeded()).isTrue();
     }
 
     @Test

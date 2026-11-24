@@ -93,4 +93,22 @@ class RoleCapacityGuardAndCapacityCapTest {
         assertThat(meters.get("game.gateway.zone.role.count").tag("zone", "1").gauge().value()).isEqualTo(100.0);
         assertThat(meters.get("game.gateway.zone.role.capacity").tag("zone", "1").gauge().value()).isEqualTo(100.0);
     }
+
+    @Test
+    void 角色上限守卫_关停写库异常不抛出不中断后续区检查() {
+        GatewayStore store = mock(GatewayStore.class);
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        ZoneRow z1 = new ZoneRow(1, "一区", 0, 45_000, "", null, true, 1, false, 100, 0, 0);
+        ZoneRow z2 = new ZoneRow(2, "二区", 0, 45_000, "", null, false, 2, false, 100, 0, 0);
+        when(store.closeCreateRoleIfCapacityReached(1, 100)).thenThrow(new IllegalStateException("mysql transient"));
+        when(store.closeCreateRoleIfCapacityReached(2, 100)).thenReturn(true);
+        RoleCapacityGuard guard = new RoleCapacityGuard(() -> List.of(z1, z2), zoneId -> 100L, store, meters);
+
+        guard.tick();
+
+        verify(store).closeCreateRoleIfCapacityReached(1, 100);
+        verify(store).closeCreateRoleIfCapacityReached(2, 100);
+        assertThat(meters.get("game.gateway.role.capacity.check").tag("outcome", "error").counter().count()).isEqualTo(1.0);
+        assertThat(meters.get("game.gateway.role.capacity.check").tag("outcome", "closed").counter().count()).isEqualTo(1.0);
+    }
 }

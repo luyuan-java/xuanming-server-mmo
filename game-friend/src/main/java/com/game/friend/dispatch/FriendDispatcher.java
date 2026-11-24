@@ -167,7 +167,15 @@ public final class FriendDispatcher {
         Deadline deadline = Deadline.within(budgetMillis, caller);
         CompletableFuture<ClientReply> reply = new CompletableFuture<>();
         try {
-            executor.execute(() -> reply.complete(handle(route, session, call, deadline, sample)));
+            executor.execute(() -> {
+                try {
+                    reply.complete(handle(route, session, call, deadline, sample));
+                } catch (Throwable failure) {
+                    log.error("[friend] {} 处理出现严重错误 {}", route.method(), describe(call.getSession()), failure);
+                    reply.complete(route.failure(CommonErrorTip.common_error.kServiceUnavailable_VALUE, "storage unavailable"));
+                    if (failure instanceof Error err) throw err;
+                }
+            });
         } catch (RejectedExecutionException e) {
             log.warn("[friend] 工作队列已满，拒绝请求 method={} {}", route.method(), describe(call.getSession()));
             metrics.requestCompleted(sample, route.method(), RequestResult.OVERLOADED);

@@ -47,11 +47,12 @@ public final class MailProvider implements MailAdminService, AutoCloseable {
             admin.execute(() -> {
                 try {
                     response.complete(work.run(caller, budget));
-                } catch (Exception failure) {
+                } catch (Throwable failure) {
                     var b = prototype.toBuilder();
                     var f = b.getDescriptorForType().findFieldByName("error_message");
                     b.setField(f, TipInfoMessage.newBuilder().setId(error(failure)).build());
                     response.complete((T) b.build());
+                    if (failure instanceof Error err) throw err;
                 }
             });
         } catch (Exception failure) {

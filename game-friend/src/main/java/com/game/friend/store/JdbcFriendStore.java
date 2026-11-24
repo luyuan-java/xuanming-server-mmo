@@ -597,7 +597,7 @@ public final class JdbcFriendStore implements FriendStore {
                     }
                 }
             } finally {
-                if(!c.getAutoCommit())c.rollback();
+                if (!c.getAutoCommit()) rollbackQuietly(c);
                 restore(c, autoCommit, isolation);
             }
         } catch (SQLException e) {

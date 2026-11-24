@@ -24,7 +24,7 @@ import java.util.concurrent.TimeoutException;
  * 三方 OAuth 校验共用的 HTTP GET（JDK HttpClient，整个交换 5 s 总时限同基线、响应体上限 64 KiB）。线程安全。
  * 所有失败都抛 {@link AuthProviderUnavailableException}：到这一步还没轮到解析玩家凭证（同 mmorpg {@code oauthGet}）。
  */
-final class OAuthHttp {
+final class OAuthHttp implements AutoCloseable {
 
     static final Duration TIMEOUT = Duration.ofSeconds(5);
     static final int MAX_BODY_BYTES = 64 * 1024;
@@ -40,6 +40,11 @@ final class OAuthHttp {
     OAuthHttp(Duration timeout) {
         this.timeout = timeout;
         this.client = HttpClient.newBuilder().connectTimeout(timeout).build();
+    }
+
+    @Override
+    public void close() {
+        client.close();
     }
 
     /**

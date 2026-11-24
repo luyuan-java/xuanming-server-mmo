@@ -45,12 +45,20 @@ public final class RankRewardWorker implements SmartLifecycle, AutoCloseable {
             return;
         try {
             for (long id : store.due(Deadline.after(2000), System.currentTimeMillis())) {
-                if (!running.get())
+                if (!running.get() || Thread.currentThread().isInterrupted())
                     break;
-                process(id);
+                try {
+                    process(id);
+                } catch (Exception failure) {
+                    if (failure instanceof InterruptedException)
+                        Thread.currentThread().interrupt();
+                    LOG.warn("榜奖单条投信失败，下轮保留原奖励号恢复，rewardId={}，类型={}", id, failure.getClass().getSimpleName());
+                }
             }
         } catch (Exception failure) {
-            LOG.warn("榜奖投信失败，下轮按原奖励号恢复，类型={}", failure.getClass().getSimpleName());
+            if (failure instanceof InterruptedException)
+                Thread.currentThread().interrupt();
+            LOG.warn("榜奖扫描失败，下轮按原奖励号恢复，类型={}", failure.getClass().getSimpleName());
         }
     }
     void process(long id) throws Exception {
@@ -73,6 +81,10 @@ public final class RankRewardWorker implements SmartLifecycle, AutoCloseable {
             var response = mail.sendPersonalMail(signed).get(2200, TimeUnit.MILLISECONDS);
             if (response.getErrorMessage().getId() == 0)
                 mailId = response.getMailId();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            LOG.warn("榜奖发信被中断，保留原幂等键下次重投 rewardId={}", id);
+            return;
         } catch (Exception unknown) {
             LOG.warn("榜奖发信未确认，将保持原幂等键重投，类型={}", unknown.getClass().getSimpleName());
         }

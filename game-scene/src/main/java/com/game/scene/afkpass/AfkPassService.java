@@ -234,7 +234,12 @@ public final class AfkPassService {
                         Long.toUnsignedString(playerId), set ? "set" : "del", seq, reason, err);
                 return;
             }
-            logicExecutor.execute(() -> player.confirmAfkPassProjection(seq));
+            try {
+                logicExecutor.execute(() -> player.confirmAfkPassProjection(seq));
+            } catch (java.util.concurrent.RejectedExecutionException stopped) {
+                log.debug("[AfkPass] projection confirmation dropped during shutdown player_id={} seq={}",
+                        Long.toUnsignedString(playerId), seq);
+            }
         });
     }
 

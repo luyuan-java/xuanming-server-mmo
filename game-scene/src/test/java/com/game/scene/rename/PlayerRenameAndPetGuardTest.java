@@ -218,6 +218,29 @@ class PlayerRenameAndPetGuardTest {
         RenamePetResponse ok = sendRenamePet(renamePetId, petId, "小青龙");
         assertThat(ok.getErrorMessage().getId()).isZero();
         assertThat(player.pets().find(petId).name()).isEqualTo("小青龙");
+
+        // 4. 在途去重：同玩家并发重发宝宝改名立刻回 1003，不把第二笔塞进审核池
+        java.util.ArrayDeque<Runnable> queued = new java.util.ArrayDeque<>();
+        PetFeature asyncPetFeature = new PetFeature(petService, Contracts.REGISTRY,
+                (scene, pid, text) -> CheckTextResponse.newBuilder().setVerdict(TextVerdict.TEXT_VERDICT_PASS).build(),
+                queued::add, Runnable::run);
+        ClientRequestHandler asyncHandler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS,
+                RunMode.DEV, List.of(asyncPetFeature));
+        sink.clear();
+        asyncHandler.onClientForward(LINK, ClientForward.newBuilder()
+                .setSessionId(SESSION).setPlayerId(PLAYER).setMessageId(renamePetId).setRequestId(++reqSeq)
+                .setBody(RenamePetRequest.newBuilder().setPetId(petId).setName("白泽一号").build().toByteString()).build());
+        long secondReq = ++reqSeq;
+        asyncHandler.onClientForward(LINK, ClientForward.newBuilder()
+                .setSessionId(SESSION).setPlayerId(PLAYER).setMessageId(renamePetId).setRequestId(secondReq)
+                .setBody(RenamePetRequest.newBuilder().setPetId(petId).setName("白泽二号").build().toByteString()).build());
+        assertThat(queued).hasSize(1);
+        MessageContent secondReply = sink.to(LINK, SESSION).stream()
+                .filter(m -> m.getMessageId() == renamePetId && m.getId() == secondReq).findFirst().orElseThrow();
+        assertThat(RenamePetResponse.parseFrom(secondReply.getSerializedMessage()).getErrorMessage().getId())
+                .isEqualTo(CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+        queued.removeFirst().run();
+        assertThat(player.pets().find(petId).name()).isEqualTo("白泽一号");
     }
 
     private RenamePlayerResponse sendRename(int msgId, String name) throws Exception {

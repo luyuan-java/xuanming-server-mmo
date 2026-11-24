@@ -59,17 +59,18 @@ public final class ClockCheck {
     }
 
     private static long measure(String host, String port) throws Exception {
-        HttpClient client = HttpClient.newBuilder().sslContext(clusterContext()).connectTimeout(TIMEOUT).build();
         String authority = host.contains(":") ? "[" + host + "]:" + port : host + ":" + port;
         HttpRequest request = HttpRequest.newBuilder(URI.create("https://" + authority + "/version"))
                 .timeout(TIMEOUT).GET().build();
-        long sent = System.currentTimeMillis();
-        HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
-        long received = System.currentTimeMillis();
-        String date = response.headers().firstValue("date")
-                .orElseThrow(() -> new IllegalStateException("no Date header"));
-        long dateSeconds = ZonedDateTime.parse(date, DateTimeFormatter.RFC_1123_DATE_TIME).toEpochSecond();
-        return offsetMillis(sent, received, dateSeconds);
+        try (HttpClient client = HttpClient.newBuilder().sslContext(clusterContext()).connectTimeout(TIMEOUT).build()) {
+            long sent = System.currentTimeMillis();
+            HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
+            long received = System.currentTimeMillis();
+            String date = response.headers().firstValue("date")
+                    .orElseThrow(() -> new IllegalStateException("no Date header"));
+            long dateSeconds = ZonedDateTime.parse(date, DateTimeFormatter.RFC_1123_DATE_TIME).toEpochSecond();
+            return offsetMillis(sent, received, dateSeconds);
+        }
     }
 
     /** 本机时钟减参照时钟（毫秒）：本机取请求往返中点，参照取 Date 所在秒的中点。 */

@@ -20,7 +20,7 @@ import org.slf4j.LoggerFactory;
  * HTTP 失败、坏 JSON、error=0 却没有 openid、缺必需的 unionid 抛 {@link AuthProviderUnavailableException}，登录回故障码。
  * QQ 的 error 码没有可靠的「哪些是应用侧故障」清单，拿不准的一律按凭证无效。
  */
-public final class QqProvider implements ExternalAuthProvider {
+public final class QqProvider implements ExternalAuthProvider, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(QqProvider.class);
     static final String DEFAULT_ENDPOINT = "https://graph.qq.com";
@@ -95,5 +95,10 @@ public final class QqProvider implements ExternalAuthProvider {
             return Optional.of("qq_" + openid);
         }
         return Optional.of("qq_" + unionid);
+    }
+
+    @Override
+    public void close() {
+        http.close();
     }
 }

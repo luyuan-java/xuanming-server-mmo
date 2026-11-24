@@ -37,6 +37,7 @@ public final class CreationLedger {
                 ||old!=null&&!old.operation().equals(r.getPlacementOperationId()))throw new IllegalArgumentException("创建操作或执行实例不符");
         // 和建房同一逻辑线程：旧恢复任务只能对缺席房间立墓碑，不能误杀已成功的原操作。
         if(r.getReason().equals("global_match_abort_if_absent")&&exists)return false;
+        entries.entrySet().removeIf(e->e.getValue().aborted()&&e.getValue().expiry()<now&&e.getKey()!=r.getBattleId());
         entries.put(r.getBattleId(),new Entry(r.getPlacementOperationId(),old==null?new byte[0]:old.canonical(),
                 Math.max(now+360_000,old==null?0:old.expiry()),true));
         return true;

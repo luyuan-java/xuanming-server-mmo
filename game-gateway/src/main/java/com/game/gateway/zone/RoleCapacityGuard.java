@@ -85,7 +85,15 @@ public final class RoleCapacityGuard {
             }
             registerCountGauge(zoneId, count);
             if (count >= cap) {
-                boolean closed = store.closeCreateRoleIfCapacityReached(zoneId, cap);
+                boolean closed;
+                try {
+                    closed = store.closeCreateRoleIfCapacityReached(zoneId, cap);
+                } catch (RuntimeException e) {
+                    checkError.increment();
+                    log.warn("角色上限守卫关停创角写库失败（下一拍重试） zone={} role_count={} role_capacity={}: {}",
+                            Integer.toUnsignedLong(zoneId), count, cap, e.toString());
+                    continue;
+                }
                 if (closed) {
                     checkClosed.increment();
                     log.warn("区服注册角色数达到软上限，自动暂停创建新角色 zone={} role_count={} role_capacity={}",

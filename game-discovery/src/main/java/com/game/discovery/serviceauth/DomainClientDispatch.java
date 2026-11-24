@@ -6,6 +6,7 @@ import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.contract.MessageIdRegistry;
 import com.google.protobuf.Message;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.function.ToIntFunction;
@@ -47,12 +48,16 @@ public final class DomainClientDispatch implements AutoCloseable {
         methods.forEach(method -> registry.requireId(service, method));
     }
     public CompletableFuture<ClientReply> dispatch(ClientCall call) {
+        return dispatch(call, Optional.empty());
+    }
+
+    public CompletableFuture<ClientReply> dispatch(ClientCall call, Optional<Deadline> caller) {
         var contract = registry.byId(call.getMessageId()).orElse(null);
         if (contract == null || !contract.serviceName().equals(service) || !methods.contains(contract.methodName())
                 || call.getSession().getPlayerId() == 0)
             return CompletableFuture.completedFuture(
                     ClientReply.newBuilder().setTipId(error.applyAsInt(new IllegalArgumentException())).build());
-        Deadline budget = Deadline.after(3500);
+        Deadline budget = Deadline.within(3500, caller);
         var result = new CompletableFuture<ClientReply>();
         Runnable run = () -> {
             Message response;
@@ -61,17 +66,21 @@ public final class DomainClientDispatch implements AutoCloseable {
                     throw new TimeoutException();
                 var request = contract.requestPrototype().getParserForType().parseFrom(call.getBody());
                 response = handler.apply(contract.methodName(), call.getSession(), request, budget);
-            } catch (Exception failure) {
+            } catch (Throwable failure) {
                 var builder = contract.responsePrototype().toBuilder();
                 var field = builder.getDescriptorForType().findFieldByName("error_message");
                 if (field == null) {
                     result.complete(ClientReply.newBuilder().setTipId(error.applyAsInt(failure)).build());
+                    if (failure instanceof Error err) throw err;
                     return;
                 }
                 var tip = builder.newBuilderForField(field);
                 tip.setField(tip.getDescriptorForType().findFieldByName("id"), error.applyAsInt(failure));
                 builder.setField(field, tip.build());
                 response = builder.build();
+                result.complete(ClientReply.newBuilder().setBody(response.toByteString()).build());
+                if (failure instanceof Error err) throw err;
+                return;
             }
             result.complete(ClientReply.newBuilder().setBody(response.toByteString()).build());
         };

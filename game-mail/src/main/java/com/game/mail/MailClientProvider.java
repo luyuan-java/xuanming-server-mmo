@@ -11,7 +11,7 @@ public final class MailClientProvider implements ClientMessageService {
         this.dispatcher = dispatcher;
     }
     public CompletableFuture<ClientReply> handle(ClientCall call) {
-        return dispatcher.dispatch(call);
+        return dispatcher.dispatch(call, CallerDeadline.fromRpcContext());
     }
     public CompletableFuture<Ack> sessionClosed(SessionClosed event) {
         return CompletableFuture.completedFuture(Ack.getDefaultInstance());

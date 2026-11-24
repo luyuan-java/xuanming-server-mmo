@@ -114,7 +114,12 @@ public final class PlayerRenameService {
                                 Long.toUnsignedString(playerId), e.getMessage());
                     }
                     CheckTextResponse finalResp = resp;
-                    logicExecutor.execute(() -> onContentChecked(world, playerId, ownerEpoch, normalized, finalResp));
+                    try {
+                        logicExecutor.execute(() -> onContentChecked(world, playerId, ownerEpoch, normalized, finalResp));
+                    } catch (RejectedExecutionException stopped) {
+                        log.debug("Role rename callback dropped because scene logic loop stopped player={}",
+                                Long.toUnsignedString(playerId));
+                    }
                 });
             } catch (RejectedExecutionException full) {
                 player.setRenameInFlight(false);

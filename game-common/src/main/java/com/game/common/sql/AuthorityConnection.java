@@ -29,6 +29,7 @@ public final class AuthorityConnection implements InvocationHandler {
         }
     }
     private final KeyLimits keyLimits;
+    private boolean hasSessionDeadline;
     private long sessionDeadlineUntil;
     private final Connection physical;
     private final WriterAuthority authority;
@@ -208,7 +209,7 @@ public final class AuthorityConnection implements InvocationHandler {
                 if(name.equals("getGeneratedKeys")){
                     if(keys!=null)return keys;
                     if(auto&&!begun){
-                        try(ResultSet original=raw.getGeneratedKeys()){keys=Snapshot.capture(original,new CopyBudget(raw.getQueryTimeout(),physical.getNetworkTimeout(),keyLimits,0),this);return keys;}
+                        try(ResultSet original=raw.getGeneratedKeys()){keys=Snapshot.capture(original,new CopyBudget(raw.getQueryTimeout(),physical.getNetworkTimeout(),keyLimits,false,0),this);return keys;}
                     }
                     ResultSet original=raw.getGeneratedKeys();return wrapRows(original,this,false).view;
                 }
@@ -254,6 +255,7 @@ public final class AuthorityConnection implements InvocationHandler {
                                 if(!actual.next()||actual.getLong(1)!=caps[0]||actual.getLong(2)!=caps[1]||actual.next())throw new SQLException("期限SET没有精确读回");
                             }
                             long cap=caps[0]==0?caps[1]:caps[1]==0?caps[0]:Math.min(caps[0],caps[1]);
+                            hasSessionDeadline=cap!=0;
                             sessionDeadlineUntil=cap==0?0:System.nanoTime()+java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(cap);return result;
                         }catch(Throwable failure){poison();throw unknown(failure);}
                     }
@@ -261,7 +263,7 @@ public final class AuthorityConnection implements InvocationHandler {
                     closePrevious();
                     if(auto&&activeAuto!=null&&activeAuto!=this)throw new SQLException("同physical Connection已有未完成auto operation","HY010");
                     begin();if(auto)activeAuto=this;
-                    CopyBudget budget=new CopyBudget(raw.getQueryTimeout(),physical.getNetworkTimeout(),keyLimits,sessionDeadlineUntil);
+                    CopyBudget budget=new CopyBudget(raw.getQueryTimeout(),physical.getNetworkTimeout(),keyLimits,hasSessionDeadline,sessionDeadlineUntil);
                     operationBudget=budget;captureKeys=kind==AuthoritySql.Kind.WRITE&&(preparedSql!=null?preparedKeys:requestedKeys(args));
                     try{
                         Object outcome=business(method,args);
@@ -491,16 +493,16 @@ public final class AuthorityConnection implements InvocationHandler {
         final long until;final int network,query;
         final KeyLimits limits;
         long bytes;int rows;
-        CopyBudget(int query,int network,KeyLimits limits,long sessionDeadline){
+        CopyBudget(int query,int network,KeyLimits limits,boolean hasSessionDeadline,long sessionDeadline){
             this.network=network;this.query=query;this.limits=limits;
             long millis=limits.millis();
             if(query>0)millis=Math.min(millis,query*1000L);
             if(network>0)millis=Math.min(millis,network);
             long own=System.nanoTime()+java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(millis);
-            until=sessionDeadline==0?own:Math.min(own,sessionDeadline);
+            until=!hasSessionDeadline?own:(own-sessionDeadline<=0?own:sessionDeadline);
         }
         void check(long extra)throws SQLException{
-            if(Thread.currentThread().isInterrupted()||until!=Long.MAX_VALUE&&System.nanoTime()>=until)
+            if(Thread.currentThread().isInterrupted()||System.nanoTime()-until>=0)
                 throw new SQLTimeoutException("generated keys复制用尽原期限","HYT00");
             if(extra<0||bytes>limits.bytes()-extra)throw new SQLDataException("generated keys完整缓存超过配置字节上限，原事务必须回滚","22003");
             bytes+=extra;

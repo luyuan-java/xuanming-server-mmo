@@ -81,6 +81,10 @@ public final class WeChatAdapter implements PlatformAdapter {
             String token;
             try {
                 token = accessToken(timeout);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.error("[content_guard/wechat] token fetch interrupted");
+                return ReviewResult.unavailable(PROVIDER_WECHAT);
             } catch (Exception e) {
                 log.error("[content_guard/wechat] token fetch failed: {}", e.getMessage());
                 return ReviewResult.unavailable(PROVIDER_WECHAT);
