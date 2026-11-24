@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-24 挂机月卡（430–432）、断线保留离线托管、服务器驱动组队跟随、小游戏同端口 WebSocket 与启动时钟核对
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 挂机月卡（`SceneAfkPassClientPlayer` 430–432、报价/叠加/幂等重放/关键存盘提交后同步 Redis 投影与失败自愈、`TX_SHOP_BUY` 审计）、断线保留（25s 普通窗口 + 挂机月卡离线托管/30s 退场前移/15s 宽限/同代无损重连接回）、服务器驱动组队跟随（`TeamFollow` 381 / `NotifyTeamFollowState` 382、折线里程与环路折返回收、4 随从上限与 250ms/15°/15% 同步节流、托管静默跳过、暂离立即回收空队形）、小游戏同端口 TCP/RFC 6455 WebSocket 复用与全链路 `ws_url` 透传、`GateTokens.verify` 补齐 `zone_id` 校验与 `ClockCheck` 启动时钟核对 | C++ `scene`（`afk_pass.cpp`/`connection_lost_hold`/`team_follow_*`）、C++ `gate`/`battle` 同端口 WebSocket、Go `gateway`/`scene_manager`/`match` `ws_url` 透传、`java/server_startup/ClockCheck.java` | `game-common` 新增 `ClockCheck`、`ClientWsUrls`（fail-closed IPv4/URL 拼接）并补齐 `GateTokens.verify` `zone_id` 校验（229 项全绿/1 跳过）；`game-net` 零额外依赖新增 `WebSocketMuxHandler`/`WebSocketBinaryCodec`/`WebSocketObserver`（24 项全绿）；`game-api` 补齐 `GateNodeInfo`/`BattleNodeInfo.client_ws_url` 与 `ZoneRedirect.gate_ws_url`（101 项全绿）；`game-gate`（369 项全绿）、`game-battle`、`game-gateway`（118 项全绿/11 跳过）、`game-scene-manager`（`TravelRouter`）、`game-match`（`GlobalMatchService`）全链路透传 `ws_url` 并接通同端口 WS；`game-player-store` 新增 `player.afk_pass_expires_at`/`afk_pass_last_req_id` 列与 `COALESCE` 围栏写入（214 项全绿/8 跳过）；`game-scene` 新增 `com.game.scene.afkpass.*`、`ConnectionLostHold`、`TeamFollowTrail`/`TeamFollowFormation`/`TeamFollowCoordinator` 并接入 `SceneNode`/`SceneWorld`/`ClientRequestHandler`/`TeamFollowService`（定向 307 项全绿，含 `AfkPassHostingAndTeamFollowTest`、`FreezeGateTest`、`InBattleGateMatrixTest` 全 `SceneFeature` 矩阵、`TeamFollowServiceTest`、`SceneWorldTest`）；`game-robot` 命名空间与切片门禁 35 项全绿（3 跳过）；设计见 `docs/design/afk-follow-ws-and-clockcheck.md` | 已对齐 |
+
 ## 2026-11-24 实名认证、防沉迷、账号注销、渠道身份档案与 `/api/refresh-token` IP 限流
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |

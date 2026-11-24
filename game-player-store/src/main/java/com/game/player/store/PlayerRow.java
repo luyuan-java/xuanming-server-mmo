@@ -17,6 +17,10 @@ public class PlayerRow {
     private int gender;
     private String appearanceId = "";
     private long renamedMs;
+    /** 挂机月卡到期 Unix 秒；null 表示调用方不覆盖该列（如最终快照补偿），0 表示未开通或 GM 清除。 */
+    private Long afkPassExpiresAt;
+    /** 最近一次挂机月卡开通幂等请求号；null 表示不覆盖。 */
+    private Long afkPassLastReqId;
     /** 列是 INT UNSIGNED：按 long 读（rs.getLong），≥ 2^31 的值不会让 JDBC 读 int 越界、整行加载失败。 */
     private long level = 1;
     private int sceneConfigId;
@@ -94,6 +98,30 @@ public class PlayerRow {
 
     public void setRenamedMs(long renamedMs) {
         this.renamedMs = renamedMs;
+    }
+
+    public Long getAfkPassExpiresAt() {
+        return afkPassExpiresAt;
+    }
+
+    public void setAfkPassExpiresAt(Long afkPassExpiresAt) {
+        this.afkPassExpiresAt = afkPassExpiresAt;
+    }
+
+    public long afkPassExpiresAtOrZero() {
+        return afkPassExpiresAt == null ? 0L : afkPassExpiresAt;
+    }
+
+    public Long getAfkPassLastReqId() {
+        return afkPassLastReqId;
+    }
+
+    public void setAfkPassLastReqId(Long afkPassLastReqId) {
+        this.afkPassLastReqId = afkPassLastReqId;
+    }
+
+    public long afkPassLastReqIdOrZero() {
+        return afkPassLastReqId == null ? 0L : afkPassLastReqId;
     }
 
     public long getLevel() {

@@ -281,6 +281,7 @@ class FreezeGateTest {
         expected.put("SceneMovementClientPlayerMoveStart", FreezePolicy.DROP);
         expected.put("SceneMovementClientPlayerMoveSync", FreezePolicy.DROP);
         expected.put("SceneMovementClientPlayerMoveStop", FreezePolicy.DROP);
+        expected.put("SceneMovementClientPlayerTeamFollow", FreezePolicy.REJECT);
         expected.put("SceneSkillClientPlayerListSkills", FreezePolicy.READ_ONLY);
         expected.put("SceneSkillClientPlayerReleaseSkill", FreezePolicy.ALLOW);
         expected.put("SceneCurrencyClientPlayerGetCurrencyList", FreezePolicy.READ_ONLY);
@@ -408,7 +409,7 @@ class FreezeGateTest {
         assertThat(player.toSave()).as("冻结中没有任何入口改动可持久化状态").isEqualTo(handOff.frozen());
         assertThat(audit.items).hasSize(itemAudits);
         assertThat(audit.currencies).hasSize(currencyAudits);
-        assertThat(frozenRejections("request")).as("173 / 94 / 95").isEqualTo(3);
+        assertThat(frozenRejections("request")).as("173 / 94 / 95 / 381").isEqualTo(4);
         assertThat(frozenRejections("move")).isEqualTo(3);
         assertThat(frozenRejections("asset_op")).isEqualTo(1);
         assertThat(meters.get("game.scene.moves").tag("result", "frozen").counter().count()).isEqualTo(3);
@@ -573,6 +574,7 @@ class FreezeGateTest {
         probes.add(new Probe(moveSvc, "MoveStart", MoveStartC2S.getDefaultInstance(), DROPPED));
         probes.add(new Probe(moveSvc, "MoveSync", MoveSyncC2S.getDefaultInstance(), DROPPED));
         probes.add(new Probe(moveSvc, "MoveStop", MoveStopC2S.getDefaultInstance(), DROPPED));
+        probes.add(new Probe(moveSvc, "TeamFollow", com.game.proto.TeamFollowC2S.getDefaultInstance(), DROPPED));
 
         probes.add(new Probe("SceneSceneClientPlayer", "EnterScene", enterSceneRequest(REMOTE_SCENE),
                 CHANGING_SCENE));

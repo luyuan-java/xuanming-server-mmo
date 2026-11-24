@@ -151,6 +151,9 @@ public final class ClientRequestHandler {
         // 冻结闸与战斗闸都放行；应答可能是延迟应答（在队检查读回来才回）
         register(ids.travelToZone(), TravelToZoneRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED,
                 (call, req) -> world.requestTravel(call, req.getTargetZoneId(), req.getSceneConfigId()));
+        // 组队跟随声明（TeamFollowC2S，单向无应答；冻结期拒改意图，战斗中允许挂/摘意图由队形统一处理）
+        register(ids.teamFollow(), com.game.proto.TeamFollowC2S.class, FreezePolicy.REJECT, BattlePolicy.ALLOW,
+                (call, req) -> world.handleTeamFollow(call.player(), req.getFollow()));
     }
 
     @SuppressWarnings("unchecked")

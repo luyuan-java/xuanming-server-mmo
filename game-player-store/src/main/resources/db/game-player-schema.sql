@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS player (
     gender           INT UNSIGNED    NOT NULL,
     appearance_id    VARCHAR(64)     NOT NULL DEFAULT '',
     renamed_ms       BIGINT          NOT NULL DEFAULT 0 COMMENT '上次角色改名成功时刻（Unix 毫秒，用于冷却校验）',
+    afk_pass_expires_at BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '挂机月卡到期时刻（Unix 秒；0 = 未开通/已清除）',
+    afk_pass_last_req_id BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '最近一次挂机月卡开通幂等请求号',
     level            INT UNSIGNED    NOT NULL DEFAULT 1,
     scene_config_id  INT UNSIGNED    NOT NULL DEFAULT 0 COMMENT '上次所在场景配置；0 = 从未进过场景',
     pos_x            DOUBLE          NOT NULL DEFAULT 0,

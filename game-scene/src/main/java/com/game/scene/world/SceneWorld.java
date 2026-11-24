@@ -278,6 +278,26 @@ public final class SceneWorld {
     private final Map<SessionKey, TransferTombstone> transferTombstones = new HashMap<>();
     /** 本机已切线、共享冷却仍在途：按玩家保留，重连重建实体也不能在写入前再手动选线。只由逻辑线程访问。 */
     private record ChannelCooldownWrite(long token, long deadlineNanos) { }
+    /** 服务器驱动组队跟随协调器（单逻辑线程独占）。 */
+    private final com.game.scene.team.TeamFollowCoordinator teamFollowCoordinator = new com.game.scene.team.TeamFollowCoordinator();
+    /** 可选挂机月卡服务（加载/存盘提交/托管心跳同步 Redis 投影）。 */
+    private com.game.scene.afkpass.AfkPassService afkPassService;
+    /** 断线 25s 保留与挂机月卡离线托管开关（生产 SceneNode 默认开启；存量单测默认关闭以免改动旧断线即移出预期）。 */
+    private boolean connectionLostHoldEnabled;
+
+    public com.game.scene.team.TeamFollowCoordinator teamFollowCoordinator() {
+        return teamFollowCoordinator;
+    }
+
+    public SceneWorld withAfkPassService(com.game.scene.afkpass.AfkPassService afkPassService) {
+        this.afkPassService = afkPassService;
+        return this;
+    }
+
+    public SceneWorld withConnectionLostHold(boolean enabled) {
+        this.connectionLostHoldEnabled = enabled;
+        return this;
+    }
     private final Map<Long, ChannelCooldownWrite> channelCooldownWrites = new HashMap<>();
     /**
      * 已交出并释放、实例已移出世界、重定向帧还没定（发出或确定不发）的旅客数（zone-travel-spec §5.3「世界计数」、TF16）：
@@ -1506,6 +1526,12 @@ public final class SceneWorld {
         if(finalizing.containsKey(new FinalKey(playerId,epoch)) || tradeDrains.containsKey(new FinalKey(playerId,epoch))) {
             failEnter(pending,"该归属代已开始最终退出，禁止同代复活");return;
         }
+        // 同归属代重连接回断线保留 / 离线托管中的实体（免读库，保持在场位置、队形与战斗态）
+        ScenePlayer held = playersById.get(playerId);
+        if (held != null && held.connectionLostHold() != null && held.ownerEpoch() == epoch) {
+            resumeConnectionLostHold(held, key);
+            return;
+        }
         PendingEnter replaced = pendingEnters.put(key, pending);
         if (replaced != null) {
             log.warn("同一会话在加载完成前再次进场，只处理最新一次 player={} session={}", playerId, key);
@@ -1655,7 +1681,7 @@ public final class SceneWorld {
                         playerId, previous.ownerEpoch(), epoch);
             }
             removePlayer(previous, false);
-            if (!previous.session().equals(key)) {
+            if (previous.session() != null && !previous.session().equals(key)) {
                 kick(previous, KICKED_BY_ANOTHER, "被新的进场接管（旧实例已失去归属）");
             }
         }
@@ -1665,6 +1691,7 @@ public final class SceneWorld {
                 resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime(), tables.classSkills());
         player.setName(data.name());
         player.setRenamedMs(data.renamedMs());
+        player.restoreAfkPass(data.afkPassExpiresAt(), data.afkPassLastReqId());
         if (pending.admission() != null) player.bindAdmission(pending.admission());
         if (previous != null && previous.ownerEpoch() == epoch) {
             player.continueLocationSeq(previous.locationSeq());
@@ -1704,6 +1731,9 @@ public final class SceneWorld {
         log.info("玩家进场 player={} session={} scene_id={} entity={} epoch={} 接管旧实例={} 交出进场={}", playerId, key,
                 Long.toUnsignedString(scene.sceneId()), player.entity(), player.ownerEpoch(), previous != null, transfer);
         // 进场（登录 / 重连 / 顶号 / 交出进场）之后查组队跟随：异步读，结果回到逻辑线程（team-spec §6.10）
+        if (afkPassService != null) {
+            afkPassService.onPlayerLoaded(player);
+        }
         teamFollow.onEnteredScene(this, player);
         // 进场恢复（scene-battle-spec §7.8）：组队跟随之后（同基线组队 3.5 步在战斗 6 步之前）；同 epoch 接替旧实例时沿用它的冻结
         battle.onEntered(this, player, previous != null && previous.ownerEpoch() == epoch ? previous : null);
@@ -1714,7 +1744,9 @@ public final class SceneWorld {
     /** 两份写回内容相同（不比 owner_epoch：库里的 epoch 已被这次进场夺权改掉）。 */
     private static boolean sameContent(PlayerSave a, PlayerSave b) {
         return a.level() == b.level() && a.sceneConfigId() == b.sceneConfigId() && a.position().equals(b.position())
-                && a.state().equals(b.state());
+                && a.state().equals(b.state())
+                && a.afkPassExpiresAt() == b.afkPassExpiresAt()
+                && a.afkPassLastReqId() == b.afkPassLastReqId();
     }
 
     /**
@@ -2791,6 +2823,9 @@ public final class SceneWorld {
      * 位置变化在帧内的视野刷新里重新判定进出视野（{@link ViewIndex} 的重判节奏：静止立即，移动中每累计 1 m）。
      */
     void applyMove(ScenePlayer player, MoveInput input) {
+        if (teamFollowCoordinator.isDriven(player)) {
+            return;
+        }
         if (!input.isAcceptable()) {
             metrics.move(MoveResult.INVALID);
             log.debug("移动输入含非有限值或坐标超出世界范围，丢弃 player={} input_seq={}", player.playerId(),
@@ -3008,6 +3043,9 @@ public final class SceneWorld {
             long viewBroadcastNanos = 0;
             for (Scene scene : scenes.values()) {
                 integrate(scene);
+            }
+            teamFollowCoordinator.tick(this, MovementRules.STEP_SECONDS, frame);
+            for (Scene scene : scenes.values()) {
                 scene.refreshViews(viewChanges);
                 long emitStart = clock.nanoTime();
                 emitViewChanges();
@@ -3183,6 +3221,10 @@ public final class SceneWorld {
         if (deferLeaveIfFrozen(player, leave.getVoluntary())) {
             return;
         }
+        if (!leave.getVoluntary() && connectionLostHoldEnabled && !switchInFlight(player)) {
+            enterConnectionLostHold(player, key);
+            return;
+        }
         removePlayer(player, true);
         // 主动离开（LeaveGame）= 干净登出：删位置记录，下次进游戏按首登落点；断线留 30 s 重连租约（同基线断线租约）
         writeLeaveLocation(player, leave.getVoluntary());
@@ -3211,6 +3253,10 @@ public final class SceneWorld {
         int removed = 0;
         for (ScenePlayer player : onLink) {
             if (deferLeaveIfFrozen(player, false)) {
+                continue;
+            }
+            if (connectionLostHoldEnabled && !switchInFlight(player)) {
+                enterConnectionLostHold(player, player.session());
                 continue;
             }
             removePlayer(player, true);
@@ -3428,6 +3474,10 @@ public final class SceneWorld {
                     battle.onPersisted(this, player);
                     // 收件箱：落盘之后才确认的快路径（结局此刻已在落库快照里的，确认掉）
                     inbox.onPersisted(this, player);
+                    // 挂机月卡：存档提交后同步 Redis 投影并在失败时自愈
+                    if (afkPassService != null) {
+                        afkPassService.onSaveCommitted(player, snapshot.afkPassExpiresAt());
+                    }
                 }
             }
             case FAILED -> {
@@ -3456,6 +3506,9 @@ public final class SceneWorld {
      * 顶号 / 失去归属用 2017；交出结局无法确认用 3023（scene-handoff-spec §5.5）。
      */
     private void kick(ScenePlayer player, int tipId, String reason) {
+        if (player.session() == null) {
+            return;
+        }
         sink.playerKicked(player.session().linkId(), player.session().sessionId(), player.playerId(),
                 player.ownerEpoch(), tipId);
         log.warn("踢出玩家 player={} session={} epoch={} tip={} 原因={}", player.playerId(), player.session(),
@@ -3479,10 +3532,13 @@ public final class SceneWorld {
             sw.detach();
         }
         player.stopMotion();
+        teamFollowCoordinator.onPlayerRemoved(this, player);
         List<ScenePlayer> watchers = player.scene().remove(player);
         noteOccupancy(player.scene());
         playersById.remove(player.playerId(), player);
-        playersBySession.remove(player.session(), player);
+        if (player.session() != null) {
+            playersBySession.remove(player.session(), player);
+        }
         playersByEntity.remove(player.entity(), player);
         publishPopulation(player.scene().configId());
         metrics.aoiLeft(watchers.size());
@@ -3727,9 +3783,13 @@ public final class SceneWorld {
         return playersByEntity.get(entity);
     }
 
-    /** 给本人下发一条消息（经它所在 gate 链路的会话）。逻辑线程上调用。 */
+    /** 给本人下发一条消息（经它所在 gate 链路的会话）。断线保留/离线托管已摘除会话时静默跳过。 */
     public void sendTo(ScenePlayer player, MessageContent content) {
-        sendToSession(player.session(), content);
+        SessionKey session = player.session();
+        if (session == null) {
+            return;
+        }
+        sendToSession(session, content);
     }
 
     /**
@@ -3767,17 +3827,154 @@ public final class SceneWorld {
         broadcast(recipients, content);
     }
 
-    /** 按链路分组，同一链路上的会话合成一帧下发。 */
+    /** 按链路分组，同一链路上的会话合成一帧下发；离线托管实体无活会话时静默跳过，避免刷屏与无效序列化。 */
     private void broadcast(Collection<ScenePlayer> recipients, MessageContent content) {
         if (recipients.isEmpty()) {
             return;
         }
         Map<Long, List<Integer>> sessionsByLink = new LinkedHashMap<>();
         for (ScenePlayer recipient : recipients) {
-            sessionsByLink.computeIfAbsent(recipient.session().linkId(), k -> new ArrayList<>())
-                    .add(recipient.session().sessionId());
+            SessionKey session = recipient.session();
+            if (session == null) {
+                continue;
+            }
+            sessionsByLink.computeIfAbsent(session.linkId(), k -> new ArrayList<>())
+                    .add(session.sessionId());
         }
         sessionsByLink.forEach((linkId, sessionIds) -> sink.send(linkId, sessionIds, content));
+    }
+
+    // ------------------------------------------------------------------ 挂机月卡 / 断线保留离线托管 / 组队跟随桥接
+
+    /** 关键进度变动（开通/GM 设置挂机月卡）后立即提交一次在线存盘（若无在途写且未停服）。 */
+    public void requestKeyProgressSave(ScenePlayer player) {
+        if (player == null || periodicSaveStopped || player.progressSaveInFlight() || player.frozen()
+                || playersById.get(player.playerId()) != player) {
+            return;
+        }
+        if (!repository.acceptsProgress()) {
+            return;
+        }
+        PlayerSave snapshot = player.toSave();
+        player.setProgressSaveInFlight(true);
+        repository.saveProgress(snapshot, result -> onProgressSaved(player, snapshot, result));
+    }
+
+    /** 客户端发送 TeamFollowC2S：声明跟随（挂意图并刷新组队检查）或暂离（摘意图并立刻停止驱动）。 */
+    void handleTeamFollow(ScenePlayer player, boolean follow) {
+        teamFollowCoordinator.setFollowIntent(this, player, follow);
+        if (follow) {
+            teamFollow.onRefresh(this, player, true);
+        }
+    }
+
+    public long currentFrame() {
+        return frame;
+    }
+
+    public SceneNavigation navigationFor(Scene scene) {
+        return tables.navigation(scene.configId());
+    }
+
+    public void relocateTeamFollower(ScenePlayer follower, Vec3 target) {
+        follower.scene().relocate(follower, target);
+    }
+
+    public void sendTeamFollowState(ScenePlayer follower, com.game.proto.TeamFollowStateS2C state) {
+        sendTo(follower, push(ids.notifyTeamFollowState(), state));
+    }
+
+    public void broadcastTeamFollowMove(ScenePlayer follower) {
+        Set<ScenePlayer> watchers = follower.scene().watchers(follower);
+        List<ScenePlayer> recipients = new ArrayList<>(watchers.size() + 1);
+        recipients.add(follower);
+        recipients.addAll(watchers);
+        broadcast(recipients, push(ids.notifyActorMove(), follower.toActorMove(clock.epochMillis())));
+    }
+
+    private void enterConnectionLostHold(ScenePlayer player, SessionKey lostSession) {
+        long nowSec = Math.floorDiv(clock.epochMillis(), 1000L);
+        if (lostSession != null) {
+            playersBySession.remove(lostSession, player);
+        }
+        haltMotion(player);
+        ConnectionLostHold.State hold = new ConnectionLostHold.State(
+                clock.nanoTime(), lostSession, player.afkPassExpiresAt(), nowSec);
+        player.enterConnectionLostHold(hold);
+        if (hold.afkPass() == ConnectionLostHold.AfkPassState.ACTIVE
+                && nowSec + ConnectionLostHold.HOSTING_EXIT_LEAD_SECONDS < hold.afkPassExpiresAtSec()) {
+            hold.markHostingStarted();
+            // 2026-11-22 收口：即使尚未拿到 TeamId 快照，也先挂跟随意图并触发兜底检查；仅已确认无队跳过
+            if (!player.teamMembershipKnown() || player.teamId() != 0) {
+                teamFollowCoordinator.setFollowIntent(this, player, true);
+                teamFollow.onRefresh(this, player, true);
+            }
+        }
+        log.info("玩家进入断线保留 player={} hosting={} afk_expires_at={}",
+                Long.toUnsignedString(player.playerId()), hold.hostingStarted(), hold.afkPassExpiresAtSec());
+    }
+
+    private void resumeConnectionLostHold(ScenePlayer player, SessionKey newSession) {
+        player.resumeConnectionLostHold(newSession);
+        player.markActive(frame);
+        playersBySession.put(newSession, player);
+        Scene scene = player.scene();
+        ActorCreateS2C self = player.toActorCreate();
+        sendTo(player, push(ids.notifyEnterScene(), EnterSceneS2C.newBuilder().setSceneInfo(scene.info()).build()));
+        resendSelfStateFlagsAfterEntry(player);
+        sendTo(player, push(ids.notifyActorCreate(), self));
+        Set<ScenePlayer> visible = scene.watchers(player);
+        if (!visible.isEmpty()) {
+            sendTo(player, push(ids.notifyActorListCreate(), actorList(visible)));
+            catchUpMoves(player, visible);
+        }
+        sink.enterResult(newSession.linkId(), newSession.sessionId(), player.playerId(), player.ownerEpoch(), 0);
+        locations.entered(player);
+        teamFollowCoordinator.resendStateAfterEntry(this, player);
+        teamFollow.onEnteredScene(this, player);
+        log.info("玩家断线保留无损接回 player={} session={} epoch={}",
+                Long.toUnsignedString(player.playerId()), newSession, player.ownerEpoch());
+    }
+
+    /** 1 秒周期巡检：判定断线保留/离线托管是否到期退出、60s 托管投影刷新与 15s 错峰跟随重查。 */
+    public int sweepConnectionLostHolds() {
+        long nowNanos = clock.nanoTime();
+        long nowSec = Math.floorDiv(clock.epochMillis(), 1000L);
+        int exited = 0;
+        for (ScenePlayer player : new ArrayList<>(playersById.values())) {
+            ConnectionLostHold.State hold = player.connectionLostHold();
+            if (hold == null) {
+                continue;
+            }
+            long heldSec = TimeUnit.NANOSECONDS.toSeconds(Math.max(0L, nowNanos - hold.lostAtNanos()));
+            ConnectionLostHold.HoldVerdict verdict = ConnectionLostHold.judgeHold(
+                    heldSec, hold.afkPass(), hold.afkPassExpiresAtSec(), nowSec, hold.probeInFlight());
+            if (verdict == ConnectionLostHold.HoldVerdict.PROBE) {
+                // 同步用内存中最新权威到期时刻复核（若续费/GM 修改已生效则延长托管）
+                hold.refreshPass(player.afkPassExpiresAt(), nowSec);
+                verdict = ConnectionLostHold.judgeHold(
+                        heldSec, hold.afkPass(), hold.afkPassExpiresAtSec(), nowSec, false);
+            }
+            if (verdict == ConnectionLostHold.HoldVerdict.EXIT) {
+                removePlayer(player, true);
+                locations.disconnected(player);
+                exited++;
+                continue;
+            }
+            if (ConnectionLostHold.isHosting(hold.hostingStarted(), hold.afkPass(), hold.afkPassExpiresAtSec(), nowSec)) {
+                if (afkPassService != null
+                        && nowSec - hold.lastProjectionRefreshSec() >= com.game.scene.afkpass.AfkPassRules.PROJECTION_REFRESH_PERIOD_SECONDS) {
+                    hold.setLastProjectionRefreshSec(nowSec);
+                    afkPassService.refreshProjection(player);
+                }
+                if (!teamFollowCoordinator.isDriven(player)
+                        && teamFollowCoordinator.wantsFollow(player.playerId())
+                        && ConnectionLostHold.isHostedFollowRecheckDue(player.playerId(), nowSec)) {
+                    teamFollow.onRefresh(this, player, true);
+                }
+            }
+        }
+        return exited;
     }
 
     private static ActorListCreateS2C actorList(Collection<ScenePlayer> actors) {

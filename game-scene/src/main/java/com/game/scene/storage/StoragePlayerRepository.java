@@ -899,7 +899,8 @@ public final class StoragePlayerRepository implements PlayerRepository {
         int level = (int) Math.min(row.getLevel(), Integer.MAX_VALUE);
         return new PlayerData(row.getPlayerId(), row.getOwnerEpoch(), row.getClassId(), row.getGender(),
                 row.getAppearanceId(), level, row.getSceneConfigId(),
-                new Vec3(row.getPosX(), row.getPosY(), row.getPosZ()), state, row.getName(), row.getRenamedMs());
+                new Vec3(row.getPosX(), row.getPosY(), row.getPosZ()), state, row.getName(), row.getRenamedMs(),
+                row.afkPassExpiresAtOrZero(), row.afkPassLastReqIdOrZero());
     }
 
     @Override
@@ -954,6 +955,8 @@ public final class StoragePlayerRepository implements PlayerRepository {
         row.setPosY(position.y());
         row.setPosZ(position.z());
         row.setAppearanceId(save.appearanceId());
+        row.setAfkPassExpiresAt(save.afkPassExpiresAt());
+        row.setAfkPassLastReqId(save.afkPassLastReqId());
         return row;
     }
 }

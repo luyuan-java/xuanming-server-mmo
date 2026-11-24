@@ -45,7 +45,8 @@ public final class ScenePlayer {
 
     private final long playerId;
     private final long entity;
-    private final SessionKey session;
+    /** 当前绑定的 gate 会话；进入断线保留 / 离线托管后置 null，重连接回时重新绑定。 */
+    private SessionKey session;
     private final long ownerEpoch;
     /** 本次SQL OPEN已登记的完整原件；跨本节点换图保持，绝不按当前归属重建。 */
     private RoleAdmissionIdentity admission;
@@ -110,6 +111,18 @@ public final class ScenePlayer {
     private long renamedMs;
     /** 角色改名在途标记（逻辑线程内存态，不持久化）。 */
     private boolean renameInFlight;
+    /** 挂机月卡到期时刻（Unix 秒，存档列 player.afk_pass_expires_at；0 = 未开通或已清除）。 */
+    private long afkPassExpiresAt;
+    /** 最近一次挂机月卡开通幂等请求号（存档列 player.afk_pass_last_req_id）。 */
+    private long afkPassLastReqId;
+    /** 本次会话挂机月卡开通幂等键有界集合（最多 64 条，启动由存档 afk_pass_last_req_id 预热）。 */
+    private final java.util.LinkedHashSet<Long> afkPassRequestIds = new java.util.LinkedHashSet<>();
+    /** 最近一次已落盘确认的挂机月卡到期时刻与 Redis 投影确认序号。 */
+    private long committedAfkPassExpiresAt;
+    private long afkPassProjectionSeq;
+    private long afkPassConfirmedSeq;
+    /** 断线保留 / 离线托管运行态（null = 在线正常连接）。 */
+    private ConnectionLostHold.State connectionLostHold;
     /** 获取滑动窗口（获取异常检测；不持久化，随实例清空）。 */
     private final GainWindows gainWindows = new GainWindows();
     /** 库里此刻的样子（最近一次确认落库的快照）：周期存盘的脏比对基准；null = 不确定（上次在线存盘失败），下次无条件写。 */
@@ -333,11 +346,11 @@ public final class ScenePlayer {
         this.position = position;
     }
 
-    void setRotation(Rotation rotation) {
+    public void setRotation(Rotation rotation) {
         this.rotation = rotation;
     }
 
-    void setVelocity(Vec3 velocity) {
+    public void setVelocity(Vec3 velocity) {
         this.velocity = velocity;
     }
 
@@ -345,8 +358,16 @@ public final class ScenePlayer {
      * 只清速度，不置脏位、也不发 133。离场 / 换场景 / 瞬移由销毁与创建传达；停服不发下行。
      * 仍留在场景里的停步必须经 SceneWorld 的 haltMotion，原先在动才当场发 133，并保留 66 脏位语义。
      */
-    void stopMotion() {
+    public void stopMotion() {
         this.velocity = Vec3.ORIGIN;
+    }
+
+    public void markTransformAndVelocityDirty() {
+        syncDirty |= DIRTY_TRANSFORM | DIRTY_VELOCITY;
+    }
+
+    public void markVelocityDirty() {
+        syncDirty |= DIRTY_VELOCITY;
     }
 
     /**
@@ -437,7 +458,7 @@ public final class ScenePlayer {
 
     PlayerSave toSave() {
         return new PlayerSave(playerId, ownerEpoch, level, scene.configId(), position, persistentState(),
-                appearanceIdDirty ? appearanceId : "");
+                appearanceIdDirty ? appearanceId : "", afkPassExpiresAt, afkPassLastReqId);
     }
 
     /** 当前内存状态里需要持久化的玩法数据。新增玩法数据时在这里写、在构造器里恢复。 */
@@ -582,6 +603,85 @@ public final class ScenePlayer {
 
     public void setRenameInFlight(boolean inFlight) {
         this.renameInFlight = inFlight;
+    }
+
+    public long afkPassExpiresAt() {
+        return afkPassExpiresAt;
+    }
+
+    public void setAfkPassExpiresAt(long expiresAtSec) {
+        this.afkPassExpiresAt = expiresAtSec;
+    }
+
+    void restoreAfkPass(long expiresAtSec, long lastReqId) {
+        this.afkPassExpiresAt = expiresAtSec;
+        this.afkPassLastReqId = lastReqId;
+        this.committedAfkPassExpiresAt = expiresAtSec;
+        if (lastReqId != 0) {
+            this.afkPassRequestIds.add(lastReqId);
+        }
+    }
+
+    public boolean hasAfkPassRequest(long reqId) {
+        return reqId != 0 && afkPassRequestIds.contains(reqId);
+    }
+
+    public void recordAfkPassRequest(long reqId) {
+        if (reqId == 0) {
+            return;
+        }
+        this.afkPassLastReqId = reqId;
+        this.afkPassRequestIds.add(reqId);
+        while (this.afkPassRequestIds.size() > 64) {
+            var it = this.afkPassRequestIds.iterator();
+            it.next();
+            it.remove();
+        }
+    }
+
+    public long initAfkPassProjection(long expiresAtSec) {
+        this.committedAfkPassExpiresAt = expiresAtSec;
+        this.afkPassProjectionSeq = 1L;
+        this.afkPassConfirmedSeq = 0L;
+        return 1L;
+    }
+
+    public boolean needsAfkPassProjectionSync(long committedExpiresAtSec) {
+        return committedExpiresAtSec != this.committedAfkPassExpiresAt
+                || this.afkPassConfirmedSeq != this.afkPassProjectionSeq;
+    }
+
+    public long nextAfkPassProjectionSeq(long committedExpiresAtSec) {
+        this.committedAfkPassExpiresAt = committedExpiresAtSec;
+        return ++this.afkPassProjectionSeq;
+    }
+
+    public void confirmAfkPassProjection(long seq) {
+        if (seq > this.afkPassConfirmedSeq && seq <= this.afkPassProjectionSeq) {
+            this.afkPassConfirmedSeq = seq;
+        }
+    }
+
+    public long committedAfkPassExpiresAt() {
+        return committedAfkPassExpiresAt;
+    }
+
+    public boolean hasUnconfirmedAfkPassProjection() {
+        return afkPassConfirmedSeq != afkPassProjectionSeq;
+    }
+
+    public ConnectionLostHold.State connectionLostHold() {
+        return connectionLostHold;
+    }
+
+    void enterConnectionLostHold(ConnectionLostHold.State hold) {
+        this.session = null;
+        this.connectionLostHold = hold;
+    }
+
+    void resumeConnectionLostHold(SessionKey newSession) {
+        this.session = java.util.Objects.requireNonNull(newSession, "newSession");
+        this.connectionLostHold = null;
     }
 
     /**

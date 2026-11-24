@@ -20,7 +20,11 @@ import java.util.Objects;
  * @param advertiseHost 通告给客户端的直连主机（非空）
  * @param advertisePort 通告给客户端的直连端口（1..65535）
  */
-public record BattleIdentity(int nodeId, String instanceId, String advertiseHost, int advertisePort) {
+public record BattleIdentity(int nodeId, String instanceId, String advertiseHost, int advertisePort, String clientWsUrl) {
+
+    public BattleIdentity(int nodeId, String instanceId, String advertiseHost, int advertisePort) {
+        this(nodeId, instanceId, advertiseHost, advertisePort, "");
+    }
 
     public BattleIdentity {
         if (nodeId <= 0) {
@@ -37,5 +41,6 @@ public record BattleIdentity(int nodeId, String instanceId, String advertiseHost
         if (advertisePort < 1 || advertisePort > 65535) {
             throw new IllegalArgumentException("battle 通告端口超出范围: " + advertisePort);
         }
+        clientWsUrl = clientWsUrl == null ? "" : clientWsUrl;
     }
 }

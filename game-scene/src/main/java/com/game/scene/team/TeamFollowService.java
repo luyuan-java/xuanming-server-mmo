@@ -188,12 +188,14 @@ public final class TeamFollowService implements TeamFollow {
                 return;
             }
             if (!membership.inTeam()) {
+                world.teamFollowCoordinator().onTeamChanged(world, player);
                 metrics.teamFollow(TeamFollowResult.NOT_IN_TEAM);
                 finish(player, state, true);
             } else if (state.mode == Mode.REFRESH_ONLY) {
                 metrics.teamFollow(TeamFollowResult.REFRESHED);
                 finish(player, state, true);
             } else if (info.getLeaderId() == player.playerId()) {
+                world.teamFollowCoordinator().onBecameLeader(world, player);
                 metrics.teamFollow(TeamFollowResult.IS_LEADER);
                 finish(player, state, true);
                 if (state.mode == Mode.FOLLOW_AND_FANOUT) {
@@ -202,8 +204,15 @@ public final class TeamFollowService implements TeamFollow {
                         if (memberId != player.playerId() && member != null) check(world, member, Mode.FOLLOW_ONLY, null);
                     }
                 }
-            } else if (!followLeader(world, player, state, info.getLeaderId(), locked)) {
-                finish(player, state, true);
+            } else {
+                world.teamFollowCoordinator().onNotLeader(world, player);
+                int idx = info.getMembersList().indexOf(player.playerId());
+                if (idx >= 0) {
+                    world.teamFollowCoordinator().rememberJoinSeq(player.playerId(), idx + 1);
+                }
+                if (!followLeader(world, player, state, info.getLeaderId(), locked)) {
+                    finish(player, state, true);
+                }
             }
         } catch (RuntimeException error) {
             readFailed(player.playerId(), error);
@@ -265,7 +274,12 @@ public final class TeamFollowService implements TeamFollow {
             return true;
         }
         if (leader.scene() == player.scene()) {
-            if (shouldRegroup(player.position().horizontalDistance(leader.position()), world.mutuallyVisible(player, leader))) {
+            boolean walkAllowed = !shouldRegroup(player.position().horizontalDistance(leader.position()), world.mutuallyVisible(player, leader));
+            if (world.teamFollowCoordinator().tryAttach(world, player, leader, walkAllowed)) {
+                metrics.teamFollow(TeamFollowResult.SAME_SCENE);
+                return false;
+            }
+            if (!walkAllowed) {
                 Rotation facing = leader.rotation() == null ? Rotation.getDefaultInstance() : leader.rotation();
                 TeleportResult result = world.teleportWithinScene(player, leader.position(), facing, TeleportReason.TEAM_REGROUP);
                 metrics.teamFollow(result == TeleportResult.TELEPORTED ? TeamFollowResult.REGROUPED : TeamFollowResult.REGROUP_REJECTED);

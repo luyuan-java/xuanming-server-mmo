@@ -29,4 +29,6 @@ message ZoneRedirect {
   // 票据过期时刻（Unix 秒）= 票据 payload 里的 expire_timestamp → 124 的 token_deadline。
   // 签发时刻 + 300 s（com.game.common.token.GateTokenIssuer#REDIRECT_TICKET_TTL）。
   int64 token_deadline = 7;
+  // 目标 gate 对外通告的小游戏 WebSocket 地址 → 124 的 target_ws_url；空串表示不接小游戏。
+  string gate_ws_url = 8;
 }

@@ -63,4 +63,12 @@ class GateTokensTest {
         assertThat(TOKENS.verify(forZone1Gate1, signature, 1, 1, NOW).ok()).as("本来的那台 gate 认").isTrue();
         assertThat(TOKENS.verify(forZone1Gate1, signature, 1, 2, NOW).failure()).isEqualTo(GateTokens.Failure.WRONG_ZONE);
     }
+
+    @Test
+    void 普通登录令牌targetZone为0时仍强制校验zone_id() {
+        ByteString plainZone1 = payload(1, 0, NOW + 600);
+        ByteString sig = TOKENS.sign(plainZone1);
+        assertThat(TOKENS.verify(plainZone1, sig, 1, 1, NOW).ok()).isTrue();
+        assertThat(TOKENS.verify(plainZone1, sig, 1, 2, NOW).failure()).isEqualTo(GateTokens.Failure.WRONG_ZONE);
+    }
 }

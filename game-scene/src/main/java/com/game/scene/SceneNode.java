@@ -191,6 +191,7 @@ public class SceneNode implements SmartLifecycle {
     private final PetTables petTables;
     private com.game.scene.appearance.AppearanceTables appearanceTables;
     private com.game.scene.rename.PlayerRenameTables renameTables;
+    private com.game.scene.afkpass.AfkPassTables afkPassTables;
     private com.game.scene.player.SceneTextGuard textGuard;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
@@ -215,6 +216,12 @@ public class SceneNode implements SmartLifecycle {
     public synchronized SceneNode withRenameTables(com.game.scene.rename.PlayerRenameTables renameTables) {
         if (running) throw new IllegalStateException("节点已启动");
         this.renameTables = java.util.Objects.requireNonNull(renameTables);
+        return this;
+    }
+
+    public synchronized SceneNode withAfkPassTables(com.game.scene.afkpass.AfkPassTables afkPassTables) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.afkPassTables = java.util.Objects.requireNonNull(afkPassTables);
         return this;
     }
 
@@ -422,6 +429,26 @@ public class SceneNode implements SmartLifecycle {
         com.game.scene.rename.PlayerRenameService renameService = renameTables == null ? null
                 : new com.game.scene.rename.PlayerRenameService(renameTables, bags, SceneClock.SYSTEM, registry,
                         textGuard, storageExecutor, logic);
+        com.game.scene.afkpass.AfkPassService afkPassService = afkPassTables == null ? null
+                : new com.game.scene.afkpass.AfkPassService(afkPassTables, currency, SceneClock.SYSTEM,
+                        new com.game.scene.afkpass.AfkPassService.ProjectionSink() {
+                            @Override
+                            public java.util.concurrent.CompletionStage<Boolean> set(long playerId, long expiresAtSec, Duration ttl) {
+                                String key = redisKeys.prefix() + "player:afk_pass:" + Long.toUnsignedString(playerId);
+                                return redis.getBucket(key, org.redisson.client.codec.StringCodec.INSTANCE)
+                                        .setAsync(Long.toUnsignedString(expiresAtSec), ttl)
+                                        .thenApply(ignored -> true)
+                                        .exceptionally(err -> false);
+                            }
+                            @Override
+                            public java.util.concurrent.CompletionStage<Boolean> delete(long playerId) {
+                                String key = redisKeys.prefix() + "player:afk_pass:" + Long.toUnsignedString(playerId);
+                                return redis.getBucket(key, org.redisson.client.codec.StringCodec.INSTANCE)
+                                        .deleteAsync()
+                                        .thenApply(ignored -> true)
+                                        .exceptionally(err -> false);
+                            }
+                        }, logic);
         AuditPipeline pipeline = auditPipeline;
         PlayerSnapshots snapshots = pipeline == null ? PlayerSnapshots.NONE
                 : new KafkaPlayerSnapshots(pipeline, SceneClock.SYSTEM, zoneId);
@@ -493,6 +520,14 @@ public class SceneNode implements SmartLifecycle {
                 skills.interruptActiveCast(sceneWorld, player, 0);
             }
         });
+        sceneWorld.teamFollowCoordinator().attachSkills(skills);
+        skills.registerActionStateExitHook(SkillService.STATE_TEAM_FOLLOW, (player, reason) -> {
+            if (reason == com.game.common.combatai.StateMutexMatrix.StateExitReason.INTERRUPTED) {
+                sceneWorld.teamFollowCoordinator().detach(sceneWorld, player,
+                        com.game.proto.TeamFollowStopReason.TEAM_FOLLOW_STOP_REASON_LEFT_FOLLOW);
+            }
+        });
+        sceneWorld.withAfkPassService(afkPassService).withConnectionLostHold(true);
         battle.withInboxFailureHandler((player,failure)->sceneWorld.discardUnpersistedBattleEffect(player,player.ownerEpoch(),failure));
         repository.onFinalApplied(sceneWorld::onFinalApplied);
         repository.startFinalRecovery(scheduler);
@@ -533,6 +568,9 @@ public class SceneNode implements SmartLifecycle {
         if (renameService != null) {
             features.add(new com.game.scene.rename.PlayerRenameFeature(renameService));
         }
+        if (afkPassService != null) {
+            features.add(new com.game.scene.afkpass.AfkPassFeature(afkPassService));
+        }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, runMode, features);
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
         // 主世界频道（批次 5.1，scene-channels-spec §4.10.5）：节点不再自己发号建场景（D18），按 scene-manager 写在 Redis 的频道计划建。
@@ -558,6 +596,7 @@ public class SceneNode implements SmartLifecycle {
                 if (appearanceService != null) {
                     appearanceService.tickExpiries(sceneWorld);
                 }
+                sceneWorld.sweepConnectionLostHolds();
                 updateChannelReadiness(sceneWorld);
             } catch (RuntimeException e) {
                 log.error("场景维护（排空推进 / 实例回收）这一秒出错，下一秒照常", e);

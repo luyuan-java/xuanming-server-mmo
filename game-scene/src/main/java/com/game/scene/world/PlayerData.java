@@ -21,7 +21,9 @@ public record PlayerData(
         Vec3 position,
         PlayerState state,
         String name,
-        long renamedMs) {
+        long renamedMs,
+        long afkPassExpiresAt,
+        long afkPassLastReqId) {
 
     public PlayerData {
         appearanceId = appearanceId == null ? "" : appearanceId;
@@ -30,26 +32,34 @@ public record PlayerData(
         name = name == null ? "" : name;
     }
 
+    /** 不带挂机月卡（既有调用方与测试）。 */
+    public PlayerData(long playerId, long ownerEpoch, int classId, int gender, String appearanceId, int level,
+                      int sceneConfigId, Vec3 position, PlayerState state, String name, long renamedMs) {
+        this(playerId, ownerEpoch, classId, gender, appearanceId, level, sceneConfigId, position, state, name,
+                renamedMs, 0L, 0L);
+    }
+
     /** 不带改名时间戳（既有调用方与测试）。 */
     public PlayerData(long playerId, long ownerEpoch, int classId, int gender, String appearanceId, int level,
                       int sceneConfigId, Vec3 position, PlayerState state, String name) {
-        this(playerId, ownerEpoch, classId, gender, appearanceId, level, sceneConfigId, position, state, name, 0L);
+        this(playerId, ownerEpoch, classId, gender, appearanceId, level, sceneConfigId, position, state, name, 0L, 0L, 0L);
     }
 
     /** 不带角色名（测试与旧调用方）。 */
     public PlayerData(long playerId, long ownerEpoch, int classId, int gender, String appearanceId, int level,
                       int sceneConfigId, Vec3 position, PlayerState state) {
-        this(playerId, ownerEpoch, classId, gender, appearanceId, level, sceneConfigId, position, state, "", 0L);
+        this(playerId, ownerEpoch, classId, gender, appearanceId, level, sceneConfigId, position, state, "", 0L, 0L, 0L);
     }
 
     /** 没有玩法数据（新号 / 测试）。 */
     public PlayerData(long playerId, long ownerEpoch, int classId, int gender, String appearanceId, int level,
                       int sceneConfigId, Vec3 position) {
-        this(playerId, ownerEpoch, classId, gender, appearanceId, level, sceneConfigId, position, null, "", 0L);
+        this(playerId, ownerEpoch, classId, gender, appearanceId, level, sceneConfigId, position, null, "", 0L, 0L, 0L);
     }
 
     /** 库里此刻的样子（周期存盘的脏比对基准）。 */
     PlayerSave asPersisted() {
-        return new PlayerSave(playerId, ownerEpoch, level, sceneConfigId, position, state);
+        return new PlayerSave(playerId, ownerEpoch, level, sceneConfigId, position, state, "",
+                afkPassExpiresAt, afkPassLastReqId);
     }
 }

@@ -178,6 +178,8 @@ public final class BattleFixture {
     final com.game.scene.appearance.AppearanceService appearance;
     final com.game.scene.rename.PlayerRenameTables renameTables = com.game.scene.rename.PlayerRenameTables.from(CONFIG);
     final com.game.scene.rename.PlayerRenameService renameService;
+    final com.game.scene.afkpass.AfkPassTables afkPassTables = com.game.scene.afkpass.AfkPassTables.from(CONFIG);
+    final com.game.scene.afkpass.AfkPassService afkPassService;
     public final com.game.scene.equip.EquipmentService equipment;
     public final AttributeService attributes;
     public final PetService pets;
@@ -269,9 +271,13 @@ public final class BattleFixture {
         repo.setRenameClock(clock::epochMillis);
         appearance = new com.game.scene.appearance.AppearanceService(appearanceTables, bags, clock, Contracts.REGISTRY);
         renameService = new com.game.scene.rename.PlayerRenameService(renameTables, bags, clock, Contracts.REGISTRY);
+        afkPassService = new com.game.scene.afkpass.AfkPassService(afkPassTables, currency, clock,
+                com.game.scene.afkpass.AfkPassService.ProjectionSink.NOOP, logic);
+        world.withAfkPassService(afkPassService);
         features = List.of(
                 new com.game.scene.appearance.AppearanceFeature(appearance),
                 new com.game.scene.rename.PlayerRenameFeature(renameService),
+                new com.game.scene.afkpass.AfkPassFeature(afkPassService),
                 new CurrencyFeature(currency),
                 new AttributeFeature(attributes, Contracts.REGISTRY, call -> {
                     petFeature.onOwnerLevelChanged(call);

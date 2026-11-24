@@ -25,6 +25,8 @@ message GateNodeInfo {
   uint64 started_at_ms = 8;
   // 当前节点号租约代次，目录发布围栏拒绝旧持有者的迟到刷新；旧版本为 0。
   uint64 lease_epoch = 9;
+  // 小游戏客户端的 WebSocket 地址（CLIENT_WS_BASE_URL + /<ip>/<port>）；空串表示不接小游戏。
+  string client_ws_url = 10;
 }
 
 message SceneNodeInfo {
@@ -95,4 +97,6 @@ message BattleNodeInfo {
   string table_fingerprint = 10;
   // 物理机房编号；0 不具备全球匹配/探测资格，与逻辑 zone 无关。
   uint32 physical_region = 11;
+  // 小游戏客户端直连 / 地域测速的 WebSocket 地址；空串表示不接小游戏。
+  string client_ws_url = 12;
 }

@@ -41,6 +41,7 @@ public final class ClientPipeline {
     public static void install(ChannelPipeline pipeline, SessionRegistry registry, ClientDispatcher dispatcher) {
         GateMetrics metrics = dispatcher.metrics();
         ClientChannelHandler handler = new ClientChannelHandler(registry, dispatcher);
+        pipeline.addLast("wsMux", new com.game.net.client.WebSocketMuxHandler(metrics.webSocketObserver()));
         pipeline.addLast("clientFrameDecoder", new ClientFrameDecoder(ACCEPTED, ClientFrames.DEFAULT_MAX_LEN,
                 handler::acceptsFrames, (ctx, e) -> {
                     // 非法帧由公网流量决定，采样记录；解码器随后关闭连接。

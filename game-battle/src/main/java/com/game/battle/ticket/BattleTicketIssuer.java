@@ -68,15 +68,18 @@ public final class BattleTicketIssuer {
                     .build()
                     .toByteString();
             ByteString signature = tickets.sign(payload);
-            BattleAssignedS2C assigned = BattleAssignedS2C.newBuilder()
+            BattleAssignedS2C.Builder assignedBuilder = BattleAssignedS2C.newBuilder()
                     .setBattleId(battleId)
                     .setHost(identity.advertiseHost())
                     .setPort(identity.advertisePort())
                     .setTokenPayload(payload)
                     .setTokenSignature(signature)
                     .setExpireAtMs(expireAtMs)
-                    .setRole(role)
-                    .build();
+                    .setRole(role);
+            if (!identity.clientWsUrl().isEmpty()) {
+                assignedBuilder.setWsUrl(identity.clientWsUrl());
+            }
+            BattleAssignedS2C assigned = assignedBuilder.build();
             metrics.ticket(path, true);
             return Optional.of(assigned);
         } catch (RuntimeException e) {

@@ -24,7 +24,7 @@ public interface PlayerMapper {
 
 
     // JDBC现有int API保留uint32位模式；SQL列始终存0..4294967295，回读先降为有符号int范围。
-    String PLAYER_COLUMNS = "player_id,account,owner_revision,trade_listing_id,CASE WHEN zone_id>2147483647 THEN CAST(zone_id AS DECIMAL(20,0))-4294967296 ELSE zone_id END AS zone_id,name,name_key,class_id,gender,appearance_id,renamed_ms,level,"
+    String PLAYER_COLUMNS = "player_id,account,owner_revision,trade_listing_id,CASE WHEN zone_id>2147483647 THEN CAST(zone_id AS DECIMAL(20,0))-4294967296 ELSE zone_id END AS zone_id,name,name_key,class_id,gender,appearance_id,renamed_ms,afk_pass_expires_at,afk_pass_last_req_id,level,"
             + "CASE WHEN scene_config_id>2147483647 THEN CAST(scene_config_id AS DECIMAL(20,0))-4294967296 ELSE scene_config_id END AS scene_config_id,"
             + "pos_x,pos_y,pos_z,owner_epoch,owner_released,owner_lease_until,created_at,updated_at";
 
@@ -145,6 +145,8 @@ public interface PlayerMapper {
                SET level = #{level}, scene_config_id = (CASE WHEN #{sceneConfigId}<0 THEN #{sceneConfigId}+4294967296 ELSE #{sceneConfigId} END),
                    pos_x = #{posX}, pos_y = #{posY}, pos_z = #{posZ},
                    appearance_id = COALESCE(NULLIF(#{appearanceId}, ''), appearance_id),
+                   afk_pass_expires_at = COALESCE(#{afkPassExpiresAt}, afk_pass_expires_at),
+                   afk_pass_last_req_id = COALESCE(#{afkPassLastReqId}, afk_pass_last_req_id),
                    owner_released = 1, updated_at = #{updatedAt}
              WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch} AND owner_released = 0
             """)
@@ -159,6 +161,8 @@ public interface PlayerMapper {
                SET level = #{level}, scene_config_id = (CASE WHEN #{sceneConfigId}<0 THEN #{sceneConfigId}+4294967296 ELSE #{sceneConfigId} END),
                    pos_x = #{posX}, pos_y = #{posY}, pos_z = #{posZ},
                    appearance_id = COALESCE(NULLIF(#{appearanceId}, ''), appearance_id),
+                   afk_pass_expires_at = COALESCE(#{afkPassExpiresAt}, afk_pass_expires_at),
+                   afk_pass_last_req_id = COALESCE(#{afkPassLastReqId}, afk_pass_last_req_id),
                    updated_at = #{updatedAt}
              WHERE player_id = #{playerId} AND owner_epoch = #{ownerEpoch} AND owner_released = 0
             """)
@@ -180,6 +184,8 @@ public interface PlayerMapper {
                SET level = #{row.level}, scene_config_id = (CASE WHEN #{row.sceneConfigId}<0 THEN #{row.sceneConfigId}+4294967296 ELSE #{row.sceneConfigId} END),
                    pos_x = #{row.posX}, pos_y = #{row.posY}, pos_z = #{row.posZ},
                    appearance_id = COALESCE(NULLIF(#{row.appearanceId}, ''), appearance_id),
+                   afk_pass_expires_at = COALESCE(#{row.afkPassExpiresAt}, afk_pass_expires_at),
+                   afk_pass_last_req_id = COALESCE(#{row.afkPassLastReqId}, afk_pass_last_req_id),
                    owner_epoch = owner_epoch + 1, owner_released = #{released}, owner_lease_until = #{leaseUntil},
                    updated_at = #{row.updatedAt}
              WHERE player_id = #{row.playerId} AND owner_epoch = #{row.ownerEpoch} AND owner_released = 0 AND trade_listing_id=0

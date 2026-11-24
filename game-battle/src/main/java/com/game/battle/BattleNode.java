@@ -170,7 +170,12 @@ public final class BattleNode implements SmartLifecycle {
         lease = l;
         int nodeId = l.nodeId();
         // 票据里的直连地址用客户端通告地址；控制面（Dubbo 导出、目录 rpc_host）用 advertiseHost（deploy-ci-spec Q9）
-        BattleIdentity id = new BattleIdentity(nodeId, instanceId, clientAdvertiseHost, props.effectiveAdvertisePort());
+        String wsBase = props.clientWsBaseUrl();
+        if (wsBase == null || wsBase.isEmpty()) {
+            wsBase = System.getenv(com.game.common.net.ClientWsUrls.BASE_URL_ENV);
+        }
+        String clientWsUrl = com.game.common.net.ClientWsUrls.buildAdvertiseUrl(wsBase, clientAdvertiseHost, props.effectiveAdvertisePort());
+        BattleIdentity id = new BattleIdentity(nodeId, instanceId, clientAdvertiseHost, props.effectiveAdvertisePort(), clientWsUrl);
         identity = id;
 
         // 第 5 步：逻辑线程（= 直连面唯一的 I/O EventLoop）、房间服务、回复执行器。状态量回调读 volatile 字段（抓取线程上调用），
@@ -222,7 +227,7 @@ public final class BattleNode implements SmartLifecycle {
         }
 
         // 第 9 步：先开闸、后进目录。首发在本线程上同步做，之后每 5 s 一次
-        BattleNodeInfo info = BattleNodeInfo.newBuilder()
+        BattleNodeInfo.Builder infoBuilder = BattleNodeInfo.newBuilder()
                 .setNodeId(nodeId)
                 .setInstanceId(instanceId)
                 .setRpcHost(advertiseHost)
@@ -230,8 +235,11 @@ public final class BattleNode implements SmartLifecycle {
                 .setClientHost(clientAdvertiseHost)
                 .setClientPort(props.effectiveAdvertisePort())
                 .setTableFingerprint(tables.fingerprint())
-                .setPhysicalRegion(global.physicalRegion())
-                .build();
+                .setPhysicalRegion(global.physicalRegion());
+        if (!clientWsUrl.isEmpty()) {
+            infoBuilder.setClientWsUrl(clientWsUrl);
+        }
+        BattleNodeInfo info = infoBuilder.build();
         BattleDirectoryPublisher p = new BattleDirectoryPublisher(infra.directory(nodeId), info, this::directorySnapshot);
         publisher = p;
         p.publishNow();

@@ -42,7 +42,8 @@ public record GateProperties(
         Duration linkPingInterval,
         Duration linkIdleTimeout,
         Duration linkSupersedeCheckInterval,
-        Duration linkSupersededGrace) {
+        Duration linkSupersededGrace,
+        String clientWsBaseUrl) {
 
     public GateProperties(Integer clientPort, Integer advertisePort, Integer workerThreads, Integer linkThreads,
                           Integer maxPendingRequests, Integer illegalPacketThreshold, Duration handshakeTimeout,
@@ -50,7 +51,18 @@ public record GateProperties(
                           Duration shutdownDrainTimeout, Duration redirectLinger) {
         this(clientPort, advertisePort, workerThreads, linkThreads, maxPendingRequests, illegalPacketThreshold,
                 handshakeTimeout, linkConnectTimeout, linkHelloTimeout, linkMaxQueuedFrames, shutdownDrainTimeout,
-                redirectLinger, null, null, null, null);
+                redirectLinger, null, null, null, null, null);
+    }
+
+    public GateProperties(Integer clientPort, Integer advertisePort, Integer workerThreads, Integer linkThreads,
+                          Integer maxPendingRequests, Integer illegalPacketThreshold, Duration handshakeTimeout,
+                          Duration linkConnectTimeout, Duration linkHelloTimeout, Integer linkMaxQueuedFrames,
+                          Duration shutdownDrainTimeout, Duration redirectLinger,
+                          Duration linkPingInterval, Duration linkIdleTimeout,
+                          Duration linkSupersedeCheckInterval, Duration linkSupersededGrace) {
+        this(clientPort, advertisePort, workerThreads, linkThreads, maxPendingRequests, illegalPacketThreshold,
+                handshakeTimeout, linkConnectTimeout, linkHelloTimeout, linkMaxQueuedFrames, shutdownDrainTimeout,
+                redirectLinger, linkPingInterval, linkIdleTimeout, linkSupersedeCheckInterval, linkSupersededGrace, null);
     }
 
     @org.springframework.boot.context.properties.bind.ConstructorBinding
@@ -71,6 +83,7 @@ public record GateProperties(
         linkIdleTimeout = linkIdleTimeout == null ? Duration.ofSeconds(15) : linkIdleTimeout;
         linkSupersedeCheckInterval = linkSupersedeCheckInterval == null ? Duration.ofSeconds(5) : linkSupersedeCheckInterval;
         linkSupersededGrace = linkSupersededGrace == null ? Duration.ofSeconds(30) : linkSupersededGrace;
+        clientWsBaseUrl = com.game.common.net.ClientWsUrls.parseBaseUrl(clientWsBaseUrl);
         new com.game.gate.link.LinkSettings(linkHelloTimeout, linkMaxQueuedFrames, linkPingInterval, linkIdleTimeout, linkSupersededGrace);
         if (linkSupersedeCheckInterval.toMillis() < 1)
             throw new IllegalArgumentException("game.gate.link-supersede-check-interval 不得短于 1ms");

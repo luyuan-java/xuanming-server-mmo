@@ -98,6 +98,7 @@ public final class GateNode {
     private final GateProperties properties;
     private final int zoneId;
     private final String advertiseHost;
+    private final String clientWsUrl;
     private final Path tableDir;
     private final GateMetrics metrics;
     /** 运行模式：只决定 GM 类客户端指令放不放行（prod 拒绝）。 */
@@ -165,6 +166,11 @@ public final class GateNode {
         this.properties = properties;
         this.zoneId = zoneId;
         this.advertiseHost = advertiseHost;
+        String wsBase = properties.clientWsBaseUrl();
+        if (wsBase == null || wsBase.isEmpty()) {
+            wsBase = System.getenv(com.game.common.net.ClientWsUrls.BASE_URL_ENV);
+        }
+        this.clientWsUrl = com.game.common.net.ClientWsUrls.buildAdvertiseUrl(wsBase, advertiseHost, properties.advertisePort());
         this.tableDir = tableDir;
         this.metrics = metrics;
         this.startedAtMs = System.currentTimeMillis();
@@ -301,7 +307,12 @@ public final class GateNode {
 
     static GateNodeInfo directoryEntry(int zoneId, int nodeId, String instanceId, String clientHost, int clientPort,
                                        int playerCount, long startedAtMs, long leaseEpoch) {
-        return GateNodeInfo.newBuilder()
+        return directoryEntry(zoneId, nodeId, instanceId, clientHost, clientPort, playerCount, startedAtMs, leaseEpoch, "");
+    }
+
+    static GateNodeInfo directoryEntry(int zoneId, int nodeId, String instanceId, String clientHost, int clientPort,
+                                       int playerCount, long startedAtMs, long leaseEpoch, String clientWsUrl) {
+        GateNodeInfo.Builder b = GateNodeInfo.newBuilder()
                 .setZoneId(zoneId)
                 .setNodeId(nodeId)
                 .setInstanceId(instanceId)
@@ -310,8 +321,11 @@ public final class GateNode {
                 .setPlayerCount(playerCount)
                 .setDraining(false)
                 .setStartedAtMs(startedAtMs)
-                .setLeaseEpoch(leaseEpoch)
-                .build();
+                .setLeaseEpoch(leaseEpoch);
+        if (clientWsUrl != null && !clientWsUrl.isEmpty()) {
+            b.setClientWsUrl(clientWsUrl);
+        }
+        return b.build();
     }
 
     /** 每 5s 刷新一次节点目录条目（TTL 15s）。在后台线程上执行，阻塞 Redis 调用不碰 I/O 线程。 */
@@ -319,7 +333,7 @@ public final class GateNode {
         synchronized (directoryIoLock) {
             if (acceptingStopped) return;
             GateNodeInfo info = directoryEntry(zoneId, lease.nodeId(), instanceId, advertiseHost, properties.advertisePort(),
-                    registry.size(), startedAtMs, lease.leaseEpoch());
+                    registry.size(), startedAtMs, lease.leaseEpoch(), clientWsUrl);
             try {
                 gateDirectory.publish(zoneId, lease.nodeId(), info, DIRECTORY_TTL);
             } catch (RuntimeException e) {

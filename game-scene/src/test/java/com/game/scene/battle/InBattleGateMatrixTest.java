@@ -158,6 +158,7 @@ class InBattleGateMatrixTest {
     private static final String PET = "ScenePetClientPlayer";
     private static final String APPEARANCE = "SceneAppearanceClientPlayer";
     private static final String COMMON = "SceneClientPlayerCommon";
+    private static final String AFK_PASS = "SceneAfkPassClientPlayer";
 
     /** 战斗中的预期（除了正数 = 应答里的拒绝码之外的三种）。 */
     private static final int SAME_AS_NOT_IN_BATTLE = -1;
@@ -223,6 +224,10 @@ class InBattleGateMatrixTest {
             new Row(444, APPEARANCE, "StartAppearanceTrial", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(445, APPEARANCE, "CancelAppearanceTrial", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(428, COMMON, "RenamePlayer", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(381, MOVE, "TeamFollow", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(430, AFK_PASS, "GetAfkPass", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(431, AFK_PASS, "BuyAfkPass", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(432, AFK_PASS, "GmSetAfkPass", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(193, MISSION, "GetMissionList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             // ALLOW：只给建议
             new Row(173, ATTRIBUTE, "AutoAllocateAttributePoints", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -547,6 +552,14 @@ class InBattleGateMatrixTest {
         out.put(MOVE + "MoveSync", s -> MoveSyncC2S.newBuilder().setLocation(new Vec3(6, 5, 0).toLocation())
                 .setVelocity(new Vec3(1, 0, 0).toVelocity()).setInputSeq(2).build());
         out.put(MOVE + "MoveStop", s -> MoveStopC2S.newBuilder().setEndLocation(new Vec3(6, 5, 0).toLocation()).setInputSeq(3).build());
+        out.put(MOVE + "TeamFollow", s -> com.game.proto.TeamFollowC2S.newBuilder().setFollow(false).build());
+        out.put(AFK_PASS + "GetAfkPass", s -> com.game.proto.GetAfkPassRequest.getDefaultInstance());
+        out.put(AFK_PASS + "BuyAfkPass", s -> {
+            var rule = s.world().afkPassTables.rule();
+            return com.game.proto.BuyAfkPassRequest.newBuilder().setClientRequestId(901L)
+                    .setExpectedCurrencyType(rule.priceCurrencyType()).setExpectedPrice(rule.price()).build();
+        });
+        out.put(AFK_PASS + "GmSetAfkPass", s -> com.game.proto.GmSetAfkPassRequest.newBuilder().setRemainingSeconds(3600).build());
         out.put(SCENE + "EnterScene", s -> EnterSceneC2SRequest.newBuilder().setSceneInfo(SceneInfoComp.newBuilder()
                 .setSceneId(s.world().scene2.sceneId()).setSceneConfigId(s.world().scene2.configId())).build());
         out.put(SCENE + "SceneInfoC2S", s -> SceneInfoRequest.getDefaultInstance());
@@ -970,6 +983,11 @@ class InBattleGateMatrixTest {
         if (row.service().equals(COMMON) && row.method().equals("RenamePlayer")) {
             var rule = w.renameTables.rule();
             grantProbeItem(w, subject.player(), rule.renameItemId(), rule.renameItemCount());
+        }
+        if (row.service().equals(AFK_PASS) && row.method().equals("BuyAfkPass")) {
+            var rule = w.afkPassTables.rule();
+            assertThat(w.currency.add(subject.player(), rule.priceCurrencyType(), rule.price(), Reason.GM_GRANT).ok()).isTrue();
+            w.sink.clear();
         }
         if (!EQUIPMENT_METHODS.contains(row.method())) return subject;
         ScenePlayer player = subject.player();

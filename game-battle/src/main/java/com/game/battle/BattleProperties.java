@@ -40,7 +40,16 @@ public record BattleProperties(
         FingerprintMode tableFingerprintMode,
         Integer rpcMaxInflight,
         Duration shutdownFlushTimeout,
-        String clientAdvertiseHost) {
+        String clientAdvertiseHost,
+        String clientWsBaseUrl) {
+
+    public BattleProperties(Integer clientPort, String clientBindHost, Integer advertisePort, Integer rpcPort,
+                            Integer maxConnections, Duration handshakeTimeout, Integer illegalPacketThreshold,
+                            FingerprintMode tableFingerprintMode, Integer rpcMaxInflight, Duration shutdownFlushTimeout,
+                            String clientAdvertiseHost) {
+        this(clientPort, clientBindHost, advertisePort, rpcPort, maxConnections, handshakeTimeout, illegalPacketThreshold,
+                tableFingerprintMode, rpcMaxInflight, shutdownFlushTimeout, clientAdvertiseHost, null);
+    }
 
     public static final int DEFAULT_CLIENT_PORT = 12000;
     public static final int DEFAULT_RPC_PORT = 21200;
@@ -55,6 +64,7 @@ public record BattleProperties(
     public static final int DEFAULT_RPC_MAX_INFLIGHT = 256;
     public static final Duration DEFAULT_SHUTDOWN_FLUSH_TIMEOUT = Duration.ofSeconds(1);
 
+    @org.springframework.boot.context.properties.bind.ConstructorBinding
     public BattleProperties {
         clientPort = port(clientPort, DEFAULT_CLIENT_PORT, "client-port", false);
         clientBindHost = clientBindHost == null || clientBindHost.isBlank() ? "0.0.0.0" : clientBindHost.strip();
@@ -91,11 +101,12 @@ public record BattleProperties(
         }
         // 空白视同不配（环境变量占位符缺省展开成空串）
         clientAdvertiseHost = clientAdvertiseHost == null || clientAdvertiseHost.isBlank() ? null : clientAdvertiseHost.strip();
+        clientWsBaseUrl = com.game.common.net.ClientWsUrls.parseBaseUrl(clientWsBaseUrl);
     }
 
     /** 全部取缺省值（测试用）。 */
     public static BattleProperties defaults() {
-        return new BattleProperties(null, null, null, null, null, null, null, null, null, null, null);
+        return new BattleProperties(null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     /**

@@ -78,6 +78,8 @@ public final class BattleMetrics {
     static final String ADMISSION_PHASE = "game.battle.admission.phase";
     static final String LEASE_LOST = "game.battle.lease.lost";
     static final String DEV_GATHER = "game.battle.dev.gather";
+    static final String WEBSOCKET_HANDSHAKES = "game.battle.websocket.handshakes";
+    static final String WEBSOCKET_PROTOCOL_CLOSED = "game.battle.websocket.protocol.closed";
 
     /** 白名单外的上行号（{@code game_battle_client_requests_total{method}}）。 */
     public static final String METHOD_OTHER = "other";
@@ -370,6 +372,9 @@ public final class BattleMetrics {
     private final Map<RpcMethod, Map<RpcResult, Timer>> rpcs;
     private final Counter leaseLost;
     private final Map<DevGatherMode, Map<DevGatherResult, Counter>> devGathers;
+    private final Counter wsHandshakeAccepted;
+    private final Counter wsHandshakeRejected;
+    private final Counter wsProtocolClosed;
 
     private volatile IntSupplier roomCount = () -> 0;
     private volatile IntSupplier directConnectionCount = () -> 0;
@@ -405,6 +410,12 @@ public final class BattleMetrics {
         this.invalidFrames = counters(ClientFrameException.Reason.class, INVALID_FRAMES, "非法帧（解码失败即断开，不回包）", "reason",
                 BattleMetrics::lower);
         this.disconnects = counters(Disconnect.class, DISCONNECTS, "服务端主动断开直连", "reason", BattleMetrics::lower);
+        this.wsHandshakeAccepted = Counter.builder(WEBSOCKET_HANDSHAKES).description("battle 直连 WebSocket 升级握手")
+                .tag("result", "accepted").register(registry);
+        this.wsHandshakeRejected = Counter.builder(WEBSOCKET_HANDSHAKES).description("battle 直连 WebSocket 升级握手")
+                .tag("result", "rejected").register(registry);
+        this.wsProtocolClosed = Counter.builder(WEBSOCKET_PROTOCOL_CLOSED)
+                .description("battle 直连 WebSocket 协议违规关闭").register(registry);
 
         for (Notify notify : Notify.values()) {
             pushCounter(notify.category(), PushRoute.DIRECT, notify);
@@ -592,6 +603,15 @@ public final class BattleMetrics {
     /** dev gather 的一次调用（管理 Tomcat 线程）。 */
     public void devGather(DevGatherMode mode, DevGatherResult result) {
         devGathers.get(mode).get(result).increment();
+    }
+
+    /** 供直连面同端口 WebSocket 复用层记录握手与协议违规指标。 */
+    public com.game.net.client.WebSocketObserver webSocketObserver() {
+        return new com.game.net.client.WebSocketObserver() {
+            @Override public void onHandshakeAccepted() { wsHandshakeAccepted.increment(); }
+            @Override public void onHandshakeRejected(String reason) { wsHandshakeRejected.increment(); }
+            @Override public void onProtocolClosed(int closeCode) { wsProtocolClosed.increment(); }
+        };
     }
 
     // ---------------------------------------------------------------- 内部

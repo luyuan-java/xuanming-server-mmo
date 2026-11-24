@@ -1444,16 +1444,18 @@ public final class ClientDispatcher {
      * 否则字节与签名不一定对得上）。信封 {@code MessageContent{message_id = 124}} <b>不设 id</b>（基线 gate_event_handler.cpp:234-271）。
      */
     private MessageContent redirectNotify(ZoneRedirect redirect) {
-        RedirectToGateNotify notify = RedirectToGateNotify.newBuilder()
+        RedirectToGateNotify.Builder notify = RedirectToGateNotify.newBuilder()
                 .setTargetIp(redirect.getGateHost())
                 .setTargetPort(redirect.getGatePort())
                 .setTokenPayload(redirect.getTokenPayload())
                 .setTokenSignature(redirect.getTokenSignature())
-                .setTokenDeadline(redirect.getTokenDeadline())
-                .build();
+                .setTokenDeadline(redirect.getTokenDeadline());
+        if (!redirect.getGateWsUrl().isEmpty()) {
+            notify.setTargetWsUrl(redirect.getGateWsUrl());
+        }
         return MessageContent.newBuilder()
                 .setMessageId(redirectToGateMessageId)
-                .setSerializedMessage(notify.toByteString())
+                .setSerializedMessage(notify.build().toByteString())
                 .build();
     }
 

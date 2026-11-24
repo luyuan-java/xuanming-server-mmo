@@ -331,7 +331,7 @@ public final class TravelRouter implements TravelRouting {
         }
         GateNodeInfo gate = picked.get();
         IssuedGateToken token = issuer.issueRedirect(gate.getNodeId(), gate.getZoneId(), playerId, toZone);
-        ZoneRedirect redirect = ZoneRedirect.newBuilder()
+        ZoneRedirect.Builder redirectBuilder = ZoneRedirect.newBuilder()
                 .setTargetZoneId(toZone)
                 .setGateNodeId(gate.getNodeId())
                 .setGateHost(gate.getClientHost())
@@ -339,8 +339,11 @@ public final class TravelRouter implements TravelRouting {
                 // 签名时的原字节，原样放进应答（下游一律原样拷贝，不得解析后重新序列化）
                 .setTokenPayload(token.payload())
                 .setTokenSignature(token.signature())
-                .setTokenDeadline(token.deadlineEpochSec())
-                .build();
+                .setTokenDeadline(token.deadlineEpochSec());
+        if (!gate.getClientWsUrl().isEmpty()) {
+            redirectBuilder.setGateWsUrl(gate.getClientWsUrl());
+        }
+        ZoneRedirect redirect = redirectBuilder.build();
         return Optional.of(new Ticket(gate, redirect));
     }
 

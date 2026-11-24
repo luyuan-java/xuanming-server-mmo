@@ -227,6 +227,7 @@ public final class BattleEdgeServer implements DirectEdge {
         BattleEdgeHandler handler = new BattleEdgeHandler(this);
         ChannelPipeline p = ch.pipeline();
         p.addLast("edgeGuard", new EdgeInboundGuard(handler));
+        p.addLast("wsMux", new com.game.net.client.WebSocketMuxHandler(deps.metrics().webSocketObserver()));
         p.addLast("clientFrameDecoder", new ClientFrameDecoder(ACCEPTED, ClientFrames.DEFAULT_MAX_LEN, handler::acceptsInbound,
                 (ctx, e) -> handler.onInvalidFrame(ctx.channel(), e)));
         p.addLast("clientFrameEncoder", ClientFrameEncoder.INSTANCE);

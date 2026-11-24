@@ -55,7 +55,7 @@ class ZoneTravelContractTest {
 
         assertThat(redirect().toByteArray()).isEqualTo(expected.toByteArray());
         assertFields(ZoneRedirect.getDescriptor(), "target_zone_id", 1, "gate_node_id", 2, "gate_host", 3, "gate_port", 4,
-                "token_payload", 5, "token_signature", 6, "token_deadline", 7);
+                "token_payload", 5, "token_signature", 6, "token_deadline", 7, "gate_ws_url", 8);
     }
 
     @Test

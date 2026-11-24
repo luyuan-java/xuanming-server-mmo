@@ -140,8 +140,13 @@ public final class GlobalMatchService implements AutoCloseable {
                     ||n.getClientPort()==0||!regions.add(n.getPhysicalRegion()))continue;
             var grant=NetworkProbeGrant.newBuilder().setPlanId(id).setPlayerId(session.getPlayerId()).setSessionBinding(binding)
                     .setPhysicalRegion(n.getPhysicalRegion()).setTargetNodeId(n.getNodeId()).setTargetInstanceId(n.getInstanceId()).setExpiresAtMs(expiry).build();
-            response.addTargets(NetworkProbeTarget.newBuilder().setPhysicalRegion(n.getPhysicalRegion()).setHost(n.getClientHost())
-                    .setPort(n.getClientPort()).setGrant(NetworkProbes.sign(config.probeSecret(),NetworkProbes.GRANT,grant)));
+            NetworkProbeTarget.Builder target = NetworkProbeTarget.newBuilder()
+                    .setPhysicalRegion(n.getPhysicalRegion()).setHost(n.getClientHost())
+                    .setPort(n.getClientPort()).setGrant(NetworkProbes.sign(config.probeSecret(), NetworkProbes.GRANT, grant));
+            if (!n.getClientWsUrl().isEmpty()) {
+                target.setWsUrl(n.getClientWsUrl());
+            }
+            response.addTargets(target);
         }
         if(response.getTargetsCount()==0)throw new IllegalStateException("没有合格的探测机房");
         store.plan(session.getPlayerId(),GlobalProbeProfile.newBuilder().setPlanId(id).setSessionBinding(binding)

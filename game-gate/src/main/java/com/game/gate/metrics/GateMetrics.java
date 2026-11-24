@@ -50,6 +50,8 @@ public final class GateMetrics {
     static final String SPECTATE_TICKET_REJECTS = "game.gate.spectate.ticket.rejects";
     static final String SPECTATE_SOURCE_LOST = "game.gate.spectate.source.lost";
     static final String SPECTATE_CHANNEL_FAILURES = "game.gate.spectate.channel.failures";
+    static final String WEBSOCKET_HANDSHAKES = "game.gate.websocket.handshakes";
+    static final String WEBSOCKET_PROTOCOL_CLOSED = "game.gate.websocket.protocol.closed";
 
     /** 不在客户端白名单里的消息号（以及没有路由的请求）统一用的标签值。 */
     public static final String UNKNOWN = "unknown";
@@ -315,6 +317,9 @@ public final class GateMetrics {
     private final Counter spectateSkipped;
     private final Counter spectateSourceLost;
     private final Counter spectateChannelFailures;
+    private final Counter wsHandshakeAccepted;
+    private final Counter wsHandshakeRejected;
+    private final Counter wsProtocolClosed;
     private final Map<NodeLinkFrame.BodyCase, Counter> framesOut;
     private final Map<NodeLinkFrame.BodyCase, Counter> framesIn;
     private final Map<LoginCall, Timer> loginCallsOk;
@@ -368,6 +373,12 @@ public final class GateMetrics {
         this.spectateSourceLost = Counter.builder(SPECTATE_SOURCE_LOST).description("源站失联（空闲超时、过期或频道订阅失败）由 gate 本地收尾的观战条目").register(registry);
         this.spectateChannelFailures = Counter.builder(SPECTATE_CHANNEL_FAILURES)
                 .description("观战频道订阅失败（持续增长多半是订阅容量到顶：game.redis.subscription-connection-pool-size × subscriptions-per-connection）").register(registry);
+        this.wsHandshakeAccepted = Counter.builder(WEBSOCKET_HANDSHAKES).description("WebSocket 升级握手计数")
+                .tag("result", "accepted").register(registry);
+        this.wsHandshakeRejected = Counter.builder(WEBSOCKET_HANDSHAKES).description("WebSocket 升级握手计数")
+                .tag("result", "rejected").register(registry);
+        this.wsProtocolClosed = Counter.builder(WEBSOCKET_PROTOCOL_CLOSED)
+                .description("WebSocket 协议错误或超长帧关闭连接计数").register(registry);
         this.framesOut = frameCounters("out");
         this.framesIn = frameCounters("in");
         this.loginCallsOk = loginTimers("ok");
@@ -551,6 +562,15 @@ public final class GateMetrics {
     /** 一次观战频道订阅失败。 */
     public void spectateChannelFailed() {
         spectateChannelFailures.increment();
+    }
+
+    /** 供同端口 WebSocket 复用层记录握手与协议关闭指标。 */
+    public com.game.net.client.WebSocketObserver webSocketObserver() {
+        return new com.game.net.client.WebSocketObserver() {
+            @Override public void onHandshakeAccepted() { wsHandshakeAccepted.increment(); }
+            @Override public void onHandshakeRejected(String reason) { wsHandshakeRejected.increment(); }
+            @Override public void onProtocolClosed(int closeCode) { wsProtocolClosed.increment(); }
+        };
     }
 
     // ================================================================ 内部

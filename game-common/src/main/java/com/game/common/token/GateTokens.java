@@ -52,7 +52,8 @@ public final class GateTokens {
         if (parsed.getGateNodeId() != selfGateNodeId) {
             return Verdict.fail(Failure.WRONG_GATE);
         }
-        if (parsed.getTargetZoneId() != 0 && parsed.getTargetZoneId() != selfZoneId) {
+        int expectedZone = parsed.getTargetZoneId() != 0 ? parsed.getTargetZoneId() : parsed.getZoneId();
+        if (expectedZone != 0 && expectedZone != selfZoneId) {
             return Verdict.fail(Failure.WRONG_ZONE);
         }
         if (parsed.getExpireTimestamp() <= nowEpochSeconds) {

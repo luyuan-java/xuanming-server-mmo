@@ -29,6 +29,7 @@ public record AssignGateResponse(
         int code,
         String gateIp,
         int gatePort,
+        String gateWsUrl,
         byte[] tokenPayload,
         byte[] tokenSignature,
         long tokenDeadline,
@@ -67,17 +68,23 @@ public record AssignGateResponse(
 
     public static AssignGateResponse admitted(String gateIp, int gatePort, byte[] tokenPayload, byte[] tokenSignature,
                                               long tokenDeadline) {
-        return new AssignGateResponse(CODE_OK, gateIp, gatePort, tokenPayload, tokenSignature, tokenDeadline, null, null,
-                null, null, null, null, null);
+        return admitted(gateIp, gatePort, null, tokenPayload, tokenSignature, tokenDeadline);
+    }
+
+    public static AssignGateResponse admitted(String gateIp, int gatePort, String gateWsUrl, byte[] tokenPayload,
+                                              byte[] tokenSignature, long tokenDeadline) {
+        String normalizedWs = gateWsUrl == null || gateWsUrl.isEmpty() ? null : gateWsUrl;
+        return new AssignGateResponse(CODE_OK, gateIp, gatePort, normalizedWs, tokenPayload, tokenSignature, tokenDeadline,
+                null, null, null, null, null, null, null);
     }
 
     public static AssignGateResponse rejected(int code, String error) {
-        return new AssignGateResponse(code, null, 0, null, null, 0, error, null, null, null, null, null, null);
+        return new AssignGateResponse(code, null, 0, null, null, null, 0, error, null, null, null, null, null, null);
     }
 
     /** 登录排队中（同基线 loginQueueing）：{@code rank} 从 0 起。 */
     public static AssignGateResponse loginQueueing(String queueToken, long rank, long total, long retryAfterMs) {
-        return new AssignGateResponse(CODE_QUEUEING, null, 0, null, null, 0, null, retryAfterMs, QUEUE_SOURCE_LOGIN,
+        return new AssignGateResponse(CODE_QUEUEING, null, 0, null, null, null, 0, null, retryAfterMs, QUEUE_SOURCE_LOGIN,
                 queueToken, rank, total, null);
     }
 
@@ -86,7 +93,7 @@ public record AssignGateResponse(
      * {@code queue_pos} 是估计值（区桶余量；分波未开放时 -1）。
      */
     public static AssignGateResponse rateLimitQueueing(long retryAfterMs, long queuePos) {
-        return new AssignGateResponse(CODE_QUEUEING, null, 0, null, null, 0, null, retryAfterMs, QUEUE_SOURCE_RATELIMIT,
+        return new AssignGateResponse(CODE_QUEUEING, null, 0, null, null, null, 0, null, retryAfterMs, QUEUE_SOURCE_RATELIMIT,
                 null, null, null, queuePos);
     }
 }

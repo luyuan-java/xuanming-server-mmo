@@ -65,7 +65,9 @@ public interface AssetAudit {
         /** 镶嵌消耗一颗宝石。 */
         EQUIP_INLAY,
         /** 取下宝石返还到人物背包。 */
-        EQUIP_GEM_REMOVE
+        EQUIP_GEM_REMOVE,
+        /** 挂机月卡开通 / 续费扣款。 */
+        AFK_PASS_BUY
     }
 
     /**

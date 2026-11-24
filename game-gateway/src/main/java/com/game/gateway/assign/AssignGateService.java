@@ -231,7 +231,7 @@ public final class AssignGateService {
     private AssignGateResponse sign(int zoneId, GateNodeInfo gate) {
         IssuedGateToken token = issuer.issue(gate.getNodeId(), zoneId);
         log.debug("已分配 gate zone={} node={} 在线={}", zoneId, gate.getNodeId(), Integer.toUnsignedLong(gate.getPlayerCount()));
-        return AssignGateResponse.admitted(gate.getClientHost(), gate.getClientPort(),
+        return AssignGateResponse.admitted(gate.getClientHost(), gate.getClientPort(), gate.getClientWsUrl(),
                 token.payload().toByteArray(), token.signature().toByteArray(), token.deadlineEpochSec());
     }
 
