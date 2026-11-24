@@ -72,7 +72,7 @@ public final class ChatDispatcher {
     }
 
     public Set<Integer> routedMessageIds() {
-        return Set.of(sendId, pullId, reportId, retractWorldId);
+        return Set.of(sendId, pullId, reportId);
     }
 
     /** 没有调用方截止的派发（单测、进程内直调）：截止只看本地预算。 */
@@ -107,9 +107,11 @@ public final class ChatDispatcher {
                         .handle((response, error) -> finish(sample, REPORT, response, error));
             }
             if (messageId == retractWorldId) {
-                RetractWorldChatRequest request = RetractWorldChatRequest.parseFrom(call.getBody());
-                return service.retractWorld(request, budget).toCompletableFuture()
-                        .handle((response, error) -> finish(sample, RETRACT_WORLD, response, error));
+                // RetractWorldChat(434) 标了 CLIENT_RPC_SERVER_ONLY：纵深防御，客户端入口一律回信封 1003（同 GuildDispatcher 拒 8）
+                log.warn("[chat] 拒绝客户端上行 SERVER_ONLY 方法 RetractWorldChat gate={} session={} player={}",
+                        call.getSession().getGateNodeId(), call.getSession().getSessionId(), call.getSession().getPlayerId());
+                metrics.requestCompleted(sample, RETRACT_WORLD, RequestResult.UNSUPPORTED);
+                return CompletableFuture.completedFuture(envelope(CommonErrorTip.common_error.kServiceUnavailable_VALUE));
             }
         } catch (InvalidProtocolBufferException e) {
             log.warn("[chat] 请求体解析失败 message_id={} gate={} session={}: {}", messageId, call.getSession().getGateNodeId(),

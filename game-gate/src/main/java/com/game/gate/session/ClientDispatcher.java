@@ -431,10 +431,12 @@ public final class ClientDispatcher {
             // 重定向之后的准入（kRejectedRedirected）一致：mmorpg client-request-ordering.md O4「每个请求恰好一个回执」、O6「gate 级失败
             // 一律带请求 id」、O9。2026-11-11 起，原为静默丢弃（zone-travel-spec §5.7 已同步）。合规客户端此刻正在换连接，几秒内自己关闭。
             MessageRoute redirectedRoute = routes.clientRoute(request.getMessageId());
-            countRequest(redirectedRoute, RequestResult.REDIRECTED);
-            if (redirectedRoute != null) {
-                s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
+            if (redirectedRoute == null || redirectedRoute.serverOnly()) {
+                countRequest(null, RequestResult.REDIRECTED);
+                return;
             }
+            countRequest(redirectedRoute, RequestResult.REDIRECTED);
+            s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
             return;
         }
         if (!s.verified) {
@@ -449,6 +451,18 @@ public final class ClientDispatcher {
         if (route == null) {
             countRequest(null, RequestResult.UNKNOWN_MESSAGE);
             registerIllegal(s, "unknown_message_id", request.getMessageId());
+            return;
+        }
+        if (route.serverOnly()) {
+            // CLIENT_RPC_SERVER_ONLY 方法（如 RetractWorldChat 434、UpdateGuildScore 8、Disconnect/Migration/RenewSession）
+            // 绝不转发给后端；按 O6 对有应答方法回带请求 id 的信封 1003 并计非法包（持续探测将触发踢线）。
+            log.debug("拒绝客户端发起的 SERVER_ONLY 方法 session={} message_id={} method={}",
+                    sid(s), request.getMessageId(), route.method());
+            if (route.hasResponse()) {
+                s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
+            }
+            countRequest(route, RequestResult.UNKNOWN_MESSAGE);
+            registerIllegal(s, "server_only", request.getMessageId());
             return;
         }
         if (request.getSerializedSize() > MAX_REQUEST_BYTES) {

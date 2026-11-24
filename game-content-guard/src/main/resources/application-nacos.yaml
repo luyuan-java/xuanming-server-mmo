@@ -1,0 +1,4 @@
+# nacos profile：Dubbo 注册到 Nacos（同 game-payment/application-nacos.yaml）。
+dubbo:
+  registry:
+    address: nacos://${GAME_NACOS_ADDR:127.0.0.1:8848}

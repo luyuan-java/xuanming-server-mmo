@@ -3,6 +3,10 @@
 # 在 GAME_NACOS_ADDR 里带 ?namespace=<ID>（如 GAME_NACOS_ADDR=127.0.0.1:8848?namespace=t1），或给 Dubbo 的配置项 dubbo.registry.parameters.namespace
 # （-D 系统属性 / --命令行参数 / SPRING_APPLICATION_JSON），并先在 Nacos 建好 ID 等于该值的命名空间（建议取 <ns>）。环境变量
 # DUBBO_REGISTRY_PARAMETERS_NAMESPACE 与方括号写法 parameters[namespace] Dubbo 都不认，会静默落进 public（architecture.md §6.2）。
+game:
+  dubbo:
+    content-guard-url: ""
+
 dubbo:
   registry:
     address: nacos://${GAME_NACOS_ADDR:127.0.0.1:8848}

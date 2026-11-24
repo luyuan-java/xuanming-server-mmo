@@ -1,0 +1,9 @@
+# nacos profile：清空直连 URL，通过 Nacos 发现 game-mail / game-match。
+game:
+  dubbo:
+    mail-url: ""
+    match-url: ""
+
+dubbo:
+  registry:
+    address: nacos://${GAME_NACOS_ADDR:127.0.0.1:8848}

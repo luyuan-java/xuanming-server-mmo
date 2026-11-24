@@ -50,6 +50,9 @@ public final class MessageIdRegistry {
     /** 服务级自定义 option 的扩展字段名（mmorpg proto 里 {@code extend google.protobuf.ServiceOptions} 的字段名）。 */
     static final String OPTION_IS_CLIENT_PROTOCOL_SERVICE = "OptionIsClientProtocolService";
     static final String OPTION_IS_PLAYER_SERVICE = "OptionIsPlayerService";
+    /** 方法级自定义 option 的扩展字段名（{@code extend google.protobuf.MethodOptions}）。 */
+    static final String OPTION_CLIENT_RPC_KIND = "OptionClientRpcKind";
+    static final String CLIENT_RPC_SERVER_ONLY = "CLIENT_RPC_SERVER_ONLY";
 
     private final Map<Integer, MessageMethod> byId;
     private final Map<String, Integer> idByKey;
@@ -143,6 +146,7 @@ public final class MessageIdRegistry {
         ServiceDescriptor service = method.getService();
         boolean client = serviceOptionIsTrue(service, OPTION_IS_CLIENT_PROTOCOL_SERVICE);
         boolean player = serviceOptionIsTrue(service, OPTION_IS_PLAYER_SERVICE);
+        boolean serverOnly = methodIsServerOnly(method);
         return new MessageMethod(
                 id,
                 service.getName(),
@@ -151,7 +155,19 @@ public final class MessageIdRegistry {
                 defaultInstance(method.getInputType(), loader),
                 defaultInstance(method.getOutputType(), loader),
                 client,
-                player);
+                player,
+                serverOnly);
+    }
+
+    /** 读取方法级 {@code OptionClientRpcKind} 扩展枚举，判断是否为 {@code CLIENT_RPC_SERVER_ONLY}。 */
+    static boolean methodIsServerOnly(MethodDescriptor method) {
+        for (Map.Entry<Descriptors.FieldDescriptor, Object> e : method.getOptions().getAllFields().entrySet()) {
+            if (e.getKey().isExtension() && e.getKey().getName().equals(OPTION_CLIENT_RPC_KIND)
+                    && e.getValue() instanceof Descriptors.EnumValueDescriptor ev) {
+                return CLIENT_RPC_SERVER_ONLY.equals(ev.getName());
+            }
+        }
+        return false;
     }
 
     /**

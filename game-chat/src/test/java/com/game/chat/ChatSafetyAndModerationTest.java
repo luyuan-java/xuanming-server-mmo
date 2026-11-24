@@ -91,7 +91,7 @@ class ChatSafetyAndModerationTest {
             var metrics = new ChatMetrics(new SimpleMeterRegistry());
             try (var service = new ChatService(f.store, metrics, props, KEYS, null, publisher)) {
                 var dispatcher = new ChatDispatcher(REGISTRY, service, metrics, 3500);
-                assertEquals(4, dispatcher.routedMessageIds().size());
+                assertEquals(3, dispatcher.routedMessageIds().size());
 
                 // 发送一条世界消息与一条 10->20 私聊消息
                 long worldTs = f.clock.get();
@@ -146,28 +146,31 @@ class ChatSafetyAndModerationTest {
                                 .setBody(repWorld.toBuilder().setDetail("x".repeat(201)).build().toByteString()).build())
                                 .get(5, TimeUnit.SECONDS).getBody()).getErrorMessage().getId());
 
-                // 撤回世界消息：首次 retracted=true 并广播；二次幂等 retracted=false 不重复广播；不存在回 18006
+                // 客户端上行 434 RetractWorldChat（CLIENT_RPC_SERVER_ONLY）必须被 ChatDispatcher 拦截回信封 1003，不得执行撤回
                 int retractId = REGISTRY.requireId("ClientPlayerChat", "RetractWorldChat");
                 var retractReq = RetractWorldChatRequest.newBuilder()
                         .setSenderPlayerId(10).setSendTimeMs(worldTs).setReason("ops_remove").build();
-                var r1 = RetractWorldChatResponse.parseFrom(dispatcher.dispatch(ClientCall.newBuilder()
-                        .setMessageId(retractId).setBody(retractReq.toByteString()).build())
-                        .get(5, TimeUnit.SECONDS).getBody());
+                var clientBlocked = dispatcher.dispatch(ClientCall.newBuilder()
+                        .setSession(s20).setMessageId(retractId).setBody(retractReq.toByteString()).build())
+                        .get(5, TimeUnit.SECONDS);
+                assertEquals(CommonErrorTip.common_error.kServiceUnavailable_VALUE, clientBlocked.getTipId());
+                assertTrue(clientBlocked.getBody().isEmpty());
+                assertEquals(0, retracted.size());
+
+                // 内部调用 service.retractWorld：首次 retracted=true 并广播；二次幂等 retracted=false 不重复广播；不存在回 18006
+                var r1 = service.retractWorld(retractReq, 3500).toCompletableFuture().get(5, TimeUnit.SECONDS);
                 assertEquals(0, r1.getErrorMessage().getId());
                 assertTrue(r1.getRetracted());
                 assertEquals(1, retracted.size());
                 assertEquals("ops_remove", retracted.getFirst().getReason());
 
-                var r2 = RetractWorldChatResponse.parseFrom(dispatcher.dispatch(ClientCall.newBuilder()
-                        .setMessageId(retractId).setBody(retractReq.toByteString()).build())
-                        .get(5, TimeUnit.SECONDS).getBody());
+                var r2 = service.retractWorld(retractReq, 3500).toCompletableFuture().get(5, TimeUnit.SECONDS);
                 assertEquals(0, r2.getErrorMessage().getId());
                 assertFalse(r2.getRetracted());
                 assertEquals(1, retracted.size());
 
-                var rMissing = RetractWorldChatResponse.parseFrom(dispatcher.dispatch(ClientCall.newBuilder()
-                        .setMessageId(retractId).setBody(retractReq.toBuilder().setSendTimeMs(999999).build().toByteString()).build())
-                        .get(5, TimeUnit.SECONDS).getBody());
+                var rMissing = service.retractWorld(retractReq.toBuilder().setSendTimeMs(999999).build(), 3500)
+                        .toCompletableFuture().get(5, TimeUnit.SECONDS);
                 assertEquals(ChatErrorTip.chat_error.kChatMessageNotFound_VALUE, rMissing.getErrorMessage().getId());
 
                 // 拉取世界历史不再返回已撤回条目，但原件表行仍在（追加只读）

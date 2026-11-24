@@ -50,7 +50,7 @@ public class ChatConfiguration {
     @ConditionalOnProperty(name = "game.chat.content-guard-enabled", havingValue = "true")
     static class ContentGuardClientConfiguration {
 
-        @DubboReference(group = DubboGroups.CONTENT_GUARD, check = false, timeout = 1500, retries = 0)
+        @DubboReference(group = DubboGroups.CONTENT_GUARD, url = "${game.dubbo.content-guard-url:}", check = false, timeout = 1500, retries = 0)
         private ContentGuardService contentGuardService;
 
         @Bean

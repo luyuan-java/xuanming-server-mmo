@@ -14,13 +14,20 @@ package com.game.gate.session;
  * @param directOnly  只走客户端直连、gate 永不中继的号（{@link MessageRoutes#DIRECT_ONLY_SERVICES}，现在只有战斗服务
  *                    {@code BattleClientPlayer} 的 12 个号）：gate 在 GM 闸之后当场回带请求 id 的信封 1003（2026-10-15 起，原为 23 推送；mmorpg client-request-ordering.md O6），不看 {@code domain}、
  *                    不过热关停、不进任何队列（scene-battle-spec §2.5、§7.19，D12）
+ * @param serverOnly  契约标了 {@code OptionClientRpcKind = CLIENT_RPC_SERVER_ONLY} 的方法：客户端禁止发起，gate 入口直接拒绝、计非法包、绝不转发
  */
 public record MessageRoute(int messageId, String domain, boolean hasResponse, String method, boolean gm, String rpcPath,
-                           boolean directOnly) {
+                           boolean directOnly, boolean serverOnly) {
+
+    /** 兼容构造：默认非 {@code CLIENT_RPC_SERVER_ONLY}。 */
+    public MessageRoute(int messageId, String domain, boolean hasResponse, String method, boolean gm, String rpcPath,
+                        boolean directOnly) {
+        this(messageId, domain, hasResponse, method, gm, rpcPath, directOnly, false);
+    }
 
     /** 经 gate 中继的普通路由（不是只走直连的号）。 */
     public MessageRoute(int messageId, String domain, boolean hasResponse, String method, boolean gm, String rpcPath) {
-        this(messageId, domain, hasResponse, method, gm, rpcPath, false);
+        this(messageId, domain, hasResponse, method, gm, rpcPath, false, false);
     }
 
     /** 全路径缺省由 {@code 服务裸名.方法名} 推出（没有 proto 包名；测试里手写的路由用）。 */

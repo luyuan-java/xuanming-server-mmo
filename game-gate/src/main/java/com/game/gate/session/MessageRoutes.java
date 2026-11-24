@@ -3,6 +3,7 @@ package com.game.gate.session;
 import com.game.api.DubboGroups;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
+import com.game.contract.generated.ContractClientRpcKind;
 import com.game.contract.generated.ContractNodeType;
 import com.game.contract.generated.ContractRouteEntry;
 import com.game.contract.generated.ContractRouteTable;
@@ -123,7 +124,7 @@ public interface MessageRoutes {
             String domain = domainOf(e);
             table.put(e.messageId(), new MessageRoute(
                     e.messageId(), domain, e.hasResponse(), e.qualifiedMethod(), e.gmCommand(),
-                    e.fullMethod(), e.directOnly()));
+                    e.fullMethod(), e.directOnly(), e.rpcKind() == ContractClientRpcKind.SERVER_ONLY));
         }
         Map<Integer, MessageRoute> frozen = Map.copyOf(table);
         List<MessageRoute> all = frozen.values().stream().sorted(Comparator.comparingInt(MessageRoute::messageId)).toList();
@@ -160,7 +161,8 @@ public interface MessageRoutes {
             if (method.clientService()) {
                 table.put(method.messageId(), new MessageRoute(method.messageId(), backendOf(method), hasResponse(method),
                         method.serviceName() + "." + method.methodName(), method.gmCommand(),
-                        "/" + method.method().getService().getFullName() + "/" + method.methodName(), directOnly(method)));
+                        "/" + method.method().getService().getFullName() + "/" + method.methodName(),
+                        directOnly(method), method.serverOnly()));
             }
         }
         Map<Integer, MessageRoute> frozen = Map.copyOf(table);

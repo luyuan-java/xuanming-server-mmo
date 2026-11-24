@@ -73,6 +73,8 @@ class ClientDispatcherTest {
     private static final int FRIEND_MSG = 234;
     /** 聚宝斋浏览 196（trade 域；rpcPath 用生产形状，热关停按 trade.ClientPlayerJubaozhai/* 匹配）。 */
     private static final int TRADE_MSG = 196;
+    /** 仅服务端方法（CLIENT_RPC_SERVER_ONLY，如 434 RetractWorldChat / 8 UpdateGuildScore）：绝不转发给后端。 */
+    private static final int SERVER_ONLY_MSG = 434;
     private static final int SCENE_NODE = 7;
     private static final long PLAYER = 42L;
 
@@ -90,6 +92,8 @@ class ClientDispatcherTest {
         case FRIEND_MSG -> new MessageRoute(id, "friend");
         case TRADE_MSG -> new MessageRoute(id, "trade", true, "ClientPlayerJubaozhai.BrowseListings", false,
                 "/trade.ClientPlayerJubaozhai/BrowseListings");
+        case SERVER_ONLY_MSG -> new MessageRoute(id, "friend", true, "ClientPlayerChat.RetractWorldChat", false,
+                "/chatpb.ClientPlayerChat/RetractWorldChat", false, true);
         default -> null;
     };
 
@@ -833,6 +837,19 @@ class ClientDispatcherTest {
         assertThat((Object) ch.readOutbound()).isNull();
         assertThat(friend.calls).as("排队的那个随断线丢掉").hasSize(1);
         assertThat(requests("friend", FRIEND_MSG, "dropped")).isEqualTo(1);
+    }
+
+    @Test
+    void 客户端发起SERVER_ONLY方法被gate拦截回信封1003且计非法包_绝不转发后端() {
+        EmbeddedChannel ch = verified();
+        ch.writeInbound(request(99, SERVER_ONLY_MSG, "spoof-retract"));
+        assertThat(friend.calls).as("SERVER_ONLY 绝不能到达后端").isEmpty();
+        MessageContent reply = ch.readOutbound();
+        assertThat(reply).isNotNull();
+        assertThat(reply.getId()).isEqualTo(99);
+        assertThat(reply.getMessageId()).isEqualTo(SERVER_ONLY_MSG);
+        assertThat(reply.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat(session().illegalPackets).isEqualTo(1);
     }
 
     @Test

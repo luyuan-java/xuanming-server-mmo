@@ -1,9 +1,11 @@
 server:
   port: 18128
+  address: ${GAME_GM_BIND_ADDRESS:127.0.0.1}
 
 management:
   server:
     port: 18129
+    address: ${GAME_MANAGEMENT_ADDRESS:127.0.0.1}
   endpoints:
     web:
       exposure:
@@ -12,18 +14,40 @@ management:
 spring:
   application:
     name: game-gm-admin
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: "${GAME_MYSQL_URL:jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED'}"
-    username: root
-    password: ""
+    username: ${GAME_MYSQL_USER:${MMORPG_SQL_USERNAME:root}}
+    password: ${GAME_MYSQL_PASSWORD:${MMORPG_SQL_PASSWORD:}}
 
 game:
+  redis:
+    address: redis://127.0.0.1:6379
+    database: 12
+  dubbo:
+    mail-url: tri://127.0.0.1:20916
+    match-url: tri://127.0.0.1:20888
   gm:
-    gateway-url: http://127.0.0.1:8081
-    gateway-admin-key: ""
+    gateway-url: http://127.0.0.1:18106
+    gateway-admin-key: ${GAME_ADMIN_TOKEN:}
+    allow-insecure-internal-gateway: false
     mail-enabled: false
     match-ops-enabled: false
     player-commands-enabled: false
     call-budget-ms: 5000
     auto-init-schema: true
+
+dubbo:
+  application:
+    name: ${spring.application.name}
+    logger: slf4j
+    qos-enable: false
+    serialize-check-status: STRICT
+  registry:
+    address: N/A
+  consumer:
+    check: false
+    retries: 0
+    timeout: 5000

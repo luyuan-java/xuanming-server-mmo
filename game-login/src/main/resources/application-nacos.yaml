@@ -11,3 +11,4 @@ dubbo:
 game:
   dubbo:
     scene-manager-url: ""
+    content-guard-url: ""

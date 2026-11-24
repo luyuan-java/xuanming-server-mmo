@@ -424,7 +424,7 @@ public class LoginConfiguration {
     @ConditionalOnProperty(name = "game.login.content-guard-enabled", havingValue = "true")
     static class ContentGuardClientConfiguration {
 
-        @org.apache.dubbo.config.annotation.DubboReference(group = DubboGroups.CONTENT_GUARD, check = false, timeout = 1500, retries = 0)
+        @org.apache.dubbo.config.annotation.DubboReference(group = DubboGroups.CONTENT_GUARD, url = "${game.dubbo.content-guard-url:}", check = false, timeout = 1500, retries = 0)
         private ContentGuardService contentGuardService;
 
         @Bean

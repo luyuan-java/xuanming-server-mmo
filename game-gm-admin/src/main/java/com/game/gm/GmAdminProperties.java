@@ -14,13 +14,28 @@ public record GmAdminProperties(
         Boolean playerCommandsEnabled,
         Long callBudgetMs,
         Boolean autoInitSchema,
-        Map<String, OperatorEntry> operators) {
+        Map<String, OperatorEntry> operators,
+        Boolean allowInsecureInternalGateway) {
 
     public record OperatorEntry(String username, List<String> permissions) {
     }
 
+    /** 兼容 8 参构造（默认不允许非回环明文 HTTP）。 */
+    public GmAdminProperties(
+            String gatewayUrl,
+            String gatewayAdminKey,
+            Boolean mailEnabled,
+            Boolean matchOpsEnabled,
+            Boolean playerCommandsEnabled,
+            Long callBudgetMs,
+            Boolean autoInitSchema,
+            Map<String, OperatorEntry> operators) {
+        this(gatewayUrl, gatewayAdminKey, mailEnabled, matchOpsEnabled, playerCommandsEnabled,
+                callBudgetMs, autoInitSchema, operators, false);
+    }
+
     public GmAdminProperties {
-        gatewayUrl = (gatewayUrl == null || gatewayUrl.isBlank()) ? "http://127.0.0.1:8081" : gatewayUrl.strip();
+        gatewayUrl = (gatewayUrl == null || gatewayUrl.isBlank()) ? "http://127.0.0.1:18106" : gatewayUrl.strip();
         gatewayAdminKey = gatewayAdminKey == null ? "" : gatewayAdminKey.strip();
         mailEnabled = mailEnabled != null && mailEnabled;
         matchOpsEnabled = matchOpsEnabled != null && matchOpsEnabled;
@@ -31,5 +46,6 @@ public record GmAdminProperties(
         }
         autoInitSchema = autoInitSchema == null || autoInitSchema;
         operators = operators == null ? Map.of() : Map.copyOf(operators);
+        allowInsecureInternalGateway = allowInsecureInternalGateway != null && allowInsecureInternalGateway;
     }
 }

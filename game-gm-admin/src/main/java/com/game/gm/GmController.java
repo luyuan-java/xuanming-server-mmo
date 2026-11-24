@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.annotation.PreDestroy;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.math.BigInteger;
@@ -72,11 +73,17 @@ public class GmController {
         this.gatewayKey = properties.gatewayAdminKey();
         String host = this.gateway.getHost();
         boolean loopback = "127.0.0.1".equals(host) || "localhost".equals(host) || "[::1]".equals(host);
+        boolean allowHttp = loopback || Boolean.TRUE.equals(properties.allowInsecureInternalGateway());
         if (host == null || this.gateway.getUserInfo() != null || this.gateway.getQuery() != null
                 || this.gateway.getFragment() != null
-                || !("https".equals(this.gateway.getScheme()) || ("http".equals(this.gateway.getScheme()) && loopback))) {
-            throw new IllegalArgumentException("GM gateway requires HTTPS or loopback HTTP");
+                || !("https".equals(this.gateway.getScheme()) || ("http".equals(this.gateway.getScheme()) && allowHttp))) {
+            throw new IllegalArgumentException("GM gateway requires HTTPS, loopback HTTP, or allowInsecureInternalGateway");
         }
+    }
+
+    @PreDestroy
+    void closeHttpClient() {
+        http.close();
     }
 
     @GetMapping("/overview")
@@ -96,6 +103,8 @@ public class GmController {
                 String path = gateway.toString().replaceAll("/+$", "") + "/admin/zones";
                 HttpRequest request = HttpRequest.newBuilder(URI.create(path))
                         .timeout(Duration.ofSeconds(5))
+                        .header("X-Game-Admin-Token", gatewayKey)
+                        .header("X-Game-Operator", principal.username())
                         .header("X-Admin-Key", gatewayKey)
                         .GET().build();
                 HttpResponse<java.io.InputStream> response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());

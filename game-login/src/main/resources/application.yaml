@@ -81,6 +81,7 @@ game:
     database: 12
   dubbo:
     scene-manager-url: tri://127.0.0.1:20882
+    content-guard-url: tri://127.0.0.1:20919
   login:
     role-trade:
       enabled: ${GAME_PLAYER_TRADE_ENABLED:false}

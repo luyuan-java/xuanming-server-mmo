@@ -463,7 +463,7 @@ public class GuildConfiguration {
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnProperty(name = "game.guild.content-guard-enabled", havingValue = "true")
     static class ContentGuardClientConfiguration {
-        @DubboReference(group = DubboGroups.CONTENT_GUARD, check = false, timeout = 1500, retries = 0)
+        @DubboReference(group = DubboGroups.CONTENT_GUARD, url = "${game.dubbo.content-guard-url:}", check = false, timeout = 1500, retries = 0)
         private ContentGuardService contentGuard;
 
         @Bean

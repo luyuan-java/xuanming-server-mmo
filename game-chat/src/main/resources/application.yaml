@@ -55,6 +55,8 @@ game:
   redis:
     address: redis://127.0.0.1:6379
     database: 12
+  dubbo:
+    content-guard-url: tri://127.0.0.1:20919
   chat:
     require-tidb: true
     # 缺省值同 mmorpg go/chat（etc/chat.yaml）。

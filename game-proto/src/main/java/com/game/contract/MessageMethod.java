@@ -17,6 +17,7 @@ import com.google.protobuf.Message;
  * @param responsePrototype 应答消息的默认实例
  * @param clientService     所在服务标了 {@code OptionIsClientProtocolService}（客户端可直接发）
  * @param playerService     所在服务标了 {@code OptionIsPlayerService}（由玩家所在的 scene 处理）
+ * @param serverOnly        方法标了 {@code OptionClientRpcKind = CLIENT_RPC_SERVER_ONLY}（仅服务端内部或 gate 合成可调，禁止客户端直接发起）
  */
 public record MessageMethod(
         int messageId,
@@ -26,7 +27,22 @@ public record MessageMethod(
         Message requestPrototype,
         Message responsePrototype,
         boolean clientService,
-        boolean playerService) {
+        boolean playerService,
+        boolean serverOnly) {
+
+    /** 兼容构造：默认非 {@code CLIENT_RPC_SERVER_ONLY}。 */
+    public MessageMethod(
+            int messageId,
+            String serviceName,
+            String methodName,
+            MethodDescriptor method,
+            Message requestPrototype,
+            Message responsePrototype,
+            boolean clientService,
+            boolean playerService) {
+        this(messageId, serviceName, methodName, method, requestPrototype, responsePrototype,
+                clientService, playerService, false);
+    }
 
     /** 与 message_id.txt 的键同形：服务裸名 + 方法名。 */
     public String key() {

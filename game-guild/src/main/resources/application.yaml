@@ -72,6 +72,8 @@ game:
   redis:
     address: redis://127.0.0.1:6379
     database: 12
+  dubbo:
+    content-guard-url: tri://127.0.0.1:20919
   guild:
     activity:
       enabled: true

@@ -1,10 +1,12 @@
 package com.game.gm;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.game.api.DubboGroups;
 import com.game.api.MailAdminService;
 import com.game.api.MatchInternalService;
 import com.game.common.player.PlayerHomeZones;
 import com.game.common.player.PlayerProfiles;
+import com.game.discovery.RedisKeys;
 import com.game.discovery.location.PlayerLocationDirectory;
 import com.game.discovery.presence.PlayerPresenceDirectory;
 import java.io.IOException;
@@ -12,8 +14,12 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import javax.sql.DataSource;
+import org.apache.dubbo.config.annotation.DubboReference;
+import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -41,6 +47,52 @@ public class GmAdminConfiguration {
             initSchema(jdbc);
         }
         return new GmCommandJournal(jdbc, mapper, txManager);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnBean({RedissonClient.class, RedisKeys.class})
+    @ConditionalOnProperty(name = "game.gm.redis-enabled", havingValue = "true", matchIfMissing = true)
+    public PlayerPresenceDirectory gmPlayerPresenceDirectory(RedissonClient redis, RedisKeys keys) {
+        return new PlayerPresenceDirectory(redis, keys);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnBean({RedissonClient.class, RedisKeys.class})
+    @ConditionalOnProperty(name = "game.gm.redis-enabled", havingValue = "true", matchIfMissing = true)
+    public PlayerLocationDirectory gmPlayerLocationDirectory(RedissonClient redis, RedisKeys keys) {
+        return new PlayerLocationDirectory(redis, keys);
+    }
+
+    /** 显式开启 {@code game.gm.mail-enabled=true} 时挂载邮件管理 Dubbo 引用（直连或 Nacos）。 */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(name = "game.gm.mail-enabled", havingValue = "true")
+    static class MailAdminClientConfiguration {
+
+        @DubboReference(group = DubboGroups.MAIL, url = "${game.dubbo.mail-url:}", check = false, timeout = 5000, retries = 0)
+        private MailAdminService mailAdminService;
+
+        @Bean
+        @ConditionalOnMissingBean
+        MailAdminService gmMailAdminService() {
+            return mailAdminService;
+        }
+    }
+
+    /** 显式开启 {@code game.gm.match-ops-enabled=true} 时挂载匹配内部管理 Dubbo 引用（战斗剧本审核）。 */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(name = "game.gm.match-ops-enabled", havingValue = "true")
+    static class MatchOpsClientConfiguration {
+
+        @DubboReference(group = DubboGroups.MATCH, url = "${game.dubbo.match-url:}", check = false, timeout = 5000, retries = 0)
+        private MatchInternalService matchInternalService;
+
+        @Bean
+        @ConditionalOnMissingBean
+        MatchInternalService gmMatchInternalService() {
+            return matchInternalService;
+        }
     }
 
     @Bean

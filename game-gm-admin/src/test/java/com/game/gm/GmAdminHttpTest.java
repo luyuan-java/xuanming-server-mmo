@@ -44,7 +44,9 @@ class GmAdminHttpTest {
     void setUp() throws Exception {
         gatewayServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         gatewayServer.createContext("/admin/zones", exchange -> {
-            if (!"gw-secret-key".equals(exchange.getRequestHeaders().getFirst("X-Admin-Key"))) {
+            if (!"gw-secret-key".equals(exchange.getRequestHeaders().getFirst("X-Game-Admin-Token"))
+                    || !"ops.admin".equals(exchange.getRequestHeaders().getFirst("X-Game-Operator"))
+                    || !"gw-secret-key".equals(exchange.getRequestHeaders().getFirst("X-Admin-Key"))) {
                 exchange.sendResponseHeaders(403, -1);
                 exchange.close();
                 return;

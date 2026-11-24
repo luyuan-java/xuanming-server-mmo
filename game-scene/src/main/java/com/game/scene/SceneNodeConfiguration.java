@@ -135,22 +135,51 @@ public class SceneNodeConfiguration {
         return com.game.scene.season.SeasonTables.from(tables);
     }
 
-    /** 显式开启 game.scene.content-guard-enabled=true 时接入内容安全 Dubbo 服务（角色改名与宝宝改名共用）。 */
+    /**
+     * 显式开启 {@code game.scene.content-guard-enabled=true} 时接入内容安全 Dubbo 服务（角色改名与宝宝改名共用）。
+     *
+     * <p>game-scene 刻意不引入 {@code dubbo-spring-boot-starter}（避免污染节点级隔离 Dubbo 模型），
+     * 因此同 {@link com.game.scene.inbox.DubboInboxTransport} 一样用编程式 {@link com.game.api.rpc.NodeRpcClients} 直连。
+     */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnProperty(name = "game.scene.content-guard-enabled", havingValue = "true")
     static class ContentGuardClientConfiguration {
 
-        @org.apache.dubbo.config.annotation.DubboReference(group = DubboGroups.CONTENT_GUARD, check = false, timeout = 1500, retries = 0)
-        private ContentGuardService contentGuardService;
+        private static final Duration CALL_TIMEOUT = Duration.ofMillis(1500);
+
+        @Bean(destroyMethod = "close")
+        com.game.api.rpc.NodeRpcClients<ContentGuardService> sceneContentGuardClients() {
+            return new com.game.api.rpc.NodeRpcClients<>(
+                    "game-scene-content-guard", ContentGuardService.class, DubboGroups.CONTENT_GUARD,
+                    CALL_TIMEOUT, "scene-content-guard-connect");
+        }
 
         @Bean
-        SceneTextGuard sceneTextGuard() {
-            return (scene, playerId, text) -> contentGuardService.checkText(
-                    com.game.proto.content_guard.CheckTextRequest.newBuilder()
-                            .setScene(scene)
-                            .setPlayerId(playerId)
-                            .setText(text)
-                            .build());
+        SceneTextGuard sceneTextGuard(
+                com.game.api.rpc.NodeRpcClients<ContentGuardService> clients,
+                @Value("${game.dubbo.content-guard-url:tri://127.0.0.1:20919}") String url) {
+            java.net.URI uri = java.net.URI.create(url == null ? "" : url.trim());
+            if (!"tri".equals(uri.getScheme()) || uri.getHost() == null || uri.getPort() < 1) {
+                throw new IllegalArgumentException("game.dubbo.content-guard-url 必须是 tri://host:port: " + url);
+            }
+            var target = new com.game.api.rpc.NodeRpcClients.Target(uri.getHost(), uri.getPort(), "");
+            return (scene, playerId, text) -> {
+                var req = com.game.proto.content_guard.CheckTextRequest.newBuilder()
+                        .setScene(scene)
+                        .setPlayerId(playerId)
+                        .setText(text)
+                        .build();
+                try {
+                    return clients.call(target, CALL_TIMEOUT,
+                                    svc -> CompletableFuture.completedFuture(svc.checkText(req)))
+                            .get(CALL_TIMEOUT.toMillis() + 300L, java.util.concurrent.TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("内容安全检查被中断", e);
+                } catch (Exception e) {
+                    throw new IllegalStateException("内容安全检查失败: " + e.getMessage(), e);
+                }
+            };
         }
     }
 

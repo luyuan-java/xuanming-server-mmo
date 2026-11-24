@@ -517,5 +517,13 @@ class MessageRoutesTest {
             assertThat(generated.clientRoute(route.messageId())).isEqualTo(route);
         }
         assertThat(generated.clientRoute(Integer.MAX_VALUE)).isNull();
+        // 所有标了 CLIENT_RPC_SERVER_ONLY 的方法在静态表与运行时注册表里都标 serverOnly=true
+        List<String> serverOnly = routes.all().stream()
+                .filter(MessageRoute::serverOnly)
+                .map(MessageRoute::method)
+                .toList();
+        assertThat(serverOnly).contains("ClientPlayerChat.RetractWorldChat", "GuildService.UpdateGuildScore",
+                "ClientPlayerLogin.Disconnect", "ClientPlayerLogin.RequestGateMigration", "ClientPlayerLogin.RenewSession");
+        assertThat(routes.clientRoute(registry.requireId("ClientPlayerChat", "SendChat")).serverOnly()).isFalse();
     }
 }
