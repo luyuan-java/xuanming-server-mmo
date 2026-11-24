@@ -182,6 +182,8 @@ public final class BattleFixture {
     final com.game.scene.afkpass.AfkPassService afkPassService;
     public final com.game.scene.merchant.MysteryMerchantTables merchantTables = com.game.scene.merchant.MysteryMerchantTables.from(CONFIG);
     public final com.game.scene.merchant.MysteryMerchantService merchant;
+    public final com.game.scene.season.SeasonTables seasonTables = com.game.scene.season.SeasonTables.from(CONFIG);
+    public final com.game.scene.season.SeasonService season;
     public final com.game.scene.equip.EquipmentService equipment;
     public final com.game.scene.equip.EquipmentCraftService craft;
     public final AttributeService attributes;
@@ -249,11 +251,14 @@ public final class BattleFixture {
         equipment = new com.game.scene.equip.EquipmentService(equipmentRules, bags, currency, attributes, sceneMetrics);
         craft = new com.game.scene.equip.EquipmentCraftService(equipmentRules, bags, attributes, sceneMetrics, clock);
         merchant = new com.game.scene.merchant.MysteryMerchantService(merchantTables, bags, currency, clock, sceneMetrics);
+        season = new com.game.scene.season.SeasonService(seasonTables, currency, attributes, clock, sceneMetrics);
+        attributes.withSeason((p, out) -> season.collectEffects(p, clock.epochMillis(), out), season::activeSeasonId);
         missions = new MissionService(MissionTables.from(CONFIG), bags, clock);
         skills = new SkillService(SkillTables.from(CONFIG), clock, sceneMetrics, Contracts.IDS);
         pets = new PetService(PetTables.from(CONFIG), currency, guids, clock, new SplittableRandom(7), sceneMetrics);
         PetFeature petFeature = new PetFeature(pets, Contracts.REGISTRY);
-        settlements = new BattleSettlementService(currency, bags, pets, missions, tables, battleMetrics, clock, petListChangedId);
+        settlements = new BattleSettlementService(currency, bags, pets, missions, tables, battleMetrics, clock, petListChangedId)
+                .withSeasonService(season);
         battle = new PlayerBattleService(locks, settlements, tables, pets, this::routing, teamFollow, battleMetrics, clock, logic,
                 reconnectHintId, battleEndId);
         // 进场规整同 SceneNode：背包 → 属性 → 宝宝 → 任务 → 两本账本的加载检查
@@ -279,6 +284,7 @@ public final class BattleFixture {
         afkPassService = new com.game.scene.afkpass.AfkPassService(afkPassTables, currency, clock,
                 com.game.scene.afkpass.AfkPassService.ProjectionSink.NOOP, logic);
         world.withAfkPassService(afkPassService);
+        world.withActiveSeason(season::activeSeasonId);
         features = List.of(
                 new com.game.scene.appearance.AppearanceFeature(appearance),
                 new com.game.scene.rename.PlayerRenameFeature(renameService),
@@ -290,9 +296,11 @@ public final class BattleFixture {
                 }),
                 bagFeature, new com.game.scene.equip.EquipmentFeature(equipment, craft, bagFeature, attributes, Contracts.REGISTRY),
                 new com.game.scene.merchant.MysteryMerchantFeature(merchant, bagFeature),
+                new com.game.scene.season.SeasonFeature(season, attributes, Contracts.REGISTRY),
                 new BattleResultFeature(),
                 new MissionFeature(missions), new ActivityFeature(missions), new SkillFeature(skills),
-                new com.game.scene.skill.ClassSkillFeature(new com.game.scene.skill.ClassSkillService(currency, attributes),
+                new com.game.scene.skill.ClassSkillFeature(
+                        new com.game.scene.skill.ClassSkillService(currency, attributes).withActiveSeason(season::activeSeasonId),
                         attributes, Contracts.REGISTRY),
                 petFeature);
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV, features);

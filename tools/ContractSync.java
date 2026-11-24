@@ -261,8 +261,16 @@ public final class ContractSync {
         cleanDir(navigationOut);
         Path navigationSource = source.resolve("data/scene_nav_bin/current_maps");
         List<String> maps = new ArrayList<>(List.of("main", "island", "village"));
-        // 历史来源的渔村仍走旧栅格；新版包与旧包并存，不能覆盖复用 donghai_scene 的场景。
-        if (Files.exists(navigationSource.resolve(YUEXI_NAVIGATION))) maps.add(YUEXI_NAVIGATION);
+        // 历史来源的渔村仍走旧栅格；所有新版版本化包（月汐湾、碧渊水宫等）自动同步，与旧包并存。
+        try (var walk = Files.walk(navigationSource)) {
+            walk.filter(Files::isDirectory)
+                    .map(dir -> navigationSource.relativize(dir).toString().replace('\\', '/'))
+                    .filter(rel -> !rel.isEmpty() && !maps.contains(rel))
+                    .filter(rel -> Files.isRegularFile(navigationSource.resolve(rel).resolve("source.json"))
+                            && Files.isRegularFile(navigationSource.resolve(rel).resolve("walkmask.txt")))
+                    .sorted()
+                    .forEach(maps::add);
+        }
         for (String map : maps) {
             for (String name : List.of("source.json", "walkmask.txt")) {
                 Path target = navigationOut.resolve(map).resolve(name);

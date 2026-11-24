@@ -71,7 +71,9 @@ public interface AssetAudit {
         /** 神秘商人购买。 */
         MYSTERY_MERCHANT_BUY,
         /** 装备打造与固定词条安装。 */
-        EQUIP_CRAFT
+        EQUIP_CRAFT,
+        /** 单槽赛季印追赶扣款。 */
+        SEASON_SEAL_CATCHUP
     }
 
     /**

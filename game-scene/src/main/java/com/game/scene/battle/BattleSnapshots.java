@@ -37,6 +37,14 @@ public final class BattleSnapshots {
      */
     public static BattlePlayerSnapshot build(ScenePlayer player, SceneBattleTables tables, List<BattlePetSnapshot> pets,
                                              BattleRouting routing) {
+        return build(player, tables, pets, routing, 0);
+    }
+
+    /**
+     * 组快照（含当季免费赛季技能与开局冻结的 {@code active_season_id}）。
+     */
+    public static BattlePlayerSnapshot build(ScenePlayer player, SceneBattleTables tables, List<BattlePetSnapshot> pets,
+                                             BattleRouting routing, int activeSeasonId) {
         PlayerAttributes attributes = player.attributes();
         PlayerAttributes.Derived derived = attributes.derived();
         long health = attributes.health();
@@ -72,6 +80,9 @@ public final class BattleSnapshots {
                 .setRouting(routing)
                 .setTeamIndex(0)
                 .setTableFingerprint(tables.fingerprint());
+        if (activeSeasonId != 0) {
+            snapshot.setActiveSeasonId(activeSeasonId);
+        }
         // 无装备战斗属性时保持旧快照的缺省 presence；消费者按 0 处理。
         if (!attributes.combat().equals(com.game.proto.CombatAttributes.getDefaultInstance())) {
             snapshot.setCombat(attributes.combat());
@@ -79,11 +90,34 @@ public final class BattleSnapshots {
         var equipment = attributes.equipment().effects();
         if (!equipment.equals(com.game.proto.EquipmentEffects.getDefaultInstance())) snapshot.setEquipmentEffects(equipment);
         for (int skill : player.skills()) {
+            var row = player.skillCatalog().row(skill);
+            if (row != null && row.getSeasonId() != 0) {
+                continue;
+            }
             int rank = player.skillCatalog().effectiveRank(player.classId(), player.level(), player.learnedSkills(), skill);
             if (rank != 0) snapshot.putSkillRanks(skill, rank);
             // 原顺序；跳过 0 与查不到行的；剔除被动 / 持续施法 / 开关（引擎再过滤一次）
             if (skill != 0 && tables.skillExists(skill) && tables.castable(skill)) {
                 snapshot.addSkillTableIds(skill);
+            }
+        }
+        // 当季免费赛季技能按 skill_table_id 升序并入快照，开局随 active_season_id 冻结。
+        if (activeSeasonId != 0) {
+            int effLevel = com.game.scene.player.PlayerLevels.effective(player.level());
+            for (var row : player.skillCatalog().classRows(player.classId())) {
+                if (row.getSeasonId() != activeSeasonId
+                        || !com.game.scene.skill.ClassSkillCatalog.forSubject(row, 1)) {
+                    continue;
+                }
+                int effRank = com.game.battle.engine.SeasonRules.effectiveSeasonalSkillRank(
+                        effLevel, row.getUnlockLevel(), row.getMaxRank());
+                if (effRank <= 0) {
+                    continue;
+                }
+                snapshot.putSkillRanks(row.getId(), effRank);
+                if (tables.skillExists(row.getId()) && tables.castable(row.getId())) {
+                    snapshot.addSkillTableIds(row.getId());
+                }
             }
         }
         // 只取主背包；跳过数量 0 的堆；只取 battle_usable；按 config_id 无符号升序合并，数量 uint64 累加

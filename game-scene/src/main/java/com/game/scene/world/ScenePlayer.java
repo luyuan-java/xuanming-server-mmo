@@ -26,6 +26,7 @@ import com.game.scene.player.PlayerClientRequestLedger;
 import com.game.scene.player.PlayerItemGainBlock;
 import com.game.scene.player.PlayerMissions;
 import com.game.scene.player.PlayerMysteryMerchant;
+import com.game.scene.player.PlayerSeason;
 import com.game.scene.player.PlayerPets;
 import com.game.scene.player.PlayerSkillState;
 import com.game.scene.player.Wallet;
@@ -116,6 +117,7 @@ public final class ScenePlayer {
     private final PlayerClientRequestLedger clientRequestLedger;
     /** 神秘商人个人每轮限购记录。 */
     private final PlayerMysteryMerchant mysteryMerchant;
+    private final PlayerSeason season;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -212,6 +214,8 @@ public final class ScenePlayer {
                 ? PlayerClientRequestLedger.restore(state.getClientRequestLedger()) : PlayerClientRequestLedger.empty();
         this.mysteryMerchant = state.hasMysteryMerchant()
                 ? PlayerMysteryMerchant.restore(state.getMysteryMerchant()) : PlayerMysteryMerchant.empty();
+        this.season = state.hasSeason()
+                ? PlayerSeason.restore(state.getSeason()) : PlayerSeason.empty();
     }
 
     public long playerId() {
@@ -307,6 +311,10 @@ public final class ScenePlayer {
     /** 神秘商人个人限购记录（逻辑线程上读写）。 */
     public PlayerMysteryMerchant mysteryMerchant() {
         return mysteryMerchant;
+    }
+
+    public PlayerSeason season() {
+        return season;
     }
 
     public int level() {
@@ -559,6 +567,9 @@ public final class ScenePlayer {
         }
         if (!mysteryMerchant.isPristine()) {
             state.setMysteryMerchant(mysteryMerchant.toState());
+        }
+        if (!season.isEmpty()) {
+            state.setSeason(season.toState());
         }
         return state.build();
     }

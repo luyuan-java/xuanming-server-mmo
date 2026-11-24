@@ -300,10 +300,20 @@ public final class SceneWorld {
     }
 
     private PlayerSyncDigests syncDigests = PlayerSyncDigests.UNAVAILABLE;
+    private java.util.function.IntSupplier activeSeasonSupplier = () -> 0;
 
     public SceneWorld withSyncDigests(PlayerSyncDigests syncDigests) {
         this.syncDigests = syncDigests == null ? PlayerSyncDigests.UNAVAILABLE : syncDigests;
         return this;
+    }
+
+    public SceneWorld withActiveSeason(java.util.function.IntSupplier supplier) {
+        this.activeSeasonSupplier = supplier == null ? () -> 0 : supplier;
+        return this;
+    }
+
+    public int activeSeasonId() {
+        return activeSeasonSupplier.getAsInt();
     }
     private final Map<Long, ChannelCooldownWrite> channelCooldownWrites = new HashMap<>();
     /**

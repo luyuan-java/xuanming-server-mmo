@@ -4,6 +4,7 @@ import static com.game.scene.world.SceneMessageIds.tip;
 import static com.game.table.SkillErrorTip.skill_error.*;
 
 import com.game.battle.engine.ClassSkillRules;
+import com.game.battle.engine.SeasonRules;
 import com.game.proto.ListSkillsResponse;
 import com.game.proto.PlayerSkillComp;
 import com.game.proto.PlayerSkillListComp;
@@ -13,6 +14,7 @@ import com.game.proto.UpgradeSkillResponse;
 import com.game.scene.attribute.AttributeService;
 import com.game.scene.pet.PetService;
 import com.game.table.PetErrorTip;
+import com.game.table.SeasonErrorTip;
 import com.game.proto.SupportSkillPreview;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.currency.CurrencyService;
@@ -29,6 +31,7 @@ public final class ClassSkillService {
     private final CurrencyService currency;
     private final AttributeService attributes;
     private final PetService pets;
+    private java.util.function.IntSupplier activeSeason = () -> 0;
 
     public ClassSkillService(CurrencyService currency, AttributeService attributes) {
         this(currency, attributes, null);
@@ -38,6 +41,11 @@ public final class ClassSkillService {
         this.pets = pets;
         this.currency = currency;
         this.attributes = attributes;
+    }
+
+    public ClassSkillService withActiveSeason(java.util.function.IntSupplier activeSeason) {
+        this.activeSeason = activeSeason == null ? () -> 0 : activeSeason;
+        return this;
     }
 
     static int busy(ScenePlayer player) {
@@ -56,6 +64,11 @@ public final class ClassSkillService {
 
     /** 显式客户端投影，绝不把内部持久未知字段或未来技能传出。 */
     public static ListSkillsResponse book(ScenePlayer player) {
+        return book(player, 0);
+    }
+
+    /** 显式客户端投影：按当季 activeSeasonId 自动并入本季免费技能，不写入永久存档。 */
+    public static ListSkillsResponse book(ScenePlayer player, int activeSeasonId) {
         var catalog = player.skillCatalog();
         var owned = player.learnedSkills();
         int level = PlayerLevels.effective(player.level());
@@ -63,16 +76,36 @@ public final class ClassSkillService {
         var list = PlayerSkillListComp.newBuilder();
         for (int id : player.skills()) {
             SkillTable row = catalog.row(id);
+            if (row != null && row.getSeasonId() != 0) continue;
             var entry = PlayerSkillComp.newBuilder().setSkillTableId(id);
             if (ClassSkillCatalog.ranked(row)) entry.setRank(owned.rank(id));
             list.addSkillList(entry);
+        }
+        var rows = new java.util.ArrayList<SkillTable>();
+        for (SkillTable row : catalog.classRows(player.classId())) {
+            if (row.getSeasonId() != 0 && !SeasonRules.isSkillActiveInSeason(row.getSeasonId(), activeSeasonId)) {
+                continue;
+            }
+            rows.add(row);
+        }
+        // 当季免费赛季技能按 skill_table_id 升序并入已拥有列表（不落库）
+        for (SkillTable row : rows) {
+            if (row.getSeasonId() == 0 || !ClassSkillCatalog.forSubject(row, 1)) continue;
+            int effRank = SeasonRules.effectiveSeasonalSkillRank(level, row.getUnlockLevel(), row.getMaxRank());
+            if (effRank > 0) {
+                list.addSkillList(PlayerSkillComp.newBuilder().setSkillTableId(row.getId()).setRank(effRank));
+            }
         }
         var result = ListSkillsResponse.newBuilder().setErrorMessage(tip(0)).setSkillList(list)
                 .setClassId(player.classId()).setPlayerLevel(level).setCurrencyBalance(balance);
         var previews = new java.util.HashMap<Integer, SupportSkillPreview>();
         CharacterSupport.build(player).getPreviewsList().forEach(preview -> previews.put(preview.getSkillTableId(), preview));
-        for (SkillTable row : catalog.classRows(player.classId())) {
-            var view = catalogEntry(catalog, row, owned.rank(row.getId()), level, balance, busy(player), false);
+        int busyTip = busy(player);
+        for (SkillTable row : rows) {
+            int rank = row.getSeasonId() != 0
+                    ? SeasonRules.effectiveSeasonalSkillRank(level, row.getUnlockLevel(), row.getMaxRank())
+                    : owned.rank(row.getId());
+            var view = catalogEntry(catalog, row, rank, level, balance, busyTip, false);
             var preview = previews.get(row.getId());
             if (preview != null) view.setSupportPreview(preview);
             result.addCatalog(view);
@@ -81,7 +114,11 @@ public final class ClassSkillService {
     }
 
     public static ListSkillsResponse book(ScenePlayer player, long petId) {
-        if (petId == 0) return book(player);
+        return book(player, petId, 0);
+    }
+
+    public static ListSkillsResponse book(ScenePlayer player, long petId, int activeSeasonId) {
+        if (petId == 0) return book(player, activeSeasonId);
         var result = ListSkillsResponse.newBuilder().setPetId(petId);
         var pet = player.pets().find(petId);
         if (pet == null) return result.setErrorMessage(tip(PetErrorTip.pet_error.kPetNotFound_VALUE)).build();
@@ -96,18 +133,23 @@ public final class ClassSkillService {
                 .setSkillTableId(id).setRank(ClassSkillCatalog.petStoredRank(pet, species, id))));
         int blocked = busy(player);
         if (blocked == 0 && PlayerLevels.effective(player.level()) < level) blocked = PetErrorTip.pet_error.kPetOwnerLevelNotEnough_VALUE;
-        for (var row : catalog.petRows())
+        for (var row : catalog.petRows()) {
+            if (row.getSeasonId() != 0 && !SeasonRules.isSkillActiveInSeason(row.getSeasonId(), activeSeasonId)) continue;
             result.addCatalog(catalogEntry(catalog, row, ClassSkillCatalog.petStoredRank(pet, species, row.getId()),
                     level, balance, blocked, true));
+        }
         return result.build();
     }
 
     private static SkillCatalogEntry.Builder catalogEntry(ClassSkillCatalog catalog, SkillTable row, int rank,
             int level, long balance, int blocked, boolean pet) {
         int limit = ClassSkillRules.rankLimit(level, row.getUnlockLevel(), row.getMaxRank());
+        boolean seasonal = row.getSeasonId() != 0;
         boolean full = Integer.compareUnsigned(rank, row.getMaxRank()) >= 0;
-        long cost = full ? 0 : ClassSkillRules.upgradeCost(rank + 1, row.getUnlockLevel());
-        if (blocked == 0) blocked = full ? kSkillMaxRankReached_VALUE
+        long cost = (!seasonal && !full) ? ClassSkillRules.upgradeCost(rank + 1, row.getUnlockLevel()) : 0;
+        int blockTip = seasonal ? SeasonErrorTip.season_error.kSeasonSkillNoUpgrade_VALUE
+                : blocked != 0 ? blocked
+                : full ? kSkillMaxRankReached_VALUE
                 : Integer.compareUnsigned(rank, limit) >= 0 ? kSkillLevelNotEnough_VALUE
                 : Long.compareUnsigned(cost, balance) > 0 ? kSkillGoldNotEnough_VALUE : 0;
         return SkillCatalogEntry.newBuilder().setSkillTableId(row.getId()).setName(row.getName())
@@ -116,8 +158,9 @@ public final class ClassSkillService {
                 .setTargetTeam(row.getTargetTeam()).setMaxTargets(pet ? row.getPetMaxTargets() : row.getMaxTargets())
                 .setUnlockLevel(row.getUnlockLevel()).setMaxRank(row.getMaxRank()).setRank(rank).setRankLimit(limit)
                 .setManaPercent(row.getManaPercent()).setCooldownRounds(row.getCooldownRounds()).setNextRankCost(cost)
-                .setUpgradeBlockTipId(blocked).setDurationRounds(catalog.durationRounds(row)).setAllowDeadTarget(row.getAllowDeadTarget() != 0)
-                .setAbilityKind(row.getAbilityKind()).setCasterMask(row.getCasterMask()).setActionTags(row.getActionTags());
+                .setUpgradeBlockTipId(blockTip).setDurationRounds(catalog.durationRounds(row)).setAllowDeadTarget(row.getAllowDeadTarget() != 0)
+                .setAbilityKind(row.getAbilityKind()).setCasterMask(row.getCasterMask()).setActionTags(row.getActionTags())
+                .setSeasonId(row.getSeasonId());
     }
 
     public UpgradeSkillResponse upgrade(ScenePlayer player, UpgradeSkillRequest request) {
@@ -126,6 +169,7 @@ public final class ClassSkillService {
             return rejected(player, kSkillUpgradeCountInvalid_VALUE);
         SkillTable row = player.skillCatalog().row(request.getSkillTableId());
         if (row == null) return rejected(player, CommonErrorTip.common_error.kInvalidTableId_VALUE);
+        if (row.getSeasonId() != 0) return rejected(player, SeasonErrorTip.season_error.kSeasonSkillNoUpgrade_VALUE);
         if (!ClassSkillCatalog.characterCanLearn(row, player.classId()))
             return rejected(player, kSkillNotInClass_VALUE);
         int busy = busy(player);
@@ -143,7 +187,7 @@ public final class ClassSkillService {
         if (payment.tipId() != 0) return rejected(player, payment.tipId());
         payment.commitSkills(candidate, AssetAudit.Reason.SKILL_UPGRADE, Integer.toUnsignedLong(row.getId()));
         if (ClassSkillCatalog.passive(row)) attributes.skillsChanged(player);
-        return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(0)).setState(book(player))
+        return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(0)).setState(book(player, activeSeason.getAsInt()))
                 .setUpgradedCount(plan.steps()).setStopTipId(plan.steps() < request.getCount() ? stop(plan.stop()) : 0).build();
     }
 
@@ -159,6 +203,7 @@ public final class ClassSkillService {
         else if (pet == null) error = PetErrorTip.pet_error.kPetNotFound_VALUE;
         else if (species == null || pets == null) error = CommonErrorTip.common_error.kInvalidTableData_VALUE;
         else if (row == null) error = CommonErrorTip.common_error.kInvalidTableId_VALUE;
+        else if (row.getSeasonId() != 0) error = SeasonErrorTip.season_error.kSeasonSkillNoUpgrade_VALUE;
         else if (!ClassSkillCatalog.forSubject(row, 2)) error = kSkillNotInClass_VALUE;
         else if (busy(player) != 0) error = kSkillUpgradeBusy_VALUE;
         else {
@@ -174,12 +219,12 @@ public final class ClassSkillService {
                 if (error == 0) response.setUpgradedCount(plan.steps()).setStopTipId(plan.steps() < request.getCount() ? stop(plan.stop()) : 0);
             }
         }
-        var state = book(player, petId);
+        var state = book(player, petId, activeSeason.getAsInt());
         if (state.getErrorMessage().getId() == 0) response.setState(state);
         return response.setErrorMessage(tip(error)).build();
     }
 
-    private static UpgradeSkillResponse rejected(ScenePlayer player, int error) {
-        return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(error)).setState(book(player)).build();
+    private UpgradeSkillResponse rejected(ScenePlayer player, int error) {
+        return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(error)).setState(book(player, activeSeason.getAsInt())).build();
     }
 }

@@ -401,6 +401,10 @@ final class ConfiguredBattle {
             for (var artifact : actor.state().getArtifactStatesBuilderList()) {
                 if (artifact.getPendingRound() != 0 && artifact.getPendingRound() <= ctx.roundIndex()) artifact.clearPendingAilmentKind().clearPendingRound();
             }
+            if (actor.state().hasSeasonSealState()) {
+                var seal = actor.state().getSeasonSealStateBuilder();
+                if (seal.getPendingRound() != 0 && seal.getPendingRound() <= ctx.roundIndex()) seal.clearPendingAilmentKind().clearPendingRound();
+            }
         }
     }
 }

@@ -99,14 +99,14 @@ public final class ClassSkillCatalog {
 
     public int effectiveRank(int classId, int level, PlayerSkills owned, int id) {
         SkillTable row = row(id);
-        return row == null || !characterCanLearn(row, classId) ? 0
+        return row == null || row.getSeasonId() != 0 || !characterCanLearn(row, classId) ? 0
                 : ClassSkillRules.effectiveRank(owned.rank(id), PlayerLevels.effective(level),
                         row.getUnlockLevel(), row.getMaxRank());
     }
 
     public boolean usable(int classId, int level, PlayerSkills owned, int id) {
         SkillTable row = row(id);
-        if (row == null || !owned.contains(id)) return false;
+        if (row == null || row.getSeasonId() != 0 || !owned.contains(id)) return false;
         if (row.getBattleModel() != 0 || ranked(row)) return effectiveRank(classId, level, owned, id) != 0;
         return skills.values().stream().noneMatch(skill -> classId != 0 && skill.getClassId() == classId);
     }
@@ -119,7 +119,7 @@ public final class ClassSkillCatalog {
     public void grantSeeds(int classId, int level, PlayerSkills owned, List<Integer> seeds) {
         for (int id : seeds) {
             SkillTable row = row(id);
-            if (row == null) continue;
+            if (row == null || row.getSeasonId() != 0) continue;
             if (row.getBattleModel() == 0 && !ranked(row)) {
                 if (!owned.contains(id)) owned.setRank(id, 0);
             } else if (characterCanLearn(row, classId) && owned.rank(id) == 0
@@ -141,12 +141,30 @@ public final class ClassSkillCatalog {
     }
 
     public double passive(int classId, int level, PlayerSkills owned, ClassSkillRules.PassiveStat stat) {
+        return passive(classId, level, owned, stat, 0);
+    }
+
+    public double passive(int classId, int level, PlayerSkills owned, ClassSkillRules.PassiveStat stat, int activeSeasonId) {
         double total = 0;
         for (var entry : owned.entries()) {
             SkillTable row = row(entry.getSkillId());
+            if (row == null || row.getSeasonId() != 0) continue;
             int rank = effectiveRank(classId, level, owned, entry.getSkillId());
             if (rank != 0 && ClassSkillRules.parsePassiveStat(row.getPassiveStat()) == stat)
                 total += row.getPassivePercent() * ClassSkillRules.passiveRankFactor(rank);
+        }
+        if (activeSeasonId != 0) {
+            int effLevel = PlayerLevels.effective(level);
+            for (SkillTable row : classRows(classId)) {
+                if (row.getSeasonId() != activeSeasonId || !forSubject(row, 1) || row.getPassiveStat().isEmpty()) {
+                    continue;
+                }
+                int rank = com.game.battle.engine.SeasonRules.effectiveSeasonalSkillRank(
+                        effLevel, row.getUnlockLevel(), row.getMaxRank());
+                if (rank != 0 && ClassSkillRules.parsePassiveStat(row.getPassiveStat()) == stat) {
+                    total += row.getPassivePercent() * ClassSkillRules.passiveRankFactor(rank);
+                }
+            }
         }
         return total;
     }

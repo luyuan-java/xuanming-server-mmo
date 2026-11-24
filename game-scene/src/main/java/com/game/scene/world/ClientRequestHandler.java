@@ -140,7 +140,7 @@ public final class ClientRequestHandler {
         register(ids.moveStop(), MoveStopC2S.class, FreezePolicy.DROP, BattlePolicy.STOP_ONLY,
                 (call, req) -> world.applyMove(call.player(), MoveInput.of(req)));
         register(ids.listSkills(), com.game.proto.ListSkillsRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
-                (call, req) -> call.reply(com.game.scene.skill.ClassSkillService.book(call.player(), req.getPetId())));
+                (call, req) -> call.reply(com.game.scene.skill.ClassSkillService.book(call.player(), req.getPetId(), world.activeSeasonId())));
         // 63 自己判在途（选目标中 / 冻结中都回 3014），冻结闸对它放行
         // 63 自己判战斗在途（3023，先于换图在途 3014，scene-battle-spec §7.13）
         register(ids.enterScene(), EnterSceneC2SRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED, this::enterScene);

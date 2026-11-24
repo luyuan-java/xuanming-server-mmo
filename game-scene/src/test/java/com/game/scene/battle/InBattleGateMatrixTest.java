@@ -134,6 +134,7 @@ class InBattleGateMatrixTest {
     private static final int ZONE_TRAVEL_IN_BATTLE = 3025;
     private static final int EQUIPMENT_IN_BATTLE = 28007;
     private static final int MYSTERY_MERCHANT_IN_BATTLE = 30007;
+    private static final int SEASON_IN_BATTLE = 34009;
     private static final java.util.Set<String> EQUIPMENT_METHODS = java.util.Set.of(
             "EquipItem", "UnequipItem", "GmGrantItem", "EnhanceEquip", "InlayGem", "RemoveGem",
             "CommitEquipmentCraft", "ClaimEquipmentMaterialReward");
@@ -163,6 +164,7 @@ class InBattleGateMatrixTest {
     private static final String AFK_PASS = "SceneAfkPassClientPlayer";
     private static final String BATTLE_RESULT = "SceneBattleResultClientPlayer";
     private static final String MYSTERY_MERCHANT = "SceneMysteryMerchantClientPlayer";
+    private static final String SEASON = "SceneSeasonClientPlayer";
 
     /** 战斗中的预期（除了正数 = 应答里的拒绝码之外的三种）。 */
     private static final int SAME_AS_NOT_IN_BATTLE = -1;
@@ -213,12 +215,15 @@ class InBattleGateMatrixTest {
             new Row(406, BAG, "CommitEquipmentCraft", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
             new Row(408, BAG, "ClaimEquipmentMaterialReward", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
             new Row(315, MYSTERY_MERCHANT, "BuyMysteryMerchantGoods", BattlePolicy.GATED, MYSTERY_MERCHANT_IN_BATTLE),
+            new Row(454, SEASON, "EquipSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
+            new Row(455, SEASON, "CatchupSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
             // 批次 5.4：226 跨 zone 传送自己判战斗在途（基线 kZoneTravelInBattle，player_lifecycle.cpp:2784-2788），计在 zone_travel 闸上
             new Row(226, SCENE, "TravelToZone", BattlePolicy.GATED, ZONE_TRAVEL_IN_BATTLE),
             // ALLOW：只读
             new Row(43, SCENE, "SceneInfoC2S", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(253, SCENE, "GetSyncDigest", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(314, MYSTERY_MERCHANT, "GetMysteryMerchantInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(453, SEASON, "GetSeasonState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(77, SKILL, "ListSkills", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(54, CURRENCY, "GetCurrencyList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(167, ATTRIBUTE, "GetAttributePanel", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -332,9 +337,9 @@ class InBattleGateMatrixTest {
         assertThat(List.of(134, 132)).allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).isEqualTo(BattlePolicy.DROP));
         assertThat(f.handler.battlePolicy(131)).isEqualTo(BattlePolicy.STOP_ONLY);
         assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226,
-                246, 247, 249, 250, 251, 252, 315, 317, 406, 408))
+                246, 247, 249, 250, 251, 252, 315, 317, 406, 408, 454, 455))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.GATED));
-        assertThat(List.of(43, 253, 314, 77, 54, 167, 181, 190, 348, 191, 374, 404, 405, 407, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
+        assertThat(List.of(43, 253, 314, 453, 77, 54, 167, 181, 190, 348, 191, 374, 404, 405, 407, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.ALLOW));
         assertThat(f.handler.battlePolicy(136)).as("没有处理器的方法没有策略（战斗与否都回 1006）").isNull();
         assertThat(registered).as("现有方法逐个显式声明，没有一个落到缺省 REJECT（D11：没有行为变化）")
@@ -647,6 +652,26 @@ class InBattleGateMatrixTest {
                     .setExpectedItemConfigId(resolved.itemConfigId())
                     .setExpectedItemCount(resolved.itemCount())
                     .setClientRequestId(5003L)
+                    .build();
+        });
+        out.put(SEASON + "GetSeasonState", s -> com.game.proto.GetSeasonStateRequest.getDefaultInstance());
+        out.put(SEASON + "EquipSeasonSeal", s -> {
+            var rule = s.world().seasonTables.activeSeason(s.world().clock.epochMillis());
+            int otherSeal = s.world().seasonTables.validSealsOf(rule.getId()).stream()
+                    .mapToInt(com.game.table.SeasonSealTable::getId)
+                    .filter(id -> id != rule.getDefaultSealId())
+                    .findFirst().orElseThrow();
+            return com.game.proto.EquipSeasonSealRequest.newBuilder()
+                    .setSeasonId(rule.getId()).setSealId(otherSeal).build();
+        });
+        out.put(SEASON + "CatchupSeasonSeal", s -> {
+            var rule = s.world().seasonTables.activeSeason(s.world().clock.epochMillis());
+            return com.game.proto.CatchupSeasonSealRequest.newBuilder()
+                    .setClientRequestId(5004L)
+                    .setSeasonId(rule.getId())
+                    .setPointsToBuy(1)
+                    .setExpectedCurrencyType(rule.getCatchupCurrencyType())
+                    .setExpectedTotalPrice(rule.getCatchupPricePerPoint())
                     .build();
         });
         out.put(BATTLE_RESULT + "GetRecentBattleResults", s -> com.game.proto.GetRecentBattleResultsRequest.getDefaultInstance());
@@ -1077,6 +1102,20 @@ class InBattleGateMatrixTest {
             assertThat(w.currency.add(subject.player(), resolved.currencyType(), resolved.price() * 2, Reason.GM_GRANT).ok()).isTrue();
             w.sink.clear();
         }
+        if (row.service().equals(SEASON)) {
+            var rule = w.seasonTables.activeSeason(w.clock.epochMillis());
+            if (rule == null) {
+                var firstEnabled = BattleFixture.CONFIG.seasonRule().all().stream()
+                        .filter(com.game.table.SeasonRuleTable::getEnabled).findFirst().orElseThrow();
+                w.clock.setEpochMillis(firstEnabled.getStartsAtMs() + 1_000L);
+                rule = w.seasonTables.activeSeason(w.clock.epochMillis());
+            }
+            if (row.method().equals("CatchupSeasonSeal") && rule != null) {
+                assertThat(w.currency.add(subject.player(), rule.getCatchupCurrencyType(),
+                        Math.max(rule.getCatchupPricePerPoint() * 2L, 100L), Reason.GM_GRANT).ok()).isTrue();
+                w.sink.clear();
+            }
+        }
         if (row.service().equals(BAG) && (row.method().equals("PreviewEquipmentCraft") || row.method().equals("CommitEquipmentCraft"))) {
             var rules = w.craft.getRules(subject.player());
             var recipe = rules.getRecipes(0);
@@ -1213,9 +1252,9 @@ class InBattleGateMatrixTest {
         return f.count("game.scene.battle.gate.rejects", "gate", gate);
     }
 
-    /** 包含跨区、装备与神秘商人的全部闸（{@code game_scene_battle_gate_rejects_total{gate}}）。 */
+    /** 包含跨区、装备、神秘商人与赛季的全部闸（{@code game_scene_battle_gate_rejects_total{gate}}）。 */
     private static final List<String> GATES = List.of("enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default",
-            "zone_travel", "equipment", "mystery_merchant");
+            "zone_travel", "equipment", "mystery_merchant", "season");
 
     private Map<String, Double> gateRejectsByGate() {
         Map<String, Double> out = new TreeMap<>();
@@ -1244,6 +1283,7 @@ class InBattleGateMatrixTest {
             case PET -> "pet";
             case BAG -> EQUIPMENT_METHODS.contains(row.method()) ? "equipment" : "bag_sort";
             case MYSTERY_MERCHANT -> "mystery_merchant";
+            case SEASON -> "season";
             default -> throw new AssertionError(row.key() + " 是 GATED，但没有登记它计在哪个闸上（规格 §9 的 gate 取值）");
         };
     }

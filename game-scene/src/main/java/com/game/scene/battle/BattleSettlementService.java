@@ -74,6 +74,7 @@ public final class BattleSettlementService {
     private final SceneBattleMetrics metrics;
     private final SceneClock clock;
     private final int notifyPetListChanged;
+    private com.game.scene.season.SeasonService seasonService;
 
     /** @param notifyPetListChanged 184 的消息号（{@code ScenePetClientPlayer.NotifyPetListChanged}） */
     public BattleSettlementService(CurrencyService currency, BagService bags, PetService pets, MissionService missions,
@@ -86,6 +87,11 @@ public final class BattleSettlementService {
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.notifyPetListChanged = notifyPetListChanged;
+    }
+
+    public BattleSettlementService withSeasonService(com.game.scene.season.SeasonService seasonService) {
+        this.seasonService = seasonService;
+        return this;
     }
 
     /**
@@ -376,6 +382,10 @@ public final class BattleSettlementService {
                                     Map<Integer, Long> itemsGained, Map<Integer, Long> itemsConsumed) {
         long nowMs = clock.epochMillis();
         int materialCreditAdded = com.game.scene.equip.EquipmentCraftService.creditBattleMaterialReward(player, settlement, nowMs);
+        var seasonCredit = seasonService == null
+                ? com.game.scene.season.SeasonService.BattleCreditOutcome.NONE
+                : seasonService.creditBattlePoints(player, settlement, nowMs);
+        int recordedSeasonId = settlement.getSeasonId() != 0 ? settlement.getSeasonId() : seasonCredit.seasonId();
         com.game.player.store.state.BattleResultEntryState.Builder entry = com.game.player.store.state.BattleResultEntryState.newBuilder()
                 .setBattleId(settlement.getBattleId())
                 .setOutcome(settlement.getOutcomeValue())
@@ -388,7 +398,7 @@ public final class BattleSettlementService {
                 .setMatchMode(settlement.getMatchMode())
                 .setBattleConfigId(settlement.getBattleConfigId())
                 .setMaterialCreditUnitsAdded(materialCreditAdded)
-                .setSeasonId(settlement.getSeasonId());
+                .setSeasonId(recordedSeasonId);
         if (goldCredited > 0) {
             entry.addCurrencies(com.game.player.store.state.BattleResultCurrencyState.newBuilder()
                     .setCurrencyType(Wallet.GOLD)

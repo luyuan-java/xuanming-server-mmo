@@ -149,7 +149,7 @@ class ClassSkillClientTest {
         var book = ListSkillsResponse.parseFrom(frame.getSerializedMessage());
         assertThat(book.getSkillList().getSkillListList()).extracting(e -> e.getSkillTableId()).containsExactly(1101, 1106);
         assertThat(book.getSkillList().getSkillListList()).allSatisfy(e -> assertThat(e.getRank()).isEqualTo(1));
-        assertThat(book.getCatalogList()).hasSize(40).allSatisfy(e -> assertThat(e.getCasterMask() & 1).isEqualTo(1));
+        assertThat(book.getCatalogList()).hasSize(41).allSatisfy(e -> assertThat(e.getCasterMask() & 1).isEqualTo(1));
         assertThat(book.getClassId()).isEqualTo(1);
         assertThat(book.getPlayerLevel()).isEqualTo(85);
         assertThat(book.getCurrencyBalance()).isEqualTo(10_000);

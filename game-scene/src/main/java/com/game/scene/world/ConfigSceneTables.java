@@ -88,13 +88,21 @@ public final class ConfigSceneTables implements SceneTables {
                 continue;
             }
             if (nav.startsWith(CURRENT_NAV_PREFIX)) {
-                if (row.getId() != 3 || !nav.equals(CURRENT_NAV_PREFIX + CurrentMapNavigation.YUEXI_FOLDER + "/scene.bin")) {
-                    throw new IllegalStateException("新版主世界导航与 BaseScene 不匹配: " + row.getId());
+                if (!nav.endsWith("/scene.bin")) {
+                    throw new IllegalStateException("新版主世界导航路径缺少 /scene.bin: " + row.getId());
                 }
-                CurrentMapNavigation grid = CurrentMapNavigation.loadYuexi(navigationRoot);
+                String relativeFolder = nav.substring(CURRENT_NAV_PREFIX.length(), nav.length() - "/scene.bin".length());
+                CurrentMapNavigation grid;
+                if (row.getId() == 3 && CurrentMapNavigation.YUEXI_FOLDER.equals(relativeFolder)) {
+                    grid = CurrentMapNavigation.loadYuexi(navigationRoot);
+                } else if (row.getId() == 3) {
+                    throw new IllegalStateException("新版主世界导航与 BaseScene 不匹配: " + row.getId());
+                } else {
+                    grid = CurrentMapNavigation.loadVersionedCurrentMap(navigationRoot, relativeFolder, row.getId());
+                }
                 if (!spawn.isFinite() || spawn.z() != grid.spawn().z()
                         || grid.spawn().horizontalDistance(spawn) > 1e-9 || !grid.isWalkable(spawn)) {
-                    throw new IllegalStateException("BaseScene 出生点与月汐湾导航不一致: " + row.getId());
+                    throw new IllegalStateException("BaseScene 出生点与新版主世界导航不一致: " + row.getId());
                 }
                 navigation.put(row.getId(), grid);
                 continue;

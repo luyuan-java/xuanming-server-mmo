@@ -130,6 +130,11 @@ public class SceneNodeConfiguration {
         return com.game.scene.merchant.MysteryMerchantTables.from(tables);
     }
 
+    @Bean
+    public com.game.scene.season.SeasonTables seasonTables(ConfigTables tables) {
+        return com.game.scene.season.SeasonTables.from(tables);
+    }
+
     /** 显式开启 game.scene.content-guard-enabled=true 时接入内容安全 Dubbo 服务（角色改名与宝宝改名共用）。 */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnProperty(name = "game.scene.content-guard-enabled", havingValue = "true")
@@ -193,6 +198,7 @@ public class SceneNodeConfiguration {
                                PlayerRenameTables playerRenameTables,
                                com.game.scene.afkpass.AfkPassTables afkPassTables,
                                com.game.scene.merchant.MysteryMerchantTables mysteryMerchantTables,
+                               com.game.scene.season.SeasonTables seasonTables,
                                ObjectProvider<SceneTextGuard> textGuard, NodeLinkAuth nodeLinkAuth,
                                SceneMetrics sceneMetrics, AuditProperties audit, KafkaNames kafkaNames,
                                SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source,
@@ -206,6 +212,7 @@ public class SceneNodeConfiguration {
                 .withRenameTables(playerRenameTables)
                 .withAfkPassTables(afkPassTables)
                 .withMysteryMerchantTables(mysteryMerchantTables)
+                .withSeasonTables(seasonTables)
                 .withTextGuard(textGuard.getIfAvailable())
                 .withMaintenanceBoot(boot);
     }

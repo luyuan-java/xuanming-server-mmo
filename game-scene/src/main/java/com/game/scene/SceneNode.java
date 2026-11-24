@@ -193,6 +193,7 @@ public class SceneNode implements SmartLifecycle {
     private com.game.scene.rename.PlayerRenameTables renameTables;
     private com.game.scene.afkpass.AfkPassTables afkPassTables;
     private com.game.scene.merchant.MysteryMerchantTables mysteryMerchantTables;
+    private com.game.scene.season.SeasonTables seasonTables;
     private com.game.scene.player.SceneTextGuard textGuard;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
@@ -229,6 +230,12 @@ public class SceneNode implements SmartLifecycle {
     public synchronized SceneNode withMysteryMerchantTables(com.game.scene.merchant.MysteryMerchantTables mysteryMerchantTables) {
         if (running) throw new IllegalStateException("节点已启动");
         this.mysteryMerchantTables = java.util.Objects.requireNonNull(mysteryMerchantTables);
+        return this;
+    }
+
+    public synchronized SceneNode withSeasonTables(com.game.scene.season.SeasonTables seasonTables) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.seasonTables = java.util.Objects.requireNonNull(seasonTables);
         return this;
     }
 
@@ -431,6 +438,12 @@ public class SceneNode implements SmartLifecycle {
                 equipmentRules, bags, attributes, metrics, SceneClock.SYSTEM);
         com.game.scene.merchant.MysteryMerchantService mysteryMerchantService = mysteryMerchantTables == null ? null
                 : new com.game.scene.merchant.MysteryMerchantService(mysteryMerchantTables, bags, currency, SceneClock.SYSTEM, metrics);
+        com.game.scene.season.SeasonService seasonService = seasonTables == null ? null
+                : new com.game.scene.season.SeasonService(seasonTables, currency, attributes, SceneClock.SYSTEM, metrics);
+        if (seasonService != null) {
+            attributes.withSeason((p, out) -> seasonService.collectEffects(p, SceneClock.SYSTEM.epochMillis(), out),
+                    seasonService::activeSeasonId);
+        }
         MissionService missions = new MissionService(missionTables, bags, SceneClock.SYSTEM);
         SkillService skills = new SkillService(skillTables, SceneClock.SYSTEM, metrics, ids);
         PetService petService = new PetService(petTables, currency, itemGuids(guids), SceneClock.SYSTEM,
@@ -497,6 +510,9 @@ public class SceneNode implements SmartLifecycle {
         // 世界的战斗钩子就是它（进场恢复、落盘后销账、原地解冻后重跑进场恢复），世界建好后再绑定
         BattleSettlementService settlements = new BattleSettlementService(currency, bags, petService, missions, battleTables,
                 battleMetrics, SceneClock.SYSTEM, registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged"));
+        if (seasonService != null) {
+            settlements.withSeasonService(seasonService);
+        }
         PlayerBattleService battle = new PlayerBattleService(BattleLocks.redis(new BattleRedis(redis, redisKeys)), settlements,
                 battleTables, petService, player -> battleRouting(gateLinks, player, zoneId, nodeId), teamFollow, battleMetrics,
                 SceneClock.SYSTEM, logic, registry.requireId("BattleClientPlayer", "NotifyBattleReconnect"),
@@ -542,6 +558,9 @@ public class SceneNode implements SmartLifecycle {
         sceneWorld.withAfkPassService(afkPassService)
                 .withConnectionLostHold(true)
                 .withSyncDigests(new com.game.scene.storage.RedisPlayerSyncDigests(redis, redisKeys, logic));
+        if (seasonService != null) {
+            sceneWorld.withActiveSeason(seasonService::activeSeasonId);
+        }
         battle.withInboxFailureHandler((player,failure)->sceneWorld.discardUnpersistedBattleEffect(player,player.ownerEpoch(),failure));
         repository.onFinalApplied(sceneWorld::onFinalApplied);
         repository.startFinalRecovery(scheduler);
@@ -568,6 +587,10 @@ public class SceneNode implements SmartLifecycle {
         if (!RunMode.isRecognized(props.runMode())) {
             log.warn("game.run-mode（GAME_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
         }
+        com.game.scene.skill.ClassSkillService classSkillService = new com.game.scene.skill.ClassSkillService(currency, attributes, petService);
+        if (seasonService != null) {
+            classSkillService.withActiveSeason(seasonService::activeSeasonId);
+        }
         java.util.List<com.game.scene.world.SceneFeature> features = new java.util.ArrayList<>(List.of(
                 new CurrencyFeature(currency), new AttributeFeature(attributes, registry, call -> {
                     pets.onOwnerLevelChanged(call);
@@ -576,7 +599,7 @@ public class SceneNode implements SmartLifecycle {
                 new com.game.scene.battle.BattleResultFeature(),
                 new MissionFeature(missions), new ActivityFeature(missions),
                 new SkillFeature(skills), new com.game.scene.skill.ClassSkillFeature(
-                        new com.game.scene.skill.ClassSkillService(currency, attributes, petService), attributes, registry, petService), pets));
+                        classSkillService, attributes, registry, petService), pets));
         if (appearanceService != null) {
             features.add(new com.game.scene.appearance.AppearanceFeature(appearanceService));
         }
@@ -588,6 +611,9 @@ public class SceneNode implements SmartLifecycle {
         }
         if (mysteryMerchantService != null) {
             features.add(new com.game.scene.merchant.MysteryMerchantFeature(mysteryMerchantService, bagFeature));
+        }
+        if (seasonService != null) {
+            features.add(new com.game.scene.season.SeasonFeature(seasonService, attributes, registry));
         }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, runMode, features);
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");

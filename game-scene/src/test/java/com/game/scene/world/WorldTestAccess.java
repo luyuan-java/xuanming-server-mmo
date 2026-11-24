@@ -117,4 +117,12 @@ public final class WorldTestAccess {
         player.setName(name);
         return player;
     }
+
+    /** 带完整技能目录的玩家实例（测职业/赛季技能投影与快照用）。 */
+    public static ScenePlayer playerWithCatalog(long playerId, int classId, int level,
+                                                com.game.player.store.state.PlayerState state,
+                                                com.game.scene.skill.ClassSkillCatalog catalog) {
+        return new ScenePlayer(playerId, 10_000 + playerId, new SessionKey(1, (int) playerId), 1, classId, 1,
+                "look-" + playerId, level, java.util.List.of(), Vec3.ORIGIN, state, 0L, catalog);
+    }
 }

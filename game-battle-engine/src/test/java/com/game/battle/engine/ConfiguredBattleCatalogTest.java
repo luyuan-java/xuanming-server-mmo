@@ -159,8 +159,8 @@ class ConfiguredBattleCatalogTest {
 
     @Test void 每个正式主动技能都能被许可主体实际施放() {
         var catalog = TABLES.skill().all().stream().filter(s -> s.getBattleModel() == 1).toList();
-        assertThat(catalog).hasSize(61);
-        assertThat(TABLES.buff().all().stream().filter(b -> b.getBattleOp() != 0).count()).isEqualTo(62);
+        assertThat(catalog).hasSize(66);
+        assertThat(TABLES.buff().all().stream().filter(b -> b.getBattleOp() != 0).count()).isEqualTo(69);
         int casts = 0;
         for (SkillTable skill : catalog) {
             if (skill.getAbilityKind() != 1) continue;
@@ -168,6 +168,9 @@ class ConfiguredBattleCatalogTest {
                 if ((skill.getCasterMask() & mask) == 0) continue;
                 boolean pet = mask == 2;
                 var request = request();
+                if (!pet && skill.getSeasonId() != 0) {
+                    request.getPlayersBuilder(0).setActiveSeasonId(skill.getSeasonId());
+                }
                 learn(request,skill.getId(),pet);
                 var engine = TestBattles.start(request,DATA);
                 var result = cast(engine,skill.getId(),pet);
@@ -175,7 +178,7 @@ class ConfiguredBattleCatalogTest {
                 casts++;
             }
         }
-        assertThat(casts).isEqualTo(51);
+        assertThat(casts).isEqualTo(56);
     }
 
     @Test void 中立治疗和初始护盾预览等于同局实际收益且按独立加成扣蓝() {

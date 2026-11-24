@@ -41,14 +41,17 @@ final class BattleEquipment {
                 && bounded(p.getAilmentHitBpsMap(),7,10000) && bounded(p.getAilmentResistBpsMap(),7,10000);
     }
 
+    /** 哨兵下标：标识单槽赛季印（不进入永久法宝数组，使用独立 {@code season_seal_state} 与 {@code season_seal_id}）。 */
+    static final int SEASON_SEAL_INDEX = -1;
+
     private static boolean validArtifact(EquipmentArtifactSource a) {
-        int id = a.getEffectId();
-        return a.getItemId() > 0 && id >= 1 && id <= 8 && a.getBonusBps() > 0 && a.getBonusBps() <= 10000
-                && Integer.compareUnsigned(a.getCapBps(),10000) <= 0 && Integer.compareUnsigned(a.getHealthThresholdBps(),10000) <= 0
-                && Integer.compareUnsigned(a.getPerRoundLimit(),1) <= 0 && Integer.compareUnsigned(a.getBattleLimit(),3) <= 0
-                && Integer.compareUnsigned(a.getActiveRounds(),2) <= 0 && (id == 6 || a.getPerRoundLimit() > 0)
-                && ((id != 3 && id < 6) || a.getBattleLimit() > 0) && (id != 6 || (a.getCapBps() > 0 && a.getActiveRounds() > 0))
-                && (id != 4 || a.getHealthThresholdBps() != 0);
+        return a.getItemId() > 0 && SeasonRules.validArtifactDefinition(a.getEffectId(), a.getBonusBps(),
+                a.getCapBps(), a.getPerRoundLimit(), a.getBattleLimit(), a.getActiveRounds(), a.getHealthThresholdBps());
+    }
+
+    private static boolean validSeasonSeal(SeasonSealEffect s) {
+        return SeasonRules.validSealEffect(s.getSeasonId(), s.getSealId(), s.getEffectId(), s.getBonusBps(),
+                s.getCapBps(), s.getPerRoundLimit(), s.getBattleLimit(), s.getActiveRounds(), s.getHealthThresholdBps());
     }
 
     static boolean initialize(BattleActorState.Builder actor, EquipmentEffects equipment) {
@@ -57,6 +60,8 @@ final class BattleEquipment {
                 equipment.getMagicCritBps(),equipment.getPhysicalResistBps(),equipment.getMagicResistBps()};
         int[] limits = {3200,3200,800,200,3200,3200,800,800,600,600};
         for (int i = 0; i < values.length; i++) if (Integer.compareUnsigned(values[i],limits[i]) > 0) return false;
+        if (Integer.compareUnsigned(equipment.getSeasonMaxHealthBps(), SeasonRules.HARD_STAT_CAP_BPS) > 0
+                || Integer.compareUnsigned(equipment.getSeasonDefenseBps(), SeasonRules.HARD_STAT_CAP_BPS) > 0) return false;
         if (!bounded(equipment.getAilmentHitBpsMap(),7,1600) || !bounded(equipment.getAilmentResistBpsMap(),7,1600)
                 || !bounded(equipment.getManaReductionBpsMap(),12,1200) || equipment.getArtifactsCount() > 2) return false;
         var ids = new HashSet<Long>();
@@ -65,6 +70,12 @@ final class BattleEquipment {
             if (!validArtifact(artifact) || !ids.add(artifact.getItemId())) return false;
             copy.addArtifacts(artifact);
             actor.addArtifactStatesBuilder().setItemId(artifact.getItemId());
+        }
+        actor.clearSeasonSealState();
+        if (equipment.hasSeasonSeal()) {
+            var seal = equipment.getSeasonSeal();
+            if (!validSeasonSeal(seal)) return false;
+            actor.getSeasonSealStateBuilder().setItemId(Integer.toUnsignedLong(seal.getSealId()));
         }
         if (!validSources(equipment)) copy.clearSupportSources().clearSupportSourcesComplete();
         actor.setEquipmentEffects(copy).setEntryMaxHealth(actor.getMaxHealth()).setEntryMaxMana(actor.getMaxMana());
@@ -86,28 +97,61 @@ final class BattleEquipment {
         return heal == equipment.getOutgoingHealBps() && shield == equipment.getShieldCapacityBps();
     }
 
+    int bonusBps(BattleUnit actor, int index) {
+        var eq = actor.state().getEquipmentEffects();
+        return index == SEASON_SEAL_INDEX ? eq.getSeasonSeal().getBonusBps() : eq.getArtifacts(index).getBonusBps();
+    }
+
+    int capBps(BattleUnit actor, int index) {
+        var eq = actor.state().getEquipmentEffects();
+        return index == SEASON_SEAL_INDEX ? eq.getSeasonSeal().getCapBps() : eq.getArtifacts(index).getCapBps();
+    }
+
+    int healthThresholdBps(BattleUnit actor, int index) {
+        var eq = actor.state().getEquipmentEffects();
+        return index == SEASON_SEAL_INDEX ? eq.getSeasonSeal().getHealthThresholdBps() : eq.getArtifacts(index).getHealthThresholdBps();
+    }
+
+    private static boolean canTrigger(int effectId, int activeRounds, int battleLimit, int perRoundLimit,
+                                      BattleArtifactState usage, int kind, int roundIndex) {
+        return effectId == kind && (activeRounds == 0 || roundIndex <= activeRounds)
+                && (battleLimit == 0 || usage.getUsedCount() < battleLimit)
+                && (perRoundLimit == 0 || usage.getLastTriggerRound() != roundIndex || usage.getRoundTriggerCount() < perRoundLimit);
+    }
+
     List<Integer> available(BattleUnit actor, int kind) {
         var list = new ArrayList<Integer>();
         if (!actor.isPlayer() || !actor.isActive()) return list;
         var equipment = actor.state().getEquipmentEffects();
         for (int i = 0; i < equipment.getArtifactsCount(); i++) {
             var a = equipment.getArtifacts(i);
-            var usage = actor.state().getArtifactStates(i);
-            if (a.getEffectId() == kind && (a.getActiveRounds() == 0 || ctx.roundIndex() <= a.getActiveRounds())
-                    && (a.getBattleLimit() == 0 || usage.getUsedCount() < a.getBattleLimit())
-                    && (a.getPerRoundLimit() == 0 || usage.getLastTriggerRound() != ctx.roundIndex() || usage.getRoundTriggerCount() < a.getPerRoundLimit()))
+            if (canTrigger(a.getEffectId(), a.getActiveRounds(), a.getBattleLimit(), a.getPerRoundLimit(),
+                    actor.state().getArtifactStates(i), kind, ctx.roundIndex()))
                 list.add(i);
+        }
+        if (equipment.hasSeasonSeal() && actor.state().hasSeasonSealState()) {
+            var seal = equipment.getSeasonSeal();
+            if (canTrigger(seal.getEffectId(), seal.getActiveRounds(), seal.getBattleLimit(), seal.getPerRoundLimit(),
+                    actor.state().getSeasonSealState(), kind, ctx.roundIndex()))
+                list.add(SEASON_SEAL_INDEX);
         }
         return list;
     }
 
     void use(BattleUnit source, int index, BattleUnit target, long value) {
-        var a = source.state().getEquipmentEffects().getArtifacts(index);
-        var state = source.state().getArtifactStatesBuilder(index);
+        BattleArtifactState.Builder state = index == SEASON_SEAL_INDEX
+                ? source.state().getSeasonSealStateBuilder()
+                : source.state().getArtifactStatesBuilder(index);
         state.setUsedCount(state.getUsedCount()+1).setRoundTriggerCount(state.getLastTriggerRound() == ctx.roundIndex() ? state.getRoundTriggerCount()+1 : 1)
                 .setLastTriggerRound(ctx.roundIndex());
-        ctx.events().append(BATTLE_EVENT_ARTIFACT,source.actorId(),target.actorId()).setArtifactItemId(a.getItemId())
-                .setArtifactEffectId(a.getEffectId()).setValue(value).setSuccess(true);
+        var ev = ctx.events().append(BATTLE_EVENT_ARTIFACT,source.actorId(),target.actorId()).setValue(value).setSuccess(true);
+        if (index == SEASON_SEAL_INDEX) {
+            var seal = source.state().getEquipmentEffects().getSeasonSeal();
+            ev.setSeasonSealId(seal.getSealId()).setArtifactEffectId(seal.getEffectId());
+        } else {
+            var a = source.state().getEquipmentEffects().getArtifacts(index);
+            ev.setArtifactItemId(a.getItemId()).setArtifactEffectId(a.getEffectId());
+        }
     }
 
     static long floorBps(long amount, int bps) {
@@ -136,7 +180,7 @@ final class BattleEquipment {
         if (hit.origin == DIRECT && hit.primary == target.actorId() && hit.shieldOrdinal == 0) {
             for (int index : available(source,5)) {
                 double previous = bonus;
-                bonus += source.state().getEquipmentEffects().getArtifacts(index).getBonusBps()/10000.0;
+                bonus += bonusBps(source, index)/10000.0;
                 if (Math.floor(base*(1+bonus)) > Math.floor(base*(1+previous))) contributions.add(index);
             }
         }
@@ -147,8 +191,7 @@ final class BattleEquipment {
         long missing = Long.compareUnsigned(actor.maxMana(),actor.mana()) > 0 ? actor.maxMana()-actor.mana() : 0;
         long total = 0;
         for (int index : available(actor,7)) {
-            var a = actor.state().getEquipmentEffects().getArtifacts(index);
-            long gain = minUnsigned(missing-total,floorBps(actor.state().getEntryMaxMana(),a.getBonusBps()));
+            long gain = minUnsigned(missing-total,floorBps(actor.state().getEntryMaxMana(),bonusBps(actor, index)));
             if (gain == 0) continue;
             total += gain;
             use(actor,index,actor,gain);
@@ -162,8 +205,7 @@ final class BattleEquipment {
         if (source.teamIndex() == target.teamIndex() || (hit.origin != DIRECT && hit.origin != MIRRORED && hit.origin != PURSUED)) return amount;
         long remaining = amount;
         for (int index : available(target,6)) {
-            var a = target.state().getEquipmentEffects().getArtifacts(index);
-            long diff = minUnsigned(remaining,minUnsigned(floorBps(amount,a.getBonusBps()),floorBps(target.state().getEntryMaxHealth(),a.getCapBps())));
+            long diff = minUnsigned(remaining,minUnsigned(floorBps(amount,bonusBps(target, index)),floorBps(target.state().getEntryMaxHealth(),capBps(target, index))));
             if (diff == 0) continue;
             remaining -= diff;
             use(target,index,target,diff);
@@ -176,9 +218,8 @@ final class BattleEquipment {
         int effect = type == CombatDamageRules.PHYSICAL_DAMAGE ? 1 : type == CombatDamageRules.MAGIC_DAMAGE ? 2 : 0;
         int total = 0;
         for (int index : available(source,effect)) {
-            var a = source.state().getEquipmentEffects().getArtifacts(index);
             long before = floorBps(amount, Math.min(10000,total));
-            total += a.getBonusBps();
+            total += bonusBps(source, index);
             long left = floorBps(amount, Math.min(10000,total))-before, removed = 0;
             for (var entry : defenses) {
                 var row = battle.row(entry);
@@ -191,8 +232,10 @@ final class BattleEquipment {
                 left -= part;
                 removed += part;
                 live.setRemainingCapacity(live.getRemainingCapacity()-part);
-                ctx.events().append(BATTLE_EVENT_SHIELD,source.actorId(),target.actorId()).setBuffTableId(row.getId()).setBuffInstanceId(entry.getBuffId())
-                        .setAbsorbed(part).setShieldAfter(live.getRemainingCapacity()).setArtifactItemId(a.getItemId()).setArtifactEffectId(effect);
+                var ev = ctx.events().append(BATTLE_EVENT_SHIELD,source.actorId(),target.actorId()).setBuffTableId(row.getId()).setBuffInstanceId(entry.getBuffId())
+                        .setAbsorbed(part).setShieldAfter(live.getRemainingCapacity()).setArtifactEffectId(effect);
+                if (index == SEASON_SEAL_INDEX) ev.setSeasonSealId(source.state().getEquipmentEffects().getSeasonSeal().getSealId());
+                else ev.setArtifactItemId(source.state().getEquipmentEffects().getArtifacts(index).getItemId());
                 if (live.getRemainingCapacity() == 0) battle.remove(target,entry.getBuffId());
             }
             if (removed != 0) use(source,index,target,removed);
@@ -219,17 +262,28 @@ final class BattleEquipment {
         });
         if (kind == CONFUSION || kind == SLEEP) resist += 10000*battle.modifier(target,CONTROL_RESIST);
         boolean consumed = false;
-        if (primary) for (int i=0; i<equipment.getArtifactsCount(); i++) {
-            var a = equipment.getArtifacts(i);
-            var state = source.state().getArtifactStatesBuilder(i);
-            if (a.getEffectId() == 3 && state.getPendingRound() == ctx.roundIndex() && state.getPendingAilmentKind() == kind) {
-                accuracy += a.getBonusBps();
-                state.clearPendingRound().clearPendingAilmentKind();
-                consumed = true;
+        if (primary) {
+            for (int i=0; i<equipment.getArtifactsCount(); i++) {
+                var a = equipment.getArtifacts(i);
+                var state = source.state().getArtifactStatesBuilder(i);
+                if (a.getEffectId() == 3 && state.getPendingRound() == ctx.roundIndex() && state.getPendingAilmentKind() == kind) {
+                    accuracy += a.getBonusBps();
+                    state.clearPendingRound().clearPendingAilmentKind();
+                    consumed = true;
+                }
+            }
+            if (equipment.hasSeasonSeal() && source.state().hasSeasonSealState()) {
+                var seal = equipment.getSeasonSeal();
+                var state = source.state().getSeasonSealStateBuilder();
+                if (seal.getEffectId() == 3 && state.getPendingRound() == ctx.roundIndex() && state.getPendingAilmentKind() == kind) {
+                    accuracy += seal.getBonusBps();
+                    state.clearPendingRound().clearPendingAilmentKind();
+                    consumed = true;
+                }
             }
         }
         if (normal && kind <= 6) for (int i : available(target,8)) {
-            int bps = target.state().getEquipmentEffects().getArtifacts(i).getBonusBps();
+            int bps = bonusBps(target, i);
             resist += bps;
             use(target,i,target,bps);
         }
@@ -238,7 +292,7 @@ final class BattleEquipment {
         if (ctx.rng().rand01() < chance) return true;
         ctx.events().append(BATTLE_EVENT_RESIST,source.actorId(),target.actorId()).setBuffTableId(row.getId());
         if (primary && !consumed) for (int i : available(source,3)) {
-            var state = source.state().getArtifactStatesBuilder(i);
+            var state = i == SEASON_SEAL_INDEX ? source.state().getSeasonSealStateBuilder() : source.state().getArtifactStatesBuilder(i);
             if (state.getPendingRound() == 0) {
                 state.setPendingRound(ctx.roundIndex()+1).setPendingAilmentKind(kind);
                 use(source,i,source,kind);
@@ -271,7 +325,7 @@ final class BattleEquipment {
         for (var part : List.of(healing,shield)) {
             var available = available(actor, part == healing ? 4 : 5);
             for (var detail : part.getSourcesBuilderList()) {
-                if (detail.getConditional() && available.stream().noneMatch(i -> equipment.getArtifacts(i).getItemId() == detail.getItemId()))
+                if (detail.getConditional() && available.stream().noneMatch(i -> i >= 0 && equipment.getArtifacts(i).getItemId() == detail.getItemId()))
                     detail.setReason("当前次数/回合或角色状态不满足法宝条件，不计常驻总计");
             }
         }

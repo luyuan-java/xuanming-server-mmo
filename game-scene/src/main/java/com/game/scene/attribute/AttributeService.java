@@ -97,6 +97,8 @@ public final class AttributeService {
     private final CurrencyService currency;
     private final SceneMetrics metrics;
     private final com.game.scene.equip.EquipmentRules equipment;
+    private java.util.function.BiConsumer<ScenePlayer, com.game.proto.EquipmentEffects.Builder> seasonEffects;
+    private java.util.function.IntSupplier activeSeason = () -> 0;
 
     public AttributeService(AttributeTables tables, SceneClock clock, CurrencyService currency) {
         this(tables, clock, currency, SceneMetrics.noop());
@@ -122,6 +124,15 @@ public final class AttributeService {
 
     /** 修习被动与换装同样按比例保留当前血蓝。 */
     public void skillsChanged(ScenePlayer player) { recalculate(player, RecalcReason.SKILL); }
+
+    /** 装配赛季轻属性与当季免费技能被动来源（场景逻辑线程调用）。 */
+    public AttributeService withSeason(
+            java.util.function.BiConsumer<ScenePlayer, com.game.proto.EquipmentEffects.Builder> seasonEffects,
+            java.util.function.IntSupplier activeSeason) {
+        this.seasonEffects = seasonEffects;
+        this.activeSeason = activeSeason == null ? () -> 0 : activeSeason;
+        return this;
+    }
 
     // ------------------------------------------------------------------ 加载
 
@@ -161,6 +172,13 @@ public final class AttributeService {
         Accumulator acc = Accumulator.classInitial(classRow);
         Accumulator standard = standardBaseAtLevelCap(classRow);
         var equipmentBonus = com.game.scene.equip.EquipmentBonuses.collect(player.bags(), equipment);
+        if (seasonEffects != null) {
+            var mergedEffects = equipmentBonus.effects().toBuilder();
+            seasonEffects.accept(player, mergedEffects);
+            equipmentBonus = new com.game.scene.equip.EquipmentBonuses(
+                    equipmentBonus.primary(), equipmentBonus.allPrimary(), equipmentBonus.flat(),
+                    equipmentBonus.combat(), mergedEffects.build());
+        }
         attributes.setEquipment(equipmentBonus);
         for (AttributeDimensionTable dimension : tables.playerDimensions()) {
             double natural = (double) Integer.toUnsignedLong(dimension.getBasePerLevel()) * level;
@@ -187,15 +205,18 @@ public final class AttributeService {
         acc.speed += flat.speed(); acc.defense += flat.defense();
         var catalog = player.skillCatalog();
         var learned = player.learnedSkills();
+        int currentSeasonId = activeSeason.getAsInt();
         java.util.function.ToDoubleFunction<com.game.battle.engine.ClassSkillRules.PassiveStat> passive =
-                stat -> catalog.passive(player.classId(), player.level(), learned, stat);
+                stat -> catalog.passive(player.classId(), player.level(), learned, stat, currentSeasonId);
         var effects = equipmentBonus.effects();
-        acc.maxHealth *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAX_HEALTH) + effects.getMaxHealthBps() / 10000.0;
+        acc.maxHealth *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAX_HEALTH)
+                + (effects.getMaxHealthBps() + effects.getSeasonMaxHealthBps()) / 10000.0;
         acc.maxMana *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAX_MANA);
         acc.physicalAttack *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.PHYSICAL_ATTACK) + effects.getPhysicalAttackBps() / 10000.0;
         acc.magicAttack *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.MAGIC_ATTACK) + effects.getMagicAttackBps() / 10000.0;
         acc.speed *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.SPEED) + effects.getSpeedBps() / 10000.0;
-        acc.defense *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.DEFENSE);
+        acc.defense *= 1 + passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.DEFENSE)
+                + effects.getSeasonDefenseBps() / 10000.0;
         long crit = floor(passive.applyAsDouble(com.game.battle.engine.ClassSkillRules.PassiveStat.CRIT) * 100 + 1e-9);
         var combat = equipmentBonus.combat();
         if (crit > 0) combat = combat.toBuilder()

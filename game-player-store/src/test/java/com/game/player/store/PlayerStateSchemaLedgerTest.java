@@ -11,9 +11,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** 正常 Maven test/verify 的持久字段门禁；不写台账，不在缺少原件时自动重新建立基线。 */
 class PlayerStateSchemaLedgerTest {
-    // 第一至七代登记技能、宠物回执、宝宝条目与培养阶、角色形象试用/永久衣柜、宝宝技能重数和装备固定词条。第八代追加 ItemGainBlockState 与 ActivityVitalityState；第九代追加近期战斗结果、客户端请求幂等账本与神秘商人限购。
+    // 第一至七代登记技能、宠物回执、宝宝条目与培养阶、角色形象试用/永久衣柜、宝宝技能重数和装备固定词条。第八代追加 ItemGainBlockState 与 ActivityVitalityState；第九代追加近期战斗结果、客户端请求幂等账本与神秘商人限购；第十代追加单槽赛季印与赛季追赶幂等回执。
     private static final String GENESIS_SHA256 = "3cd2f18d61634eaabe7d5805df027877451816242bb41ff5aecb704177d7877d";
-    private static final String HEAD_SHA256 = "ccf21a294daf9041cded93df9077a26ace1307c5da75807a58d7eadd6592424e";
+    private static final String HEAD_SHA256 = "e061804d0331c09ed07daab3ddedff9fbed9cda1739c6ecde5eb69aeed4b1def";
 
     // 仅登记已经存在的领域 restore→修改→toState 未知字段往返证据；protobuf 自己的 parse/serialize 不能替代它。
     private static final Set<String> ALLOW_ADDITIONS = Set.of(
@@ -25,14 +25,15 @@ class PlayerStateSchemaLedgerTest {
             "game.storage.AssetOpLedgerState", "game.storage.AssetOpStreamLedgerState",
             "game.storage.AssetOpRejectionState", // AssetOpLedgerTest：各层记账前后保留。
             "game.storage.AppearanceState", // PlayerAppearanceTest：试用位图、未知高位与未知字段往返保留。
-            "game.storage.EquipmentState"); // EquipmentServiceTest：拆宝石、跨玩家搬运再存盘保留固定词条及嵌套未知字段。
+            "game.storage.EquipmentState", // EquipmentServiceTest：拆宝石、跨玩家搬运再存盘保留固定词条及嵌套未知字段。
+            "game.storage.ClientRequestRecordState"); // PlayerClientRequestLedger：toBuilder 原样保留已有记录及未知字段。
     // 当前根闭包没有 enum；未来 enum 新值须另有原始数值往返证据，不能沿用 unknown fields 证明。
 
     @Test void playerStateDescriptorMatchesRegisteredPersistentHistory() throws Exception {
         var current = PersistentSchemaSnapshot.capture(PlayerState.getDescriptor());
         int generation = verifyRegisteredSchema(Path.of("src/test/resources/persistent-schema"),
                 GENESIS_SHA256, HEAD_SHA256, current, ALLOW_ADDITIONS);
-        assertThat(generation).isEqualTo(9);
+        assertThat(generation).isEqualTo(10);
     }
 
     /** 已合法退役为不可达的类型仍须保留历史解冻政策，不能只用当前闭包判定策略名有效。 */

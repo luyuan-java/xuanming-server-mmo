@@ -35,10 +35,9 @@ final class ConfiguredImpact {
         double received = Math.max(0,1+battle.modifier(target,IN_HEAL));
         if (equipmentHeal && hit.origin == DIRECT && hit.primary == target.actorId() && hit.healOrdinal == 0) {
             for (int index : battle.equipment.available(source,4)) {
-                var artifact = source.state().getEquipmentEffects().getArtifacts(index);
-                if (toDouble(target.health()) * 10000 > toDouble(target.maxHealth()) * artifact.getHealthThresholdBps()) continue;
+                if (toDouble(target.health()) * 10000 > toDouble(target.maxHealth()) * battle.equipment.healthThresholdBps(source, index)) continue;
                 long before = target.landedHeal(SupportEffectRules.applyBonus(amount,bonus) * received);
-                bonus += artifact.getBonusBps()/10000.0;
+                bonus += battle.equipment.bonusBps(source, index)/10000.0;
                 long after = target.landedHeal(SupportEffectRules.applyBonus(amount,bonus) * received);
                 if (Long.compareUnsigned(after,before) > 0) battle.equipment.use(source,index,target,after-before);
             }

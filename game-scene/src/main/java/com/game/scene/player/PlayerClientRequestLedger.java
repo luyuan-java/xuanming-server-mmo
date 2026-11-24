@@ -31,6 +31,7 @@ public final class PlayerClientRequestLedger {
     public static final int KIND_CREATE_ATTRIBUTE_SCHEME = 3;
     public static final int KIND_EQUIPMENT_CRAFT = 4;
     public static final int KIND_EQUIPMENT_MATERIAL_REWARD = 5;
+    public static final int KIND_CATCHUP_SEASON_SEAL = 9;
 
     public enum Verdict {
         NEW, REPLAY, MISMATCH

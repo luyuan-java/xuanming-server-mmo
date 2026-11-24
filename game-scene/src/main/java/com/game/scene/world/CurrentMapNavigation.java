@@ -71,6 +71,40 @@ public final class CurrentMapNavigation implements SceneNavigation {
         }
     }
 
+    /** 通用 schemaVersion=2 版本化主世界导航包（如场景 5 碧渊水宫）；校验 sceneId / key / revision 与位图 SHA256。 */
+    static CurrentMapNavigation loadVersionedCurrentMap(Path root, String relativeFolder, int expectedSceneId) {
+        Path folder = root.resolve(relativeFolder);
+        try {
+            byte[] sourceBytes = Files.readAllBytes(folder.resolve("source.json"));
+            JsonNode source = new ObjectMapper().readTree(sourceBytes);
+            String key = source.path("key").asText("");
+            String revision = source.path("revision").asText("");
+            String expectedFolder = key + "/" + revision;
+            String encoding = source.path("maskEncoding").asText("");
+            if (!source.path("schemaVersion").isIntegralNumber() || source.path("schemaVersion").intValue() != 2
+                    || !source.path("sceneId").isIntegralNumber() || source.path("sceneId").intValue() != expectedSceneId
+                    || key.isEmpty() || revision.isEmpty() || !relativeFolder.equals(expectedFolder)
+                    || (!encoding.isEmpty() && !"base64-msb-first-row-major-top-to-bottom".equals(encoding))) {
+                throw new IllegalArgumentException("新版主世界导航身份与目录不匹配: " + folder);
+            }
+            CurrentMapNavigation map = loadRectangular(source, Files.readAllBytes(folder.resolve("walkmask.txt")), folder);
+            if (source.has("walkableCellCount")) {
+                int count = 0;
+                for (int row = 0; row < map.rows; row++) {
+                    for (int col = 0; col < map.columns; col++) {
+                        if (map.cell(col, row)) count++;
+                    }
+                }
+                if (count != positiveInteger(source, "walkableCellCount")) {
+                    throw new IllegalArgumentException("新版主世界导航可走格计数不一致: " + folder);
+                }
+            }
+            return map;
+        } catch (IOException e) {
+            throw new UncheckedIOException("读取新版主世界导航失败: " + folder, e);
+        }
+    }
+
     private static boolean rectangleEquals(JsonNode rect, double x, double z, double width, double height) {
         return coordinate(rect, "x") == x && coordinate(rect, "y") == z
                 && coordinate(rect, "width") == width && coordinate(rect, "height") == height;

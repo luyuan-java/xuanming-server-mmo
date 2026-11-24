@@ -242,17 +242,20 @@ public final class TurnBattleEngine {
                 actor.addBuffs(buff);
                 buffs.reserveSnapshotBuffId(buff.getBuffId());
             }
-            // 职业重数按当前职业和等级重新夹取；被动也保留有效重数，供治疗被动使用。
+            int activeSeasonId = snapshot.getActiveSeasonId();
+            // 职业重数按当前职业、等级与当前活跃赛季重新夹取；被动也保留有效重数，供治疗被动使用。
             snapshot.getSkillRanksMap().forEach((skillId, storedRank) -> ctx.data().skill(skillId).ifPresent(skill -> {
+                if (!SeasonRules.isSkillActiveInSeason(skill.getSeasonId(), activeSeasonId)) return;
                 if (skill.getBattleModel() == 1 ? !ConfiguredBattle.subject(actor,skill)
                         : !BattleRules.isClassSkill(skill) || skill.getClassId() != actor.getClassId()) return;
                 int rank = ClassSkillRules.effectiveRank(storedRank, actor.getLevel(), skill.getUnlockLevel(), skill.getMaxRank());
                 if (rank != 0) actor.putSkillRanks(skillId, rank);
             }));
-            // 技能只收回合制可施放且已具有有效职业重数的；外来快照不能授予未学技能。
+            // 技能只收回合制可施放、赛季归属合法且已具有有效职业重数的；外来快照不能授予未学或过季技能。
             for (int skillTableId : snapshot.getSkillTableIdsList()) {
                 Optional<SkillTable> skillRow = ctx.data().skill(skillTableId);
-                if (skillRow.isEmpty() || !BattleRules.isTurnBattleCastableSkill(skillRow.get())) {
+                if (skillRow.isEmpty() || !BattleRules.isTurnBattleCastableSkill(skillRow.get())
+                        || !SeasonRules.isSkillActiveInSeason(skillRow.get().getSeasonId(), activeSeasonId)) {
                     continue;
                 }
                 if ((skillRow.get().getBattleModel() == 1 || BattleRules.isClassSkill(skillRow.get()))
@@ -1340,7 +1343,7 @@ public final class TurnBattleEngine {
     public static void stripEngineOnlyState(BattleStateS2C.Builder state) {
         for (BattleActorState.Builder actor : state.getActorsBuilderList()) {
             actor.clearCombat().clearPetCultivation().clearAbilityUseCounts().clearRoundEffectUsage().clearRuntimeSkills()
-                    .clearEquipmentEffects().clearArtifactStates().clearEntryMaxHealth().clearEntryMaxMana();
+                    .clearEquipmentEffects().clearArtifactStates().clearSeasonSealState().clearEntryMaxHealth().clearEntryMaxMana();
         }
     }
 

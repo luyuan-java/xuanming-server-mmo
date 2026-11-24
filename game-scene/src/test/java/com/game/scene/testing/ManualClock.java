@@ -26,4 +26,8 @@ public final class ManualClock implements SceneClock {
         nanos += TimeUnit.MILLISECONDS.toNanos(millis);
         epochMillis += millis;
     }
+
+    public void setEpochMillis(long epochMillis) {
+        this.epochMillis = epochMillis;
+    }
 }

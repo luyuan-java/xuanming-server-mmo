@@ -53,6 +53,8 @@ message PlayerState {
   ClientRequestLedgerState client_request_ledger = 16;
   // 神秘商人个人限购记录（仅记当前一轮，同事务围栏提交）。
   PlayerMysteryMerchantState mystery_merchant = 17;
+  // 单槽赛季印存档记录（按 season_id 索引，保留历史赛季记录与未知字段，同事务围栏提交）。
+  PlayerSeasonState season = 18;
 }
 
 message BattleResultHistoryState {
@@ -113,6 +115,8 @@ message ClientRequestRecordState {
   uint64 material_reward_revision = 10;
   uint32 crafting_material_count = 11;
   uint32 enhancement_stone_count = 12;
+  uint32 season_catchup_points = 13;
+  uint64 season_catchup_spent = 14;
 }
 
 message EquipmentMaterialRewardLedgerState {
@@ -130,6 +134,19 @@ message PlayerMysteryMerchantState {
 message PlayerMysteryMerchantPurchaseState {
   uint32 goods_id = 1;
   uint32 count = 2;
+}
+
+message PlayerSeasonState {
+  repeated PlayerSeasonSealRecordState records = 1;
+}
+
+message PlayerSeasonSealRecordState {
+  uint32 season_id = 1;
+  uint32 equipped_seal_id = 2;
+  uint32 progress_points = 3;
+  uint32 battle_points = 4;
+  uint32 catchup_points = 5;
+  uint64 revision = 6;
 }
 
 message ItemGainBlockState {

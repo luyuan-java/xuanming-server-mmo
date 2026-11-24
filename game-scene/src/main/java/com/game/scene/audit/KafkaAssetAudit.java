@@ -110,6 +110,7 @@ public final class KafkaAssetAudit implements AssetAudit {
             case AFK_PASS_BUY -> TransactionReason.TX_SHOP_BUY;
             case MYSTERY_MERCHANT_BUY -> TransactionReason.TX_SHOP_BUY;
             case EQUIP_CRAFT -> TransactionReason.TX_EQUIP_ENHANCE;
+            case SEASON_SEAL_CATCHUP -> TransactionReason.TX_SHOP_BUY;
         };
     }
 }
