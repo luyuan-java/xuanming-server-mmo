@@ -52,9 +52,13 @@ public class WorldChannelConfiguration {
     public WorldChannelControlPlane worldChannelControlPlane(WorldChannelStore store, SceneNodeSource sceneNodeSource,
                                                              WorldSceneConfigs worldConfigs, WorldChannelProperties props,
                                                              WorldChannelMetrics metrics, SceneIdAllocator sceneIdAllocator,
-                                                             WorldChannelDirectoryStore directories, ChannelSwitchProperties switchProps) {
+                                                             WorldChannelDirectoryStore directories, ChannelSwitchProperties switchProps,
+                                                             com.game.table.ConfigTables configTables, RedissonClient redis, RedisKeys redisKeys) {
+        MysteryMerchantScheduler.Tables merchantTables = MysteryMerchantScheduler.loadTables(configTables, worldConfigs.worldConfigIds());
+        MysteryMerchantScheduler merchant = merchantTables == null ? null
+                : new MysteryMerchantScheduler(merchantTables, MysteryMerchantScheduler.redisStore(redis, redisKeys));
         return WorldChannelControlPlane.start(store, sceneNodeSource, worldConfigs, props, metrics, sceneIdAllocator,
-                directories, switchProps);
+                directories, switchProps, merchant);
     }
 
     /** 健康组件 {@code worldChannels}（bean 名去掉 HealthIndicator 后缀即组件名）。 */

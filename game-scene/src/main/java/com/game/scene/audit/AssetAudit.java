@@ -67,7 +67,11 @@ public interface AssetAudit {
         /** 取下宝石返还到人物背包。 */
         EQUIP_GEM_REMOVE,
         /** 挂机月卡开通 / 续费扣款。 */
-        AFK_PASS_BUY
+        AFK_PASS_BUY,
+        /** 神秘商人购买。 */
+        MYSTERY_MERCHANT_BUY,
+        /** 装备打造与固定词条安装。 */
+        EQUIP_CRAFT
     }
 
     /**

@@ -58,6 +58,7 @@ public final class EquipmentDisplay {
                         .thenComparing(EquipmentRules.AttributeValue::sequence, Integer::compareUnsigned))
                 .forEach(v -> info.addAffixes(line(v)));
         if (item.equipment() == null) return;
+        fillFixedDisplay(item, row, info);
         var values = rules.gemValues(item); var seen = new HashSet<Integer>();
         for (var socket : rules.tables().sockets(row.getEquipKind())) {
             if (!seen.add(socket.getSocket())) continue;
@@ -71,6 +72,67 @@ public final class EquipmentDisplay {
             });
             info.addGemSockets(display);
         }
+    }
+
+    /** 填充装备 V1 固定词条槽与法宝展示信息（GetBag / 打造规则 / 打造预览共用同一出处）。 */
+    public void fillFixedDisplay(BagItem item, com.game.table.ItemTable row, BagItemInfo.Builder info) {
+        int profile = row.getEquipProfile();
+        info.setEquipProfile(profile);
+        info.clearFixedAffixSlots().clearArtifact();
+        if (profile == 1 || profile == 2) {
+            boolean valid = item != null && item.equipment() != null && FixedEquipmentEffects.validSelections(item, profile, rules.tables());
+            for (int slot = 1; slot <= 2; slot++) {
+                EquipFixedAffixSlotInfo.Builder shown = EquipFixedAffixSlotInfo.newBuilder()
+                        .setSlot(slot)
+                        .setPool(profile == 1 ? slot : 3);
+                if (valid) {
+                    for (var selected : item.equipment().getFixedAffixesList()) {
+                        if (selected.getSlot() == slot) {
+                            var affix = rules.tables().fixedAffix(selected.getAffixId());
+                            if (affix != null) {
+                                shown.setSelected(affixInfo(affix));
+                            }
+                        }
+                    }
+                }
+                info.addFixedAffixSlots(shown);
+            }
+        } else if (profile == 3) {
+            var artifact = rules.tables().artifact(row.getArtifactId());
+            if (artifact != null && FixedEquipmentEffects.validArtifact(artifact)) {
+                info.setArtifact(artifactInfo(artifact));
+            }
+        }
+    }
+
+    public static EquipFixedAffixInfo affixInfo(com.game.table.EquipV1AffixTable row) {
+        return EquipFixedAffixInfo.newBuilder()
+                .setAffixId(row.getId())
+                .setPool(row.getPool())
+                .setName(row.getName())
+                .setDescription(row.getDescription())
+                .setValueBps(row.getValuePermyriad())
+                .setSourceCapBps(row.getSourceCap())
+                .setEffect(row.getEffect())
+                .setEffectParam(row.getEffectParam())
+                .setUnit(row.getEffect() >= 7 && row.getEffect() <= 12 ? 2 : 1)
+                .setMaterialConfigId(row.getMaterialId())
+                .setMaterialCount(row.getMaterialCount())
+                .build();
+    }
+
+    public static EquipArtifactInfo artifactInfo(com.game.table.EquipArtifactTable row) {
+        return EquipArtifactInfo.newBuilder()
+                .setEffectId(row.getId())
+                .setName(row.getName())
+                .setDescription(row.getDescription())
+                .setBonusBps(row.getBonusBps())
+                .setCapBps(row.getCapBps())
+                .setPerRoundLimit(row.getPerRoundLimit())
+                .setBattleLimit(row.getBattleLimit())
+                .setActiveRounds(row.getActiveRounds())
+                .setHealthThresholdBps(row.getHealthThresholdBps())
+                .build();
     }
     public void slots(BagLayoutInfo.Builder layout) {
         var seen = new HashSet<Integer>();

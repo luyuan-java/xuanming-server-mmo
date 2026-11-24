@@ -12,11 +12,16 @@ import com.game.scene.world.*;
 public final class EquipmentFeature implements SceneFeature {
     private static final String SERVICE = "SceneBagClientPlayer";
     private final EquipmentService equipment;
+    private final EquipmentCraftService craft;
     private final BagFeature bags;
     private final AttributeService attributes;
     private final int notifyPanel;
     public EquipmentFeature(EquipmentService equipment, BagFeature bags, AttributeService attributes, MessageIdRegistry registry) {
-        this.equipment = equipment; this.bags = bags; this.attributes = attributes;
+        this(equipment, null, bags, attributes, registry);
+    }
+    public EquipmentFeature(EquipmentService equipment, EquipmentCraftService craft, BagFeature bags,
+                            AttributeService attributes, MessageIdRegistry registry) {
+        this.equipment = equipment; this.craft = craft; this.bags = bags; this.attributes = attributes;
         notifyPanel = registry.requireId("SceneAttributeClientPlayer", "NotifyAttributePanelChanged");
     }
     private void changed(PlayerCall call, EquipmentService.Outcome result) {
@@ -61,5 +66,22 @@ public final class EquipmentFeature implements SceneFeature {
             if (result.tip() == 0) reply.setBag(bags.snapshot(call.player(), BagType.INVENTORY)).setEquipment(bags.snapshot(call.player(), BagType.EQUIPMENT));
             call.reply(reply.build());
         });
+        if (craft != null) {
+            r.on(SERVICE, "GetEquipmentCraftRules", GetEquipmentCraftRulesRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                    (call, request) -> call.reply(craft.getRules(call.player())));
+            r.on(SERVICE, "PreviewEquipmentCraft", PreviewEquipmentCraftRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                    (call, request) -> call.reply(craft.preview(call.player(), request)));
+            r.on(SERVICE, "CommitEquipmentCraft", CommitEquipmentCraftRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
+                var result = craft.commit(call.player(), request, bags);
+                if (result.attributesChanged()) {
+                    call.push(notifyPanel, AttributePanelChangedS2C.newBuilder().setPanel(attributes.buildPanel(call.player())).build());
+                }
+                call.reply(result.response());
+            });
+            r.on(SERVICE, "GetEquipmentMaterialReward", GetEquipmentMaterialRewardRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                    (call, request) -> call.reply(craft.getMaterialReward(call.player(), craft.nowMillis())));
+            r.on(SERVICE, "ClaimEquipmentMaterialReward", ClaimEquipmentMaterialRewardRequest.class, FreezePolicy.GATED, BattlePolicy.GATED,
+                    (call, request) -> call.reply(craft.claimMaterialReward(call.player(), request, bags, craft.nowMillis())));
+        }
     }
 }

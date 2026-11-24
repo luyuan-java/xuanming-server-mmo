@@ -42,6 +42,13 @@ public final class WorldChannelControlPlane implements AutoCloseable {
     public static WorldChannelControlPlane start(WorldChannelStore store, SceneNodeSource source, WorldSceneConfigs worldConfigs,
                                                  WorldChannelProperties props, WorldChannelMetrics metrics, SceneIdAllocator ids,
                                                  WorldChannelDirectoryStore directories, ChannelSwitchProperties switchProps) {
+        return start(store, source, worldConfigs, props, metrics, ids, directories, switchProps, null);
+    }
+
+    public static WorldChannelControlPlane start(WorldChannelStore store, SceneNodeSource source, WorldSceneConfigs worldConfigs,
+                                                 WorldChannelProperties props, WorldChannelMetrics metrics, SceneIdAllocator ids,
+                                                 WorldChannelDirectoryStore directories, ChannelSwitchProperties switchProps,
+                                                 MysteryMerchantScheduler mysteryMerchant) {
         if (!props.leaderEligible()) {
             log.info("game.scene-manager.world.leader-eligible=false：本副本不竞选频道计划领导者，只做数据面分配与实例取号（发号 worker={}）",
                     ids.worker());
@@ -55,7 +62,8 @@ public final class WorldChannelControlPlane implements AutoCloseable {
         log.info("主世界频道控制面 scene_id 发号 worker={} 覆盖模式={} 自动扩缩容={} 种子={} 按图覆盖={}", ids.worker(), props.coverage(),
                 props.autoscale().enabled(), props.channelCount(), props.channelCountByConfig());
         ChannelDirectoryPublisher publisher = directories == null ? null : new ChannelDirectoryPublisher(store, directories,
-                source, switchProps, props, worldConfigs.orderedConfigIds(), coordinator::ledZones, token, System::currentTimeMillis, metrics);
+                source, switchProps, props, worldConfigs.orderedConfigIds(), coordinator::ledZones, token,
+                System::currentTimeMillis, metrics, mysteryMerchant);
         WorldChannelRunner runner = new WorldChannelRunner(coordinator, props.tick(), props.leaderLockTtl().dividedBy(3), publisher);
         return new WorldChannelControlPlane(ids, coordinator, runner);
     }

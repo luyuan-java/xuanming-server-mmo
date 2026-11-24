@@ -22,8 +22,10 @@ import com.game.scene.player.PlayerBags;
 import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.PlayerAppearance;
 import com.game.scene.player.PlayerBattleResults;
+import com.game.scene.player.PlayerClientRequestLedger;
 import com.game.scene.player.PlayerItemGainBlock;
 import com.game.scene.player.PlayerMissions;
+import com.game.scene.player.PlayerMysteryMerchant;
 import com.game.scene.player.PlayerPets;
 import com.game.scene.player.PlayerSkillState;
 import com.game.scene.player.Wallet;
@@ -110,6 +112,10 @@ public final class ScenePlayer {
     private final PlayerActivityVitality activityVitality;
     /** 本人近期战斗结果列表（至多 10 条，结算应用同帧写入、确认落盘后对客户端公开）。 */
     private final PlayerBattleResults battleResults;
+    /** 客户端请求幂等键账本 + 装备打造防重水位 + 装备材料自选账本。 */
+    private final PlayerClientRequestLedger clientRequestLedger;
+    /** 神秘商人个人每轮限购记录。 */
+    private final PlayerMysteryMerchant mysteryMerchant;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -202,6 +208,10 @@ public final class ScenePlayer {
         this.itemGainBlock = state.hasItemGainBlock() ? PlayerItemGainBlock.restore(state.getItemGainBlock()) : PlayerItemGainBlock.empty();
         this.activityVitality = state.hasActivityVitality() ? PlayerActivityVitality.restore(state.getActivityVitality()) : PlayerActivityVitality.empty();
         this.battleResults = state.hasBattleResults() ? PlayerBattleResults.restore(state.getBattleResults()) : PlayerBattleResults.empty();
+        this.clientRequestLedger = state.hasClientRequestLedger()
+                ? PlayerClientRequestLedger.restore(state.getClientRequestLedger()) : PlayerClientRequestLedger.empty();
+        this.mysteryMerchant = state.hasMysteryMerchant()
+                ? PlayerMysteryMerchant.restore(state.getMysteryMerchant()) : PlayerMysteryMerchant.empty();
     }
 
     public long playerId() {
@@ -287,6 +297,16 @@ public final class ScenePlayer {
     /** 本人近期战斗结果列表（逻辑线程上读写；结算同帧写入、落盘后对外公开）。 */
     public PlayerBattleResults battleResults() {
         return battleResults;
+    }
+
+    /** 客户端请求幂等键账本与装备打造/材料自选水位（逻辑线程上读写）。 */
+    public PlayerClientRequestLedger clientRequestLedger() {
+        return clientRequestLedger;
+    }
+
+    /** 神秘商人个人限购记录（逻辑线程上读写）。 */
+    public PlayerMysteryMerchant mysteryMerchant() {
+        return mysteryMerchant;
     }
 
     public int level() {
@@ -533,6 +553,12 @@ public final class ScenePlayer {
         }
         if (!battleResults.isPristine()) {
             state.setBattleResults(battleResults.toState());
+        }
+        if (!clientRequestLedger.isPristine()) {
+            state.setClientRequestLedger(clientRequestLedger.toState());
+        }
+        if (!mysteryMerchant.isPristine()) {
+            state.setMysteryMerchant(mysteryMerchant.toState());
         }
         return state.build();
     }

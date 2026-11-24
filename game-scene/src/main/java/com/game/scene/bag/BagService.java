@@ -53,6 +53,15 @@ public final class BagService {
         return candidate.bag(BagType.INVENTORY).add(Map.of(config, 1L), tables, guids);
     }
 
+    /** 装备打造 / 材料自选候选入包，沿用封禁、铸号与容量规则；此处不写玩家、不发审计。 */
+    public Bag.AddResult prepareEquipmentGrant(ScenePlayer player, com.game.scene.player.PlayerBags candidate, Map<Integer, Long> counts) {
+        if (!writable(player)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
+        for (int config : counts.keySet()) {
+            if (isItemGainBlocked(player, config)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
+        }
+        return candidate.bag(BagType.INVENTORY).add(counts, tables, guids);
+    }
+
     /** 完整候选已提交后的材料/宝石流水；旁路失败不能把成功的资产变更误报成可重试。 */
     public void auditEquipment(ScenePlayer player, java.util.List<Bag.Drawn> removed, java.util.List<Bag.Written> gained,
                                AssetAudit.Reason reason, long equipmentId, String extra) {

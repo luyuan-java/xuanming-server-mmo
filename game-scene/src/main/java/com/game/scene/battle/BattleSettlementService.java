@@ -371,9 +371,11 @@ public final class BattleSettlementService {
         return removed;
     }
 
-    /** 结算应用同帧写入本人近期战斗结果（确认落盘后才对 371/372 可见）。 */
+    /** 结算应用同帧写入本人近期战斗结果（确认落盘后才对 371/372 可见），并按游戏日上限累计装备材料自选额度。 */
     private void recordBattleResult(ScenePlayer player, BattleSettlementData settlement, long goldCredited,
                                     Map<Integer, Long> itemsGained, Map<Integer, Long> itemsConsumed) {
+        long nowMs = clock.epochMillis();
+        int materialCreditAdded = com.game.scene.equip.EquipmentCraftService.creditBattleMaterialReward(player, settlement, nowMs);
         com.game.player.store.state.BattleResultEntryState.Builder entry = com.game.player.store.state.BattleResultEntryState.newBuilder()
                 .setBattleId(settlement.getBattleId())
                 .setOutcome(settlement.getOutcomeValue())
@@ -382,9 +384,10 @@ public final class BattleSettlementService {
                 .setFled(settlement.getFled())
                 .setTotalRounds(settlement.getTotalRounds())
                 .setFinishedAtMs(settlement.getFinishedAtMs())
-                .setSettledAtMs(clock.epochMillis())
+                .setSettledAtMs(nowMs)
                 .setMatchMode(settlement.getMatchMode())
                 .setBattleConfigId(settlement.getBattleConfigId())
+                .setMaterialCreditUnitsAdded(materialCreditAdded)
                 .setSeasonId(settlement.getSeasonId());
         if (goldCredited > 0) {
             entry.addCurrencies(com.game.player.store.state.BattleResultCurrencyState.newBuilder()

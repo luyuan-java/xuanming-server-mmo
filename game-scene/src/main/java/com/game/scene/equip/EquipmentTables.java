@@ -61,8 +61,12 @@ public final class EquipmentTables {
         return Collections.unmodifiableMap(result);
     }
     public ItemTable item(int id) { return items.get(id); }
-    EquipV1AffixTable fixedAffix(int id) { return fixedAffixes.get(id); }
-    EquipArtifactTable artifact(int id) { return artifacts.get(id); }
+    public List<ItemTable> items() { return List.copyOf(items.values()); }
+    public EquipV1AffixTable fixedAffix(int id) { return fixedAffixes.get(id); }
+    public List<EquipV1AffixTable> fixedAffixes() { return List.copyOf(fixedAffixes.values()); }
+    public EquipArtifactTable artifact(int id) { return artifacts.get(id); }
+    public List<EquipArtifactTable> artifacts() { return List.copyOf(artifacts.values()); }
+    public List<EquipEnhanceTable> enhancements() { return List.copyOf(enhancements.values()); }
     public EquipAttributeTable attribute(int id) { return attributes.get(id); }
     public List<EquipAttributeTable> attributes() { return List.copyOf(attributes.values()); }
     public EquipAffixRuleTable rule(int id) { return rules.get(id); }

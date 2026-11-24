@@ -34,9 +34,13 @@ public class SceneManagerConfiguration {
      *                 从别处启动时显式设 {@code game.table-dir}（环境变量 {@code GAME_TABLE_DIR}）。
      */
     @Bean
-    public WorldSceneConfigs worldSceneConfigs(@Value("${game.table-dir:config-data/tables}") String tableDir,
-                                               SceneManagerProperties props) {
-        WorldSceneConfigs configs = loadWorldSceneConfigs(Path.of(tableDir), props.defaultWorldConfigId());
+    public ConfigTables configTables(@Value("${game.table-dir:config-data/tables}") String tableDir) {
+        return ConfigTables.load(Path.of(tableDir));
+    }
+
+    @Bean
+    public WorldSceneConfigs worldSceneConfigs(ConfigTables configTables, SceneManagerProperties props) {
+        WorldSceneConfigs configs = WorldSceneConfigs.fromWorldTable(configTables.world().all(), props.defaultWorldConfigId());
         log.info("世界地图已加载 default={} all={}", configs.defaultConfigId(), configs.worldConfigIds());
         return configs;
     }

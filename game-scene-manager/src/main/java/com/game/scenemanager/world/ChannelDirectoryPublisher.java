@@ -28,11 +28,19 @@ public final class ChannelDirectoryPublisher {
     private final String token;
     private final LongSupplier millis;
     private final WorldChannelMetrics metrics;
+    private final MysteryMerchantScheduler mysteryMerchant;
 
     public ChannelDirectoryPublisher(WorldChannelStore plans, WorldChannelDirectoryStore directories,
                                      SceneNodeSource nodes, ChannelSwitchProperties props, WorldChannelProperties world,
                                      List<Integer> configs, Supplier<Set<Integer>> ledZones, String token, LongSupplier millis,
                                      WorldChannelMetrics metrics) {
+        this(plans, directories, nodes, props, world, configs, ledZones, token, millis, metrics, null);
+    }
+
+    public ChannelDirectoryPublisher(WorldChannelStore plans, WorldChannelDirectoryStore directories,
+                                     SceneNodeSource nodes, ChannelSwitchProperties props, WorldChannelProperties world,
+                                     List<Integer> configs, Supplier<Set<Integer>> ledZones, String token, LongSupplier millis,
+                                     WorldChannelMetrics metrics, MysteryMerchantScheduler mysteryMerchant) {
         this.plans = plans;
         this.directories = directories;
         this.nodes = nodes;
@@ -43,6 +51,7 @@ public final class ChannelDirectoryPublisher {
         this.token = token;
         this.millis = millis;
         this.metrics = metrics;
+        this.mysteryMerchant = mysteryMerchant;
     }
 
     public Duration interval() { return props.refreshInterval(); }
@@ -73,6 +82,9 @@ public final class ChannelDirectoryPublisher {
                     if (overview.getMapsCount() > 0
                             && !directories.publishOverview(zone, token, plan.version(), overview.toByteArray(), ttl)) {
                         fenced = true;
+                    }
+                    if (!fenced && mysteryMerchant != null) {
+                        mysteryMerchant.tick(zone, byConfig, nowMs);
                     }
                 }
                 metrics.directoryPublish(fenced ? DirectoryPublishResult.FENCED

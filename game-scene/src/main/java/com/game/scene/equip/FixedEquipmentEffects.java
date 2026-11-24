@@ -44,14 +44,7 @@ final class FixedEquipmentEffects {
             }
             if (profile == 3) {
                 var artifact = tables.artifact(template.getArtifactId());
-                if (artifact == null || artifact.getId() < 1 || artifact.getId() > 8 || artifact.getBonusBps() <= 0
-                        || artifact.getBonusBps() > 10000 || artifact.getCapBps() < 0 || artifact.getCapBps() > 10000
-                        || artifact.getHealthThresholdBps() < 0 || artifact.getHealthThresholdBps() > 10000
-                        || Integer.compareUnsigned(artifact.getPerRoundLimit(),1) > 0 || Integer.compareUnsigned(artifact.getBattleLimit(),3) > 0
-                        || Integer.compareUnsigned(artifact.getActiveRounds(),2) > 0 || artifact.getId() != 6 && artifact.getPerRoundLimit() == 0
-                        || (artifact.getId() == 3 || artifact.getId() >= 6) && artifact.getBattleLimit() == 0
-                        || artifact.getId() == 6 && (artifact.getCapBps() == 0 || artifact.getActiveRounds() == 0)
-                        || artifact.getId() == 4 && artifact.getHealthThresholdBps() == 0) {
+                if (!validArtifact(artifact)) {
                     result.setSupportSourcesComplete(false);
                     continue;
                 }
@@ -90,7 +83,20 @@ final class FixedEquipmentEffects {
         return result.build();
     }
 
-    private static boolean validSelections(BagItem item, int profile, EquipmentTables tables) {
+    static boolean validArtifact(com.game.table.EquipArtifactTable artifact) {
+        return artifact != null && artifact.getId() >= 1 && artifact.getId() <= 8 && artifact.getBonusBps() > 0
+                && artifact.getBonusBps() <= 10000 && artifact.getCapBps() >= 0 && artifact.getCapBps() <= 10000
+                && artifact.getHealthThresholdBps() >= 0 && artifact.getHealthThresholdBps() <= 10000
+                && Integer.compareUnsigned(artifact.getPerRoundLimit(), 1) <= 0
+                && Integer.compareUnsigned(artifact.getBattleLimit(), 3) <= 0
+                && Integer.compareUnsigned(artifact.getActiveRounds(), 2) <= 0
+                && (artifact.getId() == 6 || artifact.getPerRoundLimit() != 0)
+                && ((artifact.getId() != 3 && artifact.getId() < 6) || artifact.getBattleLimit() != 0)
+                && (artifact.getId() != 6 || (artifact.getCapBps() != 0 && artifact.getActiveRounds() != 0))
+                && (artifact.getId() != 4 || artifact.getHealthThresholdBps() != 0);
+    }
+
+    static boolean validSelections(BagItem item, int profile, EquipmentTables tables) {
         if (item.equipment() == null || item.equipment().getFixedAffixesCount() > 2) return false;
         var slots = new HashSet<Integer>();
         var ids = new HashSet<Integer>();
@@ -103,7 +109,7 @@ final class FixedEquipmentEffects {
         return true;
     }
 
-    private static boolean validAffix(EquipV1AffixTable row, EquipmentTables tables) {
+    static boolean validAffix(EquipV1AffixTable row, EquipmentTables tables) {
         int effect = row.getEffect(), param = row.getEffectParam();
         int max = switch (effect) {
             case 1, 2, 5, 6 -> 3200;

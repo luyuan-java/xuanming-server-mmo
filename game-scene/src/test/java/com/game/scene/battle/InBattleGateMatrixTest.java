@@ -133,8 +133,10 @@ class InBattleGateMatrixTest {
     private static final int ASSET_IN_BATTLE = 27002;
     private static final int ZONE_TRAVEL_IN_BATTLE = 3025;
     private static final int EQUIPMENT_IN_BATTLE = 28007;
+    private static final int MYSTERY_MERCHANT_IN_BATTLE = 30007;
     private static final java.util.Set<String> EQUIPMENT_METHODS = java.util.Set.of(
-            "EquipItem", "UnequipItem", "GmGrantItem", "EnhanceEquip", "InlayGem", "RemoveGem");
+            "EquipItem", "UnequipItem", "GmGrantItem", "EnhanceEquip", "InlayGem", "RemoveGem",
+            "CommitEquipmentCraft", "ClaimEquipmentMaterialReward");
     /** 226 的目标：别的 zone（夹具的本 zone 是 {@link BattleFixture#ZONE}）。 */
     private static final int OTHER_ZONE = BattleFixture.ZONE + 1;
 
@@ -160,6 +162,7 @@ class InBattleGateMatrixTest {
     private static final String COMMON = "SceneClientPlayerCommon";
     private static final String AFK_PASS = "SceneAfkPassClientPlayer";
     private static final String BATTLE_RESULT = "SceneBattleResultClientPlayer";
+    private static final String MYSTERY_MERCHANT = "SceneMysteryMerchantClientPlayer";
 
     /** 战斗中的预期（除了正数 = 应答里的拒绝码之外的三种）。 */
     private static final int SAME_AS_NOT_IN_BATTLE = -1;
@@ -207,11 +210,15 @@ class InBattleGateMatrixTest {
             new Row(250, BAG, "InlayGem", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
             new Row(251, BAG, "EnhanceEquip", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
             new Row(252, BAG, "RemoveGem", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
+            new Row(406, BAG, "CommitEquipmentCraft", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
+            new Row(408, BAG, "ClaimEquipmentMaterialReward", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
+            new Row(315, MYSTERY_MERCHANT, "BuyMysteryMerchantGoods", BattlePolicy.GATED, MYSTERY_MERCHANT_IN_BATTLE),
             // 批次 5.4：226 跨 zone 传送自己判战斗在途（基线 kZoneTravelInBattle，player_lifecycle.cpp:2784-2788），计在 zone_travel 闸上
             new Row(226, SCENE, "TravelToZone", BattlePolicy.GATED, ZONE_TRAVEL_IN_BATTLE),
             // ALLOW：只读
             new Row(43, SCENE, "SceneInfoC2S", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(253, SCENE, "GetSyncDigest", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(314, MYSTERY_MERCHANT, "GetMysteryMerchantInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(77, SKILL, "ListSkills", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(54, CURRENCY, "GetCurrencyList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(167, ATTRIBUTE, "GetAttributePanel", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -223,6 +230,9 @@ class InBattleGateMatrixTest {
             new Row(348, ACTIVITY, "ClaimActivityVitalityReward", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(191, BAG, "GetBag", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(374, BAG, "RetrieveTemporaryItems", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(404, BAG, "GetEquipmentCraftRules", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(405, BAG, "PreviewEquipmentCraft", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(407, BAG, "GetEquipmentMaterialReward", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(371, BATTLE_RESULT, "GetRecentBattleResults", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(372, BATTLE_RESULT, "AckBattleResults", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(442, APPEARANCE, "GetAppearanceInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -322,9 +332,9 @@ class InBattleGateMatrixTest {
         assertThat(List.of(134, 132)).allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).isEqualTo(BattlePolicy.DROP));
         assertThat(f.handler.battlePolicy(131)).isEqualTo(BattlePolicy.STOP_ONLY);
         assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226,
-                246, 247, 249, 250, 251, 252, 317))
+                246, 247, 249, 250, 251, 252, 315, 317, 406, 408))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.GATED));
-        assertThat(List.of(43, 253, 77, 54, 167, 181, 190, 348, 191, 374, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
+        assertThat(List.of(43, 253, 314, 77, 54, 167, 181, 190, 348, 191, 374, 404, 405, 407, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.ALLOW));
         assertThat(f.handler.battlePolicy(136)).as("没有处理器的方法没有策略（战斗与否都回 1006）").isNull();
         assertThat(registered).as("现有方法逐个显式声明，没有一个落到缺省 REJECT（D11：没有行为变化）")
@@ -596,6 +606,49 @@ class InBattleGateMatrixTest {
 
         out.put(BAG + "GetBag", s -> GetBagRequest.newBuilder().setBagType(BagType.INVENTORY.code()).build());
         out.put(BAG + "RetrieveTemporaryItems", s -> com.game.proto.RetrieveTemporaryItemsRequest.newBuilder().setTakeAll(true).build());
+        out.put(BAG + "GetEquipmentCraftRules", s -> com.game.proto.GetEquipmentCraftRulesRequest.getDefaultInstance());
+        out.put(BAG + "PreviewEquipmentCraft", s -> {
+            var rules = s.world().craft.getRules(s.player());
+            var recipe = rules.getRecipes(0);
+            return com.game.proto.PreviewEquipmentCraftRequest.newBuilder()
+                    .setChoice(com.game.proto.EquipmentCraftChoice.newBuilder()
+                            .setOperation(com.game.proto.EquipmentCraftChoice.Operation.CREATE_ITEM)
+                            .setConfigId(recipe.getProduct().getConfigId()))
+                    .build();
+        });
+        out.put(BAG + "CommitEquipmentCraft", s -> {
+            var rules = s.world().craft.getRules(s.player());
+            var recipe = rules.getRecipes(0);
+            return com.game.proto.CommitEquipmentCraftRequest.newBuilder()
+                    .setClientRequestId(5001L)
+                    .setRulesFingerprint(rules.getRulesFingerprint())
+                    .setExpectedForgeRevision(0L)
+                    .setChoice(com.game.proto.EquipmentCraftChoice.newBuilder()
+                            .setOperation(com.game.proto.EquipmentCraftChoice.Operation.CREATE_ITEM)
+                            .setConfigId(recipe.getProduct().getConfigId()))
+                    .build();
+        });
+        out.put(BAG + "GetEquipmentMaterialReward", s -> com.game.proto.GetEquipmentMaterialRewardRequest.getDefaultInstance());
+        out.put(BAG + "ClaimEquipmentMaterialReward", s -> com.game.proto.ClaimEquipmentMaterialRewardRequest.newBuilder()
+                .setClientRequestId(5002L).setExpectedRevision(0L)
+                .setCraftingMaterialCount(6).setEnhancementStoneCount(4).build());
+        out.put(MYSTERY_MERCHANT + "GetMysteryMerchantInfo", s -> com.game.proto.GetMysteryMerchantInfoRequest.getDefaultInstance());
+        out.put(MYSTERY_MERCHANT + "BuyMysteryMerchantGoods", s -> {
+            var entry = com.game.proto.MysteryMerchantShelfEntry.newBuilder()
+                    .setGoodsId(BattleFixture.CONFIG.mysteryMerchantGoods().all().getFirst().getId())
+                    .setDiscountPercent(60).build();
+            var resolved = s.world().merchantTables.resolve(entry);
+            return com.game.proto.BuyMysteryMerchantGoodsRequest.newBuilder()
+                    .setRoundId(1_700_000_000L)
+                    .setGoodsId(resolved.goodsId())
+                    .setCount(1)
+                    .setExpectedPrice(resolved.price())
+                    .setExpectedCurrencyType(resolved.currencyType())
+                    .setExpectedItemConfigId(resolved.itemConfigId())
+                    .setExpectedItemCount(resolved.itemCount())
+                    .setClientRequestId(5003L)
+                    .build();
+        });
         out.put(BATTLE_RESULT + "GetRecentBattleResults", s -> com.game.proto.GetRecentBattleResultsRequest.getDefaultInstance());
         out.put(BATTLE_RESULT + "AckBattleResults", s -> com.game.proto.AckBattleResultsRequest.getDefaultInstance());
         out.put(BAG + "SortBag", s -> SortBagRequest.newBuilder().setBagType(BagType.INVENTORY.code()).build());
@@ -1007,6 +1060,37 @@ class InBattleGateMatrixTest {
                     .setRuleId(1).setConfigurationRevision(1).setPeriodId(1_700_000_000_000L).setThresholdId(1)
                     .setRequestId("battle-vitality-replay-1").setRewardId(1).setClaimedAtMs(1_700_000_000_000L).build());
         }
+        if (row.service().equals(MYSTERY_MERCHANT) && row.method().equals("BuyMysteryMerchantGoods")) {
+            var goodsRow = BattleFixture.CONFIG.mysteryMerchantGoods().all().getFirst();
+            var entry = com.game.proto.MysteryMerchantShelfEntry.newBuilder()
+                    .setGoodsId(goodsRow.getId()).setDiscountPercent(60).build();
+            var resolved = w.merchantTables.resolve(entry);
+            long now = w.clock.epochMillis();
+            w.merchant.applyState(com.game.proto.MysteryMerchantState.newBuilder()
+                    .setRoundId(1_700_000_000L).setRevision(1)
+                    .setAppearAtMs(now - 10_000L).setExpireAtMs(now + 600_000L)
+                    .setIntervalSeconds(3600)
+                    .setSceneId(w.scene1.sceneId()).setSceneConfigId(w.scene1.configId())
+                    .setPosition(Vector3.newBuilder().setX(START.x()).setY(START.y()).setZ(START.z()))
+                    .addShelf(entry)
+                    .build(), now);
+            assertThat(w.currency.add(subject.player(), resolved.currencyType(), resolved.price() * 2, Reason.GM_GRANT).ok()).isTrue();
+            w.sink.clear();
+        }
+        if (row.service().equals(BAG) && (row.method().equals("PreviewEquipmentCraft") || row.method().equals("CommitEquipmentCraft"))) {
+            var rules = w.craft.getRules(subject.player());
+            var recipe = rules.getRecipes(0);
+            if (Integer.compareUnsigned(recipe.getProduct().getEquipLevel(), subject.player().level()) > 0) {
+                assertThat(w.attributes.gmSetLevel(subject.player(), recipe.getProduct().getEquipLevel())).isZero();
+            }
+            grantProbeItem(w, subject.player(), recipe.getMaterialConfigId(), Integer.toUnsignedLong(recipe.getMaterialCount()));
+            w.sink.clear();
+        }
+        if (row.service().equals(BAG) && row.method().equals("ClaimEquipmentMaterialReward")) {
+            var prev = subject.player().clientRequestLedger().materialReward();
+            subject.player().clientRequestLedger().setMaterialReward(prev.toBuilder().setAvailableUnits(10).build());
+            w.sink.clear();
+        }
         if (!EQUIPMENT_METHODS.contains(row.method())) return subject;
         ScenePlayer player = subject.player();
         var tables = w.equipment.rules().tables();
@@ -1129,9 +1213,9 @@ class InBattleGateMatrixTest {
         return f.count("game.scene.battle.gate.rejects", "gate", gate);
     }
 
-    /** 包含跨区与装备扩展的全部十个闸（{@code game_scene_battle_gate_rejects_total{gate}}）。 */
+    /** 包含跨区、装备与神秘商人的全部闸（{@code game_scene_battle_gate_rejects_total{gate}}）。 */
     private static final List<String> GATES = List.of("enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default",
-            "zone_travel", "equipment");
+            "zone_travel", "equipment", "mystery_merchant");
 
     private Map<String, Double> gateRejectsByGate() {
         Map<String, Double> out = new TreeMap<>();
@@ -1159,6 +1243,7 @@ class InBattleGateMatrixTest {
             case ATTRIBUTE -> "attribute";
             case PET -> "pet";
             case BAG -> EQUIPMENT_METHODS.contains(row.method()) ? "equipment" : "bag_sort";
+            case MYSTERY_MERCHANT -> "mystery_merchant";
             default -> throw new AssertionError(row.key() + " 是 GATED，但没有登记它计在哪个闸上（规格 §9 的 gate 取值）");
         };
     }

@@ -3858,6 +3858,11 @@ public final class SceneWorld {
         broadcast(recipients, content);
     }
 
+    /** 向本节点所有在线玩家广播推送（如神秘商人 316 出现公告）。 */
+    public void broadcastToAllPlayers(MessageContent content) {
+        broadcast(playersById.values(), content);
+    }
+
     /** 按链路分组，同一链路上的会话合成一帧下发；离线托管实体无活会话时静默跳过，避免刷屏与无效序列化。 */
     private void broadcast(Collection<ScenePlayer> recipients, MessageContent content) {
         if (recipients.isEmpty()) {

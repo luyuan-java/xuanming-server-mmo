@@ -192,6 +192,7 @@ public class SceneNode implements SmartLifecycle {
     private com.game.scene.appearance.AppearanceTables appearanceTables;
     private com.game.scene.rename.PlayerRenameTables renameTables;
     private com.game.scene.afkpass.AfkPassTables afkPassTables;
+    private com.game.scene.merchant.MysteryMerchantTables mysteryMerchantTables;
     private com.game.scene.player.SceneTextGuard textGuard;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
@@ -222,6 +223,12 @@ public class SceneNode implements SmartLifecycle {
     public synchronized SceneNode withAfkPassTables(com.game.scene.afkpass.AfkPassTables afkPassTables) {
         if (running) throw new IllegalStateException("节点已启动");
         this.afkPassTables = java.util.Objects.requireNonNull(afkPassTables);
+        return this;
+    }
+
+    public synchronized SceneNode withMysteryMerchantTables(com.game.scene.merchant.MysteryMerchantTables mysteryMerchantTables) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.mysteryMerchantTables = java.util.Objects.requireNonNull(mysteryMerchantTables);
         return this;
     }
 
@@ -279,6 +286,7 @@ public class SceneNode implements SmartLifecycle {
     private volatile ScheduledFuture<?> saveTask;
     private volatile ScheduledFuture<?> locationTask;
     private volatile ScheduledFuture<?> drainTask;
+    private volatile ScheduledFuture<?> mysteryMerchantTask;
     private volatile ChannelPlanFollower channelFollower;
     private volatile NodeLinkServer linkServer;
     private volatile SceneDirectoryPublisher publisher;
@@ -419,6 +427,10 @@ public class SceneNode implements SmartLifecycle {
         AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency, metrics, equipmentRules);
         BagFeature bagFeature = new BagFeature(bags);
         EquipmentService equipment = new EquipmentService(equipmentRules, bags, currency, attributes, metrics);
+        com.game.scene.equip.EquipmentCraftService equipmentCraft = new com.game.scene.equip.EquipmentCraftService(
+                equipmentRules, bags, attributes, metrics, SceneClock.SYSTEM);
+        com.game.scene.merchant.MysteryMerchantService mysteryMerchantService = mysteryMerchantTables == null ? null
+                : new com.game.scene.merchant.MysteryMerchantService(mysteryMerchantTables, bags, currency, SceneClock.SYSTEM, metrics);
         MissionService missions = new MissionService(missionTables, bags, SceneClock.SYSTEM);
         SkillService skills = new SkillService(skillTables, SceneClock.SYSTEM, metrics, ids);
         PetService petService = new PetService(petTables, currency, itemGuids(guids), SceneClock.SYSTEM,
@@ -560,7 +572,7 @@ public class SceneNode implements SmartLifecycle {
                 new CurrencyFeature(currency), new AttributeFeature(attributes, registry, call -> {
                     pets.onOwnerLevelChanged(call);
                     missions.onLevelChanged(call.player());
-                }), bagFeature, new EquipmentFeature(equipment, bagFeature, attributes, registry),
+                }), bagFeature, new EquipmentFeature(equipment, equipmentCraft, bagFeature, attributes, registry),
                 new com.game.scene.battle.BattleResultFeature(),
                 new MissionFeature(missions), new ActivityFeature(missions),
                 new SkillFeature(skills), new com.game.scene.skill.ClassSkillFeature(
@@ -573,6 +585,9 @@ public class SceneNode implements SmartLifecycle {
         }
         if (afkPassService != null) {
             features.add(new com.game.scene.afkpass.AfkPassFeature(afkPassService));
+        }
+        if (mysteryMerchantService != null) {
+            features.add(new com.game.scene.merchant.MysteryMerchantFeature(mysteryMerchantService, bagFeature));
         }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, runMode, features);
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
@@ -646,6 +661,25 @@ public class SceneNode implements SmartLifecycle {
                 log.error("玩家位置续期这一秒出错，下一秒照常", e);
             }
         }, 1, 1, TimeUnit.SECONDS);
+
+        if (mysteryMerchantService != null) {
+            int notifyMerchantId = registry.requireId("SceneMysteryMerchantClientPlayer", "NotifyMysteryMerchant");
+            byte[] stateField = "state".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            String merchantKey = redisKeys.mysteryMerchant(zoneId);
+            mysteryMerchantTask = scheduler.scheduleWithFixedDelay(() -> {
+                try {
+                    Object raw = redis.getMap(merchantKey, ByteArrayCodec.INSTANCE).get(stateField);
+                    if (!(raw instanceof byte[] bytes) || bytes.length == 0) {
+                        return;
+                    }
+                    com.game.proto.MysteryMerchantState parsed = com.game.proto.MysteryMerchantState.parseFrom(bytes);
+                    postToLogic(() -> mysteryMerchantService.applyState(parsed, mysteryMerchantService.nowMillis())
+                            .ifPresent(notify -> sceneWorld.broadcastToAllPlayers(SceneMessageIds.push(notifyMerchantId, notify))));
+                } catch (Exception e) {
+                    log.warn("mystery_merchant_poll_failed zone={}", zoneId, e);
+                }
+            }, 0, 5, TimeUnit.SECONDS);
+        }
 
         // 归属：接管请求（login → 全部 scene）与续约。都要在接受链路之前就绪：进场的玩家一上来就需要续约、可被接管。
         takeoverSubscriber = new OwnerTakeoverSubscriber(
@@ -1052,6 +1086,10 @@ public class SceneNode implements SmartLifecycle {
         ScheduledFuture<?> locationRefresh = locationTask;
         if (locationRefresh != null) {
             locationRefresh.cancel(false);
+        }
+        ScheduledFuture<?> merchantPoll = mysteryMerchantTask;
+        if (merchantPoll != null) {
+            merchantPoll.cancel(false);
         }
         ScheduledFuture<?> saves = saveTask;
         if (saves != null) {

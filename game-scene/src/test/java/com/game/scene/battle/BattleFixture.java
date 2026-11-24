@@ -180,7 +180,10 @@ public final class BattleFixture {
     final com.game.scene.rename.PlayerRenameService renameService;
     final com.game.scene.afkpass.AfkPassTables afkPassTables = com.game.scene.afkpass.AfkPassTables.from(CONFIG);
     final com.game.scene.afkpass.AfkPassService afkPassService;
+    public final com.game.scene.merchant.MysteryMerchantTables merchantTables = com.game.scene.merchant.MysteryMerchantTables.from(CONFIG);
+    public final com.game.scene.merchant.MysteryMerchantService merchant;
     public final com.game.scene.equip.EquipmentService equipment;
+    public final com.game.scene.equip.EquipmentCraftService craft;
     public final AttributeService attributes;
     public final PetService pets;
     public final MissionService missions;
@@ -244,6 +247,8 @@ public final class BattleFixture {
         bags = new BagService(BagTables.from(CONFIG, equipmentRules), guids, audit, GainAnomalyDetector.off(), sceneMetrics);
         attributes = new AttributeService(AttributeTables.from(CONFIG), clock, currency, sceneMetrics, equipmentRules);
         equipment = new com.game.scene.equip.EquipmentService(equipmentRules, bags, currency, attributes, sceneMetrics);
+        craft = new com.game.scene.equip.EquipmentCraftService(equipmentRules, bags, attributes, sceneMetrics, clock);
+        merchant = new com.game.scene.merchant.MysteryMerchantService(merchantTables, bags, currency, clock, sceneMetrics);
         missions = new MissionService(MissionTables.from(CONFIG), bags, clock);
         skills = new SkillService(SkillTables.from(CONFIG), clock, sceneMetrics, Contracts.IDS);
         pets = new PetService(PetTables.from(CONFIG), currency, guids, clock, new SplittableRandom(7), sceneMetrics);
@@ -283,7 +288,8 @@ public final class BattleFixture {
                     petFeature.onOwnerLevelChanged(call);
                     missions.onLevelChanged(call.player());
                 }),
-                bagFeature, new com.game.scene.equip.EquipmentFeature(equipment, bagFeature, attributes, Contracts.REGISTRY),
+                bagFeature, new com.game.scene.equip.EquipmentFeature(equipment, craft, bagFeature, attributes, Contracts.REGISTRY),
+                new com.game.scene.merchant.MysteryMerchantFeature(merchant, bagFeature),
                 new BattleResultFeature(),
                 new MissionFeature(missions), new ActivityFeature(missions), new SkillFeature(skills),
                 new com.game.scene.skill.ClassSkillFeature(new com.game.scene.skill.ClassSkillService(currency, attributes),
