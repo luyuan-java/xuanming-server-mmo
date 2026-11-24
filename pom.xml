@@ -38,6 +38,7 @@
         <module>game-rank</module>
         <module>game-content-guard</module>
         <module>game-payment</module>
+        <module>game-gm-admin</module>
         <module>game-inbox</module>
         <module>game-mall</module>
         <module>game-match</module>

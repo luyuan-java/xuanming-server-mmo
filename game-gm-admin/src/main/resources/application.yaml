@@ -1,0 +1,29 @@
+server:
+  port: 18128
+
+management:
+  server:
+    port: 18129
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+spring:
+  application:
+    name: game-gm-admin
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: "${GAME_MYSQL_URL:jdbc:mysql://${GAME_MYSQL_HOST:127.0.0.1}:${GAME_MYSQL_PORT:4000}/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&connectTimeout=3000&socketTimeout=4000&useAffectedRows=true&sessionVariables=transaction_isolation='READ-COMMITTED'}"
+    username: root
+    password: ""
+
+game:
+  gm:
+    gateway-url: http://127.0.0.1:8081
+    gateway-admin-key: ""
+    mail-enabled: false
+    match-ops-enabled: false
+    player-commands-enabled: false
+    call-budget-ms: 5000
+    auto-init-schema: true
