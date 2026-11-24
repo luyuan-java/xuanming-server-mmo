@@ -589,6 +589,29 @@ public final class RedisLoginTokens implements LoginTokens {
         return revokeFamily(account, familyId, head == null ? "" : head);
     }
 
+    @Override
+    public void revokeAll(String account) {
+        if (account == null || account.isEmpty()) {
+            return;
+        }
+        String setKey = redisKeys.loginAccountRefresh(account);
+        RScoredSortedSet<String> set = redis.getScoredSortedSet(setKey, StringCodec.INSTANCE);
+        List<String> families = store("读取账号令牌家族列表", () -> new ArrayList<>(set.valueRange(0, -1)));
+        for (String familyId : families) {
+            try {
+                revokeFamilyById(account, familyId);
+            } catch (RuntimeException e) {
+                log.error("全量吊销令牌家族失败 account={} family={}: {}", account, familyLogTag(familyId),
+                        e.getClass().getSimpleName());
+            }
+        }
+        try {
+            set.delete();
+        } catch (RuntimeException e) {
+            log.warn("清理账号令牌家族索引失败 account={}: {}", account, e.getClass().getSimpleName());
+        }
+    }
+
     /**
      * 把家族登记 / 续进账号索引，再核一次家族记录：登记期间家族已被并发吊销（吊销方先删记录、再摘索引），就把它摘掉并返回 false，
      * 索引里不留死成员。两个键分属不同 slot，各自线性一致：吊销方的摘除要么排在本次登记之后，要么本次的 EXISTS 已经看到记录被删。

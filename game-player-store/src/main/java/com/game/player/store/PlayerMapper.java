@@ -310,4 +310,143 @@ public interface PlayerMapper {
             "<foreach collection='leases' item='l' open='(' separator=',' close=')'>(#{l.playerId}, #{l.ownerEpoch})</foreach>",
             "</script>"})
     List<Long> selectStillHeld(@Param("leases") List<OwnerLease> leases);
+
+    // ---------------------------------------------------------------- 实名认证、账号注销与渠道身份
+
+    String ACCOUNT_LIFECYCLE_COLUMNS = "account, real_name_pi, deletion_state, deletion_requested_ms, "
+            + "deletion_execute_after_ms, deletion_lease_until_ms, deletion_source";
+
+    @Select("SELECT " + ACCOUNT_LIFECYCLE_COLUMNS + ", 0 AS prev_deleted_ms FROM account WHERE account = #{account}")
+    @ConstructorArgs({
+            @Arg(column = "account", javaType = String.class),
+            @Arg(column = "real_name_pi", javaType = String.class),
+            @Arg(column = "deletion_state", javaType = int.class),
+            @Arg(column = "deletion_requested_ms", javaType = long.class),
+            @Arg(column = "deletion_execute_after_ms", javaType = long.class),
+            @Arg(column = "deletion_lease_until_ms", javaType = long.class),
+            @Arg(column = "deletion_source", javaType = int.class),
+            @Arg(column = "prev_deleted_ms", javaType = long.class)})
+    AccountLifecycle selectAccountLifecycle(@Param("account") String account);
+
+    @Select("SELECT " + ACCOUNT_LIFECYCLE_COLUMNS + ", 0 AS prev_deleted_ms FROM account WHERE account = #{account} FOR UPDATE")
+    @ConstructorArgs({
+            @Arg(column = "account", javaType = String.class),
+            @Arg(column = "real_name_pi", javaType = String.class),
+            @Arg(column = "deletion_state", javaType = int.class),
+            @Arg(column = "deletion_requested_ms", javaType = long.class),
+            @Arg(column = "deletion_execute_after_ms", javaType = long.class),
+            @Arg(column = "deletion_lease_until_ms", javaType = long.class),
+            @Arg(column = "deletion_source", javaType = int.class),
+            @Arg(column = "prev_deleted_ms", javaType = long.class)})
+    AccountLifecycle selectAccountLifecycleForUpdate(@Param("account") String account);
+
+    @Select("SELECT deletion_state FROM account WHERE account = #{account}")
+    Integer selectAccountDeletionState(@Param("account") String account);
+
+    /** 仅在未实名（real_name_pi = ''）时一次性绑定；已实名时影响 0 行。 */
+    @Update("UPDATE account SET real_name_pi = #{pi} WHERE account = #{account} AND real_name_pi = ''")
+    int setAccountRealNameIfEmpty(@Param("account") String account, @Param("pi") String pi);
+
+    /** 客服重置实名；原已实名则影响 1 行。 */
+    @Update("UPDATE account SET real_name_pi = '' WHERE account = #{account} AND real_name_pi <> ''")
+    int clearAccountRealName(@Param("account") String account);
+
+    /** 供支付服务按 player_id 读取所属账号的实名 pi。 */
+    @Select("SELECT a.real_name_pi FROM player p JOIN account a ON a.account = p.account WHERE p.player_id = #{playerId}")
+    String selectRealNamePiByPlayerId(@Param("playerId") long playerId);
+
+    @Update("""
+            UPDATE account
+               SET deletion_state = 1,
+                   deletion_requested_ms = #{requestedMs},
+                   deletion_execute_after_ms = #{executeAfterMs},
+                   deletion_lease_until_ms = 0,
+                   deletion_source = #{source}
+             WHERE account = #{account} AND deletion_state = 0
+            """)
+    int markAccountDeletionPending(@Param("account") String account, @Param("requestedMs") long requestedMs,
+                                   @Param("executeAfterMs") long executeAfterMs, @Param("source") int source);
+
+    @Update("""
+            UPDATE account
+               SET deletion_state = 0,
+                   deletion_requested_ms = 0,
+                   deletion_execute_after_ms = 0,
+                   deletion_lease_until_ms = 0,
+                   deletion_source = 0
+             WHERE account = #{account} AND deletion_state = 1
+            """)
+    int cancelAccountDeletionPending(@Param("account") String account);
+
+    @Select("""
+            SELECT account FROM account
+             WHERE deletion_state IN (1, 2)
+               AND deletion_execute_after_ms <= #{nowMs}
+               AND deletion_lease_until_ms <= #{nowMs}
+             ORDER BY deletion_execute_after_ms, account
+             LIMIT #{limit}
+            """)
+    List<String> selectDueDeletionAccounts(@Param("nowMs") long nowMs, @Param("limit") int limit);
+
+    @Update("""
+            UPDATE account
+               SET deletion_state = 2,
+                   deletion_lease_until_ms = #{leaseUntilMs}
+             WHERE account = #{account}
+               AND deletion_state IN (1, 2)
+               AND deletion_execute_after_ms <= #{nowMs}
+               AND deletion_lease_until_ms <= #{nowMs}
+            """)
+    int claimDeletionAccount(@Param("account") String account, @Param("nowMs") long nowMs,
+                             @Param("leaseUntilMs") long leaseUntilMs);
+
+    @Select("SELECT deleted_ms FROM account_deletion_receipt WHERE account_digest = #{digest}")
+    Long selectDeletionReceiptMs(@Param("digest") byte[] digest);
+
+    @Insert("""
+            INSERT INTO account_deletion_receipt (account_digest, requested_ms, deleted_ms, source)
+            VALUES (#{digest}, #{requestedMs}, #{deletedMs}, #{source})
+            ON DUPLICATE KEY UPDATE requested_ms = VALUES(requested_ms),
+                                    deleted_ms = VALUES(deleted_ms),
+                                    source = VALUES(source)
+            """)
+    int upsertDeletionReceipt(@Param("digest") byte[] digest, @Param("requestedMs") long requestedMs,
+                              @Param("deletedMs") long deletedMs, @Param("source") int source);
+
+    @Delete("DELETE FROM account WHERE account = #{account} AND deletion_state = 2")
+    int deleteDeletingAccount(@Param("account") String account);
+
+    @Delete("DELETE FROM player_state WHERE player_id = #{playerId}")
+    int deletePlayerState(@Param("playerId") long playerId);
+
+    @Delete("DELETE FROM player_name_hold WHERE owner_player_id = #{playerId}")
+    int deleteNameHoldsByOwner(@Param("playerId") long playerId);
+
+    @Delete("DELETE FROM player WHERE player_id = #{playerId} AND account = #{account} AND trade_listing_id = 0")
+    int deletePlayerForAccount(@Param("playerId") long playerId, @Param("account") String account);
+
+    @Insert("""
+            INSERT INTO account_channel_identity (account, channel, open_id, updated_at)
+            VALUES (#{account}, #{channel}, #{openId}, #{updatedAt})
+            ON DUPLICATE KEY UPDATE channel = VALUES(channel),
+                                    open_id = VALUES(open_id),
+                                    updated_at = VALUES(updated_at)
+            """)
+    int upsertAccountChannelIdentity(@Param("account") String account, @Param("channel") String channel,
+                                     @Param("openId") String openId, @Param("updatedAt") long updatedAt);
+
+    @Select("""
+            SELECT c.account, c.channel, c.open_id, c.updated_at
+              FROM player p JOIN account_channel_identity c ON c.account = p.account
+             WHERE p.player_id = #{playerId}
+            """)
+    @ConstructorArgs({
+            @Arg(column = "account", javaType = String.class),
+            @Arg(column = "channel", javaType = String.class),
+            @Arg(column = "open_id", javaType = String.class),
+            @Arg(column = "updated_at", javaType = long.class)})
+    AccountChannelIdentity selectChannelIdentityByPlayerId(@Param("playerId") long playerId);
+
+    @Delete("DELETE FROM account_channel_identity WHERE account = #{account}")
+    int deleteAccountChannelIdentity(@Param("account") String account);
 }

@@ -1,3 +1,7 @@
+game:
+  dubbo:
+    login-url: ""
+
 dubbo:
   registry:
     address: nacos://${GAME_NACOS_ADDR:127.0.0.1:8848}

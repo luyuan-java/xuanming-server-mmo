@@ -4,9 +4,34 @@
 -- M16路由结构的唯一DDL源为classpath:db/game-route-authority-schema.sql；必须在本脚本前执行。
 
 CREATE TABLE IF NOT EXISTS account (
-    account     VARCHAR(64)     NOT NULL,
-    created_at  BIGINT          NOT NULL COMMENT 'Unix 毫秒',
-    password_hash VARCHAR(255)  NULL COMMENT 'Argon2id PHC 串；NULL = 该账号不能口令登录（生产口令认证只读，登录不写）',
+    account                    VARCHAR(64)       NOT NULL,
+    created_at                 BIGINT            NOT NULL COMMENT 'Unix 毫秒',
+    password_hash              VARCHAR(255)      NULL COMMENT 'Argon2id PHC 串；NULL = 该账号不能口令登录（生产口令认证只读，登录不写）',
+    real_name_pi               VARCHAR(64)       NOT NULL DEFAULT '' COMMENT 'NPPA 38 位实名标识；空串 = 未实名',
+    deletion_state             TINYINT UNSIGNED  NOT NULL DEFAULT 0 COMMENT '0=正常 1=冷静期 2=执行中',
+    deletion_requested_ms      BIGINT            NOT NULL DEFAULT 0 COMMENT '注销申请时刻（Unix 毫秒）',
+    deletion_execute_after_ms  BIGINT            NOT NULL DEFAULT 0 COMMENT '冷静期满可执行时刻（Unix 毫秒）',
+    deletion_lease_until_ms    BIGINT            NOT NULL DEFAULT 0 COMMENT '执行者认领租约截止时刻（Unix 毫秒）',
+    deletion_source            TINYINT UNSIGNED  NOT NULL DEFAULT 0 COMMENT '1=本人申请 2=运维代办',
+    PRIMARY KEY (account),
+    KEY idx_account_deletion_due (deletion_state, deletion_execute_after_ms, deletion_lease_until_ms)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+-- 账号注销完成回执：只存账号 SHA-256 摘要，不存原文，供同身份重注册展示上次注销完成时刻。
+CREATE TABLE IF NOT EXISTS account_deletion_receipt (
+    account_digest  VARBINARY(32)     NOT NULL COMMENT 'SHA-256(account)',
+    requested_ms    BIGINT            NOT NULL COMMENT '申请注销时刻（Unix 毫秒）',
+    deleted_ms      BIGINT            NOT NULL COMMENT '完成注销时刻（Unix 毫秒）',
+    source          TINYINT UNSIGNED  NOT NULL COMMENT '1=本人申请 2=运维代办',
+    PRIMARY KEY (account_digest)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+-- 账号渠道身份档案：登录解析后落库，供内容安全外部平台复审与聊天检索 (channel, open_id)。
+CREATE TABLE IF NOT EXISTS account_channel_identity (
+    account     VARCHAR(64)   NOT NULL,
+    channel     VARCHAR(32)   NOT NULL DEFAULT '',
+    open_id     VARCHAR(128)  NOT NULL DEFAULT '',
+    updated_at  BIGINT        NOT NULL COMMENT 'Unix 毫秒',
     PRIMARY KEY (account)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
 

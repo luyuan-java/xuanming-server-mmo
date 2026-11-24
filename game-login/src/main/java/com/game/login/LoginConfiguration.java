@@ -3,6 +3,7 @@ package com.game.login;
 import com.game.api.ContentGuardService;
 import com.game.api.DubboGroups;
 import com.game.api.SceneDirectoryService;
+import com.game.common.compliance.AntiAddictionRules;
 import com.game.common.id.Snowflake;
 import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
@@ -27,6 +28,16 @@ import com.game.login.auth.LoginAuthenticator;
 import com.game.login.character.CharacterRules;
 import com.game.login.character.PlayerIdGenerator;
 import com.game.login.character.TableCharacterRules;
+import com.game.login.compliance.AccountDeletionService;
+import com.game.login.compliance.AntiAddictionGate;
+import com.game.login.compliance.ComplianceProperties;
+import com.game.login.compliance.NppaClient;
+import com.game.login.compliance.NppaLedger;
+import com.game.login.compliance.NppaQuota;
+import com.game.login.compliance.NppaRedisKeys;
+import com.game.login.compliance.NppaReporter;
+import com.game.login.compliance.RealNameService;
+import com.game.player.store.RoleDeletionPrecheck;
 import com.game.login.dispatch.ClientMessageDispatcher;
 import com.game.login.dispatch.ClientMessageHandler;
 import com.game.login.dispatch.InFlightKeys;
@@ -275,12 +286,81 @@ public class LoginConfiguration {
         return new PlayerIdGenerator(new Snowflake(playerIdLease.nodeId()), playerIdLease::isValid);
     }
 
-    /** 登录主流程（TCP 48 与 HTTP 登录共用，同一份跨实例账号在途闸门）。 */
-    @Bean
+    /** 兼容既有 6 参调用（如接线单测）。 */
     public AccountLogin accountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens loginTokens,
                                      LoginDevices loginDevices, RedissonClient redis, RedisKeys redisKeys) {
         return new AccountLogin(authenticator, store, loginTokens, loginDevices,
-                InFlightKeys.distributed(redis, account -> redisKeys.loginInFlight("account", account), IN_FLIGHT_TTL));
+                InFlightKeys.distributed(redis, account -> redisKeys.loginInFlight("account", account), IN_FLIGHT_TTL),
+                null, true);
+    }
+
+    /** 登录主流程（TCP 48 与 HTTP 登录共用，同一份跨实例账号在途闸门，挂载可选防沉迷门禁）。 */
+    @Bean
+    public AccountLogin accountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens loginTokens,
+                                     LoginDevices loginDevices, RedissonClient redis, RedisKeys redisKeys,
+                                     ObjectProvider<AntiAddictionGate> antiAddictionGate) {
+        return new AccountLogin(authenticator, store, loginTokens, loginDevices,
+                InFlightKeys.distributed(redis, account -> redisKeys.loginInFlight("account", account), IN_FLIGHT_TTL),
+                antiAddictionGate.getIfAvailable(), true);
+    }
+
+    /** 账号注销服务与后台执行器（每 30s 按租约认领到期账号并经角色栅栏删除）。 */
+    @Bean
+    public AccountDeletionService accountDeletionService(PlayerStore store, LoginTokens loginTokens,
+                                                         OwnerTakeovers ownerTakeovers,
+                                                         ComplianceProperties compliance,
+                                                         MeterRegistry meterRegistry) {
+        var del = compliance.getDeletion();
+        return new AccountDeletionService(store, loginTokens, ownerTakeovers, RoleDeletionPrecheck.SQL_FULL,
+                del.getCoolingOff(), null, del.isExecutorEnabled(), meterRegistry);
+    }
+
+    /** 显式开启 game.login.compliance.anti-addiction.enabled=true 时装配 NPPA 实名、防沉迷裁决与上下线上报。 */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(name = "game.login.compliance.anti-addiction.enabled", havingValue = "true")
+    static class AntiAddictionConfiguration {
+
+        @Bean
+        NppaRedisKeys nppaRedisKeys(RedisKeys redisKeys) {
+            return new NppaRedisKeys(redisKeys);
+        }
+
+        @Bean
+        NppaClient nppaClient(ComplianceProperties compliance) {
+            var aa = compliance.getAntiAddiction();
+            String secretKey = System.getenv(ComplianceProperties.NPPA_SECRET_KEY_ENV);
+            return new NppaClient(new NppaClient.Config(
+                    aa.getNppaAppId(), aa.getNppaBizId(), secretKey,
+                    aa.getNppaCheckUrl(), aa.getNppaQueryUrl(), aa.getNppaLoginoutUrl()));
+        }
+
+        @Bean
+        NppaQuota nppaQuota(RedissonClient redis, NppaRedisKeys keys) {
+            return new NppaQuota.Redis(redis, keys);
+        }
+
+        @Bean
+        NppaLedger nppaLedger(RedissonClient redis, NppaRedisKeys keys, LoginProperties loginProps) {
+            return new NppaLedger(redis, keys, loginProps.deviceSessionTtl());
+        }
+
+        @Bean
+        NppaReporter nppaReporter(NppaLedger ledger, NppaQuota quota, NppaClient client, MeterRegistry meters) {
+            return new NppaReporter(ledger, quota, client::loginout, Clock.systemUTC(), meters);
+        }
+
+        @Bean
+        AntiAddictionGate antiAddictionGate(ComplianceProperties compliance, RedissonClient redis,
+                                            NppaRedisKeys keys, NppaClient client, NppaQuota quota,
+                                            NppaLedger ledger, PlayerStore store) {
+            var aa = compliance.getAntiAddiction();
+            AntiAddictionRules.Calendar calendar = AntiAddictionRules.Calendar.of(aa.getExtraPlayDays());
+            RealNameService realName = new RealNameService(
+                    new RealNameService.RedisStateStore(redis, keys), client.asVerifier(), store,
+                    quota, aa.getDailySubmitLimit(), Clock.systemUTC());
+            return new AntiAddictionGate(calendar, java.util.Set.copyOf(aa.getPlatformManagedAuthTypes()),
+                    realName, ledger, Clock.systemUTC());
+        }
     }
 
     @Bean

@@ -4,14 +4,17 @@ import com.game.api.proto.SessionContext;
 import com.game.login.auth.AuthProviderUnavailableException;
 import com.game.login.auth.LoginAuthenticator;
 import com.game.login.auth.LoginAuthenticator.Authenticated;
+import com.game.login.compliance.AntiAddictionGate;
 import com.game.login.dispatch.InFlightKeys;
 import com.game.login.dispatch.Tips;
 import com.game.login.handler.PlayerViews;
 import com.game.login.session.LoginDevices;
 import com.game.login.token.LoginTokens;
 import com.game.login.token.TokenPair;
+import com.game.player.store.AccountLifecycle;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
+import com.game.proto.login.AntiAddictionStatus;
 import com.game.proto.login.LoginRequest;
 import com.game.proto.login.LoginResponse;
 import com.game.table.LoginErrorTip;
@@ -44,6 +47,8 @@ public final class AccountLogin {
     private final LoginTokens tokens;
     private final LoginDevices devices;
     private final InFlightKeys<String> accountsInFlight;
+    private final AntiAddictionGate antiAddiction;
+    private final boolean strictAccessTokenAccount;
 
     public AccountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens tokens, LoginDevices devices) {
         this(authenticator, store, tokens, devices, new InFlightKeys<>());
@@ -51,28 +56,54 @@ public final class AccountLogin {
 
     public AccountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens tokens, LoginDevices devices,
                         InFlightKeys<String> accountsInFlight) {
+        this(authenticator, store, tokens, devices, accountsInFlight, null, false);
+    }
+
+    public AccountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens tokens, LoginDevices devices,
+                        InFlightKeys<String> accountsInFlight, AntiAddictionGate antiAddiction,
+                        boolean strictAccessTokenAccount) {
         this.authenticator = authenticator;
         this.store = store;
         this.tokens = tokens;
         this.devices = devices;
         this.accountsInFlight = java.util.Objects.requireNonNull(accountsInFlight, "accountsInFlight");
+        this.antiAddiction = antiAddiction;
+        this.strictAccessTokenAccount = strictAccessTokenAccount;
     }
 
     /**
      * 一次登录的结局。
      *
-     * @param response 给客户端的应答（失败时只带 {@code error_message}）
-     * @param account  成功时是通过认证的账号；失败为 null
+     * @param response       给客户端的应答（失败时只带 {@code error_message}，防沉迷拒绝时也附带最新 {@code anti_addiction}）
+     * @param account        成功时是通过认证的账号；失败为 null
+     * @param playDeadlineMs 未成年人防沉迷截止时刻（Unix 毫秒，0 = 不限）
      */
-    public record Outcome(LoginResponse response, String account) {
+    public record Outcome(LoginResponse response, String account, long playDeadlineMs) {
+
+        public Outcome(LoginResponse response, String account) {
+            this(response, account, 0L);
+        }
 
         public boolean succeeded() {
             return account != null;
         }
 
         static Outcome failed(int tipId) {
-            return new Outcome(LoginResponse.newBuilder().setErrorMessage(Tips.of(tipId)).build(), null);
+            return new Outcome(LoginResponse.newBuilder().setErrorMessage(Tips.of(tipId)).build(), null, 0L);
         }
+
+        static Outcome failedWithAntiAddiction(int tipId, AntiAddictionStatus status) {
+            LoginResponse.Builder b = LoginResponse.newBuilder().setErrorMessage(Tips.of(tipId));
+            if (status != null) {
+                b.setAntiAddiction(status);
+            }
+            return new Outcome(b.build(), null, 0L);
+        }
+    }
+
+    /** 提供认证器给注销申请等重新认证路径复用。 */
+    public Optional<Authenticated> authenticate(LoginRequest request) {
+        return authenticator.authenticate(request);
     }
 
     /** TCP 48：带会话（查设备数）。 */
@@ -105,9 +136,31 @@ public final class AccountLogin {
             return Outcome.failed(LoginErrorTip.login_error.kLoginInProgress_VALUE);
         }
         try {
-            String deviceKey = null;
-            if (session != null) {
-                deviceKey = LoginDevices.sessionKey(session.getGateInstanceId(), session.getSessionId());
+            boolean isAccessToken = "access_token".equals(request.getAuthType());
+            String authType = authenticated.get().authType();
+            String deviceKey = session != null
+                    ? LoginDevices.sessionKey(session.getGateInstanceId(), session.getSessionId())
+                    : null;
+
+            // 先读账号生命周期（access_token 路径在严格模式下不自动建行，防止已注销账号被旧令牌复活）
+            Optional<AccountLifecycle> before = readLifecycleQuietly(account, false);
+            if (strictAccessTokenAccount && isAccessToken && before.isEmpty()) {
+                return Outcome.failed(LoginErrorTip.login_error.kLoginAccountNotFound_VALUE);
+            }
+            AccountLifecycle lifecycle = before.orElse(null);
+
+            // TCP 路径先判防沉迷，被拒时不占设备名额、不写会话账本
+            AntiAddictionGate.Verdict aaVerdict = AntiAddictionGate.Verdict.DISABLED;
+            if (session != null && antiAddiction != null) {
+                String pi = lifecycle == null ? "" : lifecycle.realNamePi();
+                aaVerdict = antiAddiction.evaluate(authType, pi, antiAddiction.now());
+                if (aaVerdict.rejectTip() != 0) {
+                    log.info("防沉迷拒绝绑定会话 account={} channel={} tip={}", account, authType, aaVerdict.rejectTip());
+                    return Outcome.failedWithAntiAddiction(aaVerdict.rejectTip(), aaVerdict.status());
+                }
+            }
+
+            if (deviceKey != null) {
                 Integer refused = admitDevice(account, deviceKey);
                 if (refused != null) {
                     return Outcome.failed(refused);
@@ -115,7 +168,21 @@ public final class AccountLogin {
             }
             List<PlayerRow> players;
             try {
-                store.ensureAccount(account);
+                if (!strictAccessTokenAccount || !isAccessToken) {
+                    if (before.isEmpty()) {
+                        // 首次出现该账号：走 ensureAccount 兼容既有单测，再补查生命周期与历史注销回执
+                        store.ensureAccount(account);
+                        lifecycle = readLifecycleQuietly(account, false).orElse(null);
+                        if (lifecycle != null) {
+                            long prevDeletedMs = store.findDeletionReceiptMs(account);
+                            if (prevDeletedMs > 0) {
+                                lifecycle = lifecycle.withPreviousDeletedMs(prevDeletedMs);
+                            }
+                        }
+                    } else {
+                        store.ensureAccount(account);
+                    }
+                }
                 players = store.listPlayers(account);
             } catch (RuntimeException e) {
                 // gate 不会绑这个账号：撤销这次新登记（同账号重登时登记原本就在、gate 仍绑着它，不能撤）
@@ -124,17 +191,47 @@ public final class AccountLogin {
                 }
                 throw e;
             }
+            recordChannelIdentityQuietly(account, authType);
+
+            if (deviceKey != null && antiAddiction != null) {
+                try {
+                    antiAddiction.beginWatchedSession(deviceKey, aaVerdict);
+                } catch (RuntimeException e) {
+                    log.error("登记防沉迷会话账本失败 account={} session={}: {}", account, deviceKey, e.toString());
+                    if (!account.equals(session.getAccount())) {
+                        revokeQuietly(account, deviceKey);
+                    }
+                    return Outcome.failed(LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE);
+                }
+            }
+
             LoginResponse.Builder response = LoginResponse.newBuilder().addAllPlayers(PlayerViews.wrapAll(players));
+            if (lifecycle != null) {
+                response.setAccountDeletionState(lifecycle.deletionState())
+                        .setAccountDeletionExecuteAfter(lifecycle.deletionExecuteAfterMs() / 1000L)
+                        .setPreviousAccountDeletedAt(lifecycle.previousDeletedMs() / 1000L);
+            }
+            if (antiAddiction != null) {
+                if (session == null) {
+                    AntiAddictionStatus status = antiAddiction.evaluateForHttpLogin(
+                            account, authType, lifecycle == null ? "" : lifecycle.realNamePi());
+                    if (status != null) {
+                        response.setAntiAddiction(status);
+                    }
+                } else if (aaVerdict.status() != null) {
+                    response.setAntiAddiction(aaVerdict.status());
+                }
+            }
             if (authenticated.get().issuesTokens()
-                    && !issueTokens(account, authenticated.get().authType(), response) && session == null) {
+                    && !issueTokens(account, authType, response) && session == null) {
                 return Outcome.failed(LoginErrorTip.login_error.kLoginTokenIssueFailed_VALUE);
             }
             if (deviceKey != null) {
                 bindQuietly(account, deviceKey, session.getAccount());
             }
             log.info("登录成功 account={} path={} auth_type={} players={}", account, path(session),
-                    authenticated.get().authType(), players.size());
-            return new Outcome(response.build(), account);
+                    authType, players.size());
+            return new Outcome(response.build(), account, aaVerdict.playDeadlineMs());
         } finally {
             accountsInFlight.release(account);
         }
@@ -196,11 +293,30 @@ public final class AccountLogin {
      */
     public void closeDeviceSession(SessionContext session) {
         String deviceKey = LoginDevices.sessionKey(session.getGateInstanceId(), session.getSessionId());
+        if (antiAddiction != null) {
+            antiAddiction.endWatchedSessionQuietly(deviceKey);
+        }
         try {
             devices.close(deviceKey, session.getAccount());
         } catch (RuntimeException e) {
             log.warn("会话结束时注销登录设备失败（按登记有效期自愈） account={} session={}: {}", session.getAccount(), deviceKey,
                     e.toString());
+        }
+    }
+
+    private Optional<AccountLifecycle> readLifecycleQuietly(String account, boolean createIfAbsent) {
+        Optional<AccountLifecycle> res = store.readAccountLifecycle(account, createIfAbsent);
+        return res == null ? Optional.empty() : res;
+    }
+
+    private void recordChannelIdentityQuietly(String account, String channel) {
+        if (channel == null || channel.isEmpty() || "access_token".equals(channel)) {
+            return;
+        }
+        try {
+            store.upsertAccountChannelIdentity(account, channel, "");
+        } catch (RuntimeException e) {
+            log.debug("记录账号渠道身份失败（不影响登录） account={} channel={}: {}", account, channel, e.getClass().getSimpleName());
         }
     }
 

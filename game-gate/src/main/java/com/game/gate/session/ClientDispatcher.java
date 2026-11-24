@@ -47,6 +47,7 @@ import com.game.proto.TipInfoMessage;
 import com.game.proto.UnsubscribeSpectateRequest;
 import com.game.proto.UnsubscribeSpectateResponse;
 import com.game.table.CommonErrorTip;
+import com.game.table.LoginErrorTip;
 import com.game.table.MatchErrorTip;
 import com.game.table.SceneErrorTip;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -130,6 +131,8 @@ public final class ClientDispatcher {
     static final int TIP_ENTER_SCENE_FAILED = SceneErrorTip.scene_error.kEnterSceneFailed_VALUE;
     /** 跨 zone 传送受理后未成（3027，基线 {@code genericFailTip}）：重定向载荷非法时推这个码后断开。 */
     static final int TIP_ZONE_TRAVEL_FAILED = SceneErrorTip.scene_error.kZoneTravelTargetBusy_VALUE;
+    /** 未成年人当日防沉迷可玩时段到期踢线提示（2049）。 */
+    static final int TIP_MINOR_PLAY_TIME_OVER = LoginErrorTip.login_error.kLoginMinorPlayTimeOver_VALUE;
 
     /**
      * 会话后端 lane 的排队 + 在途总上限:超过就回带请求 id 的信封 1008、不断连、不计非法包。
@@ -527,8 +530,9 @@ public final class ClientDispatcher {
         spectate.drop(s);
         // 客户端先关（已重定向的会话正常就是这样收场）：收口定时器作废
         s.cancelRedirectLinger();
-        // 后端 lane 的延后放行一并作废：排队项随断线丢弃，不再发出
+        // 后端 lane 的延后放行与未成年人防沉迷截止定时器一并作废
         s.cancelBackendRelease();
+        s.cancelPlayDeadline();
         discardPending(s, RequestResult.DROPPED);
         // 已重定向的会话没有场景绑定，这里什么也不发
         leaveScene(s, s.leaveGameRequests > 0);
@@ -862,7 +866,7 @@ public final class ClientDispatcher {
             }
             SessionDirective directive = directives.get(i);
             switch (directive.getKindCase()) {
-                case BIND_ACCOUNT -> s.account = directive.getBindAccount().getAccount();
+                case BIND_ACCOUNT -> applyBindAccount(s, directive.getBindAccount());
                 case ENTER_SCENE -> enterScene(s, directive.getEnterScene());
                 case CLOSE_SESSION -> closeByServer(s, directive.getCloseSession().getTipId());
                 case UNBIND_PLAYER -> unbindPlayer(s);
@@ -870,6 +874,26 @@ public final class ClientDispatcher {
                 case KIND_NOT_SET -> log.warn("login 下发了空会话指令 session={}", sid(s));
             }
         }
+    }
+
+    private void applyBindAccount(ClientSession s, com.game.api.proto.BindAccount bind) {
+        s.account = bind.getAccount();
+        long deadlineMs = bind.getPlayDeadlineMs();
+        if (deadlineMs <= 0) {
+            s.cancelPlayDeadline();
+            return;
+        }
+        long delayMs = Math.max(0L, deadlineMs - clock.millis());
+        int sessionId = s.sessionId();
+        String expectedAccount = s.account;
+        s.schedulePlayDeadline(delayMs, () -> {
+            ClientSession current = registry.get(sessionId);
+            if (current != s || current.closed || current.closing || !expectedAccount.equals(current.account)) {
+                return;
+            }
+            log.info("未成年人防沉迷时段到期踢线 session={} account={} deadline_ms={}", sid(current), expectedAccount, deadlineMs);
+            closeByServer(current, TIP_MINOR_PLAY_TIME_OVER);
+        });
     }
 
     /** 不再执行的指令：只记日志；其中的重定向指令按过期计数（每条重定向指令恰好计一次结局）。 */

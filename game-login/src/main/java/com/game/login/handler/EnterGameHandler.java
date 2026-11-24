@@ -315,6 +315,10 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
             log.info("进游戏拒绝：角色不属于本账号 account={} player={} 存在={}", account, playerId, found.isPresent());
             return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));
         }
+        var lifecycle = store.readAccountLifecycle(account, false);
+        if (lifecycle != null && lifecycle.isPresent() && lifecycle.get().deletingOrPending()) {
+            return done(error(LoginErrorTip.login_error.kLoginAccountDeletionPending_VALUE));
+        }
         PlayerRow row = found.get();
         if ("06_thunder_caster_boy".equals(row.getAppearanceId())) {
             return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));

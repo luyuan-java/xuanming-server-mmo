@@ -242,7 +242,7 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
     /** @param createDeadline 请求预算的截止时刻（{@link #nanoClock} 的读数） */
     private CreatePlayerResponse create(SessionContext session, String account, CreatePlayerRequest request,
                                         long createDeadline) {
-        // 快照预检只用于快速拒绝（不持锁、不发号）；权威判定在 createPlayerWithinCap 的事务里。
+        // 快照预检只用于快速拒绝（不持锁、不发号）；权威判定（含注销冷静期拦截）在 createPlayerWithinCap 事务内完成。
         List<PlayerRow> snapshot = store.listPlayers(account);
         String appearanceId = request.getAppearanceId();
         boolean retiredAppearance = CharacterAppearances.isRetired(appearanceId);
@@ -371,6 +371,10 @@ public final class CreatePlayerHandler implements ClientMessageHandler<CreatePla
             case ACCOUNT_MISSING -> {
                 log.error("建角拒绝：账号行不存在（登录时应已建好）account={}", account);
                 yield error(LoginErrorTip.login_error.kLoginDataSerializeFailed_VALUE);
+            }
+            case DELETION_PENDING -> {
+                log.info("建角拒绝：账号处于注销冷静期或执行中 account={}", account);
+                yield error(LoginErrorTip.login_error.kLoginAccountDeletionPending_VALUE);
             }
             case NAME_TAKEN -> requested
                     ? nameTaken(account, row, outcome.existing())

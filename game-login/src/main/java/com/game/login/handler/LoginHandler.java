@@ -53,8 +53,12 @@ public final class LoginHandler implements ClientMessageHandler<LoginRequest> {
         if (!outcome.succeeded()) {
             return CompletableFuture.completedFuture(HandlerReply.of(outcome.response()));
         }
+        BindAccount.Builder bind = BindAccount.newBuilder().setAccount(outcome.account());
+        if (outcome.playDeadlineMs() > 0) {
+            bind.setPlayDeadlineMs(outcome.playDeadlineMs());
+        }
         return CompletableFuture.completedFuture(HandlerReply.of(outcome.response(), SessionDirective.newBuilder()
-                .setBindAccount(BindAccount.newBuilder().setAccount(outcome.account()))
+                .setBindAccount(bind)
                 .build()));
     }
 

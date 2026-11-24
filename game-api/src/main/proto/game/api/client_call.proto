@@ -69,6 +69,8 @@ message SessionDirective {
 // 登录成功：把账号绑到会话上，之后的调用都带着它。
 message BindAccount {
   string account = 1;
+  // 未成年人本次防沉迷截止时刻（Unix 毫秒，0 = 不限）；非 0 时 gate 在到点推送 2049 并关闭会话。
+  uint64 play_deadline_ms = 2;
 }
 
 // 进游戏：gate 把会话绑定到玩家，并经节点链路把玩家送进指定场景节点的指定场景。

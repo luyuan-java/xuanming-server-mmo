@@ -2314,6 +2314,31 @@ class ClientDispatcherTest {
         assertThat(original.getAccount()).isEqualTo("robot_0001");
     }
 
+    @Test
+    void 未成年人防沉迷可玩截止到点推送2049并断开() {
+        EmbeddedChannel ch = verified();
+        long deadlineMs = NOW * 1000L + 50L;
+        ch.writeInbound(ClientRequest.newBuilder().setMessageId(LOGIN_MSG).setId(901).build());
+        login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder()
+                        .setBindAccount(BindAccount.newBuilder().setAccount("minor_1").setPlayDeadlineMs(deadlineMs)))
+                .build());
+        ch.runPendingTasks();
+        // 先收到登录应答，尚未断开
+        MessageContent loginReply = ch.readOutbound();
+        assertThat(loginReply).isNotNull();
+        assertThat(loginReply.getMessageId()).isEqualTo(LOGIN_MSG);
+        assertThat(ch.isOpen()).isTrue();
+
+        // 推进 EmbeddedChannel 调度时钟越过 50ms 截止 -> 推 2049 并关闭连接
+        ch.advanceTimeBy(60, TimeUnit.MILLISECONDS);
+        ch.runScheduledPendingTasks();
+        Object kickFrame = ch.readOutbound();
+        assertThat(kickFrame).isNotNull();
+        assertThat(tipOf(kickFrame)).isEqualTo(ClientDispatcher.TIP_MINOR_PLAY_TIME_OVER);
+        assertThat(ch.isOpen()).isFalse();
+    }
+
     private static ByteString payload(int gateNodeId, long expire) {
         return GateTokenPayload.newBuilder().setGateNodeId(gateNodeId).setZoneId(ZONE).setExpireTimestamp(expire).build().toByteString();
     }

@@ -11,13 +11,21 @@ import java.util.List;
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record HttpLoginResponse(int code, String message, Long retryAfterMs, Long queuePos, List<PlayerInfo> players,
-                                String accessToken, String refreshToken, Long accessTokenExpire, Long refreshTokenExpire) {
+                                String accessToken, String refreshToken, Long accessTokenExpire, Long refreshTokenExpire,
+                                Integer accountDeletionState, Long accountDeletionExecuteAfter,
+                                Long previousAccountDeletedAt, HttpAntiAddictionStatus antiAddiction) {
 
     public static final int CODE_OK = 0;
     public static final int CODE_QUEUEING = 100;
     public static final int CODE_RATE_LIMITED = 429;
     public static final int CODE_AUTH_REJECTED = 401;
     public static final int CODE_INTERNAL = 500;
+
+    public HttpLoginResponse(int code, String message, Long retryAfterMs, Long queuePos, List<PlayerInfo> players,
+                             String accessToken, String refreshToken, Long accessTokenExpire, Long refreshTokenExpire) {
+        this(code, message, retryAfterMs, queuePos, players, accessToken, refreshToken, accessTokenExpire,
+                refreshTokenExpire, null, null, null, null);
+    }
 
     /** 角色摘要。level 恒为 0：login 的角色列表（loginpb.AccountSimplePlayer）不带等级（基线同）。 */
     public record PlayerInfo(long playerId, String name, int level) {
@@ -26,15 +34,29 @@ public record HttpLoginResponse(int code, String message, Long retryAfterMs, Lon
     public static HttpLoginResponse ok(List<PlayerInfo> players, String accessToken, String refreshToken,
                                        long accessTokenExpire, long refreshTokenExpire) {
         return new HttpLoginResponse(CODE_OK, null, null, null, players, accessToken, refreshToken, accessTokenExpire,
-                refreshTokenExpire);
+                refreshTokenExpire, null, null, null, null);
+    }
+
+    public static HttpLoginResponse ok(List<PlayerInfo> players, String accessToken, String refreshToken,
+                                       long accessTokenExpire, long refreshTokenExpire,
+                                       int deletionState, long deletionExecuteAfter, long previousDeletedAt,
+                                       HttpAntiAddictionStatus antiAddiction) {
+        return new HttpLoginResponse(CODE_OK, null, null, null, players, accessToken, refreshToken, accessTokenExpire,
+                refreshTokenExpire,
+                deletionState != 0 ? deletionState : null,
+                deletionExecuteAfter != 0 ? deletionExecuteAfter : null,
+                previousDeletedAt != 0 ? previousDeletedAt : null,
+                antiAddiction);
     }
 
     /** 开服限流排队（同基线 LoginResponse.queueing）。 */
     public static HttpLoginResponse queueing(long retryAfterMs, long queuePos) {
-        return new HttpLoginResponse(CODE_QUEUEING, "QUEUEING", retryAfterMs, queuePos, null, null, null, null, null);
+        return new HttpLoginResponse(CODE_QUEUEING, "QUEUEING", retryAfterMs, queuePos, null, null, null, null, null,
+                null, null, null, null);
     }
 
     public static HttpLoginResponse error(int code, String message) {
-        return new HttpLoginResponse(code, message, null, null, null, null, null, null, null);
+        return new HttpLoginResponse(code, message, null, null, null, null, null, null, null,
+                null, null, null, null);
     }
 }

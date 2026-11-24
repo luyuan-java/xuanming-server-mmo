@@ -32,7 +32,7 @@ public final class RateLimiter {
 
     /** 冷却按端点分开（基线 cooldownScope）：login 成功紧接着 assign-gate 是正常顺序，不能互相撞冷却。 */
     public enum Scope {
-        LOGIN("login"), ASSIGN("assign");
+        LOGIN("login"), ASSIGN("assign"), REAL_NAME("real-name");
 
         private final String key;
 
@@ -80,6 +80,39 @@ public final class RateLimiter {
      */
     public RateLimitDecision checkUnverifiedZone(int zoneId, String clientIp, String identity, Scope scope) {
         return decide(zoneId, false, clientIp, identity, scope);
+    }
+
+    /**
+     * 仅过共享 IP 令牌桶与 fail-open 熔断（跳过分波、区桶与账号冷却），供 {@code /api/refresh-token} 使用
+     * （对齐 2026-11-20 登录排队与开服限流标准收口：游戏内正常续期不进排队与账号冷却，仅防单 IP 洪水）。
+     */
+    public RateLimitDecision checkIpOnly(String clientIp) {
+        if (!settings.enabled()) {
+            return RateLimitDecision.pass();
+        }
+        long now = nowMs.getAsLong();
+        long until = bypassUntilMs.get();
+        if (until != 0 && (now < until || !bypassUntilMs.compareAndSet(until, now + FAIL_OPEN_HOLD.toMillis()))) {
+            return RateLimitDecision.pass();
+        }
+        String ip = clientIp == null || clientIp.isBlank() ? "?" : clientIp;
+        try {
+            RateLimitStore.Admission admission = store.admit(
+                    new RateLimitStore.Bucket(redisKeys.rateLimitIp(ip), settings.ipRps(), settings.ipBurst()),
+                    null);
+            if (until != 0) {
+                bypassUntilMs.set(0);
+                log.info("限流存储恢复，重新开始限流");
+            }
+            if (admission.kind() == RateLimitStore.Admission.Kind.IP_EMPTY) {
+                return RateLimitDecision.deny(RateLimitDecision.IP_RATE_LIMIT);
+            }
+            return RateLimitDecision.pass();
+        } catch (RuntimeException e) {
+            bypassUntilMs.set(now + FAIL_OPEN_HOLD.toMillis());
+            log.warn("限流存储出错，{} s 内放行（fail-open）: {}", FAIL_OPEN_HOLD.toSeconds(), e.toString());
+            return RateLimitDecision.pass();
+        }
     }
 
     private RateLimitDecision decide(int zoneId, boolean zoneBucket, String clientIp, String identity, Scope scope) {

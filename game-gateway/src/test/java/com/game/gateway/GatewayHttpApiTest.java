@@ -128,6 +128,7 @@ class GatewayHttpApiTest {
         when(probe.health(anyInt())).thenReturn(ZoneHealthProbe.Health.UNKNOWN);
         when(probe.loadLevel(anyInt())).thenReturn(Optional.empty());
         when(limiter.check(anyInt(), any(), any(), any())).thenReturn(RateLimitDecision.pass());
+        when(limiter.checkIpOnly(any())).thenReturn(RateLimitDecision.pass());
     }
 
     private double assignOutcomes(int code, String reason) {
@@ -551,5 +552,6 @@ class GatewayHttpApiTest {
         callAsync(post("/api/refresh-token").contentType(MediaType.APPLICATION_JSON).content("{\"refresh_token\":\"r1\"}"));
         call(post("/api/queue-status").contentType(MediaType.APPLICATION_JSON).content("{\"zone_id\":1}"));
         org.mockito.Mockito.verify(limiter, org.mockito.Mockito.times(2)).check(anyInt(), any(), any(), any());
+        org.mockito.Mockito.verify(limiter, org.mockito.Mockito.times(1)).checkIpOnly(eq("127.0.0.1"));
     }
 }

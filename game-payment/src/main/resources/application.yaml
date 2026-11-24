@@ -48,6 +48,8 @@ management:
 game:
   run-mode: ${GAME_RUN_MODE:prod}
   advertise-host: 127.0.0.1
+  dubbo:
+    login-url: tri://127.0.0.1:20881
   payment:
     workers-enabled: true
     verify-schema: true

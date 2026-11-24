@@ -45,6 +45,10 @@ public interface LoginTokens {
      */
     Optional<TokenPair> refresh(String refreshToken, BooleanSupplier pastDeadline);
 
+    /** 吊销该账号的全部令牌家族（账号注销申请与执行时调用）；默认空实现以兼容测试替身。 */
+    default void revokeAll(String account) {
+    }
+
     /** 轮换在写之前因请求截止放弃：什么都没写，旧 refresh 仍然有效，调用方应回可重试的错误（不是「令牌无效」）。 */
     final class RotationAbandoned extends RuntimeException {
 

@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-24 实名认证、防沉迷、账号注销、渠道身份档案与 `/api/refresh-token` IP 限流
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 实名认证（NPPA `check`/`query`/`loginout` AES-128-GCM + SHA-256、待查自动回查、16 分片行为上报账本 + Redis GCRA 限流）、防沉迷（未成年人可玩时段拦截 2048 + `BindAccount.play_deadline_ms` 到点 `game-gate` 推 2049 踢线、`game-payment` `minor-spending-gate=realname` 经 `LoginAdminService` 实查）、账号注销（重新认证 2038/2039 + `RoleDeletionPrecheck` 角色删除栅栏 + 冷静期撤销 + 后台到期执行删角写回执 `account_deletion_receipt` + 运维代办）、渠道身份档案 `account_channel_identity` 与 `/api/refresh-token` 共享 IP 令牌桶限流 | `go/login`（`nppa`/`realname`/`antiaddiction`/`account_deletion`/`loginadmin`）、`go/data_service`（`account_deletion_receipt`/`account_channel_identity`/角色栅栏）、`java/gateway_node`（`/api/real-name`、`/api/account/delete{,/cancel}`、`/api/refresh-token` `checkIpOnly`）、C++ `gate` 到点踢线 2049 | `game-player-store` 补齐 `account` 实名/注销字段、`account_deletion_receipt`/`account_channel_identity` 表与 `RoleDeletionPrecheck`（复用 `RolePendingFence` + `guild.leader_id` 事务预检，`AccountComplianceStoreTest` 2/2，模块 214 项全绿/8 跳过）；`game-api` 扩展 `BindAccount.play_deadline_ms`、`AccountLoginService`、`LoginAdminService`、`RoleFenceParticipantService`（101 项全绿）；`game-login` 新增 `com.game.login.compliance.*` 全套服务与 1s/30s 生命周期后台线程（`LoginComplianceTest` 3/3，模块 398 项全绿/44 跳过）；`game-gateway` 新增 3 个合规 HTTP 端点与 `/api/refresh-token` `checkIpOnly`（`LoginComplianceHttpTest` 3/3，模块 118 项全绿/11 跳过）；`game-gate` 实现到点 EventLoop 推 2049 断连（368 项全绿）；`game-payment` 接通 `minor-spending-gate=realname`（11 项全绿）；`game-robot` 命名空间与切片门禁 35/35 全绿（3 跳过）；设计见 `docs/design/real-name-deletion-and-role-fence.md` | 已对齐 |
+
 ## 2026-11-23 充值支付微服务（`game-payment`，`ClientPlayerPayment` 396–399）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |

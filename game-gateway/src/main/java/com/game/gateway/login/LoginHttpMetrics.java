@@ -15,6 +15,8 @@ public final class LoginHttpMetrics {
     static final String NAME = "game.gateway.login";
     static final String LOGIN = "login";
     static final String REFRESH = "refresh";
+    static final String REAL_NAME = "real_name";
+    static final String ACCOUNT_DELETION = "account_deletion";
 
     private final MeterRegistry registry;
     private final ConcurrentHashMap<String, Counter> counters = new ConcurrentHashMap<>();
@@ -29,6 +31,7 @@ public final class LoginHttpMetrics {
         }
         counter(LOGIN, HttpLoginResponse.CODE_QUEUEING);
         counter(LOGIN, HttpLoginResponse.CODE_RATE_LIMITED);
+        counter(REFRESH, HttpLoginResponse.CODE_RATE_LIMITED);
     }
 
     public void login(int code) {
@@ -37,6 +40,14 @@ public final class LoginHttpMetrics {
 
     public void refresh(int code) {
         counter(REFRESH, code).increment();
+    }
+
+    public void realName(int code) {
+        counter(REAL_NAME, code).increment();
+    }
+
+    public void accountDeletion(int code) {
+        counter(ACCOUNT_DELETION, code).increment();
     }
 
     private Counter counter(String endpoint, int code) {

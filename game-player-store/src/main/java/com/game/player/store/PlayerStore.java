@@ -146,6 +146,327 @@ public class PlayerStore {
         return Optional.ofNullable(mapper.selectById(playerId));
     }
 
+    // ---------------------------------------------------------------- 实名认证、账号注销与渠道身份
+
+    /** 注销冷却期上限（30 天，同权威主仓 {@code MaxDeletionCoolingOff}）。 */
+    public static final Duration MAX_DELETION_COOLING_OFF = Duration.ofDays(30);
+    /** 执行者单次认领上限。 */
+    public static final int MAX_DELETION_CLAIM = 32;
+
+    /** 注销申请 / 撤销的结果状态。 */
+    public enum AccountDeletionStatus {
+        OK,
+        NOT_FOUND,
+        BLOCKED,
+        TOO_LATE,
+        RETRY
+    }
+
+    /** 预检阻断条目。 */
+    public record DeletionBlocker(long playerId, String reason) {
+    }
+
+    /** 申请或撤销注销的权威结果。 */
+    public record AccountDeletionOutcome(
+            AccountDeletionStatus status,
+            AccountLifecycle lifecycle,
+            List<DeletionBlocker> blockers) {
+        public AccountDeletionOutcome {
+            blockers = blockers == null ? List.of() : List.copyOf(blockers);
+        }
+    }
+
+    /** 收尾注销的结果。 */
+    public record FinishDeletionOutcome(boolean done, int remainingRoles) {
+    }
+
+    /** 角色删除状态（供注销执行器逐角推进）。 */
+    public enum RoleRemovalStatus {
+        REMOVED,
+        NOT_FOUND,
+        NOT_OWNER,
+        BUSY,
+        BLOCKED
+    }
+
+    /**
+     * 读取账号实名与注销生命周期；{@code createIfAbsent=true} 时若不存在则创建，且新建时顺带查询历史注销回执。
+     * {@code createIfAbsent=false} 时不存在返回空（用于 {@code access_token} 路径，防止已注销账号被旧令牌复活）。
+     */
+    @Transactional
+    public Optional<AccountLifecycle> readAccountLifecycle(String account, boolean createIfAbsent) {
+        Objects.requireNonNull(account, "account");
+        AccountLifecycle row = mapper.selectAccountLifecycle(account);
+        boolean created = false;
+        if (row == null) {
+            if (!createIfAbsent) {
+                return Optional.empty();
+            }
+            created = mapper.insertAccountIfAbsent(account, clockMs.getAsLong()) == 1;
+            row = mapper.selectAccountLifecycle(account);
+            if (row == null) {
+                return Optional.empty();
+            }
+        }
+        if (created) {
+            Long prev = mapper.selectDeletionReceiptMs(accountDigest(account));
+            if (prev != null && prev > 0) {
+                return Optional.of(row.withPreviousDeletedMs(prev));
+            }
+        }
+        return Optional.of(row);
+    }
+
+    /**
+     * 一次性原子绑定实名 {@code pi}（只写空列）：成功或重放同一 {@code pi} 返回该 {@code pi}；
+     * 已绑定其他 {@code pi} 返回库中已有 {@code pi}；账号不存在返回空串。
+     */
+    @Transactional
+    public String setAccountRealName(String account, String pi) {
+        if (account == null || account.isBlank() || pi == null || pi.isBlank()) {
+            throw new IllegalArgumentException("account 与 pi 均不能为空");
+        }
+        AccountLifecycle locked = mapper.selectAccountLifecycleForUpdate(account);
+        if (locked == null) {
+            return "";
+        }
+        if (!locked.realNamePi().isEmpty()) {
+            return locked.realNamePi();
+        }
+        mapper.setAccountRealNameIfEmpty(account, pi);
+        AccountLifecycle after = mapper.selectAccountLifecycle(account);
+        return after == null ? "" : after.realNamePi();
+    }
+
+    /** 客服重置实名；返回账号是否存在及重置前是否已实名。 */
+    public record ResetRealNameOutcome(boolean found, boolean hadRealName) {
+    }
+
+    @Transactional
+    public ResetRealNameOutcome resetAccountRealName(String account) {
+        if (account == null || account.isBlank()) {
+            return new ResetRealNameOutcome(false, false);
+        }
+        AccountLifecycle locked = mapper.selectAccountLifecycleForUpdate(account);
+        if (locked == null) {
+            return new ResetRealNameOutcome(false, false);
+        }
+        boolean had = !locked.realNamePi().isEmpty();
+        if (had) {
+            mapper.clearAccountRealName(account);
+        }
+        return new ResetRealNameOutcome(true, had);
+    }
+
+    /** 查询角色所属账号的实名 {@code pi}（未实名或角色不存在返回空串）。 */
+    public String findRealNamePiByPlayerId(long playerId) {
+        String pi = mapper.selectRealNamePiByPlayerId(playerId);
+        return pi == null ? "" : pi;
+    }
+
+    /** 记录账号的渠道身份档案（幂等 upsert）。 */
+    public void upsertAccountChannelIdentity(String account, String channel, String openId) {
+        if (account == null || account.isBlank()) {
+            return;
+        }
+        mapper.upsertAccountChannelIdentity(account, channel == null ? "" : channel,
+                openId == null ? "" : openId, clockMs.getAsLong());
+    }
+
+    /** 按角色号查询其所属账号最近一次登录的渠道身份。 */
+    public Optional<AccountChannelIdentity> findPlayerChannelIdentity(long playerId) {
+        return Optional.ofNullable(mapper.selectChannelIdentityByPlayerId(playerId));
+    }
+
+    /**
+     * 申请账号注销：预检全部角色挂起后，在账号行锁内原子迁移 {@code 0 -> 1} 并记录冷静期截止时刻。
+     * 重复申请原样返回当前状态与原到期时刻（不刷新冷静期）。
+     */
+    @Transactional
+    public AccountDeletionOutcome requestAccountDeletion(String account, int source, Duration coolingOff,
+                                                         RoleDeletionPrecheck precheck) {
+        if (account == null || account.isBlank()
+                || (source != AccountLifecycle.SOURCE_USER && source != AccountLifecycle.SOURCE_ADMIN)
+                || coolingOff == null || coolingOff.isNegative() || coolingOff.compareTo(MAX_DELETION_COOLING_OFF) > 0) {
+            throw new IllegalArgumentException("非法注销申请参数");
+        }
+        RoleDeletionPrecheck check = precheck == null ? RoleDeletionPrecheck.SQL_FULL : precheck;
+        AccountLifecycle locked = mapper.selectAccountLifecycleForUpdate(account);
+        if (locked == null) {
+            return new AccountDeletionOutcome(AccountDeletionStatus.NOT_FOUND, null, List.of());
+        }
+        if (locked.deletionState() != AccountLifecycle.DELETION_NONE) {
+            return new AccountDeletionOutcome(AccountDeletionStatus.OK, locked, List.of());
+        }
+        List<PlayerRow> roles = mapper.selectByAccount(account);
+        boolean includeSelfService = source == AccountLifecycle.SOURCE_USER;
+        List<DeletionBlocker> blockers = new ArrayList<>();
+        for (PlayerRow role : roles) {
+            long pid = role.getPlayerId();
+            if (role.getTradeListingId() != 0) {
+                blockers.add(new DeletionBlocker(pid, RoleDeletionPrecheck.BLOCKER_ROLE_LISTED));
+                continue;
+            }
+            if (mapper.selectBlockingFinalEpoch(pid) != null) {
+                blockers.add(new DeletionBlocker(pid, RoleDeletionPrecheck.BLOCKER_PENDING));
+                continue;
+            }
+            List<String> extra = runPrecheck(check, pid, includeSelfService);
+            if (extra == null) {
+                return new AccountDeletionOutcome(AccountDeletionStatus.RETRY, null, List.of());
+            }
+            for (String reason : extra) {
+                blockers.add(new DeletionBlocker(pid, (reason == null || reason.isBlank())
+                        ? RoleDeletionPrecheck.BLOCKER_PENDING : reason));
+            }
+        }
+        if (!blockers.isEmpty()) {
+            return new AccountDeletionOutcome(AccountDeletionStatus.BLOCKED, locked, blockers);
+        }
+        long now = clockMs.getAsLong();
+        long executeAfter = now + coolingOff.toMillis();
+        mapper.markAccountDeletionPending(account, now, executeAfter, source);
+        AccountLifecycle after = mapper.selectAccountLifecycle(account);
+        return new AccountDeletionOutcome(AccountDeletionStatus.OK, after, List.of());
+    }
+
+    /** 撤销注销：冷静期（1）原子回滚至正常（0）；正常（0）幂等成功；执行中（2）拒绝 {@code TOO_LATE}。 */
+    @Transactional
+    public AccountDeletionOutcome cancelAccountDeletion(String account) {
+        if (account == null || account.isBlank()) {
+            return new AccountDeletionOutcome(AccountDeletionStatus.NOT_FOUND, null, List.of());
+        }
+        AccountLifecycle locked = mapper.selectAccountLifecycleForUpdate(account);
+        if (locked == null) {
+            return new AccountDeletionOutcome(AccountDeletionStatus.NOT_FOUND, null, List.of());
+        }
+        if (locked.deletionState() == AccountLifecycle.DELETION_DELETING) {
+            return new AccountDeletionOutcome(AccountDeletionStatus.TOO_LATE, locked, List.of());
+        }
+        if (locked.deletionState() == AccountLifecycle.DELETION_PENDING) {
+            mapper.cancelAccountDeletionPending(account);
+        }
+        AccountLifecycle after = mapper.selectAccountLifecycle(account);
+        return new AccountDeletionOutcome(AccountDeletionStatus.OK, after, List.of());
+    }
+
+    /** 认领一批冷静期已满或执行租约过期的注销账号，将状态推进到 {@code DELETING(2)} 并写入新租约。 */
+    @Transactional
+    public List<String> claimDueAccountDeletions(int limit, Duration lease) {
+        if (limit < 1 || limit > MAX_DELETION_CLAIM || lease == null || lease.isNegative() || lease.isZero()) {
+            throw new IllegalArgumentException("非法认领参数");
+        }
+        long now = clockMs.getAsLong();
+        long leaseUntil = now + lease.toMillis();
+        List<String> due = mapper.selectDueDeletionAccounts(now, limit);
+        List<String> claimed = new ArrayList<>(due.size());
+        for (String account : due) {
+            if (mapper.claimDeletionAccount(account, now, leaseUntil) == 1) {
+                claimed.add(account);
+            }
+        }
+        return claimed;
+    }
+
+    /**
+     * 注销执行器逐角清理：在角色行锁事务内确认归属仍为该账号、无活跃写者（已释放或租约过期）、无交易冻结、
+     * 无未决最终存档且通过跨域角色栅栏，然后删除角色及其存档与旧名保护记录。
+     */
+    @Transactional
+    public RoleRemovalStatus removeRoleForDeletion(String account, long playerId, RoleDeletionPrecheck precheck) {
+        RoleDeletionPrecheck check = precheck == null ? RoleDeletionPrecheck.SQL_FULL : precheck;
+        OwnerState owner = lockedOwner(playerId);
+        if (owner == null) {
+            return RoleRemovalStatus.NOT_FOUND;
+        }
+        PlayerRow row = mapper.selectById(playerId);
+        if (row == null) {
+            return RoleRemovalStatus.NOT_FOUND;
+        }
+        if (!account.equals(row.getAccount())) {
+            return RoleRemovalStatus.NOT_OWNER;
+        }
+        long now = clockMs.getAsLong();
+        if (!owner.released() && owner.leaseUntil() >= now) {
+            return RoleRemovalStatus.BUSY;
+        }
+        if (row.getTradeListingId() != 0 || mapper.selectBlockingFinalEpoch(playerId) != null) {
+            return RoleRemovalStatus.BLOCKED;
+        }
+        List<String> extra = runPrecheck(check, playerId, false);
+        if (extra == null || !extra.isEmpty()) {
+            return RoleRemovalStatus.BLOCKED;
+        }
+        mapper.deletePlayerState(playerId);
+        mapper.deleteNameHoldsByOwner(playerId);
+        int deleted = mapper.deletePlayerForAccount(playerId, account);
+        return deleted == 1 ? RoleRemovalStatus.REMOVED : RoleRemovalStatus.BLOCKED;
+    }
+
+    /**
+     * 收尾注销：锁账号行，确认处于 {@code DELETING(2)} 且名下已无任何角色，写入只含账号 SHA-256 摘要的回执，
+     * 并删除 {@code account} 与 {@code account_channel_identity} 行。账号已不在则幂等返回 {@code done=true}。
+     */
+    @Transactional
+    public FinishDeletionOutcome finishAccountDeletion(String account) {
+        AccountLifecycle locked = mapper.selectAccountLifecycleForUpdate(account);
+        if (locked == null) {
+            return new FinishDeletionOutcome(true, 0);
+        }
+        if (locked.deletionState() != AccountLifecycle.DELETION_DELETING) {
+            throw new IllegalStateException("账号不在 DELETING 状态，拒绝收尾: state=" + locked.deletionState());
+        }
+        int remaining = mapper.countByAccount(account);
+        if (remaining > 0) {
+            return new FinishDeletionOutcome(false, remaining);
+        }
+        long now = clockMs.getAsLong();
+        mapper.upsertDeletionReceipt(accountDigest(account), locked.deletionRequestedMs(), now, locked.deletionSource());
+        mapper.deleteAccountChannelIdentity(account);
+        mapper.deleteDeletingAccount(account);
+        return new FinishDeletionOutcome(true, 0);
+    }
+
+    /** 查询该账号最近一次完成注销的回执时刻（Unix 毫秒，无记录返回 0）。 */
+    public long findDeletionReceiptMs(String account) {
+        if (account == null || account.isBlank()) {
+            return 0L;
+        }
+        Long ms = mapper.selectDeletionReceiptMs(accountDigest(account));
+        return ms == null ? 0L : ms;
+    }
+
+    /** 返回账号摘要（SHA-256 32 字节），与权威主仓 {@code accountDigest} 同口径。 */
+    public static byte[] accountDigest(String account) {
+        try {
+            return java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(account.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new AssertionError(impossible);
+        }
+    }
+
+    private List<String> runPrecheck(RoleDeletionPrecheck check, long playerId, boolean includeSelfService) {
+        if (check == RoleDeletionPrecheck.NONE) {
+            return List.of();
+        }
+        if (routeSource == null) {
+            try {
+                return check.blockers(null, playerId, includeSelfService);
+            } catch (SQLException e) {
+                return null;
+            }
+        }
+        var connection = org.springframework.jdbc.datasource.DataSourceUtils.getConnection(routeSource);
+        try {
+            return check.blockers(connection, playerId, includeSelfService);
+        } catch (SQLException e) {
+            return null;
+        } finally {
+            org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(connection, routeSource);
+        }
+    }
+
     /** 外层运维事务也必须在自身首个P锁之前调用；只使用与Mapper同一Spring绑定连接。 */
     public void lockRoutes(Collection<Long> players,List<Integer> extraZones){
         if(transactions==null)return; // 明确无数据库的Mapper单测构造器，不是生产失败回退。
@@ -317,6 +638,8 @@ public class PlayerStore {
         PLAYER_FULL,
         /** 账号行不存在（登录时 {@link #ensureAccount} 应已建好；这里 fail-closed）。 */
         ACCOUNT_MISSING,
+        /** 账号处于注销冷静期或执行中，禁止新建角色。 */
+        DELETION_PENDING,
         /**
          * 只有带时限的重载（{@link #createPlayerWithinCap(PlayerRow, int, List, Duration)}）会返回：事务没赶在调用方截止之前完成，
          * 已回滚、什么也没写（{@code existing} 为空）。
@@ -379,6 +702,10 @@ public class PlayerStore {
         lockRoutes(List.of(row.getPlayerId()), List.of(row.getZoneId()));
         if (mapper.lockAccount(row.getAccount()) == null) {
             return new CreateOutcome(CreateStatus.ACCOUNT_MISSING, List.of());
+        }
+        Integer deletionState = mapper.selectAccountDeletionState(row.getAccount());
+        if (deletionState != null && deletionState != AccountLifecycle.DELETION_NONE) {
+            return new CreateOutcome(CreateStatus.DELETION_PENDING, List.of());
         }
         List<PlayerRow> existing = mapper.selectByAccount(row.getAccount());
         if (existing.size() >= maxPlayers) {

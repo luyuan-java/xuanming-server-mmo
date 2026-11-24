@@ -1,5 +1,7 @@
 package com.game.payment;
 
+import com.game.api.DubboGroups;
+import com.game.api.LoginAdminService;
 import com.game.common.RunMode;
 import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
@@ -207,5 +209,25 @@ public class PaymentConfiguration {
     public PaymentWorkers paymentWorkers(PaymentService service, PaymentProperties props) {
         return new PaymentWorkers(service, Duration.ofSeconds(2), Duration.ofSeconds(5),
                 Duration.ofMinutes(5), props.isWorkersEnabled());
+    }
+
+    /** 显式开启 minor-spending-gate=realname 时，经 Dubbo 接入 game-login 实时查询账号实名 pi。 */
+    @Configuration(proxyBeanMethods = false)
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(
+            name = "game.payment.minor-spending-gate", havingValue = PaymentProperties.GATE_REALNAME)
+    static class RealNameReaderConfiguration {
+
+        @org.apache.dubbo.config.annotation.DubboReference(
+                group = DubboGroups.LOGIN, check = false, url = "${game.dubbo.login-url:}", timeout = 2000, retries = 0)
+        private LoginAdminService loginAdminService;
+
+        @Bean
+        RealNameReader realNameReader() {
+            return playerId -> {
+                String pi = loginAdminService.realNamePiOfPlayer(playerId).join();
+                boolean verified = pi != null && !pi.isBlank();
+                return new RealNameReader.RealNameStatus(verified, verified ? pi : "");
+            };
+        }
     }
 }

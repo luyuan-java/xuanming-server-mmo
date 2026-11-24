@@ -74,6 +74,14 @@ public final class InMemoryLoginTokens implements LoginTokens {
         return Optional.of(issueFamily(data.account(), data.authType(), data.deviceId(), data.familyId()));
     }
 
+    @Override
+    public synchronized void revokeAll(String account) {
+        check();
+        access.entrySet().removeIf(e -> account.equals(e.getValue().account()));
+        refresh.entrySet().removeIf(e -> account.equals(e.getValue().account()));
+        familyAccounts.entrySet().removeIf(e -> account.equals(e.getValue()));
+    }
+
     private void check() {
         if (broken) {
             throw new IllegalStateException("令牌存储不可达（测试注入）");

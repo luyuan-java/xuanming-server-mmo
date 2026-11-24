@@ -32,7 +32,26 @@ public class LoginController {
     }
 
     @PostMapping("/refresh-token")
-    public CompletableFuture<HttpRefreshTokenResponse> refresh(@RequestBody HttpRefreshTokenRequest request) {
-        return service.refresh(request);
+    public CompletableFuture<HttpRefreshTokenResponse> refresh(@RequestBody HttpRefreshTokenRequest request,
+                                                               HttpServletRequest http) {
+        return service.refresh(request, ipResolver.resolve(http));
+    }
+
+    @PostMapping("/real-name")
+    public CompletableFuture<HttpRealNameResponse> realName(@RequestBody HttpRealNameRequest request,
+                                                            HttpServletRequest http) {
+        return service.submitRealName(request, ipResolver.resolve(http));
+    }
+
+    @PostMapping("/account/delete")
+    public CompletableFuture<HttpAccountDeletionResponse> requestAccountDeletion(
+            @RequestBody HttpAccountDeletionRequest request, HttpServletRequest http) {
+        return service.requestAccountDeletion(request, ipResolver.resolve(http));
+    }
+
+    @PostMapping("/account/delete/cancel")
+    public CompletableFuture<HttpAccountDeletionResponse> cancelAccountDeletion(
+            @RequestBody HttpCancelAccountDeletionRequest request, HttpServletRequest http) {
+        return service.cancelAccountDeletion(request, ipResolver.resolve(http));
     }
 }

@@ -136,6 +136,8 @@ public final class ClientSession {
      * （见 {@code ClientDispatcher#BACKEND_RESULT_UNKNOWN_HOLD_NANOS}），断线时撤销。
      */
     private ScheduledFuture<?> backendRelease;
+    /** 未成年人防沉迷可玩截止定时器（到点推送 2049 并关闭会话；断线或重新绑定时撤销）。 */
+    private ScheduledFuture<?> playDeadlineTask;
 
     ClientSession(int sessionId, Channel channel, String clientIp) {
         this.sessionId = sessionId;
@@ -270,6 +272,23 @@ public final class ClientSession {
         if (backendRelease != null) {
             backendRelease.cancel(false);
             backendRelease = null;
+        }
+    }
+
+    /** 挂未成年人防沉迷可玩截止定时器（在本连接的 EventLoop 上到点踢线）。 */
+    void schedulePlayDeadline(long delayMs, Runnable onExpired) {
+        cancelPlayDeadline();
+        try {
+            playDeadlineTask = channel.eventLoop().schedule(onExpired, Math.max(0L, delayMs), TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            log.debug("会话线程已关闭，不挂防沉迷截止定时器 session={}", Integer.toUnsignedString(sessionId));
+        }
+    }
+
+    void cancelPlayDeadline() {
+        if (playDeadlineTask != null) {
+            playDeadlineTask.cancel(false);
+            playDeadlineTask = null;
         }
     }
 
