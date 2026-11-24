@@ -298,6 +298,13 @@ public final class SceneWorld {
         this.connectionLostHoldEnabled = enabled;
         return this;
     }
+
+    private PlayerSyncDigests syncDigests = PlayerSyncDigests.UNAVAILABLE;
+
+    public SceneWorld withSyncDigests(PlayerSyncDigests syncDigests) {
+        this.syncDigests = syncDigests == null ? PlayerSyncDigests.UNAVAILABLE : syncDigests;
+        return this;
+    }
     private final Map<Long, ChannelCooldownWrite> channelCooldownWrites = new HashMap<>();
     /**
      * 已交出并释放、实例已移出世界、重定向帧还没定（发出或确定不发）的旅客数（zone-travel-spec §5.3「世界计数」、TF16）：
@@ -1397,6 +1404,21 @@ public final class SceneWorld {
     /** 43：普通请求保持原有零 IO 路径；显式请求目录或世界地图总览时异步读取，失败仍推一条 31。 */
     void requestSceneInfo(ScenePlayer player, boolean withDirectory) {
         requestSceneInfo(player, withDirectory, false);
+    }
+
+    /** 253 落地恢复版本摘要：异步读共享 Redis，回调复核玩家仍在本节点同会话同代次后推 254。 */
+    void requestSyncDigest(ScenePlayer player) {
+        long playerId = player.playerId();
+        SessionKey session = player.session();
+        long epoch = player.ownerEpoch();
+        syncDigests.read(playerId, digest -> {
+            ScenePlayer current = playerById(playerId);
+            if (current != player || current.session() == null || !current.session().equals(session)
+                    || current.ownerEpoch() != epoch) {
+                return;
+            }
+            sendTo(current, push(ids.notifySyncDigest(), digest == null ? SyncDigestParser.unavailable() : digest));
+        });
     }
 
     void requestSceneInfo(ScenePlayer player, boolean withDirectory, boolean withOverview) {

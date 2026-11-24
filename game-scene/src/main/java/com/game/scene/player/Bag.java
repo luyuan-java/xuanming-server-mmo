@@ -100,6 +100,85 @@ public final class Bag {
         return OK;
     }
 
+    /** 按入包先后（{@link BagItem#ACQUIRE_ORDER}）返回全部实例。 */
+    public List<BagItem> itemsByAcquireOrder() {
+        List<BagItem> out = new ArrayList<>(byGuid.values());
+        out.sort(BagItem.ACQUIRE_ORDER);
+        return out;
+    }
+
+    /** 从当前背包取出任意实例（用于临时格向人物背包搬运的候选副本）。 */
+    public BagItem takeAny(long guid) {
+        BagItem item = byGuid.get(guid);
+        if (item == null) {
+            return null;
+        }
+        remove(item);
+        return item;
+    }
+
+    /**
+     * 将临时格中的实例原样搬入本包（在候选背包上调用）：可叠加且无装备/未知字段的物品先并入既有未满堆，
+     * 剩余数量仍沿用原 guid 落空位；装备或不可叠加实例整件保留 guid、词条、强化、宝石与未知字段。
+     */
+    public int moveInFromTemporary(BagItem source, ItemCatalog catalog) {
+        ItemSpec spec = catalog.item(source.configId());
+        if (spec == null) {
+            return INVALID_TABLE_ID;
+        }
+        if (spec.maxStackSize() == 0) {
+            return INVALID_TABLE_DATA;
+        }
+        if (source.guid() == 0 || source.guid() == -1L || source.size() <= 0 || byGuid.containsKey(source.guid()) || nextAcquireSeq == 0) {
+            return INVALID_PARAM;
+        }
+        boolean plainStackable = spec.stackable() && source.equipment() == null && source.unknownFields().asMap().isEmpty();
+        if (plainStackable) {
+            long maxStack = Integer.toUnsignedLong(spec.maxStackSize());
+            List<BagItem> partials = new ArrayList<>();
+            long mergeCap = 0;
+            for (BagItem existing : itemsByAcquireOrder()) {
+                if (existing.configId() == source.configId() && existing.equipment() == null
+                        && existing.unknownFields().asMap().isEmpty() && existing.size() < maxStack) {
+                    partials.add(existing);
+                    mergeCap += maxStack - existing.size();
+                }
+            }
+            long remaining = Math.max(0L, source.size() - mergeCap);
+            int slot = -1;
+            if (remaining > 0) {
+                slot = slotForNew(spec, catalog);
+                if (slot < 0) {
+                    return NO_SPACE;
+                }
+            }
+            long left = source.size();
+            for (BagItem target : partials) {
+                if (left == 0) {
+                    break;
+                }
+                long add = Math.min(left, maxStack - target.size());
+                target.size(target.size() + add);
+                left -= add;
+            }
+            if (left > 0) {
+                BagItem placed = new BagItem(source.guid(), source.configId(), left, nextAcquireSeq++, source.unknownFields());
+                place(placed, slot);
+            }
+            return OK;
+        }
+        int slot = slotForNew(spec, catalog);
+        if (slot < 0) {
+            return NO_SPACE;
+        }
+        BagItem moved = new BagItem(source.guid(), source.configId(), source.size(), nextAcquireSeq++, source.unknownFields());
+        if (source.equipment() != null) {
+            moved.equipment(source.equipment());
+        }
+        place(moved, slot);
+        return OK;
+    }
+
     /** 全部实例，按格子号升序。 */
     public List<BagItem> items() {
         List<BagItem> out = new ArrayList<>(byGuid.size());

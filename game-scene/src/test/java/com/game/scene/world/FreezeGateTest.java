@@ -149,6 +149,8 @@ class FreezeGateTest {
     private static final int PUSH_ONLY = -2;
     /** 冻结中的预期：进了处理器（应答码由处理器自己定，不是冻结闸的 1005）。 */
     private static final int PASSED = -3;
+    /** 冻结中的预期：不回应答、只推 254 NotifySyncDigest。 */
+    private static final int PUSH_SYNC_DIGEST = -4;
 
     private static ConfigTables config;
 
@@ -255,7 +257,8 @@ class FreezeGateTest {
                     pets.onOwnerLevelChanged(call);
                     missions.onLevelChanged(call.player());
                 }),
-                new BagFeature(bags), new MissionFeature(missions), new ActivityFeature(missions),
+                new BagFeature(bags), new com.game.scene.battle.BattleResultFeature(),
+                new MissionFeature(missions), new ActivityFeature(missions),
                 new SkillFeature(skills), pets));
         assetOps = new AssetOpService(world, currency, bags, new AssetOpAuth(caller -> SECRET), clock, metrics);
         Scene scene = world.createScene(1);
@@ -277,6 +280,7 @@ class FreezeGateTest {
         Map<String, FreezePolicy> expected = new TreeMap<>();
         expected.put("SceneSceneClientPlayerEnterScene", FreezePolicy.ALLOW);
         expected.put("SceneSceneClientPlayerSceneInfoC2S", FreezePolicy.READ_ONLY);
+        expected.put("SceneSceneClientPlayerGetSyncDigest", FreezePolicy.READ_ONLY);
         // 批次 5.4：226 自己判在途（冻结中回 13000，zone-travel-spec §5.10）
         expected.put("SceneSceneClientPlayerTravelToZone", FreezePolicy.ALLOW);
         expected.put("SceneMovementClientPlayerMoveStart", FreezePolicy.DROP);
@@ -298,6 +302,9 @@ class FreezeGateTest {
         expected.put("SceneAttributeClientPlayerAutoAllocateAttributePoints", FreezePolicy.REJECT);
         expected.put("SceneBagClientPlayerGetBag", FreezePolicy.READ_ONLY);
         expected.put("SceneBagClientPlayerSortBag", FreezePolicy.GATED);
+        expected.put("SceneBagClientPlayerRetrieveTemporaryItems", FreezePolicy.GATED);
+        expected.put("SceneBattleResultClientPlayerGetRecentBattleResults", FreezePolicy.READ_ONLY);
+        expected.put("SceneBattleResultClientPlayerAckBattleResults", FreezePolicy.GATED);
         expected.put("SceneMissionClientPlayerGetMissionList", FreezePolicy.READ_ONLY);
         expected.put("SceneMissionClientPlayerAcceptMission", FreezePolicy.GATED);
         expected.put("SceneMissionClientPlayerClaimMissionReward", FreezePolicy.GATED);
@@ -394,6 +401,8 @@ class FreezeGateTest {
                 case DROPPED -> assertThat(sent).as(probe.key()).isEmpty();
                 case PUSH_ONLY -> assertThat(sent).as(probe.key()).extracting(MessageContent::getMessageId)
                         .containsExactly(Contracts.IDS.notifySceneInfo());
+                case PUSH_SYNC_DIGEST -> assertThat(sent).as(probe.key()).extracting(MessageContent::getMessageId)
+                        .containsExactly(Contracts.IDS.notifySyncDigest());
                 case PASSED -> assertThat(sent).as(probe.key()).last().satisfies(reply -> {
                     assertThat(reply.getMessageId()).isEqualTo(messageId);
                     assertThat(tipOf(reply)).isNotEqualTo(INVALID_PARAMETER);
@@ -531,6 +540,13 @@ class FreezeGateTest {
                 SortBagRequest.newBuilder().setBagType(BagType.INVENTORY.code()).build(), INVALID_PARAMETER));
         probes.add(new Probe("SceneBagClientPlayer", "GetBag",
                 GetBagRequest.newBuilder().setBagType(BagType.INVENTORY.code()).build(), 0));
+        probes.add(new Probe("SceneBagClientPlayer", "RetrieveTemporaryItems",
+                com.game.proto.RetrieveTemporaryItemsRequest.newBuilder().setTakeAll(true).build(),
+                com.game.table.BagErrorTip.bag_error.kBagTemporaryRetrieveBusy_VALUE));
+        probes.add(new Probe("SceneBattleResultClientPlayer", "GetRecentBattleResults",
+                com.game.proto.GetRecentBattleResultsRequest.getDefaultInstance(), 0));
+        probes.add(new Probe("SceneBattleResultClientPlayer", "AckBattleResults",
+                com.game.proto.AckBattleResultsRequest.getDefaultInstance(), FEATURE_UNAVAILABLE));
 
         String missionSvc = "SceneMissionClientPlayer";
         probes.add(new Probe(missionSvc, "AcceptMission",
@@ -586,6 +602,8 @@ class FreezeGateTest {
                 CHANGING_SCENE));
         probes.add(new Probe("SceneSceneClientPlayer", "SceneInfoC2S", SceneInfoRequest.getDefaultInstance(),
                 PUSH_ONLY));
+        probes.add(new Probe("SceneSceneClientPlayer", "GetSyncDigest",
+                com.game.proto.GetSyncDigestRequest.getDefaultInstance(), PUSH_SYNC_DIGEST));
         // 批次 5.4：226 自己判在途，交出冻结中回 13000（zone-travel-spec §5.10），不改任何状态
         probes.add(new Probe("SceneSceneClientPlayer", "TravelToZone", TravelToZoneRequest.newBuilder().setTargetZoneId(2).build(),
                 TRANSFER_IN_PROGRESS));

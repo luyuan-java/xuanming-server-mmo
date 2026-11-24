@@ -8,6 +8,8 @@ import com.game.proto.BagLayoutInfo;
 import com.game.proto.BagSlotInfo;
 import com.game.proto.GetBagRequest;
 import com.game.proto.GetBagResponse;
+import com.game.proto.RetrieveTemporaryItemsRequest;
+import com.game.proto.RetrieveTemporaryItemsResponse;
 import com.game.proto.SortBagRequest;
 import com.game.proto.SortBagResponse;
 import com.game.scene.player.Bag;
@@ -48,11 +50,26 @@ public final class BagFeature implements SceneFeature {
                 : new com.game.scene.equip.EquipmentDisplay(bags.tables().equipmentRules());
     }
 
-    /** 冻结策略（scene-handoff-spec §5.9）：191 只读；192 GATED，由 {@link BagService} 的冻结闸回 1005。 */
+    /** 冻结策略（scene-handoff-spec §5.9）：191 只读；192 GATED；374 临时格取回交接冻结回 6017、战斗中放行。 */
     @Override
     public void register(Registrar r) {
         r.on(SERVICE, "GetBag", GetBagRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, this::getBag);
         r.on(SERVICE, "SortBag", SortBagRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, this::sortBag);
+        r.on(SERVICE, "RetrieveTemporaryItems", RetrieveTemporaryItemsRequest.class,
+                FreezePolicy.GATED, BattlePolicy.ALLOW, this::retrieveTemporary);
+    }
+
+    private void retrieveTemporary(PlayerCall call, RetrieveTemporaryItemsRequest request) {
+        int tip = bags.retrieveTemporary(call.player(), request.getItemId(), request.getTakeAll());
+        if (tip != 0) {
+            call.reply(RetrieveTemporaryItemsResponse.newBuilder().setErrorMessage(tip(tip)).build());
+            return;
+        }
+        call.reply(RetrieveTemporaryItemsResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setBag(snapshot(call.player(), BagType.INVENTORY))
+                .setTemporary(snapshot(call.player(), BagType.TEMPORARY))
+                .build());
     }
 
     private void getBag(PlayerCall call, GetBagRequest request) {

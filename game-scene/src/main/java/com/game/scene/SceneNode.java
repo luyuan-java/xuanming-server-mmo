@@ -527,7 +527,9 @@ public class SceneNode implements SmartLifecycle {
                         com.game.proto.TeamFollowStopReason.TEAM_FOLLOW_STOP_REASON_LEFT_FOLLOW);
             }
         });
-        sceneWorld.withAfkPassService(afkPassService).withConnectionLostHold(true);
+        sceneWorld.withAfkPassService(afkPassService)
+                .withConnectionLostHold(true)
+                .withSyncDigests(new com.game.scene.storage.RedisPlayerSyncDigests(redis, redisKeys, logic));
         battle.withInboxFailureHandler((player,failure)->sceneWorld.discardUnpersistedBattleEffect(player,player.ownerEpoch(),failure));
         repository.onFinalApplied(sceneWorld::onFinalApplied);
         repository.startFinalRecovery(scheduler);
@@ -559,6 +561,7 @@ public class SceneNode implements SmartLifecycle {
                     pets.onOwnerLevelChanged(call);
                     missions.onLevelChanged(call.player());
                 }), bagFeature, new EquipmentFeature(equipment, bagFeature, attributes, registry),
+                new com.game.scene.battle.BattleResultFeature(),
                 new MissionFeature(missions), new ActivityFeature(missions),
                 new SkillFeature(skills), new com.game.scene.skill.ClassSkillFeature(
                         new com.game.scene.skill.ClassSkillService(currency, attributes, petService), attributes, registry, petService), pets));

@@ -21,6 +21,7 @@ import com.game.scene.player.PlayerActivityVitality;
 import com.game.scene.player.PlayerBags;
 import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.PlayerAppearance;
+import com.game.scene.player.PlayerBattleResults;
 import com.game.scene.player.PlayerItemGainBlock;
 import com.game.scene.player.PlayerMissions;
 import com.game.scene.player.PlayerPets;
@@ -107,6 +108,8 @@ public final class ScenePlayer {
     private final PlayerItemGainBlock itemGainBlock;
     /** 活动中心活跃度积分与档位领取账本（同一次存盘提交）。 */
     private final PlayerActivityVitality activityVitality;
+    /** 本人近期战斗结果列表（至多 10 条，结算应用同帧写入、确认落盘后对客户端公开）。 */
+    private final PlayerBattleResults battleResults;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -198,6 +201,7 @@ public final class ScenePlayer {
         this.appearance = state.hasAppearance() ? PlayerAppearance.restore(state.getAppearance()) : PlayerAppearance.empty();
         this.itemGainBlock = state.hasItemGainBlock() ? PlayerItemGainBlock.restore(state.getItemGainBlock()) : PlayerItemGainBlock.empty();
         this.activityVitality = state.hasActivityVitality() ? PlayerActivityVitality.restore(state.getActivityVitality()) : PlayerActivityVitality.empty();
+        this.battleResults = state.hasBattleResults() ? PlayerBattleResults.restore(state.getBattleResults()) : PlayerBattleResults.empty();
     }
 
     public long playerId() {
@@ -278,6 +282,11 @@ public final class ScenePlayer {
     /** 活动中心活跃度账本（逻辑线程上读写；写入只经 {@code ActivityVitalityService}）。 */
     public PlayerActivityVitality activityVitality() {
         return activityVitality;
+    }
+
+    /** 本人近期战斗结果列表（逻辑线程上读写；结算同帧写入、落盘后对外公开）。 */
+    public PlayerBattleResults battleResults() {
+        return battleResults;
     }
 
     public int level() {
@@ -521,6 +530,9 @@ public final class ScenePlayer {
         }
         if (!activityVitality.isPristine()) {
             state.setActivityVitality(activityVitality.toState());
+        }
+        if (!battleResults.isPristine()) {
+            state.setBattleResults(battleResults.toState());
         }
         return state.build();
     }

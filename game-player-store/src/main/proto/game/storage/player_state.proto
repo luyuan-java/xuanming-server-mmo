@@ -47,6 +47,89 @@ message PlayerState {
   ItemGainBlockState item_gain_block = 13;
   // 活动中心活跃度账本（一次性任务去重位图、当期积分来源与已结束周期最近 64 条领取记录，同事务围栏提交）。
   ActivityVitalityState activity_vitality = 14;
+  // 本人近期战斗结果（至多 10 条，结算应用同帧写入、确认落盘后对客户端公开）。
+  BattleResultHistoryState battle_results = 15;
+  // 客户端请求幂等键账本（至多 32 条 + 装备打造水位 + 装备材料自选账本，同事务围栏提交）。
+  ClientRequestLedgerState client_request_ledger = 16;
+  // 神秘商人个人限购记录（仅记当前一轮，同事务围栏提交）。
+  PlayerMysteryMerchantState mystery_merchant = 17;
+}
+
+message BattleResultHistoryState {
+  uint64 last_result_seq = 1;
+  repeated BattleResultEntryState entries = 2;
+}
+
+message BattleResultEntryState {
+  uint64 result_seq = 1;
+  uint64 battle_id = 2;
+  uint32 outcome = 3;
+  uint32 team_index = 4;
+  bool is_dead = 5;
+  bool fled = 6;
+  uint32 total_rounds = 7;
+  uint64 finished_at_ms = 8;
+  uint64 settled_at_ms = 9;
+  repeated BattleResultCurrencyState currencies = 10;
+  repeated BattleResultItemState items_gained = 11;
+  repeated BattleResultItemState items_consumed = 12;
+  bool lines_truncated = 13;
+  bool seen = 14;
+  uint32 match_mode = 15;
+  uint32 battle_config_id = 16;
+  bool items_mailed = 17;
+  uint64 exp_gain = 18;
+  uint32 material_credit_units_added = 19;
+  uint32 season_id = 20;
+}
+
+message BattleResultCurrencyState {
+  uint32 currency_type = 1;
+  uint64 amount = 2;
+}
+
+message BattleResultItemState {
+  uint32 item_table_id = 1;
+  uint64 count = 2;
+}
+
+message ClientRequestLedgerState {
+  repeated ClientRequestRecordState records = 1;
+  uint64 next_seq = 2;
+  uint64 forge_revision = 3;
+  EquipmentMaterialRewardLedgerState material_reward = 4;
+}
+
+message ClientRequestRecordState {
+  uint64 key = 1;
+  uint32 kind = 2;
+  bytes fingerprint = 3;
+  uint64 seq = 4;
+  bool enhance_success = 5;
+  uint32 enhance_level = 6;
+  uint32 created_scheme_id = 7;
+  uint64 equipment_item_id = 8;
+  uint64 forge_revision = 9;
+  uint64 material_reward_revision = 10;
+  uint32 crafting_material_count = 11;
+  uint32 enhancement_stone_count = 12;
+}
+
+message EquipmentMaterialRewardLedgerState {
+  uint64 day_starts_at_ms = 1;
+  uint32 earned_today = 2;
+  uint64 available_units = 3;
+  uint64 revision = 4;
+}
+
+message PlayerMysteryMerchantState {
+  uint64 round_id = 1;
+  repeated PlayerMysteryMerchantPurchaseState purchases = 2;
+}
+
+message PlayerMysteryMerchantPurchaseState {
+  uint32 goods_id = 1;
+  uint32 count = 2;
 }
 
 message ItemGainBlockState {

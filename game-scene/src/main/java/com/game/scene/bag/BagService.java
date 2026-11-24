@@ -303,6 +303,52 @@ public final class BagService {
     }
 
     /**
+     * 374 从临时格取回到人物背包（全或无；对齐 C++ {@code PlayerBagSystem::RetrieveTemporary}）。
+     * 参数二选一先于状态校验；只拦交接冻结（6017），战斗中放行以便两包满延后结算时腾位补发。
+     */
+    public int retrieveTemporary(ScenePlayer player, long itemId, boolean takeAll) {
+        if ((itemId != 0) == takeAll) {
+            return REFUSED;
+        }
+        if (player.frozen()) {
+            return com.game.table.BagErrorTip.bag_error.kBagTemporaryRetrieveBusy_VALUE;
+        }
+        Bag temporary = player.bags().bag(BagType.TEMPORARY);
+        java.util.List<Long> targetGuids = new java.util.ArrayList<>();
+        if (takeAll) {
+            for (com.game.scene.player.BagItem item : temporary.itemsByAcquireOrder()) {
+                targetGuids.add(item.guid());
+            }
+            if (targetGuids.isEmpty()) {
+                return 0;
+            }
+        } else {
+            if (temporary.item(itemId) == null) {
+                return com.game.table.BagErrorTip.bag_error.kBagTemporaryItemNotFound_VALUE;
+            }
+            targetGuids.add(itemId);
+        }
+        com.game.scene.player.PlayerBags candidate = com.game.scene.player.PlayerBags.restore(player.bags().toState());
+        candidate.normalize(tables);
+        Bag candTemp = candidate.bag(BagType.TEMPORARY);
+        Bag candInv = candidate.bag(BagType.INVENTORY);
+        for (long guid : targetGuids) {
+            com.game.scene.player.BagItem pulled = candTemp.takeAny(guid);
+            if (pulled == null) {
+                return com.game.table.BagErrorTip.bag_error.kBagTemporaryItemNotFound_VALUE;
+            }
+            int tip = candInv.moveInFromTemporary(pulled, tables);
+            if (tip != 0) {
+                return tip == Bag.NO_SPACE || tip == com.game.table.BagErrorTip.bag_error.kBagAddItemBagFull_VALUE
+                        ? com.game.table.BagErrorTip.bag_error.kBagTemporaryRetrieveBagFull_VALUE
+                        : tip;
+            }
+        }
+        player.bags().commitPrepared(candidate);
+        return 0;
+    }
+
+    /**
      * 按持有夹紧的批量扣除（回合制战斗结算的消耗，scene-battle-spec §7.11 h 步；基线 {@code RemoveItemsClamped}）：每个配置（无符号升序）
      * 按<b>格子号升序</b>抽取（D22），扣不满不报错；每个被抽到的实例记一条销毁流水（{@code reason}、关联号、附加信息由调用方给）。
      * 闸：冻结中什么都不扣（返回空表；调用方已排除冻结）。<b>不判战斗在途</b>（D48）。

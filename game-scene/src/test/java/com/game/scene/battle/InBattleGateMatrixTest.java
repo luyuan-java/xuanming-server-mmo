@@ -159,6 +159,7 @@ class InBattleGateMatrixTest {
     private static final String APPEARANCE = "SceneAppearanceClientPlayer";
     private static final String COMMON = "SceneClientPlayerCommon";
     private static final String AFK_PASS = "SceneAfkPassClientPlayer";
+    private static final String BATTLE_RESULT = "SceneBattleResultClientPlayer";
 
     /** 战斗中的预期（除了正数 = 应答里的拒绝码之外的三种）。 */
     private static final int SAME_AS_NOT_IN_BATTLE = -1;
@@ -210,6 +211,7 @@ class InBattleGateMatrixTest {
             new Row(226, SCENE, "TravelToZone", BattlePolicy.GATED, ZONE_TRAVEL_IN_BATTLE),
             // ALLOW：只读
             new Row(43, SCENE, "SceneInfoC2S", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(253, SCENE, "GetSyncDigest", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(77, SKILL, "ListSkills", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(54, CURRENCY, "GetCurrencyList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(167, ATTRIBUTE, "GetAttributePanel", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -220,6 +222,9 @@ class InBattleGateMatrixTest {
             new Row(190, ACTIVITY, "GetActivityList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(348, ACTIVITY, "ClaimActivityVitalityReward", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(191, BAG, "GetBag", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(374, BAG, "RetrieveTemporaryItems", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(371, BATTLE_RESULT, "GetRecentBattleResults", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(372, BATTLE_RESULT, "AckBattleResults", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(442, APPEARANCE, "GetAppearanceInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(443, APPEARANCE, "SwitchAppearance", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(444, APPEARANCE, "StartAppearanceTrial", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -319,7 +324,7 @@ class InBattleGateMatrixTest {
         assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226,
                 246, 247, 249, 250, 251, 252, 317))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.GATED));
-        assertThat(List.of(43, 77, 54, 167, 181, 190, 348, 191, 193, 173, 188, 37, 49, 94, 95, 194, 195))
+        assertThat(List.of(43, 253, 77, 54, 167, 181, 190, 348, 191, 374, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.ALLOW));
         assertThat(f.handler.battlePolicy(136)).as("没有处理器的方法没有策略（战斗与否都回 1006）").isNull();
         assertThat(registered).as("现有方法逐个显式声明，没有一个落到缺省 REJECT（D11：没有行为变化）")
@@ -564,6 +569,7 @@ class InBattleGateMatrixTest {
         out.put(SCENE + "EnterScene", s -> EnterSceneC2SRequest.newBuilder().setSceneInfo(SceneInfoComp.newBuilder()
                 .setSceneId(s.world().scene2.sceneId()).setSceneConfigId(s.world().scene2.configId())).build());
         out.put(SCENE + "SceneInfoC2S", s -> SceneInfoRequest.getDefaultInstance());
+        out.put(SCENE + "GetSyncDigest", s -> com.game.proto.GetSyncDigestRequest.getDefaultInstance());
         // 不在队（夹具的在队检查缺省回「不在队」）：不在战斗时受理 {0}，之后挂在选目标上
         out.put(SCENE + "TravelToZone", s -> TravelToZoneRequest.newBuilder().setTargetZoneId(OTHER_ZONE).build());
         // 技能 2：范围技能、无前摇无冷却（正式配表），不在战斗时一定放得出
@@ -589,6 +595,9 @@ class InBattleGateMatrixTest {
         out.put(ATTRIBUTE + "AutoAllocateAttributePoints", s -> AutoAllocateAttributePointsRequest.newBuilder().setPoolId(PLAYER_POOL).build());
 
         out.put(BAG + "GetBag", s -> GetBagRequest.newBuilder().setBagType(BagType.INVENTORY.code()).build());
+        out.put(BAG + "RetrieveTemporaryItems", s -> com.game.proto.RetrieveTemporaryItemsRequest.newBuilder().setTakeAll(true).build());
+        out.put(BATTLE_RESULT + "GetRecentBattleResults", s -> com.game.proto.GetRecentBattleResultsRequest.getDefaultInstance());
+        out.put(BATTLE_RESULT + "AckBattleResults", s -> com.game.proto.AckBattleResultsRequest.getDefaultInstance());
         out.put(BAG + "SortBag", s -> SortBagRequest.newBuilder().setBagType(BagType.INVENTORY.code()).build());
         out.put(BAG + "EquipItem", s -> com.game.proto.EquipItemRequest.newBuilder().setItemId(s.equipment().itemId()).build());
         out.put(BAG + "UnequipItem", s -> com.game.proto.UnequipItemRequest.newBuilder().setItemId(s.equipment().itemId()).build());

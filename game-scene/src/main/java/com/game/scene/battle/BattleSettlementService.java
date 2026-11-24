@@ -194,6 +194,12 @@ public final class BattleSettlementService {
             for(var defeat:settlement.getDefeatedMonstersList())missions.onMonsterKilled(player,defeat.getMonsterConfigId(),defeat.getCount());
             // 自动领奖失败的claimable仍在同份玩家状态，不删资格；经验产品边界仍不冒已到账。
             if(settlement.getExpGain()!=0)metrics.expIgnored();
+            Map<Integer, Long> actualConsumed = new TreeMap<>(Integer::compareUnsigned);
+            consumed.forEach((cfg, wanted) -> {
+                long got = wanted - shortfalls.getOrDefault(cfg, 0L);
+                if (got > 0) actualConsumed.put(cfg, got);
+            });
+            recordBattleResult(player, settlement, gold > 0 && goldTip == 0 ? gold : 0L, gained, actualConsumed);
             return Result.APPLIED;
         }finally{player.battle().setApplying(false);}
     }
@@ -268,13 +274,16 @@ public final class BattleSettlementService {
                             Long.toUnsignedString(battleId), Long.toUnsignedString(settlement.getExpGain()));
                 }
             });
-            step("消耗", player, battleId, () -> applyConsumed(player, settlement));
-            step("掉落", player, battleId, () -> applyGained(player, settlement));
+            Map<Integer, Long> actualConsumed = new TreeMap<>(Integer::compareUnsigned);
+            Map<Integer, Long> actualGained = new TreeMap<>(Integer::compareUnsigned);
+            step("消耗", player, battleId, () -> actualConsumed.putAll(applyConsumed(player, settlement)));
+            step("掉落", player, battleId, () -> actualGained.putAll(applyGained(player, settlement)));
             step("击杀", player, battleId, () -> {
                 for (BattleMonsterDefeat defeat : settlement.getDefeatedMonstersList()) {
                     missions.onMonsterKilled(player, defeat.getMonsterConfigId(), defeat.getCount());
                 }
             });
+            step("近期战果", player, battleId, () -> recordBattleResult(player, settlement, gold, actualGained, actualConsumed));
         } finally {
             long evicted = ledger.record(battleId, clock.epochMillis());
             if (evicted != 0) {
@@ -329,7 +338,7 @@ public final class BattleSettlementService {
     }
 
     /** h：消耗（跳过 0；非 battle_usable 拒扣；数量夹到 uint32；按持有夹紧、格子号升序；之后只合并不重排）。 */
-    private void applyConsumed(ScenePlayer player, BattleSettlementData settlement) {
+    private Map<Integer, Long> applyConsumed(ScenePlayer player, BattleSettlementData settlement) {
         long battleId = settlement.getBattleId();
         Map<Integer, Long> counts = new TreeMap<>(Integer::compareUnsigned);
         for (BattleItemEntry item : settlement.getItemsConsumedList()) {
@@ -346,7 +355,7 @@ public final class BattleSettlementService {
             counts.merge(item.getItemTableId(), clampCount(item.getCount()), (a, b) -> Math.min(a + b, UINT32_MAX));
         }
         if (counts.isEmpty()) {
-            return;
+            return Map.of();
         }
         Map<Integer, Long> removed = bags.removeClamped(player, BagType.INVENTORY, counts, AssetAudit.Reason.ITEM_DESTROY, battleId,
                 extra(battleId));
@@ -359,10 +368,41 @@ public final class BattleSettlementService {
             }
         });
         bags.mergeOnly(player, BagType.INVENTORY);
+        return removed;
+    }
+
+    /** 结算应用同帧写入本人近期战斗结果（确认落盘后才对 371/372 可见）。 */
+    private void recordBattleResult(ScenePlayer player, BattleSettlementData settlement, long goldCredited,
+                                    Map<Integer, Long> itemsGained, Map<Integer, Long> itemsConsumed) {
+        com.game.player.store.state.BattleResultEntryState.Builder entry = com.game.player.store.state.BattleResultEntryState.newBuilder()
+                .setBattleId(settlement.getBattleId())
+                .setOutcome(settlement.getOutcomeValue())
+                .setTeamIndex(settlement.getPlayerTeamIndex())
+                .setIsDead(settlement.getIsDead())
+                .setFled(settlement.getFled())
+                .setTotalRounds(settlement.getTotalRounds())
+                .setFinishedAtMs(settlement.getFinishedAtMs())
+                .setSettledAtMs(clock.epochMillis())
+                .setMatchMode(settlement.getMatchMode())
+                .setBattleConfigId(settlement.getBattleConfigId())
+                .setSeasonId(settlement.getSeasonId());
+        if (goldCredited > 0) {
+            entry.addCurrencies(com.game.player.store.state.BattleResultCurrencyState.newBuilder()
+                    .setCurrencyType(Wallet.GOLD)
+                    .setAmount(goldCredited));
+        }
+        java.util.List<com.game.player.store.state.BattleResultItemState> gainedLines = new java.util.ArrayList<>();
+        boolean truncGained = com.game.scene.player.PlayerBattleResults.fillItemLines(itemsGained, gainedLines);
+        java.util.List<com.game.player.store.state.BattleResultItemState> consumedLines = new java.util.ArrayList<>();
+        boolean truncConsumed = com.game.scene.player.PlayerBattleResults.fillItemLines(itemsConsumed, consumedLines);
+        entry.addAllItemsGained(gainedLines)
+                .addAllItemsConsumed(consumedLines)
+                .setLinesTruncated(truncGained || truncConsumed);
+        player.battleResults().record(entry);
     }
 
     /** i：掉落（数量夹到 uint32 后按配置累加；主包失败时没进去的部分改投临时格；两处都放不下丢失并 ERROR，不让整笔失败）。 */
-    private void applyGained(ScenePlayer player, BattleSettlementData settlement) {
+    private Map<Integer, Long> applyGained(ScenePlayer player, BattleSettlementData settlement) {
         long battleId = settlement.getBattleId();
         Map<Integer, Long> counts = new TreeMap<>(Integer::compareUnsigned);
         for (BattleItemEntry item : settlement.getItemsGainedList()) {
@@ -372,7 +412,7 @@ public final class BattleSettlementService {
             counts.merge(item.getItemTableId(), clampCount(item.getCount()), (a, b) -> Math.min(a + b, UINT32_MAX));
         }
         if (counts.isEmpty()) {
-            return;
+            return Map.of();
         }
         Bag inventory = player.bags().bag(BagType.INVENTORY);
         Map<Integer, Long> before = new TreeMap<>(Integer::compareUnsigned);
@@ -380,28 +420,34 @@ public final class BattleSettlementService {
         String extra = extra(battleId);
         Bag.AddResult added = bags.addItems(player, BagType.INVENTORY, counts, AssetAudit.Reason.ITEM_AWARD, battleId, extra);
         if (added.ok()) {
-            return;
+            return counts;
         }
+        Map<Integer, Long> credited = new TreeMap<>(Integer::compareUnsigned);
         Map<Integer, Long> missing = new TreeMap<>(Integer::compareUnsigned);
         counts.forEach((config, wanted) -> {
-            long got = inventory.total(config) - before.get(config);
+            long got = Math.max(0L, inventory.total(config) - before.get(config));
+            if (got > 0) {
+                credited.put(config, got);
+            }
             if (got < wanted) {
-                missing.put(config, wanted - Math.max(got, 0));
+                missing.put(config, wanted - got);
             }
         });
         if (missing.isEmpty()) {
-            return;
+            return credited;
         }
         Bag.AddResult overflow = bags.addItems(player, BagType.TEMPORARY, missing, AssetAudit.Reason.ITEM_AWARD, battleId, extra);
         if (overflow.ok()) {
             metrics.item(ItemKind.DROP_OVERFLOW);
             log.info("战斗掉落主包放不下，改投临时格 player={} battle_id={} items={} 主包 tip={}", Long.toUnsignedString(player.playerId()),
                     Long.toUnsignedString(battleId), missing, added.tip());
-            return;
+            missing.forEach((config, cnt) -> credited.merge(config, cnt, Long::sum));
+            return credited;
         }
         metrics.item(ItemKind.DROP_LOST);
         log.error("战斗掉落主包与临时格都放不下（或被获取封禁），道具丢失 player={} battle_id={} items={} 主包 tip={} 临时格 tip={}",
                 Long.toUnsignedString(player.playerId()), Long.toUnsignedString(battleId), missing, added.tip(), overflow.tip());
+        return credited;
     }
 
     private static long clampCount(long count) {

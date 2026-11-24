@@ -284,6 +284,7 @@ public final class BattleFixture {
                     missions.onLevelChanged(call.player());
                 }),
                 bagFeature, new com.game.scene.equip.EquipmentFeature(equipment, bagFeature, attributes, Contracts.REGISTRY),
+                new BattleResultFeature(),
                 new MissionFeature(missions), new ActivityFeature(missions), new SkillFeature(skills),
                 new com.game.scene.skill.ClassSkillFeature(new com.game.scene.skill.ClassSkillService(currency, attributes),
                         attributes, Contracts.REGISTRY),

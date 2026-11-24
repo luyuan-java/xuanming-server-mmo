@@ -148,6 +148,9 @@ public final class ClientRequestHandler {
         register(ids.sceneInfoC2S(), SceneInfoRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
                 (call, req) -> world.requestSceneInfo(call.player(), req.getWithChannelDirectory(),
                         req.getWithWorldMapOverview()));
+        // 253 落地恢复按域版本摘要：应答 Empty 不回包，改推 254 NotifySyncDigest（所有失败推 UNAVAILABLE）。
+        register(ids.getSyncDigest(), com.game.proto.GetSyncDigestRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                (call, req) -> world.requestSyncDigest(call.player()));
         // 226 跨 zone 传送（批次 5.4，zone-travel-spec §5.5）：自己判战斗在途（3025）与换图在途（冻结中 / 传送在途 13000，63 在途 3014），
         // 冻结闸与战斗闸都放行；应答可能是延迟应答（在队检查读回来才回）
         register(ids.travelToZone(), TravelToZoneRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED,

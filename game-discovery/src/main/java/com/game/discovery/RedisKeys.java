@@ -96,6 +96,13 @@ public final class RedisKeys {
     }
 
     /**
+     * 玩家落地同步版本摘要 Hash：{@code <ns>:player:{<player_id>}:sync_digest}（字段 {@code g} 为代次，其余为十进制 {@code SyncDomain} 计数）。
+     */
+    public String playerSyncDigest(long playerId) {
+        return prefix + "player:{" + Long.toUnsignedString(playerId) + "}:sync_digest";
+    }
+
+    /**
      * gate 排空标记 {@code game:gate-draining:{zone}:{node}}：值为打标记时刻（Redis 服务器时间，Unix 秒），必须带 TTL——
      * 打标记的人中途挂了，到期后这台 gate 自动重新接客（容量不会永久蒸发）。game-data 运维接口写，game-gateway 读。
      */
@@ -293,6 +300,11 @@ public final class RedisKeys {
     /** 本 zone 已开放大世界地图热度与灵潮总览读模型（protobuf STRING，短 TTL）；与该 zone 领导锁/计划同槽。 */
     public String worldMapOverview(int zoneId) {
         return worldZonePrefix(zoneId) + "overview";
+    }
+
+    /** 本 zone 神秘商人当前轮次权威记录（Hash：字段 {@code state} 为 protobuf 字节，{@code v} 为只进不退版本号）。 */
+    public String mysteryMerchant(int zoneId) {
+        return worldZonePrefix(zoneId) + "mystery-merchant";
     }
 
     /** 玩家主动切线冷却（STRING，短 TTL）；全局 player 维度，跨节点/zone不重置。 */
