@@ -919,11 +919,15 @@ public class SceneNode implements SmartLifecycle {
                 evacuationDone = new CompletableFuture<>();
                 CompletableFuture<String> current = evacuationDone;
                 evacuationCheck = logicLoop.scheduleAtFixedRate(() -> {
-                    if (current.isDone()) return;
-                    NodeEvacuation state = w.nodeEvacuation();
-                    if (w.nodeEvacuated()) current.complete("drained");
-                    else if (state != null && state.expired(System.nanoTime())) current.complete("budget_exceeded");
-                    if (current.isDone()) evacuationCheck.cancel(false);
+                    try {
+                        if (current.isDone()) return;
+                        NodeEvacuation state = w.nodeEvacuation();
+                        if (w.nodeEvacuated()) current.complete("drained");
+                        else if (state != null && state.expired(System.nanoTime())) current.complete("budget_exceeded");
+                        if (current.isDone()) evacuationCheck.cancel(false);
+                    } catch (RuntimeException e) {
+                        log.warn("疏散收敛检查异常，下个周期重试", e);
+                    }
                 }, 0, 100, TimeUnit.MILLISECONDS);
             }
             evacuationDone.whenComplete((value, failure) -> {

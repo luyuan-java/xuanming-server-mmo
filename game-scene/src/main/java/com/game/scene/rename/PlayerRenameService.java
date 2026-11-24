@@ -78,12 +78,26 @@ public final class PlayerRenameService {
         this.logicExecutor = logicExecutor;
     }
 
-    /** 入口（场景逻辑线程）：同步前置校验，立即回受理或拒绝；受理后异步推进内容安全与 SQL 提交并推送 429。 */
+    /** 入口（场景逻辑线程）：同步前置校验并预扣改名卡，立即回受理或拒绝；任一步失败退还改名卡，SQL 成功推 429。 */
     public RenamePlayerResponse requestRename(SceneWorld world, ScenePlayer player, RenamePlayerRequest request) {
         String normalized = precheck(player, request == null ? "" : request.getName(), clock.epochMillis());
         int err = precheckError(player, request == null ? "" : request.getName(), normalized, clock.epochMillis());
         if (err != OK) {
             return RenamePlayerResponse.newBuilder().setErrorMessage(tip(err)).build();
+        }
+        // 受理即在逻辑线程原子预扣改名卡，防止异步送检/SQL 窗口内转走或销毁改名卡白嫖改名
+        PlayerRenameTables.Rule rule = tables.rule();
+        if (rule.renameItemCount() > 0) {
+            Map<Integer, Long> removed = bags.removeClamped(player, BagType.INVENTORY,
+                    Map.of(rule.renameItemId(), rule.renameItemCount()),
+                    AssetAudit.Reason.ITEM_DESTROY, 0L, "player_rename");
+            long deducted = removed.getOrDefault(rule.renameItemId(), 0L);
+            if (deducted < rule.renameItemCount()) {
+                if (deducted > 0) {
+                    refundRenameCard(player, rule.renameItemId(), deducted);
+                }
+                return RenamePlayerResponse.newBuilder().setErrorMessage(tip(ROLE_RENAME_NO_CARD)).build();
+            }
         }
         player.setRenameInFlight(true);
         long playerId = player.playerId();
@@ -104,6 +118,7 @@ public final class PlayerRenameService {
                 });
             } catch (RejectedExecutionException full) {
                 player.setRenameInFlight(false);
+                refundRenameCard(player, rule.renameItemId(), rule.renameItemCount());
                 log.warn("Role rename content guard executor full player={}", Long.toUnsignedString(playerId));
                 return RenamePlayerResponse.newBuilder().setErrorMessage(tip(ROLE_NAME_CHECK_UNAVAILABLE)).build();
             }
@@ -116,23 +131,32 @@ public final class PlayerRenameService {
     private void onContentChecked(SceneWorld world, long playerId, long ownerEpoch, String normalized,
                                   CheckTextResponse resp) {
         ScenePlayer current = world.playerById(playerId);
+        PlayerRenameTables.Rule rule = tables.rule();
         if (current == null || current.ownerEpoch() != ownerEpoch) {
+            // shortcut: 玩家在改名送检在途期间离线且送检失败时改名卡已预扣无法原位退还，待接入持久化补偿收件箱升级
+            if (resp == null || resp.getVerdict() != TextVerdict.TEXT_VERDICT_PASS) {
+                log.error("Role rename content check failed after player left scene; card refund skipped player={} item={} count={}",
+                        Long.toUnsignedString(playerId), rule.renameItemId(), rule.renameItemCount());
+            }
             return;
         }
         if (resp == null) {
             current.setRenameInFlight(false);
+            refundRenameCard(current, rule.renameItemId(), rule.renameItemCount());
             pushFailure(world, current, ROLE_NAME_CHECK_UNAVAILABLE, 0);
             return;
         }
         if (resp.getVerdict() != TextVerdict.TEXT_VERDICT_PASS) {
             current.setRenameInFlight(false);
+            refundRenameCard(current, rule.renameItemId(), rule.renameItemCount());
             pushFailure(world, current, ROLE_NAME_SENSITIVE, 0);
             return;
         }
-        // 内容安全回调时再次核对状态（期间可能冻结或改名卡被消耗）。
-        int recheck = precheckAfterInFlight(current, normalized, clock.epochMillis());
+        // 内容安全回调时再次核对冻结/同名/冷却状态（改名卡已于受理时预扣）。
+        int recheck = precheckAfterInFlight(current, normalized, clock.epochMillis(), false);
         if (recheck != OK) {
             current.setRenameInFlight(false);
+            refundRenameCard(current, rule.renameItemId(), rule.renameItemCount());
             pushFailure(world, current, recheck, 0);
             return;
         }
@@ -149,24 +173,23 @@ public final class PlayerRenameService {
 
     private void onStoreRenameDone(SceneWorld world, long playerId, long ownerEpoch, RenameOutcome outcome) {
         ScenePlayer current = world.playerById(playerId);
+        PlayerRenameTables.Rule rule = tables.rule();
         if (current == null || current.ownerEpoch() != ownerEpoch) {
+            // shortcut: 玩家在改名 SQL 在途期间离线且改名失败时改名卡已预扣无法原位退还，待接入持久化补偿收件箱升级
+            if (outcome == null || outcome.status() != RenameStatus.OK) {
+                log.error("Role rename SQL failed after player left scene; card refund skipped player={} status={} item={} count={}",
+                        Long.toUnsignedString(playerId), outcome == null ? "null" : outcome.status(),
+                        rule.renameItemId(), rule.renameItemCount());
+            }
             return;
         }
         current.setRenameInFlight(false);
         if (outcome == null) {
+            refundRenameCard(current, rule.renameItemId(), rule.renameItemCount());
             pushFailure(world, current, SERVICE_UNAVAILABLE, 0);
             return;
         }
         if (outcome.status() == RenameStatus.OK) {
-            PlayerRenameTables.Rule rule = tables.rule();
-            Map<Integer, Long> removed = bags.removeClamped(current, BagType.INVENTORY,
-                    Map.of(rule.renameItemId(), rule.renameItemCount()),
-                    AssetAudit.Reason.ITEM_DESTROY, 0L, "player_rename");
-            long deducted = removed.getOrDefault(rule.renameItemId(), 0L);
-            if (deducted < rule.renameItemCount()) {
-                log.warn("Role rename committed in SQL but rename card short player={} expected={} actual={}",
-                        Long.toUnsignedString(playerId), rule.renameItemCount(), deducted);
-            }
             current.applyRename(outcome.name(), outcome.renamedMs());
             world.requestSave(current);
             PlayerRenamedNotify notify = PlayerRenamedNotify.newBuilder()
@@ -177,6 +200,7 @@ public final class PlayerRenameService {
             world.sendTo(current, SceneMessageIds.push(notifyPlayerRenamedId, notify));
             return;
         }
+        refundRenameCard(current, rule.renameItemId(), rule.renameItemCount());
         int tipId = switch (outcome.status()) {
             case NAME_TAKEN -> ROLE_NAME_TAKEN;
             case SAME_NAME -> ROLE_RENAME_SAME_NAME;
@@ -186,6 +210,18 @@ public final class PlayerRenameService {
         };
         long nextSec = outcome.status() == RenameStatus.COOLDOWN ? outcome.nextAllowedMs() / 1_000L : 0L;
         pushFailure(world, current, tipId, nextSec);
+    }
+
+    private void refundRenameCard(ScenePlayer player, int itemId, long count) {
+        if (count <= 0) {
+            return;
+        }
+        var res = bags.addItems(player, BagType.INVENTORY, Map.of(itemId, count),
+                AssetAudit.Reason.SYSTEM_GRANT, 0L, "player_rename_refund");
+        if (res.tip() != 0) {
+            log.error("Role rename failed and refund card failed player={} item={} count={} tip={}",
+                    Long.toUnsignedString(player.playerId()), itemId, count, res.tip());
+        }
     }
 
     private String precheck(ScenePlayer player, String rawName, long nowMs) {
@@ -205,10 +241,10 @@ public final class PlayerRenameService {
         if (normalized == null) {
             return ROLE_NAME_INVALID;
         }
-        return precheckAfterInFlight(player, normalized, nowMs);
+        return precheckAfterInFlight(player, normalized, nowMs, true);
     }
 
-    private int precheckAfterInFlight(ScenePlayer player, String normalized, long nowMs) {
+    private int precheckAfterInFlight(ScenePlayer player, String normalized, long nowMs, boolean checkCard) {
         if (player.frozen()) {
             return ROLE_RENAME_FROZEN;
         }
@@ -220,9 +256,11 @@ public final class PlayerRenameService {
         if (rule.cooldownMs() > 0 && player.renamedMs() > 0 && nowMs < player.renamedMs() + rule.cooldownMs()) {
             return ROLE_RENAME_COOLDOWN;
         }
-        long cardCount = player.bags().bag(BagType.INVENTORY).total(rule.renameItemId());
-        if (cardCount < rule.renameItemCount()) {
-            return ROLE_RENAME_NO_CARD;
+        if (checkCard) {
+            long cardCount = player.bags().bag(BagType.INVENTORY).total(rule.renameItemId());
+            if (cardCount < rule.renameItemCount()) {
+                return ROLE_RENAME_NO_CARD;
+            }
         }
         return OK;
     }

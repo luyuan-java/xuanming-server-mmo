@@ -150,7 +150,7 @@ public class SceneNodeConfiguration {
         @Bean(destroyMethod = "close")
         com.game.api.rpc.NodeRpcClients<ContentGuardService> sceneContentGuardClients() {
             return new com.game.api.rpc.NodeRpcClients<>(
-                    "game-scene-content-guard", ContentGuardService.class, DubboGroups.CONTENT_GUARD,
+                    "scene-content-guard", ContentGuardService.class, DubboGroups.CONTENT_GUARD,
                     CALL_TIMEOUT, "scene-content-guard-connect");
         }
 

@@ -147,9 +147,11 @@ class PlayerRenameAndPetGuardTest {
         assertThat(bags.addItems(player, BagType.INVENTORY,
                 Map.of(rule.renameItemId(), rule.renameItemCount()), Reason.GM_GRANT, 0, "").tip()).isZero();
 
-        // 2. 内容安全 REJECT / MASKED -> 428 受理，429 推 2034，不扣卡
+        // 2. 内容安全 REJECT / MASKED -> 428 受理（在途期间改名卡已预扣，无法转走白嫖），429 推 2034 并退还改名卡
         guardRef.set((scene, pid, text) -> {
             assertThat(scene).isEqualTo(TextScene.TEXT_SCENE_ROLE_NAME);
+            assertThat(player.bags().bag(BagType.INVENTORY).total(rule.renameItemId()))
+                    .as("异步送检在途期间改名卡必须已预扣").isZero();
             return CheckTextResponse.newBuilder().setVerdict(TextVerdict.TEXT_VERDICT_REJECT).build();
         });
         assertThat(sendRename(renameId, "违规名").getErrorMessage().getId()).isZero();

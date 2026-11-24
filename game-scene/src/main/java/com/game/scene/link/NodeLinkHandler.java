@@ -136,7 +136,8 @@ public final class NodeLinkHandler extends SimpleChannelInboundHandler<NodeLinkF
                     return;
                 }
                 long id = linkId;
-                postFrame(ctx,frame.toByteArray(), () -> inbound.frameReceived(id, frame));
+                byte[] original = maintenance == null ? null : frame.toByteArray();
+                postFrame(ctx, original, () -> inbound.frameReceived(id, frame));
             }
             case REJECTED -> {
                 // 已回拒绝、正在断开，后续帧一律丢弃。
