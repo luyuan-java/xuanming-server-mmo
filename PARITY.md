@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-23 编译期协议代码生成（`game-proto-codegen`，对齐 C++ `protogen` 思想）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 协议代码生成（消息号/事件号常量、静态路由表、每服务 Handler 接口与派发器、Robot 类型化 RPC 桩） | `tools/proto_generator/protogen`（生成 `message_id`/`event_id`、`route_table.go`、`service_metadata.h`、handler 骨架、`robot_*.tmpl`） | 新增编译期 javac 注解处理器 `game-proto-codegen`（零新增第三方依赖），编译 `game-proto` 时自动生成 410 条消息号路由、52 个服务接口/零反射 switch 派发器/类型化 RPC 桩与 19 条事件号常量；`game-gate` 改由 `MessageRoutes.fromGenerated()` 驱动，`game-robot` 增加 `call(ContractRpcMethod, ...)` 类型化重载；设计落盘 `docs/design/proto-codegen.md` 并更新 `AGENTS.md §1` | 已对齐 |
+
 ## 2026-11-23 契约同步到 mmorpg 5c0a518a6（排位预设与规则表）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |

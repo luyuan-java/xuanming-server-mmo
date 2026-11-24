@@ -3,6 +3,9 @@ package com.game.gate.session;
 import com.game.api.DubboGroups;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
+import com.game.contract.generated.ContractNodeType;
+import com.game.contract.generated.ContractRouteEntry;
+import com.game.contract.generated.ContractRouteTable;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -93,6 +96,59 @@ public interface MessageRoutes {
      */
     default List<MessageRoute> all() {
         return List.of();
+    }
+
+    /** 编译期节点类型 → 已接入后端 Dubbo group（未接入的节点类型如 PAYMENT 暂落 {@link #BACKEND_UNSUPPORTED}）。 */
+    Map<ContractNodeType, String> NODE_BACKENDS = Map.of(
+            ContractNodeType.LOGIN, DubboGroups.LOGIN,
+            ContractNodeType.FRIEND, DubboGroups.FRIEND,
+            ContractNodeType.CHAT, DubboGroups.CHAT,
+            ContractNodeType.TEAM, DubboGroups.TEAM,
+            ContractNodeType.GUILD, DubboGroups.GUILD,
+            ContractNodeType.TRADE, DubboGroups.TRADE,
+            ContractNodeType.MAIL, DubboGroups.MAIL,
+            ContractNodeType.RANK, DubboGroups.RANK,
+            ContractNodeType.MATCH, DubboGroups.MATCH);
+
+    /**
+     * 从 {@code game-proto-codegen} 编译期生成的 {@link ContractRouteTable} 构建（零反射，生产默认入口）。
+     * 与 {@link #of(MessageIdRegistry)} 对同一契约产出逐条一致的路由集合。
+     */
+    static MessageRoutes fromGenerated() {
+        List<ContractRouteEntry> entries = ContractRouteTable.clientRoutes();
+        Map<Integer, MessageRoute> table = new HashMap<>(entries.size() * 2);
+        for (ContractRouteEntry e : entries) {
+            String domain = domainOf(e);
+            table.put(e.messageId(), new MessageRoute(
+                    e.messageId(), domain, e.hasResponse(), e.qualifiedMethod(), e.gmCommand(),
+                    e.fullMethod(), e.directOnly()));
+        }
+        Map<Integer, MessageRoute> frozen = Map.copyOf(table);
+        List<MessageRoute> all = frozen.values().stream().sorted(Comparator.comparingInt(MessageRoute::messageId)).toList();
+        return new MessageRoutes() {
+            @Override
+            public MessageRoute clientRoute(int messageId) {
+                return frozen.get(messageId);
+            }
+
+            @Override
+            public List<MessageRoute> all() {
+                return all;
+            }
+        };
+    }
+
+    static String domainOf(ContractRouteEntry entry) {
+        if (entry.playerService()) {
+            return ClientDispatcher.DOMAIN_SCENE;
+        }
+        if (entry.gateLocal()) {
+            return ClientDispatcher.DOMAIN_GATE;
+        }
+        if (entry.directOnly()) {
+            return BACKEND_UNSUPPORTED;
+        }
+        return NODE_BACKENDS.getOrDefault(entry.nodeType(), BACKEND_UNSUPPORTED);
     }
 
     /** 从消息号注册表构建（启动时一次，之后只读，线程安全）。 */

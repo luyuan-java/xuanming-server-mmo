@@ -509,4 +509,14 @@ class MessageRoutesTest {
     void 推tip用的消息号是23() {
         assertThat(registry.requireId("SceneClientPlayerCommon", "SendTipToClient")).isEqualTo(23);
     }
+
+    @Test
+    void 编译期生成路由表与运行时MessageIdRegistry逐条一致() {
+        MessageRoutes generated = MessageRoutes.fromGenerated();
+        assertThat(generated.all()).containsExactlyElementsOf(routes.all());
+        for (MessageRoute route : routes.all()) {
+            assertThat(generated.clientRoute(route.messageId())).isEqualTo(route);
+        }
+        assertThat(generated.clientRoute(Integer.MAX_VALUE)).isNull();
+    }
 }

@@ -23,6 +23,12 @@
             <artifactId>protobuf-java</artifactId>
         </dependency>
         <dependency>
+            <!-- 只在编译期作为注解处理器使用，不进运行时、不传递（与 game-table-codegen 一致） -->
+            <groupId>com.game</groupId>
+            <artifactId>game-proto-codegen</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
@@ -38,11 +44,35 @@
                     <sourceDirectories>
                         <sourceDirectory>${project.basedir}/src/main/proto</sourceDirectory>
                     </sourceDirectories>
-                    <!-- MessageIdRegistry 在运行时读这份 descriptor set 枚举所有服务 / 方法；保留自定义 option（OptionIsClientProtocolService）。 -->
+                    <!-- MessageIdRegistry 与 game-proto-codegen 共享这份 descriptor set；保留自定义 option。 -->
                     <outputDescriptorFile>${project.build.outputDirectory}/contract/contract.desc</outputDescriptorFile>
                     <outputDescriptorIncludeImports>true</outputDescriptorIncludeImports>
                     <outputDescriptorRetainOptions>true</outputDescriptorRetainOptions>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-compile</id>
+                        <configuration>
+                            <proc>full</proc>
+                            <compilerArgs>
+                                <arg>-Agame.proto.descriptorSet=${project.build.outputDirectory}/contract/contract.desc</arg>
+                                <arg>-Agame.proto.messageIds=${project.basedir}/src/main/resources/contract/message_id.txt</arg>
+                                <arg>-Agame.proto.eventIds=${project.basedir}/src/main/resources/contract/event_id.txt</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <!-- 测试编译不再重跑协议代码生成，避免 test-classes 里出现重复生成类 -->
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <proc>none</proc>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

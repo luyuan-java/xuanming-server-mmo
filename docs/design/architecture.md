@@ -32,7 +32,8 @@ Java 代码不得依赖这套目录，具体做法：
 | 模块 | 类型 | 职责 |
 |---|---|---|
 | `game-mall` | 进程（2026-10-15 首批） | 按 mall 固定版本独立适配官方 SKU 订单：全局 TiDB 下单/幂等预占、可信支付/取消竞争与待交付意图；本版 namespace 库及独立源码，不跨仓依赖 C++/Go 版 mall-game jar。真实 TiDB、HTTP 与打包证据见 PARITY；P2P/聚宝斋/拍卖、渠道退款与资产交付尚未闭环，当前不能标交易完成 |
-| `game-proto` | 库（同步产物） | 客户端契约 proto；`MessageIdRegistry`（消息号 ↔ 服务 / 方法 / 请求应答类型） |
+| `game-proto-codegen` | 库（编译期） | javac 注解处理器（对齐 C++ `protogen` 思想）：读 `contract.desc`、`message_id.txt`、`event_id.txt`，编译期生成 `ContractMessageIds`、`ContractEventIds`、`ContractNodeType`、`ContractRouteTable`、`ContractRpcMethod`、每服务 `<Service>Rpc` / `<Service>Handler` / `<Service>ContractDispatcher`；不进运行时，见 [proto-codegen.md](proto-codegen.md) |
+| `game-proto` | 库（同步产物 + 生成物） | 客户端契约 proto；`MessageIdRegistry`（运行时描述符注册表）与 `game-proto-codegen` 编译期生成的静态路由表、消息/事件号常量、每服务处理器接口与零反射派发器 |
 | `game-table` | 库 | 配置表：同步来的权威 schema（`cfg_*` option）与表数据；`com.game.table.ConfigTables` 与各表 `<Sheet>Rows` 编译期生成；手写运行时 `com.game.table.load`（manifest 校验、解析）。见 [config-tables.md](config-tables.md) |
 | `game-table-codegen` | 库（编译期） | javac 注解处理器：读 protoc 描述符集，按 schema 生成类型安全的表访问代码；不进运行时 |
 | `game-common` | 库 | 雪花 ID、节点号租约、gate 令牌签名与签发（`com.game.common.token.GateTokenIssuer`：普通令牌 + 批次 5.4 的跨 zone 重定向票据 `issueRedirect`，从 game-gateway 下沉，gateway 与 scene-manager 共用）、battle 直连票据签名与密钥强度判定（`BattleTickets` / `BattleSecretPolicy`）、时间源、无符号数换算（`Unsigned`）等无框架公共件 |

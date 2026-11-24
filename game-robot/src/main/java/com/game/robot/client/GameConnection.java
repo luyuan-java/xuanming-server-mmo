@@ -1,5 +1,6 @@
 package com.game.robot.client;
 
+import com.game.contract.generated.ContractRpcMethod;
 import com.game.net.client.ClientFrameDecoder;
 import com.game.net.client.ClientFrameEncoder;
 import com.game.proto.ClientRequest;
@@ -192,6 +193,17 @@ public final class GameConnection implements AutoCloseable {
                     + received.envelopeTipId() + "（业务错误应放在应答体的 error_message 里）");
         }
         return received.parse(parser);
+    }
+
+    /** 使用编译期生成的 {@link ContractRpcMethod} 发送单向消息（无需手写消息号）。 */
+    public <Q extends Message> long send(ContractRpcMethod<Q, ?> method, Q body) throws RobotException {
+        return send(method.messageId(), body);
+    }
+
+    /** 使用编译期生成的 {@link ContractRpcMethod} 发起类型化 RPC 调用（免手写消息号与 Parser）。 */
+    public <Q extends Message, R extends Message> R call(ContractRpcMethod<Q, R> method, Q body, Duration timeout)
+            throws RobotException {
+        return call(method.messageId(), body, method.responseParser(), timeout);
     }
 
     /** 从 {@code fromIndex} 起等第一条满足条件的下行；超时或连接关闭时为空。 */

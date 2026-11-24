@@ -1,5 +1,6 @@
 package com.game.robot.client;
 
+import com.game.contract.generated.ContractRpcMethod;
 import com.game.net.client.ClientFrameDecoder;
 import com.game.net.client.ClientFrameEncoder;
 import com.game.proto.BattleAssignedS2C;
@@ -183,6 +184,12 @@ public final class BattleDirectConnection implements AutoCloseable {
             throw new RobotException("message_id=" + messageId + " 的应答是信封错误 tip=" + reply.envelopeTipId());
         }
         return reply.parse(parser);
+    }
+
+    /** 使用编译期生成的 {@link ContractRpcMethod} 发起直连类型化 RPC 调用。 */
+    public <Q extends Message, R extends Message> R call(ContractRpcMethod<Q, R> method, Q body, Duration timeout)
+            throws RobotException {
+        return call(method.messageId(), body, method.responseParser(), timeout);
     }
 
     /** 从 {@code fromIndex} 起等第一项满足条件的记录（关闭标记也参与匹配）；超时或已关闭且没有匹配时为空。 */

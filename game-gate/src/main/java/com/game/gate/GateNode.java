@@ -216,7 +216,7 @@ public final class GateNode {
         PushMessageIds pushIds = PushMessageIds.resolve(messageIdRegistry);
         MessageLimits messageLimits = TableMessageLimits.load(tableDir);
         ClientDispatcher dispatcher = new ClientDispatcher(identity, tokens, InstantSource.system(),
-                MessageRoutes.of(messageIdRegistry), pushIds, login, backends, links, registry,
+                MessageRoutes.fromGenerated(), pushIds, login, backends, links, registry,
                 new GateLimits(properties.maxPendingRequests(), properties.illegalPacketThreshold(), properties.handshakeTimeout(),
                         messageLimits, runMode.allowsGmCommands(), properties.redirectLinger()), metrics, presence);
         links.bindListener(new SceneEventRouter(registry, dispatcher));

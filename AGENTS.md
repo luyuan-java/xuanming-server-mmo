@@ -51,9 +51,11 @@ Java 续移植统一在主仓库的 `main` 分支进行，不再为本任务创�
   当前地图允许 `--scope current-maps` 单域同步 BaseScene 与导航，保留其他已接契约；地图独立记录在 `maps.source.commit`，
   不改全局 `mmorpg.commit`。完整检查用 `--mmorpg <全局源> --maps-source <地图源> --check` 从两个提交重建期望，
   禁止拿本仓库现有非地图产物充当完整检查的期望。已有地图覆盖后全量写入必须显式指定 `--maps-source`。
-- **服务端内部按 Java 惯用方式实现，不照抄 C++/Go**。Java 版有自己的库表与 Redis 键空间，不与 C++/Go 服务混部。
+- **架构与流程对齐 C++，内部实现按 Java 惯用法（用户 2026-11-20 明确）**：
+  - 节点与服务划分、客户端协议与消息号分发、由契约 proto 编译期生成消息号/事件号表、静态路由表、每服务 Handler 接口与零反射派发器、Robot 类型化 RPC 桩的流水线思想对齐 C++ `protogen`（见 `docs/design/proto-codegen.md` 与 `docs/design/config-tables.md`）；Java 仓库覆盖全部 C++ 节点、Go 微服务与权威仓 `java/*` 能力，最终不依赖任何 C++/Go 进程。
+  - 具体实现按 Java 21 标准惯用法（Netty、Spring Boot、Dubbo Triple、javac 注解处理器、JVM GC 管理对象生命周期，不手写裸指针/手工对象池/C++ 注释代码段）；Java 版拥有独立的库表与 Redis 键空间，不与 C++/Go 服务混部。
 - **目录、模块、工具都按 Java 标准自行组织，不对应 mmorpg 的目录结构**；Java 代码不得依赖同步来的 proto 所在目录
-  （包名按 proto package，路由按服务语义，见 `docs/design/architecture.md` §1）。工具也用 Java 写。
+  （包名按 proto package，节点类型与路由按 proto 选项与服务语义，见 `docs/design/architecture.md` §1 与 `docs/design/proto-codegen.md`）。工具也用 Java 写。
 
 ## 2. 选型（强制）
 
