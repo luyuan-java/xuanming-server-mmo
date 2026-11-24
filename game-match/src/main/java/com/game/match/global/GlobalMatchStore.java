@@ -862,6 +862,7 @@ public final class GlobalMatchStore {
                 if(terminal.getTerminalDecision()==1&&(!terminal.getOriginal().equals(request.getRawResultPayload())
                         ||!terminal.getOriginalDigest().equals(com.game.match.rating.BattleCompletionStore.digest(request.getRawResultPayload()))))
                     throw new SecurityException("终局重放不是原字节");
+                if(terminal.getTerminalDecision()==1) com.game.match.report.BattleReportStore.checkDuplicateReplay(c,request);
                 return terminal;
             }
             var seen=db.findOneByPk(c,GlobalFormationRow.newBuilder().setBattleId(request.getBattleId()).build()).orElseThrow();
@@ -880,6 +881,7 @@ public final class GlobalMatchStore {
             if(t.getTerminalDecision()==1) {
                 if(!t.getOriginal().equals(request.getRawResultPayload())||!t.getOriginalDigest().equals(com.game.match.rating.BattleCompletionStore.digest(request.getRawResultPayload())))
                     throw new SecurityException("终局重放不是原字节");
+                com.game.match.report.BattleReportStore.checkDuplicateReplay(c,request);
                 return t;
             }
             if(f.getState()==5||f.getCreateRequest().isEmpty())throw new SecurityException("原成局不允许完成");
@@ -908,6 +910,8 @@ public final class GlobalMatchStore {
                     .setOriginalDigest(com.game.match.rating.BattleCompletionStore.digest(request.getRawResultPayload()))
                     .setPlayerCount(settlements.size()).setIssuedAtMs(stamp).setSourceKind(2).setRetryMs(stamp).build();
             if(f.getState()<4)units.finished(c,f,completedTickets,true,stamp);
+            if(create.getRecordReplay()||request.hasReplay())
+                com.game.match.report.BattleReportStore.writeInTransaction(c,create,event,request.hasReplay()?request.getReplay():null,stamp);
             db.updateByPk(c,completed);db.updateByPk(c,f.toBuilder().setState(4).build());return completed;
         });
     }

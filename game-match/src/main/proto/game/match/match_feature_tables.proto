@@ -1,0 +1,183 @@
+// game-match 的战报回放、战斗剧本与论剑排位权威表（经 game-pbmysql 只扩不缩同步）。
+syntax = "proto3";
+
+package game.match.feature;
+
+import "proto2mysql/proto2mysql_option.proto";
+
+option java_package = "com.game.match.feature.pb";
+option java_multiple_files = true;
+option java_outer_classname = "MatchFeatureTablesProto";
+option (proto2mysql.db) = true;
+
+// ---- 战报回放（battle-report-replay.md） ----
+
+message MatchBattleReportRow {
+  option (proto2mysql.table_name) = "match_battle_report";
+  option (proto2mysql.primary_key) = "battle_id";
+
+  uint64 battle_id = 1;
+  uint64 created_ms = 2;
+  uint32 match_mode = 3;
+  uint32 battle_config_id = 4;
+  bytes envelope = 5;
+  bytes envelope_digest = 6;
+  uint32 ref_count = 7;
+}
+
+message MatchPlayerBattleReportRow {
+  option (proto2mysql.table_name) = "match_player_battle_report";
+  option (proto2mysql.primary_key) = "player_id,created_ms,battle_id";
+  option (proto2mysql.index) = "player_id,battle_id";
+
+  uint64 player_id = 1;
+  uint64 created_ms = 2;
+  uint64 battle_id = 3;
+  bytes summary = 4;
+}
+
+// ---- 战斗剧本与运营审核（battle-script.md） ----
+
+message MatchBattleScriptRow {
+  option (proto2mysql.table_name) = "match_battle_script";
+  option (proto2mysql.primary_key) = "script_id";
+  option (proto2mysql.index) = "owner_player_id,submitted_ms,script_id;review_state,submitted_ms,script_id";
+
+  uint64 script_id = 1;
+  uint64 owner_player_id = 2;
+  uint32 revision = 3;
+  bytes content = 4;
+  uint32 review_state = 5;
+  uint32 approved_revision = 6;
+  bytes approved_content = 7;
+  string reject_reason = 8;
+  uint64 submitted_ms = 9;
+  uint64 reviewed_ms = 10;
+}
+
+message MatchBattleScriptReviewRow {
+  option (proto2mysql.table_name) = "match_battle_script_review";
+  option (proto2mysql.primary_key) = "script_id,revision";
+  option (proto2mysql.index) = "reviewed_ms,script_id,revision";
+
+  uint64 script_id = 1;
+  uint32 revision = 2;
+  uint64 owner_player_id = 3;
+  bool approved = 4;
+  string reviewer = 5;
+  string reason = 6;
+  uint64 reviewed_ms = 7;
+  bytes content = 8;
+}
+
+message MatchBattleScriptLoadoutRow {
+  option (proto2mysql.table_name) = "match_battle_script_loadout";
+  option (proto2mysql.primary_key) = "player_id,match_mode,battle_config_id";
+  option (proto2mysql.index) = "player_id,player_script_id";
+
+  uint64 player_id = 1;
+  uint32 match_mode = 2;
+  uint32 battle_config_id = 3;
+  uint32 origin = 4;
+  uint32 official_script_id = 5;
+  uint64 player_script_id = 6;
+  uint64 updated_ms = 7;
+}
+
+// ---- 论剑排位首发 V1（ranked-play-v1-implementation.md） ----
+
+message MatchRankedSeasonRow {
+  option (proto2mysql.table_name) = "match_ranked_season";
+  option (proto2mysql.primary_key) = "season_id";
+
+  uint32 season_id = 1;
+  string season_key = 2;
+  string season_name = 3;
+  uint64 rank_generation = 4;
+  uint32 rule_version = 5;
+  uint32 state = 6;
+  uint64 start_ms = 7;
+  uint64 end_ms = 8;
+  uint32 battle_config_id = 9;
+  uint64 champion_player_id = 10;
+  string champion_name = 11;
+  int64 champion_rating_centi = 12;
+  bool rank_board_sealed = 13;
+}
+
+message MatchRankedPlayerPrefsRow {
+  option (proto2mysql.table_name) = "match_ranked_player_prefs";
+  option (proto2mysql.primary_key) = "player_id";
+
+  uint64 player_id = 1;
+  uint32 character_preset_id = 2;
+  uint32 pet_preset_id = 3;
+  uint32 rule_version = 4;
+  string equipped_talisman_code = 5;
+  string equipped_avatar_pattern_code = 6;
+  string equipped_card_bg_code = 7;
+  string equipped_title_code = 8;
+  bool hide_talisman = 9;
+  uint64 updated_ms = 10;
+}
+
+message MatchRankedPlayerSeasonRow {
+  option (proto2mysql.table_name) = "match_ranked_player_season";
+  option (proto2mysql.primary_key) = "season_id,player_id";
+  option (proto2mysql.index) = "player_id,season_id";
+
+  uint32 season_id = 1;
+  uint64 player_id = 2;
+  bool qualified = 3;
+  int64 rating_centi = 4;
+  int64 peak_rating_centi = 5;
+  uint32 valid_matches = 6;
+  uint32 wins = 7;
+  uint32 losses = 8;
+  uint32 draws = 9;
+  uint64 qualified_at_ms = 10;
+  uint32 milestone_bits = 11;
+  uint64 final_rank = 12;
+  bool champion_awarded = 13;
+  uint64 updated_ms = 14;
+}
+
+message MatchRankedRewardRow {
+  option (proto2mysql.table_name) = "match_ranked_reward";
+  option (proto2mysql.primary_key) = "player_id,season_id,kind,tier_value";
+
+  uint64 player_id = 1;
+  uint32 season_id = 2;
+  uint32 kind = 3;
+  uint32 tier_value = 4;
+  string item_code = 5;
+  uint64 granted_at_ms = 6;
+}
+
+message MatchRankedBattleRow {
+  option (proto2mysql.table_name) = "match_ranked_battle";
+  option (proto2mysql.primary_key) = "player_id,battle_id";
+  option (proto2mysql.index) = "player_id,settled_at_ms,battle_id";
+
+  uint64 player_id = 1;
+  uint64 battle_id = 2;
+  uint32 season_id = 3;
+  uint32 team_size = 4;
+  uint32 status = 5;
+  uint32 outcome = 6;
+  uint32 player_team_index = 7;
+  uint32 total_rounds = 8;
+  bool participated = 9;
+  bool fled = 10;
+  int64 rating_before_centi = 11;
+  int64 rating_after_centi = 12;
+  int64 rating_delta_centi = 13;
+  uint32 tier_before = 14;
+  uint32 tier_after = 15;
+  bool newly_qualified = 16;
+  uint32 season_valid_matches_after = 17;
+  bytes newly_unlocked_rewards_proto = 18;
+  uint64 settled_at_ms = 19;
+  uint32 character_preset_id = 20;
+  uint32 pet_preset_id = 21;
+}

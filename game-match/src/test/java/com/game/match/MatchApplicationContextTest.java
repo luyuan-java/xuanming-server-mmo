@@ -182,7 +182,9 @@ class MatchApplicationContextTest {
             // 批次 6.5 观战：存储、163 + 观众 RPC + 在途口、164 + 开局钩子 + 清扫
             SpectateStoreConfiguration.class, WatchBattleConfiguration.class, WatchableConfiguration.class,
             // 观战大厅档：档位存储、中继开关、准入与启动门禁、赛事局运营入口
-            com.game.match.spectate.SpectateRelayConfiguration.class, com.game.match.admin.SpectateFeaturedController.class);
+            com.game.match.spectate.SpectateRelayConfiguration.class, com.game.match.admin.SpectateFeaturedController.class,
+            // 战报回放（379/380）、战斗剧本与审核（387–392）、论剑排位预设档案（448–451）
+            com.game.match.feature.MatchFeatureConfiguration.class);
 
     private final LeaseOnlyRedis redis = new LeaseOnlyRedis();
     private final List<String> events = new CopyOnWriteArrayList<>();

@@ -176,6 +176,7 @@ public final class TeamRules {
             case KICK -> c.kick();
             case TRANSFER_LEADER -> c.transferLeader();
             case DISBAND -> c.disband();
+            case CONFIRM_RANKED_PRESET -> c.confirmRankedPreset();
             case null, default -> {
                 return Decision.reject(TeamTips.INTERNAL, 0);
             }
@@ -254,6 +255,29 @@ public final class TeamRules {
             return TeamTips.SIZE_EXCEEDED;
         }
         return TeamTips.OK;
+    }
+
+    /** 是否全部成员均已按 {@code ruleVersion} 完成排位预设确认（成员为空返回 false）。 */
+    public static boolean allRankedPresetsConfirmed(TeamRecordOrBuilder rec, int ruleVersion) {
+        if (rec == null || rec.getMembersCount() == 0 || ruleVersion <= 0) {
+            return false;
+        }
+        return firstUnconfirmedRankedMember(rec, ruleVersion) == 0L;
+    }
+
+    /** 按 {@link #MEMBER_ORDER} 返回首位未按 {@code ruleVersion} 完成排位预设确认的成员 id；全员已确认返回 0。 */
+    public static long firstUnconfirmedRankedMember(TeamRecordOrBuilder rec, int ruleVersion) {
+        if (rec == null || ruleVersion <= 0) {
+            return 0L;
+        }
+        for (long pid : memberIds(rec)) {
+            TeamMemberRecord m = findMember(rec, pid);
+            if (m == null || !m.getRankedPresetConfirmed() || m.getRankedRuleVersion() != ruleVersion
+                    || m.getRankedCharacterPresetId() == 0 || m.getRankedPetPresetId() == 0) {
+                return pid;
+            }
+        }
+        return 0L;
     }
 
     /** 开战名单（rules.go:327-342）：队长在前（前提是队长在成员里），其余按 {@link #MEMBER_ORDER}。 */
@@ -880,11 +904,56 @@ public final class TeamRules {
             markOp(TeamChangeReason.TEAM_CHANGE_REASON_DISBANDED, op.caller());
         }
 
+        /** 队员确认本人在本队排位中的人物与宝宝预设。 */
+        void confirmRankedPreset() {
+            long caller = op.caller();
+            int idx = -1;
+            for (int i = 0; i < rec.getMembersCount(); i++) {
+                if (rec.getMembers(i).getPlayerId() == caller) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0) {
+                fail(TeamTips.NO_TEAM, 0);
+                return;
+            }
+            if (locked()) {
+                fail(TeamTips.IN_MATCH, 0);
+                return;
+            }
+            TeamMemberRecord cur = rec.getMembers(idx);
+            if (cur.getRankedPresetConfirmed()
+                    && cur.getRankedCharacterPresetId() == op.rankedCharacterPresetId()
+                    && cur.getRankedPetPresetId() == op.rankedPetPresetId()
+                    && cur.getRankedRuleVersion() == op.rankedRuleVersion()) {
+                return;
+            }
+            rec.setMembers(idx, cur.toBuilder()
+                    .setRankedCharacterPresetId(op.rankedCharacterPresetId())
+                    .setRankedPetPresetId(op.rankedPetPresetId())
+                    .setRankedRuleVersion(op.rankedRuleVersion())
+                    .setRankedPresetConfirmed(true)
+                    .build());
+            markOp(TeamChangeReason.TEAM_CHANGE_REASON_RANKED_PRESET_CONFIRMED, caller);
+        }
+
+        /** 名单增减时清空所有留队成员的排位确认状态，保留上次选择供客户端预填。 */
+        void clearRankedConfirmations() {
+            for (int i = 0; i < rec.getMembersCount(); i++) {
+                TeamMemberRecord m = rec.getMembers(i);
+                if (m.getRankedPresetConfirmed()) {
+                    rec.setMembers(i, m.toBuilder().setRankedPresetConfirmed(false).build());
+                }
+            }
+        }
+
         /**
          * 加入成员并删掉此人在本队的申请与邀请（rules.go:694-715）。seq 取 next_join_seq，遍历现有成员遇到 join_seq ≥ seq 就改成
          * join_seq+1（next_join_seq 缺失或落后时自愈），最后为 0 则取 1。
          */
         void addMember(long playerId, int zone) {
+            clearRankedConfirmations();
             int seq = rec.getNextJoinSeq();
             for (TeamMemberRecord m : rec.getMembersList()) {
                 if (Integer.compareUnsigned(m.getJoinSeq(), seq) >= 0) {
@@ -911,7 +980,7 @@ public final class TeamRules {
             List<TeamMemberRecord> kept = new ArrayList<>(rec.getMembersCount());
             for (TeamMemberRecord m : rec.getMembersList()) {
                 if (m.getPlayerId() != playerId) {
-                    kept.add(m);
+                    kept.add(m.getRankedPresetConfirmed() ? m.toBuilder().setRankedPresetConfirmed(false).build() : m);
                 }
             }
             rec.clearMembers().addAllMembers(kept);

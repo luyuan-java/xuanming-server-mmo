@@ -159,7 +159,7 @@ class MatchControlContractTest {
         Method method = MatchInternalService.class.getDeclaredMethod("startActivityBattle", StartActivityBattleRequest.class);
         assertThat(method.getReturnType()).isEqualTo(CompletableFuture.class);
         assertThat(MatchInternalService.class.getDeclaredMethods()).extracting(Method::getName)
-            .containsExactlyInAnyOrder("startActivityBattle","cancelActivityBattle","commitBattleOutcome");
+            .containsExactlyInAnyOrder("startActivityBattle","cancelActivityBattle","commitBattleOutcome","listPendingBattleScripts","reviewBattleScript");
         Method cancel=MatchInternalService.class.getDeclaredMethod("cancelActivityBattle",com.game.proto.match.CancelActivityBattleRequest.class);
         assertThat(cancel.getGenericReturnType().getTypeName()).contains(com.game.proto.match.CancelActivityBattleResponse.class.getName());
         Method commit=MatchInternalService.class.getDeclaredMethod("commitBattleOutcome",com.game.proto.match.CommitBattleOutcomeRequest.class);

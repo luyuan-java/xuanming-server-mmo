@@ -16,7 +16,13 @@ package com.game.team.rules;
  * @param accept       HANDLE_APPLICATION 的 approve / RESPOND_INVITE 的 accept
  */
 public record Op(OpKind kind, long caller, long callerTeamId, int callerZone, long target, int targetZone,
-                 long newTeamId, boolean accept) {
+                 long newTeamId, boolean accept, int rankedCharacterPresetId, int rankedPetPresetId,
+                 int rankedRuleVersion) {
+
+    public Op(OpKind kind, long caller, long callerTeamId, int callerZone, long target, int targetZone,
+              long newTeamId, boolean accept) {
+        this(kind, caller, callerTeamId, callerZone, target, targetZone, newTeamId, accept, 0, 0, 0);
+    }
 
     /** 建队：caller 为队长，zone 为建队者 home zone，teamId 由发号器给出（rules.go:97-100）。 */
     public static Op create(long caller, long teamId, int zone) {
@@ -68,8 +74,15 @@ public record Op(OpKind kind, long caller, long callerTeamId, int callerZone, lo
         return new Op(OpKind.DISBAND, caller, 0, 0, 0, 0, 0, false);
     }
 
+    /** 队员确认本人在本队排位中的人物与宝宝预设。 */
+    public static Op confirmRankedPreset(long caller, int characterPresetId, int petPresetId, int ruleVersion) {
+        return new Op(OpKind.CONFIRM_RANKED_PRESET, caller, 0, 0, 0, 0, 0, false,
+                characterPresetId, petPresetId, ruleVersion);
+    }
+
     /** 返回填好 {@code callerTeamId} 的副本（存储层在每轮 S_READ 之后调用）。 */
     public Op withCallerTeamId(long callerTeamId) {
-        return new Op(kind, caller, callerTeamId, callerZone, target, targetZone, newTeamId, accept);
+        return new Op(kind, caller, callerTeamId, callerZone, target, targetZone, newTeamId, accept,
+                rankedCharacterPresetId, rankedPetPresetId, rankedRuleVersion);
     }
 }

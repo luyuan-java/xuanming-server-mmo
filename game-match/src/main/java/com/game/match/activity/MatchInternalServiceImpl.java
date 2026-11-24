@@ -45,22 +45,39 @@ public class MatchInternalServiceImpl implements MatchInternalService {
     private final com.game.match.global.GlobalMatchStore outcomes;
     private final String outcomeSecret;
     private final ServiceCallSignatures outcomeSignatures;
+    private final com.game.match.script.BattleScriptService scripts;
+    private final ServiceCallSignatures opsSignatures;
 
-    @org.springframework.beans.factory.annotation.Autowired
     public MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props,
             org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchStore> outcomes,
             org.springframework.core.env.Environment environment) {
         this(service,workers,props,environment.getProperty("MMORPG_MATCH_INTERNAL_SECRET_GUILD"),outcomes.getIfAvailable(),
-                environment.getProperty(MatchInternalService.OUTCOME_SECRET_ENV));
+                environment.getProperty(MatchInternalService.OUTCOME_SECRET_ENV),
+                null, environment.getProperty(MatchInternalService.OPS_SECRET_ENV));
+    }
+    @org.springframework.beans.factory.annotation.Autowired
+    public MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchStore> outcomes,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.script.BattleScriptService> scripts,
+            org.springframework.core.env.Environment environment) {
+        this(service,workers,props,environment.getProperty("MMORPG_MATCH_INTERNAL_SECRET_GUILD"),outcomes.getIfAvailable(),
+                environment.getProperty(MatchInternalService.OUTCOME_SECRET_ENV),
+                scripts.getIfAvailable(), environment.getProperty(MatchInternalService.OPS_SECRET_ENV));
     }
     public MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props) {
-        this(service,workers,props,System.getenv("MMORPG_MATCH_INTERNAL_SECRET_GUILD"),null,System.getenv(MatchInternalService.OUTCOME_SECRET_ENV));
+        this(service,workers,props,System.getenv("MMORPG_MATCH_INTERNAL_SECRET_GUILD"),null,System.getenv(MatchInternalService.OUTCOME_SECRET_ENV),
+                null, System.getenv(MatchInternalService.OPS_SECRET_ENV));
     }
     MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props, String cancellationSecret) {
-        this(service,workers,props,cancellationSecret,null,null);
+        this(service,workers,props,cancellationSecret,null,null,null,null);
+    }
+    public MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props,
+            com.game.match.script.BattleScriptService scripts, String opsSecret) {
+        this(service,workers,props,null,null,null,scripts,opsSecret);
     }
     private MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props, String cancellationSecret,
-            com.game.match.global.GlobalMatchStore outcomes,String outcomeSecret) {
+            com.game.match.global.GlobalMatchStore outcomes,String outcomeSecret,
+            com.game.match.script.BattleScriptService scripts, String opsSecret) {
         this.service = Objects.requireNonNull(service, "service");
         this.workers = Objects.requireNonNull(workers, "workers");
         this.budgetMs = props.requestBudget().toMillis();
@@ -71,6 +88,67 @@ public class MatchInternalServiceImpl implements MatchInternalService {
         this.outcomeSecret=outcomeSecret;
         this.outcomeSignatures=outcomeSecret==null||outcomeSecret.isBlank()?null
                 :new ServiceCallSignatures(Map.of("battle",outcomeSecret),System::currentTimeMillis);
+        this.scripts=scripts;
+        this.opsSignatures=opsSecret==null||opsSecret.isBlank()?null
+                :new ServiceCallSignatures(Map.of(MatchInternalService.OPS_CALLER,opsSecret),System::currentTimeMillis);
+    }
+
+    @Override
+    public CompletableFuture<com.game.proto.match.ListPendingBattleScriptsResponse> listPendingBattleScripts(
+            com.game.proto.match.ListPendingBattleScriptsRequest request) {
+        if (scripts == null || opsSignatures == null || request == null || !verifyOps(MatchInternalService.LIST_PENDING_SCRIPTS_METHOD, request)) {
+            return CompletableFuture.completedFuture(com.game.proto.match.ListPendingBattleScriptsResponse.newBuilder()
+                    .setReject(com.game.proto.match.BattleScriptReviewReject.BATTLE_SCRIPT_REVIEW_REJECT_DENIED).build());
+        }
+        Deadline d = MatchRpcAttachments.deadlineFromCall(budgetMs);
+        CompletableFuture<com.game.proto.match.ListPendingBattleScriptsResponse> reply = new CompletableFuture<>();
+        try {
+            workers.execute(() -> {
+                if (d.expired()) {
+                    reply.complete(com.game.proto.match.ListPendingBattleScriptsResponse.newBuilder()
+                            .setReject(com.game.proto.match.BattleScriptReviewReject.BATTLE_SCRIPT_REVIEW_REJECT_INTERNAL).build());
+                } else {
+                    reply.complete(scripts.listPending(request));
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            reply.complete(com.game.proto.match.ListPendingBattleScriptsResponse.newBuilder()
+                    .setReject(com.game.proto.match.BattleScriptReviewReject.BATTLE_SCRIPT_REVIEW_REJECT_INTERNAL).build());
+        }
+        return reply;
+    }
+
+    @Override
+    public CompletableFuture<com.game.proto.match.ReviewBattleScriptResponse> reviewBattleScript(
+            com.game.proto.match.ReviewBattleScriptRequest request) {
+        if (scripts == null || opsSignatures == null || request == null || !verifyOps(MatchInternalService.REVIEW_SCRIPT_METHOD, request)) {
+            return CompletableFuture.completedFuture(com.game.proto.match.ReviewBattleScriptResponse.newBuilder()
+                    .setReject(com.game.proto.match.BattleScriptReviewReject.BATTLE_SCRIPT_REVIEW_REJECT_DENIED).build());
+        }
+        Deadline d = MatchRpcAttachments.deadlineFromCall(budgetMs);
+        CompletableFuture<com.game.proto.match.ReviewBattleScriptResponse> reply = new CompletableFuture<>();
+        try {
+            workers.execute(() -> {
+                if (d.expired()) {
+                    reply.complete(com.game.proto.match.ReviewBattleScriptResponse.newBuilder()
+                            .setReject(com.game.proto.match.BattleScriptReviewReject.BATTLE_SCRIPT_REVIEW_REJECT_INTERNAL).build());
+                } else {
+                    reply.complete(scripts.review(request));
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            reply.complete(com.game.proto.match.ReviewBattleScriptResponse.newBuilder()
+                    .setReject(com.game.proto.match.BattleScriptReviewReject.BATTLE_SCRIPT_REVIEW_REJECT_INTERNAL).build());
+        }
+        return reply;
+    }
+
+    private boolean verifyOps(String method, com.google.protobuf.Message request) {
+        try {
+            return MatchInternalService.OPS_CALLER.equals(opsSignatures.verify(method, request));
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     @Override public CompletableFuture<com.game.proto.match.CommitBattleOutcomeResponse> commitBattleOutcome(

@@ -25,8 +25,17 @@ import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MetricLabels;
 import com.game.match.queue.QueueHandlers;
 import com.game.match.queue.QueueService;
+import com.game.match.ranked.RankedService;
+import com.game.match.ranked.RankedStore;
+import com.game.match.ranked.RankedTables;
 import com.game.match.reissue.BattleTicketReissue;
 import com.game.match.reissue.ReissueHandler;
+import com.game.match.report.BattleReportHandlers;
+import com.game.match.report.BattleReportStore;
+import com.game.match.script.BattleScriptCatalog;
+import com.game.match.script.BattleScriptService;
+import com.game.match.script.BattleScriptStore;
+import com.game.match.script.BattleScriptValidator;
 import com.game.match.support.MatchTip;
 import com.game.match.support.MatchTips;
 import com.game.match.testing.FakeBattleNode;
@@ -97,14 +106,24 @@ class MatchClientMessageServiceTest {
     /** 字段 1 声明成长度前缀、长度却超出剩余字节：任何消息类型都解析不了。 */
     private static final ByteString TRUNCATED = ByteString.copyFrom(new byte[] {0x0A, 0x7F, 0x01});
 
+    private static final List<String> FEATURE_METHODS = List.of(
+            MatchMethods.LIST_BATTLE_REPORTS, MatchMethods.GET_BATTLE_REPORT,
+            MatchMethods.LIST_BATTLE_SCRIPTS, MatchMethods.SUBMIT_BATTLE_SCRIPT,
+            MatchMethods.DELETE_BATTLE_SCRIPT, MatchMethods.SET_BATTLE_SCRIPT_LOADOUT,
+            MatchMethods.GET_RANKED_PROFILE, MatchMethods.SAVE_RANKED_PRESET,
+            MatchMethods.UPDATE_RANKED_COSMETIC, MatchMethods.GET_RANKED_BATTLE_RESULT);
+
     private static final Map<String, Integer> IDS = new java.util.HashMap<>(Map.of(
             MatchMethods.JOIN_QUEUE, 157, MatchMethods.CANCEL_QUEUE, 148, MatchMethods.GET_QUEUE_STATUS, 153,
             MatchMethods.CHALLENGE_PLAYER, 152, MatchMethods.RESPOND_CHALLENGE, 151, MatchMethods.REQUEST_BATTLE_TICKET, 179,
             MatchMethods.NOTIFY_CHALLENGE_INVITE, 156, MatchMethods.NOTIFY_CHALLENGE_RESULT, 154,
             MatchMethods.WATCH_BATTLE, 163, MatchMethods.LIST_WATCHABLE_BATTLES, 164));
     static {
-        IDS.put(MatchMethods.GET_NETWORK_PROBE_PLAN,REGISTRY.requireId(MatchMethods.SERVICE,MatchMethods.GET_NETWORK_PROBE_PLAN));
-        IDS.put(MatchMethods.COMMIT_NETWORK_PROBE,REGISTRY.requireId(MatchMethods.SERVICE,MatchMethods.COMMIT_NETWORK_PROBE));
+        IDS.put(MatchMethods.GET_NETWORK_PROBE_PLAN, REGISTRY.requireId(MatchMethods.SERVICE, MatchMethods.GET_NETWORK_PROBE_PLAN));
+        IDS.put(MatchMethods.COMMIT_NETWORK_PROBE, REGISTRY.requireId(MatchMethods.SERVICE, MatchMethods.COMMIT_NETWORK_PROBE));
+        for (String method : FEATURE_METHODS) {
+            IDS.put(method, REGISTRY.requireId(MatchMethods.SERVICE, method));
+        }
     }
     private static final List<String> INLINE = List.of(MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT);
 
@@ -215,6 +234,9 @@ class MatchClientMessageServiceTest {
                 Reply.envelope(MatchTips.SERVICE_UNAVAILABLE)));
         add(handlers,new Business(MatchMethods.GET_NETWORK_PROBE_PLAN,Reply.body(com.game.proto.match.GetNetworkProbePlanResponse.getDefaultInstance()),Reply.envelope(MatchTips.SERVICE_UNAVAILABLE)));
         add(handlers,new Business(MatchMethods.COMMIT_NETWORK_PROBE,Reply.body(com.game.proto.match.CommitNetworkProbeResponse.getDefaultInstance()),Reply.envelope(MatchTips.SERVICE_UNAVAILABLE)));
+        for (String method : FEATURE_METHODS) {
+            add(handlers, new Business(method, Reply.empty(), Reply.envelope(MatchTips.SERVICE_UNAVAILABLE)));
+        }
         return handlers;
     }
 
@@ -438,8 +460,15 @@ class MatchClientMessageServiceTest {
 
         CompletableFuture<ClientReply> plan = service.handle(call(MatchMethods.GET_NETWORK_PROBE_PLAN));
         CompletableFuture<ClientReply> commit = service.handle(call(MatchMethods.COMMIT_NETWORK_PROBE));
+        List<CompletableFuture<ClientReply>> featureCalls = new ArrayList<>();
+        for (String method : FEATURE_METHODS) {
+            featureCalls.add(service.handle(call(method)));
+        }
 
-        assertThat(List.of(join, challenge, respond, reissue, cancel, status, watch, list, plan, commit)).as("拒收当场应答，不等工作线程")
+        List<CompletableFuture<ClientReply>> allCalls = new ArrayList<>(
+                List.of(join, challenge, respond, reissue, cancel, status, watch, list, plan, commit));
+        allCalls.addAll(featureCalls);
+        assertThat(allCalls).as("拒收当场应答，不等工作线程")
                 .allSatisfy(f -> assertThat(f).isDone());
         assertThat(watch.get().getTipId()).as("163 有 in-band 错误字段").isZero();
         WatchBattleResponse watched = WatchBattleResponse.parseFrom(watch.get().getBody());
@@ -458,8 +487,10 @@ class MatchClientMessageServiceTest {
         RequestBattleTicketResponse reissued = RequestBattleTicketResponse.parseFrom(reissue.get().getBody());
         assertInBandBusy(reissued.getErrorMessage());
         assertThat(reissued.hasAssignment()).isFalse();
-        for (CompletableFuture<ClientReply> envelope : List.of(cancel, status, list, plan, commit)) {
-            assertThat(envelope.get().getTipId()).as("148 / 153 / 164 没有 in-band 错误字段：信封").isEqualTo(1003);
+        List<CompletableFuture<ClientReply>> envelopes = new ArrayList<>(List.of(cancel, status, list, plan, commit));
+        envelopes.addAll(featureCalls);
+        for (CompletableFuture<ClientReply> envelope : envelopes) {
+            assertThat(envelope.get().getTipId()).as("无 in-band 错误字段的号：信封 1003").isEqualTo(1003);
             assertThat(envelope.get().getBody().isEmpty()).isTrue();
             assertThat(envelope.get().getTipParametersList()).isEmpty();
         }
@@ -540,11 +571,21 @@ class MatchClientMessageServiceTest {
                 Runnable::run, 60_000, IDS.get(MatchMethods.NOTIFY_CHALLENGE_INVITE), IDS.get(MatchMethods.NOTIFY_CHALLENGE_RESULT));
         BattleTicketReissue reissue = new BattleTicketReissue(realPlacements, new FakePlacementDialer(new FakeBattleNode()), metrics);
         InlineHandlers inline = new InlineHandlers();
-        return List.of(new com.game.match.global.ProbeHandlers.Plan(()->null),new com.game.match.global.ProbeHandlers.Commit(()->null),
+        BattleReportStore reports = mock(BattleReportStore.class);
+        BattleScriptService scripts = new BattleScriptService(
+                mock(BattleScriptStore.class), mock(BattleScriptCatalog.class), mock(BattleScriptValidator.Tables.class), () -> 1L);
+        RankedService ranked = new RankedService(mock(RankedStore.class), mock(RankedTables.class), System::currentTimeMillis);
+        List<MatchMethodHandler> handlers = new ArrayList<>(List.of(
+                new com.game.match.global.ProbeHandlers.Plan(() -> null),
+                new com.game.match.global.ProbeHandlers.Commit(() -> null),
                 new QueueHandlers.Join(queue, metrics), new QueueHandlers.Cancel(queue), new QueueHandlers.Status(queue),
                 new ReissueHandler(reissue), ChallengeHandlers.challengePlayer(challenge, metrics),
                 ChallengeHandlers.respondChallenge(challenge, metrics), inline.notifyChallengeInviteUplinkHandler(),
-                inline.notifyChallengeResultUplinkHandler());
+                inline.notifyChallengeResultUplinkHandler(),
+                BattleReportHandlers.listHandler(reports), BattleReportHandlers.getHandler(reports)));
+        handlers.addAll(scripts.clientHandlers());
+        handlers.addAll(ranked.clientHandlers());
+        return handlers;
     }
 
     private MatchDispatcher realDispatcher(int threads, int queue, long budgetMillis) {

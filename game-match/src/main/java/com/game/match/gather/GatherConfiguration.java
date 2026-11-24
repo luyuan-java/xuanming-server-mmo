@@ -58,8 +58,11 @@ public class GatherConfiguration {
     @Bean(name="gatherPipeline")
     public GatherPipeline configuredGatherPipeline(MatchIds ids,BattleNodes nodes,RedisClock clock,GatherHooks hooks,RatingReader ratings,
             ScenePreparer scenes,NodeCalls<BattleNodeService> calls,PlacementStore placements,TicketStore tickets,Compensation compensation,
-            MatchMetrics metrics,MatchProperties props,org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){
-        return gatherPipeline(ids,nodes,clock,hooks,ratings,scenes,calls,placements,tickets,compensation,metrics,props).withGlobal(global.getIfAvailable());}
+            MatchMetrics metrics,MatchProperties props,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.script.BattleScriptResolver> scriptResolver){
+        return gatherPipeline(ids,nodes,clock,hooks,ratings,scenes,calls,placements,tickets,compensation,metrics,props)
+                .withGlobal(global.getIfAvailable()).withBattleScriptResolver(scriptResolver.getIfAvailable());}
 
     @Bean
     public GatherLauncher gatherLauncher(GatherPipeline gatherPipeline, MatchMetrics metrics, MatchProperties props) {

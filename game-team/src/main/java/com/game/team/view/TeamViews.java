@@ -93,9 +93,17 @@ public final class TeamViews {
                 .setApplicationCount(live.getApplicationsCount())
                 .setServerTimeMs(nowMs);
         // join_seq 升序；客户端仍按 join_seq 字段排序，不依赖下标
+        int ruleVersion = 0;
         for (long pid : TeamRules.memberIds(live)) {
             TeamMemberRecord m = TeamRules.findMember(live, pid);
-            view.addMembers(memberView(pid, m.getZoneId(), m.getJoinSeq(), leader, dc));
+            if (m.getRankedRuleVersion() > ruleVersion) {
+                ruleVersion = m.getRankedRuleVersion();
+            }
+            view.addMembers(memberView(m, leader, dc));
+        }
+        if (ruleVersion > 0) {
+            view.setRankedRuleVersion(ruleVersion);
+            view.setRankedPresetsAllConfirmed(TeamRules.allRankedPresetsConfirmed(live, ruleVersion));
         }
         if (viewer == 0 || viewer != leader) {
             return view.build();
@@ -116,6 +124,21 @@ public final class TeamViews {
                     .setExpireAtMs(inv.getExpireAtMs()));
         }
         return view.build();
+    }
+
+    /** 成员展示视图（带排位预设确认快照）。 */
+    public static TeamMemberView memberView(TeamMemberRecord m, long leader, Map<Long, MemberDisplay> dc) {
+        TeamMemberView base = memberView(m.getPlayerId(), m.getZoneId(), m.getJoinSeq(), leader, dc);
+        if (m.getRankedCharacterPresetId() == 0 && m.getRankedPetPresetId() == 0
+                && m.getRankedRuleVersion() == 0 && !m.getRankedPresetConfirmed()) {
+            return base;
+        }
+        return base.toBuilder()
+                .setRankedCharacterPresetId(m.getRankedCharacterPresetId())
+                .setRankedPetPresetId(m.getRankedPetPresetId())
+                .setRankedRuleVersion(m.getRankedRuleVersion())
+                .setRankedPresetConfirmed(m.getRankedPresetConfirmed())
+                .build();
     }
 
     /**

@@ -138,7 +138,9 @@ public final class GatherPipeline {
     private final LongSupplier seeds;
     private final Timeouts timeouts;
     private com.game.match.global.GlobalMatchService global;
+    private com.game.match.script.BattleScriptResolver scriptResolver;
     public GatherPipeline withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
+    public GatherPipeline withBattleScriptResolver(com.game.match.script.BattleScriptResolver resolver){this.scriptResolver=resolver;return this;}
 
     /**
      * 生产装配。
@@ -340,6 +342,9 @@ public final class GatherPipeline {
             }
             // 观战可见性在建房时决定一次、随建房原件冻结（battle 第二道闸只认它）；落点记录抄同一份冻结值，不按模式另算
             create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext()));
+            if (scriptResolver != null) {
+                create.addAllTeamScripts(scriptResolver.resolveForBattle(battleId, mode.getNumber(), plan.battleConfigId(), create.getPlayersList()));
+            }
             CreateBattleRequest createRequest = create.build();
             record.setSpectateVisibility(createRequest.getSpectateVisibilityValue());
 

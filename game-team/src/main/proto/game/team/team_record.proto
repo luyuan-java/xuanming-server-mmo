@@ -37,6 +37,10 @@ message TeamMemberRecord {
   uint32 join_seq = 4;
   string owner_account = 5;
   uint64 owner_revision = 6;
+  uint32 ranked_character_preset_id = 7;
+  uint32 ranked_pet_preset_id = 8;
+  uint32 ranked_rule_version = 9;
+  bool ranked_preset_confirmed = 10;
 }
 
 message TeamApplicationRecord {

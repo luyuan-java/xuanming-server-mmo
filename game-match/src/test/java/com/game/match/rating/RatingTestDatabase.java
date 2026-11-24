@@ -214,8 +214,12 @@ public final class RatingTestDatabase implements AutoCloseable {
 
     private static void createH2Tables(DataSource ds) throws SQLException {
         PbMysql registry = MatchRatingTables.registry();
+        PbMysql features = com.game.match.feature.MatchFeatureTables.registry();
         try (Connection c = h2SchemaDataSource(ds).getConnection(); Statement st = c.createStatement()) {
             for (TableSchema table : registry.tables()) {
+                st.execute(h2Ddl(table.createTableSql()));
+            }
+            for (TableSchema table : features.tables()) {
                 st.execute(h2Ddl(table.createTableSql()));
             }
         }

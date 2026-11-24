@@ -5,7 +5,9 @@ import com.game.common.deadline.Deadline;
 import com.game.common.deadline.Deadline.DependencyException;
 import com.game.common.player.HomeZones;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.match.MatchMode;
 import com.game.proto.team.ApplyJoinTeamRequest;
+import com.game.proto.team.ConfirmRankedPresetRequest;
 import com.game.proto.team.CreateTeamRequest;
 import com.game.proto.team.DisbandTeamRequest;
 import com.game.proto.team.GetMyTeamRequest;
@@ -34,6 +36,7 @@ import com.game.team.proto.TeamRecord;
 import com.game.team.push.TeamPushes;
 import com.game.team.rules.Op;
 import com.game.team.rules.RuleConfig;
+import com.game.team.rules.TeamRankedRules;
 import com.game.team.rules.TeamRules;
 import com.game.team.rules.TeamTips;
 import com.game.team.store.Bind;
@@ -117,6 +120,7 @@ public final class TeamService {
     private final TeamMetrics metrics;
     private final RuleConfig cfg;
     private final BooleanSupplier stopping;
+    private final TeamRankedRules rankedRules;
 
     /**
      * @param sessions  规则用的会话四态与邀请目标的严格在线判定（{@code TeamSessions}）
@@ -132,6 +136,13 @@ public final class TeamService {
     public TeamService(TeamStore store, SessionReads sessions, DisplayLoader display, HomeZones homeZones,
                        LongSupplier teamIds, TeamBattlePort battle, Executor matchEnd, TeamPushes pushes, TeamMetrics metrics,
                        RuleConfig cfg, BooleanSupplier stopping) {
+        this(store, sessions, display, homeZones, teamIds, battle, matchEnd, pushes, metrics, cfg, stopping,
+                TeamRankedRules.defaults());
+    }
+
+    public TeamService(TeamStore store, SessionReads sessions, DisplayLoader display, HomeZones homeZones,
+                       LongSupplier teamIds, TeamBattlePort battle, Executor matchEnd, TeamPushes pushes, TeamMetrics metrics,
+                       RuleConfig cfg, BooleanSupplier stopping, TeamRankedRules rankedRules) {
         this.store = store;
         this.sessions = sessions;
         this.display = display;
@@ -143,13 +154,14 @@ public final class TeamService {
         this.metrics = metrics;
         this.cfg = cfg == null ? RuleConfig.DEFAULT : cfg;
         this.stopping = Objects.requireNonNull(stopping, "stopping");
+        this.rankedRules = rankedRules == null ? TeamRankedRules.defaults() : rankedRules;
     }
 
     // ================================================================ RPC
 
     /** 每次RPC创建不可变的原身份视图；不使用ThreadLocal，也不从当前SQL归属补原会话。 */
     private TeamService forActor(SessionContext original,String method,com.google.protobuf.Message request) {
-        return new TeamService(store.forActor(original,method,request),sessions,display,homeZones,teamIds,battle,matchEnd,pushes,metrics,cfg,stopping);
+        return new TeamService(store.forActor(original,method,request),sessions,display,homeZones,teamIds,battle,matchEnd,pushes,metrics,cfg,stopping,rankedRules);
     }
     @FunctionalInterface private interface OriginalCall { TeamResponse apply(TeamService service); }
     private TeamResponse originalCall(SessionContext original,String method,com.google.protobuf.Message request,Deadline deadline,OriginalCall call) {
@@ -183,6 +195,7 @@ public final class TeamService {
     public TeamResponse kickMember(SessionContext a,KickMemberRequest q,Deadline d){return originalCall(a,TeamMethods.KICK_MEMBER,q,d,s->s.kickMember(a.getPlayerId(),q,d));}
     public TeamResponse transferLeader(SessionContext a,TransferLeaderRequest q,Deadline d){return originalCall(a,TeamMethods.TRANSFER_LEADER,q,d,s->s.transferLeader(a.getPlayerId(),q,d));}
     public TeamResponse disbandTeam(SessionContext a,DisbandTeamRequest q,Deadline d){return originalCall(a,TeamMethods.DISBAND_TEAM,q,d,s->s.disbandTeam(a.getPlayerId(),q,d));}
+    public TeamResponse confirmRankedPreset(SessionContext a,ConfirmRankedPresetRequest q,Deadline d){return originalCall(a,TeamMethods.CONFIRM_RANKED_PRESET,q,d,s->s.confirmRankedPreset(a.getPlayerId(),q,d));}
     public ListMyInvitesResponse listMyInvites(SessionContext a,ListMyInvitesRequest q,Deadline d){
         try{return forActor(a,TeamMethods.LIST_MY_INVITES,q).listMyInvites(a.getPlayerId(),q,d);}
         catch(SecurityException|DependencyException invalid){return ListMyInvitesResponse.newBuilder().setErrorMessage(tipOf(TeamTips.INTERNAL,0)).build();}
@@ -429,6 +442,16 @@ public final class TeamService {
                 MutateSpec.of(TeamMethods.DISBAND_TEAM), deadline).response();
     }
 
+    /** ConfirmRankedPreset（452）：队员确认本人在本队排位中的人物与宝宝预设，预设或规则版本非法直接回 4034 + 自由读视图。 */
+    public TeamResponse confirmRankedPreset(long caller, ConfirmRankedPresetRequest request, Deadline deadline) {
+        if (!rankedRules.isValidSelection(request.getCharacterPresetId(), request.getPetPresetId(), request.getRuleVersion())) {
+            return respond(caller, TeamTips.RANKED_PRESET_INVALID, 0, deadline);
+        }
+        return runMutate(caller, Bind.caller(caller, request.getExpectedTeamId()),
+                Op.confirmRankedPreset(caller, request.getCharacterPresetId(), request.getPetPresetId(), request.getRuleVersion()),
+                MutateSpec.of(TeamMethods.CONFIRM_RANKED_PRESET), deadline).response();
+    }
+
     /**
      * StartTeamMatch（211，service.go:330-412；team-spec §5.1；跨进程后的流程见 match-spec §7.6）。整队开战：不补位、即时开战、不进队列。
      * 第 1–4 步算一轮；开战锁提交返回冲突 / 修复时<b>整轮重来</b>（重新读记录、重排名单、重新预检），最多 3 轮且不超出请求预算，
@@ -514,6 +537,16 @@ public final class TeamService {
             int code = TeamRules.checkMatchStart(rec, caller, snap.nowMs());
             if (code != TeamTips.OK) {
                 return matchReject(caller, code, 0, snap, deadline);
+            }
+            if (request.getMatchMode() == MatchMode.MATCH_MODE_PVP_TEAM) {
+                int reqVer = request.getRankedRuleVersion();
+                if (reqVer != 0 && reqVer != rankedRules.ruleVersion()) {
+                    return matchReject(caller, TeamTips.RANKED_PRESET_INVALID, 0, snap, deadline);
+                }
+                long unconfirmed = TeamRules.firstUnconfirmedRankedMember(rec, rankedRules.ruleVersion());
+                if (unconfirmed != 0L) {
+                    return matchReject(caller, TeamTips.RANKED_PRESET_UNCONFIRMED, unconfirmed, snap, deadline);
+                }
             }
             List<Long> roster = TeamRules.matchRoster(rec);
             TeamBattlePort.Check check = battle.checkTeamMatch(configId, roster, deadline);

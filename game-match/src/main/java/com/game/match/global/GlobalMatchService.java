@@ -478,6 +478,8 @@ public final class GlobalMatchService implements AutoCloseable {
             finally{running.remove(f.getBattleId());slots.release();}});}
         catch(RejectedExecutionException e){running.remove(f.getBattleId());slots.release();}
     }
+    private com.game.match.script.BattleScriptResolver scriptResolver;
+    public GlobalMatchService withBattleScriptResolver(com.game.match.script.BattleScriptResolver resolver){this.scriptResolver=resolver;return this;}
     private GatherResult execute(GlobalFormationRow initial) {
         var f=initial;
         try {
@@ -505,6 +507,9 @@ public final class GlobalMatchService implements AutoCloseable {
             // 观战可见性建房时决定一次，随 formation 持久的 create_request 冻结；之后观战各处只读这份原件，不按模式重算
             request.setSpectateVisibility(com.game.match.spectate.SpectateVisibilityPolicy.decide(MatchMode.forNumber(f.getMode()),
                     request.hasActivityContext()?request.getActivityContext():null));
+            if(scriptResolver!=null) {
+                request.addAllTeamScripts(scriptResolver.resolveForBattle(f.getBattleId(),f.getMode(),f.getConfigId(),snapshots));
+            }
             var preflight=query(f);
             f=store.saveIntent(f,NetworkProbes.bytes(request.build()),preflight);
             return create(f);

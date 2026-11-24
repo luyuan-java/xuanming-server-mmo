@@ -9,6 +9,7 @@ import com.game.contract.MessageMethod;
 import com.game.proto.Empty;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.team.ApplyJoinTeamRequest;
+import com.game.proto.team.ConfirmRankedPresetRequest;
 import com.game.proto.team.CreateTeamRequest;
 import com.game.proto.team.DisbandTeamRequest;
 import com.game.proto.team.GetMyTeamRequest;
@@ -130,6 +131,7 @@ public final class TeamDispatcher {
         addSession(byId, TeamMethods.TRANSFER_LEADER, TransferLeaderRequest.class, service::transferLeader);
         addSession(byId, TeamMethods.DISBAND_TEAM, DisbandTeamRequest.class, service::disbandTeam);
         addSession(byId, TeamMethods.START_TEAM_MATCH, StartTeamMatchRequest.class, service::startTeamMatch);
+        addSession(byId, TeamMethods.CONFIRM_RANKED_PRESET, ConfirmRankedPresetRequest.class, service::confirmRankedPreset);
         if (!byId.values().stream().map(Route::method).toList().containsAll(TeamMethods.REQUESTS)) {
             throw new IllegalStateException("组队 C2S 方法没有全部接管: " + TeamMethods.REQUESTS);
         }

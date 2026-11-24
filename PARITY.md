@@ -6,6 +6,12 @@
 |---|---|---|---|
 | 赛季技能免费当季生效 + 单槽「赛季印」（`SeasonRule` / `SeasonSeal` 表、`Skill.season_id = 58` + 4 个 S1 技能 `15001–15004`、`Buff` `150010–150040`、`season_error` 34000–34011、`PlayerSeasonComp` 落 `player_database.season_component = 30`、`ClientRequestKind::kCatchupSeasonSeal = 9`、`TX_SEASON_SEAL_CATCHUP = 35`、`EquipmentEffects.season_seal`/`season_max_health_bps`/`season_defense_bps`、`BattlePlayerSnapshot.active_season_id = 24`、`BattleActorState.season_seal_state = 44`、`BattleEventItem.season_seal_id = 24`、`SkillCatalogEntry.season_id = 24`、`SceneSeasonClientPlayer` 453–455） | 已在 `xuanming-server-mmo-cpp` 落地并同步 `mmorpg-client`：`season_rules.h`、`player_season.{h,cpp}`、`player_season_handler.cpp`、`player_handoff_gate.h`、`player_database_loader.cpp`、`player_attribute.cpp`（仅气血/防御轻加成且硬上限 ≤ 5%，不碰速度/暴击/控制）、`player_equipment_v1.cpp`、`player_skill.cpp`、`player_battle.cpp`（正规排位/PVE 结算原子累计进度点）、`turn_battle_engine.cpp`、`equipment_battle_effects.cpp`；验证：`test_cpp*` 42/42 OK、`bag_test` `SeasonRulesTest`+`PlayerSeasonSystemTest` 8/8 通过、`turn_battle_engine_test` `SeasonBattleTest`+`ModernSkillCatalogTest`+`EquipmentV1BattleTest` 64/64 通过、`skill_test` 98/98 通过、`cross_zone_test` `*HandoffGate*:*Freeze*` 32/32 通过、`mmorpg-client` `client_compile_check` 0 错误；设计及 Codex UI 联调契约见 `xuanming-server-mmo-cpp/docs/design/season-skills-and-seal-design.md` | 尚未跑 `ContractSync` 同步 `SeasonRule`/`SeasonSeal`/453–455，也尚未在 `game-scene` / `game-battle` 实现对应逻辑 | Java 待做 |
 
+## 2026-11-24 战报回放（379/380）、战斗剧本与审核（387–392）与论剑排位预设（448–452）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 战报回放（`ListBattleReports` 379 / `GetBattleReport` 380、单玩家 100 条上限与批 16 淘汰、引用计数 GC、重复上报摘要核验、先鉴权再读大正文）、战斗剧本与审核（`ListPendingBattleScripts` 387 / `ReviewBattleScript` 388、`ListBattleScripts`/`SubmitBattleScript`/`DeleteBattleScript`/`SetBattleScriptLoadout` 389–392、官方剧本只读目录 + 规则校验 + 开局剧本解析与排位跳过玩家剧本 + 180 天审核流水清理）、论剑排位首发 V1（`GetRankedProfile`/`SaveRankedPreset`/`UpdateRankedCosmetic`/`GetRankedBattleResult` 448–451、`RankedRule`/`RankedPreset` 配表、100/200/300 分差曲线、5 段位、4/8/12 场里程碑与饰品归属核验）及队伍排位预设确认（`ClientPlayerTeam.ConfirmRankedPreset` 452、名单增减确认态失效与 `PVP_TEAM` 开战门禁 4033/4034） | `go/match`（战报/战斗剧本/审核）+ `docs/design/ranked-play-v1-implementation.md` + `5c0a518a6` 契约/配表 | `game-api` 扩展 `MatchInternalService` 387/388 运维签名方法（`MatchControlContractTest` 10/10）；`game-match` 新增 `match_feature_tables.proto`（10 张权威表）、内置 `match/official_scripts.json`、`com.game.match.{feature,report,script,ranked}.*`，补齐全部 22 个 `MatchService` 处理器并将剧本解析接入 `GlobalMatchService`/`GatherPipeline`、战报落库接入 `GlobalMatchStore`（全量 2,065 项通过/377 外部夹具跳过）；`game-team` 扩展 `team_record.proto`、`TeamTips`（4031–4034）、`TeamRankedRules`、`TeamRules`（452 与名单变动失效）、`TeamViews`、`TeamDispatcher`（13 个 C2S）、`TeamService`（`ConfirmRankedPreset` 与 `PVP_TEAM` 4033/4034 门禁，全量 391 项通过/98 外部夹具跳过）；`game-robot` 门禁 35/35 通过（3 跳过）；设计见 `docs/design/match-reports-scripts-and-ranked-presets.md` | 已对齐 |
+
 ## 2026-11-24 挂机月卡（430–432）、断线保留离线托管、服务器驱动组队跟随、小游戏同端口 WebSocket 与启动时钟核对
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |
@@ -71,7 +77,7 @@
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |
 |---|---|---|---|
-| 排位预设与规则契约（`RankedPreset` / `RankedRule` 表、448–452 五个消息号、tip `16034–16036` / `4033–4034`） | `5c0a518a6` 已导表并生成协议（含 `MatchService` 448–451 与 `ClientPlayerTeam.ConfirmRankedPreset` 452） | `ContractSync` 全量同步且 `--check` 一致，33 模块 `clean install -DskipTests` 通过；gate 已按服务语义转发 448–452，game-match / game-team 业务处理器尚未实现 | Java 待做 |
+| 排位预设与规则契约（`RankedPreset` / `RankedRule` 表、448–452 五个消息号、tip `16034–16036` / `4033–4034`） | `5c0a518a6` 已导表并生成协议（含 `MatchService` 448–451 与 `ClientPlayerTeam.ConfirmRankedPreset` 452） | `ContractSync` 全量同步且 `--check` 一致；2026-11-24 已在 `game-match`（448–451）与 `game-team`（452 + `PVP_TEAM` 门禁）完整实现并通过验证 | 已对齐 |
 
 ## 2026-11-21 角色形象切换（10 元角色形象卡）与 1 小时免费试用（bit 存储）
 
@@ -85,8 +91,8 @@
 
 | 契约面 | C++ / Go 位置 | Java 现状 | 状态 |
 |---|---|---|---|
-| 战报列表 / 详情（379 / 380） | `go/match` 战报 | gate 转给 game-match，派发器无处理器回信封 1003；`MatchMethodsTest` 钉住 | Java 待做 |
-| 战斗剧本（389–392，含内部审核 387 / 388） | `go/match` 战斗剧本 | 同上 | Java 待做 |
+| 战报列表 / 详情（379 / 380） | `go/match` 战报 | `game-match` `BattleReportStore` / `BattleReportHandlers` 已实现（2026-11-24），`MatchMethodsTest` 全部 22 方法无 deferred | 已对齐 |
+| 战斗剧本（389–392，含内部审核 387 / 388） | `go/match` 战斗剧本 | `game-match` `BattleScript*` 与 `MatchInternalService` 387/388 已实现（2026-11-24），含官方目录、规则校验、180 天审核流水清理与开局下发 | 已对齐 |
 | `ClientPlayerPayment`（396–399） | `go/payment` | `game-payment` 独立进程与 `game-gate` 路由已完整接入（2026-11-23），`MessageRoutesTest` `notPorted` 已清零 | 已对齐 |
 | 收件箱 GM 物品获取封锁 / 解封（类型 5 / 6） | `GainBlockService`、`player_item_gain_block_comp` | 注册表有载荷校验（`item_config_id ≠ 0`），列入 `V1_DISABLED`，配置进白名单即拒启 | Java 待做 |
 | 帮会 `score_version`（库表列已随 DDL 生成） | `go/guild/internal/data/guild_repo.go` 写分同事务 +1、按版本重建榜 | `GuildRow` 已加列 12，未按版本写分 / 重建榜 | Java 待做 |

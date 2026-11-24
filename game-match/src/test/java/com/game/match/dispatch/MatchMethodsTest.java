@@ -37,6 +37,16 @@ class MatchMethodsTest {
                 MatchMethods.REQUEST_BATTLE_TICKET, 179));
         expected.put(MatchMethods.GET_NETWORK_PROBE_PLAN,REGISTRY.requireId(MatchMethods.SERVICE,MatchMethods.GET_NETWORK_PROBE_PLAN));
         expected.put(MatchMethods.COMMIT_NETWORK_PROBE,REGISTRY.requireId(MatchMethods.SERVICE,MatchMethods.COMMIT_NETWORK_PROBE));
+        expected.put(MatchMethods.LIST_BATTLE_REPORTS, 379);
+        expected.put(MatchMethods.GET_BATTLE_REPORT, 380);
+        expected.put(MatchMethods.LIST_BATTLE_SCRIPTS, 389);
+        expected.put(MatchMethods.SUBMIT_BATTLE_SCRIPT, 390);
+        expected.put(MatchMethods.DELETE_BATTLE_SCRIPT, 391);
+        expected.put(MatchMethods.SET_BATTLE_SCRIPT_LOADOUT, 392);
+        expected.put(MatchMethods.GET_RANKED_PROFILE, 448);
+        expected.put(MatchMethods.SAVE_RANKED_PRESET, 449);
+        expected.put(MatchMethods.UPDATE_RANKED_COSMETIC, 450);
+        expected.put(MatchMethods.GET_RANKED_BATTLE_RESULT, 451);
 
         assertThat(MatchMethods.ALL).containsExactlyInAnyOrderElementsOf(expected.keySet());
         expected.forEach((method, id) ->
@@ -52,14 +62,7 @@ class MatchMethodsTest {
                 assertThat(method.clientService()).as(method.key() + " 标了客户端服务").isTrue();
             }
         }
-        // 战报 379/380、战斗剧本 389–392 与排位预设/资料 448–451 已随契约同步、Java 尚未实现（PARITY Java 待做）：gate 照转，派发器无处理器回信封 1003。
-        Set<String> deferred = Set.of("ListBattleReports", "GetBattleReport",
-                "ListBattleScripts", "SubmitBattleScript", "DeleteBattleScript", "SetBattleScriptLoadout",
-                "GetRankedProfile", "SaveRankedPreset", "UpdateRankedCosmetic", "GetRankedBattleResult");
-        Set<String> expected = new TreeSet<>(MatchMethods.ALL);
-        expected.addAll(deferred);
-        assertThat(inContract).containsExactlyInAnyOrderElementsOf(expected);
-        assertThat(MatchMethods.ALL).doesNotContainAnyElementsOf(deferred);
+        assertThat(inContract).containsExactlyInAnyOrderElementsOf(MatchMethods.ALL);
     }
 
     @Test

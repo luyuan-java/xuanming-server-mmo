@@ -34,11 +34,27 @@ public final class MatchMethods {
     public static final String REQUEST_BATTLE_TICKET = "RequestBattleTicket";
     public static final String GET_NETWORK_PROBE_PLAN = "GetNetworkProbePlan";
     public static final String COMMIT_NETWORK_PROBE = "CommitNetworkProbe";
+    /** 379/380：战报列表与回放正文查询。 */
+    public static final String LIST_BATTLE_REPORTS = "ListBattleReports";
+    public static final String GET_BATTLE_REPORT = "GetBattleReport";
+    /** 389–392：战斗剧本列表、提交、删除、选用。 */
+    public static final String LIST_BATTLE_SCRIPTS = "ListBattleScripts";
+    public static final String SUBMIT_BATTLE_SCRIPT = "SubmitBattleScript";
+    public static final String DELETE_BATTLE_SCRIPT = "DeleteBattleScript";
+    public static final String SET_BATTLE_SCRIPT_LOADOUT = "SetBattleScriptLoadout";
+    /** 448–451：论剑排位资料、默认预设、饰品佩戴与战果查询。 */
+    public static final String GET_RANKED_PROFILE = "GetRankedProfile";
+    public static final String SAVE_RANKED_PRESET = "SaveRankedPreset";
+    public static final String UPDATE_RANKED_COSMETIC = "UpdateRankedCosmetic";
+    public static final String GET_RANKED_BATTLE_RESULT = "GetRankedBattleResult";
 
-    /** 全部 10 个方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
+    /** 全部 22 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
     public static final List<String> ALL = List.of(JOIN_QUEUE, CANCEL_QUEUE, GET_QUEUE_STATUS, CHALLENGE_PLAYER, RESPOND_CHALLENGE,
             NOTIFY_CHALLENGE_INVITE, NOTIFY_CHALLENGE_RESULT, WATCH_BATTLE, LIST_WATCHABLE_BATTLES, REQUEST_BATTLE_TICKET,
-            GET_NETWORK_PROBE_PLAN, COMMIT_NETWORK_PROBE);
+            GET_NETWORK_PROBE_PLAN, COMMIT_NETWORK_PROBE,
+            LIST_BATTLE_REPORTS, GET_BATTLE_REPORT,
+            LIST_BATTLE_SCRIPTS, SUBMIT_BATTLE_SCRIPT, DELETE_BATTLE_SCRIPT, SET_BATTLE_SCRIPT_LOADOUT,
+            GET_RANKED_PROFILE, SAVE_RANKED_PRESET, UPDATE_RANKED_COSMETIC, GET_RANKED_BATTLE_RESULT);
 
     private MatchMethods() {
     }

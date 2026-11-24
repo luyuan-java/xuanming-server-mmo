@@ -72,6 +72,14 @@ public final class TeamTips {
     public static final int STATE_CHANGED = TeamErrorTip.team_error.kTeamStateChanged_VALUE;
     /** Redis、home zone、发号等依赖故障（team 段唯一的 fault）。 */
     public static final int INTERNAL = TeamErrorTip.team_error.kTeamInternal_VALUE;
+    /** 队伍 PVP 排位人数档位不被允许。 */
+    public static final int PVP_PARTY_SIZE_NOT_ALLOWED = TeamErrorTip.team_error.kTeamPvpPartySizeNotAllowed_VALUE;
+    /** 队伍成员排位段位/分差过大。 */
+    public static final int RATING_GAP_TOO_LARGE = TeamErrorTip.team_error.kTeamRatingGapTooLarge_VALUE;
+    /** 有队员尚未按当前名单与当前规则版本确认排位预设（parameters[0] = player_id）。 */
+    public static final int RANKED_PRESET_UNCONFIRMED = TeamErrorTip.team_error.kTeamRankedPresetUnconfirmed_VALUE;
+    /** 排位预设组合或规则版本非法。 */
+    public static final int RANKED_PRESET_INVALID = TeamErrorTip.team_error.kTeamRankedPresetInvalid_VALUE;
 
     /** team 段内的故障码集合（基线 faults.go:56 只有 TeamInternal）。 */
     public static final Set<Integer> FAULTS = Set.of(INTERNAL);

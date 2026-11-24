@@ -23,5 +23,7 @@ public enum OpKind {
     /** TransferLeader：队长转让。 */
     TRANSFER_LEADER,
     /** DisbandTeam：队长解散。 */
-    DISBAND
+    DISBAND,
+    /** ConfirmRankedPreset：队员确认排位预设。 */
+    CONFIRM_RANKED_PRESET
 }

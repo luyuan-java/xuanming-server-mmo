@@ -54,6 +54,10 @@ class TeamTipsTest {
         codes.put("SIZE_EXCEEDED", TeamTips.SIZE_EXCEEDED);
         codes.put("STATE_CHANGED", TeamTips.STATE_CHANGED);
         codes.put("INTERNAL", TeamTips.INTERNAL);
+        codes.put("PVP_PARTY_SIZE_NOT_ALLOWED", TeamTips.PVP_PARTY_SIZE_NOT_ALLOWED);
+        codes.put("RATING_GAP_TOO_LARGE", TeamTips.RATING_GAP_TOO_LARGE);
+        codes.put("RANKED_PRESET_UNCONFIRMED", TeamTips.RANKED_PRESET_UNCONFIRMED);
+        codes.put("RANKED_PRESET_INVALID", TeamTips.RANKED_PRESET_INVALID);
         return codes;
     }
 

@@ -33,6 +33,10 @@ public interface MatchInternalService {
 
     String OUTCOME_METHOD = "/match.MatchInternal/CommitBattleOutcome";
     String OUTCOME_SECRET_ENV = "MMORPG_MATCH_OUTCOME_SECRET_BATTLE";
+    String LIST_PENDING_SCRIPTS_METHOD = "/match.MatchInternal/ListPendingBattleScripts";
+    String REVIEW_SCRIPT_METHOD = "/match.MatchInternal/ReviewBattleScript";
+    String OPS_SECRET_ENV = "MMORPG_MATCH_OPS_SECRET";
+    String OPS_CALLER = "ops";
 
     /** Battle固定原operation/instance提交冻结的完整终局；未知提交只能重放原字节。 */
     default CompletableFuture<com.game.proto.match.CommitBattleOutcomeResponse> commitBattleOutcome(
@@ -45,5 +49,19 @@ public interface MatchInternalService {
     /** 取消绑定完整原Start；零battle墓碑或签名的持久ABORT可确认安全取消，COMPLETE恢复原结果投递，UNKNOWN继续等待。 */
     default CompletableFuture<CancelActivityBattleResponse> cancelActivityBattle(CancelActivityBattleRequest request) {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("活动取消尚未装配，原请求仍须恢复"));
+    }
+
+    /** 运营拉取待审玩家战斗剧本列表（387，调用方 ops，带内拒绝）。 */
+    default CompletableFuture<com.game.proto.match.ListPendingBattleScriptsResponse> listPendingBattleScripts(
+            com.game.proto.match.ListPendingBattleScriptsRequest request) {
+        return CompletableFuture.completedFuture(com.game.proto.match.ListPendingBattleScriptsResponse.newBuilder()
+                .setReject(com.game.proto.match.BattleScriptReviewReject.BATTLE_SCRIPT_REVIEW_REJECT_DENIED).build());
+    }
+
+    /** 运营审核一版待审玩家战斗剧本（388，调用方 ops，按 revision CAS，带内拒绝）。 */
+    default CompletableFuture<com.game.proto.match.ReviewBattleScriptResponse> reviewBattleScript(
+            com.game.proto.match.ReviewBattleScriptRequest request) {
+        return CompletableFuture.completedFuture(com.game.proto.match.ReviewBattleScriptResponse.newBuilder()
+                .setReject(com.game.proto.match.BattleScriptReviewReject.BATTLE_SCRIPT_REVIEW_REJECT_DENIED).build());
     }
 }

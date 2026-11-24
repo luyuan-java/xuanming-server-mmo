@@ -241,6 +241,8 @@ class TeamServiceIntegrationTest {
         bodies.put(TeamMethods.DISBAND_TEAM, DisbandTeamRequest.newBuilder().setExpectedTeamId(tid).build());
         bodies.put(TeamMethods.START_TEAM_MATCH, StartTeamMatchRequest.newBuilder().setBattleConfigId(1)
                 .setExpectedTeamId(tid).build());
+        bodies.put(TeamMethods.CONFIRM_RANKED_PRESET, com.game.proto.team.ConfirmRankedPresetRequest.newBuilder()
+                .setExpectedTeamId(tid).setCharacterPresetId(101).setPetPresetId(201).setRuleVersion(1).build());
         assertThat(bodies.keySet()).containsExactlyElementsOf(TeamMethods.REQUESTS);
 
         Map<String, SessionContext> sessions = new LinkedHashMap<>();

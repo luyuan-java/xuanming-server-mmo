@@ -22,8 +22,10 @@ import com.game.team.presence.TeamDisplay;
 import com.game.team.presence.TeamSessions;
 import com.game.team.push.TeamPushes;
 import com.game.team.rules.RuleConfig;
+import com.game.team.rules.TeamRankedRules;
 import com.game.team.service.TeamMethods;
 import com.game.team.service.TeamService;
+import com.game.table.ConfigTables;
 import com.game.team.store.RedissonTeamRedis;
 import com.game.team.store.TeamStore;
 import com.game.team.store.TeamTables;
@@ -36,6 +38,7 @@ import javax.sql.DataSource;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -241,6 +244,12 @@ public class TeamConfiguration {
         return new TeamShutdown();
     }
 
+    @Bean
+    public TeamRankedRules teamRankedRules(ObjectProvider<ConfigTables> tables) {
+        ConfigTables config = tables.getIfAvailable();
+        return config != null ? TeamRankedRules.from(config) : TeamRankedRules.defaults();
+    }
+
     /**
      * @param battle   整队开战的票据域端口（生产为 {@link TeamDubboConfiguration} 里的 {@code MatchTeamBattle}：调 game-match）
      * @param shutdown 停机标志：置位后异常完成的 gather 不再清锁、不推送
@@ -249,10 +258,11 @@ public class TeamConfiguration {
     public TeamService teamService(TeamStore store, TeamSessions sessions, TeamDisplay display, PlayerProfiles profiles,
                                    TeamIds teamIds, TeamBattlePort battle,
                                    @Qualifier("teamMatchEndPool") TeamWorkerPool teamMatchEndPool, TeamPushes pushes,
-                                   TeamMetrics metrics, TeamProperties props, TeamShutdown shutdown,DataSource source) {
+                                   TeamMetrics metrics, TeamProperties props, TeamShutdown shutdown, DataSource source,
+                                   TeamRankedRules rankedRules) {
         PlayerHomeZones homeZones = new PlayerHomeZones(source, props.homeZoneTimeout());
         return new TeamService(store, sessions, display, homeZones, teamIds::nextId, battle, teamMatchEndPool, pushes, metrics,
-                new RuleConfig(props.allowCrossZone()), shutdown::stopping);
+                new RuleConfig(props.allowCrossZone()), shutdown::stopping, rankedRules);
     }
 
     @Bean
