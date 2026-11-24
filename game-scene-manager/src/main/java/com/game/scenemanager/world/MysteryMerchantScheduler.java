@@ -187,10 +187,10 @@ public final class MysteryMerchantScheduler {
                 List.copyOf(goods), Collections.unmodifiableMap(spots));
     }
 
-    /** 领导者在每次目录发布成功后推进一拍神秘商人调度。 */
-    public void tick(int zoneId, Map<Integer, SceneChannelDirectory> directories, long nowMs) {
+    /** 领导者在每次目录发布成功后推进一拍神秘商人调度，并返回当前活跃商人所在地图配置号（无则返回 0）。 */
+    public int tick(int zoneId, Map<Integer, SceneChannelDirectory> directories, long nowMs) {
         if (tables == null || directories == null || directories.isEmpty()) {
-            return;
+            return 0;
         }
         Rule rule = tables.rule();
         long nowSec = Math.max(0L, nowMs / 1000L);
@@ -199,7 +199,7 @@ public final class MysteryMerchantScheduler {
         long expireAtMs = (roundId + rule.staySeconds()) * 1000L;
         if (nowMs >= expireAtMs) {
             missingTicksByZone.remove(zoneId);
-            return;
+            return 0;
         }
         MysteryMerchantState current = null;
         boolean forceOverwrite = false;
@@ -219,7 +219,9 @@ public final class MysteryMerchantScheduler {
         long ttlSec = Math.max(MAX_INTERVAL_SEC, rule.intervalSeconds() * 2L);
         if (current != null && !forceOverwrite) {
             if (Long.compareUnsigned(current.getRoundId(), roundId) > 0) {
-                return;
+                return Long.compareUnsigned(nowMs, current.getAppearAtMs()) >= 0
+                        && Long.compareUnsigned(nowMs, current.getExpireAtMs()) < 0
+                        ? current.getSceneConfigId() : 0;
             }
             if (current.getRoundId() == roundId) {
                 SceneChannelState chState = findChannelState(directories, current.getSceneConfigId(), current.getSceneId());
@@ -227,21 +229,21 @@ public final class MysteryMerchantScheduler {
                         || chState == SceneChannelState.SCENE_CHANNEL_STATE_BUSY
                         || chState == SceneChannelState.SCENE_CHANNEL_STATE_FULL) {
                     missingTicksByZone.remove(zoneId);
-                    return;
+                    return current.getSceneConfigId();
                 }
                 boolean immediate = chState == SceneChannelState.SCENE_CHANNEL_STATE_CLOSING;
                 if (!immediate) {
                     int missing = missingTicksByZone.merge(zoneId, 1, Integer::sum);
                     if (missing < MISSING_TICKS_BEFORE_RELOCATE) {
-                        return;
+                        return current.getSceneConfigId();
                     }
                 }
                 if (current.getRevision() >= MAX_REVISION) {
-                    return;
+                    return current.getSceneConfigId();
                 }
                 ChannelCandidate picked = pickChannel(directories, current.getSceneId());
                 if (picked == null) {
-                    return;
+                    return current.getSceneConfigId();
                 }
                 Spot spot = pickSpot(picked.configId());
                 int nextRev = current.getRevision() + 1;
@@ -259,13 +261,14 @@ public final class MysteryMerchantScheduler {
                     log.info("mystery_merchant_relocated zone={} round={} rev={} scene_id={} channel={}",
                             zoneId, Long.toUnsignedString(roundId), nextRev,
                             Long.toUnsignedString(picked.sceneId()), picked.channelNo());
+                    return picked.configId();
                 }
-                return;
+                return current.getSceneConfigId();
             }
         }
         ChannelCandidate picked = pickChannel(directories, 0L);
         if (picked == null) {
-            return;
+            return 0;
         }
         Spot spot = pickSpot(picked.configId());
         List<MysteryMerchantShelfEntry> shelf = rollShelf(rule);
@@ -289,7 +292,9 @@ public final class MysteryMerchantScheduler {
             log.info("mystery_merchant_spawned zone={} round={} scene_id={} channel={} shelf_size={}",
                     zoneId, Long.toUnsignedString(roundId), Long.toUnsignedString(picked.sceneId()),
                     picked.channelNo(), shelf.size());
+            return picked.configId();
         }
+        return 0;
     }
 
     public static long versionOf(long roundId, int revision) {

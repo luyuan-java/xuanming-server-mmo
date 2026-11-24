@@ -53,8 +53,11 @@ public class WorldChannelConfiguration {
                                                              WorldSceneConfigs worldConfigs, WorldChannelProperties props,
                                                              WorldChannelMetrics metrics, SceneIdAllocator sceneIdAllocator,
                                                              WorldChannelDirectoryStore directories, ChannelSwitchProperties switchProps,
-                                                             com.game.table.ConfigTables configTables, RedissonClient redis, RedisKeys redisKeys) {
-        MysteryMerchantScheduler.Tables merchantTables = MysteryMerchantScheduler.loadTables(configTables, worldConfigs.worldConfigIds());
+                                                             org.springframework.beans.factory.ObjectProvider<com.game.table.ConfigTables> configTablesProvider,
+                                                             RedissonClient redis, RedisKeys redisKeys) {
+        com.game.table.ConfigTables configTables = configTablesProvider.getIfAvailable();
+        MysteryMerchantScheduler.Tables merchantTables = configTables == null ? null
+                : MysteryMerchantScheduler.loadTables(configTables, worldConfigs.worldConfigIds());
         MysteryMerchantScheduler merchant = merchantTables == null ? null
                 : new MysteryMerchantScheduler(merchantTables, MysteryMerchantScheduler.redisStore(redis, redisKeys));
         return WorldChannelControlPlane.start(store, sceneNodeSource, worldConfigs, props, metrics, sceneIdAllocator,

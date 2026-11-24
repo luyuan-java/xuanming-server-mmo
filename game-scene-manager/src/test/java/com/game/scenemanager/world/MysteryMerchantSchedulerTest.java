@@ -60,8 +60,14 @@ class MysteryMerchantSchedulerTest {
         Map<Integer, SceneChannelDirectory> dir1 = Map.of(mapId, dir(mapId,
                 entry(101L, 1, SceneChannelState.SCENE_CHANNEL_STATE_SMOOTH),
                 entry(102L, 2, SceneChannelState.SCENE_CHANNEL_STATE_SMOOTH)));
-        scheduler.tick(1, dir1, round1Ms);
+        int activeMap = scheduler.tick(1, dir1, round1Ms);
+        assertThat(activeMap).isEqualTo(mapId);
         assertThat(store.writes).isEqualTo(1);
+        var overview = WorldMapOverviewBuilder.build(1,
+                new WorldChannelProperties.WorldMapPlay(java.util.List.of(mapId), java.util.List.of(mapId),
+                        java.time.Duration.ofHours(1), java.time.Duration.ofMinutes(40), 100),
+                dir1, round1Ms, activeMap);
+        assertThat(overview.getMaps(0).getHasMysteryMerchant()).isTrue();
         MysteryMerchantState first = MysteryMerchantState.parseFrom(store.readState(1));
         assertThat(first.getRevision()).isEqualTo(1);
         assertThat(first.getSceneId()).isEqualTo(101L);

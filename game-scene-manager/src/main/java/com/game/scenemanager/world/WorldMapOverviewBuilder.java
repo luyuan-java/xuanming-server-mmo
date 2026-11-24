@@ -71,6 +71,12 @@ public final class WorldMapOverviewBuilder {
 
     public static WorldMapOverview build(int zoneId, WorldChannelProperties.WorldMapPlay play,
                                          Map<Integer, SceneChannelDirectory> directoriesByConfig, long nowMs) {
+        return build(zoneId, play, directoriesByConfig, nowMs, 0);
+    }
+
+    public static WorldMapOverview build(int zoneId, WorldChannelProperties.WorldMapPlay play,
+                                         Map<Integer, SceneChannelDirectory> directoriesByConfig, long nowMs,
+                                         int mysteryMerchantSceneConfigId) {
         long nowSeconds = Math.floorDiv(nowMs, 1000L);
         List<Integer> tideCandidates = play.tideCandidateMapIds();
         WorldTideSnapshot.Builder tide = worldTideAt(nowSeconds, tideCandidates,
@@ -126,6 +132,7 @@ public final class WorldMapOverviewBuilder {
                     .setRecommendedSceneId(recSceneId)
                     .setRecommendedChannelNo(recChannelNo)
                     .setIsTideMap(isTideMap)
+                    .setHasMysteryMerchant(mysteryMerchantSceneConfigId != 0 && mysteryMerchantSceneConfigId == configId)
                     .build());
         }
         entries.sort(Comparator.comparing(WorldMapOverviewEntry::getSceneConfigId, Integer::compareUnsigned));

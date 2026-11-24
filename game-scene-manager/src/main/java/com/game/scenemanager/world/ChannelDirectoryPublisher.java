@@ -78,13 +78,11 @@ public final class ChannelDirectoryPublisher {
                     byConfig.put(config, model);
                 }
                 if (!fenced) {
-                    var overview = WorldMapOverviewBuilder.build(zone, world.mapPlay(), byConfig, nowMs);
+                    int merchantMapId = mysteryMerchant != null ? mysteryMerchant.tick(zone, byConfig, nowMs) : 0;
+                    var overview = WorldMapOverviewBuilder.build(zone, world.mapPlay(), byConfig, nowMs, merchantMapId);
                     if (overview.getMapsCount() > 0
                             && !directories.publishOverview(zone, token, plan.version(), overview.toByteArray(), ttl)) {
                         fenced = true;
-                    }
-                    if (!fenced && mysteryMerchant != null) {
-                        mysteryMerchant.tick(zone, byConfig, nowMs);
                     }
                 }
                 metrics.directoryPublish(fenced ? DirectoryPublishResult.FENCED
