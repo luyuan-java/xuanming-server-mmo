@@ -73,7 +73,9 @@ public interface AssetAudit {
         /** 装备打造与固定词条安装。 */
         EQUIP_CRAFT,
         /** 单槽赛季印追赶扣款。 */
-        SEASON_SEAL_CATCHUP
+        SEASON_SEAL_CATCHUP,
+        /** 渠道撤单/拒付后的官方商城发放扣回（TX_PAYMENT_REVERSAL = 31）。 */
+        PAYMENT_REVERSAL
     }
 
     /**

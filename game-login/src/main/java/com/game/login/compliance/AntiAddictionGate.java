@@ -104,6 +104,19 @@ public final class AntiAddictionGate {
         ledger.begin(connId, si, verdict.reportPi(), verdict.playDeadlineMs());
     }
 
+    /** 顺延防沉迷会话账本租约；返回未成年人可玩截止时间戳（毫秒，0 = 成年人或未登记）。 */
+    public long renewWatchedSession(String connId) {
+        if (ledger == null || connId == null || connId.isEmpty()) {
+            return 0L;
+        }
+        return ledger.renew(connId);
+    }
+
+    /** 判断未成年人是否已超过可玩截止时刻（用于 gate 未按时断开时的 login 兜底踢线）。 */
+    public boolean isPastPlayDeadline(long playDeadlineMs) {
+        return playDeadlineMs > 0L && clock.millis() >= playDeadlineMs;
+    }
+
     public void endWatchedSessionQuietly(String connId) {
         if (ledger == null) {
             return;

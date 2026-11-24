@@ -29,6 +29,9 @@ import org.springframework.transaction.PlatformTransactionManager;
 @Configuration(proxyBeanMethods = false)
 public class GmAdminConfiguration {
 
+    /** 与 game-mail {@code MailConfiguration.signatures()} 角色 {@code admin} 统一的标准环境变量名。 */
+    public static final String CANONICAL_MAIL_ADMIN_SECRET_ENV = "MAIL_PRODUCER_SECRET_ADMIN";
+    /** 兼容历史部署的旧变量名；当 {@link #CANONICAL_MAIL_ADMIN_SECRET_ENV} 未设置时回退读取。 */
     public static final String MAIL_ADMIN_SECRET_ENV = "MMORPG_MAIL_ADMIN_SECRET";
     public static final String PLAYER_COMMAND_SECRET_ENV = "MMORPG_GM_PLAYER_COMMAND_SECRET";
 
@@ -108,7 +111,8 @@ public class GmAdminConfiguration {
         DataSource ds = dataSource.getIfAvailable();
         PlayerProfiles profiles = ds == null ? null : new PlayerProfiles(maxWait -> ds.getConnection(), 3);
         PlayerHomeZones homeZones = ds == null ? null : new PlayerHomeZones(ds, Duration.ofMillis(1500));
-        String mailSecret = Boolean.TRUE.equals(properties.mailEnabled()) ? env(MAIL_ADMIN_SECRET_ENV) : "";
+        String mailSecret = Boolean.TRUE.equals(properties.mailEnabled())
+                ? resolveMailAdminSecret(System::getenv) : "";
         String matchOpsSecret = Boolean.TRUE.equals(properties.matchOpsEnabled()) ? env(MatchInternalService.OPS_SECRET_ENV) : "";
         String playerCmdSecret = Boolean.TRUE.equals(properties.playerCommandsEnabled()) ? env(PLAYER_COMMAND_SECRET_ENV) : "";
         return new DubboGmGamePort(
@@ -135,6 +139,15 @@ public class GmAdminConfiguration {
         } catch (IOException e) {
             throw new IllegalStateException("初始化 GM 账本表失败", e);
         }
+    }
+
+    static String resolveMailAdminSecret(java.util.function.Function<String, String> lookup) {
+        String canonical = lookup.apply(CANONICAL_MAIL_ADMIN_SECRET_ENV);
+        if (canonical != null && !canonical.isBlank()) {
+            return canonical.strip();
+        }
+        String legacy = lookup.apply(MAIL_ADMIN_SECRET_ENV);
+        return legacy == null ? "" : legacy.strip();
     }
 
     private static String env(String name) {

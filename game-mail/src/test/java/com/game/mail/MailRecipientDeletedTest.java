@@ -44,4 +44,22 @@ class MailRecipientDeletedTest {
         assertThat(MailProvider.error(new MailStore.Reject(MailStore.RECIPIENT_DELETED)))
                 .isEqualTo(MailErrorTip.mail_error.kMailRecipientDeleted_VALUE);
     }
+
+    @Test
+    void 权威角色查询区分在库角色已删角色与SQL故障() throws Exception {
+        AuthorityJdbc liveJdbc = mock(AuthorityJdbc.class);
+        when(liveJdbc.read(any(), any())).thenReturn(1);
+        assertThat(MailConfiguration.playerMissingOrDeleted(liveJdbc).test(1001L)).isFalse();
+
+        AuthorityJdbc deletedJdbc = mock(AuthorityJdbc.class);
+        when(deletedJdbc.read(any(), any())).thenReturn(null);
+        assertThat(MailConfiguration.playerMissingOrDeleted(deletedJdbc).test(1002L)).isTrue();
+
+        AuthorityJdbc brokenJdbc = mock(AuthorityJdbc.class);
+        when(brokenJdbc.read(any(), any())).thenThrow(new java.sql.SQLException("db down"));
+        assertThatThrownBy(() -> MailConfiguration.playerMissingOrDeleted(brokenJdbc).test(1003L))
+                .isInstanceOf(Deadline.DependencyException.class);
+        assertThat(MailProvider.error(new Deadline.DependencyException("db down", null)))
+                .isEqualTo(com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+    }
 }

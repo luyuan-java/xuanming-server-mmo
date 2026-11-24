@@ -36,4 +36,12 @@ public final class DeliveryApi {
     public record Sku(long skuId, String title, long priceMinor, String currency, long available) {}
 
     public record Skus(List<Sku> skus) {}
+
+    /** 扣回待办（/internal/reversals/poll，delivery 角色）：渠道撤销或恢复付款后，由 trade 把发放收敛到最新修订号。 */
+    public record ReversalEntry(Intent intent, int revision, boolean entitled, String cursor) {}
+
+    public record ReversalPage(List<ReversalEntry> entries) {}
+
+    /** 扣回回执（/internal/reversals/receipt，delivery 角色）：state 取 REVERSED / DELIVERED / MANUAL。 */
+    public record ReversalReceipt(String orderId, int revision, String tradeOrderId, String state, String proof) {}
 }

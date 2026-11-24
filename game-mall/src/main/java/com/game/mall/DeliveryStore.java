@@ -20,6 +20,7 @@ public final class DeliveryStore {
     private final TransactionTemplate tx;
     private final PaymentPolicy paymentPolicy;
     private final RmbConsignmentStore consignments;
+    private final Clock clock;
 
     public DeliveryStore(JdbcTemplate jdbc, PlatformTransactionManager manager) {
         this(jdbc, manager, null, RunMode.PROD);
@@ -49,6 +50,7 @@ public final class DeliveryStore {
                   RmbConsignmentStore consignments) {
         this.jdbc = jdbc;
         this.consignments = consignments;
+        this.clock = Clock.systemUTC();
         this.paymentPolicy = new PaymentPolicy(jdbc, properties, runMode);
         this.tx = new TransactionTemplate(manager);
         this.tx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
@@ -135,7 +137,7 @@ public final class DeliveryStore {
         if (in == null || in.orderId() == null || !in.orderId().matches("[0-9a-f-]{36}") || in.tradeOrderId() == null
                 || !in.tradeOrderId().matches("[1-9][0-9]{0,19}") || in.proof() == null
                 || !in.proof().matches("[0-9a-f]{64}")
-                || !Set.of("DELIVERED", "REFUND_PENDING", "MANUAL").contains(in.state())) {
+                || !Set.of("DELIVERED", "REFUND_PENDING", "MANUAL", "VOIDED").contains(in.state())) {
             throw new MallException(400, "交付持久回执非法");
         }
         tx.executeWithoutResult(status -> {
@@ -147,8 +149,7 @@ public final class DeliveryStore {
             var existing = jdbc.queryForList("SELECT trade_order_id,state,proof FROM commerce_delivery_receipt WHERE order_sn=?", in.orderId());
             if (!existing.isEmpty()) {
                 var old = existing.getFirst();
-                if (!in.tradeOrderId().equals(old.get("trade_order_id")) || !in.state().equals(old.get("state"))
-                        || !in.proof().equals(old.get("proof"))) {
+                if (!in.tradeOrderId().equals(old.get("trade_order_id")) || !in.state().equals(old.get("state"))) {
                     throw new MallException(409, "同一交付意图的终局发生冲突");
                 }
                 return;
@@ -161,7 +162,7 @@ public final class DeliveryStore {
             }
             boolean reversalOwned = !jdbc.queryForList(
                     "SELECT revision FROM commerce_reversal_intent WHERE order_sn=? FOR UPDATE", in.orderId()).isEmpty();
-            if (!reversalOwned && ((Number) orders.getFirst().get("status")).intValue() != 1) {
+            if (!reversalOwned && (((Number) orders.getFirst().get("status")).intValue() != 1 || "VOIDED".equals(in.state()))) {
                 throw new MallException(409, "交付订单不在已支付待交付状态");
             }
             if (((Number) orders.getFirst().get("sku_id")).longValue() == 0) {
@@ -354,6 +355,128 @@ public final class DeliveryStore {
             boolean ordersOwnPayment = MallApi.RefundReason.stored((String) intents.getFirst().get("source")).refundsOrdersOwnPayment();
             if (ordersOwnPayment && jdbc.update("UPDATE oms_order SET status=7 WHERE order_sn=? AND status=5", in.orderId()) != 1) {
                 throw new MallException(503, "订单本身的退款待办与订单状态不一致");
+            }
+        });
+    }
+
+    /**
+     * 扣回待办（/internal/reversals/poll，delivery 角色）：渠道撤销或撤销又被撤回绑定付款后，
+     * 通知 trade 将该订单的发放收敛到最新修订号（偶数 = 应持有，奇数 = 应扣回）。
+     */
+    public DeliveryApi.ReversalPage reversals(DeliveryApi.Poll input) {
+        if (input == null || input.limit() < 1 || input.limit() > 100) {
+            throw new MallException(400, "扣回批量非法");
+        }
+        PendingScanCursor cursor = PendingScanCursor.parse(input.cursor());
+        if (cursor == null) {
+            var upper = jdbc.query("SELECT updated_ms,order_sn FROM commerce_reversal_intent WHERE status='PENDING' "
+                            + "ORDER BY updated_ms DESC,order_sn DESC LIMIT 1",
+                    (r, n) -> new PendingScanCursor(0, "", r.getLong(1), r.getString(2)));
+            if (upper.isEmpty()) {
+                return new DeliveryApi.ReversalPage(List.of());
+            }
+            cursor = upper.getFirst();
+            if (cursor.upperMs() < 0 || !cursor.upperId().matches(PaymentPolicy.ORDER)) {
+                throw new MallException(503, "扣回意图排序键损坏");
+            }
+        }
+        record ReversalRow(DeliveryApi.Intent intent, long updatedMs, int revision) {}
+        var rows = jdbc.query("SELECT "
+                        + "d.order_sn,d.buyer_id,d.sku_id,d.quantity,g.item_config_id,g.count_per_unit,g.title,o.pay_"
+                        + "amount,o.currency,v.updated_ms,p.buyer_account,p.buyer_owner_revision,o.buyer_id,o.sku_id,o.quantity,v.revision "
+                        + "FROM commerce_reversal_intent v JOIN commerce_delivery_intent d ON d.order_sn=v.order_sn "
+                        + "JOIN commerce_order_grant g ON g.order_sn=d.order_sn JOIN oms_order o ON o.order_sn=d.order_sn "
+                        + "LEFT JOIN commerce_official_owner p ON p.order_sn=d.order_sn "
+                        + "WHERE v.status='PENDING' AND d.sku_id<>0 "
+                        + "AND (v.updated_ms>? OR (v.updated_ms=? AND v.order_sn>?)) "
+                        + "AND (v.updated_ms<? OR (v.updated_ms=? AND v.order_sn<=?)) "
+                        + "ORDER BY v.updated_ms,v.order_sn LIMIT ?",
+                (r, n) -> {
+                    long count = Math.multiplyExact(r.getInt(4), (long) r.getInt(6));
+                    if (count < 1 || count > 4096) {
+                        throw new MallException(503, "已冻结的SKU游戏数量越界");
+                    }
+                    if (r.getLong(10) < 0 || !r.getString(1).matches(PaymentPolicy.ORDER)) {
+                        throw new MallException(503, "扣回意图排序键损坏");
+                    }
+                    if (!r.getString(2).equals(r.getString(13)) || r.getLong(3) != r.getLong(14) || r.getInt(4) != r.getInt(15)) {
+                        throw new MallException(503, "扣回意图与原OMS角色或商品不符");
+                    }
+                    int rev = r.getInt(16);
+                    if (rev < 1) {
+                        throw new MallException(503, "扣回待办修订号非法");
+                    }
+                    return new ReversalRow(new DeliveryApi.Intent(r.getString(1), r.getString(2),
+                            CommerceIdentity.storedAccount(r.getBytes(11)), CommerceIdentity.storedRevision(r.getBytes(12)),
+                            r.getLong(3), r.getInt(4), r.getInt(5),
+                            (int) count, r.getString(7), r.getLong(8), r.getString(9)), r.getLong(10), rev);
+                },
+                cursor.afterMs(), cursor.afterMs(), cursor.afterId(), cursor.upperMs(), cursor.upperMs(), cursor.upperId(), input.limit() + 1);
+        boolean hasMore = rows.size() > input.limit();
+        int count = Math.min(rows.size(), input.limit());
+        List<DeliveryApi.ReversalEntry> entries = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            var row = rows.get(i);
+            entries.add(new DeliveryApi.ReversalEntry(row.intent(), row.revision(), row.revision() % 2 == 0,
+                    !hasMore && i == count - 1 ? "" : cursor.after(row.updatedMs(), row.intent().orderId())));
+        }
+        return new DeliveryApi.ReversalPage(List.copyOf(entries));
+    }
+
+    /**
+     * 扣回回执（/internal/reversals/receipt，delivery 角色）：按 (order_sn, revision) 幂等；
+     * 仅最新修订号推进待办与订单（REVERSED -> 9、DELIVERED -> 2、MANUAL -> 7），旧修订号只留档。
+     */
+    public void reversalReceipt(DeliveryApi.ReversalReceipt in) {
+        if (in == null || in.orderId() == null || !in.orderId().matches(PaymentPolicy.ORDER) || in.revision() < 1
+                || in.tradeOrderId() == null || !in.tradeOrderId().matches("[1-9][0-9]{0,19}")
+                || in.proof() == null || !in.proof().matches("[0-9a-f]{64}")
+                || !Set.of("REVERSED", "DELIVERED", "MANUAL").contains(in.state())) {
+            throw new MallException(400, "扣回回执非法");
+        }
+        boolean entitled = in.revision() % 2 == 0;
+        if (in.state().equals(entitled ? "REVERSED" : "DELIVERED")) {
+            throw new MallException(400, "扣回回执的结论与修订号不符");
+        }
+        tx.executeWithoutResult(status -> {
+            var orders = jdbc.queryForList("SELECT status FROM oms_order WHERE order_sn=? FOR UPDATE", in.orderId());
+            if (orders.size() != 1) {
+                throw new MallException(404, "扣回订单不存在");
+            }
+            var intents = jdbc.queryForList("SELECT revision,status FROM commerce_reversal_intent WHERE order_sn=? FOR UPDATE", in.orderId());
+            if (intents.size() != 1) {
+                throw new MallException(404, "扣回待办不存在");
+            }
+            int latest = ((Number) intents.getFirst().get("revision")).intValue();
+            if (in.revision() > latest) {
+                throw new MallException(409, "扣回回执的修订号超过商城记下的最新修订号");
+            }
+            var existing = jdbc.queryForList("SELECT trade_order_id,state,proof FROM commerce_reversal_receipt WHERE order_sn=? AND revision=?",
+                    in.orderId(), in.revision());
+            if (!existing.isEmpty()) {
+                var old = existing.getFirst();
+                if (!in.tradeOrderId().equals(old.get("trade_order_id")) || !in.state().equals(old.get("state"))) {
+                    throw new MallException(409, "同一修订号的扣回结论发生冲突");
+                }
+                return;
+            }
+            jdbc.update("INSERT INTO commerce_reversal_receipt(order_sn,revision,trade_order_id,state,proof) VALUES(?,?,?,?,?)",
+                    in.orderId(), in.revision(), in.tradeOrderId(), in.state(), in.proof());
+            if (in.revision() < latest) {
+                return;
+            }
+            if (!"PENDING".equals(intents.getFirst().get("status"))) {
+                throw new MallException(503, "扣回待办已终结但缺这个修订号的回执");
+            }
+            jdbc.update("UPDATE commerce_reversal_intent SET status=?,updated_ms=? WHERE order_sn=? AND revision=? AND status='PENDING'",
+                    in.state(), clock.millis(), in.orderId(), in.revision());
+            int next = switch (in.state()) {
+                case "REVERSED" -> 9;
+                case "DELIVERED" -> 2;
+                default -> 7;
+            };
+            if (jdbc.update("UPDATE oms_order SET status=? WHERE order_sn=? AND status=8", next, in.orderId()) != 1) {
+                throw new MallException(503, "扣回中的订单状态不一致");
             }
         });
     }

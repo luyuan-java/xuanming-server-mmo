@@ -311,6 +311,30 @@ public final class CommerceEngine {
         });
     }
 
+    /**
+     * 将商城报来的付款修订号单调写入官方合同（只增不减），非 MANUAL 合同回到 {@code official_deliver} 重新收敛发放。
+     */
+    public TradeCommerceRow applyPaymentRevision(long commerceId, int revision, Deadline d) throws SQLException {
+        return store.transaction(d, c -> {
+            var current = store.lock(c, commerceId);
+            if (current == null) {
+                throw new CorruptContract("官方订单合同不存在");
+            }
+            var w = workflow(current);
+            if (current.getKind() != 1 || Integer.compareUnsigned(w.getPaymentRevision(), revision) >= 0) {
+                return current;
+            }
+            var r = current.toBuilder();
+            w.setPaymentRevision(revision).setPaymentRevoked((revision & 1) == 1);
+            if (r.getStatus() != MANUAL) {
+                w.setStage(STAGE_OFFICIAL_DELIVER);
+                r.setStatus(DELIVERING);
+            }
+            r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(clock.getAsLong());
+            return store.save(c, r);
+        });
+    }
+
     public void advance(TradeCommerceRow prior, Deadline d) throws SQLException {
         var pw = workflow(prior);
         store.ensureSeqs(d, prior.getSellerPlayerId(), prior.getBuyerPlayerId(), pw.getHighestBidder());
@@ -374,7 +398,7 @@ public final class CommerceEngine {
                         } catch (InvalidProtocolBufferException e) {
                             throw new CorruptContract("托管快照损坏", e);
                         }
-                    if (l.getStream() == 3 && applied(l))
+                    if (l.getStream() == 3 && applied(l) && !isOfficialReverseLeg(l.getRole()))
                         try {
                             transfer(l.build());
                         } catch (IllegalStateException corrupted) {
@@ -407,7 +431,7 @@ public final class CommerceEngine {
                              .setStream(l.getStream())
                              .setKind(l.getStream() == 3 ? 1 : 2)
                              .setStatus(1)
-                             .setTxType(l.getStream() == 3 ? 3 : 4)
+                             .setTxType(l.getStream() == 3 ? (isOfficialReverseLeg(l.getRole()) ? TX_PAYMENT_REVERSAL : 3) : 4)
                              .setRefKind(2)
                              .setRefId(r.getCommerceId())
                              .setPayload(l.getBundle().toByteString())

@@ -112,6 +112,10 @@ public final class ClientDispatcher {
     private static final Logger log = LoggerFactory.getLogger(ClientDispatcher.class);
     /** LeaveGame 在契约里的方法名（服务裸名.方法名）。 */
     private static final String LEAVE_GAME_METHOD = "ClientPlayerLogin.LeaveGame";
+    /** RenewSession 在契约里的方法名（仅 gate 合成调用，不向客户端暴露）。 */
+    private static final String RENEW_SESSION_METHOD = "ClientPlayerLogin.RenewSession";
+    static final long DEFAULT_SESSION_RENEW_INITIAL_MS = TimeUnit.MINUTES.toMillis(10);
+    static final long DEFAULT_SESSION_RENEW_RETRY_MS = TimeUnit.SECONDS.toMillis(30);
 
     /** C++ kMaxClientMessageSize：整个 ClientRequest 序列化后超过 1KB 即拒绝。 */
     static final int MAX_REQUEST_BYTES = 1024;
@@ -175,6 +179,7 @@ public final class ClientDispatcher {
      * （只收 tip 号的旧重载）：这时重定向帧 / 重定向指令一律按内容非法收口（推 23 {3027} 后断开），绝不发消息号为 0 的包。
      */
     private final int redirectToGateMessageId;
+    private final int renewSessionMessageId;
     private final ClientMessageService login;
     /** login 以外的客户端消息后端：Dubbo group（= 消息域）→ 服务（friend ……）。 */
     private final Map<String, ClientMessageService> backends;
@@ -189,6 +194,8 @@ public final class ClientDispatcher {
     private SpectateSubscriptions spectate = SpectateSubscriptions.NONE;
     /** 按后端域隔离的三态熔断器（{@link #withBackendCircuitBreaker}）；默认关闭以免影响存量单测。 */
     private EndpointCircuitBreaker backendBreaker = EndpointCircuitBreaker.disabled();
+    private volatile long sessionRenewInitialMs = DEFAULT_SESSION_RENEW_INITIAL_MS;
+    private volatile long sessionRenewRetryMs = DEFAULT_SESSION_RENEW_RETRY_MS;
 
     /**
      * @param tipMessageId 服务端推 tip 用的消息号（{@code SceneClientPlayerCommon.SendTipToClient}，现为 23）
@@ -263,11 +270,23 @@ public final class ClientDispatcher {
         this.nanoClock = nanoClock;
         // 战斗上行拒绝平时恒为 0：装配时把这几条时间序列先建出来（见 GateMetrics#registerRequest）。
         // 手写的路由表（测试里的 lambda）不枚举，all() 为空，什么也不建。
+        int renewId = 0;
         for (MessageRoute route : routes.all()) {
             if (route.directOnly()) {
                 metrics.registerRequest(route.domain(), route.method(), RequestResult.BATTLE_REJECTED);
             }
+            if (RENEW_SESSION_METHOD.equals(route.method())) {
+                renewId = route.messageId();
+            }
         }
+        this.renewSessionMessageId = renewId;
+    }
+
+    /** 仅测试用：覆写会话首次续租与失败重试延迟。 */
+    ClientDispatcher withSessionRenewIntervalsMs(long initialMs, long retryMs) {
+        this.sessionRenewInitialMs = Math.max(1L, initialMs);
+        this.sessionRenewRetryMs = Math.max(1L, retryMs);
+        return this;
     }
 
     /** 接上观战订阅（进程装配时、客户端端口打开之前调用一次）。 */
@@ -553,9 +572,10 @@ public final class ClientDispatcher {
         spectate.drop(s);
         // 客户端先关（已重定向的会话正常就是这样收场）：收口定时器作废
         s.cancelRedirectLinger();
-        // 后端 lane 的延后放行与未成年人防沉迷截止定时器一并作废
+        // 后端 lane 的延后放行、会话续租与未成年人防沉迷截止定时器一并作废
         s.cancelBackendRelease();
         s.cancelPlayDeadline();
+        s.cancelSessionRenew();
         discardPending(s, RequestResult.DROPPED);
         // 已重定向的会话没有场景绑定，这里什么也不发
         leaveScene(s, s.leaveGameRequests > 0);
@@ -915,6 +935,11 @@ public final class ClientDispatcher {
 
     private void applyBindAccount(ClientSession s, com.game.api.proto.BindAccount bind) {
         s.account = bind.getAccount();
+        if (s.account.isEmpty()) {
+            s.cancelSessionRenew();
+        } else if (renewSessionMessageId > 0) {
+            scheduleSessionRenew(s, s.account, sessionRenewInitialMs);
+        }
         long deadlineMs = bind.getPlayDeadlineMs();
         if (deadlineMs <= 0) {
             s.cancelPlayDeadline();
@@ -931,6 +956,67 @@ public final class ClientDispatcher {
             log.info("未成年人防沉迷时段到期踢线 session={} account={} deadline_ms={}", sid(current), expectedAccount, deadlineMs);
             closeByServer(current, TIP_MINOR_PLAY_TIME_OVER);
         });
+    }
+
+    /** 定期向 login 合成发送 RenewSession（394）：刷新防沉迷会话账本租约，并承接未成年人超时兜底踢线指令。 */
+    private void scheduleSessionRenew(ClientSession s, String expectedAccount, long delayMs) {
+        int sessionId = s.sessionId();
+        s.scheduleSessionRenew(delayMs, () -> {
+            ClientSession current = registry.get(sessionId);
+            if (current != s || current.closed || current.closing || current.redirected
+                    || !expectedAccount.equals(current.account)) {
+                return;
+            }
+            sendSessionRenew(current, expectedAccount);
+        });
+    }
+
+    private void sendSessionRenew(ClientSession s, String expectedAccount) {
+        ClientCall call = ClientCall.newBuilder()
+                .setSession(context(s))
+                .setMessageId(renewSessionMessageId)
+                .setBody(com.google.protobuf.ByteString.EMPTY)
+                .setRequestId(0)
+                .build();
+        CompletableFuture<ClientReply> future;
+        try {
+            future = login.handle(call);
+        } catch (RuntimeException e) {
+            future = CompletableFuture.failedFuture(e);
+        }
+        if (future == null) {
+            future = CompletableFuture.failedFuture(new IllegalStateException("login RenewSession 返回 null future"));
+        }
+        future.whenComplete((reply, error) -> s.execute(() -> onSessionRenewCompleted(s, expectedAccount, reply, error)));
+    }
+
+    private void onSessionRenewCompleted(ClientSession s, String expectedAccount, ClientReply reply, Throwable error) {
+        if (s.closed || s.closing || s.redirected || !expectedAccount.equals(s.account)) {
+            return;
+        }
+        if (error != null || reply == null) {
+            log.warn("会话续租失败，退避后重试 session={} account={} 原因={}", sid(s), expectedAccount,
+                    error == null ? "null" : rootCause(error).toString());
+            scheduleSessionRenew(s, expectedAccount, sessionRenewRetryMs);
+            return;
+        }
+        if (!reply.getDirectivesList().isEmpty()) {
+            applyDirectives(s, reply.getDirectivesList());
+        }
+        if (s.closed || s.closing || s.redirected || !expectedAccount.equals(s.account)) {
+            return;
+        }
+        try {
+            com.game.proto.login.RenewSessionResponse resp =
+                    com.game.proto.login.RenewSessionResponse.parseFrom(reply.getBody());
+            if (resp.getRenewed()) {
+                long nextMs = Math.max(1L, Integer.toUnsignedLong(resp.getRenewAfterSeconds())) * 1000L;
+                scheduleSessionRenew(s, expectedAccount, nextMs);
+            }
+        } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+            log.warn("解析 RenewSessionResponse 失败，退避后重试 session={}", sid(s), e);
+            scheduleSessionRenew(s, expectedAccount, sessionRenewRetryMs);
+        }
     }
 
     /** 不再执行的指令：只记日志；其中的重定向指令按过期计数（每条重定向指令恰好计一次结局）。 */
@@ -1463,6 +1549,8 @@ public final class ClientDispatcher {
      */
     private void enterRedirected(ClientSession s, RedirectSource source, ZoneRedirect redirect) {
         s.redirected = true;
+        s.cancelSessionRenew();
+        s.cancelPlayDeadline();
         failQueuedOnRedirect(s);
         s.send(redirectNotify(redirect));
         metrics.redirect(source, RedirectResult.SENT);

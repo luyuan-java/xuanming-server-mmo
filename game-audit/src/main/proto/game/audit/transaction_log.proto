@@ -51,6 +51,8 @@ enum TransactionReason {
   TX_EQUIP_ENHANCE = 27;
   TX_EQUIP_INLAY = 28;
   TX_EQUIP_GEM_REMOVE = 29;
+  // 渠道撤单 / 拒付后的官方商城发放扣回（数值同 mmorpg TX_PAYMENT_REVERSAL = 31）
+  TX_PAYMENT_REVERSAL = 31;
   // 运维面（game-data 直写，数值同 mmorpg TransactionType；基线有枚举值、没有写入方）：
   // 回档恢复（余额 / 实例变化，correlation_id = 作业号）、精确回收、批量回收
   TX_ROLLBACK_RESTORE = 16;

@@ -290,7 +290,7 @@ unset spectate_secret_trimmed other_secret
 export GAME_SPECTATE_TOKEN_SECRET
 
 # 新域的调用密钥各自生成，调用方与提供方继承同一值；商城四个信任域不得共用。
-for secret_name in GAME_ASSET_OP_SECRET_MAIL GAME_ASSET_OP_SECRET_TRADE MAIL_PRODUCER_SECRET_RANK RANK_PRODUCER_SECRET_MATCH \
+for secret_name in GAME_ASSET_OP_SECRET_MAIL GAME_ASSET_OP_SECRET_TRADE MAIL_PRODUCER_SECRET_ADMIN MAIL_PRODUCER_SECRET_RANK RANK_PRODUCER_SECRET_MATCH \
     MMORPG_INTERNAL_SECRET_SCENE GAME_MALL_GATEWAY_SECRET GAME_MALL_PAYMENT_SECRET GAME_MALL_DELIVERY_SECRET GAME_MALL_ADMIN_SECRET; do
   if [[ -z "${!secret_name:-}" ]]; then
     printf -v "$secret_name" '%s' "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"

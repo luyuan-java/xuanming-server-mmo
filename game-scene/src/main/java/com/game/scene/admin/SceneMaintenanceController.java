@@ -28,18 +28,34 @@ public final class SceneMaintenanceController {
     public byte[] open(@RequestBody byte[] original)throws Exception{return node.openMaintenanceSource(com.game.player.store.state.SqlWriterMaintenanceReceipt.SourceOpenAck.parseFrom(original)).toByteArray();}
     /** 受理、cut和完成共用一把短锁；异步任务不会持锁等待自己。 */
     public static final class Gate {
+        private static final byte[] EMPTY_FRONTIER = newSha256().digest(new byte[0]);
+        private final MessageDigest sha256 = newSha256();
+        private final byte[] acceptedBuf = new byte[8];
         private boolean accepting=true,preparedOnly;
         private String operation="";
-        private byte[] revival=new byte[0],frontier=emptyFrontier();
-        private static byte[] emptyFrontier(){try{return MessageDigest.getInstance("SHA-256").digest(new byte[0]);}catch(NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}}
+        private byte[] revival=new byte[0],frontier=EMPTY_FRONTIER.clone();
+        private static MessageDigest newSha256(){try{return MessageDigest.getInstance("SHA-256");}catch(NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}}
         private long accepted,completed,unknown,closedMs;
         public synchronized void prepareOnly(){if(accepted!=0||!operation.isEmpty())throw new IllegalStateException("publication已受理或旧boot已cut");accepting=false;preparedOnly=true;closedMs=System.currentTimeMillis();}
         public synchronized void openPrepared(){if(!preparedOnly||accepting||!operation.isEmpty()||accepted!=0||completed!=0||unknown!=0)throw new IllegalStateException("只允许全新prepare-only boot第一次开放");preparedOnly=false;accepting=true;}
         public synchronized Lease admit(byte[] original){
             if(!accepting)throw new java.util.concurrent.RejectedExecutionException("维护publication已永久关闭");
             accepted=Math.addExact(accepted,1);
-            try{MessageDigest hash=MessageDigest.getInstance("SHA-256");hash.update(frontier);hash.update(ByteBuffer.allocate(8).putLong(accepted).array());hash.update(original);frontier=hash.digest();}
-            catch(NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
+            // 持有本锁时复用单实例 MessageDigest 与 8 字节计数缓冲，避免每帧 JCA 查找与 ByteBuffer 分配。
+            long seq = accepted;
+            acceptedBuf[0] = (byte) (seq >>> 56);
+            acceptedBuf[1] = (byte) (seq >>> 48);
+            acceptedBuf[2] = (byte) (seq >>> 40);
+            acceptedBuf[3] = (byte) (seq >>> 32);
+            acceptedBuf[4] = (byte) (seq >>> 24);
+            acceptedBuf[5] = (byte) (seq >>> 16);
+            acceptedBuf[6] = (byte) (seq >>> 8);
+            acceptedBuf[7] = (byte) seq;
+            sha256.reset();
+            sha256.update(frontier);
+            sha256.update(acceptedBuf);
+            sha256.update(original);
+            frontier=sha256.digest();
             return new Lease(this);
         }
         public synchronized void close(String run,byte[] fence){

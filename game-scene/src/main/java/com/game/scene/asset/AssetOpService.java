@@ -92,7 +92,7 @@ public final class AssetOpService {
             AssetStream.ASSET_STREAM_GUILD_CREDIT, new StreamRule(Direction.CREDIT,
                     Map.of(25, AssetAudit.Reason.GUILD_SHOP, 26, AssetAudit.Reason.GUILD_ACTIVITY_REWARD)),
             AssetStream.ASSET_STREAM_TRADE_DEBIT, new StreamRule(Direction.DEBIT,
-                    Map.of(3, AssetAudit.Reason.AUCTION_SELL)),
+                    Map.of(3, AssetAudit.Reason.AUCTION_SELL, 31, AssetAudit.Reason.PAYMENT_REVERSAL)),
             AssetStream.ASSET_STREAM_TRADE_CREDIT, new StreamRule(Direction.CREDIT,
                     Map.of(4, AssetAudit.Reason.AUCTION_BUY, 1, AssetAudit.Reason.TRADE)),
             // 邮件独占；GM 与榜奖必须通过邮件附件，不允许借此直发。

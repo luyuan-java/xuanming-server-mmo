@@ -104,6 +104,87 @@ public final class CommerceRules {
         // 扣出用GUID选择，入账只用可信完整原件，不能混带两种命令的字段。
         return b.clearItemUuids().clearPetId().build();
     }
+    static final String STAGE_OFFICIAL_DELIVER = "official_deliver";
+    static final String STAGE_OFFICIAL_REVERSED = "official_reversed";
+    static final String OFFICIAL_CREDIT_ROLE = "official_credit";
+    static final String OFFICIAL_REVERSE_PREFIX = "official_reverse_";
+    static final String OFFICIAL_REGRANT_PREFIX = "official_regrant_";
+    static final int TX_PAYMENT_REVERSAL = 31;
+
+    static boolean isOfficialReverseLeg(String role) {
+        return role != null && role.startsWith(OFFICIAL_REVERSE_PREFIX);
+    }
+
+    /** 按官方合同各腿结局计算买家当前是否持有发放：发放腿(stream=4)到账后持有，扣回腿(stream=3)到账后不持有。 */
+    private static Boolean officialHeldIfSettled(TradeCommerceWorkflow.Builder w) {
+        boolean held = false;
+        for (var l : w.getLegsBuilderList()) {
+            if (!l.getSupersededBy().isEmpty()) {
+                continue;
+            }
+            if (!done(l)) {
+                return null;
+            }
+            if (applied(l)) {
+                held = l.getStream() == 4;
+            }
+        }
+        return held;
+    }
+
+    /** 将官方商城合同的发放收敛到最新付款修订号（对齐 Go official_reversal.go planOfficial）。 */
+    static void planOfficial(TradeCommerceRow.Builder r, TradeCommerceWorkflow.Builder w) {
+        Boolean held = officialHeldIfSettled(w);
+        if (held == null) {
+            return;
+        }
+        boolean entitled = !w.getPaymentRevoked();
+        if (held == entitled) {
+            if (entitled) {
+                w.setStage("done");
+                r.setStatus(SETTLED);
+            } else {
+                w.setStage(STAGE_OFFICIAL_REVERSED);
+                r.setStatus(CANCELLED);
+            }
+            return;
+        }
+        String rev = Integer.toUnsignedString(w.getPaymentRevision());
+        String role = OFFICIAL_CREDIT_ROLE;
+        int stream = 4;
+        if (!entitled) {
+            role = OFFICIAL_REVERSE_PREFIX + rev;
+            stream = 3;
+        } else if (leg(w, OFFICIAL_CREDIT_ROLE) != null && w.getPaymentRevision() > 0) {
+            role = OFFICIAL_REGRANT_PREFIX + rev;
+        }
+        if (leg(w, role) == null) {
+            add(w, role, r.getBuyerPlayerId(), stream, w.getOfficialBundle());
+            return;
+        }
+        if (OFFICIAL_CREDIT_ROLE.equals(role) && w.getPaymentRevision() == 0) {
+            w.setStage("official_refund");
+            r.setStatus(8);
+            return;
+        }
+        w.setStage("manual");
+        r.setStatus(MANUAL);
+    }
+
+    /** 官方订单回报商城扣回待办的结论；空串表示合同尚未收敛到当前修订号。 */
+    static String officialReversalState(TradeCommerceRow r, TradeCommerceWorkflow w) {
+        if (r.getStatus() == MANUAL) {
+            return "MANUAL";
+        }
+        if (r.getStatus() == SETTLED && !w.getPaymentRevoked()) {
+            return "DELIVERED";
+        }
+        if (r.getStatus() == CANCELLED && w.getPaymentRevoked()) {
+            return "REVERSED";
+        }
+        return "";
+    }
+
     static TradeCommerceLeg.Builder leg(TradeCommerceWorkflow.Builder w, String name) {
         for (var l : w.getLegsBuilderList())
             if (l.getRole().equals(name))
@@ -152,18 +233,8 @@ public final class CommerceRules {
             }
             return;
         }
-        if (w.getStage().equals("official_deliver")) {
-            add(w, "official_credit", r.getBuyerPlayerId(), 4, w.getOfficialBundle());
-            var l = leg(w, "official_credit");
-            if (!done(l))
-                return;
-            if (applied(l)) {
-                w.setStage("done");
-                r.setStatus(SETTLED);
-            } else {
-                w.setStage("official_refund");
-                r.setStatus(8);
-            }
+        if (w.getStage().equals(STAGE_OFFICIAL_DELIVER)) {
+            planOfficial(r, w);
             return;
         }
         if (w.getStage().equals("offer_escrow")) {

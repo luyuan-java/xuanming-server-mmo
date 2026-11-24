@@ -33,6 +33,18 @@ public final class DeliveryController {
         store.receipt(input);
     }
 
+    @PostMapping("/internal/reversals/poll")
+    public DeliveryApi.ReversalPage reversals(HttpServletRequest request, @RequestBody DeliveryApi.Poll input) {
+        check(request);
+        return store.reversals(input);
+    }
+
+    @PostMapping("/internal/reversals/receipt")
+    public void reversalReceipt(HttpServletRequest request, @RequestBody DeliveryApi.ReversalReceipt input) {
+        check(request);
+        store.reversalReceipt(input);
+    }
+
     @PostMapping("/internal/refunds/poll")
     public DeliveryApi.RefundPage refunds(HttpServletRequest request,
                                           @RequestBody(required = false) DeliveryApi.RefundPoll input) {

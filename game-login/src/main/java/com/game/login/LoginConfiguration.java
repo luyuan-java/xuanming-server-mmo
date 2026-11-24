@@ -493,6 +493,11 @@ public class LoginConfiguration {
     }
 
     @Bean
+    public com.game.login.handler.RenewSessionHandler renewSessionHandler(AccountLogin accountLogin, LoginProperties props) {
+        return new com.game.login.handler.RenewSessionHandler(accountLogin, props.deviceSessionTtl());
+    }
+
+    @Bean
     public ClientMessageDispatcher clientMessageDispatcher(MessageIdRegistry registry,
                                                            List<ClientMessageHandler<?>> handlers,
                                                            LoginWorkerPool loginWorkerPool, LoginMetrics loginMetrics) {

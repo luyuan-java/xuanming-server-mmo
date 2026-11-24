@@ -30,6 +30,7 @@ public final class OfficialMallClient implements AutoCloseable {
     private final ObjectMapper json;
     // 只由 CommerceRuntime 的恢复线程推进；进程重启从头重放，SQL 请求键保持原合同和 seq。
     private String deliveryCursor = "";
+    private String reversalCursor = "";
     private final HttpClient http = HttpClient.newBuilder()
                                         .connectTimeout(Duration.ofSeconds(2))
                                         .followRedirects(HttpClient.Redirect.NEVER)
@@ -215,6 +216,36 @@ public final class OfficialMallClient implements AutoCloseable {
     }
     public void tick(Deadline d) throws Exception {
         Exception firstFailure = null;
+        try {
+            tickDeliveries(d);
+        } catch (Exception failure) {
+            firstFailure = failure;
+            if (failure instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+                throw failure;
+            }
+        }
+        if (d.remainingMillis() >= 300) {
+            try {
+                tickReversals(d);
+            } catch (Exception failure) {
+                if (firstFailure == null) {
+                    firstFailure = failure;
+                } else if (firstFailure != failure) {
+                    firstFailure.addSuppressed(failure);
+                }
+                if (failure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+        if (firstFailure != null) {
+            throw firstFailure;
+        }
+    }
+
+    private void tickDeliveries(Deadline d) throws Exception {
+        Exception firstFailure = null;
         var entries = deliveryPage(call("delivery", "trade", "POST", "/internal/deliveries/poll",
             Map.of("limit", 20, "cursor", deliveryCursor), d), deliveryCursor);
         if (entries.isEmpty()) {
@@ -246,7 +277,42 @@ public final class OfficialMallClient implements AutoCloseable {
         if (firstFailure != null)
             throw firstFailure;
     }
+
+    /** 拉取一页商城扣回待办（/internal/reversals/poll），写入付款修订号并在合同收敛后提交扣回回执。 */
+    void tickReversals(Deadline d) throws Exception {
+        Exception firstFailure = null;
+        var entries = reversalPage(call("delivery", "trade", "POST", "/internal/reversals/poll",
+            Map.of("limit", 20, "cursor", reversalCursor), d), reversalCursor);
+        if (entries.isEmpty()) {
+            reversalCursor = "";
+            return;
+        }
+        for (var entry : entries) {
+            if (d.remainingMillis() < 300)
+                break;
+            boolean interrupted = false;
+            try {
+                reconcileReversal(entry, Deadline.after(Math.min(2500, d.remainingMillis())));
+            } catch (Exception failure) {
+                if (firstFailure == null)
+                    firstFailure = failure;
+                else if (firstFailure != failure)
+                    firstFailure.addSuppressed(failure);
+                if (failure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                    interrupted = true;
+                }
+            }
+            reversalCursor = entry.cursor();
+            if (interrupted)
+                break;
+        }
+        if (firstFailure != null)
+            throw firstFailure;
+    }
+
     record DeliveryEntry(JsonNode intent, String cursor) {}
+    record ReversalEntry(JsonNode intent, int revision, boolean entitled, String cursor) {}
     private record DeliveryScan(long afterMs, String afterId, long upperMs, String upperId) {}
     private static int compareDeliveryKey(long firstMs, String firstId, long secondMs, String secondId) {
         int time = Long.compare(firstMs, secondMs);
@@ -299,12 +365,71 @@ public final class OfficialMallClient implements AutoCloseable {
         }
         return result;
     }
+    static List<ReversalEntry> reversalPage(JsonNode page, String requestedCursor) {
+        if (!page.isObject() || !page.path("entries").isArray() || page.path("entries").size() > 20)
+            throw new IllegalStateException("商城扣回页包装非法");
+        DeliveryScan previous = requestedCursor.isEmpty() ? null : decodeDeliveryCursor(requestedCursor);
+        List<ReversalEntry> result = new ArrayList<>();
+        var entries = page.path("entries");
+        Set<String> orders = new HashSet<>();
+        for (int i = 0; i < entries.size(); i++) {
+            var entry = entries.get(i);
+            if (!entry.isObject() || !entry.path("intent").isObject() || !entry.path("cursor").isTextual()
+                    || !entry.path("revision").isInt() || entry.path("revision").intValue() < 1
+                    || !entry.path("entitled").isBoolean())
+                throw new IllegalStateException("商城扣回项包装非法");
+            int revision = entry.path("revision").intValue();
+            boolean entitled = entry.path("entitled").booleanValue();
+            if (entitled != ((revision & 1) == 0))
+                throw new IllegalStateException("商城扣回项修订号与应持有奇偶不符");
+            String cursor = entry.path("cursor").textValue();
+            String order = entry.path("intent").path("orderId").asText();
+            if (!orders.add(order))
+                throw new IllegalStateException("商城扣回页重复订单");
+            if (cursor.isEmpty()) {
+                if (i != entries.size() - 1)
+                    throw new IllegalStateException("商城扣回页在末项前提前绕回");
+            } else {
+                DeliveryScan next = decodeDeliveryCursor(cursor);
+                if (!next.afterId().equals(order) || previous != null
+                    && (next.upperMs() != previous.upperMs() || !next.upperId().equals(previous.upperId())
+                        || compareDeliveryKey(next.afterMs(), next.afterId(), previous.afterMs(), previous.afterId()) <= 0))
+                    throw new IllegalStateException("商城扣回页游标乱序或上界变化");
+                previous = next;
+            }
+            result.add(new ReversalEntry(entry.path("intent"), revision, entitled, cursor));
+        }
+        return result;
+    }
+
+    private void reconcileReversal(ReversalEntry entry, Deadline d) throws Exception {
+        var accepted = accept(entry.intent(), d);
+        var updated = e.applyPaymentRevision(accepted.getCommerceId(), entry.revision(), d);
+        var workflow = CommerceEngine.workflow(updated).build();
+        String state = officialReversalState(updated, workflow);
+        if (state.isEmpty()) {
+            return;
+        }
+        call("delivery", "trade", "POST", "/internal/reversals/receipt",
+            Map.of("orderId", entry.intent().path("orderId").asText(),
+                "revision", workflow.getPaymentRevision(),
+                "tradeOrderId", Long.toUnsignedString(updated.getCommerceId()),
+                "state", state,
+                "proof", HexFormat.of().formatHex(CommerceEngine.sha(updated.getWorkflowProto().toByteArray()).toByteArray())), d);
+    }
+
     private void deliverIntent(JsonNode in, Deadline d) throws Exception {
         var r = accept(in, d);
         String state = switch (r.getStatus()) {
             case SETTLED -> "DELIVERED";
             case 8 -> "REFUND_PENDING";
-            case CANCELLED -> CommerceEngine.workflow(r).getStage().equals("official_refund") ? "REFUND_PENDING" : "";
+            case CANCELLED -> {
+                var w = CommerceEngine.workflow(r);
+                if (w.getStage().equals("official_refund")) yield "REFUND_PENDING";
+                if (w.getStage().equals(STAGE_OFFICIAL_REVERSED))
+                    yield applied(leg(w, OFFICIAL_CREDIT_ROLE)) ? "DELIVERED" : "VOIDED";
+                yield "";
+            }
             case MANUAL -> "MANUAL";
             default -> "";
         };

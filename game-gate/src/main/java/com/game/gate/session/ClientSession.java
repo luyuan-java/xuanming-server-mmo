@@ -138,6 +138,8 @@ public final class ClientSession {
     private ScheduledFuture<?> backendRelease;
     /** 未成年人防沉迷可玩截止定时器（到点推送 2049 并关闭会话；断线或重新绑定时撤销）。 */
     private ScheduledFuture<?> playDeadlineTask;
+    /** 周期向 login 续租的定时器（刷新设备与 NPPA 会话账本租约；断线、重定向或解绑时撤销）。 */
+    private ScheduledFuture<?> sessionRenewTask;
 
     ClientSession(int sessionId, Channel channel, String clientIp) {
         this.sessionId = sessionId;
@@ -289,6 +291,23 @@ public final class ClientSession {
         if (playDeadlineTask != null) {
             playDeadlineTask.cancel(false);
             playDeadlineTask = null;
+        }
+    }
+
+    /** 挂 login 会话定期续租定时器（在本连接的 EventLoop 上到点触发）。 */
+    void scheduleSessionRenew(long delayMs, Runnable onDue) {
+        cancelSessionRenew();
+        try {
+            sessionRenewTask = channel.eventLoop().schedule(onDue, Math.max(1L, delayMs), TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            log.debug("会话线程已关闭，不挂会话续租定时器 session={}", Integer.toUnsignedString(sessionId));
+        }
+    }
+
+    void cancelSessionRenew() {
+        if (sessionRenewTask != null) {
+            sessionRenewTask.cancel(false);
+            sessionRenewTask = null;
         }
     }
 

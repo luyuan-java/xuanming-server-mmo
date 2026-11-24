@@ -124,6 +124,49 @@ class PaymentContractHttpTest {
             JsonNode polled = json.readTree(call(http, "delivery", "trade", "/internal/deliveries/poll",
                     "{\"cursor\":\"\",\"limit\":20}").body());
             assertThat(polled.get("entries")).isEmpty();
+
+            // 11. 扣回待办拉取 (/internal/reversals/poll) 返回 revision=1, entitled=false
+            JsonNode revPolled = json.readTree(call(http, "delivery", "trade", "/internal/reversals/poll",
+                    "{\"cursor\":\"\",\"limit\":20}").body());
+            assertThat(revPolled.get("entries")).hasSize(1);
+            JsonNode revEntry = revPolled.get("entries").get(0);
+            assertThat(revEntry.get("intent").get("orderId").asText()).isEqualTo(o1);
+            assertThat(revEntry.get("revision").asInt()).isEqualTo(1);
+            assertThat(revEntry.get("entitled").asBoolean()).isFalse();
+
+            // 12. 扣回回执 (/internal/reversals/receipt)：与奇偶不符返回 400；正确 REVERSED 推进订单到 REVERSED；幂等重放 200；冲突 409
+            String proof1 = "a".repeat(64);
+            var badParity = call(http, "delivery", "trade", "/internal/reversals/receipt",
+                    "{\"orderId\":\"" + o1 + "\",\"revision\":1,\"tradeOrderId\":\"9001\",\"state\":\"DELIVERED\",\"proof\":\"" + proof1 + "\"}");
+            assertThat(badParity.statusCode()).isEqualTo(400);
+            var okRev = call(http, "delivery", "trade", "/internal/reversals/receipt",
+                    "{\"orderId\":\"" + o1 + "\",\"revision\":1,\"tradeOrderId\":\"9001\",\"state\":\"REVERSED\",\"proof\":\"" + proof1 + "\"}");
+            assertThat(okRev.statusCode()).isEqualTo(200);
+            assertThat(call(http, "delivery", "trade", "/internal/reversals/receipt",
+                    "{\"orderId\":\"" + o1 + "\",\"revision\":1,\"tradeOrderId\":\"9001\",\"state\":\"REVERSED\",\"proof\":\"" + "b".repeat(64) + "\"}").statusCode())
+                    .isEqualTo(200);
+            assertThat(call(http, "delivery", "trade", "/internal/reversals/receipt",
+                    "{\"orderId\":\"" + o1 + "\",\"revision\":1,\"tradeOrderId\":\"9001\",\"state\":\"MANUAL\",\"proof\":\"" + proof1 + "\"}").statusCode())
+                    .isEqualTo(409);
+            assertThat(json.readTree(call(http, "payment", "payment-adapter", "/internal/payments/order-view",
+                    "{\"orderId\":\"" + o1 + "\"}").body()).get("state").asText()).isEqualTo("REVERSED");
+            assertThat(json.readTree(call(http, "delivery", "trade", "/internal/reversals/poll",
+                    "{\"cursor\":\"\",\"limit\":20}").body()).get("entries")).isEmpty();
+
+            // 13. 渠道争议胜诉恢复（revision=2, PAID）-> 扣回待办重新出现 (entitled=true) -> 回执 DELIVERED 恢复订单到 DELIVERED
+            var rev2 = call(http, "payment", "payment-adapter", "/internal/payments/revision",
+                    "{\"orderId\":\"" + o1 + "\",\"channel\":\"alipay\",\"transactionId\":\"tx-ok-1\",\"revision\":2,\"fact\":\"PAID\"}");
+            assertThat(rev2.statusCode()).isEqualTo(200);
+            JsonNode rev2Polled = json.readTree(call(http, "delivery", "trade", "/internal/reversals/poll",
+                    "{\"cursor\":\"\",\"limit\":20}").body());
+            assertThat(rev2Polled.get("entries")).hasSize(1);
+            assertThat(rev2Polled.get("entries").get(0).get("revision").asInt()).isEqualTo(2);
+            assertThat(rev2Polled.get("entries").get(0).get("entitled").asBoolean()).isTrue();
+            assertThat(call(http, "delivery", "trade", "/internal/reversals/receipt",
+                    "{\"orderId\":\"" + o1 + "\",\"revision\":2,\"tradeOrderId\":\"9001\",\"state\":\"DELIVERED\",\"proof\":\"" + "c".repeat(64) + "\"}").statusCode())
+                    .isEqualTo(200);
+            assertThat(json.readTree(call(http, "payment", "payment-adapter", "/internal/payments/order-view",
+                    "{\"orderId\":\"" + o1 + "\"}").body()).get("state").asText()).isEqualTo("DELIVERED");
         }
     }
 

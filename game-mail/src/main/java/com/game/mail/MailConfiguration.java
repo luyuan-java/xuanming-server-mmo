@@ -51,7 +51,24 @@ public class MailConfiguration {
     }
     @Bean
     MailStore store(AuthorityJdbc jdbc, ConfigTables tables) {
-        return new MailStore(jdbc, new AuthorityIds(jdbc, "mail_id_sequence"), tables.item()::contains, System::currentTimeMillis);
+        return new MailStore(jdbc, new AuthorityIds(jdbc, "mail_id_sequence"), tables.item()::contains,
+                System::currentTimeMillis, playerMissingOrDeleted(jdbc));
+    }
+
+    /**
+     * 权威删角核查：共享库 {@code player} 表无该角色行即视为已删角/不存在（回 17011，不建空邮箱行）；
+     * 查询遇到 SQL 故障时 fail-closed 抛 {@link com.game.common.deadline.Deadline.DependencyException}，绝不误判为已删角。
+     */
+    static java.util.function.LongPredicate playerMissingOrDeleted(AuthorityJdbc jdbc) {
+        return playerId -> {
+            try {
+                return jdbc.read(com.game.common.deadline.Deadline.after(1500),
+                        s -> s.one("SELECT 1 FROM player WHERE player_id=?", r -> r.getInt(1),
+                                AuthorityJdbc.u64(playerId))) == null;
+            } catch (java.sql.SQLException e) {
+                throw new com.game.common.deadline.Deadline.DependencyException("查询收件人角色状态失败", e);
+            }
+        };
     }
     @Bean
     ServiceCallSignatures signatures() {

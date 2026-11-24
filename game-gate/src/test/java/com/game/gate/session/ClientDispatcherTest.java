@@ -2356,6 +2356,70 @@ class ClientDispatcherTest {
         assertThat(ch.isOpen()).isFalse();
     }
 
+    @Test
+    void 绑定账号后周期合成RenewSession并承接未成年人兜底踢线() {
+        MessageRoute loginRoute = new MessageRoute(LOGIN_MSG, "login", true, "ClientPlayerLogin.Login");
+        MessageRoute renewRoute = new MessageRoute(394, "login", true, "ClientPlayerLogin.RenewSession",
+                false, "/ClientPlayerLogin/RenewSession", false, true);
+        MessageRoutes withRenew = new MessageRoutes() {
+            @Override public MessageRoute clientRoute(int messageId) {
+                return messageId == LOGIN_MSG ? loginRoute : messageId == 394 ? renewRoute : null;
+            }
+            @Override public List<MessageRoute> all() {
+                return List.of(loginRoute, renewRoute);
+            }
+        };
+        FakeLogin renewLogin = new FakeLogin();
+        SessionRegistry reg = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
+        GateMetrics m = new GateMetrics(new SimpleMeterRegistry());
+        ClientDispatcher d = new ClientDispatcher(
+                new GateIdentity(GATE_NODE, "gate-inst-renew", ZONE),
+                tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)), withRenew, TIP_MSG,
+                renewLogin, new FakeLinks(), reg, new GateLimits(4, 3, Duration.ZERO), m, PresenceRecorder.NONE)
+                .withSessionRenewIntervalsMs(50L, 30L);
+        EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(reg, d));
+        ch.writeInbound(verifyRequest(GATE_NODE, NOW + 60));
+        ch.readOutbound();
+
+        ch.writeInbound(ClientRequest.newBuilder().setMessageId(LOGIN_MSG).setId(1).build());
+        renewLogin.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder()
+                        .setBindAccount(BindAccount.newBuilder().setAccount("acc_renew")))
+                .build());
+        ch.runPendingTasks();
+        assertThat((Object) ch.readOutbound()).isNotNull(); // 登录应答
+
+        // 首次 50ms 到期 -> 合成 394 RenewSession，不向客户端写回包
+        ch.advanceTimeBy(60, TimeUnit.MILLISECONDS);
+        ch.runScheduledPendingTasks();
+        assertThat(renewLogin.calls).hasSize(2);
+        assertThat(renewLogin.calls.get(1).getMessageId()).isEqualTo(394);
+        assertThat(renewLogin.calls.get(1).getSession().getAccount()).isEqualTo("acc_renew");
+        renewLogin.complete(ClientReply.newBuilder()
+                .setBody(com.game.proto.login.RenewSessionResponse.newBuilder()
+                        .setRenewed(true).setRenewAfterSeconds(1).build().toByteString())
+                .build());
+        ch.runPendingTasks();
+        assertThat((Object) ch.readOutbound()).isNull();
+        assertThat(ch.isOpen()).isTrue();
+
+        // 下次 1s 到期 -> login 返回未成年人兜底踢线指令 2049 -> 推 2049 并关闭连接
+        ch.advanceTimeBy(1100, TimeUnit.MILLISECONDS);
+        ch.runScheduledPendingTasks();
+        assertThat(renewLogin.calls).hasSize(3);
+        assertThat(renewLogin.calls.get(2).getMessageId()).isEqualTo(394);
+        renewLogin.complete(ClientReply.newBuilder()
+                .setBody(com.game.proto.login.RenewSessionResponse.newBuilder().setRenewed(false).build().toByteString())
+                .addDirectives(SessionDirective.newBuilder()
+                        .setCloseSession(CloseSession.newBuilder().setTipId(ClientDispatcher.TIP_MINOR_PLAY_TIME_OVER)))
+                .build());
+        ch.runPendingTasks();
+        Object kick = ch.readOutbound();
+        assertThat(kick).isNotNull();
+        assertThat(tipOf(kick)).isEqualTo(ClientDispatcher.TIP_MINOR_PLAY_TIME_OVER);
+        assertThat(ch.isOpen()).isFalse();
+    }
+
     private static ByteString payload(int gateNodeId, long expire) {
         return GateTokenPayload.newBuilder().setGateNodeId(gateNodeId).setZoneId(ZONE).setExpireTimestamp(expire).build().toByteString();
     }

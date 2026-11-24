@@ -24,5 +24,20 @@ class SceneMaintenanceControllerTest {
         var accepted=fresh.admit(new byte[]{3});accepted.complete(null);byte[] fence=new byte[16];fence[0]=9;fresh.close(UUID.randomUUID().toString(),fence);assertTrue(fresh.settled());assertThrows(IllegalStateException.class,fresh::prepareOnly);assertThrows(IllegalStateException.class,fresh::openPrepared);
     }
     @Test void preparedUnknownCannotProduceAnOpenSource(){var gate=new SceneMaintenanceController.Gate();gate.prepareOnly();gate.recordUnknown();assertFalse(gate.settled());assertThrows(IllegalStateException.class,gate::openPrepared);}
+    @Test void reusedSha256MatchesReferenceFrontierChain() throws Exception {
+        var gate = new SceneMaintenanceController.Gate();
+        byte[] expected = java.security.MessageDigest.getInstance("SHA-256").digest(new byte[0]);
+        assertArrayEquals(expected, gate.frontier());
+        byte[][] payloads = {new byte[]{1, 2, 3}, new byte[0], new byte[]{(byte) 0xff, 0x10}};
+        for (int i = 0; i < payloads.length; i++) {
+            gate.admit(payloads[i]).complete(null);
+            var ref = java.security.MessageDigest.getInstance("SHA-256");
+            ref.update(expected);
+            ref.update(java.nio.ByteBuffer.allocate(8).putLong(i + 1L).array());
+            ref.update(payloads[i]);
+            expected = ref.digest();
+            assertArrayEquals(expected, gate.frontier());
+        }
+    }
 }
 

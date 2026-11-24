@@ -182,6 +182,7 @@ services:
       <<: [*common-env, *db-env]
       GAME_ADVERTISE_HOST: "game-mail"
       GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      MAIL_PRODUCER_SECRET_ADMIN: "${MAIL_PRODUCER_SECRET_ADMIN:?缺少 MAIL_PRODUCER_SECRET_ADMIN}"
       MAIL_PRODUCER_SECRET_RANK: "${MAIL_PRODUCER_SECRET_RANK:?缺少 MAIL_PRODUCER_SECRET_RANK}"
       GAME_ASSET_OP_SECRET_MAIL: "${GAME_ASSET_OP_SECRET_MAIL:?缺少 GAME_ASSET_OP_SECRET_MAIL}"
     depends_on:
@@ -436,6 +437,7 @@ services:
       GAME_GM_ALLOW_INSECURE_INTERNAL_GATEWAY: "true"
       GAME_DUBBO_MAILURL: "tri://game-mail:20916"
       GAME_DUBBO_MATCHURL: "tri://game-match:20888"
+      MAIL_PRODUCER_SECRET_ADMIN: "${MAIL_PRODUCER_SECRET_ADMIN:?缺少 MAIL_PRODUCER_SECRET_ADMIN}"
     depends_on:
       route-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}

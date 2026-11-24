@@ -24,37 +24,43 @@ public final class RedisLoginDevices implements LoginDevices {
     static final String CLOSED_MARKER = "";
 
     /**
-     * KEYS[1] 账号名单，KEYS[2] 会话反查键；ARGV：now 毫秒、会话键、这次登记的过期毫秒、TTL 毫秒、上限、关闭墓碑。
-     * 返回 1 放行、0 名单已满、-1 会话已关闭（这两种都什么也不改）。放行时顺带续反查键的 TTL（键不存在时 PEXPIRE 不做事；
-     * 墓碑在最前面就返回了，续不到它）。
+     * 单键脚本（Redis Cluster 槽位安全）：KEYS[1] = 账号名单；ARGV：now 毫秒、会话键、过期毫秒、TTL 毫秒、上限。
+     * 返回 1 已登记/续期、0 名单已满。
      */
-    static final String ADMIT_SCRIPT = """
-            if redis.call('GET', KEYS[2]) == ARGV[6] then
-              return -1
-            end
+    static final String ADMIT_ACCOUNT_SCRIPT = """
             redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', '(' .. ARGV[1])
             if not redis.call('ZSCORE', KEYS[1], ARGV[2]) and redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[5]) then
               return 0
             end
             redis.call('ZADD', KEYS[1], ARGV[3], ARGV[2])
             redis.call('PEXPIRE', KEYS[1], ARGV[4])
-            redis.call('PEXPIRE', KEYS[2], ARGV[4])
             return 1
             """;
 
     /**
-     * KEYS[1] 会话反查键，KEYS[2] 本账号名单，KEYS[3]（可选）会话原账号的名单；ARGV：会话键、账号、TTL 毫秒、关闭墓碑。
-     * 返回 1 已记下归属（并从原账号名单注销）；0 会话已关闭：不记归属、墓碑不动，只从本账号名单撤销这个会话（这次登录 admit 写下的）。
+     * 单键脚本（Redis Cluster 槽位安全）：KEYS[1] = 会话反查键；ARGV：TTL 毫秒、关闭墓碑。
+     * 返回 -1 会话已关闭（墓碑不动），1 未关闭（反查键存在时顺带续期）。
      */
-    static final String BIND_SCRIPT = """
-            if redis.call('GET', KEYS[1]) == ARGV[4] then
-              redis.call('ZREM', KEYS[2], ARGV[1])
+    static final String TOUCH_SESSION_SCRIPT = """
+            local v = redis.call('GET', KEYS[1])
+            if v == ARGV[2] then
+              return -1
+            end
+            if v then
+              redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            end
+            return 1
+            """;
+
+    /**
+     * 单键脚本（Redis Cluster 槽位安全）：KEYS[1] = 会话反查键；ARGV：账号、TTL 毫秒、关闭墓碑。
+     * 返回 1 已记下归属；0 会话已关闭（墓碑不动）。
+     */
+    static final String BIND_SESSION_SCRIPT = """
+            if redis.call('GET', KEYS[1]) == ARGV[3] then
               return 0
             end
-            if KEYS[3] then
-              redis.call('ZREM', KEYS[3], ARGV[1])
-            end
-            redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+            redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
             return 1
             """;
 
@@ -99,26 +105,42 @@ public final class RedisLoginDevices implements LoginDevices {
 
     @Override
     public Admission admit(String account, String sessionKey) {
-        long now = clock.millis();
-        Long verdict = script().eval(RScript.Mode.READ_WRITE, ADMIT_SCRIPT, RScript.ReturnType.INTEGER,
-                List.of(redisKeys.loginDevices(account), redisKeys.loginDeviceSession(sessionKey)),
-                String.valueOf(now), sessionKey, String.valueOf(now + ttl.toMillis()), String.valueOf(ttl.toMillis()),
-                String.valueOf(max), CLOSED_MARKER);
-        if (verdict != null && verdict == 1L) {
-            return Admission.ADMITTED;
+        String sessionRedisKey = redisKeys.loginDeviceSession(sessionKey);
+        if (CLOSED_MARKER.equals(redis.getBucket(sessionRedisKey, StringCodec.INSTANCE).get())) {
+            return Admission.CLOSED;
         }
-        return verdict != null && verdict == -1L ? Admission.CLOSED : Admission.FULL;
+        long now = clock.millis();
+        long ttlMs = ttl.toMillis();
+        Long verdict = script().eval(RScript.Mode.READ_WRITE, ADMIT_ACCOUNT_SCRIPT, RScript.ReturnType.INTEGER,
+                List.of(redisKeys.loginDevices(account)),
+                String.valueOf(now), sessionKey, String.valueOf(now + ttlMs), String.valueOf(ttlMs),
+                String.valueOf(max));
+        if (verdict == null || verdict != 1L) {
+            return Admission.FULL;
+        }
+        Long sessionState = script().eval(RScript.Mode.READ_WRITE, TOUCH_SESSION_SCRIPT, RScript.ReturnType.INTEGER,
+                List.of(sessionRedisKey), String.valueOf(ttlMs), CLOSED_MARKER);
+        if (sessionState != null && sessionState == -1L) {
+            // 并发 close 在两次单键调用间落下墓碑：立即从账号名单撤销，避免残留。
+            revoke(account, sessionKey);
+            return Admission.CLOSED;
+        }
+        return Admission.ADMITTED;
     }
 
     @Override
     public boolean bind(String account, String sessionKey, String previousAccount) {
-        List<Object> keys = !previousAccount.isEmpty() && !previousAccount.equals(account)
-                ? List.<Object>of(redisKeys.loginDeviceSession(sessionKey), redisKeys.loginDevices(account),
-                        redisKeys.loginDevices(previousAccount))
-                : List.<Object>of(redisKeys.loginDeviceSession(sessionKey), redisKeys.loginDevices(account));
-        Long bound = script().eval(RScript.Mode.READ_WRITE, BIND_SCRIPT, RScript.ReturnType.INTEGER, keys,
-                sessionKey, account, String.valueOf(ttl.toMillis()), CLOSED_MARKER);
-        return bound != null && bound == 1L;
+        Long bound = script().eval(RScript.Mode.READ_WRITE, BIND_SESSION_SCRIPT, RScript.ReturnType.INTEGER,
+                List.of(redisKeys.loginDeviceSession(sessionKey)),
+                account, String.valueOf(ttl.toMillis()), CLOSED_MARKER);
+        if (bound == null || bound != 1L) {
+            revoke(account, sessionKey);
+            return false;
+        }
+        if (!previousAccount.isEmpty() && !previousAccount.equals(account)) {
+            revoke(previousAccount, sessionKey);
+        }
+        return true;
     }
 
     @Override

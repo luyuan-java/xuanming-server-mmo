@@ -427,6 +427,18 @@ class CommerceRuntimeTest {
                     exchange.sendResponseHeaders(200, -1);
                 }
             });
+            server.createContext("/internal/reversals/poll", exchange -> {
+                try (exchange) {
+                    byte[] body = "{\"entries\":[]}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(200, body.length);
+                    exchange.getResponseBody().write(body);
+                }
+            });
+            server.createContext("/internal/reversals/receipt", exchange -> {
+                try (exchange) {
+                    exchange.sendResponseHeaders(200, -1);
+                }
+            });
             server.start();
         }
         OfficialMallClient mall(CommerceEngine engine) {

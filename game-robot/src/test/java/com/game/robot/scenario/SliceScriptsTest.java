@@ -148,7 +148,7 @@ class SliceScriptsTest {
         String recovery = recovered.group(1);
         String names = source.substring(0, source.indexOf("; do"));
         assertThat(names.replace("\\\n", " ").trim().split("\\s+")).containsExactly(
-                "GAME_ASSET_OP_SECRET_MAIL", "GAME_ASSET_OP_SECRET_TRADE", "MAIL_PRODUCER_SECRET_RANK",
+                "GAME_ASSET_OP_SECRET_MAIL", "GAME_ASSET_OP_SECRET_TRADE", "MAIL_PRODUCER_SECRET_ADMIN", "MAIL_PRODUCER_SECRET_RANK",
                 "RANK_PRODUCER_SECRET_MATCH", "MMORPG_INTERNAL_SECRET_SCENE", "GAME_MALL_GATEWAY_SECRET",
                 "GAME_MALL_PAYMENT_SECRET", "GAME_MALL_DELIVERY_SECRET", "GAME_MALL_ADMIN_SECRET");
         assertThat(recovery.substring(0, recovery.indexOf("; do"))).as("两端名单与顺序逐字相同").isEqualTo(names);

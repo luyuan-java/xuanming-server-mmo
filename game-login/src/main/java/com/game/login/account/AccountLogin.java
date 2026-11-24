@@ -262,6 +262,51 @@ public final class AccountLogin {
         }
     }
 
+    /** 周期续租（{@code RenewSession}）的结论：是否继续续租、下次间隔（秒）、是否需兜底踢掉超时的未成年人。 */
+    public record RenewOutcome(boolean renewed, int renewAfterSeconds, boolean kickMinor) {
+    }
+
+    /**
+     * gate 为活跃连接定期代发的续租（对齐 Go {@code RenewSessionLogic} + {@code renewWatchedSession}）：
+     * <ul>
+     *   <li>大厅未进场会话同步续期设备登记；会话已留关闭墓碑时立即收尾防沉迷账本并停止续租；</li>
+     *   <li>防沉迷会话账本顺延租约；若未成年人已过可玩截止时刻（gate 漏踢），由 login 兜底返回踢线指令；</li>
+     *   <li>续租间隔取 {@code sessionTtl / 3}（下限 1 秒），连续失败两次仍不早于 TTL 过期。</li>
+     * </ul>
+     */
+    public RenewOutcome renewSession(SessionContext session, java.time.Duration sessionTtl) {
+        if (session == null || session.getAccount().isEmpty() || session.getGateInstanceId().isEmpty()) {
+            return new RenewOutcome(false, 0, false);
+        }
+        String deviceKey = LoginDevices.sessionKey(session.getGateInstanceId(), session.getSessionId());
+        if (session.getPlayerId() == 0) {
+            LoginDevices.Admission admission = devices.admit(session.getAccount(), deviceKey);
+            if (admission != LoginDevices.Admission.ADMITTED) {
+                if (antiAddiction != null) {
+                    antiAddiction.endWatchedSessionQuietly(deviceKey);
+                }
+                return new RenewOutcome(false, 0, false);
+            }
+        }
+        if (antiAddiction != null) {
+            try {
+                long deadlineMs = antiAddiction.renewWatchedSession(deviceKey);
+                if (antiAddiction.isPastPlayDeadline(deadlineMs)) {
+                    log.error("未成年人超过防沉迷可玩截止时刻仍在线，login 兜底踢线 account={} session={} deadline_ms={}",
+                            session.getAccount(), deviceKey, deadlineMs);
+                    antiAddiction.endWatchedSessionQuietly(deviceKey);
+                    return new RenewOutcome(false, 0, true);
+                }
+            } catch (RuntimeException e) {
+                // 账本暂不可用时不踢线，留待下一次续租重试（同 Go anti_addiction.go）
+                log.error("防沉迷会话续租失败，下周期重试 session={}: {}", deviceKey, e.toString());
+            }
+        }
+        long seconds = (sessionTtl == null ? java.time.Duration.ofMinutes(30) : sessionTtl).toSeconds() / 3L;
+        int renewAfter = (int) Math.max(1L, Math.min(Integer.MAX_VALUE, seconds));
+        return new RenewOutcome(true, renewAfter, false);
+    }
+
     /**
      * 会话上的建角 / 进游戏之前续期设备登记（会话离开窗口后——进游戏失败回到大厅、离开游戏、登记过期——再在大厅里行动就重新计入）。
      * 返回拒绝码（名单已满 2024、存储出错 2023、会话已结束 2018）或 null。会话没绑账号时不做事（由调用方按 2028 处理）。

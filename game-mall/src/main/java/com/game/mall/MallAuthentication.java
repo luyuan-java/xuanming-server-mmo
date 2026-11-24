@@ -57,6 +57,8 @@ public final class MallAuthentication extends OncePerRequestFilter {
             Map.entry("/internal/refunds/close", "payment"),
             Map.entry("/internal/deliveries/poll", "delivery"),
             Map.entry("/internal/deliveries/receipt", "delivery"),
+            Map.entry("/internal/reversals/poll", "delivery"),
+            Map.entry("/internal/reversals/receipt", "delivery"),
             Map.entry("/internal/admin/skus/list", "admin"),
             Map.entry("/internal/admin/skus/create", "admin"),
             Map.entry("/internal/admin/skus/update", "admin"),
