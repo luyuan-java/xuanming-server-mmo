@@ -17,6 +17,7 @@ management:
         include: health,prometheus
 
 game:
+  advertise-host: ${GAME_ADVERTISE_HOST:127.0.0.1}
   content-guard:
     require-lexicon: false
     max-text-bytes: 4096
@@ -41,6 +42,7 @@ dubbo:
   protocol:
     name: tri
     port: 20919
+    host: ${game.advertise-host:127.0.0.1}
     serialization: protobuf
   registry:
     address: N/A

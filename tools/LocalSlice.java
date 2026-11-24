@@ -38,18 +38,20 @@ public final class LocalSlice {
     /** 与 tools/local/start-slice.sh SERVICES 及 stop-slice.sh 严格同序。 */
     private static final List<ServiceSpec> START_ORDER = List.of(
             new ServiceSpec("game-scene-manager", "game-scene-manager", List.of(20882), List.of()),
+            new ServiceSpec("game-content-guard", "game-content-guard", List.of(20919), List.of()),
             new ServiceSpec("game-login", "game-login", List.of(20881), List.of()),
             new ServiceSpec("game-friend", "game-friend", List.of(20883), List.of()),
             new ServiceSpec("game-chat", "game-chat", List.of(20884), List.of()),
+            new ServiceSpec("game-mail", "game-mail", List.of(20916), List.of()),
+            new ServiceSpec("game-rank", "game-rank", List.of(20917), List.of()),
             new ServiceSpec("game-match", "game-match", List.of(20888), List.of()),
             new ServiceSpec("game-team", "game-team", List.of(20885), List.of()),
             new ServiceSpec("game-guild", "game-guild", List.of(20886), List.of()),
             new ServiceSpec("game-mall", "game-mall", List.of(18120), List.of()),
             new ServiceSpec("game-payment", "game-payment", List.of(20920), List.of()),
             new ServiceSpec("game-trade", "game-trade", List.of(20887), List.of()),
-            new ServiceSpec("game-mail", "game-mail", List.of(20916), List.of()),
-            new ServiceSpec("game-rank", "game-rank", List.of(20917), List.of()),
             new ServiceSpec("game-data", "game-data", List.of(18106), List.of()),
+            new ServiceSpec("game-gm-admin", "game-gm-admin", List.of(18128), List.of()),
             new ServiceSpec("game-inbox", "game-inbox", List.of(20918), List.of()),
             new ServiceSpec("game-scene", "game-scene", List.of(21000, 21100, 18104), List.of()),
             new ServiceSpec("game-gate", "game-gate", List.of(11000), List.of()),
@@ -59,9 +61,10 @@ public final class LocalSlice {
 
     private static final List<String> STOP_ORDER = List.of(
             "game-battle", "game-match", "game-gateway", "game-gate-z2", "game-gate",
-            "game-scene-z2", "game-scene-2", "game-scene", "game-inbox", "game-data",
-            "game-rank", "game-mail", "game-trade", "game-payment", "game-mall",
-            "game-guild", "game-team", "game-chat", "game-friend", "game-login", "game-scene-manager"
+            "game-scene-z2", "game-scene-2", "game-scene", "game-inbox", "game-gm-admin", "game-data",
+            "game-trade", "game-payment", "game-mall", "game-guild", "game-team",
+            "game-rank", "game-mail", "game-chat", "game-friend", "game-login",
+            "game-content-guard", "game-scene-manager"
     );
 
     public static void main(String[] args) {

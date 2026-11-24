@@ -1,4 +1,4 @@
-# 完整 Java 开发栈：同一 TiDB 权威域，全部 17 个服务进程 + robot 工具镜像。
+# 完整 Java 开发栈：同一 TiDB 权威域，全部 20 个服务进程 + robot 工具镜像。
 # dev 固定在本文件；不可把单 PD/TiKV/Redis/Kafka 形态当成生产或故障耐久验收。
 # docker compose -f deploy/compose/stack.yaml --profile tools build
 # docker compose -f deploy/compose/stack.yaml up -d --wait --wait-timeout 600
@@ -71,6 +71,26 @@ services:
       <<: *health
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18102/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-scene-manager/20882'"]
 
+  game-content-guard:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-content-guard:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-content-guard
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: *common-env
+      GAME_ADVERTISE_HOST: "game-content-guard"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+    depends_on:
+      redis: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18119/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-content-guard/20919'"]
+
   game-login:
     <<: *java
     image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-login:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
@@ -87,12 +107,14 @@ services:
       GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
       GAME_LOGIN_DEV_PASSWORD: "${GAME_LOGIN_DEV_PASSWORD:?缺少 GAME_LOGIN_DEV_PASSWORD}"
       GAME_DUBBO_SCENEMANAGERURL: "tri://game-scene-manager:20882"
+      GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
       GAME_LOGIN_MODE: "dev"
     depends_on:
       route-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       kafka: {condition: service_healthy}
       game-scene-manager: {condition: service_healthy}
+      game-content-guard: {condition: service_healthy}
     healthcheck:
       <<: *health
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18101/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-login/20881'"]
@@ -135,11 +157,13 @@ services:
       <<: [*common-env, *db-env]
       GAME_ADVERTISE_HOST: "game-chat"
       GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
     depends_on:
       route-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       kafka: {condition: service_healthy}
       game-login: {condition: service_healthy}
+      game-content-guard: {condition: service_healthy}
     healthcheck:
       <<: *health
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18108/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-chat/20884'"]
@@ -264,11 +288,13 @@ services:
       GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
       GAME_ASSET_OP_SECRET_GUILD: "${GAME_ASSET_OP_SECRET_GUILD:?缺少 GAME_ASSET_OP_SECRET_GUILD}"
       GAME_MATCH_URL: "tri://game-match:20888"
+      GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
     depends_on:
       route-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       kafka: {condition: service_healthy}
       game-match: {condition: service_healthy}
+      game-content-guard: {condition: service_healthy}
     healthcheck:
       <<: *health
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18110/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-guild/20886'"]
@@ -299,6 +325,34 @@ services:
     healthcheck:
       <<: *health
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18121/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-mall/18120'"]
+
+  game-payment:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-payment:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-payment
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-payment"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_MALL_PAYMENT_SECRET: "${GAME_MALL_PAYMENT_SECRET:?缺少 GAME_MALL_PAYMENT_SECRET}"
+      GAME_PAYMENT_MALL_BASE_URL: "http://game-mall:18120"
+      GAME_DUBBO_LOGINURL: "tri://game-login:20881"
+      GAME_PAYMENT_NOTIFY_ADDRESS: "0.0.0.0"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      game-login: {condition: service_healthy}
+      game-mall: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18125/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-payment/20920'"]
 
   game-trade:
     <<: *java
@@ -361,6 +415,36 @@ services:
       <<: *health
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18106/actuator/health/readiness > /dev/null"]
 
+  game-gm-admin:
+    <<: *java
+    image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-gm-admin:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        MODULE: game-gm-admin
+        GAME_BUILD_COMMIT: ${GAME_BUILD_COMMIT:?必须设置构建提交}
+        GAME_BUILD_CONTRACT: ${GAME_BUILD_CONTRACT:?必须设置契约提交}
+    environment:
+      <<: [*common-env, *db-env]
+      GAME_ADVERTISE_HOST: "game-gm-admin"
+      GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
+      GAME_ADMIN_TOKEN: "${GAME_ADMIN_TOKEN:?缺少 GAME_ADMIN_TOKEN}"
+      GAME_GM_BIND_ADDRESS: "0.0.0.0"
+      GAME_GM_GATEWAY_URL: "http://game-data:18106"
+      GAME_GM_ALLOW_INSECURE_INTERNAL_GATEWAY: "true"
+      GAME_DUBBO_MAILURL: "tri://game-mail:20916"
+      GAME_DUBBO_MATCHURL: "tri://game-match:20888"
+    depends_on:
+      route-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      game-data: {condition: service_healthy}
+      game-mail: {condition: service_healthy}
+      game-match: {condition: service_healthy}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18129/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-gm-admin/18128'"]
+
   game-inbox:
     <<: *java
     image: ${GAME_IMAGE_NAMESPACE:-game-java}/game-inbox:${GAME_IMAGE_TAG:?必须设置不可变提交标签}
@@ -408,12 +492,14 @@ services:
       GAME_SCENE_LINKBINDHOST: "0.0.0.0"
       GAME_SCENE_SCENEMANAGERURL: "tri://game-scene-manager:20882"
       GAME_SCENE_INBOX_URL: "tri://game-inbox:20918"
+      GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
       GAME_ASSET_OP_SECRET_TRADE: "${GAME_ASSET_OP_SECRET_TRADE:?缺少 GAME_ASSET_OP_SECRET_TRADE}"
     depends_on:
       route-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       kafka: {condition: service_healthy}
       game-scene-manager: {condition: service_healthy}
+      game-content-guard: {condition: service_healthy}
       game-login: {condition: service_healthy}
       game-guild: {condition: service_healthy}
       game-inbox: {condition: service_healthy}
@@ -476,6 +562,7 @@ services:
       GAME_DUBBO_MAILURL: "tri://game-mail:20916"
       GAME_DUBBO_RANKURL: "tri://game-rank:20917"
       GAME_DUBBO_MATCHURL: "tri://game-match:20888"
+      GAME_DUBBO_PAYMENTURL: "tri://game-payment:20920"
     depends_on:
       route-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
@@ -489,6 +576,7 @@ services:
       game-mail: {condition: service_healthy}
       game-rank: {condition: service_healthy}
       game-match: {condition: service_healthy}
+      game-payment: {condition: service_healthy}
       game-scene: {condition: service_healthy}
     healthcheck:
       <<: *health

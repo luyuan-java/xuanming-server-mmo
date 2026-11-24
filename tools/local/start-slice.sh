@@ -73,7 +73,7 @@ sql_boot_environment() {
   local operator_url=${MMORPG_SQL_OPERATOR_JDBC_URL:-} operator_user=${MMORPG_SQL_OPERATOR_USER:-} operator_password=${MMORPG_SQL_OPERATOR_PASSWORD:-} operator_principal=${MMORPG_SQL_OPERATOR_PRINCIPAL:-}
   [[ "$mode" == normal || ( "$mode" == prepare && ( "$module" == game-scene || "$module" == game-match ) ) ]] || { echo 'prepare只支持已装配真实准备/开放接缝的game-scene/game-match' >&2; return 1; }
   local -A seen=()
-  case "$module" in game-battle|game-gate|game-gate-z2) sql=0;; esac
+  case "$module" in game-battle|game-gate|game-gate-z2|game-content-guard) sql=0;; esac
   # 每次launch先摘掉上一实例能力与Spring高优先级SQL覆盖；只能读取本boot选中完整配置。
   unset MMORPG_SQL_WRITER_GRANT_FILE MMORPG_SQL_WRITER_GRANT_SHA256 MMORPG_SQL_WRITER_CONSUME_DIR MMORPG_SQL_DEPLOYMENT_ID MMORPG_SQL_PHYSICAL_AUTHORITY_SHA256
   unset MMORPG_SQL_RUNTIME_CONFIG_FILE MMORPG_SQL_RUNTIME_CONFIG_SHA256 SPRING_CONFIG_ADDITIONAL_LOCATION
@@ -341,19 +341,21 @@ mkdir -p run/logs run/pids
 # 模块名 就绪端口…（一个进程可以列多个端口，逐个等到可连再起下一个）
 SERVICES=(
   "game-scene-manager 20882"
+  "game-content-guard 20919" # 内容安全：先于 login / chat / guild / scene 直连调用方启动
   "game-login 20881"
   "game-friend 20883"
   "game-chat 20884"
-  "game-match"              # 匹配：先等 Dubbo 20888，再等凑单、观战清扫与评分消费起来（见 wait_match_ready）。它是 game-team 与 game-gate 的
-                          # Dubbo 提供方，必须排在两者之前（文件头「启动次序的一条硬约束」）
+  "game-mail 20916"         # 邮件：先于 rank / gm-admin / gate 启动
+  "game-rank 20917"         # 排行榜：先于 match / gate 启动
+  "game-match"              # 匹配：先等 Dubbo 20888，再等凑单、观战清扫与评分消费起来（见 wait_match_ready）。它是 game-team、game-guild 与 game-gate 的
+                          # Dubbo 提供方，必须排在它们之前（文件头「启动次序的一条硬约束」）
   "game-team 20885"
   "game-guild 20886"
-  "game-mall 18120"         # 商城独立进程，冷库先显式执行其全新安装迁移；先于交易的商城交付调用方
+  "game-mall 18120"         # 商城独立进程，冷库先显式执行其全新安装迁移；先于交易与支付调用方
   "game-payment 20920"      # 支付服务：紧随商城启动，先于 gate 直连（ClientPlayerPayment 396–399）
   "game-trade 20887"        # 聚宝斋；播种接口在管理端口 18111（Tomcat 先于 Dubbo 暴露就绪，等 20887 即可）
-  "game-mail 20916"         # 邮件：先等 gate 直连的 Dubbo 端口
-  "game-rank 20917"         # 排行榜：先于 gate 启动
   "game-data 18106"
+  "game-gm-admin 18128"     # GM 管理后台：依赖 data / mail / match
   "game-inbox 20918"        # 收件箱：等待 Dubbo 就绪后，才启动各区的场景消费方
   "game-scene"              # 场景节点：起 GAME_SCENE_NODES 个实例，端口见下面的 SCENE_NODES；GAME_ZONES=2 时随后再起区 2 的 game-scene-z2
   "game-gate 11000"         # GAME_ZONES=2 时随后再起区 2 的 game-gate-z2（实例与端口见下面的 ZONE2_GATE）

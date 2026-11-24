@@ -35,5 +35,5 @@ for scenario in smoke movement reconnect bag currency attribute; do
 done
 # 运行过真实客户端后再看状态，不能只以端口曾开放一次证明整栈仍存活。
 "${compose[@]}" ps --format json > ci-logs/stack-status.jsonl
-java tools/StackCheck.java --status ci-logs/stack-status.jsonl --expected 17
-echo "JAVA_STACK_OK services=17 scenarios=6"
+java tools/StackCheck.java --status ci-logs/stack-status.jsonl --expected 20
+echo "JAVA_STACK_OK services=20 scenarios=6"

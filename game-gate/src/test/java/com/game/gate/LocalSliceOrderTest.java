@@ -58,10 +58,15 @@ class LocalSliceOrderTest {
     }
 
     @Test
-    void 清单解析得对_十八个进程_gate与gateway在后段_battle最后() {
-        assertThat(startOrder).containsExactly("game-scene-manager", "game-login", "game-friend", "game-chat", "game-match", "game-team", "game-guild",
-                "game-mall", "game-payment", "game-trade", "game-mail", "game-rank", "game-data", "game-inbox", "game-scene", "game-gate", "game-gateway", "game-battle");
+    void 清单解析得对_二十个进程_gate与gateway在后段_battle最后() {
+        assertThat(startOrder).containsExactly("game-scene-manager", "game-content-guard", "game-login", "game-friend",
+                "game-chat", "game-mail", "game-rank", "game-match", "game-team", "game-guild",
+                "game-mall", "game-payment", "game-trade", "game-data", "game-gm-admin", "game-inbox",
+                "game-scene", "game-gate", "game-gateway", "game-battle");
         assertThat(startOrder).doesNotHaveDuplicates();
+        assertThat(startOrder.indexOf("game-mail")).isLessThan(startOrder.indexOf("game-rank"))
+                .isLessThan(startOrder.indexOf("game-match"));
+        assertThat(startOrder.indexOf("game-content-guard")).isLessThan(startOrder.indexOf("game-login"));
     }
 
     @Test

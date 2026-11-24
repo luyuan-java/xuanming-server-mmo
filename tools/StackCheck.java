@@ -22,7 +22,7 @@ import org.w3c.dom.NodeList;
  * <p>用法：
  * <pre>
  *   docker compose --profile tools config --format json | java tools/StackCheck.java [--root .]
- *   java tools/StackCheck.java --status ci-logs/stack-status.jsonl [--expected 17] [--root .]
+ *   java tools/StackCheck.java --status ci-logs/stack-status.jsonl [--expected 20] [--root .]
  * </pre>
  * 不打印任何环境变量或密钥值。
  */
