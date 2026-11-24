@@ -37,7 +37,7 @@ class GuildParityClosureTest {
         assertThat(JdbcGuildStore.UPDATE_GUILD_SCORE).endsWith("WHERE guild_id = ?");
         assertThat(JdbcGuildStore.SELECT_ALL_VERSIONED_SCORES).doesNotContain("FOR UPDATE");
         assertThat(JdbcGuildStore.SELECT_SUCCESSOR_MEMBER)
-                .contains("ORDER BY role DESC, total_contribution DESC, join_time_ms ASC, player_id ASC LIMIT 1");
+                .contains("ORDER BY role DESC, contribution_total DESC, join_time_ms ASC, player_id ASC LIMIT 1");
     }
 
     @Test

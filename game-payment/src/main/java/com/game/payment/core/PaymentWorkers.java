@@ -26,7 +26,7 @@ public final class PaymentWorkers implements SmartLifecycle {
     private final boolean enabled;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean kickQueued = new AtomicBoolean(false);
-    private ScheduledExecutorService scheduler;
+    private volatile ScheduledExecutorService scheduler;
 
     public PaymentWorkers(PaymentService service, Duration interval, Duration refundPollInterval,
                           Duration historyInterval, boolean enabled) {
@@ -58,28 +58,27 @@ public final class PaymentWorkers implements SmartLifecycle {
     }
 
     @Override
-    public void start() {
-        if (!enabled || !running.compareAndSet(false, true)) {
+    public synchronized void start() {
+        if (!enabled || running.get()) {
             return;
         }
-        this.scheduler = Executors.newScheduledThreadPool(5, r -> {
-            Thread t = new Thread(r, "payment-worker");
-            t.setDaemon(true);
-            return t;
-        });
+        ScheduledExecutorService exec = Executors.newScheduledThreadPool(5,
+                Thread.ofPlatform().name("payment-worker-", 0).daemon(true).factory());
+        this.scheduler = exec;
+        running.set(true);
         long baseMs = Math.max(200L, interval.toMillis());
         long refundMs = Math.max(500L, refundPollInterval.toMillis());
         long histMs = Math.max(1000L, historyInterval.toMillis());
-        scheduler.scheduleWithFixedDelay(() -> runSafely("sweepIntents", service::sweepIntents), baseMs, baseMs, TimeUnit.MILLISECONDS);
-        scheduler.scheduleWithFixedDelay(() -> runSafely("pushMall", service::pushMall), baseMs, baseMs, TimeUnit.MILLISECONDS);
-        scheduler.scheduleWithFixedDelay(() -> runSafely("processRefunds", service::processRefunds), refundMs, refundMs, TimeUnit.MILLISECONDS);
-        scheduler.scheduleWithFixedDelay(() -> runSafely("finalizePending", service::finalizePending), baseMs, baseMs, TimeUnit.MILLISECONDS);
-        scheduler.scheduleWithFixedDelay(() -> runSafely("pollHistory", service::pollHistory), histMs, histMs, TimeUnit.MILLISECONDS);
+        exec.scheduleWithFixedDelay(() -> runSafely("sweepIntents", service::sweepIntents), baseMs, baseMs, TimeUnit.MILLISECONDS);
+        exec.scheduleWithFixedDelay(() -> runSafely("pushMall", service::pushMall), baseMs, baseMs, TimeUnit.MILLISECONDS);
+        exec.scheduleWithFixedDelay(() -> runSafely("processRefunds", service::processRefunds), refundMs, refundMs, TimeUnit.MILLISECONDS);
+        exec.scheduleWithFixedDelay(() -> runSafely("finalizePending", service::finalizePending), baseMs, baseMs, TimeUnit.MILLISECONDS);
+        exec.scheduleWithFixedDelay(() -> runSafely("pollHistory", service::pollHistory), histMs, histMs, TimeUnit.MILLISECONDS);
         log.info("[payment] background workers started interval={}ms refund={}ms history={}ms", baseMs, refundMs, histMs);
     }
 
     @Override
-    public void stop() {
+    public synchronized void stop() {
         if (!running.compareAndSet(true, false)) {
             return;
         }

@@ -166,7 +166,22 @@ public final class GuildCache {
         if (ids.isEmpty()) {
             return found;
         }
-        if(authoritativeReads){for(long guild:ids)guild(guild,deadline).ifPresent(value->found.put(guild,value));return found;}
+        if (authoritativeReads) {
+            for (long guildId : ids) {
+                if (deadline.expired()) {
+                    log.error("[guild] 展示批量权威读预算用完，已读 {}/{}", found.size(), ids.size());
+                    break;
+                }
+                try {
+                    guild(guildId, deadline).ifPresent(value -> found.put(guildId, value));
+                } catch (DependencyException e) {
+                    metrics.cache(CacheKind.SNAPSHOT, CacheResult.ERROR);
+                    log.error("[guild] 展示权威读失败 guild={}，该条只带 id / 分数 / 名次: {}",
+                            Long.toUnsignedString(guildId), rootMessage(e));
+                }
+            }
+            return found;
+        }
         List<String> keys = ids.stream().map(redisKeys::guildSnapshot).toList();
         Map<String, byte[]> raw;
         try {

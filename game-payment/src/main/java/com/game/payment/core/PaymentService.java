@@ -1055,13 +1055,17 @@ public final class PaymentService {
                 if (!out.hasRefundReason()) {
                     metrics.countMallPush("bound");
                     store.settleMall(txn, lease, new MallSync(PaymentRecords.MALL_BOUND, "", 0, true, ""), nowMs);
-                    if (PaymentRecords.isRevoked(txn.factRevision()) && (txn.orderHi() != 0L || txn.orderLo() != 0L)) {
+                    TxnRecord latest = store.findTxn(txn.channel(), txn.txnHi(), txn.txnLo());
+                    int latestRev = latest != null ? latest.factRevision() : txn.factRevision();
+                    if (PaymentRecords.isRevoked(latestRev) && (txn.orderHi() != 0L || txn.orderLo() != 0L)) {
                         applyFlip(txn.orderHi(), txn.orderLo(), PaymentRecords.INTENT_CLOSED, nowMs);
                     }
                 } else {
                     metrics.countMallPush("refund_queued");
                     store.settleMall(txn, lease, new MallSync(PaymentRecords.MALL_REFUND_QUEUED, out.refundReason(), 0, true, ""), nowMs);
-                    if (PaymentRecords.isRevoked(txn.factRevision())
+                    TxnRecord latest = store.findTxn(txn.channel(), txn.txnHi(), txn.txnLo());
+                    int latestRev = latest != null ? latest.factRevision() : txn.factRevision();
+                    if (PaymentRecords.isRevoked(latestRev)
                             && MallClient.refundsOrdersOwnPayment(out.refundReason())
                             && (txn.orderHi() != 0L || txn.orderLo() != 0L)) {
                         applyFlip(txn.orderHi(), txn.orderLo(), PaymentRecords.INTENT_CLOSED, nowMs);

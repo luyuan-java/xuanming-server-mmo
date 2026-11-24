@@ -119,6 +119,11 @@ class PaymentContractHttpTest {
                     "{\"orderId\":\"" + o1 + "\"}").body());
             assertThat(view.get("state").asText()).isEqualTo("REVERSAL_PENDING");
             assertThat(view.get("paymentRevision").asInt()).isEqualTo(1);
+
+            // 10. 已被撤销进入 REVERSAL_PENDING 的官方订单不得再被交付拉取发放道具
+            JsonNode polled = json.readTree(call(http, "delivery", "trade", "/internal/deliveries/poll",
+                    "{\"cursor\":\"\",\"limit\":20}").body());
+            assertThat(polled.get("entries")).isEmpty();
         }
     }
 

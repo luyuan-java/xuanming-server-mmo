@@ -1,9 +1,12 @@
 package com.game.data.admin;
 
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.common.zone.ZoneIdJsonDeserializer;
+import com.game.common.zone.ZoneIds;
 import com.game.discovery.NodeDirectory;
 import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
@@ -63,7 +66,7 @@ public class SceneEvacuationAdminController {
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record EvacuateBody(Long zoneId, Long nodeId, Long ttlSec, Boolean force) {}
+    public record EvacuateBody(@JsonDeserialize(using = ZoneIdJsonDeserializer.class) Long zoneId, Long nodeId, Long ttlSec, Boolean force) {}
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     public record ChannelView(String sceneId, long sceneConfigId, long playerCount, String kind, String state) {
@@ -79,11 +82,11 @@ public class SceneEvacuationAdminController {
             Long evacuatingSince, boolean staleMark, long playerCount, List<ChannelView> channels, boolean evacuated) {}
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record EvacuateResult(int zoneId, int nodeId, String instanceId, boolean marked, Long evacuatingSince) {}
+    public record EvacuateResult(long zoneId, int nodeId, String instanceId, boolean marked, Long evacuatingSince) {}
 
     @GetMapping(PATH + "/{zoneId}")
-    public List<SceneView> list(@PathVariable("zoneId") int zoneId) {
-        positive(zoneId, "zone_id");
+    public List<SceneView> list(@PathVariable("zoneId") long zoneNumber) {
+        int zoneId = ZoneAdminController.requiredZone(zoneNumber);
         return redis(() -> {
             List<SceneNodeInfo> nodes = directory.get().list(zoneId);
             Map<Integer, SceneEvacuationMarks.Mark> found = marks.get().evacuating(zoneId,
@@ -102,7 +105,11 @@ public class SceneEvacuationAdminController {
 
     @PostMapping(PATH + "/evacuate")
     public EvacuateResult evacuate(@RequestBody EvacuateBody body, HttpServletRequest request) {
-        int zone = id(body.zoneId(), "zone_id");
+        if (body.zoneId() == null || body.zoneId() <= 0 || body.zoneId() > ZoneIds.MAX) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 须在 1–4294967295");
+        }
+        int zone = ZoneIds.requiredBits(body.zoneId());
+        long zoneNumber = body.zoneId();
         int nodeId = id(body.nodeId(), "node_id");
         long ttl = body.ttlSec() == null ? DEFAULT_TTL_SECONDS : body.ttlSec();
         if (ttl < minTtlSeconds || ttl > MAX_TTL_SECONDS) {
@@ -132,7 +139,7 @@ public class SceneEvacuationAdminController {
             SceneEvacuationMarks.MarkResult result = marks.get().mark(zone, nodeId, target.getInstanceId(),
                     Duration.ofSeconds(ttl), force ? null : others);
             audit.warn("scene evacuate zone_id={} node_id={} instance={} result={} ttl_sec={} force={} operator={}",
-                    zone, nodeId, target.getInstanceId(), result, ttl, force, ZoneAdminController.operator(request));
+                    zoneNumber, nodeId, target.getInstanceId(), result, ttl, force, ZoneAdminController.operator(request));
             if (result == SceneEvacuationMarks.MarkResult.LAST_NODE) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "last_node：本区没有其他可接客 scene，确认要打带 force=true");
             }
@@ -146,18 +153,18 @@ public class SceneEvacuationAdminController {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "zone_retired：区服已永久退役");
             }
             SceneEvacuationMarks.Mark mark = marks.get().read(zone, nodeId);
-            return new EvacuateResult(zone, nodeId, target.getInstanceId(), result == SceneEvacuationMarks.MarkResult.MARKED,
+            return new EvacuateResult(zoneNumber, nodeId, target.getInstanceId(), result == SceneEvacuationMarks.MarkResult.MARKED,
                     mark != null && mark.appliesTo(target.getInstanceId()) ? mark.markedAtSec() : null);
         });
     }
 
     @DeleteMapping(PATH + "/evacuate/{zoneId}/{nodeId}")
-    public ResponseEntity<Void> cancel(@PathVariable("zoneId") int zoneId, @PathVariable("nodeId") int nodeId,
+    public ResponseEntity<Void> cancel(@PathVariable("zoneId") long zoneNumber, @PathVariable("nodeId") int nodeId,
             HttpServletRequest request) {
-        positive(zoneId, "zone_id");
+        int zoneId = ZoneAdminController.requiredZone(zoneNumber);
         positive(nodeId, "node_id");
         redis(() -> { marks.get().clear(zoneId, nodeId); return null; });
-        audit.warn("scene evacuation cancel zone_id={} node_id={} operator={}", zoneId, nodeId,
+        audit.warn("scene evacuation cancel zone_id={} node_id={} operator={}", zoneNumber, nodeId,
                 ZoneAdminController.operator(request));
         return ResponseEntity.noContent().build();
     }

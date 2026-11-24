@@ -472,7 +472,7 @@ public final class GoogleChannel implements PaymentChannel, PaymentChannel.Recei
                 throw new ChannelException(ChannelException.Kind.TEMP_UNAVAILABLE, "google certs wait failed", e);
             }
         }
-        CertsResult fetched;
+        CertsResult fetched = null;
         try {
             fetched = new CertsResult(fetchCerts(), null);
         } catch (ChannelException e) {
@@ -481,19 +481,22 @@ public final class GoogleChannel implements PaymentChannel, PaymentChannel.Recei
         } catch (RuntimeException e) {
             fetched = new CertsResult(Map.of(),
                     new ChannelException(ChannelException.Kind.TEMP_UNAVAILABLE, "google OIDC certs unavailable", e));
-        }
-        certsLock.lock();
-        try {
-            certsInflight = null;
-            if (fetched.error() == null) {
-                Instant fetchedAt = clock.instant();
-                certs = fetched.keys();
-                certsFetchedAt = fetchedAt;
-                certsExpiry = fetchedAt.plus(Duration.ofHours(1));
-            }
-            leader.complete(fetched);
         } finally {
-            certsLock.unlock();
+            CertsResult completed = fetched != null ? fetched
+                    : new CertsResult(Map.of(), new ChannelException(ChannelException.Kind.TEMP_UNAVAILABLE, "google OIDC certs aborted"));
+            certsLock.lock();
+            try {
+                certsInflight = null;
+                if (completed.error() == null) {
+                    Instant fetchedAt = clock.instant();
+                    certs = completed.keys();
+                    certsFetchedAt = fetchedAt;
+                    certsExpiry = fetchedAt.plus(Duration.ofHours(1));
+                }
+                leader.complete(completed);
+            } finally {
+                certsLock.unlock();
+            }
         }
         if (fetched.error() != null) {
             throw fetched.error();
@@ -613,24 +616,27 @@ public final class GoogleChannel implements PaymentChannel, PaymentChannel.Recei
                 throw new ChannelException(ChannelException.Kind.OTHER, "google token wait failed", e);
             }
         }
-        TokenResult res;
+        TokenResult res = null;
         try {
             res = fetchToken();
         } catch (ChannelException e) {
             res = new TokenResult("", Instant.EPOCH, e);
         } catch (RuntimeException e) {
             res = new TokenResult("", Instant.EPOCH, new ChannelException(ChannelException.Kind.OTHER, e.getMessage(), e));
-        }
-        tokenLock.lock();
-        try {
-            tokenInflight = null;
-            if (res.error() == null) {
-                accessToken = res.token();
-                tokenExpiry = res.expiry();
-            }
-            leader.complete(res);
         } finally {
-            tokenLock.unlock();
+            TokenResult completed = res != null ? res
+                    : new TokenResult("", Instant.EPOCH, new ChannelException(ChannelException.Kind.OTHER, "google token aborted"));
+            tokenLock.lock();
+            try {
+                tokenInflight = null;
+                if (completed.error() == null) {
+                    accessToken = completed.token();
+                    tokenExpiry = completed.expiry();
+                }
+                leader.complete(completed);
+            } finally {
+                tokenLock.unlock();
+            }
         }
         if (res.error() != null) {
             throw res.error();

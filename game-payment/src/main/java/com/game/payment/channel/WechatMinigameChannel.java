@@ -428,24 +428,27 @@ public final class WechatMinigameChannel implements PaymentChannel, PaymentChann
         if (waitOn != null) {
             return awaitToken(waitOn);
         }
-        TokenResult res;
+        TokenResult res = null;
         try {
             res = fetchStableToken();
         } catch (ChannelException e) {
             res = new TokenResult("", Instant.EPOCH, e);
         } catch (RuntimeException e) {
             res = new TokenResult("", Instant.EPOCH, new ChannelException(ChannelException.Kind.OTHER, e.getMessage(), e));
-        }
-        tokenLock.lock();
-        try {
-            tokenInflight = null;
-            if (res.error() == null) {
-                accessToken = res.token();
-                tokenExpiry = res.expiry();
-            }
-            leader.complete(res);
         } finally {
-            tokenLock.unlock();
+            TokenResult completed = res != null ? res
+                    : new TokenResult("", Instant.EPOCH, new ChannelException(ChannelException.Kind.OTHER, "stable_token aborted"));
+            tokenLock.lock();
+            try {
+                tokenInflight = null;
+                if (completed.error() == null) {
+                    accessToken = completed.token();
+                    tokenExpiry = completed.expiry();
+                }
+                leader.complete(completed);
+            } finally {
+                tokenLock.unlock();
+            }
         }
         if (res.error() != null) {
             throw res.error();

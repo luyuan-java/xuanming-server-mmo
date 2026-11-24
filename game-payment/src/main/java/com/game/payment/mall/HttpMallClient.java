@@ -26,7 +26,7 @@ import javax.crypto.spec.SecretKeySpec;
 /**
  * 商城 HTTP 客户端实现（v1 HMAC-SHA256 签名，与 {@code game-mall} 和 Go {@code mall.Client} 逐字节一致）。
  */
-public final class HttpMallClient implements MallClient {
+public final class HttpMallClient implements MallClient, AutoCloseable {
 
     private static final int MAX_BODY_BYTES = 256 * 1024;
     private static final HexFormat HEX = HexFormat.of();
@@ -253,5 +253,11 @@ public final class HttpMallClient implements MallClient {
             case 409 -> throw new MallClientException(MallClientException.Kind.CONFLICT, 409, "mall: conflict (409)", null);
             default -> throw new MallClientException(MallClientException.Kind.HTTP_STATUS, code, "mall: HTTP " + code, null);
         }
+    }
+
+    @Override
+    @jakarta.annotation.PreDestroy
+    public void close() {
+        http.close();
     }
 }

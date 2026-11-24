@@ -12,7 +12,9 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.LongSupplier;
@@ -125,7 +127,7 @@ public final class PlayerTradeStore {
         byte[] token = ascii(UUID.randomUUID().toString());
         return transaction(timeout, () -> {
             routeLock(request.playerId());
-            lockAccounts(request.sellerAccount());
+            Map<String, Integer> deletionStates = lockAccounts(request.sellerAccount());
             long now = millis.getAsLong();
             sql.update("INSERT INTO player_trade_freeze(listing_id,player_id,seller_account,owner_revision,freeze_epoch,"
                     + "request_digest,creation_token,status,created_ms,updated_ms) VALUES(?,?,?,?,0,?,?,'FREEZING',?,?)"
@@ -137,6 +139,9 @@ public final class PlayerTradeStore {
                 if (terminal(row.receipt().status())) return row.receipt();
                 bound(row.receipt());
                 return row.receipt();
+            }
+            if (deletionStates.getOrDefault(request.sellerAccount(), 0) != 0) {
+                throw fail(Code.CONFLICT, "卖家账号已进入注销流程，禁止冻结出售角色");
             }
             if (request.ownerRevision() == Long.MAX_VALUE) throw fail(Code.CONFLICT, "账号归属修订已耗尽，不能再出售角色");
             Owner owner = owner(request.playerId());
@@ -212,7 +217,7 @@ public final class PlayerTradeStore {
         byte[] token = ascii(UUID.randomUUID().toString());
         return transaction(timeout, () -> {
             routeLock(request.playerId());
-            lockAccounts(request.sellerAccount(), request.buyerAccount());
+            Map<String, Integer> deletionStates = lockAccounts(request.sellerAccount(), request.buyerAccount());
             FreezeRow listing = freeze(request.listingId());
             var freezeRequest = new FreezeRequest(request.listingId(), request.playerId(), request.sellerAccount(), request.ownerRevision());
             match(listing, freezeRequest, digest("freeze", request.listingId(), request.playerId(), request.ownerRevision(), request.sellerAccount()));
@@ -229,6 +234,9 @@ public final class PlayerTradeStore {
                 if (!"APPLIED".equals(previous.status()) || previous.receipt().newRevision() != request.ownerRevision() + 1)
                     throw fail(Code.CORRUPT, "过户收据原件未完成或损坏");
                 return previous.receipt();
+            }
+            if (deletionStates.getOrDefault(request.buyerAccount(), 0) != 0) {
+                throw fail(Code.CONFLICT, "买家账号已进入注销流程，禁止角色过户");
             }
             if (listing.receipt().status() != Status.FROZEN || listing.cancelling()) throw fail(Code.NOT_READY, "角色尚未完成冻结或正在撤单");
             Owner owner = bound(listing.receipt());
@@ -296,13 +304,17 @@ public final class PlayerTradeStore {
         if (rows.size() != 1) throw fail(Code.CORRUPT, "过户原请求不存在");
         return rows.getFirst();
     }
-    private void lockAccounts(String... values) {
+    private Map<String, Integer> lockAccounts(String... values) {
         List<String> accounts = new ArrayList<>(List.of(values));
         accounts.sort((left, right) -> Arrays.compareUnsigned(utf8(left), utf8(right)));
+        Map<String, Integer> deletionStates = new HashMap<>();
         for (String value : accounts.stream().distinct().toList()) {
-            var rows = sql.queryForList("SELECT account FROM account WHERE account=? FOR UPDATE", String.class, value);
-            if (rows.size() != 1 || !value.equals(rows.getFirst())) throw fail(Code.NOT_FOUND, "原账号不存在");
+            var rows = sql.query("SELECT account, deletion_state FROM account WHERE account=? FOR UPDATE",
+                    (rs, ignored) -> Map.entry(rs.getString(1), rs.getInt(2)), value);
+            if (rows.size() != 1 || !value.equals(rows.getFirst().getKey())) throw fail(Code.NOT_FOUND, "原账号不存在");
+            deletionStates.put(value, rows.getFirst().getValue());
         }
+        return deletionStates;
     }
     private <T> T transaction(Duration timeout, Supplier<T> work) {
         if (timeout == null || timeout.isNegative() || timeout.isZero() || timeout.compareTo(Duration.ofSeconds(30)) > 0)

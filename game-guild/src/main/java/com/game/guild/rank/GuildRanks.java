@@ -397,31 +397,52 @@ public final class GuildRanks {
         return Optional.of(new RankEntry(guildId, toScore(raw.score(), key), (int) (raw.index() + 1)));
     }
     private java.sql.PreparedStatement sql(java.sql.Connection c,Deadline d,String query,Object...values)throws java.sql.SQLException{
-        if(d.expired())throw new java.sql.SQLTimeoutException("帮会SQL排行预算耗尽");var p=c.prepareStatement(query);p.setQueryTimeout((int)Math.max(1,Math.min(3,(d.remainingMillis()+999)/1000)));for(int i=0;i<values.length;i++)p.setObject(i+1,values[i]);return p;
+        if(d.expired())throw new java.sql.SQLTimeoutException("帮会SQL排行预算耗尽");
+        var p=c.prepareStatement(query);
+        try{
+            p.setQueryTimeout((int)Math.max(1,Math.min(3,(d.remainingMillis()+999)/1000)));
+            for(int i=0;i<values.length;i++)p.setObject(i+1,values[i]);
+            return p;
+        }catch(java.sql.SQLException|RuntimeException failure){
+            try{p.close();}catch(java.sql.SQLException suppressed){failure.addSuppressed(suppressed);}
+            throw failure;
+        }
     }
     private RankPage sqlPage(int zone,int page,int size,Deadline deadline){
         long p=Integer.toUnsignedLong(page),n=Integer.toUnsignedLong(size),start=p==0?0:(p-1)*n;
         if(n>50)throw new IllegalArgumentException("排行单页超过正式上限");
         try(var c=sqlSource.getConnection()){
-            c.setTransactionIsolation(java.sql.Connection.TRANSACTION_REPEATABLE_READ);c.setAutoCommit(false);
-            try{long total;String where=zone==0?"":" WHERE zone_id="+Integer.toUnsignedLong(zone);
-                try(var q=sql(c,deadline,"SELECT COUNT(*) FROM guild"+where);var r=q.executeQuery()){r.next();total=r.getLong(1);}
-                var entries=new ArrayList<RankEntry>();if(p!=0&&n!=0&&Long.compareUnsigned(start,total)<0){
-                    try(var q=sql(c,deadline,"SELECT guild_id,score FROM guild"+where+" ORDER BY score DESC,CAST(guild_id AS CHAR) COLLATE utf8mb4_bin DESC LIMIT ? OFFSET ?",n,start);var r=q.executeQuery()){while(r.next())entries.add(new RankEntry(Long.parseUnsignedLong(r.getString(1)),r.getLong(2),(int)(start+entries.size()+1)));}
-                }
-                if(deadline.expired())throw new java.sql.SQLTimeoutException("帮会SQL排行预算耗尽");c.commit();return new RankPage(entries,total);
-            }catch(java.sql.SQLException|RuntimeException failure){try{c.rollback();}catch(java.sql.SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
+            boolean prevAuto=c.getAutoCommit();int prevIso=c.getTransactionIsolation();
+            try{
+                c.setTransactionIsolation(java.sql.Connection.TRANSACTION_REPEATABLE_READ);c.setAutoCommit(false);
+                try{long total;String where=zone==0?"":" WHERE zone_id="+Integer.toUnsignedLong(zone);
+                    try(var q=sql(c,deadline,"SELECT COUNT(*) FROM guild"+where);var r=q.executeQuery()){r.next();total=r.getLong(1);}
+                    var entries=new ArrayList<RankEntry>();if(p!=0&&n!=0&&Long.compareUnsigned(start,total)<0){
+                        try(var q=sql(c,deadline,"SELECT guild_id,score FROM guild"+where+" ORDER BY score DESC,CAST(guild_id AS CHAR) COLLATE utf8mb4_bin DESC LIMIT ? OFFSET ?",n,start);var r=q.executeQuery()){while(r.next())entries.add(new RankEntry(Long.parseUnsignedLong(r.getString(1)),r.getLong(2),(int)(start+entries.size()+1)));}
+                    }
+                    if(deadline.expired())throw new java.sql.SQLTimeoutException("帮会SQL排行预算耗尽");c.commit();return new RankPage(entries,total);
+                }catch(java.sql.SQLException|RuntimeException failure){try{c.rollback();}catch(java.sql.SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
+            }finally{
+                try{c.setAutoCommit(prevAuto);}catch(java.sql.SQLException ignored){}
+                try{c.setTransactionIsolation(prevIso);}catch(java.sql.SQLException ignored){}
+            }
         }catch(java.sql.SQLException failure){throw new DependencyException("帮会SQL区榜读取失败",failure);}
     }
     private Optional<RankEntry> sqlRank(long guild,int zone,Deadline deadline){
         try(var c=sqlSource.getConnection()){
-            c.setTransactionIsolation(java.sql.Connection.TRANSACTION_REPEATABLE_READ);c.setAutoCommit(false);
-            try{Long score;String where=zone==0?"":" AND zone_id="+Integer.toUnsignedLong(zone);
-                try(var q=sql(c,deadline,"SELECT score FROM guild WHERE guild_id=?"+where,com.game.common.player.PlayerRouteAuthority.u64(guild));var r=q.executeQuery()){score=r.next()?r.getLong(1):null;}
-                if(score==null){c.commit();return Optional.empty();}long higher;
-                try(var q=sql(c,deadline,"SELECT COUNT(*) FROM guild WHERE (score>? OR (score=? AND CAST(guild_id AS CHAR) COLLATE utf8mb4_bin > ?))"+where,score,score,Long.toUnsignedString(guild));var r=q.executeQuery()){r.next();higher=r.getLong(1);}
-                if(deadline.expired())throw new java.sql.SQLTimeoutException("帮会SQL排行预算耗尽");c.commit();return Optional.of(new RankEntry(guild,score,(int)(higher+1)));
-            }catch(java.sql.SQLException|RuntimeException failure){try{c.rollback();}catch(java.sql.SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
+            boolean prevAuto=c.getAutoCommit();int prevIso=c.getTransactionIsolation();
+            try{
+                c.setTransactionIsolation(java.sql.Connection.TRANSACTION_REPEATABLE_READ);c.setAutoCommit(false);
+                try{Long score;String where=zone==0?"":" AND zone_id="+Integer.toUnsignedLong(zone);
+                    try(var q=sql(c,deadline,"SELECT score FROM guild WHERE guild_id=?"+where,com.game.common.player.PlayerRouteAuthority.u64(guild));var r=q.executeQuery()){score=r.next()?r.getLong(1):null;}
+                    if(score==null){c.commit();return Optional.empty();}long higher;
+                    try(var q=sql(c,deadline,"SELECT COUNT(*) FROM guild WHERE (score>? OR (score=? AND CAST(guild_id AS CHAR) COLLATE utf8mb4_bin > ?))"+where,score,score,Long.toUnsignedString(guild));var r=q.executeQuery()){r.next();higher=r.getLong(1);}
+                    if(deadline.expired())throw new java.sql.SQLTimeoutException("帮会SQL排行预算耗尽");c.commit();return Optional.of(new RankEntry(guild,score,(int)(higher+1)));
+                }catch(java.sql.SQLException|RuntimeException failure){try{c.rollback();}catch(java.sql.SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
+            }finally{
+                try{c.setAutoCommit(prevAuto);}catch(java.sql.SQLException ignored){}
+                try{c.setTransactionIsolation(prevIso);}catch(java.sql.SQLException ignored){}
+            }
         }catch(java.sql.SQLException failure){throw new DependencyException("帮会SQL名次读取失败",failure);}
     }
 

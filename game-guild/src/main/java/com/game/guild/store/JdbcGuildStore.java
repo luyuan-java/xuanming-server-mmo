@@ -106,7 +106,7 @@ public final class JdbcGuildStore implements GuildStore {
     /** M12：帮主注销自动让位候选排序（职位最高→累计帮贡最多→入帮最早→player_id 最小）。 */
     static final String SELECT_SUCCESSOR_MEMBER =
             "SELECT player_id FROM guild_member WHERE guild_id = ? AND player_id <> ?"
-                    + " ORDER BY role DESC, total_contribution DESC, join_time_ms ASC, player_id ASC LIMIT 1";
+                    + " ORDER BY role DESC, contribution_total DESC, join_time_ms ASC, player_id ASC LIMIT 1";
 
     // ---------------------------------------------------------------- S：guild_player_state
     /** S1：补建状态行 / 哨兵行。 */
@@ -937,8 +937,10 @@ public final class JdbcGuildStore implements GuildStore {
             t.updateExactlyOne("注销解散删帮会 " + id(guildId), DELETE_GUILD, guildId);
             return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.DISBANDED, guildId, guild.zoneId(), 0L));
         });
-        return outcome instanceof TxOutcome.Ok<DeletionOutcome> ok ? ok.value()
-                : new DeletionOutcome(DeletionOutcome.Kind.NOT_IN_GUILD, 0L, 0, 0L);
+        if (outcome instanceof TxOutcome.Ok<DeletionOutcome> ok) {
+            return ok.value();
+        }
+        throw new Deadline.DependencyException("注销帮会收尾事务未确认，禁止伪装不在帮: " + outcome);
     }
 
     // ================================================================ 状态行与守卫

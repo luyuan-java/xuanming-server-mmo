@@ -168,6 +168,18 @@ class RmbConsignmentStoreTest {
         }
     }
 
+    @Test void 罚没金额必须扣出可提现余额_禁止超提或触发约束失败() throws Exception {
+        try (var f = new Fixture()) {
+            f.earned("1002", 101); // net_fen = 95
+            f.clock.add(1_000);
+            f.db.jdbc.update("UPDATE commerce_seller_income SET forfeited_fen=40");
+            rejects(409, () -> f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "forfeit-over-001", 56)));
+            var ok = f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "forfeit-exact-001", 55));
+            assertEquals("REQUESTED", ok.state());
+            assertEquals(55, f.db.value("commerce_seller_income", "reserved_fen"));
+        }
+    }
+
     @Test void 本地提供方先提交与结算先提交两个窗口均按原流水恢复() {
         for (boolean afterSettlement : List.of(false, true)) {
             try (var f = new Fixture()) {

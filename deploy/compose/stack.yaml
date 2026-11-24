@@ -375,6 +375,7 @@ services:
       GAME_TRADE_MALL_URL: "http://game-mall:18120"
       GAME_TRADE_MALL_ENABLED: "true"
       GAME_TRADE_COMMERCE_ENABLED: "true"
+      GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
       GAME_ASSET_OP_SECRET_TRADE: "${GAME_ASSET_OP_SECRET_TRADE:?缺少 GAME_ASSET_OP_SECRET_TRADE}"
     depends_on:
       route-init: {condition: service_completed_successfully}

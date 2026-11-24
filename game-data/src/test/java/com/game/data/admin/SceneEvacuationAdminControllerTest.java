@@ -99,10 +99,16 @@ class SceneEvacuationAdminControllerTest {
     void 未知节点404_非法请求400且零写_重复身份503() {
         when(directory.list(1)).thenReturn(List.of(node(1, false, 0)));
         assertThatThrownBy(() -> call(1L, 2L, null, true)).hasMessageContaining("404");
-        for (Long bad : new Long[] {null, 0L, -1L, 2_147_483_648L}) {
-            assertThatThrownBy(() -> call(bad, 1L, null, true)).hasMessageContaining("400");
-            assertThatThrownBy(() -> call(1L, bad, null, true)).hasMessageContaining("400");
+        for (Long badZone : new Long[] {null, 0L, -1L, 4_294_967_296L}) {
+            assertThatThrownBy(() -> call(badZone, 1L, null, true)).hasMessageContaining("400");
         }
+        for (Long badNode : new Long[] {null, 0L, -1L, 2_147_483_648L}) {
+            assertThatThrownBy(() -> call(1L, badNode, null, true)).hasMessageContaining("400");
+        }
+        // 高位 uint32 zone_id（> 2^31-1）与 ZoneAdminController 同口径，不再被误拦为 400。
+        int highZoneBits = (int) 3_000_000_000L;
+        when(directory.list(highZoneBits)).thenReturn(List.of());
+        assertThatThrownBy(() -> call(3_000_000_000L, 1L, null, true)).hasMessageContaining("404");
         for (long bad : new long[] {-1, 0, 1799, 86401}) {
             assertThatThrownBy(() -> call(1L, 1L, bad, true)).hasMessageContaining("400");
         }

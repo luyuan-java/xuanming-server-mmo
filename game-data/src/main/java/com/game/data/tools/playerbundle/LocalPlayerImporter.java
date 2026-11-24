@@ -136,11 +136,19 @@ final class LocalPlayerImporter {
             writeState(plan, epoch, nowMs);
             connection.commit();
             return epoch;
-        } catch (SQLException | Refused | RuntimeException e) {
-            rollbackQuietly();
-            throw e;
+        } catch (SQLException | Refused | RuntimeException | Error failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+                // 不能在回滚未明的事务上通过恢复 autoCommit 意外提交。
+                try { connection.close(); } catch (SQLException closeFailure) { failure.addSuppressed(closeFailure); }
+            }
+            throw failure;
         } finally {
-            connection.setAutoCommit(autoCommit);
+            if (!connection.isClosed()) {
+                connection.setAutoCommit(autoCommit);
+            }
         }
     }
 

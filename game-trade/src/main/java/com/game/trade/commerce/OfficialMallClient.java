@@ -19,7 +19,7 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 /** Mall官方库存与游戏资产之间的可信接缝；HTTP未知时原订单与seq原样保留。 */
-public final class OfficialMallClient {
+public final class OfficialMallClient implements AutoCloseable {
     static final class HttpFailure extends IllegalStateException {
         private final int status;
         HttpFailure(int status) { super("商城HTTP请求失败：" + status); this.status = status; }
@@ -138,6 +138,8 @@ public final class OfficialMallClient {
             case "REFUND_PENDING" -> 8;
             case "REFUNDED" -> 9;
             case "MANUAL" -> 10;
+            case "REVERSAL_PENDING" -> 12;
+            case "REVERSED" -> 13;
             default -> throw new IllegalStateException("商城状态未知");
         };
         return CommerceOrderResponse.newBuilder()
@@ -324,5 +326,11 @@ public final class OfficialMallClient {
                 return null;
             });
         }
+    }
+
+    @Override
+    @jakarta.annotation.PreDestroy
+    public void close() {
+        http.close();
     }
 }

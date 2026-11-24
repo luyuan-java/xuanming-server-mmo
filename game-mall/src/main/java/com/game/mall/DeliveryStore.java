@@ -98,7 +98,9 @@ public final class DeliveryStore {
                         + "amount,o.currency,d.created_ms,p.buyer_account,p.buyer_owner_revision,o.buyer_id,o.sku_id,o.quantity "
                         + "FROM commerce_delivery_intent d JOIN commerce_order_grant g ON g.order_sn=d.order_sn JOIN oms_order "
                         + "o ON o.order_sn=d.order_sn LEFT JOIN commerce_official_owner p ON p.order_sn=d.order_sn "
-                        + "WHERE d.status='PENDING' AND d.sku_id<>0 AND (d.created_ms>? OR (d.created_ms=? AND d.order_sn>?)) "
+                        + "WHERE d.status='PENDING' AND d.sku_id<>0 AND o.status=1 "
+                        + "AND NOT EXISTS (SELECT 1 FROM commerce_reversal_intent r WHERE r.order_sn=d.order_sn) "
+                        + "AND (d.created_ms>? OR (d.created_ms=? AND d.order_sn>?)) "
                         + "AND (d.created_ms<? OR (d.created_ms=? AND d.order_sn<=?)) "
                         + "ORDER BY d.created_ms,d.order_sn LIMIT ?",
                 (r, n) -> {

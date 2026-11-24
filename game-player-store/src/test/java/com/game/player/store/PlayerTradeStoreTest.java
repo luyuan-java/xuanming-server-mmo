@@ -100,6 +100,24 @@ class PlayerTradeStoreTest {
         }
     }
 
+    @Test void 注销流程中的账号禁止新冻结或作为买家接收角色过户() throws Exception {
+        try (var f = new Fixture()) {
+            f.player(1, "seller");
+            var store = f.trade(5, true);
+            // 1. 卖家进入冷静期(deletion_state=1)时禁止新冻结出售
+            assertEquals(1, f.sql.update("UPDATE account SET deletion_state=1 WHERE account=?", "seller"));
+            refuses(Code.CONFLICT, () -> store.beginFreeze(freeze(201, 1, "seller", 1), BUDGET));
+            // 2. 卖家恢复正常后冻结成功，若买家进入注销流程(deletion_state=1)，禁止过户进注销账号
+            assertEquals(1, f.sql.update("UPDATE account SET deletion_state=0 WHERE account=?", "seller"));
+            var req = freeze(202, 1, "seller", 1);
+            store.beginFreeze(req, BUDGET);
+            store.confirmFreeze(req, BUDGET);
+            assertEquals(1, f.sql.update("UPDATE account SET deletion_state=1 WHERE account=?", "buyer"));
+            refuses(Code.CONFLICT, () -> store.transfer(transfer(601, 202, 1, "seller", "buyer", 1), BUDGET));
+            assertEquals("seller", f.row(1).getAccount());
+        }
+    }
+
     @Test void 买家满位不留成功收据_腾位后以原tx重试_同tx换载荷拒绝() throws Exception {
         try (var f = new Fixture()) {
             f.player(1, "seller");

@@ -7,6 +7,9 @@ import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Result;
+import org.apache.ibatis.annotations.ResultMap;
+import org.apache.ibatis.annotations.Results;
 import org.apache.ibatis.annotations.Select;
 
 /**
@@ -15,6 +18,9 @@ import org.apache.ibatis.annotations.Select;
  */
 @Mapper
 public interface PlayerSnapshotMapper {
+
+    String U32 = "typeHandler=com.game.data.store.UnsignedIntTypeHandler";
+    String U64 = "typeHandler=com.game.data.store.UnsignedLongTypeHandler";
 
     /** 元数据列（不取玩法数据本体，只给字节数）。 */
     String META = "snapshot_id, player_id, time_ms, cause, zone_id, owner_epoch, level, scene_config_id, pos_x, pos_y, pos_z, "
@@ -32,8 +38,14 @@ public interface PlayerSnapshotMapper {
                 scene_config_id, pos_x, pos_y, pos_z, player_state, ingested_at)
             VALUES
             <foreach collection="rows" item="r" separator=",">
-                (#{r.snapshotId}, #{r.playerId}, #{r.timeMs}, #{r.cause}, #{r.zoneId}, #{r.ownerEpoch}, #{r.level},
-                 #{r.sceneConfigId}, #{r.posX}, #{r.posY}, #{r.posZ}, #{r.playerState}, #{ingestedAt})
+                (#{r.snapshotId,""" + U64 + """
+            }, #{r.playerId,""" + U64 + """
+            }, #{r.timeMs}, #{r.cause}, #{r.zoneId,""" + U32 + """
+            }, #{r.ownerEpoch,""" + U64 + """
+            }, #{r.level,""" + U32 + """
+            },
+                 #{r.sceneConfigId,""" + U32 + """
+            }, #{r.posX}, #{r.posY}, #{r.posZ}, #{r.playerState}, #{ingestedAt})
             </foreach>
             ON DUPLICATE KEY UPDATE snapshot_id = snapshot_id
             </script>""")
@@ -48,24 +60,39 @@ public interface PlayerSnapshotMapper {
     @Insert("""
             INSERT INTO player_snapshot (snapshot_id, player_id, time_ms, cause, zone_id, owner_epoch, level,
                 scene_config_id, pos_x, pos_y, pos_z, player_state, ingested_at, operator, note)
-            VALUES (#{r.snapshotId}, #{r.playerId}, #{r.timeMs}, #{r.cause}, #{r.zoneId}, #{r.ownerEpoch}, #{r.level},
-                #{r.sceneConfigId}, #{r.posX}, #{r.posY}, #{r.posZ}, #{r.playerState}, #{ingestedAt}, #{operator}, #{note})""")
+            VALUES (#{r.snapshotId,""" + U64 + """
+            }, #{r.playerId,""" + U64 + """
+            }, #{r.timeMs}, #{r.cause}, #{r.zoneId,""" + U32 + """
+            }, #{r.ownerEpoch,""" + U64 + """
+            }, #{r.level,""" + U32 + """
+            },
+                #{r.sceneConfigId,""" + U32 + """
+            }, #{r.posX}, #{r.posY}, #{r.posZ}, #{r.playerState}, #{ingestedAt}, #{operator}, #{note})""")
     int insertDirect(@Param("r") PlayerSnapshotRow row, @Param("ingestedAt") long ingestedAt,
                      @Param("operator") String operator, @Param("note") String note);
 
     /** 按号取一份快照（含玩法数据本体）；没有为 null。 */
-    @Select("SELECT " + META + ", player_state FROM player_snapshot WHERE snapshot_id = #{id}")
+    @Results(id = "playerSnapshot", value = {
+            @Result(column = "snapshot_id", property = "snapshotId", typeHandler = UnsignedLongTypeHandler.class),
+            @Result(column = "player_id", property = "playerId", typeHandler = UnsignedLongTypeHandler.class),
+            @Result(column = "zone_id", property = "zoneId", typeHandler = UnsignedIntTypeHandler.class),
+            @Result(column = "owner_epoch", property = "ownerEpoch", typeHandler = UnsignedLongTypeHandler.class),
+            @Result(column = "level", property = "level", typeHandler = UnsignedIntTypeHandler.class),
+            @Result(column = "scene_config_id", property = "sceneConfigId", typeHandler = UnsignedIntTypeHandler.class)})
+    @Select("SELECT " + META + ", player_state FROM player_snapshot WHERE snapshot_id = #{id," + U64 + "}")
     PlayerSnapshotEntry findById(@Param("id") long snapshotId);
 
     /**
      * 某玩家在 {@code atMs}（含）之前、原因在白名单里的最近一份快照的元数据；同毫秒并列取号大的（雪花时间序）。没有为 null。
      * 白名单由调用方给（按时刻选源的缺省白名单不含安全快照，见 SnapshotCauses.POINT_IN_TIME_SOURCES）。
      */
+    @ResultMap("playerSnapshot")
     @Select("""
             <script>
             SELECT""" + " " + META + " " + """
               FROM player_snapshot
-             WHERE player_id = #{player} AND time_ms &lt;= #{atMs} AND cause IN
+             WHERE player_id = #{player,""" + U64 + """
+            } AND time_ms &lt;= #{atMs} AND cause IN
              <foreach collection="causes" item="c" open="(" separator="," close=")">#{c}</foreach>
              ORDER BY time_ms DESC, snapshot_id DESC LIMIT 1
             </script>""")
@@ -75,11 +102,13 @@ public interface PlayerSnapshotMapper {
     /**
      * 某玩家的快照元数据（半开窗口 [since, until)），可按原因过滤（空 = 全部），正序或倒序（时间、快照号），至多 {@code limit} 条。
      */
+    @ResultMap("playerSnapshot")
     @Select("""
             <script>
             SELECT""" + " " + META + " " + """
               FROM player_snapshot
-             WHERE player_id = #{player} AND time_ms &gt;= #{since} AND time_ms &lt; #{until}
+             WHERE player_id = #{player,""" + U64 + """
+            } AND time_ms &gt;= #{since} AND time_ms &lt; #{until}
              <if test="causes != null and !causes.isEmpty()">
                AND cause IN <foreach collection="causes" item="c" open="(" separator="," close=")">#{c}</foreach>
              </if>

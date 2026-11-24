@@ -63,6 +63,7 @@ management:
 game:
   dubbo:
     player-trade-url: ${GAME_PLAYER_TRADE_URL:tri://127.0.0.1:20881}
+    content-guard-url: ${GAME_DUBBO_CONTENTGUARDURL:tri://127.0.0.1:20919}
   # 运行模式：只有 dev / test（含别名 development / local / testing）开放播种接口，其余（含未设、写错）一律 403。进程缺省 prod；
   # 本机切片由 tools/local/start-slice.sh 设 GAME_RUN_MODE=dev。
   run-mode: ${GAME_RUN_MODE:prod}

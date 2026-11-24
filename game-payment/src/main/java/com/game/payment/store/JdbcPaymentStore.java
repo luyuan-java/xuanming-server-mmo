@@ -665,9 +665,18 @@ public final class JdbcPaymentStore implements PaymentStore {
 
     private Connection openSpendTx() throws SQLException {
         Connection c = dataSource.getConnection();
-        c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-        c.setAutoCommit(false);
-        return c;
+        try {
+            c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            c.setAutoCommit(false);
+            return c;
+        } catch (SQLException | RuntimeException failure) {
+            try {
+                c.close();
+            } catch (SQLException suppressed) {
+                failure.addSuppressed(suppressed);
+            }
+            throw failure;
+        }
     }
 
     private static void lockSpender(Connection c, long spenderHi, long spenderLo, long nowMs) throws SQLException {

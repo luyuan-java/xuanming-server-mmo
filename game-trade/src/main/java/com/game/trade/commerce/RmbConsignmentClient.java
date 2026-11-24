@@ -48,6 +48,7 @@ public final class RmbConsignmentClient {
         int state = switch (text(v,"state")) {
             case "AWAITING_PAYMENT" -> 2; case "DELIVERY_PENDING" -> 4; case "DELIVERED" -> 5;
             case "CANCELLED" -> 7; case "REFUND_PENDING" -> 8; case "REFUNDED" -> 9; case "MANUAL" -> 10;
+            case "REVERSAL_PENDING" -> 12; case "REVERSED" -> 13;
             default -> throw new IllegalStateException("商城订单状态未知");
         };
         if (!"CNY".equals(text(v,"currency"))) throw new IllegalStateException("寄售币种不符");
