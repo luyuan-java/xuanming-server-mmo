@@ -10,7 +10,10 @@ import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.chat.PullChatHistoryRequest;
+import com.game.proto.chat.ReportChatRequest;
+import com.game.proto.chat.RetractWorldChatRequest;
 import com.game.proto.chat.SendChatRequest;
+import com.game.table.ChatErrorTip;
 import com.game.table.CommonErrorTip;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -36,6 +39,8 @@ public final class ChatDispatcher {
     public static final String SERVICE = "ClientPlayerChat";
     static final String SEND = "SendChat";
     static final String PULL = "PullChatHistory";
+    static final String REPORT = "ReportChat";
+    static final String RETRACT_WORLD = "RetractWorldChat";
 
     private final MessageIdRegistry registry;
     private final ChatService service;
@@ -43,6 +48,8 @@ public final class ChatDispatcher {
     private final long budgetMillis;
     private final int sendId;
     private final int pullId;
+    private final int reportId;
+    private final int retractWorldId;
 
     public ChatDispatcher(MessageIdRegistry registry, ChatService service, ChatMetrics metrics, long budgetMillis) {
         this.registry = registry;
@@ -51,6 +58,8 @@ public final class ChatDispatcher {
         this.budgetMillis = budgetMillis;
         this.sendId = requireMethod(registry, SEND, SendChatRequest.class);
         this.pullId = requireMethod(registry, PULL, PullChatHistoryRequest.class);
+        this.reportId = requireMethod(registry, REPORT, ReportChatRequest.class);
+        this.retractWorldId = requireMethod(registry, RETRACT_WORLD, RetractWorldChatRequest.class);
     }
 
     private static int requireMethod(MessageIdRegistry registry, String method, Class<?> requestType) {
@@ -63,7 +72,7 @@ public final class ChatDispatcher {
     }
 
     public Set<Integer> routedMessageIds() {
-        return Set.of(sendId, pullId);
+        return Set.of(sendId, pullId, reportId, retractWorldId);
     }
 
     /** 没有调用方截止的派发（单测、进程内直调）：截止只看本地预算。 */
@@ -92,10 +101,20 @@ public final class ChatDispatcher {
                 return service.pull(call.getSession(), request, budget).toCompletableFuture()
                         .handle((response, error) -> finish(sample, PULL, response, error));
             }
+            if (messageId == reportId) {
+                ReportChatRequest request = ReportChatRequest.parseFrom(call.getBody());
+                return service.report(call.getSession(), request, budget).toCompletableFuture()
+                        .handle((response, error) -> finish(sample, REPORT, response, error));
+            }
+            if (messageId == retractWorldId) {
+                RetractWorldChatRequest request = RetractWorldChatRequest.parseFrom(call.getBody());
+                return service.retractWorld(request, budget).toCompletableFuture()
+                        .handle((response, error) -> finish(sample, RETRACT_WORLD, response, error));
+            }
         } catch (InvalidProtocolBufferException e) {
             log.warn("[chat] 请求体解析失败 message_id={} gate={} session={}: {}", messageId, call.getSession().getGateNodeId(),
                     call.getSession().getSessionId(), e.getMessage());
-            metrics.requestCompleted(sample, messageId == sendId ? SEND : PULL, RequestResult.BAD_REQUEST);
+            metrics.requestCompleted(sample, methodName(messageId), RequestResult.BAD_REQUEST);
             return CompletableFuture.completedFuture(envelope(CommonErrorTip.common_error.kServiceUnavailable_VALUE));
         }
         Optional<MessageMethod> known = registry.byId(messageId);
@@ -104,6 +123,14 @@ public final class ChatDispatcher {
         return CompletableFuture.completedFuture(envelope(known.isPresent()
                 ? CommonErrorTip.common_error.kFeatureUnavailable_VALUE
                 : CommonErrorTip.common_error.kMessageIdNotFound_VALUE));
+    }
+
+    private String methodName(int messageId) {
+        if (messageId == sendId) return SEND;
+        if (messageId == pullId) return PULL;
+        if (messageId == reportId) return REPORT;
+        if (messageId == retractWorldId) return RETRACT_WORLD;
+        return ChatMetrics.UNROUTED;
     }
 
     private ClientReply finish(Timer.Sample sample, String method, Message response, Throwable error) {
@@ -123,7 +150,9 @@ public final class ChatDispatcher {
             return RequestResult.OK;
         }
         TipInfoMessage tip = (TipInfoMessage) response.getField(field);
-        return tip.getId() == CommonErrorTip.common_error.kServiceUnavailable_VALUE
+        int id = tip.getId();
+        return (id == CommonErrorTip.common_error.kServiceUnavailable_VALUE
+                || id == ChatErrorTip.chat_error.kChatContentCheckUnavailable_VALUE)
                 ? RequestResult.INTERNAL_ERROR : RequestResult.BUSINESS_ERROR;
     }
 

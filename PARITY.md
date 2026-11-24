@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-23 聊天内容安全、举报（433）、世界撤回（434/435）与反刷屏（`game-chat`）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 聊天内容安全（打码/拒绝/联系方式 18005/不可用 18001 + 世界频道短超时放行后台异步复检自动撤回）、举报（`ReportChat` 433）、世界频道撤回（`RetractWorldChat` 434 / `ChatRetractedNotify` 435）与反刷屏门槛（世界冷却、世界最低等级 18002、跨副本重复哈希 18003、新号每日私聊上限 18004） | `go/chat`（`retract_report.go`、`content_review.go`、`store.go`、`chat_logic.go`、`schema.go`） | `game-chat` 新增 4 张追加只读表（`chat_world_retraction`/`chat_report`/`chat_repeat_event`/`chat_private_daily_target`）及 `ChatSqlConfiguration` 启动 schema 验真、`ChatDispatcher` 路由 433/434 与 18001 fault 归类、`JdbcChatStore` 撤回/举报/冷却/防刷/私聊日限与 `pull` 过滤撤回、`ChatService.TextGuard` 与 `WorldPublisher`（含 `game.chat.content-guard-enabled=true` Dubbo 装配与有界后台平台复检自动撤回）；`game-chat` 60 项单测全部通过（含 `ChatSafetyAndModerationTest` 4 项，6 项外部夹具跳过）；设计见 `docs/design/rename-and-content-safety.md` | 已对齐 |
+
 ## 2026-11-23 帮会改名（439）与内容安全接入（`game-guild`）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |

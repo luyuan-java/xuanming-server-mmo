@@ -67,6 +67,32 @@ public final class ChatRoleAuthority implements AutoCloseable {
         return result;
     }
 
+    /** 服务端内部写（如异步复检或运营撤回世界频道消息）：无调用玩家会话锁，但仍走全局可写围栏与同有界池。 */
+    public <T> CompletableFuture<T> executeInternal(Deadline deadline, AuthorityJdbc.Work<T> action) {
+        var result = new CompletableFuture<T>();
+        pending.add(result);
+        try {
+            workers.execute(() -> {
+                try {
+                    AuthorityJdbc.check(deadline);
+                    T value = sql.tx(deadline, transaction -> {
+                        if (result.isCancelled()) throw new RejectedExecutionException("聊天内部请求已取消");
+                        return action.apply(transaction);
+                    });
+                    result.complete(value);
+                } catch (Exception failure) {
+                    result.completeExceptionally(failure);
+                } finally {
+                    pending.remove(result);
+                }
+            });
+        } catch (RejectedExecutionException full) {
+            pending.remove(result);
+            result.completeExceptionally(full);
+        }
+        return result;
+    }
+
     @Override public void close() {
         workers.shutdown();
         try {

@@ -42,6 +42,13 @@ public final class ChatMetrics {
         CHANNEL_UNAVAILABLE,
         TOO_LONG,
         RATE_LIMITED,
+        WORLD_COOLDOWN,
+        CONTENT_REJECTED,
+        CONTENT_UNAVAILABLE,
+        CONTACT_REJECTED,
+        LEVEL_TOO_LOW,
+        DUPLICATE_SPAM,
+        PRIVATE_TARGET_LIMIT,
         STORAGE_ERROR
     }
 

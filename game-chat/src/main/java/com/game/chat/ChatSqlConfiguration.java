@@ -58,12 +58,17 @@ public class ChatSqlConfiguration {
     }
 
     static void verifySchema(Connection connection) throws SQLException {
-        for (String sql : List.of(
-                "SELECT player_id,account,owner_revision,trade_listing_id,zone_id FROM player WHERE 1=0",
-                "SELECT player_id,request_id,owner_account,owner_revision,"
-                        + "request_digest,request_payload,message_payload,stream_key,state,accepted_ms,result_tip FROM chat_send_authority WHERE 1=0",
-                "SELECT id,original_contract FROM chat_policy WHERE 1=0")) {
-            try (var statement = connection.prepareStatement(sql)) {
+        record TableProbe(String name, String sql) {}
+        for (TableProbe probe : List.of(
+                new TableProbe("player", "SELECT player_id,account,owner_revision,trade_listing_id,zone_id FROM player WHERE 1=0"),
+                new TableProbe("chat_send_authority", "SELECT player_id,request_id,owner_account,owner_revision,"
+                        + "request_digest,request_payload,message_payload,stream_key,state,accepted_ms,result_tip FROM chat_send_authority WHERE 1=0"),
+                new TableProbe("chat_policy", "SELECT id,original_contract FROM chat_policy WHERE 1=0"),
+                new TableProbe("chat_world_retraction", "SELECT sender_player_id,accepted_ms,retracted_ms,reason FROM chat_world_retraction WHERE 1=0"),
+                new TableProbe("chat_report", "SELECT reporter_player_id,channel,target_sender_player_id,send_time_ms,reason,detail,reported_ms FROM chat_report WHERE 1=0"),
+                new TableProbe("chat_repeat_event", "SELECT content_hash,accepted_ms,sender_player_id FROM chat_repeat_event WHERE 1=0"),
+                new TableProbe("chat_private_daily_target", "SELECT sender_player_id,day_ymd,target_player_id FROM chat_private_daily_target WHERE 1=0"))) {
+            try (var statement = connection.prepareStatement(probe.sql())) {
                 statement.setQueryTimeout(3);
                 try (var rows = statement.executeQuery()) {
                     var fields = rows.getMetaData();
@@ -73,16 +78,19 @@ public class ChatSqlConfiguration {
                         }
                         String field = fields.getColumnLabel(index).toLowerCase(Locale.ROOT);
                         int type = fields.getColumnType(index);
-                        if (List.of("request_id", "owner_account", "request_digest", "stream_key").contains(field)) {
+                        boolean binaryReason = probe.name().equals("chat_world_retraction") && field.equals("reason");
+                        if (List.of("request_id", "owner_account", "request_digest", "stream_key", "detail", "content_hash").contains(field) || binaryReason) {
                             int minimum = switch (field) {
                                 case "request_id" -> 64;
                                 case "owner_account" -> 764;
-                                case "request_digest" -> 32;
+                                case "request_digest", "content_hash" -> 32;
+                                case "reason" -> 128;
+                                case "detail" -> 255;
                                 default -> 191;
                             };
-                            boolean digest = field.equals("request_digest");
-                            if (type != (digest ? java.sql.Types.BINARY : java.sql.Types.VARBINARY)
-                                    || (digest ? fields.getPrecision(index) != 32 : fields.getPrecision(index) < minimum)) {
+                            boolean fixedHash = field.equals("request_digest") || field.equals("content_hash");
+                            if (type != (fixedHash ? java.sql.Types.BINARY : java.sql.Types.VARBINARY)
+                                    || (fixedHash ? fields.getPrecision(index) != 32 : fields.getPrecision(index) < minimum)) {
                                 throw new SQLException("聊天原件二进制列形状不符");
                             }
                         } else if (field.equals("account")) {
@@ -92,11 +100,13 @@ public class ChatSqlConfiguration {
                         } else if (List.of("request_payload", "message_payload", "original_contract").contains(field)) {
                             if (!List.of(java.sql.Types.BLOB, java.sql.Types.LONGVARBINARY, java.sql.Types.VARBINARY).contains(type)
                                     || fields.getPrecision(index) < 65_536) throw new SQLException("聊天PB原件列不足");
-                        } else if (List.of("player_id", "owner_revision", "trade_listing_id", "accepted_ms").contains(field)) {
+                        } else if (List.of("player_id", "owner_revision", "trade_listing_id", "accepted_ms",
+                                "sender_player_id", "retracted_ms", "reporter_player_id", "target_sender_player_id",
+                                "send_time_ms", "reported_ms", "target_player_id").contains(field)) {
                             // H2的高uint64夹具用DECIMAL20；生产由真实TiDB会话门禁另验。
                             if (type != java.sql.Types.BIGINT && !(type == java.sql.Types.DECIMAL && fields.getPrecision(index) >= 20
                                     && fields.getScale(index) == 0)) throw new SQLException("聊天角色/时间整数列形状不符");
-                        } else if (List.of("state", "result_tip", "id", "zone_id").contains(field)
+                        } else if (List.of("state", "result_tip", "id", "zone_id", "channel", "reason", "day_ymd").contains(field)
                                 && type != java.sql.Types.INTEGER) throw new SQLException("聊天整数列形状不符");
                     }
                 }
@@ -106,8 +116,14 @@ public class ChatSqlConfiguration {
         String schema;
         try { schema = connection.getSchema(); }
         catch (java.sql.SQLFeatureNotSupportedException unsupported) { schema = null; }
-        for (var entry : Map.of("player", List.of("player_id"), "chat_send_authority", List.of("player_id", "request_id"),
-                "chat_policy", List.of("id")).entrySet()) {
+        for (var entry : Map.of(
+                "player", List.of("player_id"),
+                "chat_send_authority", List.of("player_id", "request_id"),
+                "chat_policy", List.of("id"),
+                "chat_world_retraction", List.of("sender_player_id", "accepted_ms"),
+                "chat_report", List.of("reporter_player_id", "channel", "target_sender_player_id", "send_time_ms"),
+                "chat_repeat_event", List.of("content_hash", "accepted_ms", "sender_player_id"),
+                "chat_private_daily_target", List.of("sender_player_id", "day_ymd", "target_player_id")).entrySet()) {
             String table = metadata.storesUpperCaseIdentifiers() ? entry.getKey().toUpperCase(Locale.ROOT) : entry.getKey();
             var keys = new TreeMap<Short, String>();
             try (var rows = metadata.getPrimaryKeys(connection.getCatalog(), schema, table)) {
@@ -115,7 +131,18 @@ public class ChatSqlConfiguration {
             }
             if (!List.copyOf(keys.values()).equals(entry.getValue())) throw new SQLException("聊天原件缺正式唯一主键");
         }
-        String table = metadata.storesUpperCaseIdentifiers() ? "CHAT_SEND_AUTHORITY" : "chat_send_authority";
+        requireIndexes(connection, metadata, schema, "chat_send_authority",
+                List.of(List.of("stream_key", "state", "accepted_ms", "player_id", "request_id"),
+                        List.of("player_id", "state", "accepted_ms")));
+        requireIndexes(connection, metadata, schema, "chat_world_retraction",
+                List.of(List.of("accepted_ms", "sender_player_id")));
+        requireIndexes(connection, metadata, schema, "chat_report",
+                List.of(List.of("target_sender_player_id", "send_time_ms")));
+    }
+
+    private static void requireIndexes(Connection connection, DatabaseMetaData metadata, String schema,
+            String tableName, List<List<String>> expected) throws SQLException {
+        String table = metadata.storesUpperCaseIdentifiers() ? tableName.toUpperCase(Locale.ROOT) : tableName;
         var indexes = new HashMap<String, TreeMap<Short, String>>();
         try (var rows = metadata.getIndexInfo(connection.getCatalog(), schema, table, false, false)) {
             while (rows.next()) {
@@ -127,9 +154,10 @@ public class ChatSqlConfiguration {
         }
         var actual = new ArrayList<List<String>>();
         for (var columns : indexes.values()) actual.add(List.copyOf(columns.values()));
-        if (!actual.contains(List.of("stream_key", "state", "accepted_ms", "player_id", "request_id"))
-                || !actual.contains(List.of("player_id", "state", "accepted_ms"))) {
-            throw new SQLException("聊天缺少正式窗口/限速有界索引");
+        for (List<String> want : expected) {
+            if (!actual.contains(want)) {
+                throw new SQLException("聊天缺少正式窗口/限速有界索引");
+            }
         }
     }
 }

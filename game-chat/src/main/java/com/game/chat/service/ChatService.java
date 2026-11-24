@@ -13,10 +13,20 @@ import com.game.discovery.RedisKeys;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.chat.ChatChannelType;
 import com.game.proto.chat.ChatMessage;
+import com.game.proto.chat.ChatRetractedNotify;
 import com.game.proto.chat.PullChatHistoryRequest;
 import com.game.proto.chat.PullChatHistoryResponse;
+import com.game.proto.chat.ReportChatRequest;
+import com.game.proto.chat.ReportChatResponse;
+import com.game.proto.chat.RetractWorldChatRequest;
+import com.game.proto.chat.RetractWorldChatResponse;
 import com.game.proto.chat.SendChatRequest;
 import com.game.proto.chat.SendChatResponse;
+import com.game.proto.content_guard.CheckTextResponse;
+import com.game.proto.content_guard.TextCategory;
+import com.game.proto.content_guard.TextScene;
+import com.game.proto.content_guard.TextVerdict;
+import com.game.table.ChatErrorTip;
 import com.game.table.CommonErrorTip;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.nio.charset.StandardCharsets;
@@ -26,10 +36,16 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
@@ -54,12 +70,16 @@ import org.slf4j.LoggerFactory;
  * <p>全部方法异步、不阻塞调用线程（只发 Redis 异步命令、在回调里组下一步）；每步受整请求预算约束，释放 / 完结幂等键有独立的 1 s 上界
  * （它们发生在原请求预算可能已到期的时刻）。占位、限速、写历史三个写在发出前查截止（{@link #clientWrite}），过了就不发。
  */
-public final class ChatService {
+public final class ChatService implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(ChatService.class);
 
     static final int MAX_REQUEST_ID_BYTES = 64;
+    static final int MAX_RETRACT_REASON_BYTES = 128;
+    static final int MAX_REPORT_DETAIL_BYTES = 200;
     static final long RATE_LIMIT_WINDOW_SECONDS = 1;
+    static final long ASYNC_RECHECK_TIMEOUT_MS = 4_000L;
+    static final String PLATFORM_REJECT_REASON = "platform_async_reject";
     static final Duration CLAIM_RELEASE_TIMEOUT = Duration.ofSeconds(1);
     static final String CLAIM_PENDING = "pending";
     static final String CLAIM_DONE = "done";
@@ -69,6 +89,31 @@ public final class ChatService {
     static final int RATE_LIMITED = CommonErrorTip.common_error.kRateLimitExceeded_VALUE;
     static final int CHANNEL_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
     static final int STORAGE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
+    static final int CONTENT_REJECTED = ChatErrorTip.chat_error.kChatContentRejected_VALUE;
+    static final int CONTENT_CHECK_UNAVAILABLE = ChatErrorTip.chat_error.kChatContentCheckUnavailable_VALUE;
+    static final int LEVEL_TOO_LOW = ChatErrorTip.chat_error.kChatLevelTooLow_VALUE;
+    static final int DUPLICATE_SPAM = ChatErrorTip.chat_error.kChatDuplicateSpam_VALUE;
+    static final int PRIVATE_TARGET_LIMIT = ChatErrorTip.chat_error.kChatPrivateTargetLimit_VALUE;
+    static final int CONTACT_REJECTED = ChatErrorTip.chat_error.kChatContactRejected_VALUE;
+
+    /** 内容安全策略接口：事务外送检聊天正文，并支持世界频道短超时放行后的异步外部平台复检。 */
+    @FunctionalInterface
+    public interface TextGuard {
+        CheckTextResponse check(TextScene scene, long playerId, String text, boolean allowAsyncPlatform);
+
+        default CheckTextResponse checkPlatform(TextScene scene, long playerId, String text) {
+            return CheckTextResponse.newBuilder().setVerdict(TextVerdict.TEXT_VERDICT_PASS).build();
+        }
+    }
+
+    /** 世界频道消息与撤回广播的观察者接缝（默认无操作，按需接入推送通道或测试探针）。 */
+    public interface WorldPublisher {
+        WorldPublisher NOOP = new WorldPublisher() { };
+
+        default void publishMessage(ChatMessage message) { }
+
+        default void publishRetracted(ChatRetractedNotify notify) { }
+    }
 
     private final ChatStore store;
     private final JdbcChatStore authority;
@@ -85,6 +130,10 @@ public final class ChatService {
     private final LongSupplier nanoClock;
     private final RedisKeys keys;
     private final SensitiveWordFilter contentFilter;
+    private final TextGuard textGuard;
+    private final WorldPublisher worldPublisher;
+    private final Executor recheckExecutor;
+    private final ExecutorService ownedRecheckPool;
     private final SecureRandom random = new SecureRandom();
 
     /** @param keys 历史 / 幂等 / 限速键的出处（注入的 {@link RedisKeys}；键随部署命名空间） */
@@ -101,21 +150,37 @@ public final class ChatService {
                 Duration requestIdTtl, LongSupplier clockMs, RedisKeys keys, List<String> sensitiveWords,
                 LongSupplier nanoClock) {
         this(store, metrics, maxContentBytes, rateLimitPerSecond, historyMaxEntries, historyTtl, historyDefaultLimit,
-                historyMaxLimit, requestIdTtl, clockMs, keys, sensitiveWords, nanoClock, null);
+                historyMaxLimit, requestIdTtl, clockMs, keys, sensitiveWords, nanoClock, null, null, WorldPublisher.NOOP, null);
     }
 
     /** 正式入口只用SQL权威；旧Redis接缝保留给窗口/纯校验夹具，不装配为生产数据源。 */
     public ChatService(JdbcChatStore authority, ChatMetrics metrics, ChatProperties rules, RedisKeys keys) {
+        this(authority, metrics, rules, keys, null, WorldPublisher.NOOP);
+    }
+
+    /** 正式入口（可选内容安全与世界频道广播接缝）。 */
+    public ChatService(JdbcChatStore authority, ChatMetrics metrics, ChatProperties rules, RedisKeys keys,
+                       TextGuard textGuard, WorldPublisher worldPublisher) {
         this(null, metrics, rules.maxContentBytes(), rules.rateLimitPerSecond(), rules.historyMaxEntries(),
                 rules.historyTtl(), rules.historyDefaultLimit(), rules.historyMaxLimit(), rules.requestIdTtl(),
                 System::currentTimeMillis, keys, rules.sensitiveWords(), System::nanoTime,
-                Objects.requireNonNull(authority));
+                Objects.requireNonNull(authority), textGuard, worldPublisher, null);
+    }
+
+    /** 单测注入同步/可控执行器，验证世界频道异步平台复检与自动撤回。 */
+    public ChatService(JdbcChatStore authority, ChatMetrics metrics, ChatProperties rules, RedisKeys keys,
+                       TextGuard textGuard, WorldPublisher worldPublisher, Executor recheckExecutor) {
+        this(null, metrics, rules.maxContentBytes(), rules.rateLimitPerSecond(), rules.historyMaxEntries(),
+                rules.historyTtl(), rules.historyDefaultLimit(), rules.historyMaxLimit(), rules.requestIdTtl(),
+                System::currentTimeMillis, keys, rules.sensitiveWords(), System::nanoTime,
+                Objects.requireNonNull(authority), textGuard, worldPublisher, recheckExecutor);
     }
 
     private ChatService(ChatStore store, ChatMetrics metrics, int maxContentBytes, int rateLimitPerSecond,
                 int historyMaxEntries, Duration historyTtl, int historyDefaultLimit, int historyMaxLimit,
                 Duration requestIdTtl, LongSupplier clockMs, RedisKeys keys, List<String> sensitiveWords,
-                LongSupplier nanoClock, JdbcChatStore authority) {
+                LongSupplier nanoClock, JdbcChatStore authority, TextGuard textGuard,
+                WorldPublisher worldPublisher, Executor customRecheckExecutor) {
         this.authority = authority;
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
         this.store = store;
@@ -130,6 +195,31 @@ public final class ChatService {
         this.clockMs = clockMs;
         this.keys = Objects.requireNonNull(keys, "keys");
         this.contentFilter = new SensitiveWordFilter(sensitiveWords);
+        this.textGuard = textGuard;
+        this.worldPublisher = worldPublisher == null ? WorldPublisher.NOOP : worldPublisher;
+        if (customRecheckExecutor != null) {
+            this.recheckExecutor = customRecheckExecutor;
+            this.ownedRecheckPool = null;
+        } else if (textGuard != null && authority != null) {
+            var seq = new AtomicInteger();
+            this.ownedRecheckPool = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.SECONDS,
+                    new ArrayBlockingQueue<>(64), r -> {
+                Thread t = new Thread(r, "chat-platform-recheck-" + seq.incrementAndGet());
+                t.setDaemon(true);
+                return t;
+            }, new ThreadPoolExecutor.AbortPolicy());
+            this.recheckExecutor = this.ownedRecheckPool;
+        } else {
+            this.recheckExecutor = null;
+            this.ownedRecheckPool = null;
+        }
+    }
+
+    @Override
+    public void close() {
+        if (ownedRecheckPool != null) {
+            ownedRecheckPool.shutdownNow();
+        }
     }
 
     /** 频道 → 历史键；拒绝时 key 为 null、带 tip 与结局。发言（peer = target）与拉取（peer = peer_player_id）共用。 */
@@ -169,7 +259,7 @@ public final class ChatService {
      */
     public CompletionStage<SendChatResponse> send(long sender, SendChatRequest request, long budgetMs) {
         if (authority != null) return sendRejected(channelLabel(request.getMessage().getChannelValue()), INVALID_PARAMETER, Outcome.NO_SESSION);
-        PreparedSend prepared = prepare(sender, request);
+        PreparedSend prepared = prepare(sender, request, true);
         Channel label = channelLabel(request.getMessage().getChannelValue());
         if (prepared.tip() != 0) return sendRejected(label, prepared.tip(), prepared.outcome());
         ChatMessage message = prepared.request().getMessage();
@@ -196,61 +286,248 @@ public final class ChatService {
                 }).thenCompose(stage -> stage);
     }
 
-    private record PreparedSend(SendChatRequest request, int tip, Outcome outcome) { }
+    private record PreparedSend(SendChatRequest request, String rawTrimmed, int tip, Outcome outcome) { }
+
+    private record ReviewDecision(String displayContent, int rejectTip, boolean pendingPlatform) { }
 
     /** SQL与既有逻辑夹具共用同一纯校验/屏蔽/规范化，不把调用方声明的sender/time写入原件。 */
-    private PreparedSend prepare(long sender, SendChatRequest request) {
+    private PreparedSend prepare(long sender, SendChatRequest request, boolean applyLocalFilter) {
         ChatMessage msg = request.getMessage();
         if (sender == 0) {
-            return new PreparedSend(null, INVALID_PARAMETER, Outcome.NO_SESSION);
+            return new PreparedSend(null, null, INVALID_PARAMETER, Outcome.NO_SESSION);
         }
         if (!request.hasMessage()) {
-            return new PreparedSend(null, INVALID_PARAMETER, Outcome.BAD_REQUEST);
+            return new PreparedSend(null, null, INVALID_PARAMETER, Outcome.BAD_REQUEST);
         }
         Resolved resolved = resolveLogKey(keys, msg.getChannelValue(), sender, msg.getTargetPlayerId());
         if (resolved.key() == null) {
-            return new PreparedSend(null, resolved.tip(), resolved.outcome());
+            return new PreparedSend(null, null, resolved.tip(), resolved.outcome());
         }
         long target = msg.getChannelValue() == ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE_VALUE ? msg.getTargetPlayerId() : 0;
         // 按原始字节数限长（存储与带宽按字节算），trim 后不能为空
         if (msg.getContentBytes().size() > maxContentBytes) {
-            return new PreparedSend(null, MESSAGE_TOO_LONG, Outcome.TOO_LONG);
+            return new PreparedSend(null, null, MESSAGE_TOO_LONG, Outcome.TOO_LONG);
         }
-        String content = GoSpaces.trim(msg.getContent());
-        if (content.isEmpty()) {
-            return new PreparedSend(null, MESSAGE_TOO_LONG, Outcome.TOO_LONG);
+        String rawTrimmed = GoSpaces.trim(msg.getContent());
+        if (rawTrimmed.isEmpty()) {
+            return new PreparedSend(null, null, MESSAGE_TOO_LONG, Outcome.TOO_LONG);
         }
         // 先限制原始字节再屏蔽，不能靠中文替换为 * 绕过消息大小门禁；只存屏蔽后的正文。
-        content = contentFilter.mask(content);
+        String content = applyLocalFilter ? contentFilter.mask(rawTrimmed) : rawTrimmed;
         String requestId = request.getRequestId();
         if (requestId.getBytes(StandardCharsets.UTF_8).length > MAX_REQUEST_ID_BYTES) {
-            return new PreparedSend(null, INVALID_PARAMETER, Outcome.BAD_REQUEST);
+            return new PreparedSend(null, null, INVALID_PARAMETER, Outcome.BAD_REQUEST);
         }
         ChatMessage normalized = ChatMessage.newBuilder()
                 .setSenderPlayerId(sender).setTargetPlayerId(target).setChannelValue(msg.getChannelValue())
                 .setContent(content).build();
-        return new PreparedSend(request.toBuilder().setMessage(normalized).build(), 0, null);
+        return new PreparedSend(request.toBuilder().setMessage(normalized).build(), rawTrimmed, 0, null);
     }
 
     public CompletionStage<SendChatResponse> send(SessionContext original, SendChatRequest request, long budgetMs) {
         Channel label = channelLabel(request.getMessage().getChannelValue());
         long sender = original == null ? 0 : original.getPlayerId();
-        PreparedSend prepared = prepare(sender, request);
+        PreparedSend prepared = prepare(sender, request, textGuard == null);
         if (prepared.tip() != 0) return sendRejected(label, prepared.tip(), prepared.outcome());
         if (authority == null) return sendRejected(label, STORAGE, Outcome.STORAGE_ERROR);
-        return authority.send(original, prepared.request(), Deadline.after(budgetMs)).handle((sent, error) -> {
-            if (error != null) {
-                boolean denied = denied(error);
-                metrics.send(label, denied ? Outcome.NO_SESSION : Outcome.STORAGE_ERROR);
-                return reject(SendChatResponse.newBuilder(), denied ? INVALID_PARAMETER : STORAGE);
+
+        SendChatRequest toStore = prepared.request();
+        String rawTrimmed = prepared.rawTrimmed();
+        int preRejectTip = 0;
+        boolean pendingPlatform = false;
+        if (textGuard != null) {
+            ReviewDecision reviewed = reviewContent(toStore.getMessage().getChannel(), sender, rawTrimmed);
+            preRejectTip = reviewed.rejectTip();
+            pendingPlatform = reviewed.pendingPlatform();
+            if (preRejectTip == 0 && !reviewed.displayContent().equals(rawTrimmed)) {
+                toStore = toStore.toBuilder().setMessage(
+                        toStore.getMessage().toBuilder().setContent(reviewed.displayContent())).build();
             }
-            metrics.send(label, sent.tip() != 0 ? Outcome.RATE_LIMITED : sent.duplicate() ? Outcome.DUPLICATE : Outcome.OK);
-            return sent.tip() == 0 ? SendChatResponse.getDefaultInstance() : reject(SendChatResponse.newBuilder(), sent.tip());
+        }
+        final boolean isWorld = toStore.getMessage().getChannel() == ChatChannelType.CHAT_CHANNEL_TYPE_WORLD;
+        final boolean needAsyncRecheck = isWorld && pendingPlatform && textGuard != null;
+        return authority.sendDetailed(original, toStore, rawTrimmed, preRejectTip, Deadline.after(budgetMs))
+                .handle((outcome, error) -> {
+                    if (error != null) {
+                        boolean denied = denied(error);
+                        metrics.send(label, denied ? Outcome.NO_SESSION : Outcome.STORAGE_ERROR);
+                        return reject(SendChatResponse.newBuilder(), denied ? INVALID_PARAMETER : STORAGE);
+                    }
+                    JdbcChatStore.Sent sent = outcome.sent();
+                    if (sent.tip() != 0) {
+                        metrics.send(label, rejectOutcome(sent.tip(), outcome.cooldown()));
+                        return reject(SendChatResponse.newBuilder(), sent.tip());
+                    }
+                    metrics.send(label, sent.duplicate() ? Outcome.DUPLICATE : Outcome.OK);
+                    if (!sent.duplicate() && isWorld && outcome.message() != null) {
+                        worldPublisher.publishMessage(outcome.message());
+                        if (needAsyncRecheck) {
+                            scheduleAsyncWorldPlatformRecheck(outcome.message(), rawTrimmed);
+                        }
+                    }
+                    return SendChatResponse.getDefaultInstance();
+                });
+    }
+
+    /** 举报世界频道或私聊违规消息（ClientPlayerChat.ReportChat，433）。 */
+    public CompletionStage<ReportChatResponse> report(SessionContext original, ReportChatRequest request, long budgetMs) {
+        long sender = original == null ? 0 : original.getPlayerId();
+        if (sender == 0 || request == null || request.getTargetSenderPlayerId() == 0 || request.getSendTimeMs() <= 0
+                || request.getReason() == 0 || request.getReason() > 4
+                || request.getDetailBytes().size() > MAX_REPORT_DETAIL_BYTES) {
+            return CompletableFuture.completedFuture(reject(ReportChatResponse.newBuilder(), INVALID_PARAMETER));
+        }
+        Resolved resolved = resolveLogKey(keys, request.getChannelValue(), sender, request.getTargetSenderPlayerId());
+        if (resolved.key() == null) {
+            return CompletableFuture.completedFuture(reject(ReportChatResponse.newBuilder(), INVALID_PARAMETER));
+        }
+        if (authority == null) {
+            return CompletableFuture.completedFuture(reject(ReportChatResponse.newBuilder(), STORAGE));
+        }
+        return authority.reportMessage(original, request, Deadline.after(budgetMs)).handle((tip, error) -> {
+            if (error != null) {
+                if (denied(error) || badArg(error)) {
+                    return reject(ReportChatResponse.newBuilder(), INVALID_PARAMETER);
+                }
+                log.error("[chat] ReportChat SQL write failed");
+                return reject(ReportChatResponse.newBuilder(), STORAGE);
+            }
+            return tip == 0 ? ReportChatResponse.getDefaultInstance()
+                    : reject(ReportChatResponse.newBuilder(), tip);
         });
+    }
+
+    /** 内部撤回世界频道消息（ClientPlayerChat.RetractWorldChat，434，仅服务端可调）。 */
+    public CompletionStage<RetractWorldChatResponse> retractWorld(RetractWorldChatRequest request, long budgetMs) {
+        if (request == null || request.getSenderPlayerId() == 0 || request.getSendTimeMs() <= 0
+                || request.getReasonBytes().size() > MAX_RETRACT_REASON_BYTES) {
+            return CompletableFuture.completedFuture(reject(RetractWorldChatResponse.newBuilder(), INVALID_PARAMETER));
+        }
+        if (authority == null) {
+            return CompletableFuture.completedFuture(reject(RetractWorldChatResponse.newBuilder(), STORAGE));
+        }
+        String reason = GoSpaces.trim(request.getReason());
+        return authority.retractWorld(request.getSenderPlayerId(), request.getSendTimeMs(), reason, Deadline.after(budgetMs))
+                .handle((result, error) -> {
+                    if (error != null) {
+                        if (badArg(error)) {
+                            return reject(RetractWorldChatResponse.newBuilder(), INVALID_PARAMETER);
+                        }
+                        log.error("[chat] RetractWorldChat SQL write failed");
+                        return reject(RetractWorldChatResponse.newBuilder(), STORAGE);
+                    }
+                    if (result.tip() != 0) {
+                        return reject(RetractWorldChatResponse.newBuilder(), result.tip());
+                    }
+                    if (result.retracted()) {
+                        worldPublisher.publishRetracted(ChatRetractedNotify.newBuilder()
+                                .setChannel(ChatChannelType.CHAT_CHANNEL_TYPE_WORLD)
+                                .setSenderPlayerId(request.getSenderPlayerId())
+                                .setSendTimeMs(request.getSendTimeMs())
+                                .setReason(reason)
+                                .build());
+                    }
+                    return RetractWorldChatResponse.newBuilder().setRetracted(result.retracted()).build();
+                });
+    }
+
+    private ReviewDecision reviewContent(ChatChannelType channel, long sender, String rawTrimmed) {
+        boolean isWorld = channel == ChatChannelType.CHAT_CHANNEL_TYPE_WORLD;
+        TextScene scene = isWorld ? TextScene.TEXT_SCENE_CHAT_WORLD : TextScene.TEXT_SCENE_CHAT_PRIVATE;
+        CheckTextResponse resp;
+        try {
+            resp = textGuard.check(scene, sender, rawTrimmed, isWorld);
+        } catch (RuntimeException e) {
+            log.warn("[chat] Content guard check failed, sender={} scene={}: {}",
+                    Long.toUnsignedString(sender), scene, e.getMessage());
+            return new ReviewDecision("", CONTENT_CHECK_UNAVAILABLE, false);
+        }
+        if (resp == null) {
+            return new ReviewDecision("", CONTENT_CHECK_UNAVAILABLE, false);
+        }
+        return switch (resp.getVerdict()) {
+            case TEXT_VERDICT_PASS -> new ReviewDecision(rawTrimmed, 0, resp.getPendingPlatformReview());
+            case TEXT_VERDICT_MASKED -> {
+                String masked = resp.getMaskedText();
+                if (!GoSpaces.trim(masked).isEmpty()
+                        && masked.getBytes(StandardCharsets.UTF_8).length <= maxContentBytes) {
+                    yield new ReviewDecision(masked, 0, resp.getPendingPlatformReview());
+                }
+                yield new ReviewDecision("", CONTENT_REJECTED, false);
+            }
+            default -> new ReviewDecision("",
+                    resp.getCategory() == TextCategory.TEXT_CATEGORY_AD ? CONTACT_REJECTED : CONTENT_REJECTED, false);
+        };
+    }
+
+    private void scheduleAsyncWorldPlatformRecheck(ChatMessage message, String rawContent) {
+        if (recheckExecutor == null || textGuard == null || authority == null || rawContent.isEmpty()) {
+            return;
+        }
+        long senderId = message.getSenderPlayerId();
+        long sendTimeMs = message.getSendTimeMs();
+        try {
+            recheckExecutor.execute(() -> {
+                CheckTextResponse resp;
+                try {
+                    resp = textGuard.checkPlatform(TextScene.TEXT_SCENE_CHAT_WORLD, senderId, rawContent);
+                } catch (RuntimeException e) {
+                    log.warn("[chat] Async platform moderation failed, sender={} send_time_ms={}: {}",
+                            Long.toUnsignedString(senderId), sendTimeMs, e.getMessage());
+                    return;
+                }
+                if (resp == null || resp.getVerdict() == TextVerdict.TEXT_VERDICT_UNSPECIFIED) {
+                    log.warn("[chat] Async platform moderation unavailable, sender={} send_time_ms={}",
+                            Long.toUnsignedString(senderId), sendTimeMs);
+                    return;
+                }
+                if (resp.getVerdict() != TextVerdict.TEXT_VERDICT_REJECT) {
+                    return;
+                }
+                try {
+                    JdbcChatStore.RetractResult res = authority.retractWorld(
+                                    senderId, sendTimeMs, PLATFORM_REJECT_REASON, Deadline.after(ASYNC_RECHECK_TIMEOUT_MS))
+                            .get(ASYNC_RECHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                    if (res.retracted()) {
+                        worldPublisher.publishRetracted(ChatRetractedNotify.newBuilder()
+                                .setChannel(ChatChannelType.CHAT_CHANNEL_TYPE_WORLD)
+                                .setSenderPlayerId(senderId)
+                                .setSendTimeMs(sendTimeMs)
+                                .setReason(PLATFORM_REJECT_REASON)
+                                .build());
+                    }
+                } catch (Exception e) {
+                    if (e instanceof InterruptedException) {
+                        Thread.currentThread().interrupt();
+                    }
+                    log.error("[chat] Async world chat retraction failed, sender={} send_time_ms={}: {}",
+                            Long.toUnsignedString(senderId), sendTimeMs, e.getMessage());
+                }
+            });
+        } catch (RejectedExecutionException full) {
+            log.warn("[chat] Async platform recheck queue full, dropped sender={} send_time_ms={}",
+                    Long.toUnsignedString(senderId), sendTimeMs);
+        }
+    }
+
+    private static Outcome rejectOutcome(int tip, boolean cooldown) {
+        if (cooldown) return Outcome.WORLD_COOLDOWN;
+        if (tip == CONTENT_REJECTED) return Outcome.CONTENT_REJECTED;
+        if (tip == CONTENT_CHECK_UNAVAILABLE) return Outcome.CONTENT_UNAVAILABLE;
+        if (tip == CONTACT_REJECTED) return Outcome.CONTACT_REJECTED;
+        if (tip == LEVEL_TOO_LOW) return Outcome.LEVEL_TOO_LOW;
+        if (tip == DUPLICATE_SPAM) return Outcome.DUPLICATE_SPAM;
+        if (tip == PRIVATE_TARGET_LIMIT) return Outcome.PRIVATE_TARGET_LIMIT;
+        return Outcome.RATE_LIMITED;
     }
 
     private static boolean denied(Throwable error) {
         for (Throwable next = error; next != null; next = next.getCause()) if (next instanceof SecurityException) return true;
+        return false;
+    }
+
+    private static boolean badArg(Throwable error) {
+        for (Throwable next = error; next != null; next = next.getCause()) if (next instanceof IllegalArgumentException) return true;
         return false;
     }
 
@@ -433,6 +710,14 @@ public final class ChatService {
 
     private static PullChatHistoryResponse reject(PullChatHistoryResponse.Builder builder, int tip) {
         return (PullChatHistoryResponse) rejectRaw(builder, tip);
+    }
+
+    private static ReportChatResponse reject(ReportChatResponse.Builder builder, int tip) {
+        return (ReportChatResponse) rejectRaw(builder, tip);
+    }
+
+    private static RetractWorldChatResponse reject(RetractWorldChatResponse.Builder builder, int tip) {
+        return (RetractWorldChatResponse) rejectRaw(builder, tip);
     }
 
     private <T> CompletableFuture<T> within(CompletionStage<T> stage, long deadlineNanos) {
