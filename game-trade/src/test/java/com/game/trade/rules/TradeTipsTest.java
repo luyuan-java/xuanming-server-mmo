@@ -50,6 +50,8 @@ class TradeTipsTest {
         codes.put("ASSET_DELIVERY_PENDING", TradeTips.ASSET_DELIVERY_PENDING);
         codes.put("MANUAL_REVIEW", TradeTips.MANUAL_REVIEW);
         codes.put("ASSET_NOT_TRADABLE", TradeTips.ASSET_NOT_TRADABLE);
+        codes.put("TITLE_SENSITIVE", TradeTips.TITLE_SENSITIVE);
+        codes.put("TEXT_CHECK_UNAVAILABLE", TradeTips.TEXT_CHECK_UNAVAILABLE);
         return codes;
     }
 
@@ -92,6 +94,8 @@ class TradeTipsTest {
         assertThat(TradeTips.ASSET_DELIVERY_PENDING).isEqualTo(20013);
         assertThat(TradeTips.MANUAL_REVIEW).isEqualTo(20014);
         assertThat(TradeTips.ASSET_NOT_TRADABLE).isEqualTo(20015);
+        assertThat(TradeTips.TITLE_SENSITIVE).isEqualTo(20016);
+        assertThat(TradeTips.TEXT_CHECK_UNAVAILABLE).isEqualTo(20017);
         assertThat(TradeTips.SERVICE_UNAVAILABLE).isEqualTo(1003);
         assertThat(TradeTips.INVALID_PARAMETER).isEqualTo(1005);
         assertThat(TradeTips.FEATURE_UNAVAILABLE).isEqualTo(CommonErrorTip.common_error.kFeatureUnavailable.getNumber());
@@ -119,8 +123,15 @@ class TradeTipsTest {
     @Test
     void 本域业务拒绝不算故障() {
         assertThat(TradeTips.isFault(TradeTips.SERVICE_UNAVAILABLE)).isTrue();
+        assertThat(TradeTips.isFault(TradeTips.TEXT_CHECK_UNAVAILABLE)).isTrue();
         assertThat(TradeTips.isFault(TradeTips.INVALID_PARAMETER)).isFalse();
-        tradeCodes().forEach((name, code) -> assertThat(TradeTips.isFault(code)).as(name).isFalse());
+        tradeCodes().forEach((name, code) -> {
+            if (code == TradeTips.TEXT_CHECK_UNAVAILABLE) {
+                assertThat(TradeTips.isFault(code)).as(name).isTrue();
+            } else {
+                assertThat(TradeTips.isFault(code)).as(name).isFalse();
+            }
+        });
         assertThat(TradeTips.isFault(0)).isFalse();
     }
 

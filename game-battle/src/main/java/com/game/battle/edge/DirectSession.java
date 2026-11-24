@@ -13,6 +13,7 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Objects;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 一条客户端直连的会话状态（基线 {@code BattleClientEdge::DirectSession}，{@code edge.h:76-91}；battle-node-spec §7.4），兼作房间一侧的
@@ -71,6 +72,8 @@ final class DirectSession implements DirectLink {
     private int illegalPackets;
     private ScheduledFuture<?> handshakeTimer;
     private Disconnect disconnectReason;
+    /** 幂等守护：保证每条会话在未认证连接 O(1) 计数器里至多加一次、减一次。 */
+    private final AtomicBoolean unauthCounted = new AtomicBoolean();
 
     DirectSession(Channel channel, BattleMetrics metrics) {
         this.channel = Objects.requireNonNull(channel, "channel");
@@ -220,6 +223,14 @@ final class DirectSession implements DirectLink {
 
     void armHandshakeTimer(ScheduledFuture<?> timer) {
         this.handshakeTimer = timer;
+    }
+
+    boolean markUnauthEntered() {
+        return unauthCounted.compareAndSet(false, true);
+    }
+
+    boolean clearUnauthCounted() {
+        return unauthCounted.compareAndSet(true, false);
     }
 
     /**

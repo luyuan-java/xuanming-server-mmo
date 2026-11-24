@@ -23,6 +23,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.*;
 import java.util.function.IntPredicate;
+import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
 
 /** 全局邮件权威：邮箱守卫→状态→操作账本的锁序；广播附件只认封存名单。 */
@@ -40,28 +41,36 @@ public final class MailStore {
     static final int FULL = MailErrorTip.mail_error.kMailRecipientBoxFull_VALUE;
     static final int PENDING = MailErrorTip.mail_error.kMailClaimPending_VALUE;
     static final int MANUAL = MailErrorTip.mail_error.kMailClaimManual_VALUE;
+    static final int RECIPIENT_DELETED = MailErrorTip.mail_error.kMailRecipientDeleted_VALUE;
     private final AuthorityJdbc sql;
     private final AuthorityIds ids;
     private final IntPredicate itemExists;
     private final LongSupplier clock;
+    private final LongPredicate recipientDeleted;
     private final long actorPlayer;
     private static final String MC = "mail_id,owner_player_id,guild_id,kind,sender_kind,request_id,request_hash,title,body,attachments,"
                                      + "sent_ms,expire_ms,campaign_id,manifest_generation";
     public MailStore(AuthorityJdbc sql, AuthorityIds ids, IntPredicate itemExists, LongSupplier clock) {
-        this(sql, ids, itemExists, clock, 0);
+        this(sql, ids, itemExists, clock, id -> false, 0);
     }
-    private MailStore(AuthorityJdbc sql, AuthorityIds ids, IntPredicate itemExists, LongSupplier clock, long actorPlayer) {
+    public MailStore(AuthorityJdbc sql, AuthorityIds ids, IntPredicate itemExists, LongSupplier clock, LongPredicate recipientDeleted) {
+        this(sql, ids, itemExists, clock, recipientDeleted, 0);
+    }
+    private MailStore(AuthorityJdbc sql, AuthorityIds ids, IntPredicate itemExists, LongSupplier clock,
+                      LongPredicate recipientDeleted, long actorPlayer) {
         this.sql = sql;
         this.ids = ids;
         this.itemExists = itemExists;
         this.clock = clock;
+        this.recipientDeleted = recipientDeleted == null ? id -> false : recipientDeleted;
         this.actorPlayer = actorPlayer;
     }
     // 请求视图显式保留队列受理时的原会话；实际领域事务首锁player验证，不能从当前角色反推身份。
     public MailStore forActor(SessionContext session) {
         require(session != null && session.getPlayerId() != 0 && !session.getAccount().isEmpty()
                         && session.getOwnerRevision() > 0, INVALID);
-        return new MailStore(sql.forActor(session.getPlayerId(), session.getAccount(), session.getOwnerRevision()), ids, itemExists, clock, session.getPlayerId());
+        return new MailStore(sql.forActor(session.getPlayerId(), session.getAccount(), session.getOwnerRevision()),
+                ids, itemExists, clock, recipientDeleted, session.getPlayerId());
     }
     private void requireActor(long player) { require(actorPlayer == 0 || actorPlayer == player, INVALID); }
     public static int sender(String caller) {
@@ -171,9 +180,11 @@ public final class MailStore {
         long now = clock.getAsLong(), expire = in.getExpireMs() == 0 ? now + 30L * 86400000 : in.getExpireMs();
         require(expire > now && expire - now <= 30L * 86400000, INVALID);
         boolean campaign = kind != 1 && payload.length > 0;
-        if (kind == 1)
+        if (kind == 1) {
             require(in.getRecipientPlayerId() != 0 && in.getGuildId() == 0, INVALID);
-        else if (kind == 2)
+            // 已注销/已删除角色直接拒收个人邮件（17011），不创建空邮箱行，上游榜单/系统发奖按终态放弃
+            require(!recipientDeleted.test(in.getRecipientPlayerId()), RECIPIENT_DELETED);
+        } else if (kind == 2)
             require(caller.equals("admin") && in.getRecipientPlayerId() == 0 && in.getGuildId() == 0, INVALID);
         else if (kind == 3)
             require(caller.equals("guild") && in.getRecipientPlayerId() == 0 && in.getGuildId() != 0, INVALID);

@@ -17,6 +17,8 @@ public final class CommerceRules {
     public static final int REQUEST_CONFLICT = TradeErrorTip.trade_error.kTradeRequestConflict_VALUE;
     public static final int SELF = TradeErrorTip.trade_error.kTradeCannotTradeSelf_VALUE;
     public static final int NOT_TRADABLE = TradeErrorTip.trade_error.kTradeAssetNotTradable_VALUE;
+    public static final int TITLE_SENSITIVE = TradeErrorTip.trade_error.kTradeTitleSensitive_VALUE;
+    public static final int TEXT_CHECK_UNAVAILABLE = TradeErrorTip.trade_error.kTradeTextCheckUnavailable_VALUE;
     public static final class Refusal extends RuntimeException {
         private final int tip;
         public Refusal(int tip) {

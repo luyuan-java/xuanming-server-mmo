@@ -132,12 +132,15 @@ public final class GlobalMatchService implements AutoCloseable {
         current(session,deadline);
         long stamp=store.now(),expiry=stamp+config.profileTtlSeconds()*1000L;
         String id=UUID.randomUUID().toString(),binding=binding(session);
+        List<BattleNodeInfo> selected = selectProbeTargets(session.getPlayerId(), directory.list(0));
+        if (selected.isEmpty()) {
+            return GetNetworkProbePlanResponse.newBuilder()
+                    .setErrorMessage(TipInfoMessage.newBuilder()
+                            .setId(com.game.table.MatchErrorTip.match_error.kMatchNoRegionWithinLatency_VALUE))
+                    .build();
+        }
         var response=GetNetworkProbePlanResponse.newBuilder().setRequired(true).setPlanId(id).setExpiresAtMs(expiry);
-        Set<Integer> regions=new HashSet<>();
-        for(var n:directory.list(0).stream().sorted(Comparator.comparingInt(BattleNodeInfo::getNodeId)).toList()) {
-            if(regions.size()>=16)break;
-            if(!n.getAccepting()||n.getPhysicalRegion()==0||n.getInstanceId().isBlank()||n.getClientHost().isBlank()
-                    ||n.getClientPort()==0||!regions.add(n.getPhysicalRegion()))continue;
+        for(var n : selected) {
             var grant=NetworkProbeGrant.newBuilder().setPlanId(id).setPlayerId(session.getPlayerId()).setSessionBinding(binding)
                     .setPhysicalRegion(n.getPhysicalRegion()).setTargetNodeId(n.getNodeId()).setTargetInstanceId(n.getInstanceId()).setExpiresAtMs(expiry).build();
             NetworkProbeTarget.Builder target = NetworkProbeTarget.newBuilder()
@@ -148,10 +151,72 @@ public final class GlobalMatchService implements AutoCloseable {
             }
             response.addTargets(target);
         }
-        if(response.getTargetsCount()==0)throw new IllegalStateException("没有合格的探测机房");
         store.plan(session.getPlayerId(),GlobalProbeProfile.newBuilder().setPlanId(id).setSessionBinding(binding)
                 .setOwnerAccount(session.getAccount()).setOwnerRevision(session.getOwnerRevision()).build(),expiry);
         return response.build();
+    }
+
+    /**
+     * 按物理机房分组（按每机房最小 node_id 排序、上限 16 个机房），机房内按 {@code (player_id, instance_id)}
+     * 做最高随机权重哈希（Rendezvous/HRW）选出单台可接纳战斗节点，避免全服探测集中打到单机。
+     */
+    static List<BattleNodeInfo> selectProbeTargets(long playerId, List<BattleNodeInfo> nodes) {
+        if (nodes == null || nodes.isEmpty()) {
+            return List.of();
+        }
+        Map<Integer, List<BattleNodeInfo>> byRegion = new LinkedHashMap<>();
+        List<BattleNodeInfo> sorted = nodes.stream()
+                .filter(n -> n.getAccepting() && n.getPhysicalRegion() != 0 && !n.getInstanceId().isBlank()
+                        && !n.getClientHost().isBlank() && n.getClientPort() != 0)
+                .sorted(Comparator.comparingInt(BattleNodeInfo::getNodeId)
+                        .thenComparing(BattleNodeInfo::getInstanceId))
+                .toList();
+        for (BattleNodeInfo n : sorted) {
+            List<BattleNodeInfo> bucket = byRegion.get(n.getPhysicalRegion());
+            if (bucket == null) {
+                if (byRegion.size() >= 16) {
+                    continue;
+                }
+                bucket = new ArrayList<>();
+                byRegion.put(n.getPhysicalRegion(), bucket);
+            }
+            bucket.add(n);
+        }
+        List<BattleNodeInfo> chosen = new ArrayList<>(byRegion.size());
+        for (List<BattleNodeInfo> candidates : byRegion.values()) {
+            BattleNodeInfo winner = candidates.getFirst();
+            long bestScore = hrwScore(playerId, winner.getInstanceId());
+            for (int i = 1; i < candidates.size(); i++) {
+                BattleNodeInfo cand = candidates.get(i);
+                long score = hrwScore(playerId, cand.getInstanceId());
+                if (Long.compareUnsigned(score, bestScore) > 0) {
+                    winner = cand;
+                    bestScore = score;
+                }
+            }
+            chosen.add(winner);
+        }
+        return chosen;
+    }
+
+    private static long hrwScore(long playerId, String instanceId) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] idBytes = new byte[8];
+            for (int i = 7; i >= 0; i--) {
+                idBytes[i] = (byte) (playerId >>> ((7 - i) * 8));
+            }
+            md.update(idBytes);
+            md.update(instanceId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            byte[] h = md.digest();
+            long v = 0;
+            for (int i = 0; i < 8; i++) {
+                v = (v << 8) | (h[i] & 0xFFL);
+            }
+            return v;
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
     public CommitNetworkProbeResponse commit(SessionContext session,CommitNetworkProbeRequest request,Deadline deadline) throws Exception {
         current(session,deadline);

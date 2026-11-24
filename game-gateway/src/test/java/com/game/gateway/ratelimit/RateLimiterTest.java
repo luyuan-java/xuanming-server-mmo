@@ -20,9 +20,9 @@ class RateLimiterTest {
 
     private final AtomicLong now = new AtomicLong(1_800_000_000_000L);
 
-    /** 内存令牌桶（与 Redis 版同一套贪心补充算法）与冷却。 */
+    /** 内存令牌桶（与 Redis 版同一套千分定点数贪心补充算法）与冷却。 */
     private final class MemoryStore implements RateLimitStore {
-        final Map<String, double[]> buckets = new HashMap<>();
+        final Map<String, long[]> buckets = new HashMap<>();
         final Map<String, Long> cooldowns = new HashMap<>();
         long cooldownNow;
         boolean broken;
@@ -30,33 +30,44 @@ class RateLimiterTest {
 
         @Override
         public Admission admit(Bucket ip, Bucket zone) {
+            return admit(ip, zone, 0);
+        }
+
+        @Override
+        public Admission admit(Bucket ip, Bucket zone, int zoneEmptyIpCostMilli) {
             calls++;
             if (broken) {
                 throw new IllegalStateException("Redis 不可达");
             }
-            double[] ipBucket = refill(ip);
-            if (ipBucket[0] < 1) {
+            long[] ipBucket = refill(ip);
+            if (ipBucket[0] < 1000L) {
                 return new Admission(Admission.Kind.IP_EMPTY, 0, 0);
             }
             if (zone == null) {
-                ipBucket[0] -= 1;
-                return new Admission(Admission.Kind.OK, 0, (long) ipBucket[0]);
+                ipBucket[0] -= 1000L;
+                return new Admission(Admission.Kind.OK, 0, ipBucket[0] / 1000L);
             }
-            double[] zoneBucket = refill(zone);
-            if (zoneBucket[0] < 1) {
-                return new Admission(Admission.Kind.ZONE_EMPTY, (long) Math.floor((1 - zoneBucket[0]) * 1000 / zone.rps()),
-                        0);
+            long[] zoneBucket = refill(zone);
+            if (zoneBucket[0] < 1000L) {
+                if (zoneEmptyIpCostMilli > 0) {
+                    ipBucket[0] = Math.max(0L, ipBucket[0] - zoneEmptyIpCostMilli);
+                }
+                return new Admission(Admission.Kind.ZONE_EMPTY, (1000L - zoneBucket[0]) / zone.rps(),
+                        zoneBucket[0] / 1000L);
             }
-            ipBucket[0] -= 1;
-            zoneBucket[0] -= 1;
-            return new Admission(Admission.Kind.OK, 0, (long) zoneBucket[0]);
+            ipBucket[0] -= 1000L;
+            zoneBucket[0] -= 1000L;
+            return new Admission(Admission.Kind.OK, 0, zoneBucket[0] / 1000L);
         }
 
-        private double[] refill(Bucket bucket) {
+        private long[] refill(Bucket bucket) {
             long nowMs = now.get();
-            double[] b = buckets.computeIfAbsent(bucket.key(), k -> new double[] {bucket.burst(), nowMs});
-            b[0] = Math.min(bucket.burst(), b[0] + (nowMs - b[1]) * bucket.rps() / 1000.0);
-            b[1] = nowMs;
+            long burstMilli = bucket.burst() * 1000L;
+            long[] b = buckets.computeIfAbsent(bucket.key(), k -> new long[] {burstMilli, nowMs});
+            if (nowMs > b[1]) {
+                b[0] = Math.min(burstMilli, b[0] + (nowMs - b[1]) * bucket.rps());
+                b[1] = nowMs;
+            }
             return b;
         }
 
@@ -91,15 +102,16 @@ class RateLimiterTest {
     }
 
     @Test
-    void 区桶空了排队_带补一个令牌要等的毫秒() {
+    void 区桶空了排队_带下限与抖动_到点后放行() {
         MemoryStore store = new MemoryStore();
         RateLimiter limiter = new RateLimiter(settings(Map.of(1L, new RateLimitSettings.ZoneLimit(1L, 2L)), null), store,
-                REDIS_KEYS, now::get);
+                REDIS_KEYS, now::get, bound -> 321L);
         assertThat(limiter.check(1, "10.0.0.1", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         assertThat(limiter.check(1, "10.0.0.2", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         RateLimitDecision queued = limiter.check(1, "10.0.0.3", null, RateLimiter.Scope.ASSIGN);
         assertThat(queued.kind()).isEqualTo(RateLimitDecision.Kind.QUEUE);
-        assertThat(queued.retryAfterMs()).isEqualTo(1000);
+        // 原始等待 1000ms 被抬高至下限 2000ms，再叠确定性抖动 321ms
+        assertThat(queued.retryAfterMs()).isEqualTo(2321L);
         now.addAndGet(1000);
         assertThat(limiter.check(1, "10.0.0.3", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
     }
@@ -132,15 +144,15 @@ class RateLimiterTest {
     }
 
     @Test
-    void 分波_没开放的区排队_retry_after是距开放的秒数() {
+    void 分波_没开放的区排队_retry_after是距开放的秒数加抖动() {
         long start = now.get() / 1000;
         RateLimitSettings.Wave wave = new RateLimitSettings.Wave(true, start, List.of(
                 new RateLimitSettings.WaveStep(0, List.of(1L)), new RateLimitSettings.WaveStep(600, List.of(-1L))));
-        RateLimiter limiter = new RateLimiter(settings(null, wave), new MemoryStore(), REDIS_KEYS, now::get);
+        RateLimiter limiter = new RateLimiter(settings(null, wave), new MemoryStore(), REDIS_KEYS, now::get, bound -> 500L);
         assertThat(limiter.check(1, "1.1.1.1", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
         RateLimitDecision closed = limiter.check(2, "1.1.1.2", null, RateLimiter.Scope.ASSIGN);
         assertThat(closed.kind()).isEqualTo(RateLimitDecision.Kind.QUEUE);
-        assertThat(closed.retryAfterMs()).isEqualTo(600_000);
+        assertThat(closed.retryAfterMs()).isEqualTo(600_500L);
         assertThat(closed.queuePos()).isEqualTo(-1);
         now.addAndGet(600_000);
         assertThat(limiter.check(2, "1.1.1.2", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
@@ -174,17 +186,20 @@ class RateLimiterTest {
     }
 
     @Test
-    void 区桶空时排队不吃IP令牌_同一NAT后面等区桶的人不会被429() {
+    void 区桶空时排队仅扣零点一个IP令牌_防不守提示狂刷热键() {
         MemoryStore store = new MemoryStore();
-        RateLimiter limiter = new RateLimiter(settings(Map.of(1L, new RateLimitSettings.ZoneLimit(1L, 1L)), null), store,
-                REDIS_KEYS, now::get);
+        // IP burst=3：1 次放行后余 2.0；排队 10 次各扣 0.1 余 1.0 仍排队，第 11 次扣至 0.9，第 12 次触发 429 IP_RATE_LIMIT
+        RateLimiter limiter = new RateLimiter(settings(Map.of(1L, new RateLimitSettings.ZoneLimit(1L, 1L)), null, 3L), store,
+                REDIS_KEYS, now::get, bound -> 0L);
         assertThat(limiter.check(1, "9.9.9.9", null, RateLimiter.Scope.ASSIGN).kind()).isEqualTo(RateLimitDecision.Kind.PASS);
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 11; i++) {
             assertThat(limiter.check(1, "9.9.9.9", null, RateLimiter.Scope.ASSIGN).kind())
+                    .as("第 %d 次排队应扣 0.1 令牌并继续排队", i + 1)
                     .isEqualTo(RateLimitDecision.Kind.QUEUE);
         }
-        assertThat(limiter.check(2, "9.9.9.9", null, RateLimiter.Scope.ASSIGN).kind())
-                .as("IP 桶还剩 1 个：排队的那 5 次没扣").isEqualTo(RateLimitDecision.Kind.PASS);
+        assertThat(limiter.check(1, "9.9.9.9", null, RateLimiter.Scope.ASSIGN).reason())
+                .as("持续忽视 retry_after_ms 刷区桶后由 IP 桶拦下")
+                .isEqualTo(RateLimitDecision.IP_RATE_LIMIT);
     }
 
     @Test

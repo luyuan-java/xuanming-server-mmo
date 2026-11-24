@@ -22,16 +22,30 @@ public final class RmbConsignmentService {
     public static final Set<String> METHODS = Set.of("CreateRmbConsignment", "GetRmbConsignment", "ListRmbConsignments",
         "BuyRmbConsignment", "CancelRmbConsignment", "GetRmbOrder", "ListRmbOrders", "CancelRmbOrder",
         "ListSellerIncomes", "CreateWithdrawal", "GetWithdrawal");
+    /** 全服可见寄售标题的内容安全闸（在数据库事务外调用；返回 0 放行，非 0 返回拒绝 tip 码）。 */
+    @FunctionalInterface
+    public interface TextGuard {
+        TextGuard ALLOW = (playerId, account, title, deadline) -> 0;
+
+        int checkTradeTitle(long playerId, String account, String title, Deadline deadline);
+    }
+
     private final CommerceEngine e;
     private final RmbConsignmentClient mall;
     private final PlayerTradeClient players;
     private final Set<Integer> currencies;
+    private final TextGuard textGuard;
     // 仅由唯一 CommerceRuntime 驱动；失败项尝试后前移，表尾绕回，绝不让前20离线合同饿死第21单。
     private String deliveryCursor = "", returnCursor = "";
     public RmbConsignmentService(CommerceEngine e, RmbConsignmentClient mall, PlayerTradeClient players, Set<Integer> currencies) {
+        this(e, mall, players, currencies, TextGuard.ALLOW);
+    }
+    public RmbConsignmentService(CommerceEngine e, RmbConsignmentClient mall, PlayerTradeClient players,
+                                 Set<Integer> currencies, TextGuard textGuard) {
         this.e = e; this.mall = mall; this.players = players;
         this.currencies = currencies == null ? Set.of(0) : Set.copyOf(currencies);
         if (this.currencies.stream().anyMatch(c -> c != 0 && c != 1)) throw new IllegalArgumentException("绑定货币禁止交易");
+        this.textGuard = textGuard == null ? TextGuard.ALLOW : textGuard;
     }
     private PlayerTradeReply profile(long player, String account, Deadline d) throws Exception {
         if (player == 0 || account == null || account.isEmpty()) throw new Refusal(INVALID);
@@ -121,6 +135,14 @@ public final class RmbConsignmentService {
         if (input.getClientRequestId().length() < 8 || input.getClientRequestId().length() > 80
                 || input.getPriceFen() <= 0 || input.getPriceFen() > 9_000_000_000_000_000L
                 || input.getTitle().isBlank() || input.getTitle().length() > 128) throw new Refusal(INVALID);
+        // 寄售标题全服可见：在数据库事务与角色档案查询之前先走内容安全 fail-closed 审核
+        int titleTip;
+        try {
+            titleTip = textGuard.checkTradeTitle(me, account, input.getTitle(), d);
+        } catch (RuntimeException unavailable) {
+            throw new Refusal(TEXT_CHECK_UNAVAILABLE);
+        }
+        if (titleTip != 0) throw new Refusal(titleTip);
         String key = CommerceEngine.key("rmb", me, input.getClientRequestId() + ":" + Long.toUnsignedString(actorRevision)
             + ":" + HexFormat.of().formatHex(CommerceEngine.sha(account.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toByteArray()));
         boolean character = input.getCharacterPlayerId() != 0;

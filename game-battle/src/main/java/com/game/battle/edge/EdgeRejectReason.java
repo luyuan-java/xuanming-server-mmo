@@ -14,6 +14,8 @@ enum EdgeRejectReason {
     // ---------------------------------------------------------------- 握手之前
     /** 并发连接数已满（闸 G1）。 */
     AT_CAPACITY,
+    /** 公网来源前缀在承压期超限被拒。 */
+    SOURCE_RATE_LIMITED,
     /** 握手期限内没完成握手（闸 G3）。 */
     HANDSHAKE_TIMEOUT,
     /** 握手前发 {@code ClientRequest}（闸 G4）。 */

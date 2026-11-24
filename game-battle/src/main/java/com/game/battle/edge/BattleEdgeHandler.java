@@ -117,6 +117,13 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
         Channel ch = ctx.channel();
+        // 承压期按公网来源前缀限速（未承压或非公网直接放行）
+        if (!edge.tryAdmitSource(ch.remoteAddress())) {
+            edge.rejectLog().record(EdgeRejectReason.SOURCE_RATE_LIMITED, DirectSession.describe(ch.remoteAddress()));
+            metrics.disconnect(Disconnect.AT_CAPACITY);
+            ctx.close();
+            return;
+        }
         // 闸 G1：并发上限。必须是第一道：在分配会话之前拒掉，否则限流本身先付出它想省的内存（edge.cpp:157-166）
         if (!edge.tryAdmit()) {
             edge.rejectLog().record(EdgeRejectReason.AT_CAPACITY, DirectSession.describe(ch.remoteAddress()));
@@ -252,7 +259,7 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
             if(g.getPlayerId()==0||g.getPlanId().isEmpty()||g.getSessionBinding().isEmpty()||g.getPhysicalRegion()!=config.physicalRegion()
                     ||g.getTargetNodeId()!=deps.identity().nodeId()||!g.getTargetInstanceId().equals(deps.identity().instanceId())
                     ||g.getExpiresAtMs()<=deps.clock().epochMillis()){s.forceClose(null);return;}
-            probeGrant=g;sendProbeChallenge(s);
+            probeGrant=g;edge.markAuthenticated(s);sendProbeChallenge(s);
         }catch(com.google.protobuf.InvalidProtocolBufferException e){s.forceClose(null);}
     }
     private void sendProbeChallenge(DirectSession s){
@@ -319,6 +326,7 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
             return;
         }
         s.markVerified(battleId, playerId, payload.getRole(), Integer.toUnsignedLong(gateSession.getAsInt()));
+        edge.markAuthenticated(s);
         verifiedPayload=payload;
         metrics.handshake(HandshakeResult.OK);
         s.writeDirect(BattleFrames.verifyAccepted(battleId));

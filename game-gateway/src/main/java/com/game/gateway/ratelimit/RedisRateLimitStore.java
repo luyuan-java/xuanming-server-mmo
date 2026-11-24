@@ -62,8 +62,9 @@ public final class RedisRateLimitStore implements RateLimitStore {
             local zoneRps = tonumber(ARGV[5])
             local zoneT, zoneLast = load(KEYS[2], zoneRps, tonumber(ARGV[6]) * 1000)
             if zoneT < 1000 then
+              local ipCost = tonumber(ARGV[7]) or 0
               save(KEYS[2], zoneT, zoneLast)
-              save(KEYS[1], ipT, ipLast)
+              save(KEYS[1], math.max(0, ipT - ipCost), ipLast)
               return {2, math.floor((1000 - zoneT) / zoneRps), math.floor(zoneT / 1000)}
             end
             save(KEYS[2], zoneT - 1000, zoneLast)
@@ -79,20 +80,30 @@ public final class RedisRateLimitStore implements RateLimitStore {
 
     @Override
     public Admission admit(Bucket ip, Bucket zone) {
-        return eval(new byte[0], ip, zone);
+        return eval(new byte[0], ip, zone, 0);
+    }
+
+    @Override
+    public Admission admit(Bucket ip, Bucket zone, int zoneEmptyIpCostMilli) {
+        return eval(new byte[0], ip, zone, zoneEmptyIpCostMilli);
     }
 
     /** 测试用：指定当前毫秒（代替 Redis 服务器时间）。 */
     Admission admitAt(long nowMs, Bucket ip, Bucket zone) {
-        return eval(number(nowMs), ip, zone);
+        return eval(number(nowMs), ip, zone, 0);
     }
 
-    private Admission eval(byte[] now, Bucket ip, Bucket zone) {
+    /** 测试用：指定当前毫秒与区桶空 IP 扣减（千分令牌）。 */
+    Admission admitAt(long nowMs, Bucket ip, Bucket zone, int zoneEmptyIpCostMilli) {
+        return eval(number(nowMs), ip, zone, zoneEmptyIpCostMilli);
+    }
+
+    private Admission eval(byte[] now, Bucket ip, Bucket zone, int zoneEmptyIpCostMilli) {
         List<Object> keys = zone == null ? List.of(ip.key()) : List.of(ip.key(), zone.key());
         byte[][] args = zone == null
                 ? new byte[][] {now, number(IDLE_TTL.toMillis()), number(ip.rps()), number(ip.burst())}
                 : new byte[][] {now, number(IDLE_TTL.toMillis()), number(ip.rps()), number(ip.burst()),
-                        number(zone.rps()), number(zone.burst())};
+                        number(zone.rps()), number(zone.burst()), number(Math.max(0, Math.min(1000, zoneEmptyIpCostMilli)))};
         List<Object> r = redis.getScript(ByteArrayCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, ADMIT,
                 RScript.ReturnType.MULTI, keys, (Object[]) args);
         long kind = (Long) r.get(0);

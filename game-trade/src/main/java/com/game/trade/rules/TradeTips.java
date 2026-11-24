@@ -52,6 +52,10 @@ public final class TradeTips {
     public static final int MANUAL_REVIEW = TradeErrorTip.trade_error.kTradeManualReview_VALUE;
     /** 资产不允许交易。 */
     public static final int ASSET_NOT_TRADABLE = TradeErrorTip.trade_error.kTradeAssetNotTradable_VALUE;
+    /** 人民币寄售标题命中内容安全敏感词（业务拒绝）。 */
+    public static final int TITLE_SENSITIVE = TradeErrorTip.trade_error.kTradeTitleSensitive_VALUE;
+    /** 内容安全服务不可达或超时，未检过的寄售标题拒绝放行（故障码）。 */
+    public static final int TEXT_CHECK_UNAVAILABLE = TradeErrorTip.trade_error.kTradeTextCheckUnavailable_VALUE;
 
     // ---- 通用段（common_error_tip.proto:18、:22；tip_text.json） ----
 

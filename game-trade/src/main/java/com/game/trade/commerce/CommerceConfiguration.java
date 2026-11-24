@@ -71,12 +71,41 @@ public class CommerceConfiguration {
         OfficialMallProperties p, CommerceEngine e, com.fasterxml.jackson.databind.ObjectMapper json) {
         return new OfficialMallClient(p, e, json);
     }
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(name = "game.trade.content-guard-enabled", havingValue = "true")
+    static class ContentGuardClientConfiguration {
+        @org.apache.dubbo.config.annotation.DubboReference(group = com.game.api.DubboGroups.CONTENT_GUARD,
+            check = false, url = "${game.dubbo.content-guard-url:}", timeout = 1500, retries = 0)
+        private com.game.api.ContentGuardService contentGuard;
+
+        @Bean
+        public RmbConsignmentService.TextGuard rmbTradeTitleGuard() {
+            return (playerId, account, title, deadline) -> {
+                try {
+                    var resp = contentGuard.checkText(com.game.proto.content_guard.CheckTextRequest.newBuilder()
+                            .setScene(com.game.proto.content_guard.TextScene.TEXT_SCENE_TRADE_TITLE)
+                            .setPlayerId(playerId)
+                            .setText(title)
+                            .build());
+                    if (resp == null) {
+                        return CommerceRules.TEXT_CHECK_UNAVAILABLE;
+                    }
+                    return resp.getVerdict() == com.game.proto.content_guard.TextVerdict.TEXT_VERDICT_PASS
+                            ? 0 : CommerceRules.TITLE_SENSITIVE;
+                } catch (RuntimeException unavailable) {
+                    return CommerceRules.TEXT_CHECK_UNAVAILABLE;
+                }
+            };
+        }
+    }
     @Bean
     @ConditionalOnProperty(name = "game.trade.rmb.enabled", havingValue = "true")
     public RmbConsignmentService rmbConsignmentService(CommerceEngine engine, OfficialMallClient mall,
-            RmbConsignmentProperties properties) {
+            RmbConsignmentProperties properties,
+            org.springframework.beans.factory.ObjectProvider<RmbConsignmentService.TextGuard> textGuard) {
         return new RmbConsignmentService(engine, new RmbConsignmentClient(mall),
-            new PlayerTradeClient(playerTrades, System.getenv("GAME_PLAYER_TRADE_SECRET")), properties.currencies());
+            new PlayerTradeClient(playerTrades, System.getenv("GAME_PLAYER_TRADE_SECRET")),
+            properties.currencies(), textGuard.getIfAvailable(() -> RmbConsignmentService.TextGuard.ALLOW));
     }
     @Bean(initMethod = "start", destroyMethod = "close")
     public CommerceRuntime commerceRuntime(CommerceEngine e, ReliableAssetDelivery delivery,

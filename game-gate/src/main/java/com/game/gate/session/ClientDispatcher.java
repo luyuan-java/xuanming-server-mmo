@@ -19,6 +19,7 @@ import com.game.api.proto.SessionContext;
 import com.game.api.proto.SessionDirective;
 import com.game.api.proto.ZoneRedirect;
 import com.game.common.killswitch.KillSwitch;
+import com.game.common.net.EndpointCircuitBreaker;
 import com.game.common.token.GateTokens;
 import com.game.common.token.SpectateTickets;
 import com.game.gate.link.SceneLinks;
@@ -186,6 +187,8 @@ public final class ClientDispatcher {
     /** 观战订阅的验签与订阅表（{@link #withSpectate}）；没装配时凭证一律被拒。 */
     private SpectateTickets spectateTickets = SpectateTickets.disabled();
     private SpectateSubscriptions spectate = SpectateSubscriptions.NONE;
+    /** 按后端域隔离的三态熔断器（{@link #withBackendCircuitBreaker}）；默认关闭以免影响存量单测。 */
+    private EndpointCircuitBreaker backendBreaker = EndpointCircuitBreaker.disabled();
 
     /**
      * @param tipMessageId 服务端推 tip 用的消息号（{@code SceneClientPlayerCommon.SendTipToClient}，现为 23）
@@ -271,6 +274,12 @@ public final class ClientDispatcher {
     public ClientDispatcher withSpectate(SpectateTickets tickets, SpectateSubscriptions subscriptions) {
         this.spectateTickets = java.util.Objects.requireNonNull(tickets, "tickets");
         this.spectate = java.util.Objects.requireNonNull(subscriptions, "subscriptions");
+        return this;
+    }
+
+    /** 接上按后端域隔离的三态熔断器（进程装配时、客户端端口打开之前调用一次）。 */
+    public ClientDispatcher withBackendCircuitBreaker(EndpointCircuitBreaker breaker) {
+        this.backendBreaker = java.util.Objects.requireNonNull(breaker, "breaker");
         return this;
     }
 
@@ -670,6 +679,13 @@ public final class ClientDispatcher {
             String domain = next.route().domain();
             // 入队时已确认该域有后端（onRequest 的 backends.containsKey）;装配后 backends 不再变。
             ClientMessageService backend = backends.get(domain);
+            if (!backendBreaker.tryAcquire(domain)) {
+                log.debug("后端熔断打开，快速回 1003 session={} domain={} message_id={}", sid(s), domain,
+                        next.request().getMessageId());
+                countRequest(next.route(), RequestResult.CIRCUIT_OPEN);
+                s.send(envelopeError(next.request(), TIP_SERVICE_UNAVAILABLE));
+                continue;
+            }
             countRequest(next.route(), RequestResult.FORWARDED);
             callBackend(s, domain, backend, next.request(), sessionAtSend(s, next));
         }
@@ -728,7 +744,14 @@ public final class ClientDispatcher {
         // 同步抛出 / 返回 null：请求没交给 Dubbo，失败时不必等（见 BACKEND_RESULT_UNKNOWN_HOLD_NANOS）
         boolean mayHaveReachedBackend = handedOff;
         future.whenComplete((reply, error) -> {
-            metrics.backendCallCompleted(domain, sample, error == null && reply != null);
+            boolean ok = error == null && reply != null;
+            // 先于会话关闭分支更新熔断器，避免客户端中途断连导致 HalfOpen 探测锁永久泄漏
+            if (ok) {
+                backendBreaker.recordSuccess(domain);
+            } else {
+                backendBreaker.recordFailure(domain);
+            }
+            metrics.backendCallCompleted(domain, sample, ok);
             s.execute(() -> onBackendCompleted(s, domain, request, reply, error, mayHaveReachedBackend, sentAtNanos));
         });
     }

@@ -6,8 +6,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.HexFormat;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+import java.util.function.LongUnaryOperator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,16 +53,24 @@ public final class RateLimiter {
     private final RedisKeys redisKeys;
     private final WaveSchedule wave;
     private final LongSupplier nowMs;
+    /** 给定正上界 n，返回 [0, n) 均匀随机数，用于排队 retry_after_ms 抖动；测试可注入确定值。 */
+    private final LongUnaryOperator randomBelow;
     /** 0 = 正常；否则存储出错后直接放行到这个时刻（毫秒），到期由抢到的那一个请求去探。 */
     private final AtomicLong bypassUntilMs = new AtomicLong();
 
     /** @param redisKeys 本进程部署命名空间的键名（区桶、IP 桶、冷却的键都由它生成） */
     public RateLimiter(RateLimitSettings settings, RateLimitStore store, RedisKeys redisKeys, LongSupplier nowMs) {
+        this(settings, store, redisKeys, nowMs, bound -> ThreadLocalRandom.current().nextLong(bound));
+    }
+
+    public RateLimiter(RateLimitSettings settings, RateLimitStore store, RedisKeys redisKeys,
+                       LongSupplier nowMs, LongUnaryOperator randomBelow) {
         this.settings = settings;
         this.store = store;
         this.redisKeys = redisKeys;
         this.wave = new WaveSchedule(settings.wave());
         this.nowMs = nowMs;
+        this.randomBelow = randomBelow;
     }
 
     public boolean enabled() {
@@ -122,7 +132,7 @@ public final class RateLimiter {
         long now = nowMs.getAsLong();
         long nowSec = now / 1000;
         if (!wave.isOpen(zoneId, nowSec)) {
-            return RateLimitDecision.queue(wave.secondsUntilOpen(zoneId, nowSec) * 1000L, -1);
+            return RateLimitDecision.queue(queueRetryAfterMs(wave.secondsUntilOpen(zoneId, nowSec) * 1000L), -1);
         }
         long until = bypassUntilMs.get();
         if (until != 0 && (now < until || !bypassUntilMs.compareAndSet(until, now + FAIL_OPEN_HOLD.toMillis()))) {
@@ -133,7 +143,8 @@ public final class RateLimiter {
             RateLimitStore.Admission admission = store.admit(
                     new RateLimitStore.Bucket(redisKeys.rateLimitIp(ip), settings.ipRps(), settings.ipBurst()),
                     zoneBucket && zoneId != 0 ? new RateLimitStore.Bucket(redisKeys.rateLimitZone(zoneId),
-                            settings.zoneRps(zoneId), settings.zoneBurst(zoneId)) : null);
+                            settings.zoneRps(zoneId), settings.zoneBurst(zoneId)) : null,
+                    settings.queueRetryIpCostMilli());
             if (until != 0) {
                 bypassUntilMs.set(0);
                 log.info("限流存储恢复，重新开始限流");
@@ -143,7 +154,7 @@ public final class RateLimiter {
                     return RateLimitDecision.deny(RateLimitDecision.IP_RATE_LIMIT);
                 }
                 case ZONE_EMPTY -> {
-                    return RateLimitDecision.queue(admission.waitMs(), admission.remaining());
+                    return RateLimitDecision.queue(queueRetryAfterMs(admission.waitMs()), admission.remaining());
                 }
                 case OK -> {
                 }
@@ -160,6 +171,13 @@ public final class RateLimiter {
             return RateLimitDecision.pass();
         }
         return RateLimitDecision.pass();
+    }
+
+    /** 排队重试提示：不低于下限并叠加 [0, jitter) 均匀抖动（防热键打爆与整批惊群）。 */
+    private long queueRetryAfterMs(long rawWaitMs) {
+        long jitterBound = settings.queueRetryJitterMs();
+        long jitter = jitterBound > 0 ? Math.floorMod(randomBelow.applyAsLong(jitterBound), jitterBound) : 0;
+        return Math.max(settings.queueRetryMinMs(), rawWaitMs) + jitter;
     }
 
     /** 身份的 SHA-256 前 16 字节（十六进制）。 */

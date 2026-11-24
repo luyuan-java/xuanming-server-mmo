@@ -7,11 +7,16 @@ public interface RateLimitStore {
 
     /**
      * 先 IP 桶、再区桶，原子地各取一个：IP 桶空 → {@link Admission.Kind#IP_EMPTY}（区桶不碰）；区桶空 →
-     * {@link Admission.Kind#ZONE_EMPTY}（IP 令牌退回——排队中的重试不吃 IP 桶）；都有 → 两边各扣一个。
+     * {@link Admission.Kind#ZONE_EMPTY}（按 {@code zoneEmptyIpCostMilli} 扣小份 IP 令牌）；都有 → 两边各扣一个。
      *
      * @param zone 区桶；为 null 只判 IP 桶
      */
     Admission admit(Bucket ip, Bucket zone);
+
+    /** 带区桶空时 IP 令牌扣减（千分令牌，0..1000）的原子判桶；旧实现默认委托 {@link #admit(Bucket, Bucket)}。 */
+    default Admission admit(Bucket ip, Bucket zone, int zoneEmptyIpCostMilli) {
+        return admit(ip, zone);
+    }
 
     /** 冷却：键不存在就占上（TTL = 冷却时长）返回 true；还在冷却返回 false。 */
     boolean tryCooldown(String key, Duration cooldown);

@@ -2,6 +2,7 @@ package com.game.battle.edge;
 
 import com.game.battle.BattleProperties;
 import com.game.battle.metrics.BattleMetrics.Disconnect;
+import com.game.common.net.SourcePrefixRateLimiter;
 import com.game.net.client.ClientFrameDecoder;
 import com.game.net.client.ClientFrameEncoder;
 import com.game.net.client.ClientFrames;
@@ -68,12 +69,19 @@ public final class BattleEdgeServer implements DirectEdge {
     /** 停机时等强关完成、等 accept 线程退出的上限（只为不无限阻塞）。 */
     private static final Duration CLOSE_WAIT = Duration.ofSeconds(2);
 
+    /** 承压窗口：最近发生过并发满或来源限速拒收后，在此时长内保持来源前缀限速激活。 */
+    private static final long PRESSURE_COOLDOWN_NANOS = TimeUnit.SECONDS.toNanos(10);
+
     private final EdgeDependencies deps;
     private final LongSupplier nanoClock;
     private final AtomicInteger connections = new AtomicInteger();
+    private final AtomicInteger unauthenticatedConnections = new AtomicInteger();
     private final Set<DirectSession> sessions = ConcurrentHashMap.newKeySet();
     private final EdgeRejectLog rejectLog = new EdgeRejectLog();
     private final AtomicLong acceptedTotal = new AtomicLong();
+    private volatile SourcePrefixRateLimiter sourceRateLimiter = new SourcePrefixRateLimiter(0, 0);
+    private volatile int preAuthBudget;
+    private final AtomicLong lastPressureRejectNanos = new AtomicLong(Long.MIN_VALUE);
 
     private final Object lifecycle = new Object();
     private EventLoopGroup bossGroup;
@@ -89,6 +97,22 @@ public final class BattleEdgeServer implements DirectEdge {
     BattleEdgeServer(EdgeDependencies deps, LongSupplier nanoClock) {
         this.deps = Objects.requireNonNull(deps, "deps");
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
+        this.preAuthBudget = Math.max(1, Math.min(256, deps.properties().effectiveMaxConnections() / 4));
+    }
+
+    /** 装配仅公网来源前缀限速（承压时激活；默认关闭，开启后仅对公网 IPv4 /24、IPv6 /64 生效）。 */
+    public BattleEdgeServer withSourcePrefixRateLimiter(SourcePrefixRateLimiter limiter, int preAuthBudget) {
+        this.sourceRateLimiter = Objects.requireNonNull(limiter, "limiter");
+        if (preAuthBudget <= 0) {
+            throw new IllegalArgumentException("preAuthBudget 必须为正: " + preAuthBudget);
+        }
+        this.preAuthBudget = preAuthBudget;
+        return this;
+    }
+
+    /** O(1) 未认证直连数：既未完成票据握手、也未通过探测授权验签的连接数。 */
+    public int unauthenticatedConnectionCount() {
+        return unauthenticatedConnections.get();
     }
 
     /** 构造时给的依赖（装配与测试核对用）。 */
@@ -234,12 +258,31 @@ public final class BattleEdgeServer implements DirectEdge {
         p.addLast("battleEdge", handler);
     }
 
+    /** 仅公网来源前缀限速（承压时激活；跳过内网/回环/CGNAT/边缘代理地址）。 */
+    boolean tryAdmitSource(SocketAddress remoteAddress) {
+        SourcePrefixRateLimiter limiter = sourceRateLimiter;
+        if (!limiter.enabled()) {
+            return true;
+        }
+        long now = nanoClock.getAsLong();
+        long lastReject = lastPressureRejectNanos.get();
+        boolean underPressure = unauthenticatedConnections.get() >= preAuthBudget
+                || (lastReject != Long.MIN_VALUE && now - lastReject < PRESSURE_COOLDOWN_NANOS);
+        java.net.InetAddress inet = remoteAddress instanceof InetSocketAddress isa ? isa.getAddress() : null;
+        if (!limiter.tryAdmit(inet, underPressure)) {
+            lastPressureRejectNanos.set(now);
+            return false;
+        }
+        return true;
+    }
+
     /** 闸 G1：连接数（含未握手）没到有效上限就占一个名额（配置 0 时取硬上限 65535）。 */
     boolean tryAdmit() {
         int max = deps.properties().effectiveMaxConnections();
         while (true) {
             int current = connections.get();
             if (current >= max) {
+                lastPressureRejectNanos.set(nanoClock.getAsLong());
                 return false;
             }
             if (connections.compareAndSet(current, current + 1)) {
@@ -250,12 +293,23 @@ public final class BattleEdgeServer implements DirectEdge {
 
     void register(DirectSession session) {
         sessions.add(session);
+        if (session.markUnauthEntered()) {
+            unauthenticatedConnections.incrementAndGet();
+        }
     }
 
-    /** 连接断开：归还 {@link #tryAdmit()} 占的名额。 */
+    /** 握手成功或网络探测授权验签通过：立即从未认证池中移除（幂等）。 */
+    void markAuthenticated(DirectSession session) {
+        if (session.clearUnauthCounted()) {
+            unauthenticatedConnections.decrementAndGet();
+        }
+    }
+
+    /** 连接断开：归还 {@link #tryAdmit()} 占的名额并幂等扣减未认证计数。 */
     void unregister(DirectSession session) {
         if (sessions.remove(session)) {
             connections.decrementAndGet();
+            markAuthenticated(session);
         }
     }
 

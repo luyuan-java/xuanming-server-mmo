@@ -140,7 +140,9 @@ public final class GateMetrics {
          * 推过 124 之后新到的请求，当场回执（未知消息号不回包，只计数）。2026-11-11 起，原为一律不回包
          * （mmorpg client-request-ordering.md O4 / O6 / O9，与 C++ 版 gate 路由 lane 同形）。
          */
-        REDIRECTED
+        REDIRECTED,
+        /** 目标后端熔断打开：快速回带请求 id 的信封 1003，不计非法包、不阻滞会话 lane。 */
+        CIRCUIT_OPEN
     }
 
     /** gate 主动断开连接的原因（{@code game.gate.disconnects{reason}}），每次主动断开恰好计一次；客户端自己断开、停服 / 丢租约的批量关闭不计。 */
