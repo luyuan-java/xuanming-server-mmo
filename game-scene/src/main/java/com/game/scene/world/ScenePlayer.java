@@ -17,9 +17,11 @@ import com.game.scene.battle.PlayerBattle;
 import com.game.scene.inbox.InboxLedger;
 import com.game.scene.inbox.PlayerInboxRuntime;
 import com.game.scene.player.GainWindows;
+import com.game.scene.player.PlayerActivityVitality;
 import com.game.scene.player.PlayerBags;
 import com.game.scene.player.PlayerAttributes;
 import com.game.scene.player.PlayerAppearance;
+import com.game.scene.player.PlayerItemGainBlock;
 import com.game.scene.player.PlayerMissions;
 import com.game.scene.player.PlayerPets;
 import com.game.scene.player.PlayerSkillState;
@@ -101,6 +103,10 @@ public final class ScenePlayer {
     private final InboxLedger inboxLedger;
     /** 角色形象 1 小时试用位图、在途试用态与幂等回执（永久形象在 appearanceId）。 */
     private final PlayerAppearance appearance;
+    /** 个人物品获取封锁清单（GM 收件箱类型 5 / 6；与收件箱账本同一次存盘提交）。 */
+    private final PlayerItemGainBlock itemGainBlock;
+    /** 活动中心活跃度积分与档位领取账本（同一次存盘提交）。 */
+    private final PlayerActivityVitality activityVitality;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -190,6 +196,8 @@ public final class ScenePlayer {
         this.battleLedger = state.hasBattleLedger() ? BattleLedger.restore(state.getBattleLedger()) : BattleLedger.empty();
         this.inboxLedger = state.hasInboxLedger() ? InboxLedger.restore(state.getInboxLedger()) : InboxLedger.empty();
         this.appearance = state.hasAppearance() ? PlayerAppearance.restore(state.getAppearance()) : PlayerAppearance.empty();
+        this.itemGainBlock = state.hasItemGainBlock() ? PlayerItemGainBlock.restore(state.getItemGainBlock()) : PlayerItemGainBlock.empty();
+        this.activityVitality = state.hasActivityVitality() ? PlayerActivityVitality.restore(state.getActivityVitality()) : PlayerActivityVitality.empty();
     }
 
     public long playerId() {
@@ -260,6 +268,16 @@ public final class ScenePlayer {
 
     public PlayerAppearance appearance() {
         return appearance;
+    }
+
+    /** 个人物品获取封锁清单（逻辑线程上读写；写入只经 {@code BagService}）。 */
+    public PlayerItemGainBlock itemGainBlock() {
+        return itemGainBlock;
+    }
+
+    /** 活动中心活跃度账本（逻辑线程上读写；写入只经 {@code ActivityVitalityService}）。 */
+    public PlayerActivityVitality activityVitality() {
+        return activityVitality;
     }
 
     public int level() {
@@ -497,6 +515,12 @@ public final class ScenePlayer {
         }
         if (!appearance.isPristine()) {
             state.setAppearance(appearance.toState());
+        }
+        if (!itemGainBlock.isPristine()) {
+            state.setItemGainBlock(itemGainBlock.toState());
+        }
+        if (!activityVitality.isPristine()) {
+            state.setActivityVitality(activityVitality.toState());
         }
         return state.build();
     }

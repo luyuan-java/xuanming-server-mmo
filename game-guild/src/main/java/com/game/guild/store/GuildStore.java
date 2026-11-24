@@ -223,6 +223,17 @@ public interface GuildStore {
     record GuildScore(long guildId, int zoneId, long score) {
     }
 
+    /** 带递增版本号的帮会权威积分行（写分同事务 score_version + 1，对齐 Go guild_repo.go）。 */
+    record VersionedScore(long guildId, int zoneId, long score, long scoreVersion) {
+    }
+
+    /** 账号注销帮会收尾结果：不在帮、普通离帮、帮主自动让位或单人帮解散。 */
+    record DeletionOutcome(Kind kind, long guildId, int zoneId, long newLeaderId) {
+        public enum Kind {
+            NOT_IN_GUILD, REMOVED, LEADER_TRANSFERRED, DISBANDED
+        }
+    }
+
     // ================================================================ 写（事务）
 
     /**
@@ -341,4 +352,26 @@ public interface GuildStore {
 
     /** 单个帮会的 (guild_id, zone_id, score)；不存在返回空（Java 增项：入榜 / 校对单帮用，与 G10 同列）。 */
     Optional<GuildScore> guildScore(long guildId, Deadline deadline);
+
+    /**
+     * 原子更新帮会积分并在同一事务内递增 {@code score_version}；帮会不存在返回空（对齐 Go {@code UpdateGuildScore}）。
+     */
+    default Optional<VersionedScore> updateGuildScore(long guildId, long score, Deadline deadline) {
+        return Optional.empty();
+    }
+
+    /** 全表带版本号的权威积分快照（{@code SELECT guild_id, zone_id, score, score_version FROM guild}）。 */
+    default List<VersionedScore> allVersionedGuildScores(Deadline deadline) {
+        return allGuildScores(deadline).stream()
+                .map(s -> new VersionedScore(s.guildId(), s.zoneId(), s.score(), 0L))
+                .toList();
+    }
+
+    /**
+     * 账号注销删角收尾：普通成员直接退帮，帮主按「职位最高→累计帮贡最多→入帮最早→player_id 最小」自动让位，
+     * 仅剩帮主一人时自动解散帮会并清理成员与待审申请（对齐 docs/design/account-deletion.md）。
+     */
+    default DeletionOutcome purgeDeletedPlayer(long playerId, long nowMs, Deadline deadline) {
+        return new DeletionOutcome(DeletionOutcome.Kind.NOT_IN_GUILD, 0L, 0, 0L);
+    }
 }

@@ -49,7 +49,7 @@ public final class BagService {
 
     /** 装备取石只准备候选入包，沿用封禁、铸号与容量规则；此处不写玩家、不发审计。 */
     public Bag.AddResult prepareEquipmentReturn(ScenePlayer player, com.game.scene.player.PlayerBags candidate, int config) {
-        if (!writable(player) || globalBlocks.blocksItem(config)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
+        if (!writable(player) || isItemGainBlocked(player, config)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
         return candidate.bag(BagType.INVENTORY).add(Map.of(config, 1L), tables, guids);
     }
 
@@ -146,14 +146,14 @@ public final class BagService {
         candidate.normalize(tables);
         var bag = candidate.bag(BagType.INVENTORY);
         var gained = new java.util.ArrayList<Bag.Written>();
-        for (int config : counts.keySet()) if (globalBlocks.blocksItem(config)) return failedTransfer(player, REFUSED);
+        for (int config : counts.keySet()) if (isItemGainBlocked(player, config)) return failedTransfer(player, REFUSED);
         if (!counts.isEmpty()) {
             var result = bag.add(counts, tables, guids);
             if (!result.ok()) return failedTransfer(player, result.tip());
             gained.addAll(result.written());
         }
         for (var instance : instances) {
-            if (globalBlocks.blocksItem(instance.getConfigId())) return failedTransfer(player, REFUSED);
+            if (isItemGainBlocked(player, instance.getConfigId())) return failedTransfer(player, REFUSED);
             if (candidate.toState().getItemsList().stream().anyMatch(existing -> existing.getItemUuid() == instance.getItemUuid())) return failedTransfer(player, Bag.INVALID_PARAM);
             int tip = bag.putInstance(instance, tables);
             if (tip != 0) return failedTransfer(player, tip);
@@ -185,7 +185,7 @@ public final class BagService {
         var removed=new java.util.ArrayList<Bag.Drawn>();var written=new java.util.ArrayList<Bag.Written>();
         for(var entry:consumed.entrySet())removed.addAll(inventory.drainClamped(entry.getKey(),entry.getValue()));
         for(var entry:new TreeMap<>(gained).entrySet()) {
-            if(globalBlocks.blocksItem(entry.getKey()))return failedTransfer(player,REFUSED);
+            if(isItemGainBlocked(player, entry.getKey()))return failedTransfer(player,REFUSED);
             long before=inventory.total(entry.getKey());
             var first=inventory.add(Map.of(entry.getKey(),entry.getValue()),tables,guids);written.addAll(first.written());
             long credited=inventory.total(entry.getKey())-before;
@@ -208,6 +208,34 @@ public final class BagService {
     /** 换上新的全服产出封禁名单（逻辑线程上调用）。 */
     public void applyGlobalBlocks(GlobalGainBlocks blocks) {
         globalBlocks = blocks;
+    }
+
+    /** 全服封禁或本玩家个人物品获取封禁（GM 收件箱类型 5 / 6）统一判定入口。 */
+    public boolean isItemGainBlocked(ScenePlayer player, int configId) {
+        return globalBlocks.blocksItem(configId) || player.itemGainBlock().isBlocked(configId);
+    }
+
+    /** 封锁指定玩家今后获得某物品配置号（GM 收件箱类型 5；幂等，允许配置号暂未出现在本节点物品表中）。 */
+    public int blockItemGain(ScenePlayer player, int itemConfigId) {
+        if (!writable(player) || itemConfigId == 0) {
+            return REFUSED;
+        }
+        if (tables.item(itemConfigId) == null) {
+            org.slf4j.LoggerFactory.getLogger(BagService.class).warn(
+                    "封锁物品获取的配置号不在本节点物品表中，仍照常落盘 player={} item_config_id={}",
+                    Long.toUnsignedString(player.playerId()), Integer.toUnsignedString(itemConfigId));
+        }
+        player.itemGainBlock().block(itemConfigId);
+        return 0;
+    }
+
+    /** 解除指定玩家对某物品配置号的获取封锁（GM 收件箱类型 6；幂等）。 */
+    public int unblockItemGain(ScenePlayer player, int itemConfigId) {
+        if (!writable(player) || itemConfigId == 0) {
+            return REFUSED;
+        }
+        player.itemGainBlock().unblock(itemConfigId);
+        return 0;
     }
 
     /**
@@ -233,7 +261,7 @@ public final class BagService {
         TreeMap<Integer, Long> ordered = new TreeMap<>(Integer::compareUnsigned);
         ordered.putAll(counts);
         for (int configId : ordered.keySet()) {
-            if (globalBlocks.blocksItem(configId)) {
+            if (isItemGainBlocked(player, configId)) {
                 metrics.gainBlocked(RedisGainBlockSource.ITEM);
                 return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
             }

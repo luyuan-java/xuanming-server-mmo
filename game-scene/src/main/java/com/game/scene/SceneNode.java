@@ -489,7 +489,7 @@ public class SceneNode implements SmartLifecycle {
                 battleTables, petService, player -> battleRouting(gateLinks, player, zoneId, nodeId), teamFollow, battleMetrics,
                 SceneClock.SYSTEM, logic, registry.requireId("BattleClientPlayer", "NotifyBattleReconnect"),
                 registry.requireId("BattleClientPlayer", "NotifyBattleEnd"));
-        InboxService inbox = new InboxService(InboxConsumers.withBattle(currency,battle), inboxClient, SceneClock.SYSTEM,
+        InboxService inbox = new InboxService(InboxConsumers.withBattle(currency, bags, battle), inboxClient, SceneClock.SYSTEM,
                 new InboxService.Settings(settings.inbox().consumerEnabled(), settings.inbox().periodicFetchMinutes()),
                 () -> nodeId, () -> ThreadLocalRandom.current().nextInt(1001));
         // 进场景前的规整：先背包（坏档拒绝进场），再属性、宝宝（同基线加载顺序），最后重建任务索引

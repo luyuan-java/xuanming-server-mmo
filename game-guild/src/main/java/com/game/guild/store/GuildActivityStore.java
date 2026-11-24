@@ -284,7 +284,7 @@ public final class GuildActivityStore {
                     || (Long) projection[4] != view.getBattleId() || view.getBattleId() != 0 && view.getBattleId() != battle)
                 throw new SQLException("历练终局大厅投影与永久原件冲突");
             var closed = view.toBuilder().setStateValue(4).setBattleId(battle);
-            if (cancellation != null) closed.setEndTipId(GuildTips.TRIAL_SERVICE_BUSY);
+            if (cancellation != null) closed.setEndTipId(cancelledLobbyEndTip(battle));
             saveLobby(s, closed.build(), 0, start.toByteArray());
         }
         // 房间投影可清理；仅退休仍指向原request的slot，绝不覆盖此后建立的新房间。
@@ -296,6 +296,11 @@ public final class GuildActivityStore {
                 s.update("UPDATE guild_activity_slot SET expires_ms=0 WHERE player_id=? AND lobby_id=?",
                         u64(identity.getPlayerId()), u64(original.getRequestId()));
         }
+    }
+
+    /** 取消终局大厅提示码：已建对局被 match 作废回 14042，未开成局回 14041（对齐 Go trial_launch_repo.go）。 */
+    static int cancelledLobbyEndTip(long battleId) {
+        return battleId != 0 ? GuildTips.TRIAL_BATTLE_ABORTED : GuildTips.TRIAL_SERVICE_BUSY;
     }
 
     private GuildTrialLobbyView end(AuthorityJdbc.Session s, GuildTrialLobbyView view, int tip, String... parameters) throws SQLException {

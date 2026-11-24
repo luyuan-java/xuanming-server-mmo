@@ -2,6 +2,7 @@ package com.game.scene.mission;
 
 import static com.game.scene.world.SceneMessageIds.tip;
 
+import com.game.proto.ClaimActivityVitalityRewardRequest;
 import com.game.proto.GetActivityListRequest;
 import com.game.proto.GetActivityListResponse;
 import com.game.proto.PlayerActivityInfo;
@@ -33,11 +34,14 @@ public final class ActivityFeature implements SceneFeature {
         this.missions = missions;
     }
 
-    /** 冻结策略（scene-handoff-spec §5.9）：190 只读（接取闸只读算可参与）。 */
+    /** 冻结策略（scene-handoff-spec §5.9）：190 只读；348 领奖幂等重放优先，未重放的新领奖在业务层判冻结/战斗回 1006。 */
     @Override
     public void register(Registrar r) {
         r.on(SERVICE, "GetActivityList", GetActivityListRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
                 (call, request) -> call.reply(list(call.player(), missions.nowMillis())));
+        r.on(SERVICE, "ClaimActivityVitalityReward", ClaimActivityVitalityRewardRequest.class,
+                FreezePolicy.GATED, BattlePolicy.ALLOW,
+                (call, request) -> call.reply(missions.vitality().claim(call.player(), request, missions.nowMillis())));
     }
 
     GetActivityListResponse list(ScenePlayer player, long nowMs) {
@@ -52,6 +56,7 @@ public final class ActivityFeature implements SceneFeature {
                 .setErrorMessage(tip(MissionService.OK))
                 .addAllActivities(activities)
                 .setServerTimeMs(nowMs)
+                .setVitality(missions.vitality().buildSnapshot(player, nowMs))
                 .build();
     }
 

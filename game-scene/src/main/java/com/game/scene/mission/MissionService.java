@@ -55,15 +55,25 @@ public final class MissionService {
     private final MissionTables tables;
     private final BagService bags;
     private final SceneClock clock;
+    private final ActivityVitalityService vitality;
 
     public MissionService(MissionTables tables, BagService bags, SceneClock clock) {
         this.tables = tables;
         this.bags = bags;
         this.clock = clock;
+        this.vitality = new ActivityVitalityService(tables, bags);
     }
 
     public MissionTables tables() {
         return tables;
+    }
+
+    BagService bags() {
+        return bags;
+    }
+
+    public ActivityVitalityService vitality() {
+        return vitality;
     }
 
     /** 一次请求只读一次的时钟（UTC 毫秒）。 */
@@ -324,6 +334,7 @@ public final class MissionService {
         private void complete(MissionDef def) {
             int id = def.id();
             missions.complete(id, def.type(), def.subType(), def.categories());
+            vitality.onMissionCompleted(player, def, nowMs);
             if (def.rewardId() != 0) {
                 missions.setClaimable(id);
                 if (def.autoReward()) {

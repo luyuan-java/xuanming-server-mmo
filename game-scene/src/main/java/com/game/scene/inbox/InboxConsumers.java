@@ -1,11 +1,13 @@
 package com.game.scene.inbox;
 
 import com.game.proto.player_inbox.GmCurrencyGainPayload;
+import com.game.proto.player_inbox.GmItemGainPayload;
 import com.game.proto.player_inbox.PlayerInboxDomain;
 import com.game.proto.player_inbox.PlayerInboxDomainSpec;
 import com.game.proto.player_inbox.PlayerInboxMessageType;
 import com.game.proto.player_inbox.PlayerInboxPlayerInboxOuterClass;
 import com.game.proto.player_inbox.PlayerInboxTypeSpec;
+import com.game.scene.bag.BagService;
 import com.game.scene.currency.CurrencyService;
 import com.game.scene.player.Wallet;
 import com.game.scene.world.ScenePlayer;
@@ -119,6 +121,15 @@ public final class InboxConsumers {
         return new InboxConsumers(table);
     }
 
+    /** 生产装配：GM 处置域（货币获取 1/2 + 物品获取 5/6）。 */
+    public static InboxConsumers gmSanction(CurrencyService currency, BagService bags) {
+        Objects.requireNonNull(bags, "bags");
+        Map<PlayerInboxMessageType, Executor> table = new EnumMap<>(gmSanction(currency).executors);
+        table.put(PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_BLOCK_ITEM_GAIN, (player, payload) -> itemGain(bags, player, payload, true));
+        table.put(PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_UNBLOCK_ITEM_GAIN, (player, payload) -> itemGain(bags, player, payload, false));
+        return new InboxConsumers(table);
+    }
+
     /** 战斗结算载荷的上限（同 game-inbox 规格与 game-match 的个人终局 16 KiB 上限，同 C++ {@code ApplyInboxSettlement}）。 */
     static final int BATTLE_PAYLOAD_MAX_BYTES = 16 * 1024;
 
@@ -133,6 +144,14 @@ public final class InboxConsumers {
         var table=new EnumMap<PlayerInboxMessageType,Executor>(PlayerInboxMessageType.class);
         table.putAll(gmSanction(currency).executors);
         table.put(PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT,(player,payload)->battleSettlement(battle,player,payload));
+        return new InboxConsumers(table);
+    }
+
+    /** 完整生产装配：GM 处置域（货币 1/2 + 物品 5/6）+ 战斗结算域（4）。 */
+    public static InboxConsumers withBattle(CurrencyService currency, BagService bags, com.game.scene.battle.PlayerBattleService battle) {
+        var table = new EnumMap<PlayerInboxMessageType, Executor>(PlayerInboxMessageType.class);
+        table.putAll(gmSanction(currency, bags).executors);
+        table.put(PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT, (player, payload) -> battleSettlement(battle, player, payload));
         return new InboxConsumers(table);
     }
 
@@ -240,6 +259,25 @@ public final class InboxConsumers {
             return new Rejected(PAYLOAD_INVALID);
         }
         int tip = block ? currency.block(player, type) : currency.unblock(player, type);
+        return tip == 0 ? new Applied() : new Rejected(tip);
+    }
+
+    /**
+     * 封锁 / 解封个人物品获取（同 mmorpg {@code GmSanctionInboxExecutor::BlockItemGain / UnblockItemGain}）：
+     * 载荷解码失败或 {@code item_config_id == 0} → REJECTED(PayloadInvalid)；否则幂等写 {@code PlayerItemGainBlock}。
+     */
+    static ExecResult itemGain(BagService bags, ScenePlayer player, ByteString payload, boolean block) {
+        GmItemGainPayload decoded;
+        try {
+            decoded = GmItemGainPayload.parseFrom(payload);
+        } catch (InvalidProtocolBufferException e) {
+            return new Rejected(PAYLOAD_INVALID);
+        }
+        int itemConfigId = decoded.getItemConfigId();
+        if (itemConfigId == 0) {
+            return new Rejected(PAYLOAD_INVALID);
+        }
+        int tip = block ? bags.blockItemGain(player, itemConfigId) : bags.unblockItemGain(player, itemConfigId);
         return tip == 0 ? new Applied() : new Rejected(tip);
     }
 }

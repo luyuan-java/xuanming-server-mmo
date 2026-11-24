@@ -138,6 +138,7 @@ class FreezeGateTest {
     private static final long REMOTE_SCENE = 900_001;
     private static final String SECRET = "freeze-gate-test-secret-0123456789ab";
     private static final int INVALID_PARAMETER = 1005;
+    private static final int FEATURE_UNAVAILABLE = 1006;
     private static final int ASSET_FROZEN = 27003;
     private static final int CHANGING_SCENE = 3014;
     private static final int TRANSFER_IN_PROGRESS = 13000;
@@ -301,6 +302,7 @@ class FreezeGateTest {
         expected.put("SceneMissionClientPlayerAcceptMission", FreezePolicy.GATED);
         expected.put("SceneMissionClientPlayerClaimMissionReward", FreezePolicy.GATED);
         expected.put("SceneActivityClientPlayerGetActivityList", FreezePolicy.READ_ONLY);
+        expected.put("SceneActivityClientPlayerClaimActivityVitalityReward", FreezePolicy.GATED);
         expected.put("ScenePetClientPlayerGetPetList", FreezePolicy.READ_ONLY);
         expected.put("ScenePetClientPlayerGetPetShop", FreezePolicy.READ_ONLY);
         expected.put("ScenePetClientPlayerGetPetEntries", FreezePolicy.READ_ONLY);
@@ -538,6 +540,10 @@ class FreezeGateTest {
         probes.add(new Probe(missionSvc, "GetMissionList", GetMissionListRequest.getDefaultInstance(), 0));
         probes.add(new Probe("SceneActivityClientPlayer", "GetActivityList",
                 GetActivityListRequest.getDefaultInstance(), 0));
+        probes.add(new Probe("SceneActivityClientPlayer", "ClaimActivityVitalityReward",
+                com.game.proto.ClaimActivityVitalityRewardRequest.newBuilder()
+                        .setRuleId(1).setConfigurationRevision(1).setPeriodId(1).setThresholdId(1)
+                        .setRequestId("freeze-vitality-1").build(), FEATURE_UNAVAILABLE));
 
         String petSvc = "ScenePetClientPlayer";
         probes.add(new Probe(petSvc, "GmGrantPet", GmGrantPetRequest.newBuilder().setPetTableId(1).build(),

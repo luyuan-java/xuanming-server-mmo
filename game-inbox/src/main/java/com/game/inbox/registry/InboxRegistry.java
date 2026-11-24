@@ -104,9 +104,7 @@ public final class InboxRegistry {
      * GmSanctionPlayer 对它照常回 kPlayerInboxDisabled（不在白名单里）；类型注册不动，解禁时删掉这一项。
      */
     public static final Map<PlayerInboxMessageType, String> V1_DISABLED = Map.of(
-            PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_ATTACH_CURRENCY_DEBT, "欠款合并语义与撤销路径未就绪（mmorpg 交接 §6 M2 / M3）",
-            PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_BLOCK_ITEM_GAIN, "Java scene 尚无物品获取封锁执行器（PARITY Java 待做）",
-            PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_UNBLOCK_ITEM_GAIN, "Java scene 尚无物品获取封锁执行器（PARITY Java 待做）");
+            PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_ATTACH_CURRENCY_DEBT, "欠款合并语义与撤销路径未就绪（mmorpg 交接 §6 M2 / M3）");
 
     private final Map<PlayerInboxDomain, PlayerInboxDomainSpec> domains;
     private final Map<PlayerInboxMessageType, TypeEntry> types;

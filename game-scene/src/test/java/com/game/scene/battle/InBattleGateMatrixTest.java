@@ -218,6 +218,7 @@ class InBattleGateMatrixTest {
             new Row(410, PET, "GetPetEntries", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(411, PET, "PreviewPetEntries", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(190, ACTIVITY, "GetActivityList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(348, ACTIVITY, "ClaimActivityVitalityReward", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(191, BAG, "GetBag", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(442, APPEARANCE, "GetAppearanceInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(443, APPEARANCE, "SwitchAppearance", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -318,7 +319,7 @@ class InBattleGateMatrixTest {
         assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226,
                 246, 247, 249, 250, 251, 252, 317))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.GATED));
-        assertThat(List.of(43, 77, 54, 167, 181, 190, 191, 193, 173, 188, 37, 49, 94, 95, 194, 195))
+        assertThat(List.of(43, 77, 54, 167, 181, 190, 348, 191, 193, 173, 188, 37, 49, 94, 95, 194, 195))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.ALLOW));
         assertThat(f.handler.battlePolicy(136)).as("没有处理器的方法没有策略（战斗与否都回 1006）").isNull();
         assertThat(registered).as("现有方法逐个显式声明，没有一个落到缺省 REJECT（D11：没有行为变化）")
@@ -603,6 +604,9 @@ class InBattleGateMatrixTest {
         out.put(MISSION + "AcceptMission", s -> MissionActionRequest.newBuilder().setMissionId(FRESH_MISSION).build());
         out.put(MISSION + "ClaimMissionReward", s -> MissionActionRequest.newBuilder().setMissionId(CLAIMABLE_MISSION).build());
         out.put(ACTIVITY + "GetActivityList", s -> GetActivityListRequest.getDefaultInstance());
+        out.put(ACTIVITY + "ClaimActivityVitalityReward", s -> com.game.proto.ClaimActivityVitalityRewardRequest.newBuilder()
+                .setRuleId(1).setConfigurationRevision(1).setPeriodId(1_700_000_000_000L).setThresholdId(1)
+                .setRequestId("battle-vitality-replay-1").build());
 
         out.put(PET + "GetPetList", s -> GetPetListRequest.getDefaultInstance());
         out.put(PET + "GetPetShop", s -> GetPetShopRequest.getDefaultInstance());
@@ -988,6 +992,11 @@ class InBattleGateMatrixTest {
             var rule = w.afkPassTables.rule();
             assertThat(w.currency.add(subject.player(), rule.priceCurrencyType(), rule.price(), Reason.GM_GRANT).ok()).isTrue();
             w.sink.clear();
+        }
+        if (row.service().equals(ACTIVITY) && row.method().equals("ClaimActivityVitalityReward")) {
+            subject.player().activityVitality().addClaim(com.game.player.store.state.ActivityClaimRecordState.newBuilder()
+                    .setRuleId(1).setConfigurationRevision(1).setPeriodId(1_700_000_000_000L).setThresholdId(1)
+                    .setRequestId("battle-vitality-replay-1").setRewardId(1).setClaimedAtMs(1_700_000_000_000L).build());
         }
         if (!EQUIPMENT_METHODS.contains(row.method())) return subject;
         ScenePlayer player = subject.player();

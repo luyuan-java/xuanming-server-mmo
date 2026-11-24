@@ -12,6 +12,12 @@
 |---|---|---|---|
 | 赛季技能免费当季生效 + 单槽「赛季印」（`SeasonRule` / `SeasonSeal` 表、`Skill.season_id = 58` + 4 个 S1 技能 `15001–15004`、`Buff` `150010–150040`、`season_error` 34000–34011、`PlayerSeasonComp` 落 `player_database.season_component = 30`、`ClientRequestKind::kCatchupSeasonSeal = 9`、`TX_SEASON_SEAL_CATCHUP = 35`、`EquipmentEffects.season_seal`/`season_max_health_bps`/`season_defense_bps`、`BattlePlayerSnapshot.active_season_id = 24`、`BattleActorState.season_seal_state = 44`、`BattleEventItem.season_seal_id = 24`、`SkillCatalogEntry.season_id = 24`、`SceneSeasonClientPlayer` 453–455） | 已在 `xuanming-server-mmo-cpp` 落地并同步 `mmorpg-client`：`season_rules.h`、`player_season.{h,cpp}`、`player_season_handler.cpp`、`player_handoff_gate.h`、`player_database_loader.cpp`、`player_attribute.cpp`（仅气血/防御轻加成且硬上限 ≤ 5%，不碰速度/暴击/控制）、`player_equipment_v1.cpp`、`player_skill.cpp`、`player_battle.cpp`（正规排位/PVE 结算原子累计进度点）、`turn_battle_engine.cpp`、`equipment_battle_effects.cpp`；验证：`test_cpp*` 42/42 OK、`bag_test` `SeasonRulesTest`+`PlayerSeasonSystemTest` 8/8 通过、`turn_battle_engine_test` `SeasonBattleTest`+`ModernSkillCatalogTest`+`EquipmentV1BattleTest` 64/64 通过、`skill_test` 98/98 通过、`cross_zone_test` `*HandoffGate*:*Freeze*` 32/32 通过、`mmorpg-client` `client_compile_check` 0 错误；设计及 Codex UI 联调契约见 `xuanming-server-mmo-cpp/docs/design/season-skills-and-seal-design.md` | 尚未跑 `ContractSync` 同步 `SeasonRule`/`SeasonSeal`/453–455，也尚未在 `game-scene` / `game-battle` 实现对应逻辑 | Java 待做 |
 
+## 2026-11-24 帮会（14042 / `score_version` / 删角自动传位）、收件箱个人物品禁获（类型 5/6）与活动活跃度领奖（348）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| 帮会历练被 match 作废回 `14042`（`TRIAL_BATTLE_ABORTED`）、帮会写分同事务递增 `score_version` 与带版本重建榜、角色注销清理帮会成员（普通成员离帮 / 帮主按 `role DESC, total_contribution DESC, join_time_ms ASC, player_id ASC` 自动传位 / 独苗自动解散）、GM 收件箱个人物品获取封锁/解封（类型 5/6 移出 `V1_DISABLED`、`PlayerState` 第 8 代台账 `item_gain_block=13`、`BagService` 统一全服+个人禁获判定）、活动中心活跃度积分与档位领奖（`SceneActivityClientPlayer.ClaimActivityVitalityReward` 348、`PlayerState` 第 8 代台账 `activity_vitality=14`、一次性任务位图去重、同 `request_id` 幂等重放优先于跨期/冻结/战斗闸、旧期未领回 `12001`、64 条旧期记录裁剪） | Go `guild`（`trial_launch_repo.go` / `guild_repo.go`）、Go `player_inbox` + C++ `GmSanctionInboxExecutor` / `GainBlockService`、C++ `PlayerActivitySystem` / `player_activity_handler.cpp` | `game-guild` 补齐 `GuildActivityStore.cancelledLobbyEndTip`（14042/14041）、`GuildStore`/`JdbcGuildStore` 原子 `updateGuildScore` + `allVersionedGuildScores` + `purgeDeletedPlayer` 及 `GuildParityClosureTest`（全模块通过并安装）；`game-player-store` 扩展 `player_state.proto`（`13`/`14`）并追加第 8 代持久化台账 `0008.schema`（`PlayerStateSchemaLedgerTest` 全绿）；`game-inbox` 解禁类型 5/6（18/18 全绿）；`game-scene` 新增 `PlayerItemGainBlock`、`PlayerActivityVitality`、`ActivityVitalityService` 并接入 `ScenePlayer` / `BagService` / `InboxConsumers` / `SceneNode` / `MissionTables` / `MissionService` / `ActivityFeature`，同步更新 `FreezeGateTest` / `InBattleGateMatrixTest` 并新增 `ActivityVitalityAndItemBlockTest`（定向 221/221 全绿），`game-robot` 门禁 35/35 通过（3 跳过）；设计见 `docs/design/guild-inbox-activity-parity.md` | 已对齐 |
+
 ## 2026-11-24 基础设施与业务对账残余收口（三态熔断、仅公网来源限速与 O(1) 未认证计数、网关排队重试下限/抖动/0.1 IP 扣减、探测 HRW 分散与 16023、寄售标题审核、已删角邮件 17011）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |
@@ -112,9 +118,9 @@
 | 战报列表 / 详情（379 / 380） | `go/match` 战报 | `game-match` `BattleReportStore` / `BattleReportHandlers` 已实现（2026-11-24），`MatchMethodsTest` 全部 22 方法无 deferred | 已对齐 |
 | 战斗剧本（389–392，含内部审核 387 / 388） | `go/match` 战斗剧本 | `game-match` `BattleScript*` 与 `MatchInternalService` 387/388 已实现（2026-11-24），含官方目录、规则校验、180 天审核流水清理与开局下发 | 已对齐 |
 | `ClientPlayerPayment`（396–399） | `go/payment` | `game-payment` 独立进程与 `game-gate` 路由已完整接入（2026-11-23），`MessageRoutesTest` `notPorted` 已清零 | 已对齐 |
-| 收件箱 GM 物品获取封锁 / 解封（类型 5 / 6） | `GainBlockService`、`player_item_gain_block_comp` | 注册表有载荷校验（`item_config_id ≠ 0`），列入 `V1_DISABLED`，配置进白名单即拒启 | Java 待做 |
-| 帮会 `score_version`（库表列已随 DDL 生成） | `go/guild/internal/data/guild_repo.go` 写分同事务 +1、按版本重建榜 | `GuildRow` 已加列 12，未按版本写分 / 重建榜 | Java 待做 |
-| 帮会历练对局被 match 作废回 14042 | `go/guild/internal/data/trial_launch_repo.go`、`constants.go:180` | `GuildTips.TRIAL_BATTLE_ABORTED` 已登记，历练链路未改用 | Java 待做 |
+| 收件箱 GM 物品获取封锁 / 解封（类型 5 / 6） | `GainBlockService`、`player_item_gain_block_comp` | `game-inbox` 移出 `V1_DISABLED`，`game-player-store` 第 8 代台账 `item_gain_block=13`，`game-scene` `BagService` + `InboxConsumers` + `SceneNode` 已接入并通过端到端单测（2026-11-24） | 已对齐 |
+| 帮会 `score_version`（库表列已随 DDL 生成） | `go/guild/internal/data/guild_repo.go` 写分同事务 +1、按版本重建榜 | `JdbcGuildStore.updateGuildScore` 原子 `score_version + 1`、`allVersionedGuildScores` 带版本重建榜（2026-11-24） | 已对齐 |
+| 帮会历练对局被 match 作废回 14042 | `go/guild/internal/data/trial_launch_repo.go`、`constants.go:180` | `GuildActivityStore.cancelledLobbyEndTip` 按 `battleId != 0` 回 `TRIAL_BATTLE_ABORTED(14042)`（2026-11-24） | 已对齐 |
 | `guild_asset_op` 认领覆盖索引 | `guild_db.proto:167` | `idx_guild_asset_op_0` 改为 (status,next_attempt_ms,op_id,player_id)，与基线 DDL 逐字节一致；已有库需重建该索引 | 已对齐 |
 
 ## 2026-11-15 月汐湾春节与中秋场景 3

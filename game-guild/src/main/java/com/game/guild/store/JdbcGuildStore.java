@@ -97,6 +97,16 @@ public final class JdbcGuildStore implements GuildStore {
     static final String SELECT_ALL_SCORES = "SELECT guild_id, zone_id, score FROM guild";
     /** G10 的单帮版（Java 增项）。 */
     static final String SELECT_GUILD_SCORE = "SELECT guild_id, zone_id, score FROM guild WHERE guild_id = ?";
+    /** G12：写分事务锁帮会行并取当前版本号。 */
+    static final String LOCK_GUILD_SCORE = "SELECT zone_id, score_version FROM guild WHERE guild_id = ? FOR UPDATE";
+    /** G13：写分同事务推进 score_version。 */
+    static final String UPDATE_GUILD_SCORE = "UPDATE guild SET score = ?, score_version = ? WHERE guild_id = ?";
+    /** G14：带版本号的权威积分全表普通读。 */
+    static final String SELECT_ALL_VERSIONED_SCORES = "SELECT guild_id, zone_id, score, score_version FROM guild";
+    /** M12：帮主注销自动让位候选排序（职位最高→累计帮贡最多→入帮最早→player_id 最小）。 */
+    static final String SELECT_SUCCESSOR_MEMBER =
+            "SELECT player_id FROM guild_member WHERE guild_id = ? AND player_id <> ?"
+                    + " ORDER BY role DESC, total_contribution DESC, join_time_ms ASC, player_id ASC LIMIT 1";
 
     // ---------------------------------------------------------------- S：guild_player_state
     /** S1：补建状态行 / 哨兵行。 */
@@ -852,6 +862,83 @@ public final class JdbcGuildStore implements GuildStore {
     @Override
     public Optional<GuildScore> guildScore(long guildId, Deadline deadline) {
         return Optional.ofNullable(tx.read(deadline, db -> db.one(SELECT_GUILD_SCORE, JdbcGuildStore::scoreRow, guildId)));
+    }
+
+    @Override
+    public Optional<VersionedScore> updateGuildScore(long guildId, long score, Deadline deadline) {
+        TxOutcome<VersionedScore> outcome = tx.run(GuildTxOp.SCORE, deadline, t -> {
+            long[] row = t.one(LOCK_GUILD_SCORE, rs -> new long[] {GuildJdbc.u32(rs, 1), GuildJdbc.u64(rs, 2)}, guildId);
+            if (row == null) {
+                return TxOutcome.reject(GuildReject.GUILD_GONE);
+            }
+            int zoneId = (int) row[0];
+            long nextVersion = row[1] + 1L;
+            t.updateExactlyOne("帮会 " + id(guildId) + " 写分与递增 score_version",
+                    UPDATE_GUILD_SCORE, score, nextVersion, guildId);
+            return TxOutcome.ok(new VersionedScore(guildId, zoneId, score, nextVersion));
+        });
+        return outcome instanceof TxOutcome.Ok<VersionedScore> ok ? Optional.of(ok.value()) : Optional.empty();
+    }
+
+    @Override
+    public List<VersionedScore> allVersionedGuildScores(Deadline deadline) {
+        return tx.read(deadline, db -> db.list(SELECT_ALL_VERSIONED_SCORES,
+                rs -> new VersionedScore(GuildJdbc.u64(rs, 1), GuildJdbc.u32(rs, 2), rs.getLong(3), GuildJdbc.u64(rs, 4))));
+    }
+
+    @Override
+    public DeletionOutcome purgeDeletedPlayer(long playerId, long nowMs, Deadline deadline) {
+        requirePlayer(playerId, "注销角色");
+        requireNow(nowMs, "注销帮会收尾");
+        long guildId = playerGuildId(playerId, deadline);
+        if (guildId == 0L) {
+            return new DeletionOutcome(DeletionOutcome.Kind.NOT_IN_GUILD, 0L, 0, 0L);
+        }
+        GuildReject ensure = ensurePlayerStateRows(GuildTxOp.LEAVE, nowMs, deadline, List.of(playerId));
+        if (ensure != null) {
+            throw new Deadline.DependencyException("注销帮会收尾状态行补建冲突: " + ensure);
+        }
+        TxOutcome<DeletionOutcome> outcome = tx.run(GuildTxOp.DISBAND, deadline, t -> {
+            GuildRow guild = lockGuildRow(t, guildId);
+            if (guild == null) {
+                return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.NOT_IN_GUILD, 0L, 0, 0L));
+            }
+            lockPlayerState(t, playerId);
+            Integer role = lockMemberRole(t, guildId, playerId);
+            if (role == null) {
+                return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.NOT_IN_GUILD, 0L, 0, 0L));
+            }
+            if (guild.leaderId() != playerId && role != GuildRoles.LEADER) {
+                t.updateExactlyOne("注销删普通成员 " + id(playerId), DELETE_MEMBER, guildId, playerId);
+                deleteApplicationRows(t, applicationKeysOfPlayers(t, List.of(playerId)));
+                hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
+                return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.REMOVED, guildId, guild.zoneId(), 0L));
+            }
+            Long successor = t.one(SELECT_SUCCESSOR_MEMBER, rs -> GuildJdbc.u64(rs, 1), guildId, playerId);
+            if (successor != null && successor != 0L) {
+                lockMemberRole(t, guildId, successor);
+                t.updateExactlyOne("注销帮主让位改 leader_id", UPDATE_LEADER, successor, guildId);
+                t.update(UPDATE_MEMBER_ROLE, GuildRoles.LEADER, guildId, successor);
+                t.updateExactlyOne("注销删除原帮主成员行 " + id(playerId), DELETE_MEMBER, guildId, playerId);
+                deleteApplicationRows(t, applicationKeysOfPlayers(t, List.of(playerId)));
+                hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
+                return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.LEADER_TRANSFERRED, guildId, guild.zoneId(), successor));
+            }
+            // 仅剩帮主一人：直接解散帮会并清理全部关联记录
+            t.updateExactlyOne("注销解散删唯一成员 " + id(playerId), DELETE_MEMBER, guildId, playerId);
+            List<AppKey> keys = new ArrayList<>();
+            for (long applicant : t.ids(SELECT_APPLICANTS_OF_GUILD, guildId)) {
+                keys.add(new AppKey(guildId, applicant));
+            }
+            keys.addAll(applicationKeysOfPlayers(t, List.of(playerId)));
+            deleteApplicationRows(t, keys);
+            hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
+            hooks.deleteGuildActivityProgress(t, guildId);
+            t.updateExactlyOne("注销解散删帮会 " + id(guildId), DELETE_GUILD, guildId);
+            return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.DISBANDED, guildId, guild.zoneId(), 0L));
+        });
+        return outcome instanceof TxOutcome.Ok<DeletionOutcome> ok ? ok.value()
+                : new DeletionOutcome(DeletionOutcome.Kind.NOT_IN_GUILD, 0L, 0, 0L);
     }
 
     // ================================================================ 状态行与守卫

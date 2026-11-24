@@ -11,9 +11,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** 正常 Maven test/verify 的持久字段门禁；不写台账，不在缺少原件时自动重新建立基线。 */
 class PlayerStateSchemaLedgerTest {
-    // 第一至六代登记技能、宠物回执、宝宝条目与培养阶、角色形象试用、宝宝技能重数和装备固定词条。第七代追加 AppearanceState.owned_bits（永久收藏衣柜）。
+    // 第一至七代登记技能、宠物回执、宝宝条目与培养阶、角色形象试用/永久衣柜、宝宝技能重数和装备固定词条。第八代追加 ItemGainBlockState 与 ActivityVitalityState。
     private static final String GENESIS_SHA256 = "3cd2f18d61634eaabe7d5805df027877451816242bb41ff5aecb704177d7877d";
-    private static final String HEAD_SHA256 = "e4df28e3882e466cce2915b534a069c6d6f4679c091b3a7cf93212af5f6c9b19";
+    private static final String HEAD_SHA256 = "b487d25efcd88b6a0d08f320a8539e21ded7ea9731df02684b52539b7e850dcb";
 
     // 仅登记已经存在的领域 restore→修改→toState 未知字段往返证据；protobuf 自己的 parse/serialize 不能替代它。
     private static final Set<String> ALLOW_ADDITIONS = Set.of(
@@ -32,7 +32,7 @@ class PlayerStateSchemaLedgerTest {
         var current = PersistentSchemaSnapshot.capture(PlayerState.getDescriptor());
         int generation = verifyRegisteredSchema(Path.of("src/test/resources/persistent-schema"),
                 GENESIS_SHA256, HEAD_SHA256, current, ALLOW_ADDITIONS);
-        assertThat(generation).isEqualTo(7);
+        assertThat(generation).isEqualTo(8);
     }
 
     /** 已合法退役为不可达的类型仍须保留历史解冻政策，不能只用当前闭包判定策略名有效。 */

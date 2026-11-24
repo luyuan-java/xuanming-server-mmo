@@ -1,10 +1,13 @@
 package com.game.scene.mission;
 
 import com.game.table.ActivityScheduleTable;
+import com.game.table.ActivityVitalityRewardTable;
+import com.game.table.ActivityVitalityRuleTable;
 import com.game.table.CommonErrorTip;
 import com.game.table.ConditionTable;
 import com.game.table.ConfigTables;
 import com.game.table.DungeonTable;
+import com.game.table.ItemTable;
 import com.game.table.MissionTable;
 import com.game.table.Rewardreward;
 import com.game.table.RewardTable;
@@ -113,13 +116,29 @@ public final class MissionTables {
     public record RewardDef(int tip, Map<Integer, Long> items) {
     }
 
+    /** 物品只读展示信息（活动活跃度档位奖励物品预览用）。 */
+    public record ItemDisplay(String name, String iconKey, int equipKind) {
+    }
+
     private final List<MissionDef> missions;
     private final Map<Integer, MissionDef> byId;
     private final Map<Integer, RewardDef> rewards;
+    private final List<ActivityVitalityRuleTable> vitalityRules;
+    private final List<ActivityVitalityRewardTable> vitalityRewards;
+    private final Map<Integer, ItemDisplay> itemDisplays;
+    private final Map<Integer, Integer> missionBitIndices;
 
     MissionTables(List<MissionTable> missionRows, List<ConditionTable> conditionRows, List<RewardTable> rewardRows,
                   List<ActivityScheduleTable> scheduleRows, Set<Integer> reachableMonsters, boolean monsterTablesUsable,
                   IntPredicate itemExists) {
+        this(missionRows, conditionRows, rewardRows, scheduleRows, reachableMonsters, monsterTablesUsable, itemExists,
+                List.of(), List.of(), Map.of());
+    }
+
+    MissionTables(List<MissionTable> missionRows, List<ConditionTable> conditionRows, List<RewardTable> rewardRows,
+                  List<ActivityScheduleTable> scheduleRows, Set<Integer> reachableMonsters, boolean monsterTablesUsable,
+                  IntPredicate itemExists, List<ActivityVitalityRuleTable> vitalityRules,
+                  List<ActivityVitalityRewardTable> vitalityRewards, Map<Integer, ItemDisplay> itemDisplays) {
         Map<Integer, ConditionDef> conditions = new HashMap<>();
         for (ConditionTable row : conditionRows) {
             conditions.put(row.getId(), ConditionDef.of(row));
@@ -147,14 +166,30 @@ public final class MissionTables {
         }
         this.missions = List.copyOf(list);
         this.byId = Map.copyOf(index);
+        this.vitalityRules = List.copyOf(vitalityRules);
+        this.vitalityRewards = List.copyOf(vitalityRewards);
+        this.itemDisplays = Map.copyOf(itemDisplays);
+        // 确定性稠密位序（按无符号任务号升序分配 0..N-1，供活动活跃度去重位图落盘）
+        List<Integer> sortedIds = new ArrayList<>(index.keySet());
+        sortedIds.sort(Integer::compareUnsigned);
+        Map<Integer, Integer> bitIndices = new HashMap<>(sortedIds.size() * 2);
+        for (int i = 0; i < sortedIds.size(); i++) {
+            bitIndices.put(sortedIds.get(i), i);
+        }
+        this.missionBitIndices = Map.copyOf(bitIndices);
         warnUnusable(scheduleRows, itemExists);
     }
 
     public static MissionTables from(ConfigTables tables) {
         boolean usable = tables.dungeon().size() > 0 && tables.monster().size() > 0;
+        Map<Integer, ItemDisplay> displays = new HashMap<>();
+        for (ItemTable item : tables.item().all()) {
+            displays.put(item.getId(), new ItemDisplay(item.getName(), item.getIconKey(), item.getEquipKind()));
+        }
         return new MissionTables(tables.mission().all(), tables.condition().all(), tables.reward().all(),
                 tables.activitySchedule().all(), reachableMonsters(tables.dungeon().all(), tables.monster()::contains),
-                usable, tables.item()::contains);
+                usable, tables.item()::contains, tables.activityVitalityRule().all(),
+                tables.activityVitalityReward().all(), displays);
     }
 
     /** 能打到的怪：副本里出现、且怪物表里有（0 跳过）。 */
@@ -187,6 +222,27 @@ public final class MissionTables {
         }
         RewardDef reward = rewards.get(rewardId);
         return reward != null ? reward : new RewardDef(INVALID_TABLE_DATA, Map.of());
+    }
+
+    /** 活跃度规则表行。 */
+    public List<ActivityVitalityRuleTable> vitalityRules() {
+        return vitalityRules;
+    }
+
+    /** 活跃度档位奖励表行。 */
+    public List<ActivityVitalityRewardTable> vitalityRewards() {
+        return vitalityRewards;
+    }
+
+    /** 物品展示信息；不存在返回 null。 */
+    public ItemDisplay itemDisplay(int itemConfigId) {
+        return itemDisplays.get(itemConfigId);
+    }
+
+    /** 任务对应的紧凑位序；不存在返回 -1。 */
+    public int missionBitIndex(int missionId) {
+        Integer idx = missionBitIndices.get(missionId);
+        return idx != null ? idx : -1;
     }
 
     // ------------------------------------------------------------------ 静态闸

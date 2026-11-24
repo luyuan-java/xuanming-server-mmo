@@ -43,6 +43,41 @@ message PlayerState {
   PlayerSkillBookState skills = 11;
   // 角色形象永久已拥有位图、1 小时免费试用位图、在途试用态与幂等回执（永久形象存于 player.appearance_id，同事务围栏提交）。
   AppearanceState appearance = 12;
+  // 个人物品获取封锁清单（GM 收件箱类型 5 / 6，与背包同事务围栏提交）。
+  ItemGainBlockState item_gain_block = 13;
+  // 活动中心活跃度账本（一次性任务去重位图、当期积分来源与已结束周期最近 64 条领取记录，同事务围栏提交）。
+  ActivityVitalityState activity_vitality = 14;
+}
+
+message ItemGainBlockState {
+  // 按 item_config_id 无符号升序写出，避免周期存盘误判脏数据。
+  repeated uint32 blocked_item_config_ids = 1;
+}
+
+message ActivityVitalityState {
+  // 一次性活动任务永久去重位图（按任务号位序紧密低位在前）。
+  bytes credited_missions = 1;
+  repeated ActivityPointSourceState sources = 2;
+  repeated ActivityClaimRecordState claims = 3;
+}
+
+message ActivityPointSourceState {
+  uint32 mission_scope = 1;
+  uint32 mission_id = 2;
+  uint32 rule_id = 3;
+  uint64 configuration_revision = 4;
+  uint64 period_id = 5;
+  uint32 points = 6;
+}
+
+message ActivityClaimRecordState {
+  uint32 rule_id = 1;
+  uint64 configuration_revision = 2;
+  uint64 period_id = 3;
+  uint32 threshold_id = 4;
+  string request_id = 5;
+  uint32 reward_id = 6;
+  uint64 claimed_at_ms = 7;
 }
 
 message AppearanceState {
