@@ -1,7 +1,10 @@
 package com.game.match.ranked;
 
 import com.game.match.support.MatchModes;
+import com.game.proto.BattleActivityContext;
 import com.game.proto.BattleParticipationFact;
+import com.game.proto.RankedMatchContext;
+import com.game.proto.TrialBattleContext;
 import com.game.proto.match.RankedPresetView;
 import com.game.proto.match.RankedTier;
 import com.game.table.ConfigTables;
@@ -9,6 +12,7 @@ import com.game.table.DungeonTable;
 import com.game.table.PlayModeTable;
 import com.game.table.RankedPresetTable;
 import com.game.table.RankedRuleTable;
+import com.game.table.TrialJournalEntryTable;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -21,9 +25,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
-/** 论剑排位首发 V1 与玩法白名单配表只读视图（{@code RankedRule} id=1 + {@code RankedPreset} + {@code PlayMode} + {@code Dungeon}）。 */
+/** 论剑排位首发 V1、玩法白名单与五行试炼志 V2 对局上下文配表只读视图。 */
 public final class RankedTables {
 
     public static final int ROLE_KIND_CHARACTER = 1;
@@ -34,23 +39,32 @@ public final class RankedTables {
     public static final List<Integer> PRIMARY_TEAM_SIZES = List.of(1, 3, 5);
     public static final List<Integer> SPECIAL_TEAM_SIZES = List.of(2, 4);
 
+    private record TrialVariantKey(int sourceKind, int difficulty, String variantKey) {
+    }
+
     private final RankedRuleTable rule;
     private final Map<Integer, RankedPresetTable> presetsById;
     private final List<RankedPresetView> presetViews;
     private final String configFingerprint;
     private final Map<Long, List<Integer>> allowedTeamSizesByModeConfig;
     private final Map<Integer, Integer> bossTrialKindByDungeon;
+    private final Map<Integer, TrialBattleContext> trialContextsByDungeon;
+    private final TrialBattleContext rankedTrialContext;
 
     private RankedTables(RankedRuleTable rule, Map<Integer, RankedPresetTable> presetsById,
                          List<RankedPresetView> presetViews, String configFingerprint,
                          Map<Long, List<Integer>> allowedTeamSizesByModeConfig,
-                         Map<Integer, Integer> bossTrialKindByDungeon) {
+                         Map<Integer, Integer> bossTrialKindByDungeon,
+                         Map<Integer, TrialBattleContext> trialContextsByDungeon,
+                         TrialBattleContext rankedTrialContext) {
         this.rule = rule;
         this.presetsById = presetsById;
         this.presetViews = presetViews;
         this.configFingerprint = configFingerprint;
         this.allowedTeamSizesByModeConfig = allowedTeamSizesByModeConfig;
         this.bossTrialKindByDungeon = bossTrialKindByDungeon;
+        this.trialContextsByDungeon = trialContextsByDungeon;
+        this.rankedTrialContext = rankedTrialContext;
     }
 
     public static RankedTables from(ConfigTables config) {
@@ -82,8 +96,112 @@ public final class RankedTables {
                 bossKinds.put(dungeon.getId(), dungeon.getBossTrialKind());
             }
         }
+        Map<Integer, TrialBattleContext> trialByDungeon = new HashMap<>();
+        TrialBattleContext rankedTrial = buildTrialContexts(config, config.dungeon().all(),
+                config.trialJournalEntry().all(), trialByDungeon);
         return new RankedTables(rule, Map.copyOf(byId), List.copyOf(views), fingerprint,
-                Map.copyOf(allowedSizes), Map.copyOf(bossKinds));
+                Map.copyOf(allowedSizes), Map.copyOf(bossKinds),
+                Map.copyOf(trialByDungeon), rankedTrial);
+    }
+
+    private static TrialBattleContext buildTrialContexts(ConfigTables config,
+                                                         List<DungeonTable> dungeons,
+                                                         List<TrialJournalEntryTable> entries,
+                                                         Map<Integer, TrialBattleContext> outByDungeon) {
+        Map<TrialVariantKey, TrialJournalEntryTable> byVariant = new HashMap<>(entries.size() * 2);
+        for (TrialJournalEntryTable entry : entries) {
+            if (!entry.getEnabled()) {
+                continue;
+            }
+            if (entry.getId() == 0 || entry.getRuleVersion() == 0) {
+                throw new IllegalStateException("TrialJournalEntry 行 id=" + entry.getId() + " 缺少有效 id 或 rule_version");
+            }
+            TrialVariantKey key = new TrialVariantKey(entry.getSourceKind(), entry.getDifficulty(), entry.getVariantKey());
+            TrialJournalEntryTable prev = byVariant.putIfAbsent(key, entry);
+            if (prev != null) {
+                throw new IllegalStateException("TrialJournalEntry 行 " + prev.getId() + " 与 " + entry.getId()
+                        + " 的 (source_kind=" + entry.getSourceKind() + ", difficulty=" + entry.getDifficulty()
+                        + ", variant_key=" + entry.getVariantKey() + ") 重复");
+            }
+        }
+        for (DungeonTable dungeon : dungeons) {
+            TrialVariantKey mapped = bossTrialVariant(dungeon.getBossTrialKind(), dungeon.getDifficulty());
+            if (mapped == null) {
+                continue;
+            }
+            TrialJournalEntryTable entry = byVariant.get(mapped);
+            if (entry == null) {
+                continue;
+            }
+            int guardMonsterId = 0;
+            for (int monsterId : dungeon.getMonsterList()) {
+                if (monsterId == 0) {
+                    continue;
+                }
+                var monster = config.monster().find(monsterId);
+                if (monster.isPresent() && monster.get().getIsBoss() == 0) {
+                    guardMonsterId = monsterId;
+                    break;
+                }
+            }
+            outByDungeon.put(dungeon.getId(), TrialBattleContext.newBuilder()
+                    .setJournalEntryId(entry.getId())
+                    .setTrialRuleVersion(entry.getRuleVersion())
+                    .setSeasonId(entry.getSeasonId())
+                    .setGuardMonsterTableId(guardMonsterId)
+                    .build());
+        }
+        TrialJournalEntryTable rankedEntry = byVariant.get(new TrialVariantKey(4, 0, "ranked_pvp"));
+        if (rankedEntry == null) {
+            return null;
+        }
+        return TrialBattleContext.newBuilder()
+                .setJournalEntryId(rankedEntry.getId())
+                .setTrialRuleVersion(rankedEntry.getRuleVersion())
+                .setSeasonId(rankedEntry.getSeasonId())
+                .build();
+    }
+
+    private static TrialVariantKey bossTrialVariant(int bossTrialKind, int difficulty) {
+        return switch (bossTrialKind) {
+            case 1 -> new TrialVariantKey(1, difficulty, "rejuvenation");
+            case 2 -> new TrialVariantKey(1, difficulty, "bulwark");
+            case 3 -> new TrialVariantKey(1, difficulty, "barrier");
+            case 4 -> new TrialVariantKey(1, difficulty, "venom");
+            case 5 -> new TrialVariantKey(2, difficulty, "rescue");
+            case 6 -> new TrialVariantKey(3, difficulty, "polarity_5v5");
+            default -> null;
+        };
+    }
+
+    /**
+     * 返回本局应冻结进 {@code CreateBattleRequest.trial_context} 的试炼志上下文（对齐 Go {@code Catalog.TrialContextFor}）。
+     * 覆盖卷一/卷二首领试炼、卷三护卫救援与物法易势（允许免费预设）、卷三人宠会武；帮会活动战/切磋/普通副本/跨季返回空。
+     */
+    public Optional<TrialBattleContext> trialContextFor(int mode, int configId,
+                                                        BattleActivityContext activityContext,
+                                                        RankedMatchContext rankedCtx) {
+        if (activityContext != null) {
+            return Optional.empty();
+        }
+        if (mode == MatchModes.PVE_SOLO || mode == MatchModes.PVE_TEAM || mode == MatchModes.POLARITY_5V5) {
+            if (rankedCtx != null && rankedCtx.getSeasonId() != 0) {
+                return Optional.empty();
+            }
+            return Optional.ofNullable(trialContextsByDungeon.get(configId));
+        }
+        if (mode == MatchModes.PVP_TEAM) {
+            if (rankedTrialContext == null) {
+                return Optional.empty();
+            }
+            if (rankedCtx != null && rankedCtx.getSeasonId() != 0
+                    && rankedTrialContext.getSeasonId() != 0
+                    && rankedTrialContext.getSeasonId() != rankedCtx.getSeasonId()) {
+                return Optional.empty();
+            }
+            return Optional.of(rankedTrialContext);
+        }
+        return Optional.empty();
     }
 
     static Map<Long, List<Integer>> parsePlayModeAllowedSizes(List<PlayModeTable> rows) {

@@ -61,11 +61,13 @@ public class GatherConfiguration {
             MatchMetrics metrics,MatchProperties props,
             org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global,
             org.springframework.beans.factory.ObjectProvider<com.game.match.script.BattleScriptResolver> scriptResolver,
-            org.springframework.beans.factory.ObjectProvider<com.game.match.ranked.RankedStore> rankedStore){
+            org.springframework.beans.factory.ObjectProvider<com.game.match.ranked.RankedStore> rankedStore,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.ranked.RankedTables> rankedTables){
         return gatherPipeline(ids,nodes,clock,hooks,ratings,scenes,calls,placements,tickets,compensation,metrics,props)
                 .withGlobal(global.getIfAvailable())
                 .withBattleScriptResolver(scriptResolver.getIfAvailable())
-                .withRankedStore(rankedStore.getIfAvailable());}
+                .withRankedStore(rankedStore.getIfAvailable())
+                .withRankedTables(rankedTables.getIfAvailable());}
 
     @Bean
     public GatherLauncher gatherLauncher(GatherPipeline gatherPipeline, MatchMetrics metrics, MatchProperties props) {

@@ -169,6 +169,9 @@ final class ConfiguredBattle {
         ctx.events().append(BATTLE_EVENT_SKILL, actor.actorId(), cast.primary).setSkillTableId(skill.getId())
                 .setHitKind(origin == MIRRORED ? BATTLE_HIT_MIRROR : BATTLE_HIT_NORMAL);
         if (origin == DIRECT || origin == CONFUSED) {
+            if (actor.isPlayer() && skill.getSeasonId() != 0) {
+                ctx.encounter.markAntiControlOrSeasonSkill(actor.actorId());
+            }
             cast.paidMana = equipment.manaCost(actor, skill);
             if (cast.paidMana != 0) {
                 actor.setMana(actor.mana() - cast.paidMana);

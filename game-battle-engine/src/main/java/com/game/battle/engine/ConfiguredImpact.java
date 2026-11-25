@@ -43,6 +43,7 @@ final class ConfiguredImpact {
             }
         }
         long healed = target.applyHeal(SupportEffectRules.applyBonus(amount,bonus) * received);
+        ctx.encounter.recordTrialMonsterHeal(source, target, healed);
         if (healed != 0) ctx.encounter.recordEffectiveContribution(source);
         ctx.events().append(BATTLE_EVENT_HEAL,source.actorId(),target.actorId()).setSkillTableId(hit.skill).setValue(healed).setTargetHealthAfter(target.health());
     }
@@ -126,6 +127,9 @@ final class ConfiguredImpact {
         remaining = battle.equipment.reduce(source,target,remaining,hit);
         long dealt = minUnsigned(target.health(),remaining);
         target.setHealth(target.health()-dealt);
+        if (hit.origin == DIRECT) {
+            ctx.encounter.recordTrialDirectDamage(source, target, type, EquipmentCombatRules.addSaturated(dealt, absorbed));
+        }
         if (dealt != 0 || absorbed != 0) ctx.encounter.recordEffectiveContribution(source);
         ctx.events().append(BATTLE_EVENT_DAMAGE,source.actorId(),target.actorId()).setSkillTableId(hit.skill).setValue(dealt).setAbsorbed(absorbed)
                 .setTargetHealthAfter(target.health()).setTargetManaAfter(target.mana()).setHitKind(kind).setDamageOrigin(hit.origin)

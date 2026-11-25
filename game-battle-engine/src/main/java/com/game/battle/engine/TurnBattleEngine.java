@@ -174,6 +174,9 @@ public final class TurnBattleEngine {
             }
         }
         engine.ctx.encounter.configure(bossTrialKind, battleDifficulty);
+        if (request.hasTrialContext()) {
+            engine.ctx.encounter.configureTrial(request.getTrialContext().getGuardMonsterTableId());
+        }
 
         BattleStart.Rejected rejected = engine.initPlayers();
         if (rejected != null) {
@@ -1078,6 +1081,9 @@ public final class TurnBattleEngine {
         }
         long dealt = ctx.encounter.applyLegacyDamage(actor, target, damage, CombatDamageRules.PHYSICAL_DAMAGE,
                 kind != eBattleHitKind.BATTLE_HIT_COUNTER);
+        if (kind != eBattleHitKind.BATTLE_HIT_COUNTER) {
+            ctx.encounter.recordTrialDirectDamage(actor, target, CombatDamageRules.PHYSICAL_DAMAGE, dealt);
+        }
         if (dealt != 0) ctx.encounter.recordEffectiveContribution(actor);
 
         ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
@@ -1225,6 +1231,7 @@ public final class TurnBattleEngine {
                 ctx.configured.impact.damage(actor,target,finalDamage.value(),row.getDamageType(),hit,eBattleHitKind.BATTLE_HIT_NORMAL);
             } else {
             long dealt = ctx.encounter.applyLegacyDamage(actor, target, finalDamage.value(), row.getDamageType(), true);
+            ctx.encounter.recordTrialDirectDamage(actor, target, row.getDamageType(), dealt);
             if (dealt != 0) ctx.encounter.recordEffectiveContribution(actor);
 
             ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
@@ -1511,6 +1518,7 @@ public final class TurnBattleEngine {
             }
             settlement.setExpGain(expSum).setGoldGain(goldSum);
         }
+        ctx.encounter.populateTrialFacts(request, actor, playerId, settlement);
         return settlement.build();
     }
 

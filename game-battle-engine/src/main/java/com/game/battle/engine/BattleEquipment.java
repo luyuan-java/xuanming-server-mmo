@@ -238,7 +238,10 @@ final class BattleEquipment {
                 else ev.setArtifactItemId(source.state().getEquipmentEffects().getArtifacts(index).getItemId());
                 if (live.getRemainingCapacity() == 0) battle.remove(target,entry.getBuffId());
             }
-            if (removed != 0) use(source,index,target,removed);
+            if (removed != 0) {
+                use(source,index,target,removed);
+                if (source.isPlayer()) ctx.encounter.markShieldBreak(source);
+            }
         }
     }
 
@@ -286,6 +289,7 @@ final class BattleEquipment {
             int bps = bonusBps(target, i);
             resist += bps;
             use(target,i,target,bps);
+            if (target.isPlayer()) ctx.encounter.markAntiControlOrSeasonSkill(target.actorId());
         }
         resist = Math.max(0,resist + 100*toDouble(combat.getResistAllAilment()) - 100*toDouble(source.combat().getIgnoreAilmentResist()));
         double chance = Math.clamp(row.getApplicationChance() + (accuracy-resist)/10000,0.05,kind == POISON ? 0.95 : 0.85);

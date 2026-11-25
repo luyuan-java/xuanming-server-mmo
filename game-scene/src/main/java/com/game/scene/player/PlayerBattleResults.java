@@ -186,7 +186,11 @@ public final class PlayerBattleResults {
                 .setMaterialCreditUnitsAdded(e.getMaterialCreditUnitsAdded())
                 .setMaterialTradableUnitsAdded(e.getMaterialTradableUnitsAdded())
                 .setMaterialPvpLossIneligible(e.getMaterialPvpLossIneligible())
-                .setSeasonId(e.getSeasonId());
+                .setSeasonId(e.getSeasonId())
+                .setTrialJournalEntryId(e.getTrialJournalEntryId())
+                .addAllTrialNewlyLitSealIds(e.getTrialNewlyLitSealIdsList())
+                .setTrialNewSoloBest(e.getTrialNewSoloBest())
+                .setTrialNewCoopBest(e.getTrialNewCoopBest());
         for (BattleResultCurrencyState c : e.getCurrenciesList()) {
             b.addCurrencies(PlayerBattleResultCurrency.newBuilder()
                     .setCurrencyType(c.getCurrencyType())

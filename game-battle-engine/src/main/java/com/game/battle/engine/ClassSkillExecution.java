@@ -128,6 +128,7 @@ final class ClassSkillExecution {
                     ctx.configured.impact.damage(actor,target,amount,skill.getDamageType(),hit,com.game.proto.eBattleHitKind.BATTLE_HIT_NORMAL);
                 } else {
                     long dealt = ctx.encounter.applyLegacyDamage(actor, target, amount, skill.getDamageType(), true);
+                    ctx.encounter.recordTrialDirectDamage(actor, target, skill.getDamageType(), dealt);
                     if (dealt != 0) ctx.encounter.recordEffectiveContribution(actor);
                     event(eBattleEventType.BATTLE_EVENT_DAMAGE, actor, target, skill).setValue(dealt).setIsCritical(damage.critical());
                     if (target.health() == 0) ctx.handleDeath(target, actor.actorId());
@@ -141,6 +142,7 @@ final class ClassSkillExecution {
                 ctx.configured.impact.heal(actor,target,amount,new BattleEffect.Hit(skill.getId(),rank,BattleEffect.DIRECT,primary),false,false);
             } else {
                 long healed = target.applyHeal(amount);
+                ctx.encounter.recordTrialMonsterHeal(actor, target, healed);
                 if (healed != 0) ctx.encounter.recordEffectiveContribution(actor);
                 event(eBattleEventType.BATTLE_EVENT_HEAL, actor, target, skill).setValue(healed);
             }

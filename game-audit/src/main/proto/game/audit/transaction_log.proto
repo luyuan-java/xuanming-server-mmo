@@ -53,6 +53,13 @@ enum TransactionReason {
   TX_EQUIP_GEM_REMOVE = 29;
   // 渠道撤单 / 拒付后的官方商城发放扣回（数值同 mmorpg TX_PAYMENT_REVERSAL = 31）
   TX_PAYMENT_REVERSAL = 31;
+  // 五行试炼志 V2 里程碑发奖（仅自用重铸砂 / 法宝拓印）与拓印兑换仅自用法宝（数值同 mmorpg TransactionType）
+  TX_TRIAL_JOURNAL_MILESTONE = 36;
+  TX_TRIAL_ARTIFACT_REDEEM = 37;
+  // 装备固定词条品相打磨 / 无损重铸、分卷宗技能制书与宗师主城原子代打费（数值同 mmorpg TransactionType）
+  TX_EQUIP_POLISH_REFORGE = 38;
+  TX_SKILL_SCROLL_CRAFT = 39;
+  TX_CRAFT_PROXY_FEE = 40;
   // 运维面（game-data 直写，数值同 mmorpg TransactionType；基线有枚举值、没有写入方）：
   // 回档恢复（余额 / 实例变化，correlation_id = 作业号）、精确回收、批量回收
   TX_ROLLBACK_RESTORE = 16;

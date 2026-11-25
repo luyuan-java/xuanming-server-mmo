@@ -140,9 +140,11 @@ public final class GatherPipeline {
     private com.game.match.global.GlobalMatchService global;
     private com.game.match.script.BattleScriptResolver scriptResolver;
     private com.game.match.ranked.RankedStore rankedStore;
+    private com.game.match.ranked.RankedTables rankedTables;
     public GatherPipeline withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
     public GatherPipeline withBattleScriptResolver(com.game.match.script.BattleScriptResolver resolver){this.scriptResolver=resolver;return this;}
     public GatherPipeline withRankedStore(com.game.match.ranked.RankedStore store){this.rankedStore=store;return this;}
+    public GatherPipeline withRankedTables(com.game.match.ranked.RankedTables tables){this.rankedTables=tables;return this;}
 
     /**
      * 生产装配。
@@ -375,6 +377,12 @@ public final class GatherPipeline {
             }
             if (plan.activityContext() != null) {
                 create.setActivityContext(plan.activityContext());
+            }
+            com.game.match.ranked.RankedTables catalogTables = rankedTables != null ? rankedTables
+                    : (rankedStore != null ? rankedStore.tables() : null);
+            if (catalogTables != null) {
+                catalogTables.trialContextFor(mode.getNumber(), plan.battleConfigId(), plan.activityContext(), rankedContext)
+                        .ifPresent(create::setTrialContext);
             }
             // 观战可见性在建房时决定一次、随建房原件冻结（battle 第二道闸只认它）；落点记录抄同一份冻结值，不按模式另算
             create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext()));

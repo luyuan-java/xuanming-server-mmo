@@ -184,6 +184,8 @@ public final class BattleFixture {
     public final com.game.scene.merchant.MysteryMerchantService merchant;
     public final com.game.scene.season.SeasonTables seasonTables = com.game.scene.season.SeasonTables.from(CONFIG);
     public final com.game.scene.season.SeasonService season;
+    public final com.game.scene.trial.TrialJournalTables trialJournalTables = com.game.scene.trial.TrialJournalTables.from(CONFIG);
+    public final com.game.scene.trial.TrialJournalService trialJournal;
     public final com.game.scene.equip.EquipmentService equipment;
     public final com.game.scene.equip.EquipmentCraftService craft;
     public final AttributeService attributes;
@@ -257,10 +259,15 @@ public final class BattleFixture {
         skills = new SkillService(SkillTables.from(CONFIG), clock, sceneMetrics, Contracts.IDS);
         pets = new PetService(PetTables.from(CONFIG), currency, guids, clock, new SplittableRandom(7), sceneMetrics);
         PetFeature petFeature = new PetFeature(pets, Contracts.REGISTRY);
+        appearance = new com.game.scene.appearance.AppearanceService(appearanceTables, bags, clock, Contracts.REGISTRY);
+        trialJournal = new com.game.scene.trial.TrialJournalService(trialJournalTables, bags, appearance, clock, sceneMetrics,
+                season::activeSeasonId);
         settlements = new BattleSettlementService(currency, bags, pets, missions, tables, battleMetrics, clock, petListChangedId)
-                .withSeasonService(season);
+                .withSeasonService(season)
+                .withTrialJournalService(trialJournal);
         battle = new PlayerBattleService(locks, settlements, tables, pets, this::routing, teamFollow, battleMetrics, clock, logic,
-                reconnectHintId, battleEndId);
+                reconnectHintId, battleEndId)
+                .withTrialJournalService(trialJournal);
         // 进场规整同 SceneNode：背包 → 属性 → 宝宝 → 任务 → 两本账本的加载检查
         world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, sink, repo, new AtomicLong(5000)::incrementAndGet, clock,
                 sceneMetrics, player -> {
@@ -279,7 +286,6 @@ public final class BattleFixture {
         battle.attach(world);
         BagFeature bagFeature = new BagFeature(bags);
         repo.setRenameClock(clock::epochMillis);
-        appearance = new com.game.scene.appearance.AppearanceService(appearanceTables, bags, clock, Contracts.REGISTRY);
         renameService = new com.game.scene.rename.PlayerRenameService(renameTables, bags, clock, Contracts.REGISTRY);
         afkPassService = new com.game.scene.afkpass.AfkPassService(afkPassTables, currency, clock,
                 com.game.scene.afkpass.AfkPassService.ProjectionSink.NOOP, logic);
@@ -297,6 +303,7 @@ public final class BattleFixture {
                 bagFeature, new com.game.scene.equip.EquipmentFeature(equipment, craft, bagFeature, attributes, Contracts.REGISTRY),
                 new com.game.scene.merchant.MysteryMerchantFeature(merchant, bagFeature),
                 new com.game.scene.season.SeasonFeature(season, attributes, Contracts.REGISTRY),
+                new com.game.scene.trial.TrialJournalFeature(trialJournal),
                 new BattleResultFeature(),
                 new MissionFeature(missions), new ActivityFeature(missions), new SkillFeature(skills),
                 new com.game.scene.skill.ClassSkillFeature(

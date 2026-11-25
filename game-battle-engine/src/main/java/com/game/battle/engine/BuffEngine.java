@@ -405,6 +405,10 @@ final class BuffEngine {
                         (double) Integer.toUnsignedLong(actor.level()), lostHealth);
                 long healed = actor.applyHeal(healAmount);
                 if (healed != 0) {
+                    BattleUnit caster = ctx.findActor(entry.getCasterId());
+                    if (caster != null) {
+                        ctx.encounter.recordTrialMonsterHeal(caster, actor, healed);
+                    }
                     ctx.events().append(eBattleEventType.BATTLE_EVENT_BUFF_TICK, entry.getCasterId(), actor.actorId())
                             .setBuffTableId(row.getId())
                             .setValue(healed)

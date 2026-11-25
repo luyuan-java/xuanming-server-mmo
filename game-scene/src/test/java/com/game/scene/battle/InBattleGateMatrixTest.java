@@ -135,6 +135,7 @@ class InBattleGateMatrixTest {
     private static final int EQUIPMENT_IN_BATTLE = 28007;
     private static final int MYSTERY_MERCHANT_IN_BATTLE = 30007;
     private static final int SEASON_IN_BATTLE = 34009;
+    private static final int TRIAL_JOURNAL_IN_BATTLE = 35002;
     private static final java.util.Set<String> EQUIPMENT_METHODS = java.util.Set.of(
             "EquipItem", "UnequipItem", "GmGrantItem", "EnhanceEquip", "InlayGem", "RemoveGem",
             "CommitEquipmentCraft", "ClaimEquipmentMaterialReward");
@@ -165,6 +166,7 @@ class InBattleGateMatrixTest {
     private static final String BATTLE_RESULT = "SceneBattleResultClientPlayer";
     private static final String MYSTERY_MERCHANT = "SceneMysteryMerchantClientPlayer";
     private static final String SEASON = "SceneSeasonClientPlayer";
+    private static final String TRIAL_JOURNAL = "SceneTrialJournalClientPlayer";
 
     /** 战斗中的预期（除了正数 = 应答里的拒绝码之外的三种）。 */
     private static final int SAME_AS_NOT_IN_BATTLE = -1;
@@ -217,6 +219,8 @@ class InBattleGateMatrixTest {
             new Row(315, MYSTERY_MERCHANT, "BuyMysteryMerchantGoods", BattlePolicy.GATED, MYSTERY_MERCHANT_IN_BATTLE),
             new Row(454, SEASON, "EquipSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(455, SEASON, "CatchupSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
+            new Row(457, TRIAL_JOURNAL, "ClaimTrialJournalMilestone", BattlePolicy.GATED, TRIAL_JOURNAL_IN_BATTLE),
+            new Row(458, TRIAL_JOURNAL, "RedeemBoundArtifactVoucher", BattlePolicy.GATED, TRIAL_JOURNAL_IN_BATTLE),
             // 批次 5.4：226 跨 zone 传送自己判战斗在途（基线 kZoneTravelInBattle，player_lifecycle.cpp:2784-2788），计在 zone_travel 闸上
             new Row(226, SCENE, "TravelToZone", BattlePolicy.GATED, ZONE_TRAVEL_IN_BATTLE),
             // ALLOW：只读
@@ -224,6 +228,7 @@ class InBattleGateMatrixTest {
             new Row(253, SCENE, "GetSyncDigest", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(314, MYSTERY_MERCHANT, "GetMysteryMerchantInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(453, SEASON, "GetSeasonState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(456, TRIAL_JOURNAL, "GetTrialJournal", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(77, SKILL, "ListSkills", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(54, CURRENCY, "GetCurrencyList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(167, ATTRIBUTE, "GetAttributePanel", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -337,9 +342,9 @@ class InBattleGateMatrixTest {
         assertThat(List.of(134, 132)).allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).isEqualTo(BattlePolicy.DROP));
         assertThat(f.handler.battlePolicy(131)).isEqualTo(BattlePolicy.STOP_ONLY);
         assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226,
-                246, 247, 249, 250, 251, 252, 315, 317, 406, 408, 454, 455))
+                246, 247, 249, 250, 251, 252, 315, 317, 406, 408, 454, 455, 457, 458))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.GATED));
-        assertThat(List.of(43, 253, 314, 453, 77, 54, 167, 181, 190, 348, 191, 374, 404, 405, 407, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
+        assertThat(List.of(43, 253, 314, 453, 456, 77, 54, 167, 181, 190, 348, 191, 374, 404, 405, 407, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.ALLOW));
         assertThat(f.handler.battlePolicy(136)).as("没有处理器的方法没有策略（战斗与否都回 1006）").isNull();
         assertThat(registered).as("现有方法逐个显式声明，没有一个落到缺省 REJECT（D11：没有行为变化）")
@@ -714,6 +719,11 @@ class InBattleGateMatrixTest {
         out.put(PET + "GmGrantPet", s -> GmGrantPetRequest.newBuilder().setPetTableId(1).build());
         out.put(PET + "AutoAllocatePetPoints", s -> AutoAllocatePetPointsRequest.newBuilder().setPetId(s.activePet()).build());
         out.put(COMMON + "RenamePlayer", s -> com.game.proto.RenamePlayerRequest.newBuilder().setName("战中改名").build());
+        out.put(TRIAL_JOURNAL + "GetTrialJournal", s -> com.game.proto.GetTrialJournalRequest.getDefaultInstance());
+        out.put(TRIAL_JOURNAL + "ClaimTrialJournalMilestone", s -> com.game.proto.ClaimTrialJournalMilestoneRequest.newBuilder()
+                .setClientRequestId(9101L).setMilestoneId(101).build());
+        out.put(TRIAL_JOURNAL + "RedeemBoundArtifactVoucher", s -> com.game.proto.RedeemBoundArtifactVoucherRequest.newBuilder()
+                .setClientRequestId(9102L).setArtifactItemConfigId(3301).build());
         return out;
     }
 
@@ -1116,6 +1126,17 @@ class InBattleGateMatrixTest {
                 w.sink.clear();
             }
         }
+        if (row.service().equals(TRIAL_JOURNAL)) {
+            if (row.method().equals("ClaimTrialJournalMilestone")) {
+                // 点亮卷一前 3 枚战法印（1011/1012/1013），使 101 里程碑达标可领
+                subject.player().trialJournal().replace(com.game.player.store.state.PlayerTrialJournalState.newBuilder()
+                        .setLitSealBits(com.google.protobuf.ByteString.copyFrom(new byte[] {0x07}))
+                        .build());
+            } else if (row.method().equals("RedeemBoundArtifactVoucher")) {
+                grantProbeItem(w, subject.player(), com.game.battle.engine.TrialJournalRules.BOUND_ARTIFACT_VOUCHER_ITEM_ID, 1L);
+            }
+            w.sink.clear();
+        }
         if (row.service().equals(BAG) && (row.method().equals("PreviewEquipmentCraft") || row.method().equals("CommitEquipmentCraft"))) {
             var rules = w.craft.getRules(subject.player());
             var recipe = rules.getRecipes(0);
@@ -1258,7 +1279,7 @@ class InBattleGateMatrixTest {
 
     /** 包含跨区、装备、神秘商人与赛季的全部闸（{@code game_scene_battle_gate_rejects_total{gate}}）。 */
     private static final List<String> GATES = List.of("enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default",
-            "zone_travel", "equipment", "mystery_merchant", "season");
+            "zone_travel", "equipment", "mystery_merchant", "season", "trial_journal");
 
     private Map<String, Double> gateRejectsByGate() {
         Map<String, Double> out = new TreeMap<>();
@@ -1288,6 +1309,7 @@ class InBattleGateMatrixTest {
             case BAG -> EQUIPMENT_METHODS.contains(row.method()) ? "equipment" : "bag_sort";
             case MYSTERY_MERCHANT -> "mystery_merchant";
             case SEASON -> "season";
+            case TRIAL_JOURNAL -> "trial_journal";
             default -> throw new AssertionError(row.key() + " 是 GATED，但没有登记它计在哪个闸上（规格 §9 的 gate 取值）");
         };
     }

@@ -2,12 +2,19 @@ package com.game.battle.engine;
 
 import com.game.common.combat.CombatDamageRules;
 import com.game.common.math.Unsigned;
+import com.game.proto.BattlePlayerSnapshot;
+import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.BattleTelegraphEntry;
+import com.game.proto.BattleTrialJournalFacts;
+import com.game.proto.CreateBattleRequest;
+import com.game.proto.EquipmentArtifactSource;
+import com.game.proto.TrialBattleContext;
 import com.game.proto.eBattleEventType;
 import com.game.proto.eBattleHitKind;
 import com.game.proto.eBattleOutcome;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.NavigableMap;
 import java.util.TreeMap;
@@ -22,11 +29,16 @@ final class EncounterMechanics {
     private final BattleContext ctx;
     private int bossTrialKind = BattleConstants.BOSS_TRIAL_KIND_NONE;
     private int battleDifficulty;
+    private int trialGuardMonsterTableId;
     private long protectedGuardActorId;
     private int initialPolarity;
     private int activePolarity;
     private int bossStanceType;
     private long bossBarrierShield;
+    private long bossGuardHealTotal;
+    private final boolean[] teamDealtPhysicalDirectDamage = new boolean[2];
+    private final boolean[] teamDealtMagicDirectDamage = new boolean[2];
+    private final TreeSet<Long> everDiedActors = new TreeSet<>(Long::compareUnsigned);
     private final List<BattleTelegraphEntry> activeTelegraphs = new ArrayList<>();
     private final NavigableMap<Long, TreeSet<Integer>> manualActionRoundsByPlayer =
             new TreeMap<>(Long::compareUnsigned);
@@ -42,6 +54,40 @@ final class EncounterMechanics {
     void configure(int bossTrialKind, int battleDifficulty) {
         this.bossTrialKind = bossTrialKind;
         this.battleDifficulty = battleDifficulty;
+    }
+
+    void configureTrial(int guardMonsterTableId) {
+        this.trialGuardMonsterTableId = guardMonsterTableId;
+    }
+
+    void recordDeath(long actorId) {
+        if (actorId != 0L) {
+            everDiedActors.add(actorId);
+        }
+    }
+
+    void recordTrialDirectDamage(BattleUnit source, BattleUnit target, int damageType, long dealtOrAbsorbed) {
+        if (dealtOrAbsorbed == 0L || source == null || target == null
+                || source.teamIndex() == target.teamIndex()
+                || source.teamIndex() < 0 || source.teamIndex() >= 2) {
+            return;
+        }
+        if (damageType == CombatDamageRules.PHYSICAL_DAMAGE) {
+            teamDealtPhysicalDirectDamage[source.teamIndex()] = true;
+        } else if (damageType == CombatDamageRules.MAGIC_DAMAGE) {
+            teamDealtMagicDirectDamage[source.teamIndex()] = true;
+        }
+    }
+
+    void recordTrialMonsterHeal(BattleUnit source, BattleUnit target, long healed) {
+        if (healed == 0L || source == null || target == null
+                || !source.isMonster() || !target.isMonster()
+                || !target.isBoss() || source.actorId() == target.actorId()) {
+            return;
+        }
+        if (trialGuardMonsterTableId == 0 || source.monsterTableId() == trialGuardMonsterTableId) {
+            bossGuardHealTotal = EquipmentCombatRules.addSaturated(bossGuardHealTotal, healed);
+        }
     }
 
     int bossTrialKind() {
@@ -191,6 +237,7 @@ final class EncounterMechanics {
             bossBarrierShield -= absorbed;
             result -= absorbed;
             if (absorbed != 0L) {
+                recordTrialDirectDamage(source, target, damageType, absorbed);
                 recordEffectiveContribution(source);
                 ctx.events().append(eBattleEventType.BATTLE_EVENT_SHIELD, target.actorId(), target.actorId())
                         .setAbsorbed(absorbed)
@@ -441,6 +488,7 @@ final class EncounterMechanics {
                     long pct = Integer.compareUnsigned(battleDifficulty, 2) >= 0 ? 10L : 8L;
                     long rawHeal = Math.max(1L, Long.divideUnsigned(boss.maxHealth() * pct, 100L));
                     long healed = boss.applyHeal(Unsigned.toDouble(rawHeal) * received);
+                    recordTrialMonsterHeal(source, boss, healed);
                     ctx.events().append(eBattleEventType.BATTLE_EVENT_HEAL, source.actorId(), boss.actorId())
                             .setValue(healed)
                             .setTargetHealthAfter(boss.health())
@@ -514,6 +562,84 @@ final class EncounterMechanics {
         }
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             state.addAllTelegraphs(activeTelegraphs);
+        }
+    }
+
+    /** 五行试炼志 V2：冻结权威战法事实与轻量阵容快照（不查配置表、不掷随机，对齐 C++ BuildSettlement）。 */
+    void populateTrialFacts(CreateBattleRequest request, BattleUnit actor, long playerId,
+                            BattleSettlementData.Builder settlement) {
+        if (!request.hasTrialContext() || request.getTrialContext().getJournalEntryId() == 0) {
+            return;
+        }
+        TrialBattleContext trialCtx = request.getTrialContext();
+        BattleTrialJournalFacts.Builder facts = settlement.getTrialFactsBuilder()
+                .setJournalEntryId(trialCtx.getJournalEntryId())
+                .setTrialRuleVersion(trialCtx.getTrialRuleVersion())
+                .setSeasonId(trialCtx.getSeasonId());
+
+        record Teammate(long playerId, String name) {
+        }
+        int humanCount = 0;
+        List<Teammate> teammates = new ArrayList<>();
+        for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
+            if (snapshot.getTeamIndex() != actor.teamIndex()) {
+                continue;
+            }
+            humanCount++;
+            if (snapshot.getPlayerId() == playerId) {
+                if (snapshot.getPetsCount() > 0) {
+                    var pet = snapshot.getPets(0);
+                    facts.setUsedPetTableId(pet.getCombatPetTableId() != 0
+                            ? pet.getCombatPetTableId() : pet.getPetTableId());
+                }
+            } else {
+                teammates.add(new Teammate(snapshot.getPlayerId(), snapshot.getPlayerName()));
+            }
+        }
+        facts.setInitialHumanCount(humanCount);
+        teammates.sort(Comparator.comparingLong(Teammate::playerId));
+        int maxNames = Math.min(teammates.size(), TrialJournalRules.MAX_COOP_TEAMMATES);
+        for (int i = 0; i < maxNames; i++) {
+            if (!teammates.get(i).name().isEmpty()) {
+                facts.addTeammateNames(teammates.get(i).name());
+            }
+        }
+
+        boolean selfOrPetDied = everDiedActors.contains(playerId);
+        boolean guardSurvived = false;
+        if (protectedGuardActorId != 0L) {
+            BattleUnit protectedGuard = ctx.findActor(protectedGuardActorId);
+            guardSurvived = protectedGuard != null && !protectedGuard.isDead();
+        }
+        for (BattleUnit other : ctx.units()) {
+            if (other.isPet() && other.ownerPlayerId() == playerId && everDiedActors.contains(other.actorId())) {
+                selfOrPetDied = true;
+            }
+            if (protectedGuardActorId == 0L
+                    && other.isMonster() && other.teamIndex() != actor.teamIndex()
+                    && !other.isBoss() && !other.isDead()
+                    && (trialCtx.getGuardMonsterTableId() == 0
+                    || other.monsterTableId() == trialCtx.getGuardMonsterTableId())) {
+                guardSurvived = true;
+            }
+        }
+        int myTeam = actor.teamIndex();
+        facts.setSelfOrPetEverDied(selfOrPetDied)
+                .setBossGuardHealTotal(bossGuardHealTotal)
+                .setGuardStanceDispelled(guardStanceDispelled)
+                .setTeamDealtPhysicalDirectDamage(myTeam >= 0 && myTeam < 2 && teamDealtPhysicalDirectDamage[myTeam])
+                .setTeamDealtMagicDirectDamage(myTeam >= 0 && myTeam < 2 && teamDealtMagicDirectDamage[myTeam])
+                .setGuardSurvived(guardSurvived)
+                .setSelfTriggeredShieldBreak(shieldBreakPlayers.contains(playerId))
+                .setSelfTriggeredAntiControlOrSeasonSkill(antiControlOrSeasonSkillPlayers.contains(playerId));
+
+        List<Integer> rawEffects = new ArrayList<>();
+        for (EquipmentArtifactSource artifact : actor.state().getEquipmentEffects().getArtifactsList()) {
+            rawEffects.add(artifact.getEffectId());
+        }
+        facts.addAllUsedArtifactEffectIds(TrialJournalRules.normalizeArtifactEffectIds(rawEffects));
+        if (actor.state().getEquipmentEffects().hasSeasonSeal()) {
+            facts.setUsedSeasonSealId(actor.state().getEquipmentEffects().getSeasonSeal().getSealId());
         }
     }
 

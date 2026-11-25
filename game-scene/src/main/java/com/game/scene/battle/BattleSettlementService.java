@@ -75,6 +75,7 @@ public final class BattleSettlementService {
     private final SceneClock clock;
     private final int notifyPetListChanged;
     private com.game.scene.season.SeasonService seasonService;
+    private com.game.scene.trial.TrialJournalService trialJournalService;
 
     /** @param notifyPetListChanged 184 的消息号（{@code ScenePetClientPlayer.NotifyPetListChanged}） */
     public BattleSettlementService(CurrencyService currency, BagService bags, PetService pets, MissionService missions,
@@ -91,6 +92,11 @@ public final class BattleSettlementService {
 
     public BattleSettlementService withSeasonService(com.game.scene.season.SeasonService seasonService) {
         this.seasonService = seasonService;
+        return this;
+    }
+
+    public BattleSettlementService withTrialJournalService(com.game.scene.trial.TrialJournalService trialJournalService) {
+        this.trialJournalService = trialJournalService;
         return this;
     }
 
@@ -412,6 +418,9 @@ public final class BattleSettlementService {
         var seasonCredit = seasonService == null
                 ? com.game.scene.season.SeasonService.BattleCreditOutcome.NONE
                 : seasonService.creditBattlePoints(player, settlement, nowMs);
+        var trialDelta = trialJournalService == null
+                ? com.game.scene.trial.TrialJournalService.SettlementDelta.NONE
+                : trialJournalService.applyBattleCredit(player, settlement, nowMs);
         int recordedSeasonId = settlement.getSeasonId() != 0 ? settlement.getSeasonId() : seasonCredit.seasonId();
         com.game.player.store.state.BattleResultEntryState.Builder entry = com.game.player.store.state.BattleResultEntryState.newBuilder()
                 .setBattleId(settlement.getBattleId())
@@ -427,7 +436,11 @@ public final class BattleSettlementService {
                 .setMaterialCreditUnitsAdded(materialDelta.totalUnitsAdded())
                 .setMaterialTradableUnitsAdded(materialDelta.tradableUnitsAdded())
                 .setMaterialPvpLossIneligible(materialDelta.pvpLossIneligible())
-                .setSeasonId(recordedSeasonId);
+                .setSeasonId(recordedSeasonId)
+                .setTrialJournalEntryId(trialDelta.entryId())
+                .addAllTrialNewlyLitSealIds(trialDelta.newlyLitSealIds())
+                .setTrialNewSoloBest(trialDelta.newSoloBest())
+                .setTrialNewCoopBest(trialDelta.newCoopBest());
         if (goldCredited > 0) {
             entry.addCurrencies(com.game.player.store.state.BattleResultCurrencyState.newBuilder()
                     .setCurrencyType(Wallet.GOLD)

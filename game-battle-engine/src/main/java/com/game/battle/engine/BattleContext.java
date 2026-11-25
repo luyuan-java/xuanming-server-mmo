@@ -291,6 +291,7 @@ final class BattleContext {
         }
         target.state().setIsDead(true);
         target.setDefending(false);
+        encounter.recordDeath(target.actorId());
         for (var artifact : target.state().getArtifactStatesBuilderList()) artifact.clearPendingAilmentKind().clearPendingRound();
         if (target.state().hasSeasonSealState()) target.state().getSeasonSealStateBuilder().clearPendingAilmentKind().clearPendingRound();
         if (!configured.hasEffects(target)) target.state().clearBuffs();

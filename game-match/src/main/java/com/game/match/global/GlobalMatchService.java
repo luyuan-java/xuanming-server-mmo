@@ -653,6 +653,11 @@ public final class GlobalMatchService implements AutoCloseable {
                 request.setRankedContext(rankedContext);
             }
             if(!f.getActivityContext().isEmpty())request.setActivityContext(BattleActivityContext.parseFrom(f.getActivityContext()));
+            if (rankedTables != null) {
+                rankedTables.trialContextFor(f.getMode(), f.getConfigId(),
+                                request.hasActivityContext() ? request.getActivityContext() : null, rankedContext)
+                        .ifPresent(request::setTrialContext);
+            }
             // 观战可见性建房时决定一次，随 formation 持久的 create_request 冻结；之后观战各处只读这份原件，不按模式重算
             request.setSpectateVisibility(com.game.match.spectate.SpectateVisibilityPolicy.decide(MatchMode.forNumber(f.getMode()),
                     request.hasActivityContext()?request.getActivityContext():null));

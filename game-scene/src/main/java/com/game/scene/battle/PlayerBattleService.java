@@ -140,9 +140,15 @@ public final class PlayerBattleService implements BattleHooks {
     private final int battleEndId;
     /** 装配时绑定一次（世界由同一个组合根建，钩子先于世界存在）。 */
     private SceneWorld world;
+    private com.game.scene.trial.TrialJournalService trialJournalService;
     private java.util.function.BiConsumer<ScenePlayer,RuntimeException> inboxFailure;
     /** 仅通知缓存，不参与授权/去重；永久依据仍为Inbox SQL原收据和存档域水位。 */
     private final Map<ScenePlayer,BattleSettlementData> inboxNotifications=new java.util.WeakHashMap<>();
+
+    public PlayerBattleService withTrialJournalService(com.game.scene.trial.TrialJournalService service) {
+        this.trialJournalService = service;
+        return this;
+    }
 
     public PlayerBattleService withInboxFailureHandler(java.util.function.BiConsumer<ScenePlayer,RuntimeException> failure) {
         this.inboxFailure=Objects.requireNonNull(failure);return this;
@@ -232,7 +238,10 @@ public final class PlayerBattleService implements BattleHooks {
         boolean isBossTrial = bossTrialKind >= 1 && bossTrialKind <= 4;
         boolean isGuardRescue = bossTrialKind == 5;
         // 困难首领试炼准入硬校验（core-gameplay-loop.md §1）：任意普通首领首通后持久解锁，组队困难全员各校一次。
-        if (isBossTrial && dungeonRow.getDifficulty() >= 2 && !player.trialJournal().normalBossTrialCleared()) {
+        boolean hardUnlocked = trialJournalService != null
+                ? trialJournalService.hasClearedAnyNormalBossTrial(player)
+                : player.trialJournal().normalBossTrialCleared();
+        if (isBossTrial && dungeonRow.getDifficulty() >= 2 && !hardUnlocked) {
             log.warn("备战被拒：困难首领试炼尚未通关任意普通首领试炼 player={} battle_id={} battle_config_id={}",
                     Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
                     Integer.toUnsignedString(request.getBattleConfigId()));

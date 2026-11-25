@@ -211,8 +211,50 @@ class RankedParityTest {
             assertThat(profA.getHistory(0).getFinalRank()).isEqualTo(1L);
             assertThat(profA.getHistory(0).getChampionAwarded()).isFalse();
 
-            GetRankedProfileResponse profB = service.getProfile(pB, GetRankedProfileRequest.newBuilder().setIncludeHistory(true).build());
-            assertThat(profB.getHistory(0).getFinalRank()).isEqualTo(2L);
+            GetRankedProfileResponse profB = service.getProfile(pB, GetRankedProfileRequest.getDefaultInstance());
+            assertThat(profB.getHistoryList()).isEmpty();
+            GetRankedProfileResponse profBHist = service.getProfile(pB, GetRankedProfileRequest.newBuilder().setIncludeHistory(true).build());
+            assertThat(profBHist.getHistory(0).getFinalRank()).isEqualTo(2L);
         }
+    }
+
+    @Test
+    void 试炼志上下文解析覆盖全三卷并隔离活动战与跨季排位() {
+        // 卷一普通/困难首领试炼 101..108
+        for (int dungeonId = 101; dungeonId <= 108; dungeonId++) {
+            var ctx = TABLES.trialContextFor(MatchModes.PVE_SOLO, dungeonId, null, null);
+            assertThat(ctx).as("dungeon=%d", dungeonId).isPresent();
+            assertThat(ctx.get().getJournalEntryId()).isPositive();
+            assertThat(ctx.get().getTrialRuleVersion()).isPositive();
+            assertThat(ctx.get().getSeasonId()).isZero();
+            assertThat(ctx.get().getGuardMonsterTableId()).isPositive();
+        }
+        // 卷三护卫救援(109) 与 物法易势 5V5(110) 搭配免费预设上下文（season_id=0, use_free_preset=true）保留试炼志上下文
+        RankedMatchContext freePreset = RankedMatchContext.newBuilder().setUseFreePreset(true).build();
+        var rescue = TABLES.trialContextFor(MatchModes.PVE_TEAM, 109, null, freePreset);
+        assertThat(rescue).isPresent();
+        assertThat(rescue.get().getJournalEntryId()).isEqualTo(301);
+        assertThat(rescue.get().getSeasonId()).isPositive();
+        assertThat(rescue.get().getGuardMonsterTableId()).isPositive();
+
+        var polarity = TABLES.trialContextFor(MatchModes.POLARITY_5V5, 110, null, freePreset);
+        assertThat(polarity).isPresent();
+        assertThat(polarity.get().getJournalEntryId()).isEqualTo(302);
+        assertThat(polarity.get().getSeasonId()).isPositive();
+
+        // 卷三人宠会武(PVP_TEAM) 同季保留，跨季过滤
+        int rankedSeasonId = TABLES.trialContextFor(MatchModes.PVP_TEAM, 5, null, null).orElseThrow().getSeasonId();
+        var rankedSame = TABLES.trialContextFor(MatchModes.PVP_TEAM, 5, null,
+                RankedMatchContext.newBuilder().setSeasonId(rankedSeasonId).build());
+        assertThat(rankedSame).isPresent();
+        assertThat(rankedSame.get().getJournalEntryId()).isEqualTo(303);
+        assertThat(TABLES.trialContextFor(MatchModes.PVP_TEAM, 5, null,
+                RankedMatchContext.newBuilder().setSeasonId(rankedSeasonId + 1).build())).isEmpty();
+
+        // 活动战、切磋与常规副本一律不附试炼志上下文
+        var activity = com.game.proto.BattleActivityContext.newBuilder().setActivityId(1).build();
+        assertThat(TABLES.trialContextFor(MatchModes.PVE_SOLO, 101, activity, null)).isEmpty();
+        assertThat(TABLES.trialContextFor(MatchModes.PVP_CHALLENGE, 101, null, null)).isEmpty();
+        assertThat(TABLES.trialContextFor(MatchModes.PVE_SOLO, 1, null, null)).isEmpty();
     }
 }

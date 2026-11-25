@@ -75,7 +75,17 @@ public interface AssetAudit {
         /** 单槽赛季印追赶扣款。 */
         SEASON_SEAL_CATCHUP,
         /** 渠道撤单/拒付后的官方商城发放扣回（TX_PAYMENT_REVERSAL = 31）。 */
-        PAYMENT_REVERSAL
+        PAYMENT_REVERSAL,
+        /** 五行试炼志里程碑发奖（TX_TRIAL_JOURNAL_MILESTONE = 36）。 */
+        TRIAL_JOURNAL_MILESTONE,
+        /** 五行试炼志拓印兑换仅自用法宝（TX_TRIAL_ARTIFACT_REDEEM = 37）。 */
+        TRIAL_ARTIFACT_REDEEM,
+        /** 装备品相打磨 / 无损重铸（TX_EQUIP_POLISH_REFORGE = 38）。 */
+        EQUIP_POLISH_REFORGE,
+        /** 分卷宗技能制书 / 拆解返片（TX_SKILL_SCROLL_CRAFT = 39）。 */
+        SKILL_SCROLL_CRAFT,
+        /** 主城宗师原子代打费与 5% 系统税回收（TX_CRAFT_PROXY_FEE = 40）。 */
+        CRAFT_PROXY_FEE
     }
 
     /**

@@ -194,6 +194,7 @@ public class SceneNode implements SmartLifecycle {
     private com.game.scene.afkpass.AfkPassTables afkPassTables;
     private com.game.scene.merchant.MysteryMerchantTables mysteryMerchantTables;
     private com.game.scene.season.SeasonTables seasonTables;
+    private com.game.scene.trial.TrialJournalTables trialJournalTables;
     private com.game.scene.player.SceneTextGuard textGuard;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
@@ -236,6 +237,12 @@ public class SceneNode implements SmartLifecycle {
     public synchronized SceneNode withSeasonTables(com.game.scene.season.SeasonTables seasonTables) {
         if (running) throw new IllegalStateException("节点已启动");
         this.seasonTables = java.util.Objects.requireNonNull(seasonTables);
+        return this;
+    }
+
+    public synchronized SceneNode withTrialJournalTables(com.game.scene.trial.TrialJournalTables trialJournalTables) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.trialJournalTables = java.util.Objects.requireNonNull(trialJournalTables);
         return this;
     }
 
@@ -523,10 +530,19 @@ public class SceneNode implements SmartLifecycle {
         if (seasonService != null) {
             settlements.withSeasonService(seasonService);
         }
+        com.game.scene.trial.TrialJournalService trialJournalService = trialJournalTables == null ? null
+                : new com.game.scene.trial.TrialJournalService(trialJournalTables, bags, appearanceService,
+                        SceneClock.SYSTEM, metrics, seasonService == null ? () -> 0 : seasonService::activeSeasonId);
+        if (trialJournalService != null) {
+            settlements.withTrialJournalService(trialJournalService);
+        }
         PlayerBattleService battle = new PlayerBattleService(BattleLocks.redis(new BattleRedis(redis, redisKeys)), settlements,
                 battleTables, petService, player -> battleRouting(gateLinks, player, zoneId, nodeId), teamFollow, battleMetrics,
                 SceneClock.SYSTEM, logic, registry.requireId("BattleClientPlayer", "NotifyBattleReconnect"),
                 registry.requireId("BattleClientPlayer", "NotifyBattleEnd"));
+        if (trialJournalService != null) {
+            battle.withTrialJournalService(trialJournalService);
+        }
         InboxService inbox = new InboxService(InboxConsumers.withBattle(currency, bags, battle), inboxClient, SceneClock.SYSTEM,
                 new InboxService.Settings(settings.inbox().consumerEnabled(), settings.inbox().periodicFetchMinutes()),
                 () -> nodeId, () -> ThreadLocalRandom.current().nextInt(1001));
@@ -635,6 +651,9 @@ public class SceneNode implements SmartLifecycle {
         }
         if (seasonService != null) {
             features.add(new com.game.scene.season.SeasonFeature(seasonService, attributes, registry));
+        }
+        if (trialJournalService != null) {
+            features.add(new com.game.scene.trial.TrialJournalFeature(trialJournalService));
         }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, runMode, features);
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");
