@@ -38,17 +38,24 @@ public final class RmbConsignmentService {
     private final PlayerTradeClient players;
     private final Set<Integer> currencies;
     private final TextGuard textGuard;
+    private final SellerCreditService.RoleOwnershipLookup ownership;
     // 仅由唯一 CommerceRuntime 驱动；失败项尝试后前移，表尾绕回，绝不让前20离线合同饿死第21单。
     private String deliveryCursor = "", returnCursor = "";
     public RmbConsignmentService(CommerceEngine e, RmbConsignmentClient mall, PlayerTradeClient players, Set<Integer> currencies) {
-        this(e, mall, players, currencies, TextGuard.ALLOW);
+        this(e, mall, players, currencies, TextGuard.ALLOW, null);
     }
     public RmbConsignmentService(CommerceEngine e, RmbConsignmentClient mall, PlayerTradeClient players,
                                  Set<Integer> currencies, TextGuard textGuard) {
+        this(e, mall, players, currencies, textGuard, null);
+    }
+    public RmbConsignmentService(CommerceEngine e, RmbConsignmentClient mall, PlayerTradeClient players,
+                                 Set<Integer> currencies, TextGuard textGuard,
+                                 SellerCreditService.RoleOwnershipLookup ownership) {
         this.e = e; this.mall = mall; this.players = players;
         this.currencies = currencies == null ? Set.of(0) : Set.copyOf(currencies);
         if (this.currencies.stream().anyMatch(c -> c != 0 && c != 1)) throw new IllegalArgumentException("绑定货币禁止交易");
         this.textGuard = textGuard == null ? TextGuard.ALLOW : textGuard;
+        this.ownership = ownership;
     }
     private PlayerTradeReply profile(long player, String account, Deadline d) throws Exception {
         if (player == 0 || account == null || account.isEmpty()) throw new Refusal(INVALID);
@@ -161,10 +168,21 @@ public final class RmbConsignmentService {
         }
         long owner = character ? input.getCharacterPlayerId() : me;
         var identity = profile(owner, account, d);
+        String designatedBuyerAccount = "";
+        long targetId = input.getDesignatedBuyerPlayerId();
+        if (targetId != 0) {
+            if (targetId == me) throw new Refusal(SELF);
+            if (ownership == null) throw new Refusal(INVALID);
+            var targetOwned = ownership.lookup(targetId);
+            if (targetOwned == null || targetOwned.account() == null || targetOwned.account().isBlank())
+                throw new Refusal(INVALID);
+            if (targetOwned.account().equals(account)) throw new Refusal(SELF);
+            designatedBuyerAccount = targetOwned.account();
+        }
         var rmb = TradeRmbConsignmentWorkflow.newBuilder().setSellerAccount(account)
             .setSellerOwnerRevision(identity.getOwnerRevision()).setCharacterPlayerId(input.getCharacterPlayerId())
             .setMarketZone(identity.getHomeZone()).setAssetKind(kind).setTitle(input.getTitle()).setPriceFen(input.getPriceFen())
-            .setClientRequestId(input.getClientRequestId());
+            .setClientRequestId(input.getClientRequestId()).setDesignatedBuyerAccount(designatedBuyerAccount);
         // 摘要绑定完整客户端原件及本次可信account/revision/zone；新账号世代不能复用旧角色的请求键。
         byte[] originalInput = CommerceEngine.deterministic(input), trustedIdentity = CommerceEngine.deterministic(rmb.build());
         ByteString digest = CommerceEngine.sha(java.nio.ByteBuffer.allocate(4 + originalInput.length + trustedIdentity.length)
@@ -208,7 +226,7 @@ public final class RmbConsignmentService {
             : RmbConsignmentView.newBuilder().setListingId(row.getCommerceId()).setSellerPlayerId(row.getSellerPlayerId())
                 .setMarketZone(terms.getMarketZone()).setAssetKind(terms.getAssetKind()).setTitle(terms.getTitle())
                 .setPriceFen(terms.getPriceFen()).setState(row.getStatus() == CANCELLED ? "RETURNED" : "ESCROWING")
-                .setPhase(w.getStage()).build();
+                .setPhase(w.getStage()).setDesignatedOnly(!terms.getDesignatedBuyerAccount().isEmpty()).build();
         return RmbConsignmentResponse.newBuilder().setListing(view).setServerNowMs(e.clock.getAsLong()).build();
     }
     private void edit(TradeCommerceRow observed, Deadline d,
@@ -265,6 +283,9 @@ public final class RmbConsignmentService {
             registration.put("assetCurrencyType", rmb.getAssetKind().equals("CURRENCY") ? w.getSellerAssets().getCurrencyType() : null);
             registration.put("escrowReference", rmb.getEscrowReference()); registration.put("escrowProof", proof);
             registration.put("priceFen", rmb.getPriceFen()); registration.put("title", rmb.getTitle());
+            if (!rmb.getDesignatedBuyerAccount().isEmpty()) {
+                registration.put("designatedBuyerAccount", rmb.getDesignatedBuyerAccount());
+            }
             var accepted = listing(mall.call("register", registration, d));
             if (accepted.getListingId() != row.getCommerceId() || accepted.getSellerPlayerId() != row.getSellerPlayerId()
                     || accepted.getPriceFen() != rmb.getPriceFen() || !accepted.getAssetKind().equals(rmb.getAssetKind()))

@@ -53,6 +53,9 @@ public final class SpectateVisibilityPolicy {
         table.put(MatchMode.MATCH_MODE_PVP_TEAM, eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);
         // 轮换娱乐物法易势 5V5：非公开观战模式，默认私密
         table.put(MatchMode.MATCH_MODE_POLARITY_5V5, eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);
+        // 帮会全天帮战 V2（真人直打 / 守旗阵踢馆）：全对局公开实时观战
+        table.put(MatchMode.MATCH_MODE_GUILD_WAR_PVP, eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
+        table.put(MatchMode.MATCH_MODE_GUILD_WAR_SIEGE, eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         // 全服赛季战队锦标赛《群仙问道赛》：全服公开观战，优先升 L2 赛事广播
         table.put(MatchMode.MATCH_MODE_SEASON_TOURNAMENT, eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         return Collections.unmodifiableMap(table);

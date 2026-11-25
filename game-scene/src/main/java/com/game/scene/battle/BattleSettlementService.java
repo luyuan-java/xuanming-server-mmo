@@ -76,6 +76,7 @@ public final class BattleSettlementService {
     private final int notifyPetListChanged;
     private com.game.scene.season.SeasonService seasonService;
     private com.game.scene.trial.TrialJournalService trialJournalService;
+    private com.game.scene.festivalbeast.FestivalBeastService festivalBeastService;
 
     /** @param notifyPetListChanged 184 的消息号（{@code ScenePetClientPlayer.NotifyPetListChanged}） */
     public BattleSettlementService(CurrencyService currency, BagService bags, PetService pets, MissionService missions,
@@ -98,6 +99,15 @@ public final class BattleSettlementService {
     public BattleSettlementService withTrialJournalService(com.game.scene.trial.TrialJournalService trialJournalService) {
         this.trialJournalService = trialJournalService;
         return this;
+    }
+
+    public BattleSettlementService withFestivalBeastService(com.game.scene.festivalbeast.FestivalBeastService festivalBeastService) {
+        this.festivalBeastService = festivalBeastService;
+        return this;
+    }
+
+    private static boolean isFestivalBeast(BattleSettlementData settlement) {
+        return settlement.hasFestivalBeast() && settlement.getFestivalBeast().getActivityInstanceId() != 0;
     }
 
     /**
@@ -129,11 +139,11 @@ public final class BattleSettlementService {
         if(player.battle().applying())throw new IllegalStateException("战斗Inbox结算重入");
         player.battle().setApplying(true);
         try{
-            if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset()) {
-                // 正式人宠会武(competitive_ranked)与免费预设娱乐场(use_free_preset)零资产侵入：
-                // 不动气血/法力/宠物/背包/金币/经验/任务，仅原子累计材料自选额度、赛季进度、试炼志与近期战果。
+            if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isFestivalBeast(settlement)) {
+                // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)与瑞兽迎春零资产侵入：
+                // 不动气血/法力/宠物/背包/金币/经验/任务，仅原子累计材料自选额度、赛季进度、试炼志、瑞兽进度与近期战果。
                 markNormalBossTrialIfCleared(player, settlement);
-                recordBattleResult(player, settlement, 0L, Map.of(), Map.of());
+                recordBattleResult(world, player, settlement, 0L, Map.of(), Map.of());
                 return Result.APPLIED;
             }
             long now=currency.nowSeconds(),gold=settlement.getGoldGain();
@@ -219,7 +229,7 @@ public final class BattleSettlementService {
                 if (got > 0) actualConsumed.put(cfg, got);
             });
             markNormalBossTrialIfCleared(player, settlement);
-            recordBattleResult(player, settlement, gold > 0 && goldTip == 0 ? gold : 0L, gained, actualConsumed);
+            recordBattleResult(world, player, settlement, gold > 0 && goldTip == 0 ? gold : 0L, gained, actualConsumed);
             return Result.APPLIED;
         }finally{player.battle().setApplying(false);}
     }
@@ -265,12 +275,12 @@ public final class BattleSettlementService {
                     Long.toUnsignedString(battleId), ledger.invalidReason());
             return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
         }
-        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset()) {
-            // 正式人宠会武(competitive_ranked)与免费预设娱乐场(use_free_preset)零资产侵入：
-            // 跳过宠物/金币/气血法力/消耗/掉落/击杀，只记材料自选额度、赛季进度、试炼志与近期战果，返回前请求落盘。
+        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isFestivalBeast(settlement)) {
+            // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)与瑞兽迎春零资产侵入：
+            // 跳过宠物/金币/气血法力/消耗/掉落/击杀，只记材料自选额度、赛季进度、试炼志、瑞兽进度与近期战果，返回前请求落盘。
             try {
                 step("试炼志首领首通", player, battleId, () -> markNormalBossTrialIfCleared(player, settlement));
-                step("近期战果", player, battleId, () -> recordBattleResult(player, settlement, 0L, Map.of(), Map.of()));
+                step("近期战果", player, battleId, () -> recordBattleResult(world, player, settlement, 0L, Map.of(), Map.of()));
             } finally {
                 long evicted = ledger.record(battleId, clock.epochMillis());
                 if (evicted != 0) {
@@ -322,7 +332,7 @@ public final class BattleSettlementService {
                 }
             });
             step("试炼志首领首通", player, battleId, () -> markNormalBossTrialIfCleared(player, settlement));
-            step("近期战果", player, battleId, () -> recordBattleResult(player, settlement, gold, actualGained, actualConsumed));
+            step("近期战果", player, battleId, () -> recordBattleResult(world, player, settlement, gold, actualGained, actualConsumed));
         } finally {
             long evicted = ledger.record(battleId, clock.epochMillis());
             if (evicted != 0) {
@@ -411,16 +421,28 @@ public final class BattleSettlementService {
     }
 
     /** 结算应用同帧写入本人近期战斗结果（确认落盘后才对 371/372 可见），并按游戏日上限累计装备材料自选额度。 */
-    private void recordBattleResult(ScenePlayer player, BattleSettlementData settlement, long goldCredited,
+    private void recordBattleResult(SceneWorld world, ScenePlayer player, BattleSettlementData settlement, long goldCredited,
                                     Map<Integer, Long> itemsGained, Map<Integer, Long> itemsConsumed) {
         long nowMs = clock.epochMillis();
+        boolean festivalBattle = isFestivalBeast(settlement);
         var materialDelta = com.game.scene.equip.EquipmentCraftService.creditBattleMaterialRewardDelta(player, settlement, nowMs);
-        var seasonCredit = seasonService == null
+        if (materialDelta.tradableUnitsAdded() > 0 && world != null) {
+            var rewardState = player.clientRequestLedger().materialReward();
+            if (rewardState.getMigratedToV2()
+                    && Integer.compareUnsigned(rewardState.getTradableEarnedTotal(), rewardState.getStage1TradableConfirmed()) > 0) {
+                world.syncAccountStage1Tradable(player, nowMs);
+            }
+        }
+        var seasonCredit = (festivalBattle || seasonService == null)
                 ? com.game.scene.season.SeasonService.BattleCreditOutcome.NONE
                 : seasonService.creditBattlePoints(player, settlement, nowMs);
-        var trialDelta = trialJournalService == null
+        var trialDelta = (festivalBattle || trialJournalService == null)
                 ? com.game.scene.trial.TrialJournalService.SettlementDelta.NONE
                 : trialJournalService.applyBattleCredit(player, settlement, nowMs);
+        var festivalDelta = (!festivalBattle || festivalBeastService == null)
+                ? com.game.scene.festivalbeast.FestivalBeastService.SettlementDelta.NONE
+                : festivalBeastService.applyBattleSettlement(player, settlement, nowMs);
+        var materialAfter = com.game.scene.festivalbeast.FestivalBeastService.buildMaterialSummary(player, nowMs);
         int recordedSeasonId = settlement.getSeasonId() != 0 ? settlement.getSeasonId() : seasonCredit.seasonId();
         com.game.player.store.state.BattleResultEntryState.Builder entry = com.game.player.store.state.BattleResultEntryState.newBuilder()
                 .setBattleId(settlement.getBattleId())
@@ -440,7 +462,17 @@ public final class BattleSettlementService {
                 .setTrialJournalEntryId(trialDelta.entryId())
                 .addAllTrialNewlyLitSealIds(trialDelta.newlyLitSealIds())
                 .setTrialNewSoloBest(trialDelta.newSoloBest())
-                .setTrialNewCoopBest(trialDelta.newCoopBest());
+                .setTrialNewCoopBest(trialDelta.newCoopBest())
+                .setMaterialAvailableUnitsAfter(materialAfter.getAvailableUnits())
+                .setMaterialEarnableRemainingAfter(materialAfter.getEarnableRemainingUnits());
+        if (festivalDelta.active()) {
+            entry.setFestivalActivityInstanceId(festivalDelta.activityInstanceId())
+                    .setFestivalRewardIdentity(festivalDelta.rewardIdentity())
+                    .setFestivalWinsBefore(festivalDelta.winsBefore())
+                    .setFestivalWinsAfter(festivalDelta.winsAfter())
+                    .setFestivalRequiredWins(festivalDelta.requiredWins())
+                    .setFestivalNewlyEligible(festivalDelta.newlyEligible());
+        }
         if (goldCredited > 0) {
             entry.addCurrencies(com.game.player.store.state.BattleResultCurrencyState.newBuilder()
                     .setCurrencyType(Wallet.GOLD)

@@ -488,7 +488,8 @@ class SceneMetricsTest {
         try {
             SceneMetrics exported = new SceneMetrics(prometheus);
             String before = prometheus.scrape();
-            String[] gates = {"enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default", "zone_travel", "equipment"};
+            String[] gates = {"enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default",
+                    "zone_travel", "equipment", "mystery_merchant", "season", "trial_journal"};
             for (String gate : gates) {
                 assertThat(before).contains("game_scene_battle_gate_rejects_total{gate=\"" + gate + "\"} 0");
             }

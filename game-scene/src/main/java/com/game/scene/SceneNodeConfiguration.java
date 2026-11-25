@@ -145,6 +145,40 @@ public class SceneNodeConfiguration {
         return com.game.scene.craft.SkillCraftTables.from(tables);
     }
 
+    @Bean
+    public com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables(ConfigTables tables) {
+        return com.game.scene.festivalbeast.FestivalBeastTables.from(tables);
+    }
+
+    /** 可选直连 MatchInternalService（配置 {@code game.dubbo.match-url} 时启用瑞兽迎春活动开局调用）。 */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(name = "game.dubbo.match-url")
+    static class MatchActivityClientConfiguration {
+
+        private static final Duration CALL_TIMEOUT = Duration.ofMillis(4000);
+
+        @Bean(destroyMethod = "close")
+        com.game.api.rpc.NodeRpcClients<com.game.api.MatchInternalService> sceneMatchInternalClients() {
+            return new com.game.api.rpc.NodeRpcClients<>(
+                    "scene-match-internal", com.game.api.MatchInternalService.class,
+                    com.game.api.DubboGroups.MATCH, CALL_TIMEOUT, "scene-match-internal-connect");
+        }
+
+        @Bean
+        java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
+                java.util.concurrent.CompletableFuture<com.game.proto.match.StartActivityBattleResponse>>
+        sceneMatchActivityStarter(
+                com.game.api.rpc.NodeRpcClients<com.game.api.MatchInternalService> clients,
+                @Value("${game.dubbo.match-url}") String url) {
+            java.net.URI uri = java.net.URI.create(url == null ? "" : url.trim());
+            if (!"tri".equals(uri.getScheme()) || uri.getHost() == null || uri.getPort() < 1) {
+                throw new IllegalArgumentException("game.dubbo.match-url 必须是 tri://host:port: " + url);
+            }
+            var target = new com.game.api.rpc.NodeRpcClients.Target(uri.getHost(), uri.getPort(), "");
+            return request -> clients.call(target, CALL_TIMEOUT, svc -> svc.startActivityBattle(request));
+        }
+    }
+
     /**
      * 显式开启 {@code game.scene.content-guard-enabled=true} 时接入内容安全 Dubbo 服务（角色改名与宝宝改名共用）。
      *
@@ -240,6 +274,9 @@ public class SceneNodeConfiguration {
                                com.game.scene.season.SeasonTables seasonTables,
                                com.game.scene.trial.TrialJournalTables trialJournalTables,
                                com.game.scene.craft.SkillCraftTables skillCraftTables,
+                               com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables,
+                               ObjectProvider<java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
+                                       java.util.concurrent.CompletableFuture<com.game.proto.match.StartActivityBattleResponse>>> matchActivityStarter,
                                ObjectProvider<SceneTextGuard> textGuard, NodeLinkAuth nodeLinkAuth,
                                SceneMetrics sceneMetrics, AuditProperties audit, KafkaNames kafkaNames,
                                SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source,
@@ -256,6 +293,8 @@ public class SceneNodeConfiguration {
                 .withSeasonTables(seasonTables)
                 .withTrialJournalTables(trialJournalTables)
                 .withSkillCraftTables(skillCraftTables)
+                .withFestivalBeastTables(festivalBeastTables)
+                .withMatchActivityStarter(matchActivityStarter.getIfAvailable())
                 .withTextGuard(textGuard.getIfAvailable())
                 .withMaintenanceBoot(boot);
     }

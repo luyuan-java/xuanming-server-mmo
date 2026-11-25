@@ -106,6 +106,8 @@ public final class AssetOpService {
     private final SceneClock clock;
     private final SceneMetrics metrics;
     private final java.util.function.LongSupplier petCapacity;
+    private java.util.function.IntPredicate petTransferable = tableId -> true;
+    private java.util.function.Predicate<com.game.scene.player.PlayerPets> hasNormalPetSlot;
 
     /** 不出指标（测试用）。 */
     public AssetOpService(SceneWorld world, CurrencyService currency, BagService bags, AssetOpAuth auth,
@@ -127,6 +129,15 @@ public final class AssetOpService {
         this.clock = clock;
         this.metrics = metrics;
         this.petCapacity = petCapacity;
+        this.hasNormalPetSlot = pets -> pets.size() < petCapacity.getAsLong();
+    }
+
+    /** 绑定宝宝转移守卫与普通携带位口径（禁止单宠转移绑定的专属神兽，且交易不占用专属赠送位）。 */
+    public AssetOpService withPetRules(java.util.function.IntPredicate petTransferable,
+                                       java.util.function.Predicate<com.game.scene.player.PlayerPets> hasNormalPetSlot) {
+        this.petTransferable = java.util.Objects.requireNonNull(petTransferable, "petTransferable");
+        this.hasNormalPetSlot = java.util.Objects.requireNonNull(hasNormalPetSlot, "hasNormalPetSlot");
+        return this;
     }
 
     /** 进场景前（{@code PlayerInitializer}）：账本加载时判了损坏就大声报一次（该玩家的资产通道随之关闭，原数据不改写）。 */
@@ -411,6 +422,9 @@ public final class AssetOpService {
             if (pet == null || player.pets().activePetId() == bundle.getPetId() || pet.getSerializedSize() > 16 * 1024) {
                 return rejectAndRecord(player, request, INVALID_BUNDLE, nowMs);
             }
+            if (!petTransferable.test(pet.getPetTableId())) {
+                return rejectAndRecord(player, request, com.game.table.PetErrorTip.pet_error.kPetNotTransferable_VALUE, nowMs);
+            }
             snapshot.setPet(com.game.api.proto.AssetPetInstance.newBuilder().setPetId(pet.getPetId()).setPetTableId(pet.getPetTableId())
                     .setName(pet.getName()).setLevel(pet.getLevel()).setInstanceProto(pet.toByteString()));
             pets.takeTransferred(pet.getPetId());
@@ -453,10 +467,14 @@ public final class AssetOpService {
             try {
                 for (var instance : bundle.getItemInstancesList()) transferredItems.add(com.game.player.store.state.BagItemState.parseFrom(instance.getInstanceProto()));
                 if (bundle.hasPetInstance()) {
-                    if (transferredPets.size() >= petCapacity.getAsLong() || transferredPets.find(bundle.getPetInstance().getPetId()) != null) {
+                    var incomingPet = com.game.player.store.state.PetEntry.parseFrom(bundle.getPetInstance().getInstanceProto());
+                    if (!petTransferable.test(incomingPet.getPetTableId())) {
+                        return rejectAndRecord(player, request, com.game.table.PetErrorTip.pet_error.kPetNotTransferable_VALUE, nowMs);
+                    }
+                    if (!hasNormalPetSlot.test(transferredPets) || transferredPets.find(bundle.getPetInstance().getPetId()) != null) {
                         return answer(AssetOutcome.ASSET_OUTCOME_RETRY, com.game.table.PetErrorTip.pet_error.kPetSlotFull_VALUE);
                     }
-                    transferredPets.putTransferred(com.game.player.store.state.PetEntry.parseFrom(bundle.getPetInstance().getInstanceProto()));
+                    transferredPets.putTransferred(incomingPet);
                 }
             } catch (com.google.protobuf.InvalidProtocolBufferException | IllegalArgumentException error) {
                 return rejectAndRecord(player, request, INVALID_BUNDLE, nowMs);

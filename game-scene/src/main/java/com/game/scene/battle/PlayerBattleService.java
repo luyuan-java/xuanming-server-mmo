@@ -141,12 +141,18 @@ public final class PlayerBattleService implements BattleHooks {
     /** 装配时绑定一次（世界由同一个组合根建，钩子先于世界存在）。 */
     private SceneWorld world;
     private com.game.scene.trial.TrialJournalService trialJournalService;
+    private com.game.scene.festivalbeast.FestivalBeastService festivalBeastService;
     private java.util.function.BiConsumer<ScenePlayer,RuntimeException> inboxFailure;
     /** 仅通知缓存，不参与授权/去重；永久依据仍为Inbox SQL原收据和存档域水位。 */
     private final Map<ScenePlayer,BattleSettlementData> inboxNotifications=new java.util.WeakHashMap<>();
 
     public PlayerBattleService withTrialJournalService(com.game.scene.trial.TrialJournalService service) {
         this.trialJournalService = service;
+        return this;
+    }
+
+    public PlayerBattleService withFestivalBeastService(com.game.scene.festivalbeast.FestivalBeastService service) {
+        this.festivalBeastService = service;
         return this;
     }
 
@@ -237,6 +243,28 @@ public final class PlayerBattleService implements BattleHooks {
         int bossTrialKind = dungeonRow != null ? dungeonRow.getBossTrialKind() : 0;
         boolean isBossTrial = (bossTrialKind >= 1 && bossTrialKind <= 4) || bossTrialKind == 8;
         boolean isGuardRescue = bossTrialKind == 5;
+        boolean isFestivalBeast = bossTrialKind == com.game.scene.festivalbeast.FestivalBeastRules.BOSS_TRIAL_KIND_FESTIVAL_BEAST
+                || (request.hasActivityContext()
+                && request.getActivityContext().getKind() == com.game.proto.eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST);
+        if (isFestivalBeast) {
+            if (useFreePreset
+                    || bossTrialKind != com.game.scene.festivalbeast.FestivalBeastRules.BOSS_TRIAL_KIND_FESTIVAL_BEAST
+                    || !request.hasActivityContext()
+                    || request.getActivityContext().getKind() != com.game.proto.eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST
+                    || !request.getActivityContext().hasFestivalBeast()) {
+                return prepareRejected(INVALID_PARAMETER, Prepare.INVALID);
+            }
+            if (festivalBeastService == null) {
+                return prepareRejected(SERVICE_UNAVAILABLE, Prepare.INVALID);
+            }
+            int petTip = festivalBeastService.verifyPrepareBattlePet(
+                    world, player, request.getActivityContext().getFestivalBeast());
+            if (petTip != 0) {
+                log.warn("备战被拒：瑞兽迎春锁定出战宝宝复核失败 player={} battle_id={} tip={}",
+                        Long.toUnsignedString(playerId), Long.toUnsignedString(battleId), petTip);
+                return prepareRejected(petTip, Prepare.INVALID);
+            }
+        }
         // 困难首领试炼准入硬校验（core-gameplay-loop.md §1）：任意普通首领首通后持久解锁，组队困难全员各校一次。
         boolean hardUnlocked = trialJournalService != null
                 ? trialJournalService.hasClearedAnyNormalBossTrial(player)
@@ -247,8 +275,8 @@ public final class PlayerBattleService implements BattleHooks {
                     Integer.toUnsignedString(request.getBattleConfigId()));
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
         }
-        // 免费预设娱乐场、正式人宠会武与首领试炼均以局内满血蓝无耗材快照入场，不受场外残血或 0 血阻断。
-        boolean isolateBattleTempState = useFreePreset || isFormalRanked || isBossTrial || isGuardRescue;
+        // 免费预设娱乐场、正式人宠会武、首领试炼与瑞兽迎春均以局内满血蓝无耗材快照入场，不受场外残血或 0 血阻断。
+        boolean isolateBattleTempState = useFreePreset || isFormalRanked || isBossTrial || isGuardRescue || isFestivalBeast;
         if (!isolateBattleTempState && player.attributes().health() == 0) {
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.DEAD);
         }
@@ -493,6 +521,9 @@ public final class PlayerBattleService implements BattleHooks {
         }
         metrics.cancel(Cancel.CLEARED);
         log.info("取消备战，解冻 player={} battle_id={}", Long.toUnsignedString(playerId), Long.toUnsignedString(battleId));
+        if (festivalBeastService != null) {
+            festivalBeastService.onBattlePrepareCancelledOrVoid(world, player, battleId);
+        }
         // 只删备战锁：这条删除若被排到紧随其后的确认之后，锁已标 F、迟到确认已重建 FIGHTING，不能再删（审计 FRZ-7）
         return clearFreeze(player, LockAction.DELETE_PREPARING);
     }
@@ -927,6 +958,9 @@ public final class PlayerBattleService implements BattleHooks {
                     if (now > freeze.effectiveDeadlineMs()) {
                         // 只摘冻结、锁留到 TTL（给迟到的确认留重建余地）
                         clearFreeze(player, LockAction.KEEP_LOCK);
+                        if (festivalBeastService != null) {
+                            festivalBeastService.onBattlePrepareCancelledOrVoid(world, player, freeze.battleId());
+                        }
                         metrics.freezeExpired(SceneBattleMetrics.Phase.PREPARING);
                         log.info("备战到期，解冻（锁保留到 TTL） player={} battle_id={}", Long.toUnsignedString(player.playerId()),
                                 Long.toUnsignedString(freeze.battleId()));
@@ -968,6 +1002,9 @@ public final class PlayerBattleService implements BattleHooks {
         if (now > deadline + BattleRedis.LOCK_EXTRA_TTL_SEC * 1000) {
             // 有效期限 + 60 s 仍读不到本局记录（锁也已过期）：不读、直接判废
             clearFreeze(player, LockAction.DELETE_IF_MATCH);
+            if (festivalBeastService != null) {
+                festivalBeastService.onBattlePrepareCancelledOrVoid(world, player, freeze.battleId());
+            }
             metrics.rescue(Rescue.GAVE_UP);
             metrics.freezeExpired(SceneBattleMetrics.Phase.FIGHTING);
             log.warn("战斗期限 + 终局宽限 + 投递余量 + 60 s 仍未结算，判废 player={} battle_id={} deadline={}",
@@ -1022,6 +1059,9 @@ public final class PlayerBattleService implements BattleHooks {
             return;
         }
         clearFreeze(player, LockAction.DELETE_IF_MATCH);
+        if (festivalBeastService != null) {
+            festivalBeastService.onBattlePrepareCancelledOrVoid(world, player, freeze.battleId());
+        }
         metrics.rescue(reason);
         metrics.freezeExpired(SceneBattleMetrics.Phase.FIGHTING);
         log.info("战斗有效期限（期限 + 终局宽限 + 投递余量）+ 宽限已过、没有可应用的本局记录（{}），判废 player={} battle_id={}", reason,
@@ -1141,22 +1181,7 @@ public final class PlayerBattleService implements BattleHooks {
             writeOff(player, battleId, trigger);
             if (result.outcome() == Outcome.APPLIED) {
                 // 184（有宝宝条目时，应用里已推）→ 150，同一条 gate 链路 FIFO；账本命中的不推（B9）
-                var recorded = player.battleResults().findByBattleId(battleId);
-                BattleEndS2C.Builder endPush = BattleEndS2C.newBuilder()
-                        .setBattleId(battleId)
-                        .setOutcome(settlement.getOutcome())
-                        .setSettlement(settlement);
-                if (recorded != null) {
-                    endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded())
-                            .setMaterialTradableUnitsAdded(recorded.getMaterialTradableUnitsAdded())
-                            .setMaterialPvpLossIneligible(recorded.getMaterialPvpLossIneligible());
-                    if (recorded.getSeasonId() != 0) {
-                        endPush.setSeasonId(recorded.getSeasonId());
-                    }
-                } else if (settlement.getSeasonId() != 0) {
-                    endPush.setSeasonId(settlement.getSeasonId());
-                }
-                world.sendTo(player, push(battleEndId, endPush.build()));
+                world.sendTo(player, push(battleEndId, buildBattleEndPush(player, battleId, settlement)));
             }
         }
         return result;
@@ -1271,25 +1296,43 @@ public final class PlayerBattleService implements BattleHooks {
                 var notification=inboxNotifications.get(player);
                 if(notification!=null&&notification.getBattleId()==decision.getRequestId()){
                     inboxNotifications.remove(player);
-                    var recorded = player.battleResults().findByBattleId(notification.getBattleId());
-                    BattleEndS2C.Builder endPush = BattleEndS2C.newBuilder()
-                            .setBattleId(notification.getBattleId())
-                            .setOutcome(notification.getOutcome())
-                            .setSettlement(notification);
-                    if (recorded != null) {
-                        endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded())
-                                .setMaterialTradableUnitsAdded(recorded.getMaterialTradableUnitsAdded())
-                                .setMaterialPvpLossIneligible(recorded.getMaterialPvpLossIneligible());
-                        if (recorded.getSeasonId() != 0) {
-                            endPush.setSeasonId(recorded.getSeasonId());
-                        }
-                    } else if (notification.getSeasonId() != 0) {
-                        endPush.setSeasonId(notification.getSeasonId());
-                    }
-                    world.sendTo(player, push(battleEndId, endPush.build()));
+                    world.sendTo(player, push(battleEndId,
+                            buildBattleEndPush(player, notification.getBattleId(), notification)));
                 }
             }
         }
+    }
+
+    private static BattleEndS2C buildBattleEndPush(ScenePlayer player, long battleId, BattleSettlementData settlement) {
+        var recorded = player.battleResults().findByBattleId(battleId);
+        BattleEndS2C.Builder endPush = BattleEndS2C.newBuilder()
+                .setBattleId(battleId)
+                .setOutcome(settlement.getOutcome())
+                .setSettlement(settlement);
+        if (recorded != null) {
+            endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded())
+                    .setMaterialTradableUnitsAdded(recorded.getMaterialTradableUnitsAdded())
+                    .setMaterialPvpLossIneligible(recorded.getMaterialPvpLossIneligible());
+            if (recorded.getSeasonId() != 0) {
+                endPush.setSeasonId(recorded.getSeasonId());
+            }
+            if (recorded.getFestivalActivityInstanceId() != 0) {
+                endPush.setFestivalBeastSettlement(com.game.proto.FestivalBeastSettlementSummary.newBuilder()
+                        .setActivityInstanceId(recorded.getFestivalActivityInstanceId())
+                        .setRewardIdentity(recorded.getFestivalRewardIdentity())
+                        .setWinsBefore(recorded.getFestivalWinsBefore())
+                        .setWinsAfter(recorded.getFestivalWinsAfter())
+                        .setRequiredWins(recorded.getFestivalRequiredWins())
+                        .setNewlyEligible(recorded.getFestivalNewlyEligible())
+                        .setMaterialUnitsAdded(recorded.getMaterialCreditUnitsAdded())
+                        .setMaterialTradableUnitsAdded(recorded.getMaterialTradableUnitsAdded())
+                        .setMaterialAvailableUnitsAfter(recorded.getMaterialAvailableUnitsAfter())
+                        .setMaterialEarnableRemainingAfter(recorded.getMaterialEarnableRemainingAfter()));
+            }
+        } else if (settlement.getSeasonId() != 0) {
+            endPush.setSeasonId(settlement.getSeasonId());
+        }
+        return endPush.build();
     }
     private static boolean inboxPersistedApplied(ScenePlayer player,long battleId) {
         var state=player.persistedState();if(state==null||!state.hasInboxLedger())return false;

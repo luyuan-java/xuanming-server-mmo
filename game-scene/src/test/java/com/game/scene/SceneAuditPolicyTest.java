@@ -17,7 +17,7 @@ class SceneAuditPolicyTest {
             when(props.runMode()).thenReturn(mode);
             var audit = new AuditProperties(true, "127.0.0.1:1", 1, (short) 1, Duration.ofSeconds(1));
             assertThatThrownBy(() -> new SceneNodeConfiguration().sceneNode(props,
-                    null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
                     audit, null, null, null, null, null, null, null))
                     .isInstanceOf(AuditTopicContractException.class).hasMessageContaining("生产审计");
         }

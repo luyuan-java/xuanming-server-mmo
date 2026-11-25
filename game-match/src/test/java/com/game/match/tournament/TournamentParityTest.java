@@ -9,6 +9,8 @@ import com.game.proto.BattlePetSettlementData;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.eBattleOutcome;
+import com.game.proto.content_guard.CheckTextResponse;
+import com.game.proto.content_guard.TextVerdict;
 import com.game.proto.match.CheerTournamentSquadRequest;
 import com.game.proto.match.ClaimTournamentRewardRequest;
 import com.game.proto.match.CreateTournamentSquadRequest;
@@ -286,6 +288,98 @@ class TournamentParityTest {
             assertThat(nextSeasonView.getHallOfFameCount()).isEqualTo(1);
             assertThat(nextSeasonView.getHallOfFame(0).getChampionSquadName()).isEqualTo("太玄剑阁");
             assertThat(bracketBeforeFinal.getKnockoutBracket(0).getState()).isEqualTo(TournamentMatchState.TOURNAMENT_MATCH_STATE_FINISHED);
+        }
+    }
+
+    @Test
+    void 生产接线回归_内容安全拦截与发件失败重试与开战失败回滚与后台驱动器() throws Exception {
+        TournamentTables tables = TournamentTables.from(config);
+        try (RatingTestDatabase db = RatingTestDatabase.h2()) {
+            AtomicLong now = new AtomicLong(1_850_000_000_000L);
+            AtomicLong idGen = new AtomicLong(950_000L);
+            TournamentStore store = new TournamentStore(db.dataSource, tables, now::get);
+
+            // 1. 内容安全拦截：违禁队名在事务外即被拒，且不写入数据库
+            TournamentService.TextGuard guard = (scene, pid, text) -> CheckTextResponse.newBuilder()
+                    .setVerdict(text.contains("违禁") ? TextVerdict.TEXT_VERDICT_REJECT : TextVerdict.TEXT_VERDICT_PASS)
+                    .build();
+            java.util.concurrent.atomic.AtomicBoolean failLaunch = new java.util.concurrent.atomic.AtomicBoolean(true);
+            java.util.concurrent.atomic.AtomicBoolean failMail = new java.util.concurrent.atomic.AtomicBoolean(true);
+            TournamentService.MatchLauncher launcher = spec -> failLaunch.get() ? 0L : idGen.incrementAndGet();
+            TournamentService.RewardMailSender mailSender = (pid, reward, title, body) -> {
+                if (failMail.get()) {
+                    throw new IllegalStateException("mail node temporary unavailable");
+                }
+                assertThat(title).isNotBlank();
+                assertThat(reward.rewardId()).isPositive();
+                return 880_000L + reward.tierId();
+            };
+            TournamentService service = new TournamentService(store, idGen::incrementAndGet, launcher, guard, mailSender);
+
+            var badName = service.createSquad(101L, 1, CreateTournamentSquadRequest.newBuilder().setSquadName("违禁仙盟").build());
+            assertThat(badName.getErrorMessage().getId())
+                    .isEqualTo(MatchErrorTip.match_error.kMatchTournamentSquadNameInvalid_VALUE);
+
+            // 2. 正常建 2 队并锁定报名 -> 后台驱动器 tick 推进至海选
+            long[][] teams = {{101L, 102L, 103L}, {201L, 202L, 203L}};
+            String[] names = {"灵霄剑派", "天机玄门"};
+            for (int i = 0; i < 2; i++) {
+                var c = service.createSquad(teams[i][0], 1, CreateTournamentSquadRequest.newBuilder().setSquadName(names[i]).build());
+                assertThat(c.getErrorMessage().getId()).isZero();
+                for (int j = 1; j < 3; j++) {
+                    service.inviteMember(teams[i][0], InviteTournamentMemberRequest.newBuilder().setTargetPlayerId(teams[i][j]).build());
+                    service.respondInvite(teams[i][j], 1, RespondTournamentInviteRequest.newBuilder()
+                            .setSquadId(c.getSquad().getSquadId()).setAccept(true).build());
+                }
+                assertThat(service.registerSquad(teams[i][0]).getErrorMessage().getId()).isZero();
+            }
+
+            var ov = service.getOverview(101L, GetTournamentOverviewRequest.getDefaultInstance());
+            now.set(ov.getCurrentSeason().getQualifierStartMs() + 1000L);
+            try (TournamentSeasonDriver driver = new TournamentSeasonDriver(store, idGen::incrementAndGet, 60_000L)) {
+                driver.start();
+                assertThat(driver.isRunning()).isTrue();
+                driver.tick();
+            }
+            assertThat(service.getOverview(101L, GetTournamentOverviewRequest.getDefaultInstance())
+                    .getCurrentSeason().getStage()).isEqualTo(TournamentStage.TOURNAMENT_STAGE_QUALIFIER);
+
+            // 3. 开战器返回 0（如有人离线/备战失败）时回滚 READY 到 WAITING，返回 kMatchTournamentMatchNotReady；恢复后再点直接成功开战
+            assertThat(service.startMatch(101L, StartTournamentMatchRequest.getDefaultInstance()).getErrorMessage().getId()).isZero();
+            var failedStart = service.startMatch(201L, StartTournamentMatchRequest.getDefaultInstance());
+            assertThat(failedStart.getErrorMessage().getId())
+                    .isEqualTo(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE);
+            assertThat(failedStart.getBattleId()).isZero();
+
+            failLaunch.set(false);
+            var okStart = service.startMatch(201L, StartTournamentMatchRequest.getDefaultInstance());
+            assertThat(okStart.getErrorMessage().getId()).isZero();
+            assertThat(okStart.getBattleId()).isPositive();
+
+            // 4. 完赛并直接推进结算 -> 验证发件失败不落账 CLAIMED，重试发件成功后写入 mail_id 且二次领取拒收
+            store.applyBattleResult(BattleResultEvent.newBuilder()
+                    .setBattleId(okStart.getBattleId())
+                    .setMatchMode(MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE)
+                    .setBattleConfigId(tables.rule().getBattleConfigId())
+                    .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                    .setTotalRounds(5)
+                    .build(), 20);
+            now.set(ov.getCurrentSeason().getKnockoutStartMs() + 1000L);
+            store.advanceSeason(now.get(), idGen::incrementAndGet);
+            now.set(ov.getCurrentSeason().getSettleStartMs() + 1000L);
+            store.advanceSeason(now.get(), idGen::incrementAndGet);
+
+            var mailFailResp = service.claimReward(101L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build());
+            assertThat(mailFailResp.getErrorMessage().getId()).isEqualTo(MatchErrorTip.match_error.kMatchInternal_VALUE);
+
+            failMail.set(false);
+            var mailOkResp = service.claimReward(101L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build());
+            assertThat(mailOkResp.getErrorMessage().getId()).isZero();
+            assertThat(mailOkResp.getClaimedRewardsCount()).isEqualTo(1);
+            assertThat(mailOkResp.getClaimedRewards(0).getMailId()).isPositive();
+            assertThat(service.claimReward(101L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build())
+                    .getErrorMessage().getId())
+                    .isEqualTo(MatchErrorTip.match_error.kMatchTournamentRewardUnavailable_VALUE);
         }
     }
 

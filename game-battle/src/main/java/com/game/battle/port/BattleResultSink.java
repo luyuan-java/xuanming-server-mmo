@@ -31,6 +31,13 @@ public interface BattleResultSink {
         return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("结果端口未装配Match永久终局"));
     }
 
+    /** 携带可选战报回放外壳的终局提交；未覆写的兼容实现透传三参版本。 */
+    default java.util.concurrent.CompletableFuture<com.game.proto.match.BattleOutcomeDecision> commitOutcome(
+            com.game.proto.CreateBattleRequest creation, BattleResultEvent event, com.google.protobuf.ByteString original,
+            com.game.proto.BattleReplayEnvelope replay) {
+        return commitOutcome(creation, event, original);
+    }
+
     /** 已验证签名的持久ABORT，不是超时、RPC故障或Kafka失败。 */
     final class OutcomeAborted extends RuntimeException {
         public OutcomeAborted(){super("Match永久ABORT已提交，不许可个人奖励");}

@@ -101,7 +101,8 @@ public final class PetTables {
 
     List<PetTable> shopRows() {
         return pets.values().stream().filter(row -> row.getUnknownFields().asMap().isEmpty()
-                        && row.getAcquisitionTier() == 0 && row.getShopPriceGold() > 0)
+                        && row.getAcquisitionTier() == 0 && row.getShopPriceGold() > 0
+                        && row.getTransferPolicy() == 0 && row.getExclusiveGiftSlots() == 0)
                 .sorted(Comparator.comparingLong(row -> Integer.toUnsignedLong(row.getId()))).toList();
     }
 

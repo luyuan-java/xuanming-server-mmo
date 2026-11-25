@@ -26,7 +26,8 @@ class MissionTablesTest {
     @Test
     void 正式表_可达怪物是副本里出现且怪物表里有的() {
         assertThat(MissionTables.reachableMonsters(MissionFixtures.SHIPPED.dungeon().all(),
-                MissionFixtures.SHIPPED.monster()::contains)).containsExactlyInAnyOrder(1, 2, 6, 7, 11, 12, 16);
+                MissionFixtures.SHIPPED.monster()::contains))
+                .containsExactlyInAnyOrder(1, 2, 6, 7, 11, 12, 16, 101, 102, 103, 104, 105, 106, 107, 108);
         DungeonTable withZero = DungeonTable.newBuilder().setId(9).addMonster(0).addMonster(99).addMonster(3).build();
         assertThat(MissionTables.reachableMonsters(List.of(withZero), id -> id != 99)).containsExactly(3);
     }

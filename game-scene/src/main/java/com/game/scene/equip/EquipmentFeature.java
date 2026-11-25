@@ -94,7 +94,7 @@ public final class EquipmentFeature implements SceneFeature {
             r.on(SERVICE, "GetEquipmentMaterialReward", GetEquipmentMaterialRewardRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
                     (call, request) -> call.reply(craft.getMaterialReward(call.player(), craft.nowMillis())));
             r.on(SERVICE, "ClaimEquipmentMaterialReward", ClaimEquipmentMaterialRewardRequest.class, FreezePolicy.GATED, BattlePolicy.GATED,
-                    (call, request) -> call.reply(craft.claimMaterialReward(call.player(), request, bags, craft.nowMillis())));
+                    (call, request) -> call.reply(craft.claimMaterialReward(call.player(), request, bags, craft.nowMillis(), call.world())));
         }
     }
 }

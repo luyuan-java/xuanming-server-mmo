@@ -5,12 +5,14 @@ import static com.game.scene.world.SceneMessageIds.tip;
 import com.game.contract.MessageIdRegistry;
 import com.game.proto.AllocatePetPointsRequest;
 import com.game.proto.AllocatePetPointsResponse;
+import com.game.proto.AscendPetTierRequest;
 import com.game.proto.AutoAllocatePetPointsRequest;
 import com.game.proto.AutoAllocatePetPointsResponse;
 import com.game.proto.GetPetListRequest;
 import com.game.proto.GetPetEntriesRequest;
 import com.game.proto.PreviewPetEntriesRequest;
 import com.game.proto.SavePetEntriesRequest;
+import com.game.proto.SwitchPetEntryPresetRequest;
 import com.game.proto.GetPetShopRequest;
 import com.game.proto.BuyPetRequest;
 import com.game.proto.BuyPetResponse;
@@ -90,7 +92,17 @@ public final class PetFeature implements SceneFeature {
                 (call, request) -> call.reply(pets.previewEntries(call.player(), request)));
         r.on(SERVICE, "SavePetEntries", SavePetEntriesRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
             var response = pets.saveEntries(call.player(), request);
-            if (response.getErrorMessage().getId() == 0) call.world().requestSave(call.player());
+            if (response.getErrorMessage().getId() == 0 && !response.getReplayed()) call.world().requestSave(call.player());
+            call.reply(response);
+        });
+        r.on(SERVICE, "SwitchPetEntryPreset", SwitchPetEntryPresetRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
+            var response = pets.switchEntryPreset(call.player(), request);
+            if (response.getErrorMessage().getId() == 0 && !response.getReplayed()) call.world().requestSave(call.player());
+            call.reply(response);
+        });
+        r.on(SERVICE, "AscendPetTier", AscendPetTierRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
+            var response = pets.ascendTier(call.player(), request);
+            if (response.getErrorMessage().getId() == 0 && !response.getReplayed()) call.world().requestSave(call.player());
             call.reply(response);
         });
         r.on(SERVICE, "GetPetList", GetPetListRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, (call, request) -> call.reply(

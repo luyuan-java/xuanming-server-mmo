@@ -28,6 +28,7 @@ import io.micrometer.core.instrument.Timer;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -132,16 +133,20 @@ public final class TradeDispatcher {
                 service::setFavorite, (request, tip) -> JubaozhaiService.rejectFavorite(request.getListingId(), tip));
         client(byId, TradeMethods.GET_MY_SHELF, GetMyShelfRequest.class, GetMyShelfResponse.class,
                 service::getMyShelf, (request, tip) -> JubaozhaiService.rejectShelf(tip));
-        for(String name:java.util.stream.Stream.concat(TradeMethods.COMMERCE_REQUESTS.stream(),TradeMethods.RMB_REQUESTS.stream()).toList()){
-            MessageMethod contract=contractOf(TradeMethods.SERVICE,name);
-            Handler<Message> handler=(me,request,deadline)->commerce==null
-                    ?com.game.trade.commerce.CommerceClientService.rejection(contract.responsePrototype(),TradeTips.FEATURE_UNAVAILABLE)
-                    :commerce.handle(name,me,request,contract.responsePrototype(),deadline);
-            byId.put(contract.messageId(),new Route(name,Kind.CLIENT,contract.requestPrototype(),handler,
-                    (request,tip)->com.game.trade.commerce.CommerceClientService.rejection(contract.responsePrototype(),tip.code())));
+        for (String name : java.util.stream.Stream.of(
+                TradeMethods.COMMERCE_REQUESTS, TradeMethods.RMB_REQUESTS, TradeMethods.CREDIT_REQUESTS)
+                .flatMap(List::stream).toList()) {
+            MessageMethod contract = contractOf(TradeMethods.SERVICE, name);
+            Handler<Message> handler = (me, request, deadline) -> commerce == null
+                    ? com.game.trade.commerce.CommerceClientService.rejection(contract.responsePrototype(), TradeTips.FEATURE_UNAVAILABLE)
+                    : commerce.handle(name, me, request, contract.responsePrototype(), deadline);
+            byId.put(contract.messageId(), new Route(name, Kind.CLIENT, contract.requestPrototype(), handler,
+                    (request, tip) -> com.game.trade.commerce.CommerceClientService.rejection(contract.responsePrototype(), tip.code())));
         }
-        MessageMethod seed = contractOf(TradeMethods.ADMIN_SERVICE, TradeMethods.SEED_LISTING);
-        byId.put(seed.messageId(), new Route(TradeMethods.SEED_LISTING, Kind.FORBIDDEN, seed.requestPrototype(), null, null));
+        for (String adminMethod : TradeMethods.FORBIDDEN_ADMIN_METHODS) {
+            MessageMethod adminContract = contractOf(TradeMethods.ADMIN_SERVICE, adminMethod);
+            byId.put(adminContract.messageId(), new Route(adminMethod, Kind.FORBIDDEN, adminContract.requestPrototype(), null, null));
+        }
 
         Set<String> unknown = new TreeSet<>();
         for (MessageMethod m : registry.all()) {
@@ -258,7 +263,9 @@ public final class TradeDispatcher {
         }
         Message response;
         try {
-            response = (TradeMethods.RMB_REQUESTS.contains(route.method()) || TradeMethods.COMMERCE_REQUESTS.contains(route.method())) && commerce != null
+            response = (TradeMethods.RMB_REQUESTS.contains(route.method())
+                    || TradeMethods.COMMERCE_REQUESTS.contains(route.method())
+                    || TradeMethods.CREDIT_REQUESTS.contains(route.method())) && commerce != null
                 ? commerce.handle(route.method(), session, request, contractOf(TradeMethods.SERVICE, route.method()).responsePrototype(), deadline)
                 : route.handler().handle(me, request, deadline);
             if (response == null) {

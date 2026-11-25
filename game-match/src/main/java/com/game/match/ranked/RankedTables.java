@@ -35,6 +35,7 @@ public final class RankedTables {
     public static final int ROLE_KIND_CHARACTER = 1;
     public static final int ROLE_KIND_PET = 2;
     public static final int BOSS_TRIAL_KIND_GUARD_RESCUE = 5;
+    public static final int BOSS_TRIAL_KIND_FESTIVAL_BEAST = 7;
     public static final int BOSS_TRIAL_KIND_POLARITY = 6;
     public static final long INITIAL_RATING_CENTI = 150_000L;
     public static final List<Integer> PRIMARY_TEAM_SIZES = List.of(1, 3, 5);
@@ -90,13 +91,19 @@ public final class RankedTables {
                 .sorted(Comparator.comparingInt(RankedPresetTable::getId))
                 .toList();
         String fingerprint = computeConfigFingerprint(rule, byIdAsc);
-        Map<Long, List<Integer>> allowedSizes = parsePlayModeAllowedSizes(config.playMode().all());
         Map<Integer, Integer> bossKinds = new HashMap<>();
         for (DungeonTable dungeon : config.dungeon().all()) {
             if (dungeon.getBossTrialKind() != 0) {
                 bossKinds.put(dungeon.getId(), dungeon.getBossTrialKind());
             }
         }
+        for (PlayModeTable row : config.playMode().all()) {
+            if (bossKinds.getOrDefault(row.getBattleConfigId(), 0) == BOSS_TRIAL_KIND_FESTIVAL_BEAST) {
+                throw new IllegalStateException("PlayMode id=" + row.getId()
+                        + " 禁止配置瑞兽迎春专属副本 dungeon=" + row.getBattleConfigId());
+            }
+        }
+        Map<Long, List<Integer>> allowedSizes = parsePlayModeAllowedSizes(config.playMode().all());
         Map<Integer, TrialBattleContext> trialByDungeon = new HashMap<>();
         TrialBattleContext rankedTrial = buildTrialContexts(config, config.dungeon().all(),
                 config.trialJournalEntry().all(), trialByDungeon);

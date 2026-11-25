@@ -1801,6 +1801,7 @@ public final class SceneWorld {
         if (afkPassService != null) {
             afkPassService.onPlayerLoaded(player);
         }
+        syncAccountStage1Tradable(player, clock.epochMillis());
         teamFollow.onEnteredScene(this, player);
         // 进场恢复（scene-battle-spec §7.8）：组队跟随之后（同基线组队 3.5 步在战斗 6 步之前）；同 epoch 接替旧实例时沿用它的冻结
         battle.onEntered(this, player, previous != null && previous.ownerEpoch() == epoch ? previous : null);
@@ -4017,10 +4018,12 @@ public final class SceneWorld {
                 Long.toUnsignedString(player.playerId()), newSession, player.ownerEpoch());
     }
 
-    /** 1 秒周期巡检：判定断线保留/离线托管是否到期退出、60s 托管投影刷新与 15s 错峰跟随重查。 */
+    /** 1 秒周期巡检：判定断线保留/离线托管是否到期退出、60s 托管投影刷新、15s 错峰跟随重查与账号级可交易额度补齐。 */
     public int sweepConnectionLostHolds() {
+        long nowMs = clock.epochMillis();
+        retryAccountStage1TradableSyncs(nowMs);
         long nowNanos = clock.nanoTime();
-        long nowSec = Math.floorDiv(clock.epochMillis(), 1000L);
+        long nowSec = Math.floorDiv(nowMs, 1000L);
         int exited = 0;
         for (ScenePlayer player : new ArrayList<>(playersById.values())) {
             ConnectionLostHold.State hold = player.connectionLostHold();
@@ -4056,6 +4059,111 @@ public final class SceneWorld {
             }
         }
         return exited;
+    }
+
+    /** 异步向玩家库同步并占坑账号级阶段一 60 份可交易配额（逻辑线程调用，不阻塞场景主循环）。 */
+    public void syncAccountStage1Tradable(ScenePlayer player, long nowMs) {
+        if (player == null || !repository.supportsAccountStage1TradableSync()) {
+            return;
+        }
+        if (playersById.get(player.playerId()) != player || player.accountStage1TradableSyncInFlight()) {
+            return;
+        }
+        var ledger = player.clientRequestLedger();
+        int desired = ledger.materialReward().getMigratedToV2()
+                ? Math.min(ledger.materialReward().getTradableEarnedTotal(),
+                com.game.scene.player.PlayerClientRequestLedger.TRADABLE_LIFETIME_LIMIT)
+                : 0;
+        player.mergeAccountStage1TradableUsed(desired);
+        player.setAccountStage1TradableSyncInFlight(true);
+        long playerId = player.playerId();
+        repository.syncAccountStage1Tradable(playerId, desired,
+                outcome -> onAccountStage1TradableSynced(playerId, player, desired, outcome, nowMs));
+    }
+
+    private void onAccountStage1TradableSynced(long playerId, ScenePlayer expectedPlayer, int desiredCharTotal,
+                                               com.game.player.store.PlayerStore.Stage1TradableQuotaOutcome outcome,
+                                               long dispatchNowMs) {
+        if (playersById.get(playerId) != expectedPlayer) {
+            return;
+        }
+        expectedPlayer.setAccountStage1TradableSyncInFlight(false);
+        long nowMs = Math.max(dispatchNowMs, clock.epochMillis());
+        if (outcome == null) {
+            int attempts = expectedPlayer.incrementAccountStage1TradableRetryAttempts();
+            int shift = Math.min(Math.max(0, attempts - 1), 4);
+            long delayMs = Math.min(30_000L, 2_000L << shift);
+            expectedPlayer.setAccountStage1TradableNextRetryAtMs(nowMs + delayMs);
+            return;
+        }
+        expectedPlayer.resetAccountStage1TradableRetry();
+        expectedPlayer.setAccountStage1TradableLoaded(true);
+        if (!outcome.found()) {
+            return;
+        }
+        expectedPlayer.mergeAccountStage1TradableUsed(outcome.accountUsedTotal());
+        var ledger = expectedPlayer.clientRequestLedger();
+        if (!ledger.isValid()) {
+            return;
+        }
+        var state = ledger.materialReward();
+        if (!state.getMigratedToV2()) {
+            return;
+        }
+        int cap = com.game.scene.player.PlayerClientRequestLedger.TRADABLE_LIFETIME_LIMIT;
+        int confirmedByDir = Math.min(Math.max(0, outcome.confirmedCharTotal()), cap);
+        var updated = state.toBuilder();
+        boolean changed = false;
+        // 若账号级 60 上限已被同账号其他角色（或已删角色）抢先占满，将本角色超额未确认可交易额平滑降级为绑定自用（总份数不变）。
+        if (Integer.compareUnsigned(state.getTradableEarnedTotal(), confirmedByDir) > 0
+                && (Integer.compareUnsigned(confirmedByDir, desiredCharTotal) < 0
+                || expectedPlayer.accountStage1TradableUsed() >= cap)) {
+            int revoked = state.getTradableEarnedTotal() - confirmedByDir;
+            long availTrad = state.getAvailableTradableUnits();
+            updated.setTradableEarnedTotal(confirmedByDir)
+                    .setAvailableTradableUnits(Long.compareUnsigned(availTrad, Integer.toUnsignedLong(revoked)) > 0
+                            ? availTrad - Integer.toUnsignedLong(revoked) : 0L);
+            changed = true;
+        }
+        int nextConfirmed = Math.min(updated.getTradableEarnedTotal(),
+                Math.max(updated.getStage1TradableConfirmed(), confirmedByDir));
+        if (nextConfirmed != updated.getStage1TradableConfirmed()) {
+            updated.setStage1TradableConfirmed(nextConfirmed);
+            changed = true;
+        }
+        if (changed) {
+            var built = updated.build();
+            if (com.game.scene.player.PlayerClientRequestLedger.isMaterialRewardValid(built)) {
+                ledger.setMaterialReward(built);
+                requestKeyProgressSave(expectedPlayer);
+            }
+        }
+        var after = ledger.materialReward();
+        if (Integer.compareUnsigned(after.getTradableEarnedTotal(), after.getStage1TradableConfirmed()) > 0
+                && expectedPlayer.accountStage1TradableUsed() < cap) {
+            syncAccountStage1Tradable(expectedPlayer, nowMs);
+        }
+    }
+
+    private void retryAccountStage1TradableSyncs(long nowMs) {
+        if (!repository.supportsAccountStage1TradableSync()) {
+            return;
+        }
+        for (ScenePlayer player : new ArrayList<>(playersById.values())) {
+            if (player.accountStage1TradableSyncInFlight()) {
+                continue;
+            }
+            long nextRetryAt = player.accountStage1TradableNextRetryAtMs();
+            if (nextRetryAt != 0L && nowMs < nextRetryAt) {
+                continue;
+            }
+            var state = player.clientRequestLedger().materialReward();
+            int desired = state.getMigratedToV2() ? state.getTradableEarnedTotal() : 0;
+            int confirmed = state.getMigratedToV2() ? state.getStage1TradableConfirmed() : 0;
+            if (!player.accountStage1TradableLoaded() || Integer.compareUnsigned(desired, confirmed) > 0) {
+                syncAccountStage1Tradable(player, nowMs);
+            }
+        }
     }
 
     private static ActorListCreateS2C actorList(Collection<ScenePlayer> actors) {

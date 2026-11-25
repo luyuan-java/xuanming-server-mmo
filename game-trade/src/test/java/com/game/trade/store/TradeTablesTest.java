@@ -7,8 +7,16 @@ import com.game.proto.trade.ListingCategory;
 import com.game.proto.trade.ListingStatus;
 import com.game.proto.trade.TradeFavoriteRecord;
 import com.game.proto.trade.TradeListingRecord;
+import com.game.proto.trade.TradeSellerCompletedOrderRecord;
+import com.game.proto.trade.TradeSellerCreditRecord;
+import com.game.proto.trade.TradeSellerReviewRecord;
+import com.game.proto.trade.TradeSellerViolationRecord;
 import com.game.trade.store.pb.TradeFavoriteRow;
 import com.game.trade.store.pb.TradeListingRow;
+import com.game.trade.store.pb.TradeSellerCompletedOrderRow;
+import com.game.trade.store.pb.TradeSellerCreditRow;
+import com.game.trade.store.pb.TradeSellerReviewRow;
+import com.game.trade.store.pb.TradeSellerViolationRow;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -71,8 +79,16 @@ class TradeTablesTest {
         PbMysql go = new PbMysql();
         go.register(TradeListingRecord.getDefaultInstance());
         go.register(TradeFavoriteRecord.getDefaultInstance());
+        go.register(TradeSellerCreditRecord.getDefaultInstance());
+        go.register(TradeSellerCompletedOrderRecord.getDefaultInstance());
+        go.register(TradeSellerReviewRecord.getDefaultInstance());
+        go.register(TradeSellerViolationRecord.getDefaultInstance());
         assertThat(java.createTableSql(TradeListingRow.class)).isEqualTo(go.createTableSql(TradeListingRecord.class));
         assertThat(java.createTableSql(TradeFavoriteRow.class)).isEqualTo(go.createTableSql(TradeFavoriteRecord.class));
+        assertThat(java.createTableSql(TradeSellerCreditRow.class)).isEqualTo(go.createTableSql(TradeSellerCreditRecord.class));
+        assertThat(java.createTableSql(TradeSellerCompletedOrderRow.class)).isEqualTo(go.createTableSql(TradeSellerCompletedOrderRecord.class));
+        assertThat(java.createTableSql(TradeSellerReviewRow.class)).isEqualTo(go.createTableSql(TradeSellerReviewRecord.class));
+        assertThat(java.createTableSql(TradeSellerViolationRow.class)).isEqualTo(go.createTableSql(TradeSellerViolationRecord.class));
     }
 
     @Test
@@ -84,12 +100,19 @@ class TradeTablesTest {
 
     @Test
     void 登记顺序与表名() {
-        assertThat(TradeTables.NAMES).containsExactly("trade_listing", "trade_favorite","trade_commerce","trade_commerce_guard","trade_player_op_seq","trade_asset_op");
+        assertThat(TradeTables.NAMES).containsExactly(
+                "trade_listing", "trade_favorite", "trade_commerce", "trade_commerce_guard",
+                "trade_player_op_seq", "trade_asset_op",
+                "trade_seller_credit", "trade_seller_completed_order", "trade_seller_review", "trade_seller_violation");
         PbMysql db = TradeTables.registry();
         List<String> registered = TradeTables.PROTOTYPES.stream().map(m -> db.schema(m).tableName()).toList();
         assertThat(registered).isEqualTo(TradeTables.NAMES);
         assertThat(TradeTables.LISTING).isEqualTo(db.schema(TradeListingRow.class).tableName());
         assertThat(TradeTables.FAVORITE).isEqualTo(db.schema(TradeFavoriteRow.class).tableName());
+        assertThat(TradeTables.SELLER_CREDIT).isEqualTo(db.schema(TradeSellerCreditRow.class).tableName());
+        assertThat(TradeTables.SELLER_COMPLETED_ORDER).isEqualTo(db.schema(TradeSellerCompletedOrderRow.class).tableName());
+        assertThat(TradeTables.SELLER_REVIEW).isEqualTo(db.schema(TradeSellerReviewRow.class).tableName());
+        assertThat(TradeTables.SELLER_VIOLATION).isEqualTo(db.schema(TradeSellerViolationRow.class).tableName());
         // 手写 SQL 里的表名字面量与登记的一致
         assertThat(ListingSql.COUNT_LISTINGS).contains(" FROM " + TradeTables.LISTING);
         assertThat(ListingSql.COUNT_FAVORITES).contains(" FROM " + TradeTables.FAVORITE);
@@ -100,6 +123,10 @@ class TradeTablesTest {
     void 字段与基线Record一一对应() {
         assertSameFields(TradeListingRow.getDescriptor().getFields(), TradeListingRecord.getDescriptor().getFields());
         assertSameFields(TradeFavoriteRow.getDescriptor().getFields(), TradeFavoriteRecord.getDescriptor().getFields());
+        assertSameFields(TradeSellerCreditRow.getDescriptor().getFields(), TradeSellerCreditRecord.getDescriptor().getFields());
+        assertSameFields(TradeSellerCompletedOrderRow.getDescriptor().getFields(), TradeSellerCompletedOrderRecord.getDescriptor().getFields());
+        assertSameFields(TradeSellerReviewRow.getDescriptor().getFields(), TradeSellerReviewRecord.getDescriptor().getFields());
+        assertSameFields(TradeSellerViolationRow.getDescriptor().getFields(), TradeSellerViolationRecord.getDescriptor().getFields());
         assertThat(TradeListingRow.getDescriptor().findFieldByName("category").getType()).isEqualTo(FieldDescriptor.Type.INT32);
         assertThat(TradeListingRow.getDescriptor().findFieldByName("status").getType()).isEqualTo(FieldDescriptor.Type.INT32);
         // Listing 记录的分量与表字段同名同序（camelCase）

@@ -41,6 +41,33 @@ public final class FakePlayerRepository implements PlayerRepository {
     private final Map<Long, PlayerData> rows = new HashMap<>();
     private java.util.function.LongSupplier renameClockMs = () -> 1_700_000_000_000L;
     private com.game.player.store.PlayerStore.RenameOutcome nextRenameOutcome;
+    private java.util.function.BiConsumer<PendingStage1QuotaSync, FakePlayerRepository> stage1QuotaSyncHandler;
+
+    public record PendingStage1QuotaSync(long playerId, int desiredCharTotal,
+                                         Consumer<com.game.player.store.PlayerStore.Stage1TradableQuotaOutcome> callback) {
+        public void complete(com.game.player.store.PlayerStore.Stage1TradableQuotaOutcome outcome) {
+            callback.accept(outcome);
+        }
+    }
+
+    public void setStage1QuotaSyncHandler(java.util.function.BiConsumer<PendingStage1QuotaSync, FakePlayerRepository> handler) {
+        this.stage1QuotaSyncHandler = handler;
+    }
+
+    @Override
+    public boolean supportsAccountStage1TradableSync() {
+        return stage1QuotaSyncHandler != null;
+    }
+
+    @Override
+    public void syncAccountStage1Tradable(long playerId, int desiredCharTotal,
+                                          Consumer<com.game.player.store.PlayerStore.Stage1TradableQuotaOutcome> onDone) {
+        if (stage1QuotaSyncHandler == null) {
+            onDone.accept(com.game.player.store.PlayerStore.Stage1TradableQuotaOutcome.NOT_FOUND);
+            return;
+        }
+        stage1QuotaSyncHandler.accept(new PendingStage1QuotaSync(playerId, desiredCharTotal, onDone), this);
+    }
 
     public void setRenameClock(java.util.function.LongSupplier clockMs) {
         this.renameClockMs = Objects.requireNonNull(clockMs);

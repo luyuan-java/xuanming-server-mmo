@@ -122,6 +122,8 @@ public final class ScenePlayer {
     private final com.game.scene.player.PlayerTrialJournal trialJournal;
     /** 手艺熟练度、未学技能书架、永久解锁技能与宗师原子代打运行态。 */
     private final com.game.scene.player.PlayerCraft craft;
+    /** 瑞兽迎春限时活动进度、永久资格、终身领奖回执与在途开局运行态。 */
+    private final com.game.scene.player.PlayerFestivalBeast festivalBeast;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -144,6 +146,12 @@ public final class ScenePlayer {
     private long afkPassConfirmedSeq;
     /** 断线保留 / 离线托管运行态（null = 在线正常连接）。 */
     private ConnectionLostHold.State connectionLostHold;
+    /** 账号级阶段一可交易 60 份配额异步同步运行态（逻辑线程内存态，不持久化）。 */
+    private boolean accountStage1TradableLoaded;
+    private boolean accountStage1TradableSyncInFlight;
+    private int accountStage1TradableUsed;
+    private int accountStage1TradableRetryAttempts;
+    private long accountStage1TradableNextRetryAtMs;
     /** 获取滑动窗口（获取异常检测；不持久化，随实例清空）。 */
     private final GainWindows gainWindows = new GainWindows();
     /** 库里此刻的样子（最近一次确认落库的快照）：周期存盘的脏比对基准；null = 不确定（上次在线存盘失败），下次无条件写。 */
@@ -226,6 +234,9 @@ public final class ScenePlayer {
         this.craft = state.hasCraft()
                 ? com.game.scene.player.PlayerCraft.restore(state.getCraft())
                 : com.game.scene.player.PlayerCraft.empty();
+        this.festivalBeast = state.hasFestivalBeast()
+                ? com.game.scene.player.PlayerFestivalBeast.restore(state.getFestivalBeast())
+                : com.game.scene.player.PlayerFestivalBeast.empty();
     }
 
     public long playerId() {
@@ -587,6 +598,9 @@ public final class ScenePlayer {
         if (!craft.isPristine()) {
             state.setCraft(craft.toState());
         }
+        if (!festivalBeast.isPristine()) {
+            state.setFestivalBeast(festivalBeast.toState());
+        }
         return state.build();
     }
 
@@ -642,6 +656,11 @@ public final class ScenePlayer {
     /** 手艺熟练度、未学技能书架、永久解锁技能与宗师原子代打运行态（逻辑线程上读写）。 */
     public com.game.scene.player.PlayerCraft craft() {
         return craft;
+    }
+
+    /** 瑞兽迎春限时活动运行态（逻辑线程上读写）。 */
+    public com.game.scene.player.PlayerFestivalBeast festivalBeast() {
+        return festivalBeast;
     }
 
     /** 收件箱消费账本（逻辑线程上读写；写入只经收件箱消费端）。 */
@@ -771,6 +790,58 @@ public final class ScenePlayer {
 
     public ConnectionLostHold.State connectionLostHold() {
         return connectionLostHold;
+    }
+
+    /** 本场景已知的所属账号阶段一累计可交易已用份数（>= 本角色 tradable_earned_total，封顶 60）。 */
+    public int knownAccountStage1TradableUsed() {
+        var state = clientRequestLedger.materialReward();
+        int charUsed = state.getMigratedToV2() ? state.getTradableEarnedTotal() : 0;
+        int merged = Math.max(charUsed, accountStage1TradableUsed);
+        return Math.min(merged, PlayerClientRequestLedger.TRADABLE_LIFETIME_LIMIT);
+    }
+
+    boolean accountStage1TradableLoaded() {
+        return accountStage1TradableLoaded;
+    }
+
+    void setAccountStage1TradableLoaded(boolean loaded) {
+        this.accountStage1TradableLoaded = loaded;
+    }
+
+    boolean accountStage1TradableSyncInFlight() {
+        return accountStage1TradableSyncInFlight;
+    }
+
+    void setAccountStage1TradableSyncInFlight(boolean inFlight) {
+        this.accountStage1TradableSyncInFlight = inFlight;
+    }
+
+    int accountStage1TradableUsed() {
+        return accountStage1TradableUsed;
+    }
+
+    void mergeAccountStage1TradableUsed(int used) {
+        int clamped = Math.min(Math.max(0, used), PlayerClientRequestLedger.TRADABLE_LIFETIME_LIMIT);
+        if (clamped > this.accountStage1TradableUsed) {
+            this.accountStage1TradableUsed = clamped;
+        }
+    }
+
+    int incrementAccountStage1TradableRetryAttempts() {
+        return ++this.accountStage1TradableRetryAttempts;
+    }
+
+    void resetAccountStage1TradableRetry() {
+        this.accountStage1TradableRetryAttempts = 0;
+        this.accountStage1TradableNextRetryAtMs = 0L;
+    }
+
+    long accountStage1TradableNextRetryAtMs() {
+        return accountStage1TradableNextRetryAtMs;
+    }
+
+    void setAccountStage1TradableNextRetryAtMs(long nextRetryAtMs) {
+        this.accountStage1TradableNextRetryAtMs = nextRetryAtMs;
     }
 
     void enterConnectionLostHold(ConnectionLostHold.State hold) {

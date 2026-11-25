@@ -30,7 +30,7 @@ public final class PlayerClientRequestLedger {
     public static final int BONUS_MATERIAL_UNITS = 5;
     public static final int LIFETIME_MATERIAL_LIMIT = 660;
     public static final int TRADABLE_LIFETIME_LIMIT = 60;
-    public static final int WEEKLY_MATERIAL_LIMIT = 100;
+    public static final int WEEKLY_MATERIAL_LIMIT = 150;
 
     /** 持久化请求种类（与 C++ {@code ClientRequestKind} 数值一一对应，永不重排）。 */
     public static final int KIND_ENHANCE_EQUIP = 1;
@@ -144,6 +144,7 @@ public final class PlayerClientRequestLedger {
     public static boolean isMaterialRewardValid(EquipmentMaterialRewardLedgerState m) {
         if (!m.getMigratedToV2()) {
             if (m.getLifetimeEarned() != 0 || m.getTradableEarnedTotal() != 0
+                    || m.getStage1TradableConfirmed() != 0
                     || m.getAvailableTradableUnits() != 0 || m.getWeekStartsAtMs() != 0
                     || m.getEarnedThisWeek() != 0
                     || Integer.compareUnsigned(m.getEarnedToday(), DAILY_MATERIAL_LIMIT) > 0
@@ -159,6 +160,7 @@ public final class PlayerClientRequestLedger {
         }
         int lifetime = m.getLifetimeEarned();
         int tradableTotal = m.getTradableEarnedTotal();
+        int stage1Confirmed = m.getStage1TradableConfirmed();
         long avail = m.getAvailableUnits();
         long availTradable = m.getAvailableTradableUnits();
         int earnedWeek = m.getEarnedThisWeek();
@@ -166,9 +168,11 @@ public final class PlayerClientRequestLedger {
                 || Integer.remainderUnsigned(lifetime, MIN_CLAIM_STEP_UNITS) != 0
                 || Integer.compareUnsigned(tradableTotal, TRADABLE_LIFETIME_LIMIT) > 0
                 || Integer.compareUnsigned(tradableTotal, Integer.divideUnsigned(lifetime, BATTLE_MATERIAL_UNITS)) > 0
+                || Integer.compareUnsigned(stage1Confirmed, tradableTotal) > 0
                 || Long.remainderUnsigned(avail, MIN_CLAIM_STEP_UNITS) != 0
                 || Long.compareUnsigned(availTradable, avail) > 0
-                || Long.compareUnsigned(availTradable, Integer.toUnsignedLong(tradableTotal)) > 0
+                || (Integer.compareUnsigned(lifetime, LIFETIME_MATERIAL_LIMIT) < 0
+                    && Long.compareUnsigned(availTradable, Integer.toUnsignedLong(tradableTotal)) > 0)
                 || Integer.compareUnsigned(earnedWeek, WEEKLY_MATERIAL_LIMIT) > 0
                 || Integer.remainderUnsigned(earnedWeek, MIN_CLAIM_STEP_UNITS) != 0) {
             return false;

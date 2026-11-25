@@ -1,9 +1,15 @@
 package com.game.scene.pet;
 
+import com.game.proto.AscendPetTierRequest;
+import com.game.proto.AscendPetTierResponse;
 import com.game.proto.BaseAttributesComp;
 import com.game.battle.engine.BattleRules;
 import com.game.battle.engine.ClassSkillRules;
 import com.game.battle.engine.ClassSkillRules.PassiveStat;
+import com.game.scene.bag.BagService;
+import com.game.scene.player.Bag;
+import com.game.scene.player.BagType;
+import com.game.scene.player.PlayerBags;
 import com.game.scene.skill.ClassSkillCatalog;
 import com.game.proto.GetPetShopResponse;
 import com.game.proto.PetShopOffer;
@@ -12,11 +18,14 @@ import com.game.proto.BattlePetSnapshot;
 import com.game.proto.PetDerivedInfo;
 import com.game.proto.PetDimensionInfo;
 import com.game.proto.PetInfo;
+import com.game.proto.PetTierAscensionInfo;
 import com.game.proto.GetPetEntriesResponse;
 import com.game.proto.PreviewPetEntriesRequest;
 import com.game.proto.PreviewPetEntriesResponse;
 import com.game.proto.SavePetEntriesRequest;
 import com.game.proto.SavePetEntriesResponse;
+import com.game.proto.SwitchPetEntryPresetRequest;
+import com.game.proto.SwitchPetEntryPresetResponse;
 import com.game.proto.PetListInfo;
 import com.game.scene.attribute.AttributeRules;
 import com.game.scene.attribute.AttributeRules.AllocError;
@@ -64,6 +73,54 @@ public final class PetService {
     /** 资产通道接收完整宝宝时沿用同一携带量规则。 */
     public long transferCapacity() { return tables.maxPets(); }
 
+    /** true = 该宝宝种类允许单宠交易/寄售/托管转移（transfer_policy == 0）。 */
+    public boolean isTransferableSpecies(int petTableId) {
+        PetTable row = tables.pet(petTableId);
+        return row != null && row.getTransferPolicy() == 0;
+    }
+
+    /** true = 该宝宝种类占独占赠送容量，不占普通携带容量。 */
+    public boolean isExclusiveGiftSpecies(int petTableId) {
+        PetTable row = tables.pet(petTableId);
+        return row != null && row.getExclusiveGiftSlots() > 0;
+    }
+
+    /** 仅统计占普通携带位的宝宝数量（专属赠送神兽不计入普通格）。 */
+    public long countNormalPets(PlayerPets pets) {
+        long count = 0;
+        for (Pet pet : pets.pets()) {
+            if (!isExclusiveGiftSpecies(pet.petTableId())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** 统计已拥有的指定种类宝宝数量。 */
+    public long countSpeciesPets(PlayerPets pets, int petTableId) {
+        long count = 0;
+        for (Pet pet : pets.pets()) {
+            if (pet.petTableId() == petTableId) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** 普通携带容量是否仍有空位（普通商店、捕捉、交易均不能占用专属赠送容量）。 */
+    public boolean hasNormalPetSlot(PlayerPets pets) {
+        return countNormalPets(pets) < tables.maxPets();
+    }
+
+    /** 指定专属赠送神兽种类是否还有专属赠送位。 */
+    public boolean hasExclusiveGiftSlot(PlayerPets pets, int petTableId) {
+        PetTable row = tables.pet(petTableId);
+        if (row == null || row.getExclusiveGiftSlots() == 0) {
+            return false;
+        }
+        return countSpeciesPets(pets, petTableId) < Integer.toUnsignedLong(row.getExclusiveGiftSlots());
+    }
+
     private static final Logger log = LoggerFactory.getLogger(PetService.class);
 
     static final int OK = 0;
@@ -86,8 +143,14 @@ public final class PetService {
     static final int ID_GENERATE_FAILED = PetErrorTip.pet_error.kPetIdGenerateFailed_VALUE;
     static final int NAME_SENSITIVE = PetErrorTip.pet_error.kPetNameSensitive_VALUE;
     static final int SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
+    static final int FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
     /** 回合制战斗在途（基线 kPetInBattle）。 */
     static final int IN_BATTLE = PetErrorTip.pet_error.kPetInBattle_VALUE;
+    static final int TIER_MAX_REACHED = PetErrorTip.pet_error.kPetTierMaxReached_VALUE;
+    static final int TIER_CHANGED = PetErrorTip.pet_error.kPetTierChanged_VALUE;
+    static final int TIER_LEVEL_NOT_ENOUGH = PetErrorTip.pet_error.kPetTierLevelNotEnough_VALUE;
+    static final int TIER_MATERIAL_NOT_ENOUGH = PetErrorTip.pet_error.kPetTierMaterialNotEnough_VALUE;
+    static final int ENTRY_PRESET_INVALID = PetErrorTip.pet_error.kPetEntryPresetInvalid_VALUE;
 
     /** 重算的原因（同角色）：升级按绝对增量补当前值、降级只夹；其余按比例保持。 */
     enum RecalcReason {
@@ -108,6 +171,7 @@ public final class PetService {
     private final SceneClock clock;
     private final RandomGenerator random;
     private final SceneMetrics metrics;
+    private BagService bags;
 
     /**
      * @param guids  宝宝号源（与物品同一个全服号源，同基线 item 号段）
@@ -127,6 +191,12 @@ public final class PetService {
         this.clock = clock;
         this.random = random;
         this.metrics = metrics;
+    }
+
+    /** 装配背包服务，供宝宝五阶突破校验与扣减突破材料。 */
+    public PetService withBags(BagService bags) {
+        this.bags = bags;
+        return this;
     }
 
     // ------------------------------------------------------------------ 加载与重算
@@ -235,9 +305,135 @@ public final class PetService {
         var pet = player.pets().find(request.getPetId()); int error = pet == null ? NOT_FOUND : checkWritable(player);
         if (error != 0) {
             var out = SavePetEntriesResponse.newBuilder().setRequestId(request.getRequestId()).setErrorMessage(com.game.scene.world.SceneMessageIds.tip(error));
-            if (pet != null) out.setEntries(PetEntries.info(tables, pet)); return out.build();
+            if (pet != null && PetEntries.enabled(tables)) out.setEntries(PetEntries.info(tables, pet)); return out.build();
         }
         return PetEntries.save(tables, pet, request);
+    }
+
+    public SwitchPetEntryPresetResponse switchEntryPreset(ScenePlayer player, SwitchPetEntryPresetRequest request) {
+        var pet = player.pets().find(request.getPetId());
+        int error = pet == null ? NOT_FOUND : checkWritable(player);
+        if (error != 0) {
+            var out = SwitchPetEntryPresetResponse.newBuilder().setRequestId(request.getRequestId())
+                    .setErrorMessage(com.game.scene.world.SceneMessageIds.tip(error));
+            if (pet != null && PetEntries.enabled(tables)) out.setEntries(PetEntries.info(tables, pet));
+            return out.build();
+        }
+        return PetEntries.switchPreset(tables, pet, request);
+    }
+
+    /** 501 宝宝五阶突破（普通→变异→灵兽→神兽→圣兽）：消耗 PetTier 材料与银两，幂等 + 原子提交。 */
+    public AscendPetTierResponse ascendTier(ScenePlayer player, AscendPetTierRequest request) {
+        long reqId = request.getClientRequestId();
+        Pet pet = player.pets().find(request.getPetId());
+        if (pet == null) {
+            return failAscend(player, reqId, NOT_FOUND);
+        }
+        if (reqId == 0L) {
+            return failAscend(player, reqId, INVALID_PARAMETER);
+        }
+        if (pet.tierLastRequestId() == reqId) {
+            if (pet.tierLastExpectedTier() != request.getExpectedTier()) {
+                return failAscend(player, reqId, INVALID_PARAMETER);
+            }
+            return AscendPetTierResponse.newBuilder()
+                    .setErrorMessage(com.game.scene.world.SceneMessageIds.tip(OK))
+                    .setClientRequestId(reqId)
+                    .setReplayed(true)
+                    .setNewTier(pet.tierLastResultTier())
+                    .setGold(player.wallet().balance(Wallet.GOLD))
+                    .setPets(buildList(player))
+                    .build();
+        }
+        if (player.inBattle()) {
+            metrics.battleGateReject(BattleGate.PET);
+            return failAscend(player, reqId, IN_BATTLE);
+        }
+        if (player.frozen()) {
+            return failAscend(player, reqId, INVALID_PARAMETER);
+        }
+        PetTable species = tables.pet(pet.petTableId());
+        if (species == null) {
+            return failAscend(player, reqId, TABLE_ROW_MISSING);
+        }
+        int currentTier = PetEntries.effectiveTier(tables, pet);
+        if (Integer.compareUnsigned(currentTier, PetEntries.MAX_CULTIVATION_TIER) >= 0) {
+            return failAscend(player, reqId, TIER_MAX_REACHED);
+        }
+        if (request.getExpectedTier() != currentTier) {
+            return failAscend(player, reqId, TIER_CHANGED);
+        }
+        var currentRow = tables.tier(currentTier);
+        var nextRow = tables.tier(currentTier + 1);
+        if (currentRow == null || nextRow == null) {
+            return failAscend(player, reqId, INVALID_TABLE_DATA);
+        }
+        int effectiveLevel = ClassSkillCatalog.petLevel(pet, species);
+        if (Integer.compareUnsigned(effectiveLevel, currentRow.getAscendMinPetLevel()) < 0) {
+            return failAscend(player, reqId, TIER_LEVEL_NOT_ENOUGH);
+        }
+        long costGold = currentRow.getAscendCostGold();
+        if (costGold != 0L && (costGold < 0L || Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), costGold) < 0)) {
+            return failAscend(player, reqId, GOLD_NOT_ENOUGH);
+        }
+        int costItemId = currentRow.getAscendCostItemId();
+        long costItemCount = Integer.toUnsignedLong(currentRow.getAscendCostItemCount());
+        PlayerBags candidateBags = null;
+        List<Bag.Drawn> drawn = List.of();
+        if (costItemId != 0 && costItemCount > 0L) {
+            if (bags == null) {
+                return failAscend(player, reqId, SERVICE_UNAVAILABLE);
+            }
+            if (bags.tables().hasUnknownItemSchema(costItemId)) {
+                return failAscend(player, reqId, FEATURE_UNAVAILABLE);
+            }
+            Bag inventory = player.bags().bag(BagType.INVENTORY);
+            if (inventory.plainQuantity(costItemId) < costItemCount) {
+                return failAscend(player, reqId,
+                        inventory.total(costItemId) >= costItemCount ? FEATURE_UNAVAILABLE : TIER_MATERIAL_NOT_ENOUGH);
+            }
+            candidateBags = PlayerBags.restore(player.bags().toState());
+            candidateBags.normalize(bags.tables());
+            drawn = candidateBags.bag(BagType.INVENTORY).drainPlainExact(costItemId, costItemCount, false).drawn();
+        }
+        CurrencyService.PreparedDeduction payment = null;
+        if (costGold > 0L) {
+            payment = currency.prepareDeduction(player, Wallet.GOLD, costGold);
+            if (payment.tipId() != 0) {
+                return failAscend(player, reqId, payment.tipId());
+            }
+        }
+        PlayerPets candidatePets = PlayerPets.restore(player.pets().toState());
+        candidatePets.find(pet.petId()).commitTierAscension(currentTier + 1, reqId, currentTier);
+        if (payment != null) {
+            payment.commitPets(candidatePets, AssetAudit.Reason.PET_RESET, Integer.toUnsignedLong(pet.petTableId()));
+        } else {
+            player.pets().commitPrepared(candidatePets);
+        }
+        if (candidateBags != null) {
+            player.bags().commitPrepared(candidateBags);
+            bags.auditEquipment(player, drawn, List.of(), AssetAudit.Reason.ITEM_DESTROY, reqId,
+                    "{\"operation\":\"pet_tier_ascend\"}");
+        }
+        log.info("宝宝灵阶突破 player={} pet_id={} tier={}->{} cost_gold={} cost_item={}x{}",
+                Long.toUnsignedString(player.playerId()), Long.toUnsignedString(pet.petId()),
+                currentTier, currentTier + 1, costGold, Integer.toUnsignedString(costItemId), costItemCount);
+        return AscendPetTierResponse.newBuilder()
+                .setErrorMessage(com.game.scene.world.SceneMessageIds.tip(OK))
+                .setClientRequestId(reqId)
+                .setNewTier(currentTier + 1)
+                .setGold(player.wallet().balance(Wallet.GOLD))
+                .setPets(buildList(player))
+                .build();
+    }
+
+    private AscendPetTierResponse failAscend(ScenePlayer player, long reqId, int tipId) {
+        return AscendPetTierResponse.newBuilder()
+                .setErrorMessage(com.game.scene.world.SceneMessageIds.tip(tipId))
+                .setClientRequestId(reqId)
+                .setGold(player.wallet().balance(Wallet.GOLD))
+                .setPets(buildList(player))
+                .build();
     }
 
     // ------------------------------------------------------------------ 列表
@@ -256,12 +452,12 @@ public final class PetService {
             return list.build();
         }
         for (Pet pet : pets.pets()) {
-            list.addPets(info(pets, pet, pool));
+            list.addPets(info(player, pets, pet, pool));
         }
         return list.build();
     }
 
-    private PetInfo info(PlayerPets pets, Pet pet, AttributePoolTable pool) {
+    private PetInfo info(ScenePlayer player, PlayerPets pets, Pet pet, AttributePoolTable pool) {
         PetInfo.Builder info = PetInfo.newBuilder()
                 .setPetId(pet.petId())
                 .setPetTableId(pet.petTableId())
@@ -274,6 +470,7 @@ public final class PetService {
         var tier = tables.tier(tierId);
         if (tier != null) info.setCultivationTierName(tier.getName()).setCultivationArtKey(tier.getArtKey());
         if (PetEntries.enabled(tables)) info.setEntries(PetEntries.info(tables, pet));
+        fillTierAscension(player, pet, row, info);
         info.setName(!pet.name().isEmpty() ? pet.name() : (row != null ? row.getName() : ""));
         if (row != null) {
             info.setQuality(row.getQuality()).setModelId(row.getModelId()).setDesc(row.getDesc());
@@ -309,6 +506,48 @@ public final class PetService {
         }
         derivedInfo.setHealth(pet.health()).setMana(pet.mana());
         return info.setDerived(derivedInfo).build();
+    }
+
+    private void fillTierAscension(ScenePlayer player, Pet pet, PetTable species, PetInfo.Builder info) {
+        int currentTier = PetEntries.effectiveTier(tables, pet);
+        if (Integer.compareUnsigned(currentTier, PetEntries.MAX_CULTIVATION_TIER) >= 0) {
+            return;
+        }
+        var currentRow = tables.tier(currentTier);
+        var nextRow = tables.tier(currentTier + 1);
+        if (currentRow == null || nextRow == null) {
+            return;
+        }
+        int effectiveLevel = species != null ? ClassSkillCatalog.petLevel(pet, species) : (int) Math.max(1, pet.level());
+        int costItemId = currentRow.getAscendCostItemId();
+        long ownedMaterial = costItemId != 0
+                ? player.bags().bag(BagType.INVENTORY).total(costItemId) : 0L;
+        int blockTip = 0;
+        if (player.inBattle()) {
+            blockTip = IN_BATTLE;
+        } else if (player.frozen()) {
+            blockTip = INVALID_PARAMETER;
+        } else if (Integer.compareUnsigned(effectiveLevel, currentRow.getAscendMinPetLevel()) < 0) {
+            blockTip = TIER_LEVEL_NOT_ENOUGH;
+        } else if (costItemId != 0 && ownedMaterial < Integer.toUnsignedLong(currentRow.getAscendCostItemCount())) {
+            blockTip = TIER_MATERIAL_NOT_ENOUGH;
+        } else if (currentRow.getAscendCostGold() != 0L
+                && (currentRow.getAscendCostGold() < 0L
+                || Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), currentRow.getAscendCostGold()) < 0)) {
+            blockTip = GOLD_NOT_ENOUGH;
+        }
+        info.setNextTier(PetTierAscensionInfo.newBuilder()
+                .setNextTier(nextRow.getId())
+                .setNextTierName(nextRow.getName())
+                .setNextArtKey(nextRow.getArtKey())
+                .setMinPetLevel(currentRow.getAscendMinPetLevel())
+                .setCostItemId(costItemId)
+                .setCostItemCount(currentRow.getAscendCostItemCount())
+                .setCostGold(currentRow.getAscendCostGold())
+                .setBonusEntryPoints(nextRow.getBonusEntryPoints())
+                .setOwnedItemCount(ownedMaterial)
+                .setCanAscend(blockTip == 0)
+                .setBlockTipId(blockTip));
     }
 
     // ------------------------------------------------------------------ 写操作
@@ -561,7 +800,8 @@ public final class PetService {
             return new Grant(INVALID_TABLE_DATA, 0);
         }
         PlayerPets pets = player.pets();
-        if (pets.size() >= tables.maxPets()) {
+        boolean exclusive = isExclusiveGiftSpecies(petTableId);
+        if (exclusive ? !hasExclusiveGiftSlot(pets, petTableId) : !hasNormalPetSlot(pets)) {
             return new Grant(SLOT_FULL, 0);
         }
         long[] minted = guids.tryMint(1);
@@ -630,13 +870,14 @@ public final class PetService {
         PetTable row = tables.pet(petTableId);
         if (row == null) return new Grant(TABLE_ROW_MISSING, 0);
         if (!row.getUnknownFields().asMap().isEmpty()) return new Grant(INVALID_TABLE_DATA, 0);
-        if (row.getAcquisitionTier() != 0 || row.getShopPriceGold() == 0)
+        if (row.getAcquisitionTier() != 0 || row.getShopPriceGold() == 0
+                || row.getTransferPolicy() != 0 || row.getExclusiveGiftSlots() > 0)
             return new Grant(CommonErrorTip.common_error.kFeatureUnavailable_VALUE, 0);
         if (priceGold != row.getShopPriceGold()) return new Grant(INVALID_PARAMETER, 0);
         if (priceGold < 0 || tables.pool() == null || !tables.pool().getUnknownFields().asMap().isEmpty())
             return new Grant(INVALID_TABLE_DATA, 0);
         if (ownerLevel(player) < Integer.toUnsignedLong(row.getUnlockLevel())) return new Grant(OWNER_LEVEL_NOT_ENOUGH, 0);
-        if (current.size() >= tables.maxPets()) return new Grant(SLOT_FULL, 0);
+        if (!hasNormalPetSlot(current)) return new Grant(SLOT_FULL, 0);
         if (Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), priceGold) < 0)
             return new Grant(GOLD_NOT_ENOUGH, 0);
         var deduction = currency.prepareDeduction(player, Wallet.GOLD, priceGold);
@@ -654,11 +895,49 @@ public final class PetService {
     public int availableCaptureSlots(ScenePlayer player) {
         if (!player.pets().acquisitionStateValid() || tables.pool() == null
                 || !tables.pool().getUnknownFields().asMap().isEmpty()) return 0;
-        return (int) Math.max(0, Math.min(Integer.MAX_VALUE, tables.maxPets() - player.pets().size()));
+        return (int) Math.max(0, Math.min(Integer.MAX_VALUE, tables.maxPets() - countNormalPets(player.pets())));
     }
 
     /** 完整候选由结算调用方在全部资产校验后提交。 */
     public record PreparedCaptures(int tip, List<Pet> pets) { }
+
+    /** 专属限时活动神兽领奖候选：先分配永久 pet_id，提交前不改玩家状态。 */
+    public record PreparedActivityPet(int tip, Pet pet) { }
+
+    public PreparedActivityPet prepareExclusiveActivityPet(ScenePlayer player, int petTableId) {
+        int writable = checkWritable(player);
+        if (writable != OK) {
+            return new PreparedActivityPet(writable, null);
+        }
+        PetTable row = tables.pet(petTableId);
+        if (row == null || !com.game.scene.festivalbeast.FestivalBeastRules.isValidRewardPetRow(row)) {
+            return new PreparedActivityPet(INVALID_TABLE_DATA, null);
+        }
+        if (tables.pool() == null) {
+            return new PreparedActivityPet(INVALID_TABLE_DATA, null);
+        }
+        if (!hasExclusiveGiftSlot(player.pets(), petTableId)) {
+            return new PreparedActivityPet(SLOT_FULL, null);
+        }
+        long[] minted = guids.tryMint(1);
+        if (minted == null) {
+            log.error("铸活动专属神兽号失败（全服号源不可用） player={} pet_table_id={}",
+                    Long.toUnsignedString(player.playerId()), Integer.toUnsignedString(petTableId));
+            return new PreparedActivityPet(ID_GENERATE_FAILED, null);
+        }
+        Pet pet = newPet(player, row, minted[0]);
+        return new PreparedActivityPet(OK, pet);
+    }
+
+    public void commitPreparedActivityPet(ScenePlayer player, Pet pet) {
+        if (pet == null || pet.petId() == 0) {
+            throw new IllegalArgumentException("invalid activity pet candidate");
+        }
+        player.pets().add(pet);
+        log.info("发放专属活动神兽 player={} pet_id={} pet_table_id={} level={}",
+                Long.toUnsignedString(player.playerId()), Long.toUnsignedString(pet.petId()),
+                Integer.toUnsignedString(pet.petTableId()), pet.level());
+    }
 
     public PreparedCaptures prepareCapturedPets(ScenePlayer player, List<Integer> tableIds) {
         if (tableIds.isEmpty()) return new PreparedCaptures(OK, List.of());
@@ -671,7 +950,7 @@ public final class PetService {
             PetTable row = tables.pet(id);
             if (row == null) return new PreparedCaptures(TABLE_ROW_MISSING, List.of());
             if (!row.getUnknownFields().asMap().isEmpty()) return new PreparedCaptures(INVALID_TABLE_DATA, List.of());
-            if (row.getAcquisitionTier() != 0)
+            if (row.getAcquisitionTier() != 0 || row.getTransferPolicy() != 0 || row.getExclusiveGiftSlots() > 0)
                 return new PreparedCaptures(CommonErrorTip.common_error.kFeatureUnavailable_VALUE, List.of());
             if (ownerLevel(player) < Integer.toUnsignedLong(row.getUnlockLevel()))
                 return new PreparedCaptures(OWNER_LEVEL_NOT_ENOUGH, List.of());
@@ -730,24 +1009,56 @@ public final class PetService {
         if (pet == null) {
             return List.of();
         }
+        BattlePetSnapshot snap = buildSingleBattleSnapshot(player, pet, false);
+        return snap == null ? List.of() : List.of(snap);
+    }
+
+    /** 论剑 V3 战前备战备用宝宝快照列表（排除当前首发 petId，按拥有顺序最多返回 maxCount 只）。 */
+    public List<BattlePetSnapshot> buildStandbyBattleSnapshots(ScenePlayer player, long excludePetId,
+                                                               int maxCount, boolean fullResources) {
+        if (maxCount <= 0 || tables.pool() == null) {
+            return List.of();
+        }
+        List<BattlePetSnapshot> out = new ArrayList<>();
+        for (Pet pet : player.pets().pets()) {
+            if (out.size() >= maxCount) {
+                break;
+            }
+            if (pet.petId() == 0 || pet.petId() == excludePetId) {
+                continue;
+            }
+            BattlePetSnapshot snap = buildSingleBattleSnapshot(player, pet, fullResources);
+            if (snap != null) {
+                out.add(snap);
+            }
+        }
+        return out;
+    }
+
+    private BattlePetSnapshot buildSingleBattleSnapshot(ScenePlayer player, Pet pet, boolean fullResources) {
         PetTable row = tables.pet(pet.petTableId());
         if (row == null || tables.pool() == null) {
-            log.warn("出战宝宝缺种类行或宝宝池，不带进战斗 player={} pet_id={} pet_table_id={}", Long.toUnsignedString(player.playerId()),
+            log.warn("宝宝缺种类行或宝宝池，不带进战斗 player={} pet_id={} pet_table_id={}", Long.toUnsignedString(player.playerId()),
                     Long.toUnsignedString(pet.petId()), Integer.toUnsignedString(pet.petTableId()));
-            return List.of();
+            return null;
         }
-        if (pet.health() == 0 || ownerLevel(player) < pet.level()) {
-            return List.of();
+        int effectiveLevel = ClassSkillCatalog.petLevel(pet, row);
+        if (ownerLevel(player) < Integer.toUnsignedLong(effectiveLevel)) {
+            return null;
+        }
+        if (!fullResources && pet.health() == 0) {
+            return null;
         }
         Derived derived = derived(pet, row);
-        long health = Math.min(pet.health(), derived.maxHealth());
-        long mana = derived.maxMana() > 0 ? Math.min(pet.mana(), derived.maxMana()) : pet.mana();
+        long health = fullResources ? derived.maxHealth() : Math.min(pet.health(), derived.maxHealth());
+        long mana = fullResources ? derived.maxMana()
+                : (derived.maxMana() > 0 ? Math.min(pet.mana(), derived.maxMana()) : pet.mana());
         var snapshot = BattlePetSnapshot.newBuilder()
                 .setPetId(pet.petId())
                 .setOwnerPlayerId(player.playerId())
                 .setPetName(!pet.name().isEmpty() ? pet.name() : row.getName())
                 .setPetTableId(pet.petTableId())
-                .setLevel(ClassSkillCatalog.petLevel(pet, row))
+                .setLevel(effectiveLevel)
                 .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(health).setMana(mana).setSpeed(derived.speed()))
                 .setMaxHealth(derived.maxHealth())
                 .setMaxMana(derived.maxMana())
@@ -760,7 +1071,7 @@ public final class PetService {
             if (BattleRules.isTurnBattleCastableSkill(skill)) snapshot.addSkillTableIds(id);
             if (skill.getBattleModel() == 1) snapshot.putSkillRanks(id, rank);
         });
-        return List.of(snapshot.build());
+        return snapshot.build();
     }
 
     /**

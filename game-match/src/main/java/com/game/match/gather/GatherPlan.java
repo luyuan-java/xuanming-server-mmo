@@ -120,8 +120,22 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
             throw new IllegalArgumentException("活动开战必须预先发号");
         }
         Objects.requireNonNull(activityContext, "activityContext");
-        return new GatherPlan(MatchMode.MATCH_MODE_PVE_TEAM, battleConfigId, roster, tickets, FailPolicy.DELETE_ALL, presetBattleId,
+        MatchMode mode = activityContext.getKind() == com.game.proto.eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST
+                ? MatchMode.MATCH_MODE_PVE_SOLO
+                : MatchMode.MATCH_MODE_PVE_TEAM;
+        return new GatherPlan(mode, battleConfigId, roster, tickets, FailPolicy.DELETE_ALL, presetBattleId,
                 activityContext);
+    }
+
+    /**
+     * 全服赛季战队锦标赛开战（前半名单为 A 队，后半为 B 队，不占用排队票据，预先分配 battle_id 写回赛程表）。
+     */
+    public static GatherPlan tournament(int battleConfigId, List<Long> roster, long presetBattleId) {
+        if (presetBattleId == 0) {
+            throw new IllegalArgumentException("锦标赛开战必须预先发号");
+        }
+        return new GatherPlan(MatchMode.MATCH_MODE_SEASON_TOURNAMENT, battleConfigId, roster, Map.of(),
+                FailPolicy.NO_TICKETS, presetBattleId, null);
     }
 
     // ---------------------------------------------------------------- 管线用的小工具

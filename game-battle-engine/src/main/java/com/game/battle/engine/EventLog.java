@@ -56,6 +56,10 @@ final class EventLog {
         hitIndex = 0;
     }
 
+    int groupId() {
+        return groupId;
+    }
+
     /** 技能逐目标落地时设目标序；落地结束后调用方再设回 0。 */
     void setHitIndex(int index) {
         hitIndex = index;

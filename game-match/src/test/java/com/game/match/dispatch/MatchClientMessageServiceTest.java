@@ -48,6 +48,8 @@ import com.game.match.testing.InMemoryTicketStore;
 import com.game.match.testing.RecordingPushes;
 import com.game.match.ticket.DefaultTicketHealing;
 import com.game.match.ticket.TicketState;
+import com.game.match.tournament.TournamentService;
+import com.game.match.tournament.TournamentStore;
 import com.game.proto.RequestBattleTicketRequest;
 import com.game.proto.RequestBattleTicketResponse;
 import com.game.proto.TipInfoMessage;
@@ -111,7 +113,13 @@ class MatchClientMessageServiceTest {
             MatchMethods.LIST_BATTLE_SCRIPTS, MatchMethods.SUBMIT_BATTLE_SCRIPT,
             MatchMethods.DELETE_BATTLE_SCRIPT, MatchMethods.SET_BATTLE_SCRIPT_LOADOUT,
             MatchMethods.GET_RANKED_PROFILE, MatchMethods.SAVE_RANKED_PRESET,
-            MatchMethods.UPDATE_RANKED_COSMETIC, MatchMethods.GET_RANKED_BATTLE_RESULT);
+            MatchMethods.UPDATE_RANKED_COSMETIC, MatchMethods.GET_RANKED_BATTLE_RESULT,
+            MatchMethods.GET_TOURNAMENT_OVERVIEW, MatchMethods.CREATE_TOURNAMENT_SQUAD,
+            MatchMethods.INVITE_TOURNAMENT_MEMBER, MatchMethods.RESPOND_TOURNAMENT_INVITE,
+            MatchMethods.LEAVE_TOURNAMENT_SQUAD, MatchMethods.UPDATE_TOURNAMENT_LINEUP,
+            MatchMethods.REGISTER_TOURNAMENT_SQUAD, MatchMethods.LIST_TOURNAMENT_STANDINGS,
+            MatchMethods.START_TOURNAMENT_MATCH, MatchMethods.CHEER_TOURNAMENT_SQUAD,
+            MatchMethods.CLAIM_TOURNAMENT_REWARD);
 
     private static final Map<String, Integer> IDS = new java.util.HashMap<>(Map.of(
             MatchMethods.JOIN_QUEUE, 157, MatchMethods.CANCEL_QUEUE, 148, MatchMethods.GET_QUEUE_STATUS, 153,
@@ -575,6 +583,7 @@ class MatchClientMessageServiceTest {
         BattleScriptService scripts = new BattleScriptService(
                 mock(BattleScriptStore.class), mock(BattleScriptCatalog.class), mock(BattleScriptValidator.Tables.class), () -> 1L);
         RankedService ranked = new RankedService(mock(RankedStore.class), mock(RankedTables.class), System::currentTimeMillis);
+        TournamentService tournament = new TournamentService(mock(TournamentStore.class), () -> 1L, null);
         List<MatchMethodHandler> handlers = new ArrayList<>(List.of(
                 new com.game.match.global.ProbeHandlers.Plan(() -> null),
                 new com.game.match.global.ProbeHandlers.Commit(() -> null),
@@ -585,6 +594,7 @@ class MatchClientMessageServiceTest {
                 BattleReportHandlers.listHandler(reports), BattleReportHandlers.getHandler(reports)));
         handlers.addAll(scripts.clientHandlers());
         handlers.addAll(ranked.clientHandlers());
+        handlers.addAll(tournament.clientHandlers());
         return handlers;
     }
 

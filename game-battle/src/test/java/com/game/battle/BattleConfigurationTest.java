@@ -656,4 +656,43 @@ class BattleConfigurationTest {
         }
         assertThat(own).singleElement().satisfies(record -> assertThat(record.value()).isEqualTo(event.toByteArray()));
     }
+
+    @Test
+    void SignedOutcomeSink仅在recordReplay开启时把回放外壳签进CommitBattleOutcomeRequest() {
+        List<com.game.proto.match.CommitBattleOutcomeRequest> sent = new ArrayList<>();
+        com.game.api.MatchInternalService match = mock(com.game.api.MatchInternalService.class);
+        org.mockito.Mockito.when(match.commitBattleOutcome(org.mockito.ArgumentMatchers.any())).thenAnswer(inv -> {
+            com.game.proto.match.CommitBattleOutcomeRequest req = inv.getArgument(0);
+            sent.add(req);
+            var reply = com.game.proto.match.CommitBattleOutcomeResponse.newBuilder()
+                    .setDecision(com.game.proto.match.BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE)
+                    .setRequestDigest(com.game.discovery.serviceauth.ServiceCallSignatures.digest(req))
+                    .build();
+            var signedReply = com.game.discovery.serviceauth.ServiceCallSignatures.sign(
+                    com.game.api.MatchInternalService.OUTCOME_METHOD + "/reply", reply, "match", SECRET, System.currentTimeMillis());
+            return java.util.concurrent.CompletableFuture.completedFuture(signedReply);
+        });
+        var sink = new BattleConfiguration.SignedOutcomeSink(mock(BattleResultSink.class), match, SECRET);
+        var event = BattleResultEvent.newBuilder().setBattleId(8801L).build();
+        var replay = com.game.proto.BattleReplayEnvelope.newBuilder()
+                .setFormatVersion(1)
+                .setCodec(com.game.proto.eBattleReplayCodec.BATTLE_REPLAY_CODEC_GZIP)
+                .setRawBytes(16)
+                .setPayload(com.google.protobuf.ByteString.copyFromUtf8("gz"))
+                .build();
+        var recordedCreate = com.game.proto.CreateBattleRequest.newBuilder()
+                .setBattleId(8801L).setPlacementOperationId("op-1").setTargetInstanceId("b-1")
+                .setOutcomeProtocolVersion(1).setRecordReplay(true).build();
+        var skippedCreate = recordedCreate.toBuilder().setRecordReplay(false).build();
+
+        assertThat(sink.commitOutcome(recordedCreate, event, event.toByteString(), replay).join())
+                .isEqualTo(com.game.proto.match.BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE);
+        assertThat(sink.commitOutcome(skippedCreate, event, event.toByteString(), replay).join())
+                .isEqualTo(com.game.proto.match.BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE);
+
+        assertThat(sent).hasSize(2);
+        assertThat(sent.get(0).hasReplay()).isTrue();
+        assertThat(sent.get(0).getReplay()).isEqualTo(replay);
+        assertThat(sent.get(1).hasReplay()).isFalse();
+    }
 }

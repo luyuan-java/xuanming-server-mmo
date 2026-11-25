@@ -26,7 +26,7 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
-/** 统一经济契约测试：V1 装备 +1..+10 必成与 +11 概率硬保底幂等强化、两阶段 660/60 + 每周 100 绑定材料账本与防挂机。 */
+/** 统一经济契约测试：V1 装备 +1..+10 必成与 +11 概率硬保底幂等强化、两阶段 660/60 + 每周 150 绑定材料账本与防挂机。 */
 class EnhancePityAndMaterialLedgerTest {
 
     @Test
@@ -47,7 +47,8 @@ class EnhancePityAndMaterialLedgerTest {
         BagItem weapon = player.bags().bag(BagType.INVENTORY).items().stream()
                 .filter(i -> i.configId() == v1Weapon.getId()).findFirst().orElseThrow();
         weapon.equipment(EquipmentState.newBuilder().setEnhanceLevel(9).build());
-        assertThat(f.bags.addItems(player, BagType.INVENTORY, Map.of(EquipmentCraftService.ENHANCEMENT_STONE_ID, 2000L),
+        // +9->+10 需 15 颗，+10->+11 满 20 次硬保底需 20 × 100 = 2000 颗，合计 2015 颗。
+        assertThat(f.bags.addItems(player, BagType.INVENTORY, Map.of(EquipmentCraftService.ENHANCEMENT_STONE_ID, 2015L),
                 AssetAudit.Reason.GM_GRANT, 0L, "").ok()).isTrue();
 
         // +9 -> +10：100% 必成（即使随机源返回最大值 9999，10000 > 9999 仍必成，pity_limit=0）
@@ -93,22 +94,28 @@ class EnhancePityAndMaterialLedgerTest {
             assertThat(res.enhancePityCount()).isEqualTo(attempt);
         }
 
-        // 展示视图明确公示 pity_limit=20、current_pity_count=19、pity_guaranteed_next=true
+        // 展示视图明确公示 material_count（随契约表同步）、pity_limit=20、current_pity_count=19、pity_guaranteed_next=true
+        int expectedPlus11Cost = BattleFixture.CONFIG.equipEnhance().all().stream()
+                .filter(row -> row.getProfileId() == 1 && row.getLevel() == 11)
+                .findFirst().orElseThrow().getMaterialCount();
         BagItem liveWeapon = player.bags().bag(BagType.INVENTORY).item(weapon.guid());
         BagItemInfo.Builder view = BagItemInfo.newBuilder();
         display.item(liveWeapon, view);
         assertThat(view.getEnhancePityCount()).isEqualTo(19);
+        assertThat(view.getEnhanceNext().getMaterialCount()).isEqualTo(expectedPlus11Cost);
         assertThat(view.getEnhanceNext().getPityLimit()).isEqualTo(20);
         assertThat(view.getEnhanceNext().getCurrentPityCount()).isEqualTo(19);
         assertThat(view.getEnhanceNext().getPityGuaranteedNext()).isTrue();
 
-        // 第 20 次触发硬保底 100% 必成 +11，保底归零，总加成 2400 万分比（+24%）
+        // 第 20 次触发硬保底 100% 必成 +11，保底归零，消耗精确等于 +10(15) + 20 * expectedPlus11Cost，总加成 2400 万分比（+24%）
         var pityWin = service.enhance(player, EnhanceEquipRequest.newBuilder()
                 .setItemId(weapon.guid()).setExpectedLevel(10).setExpectedPityCount(19).setClientRequestId(2020L).build());
         assertThat(pityWin.tip()).isZero();
         assertThat(pityWin.success()).isTrue();
         assertThat(pityWin.enhanceLevel()).isEqualTo(11);
         assertThat(pityWin.enhancePityCount()).isZero();
+        assertThat(player.bags().bag(BagType.INVENTORY).total(EquipmentCraftService.ENHANCEMENT_STONE_ID))
+                .isEqualTo(2015L - 15L - 20L * expectedPlus11Cost);
         assertThat(fixedLoseRules.bonus(1, 11)).isEqualTo(2400L);
     }
 
@@ -183,28 +190,176 @@ class EnhancePityAndMaterialLedgerTest {
         assertThat(capStage1.tradableUnitsAdded()).isZero();
         assertThat(player.clientRequestLedger().materialReward().getLifetimeEarned()).isEqualTo(660);
 
-        // 5. 自动进入阶段二（weekly_phase_active=true）：本周累计至 100 全绑定后封顶；时钟回拨到上周不重开；跨入下周一 05:00 后重新开放
+        // 5. 自动进入阶段二（weekly_phase_active=true）：本周累计至 150 全绑定后封顶；时钟回拨到上周不重开；跨入下周一 05:00 后重新开放
         EquipmentMaterialRewardSnapshot phase2Snap = f.craft.getMaterialReward(player, monWeek1).getSnapshot();
         assertThat(phase2Snap.getWeeklyPhaseActive()).isTrue();
-        assertThat(phase2Snap.getWeeklyLimit()).isEqualTo(100);
+        assertThat(phase2Snap.getWeeklyLimit()).isEqualTo(150);
 
         int weekEarned = 0;
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 9; i++) {
             var dw = EquipmentCraftService.creditBattleMaterialRewardDelta(
                     player, hardPveWin.toBuilder().setBattleId(10L + i).build(), monWeek1);
             assertThat(dw.tradableUnitsAdded()).isZero();
+            assertThat(dw.totalUnitsAdded()).isEqualTo(15);
             weekEarned += dw.totalUnitsAdded();
         }
-        assertThat(weekEarned).isEqualTo(100);
+        BattleSettlementData normalPveWin = hardPveWin.toBuilder().setBattleId(19L).setBattleDifficulty(1).build();
+        var dwNorm = EquipmentCraftService.creditBattleMaterialRewardDelta(player, normalPveWin, monWeek1);
+        assertThat(dwNorm.totalUnitsAdded()).isEqualTo(10);
+        weekEarned += dwNorm.totalUnitsAdded();
+        // 145 -> 150 截断补满最后 5 份，后续再胜得 0。
+        var dwCap = EquipmentCraftService.creditBattleMaterialRewardDelta(
+                player, hardPveWin.toBuilder().setBattleId(20L).build(), monWeek1);
+        assertThat(dwCap.totalUnitsAdded()).isEqualTo(5);
+        assertThat(dwCap.tradableUnitsAdded()).isZero();
+        weekEarned += dwCap.totalUnitsAdded();
+        assertThat(weekEarned).isEqualTo(150);
+        assertThat(EquipmentCraftService.creditBattleMaterialRewardDelta(
+                player, hardPveWin.toBuilder().setBattleId(21L).build(), monWeek1).totalUnitsAdded()).isZero();
         // 时钟回拨到前一周：拒绝重新入账
         long prevWeekMs = monWeek1 - 7L * 86_400_000L;
         assertThat(EquipmentCraftService.creditBattleMaterialRewardDelta(
-                player, hardPveWin.toBuilder().setBattleId(20L).build(), prevWeekMs).totalUnitsAdded()).isZero();
-        // 跨入下一周（+7 天）：重新开放 100 绑定额度
+                player, hardPveWin.toBuilder().setBattleId(22L).build(), prevWeekMs).totalUnitsAdded()).isZero();
+        // 跨入下一周（+7 天）：重新开放 150 绑定额度
         long nextWeekMs = monWeek1 + 7L * 86_400_000L;
         var nextWeekDelta = EquipmentCraftService.creditBattleMaterialRewardDelta(
-                player, hardPveWin.toBuilder().setBattleId(21L).build(), nextWeekMs);
+                player, hardPveWin.toBuilder().setBattleId(23L).build(), nextWeekMs);
         assertThat(nextWeekDelta.totalUnitsAdded()).isEqualTo(15);
         assertThat(nextWeekDelta.tradableUnitsAdded()).isZero();
+    }
+
+    @Test
+    void 强化严格TB隔离与绑定传染_纯T足量不误绑_混绑二次确认后无论成败传染() {
+        BattleFixture f = new BattleFixture();
+        // 确定性掷骰总是落败，验证 +11 失败扣绑定石同样传染变绑
+        EquipmentRules fixedLoseRules = new EquipmentRules(f.equipment.rules().tables(), bound -> bound - 1L);
+        EquipmentService service = new EquipmentService(fixedLoseRules, f.bags, f.currency, f.attributes,
+                new com.game.scene.metrics.SceneMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+        BagFeature bagView = new BagFeature(f.bags);
+
+        ScenePlayer player = f.enter(11, 8810L);
+        ItemTable v1Weapon = BattleFixture.CONFIG.item().all().stream()
+                .filter(row -> row.getEquipProfile() == 1 && row.getEquipKind() == 11)
+                .findFirst().orElseThrow();
+        assertThat(f.bags.addItems(player, BagType.INVENTORY, Map.of(v1Weapon.getId(), 1L),
+                false, AssetAudit.Reason.GM_GRANT, 0L, "").ok()).isTrue();
+        BagItem weapon = player.bags().bag(BagType.INVENTORY).items().stream()
+                .filter(i -> i.configId() == v1Weapon.getId()).findFirst().orElseThrow();
+        assertThat(weapon.bound()).isFalse();
+
+        // 背包同时持有 10 颗绑定百炼石 + 20 颗可交易百炼石：+0->+1 仅需 2 颗，纯 T 足量，哪怕传 allow_bound_materials=true 也不误绑且仅扣 T 堆
+        assertThat(f.bags.addItems(player, BagType.INVENTORY, Map.of(EquipmentCraftService.ENHANCEMENT_STONE_ID, 10L),
+                true, AssetAudit.Reason.GM_GRANT, 0L, "").ok()).isTrue();
+        assertThat(f.bags.addItems(player, BagType.INVENTORY, Map.of(EquipmentCraftService.ENHANCEMENT_STONE_ID, 20L),
+                false, AssetAudit.Reason.GM_GRANT, 0L, "").ok()).isTrue();
+
+        var snapBefore = bagView.snapshot(player, BagType.INVENTORY).getItemsList().stream()
+                .filter(i -> i.getItemId() == weapon.guid()).findFirst().orElseThrow();
+        assertThat(snapBefore.getEnhanceNext().getTradableMaterialAvailable()).isEqualTo(20L);
+        assertThat(snapBefore.getEnhanceNext().getWillBindOnEnhance()).isFalse();
+
+        var to1 = service.enhance(player, EnhanceEquipRequest.newBuilder()
+                .setItemId(weapon.guid()).setExpectedLevel(0).setAllowBoundMaterials(true).setClientRequestId(5101L).build());
+        assertThat(to1.tip()).isZero();
+        assertThat(to1.enhanceLevel()).isEqualTo(1);
+        assertThat(player.bags().bag(BagType.INVENTORY).item(weapon.guid()).bound()).isFalse();
+        assertThat(player.bags().bag(BagType.INVENTORY).plainTradableQuantity(EquipmentCraftService.ENHANCEMENT_STONE_ID)).isEqualTo(18L);
+        assertThat(player.bags().bag(BagType.INVENTORY).total(EquipmentCraftService.ENHANCEMENT_STONE_ID)).isEqualTo(28L);
+
+        // 切到 +10->+11：可交易石不足（仅 18 颗），补发 100 颗绑定石 -> 快照提示 will_bind_on_enhance=true，未确认被拦 28027
+        player.bags().bag(BagType.INVENTORY).item(weapon.guid())
+                .equipment(EquipmentState.newBuilder().setEnhanceLevel(10).build());
+        assertThat(f.bags.addItems(player, BagType.INVENTORY, Map.of(EquipmentCraftService.ENHANCEMENT_STONE_ID, 100L),
+                true, AssetAudit.Reason.GM_GRANT, 0L, "").ok()).isTrue();
+        var snapPlus11 = bagView.snapshot(player, BagType.INVENTORY).getItemsList().stream()
+                .filter(i -> i.getItemId() == weapon.guid()).findFirst().orElseThrow();
+        assertThat(snapPlus11.getEnhanceNext().getWillBindOnEnhance()).isTrue();
+
+        var blocked = service.enhance(player, EnhanceEquipRequest.newBuilder()
+                .setItemId(weapon.guid()).setExpectedLevel(10).setExpectedPityCount(0).setClientRequestId(5102L).build());
+        assertThat(blocked.tip()).isEqualTo(equip_error.kEquipBindConfirmRequired_VALUE);
+        assertThat(player.bags().bag(BagType.INVENTORY).item(weapon.guid()).bound()).isFalse();
+
+        // 确认 allow_bound_materials=true：即使 +11 掷骰失败，消耗了绑定石也立刻传染变绑，杜绝洗白套现
+        var confirmedFail = service.enhance(player, EnhanceEquipRequest.newBuilder()
+                .setItemId(weapon.guid()).setExpectedLevel(10).setExpectedPityCount(0)
+                .setAllowBoundMaterials(true).setClientRequestId(5103L).build());
+        assertThat(confirmedFail.tip()).isZero();
+        assertThat(confirmedFail.success()).isFalse();
+        assertThat(confirmedFail.enhancePityCount()).isEqualTo(1);
+        assertThat(player.bags().bag(BagType.INVENTORY).item(weapon.guid()).bound()).isTrue();
+    }
+
+    @Test
+    void 账号级60可交易跨角色防刷_未确认领取FailClosed_二阶段月卡解锁可交易不增总量() {
+        BattleFixture f = new BattleFixture();
+        BagFeature bagView = new BagFeature(f.bags);
+        long monWeek1 = 1_795_384_800_000L;
+        // 模拟账号级 60 份配额表（主号已用 60，小号建角后不可再超发；同时支持手动释放回调验证 fail-closed）
+        java.util.concurrent.atomic.AtomicInteger accountUsed = new java.util.concurrent.atomic.AtomicInteger(60);
+        java.util.List<com.game.scene.testing.FakePlayerRepository.PendingStage1QuotaSync> pendingSyncs = new java.util.ArrayList<>();
+        f.repo.setStage1QuotaSyncHandler((sync, repo) -> pendingSyncs.add(sync));
+
+        ScenePlayer alt = f.enter(11, 8820L);
+        // 进场自动发起了一次账号配额同步，先挂起不回包，模拟同步尚未完成时小号胜局入账
+        assertThat(pendingSyncs).hasSize(1);
+        BattleSettlementData hardPveWin = BattleSettlementData.newBuilder()
+                .setBattleId(901L).setPlayerId(alt.playerId())
+                .setMatchMode(MatchMode.MATCH_MODE_PVE_SOLO_VALUE)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN).setPlayerTeamIndex(0)
+                .setTotalRounds(4).setBattleDifficulty(2).build();
+        var delta = EquipmentCraftService.creditBattleMaterialRewardDelta(alt, hardPveWin, monWeek1);
+        assertThat(delta.totalUnitsAdded()).isEqualTo(15);
+        assertThat(delta.tradableUnitsAdded()).isEqualTo(1);
+
+        // 未经账号目录确认前，领取含可交易份数的批次必须 fail-closed 拒回 kServiceUnavailable
+        var blockedClaim = f.craft.claimMaterialReward(alt, ClaimEquipmentMaterialRewardRequest.newBuilder()
+                .setClientRequestId(9201L).setExpectedRevision(0L)
+                .setCraftingMaterialCount(10).setEnhancementStoneCount(5).build(), bagView, monWeek1, f.world);
+        assertThat(blockedClaim.getErrorMessage().getId())
+                .isEqualTo(com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+
+        // 账号目录回包：该账号已用 60/60，本小号确认额度 0 -> 本地超额未确认可交易额平滑降级为绑定自用（总份数 15 不变）
+        pendingSyncs.removeFirst().complete(new com.game.player.store.PlayerStore.Stage1TradableQuotaOutcome(true, 0, accountUsed.get()));
+        assertThat(alt.clientRequestLedger().materialReward().getTradableEarnedTotal()).isZero();
+        assertThat(alt.clientRequestLedger().materialReward().getAvailableTradableUnits()).isZero();
+        assertThat(alt.clientRequestLedger().materialReward().getAvailableUnits()).isEqualTo(15L);
+        assertThat(f.craft.getMaterialReward(alt, monWeek1).getSnapshot().getTradableEarnedTotal()).isEqualTo(60);
+
+        // 降级后可正常领取全部 15 份绑定材料（0 可交易）
+        var boundClaim = f.craft.claimMaterialReward(alt, ClaimEquipmentMaterialRewardRequest.newBuilder()
+                .setClientRequestId(9202L).setExpectedRevision(0L)
+                .setCraftingMaterialCount(10).setEnhancementStoneCount(5).build(), bagView, monWeek1, f.world);
+        assertThat(boundClaim.getErrorMessage().getId()).isZero();
+        assertThat(alt.bags().bag(BagType.INVENTORY).plainTradableQuantity(EquipmentCraftService.CRAFTING_MATERIAL_ID)).isZero();
+        assertThat(alt.bags().bag(BagType.INVENTORY).total(EquipmentCraftService.CRAFTING_MATERIAL_ID)).isEqualTo(10L);
+
+        // 下一场胜局因本场景已知账号已达 60/60，直接产生 0 可交易
+        var altWin2 = EquipmentCraftService.creditBattleMaterialRewardDelta(
+                alt, hardPveWin.toBuilder().setBattleId(902L).build(), monWeek1);
+        assertThat(altWin2.totalUnitsAdded()).isEqualTo(15);
+        assertThat(altWin2.tradableUnitsAdded()).isZero();
+
+        // 推入二阶段（lifetime=660）：开通有效仙途轻享卡后，每周 150 池胜局含 1 份可交易且不增总额度
+        alt.clientRequestLedger().setMaterialReward(EquipmentMaterialRewardLedgerState.newBuilder()
+                .setMigratedToV2(true)
+                .setLifetimeEarned(660)
+                .setTradableEarnedTotal(0)
+                .setStage1TradableConfirmed(0)
+                .setAvailableUnits(0)
+                .setAvailableTradableUnits(0)
+                .setRevision(1L)
+                .build());
+        alt.setAfkPassExpiresAt(monWeek1 / 1000L + 86_400L);
+        var stage2CardWin = EquipmentCraftService.creditBattleMaterialRewardDelta(
+                alt, hardPveWin.toBuilder().setBattleId(903L).build(), monWeek1);
+        assertThat(stage2CardWin.totalUnitsAdded()).isEqualTo(15);
+        assertThat(stage2CardWin.tradableUnitsAdded()).isEqualTo(1);
+        assertThat(alt.clientRequestLedger().isValid()).isTrue();
+        var stage2Claim = f.craft.claimMaterialReward(alt, ClaimEquipmentMaterialRewardRequest.newBuilder()
+                .setClientRequestId(9203L).setExpectedRevision(1L)
+                .setCraftingMaterialCount(5).setEnhancementStoneCount(10).build(), bagView, monWeek1, f.world);
+        assertThat(stage2Claim.getErrorMessage().getId()).isZero();
+        assertThat(alt.bags().bag(BagType.INVENTORY).plainTradableQuantity(EquipmentCraftService.CRAFTING_MATERIAL_ID)).isEqualTo(1L);
     }
 }

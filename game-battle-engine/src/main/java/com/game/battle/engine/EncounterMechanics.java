@@ -11,6 +11,7 @@ import com.game.proto.BattleTelegraphEntry;
 import com.game.proto.BattleTrialJournalFacts;
 import com.game.proto.CreateBattleRequest;
 import com.game.proto.EquipmentArtifactSource;
+import com.game.proto.FestivalBeastBattleContext;
 import com.game.proto.TrialBattleContext;
 import com.game.proto.eBattleEventType;
 import com.game.proto.eBattleHitKind;
@@ -43,6 +44,7 @@ final class EncounterMechanics {
     private final BattleContext ctx;
     private int bossTrialKind = BattleConstants.BOSS_TRIAL_KIND_NONE;
     private int battleDifficulty;
+    private FestivalBeastBattleContext festivalBeast;
     private int initialAttackerHumanCount;
     private int trialGuardMonsterTableId;
     private int trialGuardStanceBuffId;
@@ -92,6 +94,18 @@ final class EncounterMechanics {
     void configureTrial(int guardMonsterTableId, int guardStanceBuffId) {
         this.trialGuardMonsterTableId = guardMonsterTableId;
         this.trialGuardStanceBuffId = guardStanceBuffId;
+    }
+
+    void configureFestivalBeast(FestivalBeastBattleContext context) {
+        this.festivalBeast = context;
+    }
+
+    boolean isFestivalBeast() {
+        return bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_FESTIVAL_BEAST && festivalBeast != null;
+    }
+
+    FestivalBeastBattleContext festivalBeast() {
+        return festivalBeast;
     }
 
     void setInitialAttackerHumanCount(int count) {
@@ -617,6 +631,12 @@ final class EncounterMechanics {
                         .setShieldAfter(bossBarrierShield);
                 if (bossBarrierShield == 0L) {
                     markShieldBreak(source);
+                    // 灵障碎障破绽：击破首领灵障护盾立即触发完整「破绽（+35%，至下回合末）」，将破盾转化为全队爆发窗口。
+                    applyBossExposed(target.actorId(), BattleConstants.BOSS_EXPOSED_FULL_PCT, ctx.roundIndex() + 1);
+                    stanceBreakCount++;
+                    emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_STANCE_BREAK,
+                            source != null ? source.actorId() : target.actorId(),
+                            target.actorId(), BattleConstants.BOSS_EXPOSED_FULL_PCT);
                 }
             }
         }
@@ -738,7 +758,8 @@ final class EncounterMechanics {
         activeTelegraphs.clear();
         activeTelegraphs.addAll(kept);
 
-        if (!isBossTrialOrRescue()) {
+        boolean festival = isFestivalBeast();
+        if (!festival && !isBossTrialOrRescue()) {
             return;
         }
 
@@ -776,6 +797,33 @@ final class EncounterMechanics {
             } else {
                 if (otherGuard == null) otherGuard = actor;
             }
+        }
+
+        // 0. 瑞兽迎春：在 R2/5/8/11 操作窗口开始前确定性预告下一回合（R3/6/9/12）重击目标，仅抽一次。
+        if (festival) {
+            FestivalBeastBattleContext fb = festivalBeast;
+            int execRound = r + fb.getTelegraphLeadRounds();
+            if (boss != null
+                    && Integer.compareUnsigned(execRound, maxRounds) <= 0
+                    && Integer.compareUnsigned(execRound, fb.getFirstHeavyRound()) >= 0
+                    && Integer.remainderUnsigned(execRound - fb.getFirstHeavyRound(), fb.getCycleRounds()) == 0
+                    && !hasEntryFor(boss.actorId(), execRound)) {
+                long targetId = pickEnemyTarget(boss);
+                if (targetId != 0L) {
+                    activeTelegraphs.add(BattleTelegraphEntry.newBuilder()
+                            .setSourceActorId(boss.actorId())
+                            .setTargetActorId(targetId)
+                            .addTargetActorIds(targetId)
+                            .setTelegraphRound(r)
+                            .setExecuteRound(execRound)
+                            .setIntentKind(BattleConstants.TELEGRAPH_KIND_FESTIVAL_HEAVY_STRIKE)
+                            .setStatus(BattleConstants.TELEGRAPH_STATUS_UPCOMING)
+                            .setStateVersion(++telegraphStateVersion)
+                            .setLabel("春禧重击蓄力：下回合慢速物理重击锁定目标，防御可减半、控场可打断")
+                            .build());
+                }
+            }
+            return;
         }
 
         // 1. 首领蓄力慢速重击：一阶段 R1/4/7/10/13 预告；二阶段决战姿态按 nextPhase2CleaveTelegraphRound 每 2 回合循环。
@@ -920,10 +968,17 @@ final class EncounterMechanics {
             }
             BattleUnit source = ctx.findActor(entry.getSourceActorId());
             if (source == null || !source.isActive()) {
+                if (entry.getIntentKind() == BattleConstants.TELEGRAPH_KIND_FESTIVAL_HEAVY_STRIKE) {
+                    recordResolved(roundResolved, entry, BattleConstants.TELEGRAPH_STATUS_CANCELLED_BY_CONTROL,
+                            "首领已倒地，春禧重击取消");
+                }
                 continue;
             }
             if (isActorControlLocked(source, checks)) {
-                if (isBossTrial()) {
+                if (entry.getIntentKind() == BattleConstants.TELEGRAPH_KIND_FESTIVAL_HEAVY_STRIKE) {
+                    recordResolved(roundResolved, entry, BattleConstants.TELEGRAPH_STATUS_CANCELLED_BY_CONTROL,
+                            "春禧重击受控取消");
+                } else if (isBossTrial()) {
                     switch (entry.getIntentKind()) {
                         case BattleConstants.TELEGRAPH_KIND_SLOW_CLEAVE,
                              BattleConstants.TELEGRAPH_KIND_BOSS_MAGIC_STRIKE,
@@ -956,6 +1011,20 @@ final class EncounterMechanics {
                             recordResolved(roundResolved, entry, BattleConstants.TELEGRAPH_STATUS_CANCELLED_BY_CONTROL,
                                     "切阵被控打断，触发崩势破绽");
                         }
+                        case BattleConstants.TELEGRAPH_KIND_GUARD_SHIELD,
+                             BattleConstants.TELEGRAPH_KIND_GUARD_BIND -> {
+                            stanceBreakCount++;
+                            BattleUnit boss = findAliveBoss();
+                            if (boss != null) {
+                                applyBossExposed(boss.actorId(), BattleConstants.BOSS_EXPOSED_PARTIAL_PCT, r + 1);
+                                emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_STANCE_BREAK,
+                                        source.actorId(), boss.actorId(), BattleConstants.BOSS_EXPOSED_PARTIAL_PCT);
+                            }
+                            recordResolved(roundResolved, entry, BattleConstants.TELEGRAPH_STATUS_CANCELLED_BY_CONTROL,
+                                    entry.getIntentKind() == BattleConstants.TELEGRAPH_KIND_GUARD_SHIELD
+                                            ? "灵障护佑被控打断，首领陷入破绽"
+                                            : "缚灵锁脉被控打断，首领陷入破绽");
+                        }
                         default -> {
                         }
                     }
@@ -963,6 +1032,21 @@ final class EncounterMechanics {
                 continue;
             }
             switch (entry.getIntentKind()) {
+                case BattleConstants.TELEGRAPH_KIND_FESTIVAL_HEAVY_STRIKE -> {
+                    BattleUnit target = ctx.findActor(entry.getTargetActorId());
+                    if (target == null || !target.isActive()) {
+                        recordResolved(roundResolved, entry, BattleConstants.TELEGRAPH_STATUS_CANCELLED_TARGET_INVALID,
+                                "目标已失效，春禧重击取消");
+                        break;
+                    }
+                    ctx.events().beginGroup();
+                    ctx.events().append(eBattleEventType.BATTLE_EVENT_ATTACK, source.actorId(), target.actorId());
+                    double scale = isFestivalBeast()
+                            ? Integer.toUnsignedLong(festivalBeast.getHeavyDamagePercent()) / 100.0
+                            : 1.8;
+                    dealBossStrike(source, target, CombatDamageRules.PHYSICAL_DAMAGE, scale);
+                    recordResolved(roundResolved, entry, BattleConstants.TELEGRAPH_STATUS_EXECUTED, "春禧重击已发动");
+                }
                 case BattleConstants.TELEGRAPH_KIND_SLOW_CLEAVE,
                      BattleConstants.TELEGRAPH_KIND_BOSS_MAGIC_STRIKE -> {
                     List<Long> targetIds = new ArrayList<>();
@@ -1062,10 +1146,65 @@ final class EncounterMechanics {
                     }
                     ctx.events().beginGroup();
                     double scale = Integer.compareUnsigned(battleDifficulty, 2) >= 0 ? 1.05 : 0.85;
+                    if (isBossTrial()) {
+                        if (bossMomentumStacks > 0) {
+                            scale *= (1.0 + (bossMomentumStacks * BattleConstants.BOSS_MOMENTUM_PER_STACK_PCT) / 100.0);
+                        }
+                        if (bossPhase >= 2) {
+                            scale *= 1.10;
+                        }
+                    }
+                    int validTargets = 0;
+                    int parriedTargets = 0;
                     for (long targetId : targets) {
                         BattleUnit target = ctx.findActor(targetId);
-                        if (target != null && target.isActive()) {
-                            dealBossStrike(source, target, CombatDamageRules.MAGIC_DAMAGE, scale);
+                        if (target == null || !target.isActive()) {
+                            continue;
+                        }
+                        validTargets++;
+                        long ownerId = ownerPlayerIdOf(target);
+                        if (ownerId != 0L && isBossTrial()) {
+                            selfCleavesTargetedByPlayer.merge(ownerId, 1, Integer::sum);
+                        }
+                        boolean wasDefending = target.isDefending();
+                        boolean hadProtection = actorHasBossCleaveParryProtection(target, CombatDamageRules.MAGIC_DAMAGE);
+                        int eventsBefore = ctx.events().eventCount();
+                        dealBossStrike(source, target, CombatDamageRules.MAGIC_DAMAGE, scale);
+                        boolean triggeredShieldOrReflect = false;
+                        for (int i = eventsBefore; i < ctx.events().eventCount(); i++) {
+                            BattleEventItem ev = ctx.events().eventAt(i);
+                            if (ev.getEventType() == eBattleEventType.BATTLE_EVENT_SHIELD
+                                    && ev.getTargetId() == target.actorId()
+                                    && ev.getAbsorbed() != 0L) {
+                                triggeredShieldOrReflect = true;
+                                break;
+                            }
+                            if (ev.getEventType() == eBattleEventType.BATTLE_EVENT_DAMAGE
+                                    && ev.getHitKind() == eBattleHitKind.BATTLE_HIT_REFLECT
+                                    && ev.getSourceId() == target.actorId()) {
+                                triggeredShieldOrReflect = true;
+                                break;
+                            }
+                        }
+                        if (wasDefending || hadProtection || triggeredShieldOrReflect) {
+                            parriedTargets++;
+                            if (ownerId != 0L && isBossTrial()) {
+                                selfCleavesParriedByPlayer.merge(ownerId, 1, Integer::sum);
+                            }
+                        }
+                    }
+                    if (isBossTrial()) {
+                        bossMomentumStacks = 0;
+                        if (validTargets > 0 && parriedTargets == validTargets) {
+                            applyBossExposed(source.actorId(), BattleConstants.BOSS_EXPOSED_FULL_PCT, r + 1);
+                            cleaveParryCount++;
+                            emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_CLEAVE_PARRY_EXPOSE,
+                                    source.actorId(), source.actorId(), BattleConstants.BOSS_EXPOSED_FULL_PCT);
+                        } else if (validTargets >= 2 && parriedTargets * 2 >= validTargets) {
+                            applyBossExposed(source.actorId(), BattleConstants.BOSS_EXPOSED_PARTIAL_PCT, r + 1);
+                            cleaveParryCount++;
+                            emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_CLEAVE_PARRY_EXPOSE,
+                                    source.actorId(), source.actorId(), BattleConstants.BOSS_EXPOSED_PARTIAL_PCT);
                         }
                     }
                     recordResolved(roundResolved, entry, BattleConstants.TELEGRAPH_STATUS_EXECUTED, "玄毒冲击已发动");

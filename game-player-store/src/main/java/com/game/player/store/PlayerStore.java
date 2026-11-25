@@ -428,8 +428,53 @@ public class PlayerStore {
         long now = clockMs.getAsLong();
         mapper.upsertDeletionReceipt(accountDigest(account), locked.deletionRequestedMs(), now, locked.deletionSource());
         mapper.deleteAccountChannelIdentity(account);
+        mapper.deleteAccountRoleTradableQuota(account);
         mapper.deleteDeletingAccount(account);
         return new FinishDeletionOutcome(true, 0);
+    }
+
+    /** 阶段一跨角色终身可交易装备材料硬上限（删角不重置，与权威主仓 {@code Stage1TradableMaterialLifetimeLimit} 一致）。 */
+    public static final int STAGE1_TRADABLE_MATERIAL_LIFETIME_LIMIT = 60;
+
+    /** {@link #syncAccountStage1Tradable} 返回结果。 */
+    public record Stage1TradableQuotaOutcome(boolean found, int confirmedCharTotal, int accountUsedTotal) {
+        public static final Stage1TradableQuotaOutcome NOT_FOUND = new Stage1TradableQuotaOutcome(false, 0, 0);
+    }
+
+    /**
+     * 在单事务内按账号行锁幂等确认本角色阶段一可交易装备材料份数，并累加至 {@code account.stage1_tradable_material_used}
+     * （跨角色与删角重建共享终身 60 份硬上限）。
+     */
+    @Transactional
+    public Stage1TradableQuotaOutcome syncAccountStage1Tradable(long playerId, int desiredCharTotal) {
+        if (playerId == 0 || desiredCharTotal < 0 || desiredCharTotal > STAGE1_TRADABLE_MATERIAL_LIFETIME_LIMIT) {
+            throw new IllegalArgumentException("非法阶段一可交易配额同步参数: playerId=" + playerId + " desired=" + desiredCharTotal);
+        }
+        String account = mapper.selectAccountByPlayerId(playerId);
+        if (account == null || account.isBlank()) {
+            return Stage1TradableQuotaOutcome.NOT_FOUND;
+        }
+        Integer usedObj = mapper.selectAccountStage1TradableUsedForUpdate(account);
+        if (usedObj == null) {
+            return Stage1TradableQuotaOutcome.NOT_FOUND;
+        }
+        int used = Math.min(Math.max(usedObj, 0), STAGE1_TRADABLE_MATERIAL_LIFETIME_LIMIT);
+        Integer prevObj = mapper.selectRoleTradableQuotaForUpdate(account, playerId);
+        int prevConfirmed = prevObj == null ? 0 : Math.min(Math.max(prevObj, 0), STAGE1_TRADABLE_MATERIAL_LIFETIME_LIMIT);
+        int confirmedChar = prevConfirmed;
+        int accountUsed = used;
+        if (desiredCharTotal > prevConfirmed && used < STAGE1_TRADABLE_MATERIAL_LIFETIME_LIMIT) {
+            int want = desiredCharTotal - prevConfirmed;
+            int remaining = STAGE1_TRADABLE_MATERIAL_LIFETIME_LIMIT - used;
+            int grant = Math.min(want, remaining);
+            if (grant > 0) {
+                confirmedChar = prevConfirmed + grant;
+                accountUsed = used + grant;
+                mapper.upsertRoleTradableQuota(account, playerId, confirmedChar, clockMs.getAsLong());
+                mapper.updateAccountStage1TradableUsed(account, accountUsed);
+            }
+        }
+        return new Stage1TradableQuotaOutcome(true, confirmedChar, accountUsed);
     }
 
     /** 查询该账号最近一次完成注销的回执时刻（Unix 毫秒，无记录返回 0）。 */

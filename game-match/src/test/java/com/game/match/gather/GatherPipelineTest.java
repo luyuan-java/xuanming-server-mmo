@@ -190,6 +190,13 @@ class GatherPipelineTest {
                 "切磋", eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE,
                 "帮会历练", eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);
 
+        Map<String, Boolean> expectedReplay = Map.of(
+                "PVE_SOLO", false,
+                "整队 PVE_TEAM", false,
+                "凑单 1V1", true,
+                "切磋", true,
+                "帮会历练", false);
+
         entries.forEach((entry, planOf) -> {
             GatherFixture fx = new GatherFixture();
 
@@ -198,6 +205,7 @@ class GatherPipelineTest {
             assertThat(result.ok()).as(entry).isTrue();
             CreateBattleRequest create = fx.battleA.creates.get(0);
             assertThat(create.getSpectateVisibility()).as(entry).isEqualTo(expected.get(entry));
+            assertThat(create.getRecordReplay()).as("%s：仅 PVP 冻结 record_replay=true", entry).isEqualTo(expectedReplay.get(entry));
             assertThat(fx.placements.writes).as("%s：建房前与成功后的两次落点写都抄同一份冻结值", entry).hasSize(2)
                     .allSatisfy(written -> assertThat(written.getSpectateVisibility()).isEqualTo(create.getSpectateVisibilityValue()));
             assertThat(fx.hooks.started).as("%s：交给开局钩子的也是它", entry).singleElement()

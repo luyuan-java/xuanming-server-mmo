@@ -118,6 +118,19 @@ public final class BagFeature implements SceneFeature {
                 entry.setMaxStack(spec.maxStackSize()).setEquipKind(spec.equipKind());
             }
             if (equipment != null) equipment.item(item, entry);
+            if (entry.hasEnhanceNext()
+                    && entry.getEnhanceNext().getMaterialConfigId() != 0
+                    && entry.getEnhanceNext().getMaterialCount() > 0) {
+                int matId = entry.getEnhanceNext().getMaterialConfigId();
+                long matCount = Integer.toUnsignedLong(entry.getEnhanceNext().getMaterialCount());
+                Bag inv = player.bags().bag(BagType.INVENTORY);
+                long tradableAvail = inv.plainTradableQuantity(matId);
+                long totalAvail = inv.plainQuantity(matId);
+                entry.getEnhanceNextBuilder().setTradableMaterialAvailable(tradableAvail);
+                if (!item.bound() && tradableAvail < matCount && totalAvail >= matCount) {
+                    entry.getEnhanceNextBuilder().setWillBindOnEnhance(true);
+                }
+            }
             info.addItems(entry);
         }
         BagLayoutInfo.Builder layout = BagLayoutInfo.newBuilder()

@@ -60,22 +60,31 @@ public final class ActivityBattleService {
     private final MatchIds ids;
     private final MatchMetrics metrics;
     private final Supplier<String> ticketIds;
+    private final java.util.function.LongSupplier clockMs;
     private com.game.match.global.GlobalMatchService global;
+    private com.game.match.ranked.RankedTables rankedTables;
     public ActivityBattleService withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
+    public ActivityBattleService withRankedTables(com.game.match.ranked.RankedTables rankedTables){this.rankedTables=rankedTables;return this;}
 
     public ActivityBattleService(MemberPrecheck precheck, TicketStore tickets, GatherLauncher gather, MatchIds ids, MatchMetrics metrics) {
-        this(precheck, tickets, gather, ids, metrics, () -> UUID.randomUUID().toString());
+        this(precheck, tickets, gather, ids, metrics, () -> UUID.randomUUID().toString(), System::currentTimeMillis);
     }
 
     /** @param ticketIds 票号来源（生产是随机 UUID；测试可注入确定的值） */
     ActivityBattleService(MemberPrecheck precheck, TicketStore tickets, GatherLauncher gather, MatchIds ids, MatchMetrics metrics,
                           Supplier<String> ticketIds) {
+        this(precheck, tickets, gather, ids, metrics, ticketIds, System::currentTimeMillis);
+    }
+
+    ActivityBattleService(MemberPrecheck precheck, TicketStore tickets, GatherLauncher gather, MatchIds ids, MatchMetrics metrics,
+                          Supplier<String> ticketIds, java.util.function.LongSupplier clockMs) {
         this.precheck = Objects.requireNonNull(precheck, "precheck");
         this.groupTickets = new GroupTickets(Objects.requireNonNull(tickets, "tickets"));
         this.gather = Objects.requireNonNull(gather, "gather");
         this.ids = Objects.requireNonNull(ids, "ids");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.ticketIds = Objects.requireNonNull(ticketIds, "ticketIds");
+        this.clockMs = Objects.requireNonNull(clockMs, "clockMs");
     }
 
     /**
@@ -97,6 +106,19 @@ public final class ActivityBattleService {
             log.error("[match] 活动开战参数非法：{} config={} members={} ctx=[{}]", invalid, Integer.toUnsignedString(configId), describe(members),
                     describe(request));
             return rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0);
+        }
+        boolean isFestivalBeast = context.getKind() == com.game.proto.eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST;
+        if (isFestivalBeast) {
+            if (rankedTables != null && rankedTables.bossTrialKind(configId)
+                    != com.game.match.ranked.RankedTables.BOSS_TRIAL_KIND_FESTIVAL_BEAST) {
+                return rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0);
+            }
+            var fb = context.getFestivalBeast();
+            long nowMs = clockMs.getAsLong();
+            if (Long.compareUnsigned(nowMs, fb.getEffectiveStartAtMs()) < 0
+                    || Long.compareUnsigned(nowMs, fb.getEffectiveEndAtMs()) >= 0) {
+                return rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_OUTSIDE_WINDOW, 0);
+            }
         }
 
         // 2. 逐成员只读预检
@@ -155,16 +177,21 @@ public final class ActivityBattleService {
         });
 
         // 7. 同步回 battle_id
+        long admittedAtMs = isFestivalBeast ? clockMs.getAsLong() : 0L;
         log.info("[match] 活动开战已受理 battle={} config={} members={} zones={} ctx=[{}]", Long.toUnsignedString(battleId),
                 Integer.toUnsignedString(configId), describe(members), checked.zones().values(), describe(request));
         metrics.activityBattle(kind, ActivityResult.STARTED);
-        return StartActivityBattleResponse.newBuilder().setBattleId(battleId).build();
+        return StartActivityBattleResponse.newBuilder().setBattleId(battleId).setAdmittedAtMs(admittedAtMs).build();
     }
 
     private StartActivityBattleResponse startGlobal(StartActivityBattleRequest request,Deadline deadline) {
         int kind=request.getActivityContext().getKindValue();
-        if(request.getRequestId()==0||request.getActivityContext().getLaunchRequestId()!=request.getRequestId()
-            ||ActivityRequestValidator.invalidReason(request)!=null)return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT,0);
+        if(ActivityRequestValidator.invalidReason(request)!=null)return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT,0);
+        if(request.getActivityContext().getKind()==com.game.proto.eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST){
+            return startGlobalFestivalBeast(request,kind,deadline);
+        }
+        if(request.getRequestId()==0||request.getActivityContext().getLaunchRequestId()!=request.getRequestId())
+            return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT,0);
         try{
             var key=com.game.match.global.pb.GlobalDirectIntentRow.newBuilder().setKind(2).setOwnerId(request.getActivityContext().getGuildId()).setRequestLow(request.getRequestId()).build();
             var old=global.store().direct(key);
@@ -178,10 +205,58 @@ public final class ActivityBattleService {
         }catch(RuntimeException e){log.warn("活动原意图提交结果尚未确认",e);return rejected(kind,ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL,0);}
     }
 
+    private StartActivityBattleResponse startGlobalFestivalBeast(StartActivityBattleRequest request, int kind, Deadline deadline) {
+        if (rankedTables != null && rankedTables.bossTrialKind(request.getBattleConfigId())
+                != com.game.match.ranked.RankedTables.BOSS_TRIAL_KIND_FESTIVAL_BEAST) {
+            return rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0);
+        }
+        try {
+            long playerId = request.getMemberPlayerIds(0);
+            var key = com.game.match.global.pb.GlobalDirectIntentRow.newBuilder()
+                    .setKind(5)
+                    .setOwnerId(playerId)
+                    .setRequestHigh(request.getRequestHigh())
+                    .setRequestLow(request.getRequestLow())
+                    .build();
+            var old = global.store().direct(key);
+            if (old != null) {
+                if (old.getCancelled()) return rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0);
+                if (!old.getPayload().equals(request.toByteString())) {
+                    return rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0);
+                }
+                var f = old.getBattleId() != 0
+                        ? global.store().formation(old.getBattleId())
+                        : global.reserveDirect(key, request.toByteString(),
+                        com.game.proto.match.MatchMode.MATCH_MODE_PVE_SOLO_VALUE,
+                        request.getBattleConfigId(), request.getMemberPlayerIdsList(),
+                        Map.of(), 0, request.getActivityContext());
+                global.launchCommitted(f);
+                return globalReply(f);
+            }
+            var checked = precheck.check(request.getMemberPlayerIdsList(), deadline);
+            if (!checked.passed()) return rejectedPrecheck(kind, checked);
+            var f = global.reserveDirect(key, request.toByteString(),
+                    com.game.proto.match.MatchMode.MATCH_MODE_PVE_SOLO_VALUE,
+                    request.getBattleConfigId(), request.getMemberPlayerIdsList(),
+                    Map.of(), 0, request.getActivityContext());
+            global.launchCommitted(f);
+            return globalReply(f);
+        } catch (com.game.match.global.GlobalMatchStore.OutsideActivityWindowException outside) {
+            return rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_OUTSIDE_WINDOW, 0);
+        } catch (RuntimeException e) {
+            log.warn("瑞兽迎春原意图提交结果尚未确认", e);
+            return rejected(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0);
+        }
+    }
+
     private static StartActivityBattleResponse globalReply(com.game.match.global.pb.GlobalFormationRow formation) {
         if(formation==null||formation.getBattleId()==0||formation.getState()<1||formation.getState()>5)
             throw new IllegalStateException("活动成局原件或状态缺失");
-        return StartActivityBattleResponse.newBuilder().setBattleId(formation.getBattleId()).setFormationState(formation.getState()).build();
+        return StartActivityBattleResponse.newBuilder()
+                .setBattleId(formation.getBattleId())
+                .setFormationState(formation.getState())
+                .setAdmittedAtMs(formation.getCreatedMs())
+                .build();
     }
 
     public com.game.proto.match.CancelActivityBattleResponse cancel(com.game.proto.match.CancelActivityBattleRequest request,Deadline d) {

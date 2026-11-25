@@ -59,6 +59,59 @@ message PlayerState {
   PlayerTrialJournalState trial_journal = 19;
   // 轻量化手艺熟练度、未学技能书架、永久解锁技能与宗师原子代打配置（同事务围栏提交）。
   PlayerCraftState craft = 20;
+  // 瑞兽迎春限时活动期次胜场、永久待领资格、终身领取回执与在途开局恢复状态（同事务围栏提交）。
+  PlayerFestivalBeastState festival_beast = 21;
+}
+
+message FestivalBeastPeriodProgressState {
+  uint32 activity_instance_id = 1;
+  uint32 wins = 2;
+  uint32 required_wins = 3;
+  uint64 last_win_at_ms = 4;
+  string reward_identity = 5;
+}
+
+message FestivalBeastPermanentEligibilityState {
+  string reward_identity = 1;
+  uint32 reward_definition_version = 2;
+  uint32 reward_pet_table_id = 3;
+  uint32 source_activity_instance_id = 4;
+  uint64 earned_at_ms = 5;
+  uint64 earned_battle_id = 6;
+}
+
+message FestivalBeastClaimReceiptState {
+  string reward_identity = 1;
+  string request_id = 2;
+  uint32 reward_definition_version = 3;
+  uint32 reward_pet_table_id = 4;
+  uint64 pet_id = 5;
+  uint64 claimed_at_ms = 6;
+}
+
+message FestivalBeastPendingLaunchState {
+  string request_id = 1;
+  uint32 activity_instance_id = 2;
+  uint32 config_revision = 3;
+  string reward_identity = 4;
+  uint64 locked_pet_id = 5;
+  uint32 locked_owner_level = 6;
+  uint32 matched_tier_id = 7;
+  uint32 battle_config_id = 8;
+  uint32 launch_state = 9;
+  uint64 battle_id = 10;
+  uint64 requested_at_ms = 11;
+  uint64 admitted_at_ms = 12;
+  uint32 reject_tip_id = 13;
+  string reject_reason = 14;
+}
+
+message PlayerFestivalBeastState {
+  uint64 state_revision = 1;
+  repeated FestivalBeastPeriodProgressState period_progress = 2;
+  repeated FestivalBeastPermanentEligibilityState eligibilities = 3;
+  repeated FestivalBeastClaimReceiptState claim_receipts = 4;
+  FestivalBeastPendingLaunchState pending_launch = 5;
 }
 
 message PlayerTrialJournalState {
@@ -157,6 +210,14 @@ message BattleResultEntryState {
   bool trial_new_coop_best = 24;
   uint32 material_tradable_units_added = 25;
   bool material_pvp_loss_ineligible = 26;
+  uint32 festival_activity_instance_id = 27;
+  string festival_reward_identity = 28;
+  uint32 festival_wins_before = 29;
+  uint32 festival_wins_after = 30;
+  uint32 festival_required_wins = 31;
+  bool festival_newly_eligible = 32;
+  uint64 material_available_units_after = 33;
+  uint32 material_earnable_remaining_after = 34;
 }
 
 message BattleResultCurrencyState {
@@ -219,6 +280,7 @@ message EquipmentMaterialRewardLedgerState {
   uint64 week_starts_at_ms = 8;
   uint32 earned_this_week = 9;
   bool migrated_to_v2 = 10;
+  uint32 stage1_tradable_confirmed = 11;
 }
 
 message PlayerMysteryMerchantState {
@@ -292,8 +354,22 @@ message AppearanceRequestReceipt {
   uint64 seq = 4;
 }
 
+message SkillLoadoutSchemeState {
+  uint32 scheme_id = 1;
+  uint32 role_tag = 2;
+  repeated uint32 passive_skill_ids = 3;
+  repeated uint32 pursuit_skill_ids = 4;
+  repeated uint32 opening_skill_ids = 5;
+}
+
 message PlayerSkillBookState {
   repeated PlayerSkillEntry entries = 1;
+  uint32 active_loadout_scheme_id = 2;
+  repeated SkillLoadoutSchemeState loadout_schemes = 3;
+  uint64 loadout_state_version = 4;
+  string loadout_last_request_id = 5;
+  uint64 loadout_last_base_version = 6;
+  uint32 loadout_last_scheme_id = 7;
 }
 
 message PlayerSkillEntry {
@@ -390,6 +466,12 @@ message PetState {
   bool starter_pet_granted = 7;
 }
 
+message PetEntryPresetState {
+  uint32 slot_id = 1;
+  uint32 tag = 2;
+  map<uint32, uint32> allocated = 3;
+}
+
 // 一只宝宝（mmorpg PetInstance 的 Java 自有对应）。
 message PetEntry {
   // 全服唯一的雪花号（场景节点在全服号段租约上发，与物品同一个号源）。
@@ -421,6 +503,13 @@ message PetEntry {
   uint32 entry_last_config_version = 16;
   map<uint32, uint32> entry_last_target = 17;
   uint32 cultivation_tier = 18;
+  uint32 active_entry_preset_slot = 19;
+  repeated PetEntryPresetState entry_presets = 20;
+  uint64 tier_last_request_id = 21;
+  uint32 tier_last_expected_tier = 22;
+  uint32 tier_last_result_tier = 23;
+  uint32 entry_last_preset_slot = 24;
+  uint32 entry_last_preset_tag = 25;
 }
 
 // 当前气血 / 法力。health == 0 = 阵亡：进场按上限回满（基础复活）；活着的进场只按新上限往下夹，不补。

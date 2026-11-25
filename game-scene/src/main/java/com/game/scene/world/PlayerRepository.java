@@ -107,6 +107,20 @@ public interface PlayerRepository {
                 com.game.player.store.PlayerStore.RenameStatus.FENCED, "", 0L, 0L));
     }
 
+    /** 是否启用账号级阶段一可交易 60 份额度同步（生产存储与显式开启同步的测试仓储返回 true）。 */
+    default boolean supportsAccountStage1TradableSync() {
+        return false;
+    }
+
+    /**
+     * 异步同步并占坑账号级阶段一 60 份可交易额度（在存储线程执行，结果投递回场景逻辑线程；
+     * 瞬时故障时回调传 {@code null} 供场景重试）。
+     */
+    default void syncAccountStage1Tradable(long playerId, int desiredCharTotal,
+                                           Consumer<com.game.player.store.PlayerStore.Stage1TradableQuotaOutcome> onDone) {
+        onDone.accept(com.game.player.store.PlayerStore.Stage1TradableQuotaOutcome.NOT_FOUND);
+    }
+
     /**
      * 交出归属：带围栏写回冻结快照（{@code frozen.ownerEpoch()} = 本实例持有的 E），同一事务里把 epoch 加一到 E+1、给新租约。
      * 只有仍由 E 持有、未释放、且剩余租约不短于安全边际时才提交。{@code mode} 决定提交时 E+1 的释放标记：

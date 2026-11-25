@@ -1,6 +1,7 @@
 package com.game.scene.player;
 
 import com.game.player.store.state.PetEntry;
+import com.game.player.store.state.PetEntryPresetState;
 import com.game.player.store.state.PetState;
 import com.google.protobuf.UnknownFieldSet;
 import java.util.ArrayList;
@@ -36,22 +37,86 @@ public final class PlayerPets {
         public Map<Integer, Integer> skillRanks() { return Collections.unmodifiableMap(skillRanks); }
         public void setSkillRank(int id, int rank) { skillRanks.put(id, rank); }
         private final Map<Integer, Integer> entryLastTarget = new TreeMap<>(Integer::compareUnsigned);
-        private long entryStateVersion, entryLastBaseVersion;
-        private int entryLastConfigVersion, cultivationTier;
+        private final Map<Integer, PetEntryPresetState> entryPresets = new TreeMap<>(Integer::compareUnsigned);
+        private long entryStateVersion, entryLastBaseVersion, tierLastRequestId;
+        private int entryLastConfigVersion, cultivationTier, activeEntryPresetSlot,
+                tierLastExpectedTier, tierLastResultTier, entryLastPresetSlot, entryLastPresetTag;
         private String entryLastRequestId = "";
         public Map<Integer,Integer> entryAllocated() { return Collections.unmodifiableMap(entryAllocated); }
         public long entryStateVersion() { return entryStateVersion == 0 ? 1 : entryStateVersion; }
+        public long rawEntryStateVersion() { return entryStateVersion; }
         public String entryLastRequestId() { return entryLastRequestId; }
         public long entryLastBaseVersion() { return entryLastBaseVersion; }
         public int entryLastConfigVersion() { return entryLastConfigVersion; }
         public Map<Integer,Integer> entryLastTarget() { return Collections.unmodifiableMap(entryLastTarget); }
         public int cultivationTier() { return cultivationTier; }
         public void setCultivationTier(int value) { cultivationTier = value; }
+        public int activeEntryPresetSlot() { return activeEntryPresetSlot; }
+        public PetEntryPresetState entryPreset(int slotId) { return entryPresets.get(slotId); }
+        public Map<Integer, PetEntryPresetState> entryPresets() { return Collections.unmodifiableMap(entryPresets); }
+        public long tierLastRequestId() { return tierLastRequestId; }
+        public int tierLastExpectedTier() { return tierLastExpectedTier; }
+        public int tierLastResultTier() { return tierLastResultTier; }
+        public int entryLastPresetSlot() { return entryLastPresetSlot; }
+        public int entryLastPresetTag() { return entryLastPresetTag; }
+
         public void commitEntries(Map<Integer,Integer> values, long version, String requestId, long baseVersion,
                                   int configVersion, Map<Integer,Integer> target) {
             entryAllocated.clear(); entryAllocated.putAll(values); entryStateVersion = version;
             entryLastRequestId = requestId; entryLastBaseVersion = baseVersion; entryLastConfigVersion = configVersion;
             entryLastTarget.clear(); entryLastTarget.putAll(target);
+            entryLastPresetSlot = 0; entryLastPresetTag = 0;
+        }
+
+        public void commitEntriesWithPreset(int activeSlot, Map<Integer,Integer> values, long version, String requestId,
+                                            long baseVersion, int configVersion, Map<Integer,Integer> target) {
+            activeEntryPresetSlot = activeSlot;
+            commitEntries(values, version, requestId, baseVersion, configVersion, target);
+            syncPresetFromAllocated(activeSlot);
+        }
+
+        public void commitEntryPresetSwitch(int previousSlot, int targetSlot, int requestedTag, int keepTagSentinel,
+                                            long version, String requestId, long baseVersion, int configVersion) {
+            syncPresetFromAllocated(previousSlot);
+            PetEntryPresetState existing = entryPresets.get(targetSlot);
+            int nextTag = requestedTag != keepTagSentinel ? requestedTag : (existing == null ? 0 : existing.getTag());
+            PetEntryPresetState updated = (existing == null
+                    ? PetEntryPresetState.newBuilder().setSlotId(targetSlot)
+                    : existing.toBuilder()).setTag(nextTag).build();
+            entryPresets.put(targetSlot, updated);
+            activeEntryPresetSlot = targetSlot;
+            entryAllocated.clear();
+            updated.getAllocatedMap().forEach((id, pts) -> {
+                if (pts != 0) entryAllocated.put(id, pts);
+            });
+            entryStateVersion = version;
+            entryLastRequestId = requestId;
+            entryLastBaseVersion = baseVersion;
+            entryLastConfigVersion = configVersion;
+            entryLastPresetSlot = targetSlot;
+            entryLastPresetTag = requestedTag;
+            entryLastTarget.clear();
+        }
+
+        public void commitTierAscension(int newTier, long requestId, int expectedTier) {
+            cultivationTier = newTier;
+            if (entryStateVersion != -1L) {
+                entryStateVersion = entryStateVersion() + 1;
+            }
+            tierLastRequestId = requestId;
+            tierLastExpectedTier = expectedTier;
+            tierLastResultTier = newTier;
+        }
+
+        private void syncPresetFromAllocated(int slotId) {
+            PetEntryPresetState existing = entryPresets.get(slotId);
+            PetEntryPresetState.Builder builder = existing == null
+                    ? PetEntryPresetState.newBuilder().setSlotId(slotId)
+                    : existing.toBuilder().clearAllocated();
+            entryAllocated.forEach((id, pts) -> {
+                if (pts != 0) builder.putAllocated(id, pts);
+            });
+            entryPresets.put(slotId, builder.build());
         }
 
 
@@ -174,6 +239,13 @@ public final class PlayerPets {
                     .setEntryLastRequestId(entryLastRequestId).setEntryLastBaseVersion(entryLastBaseVersion)
                     .setEntryLastConfigVersion(entryLastConfigVersion).putAllEntryLastTarget(entryLastTarget)
                     .setCultivationTier(cultivationTier).putAllSkillRanks(skillRanks)
+                    .setActiveEntryPresetSlot(activeEntryPresetSlot)
+                    .addAllEntryPresets(entryPresets.values())
+                    .setTierLastRequestId(tierLastRequestId)
+                    .setTierLastExpectedTier(tierLastExpectedTier)
+                    .setTierLastResultTier(tierLastResultTier)
+                    .setEntryLastPresetSlot(entryLastPresetSlot)
+                    .setEntryLastPresetTag(entryLastPresetTag)
                     .setUnknownFields(unknownFields);
             allocated.forEach((dimension, points) -> entry.putAllocated(dimension, (int) (long) points));
             aptitude.forEach((dimension, value) -> entry.putAptitude(dimension, (int) (long) value));
@@ -196,6 +268,17 @@ public final class PlayerPets {
                     entry.getEntryLastBaseVersion(), entry.getEntryLastConfigVersion(), entry.getEntryLastTargetMap());
             restored.setCultivationTier(entry.getCultivationTier());
             restored.skillRanks.putAll(entry.getSkillRanksMap());
+            restored.activeEntryPresetSlot = entry.getActiveEntryPresetSlot();
+            for (PetEntryPresetState preset : entry.getEntryPresetsList()) {
+                if (preset.getSlotId() != 0) {
+                    restored.entryPresets.putIfAbsent(preset.getSlotId(), preset);
+                }
+            }
+            restored.tierLastRequestId = entry.getTierLastRequestId();
+            restored.tierLastExpectedTier = entry.getTierLastExpectedTier();
+            restored.tierLastResultTier = entry.getTierLastResultTier();
+            restored.entryLastPresetSlot = entry.getEntryLastPresetSlot();
+            restored.entryLastPresetTag = entry.getEntryLastPresetTag();
             return restored;
         }
 

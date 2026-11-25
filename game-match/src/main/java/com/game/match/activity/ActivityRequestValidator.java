@@ -52,12 +52,49 @@ public final class ActivityRequestValidator {
         if (kind == null || kind == eBattleActivityKind.BATTLE_ACTIVITY_KIND_NONE) {
             return "活动类型为 NONE 或未知";
         }
-        if (context.getGuildId() == 0 || context.getActivityId() == 0 || context.getPeriodKey() == 0 || context.getGuildPeriodKey() == 0) {
-            return "活动上下文字段为 0";
-        }
         if (context.getInitiatorPlayerId() != members.get(0)) {
             return "发起人不在名单首位";
         }
-        return null;
+        return switch (kind) {
+            case BATTLE_ACTIVITY_KIND_GUILD_TRIAL -> {
+                if (context.getGuildId() == 0 || context.getActivityId() == 0
+                        || context.getPeriodKey() == 0 || context.getGuildPeriodKey() == 0) {
+                    yield "活动上下文字段为 0";
+                }
+                yield null;
+            }
+            case BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST -> {
+                if (members.size() != 1) {
+                    yield "瑞兽迎春仅允许单人携宠开局";
+                }
+                if (request.getRequestHigh() == 0 && request.getRequestLow() == 0) {
+                    yield "瑞兽迎春请求 UUID 为空";
+                }
+                if (!context.hasFestivalBeast()) {
+                    yield "缺少瑞兽迎春活动上下文";
+                }
+                var fb = context.getFestivalBeast();
+                if (fb.getActivityInstanceId() == 0
+                        || fb.getRewardIdentity().isEmpty()
+                        || fb.getRequiredWins() == 0
+                        || fb.getLockedPetId() == 0
+                        || fb.getTierId() == 0
+                        || fb.getBossHealth() == 0
+                        || fb.getRoundLimit() == 0
+                        || fb.getCycleRounds() == 0
+                        || fb.getFirstHeavyRound() == 0
+                        || Integer.compareUnsigned(fb.getFirstHeavyRound(), fb.getCycleRounds()) > 0
+                        || fb.getTelegraphLeadRounds() == 0
+                        || Integer.compareUnsigned(fb.getTelegraphLeadRounds(), fb.getFirstHeavyRound()) >= 0
+                        || fb.getHeavyDamagePercent() == 0
+                        || fb.getEffectiveStartAtMs() == 0
+                        || Long.compareUnsigned(fb.getEffectiveEndAtMs(), fb.getEffectiveStartAtMs()) <= 0
+                        || fb.getClientRequestId().isEmpty()) {
+                    yield "瑞兽迎春上下文字段非法";
+                }
+                yield null;
+            }
+            default -> "不支持的活动类型";
+        };
     }
 }

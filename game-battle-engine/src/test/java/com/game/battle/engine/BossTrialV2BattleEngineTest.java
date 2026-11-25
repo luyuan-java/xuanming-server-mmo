@@ -421,4 +421,57 @@ class BossTrialV2BattleEngineTest {
         assertThat(r2.getState().getBossMomentumStacks()).isZero();
         assertThat(eng.findUnitForTest(bossId).health()).isLessThan(bossHpBefore);
     }
+
+    @Test
+    void 灵障碎盾破绽与幽毒群体御毒化劲破绽() {
+        // 1. 灵障首领（Dungeon 105，kind=3）：R1 蓄盾 -> R2 单点击破护盾立即触发 +35% 破绽与崩势破盾事件
+        CreateBattleRequest barrierReq = CreateBattleRequest.newBuilder()
+                .setBattleId(9851L)
+                .setBattleConfigId(105)
+                .setMatchMode(MatchMode.MATCH_MODE_PVE_SOLO_VALUE)
+                .setSeed(6001L)
+                .setTrialContext(TrialBattleContext.newBuilder().setJournalEntryId(201).setTrialRuleVersion(1).build())
+                .addPlayers(player(5101L, 120_000L, 950L, 6000L, 200L))
+                .build();
+        TurnBattleEngine barrierEng = ((BattleStart.Started) TurnBattleEngine.start(barrierReq, data)).engine();
+        long barrierBossId = findMonsterId(barrierEng.buildStateSnapshot(), 104, true);
+        barrierEng.submitAction(5101L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        barrierEng.resolveCurrentRound();
+        barrierEng.submitAction(5101L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_ATTACK).setTargetId(barrierBossId).build());
+        TurnResultS2C br2 = barrierEng.resolveCurrentRound();
+        assertThat(br2.getState().getBossExposedPct()).isEqualTo(BattleConstants.BOSS_EXPOSED_FULL_PCT);
+        assertThat(br2.getEventsList()).anyMatch(e -> e.getEventType() == eBattleEventType.BATTLE_EVENT_BOSS_MECHANIC
+                && e.getMechanicKind() == BattleConstants.BOSS_MECHANIC_STANCE_BREAK
+                && e.getValue() == BattleConstants.BOSS_EXPOSED_FULL_PCT);
+        assertThat(barrierEng.buildSettlement(5101L).getTrialFacts().getStanceBreakCount()).isGreaterThanOrEqualTo(1);
+
+        // 2. 幽毒首领（Dungeon 107，kind=4）：2 人局 R2 玄毒冲击 1/2 防御 +20% 轻破绽、全员防御 +35% 完整破绽
+        CreateBattleRequest venomHalfReq = CreateBattleRequest.newBuilder()
+                .setBattleId(9852L)
+                .setBattleConfigId(107)
+                .setMatchMode(MatchMode.MATCH_MODE_PVE_TEAM_VALUE)
+                .setSeed(6002L)
+                .addPlayers(player(5201L, 120_000L, 950L, 200L, 200L))
+                .addPlayers(player(5202L, 120_000L, 940L, 200L, 200L))
+                .build();
+        CreateBattleRequest venomFullReq = venomHalfReq.toBuilder().setBattleId(9853L).build();
+        TurnBattleEngine venomHalf = ((BattleStart.Started) TurnBattleEngine.start(venomHalfReq, data)).engine();
+        TurnBattleEngine venomFull = ((BattleStart.Started) TurnBattleEngine.start(venomFullReq, data)).engine();
+        for (long pid : List.of(5201L, 5202L)) {
+            venomHalf.submitAction(pid, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+            venomFull.submitAction(pid, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        }
+        venomHalf.resolveCurrentRound();
+        venomFull.resolveCurrentRound();
+        venomHalf.submitAction(5201L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        venomHalf.submitAction(5202L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_ATTACK).build());
+        TurnResultS2C vrHalf = venomHalf.resolveCurrentRound();
+        assertThat(vrHalf.getState().getBossExposedPct()).isEqualTo(BattleConstants.BOSS_EXPOSED_PARTIAL_PCT);
+
+        venomFull.submitAction(5201L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        venomFull.submitAction(5202L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        TurnResultS2C vrFull = venomFull.resolveCurrentRound();
+        assertThat(vrFull.getState().getBossExposedPct()).isEqualTo(BattleConstants.BOSS_EXPOSED_FULL_PCT);
+    }
 }

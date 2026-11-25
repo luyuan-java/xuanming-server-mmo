@@ -523,6 +523,8 @@ public final class SkillCraftService {
         if (request.getPetId() == 0L) {
             if (player.learnedSkills().rank(skillId) == 0) {
                 player.learnedSkills().setRank(skillId, 1);
+                com.game.scene.skill.SkillLoadoutRules.tryAutoSlotNewlyLearned(
+                        player.skillCatalog(), player.learnedSkills(), row);
             }
             if (ClassSkillCatalog.passive(row)) {
                 attributes.skillsChanged(player);

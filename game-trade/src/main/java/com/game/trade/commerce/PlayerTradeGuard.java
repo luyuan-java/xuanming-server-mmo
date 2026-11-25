@@ -105,6 +105,18 @@ public final class PlayerTradeGuard {
         this.dailyOut = dailyOut;
     }
 
+    Policy policy() {
+        return policy;
+    }
+
+    ReferencePrice.Reader prices() {
+        return prices;
+    }
+
+    DailyPlayerTradeTracker dailyOut() {
+        return dailyOut;
+    }
+
     /**
      * 校验当面交易是否符合已启用的防骗策略；Mode 为空时不介入，启用方案 A/B 或遇到未知模式时严格 fail-closed。
      */

@@ -16,8 +16,10 @@ import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.BattleSurrenderVoteState;
 import com.game.proto.CreateBattleRequest;
+import com.game.proto.FestivalBeastBattleContext;
 import com.game.proto.TurnResultS2C;
 import com.game.proto.eBattleActionType;
+import com.game.proto.eBattleActivityKind;
 import com.game.proto.eBattleActorType;
 import com.game.proto.eBattleEventType;
 import com.game.proto.eBattleHitKind;
@@ -189,6 +191,40 @@ public final class TurnBattleEngine {
                 engine.maxRounds = BattleConstants.POLARITY_DEFAULT_MAX_ROUNDS;
             }
         }
+        // 瑞兽迎春硬性准入门禁：boss_trial_kind=7 必须且仅能携带合法冻结的 FESTIVAL_BEAST 上下文、单人携单只锁定出战宝宝。
+        boolean hasFestivalActivity = request.hasActivityContext()
+                && request.getActivityContext().getKind() == eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST;
+        if (bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_FESTIVAL_BEAST || hasFestivalActivity) {
+            if (bossTrialKind != BattleConstants.BOSS_TRIAL_KIND_FESTIVAL_BEAST
+                    || !hasFestivalActivity
+                    || request.getMatchMode() != BattleConstants.MATCH_MODE_PVE_SOLO
+                    || request.getPlayersCount() != 1
+                    || request.getPlayers(0).getPetsCount() != 1
+                    || !request.getActivityContext().hasFestivalBeast()) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "瑞兽迎春开局缺少合法单人携宠上下文: battle_id=" + Long.toUnsignedString(request.getBattleId()));
+            }
+            FestivalBeastBattleContext fb = request.getActivityContext().getFestivalBeast();
+            if (fb.getActivityInstanceId() == 0
+                    || fb.getRewardIdentity().isEmpty()
+                    || fb.getRequiredWins() == 0
+                    || fb.getLockedPetId() == 0
+                    || request.getPlayers(0).getPets(0).getPetId() != fb.getLockedPetId()
+                    || fb.getBossHealth() == 0
+                    || fb.getRoundLimit() == 0
+                    || fb.getCycleRounds() == 0
+                    || fb.getFirstHeavyRound() == 0
+                    || Integer.compareUnsigned(fb.getFirstHeavyRound(), fb.getCycleRounds()) > 0
+                    || fb.getTelegraphLeadRounds() == 0
+                    || Integer.compareUnsigned(fb.getTelegraphLeadRounds(), fb.getFirstHeavyRound()) >= 0
+                    || fb.getHeavyDamagePercent() == 0) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "瑞兽迎春活动参数或锁定宝宝非法: battle_id=" + Long.toUnsignedString(request.getBattleId()));
+            }
+            engine.maxRounds = fb.getRoundLimit();
+            engine.ctx.encounter.configureFestivalBeast(fb);
+        }
+
         engine.ctx.setMaxRounds(engine.maxRounds);
         engine.ctx.encounter.configure(bossTrialKind, battleDifficulty);
         if (request.hasTrialContext()) {
@@ -206,7 +242,10 @@ public final class TurnBattleEngine {
             return rejected;
         }
         if (engine.ctx.isPve()) {
-            engine.initMonsters();
+            rejected = engine.initMonsters();
+            if (rejected != null) {
+                return rejected;
+            }
         }
 
         // 两侧都必须有单位（engine.cpp:96-104）：team 0 记 A 方，其余一律记 B 方
@@ -294,14 +333,24 @@ public final class TurnBattleEngine {
                 buffs.reserveSnapshotBuffId(buff.getBuffId());
             }
             int activeSeasonId = snapshot.getActiveSeasonId();
-            // 职业重数按当前职业、等级与当前活跃赛季重新夹取；被动也保留有效重数，供治疗被动使用。
-            snapshot.getSkillRanksMap().forEach((skillId, storedRank) -> ctx.data().skill(skillId).ifPresent(skill -> {
-                if (!SeasonRules.isSkillActiveInSeason(skill.getSeasonId(), activeSeasonId)) return;
-                if (skill.getBattleModel() == 1 ? !ConfiguredBattle.subject(actor,skill)
-                        : !BattleRules.isClassSkill(skill) || skill.getClassId() != actor.getClassId()) return;
+            // 职业重数按当前职业、等级与当前活跃赛季重新夹取；同 exclusive_group 互斥战法按 skill_table_id 升序确定性保留首条。
+            List<Map.Entry<Integer, Integer>> sortedRanks = new ArrayList<>(snapshot.getSkillRanksMap().entrySet());
+            sortedRanks.sort(Map.Entry.comparingByKey(Integer::compareUnsigned));
+            TreeSet<Integer> occupiedExclusiveGroups = new TreeSet<>(Integer::compareUnsigned);
+            for (Map.Entry<Integer, Integer> entry : sortedRanks) {
+                int skillId = entry.getKey();
+                int storedRank = entry.getValue();
+                Optional<SkillTable> skillOpt = ctx.data().skill(skillId);
+                if (skillOpt.isEmpty()) continue;
+                SkillTable skill = skillOpt.get();
+                if (!SeasonRules.isSkillActiveInSeason(skill.getSeasonId(), activeSeasonId)) continue;
+                if (skill.getBattleModel() == 1 ? !ConfiguredBattle.subject(actor, skill)
+                        : !BattleRules.isClassSkill(skill) || skill.getClassId() != actor.getClassId()) continue;
                 int rank = ClassSkillRules.effectiveRank(storedRank, actor.getLevel(), skill.getUnlockLevel(), skill.getMaxRank());
-                if (rank != 0) actor.putSkillRanks(skillId, rank);
-            }));
+                if (rank == 0) continue;
+                if (skill.getExclusiveGroup() != 0 && !occupiedExclusiveGroups.add(skill.getExclusiveGroup())) continue;
+                actor.putSkillRanks(skillId, rank);
+            }
             // 技能只收回合制可施放、赛季归属合法且已具有有效职业重数的；外来快照不能授予未学或过季技能。
             for (int skillTableId : snapshot.getSkillTableIdsList()) {
                 Optional<SkillTable> skillRow = ctx.data().skill(skillTableId);
@@ -421,7 +470,7 @@ public final class TurnBattleEngine {
      * uint32）；普通 PVE 按进攻方玩家数循环生成完整怪物组，最多十只，宝宝不计人数。
      * 活动对局保留固定组；空组仍是每个玩家快照一只兜底怪（id 0）。
      */
-    private void initMonsters() {
+    private BattleStart.Rejected initMonsters() {
         int referenceLevel = 1;
         int attackerCount = 0;
         for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
@@ -470,6 +519,39 @@ public final class TurnBattleEngine {
             }
         }
         long hpScale = isBossTrialOrRescue ? Math.max(1, attackerCount) : 1L;
+        if (isFestivalBeastBattle()) {
+            if (monsterIds.size() != 1) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "瑞兽迎春副本怪物数必须恰好为 1: battle_config_id="
+                                + Integer.toUnsignedString(request.getBattleConfigId()));
+            }
+            appendMonsterActor(monsterIds.getFirst(), 0, referenceLevel);
+            BattleUnit spawned = ctx.units().getLast();
+            FestivalBeastBattleContext fb = request.getActivityContext().getFestivalBeast();
+            spawned.state().setIsBoss(true);
+            if (!fb.getBossName().isEmpty()) {
+                spawned.state().setName(fb.getBossName());
+            }
+            spawned.state().setMaxHealth(fb.getBossHealth());
+            spawned.state().getAttributesBuilder()
+                    .setHealth(fb.getBossHealth())
+                    .setStrength(0)
+                    .setArmor(0)
+                    .setResistance(fb.getBossResistance())
+                    .setSpeed(fb.getBossSpeed())
+                    .setCritchance(0);
+            spawned.state()
+                    .setPhysicalAttack(fb.getBossPhysicalAttack())
+                    .setMagicAttack(0)
+                    .setDefense(fb.getBossDefense())
+                    .clearCombat()
+                    .clearEquipmentEffects()
+                    .clearPetCultivation()
+                    .clearSkillTableIds()
+                    .clearRuntimeSkills()
+                    .setCapturePetTableId(0);
+            return null;
+        }
         int monsterIndex = 0;
         for (int monsterTableId : monsterIds) {
             appendMonsterActor(monsterTableId, monsterIndex, referenceLevel);
@@ -496,6 +578,7 @@ public final class TurnBattleEngine {
             }
             monsterIndex++;
         }
+        return null;
     }
 
     /**
@@ -580,6 +663,11 @@ public final class TurnBattleEngine {
     /** 是否为首领试炼对局（boss_trial_kind 1..4 或 8 双卫同阵；用于 18 秒行动窗口与确定退出）。 */
     public boolean isBossTrialBattle() {
         return ctx.encounter.isBossTrial();
+    }
+
+    /** 是否为瑞兽迎春单人携宠限时活动对局（boss_trial_kind == 7 且冻结合法 FESTIVAL_BEAST 上下文）。 */
+    public boolean isFestivalBeastBattle() {
+        return ctx.encounter.isFestivalBeast();
     }
 
     public int maxRounds() {
@@ -907,6 +995,7 @@ public final class TurnBattleEngine {
         ctx.events().startRound(result);
         List<Long> order = buildTurnOrder();
         lastActionOrder = order;
+        ctx.snapshotRoundStartSpeeds();
 
         for (long actorId : order) {
             if (ctx.encounter.isSlowPhaseActor(actorId)) {
@@ -1133,10 +1222,13 @@ public final class TurnBattleEngine {
                             .setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
                     continue;
                 }
+                BattleAction fallback = ctx.configured.isPhysicalForbidden(unit)
+                        ? BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build()
+                        : DEFAULT_ACTION;
                 BattleAction modern = unit.isPet() || (unit.isPlayer() && unit.isAuto()) ? ctx.configured.auto(unit,checks).orElse(null) : null;
                 BattleAction action = modern != null ? modern : unit.isPet() ? defaultPetAction(unit)
-                        : unit.isPlayer() && unit.isAuto() ? autoClassSkills.select(unit).orElse(DEFAULT_ACTION)
-                        : DEFAULT_ACTION;
+                        : unit.isPlayer() && unit.isAuto() ? autoClassSkills.select(unit).orElse(fallback)
+                        : fallback;
                 pendingActions.put(unit.actorId(), action);
             }
         }
@@ -1204,13 +1296,21 @@ public final class TurnBattleEngine {
      * 否则按 action_type 的 int 值分派，未知类型什么也不做。
      */
     private void executeAction(BattleUnit actor, BattleAction action) {
+        if (ctx.configured.executePreparedCastIfReady(actor)) {
+            return;
+        }
         if (ctx.configured.control(actor,action,checks)) return;
         if (ctx.actorHasBuffOfType(actor, BattleConstants.BUFF_TYPE_STUN)
                 || ctx.actorHasBuffOfType(actor, BattleConstants.BUFF_TYPE_FREEZE)) {
             return;
         }
         switch (action.getActionTypeValue()) {
-            case eBattleActionType.BATTLE_ACTION_ATTACK_VALUE -> executeAttack(actor, action.getTargetId());
+            case eBattleActionType.BATTLE_ACTION_ATTACK_VALUE -> {
+                if (ctx.configured.isPhysicalForbidden(actor)) {
+                    break;
+                }
+                executeAttack(actor, action.getTargetId());
+            }
             case eBattleActionType.BATTLE_ACTION_SKILL_VALUE -> executeSkill(actor, action);
             case eBattleActionType.BATTLE_ACTION_DEFEND_VALUE -> executeDefend(actor);
             case eBattleActionType.BATTLE_ACTION_ITEM_VALUE -> ledger.executeItem(actor, action, checks);
@@ -1262,6 +1362,10 @@ public final class TurnBattleEngine {
             resolveBasicAttackHit(actor, target, eBattleHitKind.BATTLE_HIT_COMBO);
         }
         ctx.events().setHitIndex(0);
+        // 单次物理攻击标记（S01 截锋令 / S09 授锋战印）覆盖整次普攻行动（含连击），行动末一次性消耗。
+        if (actor.isActive()) {
+            ctx.configured.consumeOneShotAttackModifiers(actor, CombatDamageRules.PHYSICAL_DAMAGE);
+        }
         tryCounterAttack(actor, target);
     }
 
@@ -1335,7 +1439,9 @@ public final class TurnBattleEngine {
     }
 
     private void tryCounterAttack(BattleUnit attacker, BattleUnit defender) {
-        if (!attacker.isActive() || !defender.isActive() || checks.checkState(defender) != ActionChecks.SUCCESS
+        if (!attacker.isActive() || !defender.isActive()
+                || checks.checkState(defender) != ActionChecks.SUCCESS
+                || ctx.configured.isPhysicalForbidden(defender)
                 || !ctx.rng().rollPercent(defender.combat().getCounterRate())) return;
         ctx.events().beginGroup();
         ctx.events().append(eBattleEventType.BATTLE_EVENT_ATTACK, defender.actorId(), attacker.actorId())
@@ -1557,7 +1663,7 @@ public final class TurnBattleEngine {
                 .setSuccess(success);
         if (success) {
             actor.markFled();
-            if (ctx.encounter.isBossTrial() && actor.isPlayer()) {
+            if ((ctx.encounter.isBossTrial() || ctx.encounter.isFestivalBeast()) && actor.isPlayer()) {
                 for (BattleUnit other : ctx.units()) {
                     if (other.isPet() && other.ownerPlayerId() == actor.actorId() && !other.fled()) {
                         boolean wasActive = other.isActive();
@@ -1644,7 +1750,8 @@ public final class TurnBattleEngine {
      * 组队人人独立掷骰、不分赃；击杀簿 count 恒为 1，不按 count 放大。
      */
     private void rollDrops() {
-        if (outcome != eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN || ctx.defeatedMonsters().isEmpty()) {
+        if (outcome != eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN || ctx.defeatedMonsters().isEmpty()
+                || isFestivalBeastBattle()) {
             return;
         }
         for (Map.Entry<Long, BattleSettlementData.Builder> playerSettlement : ctx.settlements().entrySet()) {
@@ -1754,7 +1861,11 @@ public final class TurnBattleEngine {
                     .setParticipated(didPlayerParticipate(playerId));
         }
 
-        if (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && actor.teamIndex() == 0
+        if (isFestivalBeastBattle()) {
+            settlement.setFestivalBeast(request.getActivityContext().getFestivalBeast());
+        }
+
+        if (!isFestivalBeastBattle() && outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && actor.teamIndex() == 0
                 && !actor.fled() && !actor.isDead()) {
             long expSum = 0;
             long goldSum = 0;

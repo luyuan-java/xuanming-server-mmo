@@ -28,9 +28,11 @@ class TradeMetricsTest {
                         .as(method + "/" + result).isZero();
             }
         }
-        for (String result : List.of("forbidden", "bad_request", "unauthenticated")) {
-            assertThat(meters.get("game.trade.requests").tag("method", TradeMethods.SEED_LISTING).tag("result", result).timer())
-                    .isNotNull();
+        for (String adminMethod : TradeMethods.FORBIDDEN_ADMIN_METHODS) {
+            for (String result : List.of("forbidden", "bad_request", "unauthenticated")) {
+                assertThat(meters.get("game.trade.requests").tag("method", adminMethod).tag("result", result).timer())
+                        .as(adminMethod + "/" + result).isNotNull();
+            }
         }
         assertThat(meters.get("game.trade.requests").tag("method", TradeMetrics.UNROUTED).tag("result", "unsupported").timer())
                 .isNotNull();
@@ -41,7 +43,7 @@ class TradeMetricsTest {
             assertThat(meters.get("game.trade.seed.listings").tag("result", result).counter().count()).isZero();
         }
         assertThat(meters.get("game.trade.favorite.retries").counter().count()).isZero();
-        for (String op : List.of("seed_listing", "other")) {
+        for (String op : List.of("seed_listing", "seller_environment", "seller_violation", "other")) {
             for (String status : List.of("200", "400", "401", "403", "500", "503")) {
                 assertThat(meters.get("game.trade.admin.requests").tag("op", op).tag("status", status).counter().count()).isZero();
             }
@@ -79,7 +81,7 @@ class TradeMetricsTest {
         Set<String> methods = new HashSet<>();
         meters.get("game.trade.requests").timers().forEach(t -> methods.add(t.getId().getTag("method")));
         Set<String> allowed = new HashSet<>(TradeMethods.CLIENT_REQUESTS);
-        allowed.add(TradeMethods.SEED_LISTING);
+        allowed.addAll(TradeMethods.FORBIDDEN_ADMIN_METHODS);
         allowed.add(TradeMetrics.UNROUTED);
         assertThat(methods).isEqualTo(allowed);
     }

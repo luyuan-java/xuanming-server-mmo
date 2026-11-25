@@ -99,7 +99,10 @@ class ClassSkillClientTest {
                 .setMessageId(77).setBody(ListSkillsRequest.newBuilder().setPetId(petId).build().toByteString()).build());
         var book = ListSkillsResponse.parseFrom(f.sink.to(1,11).getLast().getSerializedMessage());
         assertThat(book.getPetId()).isEqualTo(petId);
-        assertThat(book.getCatalogList()).hasSize(34).allSatisfy(row -> assertThat(row.getCasterMask() & 2).isEqualTo(2));
+        int expectedPetCount = (int) config.skill().all().stream()
+                .filter(s -> s.getBattleModel() == 1 && s.getSeasonId() == 0 && (s.getCasterMask() & 2) != 0).count();
+        assertThat(book.getCatalogList()).hasSize(expectedPetCount)
+                .allSatisfy(row -> assertThat(row.getCasterMask() & 2).isEqualTo(2));
         assertThat(f.upgrade(10018, 0).getErrorMessage().getId()).isEqualTo(com.game.table.SkillErrorTip.skill_error.kSkillNotInClass_VALUE);
         assertThat(f.upgrade(petId + 1, 10018, 0).getErrorMessage().getId()).isEqualTo(com.game.table.PetErrorTip.pet_error.kPetNotFound_VALUE);
         assertThat(f.upgrade(petId, 10018, 0).getUpgradedCount()).isEqualTo(1);
@@ -149,7 +152,12 @@ class ClassSkillClientTest {
         var book = ListSkillsResponse.parseFrom(frame.getSerializedMessage());
         assertThat(book.getSkillList().getSkillListList()).extracting(e -> e.getSkillTableId()).containsExactly(1101, 1106);
         assertThat(book.getSkillList().getSkillListList()).allSatisfy(e -> assertThat(e.getRank()).isEqualTo(1));
-        assertThat(book.getCatalogList()).hasSize(41).allSatisfy(e -> assertThat(e.getCasterMask() & 1).isEqualTo(1));
+        int expectedCharCount = (int) config.skill().all().stream()
+                .filter(s -> s.getBattleModel() == 1 && s.getSeasonId() == 0 && (s.getCasterMask() & 1) != 0).count();
+        assertThat(book.getCatalogList()).hasSize(expectedCharCount)
+                .allSatisfy(e -> assertThat(e.getCasterMask() & 1).isEqualTo(1));
+        assertThat(book.hasLoadout()).isTrue();
+        assertThat(book.getLoadout().getSchemesList()).hasSize(3);
         assertThat(book.getClassId()).isEqualTo(1);
         assertThat(book.getPlayerLevel()).isEqualTo(85);
         assertThat(book.getCurrencyBalance()).isEqualTo(10_000);

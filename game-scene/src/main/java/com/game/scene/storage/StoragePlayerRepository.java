@@ -933,6 +933,41 @@ public final class StoragePlayerRepository implements PlayerRepository {
         }
     }
 
+    @Override
+    public boolean supportsAccountStage1TradableSync() {
+        return true;
+    }
+
+    @Override
+    public void syncAccountStage1Tradable(long playerId, int desiredCharTotal,
+                                          Consumer<PlayerStore.Stage1TradableQuotaOutcome> onDone) {
+        try {
+            storageExecutor.execute(() -> {
+                PlayerStore.Stage1TradableQuotaOutcome outcome;
+                try {
+                    outcome = store.syncAccountStage1Tradable(playerId, desiredCharTotal);
+                } catch (RuntimeException e) {
+                    log.warn("账号级阶段一可交易配额同步失败，将退避重试 player={} desired={}",
+                            Long.toUnsignedString(playerId), desiredCharTotal, e);
+                    outcome = null;
+                }
+                deliverStage1TradableQuota(playerId, onDone, outcome);
+            });
+        } catch (RejectedExecutionException e) {
+            log.warn("存储线程池拒绝账号级阶段一可交易配额同步 player={}", Long.toUnsignedString(playerId));
+            deliverStage1TradableQuota(playerId, onDone, null);
+        }
+    }
+
+    private void deliverStage1TradableQuota(long playerId, Consumer<PlayerStore.Stage1TradableQuotaOutcome> onDone,
+                                            PlayerStore.Stage1TradableQuotaOutcome outcome) {
+        try {
+            logicExecutor.execute(() -> onDone.accept(outcome));
+        } catch (RejectedExecutionException e) {
+            log.warn("逻辑线程已关闭，丢弃账号级阶段一可交易配额回调 player={}", Long.toUnsignedString(playerId));
+        }
+    }
+
     /**
      * 写回行。坐标含 NaN / ±Inf 时改写成 (0,0,0) 并记 ERROR：JDBC 驱动拒绝非有限的 double
      * （Connector/J 默认 {@code allowNanAndInf=false}，按非瞬时故障处理），整条写回会失败——等级、场景、位置都丢，

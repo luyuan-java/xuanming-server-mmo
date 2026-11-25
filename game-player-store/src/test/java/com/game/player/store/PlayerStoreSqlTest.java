@@ -102,6 +102,31 @@ class PlayerStoreSqlTest {
         return row;
     }
 
+    @Test
+    void 账号级阶段一可交易60份配额跨角色与删角不重置_幂等封顶() {
+        long p1 = newPlayer(99101, "配额主号");
+        long p2 = newPlayer(99102, "配额小号");
+
+        // 主号占满 45 份，幂等重调不重复扣减
+        var r1 = store.syncAccountStage1Tradable(p1, 45);
+        assertThat(r1).isEqualTo(new PlayerStore.Stage1TradableQuotaOutcome(true, 45, 45));
+        var r1Again = store.syncAccountStage1Tradable(p1, 45);
+        assertThat(r1Again).isEqualTo(new PlayerStore.Stage1TradableQuotaOutcome(true, 45, 45));
+
+        // 模拟删角（仅删除 player 行与角色配额行）：账号累计 stage1_tradable_material_used 保持 45 绝不清零
+        jdbc().update("DELETE FROM player WHERE player_id=?", p1);
+        jdbc().update("DELETE FROM account_role_tradable_quota WHERE player_id=?", p1);
+
+        // 同账号小号申请 25 份，只能批到剩余 15 份，账号累计封顶 60
+        var r2 = store.syncAccountStage1Tradable(p2, 25);
+        assertThat(r2).isEqualTo(new PlayerStore.Stage1TradableQuotaOutcome(true, 15, 60));
+
+        // 第三角色再建角申请 10 份 -> 0 份，账号仍锁定 60/60
+        long p3 = newPlayer(99103, "配额三号");
+        var r3 = store.syncAccountStage1Tradable(p3, 10);
+        assertThat(r3).isEqualTo(new PlayerStore.Stage1TradableQuotaOutcome(true, 0, 60));
+    }
+
     // ================================================================ 归属协议
 
     @Test

@@ -3,6 +3,7 @@ package com.game.battle.room;
 import com.game.battle.engine.TurnBattleEngine;
 import com.game.battle.metrics.BattleMetrics;
 import com.game.proto.BattleActivityContext;
+import com.game.proto.BattleReplayEnvelope;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.TurnResultS2C;
@@ -78,12 +79,15 @@ final class BattleRoom {
     java.util.concurrent.CompletionStage<Void> spectateTail = java.util.concurrent.CompletableFuture.completedFuture(null);
     /** 原建房完整正文，包含不可替换的operation/instance和实际采用的终局协议。 */
     com.game.proto.CreateBattleRequest originalCreate=com.game.proto.CreateBattleRequest.getDefaultInstance();
+    /** 仅当 originalCreate.record_replay 为真时存在，终局冻结一次后交给 PendingCompletion 复用于重试。 */
+    BattleReplayRecorder replay;
     PendingCompletion pendingCompletion;
 
     /** 原结果不可改；仅逻辑线程更新尝试状态，未知不构成终局。 */
     static final class PendingCompletion {
         final BattleResultEvent event;
         final com.google.protobuf.ByteString original;
+        final BattleReplayEnvelope replay;
         final TurnResultS2C finalTurn;
         final BattleStateS2C visibleBefore;
         final eSpectateEndReason spectateReason;
@@ -93,7 +97,11 @@ final class BattleRoom {
         Cancellable retryTimer = Cancellable.NONE;
         PendingCompletion(BattleResultEvent event,TurnResultS2C finalTurn,BattleStateS2C visibleBefore,
                           eSpectateEndReason spectateReason,BattleMetrics.RoomEnd endReason) {
-            this.event=event;this.original=event.toByteString();this.finalTurn=finalTurn;this.visibleBefore=visibleBefore;
+            this(event,null,finalTurn,visibleBefore,spectateReason,endReason);
+        }
+        PendingCompletion(BattleResultEvent event,BattleReplayEnvelope replay,TurnResultS2C finalTurn,BattleStateS2C visibleBefore,
+                          eSpectateEndReason spectateReason,BattleMetrics.RoomEnd endReason) {
+            this.event=event;this.original=event.toByteString();this.replay=replay;this.finalTurn=finalTurn;this.visibleBefore=visibleBefore;
             this.spectateReason=spectateReason;this.endReason=endReason;
         }
     }

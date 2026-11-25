@@ -457,8 +457,33 @@ public final class GlobalMatchStore {
             db.insert(c,result);
             return result;
     }
+    /** 瑞兽迎春等限时活动在持久准入提交点核对数据库权威时钟超出开放区间 [start, end) 时抛出。 */
+    public static final class OutsideActivityWindowException extends RuntimeException {
+        public OutsideActivityWindowException(String message) {
+            super(message);
+        }
+    }
+
+    private static void verifyFestivalBeastWindow(GlobalFormationRow formation, long stamp) throws Exception {
+        if (formation == null || formation.getActivityContext().isEmpty()) {
+            throw new IllegalArgumentException("瑞兽迎春活动上下文缺失");
+        }
+        var actx = com.game.proto.BattleActivityContext.parseFrom(formation.getActivityContext());
+        if (actx.getKind() != com.game.proto.eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST
+                || !actx.hasFestivalBeast()) {
+            throw new IllegalArgumentException("瑞兽迎春活动上下文非法");
+        }
+        var fb = actx.getFestivalBeast();
+        if (fb.getEffectiveStartAtMs() == 0
+                || Long.compareUnsigned(fb.getEffectiveEndAtMs(), fb.getEffectiveStartAtMs()) <= 0
+                || Long.compareUnsigned(stamp, fb.getEffectiveStartAtMs()) < 0
+                || Long.compareUnsigned(stamp, fb.getEffectiveEndAtMs()) >= 0) {
+            throw new OutsideActivityWindowException("瑞兽迎春不在开放时间窗内");
+        }
+    }
+
     public GlobalDirectIntentRow direct(GlobalDirectIntentRow key) { return tx(c->{
-        if(key.getKind()!=2)owner(c,key.getOwnerId(),key.getOwnerAccount(),key.getOwnerRevision());
+        if(key.getKind()!=2&&key.getKind()!=4&&key.getKind()!=5)owner(c,key.getOwnerId(),key.getOwnerAccount(),key.getOwnerRevision());
         var row=db.findOneByPk(c,key).orElse(null);
         if(row!=null&&(!row.getOwnerAccount().equals(key.getOwnerAccount())||row.getOwnerRevision()!=key.getOwnerRevision()))throw new SecurityException("旧归属的开局意图不能重放");
         return row;
@@ -467,7 +492,7 @@ public final class GlobalMatchStore {
     private GlobalDirectIntentRow prepareDirect(Connection c,GlobalDirectIntentRow key,ByteString payload,List<GlobalTicketRow> members,GlobalFormationRow formation)throws Exception {
         owners(c,members);
         if(key.getKind()==2)GlobalActivityLaunchAuthority.lock(c,payload,members);
-        if(key.getKind()!=2&&members.stream().noneMatch(t->t.getPlayerId()==key.getOwnerId()&&t.getOwnerAccount().equals(key.getOwnerAccount())&&t.getOwnerRevision()==key.getOwnerRevision()))throw new SecurityException("直接准入原发起者不在名单");
+        if(key.getKind()!=2&&key.getKind()!=4&&key.getKind()!=5&&members.stream().noneMatch(t->t.getPlayerId()==key.getOwnerId()&&t.getOwnerAccount().equals(key.getOwnerAccount())&&t.getOwnerRevision()==key.getOwnerRevision()))throw new SecurityException("直接准入原发起者不在名单");
         var prior=db.findOneByPkForUpdate(c,key);
         if(prior.isPresent()){
             var original=prior.get();if(!original.getPayload().equals(payload)||!original.getOwnerAccount().equals(key.getOwnerAccount())||original.getOwnerRevision()!=key.getOwnerRevision()||original.getCancelled())throw new SecurityException("原direct请求已变更或取消");
@@ -476,6 +501,7 @@ public final class GlobalMatchStore {
         }
         requireNewRoot();com.game.common.player.MatchEntryAuthority.requireFree(c,members.stream().map(GlobalTicketRow::getPlayerId).toList(),"",key.getKind()==2?key.getRequestLow():0,3);
         List<GlobalTicketRow> pending=new ArrayList<>();long stamp=now(c);
+        if(key.getKind()==5)verifyFestivalBeastWindow(formation,stamp);
         for(var member:members.stream().sorted((a,b)->Long.compareUnsigned(a.getPlayerId(),b.getPlayerId())).toList())if(locked(c,member.getPlayerId()).getState()!=4)throw new SQLException("直接准入成员已有原票占用");
         for(var member:members){var profile=db.findOneByPk(c,GlobalProfileRow.newBuilder().setPlayerId(member.getPlayerId()).build()).orElseThrow();
             if(!profile.getPayload().equals(member.getProfile())||profile.getExpiresMs()<=stamp)throw new SQLException("直接准入原profile已变或过期");
@@ -498,6 +524,10 @@ public final class GlobalMatchStore {
             if(original.getBattleId()!=0)return db.findOneByPk(c,GlobalFormationRow.newBuilder().setBattleId(original.getBattleId()).build()).orElseThrow();
             for(var bytes:original.getObserverExitsList())if(!com.game.common.player.ObserverExitAuthority.provedClosed(c,com.game.proto.ObserverExitOriginal.parseFrom(bytes),3))throw new SQLException("原direct退出观战仍无正证明");
             long stamp=now(c);boolean aborted=original.getCancelled()||members.stream().anyMatch(t->t.getExpiresMs()<=stamp);
+            if(!aborted&&key.getKind()==5){
+                try{verifyFestivalBeastWindow(original.getStartOriginal().getFormation(),stamp);}
+                catch(OutsideActivityWindowException ignored){aborted=true;}
+            }
             for(var member:members){var p=db.findOneByPk(c,GlobalProfileRow.newBuilder().setPlayerId(member.getPlayerId()).build());if(p.isEmpty()||!p.get().getPayload().equals(member.getProfile())||p.get().getExpiresMs()<=stamp)aborted=true;}
             for(var member:members.stream().sorted((a,b)->Long.compareUnsigned(a.getPlayerId(),b.getPlayerId())).toList()){
                 var actual=locked(c,member.getPlayerId());if(!actual.equals(member)||actual.getState()!=0)throw new SQLException("原direct pending票已变");db.updateByPk(c,actual.toBuilder().setState(4).build());
@@ -507,9 +537,9 @@ public final class GlobalMatchStore {
             if(invite!=null)db.updateByPk(c,invite.toBuilder().setState(2).setBattleId(result.getBattleId()).build());return result;
         });
     }
-    public GlobalDirectIntentRow pendingDirectUpper(){return tx(c->{var rows=db.findAll(c,GlobalDirectIntentRow.class,"admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3) ORDER BY kind DESC,owner_id DESC,request_high DESC,request_low DESC LIMIT 1");return rows.isEmpty()?null:rows.getFirst();});}
+    public GlobalDirectIntentRow pendingDirectUpper(){return tx(c->{var rows=db.findAll(c,GlobalDirectIntentRow.class,"admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3,4,5) ORDER BY kind DESC,owner_id DESC,request_high DESC,request_low DESC LIMIT 1");return rows.isEmpty()?null:rows.getFirst();});}
     public List<GlobalDirectIntentRow> pendingDirects(int kind,long owner,long high,long low,GlobalDirectIntentRow upper){return tx(c->db.findAll(c,GlobalDirectIntentRow.class,
-        "admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3) AND (kind>? OR (kind=? AND (owner_id>? OR (owner_id=? AND (request_high>? OR (request_high=? AND request_low>?)))))) AND (kind<? OR (kind=? AND (owner_id<? OR (owner_id=? AND (request_high<? OR (request_high=? AND request_low<=?)))))) ORDER BY kind,owner_id,request_high,request_low LIMIT 8",
+        "admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3,4,5) AND (kind>? OR (kind=? AND (owner_id>? OR (owner_id=? AND (request_high>? OR (request_high=? AND request_low>?)))))) AND (kind<? OR (kind=? AND (owner_id<? OR (owner_id=? AND (request_high<? OR (request_high=? AND request_low<=?)))))) ORDER BY kind,owner_id,request_high,request_low LIMIT 8",
         kind,kind,PbMysql.uint64(owner),PbMysql.uint64(owner),PbMysql.uint64(high),PbMysql.uint64(high),PbMysql.uint64(low),upper.getKind(),upper.getKind(),PbMysql.uint64(upper.getOwnerId()),PbMysql.uint64(upper.getOwnerId()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestLow())));}
     /** 新意图仅此处捕获目标归属；旧邀请/接受绝不再用当前归属补原件。 */
     private SessionContext newTarget(Connection c,long player)throws SQLException {

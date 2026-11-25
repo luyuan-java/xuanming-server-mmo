@@ -205,8 +205,10 @@ class InBattleGateMatrixTest {
             new Row(189, PET, "RenamePet", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(187, PET, "GmGrantPet", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(403, PET, "BuyPet", BattlePolicy.GATED, PET_IN_BATTLE),
-            // 宝宝条目保存：战斗只读（pet-entries-first-test.md），写前置 checkWritable 回 kPetInBattle
+            // 宝宝条目保存/切方案/五阶突破：战斗只读，写前置回 kPetInBattle
             new Row(412, PET, "SavePetEntries", BattlePolicy.GATED, PET_IN_BATTLE),
+            new Row(500, PET, "SwitchPetEntryPreset", BattlePolicy.GATED, PET_IN_BATTLE),
+            new Row(501, PET, "AscendPetTier", BattlePolicy.GATED, PET_IN_BATTLE),
             new Row(192, BAG, "SortBag", BattlePolicy.GATED, INVALID_PARAMETER),
             // 装备 2.11：六个入口均由装备业务闸拒绝，每次计 equipment 一次。
             new Row(246, BAG, "UnequipItem", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
@@ -226,6 +228,8 @@ class InBattleGateMatrixTest {
             new Row(461, SKILL, "LearnSkillBook", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
             new Row(462, SKILL, "DismantleSkillBook", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
             new Row(463, SKILL, "SetCraftProxyStall", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
+            new Row(502, SKILL, "SaveSkillLoadout", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
+            new Row(503, SKILL, "SwitchSkillLoadout", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
             // 批次 5.4：226 跨 zone 传送自己判战斗在途（基线 kZoneTravelInBattle，player_lifecycle.cpp:2784-2788），计在 zone_travel 闸上
             new Row(226, SCENE, "TravelToZone", BattlePolicy.GATED, ZONE_TRAVEL_IN_BATTLE),
             // ALLOW：只读
@@ -245,6 +249,9 @@ class InBattleGateMatrixTest {
             new Row(411, PET, "PreviewPetEntries", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(190, ACTIVITY, "GetActivityList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(348, ACTIVITY, "ClaimActivityVitalityReward", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(476, ACTIVITY, "GetFestivalBeastDetail", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(477, ACTIVITY, "StartFestivalBeastChallenge", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(478, ACTIVITY, "ClaimFestivalBeastReward", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(191, BAG, "GetBag", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(374, BAG, "RetrieveTemporaryItems", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(404, BAG, "GetEquipmentCraftRules", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -349,9 +356,10 @@ class InBattleGateMatrixTest {
         assertThat(List.of(134, 132)).allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).isEqualTo(BattlePolicy.DROP));
         assertThat(f.handler.battlePolicy(131)).isEqualTo(BattlePolicy.STOP_ONLY);
         assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226,
-                246, 247, 249, 250, 251, 252, 315, 317, 406, 408, 454, 455, 457, 458, 460, 461, 462, 463))
+                246, 247, 249, 250, 251, 252, 315, 317, 403, 406, 408, 412, 454, 455, 457, 458, 460, 461, 462, 463,
+                500, 501, 502, 503))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.GATED));
-        assertThat(List.of(43, 253, 314, 453, 456, 459, 464, 77, 54, 167, 181, 190, 348, 191, 374, 404, 405, 407, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
+        assertThat(List.of(43, 253, 314, 453, 456, 459, 464, 77, 54, 167, 181, 190, 348, 476, 477, 478, 191, 374, 404, 405, 407, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.ALLOW));
         assertThat(f.handler.battlePolicy(136)).as("没有处理器的方法没有策略（战斗与否都回 1006）").isNull();
         assertThat(registered).as("现有方法逐个显式声明，没有一个落到缺省 REJECT（D11：没有行为变化）")
@@ -716,6 +724,11 @@ class InBattleGateMatrixTest {
                 .setStateVersion(1).setConfigVersion(entryVersion).build());
         out.put(PET + "SavePetEntries", s -> com.game.proto.SavePetEntriesRequest.newBuilder().setPetId(s.activePet())
                 .setStateVersion(1).setConfigVersion(entryVersion).setRequestId("battle-probe-00000001").build());
+        out.put(PET + "SwitchPetEntryPreset", s -> com.game.proto.SwitchPetEntryPresetRequest.newBuilder().setPetId(s.activePet())
+                .setSlotId(2).setTag(1).setStateVersion(1).setConfigVersion(entryVersion)
+                .setRequestId("battle-preset-0000001").build());
+        out.put(PET + "AscendPetTier", s -> com.game.proto.AscendPetTierRequest.newBuilder().setPetId(s.activePet())
+                .setExpectedTier(1).setClientRequestId(9301L).build());
         out.put(PET + "BuyPet", s -> BuyPetRequest.newBuilder().setPetTableId(1).setPurchaseSequence(1).setPriceGold(1000).build());
         out.put(PET + "SummonPet", s -> SummonPetRequest.newBuilder().setPetId(s.sparePet()).build());
         out.put(PET + "RecallPet", s -> RecallPetRequest.getDefaultInstance());
@@ -751,6 +764,20 @@ class InBattleGateMatrixTest {
                 .setBookId(1L).setExpectedRevision(0L).setClientRequestId(9203L).build());
         out.put(SKILL + "SetCraftProxyStall", s -> com.game.proto.SetCraftProxyStallRequest.newBuilder()
                 .setOpen(true).setProxyForgeFeeGold(60L).setProxyScrollFeeGold(0L).build());
+        out.put(SKILL + "SaveSkillLoadout", s -> com.game.proto.SaveSkillLoadoutRequest.newBuilder()
+                .setSchemeId(1).setRoleTag(1).setStateVersion(1L).setRequestId("battle-loadout-000001").build());
+        out.put(SKILL + "SwitchSkillLoadout", s -> com.game.proto.SwitchSkillLoadoutRequest.newBuilder()
+                .setSchemeId(2).setStateVersion(1L).setRequestId("battle-loadout-000002").build());
+        out.put(ACTIVITY + "GetFestivalBeastDetail", s -> com.game.proto.GetFestivalBeastDetailRequest.getDefaultInstance());
+        out.put(ACTIVITY + "StartFestivalBeastChallenge", s -> com.game.proto.StartFestivalBeastChallengeRequest.newBuilder()
+                .setClientRequestId("11111111-1111-4111-8111-111111111111")
+                .setActivityInstanceId(202601)
+                .setConfigRevision(1)
+                .build());
+        out.put(ACTIVITY + "ClaimFestivalBeastReward", s -> com.game.proto.ClaimFestivalBeastRewardRequest.newBuilder()
+                .setClientRequestId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .setRewardIdentity("festival_beast_chunxishou_v1")
+                .build());
         return out;
     }
 
@@ -1122,6 +1149,36 @@ class InBattleGateMatrixTest {
                     .setRuleId(1).setConfigurationRevision(1).setPeriodId(1_700_000_000_000L).setThresholdId(1)
                     .setRequestId("battle-vitality-replay-1").setRewardId(1).setClaimedAtMs(1_700_000_000_000L).build());
         }
+        if (row.service().equals(ACTIVITY) && row.method().equals("StartFestivalBeastChallenge")) {
+            subject.player().festivalBeast().replace(com.game.player.store.state.PlayerFestivalBeastState.newBuilder()
+                    .setStateRevision(1L)
+                    .setPendingLaunch(com.game.player.store.state.FestivalBeastPendingLaunchState.newBuilder()
+                            .setRequestId("11111111-1111-4111-8111-111111111111")
+                            .setActivityInstanceId(202601)
+                            .setConfigRevision(1)
+                            .setRewardIdentity("festival_beast_chunxishou_v1")
+                            .setLockedPetId(subject.activePet())
+                            .setLockedOwnerLevel(LEVEL)
+                            .setMatchedTierId(3)
+                            .setBattleConfigId(111)
+                            .setLaunchState(com.game.proto.FestivalBeastLaunchState.FESTIVAL_BEAST_LAUNCH_ADMITTED_VALUE)
+                            .setBattleId(88001L)
+                            .setRequestedAtMs(w.clock.epochMillis())
+                            .setAdmittedAtMs(w.clock.epochMillis()))
+                    .build());
+        }
+        if (row.service().equals(ACTIVITY) && row.method().equals("ClaimFestivalBeastReward")) {
+            subject.player().festivalBeast().replace(com.game.player.store.state.PlayerFestivalBeastState.newBuilder()
+                    .setStateRevision(1L)
+                    .addClaimReceipts(com.game.player.store.state.FestivalBeastClaimReceiptState.newBuilder()
+                            .setRewardIdentity("festival_beast_chunxishou_v1")
+                            .setRequestId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                            .setRewardDefinitionVersion(1)
+                            .setRewardPetTableId(101)
+                            .setPetId(subject.activePet())
+                            .setClaimedAtMs(w.clock.epochMillis()))
+                    .build());
+        }
         if (row.service().equals(MYSTERY_MERCHANT) && row.method().equals("BuyMysteryMerchantGoods")) {
             var goodsRow = BattleFixture.CONFIG.mysteryMerchantGoods().all().getFirst();
             var entry = com.game.proto.MysteryMerchantShelfEntry.newBuilder()
@@ -1161,6 +1218,19 @@ class InBattleGateMatrixTest {
                         .build());
             } else if (row.method().equals("RedeemBoundArtifactVoucher")) {
                 grantProbeItem(w, subject.player(), com.game.battle.engine.TrialJournalRules.BOUND_ARTIFACT_VOUCHER_ITEM_ID, 1L);
+            }
+            w.sink.clear();
+        }
+        if (row.service().equals(PET) && row.method().equals("AscendPetTier")) {
+            var tier1 = BattleFixture.CONFIG.petTier().all().stream()
+                    .filter(t -> t.getId() == 1).findFirst().orElseThrow();
+            if (Integer.compareUnsigned(tier1.getAscendMinPetLevel(), subject.player().level()) > 0) {
+                assertThat(w.attributes.gmSetLevel(subject.player(), tier1.getAscendMinPetLevel())).isZero();
+                w.pets.onOwnerLevelChanged(subject.player());
+            }
+            if (tier1.getAscendCostItemId() != 0 && tier1.getAscendCostItemCount() != 0) {
+                grantProbeItem(w, subject.player(), tier1.getAscendCostItemId(),
+                        Integer.toUnsignedLong(tier1.getAscendCostItemCount()));
             }
             w.sink.clear();
         }

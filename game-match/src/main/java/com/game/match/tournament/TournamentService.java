@@ -5,6 +5,9 @@ import com.game.common.deadline.Deadline;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.dispatch.MatchMethods;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.content_guard.CheckTextResponse;
+import com.game.proto.content_guard.TextScene;
+import com.game.proto.content_guard.TextVerdict;
 import com.game.proto.match.CheerTournamentSquadRequest;
 import com.game.proto.match.CheerTournamentSquadResponse;
 import com.game.proto.match.ClaimTournamentRewardRequest;
@@ -53,14 +56,35 @@ public final class TournamentService {
         long launch(TournamentStore.LaunchSpec spec);
     }
 
+    /** 战队名 UGC 内容安全送检策略（Strategy 模式）：生产接 game-content-guard，null 表示未启用。 */
+    @FunctionalInterface
+    public interface TextGuard {
+        CheckTextResponse check(TextScene scene, long playerId, String text);
+    }
+
+    /** 赛季奖励个人邮件投递策略（Strategy 模式）：生产接 game-mail MailAdminService（sender_kind=6），事务外幂等投递，返回 mail_id。 */
+    @FunctionalInterface
+    public interface RewardMailSender {
+        long send(long playerId, TournamentStore.ClaimableReward reward, String title, String body) throws Exception;
+    }
+
     private final TournamentStore store;
     private final LongSupplier idGenerator;
     private final MatchLauncher launcher;
+    private final TextGuard textGuard;
+    private final RewardMailSender mailSender;
 
     public TournamentService(TournamentStore store, LongSupplier idGenerator, MatchLauncher launcher) {
+        this(store, idGenerator, launcher, null, null);
+    }
+
+    public TournamentService(TournamentStore store, LongSupplier idGenerator, MatchLauncher launcher,
+                             TextGuard textGuard, RewardMailSender mailSender) {
         this.store = Objects.requireNonNull(store, "store");
         this.idGenerator = Objects.requireNonNull(idGenerator, "idGenerator");
         this.launcher = launcher;
+        this.textGuard = textGuard;
+        this.mailSender = mailSender;
     }
 
     public GetTournamentOverviewResponse getOverview(long playerId, GetTournamentOverviewRequest req) {
@@ -80,6 +104,22 @@ public final class TournamentService {
     public CreateTournamentSquadResponse createSquad(long playerId, int zoneId, CreateTournamentSquadRequest req) {
         if (playerId == 0L) {
             return CreateTournamentSquadResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+        // UGC 队名先在 SQL 事务外经内容安全审核（与 Go 版 TournamentLogic 对齐）。
+        if (textGuard != null) {
+            try {
+                CheckTextResponse checked = textGuard.check(TextScene.TEXT_SCENE_GUILD_NAME, playerId, req.getSquadName());
+                if (checked == null || checked.getVerdict() != TextVerdict.TEXT_VERDICT_PASS) {
+                    return CreateTournamentSquadResponse.newBuilder()
+                            .setErrorMessage(tip(MatchErrorTip.match_error.kMatchTournamentSquadNameInvalid_VALUE))
+                            .build();
+                }
+            } catch (RuntimeException e) {
+                log.error("[tournament] createSquad content guard failed player={}: {}", Long.toUnsignedString(playerId), e.getMessage());
+                return CreateTournamentSquadResponse.newBuilder()
+                        .setErrorMessage(tip(MatchErrorTip.match_error.kMatchTournamentSquadNameInvalid_VALUE))
+                        .build();
+            }
         }
         long squadId = idGenerator.getAsLong();
         if (squadId == 0L) {
@@ -207,8 +247,20 @@ public final class TournamentService {
                         .setMatch(outcome.match())
                         .build();
             }
-            long battleId = launcher != null ? launcher.launch(outcome.launch()) : 0L;
-            if (battleId != 0L) {
+            if (launcher != null) {
+                long battleId = launcher.launch(outcome.launch());
+                if (battleId == 0L) {
+                    try {
+                        store.bindMatchBattle(outcome.launch().matchId(), 0L, false);
+                    } catch (SQLException rollbackErr) {
+                        log.warn("[tournament] rollback ready state failed match={}: {}",
+                                Long.toUnsignedString(outcome.launch().matchId()), rollbackErr.getMessage());
+                    }
+                    return StartTournamentMatchResponse.newBuilder()
+                            .setErrorMessage(tip(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE))
+                            .setMatch(outcome.match())
+                            .build();
+                }
                 store.bindMatchBattle(outcome.launch().matchId(), battleId, outcome.launch().featured());
                 return StartTournamentMatchResponse.newBuilder()
                         .setErrorMessage(tip(0))
@@ -256,7 +308,48 @@ public final class TournamentService {
             return ClaimTournamentRewardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
         }
         try {
-            List<TournamentPlayerRewardView> claimed = store.claimRewards(playerId, req.getSeasonId());
+            if (mailSender == null) {
+                List<TournamentPlayerRewardView> claimed = store.claimRewards(playerId, req.getSeasonId());
+                return ClaimTournamentRewardResponse.newBuilder()
+                        .setErrorMessage(tip(0))
+                        .addAllClaimedRewards(claimed)
+                        .build();
+            }
+            // 事务外逐条以 reward_id 为幂等键发个人邮件，成功拿到 mail_id 后再落账 CLAIMED（与 Go 版逐条对齐）。
+            List<TournamentStore.ClaimableReward> pending = store.claimableRewards(playerId, req.getSeasonId());
+            if (pending.isEmpty()) {
+                return ClaimTournamentRewardResponse.newBuilder()
+                        .setErrorMessage(tip(MatchErrorTip.match_error.kMatchTournamentRewardUnavailable_VALUE))
+                        .build();
+            }
+            List<TournamentPlayerRewardView> claimed = new java.util.ArrayList<>(pending.size());
+            for (TournamentStore.ClaimableReward r : pending) {
+                String title = "群仙问道赛赛季奖励";
+                String body = "本赛季群仙问道赛奖励已结算，请查收附件。";
+                var tierOpt = store.tables().rewardById(r.tierId());
+                if (tierOpt.isPresent()) {
+                    if (!tierOpt.get().getMailTitle().isEmpty()) {
+                        title = tierOpt.get().getMailTitle();
+                    }
+                    if (!tierOpt.get().getMailBody().isEmpty()) {
+                        body = tierOpt.get().getMailBody();
+                    }
+                }
+                long mailId;
+                try {
+                    mailId = mailSender.send(playerId, r, title, body);
+                } catch (Exception mailErr) {
+                    log.error("[tournament] send reward mail failed player={} reward={}: {}",
+                            Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()), mailErr.getMessage());
+                    return ClaimTournamentRewardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+                }
+                if (mailId == 0L) {
+                    log.error("[tournament] send reward mail returned empty mail_id player={} reward={}",
+                            Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()));
+                    return ClaimTournamentRewardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+                }
+                claimed.add(store.markRewardClaimed(r.seasonId(), playerId, r.tierKind(), mailId));
+            }
             return ClaimTournamentRewardResponse.newBuilder()
                     .setErrorMessage(tip(0))
                     .addAllClaimedRewards(claimed)

@@ -650,4 +650,71 @@ class EquipQualityAndSkillCraftTest {
                         .build(), CraftSkillBookResponse.parser());
         assertThat(afterClose.getErrorMessage().getId()).isEqualTo(equip_error.kEquipProxyMasterUnavailable_VALUE);
     }
+
+    @Test
+    void 既有纯T装备在可交易料充足时即使包里有绑定堆且传允许绑定也不误绑() throws Exception {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer player = f.enter(11, 2099L);
+        assertThat(f.attributes.gmSetLevel(player, 60)).isZero();
+        assertThat(f.currency.add(player, Wallet.GOLD, 10_000L, Reason.GM_GRANT).ok()).isTrue();
+
+        GetEquipmentCraftRulesResponse rules = call(f, player, BAG_SERVICE, "GetEquipmentCraftRules",
+                GetEquipmentCraftRulesRequest.getDefaultInstance(), GetEquipmentCraftRulesResponse.parser());
+        var accessoryRecipe = rules.getRecipesList().stream()
+                .filter(r -> r.getProduct().getEquipProfile() == 2)
+                .findFirst().orElseThrow();
+        var normalAffix = rules.getAffixesList().stream()
+                .filter(a -> a.getPool() == 3 && !a.getPolishExempt())
+                .findFirst().orElseThrow();
+
+        // 同时拥有充足可交易料 + 额外绑定料
+        Map<Integer, Long> tradableMats = new java.util.LinkedHashMap<>();
+        tradableMats.merge(accessoryRecipe.getMaterialConfigId(), (long) accessoryRecipe.getMaterialCount(), Long::sum);
+        tradableMats.merge(normalAffix.getMaterialConfigId(), (long) normalAffix.getMaterialCount(), Long::sum);
+        assertThat(f.bags.addItems(player, BagType.INVENTORY, tradableMats,
+                false, Reason.GM_GRANT, 0, "").tip()).isZero();
+        assertThat(f.bags.addItems(player, BagType.INVENTORY, Map.of(
+                normalAffix.getMaterialConfigId(), 5L), true, Reason.GM_GRANT, 0, "").tip()).isZero();
+
+        CommitEquipmentCraftResponse crafted = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(5001L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(0L)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.CREATE_ITEM)
+                                .setConfigId(accessoryRecipe.getProduct().getConfigId()))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(crafted.getErrorMessage().getId()).isZero();
+        long itemId = crafted.getItemId();
+        assertThat(player.bags().bag(BagType.INVENTORY).item(itemId).bound()).isFalse();
+
+        // 预览与提交（哪怕携带 allow_bound_materials=true）：因纯 T 词条料充足，will_bind_item 必须为 false，提交仅扣 T 堆、装备不误绑
+        PreviewEquipmentCraftResponse preview = call(f, player, BAG_SERVICE, "PreviewEquipmentCraft",
+                PreviewEquipmentCraftRequest.newBuilder()
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.INSTALL_AFFIX)
+                                .setItemId(itemId).setAffixSlot(1).setAffixId(normalAffix.getAffixId())
+                                .setAllowBoundMaterials(true))
+                        .build(), PreviewEquipmentCraftResponse.parser());
+        assertThat(preview.getErrorMessage().getId()).isZero();
+        assertThat(preview.getPreview().getWillBindItem()).isFalse();
+        assertThat(preview.getPreview().getResult().getBound()).isFalse();
+
+        CommitEquipmentCraftResponse installed = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(5002L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(1L)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.INSTALL_AFFIX)
+                                .setItemId(itemId).setAffixSlot(1).setAffixId(normalAffix.getAffixId())
+                                .setAllowBoundMaterials(true))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(installed.getErrorMessage().getId()).isZero();
+        assertThat(player.bags().bag(BagType.INVENTORY).item(itemId).bound()).isFalse();
+        // 5 份绑定料应完整保留，只扣了可交易料
+        assertThat(player.bags().bag(BagType.INVENTORY).total(normalAffix.getMaterialConfigId())).isEqualTo(5L);
+        assertThat(player.bags().bag(BagType.INVENTORY).plainTradableQuantity(normalAffix.getMaterialConfigId())).isZero();
+    }
 }

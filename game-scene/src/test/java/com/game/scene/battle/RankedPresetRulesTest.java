@@ -72,7 +72,7 @@ class RankedPresetRulesTest {
 
         RankedMatchContext ctx = RankedMatchContext.newBuilder()
                 .setSeasonId(0)
-                .setRuleVersion(1)
+                .setRuleVersion(sceneBattleTables.ranked().rule().getRuleVersion())
                 .setConfigFingerprint(sceneBattleTables.ranked().configFingerprint())
                 .setTeamSize(1)
                 .setUseFreePreset(true)

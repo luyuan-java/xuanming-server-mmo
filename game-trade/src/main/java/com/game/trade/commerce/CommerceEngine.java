@@ -35,12 +35,14 @@ public final class CommerceEngine {
     private final com.game.api.proto.SessionContext actor;
     private final PlayerTradeGuard playerTradeGuard;
     private final SellerCreditService credits;
+    private final ReferencePrice.Reader referencePrices;
     public CommerceEngine(CommerceStore store, LongSupplier ids, Policy policy, LongSupplier clock) {
-        this(store, ids, policy, clock, null, null, null);
+        this(store, ids, policy, clock, null, null, null, null);
     }
     private CommerceEngine(CommerceStore store, LongSupplier ids, Policy policy, LongSupplier clock,
                             com.game.api.proto.SessionContext actor,
-                            PlayerTradeGuard playerTradeGuard, SellerCreditService credits) {
+                            PlayerTradeGuard playerTradeGuard, SellerCreditService credits,
+                            ReferencePrice.Reader referencePrices) {
         this.store = Objects.requireNonNull(store);
         this.ids = Objects.requireNonNull(ids);
         this.policy = Objects.requireNonNull(policy);
@@ -48,21 +50,29 @@ public final class CommerceEngine {
         this.actor = actor;
         this.playerTradeGuard = playerTradeGuard;
         this.credits = credits;
+        this.referencePrices = referencePrices;
     }
     /** 挂载游戏内当面交易防骗门禁（返回共享底层账本的新引擎视图）。 */
     public CommerceEngine withPlayerTradeGuard(PlayerTradeGuard guard) {
-        return new CommerceEngine(store, ids, policy, clock, actor, guard, credits);
+        ReferencePrice.Reader effectivePrices = referencePrices != null ? referencePrices : (guard == null ? null : guard.prices());
+        return new CommerceEngine(store, ids, policy, clock, actor, guard, credits, effectivePrices);
     }
     /** 挂载卖家店铺信用服务（官方托管首次结案后幂等计入真实成交）。 */
     public CommerceEngine withSellerCreditService(SellerCreditService service) {
-        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, service);
+        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, service, referencePrices);
     }
+    /** 挂载近 7 日真实成交中位参考价查询器。 */
+    public CommerceEngine withReferencePrices(ReferencePrice.Reader reader) {
+        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, credits, reader);
+    }
+    PlayerTradeGuard playerTradeGuard() { return playerTradeGuard; }
     SellerCreditService credits() { return credits; }
+    ReferencePrice.Reader referencePrices() { return referencePrices; }
     /** 每次客户端调用显式绑定原会话；共享的号源/仓储不变，不存线程局部或进程级请求状态。 */
     CommerceEngine forActor(com.game.api.proto.SessionContext actor) {
         if (actor == null || actor.getPlayerId() == 0 || actor.getAccount().isEmpty() || actor.getOwnerRevision() <= 0)
             throw new Refusal(INVALID);
-        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, credits);
+        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, credits, referencePrices);
     }
     com.game.api.proto.SessionContext actor() { return actor; }
     private String playerRequestKey(long me, String request) {
@@ -182,6 +192,8 @@ public final class CommerceEngine {
         policy.price(in.getPrice(), in.getCurrencyType());
         if (in.getDurationMs() < 60000 || in.getDurationMs() > 30L * 86400000)
             throw new Refusal(INVALID);
+        if (in.getDesignatedBuyerPlayerId() == me)
+            throw new Refusal(SELF);
         return create(me, in.getClientRequestId(), in,
             TradeCommerceRow.newBuilder()
                 .setKind(3)
@@ -190,7 +202,11 @@ public final class CommerceEngine {
                 .setUnitPrice(in.getPrice())
                 .setCurrencyType(in.getCurrencyType())
                 .setExpiresMs(clock.getAsLong() + in.getDurationMs()),
-            TradeCommerceWorkflow.newBuilder().setSellerAssets(in.getAssets()).setStage("escrow"), d);
+            TradeCommerceWorkflow.newBuilder()
+                .setSellerAssets(in.getAssets())
+                .setDesignatedBuyerPlayerId(in.getDesignatedBuyerPlayerId())
+                .setStage("escrow"),
+            d);
     }
     public TradeCommerceRow lot(long me, CreateAuctionLotRequest in, Deadline d) throws SQLException {
         policy.selection(in.getAssets());
@@ -298,6 +314,8 @@ public final class CommerceEngine {
                         throw new Refusal(CONFLICT);
                     if (me == r.getSellerPlayerId())
                         throw new Refusal(SELF);
+                    if (w.getDesignatedBuyerPlayerId() != 0 && w.getDesignatedBuyerPlayerId() != me)
+                        throw new Refusal(CONFLICT);
                     if (w.getQuantityReserved() >= 32)
                         throw new Refusal(CONFLICT);
                     r.setBuyerPlayerId(me).setStatus(ESCROWING);

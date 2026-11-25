@@ -40,9 +40,13 @@ public final class TradeMetrics implements JdbcListingStore.Events {
     /** 不认识的消息号（契约里没有，或有但不归 trade）。 */
     public static final String UNROUTED = "unrouted";
 
-    /** 播种接口的 op 标签（{@code /admin/trade/seed-listing}）；其余路径一律 {@link #ADMIN_OP_OTHER}。 */
+    /** 播种接口的 op 标签（{@code /admin/trade/seed-listing}）；信用内部接口取固定值；其余路径一律 {@link #ADMIN_OP_OTHER}。 */
     public static final String ADMIN_OP_SEED_LISTING = "seed_listing";
+    public static final String ADMIN_OP_SELLER_ENVIRONMENT = "seller_environment";
+    public static final String ADMIN_OP_SELLER_VIOLATION = "seller_violation";
     public static final String ADMIN_OP_OTHER = "other";
+    private static final List<String> ADMIN_OPS = List.of(
+            ADMIN_OP_SEED_LISTING, ADMIN_OP_SELLER_ENVIRONMENT, ADMIN_OP_SELLER_VIOLATION, ADMIN_OP_OTHER);
 
     /** 预建的 HTTP 状态（过滤器的 503 / 401 / 400，控制器的 403 / 400 / 200，处理中抛异常的 500）；别的状态首次出现时再建（状态码本身有界）。 */
     static final List<String> ADMIN_STATUSES = List.of("200", "400", "401", "403", "500", "503");
@@ -95,8 +99,10 @@ public final class TradeMetrics implements JdbcListingStore.Events {
                 timer(method, result);
             }
         }
-        for (RequestResult result : List.of(RequestResult.FORBIDDEN, RequestResult.BAD_REQUEST, RequestResult.UNAUTHENTICATED)) {
-            timer(TradeMethods.SEED_LISTING, result);
+        for (String adminMethod : TradeMethods.FORBIDDEN_ADMIN_METHODS) {
+            for (RequestResult result : List.of(RequestResult.FORBIDDEN, RequestResult.BAD_REQUEST, RequestResult.UNAUTHENTICATED)) {
+                timer(adminMethod, result);
+            }
         }
         timer(UNROUTED, RequestResult.UNSUPPORTED);
 
@@ -113,7 +119,7 @@ public final class TradeMetrics implements JdbcListingStore.Events {
         this.favoriteRetries = Counter.builder(FAVORITE_RETRIES)
                 .description("收藏写入撞 1213 / 1205 / 9007 后整条重跑的次数（ODKU 之后只剩 InnoDB 固有情形，长期非 0 需要排查）")
                 .register(registry);
-        for (String op : List.of(ADMIN_OP_SEED_LISTING, ADMIN_OP_OTHER)) {
+        for (String op : ADMIN_OPS) {
             for (String status : ADMIN_STATUSES) {
                 adminCounter(op, status);
             }
@@ -144,7 +150,12 @@ public final class TradeMetrics implements JdbcListingStore.Events {
 
     /** 管理端口 /admin/** 的一次调用（op 由调用方从已知路径映射，不得传任意路径）。 */
     public void adminRequest(String op, int status) {
-        adminCounter(ADMIN_OP_SEED_LISTING.equals(op) ? ADMIN_OP_SEED_LISTING : ADMIN_OP_OTHER, Integer.toString(status)).increment();
+        String normalized = (ADMIN_OP_SEED_LISTING.equals(op)
+                || ADMIN_OP_SELLER_ENVIRONMENT.equals(op)
+                || ADMIN_OP_SELLER_VIOLATION.equals(op))
+                ? op
+                : ADMIN_OP_OTHER;
+        adminCounter(normalized, Integer.toString(status)).increment();
     }
 
     private Timer timer(String method, RequestResult result) {

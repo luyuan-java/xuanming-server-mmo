@@ -108,9 +108,11 @@ class TradeDispatcherTest {
         for (String method : TradeMethods.CLIENT_REQUESTS) {
             expected.add(id(method));
         }
-        assertThat(expected).contains(196, 197, 198, 200).hasSize(35);
+        assertThat(expected).contains(196, 197, 198, 200, 481, 482, 483, 484).hasSize(39);
         assertThat(d.clientMessageIds()).isEqualTo(expected);
-        expected.add(seedId());
+        for (String adminMethod : TradeMethods.FORBIDDEN_ADMIN_METHODS) {
+            expected.add(REGISTRY.requireId(TradeMethods.ADMIN_SERVICE, adminMethod));
+        }
         assertThat(seedId()).isEqualTo(199);
         assertThat(d.routedMessageIds()).isEqualTo(expected);
 
@@ -165,7 +167,7 @@ class TradeDispatcherTest {
     }
 
     @Test void 新交易接口关闭时有明确应答而非未实现或静默超时()throws Exception{
-        var d=dispatcher();for(String name:TradeMethods.COMMERCE_REQUESTS){var contract=REGISTRY.byId(id(name)).orElseThrow();var response=done(d.dispatch(call(name,PLAYER_A,contract.requestPrototype())));assertThat(inBandTip(response,contract.responsePrototype()).getId()).as(name).isEqualTo(TradeTips.FEATURE_UNAVAILABLE);}
+        var d=dispatcher();for(String name:java.util.stream.Stream.concat(TradeMethods.COMMERCE_REQUESTS.stream(),TradeMethods.CREDIT_REQUESTS.stream()).toList()){var contract=REGISTRY.byId(id(name)).orElseThrow();var response=done(d.dispatch(call(name,PLAYER_A,contract.requestPrototype())));assertThat(inBandTip(response,contract.responsePrototype()).getId()).as(name).isEqualTo(TradeTips.FEATURE_UNAVAILABLE);}
     }
 
     @Test
@@ -196,11 +198,19 @@ class TradeDispatcherTest {
 
     @Test
     void 上行199回信封1003_计forbidden_不碰库() {
-        ClientReply reply = done(dispatcher().dispatch(call(seedId(), PLAYER_B,
+        TradeDispatcher d = dispatcher();
+        ClientReply reply = done(d.dispatch(call(seedId(), PLAYER_B,
                 TradeServiceFixture.seedRequest().build().toByteString())));
 
         assertThat(reply).isEqualTo(ENVELOPE_1003);
         assertThat(requests(TradeMethods.SEED_LISTING, "forbidden")).isEqualTo(1);
+
+        int envId = REGISTRY.requireId(TradeMethods.ADMIN_SERVICE, TradeMethods.RECORD_SELLER_ENVIRONMENT);
+        int vioId = REGISTRY.requireId(TradeMethods.ADMIN_SERVICE, TradeMethods.RECORD_SELLER_VIOLATION);
+        assertThat(done(d.dispatch(call(envId, PLAYER_B, ByteString.EMPTY)))).isEqualTo(ENVELOPE_1003);
+        assertThat(done(d.dispatch(call(vioId, PLAYER_B, ByteString.EMPTY)))).isEqualTo(ENVELOPE_1003);
+        assertThat(requests(TradeMethods.RECORD_SELLER_ENVIRONMENT, "forbidden")).isEqualTo(1);
+        assertThat(requests(TradeMethods.RECORD_SELLER_VIOLATION, "forbidden")).isEqualTo(1);
         assertThat(f.store.calls).isEmpty();
     }
 

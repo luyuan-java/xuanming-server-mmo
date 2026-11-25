@@ -316,11 +316,18 @@ public class BattleConfiguration {
                 com.google.protobuf.ByteString original,Channel channel){return legacy.publishConfirmed(event,original,channel);}
         @Override public java.util.concurrent.CompletableFuture<com.game.proto.match.BattleOutcomeDecision> commitOutcome(
                 com.game.proto.CreateBattleRequest creation,com.game.proto.contracts.kafka.BattleResultEvent event,com.google.protobuf.ByteString original) {
+            return commitOutcome(creation, event, original, null);
+        }
+        @Override public java.util.concurrent.CompletableFuture<com.game.proto.match.BattleOutcomeDecision> commitOutcome(
+                com.game.proto.CreateBattleRequest creation,com.game.proto.contracts.kafka.BattleResultEvent event,com.google.protobuf.ByteString original,
+                com.game.proto.BattleReplayEnvelope replay) {
             if(creation.getOutcomeProtocolVersion()!=1||creation.getBattleId()!=event.getBattleId())
                 return java.util.concurrent.CompletableFuture.failedFuture(new SecurityException("终局原建房身份不同"));
-            var request=com.game.proto.match.CommitBattleOutcomeRequest.newBuilder().setBattleId(creation.getBattleId())
+            var builder=com.game.proto.match.CommitBattleOutcomeRequest.newBuilder().setBattleId(creation.getBattleId())
                     .setPlacementOperationId(creation.getPlacementOperationId()).setTargetInstanceId(creation.getTargetInstanceId())
-                    .setRawResultPayload(original).build();
+                    .setRawResultPayload(original);
+            if(replay!=null&&creation.getRecordReplay())builder.setReplay(replay);
+            var request=builder.build();
             var signed=com.game.discovery.serviceauth.ServiceCallSignatures.sign(com.game.api.MatchInternalService.OUTCOME_METHOD,
                     request,"battle",secret,System.currentTimeMillis());
             return match.commitBattleOutcome(signed).thenApply(response->{

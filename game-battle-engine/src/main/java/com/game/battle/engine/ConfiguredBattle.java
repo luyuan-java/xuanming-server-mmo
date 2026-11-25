@@ -114,11 +114,27 @@ final class ConfiguredBattle {
         return gain + loss;
     }
 
+    boolean isPhysicalForbidden(BattleUnit actor) {
+        return modifier(actor, FORBID_PHYSICAL) > 0.0;
+    }
+
+    boolean isMagicForbidden(BattleUnit actor) {
+        return modifier(actor, FORBID_MAGIC) > 0.0;
+    }
+
     int check(BattleUnit actor, BattleAction action, SkillTable skill) {
         if (!subject(actor.state(), skill) || actor.state().getSkillRanksOrDefault(skill.getId(), 0) == 0
                 || skill.getAbilityKind() != 1 || hasState(actor, SEAL_ACTIVE)
-                || ((skill.getActionTags() & 1) != 0 && hasState(actor, SEAL_PHYSICAL))
-                || ((skill.getActionTags() & 2) != 0 && hasState(actor, SEAL_MAGIC))) return ActionChecks.SKILL_CANNOT_CAST_IN_STATE;
+                || ((skill.getActionTags() & 1) != 0 && (hasState(actor, SEAL_PHYSICAL) || isPhysicalForbidden(actor)))
+                || ((skill.getActionTags() & 2) != 0 && (hasState(actor, SEAL_MAGIC) || isMagicForbidden(actor)))) return ActionChecks.SKILL_CANNOT_CAST_IN_STATE;
+        if (actor.state().getChargingSkillId() != 0) {
+            for (int effectId : skill.getEffectList()) {
+                BuffTable effect = row(effectId);
+                if (effect != null && effect.getBattleOp() == PREPARE_CAST) {
+                    return ActionChecks.SKILL_CANNOT_CAST_IN_STATE;
+                }
+            }
+        }
         if (actor.state().getSkillCooldownRoundsOrDefault(skill.getId(), 0) != 0) return ActionChecks.SKILL_COOLDOWN_NOT_READY;
         if ((skill.getMaxBattleUses() != 0 && Integer.compareUnsigned(actor.state().getAbilityUseCountsOrDefault(skill.getId(), 0),
                 skill.getMaxBattleUses()) >= 0) || (skill.getHealthCostMode() == 1 && Long.compareUnsigned(actor.health(), 1) <= 0)
@@ -136,8 +152,64 @@ final class ConfiguredBattle {
         for (BattleUnit target : ctx.units()) {
             if (targetAllowed(actor, target, skill)) (target.actorId() == primary ? chosen : candidates).add(target);
         }
-        fillTargets(chosen, candidates, limit);
+        int policy = skill.getSecondaryTargetPolicy();
+        if (policy == POLICY_RANDOM) {
+            fillTargets(chosen, candidates, limit);
+            return chosen;
+        }
+        // 策略模式副目标排序：保留主目标，其余名额按策略最优值选取；并列集合内用确定性 RNG 打破平局。
+        while (chosen.size() < limit && !candidates.isEmpty()) {
+            List<Integer> bestIndices = new ArrayList<>();
+            for (int i = 0; i < candidates.size(); i++) {
+                if (bestIndices.isEmpty()) {
+                    bestIndices.add(i);
+                    continue;
+                }
+                int cmp = compareSecondaryTarget(policy, candidates.get(i), candidates.get(bestIndices.getFirst()));
+                if (cmp > 0) {
+                    bestIndices.clear();
+                    bestIndices.add(i);
+                } else if (cmp == 0) {
+                    bestIndices.add(i);
+                }
+            }
+            if (bestIndices.isEmpty()) break;
+            int chosenPos = bestIndices.size() == 1
+                    ? bestIndices.getFirst()
+                    : bestIndices.get((int) ctx.rng().randIndex(bestIndices.size()));
+            chosen.add(candidates.remove(chosenPos));
+        }
         return chosen;
+    }
+
+    private int compareSecondaryTarget(int policy, BattleUnit lhs, BattleUnit rhs) {
+        return switch (policy) {
+            case POLICY_HIGHEST_PHYSICAL_ATTACK ->
+                    Long.compareUnsigned(ctx.effectivePhysicalAttack(lhs), ctx.effectivePhysicalAttack(rhs));
+            case POLICY_HIGHEST_MAGIC_ATTACK ->
+                    Long.compareUnsigned(ctx.effectiveMagicAttack(lhs), ctx.effectiveMagicAttack(rhs));
+            case POLICY_LOWEST_HEALTH_VALUE -> Long.compareUnsigned(rhs.health(), lhs.health());
+            case POLICY_LOWEST_HEALTH_RATIO -> {
+                double a = lhs.maxHealth() != 0L
+                        ? Unsigned.toDouble(lhs.health()) / Unsigned.toDouble(lhs.maxHealth()) : 1.0;
+                double b = rhs.maxHealth() != 0L
+                        ? Unsigned.toDouble(rhs.health()) / Unsigned.toDouble(rhs.maxHealth()) : 1.0;
+                yield Math.abs(a - b) <= 1e-12 ? 0 : (a < b ? 1 : -1);
+            }
+            case POLICY_LOWEST_PHYSICAL_DEFENSE -> {
+                double a = ctx.effectiveMitigationScore(lhs, false);
+                double b = ctx.effectiveMitigationScore(rhs, false);
+                yield Math.abs(a - b) <= 1e-9 ? 0 : (a < b ? 1 : -1);
+            }
+            case POLICY_LOWEST_MAGIC_DEFENSE -> {
+                double a = ctx.effectiveMitigationScore(lhs, true);
+                double b = ctx.effectiveMitigationScore(rhs, true);
+                yield Math.abs(a - b) <= 1e-9 ? 0 : (a < b ? 1 : -1);
+            }
+            case POLICY_LOWEST_ROUND_SPEED ->
+                    Long.compareUnsigned(ctx.roundStartSpeed(rhs), ctx.roundStartSpeed(lhs));
+            default -> 0;
+        };
     }
 
     void fillTargets(List<BattleUnit> chosen, List<BattleUnit> candidates, int limit) {
@@ -201,18 +273,21 @@ final class ConfiguredBattle {
                 if (after == 0) ctx.handleDeath(actor, actor.actorId());
             }
         }
-        boolean landed = false;
+        int effectsBegin = ctx.events().eventCount();
         for (int i = 0; i < targets.size(); i++) {
             BattleUnit target = targets.get(i);
             if (target.fled()) continue;
             ctx.events().setHitIndex(i);
             Hit hit = cast.derived(origin);
             hit.primaryFocusBonus = cast.primaryFocusBonus;
+            final int targetOrdinal = i;
             var eligible = skill.getEffectList().stream().map(this::row)
-                    .filter(r -> r != null && (r.getBattleOp() != CONSUME || (tagged(target,r.getRequiredTag())
+                    .filter(r -> r != null
+                            && !(targetOrdinal > 0 && r.getEffectTarget() == 1)
+                            && (r.getBattleOp() != CONSUME || (tagged(target,r.getRequiredTag())
                             && tagged(target,r.getSecondRequiredTag())))).toList();
             for (var effect : eligible) {
-                landed |= effects.apply(actor, target, effect.getId(), hit, 0);
+                effects.apply(actor, target, effect.getId(), hit, 0);
                 switch (effect.getBattleOp()) {
                     case DAMAGE -> hit.damageOrdinal++;
                     case HEAL -> hit.healOrdinal++;
@@ -222,7 +297,22 @@ final class ConfiguredBattle {
             }
         }
         ctx.events().setHitIndex(0);
-        if (landed && origin == DIRECT && actor.isActive()) trigger(actor, targets.getFirst(), AFTER_SKILL, skill.getDamageType(), cast);
+        boolean hitDirectly = false;
+        boolean landedDirectStrike = false;
+        for (int idx = effectsBegin; idx < ctx.events().eventCount(); idx++) {
+            BattleEventItem ev = ctx.events().eventAt(idx);
+            if (ev.getEventType() == BATTLE_EVENT_DAMAGE && ev.getSourceId() == actor.actorId()
+                    && ev.getSkillTableId() == skill.getId() && ev.getDamageOrigin() == DIRECT) {
+                if (ev.getValue() != 0L) hitDirectly = true;
+                if (ev.getValue() != 0L || ev.getAbsorbed() != 0L) landedDirectStrike = true;
+            }
+        }
+        if (origin == DIRECT && landedDirectStrike && actor.isActive()) {
+            consumeOneShotAttackModifiers(actor, skill.getDamageType());
+        }
+        if (origin == DIRECT && hitDirectly && actor.isActive()) {
+            trigger(actor, targets.getFirst(), AFTER_SKILL, skill.getDamageType(), cast);
+        }
     }
 
     Optional<BattleAction> auto(BattleUnit actor, ActionChecks checks) {
@@ -253,19 +343,22 @@ final class ConfiguredBattle {
 
     boolean control(BattleUnit actor, BattleAction action, ActionChecks checks) {
         if (hasState(actor, FREEZE) || hasState(actor, SLEEP)) return true;
-        if (!hasState(actor, CONFUSION)) return action.getActionType() == eBattleActionType.BATTLE_ACTION_ATTACK && hasState(actor, SEAL_PHYSICAL);
+        if (!hasState(actor, CONFUSION)) return action.getActionType() == eBattleActionType.BATTLE_ACTION_ATTACK
+                && (hasState(actor, SEAL_PHYSICAL) || isPhysicalForbidden(actor));
         var allies = ctx.units().stream().filter(t -> t != actor && t.teamIndex() == actor.teamIndex() && t.isActive()).toList();
         if (!allies.isEmpty()) {
             var ally = allies.get(allies.size() == 1 ? 0 : (int)ctx.rng().randIndex(allies.size()));
             for (int id : actor.state().getSkillTableIdsList()) {
                 SkillTable skill = skill(id);
                 if (skill != null && skill.getBattleModel() == 1 && (skill.getActionTags() & 3) != 0
+                        && !((skill.getActionTags() & 1) != 0 && (hasState(actor, SEAL_PHYSICAL) || isPhysicalForbidden(actor)))
+                        && !((skill.getActionTags() & 2) != 0 && (hasState(actor, SEAL_MAGIC) || isMagicForbidden(actor)))
                         && checks.checkActionPrerequisites(actor, action(id, 0)) == ActionChecks.SUCCESS) {
                     cast(actor,skill,ally.actorId(), CONFUSED, 1);
                     return true;
                 }
             }
-            if (!hasState(actor,SEAL_PHYSICAL)) {
+            if (!hasState(actor,SEAL_PHYSICAL) && !isPhysicalForbidden(actor)) {
                 ctx.events().append(BATTLE_EVENT_ATTACK,actor.actorId(),ally.actorId());
                 Hit hit = new Hit(0,1,CONFUSED,0);
                 impact.weaponHit(actor,ally,CombatDamageRules.PHYSICAL_DAMAGE,1,hit,BATTLE_HIT_NORMAL);
@@ -305,7 +398,10 @@ final class ConfiguredBattle {
             switch (row.getBattleOp()) {
                 case MIRROR -> {
                     if (!other.isActive() || hasState(owner, FREEZE) || hasState(owner, SLEEP)) break;
+                    if ((type == CombatDamageRules.PHYSICAL_DAMAGE && isPhysicalForbidden(owner))
+                            || (type == CombatDamageRules.MAGIC_DAMAGE && isMagicForbidden(owner))) break;
                     SkillTable incoming = skill(hit.skill);
+                    if (incoming != null && (other.isBoss() || incoming.getForbidCopy() != 0)) break;
                     double scale = row.getRatio() > 0 ? row.getRatio() : 1;
                     if (incoming != null && incoming.getBattleModel() == 1) cast(owner, incoming, other.actorId(), MIRRORED, scale);
                     else impact.weaponHit(owner,other,type,scale,hit.derived(MIRRORED),BATTLE_HIT_MIRROR);
@@ -350,7 +446,188 @@ final class ConfiguredBattle {
             ctx.events().append(BATTLE_EVENT_MAX_HEALTH,entry.getCasterId(),target.actorId()).setTargetMaxHealthAfter(max).setTargetHealthAfter(target.health());
         }
         target.state().removeBuffs(index);
+        if (row != null && row.getBattleOp() == PREPARE_CAST) {
+            syncChargingSkillId(target);
+        }
         ctx.events().append(BATTLE_EVENT_BUFF_REMOVE, entry.getCasterId(),target.actorId()).setBuffTableId(entry.getBuffTableId()).setBuffInstanceId(id);
+    }
+
+    boolean tryConsumeControlImmunity(BattleUnit caster, BattleUnit target, BuffTable row) {
+        for (int i = 0; i < target.state().getBuffsCount(); i++) {
+            BattleBuffEntry saved = target.state().getBuffs(i);
+            BuffTable guard = row(saved);
+            if (guard == null || guard.getBattleOp() != CONTROL_IMMUNITY) {
+                continue;
+            }
+            long guardId = saved.getBuffId();
+            if (saved.getRemainingHits() <= 1) {
+                remove(target, guardId);
+            } else {
+                target.state().getBuffsBuilder(i).setRemainingHits(saved.getRemainingHits() - 1);
+            }
+            if (target.isPlayer()) {
+                ctx.encounter.markAntiControlOrSeasonSkill(target.actorId());
+            }
+            ctx.events().append(BATTLE_EVENT_RESIST, caster.actorId(), target.actorId())
+                    .setBuffTableId(row.getId());
+            return true;
+        }
+        return false;
+    }
+
+    void incrementHitVulnerability(BattleUnit target) {
+        int roundIndex = ctx.roundIndex();
+        long currentGroup = Integer.toUnsignedLong(ctx.events().groupId());
+        for (int i = 0; i < target.state().getBuffsCount(); i++) {
+            BattleBuffEntry saved = target.state().getBuffs(i);
+            BuffTable row = row(saved);
+            if (row == null || row.getBattleOp() != HIT_VULNERABILITY) {
+                continue;
+            }
+            // 同一行动 group_id 对同一目标至多叠 1 层，防止连击或多段技能单次叠满。
+            if (saved.getLastTriggerRound() == roundIndex && saved.getSecondaryValue() == currentGroup) {
+                continue;
+            }
+            int cap = Math.max(1, row.getStackLimit());
+            if (Integer.compareUnsigned(saved.getStacks(), cap) >= 0) {
+                continue;
+            }
+            target.state().getBuffsBuilder(i)
+                    .setStacks(saved.getStacks() + 1)
+                    .setLastTriggerRound(roundIndex)
+                    .setSecondaryValue(currentGroup);
+        }
+    }
+
+    double hitVulnerabilityBonus(BattleUnit target) {
+        double bonus = 0.0;
+        for (BattleBuffEntry entry : target.state().getBuffsList()) {
+            BuffTable row = row(entry);
+            if (row == null || row.getBattleOp() != HIT_VULNERABILITY) {
+                continue;
+            }
+            if (entry.getStacks() != 0 && Double.isFinite(row.getRatio())) {
+                bonus += row.getRatio() * Integer.toUnsignedLong(entry.getStacks());
+            }
+        }
+        return bonus;
+    }
+
+    void syncChargingSkillId(BattleUnit actor) {
+        int chargingId = 0;
+        for (BattleBuffEntry entry : actor.state().getBuffsList()) {
+            BuffTable row = row(entry);
+            if (row != null && row.getBattleOp() == PREPARE_CAST) {
+                chargingId = entry.getSourceSkillId();
+                break;
+            }
+        }
+        actor.state().setChargingSkillId(chargingId);
+    }
+
+    boolean executePreparedCastIfReady(BattleUnit actor) {
+        int prepareIndex = -1;
+        for (int i = 0; i < actor.state().getBuffsCount(); i++) {
+            BattleBuffEntry entry = actor.state().getBuffs(i);
+            BuffTable row = row(entry);
+            if (row != null && row.getBattleOp() == PREPARE_CAST
+                    && Integer.compareUnsigned(entry.getAppliedRound(), ctx.roundIndex()) < 0) {
+                prepareIndex = i;
+                break;
+            }
+        }
+        if (prepareIndex < 0) {
+            return false;
+        }
+        BattleBuffEntry saved = actor.state().getBuffs(prepareIndex);
+        BuffTable prepareRow = row(saved);
+        SkillTable skillRow = skill(saved.getSourceSkillId());
+        boolean blocked = prepareRow == null || skillRow == null
+                || ctx.actorHasBuffOfType(actor, BattleConstants.BUFF_TYPE_STUN)
+                || ctx.actorHasBuffOfType(actor, BattleConstants.BUFF_TYPE_FREEZE)
+                || hasState(actor, FREEZE)
+                || hasState(actor, SLEEP)
+                || hasState(actor, CONFUSION)
+                || hasState(actor, SEAL_ACTIVE)
+                || ((skillRow.getActionTags() & 1) != 0 && (hasState(actor, SEAL_PHYSICAL) || isPhysicalForbidden(actor)))
+                || ((skillRow.getActionTags() & 2) != 0 && (hasState(actor, SEAL_MAGIC) || isMagicForbidden(actor)));
+
+        // 无论释放或被打断，蓄力状态均在本回合窗口消耗清除（打断不退蓝、不退冷却）。
+        remove(actor, saved.getBuffId());
+        if (blocked) {
+            return false;
+        }
+
+        List<BattleUnit> chosen = targets(actor, skillRow, saved.getSecondaryValue());
+        if (chosen.isEmpty()) {
+            return true;
+        }
+
+        int rank = Math.max(1, actor.state().getSkillRanksOrDefault(skillRow.getId(), 1));
+        Hit cast = new Hit(skillRow.getId(), rank, DIRECT, chosen.getFirst().actorId());
+        int subjectMaxTargets = actor.isPet()
+                ? (skillRow.getPetMaxTargets() > 0 ? skillRow.getPetMaxTargets() : skillRow.getMaxTargets())
+                : skillRow.getMaxTargets();
+        cast.primaryFocusBonus = ctx.isCompetitivePvp()
+                && actor.isPlayer()
+                && subjectMaxTargets > 1
+                && saved.getSecondaryValue() != 0L
+                && chosen.getFirst().actorId() == saved.getSecondaryValue()
+                && chosen.size() < subjectMaxTargets;
+        cast.isMultiTargetSkill = subjectMaxTargets > 1;
+
+        ctx.events().append(BATTLE_EVENT_SKILL, actor.actorId(), cast.primary)
+                .setSkillTableId(skillRow.getId())
+                .setHitKind(BATTLE_HIT_NORMAL);
+
+        int effectsBegin = ctx.events().eventCount();
+        List<Integer> payloadBuffs = prepareRow.getSubBuffList();
+        for (int i = 0; i < chosen.size(); i++) {
+            BattleUnit target = chosen.get(i);
+            if (target.fled()) continue;
+            ctx.events().setHitIndex(i);
+            Hit targetHit = cast.derived(DIRECT);
+            targetHit.primaryFocusBonus = cast.primaryFocusBonus;
+            for (int childBuffId : payloadBuffs) {
+                effects.apply(actor, target, childBuffId, targetHit, 1);
+                BuffTable def = row(childBuffId);
+                if (def != null && def.getBattleOp() == DAMAGE) {
+                    targetHit.damageOrdinal++;
+                }
+            }
+        }
+        ctx.events().setHitIndex(0);
+
+        boolean hitDirectly = false;
+        for (int idx = effectsBegin; idx < ctx.events().eventCount(); idx++) {
+            BattleEventItem ev = ctx.events().eventAt(idx);
+            if (ev.getEventType() == BATTLE_EVENT_DAMAGE && ev.getSourceId() == actor.actorId()
+                    && ev.getSkillTableId() == skillRow.getId()
+                    && ev.getValue() != 0L && ev.getDamageOrigin() == DIRECT) {
+                hitDirectly = true;
+                break;
+            }
+        }
+        if (hitDirectly && actor.isActive()) {
+            consumeOneShotAttackModifiers(actor, skillRow.getDamageType());
+            trigger(actor, chosen.getFirst(), AFTER_SKILL, skillRow.getDamageType(), cast);
+        }
+        return true;
+    }
+
+    void consumeOneShotAttackModifiers(BattleUnit source, int damageType) {
+        int targetStat = damageType == CombatDamageRules.PHYSICAL_DAMAGE
+                ? NEXT_PHYSICAL_ATTACK : NEXT_MAGIC_ATTACK;
+        List<Long> toRemove = new ArrayList<>();
+        for (BattleBuffEntry entry : source.state().getBuffsList()) {
+            BuffTable row = row(entry);
+            if (row != null && row.getBattleOp() == MODIFIER && row.getModifierStat() == targetStat) {
+                toRemove.add(entry.getBuffId());
+            }
+        }
+        for (long buffId : toRemove) {
+            remove(source, buffId);
+        }
     }
 
     void beginRound() {

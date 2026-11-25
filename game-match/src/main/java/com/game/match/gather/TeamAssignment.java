@@ -42,6 +42,13 @@ public final class TeamAssignment {
             return snake(members, ratingCenti == null ? Map.of() : ratingCenti);
         }
         int[] teams = new int[members.size()];
+        if (mode == MatchMode.MATCH_MODE_SEASON_TOURNAMENT) {
+            int half = members.size() / 2;
+            for (int i = 0; i < teams.length; i++) {
+                teams[i] = i >= half ? 1 : 0;
+            }
+            return teams;
+        }
         if (mode == MatchMode.MATCH_MODE_1V1 || mode == MatchMode.MATCH_MODE_PVP_CHALLENGE) {
             for (int i = 0; i < teams.length; i++) {
                 teams[i] = i;

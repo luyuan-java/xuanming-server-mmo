@@ -39,17 +39,36 @@ public class CommerceConfiguration {
         return new CommerceStore(source);
     }
     @Bean
+    public SellerCreditService.RoleOwnershipLookup tradeRoleOwnershipLookup(DataSource source) {
+        return new SellerCreditService.SqlRoleOwnershipLookup(source);
+    }
+    @Bean
+    public ReferencePrice.Reader tradeReferencePriceReader(DataSource source) {
+        return new ReferencePrice.SqlReader(source);
+    }
+    @Bean
+    public SellerCreditService sellerCreditService(
+            DataSource source, ListingIds ids, SellerCreditService.RoleOwnershipLookup ownership,
+            CommerceProperties p, com.fasterxml.jackson.databind.ObjectMapper json, SchemaReady ready) {
+        return new SellerCreditService(
+                new SellerCreditService.SqlStore(source, ids::nextId, System::currentTimeMillis, json),
+                ownership,
+                p.sellerCreditPolicy());
+    }
+    @Bean
     public CommerceEngine commerceEngine(
             CommerceStore store, ListingIds ids, CommerceProperties p, DataSource source,
+            ReferencePrice.Reader referencePrices,
             org.springframework.beans.factory.ObjectProvider<PlayerTradeGuard.FriendRelationReader> friends,
             org.springframework.beans.factory.ObjectProvider<SellerCreditService> sellerCredits) {
-        CommerceEngine engine = new CommerceEngine(store, ids::nextId, p.policy(), System::currentTimeMillis);
+        CommerceEngine engine = new CommerceEngine(store, ids::nextId, p.policy(), System::currentTimeMillis)
+                .withReferencePrices(referencePrices);
         PlayerTradeGuard.Policy tradePolicy = p.playerTradePolicy();
         if (!tradePolicy.mode().isEmpty()) {
             engine = engine.withPlayerTradeGuard(new PlayerTradeGuard(
                     tradePolicy,
                     friends.getIfAvailable(),
-                    new ReferencePrice.SqlReader(source),
+                    referencePrices,
                     new PlayerTradeGuard.SqlDailyTracker(source)));
         }
         SellerCreditService credits = sellerCredits.getIfAvailable();
@@ -118,10 +137,12 @@ public class CommerceConfiguration {
     @ConditionalOnProperty(name = "game.trade.rmb.enabled", havingValue = "true")
     public RmbConsignmentService rmbConsignmentService(CommerceEngine engine, OfficialMallClient mall,
             RmbConsignmentProperties properties,
-            org.springframework.beans.factory.ObjectProvider<RmbConsignmentService.TextGuard> textGuard) {
+            org.springframework.beans.factory.ObjectProvider<RmbConsignmentService.TextGuard> textGuard,
+            org.springframework.beans.factory.ObjectProvider<SellerCreditService.RoleOwnershipLookup> ownership) {
         return new RmbConsignmentService(engine, new RmbConsignmentClient(mall),
             new PlayerTradeClient(playerTrades, System.getenv("GAME_PLAYER_TRADE_SECRET")),
-            properties.currencies(), textGuard.getIfAvailable(() -> RmbConsignmentService.TextGuard.ALLOW));
+            properties.currencies(), textGuard.getIfAvailable(() -> RmbConsignmentService.TextGuard.ALLOW),
+            ownership.getIfAvailable());
     }
     @Bean(initMethod = "start", destroyMethod = "close")
     public CommerceRuntime commerceRuntime(CommerceEngine e, ReliableAssetDelivery delivery,

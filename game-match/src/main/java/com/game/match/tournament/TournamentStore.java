@@ -74,6 +74,9 @@ public final class TournamentStore {
     public record PrepareMatchOutcome(TournamentMatchView match, LaunchSpec launch) {
     }
 
+    public record ClaimableReward(long rewardId, int seasonId, int tierKind, int tierId, byte[] attachments) {
+    }
+
     private record SeasonRow(int seasonId, String seasonKey, String seasonName, int ruleVersion, int stage,
                              long registrationStartMs, long qualifierStartMs, long knockoutStartMs,
                              long settleStartMs, long endMs, int battleTeamSize, int rosterMaxSize,
@@ -102,6 +105,10 @@ public final class TournamentStore {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.tables = Objects.requireNonNull(tables, "tables");
         this.clockMs = clockMs == null ? System::currentTimeMillis : clockMs;
+    }
+
+    public TournamentTables tables() {
+        return tables;
     }
 
     private void requireOpen() {
@@ -1011,6 +1018,65 @@ public final class TournamentStore {
                 }
             }
             return resp.build();
+        });
+    }
+
+    public List<ClaimableReward> claimableRewards(long playerId, int seasonId) throws SQLException {
+        return inTx(c -> {
+            String sql = seasonId == 0
+                    ? "SELECT reward_id,season_id,tier_kind,tier_id,attachments FROM " + MatchFeatureTables.TOURNAMENT_REWARD
+                    + " WHERE player_id=? AND delivery_state=? ORDER BY season_id DESC, tier_kind ASC"
+                    : "SELECT reward_id,season_id,tier_kind,tier_id,attachments FROM " + MatchFeatureTables.TOURNAMENT_REWARD
+                    + " WHERE player_id=? AND season_id=? AND delivery_state=? ORDER BY tier_kind ASC";
+            List<ClaimableReward> list = new ArrayList<>();
+            try (PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setLong(1, playerId);
+                if (seasonId == 0) {
+                    ps.setInt(2, TournamentRewardDeliveryState.TOURNAMENT_REWARD_DELIVERY_CLAIMABLE_VALUE);
+                } else {
+                    ps.setInt(2, seasonId);
+                    ps.setInt(3, TournamentRewardDeliveryState.TOURNAMENT_REWARD_DELIVERY_CLAIMABLE_VALUE);
+                }
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        byte[] raw = rs.getBytes(5);
+                        list.add(new ClaimableReward(rs.getLong(1), rs.getInt(2), rs.getInt(3), rs.getInt(4),
+                                raw == null ? new byte[0] : raw));
+                    }
+                }
+            }
+            return list;
+        });
+    }
+
+    public TournamentPlayerRewardView markRewardClaimed(int seasonId, long playerId, int tierKind, long mailId) throws SQLException {
+        long now = clockMs.getAsLong();
+        return inTx(c -> {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE " + MatchFeatureTables.TOURNAMENT_REWARD
+                            + " SET delivery_state=?,mail_id=?,claimed_ms=?,updated_ms=? WHERE season_id=? AND player_id=? AND tier_kind=?")) {
+                ps.setInt(1, TournamentRewardDeliveryState.TOURNAMENT_REWARD_DELIVERY_CLAIMED_VALUE);
+                ps.setLong(2, mailId);
+                ps.setLong(3, now);
+                ps.setLong(4, now);
+                ps.setInt(5, seasonId);
+                ps.setLong(6, playerId);
+                ps.setInt(7, tierKind);
+                ps.executeUpdate();
+            }
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT * FROM " + MatchFeatureTables.TOURNAMENT_REWARD
+                            + " WHERE season_id=? AND player_id=? AND tier_kind=?")) {
+                ps.setInt(1, seasonId);
+                ps.setLong(2, playerId);
+                ps.setInt(3, tierKind);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        return scanRewardView(rs);
+                    }
+                }
+            }
+            throw new DomainException(MatchErrorTip.match_error.kMatchTournamentRewardUnavailable_VALUE);
         });
     }
 

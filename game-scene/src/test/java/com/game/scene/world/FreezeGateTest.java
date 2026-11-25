@@ -237,7 +237,8 @@ class FreezeGateTest {
         AttributeService attributes = new AttributeService(AttributeTables.from(config), clock, currency);
         MissionService missions = new MissionService(MissionTables.from(config), bags, clock);
         SkillService skills = new SkillService(SkillTables.from(config), clock, metrics, Contracts.IDS);
-        PetService petService = new PetService(PetTables.from(config), currency, guids, clock, new SplittableRandom(7));
+        PetService petService = new PetService(PetTables.from(config), currency, guids, clock, new SplittableRandom(7))
+                .withBags(bags);
         PetFeature pets = new PetFeature(petService, Contracts.REGISTRY);
         world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, sink, repo, new AtomicLong(5000)::incrementAndGet,
                 clock, metrics, p -> {
@@ -315,7 +316,8 @@ class FreezeGateTest {
         expected.put("ScenePetClientPlayerGetPetEntries", FreezePolicy.READ_ONLY);
         expected.put("ScenePetClientPlayerPreviewPetEntries", FreezePolicy.READ_ONLY);
         for (String write : List.of("SummonPet", "RecallPet", "AllocatePetPoints", "ResetPetPoints",
-                "AutoAllocatePetPoints", "RenamePet", "GmGrantPet", "BuyPet", "SavePetEntries")) {
+                "AutoAllocatePetPoints", "RenamePet", "GmGrantPet", "BuyPet", "SavePetEntries",
+                "SwitchPetEntryPreset", "AscendPetTier")) {
             expected.put("ScenePetClientPlayer" + write, FreezePolicy.GATED);
         }
 
@@ -586,6 +588,10 @@ class FreezeGateTest {
                 .setStateVersion(1).setConfigVersion(entryVersion).build(), PASSED));
         probes.add(new Probe(petSvc, "SavePetEntries", com.game.proto.SavePetEntriesRequest.newBuilder().setPetId(petId)
                 .setStateVersion(1).setConfigVersion(entryVersion).setRequestId("freeze-probe-0000001").build(), INVALID_PARAMETER));
+        probes.add(new Probe(petSvc, "SwitchPetEntryPreset", com.game.proto.SwitchPetEntryPresetRequest.newBuilder().setPetId(petId)
+                .setSlotId(2).setTag(1).setStateVersion(1).setConfigVersion(entryVersion).setRequestId("freeze-preset-000001").build(), INVALID_PARAMETER));
+        probes.add(new Probe(petSvc, "AscendPetTier", com.game.proto.AscendPetTierRequest.newBuilder().setPetId(petId)
+                .setExpectedTier(1).setClientRequestId(88001L).build(), INVALID_PARAMETER));
 
         probes.add(new Probe("SceneSkillClientPlayer", "ReleaseSkill", ReleaseSkillRequest.newBuilder()
                 .setSkillTableId(1).setTargetId(player.entity())

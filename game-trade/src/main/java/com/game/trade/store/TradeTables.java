@@ -1,12 +1,16 @@
 package com.game.trade.store;
 
 import com.game.pbmysql.PbMysql;
+import com.game.trade.store.pb.TradeAssetOpRow;
+import com.game.trade.store.pb.TradeCommerceGuardRow;
+import com.game.trade.store.pb.TradeCommerceRow;
 import com.game.trade.store.pb.TradeFavoriteRow;
 import com.game.trade.store.pb.TradeListingRow;
-import com.game.trade.store.pb.TradeCommerceRow;
-import com.game.trade.store.pb.TradeCommerceGuardRow;
 import com.game.trade.store.pb.TradePlayerOpSeqRow;
-import com.game.trade.store.pb.TradeAssetOpRow;
+import com.game.trade.store.pb.TradeSellerCompletedOrderRow;
+import com.game.trade.store.pb.TradeSellerCreditRow;
+import com.game.trade.store.pb.TradeSellerReviewRow;
+import com.game.trade.store.pb.TradeSellerViolationRow;
 import com.google.protobuf.Message;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -28,12 +32,32 @@ public final class TradeTables {
     public static final String LISTING = "trade_listing";
     /** trade_favorite（收藏）。 */
     public static final String FAVORITE = "trade_favorite";
+    /** trade_seller_credit（卖家店铺信用档案）。 */
+    public static final String SELLER_CREDIT = "trade_seller_credit";
+    /** trade_seller_completed_order（卖家信用已计成交幂等账本）。 */
+    public static final String SELLER_COMPLETED_ORDER = "trade_seller_completed_order";
+    /** trade_seller_review（买家评价凭证）。 */
+    public static final String SELLER_REVIEW = "trade_seller_review";
+    /** trade_seller_violation（核实违约黑历史）。 */
+    public static final String SELLER_VIOLATION = "trade_seller_violation";
 
     /** 表名，与 {@link #PROTOTYPES} 一一对应。手写 SQL 里的表名字面量必须与这里（= trade_tables.proto 的 table_name）一致，TradeTablesTest 钉住。 */
-    public static final List<String> NAMES = List.of(LISTING, FAVORITE,"trade_commerce","trade_commerce_guard","trade_player_op_seq","trade_asset_op");
+    public static final List<String> NAMES = List.of(
+            LISTING, FAVORITE, "trade_commerce", "trade_commerce_guard", "trade_player_op_seq", "trade_asset_op",
+            SELLER_CREDIT, SELLER_COMPLETED_ORDER, SELLER_REVIEW, SELLER_VIOLATION);
 
     /** 表消息原型（登记顺序同基线 Tables()）。 */
-    public static final List<Message> PROTOTYPES = List.of(TradeListingRow.getDefaultInstance(), TradeFavoriteRow.getDefaultInstance(),TradeCommerceRow.getDefaultInstance(),TradeCommerceGuardRow.getDefaultInstance(),TradePlayerOpSeqRow.getDefaultInstance(),TradeAssetOpRow.getDefaultInstance());
+    public static final List<Message> PROTOTYPES = List.of(
+            TradeListingRow.getDefaultInstance(),
+            TradeFavoriteRow.getDefaultInstance(),
+            TradeCommerceRow.getDefaultInstance(),
+            TradeCommerceGuardRow.getDefaultInstance(),
+            TradePlayerOpSeqRow.getDefaultInstance(),
+            TradeAssetOpRow.getDefaultInstance(),
+            TradeSellerCreditRow.getDefaultInstance(),
+            TradeSellerCompletedOrderRow.getDefaultInstance(),
+            TradeSellerReviewRow.getDefaultInstance(),
+            TradeSellerViolationRow.getDefaultInstance());
 
     private TradeTables() {
     }

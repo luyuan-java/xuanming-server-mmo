@@ -5,35 +5,69 @@ import static com.game.trade.commerce.CommerceRules.*;
 import com.game.common.deadline.Deadline;
 import com.game.common.player.HomeZones;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.common.base.CurrencyType;
 import com.game.proto.trade.*;
+import com.game.trade.dispatch.TradeMethods;
 import com.game.trade.store.pb.TradeCommerceRow;
 import com.google.protobuf.Message;
 import java.sql.SQLException;
 import java.util.*;
+import java.util.function.LongSupplier;
 
 /** 客户端只选已有资产；应答摘要来自已提交托管快照，所有写入经同一合同引擎。 */
 public final class CommerceClientService {
+    private static final int MAX_SELLER_REVIEW_COMMENT_CODEPOINTS = 200;
+    private static final int REFERENCE_WINDOW_DAYS = 7;
+
     private final CommerceEngine engine;
     private final HomeZones homes;
     private final OfficialMallClient mall;
     private final RmbConsignmentService rmb;
+    private final RmbConsignmentService.TextGuard textGuard;
+    private final SellerCreditService credits;
+    private final ReferencePrice.Reader referencePrices;
+    private final PlayerTradeGuard playerTradeGuard;
+    private final LongSupplier clock;
+
     public CommerceClientService(CommerceEngine engine, HomeZones homes) {
-        this(engine, homes, null);
+        this(engine, homes, null, null, null, null, null, null, null);
     }
     public CommerceClientService(CommerceEngine engine, HomeZones homes, OfficialMallClient mall) {
-        this(engine, homes, mall, null);
+        this(engine, homes, mall, null, null, null, null, null, null);
     }
     public CommerceClientService(CommerceEngine engine, HomeZones homes, OfficialMallClient mall, RmbConsignmentService rmb) {
+        this(engine, homes, mall, rmb, null, null, null, null, null);
+    }
+    public CommerceClientService(CommerceEngine engine, HomeZones homes, OfficialMallClient mall, RmbConsignmentService rmb,
+                                 RmbConsignmentService.TextGuard textGuard) {
+        this(engine, homes, mall, rmb, textGuard, null, null, null, null);
+    }
+    public CommerceClientService(CommerceEngine engine, HomeZones homes, OfficialMallClient mall, RmbConsignmentService rmb,
+                                 RmbConsignmentService.TextGuard textGuard, SellerCreditService credits,
+                                 ReferencePrice.Reader referencePrices, PlayerTradeGuard playerTradeGuard,
+                                 LongSupplier clock) {
         this.engine = engine;
         this.homes = homes;
         this.mall = mall;
         this.rmb = rmb;
+        this.textGuard = textGuard == null ? RmbConsignmentService.TextGuard.ALLOW : textGuard;
+        this.credits = credits != null ? credits : (engine == null ? null : engine.credits());
+        this.referencePrices = referencePrices != null ? referencePrices : (engine == null ? null : engine.referencePrices());
+        this.playerTradeGuard = playerTradeGuard != null ? playerTradeGuard : (engine == null ? null : engine.playerTradeGuard());
+        this.clock = clock != null ? clock : (engine != null ? engine.clock : System::currentTimeMillis);
     }
     public Message handle(String method, com.game.api.proto.SessionContext session, Message input, Message prototype, Deadline d) {
         try {
+            if (TradeMethods.CREDIT_REQUESTS.contains(method)) {
+                if (session == null || session.getPlayerId() == 0) {
+                    return rejection(prototype, INVALID);
+                }
+                return handleCredit(method, session.getPlayerId(), session.getAccount(), input, prototype, d);
+            }
             if (!RmbConsignmentService.METHODS.contains(method)) {
                 if (engine == null) return rejection(prototype, com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE);
-                var authorized = new CommerceClientService(engine.forActor(session), homes, mall, rmb);
+                var authorized = new CommerceClientService(engine.forActor(session), homes, mall, rmb, textGuard,
+                        credits, referencePrices, playerTradeGuard, clock);
                 return authorized.handle(method, session.getPlayerId(), input, prototype, d);
             }
             if (rmb == null) return rejection(prototype, com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE);
@@ -51,6 +85,9 @@ public final class CommerceClientService {
         }
     }
     public Message handle(String method, long me, Message input, Message prototype, Deadline d) {
+        if (TradeMethods.CREDIT_REQUESTS.contains(method)) {
+            return handleCredit(method, me, "", input, prototype, d);
+        }
         if (engine == null)
             return rejection(prototype, com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE);
         try {
@@ -72,7 +109,12 @@ public final class CommerceClientService {
                 }
                 case "ConfirmPlayerTrade" ->
                     order(engine.mutate(me, id(((ConfirmPlayerTradeRequest) input).getOrderId()), "confirm", d));
-                case "CreateConsignment" -> order(engine.consignment(me, (CreateConsignmentRequest) input, d));
+                case "CreateConsignment" -> {
+                    var in = (CreateConsignmentRequest) input;
+                    if (in.getDesignatedBuyerPlayerId() != 0 && homes.homeZoneOf(in.getDesignatedBuyerPlayerId(), d) == 0)
+                        throw new Refusal(com.game.table.TradeErrorTip.trade_error.kTradeCounterpartyUnknown_VALUE);
+                    yield order(engine.consignment(me, in, d));
+                }
                 case "BuyConsignment" -> {
                     var in = (BuyConsignmentRequest) input;
                     if (in.getClientRequestId().length() < 8)
@@ -205,6 +247,7 @@ public final class CommerceClientService {
             .setSellerConfirmed(w.getSellerConfirmed())
             .setBuyerConfirmed(w.getBuyerConfirmed())
             .setRelatedId(Long.toUnsignedString(r.getKind() == 1 ? w.getSkuId() : r.getParentId()))
+            .setDesignatedBuyerPlayerId(w.getDesignatedBuyerPlayerId())
             .build();
     }
     String title(int config) {
@@ -341,5 +384,182 @@ public final class CommerceClientService {
             return null;
         });
         return out.build();
+    }
+
+    private Message handleCredit(String method, long me, String account, Message input, Message prototype, Deadline d) {
+        long nowMs = clock.getAsLong();
+        try {
+            CommerceStore.active(d);
+            if (me == 0) {
+                throw new Refusal(INVALID);
+            }
+            return switch (method) {
+                case TradeMethods.GET_SELLER_CREDIT -> getSellerCredit(me, (GetSellerCreditRequest) input, nowMs);
+                case TradeMethods.SUBMIT_SELLER_REVIEW ->
+                        submitSellerReview(me, account, (SubmitSellerReviewRequest) input, nowMs, d);
+                case TradeMethods.GET_MARKET_REFERENCE_PRICE ->
+                        getMarketReferencePrice((GetMarketReferencePriceRequest) input, nowMs);
+                case TradeMethods.GET_PLAYER_TRADE_QUOTA ->
+                        getPlayerTradeQuota(me, (GetPlayerTradeQuotaRequest) input, nowMs);
+                default -> rejection(prototype, com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE);
+            };
+        } catch (Refusal denied) {
+            return creditRejection(prototype, denied.tip(), nowMs);
+        } catch (SQLException | RuntimeException failure) {
+            return creditRejection(prototype, com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE, nowMs);
+        }
+    }
+
+    private SellerCreditResponse getSellerCredit(long me, GetSellerCreditRequest in, long nowMs) throws SQLException {
+        if (credits == null) {
+            throw new Refusal(com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE);
+        }
+        long targetId = in.getSellerPlayerId() == 0 ? me : in.getSellerPlayerId();
+        SellerCreditService.Profile prof = credits.getProfile(targetId, nowMs);
+        return SellerCreditResponse.newBuilder()
+                .setProfile(SellerCreditService.toView(prof))
+                .setServerNowMs(nowMs)
+                .build();
+    }
+
+    private SubmitSellerReviewResponse submitSellerReview(
+            long me, String account, SubmitSellerReviewRequest in, long nowMs, Deadline d) throws SQLException {
+        if (credits == null || engine == null) {
+            throw new Refusal(com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE);
+        }
+        SellerCreditService.Rating rating = SellerCreditService.Rating.fromCode(in.getRatingValue());
+        if (rating == SellerCreditService.Rating.UNSPECIFIED) {
+            throw new Refusal(INVALID);
+        }
+        String comment = in.getComment().trim();
+        if (comment.codePointCount(0, comment.length()) > MAX_SELLER_REVIEW_COMMENT_CODEPOINTS) {
+            throw new Refusal(INVALID);
+        }
+        if (!comment.isEmpty()) {
+            int rejectTip;
+            try {
+                rejectTip = textGuard.checkTradeTitle(me, account == null ? "" : account, comment, d);
+            } catch (RuntimeException unavailable) {
+                throw new Refusal(TEXT_CHECK_UNAVAILABLE);
+            }
+            if (rejectTip != 0) {
+                throw new Refusal(rejectTip);
+            }
+        }
+        long orderNum = parseCommerceOrderId(in.getOrderId());
+        TradeCommerceRow rec = engine.store.get(orderNum);
+        if (rec == null) {
+            throw new Refusal(MISSING);
+        }
+        TradeCommerceWorkflow wf = CommerceEngine.workflow(rec).build();
+        var factOpt = SellerCreditService.settledTradeFact(rec, wf, rec.getUpdatedMs());
+        if (factOpt.isEmpty()) {
+            throw new Refusal(CONFLICT);
+        }
+        SellerCreditService.CompletedTradeFact fact = factOpt.get();
+        if (fact.buyerPlayerId() != me) {
+            throw new Refusal(MISSING);
+        }
+        SellerCreditService.ReviewSubmission sub = credits.submitReview(
+                new SellerCreditService.ReviewRequest(fact, rating, comment), nowMs);
+        return SubmitSellerReviewResponse.newBuilder()
+                .setCountedForScore(sub.review().countedForScore())
+                .setReplayed(sub.replayed())
+                .setProfile(SellerCreditService.toView(sub.profile()))
+                .setServerNowMs(nowMs)
+                .build();
+    }
+
+    private GetMarketReferencePriceResponse getMarketReferencePrice(GetMarketReferencePriceRequest in, long nowMs)
+            throws SQLException {
+        int itemConfigId = in.getItemConfigId();
+        int currencyType = in.getCurrencyType();
+        GetMarketReferencePriceResponse.Builder out = GetMarketReferencePriceResponse.newBuilder()
+                .setItemConfigId(itemConfigId)
+                .setCurrencyType(currencyType)
+                .setWindowDays(REFERENCE_WINDOW_DAYS)
+                .setServerNowMs(nowMs);
+        if (itemConfigId == 0 || !isKnownCurrency(currencyType)) {
+            return out.setErrorMessage(TipInfoMessage.newBuilder().setId(INVALID).build()).build();
+        }
+        if (referencePrices == null) {
+            return out.setErrorMessage(TipInfoMessage.newBuilder()
+                    .setId(com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE).build()).build();
+        }
+        ReferencePrice.View ref = referencePrices.referencePrice(itemConfigId, currencyType, nowMs);
+        return out.setMedianUnitPrice(ref.medianUnitPrice())
+                .setSampleCount(ref.sampleCount())
+                .setInsufficientSample(ref.insufficientSample())
+                .build();
+    }
+
+    private GetPlayerTradeQuotaResponse getPlayerTradeQuota(long me, GetPlayerTradeQuotaRequest in, long nowMs)
+            throws SQLException {
+        int currency = in.getCurrencyType();
+        GetPlayerTradeQuotaResponse.Builder out = GetPlayerTradeQuotaResponse.newBuilder()
+                .setCurrencyType(currency)
+                .setServerNowMs(nowMs);
+        if (!isKnownCurrency(currency)) {
+            return out.setErrorMessage(TipInfoMessage.newBuilder().setId(INVALID).build()).build();
+        }
+        PlayerTradeGuard.Policy p = playerTradeGuard == null ? PlayerTradeGuard.Policy.disabled() : playerTradeGuard.policy();
+        boolean acquaintance = PlayerTradeGuard.MODE_ACQUAINTANCE_LOCKED.equals(p.mode());
+        long minFriendMs = p.minFriendDurationMs() == 0 && acquaintance
+                ? PlayerTradeGuard.DEFAULT_MIN_FRIEND_DURATION_MS : p.minFriendDurationMs();
+        int maxDevPct = p.maxReferenceDeviationPct() == 0 && acquaintance
+                ? PlayerTradeGuard.DEFAULT_MAX_REFERENCE_DEVIATION_PCT : p.maxReferenceDeviationPct();
+        long coolingLockMs = p.coolingLockDurationMs() == 0 && acquaintance
+                ? PlayerTradeGuard.DEFAULT_COOLING_LOCK_DURATION_MS : p.coolingLockDurationMs();
+        long limit = p.maxDailyCurrencyAmount();
+        long used = 0L;
+        if (playerTradeGuard != null && playerTradeGuard.dailyOut() != null) {
+            long dayStart = Long.divideUnsigned(nowMs, PlayerTradeGuard.DAY_MS) * PlayerTradeGuard.DAY_MS;
+            used = playerTradeGuard.dailyOut().dailyCurrencyOutflow(me, currency, dayStart);
+        }
+        long remaining = Long.compareUnsigned(limit, used) > 0 ? limit - used : 0L;
+        List<Integer> sortedConsumables = p.consumableItems().stream().sorted(Integer::compareUnsigned).toList();
+        return out.setMode(p.mode())
+                .setDailyCurrencyLimit(limit)
+                .setDailyCurrencyUsed(used)
+                .setDailyCurrencyRemaining(remaining)
+                .addAllConsumableItemIds(sortedConsumables)
+                .setMinFriendDurationMs(minFriendMs)
+                .setMaxReferenceDeviationPct(maxDevPct)
+                .setCoolingLockDurationMs(coolingLockMs)
+                .build();
+    }
+
+    private static boolean isKnownCurrency(int currencyType) {
+        return currencyType >= 0 && CurrencyType.forNumber(currencyType) != null;
+    }
+
+    private static long parseCommerceOrderId(String raw) {
+        String trimmed = raw == null ? "" : raw.trim();
+        if (trimmed.startsWith("commerce:")) {
+            trimmed = trimmed.substring("commerce:".length());
+        }
+        if (trimmed.isEmpty()) {
+            throw new Refusal(INVALID);
+        }
+        try {
+            long parsed = Long.parseUnsignedLong(trimmed);
+            if (parsed == 0) {
+                throw new Refusal(INVALID);
+            }
+            return parsed;
+        } catch (NumberFormatException invalid) {
+            throw new Refusal(INVALID);
+        }
+    }
+
+    private static Message creditRejection(Message prototype, int tip, long nowMs) {
+        var b = prototype.newBuilderForType();
+        b.setField(prototype.getDescriptorForType().findFieldByName("error_message"),
+                TipInfoMessage.newBuilder().setId(tip).build());
+        var nowField = prototype.getDescriptorForType().findFieldByName("server_now_ms");
+        if (nowField != null) {
+            b.setField(nowField, nowMs);
+        }
+        return b.build();
     }
 }

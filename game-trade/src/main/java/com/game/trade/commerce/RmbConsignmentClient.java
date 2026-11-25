@@ -35,6 +35,11 @@ public final class RmbConsignmentClient {
         if (field != null && field.isNull()) return "";
         return text(input, key);
     }
+    static String optionalNullableText(JsonNode input, String key) {
+        var field = input.get(key);
+        if (field == null || field.isNull()) return "";
+        return text(input, key);
+    }
     static RmbSellerIncome income(JsonNode item) {
         String orderId = text(item, "orderId");
         long gross = number(item, "grossFen");
@@ -44,6 +49,7 @@ public final class RmbConsignmentClient {
         long paid = number(item, "paidFen");
         long forfeited = optionalNumber(item, "forfeitedFen");
         long disputeFrozen = optionalNumber(item, "disputeFrozenFen");
+        String disputeCaseId = optionalNullableText(item, "disputeCaseId");
         long availableMs = number(item, "availableMs");
         if (gross > 9_000_000_000_000_000L
                 || fee > gross
@@ -62,6 +68,8 @@ public final class RmbConsignmentClient {
                 .setReservedFen(reserved)
                 .setPaidFen(paid)
                 .setAvailableMs(availableMs)
+                .setDisputeFrozenFen(disputeFrozen)
+                .setDisputeCaseId(disputeCaseId)
                 .build();
     }
     static JsonNode array(JsonNode input, String key) {
@@ -76,7 +84,8 @@ public final class RmbConsignmentClient {
             .setTitle(text(v,"title")).setPriceFen(number(v,"priceFen"))
             .setFeeBps(Math.toIntExact(number(v,"feeBps"))).setCoolingMs(number(v,"coolingMs"))
             .setNoticeEndMs(number(v,"noticeEndMs")).setSaleEndMs(number(v,"saleEndMs"))
-            .setState(text(v,"state")).setPhase(text(v,"phase")).setOrderId(nullableText(v,"orderId")).build();
+            .setState(text(v,"state")).setPhase(text(v,"phase")).setOrderId(nullableText(v,"orderId"))
+            .setDesignatedOnly(!optionalNullableText(v, "designatedBuyerAccount").isEmpty()).build();
     }
     static CommerceOrderView order(JsonNode v) {
         int state = switch (text(v,"state")) {

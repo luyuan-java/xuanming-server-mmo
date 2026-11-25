@@ -146,9 +146,11 @@ public final class ClassSkillCatalog {
 
     public double passive(int classId, int level, PlayerSkills owned, ClassSkillRules.PassiveStat stat, int activeSeasonId) {
         double total = 0;
+        var equippedNonActive = SkillLoadoutRules.collectEquippedNonActiveSkills(this, classId, level, owned);
         for (var entry : owned.entries()) {
             SkillTable row = row(entry.getSkillId());
             if (row == null || row.getSeasonId() != 0) continue;
+            if (row.getBattleModel() == 1 && row.getAbilityKind() > 1 && !equippedNonActive.contains(row.getId())) continue;
             int rank = effectiveRank(classId, level, owned, entry.getSkillId());
             if (rank != 0 && ClassSkillRules.parsePassiveStat(row.getPassiveStat()) == stat)
                 total += row.getPassivePercent() * ClassSkillRules.passiveRankFactor(rank);

@@ -11,9 +11,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** 正常 Maven test/verify 的持久字段门禁；不写台账，不在缺少原件时自动重新建立基线。 */
 class PlayerStateSchemaLedgerTest {
-    // 第一至七代登记技能、宠物回执、宝宝条目与培养阶、角色形象试用/永久衣柜、宝宝技能重数和装备固定词条。第八代追加 ItemGainBlockState 与 ActivityVitalityState；第九代追加近期战斗结果、客户端请求幂等账本与神秘商人限购；第十代追加单槽赛季印与赛季追赶幂等回执；第十一代追加物品绑定、起步首宠、装备品相/保底/宗师署名、两阶段材料总账、近期战果试炼/材料回显、五行试炼志与手艺制书。
+    // 第一至七代登记技能、宠物回执、宝宝条目与培养阶、角色形象试用/永久衣柜、宝宝技能重数和装备固定词条。第八代追加 ItemGainBlockState 与 ActivityVitalityState；第九代追加近期战斗结果、客户端请求幂等账本与神秘商人限购；第十代追加单槽赛季印与赛季追赶幂等回执；第十一代追加物品绑定、起步首宠、装备品相/保底/宗师署名、两阶段材料总账、近期战果试炼/材料回显、五行试炼志与手艺制书；第十二代追加瑞兽迎春活动进度/领奖/开局意图、近期战果瑞兽进度增量与账号级阶段一可交易配额确认水位；第十三代追加宝宝条目 3 套预设方案与灵阶突破幂等回执、人物战法构筑 3 套装配方案与乐观锁回执。
     private static final String GENESIS_SHA256 = "3cd2f18d61634eaabe7d5805df027877451816242bb41ff5aecb704177d7877d";
-    private static final String HEAD_SHA256 = "2598eb6721f57b9ae88d3295dc7958e1de0efa06babb16d73ccf1275558594bd";
+    private static final String HEAD_SHA256 = "f74c7f1525a0791174ac78879bcb6c6b45bce0fb413b0aaa3de28001ca0b5d83";
 
     // 仅登记已经存在的领域 restore→修改→toState 未知字段往返证据；protobuf 自己的 parse/serialize 不能替代它。
     private static final Set<String> ALLOW_ADDITIONS = Set.of(
@@ -30,14 +30,15 @@ class PlayerStateSchemaLedgerTest {
             "game.storage.BagItemState", // CoreGameplayLoopParityTest：BagItem 原样保留未知字段并跨绑定分堆/搬运往返。
             "game.storage.EquipmentFixedAffixState", // CoreGameplayLoopParityTest：EquipmentState 嵌套固定词条保留未知字段往返。
             "game.storage.EquipmentMaterialRewardLedgerState", // CoreGameplayLoopParityTest：toBuilder 保留未知字段往返。
-            "game.storage.BattleResultEntryState"); // CoreGameplayLoopParityTest：PlayerBattleResults 确认已读保留未知字段往返。
+            "game.storage.BattleResultEntryState", // CoreGameplayLoopParityTest：PlayerBattleResults 确认已读保留未知字段往返。
+            "game.storage.PlayerSkillBookState"); // ClassSkillClientTest：PlayerSkills 恢复、装配方案保存与存盘保留未知字段往返。
     // 当前根闭包没有 enum；未来 enum 新值须另有原始数值往返证据，不能沿用 unknown fields 证明。
 
     @Test void playerStateDescriptorMatchesRegisteredPersistentHistory() throws Exception {
         var current = PersistentSchemaSnapshot.capture(PlayerState.getDescriptor());
         int generation = verifyRegisteredSchema(Path.of("src/test/resources/persistent-schema"),
                 GENESIS_SHA256, HEAD_SHA256, current, ALLOW_ADDITIONS);
-        assertThat(generation).isEqualTo(11);
+        assertThat(generation).isEqualTo(13);
     }
 
     /** 已合法退役为不可达的类型仍须保留历史解冻政策，不能只用当前闭包判定策略名有效。 */

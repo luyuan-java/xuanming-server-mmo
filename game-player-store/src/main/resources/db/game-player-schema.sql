@@ -13,8 +13,18 @@ CREATE TABLE IF NOT EXISTS account (
     deletion_execute_after_ms  BIGINT            NOT NULL DEFAULT 0 COMMENT '冷静期满可执行时刻（Unix 毫秒）',
     deletion_lease_until_ms    BIGINT            NOT NULL DEFAULT 0 COMMENT '执行者认领租约截止时刻（Unix 毫秒）',
     deletion_source            TINYINT UNSIGNED  NOT NULL DEFAULT 0 COMMENT '1=本人申请 2=运维代办',
+    stage1_tradable_material_used INT UNSIGNED   NOT NULL DEFAULT 0 COMMENT '阶段一装备材料自选跨角色终身可交易已用总额（0..60，删角不重置）',
     PRIMARY KEY (account),
     KEY idx_account_deletion_due (deletion_state, deletion_execute_after_ms, deletion_lease_until_ms)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+-- 账号级阶段一可交易装备材料按角色高水位确认表（防建小号/删角循环刷 60 份可交易料）。
+CREATE TABLE IF NOT EXISTS account_role_tradable_quota (
+    account          VARCHAR(64)       NOT NULL,
+    player_id        BIGINT UNSIGNED   NOT NULL,
+    confirmed_units  INT UNSIGNED      NOT NULL DEFAULT 0,
+    updated_at       BIGINT            NOT NULL COMMENT 'Unix 毫秒',
+    PRIMARY KEY (account, player_id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
 
 -- 账号注销完成回执：只存账号 SHA-256 摘要，不存原文，供同身份重注册展示上次注销完成时刻。

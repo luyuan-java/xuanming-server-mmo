@@ -116,6 +116,9 @@ final class ConfiguredEffects {
             previous = entry;
             break;
         }
+        if (hostile && op == CONTROL && row.getStateKind() >= 1 && row.getStateKind() <= 6) {
+            if (battle.tryConsumeControlImmunity(source, receiver, row)) return false;
+        }
         if (hostile && row.getStateKind() >= 1 && row.getStateKind() <= 7 && (op == CONTROL || op == PERIODIC)) {
             if (!battle.equipment.controlRoll(source,receiver,row,hit)) return false;
         } else if (hostile && row.getApplicationChance() > 0 && row.getApplicationChance() < 1 && ctx.rng().rand01() >= row.getApplicationChance()) {
@@ -132,6 +135,10 @@ final class ConfiguredEffects {
         if (op == REVIVE) added.setOutgoingHealSnapshot(value);
         if (op == MODIFIER && row.getModifierStat() == ADAPTIVE)
             added.setChosenStat(Long.compareUnsigned(receiver.physicalAttack(),receiver.magicAttack()) >= 0 ? 1 : 2);
+        if (op == PREPARE_CAST) {
+            added.setSecondaryValue(hit.primary);
+            battle.syncChargingSkillId(receiver);
+        }
         if (op == TEMP_HEALTH) {
             long extra = minUnsigned(fromDoubleSaturating(value),receiver.maxHealth());
             added.setSecondaryValue(extra);
@@ -145,7 +152,7 @@ final class ConfiguredEffects {
             event.setShieldAfter(fromDoubleSaturating(value));
             for (int index : artifacts) battle.equipment.use(source,index,receiver,source.state().getEquipmentEffects().getArtifacts(index).getBonusBps());
         }
-        if (row.getTriggerEvent() == 0 && op != PURSUIT) {
+        if (row.getTriggerEvent() == 0 && op != PURSUIT && op != PREPARE_CAST) {
             for (int child : row.getSubBuffList()) {
                 if (receiver.findBuffIndex(instance) < 0) break;
                 apply(source,receiver,child,hit,depth+1);

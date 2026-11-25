@@ -490,6 +490,13 @@ public final class EquipmentCraftService {
     public ClaimEquipmentMaterialRewardResponse claimMaterialReward(ScenePlayer player,
                                                                     ClaimEquipmentMaterialRewardRequest request,
                                                                     BagFeature bagView, long nowMs) {
+        return claimMaterialReward(player, request, bagView, nowMs, null);
+    }
+
+    public ClaimEquipmentMaterialRewardResponse claimMaterialReward(ScenePlayer player,
+                                                                    ClaimEquipmentMaterialRewardRequest request,
+                                                                    BagFeature bagView, long nowMs,
+                                                                    SceneWorld world) {
         long reqId = request.getClientRequestId();
         PlayerClientRequestLedger ledger = player.clientRequestLedger();
         long currentRev = ledger.materialReward().getRevision();
@@ -533,6 +540,14 @@ public final class EquipmentCraftService {
                 ? Math.min(curState.getAvailableTradableUnits(), curState.getAvailableUnits())
                 : 0L;
         long batchTradable = Math.min(total, availTradable);
+        // 账号级阶段一 60 份硬防线（fail-closed）：存在未由账号表确认的阶段一可交易份数时，
+        // 禁止先铸造可交易材料，先触发异步同步并回 SERVICE_UNAVAILABLE，杜绝删角/双角竞态超发。
+        boolean enforceAccountQuota = world != null && world.repository().supportsAccountStage1TradableSync();
+        if (enforceAccountQuota && batchTradable > 0 && curState.getMigratedToV2()
+                && Integer.compareUnsigned(curState.getTradableEarnedTotal(), curState.getStage1TradableConfirmed()) > 0) {
+            world.syncAccountStage1Tradable(player, nowMs);
+            return rejectMaterial(reqId, currentRev, SERVICE_UNAVAILABLE, false);
+        }
         long craftingTradable = Math.min(craftingCount, batchTradable);
         long craftingBound = craftingCount - craftingTradable;
         long stoneTradable = Math.min(stoneCount, batchTradable - craftingTradable);
@@ -599,8 +614,19 @@ public final class EquipmentCraftService {
         return creditBattleMaterialRewardDelta(player, settlement, nowMs).totalUnitsAdded();
     }
 
-    /** 结算应用同帧累加两阶段装备材料自选额度（第一阶段首套 660/至多 60 可交易；第二阶段每周 100 全绑定）。 */
+    /**
+     * 结算应用同帧累加两阶段装备材料自选额度：
+     * 第一阶段首套 660 份，胜局每满 10 份含至多 1 份可交易（跨角色/删角账号级硬上限 60 份）；
+     * 第二阶段每周 150 份，零氪全绑定自用，持有有效仙途轻享卡（{@code afkPassExpiresAt > nowSec}）时每场有效胜局将其中 1 份解锁为市场可交易产出。
+     */
     public static BattleCreditDelta creditBattleMaterialRewardDelta(ScenePlayer player, BattleSettlementData settlement, long nowMs) {
+        boolean lightCardActive = Long.compareUnsigned(player.afkPassExpiresAt(), Long.divideUnsigned(nowMs, 1000L)) > 0;
+        return creditBattleMaterialRewardDelta(player, settlement, nowMs, lightCardActive, player.knownAccountStage1TradableUsed());
+    }
+
+    public static BattleCreditDelta creditBattleMaterialRewardDelta(ScenePlayer player, BattleSettlementData settlement,
+                                                                    long nowMs, boolean lightCardActive,
+                                                                    int accountStage1TradableUsed) {
         BattleEvaluation eval = evaluateBattle(settlement);
         if (!eval.eligible()) {
             return new BattleCreditDelta(0, 0, eval.pvpLossIneligible());
@@ -628,8 +654,9 @@ public final class EquipmentCraftService {
         if (Integer.compareUnsigned(prevLifetime, LIFETIME_LIMIT) < 0) {
             int stage1Remain = LIFETIME_LIMIT - prevLifetime;
             addTotal = Math.min(grossUnits, stage1Remain);
+            int effectiveAccountUsed = Math.max(prevTradableTotal, Math.min(Math.max(0, accountStage1TradableUsed), TRADABLE_LIFETIME_LIMIT));
             if (eval.isWin() && addTotal >= BATTLE_UNITS
-                    && Integer.compareUnsigned(prevTradableTotal, TRADABLE_LIFETIME_LIMIT) < 0) {
+                    && Integer.compareUnsigned(effectiveAccountUsed, TRADABLE_LIFETIME_LIMIT) < 0) {
                 addTradable = 1;
             }
             if (Long.compareUnsigned(prev.getAvailableUnits(), -1L - Integer.toUnsignedLong(addTotal)) > 0) {
@@ -649,6 +676,7 @@ public final class EquipmentCraftService {
                 return BattleCreditDelta.NONE;
             }
             addTotal = Math.min(grossUnits, WEEKLY_LIMIT - earnedWeek);
+            addTradable = (lightCardActive && eval.isWin() && addTotal >= BATTLE_UNITS) ? 1 : 0;
             if (Long.compareUnsigned(prev.getAvailableUnits(), -1L - Integer.toUnsignedLong(addTotal)) > 0) {
                 return BattleCreditDelta.NONE;
             }
@@ -656,6 +684,9 @@ public final class EquipmentCraftService {
                     .setWeekStartsAtMs(weekStart)
                     .setEarnedThisWeek(earnedWeek + addTotal)
                     .setAvailableUnits(prev.getAvailableUnits() + Integer.toUnsignedLong(addTotal));
+            if (addTradable > 0) {
+                next.setAvailableTradableUnits(prevAvailableTradable + Integer.toUnsignedLong(addTradable));
+            }
         }
         EquipmentMaterialRewardLedgerState built = next.build();
         if (!PlayerClientRequestLedger.isMaterialRewardValid(built)) {
@@ -823,7 +854,7 @@ public final class EquipmentCraftService {
             if (inventory.plainTradableQuantity(configId) < count) {
                 allTradableEnough = false;
             }
-            if (inventory.total(configId) > inventory.totalTradable(configId)) {
+            if (inventory.plainQuantity(configId) > inventory.plainTradableQuantity(configId)) {
                 anyBoundPresent = true;
             }
         }
@@ -842,19 +873,22 @@ public final class EquipmentCraftService {
             prepared.willBindItem = false;
             return;
         }
-        // 既有可交易装备：默认强制 TRADEABLE_ONLY，防误混绑定重铸砂/绑定定星保底符染毒变绑。
+        // 既有可交易装备：可交易材料充足时一律强制 TRADEABLE_ONLY（哪怕包里另有绑定堆或透传 allow_bound_materials=true，
+        // 也绝不误耗绑定堆染毒纯 T 装备）；仅当可交易料不足时，未确认拦 kEquipBindConfirmRequired，确认后由提交段按实际
+        // consumedBound 决定是否转绑。
+        if (allTradableEnough) {
+            prepared.tradableOnly = true;
+            prepared.willBindItem = false;
+            return;
+        }
         if (!choice.getAllowBoundMaterials()) {
             prepared.tradableOnly = true;
-            if (!allTradableEnough) {
-                prepared.willBindItem = true;
-                prepared.bindConfirmBlocked = true;
-            }
+            prepared.willBindItem = true;
+            prepared.bindConfirmBlocked = true;
             return;
         }
         prepared.tradableOnly = false;
-        if (anyBoundPresent) {
-            prepared.willBindItem = true;
-        }
+        prepared.willBindItem = anyBoundPresent;
     }
 
     private static BagItem locateEquipment(ScenePlayer player, long itemId, BagType[] holderOut) {
@@ -1247,7 +1281,7 @@ public final class EquipmentCraftService {
         }
         EquipmentMaterialRewardLedgerState state = player.clientRequestLedger().materialReward();
         int lifetimeEarned = state.getMigratedToV2() ? state.getLifetimeEarned() : 0;
-        int tradableEarnedTotal = state.getMigratedToV2() ? state.getTradableEarnedTotal() : 0;
+        int tradableEarnedTotal = player.knownAccountStage1TradableUsed();
         long availableUnits = state.getAvailableUnits();
         long availableTradable = state.getMigratedToV2()
                 ? Math.min(state.getAvailableTradableUnits(), availableUnits)
@@ -1255,6 +1289,7 @@ public final class EquipmentCraftService {
         int batchUnits = (int) Math.min(Integer.toUnsignedLong(MAX_CLAIM_BATCH_UNITS), availableUnits);
         int batchTradable = (int) Math.min(Integer.toUnsignedLong(batchUnits), availableTradable);
         boolean weeklyPhase = Integer.compareUnsigned(lifetimeEarned, LIFETIME_LIMIT) >= 0;
+        boolean lightCardActive = Long.compareUnsigned(player.afkPassExpiresAt(), Long.divideUnsigned(nowMs, 1000L)) > 0;
         int earnedThisWeek = (weeklyPhase && state.getWeekStartsAtMs() == week[0]) ? state.getEarnedThisWeek() : 0;
         int earnedToday = state.getDayStartsAtMs() == day[0] ? state.getEarnedToday() : 0;
         int writable = checkWritable(player, false);
@@ -1283,7 +1318,9 @@ public final class EquipmentCraftService {
                 .setCanClaim(canClaim);
         if (batchUnits == 0) {
             out.setUnavailableReason(weeklyPhase
-                    ? "完成主要战斗可获得本周材料自选份数（每周上限100份，全绑定）。"
+                    ? (lightCardActive
+                    ? "完成主要战斗可获得本周材料自选份数（每周上限150份，仙途轻享卡生效中：胜局含1份可交易）。"
+                    : "完成主要战斗可获得本周材料自选份数（每周上限150份，全绑定；开通仙途轻享卡可解锁胜局可交易产出）。")
                     : "完成主要战斗可获得首套材料自选份数（首套总池660份，无每日限制）。");
         } else if (writable == equip_error.kEquipInBattle_VALUE) {
             out.setUnavailableReason("战斗中暂不能领取，请在结算完成后重试。");

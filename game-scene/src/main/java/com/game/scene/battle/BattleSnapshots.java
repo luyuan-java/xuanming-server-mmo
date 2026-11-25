@@ -89,9 +89,15 @@ public final class BattleSnapshots {
         }
         var equipment = attributes.equipment().effects();
         if (!equipment.equals(com.game.proto.EquipmentEffects.getDefaultInstance())) snapshot.setEquipmentEffects(equipment);
+        var equippedNonActive = com.game.scene.skill.SkillLoadoutRules.collectEquippedNonActiveSkills(
+                player.skillCatalog(), player.classId(), player.level(), player.learnedSkills());
         for (int skill : player.skills()) {
             var row = player.skillCatalog().row(skill);
             if (row != null && row.getSeasonId() != 0) {
+                continue;
+            }
+            if (row != null && row.getBattleModel() == 1 && row.getAbilityKind() > 1
+                    && !equippedNonActive.contains(skill)) {
                 continue;
             }
             int rank = player.skillCatalog().effectiveRank(player.classId(), player.level(), player.learnedSkills(), skill);

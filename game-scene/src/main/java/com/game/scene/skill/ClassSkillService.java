@@ -5,13 +5,19 @@ import static com.game.table.SkillErrorTip.skill_error.*;
 
 import com.game.battle.engine.ClassSkillRules;
 import com.game.battle.engine.SeasonRules;
+import com.game.player.store.state.SkillLoadoutSchemeState;
 import com.game.proto.ListSkillsResponse;
 import com.game.proto.PlayerSkillComp;
 import com.game.proto.PlayerSkillListComp;
+import com.game.proto.SaveSkillLoadoutRequest;
+import com.game.proto.SaveSkillLoadoutResponse;
 import com.game.proto.SkillCatalogEntry;
+import com.game.proto.SwitchSkillLoadoutRequest;
+import com.game.proto.SwitchSkillLoadoutResponse;
 import com.game.proto.UpgradeSkillRequest;
 import com.game.proto.UpgradeSkillResponse;
 import com.game.scene.attribute.AttributeService;
+import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.pet.PetService;
 import com.game.table.PetErrorTip;
 import com.game.table.SeasonErrorTip;
@@ -25,12 +31,16 @@ import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SwitchPhase;
 import com.game.table.CommonErrorTip;
 import com.game.table.SkillTable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 
 /** 技能书与修习用例。同步在场景线程执行，扣款和存储重数共用整份存档的归属围栏。 */
 public final class ClassSkillService {
     private final CurrencyService currency;
     private final AttributeService attributes;
     private final PetService pets;
+    private SceneMetrics metrics = SceneMetrics.noop();
     private java.util.function.IntSupplier activeSeason = () -> 0;
     private java.util.function.BooleanSupplier craftUnlockGate = () -> false;
 
@@ -42,6 +52,11 @@ public final class ClassSkillService {
         this.pets = pets;
         this.currency = currency;
         this.attributes = attributes;
+    }
+
+    public ClassSkillService withMetrics(SceneMetrics metrics) {
+        this.metrics = metrics == null ? SceneMetrics.noop() : metrics;
+        return this;
     }
 
     public ClassSkillService withActiveSeason(java.util.function.IntSupplier activeSeason) {
@@ -57,6 +72,14 @@ public final class ClassSkillService {
     static int busy(ScenePlayer player) {
         return player.inBattle() || player.frozen() || player.switchPhase() != SwitchPhase.NONE
                 ? kSkillUpgradeBusy_VALUE : 0;
+    }
+
+    private int checkWritable(ScenePlayer player) {
+        if (player.inBattle()) {
+            metrics.battleGateReject(SceneMetrics.BattleGate.SKILL);
+            return kSkillUpgradeBusy_VALUE;
+        }
+        return player.frozen() || player.switchPhase() != SwitchPhase.NONE ? kSkillUpgradeBusy_VALUE : 0;
     }
 
     static int stop(ClassSkillRules.UpgradeStop stop) {
@@ -107,7 +130,10 @@ public final class ClassSkillService {
             }
         }
         var result = ListSkillsResponse.newBuilder().setErrorMessage(tip(0)).setSkillList(list)
-                .setClassId(player.classId()).setPlayerLevel(level).setCurrencyBalance(balance);
+                .setClassId(player.classId()).setPlayerLevel(level).setCurrencyBalance(balance)
+                .setLoadout(SkillLoadoutRules.buildSnapshot(catalog, player.classId(), level, owned));
+        Set<Integer> equippedNonActive = SkillLoadoutRules.collectEquippedNonActiveSkills(
+                catalog, player.classId(), level, owned);
         var previews = new java.util.HashMap<Integer, SupportSkillPreview>();
         CharacterSupport.build(player).getPreviewsList().forEach(preview -> previews.put(preview.getSkillTableId(), preview));
         int busyTip = busy(player);
@@ -117,7 +143,9 @@ public final class ClassSkillService {
                     : owned.rank(row.getId());
             boolean craftRequired = craftGateEnabled && row.getSeasonId() == 0 && row.getScrollId() > 0;
             boolean unlockedByBook = player.craft().isSkillBookUnlocked(row.getId());
-            var view = catalogEntry(catalog, row, rank, level, balance, busyTip, false, craftRequired, unlockedByBook);
+            boolean equipped = rank > 0 && (row.getSeasonId() != 0 || row.getBattleModel() != 1
+                    || row.getAbilityKind() == 1 || equippedNonActive.contains(row.getId()));
+            var view = catalogEntry(catalog, row, rank, level, balance, busyTip, false, craftRequired, unlockedByBook, equipped);
             var preview = previews.get(row.getId());
             if (preview != null) view.setSupportPreview(preview);
             result.addCatalog(view);
@@ -154,13 +182,14 @@ public final class ClassSkillService {
             boolean craftRequired = craftGateEnabled && row.getSeasonId() == 0 && row.getScrollId() > 0;
             boolean unlockedByBook = player.craft().isSkillBookUnlocked(row.getId());
             result.addCatalog(catalogEntry(catalog, row, ClassSkillCatalog.petStoredRank(pet, species, row.getId()),
-                    level, balance, blocked, true, craftRequired, unlockedByBook));
+                    level, balance, blocked, true, craftRequired, unlockedByBook, true));
         }
         return result.build();
     }
 
     private static SkillCatalogEntry.Builder catalogEntry(ClassSkillCatalog catalog, SkillTable row, int rank,
-            int level, long balance, int blocked, boolean pet, boolean craftRequired, boolean unlockedByBook) {
+            int level, long balance, int blocked, boolean pet, boolean craftRequired, boolean unlockedByBook,
+            boolean equipped) {
         int limit = ClassSkillRules.rankLimit(level, row.getUnlockLevel(), row.getMaxRank());
         boolean seasonal = row.getSeasonId() != 0;
         boolean full = Integer.compareUnsigned(rank, row.getMaxRank()) >= 0;
@@ -184,7 +213,10 @@ public final class ClassSkillService {
                 .setScrollId(row.getScrollId())
                 .setRarityTier(row.getRarityTier())
                 .setCraftUnlockRequired(craftRequired)
-                .setUnlockedByBook(unlockedByBook);
+                .setUnlockedByBook(unlockedByBook)
+                .setSecondaryTargetPolicy(row.getSecondaryTargetPolicy())
+                .setExclusiveGroup(row.getExclusiveGroup())
+                .setEquipped(equipped);
     }
 
     public UpgradeSkillResponse upgrade(ScenePlayer player, UpgradeSkillRequest request) {
@@ -196,7 +228,7 @@ public final class ClassSkillService {
         if (row.getSeasonId() != 0) return rejected(player, SeasonErrorTip.season_error.kSeasonSkillNoUpgrade_VALUE);
         if (!ClassSkillCatalog.characterCanLearn(row, player.classId()))
             return rejected(player, kSkillNotInClass_VALUE);
-        int busy = busy(player);
+        int busy = checkWritable(player);
         if (busy != 0) return rejected(player, busy);
         int oldRank = player.learnedSkills().rank(row.getId());
         if (oldRank == 0 && craftUnlockGate.getAsBoolean() && row.getScrollId() > 0
@@ -211,6 +243,9 @@ public final class ClassSkillService {
 
         PlayerSkills candidate = PlayerSkills.restore(player.learnedSkills().toState());
         candidate.setRank(row.getId(), plan.finalRank());
+        if (oldRank == 0) {
+            SkillLoadoutRules.tryAutoSlotNewlyLearned(player.skillCatalog(), candidate, row);
+        }
         var payment = currency.prepareDeduction(player, Wallet.GOLD, plan.totalCost());
         if (payment.tipId() != 0) return rejected(player, payment.tipId());
         payment.commitSkills(candidate, AssetAudit.Reason.SKILL_UPGRADE, Integer.toUnsignedLong(row.getId()));
@@ -218,6 +253,124 @@ public final class ClassSkillService {
         return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(0))
                 .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
                 .setUpgradedCount(plan.steps()).setStopTipId(plan.steps() < request.getCount() ? stop(plan.stop()) : 0).build();
+    }
+
+    /** 502 保存人物战法构筑方案（3 被动 + 1 追击 + 1 开场，乐观锁 + 幂等回执）。 */
+    public SaveSkillLoadoutResponse saveLoadout(ScenePlayer player, SaveSkillLoadoutRequest request) {
+        String reqId = request.getRequestId();
+        if (!SkillLoadoutRules.validRequestId(reqId)) {
+            return failSaveLoadout(player, reqId, CommonErrorTip.common_error.kInvalidParameter_VALUE);
+        }
+        PlayerSkills owned = player.learnedSkills();
+        if (owned.loadoutLastRequestId().equals(reqId)) {
+            boolean same = owned.loadoutLastBaseVersion() == request.getStateVersion()
+                    && owned.loadoutLastSchemeId() == request.getSchemeId();
+            if (!same) {
+                return failSaveLoadout(player, reqId, CommonErrorTip.common_error.kInvalidParameter_VALUE);
+            }
+            return SaveSkillLoadoutResponse.newBuilder()
+                    .setErrorMessage(tip(0))
+                    .setRequestId(reqId)
+                    .setReplayed(true)
+                    .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                    .build();
+        }
+        int busy = checkWritable(player);
+        if (busy != 0) {
+            return failSaveLoadout(player, reqId, busy);
+        }
+        long currentVersion = SkillLoadoutRules.version(owned.loadoutStateVersion());
+        if (request.getStateVersion() != currentVersion || owned.loadoutStateVersion() == -1L) {
+            return failSaveLoadout(player, reqId, kSkillLoadoutVersionChanged_VALUE);
+        }
+        List<Integer> passiveIds = new ArrayList<>(request.getPassiveSkillIdsList());
+        List<Integer> pursuitIds = new ArrayList<>(request.getPursuitSkillIdsList());
+        List<Integer> openingIds = new ArrayList<>(request.getOpeningSkillIdsList());
+        int err = SkillLoadoutRules.validateScheme(request.getSchemeId(), request.getRoleTag(),
+                passiveIds, pursuitIds, openingIds,
+                player.skillCatalog(), player.classId(), PlayerLevels.effective(player.level()), owned);
+        if (err != 0) {
+            return failSaveLoadout(player, reqId, err);
+        }
+        passiveIds.sort(Integer::compareUnsigned);
+        pursuitIds.sort(Integer::compareUnsigned);
+        openingIds.sort(Integer::compareUnsigned);
+        SkillLoadoutSchemeState existing = owned.loadoutScheme(request.getSchemeId());
+        SkillLoadoutSchemeState updated = (existing == null
+                ? SkillLoadoutSchemeState.newBuilder().setSchemeId(request.getSchemeId())
+                : existing.toBuilder().clearPassiveSkillIds().clearPursuitSkillIds().clearOpeningSkillIds())
+                .setRoleTag(request.getRoleTag())
+                .addAllPassiveSkillIds(passiveIds)
+                .addAllPursuitSkillIds(pursuitIds)
+                .addAllOpeningSkillIds(openingIds)
+                .build();
+        owned.putLoadoutScheme(updated);
+        owned.commitLoadout(request.getSchemeId(), currentVersion + 1, reqId, request.getStateVersion(), request.getSchemeId());
+        attributes.skillsChanged(player);
+        return SaveSkillLoadoutResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setRequestId(reqId)
+                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                .build();
+    }
+
+    /** 503 一键切换人物战法构筑流派方案（1..3，乐观锁 + 幂等回执）。 */
+    public SwitchSkillLoadoutResponse switchLoadout(ScenePlayer player, SwitchSkillLoadoutRequest request) {
+        String reqId = request.getRequestId();
+        if (!SkillLoadoutRules.validRequestId(reqId)) {
+            return failSwitchLoadout(player, reqId, CommonErrorTip.common_error.kInvalidParameter_VALUE);
+        }
+        if (!SkillLoadoutRules.validSchemeId(request.getSchemeId())) {
+            return failSwitchLoadout(player, reqId, kSkillLoadoutSchemeInvalid_VALUE);
+        }
+        PlayerSkills owned = player.learnedSkills();
+        if (owned.loadoutLastRequestId().equals(reqId)) {
+            boolean same = owned.loadoutLastBaseVersion() == request.getStateVersion()
+                    && owned.loadoutLastSchemeId() == request.getSchemeId();
+            if (!same) {
+                return failSwitchLoadout(player, reqId, CommonErrorTip.common_error.kInvalidParameter_VALUE);
+            }
+            return SwitchSkillLoadoutResponse.newBuilder()
+                    .setErrorMessage(tip(0))
+                    .setRequestId(reqId)
+                    .setReplayed(true)
+                    .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                    .build();
+        }
+        int busy = checkWritable(player);
+        if (busy != 0) {
+            return failSwitchLoadout(player, reqId, busy);
+        }
+        long currentVersion = SkillLoadoutRules.version(owned.loadoutStateVersion());
+        if (request.getStateVersion() != currentVersion || owned.loadoutStateVersion() == -1L) {
+            return failSwitchLoadout(player, reqId, kSkillLoadoutVersionChanged_VALUE);
+        }
+        if (owned.loadoutScheme(request.getSchemeId()) == null) {
+            owned.putLoadoutScheme(SkillLoadoutSchemeState.newBuilder().setSchemeId(request.getSchemeId()).build());
+        }
+        owned.commitLoadout(request.getSchemeId(), currentVersion + 1, reqId, request.getStateVersion(), request.getSchemeId());
+        attributes.skillsChanged(player);
+        return SwitchSkillLoadoutResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setRequestId(reqId)
+                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                .build();
+    }
+
+    private SaveSkillLoadoutResponse failSaveLoadout(ScenePlayer player, String reqId, int error) {
+        return SaveSkillLoadoutResponse.newBuilder()
+                .setErrorMessage(tip(error))
+                .setRequestId(reqId)
+                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                .build();
+    }
+
+    private SwitchSkillLoadoutResponse failSwitchLoadout(ScenePlayer player, String reqId, int error) {
+        return SwitchSkillLoadoutResponse.newBuilder()
+                .setErrorMessage(tip(error))
+                .setRequestId(reqId)
+                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                .build();
     }
 
     private UpgradeSkillResponse upgradePet(ScenePlayer player, UpgradeSkillRequest request) {

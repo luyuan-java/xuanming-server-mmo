@@ -61,9 +61,13 @@ final class ConfiguredImpact {
             double typedOutgoing = type == CombatDamageRules.PHYSICAL_DAMAGE
                     ? battle.modifier(source, OUT_PHYSICAL_DAMAGE)
                     : battle.modifier(source, OUT_MAGIC_DAMAGE);
-            damage *= Math.max(0, 1 + battle.modifier(source, OUT_DAMAGE) + typedOutgoing);
+            double oneShotOutgoing = hit.origin == DIRECT
+                    ? battle.modifier(source, type == CombatDamageRules.PHYSICAL_DAMAGE
+                            ? NEXT_PHYSICAL_ATTACK : NEXT_MAGIC_ATTACK)
+                    : 0.0;
+            damage *= Math.max(0, 1 + battle.modifier(source, OUT_DAMAGE) + typedOutgoing + oneShotOutgoing);
             if (hit.origin == DIRECT && kind != BATTLE_HIT_COUNTER) damage *= 1 + PetCultivationRules.damageBonus(source,type);
-            damage *= Math.max(0,1+battle.modifier(target,IN_DAMAGE));
+            damage *= Math.max(0,1+battle.modifier(target,IN_DAMAGE)+battle.hitVulnerabilityBonus(target));
             if (type == CombatDamageRules.MAGIC_DAMAGE) damage *= Math.max(0,1-battle.modifier(target,MAGIC_REDUCTION));
             if (kind == BATTLE_HIT_COMBO || hit.damageOrdinal > 0) damage *= Math.max(0,1-battle.modifier(target,LATER_REDUCTION));
             for (var entry : List.copyOf(source.state().getBuffsList())) {
@@ -154,6 +158,11 @@ final class ConfiguredImpact {
             if (row != null && row.getBattleOp() == CONTROL && row.getStateKind() == SLEEP) battle.remove(target,entry.getBuffId());
         }
         if (target.health() == 0) ctx.handleDeath(target,source.actorId());
+        if (EquipmentCombatRules.addSaturated(dealt, absorbed) != 0L
+                && (hit.origin == DIRECT || hit.origin == PURSUED)
+                && target.isActive()) {
+            battle.incrementHitVulnerability(target);
+        }
         battle.equipment.breakShields(source,target,shieldDamage,type,hit,defenses);
         Hit trigger = hit.derived(hit.origin);
         trigger.actualDamage = dealt;

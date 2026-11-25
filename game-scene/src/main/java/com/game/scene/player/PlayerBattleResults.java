@@ -190,7 +190,15 @@ public final class PlayerBattleResults {
                 .setTrialJournalEntryId(e.getTrialJournalEntryId())
                 .addAllTrialNewlyLitSealIds(e.getTrialNewlyLitSealIdsList())
                 .setTrialNewSoloBest(e.getTrialNewSoloBest())
-                .setTrialNewCoopBest(e.getTrialNewCoopBest());
+                .setTrialNewCoopBest(e.getTrialNewCoopBest())
+                .setFestivalActivityInstanceId(e.getFestivalActivityInstanceId())
+                .setFestivalRewardIdentity(e.getFestivalRewardIdentity())
+                .setFestivalWinsBefore(e.getFestivalWinsBefore())
+                .setFestivalWinsAfter(e.getFestivalWinsAfter())
+                .setFestivalRequiredWins(e.getFestivalRequiredWins())
+                .setFestivalNewlyEligible(e.getFestivalNewlyEligible())
+                .setMaterialAvailableUnitsAfter(e.getMaterialAvailableUnitsAfter())
+                .setMaterialEarnableRemainingAfter(e.getMaterialEarnableRemainingAfter());
         for (BattleResultCurrencyState c : e.getCurrenciesList()) {
             b.addCurrencies(PlayerBattleResultCurrency.newBuilder()
                     .setCurrencyType(c.getCurrencyType())

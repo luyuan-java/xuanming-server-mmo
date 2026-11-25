@@ -317,6 +317,9 @@ public final class GatherPipeline {
                 if (rankedContext != null) {
                     reqBuilder.setRankedContext(rankedContext);
                 }
+                if (plan.activityContext() != null) {
+                    reqBuilder.setActivityContext(plan.activityContext());
+                }
                 PrepareBattleRequest request = reqBuilder.build();
                 switch (parts.scenes().prepare(request)) {
                     case ScenePreparer.Prepare.Ok ok -> {
@@ -384,8 +387,9 @@ public final class GatherPipeline {
                 catalogTables.trialContextFor(mode.getNumber(), plan.battleConfigId(), plan.activityContext(), rankedContext)
                         .ifPresent(create::setTrialContext);
             }
-            // 观战可见性在建房时决定一次、随建房原件冻结（battle 第二道闸只认它）；落点记录抄同一份冻结值，不按模式另算
+            // 观战可见性与战报录制标记在建房时决定一次、随建房原件冻结；落点记录抄同一份可见性
             create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext()));
+            create.setRecordReplay(com.game.match.report.BattleReplayPolicy.decide(mode));
             if (scriptResolver != null && (rankedContext == null || !rankedContext.getUseFreePreset())) {
                 create.addAllTeamScripts(scriptResolver.resolveForBattle(battleId, mode.getNumber(), plan.battleConfigId(), create.getPlayersList()));
             }

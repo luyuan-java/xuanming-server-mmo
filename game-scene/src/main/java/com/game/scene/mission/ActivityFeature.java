@@ -29,9 +29,15 @@ public final class ActivityFeature implements SceneFeature {
     static final String REASON_NOT_PARTICIPATABLE = "活动所需玩法或当前状态暂不满足参与条件";
 
     private final MissionService missions;
+    private com.game.scene.festivalbeast.FestivalBeastService festivalBeastService;
 
     public ActivityFeature(MissionService missions) {
         this.missions = missions;
+    }
+
+    public ActivityFeature withFestivalBeastService(com.game.scene.festivalbeast.FestivalBeastService festivalBeastService) {
+        this.festivalBeastService = festivalBeastService;
+        return this;
     }
 
     /** 冻结策略（scene-handoff-spec §5.9）：190 只读；348 领奖幂等重放优先，未重放的新领奖在业务层判冻结/战斗回 1006。 */
@@ -52,6 +58,12 @@ public final class ActivityFeature implements SceneFeature {
             }
         }
         activities.sort(Comparator.comparing(PlayerActivityInfo::getActivityId, Integer::compareUnsigned));
+        if (festivalBeastService != null) {
+            PlayerActivityInfo festivalEntry = festivalBeastService.buildCatalogEntry(player, nowMs);
+            if (festivalEntry != null) {
+                activities.add(festivalEntry);
+            }
+        }
         return GetActivityListResponse.newBuilder()
                 .setErrorMessage(tip(MissionService.OK))
                 .addAllActivities(activities)

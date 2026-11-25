@@ -1,7 +1,19 @@
 package com.game.match.feature;
 
+import com.game.api.ContentGuardService;
+import com.game.api.DubboGroups;
+import com.game.api.MailAdminService;
+import com.game.api.rpc.NodeRpcClients;
+import com.game.common.deadline.Deadline;
+import com.game.discovery.serviceauth.ServiceCallSignatures;
 import com.game.match.dispatch.MatchMethodHandler;
+import com.game.match.gather.GatherLauncher;
+import com.game.match.gather.GatherPlan;
+import com.game.match.global.GlobalMatchService;
+import com.game.match.global.pb.GlobalDirectIntentRow;
+import com.game.match.global.pb.GlobalFormationRow;
 import com.game.match.id.MatchIds;
+import com.game.match.precheck.MemberPrecheck;
 import com.game.match.ranked.RankedService;
 import com.game.match.ranked.RankedStore;
 import com.game.match.ranked.RankedTables;
@@ -14,16 +26,35 @@ import com.game.match.script.BattleScriptResolver;
 import com.game.match.script.BattleScriptService;
 import com.game.match.script.BattleScriptStore;
 import com.game.match.script.BattleScriptValidator;
+import com.game.match.tournament.TournamentSeasonDriver;
 import com.game.match.tournament.TournamentService;
 import com.game.match.tournament.TournamentStore;
 import com.game.match.tournament.TournamentTables;
+import com.game.proto.content_guard.CheckTextRequest;
+import com.game.proto.mail.MailAttachments;
+import com.game.proto.mail.SendMailRequest;
+import com.game.proto.mail.SendMailResponse;
+import com.game.proto.match.MatchMode;
 import com.game.table.ConfigTables;
+import com.google.protobuf.ByteString;
+import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -159,6 +190,10 @@ public class MatchFeatureConfiguration {
 
     // ---- 全服赛季战队锦标赛《群仙问道赛》V1（465–475） ----
 
+    private static final int TOURNAMENT_MAIL_SENDER_KIND = 6; // 对应 game-mail SenderKind("match") = 6
+    private static final String TOURNAMENT_MAIL_CALLER = "match";
+    private static final long TOURNAMENT_MAIL_TTL_MS = 30L * 24 * 3600 * 1000;
+
     @Bean
     public TournamentTables tournamentTables(ConfigTables config) {
         return TournamentTables.from(config);
@@ -170,9 +205,173 @@ public class MatchFeatureConfiguration {
     }
 
     @Bean
+    public TournamentService.MatchLauncher tournamentMatchLauncher(
+            ObjectProvider<GlobalMatchService> globalMatchProvider,
+            GatherLauncher gatherLauncher,
+            MemberPrecheck memberPrecheck,
+            MatchIds matchIds) {
+        return spec -> {
+            List<Long> members = new ArrayList<>(spec.teamA().size() + spec.teamB().size());
+            members.addAll(spec.teamA());
+            members.addAll(spec.teamB());
+            GlobalMatchService global = globalMatchProvider.getIfAvailable();
+            if (global != null) {
+                try {
+                    GlobalDirectIntentRow key = GlobalDirectIntentRow.newBuilder()
+                            .setKind(4)
+                            .setOwnerId(spec.matchId())
+                            .setRequestLow(spec.matchId())
+                            .build();
+                    ByteString payload = encodeTournamentLaunchPayload(spec);
+                    GlobalFormationRow formation = global.reserveDirect(
+                            key, payload, MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE,
+                            spec.battleConfigId(), members, Map.of(), 0L, null);
+                    if (formation == null || formation.getBattleId() == 0L || formation.getState() == 5) {
+                        return 0L;
+                    }
+                    if (formation.getState() < 4) {
+                        global.launchCommitted(formation);
+                    }
+                    return formation.getBattleId();
+                } catch (RuntimeException e) {
+                    log.warn("[tournament] global reserveDirect failed match={}: {}",
+                            Long.toUnsignedString(spec.matchId()), e.getMessage());
+                    return 0L;
+                }
+            }
+            MemberPrecheck.Result checked = memberPrecheck.check(members, Deadline.after(3_000));
+            if (!checked.passed()) {
+                log.warn("[tournament] local precheck failed match={} reason={} offender={}",
+                        Long.toUnsignedString(spec.matchId()), checked.reason(), Long.toUnsignedString(checked.offender()));
+                return 0L;
+            }
+            long battleId = matchIds.nextBattleId().orElse(0L);
+            if (battleId == 0L) {
+                log.error("[tournament] local battle_id allocation failed match={}", Long.toUnsignedString(spec.matchId()));
+                return 0L;
+            }
+            gatherLauncher.launch(GatherPlan.tournament(spec.battleConfigId(), members, battleId))
+                    .whenComplete((result, err) -> {
+                        boolean ok = err == null && result != null && result.ok();
+                        if (!ok) {
+                            log.error("[tournament] local gather failed match={} battle={} outcome={}",
+                                    Long.toUnsignedString(spec.matchId()), Long.toUnsignedString(battleId),
+                                    result == null ? "error" : result.outcome().label(), err);
+                        }
+                    });
+            return battleId;
+        };
+    }
+
+    @Bean(destroyMethod = "close")
+    @ConditionalOnProperty(name = "game.match.content-guard-enabled", havingValue = "true")
+    public NodeRpcClients<ContentGuardService> tournamentContentGuardClients() {
+        return new NodeRpcClients<>("match-content-guard", ContentGuardService.class,
+                DubboGroups.CONTENT_GUARD, Duration.ofMillis(1500), "match-content-guard-connect");
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "game.match.content-guard-enabled", havingValue = "true")
+    public TournamentService.TextGuard tournamentTextGuard(
+            @Qualifier("tournamentContentGuardClients") NodeRpcClients<ContentGuardService> clients,
+            @Value("${game.dubbo.content-guard-url:tri://127.0.0.1:20919}") String url) {
+        NodeRpcClients.Target target = parseTriTarget("game.dubbo.content-guard-url", url);
+        Duration timeout = Duration.ofMillis(1500);
+        return (scene, playerId, text) -> {
+            CheckTextRequest req = CheckTextRequest.newBuilder()
+                    .setScene(scene).setPlayerId(playerId).setText(text).build();
+            try {
+                return clients.call(target, timeout, svc -> CompletableFuture.completedFuture(svc.checkText(req)))
+                        .get(timeout.toMillis() + 300L, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("tournament content guard interrupted", e);
+            } catch (Exception e) {
+                throw new IllegalStateException("tournament content guard failed: " + e.getMessage(), e);
+            }
+        };
+    }
+
+    @Bean(destroyMethod = "close")
+    @ConditionalOnProperty(name = "game.match.mail.enabled", havingValue = "true")
+    public NodeRpcClients<MailAdminService> tournamentMailClients() {
+        return new NodeRpcClients<>("match-mail-admin", MailAdminService.class,
+                DubboGroups.MAIL, Duration.ofMillis(2000), "match-mail-connect");
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "game.match.mail.enabled", havingValue = "true")
+    public TournamentService.RewardMailSender tournamentRewardMailSender(
+            @Qualifier("tournamentMailClients") NodeRpcClients<MailAdminService> clients,
+            @Value("${game.match.mail-url:tri://127.0.0.1:20916}") String url,
+            @Value("${game.match.mail-producer-secret:${MAIL_PRODUCER_SECRET_MATCH:}}") String secret) {
+        String trimmedSecret = secret == null ? "" : secret.strip();
+        if (trimmedSecret.getBytes(StandardCharsets.UTF_8).length < 32) {
+            throw new IllegalArgumentException("启用 game.match.mail.enabled 时必须配置 ≥32 字节的 MAIL_PRODUCER_SECRET_MATCH");
+        }
+        NodeRpcClients.Target target = parseTriTarget("game.match.mail-url", url);
+        Duration timeout = Duration.ofMillis(2000);
+        return (playerId, reward, title, body) -> {
+            MailAttachments atts = reward.attachments().length > 0
+                    ? MailAttachments.parseFrom(reward.attachments())
+                    : MailAttachments.getDefaultInstance();
+            long nowMs = System.currentTimeMillis();
+            SendMailRequest request = SendMailRequest.newBuilder()
+                    .setSenderKind(TOURNAMENT_MAIL_SENDER_KIND)
+                    .setRequestId(reward.rewardId())
+                    .setRecipientPlayerId(playerId)
+                    .setTitle(title)
+                    .setBody(body)
+                    .setAttachments(atts)
+                    .setExpireMs(nowMs + TOURNAMENT_MAIL_TTL_MS)
+                    .build();
+            SendMailRequest signed = ServiceCallSignatures.sign(
+                    MailAdminService.PERSONAL_METHOD, request, TOURNAMENT_MAIL_CALLER, trimmedSecret, nowMs);
+            SendMailResponse response = clients.call(target, timeout, svc -> svc.sendPersonalMail(signed))
+                    .get(timeout.toMillis() + 300L, TimeUnit.MILLISECONDS);
+            if (response == null || response.getErrorMessage().getId() != 0 || response.getMailId() == 0L) {
+                throw new IllegalStateException("mail admin rejected tip="
+                        + (response == null ? -1 : response.getErrorMessage().getId()));
+            }
+            return response.getMailId();
+        };
+    }
+
+    @Bean
     public TournamentService tournamentService(TournamentStore store, MatchIds matchIds,
-                                               ObjectProvider<TournamentService.MatchLauncher> launcher) {
-        return new TournamentService(store, () -> matchIds.nextBattleId().orElse(0L), launcher.getIfAvailable());
+                                               ObjectProvider<TournamentService.MatchLauncher> launcher,
+                                               ObjectProvider<TournamentService.TextGuard> textGuard,
+                                               ObjectProvider<TournamentService.RewardMailSender> mailSender) {
+        return new TournamentService(store, () -> matchIds.nextBattleId().orElse(0L),
+                launcher.getIfAvailable(), textGuard.getIfAvailable(), mailSender.getIfAvailable());
+    }
+
+    @Bean
+    public TournamentSeasonDriver tournamentSeasonDriver(TournamentStore store, MatchIds matchIds) {
+        return new TournamentSeasonDriver(store, () -> matchIds.nextBattleId().orElse(0L));
+    }
+
+    private static ByteString encodeTournamentLaunchPayload(TournamentStore.LaunchSpec spec) {
+        ByteBuffer buf = ByteBuffer.allocate(16 + 8 * (spec.teamA().size() + spec.teamB().size()))
+                .order(ByteOrder.LITTLE_ENDIAN);
+        buf.putLong(spec.matchId());
+        buf.putInt(spec.seasonId());
+        buf.putInt(spec.battleConfigId());
+        for (long pid : spec.teamA()) {
+            buf.putLong(pid);
+        }
+        for (long pid : spec.teamB()) {
+            buf.putLong(pid);
+        }
+        return ByteString.copyFrom(buf.array());
+    }
+
+    private static NodeRpcClients.Target parseTriTarget(String propName, String url) {
+        URI uri = URI.create(url == null ? "" : url.trim());
+        if (!"tri".equals(uri.getScheme()) || uri.getHost() == null || uri.getPort() < 1) {
+            throw new IllegalArgumentException(propName + " 必须是 tri://host:port: " + url);
+        }
+        return new NodeRpcClients.Target(uri.getHost(), uri.getPort(), "");
     }
 
     @Bean

@@ -62,7 +62,9 @@ final class ActionChecks {
                 action.getActionType() != eBattleActionType.BATTLE_ACTION_SKILL && action.getActionType() != eBattleActionType.BATTLE_ACTION_DEFEND) return INVALID_PARAMETER;
         switch (action.getActionTypeValue()) {
             case eBattleActionType.BATTLE_ACTION_ATTACK_VALUE -> {
-                return ctx.configured.hasState(actor, BattleEffect.SEAL_PHYSICAL) ? SKILL_CANNOT_CAST_IN_STATE : SUCCESS;
+                return (ctx.configured.hasState(actor, BattleEffect.SEAL_PHYSICAL)
+                        || ctx.configured.isPhysicalForbidden(actor))
+                        ? SKILL_CANNOT_CAST_IN_STATE : SUCCESS;
             }
             case eBattleActionType.BATTLE_ACTION_RECALL_PET_VALUE -> {
                 BattleUnit pet = ctx.findActor(action.getTargetId());
@@ -98,6 +100,7 @@ final class ActionChecks {
      * 沉默许可 1002 或格值 → 法力 7004。
      */
     int checkCapture(BattleUnit actor, long targetId) {
+        if (ctx.encounter.isFestivalBeast()) return INVALID_PARAMETER;
         BattleUnit target = ctx.findActor(targetId);
         if (!ctx.isPve() || !actor.isPlayer() || actor.teamIndex() != 0 || target == null ||
                 target.state().getActorType() != com.game.proto.eBattleActorType.BATTLE_ACTOR_TYPE_MONSTER ||
@@ -161,6 +164,9 @@ final class ActionChecks {
      * 目标（非 0、非自己时）不存在或已死 / 已逃 7001、是敌方 7002。沉默不限制道具；目标可以是同队的玩家或宝宝。
      */
     int checkItemUse(BattleUnit actor, BattleAction action) {
+        if (ctx.encounter.isFestivalBeast()) {
+            return INVALID_PARAMETER;
+        }
         Optional<ItemTable> itemRow = ctx.data().item(action.getItemTableId());
         if (itemRow.isEmpty()) {
             return INVALID_TABLE_ID;

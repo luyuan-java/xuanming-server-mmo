@@ -20,6 +20,7 @@ import com.game.proto.AddObserverResponse;
 import com.game.proto.BattleAssignedS2C;
 import com.game.proto.BattleEndS2C;
 import com.game.proto.BattlePlayerSnapshot;
+import com.game.proto.BattleReplayEnvelope;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleStateS2C;
@@ -232,6 +233,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         room.battleTimer = scheduler.after(untilDeadline < 0 ? Long.MAX_VALUE : untilDeadline, () -> onBattleDeadline(room));
         armRoundTimer(room);
         BattleStateS2C start = fullState(room);
+        if (request.getRecordReplay()) {
+            room.replay = new BattleReplayRecorder(request, deps.tableFingerprint(), BattleViews.forObserver(start));
+        }
         for (Map.Entry<Long, BattleRouting> entry : room.routingByPlayer.entrySet()) {
             long playerId = entry.getKey();
             ViewerState view = BattleViews.forParticipant(start, playerId, engine.selfItems(playerId),
@@ -1047,11 +1051,15 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         result.setBattleId(room.battleId);
         result.getStateBuilder().setBattleId(room.battleId);
         result.clearActionOrder().addAllActionOrder(room.engine.lastActionOrder());
+        TurnResultS2C builtResult = result.build();
+        if (room.replay != null) {
+            room.replay.addRound(builtResult, BattleViews.forObserver(builtResult.getState()));
+        }
         if(!ongoing&&room.requiresResultConfirmation){
-            beginResultCommit(room,outcome,eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED,result.build(),visibleBefore,RoomEnd.FINISHED);
+            beginResultCommit(room,outcome,eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED,builtResult,visibleBefore,RoomEnd.FINISHED);
             metrics.roundResolve(System.nanoTime()-started);return RoundOutcome.PENDING_RESULT;
         }
-        broadcastTurnResult(room, result.build());
+        broadcastTurnResult(room, builtResult);
         if (!ongoing) {
             finishBattle(room, outcome, eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED);
             eraseRoom(room, RoomEnd.FINISHED);
@@ -1071,8 +1079,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         }
         log.warn("战斗整场超时强制收尾 battle_id={} outcome={}", Long.toUnsignedString(room.battleId), outcome);
         room.roundTimer.cancel();
+        BattleStateS2C deadlineFull = fullState(room);
+        if (room.replay != null) {
+            room.replay.markDeadlineDraw(BattleViews.forObserver(deadlineFull));
+        }
         if(room.requiresResultConfirmation){
-            beginResultCommit(room,outcome,eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED,null,fullState(room),RoomEnd.DEADLINE);return;
+            beginResultCommit(room,outcome,eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED,null,deadlineFull,RoomEnd.DEADLINE);return;
         }
         finishBattle(room, outcome, eSpectateEndReason.SPECTATE_END_BATTLE_ABORTED);
         eraseRoom(room, RoomEnd.DEADLINE);
@@ -1144,7 +1156,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 .addAllSettlements(settlements).setSettlementFormatVersion(1);
         attachRankedResultFacts(room, eventBuilder);
         BattleResultEvent event = eventBuilder.build();
-        var pending=new BattleRoom.PendingCompletion(event,finalTurn,visibleBefore.toBuilder().setActionDeadlineMs(0).build(),reason,endReason);
+        BattleReplayEnvelope replay = room.replay == null ? null
+                : room.replay.freeze(outcome, event.getTotalRounds(), finishedAtMs).orElse(null);
+        var pending=new BattleRoom.PendingCompletion(event,replay,finalTurn,visibleBefore.toBuilder().setActionDeadlineMs(0).build(),reason,endReason);
         room.pendingCompletion=pending;
         attemptResultCommit(room,pending);
     }
@@ -1157,7 +1171,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             if(pending.original.size()>com.game.battle.port.BattleResultSink.MAX_SOURCE_BYTES)
                 acknowledged=CompletableFuture.failedFuture(new IllegalArgumentException("完成来源超过共同字节上限"));
             else if(room.originalCreate.getOutcomeProtocolVersion()==1)
-                acknowledged=deps.results().commitOutcome(room.originalCreate,pending.event,pending.original).thenCompose(decision->switch(decision){
+                acknowledged=deps.results().commitOutcome(room.originalCreate,pending.event,pending.original,pending.replay).thenCompose(decision->switch(decision){
                     case BATTLE_OUTCOME_DECISION_COMPLETE -> CompletableFuture.completedFuture(null);
                     case BATTLE_OUTCOME_DECISION_ABORT -> CompletableFuture.failedFuture(new com.game.battle.port.BattleResultSink.OutcomeAborted());
                     default -> CompletableFuture.failedFuture(new IllegalStateException("Match没有确认唯一终局"));

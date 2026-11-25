@@ -39,6 +39,7 @@ public final class CharacterSupport {
         var shield = new Selection();
         var mana = new Selection();
         double legacyHeal = 0;
+        var equippedNonActive = SkillLoadoutRules.collectEquippedNonActiveSkills(catalog, player.classId(), level, owned);
         for (var entry : owned.entries().stream().sorted((a,b) -> Integer.compareUnsigned(a.getSkillId(), b.getSkillId())).toList()) {
             int id = entry.getSkillId();
             var skill = catalog.row(id);
@@ -48,6 +49,7 @@ public final class CharacterSupport {
             }
             int rank = catalog.effectiveRank(player.classId(), level, owned, id);
             if (rank == 0) continue;
+            if (skill.getBattleModel() == 1 && skill.getAbilityKind() > 1 && !equippedNonActive.contains(id)) continue;
             if (ClassSkillRules.parsePassiveStat(skill.getPassiveStat()) == ClassSkillRules.PassiveStat.OUTGOING_HEAL) {
                 double value = skill.getPassivePercent() * ClassSkillRules.passiveRankFactor(rank);
                 legacyHeal += value;

@@ -99,6 +99,14 @@ class TeamAssignmentTest {
     }
 
     @Test
+    void 赛季战队锦标赛_前半A队后半B队_与Go版teamIndexFor一致() {
+        assertThat(TeamAssignment.assign(MatchMode.MATCH_MODE_SEASON_TOURNAMENT, List.of(1L, 2L, 3L, 4L, 5L, 6L), descending()))
+                .containsExactly(0, 0, 0, 1, 1, 1);
+        assertThat(TeamAssignment.assign(MatchMode.MATCH_MODE_SEASON_TOURNAMENT, TEN, descending()))
+                .containsExactly(0, 0, 0, 0, 0, 1, 1, 1, 1, 1);
+    }
+
+    @Test
     void 不排队的模式也不会分出1队_3V3全员0队() {
         assertThat(TeamAssignment.assign(MatchMode.MATCH_MODE_3V3, List.of(1L, 2L, 3L, 4L, 5L, 6L), Map.of())).containsExactly(0, 0, 0, 0, 0, 0);
     }

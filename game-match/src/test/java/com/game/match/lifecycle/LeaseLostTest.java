@@ -262,7 +262,11 @@ class LeaseLostTest {
                 MatchMethods.WATCH_BATTLE, MatchMethods.LIST_WATCHABLE_BATTLES, MatchMethods.GET_NETWORK_PROBE_PLAN, MatchMethods.COMMIT_NETWORK_PROBE,
                 MatchMethods.LIST_BATTLE_REPORTS, MatchMethods.GET_BATTLE_REPORT,
                 MatchMethods.LIST_BATTLE_SCRIPTS, MatchMethods.SUBMIT_BATTLE_SCRIPT, MatchMethods.DELETE_BATTLE_SCRIPT, MatchMethods.SET_BATTLE_SCRIPT_LOADOUT,
-                MatchMethods.GET_RANKED_PROFILE, MatchMethods.SAVE_RANKED_PRESET, MatchMethods.UPDATE_RANKED_COSMETIC, MatchMethods.GET_RANKED_BATTLE_RESULT);
+                MatchMethods.GET_RANKED_PROFILE, MatchMethods.SAVE_RANKED_PRESET, MatchMethods.UPDATE_RANKED_COSMETIC, MatchMethods.GET_RANKED_BATTLE_RESULT,
+                MatchMethods.GET_TOURNAMENT_OVERVIEW, MatchMethods.CREATE_TOURNAMENT_SQUAD, MatchMethods.INVITE_TOURNAMENT_MEMBER,
+                MatchMethods.RESPOND_TOURNAMENT_INVITE, MatchMethods.LEAVE_TOURNAMENT_SQUAD, MatchMethods.UPDATE_TOURNAMENT_LINEUP,
+                MatchMethods.REGISTER_TOURNAMENT_SQUAD, MatchMethods.LIST_TOURNAMENT_STANDINGS, MatchMethods.START_TOURNAMENT_MATCH,
+                MatchMethods.CHEER_TOURNAMENT_SQUAD, MatchMethods.CLAIM_TOURNAMENT_REWARD);
 
         for (String method : unaffected) {
             ClientReply reply = reply(dispatcher.dispatch(call(method, ByteString.EMPTY, 1001)));

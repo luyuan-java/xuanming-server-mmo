@@ -513,7 +513,8 @@ public final class GlobalMatchService implements AutoCloseable {
             var f=directFormation(members,mode,configId,stamp);
             if(activity!=null)f.setActivityContext(activity.toByteString());
             return resumeDirect(store.prepareDirect(key,payload,members,f.build()),Deadline.after(4000));
-        }catch(Exception e){throw new Deadline.DependencyException("全球原业务成局尚未确认",e);}
+        }catch(GlobalMatchStore.OutsideActivityWindowException outside){throw outside;}
+        catch(Exception e){throw new Deadline.DependencyException("全球原业务成局尚未确认",e);}
     }
     private GlobalFormationRow resumeDirect(GlobalDirectIntentRow original,Deadline deadline)throws Exception {
         List<ObserverExitOriginal> exits=new ArrayList<>();for(var bytes:original.getObserverExitsList())exits.add(ObserverExitOriginal.parseFrom(bytes));exitSpectators(exits,deadline);
@@ -627,6 +628,8 @@ public final class GlobalMatchService implements AutoCloseable {
                 int sideSize = f.getMode() == MatchModes.POLARITY_5V5 ? Math.max(1, roster.size() / 2) : roster.size();
                 rankedContext = rankedStore.buildFreePresetContext(sideSize, roster, Map.of());
             }
+            BattleActivityContext activityContext = f.getActivityContext().isEmpty()
+                    ? null : BattleActivityContext.parseFrom(f.getActivityContext());
             List<BattlePlayerSnapshot> snapshots=new ArrayList<>();List<FingerprintCheck.Member> fingerprints=new ArrayList<>();
             for(int i=0;i<roster.size();i++) {
                 long player=roster.get(i);
@@ -635,6 +638,9 @@ public final class GlobalMatchService implements AutoCloseable {
                         .setBattleConfigId(f.getConfigId()).setMatchMode(f.getMode());
                 if (rankedContext != null) {
                     prepBuilder.setRankedContext(rankedContext);
+                }
+                if (activityContext != null) {
+                    prepBuilder.setActivityContext(activityContext);
                 }
                 var result=scenes.prepare(prepBuilder.build(),endpoint->store.prepared(initial,GlobalPreparedEndpoint.newBuilder().setPlayerId(player).setZoneId(endpoint.zoneId())
                         .setNodeId(endpoint.nodeId()).setHost(endpoint.target().host()).setPort(endpoint.target().port()).setInstanceId(endpoint.target().instanceId()).build()));
@@ -658,9 +664,11 @@ public final class GlobalMatchService implements AutoCloseable {
                                 request.hasActivityContext() ? request.getActivityContext() : null, rankedContext)
                         .ifPresent(request::setTrialContext);
             }
-            // 观战可见性建房时决定一次，随 formation 持久的 create_request 冻结；之后观战各处只读这份原件，不按模式重算
-            request.setSpectateVisibility(com.game.match.spectate.SpectateVisibilityPolicy.decide(MatchMode.forNumber(f.getMode()),
+            // 观战可见性与战报录制标记建房时决定一次，随 formation 持久的 create_request 冻结
+            var mode = MatchMode.forNumber(f.getMode());
+            request.setSpectateVisibility(com.game.match.spectate.SpectateVisibilityPolicy.decide(mode,
                     request.hasActivityContext()?request.getActivityContext():null));
+            request.setRecordReplay(com.game.match.report.BattleReplayPolicy.decide(mode));
             if(scriptResolver!=null && (rankedContext == null || !rankedContext.getUseFreePreset())) {
                 request.addAllTeamScripts(scriptResolver.resolveForBattle(f.getBattleId(),f.getMode(),f.getConfigId(),snapshots));
             }

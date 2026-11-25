@@ -88,7 +88,16 @@ public final class TradeAdminAuthFilter extends OncePerRequestFilter {
 
     /** 指标的 op 标签：已知接口取固定值，其余一律 other（任意路径不得变成标签值，否则可被刷成高基数）。 */
     static String opOf(String path) {
-        return SeedListingController.PATH.equals(path) ? TradeMetrics.ADMIN_OP_SEED_LISTING : TradeMetrics.ADMIN_OP_OTHER;
+        if (SeedListingController.PATH.equals(path)) {
+            return TradeMetrics.ADMIN_OP_SEED_LISTING;
+        }
+        if (SellerCreditAdminController.ENVIRONMENT_PATH.equals(path)) {
+            return TradeMetrics.ADMIN_OP_SELLER_ENVIRONMENT;
+        }
+        if (SellerCreditAdminController.VIOLATION_PATH.equals(path)) {
+            return TradeMetrics.ADMIN_OP_SELLER_VIOLATION;
+        }
+        return TradeMetrics.ADMIN_OP_OTHER;
     }
 
     /** 写审计日志前把控制字符换成 ?（路径是解码后的，%0A 之类会变成真换行，可伪造日志行）。 */

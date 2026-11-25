@@ -459,4 +459,27 @@ public interface PlayerMapper {
 
     @Delete("DELETE FROM account_channel_identity WHERE account = #{account}")
     int deleteAccountChannelIdentity(@Param("account") String account);
+
+    @Select("SELECT account FROM player WHERE player_id = #{playerId}")
+    String selectAccountByPlayerId(@Param("playerId") long playerId);
+
+    @Select("SELECT stage1_tradable_material_used FROM account WHERE account = #{account} FOR UPDATE")
+    Integer selectAccountStage1TradableUsedForUpdate(@Param("account") String account);
+
+    @Update("UPDATE account SET stage1_tradable_material_used = #{used} WHERE account = #{account}")
+    int updateAccountStage1TradableUsed(@Param("account") String account, @Param("used") int used);
+
+    @Select("SELECT confirmed_units FROM account_role_tradable_quota WHERE account = #{account} AND player_id = #{playerId} FOR UPDATE")
+    Integer selectRoleTradableQuotaForUpdate(@Param("account") String account, @Param("playerId") long playerId);
+
+    @Insert("""
+            INSERT INTO account_role_tradable_quota (account, player_id, confirmed_units, updated_at)
+            VALUES (#{account}, #{playerId}, #{confirmedUnits}, #{updatedAt})
+            ON DUPLICATE KEY UPDATE confirmed_units = VALUES(confirmed_units), updated_at = VALUES(updated_at)
+            """)
+    int upsertRoleTradableQuota(@Param("account") String account, @Param("playerId") long playerId,
+                                @Param("confirmedUnits") int confirmedUnits, @Param("updatedAt") long updatedAt);
+
+    @Delete("DELETE FROM account_role_tradable_quota WHERE account = #{account}")
+    int deleteAccountRoleTradableQuota(@Param("account") String account);
 }

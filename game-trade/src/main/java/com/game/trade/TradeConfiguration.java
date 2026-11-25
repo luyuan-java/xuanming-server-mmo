@@ -203,8 +203,13 @@ public class TradeConfiguration {
                                            org.springframework.beans.factory.ObjectProvider<com.game.trade.commerce.CommerceEngine> commerce,
                                            org.springframework.beans.factory.ObjectProvider<com.game.trade.commerce.OfficialMallClient> mall,
                                            org.springframework.beans.factory.ObjectProvider<com.game.trade.commerce.RmbConsignmentService> rmb,
+                                           org.springframework.beans.factory.ObjectProvider<com.game.trade.commerce.RmbConsignmentService.TextGuard> textGuard,
                                            HomeZones tradeHomeZones) {
-        TradeDispatcher dispatcher = new TradeDispatcher(registry, service, tradeWorkerPool, metrics, props.requestBudget().toMillis(),new com.game.trade.commerce.CommerceClientService(commerce.getIfAvailable(),tradeHomeZones,mall.getIfAvailable(),rmb.getIfAvailable()));
+        TradeDispatcher dispatcher = new TradeDispatcher(registry, service, tradeWorkerPool, metrics,
+                props.requestBudget().toMillis(),
+                new com.game.trade.commerce.CommerceClientService(
+                        commerce.getIfAvailable(), tradeHomeZones, mall.getIfAvailable(),
+                        rmb.getIfAvailable(), textGuard.getIfAvailable()));
         MarketSettings market = props.market().settings();
         log.info("trade 接管的消息号={} 市场范围={} 页长={}/{} 页码上限={} 收藏上限={} 请求预算={} 播种={}（运行模式 {}） 库={} 用户={}",
                 dispatcher.clientMessageIds(), props.market().scope(), market.defaultPageSize(), market.maxPageSize(),

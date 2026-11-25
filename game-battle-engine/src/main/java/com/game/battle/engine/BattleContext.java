@@ -10,7 +10,9 @@ import com.game.table.BuffTable;
 import com.game.table.SkillTable;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -46,6 +48,8 @@ final class BattleContext {
     private final List<BattleUnit> units = new ArrayList<>();
     private final List<BattleMonsterDefeat> defeatedMonsters = new ArrayList<>();
     private final NavigableMap<Long, BattleSettlementData.Builder> settlements = new TreeMap<>(Long::compareUnsigned);
+    /** 回合排速时刻冻结的有效速度快照，供副目标策略「本回合排速最低」稳定读取。 */
+    private final Map<Long, Long> roundStartSpeeds = new HashMap<>();
     /** uint32；正在收集 / 结算的回合号，从 1 开始（{@code engine.h:227}）。 */
     private int roundIndex = 1;
     private int maxRounds = BattleConstants.DEFAULT_MAX_ROUNDS;
@@ -254,6 +258,40 @@ final class BattleContext {
     }
 
     long effectiveSpeed(BattleUnit actor) { return effective(actor, actor.speed(), ClassSkillCombat.Stat.SPEED, BattleEffect.SPEED); }
+
+    void snapshotRoundStartSpeeds() {
+        roundStartSpeeds.clear();
+        for (BattleUnit actor : units) {
+            if (actor.isActive()) {
+                roundStartSpeeds.put(actor.actorId(), effectiveSpeed(actor));
+            }
+        }
+    }
+
+    long roundStartSpeed(BattleUnit actor) {
+        Long frozen = roundStartSpeeds.get(actor.actorId());
+        return frozen != null ? frozen : effectiveSpeed(actor);
+    }
+
+    long effectiveMagicAttack(BattleUnit actor) {
+        double mult = Math.max(0.1, 1.0 + configured.modifier(actor, BattleEffect.MAGIC_ATTACK));
+        return Unsigned.fromDoubleSaturating(Unsigned.toDouble(actor.magicAttack()) * mult);
+    }
+
+    /** 承受比例越低说明防御越厚，返回 1 - received 作为防御厚度分，便于按「最低物防/法防」升序挑选脆皮。 */
+    double effectiveMitigationScore(BattleUnit actor, boolean isMagic) {
+        long resistBonus = isMagic ? actor.combat().getMagicResist() : actor.combat().getPhysicalResist();
+        int equipResist = isMagic
+                ? actor.state().getEquipmentEffects().getMagicResistBps()
+                : actor.state().getEquipmentEffects().getPhysicalResistBps();
+        long legacyResist = EquipmentCombatRules.addSaturated(actor.resistance(), resistBonus);
+        double resistBps = Unsigned.toDouble(legacyResist) * 100.0 + Integer.toUnsignedLong(equipResist);
+        double coefficient = 360.0 + 120.0 * Math.clamp(Integer.toUnsignedLong(actor.level()), 1L, 85L);
+        double received = Math.max(0.4,
+                coefficient / (Unsigned.toDouble(actor.armor()) + Unsigned.toDouble(effectiveDefense(actor)) + coefficient)
+                        * (1.0 - Math.clamp(resistBps / 10000.0, 0.0, 1.0)));
+        return 1.0 - Math.clamp(received, 0.0, 1.0);
+    }
 
     private long effective(BattleUnit actor, long base, ClassSkillCombat.Stat stat, int modifier) {
         double multiplier = classSkills.statMultiplier(actor, stat, 0) * Math.max(0.1, 1 + configured.modifier(actor, modifier));

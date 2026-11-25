@@ -26,11 +26,15 @@ class MetricLabelsTest {
         assertThat(MetricLabels.mode(5)).isEqualTo("MATCH_MODE_PVE_TEAM");
         assertThat(MetricLabels.mode(6)).isEqualTo("MATCH_MODE_PVP_CHALLENGE");
         assertThat(MetricLabels.mode(7)).isEqualTo("MATCH_MODE_PVP_TEAM");
+        assertThat(MetricLabels.mode(8)).isEqualTo("MATCH_MODE_POLARITY_5V5");
+        assertThat(MetricLabels.mode(9)).isEqualTo("MATCH_MODE_GUILD_WAR_PVP");
+        assertThat(MetricLabels.mode(10)).isEqualTo("MATCH_MODE_GUILD_WAR_SIEGE");
+        assertThat(MetricLabels.mode(11)).isEqualTo("MATCH_MODE_SEASON_TOURNAMENT");
     }
 
     @Test
     void 模式_契约里没有的值一律unknown_不输出数字串() {
-        assertThat(MetricLabels.mode(8)).isEqualTo("unknown");
+        assertThat(MetricLabels.mode(12)).isEqualTo("unknown");
         assertThat(MetricLabels.mode(-1)).isEqualTo("unknown");
         assertThat(MetricLabels.mode(Integer.MAX_VALUE)).isEqualTo("unknown");
         assertThat(MetricLabels.mode(MatchMode.UNRECOGNIZED)).isEqualTo("unknown");
@@ -46,7 +50,8 @@ class MetricLabelsTest {
         }
         assertThat(seen).containsExactlyInAnyOrder("MATCH_MODE_UNSPECIFIED", "MATCH_MODE_5V5", "MATCH_MODE_3V3",
                 "MATCH_MODE_1V1", "MATCH_MODE_PVE_SOLO", "MATCH_MODE_PVE_TEAM", "MATCH_MODE_PVP_CHALLENGE",
-                "MATCH_MODE_PVP_TEAM", "unknown");
+                "MATCH_MODE_PVP_TEAM", "MATCH_MODE_POLARITY_5V5", "MATCH_MODE_GUILD_WAR_PVP",
+                "MATCH_MODE_GUILD_WAR_SIEGE", "MATCH_MODE_SEASON_TOURNAMENT", "unknown");
     }
 
     @Test
@@ -95,7 +100,9 @@ class MetricLabelsTest {
     void 活动类型_已知值去前缀小写_未知值unknown() {
         assertThat(MetricLabels.activityKind(0)).isEqualTo("none");
         assertThat(MetricLabels.activityKind(1)).isEqualTo("guild_trial");
-        assertThat(MetricLabels.activityKind(2)).isEqualTo("unknown");
+        assertThat(MetricLabels.activityKind(2)).isEqualTo("festival_beast");
+        assertThat(MetricLabels.activityKind(3)).isEqualTo("guild_war");
+        assertThat(MetricLabels.activityKind(4)).isEqualTo("unknown");
         assertThat(MetricLabels.activityKind(-1)).isEqualTo("unknown");
         assertThat(MetricLabels.activityKind(99)).isEqualTo("unknown");
     }

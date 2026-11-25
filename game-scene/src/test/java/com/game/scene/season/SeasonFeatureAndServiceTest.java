@@ -284,6 +284,33 @@ class SeasonFeatureAndServiceTest {
         assertThat(f.settlements.apply(f.world, player, fled).outcome())
                 .isEqualTo(com.game.scene.battle.BattleSettlementService.Outcome.APPLIED);
         assertThat(player.season().record(rule.getId()).getProgressPoints()).isEqualTo(expectedAfterLoss);
+
+        // 5. 正式排位败局防挂机（回合不足 / 手动不足 / 无有效贡献均不给点；达标败局 +pvpOtherPoints；1 回合速胜 +pvpWinPoints）
+        assertThat(SeasonService.isEligibleBattle(BattleFixture.settlement(player.playerId(), 9005L, 0)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN)
+                .setCompetitiveRanked(true).setParticipated(true)
+                .setTotalRounds(2).setManualActionRounds(2).setEffectiveCombatContribution(true).build())).isFalse();
+        assertThat(SeasonService.isEligibleBattle(BattleFixture.settlement(player.playerId(), 9006L, 0)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN)
+                .setCompetitiveRanked(true).setParticipated(true)
+                .setTotalRounds(3).setManualActionRounds(1).setEffectiveCombatContribution(true).build())).isFalse();
+        assertThat(SeasonService.isEligibleBattle(BattleFixture.settlement(player.playerId(), 9007L, 0)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN)
+                .setCompetitiveRanked(true).setParticipated(true)
+                .setTotalRounds(3).setManualActionRounds(2).setEffectiveCombatContribution(false).build())).isFalse();
+        assertThat(SeasonService.isEligibleBattle(BattleFixture.settlement(player.playerId(), 9008L, 0)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN)
+                .setCompetitiveRanked(true).setParticipated(true)
+                .setTotalRounds(3).setManualActionRounds(2).setEffectiveCombatContribution(true).build())).isTrue();
+        assertThat(SeasonService.isEligibleBattle(BattleFixture.settlement(player.playerId(), 9009L, 0)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                .setCompetitiveRanked(true).setParticipated(true)
+                .setTotalRounds(1).setManualActionRounds(1).setEffectiveCombatContribution(true).build())).isTrue();
     }
 
     @Test

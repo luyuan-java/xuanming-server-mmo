@@ -98,10 +98,17 @@ class TradeAdminAuthFilterTest {
         call("secret", "/admin/whatever/" + "x".repeat(200), "secret", "ops", (req, res) -> { });
 
         assertThat(TradeAdminAuthFilter.opOf(SeedListingController.PATH)).isEqualTo(TradeMetrics.ADMIN_OP_SEED_LISTING);
+        assertThat(TradeAdminAuthFilter.opOf(SellerCreditAdminController.ENVIRONMENT_PATH))
+                .isEqualTo(TradeMetrics.ADMIN_OP_SELLER_ENVIRONMENT);
+        assertThat(TradeAdminAuthFilter.opOf(SellerCreditAdminController.VIOLATION_PATH))
+                .isEqualTo(TradeMetrics.ADMIN_OP_SELLER_VIOLATION);
         assertThat(TradeAdminAuthFilter.opOf("/admin/trade/seed-listing/")).isEqualTo(TradeMetrics.ADMIN_OP_OTHER);
         assertThat(counted(TradeMetrics.ADMIN_OP_OTHER, "200")).isEqualTo(1);
-        assertThat(meters.get("game.trade.admin.requests").counters()).as("op 只有两个取值").allMatch(c ->
-                c.getId().getTag("op").equals(TradeMetrics.ADMIN_OP_SEED_LISTING) || c.getId().getTag("op").equals(TradeMetrics.ADMIN_OP_OTHER));
+        assertThat(meters.get("game.trade.admin.requests").counters()).as("op 只取已知接口枚举").allMatch(c ->
+                c.getId().getTag("op").equals(TradeMetrics.ADMIN_OP_SEED_LISTING)
+                        || c.getId().getTag("op").equals(TradeMetrics.ADMIN_OP_SELLER_ENVIRONMENT)
+                        || c.getId().getTag("op").equals(TradeMetrics.ADMIN_OP_SELLER_VIOLATION)
+                        || c.getId().getTag("op").equals(TradeMetrics.ADMIN_OP_OTHER));
     }
 
     @Test

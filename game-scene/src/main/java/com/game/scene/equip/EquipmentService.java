@@ -136,7 +136,7 @@ public final class EquipmentService {
         return new Outcome(result.tip(), result.ok(), 0, false);
     }
     public Outcome enhance(ScenePlayer p, long id) {
-        return enhanceCore(p, id, null, null, 0L, null);
+        return enhanceCore(p, id, null, null, false, 0L, null);
     }
 
     /** RPC 强化入口：先按 client_request_id 幂等查账，再校乐观等级/保底次数与 profile 规则。 */
@@ -163,7 +163,8 @@ public final class EquipmentService {
             }
         }
         Integer expectedPity = request.hasExpectedPityCount() ? request.getExpectedPityCount() : null;
-        return enhanceCore(p, request.getItemId(), request.getExpectedLevel(), expectedPity, reqId, fingerprint);
+        return enhanceCore(p, request.getItemId(), request.getExpectedLevel(), expectedPity,
+                request.getAllowBoundMaterials(), reqId, fingerprint);
     }
 
     private int resolvePityLimitForReplay(ScenePlayer p, long itemId) {
@@ -177,7 +178,7 @@ public final class EquipmentService {
     }
 
     private Outcome enhanceCore(ScenePlayer p, long id, Integer expectedLevel, Integer expectedPity,
-                                long clientRequestId, ByteString fingerprint) {
+                                boolean allowBoundMaterials, long clientRequestId, ByteString fingerprint) {
         int gate = writable(p); if (gate != 0) return Outcome.refused(gate);
         Located found = locate(p.bags(), id); if (found.tip() != 0) return Outcome.refused(found.tip());
         int profile = found.row().getEquipProfile();
@@ -200,6 +201,18 @@ public final class EquipmentService {
         long count = Integer.toUnsignedLong(row.getMaterialCount());
         int materialTip = material ? quantityTip(p, row.getMaterialId(), count, equip_error.kEquipEnhanceMaterialNotEnough_VALUE) : 0;
         if (materialTip != 0) return Outcome.refused(materialTip);
+        // 可交易装备强化 T/B 隔离：可交易石充足时始终仅扣可交易石（即使传 allow_bound_materials=true 也不误耗绑定石）；
+        // 可交易石不足时默认拒回 kEquipBindConfirmRequired，确认后按实际消耗绑定堆传染。
+        boolean equipCurrentlyBound = found.item().bound();
+        boolean tradableOnly = false;
+        if (material && !equipCurrentlyBound) {
+            long tradableAvail = p.bags().bag(BagType.INVENTORY).plainTradableQuantity(row.getMaterialId());
+            if (tradableAvail >= count) {
+                tradableOnly = true;
+            } else if (!allowBoundMaterials) {
+                return Outcome.refused(equip_error.kEquipBindConfirmRequired_VALUE);
+            }
+        }
         if (row.getCostGold() < 0) return Outcome.refused(equip_error.kEquipEnhanceGoldNotEnough_VALUE);
         var debit = currency.prepareDeduction(p, Wallet.GOLD, row.getCostGold());
         if (debit.tipId() != 0) return Outcome.refused(equip_error.kEquipEnhanceGoldNotEnough_VALUE);
@@ -208,12 +221,21 @@ public final class EquipmentService {
         boolean success = roll.success();
         int level = success ? current + 1 : (int) Math.max(0, current - Integer.toUnsignedLong(row.getFailLevelLoss()));
         PlayerBags next = candidate(p);
-        List<Bag.Drawn> removed = material ? next.bag(BagType.INVENTORY).drainPlainExact(row.getMaterialId(), count) : List.of();
+        List<Bag.Drawn> removed = List.of();
+        boolean consumedBound = false;
+        if (material) {
+            Bag.DrainOutcome drain = next.bag(BagType.INVENTORY).drainPlainExact(row.getMaterialId(), count, tradableOnly);
+            removed = drain.drawn();
+            consumedBound = drain.consumedBound();
+        }
         BagItem target = locate(next, id).item();
         target.equipment(target.equipment().toBuilder()
                 .setEnhanceLevel(level)
                 .setEnhancePityCount(roll.nextPityCount())
                 .build());
+        if (!equipCurrentlyBound && consumedBound) {
+            target.setBound(true);
+        }
         String extra = "{\"success\":" + success + ",\"from\":" + current + ",\"to\":" + level
                 + (pityLimit > 0 ? ",\"pity\":" + roll.nextPityCount() + ",\"pity_triggered\":" + roll.triggeredByPity() : "")
                 + "}";

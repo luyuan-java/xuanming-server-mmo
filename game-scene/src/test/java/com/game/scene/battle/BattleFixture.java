@@ -188,6 +188,8 @@ public final class BattleFixture {
     public final com.game.scene.trial.TrialJournalService trialJournal;
     public final com.game.scene.craft.SkillCraftTables skillCraftTables = com.game.scene.craft.SkillCraftTables.from(CONFIG);
     public final com.game.scene.craft.SkillCraftService skillCraft;
+    public final com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables = com.game.scene.festivalbeast.FestivalBeastTables.from(CONFIG);
+    public final com.game.scene.festivalbeast.FestivalBeastService festivalBeast;
     public final com.game.scene.skill.ClassSkillService classSkill;
     public final com.game.scene.equip.EquipmentService equipment;
     public final com.game.scene.equip.EquipmentCraftService craft;
@@ -260,21 +262,26 @@ public final class BattleFixture {
         attributes.withSeason((p, out) -> season.collectEffects(p, clock.epochMillis(), out), season::activeSeasonId);
         missions = new MissionService(MissionTables.from(CONFIG), bags, clock);
         skills = new SkillService(SkillTables.from(CONFIG), clock, sceneMetrics, Contracts.IDS);
-        pets = new PetService(PetTables.from(CONFIG), currency, guids, clock, new SplittableRandom(7), sceneMetrics);
+        pets = new PetService(PetTables.from(CONFIG), currency, guids, clock, new SplittableRandom(7), sceneMetrics)
+                .withBags(bags);
         PetFeature petFeature = new PetFeature(pets, Contracts.REGISTRY);
         appearance = new com.game.scene.appearance.AppearanceService(appearanceTables, bags, clock, Contracts.REGISTRY);
         trialJournal = new com.game.scene.trial.TrialJournalService(trialJournalTables, bags, appearance, clock, sceneMetrics,
                 season::activeSeasonId);
         skillCraft = new com.game.scene.craft.SkillCraftService(skillCraftTables, bags, currency, attributes, pets, clock, sceneMetrics);
+        festivalBeast = new com.game.scene.festivalbeast.FestivalBeastService(festivalBeastTables, pets, clock, petListChangedId);
         classSkill = new com.game.scene.skill.ClassSkillService(currency, attributes, pets)
+                .withMetrics(sceneMetrics)
                 .withActiveSeason(season::activeSeasonId)
                 .withCraftUnlockGate(skillCraft::isCraftUnlockGateEnabled);
         settlements = new BattleSettlementService(currency, bags, pets, missions, tables, battleMetrics, clock, petListChangedId)
                 .withSeasonService(season)
-                .withTrialJournalService(trialJournal);
+                .withTrialJournalService(trialJournal)
+                .withFestivalBeastService(festivalBeast);
         battle = new PlayerBattleService(locks, settlements, tables, pets, this::routing, teamFollow, battleMetrics, clock, logic,
                 reconnectHintId, battleEndId)
-                .withTrialJournalService(trialJournal);
+                .withTrialJournalService(trialJournal)
+                .withFestivalBeastService(festivalBeast);
         // 进场规整同 SceneNode：背包 → 属性 → 宝宝 → 任务 → 两本账本的加载检查
         world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, sink, repo, new AtomicLong(5000)::incrementAndGet, clock,
                 sceneMetrics, player -> {
@@ -313,7 +320,8 @@ public final class BattleFixture {
                 new com.game.scene.season.SeasonFeature(season, attributes, Contracts.REGISTRY),
                 new com.game.scene.trial.TrialJournalFeature(trialJournal),
                 new BattleResultFeature(),
-                new MissionFeature(missions), new ActivityFeature(missions), new SkillFeature(skills),
+                new MissionFeature(missions), new ActivityFeature(missions).withFestivalBeastService(festivalBeast),
+                new com.game.scene.festivalbeast.FestivalBeastFeature(festivalBeast), new SkillFeature(skills),
                 new com.game.scene.skill.ClassSkillFeature(classSkill, attributes, Contracts.REGISTRY, pets),
                 new com.game.scene.craft.SkillCraftFeature(skillCraft, attributes, pets, Contracts.REGISTRY),
                 petFeature);

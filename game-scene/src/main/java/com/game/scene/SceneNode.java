@@ -196,6 +196,9 @@ public class SceneNode implements SmartLifecycle {
     private com.game.scene.season.SeasonTables seasonTables;
     private com.game.scene.trial.TrialJournalTables trialJournalTables;
     private com.game.scene.craft.SkillCraftTables skillCraftTables;
+    private com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables;
+    private java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
+            java.util.concurrent.CompletableFuture<com.game.proto.match.StartActivityBattleResponse>> matchActivityStarter;
     private com.game.scene.player.SceneTextGuard textGuard;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
@@ -250,6 +253,20 @@ public class SceneNode implements SmartLifecycle {
     public synchronized SceneNode withSkillCraftTables(com.game.scene.craft.SkillCraftTables skillCraftTables) {
         if (running) throw new IllegalStateException("节点已启动");
         this.skillCraftTables = java.util.Objects.requireNonNull(skillCraftTables);
+        return this;
+    }
+
+    public synchronized SceneNode withFestivalBeastTables(com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.festivalBeastTables = java.util.Objects.requireNonNull(festivalBeastTables);
+        return this;
+    }
+
+    public synchronized SceneNode withMatchActivityStarter(
+            java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
+                    java.util.concurrent.CompletableFuture<com.game.proto.match.StartActivityBattleResponse>> starter) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.matchActivityStarter = starter;
         return this;
     }
 
@@ -462,7 +479,7 @@ public class SceneNode implements SmartLifecycle {
         MissionService missions = new MissionService(missionTables, bags, SceneClock.SYSTEM);
         SkillService skills = new SkillService(skillTables, SceneClock.SYSTEM, metrics, ids);
         PetService petService = new PetService(petTables, currency, itemGuids(guids), SceneClock.SYSTEM,
-                new SplittableRandom(), metrics);
+                new SplittableRandom(), metrics).withBags(bags);
         ThreadPoolExecutor guardPool = null;
         if (textGuard != null) {
             guardPool = new ThreadPoolExecutor(2, 8, 30L, TimeUnit.SECONDS,
@@ -543,12 +560,35 @@ public class SceneNode implements SmartLifecycle {
         if (trialJournalService != null) {
             settlements.withTrialJournalService(trialJournalService);
         }
+        com.game.scene.festivalbeast.FestivalBeastService festivalBeastService = festivalBeastTables == null ? null
+                : new com.game.scene.festivalbeast.FestivalBeastService(
+                        festivalBeastTables, petService, SceneClock.SYSTEM,
+                        registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged"));
+        if (festivalBeastService != null) {
+            var starter = matchActivityStarter;
+            if (starter != null) {
+                festivalBeastService.withLaunchSender((req, cb) -> {
+                    starter.apply(req).whenComplete((rep, err) -> {
+                        try {
+                            logic.execute(() -> cb.onReply(err == null && rep != null, rep));
+                        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                            // 节点停服后丢弃迟到回调
+                        }
+                    });
+                    return true;
+                });
+            }
+            settlements.withFestivalBeastService(festivalBeastService);
+        }
         PlayerBattleService battle = new PlayerBattleService(BattleLocks.redis(new BattleRedis(redis, redisKeys)), settlements,
                 battleTables, petService, player -> battleRouting(gateLinks, player, zoneId, nodeId), teamFollow, battleMetrics,
                 SceneClock.SYSTEM, logic, registry.requireId("BattleClientPlayer", "NotifyBattleReconnect"),
                 registry.requireId("BattleClientPlayer", "NotifyBattleEnd"));
         if (trialJournalService != null) {
             battle.withTrialJournalService(trialJournalService);
+        }
+        if (festivalBeastService != null) {
+            battle.withFestivalBeastService(festivalBeastService);
         }
         InboxService inbox = new InboxService(InboxConsumers.withBattle(currency, bags, battle), inboxClient, SceneClock.SYSTEM,
                 new InboxService.Settings(settings.inbox().consumerEnabled(), settings.inbox().periodicFetchMinutes()),
@@ -613,7 +653,8 @@ public class SceneNode implements SmartLifecycle {
         tradeFreezeRecovery = tradeFreezes;
         tradeFreezes.start(scheduler);
         assetOps = new AssetOpEndpoint(logic, new AssetOpService(sceneWorld, currency, bags,
-                AssetOpAuth.fromEnvironment(), SceneClock.SYSTEM, metrics, petService::transferCapacity));
+                AssetOpAuth.fromEnvironment(), SceneClock.SYSTEM, metrics, petService::transferCapacity)
+                .withPetRules(petService::isTransferableSpecies, petService::hasNormalPetSlot));
         // 资产通道的跨进程提供方：先建好（导出在接受链路之后、发布目录之前）。回写池队列无界，但同时排队的至多是在途上限条
         assetReplyExecutor = new ThreadPoolExecutor(ASSET_REPLY_THREADS, ASSET_REPLY_THREADS, 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(), new DefaultThreadFactory("scene-asset-reply", true));
@@ -637,12 +678,17 @@ public class SceneNode implements SmartLifecycle {
         if (skillCraftService != null) {
             sceneWorld.withCraftUnlockGate(skillCraftService::isCraftUnlockGateEnabled);
         }
-        com.game.scene.skill.ClassSkillService classSkillService = new com.game.scene.skill.ClassSkillService(currency, attributes, petService);
+        com.game.scene.skill.ClassSkillService classSkillService = new com.game.scene.skill.ClassSkillService(currency, attributes, petService)
+                .withMetrics(metrics);
         if (seasonService != null) {
             classSkillService.withActiveSeason(seasonService::activeSeasonId);
         }
         if (skillCraftService != null) {
             classSkillService.withCraftUnlockGate(skillCraftService::isCraftUnlockGateEnabled);
+        }
+        ActivityFeature activityFeature = new ActivityFeature(missions);
+        if (festivalBeastService != null) {
+            activityFeature.withFestivalBeastService(festivalBeastService);
         }
         java.util.List<com.game.scene.world.SceneFeature> features = new java.util.ArrayList<>(List.of(
                 new CurrencyFeature(currency), new AttributeFeature(attributes, registry, call -> {
@@ -650,9 +696,12 @@ public class SceneNode implements SmartLifecycle {
                     missions.onLevelChanged(call.player());
                 }), bagFeature, new EquipmentFeature(equipment, equipmentCraft, bagFeature, attributes, registry),
                 new com.game.scene.battle.BattleResultFeature(),
-                new MissionFeature(missions), new ActivityFeature(missions),
+                new MissionFeature(missions), activityFeature,
                 new SkillFeature(skills), new com.game.scene.skill.ClassSkillFeature(
                         classSkillService, attributes, registry, petService), pets));
+        if (festivalBeastService != null) {
+            features.add(new com.game.scene.festivalbeast.FestivalBeastFeature(festivalBeastService));
+        }
         if (appearanceService != null) {
             features.add(new com.game.scene.appearance.AppearanceFeature(appearanceService));
         }

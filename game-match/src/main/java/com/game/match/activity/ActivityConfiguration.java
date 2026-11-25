@@ -21,5 +21,10 @@ public class ActivityConfiguration {
     }
     @Bean(name="activityBattleService")
     public ActivityBattleService configuredActivityBattleService(MemberPrecheck precheck,TicketStore tickets,GatherLauncher gather,MatchIds ids,MatchMetrics metrics,
-            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global){return activityBattleService(precheck,tickets,gather,ids,metrics).withGlobal(global.getIfAvailable());}
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.ranked.RankedTables> rankedTables){
+        return activityBattleService(precheck,tickets,gather,ids,metrics)
+                .withGlobal(global.getIfAvailable())
+                .withRankedTables(rankedTables.getIfAvailable());
+    }
 }
