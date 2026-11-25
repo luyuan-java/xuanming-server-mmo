@@ -752,10 +752,10 @@ public final class GlobalMatchStore {
             if(unit==null){if(direct.get().getAdmissionPrepared()&&direct.get().getBattleId()==0)return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).setState(1).build();return null;}return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).setBattleId(unit.getBattleId()).setState(unit.getState()==1?2:unit.getState()==2?3:unit.getState()==3?4:5).build();});
     }
     private GlobalFormationRow reserveDirect(Connection c,GlobalDirectIntentRow key,ByteString payload,List<GlobalTicketRow> members,GlobalFormationRow formation)throws Exception {
-            if(key.getKind()!=2&&members.stream().noneMatch(t->t.getPlayerId()==key.getOwnerId()&&t.getOwnerAccount().equals(key.getOwnerAccount())&&t.getOwnerRevision()==key.getOwnerRevision()))
+            if(key.getKind()!=2&&key.getKind()!=4&&members.stream().noneMatch(t->t.getPlayerId()==key.getOwnerId()&&t.getOwnerAccount().equals(key.getOwnerAccount())&&t.getOwnerRevision()==key.getOwnerRevision()))
                 throw new SecurityException("开局发起原身份不在名单内");
             owners(c,members);
-            if(key.getKind()!=2)owner(c,key.getOwnerId(),key.getOwnerAccount(),key.getOwnerRevision());
+            if(key.getKind()!=2&&key.getKind()!=4)owner(c,key.getOwnerId(),key.getOwnerAccount(),key.getOwnerRevision());
             db.insertIgnore(c,key.toBuilder().setPayload(payload).build());
             var original=db.findOneByPkForUpdate(c,key).orElseThrow();
             if(!original.getPayload().equals(payload))throw new IllegalArgumentException("相同业务意图内容不同");

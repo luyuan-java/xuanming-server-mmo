@@ -138,6 +138,9 @@ final class ConfiguredImpact {
             }
         }
         remaining = battle.equipment.reduce(source,target,remaining,hit);
+        long earthAbsorbed = target.absorbTournamentEarthShield(remaining);
+        remaining -= earthAbsorbed;
+        absorbed = EquipmentCombatRules.addSaturated(absorbed, earthAbsorbed);
         long dealt = minUnsigned(target.health(),remaining);
         target.setHealth(target.health()-dealt);
         if (hit.origin == DIRECT) {

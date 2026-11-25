@@ -16,6 +16,8 @@ import com.game.proto.match.CreateTournamentSquadRequest;
 import com.game.proto.match.CreateTournamentSquadResponse;
 import com.game.proto.match.GetTournamentOverviewRequest;
 import com.game.proto.match.GetTournamentOverviewResponse;
+import com.game.proto.match.GetTournamentSpectateCheerRequest;
+import com.game.proto.match.GetTournamentSpectateCheerResponse;
 import com.game.proto.match.InviteTournamentMemberRequest;
 import com.game.proto.match.InviteTournamentMemberResponse;
 import com.game.proto.match.LeaveTournamentSquadRequest;
@@ -26,6 +28,10 @@ import com.game.proto.match.RegisterTournamentSquadRequest;
 import com.game.proto.match.RegisterTournamentSquadResponse;
 import com.game.proto.match.RespondTournamentInviteRequest;
 import com.game.proto.match.RespondTournamentInviteResponse;
+import com.game.proto.match.SaluteTournamentChampionRequest;
+import com.game.proto.match.SaluteTournamentChampionResponse;
+import com.game.proto.match.SendTournamentSpectateCheerRequest;
+import com.game.proto.match.SendTournamentSpectateCheerResponse;
 import com.game.proto.match.StartTournamentMatchRequest;
 import com.game.proto.match.StartTournamentMatchResponse;
 import com.game.proto.match.TournamentInviteView;
@@ -35,6 +41,7 @@ import com.game.proto.match.TournamentSquadView;
 import com.game.proto.match.UpdateTournamentLineupRequest;
 import com.game.proto.match.UpdateTournamentLineupResponse;
 import com.game.table.MatchErrorTip;
+import com.game.table.TournamentRuleTable;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.sql.SQLException;
@@ -73,6 +80,7 @@ public final class TournamentService {
     private final MatchLauncher launcher;
     private final TextGuard textGuard;
     private final RewardMailSender mailSender;
+    private final TournamentSpectateCheerHub cheerHub = new TournamentSpectateCheerHub();
 
     public TournamentService(TournamentStore store, LongSupplier idGenerator, MatchLauncher launcher) {
         this(store, idGenerator, launcher, null, null);
@@ -233,6 +241,25 @@ public final class TournamentService {
         }
     }
 
+    /** 为就绪或局间换阵自动开打的对局统一建房并回填 battle_id（失败则原子回滚就绪态）。 */
+    public long launchSpec(TournamentStore.LaunchSpec spec) throws SQLException {
+        if (spec == null || launcher == null) {
+            return 0L;
+        }
+        long battleId = launcher.launch(spec);
+        if (battleId == 0L) {
+            try {
+                store.bindMatchBattle(spec.matchId(), 0L, false);
+            } catch (SQLException rollbackErr) {
+                log.warn("[tournament] rollback ready state failed match={}: {}",
+                        Long.toUnsignedString(spec.matchId()), rollbackErr.getMessage());
+            }
+            return 0L;
+        }
+        store.bindMatchBattle(spec.matchId(), battleId, spec.featured());
+        return battleId;
+    }
+
     public StartTournamentMatchResponse startMatch(long playerId, StartTournamentMatchRequest req) {
         if (playerId == 0L) {
             return StartTournamentMatchResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
@@ -248,20 +275,13 @@ public final class TournamentService {
                         .build();
             }
             if (launcher != null) {
-                long battleId = launcher.launch(outcome.launch());
+                long battleId = launchSpec(outcome.launch());
                 if (battleId == 0L) {
-                    try {
-                        store.bindMatchBattle(outcome.launch().matchId(), 0L, false);
-                    } catch (SQLException rollbackErr) {
-                        log.warn("[tournament] rollback ready state failed match={}: {}",
-                                Long.toUnsignedString(outcome.launch().matchId()), rollbackErr.getMessage());
-                    }
                     return StartTournamentMatchResponse.newBuilder()
                             .setErrorMessage(tip(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE))
                             .setMatch(outcome.match())
                             .build();
                 }
-                store.bindMatchBattle(outcome.launch().matchId(), battleId, outcome.launch().featured());
                 return StartTournamentMatchResponse.newBuilder()
                         .setErrorMessage(tip(0))
                         .setMatch(outcome.match().toBuilder()
@@ -362,6 +382,112 @@ public final class TournamentService {
         }
     }
 
+    public SaluteTournamentChampionResponse saluteChampion(long playerId, SaluteTournamentChampionRequest req) {
+        if (playerId == 0L) {
+            return SaluteTournamentChampionResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+        long rewardId = idGenerator.getAsLong();
+        if (rewardId == 0L) {
+            return SaluteTournamentChampionResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+        try {
+            TournamentStore.SaluteOutcome res = store.saluteChampion(playerId, req.getSeasonId(), rewardId);
+            TournamentRuleTable rule = store.tables().rule();
+            long mailId = 0L;
+            if (mailSender != null) {
+                byte[] attBytes = TournamentTables.buildSaluteMailAttachments(rule).toByteArray();
+                TournamentStore.ClaimableReward reward = new TournamentStore.ClaimableReward(
+                        res.rewardId(), res.seasonId(), 0, 0, attBytes);
+                try {
+                    mailId = mailSender.send(playerId, reward,
+                            "群仙问道赛·观道致敬小礼",
+                            "感谢道友向本服总冠军致敬，谨奉绑定修道薄礼一份，请查收附件。");
+                    if (mailId != 0L) {
+                        store.updateSaluteMailId(playerId, res.saluteDay(), mailId);
+                    }
+                } catch (Exception mailErr) {
+                    log.warn("[tournament] salute mail delivery failed player={} reward={}: {}",
+                            Long.toUnsignedString(playerId), Long.toUnsignedString(res.rewardId()), mailErr.getMessage());
+                }
+            }
+            return SaluteTournamentChampionResponse.newBuilder()
+                    .setErrorMessage(tip(0))
+                    .setSeasonId(res.seasonId())
+                    .setChampionSaluteCount(res.championSaluteCount())
+                    .setSalutedToday(true)
+                    .setGoldAmount(rule.getSaluteGoldAmount())
+                    .addAllItems(TournamentTables.saluteRewardItems(rule))
+                    .setMailId(mailId)
+                    .build();
+        } catch (TournamentStore.DomainException e) {
+            return SaluteTournamentChampionResponse.newBuilder().setErrorMessage(tip(e.tipId())).build();
+        } catch (SQLException e) {
+            log.error("[tournament] saluteChampion failed player={}", Long.toUnsignedString(playerId), e);
+            return SaluteTournamentChampionResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+    }
+
+    public SendTournamentSpectateCheerResponse sendSpectateCheer(long playerId, SendTournamentSpectateCheerRequest req) {
+        if (playerId == 0L) {
+            return SendTournamentSpectateCheerResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+        if (req.getBattleId() == 0L
+                || !TournamentRules.isValidSpectateCheerPhrase(req.getPhraseId())
+                || !TournamentRules.isValidSpectateCheerSide(req.getSide())
+                || !store.isTournamentBattle(req.getBattleId())) {
+            return SendTournamentSpectateCheerResponse.newBuilder()
+                    .setErrorMessage(tip(MatchErrorTip.match_error.kMatchTournamentSpectateCheerInvalid_VALUE))
+                    .build();
+        }
+        long now = store.nowMs();
+        TournamentSpectateCheerHub.SendOutcome outcome = cheerHub.send(
+                req.getBattleId(), playerId, "", req.getPhraseId(), req.getSide(), now);
+        if (outcome.invalidArg()) {
+            return SendTournamentSpectateCheerResponse.newBuilder()
+                    .setErrorMessage(tip(MatchErrorTip.match_error.kMatchTournamentSpectateCheerInvalid_VALUE))
+                    .build();
+        }
+        TournamentSpectateCheerHub.Snapshot snap = outcome.snapshot();
+        if (outcome.cooldownHit()) {
+            return SendTournamentSpectateCheerResponse.newBuilder()
+                    .setErrorMessage(tip(MatchErrorTip.match_error.kMatchTournamentSpectateCheerCooldown_VALUE))
+                    .setBattleId(snap.battleId())
+                    .setCountA(snap.countA())
+                    .setCountB(snap.countB())
+                    .setCooldownUntilMs(snap.cooldownUntilMs())
+                    .setServerTimeMs(snap.serverTimeMs())
+                    .build();
+        }
+        return SendTournamentSpectateCheerResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setBattleId(snap.battleId())
+                .setCountA(snap.countA())
+                .setCountB(snap.countB())
+                .setCooldownUntilMs(snap.cooldownUntilMs())
+                .addAllRecentCheers(snap.recentCheers())
+                .setServerTimeMs(snap.serverTimeMs())
+                .build();
+    }
+
+    public GetTournamentSpectateCheerResponse getSpectateCheer(long playerId, GetTournamentSpectateCheerRequest req) {
+        if (req.getBattleId() == 0L || !store.isTournamentBattle(req.getBattleId())) {
+            return GetTournamentSpectateCheerResponse.newBuilder()
+                    .setErrorMessage(tip(MatchErrorTip.match_error.kMatchTournamentSpectateCheerInvalid_VALUE))
+                    .build();
+        }
+        long now = store.nowMs();
+        TournamentSpectateCheerHub.Snapshot snap = cheerHub.snapshot(req.getBattleId(), playerId, req.getAfterSeq(), now);
+        return GetTournamentSpectateCheerResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setBattleId(snap.battleId())
+                .setCountA(snap.countA())
+                .setCountB(snap.countB())
+                .setCooldownUntilMs(snap.cooldownUntilMs())
+                .addAllRecentCheers(snap.recentCheers())
+                .setServerTimeMs(snap.serverTimeMs())
+                .build();
+    }
+
     public List<MatchMethodHandler> clientHandlers() {
         return List.of(
                 handler(MatchMethods.GET_TOURNAMENT_OVERVIEW,
@@ -399,7 +525,16 @@ public final class TournamentService {
                         () -> CheerTournamentSquadResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
                 handler(MatchMethods.CLAIM_TOURNAMENT_REWARD,
                         (s, b) -> claimReward(pid(s), ClaimTournamentRewardRequest.parseFrom(b)),
-                        () -> ClaimTournamentRewardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build())
+                        () -> ClaimTournamentRewardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
+                handler(MatchMethods.SALUTE_TOURNAMENT_CHAMPION,
+                        (s, b) -> saluteChampion(pid(s), SaluteTournamentChampionRequest.parseFrom(b)),
+                        () -> SaluteTournamentChampionResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
+                handler(MatchMethods.SEND_TOURNAMENT_SPECTATE_CHEER,
+                        (s, b) -> sendSpectateCheer(pid(s), SendTournamentSpectateCheerRequest.parseFrom(b)),
+                        () -> SendTournamentSpectateCheerResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
+                handler(MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER,
+                        (s, b) -> getSpectateCheer(pid(s), GetTournamentSpectateCheerRequest.parseFrom(b)),
+                        () -> GetTournamentSpectateCheerResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build())
         );
     }
 

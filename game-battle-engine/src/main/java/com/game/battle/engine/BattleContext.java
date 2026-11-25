@@ -5,6 +5,7 @@ import com.game.common.math.Unsigned;
 import com.game.proto.BattleBuffEntryOrBuilder;
 import com.game.proto.BattleMonsterDefeat;
 import com.game.proto.BattleSettlementData;
+import com.game.proto.TournamentLeylineElement;
 import com.game.proto.eBattleEventType;
 import com.game.table.BuffTable;
 import com.game.table.SkillTable;
@@ -53,6 +54,7 @@ final class BattleContext {
     /** uint32；正在收集 / 结算的回合号，从 1 开始（{@code engine.h:227}）。 */
     private int roundIndex = 1;
     private int maxRounds = BattleConstants.DEFAULT_MAX_ROUNDS;
+    private TournamentLeylineElement activeTournamentLeyline = TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED;
 
     /**
      * @param matchMode 请求里的 match_mode（uint32）；只有 4 / 5 算 PVE，其余一律非 PVE（{@code IsPveMatch}，{@code engine.cpp:1312-1315}）
@@ -118,7 +120,21 @@ final class BattleContext {
                 : 100L - penalty;
     }
 
+    TournamentLeylineElement activeTournamentLeyline() {
+        return activeTournamentLeyline;
+    }
+
+    void setActiveTournamentLeyline(TournamentLeylineElement element) {
+        this.activeTournamentLeyline = element == null
+                ? TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED
+                : element;
+    }
+
     long landedHeal(BattleUnit target, double rawHeal) {
+        if (activeTournamentLeyline == TournamentLeylineElement.TOURNAMENT_LEYLINE_WOOD
+                && rawHeal > 0.0 && Double.isFinite(rawHeal)) {
+            rawHeal *= 110.0 / 100.0;
+        }
         if (escalationStacks() > 0 && rawHeal > 0.0 && Double.isFinite(rawHeal)) {
             rawHeal *= escalationSupportPct() / 100.0;
         }
@@ -359,13 +375,25 @@ final class BattleContext {
             damage *= ratio / CombatDamageRules.receivedRatio(target.armor(),effectiveDefense(target),resistance,target.level());
         }
         if (!pve) damage *= BattleConstants.PVP_DAMAGE_SCALE;
+        // 锦标赛 V2 五行灵脉伤害缩放（与 C++ 引擎逐项对齐）：金锐破防 +4%、火炽 +6%、土厚减伤 -5%。
+        switch (activeTournamentLeyline) {
+            case TOURNAMENT_LEYLINE_METAL -> damage *= 104.0 / 100.0;
+            case TOURNAMENT_LEYLINE_FIRE -> damage *= 106.0 / 100.0;
+            case TOURNAMENT_LEYLINE_EARTH -> damage *= 95.0 / 100.0;
+            default -> {
+            }
+        }
         return damage;
     }
 
     /** 对应伤害类型的暴击概率；读取装备和基础值，不消耗 RNG。 */
     double criticalChance(BattleUnit caster, int damageType) {
         // std::clamp(v, 0.0, 1.0) = v < 0 ? 0 : (1 < v ? 1 : v)；不用 Math.clamp，以免 NaN / -0.0 行为不同
-        double critChance = Unsigned.toDouble(EquipmentCombatRules.criticalRate(caster.critChance(), caster.combat(), damageType)) / 100.0;
+        long critRate = EquipmentCombatRules.criticalRate(caster.critChance(), caster.combat(), damageType);
+        if (activeTournamentLeyline == TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL) {
+            critRate = EquipmentCombatRules.addSaturated(critRate, 5L);
+        }
+        double critChance = Unsigned.toDouble(critRate) / 100.0;
         var equipment = caster.state().getEquipmentEffects();
         critChance += (damageType == CombatDamageRules.PHYSICAL_DAMAGE ? equipment.getPhysicalCritBps()
                 : damageType == CombatDamageRules.MAGIC_DAMAGE ? equipment.getMagicCritBps() : 0) / 10000.0;

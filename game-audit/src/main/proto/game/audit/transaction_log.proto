@@ -60,6 +60,8 @@ enum TransactionReason {
   TX_EQUIP_POLISH_REFORGE = 38;
   TX_SKILL_SCROLL_CRAFT = 39;
   TX_CRAFT_PROXY_FEE = 40;
+  // 官方灵石百宝阁直购（数值同 mmorpg TransactionType = 44）
+  TX_SPIRIT_SHOP_BUY = 44;
   // 运维面（game-data 直写，数值同 mmorpg TransactionType；基线有枚举值、没有写入方）：
   // 回档恢复（余额 / 实例变化，correlation_id = 作业号）、精确回收、批量回收
   TX_ROLLBACK_RESTORE = 16;

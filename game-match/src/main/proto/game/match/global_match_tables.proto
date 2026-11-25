@@ -246,6 +246,8 @@ message GlobalFormationRow {
   repeated GlobalPreparedEndpoint prepared = 18;
   // 建房原件里冻结的观战可见性是否 PUBLIC：与 create_request 同一笔事务写入，之后不变。观战列表与随机选场在 SQL 里直接过滤（索引带它），不解码原件。
   bool spectate_public = 19;
+  // 锦标赛 V2 在成局提交点冻结的 TournamentBattleContext(BO3 局分与五行灵脉);非锦标赛为空。
+  bytes tournament_context = 20;
 }
 message GlobalPreparedEndpoint {
   uint64 player_id = 1;

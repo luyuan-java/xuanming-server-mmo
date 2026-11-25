@@ -47,6 +47,7 @@ public final class PlayerClientRequestLedger {
     public static final int KIND_SKILL_SCROLL_CRAFT = 12;
     public static final int KIND_LEARN_SKILL_BOOK = 13;
     public static final int KIND_DISMANTLE_SKILL_BOOK = 14;
+    public static final int KIND_BUY_SPIRIT_SHOP = 15;
 
     public enum Verdict {
         NEW, REPLAY, MISMATCH

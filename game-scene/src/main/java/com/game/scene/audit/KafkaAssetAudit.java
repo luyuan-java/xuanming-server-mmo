@@ -117,6 +117,7 @@ public final class KafkaAssetAudit implements AssetAudit {
             case EQUIP_POLISH_REFORGE -> TransactionReason.TX_EQUIP_POLISH_REFORGE;
             case SKILL_SCROLL_CRAFT -> TransactionReason.TX_SKILL_SCROLL_CRAFT;
             case CRAFT_PROXY_FEE -> TransactionReason.TX_CRAFT_PROXY_FEE;
+            case SPIRIT_SHOP_BUY -> TransactionReason.TX_SPIRIT_SHOP_BUY;
         };
     }
 }

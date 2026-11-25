@@ -1,7 +1,11 @@
 package com.game.match.tournament;
 
+import com.game.proto.TournamentLeylineElement;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -15,6 +19,10 @@ public final class TournamentRules {
 
     public static final int MIN_SQUAD_NAME_CODEPOINTS = 2;
     public static final int MAX_SQUAD_NAME_CODEPOINTS = 12;
+    public static final int MIN_SPECTATE_CHEER_PHRASE_ID = 1;
+    public static final int MAX_SPECTATE_CHEER_PHRASE_ID = 6;
+    public static final int DEFAULT_INTERMISSION_SEC = 60;
+    private static final ZoneOffset UTC_PLUS_8 = ZoneOffset.ofHours(8);
 
     private TournamentRules() {
     }
@@ -153,5 +161,107 @@ public final class TournamentRules {
             out.add(buf.getLong());
         }
         return out;
+    }
+
+    /** 判定淘汰赛某一轮是否为 BO3（半决赛与总决赛，即该轮参赛队数 remaining <= 4）。 */
+    public static int bestOfForKnockout(int bracketSize, int roundIndex, boolean bo3Top4Enabled) {
+        if (!bo3Top4Enabled || bracketSize < 2 || roundIndex < 1) {
+            return 1;
+        }
+        int remaining = bracketSize >> (roundIndex - 1);
+        return (remaining >= 2 && remaining <= 4) ? 3 : 1;
+    }
+
+    private static long splitMix64(long x) {
+        x += 0x9E3779B97F4A7C15L;
+        x = (x ^ (x >>> 30)) * 0xBF58476D1CE4E5B9L;
+        x = (x ^ (x >>> 27)) * 0x94D049BB133111EBL;
+        return x ^ (x >>> 31);
+    }
+
+    /** 确定性无放回抽取 BO3 五行灵脉顺序（与 Go 侧 DrawLeylines 逐字节同源）。 */
+    public static List<TournamentLeylineElement> drawLeylines(int seasonId, long matchId, int bestOf) {
+        if (bestOf <= 1) {
+            return List.of();
+        }
+        TournamentLeylineElement[] pool = new TournamentLeylineElement[]{
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL,
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_WOOD,
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_WATER,
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_FIRE,
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_EARTH
+        };
+        int count = Math.min(bestOf, pool.length);
+        long state = (Integer.toUnsignedLong(seasonId) << 32) ^ matchId;
+        List<TournamentLeylineElement> out = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            state = splitMix64(state + (i + 1L));
+            int rem = pool.length - i;
+            int pick = i + (int) Long.remainderUnsigned(state, rem);
+            TournamentLeylineElement tmp = pool[i];
+            pool[i] = pool[pick];
+            pool[pick] = tmp;
+            out.add(pool[i]);
+        }
+        return List.copyOf(out);
+    }
+
+    public static String encodeLeylineSequence(List<TournamentLeylineElement> seq) {
+        if (seq == null || seq.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (TournamentLeylineElement e : seq) {
+            if (e != null && e != TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED) {
+                if (!sb.isEmpty()) {
+                    sb.append(',');
+                }
+                sb.append(e.getNumber());
+            }
+        }
+        return sb.toString();
+    }
+
+    public static List<TournamentLeylineElement> decodeLeylineSequence(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        String[] parts = raw.trim().split(",");
+        List<TournamentLeylineElement> out = new ArrayList<>(parts.length);
+        for (String p : parts) {
+            try {
+                int v = Integer.parseInt(p.trim());
+                if (v >= 1 && v <= 5) {
+                    TournamentLeylineElement el = TournamentLeylineElement.forNumber(v);
+                    if (el != null) {
+                        out.add(el);
+                    }
+                }
+            } catch (NumberFormatException ignored) {
+                // 跳过坏项
+            }
+        }
+        return List.copyOf(out);
+    }
+
+    public static TournamentLeylineElement leylineForGame(List<TournamentLeylineElement> seq, int gameIndex) {
+        if (seq == null || gameIndex < 1 || gameIndex > seq.size()) {
+            return TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED;
+        }
+        return seq.get(gameIndex - 1);
+    }
+
+    /** 将 Unix 毫秒转换为 UTC+8 自然日键 YYYYMMDD（每日免费观道致敬重置口径，与 Go Utc8DayKey 完全一致）。 */
+    public static int utc8DayKey(long unixMs) {
+        ZonedDateTime dt = Instant.ofEpochMilli(unixMs).atZone(UTC_PLUS_8);
+        return dt.getYear() * 10000 + dt.getMonthValue() * 100 + dt.getDayOfMonth();
+    }
+
+    public static boolean isValidSpectateCheerPhrase(int phraseId) {
+        return phraseId >= MIN_SPECTATE_CHEER_PHRASE_ID && phraseId <= MAX_SPECTATE_CHEER_PHRASE_ID;
+    }
+
+    public static boolean isValidSpectateCheerSide(int side) {
+        return side == 0 || side == 1;
     }
 }

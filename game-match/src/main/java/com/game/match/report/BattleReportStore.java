@@ -53,9 +53,15 @@ public final class BattleReportStore {
     public static final String DROP_NOT_REQUESTED = "not_requested";
 
     private final DataSource dataSource;
+    private final java.util.function.LongPredicate publicReplayAllowed;
 
     public BattleReportStore(DataSource dataSource) {
+        this(dataSource, battleId -> false);
+    }
+
+    public BattleReportStore(DataSource dataSource, java.util.function.LongPredicate publicReplayAllowed) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.publicReplayAllowed = publicReplayAllowed == null ? battleId -> false : publicReplayAllowed;
     }
 
     /** 校验回放外壳，合格返回空串；null 由调用方按「未录制」处理。 */
@@ -220,7 +226,7 @@ public final class BattleReportStore {
                 auth.setObject(1, PbMysql.uint64(playerId));
                 auth.setObject(2, PbMysql.uint64(battleId));
                 try (ResultSet rs = auth.executeQuery()) {
-                    if (!rs.next()) {
+                    if (!rs.next() && !publicReplayAllowed.test(battleId)) {
                         return Optional.empty();
                     }
                 }

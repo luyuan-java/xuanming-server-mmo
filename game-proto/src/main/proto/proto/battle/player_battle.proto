@@ -73,6 +73,7 @@ message BattleStateS2C {
   uint32 surrender_unlock_round = 24;           // PVP 投降解锁回合号（0=不可投降，PVP 为 5）
   BattleSurrenderVoteState surrender_vote = 25; // 本队当前投降投票或冷却状态（对手与观众视角由节点清空）
   BattlePrepState prep_state = 26;              // 论剑 V3 战前 15 秒明牌变阵状态（非变阵期留空；对手与观众按视角脱敏）
+  TournamentBattleContext tournament_context = 27; // 全服赛季战队锦标赛 V2：BO3 局分与五行灵脉阵眼上下文（供参战与观众展示）
 }
 
 message BattleStartS2C {

@@ -604,3 +604,27 @@ message BattleTrialJournalFacts {
   bool all_self_cleaves_parried = 24;          // 首领试炼 V2：本人及本人宝宝被重劈点名>=1次且100%合法化解(不含倒地/退出取消)
   bool self_parried_cleave_at_least_once = 25; // 首领试炼 V2：本人或本人宝宝至少合法化解过 1 次重劈
 }
+
+// ---- 全服赛季战队锦标赛《群仙问道赛》V2：BO3 与五行灵脉阵眼开局冻结上下文(docs/design/season-team-tournament-v2.md) ----
+enum TournamentLeylineElement {
+  TOURNAMENT_LEYLINE_UNSPECIFIED = 0; // 无灵脉(BO1 / 非锦标赛)
+  TOURNAMENT_LEYLINE_METAL       = 1; // 金锐灵脉：暴击率 +5%，破防直伤 +4%
+  TOURNAMENT_LEYLINE_WOOD        = 2; // 木生灵脉：治疗与护盾效果 +10%
+  TOURNAMENT_LEYLINE_WATER       = 3; // 水润灵脉：回合初恢复 5% 法力，控制抗性 +8%
+  TOURNAMENT_LEYLINE_FIRE        = 4; // 火炽灵脉：全体伤害 +6%
+  TOURNAMENT_LEYLINE_EARTH       = 5; // 土厚灵脉：受到伤害 -5%，首回合护盾 +8% 气血上限
+}
+
+message TournamentBattleContext {
+  uint32 season_id = 1;
+  uint64 match_id = 2;
+  uint32 best_of = 3;                              // 1=BO1, 3=BO3
+  uint32 game_index = 4;                           // 当前第几小局(1..best_of)
+  uint32 wins_a = 5;                               // 本小局开打前 A 队已胜局数
+  uint32 wins_b = 6;                               // 本小局开打前 B 队已胜局数
+  TournamentLeylineElement leyline_element = 7;    // 本小局生效五行灵脉阵眼
+  uint64 squad_a_id = 8;
+  string squad_a_name = 9;
+  uint64 squad_b_id = 10;
+  string squad_b_name = 11;
+}

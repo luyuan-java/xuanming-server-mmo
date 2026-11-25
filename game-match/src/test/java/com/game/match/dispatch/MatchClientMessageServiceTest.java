@@ -119,7 +119,9 @@ class MatchClientMessageServiceTest {
             MatchMethods.LEAVE_TOURNAMENT_SQUAD, MatchMethods.UPDATE_TOURNAMENT_LINEUP,
             MatchMethods.REGISTER_TOURNAMENT_SQUAD, MatchMethods.LIST_TOURNAMENT_STANDINGS,
             MatchMethods.START_TOURNAMENT_MATCH, MatchMethods.CHEER_TOURNAMENT_SQUAD,
-            MatchMethods.CLAIM_TOURNAMENT_REWARD);
+            MatchMethods.CLAIM_TOURNAMENT_REWARD,
+            MatchMethods.SALUTE_TOURNAMENT_CHAMPION, MatchMethods.SEND_TOURNAMENT_SPECTATE_CHEER,
+            MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER);
 
     private static final Map<String, Integer> IDS = new java.util.HashMap<>(Map.of(
             MatchMethods.JOIN_QUEUE, 157, MatchMethods.CANCEL_QUEUE, 148, MatchMethods.GET_QUEUE_STATUS, 153,

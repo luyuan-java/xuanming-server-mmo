@@ -71,6 +71,8 @@ message CreateBattleRequest {
   RankedMatchContext ranked_context = 18;
   // 五行试炼志 V2 开局冻结上下文(非试炼志关联局留空)。
   TrialBattleContext trial_context = 19;
+  // 全服赛季战队锦标赛 V2 开局冻结上下文(BO3 局分与五行灵脉阵眼,非锦标赛留空)。
+  TournamentBattleContext tournament_context = 20;
 }
 
 // error_message 非零 = 未建房。签不出参战票据时回 kServiceUnavailable(turn-based §22 D70 fail-closed):

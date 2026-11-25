@@ -85,7 +85,9 @@ public interface AssetAudit {
         /** 分卷宗技能制书 / 拆解返片（TX_SKILL_SCROLL_CRAFT = 39）。 */
         SKILL_SCROLL_CRAFT,
         /** 主城宗师原子代打费与 5% 系统税回收（TX_CRAFT_PROXY_FEE = 40）。 */
-        CRAFT_PROXY_FEE
+        CRAFT_PROXY_FEE,
+        /** 官方灵石百宝阁直购（TX_SPIRIT_SHOP_BUY = 44）。 */
+        SPIRIT_SHOP_BUY
     }
 
     /**

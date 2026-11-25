@@ -85,8 +85,9 @@ public class MatchFeatureConfiguration {
     // ---- 战报回放（379/380） ----
 
     @Bean
-    public BattleReportStore battleReportStore(DataSource dataSource, FeatureSchemaReady schemaReady) {
-        return new BattleReportStore(dataSource);
+    public BattleReportStore battleReportStore(DataSource dataSource, TournamentStore tournamentStore,
+                                               FeatureSchemaReady schemaReady) {
+        return new BattleReportStore(dataSource, tournamentStore::isPublicKnockoutReplayAllowed);
     }
 
     @Bean
@@ -221,11 +222,12 @@ public class MatchFeatureConfiguration {
                             .setKind(4)
                             .setOwnerId(spec.matchId())
                             .setRequestLow(spec.matchId())
+                            .setRequestHigh(Math.max(1, spec.gameIndex()))
                             .build();
                     ByteString payload = encodeTournamentLaunchPayload(spec);
                     GlobalFormationRow formation = global.reserveDirect(
                             key, payload, MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE,
-                            spec.battleConfigId(), members, Map.of(), 0L, null);
+                            spec.battleConfigId(), members, Map.of(), 0L, null, spec.toBattleContext());
                     if (formation == null || formation.getBattleId() == 0L || formation.getState() == 5) {
                         return 0L;
                     }
@@ -250,7 +252,7 @@ public class MatchFeatureConfiguration {
                 log.error("[tournament] local battle_id allocation failed match={}", Long.toUnsignedString(spec.matchId()));
                 return 0L;
             }
-            gatherLauncher.launch(GatherPlan.tournament(spec.battleConfigId(), members, battleId))
+            gatherLauncher.launch(GatherPlan.tournament(spec.battleConfigId(), members, battleId, spec.toBattleContext()))
                     .whenComplete((result, err) -> {
                         boolean ok = err == null && result != null && result.ok();
                         if (!ok) {
@@ -347,16 +349,19 @@ public class MatchFeatureConfiguration {
     }
 
     @Bean
-    public TournamentSeasonDriver tournamentSeasonDriver(TournamentStore store, MatchIds matchIds) {
-        return new TournamentSeasonDriver(store, () -> matchIds.nextBattleId().orElse(0L));
+    public TournamentSeasonDriver tournamentSeasonDriver(TournamentStore store, MatchIds matchIds,
+                                                         TournamentService tournamentService) {
+        return new TournamentSeasonDriver(store, () -> matchIds.nextBattleId().orElse(0L),
+                5_000L, tournamentService::launchSpec);
     }
 
     private static ByteString encodeTournamentLaunchPayload(TournamentStore.LaunchSpec spec) {
-        ByteBuffer buf = ByteBuffer.allocate(16 + 8 * (spec.teamA().size() + spec.teamB().size()))
+        ByteBuffer buf = ByteBuffer.allocate(20 + 8 * (spec.teamA().size() + spec.teamB().size()))
                 .order(ByteOrder.LITTLE_ENDIAN);
         buf.putLong(spec.matchId());
         buf.putInt(spec.seasonId());
         buf.putInt(spec.battleConfigId());
+        buf.putInt(Math.max(1, spec.gameIndex()));
         for (long pid : spec.teamA()) {
             buf.putLong(pid);
         }
@@ -427,5 +432,20 @@ public class MatchFeatureConfiguration {
     @Bean
     public MatchMethodHandler claimTournamentRewardHandler(TournamentService service) {
         return service.clientHandlers().get(10);
+    }
+
+    @Bean
+    public MatchMethodHandler saluteTournamentChampionHandler(TournamentService service) {
+        return service.clientHandlers().get(11);
+    }
+
+    @Bean
+    public MatchMethodHandler sendTournamentSpectateCheerHandler(TournamentService service) {
+        return service.clientHandlers().get(12);
+    }
+
+    @Bean
+    public MatchMethodHandler getTournamentSpectateCheerHandler(TournamentService service) {
+        return service.clientHandlers().get(13);
     }
 }

@@ -304,6 +304,19 @@ public final class TurnBattleEngine {
         }
         engine.bindDungeonMonsterAis(monsterAiProfiles);
         engine.ctx.encounter.initSpecialState(request.getMatchMode(), engine.maxRounds);
+        // 锦标赛 V2 五行灵脉初始化：设置生效灵脉，土厚灵脉开场赋予全体 8% 气血护盾（与 C++ 引擎逐项对齐）。
+        if (request.hasTournamentContext()) {
+            var leyline = request.getTournamentContext().getLeylineElement();
+            engine.ctx.setActiveTournamentLeyline(leyline);
+            if (leyline == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_EARTH) {
+                for (BattleUnit unit : engine.ctx.units()) {
+                    if (unit.isActive() && Long.compareUnsigned(unit.maxHealth(), 0L) > 0) {
+                        long shield = Math.max(1L, Long.divideUnsigned(unit.maxHealth() * 8L, 100L));
+                        unit.setTournamentEarthShield(shield);
+                    }
+                }
+            }
+        }
         return new BattleStart.Started(engine);
     }
 
@@ -1381,6 +1394,19 @@ public final class TurnBattleEngine {
         }
 
         ctx.configured.beginRound();
+        // 锦标赛 V2 水润灵脉：每回合初为存活单位额外恢复 5% 最大法力（封顶至 max_mana）。
+        if (ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_WATER) {
+            for (BattleUnit unit : ctx.units()) {
+                if (!unit.isActive() || Long.compareUnsigned(unit.maxMana(), 0L) == 0) {
+                    continue;
+                }
+                if (Long.compareUnsigned(unit.mana(), unit.maxMana()) >= 0) {
+                    continue;
+                }
+                long regen = Math.max(1L, Long.divideUnsigned(unit.maxMana() * 5L, 100L));
+                unit.restoreMana(regen);
+            }
+        }
         fillDefaultActions();
 
         ctx.events().startRound(result);
@@ -2297,6 +2323,9 @@ public final class TurnBattleEngine {
                 .setEscalationStacks(escalationStacks())
                 .setEscalationStartRound(escalationStartRound())
                 .setSurrenderUnlockRound(surrenderUnlockRound());
+        if (request.hasTournamentContext() && request.getTournamentContext().getMatchId() != 0L) {
+            state.setTournamentContext(request.getTournamentContext());
+        }
         for (BattleUnit unit : ctx.units()) {
             var visible = state.addActorsBuilder().mergeFrom(unit.snapshot());
             if (unit.isPlayer()) visible.setSupportEffects(ctx.configured.equipment.summary(unit));
@@ -2335,6 +2364,12 @@ public final class TurnBattleEngine {
     /** 该玩家剩余的战斗道具（规格 §6.3）：余量非 0 的条目按 item_table_id 升序（稳定排序，D6）；不在本局的玩家返回空列表。 */
     public List<BattleItemEntry> selfItems(long playerId) {
         return ledger.selfItems(playerId);
+    }
+
+    /** 查询指定单位当前剩余的锦标赛 V2 土厚灵脉首回合护盾（供单测核对）。 */
+    public long tournamentEarthShieldOf(long actorId) {
+        BattleUnit unit = ctx.findActor(actorId);
+        return unit == null ? 0L : unit.tournamentEarthShield();
     }
 
     // =====================================================================================================

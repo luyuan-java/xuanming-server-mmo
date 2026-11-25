@@ -55,6 +55,8 @@ final class ConfiguredEffects {
         List<Integer> artifacts = new ArrayList<>();
         if (op == SHIELD && (source.isPet() || row.getHitLimit() == 0))
             value = battle.equipment.shield(source,receiver,value,hit,artifacts);
+        if (op == SHIELD && ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_WOOD)
+            value *= 110.0 / 100.0;
         if (op == SHIELD && ctx.escalationStacks() > 0)
             value *= ctx.escalationSupportPct() / 100.0;
         if (instant(op) && row.getTriggerEvent() == 0) {

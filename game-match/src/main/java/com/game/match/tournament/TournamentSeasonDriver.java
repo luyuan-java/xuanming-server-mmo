@@ -20,20 +20,32 @@ public final class TournamentSeasonDriver implements SmartLifecycle, AutoCloseab
     private static final Logger log = LoggerFactory.getLogger(TournamentSeasonDriver.class);
     private static final long DEFAULT_INTERVAL_MS = 5_000L;
 
+    @FunctionalInterface
+    public interface IntermissionLauncher {
+        void launch(TournamentStore.LaunchSpec spec) throws Exception;
+    }
+
     private final TournamentStore store;
     private final LongSupplier idGenerator;
     private final long intervalMs;
+    private final IntermissionLauncher intermissionLauncher;
     private final AtomicBoolean running = new AtomicBoolean();
     private ScheduledExecutorService scheduler;
 
     public TournamentSeasonDriver(TournamentStore store, LongSupplier idGenerator) {
-        this(store, idGenerator, DEFAULT_INTERVAL_MS);
+        this(store, idGenerator, DEFAULT_INTERVAL_MS, null);
     }
 
     public TournamentSeasonDriver(TournamentStore store, LongSupplier idGenerator, long intervalMs) {
+        this(store, idGenerator, intervalMs, null);
+    }
+
+    public TournamentSeasonDriver(TournamentStore store, LongSupplier idGenerator, long intervalMs,
+                                  IntermissionLauncher intermissionLauncher) {
         this.store = Objects.requireNonNull(store, "store");
         this.idGenerator = Objects.requireNonNull(idGenerator, "idGenerator");
         this.intervalMs = Math.max(50L, intervalMs);
+        this.intermissionLauncher = intermissionLauncher;
     }
 
     @Override
@@ -55,6 +67,20 @@ public final class TournamentSeasonDriver implements SmartLifecycle, AutoCloseab
             store.advanceSeason(0L, idGenerator);
         } catch (Exception e) {
             log.warn("[tournament] advanceSeason tick failed: {}", e.getMessage());
+        }
+        if (intermissionLauncher != null) {
+            try {
+                for (TournamentStore.LaunchSpec spec : store.takeDueIntermissionLaunches(0L)) {
+                    try {
+                        intermissionLauncher.launch(spec);
+                    } catch (Exception e) {
+                        log.warn("[tournament] intermission auto-launch failed match={} game={}: {}",
+                                Long.toUnsignedString(spec.matchId()), spec.gameIndex(), e.getMessage());
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[tournament] takeDueIntermissionLaunches tick failed: {}", e.getMessage());
+            }
         }
     }
 

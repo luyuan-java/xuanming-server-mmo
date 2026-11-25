@@ -264,6 +264,9 @@ final class BattleEquipment {
             case CONFUSION -> combat.getResistConfusion(); default -> combat.getResistForget();
         });
         if (kind == CONFUSION || kind == SLEEP) resist += 10000*battle.modifier(target,CONTROL_RESIST);
+        if (ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_WATER) {
+            resist += 800.0;
+        }
         boolean consumed = false;
         if (primary) {
             for (int i=0; i<equipment.getArtifactsCount(); i++) {

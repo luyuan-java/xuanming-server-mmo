@@ -547,6 +547,7 @@ final class EncounterMechanics {
         long remaining = CombatDamageRules.damageToHealth(effective, -1L);
         remaining = applyDamageModifiers(source, target, remaining, damageType, isDirectPrimary,
                 isMultiTargetSkill, isPrimaryTarget, outSplashReduced);
+        remaining -= target.absorbTournamentEarthShield(remaining);
         long dealt = Unsigned.minUnsigned(target.health(), remaining);
         target.setHealth(target.health() - dealt);
         return dealt;

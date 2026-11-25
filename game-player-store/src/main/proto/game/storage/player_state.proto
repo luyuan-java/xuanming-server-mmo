@@ -61,6 +61,28 @@ message PlayerState {
   PlayerCraftState craft = 20;
   // 瑞兽迎春限时活动期次胜场、永久待领资格、终身领取回执与在途开局恢复状态（同事务围栏提交）。
   PlayerFestivalBeastState festival_beast = 21;
+  // 官方灵石百宝阁个人与共享组限购记录（同事务围栏提交）。
+  PlayerSpiritShopState spirit_shop = 22;
+}
+
+message SpiritShopGoodsPurchaseState {
+  uint32 goods_id = 1;
+  uint32 lifetime_bought = 2;
+  uint64 week_starts_at_ms = 3;
+  uint32 weekly_bought = 4;
+}
+
+message SpiritShopGroupQuotaState {
+  uint32 group_id = 1;
+  uint32 lifetime_used = 2;
+  uint64 week_starts_at_ms = 3;
+  uint32 weekly_used = 4;
+}
+
+message PlayerSpiritShopState {
+  repeated SpiritShopGoodsPurchaseState goods_records = 1;
+  repeated SpiritShopGroupQuotaState group_records = 2;
+  uint64 shop_revision = 3;
 }
 
 message FestivalBeastPeriodProgressState {

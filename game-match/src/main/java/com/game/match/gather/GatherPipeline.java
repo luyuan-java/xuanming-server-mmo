@@ -381,6 +381,9 @@ public final class GatherPipeline {
             if (plan.activityContext() != null) {
                 create.setActivityContext(plan.activityContext());
             }
+            if (plan.tournamentContext() != null) {
+                create.setTournamentContext(plan.tournamentContext());
+            }
             com.game.match.ranked.RankedTables catalogTables = rankedTables != null ? rankedTables
                     : (rankedStore != null ? rankedStore.tables() : null);
             if (catalogTables != null) {

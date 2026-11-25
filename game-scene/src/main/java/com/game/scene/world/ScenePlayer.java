@@ -124,6 +124,8 @@ public final class ScenePlayer {
     private final com.game.scene.player.PlayerCraft craft;
     /** 瑞兽迎春限时活动进度、永久资格、终身领奖回执与在途开局运行态。 */
     private final com.game.scene.player.PlayerFestivalBeast festivalBeast;
+    /** 官方灵石百宝阁个人与共享组限购记录。 */
+    private final com.game.scene.player.PlayerSpiritShop spiritShop;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -237,6 +239,9 @@ public final class ScenePlayer {
         this.festivalBeast = state.hasFestivalBeast()
                 ? com.game.scene.player.PlayerFestivalBeast.restore(state.getFestivalBeast())
                 : com.game.scene.player.PlayerFestivalBeast.empty();
+        this.spiritShop = state.hasSpiritShop()
+                ? com.game.scene.player.PlayerSpiritShop.restore(state.getSpiritShop())
+                : com.game.scene.player.PlayerSpiritShop.empty();
     }
 
     public long playerId() {
@@ -601,6 +606,9 @@ public final class ScenePlayer {
         if (!festivalBeast.isPristine()) {
             state.setFestivalBeast(festivalBeast.toState());
         }
+        if (!spiritShop.isPristine()) {
+            state.setSpiritShop(spiritShop.toState());
+        }
         return state.build();
     }
 
@@ -661,6 +669,11 @@ public final class ScenePlayer {
     /** 瑞兽迎春限时活动运行态（逻辑线程上读写）。 */
     public com.game.scene.player.PlayerFestivalBeast festivalBeast() {
         return festivalBeast;
+    }
+
+    /** 官方灵石百宝阁个人与共享组限购运行态（逻辑线程上读写；写入只经 {@code SpiritShopService}）。 */
+    public com.game.scene.player.PlayerSpiritShop spiritShop() {
+        return spiritShop;
     }
 
     /** 收件箱消费账本（逻辑线程上读写；写入只经收件箱消费端）。 */

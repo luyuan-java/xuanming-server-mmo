@@ -12,9 +12,11 @@ import com.game.match.feature.pb.MatchRankedRewardRow;
 import com.game.match.feature.pb.MatchRankedSeasonRow;
 import com.game.match.feature.pb.MatchTournamentCheerRow;
 import com.game.match.feature.pb.MatchTournamentInviteRow;
+import com.game.match.feature.pb.MatchTournamentMatchGameRow;
 import com.game.match.feature.pb.MatchTournamentMatchRow;
 import com.game.match.feature.pb.MatchTournamentMemberRow;
 import com.game.match.feature.pb.MatchTournamentRewardRow;
+import com.game.match.feature.pb.MatchTournamentSaluteRow;
 import com.game.match.feature.pb.MatchTournamentSeasonRow;
 import com.game.match.feature.pb.MatchTournamentSquadRow;
 import com.game.pbmysql.PbMysql;
@@ -43,8 +45,10 @@ public final class MatchFeatureTables {
     public static final String TOURNAMENT_MEMBER = "match_tournament_member";
     public static final String TOURNAMENT_INVITE = "match_tournament_invite";
     public static final String TOURNAMENT_MATCH = "match_tournament_match";
+    public static final String TOURNAMENT_MATCH_GAME = "match_tournament_match_game";
     public static final String TOURNAMENT_CHEER = "match_tournament_cheer";
     public static final String TOURNAMENT_REWARD = "match_tournament_reward";
+    public static final String TOURNAMENT_SALUTE = "match_tournament_salute";
 
     public static final List<Message> PROTOTYPES = List.of(
             MatchBattleReportRow.getDefaultInstance(),
@@ -62,8 +66,10 @@ public final class MatchFeatureTables {
             MatchTournamentMemberRow.getDefaultInstance(),
             MatchTournamentInviteRow.getDefaultInstance(),
             MatchTournamentMatchRow.getDefaultInstance(),
+            MatchTournamentMatchGameRow.getDefaultInstance(),
             MatchTournamentCheerRow.getDefaultInstance(),
-            MatchTournamentRewardRow.getDefaultInstance());
+            MatchTournamentRewardRow.getDefaultInstance(),
+            MatchTournamentSaluteRow.getDefaultInstance());
 
     @FunctionalInterface
     public interface SchemaSync {

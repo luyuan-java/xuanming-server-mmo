@@ -504,6 +504,11 @@ public final class GlobalMatchService implements AutoCloseable {
     /** 调用者成功回包前提交；稳定业务键、全员占用、固定地域成局一次 SQL 提交。 */
     public GlobalFormationRow reserveDirect(GlobalDirectIntentRow key,ByteString payload,int mode,int configId,List<Long> roster,
             Map<Long,String> tickets,long teamId,BattleActivityContext activity) {
+        return reserveDirect(key, payload, mode, configId, roster, tickets, teamId, activity, null);
+    }
+
+    public GlobalFormationRow reserveDirect(GlobalDirectIntentRow key,ByteString payload,int mode,int configId,List<Long> roster,
+            Map<Long,String> tickets,long teamId,BattleActivityContext activity,com.game.proto.TournamentBattleContext tournamentContext) {
         try {
             var prior=store.direct(key);
             if(prior!=null){if(prior.getCancelled()||!prior.getPayload().equals(payload))throw new IllegalArgumentException("业务意图已经决定或参数不同");
@@ -512,6 +517,7 @@ public final class GlobalMatchService implements AutoCloseable {
             var members=directMembers(mode,configId,roster,tickets,teamId,stamp);
             var f=directFormation(members,mode,configId,stamp);
             if(activity!=null)f.setActivityContext(activity.toByteString());
+            if(tournamentContext!=null)f.setTournamentContext(tournamentContext.toByteString());
             return resumeDirect(store.prepareDirect(key,payload,members,f.build()),Deadline.after(4000));
         }catch(GlobalMatchStore.OutsideActivityWindowException outside){throw outside;}
         catch(Exception e){throw new Deadline.DependencyException("全球原业务成局尚未确认",e);}
@@ -659,6 +665,7 @@ public final class GlobalMatchService implements AutoCloseable {
                 request.setRankedContext(rankedContext);
             }
             if(!f.getActivityContext().isEmpty())request.setActivityContext(BattleActivityContext.parseFrom(f.getActivityContext()));
+            if(!f.getTournamentContext().isEmpty())request.setTournamentContext(com.game.proto.TournamentBattleContext.parseFrom(f.getTournamentContext()));
             if (rankedTables != null) {
                 rankedTables.trialContextFor(f.getMode(), f.getConfigId(),
                                 request.hasActivityContext() ? request.getActivityContext() : null, rankedContext)

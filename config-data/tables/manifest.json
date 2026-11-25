@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
-  "schema_digest": "243c1949baf529dc",
-  "version": 71,
-  "content_digest": "bd77ebdccd8168a09bf3259a682e18f7840baf49ca7dda2617e924be5c2d8634",
-  "generated_at": "2026-11-25T12:28:30Z",
+  "schema_digest": "e8408ff7f70f67cc",
+  "version": 72,
+  "content_digest": "b69fc2bad47ca757e3290467b70b3f54d341aa85974dddcee322f6ce2bfd7b45",
+  "generated_at": "2026-11-25T15:19:34Z",
   "source_rev": {
-    "commit": "2f0e62225c8aaab4aac209bebe69e3804d073020",
+    "commit": "0f9bc81d68f0af285497d6ffc5cea8a87c5c5fc9",
     "data_dirty": true
   },
-  "table_count": 72,
+  "table_count": 74,
   "tables": [
     {
       "name": "ActivitySchedule",
@@ -1064,24 +1064,24 @@
       "name": "MessageLimiter",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 105,
+      "rows": 109,
       "source": {
         "file": "MessageLimiter.xlsx",
-        "size": 6714,
-        "sha256": "3197520b0ddc4e0b608d7adfb101135519f9e9d32370ae5cc1892692e2a0c8fc"
+        "size": 6784,
+        "sha256": "5d3fa5ace672e37ff257c7e2e2cc3587ca3f1f32876dcc7443c7fdb569b106f1"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "messagelimiter.json",
-          "size": 9378,
-          "sha256": "b8cf83bb8dff9ebaff569287da5b5150002a3a226c5d7a6210dbb893fb1a3114"
+          "size": 9737,
+          "sha256": "1fda38df4791394ae359e4003953880064fe989f611d86a8e3c457b1ebed9786"
         },
         {
           "kind": "binary",
           "file": "messagelimiter.pb",
-          "size": 1240,
-          "sha256": "58a495630a24ef3ac7d9ee71a3c6b5d63b70e1ada556c0ecebeffe4517025b5c"
+          "size": 1288,
+          "sha256": "7b4fdfc879f93302bc3fa7e4ee3a082a3bc9e81bcd6c87af150f248661ea92d4"
         }
       ]
     },
@@ -1586,6 +1586,56 @@
       ]
     },
     {
+      "name": "SpiritShopGoods",
+      "hot_reload": true,
+      "ids_permanent": false,
+      "rows": 7,
+      "source": {
+        "file": "SpiritShopGoods.xlsx",
+        "size": 7265,
+        "sha256": "1d3140da66742b61cbb12851f6251dc42ae3c0eb4d7a478a5bd1591bf404dfcd"
+      },
+      "artifacts": [
+        {
+          "kind": "json",
+          "file": "spiritshopgoods.json",
+          "size": 4617,
+          "sha256": "548d5e4f2897582aa1a1016a42016f5b73d6182814b77370961b2bbe85d7e47f"
+        },
+        {
+          "kind": "binary",
+          "file": "spiritshopgoods.pb",
+          "size": 1735,
+          "sha256": "a2dbc98db93802d5bbc05c7ec4494696fac774a71cab139b8305bed77a789a5b"
+        }
+      ]
+    },
+    {
+      "name": "SpiritShopLimitGroup",
+      "hot_reload": true,
+      "ids_permanent": false,
+      "rows": 1,
+      "source": {
+        "file": "SpiritShopLimitGroup.xlsx",
+        "size": 5168,
+        "sha256": "873d198a8911bf42cfacce04a1e8a4498a4a01c04eb92f46dd508af64cf39001"
+      },
+      "artifacts": [
+        {
+          "kind": "json",
+          "file": "spiritshoplimitgroup.json",
+          "size": 123,
+          "sha256": "f201fb7f7cc62ce371ae5043f12d91e3aad41b4c41c2de024c06ea3e8a33d7cf"
+        },
+        {
+          "kind": "binary",
+          "file": "spiritshoplimitgroup.pb",
+          "size": 39,
+          "sha256": "0db46eb61b6c2bbe181a4dc4c17e85b816527330c402b126302604d3e2272005"
+        }
+      ]
+    },
+    {
       "name": "Test",
       "hot_reload": false,
       "ids_permanent": false,
@@ -1667,21 +1717,21 @@
       "rows": 1,
       "source": {
         "file": "TournamentRule.xlsx",
-        "size": 5666,
-        "sha256": "a0e85216305ef4e6509a7aa29684932b743f68b1f097b02011cf5d394f2bc5b4"
+        "size": 5916,
+        "sha256": "efa7393a56dd834c76309c0ac5499dffa21adb2905eeffaa005b94af5283e662"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "tournamentrule.json",
-          "size": 688,
-          "sha256": "fb4af61e1c5a6e8dd59f3ff7bee7bb6a8deda28df41502caa969953cd212a89e"
+          "size": 913,
+          "sha256": "989963cc8f940dc7131e5376541a0049dd9148d81761f9eefd319388b15b7072"
         },
         {
           "kind": "binary",
           "file": "tournamentrule.pb",
-          "size": 180,
-          "sha256": "8bb75dd83eb91ba782f1acf355611515906c39a1dcb8b794e05194586f8ef253"
+          "size": 246,
+          "sha256": "77c936193ae545bc448f74bfd148ead04f10562f777c70f27e42e6e8e10dea9f"
         }
       ]
     },

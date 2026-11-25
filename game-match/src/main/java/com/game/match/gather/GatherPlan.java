@@ -4,6 +4,7 @@ import com.game.api.match.MatchBudgets;
 import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.TicketRef;
 import com.game.proto.BattleActivityContext;
+import com.game.proto.TournamentBattleContext;
 import com.game.proto.match.MatchMode;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -29,7 +30,13 @@ import java.util.Set;
  * @param activityContext 活动上下文，原样放进建房请求；非活动入口为 null
  */
 public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
-                         FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext) {
+                         FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext,
+                         TournamentBattleContext tournamentContext) {
+
+    public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
+                      FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext) {
+        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, null);
+    }
 
     public GatherPlan {
         Objects.requireNonNull(mode, "mode");
@@ -131,11 +138,16 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
      * 全服赛季战队锦标赛开战（前半名单为 A 队，后半为 B 队，不占用排队票据，预先分配 battle_id 写回赛程表）。
      */
     public static GatherPlan tournament(int battleConfigId, List<Long> roster, long presetBattleId) {
+        return tournament(battleConfigId, roster, presetBattleId, null);
+    }
+
+    public static GatherPlan tournament(int battleConfigId, List<Long> roster, long presetBattleId,
+                                        TournamentBattleContext tournamentContext) {
         if (presetBattleId == 0) {
             throw new IllegalArgumentException("锦标赛开战必须预先发号");
         }
         return new GatherPlan(MatchMode.MATCH_MODE_SEASON_TOURNAMENT, battleConfigId, roster, Map.of(),
-                FailPolicy.NO_TICKETS, presetBattleId, null);
+                FailPolicy.NO_TICKETS, presetBattleId, null, tournamentContext);
     }
 
     // ---------------------------------------------------------------- 管线用的小工具

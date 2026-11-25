@@ -137,6 +137,7 @@ class InBattleGateMatrixTest {
     private static final int MYSTERY_MERCHANT_IN_BATTLE = 30007;
     private static final int SEASON_IN_BATTLE = 34009;
     private static final int TRIAL_JOURNAL_IN_BATTLE = 35002;
+    private static final int SPIRIT_SHOP_IN_BATTLE = 37009;
     private static final java.util.Set<String> EQUIPMENT_METHODS = java.util.Set.of(
             "EquipItem", "UnequipItem", "GmGrantItem", "EnhanceEquip", "InlayGem", "RemoveGem",
             "CommitEquipmentCraft", "ClaimEquipmentMaterialReward");
@@ -166,6 +167,7 @@ class InBattleGateMatrixTest {
     private static final String AFK_PASS = "SceneAfkPassClientPlayer";
     private static final String BATTLE_RESULT = "SceneBattleResultClientPlayer";
     private static final String MYSTERY_MERCHANT = "SceneMysteryMerchantClientPlayer";
+    private static final String SPIRIT_SHOP = "SceneSpiritShopClientPlayer";
     private static final String SEASON = "SceneSeasonClientPlayer";
     private static final String TRIAL_JOURNAL = "SceneTrialJournalClientPlayer";
 
@@ -220,6 +222,7 @@ class InBattleGateMatrixTest {
             new Row(406, BAG, "CommitEquipmentCraft", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
             new Row(408, BAG, "ClaimEquipmentMaterialReward", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
             new Row(315, MYSTERY_MERCHANT, "BuyMysteryMerchantGoods", BattlePolicy.GATED, MYSTERY_MERCHANT_IN_BATTLE),
+            new Row(510, SPIRIT_SHOP, "BuySpiritShopGoods", BattlePolicy.GATED, SPIRIT_SHOP_IN_BATTLE),
             new Row(454, SEASON, "EquipSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(455, SEASON, "CatchupSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(457, TRIAL_JOURNAL, "ClaimTrialJournalMilestone", BattlePolicy.GATED, TRIAL_JOURNAL_IN_BATTLE),
@@ -236,6 +239,7 @@ class InBattleGateMatrixTest {
             new Row(43, SCENE, "SceneInfoC2S", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(253, SCENE, "GetSyncDigest", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(314, MYSTERY_MERCHANT, "GetMysteryMerchantInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(509, SPIRIT_SHOP, "GetSpiritShopInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(453, SEASON, "GetSeasonState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(456, TRIAL_JOURNAL, "GetTrialJournal", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(459, SKILL, "GetSkillCraftingState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -673,6 +677,23 @@ class InBattleGateMatrixTest {
                     .setExpectedItemCount(resolved.itemCount())
                     .setClientRequestId(5003L)
                     .build();
+        });
+        out.put(SPIRIT_SHOP + "GetSpiritShopInfo", s -> com.game.proto.GetSpiritShopInfoRequest.getDefaultInstance());
+        out.put(SPIRIT_SHOP + "BuySpiritShopGoods", s -> {
+            var g = s.world().spiritShopTables.sellableGoods().getFirst();
+            var b = com.game.proto.BuySpiritShopGoodsRequest.newBuilder()
+                    .setClientRequestId(5010L)
+                    .setGoodsId(g.goodsId())
+                    .setCount(1)
+                    .setExpectedCurrencyType(g.currencyType())
+                    .setExpectedUnitPrice(g.unitPrice());
+            for (var item : g.items()) {
+                b.addExpectedItems(com.game.proto.SpiritShopItemEntry.newBuilder()
+                        .setItemConfigId(item.itemConfigId())
+                        .setItemCount(item.itemCount())
+                        .setBound(item.bound()));
+            }
+            return b.build();
         });
         out.put(SEASON + "GetSeasonState", s -> com.game.proto.GetSeasonStateRequest.getDefaultInstance());
         out.put(SEASON + "EquipSeasonSeal", s -> {
@@ -1196,6 +1217,11 @@ class InBattleGateMatrixTest {
             assertThat(w.currency.add(subject.player(), resolved.currencyType(), resolved.price() * 2, Reason.GM_GRANT).ok()).isTrue();
             w.sink.clear();
         }
+        if (row.service().equals(SPIRIT_SHOP) && row.method().equals("BuySpiritShopGoods")) {
+            var g = w.spiritShopTables.sellableGoods().getFirst();
+            assertThat(w.currency.add(subject.player(), g.currencyType(), g.unitPrice() * 2, Reason.GM_GRANT).ok()).isTrue();
+            w.sink.clear();
+        }
         if (row.service().equals(SEASON)) {
             var rule = w.seasonTables.activeSeason(w.clock.epochMillis());
             if (rule == null) {
@@ -1408,7 +1434,7 @@ class InBattleGateMatrixTest {
 
     /** 包含跨区、装备、神秘商人与赛季的全部闸（{@code game_scene_battle_gate_rejects_total{gate}}）。 */
     private static final List<String> GATES = List.of("enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default",
-            "zone_travel", "equipment", "mystery_merchant", "season", "trial_journal");
+            "zone_travel", "equipment", "mystery_merchant", "season", "trial_journal", "spirit_shop");
 
     private Map<String, Double> gateRejectsByGate() {
         Map<String, Double> out = new TreeMap<>();
@@ -1437,6 +1463,7 @@ class InBattleGateMatrixTest {
             case PET -> "pet";
             case BAG -> EQUIPMENT_METHODS.contains(row.method()) ? "equipment" : "bag_sort";
             case MYSTERY_MERCHANT -> "mystery_merchant";
+            case SPIRIT_SHOP -> "spirit_shop";
             case SEASON -> "season";
             case TRIAL_JOURNAL -> "trial_journal";
             default -> throw new AssertionError(row.key() + " 是 GATED，但没有登记它计在哪个闸上（规格 §9 的 gate 取值）");

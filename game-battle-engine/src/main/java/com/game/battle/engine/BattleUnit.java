@@ -206,6 +206,25 @@ final class BattleUnit {
 
     // ---- 伤害 / 治疗原语 ----
 
+    private long tournamentEarthShield;
+
+    long tournamentEarthShield() {
+        return tournamentEarthShield;
+    }
+
+    void setTournamentEarthShield(long shield) {
+        this.tournamentEarthShield = Long.compareUnsigned(shield, 0L) > 0 ? shield : 0L;
+    }
+
+    long absorbTournamentEarthShield(long damage) {
+        if (damage == 0L || tournamentEarthShield == 0L) {
+            return 0L;
+        }
+        long absorbed = Unsigned.minUnsigned(damage, tournamentEarthShield);
+        tournamentEarthShield -= absorbed;
+        return absorbed;
+    }
+
     /**
      * 落伤害（{@code ApplyDamage}，{@code engine.cpp:1345-1359}）：raw ≤ 0 不扣；防御中减半；之后与实时侧共用落血规则
      * （向上取整、封顶到当前气血、非有限数不扣）。返回实扣（uint64）。
@@ -221,6 +240,7 @@ final class BattleUnit {
         }
         long healthBefore = attributes.getHealth();
         long damage = CombatDamageRules.damageToHealth(rawDamage, healthBefore);
+        damage -= absorbTournamentEarthShield(damage);
         attributes.setHealth(healthBefore - damage);
         return damage;
     }

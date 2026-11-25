@@ -89,6 +89,11 @@ service MatchService {
   rpc StartTournamentMatch(StartTournamentMatchRequest) returns (StartTournamentMatchResponse) {}
   rpc CheerTournamentSquad(CheerTournamentSquadRequest) returns (CheerTournamentSquadResponse) {}
   rpc ClaimTournamentReward(ClaimTournamentRewardRequest) returns (ClaimTournamentRewardResponse) {}
+
+  // ---- 全服赛季战队锦标赛《群仙问道赛》V2(docs/design/season-team-tournament-v2.md):请求只认会话本人 ----
+  rpc SaluteTournamentChampion(SaluteTournamentChampionRequest) returns (SaluteTournamentChampionResponse) {}
+  rpc SendTournamentSpectateCheer(SendTournamentSpectateCheerRequest) returns (SendTournamentSpectateCheerResponse) {}
+  rpc GetTournamentSpectateCheer(GetTournamentSpectateCheerRequest) returns (GetTournamentSpectateCheerResponse) {}
 }
 
 // ----- Match mode config -----
@@ -653,6 +658,7 @@ enum TournamentMatchState {
   TOURNAMENT_MATCH_STATE_FINISHED         = 4; // 已决胜负/平局
   TOURNAMENT_MATCH_STATE_BYE              = 5; // 轮空自动晋级
   TOURNAMENT_MATCH_STATE_FORFEIT          = 6; // 超时弃权裁决
+  TOURNAMENT_MATCH_STATE_INTERMISSION     = 7; // V2: BO3 局间灵脉公示与 60 秒换阵倒计时中
 }
 
 enum TournamentRewardTierKind {
@@ -696,6 +702,9 @@ message TournamentSeasonView {
   uint64 champion_squad_id = 20;
   string champion_squad_name = 21;
   string champion_member_summary = 22;  // 冠军成员摘要(供冠军殿堂展示)
+  uint64 champion_salute_count = 23;    // V2: 全服累计观道致敬次数
+  bool saluted_today = 24;              // V2: 当前玩家今日(UTC+8)是否已观道致敬
+  repeated TournamentMemberView champion_members = 25; // V2: 冠军战队成员外观快照
 }
 
 message TournamentMemberView {
@@ -705,6 +714,9 @@ message TournamentMemberView {
   TournamentMemberRole role = 4;
   uint32 starter_slot = 5; // 1..battle_team_size 为首发位,0 为替补
   uint64 joined_ms = 6;
+  uint32 class_id = 7;        // V2: 门派/职业表 ID(0=未知,客户端回落中性青玉剪影)
+  uint32 gender = 8;          // V2: 性别(0=未知)
+  string appearance_id = 9;   // V2: 外观立绘标识(空=按 class_id+gender 解析)
 }
 
 message TournamentSquadView {
@@ -760,6 +772,15 @@ message TournamentMatchView {
   uint64 scheduled_start_ms = 19;
   uint64 deadline_ms = 20;
   uint64 finished_ms = 21;
+  uint32 best_of = 22;                                       // V2: 1=BO1, 3=BO3
+  uint32 current_game_index = 23;                            // V2: 当前小局序号(1..best_of)
+  uint32 wins_a = 24;                                        // V2: A 队小局胜场
+  uint32 wins_b = 25;                                        // V2: B 队小局胜场
+  TournamentLeylineElement current_leyline_element = 26;     // V2: 当前/下一小局五行灵脉阵眼
+  repeated TournamentLeylineElement leyline_sequence = 27;   // V2: BO3 全部灵脉公示顺序(不重复)
+  uint64 intermission_deadline_ms = 28;                      // V2: BO3 局间换阵截止时刻(Unix 毫秒)
+  bool public_replay_available = 29;                         // V2: 是否向全服公开战报回放
+  repeated uint64 game_battle_ids = 30;                      // V2: 已开战各小局 battle_id 列表(按局序)
 }
 
 message TournamentRewardItem {
@@ -900,4 +921,56 @@ message ClaimTournamentRewardRequest {
 message ClaimTournamentRewardResponse {
   TipInfoMessage error_message = 1;
   repeated TournamentPlayerRewardView claimed_rewards = 2;
+}
+
+// ---- 《群仙问道赛》V2 增量协议：每日免费观道致敬 + 观战预设喝彩 ----
+
+message SaluteTournamentChampionRequest {
+  uint32 season_id = 1; // 0 = 致敬最近一届有总冠军的赛季
+}
+message SaluteTournamentChampionResponse {
+  TipInfoMessage error_message = 1;
+  uint32 season_id = 2;
+  uint64 champion_salute_count = 3;
+  bool saluted_today = 4;
+  uint64 gold_amount = 5;
+  repeated TournamentRewardItem items = 6;
+  uint64 mail_id = 7;
+}
+
+message TournamentSpectateCheerItem {
+  uint64 seq = 1;         // 本场递增序号(客户端按 seq 去重飘字)
+  uint32 phrase_id = 2;   // 严格白名单 1..6: 1道友加油/2稳住阵脚/3妙法天成/4配合无间/5逆转乾坤/6一战封神
+  uint32 side = 3;        // 0=支持A队(玉绿), 1=支持B队(朱砂)
+  string sender_name = 4; // 发送者角色名
+  uint64 created_ms = 5;
+}
+
+message SendTournamentSpectateCheerRequest {
+  uint64 battle_id = 1;
+  uint32 phrase_id = 2; // 严格白名单 1..6
+  uint32 side = 3;      // 0=A队, 1=B队
+}
+message SendTournamentSpectateCheerResponse {
+  TipInfoMessage error_message = 1;
+  uint64 battle_id = 2;
+  uint64 count_a = 3;
+  uint64 count_b = 4;
+  uint64 cooldown_until_ms = 5;
+  repeated TournamentSpectateCheerItem recent_cheers = 6;
+  uint64 server_time_ms = 7;
+}
+
+message GetTournamentSpectateCheerRequest {
+  uint64 battle_id = 1;
+  uint64 after_seq = 2; // 仅返回 seq > after_seq 的新喝彩(0=返回近期若干条)
+}
+message GetTournamentSpectateCheerResponse {
+  TipInfoMessage error_message = 1;
+  uint64 battle_id = 2;
+  uint64 count_a = 3;
+  uint64 count_b = 4;
+  uint64 cooldown_until_ms = 5;
+  repeated TournamentSpectateCheerItem recent_cheers = 6;
+  uint64 server_time_ms = 7;
 }

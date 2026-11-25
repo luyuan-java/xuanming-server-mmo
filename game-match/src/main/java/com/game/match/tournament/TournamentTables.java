@@ -134,6 +134,37 @@ public final class TournamentTables {
         return att.build();
     }
 
+    /** 构造每日免费观道致敬的绑定自用邮件附件（与 Go 侧 BuildSaluteMailAttachments 同口径）。 */
+    public static MailAttachments buildSaluteMailAttachments(TournamentRuleTable rule) {
+        MailAttachments.Builder att = MailAttachments.newBuilder();
+        if (rule != null) {
+            long gold = Integer.toUnsignedLong(rule.getSaluteGoldAmount());
+            if (gold > 0L) {
+                att.addCurrencies(MailCurrency.newBuilder()
+                        .setCurrencyType(GOLD_CURRENCY_TYPE)
+                        .setAmount(gold)
+                        .build());
+            }
+            if (rule.getSaluteItemId() != 0 && rule.getSaluteItemCount() != 0) {
+                att.addItems(MailItem.newBuilder()
+                        .setConfigId(rule.getSaluteItemId())
+                        .setCount(rule.getSaluteItemCount())
+                        .build());
+            }
+        }
+        return att.build();
+    }
+
+    public static List<TournamentRewardItem> saluteRewardItems(TournamentRuleTable rule) {
+        if (rule == null || rule.getSaluteItemId() == 0 || rule.getSaluteItemCount() == 0) {
+            return List.of();
+        }
+        return List.of(TournamentRewardItem.newBuilder()
+                .setItemId(rule.getSaluteItemId())
+                .setCount(rule.getSaluteItemCount())
+                .build());
+    }
+
     private static TournamentRewardTierView toTierView(TournamentRewardTable row) {
         TournamentRewardTierKind kind = TournamentRewardTierKind.forNumber(row.getTierKind());
         TournamentRewardTierView.Builder b = TournamentRewardTierView.newBuilder()

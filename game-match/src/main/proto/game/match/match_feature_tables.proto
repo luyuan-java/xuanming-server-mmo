@@ -207,6 +207,12 @@ message MatchTournamentSeasonRow {
   string champion_member_summary = 16;
   uint64 settled_ms = 17;
   uint64 updated_ms = 18;
+  bytes champion_members_blob = 19;
+  uint64 champion_salute_count = 20;
+}
+
+message MatchTournamentChampionMembersBlob {
+  repeated MatchTournamentMemberRow members = 1;
 }
 
 message MatchTournamentSquadRow {
@@ -247,6 +253,9 @@ message MatchTournamentMemberRow {
   string player_name = 6;
   uint32 zone_id = 7;
   uint64 joined_ms = 8;
+  uint32 class_id = 9;
+  uint32 gender = 10;
+  string appearance_id = 11;
 }
 
 message MatchTournamentInviteRow {
@@ -288,6 +297,43 @@ message MatchTournamentMatchRow {
   uint64 deadline_ms = 18;
   uint64 finished_ms = 19;
   uint64 updated_ms = 20;
+  uint32 best_of = 21;
+  uint32 current_game_index = 22;
+  uint32 wins_a = 23;
+  uint32 wins_b = 24;
+  uint32 current_leyline_element = 25;
+  string leyline_sequence = 26;
+  uint64 intermission_deadline_ms = 27;
+}
+
+message MatchTournamentMatchGameRow {
+  option (proto2mysql.table_name) = "match_tournament_match_game";
+  option (proto2mysql.primary_key) = "match_id,game_index";
+  option (proto2mysql.unique_key) = "battle_id";
+  option (proto2mysql.index) = "season_id,battle_id";
+
+  uint64 match_id = 1;
+  uint32 game_index = 2;
+  uint32 season_id = 3;
+  uint32 phase = 4;
+  uint64 battle_id = 5;
+  uint32 leyline_element = 6;
+  uint64 winner_squad_id = 7;
+  uint32 outcome = 8;
+  uint64 finished_ms = 9;
+}
+
+message MatchTournamentSaluteRow {
+  option (proto2mysql.table_name) = "match_tournament_salute";
+  option (proto2mysql.primary_key) = "player_id,salute_day";
+  option (proto2mysql.index) = "season_id,salute_day,player_id";
+
+  uint64 player_id = 1;
+  uint32 salute_day = 2;
+  uint32 season_id = 3;
+  uint64 reward_id = 4;
+  uint64 mail_id = 5;
+  uint64 created_ms = 6;
 }
 
 message MatchTournamentCheerRow {

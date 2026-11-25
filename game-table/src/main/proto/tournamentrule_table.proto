@@ -59,4 +59,16 @@ message TournamentRuleTable {
   uint32 invite_ttl_seconds = 19;
   // 规则说明
   string desc = 20;
+  // 半决赛与总决赛是否启用 BO3 与五行灵脉阵眼轮转(V2,默认 true)
+  bool bo3_top4_enabled = 21;
+  // BO3 局间换阵与灵脉公示倒计时秒数(V2,默认 60)
+  uint32 intermission_seconds = 22;
+  // 淘汰赛战报是否向全服公开回放(V2,默认 true)
+  bool public_knockout_replay = 23;
+  // 每日免费观道致敬绑定银两数量(V2,默认 5000)
+  uint32 salute_gold_amount = 24;
+  // 每日免费观道致敬绑定道具 ID(V2,FK -> Item.id,默认 20 灵兽口粮)
+  uint32 salute_item_id = 25 [(cfg_fk) = "Item"];
+  // 每日免费观道致敬绑定道具数量(V2,默认 3)
+  uint32 salute_item_count = 26;
 }

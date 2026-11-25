@@ -1,8 +1,12 @@
 package com.game.match.tournament;
 
 import com.game.match.feature.MatchFeatureTables;
+import com.game.match.feature.pb.MatchTournamentChampionMembersBlob;
+import com.game.match.feature.pb.MatchTournamentMemberRow;
 import com.game.proto.BattlePetSettlementData;
 import com.game.proto.BattleSettlementData;
+import com.game.proto.TournamentBattleContext;
+import com.game.proto.TournamentLeylineElement;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.eBattleOutcome;
 import com.game.proto.mail.MailAttachments;
@@ -68,7 +72,25 @@ public final class TournamentStore {
     }
 
     public record LaunchSpec(long matchId, int seasonId, TournamentMatchPhase phase, int roundIndex,
-                             int battleConfigId, List<Long> teamA, List<Long> teamB, boolean featured) {
+                             int battleConfigId, List<Long> teamA, List<Long> teamB, boolean featured,
+                             int bestOf, int gameIndex, int winsA, int winsB,
+                             TournamentLeylineElement leylineElement,
+                             long squadAId, String squadAName, long squadBId, String squadBName) {
+        public TournamentBattleContext toBattleContext() {
+            return TournamentBattleContext.newBuilder()
+                    .setSeasonId(seasonId)
+                    .setMatchId(matchId)
+                    .setBestOf(Math.max(1, bestOf))
+                    .setGameIndex(Math.max(1, gameIndex))
+                    .setWinsA(winsA)
+                    .setWinsB(winsB)
+                    .setLeylineElement(leylineElement == null ? TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED : leylineElement)
+                    .setSquadAId(squadAId)
+                    .setSquadAName(squadAName == null ? "" : squadAName)
+                    .setSquadBId(squadBId)
+                    .setSquadBName(squadBName == null ? "" : squadBName)
+                    .build();
+        }
     }
 
     public record PrepareMatchOutcome(TournamentMatchView match, LaunchSpec launch) {
@@ -77,11 +99,15 @@ public final class TournamentStore {
     public record ClaimableReward(long rewardId, int seasonId, int tierKind, int tierId, byte[] attachments) {
     }
 
+    public record SaluteOutcome(int seasonId, int saluteDay, long championSaluteCount, long rewardId) {
+    }
+
     private record SeasonRow(int seasonId, String seasonKey, String seasonName, int ruleVersion, int stage,
                              long registrationStartMs, long qualifierStartMs, long knockoutStartMs,
                              long settleStartMs, long endMs, int battleTeamSize, int rosterMaxSize,
                              int knockoutTeamCount, long championSquadId, String championSquadName,
-                             String championMemberSummary, long settledMs, long updatedMs) {
+                             String championMemberSummary, long settledMs, long updatedMs,
+                             byte[] championMembersBlob, long championSaluteCount) {
     }
 
     private record SquadRow(long squadId, int seasonId, String name, String nameNorm, long captainPlayerId,
@@ -94,7 +120,9 @@ public final class TournamentStore {
                             long squadAId, long squadBId, byte[] lineupA, byte[] lineupB,
                             boolean readyA, boolean readyB, int state, long battleId, long winnerSquadId,
                             int outcome, boolean featuredSpectate, long scheduledStartMs, long deadlineMs,
-                            long finishedMs, long updatedMs) {
+                            long finishedMs, long updatedMs,
+                            int bestOf, int currentGameIndex, int winsA, int winsB,
+                            int currentLeylineElement, String leylineSequence, long intermissionDeadlineMs) {
     }
 
     private final DataSource dataSource;
@@ -109,6 +137,10 @@ public final class TournamentStore {
 
     public TournamentTables tables() {
         return tables;
+    }
+
+    public long nowMs() {
+        return clockMs.getAsLong();
     }
 
     private void requireOpen() {
@@ -152,7 +184,7 @@ public final class TournamentStore {
             }
             try (PreparedStatement ps = c.prepareStatement(
                     "INSERT INTO " + MatchFeatureTables.TOURNAMENT_MEMBER
-                            + "(season_id,player_id,squad_id,role,starter_slot,player_name,zone_id,joined_ms) VALUES(?,?,?,?,1,?,?,?)")) {
+                            + "(season_id,player_id,squad_id,role,starter_slot,player_name,zone_id,joined_ms,class_id,gender,appearance_id) VALUES(?,?,?,?,1,?,?,?,0,0,'')")) {
                 ps.setInt(1, cur.seasonId());
                 ps.setLong(2, playerId);
                 ps.setLong(3, squadId);
@@ -303,7 +335,7 @@ public final class TournamentStore {
             }
             try (PreparedStatement ps = c.prepareStatement(
                     "INSERT INTO " + MatchFeatureTables.TOURNAMENT_MEMBER
-                            + "(season_id,player_id,squad_id,role,starter_slot,player_name,zone_id,joined_ms) VALUES(?,?,?,?,?,?,?,?)")) {
+                            + "(season_id,player_id,squad_id,role,starter_slot,player_name,zone_id,joined_ms,class_id,gender,appearance_id) VALUES(?,?,?,?,?,?,?,?,0,0,'')")) {
                 ps.setInt(1, cur.seasonId());
                 ps.setLong(2, playerId);
                 ps.setLong(3, squadId);
@@ -591,7 +623,8 @@ public final class TournamentStore {
                 if (m == null || m.seasonId() != cur.seasonId()
                         || m.phase() != TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT_VALUE
                         || (m.state() != TournamentMatchState.TOURNAMENT_MATCH_STATE_WAITING_OPPONENT_VALUE
-                        && m.state() != TournamentMatchState.TOURNAMENT_MATCH_STATE_READY_VALUE)
+                        && m.state() != TournamentMatchState.TOURNAMENT_MATCH_STATE_READY_VALUE
+                        && m.state() != TournamentMatchState.TOURNAMENT_MATCH_STATE_INTERMISSION_VALUE)
                         || m.squadAId() == 0L || m.squadBId() == 0L) {
                     throw new DomainException(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE);
                 }
@@ -611,25 +644,35 @@ public final class TournamentStore {
                 int nextState = (readyA && readyB)
                         ? TournamentMatchState.TOURNAMENT_MATCH_STATE_READY_VALUE
                         : m.state();
+                long nextInterDeadline = (readyA && readyB) ? 0L : m.intermissionDeadlineMs();
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE " + MatchFeatureTables.TOURNAMENT_MATCH
-                                + " SET lineup_a=?,lineup_b=?,ready_a=?,ready_b=?,state=?,updated_ms=? WHERE match_id=?")) {
+                                + " SET lineup_a=?,lineup_b=?,ready_a=?,ready_b=?,state=?,intermission_deadline_ms=?,updated_ms=? WHERE match_id=?")) {
                     ps.setBytes(1, lineA);
                     ps.setBytes(2, lineB);
                     ps.setBoolean(3, readyA);
                     ps.setBoolean(4, readyB);
                     ps.setInt(5, nextState);
-                    ps.setLong(6, now);
-                    ps.setLong(7, m.matchId());
+                    ps.setLong(6, nextInterDeadline);
+                    ps.setLong(7, now);
+                    ps.setLong(8, m.matchId());
                     ps.executeUpdate();
                 }
                 MatchRow updated = readMatchForUpdateTx(c, m.matchId());
+                Map<Long, SquadRow> squads = loadSquadMapTx(c, m.squadAId(), m.squadBId());
+                SquadRow sqA = squads.get(m.squadAId());
+                SquadRow sqB = squads.get(m.squadBId());
+                TournamentLeylineElement leyline = TournamentLeylineElement.forNumber(updated.currentLeylineElement());
                 LaunchSpec launch = (readyA && readyB)
                         ? new LaunchSpec(m.matchId(), cur.seasonId(), TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT,
                         m.roundIndex(), rule.getBattleConfigId(),
-                        TournamentRules.decodeLineup(lineA), TournamentRules.decodeLineup(lineB), true)
+                        TournamentRules.decodeLineup(lineA), TournamentRules.decodeLineup(lineB), true,
+                        updated.bestOf(), updated.currentGameIndex(), updated.winsA(), updated.winsB(),
+                        leyline == null ? TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED : leyline,
+                        m.squadAId(), sqA == null ? "" : sqA.name(),
+                        m.squadBId(), sqB == null ? "" : sqB.name())
                         : null;
-                return new PrepareMatchOutcome(toMatchView(updated, loadSquadMapTx(c, m.squadAId(), m.squadBId())), launch);
+                return new PrepareMatchOutcome(toMatchView(updated, squads, loadGameBattleIdsTx(c, m.matchId())), launch);
             }
 
             // 海选分支
@@ -649,7 +692,7 @@ public final class TournamentStore {
                     }
                     existing = readMatchForUpdateTx(c, existing.matchId());
                 }
-                return new PrepareMatchOutcome(toMatchView(existing, loadSquadMapTx(c, existing.squadAId(), existing.squadBId())), null);
+                return new PrepareMatchOutcome(toMatchView(existing, loadSquadMapTx(c, existing.squadAId(), existing.squadBId()), List.of()), null);
             }
             int totalReg = countRegisteredSquadsTx(c, cur.seasonId());
             int maxPairMeetings = totalReg <= 4 ? 2 : 1;
@@ -666,10 +709,15 @@ public final class TournamentStore {
                     ps.executeUpdate();
                 }
                 MatchRow updated = readMatchForUpdateTx(c, paired.matchId());
+                Map<Long, SquadRow> squads = loadSquadMapTx(c, updated.squadAId(), updated.squadBId());
+                SquadRow sqA = squads.get(updated.squadAId());
                 LaunchSpec launch = new LaunchSpec(paired.matchId(), cur.seasonId(),
                         TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_QUALIFIER, paired.roundIndex(),
-                        rule.getBattleConfigId(), TournamentRules.decodeLineup(paired.lineupA()), lineup, false);
-                return new PrepareMatchOutcome(toMatchView(updated, loadSquadMapTx(c, updated.squadAId(), updated.squadBId())), launch);
+                        rule.getBattleConfigId(), TournamentRules.decodeLineup(paired.lineupA()), lineup, false,
+                        1, 1, 0, 0, TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED,
+                        updated.squadAId(), sqA == null ? "" : sqA.name(),
+                        mySquadId, mySquad.name());
+                return new PrepareMatchOutcome(toMatchView(updated, squads, List.of()), launch);
             }
             if (newMatchId == 0L) {
                 throw new DomainException(MatchErrorTip.match_error.kMatchInternal_VALUE);
@@ -678,7 +726,9 @@ public final class TournamentStore {
                     "INSERT INTO " + MatchFeatureTables.TOURNAMENT_MATCH
                             + "(match_id,season_id,phase,round_index,slot_index,squad_a_id,squad_b_id,lineup_a,lineup_b,"
                             + "ready_a,ready_b,state,battle_id,winner_squad_id,outcome,featured_spectate,"
-                            + "scheduled_start_ms,deadline_ms,finished_ms,updated_ms) VALUES(?,?,?,?,0,?,0,?,?,1,0,?,0,0,0,0,?,?,0,?)")) {
+                            + "scheduled_start_ms,deadline_ms,finished_ms,updated_ms,"
+                            + "best_of,current_game_index,wins_a,wins_b,current_leyline_element,leyline_sequence,intermission_deadline_ms) "
+                            + "VALUES(?,?,?,?,0,?,0,?,?,1,0,?,0,0,0,0,?,?,0,?,1,1,0,0,0,'',0)")) {
                 ps.setLong(1, newMatchId);
                 ps.setInt(2, cur.seasonId());
                 ps.setInt(3, TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_QUALIFIER_VALUE);
@@ -693,22 +743,35 @@ public final class TournamentStore {
                 ps.executeUpdate();
             }
             MatchRow created = readMatchForUpdateTx(c, newMatchId);
-            return new PrepareMatchOutcome(toMatchView(created, loadSquadMapTx(c, mySquadId, 0L)), null);
+            return new PrepareMatchOutcome(toMatchView(created, loadSquadMapTx(c, mySquadId, 0L), List.of()), null);
         });
     }
 
     public void bindMatchBattle(long matchId, long battleId, boolean featured) throws SQLException {
         long now = clockMs.getAsLong();
         inTx(c -> {
+            MatchRow m = readMatchForUpdateTx(c, matchId);
+            if (m == null) {
+                return null;
+            }
             if (battleId == 0L) {
-                MatchRow m = readMatchForUpdateTx(c, matchId);
-                if (m != null && m.state() == TournamentMatchState.TOURNAMENT_MATCH_STATE_READY_VALUE) {
+                if (m.state() == TournamentMatchState.TOURNAMENT_MATCH_STATE_READY_VALUE) {
                     if (m.phase() == TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_QUALIFIER_VALUE) {
                         try (PreparedStatement ps = c.prepareStatement(
                                 "UPDATE " + MatchFeatureTables.TOURNAMENT_MATCH
                                         + " SET squad_b_id=0,lineup_b=?,ready_b=0,state=?,updated_ms=? WHERE match_id=?")) {
                             ps.setBytes(1, new byte[0]);
                             ps.setInt(2, TournamentMatchState.TOURNAMENT_MATCH_STATE_WAITING_OPPONENT_VALUE);
+                            ps.setLong(3, now);
+                            ps.setLong(4, matchId);
+                            ps.executeUpdate();
+                        }
+                    } else if (m.bestOf() >= 3 && (m.winsA() > 0 || m.winsB() > 0)) {
+                        try (PreparedStatement ps = c.prepareStatement(
+                                "UPDATE " + MatchFeatureTables.TOURNAMENT_MATCH
+                                        + " SET ready_a=0,ready_b=0,state=?,intermission_deadline_ms=?,updated_ms=? WHERE match_id=?")) {
+                            ps.setInt(1, TournamentMatchState.TOURNAMENT_MATCH_STATE_INTERMISSION_VALUE);
+                            ps.setLong(2, now + 15_000L);
                             ps.setLong(3, now);
                             ps.setLong(4, matchId);
                             ps.executeUpdate();
@@ -728,7 +791,7 @@ public final class TournamentStore {
             }
             try (PreparedStatement ps = c.prepareStatement(
                     "UPDATE " + MatchFeatureTables.TOURNAMENT_MATCH
-                            + " SET battle_id=?,state=?,featured_spectate=?,updated_ms=? WHERE match_id=? AND state IN(1,2)")) {
+                            + " SET battle_id=?,state=?,featured_spectate=?,intermission_deadline_ms=0,updated_ms=? WHERE match_id=? AND state IN(1,2,7)")) {
                 ps.setLong(1, battleId);
                 ps.setInt(2, TournamentMatchState.TOURNAMENT_MATCH_STATE_IN_BATTLE_VALUE);
                 ps.setBoolean(3, featured);
@@ -736,6 +799,8 @@ public final class TournamentStore {
                 ps.setLong(5, matchId);
                 ps.executeUpdate();
             }
+            int gameIdx = Math.max(1, m.currentGameIndex());
+            upsertMatchGameTx(c, m.matchId(), gameIdx, m.seasonId(), m.phase(), battleId, m.currentLeylineElement(), 0L, 0, 0L);
             return null;
         });
     }
@@ -746,7 +811,22 @@ public final class TournamentStore {
         }
         long now = clockMs.getAsLong();
         return inTx(c -> {
-            MatchRow m = findMatchByBattleIdForUpdateTx(c, event.getBattleId());
+            long gameMatchId = 0L;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT match_id,finished_ms FROM " + MatchFeatureTables.TOURNAMENT_MATCH_GAME + " WHERE battle_id=? FOR UPDATE")) {
+                ps.setLong(1, event.getBattleId());
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        gameMatchId = rs.getLong(1);
+                        if (rs.getLong(2) > 0L) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            MatchRow m = gameMatchId != 0L
+                    ? readMatchForUpdateTx(c, gameMatchId)
+                    : findMatchByBattleIdForUpdateTx(c, event.getBattleId());
             if (m == null || m.state() == TournamentMatchState.TOURNAMENT_MATCH_STATE_FINISHED_VALUE
                     || m.state() == TournamentMatchState.TOURNAMENT_MATCH_STATE_FORFEIT_VALUE) {
                 return false;
@@ -765,18 +845,19 @@ public final class TournamentStore {
                 outcome = eBattleOutcome.BATTLE_OUTCOME_DRAW;
             }
             TournamentRuleTable rule = tables.rule();
-            long winnerId = 0L;
+            int gameIdx = Math.max(1, m.currentGameIndex());
+            long gameWinnerId = 0L;
             if (m.phase() == TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_QUALIFIER_VALUE) {
                 int ptsA = sqA.qualifierPoints(), wA = sqA.qualifierWins(), lA = sqA.qualifierLosses(), dA = sqA.qualifierDraws();
                 int ptsB = sqB.qualifierPoints(), wB = sqB.qualifierWins(), lB = sqB.qualifierLosses(), dB = sqB.qualifierDraws();
                 if (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN) {
-                    winnerId = sqA.squadId();
+                    gameWinnerId = sqA.squadId();
                     wA++;
                     ptsA += rule.getQualifierWinPoints();
                     lB++;
                     ptsB += rule.getQualifierLossPoints();
                 } else if (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN) {
-                    winnerId = sqB.squadId();
+                    gameWinnerId = sqB.squadId();
                     wB++;
                     ptsB += rule.getQualifierWinPoints();
                     lA++;
@@ -789,29 +870,76 @@ public final class TournamentStore {
                 }
                 updateQualifierStatsTx(c, sqA.squadId(), ptsA, sqA.qualifierPlayed() + 1, wA, lA, dA, now);
                 updateQualifierStatsTx(c, sqB.squadId(), ptsB, sqB.qualifierPlayed() + 1, wB, lB, dB, now);
-            } else {
-                if (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN) {
-                    winnerId = sqA.squadId();
-                } else if (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN) {
-                    winnerId = sqB.squadId();
-                } else {
-                    var tieA = extractTieMetrics(event, 0, sqA.squadId(), sqA.seedRank());
-                    var tieB = extractTieMetrics(event, 1, sqB.squadId(), sqB.seedRank());
-                    winnerId = TournamentRules.resolveKnockoutDrawWinner(tieA, tieB) == 0 ? sqA.squadId() : sqB.squadId();
+                upsertMatchGameTx(c, m.matchId(), gameIdx, m.seasonId(), m.phase(), event.getBattleId(),
+                        m.currentLeylineElement(), gameWinnerId, outcome.getNumber(), now);
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE " + MatchFeatureTables.TOURNAMENT_MATCH
+                                + " SET state=?,winner_squad_id=?,outcome=?,finished_ms=?,updated_ms=? WHERE match_id=?")) {
+                    ps.setInt(1, TournamentMatchState.TOURNAMENT_MATCH_STATE_FINISHED_VALUE);
+                    ps.setLong(2, gameWinnerId);
+                    ps.setInt(3, outcome.getNumber());
+                    ps.setLong(4, now);
+                    ps.setLong(5, now);
+                    ps.setLong(6, m.matchId());
+                    ps.executeUpdate();
                 }
-                long loserId = winnerId == sqA.squadId() ? sqB.squadId() : sqA.squadId();
-                advanceKnockoutWinnerTx(c, season, m, winnerId, loserId, now);
+                return true;
             }
-            try (PreparedStatement ps = c.prepareStatement(
-                    "UPDATE " + MatchFeatureTables.TOURNAMENT_MATCH
-                            + " SET state=?,winner_squad_id=?,outcome=?,finished_ms=?,updated_ms=? WHERE match_id=?")) {
-                ps.setInt(1, TournamentMatchState.TOURNAMENT_MATCH_STATE_FINISHED_VALUE);
-                ps.setLong(2, winnerId);
-                ps.setInt(3, outcome.getNumber());
-                ps.setLong(4, now);
-                ps.setLong(5, now);
-                ps.setLong(6, m.matchId());
-                ps.executeUpdate();
+
+            // 淘汰赛分支（BO1 / BO3 + 60 秒局间换阵）
+            if (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN) {
+                gameWinnerId = sqA.squadId();
+            } else if (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN) {
+                gameWinnerId = sqB.squadId();
+            } else {
+                var tieA = extractTieMetrics(event, 0, sqA.squadId(), sqA.seedRank());
+                var tieB = extractTieMetrics(event, 1, sqB.squadId(), sqB.seedRank());
+                gameWinnerId = TournamentRules.resolveKnockoutDrawWinner(tieA, tieB) == 0 ? sqA.squadId() : sqB.squadId();
+            }
+            upsertMatchGameTx(c, m.matchId(), gameIdx, m.seasonId(), m.phase(), event.getBattleId(),
+                    m.currentLeylineElement(), gameWinnerId, outcome.getNumber(), now);
+
+            int winsA = m.winsA() + (gameWinnerId == sqA.squadId() ? 1 : 0);
+            int winsB = m.winsB() + (gameWinnerId == sqB.squadId() ? 1 : 0);
+            int bestOf = Math.max(1, m.bestOf());
+            int winsNeeded = bestOf / 2 + 1;
+            if (winsA >= winsNeeded || winsB >= winsNeeded) {
+                long seriesWinner = winsA >= winsNeeded ? sqA.squadId() : sqB.squadId();
+                long loserId = seriesWinner == sqA.squadId() ? sqB.squadId() : sqA.squadId();
+                advanceKnockoutWinnerTx(c, season, m, seriesWinner, loserId, now);
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE " + MatchFeatureTables.TOURNAMENT_MATCH
+                                + " SET state=?,wins_a=?,wins_b=?,winner_squad_id=?,outcome=?,intermission_deadline_ms=0,finished_ms=?,updated_ms=? WHERE match_id=?")) {
+                    ps.setInt(1, TournamentMatchState.TOURNAMENT_MATCH_STATE_FINISHED_VALUE);
+                    ps.setInt(2, winsA);
+                    ps.setInt(3, winsB);
+                    ps.setLong(4, seriesWinner);
+                    ps.setInt(5, outcome.getNumber());
+                    ps.setLong(6, now);
+                    ps.setLong(7, now);
+                    ps.setLong(8, m.matchId());
+                    ps.executeUpdate();
+                }
+            } else {
+                int nextGame = gameIdx + 1;
+                List<TournamentLeylineElement> seq = TournamentRules.decodeLeylineSequence(m.leylineSequence());
+                int nextLeyline = TournamentRules.leylineForGame(seq, nextGame).getNumber();
+                int interSec = rule.getIntermissionSeconds() > 0 ? rule.getIntermissionSeconds() : TournamentRules.DEFAULT_INTERMISSION_SEC;
+                long interDeadline = now + interSec * 1000L;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE " + MatchFeatureTables.TOURNAMENT_MATCH
+                                + " SET state=?,wins_a=?,wins_b=?,current_game_index=?,current_leyline_element=?,ready_a=0,ready_b=0,intermission_deadline_ms=?,outcome=?,updated_ms=? WHERE match_id=?")) {
+                    ps.setInt(1, TournamentMatchState.TOURNAMENT_MATCH_STATE_INTERMISSION_VALUE);
+                    ps.setInt(2, winsA);
+                    ps.setInt(3, winsB);
+                    ps.setInt(4, nextGame);
+                    ps.setInt(5, nextLeyline);
+                    ps.setLong(6, interDeadline);
+                    ps.setInt(7, outcome.getNumber());
+                    ps.setLong(8, now);
+                    ps.setLong(9, m.matchId());
+                    ps.executeUpdate();
+                }
             }
             return true;
         });
@@ -857,8 +985,9 @@ public final class TournamentStore {
         return inTx(c -> {
             SeasonRow cur = ensureSeasonTx(c, now);
             int regCount = countRegisteredSquadsTx(c, cur.seasonId());
+            boolean salutedToday = salutedTodayTx(c, playerId, now);
             GetTournamentOverviewResponse.Builder resp = GetTournamentOverviewResponse.newBuilder()
-                    .setCurrentSeason(toSeasonView(cur, regCount))
+                    .setCurrentSeason(toSeasonView(cur, regCount, salutedToday))
                     .addAllRewardTiers(tables.rewardTierViews())
                     .setServerTimeMs(now);
             long mySquadId = findPlayerSquadIdTx(c, cur.seasonId(), playerId);
@@ -869,7 +998,8 @@ public final class TournamentStore {
                 }
                 MatchRow active = findActiveMatchForSquadTx(c, cur.seasonId(), mySquadId);
                 if (active != null) {
-                    resp.setMyActiveMatch(toMatchView(active, loadSquadMapTx(c, active.squadAId(), active.squadBId())));
+                    resp.setMyActiveMatch(toMatchView(active, loadSquadMapTx(c, active.squadAId(), active.squadBId()),
+                            loadGameBattleIdsTx(c, active.matchId())));
                 }
             }
             // 待处理邀请
@@ -908,7 +1038,8 @@ public final class TournamentStore {
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         MatchRow m = scanMatch(rs);
-                        resp.addFeaturedMatches(toMatchView(m, loadSquadMapTx(c, m.squadAId(), m.squadBId())));
+                        resp.addFeaturedMatches(toMatchView(m, loadSquadMapTx(c, m.squadAId(), m.squadBId()),
+                                loadGameBattleIdsTx(c, m.matchId())));
                     }
                 }
             }
@@ -951,7 +1082,7 @@ public final class TournamentStore {
                     ps.setInt(1, TournamentStage.TOURNAMENT_STAGE_SETTLED_VALUE);
                     try (ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) {
-                            resp.addHallOfFame(toSeasonView(scanSeason(rs), 0));
+                            resp.addHallOfFame(toSeasonView(scanSeason(rs), 0, salutedToday));
                         }
                     }
                 }
@@ -969,6 +1100,7 @@ public final class TournamentStore {
             if (season == null) {
                 throw new DomainException(MatchErrorTip.match_error.kMatchTournamentSquadNotFound_VALUE);
             }
+            boolean salutedToday = playerId != 0L && salutedTodayTx(c, playerId, now);
             List<SquadRow> all = new ArrayList<>();
             Map<Long, SquadRow> byId = new LinkedHashMap<>();
             try (PreparedStatement ps = c.prepareStatement(
@@ -994,7 +1126,7 @@ public final class TournamentStore {
             int start = Math.min((p - 1) * psLimit, all.size());
             int end = Math.min(start + psLimit, all.size());
             ListTournamentStandingsResponse.Builder resp = ListTournamentStandingsResponse.newBuilder()
-                    .setSeason(toSeasonView(season, all.size()))
+                    .setSeason(toSeasonView(season, all.size(), salutedToday))
                     .setTotalSquads(all.size())
                     .setServerTimeMs(now);
             for (SquadRow sq : all.subList(start, end)) {
@@ -1013,7 +1145,8 @@ public final class TournamentStore {
                 ps.setInt(2, TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT_VALUE);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
-                        resp.addKnockoutBracket(toMatchView(scanMatch(rs), byId));
+                        MatchRow m = scanMatch(rs);
+                        resp.addKnockoutBracket(toMatchView(m, byId, loadGameBattleIdsTx(c, m.matchId())));
                     }
                 }
             }
@@ -1272,12 +1405,18 @@ public final class TournamentStore {
         for (int r = 1; r <= totalRounds; r++) {
             long rStart = now + (long) (r - 1) * roundWindowMs;
             long rDeadline = rStart + roundWindowMs;
+            int bestOf = TournamentRules.bestOfForKnockout(bracketSize, r, tables.rule().getBo3Top4Enabled());
             for (int slot = 0; slot < ids[r].length; slot++) {
+                List<TournamentLeylineElement> leylines = TournamentRules.drawLeylines(cur.seasonId(), ids[r][slot], bestOf);
+                String leylineSeq = TournamentRules.encodeLeylineSequence(leylines);
+                int firstLeyline = TournamentRules.leylineForGame(leylines, 1).getNumber();
                 try (PreparedStatement ps = c.prepareStatement(
                         "INSERT INTO " + MatchFeatureTables.TOURNAMENT_MATCH
                                 + "(match_id,season_id,phase,round_index,slot_index,squad_a_id,squad_b_id,lineup_a,lineup_b,"
                                 + "ready_a,ready_b,state,battle_id,winner_squad_id,outcome,featured_spectate,"
-                                + "scheduled_start_ms,deadline_ms,finished_ms,updated_ms) VALUES(?,?,?,?,?,?,?,?,?,0,0,?,0,?,0,1,?,?,?,?)")) {
+                                + "scheduled_start_ms,deadline_ms,finished_ms,updated_ms,"
+                                + "best_of,current_game_index,wins_a,wins_b,current_leyline_element,leyline_sequence,intermission_deadline_ms) "
+                                + "VALUES(?,?,?,?,?,?,?,?,?,0,0,?,0,?,0,1,?,?,?,?,?,1,0,0,?,?,0)")) {
                     ps.setLong(1, ids[r][slot]);
                     ps.setInt(2, cur.seasonId());
                     ps.setInt(3, TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT_VALUE);
@@ -1293,6 +1432,9 @@ public final class TournamentStore {
                     ps.setLong(13, rDeadline);
                     ps.setLong(14, states[r][slot] == TournamentMatchState.TOURNAMENT_MATCH_STATE_BYE_VALUE ? now : 0L);
                     ps.setLong(15, now);
+                    ps.setInt(16, bestOf);
+                    ps.setInt(17, firstLeyline);
+                    ps.setString(18, leylineSeq);
                     ps.executeUpdate();
                 }
             }
@@ -1389,6 +1531,23 @@ public final class TournamentStore {
             String summary = mems.stream()
                     .map(v -> v.getPlayerName().isEmpty() ? "#" + Long.toUnsignedString(v.getPlayerId()) : v.getPlayerName())
                     .reduce((a, b) -> a + " / " + b).orElse("");
+            MatchTournamentChampionMembersBlob.Builder blobBuilder = MatchTournamentChampionMembersBlob.newBuilder();
+            for (TournamentMemberView mv : mems) {
+                blobBuilder.addMembers(MatchTournamentMemberRow.newBuilder()
+                        .setSeasonId(season.seasonId())
+                        .setPlayerId(mv.getPlayerId())
+                        .setSquadId(winnerId)
+                        .setRole(mv.getRoleValue())
+                        .setStarterSlot(mv.getStarterSlot())
+                        .setPlayerName(mv.getPlayerName())
+                        .setZoneId(mv.getZoneId())
+                        .setJoinedMs(mv.getJoinedMs())
+                        .setClassId(mv.getClassId())
+                        .setGender(mv.getGender())
+                        .setAppearanceId(mv.getAppearanceId())
+                        .build());
+            }
+            byte[] champBlob = blobBuilder.build().toByteArray();
             try (PreparedStatement ps = c.prepareStatement(
                     "UPDATE " + MatchFeatureTables.TOURNAMENT_SQUAD
                             + " SET state=?,final_rank=1,updated_ms=? WHERE squad_id=?")) {
@@ -1399,12 +1558,13 @@ public final class TournamentStore {
             }
             try (PreparedStatement ps = c.prepareStatement(
                     "UPDATE " + MatchFeatureTables.TOURNAMENT_SEASON
-                            + " SET champion_squad_id=?,champion_squad_name=?,champion_member_summary=?,updated_ms=? WHERE season_id=?")) {
+                            + " SET champion_squad_id=?,champion_squad_name=?,champion_member_summary=?,champion_members_blob=?,updated_ms=? WHERE season_id=?")) {
                 ps.setLong(1, winnerId);
                 ps.setString(2, champ == null ? "" : champ.name());
                 ps.setString(3, summary);
-                ps.setLong(4, now);
-                ps.setInt(5, season.seasonId());
+                ps.setBytes(4, champBlob);
+                ps.setLong(5, now);
+                ps.setInt(6, season.seasonId());
                 ps.executeUpdate();
             }
             return;
@@ -1524,8 +1684,9 @@ public final class TournamentStore {
                 "INSERT INTO " + MatchFeatureTables.TOURNAMENT_SEASON
                         + "(season_id,season_key,season_name,rule_version,stage,registration_start_ms,qualifier_start_ms,"
                         + "knockout_start_ms,settle_start_ms,end_ms,battle_team_size,roster_max_size,knockout_team_count,"
-                        + "champion_squad_id,champion_squad_name,champion_member_summary,settled_ms,updated_ms) "
-                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,'','',0,?)")) {
+                        + "champion_squad_id,champion_squad_name,champion_member_summary,settled_ms,updated_ms,"
+                        + "champion_members_blob,champion_salute_count) "
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,'','',0,?,?,0)")) {
             ps.setInt(1, seasonId);
             ps.setString(2, "ts" + seasonId);
             ps.setString(3, "第" + seasonId + "赛季·群仙问道赛");
@@ -1539,6 +1700,7 @@ public final class TournamentStore {
             ps.setInt(11, r.getBattleTeamSize());
             ps.setInt(12, r.getRosterMaxSize());
             ps.setLong(13, startMs);
+            ps.setBytes(14, new byte[0]);
             ps.executeUpdate();
         }
     }
@@ -1634,7 +1796,7 @@ public final class TournamentStore {
     private MatchRow findActiveMatchForSquadTx(Connection c, int seasonId, long squadId) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT * FROM " + MatchFeatureTables.TOURNAMENT_MATCH
-                        + " WHERE season_id=? AND (squad_a_id=? OR squad_b_id=?) AND state IN(1,2,3) ORDER BY phase DESC, round_index DESC LIMIT 1")) {
+                        + " WHERE season_id=? AND (squad_a_id=? OR squad_b_id=?) AND state IN(1,2,3,7) ORDER BY phase DESC, round_index DESC, match_id DESC LIMIT 1")) {
             ps.setInt(1, seasonId);
             ps.setLong(2, squadId);
             ps.setLong(3, squadId);
@@ -1661,7 +1823,7 @@ public final class TournamentStore {
     private MatchRow findActiveKnockoutMatchTx(Connection c, int seasonId, long squadId) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT * FROM " + MatchFeatureTables.TOURNAMENT_MATCH
-                        + " WHERE season_id=? AND phase=? AND (squad_a_id=? OR squad_b_id=?) AND state IN(1,2) ORDER BY round_index ASC LIMIT 1 FOR UPDATE")) {
+                        + " WHERE season_id=? AND phase=? AND (squad_a_id=? OR squad_b_id=?) AND state IN(1,2,7) ORDER BY round_index ASC LIMIT 1 FOR UPDATE")) {
             ps.setInt(1, seasonId);
             ps.setInt(2, TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT_VALUE);
             ps.setLong(3, squadId);
@@ -1753,13 +1915,14 @@ public final class TournamentStore {
     private List<TournamentMemberView> loadMembersTx(Connection c, long squadId) throws SQLException {
         List<TournamentMemberView> out = new ArrayList<>();
         try (PreparedStatement ps = c.prepareStatement(
-                "SELECT player_id,player_name,zone_id,role,starter_slot,joined_ms FROM "
+                "SELECT player_id,player_name,zone_id,role,starter_slot,joined_ms,class_id,gender,appearance_id FROM "
                         + MatchFeatureTables.TOURNAMENT_MEMBER
                         + " WHERE squad_id=? ORDER BY role ASC, starter_slot ASC, joined_ms ASC")) {
             ps.setLong(1, squadId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     TournamentMemberRole role = TournamentMemberRole.forNumber(rs.getInt(4));
+                    String app = rs.getString(9);
                     out.add(TournamentMemberView.newBuilder()
                             .setPlayerId(rs.getLong(1))
                             .setPlayerName(rs.getString(2))
@@ -1767,11 +1930,311 @@ public final class TournamentStore {
                             .setRole(role == null ? TournamentMemberRole.TOURNAMENT_MEMBER_ROLE_UNSPECIFIED : role)
                             .setStarterSlot(rs.getInt(5))
                             .setJoinedMs(rs.getLong(6))
+                            .setClassId(rs.getInt(7))
+                            .setGender(rs.getInt(8))
+                            .setAppearanceId(app == null ? "" : app)
                             .build());
                 }
             }
         }
         return out;
+    }
+
+    private void upsertMatchGameTx(Connection c, long matchId, int gameIndex, int seasonId, int phase,
+                                   long battleId, int leylineElement, long winnerSquadId, int outcome, long finishedMs) throws SQLException {
+        if (matchId == 0L || battleId == 0L) {
+            return;
+        }
+        int gIdx = Math.max(1, gameIndex);
+        boolean exists;
+        try (PreparedStatement check = c.prepareStatement(
+                "SELECT 1 FROM " + MatchFeatureTables.TOURNAMENT_MATCH_GAME + " WHERE match_id=? AND game_index=?")) {
+            check.setLong(1, matchId);
+            check.setInt(2, gIdx);
+            try (ResultSet rs = check.executeQuery()) {
+                exists = rs.next();
+            }
+        }
+        if (exists) {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE " + MatchFeatureTables.TOURNAMENT_MATCH_GAME
+                            + " SET battle_id=?,leyline_element=?,winner_squad_id=?,outcome=?,finished_ms=? WHERE match_id=? AND game_index=?")) {
+                ps.setLong(1, battleId);
+                ps.setInt(2, leylineElement);
+                ps.setLong(3, winnerSquadId);
+                ps.setInt(4, outcome);
+                ps.setLong(5, finishedMs);
+                ps.setLong(6, matchId);
+                ps.setInt(7, gIdx);
+                ps.executeUpdate();
+            }
+        } else {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "INSERT INTO " + MatchFeatureTables.TOURNAMENT_MATCH_GAME
+                            + "(match_id,game_index,season_id,phase,battle_id,leyline_element,winner_squad_id,outcome,finished_ms) "
+                            + "VALUES(?,?,?,?,?,?,?,?,?)")) {
+                ps.setLong(1, matchId);
+                ps.setInt(2, gIdx);
+                ps.setInt(3, seasonId);
+                ps.setInt(4, phase);
+                ps.setLong(5, battleId);
+                ps.setInt(6, leylineElement);
+                ps.setLong(7, winnerSquadId);
+                ps.setInt(8, outcome);
+                ps.setLong(9, finishedMs);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    private List<Long> loadGameBattleIdsTx(Connection c, long matchId) throws SQLException {
+        List<Long> ids = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT battle_id FROM " + MatchFeatureTables.TOURNAMENT_MATCH_GAME
+                        + " WHERE match_id=? ORDER BY game_index ASC")) {
+            ps.setLong(1, matchId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    long bid = rs.getLong(1);
+                    if (bid != 0L) {
+                        ids.add(bid);
+                    }
+                }
+            }
+        }
+        return ids;
+    }
+
+    private boolean salutedTodayTx(Connection c, long playerId, long nowMs) throws SQLException {
+        if (playerId == 0L) {
+            return false;
+        }
+        int day = TournamentRules.utc8DayKey(nowMs);
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT 1 FROM " + MatchFeatureTables.TOURNAMENT_SALUTE + " WHERE player_id=? AND salute_day=? LIMIT 1")) {
+            ps.setLong(1, playerId);
+            ps.setInt(2, day);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    /** 扫描 BO3 局间换阵倒计时到期的淘汰赛对局，按上局合法阵容自动切 READY 并返回建房规格。 */
+    public List<LaunchSpec> takeDueIntermissionLaunches(long nowOverrideMs) throws SQLException {
+        long now = nowOverrideMs > 0L ? nowOverrideMs : clockMs.getAsLong();
+        return inTx(c -> {
+            TournamentRuleTable rule = tables.rule();
+            List<MatchRow> due = new ArrayList<>();
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT * FROM " + MatchFeatureTables.TOURNAMENT_MATCH
+                            + " WHERE phase=? AND state=? AND intermission_deadline_ms>0 AND intermission_deadline_ms<=?"
+                            + " ORDER BY match_id ASC LIMIT 16 FOR UPDATE")) {
+                ps.setInt(1, TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT_VALUE);
+                ps.setInt(2, TournamentMatchState.TOURNAMENT_MATCH_STATE_INTERMISSION_VALUE);
+                ps.setLong(3, now);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        due.add(scanMatch(rs));
+                    }
+                }
+            }
+            List<LaunchSpec> specs = new ArrayList<>();
+            for (MatchRow m : due) {
+                if (m.squadAId() == 0L || m.squadBId() == 0L) {
+                    continue;
+                }
+                SeasonRow season = readSeasonForUpdateTx(c, m.seasonId());
+                if (season == null) {
+                    continue;
+                }
+                List<Long> teamA = TournamentRules.decodeLineup(m.lineupA());
+                if (teamA.size() != season.battleTeamSize()) {
+                    List<TournamentMemberView> membersA = loadMembersTx(c, m.squadAId());
+                    if (membersA.size() >= season.battleTeamSize()) {
+                        teamA = resolveLineup(membersA, List.of(), season.battleTeamSize());
+                    }
+                }
+                List<Long> teamB = TournamentRules.decodeLineup(m.lineupB());
+                if (teamB.size() != season.battleTeamSize()) {
+                    List<TournamentMemberView> membersB = loadMembersTx(c, m.squadBId());
+                    if (membersB.size() >= season.battleTeamSize()) {
+                        teamB = resolveLineup(membersB, List.of(), season.battleTeamSize());
+                    }
+                }
+                if (teamA.size() != season.battleTeamSize() || teamB.size() != season.battleTeamSize()) {
+                    continue;
+                }
+                SquadRow sqA = readSquadTx(c, m.squadAId());
+                SquadRow sqB = readSquadTx(c, m.squadBId());
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE " + MatchFeatureTables.TOURNAMENT_MATCH
+                                + " SET lineup_a=?,lineup_b=?,ready_a=1,ready_b=1,state=?,intermission_deadline_ms=0,updated_ms=? WHERE match_id=?")) {
+                    ps.setBytes(1, TournamentRules.encodeLineup(teamA));
+                    ps.setBytes(2, TournamentRules.encodeLineup(teamB));
+                    ps.setInt(3, TournamentMatchState.TOURNAMENT_MATCH_STATE_READY_VALUE);
+                    ps.setLong(4, now);
+                    ps.setLong(5, m.matchId());
+                    ps.executeUpdate();
+                }
+                TournamentLeylineElement ley = TournamentLeylineElement.forNumber(m.currentLeylineElement());
+                specs.add(new LaunchSpec(
+                        m.matchId(), m.seasonId(), TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT,
+                        m.roundIndex(), rule.getBattleConfigId(), teamA, teamB, true,
+                        m.bestOf(), m.currentGameIndex(), m.winsA(), m.winsB(),
+                        ley == null ? TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED : ley,
+                        m.squadAId(), sqA == null ? "" : sqA.name(),
+                        m.squadBId(), sqB == null ? "" : sqB.name()));
+            }
+            return specs;
+        });
+    }
+
+    /** 原子执行每日一次免费观道致敬（主键 (player_id, salute_day) 防刷，累加全服致敬计数）。 */
+    public SaluteOutcome saluteChampion(long playerId, int requestedSeasonId, long rewardId) throws SQLException {
+        requireOpen();
+        if (playerId == 0L || rewardId == 0L) {
+            throw new DomainException(MatchErrorTip.match_error.kMatchInternal_VALUE);
+        }
+        long now = clockMs.getAsLong();
+        return inTx(c -> {
+            SeasonRow season = null;
+            if (requestedSeasonId != 0) {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT * FROM " + MatchFeatureTables.TOURNAMENT_SEASON
+                                + " WHERE season_id=? AND champion_squad_id>0 FOR UPDATE")) {
+                    ps.setInt(1, requestedSeasonId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            season = scanSeason(rs);
+                        }
+                    }
+                }
+            } else {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT * FROM " + MatchFeatureTables.TOURNAMENT_SEASON
+                                + " WHERE champion_squad_id>0 ORDER BY season_id DESC LIMIT 1 FOR UPDATE")) {
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            season = scanSeason(rs);
+                        }
+                    }
+                }
+            }
+            if (season == null) {
+                throw new DomainException(MatchErrorTip.match_error.kMatchTournamentNoChampionToSalute_VALUE);
+            }
+            int saluteDay = TournamentRules.utc8DayKey(now);
+            try (PreparedStatement check = c.prepareStatement(
+                    "SELECT 1 FROM " + MatchFeatureTables.TOURNAMENT_SALUTE
+                            + " WHERE player_id=? AND salute_day=? FOR UPDATE")) {
+                check.setLong(1, playerId);
+                check.setInt(2, saluteDay);
+                try (ResultSet rs = check.executeQuery()) {
+                    if (rs.next()) {
+                        throw new DomainException(MatchErrorTip.match_error.kMatchTournamentAlreadySalutedToday_VALUE);
+                    }
+                }
+            }
+            try (PreparedStatement ps = c.prepareStatement(
+                    "INSERT INTO " + MatchFeatureTables.TOURNAMENT_SALUTE
+                            + "(player_id,salute_day,season_id,reward_id,mail_id,created_ms) VALUES(?,?,?,?,0,?)")) {
+                ps.setLong(1, playerId);
+                ps.setInt(2, saluteDay);
+                ps.setInt(3, season.seasonId());
+                ps.setLong(4, rewardId);
+                ps.setLong(5, now);
+                ps.executeUpdate();
+            } catch (java.sql.SQLIntegrityConstraintViolationException dup) {
+                throw new DomainException(MatchErrorTip.match_error.kMatchTournamentAlreadySalutedToday_VALUE);
+            }
+            long newCount = season.championSaluteCount() + 1L;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE " + MatchFeatureTables.TOURNAMENT_SEASON
+                            + " SET champion_salute_count=?,updated_ms=? WHERE season_id=?")) {
+                ps.setLong(1, newCount);
+                ps.setLong(2, now);
+                ps.setInt(3, season.seasonId());
+                ps.executeUpdate();
+            }
+            return new SaluteOutcome(season.seasonId(), saluteDay, newCount, rewardId);
+        });
+    }
+
+    /** 事务外观道致敬邮件投递成功后回填 mail_id 供审计。 */
+    public void updateSaluteMailId(long playerId, int saluteDay, long mailId) throws SQLException {
+        if (playerId == 0L || saluteDay == 0 || mailId == 0L) {
+            return;
+        }
+        inTx(c -> {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE " + MatchFeatureTables.TOURNAMENT_SALUTE
+                            + " SET mail_id=? WHERE player_id=? AND salute_day=?")) {
+                ps.setLong(1, mailId);
+                ps.setLong(2, playerId);
+                ps.setInt(3, saluteDay);
+                ps.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    /** 校验 battle_id 是否允许全服公开回放（仅淘汰赛且配表开关开启，绝不放行海选/私密切磋）。 */
+    public boolean isPublicKnockoutReplayAllowed(long battleId) {
+        if (battleId == 0L || !tables.rule().getPublicKnockoutReplay()) {
+            return false;
+        }
+        try (Connection c = dataSource.getConnection()) {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT 1 FROM " + MatchFeatureTables.TOURNAMENT_MATCH_GAME
+                            + " WHERE battle_id=? AND phase=? LIMIT 1")) {
+                ps.setLong(1, battleId);
+                ps.setInt(2, TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT_VALUE);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        return true;
+                    }
+                }
+            }
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT 1 FROM " + MatchFeatureTables.TOURNAMENT_MATCH
+                            + " WHERE battle_id=? AND phase=? LIMIT 1")) {
+                ps.setLong(1, battleId);
+                ps.setInt(2, TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT_VALUE);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next();
+                }
+            }
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+
+    /** 校验 battle_id 是否属于锦标赛对局（供观战喝彩接口防任意伪造 battle_id）。 */
+    public boolean isTournamentBattle(long battleId) {
+        if (battleId == 0L) {
+            return false;
+        }
+        try (Connection c = dataSource.getConnection()) {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT 1 FROM " + MatchFeatureTables.TOURNAMENT_MATCH_GAME + " WHERE battle_id=? LIMIT 1")) {
+                ps.setLong(1, battleId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        return true;
+                    }
+                }
+            }
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT 1 FROM " + MatchFeatureTables.TOURNAMENT_MATCH + " WHERE battle_id=? LIMIT 1")) {
+                ps.setLong(1, battleId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next();
+                }
+            }
+        } catch (SQLException e) {
+            return false;
+        }
     }
 
     private Map<Long, SquadRow> loadSquadMapTx(Connection c, long idA, long idB) throws SQLException {
@@ -1875,10 +2338,10 @@ public final class TournamentStore {
         return new TournamentRules.KnockoutTieMetrics(squadId, seedRank, units, hpSum);
     }
 
-    private TournamentSeasonView toSeasonView(SeasonRow r, int regCount) {
+    private TournamentSeasonView toSeasonView(SeasonRow r, int regCount, boolean salutedToday) {
         TournamentRuleTable rule = tables.rule();
         TournamentStage stage = TournamentStage.forNumber(r.stage());
-        return TournamentSeasonView.newBuilder()
+        TournamentSeasonView.Builder b = TournamentSeasonView.newBuilder()
                 .setSeasonId(r.seasonId())
                 .setSeasonKey(r.seasonKey())
                 .setSeasonName(r.seasonName())
@@ -1901,7 +2364,30 @@ public final class TournamentStore {
                 .setChampionSquadId(r.championSquadId())
                 .setChampionSquadName(r.championSquadName())
                 .setChampionMemberSummary(r.championMemberSummary())
-                .build();
+                .setChampionSaluteCount(r.championSaluteCount())
+                .setSalutedToday(salutedToday);
+        if (r.championMembersBlob() != null && r.championMembersBlob().length > 0) {
+            try {
+                MatchTournamentChampionMembersBlob blob = MatchTournamentChampionMembersBlob.parseFrom(r.championMembersBlob());
+                for (MatchTournamentMemberRow mr : blob.getMembersList()) {
+                    TournamentMemberRole role = TournamentMemberRole.forNumber(mr.getRole());
+                    b.addChampionMembers(TournamentMemberView.newBuilder()
+                            .setPlayerId(mr.getPlayerId())
+                            .setPlayerName(mr.getPlayerName())
+                            .setZoneId(mr.getZoneId())
+                            .setRole(role == null ? TournamentMemberRole.TOURNAMENT_MEMBER_ROLE_UNSPECIFIED : role)
+                            .setStarterSlot(mr.getStarterSlot())
+                            .setJoinedMs(mr.getJoinedMs())
+                            .setClassId(mr.getClassId())
+                            .setGender(mr.getGender())
+                            .setAppearanceId(mr.getAppearanceId())
+                            .build());
+                }
+            } catch (InvalidProtocolBufferException ignored) {
+                // 保持防崩，摘要仍可正常展示
+            }
+        }
+        return b.build();
     }
 
     private static TournamentSquadView toSquadView(SquadRow r, List<TournamentMemberView> members) {
@@ -1926,10 +2412,15 @@ public final class TournamentStore {
                 .build();
     }
 
-    private static TournamentMatchView toMatchView(MatchRow m, Map<Long, SquadRow> squads) {
+    private TournamentMatchView toMatchView(MatchRow m, Map<Long, SquadRow> squads, List<Long> gameBattleIds) {
         TournamentMatchPhase phase = TournamentMatchPhase.forNumber(m.phase());
         TournamentMatchState state = TournamentMatchState.forNumber(m.state());
         eBattleOutcome outcome = eBattleOutcome.forNumber(m.outcome());
+        TournamentLeylineElement curLeyline = TournamentLeylineElement.forNumber(m.currentLeylineElement());
+        List<Long> battleIds = gameBattleIds == null ? List.of() : gameBattleIds;
+        boolean publicReplay = m.phase() == TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT_VALUE
+                && tables.rule().getPublicKnockoutReplay()
+                && (m.battleId() != 0L || !battleIds.isEmpty());
         TournamentMatchView.Builder b = TournamentMatchView.newBuilder()
                 .setMatchId(m.matchId())
                 .setSeasonId(m.seasonId())
@@ -1947,7 +2438,16 @@ public final class TournamentStore {
                 .setFeaturedSpectate(m.featuredSpectate())
                 .setScheduledStartMs(m.scheduledStartMs())
                 .setDeadlineMs(m.deadlineMs())
-                .setFinishedMs(m.finishedMs());
+                .setFinishedMs(m.finishedMs())
+                .setBestOf(Math.max(1, m.bestOf()))
+                .setCurrentGameIndex(Math.max(1, m.currentGameIndex()))
+                .setWinsA(m.winsA())
+                .setWinsB(m.winsB())
+                .setCurrentLeylineElement(curLeyline == null ? TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED : curLeyline)
+                .addAllLeylineSequence(TournamentRules.decodeLeylineSequence(m.leylineSequence()))
+                .setIntermissionDeadlineMs(m.intermissionDeadlineMs())
+                .setPublicReplayAvailable(publicReplay)
+                .addAllGameBattleIds(battleIds);
         SquadRow a = squads.get(m.squadAId());
         if (a != null) {
             b.setSquadAName(a.name()).setSquadASeed(a.seedRank());
@@ -1960,6 +2460,7 @@ public final class TournamentStore {
     }
 
     private static SeasonRow scanSeason(ResultSet rs) throws SQLException {
+        byte[] blob = rs.getBytes("champion_members_blob");
         return new SeasonRow(
                 rs.getInt("season_id"), rs.getString("season_key"), rs.getString("season_name"),
                 rs.getInt("rule_version"), rs.getInt("stage"),
@@ -1967,7 +2468,8 @@ public final class TournamentStore {
                 rs.getLong("knockout_start_ms"), rs.getLong("settle_start_ms"), rs.getLong("end_ms"),
                 rs.getInt("battle_team_size"), rs.getInt("roster_max_size"), rs.getInt("knockout_team_count"),
                 rs.getLong("champion_squad_id"), rs.getString("champion_squad_name"),
-                rs.getString("champion_member_summary"), rs.getLong("settled_ms"), rs.getLong("updated_ms"));
+                rs.getString("champion_member_summary"), rs.getLong("settled_ms"), rs.getLong("updated_ms"),
+                blob == null ? new byte[0] : blob, rs.getLong("champion_salute_count"));
     }
 
     private static SquadRow scanSquad(ResultSet rs) throws SQLException {
@@ -1983,6 +2485,7 @@ public final class TournamentStore {
     private static MatchRow scanMatch(ResultSet rs) throws SQLException {
         byte[] la = rs.getBytes("lineup_a");
         byte[] lb = rs.getBytes("lineup_b");
+        String leySeq = rs.getString("leyline_sequence");
         return new MatchRow(
                 rs.getLong("match_id"), rs.getInt("season_id"), rs.getInt("phase"),
                 rs.getInt("round_index"), rs.getInt("slot_index"),
@@ -1991,7 +2494,11 @@ public final class TournamentStore {
                 rs.getBoolean("ready_a"), rs.getBoolean("ready_b"), rs.getInt("state"),
                 rs.getLong("battle_id"), rs.getLong("winner_squad_id"), rs.getInt("outcome"),
                 rs.getBoolean("featured_spectate"), rs.getLong("scheduled_start_ms"),
-                rs.getLong("deadline_ms"), rs.getLong("finished_ms"), rs.getLong("updated_ms"));
+                rs.getLong("deadline_ms"), rs.getLong("finished_ms"), rs.getLong("updated_ms"),
+                rs.getInt("best_of"), rs.getInt("current_game_index"),
+                rs.getInt("wins_a"), rs.getInt("wins_b"),
+                rs.getInt("current_leyline_element"), leySeq == null ? "" : leySeq,
+                rs.getLong("intermission_deadline_ms"));
     }
 
     private static TournamentPlayerRewardView scanRewardView(ResultSet rs) throws SQLException {
