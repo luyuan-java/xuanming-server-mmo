@@ -163,7 +163,13 @@ final class ConfiguredEffects {
                 .filter(e -> battle.row(e) != null && !battle.listener(e) && battle.legacy.isDebuffEntry(e) == (row.getBattleOp() == DISPEL_DEBUFF))
                 .sorted(Comparator.comparing(e -> battle.row(e).getBattleOp() != CONTROL)).toList();
         int count = row.getEffectCount() == 0 ? candidates.size() : Math.min(candidates.size(),row.getEffectCount());
-        for (int i = 0; i < count; i++) battle.remove(target,candidates.get(i).getBuffId());
+        for (int i = 0; i < count; i++) {
+            var victim = candidates.get(i);
+            if (row.getBattleOp() == DISPEL_BUFF) {
+                ctx.encounter.recordGuardStanceDispelled(source, target, victim.getBuffTableId());
+            }
+            battle.remove(target, victim.getBuffId());
+        }
         if (row.getBattleOp() == DISPEL_BUFF && source.teamIndex() != target.teamIndex()) {
             ctx.encounter.tryDispelBossStance(source, target);
         }

@@ -176,7 +176,12 @@ final class BattleContext {
 
     long effectivePhysicalAttack(BattleUnit actor) { return effective(actor, actor.physicalAttack(), ClassSkillCombat.Stat.PHYSICAL_ATTACK, BattleEffect.PHYSICAL_ATTACK); }
 
-    long effectiveDefense(BattleUnit actor) { return effective(actor, actor.defense(), ClassSkillCombat.Stat.DEFENSE, BattleEffect.DEFENSE); }
+    long effectiveDefense(BattleUnit actor) {
+        double multiplier = classSkills.statMultiplier(actor, ClassSkillCombat.Stat.DEFENSE, 0)
+                * Math.max(0.1, 1 + configured.modifier(actor, BattleEffect.DEFENSE)
+                + configured.modifier(actor, BattleEffect.SELF_GROWING_DEFENSE));
+        return multiplier == 1 ? actor.defense() : ClassSkillRules.floorRatio(actor.defense(), multiplier);
+    }
 
     long effectiveSpeed(BattleUnit actor) { return effective(actor, actor.speed(), ClassSkillCombat.Stat.SPEED, BattleEffect.SPEED); }
 

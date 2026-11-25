@@ -140,6 +140,11 @@ public class SceneNodeConfiguration {
         return com.game.scene.trial.TrialJournalTables.from(tables);
     }
 
+    @Bean
+    public com.game.scene.craft.SkillCraftTables skillCraftTables(ConfigTables tables) {
+        return com.game.scene.craft.SkillCraftTables.from(tables);
+    }
+
     /**
      * 显式开启 {@code game.scene.content-guard-enabled=true} 时接入内容安全 Dubbo 服务（角色改名与宝宝改名共用）。
      *
@@ -234,6 +239,7 @@ public class SceneNodeConfiguration {
                                com.game.scene.merchant.MysteryMerchantTables mysteryMerchantTables,
                                com.game.scene.season.SeasonTables seasonTables,
                                com.game.scene.trial.TrialJournalTables trialJournalTables,
+                               com.game.scene.craft.SkillCraftTables skillCraftTables,
                                ObjectProvider<SceneTextGuard> textGuard, NodeLinkAuth nodeLinkAuth,
                                SceneMetrics sceneMetrics, AuditProperties audit, KafkaNames kafkaNames,
                                SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source,
@@ -249,6 +255,7 @@ public class SceneNodeConfiguration {
                 .withMysteryMerchantTables(mysteryMerchantTables)
                 .withSeasonTables(seasonTables)
                 .withTrialJournalTables(trialJournalTables)
+                .withSkillCraftTables(skillCraftTables)
                 .withTextGuard(textGuard.getIfAvailable())
                 .withMaintenanceBoot(boot);
     }

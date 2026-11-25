@@ -30,6 +30,7 @@ final class EncounterMechanics {
     private int bossTrialKind = BattleConstants.BOSS_TRIAL_KIND_NONE;
     private int battleDifficulty;
     private int trialGuardMonsterTableId;
+    private int trialGuardStanceBuffId;
     private long protectedGuardActorId;
     private int initialPolarity;
     private int activePolarity;
@@ -56,8 +57,9 @@ final class EncounterMechanics {
         this.battleDifficulty = battleDifficulty;
     }
 
-    void configureTrial(int guardMonsterTableId) {
+    void configureTrial(int guardMonsterTableId, int guardStanceBuffId) {
         this.trialGuardMonsterTableId = guardMonsterTableId;
+        this.trialGuardStanceBuffId = guardStanceBuffId;
     }
 
     void recordDeath(long actorId) {
@@ -248,6 +250,16 @@ final class EncounterMechanics {
             }
         }
         return result;
+    }
+
+    void recordGuardStanceDispelled(BattleUnit source, BattleUnit target, int buffTableId) {
+        if (source == null || target == null || source.teamIndex() != 0 || target.teamIndex() != 1 || !target.isMonster()) {
+            return;
+        }
+        int targetBuffId = trialGuardStanceBuffId;
+        if (targetBuffId == 0 || targetBuffId == buffTableId) {
+            guardStanceDispelled = true;
+        }
     }
 
     void tryDispelBossStance(BattleUnit source, BattleUnit target) {

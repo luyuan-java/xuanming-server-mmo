@@ -301,6 +301,7 @@ public final class SceneWorld {
 
     private PlayerSyncDigests syncDigests = PlayerSyncDigests.UNAVAILABLE;
     private java.util.function.IntSupplier activeSeasonSupplier = () -> 0;
+    private java.util.function.BooleanSupplier craftUnlockGateSupplier = () -> false;
 
     public SceneWorld withSyncDigests(PlayerSyncDigests syncDigests) {
         this.syncDigests = syncDigests == null ? PlayerSyncDigests.UNAVAILABLE : syncDigests;
@@ -312,6 +313,15 @@ public final class SceneWorld {
     public SceneWorld withActiveSeason(java.util.function.IntSupplier supplier) {
         this.activeSeasonSupplier = supplier == null ? () -> 0 : supplier;
         return this;
+    }
+
+    public SceneWorld withCraftUnlockGate(java.util.function.BooleanSupplier supplier) {
+        this.craftUnlockGateSupplier = supplier == null ? () -> false : supplier;
+        return this;
+    }
+
+    public boolean isCraftUnlockGateEnabled() {
+        return craftUnlockGateSupplier.getAsBoolean();
     }
 
     /** 进场景战斗恢复后的扩展钩子（用于起步首宠灵狐一次性发放等场景逻辑线程后置动作）。 */

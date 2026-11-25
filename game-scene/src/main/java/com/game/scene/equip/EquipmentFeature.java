@@ -77,9 +77,15 @@ public final class EquipmentFeature implements SceneFeature {
             r.on(SERVICE, "GetEquipmentCraftRules", GetEquipmentCraftRulesRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
                     (call, request) -> call.reply(craft.getRules(call.player())));
             r.on(SERVICE, "PreviewEquipmentCraft", PreviewEquipmentCraftRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
-                    (call, request) -> call.reply(craft.preview(call.player(), request)));
+                    (call, request) -> call.reply(craft.preview(call.player(), request, call.world())));
             r.on(SERVICE, "CommitEquipmentCraft", CommitEquipmentCraftRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
-                var result = craft.commit(call.player(), request, bags);
+                var result = craft.commit(call.player(), request, bags, call.world());
+                if (result.mutated()) {
+                    call.world().requestKeyProgressSave(call.player());
+                }
+                if (result.creditedProxyMaster() != null) {
+                    call.world().requestKeyProgressSave(result.creditedProxyMaster());
+                }
                 if (result.attributesChanged()) {
                     call.push(notifyPanel, AttributePanelChangedS2C.newBuilder().setPanel(attributes.buildPanel(call.player())).build());
                 }

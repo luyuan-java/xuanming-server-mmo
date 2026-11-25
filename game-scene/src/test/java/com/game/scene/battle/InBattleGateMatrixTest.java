@@ -128,6 +128,7 @@ class InBattleGateMatrixTest {
     private static final int SKILL_INVALID_TARGET_ID = 7001;
     private static final int SKILL_INVALID_TARGET = 7002;
     private static final int SKILL_CANNOT_CAST = 7004;
+    private static final int SKILL_UPGRADE_BUSY = 7013;
     private static final int ATTRIBUTE_IN_BATTLE = 25011;
     private static final int PET_IN_BATTLE = 26008;
     private static final int ASSET_IN_BATTLE = 27002;
@@ -221,6 +222,10 @@ class InBattleGateMatrixTest {
             new Row(455, SEASON, "CatchupSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(457, TRIAL_JOURNAL, "ClaimTrialJournalMilestone", BattlePolicy.GATED, TRIAL_JOURNAL_IN_BATTLE),
             new Row(458, TRIAL_JOURNAL, "RedeemBoundArtifactVoucher", BattlePolicy.GATED, TRIAL_JOURNAL_IN_BATTLE),
+            new Row(460, SKILL, "CraftSkillBook", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
+            new Row(461, SKILL, "LearnSkillBook", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
+            new Row(462, SKILL, "DismantleSkillBook", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
+            new Row(463, SKILL, "SetCraftProxyStall", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
             // 批次 5.4：226 跨 zone 传送自己判战斗在途（基线 kZoneTravelInBattle，player_lifecycle.cpp:2784-2788），计在 zone_travel 闸上
             new Row(226, SCENE, "TravelToZone", BattlePolicy.GATED, ZONE_TRAVEL_IN_BATTLE),
             // ALLOW：只读
@@ -229,6 +234,8 @@ class InBattleGateMatrixTest {
             new Row(314, MYSTERY_MERCHANT, "GetMysteryMerchantInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(453, SEASON, "GetSeasonState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(456, TRIAL_JOURNAL, "GetTrialJournal", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(459, SKILL, "GetSkillCraftingState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(464, SKILL, "ListCraftProxyStalls", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(77, SKILL, "ListSkills", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(54, CURRENCY, "GetCurrencyList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(167, ATTRIBUTE, "GetAttributePanel", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -342,9 +349,9 @@ class InBattleGateMatrixTest {
         assertThat(List.of(134, 132)).allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).isEqualTo(BattlePolicy.DROP));
         assertThat(f.handler.battlePolicy(131)).isEqualTo(BattlePolicy.STOP_ONLY);
         assertThat(List.of(63, 84, 168, 172, 174, 171, 169, 175, 183, 185, 186, 182, 189, 187, 192, 226,
-                246, 247, 249, 250, 251, 252, 315, 317, 406, 408, 454, 455, 457, 458))
+                246, 247, 249, 250, 251, 252, 315, 317, 406, 408, 454, 455, 457, 458, 460, 461, 462, 463))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.GATED));
-        assertThat(List.of(43, 253, 314, 453, 456, 77, 54, 167, 181, 190, 348, 191, 374, 404, 405, 407, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
+        assertThat(List.of(43, 253, 314, 453, 456, 459, 464, 77, 54, 167, 181, 190, 348, 191, 374, 404, 405, 407, 371, 372, 193, 173, 188, 37, 49, 94, 95, 194, 195))
                 .allSatisfy(id -> assertThat(f.handler.battlePolicy(id)).as("%s", id).isEqualTo(BattlePolicy.ALLOW));
         assertThat(f.handler.battlePolicy(136)).as("没有处理器的方法没有策略（战斗与否都回 1006）").isNull();
         assertThat(registered).as("现有方法逐个显式声明，没有一个落到缺省 REJECT（D11：没有行为变化）")
@@ -724,6 +731,26 @@ class InBattleGateMatrixTest {
                 .setClientRequestId(9101L).setMilestoneId(101).build());
         out.put(TRIAL_JOURNAL + "RedeemBoundArtifactVoucher", s -> com.game.proto.RedeemBoundArtifactVoucherRequest.newBuilder()
                 .setClientRequestId(9102L).setArtifactItemConfigId(3301).build());
+        out.put(SKILL + "GetSkillCraftingState", s -> com.game.proto.GetSkillCraftingStateRequest.getDefaultInstance());
+        out.put(SKILL + "ListCraftProxyStalls", s -> com.game.proto.ListCraftProxyStallsRequest.getDefaultInstance());
+        out.put(SKILL + "CraftSkillBook", s -> {
+            var scroll = s.world().skillCraftTables.enabledScrolls().stream()
+                    .filter(r -> r.getRarityTier() == 0).findFirst().orElseThrow();
+            int targetSkill = s.world().skillCraftTables.scrollSkillIds(scroll.getId()).getFirst();
+            return com.game.proto.CraftSkillBookRequest.newBuilder()
+                    .setMode(com.game.proto.CraftSkillBookRequest.CraftMode.TARGETED_REGULAR)
+                    .setScrollId(scroll.getId())
+                    .setTargetSkillTableId(targetSkill)
+                    .setExpectedRevision(0L)
+                    .setClientRequestId(9201L)
+                    .build();
+        });
+        out.put(SKILL + "LearnSkillBook", s -> com.game.proto.LearnSkillBookRequest.newBuilder()
+                .setBookId(1L).setPetId(0L).setExpectedRevision(0L).setClientRequestId(9202L).build());
+        out.put(SKILL + "DismantleSkillBook", s -> com.game.proto.DismantleSkillBookRequest.newBuilder()
+                .setBookId(1L).setExpectedRevision(0L).setClientRequestId(9203L).build());
+        out.put(SKILL + "SetCraftProxyStall", s -> com.game.proto.SetCraftProxyStallRequest.newBuilder()
+                .setOpen(true).setProxyForgeFeeGold(60L).setProxyScrollFeeGold(0L).build());
         return out;
     }
 
@@ -1134,6 +1161,38 @@ class InBattleGateMatrixTest {
                         .build());
             } else if (row.method().equals("RedeemBoundArtifactVoucher")) {
                 grantProbeItem(w, subject.player(), com.game.battle.engine.TrialJournalRules.BOUND_ARTIFACT_VOUCHER_ITEM_ID, 1L);
+            }
+            w.sink.clear();
+        }
+        if (row.service().equals(SKILL) && (row.method().equals("CraftSkillBook")
+                || row.method().equals("LearnSkillBook") || row.method().equals("DismantleSkillBook")
+                || row.method().equals("SetCraftProxyStall"))) {
+            var scroll = w.skillCraftTables.enabledScrolls().stream()
+                    .filter(r -> r.getRarityTier() == 0).findFirst().orElseThrow();
+            int playerSkillId = w.skillCraftTables.scrollSkillIds(scroll.getId()).stream()
+                    .filter(sid -> {
+                        var sk = w.skillCraftTables.skill(sid);
+                        return sk != null && (sk.getCasterMask() & 1) != 0 && !com.game.scene.skill.ClassSkillCatalog.passive(sk);
+                    })
+                    .findFirst().orElseGet(() -> w.skillCraftTables.scrollSkillIds(scroll.getId()).getFirst());
+            if (row.method().equals("CraftSkillBook")) {
+                grantProbeItem(w, subject.player(), scroll.getFragmentItemId(), Integer.toUnsignedLong(scroll.getTargetedFragmentCount()));
+                if (scroll.getTargetedGoldCost() > 0) {
+                    assertThat(w.currency.add(subject.player(), Wallet.GOLD, scroll.getTargetedGoldCost(), Reason.GM_GRANT).ok()).isTrue();
+                }
+            } else if (row.method().equals("LearnSkillBook") || row.method().equals("DismantleSkillBook")) {
+                subject.player().craft().replace(com.game.player.store.state.PlayerCraftState.newBuilder()
+                        .setNextBookSeq(2L)
+                        .addSkillBooks(com.game.player.store.state.CraftedSkillBookEntryState.newBuilder()
+                                .setBookId(1L)
+                                .setSkillTableId(playerSkillId)
+                                .setScrollId(scroll.getId())
+                                .setRarityTier(0))
+                        .build());
+            } else if (row.method().equals("SetCraftProxyStall")) {
+                subject.player().craft().replace(com.game.player.store.state.PlayerCraftState.newBuilder()
+                        .setForgeMasteryExp(com.game.scene.equip.EquipCraftQualityRules.MASTER_EXP_THRESHOLD)
+                        .build());
             }
             w.sink.clear();
         }

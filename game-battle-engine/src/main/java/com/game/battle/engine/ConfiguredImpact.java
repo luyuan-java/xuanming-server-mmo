@@ -58,7 +58,10 @@ final class ConfiguredImpact {
                 if (hit.origin == DIRECT) battle.trigger(target,source,AFTER_DODGE,type,hit);
                 return 0;
             }
-            damage *= Math.max(0,1+battle.modifier(source,OUT_DAMAGE));
+            double typedOutgoing = type == CombatDamageRules.PHYSICAL_DAMAGE
+                    ? battle.modifier(source, OUT_PHYSICAL_DAMAGE)
+                    : battle.modifier(source, OUT_MAGIC_DAMAGE);
+            damage *= Math.max(0, 1 + battle.modifier(source, OUT_DAMAGE) + typedOutgoing);
             if (hit.origin == DIRECT && kind != BATTLE_HIT_COUNTER) damage *= 1 + PetCultivationRules.damageBonus(source,type);
             damage *= Math.max(0,1+battle.modifier(target,IN_DAMAGE));
             if (type == CombatDamageRules.MAGIC_DAMAGE) damage *= Math.max(0,1-battle.modifier(target,MAGIC_REDUCTION));

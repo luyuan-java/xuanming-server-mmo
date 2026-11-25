@@ -33,12 +33,16 @@ final class FixedEquipmentEffects {
             for (var choice : item.equipment().getFixedAffixesList().stream()
                     .sorted((a,b) -> Integer.compareUnsigned(a.getAffixId(), b.getAffixId())).toList()) {
                 var affix = tables.fixedAffix(choice.getAffixId());
+                boolean exempt = EquipCraftQualityRules.isPolishExempt(affix.getEffect());
+                int tier = EquipCraftQualityRules.effectiveQualityTier(choice.getQualityTier(), exempt);
+                int scaledValue = EquipCraftQualityRules.scaleValueByQuality(
+                        affix.getValuePermyriad(), tables.qualityRatioPct(tier));
                 var channel = new Channel(affix.getEffect(), affix.getEffectParam());
-                totals.merge(channel, new Total(affix.getValuePermyriad(), affix.getSourceCap()),
+                totals.merge(channel, new Total(scaledValue, affix.getSourceCap()),
                         (a,b) -> new Total(a.raw + b.raw, Math.min(a.cap, b.cap)));
                 if (affix.getEffect() == 5 || affix.getEffect() == 6) {
                     result.addSupportSources(SupportEffectSource.newBuilder().setKind(1).setEffectKind(affix.getEffect() - 4)
-                            .setItemId(item.guid()).setAffixId(affix.getId()).setRawBonusBps(affix.getValuePermyriad())
+                            .setItemId(item.guid()).setAffixId(affix.getId()).setRawBonusBps(scaledValue)
                             .setSourceCapBps(affix.getSourceCap()).setName(template.getName() + " · " + affix.getName()));
                 }
             }

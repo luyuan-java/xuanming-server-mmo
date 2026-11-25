@@ -175,7 +175,9 @@ public final class TurnBattleEngine {
         }
         engine.ctx.encounter.configure(bossTrialKind, battleDifficulty);
         if (request.hasTrialContext()) {
-            engine.ctx.encounter.configureTrial(request.getTrialContext().getGuardMonsterTableId());
+            engine.ctx.encounter.configureTrial(
+                    request.getTrialContext().getGuardMonsterTableId(),
+                    request.getTrialContext().getGuardStanceBuffId());
         }
 
         BattleStart.Rejected rejected = engine.initPlayers();

@@ -32,6 +32,7 @@ public final class ClassSkillService {
     private final AttributeService attributes;
     private final PetService pets;
     private java.util.function.IntSupplier activeSeason = () -> 0;
+    private java.util.function.BooleanSupplier craftUnlockGate = () -> false;
 
     public ClassSkillService(CurrencyService currency, AttributeService attributes) {
         this(currency, attributes, null);
@@ -45,6 +46,11 @@ public final class ClassSkillService {
 
     public ClassSkillService withActiveSeason(java.util.function.IntSupplier activeSeason) {
         this.activeSeason = activeSeason == null ? () -> 0 : activeSeason;
+        return this;
+    }
+
+    public ClassSkillService withCraftUnlockGate(java.util.function.BooleanSupplier craftUnlockGate) {
+        this.craftUnlockGate = craftUnlockGate == null ? () -> false : craftUnlockGate;
         return this;
     }
 
@@ -69,6 +75,10 @@ public final class ClassSkillService {
 
     /** 显式客户端投影：按当季 activeSeasonId 自动并入本季免费技能，不写入永久存档。 */
     public static ListSkillsResponse book(ScenePlayer player, int activeSeasonId) {
+        return book(player, activeSeasonId, false);
+    }
+
+    public static ListSkillsResponse book(ScenePlayer player, int activeSeasonId, boolean craftGateEnabled) {
         var catalog = player.skillCatalog();
         var owned = player.learnedSkills();
         int level = PlayerLevels.effective(player.level());
@@ -105,7 +115,9 @@ public final class ClassSkillService {
             int rank = row.getSeasonId() != 0
                     ? SeasonRules.effectiveSeasonalSkillRank(level, row.getUnlockLevel(), row.getMaxRank())
                     : owned.rank(row.getId());
-            var view = catalogEntry(catalog, row, rank, level, balance, busyTip, false);
+            boolean craftRequired = craftGateEnabled && row.getSeasonId() == 0 && row.getScrollId() > 0;
+            boolean unlockedByBook = player.craft().isSkillBookUnlocked(row.getId());
+            var view = catalogEntry(catalog, row, rank, level, balance, busyTip, false, craftRequired, unlockedByBook);
             var preview = previews.get(row.getId());
             if (preview != null) view.setSupportPreview(preview);
             result.addCatalog(view);
@@ -114,11 +126,15 @@ public final class ClassSkillService {
     }
 
     public static ListSkillsResponse book(ScenePlayer player, long petId) {
-        return book(player, petId, 0);
+        return book(player, petId, 0, false);
     }
 
     public static ListSkillsResponse book(ScenePlayer player, long petId, int activeSeasonId) {
-        if (petId == 0) return book(player, activeSeasonId);
+        return book(player, petId, activeSeasonId, false);
+    }
+
+    public static ListSkillsResponse book(ScenePlayer player, long petId, int activeSeasonId, boolean craftGateEnabled) {
+        if (petId == 0) return book(player, activeSeasonId, craftGateEnabled);
         var result = ListSkillsResponse.newBuilder().setPetId(petId);
         var pet = player.pets().find(petId);
         if (pet == null) return result.setErrorMessage(tip(PetErrorTip.pet_error.kPetNotFound_VALUE)).build();
@@ -135,20 +151,24 @@ public final class ClassSkillService {
         if (blocked == 0 && PlayerLevels.effective(player.level()) < level) blocked = PetErrorTip.pet_error.kPetOwnerLevelNotEnough_VALUE;
         for (var row : catalog.petRows()) {
             if (row.getSeasonId() != 0 && !SeasonRules.isSkillActiveInSeason(row.getSeasonId(), activeSeasonId)) continue;
+            boolean craftRequired = craftGateEnabled && row.getSeasonId() == 0 && row.getScrollId() > 0;
+            boolean unlockedByBook = player.craft().isSkillBookUnlocked(row.getId());
             result.addCatalog(catalogEntry(catalog, row, ClassSkillCatalog.petStoredRank(pet, species, row.getId()),
-                    level, balance, blocked, true));
+                    level, balance, blocked, true, craftRequired, unlockedByBook));
         }
         return result.build();
     }
 
     private static SkillCatalogEntry.Builder catalogEntry(ClassSkillCatalog catalog, SkillTable row, int rank,
-            int level, long balance, int blocked, boolean pet) {
+            int level, long balance, int blocked, boolean pet, boolean craftRequired, boolean unlockedByBook) {
         int limit = ClassSkillRules.rankLimit(level, row.getUnlockLevel(), row.getMaxRank());
         boolean seasonal = row.getSeasonId() != 0;
         boolean full = Integer.compareUnsigned(rank, row.getMaxRank()) >= 0;
         long cost = (!seasonal && !full) ? ClassSkillRules.upgradeCost(rank + 1, row.getUnlockLevel()) : 0;
+        boolean blockedByBook = craftRequired && !unlockedByBook && rank == 0;
         int blockTip = seasonal ? SeasonErrorTip.season_error.kSeasonSkillNoUpgrade_VALUE
                 : blocked != 0 ? blocked
+                : blockedByBook ? kSkillCraftBookRequired_VALUE
                 : full ? kSkillMaxRankReached_VALUE
                 : Integer.compareUnsigned(rank, limit) >= 0 ? kSkillLevelNotEnough_VALUE
                 : Long.compareUnsigned(cost, balance) > 0 ? kSkillGoldNotEnough_VALUE : 0;
@@ -160,7 +180,11 @@ public final class ClassSkillService {
                 .setManaPercent(row.getManaPercent()).setCooldownRounds(row.getCooldownRounds()).setNextRankCost(cost)
                 .setUpgradeBlockTipId(blockTip).setDurationRounds(catalog.durationRounds(row)).setAllowDeadTarget(row.getAllowDeadTarget() != 0)
                 .setAbilityKind(row.getAbilityKind()).setCasterMask(row.getCasterMask()).setActionTags(row.getActionTags())
-                .setSeasonId(row.getSeasonId());
+                .setSeasonId(row.getSeasonId())
+                .setScrollId(row.getScrollId())
+                .setRarityTier(row.getRarityTier())
+                .setCraftUnlockRequired(craftRequired)
+                .setUnlockedByBook(unlockedByBook);
     }
 
     public UpgradeSkillResponse upgrade(ScenePlayer player, UpgradeSkillRequest request) {
@@ -175,6 +199,10 @@ public final class ClassSkillService {
         int busy = busy(player);
         if (busy != 0) return rejected(player, busy);
         int oldRank = player.learnedSkills().rank(row.getId());
+        if (oldRank == 0 && craftUnlockGate.getAsBoolean() && row.getScrollId() > 0
+                && !player.craft().isSkillBookUnlocked(row.getId())) {
+            return rejected(player, kSkillCraftBookRequired_VALUE);
+        }
         if (oldRank != request.getExpectedRank()) return rejected(player, kSkillRankChanged_VALUE);
         int limit = ClassSkillRules.rankLimit(PlayerLevels.effective(player.level()), row.getUnlockLevel(), row.getMaxRank());
         var plan = ClassSkillRules.planUpgrade(oldRank, row.getMaxRank(), limit, row.getUnlockLevel(),
@@ -187,7 +215,8 @@ public final class ClassSkillService {
         if (payment.tipId() != 0) return rejected(player, payment.tipId());
         payment.commitSkills(candidate, AssetAudit.Reason.SKILL_UPGRADE, Integer.toUnsignedLong(row.getId()));
         if (ClassSkillCatalog.passive(row)) attributes.skillsChanged(player);
-        return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(0)).setState(book(player, activeSeason.getAsInt()))
+        return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(0))
+                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
                 .setUpgradedCount(plan.steps()).setStopTipId(plan.steps() < request.getCount() ? stop(plan.stop()) : 0).build();
     }
 
@@ -210,6 +239,8 @@ public final class ClassSkillService {
             int level = ClassSkillCatalog.petLevel(pet, species);
             int rank = ClassSkillCatalog.petStoredRank(pet, species, row.getId());
             if (PlayerLevels.effective(player.level()) < level) error = PetErrorTip.pet_error.kPetOwnerLevelNotEnough_VALUE;
+            else if (rank == 0 && craftUnlockGate.getAsBoolean() && row.getScrollId() > 0
+                    && !player.craft().isSkillBookUnlocked(row.getId())) error = kSkillCraftBookRequired_VALUE;
             else if (rank != request.getExpectedRank()) error = kSkillRankChanged_VALUE;
             else {
                 int limit = ClassSkillRules.rankLimit(level, row.getUnlockLevel(), row.getMaxRank());
@@ -219,12 +250,13 @@ public final class ClassSkillService {
                 if (error == 0) response.setUpgradedCount(plan.steps()).setStopTipId(plan.steps() < request.getCount() ? stop(plan.stop()) : 0);
             }
         }
-        var state = book(player, petId, activeSeason.getAsInt());
+        var state = book(player, petId, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean());
         if (state.getErrorMessage().getId() == 0) response.setState(state);
         return response.setErrorMessage(tip(error)).build();
     }
 
     private UpgradeSkillResponse rejected(ScenePlayer player, int error) {
-        return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(error)).setState(book(player, activeSeason.getAsInt())).build();
+        return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(error))
+                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean())).build();
     }
 }

@@ -205,6 +205,17 @@ public final class Bag {
         return total;
     }
 
+    /** 某配置的可交易（bound=false）持有总量。 */
+    public long totalTradable(int configId) {
+        long total = 0;
+        for (BagItem item : byGuid.values()) {
+            if (item.configId() == configId && !item.bound()) {
+                total += item.size();
+            }
+        }
+        return total;
+    }
+
     // ================================================================ 入包
 
     /**

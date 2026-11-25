@@ -891,6 +891,35 @@ public final class PetService {
                 boosted(base.defense(), bonus, PassiveStat.DEFENSE));
     }
 
+    /** 校验宝宝是否可从技能书永久解锁一项技能（不发生任何写入，避免半写）。 */
+    public int checkCanUnlockSkillFromBook(ScenePlayer player, long petId) {
+        Pet pet = player.pets().find(petId);
+        if (pet == null) {
+            return NOT_FOUND;
+        }
+        PetTable species = tables.pet(pet.petTableId());
+        if (species == null || tables.pool() == null) {
+            return INVALID_TABLE_DATA;
+        }
+        return OK;
+    }
+
+    /** 研习技能书为指定宝宝永久解锁一重技能（绝不顶掉任何已有技能）并重算属性。 */
+    public int unlockSkillFromBook(ScenePlayer player, long petId, int skillTableId) {
+        int err = checkCanUnlockSkillFromBook(player, petId);
+        if (err != OK) {
+            return err;
+        }
+        Pet pet = player.pets().find(petId);
+        PetTable species = tables.pet(pet.petTableId());
+        Derived before = derived(pet, species);
+        if (pet.skillRanks().getOrDefault(skillTableId, 0) == 0) {
+            pet.setSkillRank(skillTableId, 1);
+        }
+        recalculateOne(player, pet, RecalcReason.ALLOCATE, before);
+        return OK;
+    }
+
     /** 在候选宝宝上先重算上限和当前值，再与主人钱包一次提交。 */
     public int commitSkillUpgrade(ScenePlayer player, long petId, int skillId, int rank, long cost) {
         var candidate = PlayerPets.restore(player.pets().toState());

@@ -195,6 +195,7 @@ public class SceneNode implements SmartLifecycle {
     private com.game.scene.merchant.MysteryMerchantTables mysteryMerchantTables;
     private com.game.scene.season.SeasonTables seasonTables;
     private com.game.scene.trial.TrialJournalTables trialJournalTables;
+    private com.game.scene.craft.SkillCraftTables skillCraftTables;
     private com.game.scene.player.SceneTextGuard textGuard;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
@@ -243,6 +244,12 @@ public class SceneNode implements SmartLifecycle {
     public synchronized SceneNode withTrialJournalTables(com.game.scene.trial.TrialJournalTables trialJournalTables) {
         if (running) throw new IllegalStateException("节点已启动");
         this.trialJournalTables = java.util.Objects.requireNonNull(trialJournalTables);
+        return this;
+    }
+
+    public synchronized SceneNode withSkillCraftTables(com.game.scene.craft.SkillCraftTables skillCraftTables) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.skillCraftTables = java.util.Objects.requireNonNull(skillCraftTables);
         return this;
     }
 
@@ -443,7 +450,7 @@ public class SceneNode implements SmartLifecycle {
         BagFeature bagFeature = new BagFeature(bags);
         EquipmentService equipment = new EquipmentService(equipmentRules, bags, currency, attributes, metrics);
         com.game.scene.equip.EquipmentCraftService equipmentCraft = new com.game.scene.equip.EquipmentCraftService(
-                equipmentRules, bags, attributes, metrics, SceneClock.SYSTEM);
+                equipmentRules, bags, currency, attributes, metrics, SceneClock.SYSTEM);
         com.game.scene.merchant.MysteryMerchantService mysteryMerchantService = mysteryMerchantTables == null ? null
                 : new com.game.scene.merchant.MysteryMerchantService(mysteryMerchantTables, bags, currency, SceneClock.SYSTEM, metrics);
         com.game.scene.season.SeasonService seasonService = seasonTables == null ? null
@@ -624,9 +631,18 @@ public class SceneNode implements SmartLifecycle {
         if (!RunMode.isRecognized(props.runMode())) {
             log.warn("game.run-mode（GAME_RUN_MODE）取值不认识，按 prod 运行（GM 指令拒绝）: '{}'", props.runMode());
         }
+        com.game.scene.craft.SkillCraftService skillCraftService = skillCraftTables == null ? null
+                : new com.game.scene.craft.SkillCraftService(skillCraftTables, bags, currency, attributes, petService,
+                        SceneClock.SYSTEM, metrics);
+        if (skillCraftService != null) {
+            sceneWorld.withCraftUnlockGate(skillCraftService::isCraftUnlockGateEnabled);
+        }
         com.game.scene.skill.ClassSkillService classSkillService = new com.game.scene.skill.ClassSkillService(currency, attributes, petService);
         if (seasonService != null) {
             classSkillService.withActiveSeason(seasonService::activeSeasonId);
+        }
+        if (skillCraftService != null) {
+            classSkillService.withCraftUnlockGate(skillCraftService::isCraftUnlockGateEnabled);
         }
         java.util.List<com.game.scene.world.SceneFeature> features = new java.util.ArrayList<>(List.of(
                 new CurrencyFeature(currency), new AttributeFeature(attributes, registry, call -> {
@@ -654,6 +670,9 @@ public class SceneNode implements SmartLifecycle {
         }
         if (trialJournalService != null) {
             features.add(new com.game.scene.trial.TrialJournalFeature(trialJournalService));
+        }
+        if (skillCraftService != null) {
+            features.add(new com.game.scene.craft.SkillCraftFeature(skillCraftService, attributes, petService, registry));
         }
         ClientRequestHandler requests = new ClientRequestHandler(sceneWorld, registry, ids, runMode, features);
         log.info("场景请求分发就绪 运行模式={}（GM 指令{}）", runMode, runMode.allowsGmCommands() ? "放行" : "拒绝");

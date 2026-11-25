@@ -120,6 +120,8 @@ public final class ScenePlayer {
     private final PlayerSeason season;
     /** 五行试炼志 V2 运行态（含普通首领试炼首通困难门禁）。 */
     private final com.game.scene.player.PlayerTrialJournal trialJournal;
+    /** 手艺熟练度、未学技能书架、永久解锁技能与宗师原子代打运行态。 */
+    private final com.game.scene.player.PlayerCraft craft;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -221,6 +223,9 @@ public final class ScenePlayer {
         this.trialJournal = state.hasTrialJournal()
                 ? com.game.scene.player.PlayerTrialJournal.restore(state.getTrialJournal())
                 : com.game.scene.player.PlayerTrialJournal.empty();
+        this.craft = state.hasCraft()
+                ? com.game.scene.player.PlayerCraft.restore(state.getCraft())
+                : com.game.scene.player.PlayerCraft.empty();
     }
 
     public long playerId() {
@@ -579,6 +584,9 @@ public final class ScenePlayer {
         if (!trialJournal.isPristine()) {
             state.setTrialJournal(trialJournal.toState());
         }
+        if (!craft.isPristine()) {
+            state.setCraft(craft.toState());
+        }
         return state.build();
     }
 
@@ -629,6 +637,11 @@ public final class ScenePlayer {
     /** 五行试炼志 V2 运行态（逻辑线程上读写；含普通首领首通门禁与永久/赛季战法印）。 */
     public com.game.scene.player.PlayerTrialJournal trialJournal() {
         return trialJournal;
+    }
+
+    /** 手艺熟练度、未学技能书架、永久解锁技能与宗师原子代打运行态（逻辑线程上读写）。 */
+    public com.game.scene.player.PlayerCraft craft() {
+        return craft;
     }
 
     /** 收件箱消费账本（逻辑线程上读写；写入只经收件箱消费端）。 */

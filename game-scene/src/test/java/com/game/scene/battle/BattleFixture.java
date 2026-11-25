@@ -186,6 +186,9 @@ public final class BattleFixture {
     public final com.game.scene.season.SeasonService season;
     public final com.game.scene.trial.TrialJournalTables trialJournalTables = com.game.scene.trial.TrialJournalTables.from(CONFIG);
     public final com.game.scene.trial.TrialJournalService trialJournal;
+    public final com.game.scene.craft.SkillCraftTables skillCraftTables = com.game.scene.craft.SkillCraftTables.from(CONFIG);
+    public final com.game.scene.craft.SkillCraftService skillCraft;
+    public final com.game.scene.skill.ClassSkillService classSkill;
     public final com.game.scene.equip.EquipmentService equipment;
     public final com.game.scene.equip.EquipmentCraftService craft;
     public final AttributeService attributes;
@@ -251,7 +254,7 @@ public final class BattleFixture {
         bags = new BagService(BagTables.from(CONFIG, equipmentRules), guids, audit, GainAnomalyDetector.off(), sceneMetrics);
         attributes = new AttributeService(AttributeTables.from(CONFIG), clock, currency, sceneMetrics, equipmentRules);
         equipment = new com.game.scene.equip.EquipmentService(equipmentRules, bags, currency, attributes, sceneMetrics);
-        craft = new com.game.scene.equip.EquipmentCraftService(equipmentRules, bags, attributes, sceneMetrics, clock);
+        craft = new com.game.scene.equip.EquipmentCraftService(equipmentRules, bags, currency, attributes, sceneMetrics, clock);
         merchant = new com.game.scene.merchant.MysteryMerchantService(merchantTables, bags, currency, clock, sceneMetrics);
         season = new com.game.scene.season.SeasonService(seasonTables, currency, attributes, clock, sceneMetrics);
         attributes.withSeason((p, out) -> season.collectEffects(p, clock.epochMillis(), out), season::activeSeasonId);
@@ -262,6 +265,10 @@ public final class BattleFixture {
         appearance = new com.game.scene.appearance.AppearanceService(appearanceTables, bags, clock, Contracts.REGISTRY);
         trialJournal = new com.game.scene.trial.TrialJournalService(trialJournalTables, bags, appearance, clock, sceneMetrics,
                 season::activeSeasonId);
+        skillCraft = new com.game.scene.craft.SkillCraftService(skillCraftTables, bags, currency, attributes, pets, clock, sceneMetrics);
+        classSkill = new com.game.scene.skill.ClassSkillService(currency, attributes, pets)
+                .withActiveSeason(season::activeSeasonId)
+                .withCraftUnlockGate(skillCraft::isCraftUnlockGateEnabled);
         settlements = new BattleSettlementService(currency, bags, pets, missions, tables, battleMetrics, clock, petListChangedId)
                 .withSeasonService(season)
                 .withTrialJournalService(trialJournal);
@@ -290,7 +297,8 @@ public final class BattleFixture {
         afkPassService = new com.game.scene.afkpass.AfkPassService(afkPassTables, currency, clock,
                 com.game.scene.afkpass.AfkPassService.ProjectionSink.NOOP, logic);
         world.withAfkPassService(afkPassService);
-        world.withActiveSeason(season::activeSeasonId);
+        world.withActiveSeason(season::activeSeasonId)
+                .withCraftUnlockGate(skillCraft::isCraftUnlockGateEnabled);
         features = List.of(
                 new com.game.scene.appearance.AppearanceFeature(appearance),
                 new com.game.scene.rename.PlayerRenameFeature(renameService),
@@ -306,9 +314,8 @@ public final class BattleFixture {
                 new com.game.scene.trial.TrialJournalFeature(trialJournal),
                 new BattleResultFeature(),
                 new MissionFeature(missions), new ActivityFeature(missions), new SkillFeature(skills),
-                new com.game.scene.skill.ClassSkillFeature(
-                        new com.game.scene.skill.ClassSkillService(currency, attributes).withActiveSeason(season::activeSeasonId),
-                        attributes, Contracts.REGISTRY),
+                new com.game.scene.skill.ClassSkillFeature(classSkill, attributes, Contracts.REGISTRY, pets),
+                new com.game.scene.craft.SkillCraftFeature(skillCraft, attributes, pets, Contracts.REGISTRY),
                 petFeature);
         handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV, features);
         scene1 = world.createScene(1);

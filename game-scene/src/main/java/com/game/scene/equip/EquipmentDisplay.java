@@ -110,7 +110,7 @@ public final class EquipmentDisplay {
                         if (selected.getSlot() == slot) {
                             var affix = rules.tables().fixedAffix(selected.getAffixId());
                             if (affix != null) {
-                                shown.setSelected(affixInfo(affix));
+                                shown.setSelected(affixInstanceInfo(affix, selected, rules.tables()));
                             }
                         }
                     }
@@ -126,6 +126,7 @@ public final class EquipmentDisplay {
     }
 
     public static EquipFixedAffixInfo affixInfo(com.game.table.EquipV1AffixTable row) {
+        boolean exempt = EquipCraftQualityRules.isPolishExempt(row.getEffect());
         return EquipFixedAffixInfo.newBuilder()
                 .setAffixId(row.getId())
                 .setPool(row.getPool())
@@ -138,6 +139,33 @@ public final class EquipmentDisplay {
                 .setUnit(row.getEffect() >= 7 && row.getEffect() <= 12 ? 2 : 1)
                 .setMaterialConfigId(row.getMaterialId())
                 .setMaterialCount(row.getMaterialCount())
+                .setQualityTier(0)
+                .setQualityRatioPct(100)
+                .setMaxValueBps(row.getValuePermyriad())
+                .setPolishPityCount(0)
+                .setPolishPityLimit(exempt ? 0 : EquipCraftQualityRules.POLISH_PITY_LIMIT)
+                .setPolishExempt(exempt)
+                .setPolishMaterialConfigId(EquipCraftQualityRules.POLISH_SAND_CONFIG_ID)
+                .setPolishMaterialCount(EquipCraftQualityRules.POLISH_SAND_COUNT)
+                .setPolishGoldCost(EquipCraftQualityRules.POLISH_GOLD_COST)
+                .setReforgeMaterialConfigId(EquipCraftQualityRules.REFORGE_SAND_CONFIG_ID)
+                .setReforgeMaterialCount(EquipCraftQualityRules.REFORGE_SAND_COUNT)
+                .setReforgeGoldCost(EquipCraftQualityRules.REFORGE_GOLD_COST)
+                .build();
+    }
+
+    public static EquipFixedAffixInfo affixInstanceInfo(com.game.table.EquipV1AffixTable row,
+            com.game.player.store.state.EquipmentFixedAffixState selected, EquipmentTables tables) {
+        boolean exempt = EquipCraftQualityRules.isPolishExempt(row.getEffect());
+        int tier = EquipCraftQualityRules.effectiveQualityTier(selected.getQualityTier(), exempt);
+        int ratioPct = tables.qualityRatioPct(tier);
+        return affixInfo(row).toBuilder()
+                .setQualityTier(tier)
+                .setQualityName(tables.qualityName(tier))
+                .setQualityRatioPct(ratioPct)
+                .setValueBps(EquipCraftQualityRules.scaleValueByQuality(row.getValuePermyriad(), ratioPct))
+                .setPolishPityCount((exempt || tier >= EquipCraftQualityRules.MAX_QUALITY_TIER)
+                        ? 0 : selected.getPolishPityCount())
                 .build();
     }
 

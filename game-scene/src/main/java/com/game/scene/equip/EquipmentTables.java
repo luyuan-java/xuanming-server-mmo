@@ -9,6 +9,7 @@ public final class EquipmentTables {
     private final Map<Integer, ItemTable> items;
     private final Map<Integer, EquipV1AffixTable> fixedAffixes;
     private final Map<Integer, EquipArtifactTable> artifacts;
+    private final Map<Integer, EquipAffixQualityTable> affixQualities;
     private final Map<Integer, EquipAttributeTable> attributes;
     private final Map<Integer, EquipAffixRuleTable> rules;
     private final Map<Integer, EquipEnhanceTable> enhancements;
@@ -25,15 +26,17 @@ public final class EquipmentTables {
             List<EquipAffixRuleTable> rules, List<EquipAffixPoolTable> pools, List<EquipAttributeCapTable> caps,
             List<EquipEnhanceTable> enhancements, List<EquipGemTable> gems,
             List<EquipGemSocketTable> sockets, List<EquipSlotTable> slots) {
-        this(items, attributes, rules, pools, caps, enhancements, gems, sockets, slots, List.of(), List.of());
+        this(items, attributes, rules, pools, caps, enhancements, gems, sockets, slots, List.of(), List.of(), List.of());
     }
 
     private EquipmentTables(List<ItemTable> items, List<EquipAttributeTable> attributes,
             List<EquipAffixRuleTable> rules, List<EquipAffixPoolTable> pools, List<EquipAttributeCapTable> caps,
             List<EquipEnhanceTable> enhancements, List<EquipGemTable> gems, List<EquipGemSocketTable> sockets,
-            List<EquipSlotTable> slots, List<EquipV1AffixTable> fixedAffixes, List<EquipArtifactTable> artifacts) {
+            List<EquipSlotTable> slots, List<EquipV1AffixTable> fixedAffixes, List<EquipArtifactTable> artifacts,
+            List<EquipAffixQualityTable> affixQualities) {
         this.fixedAffixes = index(fixedAffixes, EquipV1AffixTable::getId);
         this.artifacts = index(artifacts, EquipArtifactTable::getId);
+        this.affixQualities = index(affixQualities, EquipAffixQualityTable::getId);
         this.items = index(items, ItemTable::getId); this.attributes = index(attributes, EquipAttributeTable::getId);
         this.rules = index(rules, EquipAffixRuleTable::getId); this.enhancements = index(enhancements, EquipEnhanceTable::getId);
         Map<Integer, Map<Integer, EquipEnhanceTable>> byProfile = new LinkedHashMap<>();
@@ -63,7 +66,7 @@ public final class EquipmentTables {
         EquipmentTables result = new EquipmentTables(t.item().all(), t.equipAttribute().all(), t.equipAffixRule().all(),
                 t.equipAffixPool().all(), t.equipAttributeCap().all(), t.equipEnhance().all(),
                 t.equipGem().all(), t.equipGemSocket().all(), t.equipSlot().all(),
-                t.equipV1Affix().all(), t.equipArtifact().all());
+                t.equipV1Affix().all(), t.equipArtifact().all(), t.equipAffixQuality().all());
         var log = org.slf4j.LoggerFactory.getLogger(EquipmentTables.class);
         result.validationIssues().forEach(issue -> log.warn("装备表校验：{}", issue));
         return result;
@@ -84,6 +87,66 @@ public final class EquipmentTables {
     public List<EquipV1AffixTable> fixedAffixes() { return List.copyOf(fixedAffixes.values()); }
     public EquipArtifactTable artifact(int id) { return artifacts.get(id); }
     public List<EquipArtifactTable> artifacts() { return List.copyOf(artifacts.values()); }
+    public EquipAffixQualityTable affixQuality(int tier) { return affixQualities.get(tier); }
+    public List<EquipAffixQualityTable> affixQualities() { return List.copyOf(affixQualities.values()); }
+
+    /** 校验 5 档词条品相表：1..5 齐备、比例严格递增且 5 档=100%、学徒/巧匠/宗师权重总和各=10000。 */
+    public boolean validateQualityTable() {
+        if (affixQualities.size() != EquipCraftQualityRules.MAX_QUALITY_TIER) {
+            return false;
+        }
+        int prevRatio = 0;
+        long sumApprentice = 0L, sumArtisan = 0L, sumMaster = 0L;
+        for (int tier = EquipCraftQualityRules.MIN_QUALITY_TIER; tier <= EquipCraftQualityRules.MAX_QUALITY_TIER; tier++) {
+            EquipAffixQualityTable row = affixQualities.get(tier);
+            if (row == null || row.getName().isEmpty()
+                    || row.getRatioPct() < 1 || row.getRatioPct() > 100
+                    || row.getRatioPct() <= prevRatio) {
+                return false;
+            }
+            prevRatio = row.getRatioPct();
+            sumApprentice += Integer.toUnsignedLong(row.getApprenticeWeight());
+            sumArtisan += Integer.toUnsignedLong(row.getArtisanWeight());
+            sumMaster += Integer.toUnsignedLong(row.getMasterWeight());
+        }
+        return prevRatio == 100
+                && sumApprentice == EquipCraftQualityRules.QUALITY_WEIGHT_TOTAL_BPS
+                && sumArtisan == EquipCraftQualityRules.QUALITY_WEIGHT_TOTAL_BPS
+                && sumMaster == EquipCraftQualityRules.QUALITY_WEIGHT_TOTAL_BPS;
+    }
+
+    public int qualityRatioPct(int tier) {
+        EquipAffixQualityTable row = affixQualities.get(tier);
+        if (row != null && row.getRatioPct() >= 1 && row.getRatioPct() <= 100) {
+            return row.getRatioPct();
+        }
+        return EquipCraftQualityRules.defaultQualityRatioPct(tier);
+    }
+
+    public String qualityName(int tier) {
+        EquipAffixQualityTable row = affixQualities.get(tier);
+        if (row != null && !row.getName().isEmpty()) {
+            return row.getName();
+        }
+        return EquipCraftQualityRules.defaultQualityName(tier);
+    }
+
+    public int[] qualityWeightsForMastery(int masteryTier) {
+        int[] fallback = {2500, 3500, 2200, 1300, 500};
+        int[] weights = new int[EquipCraftQualityRules.MAX_QUALITY_TIER];
+        long sum = 0L;
+        for (int tier = EquipCraftQualityRules.MIN_QUALITY_TIER; tier <= EquipCraftQualityRules.MAX_QUALITY_TIER; tier++) {
+            EquipAffixQualityTable row = affixQualities.get(tier);
+            if (row == null) {
+                return fallback;
+            }
+            int w = masteryTier == EquipCraftQualityRules.MASTERY_MASTER ? row.getMasterWeight()
+                    : (masteryTier == EquipCraftQualityRules.MASTERY_ARTISAN ? row.getArtisanWeight() : row.getApprenticeWeight());
+            weights[tier - 1] = w;
+            sum += Integer.toUnsignedLong(w);
+        }
+        return sum == EquipCraftQualityRules.QUALITY_WEIGHT_TOTAL_BPS ? weights : fallback;
+    }
     public List<EquipEnhanceTable> enhancements() { return List.copyOf(enhancements.values()); }
     public EquipAttributeTable attribute(int id) { return attributes.get(id); }
     public List<EquipAttributeTable> attributes() { return List.copyOf(attributes.values()); }
