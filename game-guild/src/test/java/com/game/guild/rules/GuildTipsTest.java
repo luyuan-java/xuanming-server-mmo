@@ -84,6 +84,30 @@ class GuildTipsTest {
         codes.put("TEXT_CHECK_UNAVAILABLE", GuildTips.TEXT_CHECK_UNAVAILABLE);
         codes.put("RENAME_COOLDOWN", GuildTips.RENAME_COOLDOWN);
         codes.put("RENAME_SAME_NAME", GuildTips.RENAME_SAME_NAME);
+        codes.put("WAR_NOT_OPEN", GuildTips.WAR_NOT_OPEN);
+        codes.put("WAR_LEVEL_TOO_LOW", GuildTips.WAR_LEVEL_TOO_LOW);
+        codes.put("WAR_SAME_GUILD", GuildTips.WAR_SAME_GUILD);
+        codes.put("WAR_TARGET_PEACE_MODE", GuildTips.WAR_TARGET_PEACE_MODE);
+        codes.put("WAR_SELF_PEACE_MODE", GuildTips.WAR_SELF_PEACE_MODE);
+        codes.put("WAR_PEACE_COOLDOWN", GuildTips.WAR_PEACE_COOLDOWN);
+        codes.put("WAR_TARGET_PROTECTED", GuildTips.WAR_TARGET_PROTECTED);
+        codes.put("WAR_TARGET_IN_BATTLE", GuildTips.WAR_TARGET_IN_BATTLE);
+        codes.put("WAR_TARGET_OFFLINE", GuildTips.WAR_TARGET_OFFLINE);
+        codes.put("WAR_SAFE_ZONE", GuildTips.WAR_SAFE_ZONE);
+        codes.put("WAR_TEAM_INVALID", GuildTips.WAR_TEAM_INVALID);
+        codes.put("WAR_TEAM_SIZE_EXCEEDS_ROAD_LIMIT", GuildTips.WAR_TEAM_SIZE_EXCEEDS_ROAD_LIMIT);
+        codes.put("WAR_LEYLINE_NOT_FOUND", GuildTips.WAR_LEYLINE_NOT_FOUND);
+        codes.put("WAR_GARRISON_FULL", GuildTips.WAR_GARRISON_FULL);
+        codes.put("WAR_GARRISON_COOLDOWN", GuildTips.WAR_GARRISON_COOLDOWN);
+        codes.put("WAR_MILESTONE_LOCKED", GuildTips.WAR_MILESTONE_LOCKED);
+        codes.put("WAR_MILESTONE_CLAIMED", GuildTips.WAR_MILESTONE_CLAIMED);
+        codes.put("WAR_DIVIDEND_EMPTY", GuildTips.WAR_DIVIDEND_EMPTY);
+        codes.put("WAR_BOUNTY_INVALID_TARGET", GuildTips.WAR_BOUNTY_INVALID_TARGET);
+        codes.put("WAR_BOUNTY_ALREADY_ACTIVE", GuildTips.WAR_BOUNTY_ALREADY_ACTIVE);
+        codes.put("WAR_BOUNTY_LIMIT", GuildTips.WAR_BOUNTY_LIMIT);
+        codes.put("WAR_BOUNTY_NOT_FOUND", GuildTips.WAR_BOUNTY_NOT_FOUND);
+        codes.put("WAR_TRACK_COOLDOWN", GuildTips.WAR_TRACK_COOLDOWN);
+        codes.put("WAR_SERVICE_BUSY", GuildTips.WAR_SERVICE_BUSY);
         return codes;
     }
 
@@ -139,8 +163,8 @@ class GuildTipsTest {
         guildCodes().forEach((name, code) ->
                 assertThat(GuildTips.isFault(code)).as("%s = %d 的 fault 分类", name, code)
                         .isEqualTo(name.equals("ID_GEN_UNAVAILABLE") || name.equals("TRIAL_SERVICE_BUSY")
-                                || name.equals("TEXT_CHECK_UNAVAILABLE")));
-        assertThat(GuildTips.FAULTS).containsExactlyInAnyOrder(14008, 14041, 14045);
+                                || name.equals("TEXT_CHECK_UNAVAILABLE") || name.equals("WAR_SERVICE_BUSY")));
+        assertThat(GuildTips.FAULTS).containsExactlyInAnyOrder(14008, 14041, 14045, 14071);
         assertThat(GuildTips.isFault(GuildTips.OK)).isFalse();
         assertThat(GuildTips.isFault(GuildTips.SERVICE_UNAVAILABLE)).as("信封 1003 另计 internal_error").isFalse();
         for (GuildTip tip : GuildTip.values()) {

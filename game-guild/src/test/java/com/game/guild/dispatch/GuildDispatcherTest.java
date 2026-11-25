@@ -78,19 +78,21 @@ class GuildDispatcherTest {
     // ================================================================ 路由与启动校验
 
     @Test
-    void 接管GuildService的全部29个号() {
+    void 接管GuildService的全部40个号() {
         Set<Integer> expected = new HashSet<>();
         for (String method : GuildMethods.all()) {
             expected.add(id(method));
         }
-        assertThat(expected).hasSize(29);
+        assertThat(expected).hasSize(40);
         GuildDispatcher d = dispatcher();
         assertThat(d.routedMessageIds()).isEqualTo(expected);
         assertThat(d.messageIdsOf(GuildMethods.CLIENT_REQUESTS)).hasSize(17);
         assertThat(d.messageIdsOf(GuildMethods.ECONOMY_REQUESTS)).containsExactlyInAnyOrder(53, 76, 120, 228, 233);
-        assertThat(d.messageIdsOf(GuildMethods.FORBIDDEN)).containsExactlyInAnyOrder(8, 220);
+        assertThat(d.messageIdsOf(GuildMethods.FORBIDDEN)).containsExactlyInAnyOrder(8, 220, 494);
         assertThat(d.messageIdsOf(GuildMethods.PLACEHOLDERS)).containsExactlyInAnyOrder(239, 240, 241, 242, 243);
-        // 契约里的 GuildService 恰好就是这 28 个
+        assertThat(d.messageIdsOf(GuildMethods.GUILD_WAR_PLACEHOLDERS))
+                .containsExactlyInAnyOrder(485, 486, 487, 488, 489, 490, 491, 492, 493, 499);
+        // 契约里的 GuildService 恰好就是这 40 个
         Set<String> contract = new HashSet<>();
         for (MessageMethod m : REGISTRY.all()) {
             if (GuildMethods.SERVICE.equals(m.serviceName())) {
@@ -112,11 +114,11 @@ class GuildDispatcherTest {
     }
 
     @Test
-    void C2S与占位的应答都有error_message字段_220的应答是Empty() {
+    void C2S与占位的应答都有error_message字段_推送占位的应答是Empty() {
         for (String method : GuildMethods.all()) {
             MessageMethod m = REGISTRY.byId(id(method)).orElseThrow();
             FieldDescriptor field = m.responsePrototype().getDescriptorForType().findFieldByName("error_message");
-            if (method.equals(GuildMethods.NOTIFY_GUILD_CHANGED)) {
+            if (method.equals(GuildMethods.NOTIFY_GUILD_CHANGED) || method.equals(GuildMethods.NOTIFY_GUILD_WAR_ALERT)) {
                 assertThat(m.responsePrototype()).isInstanceOf(com.game.proto.Empty.class);
             } else {
                 assertThat(field).as(method).isNotNull();

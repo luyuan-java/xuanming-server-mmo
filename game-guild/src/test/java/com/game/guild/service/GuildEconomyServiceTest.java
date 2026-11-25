@@ -537,7 +537,7 @@ class GuildEconomyServiceTest {
         GetGuildShopResponse resp = economy.getGuildShop(ME, GetGuildShopRequest.getDefaultInstance(), d());
         assertThat(resp.hasErrorMessage()).isFalse();
         assertThat(resp.getGoodsList()).extracting(GuildShopGoodsView::getGoodsId)
-                .containsExactly(101, 102, 103, 104, 201, 202, 203, 204, 301, 302, 303);
+                .containsExactly(101, 102, 103, 104, 105, 201, 202, 203, 204, 205, 206, 301, 302, 303, 304, 305);
         Map<Integer, GuildShopGoodsView> byId = new java.util.HashMap<>();
         resp.getGoodsList().forEach(g -> byId.put(g.getGoodsId(), g));
         assertThat(byId.get(202).getMaxBuyCount()).isEqualTo(1);

@@ -284,15 +284,16 @@ class EconomyTablesTest {
         assertThat(lookup.donateOption(2).getCostAmount()).isEqualTo(100_000);
         assertThat(lookup.donateOption(0)).isNull();
         assertThat(lookup.sortedShopRows()).extracting(GuildShopTable::getId)
-                .containsExactly(101, 102, 103, 104, 201, 202, 203, 204, 301, 302, 303);
+                .containsExactly(101, 102, 103, 104, 105, 201, 202, 203, 204, 205, 206, 301, 302, 303, 304, 305);
         assertThat(lookup.shopGoods(202).getItemId()).isEqualTo(12);
         assertThat(lookup.shopGoods(999)).isNull();
         assertThat(lookup.itemMaxStack(12)).hasValue(1);
         assertThat(lookup.itemMaxStack(15)).hasValue(999);
         assertThat(lookup.itemMaxStack(999_999)).isEmpty();
         for (GuildShopTable row : lookup.sortedShopRows()) {
-            int want = row.getId() == 202 || row.getId() == 204 ? 1 : 20;
-            assertThat(EconomyTables.maxBuyCount(row, lookup.itemMaxStack(row.getItemId()).orElseThrow()))
+            int maxStack = lookup.itemMaxStack(row.getItemId()).orElseThrow();
+            int want = (int) Math.min(20L, Integer.toUnsignedLong(maxStack) / Math.max(1L, Integer.toUnsignedLong(row.getItemCount())));
+            assertThat(EconomyTables.maxBuyCount(row, maxStack))
                     .as("GuildShop[%d]", row.getId()).isEqualTo(want);
         }
     }

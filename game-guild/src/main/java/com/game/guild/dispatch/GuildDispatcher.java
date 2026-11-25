@@ -182,6 +182,9 @@ public final class GuildDispatcher {
         for (String method : GuildMethods.FORBIDDEN) {
             other(byId, method, Kind.FORBIDDEN);
         }
+        for (String method : GuildMethods.GUILD_WAR_PLACEHOLDERS) {
+            other(byId, method, Kind.PLACEHOLDER);
+        }
         if(activities==null){
             // 旧切片构造器兼容；生产装配必须显式注入完整活动服务。
             for (String method : GuildMethods.PLACEHOLDERS) other(byId, method, Kind.PLACEHOLDER);
@@ -231,7 +234,7 @@ public final class GuildDispatcher {
 
     private void other(Map<Integer, Route> byId, String method, Kind kind) {
         MessageMethod contract = contractOf(method);
-        if (GuildMethods.NOTIFY_GUILD_CHANGED.equals(method)) {
+        if (GuildMethods.NOTIFY_GUILD_CHANGED.equals(method) || GuildMethods.NOTIFY_GUILD_WAR_ALERT.equals(method)) {
             if (contract.responsePrototype().getClass() != Empty.class) {
                 throw new IllegalStateException("推送占位的应答类型不是 Empty: " + contract.key());
             }

@@ -107,6 +107,34 @@ public final class GuildTips {
     /** 新帮名与当前帮名相同。 */
     public static final int RENAME_SAME_NAME = GuildErrorTip.guild_error.kGuildRenameSameName_VALUE;
 
+    // ---- 全天帮战 V2 段（14048–14071） ----
+
+    public static final int WAR_NOT_OPEN = GuildErrorTip.guild_error.kGuildWarNotOpen_VALUE;
+    public static final int WAR_LEVEL_TOO_LOW = GuildErrorTip.guild_error.kGuildWarLevelTooLow_VALUE;
+    public static final int WAR_SAME_GUILD = GuildErrorTip.guild_error.kGuildWarSameGuild_VALUE;
+    public static final int WAR_TARGET_PEACE_MODE = GuildErrorTip.guild_error.kGuildWarTargetPeaceMode_VALUE;
+    public static final int WAR_SELF_PEACE_MODE = GuildErrorTip.guild_error.kGuildWarSelfPeaceMode_VALUE;
+    public static final int WAR_PEACE_COOLDOWN = GuildErrorTip.guild_error.kGuildWarPeaceCooldown_VALUE;
+    public static final int WAR_TARGET_PROTECTED = GuildErrorTip.guild_error.kGuildWarTargetProtected_VALUE;
+    public static final int WAR_TARGET_IN_BATTLE = GuildErrorTip.guild_error.kGuildWarTargetInBattle_VALUE;
+    public static final int WAR_TARGET_OFFLINE = GuildErrorTip.guild_error.kGuildWarTargetOffline_VALUE;
+    public static final int WAR_SAFE_ZONE = GuildErrorTip.guild_error.kGuildWarSafeZone_VALUE;
+    public static final int WAR_TEAM_INVALID = GuildErrorTip.guild_error.kGuildWarTeamInvalid_VALUE;
+    public static final int WAR_TEAM_SIZE_EXCEEDS_ROAD_LIMIT = GuildErrorTip.guild_error.kGuildWarTeamSizeExceedsRoadLimit_VALUE;
+    public static final int WAR_LEYLINE_NOT_FOUND = GuildErrorTip.guild_error.kGuildWarLeylineNotFound_VALUE;
+    public static final int WAR_GARRISON_FULL = GuildErrorTip.guild_error.kGuildWarGarrisonFull_VALUE;
+    public static final int WAR_GARRISON_COOLDOWN = GuildErrorTip.guild_error.kGuildWarGarrisonCooldown_VALUE;
+    public static final int WAR_MILESTONE_LOCKED = GuildErrorTip.guild_error.kGuildWarMilestoneLocked_VALUE;
+    public static final int WAR_MILESTONE_CLAIMED = GuildErrorTip.guild_error.kGuildWarMilestoneClaimed_VALUE;
+    public static final int WAR_DIVIDEND_EMPTY = GuildErrorTip.guild_error.kGuildWarDividendEmpty_VALUE;
+    public static final int WAR_BOUNTY_INVALID_TARGET = GuildErrorTip.guild_error.kGuildWarBountyInvalidTarget_VALUE;
+    public static final int WAR_BOUNTY_ALREADY_ACTIVE = GuildErrorTip.guild_error.kGuildWarBountyAlreadyActive_VALUE;
+    public static final int WAR_BOUNTY_LIMIT = GuildErrorTip.guild_error.kGuildWarBountyLimit_VALUE;
+    public static final int WAR_BOUNTY_NOT_FOUND = GuildErrorTip.guild_error.kGuildWarBountyNotFound_VALUE;
+    public static final int WAR_TRACK_COOLDOWN = GuildErrorTip.guild_error.kGuildWarTrackCooldown_VALUE;
+    /** 帮战匹配或外部服务不可用（fault = 1）。 */
+    public static final int WAR_SERVICE_BUSY = GuildErrorTip.guild_error.kGuildWarServiceBusy_VALUE;
+
     // ---- 通用段（tip_text.json） ----
 
     /** 信封故障：依赖故障、处理器异常、无会话、请求体非法、上行 8 / 220（§7.3）。 */
@@ -121,8 +149,8 @@ public final class GuildTips {
      */
     public static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
 
-    /** 帮会段内的 in-band 故障码集合（基线 faults.go：GuildIdGenUnavailable、GuildTrialServiceBusy、GuildTextCheckUnavailable）。 */
-    public static final Set<Integer> FAULTS = Set.of(ID_GEN_UNAVAILABLE, TRIAL_SERVICE_BUSY, TEXT_CHECK_UNAVAILABLE);
+    /** 帮会段内的 in-band 故障码集合（基线 faults.go：GuildIdGenUnavailable、GuildTrialServiceBusy、GuildTextCheckUnavailable、GuildWarServiceBusy）。 */
+    public static final Set<Integer> FAULTS = Set.of(ID_GEN_UNAVAILABLE, TRIAL_SERVICE_BUSY, TEXT_CHECK_UNAVAILABLE, WAR_SERVICE_BUSY);
 
     /** 故障答复（ErrLeaderMismatch / ErrGuildLevelConfigMissing）的基线 gRPC 文案（guild_manage_logic.go:325）。 */
     public static final String INCONSISTENT_REASON = "guild data or configuration is inconsistent";

@@ -40,9 +40,10 @@ public final class GuildMethods {
     public static final String GET_GUILD_RANK = "GetGuildRank";
     public static final String GET_GUILD_RANK_BY_GUILD = "GetGuildRankByGuild";
 
-    // ---- 客户端不得上行的两个 ----
+    // ---- 客户端不得上行的内部与推送占位 ----
     public static final String UPDATE_GUILD_SCORE = "UpdateGuildScore";
     public static final String NOTIFY_GUILD_CHANGED = "NotifyGuildChanged";
+    public static final String NOTIFY_GUILD_WAR_ALERT = "NotifyGuildWarAlert";
 
     // ---- 4.5 经济 ----
     public static final String GET_GUILD_DONATE_OPTIONS = "GetGuildDonateOptions";
@@ -58,6 +59,18 @@ public final class GuildMethods {
     public static final String START_GUILD_TRIAL = "StartGuildTrial";
     public static final String RESPOND_GUILD_TRIAL_INVITE = "RespondGuildTrialInvite";
 
+    // ---- 全天帮战 V2 协议占位（权威仓仅先落配表与协议，尚未合入业务处理，统一定向回 in-band 1006）----
+    public static final String GET_GUILD_WAR_OVERVIEW = "GetGuildWarOverview";
+    public static final String SET_GUILD_WAR_STANCE = "SetGuildWarStance";
+    public static final String REGISTER_GUILD_WAR_GARRISON = "RegisterGuildWarGarrison";
+    public static final String START_GUILD_WAR_BATTLE = "StartGuildWarBattle";
+    public static final String CLAIM_GUILD_WAR_MILESTONE = "ClaimGuildWarMilestone";
+    public static final String CLAIM_GUILD_WAR_DIVIDEND = "ClaimGuildWarDividend";
+    public static final String POST_GUILD_WAR_BOUNTY = "PostGuildWarBounty";
+    public static final String TRACK_GUILD_WAR_BOUNTY = "TrackGuildWarBounty";
+    public static final String GET_GUILD_WAR_BATTLE_RESULT = "GetGuildWarBattleResult";
+    public static final String INSPECT_FIELD_WAR_TARGETS = "InspectFieldWarTargets";
+
     public static final List<String> CLIENT_REQUESTS = List.of(CREATE_GUILD, GET_GUILD, GET_PLAYER_GUILD, LEAVE_GUILD,
             DISBAND_GUILD, SET_ANNOUNCEMENT, RENAME_GUILD, SET_GUILD_MEMBER_ROLE, KICK_GUILD_MEMBER, TRANSFER_GUILD_LEADER,
             APPLY_JOIN_GUILD, CANCEL_GUILD_APPLICATION, LIST_MY_GUILD_APPLICATIONS, LIST_GUILD_APPLICATIONS,
@@ -66,17 +79,22 @@ public final class GuildMethods {
     public static final List<String> ECONOMY_REQUESTS = List.of(GET_GUILD_DONATE_OPTIONS, DONATE_TO_GUILD, UPGRADE_GUILD,
             GET_GUILD_SHOP, BUY_GUILD_SHOP_GOODS);
 
-    public static final List<String> FORBIDDEN = List.of(UPDATE_GUILD_SCORE, NOTIFY_GUILD_CHANGED);
+    public static final List<String> FORBIDDEN = List.of(UPDATE_GUILD_SCORE, NOTIFY_GUILD_CHANGED, NOTIFY_GUILD_WAR_ALERT);
 
     public static final List<String> PLACEHOLDERS = List.of(GET_GUILD_ACTIVITIES, LIGHT_GUILD_LANTERN, CLAIM_GUILD_REUNION,
             START_GUILD_TRIAL, RESPOND_GUILD_TRIAL_INVITE);
 
+    public static final List<String> GUILD_WAR_PLACEHOLDERS = List.of(GET_GUILD_WAR_OVERVIEW, SET_GUILD_WAR_STANCE,
+            REGISTER_GUILD_WAR_GARRISON, START_GUILD_WAR_BATTLE, CLAIM_GUILD_WAR_MILESTONE, CLAIM_GUILD_WAR_DIVIDEND,
+            POST_GUILD_WAR_BOUNTY, TRACK_GUILD_WAR_BOUNTY, GET_GUILD_WAR_BATTLE_RESULT, INSPECT_FIELD_WAR_TARGETS);
+
     private GuildMethods() {
     }
 
-    /** 全部 28 个方法（启动校验：每个都必须在 message_id.txt 里）。 */
+    /** 全部 40 个方法（启动校验：每个都必须在 message_id.txt 里）。 */
     public static List<String> all() {
-        return java.util.stream.Stream.of(CLIENT_REQUESTS, ECONOMY_REQUESTS, FORBIDDEN, PLACEHOLDERS).flatMap(List::stream)
+        return java.util.stream.Stream.of(CLIENT_REQUESTS, ECONOMY_REQUESTS, FORBIDDEN, PLACEHOLDERS, GUILD_WAR_PLACEHOLDERS)
+                .flatMap(List::stream)
                 .toList();
     }
 }
