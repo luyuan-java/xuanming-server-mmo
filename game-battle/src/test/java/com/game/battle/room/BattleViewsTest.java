@@ -71,8 +71,12 @@ class BattleViewsTest {
     }
 
     @Test
-    void 观众全员冷却清空且不带道具() {
-        BattleStateS2C view = BattleViews.forObserver(full()).state();
+    void 观众全员冷却清空且不带道具与投降态() {
+        BattleStateS2C withVote = full().toBuilder()
+                .setSurrenderVote(com.game.proto.BattleSurrenderVoteState.newBuilder()
+                        .setActive(true).setTeamIndex(0).setInitiatorPlayerId(A).setRequiredAgrees(2).addAgreedPlayerIds(A))
+                .build();
+        BattleStateS2C view = BattleViews.forObserver(withVote).state();
 
         for (BattleActorState actor : view.getActorsList()) {
             assertThat(actor.getSkillCooldownRoundsMap()).isEmpty();
@@ -80,6 +84,7 @@ class BattleViewsTest {
             assertThat(actor.hasCombat()).isFalse();
         }
         assertThat(view.getSelfItemsList()).isEmpty();
+        assertThat(view.hasSurrenderVote()).isFalse();
     }
 
     @Test

@@ -403,7 +403,7 @@ final class BuffEngine {
                 double lostHealth = Unsigned.toDouble(actor.maxHealth() - actor.health());
                 double healAmount = ctx.data().buffHealthRegeneration(row.getId(),
                         (double) Integer.toUnsignedLong(actor.level()), lostHealth);
-                long healed = actor.applyHeal(healAmount);
+                long healed = ctx.applyHeal(actor, healAmount);
                 if (healed != 0) {
                     BattleUnit caster = ctx.findActor(entry.getCasterId());
                     if (caster != null) {

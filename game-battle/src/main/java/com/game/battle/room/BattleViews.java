@@ -3,6 +3,7 @@ package com.game.battle.room;
 import com.game.proto.BattleActorState;
 import com.game.proto.BattleItemEntry;
 import com.game.proto.BattleStateS2C;
+import com.game.proto.BattleSurrenderVoteState;
 import com.game.battle.engine.TurnBattleEngine;
 import java.util.List;
 
@@ -32,20 +33,28 @@ final class BattleViews {
      * @param selfItems 引擎 {@code selfItems(viewer)}
      */
     static ViewerState forParticipant(BattleStateS2C full, long viewer, List<BattleItemEntry> selfItems) {
+        return forParticipant(full, viewer, selfItems, null);
+    }
+
+    static ViewerState forParticipant(BattleStateS2C full, long viewer, List<BattleItemEntry> selfItems,
+                                      BattleSurrenderVoteState surrenderVote) {
         BattleStateS2C.Builder state = redact(full, viewer);
         if (viewer != 0) {
             state.addAllSelfItems(selfItems);
+            if (surrenderVote != null) {
+                state.setSurrenderVote(surrenderVote);
+            }
         }
         return new ViewerState(state.build());
     }
 
-    /** 观众视角：全员冷却清空，不带任何人的道具余量。 */
+    /** 观众视角：全员冷却清空，不带任何人的道具余量与队伍投降态。 */
     static ViewerState forObserver(BattleStateS2C full) {
         return new ViewerState(redact(full, 0).build());
     }
 
     private static BattleStateS2C.Builder redact(BattleStateS2C full, long viewer) {
-        BattleStateS2C.Builder state = full.toBuilder().clearSelfItems();
+        BattleStateS2C.Builder state = full.toBuilder().clearSelfItems().clearSurrenderVote();
         TurnBattleEngine.stripEngineOnlyState(state);
         for (BattleActorState.Builder actor : state.getActorsBuilderList()) {
             boolean own = viewer != 0 && (actor.getActorId() == viewer || actor.getOwnerPlayerId() == viewer);

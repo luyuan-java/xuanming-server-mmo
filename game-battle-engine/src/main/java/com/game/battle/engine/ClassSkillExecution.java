@@ -141,7 +141,7 @@ final class ClassSkillExecution {
             if (ctx.configured.hasEffects(actor) || ctx.configured.hasEffects(target)) {
                 ctx.configured.impact.heal(actor,target,amount,new BattleEffect.Hit(skill.getId(),rank,BattleEffect.DIRECT,primary),false,false);
             } else {
-                long healed = target.applyHeal(amount);
+                long healed = ctx.applyHeal(target, amount);
                 ctx.encounter.recordTrialMonsterHeal(actor, target, healed);
                 if (healed != 0) ctx.encounter.recordEffectiveContribution(actor);
                 event(eBattleEventType.BATTLE_EVENT_HEAL, actor, target, skill).setValue(healed);

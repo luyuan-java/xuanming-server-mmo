@@ -14,6 +14,7 @@ import com.game.proto.BattlePetSnapshot;
 import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleStateS2C;
+import com.game.proto.BattleSurrenderVoteState;
 import com.game.proto.CreateBattleRequest;
 import com.game.proto.TurnResultS2C;
 import com.game.proto.eBattleActionType;
@@ -22,6 +23,7 @@ import com.game.proto.eBattleEventType;
 import com.game.proto.eBattleHitKind;
 import com.game.proto.eBattleOutcome;
 import com.game.table.DungeonTable;
+import com.game.table.MatchErrorTip;
 import com.game.table.MonsterTable;
 import com.game.table.Monsterdrop;
 import com.game.table.SkillTable;
@@ -31,6 +33,7 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
@@ -83,11 +86,24 @@ public final class TurnBattleEngine {
     private final TreeSet<Long> manualActionPlayers = new TreeSet<>(Long::compareUnsigned);
     private final TreeSet<Long> explicitAutoPlayers = new TreeSet<>(Long::compareUnsigned);
     private final TreeSet<Long> hadOperableTurnPlayers = new TreeSet<>(Long::compareUnsigned);
+    /** PVP 延迟投降状态与连续未手动挂机计数（确定性、零挂钟）。 */
+    private int surrenderedTeam = -1;
+    private final BattleSurrenderVoteState.Builder[] teamSurrenderVotes = new BattleSurrenderVoteState.Builder[] {
+            BattleSurrenderVoteState.newBuilder(),
+            BattleSurrenderVoteState.newBuilder()
+    };
+    private final NavigableMap<Long, Integer> consecutiveIdleRoundsByPlayer = new TreeMap<>(Long::compareUnsigned);
+
+    public record SurrenderVoteResult(int errorTip, BattleSurrenderVoteState voteState) {
+    }
 
     private TurnBattleEngine(CreateBattleRequest request, BattleData data) {
         this.request = request;
+        boolean competitivePvp = (request.hasRankedContext() && request.getRankedContext().getSeasonId() != 0)
+                || request.getMatchMode() == BattleConstants.MATCH_MODE_POLARITY_5V5
+                || request.getMatchMode() == BattleConstants.MATCH_MODE_SEASON_TOURNAMENT;
         // 基线 Initialize 第 4 步：拷请求、rng.seed(seed)、roundIndex = 1、outcome = ONGOING（engine.cpp:69-72）
-        this.ctx = new BattleContext(data, request.getMatchMode(), request.getSeed());
+        this.ctx = new BattleContext(data, request.getMatchMode(), request.getSeed(), competitivePvp);
         this.ledger = new ItemLedger(ctx, request);
         this.checks = new ActionChecks(ctx, ledger);
         this.checks.setCaptureRequest(request);
@@ -173,6 +189,7 @@ public final class TurnBattleEngine {
                 engine.maxRounds = BattleConstants.POLARITY_DEFAULT_MAX_ROUNDS;
             }
         }
+        engine.ctx.setMaxRounds(engine.maxRounds);
         engine.ctx.encounter.configure(bossTrialKind, battleDifficulty);
         if (request.hasTrialContext()) {
             engine.ctx.encounter.configureTrial(
@@ -531,6 +548,150 @@ public final class TurnBattleEngine {
         return request.hasRankedContext() && request.getRankedContext().getUseFreePreset();
     }
 
+    /** 是否为竞技 PVP（人宠会武 / 物法易势 / 战队锦标赛）：启用凝锋主目标与战意渐盛。 */
+    public boolean isCompetitivePvpBattle() {
+        return ctx.isCompetitivePvp();
+    }
+
+    public int maxRounds() {
+        return maxRounds;
+    }
+
+    public int escalationStartRound() {
+        return ctx.escalationStartRound();
+    }
+
+    public int escalationStacks() {
+        return ctx.escalationStacks();
+    }
+
+    public int surrenderUnlockRound() {
+        return ctx.isPve() ? 0 : BattleConstants.PVP_SURRENDER_UNLOCK_ROUND;
+    }
+
+    public OptionalInt teamIndexOfPlayer(long playerId) {
+        BattleUnit actor = ctx.findActor(playerId);
+        if (actor == null || !actor.isPlayer() || Integer.compareUnsigned(actor.teamIndex(), 1) > 0) {
+            return OptionalInt.empty();
+        }
+        return OptionalInt.of(actor.teamIndex());
+    }
+
+    /** 提交 PVP 延迟投降或投票（R5 起解锁，纯确定性不耗 RNG，对齐 C++ SubmitSurrenderVote）。 */
+    public SurrenderVoteResult submitSurrenderVote(long playerId, boolean agree) {
+        if (outcome != eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
+            return new SurrenderVoteResult(ActionChecks.INVALID_PARAMETER, BattleSurrenderVoteState.getDefaultInstance());
+        }
+        if (ctx.isPve()) {
+            return new SurrenderVoteResult(MatchErrorTip.match_error.kMatchBattleSurrenderNotAllowed_VALUE,
+                    BattleSurrenderVoteState.getDefaultInstance());
+        }
+        OptionalInt teamOpt = teamIndexOfPlayer(playerId);
+        if (teamOpt.isEmpty()) {
+            return new SurrenderVoteResult(ActionChecks.INVALID_PARAMETER, BattleSurrenderVoteState.getDefaultInstance());
+        }
+        int roundIdx = ctx.roundIndex();
+        if (Integer.compareUnsigned(roundIdx, BattleConstants.PVP_SURRENDER_UNLOCK_ROUND) < 0) {
+            return new SurrenderVoteResult(MatchErrorTip.match_error.kMatchBattleSurrenderTooEarly_VALUE,
+                    BattleSurrenderVoteState.getDefaultInstance());
+        }
+        int teamIdx = teamOpt.getAsInt();
+        BattleSurrenderVoteState.Builder vote = teamSurrenderVotes[teamIdx];
+        if (!vote.getActive()) {
+            if (!agree) {
+                return new SurrenderVoteResult(ActionChecks.INVALID_PARAMETER, BattleSurrenderVoteState.getDefaultInstance());
+            }
+            if (vote.getNextAllowedRound() > 0 && Integer.compareUnsigned(roundIdx, vote.getNextAllowedRound()) < 0) {
+                return new SurrenderVoteResult(MatchErrorTip.match_error.kMatchBattleSurrenderCooldown_VALUE, vote.build());
+            }
+            int activeVoters = 0;
+            for (BattleUnit member : ctx.units()) {
+                if (!member.isPlayer() || member.teamIndex() != teamIdx) {
+                    continue;
+                }
+                int idleRounds = consecutiveIdleRoundsByPlayer.getOrDefault(member.actorId(), 0);
+                if (member.actorId() == playerId || idleRounds < BattleConstants.PVP_SURRENDER_IDLE_EXCLUDE_ROUNDS) {
+                    activeVoters++;
+                }
+            }
+            vote.clear()
+                    .setActive(true)
+                    .setTeamIndex(teamIdx)
+                    .setInitiatorPlayerId(playerId)
+                    .setInitiatedRound(roundIdx)
+                    .addAgreedPlayerIds(playerId)
+                    .setRequiredAgrees(Math.max(1, activeVoters));
+        } else {
+            for (long agreedId : vote.getAgreedPlayerIdsList()) {
+                if (agreedId == playerId) {
+                    return new SurrenderVoteResult(MatchErrorTip.match_error.kMatchBattleSurrenderAlreadyVoted_VALUE,
+                            vote.build());
+                }
+            }
+            if (!agree) {
+                vote.setActive(false)
+                        .setRejected(true)
+                        .setPassed(false)
+                        .clearAgreedPlayerIds()
+                        .setNextAllowedRound(roundIdx + BattleConstants.PVP_SURRENDER_REJECT_COOLDOWN_ROUNDS);
+                return new SurrenderVoteResult(0, vote.build());
+            }
+            List<Long> ids = new ArrayList<>(vote.getAgreedPlayerIdsList());
+            ids.add(playerId);
+            ids.sort(Long::compareUnsigned);
+            vote.clearAgreedPlayerIds().addAllAgreedPlayerIds(ids);
+        }
+
+        if (vote.getActive() && vote.getAgreedPlayerIdsCount() >= vote.getRequiredAgrees()) {
+            vote.setActive(false).setPassed(true).setRejected(false);
+            surrenderedTeam = teamIdx;
+            outcome = teamIdx == 0 ? eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN : eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN;
+            ctx.encounter.clearActiveTelegraphs();
+            rollDrops();
+        }
+        return new SurrenderVoteResult(0, vote.build());
+    }
+
+    /** 返回收信玩家己方队伍当前应展示的投降投票状态（敌方/观众返回 null）。 */
+    public BattleSurrenderVoteState surrenderVoteForViewer(long viewerPlayerId) {
+        if (viewerPlayerId == 0L) {
+            return null;
+        }
+        OptionalInt teamOpt = teamIndexOfPlayer(viewerPlayerId);
+        if (teamOpt.isEmpty()) {
+            return null;
+        }
+        BattleSurrenderVoteState.Builder vote = teamSurrenderVotes[teamOpt.getAsInt()];
+        if (vote.getActive() || vote.getPassed() || vote.getRejected()
+                || (vote.getNextAllowedRound() > 0
+                && Integer.compareUnsigned(ctx.roundIndex(), vote.getNextAllowedRound()) < 0)) {
+            return vote.build();
+        }
+        return null;
+    }
+
+    public void fillSurrenderVoteForViewer(BattleStateS2C.Builder state, long viewerPlayerId) {
+        state.clearSurrenderVote();
+        BattleSurrenderVoteState vote = surrenderVoteForViewer(viewerPlayerId);
+        if (vote != null) {
+            state.setSurrenderVote(vote);
+        }
+    }
+
+    private void expireSurrenderVotesForRoundAdvance() {
+        for (int team = 0; team < 2; team++) {
+            BattleSurrenderVoteState.Builder vote = teamSurrenderVotes[team];
+            if (!vote.getActive()) {
+                continue;
+            }
+            vote.setActive(false)
+                    .setRejected(true)
+                    .setPassed(false)
+                    .clearAgreedPlayerIds()
+                    .setNextAllowedRound(ctx.roundIndex() + BattleConstants.PVP_SURRENDER_EXPIRE_COOLDOWN_ROUNDS);
+        }
+    }
+
     /** 标记参战者已建立战斗直连或成功拉取房间状态。 */
     public void markPlayerEntered(long playerId) {
         if (playerId != 0L) {
@@ -751,9 +912,23 @@ public final class TurnBattleEngine {
         updateOutcome();
         rollDrops();
 
+        int settledRound = ctx.roundIndex();
+        for (BattleUnit unit : ctx.units()) {
+            if (!unit.isPlayer() || !unit.isActive()) {
+                continue;
+            }
+            if (ctx.encounter.hadManualActionInRound(unit.actorId(), settledRound)) {
+                consecutiveIdleRoundsByPlayer.put(unit.actorId(), 0);
+            } else {
+                consecutiveIdleRoundsByPlayer.put(unit.actorId(),
+                        consecutiveIdleRoundsByPlayer.getOrDefault(unit.actorId(), 0) + 1);
+            }
+        }
+
         pendingActions.clear();
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             ctx.advanceRound();
+            expireSurrenderVotesForRoundAdvance();
             ctx.encounter.updatePolarityForRound(request.getMatchMode());
             ctx.encounter.refreshTelegraphs(maxRounds);
         } else {
@@ -1081,7 +1256,11 @@ public final class TurnBattleEngine {
             if (kind != eBattleHitKind.BATTLE_HIT_COUNTER) tryReflectDamage(actor,target,landed);
             return landed != 0;
         }
-        long dealt = ctx.encounter.applyLegacyDamage(actor, target, damage, CombatDamageRules.PHYSICAL_DAMAGE,
+        double legacyDamage = damage;
+        if (ctx.escalationStacks() > 0) {
+            legacyDamage *= ctx.escalationDamagePct() / 100.0;
+        }
+        long dealt = ctx.encounter.applyLegacyDamage(actor, target, legacyDamage, CombatDamageRules.PHYSICAL_DAMAGE,
                 kind != eBattleHitKind.BATTLE_HIT_COUNTER);
         if (kind != eBattleHitKind.BATTLE_HIT_COUNTER) {
             ctx.encounter.recordTrialDirectDamage(actor, target, CombatDamageRules.PHYSICAL_DAMAGE, dealt);
@@ -1232,7 +1411,11 @@ public final class TurnBattleEngine {
                 hit.critical = finalDamage.critical();
                 ctx.configured.impact.damage(actor,target,finalDamage.value(),row.getDamageType(),hit,eBattleHitKind.BATTLE_HIT_NORMAL);
             } else {
-            long dealt = ctx.encounter.applyLegacyDamage(actor, target, finalDamage.value(), row.getDamageType(), true);
+            double legacySkillDamage = finalDamage.value();
+            if (ctx.escalationStacks() > 0) {
+                legacySkillDamage *= ctx.escalationDamagePct() / 100.0;
+            }
+            long dealt = ctx.encounter.applyLegacyDamage(actor, target, legacySkillDamage, row.getDamageType(), true);
             ctx.encounter.recordTrialDirectDamage(actor, target, row.getDamageType(), dealt);
             if (dealt != 0) ctx.encounter.recordEffectiveContribution(actor);
 
@@ -1478,7 +1661,8 @@ public final class TurnBattleEngine {
                 .setHealth(actor.health())
                 .setMana(actor.mana())
                 .setIsDead(actor.isDead())
-                .setFled(actor.fled());
+                .setFled(actor.fled())
+                .setSurrendered(surrenderedTeam >= 0 && actor.teamIndex() == surrenderedTeam);
 
         for (BattleUnit other : ctx.units()) {
             if (!other.isPet() || other.ownerPlayerId() != playerId || other.competitiveTemporary()) {
@@ -1524,9 +1708,12 @@ public final class TurnBattleEngine {
         return settlement.build();
     }
 
-    /** 已完成回合数：进行中为 roundIndex − 1，已结束为 roundIndex（{@code CompletedRounds}，{@code engine.cpp:1767-1770}）。 */
+    /** 已完成回合数：进行中或收令期投降终局为 roundIndex − 1，其余已结束为 roundIndex（{@code CompletedRounds}，{@code engine.cpp:1767-1770}）。 */
     private int completedRounds() {
-        return outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING ? ctx.roundIndex() - 1 : ctx.roundIndex();
+        if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING || surrenderedTeam >= 0) {
+            return ctx.roundIndex() > 0 ? ctx.roundIndex() - 1 : 0;
+        }
+        return ctx.roundIndex();
     }
 
     /**
@@ -1539,7 +1726,11 @@ public final class TurnBattleEngine {
                 .setBattleId(request.getBattleId())
                 .setRoundIndex(ctx.roundIndex())
                 .setOutcome(outcome)
-                .setActionDeadlineMs(0);
+                .setActionDeadlineMs(0)
+                .setRoundLimit(maxRounds)
+                .setEscalationStacks(escalationStacks())
+                .setEscalationStartRound(escalationStartRound())
+                .setSurrenderUnlockRound(surrenderUnlockRound());
         for (BattleUnit unit : ctx.units()) {
             var visible = state.addActorsBuilder().mergeFrom(unit.snapshot());
             if (unit.isPlayer()) visible.setSupportEffects(ctx.configured.equipment.summary(unit));

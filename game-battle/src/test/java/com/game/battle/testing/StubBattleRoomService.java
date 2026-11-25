@@ -20,6 +20,8 @@ import com.game.proto.StopWatchBattleRequest;
 import com.game.proto.StopWatchBattleResponse;
 import com.game.proto.SubmitBattleActionRequest;
 import com.game.proto.SubmitBattleActionResponse;
+import com.game.proto.SurrenderBattleRequest;
+import com.game.proto.SurrenderBattleResponse;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.eBattleTicketRole;
 import java.util.List;
@@ -167,6 +169,12 @@ public final class StubBattleRoomService implements BattleRoomService {
     public StopWatchBattleResponse stopWatch(long playerId, StopWatchBattleRequest request) {
         enter("stopWatch");
         return StopWatchBattleResponse.getDefaultInstance();
+    }
+
+    @Override
+    public SurrenderBattleResponse surrender(long playerId, SurrenderBattleRequest request) {
+        enter("surrender");
+        return SurrenderBattleResponse.getDefaultInstance();
     }
 
     @Override

@@ -61,6 +61,12 @@ class RankedParityTest {
                         .setPlayerId(playerA).setEnteredRoom(aParticipated).setManualActionAccepted(aParticipated))
                 .addParticipationFacts(BattleParticipationFact.newBuilder()
                         .setPlayerId(playerB).setEnteredRoom(bParticipated).setManualActionAccepted(bParticipated))
+                .addSettlements(com.game.proto.BattleSettlementData.newBuilder()
+                        .setBattleId(battleId).setPlayerId(playerA).setParticipated(aParticipated)
+                        .setManualActionRounds(aParticipated ? 4 : 0).setEffectiveCombatContribution(aParticipated))
+                .addSettlements(com.game.proto.BattleSettlementData.newBuilder()
+                        .setBattleId(battleId).setPlayerId(playerB).setParticipated(bParticipated)
+                        .setManualActionRounds(bParticipated ? 4 : 0).setEffectiveCombatContribution(bParticipated))
                 .build();
     }
 
@@ -80,33 +86,42 @@ class RankedParityTest {
                     now::get).withRankedStore(rankedStore);
             rankedStore.ensureActiveSeason();
 
-            // 1. 1540 -> 1556 跨段（青锋 -> 云章）
+            // 1. V2 1584 -> 1600 跨段（青锋 -> 云章）与权威分档暴露
             long p1 = 20001L, p2 = 20002L;
-            db.putRating(p1, 154_000L, 7);
-            db.putRating(p2, 154_000L, 7);
-            // 先让 p1 在本季已亮段 7 场
+            db.putRating(p1, 158_400L, 7);
+            db.putRating(p2, 158_400L, 7);
+            // 先让 p1 在本季已亮段 7 场（其中 5 胜 2 负，下一场胜即解锁 6 胜锋芒称号）
             for (int i = 0; i < 7; i++) {
                 rankedStore.recordBattleSettlement(new RankedStore.SettlementInput(
-                        p1, 100L + i, 1, 2, RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED,
-                        eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN, 0, 3, true, false, 0L, 101, 203));
+                        p1, 100L + i, 1, 3, RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED,
+                        i < 5 ? eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN : eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN,
+                        0, 4, true, false, 0L, 101, 203));
             }
-            BattleResultEvent winEvent = rankedBattle(200L, 1, 2, p1, p2, eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, true, true);
+            BattleResultEvent winEvent = rankedBattle(200L, 1, 3, p1, p2, eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, true, true);
             assertThat(ratingStore.apply(winEvent).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
             // 重放只计一次
             assertThat(ratingStore.apply(winEvent).outcome()).isEqualTo(RatingStore.Outcome.DUPLICATE);
 
             RankedBattleSettlementView view = rankedStore.getBattleResult(p1, 200L).orElseThrow();
-            assertThat(view.getRatingBeforeCenti()).isEqualTo(154_000L);
-            assertThat(view.getRatingAfterCenti()).isEqualTo(155_600L);
+            assertThat(view.getRatingBeforeCenti()).isEqualTo(158_400L);
+            assertThat(view.getRatingAfterCenti()).isEqualTo(160_000L);
             assertThat(view.getRatingDeltaCenti()).isEqualTo(1_600L);
             assertThat(view.getTierBefore()).isEqualTo(RankedTier.RANKED_TIER_QINGFENG);
             assertThat(view.getTierAfter()).isEqualTo(RankedTier.RANKED_TIER_YUNZHANG);
             assertThat(view.getSeasonValidMatchesAfter()).isEqualTo(8);
             assertThat(view.getNewlyUnlockedRewardsList())
                     .extracting(r -> r.getKind())
-                    .containsExactly(RankedRewardKind.RANKED_REWARD_CARD_BACKGROUND);
+                    .containsExactlyInAnyOrder(
+                            RankedRewardKind.RANKED_REWARD_CARD_BACKGROUND,
+                            RankedRewardKind.RANKED_REWARD_WIN_MILESTONE);
+            // 6 胜锋芒称号允许装备至称号栏
+            var equipWinTitle = rankedStore.updateCosmetic(p1,
+                    com.game.proto.match.RankedCosmeticLoadout.newBuilder()
+                            .setEquippedTitleCode("s1_win_milestone_6").build());
+            assertThat(equipWinTitle.status()).isEqualTo(RankedStore.WriteStatus.OK);
+            assertThat(equipWinTitle.row().getEquippedTitleCode()).isEqualTo("s1_win_milestone_6");
 
-            // 2. 同一角色跨五种人数完成 12 场有效败局仍拿齐 3 件展示权益
+            // 2. 同一角色跨五种人数完成 12 场有效败局仍拿齐 3 件参与展示权益，且不误发 6 胜称号
             long pLoss = 20010L;
             int[] sizes = {1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2};
             for (int i = 0; i < 12; i++) {
@@ -130,6 +145,12 @@ class RankedParityTest {
             assertThat(profile.getCurrentSeason().getAllowedTeamSizesList()).containsExactly(1, 3);
             assertThat(profile.getCurrentSeason().getPrimaryTeamSizesList()).containsExactly(1, 3, 5);
             assertThat(profile.getCurrentSeason().getSpecialTeamSizesList()).containsExactly(2, 4);
+            assertThat(profile.getCurrentSeason().getTierQingfengCenti()).isEqualTo(152_000);
+            assertThat(profile.getCurrentSeason().getTierYunzhangCenti()).isEqualTo(160_000);
+            assertThat(profile.getCurrentSeason().getTierTianshuCenti()).isEqualTo(172_000);
+            assertThat(profile.getCurrentSeason().getTierWushuangCenti()).isEqualTo(185_000);
+            assertThat(profile.getCurrentSeason().getMilestoneWinMatches()).isEqualTo(6);
+            assertThat(profile.getPresetsList()).allSatisfy(p -> assertThat(p.getSkillIdsCount()).isEqualTo(4));
 
             // 3. 正式排位上下文 use_free_preset=false，娱乐轮换(物法易势/护卫救援) use_free_preset=true 且 season_id=0
             RankedMatchContext formalCtx = rankedStore.buildRankedContext(1, List.of(p1, p2), Map.of()).orElseThrow();
@@ -157,12 +178,13 @@ class RankedParityTest {
                     now::get).withRankedStore(rankedStore);
             rankedStore.ensureActiveSeason();
 
-            // 同分 184999（临界无双线之下 => 无榜首）：A 亮段更早应排第 1，B 排第 2
-            long pA = 30001L, pB = 30002L, pLate = 30003L, pOpp = 30004L;
+            // 同分 184999（临界无双线之下 => 无榜首）：A 亮段更早应排第 1，B 排第 2；另加一位云章 160000 校验 V2 云章起发永久徽章+称号
+            long pA = 30001L, pB = 30002L, pLate = 30003L, pOpp = 30004L, pYunzhang = 30005L;
             db.putRating(pA, 184_999L, 5);
             db.putRating(pB, 184_999L, 5);
             db.putRating(pLate, 150_000L, 0);
             db.putRating(pOpp, 150_000L, 0);
+            db.putRating(pYunzhang, 160_000L, 4);
             now.set(1_730_000_100_000L);
             rankedStore.recordBattleSettlement(new RankedStore.SettlementInput(
                     pA, 401L, 1, 1, RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED,
@@ -170,6 +192,10 @@ class RankedParityTest {
             now.set(1_730_000_200_000L);
             rankedStore.recordBattleSettlement(new RankedStore.SettlementInput(
                     pB, 402L, 1, 1, RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED,
+                    eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 0, 3, true, false, 0L, 101, 203));
+            now.set(1_730_000_250_000L);
+            rankedStore.recordBattleSettlement(new RankedStore.SettlementInput(
+                    pYunzhang, 404L, 1, 1, RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED,
                     eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 0, 3, true, false, 0L, 101, 203));
 
             // 进入 SETTLING：阻止新季前的 S1 新局，但截止前已成局（season_id=1）的迟到结算仍算旧季
@@ -215,6 +241,11 @@ class RankedParityTest {
             assertThat(profB.getHistoryList()).isEmpty();
             GetRankedProfileResponse profBHist = service.getProfile(pB, GetRankedProfileRequest.newBuilder().setIncludeHistory(true).build());
             assertThat(profBHist.getHistory(0).getFinalRank()).isEqualTo(2L);
+
+            GetRankedProfileResponse profYun = service.getProfile(pYunzhang, GetRankedProfileRequest.getDefaultInstance());
+            assertThat(profYun.getEntitlementsList())
+                    .extracting(r -> r.getItemCode())
+                    .containsExactlyInAnyOrder("s1_tier_badge_yunzhang", "s1_tier_title_yunzhang");
         }
     }
 

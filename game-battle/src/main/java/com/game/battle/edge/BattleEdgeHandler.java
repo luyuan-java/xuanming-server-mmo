@@ -21,6 +21,8 @@ import com.game.proto.StopWatchBattleRequest;
 import com.game.proto.StopWatchBattleResponse;
 import com.game.proto.SubmitBattleActionRequest;
 import com.game.proto.SubmitBattleActionResponse;
+import com.game.proto.SurrenderBattleRequest;
+import com.game.proto.SurrenderBattleResponse;
 import com.game.table.CommonErrorTip;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -414,6 +416,13 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
                     StopWatchBattleRequest req = StopWatchBattleRequest.parseFrom(body);
                     if(req.getBattleId()!=s.battleId()){s.forceClose(Disconnect.REPLACED);return;}
                     StopWatchBattleResponse resp = rooms.stopWatch(playerId, req);
+                    response = resp;
+                    businessError = resp.hasErrorMessage();
+                }
+                case SURRENDER_BATTLE -> {
+                    SurrenderBattleRequest req = SurrenderBattleRequest.parseFrom(body);
+                    if(req.getBattleId()!=s.battleId()){s.forceClose(Disconnect.REPLACED);return;}
+                    SurrenderBattleResponse resp = rooms.surrender(playerId, req);
                     response = resp;
                     businessError = resp.hasErrorMessage();
                 }

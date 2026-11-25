@@ -37,6 +37,7 @@ final class BattleContext {
 
     private final BattleData data;
     private final boolean pve;
+    private final boolean competitivePvp;
     private final BattleRandom rng;
     private final ClassSkillCombat classSkills;
     final ConfiguredBattle configured;
@@ -47,14 +48,20 @@ final class BattleContext {
     private final NavigableMap<Long, BattleSettlementData.Builder> settlements = new TreeMap<>(Long::compareUnsigned);
     /** uint32；正在收集 / 结算的回合号，从 1 开始（{@code engine.h:227}）。 */
     private int roundIndex = 1;
+    private int maxRounds = BattleConstants.DEFAULT_MAX_ROUNDS;
 
     /**
      * @param matchMode 请求里的 match_mode（uint32）；只有 4 / 5 算 PVE，其余一律非 PVE（{@code IsPveMatch}，{@code engine.cpp:1312-1315}）
      * @param seed      请求里的 seed（完整 uint64，{@code engine.cpp:70}）
      */
     BattleContext(BattleData data, int matchMode, long seed) {
+        this(data, matchMode, seed, false);
+    }
+
+    BattleContext(BattleData data, int matchMode, long seed, boolean competitivePvp) {
         this.data = data;
         this.pve = matchMode == BattleConstants.MATCH_MODE_PVE_SOLO || matchMode == BattleConstants.MATCH_MODE_PVE_TEAM;
+        this.competitivePvp = competitivePvp;
         this.rng = new BattleRandom(seed);
         this.classSkills = new ClassSkillCombat(data);
         this.configured = new ConfiguredBattle(this, new BuffEngine(this));
@@ -67,6 +74,59 @@ final class BattleContext {
 
     boolean isPve() {
         return pve;
+    }
+
+    boolean isCompetitivePvp() {
+        return competitivePvp;
+    }
+
+    int maxRounds() {
+        return maxRounds;
+    }
+
+    void setMaxRounds(int maxRounds) {
+        this.maxRounds = maxRounds;
+    }
+
+    int escalationStartRound() {
+        if (!competitivePvp || Integer.compareUnsigned(maxRounds, BattleConstants.ESCALATION_MIN_ROUND_LIMIT) < 0) {
+            return 0;
+        }
+        return maxRounds - BattleConstants.ESCALATION_TAIL_ROUNDS;
+    }
+
+    int escalationStacks() {
+        int start = escalationStartRound();
+        if (start == 0 || Integer.compareUnsigned(roundIndex, start) < 0) {
+            return 0;
+        }
+        return roundIndex - start + 1;
+    }
+
+    long escalationDamagePct() {
+        return 100L + Integer.toUnsignedLong(escalationStacks()) * BattleConstants.ESCALATION_STEP_PCT;
+    }
+
+    long escalationSupportPct() {
+        long penalty = Integer.toUnsignedLong(escalationStacks()) * BattleConstants.ESCALATION_STEP_PCT;
+        return penalty >= 100L - BattleConstants.ESCALATION_SUPPORT_FLOOR_PCT
+                ? BattleConstants.ESCALATION_SUPPORT_FLOOR_PCT
+                : 100L - penalty;
+    }
+
+    long landedHeal(BattleUnit target, double rawHeal) {
+        if (escalationStacks() > 0 && rawHeal > 0.0 && Double.isFinite(rawHeal)) {
+            rawHeal *= escalationSupportPct() / 100.0;
+        }
+        return target.landedHeal(rawHeal);
+    }
+
+    long applyHeal(BattleUnit target, double rawHeal) {
+        long healed = landedHeal(target, rawHeal);
+        if (healed != 0L) {
+            target.setHealth(target.health() + healed);
+        }
+        return healed;
     }
 
     BattleRandom rng() {

@@ -39,6 +39,9 @@ import com.game.proto.StopWatchBattleRequest;
 import com.game.proto.StopWatchBattleResponse;
 import com.game.proto.SubmitBattleActionRequest;
 import com.game.proto.SubmitBattleActionResponse;
+import com.game.proto.SurrenderBattleRequest;
+import com.game.proto.SurrenderBattleResponse;
+import com.game.proto.SurrenderVoteS2C;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.TurnResultS2C;
 import com.game.proto.contracts.kafka.BattleResultEvent;
@@ -231,7 +234,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         BattleStateS2C start = fullState(room);
         for (Map.Entry<Long, BattleRouting> entry : room.routingByPlayer.entrySet()) {
             long playerId = entry.getKey();
-            ViewerState view = BattleViews.forParticipant(start, playerId, engine.selfItems(playerId));
+            ViewerState view = BattleViews.forParticipant(start, playerId, engine.selfItems(playerId),
+                    engine.surrenderVoteForViewer(playerId));
             // 177 先于 143（R5、O1）：同一批交给出口，经 gate 时是一条 GatePush{message_batch}
             outbound.pushLobby(battleId, playerId, room.directOf(playerId), List.of(
                     outbound.announcement(Notify.BATTLE_ASSIGNED, assignments.get(playerId)),
@@ -871,7 +875,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         }
         BattleStateS2C full = fullState(room);
         ViewerState view = room.isParticipant(playerId)
-                ? BattleViews.forParticipant(full, playerId, room.engine.selfItems(playerId))
+                ? BattleViews.forParticipant(full, playerId, room.engine.selfItems(playerId),
+                        room.engine.surrenderVoteForViewer(playerId))
                 : BattleViews.forObserver(full);
         return view.state();
     }
@@ -928,6 +933,58 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         closeDirectOf(room, playerId, Disconnect.BATTLE_CLOSED);
         log.info("StopWatchBattle 完成 battle_id={} observer={}", Long.toUnsignedString(room.battleId), Long.toUnsignedString(playerId));
         return response.build();
+    }
+
+    @Override
+    public SurrenderBattleResponse surrender(long playerId, SurrenderBattleRequest request) {
+        scheduler.assertInLoop();
+        SurrenderBattleResponse.Builder response = SurrenderBattleResponse.newBuilder();
+        if (playerId == 0) {
+            return response.setErrorMessage(tip(PLAYER_NOT_FOUND_IN_SESSION)).build();
+        }
+        BattleRoom room = rooms.find(request.getBattleId());
+        if (room == null || !room.isParticipant(playerId)) {
+            return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
+        }
+        if (room.pendingCompletion != null) {
+            return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
+        }
+        TurnBattleEngine.SurrenderVoteResult voteResult = room.engine.submitSurrenderVote(playerId, request.getAgree());
+        if (voteResult.errorTip() != 0) {
+            return response.setErrorMessage(tip(voteResult.errorTip())).build();
+        }
+        response.setVoteState(voteResult.voteState());
+        SurrenderBattleResponse built = response.build();
+
+        // 仅同队推送投降表决进度，严格禁止向敌方与观众泄露队伍内部投票态。
+        OptionalInt teamOpt = room.engine.teamIndexOfPlayer(playerId);
+        if (teamOpt.isPresent()) {
+            int teamIndex = teamOpt.getAsInt();
+            SurrenderVoteS2C notify = SurrenderVoteS2C.newBuilder()
+                    .setBattleId(room.battleId)
+                    .setVoteState(voteResult.voteState())
+                    .build();
+            MessageContent frame = outbound.frame(Notify.SURRENDER_VOTE, notify);
+            for (long memberId : room.routingByPlayer.keySet()) {
+                OptionalInt memberTeam = room.engine.teamIndexOfPlayer(memberId);
+                if (memberTeam.isPresent() && memberTeam.getAsInt() == teamIndex) {
+                    outbound.pushBattleFrame(room.battleId, memberId, room.directOf(memberId), Notify.SURRENDER_VOTE, frame);
+                }
+            }
+        }
+
+        eBattleOutcome outcome = room.engine.outcome();
+        if (voteResult.voteState().getPassed() && outcome != eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
+            room.roundTimer.cancel();
+            if (room.requiresResultConfirmation) {
+                beginResultCommit(room, outcome, eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED, null,
+                        fullState(room), RoomEnd.FINISHED);
+            } else {
+                finishBattle(room, outcome, eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED);
+                eraseRoom(room, RoomEnd.FINISHED);
+            }
+        }
+        return built;
     }
 
     // ===================================================================================== 任意线程
@@ -1043,7 +1100,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     private void broadcastTurnResult(BattleRoom room, TurnResultS2C result) {
         BattleStateS2C full = result.getState();
         for (long playerId : room.routingByPlayer.keySet()) {
-            ViewerState view = BattleViews.forParticipant(full, playerId, room.engine.selfItems(playerId));
+            ViewerState view = BattleViews.forParticipant(full, playerId, room.engine.selfItems(playerId),
+                    room.engine.surrenderVoteForViewer(playerId));
             outbound.pushBattleFrame(room.battleId, playerId, room.directOf(playerId), Notify.TURN_RESULT,
                     outbound.frame(Notify.TURN_RESULT, view.toTurnResult(result)));
         }

@@ -28,7 +28,9 @@ public final class BattleMessageIds {
         /** 162 自动战斗开关 → {@code SetAutoBattleResponse}。 */
         SET_AUTO_BATTLE("SetAutoBattle"),
         /** 165 退出观战 → {@code StopWatchBattleResponse}。 */
-        STOP_WATCH_BATTLE("StopWatchBattle");
+        STOP_WATCH_BATTLE("StopWatchBattle"),
+        /** 479 PVP 延迟投降 / 表决 → {@code SurrenderBattleResponse}。 */
+        SURRENDER_BATTLE("SurrenderBattle");
 
         private final String method;
 
@@ -57,7 +59,9 @@ public final class BattleMessageIds {
         /** 158 {@code TurnResultS2C}：观众版回合结果。 */
         SPECTATE_TURN_RESULT("NotifySpectateTurnResult", PushCategory.BATTLE_FRAME),
         /** 166 {@code SpectateEndS2C}：观战结束。 */
-        SPECTATE_END("NotifySpectateEnd", PushCategory.BATTLE_FRAME);
+        SPECTATE_END("NotifySpectateEnd", PushCategory.BATTLE_FRAME),
+        /** 480 {@code SurrenderVoteS2C}：同队 PVP 投降投票进度推送（仅推送给同队成员）。 */
+        SURRENDER_VOTE("NotifySurrenderVote", PushCategory.BATTLE_FRAME);
 
         private final String method;
         private final PushCategory category;

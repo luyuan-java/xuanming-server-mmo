@@ -55,6 +55,8 @@ final class ConfiguredEffects {
         List<Integer> artifacts = new ArrayList<>();
         if (op == SHIELD && (source.isPet() || row.getHitLimit() == 0))
             value = battle.equipment.shield(source,receiver,value,hit,artifacts);
+        if (op == SHIELD && ctx.escalationStacks() > 0)
+            value *= ctx.escalationSupportPct() / 100.0;
         if (instant(op) && row.getTriggerEvent() == 0) {
             switch (op) {
                 case DAMAGE -> {
@@ -68,10 +70,14 @@ final class ConfiguredEffects {
                     if (!row.getRequiredTag().isEmpty() && battle.tagged(receiver,row.getRequiredTag())) amount *= 1 + row.getConditionalBonus();
                     Hit direct = hit.derived(hit.origin);
                     direct.critical = damage.critical();
+                    if (hit.primaryFocusBonus && receiver.actorId() == hit.primary) {
+                        amount *= (double) BattleConstants.PRIMARY_TARGET_FOCUS_NUM / (double) BattleConstants.PRIMARY_TARGET_FOCUS_DEN;
+                        direct.isPrimaryFocus = true;
+                    }
                     long dealt = battle.impact.damage(source,receiver,amount,skill.getDamageType(),direct,
                             hit.origin == MIRRORED ? BATTLE_HIT_MIRROR : BATTLE_HIT_NORMAL);
                     if (row.getSecondaryRatio() > 0 && dealt != 0 && source.isActive()) {
-                        long heal = source.applyHeal(toDouble(dealt)*row.getSecondaryRatio());
+                        long heal = ctx.applyHeal(source, toDouble(dealt)*row.getSecondaryRatio());
                         ctx.events().append(BATTLE_EVENT_HEAL,source.actorId(),source.actorId()).setValue(heal).setTargetHealthAfter(source.health());
                     }
                     return dealt != 0;

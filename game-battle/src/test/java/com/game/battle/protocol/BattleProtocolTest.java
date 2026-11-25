@@ -26,6 +26,7 @@ class BattleProtocolTest {
         assertThat(ids.id(Upstream.SUBMIT_BATTLE_ACTION)).isEqualTo(149);
         assertThat(ids.id(Upstream.SET_AUTO_BATTLE)).isEqualTo(162);
         assertThat(ids.id(Upstream.STOP_WATCH_BATTLE)).isEqualTo(165);
+        assertThat(ids.id(Upstream.SURRENDER_BATTLE)).isEqualTo(479);
         assertThat(ids.id(Notify.TURN_RESULT)).isEqualTo(139);
         assertThat(ids.id(Notify.BATTLE_START)).isEqualTo(143);
         assertThat(ids.id(Notify.BATTLE_END)).isEqualTo(150);
@@ -33,14 +34,17 @@ class BattleProtocolTest {
         assertThat(ids.id(Notify.SPECTATE_STATE)).isEqualTo(161);
         assertThat(ids.id(Notify.SPECTATE_END)).isEqualTo(166);
         assertThat(ids.id(Notify.BATTLE_ASSIGNED)).isEqualTo(177);
+        assertThat(ids.id(Notify.SURRENDER_VOTE)).isEqualTo(480);
     }
 
     @Test
-    void 白名单只有四条上行_Notify号与别的服务的号都不在内() {
+    void 白名单只有五条上行_Notify号与别的服务的号都不在内() {
         assertThat(ids.upstream(149)).contains(Upstream.SUBMIT_BATTLE_ACTION);
         assertThat(ids.upstream(140)).contains(Upstream.GET_BATTLE_STATE);
         assertThat(ids.upstream(162)).contains(Upstream.SET_AUTO_BATTLE);
         assertThat(ids.upstream(165)).contains(Upstream.STOP_WATCH_BATTLE);
+        assertThat(ids.upstream(479)).contains(Upstream.SURRENDER_BATTLE);
+        assertThat(ids.upstream(480)).as("NotifySurrenderVote 号").isEmpty();
         assertThat(ids.upstream(139)).as("Notify 号").isEmpty();
         assertThat(ids.upstream(177)).isEmpty();
         assertThat(ids.upstream(157)).isEmpty();

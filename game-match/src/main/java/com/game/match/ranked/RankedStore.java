@@ -8,6 +8,7 @@ import com.game.match.feature.pb.MatchRankedRewardRow;
 import com.game.match.feature.pb.MatchRankedSeasonRow;
 import com.game.pbmysql.PbMysql;
 import com.game.proto.BattleParticipationFact;
+import com.game.proto.BattleSettlementData;
 import com.game.proto.RankedMatchContext;
 import com.game.proto.RankedMemberLoadout;
 import com.game.proto.RankedPresetSelection;
@@ -221,7 +222,7 @@ public final class RankedStore {
                 if (!ownsCode(owned, RankedRewardKind.RANKED_REWARD_TALISMAN, loadout.getEquippedTalismanCode())
                         || !ownsCode(owned, RankedRewardKind.RANKED_REWARD_AVATAR_PATTERN, loadout.getEquippedAvatarPatternCode())
                         || !ownsCode(owned, RankedRewardKind.RANKED_REWARD_CARD_BACKGROUND, loadout.getEquippedCardBgCode())
-                        || !ownsCode(owned, RankedRewardKind.RANKED_REWARD_TIER_TITLE, loadout.getEquippedTitleCode())) {
+                        || !ownsTitleCode(owned, loadout.getEquippedTitleCode())) {
                     c.rollback();
                     return new PrefsWriteResult(WriteStatus.PRESET_INVALID, null, tables.ruleVersion());
                 }
@@ -307,6 +308,12 @@ public final class RankedStore {
                         bits |= 4;
                         unlocked.add(grantReward(c, in.playerId(), seasonId, RankedRewardKind.RANKED_REWARD_TALISMAN,
                                 rule.getMilestoneTalismanMatches(), season.getSeasonKey() + "_qingyun_talisman", now));
+                    }
+                    int winTarget = tables.winMilestoneMatches();
+                    if ((bits & 8) == 0 && winTarget > 0 && wins >= winTarget) {
+                        bits |= 8;
+                        unlocked.add(grantReward(c, in.playerId(), seasonId, RankedRewardKind.RANKED_REWARD_WIN_MILESTONE,
+                                winTarget, season.getSeasonKey() + "_win_milestone_" + winTarget, now));
                     }
                 }
                 MatchRankedPlayerSeasonRow nextProgress = prev.toBuilder()
@@ -399,6 +406,10 @@ public final class RankedStore {
         for (BattleParticipationFact fact : event.getParticipationFactsList()) {
             factsByPlayer.put(fact.getPlayerId(), fact);
         }
+        Map<Long, BattleSettlementData> settlementsByPlayer = new HashMap<>();
+        for (BattleSettlementData st : event.getSettlementsList()) {
+            settlementsByPlayer.put(st.getPlayerId(), st);
+        }
         java.util.Set<Long> fledSet = new java.util.HashSet<>(event.getFledPlayerIdsList());
         Map<Long, RankedPresetSelection> loadoutByPlayer = new HashMap<>();
         for (RankedMemberLoadout loadout : ctx.getMembersList()) {
@@ -430,10 +441,14 @@ public final class RankedStore {
             long afterRating = nextCenti.getOrDefault(playerId, beforeRating);
             long delta = afterRating - beforeRating;
             boolean fled = fledSet.contains(playerId);
-            boolean participated = factsByPlayer.containsKey(playerId)
-                    ? RankedTables.evaluateParticipation(factsByPlayer.get(playerId), fled)
-                    : !fled;
             int teamIndex = teamByPlayer.getOrDefault(playerId, 0);
+            boolean playerWon = event.getTotalRounds() != 0 && (
+                    (teamIndex == 0 && event.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                            || (teamIndex == 1 && event.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN));
+            boolean participated = (factsByPlayer.containsKey(playerId) || settlementsByPlayer.containsKey(playerId))
+                    ? RankedTables.evaluateParticipation(factsByPlayer.get(playerId),
+                            settlementsByPlayer.get(playerId), event.getTotalRounds(), playerWon, fled)
+                    : !fled;
             RankedPresetSelection presets = loadoutByPlayer.get(playerId);
             int charPresetId = presets != null ? presets.getCharacterPresetId() : rule.getDefaultCharacterPresetId();
             int petPresetId = presets != null ? presets.getPetPresetId() : rule.getDefaultPetPresetId();
@@ -474,6 +489,12 @@ public final class RankedStore {
                     bits |= 4;
                     unlocked.add(grantReward(c, playerId, seasonId, RankedRewardKind.RANKED_REWARD_TALISMAN,
                             rule.getMilestoneTalismanMatches(), season.getSeasonKey() + "_qingyun_talisman", nowMs));
+                }
+                int winTarget = tables.winMilestoneMatches();
+                if ((bits & 8) == 0 && winTarget > 0 && wins >= winTarget) {
+                    bits |= 8;
+                    unlocked.add(grantReward(c, playerId, seasonId, RankedRewardKind.RANKED_REWARD_WIN_MILESTONE,
+                            winTarget, season.getSeasonKey() + "_win_milestone_" + winTarget, nowMs));
                 }
             }
             MatchRankedPlayerSeasonRow nextProgress = prev.toBuilder()
@@ -662,8 +683,14 @@ public final class RankedStore {
                     long rankPos = i + 1L;
                     boolean isChamp = champId != 0L && row.getPlayerId() == champId;
                     RankedTier peakTier = tables.tierFor(row.getPeakRatingCenti(), true);
-                    if (peakTier == RankedTier.RANKED_TIER_TIANSHU || peakTier == RankedTier.RANKED_TIER_WUSHUANG) {
-                        String tierCode = peakTier == RankedTier.RANKED_TIER_WUSHUANG ? "wushuang" : "tianshu";
+                    if (peakTier == RankedTier.RANKED_TIER_YUNZHANG
+                            || peakTier == RankedTier.RANKED_TIER_TIANSHU
+                            || peakTier == RankedTier.RANKED_TIER_WUSHUANG) {
+                        String tierCode = switch (peakTier) {
+                            case RANKED_TIER_WUSHUANG -> "wushuang";
+                            case RANKED_TIER_TIANSHU -> "tianshu";
+                            default -> "yunzhang";
+                        };
                         grantReward(c, row.getPlayerId(), seasonId, RankedRewardKind.RANKED_REWARD_TIER_BADGE,
                                 peakTier.getNumber(), locked.getSeasonKey() + "_tier_badge_" + tierCode, now);
                         grantReward(c, row.getPlayerId(), seasonId, RankedRewardKind.RANKED_REWARD_TIER_TITLE,
@@ -789,6 +816,11 @@ public final class RankedStore {
                 .setUsesOwnProgression(true)
                 .addAllPrimaryTeamSizes(RankedTables.PRIMARY_TEAM_SIZES)
                 .addAllSpecialTeamSizes(RankedTables.SPECIAL_TEAM_SIZES)
+                .setTierQingfengCenti(rule.getTierQingfengCenti())
+                .setTierYunzhangCenti(rule.getTierYunzhangCenti())
+                .setTierTianshuCenti(rule.getTierTianshuCenti())
+                .setTierWushuangCenti(rule.getTierWushuangCenti())
+                .setMilestoneWinMatches(tables.winMilestoneMatches())
                 .build();
     }
 
@@ -1283,6 +1315,11 @@ public final class RankedStore {
                 .setRatingCenti(ratingCenti)
                 .setPeakRatingCenti(0L)
                 .build();
+    }
+
+    private static boolean ownsTitleCode(List<MatchRankedRewardRow> owned, String code) {
+        return ownsCode(owned, RankedRewardKind.RANKED_REWARD_TIER_TITLE, code)
+                || ownsCode(owned, RankedRewardKind.RANKED_REWARD_WIN_MILESTONE, code);
     }
 
     private static boolean ownsCode(List<MatchRankedRewardRow> owned, RankedRewardKind kind, String code) {

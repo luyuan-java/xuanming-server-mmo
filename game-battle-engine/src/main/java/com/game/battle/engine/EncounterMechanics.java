@@ -163,6 +163,11 @@ final class EncounterMechanics {
         return rounds == null ? 0 : rounds.size();
     }
 
+    boolean hadManualActionInRound(long playerId, int roundIndex) {
+        TreeSet<Integer> rounds = manualActionRoundsByPlayer.get(playerId);
+        return rounds != null && rounds.contains(roundIndex);
+    }
+
     void recordEffectiveContribution(BattleUnit actor) {
         long owner = ownerPlayerIdOf(actor);
         if (owner != 0L) {
@@ -499,7 +504,7 @@ final class EncounterMechanics {
                     ctx.events().beginGroup();
                     long pct = Integer.compareUnsigned(battleDifficulty, 2) >= 0 ? 10L : 8L;
                     long rawHeal = Math.max(1L, Long.divideUnsigned(boss.maxHealth() * pct, 100L));
-                    long healed = boss.applyHeal(Unsigned.toDouble(rawHeal) * received);
+                    long healed = ctx.applyHeal(boss, Unsigned.toDouble(rawHeal) * received);
                     recordTrialMonsterHeal(source, boss, healed);
                     ctx.events().append(eBattleEventType.BATTLE_EVENT_HEAL, source.actorId(), boss.actorId())
                             .setValue(healed)

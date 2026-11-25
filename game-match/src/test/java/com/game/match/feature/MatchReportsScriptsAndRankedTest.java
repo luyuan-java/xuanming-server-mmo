@@ -336,7 +336,7 @@ class MatchReportsScriptsAndRankedTest {
             assertThat(unowned.getErrorMessage().getId())
                     .isEqualTo(MatchErrorTip.match_error.kMatchRankedPresetInvalid_VALUE);
 
-            // 4. 连续结算 4 场有效排位：首场亮段、第 4 场解锁头像纹样里程碑并可查战果与佩戴
+            // 4. 连续结算 4 场有效排位：首场 1516 亮段为初试、第 2 场 1532 破冰升青锋、第 4 场解锁头像纹样里程碑并可查战果与佩戴
             for (long bid = 7001; bid <= 7004; bid++) {
                 now.addAndGet(60_000L);
                 var settled = store.recordBattleSettlement(new RankedStore.SettlementInput(
@@ -345,6 +345,10 @@ class MatchReportsScriptsAndRankedTest {
                 if (bid == 7001) {
                     assertThat(settled.getNewlyQualified()).isTrue();
                     assertThat(settled.getTierBefore()).isEqualTo(RankedTier.RANKED_TIER_UNSPECIFIED);
+                    assertThat(settled.getTierAfter()).isEqualTo(RankedTier.RANKED_TIER_CHUSHI);
+                }
+                if (bid == 7002) {
+                    assertThat(settled.getTierBefore()).isEqualTo(RankedTier.RANKED_TIER_CHUSHI);
                     assertThat(settled.getTierAfter()).isEqualTo(RankedTier.RANKED_TIER_QINGFENG);
                 }
                 if (bid == 7004) {
@@ -365,7 +369,7 @@ class MatchReportsScriptsAndRankedTest {
             assertThat(latest.getErrorMessage().getId()).isZero();
             assertThat(latest.getResult().getBattleId()).isEqualTo(7004L);
             assertThat(latest.getResult().getRatingAfterCenti()).isEqualTo(156_400L);
-            assertThat(latest.getResult().getTierAfter()).isEqualTo(RankedTier.RANKED_TIER_YUNZHANG);
+            assertThat(latest.getResult().getTierAfter()).isEqualTo(RankedTier.RANKED_TIER_QINGFENG);
         }
     }
 }

@@ -108,7 +108,7 @@ final class AutoClassSkillSelector {
     private long healGain(BattleUnit actor, SkillTable skill, int rank, List<BattleUnit> targets) {
         long total = 0;
         for (BattleUnit target : targets) {
-            total = addSaturated(total, target.landedHeal(ctx.classSkillHealAmount(actor, skill, rank, target)));
+            total = addSaturated(total, ctx.landedHeal(target, ctx.classSkillHealAmount(actor, skill, rank, target)));
         }
         return total;
     }

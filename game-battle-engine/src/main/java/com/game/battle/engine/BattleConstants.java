@@ -27,6 +27,8 @@ public final class BattleConstants {
     public static final int MATCH_MODE_PVE_TEAM = 5;
     /** 物法易势 5V5（镜像 {@code MatchMode.MATCH_MODE_POLARITY_5V5}）。 */
     public static final int MATCH_MODE_POLARITY_5V5 = 8;
+    /** 跨服战队锦标赛（镜像 {@code MatchMode.MATCH_MODE_SEASON_TOURNAMENT}）。 */
+    public static final int MATCH_MODE_SEASON_TOURNAMENT = 11;
 
     // ---- 首领试炼 / 轮换玩法类型（镜像 DungeonTable.boss_trial_kind） ----
 
@@ -61,6 +63,23 @@ public final class BattleConstants {
     public static final int POLARITY_DEFAULT_MAX_ROUNDS = 16;
     public static final long POLARITY_DAMAGE_NUM = 115L;
     public static final long POLARITY_DAMAGE_DEN = 100L;
+
+    // ---- 竞技 PVP 凝锋、战意渐盛与延迟投降（V2，镜像 turn_battle_constants.h） ----
+
+    /** 竞技 PVP 多目标直接伤害技能目标不满时，显式选定主目标额外伤害（×120/100）。 */
+    public static final long PRIMARY_TARGET_FOCUS_NUM = 120L;
+    public static final long PRIMARY_TARGET_FOCUS_DEN = 100L;
+    /** 战意渐盛触发条件：回合上限 >= 10 时于最后 7 回合启动（maxRounds - 7，含）。 */
+    public static final int ESCALATION_MIN_ROUND_LIMIT = 10;
+    public static final int ESCALATION_TAIL_ROUNDS = 7;
+    /** 战意渐盛每层伤害 +10%、治疗与新护盾 -10%（最低保留 20%）。 */
+    public static final long ESCALATION_STEP_PCT = 10L;
+    public static final long ESCALATION_SUPPORT_FLOOR_PCT = 20L;
+    /** PVP 投降第 5 回合解锁、否决冷却 3 回合、超时冷却 2 回合、连续 2 回合未手动挂机不计入表决门槛。 */
+    public static final int PVP_SURRENDER_UNLOCK_ROUND = 5;
+    public static final int PVP_SURRENDER_REJECT_COOLDOWN_ROUNDS = 3;
+    public static final int PVP_SURRENDER_EXPIRE_COOLDOWN_ROUNDS = 2;
+    public static final int PVP_SURRENDER_IDLE_EXCLUDE_ROUNDS = 2;
 
     // ---- 队伍上限与自动战斗 ----
 

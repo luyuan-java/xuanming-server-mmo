@@ -17,6 +17,8 @@ import com.game.proto.StopWatchBattleRequest;
 import com.game.proto.StopWatchBattleResponse;
 import com.game.proto.SubmitBattleActionRequest;
 import com.game.proto.SubmitBattleActionResponse;
+import com.game.proto.SurrenderBattleRequest;
+import com.game.proto.SurrenderBattleResponse;
 import com.game.proto.eBattleTicketRole;
 import java.util.OptionalInt;
 
@@ -168,6 +170,9 @@ public interface BattleRoomService {
      * 不推 166。
      */
     StopWatchBattleResponse stopWatch(long playerId, StopWatchBattleRequest request);
+
+    /** 479 PVP 延迟投降 / 表决（第 5 回合解锁；表决状态仅同队可见）。 */
+    SurrenderBattleResponse surrender(long playerId, SurrenderBattleRequest request);
 
     // ---------------------------------------------------------------- 任意线程
 

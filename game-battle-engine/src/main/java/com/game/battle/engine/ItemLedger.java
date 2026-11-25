@@ -141,7 +141,7 @@ final class ItemLedger {
         }
         consumed.setCount(consumed.getCount() + 1);
 
-        long healed = row.getBattleHealHp() != 0 ? target.applyHeal(Unsigned.toDouble(row.getBattleHealHp())) : 0;
+        long healed = row.getBattleHealHp() != 0 ? ctx.applyHeal(target, Unsigned.toDouble(row.getBattleHealHp())) : 0;
         long restoredMana = row.getBattleHealMp() != 0 ? target.restoreMana(row.getBattleHealMp()) : 0;
 
         BattleEventItem.Builder event = ctx.events().append(eBattleEventType.BATTLE_EVENT_ITEM, actor.actorId(), target.actorId())

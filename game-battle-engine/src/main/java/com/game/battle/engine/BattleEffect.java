@@ -33,6 +33,8 @@ final class BattleEffect {
         long primary, paidHealth, paidMana, actualDamage, instigator;
         double scale = 1;
         boolean critical;
+        boolean primaryFocusBonus;
+        boolean isPrimaryFocus;
 
         Hit(int skill, int rank, int origin, long primary) {
             this.skill = skill;

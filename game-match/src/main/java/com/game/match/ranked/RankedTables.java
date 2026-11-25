@@ -3,6 +3,7 @@ package com.game.match.ranked;
 import com.game.match.support.MatchModes;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.BattleParticipationFact;
+import com.game.proto.BattleSettlementData;
 import com.game.proto.RankedMatchContext;
 import com.game.proto.TrialBattleContext;
 import com.game.proto.match.RankedPresetView;
@@ -272,7 +273,10 @@ public final class RankedTables {
         return configFingerprint;
     }
 
-    /** 判定单名玩家在排位中是否满足有效参赛（与 C++/Go 逐条一致）。 */
+    public static final int RANKED_MIN_ROUNDS_FOR_LOSS = 3;
+    public static final int RANKED_MIN_MANUAL_ROUNDS_FOR_LOSS = 2;
+
+    /** 判定单名玩家在排位中是否满足有效参赛（与 C++/Go evaluateRankedParticipation 逐条一致）。 */
     public static boolean evaluateParticipation(BattleParticipationFact fact, boolean fled) {
         if (fled || fact == null) {
             return false;
@@ -284,6 +288,29 @@ public final class RankedTables {
             return true;
         }
         return fact.getEnteredRoom() && fact.getNoActionOpportunity();
+    }
+
+    public static boolean evaluateParticipation(BattleParticipationFact fact, BattleSettlementData settlement,
+                                                int totalRounds, boolean playerWon, boolean fled) {
+        if (totalRounds == 0 || fled || (settlement != null && settlement.getFled())) {
+            return false;
+        }
+        boolean noActionOpportunity = fact != null && fact.getEnteredRoom() && fact.getNoActionOpportunity();
+        boolean baseParticipated = fact != null
+                ? evaluateParticipation(fact, false)
+                : (settlement != null && settlement.getParticipated());
+        if (!baseParticipated) {
+            return false;
+        }
+        if (playerWon || noActionOpportunity) {
+            return true;
+        }
+        if (settlement == null) {
+            return false;
+        }
+        return Integer.compareUnsigned(totalRounds, RANKED_MIN_ROUNDS_FOR_LOSS) >= 0
+                && Integer.compareUnsigned(settlement.getManualActionRounds(), RANKED_MIN_MANUAL_ROUNDS_FOR_LOSS) >= 0
+                && settlement.getEffectiveCombatContribution();
     }
 
     private static String computeConfigFingerprint(RankedRuleTable rule, List<RankedPresetTable> presetsByIdAsc) {
@@ -333,6 +360,10 @@ public final class RankedTables {
 
     public int ruleVersion() {
         return rule.getRuleVersion();
+    }
+
+    public int winMilestoneMatches() {
+        return rule.getMilestoneWinMatches() > 0 ? rule.getMilestoneWinMatches() : 6;
     }
 
     public List<RankedPresetView> presetViews() {
