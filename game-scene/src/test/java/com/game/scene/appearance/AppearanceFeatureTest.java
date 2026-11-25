@@ -136,12 +136,23 @@ class AppearanceFeatureTest {
         assertThat(infoResp.getErrorMessage().getId()).isZero();
         assertThat(infoResp.getInfo().getOwnedCardCount()).isEqualTo(1);
         assertThat(infoResp.getInfo().getMallPriceFen()).isEqualTo(1000L);
-        assertThat(infoResp.getInfo().getAppearancesCount()).isEqualTo(8);
-        assertThat(infoResp.getInfo().getAppearancesList())
-                .allSatisfy(entry -> assertThat(entry.getCardUnlockable()).isTrue());
+        assertThat(infoResp.getInfo().getAppearancesCount()).isEqualTo(9);
+        assertThat(infoResp.getInfo().getAppearancesList().stream()
+                .filter(e -> e.getCardUnlockable()).count()).isEqualTo(8);
+        assertThat(infoResp.getInfo().getAppearancesList().stream()
+                .filter(e -> !e.getCardUnlockable()).map(e -> e.getAppearanceId()).toList())
+                .containsExactly("20_star_formation_master_girl");
         assertThat(infoResp.getInfo().getAppearancesList().stream()
                 .filter(e -> e.getOwned()).map(e -> e.getAppearanceId()).toList())
                 .containsExactly("00_reference_topright_boy");
+
+        // 玩法专属形象 20_star_formation_master_girl（card_unlockable=0）不可用形象卡买断
+        SwitchAppearanceResponse exclusive = SwitchAppearanceResponse.parseFrom(
+                call("SwitchAppearance", SwitchAppearanceRequest.newBuilder()
+                        .setClientRequestId(5000L).setAppearanceId("20_star_formation_master_girl").build())
+                        .getSerializedMessage());
+        assertThat(exclusive.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NOT_CARD_UNLOCKABLE);
+        assertThat(exclusive.getInfo().getOwnedCardCount()).isZero(); // 失败不返回快照，卡仍保留 1 张
 
         SwitchAppearanceRequest req = SwitchAppearanceRequest.newBuilder()
                 .setClientRequestId(5001L)
@@ -332,5 +343,30 @@ class AppearanceFeatureTest {
         assertThat(done.getEpilogueTitle()).isEqualTo("灯下三碗面");
         assertThat(grantedNotify.getInfo().getSeriesProgress(1).getOwnedCount()).isZero();
         assertThat(grantedNotify.getInfo().getSeriesProgress(2).getOwnedCount()).isZero();
+    }
+
+    @Test
+    void 九名现役角色人物志配置完整且无已退场人物残留_半残行规则校验拦截() {
+        assertThat(AppearanceTables.biographyFieldsValid("", "", "", "", "")).isTrue();
+        assertThat(AppearanceTables.biographyFieldsValid("   ", "\t", "", "\n", "")).isTrue();
+        assertThat(AppearanceTables.biographyFieldsValid("陆照禾", "阿禾", "小传", "第四只碗", "正文")).isTrue();
+        assertThat(AppearanceTables.biographyFieldsValid("霜见雪", "", "小传", "霜阶扫雪", "正文")).isTrue();
+        assertThat(AppearanceTables.biographyFieldsValid("霜见雪", "", "", "霜阶扫雪", "正文")).isFalse();
+        assertThat(AppearanceTables.biographyFieldsValid("", "小名", "", "", "")).isFalse();
+        assertThat(AppearanceTables.biographyFieldsValid("星璇", "", "小传", "十八星印", "   ")).isFalse();
+
+        var rows = config.characterAppearance().all();
+        assertThat(rows).hasSize(9);
+        assertThat(rows).allSatisfy(row -> {
+            assertThat(AppearanceTables.biographyFieldsValid(
+                    row.getArchiveName(), row.getNickname(), row.getBiographySummary(),
+                    row.getStoryTitle(), row.getStoryBody())).isTrue();
+            assertThat(row.getArchiveName()).isNotBlank();
+            assertThat(row.getBiographySummary()).isNotBlank();
+            assertThat(row.getStoryTitle()).isNotBlank();
+            assertThat(row.getStoryBody()).isNotBlank();
+            assertThat(row.getBiographySummary()).doesNotContain("闻砚生");
+            assertThat(row.getStoryBody()).doesNotContain("闻砚生");
+        });
     }
 }

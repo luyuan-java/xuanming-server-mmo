@@ -96,6 +96,10 @@ public final class AppearanceTables {
             if (row.getAppearanceId().isBlank()) {
                 throw new IllegalStateException("CharacterAppearance.appearance_id 不能为空: id=" + row.getId());
             }
+            if (!biographyFieldsValid(row.getArchiveName(), row.getNickname(), row.getBiographySummary(),
+                    row.getStoryTitle(), row.getStoryBody())) {
+                throw new IllegalStateException("CharacterAppearance 人物志字段不完整: id=" + row.getId());
+            }
             Entry entry = new Entry(
                     row.getId(),
                     row.getId() - 1,
@@ -128,6 +132,23 @@ public final class AppearanceTables {
         entries.sort(Comparator.comparingInt(Entry::sortOrder).thenComparingInt(Entry::configId));
         return new AppearanceTables(parsedRule, List.copyOf(entries), Map.copyOf(byAppearanceId),
                 Map.copyOf(allById), List.copyOf(seriesList));
+    }
+
+    /**
+     * 人物志五列契约校验（与 C++ {@code player_appearance::BiographyFieldsValid} 同口径）：
+     * 五列全空合法（无人物志）；只要任一列非空白，四项核心字段（档案名、小传、篇名、正文）必须同时非空白。
+     */
+    public static boolean biographyFieldsValid(String archiveName, String nickname, String biographySummary,
+                                               String storyTitle, String storyBody) {
+        boolean hasArchive = archiveName != null && !archiveName.isBlank();
+        boolean hasNickname = nickname != null && !nickname.isBlank();
+        boolean hasSummary = biographySummary != null && !biographySummary.isBlank();
+        boolean hasTitle = storyTitle != null && !storyTitle.isBlank();
+        boolean hasBody = storyBody != null && !storyBody.isBlank();
+        if (!hasArchive && !hasNickname && !hasSummary && !hasTitle && !hasBody) {
+            return true;
+        }
+        return hasArchive && hasSummary && hasTitle && hasBody;
     }
 
     private static void validateRule(Rule rule, ConfigTables tables) {

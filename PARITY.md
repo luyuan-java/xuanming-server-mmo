@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-24 易容人物志 9 名现役角色全量收口与配表单一真相源迁移（`CharacterAppearance` 10–14 列）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| `CharacterAppearance` 新增 5 个 `common` 人物志列（`archive_name=10`、`nickname=11`、`biography_summary=12`、`story_title=13`、`story_body=14`），补齐全部 9 名现役角色（陆照禾、霜见雪、许炽、苏青莲、林知音、桑听雨、祝停云、沈澄、星璇含 `id=11` `card_unlockable=0`），替换祝停云故事中已退场角色名「闻砚生」为「沈澄」；零网络协议膨胀，双端启动/热更强校验“五列全空或四项核心非空白”；客户端 `AppearanceBiographyCatalog` 改为按原始 `appearance_id` 动态直查 `CharacterAppearanceTableManager`（不缓存行引用、热更即生效） | `data/schema/characterappearance_table.proto`、`data/CharacterAppearance.xlsx`、`tools/scripts/appearance_switch_xlsx_patch.py`、`dev.bat export`（manifest v63，`schema_digest=13bf1de1313bf7e0`，68 表）、`appearance_rules.h`（`BiographyFieldsValid`）、`player_appearance.cpp`（`ValidateTables`）、`player_appearance_test.cpp`；验证：`test_cpp_no_raw_pointer_member.py` 13/13 OK、`bin/scene.exe --validate-tables generated/tables` 68 表 PASS、`bag_test.exe` `PlayerAppearance*`/`PlayerTrialJournal*` 19/19 PASS；设计文档见 `xuanming-server-mmo-cpp/docs/design/character-appearance-switch.md` §7 | `ContractSync` 全量同步（`characterappearance_table.proto`、`characterappearance.pb`、`manifest.json`、`SOURCE.properties`）且 `--check` 通过；`AppearanceTables.biographyFieldsValid` 与 C++ 同口径强校验；`AppearanceFeatureTest` 升级为 9 名现役（含 `20_star_formation_master_girl` `card_unlockable=0` 拦截）与全表人物志完整性/零「闻砚生」断言；验证：`game-table`/`game-scene` `clean` 编译 + `AppearanceFeatureTest` **4/4 PASS** | 已对齐 |
+
 ## 2026-11-24 《五行奇谈》核心玩法 V1 定稿收口（正式会武自养 vs 免费预设解耦、规模开关、困难首通门禁、首宠灵狐与客户端核心门面）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |

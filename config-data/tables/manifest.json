@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
-  "schema_digest": "2d08ed0321d964c6",
-  "version": 62,
-  "content_digest": "901fb10be23b0bcf0149c930c03dc7c796f845aa36b95999e7662e5e091426d8",
-  "generated_at": "2026-11-24T14:40:56Z",
+  "schema_digest": "13bf1de1313bf7e0",
+  "version": 63,
+  "content_digest": "f369dc1eed1922d39c80e42321ba8e4db7cbb7339800685cad0425689d09ead9",
+  "generated_at": "2026-11-25T02:32:03Z",
   "source_rev": {
-    "commit": "5676d207a6ab960edff7ce7e54bbff6d93a796c1",
+    "commit": "3759fdad760acba3fa45f634376a166490bbda34",
     "data_dirty": true
   },
   "table_count": 68,
@@ -392,21 +392,21 @@
       "rows": 9,
       "source": {
         "file": "CharacterAppearance.xlsx",
-        "size": 6332,
-        "sha256": "7fa13b87382c007732340f68f893ead60cc39546e2a46c130378a5bc7275307f"
+        "size": 10119,
+        "sha256": "5386d93839308e7a5ffc189f6e5859a87d4c2457e7b4351895467eef68e0538f"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "characterappearance.json",
-          "size": 2317,
-          "sha256": "50332de23f5421eef308f3052ec6cbf1934c334cdcfb330c1be6861ebdf822a9"
+          "size": 8839,
+          "sha256": "7792dcb676b78e535bb1586b918187c7200d47c7650729e1f459df0aaf47e849"
         },
         {
           "kind": "binary",
           "file": "characterappearance.pb",
-          "size": 824,
-          "sha256": "7dcc3db01ba3d4f220d8d20de54b305ec80e565d16953d4245a98f09c733208d"
+          "size": 6508,
+          "sha256": "1379d1c9cca24423b80566e0ad2b0c72f3636d1b993378be12931bd7c93bb026"
         }
       ]
     },
