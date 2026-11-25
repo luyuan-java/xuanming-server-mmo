@@ -9,6 +9,7 @@ import com.game.proto.BattleActorState;
 import com.game.proto.BattleBuffEntry;
 import com.game.proto.BattleItemEntry;
 import com.game.proto.BattleMonsterDefeat;
+import com.game.proto.BattleParticipationFact;
 import com.game.proto.BattlePetSnapshot;
 import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.BattleSettlementData;
@@ -77,6 +78,11 @@ public final class TurnBattleEngine {
     private eBattleOutcome outcome = eBattleOutcome.BATTLE_OUTCOME_ONGOING;
     /** 最近一回合的出手序（含回合中途被跳过者）；下一次结算前保持不变（{@code engine.h:62-65}）。 */
     private List<Long> lastActionOrder = List.of();
+    /** 论剑排位参与事实（有序容器保确定性，不消耗 RNG）。 */
+    private final TreeSet<Long> enteredPlayers = new TreeSet<>(Long::compareUnsigned);
+    private final TreeSet<Long> manualActionPlayers = new TreeSet<>(Long::compareUnsigned);
+    private final TreeSet<Long> explicitAutoPlayers = new TreeSet<>(Long::compareUnsigned);
+    private final TreeSet<Long> hadOperableTurnPlayers = new TreeSet<>(Long::compareUnsigned);
 
     private TurnBattleEngine(CreateBattleRequest request, BattleData data) {
         this.request = request;
@@ -280,14 +286,21 @@ public final class TurnBattleEngine {
      */
     private BattleStart.Rejected initPets() {
         long petIndex = 0;
+        boolean ranked = isRankedBattle();
         for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
             for (BattlePetSnapshot pet : snapshot.getPetsList()) {
-                if (pet.getPetId() == 0) {
+                boolean competitiveTemp = pet.getCompetitiveTemporary();
+                if (competitiveTemp && !ranked) {
+                    return new BattleStart.Rejected(InitRejection.PET_ID_ZERO,
+                            "非排位对局禁止临时竞技宝宝: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                    + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
+                }
+                if (pet.getPetId() == 0 && !(competitiveTemp && ranked)) {
                     return new BattleStart.Rejected(InitRejection.PET_ID_ZERO,
                             "宝宝 pet_id 为 0: battle_id=" + Long.toUnsignedString(request.getBattleId())
                                     + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
                 }
-                if (petAlreadyJoined(pet.getPetId())) {
+                if (pet.getPetId() != 0 && petAlreadyJoined(pet.getPetId())) {
                     return new BattleStart.Rejected(InitRejection.DUPLICATE_PET,
                             "CreateBattle 同一只宝宝重复参战: battle_id=" + Long.toUnsignedString(request.getBattleId())
                                     + " pet_id=" + Long.toUnsignedString(pet.getPetId()));
@@ -305,6 +318,7 @@ public final class TurnBattleEngine {
                 BattleActorState.Builder actor = BattleActorState.newBuilder()
                         .setActorId(actorId)
                         .setPetId(pet.getPetId())
+                        .setCompetitiveTemporary(competitiveTemp)
                         .setPetCultivation(pet.getPetCultivation())
                         .setActorType(eBattleActorType.BATTLE_ACTOR_TYPE_PET)
                         .setTeamIndex(snapshot.getTeamIndex())
@@ -460,6 +474,68 @@ public final class TurnBattleEngine {
         return request.getBattleId();
     }
 
+    /** 是否为论剑排位对局（{@code ranked_context.season_id != 0}）。 */
+    public boolean isRankedBattle() {
+        return request.hasRankedContext() && request.getRankedContext().getSeasonId() != 0;
+    }
+
+    /** 标记参战者已建立战斗直连或成功拉取房间状态。 */
+    public void markPlayerEntered(long playerId) {
+        if (playerId != 0L) {
+            enteredPlayers.add(playerId);
+        }
+    }
+
+    /** 组装该玩家的排位有效参与事实（纯读）。 */
+    public BattleParticipationFact buildParticipationFact(long playerId) {
+        BattleUnit actor = ctx.findActor(playerId);
+        boolean entered = enteredPlayers.contains(playerId);
+        boolean manual = manualActionPlayers.contains(playerId);
+        boolean explicitAuto = explicitAutoPlayers.contains(playerId);
+        boolean noOpportunity = actor != null && !actor.fled() && !hadOperableTurnPlayers.contains(playerId);
+        return BattleParticipationFact.newBuilder()
+                .setPlayerId(playerId)
+                .setEnteredRoom(entered)
+                .setManualActionAccepted(manual)
+                .setExplicitAutoEnabled(explicitAuto)
+                .setNoActionOpportunity(noOpportunity)
+                .build();
+    }
+
+    /** 判定该玩家在排位中是否满足有效参赛口径（与 C++ / Go 逐条一致）。 */
+    public boolean didPlayerParticipate(long playerId) {
+        BattleUnit actor = ctx.findActor(playerId);
+        if (actor == null || !actor.isPlayer() || actor.fled()) {
+            return false;
+        }
+        if (manualActionPlayers.contains(playerId)) {
+            return true;
+        }
+        if (enteredPlayers.contains(playerId) && explicitAutoPlayers.contains(playerId)) {
+            return true;
+        }
+        return enteredPlayers.contains(playerId) && !hadOperableTurnPlayers.contains(playerId);
+    }
+
+    private boolean isPlayerHardControlled(BattleUnit actor) {
+        return ctx.actorHasBuffOfType(actor, BattleConstants.BUFF_TYPE_STUN)
+                || ctx.actorHasBuffOfType(actor, BattleConstants.BUFF_TYPE_FREEZE)
+                || ctx.configured.hasState(actor, BattleEffect.FREEZE)
+                || ctx.configured.hasState(actor, BattleEffect.SLEEP)
+                || ctx.configured.hasState(actor, BattleEffect.CONFUSION);
+    }
+
+    public static long splitMix64(long x) {
+        x += 0x9E3779B97F4A7C15L;
+        x = (x ^ (x >>> 30)) * 0xBF58476D1CE4E5B9L;
+        x = (x ^ (x >>> 27)) * 0x94D049BB133111EBL;
+        return x ^ (x >>> 31);
+    }
+
+    public static long rankedTurnTieKey(long seed, int roundIndex, long actorId) {
+        return splitMix64(seed ^ splitMix64(Integer.toUnsignedLong(roundIndex)) ^ splitMix64(actorId));
+    }
+
     /**
      * 零副作用的提交预检（{@code ValidateAction}，{@code engine.cpp:333-346}；规格 §2.2）：已结束 → 1005；单位不存在或不是玩家 → 1005；
      * 已死或已逃 → 1009；其余返回校验链结果。与 {@link #submitAction} 的接受条件逐条同源：{@code == 1000} 等价于这次提交会被收下。
@@ -477,6 +553,8 @@ public final class TurnBattleEngine {
     public boolean submitOwnedAction(long owner, long actorId, BattleAction action) {
         if (validateOwnedAction(owner,actorId,action) != ActionChecks.SUCCESS) return false;
         pendingActions.put(actorId,action);
+        manualActionPlayers.add(owner);
+        enteredPlayers.add(owner);
         return allPlayersReady();
     }
 
@@ -507,6 +585,8 @@ public final class TurnBattleEngine {
         if (actor != null && actor.isPlayer() && actor.isActive()
                 && checks.checkActionPrerequisites(actor, action) == ActionChecks.SUCCESS) {
             pendingActions.put(actorId, action);
+            manualActionPlayers.add(actorId);
+            enteredPlayers.add(actorId);
         }
         return allPlayersReady();
     }
@@ -527,6 +607,9 @@ public final class TurnBattleEngine {
             return ActionChecks.ENTITY_INVALID;
         }
         actor.setAuto(enabled);
+        if (enabled) {
+            explicitAutoPlayers.add(actorId);
+        }
         for (BattleUnit pet : ctx.units()) {
             if (pet.isPet() && pet.ownerPlayerId() == actor.actorId() && pet.state().getSkillRanksCount() != 0) pet.setAuto(enabled);
         }
@@ -589,6 +672,9 @@ public final class TurnBattleEngine {
             BattleAction action = pendingActions.get(actorId);
             if (action == null) {
                 continue;
+            }
+            if (actor.isPlayer() && !isPlayerHardControlled(actor)) {
+                hadOperableTurnPlayers.add(actor.actorId());
             }
             // 每个行动一组：该行动产生的全部事件（含降级普攻 / 死亡 / buff）共用 group_id；即使最终没有事件也占组号
             ctx.events().beginGroup();
@@ -801,11 +887,21 @@ public final class TurnBattleEngine {
                 ordered.add(unit);
             }
         }
+        boolean ranked = isRankedBattle();
+        long seed = request.getSeed();
+        int roundIdx = ctx.roundIndex();
         ordered.sort((left, right) -> {
             int initiative = Integer.compare(actionInitiative(right), actionInitiative(left));
             if (initiative != 0) return initiative;
             int speed = Long.compareUnsigned(ctx.effectiveSpeed(right), ctx.effectiveSpeed(left));
-            return speed != 0 ? speed : Long.compareUnsigned(left.actorId(), right.actorId());
+            if (speed != 0) return speed;
+            if (ranked) {
+                long leftTie = rankedTurnTieKey(seed, roundIdx, left.actorId());
+                long rightTie = rankedTurnTieKey(seed, roundIdx, right.actorId());
+                int tieCmp = Long.compareUnsigned(leftTie, rightTie);
+                if (tieCmp != 0) return tieCmp;
+            }
+            return Long.compareUnsigned(left.actorId(), right.actorId());
         });
         List<Long> order = new ArrayList<>(ordered.size());
         for (BattleUnit unit : ordered) {
@@ -1179,7 +1275,7 @@ public final class TurnBattleEngine {
         } else if (sideBWiped) {
             outcome = eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN;
         } else if (Integer.compareUnsigned(ctx.roundIndex(), maxRounds) >= 0) {
-            outcome = eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
+            outcome = isRankedBattle() ? eBattleOutcome.BATTLE_OUTCOME_DRAW : eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
         }
     }
 
@@ -1276,7 +1372,7 @@ public final class TurnBattleEngine {
                 .setFled(actor.fled());
 
         for (BattleUnit other : ctx.units()) {
-            if (!other.isPet() || other.ownerPlayerId() != playerId) {
+            if (!other.isPet() || other.ownerPlayerId() != playerId || other.competitiveTemporary()) {
                 continue;
             }
             settlement.addPetsBuilder()
@@ -1284,6 +1380,13 @@ public final class TurnBattleEngine {
                     .setHealth(other.health())
                     .setMana(other.mana())
                     .setIsDead(other.isDead());
+        }
+
+        if (isRankedBattle()) {
+            settlement.setCompetitiveRanked(true)
+                    .setSeasonId(request.getRankedContext().getSeasonId())
+                    .setRankedRuleVersion(request.getRankedContext().getRuleVersion())
+                    .setParticipated(didPlayerParticipate(playerId));
         }
 
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && actor.teamIndex() == 0

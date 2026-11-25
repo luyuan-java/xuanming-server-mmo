@@ -225,7 +225,8 @@ public final class PlayerBattleService implements BattleHooks {
         if (!readyForNextBattle(player, battleId)) {
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.NOT_READY);
         }
-        if (player.attributes().health() == 0) {
+        boolean isRanked = request.hasRankedContext() && request.getRankedContext().getSeasonId() != 0;
+        if (!isRanked && player.attributes().health() == 0) {
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.DEAD);
         }
         BattleRouting route = routing.of(player);
@@ -235,9 +236,31 @@ public final class PlayerBattleService implements BattleHooks {
                     Long.toUnsignedString(battleId));
             return prepareRejected(SESSION_NOT_FOUND, Prepare.NOT_HERE);
         }
-        BattlePlayerSnapshot snapshot = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route,
-                        world == null ? 0 : world.activeSeasonId()).toBuilder()
-                .setPetCaptureSlots(pets.availableCaptureSlots(player)).build();
+        BattlePlayerSnapshot snapshot;
+        if (isRanked) {
+            com.game.proto.RankedPresetSelection playerPresets = null;
+            for (var m : request.getRankedContext().getMembersList()) {
+                if (m.getPlayerId() == playerId && m.hasPresets()) {
+                    playerPresets = m.getPresets();
+                    break;
+                }
+            }
+            var rankedSnap = RankedPresetRules.buildCompetitiveSnapshot(
+                    player, tables, request.getRankedContext(),
+                    playerPresets,
+                    route, clock.epochMillis() / 1000L);
+            if (rankedSnap.isEmpty()) {
+                log.warn("备战被拒：论剑排位预设或规则指纹校验失败 player={} battle_id={} season={} rule_version={}",
+                        Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
+                        request.getRankedContext().getSeasonId(), request.getRankedContext().getRuleVersion());
+                return prepareRejected(INVALID_PARAMETER, Prepare.INVALID);
+            }
+            snapshot = rankedSnap.get();
+        } else {
+            snapshot = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route,
+                            world == null ? 0 : world.activeSeasonId()).toBuilder()
+                    .setPetCaptureSlots(pets.availableCaptureSlots(player)).build();
+        }
         // 快照构建后，在冻结提交点再次校验原工作代次截止。
         if(Long.compareUnsigned(prepareDeadline,clock.epochMillis())<=0)return prepareRejected(INVALID_PARAMETER,Prepare.INVALID);
         BattleFreeze freeze = new BattleFreeze(battleId, request.getBattleNodeId(), Phase.PREPARING, deadline, prepareDeadline, true);
@@ -1083,11 +1106,20 @@ public final class PlayerBattleService implements BattleHooks {
             writeOff(player, battleId, trigger);
             if (result.outcome() == Outcome.APPLIED) {
                 // 184（有宝宝条目时，应用里已推）→ 150，同一条 gate 链路 FIFO；账本命中的不推（B9）
-                world.sendTo(player, push(battleEndId, BattleEndS2C.newBuilder()
+                var recorded = player.battleResults().findByBattleId(battleId);
+                BattleEndS2C.Builder endPush = BattleEndS2C.newBuilder()
                         .setBattleId(battleId)
                         .setOutcome(settlement.getOutcome())
-                        .setSettlement(settlement)
-                        .build()));
+                        .setSettlement(settlement);
+                if (recorded != null) {
+                    endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded());
+                    if (recorded.getSeasonId() != 0) {
+                        endPush.setSeasonId(recorded.getSeasonId());
+                    }
+                } else if (settlement.getSeasonId() != 0) {
+                    endPush.setSeasonId(settlement.getSeasonId());
+                }
+                world.sendTo(player, push(battleEndId, endPush.build()));
             }
         }
         return result;
@@ -1202,8 +1234,20 @@ public final class PlayerBattleService implements BattleHooks {
                 var notification=inboxNotifications.get(player);
                 if(notification!=null&&notification.getBattleId()==decision.getRequestId()){
                     inboxNotifications.remove(player);
-                    world.sendTo(player,push(battleEndId,BattleEndS2C.newBuilder().setBattleId(notification.getBattleId())
-                            .setOutcome(notification.getOutcome()).setSettlement(notification).build()));
+                    var recorded = player.battleResults().findByBattleId(notification.getBattleId());
+                    BattleEndS2C.Builder endPush = BattleEndS2C.newBuilder()
+                            .setBattleId(notification.getBattleId())
+                            .setOutcome(notification.getOutcome())
+                            .setSettlement(notification);
+                    if (recorded != null) {
+                        endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded());
+                        if (recorded.getSeasonId() != 0) {
+                            endPush.setSeasonId(recorded.getSeasonId());
+                        }
+                    } else if (notification.getSeasonId() != 0) {
+                        endPush.setSeasonId(notification.getSeasonId());
+                    }
+                    world.sendTo(player, push(battleEndId, endPush.build()));
                 }
             }
         }

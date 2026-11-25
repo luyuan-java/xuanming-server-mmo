@@ -79,6 +79,19 @@ public final class PlayerBattleResults {
         return true;
     }
 
+    /** 按 battle_id 查一条内存中的近期战果（只读；找不到返回 null）。 */
+    public BattleResultEntryState findByBattleId(long battleId) {
+        if (battleId == 0L) {
+            return null;
+        }
+        for (BattleResultEntryState entry : entries) {
+            if (entry.getBattleId() == battleId) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
     /** 过滤未确认落盘的 {@code hidden} 局，按 {@code result_seq} 降序返回至多 {@value #MAX_ENTRIES} 条客户端视图。 */
     public List<PlayerBattleResult> visibleNewestFirst(Set<Long> hidden) {
         List<BattleResultEntryState> visible = new ArrayList<>(entries.size());

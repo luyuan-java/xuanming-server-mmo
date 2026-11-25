@@ -1,0 +1,201 @@
+package com.game.match.ranked;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.game.match.feature.pb.MatchRankedSeasonRow;
+import com.game.match.matcher.Tolerance;
+import com.game.match.metrics.MatchMetrics;
+import com.game.match.rating.RatingStore;
+import com.game.match.rating.RatingTestDatabase;
+import com.game.match.support.MatchModes;
+import com.game.proto.BattleParticipationFact;
+import com.game.proto.RankedMatchContext;
+import com.game.proto.RankedMemberLoadout;
+import com.game.proto.RankedPresetSelection;
+import com.game.proto.contracts.kafka.BattleResultEvent;
+import com.game.proto.contracts.kafka.BattleResultTeam;
+import com.game.proto.eBattleOutcome;
+import com.game.proto.match.GetRankedProfileRequest;
+import com.game.proto.match.GetRankedProfileResponse;
+import com.game.proto.match.RankedBattleSettlementView;
+import com.game.proto.match.RankedMatchRatingStatus;
+import com.game.proto.match.RankedRewardKind;
+import com.game.proto.match.RankedSeasonState;
+import com.game.proto.match.RankedTier;
+import com.game.table.ConfigTables;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.Test;
+
+/** 论剑排位 V1 Java 侧双端对账回归（分差硬封顶、1540→1556 跨段、12 败局 3 件展示权益、临界分/同分排序/无榜首/跨季重放/崩溃恢复）。 */
+class RankedParityTest {
+
+    private static final ConfigTables CONFIG = ConfigTables.load(Path.of("../config-data/tables"));
+    private static final RankedTables TABLES = RankedTables.from(CONFIG);
+
+    private static BattleResultEvent rankedBattle(long battleId, int seasonId, int teamSize,
+                                                  long playerA, long playerB, eBattleOutcome outcome,
+                                                  boolean aParticipated, boolean bParticipated) {
+        RankedPresetSelection defSel = RankedPresetSelection.newBuilder()
+                .setCharacterPresetId(101).setPetPresetId(203).build();
+        return BattleResultEvent.newBuilder()
+                .setBattleId(battleId)
+                .setMatchMode(MatchModes.PVP_TEAM)
+                .setBattleConfigId(5)
+                .setOutcome(outcome)
+                .setTotalRounds(4)
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(playerA))
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(playerB))
+                .setRankedContext(RankedMatchContext.newBuilder()
+                        .setSeasonId(seasonId)
+                        .setRuleVersion(1)
+                        .setConfigFingerprint(TABLES.configFingerprint())
+                        .setTeamSize(teamSize)
+                        .addMembers(RankedMemberLoadout.newBuilder().setPlayerId(playerA).setPresets(defSel))
+                        .addMembers(RankedMemberLoadout.newBuilder().setPlayerId(playerB).setPresets(defSel)))
+                .addParticipationFacts(BattleParticipationFact.newBuilder()
+                        .setPlayerId(playerA).setEnteredRoom(aParticipated).setManualActionAccepted(aParticipated))
+                .addParticipationFacts(BattleParticipationFact.newBuilder()
+                        .setPlayerId(playerB).setEnteredRoom(bParticipated).setManualActionAccepted(bParticipated))
+                .build();
+    }
+
+    @Test
+    void 久等不越300分与1540跨段1556及12场跨规模败局拿齐3件展示权益() throws Exception {
+        assertThat(Tolerance.rankedHardCapCenti(0)).isEqualTo(10_000L);
+        assertThat(Tolerance.rankedHardCapCenti(30)).isEqualTo(20_000L);
+        assertThat(Tolerance.rankedHardCapCenti(90)).isEqualTo(30_000L);
+        assertThat(Tolerance.rankedHardCapCenti(600)).isEqualTo(30_000L);
+
+        try (RatingTestDatabase db = RatingTestDatabase.h2()) {
+            AtomicLong now = new AtomicLong(1_730_000_000_000L);
+            RankedStore rankedStore = new RankedStore(db.dataSource, TABLES, now::get);
+            RatingStore ratingStore = new RatingStore(
+                    RatingStore.connections(db.dataSource), cfg -> 0,
+                    new MatchMetrics(new SimpleMeterRegistry(), new com.game.match.metrics.MetricLabels(id -> true)),
+                    now::get).withRankedStore(rankedStore);
+            rankedStore.ensureActiveSeason();
+
+            // 1. 1540 -> 1556 跨段（青锋 -> 云章）
+            long p1 = 20001L, p2 = 20002L;
+            db.putRating(p1, 154_000L, 7);
+            db.putRating(p2, 154_000L, 7);
+            // 先让 p1 在本季已亮段 7 场
+            for (int i = 0; i < 7; i++) {
+                rankedStore.recordBattleSettlement(new RankedStore.SettlementInput(
+                        p1, 100L + i, 1, 2, RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED,
+                        eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN, 0, 3, true, false, 0L, 101, 203));
+            }
+            BattleResultEvent winEvent = rankedBattle(200L, 1, 2, p1, p2, eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, true, true);
+            assertThat(ratingStore.apply(winEvent).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+            // 重放只计一次
+            assertThat(ratingStore.apply(winEvent).outcome()).isEqualTo(RatingStore.Outcome.DUPLICATE);
+
+            RankedBattleSettlementView view = rankedStore.getBattleResult(p1, 200L).orElseThrow();
+            assertThat(view.getRatingBeforeCenti()).isEqualTo(154_000L);
+            assertThat(view.getRatingAfterCenti()).isEqualTo(155_600L);
+            assertThat(view.getRatingDeltaCenti()).isEqualTo(1_600L);
+            assertThat(view.getTierBefore()).isEqualTo(RankedTier.RANKED_TIER_QINGFENG);
+            assertThat(view.getTierAfter()).isEqualTo(RankedTier.RANKED_TIER_YUNZHANG);
+            assertThat(view.getSeasonValidMatchesAfter()).isEqualTo(8);
+            assertThat(view.getNewlyUnlockedRewardsList())
+                    .extracting(r -> r.getKind())
+                    .containsExactly(RankedRewardKind.RANKED_REWARD_CARD_BACKGROUND);
+
+            // 2. 同一角色跨五种人数完成 12 场有效败局仍拿齐 3 件展示权益
+            long pLoss = 20010L;
+            int[] sizes = {1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2};
+            for (int i = 0; i < 12; i++) {
+                long opp = 21000L + i;
+                BattleResultEvent loss = rankedBattle(300L + i, 1, sizes[i], pLoss, opp,
+                        eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN, true, true);
+                assertThat(ratingStore.apply(loss).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+            }
+            RankedService service = new RankedService(rankedStore, TABLES, now::get);
+            GetRankedProfileResponse profile = service.getProfile(pLoss, GetRankedProfileRequest.getDefaultInstance());
+            assertThat(profile.getCurrentProgress().getValidMatches()).isEqualTo(12);
+            assertThat(profile.getCurrentProgress().getLosses()).isEqualTo(12);
+            assertThat(profile.getEntitlementsList())
+                    .extracting(r -> r.getKind())
+                    .containsExactlyInAnyOrder(
+                            RankedRewardKind.RANKED_REWARD_AVATAR_PATTERN,
+                            RankedRewardKind.RANKED_REWARD_CARD_BACKGROUND,
+                            RankedRewardKind.RANKED_REWARD_TALISMAN);
+            assertThat(profile.getCosmeticLoadout().getEquippedTalismanCode()).isEqualTo("s1_qingyun_talisman");
+        }
+    }
+
+    @Test
+    void 封榜临界分_同分排序_无榜首_旧季迟到_崩溃恢复与未参赛回归不上新季榜() throws Exception {
+        try (RatingTestDatabase db = RatingTestDatabase.h2()) {
+            AtomicLong now = new AtomicLong(1_730_000_000_000L);
+            RankedStore rankedStore = new RankedStore(db.dataSource, TABLES, now::get);
+            RatingStore ratingStore = new RatingStore(
+                    RatingStore.connections(db.dataSource), cfg -> 0,
+                    new MatchMetrics(new SimpleMeterRegistry(), new com.game.match.metrics.MetricLabels(id -> true)),
+                    now::get).withRankedStore(rankedStore);
+            rankedStore.ensureActiveSeason();
+
+            // 同分 184999（临界无双线之下 => 无榜首）：A 亮段更早应排第 1，B 排第 2
+            long pA = 30001L, pB = 30002L, pLate = 30003L, pOpp = 30004L;
+            db.putRating(pA, 184_999L, 5);
+            db.putRating(pB, 184_999L, 5);
+            db.putRating(pLate, 150_000L, 0);
+            db.putRating(pOpp, 150_000L, 0);
+            now.set(1_730_000_100_000L);
+            rankedStore.recordBattleSettlement(new RankedStore.SettlementInput(
+                    pA, 401L, 1, 1, RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED,
+                    eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 0, 3, true, false, 0L, 101, 203));
+            now.set(1_730_000_200_000L);
+            rankedStore.recordBattleSettlement(new RankedStore.SettlementInput(
+                    pB, 402L, 1, 1, RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED,
+                    eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 0, 3, true, false, 0L, 101, 203));
+
+            // 进入 SETTLING：阻止新季前的 S1 新局，但截止前已成局（season_id=1）的迟到结算仍算旧季
+            MatchRankedSeasonRow settling = rankedStore.beginSeasonRollover(1);
+            assertThat(settling.getState()).isEqualTo(RankedSeasonState.RANKED_SEASON_STATE_SETTLING_VALUE);
+            assertThat(rankedStore.buildRankedContext(1, List.of(pA, pB), Map.of())).isEmpty();
+
+            BattleResultEvent lateS1 = rankedBattle(403L, 1, 1, pLate, pOpp, eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, true, true);
+            assertThat(ratingStore.apply(lateS1).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+            assertThat(rankedStore.getBattleResult(pLate, 403L).orElseThrow().getSeasonId()).isEqualTo(1);
+
+            // 崩溃恢复封榜并开启 S2（freezeHook 恰好执行一次）
+            AtomicInteger freezeCalls = new AtomicInteger();
+            MatchRankedSeasonRow s2 = rankedStore.recoverSeasonRollover(
+                    Map.of(pA, "甲", pB, "乙"),
+                    season -> freezeCalls.incrementAndGet());
+            assertThat(freezeCalls.get()).isEqualTo(1);
+            assertThat(s2.getSeasonId()).isEqualTo(2);
+            assertThat(s2.getSeasonKey()).isEqualTo("s2");
+            assertThat(s2.getState()).isEqualTo(RankedSeasonState.RANKED_SEASON_STATE_ACTIVE_VALUE);
+
+            // 重复调用恢复幂等：不再建 S3、不再调封榜
+            MatchRankedSeasonRow s2Again = rankedStore.recoverSeasonRollover(
+                    Map.of(pA, "甲", pB, "乙"),
+                    season -> freezeCalls.incrementAndGet());
+            assertThat(s2Again.getSeasonId()).isEqualTo(2);
+            assertThat(freezeCalls.get()).isEqualTo(1);
+
+            // 核验 S1 历史：无榜首（184999 < 185000）、同分 A 第 1 / B 第 2；pA 在 S2 沿用 184999 分但 qualified=false（未参赛不上新季榜）
+            RankedService service = new RankedService(rankedStore, TABLES, now::get);
+            GetRankedProfileResponse profA = service.getProfile(pA, GetRankedProfileRequest.newBuilder().setIncludeHistory(true).build());
+            assertThat(profA.getCurrentSeason().getSeasonId()).isEqualTo(2);
+            assertThat(profA.getCurrentProgress().getRatingCenti()).isEqualTo(184_999L);
+            assertThat(profA.getCurrentProgress().getQualified()).isFalse();
+            assertThat(profA.getPastSeasonsList()).hasSize(1);
+            assertThat(profA.getPastSeasons(0).getChampionPlayerId()).isZero();
+            assertThat(profA.getPastSeasons(0).getRankBoardSealed()).isTrue();
+            assertThat(profA.getHistoryList()).hasSize(1);
+            assertThat(profA.getHistory(0).getFinalRank()).isEqualTo(1L);
+            assertThat(profA.getHistory(0).getChampionAwarded()).isFalse();
+
+            GetRankedProfileResponse profB = service.getProfile(pB, GetRankedProfileRequest.newBuilder().setIncludeHistory(true).build());
+            assertThat(profB.getHistory(0).getFinalRank()).isEqualTo(2L);
+        }
+    }
+}

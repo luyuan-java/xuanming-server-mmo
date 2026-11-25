@@ -123,6 +123,11 @@ public final class BattleSettlementService {
         if(player.battle().applying())throw new IllegalStateException("战斗Inbox结算重入");
         player.battle().setApplying(true);
         try{
+            if (settlement.getCompetitiveRanked()) {
+                // 论剑排位零资产侵入：不动气血/法力/宠物/背包/金币/经验/任务，仅原子累计材料自选额度、赛季进度与近期战果。
+                recordBattleResult(player, settlement, 0L, Map.of(), Map.of());
+                return Result.APPLIED;
+            }
             long now=currency.nowSeconds(),gold=settlement.getGoldGain();
             int goldTip=gold>0?currency.checkAdd(player,Wallet.GOLD,gold,now):0;
             // 产出封禁是明确跳过该奖励的业务决定；冻结、溢出等仍须整笔延后，不能丢掉应补发的金币。
@@ -250,6 +255,22 @@ public final class BattleSettlementService {
             log.error("战斗结算账本损坏，结算延后（等 GM 修复） player={} battle_id={} 原因={}", Long.toUnsignedString(playerId),
                     Long.toUnsignedString(battleId), ledger.invalidReason());
             return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
+        }
+        if (settlement.getCompetitiveRanked()) {
+            // 论剑排位零资产侵入：跳过宠物/金币/气血法力/消耗/掉落/击杀，只记材料自选额度、赛季进度、近期战果与结算账本。
+            try {
+                step("近期战果", player, battleId, () -> recordBattleResult(player, settlement, 0L, Map.of(), Map.of()));
+            } finally {
+                long evicted = ledger.record(battleId, clock.epochMillis());
+                if (evicted != 0) {
+                    metrics.ledgerEvicted();
+                    log.error("战斗结算账本满 {}，淘汰最旧项 player={} evicted={} battle_id={}",
+                            BattleLedger.CAPACITY, Long.toUnsignedString(playerId), Long.toUnsignedString(evicted),
+                            Long.toUnsignedString(battleId));
+                }
+            }
+            world.requestSave(player);
+            return Result.APPLIED;
         }
         var captured = pets.prepareCapturedPets(player, settlement.getCapturedPetTableIdsList());
         if (captured.tip() != 0) return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);

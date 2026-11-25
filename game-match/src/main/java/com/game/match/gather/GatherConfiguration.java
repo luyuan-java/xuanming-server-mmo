@@ -60,9 +60,12 @@ public class GatherConfiguration {
             ScenePreparer scenes,NodeCalls<BattleNodeService> calls,PlacementStore placements,TicketStore tickets,Compensation compensation,
             MatchMetrics metrics,MatchProperties props,
             org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global,
-            org.springframework.beans.factory.ObjectProvider<com.game.match.script.BattleScriptResolver> scriptResolver){
+            org.springframework.beans.factory.ObjectProvider<com.game.match.script.BattleScriptResolver> scriptResolver,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.ranked.RankedStore> rankedStore){
         return gatherPipeline(ids,nodes,clock,hooks,ratings,scenes,calls,placements,tickets,compensation,metrics,props)
-                .withGlobal(global.getIfAvailable()).withBattleScriptResolver(scriptResolver.getIfAvailable());}
+                .withGlobal(global.getIfAvailable())
+                .withBattleScriptResolver(scriptResolver.getIfAvailable())
+                .withRankedStore(rankedStore.getIfAvailable());}
 
     @Bean
     public GatherLauncher gatherLauncher(GatherPipeline gatherPipeline, MatchMetrics metrics, MatchProperties props) {

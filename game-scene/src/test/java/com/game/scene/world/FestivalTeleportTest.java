@@ -86,10 +86,6 @@ class FestivalTeleportTest {
         Vec3 dock = new Vec3(44.4375, 59.34375, 0.05);
         assertThat(yuexi.world.teleportWithinScene(yuexi.player, dock, null, TEAM_REGROUP)).isEqualTo(TELEPORTED);
         assertThat(yuexi.player.position()).isEqualTo(new Vec3(dock.x(), dock.y(), 0));
-
-        Fixture legacy = enter(3, CurrentMapNavigation.load(root, "village"));
-        assertThat(legacy.world.teleportWithinScene(legacy.player, ocean, null, ADMIN)).isEqualTo(TELEPORTED);
-        assertThat(legacy.player.position()).isEqualTo(ocean);
     }
 
     private record Fixture(SceneWorld world, ScenePlayer player, RecordingSink sink) { }

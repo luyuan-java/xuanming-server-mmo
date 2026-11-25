@@ -17,6 +17,9 @@ public final class MatchModes {
     public static final int PVE_SOLO = MatchMode.MATCH_MODE_PVE_SOLO_VALUE;
     public static final int PVE_TEAM = MatchMode.MATCH_MODE_PVE_TEAM_VALUE;
     public static final int PVP_CHALLENGE = MatchMode.MATCH_MODE_PVP_CHALLENGE_VALUE;
+    public static final int PVP_TEAM = MatchMode.MATCH_MODE_PVP_TEAM_VALUE;
+    public static final int POLARITY_5V5 = MatchMode.MATCH_MODE_POLARITY_5V5_VALUE;
+    public static final int SEASON_TOURNAMENT = MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE;
 
     /** 5V5 一局的人数。 */
     public static final int FIVE_V_FIVE_PLAYERS = 10;
@@ -31,7 +34,7 @@ public final class MatchModes {
      * （157 回 16002「该匹配模式未开放」）。PVE_TEAM 另要看该副本配没配组队人数（没配回 16003，判定先于 16002）。
      */
     public static boolean joinable(int mode) {
-        return mode == FIVE_V_FIVE || mode == ONE_V_ONE || mode == PVE_SOLO || mode == PVE_TEAM;
+        return mode == FIVE_V_FIVE || mode == ONE_V_ONE || mode == PVE_SOLO || mode == PVE_TEAM || mode == PVP_TEAM;
     }
 
     /**
@@ -54,20 +57,25 @@ public final class MatchModes {
         return 0;
     }
 
-    /** PVE人数档只有这一条规则：0用副本上限，其余须处于1..上限；uint32高半区不会变成负数放行。 */
+    /** PVE人数档：0用副本上限，其余须处于1..上限；PVP_TEAM：0按1V1（每侧1人共2人），1..5按每侧人数×2（共2..10人）；uint32高半区不会变成负数放行。 */
     public static int requestedPlayers(int mode,int maximum,int requested){
+        if(mode==PVP_TEAM){
+            int perSide=requested==0?1:requested;
+            return Integer.compareUnsigned(perSide,1)>=0&&Integer.compareUnsigned(perSide,com.game.api.match.MatchBudgets.MAX_TEAM_SIZE)<=0
+                    ? perSide*2 : 0;
+        }
         if(mode!=PVE_TEAM)return requiredPlayers(mode,maximum);
         if(maximum<1||maximum>com.game.api.match.MatchBudgets.MAX_TEAM_SIZE)return 0;
         return requested==0?maximum:Integer.compareUnsigned(requested,maximum)<=0?requested:0;
     }
 
-    /** 评分模式（只有 1V1 与 5V5）：凑单看评分容差、对局结果入账 Elo。PVE、切磋、活动一律不计分。 */
+    /** 评分模式（1V1、5V5、论剑 PVP_TEAM）：凑单看评分容差、对局结果入账 Elo。PVE、切磋、活动一律不计分。 */
     public static boolean rated(int mode) {
-        return mode == ONE_V_ONE || mode == FIVE_V_FIVE;
+        return mode == ONE_V_ONE || mode == FIVE_V_FIVE || mode == PVP_TEAM;
     }
 
-    /** 走队列凑单的模式（1V1、5V5、PVE_TEAM）。PVE_SOLO 不入队（建票即 matched、立即 gather）。 */
+    /** 走队列凑单的模式（1V1、5V5、PVE_TEAM、PVP_TEAM）。PVE_SOLO 不入队（建票即 matched、立即 gather）。 */
     public static boolean queued(int mode) {
-        return mode == ONE_V_ONE || mode == FIVE_V_FIVE || mode == PVE_TEAM;
+        return mode == ONE_V_ONE || mode == FIVE_V_FIVE || mode == PVE_TEAM || mode == PVP_TEAM;
     }
 }

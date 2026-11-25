@@ -46,6 +46,13 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
         if(!MessageDigest.isEqual(old.get().getPayloadDigest().toByteArray(),digest(event)))throw new SQLException("同对局重复评分内容不同");
         return true;
     }
+    /** 论剑排位赛季榜使用的独立 source_epoch 基址（与存量 epoch=1 永久榜隔离）。 */
+    public static final long RANKED_SOURCE_EPOCH_BASE = 10_000L;
+
+    public static long rankedSourceEpoch(int seasonId) {
+        return RANKED_SOURCE_EPOCH_BASE + Integer.toUnsignedLong(seasonId);
+    }
+
     @Override public void append(Connection c,BattleResultEvent event,Map<Long,Long> next,long stamp)throws SQLException{
         var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build();db.insertIgnore(c,key);
         var guard=db.findOneByPkForUpdate(c,key).orElseThrow();
@@ -58,6 +65,41 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
         db.insert(c,GlobalRankOutboxRow.newBuilder().setSourceEpoch(1).setSourceCursor(cursor).setRequestId(event.getBattleId())
                 .setEntries(ByteString.copyFrom(NetworkProbes.bytes(request.build()))).setPayloadDigest(ByteString.copyFrom(digest(event))).build());
         db.updateByPk(c,guard.toBuilder().setProducedCursor(cursor).build());
+    }
+
+    /** 论剑排位赛季投榜：仅写入本季已亮段（qualified=true）玩家，未参赛回归号绝不上新季榜。 */
+    @Override public void appendRanked(Connection c,BattleResultEvent event,
+                                       com.game.match.ranked.RankedStore.SeasonCommitResult commit,long stamp)throws SQLException {
+        if (commit == null || commit.qualifiedScores().isEmpty()) {
+            return;
+        }
+        long epoch = rankedSourceEpoch(commit.seasonId());
+        var key = GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build();
+        db.insertIgnore(c, key);
+        var guard = db.findOneByPkForUpdate(c, key).orElseThrow();
+        if (guard.getStopped()) {
+            throw new SQLException("排位赛季榜来源代次已停止 season=" + commit.seasonId());
+        }
+        long cursor = guard.getProducedCursor() + 1;
+        var request = SubmitRankScoresRequest.newBuilder()
+                .setGeneration(commit.rankGeneration())
+                .setSourceEpoch(epoch)
+                .setSourceCursor(cursor)
+                .setRequestId(event.getBattleId())
+                .setMode(RankSubmitMode.RANK_SUBMIT_SET);
+        commit.qualifiedScores().keySet().stream().sorted(Long::compareUnsigned).forEach(player ->
+                request.addEntries(RankScoreInput.newBuilder()
+                        .setEntityId(player)
+                        .setScore(commit.qualifiedScores().get(player))
+                        .setAchievedMs(stamp)));
+        db.insert(c, GlobalRankOutboxRow.newBuilder()
+                .setSourceEpoch(epoch)
+                .setSourceCursor(cursor)
+                .setRequestId(event.getBattleId())
+                .setEntries(ByteString.copyFrom(NetworkProbes.bytes(request.build())))
+                .setPayloadDigest(ByteString.copyFrom(digest(event)))
+                .build());
+        db.updateByPk(c, guard.toBuilder().setProducedCursor(cursor).build());
     }
     public void start(){timer.scheduleWithFixedDelay(()->{try{publish();}catch(Exception e){log.warn("评级投榜等待恢复，未推进源游标: {}",e.getClass().getSimpleName());}},0,2,TimeUnit.SECONDS);}
     public void publish()throws Exception{if(quiesced||!publication.tryLock())return;try{publishOwned();}finally{publication.unlock();}}
@@ -92,6 +134,93 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
             }catch(SQLException|RuntimeException failure){try{c.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
         }
     }
+    /** 停止指定排位赛季的排行榜源写屏障并返回最终 produced_cursor。 */
+    public long stopRankedSeasonSource(int seasonId) throws SQLException {
+        long epoch = rankedSourceEpoch(seasonId);
+        try (var c = source.getConnection()) {
+            c.setAutoCommit(false);
+            try {
+                com.game.common.player.PlayerRouteAuthority.requireMeta(c, 3, true);
+                var key = GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build();
+                db.insertIgnore(c, key);
+                var row = db.findOneByPkForUpdate(c, key).orElseThrow();
+                db.updateByPk(c, row.toBuilder().setStopped(true).build());
+                c.commit();
+                return row.getProducedCursor();
+            } catch (Exception e) {
+                c.rollback();
+                throw e;
+            }
+        }
+    }
+
+    /** 推送指定论剑赛季的全部待发排位榜 outbox 批次（含首开赛季榜代次）。 */
+    public void publishRankedSeason(int seasonId, String seasonKey, long rankGeneration) throws Exception {
+        long epoch = rankedSourceEpoch(seasonId);
+        GlobalRankSourceRow guard;
+        try (var c = source.getConnection()) {
+            guard = db.findOneByPk(c, GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build()).orElse(null);
+        }
+        if (guard == null) {
+            return;
+        }
+        long board = guard.getBoardId(), committed = guard.getCommittedCursor();
+        if (board == 0) {
+            var request = OpenRankGenerationRequest.newBuilder()
+                    .setBoard(RankBoardKey.newBuilder()
+                            .setBoardType(RankBoardType.RANK_BOARD_TYPE_MATCH_PVP_TEAM_VALUE)
+                            .setScope(RankScope.RANK_SCOPE_GLOBAL)
+                            .setPeriod(seasonKey)
+                            .setGeneration(rankGeneration))
+                    .setProducer("match")
+                    .setSourceEpoch(epoch)
+                    .setRequestId(epoch)
+                    .build();
+            var response = call(s -> s.openRankGeneration(sign(RankAdminService.OPEN_METHOD, request)));
+            if (response.getErrorMessage().getId() != 0 || response.getBoardId() == 0) {
+                throw new IllegalStateException("排位赛季榜代次打开被拒 season=" + seasonId);
+            }
+            board = response.getBoardId();
+            mutate("UPDATE match_global_rank_source SET board_id=? WHERE source_epoch=? AND board_id=0", board, epoch);
+        }
+        for (int sent = 0; sent < 64 && committed < guard.getProducedCursor(); sent++) {
+            GlobalRankOutboxRow out;
+            try (var c = source.getConnection()) {
+                out = db.findOneByPk(c, GlobalRankOutboxRow.newBuilder()
+                        .setSourceEpoch(epoch).setSourceCursor(committed + 1).build()).orElseThrow();
+            }
+            var request = SubmitRankScoresRequest.parseFrom(out.getEntries()).toBuilder().setBoardId(board).build();
+            var response = call(s -> s.submitRankScores(sign(RankAdminService.SUBMIT_METHOD, request)));
+            if (response.getErrorMessage().getId() != 0 || response.getCommittedCursor() != request.getSourceCursor()) {
+                throw new IllegalStateException("排位赛季榜尚未确认连续游标 season=" + seasonId);
+            }
+            mutate("UPDATE match_global_rank_source SET committed_cursor=? WHERE source_epoch=? AND committed_cursor=?",
+                    request.getSourceCursor(), epoch, committed);
+            committed = request.getSourceCursor();
+        }
+    }
+
+    /** 显式封榜指定排位赛季（先确保停源与全部 outbox 已确认）。 */
+    public FreezeRankGenerationResponse freezeRankedSeason(int seasonId, String seasonKey, long rankGeneration,
+                                                           FreezeRankGenerationRequest template) throws Exception {
+        long epoch = rankedSourceEpoch(seasonId);
+        publishRankedSeason(seasonId, seasonKey, rankGeneration);
+        GlobalRankSourceRow guard;
+        try (var c = source.getConnection()) {
+            guard = db.findOneByPk(c, GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build()).orElseThrow();
+        }
+        if (!guard.getStopped() || guard.getCommittedCursor() != guard.getProducedCursor() || template.getRequestId() == 0) {
+            throw new IllegalStateException("排位赛季榜源尚未停写或 outbox 未齐 season=" + seasonId);
+        }
+        var request = template.toBuilder()
+                .setBoardId(guard.getBoardId())
+                .setGeneration(rankGeneration)
+                .setSourceEpoch(epoch)
+                .setExpectedSourceCursor(guard.getProducedCursor())
+                .build();
+        return call(s -> s.freezeRankGeneration(sign(RankAdminService.FREEZE_METHOD, request)));
+    }
+
     /** 这行锁与 append 相同；回包为真实最终游标，停写后不会再产生本代 outbox。 */
     public long stopSource()throws SQLException{
         try(var c=source.getConnection()){

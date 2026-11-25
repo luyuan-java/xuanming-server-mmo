@@ -261,6 +261,7 @@ public final class RatingTestDatabase implements AutoCloseable {
      */
     static String h2Ddl(String ddl) {
         return ddl.replace(" bigint unsigned ", " NUMERIC(20) ").replace(" int unsigned ", " BIGINT ")
+                .replaceAll(" CHARACTER SET [^ ]+ COLLATE [^ ]+", "")
                 .replaceAll("\\) ENGINE=InnoDB[^\\n]*;\\s*$", ");");
     }
 

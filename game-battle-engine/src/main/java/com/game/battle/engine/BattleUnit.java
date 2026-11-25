@@ -80,6 +80,10 @@ final class BattleUnit {
         return state.getPetId();
     }
 
+    boolean competitiveTemporary() {
+        return state.getCompetitiveTemporary();
+    }
+
     /** uint32；兜底怪为 0。 */
     int monsterTableId() {
         return state.getMonsterTableId();

@@ -73,7 +73,7 @@ public class MailConfiguration {
     @Bean
     ServiceCallSignatures signatures() {
         var secrets = new HashMap<String, String>();
-        for (String role : List.of("admin", "guild", "rank", "trade", "battle")) {
+        for (String role : List.of("admin", "guild", "rank", "trade", "battle", "match")) {
             String secret = System.getenv("MAIL_PRODUCER_SECRET_" + role.toUpperCase(Locale.ROOT));
             if (secret != null && !secret.isBlank())
                 secrets.put(role, secret);

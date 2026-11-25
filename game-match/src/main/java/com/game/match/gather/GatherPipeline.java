@@ -139,8 +139,10 @@ public final class GatherPipeline {
     private final Timeouts timeouts;
     private com.game.match.global.GlobalMatchService global;
     private com.game.match.script.BattleScriptResolver scriptResolver;
+    private com.game.match.ranked.RankedStore rankedStore;
     public GatherPipeline withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
     public GatherPipeline withBattleScriptResolver(com.game.match.script.BattleScriptResolver resolver){this.scriptResolver=resolver;return this;}
+    public GatherPipeline withRankedStore(com.game.match.ranked.RankedStore store){this.rankedStore=store;return this;}
 
     /**
      * 生产装配。
@@ -275,14 +277,34 @@ public final class GatherPipeline {
             }
 
             // 2.6 分队
-            int[] teams = TeamAssignment.assign(mode, plan.members(), mode == MatchMode.MATCH_MODE_5V5 ? loadRatings(battle) : Map.of());
+            boolean isRanked = mode == MatchMode.MATCH_MODE_PVP_TEAM && rankedStore != null;
+            int[] teams = TeamAssignment.assign(mode, plan.members(),
+                    (mode == MatchMode.MATCH_MODE_5V5 || mode == MatchMode.MATCH_MODE_PVP_TEAM) ? loadRatings(battle) : Map.of());
+            com.game.proto.RankedMatchContext rankedContext = null;
+            if (isRanked) {
+                try {
+                    var maybeCtx = rankedStore.buildRankedContext(Math.max(1, n / 2), plan.members(), Map.of());
+                    if (maybeCtx.isEmpty()) {
+                        log.warn("[gather] 排位赛季结算中，拒绝开局 battle_id={}", battle);
+                        return fail(GatherOutcome.PREPARE_FAILED, 0);
+                    }
+                    rankedContext = maybeCtx.get();
+                } catch (java.sql.SQLException e) {
+                    log.error("[gather] 构建排位上下文失败 battle_id={}", battle, e);
+                    return fail(GatherOutcome.INTERNAL, 0);
+                }
+            }
 
             // 3. 逐人串行备战
             List<Prepared> prepared = new ArrayList<>(n);
             for (int i = 0; i < n; i++) {
                 long playerId = plan.members().get(i);
-                PrepareBattleRequest request = PrepareBattleRequest.newBuilder().setPlayerId(playerId).setBattleId(battleId)
-                        .setBattleNodeId(node.info().getNodeId()).setDeadlineMs(deadlineMs).setPrepareDeadlineMs(prepareDeadlineMs).build();
+                PrepareBattleRequest.Builder reqBuilder = PrepareBattleRequest.newBuilder().setPlayerId(playerId).setBattleId(battleId)
+                        .setBattleNodeId(node.info().getNodeId()).setDeadlineMs(deadlineMs).setPrepareDeadlineMs(prepareDeadlineMs);
+                if (rankedContext != null) {
+                    reqBuilder.setRankedContext(rankedContext);
+                }
+                PrepareBattleRequest request = reqBuilder.build();
                 switch (parts.scenes().prepare(request)) {
                     case ScenePreparer.Prepare.Ok ok -> {
                         cancels.add(new Compensation.Cancel(playerId, ok.endpoint()));
@@ -337,12 +359,15 @@ public final class GatherPipeline {
                 create.addPlayers(member.snapshot());
                 record.addPlayerNames(member.snapshot().getPlayerName());
             }
+            if (rankedContext != null) {
+                create.setRankedContext(rankedContext);
+            }
             if (plan.activityContext() != null) {
                 create.setActivityContext(plan.activityContext());
             }
             // 观战可见性在建房时决定一次、随建房原件冻结（battle 第二道闸只认它）；落点记录抄同一份冻结值，不按模式另算
             create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext()));
-            if (scriptResolver != null) {
+            if (scriptResolver != null && !isRanked) {
                 create.addAllTeamScripts(scriptResolver.resolveForBattle(battleId, mode.getNumber(), plan.battleConfigId(), create.getPlayersList()));
             }
             CreateBattleRequest createRequest = create.build();

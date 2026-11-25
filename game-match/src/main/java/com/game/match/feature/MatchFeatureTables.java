@@ -10,6 +10,13 @@ import com.game.match.feature.pb.MatchRankedPlayerPrefsRow;
 import com.game.match.feature.pb.MatchRankedPlayerSeasonRow;
 import com.game.match.feature.pb.MatchRankedRewardRow;
 import com.game.match.feature.pb.MatchRankedSeasonRow;
+import com.game.match.feature.pb.MatchTournamentCheerRow;
+import com.game.match.feature.pb.MatchTournamentInviteRow;
+import com.game.match.feature.pb.MatchTournamentMatchRow;
+import com.game.match.feature.pb.MatchTournamentMemberRow;
+import com.game.match.feature.pb.MatchTournamentRewardRow;
+import com.game.match.feature.pb.MatchTournamentSeasonRow;
+import com.game.match.feature.pb.MatchTournamentSquadRow;
 import com.game.pbmysql.PbMysql;
 import com.google.protobuf.Message;
 import java.sql.Connection;
@@ -31,6 +38,13 @@ public final class MatchFeatureTables {
     public static final String RANKED_PLAYER_SEASON = "match_ranked_player_season";
     public static final String RANKED_REWARD = "match_ranked_reward";
     public static final String RANKED_BATTLE = "match_ranked_battle";
+    public static final String TOURNAMENT_SEASON = "match_tournament_season";
+    public static final String TOURNAMENT_SQUAD = "match_tournament_squad";
+    public static final String TOURNAMENT_MEMBER = "match_tournament_member";
+    public static final String TOURNAMENT_INVITE = "match_tournament_invite";
+    public static final String TOURNAMENT_MATCH = "match_tournament_match";
+    public static final String TOURNAMENT_CHEER = "match_tournament_cheer";
+    public static final String TOURNAMENT_REWARD = "match_tournament_reward";
 
     public static final List<Message> PROTOTYPES = List.of(
             MatchBattleReportRow.getDefaultInstance(),
@@ -42,7 +56,14 @@ public final class MatchFeatureTables {
             MatchRankedPlayerPrefsRow.getDefaultInstance(),
             MatchRankedPlayerSeasonRow.getDefaultInstance(),
             MatchRankedRewardRow.getDefaultInstance(),
-            MatchRankedBattleRow.getDefaultInstance());
+            MatchRankedBattleRow.getDefaultInstance(),
+            MatchTournamentSeasonRow.getDefaultInstance(),
+            MatchTournamentSquadRow.getDefaultInstance(),
+            MatchTournamentMemberRow.getDefaultInstance(),
+            MatchTournamentInviteRow.getDefaultInstance(),
+            MatchTournamentMatchRow.getDefaultInstance(),
+            MatchTournamentCheerRow.getDefaultInstance(),
+            MatchTournamentRewardRow.getDefaultInstance());
 
     @FunctionalInterface
     public interface SchemaSync {

@@ -94,31 +94,23 @@ public final class ConfigSceneTables implements SceneTables {
                 String relativeFolder = nav.substring(CURRENT_NAV_PREFIX.length(), nav.length() - "/scene.bin".length());
                 CurrentMapNavigation grid;
                 if (row.getId() == 3 && CurrentMapNavigation.YUEXI_FOLDER.equals(relativeFolder)) {
-                    grid = CurrentMapNavigation.loadYuexi(navigationRoot);
+                    grid = loaded.computeIfAbsent(relativeFolder, k -> CurrentMapNavigation.loadYuexi(navigationRoot));
                 } else if (row.getId() == 3) {
                     throw new IllegalStateException("新版主世界导航与 BaseScene 不匹配: " + row.getId());
                 } else {
-                    grid = CurrentMapNavigation.loadVersionedCurrentMap(navigationRoot, relativeFolder, row.getId());
+                    // 新主城出图前，场景 1 与占位世界槽位 6..16 临时共享碧渊水宫(5)双节导航。
+                    int expectedSceneId = (row.getId() == 1 || (row.getId() >= 6 && row.getId() <= 16))
+                            && CurrentMapNavigation.BIYUAN_FOLDER.equals(relativeFolder)
+                            ? 5 : row.getId();
+                    grid = loaded.computeIfAbsent(relativeFolder,
+                            k -> CurrentMapNavigation.loadVersionedCurrentMap(navigationRoot, k, expectedSceneId));
                 }
                 if (!spawn.isFinite() || spawn.z() != grid.spawn().z()
                         || grid.spawn().horizontalDistance(spawn) > 1e-9 || !grid.isWalkable(spawn)) {
                     throw new IllegalStateException("BaseScene 出生点与新版主世界导航不一致: " + row.getId());
                 }
                 navigation.put(row.getId(), grid);
-                continue;
             }
-            String key = switch (nav.substring(nav.lastIndexOf('/') + 1)) {
-                case "main_scene.bin" -> "main";
-                case "penglai_scene.bin" -> "island";
-                case "donghai_scene.bin" -> "village";
-                default -> null; // 独立副本、旧图与未声明本批导航的场景保留原规则。
-            };
-            if (key == null) continue;
-            CurrentMapNavigation grid = loaded.computeIfAbsent(key, k -> CurrentMapNavigation.load(navigationRoot, k));
-            if (!grid.spawn().equals(spawn)) {
-                throw new IllegalStateException("BaseScene 出生点与当前地图导航不一致: " + row.getId());
-            }
-            navigation.put(row.getId(), grid);
         }
         return new ConfigSceneTables(tables, List.copyOf(world), List.copyOf(skills), navigation);
     }

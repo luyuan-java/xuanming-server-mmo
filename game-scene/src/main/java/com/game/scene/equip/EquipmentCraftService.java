@@ -377,7 +377,9 @@ public final class EquipmentCraftService {
             case MatchMode.MATCH_MODE_PVE_SOLO_VALUE, MatchMode.MATCH_MODE_PVE_TEAM_VALUE ->
                     (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && settlement.getPlayerTeamIndex() == 0)
                             || (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN && settlement.getPlayerTeamIndex() == 1);
-            case MatchMode.MATCH_MODE_1V1_VALUE, MatchMode.MATCH_MODE_5V5_VALUE, MatchMode.MATCH_MODE_PVP_TEAM_VALUE -> true;
+            case MatchMode.MATCH_MODE_1V1_VALUE, MatchMode.MATCH_MODE_5V5_VALUE,
+                    MatchMode.MATCH_MODE_POLARITY_5V5_VALUE, MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE -> true;
+            case MatchMode.MATCH_MODE_PVP_TEAM_VALUE -> !settlement.getCompetitiveRanked() || settlement.getParticipated();
             default -> false;
         };
     }

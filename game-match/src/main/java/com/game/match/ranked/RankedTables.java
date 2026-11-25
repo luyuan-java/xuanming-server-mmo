@@ -1,11 +1,16 @@
 package com.game.match.ranked;
 
+import com.game.proto.BattleParticipationFact;
 import com.game.proto.match.RankedPresetView;
 import com.game.proto.match.RankedTier;
 import com.game.table.ConfigTables;
 import com.game.table.RankedPresetTable;
 import com.game.table.RankedRuleTable;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -21,11 +26,14 @@ public final class RankedTables {
     private final RankedRuleTable rule;
     private final Map<Integer, RankedPresetTable> presetsById;
     private final List<RankedPresetView> presetViews;
+    private final String configFingerprint;
 
-    private RankedTables(RankedRuleTable rule, Map<Integer, RankedPresetTable> presetsById, List<RankedPresetView> presetViews) {
+    private RankedTables(RankedRuleTable rule, Map<Integer, RankedPresetTable> presetsById,
+                         List<RankedPresetView> presetViews, String configFingerprint) {
         this.rule = rule;
         this.presetsById = presetsById;
         this.presetViews = presetViews;
+        this.configFingerprint = configFingerprint;
     }
 
     public static RankedTables from(ConfigTables config) {
@@ -46,7 +54,70 @@ public final class RankedTables {
             throw new IllegalStateException("RankedRule 默认人物/宝宝预设无效");
         }
         List<RankedPresetView> views = sorted.stream().map(RankedTables::toView).toList();
-        return new RankedTables(rule, Map.copyOf(byId), List.copyOf(views));
+        List<RankedPresetTable> byIdAsc = config.rankedPreset().all().stream()
+                .sorted(Comparator.comparingInt(RankedPresetTable::getId))
+                .toList();
+        String fingerprint = computeConfigFingerprint(rule, byIdAsc);
+        return new RankedTables(rule, Map.copyOf(byId), List.copyOf(views), fingerprint);
+    }
+
+    public String configFingerprint() {
+        return configFingerprint;
+    }
+
+    /** 判定单名玩家在排位中是否满足有效参赛（与 C++/Go 逐条一致）。 */
+    public static boolean evaluateParticipation(BattleParticipationFact fact, boolean fled) {
+        if (fled || fact == null) {
+            return false;
+        }
+        if (fact.getManualActionAccepted()) {
+            return true;
+        }
+        if (fact.getEnteredRoom() && fact.getExplicitAutoEnabled()) {
+            return true;
+        }
+        return fact.getEnteredRoom() && fact.getNoActionOpportunity();
+    }
+
+    private static String computeConfigFingerprint(RankedRuleTable rule, List<RankedPresetTable> presetsByIdAsc) {
+        StringBuilder sb = new StringBuilder(512);
+        sb.append("ranked-v1\n");
+        sb.append("rule:id=1,ver=").append(Integer.toUnsignedString(rule.getRuleVersion()))
+                .append(",cfg=").append(Integer.toUnsignedString(rule.getBattleConfigId()))
+                .append(",cls=").append(Integer.toUnsignedString(rule.getReferenceClassId()))
+                .append(",lvl=").append(Integer.toUnsignedString(rule.getCompetitiveLevel()))
+                .append(",defc=").append(Integer.toUnsignedString(rule.getDefaultCharacterPresetId()))
+                .append(",defp=").append(Integer.toUnsignedString(rule.getDefaultPetPresetId()))
+                .append('\n');
+        for (RankedPresetTable p : presetsByIdAsc) {
+            sb.append("preset:").append(Integer.toUnsignedString(p.getId()))
+                    .append(",kind=").append(Integer.toUnsignedString(p.getRoleKind()))
+                    .append(",pet=").append(Integer.toUnsignedString(p.getPetTableId()))
+                    .append(",w=").append(Integer.toUnsignedString(p.getWeightCon()))
+                    .append('/').append(Integer.toUnsignedString(p.getWeightSpi()))
+                    .append('/').append(Integer.toUnsignedString(p.getWeightStr()))
+                    .append('/').append(Integer.toUnsignedString(p.getWeightAgi()))
+                    .append(",sk=");
+            for (int i = 0; i < p.getSkillIdsCount(); i++) {
+                if (i > 0) sb.append('|');
+                sb.append(Integer.toUnsignedString(p.getSkillIds(i)));
+            }
+            sb.append(",pe=");
+            int pairCount = Math.min(p.getPetEntryIdsCount(), p.getPetEntryPointsCount());
+            for (int i = 0; i < pairCount; i++) {
+                if (i > 0) sb.append('|');
+                sb.append(Integer.toUnsignedString(p.getPetEntryIds(i)))
+                        .append(':')
+                        .append(Integer.toUnsignedString(p.getPetEntryPoints(i)));
+            }
+            sb.append('\n');
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(sb.toString().getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     public RankedRuleTable rule() {

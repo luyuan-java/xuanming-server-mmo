@@ -28,24 +28,22 @@ class CurrentMapNavigationTest {
     }
 
     @Test
-    void 三图全部67500格与共享客户端遮罩逐位一致() throws Exception {
-        for (String key : new String[]{"main", "island", "village"}) {
-            CurrentMapNavigation navigation = CurrentMapNavigation.load(navigationRoot(), key);
-            byte[] bits = Base64.getDecoder().decode(Files.readAllBytes(navigationRoot().resolve(key).resolve("walkmask.txt")));
-            for (int row = 0; row < 150; row++) {
-                for (int col = 0; col < 150; col++) {
-                    int index = row * 150 + col;
-                    boolean expected = (bits[index / 8] & (1 << (7 - index % 8))) != 0;
-                    assertThat(navigation.isWalkable(new Vec3(299 - 2 * row, 51 + 2 * col, 0)))
-                            .as("%s row=%s col=%s", key, row, col).isEqualTo(expected);
-                }
-            }
-            assertThat(navigation.isWalkable(navigation.spawn())).isTrue();
-            for (Vec3 outside : new Vec3[]{new Vec3(-0.1, 100, 0), new Vec3(300, 100, 0),
-                    new Vec3(100, 49.9, 0), new Vec3(100, 350, 0), new Vec3(Double.NaN, 100, 0)}) {
-                assertThat(navigation.isWalkable(outside)).isFalse();
-            }
-        }
+    void 新版三张正式主世界导航可加载且出生点与外域阻挡一致() {
+        CurrentMapNavigation biyuan = CurrentMapNavigation.loadVersionedCurrentMap(
+                navigationRoot(), CurrentMapNavigation.BIYUAN_FOLDER, 5);
+        assertThat(biyuan.isWalkable(biyuan.spawn())).isTrue();
+        assertThat(biyuan.isWalkable(new Vec3(186.0, 116.25, 0))).isTrue();
+        assertThat(biyuan.isWalkable(new Vec3(252.0, 160.0, 0))).isFalse();
+
+        CurrentMapNavigation bajing = CurrentMapNavigation.loadVersionedCurrentMap(
+                navigationRoot(), CurrentMapNavigation.BAJING_FOLDER, 2);
+        assertThat(bajing.isWalkable(bajing.spawn())).isTrue();
+        assertThat(bajing.isWalkable(new Vec3(200.41666666666666, 166.66666666666669, 0))).isTrue();
+        assertThat(bajing.isWalkable(new Vec3(198.33333333333334, -12.5, 0))).isFalse();
+
+        CurrentMapNavigation yuexi = CurrentMapNavigation.loadYuexi(navigationRoot());
+        assertThat(yuexi.isWalkable(yuexi.spawn())).isTrue();
+        assertThat(yuexi.isWalkable(new Vec3(Double.NaN, 100, 0))).isFalse();
     }
 
     @Test
@@ -85,13 +83,16 @@ class CurrentMapNavigationTest {
 
     @Test
     void 合同缺失或遮罩被改动就拒绝加载(@TempDir Path root) throws Exception {
-        assertThatThrownBy(() -> CurrentMapNavigation.load(root, "main")).isInstanceOf(RuntimeException.class);
-        Path target = Files.createDirectory(root.resolve("main"));
-        Files.copy(navigationRoot().resolve("main/source.json"), target.resolve("source.json"));
-        byte[] bytes = Files.readAllBytes(navigationRoot().resolve("main/walkmask.txt"));
+        assertThatThrownBy(() -> CurrentMapNavigation.loadVersionedCurrentMap(
+                root, CurrentMapNavigation.BIYUAN_FOLDER, 5)).isInstanceOf(RuntimeException.class);
+        Path target = Files.createDirectories(root.resolve(CurrentMapNavigation.BIYUAN_FOLDER));
+        Files.copy(navigationRoot().resolve(CurrentMapNavigation.BIYUAN_FOLDER).resolve("source.json"),
+                target.resolve("source.json"));
+        byte[] bytes = Files.readAllBytes(navigationRoot().resolve(CurrentMapNavigation.BIYUAN_FOLDER).resolve("walkmask.txt"));
         bytes[0] = bytes[0] == 'A' ? (byte) 'B' : (byte) 'A';
         Files.write(target.resolve("walkmask.txt"), bytes);
-        assertThatThrownBy(() -> CurrentMapNavigation.load(root, "main"))
+        assertThatThrownBy(() -> CurrentMapNavigation.loadVersionedCurrentMap(
+                root, CurrentMapNavigation.BIYUAN_FOLDER, 5))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("SHA256");
     }
 

@@ -18,18 +18,20 @@ class MatchModesTest {
         assertThat(MatchModes.PVE_SOLO).isEqualTo(4);
         assertThat(MatchModes.PVE_TEAM).isEqualTo(5);
         assertThat(MatchModes.PVP_CHALLENGE).isEqualTo(6);
+        assertThat(MatchModes.PVP_TEAM).isEqualTo(7);
     }
 
     @Test
-    void 排队入口只开放四种模式() {
+    void 排队入口只开放五种模式() {
         assertThat(MatchModes.joinable(MatchModes.FIVE_V_FIVE)).isTrue();
         assertThat(MatchModes.joinable(MatchModes.ONE_V_ONE)).isTrue();
         assertThat(MatchModes.joinable(MatchModes.PVE_SOLO)).isTrue();
         assertThat(MatchModes.joinable(MatchModes.PVE_TEAM)).isTrue();
+        assertThat(MatchModes.joinable(MatchModes.PVP_TEAM)).isTrue();
         assertThat(MatchModes.joinable(MatchModes.THREE_V_THREE)).isFalse();
         assertThat(MatchModes.joinable(MatchModes.PVP_CHALLENGE)).as("切磋只能经切磋入口").isFalse();
         assertThat(MatchModes.joinable(MatchModes.UNSPECIFIED)).isFalse();
-        assertThat(MatchModes.joinable(7)).isFalse();
+        assertThat(MatchModes.joinable(99)).isFalse();
         assertThat(MatchModes.joinable(-1)).isFalse();
     }
 
@@ -50,9 +52,10 @@ class MatchModesTest {
     }
 
     @Test
-    void 只有1V1与5V5计分() {
+    void 只有1V1_5V5与论剑PVP_TEAM计分() {
         assertThat(MatchModes.rated(MatchModes.ONE_V_ONE)).isTrue();
         assertThat(MatchModes.rated(MatchModes.FIVE_V_FIVE)).isTrue();
+        assertThat(MatchModes.rated(MatchModes.PVP_TEAM)).isTrue();
         assertThat(MatchModes.rated(MatchModes.PVE_SOLO)).isFalse();
         assertThat(MatchModes.rated(MatchModes.PVE_TEAM)).isFalse();
         assertThat(MatchModes.rated(MatchModes.PVP_CHALLENGE)).as("切磋不计分").isFalse();
@@ -60,18 +63,22 @@ class MatchModesTest {
     }
 
     @Test
-    void 走队列的是1V1_5V5_组队_单人副本不入队() {
+    void 走队列的是1V1_5V5_组队_论剑_单人副本不入队() {
         assertThat(MatchModes.queued(MatchModes.ONE_V_ONE)).isTrue();
         assertThat(MatchModes.queued(MatchModes.FIVE_V_FIVE)).isTrue();
         assertThat(MatchModes.queued(MatchModes.PVE_TEAM)).isTrue();
+        assertThat(MatchModes.queued(MatchModes.PVP_TEAM)).isTrue();
         assertThat(MatchModes.queued(MatchModes.PVE_SOLO)).isFalse();
         assertThat(MatchModes.queued(MatchModes.PVP_CHALLENGE)).isFalse();
     }
-    @Test void PVE人数档默认_单人即时_逐档与uint32边界(){
+    @Test void PVE与PVP人数档默认_逐档与uint32边界(){
         assertThat(MatchModes.requestedPlayers(MatchModes.PVE_TEAM,5,0)).isEqualTo(5);
         for(int size=1;size<=5;size++)assertThat(MatchModes.requestedPlayers(MatchModes.PVE_TEAM,5,size)).isEqualTo(size);
         assertThat(MatchModes.requestedPlayers(MatchModes.PVE_TEAM,5,6)).isZero();assertThat(MatchModes.requestedPlayers(MatchModes.PVE_TEAM,5,-1)).isZero();
         assertThat(MatchModes.requestedPlayers(MatchModes.PVE_TEAM,0,1)).isZero();assertThat(MatchModes.requestedPlayers(MatchModes.ONE_V_ONE,5,5)).isEqualTo(2);
+        assertThat(MatchModes.requestedPlayers(MatchModes.PVP_TEAM,0,0)).isEqualTo(2);
+        for(int size=1;size<=5;size++)assertThat(MatchModes.requestedPlayers(MatchModes.PVP_TEAM,0,size)).isEqualTo(size*2);
+        assertThat(MatchModes.requestedPlayers(MatchModes.PVP_TEAM,0,6)).isZero();assertThat(MatchModes.requestedPlayers(MatchModes.PVP_TEAM,0,-1)).isZero();
     }
 
 }

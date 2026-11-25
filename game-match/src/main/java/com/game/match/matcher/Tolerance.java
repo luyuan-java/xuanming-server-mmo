@@ -70,6 +70,17 @@ public final class Tolerance {
         return base + steps * stepDelta;
     }
 
+    /** 论剑排位硬上限分差窗口（centi）：0-29s ±100、30-89s ±200、≥90s ±300，永不退化为 UNBOUNDED。 */
+    public static long rankedHardCapCenti(long waitSeconds) {
+        if (waitSeconds < 30L) {
+            return 100L * CENTI;
+        }
+        if (waitSeconds < 90L) {
+            return 200L * CENTI;
+        }
+        return 300L * CENTI;
+    }
+
     /**
      * 锚点此刻实际使用的容差（centi）：非评分模式、或已等 ≥ {@link #maxWaitSeconds()} → {@link #UNBOUNDED}；否则曲线值 × 100。
      *

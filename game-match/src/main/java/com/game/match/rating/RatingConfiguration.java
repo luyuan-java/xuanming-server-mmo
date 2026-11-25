@@ -60,7 +60,13 @@ public class RatingConfiguration {
     }
     @Bean(name="ratingStore")
     public RatingStore configuredRatingStore(DataSource dataSource,MatchProperties props,MatchMetrics metrics,SchemaReady ready,
-            ObjectProvider<com.game.match.global.RatingRankOutbox> outbox){return ratingStore(dataSource,props,metrics,ready).withCommitHook(outbox.getIfAvailable());}
+            ObjectProvider<com.game.match.global.RatingRankOutbox> outbox,
+            ObjectProvider<com.game.match.ranked.RankedStore> rankedStore,
+            ObjectProvider<com.game.match.tournament.TournamentStore> tournamentStore){
+        return ratingStore(dataSource,props,metrics,ready)
+                .withCommitHook(outbox.getIfAvailable())
+                .withRankedStore(rankedStore.getIfAvailable())
+                .withTournamentStore(tournamentStore.getIfAvailable());}
 
     /** 读评分（{@link RatingReader} 的唯一实现）：自带 {@code match-db} 线程池，失败回落 1500。 */
     @Bean(destroyMethod = "close")

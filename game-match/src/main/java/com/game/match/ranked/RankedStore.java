@@ -7,7 +7,12 @@ import com.game.match.feature.pb.MatchRankedPlayerSeasonRow;
 import com.game.match.feature.pb.MatchRankedRewardRow;
 import com.game.match.feature.pb.MatchRankedSeasonRow;
 import com.game.pbmysql.PbMysql;
+import com.game.proto.BattleParticipationFact;
+import com.game.proto.RankedMatchContext;
+import com.game.proto.RankedMemberLoadout;
 import com.game.proto.RankedPresetSelection;
+import com.game.proto.contracts.kafka.BattleResultEvent;
+import com.game.proto.contracts.kafka.BattleResultTeam;
 import com.game.proto.eBattleOutcome;
 import com.game.proto.match.RankedBattleSettlementView;
 import com.game.proto.match.RankedCosmeticLoadout;
@@ -60,6 +65,18 @@ public final class RankedStore {
                                   long ratingDeltaCenti, int characterPresetId, int petPresetId) {
     }
 
+    /** 与评分事务同提交的排位落账摘要（只把本季已亮段玩家交给排行榜 outbox）。 */
+    public record SeasonCommitResult(int seasonId, String seasonKey, long rankGeneration,
+                                     Map<Long, Long> qualifiedScores,
+                                     Map<Long, RankedBattleSettlementView> views) {
+    }
+
+    /** 封榜钩子（对接 RankAdmin.FreezeRankGeneration；测试可注入替身或 null）。 */
+    @FunctionalInterface
+    public interface RankFreezeHook {
+        void freeze(MatchRankedSeasonRow season) throws Exception;
+    }
+
     private final DataSource dataSource;
     private final RankedTables tables;
     private final LongSupplier clockMs;
@@ -80,8 +97,9 @@ public final class RankedStore {
     public ProfileData loadProfile(long playerId, boolean includeHistory) throws SQLException {
         try (Connection c = dataSource.getConnection()) {
             MatchRankedSeasonRow current = ensureSeason(c);
+            long carryRating = readCarryOverRating(c, playerId);
             MatchRankedPlayerSeasonRow progress = readPlayerSeason(c, current.getSeasonId(), playerId)
-                    .orElseGet(() -> defaultProgress(current.getSeasonId(), playerId));
+                    .orElseGet(() -> defaultProgress(current.getSeasonId(), playerId, carryRating));
             MatchRankedPlayerPrefsRow prefs = readPrefs(c, playerId).orElseGet(() -> defaultPrefs(playerId));
             List<MatchRankedRewardRow> rewards = readRewards(c, playerId);
             List<MatchRankedPlayerSeasonRow> history = List.of();
@@ -91,6 +109,46 @@ public final class RankedStore {
                 pastSeasons = readPastSeasons(c, current.getSeasonId());
             }
             return new ProfileData(current, progress, prefs, rewards, history, pastSeasons);
+        }
+    }
+
+    /** 读取单人已保存预设（未保存时返回官方默认破阵/护主）。 */
+    public RankedPresetSelection loadPlayerPresets(long playerId) throws SQLException {
+        try (Connection c = dataSource.getConnection()) {
+            MatchRankedPlayerPrefsRow prefs = readPrefs(c, playerId).orElseGet(() -> defaultPrefs(playerId));
+            return toPresetSelection(prefs);
+        }
+    }
+
+    /** 组装本局论剑排位权威上下文；若当前赛季正在结算中返回空（拒绝新局）。 */
+    public Optional<RankedMatchContext> buildRankedContext(int teamSize, List<Long> roster,
+                                                           Map<Long, RankedPresetSelection> overrides) throws SQLException {
+        try (Connection c = dataSource.getConnection()) {
+            MatchRankedSeasonRow current = ensureSeason(c);
+            if (current.getState() != RankedSeasonState.RANKED_SEASON_STATE_ACTIVE_VALUE) {
+                return Optional.empty();
+            }
+            RankedMatchContext.Builder ctx = RankedMatchContext.newBuilder()
+                    .setSeasonId(current.getSeasonId())
+                    .setSeasonKey(current.getSeasonKey())
+                    .setRankGeneration(current.getRankGeneration() != 0L
+                            ? current.getRankGeneration()
+                            : Integer.toUnsignedLong(current.getSeasonId()))
+                    .setRuleVersion(current.getRuleVersion())
+                    .setConfigFingerprint(tables.configFingerprint())
+                    .setTeamSize(teamSize);
+            for (long playerId : roster) {
+                RankedPresetSelection sel = overrides == null ? null : overrides.get(playerId);
+                if (sel == null || !tables.isValidPair(sel.getCharacterPresetId(), sel.getPetPresetId())) {
+                    MatchRankedPlayerPrefsRow prefs = readPrefs(c, playerId).orElseGet(() -> defaultPrefs(playerId));
+                    sel = toPresetSelection(prefs);
+                }
+                ctx.addMembers(RankedMemberLoadout.newBuilder()
+                        .setPlayerId(playerId)
+                        .setPresets(sel)
+                        .build());
+            }
+            return Optional.of(ctx.build());
         }
     }
 
@@ -183,8 +241,9 @@ public final class RankedStore {
                 }) : ensureSeason(c);
                 int seasonId = season.getSeasonId();
                 long now = clockMs.getAsLong();
+                long carryRating = readCarryOverRating(c, in.playerId());
                 MatchRankedPlayerSeasonRow prev = readPlayerSeason(c, seasonId, in.playerId())
-                        .orElseGet(() -> defaultProgress(seasonId, in.playerId()));
+                        .orElseGet(() -> defaultProgress(seasonId, in.playerId(), carryRating));
 
                 long beforeRating = prev.getRatingCenti();
                 RankedTier tierBefore = tables.tierFor(beforeRating, prev.getQualified());
@@ -299,6 +358,370 @@ public final class RankedStore {
                 throw e;
             }
         }
+    }
+
+    /** 与 {@code RatingStore.applyOnce} 同事务落账整场排位结算，并返回本季已亮段玩家分值供排行榜投递。 */
+    public SeasonCommitResult recordBattleResultInTx(Connection c, BattleResultEvent event,
+                                                     Map<Long, Long> preCenti, Map<Long, Long> nextCenti,
+                                                     long nowMs) throws SQLException {
+        RankedMatchContext ctx = event.getRankedContext();
+        int requestedSeasonId = ctx.getSeasonId();
+        MatchRankedSeasonRow season = requestedSeasonId != 0
+                ? readSeasonById(c, requestedSeasonId).orElseThrow(() -> new SQLException("排位赛季不存在 season=" + requestedSeasonId))
+                : ensureSeason(c);
+        int seasonId = season.getSeasonId();
+        int teamSize = ctx.getTeamSize();
+        if (teamSize == 0 && event.getTeamsCount() > 0) {
+            teamSize = event.getTeams(0).getPlayerIdsCount();
+        }
+        Map<Long, BattleParticipationFact> factsByPlayer = new HashMap<>();
+        for (BattleParticipationFact fact : event.getParticipationFactsList()) {
+            factsByPlayer.put(fact.getPlayerId(), fact);
+        }
+        java.util.Set<Long> fledSet = new java.util.HashSet<>(event.getFledPlayerIdsList());
+        Map<Long, RankedPresetSelection> loadoutByPlayer = new HashMap<>();
+        for (RankedMemberLoadout loadout : ctx.getMembersList()) {
+            loadoutByPlayer.put(loadout.getPlayerId(), loadout.getPresets());
+        }
+        Map<Long, Integer> teamByPlayer = new HashMap<>();
+        for (BattleResultTeam team : event.getTeamsList()) {
+            for (long pid : team.getPlayerIdsList()) {
+                teamByPlayer.putIfAbsent(pid, team.getTeamIndex());
+            }
+        }
+        Map<Long, Long> qualifiedScores = new java.util.LinkedHashMap<>();
+        Map<Long, RankedBattleSettlementView> views = new java.util.LinkedHashMap<>();
+        List<Long> sortedPlayers = new ArrayList<>(nextCenti.keySet());
+        sortedPlayers.sort(Long::compareUnsigned);
+        RankedRuleTable rule = tables.rule();
+        for (long playerId : sortedPlayers) {
+            Optional<MatchRankedBattleRow> existing = readBattleRow(c, playerId, event.getBattleId());
+            if (existing.isPresent()) {
+                RankedBattleSettlementView view = toBattleView(existing.get());
+                views.put(playerId, view);
+                Optional<MatchRankedPlayerSeasonRow> curRow = readPlayerSeason(c, seasonId, playerId);
+                if (curRow.isPresent() && curRow.get().getQualified()) {
+                    qualifiedScores.put(playerId, curRow.get().getRatingCenti());
+                }
+                continue;
+            }
+            long beforeRating = preCenti.getOrDefault(playerId, RankedTables.INITIAL_RATING_CENTI);
+            long afterRating = nextCenti.getOrDefault(playerId, beforeRating);
+            long delta = afterRating - beforeRating;
+            boolean fled = fledSet.contains(playerId);
+            boolean participated = factsByPlayer.containsKey(playerId)
+                    ? RankedTables.evaluateParticipation(factsByPlayer.get(playerId), fled)
+                    : !fled;
+            int teamIndex = teamByPlayer.getOrDefault(playerId, 0);
+            RankedPresetSelection presets = loadoutByPlayer.get(playerId);
+            int charPresetId = presets != null ? presets.getCharacterPresetId() : rule.getDefaultCharacterPresetId();
+            int petPresetId = presets != null ? presets.getPetPresetId() : rule.getDefaultPetPresetId();
+
+            MatchRankedPlayerSeasonRow prev = readPlayerSeason(c, seasonId, playerId)
+                    .orElseGet(() -> defaultProgress(seasonId, playerId, beforeRating));
+            RankedTier tierBefore = tables.tierFor(beforeRating, prev.getQualified());
+            boolean qualifiedAfter = prev.getQualified() || participated;
+            boolean newlyQualified = !prev.getQualified() && qualifiedAfter;
+            long qualifiedAt = prev.getQualified() ? prev.getQualifiedAtMs() : (newlyQualified ? nowMs : 0L);
+            int validAfter = prev.getValidMatches() + (participated ? 1 : 0);
+            int wins = prev.getWins();
+            int losses = prev.getLosses();
+            int draws = prev.getDraws();
+            if (event.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_DRAW) {
+                draws++;
+            } else if ((teamIndex == 0 && event.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                    || (teamIndex == 1 && event.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN)) {
+                wins++;
+            } else {
+                losses++;
+            }
+            long peak = qualifiedAfter ? Math.max(prev.getPeakRatingCenti(), afterRating) : prev.getPeakRatingCenti();
+            int bits = prev.getMilestoneBits();
+            List<RankedRewardEntitlement> unlocked = new ArrayList<>();
+            if (participated) {
+                if ((bits & 1) == 0 && validAfter >= rule.getMilestoneAvatarMatches()) {
+                    bits |= 1;
+                    unlocked.add(grantReward(c, playerId, seasonId, RankedRewardKind.RANKED_REWARD_AVATAR_PATTERN,
+                            rule.getMilestoneAvatarMatches(), season.getSeasonKey() + "_avatar_pattern", nowMs));
+                }
+                if ((bits & 2) == 0 && validAfter >= rule.getMilestoneCardMatches()) {
+                    bits |= 2;
+                    unlocked.add(grantReward(c, playerId, seasonId, RankedRewardKind.RANKED_REWARD_CARD_BACKGROUND,
+                            rule.getMilestoneCardMatches(), season.getSeasonKey() + "_card_bg", nowMs));
+                }
+                if ((bits & 4) == 0 && validAfter >= rule.getMilestoneTalismanMatches()) {
+                    bits |= 4;
+                    unlocked.add(grantReward(c, playerId, seasonId, RankedRewardKind.RANKED_REWARD_TALISMAN,
+                            rule.getMilestoneTalismanMatches(), season.getSeasonKey() + "_qingyun_talisman", nowMs));
+                }
+            }
+            MatchRankedPlayerSeasonRow nextProgress = prev.toBuilder()
+                    .setSeasonId(seasonId)
+                    .setPlayerId(playerId)
+                    .setQualified(qualifiedAfter)
+                    .setRatingCenti(afterRating)
+                    .setPeakRatingCenti(peak)
+                    .setValidMatches(validAfter)
+                    .setWins(wins)
+                    .setLosses(losses)
+                    .setDraws(draws)
+                    .setQualifiedAtMs(qualifiedAt)
+                    .setMilestoneBits(bits)
+                    .setUpdatedMs(nowMs)
+                    .build();
+            upsertPlayerSeason(c, nextProgress);
+            if (qualifiedAfter) {
+                qualifiedScores.put(playerId, afterRating);
+            }
+            RankedTier tierAfter = tables.tierFor(afterRating, qualifiedAfter);
+            RankedBattleSettlementView view = RankedBattleSettlementView.newBuilder()
+                    .setBattleId(event.getBattleId())
+                    .setSeasonId(seasonId)
+                    .setTeamSize(teamSize)
+                    .setStatus(RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED)
+                    .setOutcome(event.getOutcome())
+                    .setPlayerTeamIndex(teamIndex)
+                    .setTotalRounds(event.getTotalRounds())
+                    .setParticipated(participated)
+                    .setFled(fled)
+                    .setRatingBeforeCenti(beforeRating)
+                    .setRatingAfterCenti(afterRating)
+                    .setRatingDeltaCenti(delta)
+                    .setTierBefore(tierBefore)
+                    .setTierAfter(tierAfter)
+                    .setNewlyQualified(newlyQualified)
+                    .setSeasonValidMatchesAfter(validAfter)
+                    .addAllNewlyUnlockedRewards(unlocked)
+                    .setSettledAtMs(nowMs)
+                    .setCharacterPresetId(charPresetId)
+                    .setPetPresetId(petPresetId)
+                    .build();
+            byte[] rewardBlob = NetworkProbes.bytes(RankedBattleSettlementView.newBuilder()
+                    .addAllNewlyUnlockedRewards(unlocked).build());
+            insertBattleRow(c, MatchRankedBattleRow.newBuilder()
+                    .setPlayerId(playerId)
+                    .setBattleId(event.getBattleId())
+                    .setSeasonId(seasonId)
+                    .setTeamSize(teamSize)
+                    .setStatus(RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED_VALUE)
+                    .setOutcome(event.getOutcomeValue())
+                    .setPlayerTeamIndex(teamIndex)
+                    .setTotalRounds(event.getTotalRounds())
+                    .setParticipated(participated)
+                    .setFled(fled)
+                    .setRatingBeforeCenti(beforeRating)
+                    .setRatingAfterCenti(afterRating)
+                    .setRatingDeltaCenti(delta)
+                    .setTierBefore(tierBefore.getNumber())
+                    .setTierAfter(tierAfter.getNumber())
+                    .setNewlyQualified(newlyQualified)
+                    .setSeasonValidMatchesAfter(validAfter)
+                    .setNewlyUnlockedRewardsProto(ByteString.copyFrom(rewardBlob))
+                    .setSettledAtMs(nowMs)
+                    .setCharacterPresetId(charPresetId)
+                    .setPetPresetId(petPresetId)
+                    .build());
+            views.put(playerId, view);
+        }
+        long rankGen = season.getRankGeneration() != 0L ? season.getRankGeneration() : Integer.toUnsignedLong(seasonId);
+        return new SeasonCommitResult(seasonId, season.getSeasonKey(), rankGen,
+                Map.copyOf(qualifiedScores), Map.copyOf(views));
+    }
+
+    /** 记录作废对局（节点丢失/强制中止）：不改分、不记有效场次、不发里程碑权益，幂等落明细供客户端查询。 */
+    public void recordVoidBattle(long battleId, RankedMatchContext ctx, List<Long> playerIds) throws SQLException {
+        if (battleId == 0L || playerIds == null || playerIds.isEmpty()) {
+            return;
+        }
+        Map<Long, RankedPresetSelection> loadoutByPlayer = new HashMap<>();
+        if (ctx != null) {
+            for (RankedMemberLoadout m : ctx.getMembersList()) {
+                loadoutByPlayer.put(m.getPlayerId(), m.getPresets());
+            }
+        }
+        int seasonId = ctx != null ? ctx.getSeasonId() : 0;
+        int teamSize = ctx != null ? ctx.getTeamSize() : 0;
+        for (long playerId : playerIds) {
+            RankedPresetSelection p = loadoutByPlayer.get(playerId);
+            recordBattleSettlement(new SettlementInput(
+                    playerId, battleId, seasonId, teamSize,
+                    RankedMatchRatingStatus.RANKED_MATCH_RATING_VOID,
+                    eBattleOutcome.BATTLE_OUTCOME_ONGOING,
+                    0, 0, false, false, 0L,
+                    p != null ? p.getCharacterPresetId() : tables.rule().getDefaultCharacterPresetId(),
+                    p != null ? p.getPetPresetId() : tables.rule().getDefaultPetPresetId()));
+        }
+    }
+
+    /** 换季第 1 步（幂等）：将当前 ACTIVE 赛季置为 SETTLING，阻断旧季新局准入；已成局仍回流旧季结算。 */
+    public MatchRankedSeasonRow beginSeasonRollover(int seasonId) throws SQLException {
+        try (Connection c = dataSource.getConnection()) {
+            c.setAutoCommit(false);
+            c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            try {
+                MatchRankedSeasonRow cur = readSeasonById(c, seasonId)
+                        .orElseThrow(() -> new SQLException("赛季不存在 season=" + seasonId));
+                if (cur.getState() == RankedSeasonState.RANKED_SEASON_STATE_ACTIVE_VALUE) {
+                    try (PreparedStatement ps = c.prepareStatement(
+                            "UPDATE match_ranked_season SET state=? WHERE season_id=?")) {
+                        ps.setInt(1, RankedSeasonState.RANKED_SEASON_STATE_SETTLING_VALUE);
+                        ps.setInt(2, seasonId);
+                        ps.executeUpdate();
+                    }
+                    cur = cur.toBuilder().setState(RankedSeasonState.RANKED_SEASON_STATE_SETTLING_VALUE).build();
+                }
+                c.commit();
+                return cur;
+            } catch (Exception e) {
+                rollbackQuietly(c, e);
+                throw e;
+            }
+        }
+    }
+
+    /**
+     * 换季第 2 步（幂等可恢复）：对 SETTLING 赛季执行封榜钩子、按 (rating DESC, qualified_at_ms ASC, player_id ASC)
+     * 落定最终名次与荣誉（榜首须 >= 无双线 185000，否则榜首空缺）、旧季置 CLOSED 并开启 S+1（Elo 由 match_rating 继承，不预写新季榜）。
+     */
+    public MatchRankedSeasonRow sealSeasonAndOpenNext(int seasonId, Map<Long, String> playerNames,
+                                                      RankFreezeHook freezeHook) throws Exception {
+        MatchRankedSeasonRow cur;
+        try (Connection c = dataSource.getConnection()) {
+            cur = readSeasonById(c, seasonId)
+                    .orElseThrow(() -> new SQLException("赛季不存在 season=" + seasonId));
+        }
+        if (cur.getState() == RankedSeasonState.RANKED_SEASON_STATE_ACTIVE_VALUE) {
+            cur = beginSeasonRollover(seasonId);
+        }
+        if (freezeHook != null && !cur.getRankBoardSealed()) {
+            freezeHook.freeze(cur);
+        }
+        try (Connection c = dataSource.getConnection()) {
+            c.setAutoCommit(false);
+            c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            try {
+                MatchRankedSeasonRow locked = readSeasonByIdForUpdate(c, seasonId)
+                        .orElseThrow(() -> new SQLException("赛季不存在 season=" + seasonId));
+                int nextId = seasonId + 1;
+                Optional<MatchRankedSeasonRow> alreadyNext = readSeasonById(c, nextId);
+                if (locked.getState() == RankedSeasonState.RANKED_SEASON_STATE_CLOSED_VALUE && alreadyNext.isPresent()) {
+                    c.commit();
+                    return alreadyNext.get();
+                }
+                long now = clockMs.getAsLong();
+                List<MatchRankedPlayerSeasonRow> qualified = new ArrayList<>();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT season_id,player_id,qualified,rating_centi,peak_rating_centi,valid_matches,wins,losses,draws,qualified_at_ms,milestone_bits,final_rank,champion_awarded,updated_ms "
+                                + "FROM match_ranked_player_season WHERE season_id=? AND qualified=1")) {
+                    ps.setInt(1, seasonId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            qualified.add(scanPlayerSeason(rs));
+                        }
+                    }
+                }
+                qualified.sort((a, b) -> {
+                    int scoreCmp = Long.compare(b.getRatingCenti(), a.getRatingCenti());
+                    if (scoreCmp != 0) return scoreCmp;
+                    int timeCmp = Long.compareUnsigned(a.getQualifiedAtMs(), b.getQualifiedAtMs());
+                    if (timeCmp != 0) return timeCmp;
+                    return Long.compareUnsigned(a.getPlayerId(), b.getPlayerId());
+                });
+                long wushuangMin = Integer.toUnsignedLong(tables.rule().getTierWushuangCenti());
+                long champId = 0L;
+                String champName = "";
+                long champScore = 0L;
+                if (!qualified.isEmpty() && qualified.getFirst().getRatingCenti() >= wushuangMin) {
+                    champId = qualified.getFirst().getPlayerId();
+                    champScore = qualified.getFirst().getRatingCenti();
+                    champName = playerNames == null ? "" : playerNames.getOrDefault(champId, "");
+                }
+                for (int i = 0; i < qualified.size(); i++) {
+                    MatchRankedPlayerSeasonRow row = qualified.get(i);
+                    long rankPos = i + 1L;
+                    boolean isChamp = champId != 0L && row.getPlayerId() == champId;
+                    RankedTier peakTier = tables.tierFor(row.getPeakRatingCenti(), true);
+                    if (peakTier == RankedTier.RANKED_TIER_TIANSHU || peakTier == RankedTier.RANKED_TIER_WUSHUANG) {
+                        String tierCode = peakTier == RankedTier.RANKED_TIER_WUSHUANG ? "wushuang" : "tianshu";
+                        grantReward(c, row.getPlayerId(), seasonId, RankedRewardKind.RANKED_REWARD_TIER_BADGE,
+                                peakTier.getNumber(), locked.getSeasonKey() + "_tier_badge_" + tierCode, now);
+                        grantReward(c, row.getPlayerId(), seasonId, RankedRewardKind.RANKED_REWARD_TIER_TITLE,
+                                peakTier.getNumber(), locked.getSeasonKey() + "_tier_title_" + tierCode, now);
+                    }
+                    if (isChamp) {
+                        grantReward(c, row.getPlayerId(), seasonId, RankedRewardKind.RANKED_REWARD_CHAMPION_INSCRIPTION,
+                                RankedTier.RANKED_TIER_WUSHUANG_VALUE, locked.getSeasonKey() + "_champion_inscription", now);
+                    }
+                    upsertPlayerSeason(c, row.toBuilder()
+                            .setFinalRank(rankPos)
+                            .setChampionAwarded(isChamp)
+                            .setUpdatedMs(now)
+                            .build());
+                }
+                try (PreparedStatement upd = c.prepareStatement(
+                        "UPDATE match_ranked_season SET state=?,champion_player_id=?,champion_name=?,champion_rating_centi=?,rank_board_sealed=1 WHERE season_id=?")) {
+                    upd.setInt(1, RankedSeasonState.RANKED_SEASON_STATE_CLOSED_VALUE);
+                    upd.setObject(2, PbMysql.uint64(champId));
+                    upd.setString(3, champName);
+                    upd.setLong(4, champScore);
+                    upd.setInt(5, seasonId);
+                    upd.executeUpdate();
+                }
+                if (alreadyNext.isPresent()) {
+                    c.commit();
+                    return alreadyNext.get();
+                }
+                RankedRuleTable rule = tables.rule();
+                long start = now;
+                long end = start + Integer.toUnsignedLong(rule.getSeasonDurationDays()) * MILLIS_PER_DAY;
+                MatchRankedSeasonRow nextSeason = MatchRankedSeasonRow.newBuilder()
+                        .setSeasonId(nextId)
+                        .setSeasonKey("s" + nextId)
+                        .setSeasonName("第" + nextId + "赛季")
+                        .setRankGeneration(Integer.toUnsignedLong(nextId))
+                        .setRuleVersion(rule.getRuleVersion())
+                        .setState(RankedSeasonState.RANKED_SEASON_STATE_ACTIVE_VALUE)
+                        .setStartMs(start)
+                        .setEndMs(end)
+                        .setBattleConfigId(rule.getBattleConfigId())
+                        .build();
+                try (PreparedStatement ins = c.prepareStatement(
+                        "INSERT INTO match_ranked_season(season_id,season_key,season_name,rank_generation,rule_version,state,start_ms,end_ms,battle_config_id,champion_player_id,champion_name,champion_rating_centi,rank_board_sealed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                    ins.setInt(1, nextSeason.getSeasonId());
+                    ins.setString(2, nextSeason.getSeasonKey());
+                    ins.setString(3, nextSeason.getSeasonName());
+                    ins.setObject(4, PbMysql.uint64(nextSeason.getRankGeneration()));
+                    ins.setInt(5, nextSeason.getRuleVersion());
+                    ins.setInt(6, nextSeason.getState());
+                    ins.setObject(7, PbMysql.uint64(nextSeason.getStartMs()));
+                    ins.setObject(8, PbMysql.uint64(nextSeason.getEndMs()));
+                    ins.setInt(9, nextSeason.getBattleConfigId());
+                    ins.setObject(10, PbMysql.uint64(0L));
+                    ins.setString(11, "");
+                    ins.setLong(12, 0L);
+                    ins.setBoolean(13, false);
+                    ins.executeUpdate();
+                }
+                c.commit();
+                return nextSeason;
+            } catch (Exception e) {
+                rollbackQuietly(c, e);
+                throw e;
+            }
+        }
+    }
+
+    /** 崩溃恢复入口：若当前最新赛季处于 SETTLING（或已过 end_ms），自动完成封榜并开启下一季。 */
+    public MatchRankedSeasonRow recoverSeasonRollover(Map<Long, String> playerNames,
+                                                      RankFreezeHook freezeHook) throws Exception {
+        MatchRankedSeasonRow cur = ensureActiveSeason();
+        long now = clockMs.getAsLong();
+        if (cur.getState() == RankedSeasonState.RANKED_SEASON_STATE_SETTLING_VALUE
+                || (cur.getState() == RankedSeasonState.RANKED_SEASON_STATE_ACTIVE_VALUE
+                && cur.getEndMs() != 0L && Long.compareUnsigned(now, cur.getEndMs()) >= 0)) {
+            return sealSeasonAndOpenNext(cur.getSeasonId(), playerNames, freezeHook);
+        }
+        return cur;
     }
 
     public Optional<RankedBattleSettlementView> getBattleResult(long playerId, long battleId) throws SQLException {
@@ -441,6 +864,32 @@ public final class RankedStore {
             return readSeasonById(c, 1).orElseThrow(() -> dup);
         }
         return s1;
+    }
+
+    private Optional<MatchRankedSeasonRow> readSeasonByIdForUpdate(Connection c, int seasonId) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT season_id,season_key,season_name,rank_generation,rule_version,state,start_ms,end_ms,battle_config_id,champion_player_id,champion_name,champion_rating_centi,rank_board_sealed "
+                        + "FROM match_ranked_season WHERE season_id=? FOR UPDATE")) {
+            ps.setInt(1, seasonId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(scanSeason(rs)) : Optional.empty();
+            }
+        }
+    }
+
+    /** 跨季沿用 match_rating 权威 Elo；无记录或表未建时回落 150000（1500 分）。 */
+    private long readCarryOverRating(Connection c, long playerId) {
+        try (PreparedStatement ps = c.prepareStatement("SELECT rating_centi FROM match_rating WHERE player_id=?")) {
+            ps.setObject(1, PbMysql.uint64(playerId));
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getLong(1);
+                }
+            }
+        } catch (SQLException ignored) {
+            // 仅隔离单测环境未建 match_rating 表时回落默认分
+        }
+        return RankedTables.INITIAL_RATING_CENTI;
     }
 
     private Optional<MatchRankedSeasonRow> readSeasonById(Connection c, int seasonId) throws SQLException {
@@ -630,6 +1079,24 @@ public final class RankedStore {
 
     private RankedRewardEntitlement grantReward(Connection c, long playerId, int seasonId, RankedRewardKind kind,
                                                 int tierValue, String itemCode, long nowMs) throws SQLException {
+        try (PreparedStatement check = c.prepareStatement(
+                "SELECT item_code,granted_at_ms FROM match_ranked_reward WHERE player_id=? AND season_id=? AND kind=? AND tier_value=?")) {
+            check.setObject(1, PbMysql.uint64(playerId));
+            check.setInt(2, seasonId);
+            check.setInt(3, kind.getNumber());
+            check.setInt(4, tierValue);
+            try (ResultSet rs = check.executeQuery()) {
+                if (rs.next()) {
+                    return RankedRewardEntitlement.newBuilder()
+                            .setSeasonId(seasonId)
+                            .setKind(kind)
+                            .setTierValue(tierValue)
+                            .setItemCode(rs.getString(1))
+                            .setGrantedAtMs(Long.parseUnsignedLong(rs.getString(2)))
+                            .build();
+                }
+            }
+        }
         try (PreparedStatement ins = c.prepareStatement(
                 "INSERT INTO match_ranked_reward(player_id,season_id,kind,tier_value,item_code,granted_at_ms) VALUES(?,?,?,?,?,?)")) {
             ins.setObject(1, PbMysql.uint64(playerId));
@@ -779,11 +1246,11 @@ public final class RankedStore {
                 .build();
     }
 
-    private static MatchRankedPlayerSeasonRow defaultProgress(int seasonId, long playerId) {
+    private static MatchRankedPlayerSeasonRow defaultProgress(int seasonId, long playerId, long ratingCenti) {
         return MatchRankedPlayerSeasonRow.newBuilder()
                 .setSeasonId(seasonId)
                 .setPlayerId(playerId)
-                .setRatingCenti(RankedTables.INITIAL_RATING_CENTI)
+                .setRatingCenti(ratingCenti)
                 .setPeakRatingCenti(0L)
                 .build();
     }

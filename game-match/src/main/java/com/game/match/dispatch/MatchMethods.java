@@ -47,14 +47,29 @@ public final class MatchMethods {
     public static final String SAVE_RANKED_PRESET = "SaveRankedPreset";
     public static final String UPDATE_RANKED_COSMETIC = "UpdateRankedCosmetic";
     public static final String GET_RANKED_BATTLE_RESULT = "GetRankedBattleResult";
+    /** 465–475：全服赛季战队锦标赛《群仙问道赛》V1 客户端 11 条协议。 */
+    public static final String GET_TOURNAMENT_OVERVIEW = "GetTournamentOverview";
+    public static final String CREATE_TOURNAMENT_SQUAD = "CreateTournamentSquad";
+    public static final String INVITE_TOURNAMENT_MEMBER = "InviteTournamentMember";
+    public static final String RESPOND_TOURNAMENT_INVITE = "RespondTournamentInvite";
+    public static final String LEAVE_TOURNAMENT_SQUAD = "LeaveTournamentSquad";
+    public static final String UPDATE_TOURNAMENT_LINEUP = "UpdateTournamentLineup";
+    public static final String REGISTER_TOURNAMENT_SQUAD = "RegisterTournamentSquad";
+    public static final String LIST_TOURNAMENT_STANDINGS = "ListTournamentStandings";
+    public static final String START_TOURNAMENT_MATCH = "StartTournamentMatch";
+    public static final String CHEER_TOURNAMENT_SQUAD = "CheerTournamentSquad";
+    public static final String CLAIM_TOURNAMENT_REWARD = "ClaimTournamentReward";
 
-    /** 全部 22 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
+    /** 全部 33 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
     public static final List<String> ALL = List.of(JOIN_QUEUE, CANCEL_QUEUE, GET_QUEUE_STATUS, CHALLENGE_PLAYER, RESPOND_CHALLENGE,
             NOTIFY_CHALLENGE_INVITE, NOTIFY_CHALLENGE_RESULT, WATCH_BATTLE, LIST_WATCHABLE_BATTLES, REQUEST_BATTLE_TICKET,
             GET_NETWORK_PROBE_PLAN, COMMIT_NETWORK_PROBE,
             LIST_BATTLE_REPORTS, GET_BATTLE_REPORT,
             LIST_BATTLE_SCRIPTS, SUBMIT_BATTLE_SCRIPT, DELETE_BATTLE_SCRIPT, SET_BATTLE_SCRIPT_LOADOUT,
-            GET_RANKED_PROFILE, SAVE_RANKED_PRESET, UPDATE_RANKED_COSMETIC, GET_RANKED_BATTLE_RESULT);
+            GET_RANKED_PROFILE, SAVE_RANKED_PRESET, UPDATE_RANKED_COSMETIC, GET_RANKED_BATTLE_RESULT,
+            GET_TOURNAMENT_OVERVIEW, CREATE_TOURNAMENT_SQUAD, INVITE_TOURNAMENT_MEMBER, RESPOND_TOURNAMENT_INVITE,
+            LEAVE_TOURNAMENT_SQUAD, UPDATE_TOURNAMENT_LINEUP, REGISTER_TOURNAMENT_SQUAD, LIST_TOURNAMENT_STANDINGS,
+            START_TOURNAMENT_MATCH, CHEER_TOURNAMENT_SQUAD, CLAIM_TOURNAMENT_REWARD);
 
     private MatchMethods() {
     }

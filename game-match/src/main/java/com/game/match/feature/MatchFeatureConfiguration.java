@@ -14,6 +14,9 @@ import com.game.match.script.BattleScriptResolver;
 import com.game.match.script.BattleScriptService;
 import com.game.match.script.BattleScriptStore;
 import com.game.match.script.BattleScriptValidator;
+import com.game.match.tournament.TournamentService;
+import com.game.match.tournament.TournamentStore;
+import com.game.match.tournament.TournamentTables;
 import com.game.table.ConfigTables;
 import java.sql.SQLException;
 import java.util.List;
@@ -152,5 +155,78 @@ public class MatchFeatureConfiguration {
     @Bean
     public MatchMethodHandler getRankedBattleResultHandler(RankedService service) {
         return service.clientHandlers().get(3);
+    }
+
+    // ---- 全服赛季战队锦标赛《群仙问道赛》V1（465–475） ----
+
+    @Bean
+    public TournamentTables tournamentTables(ConfigTables config) {
+        return TournamentTables.from(config);
+    }
+
+    @Bean
+    public TournamentStore tournamentStore(DataSource dataSource, TournamentTables tables, FeatureSchemaReady schemaReady) {
+        return new TournamentStore(dataSource, tables, System::currentTimeMillis);
+    }
+
+    @Bean
+    public TournamentService tournamentService(TournamentStore store, MatchIds matchIds,
+                                               ObjectProvider<TournamentService.MatchLauncher> launcher) {
+        return new TournamentService(store, () -> matchIds.nextBattleId().orElse(0L), launcher.getIfAvailable());
+    }
+
+    @Bean
+    public MatchMethodHandler getTournamentOverviewHandler(TournamentService service) {
+        return service.clientHandlers().get(0);
+    }
+
+    @Bean
+    public MatchMethodHandler createTournamentSquadHandler(TournamentService service) {
+        return service.clientHandlers().get(1);
+    }
+
+    @Bean
+    public MatchMethodHandler inviteTournamentMemberHandler(TournamentService service) {
+        return service.clientHandlers().get(2);
+    }
+
+    @Bean
+    public MatchMethodHandler respondTournamentInviteHandler(TournamentService service) {
+        return service.clientHandlers().get(3);
+    }
+
+    @Bean
+    public MatchMethodHandler leaveTournamentSquadHandler(TournamentService service) {
+        return service.clientHandlers().get(4);
+    }
+
+    @Bean
+    public MatchMethodHandler updateTournamentLineupHandler(TournamentService service) {
+        return service.clientHandlers().get(5);
+    }
+
+    @Bean
+    public MatchMethodHandler registerTournamentSquadHandler(TournamentService service) {
+        return service.clientHandlers().get(6);
+    }
+
+    @Bean
+    public MatchMethodHandler listTournamentStandingsHandler(TournamentService service) {
+        return service.clientHandlers().get(7);
+    }
+
+    @Bean
+    public MatchMethodHandler startTournamentMatchHandler(TournamentService service) {
+        return service.clientHandlers().get(8);
+    }
+
+    @Bean
+    public MatchMethodHandler cheerTournamentSquadHandler(TournamentService service) {
+        return service.clientHandlers().get(9);
+    }
+
+    @Bean
+    public MatchMethodHandler claimTournamentRewardHandler(TournamentService service) {
+        return service.clientHandlers().get(10);
     }
 }

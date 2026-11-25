@@ -28,8 +28,9 @@ class SpectateVisibilityPolicyTest {
     void 只有PVE单人与PVE组队公开_计分局切磋人数档PVP未开放与未填一律私密() {
         assertThat(SpectateVisibilityPolicy.decide(MatchMode.MATCH_MODE_PVE_SOLO, null)).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         assertThat(SpectateVisibilityPolicy.decide(MatchMode.MATCH_MODE_PVE_TEAM, null)).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
+        assertThat(SpectateVisibilityPolicy.decide(MatchMode.MATCH_MODE_SEASON_TOURNAMENT, null)).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         for (MatchMode closed : List.of(MatchMode.MATCH_MODE_1V1, MatchMode.MATCH_MODE_5V5, MatchMode.MATCH_MODE_PVP_CHALLENGE,
-                MatchMode.MATCH_MODE_PVP_TEAM, MatchMode.MATCH_MODE_3V3, MatchMode.MATCH_MODE_UNSPECIFIED)) {
+                MatchMode.MATCH_MODE_PVP_TEAM, MatchMode.MATCH_MODE_POLARITY_5V5, MatchMode.MATCH_MODE_3V3, MatchMode.MATCH_MODE_UNSPECIFIED)) {
             assertThat(SpectateVisibilityPolicy.decide(closed, null)).as(closed.name()).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);
         }
     }

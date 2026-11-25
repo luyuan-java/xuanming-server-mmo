@@ -80,6 +80,7 @@ public final class MailStore {
             case "rank" -> 3;
             case "trade" -> 4;
             case "battle" -> 5;
+            case "match" -> 6;
             default -> 0;
         };
     }

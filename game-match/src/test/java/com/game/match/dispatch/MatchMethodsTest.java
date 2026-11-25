@@ -47,6 +47,15 @@ class MatchMethodsTest {
         expected.put(MatchMethods.SAVE_RANKED_PRESET, 449);
         expected.put(MatchMethods.UPDATE_RANKED_COSMETIC, 450);
         expected.put(MatchMethods.GET_RANKED_BATTLE_RESULT, 451);
+        for (String tournamentMethod : java.util.List.of(
+                MatchMethods.GET_TOURNAMENT_OVERVIEW, MatchMethods.CREATE_TOURNAMENT_SQUAD,
+                MatchMethods.INVITE_TOURNAMENT_MEMBER, MatchMethods.RESPOND_TOURNAMENT_INVITE,
+                MatchMethods.LEAVE_TOURNAMENT_SQUAD, MatchMethods.UPDATE_TOURNAMENT_LINEUP,
+                MatchMethods.REGISTER_TOURNAMENT_SQUAD, MatchMethods.LIST_TOURNAMENT_STANDINGS,
+                MatchMethods.START_TOURNAMENT_MATCH, MatchMethods.CHEER_TOURNAMENT_SQUAD,
+                MatchMethods.CLAIM_TOURNAMENT_REWARD)) {
+            expected.put(tournamentMethod, REGISTRY.requireId(MatchMethods.SERVICE, tournamentMethod));
+        }
 
         assertThat(MatchMethods.ALL).containsExactlyInAnyOrderElementsOf(expected.keySet());
         expected.forEach((method, id) ->

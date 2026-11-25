@@ -153,9 +153,19 @@ public final class RatingStore {
     public interface CommitHook {
         boolean alreadyApplied(Connection c,BattleResultEvent event)throws SQLException;
         void append(Connection c,BattleResultEvent event,Map<Long,Long> next,long stamp)throws SQLException;
+        default void appendRanked(Connection c,BattleResultEvent event,
+                                  com.game.match.ranked.RankedStore.SeasonCommitResult commit,long stamp)throws SQLException {
+            if (!commit.qualifiedScores().isEmpty()) {
+                append(c, event, commit.qualifiedScores(), stamp);
+            }
+        }
     }
     private CommitHook commitHook;
+    private com.game.match.ranked.RankedStore rankedStore;
+    private com.game.match.tournament.TournamentStore tournamentStore;
     public RatingStore withCommitHook(CommitHook hook){this.commitHook=hook;return this;}
+    public RatingStore withRankedStore(com.game.match.ranked.RankedStore store){this.rankedStore=store;return this;}
+    public RatingStore withTournamentStore(com.game.match.tournament.TournamentStore store){this.tournamentStore=store;return this;}
 
     /**
      * @param connections     取连接
@@ -187,6 +197,16 @@ public final class RatingStore {
      */
     public Result apply(BattleResultEvent event) {
         int mode = event.getMatchMode();
+        if (mode == com.game.match.support.MatchModes.SEASON_TOURNAMENT && tournamentStore != null) {
+            try {
+                boolean applied = tournamentStore.applyBattleResult(event, drawRoundCapFor.applyAsInt(event.getBattleConfigId()));
+                metrics.ratingUpdate(mode, applied ? RatingOutcome.APPLIED : RatingOutcome.DUPLICATE);
+                return applied ? new Result(Outcome.APPLIED, null, 0, false) : Result.duplicate();
+            } catch (SQLException e) {
+                metrics.ratingUpdate(mode, RatingOutcome.ERROR);
+                throw new StoreException("锦标赛战果入账失败 battle=" + battle(event), e);
+            }
+        }
         EloRules.Verdict verdict = EloRules.judge(event, drawRoundCapFor);
         if (verdict instanceof EloRules.Verdict.Ignored ignored) {
             metrics.ratingUpdate(mode, RatingOutcome.IGNORED);
@@ -269,7 +289,15 @@ public final class RatingStore {
                 }
                 long deltaACenti = settlement.deltaACenti();
                 setDelta(c, battleId, deltaACenti);
-                if(commitHook!=null)commitHook.append(c,event,settlement.nextCenti(),now);
+                if (rankedStore != null && event.getMatchMode() == com.game.match.support.MatchModes.PVP_TEAM
+                        && event.hasRankedContext() && event.getRankedContext().getSeasonId() != 0) {
+                    var rankedCommit = rankedStore.recordBattleResultInTx(c, event, pre, settlement.nextCenti(), now);
+                    if (commitHook != null) {
+                        commitHook.appendRanked(c, event, rankedCommit, now);
+                    }
+                } else if (commitHook != null) {
+                    commitHook.append(c, event, settlement.nextCenti(), now);
+                }
                 c.commit();
                 finished = true;
                 log.info("[rating] 对局入账 battle={} mode={} outcome={} rounds={} 回合打满按平局={} avgA={} avgB={} deltaA={} teamA={} teamB={}",

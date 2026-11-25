@@ -291,7 +291,8 @@ public final class SeasonService {
         }
         return switch (settlement.getMatchMode()) {
             case MatchMode.MATCH_MODE_PVE_SOLO_VALUE, MatchMode.MATCH_MODE_PVE_TEAM_VALUE -> playerWon(settlement);
-            case MatchMode.MATCH_MODE_1V1_VALUE, MatchMode.MATCH_MODE_5V5_VALUE, MatchMode.MATCH_MODE_PVP_TEAM_VALUE -> true;
+            case MatchMode.MATCH_MODE_1V1_VALUE, MatchMode.MATCH_MODE_5V5_VALUE -> true;
+            case MatchMode.MATCH_MODE_PVP_TEAM_VALUE -> !settlement.getCompetitiveRanked() || settlement.getParticipated();
             default -> false;
         };
     }

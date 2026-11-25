@@ -775,6 +775,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         if (role == eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER) {
             // 观众已建起直连：撤掉登记 / 断线宽限
             cancelObserverGrace(room, playerId);
+        } else if (role == eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT) {
+            room.engine.markPlayerEntered(playerId);
         }
         return OptionalInt.of(routing.getSessionId());
     }
@@ -863,6 +865,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         if (!member) {
             // 回默认状态（battle_id = 0，0 字节），不回错误码：客户端据此丢掉本地战斗界面
             return BattleStateS2C.getDefaultInstance();
+        }
+        if (room.isParticipant(playerId)) {
+            room.engine.markPlayerEntered(playerId);
         }
         BattleStateS2C full = fullState(room);
         ViewerState view = room.isParticipant(playerId)
@@ -1068,12 +1073,16 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                                    TurnResultS2C finalTurn,BattleStateS2C visibleBefore,RoomEnd endReason){
         if(room.pendingCompletion!=null)return;
         room.cancelTimers();room.actionDeadlineMs=0;
+        long finishedAtMs = clock.epochMillis();
         List<BattleSettlementData> settlements=new ArrayList<>();
         for(long player:room.routingByPlayer.keySet())settlements.add(room.engine.buildSettlement(player).toBuilder()
-                .setBattleId(room.battleId).setOutcome(outcome).build());
-        BattleResultEvent event=BattleResultAssembler.assemble(room.battleId,room.matchMode,room.battleConfigId,
-                room.activityContext,outcome,settlements,clock.epochMillis()).toBuilder()
-                .addAllSettlements(settlements).setSettlementFormatVersion(1).build();
+                .setBattleId(room.battleId).setOutcome(outcome)
+                .setMatchMode(room.matchMode).setBattleConfigId(room.battleConfigId).setFinishedAtMs(finishedAtMs).build());
+        BattleResultEvent.Builder eventBuilder=BattleResultAssembler.assemble(room.battleId,room.matchMode,room.battleConfigId,
+                room.activityContext,outcome,settlements,finishedAtMs).toBuilder()
+                .addAllSettlements(settlements).setSettlementFormatVersion(1);
+        attachRankedResultFacts(room, eventBuilder);
+        BattleResultEvent event = eventBuilder.build();
         var pending=new BattleRoom.PendingCompletion(event,finalTurn,visibleBefore.toBuilder().setActionDeadlineMs(0).build(),reason,endReason);
         room.pendingCompletion=pending;
         attemptResultCommit(room,pending);
@@ -1153,12 +1162,14 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
     private void finishBattle(BattleRoom room,eBattleOutcome outcome,eSpectateEndReason spectateReason,BattleResultEvent committedEvent){
         room.cancelTimers();
+        long finishedAtMs = clock.epochMillis();
         List<BattleSettlementData> settlements = new ArrayList<>(room.routingByPlayer.size());
         for (Map.Entry<Long, BattleRouting> entry : room.routingByPlayer.entrySet()) {
             long playerId = entry.getKey();
             // 强制平局路径引擎结算里还是 ONGOING：以节点判定为准统一盖章
             BattleSettlementData settlement = committedEvent == null
-                    ? room.engine.buildSettlement(playerId).toBuilder().setOutcome(outcome).setBattleId(room.battleId).build()
+                    ? room.engine.buildSettlement(playerId).toBuilder().setOutcome(outcome).setBattleId(room.battleId)
+                            .setMatchMode(room.matchMode).setBattleConfigId(room.battleConfigId).setFinishedAtMs(finishedAtMs).build()
                     : committedEvent.getSettlementsList().stream().filter(value -> value.getPlayerId() == playerId)
                             .findFirst().orElseThrow(() -> new IllegalStateException("已提交原件缺少玩家结算"));
             settlements.add(settlement);
@@ -1171,8 +1182,15 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         notifySpectateEndAndClose(room, spectateReason, outcome, Disconnect.BATTLE_CLOSED);
         // 终局包已全部写出：关直连（应答 → FIN 由直连面保证，R3）
         closeDirectConnections(room, Disconnect.BATTLE_CLOSED);
-        BattleResultEvent event = committedEvent!=null?committedEvent:BattleResultAssembler.assemble(room.battleId, room.matchMode, room.battleConfigId, room.activityContext,
-                outcome, settlements, clock.epochMillis());
+        BattleResultEvent event;
+        if (committedEvent != null) {
+            event = committedEvent;
+        } else {
+            BattleResultEvent.Builder eventBuilder = BattleResultAssembler.assemble(room.battleId, room.matchMode, room.battleConfigId, room.activityContext,
+                    outcome, settlements, finishedAtMs).toBuilder();
+            attachRankedResultFacts(room, eventBuilder);
+            event = eventBuilder.build();
+        }
         if(committedEvent==null)dispatchResult(room,event);
         else if(room.originalCreate.getOutcomeProtocolVersion()!=1&&BattleResultAssembler.isActivity(room.activityContext)){
             try{deps.activityResults().dispatchCommitted(event);}catch(RuntimeException failure){log.error("已提交结果的兼容补拉投影失败",failure);}
@@ -1180,6 +1198,16 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         log.info("战斗结束 battle_id={} outcome={} players={} teams={} total_rounds={} fled={} dead={} origin={} activity_kind={}",
                 Long.toUnsignedString(room.battleId), outcome, room.routingByPlayer.size(), event.getTeamsCount(), event.getTotalRounds(),
                 event.getFledPlayerIdsCount(), event.getDeadPlayerIdsCount(), room.origin, room.activityContext.getKindValue());
+    }
+
+    private static void attachRankedResultFacts(BattleRoom room, BattleResultEvent.Builder eventBuilder) {
+        if (room.originalCreate != null && room.originalCreate.hasRankedContext()
+                && room.originalCreate.getRankedContext().getSeasonId() != 0) {
+            eventBuilder.setRankedContext(room.originalCreate.getRankedContext());
+            for (long playerId : room.routingByPlayer.keySet()) {
+                eventBuilder.addParticipationFacts(room.engine.buildParticipationFact(playerId));
+            }
+        }
     }
 
     /**

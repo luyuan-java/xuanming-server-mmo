@@ -89,6 +89,7 @@ public final class ContractSync {
     private static final List<String> MANAGED = List.of(PROTO_OUT, REGISTRY_OUT, TABLE_PROTO_OUT, TABLE_CONSTANTS_OUT,
             TIP_FAULTS_OUT, TABLE_DATA_OUT, SOURCE_INFO_OUT);
     private static final List<String> MAP_MANAGED = List.of(TABLE_DATA_OUT + "/basescene.pb",
+            TABLE_DATA_OUT + "/mysterymerchantspot.pb",
             TABLE_DATA_OUT + "/manifest.json", NAVIGATION_OUT, SOURCE_INFO_OUT);
 
     private ContractSync() {
@@ -235,33 +236,41 @@ public final class ContractSync {
             throw new IllegalArgumentException("地图来源必须是真实的 40 位提交号");
         }
         String sourceManifest = readText(source.resolve("generated/tables/manifest.json"));
-        String destinationManifest = readText(out.resolve(TABLE_DATA_OUT + "/manifest.json"));
-        JsonSpan sourceScene = namedTable(sourceManifest, "BaseScene");
-        JsonSpan destinationScene = namedTable(destinationManifest, "BaseScene");
-        String sourceEntry = sourceManifest.substring(sourceScene.start(), sourceScene.end());
-        String merged = destinationManifest.substring(0, destinationScene.start()) + sourceEntry
-                + destinationManifest.substring(destinationScene.end());
-        String digest = manifestContentDigest(merged);
-        merged = merged.replaceFirst("(\"content_digest\"\\s*:\\s*\")[^\"]+(\")", "$1" + digest + "$2");
-
-        Path binary = source.resolve("generated/tables/basescene.pb");
-        String binaryHash = sha256(binary);
-        boolean matched = false;
-        for (JsonSpan artifact : objectsInArray(sourceEntry, "artifacts")) {
-            String value = sourceEntry.substring(artifact.start(), artifact.end());
-            if ("binary".equals(manifestValue(value, "kind")) && "basescene.pb".equals(manifestValue(value, "file"))) {
-                matched = binaryHash.equals(manifestValue(value, "sha256"));
+        String merged = readText(out.resolve(TABLE_DATA_OUT + "/manifest.json"));
+        String baseSceneBinaryHash = null;
+        String baseSceneEntry = null;
+        for (String[] pair : new String[][]{{"BaseScene", "basescene.pb"}, {"MysteryMerchantSpot", "mysterymerchantspot.pb"}}) {
+            String tableName = pair[0];
+            String fileName = pair[1];
+            JsonSpan sourceSpan = namedTable(sourceManifest, tableName);
+            JsonSpan destinationSpan = namedTable(merged, tableName);
+            String entry = sourceManifest.substring(sourceSpan.start(), sourceSpan.end());
+            merged = merged.substring(0, destinationSpan.start()) + entry + merged.substring(destinationSpan.end());
+            Path binary = source.resolve("generated/tables/" + fileName);
+            String binaryHash = sha256(binary);
+            boolean matched = false;
+            for (JsonSpan artifact : objectsInArray(entry, "artifacts")) {
+                String value = entry.substring(artifact.start(), artifact.end());
+                if ("binary".equals(manifestValue(value, "kind")) && fileName.equals(manifestValue(value, "file"))) {
+                    matched = binaryHash.equals(manifestValue(value, "sha256"));
+                }
+            }
+            if (!matched) throw new IllegalArgumentException("地图 " + fileName + " 与源 manifest SHA256 不一致");
+            Files.copy(binary, out.resolve(TABLE_DATA_OUT + "/" + fileName), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            if ("BaseScene".equals(tableName)) {
+                baseSceneBinaryHash = binaryHash;
+                baseSceneEntry = entry;
             }
         }
-        if (!matched) throw new IllegalArgumentException("地图 BaseScene.pb 与源 manifest SHA256 不一致");
-        Files.copy(binary, out.resolve(TABLE_DATA_OUT + "/basescene.pb"), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        String digest = manifestContentDigest(merged);
+        merged = merged.replaceFirst("(\"content_digest\"\\s*:\\s*\")[^\"]+(\")", "$1" + digest + "$2");
         writeText(out.resolve(TABLE_DATA_OUT + "/manifest.json"), merged);
 
         Path navigationOut = out.resolve(NAVIGATION_OUT);
         cleanDir(navigationOut);
         Path navigationSource = source.resolve("data/scene_nav_bin/current_maps");
-        List<String> maps = new ArrayList<>(List.of("main", "island", "village"));
-        // 历史来源的渔村仍走旧栅格；所有新版版本化包（月汐湾、碧渊水宫等）自动同步，与旧包并存。
+        List<String> maps = new ArrayList<>();
+        // 自动扫描所有含 source.json + walkmask.txt 的主世界导航目录（旧版 150x150 已退役不再硬编码）。
         try (var walk = Files.walk(navigationSource)) {
             walk.filter(Files::isDirectory)
                     .map(dir -> navigationSource.relativize(dir).toString().replace('\\', '/'))
@@ -271,6 +280,11 @@ public final class ContractSync {
                     .sorted()
                     .forEach(maps::add);
         }
+        if (maps.isEmpty()) {
+            throw new IllegalArgumentException("地图导航源目录为空: " + navigationSource);
+        }
+        // 清理已下线旧地图历史校验键，避免 SOURCE.properties 残留孤儿条目。
+        info.keySet().removeIf(k -> k.startsWith("maps."));
         for (String map : maps) {
             for (String name : List.of("source.json", "walkmask.txt")) {
                 Path target = navigationOut.resolve(map).resolve(name);
@@ -283,8 +297,8 @@ public final class ContractSync {
         info.put("maps.source.manifest.sha256", sha256(source.resolve("generated/tables/manifest.json")));
         info.put("maps.table.data.commit", manifestValue(sourceManifest, "commit"));
         info.put("maps.table.data.dirty", manifestValue(sourceManifest, "data_dirty"));
-        info.put("maps.basescene.pb.sha256", binaryHash);
-        info.put("maps.basescene.entry.sha256", sha256(sourceEntry.getBytes(StandardCharsets.UTF_8)));
+        info.put("maps.basescene.pb.sha256", baseSceneBinaryHash);
+        info.put("maps.basescene.entry.sha256", sha256(baseSceneEntry.getBytes(StandardCharsets.UTF_8)));
         writeSourceInfo(out.resolve(SOURCE_INFO_OUT), info);
     }
 

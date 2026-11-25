@@ -16,6 +16,8 @@ public final class CurrentMapNavigation implements SceneNavigation {
     private static final String YUEXI_REVISION = "yuexi-bay-20261115";
     private static final String YUEXI_SOURCE_SHA = "99fec92614867c04f1c3cdd6bcf6e8bd0d3235d3b44409c3db6a3174951c8a86";
     static final String YUEXI_FOLDER = "village/" + YUEXI_REVISION;
+    static final String BIYUAN_FOLDER = "biyuan-water-palace/biyuan-body-20261123";
+    static final String BAJING_FOLDER = "island/bajingbody20261114";
     private static final int RESOLUTION = 150;
     private static final double CELL_SIZE = 2;
     private static final double BACKOFF = 0.05;
@@ -145,54 +147,6 @@ public final class CurrentMapNavigation implements SceneNavigation {
             throw new IllegalArgumentException("当前地图出生点不在可走地面上");
         }
         connectedDomains = labelConnectedDomains();
-    }
-
-    /** 仅启动或配置重载时读文件；运行中的场景逻辑线程不做 I/O。 */
-    public static CurrentMapNavigation load(Path root, String key) {
-        Path folder = root.resolve(key);
-        try {
-            JsonNode source = new ObjectMapper().readTree(Files.readAllBytes(folder.resolve("source.json")));
-            byte[] text = Files.readAllBytes(folder.resolve("walkmask.txt"));
-            byte[] packed = Base64.getDecoder().decode(text);
-            JsonNode rect = source.path("worldRect");
-            JsonNode point = source.path("spawnWorld");
-            int sceneId = switch (key) {
-                case "main" -> 1;
-                case "island" -> 2;
-                case "village" -> 3;
-                default -> throw new IllegalArgumentException("未知当前地图: " + key);
-            };
-            if (source.path("schemaVersion").asInt() != 1 || !key.equals(source.path("key").asText())
-                    || source.path("sceneId").asInt() != sceneId
-                    || source.path("walkmaskResolution").asInt() != RESOLUTION
-                    || source.path("cellSize").asDouble() != CELL_SIZE
-                    || rect.path("x").asDouble() != 50 || rect.path("y").asDouble() != 0
-                    || rect.path("width").asDouble() != 300 || rect.path("height").asDouble() != 300
-                    || !rect.path("x").isNumber() || !rect.path("y").isNumber()
-                    || !rect.path("width").isNumber() || !rect.path("height").isNumber()
-                    || !source.path("artStatus").asText().equals("layout_preview")
-                    || !source.path("navigationStatus").asText().equals("conservative_visible_ground")
-                    || !source.path("maskEncoding").asText().equals("base64-msb-first-row-major-top-to-bottom")
-                    || !sha256(text).equals(source.path("walkmaskSha256").asText())
-                    || !sha256(packed).equals(source.path("walkmaskPackedSha256").asText())
-                    || !point.path("x").isNumber() || !point.path("y").isNumber() || !point.path("z").isNumber()) {
-                throw new IllegalArgumentException("当前地图合同或 SHA256 不一致: " + folder);
-            }
-            Vec3 spawn = new Vec3(point.get("z").asDouble(), point.get("x").asDouble(), point.get("y").asDouble());
-            CurrentMapNavigation navigation = new CurrentMapNavigation(packed, spawn);
-            int count = 0;
-            for (int row = 0; row < RESOLUTION; row++) {
-                for (int col = 0; col < RESOLUTION; col++) {
-                    if (navigation.cell(col, row)) count++;
-                }
-            }
-            if (count != source.path("walkableCellCount").asInt()) {
-                throw new IllegalArgumentException("当前地图可走格计数不一致: " + folder);
-            }
-            return navigation;
-        } catch (IOException e) {
-            throw new UncheckedIOException("读取当前地图导航失败: " + folder, e);
-        }
     }
 
     /** schema 2 为新版主世界与隔离联调地图共用的矩形和位图格式。 */

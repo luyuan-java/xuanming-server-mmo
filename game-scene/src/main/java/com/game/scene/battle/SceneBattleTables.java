@@ -20,7 +20,13 @@ import java.util.Set;
  * @param fingerprint 战斗配表指纹（32 位小写 hex）
  */
 public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
-                                Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes) {
+                                Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes,
+                                RankedPresetRules.Tables ranked) {
+
+    public SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
+                             Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes) {
+        this(fingerprint, skills, castableSkills, battleUsableItems, classes, null);
+    }
 
     public SceneBattleTables {
         skills = Set.copyOf(skills);
@@ -48,7 +54,8 @@ public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Int
         for (ClassTable row : tables.classTable().all()) {
             classes.put(row.getId(), row);
         }
-        return new SceneBattleTables(BattleTableFingerprint.compute(tables), skills, castable, usable, classes);
+        return new SceneBattleTables(BattleTableFingerprint.compute(tables), skills, castable, usable, classes,
+                RankedPresetRules.Tables.from(tables));
     }
 
     /** 技能表里有这一行。 */

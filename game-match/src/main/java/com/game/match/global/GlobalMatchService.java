@@ -270,6 +270,38 @@ public final class GlobalMatchService implements AutoCloseable {
             if(mode==MatchModes.PVE_TEAM&&maximum==0)return MatchTips.joinRejected(MatchTip.JOIN_TEAM_SIZE_NOT_CONFIGURED);
             if(size<1) return MatchTips.joinRejected(mode==MatchModes.PVE_TEAM
                     ? MatchTip.JOIN_TEAM_SIZE_OVER_LIMIT : MatchTip.JOIN_MODE_NOT_OPEN);
+            if(mode==MatchModes.PVP_TEAM&&rankedStore!=null&&rankedTables!=null){
+                try{
+                    var season=rankedStore.ensureActiveSeason();
+                    if(season.getState()!=com.game.proto.match.RankedSeasonState.RANKED_SEASON_STATE_ACTIVE_VALUE){
+                        return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
+                                .setId(com.game.table.MatchErrorTip.match_error.kMatchRankedSeasonSettling_VALUE)).build();
+                    }
+                    if(request.getRankedRuleVersion()!=0&&request.getRankedRuleVersion()!=rankedTables.ruleVersion()){
+                        return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
+                                .setId(com.game.table.MatchErrorTip.match_error.kMatchRankedRuleVersionMismatch_VALUE)).build();
+                    }
+                    if(request.getCharacterPresetId()!=0||request.getPetPresetId()!=0){
+                        var write=rankedStore.savePreset(session.getPlayerId(),request.getCharacterPresetId(),
+                                request.getPetPresetId(),request.getRankedRuleVersion());
+                        if(write.status()==com.game.match.ranked.RankedStore.WriteStatus.SEASON_SETTLING){
+                            return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
+                                    .setId(com.game.table.MatchErrorTip.match_error.kMatchRankedSeasonSettling_VALUE)).build();
+                        }
+                        if(write.status()==com.game.match.ranked.RankedStore.WriteStatus.RULE_VERSION_MISMATCH){
+                            return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
+                                    .setId(com.game.table.MatchErrorTip.match_error.kMatchRankedRuleVersionMismatch_VALUE)).build();
+                        }
+                        if(write.status()!=com.game.match.ranked.RankedStore.WriteStatus.OK){
+                            return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
+                                    .setId(com.game.table.MatchErrorTip.match_error.kMatchRankedPresetInvalid_VALUE)).build();
+                        }
+                    }
+                }catch(java.sql.SQLException rankedErr){
+                    log.error("全球排位排队校验失败 player={}",Long.toUnsignedString(session.getPlayerId()),rankedErr);
+                    return MatchTips.joinRejected(MatchTip.BUSY);
+                }
+            }
             if(players.inBattle(session.getPlayerId(),deadline))return MatchTips.joinRejected(MatchTip.JOIN_IN_BATTLE);
             var location=players.location(session.getPlayerId(),deadline);
             if(location.location()==null||location.status()!=com.game.discovery.location.PlayerLocationDirectory.LocationStatus.ONLINE)
@@ -314,9 +346,20 @@ public final class GlobalMatchService implements AutoCloseable {
         if(releaseIfEnded(row))row=store.ticket(session);
         var response=GetQueueStatusResponse.newBuilder().setRequestCancelled(store.requestCancelled(session, request));
         if(row.getState()<0||row.getState()>3||row.getTicket().isEmpty())return response.setState(QueueState.QUEUE_STATE_NOT_QUEUED).build();
-        return response.setState(row.getState()<=1?QueueState.QUEUE_STATE_QUEUED:row.getState()==2?QueueState.QUEUE_STATE_MATCHED:QueueState.QUEUE_STATE_READY)
+        int queuedSec=(int)Math.min(Integer.MAX_VALUE,Math.max(0,store.now()-row.getEnqueuedMs())/1000);
+        response.setState(row.getState()<=1?QueueState.QUEUE_STATE_QUEUED:row.getState()==2?QueueState.QUEUE_STATE_MATCHED:QueueState.QUEUE_STATE_READY)
                 .setQueueTicket(row.getTicket()).setBattleId(row.getFormationId()).setSelectedRegion(row.getSelectedRegion())
-                .setQueuedSeconds((int)Math.min(Integer.MAX_VALUE,Math.max(0,store.now()-row.getEnqueuedMs())/1000)).setRetryAfterMs(1000).build();
+                .setQueuedSeconds(queuedSec).setRetryAfterMs(1000);
+        if(row.getMode()==MatchModes.PVP_TEAM){
+            int perSide=row.getTeamSize()/2;
+            response.setTeamSize(perSide>0?perSide:1)
+                    .setWaitPromptSeconds(rankedTables!=null?rankedTables.rule().getWaitPromptSeconds():120)
+                    .setCurrentRatingSpread(rankedTables!=null?rankedTables.spreadPoints(queuedSec):(int)(com.game.match.matcher.Tolerance.rankedHardCapCenti(queuedSec)/100L));
+            if(rankedStore!=null){
+                try{response.setSeasonId(rankedStore.ensureActiveSeason().getSeasonId());}catch(java.sql.SQLException ignored){}
+            }
+        }
+        return response.build();
     }
     public boolean releaseIfEnded(GlobalTicketRow ticket) {
         if(ticket.getState()!=3)return false;
@@ -544,18 +587,38 @@ public final class GlobalMatchService implements AutoCloseable {
         catch(RejectedExecutionException e){running.remove(f.getBattleId());slots.release();}
     }
     private com.game.match.script.BattleScriptResolver scriptResolver;
+    private com.game.match.ranked.RankedStore rankedStore;
+    private com.game.match.ranked.RankedTables rankedTables;
     public GlobalMatchService withBattleScriptResolver(com.game.match.script.BattleScriptResolver resolver){this.scriptResolver=resolver;return this;}
+    public GlobalMatchService withRanked(com.game.match.ranked.RankedStore store,com.game.match.ranked.RankedTables tables){
+        this.rankedStore=store;this.rankedTables=tables;return this;
+    }
     private GatherResult execute(GlobalFormationRow initial) {
         var f=initial;
         try {
             hooks.beforePrepare(f.getMembersList().stream().map(GlobalMember::getPlayerId).toList());
             List<Long> roster=f.getMembersList().stream().map(GlobalMember::getPlayerId).toList();
             int[] teams=TeamAssignment.assign(MatchMode.forNumber(f.getMode()),roster,ratings.loadAllCentiOrDefault(roster));
+            boolean isRanked = f.getMode() == MatchModes.PVP_TEAM && rankedStore != null && rankedTables != null;
+            RankedMatchContext rankedContext = null;
+            if (isRanked) {
+                int perSide = Math.max(1, roster.size() / 2);
+                var maybeCtx = rankedStore.buildRankedContext(perSide, roster, Map.of());
+                if (maybeCtx.isEmpty()) {
+                    abort(f);
+                    return GatherResult.failed(GatherOutcome.PREPARE_FAILED, f.getBattleId());
+                }
+                rankedContext = maybeCtx.get();
+            }
             List<BattlePlayerSnapshot> snapshots=new ArrayList<>();List<FingerprintCheck.Member> fingerprints=new ArrayList<>();
             for(int i=0;i<roster.size();i++) {
                 long player=roster.get(i);
-                var result=scenes.prepare(PrepareBattleRequest.newBuilder().setPlayerId(player).setBattleId(f.getBattleId()).setBattleNodeId(f.getNodeId())
-                        .setDeadlineMs(f.getDeadlineMs()).setPrepareDeadlineMs(Math.min(f.getCreatedMs()+120_000,f.getRetryMs()-1000)).build(),endpoint->store.prepared(initial,GlobalPreparedEndpoint.newBuilder().setPlayerId(player).setZoneId(endpoint.zoneId())
+                PrepareBattleRequest.Builder prepBuilder = PrepareBattleRequest.newBuilder().setPlayerId(player).setBattleId(f.getBattleId()).setBattleNodeId(f.getNodeId())
+                        .setDeadlineMs(f.getDeadlineMs()).setPrepareDeadlineMs(Math.min(f.getCreatedMs()+120_000,f.getRetryMs()-1000));
+                if (rankedContext != null) {
+                    prepBuilder.setRankedContext(rankedContext);
+                }
+                var result=scenes.prepare(prepBuilder.build(),endpoint->store.prepared(initial,GlobalPreparedEndpoint.newBuilder().setPlayerId(player).setZoneId(endpoint.zoneId())
                         .setNodeId(endpoint.nodeId()).setHost(endpoint.target().host()).setPort(endpoint.target().port()).setInstanceId(endpoint.target().instanceId()).build()));
                 if(!(result instanceof ScenePreparer.Prepare.Ok ok)){abort(f);return GatherResult.failed(GatherOutcome.PREPARE_FAILED,f.getBattleId());}
                 snapshots.add(ok.response().getSnapshot().toBuilder().setTeamIndex(teams[i]).build());
@@ -568,11 +631,14 @@ public final class GlobalMatchService implements AutoCloseable {
                     .setTableFingerprint(fingerprint.passThrough()).setRequiredPhysicalRegion(f.getRegion()).setPlacementOperationId(f.getOperationId())
                     .setTargetInstanceId(f.getInstanceId()).setAdmitBeforeMs(Math.min(f.getCreatedMs()+120_000,f.getRetryMs()-1000))
                     .setOutcomeProtocolVersion(1);
+            if (rankedContext != null) {
+                request.setRankedContext(rankedContext);
+            }
             if(!f.getActivityContext().isEmpty())request.setActivityContext(BattleActivityContext.parseFrom(f.getActivityContext()));
             // 观战可见性建房时决定一次，随 formation 持久的 create_request 冻结；之后观战各处只读这份原件，不按模式重算
             request.setSpectateVisibility(com.game.match.spectate.SpectateVisibilityPolicy.decide(MatchMode.forNumber(f.getMode()),
                     request.hasActivityContext()?request.getActivityContext():null));
-            if(scriptResolver!=null) {
+            if(scriptResolver!=null && !isRanked) {
                 request.addAllTeamScripts(scriptResolver.resolveForBattle(f.getBattleId(),f.getMode(),f.getConfigId(),snapshots));
             }
             var preflight=query(f);

@@ -35,7 +35,11 @@ public final class GlobalRegionPolicy {
         return preferred(values,values.keySet());
     }
     public static long ratingTolerance(GlobalTicketRow anchor,long now,MatchProperties.Rating rating) {
-        return Tolerance.of(rating.tolerance()).anchorCenti(rating.enabled()&&MatchModes.rated(anchor.getMode()),Math.max(0,(now-anchor.getEnqueuedMs())/1000));
+        long waitedSec = Math.max(0, (now - anchor.getEnqueuedMs()) / 1000);
+        if (anchor.getMode() == MatchModes.PVP_TEAM) {
+            return rating.enabled() ? Tolerance.rankedHardCapCenti(waitedSec) : Tolerance.UNBOUNDED;
+        }
+        return Tolerance.of(rating.tolerance()).anchorCenti(rating.enabled()&&MatchModes.rated(anchor.getMode()),waitedSec);
     }
     public static boolean ratingEligible(GlobalTicketRow anchor,GlobalTicketRow member,long now) {
         return ratingEligible(anchor,member,now,new MatchProperties.Rating(null,null,null,null,null));
