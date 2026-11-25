@@ -142,6 +142,7 @@ public final class PlayerBattleService implements BattleHooks {
     private SceneWorld world;
     private com.game.scene.trial.TrialJournalService trialJournalService;
     private com.game.scene.festivalbeast.FestivalBeastService festivalBeastService;
+    private com.game.scene.season.SeasonService seasonService;
     private java.util.function.BiConsumer<ScenePlayer,RuntimeException> inboxFailure;
     /** 仅通知缓存，不参与授权/去重；永久依据仍为Inbox SQL原收据和存档域水位。 */
     private final Map<ScenePlayer,BattleSettlementData> inboxNotifications=new java.util.WeakHashMap<>();
@@ -153,6 +154,11 @@ public final class PlayerBattleService implements BattleHooks {
 
     public PlayerBattleService withFestivalBeastService(com.game.scene.festivalbeast.FestivalBeastService service) {
         this.festivalBeastService = service;
+        return this;
+    }
+
+    public PlayerBattleService withSeasonService(com.game.scene.season.SeasonService service) {
+        this.seasonService = service;
         return this;
     }
 
@@ -321,6 +327,17 @@ public final class PlayerBattleService implements BattleHooks {
                             .setMana(petSnap.getMaxMana());
                 }
                 snapBuilder.clearItems().setPetCaptureSlots(0);
+            }
+            // 论剑 V3 战前 15 秒明牌变阵：仅正式自养论剑与赛季锦标赛打包备选灵宠（至多 5 只）与当季全部赛季印。
+            if (isFormalRanked
+                    || request.getMatchMode() == com.game.battle.engine.BattleConstants.MATCH_MODE_SEASON_TOURNAMENT) {
+                long activePetId = snapBuilder.getPetsCount() > 0 ? snapBuilder.getPets(0).getPetId() : 0L;
+                snapBuilder.addAllStandbyPets(
+                        pets.buildStandbyBattleSnapshots(player, activePetId, 5, isolateBattleTempState));
+                if (seasonService != null) {
+                    snapBuilder.addAllAvailableSeasonSeals(
+                            seasonService.collectAvailableSeals(clock.epochMillis()));
+                }
             }
             snapshot = snapBuilder.build();
         }

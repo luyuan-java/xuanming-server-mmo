@@ -28,6 +28,7 @@ final class ActionChecks {
     static final int INVALID_TABLE_ID = CommonErrorTip.common_error.kInvalidTableId_VALUE;
     static final int INVALID_TABLE_DATA = CommonErrorTip.common_error.kInvalidTableData_VALUE;
     static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
+    static final int FEATURE_UNAVAILABLE = CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
     static final int ENTITY_INVALID = CommonErrorTip.common_error.kThisEntityIsInvalid_VALUE;
     static final int BAG_INSUFFICIENT_ITEMS = BagErrorTip.bag_error.kBagInsufficientItems_VALUE;
     static final int SKILL_INVALID_TARGET_ID = SkillErrorTip.skill_error.kSkillInvalidTargetId_VALUE;

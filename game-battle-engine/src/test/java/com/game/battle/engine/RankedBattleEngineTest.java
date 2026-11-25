@@ -9,11 +9,14 @@ import com.game.proto.BattleEventItem;
 import com.game.proto.BattleParticipationFact;
 import com.game.proto.BattlePetSnapshot;
 import com.game.proto.BattlePlayerSnapshot;
+import com.game.proto.BattlePrepState;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.BattleSurrenderVoteState;
 import com.game.proto.CreateBattleRequest;
+import com.game.proto.EquipmentEffects;
 import com.game.proto.RankedMatchContext;
+import com.game.proto.SeasonSealEffect;
 import com.game.proto.TurnResultS2C;
 import com.game.proto.eBattleActionType;
 import com.game.proto.eBattleActorType;
@@ -477,5 +480,182 @@ class RankedBattleEngineTest {
         assertThat(s101.getFled()).isFalse();
         assertThat(s101.getTotalRounds()).isEqualTo(7);
         assertThat(engine.buildSettlement(201L).getSurrendered()).isFalse();
+    }
+
+    private static SeasonSealEffect makeSeal(int seasonId, int sealId, int effectId, String name) {
+        return SeasonSealEffect.newBuilder()
+                .setSeasonId(seasonId)
+                .setSealId(sealId)
+                .setEffectId(effectId)
+                .setName(name)
+                .setBonusBps(1000)
+                .setPerRoundLimit(1)
+                .setBattleLimit(effectId == 7 ? 2 : 1)
+                .build();
+    }
+
+    @Test
+    void 论剑V3战前15秒明牌变阵_换印换宠与同队盲选隔离及亮牌后生效() {
+        RankedPresetTable charPreset = tables.rankedPreset().find(101).orElseThrow();
+        RankedPresetTable petA = tables.rankedPreset().find(201).orElseThrow();
+        RankedPresetTable petB = tables.rankedPreset().find(203).orElseThrow();
+
+        SeasonSealEffect sealDefMana = makeSeal(1, 1001, 7, "玄清回灵印");
+        SeasonSealEffect sealAntiCtrl = makeSeal(1, 1002, 8, "定心明神印");
+
+        BattlePlayerSnapshot p1Base = playerWithRealPet(5101L, 91001L, 0, 220L, charPreset, petA);
+        BattlePetSnapshot p1Standby = playerWithRealPet(5101L, 91002L, 0, 260L, charPreset, petB)
+                .getPets(0).toBuilder().setPetName("疾风备宠").build();
+        BattlePlayerSnapshot p1 = p1Base.toBuilder()
+                .setActiveSeasonId(1)
+                .setEquipmentEffects(EquipmentEffects.newBuilder().setSeasonSeal(sealAntiCtrl))
+                .addAvailableSeasonSeals(sealDefMana)
+                .addAvailableSeasonSeals(sealAntiCtrl)
+                .addStandbyPets(p1Standby)
+                .build();
+
+        BattlePlayerSnapshot p2 = playerWithRealPet(5102L, 92001L, 1, 200L, charPreset, petA).toBuilder()
+                .setActiveSeasonId(1)
+                .addAvailableSeasonSeals(sealAntiCtrl)
+                .build();
+
+        CreateBattleRequest req = CreateBattleRequest.newBuilder()
+                .setBattleId(9601L)
+                .setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setSeed(101L)
+                .setRankedContext(rankedCtx(1))
+                .addPlayers(p1)
+                .addPlayers(p2)
+                .build();
+
+        TurnBattleEngine engine = ((BattleStart.Started) TurnBattleEngine.start(req, data)).engine();
+        assertThat(engine.isInPrepPhase()).isTrue();
+        assertThat(engine.allPrepPlayersReady()).isFalse();
+        assertThat(engine.allPlayersReady()).isFalse();
+
+        // 变阵期内行动、挂机与投降一律返回 FEATURE_UNAVAILABLE，pending_actor_ids 为空
+        BattleAction defAct = BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build();
+        assertThat(engine.validateAction(5101L, defAct)).isEqualTo(ActionChecks.FEATURE_UNAVAILABLE);
+        assertThat(engine.validateOwnedAction(5101L, 5101L, defAct)).isEqualTo(ActionChecks.FEATURE_UNAVAILABLE);
+        assertThat(engine.setActorAuto(5101L, true)).isEqualTo(ActionChecks.FEATURE_UNAVAILABLE);
+        assertThat(engine.submitSurrenderVote(5101L, true).errorTip()).isEqualTo(ActionChecks.FEATURE_UNAVAILABLE);
+        BattleStateS2C prepSnap = engine.buildStateSnapshot();
+        assertThat(prepSnap.getPrepState().getActive()).isTrue();
+        assertThat(prepSnap.getPrepState().getDurationSeconds()).isEqualTo(BattleConstants.TACTICAL_PREP_DURATION_SECONDS);
+        assertThat(prepSnap.getPendingActorIdsList()).isEmpty();
+
+        long petActorIdBefore = prepSnap.getActorsList().stream()
+                .filter(a -> a.getActorType() == eBattleActorType.BATTLE_ACTOR_TYPE_PET && a.getOwnerPlayerId() == 5101L)
+                .findFirst().orElseThrow().getActorId();
+        int petSlotBefore = prepSnap.getActorsList().stream()
+                .filter(a -> a.getActorId() == petActorIdBefore)
+                .findFirst().orElseThrow().getFormationSlot();
+
+        // P1 改选回灵印(1001) + 备宠(91002) 并锁定；未锁定前对手和观众不可见 P1 选择
+        var p1Res = engine.updateBattlePrep(5101L, 1001, 91002L, true);
+        assertThat(p1Res.errorTip()).isZero();
+        assertThat(p1Res.prepState().getSelfAvailableSealsList()).hasSize(2);
+        assertThat(p1Res.prepState().getSelfAvailablePetsList()).hasSize(2);
+        assertThat(p1Res.prepState().getTeamStatesList()).hasSize(1);
+        assertThat(p1Res.prepState().getTeamStates(0).getSelectedSealId()).isEqualTo(1001);
+        assertThat(p1Res.prepState().getTeamStates(0).getSelectedPetId()).isEqualTo(91002L);
+        assertThat(p1Res.prepState().getTeamStates(0).getReady()).isTrue();
+
+        // 锁定后再改动被拒，幂等重发原方案成功
+        assertThat(engine.updateBattlePrep(5101L, 1002, 0L, true).errorTip())
+                .isEqualTo(ActionChecks.FEATURE_UNAVAILABLE);
+        assertThat(engine.updateBattlePrep(5101L, 1001, 91002L, true).errorTip()).isZero();
+
+        // 对手视角不含 P1 的 team_states，观众视角仅含倒计时
+        BattlePrepState p2View = engine.prepStateForViewer(5102L, 12345L);
+        assertThat(p2View.getTeamStatesList()).extracting(s -> s.getPlayerId()).containsExactly(5102L);
+        BattlePrepState obsView = engine.prepStateForViewer(0L, 12345L);
+        assertThat(obsView.getActive()).isTrue();
+        assertThat(obsView.getDeadlineMs()).isEqualTo(12345L);
+        assertThat(obsView.getSelfAvailableSealsList()).isEmpty();
+        assertThat(obsView.getSelfAvailablePetsList()).isEmpty();
+        assertThat(obsView.getTeamStatesList()).isEmpty();
+
+        // P2 锁定 -> 全员锁定 -> 亮牌
+        assertThat(engine.allPrepPlayersReady()).isFalse();
+        assertThat(engine.updateBattlePrep(5102L, 0, 0L, true).errorTip()).isZero();
+        assertThat(engine.allPrepPlayersReady()).isTrue();
+        assertThat(engine.finalizePrepPhase()).isTrue();
+        assertThat(engine.isInPrepPhase()).isFalse();
+        assertThat(engine.finalizePrepPhase()).isFalse();
+
+        BattleStateS2C revealed = engine.buildStateSnapshot();
+        assertThat(revealed.hasPrepState()).isFalse();
+        assertThat(revealed.getPendingActorIdsList()).contains(5101L, 5102L);
+        BattleActorState swappedPet = revealed.getActorsList().stream()
+                .filter(a -> a.getActorType() == eBattleActorType.BATTLE_ACTOR_TYPE_PET && a.getOwnerPlayerId() == 5101L)
+                .findFirst().orElseThrow();
+        assertThat(swappedPet.getActorId()).isEqualTo(petActorIdBefore);
+        assertThat(swappedPet.getFormationSlot()).isEqualTo(petSlotBefore);
+        assertThat(swappedPet.getPetId()).isEqualTo(91002L);
+        assertThat(swappedPet.getName()).isEqualTo("疾风备宠");
+
+        // 换上的回灵赛季印(1001, effect_id=7)在亮牌后首回合防御可真实触发回蓝事件
+        BattleUnit p1Unit = engine.findUnitForTest(5101L);
+        p1Unit.setMana(100L);
+        assertThat(engine.validateAction(5101L, defAct)).isEqualTo(ActionChecks.SUCCESS);
+        engine.submitAction(5101L, defAct);
+        engine.submitAction(5102L, defAct);
+        TurnResultS2C r1 = engine.resolveCurrentRound();
+        assertThat(r1.getEventsList())
+                .anyMatch(ev -> ev.getEventType() == eBattleEventType.BATTLE_EVENT_ARTIFACT
+                        && ev.getSourceId() == 5101L
+                        && ev.getSeasonSealId() == 1001);
+        assertThat(engine.buildSettlement(5101L).getPetsList())
+                .extracting(p -> p.getPetId()).containsExactly(91002L);
+    }
+
+    @Test
+    void 论剑V3战前变阵_免费预设与无备选项自动跳过且非法备宠或错季印开局拒收() {
+        RankedPresetTable charPreset = tables.rankedPreset().find(101).orElseThrow();
+        RankedPresetTable petA = tables.rankedPreset().find(201).orElseThrow();
+        SeasonSealEffect s1 = makeSeal(1, 1001, 7, "一季印");
+        SeasonSealEffect s2WrongSeason = makeSeal(2, 2001, 7, "二季印");
+
+        // 1. 正式排位但全员都无备选项 -> 不开启变阵期
+        CreateBattleRequest noChoiceReq = CreateBattleRequest.newBuilder()
+                .setBattleId(9602L).setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setSeed(102L).setRankedContext(rankedCtx(1))
+                .addPlayers(playerWithRealPet(5201L, 93001L, 0, 200L, charPreset, petA))
+                .addPlayers(playerWithRealPet(5202L, 93002L, 1, 200L, charPreset, petA))
+                .build();
+        TurnBattleEngine noChoice = ((BattleStart.Started) TurnBattleEngine.start(noChoiceReq, data)).engine();
+        assertThat(noChoice.isInPrepPhase()).isFalse();
+
+        // 2. 免费预设娱乐场即使带候选印也不进入变阵期
+        CreateBattleRequest freePresetReq = CreateBattleRequest.newBuilder()
+                .setBattleId(9603L).setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_POLARITY_5V5_VALUE)
+                .setSeed(103L).setRankedContext(freePresetCtx(1))
+                .addPlayers(playerWithTempPet(5201L, 0, 200L, charPreset, petA).toBuilder()
+                        .addAvailableSeasonSeals(s1).addAvailableSeasonSeals(makeSeal(1, 1002, 8, "二印")))
+                .addPlayers(playerWithTempPet(5202L, 1, 200L, charPreset, petA))
+                .build();
+        TurnBattleEngine freePreset = ((BattleStart.Started) TurnBattleEngine.start(freePresetReq, data)).engine();
+        assertThat(freePreset.isInPrepPhase()).isFalse();
+
+        // 3. 候选赛季印赛季归属不匹配 -> 开局拒收
+        CreateBattleRequest wrongSeasonReq = noChoiceReq.toBuilder()
+                .setBattleId(9604L)
+                .setPlayers(0, noChoiceReq.getPlayers(0).toBuilder()
+                        .setActiveSeasonId(1)
+                        .addAvailableSeasonSeals(s2WrongSeason))
+                .build();
+        assertThat(TurnBattleEngine.start(wrongSeasonReq, data)).isInstanceOf(BattleStart.Rejected.class);
+
+        // 4. 备宠与场上已有 pet_id 跨场重复 -> 开局拒收
+        CreateBattleRequest dupStandbyReq = noChoiceReq.toBuilder()
+                .setBattleId(9605L)
+                .setPlayers(0, noChoiceReq.getPlayers(0).toBuilder()
+                        .addStandbyPets(noChoiceReq.getPlayers(1).getPets(0).toBuilder().setOwnerPlayerId(5201L)))
+                .build();
+        assertThat(TurnBattleEngine.start(dupStandbyReq, data)).isInstanceOf(BattleStart.Rejected.class);
     }
 }

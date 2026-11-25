@@ -30,7 +30,9 @@ public final class BattleMessageIds {
         /** 165 退出观战 → {@code StopWatchBattleResponse}。 */
         STOP_WATCH_BATTLE("StopWatchBattle"),
         /** 479 PVP 延迟投降 / 表决 → {@code SurrenderBattleResponse}。 */
-        SURRENDER_BATTLE("SurrenderBattle");
+        SURRENDER_BATTLE("SurrenderBattle"),
+        /** 504 论剑 V3 战前 15 秒明牌变阵提交 → {@code UpdateBattlePrepResponse}。 */
+        UPDATE_BATTLE_PREP("UpdateBattlePrep");
 
         private final String method;
 
@@ -61,7 +63,9 @@ public final class BattleMessageIds {
         /** 166 {@code SpectateEndS2C}：观战结束。 */
         SPECTATE_END("NotifySpectateEnd", PushCategory.BATTLE_FRAME),
         /** 480 {@code SurrenderVoteS2C}：同队 PVP 投降投票进度推送（仅推送给同队成员）。 */
-        SURRENDER_VOTE("NotifySurrenderVote", PushCategory.BATTLE_FRAME);
+        SURRENDER_VOTE("NotifySurrenderVote", PushCategory.BATTLE_FRAME),
+        /** 505 {@code BattlePrepUpdateS2C}：论剑 V3 同队战前变阵进度推送（仅推送给同队成员）。 */
+        BATTLE_PREP_UPDATE("NotifyBattlePrepUpdate", PushCategory.BATTLE_FRAME);
 
         private final String method;
         private final PushCategory category;

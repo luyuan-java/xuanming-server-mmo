@@ -20,6 +20,8 @@ import com.game.proto.AddObserverResponse;
 import com.game.proto.BattleAssignedS2C;
 import com.game.proto.BattleEndS2C;
 import com.game.proto.BattlePlayerSnapshot;
+import com.game.proto.BattlePrepState;
+import com.game.proto.BattlePrepUpdateS2C;
 import com.game.proto.BattleReplayEnvelope;
 import com.game.proto.BattleRouting;
 import com.game.proto.BattleSettlementData;
@@ -45,6 +47,8 @@ import com.game.proto.SurrenderBattleResponse;
 import com.game.proto.SurrenderVoteS2C;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.TurnResultS2C;
+import com.game.proto.UpdateBattlePrepRequest;
+import com.game.proto.UpdateBattlePrepResponse;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.eBattleOutcome;
 import com.game.proto.eBattleTicketRole;
@@ -231,15 +235,22 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         // ---- 插表之后的副作用，顺序固定（room.cpp:597-632）
         long untilDeadline = deadlineMs - now;
         room.battleTimer = scheduler.after(untilDeadline < 0 ? Long.MAX_VALUE : untilDeadline, () -> onBattleDeadline(room));
-        armRoundTimer(room);
+        boolean inPrepPhase = engine.isInPrepPhase();
+        if (inPrepPhase) {
+            // 论剑 V3 战前 15 秒明牌变阵期：延迟录制回放起点与第 1 回合计时至亮牌开打后。
+            armPrepTimer(room);
+        } else {
+            armRoundTimer(room);
+        }
         BattleStateS2C start = fullState(room);
-        if (request.getRecordReplay()) {
+        if (request.getRecordReplay() && !inPrepPhase) {
             room.replay = new BattleReplayRecorder(request, deps.tableFingerprint(), BattleViews.forObserver(start));
         }
         for (Map.Entry<Long, BattleRouting> entry : room.routingByPlayer.entrySet()) {
             long playerId = entry.getKey();
             ViewerState view = BattleViews.forParticipant(start, playerId, engine.selfItems(playerId),
-                    engine.surrenderVoteForViewer(playerId));
+                    engine.surrenderVoteForViewer(playerId),
+                    engine.prepStateForViewer(playerId, room.prepDeadlineMs));
             // 177 先于 143（R5、O1）：同一批交给出口，经 gate 时是一条 GatePush{message_batch}
             outbound.pushLobby(battleId, playerId, room.directOf(playerId), List.of(
                     outbound.announcement(Notify.BATTLE_ASSIGNED, assignments.get(playerId)),
@@ -603,7 +614,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             return;
         }
         room.spectateRelayEnabled = true;
-        ViewerState view = BattleViews.forObserver(fullState(room));
+        ViewerState view = observerView(room, fullState(room));
         publishSpectateFrame(room, com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_STATE, view.state().getRoundIndex(),
                 outbound.frame(Notify.SPECTATE_STATE, view.toSpectateState(0)));
         log.info("观战中继已打开 battle_id={} round={}", Long.toUnsignedString(room.battleId), view.state().getRoundIndex());
@@ -657,7 +668,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             room.cancelSpectateKeepalive();
             return;
         }
-        ViewerState view = BattleViews.forObserver(fullState(room));
+        ViewerState view = observerView(room, fullState(room));
         publishSpectateFrame(room, com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_STATE, view.state().getRoundIndex(),
                 outbound.frame(Notify.SPECTATE_STATE, view.toSpectateState(0)));
     }
@@ -880,8 +891,11 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         BattleStateS2C full = fullState(room);
         ViewerState view = room.isParticipant(playerId)
                 ? BattleViews.forParticipant(full, playerId, room.engine.selfItems(playerId),
-                        room.engine.surrenderVoteForViewer(playerId))
-                : BattleViews.forObserver(full);
+                        room.engine.surrenderVoteForViewer(playerId),
+                        room.pendingCompletion == null
+                                ? room.engine.prepStateForViewer(playerId, room.prepDeadlineMs)
+                                : null)
+                : observerView(room, full);
         return view.state();
     }
 
@@ -991,6 +1005,57 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         return built;
     }
 
+    @Override
+    public UpdateBattlePrepResponse updateBattlePrep(long playerId, UpdateBattlePrepRequest request) {
+        scheduler.assertInLoop();
+        UpdateBattlePrepResponse.Builder response = UpdateBattlePrepResponse.newBuilder();
+        if (playerId == 0) {
+            return response.setErrorMessage(tip(PLAYER_NOT_FOUND_IN_SESSION)).build();
+        }
+        BattleRoom room = rooms.find(request.getBattleId());
+        if (room == null || !room.isParticipant(playerId)) {
+            return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
+        }
+        if (room.pendingCompletion != null) {
+            return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
+        }
+        room.engine.markPlayerEntered(playerId);
+        TurnBattleEngine.UpdatePrepResult res = room.engine.updateBattlePrep(
+                playerId, request.getSelectedSealId(), request.getSelectedPetId(), request.getReady());
+        if (res.errorTip() != 0) {
+            return response.setErrorMessage(tip(res.errorTip())).build();
+        }
+        BattlePrepState selfPrep = res.prepState().toBuilder()
+                .setDeadlineMs(room.prepDeadlineMs)
+                .build();
+        UpdateBattlePrepResponse built = response.setPrepState(selfPrep).build();
+        if (room.engine.allPrepPlayersReady()) {
+            finalizeBattlePrep(room);
+            return built;
+        }
+        // 仅向同队成员推送变阵同步（各自保留本人可选列表 + 共享本队选择），绝不向对手或观众泄密。
+        OptionalInt actorTeam = room.engine.teamIndexOfPlayer(playerId);
+        if (actorTeam.isPresent()) {
+            int teamIndex = actorTeam.getAsInt();
+            for (long memberId : room.routingByPlayer.keySet()) {
+                OptionalInt memberTeam = room.engine.teamIndexOfPlayer(memberId);
+                if (memberTeam.isEmpty() || memberTeam.getAsInt() != teamIndex) {
+                    continue;
+                }
+                BattlePrepState memberPrep = room.engine.prepStateForViewer(memberId, room.prepDeadlineMs);
+                if (memberPrep != null) {
+                    BattlePrepUpdateS2C notify = BattlePrepUpdateS2C.newBuilder()
+                            .setBattleId(room.battleId)
+                            .setPrepState(memberPrep)
+                            .build();
+                    outbound.pushBattleFrame(room.battleId, memberId, room.directOf(memberId),
+                            Notify.BATTLE_PREP_UPDATE, outbound.frame(Notify.BATTLE_PREP_UPDATE, notify));
+                }
+            }
+        }
+        return built;
+    }
+
     // ===================================================================================== 任意线程
 
     @Override
@@ -1008,6 +1073,53 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     /** 计时器回调的身份检查（§11 N14）：表里仍是这一个对象且没有进入收尾。 */
     private boolean isCurrent(BattleRoom room) {
         return !room.closed && rooms.find(room.battleId) == room;
+    }
+
+    /** 装填论剑 V3 战前 15 秒明牌变阵倒计时；到期自动锁阵亮牌开打。 */
+    private void armPrepTimer(BattleRoom room) {
+        room.actionDeadlineMs = 0L;
+        room.prepDeadlineMs = clock.epochMillis() + BattleConstants.TACTICAL_PREP_TIMEOUT_MS;
+        room.prepTimer = scheduler.after(BattleConstants.TACTICAL_PREP_TIMEOUT_MS, () -> {
+            if (isCurrent(room)) {
+                finalizeBattlePrep(room);
+            }
+        });
+    }
+
+    /** 战前变阵收口：落盘最终赛季印/首发宠，延迟创建战报录播起点，装填第 1 回合并向参战者与观众推送亮牌开战帧。 */
+    private void finalizeBattlePrep(BattleRoom room) {
+        if (!isCurrent(room) || room.pendingCompletion != null || !room.engine.isInPrepPhase()) {
+            return;
+        }
+        room.prepTimer.cancel();
+        room.prepTimer = Cancellable.NONE;
+        room.prepDeadlineMs = 0L;
+        if (!room.engine.finalizePrepPhase()) {
+            return;
+        }
+        armRoundTimer(room);
+        BattleStateS2C start = fullState(room);
+        if (room.originalCreate.getRecordReplay() && room.replay == null) {
+            room.replay = new BattleReplayRecorder(room.originalCreate, deps.tableFingerprint(),
+                    BattleViews.forObserver(start));
+        }
+        for (long playerId : room.routingByPlayer.keySet()) {
+            ViewerState view = BattleViews.forParticipant(start, playerId, room.engine.selfItems(playerId),
+                    room.engine.surrenderVoteForViewer(playerId));
+            outbound.pushLobby(room.battleId, playerId, room.directOf(playerId),
+                    List.of(outbound.announcement(Notify.BATTLE_START, view.toBattleStart(room.battleId))));
+        }
+        for (long observerId : room.routingByObserver.keySet()) {
+            pushSpectateState(room, observerId);
+        }
+        if (room.spectateRelayEnabled) {
+            ViewerState obsView = BattleViews.forObserver(start);
+            publishSpectateFrame(room, com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_STATE,
+                    obsView.state().getRoundIndex(),
+                    outbound.frame(Notify.SPECTATE_STATE, obsView.toSpectateState(0)));
+        }
+        log.info("战前变阵结束亮牌开打 battle_id={} action_deadline_ms={}",
+                Long.toUnsignedString(room.battleId), Long.toUnsignedString(room.actionDeadlineMs));
     }
 
     /**
@@ -1360,11 +1472,18 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 .build();
     }
 
-    /** 161 观战快照（全员冷却清空、无道具、action_deadline_ms = 房间值、观众数 = 有活直连的观众数）。 */
+    /** 161 观战快照（全员冷却清空、无道具、action_deadline_ms = 房间值、变阵期仅带倒计时、观众数 = 有活直连的观众数）。 */
     private void pushSpectateState(BattleRoom room, long observerId) {
-        ViewerState view = BattleViews.forObserver(fullState(room));
+        ViewerState view = observerView(room, fullState(room));
         outbound.pushBattleFrame(room.battleId, observerId, room.directOf(observerId), Notify.SPECTATE_STATE,
                 outbound.frame(Notify.SPECTATE_STATE, view.toSpectateState(liveObserverCount(room))));
+    }
+
+    private static ViewerState observerView(BattleRoom room, BattleStateS2C full) {
+        BattlePrepState observerPrep = room.pendingCompletion == null
+                ? room.engine.prepStateForViewer(0L, room.prepDeadlineMs)
+                : null;
+        return BattleViews.forObserver(full, observerPrep);
     }
 
     /** 在场观众数：只数有活直连的观众；登记了还没连上、或已断线在宽限里的不算（他们收不到任何战斗帧）。 */

@@ -19,6 +19,8 @@ import com.game.proto.SubmitBattleActionRequest;
 import com.game.proto.SubmitBattleActionResponse;
 import com.game.proto.SurrenderBattleRequest;
 import com.game.proto.SurrenderBattleResponse;
+import com.game.proto.UpdateBattlePrepRequest;
+import com.game.proto.UpdateBattlePrepResponse;
 import com.game.proto.eBattleTicketRole;
 import java.util.OptionalInt;
 
@@ -173,6 +175,14 @@ public interface BattleRoomService {
 
     /** 479 PVP 延迟投降 / 表决（第 5 回合解锁；表决状态仅同队可见）。 */
     SurrenderBattleResponse surrender(long playerId, SurrenderBattleRequest request);
+
+    /** 504 论剑 V3 战前 15 秒明牌变阵提交（换赛季印 / 换首发灵宠 / 锁定；仅同队同步）。 */
+    default UpdateBattlePrepResponse updateBattlePrep(long playerId, UpdateBattlePrepRequest request) {
+        return UpdateBattlePrepResponse.newBuilder()
+                .setErrorMessage(com.game.proto.TipInfoMessage.newBuilder()
+                        .setId(com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE))
+                .build();
+    }
 
     // ---------------------------------------------------------------- 任意线程
 

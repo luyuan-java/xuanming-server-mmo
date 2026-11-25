@@ -18,6 +18,9 @@ public final class BattleConstants {
     public static final long ROUND_DURATION_MS = 6000;
     /** 首领试炼手动行动收集窗口（18 秒，对齐 C++ {@code kBossTrialActionTimeoutMs}）。 */
     public static final long BOSS_TRIAL_ACTION_TIMEOUT_MS = 18_000;
+    /** 论剑 V3 战前 15 秒明牌变阵窗口（毫秒与秒，对齐 C++ {@code kTacticalPrepTimeoutMs}）。 */
+    public static final long TACTICAL_PREP_TIMEOUT_MS = 15_000;
+    public static final int TACTICAL_PREP_DURATION_SECONDS = 15;
     /** {@code DungeonTable.time_limit} 为 0（或查不到副本行）时的回合上限（{@code constants.h:18}）。 */
     public static final int DEFAULT_MAX_ROUNDS = 300;
 

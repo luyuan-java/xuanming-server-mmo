@@ -281,7 +281,8 @@ public final class BattleFixture {
         battle = new PlayerBattleService(locks, settlements, tables, pets, this::routing, teamFollow, battleMetrics, clock, logic,
                 reconnectHintId, battleEndId)
                 .withTrialJournalService(trialJournal)
-                .withFestivalBeastService(festivalBeast);
+                .withFestivalBeastService(festivalBeast)
+                .withSeasonService(season);
         // 进场规整同 SceneNode：背包 → 属性 → 宝宝 → 任务 → 两本账本的加载检查
         world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, sink, repo, new AtomicLong(5000)::incrementAndGet, clock,
                 sceneMetrics, player -> {

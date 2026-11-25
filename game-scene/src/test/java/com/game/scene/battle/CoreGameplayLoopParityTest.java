@@ -320,5 +320,76 @@ class CoreGameplayLoopParityTest {
         assertThat(freeResp.getSnapshot().getLevel()).isEqualTo(30);
         assertThat(freeResp.getSnapshot().getPetsCount()).isEqualTo(1);
         assertThat(freeResp.getSnapshot().getPets(0).getCompetitiveTemporary()).isTrue();
+        assertThat(freeResp.getSnapshot().getStandbyPetsList()).isEmpty();
+        assertThat(freeResp.getSnapshot().getAvailableSeasonSealsList()).isEmpty();
+    }
+
+    @Test
+    void 论剑V3备战快照打包至多五只满血备选灵宠与当季全部赛季印_非正式排位留空() {
+        BattleFixture f = new BattleFixture();
+        // 把测试时钟拨到配置表里首个启用赛季的窗口内，确保 collectAvailableSeals 返回非空当季赛季印列表
+        config.seasonRule().all().stream().filter(r -> r.getEnabled()).findFirst()
+                .ifPresent(rule -> f.clock.setEpochMillis(rule.getStartsAtMs() + 1_000L));
+
+        ScenePlayer p = f.enter(12, 302L);
+        int petTableId = config.pet().all().getFirst().getId();
+        // 发放 7 只灵宠（1 只出战 + 6 只待命），并故意把备选宠气血置为 1 校验满血隔离
+        long firstPetId = 0L;
+        for (int i = 0; i < 7; i++) {
+            var grant = f.pets.grant(p, petTableId);
+            assertThat(grant.tip()).isZero();
+            if (i == 0) {
+                firstPetId = grant.petId();
+            } else {
+                var entry = p.pets().find(grant.petId());
+                assertThat(entry).isNotNull();
+                entry.setHealth(1L);
+                entry.setMana(1L);
+            }
+        }
+        assertThat(f.pets.summon(p, firstPetId)).isZero();
+        long activePetId = p.pets().activePetId();
+        assertThat(activePetId).isEqualTo(firstPetId);
+
+        // 1. 正式论剑(season_id=1, use_free_preset=false)：打包至多 5 只满血备选宠（不含首发）+ 当季全部赛季印
+        int activeRuleVersion = SceneBattleTables.from(config).ranked().rule().getRuleVersion();
+        PrepareBattleRequest rankedReq = f.prepareRequest(302L, 9101L).toBuilder()
+                .setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setRankedContext(RankedMatchContext.newBuilder()
+                        .setSeasonId(1).setRuleVersion(activeRuleVersion).setTeamSize(1)
+                        .setUseFreePreset(false))
+                .build();
+        CompletableFuture<PrepareBattleResponse> rankedFut = f.battle.prepare(rankedReq);
+        f.drain();
+        PrepareBattleResponse rankedResp = rankedFut.join();
+        assertThat(rankedResp.getErrorMessage().getId()).isZero();
+        var rankedSnap = rankedResp.getSnapshot();
+        assertThat(rankedSnap.getStandbyPetsList()).hasSize(5);
+        assertThat(rankedSnap.getStandbyPetsList())
+                .allSatisfy(sp -> {
+                    assertThat(sp.getPetId()).isNotEqualTo(activePetId);
+                    assertThat(sp.getBaseAttributes().getHealth()).isEqualTo(sp.getMaxHealth());
+                    assertThat(sp.getBaseAttributes().getMana()).isEqualTo(sp.getMaxMana());
+                });
+        var expectedSeals = f.season.collectAvailableSeals(f.clock.epochMillis());
+        assertThat(rankedSnap.getAvailableSeasonSealsList()).isEqualTo(expectedSeals);
+        if (!config.seasonRule().all().isEmpty()) {
+            assertThat(expectedSeals).isNotEmpty();
+        }
+        f.cancel(302L, 9101L);
+        f.drain();
+
+        // 2. 普通 PVE 备战：备选宠与候选赛季印均留空
+        PrepareBattleRequest pveReq = f.prepareRequest(302L, 9102L).toBuilder()
+                .setBattleConfigId(101)
+                .setMatchMode(MatchMode.MATCH_MODE_PVE_SOLO_VALUE)
+                .build();
+        CompletableFuture<PrepareBattleResponse> pveFut = f.battle.prepare(pveReq);
+        f.drain();
+        PrepareBattleResponse pveResp = pveFut.join();
+        assertThat(pveResp.getErrorMessage().getId()).isZero();
+        assertThat(pveResp.getSnapshot().getStandbyPetsList()).isEmpty();
+        assertThat(pveResp.getSnapshot().getAvailableSeasonSealsList()).isEmpty();
     }
 }

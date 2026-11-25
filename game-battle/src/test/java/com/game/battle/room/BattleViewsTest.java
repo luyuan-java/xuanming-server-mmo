@@ -75,6 +75,7 @@ class BattleViewsTest {
         BattleStateS2C withVote = full().toBuilder()
                 .setSurrenderVote(com.game.proto.BattleSurrenderVoteState.newBuilder()
                         .setActive(true).setTeamIndex(0).setInitiatorPlayerId(A).setRequiredAgrees(2).addAgreedPlayerIds(A))
+                .setPrepState(com.game.proto.BattlePrepState.newBuilder().setActive(true).setDurationSeconds(15))
                 .build();
         BattleStateS2C view = BattleViews.forObserver(withVote).state();
 
@@ -85,6 +86,7 @@ class BattleViewsTest {
         }
         assertThat(view.getSelfItemsList()).isEmpty();
         assertThat(view.hasSurrenderVote()).isFalse();
+        assertThat(view.hasPrepState()).isFalse();
     }
 
     @Test

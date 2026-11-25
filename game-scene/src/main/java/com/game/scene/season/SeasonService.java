@@ -35,6 +35,8 @@ import com.game.table.SeasonRuleTable;
 import com.game.table.SeasonSealTable;
 import com.game.table.SkillTable;
 import com.google.protobuf.ByteString;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -111,8 +113,29 @@ public final class SeasonService {
         int progress = record == null ? 0 : Math.min(record.getProgressPoints(), rule.getSealMaxPoints());
         out.setSeasonMaxHealthBps(SeasonRules.scaledBonusBps(progress, rule.getSealMaxPoints(), rule.getMaxHealthBpsCap()));
         out.setSeasonDefenseBps(SeasonRules.scaledBonusBps(progress, rule.getSealMaxPoints(), rule.getDefenseBpsCap()));
-        out.setSeasonSeal(SeasonSealEffect.newBuilder()
-                .setSeasonId(rule.getId())
+        out.setSeasonSeal(toSealEffect(rule.getId(), seal));
+    }
+
+    /** 收集当季全部合法赛季印快照（按 seal_id 无符号升序，供论剑 V3 战前 15 秒明牌变阵临场切换）。 */
+    public List<SeasonSealEffect> collectAvailableSeals(long nowMs) {
+        SeasonRuleTable rule = tables.activeSeason(nowMs);
+        if (rule == null) {
+            return List.of();
+        }
+        List<SeasonSealTable> validSeals = tables.validSealsOf(rule.getId());
+        if (validSeals.isEmpty()) {
+            return List.of();
+        }
+        List<SeasonSealEffect> out = new ArrayList<>(validSeals.size());
+        for (SeasonSealTable seal : validSeals) {
+            out.add(toSealEffect(rule.getId(), seal));
+        }
+        return out;
+    }
+
+    private static SeasonSealEffect toSealEffect(int seasonId, SeasonSealTable seal) {
+        return SeasonSealEffect.newBuilder()
+                .setSeasonId(seasonId)
                 .setSealId(seal.getId())
                 .setEffectId(seal.getEffectId())
                 .setBonusBps(seal.getBonusBps())
@@ -121,7 +144,8 @@ public final class SeasonService {
                 .setBattleLimit(seal.getBattleLimit())
                 .setActiveRounds(seal.getActiveRounds())
                 .setHealthThresholdBps(seal.getHealthThresholdBps())
-                .setName(seal.getName()));
+                .setName(seal.getName())
+                .build();
     }
 
     /** 453 纯只读查询当前赛季状态、赛季印列表与本季免费技能。 */

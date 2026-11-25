@@ -590,6 +590,9 @@ public class SceneNode implements SmartLifecycle {
         if (festivalBeastService != null) {
             battle.withFestivalBeastService(festivalBeastService);
         }
+        if (seasonService != null) {
+            battle.withSeasonService(seasonService);
+        }
         InboxService inbox = new InboxService(InboxConsumers.withBattle(currency, bags, battle), inboxClient, SceneClock.SYSTEM,
                 new InboxService.Settings(settings.inbox().consumerEnabled(), settings.inbox().periodicFetchMinutes()),
                 () -> nodeId, () -> ThreadLocalRandom.current().nextInt(1001));

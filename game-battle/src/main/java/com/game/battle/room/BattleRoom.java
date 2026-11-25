@@ -52,6 +52,8 @@ final class BattleRoom {
 
     /** 回合截止计时器。 */
     Cancellable roundTimer = Cancellable.NONE;
+    /** 论剑 V3 战前 15 秒明牌变阵截止计时器。 */
+    Cancellable prepTimer = Cancellable.NONE;
     /** 整场期限计时器。 */
     Cancellable battleTimer = Cancellable.NONE;
     /** 确认补发计时器。 */
@@ -60,6 +62,8 @@ final class BattleRoom {
     Cancellable spectateKeepaliveTimer = Cancellable.NONE;
     /** 当前回合截止（Unix ms），回填进各类 state 的 {@code action_deadline_ms}。 */
     long actionDeadlineMs;
+    /** 论剑 V3 战前明牌变阵截止（Unix ms），回填进 {@code BattlePrepState.deadline_ms}。 */
+    long prepDeadlineMs;
     /** 确认事件剩余补发次数（§11 N19：计次代替墙钟窗口）。 */
     int confirmResendsLeft = RoomConstants.CONFIRM_RESENDS;
     /** 从表里移除之前置位：迟到的计时器回调据此识别出房间已死（§11 N14，配合对象身份比较）。 */
@@ -138,8 +142,10 @@ final class BattleRoom {
         return directByPlayer.get(playerId);
     }
 
-    /** 取消三个计时器（收尾、销毁、作废一律先做）。 */
+    /** 取消全部业务计时器（收尾、销毁、作废一律先做）。 */
     void cancelTimers() {
+        prepTimer.cancel();
+        prepDeadlineMs = 0;
         roundTimer.cancel();
         battleTimer.cancel();
         confirmResendTimer.cancel();

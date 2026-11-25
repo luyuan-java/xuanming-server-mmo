@@ -26,6 +26,8 @@ import com.game.proto.SubmitBattleActionRequest;
 import com.game.proto.SubmitBattleActionResponse;
 import com.game.proto.SurrenderBattleRequest;
 import com.game.proto.SurrenderBattleResponse;
+import com.game.proto.UpdateBattlePrepRequest;
+import com.game.proto.UpdateBattlePrepResponse;
 import com.game.proto.eBattleTicketRole;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +67,8 @@ final class FakeRooms implements BattleRoomService {
             (pid, req) -> StopWatchBattleResponse.getDefaultInstance();
     volatile BiFunction<Long, SurrenderBattleRequest, SurrenderBattleResponse> onSurrender =
             (pid, req) -> SurrenderBattleResponse.getDefaultInstance();
+    volatile BiFunction<Long, UpdateBattlePrepRequest, UpdateBattlePrepResponse> onUpdateBattlePrep =
+            (pid, req) -> UpdateBattlePrepResponse.getDefaultInstance();
     /** 挂接期间对新直连做的事（验证 R1：挂接时写帧必须被丢弃）。 */
     volatile Consumer<DirectLink> duringAttach = link -> {
     };
@@ -163,6 +167,12 @@ final class FakeRooms implements BattleRoomService {
     public SurrenderBattleResponse surrender(long playerId, SurrenderBattleRequest request) {
         events.add("surrender:" + playerId + ":" + request.getAgree());
         return onSurrender.apply(playerId, request);
+    }
+
+    @Override
+    public UpdateBattlePrepResponse updateBattlePrep(long playerId, UpdateBattlePrepRequest request) {
+        events.add("prep:" + playerId + ":" + request.getSelectedSealId() + ":" + request.getSelectedPetId() + ":" + request.getReady());
+        return onUpdateBattlePrep.apply(playerId, request);
     }
 
     @Override
