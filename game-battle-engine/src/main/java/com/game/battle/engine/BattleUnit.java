@@ -62,6 +62,10 @@ final class BattleUnit {
         return state.getActorType() == eBattleActorType.BATTLE_ACTOR_TYPE_MONSTER;
     }
 
+    boolean isBoss() {
+        return state.getIsBoss();
+    }
+
     /** uint32；只会是 0（A 方）或 1（B 方）。 */
     int teamIndex() {
         return state.getTeamIndex();

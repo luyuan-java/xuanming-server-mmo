@@ -133,11 +133,11 @@ class TurnBattleInvariantTest {
         assertThat(replay.settlements).as("结算字节").isEqualTo(primary.settlements);
         assertThat(replay.selfItems).as("剩余道具").isEqualTo(primary.selfItems);
 
-        // 不变量 2：挂机 ≡ 手动提交 ATTACK 0
+        // 不变量 2：挂机 ≡ 手动提交 ATTACK 0（除 manual_action_rounds 字段按定义记录手动回合数外，结算其余字段逐字节一致）
         Run manual = run(scenario, true, false);
         assertThat(manual.events).as("挂机换手动后的事件字节").isEqualTo(primary.events);
         assertThat(manual.orders).as("挂机换手动后的出手序").isEqualTo(primary.orders);
-        assertThat(manual.settlements).as("挂机换手动后的结算字节").isEqualTo(primary.settlements);
+        assertThat(manual.settlementsWithoutManualRounds).as("挂机换手动后的结算字节").isEqualTo(primary.settlementsWithoutManualRounds);
         assertThat(manual.selfItems).as("挂机换手动后的剩余道具").isEqualTo(primary.selfItems);
     }
 
@@ -473,6 +473,7 @@ class TurnBattleInvariantTest {
         final List<String> snapshots = new ArrayList<>();
         final List<List<Long>> orders = new ArrayList<>();
         final Map<Long, String> settlements = new LinkedHashMap<>();
+        final Map<Long, String> settlementsWithoutManualRounds = new LinkedHashMap<>();
         final Map<Long, List<BattleItemEntry>> selfItems = new LinkedHashMap<>();
     }
 
@@ -550,7 +551,9 @@ class TurnBattleInvariantTest {
             checker.afterBattle(resolved);
         }
         for (long playerId : players) {
-            out.settlements.put(playerId, hex(engine.buildSettlement(playerId).toByteArray()));
+            BattleSettlementData s = engine.buildSettlement(playerId);
+            out.settlements.put(playerId, hex(s.toByteArray()));
+            out.settlementsWithoutManualRounds.put(playerId, hex(s.toBuilder().clearManualActionRounds().build().toByteArray()));
             out.selfItems.put(playerId, engine.selfItems(playerId));
         }
         return out;

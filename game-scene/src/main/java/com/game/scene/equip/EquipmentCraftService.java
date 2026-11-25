@@ -62,12 +62,33 @@ import java.util.Objects;
 public final class EquipmentCraftService {
 
     public static final int DAILY_LIMIT = PlayerClientRequestLedger.DAILY_MATERIAL_LIMIT;
+    public static final int MAX_CLAIM_BATCH_UNITS = PlayerClientRequestLedger.MAX_CLAIM_BATCH_UNITS;
+    public static final int MIN_CLAIM_STEP_UNITS = PlayerClientRequestLedger.MIN_CLAIM_STEP_UNITS;
     public static final int BATTLE_UNITS = PlayerClientRequestLedger.BATTLE_MATERIAL_UNITS;
+    public static final int BONUS_UNITS = PlayerClientRequestLedger.BONUS_MATERIAL_UNITS;
+    public static final int LIFETIME_LIMIT = PlayerClientRequestLedger.LIFETIME_MATERIAL_LIMIT;
+    public static final int TRADABLE_LIFETIME_LIMIT = PlayerClientRequestLedger.TRADABLE_LIFETIME_LIMIT;
+    public static final int WEEKLY_LIMIT = PlayerClientRequestLedger.WEEKLY_MATERIAL_LIMIT;
+    public static final int PVP_MIN_ROUNDS_FOR_LOSS = 3;
+    public static final int PVP_MIN_MANUAL_ROUNDS_FOR_LOSS = 2;
     public static final int CRAFTING_MATERIAL_ID = 3001;
     public static final int ENHANCEMENT_STONE_ID = 3002;
     private static final long DAY_MS = 86_400_000L;
+    private static final long WEEK_MS = 7L * DAY_MS;
     /** UTC+8 05:00 换日偏移（UTC + 3h）。 */
     private static final long SHIFT_MS = 10_800_000L;
+    /** 1970-01-04 21:00:00 UTC = 1970-01-05 05:00:00 UTC+8（首个完整周一 05:00 切周基准）。 */
+    private static final long FIRST_MONDAY_05_UTC8_MS = 3L * DAY_MS + 21L * 3_600_000L;
+
+    /** 单局战斗材料额度增量与防挂机裁决明细（供结算记录与 BattleEndS2C 共用）。 */
+    public record BattleCreditDelta(int totalUnitsAdded, int tradableUnitsAdded, boolean pvpLossIneligible) {
+        public static final BattleCreditDelta NONE = new BattleCreditDelta(0, 0, false);
+    }
+
+    private record BattleEvaluation(boolean eligible, boolean isWin, boolean pvpLossIneligible,
+                                    int baseUnits, int bonusUnits) {
+        static final BattleEvaluation INELIGIBLE = new BattleEvaluation(false, false, false, 0, 0);
+    }
 
     static final int OK = 0;
     static final int INVALID_TABLE_DATA = CommonErrorTip.common_error.kInvalidTableData_VALUE;
@@ -295,23 +316,54 @@ public final class EquipmentCraftService {
         if (currentRev == -1L || ledger.nextSeq() == -1L) {
             return rejectMaterial(reqId, currentRev, FEATURE_UNAVAILABLE, true);
         }
-        Map<Integer, Long> grants = new LinkedHashMap<>();
-        if (craftingCount > 0) {
-            grants.put(CRAFTING_MATERIAL_ID, craftingCount);
+        EquipmentMaterialRewardLedgerState curState = ledger.materialReward();
+        long availTradable = curState.getMigratedToV2()
+                ? Math.min(curState.getAvailableTradableUnits(), curState.getAvailableUnits())
+                : 0L;
+        long batchTradable = Math.min(total, availTradable);
+        long craftingTradable = Math.min(craftingCount, batchTradable);
+        long craftingBound = craftingCount - craftingTradable;
+        long stoneTradable = Math.min(stoneCount, batchTradable - craftingTradable);
+        long stoneBound = stoneCount - stoneTradable;
+
+        Map<Integer, Long> tradableGrants = new LinkedHashMap<>();
+        if (craftingTradable > 0) {
+            tradableGrants.put(CRAFTING_MATERIAL_ID, craftingTradable);
         }
-        if (stoneCount > 0) {
-            grants.put(ENHANCEMENT_STONE_ID, stoneCount);
+        if (stoneTradable > 0) {
+            tradableGrants.put(ENHANCEMENT_STONE_ID, stoneTradable);
+        }
+        Map<Integer, Long> boundGrants = new LinkedHashMap<>();
+        if (craftingBound > 0) {
+            boundGrants.put(CRAFTING_MATERIAL_ID, craftingBound);
+        }
+        if (stoneBound > 0) {
+            boundGrants.put(ENHANCEMENT_STONE_ID, stoneBound);
         }
         PlayerBags candidate = PlayerBags.restore(player.bags().toState());
         candidate.normalize(bags.tables());
-        Bag.AddResult added = bags.prepareEquipmentGrant(player, candidate, grants);
-        if (!added.ok()) {
-            int tipId = added.tip() == Bag.NO_SPACE ? equip_error.kEquipBagFull_VALUE : added.tip();
-            return rejectMaterial(reqId, currentRev, tipId, true);
+        List<Bag.Written> allWritten = new ArrayList<>();
+        if (!tradableGrants.isEmpty()) {
+            Bag.AddResult addedTradable = bags.prepareEquipmentGrant(player, candidate, tradableGrants, false);
+            if (!addedTradable.ok()) {
+                int tipId = addedTradable.tip() == Bag.NO_SPACE ? equip_error.kEquipBagFull_VALUE : addedTradable.tip();
+                return rejectMaterial(reqId, currentRev, tipId, true);
+            }
+            allWritten.addAll(addedTradable.written());
+        }
+        if (!boundGrants.isEmpty()) {
+            Bag.AddResult addedBound = bags.prepareEquipmentGrant(player, candidate, boundGrants, true);
+            if (!addedBound.ok()) {
+                int tipId = addedBound.tip() == Bag.NO_SPACE ? equip_error.kEquipBagFull_VALUE : addedBound.tip();
+                return rejectMaterial(reqId, currentRev, tipId, true);
+            }
+            allWritten.addAll(addedBound.written());
         }
         long newRev = currentRev + 1L;
-        EquipmentMaterialRewardLedgerState nextState = ledger.materialReward().toBuilder()
-                .setAvailableUnits(ledger.materialReward().getAvailableUnits() - total)
+        EquipmentMaterialRewardLedgerState nextState = curState.toBuilder()
+                .setMigratedToV2(true)
+                .setAvailableUnits(curState.getAvailableUnits() - total)
+                .setAvailableTradableUnits(availTradable - batchTradable)
                 .setRevision(newRev)
                 .build();
         player.bags().commitPrepared(candidate);
@@ -322,65 +374,130 @@ public final class EquipmentCraftService {
                 .setFingerprint(fingerprint)
                 .setMaterialRewardRevision(newRev)
                 .setCraftingMaterialCount(request.getCraftingMaterialCount())
-                .setEnhancementStoneCount(request.getEnhancementStoneCount()));
-        bags.auditEquipment(player, List.of(), added.written(), AssetAudit.Reason.ITEM_AWARD, reqId,
+                .setEnhancementStoneCount(request.getEnhancementStoneCount())
+                .setCraftingTradableCount((int) craftingTradable)
+                .setEnhancementTradableCount((int) stoneTradable));
+        bags.auditEquipment(player, List.of(), allWritten, AssetAudit.Reason.ITEM_AWARD, reqId,
                 "{\"operation\":\"equipment_material_reward\"}");
         return appliedMaterial(player, reqId, newRev, false, bagView, nowMs);
     }
 
-    /** 结算应用同帧累加每日装备材料自选额度（返回本次实际增加的份数 0 或 10）。 */
+    /** 结算应用同帧累加两阶段装备材料自选额度，返回本次实际新增总份数（0/5/10/15）。 */
     public static int creditBattleMaterialReward(ScenePlayer player, BattleSettlementData settlement, long nowMs) {
-        if (!isEligibleBattle(settlement)) {
-            return 0;
+        return creditBattleMaterialRewardDelta(player, settlement, nowMs).totalUnitsAdded();
+    }
+
+    /** 结算应用同帧累加两阶段装备材料自选额度（第一阶段首套 660/至多 60 可交易；第二阶段每周 100 全绑定）。 */
+    public static BattleCreditDelta creditBattleMaterialRewardDelta(ScenePlayer player, BattleSettlementData settlement, long nowMs) {
+        BattleEvaluation eval = evaluateBattle(settlement);
+        if (!eval.eligible()) {
+            return new BattleCreditDelta(0, 0, eval.pvpLossIneligible());
         }
         PlayerClientRequestLedger ledger = player.clientRequestLedger();
         if (!ledger.isValid()) {
-            return 0;
+            return BattleCreditDelta.NONE;
         }
         long[] day = resolveDay(nowMs);
-        if (day == null) {
-            return 0;
+        long[] week = resolveWeek(nowMs);
+        if (day == null || week == null) {
+            return BattleCreditDelta.NONE;
         }
-        long start = day[0];
+        long weekStart = week[0];
         EquipmentMaterialRewardLedgerState prev = ledger.materialReward();
-        // 时钟回拨不重新开放当日额度；仅跨入新游戏日时清零今日已领计数，保留余额
-        if (Long.compareUnsigned(start, prev.getDayStartsAtMs()) < 0) {
-            return 0;
+        int prevLifetime = prev.getMigratedToV2() ? prev.getLifetimeEarned() : 0;
+        int prevTradableTotal = prev.getMigratedToV2() ? prev.getTradableEarnedTotal() : 0;
+        long prevAvailableTradable = prev.getMigratedToV2() ? prev.getAvailableTradableUnits() : 0L;
+        int grossUnits = eval.baseUnits() + eval.bonusUnits();
+
+        int addTotal;
+        int addTradable = 0;
+        EquipmentMaterialRewardLedgerState.Builder next = prev.toBuilder();
+
+        if (Integer.compareUnsigned(prevLifetime, LIFETIME_LIMIT) < 0) {
+            // 第一阶段：首套永久 660 份，无每日/每周重置；胜局每满 10 份基础额含至多 1 份可交易（终身 60 份上限）。
+            int stage1Remain = LIFETIME_LIMIT - prevLifetime;
+            addTotal = Math.min(grossUnits, stage1Remain);
+            if (eval.isWin() && addTotal >= BATTLE_UNITS
+                    && Integer.compareUnsigned(prevTradableTotal, TRADABLE_LIFETIME_LIMIT) < 0) {
+                addTradable = 1;
+            }
+            if (Long.compareUnsigned(prev.getAvailableUnits(), -1L - Integer.toUnsignedLong(addTotal)) > 0) {
+                return BattleCreditDelta.NONE;
+            }
+            next.setMigratedToV2(true)
+                    .setLifetimeEarned(prevLifetime + addTotal)
+                    .setTradableEarnedTotal(prevTradableTotal + addTradable)
+                    .setAvailableUnits(prev.getAvailableUnits() + Integer.toUnsignedLong(addTotal))
+                    .setAvailableTradableUnits(prevAvailableTradable + Integer.toUnsignedLong(addTradable));
+        } else {
+            // 第二阶段：每周平滑 100 份全绑定（UTC+8 周一 05:00 重置，防时钟回拨）。
+            if (Long.compareUnsigned(weekStart, prev.getWeekStartsAtMs()) < 0) {
+                return BattleCreditDelta.NONE;
+            }
+            int earnedWeek = Long.compareUnsigned(weekStart, prev.getWeekStartsAtMs()) > 0 ? 0 : prev.getEarnedThisWeek();
+            if (Integer.compareUnsigned(earnedWeek, WEEKLY_LIMIT) >= 0) {
+                return BattleCreditDelta.NONE;
+            }
+            addTotal = Math.min(grossUnits, WEEKLY_LIMIT - earnedWeek);
+            if (Long.compareUnsigned(prev.getAvailableUnits(), -1L - Integer.toUnsignedLong(addTotal)) > 0) {
+                return BattleCreditDelta.NONE;
+            }
+            next.setMigratedToV2(true)
+                    .setWeekStartsAtMs(weekStart)
+                    .setEarnedThisWeek(earnedWeek + addTotal)
+                    .setAvailableUnits(prev.getAvailableUnits() + Integer.toUnsignedLong(addTotal));
         }
-        int earned = Long.compareUnsigned(start, prev.getDayStartsAtMs()) > 0 ? 0 : prev.getEarnedToday();
-        if (Integer.compareUnsigned(earned, DAILY_LIMIT) >= 0) {
-            return 0;
+        EquipmentMaterialRewardLedgerState built = next.build();
+        if (!PlayerClientRequestLedger.isMaterialRewardValid(built)) {
+            return BattleCreditDelta.NONE;
         }
-        if (Long.compareUnsigned(prev.getAvailableUnits(), -1L - BATTLE_UNITS) > 0) {
-            return 0;
-        }
-        ledger.setMaterialReward(prev.toBuilder()
-                .setDayStartsAtMs(start)
-                .setEarnedToday(earned + BATTLE_UNITS)
-                .setAvailableUnits(prev.getAvailableUnits() + BATTLE_UNITS)
-                .build());
-        return BATTLE_UNITS;
+        ledger.setMaterialReward(built);
+        return new BattleCreditDelta(addTotal, addTradable, false);
     }
 
     public static boolean isEligibleBattle(BattleSettlementData settlement) {
+        return evaluateBattle(settlement).eligible();
+    }
+
+    private static BattleEvaluation evaluateBattle(BattleSettlementData settlement) {
         if (settlement.getBattleId() == 0 || settlement.getPlayerId() == 0 || settlement.getFled()
                 || settlement.getTotalRounds() == 0 || Integer.compareUnsigned(settlement.getPlayerTeamIndex(), 1) > 0) {
-            return false;
+            return BattleEvaluation.INELIGIBLE;
         }
         eBattleOutcome outcome = settlement.getOutcome();
         if (outcome != eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN
                 && outcome != eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN
                 && outcome != eBattleOutcome.BATTLE_OUTCOME_DRAW) {
-            return false;
+            return BattleEvaluation.INELIGIBLE;
         }
+        boolean playerWon = (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && settlement.getPlayerTeamIndex() == 0)
+                || (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN && settlement.getPlayerTeamIndex() == 1);
         return switch (settlement.getMatchMode()) {
-            case MatchMode.MATCH_MODE_PVE_SOLO_VALUE, MatchMode.MATCH_MODE_PVE_TEAM_VALUE ->
-                    (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && settlement.getPlayerTeamIndex() == 0)
-                            || (outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN && settlement.getPlayerTeamIndex() == 1);
+            case MatchMode.MATCH_MODE_PVE_SOLO_VALUE, MatchMode.MATCH_MODE_PVE_TEAM_VALUE -> {
+                if (!playerWon) {
+                    yield BattleEvaluation.INELIGIBLE;
+                }
+                int bonus = Integer.compareUnsigned(settlement.getBattleDifficulty(), 2) >= 0 ? BONUS_UNITS : 0;
+                yield new BattleEvaluation(true, true, false, BATTLE_UNITS, bonus);
+            }
             case MatchMode.MATCH_MODE_1V1_VALUE, MatchMode.MATCH_MODE_5V5_VALUE,
-                    MatchMode.MATCH_MODE_POLARITY_5V5_VALUE, MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE -> true;
-            case MatchMode.MATCH_MODE_PVP_TEAM_VALUE -> !settlement.getCompetitiveRanked() || settlement.getParticipated();
-            default -> false;
+                    MatchMode.MATCH_MODE_PVP_TEAM_VALUE, MatchMode.MATCH_MODE_POLARITY_5V5_VALUE,
+                    MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE -> {
+                if (settlement.getCompetitiveRanked() && !settlement.getParticipated()) {
+                    yield new BattleEvaluation(false, false, !playerWon, 0, 0);
+                }
+                if (playerWon) {
+                    yield new BattleEvaluation(true, true, false, BATTLE_UNITS, BONUS_UNITS);
+                }
+                // PVP 平局或败局：必须满足防挂机最低参与门槛（>=3 回合、>=2 手动回合、有有效战斗贡献）。
+                if (Integer.compareUnsigned(settlement.getTotalRounds(), PVP_MIN_ROUNDS_FOR_LOSS) < 0
+                        || Integer.compareUnsigned(settlement.getManualActionRounds(), PVP_MIN_MANUAL_ROUNDS_FOR_LOSS) < 0
+                        || !settlement.getEffectiveCombatContribution()) {
+                    yield new BattleEvaluation(false, false, true, 0, 0);
+                }
+                yield new BattleEvaluation(true, false, false, BATTLE_UNITS, 0);
+            }
+            default -> BattleEvaluation.INELIGIBLE;
         };
     }
 
@@ -393,6 +510,20 @@ public final class EquipmentCraftService {
         }
         long start = nowMs - offset;
         long next = start + DAY_MS;
+        if (Long.compareUnsigned(next, start) <= 0) {
+            return null;
+        }
+        return new long[]{start, next};
+    }
+
+    /** UTC+8 每周一 05:00（即 UTC 周日 21:00）切周起止毫秒；失败返回 null。 */
+    public static long[] resolveWeek(long nowMs) {
+        if (Long.compareUnsigned(nowMs, FIRST_MONDAY_05_UTC8_MS) < 0) {
+            return null;
+        }
+        long offset = Long.remainderUnsigned(nowMs - FIRST_MONDAY_05_UTC8_MS, WEEK_MS);
+        long start = nowMs - offset;
+        long next = start + WEEK_MS;
         if (Long.compareUnsigned(next, start) <= 0) {
             return null;
         }
@@ -565,7 +696,8 @@ public final class EquipmentCraftService {
 
     private int fillMaterialSnapshot(ScenePlayer player, long nowMs, EquipmentMaterialRewardSnapshot.Builder out) {
         long[] day = resolveDay(nowMs);
-        if (day == null) {
+        long[] week = resolveWeek(nowMs);
+        if (day == null || week == null) {
             return INVALID_PARAMETER;
         }
         ItemTable craftMat = validMaterialItem(rules.tables().item(CRAFTING_MATERIAL_ID));
@@ -574,8 +706,17 @@ public final class EquipmentCraftService {
             return INVALID_TABLE_DATA;
         }
         EquipmentMaterialRewardLedgerState state = player.clientRequestLedger().materialReward();
+        int lifetimeEarned = state.getMigratedToV2() ? state.getLifetimeEarned() : 0;
+        int tradableEarnedTotal = state.getMigratedToV2() ? state.getTradableEarnedTotal() : 0;
+        long availableUnits = state.getAvailableUnits();
+        long availableTradable = state.getMigratedToV2()
+                ? Math.min(state.getAvailableTradableUnits(), availableUnits)
+                : 0L;
+        int batchUnits = (int) Math.min(Integer.toUnsignedLong(MAX_CLAIM_BATCH_UNITS), availableUnits);
+        int batchTradable = (int) Math.min(Integer.toUnsignedLong(batchUnits), availableTradable);
+        boolean weeklyPhase = Integer.compareUnsigned(lifetimeEarned, LIFETIME_LIMIT) >= 0;
+        int earnedThisWeek = (weeklyPhase && state.getWeekStartsAtMs() == week[0]) ? state.getEarnedThisWeek() : 0;
         int earnedToday = state.getDayStartsAtMs() == day[0] ? state.getEarnedToday() : 0;
-        int batchUnits = (int) Math.min(Integer.toUnsignedLong(DAILY_LIMIT), state.getAvailableUnits());
         int writable = checkWritable(player, false);
         boolean canClaim = batchUnits > 0 && writable == OK && state.getRevision() != -1L;
         out.setAvailable(true)
@@ -583,14 +724,27 @@ public final class EquipmentCraftService {
                 .setNextResetAtMs(day[1])
                 .setEarnedToday(earnedToday)
                 .setDailyLimit(DAILY_LIMIT)
-                .setAvailableUnits(state.getAvailableUnits())
+                .setAvailableUnits(availableUnits)
                 .setBatchUnits(batchUnits)
                 .setRevision(state.getRevision())
+                .setLifetimeEarned(lifetimeEarned)
+                .setLifetimeLimit(LIFETIME_LIMIT)
+                .setTradableEarnedTotal(tradableEarnedTotal)
+                .setTradableLifetimeLimit(TRADABLE_LIFETIME_LIMIT)
+                .setAvailableTradableUnits(availableTradable)
+                .setBatchTradableUnits(batchTradable)
+                .setWeeklyPhaseActive(weeklyPhase)
+                .setWeekStartsAtMs(week[0])
+                .setNextWeekResetAtMs(week[1])
+                .setEarnedThisWeek(earnedThisWeek)
+                .setWeeklyLimit(WEEKLY_LIMIT)
                 .setCraftingMaterial(buildMaterial(player, craftMat.getId(), 0))
                 .setEnhancementStone(buildMaterial(player, enhanceStone.getId(), 0))
                 .setCanClaim(canClaim);
         if (batchUnits == 0) {
-            out.setUnavailableReason("完成主要战斗可获得材料自选份数，每日最多20份。");
+            out.setUnavailableReason(weeklyPhase
+                    ? "完成主要战斗可获得本周材料自选份数（每周上限100份，全绑定）。"
+                    : "完成主要战斗可获得首套材料自选份数（首套总池660份，无每日限制）。");
         } else if (writable == equip_error.kEquipInBattle_VALUE) {
             out.setUnavailableReason("战斗中暂不能领取，请在结算完成后重试。");
         } else if (!canClaim) {

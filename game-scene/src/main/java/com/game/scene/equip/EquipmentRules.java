@@ -23,6 +23,24 @@ public final class EquipmentRules {
     }
     public boolean enhanceSuccess(int rate) { return rate != 0 && below(10_000) < Integer.toUnsignedLong(rate); }
 
+    /** 带硬保底的强化掷骰结果（对齐 C++ {@code equiprules::RollEnhanceWithPity}）。 */
+    public record EnhanceRoll(boolean success, int nextPityCount, boolean triggeredByPity) { }
+
+    /**
+     * 含保底的强化判定：{@code pityLimit > 0} 且 {@code currentPity + 1 >= pityLimit} 时 100% 必成且不消耗随机源；
+     * 否则按万分比 {@code successRate} 掷骰，成功归零，失败且有保底时计数 +1。
+     */
+    public EnhanceRoll rollEnhanceWithPity(int successRate, int currentPity, int pityLimit) {
+        if (pityLimit > 0 && Integer.compareUnsigned(currentPity + 1, pityLimit) >= 0) {
+            return new EnhanceRoll(true, 0, true);
+        }
+        if (enhanceSuccess(successRate)) {
+            return new EnhanceRoll(true, 0, false);
+        }
+        int nextPity = pityLimit > 0 ? currentPity + 1 : 0;
+        return new EnhanceRoll(false, nextPity, false);
+    }
+
     public EquipmentState newInstance(int configId) {
         var item = tables.item(configId);
         if (item == null || item.getEquipKind() == 0 || item.getMaxStackSize() != 1) return null;
@@ -60,10 +78,44 @@ public final class EquipmentRules {
         out.addAffixes(EquipmentAffixState.newBuilder().setAttrId(row.id()).setTier(tier).setSeq(sequence)
                 .setValue((int) (row.min() + below(row.cap() - row.min() + 1))));
     }
+    public static final int V1_GUARANTEED_MAX_ENHANCE_LEVEL = 10;
+    public static final int V1_MAX_ENHANCE_LEVEL = 11;
+    public static final int V1_ENHANCE_BONUS_PER_LEVEL = 200;
+    public static final int V1_TOP_ENHANCE_BONUS_PERMYRIAD = 2400;
+
     public int level(BagItem item) {
-        return item.equipment() == null ? 0 : (int) Math.min(Integer.toUnsignedLong(item.equipment().getEnhanceLevel()), tables.maxEnhance());
+        if (item.equipment() == null) return 0;
+        var row = tables.item(item.configId());
+        int profile = row == null ? 0 : row.getEquipProfile();
+        return (int) Math.min(Integer.toUnsignedLong(item.equipment().getEnhanceLevel()), tables.maxEnhance(profile));
     }
-    public long bonus(int level) { var row = tables.enhance(level); return row == null ? 0 : Integer.toUnsignedLong(row.getBonusPermyriad()); }
+    /** V1 强化行契约：+1..+10 100% 必成零金币无保底；+11 概率提前成+硬保底必成（+24%，不掉级，零金币）。 */
+    public boolean isEnhanceRowAvailable(com.game.table.EquipEnhanceTable row) {
+        if (row == null) return false;
+        int profile = row.getProfileId();
+        if (profile == 0) return row.getSuccessRate() != 0;
+        if (profile != 1) return false;
+        int level = row.getLevel();
+        var material = tables.item(row.getMaterialId());
+        boolean baseMaterialOk = row.getFailLevelLoss() == 0 && row.getCostGold() == 0
+                && row.getMaterialId() != 0 && row.getMaterialCount() > 0
+                && material != null && material.getEquipKind() == 0 && material.getBattleUsable() == 0;
+        if (!baseMaterialOk || level <= 0 || level > V1_MAX_ENHANCE_LEVEL) return false;
+        if (level <= V1_GUARANTEED_MAX_ENHANCE_LEVEL) {
+            return row.getBonusPermyriad() == V1_ENHANCE_BONUS_PER_LEVEL * level
+                    && row.getSuccessRate() == 10_000 && row.getPityLimit() == 0;
+        }
+        return level == V1_MAX_ENHANCE_LEVEL
+                && row.getBonusPermyriad() == V1_TOP_ENHANCE_BONUS_PERMYRIAD
+                && row.getSuccessRate() > 0 && row.getSuccessRate() < 10_000
+                && row.getPityLimit() > 0;
+    }
+    public long bonus(int level) { return bonus(0, level); }
+    public long bonus(int profileId, int level) {
+        var row = tables.enhance(profileId, level);
+        return row != null && (profileId == 0 || isEnhanceRowAvailable(row))
+                ? Integer.toUnsignedLong(row.getBonusPermyriad()) : 0;
+    }
     public static long add(long a, long b) { return b > Long.MAX_VALUE - a ? Long.MAX_VALUE : a + b; }
     public static long scale(long base, long permyriad) {
         long whole = base / 10_000;
@@ -84,8 +136,9 @@ public final class EquipmentRules {
         var row = tables.item(item.configId());
         if (row == null || row.getEquipKind() == 0) return List.of();
         List<AttributeValue> out = new ArrayList<>();
+        int profile = row.getEquipProfile();
         for (var base : row.getBaseAttrList()) if (accepted(tables.attribute(base.getBaseAttrId())))
-            out.add(new AttributeValue(base.getBaseAttrId(), scale(Integer.toUnsignedLong(base.getBaseAttrValue()), bonus(level(item))), 0, 0, 0));
+            out.add(new AttributeValue(base.getBaseAttrId(), scale(Integer.toUnsignedLong(base.getBaseAttrValue()), bonus(profile, level(item))), 0, 0, 0));
         if (item.equipment() == null) return List.copyOf(out);
         for (var affix : item.equipment().getAffixesList()) {
             if (affix.getTier() < 1 || affix.getTier() > 4 || !accepted(tables.attribute(affix.getAttrId()))) continue;

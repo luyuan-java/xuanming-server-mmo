@@ -408,7 +408,7 @@ public final class BattleSettlementService {
     private void recordBattleResult(ScenePlayer player, BattleSettlementData settlement, long goldCredited,
                                     Map<Integer, Long> itemsGained, Map<Integer, Long> itemsConsumed) {
         long nowMs = clock.epochMillis();
-        int materialCreditAdded = com.game.scene.equip.EquipmentCraftService.creditBattleMaterialReward(player, settlement, nowMs);
+        var materialDelta = com.game.scene.equip.EquipmentCraftService.creditBattleMaterialRewardDelta(player, settlement, nowMs);
         var seasonCredit = seasonService == null
                 ? com.game.scene.season.SeasonService.BattleCreditOutcome.NONE
                 : seasonService.creditBattlePoints(player, settlement, nowMs);
@@ -424,7 +424,9 @@ public final class BattleSettlementService {
                 .setSettledAtMs(nowMs)
                 .setMatchMode(settlement.getMatchMode())
                 .setBattleConfigId(settlement.getBattleConfigId())
-                .setMaterialCreditUnitsAdded(materialCreditAdded)
+                .setMaterialCreditUnitsAdded(materialDelta.totalUnitsAdded())
+                .setMaterialTradableUnitsAdded(materialDelta.tradableUnitsAdded())
+                .setMaterialPvpLossIneligible(materialDelta.pvpLossIneligible())
                 .setSeasonId(recordedSeasonId);
         if (goldCredited > 0) {
             entry.addCurrencies(com.game.player.store.state.BattleResultCurrencyState.newBuilder()

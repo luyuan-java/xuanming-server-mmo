@@ -54,7 +54,7 @@ class EquipmentFeatureTest {
         assertThat(enhanced.getErrorMessage().getId()).isZero(); assertThat(enhanced.getSuccess()).isTrue();
         assertThat(enhanced.getEnhanceLevel()).isEqualTo(1); assertThat(enhanced.hasBag()).isTrue(); assertThat(enhanced.hasEquipment()).isTrue();
         f.randomValue = 9999;
-        frames = call(f, handler, "EnhanceEquip", EnhanceEquipRequest.newBuilder().setItemId(id).build());
+        frames = call(f, handler, "EnhanceEquip", EnhanceEquipRequest.newBuilder().setItemId(id).setExpectedLevel(1).build());
         assertThat(frames).hasSize(1);
         var failed = EnhanceEquipResponse.parseFrom(frames.getFirst().getSerializedMessage());
         assertThat(failed.getErrorMessage().getId()).isZero(); assertThat(failed.getSuccess()).isFalse();

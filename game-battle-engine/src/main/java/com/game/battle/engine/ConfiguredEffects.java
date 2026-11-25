@@ -82,7 +82,7 @@ final class ConfiguredEffects {
                     battle.impact.heal(source,receiver,value,hit,skill != null && skill.getBattleModel() == 1,false);
                 }
                 case MANA, DRAIN -> mana(source,receiver,value,op == DRAIN);
-                case DISPEL_DEBUFF, DISPEL_BUFF -> dispel(receiver,row);
+                case DISPEL_DEBUFF, DISPEL_BUFF -> dispel(source, receiver, row);
                 case EXTEND, CONSUME -> periodic(source,receiver,row,hit);
                 case RETREAT -> {
                     if (!hostile || !receiver.isPet()) break;
@@ -134,6 +134,7 @@ final class ConfiguredEffects {
             ctx.events().append(BATTLE_EVENT_MAX_HEALTH,source.actorId(),receiver.actorId()).setTargetMaxHealthAfter(receiver.maxHealth()).setTargetHealthAfter(receiver.health());
         }
         var event = ctx.events().append(BATTLE_EVENT_BUFF_ADD,source.actorId(),receiver.actorId()).setBuffTableId(id).setBuffInstanceId(instance).setValue(1);
+        if (hostile && (op == CONTROL || op == PERIODIC)) ctx.encounter.recordEffectiveContribution(source);
         if (op == SHIELD) {
             event.setShieldAfter(fromDoubleSaturating(value));
             for (int index : artifacts) battle.equipment.use(source,index,receiver,source.state().getEquipmentEffects().getArtifacts(index).getBonusBps());
@@ -157,12 +158,21 @@ final class ConfiguredEffects {
                 .setTargetManaAfter(target.mana()).setManaDelta(EventLog.signedManaDelta(delta,!drain));
     }
 
-    private void dispel(BattleUnit target, BuffTable row) {
+    private void dispel(BattleUnit source, BattleUnit target, BuffTable row) {
         var candidates = target.state().getBuffsList().stream()
                 .filter(e -> battle.row(e) != null && !battle.listener(e) && battle.legacy.isDebuffEntry(e) == (row.getBattleOp() == DISPEL_DEBUFF))
                 .sorted(Comparator.comparing(e -> battle.row(e).getBattleOp() != CONTROL)).toList();
         int count = row.getEffectCount() == 0 ? candidates.size() : Math.min(candidates.size(),row.getEffectCount());
         for (int i = 0; i < count; i++) battle.remove(target,candidates.get(i).getBuffId());
+        if (row.getBattleOp() == DISPEL_BUFF && source.teamIndex() != target.teamIndex()) {
+            ctx.encounter.tryDispelBossStance(source, target);
+        }
+        if (count > 0) {
+            ctx.encounter.recordEffectiveContribution(source);
+            if (row.getBattleOp() == DISPEL_DEBUFF && source.teamIndex() == target.teamIndex()) {
+                ctx.encounter.markAntiControlOrSeasonSkill(EncounterMechanics.ownerPlayerIdOf(source));
+            }
+        }
     }
 
     private void periodic(BattleUnit source, BattleUnit target, BuffTable row, Hit hit) {

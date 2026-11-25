@@ -184,6 +184,8 @@ public final class PlayerBattleResults {
                 .setItemsMailed(e.getItemsMailed())
                 .setExpGain(e.getExpGain())
                 .setMaterialCreditUnitsAdded(e.getMaterialCreditUnitsAdded())
+                .setMaterialTradableUnitsAdded(e.getMaterialTradableUnitsAdded())
+                .setMaterialPvpLossIneligible(e.getMaterialPvpLossIneligible())
                 .setSeasonId(e.getSeasonId());
         for (BattleResultCurrencyState c : e.getCurrenciesList()) {
             b.addCurrencies(PlayerBattleResultCurrency.newBuilder()

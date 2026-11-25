@@ -139,28 +139,35 @@ class RankedPresetRulesTest {
     }
 
     @Test
-    void 排位材料额度校验参与门禁与PVE共享每日20份上限() {
+    void 排位材料额度校验参与门禁与两阶段防挂机规则() {
         ScenePlayer player = WorldTestAccess.player(10003L, 1, 30, "试玩", 1, List.of(), "acc3",
                 PlayerState.getDefaultInstance());
         long nowMs = 1_730_000_000_000L;
 
-        // 1. 排位未参与(participated=false)不给材料额度
+        // 1. 排位未参与(participated=false)不给材料额度，且标 pvpLossIneligible=true
         BattleSettlementData absent = BattleSettlementData.newBuilder()
                 .setBattleId(1L).setPlayerId(10003L).setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
-                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN).setPlayerTeamIndex(0).setTotalRounds(2)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN).setPlayerTeamIndex(0).setTotalRounds(3)
+                .setManualActionRounds(2).setEffectiveCombatContribution(true)
                 .setCompetitiveRanked(true).setSeasonId(1).setParticipated(false).build();
-        assertThat(EquipmentCraftService.creditBattleMaterialReward(player, absent, nowMs)).isZero();
+        var absentDelta = EquipmentCraftService.creditBattleMaterialRewardDelta(player, absent, nowMs);
+        assertThat(absentDelta.totalUnitsAdded()).isZero();
+        assertThat(absentDelta.pvpLossIneligible()).isTrue();
 
-        // 2. 两场合格 PVE 胜局占满每日 20 份上限
+        // 2. 两场合格普通 PVE 胜局在阶段一（660 总池，无日限）各计 +10（含 1 可交易）
         BattleSettlementData pveWin = BattleSettlementData.newBuilder()
                 .setBattleId(2L).setPlayerId(10003L).setMatchMode(MatchMode.MATCH_MODE_PVE_SOLO_VALUE)
                 .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN).setPlayerTeamIndex(0).setTotalRounds(3).build();
         assertThat(EquipmentCraftService.creditBattleMaterialReward(player, pveWin, nowMs)).isEqualTo(10);
         assertThat(EquipmentCraftService.creditBattleMaterialReward(player, pveWin.toBuilder().setBattleId(3L).build(), nowMs)).isEqualTo(10);
 
-        // 3. 日满后再打有效排位局新增额度为 0
+        // 3. 达标有效参与的排位败局计 +10 全绑定（不扣日限，共 30）；不达防挂机门槛的排位败局 +0
         BattleSettlementData rankedValid = absent.toBuilder().setBattleId(4L).setParticipated(true).build();
-        assertThat(EquipmentCraftService.creditBattleMaterialReward(player, rankedValid, nowMs)).isZero();
-        assertThat(player.clientRequestLedger().materialReward().getAvailableUnits()).isEqualTo(20L);
+        var rankedDelta = EquipmentCraftService.creditBattleMaterialRewardDelta(player, rankedValid, nowMs);
+        assertThat(rankedDelta.totalUnitsAdded()).isEqualTo(10);
+        assertThat(rankedDelta.tradableUnitsAdded()).isZero();
+        assertThat(rankedDelta.pvpLossIneligible()).isFalse();
+        assertThat(player.clientRequestLedger().materialReward().getAvailableUnits()).isEqualTo(30L);
+        assertThat(player.clientRequestLedger().materialReward().getAvailableTradableUnits()).isEqualTo(2L);
     }
 }

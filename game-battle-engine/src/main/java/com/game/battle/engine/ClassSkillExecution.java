@@ -127,7 +127,8 @@ final class ClassSkillExecution {
                     hit.critical = damage.critical();
                     ctx.configured.impact.damage(actor,target,amount,skill.getDamageType(),hit,com.game.proto.eBattleHitKind.BATTLE_HIT_NORMAL);
                 } else {
-                    long dealt = target.applyDamage(amount);
+                    long dealt = ctx.encounter.applyLegacyDamage(actor, target, amount, skill.getDamageType(), true);
+                    if (dealt != 0) ctx.encounter.recordEffectiveContribution(actor);
                     event(eBattleEventType.BATTLE_EVENT_DAMAGE, actor, target, skill).setValue(dealt).setIsCritical(damage.critical());
                     if (target.health() == 0) ctx.handleDeath(target, actor.actorId());
                 }
@@ -140,6 +141,7 @@ final class ClassSkillExecution {
                 ctx.configured.impact.heal(actor,target,amount,new BattleEffect.Hit(skill.getId(),rank,BattleEffect.DIRECT,primary),false,false);
             } else {
                 long healed = target.applyHeal(amount);
+                if (healed != 0) ctx.encounter.recordEffectiveContribution(actor);
                 event(eBattleEventType.BATTLE_EVENT_HEAL, actor, target, skill).setValue(healed);
             }
         }
@@ -149,7 +151,17 @@ final class ClassSkillExecution {
             event(eBattleEventType.BATTLE_EVENT_MANA, actor, target, skill).setValue(restored)
                     .setManaDelta(EventLog.signedManaDelta(restored, true));
         }
-        if (skill.getDispelCount() != 0) buffs.dispelDebuffs(target, skill.getDispelCount());
+        if (skill.getDispelCount() != 0) {
+            if (actor.teamIndex() != target.teamIndex()) {
+                ctx.encounter.tryDispelBossStance(actor, target);
+            }
+            if (buffs.dispelDebuffs(target, skill.getDispelCount()) > 0) {
+                ctx.encounter.recordEffectiveContribution(actor);
+                if (actor.teamIndex() == target.teamIndex()) {
+                    ctx.encounter.markAntiControlOrSeasonSkill(EncounterMechanics.ownerPlayerIdOf(actor));
+                }
+            }
+        }
         double percent = skill.getBuffPercent() * ClassSkillRules.supportRankFactor(rank);
         for (int effect : skill.getEffectList()) buffs.addBuffToActor(target, effect, actor.actorId(), 0, percent);
     }

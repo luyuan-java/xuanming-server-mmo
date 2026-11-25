@@ -174,7 +174,7 @@ class TurnBattleActionTest {
                 stream.write('|');
             }
         }
-        stream.writeBytes(engine.buildSettlement(PLAYER_A).toByteArray());
+        stream.writeBytes(engine.buildSettlement(PLAYER_A).toBuilder().clearManualActionRounds().build().toByteArray());
         return stream.toByteArray();
     }
 

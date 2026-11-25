@@ -1127,7 +1127,11 @@ class InBattleGateMatrixTest {
         }
         if (row.service().equals(BAG) && row.method().equals("ClaimEquipmentMaterialReward")) {
             var prev = subject.player().clientRequestLedger().materialReward();
-            subject.player().clientRequestLedger().setMaterialReward(prev.toBuilder().setAvailableUnits(10).build());
+            subject.player().clientRequestLedger().setMaterialReward(prev.toBuilder()
+                    .setMigratedToV2(true)
+                    .setLifetimeEarned(10)
+                    .setAvailableUnits(10)
+                    .build());
             w.sink.clear();
         }
         if (!EQUIPMENT_METHODS.contains(row.method())) return subject;

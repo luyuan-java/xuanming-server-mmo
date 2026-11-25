@@ -48,10 +48,17 @@ public final class EquipmentFeature implements SceneFeature {
             call.reply(reply.build());
         });
         r.on(SERVICE, "EnhanceEquip", EnhanceEquipRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
-            var result = equipment.enhance(call.player(), request.getItemId()); changed(call, result);
+            var result = equipment.enhance(call.player(), request); changed(call, result);
             var reply = EnhanceEquipResponse.newBuilder().setErrorMessage(tip(result.tip()));
-            if (result.tip() == 0) reply.setBag(bags.snapshot(call.player(), BagType.INVENTORY)).setEquipment(bags.snapshot(call.player(), BagType.EQUIPMENT))
-                    .setSuccess(result.success()).setEnhanceLevel(result.enhanceLevel());
+            if (result.tip() == 0) {
+                reply.setBag(bags.snapshot(call.player(), BagType.INVENTORY))
+                        .setEquipment(bags.snapshot(call.player(), BagType.EQUIPMENT))
+                        .setSuccess(result.success())
+                        .setEnhanceLevel(result.enhanceLevel())
+                        .setReplayed(result.replayed())
+                        .setEnhancePityCount(result.enhancePityCount())
+                        .setEnhancePityLimit(result.enhancePityLimit());
+            }
             call.reply(reply.build());
         });
         r.on(SERVICE, "InlayGem", InlayGemRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {

@@ -147,11 +147,33 @@ public final class TurnBattleEngine {
 
         TurnBattleEngine engine = new TurnBattleEngine(request, data);
 
-        // 回合上限：副本行存在且 time_limit（uint32 秒）> 0 时按毫秒换回合，否则 300（engine.cpp:74-79）
+        // 回合上限与玩法配置：优先 DungeonTable.round_limit，其次物法易势默认 16 回合，正式排位缺省收敛到 20 回合，其余沿用 time_limit 换算。
         Optional<DungeonTable> dungeonRow = data.dungeon(request.getBattleConfigId());
-        if (dungeonRow.isPresent() && dungeonRow.get().getTimeLimit() != 0) {
-            engine.maxRounds = BattleRules.roundsFromMillis(Integer.toUnsignedLong(dungeonRow.get().getTimeLimit()) * 1000L);
+        int bossTrialKind = BattleConstants.BOSS_TRIAL_KIND_NONE;
+        int battleDifficulty = 0;
+        boolean hasExplicitRoundLimit = false;
+        if (dungeonRow.isPresent()) {
+            DungeonTable d = dungeonRow.get();
+            bossTrialKind = d.getBossTrialKind();
+            battleDifficulty = d.getDifficulty();
+            if (d.getRoundLimit() != 0) {
+                engine.maxRounds = d.getRoundLimit();
+                hasExplicitRoundLimit = true;
+            } else if (d.getTimeLimit() != 0) {
+                engine.maxRounds = BattleRules.roundsFromMillis(Integer.toUnsignedLong(d.getTimeLimit()) * 1000L);
+            }
         }
+        if (engine.isRankedBattle() && !hasExplicitRoundLimit) {
+            engine.maxRounds = Math.min(engine.maxRounds, BattleConstants.RANKED_DEFAULT_MAX_ROUNDS);
+        }
+        if (request.getMatchMode() == BattleConstants.MATCH_MODE_POLARITY_5V5
+                && bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_NONE) {
+            bossTrialKind = BattleConstants.BOSS_TRIAL_KIND_POLARITY_5V5;
+            if (engine.maxRounds == BattleConstants.DEFAULT_MAX_ROUNDS) {
+                engine.maxRounds = BattleConstants.POLARITY_DEFAULT_MAX_ROUNDS;
+            }
+        }
+        engine.ctx.encounter.configure(bossTrialKind, battleDifficulty);
 
         BattleStart.Rejected rejected = engine.initPlayers();
         if (rejected != null) {
@@ -190,6 +212,7 @@ public final class TurnBattleEngine {
         }
         engine.ctx.configured.initialize();
         engine.bindDungeonMonsterAis(monsterAiProfiles);
+        engine.ctx.encounter.initSpecialState(request.getMatchMode(), engine.maxRounds);
         return new BattleStart.Started(engine);
     }
 
@@ -388,14 +411,15 @@ public final class TurnBattleEngine {
                 referenceLevel = snapshot.getLevel();
             }
         }
+        boolean isBossTrialOrRescue = ctx.encounter.isBossTrialOrRescue();
         List<Integer> monsterIds = ctx.data().dungeonMonsterIds(request.getBattleConfigId());
         if (monsterIds.isEmpty()) {
             monsterIds = new ArrayList<>(request.getPlayersCount());
             for (int i = 0; i < request.getPlayersCount(); i++) {
                 monsterIds.add(0);
             }
-        } else if (attackerCount > 0 && request.getActivityContext().getKindValue() == 0) {
-            // 未知非零活动 kind 也视为活动；不能随人数放大其固定难度。
+        } else if (!isBossTrialOrRescue && attackerCount > 0 && request.getActivityContext().getKindValue() == 0) {
+            // 未知非零活动 kind 也视为活动；首领试炼与护卫救援固定 1 首领 + 1 护卫，仅线性缩放血量，不复制额外怪。
             long perPlayer = Integer.toUnsignedLong(ctx.data().dungeonMonstersPerPlayer(request.getBattleConfigId()));
             if (perPlayer > 0) {
                 int count = (int) Math.min(BattleConstants.MAX_SCALED_PVE_MONSTERS,
@@ -407,9 +431,23 @@ public final class TurnBattleEngine {
                 monsterIds = scaled;
             }
         }
+        long hpScale = isBossTrialOrRescue ? Math.max(1, attackerCount) : 1L;
         int monsterIndex = 0;
         for (int monsterTableId : monsterIds) {
             appendMonsterActor(monsterTableId, monsterIndex, referenceLevel);
+            BattleUnit spawned = ctx.units().getLast();
+            if (hpScale > 1L) {
+                long scaledHp = spawned.maxHealth() * hpScale;
+                spawned.state().setMaxHealth(scaledHp);
+                spawned.setHealth(scaledHp);
+            }
+            // 护卫救援：非首领护卫单位归属玩家侧（team 0）作为受保护目标，死亡即刻判负。
+            if (ctx.encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_GUARDIAN_RESCUE
+                    && !spawned.isBoss() && ctx.encounter.protectedGuardActorId() == 0L) {
+                int allySlot = ctx.nextFormationSlot(0);
+                spawned.state().setTeamIndex(0).setFormationSlot(allySlot);
+                ctx.encounter.setProtectedGuardActorId(spawned.actorId());
+            }
             monsterIndex++;
         }
     }
@@ -429,6 +467,9 @@ public final class TurnBattleEngine {
                 .setMonsterTableId(monsterTableId)
                 .setFormationSlot(ctx.nextFormationSlot(1));
         Optional<MonsterTable> monsterRow = ctx.data().monster(monsterTableId);
+        if (monsterRow.isPresent() && monsterRow.get().getIsBoss() != 0) {
+            actor.setIsBoss(true);
+        }
         BaseAttributesComp.Builder attributes = actor.getAttributesBuilder();
         if (monsterRow.isPresent() && monsterRow.get().getHealth() != 0) {
             MonsterTable row = monsterRow.get();
@@ -561,6 +602,7 @@ public final class TurnBattleEngine {
         pendingActions.put(actorId,action);
         manualActionPlayers.add(owner);
         enteredPlayers.add(owner);
+        ctx.encounter.recordManualActionRound(owner, ctx.roundIndex());
         return allPlayersReady();
     }
 
@@ -593,6 +635,7 @@ public final class TurnBattleEngine {
             pendingActions.put(actorId, action);
             manualActionPlayers.add(actorId);
             enteredPlayers.add(actorId);
+            ctx.encounter.recordManualActionRound(actorId, ctx.roundIndex());
         }
         return allPlayersReady();
     }
@@ -671,6 +714,9 @@ public final class TurnBattleEngine {
         lastActionOrder = order;
 
         for (long actorId : order) {
+            if (ctx.encounter.isSlowPhaseActor(actorId)) {
+                continue;
+            }
             BattleUnit actor = ctx.findActor(actorId);
             if (actor == null || !actor.isActive()) {
                 continue;
@@ -687,6 +733,9 @@ public final class TurnBattleEngine {
             executeAction(actor, action);
         }
 
+        // 首领试炼慢速重击与护卫周期机制：排在常规行动之后、回合末 buff tick 与摘除防御之前。
+        ctx.encounter.executeSlowAndGuardianActions(checks);
+
         buffs.tickAtRoundEnd();
         ctx.configured.endRound();
         decayCooldowns();
@@ -700,6 +749,10 @@ public final class TurnBattleEngine {
         pendingActions.clear();
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             ctx.advanceRound();
+            ctx.encounter.updatePolarityForRound(request.getMatchMode());
+            ctx.encounter.refreshTelegraphs(maxRounds);
+        } else {
+            ctx.encounter.clearActiveTelegraphs();
         }
         ctx.events().endRound();
         return result.setState(buildStateSnapshot()).build();
@@ -768,6 +821,9 @@ public final class TurnBattleEngine {
                 continue;
             }
             if (pendingActions.containsKey(actor.actorId())) {
+                continue;
+            }
+            if (ctx.encounter.protectedGuardActorId() != 0L && actor.actorId() == ctx.encounter.protectedGuardActorId()) {
                 continue;
             }
 
@@ -858,6 +914,11 @@ public final class TurnBattleEngine {
                 continue;
             }
             if (!pendingActions.containsKey(unit.actorId())) {
+                if (ctx.encounter.protectedGuardActorId() != 0L && unit.actorId() == ctx.encounter.protectedGuardActorId()) {
+                    pendingActions.put(unit.actorId(), BattleAction.newBuilder()
+                            .setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+                    continue;
+                }
                 BattleAction modern = unit.isPet() || (unit.isPlayer() && unit.isAuto()) ? ctx.configured.auto(unit,checks).orElse(null) : null;
                 BattleAction action = modern != null ? modern : unit.isPet() ? defaultPetAction(unit)
                         : unit.isPlayer() && unit.isAuto() ? autoClassSkills.select(unit).orElse(DEFAULT_ACTION)
@@ -1015,7 +1076,9 @@ public final class TurnBattleEngine {
             if (kind != eBattleHitKind.BATTLE_HIT_COUNTER) tryReflectDamage(actor,target,landed);
             return landed != 0;
         }
-        long dealt = target.applyDamage(damage);
+        long dealt = ctx.encounter.applyLegacyDamage(actor, target, damage, CombatDamageRules.PHYSICAL_DAMAGE,
+                kind != eBattleHitKind.BATTLE_HIT_COUNTER);
+        if (dealt != 0) ctx.encounter.recordEffectiveContribution(actor);
 
         ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
                 .setValue(dealt)
@@ -1161,7 +1224,8 @@ public final class TurnBattleEngine {
                 hit.critical = finalDamage.critical();
                 ctx.configured.impact.damage(actor,target,finalDamage.value(),row.getDamageType(),hit,eBattleHitKind.BATTLE_HIT_NORMAL);
             } else {
-            long dealt = target.applyDamage(finalDamage.value());
+            long dealt = ctx.encounter.applyLegacyDamage(actor, target, finalDamage.value(), row.getDamageType(), true);
+            if (dealt != 0) ctx.encounter.recordEffectiveContribution(actor);
 
             ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
                     .setSkillTableId(action.getSkillTableId())
@@ -1272,6 +1336,33 @@ public final class TurnBattleEngine {
      * 否则正在结算的回合号 ≥ 回合上限（uint32）→ B 胜（打满回合进攻方判负，PVP 也一样）。
      */
     private void updateOutcome() {
+        // 护卫救援：受保护护卫阵亡即刻判负（即便同回合击杀首领仍判负）。
+        if (ctx.encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_GUARDIAN_RESCUE) {
+            BattleUnit guard = ctx.findActor(ctx.encounter.protectedGuardActorId());
+            if (guard == null || guard.isDead()) {
+                outcome = eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
+                return;
+            }
+            boolean anyPlayerActive = false;
+            for (BattleUnit unit : ctx.units()) {
+                if (unit.isPlayer() && unit.teamIndex() == 0 && unit.isActive()) {
+                    anyPlayerActive = true;
+                    break;
+                }
+            }
+            if (!anyPlayerActive) {
+                outcome = eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
+                return;
+            }
+            if (ctx.sideWiped(1)) {
+                outcome = eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN;
+                return;
+            }
+            if (Integer.compareUnsigned(ctx.roundIndex(), maxRounds) >= 0) {
+                outcome = eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
+            }
+            return;
+        }
         boolean sideAWiped = ctx.sideWiped(0);
         boolean sideBWiped = ctx.sideWiped(1);
         if (sideAWiped && sideBWiped) {
@@ -1281,7 +1372,10 @@ public final class TurnBattleEngine {
         } else if (sideBWiped) {
             outcome = eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN;
         } else if (Integer.compareUnsigned(ctx.roundIndex(), maxRounds) >= 0) {
-            outcome = isRankedBattle() ? eBattleOutcome.BATTLE_OUTCOME_DRAW : eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
+            boolean drawOnCap = isRankedBattle()
+                    || ctx.encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_POLARITY_5V5
+                    || request.getMatchMode() == BattleConstants.MATCH_MODE_POLARITY_5V5;
+            outcome = drawOnCap ? eBattleOutcome.BATTLE_OUTCOME_DRAW : eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
         }
     }
 
@@ -1388,7 +1482,11 @@ public final class TurnBattleEngine {
                     .setIsDead(other.isDead());
         }
 
-        settlement.setUseFreePreset(usesFreePreset());
+        settlement.setUseFreePreset(usesFreePreset())
+                .setManualActionRounds(ctx.encounter.manualActionRounds(playerId))
+                .setEffectiveCombatContribution(ctx.encounter.hasEffectiveContribution(playerId))
+                .setBattleDifficulty(ctx.encounter.battleDifficulty())
+                .setBossTrialKind(ctx.encounter.bossTrialKind());
         if (isRankedBattle()) {
             settlement.setCompetitiveRanked(true)
                     .setSeasonId(request.getRankedContext().getSeasonId())
@@ -1436,6 +1534,7 @@ public final class TurnBattleEngine {
             var visible = state.addActorsBuilder().mergeFrom(unit.snapshot());
             if (unit.isPlayer()) visible.setSupportEffects(ctx.configured.equipment.summary(unit));
         }
+        ctx.encounter.populateStateSnapshot(state, outcome, maxRounds);
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             for (BattleUnit unit : ctx.units()) {
                 if ((!unit.isPlayer() && !unit.isPet()) || !unit.isActive()) {
@@ -1490,5 +1589,15 @@ public final class TurnBattleEngine {
     /** 测试钩子（包私有）：本局 RNG 至今的总抽数（{@link BattleRandom#draws()}），供测试核对规格 §8.4 的消耗账。 */
     long rngDrawsForTest() {
         return ctx.rng().draws();
+    }
+
+    /** 测试钩子（包私有）：按 actor_id 查局内单位（供特殊玩法机制单测核对状态）。 */
+    BattleUnit findUnitForTest(long actorId) {
+        return ctx.findActor(actorId);
+    }
+
+    /** 测试钩子（包私有）：读取首领试炼 / 护卫救援 / 物法易势权威机制状态。 */
+    EncounterMechanics encounterForTest() {
+        return ctx.encounter;
     }
 }

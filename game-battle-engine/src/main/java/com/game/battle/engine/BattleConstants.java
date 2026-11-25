@@ -25,6 +25,42 @@ public final class BattleConstants {
     public static final int MATCH_MODE_PVE_SOLO = 4;
     /** PVE 组队（{@code constants.h:23}）。 */
     public static final int MATCH_MODE_PVE_TEAM = 5;
+    /** 物法易势 5V5（镜像 {@code MatchMode.MATCH_MODE_POLARITY_5V5}）。 */
+    public static final int MATCH_MODE_POLARITY_5V5 = 8;
+
+    // ---- 首领试炼 / 轮换玩法类型（镜像 DungeonTable.boss_trial_kind） ----
+
+    public static final int BOSS_TRIAL_KIND_NONE = 0;
+    public static final int BOSS_TRIAL_KIND_BREAK_REJUV = 1;
+    public static final int BOSS_TRIAL_KIND_BREAK_STANCE = 2;
+    public static final int BOSS_TRIAL_KIND_BARRIER = 3;
+    public static final int BOSS_TRIAL_KIND_VENOM = 4;
+    public static final int BOSS_TRIAL_KIND_GUARDIAN_RESCUE = 5;
+    public static final int BOSS_TRIAL_KIND_POLARITY_5V5 = 6;
+
+    // ---- 首领 / 护卫公开预告意图与状态 ----
+
+    public static final int TELEGRAPH_KIND_SLOW_CLEAVE = 1;
+    public static final int TELEGRAPH_KIND_GUARD_HEAL = 2;
+    public static final int TELEGRAPH_KIND_GUARD_STANCE_PHYS = 3;
+    public static final int TELEGRAPH_KIND_GUARD_STANCE_MAGIC = 4;
+    public static final int TELEGRAPH_KIND_GUARD_SHIELD = 5;
+    public static final int TELEGRAPH_KIND_GUARD_BIND = 6;
+    public static final int TELEGRAPH_KIND_BOSS_MAGIC_STRIKE = 7;
+    public static final int TELEGRAPH_KIND_BOSS_VENOM_AOE = 8;
+
+    public static final int TELEGRAPH_STATUS_UPCOMING = 1;
+    public static final int TELEGRAPH_STATUS_EXECUTING = 2;
+    public static final int TELEGRAPH_STATUS_EXECUTED = 3;
+    public static final int TELEGRAPH_STATUS_CANCELLED_BY_CONTROL = 4;
+    public static final int TELEGRAPH_STATUS_CANCELLED_TARGET_INVALID = 5;
+
+    /** 正式论剑排位未显式配 round_limit 时的默认逻辑回合上限。 */
+    public static final int RANKED_DEFAULT_MAX_ROUNDS = 20;
+    /** 物法易势 5V5 默认逻辑回合上限与强势增伤分数（×115/100）。 */
+    public static final int POLARITY_DEFAULT_MAX_ROUNDS = 16;
+    public static final long POLARITY_DAMAGE_NUM = 115L;
+    public static final long POLARITY_DAMAGE_DEN = 100L;
 
     // ---- 队伍上限与自动战斗 ----
 

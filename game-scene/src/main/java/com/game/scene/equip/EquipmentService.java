@@ -1,7 +1,9 @@
 package com.game.scene.equip;
 
 import com.game.player.store.state.BagItemState;
+import com.game.player.store.state.ClientRequestRecordState;
 import com.game.player.store.state.EquipmentGemState;
+import com.game.proto.EnhanceEquipRequest;
 import com.game.scene.attribute.AttributeService;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.bag.BagService;
@@ -10,8 +12,10 @@ import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.BattleGate;
 import com.game.scene.player.*;
 import com.game.scene.world.ScenePlayer;
+import com.game.table.CommonErrorTip;
 import com.game.table.EquipErrorTip.equip_error;
 import com.game.table.ItemTable;
+import com.google.protobuf.ByteString;
 import java.util.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,7 +24,11 @@ import org.slf4j.LoggerFactory;
 public final class EquipmentService {
     private static final Logger log = LoggerFactory.getLogger(EquipmentService.class);
     private static final int VERSION_UNAVAILABLE = 1006;
-    public record Outcome(int tip, boolean success, int enhanceLevel, boolean attributesChanged) {
+    public record Outcome(int tip, boolean success, int enhanceLevel, boolean attributesChanged,
+                          boolean replayed, int enhancePityCount, int enhancePityLimit) {
+        public Outcome(int tip, boolean success, int enhanceLevel, boolean attributesChanged) {
+            this(tip, success, enhanceLevel, attributesChanged, false, 0, 0);
+        }
         static Outcome refused(int tip) { return new Outcome(tip, false, 0, false); }
     }
     private record Located(BagItem item, ItemTable row, boolean worn, int tip) { }
@@ -128,17 +136,66 @@ public final class EquipmentService {
         return new Outcome(result.tip(), result.ok(), 0, false);
     }
     public Outcome enhance(ScenePlayer p, long id) {
+        return enhanceCore(p, id, null, null, 0L, null);
+    }
+
+    /** RPC 强化入口：先按 client_request_id 幂等查账，再校乐观等级/保底次数与 profile 规则。 */
+    public Outcome enhance(ScenePlayer p, EnhanceEquipRequest request) {
+        if (request.getItemId() == 0) {
+            return Outcome.refused(CommonErrorTip.common_error.kInvalidParameter_VALUE);
+        }
+        long reqId = request.getClientRequestId();
+        ByteString fingerprint = null;
+        if (reqId != 0) {
+            PlayerClientRequestLedger ledger = p.clientRequestLedger();
+            if (!ledger.isValid()) {
+                return Outcome.refused(CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+            }
+            fingerprint = PlayerClientRequestLedger.fingerprint(request.toBuilder().clearClientRequestId().build());
+            var check = ledger.check(reqId, PlayerClientRequestLedger.KIND_ENHANCE_EQUIP, fingerprint);
+            if (check.verdict() == PlayerClientRequestLedger.Verdict.MISMATCH) {
+                return Outcome.refused(CommonErrorTip.common_error.kInvalidParameter_VALUE);
+            }
+            if (check.verdict() == PlayerClientRequestLedger.Verdict.REPLAY) {
+                ClientRequestRecordState rec = check.record();
+                return new Outcome(0, rec.getEnhanceSuccess(), rec.getEnhanceLevel(), false, true,
+                        rec.getEnhancePityCount(), resolvePityLimitForReplay(p, request.getItemId()));
+            }
+        }
+        Integer expectedPity = request.hasExpectedPityCount() ? request.getExpectedPityCount() : null;
+        return enhanceCore(p, request.getItemId(), request.getExpectedLevel(), expectedPity, reqId, fingerprint);
+    }
+
+    private int resolvePityLimitForReplay(ScenePlayer p, long itemId) {
+        Located found = locate(p.bags(), itemId);
+        if (found.tip() != 0 || found.item().equipment() == null) return 0;
+        int profile = found.row().getEquipProfile();
+        int level = rules.level(found.item());
+        if (level >= rules.tables().maxEnhance(profile)) return 0;
+        var next = rules.tables().enhance(profile, level + 1);
+        return next != null && rules.isEnhanceRowAvailable(next) ? next.getPityLimit() : 0;
+    }
+
+    private Outcome enhanceCore(ScenePlayer p, long id, Integer expectedLevel, Integer expectedPity,
+                                long clientRequestId, ByteString fingerprint) {
         int gate = writable(p); if (gate != 0) return Outcome.refused(gate);
         Located found = locate(p.bags(), id); if (found.tip() != 0) return Outcome.refused(found.tip());
-        if (found.item().equipment() == null || rules.tables().maxEnhance() == 0) return Outcome.refused(equip_error.kEquipEnhanceUnavailable_VALUE);
+        int profile = found.row().getEquipProfile();
+        int maxEnhance = rules.tables().maxEnhance(profile);
+        if (found.item().equipment() == null || maxEnhance == 0) return Outcome.refused(equip_error.kEquipEnhanceUnavailable_VALUE);
         int current = rules.level(found.item());
-        if (current == rules.tables().maxEnhance()) return Outcome.refused(equip_error.kEquipEnhanceMaxLevel_VALUE);
-        var row = rules.tables().enhance(current + 1);
+        int currentPity = found.item().equipment().getEnhancePityCount();
+        if (expectedLevel != null && (expectedLevel != current || (expectedPity != null && expectedPity != currentPity))) {
+            return Outcome.refused(equip_error.kEquipEnhanceLevelChanged_VALUE);
+        }
+        if (current >= maxEnhance) return Outcome.refused(equip_error.kEquipEnhanceMaxLevel_VALUE);
+        var row = rules.tables().enhance(profile, current + 1);
         if (row == null) return Outcome.refused(equip_error.kEquipInternalError_VALUE);
-        if (row.getSuccessRate() == 0) return Outcome.refused(equip_error.kEquipEnhanceUnavailable_VALUE);
+        if (!rules.isEnhanceRowAvailable(row)) return Outcome.refused(equip_error.kEquipEnhanceUnavailable_VALUE);
         boolean material = row.getMaterialId() != 0 && row.getMaterialCount() != 0;
         ItemTable materialRow = rules.tables().item(row.getMaterialId());
-        if (material && (materialRow == null || materialRow.getEquipKind() != 0))
+        if (material && (materialRow == null || materialRow.getEquipKind() != 0
+                || (profile != 0 && materialRow.getBattleUsable() != 0)))
             return Outcome.refused(equip_error.kEquipInternalError_VALUE);
         long count = Integer.toUnsignedLong(row.getMaterialCount());
         int materialTip = material ? quantityTip(p, row.getMaterialId(), count, equip_error.kEquipEnhanceMaterialNotEnough_VALUE) : 0;
@@ -146,18 +203,34 @@ public final class EquipmentService {
         if (row.getCostGold() < 0) return Outcome.refused(equip_error.kEquipEnhanceGoldNotEnough_VALUE);
         var debit = currency.prepareDeduction(p, Wallet.GOLD, row.getCostGold());
         if (debit.tipId() != 0) return Outcome.refused(equip_error.kEquipEnhanceGoldNotEnough_VALUE);
-        boolean success = rules.enhanceSuccess(row.getSuccessRate());
+        int pityLimit = row.getPityLimit();
+        var roll = rules.rollEnhanceWithPity(row.getSuccessRate(), currentPity, pityLimit);
+        boolean success = roll.success();
         int level = success ? current + 1 : (int) Math.max(0, current - Integer.toUnsignedLong(row.getFailLevelLoss()));
         PlayerBags next = candidate(p);
         List<Bag.Drawn> removed = material ? next.bag(BagType.INVENTORY).drainPlainExact(row.getMaterialId(), count) : List.of();
         BagItem target = locate(next, id).item();
-        target.equipment(target.equipment().toBuilder().setEnhanceLevel(level).build());
-        String extra = "{\"success\":" + success + ",\"from\":" + current + ",\"to\":" + level + "}";
+        target.equipment(target.equipment().toBuilder()
+                .setEnhanceLevel(level)
+                .setEnhancePityCount(roll.nextPityCount())
+                .build());
+        String extra = "{\"success\":" + success + ",\"from\":" + current + ",\"to\":" + level
+                + (pityLimit > 0 ? ",\"pity\":" + roll.nextPityCount() + ",\"pity_triggered\":" + roll.triggeredByPity() : "")
+                + "}";
         debit.commit(next, AssetAudit.Reason.EQUIP_ENHANCE, id, extra);
+        if (clientRequestId != 0 && fingerprint != null) {
+            p.clientRequestLedger().remember(ClientRequestRecordState.newBuilder()
+                    .setKey(clientRequestId)
+                    .setKind(PlayerClientRequestLedger.KIND_ENHANCE_EQUIP)
+                    .setFingerprint(fingerprint)
+                    .setEnhanceSuccess(success)
+                    .setEnhanceLevel(level)
+                    .setEnhancePityCount(roll.nextPityCount()));
+        }
         bags.auditEquipment(p, removed, List.of(), AssetAudit.Reason.EQUIP_ENHANCE, id, extra);
         boolean changed = found.worn() && level != current;
         if (changed) attributes.equipmentChanged(p);
-        return new Outcome(0, success, level, changed);
+        return new Outcome(0, success, level, changed, false, roll.nextPityCount(), pityLimit);
     }
     public Outcome inlay(ScenePlayer p, long id, int socket, int config) {
         int gate = writable(p); if (gate != 0) return Outcome.refused(gate);

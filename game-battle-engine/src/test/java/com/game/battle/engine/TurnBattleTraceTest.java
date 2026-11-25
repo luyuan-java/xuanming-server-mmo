@@ -117,6 +117,8 @@ class TurnBattleTraceTest {
                 .setOutcome(BATTLE_OUTCOME_SIDE_A_WIN)
                 .setHealth(940)
                 .setTotalRounds(5)
+                .setManualActionRounds(3)
+                .setEffectiveCombatContribution(true)
                 .build());
     }
 
@@ -512,6 +514,8 @@ class TurnBattleTraceTest {
                 .addItemsGained(BattleItemEntry.newBuilder().setItemTableId(ITEM_POTION).setCount(2))
                 .setTotalRounds(1)
                 .addDefeatedMonsters(BattleMonsterDefeat.newBuilder().setMonsterConfigId(TestTables.MONSTER_WITH_DROP).setCount(1))
+                .setManualActionRounds(1)
+                .setEffectiveCombatContribution(true)
                 .build());
     }
 

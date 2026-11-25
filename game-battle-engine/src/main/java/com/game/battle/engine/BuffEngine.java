@@ -89,6 +89,12 @@ final class BuffEngine {
             }
         }
         dispelBuffsByTag(target, row);
+        if (caster != null && (row.getBuffType() == BattleConstants.BUFF_TYPE_DISPEL || row.getDispelTagCount() > 0)) {
+            if (caster.teamIndex() != target.teamIndex()) {
+                ctx.encounter.tryDispelBossStance(caster, target);
+            }
+            ctx.encounter.recordEffectiveContribution(caster);
+        }
         if (row.getBuffType() == BattleConstants.BUFF_TYPE_DISPEL) {
             return;
         }
@@ -120,6 +126,14 @@ final class BuffEngine {
         ctx.events().append(eBattleEventType.BATTLE_EVENT_BUFF_ADD, casterId, target.actorId())
                 .setBuffTableId(buffTableId)
                 .setValue(1);
+        if (caster != null && caster.teamIndex() != target.teamIndex()
+                && (row.getBuffType() == BattleConstants.BUFF_TYPE_STUN
+                || row.getBuffType() == BattleConstants.BUFF_TYPE_FREEZE
+                || row.getBuffType() == BattleConstants.BUFF_TYPE_SILENCE
+                || row.getBuffType() == BattleConstants.BUFF_TYPE_POISON
+                || row.getBuffType() == BattleConstants.BUFF_TYPE_BURN)) {
+            ctx.encounter.recordEffectiveContribution(caster);
+        }
 
         for (int subBuffId : row.getSubBuffList()) {
             addBuffToActor(target, subBuffId, casterId, depth + 1);

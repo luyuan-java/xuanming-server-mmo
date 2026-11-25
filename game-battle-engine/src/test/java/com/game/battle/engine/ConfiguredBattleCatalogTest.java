@@ -159,8 +159,8 @@ class ConfiguredBattleCatalogTest {
 
     @Test void 每个正式主动技能都能被许可主体实际施放() {
         var catalog = TABLES.skill().all().stream().filter(s -> s.getBattleModel() == 1).toList();
-        assertThat(catalog).hasSize(66);
-        assertThat(TABLES.buff().all().stream().filter(b -> b.getBattleOp() != 0).count()).isEqualTo(69);
+        assertThat(catalog).hasSize(69);
+        assertThat(TABLES.buff().all().stream().filter(b -> b.getBattleOp() != 0).count()).isEqualTo(72);
         int casts = 0;
         for (SkillTable skill : catalog) {
             if (skill.getAbilityKind() != 1) continue;

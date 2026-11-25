@@ -12,6 +12,8 @@ public final class EquipmentTables {
     private final Map<Integer, EquipAttributeTable> attributes;
     private final Map<Integer, EquipAffixRuleTable> rules;
     private final Map<Integer, EquipEnhanceTable> enhancements;
+    private final Map<Integer, Map<Integer, EquipEnhanceTable>> enhancementsByProfile;
+    private final Map<Integer, Integer> maxEnhanceByProfile;
     private final Map<Integer, EquipGemTable> gems;
     private final List<EquipAffixPoolTable> pools;
     private final List<EquipAttributeCapTable> caps;
@@ -34,11 +36,27 @@ public final class EquipmentTables {
         this.artifacts = index(artifacts, EquipArtifactTable::getId);
         this.items = index(items, ItemTable::getId); this.attributes = index(attributes, EquipAttributeTable::getId);
         this.rules = index(rules, EquipAffixRuleTable::getId); this.enhancements = index(enhancements, EquipEnhanceTable::getId);
+        Map<Integer, Map<Integer, EquipEnhanceTable>> byProfile = new LinkedHashMap<>();
+        for (EquipEnhanceTable row : enhancements) {
+            int profile = row.getProfileId();
+            int level = (profile == 0 && row.getLevel() == 0) ? row.getId() : row.getLevel();
+            if (level != 0) {
+                byProfile.computeIfAbsent(profile, k -> new LinkedHashMap<>()).putIfAbsent(level, row);
+            }
+        }
+        Map<Integer, Map<Integer, EquipEnhanceTable>> frozenProfiles = new LinkedHashMap<>();
+        Map<Integer, Integer> maxByProfile = new LinkedHashMap<>();
+        byProfile.forEach((profile, levels) -> {
+            frozenProfiles.put(profile, Collections.unmodifiableMap(levels));
+            int m = 0;
+            while (levels.containsKey(m + 1)) m++;
+            maxByProfile.put(profile, m);
+        });
+        this.enhancementsByProfile = Collections.unmodifiableMap(frozenProfiles);
+        this.maxEnhanceByProfile = Collections.unmodifiableMap(maxByProfile);
         this.gems = index(gems, EquipGemTable::getId); this.pools = List.copyOf(pools); this.caps = List.copyOf(caps);
         this.sockets = List.copyOf(sockets); this.slots = List.copyOf(slots);
-        int max = 0;
-        while (this.enhancements.containsKey(max + 1)) max++;
-        maxEnhance = max;
+        this.maxEnhance = maxByProfile.getOrDefault(0, 0);
     }
 
     public static EquipmentTables from(ConfigTables t) {
@@ -70,9 +88,14 @@ public final class EquipmentTables {
     public EquipAttributeTable attribute(int id) { return attributes.get(id); }
     public List<EquipAttributeTable> attributes() { return List.copyOf(attributes.values()); }
     public EquipAffixRuleTable rule(int id) { return rules.get(id); }
-    public EquipEnhanceTable enhance(int level) { return enhancements.get(level); }
+    public EquipEnhanceTable enhance(int level) { return enhance(0, level); }
+    public EquipEnhanceTable enhance(int profileId, int level) {
+        Map<Integer, EquipEnhanceTable> byLevel = enhancementsByProfile.get(profileId);
+        return byLevel == null ? null : byLevel.get(level);
+    }
     public EquipGemTable gem(int id) { return gems.get(id); }
     public int maxEnhance() { return maxEnhance; }
+    public int maxEnhance(int profileId) { return maxEnhanceByProfile.getOrDefault(profileId, 0); }
     public List<EquipSlotTable> slots() { return slots; }
     public List<EquipAffixPoolTable> pool(int id) { return pools.stream().filter(r -> r.getPoolId() == id).toList(); }
     public List<EquipGemSocketTable> sockets(int kind) {
@@ -104,10 +127,15 @@ public final class EquipmentTables {
                 || Integer.compareUnsigned(row.getPinkRate(), 10_000) > 0 || Integer.compareUnsigned(row.getYellowRate(), 10_000) > 0)
             issues.add("EquipAffixRule 区间或概率越界 id=" + row.getId());
         for (var row : enhancements.values()) {
-            if (row.getId() == 0 || Integer.compareUnsigned(row.getId(), maxEnhance) > 0)
-                issues.add("EquipEnhance 等级必须从 1 连续 id=" + row.getId());
+            int profile = row.getProfileId();
+            int level = (profile == 0 && row.getLevel() == 0) ? row.getId() : row.getLevel();
+            int profileMax = maxEnhance(profile);
+            if (level == 0 || Integer.compareUnsigned(level, profileMax) > 0)
+                issues.add("EquipEnhance 等级必须从 1 连续 id=" + row.getId() + " profile=" + profile);
             if (Integer.compareUnsigned(row.getSuccessRate(), 10_000) > 0 || row.getCostGold() < 0)
                 issues.add("EquipEnhance 概率或金币越界 id=" + row.getId());
+            if (profile == 0 && row.getPityLimit() > 0 && Integer.compareUnsigned(row.getSuccessRate(), 10_000) >= 0)
+                issues.add("EquipEnhance 必成行不应设置 pity_limit id=" + row.getId());
             var material = item(row.getMaterialId());
             if (row.getMaterialId() != 0 && row.getMaterialCount() != 0
                     && (material == null || material.getEquipKind() != 0 || material.getBattleUsable() != 0))

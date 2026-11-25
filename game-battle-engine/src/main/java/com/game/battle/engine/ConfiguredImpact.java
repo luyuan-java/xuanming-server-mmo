@@ -43,6 +43,7 @@ final class ConfiguredImpact {
             }
         }
         long healed = target.applyHeal(SupportEffectRules.applyBonus(amount,bonus) * received);
+        if (healed != 0) ctx.encounter.recordEffectiveContribution(source);
         ctx.events().append(BATTLE_EVENT_HEAL,source.actorId(),target.actorId()).setSkillTableId(hit.skill).setValue(healed).setTargetHealthAfter(target.health());
     }
 
@@ -74,6 +75,8 @@ final class ConfiguredImpact {
         if (ctx.actorHasBuffOfType(target,BattleConstants.BUFF_TYPE_INVINCIBILITY)) damage = 0;
         if (target.isDefending() && hit.origin != REFLECTED && hit.origin != REDIRECT) damage *= 0.5;
         long remaining = CombatDamageRules.damageToHealth(damage,-1L);
+        remaining = ctx.encounter.applyDamageModifiers(source, target, remaining, type,
+                direct && hit.origin == DIRECT && kind != BATTLE_HIT_COUNTER);
         var defenses = direct ? target.state().getBuffsList().stream().filter(e -> {
             var row = battle.row(e);
             return row != null && ConfiguredBattle.matches(row,type);
@@ -123,6 +126,7 @@ final class ConfiguredImpact {
         remaining = battle.equipment.reduce(source,target,remaining,hit);
         long dealt = minUnsigned(target.health(),remaining);
         target.setHealth(target.health()-dealt);
+        if (dealt != 0 || absorbed != 0) ctx.encounter.recordEffectiveContribution(source);
         ctx.events().append(BATTLE_EVENT_DAMAGE,source.actorId(),target.actorId()).setSkillTableId(hit.skill).setValue(dealt).setAbsorbed(absorbed)
                 .setTargetHealthAfter(target.health()).setTargetManaAfter(target.mana()).setHitKind(kind).setDamageOrigin(hit.origin)
                 .setInstigatorId(hit.instigator).setIsCritical(hit.critical);

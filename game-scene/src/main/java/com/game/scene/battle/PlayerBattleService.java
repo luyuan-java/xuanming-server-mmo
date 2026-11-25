@@ -1138,7 +1138,9 @@ public final class PlayerBattleService implements BattleHooks {
                         .setOutcome(settlement.getOutcome())
                         .setSettlement(settlement);
                 if (recorded != null) {
-                    endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded());
+                    endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded())
+                            .setMaterialTradableUnitsAdded(recorded.getMaterialTradableUnitsAdded())
+                            .setMaterialPvpLossIneligible(recorded.getMaterialPvpLossIneligible());
                     if (recorded.getSeasonId() != 0) {
                         endPush.setSeasonId(recorded.getSeasonId());
                     }
@@ -1266,7 +1268,9 @@ public final class PlayerBattleService implements BattleHooks {
                             .setOutcome(notification.getOutcome())
                             .setSettlement(notification);
                     if (recorded != null) {
-                        endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded());
+                        endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded())
+                                .setMaterialTradableUnitsAdded(recorded.getMaterialTradableUnitsAdded())
+                                .setMaterialPvpLossIneligible(recorded.getMaterialPvpLossIneligible());
                         if (recorded.getSeasonId() != 0) {
                             endPush.setSeasonId(recorded.getSeasonId());
                         }

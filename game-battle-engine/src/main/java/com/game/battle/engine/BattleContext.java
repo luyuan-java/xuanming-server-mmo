@@ -40,6 +40,7 @@ final class BattleContext {
     private final BattleRandom rng;
     private final ClassSkillCombat classSkills;
     final ConfiguredBattle configured;
+    final EncounterMechanics encounter;
     private final EventLog events = new EventLog();
     private final List<BattleUnit> units = new ArrayList<>();
     private final List<BattleMonsterDefeat> defeatedMonsters = new ArrayList<>();
@@ -57,6 +58,7 @@ final class BattleContext {
         this.rng = new BattleRandom(seed);
         this.classSkills = new ClassSkillCombat(data);
         this.configured = new ConfiguredBattle(this, new BuffEngine(this));
+        this.encounter = new EncounterMechanics(this);
     }
 
     BattleData data() {

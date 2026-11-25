@@ -248,13 +248,14 @@ class MysteryMerchantAndEquipmentCraftTest {
         BattleFixture f = new BattleFixture();
         ScenePlayer player = f.enter(11, 1003);
 
-        // 第 1、2 场合格 PVE 胜利各记 +10（达到每日上限 20）；第 3 场不新增；逃跑场次不新增
+        // 第 1、2 场合格普通 PVE 胜利在阶段一（永久 660 总池，无日限）各记 +10（含 1 份可交易）；第 3 场逃跑不新增
         for (long battleId = 101; battleId <= 103; battleId++) {
             f.fighting(player.playerId(), battleId);
             f.deliver(BattleFixture.settlement(player.playerId(), battleId, 10)
                     .setMatchMode(MatchMode.MATCH_MODE_PVE_SOLO_VALUE)
                     .setPlayerTeamIndex(0)
                     .setTotalRounds(3)
+                    .setFled(battleId == 103)
                     .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
                     .build());
             f.drain();
@@ -264,18 +265,22 @@ class MysteryMerchantAndEquipmentCraftTest {
         GetEquipmentMaterialRewardResponse snap1 = call(f, player, BAG_SERVICE, "GetEquipmentMaterialReward",
                 GetEquipmentMaterialRewardRequest.getDefaultInstance(), GetEquipmentMaterialRewardResponse.parser());
         assertThat(snap1.getErrorMessage().getId()).isZero();
-        assertThat(snap1.getSnapshot().getEarnedToday()).isEqualTo(20);
+        assertThat(snap1.getSnapshot().getLifetimeEarned()).isEqualTo(20);
         assertThat(snap1.getSnapshot().getAvailableUnits()).isEqualTo(20);
+        assertThat(snap1.getSnapshot().getAvailableTradableUnits()).isEqualTo(2);
         assertThat(snap1.getSnapshot().getBatchUnits()).isEqualTo(20);
+        assertThat(snap1.getSnapshot().getBatchTradableUnits()).isEqualTo(2);
         assertThat(snap1.getSnapshot().getCanClaim()).isTrue();
 
-        // 跨日后今日计数归零但余额保留，再胜 1 场额外记 +10 -> 共 30（单次批量上限 20）
+        // 跨日后打一场达防挂机门槛的 1V1 败局额外记 +10（全绑定）-> 共 30（单次批量上限 20）
         f.advance(86_400_000L);
         f.fighting(player.playerId(), 104);
         f.deliver(BattleFixture.settlement(player.playerId(), 104, 10)
                 .setMatchMode(MatchMode.MATCH_MODE_1V1_VALUE)
                 .setPlayerTeamIndex(1)
-                .setTotalRounds(2)
+                .setTotalRounds(3)
+                .setManualActionRounds(2)
+                .setEffectiveCombatContribution(true)
                 .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
                 .build());
         f.drain();
@@ -283,9 +288,11 @@ class MysteryMerchantAndEquipmentCraftTest {
         f.completeSaves(com.game.scene.world.PlayerRepository.ProgressResult.SAVED);
         GetEquipmentMaterialRewardResponse snap2 = call(f, player, BAG_SERVICE, "GetEquipmentMaterialReward",
                 GetEquipmentMaterialRewardRequest.getDefaultInstance(), GetEquipmentMaterialRewardResponse.parser());
-        assertThat(snap2.getSnapshot().getEarnedToday()).isEqualTo(10);
+        assertThat(snap2.getSnapshot().getLifetimeEarned()).isEqualTo(30);
         assertThat(snap2.getSnapshot().getAvailableUnits()).isEqualTo(30);
+        assertThat(snap2.getSnapshot().getAvailableTradableUnits()).isEqualTo(2);
         assertThat(snap2.getSnapshot().getBatchUnits()).isEqualTo(20);
+        assertThat(snap2.getSnapshot().getBatchTradableUnits()).isEqualTo(2);
 
         // 408 非法拆分拒绝（总和不等于 batch_units）
         assertThat(call(f, player, BAG_SERVICE, "ClaimEquipmentMaterialReward",
@@ -293,7 +300,7 @@ class MysteryMerchantAndEquipmentCraftTest {
                         .setCraftingMaterialCount(10).setEnhancementStoneCount(5).build(),
                 ClaimEquipmentMaterialRewardResponse.parser()).getErrorMessage().getId()).isEqualTo(1005);
 
-        // 408 正常领取 12 打造材料 + 8 强化石；重放幂等；旧水位回 UNKNOWN + 1006
+        // 408 正常领取 12 打造材料 + 8 强化石（2 份可交易优先分给打造材料，其余分堆绑定）；重放幂等；旧水位回 UNKNOWN + 1006
         ClaimEquipmentMaterialRewardRequest claimReq = ClaimEquipmentMaterialRewardRequest.newBuilder()
                 .setClientRequestId(8002L).setExpectedRevision(0L)
                 .setCraftingMaterialCount(12).setEnhancementStoneCount(8).build();
@@ -304,8 +311,11 @@ class MysteryMerchantAndEquipmentCraftTest {
         assertThat(claimed.getReplayed()).isFalse();
         assertThat(claimed.getResultRevision()).isEqualTo(1L);
         assertThat(claimed.getSnapshot().getAvailableUnits()).isEqualTo(10);
+        assertThat(claimed.getSnapshot().getAvailableTradableUnits()).isZero();
         assertThat(player.bags().bag(BagType.INVENTORY).total(EquipmentCraftService.CRAFTING_MATERIAL_ID)).isEqualTo(12);
+        assertThat(player.bags().bag(BagType.INVENTORY).plainTradableQuantity(EquipmentCraftService.CRAFTING_MATERIAL_ID)).isEqualTo(2);
         assertThat(player.bags().bag(BagType.INVENTORY).total(EquipmentCraftService.ENHANCEMENT_STONE_ID)).isEqualTo(8);
+        assertThat(player.bags().bag(BagType.INVENTORY).plainTradableQuantity(EquipmentCraftService.ENHANCEMENT_STONE_ID)).isZero();
 
         ClaimEquipmentMaterialRewardResponse replayed = call(f, player, BAG_SERVICE, "ClaimEquipmentMaterialReward",
                 claimReq, ClaimEquipmentMaterialRewardResponse.parser());

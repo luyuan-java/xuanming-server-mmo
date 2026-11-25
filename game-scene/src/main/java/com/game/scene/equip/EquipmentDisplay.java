@@ -28,14 +28,34 @@ public final class EquipmentDisplay {
             }
             return;
         }
+        int profile = row.getEquipProfile();
+        int maxEnhance = rules.tables().maxEnhance(profile);
         int level = rules.level(item);
+        long currentBonus = rules.bonus(profile, level);
+        int currentPity = item.equipment() != null ? item.equipment().getEnhancePityCount() : 0;
         info.setEquipLevel(row.getEquipLevel()).setEquipClass(row.getEquipClass())
-                .setEnhanceLevel(level).setEnhanceMaxLevel(rules.tables().maxEnhance()).setEnhanceBonusPermyriad((int) rules.bonus(level));
-        var next = item.equipment() == null || level >= rules.tables().maxEnhance() ? null : rules.tables().enhance(level + 1);
-        if (next != null && next.getSuccessRate() != 0) {
+                .setEnhanceLevel(level).setEnhanceMaxLevel(maxEnhance).setEnhanceBonusPermyriad((int) currentBonus);
+        if (currentPity > 0) {
+            info.setEnhancePityCount(currentPity);
+        }
+        if (item.equipment() != null) {
+            if (!item.equipment().getCrafterName().isEmpty()) {
+                info.setCrafterName(item.equipment().getCrafterName());
+            }
+            if (item.equipment().getCrafterPlayerId() != 0) {
+                info.setCrafterPlayerId(item.equipment().getCrafterPlayerId());
+            }
+        }
+        var next = item.equipment() == null || level >= maxEnhance ? null : rules.tables().enhance(profile, level + 1);
+        if (next != null && rules.isEnhanceRowAvailable(next)) {
             var preview = EquipEnhancePreview.newBuilder().setNextLevel(level + 1).setSuccessRate(next.getSuccessRate())
                     .setCostGold(next.getCostGold())
                     .setBonusPermyriad(next.getBonusPermyriad()).setFailLevelLoss(next.getFailLevelLoss());
+            if (next.getPityLimit() > 0) {
+                preview.setPityLimit(next.getPityLimit())
+                        .setCurrentPityCount(currentPity)
+                        .setPityGuaranteedNext(Integer.compareUnsigned(currentPity + 1, next.getPityLimit()) >= 0);
+            }
             if (next.getMaterialId() != 0 && next.getMaterialCount() != 0) {
                 preview.setMaterialConfigId(next.getMaterialId()).setMaterialCount(next.getMaterialCount());
                 var material = rules.tables().item(next.getMaterialId());
@@ -47,7 +67,7 @@ public final class EquipmentDisplay {
         for (var base : row.getBaseAttrList()) {
             if (!EquipmentRules.accepted(rules.tables().attribute(base.getBaseAttrId()))) continue;
             long original = Integer.toUnsignedLong(base.getBaseAttrValue());
-            long current = EquipmentRules.scale(original, rules.bonus(level));
+            long current = EquipmentRules.scale(original, currentBonus);
             var line = line(new EquipmentRules.AttributeValue(base.getBaseAttrId(), current, 0, 0, sequence++))
                     .setEnhanceBonus(current - original);
             if (info.hasEnhanceNext()) line.setEnhanceNextValue(EquipmentRules.scale(original, Integer.toUnsignedLong(next.getBonusPermyriad())));
