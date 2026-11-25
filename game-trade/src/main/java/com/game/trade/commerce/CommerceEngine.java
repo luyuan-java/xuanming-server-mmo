@@ -13,9 +13,12 @@ import java.security.MessageDigest;
 import java.sql.*;
 import java.util.*;
 import java.util.function.LongSupplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** SQL合同与可靠资产腿的业务边界。成功只来自已提交玩家SQL账本，未知永不补发新seq。 */
 public final class CommerceEngine {
+    private static final Logger log = LoggerFactory.getLogger(CommerceEngine.class);
     /** 确定的持久数据错误，只隔离这一份合同，不能每轮阻塞全服。 */
     static final class CorruptContract extends SQLException {
         CorruptContract(String message) {
@@ -30,22 +33,36 @@ public final class CommerceEngine {
     final Policy policy;
     final LongSupplier clock;
     private final com.game.api.proto.SessionContext actor;
+    private final PlayerTradeGuard playerTradeGuard;
+    private final SellerCreditService credits;
     public CommerceEngine(CommerceStore store, LongSupplier ids, Policy policy, LongSupplier clock) {
-        this(store, ids, policy, clock, null);
+        this(store, ids, policy, clock, null, null, null);
     }
     private CommerceEngine(CommerceStore store, LongSupplier ids, Policy policy, LongSupplier clock,
-                            com.game.api.proto.SessionContext actor) {
+                            com.game.api.proto.SessionContext actor,
+                            PlayerTradeGuard playerTradeGuard, SellerCreditService credits) {
         this.store = Objects.requireNonNull(store);
         this.ids = Objects.requireNonNull(ids);
         this.policy = Objects.requireNonNull(policy);
         this.clock = Objects.requireNonNull(clock);
         this.actor = actor;
+        this.playerTradeGuard = playerTradeGuard;
+        this.credits = credits;
     }
+    /** 挂载游戏内当面交易防骗门禁（返回共享底层账本的新引擎视图）。 */
+    public CommerceEngine withPlayerTradeGuard(PlayerTradeGuard guard) {
+        return new CommerceEngine(store, ids, policy, clock, actor, guard, credits);
+    }
+    /** 挂载卖家店铺信用服务（官方托管首次结案后幂等计入真实成交）。 */
+    public CommerceEngine withSellerCreditService(SellerCreditService service) {
+        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, service);
+    }
+    SellerCreditService credits() { return credits; }
     /** 每次客户端调用显式绑定原会话；共享的号源/仓储不变，不存线程局部或进程级请求状态。 */
     CommerceEngine forActor(com.game.api.proto.SessionContext actor) {
         if (actor == null || actor.getPlayerId() == 0 || actor.getAccount().isEmpty() || actor.getOwnerRevision() <= 0)
             throw new Refusal(INVALID);
-        return new CommerceEngine(store, ids, policy, clock, actor);
+        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, credits);
     }
     com.game.api.proto.SessionContext actor() { return actor; }
     private String playerRequestKey(long me, String request) {
@@ -143,6 +160,10 @@ public final class CommerceEngine {
             throw new Refusal(SELF);
         policy.selection(in.getSellerAssets());
         policy.selection(in.getBuyerAssets());
+        if (playerTradeGuard != null) {
+            playerTradeGuard.evaluate(me, in.getBuyerPlayerId(), in.getSellerAssets(), in.getBuyerAssets(),
+                    clock.getAsLong());
+        }
         return create(me, in.getClientRequestId(), in,
             TradeCommerceRow.newBuilder()
                 .setKind(2)
@@ -340,7 +361,7 @@ public final class CommerceEngine {
         store.ensureSeqs(d, prior.getSellerPlayerId(), prior.getBuyerPlayerId(), pw.getHighestBidder());
         long[] opIds = new long[8];
         for (int i = 0; i < opIds.length; i++) opIds[i] = ids.getAsLong();
-        store.transaction(d, c -> {
+        var settledFact = store.transaction(d, c -> {
             // 旧未终局合同缺少原件时隔离，禁止以恢复时的当前owner补出“原身份”。
             if ((prior.getKind() >= 1 && prior.getKind() <= 5 || prior.getKind() == BID_KIND)
                 && (prior.getSellerPlayerId() != 0 && !pw.hasSellerIdentity()
@@ -364,7 +385,7 @@ public final class CommerceEngine {
             var current = store.lock(c, prior.getCommerceId());
             // 原身份与点锁来自prior；新版本必须等下一轮用自身原件取锁，不能借旧观察推进。
             if (current == null || current.getVersion() != prior.getVersion())
-                return null;
+                return Optional.<SellerCreditService.CompletedTradeFact>empty();
             var r = current.toBuilder();
             var w = workflow(current);
             for (var l : w.getLegsList())
@@ -388,7 +409,7 @@ public final class CommerceEngine {
                     r.setStatus(MANUAL);
                     r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(now);
                     store.save(c, r);
-                    return null;
+                    return Optional.<SellerCreditService.CompletedTradeFact>empty();
                 }
                 if (op.getStatus() != 1) {
                     l.setOutcome(op.getStatus());
@@ -447,11 +468,31 @@ public final class CommerceEngine {
             }
             if (w.getStage().equals("done"))
                 store.markConsumed(c, r.getCommerceId());
+            long engineNow = clock.getAsLong();
+            TradeCommerceWorkflow builtWorkflow = w.build();
             // 库时钟只裁决截止；updated_ms 是按引擎时钟扫描的调度键。
-            r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(clock.getAsLong());
-            store.save(c, r);
-            return null;
+            r.setWorkflowProto(builtWorkflow.toByteString()).setUpdatedMs(engineNow);
+            TradeCommerceRow saved = store.save(c, r);
+            if (current.getStatus() != SETTLED && saved.getStatus() == SETTLED) {
+                return SellerCreditService.settledTradeFact(saved, builtWorkflow, engineNow);
+            }
+            return Optional.<SellerCreditService.CompletedTradeFact>empty();
         });
+        if (settledFact != null && settledFact.isPresent()) {
+            recordSettledCreditBestEffort(settledFact.get());
+        }
+    }
+
+    void recordSettledCreditBestEffort(SellerCreditService.CompletedTradeFact fact) {
+        if (credits == null || fact == null) {
+            return;
+        }
+        try {
+            credits.recordCompletedTrade(fact);
+        } catch (SQLException | RuntimeException failure) {
+            log.error("官方托管真实成交记入卖家信用失败，不阻塞主账本 order_id={} seller_id={}",
+                    fact.orderId(), Long.toUnsignedString(fact.sellerPlayerId()), failure);
+        }
     }
     private void marketBarrier(Connection c, TradeCommerceRow.Builder r, TradeCommerceWorkflow.Builder w)
         throws SQLException {

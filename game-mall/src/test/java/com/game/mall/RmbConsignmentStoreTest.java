@@ -457,6 +457,75 @@ class RmbConsignmentStoreTest {
             assertTrue(schemaFailure.getSQLState().startsWith("42"));
         }
     }
+
+    @Test void 分层公示与定向买家及trade前缀托管引用校验() {
+        try (var f = new Fixture()) {
+            var tieredRules = new RmbConsignmentProperties(10_000L, 60_000L, 1_000L, 500, Set.of(0), 500L, 2_000L);
+            var tieredStore = new RmbConsignmentStore(f.db.jdbc, f.db.manager, f.clock, tieredRules, f.payouts);
+            var tieredOrders = new MallOrderStore(f.db.jdbc, f.db.manager, f.clock, f.db.props, RunMode.TEST, tieredStore);
+
+            // 小额 ITEMS 走短公示 2000ms 且兼容 trade:<uint64> 托管引用与定向买家
+            var small = tieredStore.register(new RmbConsignmentApi.Escrow(
+                    "9101", "11", "seller", 1, "ITEMS", null, "trade:9101", "a".repeat(64), 500L, "小额材料定向单", "vip-buyer"));
+            assertEquals(f.clock.millis() + 2_000L, small.noticeEndMs());
+            assertEquals("vip-buyer", small.designatedBuyerAccount());
+
+            // 超阈值 ITEMS 与 PET 始终走完整公示 10000ms
+            var big = tieredStore.register(new RmbConsignmentApi.Escrow(
+                    "9102", "11", "seller", 1, "ITEMS", null, "trade:9102", "b".repeat(64), 501L, "高额材料"));
+            assertEquals(f.clock.millis() + 10_000L, big.noticeEndMs());
+            var pet = tieredStore.register(new RmbConsignmentApi.Escrow(
+                    "9103", "11", "seller", 1, "PET", null, "trade:9103", "c".repeat(64), 100L, "低价宠物仍走满公示"));
+            assertEquals(f.clock.millis() + 10_000L, pet.noticeEndMs());
+
+            // 禁止定向自己
+            rejects(409, () -> tieredStore.register(new RmbConsignmentApi.Escrow(
+                    "9104", "11", "seller", 1, "ITEMS", null, "trade:9104", "d".repeat(64), 100L, "自定向", "seller")));
+
+            // 非法前缀托管引用拒绝
+            rejects(400, () -> tieredStore.register(new RmbConsignmentApi.Escrow(
+                    "9105", "11", "seller", 1, "ITEMS", null, "other:9105", "e".repeat(64), 100L, "坏前缀")));
+
+            // 满短公示后：非指定买家拒回 409，指定买家可买
+            f.clock.add(2_000L);
+            rejects(409, () -> tieredOrders.createConsignment(f.buy("9101", "stranger", "22", "stranger-buy-001")));
+            var ok = tieredOrders.createConsignment(f.buy("9101", "vip-buyer", "23", "vip-buy-001"));
+            assertEquals(500L, ok.amountMinor());
+        }
+    }
+
+    @Test void 逐单争议冻结与释放阻断超提并保持管理幂等() {
+        try (var f = new Fixture()) {
+            var order = f.earned("9201", 1000); // gross=1000, fee=50, net=950
+            f.clock.add(1_000L);
+
+            var frozen = f.rmb.resolveIncomeDispute("ops-admin", new RmbConsignmentApi.ResolveIncomeDispute(
+                    "dispute-freeze-001", order.orderId(), "FREEZE_DISPUTE", 600L, "CASE-001", "买家申诉冻结"));
+            assertEquals("DISPUTE_FROZEN:600", frozen.resultingState());
+            // 相同 (actor, requestId) 幂等重放，不重复冻结；不同条款冲突 409
+            assertEquals(frozen, f.rmb.resolveIncomeDispute("ops-admin", new RmbConsignmentApi.ResolveIncomeDispute(
+                    "dispute-freeze-001", order.orderId(), "FREEZE_DISPUTE", 600L, "CASE-001", "买家申诉冻结")));
+            rejects(409, () -> f.rmb.resolveIncomeDispute("ops-admin", new RmbConsignmentApi.ResolveIncomeDispute(
+                    "dispute-freeze-001", order.orderId(), "FREEZE_DISPUTE", 601L, "CASE-001", "改金额冲突")));
+
+            var incFrozen = f.rmb.incomes(new RmbConsignmentApi.IncomePage("seller", "", 20)).incomes().getFirst();
+            assertEquals(600L, incFrozen.disputeFrozenFen());
+            assertEquals("CASE-001", incFrozen.disputeCaseId());
+
+            // 仅剩 350 可提现：提 351 拒绝，提 350 放行
+            rejects(409, () -> f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "dispute-over-001", 351L)));
+            assertEquals(350L, f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "dispute-ok-001", 350L)).amountFen());
+
+            // 全部释放争议冻结后清空 disputeCaseId，剩余 600 恢复可提现
+            var released = f.rmb.resolveIncomeDispute("ops-admin", new RmbConsignmentApi.ResolveIncomeDispute(
+                    "dispute-release-001", order.orderId(), "RELEASE_DISPUTE", 600L, "CASE-001", "核实无误解冻"));
+            assertEquals("DISPUTE_RELEASED", released.resultingState());
+            var incReleased = f.rmb.incomes(new RmbConsignmentApi.IncomePage("seller", "", 20)).incomes().getFirst();
+            assertEquals(0L, incReleased.disputeFrozenFen());
+            assertNull(incReleased.disputeCaseId());
+            assertEquals(600L, f.rmb.withdraw(new RmbConsignmentApi.Withdraw("seller", "dispute-ok-002", 600L)).amountFen());
+        }
+    }
     private static final class Fixture implements AutoCloseable {
         final MockPaymentTestDatabase db = new MockPaymentTestDatabase();
         final MutableClock clock = new MutableClock();

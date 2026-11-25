@@ -1,6 +1,7 @@
 package com.game.mall;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -57,8 +58,14 @@ public class RmbConsignmentStore {
 
     public RmbConsignmentApi.Listing register(RmbConsignmentApi.Escrow input) {
         if (input == null) { throw invalid(); }
-        player(input.listingId()); player(input.sellerPlayerId()); player(input.escrowReference());
+        player(input.listingId()); player(input.sellerPlayerId()); escrowReference(input.escrowReference());
         account(input.sellerAccount()); proof(input.escrowProof());
+        if (input.designatedBuyerAccount() != null) {
+            account(input.designatedBuyerAccount());
+            if (input.designatedBuyerAccount().equals(input.sellerAccount())) {
+                throw new MallException(409, "定向买家不能与卖家相同");
+            }
+        }
         if (input.marketZone() < 1 || input.marketZone() > 0xffff_ffffL || input.assetKind() == null
             || !Set.of("ITEMS", "CURRENCY", "PET", "CHARACTER").contains(input.assetKind())
             || input.priceFen() < 1 || input.priceFen() > MallOrderStore.MAX_AMOUNT_MINOR || input.title() == null
@@ -68,18 +75,19 @@ public class RmbConsignmentStore {
         } else if (input.assetCurrencyType() != null) { throw invalid(); }
         String digest = digest(input);
         long now = clock.millis();
-        long notice = Math.addExact(now, rules.noticeMs());
+        long notice = Math.addExact(now, rules.noticeMsFor(input.assetKind(), input.priceFen()));
         long end = Math.addExact(notice, rules.saleMs());
+        byte[] designatedBuyerBytes = input.designatedBuyerAccount() == null ? null : bytes(input.designatedBuyerAccount());
         try {
             return Objects.requireNonNull(tx.execute(status -> {
                 // listing主键和唯一托管引用共同串行化首次登记，不接管不同资产的旧listing。
                 jdbc.update("INSERT INTO commerce_consignment(listing_id,seller_player_id,seller_account,market_zone,asset_kind,"
                     + "asset_currency_type,escrow_reference,escrow_proof,request_digest,title,price_fen,fee_bps,cooling_ms,"
-                    + "notice_end_ms,sale_end_ms,state,created_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'LISTED',?)"
+                    + "notice_end_ms,sale_end_ms,state,designated_buyer_account,created_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'LISTED',?,?)"
                     + " ON DUPLICATE KEY UPDATE listing_id=listing_id", input.listingId(), input.sellerPlayerId(),
                     bytes(input.sellerAccount()), input.marketZone(), input.assetKind(), input.assetCurrencyType(),
                     input.escrowReference(), input.escrowProof(), digest, input.title(), input.priceFen(), rules.feeBps(),
-                    rules.coolingMs(), notice, end, now);
+                    rules.coolingMs(), notice, end, designatedBuyerBytes, now);
                 var rows = listing(input.listingId(), true);
                 if (rows.isEmpty() || !rows.getFirst().digest().equals(digest)) {
                     throw new MallException(409, "寄售编号或托管引用已用于不同条款");
@@ -124,6 +132,9 @@ public class RmbConsignmentStore {
         CommerceIdentity.revision(input.buyerOwnerRevision());
         var value = requireListing(input.listingId());
         if (value.sellerAccount().equals(input.buyerAccount())) { throw new MallException(409, "同账号不能购买自己的角色或资产"); }
+        if (value.view().designatedBuyerAccount() != null && !value.view().designatedBuyerAccount().equals(input.buyerAccount())) {
+            throw new MallException(409, "该定向寄售仅限指定买家购买");
+        }
         long now = clock.millis();
         if (!value.view().state().equals("LISTED") || now < value.view().noticeEndMs() || now >= value.view().saleEndMs()) {
             throw new MallException(409, "寄售仍在公示、已结束或已被占用");
@@ -300,10 +311,11 @@ public class RmbConsignmentStore {
                 return withdrawal((String) prior.getFirst().get("withdrawal_id"), input.account(), false);
             }
             record Withdrawable(String orderId, long availableFen) {}
-            var funds = jdbc.query("SELECT order_sn,net_fen,reserved_fen,paid_fen,forfeited_fen FROM commerce_seller_income "
-                + "WHERE account=? AND available_ms<=? AND net_fen-reserved_fen-paid_fen-forfeited_fen>0 ORDER BY order_sn LIMIT 100 FOR UPDATE",
+            var funds = jdbc.query("SELECT order_sn,net_fen,reserved_fen,paid_fen,forfeited_fen,dispute_frozen_fen FROM commerce_seller_income "
+                + "WHERE account=? AND available_ms<=? AND net_fen-reserved_fen-paid_fen-forfeited_fen-dispute_frozen_fen>0 ORDER BY order_sn LIMIT 100 FOR UPDATE",
                 (row, index) -> new Withdrawable(row.getString("order_sn"),
-                    row.getLong("net_fen") - row.getLong("reserved_fen") - row.getLong("paid_fen") - row.getLong("forfeited_fen")),
+                    row.getLong("net_fen") - row.getLong("reserved_fen") - row.getLong("paid_fen")
+                        - row.getLong("forfeited_fen") - row.getLong("dispute_frozen_fen")),
                 bytes(input.account()), clock.millis());
             long remaining = input.amountFen();
             for (var row : funds) { remaining -= Math.min(remaining, row.availableFen()); }
@@ -316,7 +328,7 @@ public class RmbConsignmentStore {
                 long amount = Math.min(remaining, row.availableFen());
                 if (amount == 0) { break; }
                 if (jdbc.update("UPDATE commerce_seller_income SET reserved_fen=reserved_fen+? WHERE order_sn=? "
-                        + "AND net_fen-reserved_fen-paid_fen-forfeited_fen>=?", amount, row.orderId(), amount) != 1) {
+                        + "AND net_fen-reserved_fen-paid_fen-forfeited_fen-dispute_frozen_fen>=?", amount, row.orderId(), amount) != 1) {
                     throw new MallException(503, "收入预留并发状态异常");
                 }
                 jdbc.update("INSERT INTO commerce_withdrawal_allocation(withdrawal_id,order_sn,amount_fen) VALUES(?,?,?)",
@@ -405,19 +417,142 @@ public class RmbConsignmentStore {
         return jdbc.query("SELECT * FROM commerce_consignment WHERE listing_id=?" + (lock ? " FOR UPDATE" : ""),
             (row, index) -> stored(row), id);
     }
+    private static final Set<String> DISPUTE_ACTIONS = Set.of("FREEZE_DISPUTE", "RELEASE_DISPUTE");
+    private static final String CASE_ID_PATTERN = "[A-Za-z0-9_-]{3,64}";
+
+    /**
+     * 逐单争议冻结 / 释放卖家收入；与 {@link #withdraw} 共用 {@code commerce_seller_guard} 账号锁，
+     * 按 {@code commerce_admin_command -> oms_order -> commerce_seller_guard -> commerce_seller_income} 固定锁序防竞态双花。
+     */
+    public RmbConsignmentApi.IncomeDisputeResolution resolveIncomeDispute(
+            String actor, RmbConsignmentApi.ResolveIncomeDispute in) {
+        if (actor == null || !actor.matches("[a-z][a-z0-9-]{2,63}")
+                || in == null || in.requestId() == null || !in.requestId().matches("[A-Za-z0-9_-]{8,128}")
+                || in.orderId() == null || !in.orderId().matches(PaymentPolicy.ORDER)
+                || in.action() == null || !DISPUTE_ACTIONS.contains(in.action())
+                || in.amountFen() < 1 || in.amountFen() > MallOrderStore.MAX_AMOUNT_MINOR
+                || in.caseId() == null || !in.caseId().matches(CASE_ID_PATTERN)
+                || in.reason() == null || in.reason().isBlank() || in.reason().length() > 256) {
+            throw new MallException(400, "卖家收入争议处置参数非法");
+        }
+        String reason = in.reason().trim();
+        String reqDigest = adminDigest("income_dispute", in);
+        byte[] actorKey = actor.getBytes(StandardCharsets.US_ASCII);
+        byte[] requestKey = in.requestId().getBytes(StandardCharsets.US_ASCII);
+        String pending = "pending:" + UUID.randomUUID();
+        return Objects.requireNonNull(tx.execute(status -> {
+            jdbc.update("INSERT INTO commerce_admin_command(actor,request_id,command_type,request_digest,result_json,created_ms)"
+                    + " VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE request_id=request_id",
+                    actorKey, requestKey, "income_dispute", reqDigest, pending, clock.millis());
+            var cmdRows = jdbc.queryForList("SELECT command_type,request_digest,result_json FROM commerce_admin_command"
+                    + " WHERE actor=? AND request_id=? FOR UPDATE", actorKey, requestKey);
+            if (cmdRows.size() != 1) { throw new MallException(503, "管理请求原件缺失"); }
+            var storedCmd = cmdRows.getFirst();
+            if (!"income_dispute".equals(storedCmd.get("command_type")) || !reqDigest.equals(storedCmd.get("request_digest"))) {
+                throw new MallException(409, "管理请求号已用于不同条款");
+            }
+            if (!pending.equals(storedCmd.get("result_json"))) {
+                return decodeDisputeResolution(String.valueOf(storedCmd.get("result_json")));
+            }
+            var orderRows = jdbc.queryForList("SELECT status,sku_id FROM oms_order WHERE order_sn=? FOR UPDATE", in.orderId());
+            if (orderRows.size() != 1) { throw new MallException(404, "订单不存在"); }
+            if (((Number) orderRows.getFirst().get("sku_id")).longValue() != 0) {
+                throw new MallException(409, "争议冻结仅适用于人民币寄售订单");
+            }
+            var sellerAccounts = jdbc.query("SELECT account FROM commerce_seller_income WHERE order_sn=?",
+                    (row, n) -> row.getBytes(1), in.orderId());
+            if (sellerAccounts.size() != 1) { throw new MallException(404, "卖家收入记录不存在"); }
+            lockSeller(text(sellerAccounts.getFirst()));
+            var incomeRows = jdbc.queryForList(
+                    "SELECT net_fen,reserved_fen,paid_fen,forfeited_fen,dispute_frozen_fen,dispute_case_id "
+                            + "FROM commerce_seller_income WHERE order_sn=? FOR UPDATE",
+                    in.orderId());
+            if (incomeRows.size() != 1) { throw new MallException(503, "卖家收入记录缺失"); }
+            var inc = incomeRows.getFirst();
+            long net = ((Number) inc.get("net_fen")).longValue();
+            long reserved = ((Number) inc.get("reserved_fen")).longValue();
+            long paid = ((Number) inc.get("paid_fen")).longValue();
+            long forfeited = ((Number) inc.get("forfeited_fen")).longValue();
+            long disputeFrozen = ((Number) inc.get("dispute_frozen_fen")).longValue();
+            long now = clock.millis();
+            String resultingState;
+            switch (in.action()) {
+                case "FREEZE_DISPUTE" -> {
+                    long availableToFreeze = net - reserved - paid - forfeited - disputeFrozen;
+                    if (availableToFreeze < in.amountFen()) {
+                        throw new MallException(409, "可冻结卖家收入不足，资金可能已预留或已出款");
+                    }
+                    if (jdbc.update("UPDATE commerce_seller_income SET dispute_frozen_fen=dispute_frozen_fen+?,dispute_case_id=? "
+                                    + "WHERE order_sn=? AND net_fen-reserved_fen-paid_fen-forfeited_fen-dispute_frozen_fen>=?",
+                            in.amountFen(), in.caseId(), in.orderId(), in.amountFen()) != 1) {
+                        throw new MallException(409, "卖家收入并发变化");
+                    }
+                    resultingState = "DISPUTE_FROZEN:" + (disputeFrozen + in.amountFen());
+                }
+                case "RELEASE_DISPUTE" -> {
+                    if (disputeFrozen < in.amountFen()) {
+                        throw new MallException(409, "争议释放金额超过当前冻结额");
+                    }
+                    long remainingFrozen = disputeFrozen - in.amountFen();
+                    String nextCase = remainingFrozen == 0 ? null : in.caseId();
+                    if (jdbc.update("UPDATE commerce_seller_income SET dispute_frozen_fen=dispute_frozen_fen-?,dispute_case_id=? "
+                                    + "WHERE order_sn=? AND dispute_frozen_fen>=?",
+                            in.amountFen(), nextCase, in.orderId(), in.amountFen()) != 1) {
+                        throw new MallException(409, "卖家收入并发变化");
+                    }
+                    resultingState = remainingFrozen == 0 ? "DISPUTE_RELEASED" : "DISPUTE_FROZEN:" + remainingFrozen;
+                }
+                default -> throw new MallException(400, "不支持的收入争议动作");
+            }
+            var result = new RmbConsignmentApi.IncomeDisputeResolution(
+                    "INCOME_DISPUTE", in.orderId(), in.action(), resultingState, reason, now);
+            if (jdbc.update("UPDATE commerce_admin_command SET result_json=? WHERE actor=? AND request_id=? AND result_json=?",
+                    encodeDisputeResolution(result), actorKey, requestKey, pending) != 1) {
+                throw new MallException(503, "管理命令响应记录失败");
+            }
+            return result;
+        }));
+    }
+
+    private String adminDigest(String kind, Object input) {
+        try {
+            byte[] body = (kind + "\n" + json.writeValueAsString(input)).getBytes(StandardCharsets.UTF_8);
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(body));
+        } catch (JsonProcessingException | NoSuchAlgorithmException error) {
+            throw new IllegalStateException("管理请求摘要不可用", error);
+        }
+    }
+
+    private String encodeDisputeResolution(RmbConsignmentApi.IncomeDisputeResolution result) {
+        try { return json.writeValueAsString(result); }
+        catch (JsonProcessingException error) { throw new IllegalStateException("管理响应无法编码", error); }
+    }
+
+    private RmbConsignmentApi.IncomeDisputeResolution decodeDisputeResolution(String raw) {
+        try {
+            return json.readerFor(RmbConsignmentApi.IncomeDisputeResolution.class)
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readValue(raw);
+        } catch (JsonProcessingException corrupt) {
+            throw new MallException(503, "管理请求响应原件损坏");
+        }
+    }
+
     private Stored stored(ResultSet row) throws SQLException {
         String state = row.getString("state");
         long notice = row.getLong("notice_end_ms"), end = row.getLong("sale_end_ms"), now = clock.millis();
         String phase = state.equals("LISTED") ? (now < notice ? "PUBLIC_NOTICE" : now < end ? "ON_SALE" : "ENDED") : state;
+        byte[] designatedBytes = row.getBytes("designated_buyer_account");
+        String designatedBuyer = designatedBytes == null ? null : text(designatedBytes);
         var view = new RmbConsignmentApi.Listing(row.getString("listing_id"), row.getString("seller_player_id"), row.getLong("market_zone"),
             row.getString("asset_kind"), row.getString("title"), row.getLong("price_fen"), row.getInt("fee_bps"),
-            row.getLong("cooling_ms"), notice, end, state, phase, row.getString("current_order_sn"));
+            row.getLong("cooling_ms"), notice, end, state, phase, row.getString("current_order_sn"), designatedBuyer);
         return new Stored(view, text(row.getBytes("seller_account")), row.getString("escrow_reference"),
             row.getString("escrow_proof"), row.getString("request_digest"));
     }
     private static RmbConsignmentApi.Income income(ResultSet row) throws SQLException {
         return new RmbConsignmentApi.Income(row.getString("order_sn"), row.getLong("gross_fen"), row.getLong("fee_fen"),
-            row.getLong("net_fen"), row.getLong("reserved_fen"), row.getLong("paid_fen"), row.getLong("available_ms"));
+            row.getLong("net_fen"), row.getLong("reserved_fen"), row.getLong("paid_fen"), row.getLong("available_ms"),
+            row.getLong("forfeited_fen"), row.getLong("dispute_frozen_fen"), row.getString("dispute_case_id"));
     }
     private static void requireCurrentOrder(Stored value, String orderId, String state) {
         if (!state.equals(value.view().state()) || !orderId.equals(value.view().orderId())) {
@@ -436,6 +571,12 @@ public class RmbConsignmentStore {
     static void player(String value) {
         try { MallAuthentication.requirePlayer(value); }
         catch (MallException invalidPlayer) { throw invalid(); }
+    }
+    /** 兼容 trade 服务生成的规范格式 trade:<uint64> 以及历史纯规范 uint64 引用，拒绝其它前缀或非规范数字。 */
+    static void escrowReference(String value) {
+        if (value == null || value.isEmpty() || value.length() > 32) { throw invalid(); }
+        String numeric = value.startsWith("trade:") ? value.substring("trade:".length()) : value;
+        player(numeric);
     }
     static void request(String value) { if (value == null || !value.matches("[A-Za-z0-9_-]{8,128}")) { throw invalid(); } }
     private static void proof(String value) { if (value == null || !value.matches("[0-9a-f]{64}")) { throw invalid(); } }

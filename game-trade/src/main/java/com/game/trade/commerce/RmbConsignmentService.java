@@ -16,9 +16,12 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.*;
 import java.util.function.BiConsumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** 一个持久合同贯穿托管、角色冻结、商城、资产腿和原请求过户；所有网络调用均在SQL事务外。 */
 public final class RmbConsignmentService {
+    private static final Logger log = LoggerFactory.getLogger(RmbConsignmentService.class);
     public static final Set<String> METHODS = Set.of("CreateRmbConsignment", "GetRmbConsignment", "ListRmbConsignments",
         "BuyRmbConsignment", "CancelRmbConsignment", "GetRmbOrder", "ListRmbOrders", "CancelRmbOrder",
         "ListSellerIncomes", "CreateWithdrawal", "GetWithdrawal");
@@ -114,10 +117,8 @@ public final class RmbConsignmentService {
                 var out = ListSellerIncomesResponse.newBuilder().setServerNowMs(e.clock.getAsLong());
                 for (var item : array(mall.call("incomes", Map.of("account", account, "afterOrderId", input.getCursor(),
                         "limit", CommerceClientService.limit(input.getLimit(), 100)), d), "incomes")) {
-                    out.addIncomes(RmbSellerIncome.newBuilder().setOrderId(text(item,"orderId"))
-                        .setGrossFen(number(item,"grossFen")).setFeeFen(number(item,"feeFen")).setNetFen(number(item,"netFen"))
-                        .setReservedFen(number(item,"reservedFen")).setPaidFen(number(item,"paidFen"))
-                        .setAvailableMs(number(item,"availableMs"))).setNextCursor(text(item,"orderId"));
+                    var parsed = income(item);
+                    out.addIncomes(parsed).setNextCursor(parsed.getOrderId());
                 }
                 yield out.build();
             }
@@ -288,6 +289,17 @@ public final class RmbConsignmentService {
             if (!receipt.getState().equals("TRANSFERRED") || receipt.getOwnerRevision() != rmb.getSellerOwnerRevision() + 1)
                 throw new SecurityException("角色过户回执不符");
             edit(row, d, (r, next) -> next.setStage("rmb_receipt"));
+            SellerCreditService credits = e.credits();
+            if (credits != null && rmb.getCharacterPlayerId() != 0 && !rmb.getBuyerAccount().isEmpty()) {
+                try {
+                    credits.onCharacterTransferred(
+                            rmb.getCharacterPlayerId(), rmb.getBuyerAccount(), receipt.getOwnerRevision(), e.clock.getAsLong());
+                } catch (SQLException | RuntimeException creditError) {
+                    log.error("角色过户后重置卖家信用失败，查询时将按权威 owner_revision 懒重算 player_id={} next_rev={}",
+                            Long.toUnsignedString(rmb.getCharacterPlayerId()),
+                            Long.toUnsignedString(receipt.getOwnerRevision()), creditError);
+                }
+            }
         } else if (w.getStage().equals("rmb_character_return")) {
             var receipt = role(row, PlayerTradeCommand.Operation.CANCEL, d); requireRole(receipt);
             if (!receipt.getState().equals("UNLOCKED")) throw new IllegalStateException("角色返还排空未完");
@@ -404,13 +416,23 @@ public final class RmbConsignmentService {
         });
     }
     private void finish(TradeCommerceRow observed, int state, Deadline d) throws SQLException {
-        e.store.transaction(d, c -> {
+        var settledFact = e.store.transaction(d, c -> {
             var current = e.store.lock(c, observed.getCommerceId());
-            if (current == null || current.getVersion() != observed.getVersion()) return null;
+            if (current == null || current.getVersion() != observed.getVersion())
+                return Optional.<SellerCreditService.CompletedTradeFact>empty();
             var w = CommerceEngine.workflow(current).setStage("done");
+            TradeCommerceWorkflow built = w.build();
+            long now = e.clock.getAsLong();
             e.store.markConsumed(c, current.getCommerceId());
-            e.store.save(c, current.toBuilder().setStatus(state).setUpdatedMs(e.clock.getAsLong()).setWorkflowProto(w.build().toByteString()));
-            return null;
+            TradeCommerceRow saved = e.store.save(c, current.toBuilder().setStatus(state)
+                    .setUpdatedMs(now).setWorkflowProto(built.toByteString()));
+            if (current.getStatus() != SETTLED && saved.getStatus() == SETTLED) {
+                return SellerCreditService.settledTradeFact(saved, built, now);
+            }
+            return Optional.<SellerCreditService.CompletedTradeFact>empty();
         });
+        if (settledFact != null && settledFact.isPresent()) {
+            e.recordSettledCreditBestEffort(settledFact.get());
+        }
     }
 }

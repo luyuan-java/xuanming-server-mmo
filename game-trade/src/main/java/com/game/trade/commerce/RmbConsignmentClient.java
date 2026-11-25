@@ -25,10 +25,44 @@ public final class RmbConsignmentClient {
             throw new IllegalStateException("商城应答数值非法：" + key);
         return field.longValue();
     }
+    static long optionalNumber(JsonNode input, String key) {
+        var field = input.get(key);
+        if (field == null || field.isNull()) return 0L;
+        return number(input, key);
+    }
     static String nullableText(JsonNode input, String key) {
         var field = input.get(key);
         if (field != null && field.isNull()) return "";
         return text(input, key);
+    }
+    static RmbSellerIncome income(JsonNode item) {
+        String orderId = text(item, "orderId");
+        long gross = number(item, "grossFen");
+        long fee = number(item, "feeFen");
+        long net = number(item, "netFen");
+        long reserved = number(item, "reservedFen");
+        long paid = number(item, "paidFen");
+        long forfeited = optionalNumber(item, "forfeitedFen");
+        long disputeFrozen = optionalNumber(item, "disputeFrozenFen");
+        long availableMs = number(item, "availableMs");
+        if (gross > 9_000_000_000_000_000L
+                || fee > gross
+                || net != gross - fee
+                || paid > net
+                || reserved > net - paid
+                || forfeited > net - paid - reserved
+                || disputeFrozen > net - paid - reserved - forfeited) {
+            throw new IllegalStateException("收入原件非法");
+        }
+        return RmbSellerIncome.newBuilder()
+                .setOrderId(orderId)
+                .setGrossFen(gross)
+                .setFeeFen(fee)
+                .setNetFen(net)
+                .setReservedFen(reserved)
+                .setPaidFen(paid)
+                .setAvailableMs(availableMs)
+                .build();
     }
     static JsonNode array(JsonNode input, String key) {
         var field = key.isEmpty() ? input : input.get(key);

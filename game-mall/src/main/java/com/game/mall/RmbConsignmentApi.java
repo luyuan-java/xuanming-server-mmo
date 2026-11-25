@@ -7,12 +7,26 @@ public final class RmbConsignmentApi {
     private RmbConsignmentApi() {}
     public record Escrow(String listingId, String sellerPlayerId, String sellerAccount, long marketZone,
                          String assetKind, Integer assetCurrencyType, String escrowReference, String escrowProof,
-                         long priceFen, String title) {}
+                         long priceFen, String title, String designatedBuyerAccount) {
+        public Escrow(String listingId, String sellerPlayerId, String sellerAccount, long marketZone,
+                      String assetKind, Integer assetCurrencyType, String escrowReference, String escrowProof,
+                      long priceFen, String title) {
+            this(listingId, sellerPlayerId, sellerAccount, marketZone, assetKind, assetCurrencyType,
+                    escrowReference, escrowProof, priceFen, title, null);
+        }
+    }
     public record Page(String afterListingId, int limit) {}
     public record Get(String listingId) {}
     public record Listing(String listingId, String sellerPlayerId, long marketZone, String assetKind, String title,
                           long priceFen, int feeBps, long coolingMs, long noticeEndMs, long saleEndMs,
-                          String state, String phase, String orderId) {}
+                          String state, String phase, String orderId, String designatedBuyerAccount) {
+        public Listing(String listingId, String sellerPlayerId, long marketZone, String assetKind, String title,
+                       long priceFen, int feeBps, long coolingMs, long noticeEndMs, long saleEndMs,
+                       String state, String phase, String orderId) {
+            this(listingId, sellerPlayerId, marketZone, assetKind, title, priceFen, feeBps, coolingMs,
+                    noticeEndMs, saleEndMs, state, phase, orderId, null);
+        }
+    }
     public record Listings(List<Listing> listings) {}
     public record Buy(String listingId, String buyerPlayerId, String buyerAccount, String requestId,
                       String buyerOwnerRevision) {}
@@ -21,7 +35,17 @@ public final class RmbConsignmentApi {
     public record OrderPage(String account, String afterOrderId, int limit) {}
     public record IncomePage(String account, String afterOrderId, int limit) {}
     public record Income(String orderId, long grossFen, long feeFen, long netFen, long reservedFen,
-                         long paidFen, long availableMs) {}
+                         long paidFen, long availableMs, long forfeitedFen, long disputeFrozenFen,
+                         String disputeCaseId) {
+        public Income(String orderId, long grossFen, long feeFen, long netFen, long reservedFen,
+                      long paidFen, long availableMs) {
+            this(orderId, grossFen, feeFen, netFen, reservedFen, paidFen, availableMs, 0L, 0L, null);
+        }
+        public Income(String orderId, long grossFen, long feeFen, long netFen, long reservedFen,
+                      long paidFen, long availableMs, long forfeitedFen) {
+            this(orderId, grossFen, feeFen, netFen, reservedFen, paidFen, availableMs, forfeitedFen, 0L, null);
+        }
+    }
     public record Incomes(List<Income> incomes) {}
     public record Withdraw(String account, String requestId, long amountFen) {}
     public record Withdrawal(String withdrawalId, long amountFen, String state, String channel, String transactionId) {}
@@ -37,4 +61,10 @@ public final class RmbConsignmentApi {
     public record ReturnEntry(Return intent, String cursor) {}
     public record Returns(List<ReturnEntry> entries) {}
     public record ReturnReceipt(String listingId, String escrowReference, String escrowProof, String returnProof) {}
+    /** 逐单争议冻结 / 释放卖家收入管理请求（FREEZE_DISPUTE / RELEASE_DISPUTE）。 */
+    public record ResolveIncomeDispute(String requestId, String orderId, String action, long amountFen,
+                                       String caseId, String reason) {}
+    /** 管理人工处置结果，按 (actor, requestId) 幂等持久化在 commerce_admin_command。 */
+    public record IncomeDisputeResolution(String targetType, String targetId, String action, String resultingState,
+                                          String reason, long resolvedMs) {}
 }

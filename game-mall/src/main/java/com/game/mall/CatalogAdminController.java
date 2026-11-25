@@ -8,9 +8,17 @@ import org.springframework.web.bind.annotation.*;
 public final class CatalogAdminController {
     private final CatalogAdminStore store;
     private final MallOrderStore orders;
-    public CatalogAdminController(CatalogAdminStore store, MallOrderStore orders) {
+    private final RmbConsignmentStore consignments;
+    public CatalogAdminController(CatalogAdminStore store, MallOrderStore orders, RmbConsignmentStore consignments) {
         this.store = store;
         this.orders = orders;
+        this.consignments = consignments;
+    }
+
+    @PostMapping("/internal/admin/manual/incomes/dispute")
+    public RmbConsignmentApi.IncomeDisputeResolution resolveIncomeDispute(
+            HttpServletRequest request, @RequestBody RmbConsignmentApi.ResolveIncomeDispute input) {
+        return consignments.resolveIncomeDispute(actor(request), input);
     }
 
     @PostMapping("/internal/admin/order-view")

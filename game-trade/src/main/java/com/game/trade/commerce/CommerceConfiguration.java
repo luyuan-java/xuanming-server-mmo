@@ -39,8 +39,24 @@ public class CommerceConfiguration {
         return new CommerceStore(source);
     }
     @Bean
-    public CommerceEngine commerceEngine(CommerceStore store, ListingIds ids, CommerceProperties p) {
-        return new CommerceEngine(store, ids::nextId, p.policy(), System::currentTimeMillis);
+    public CommerceEngine commerceEngine(
+            CommerceStore store, ListingIds ids, CommerceProperties p, DataSource source,
+            org.springframework.beans.factory.ObjectProvider<PlayerTradeGuard.FriendRelationReader> friends,
+            org.springframework.beans.factory.ObjectProvider<SellerCreditService> sellerCredits) {
+        CommerceEngine engine = new CommerceEngine(store, ids::nextId, p.policy(), System::currentTimeMillis);
+        PlayerTradeGuard.Policy tradePolicy = p.playerTradePolicy();
+        if (!tradePolicy.mode().isEmpty()) {
+            engine = engine.withPlayerTradeGuard(new PlayerTradeGuard(
+                    tradePolicy,
+                    friends.getIfAvailable(),
+                    new ReferencePrice.SqlReader(source),
+                    new PlayerTradeGuard.SqlDailyTracker(source)));
+        }
+        SellerCreditService credits = sellerCredits.getIfAvailable();
+        if (credits != null) {
+            engine = engine.withSellerCreditService(credits);
+        }
+        return engine;
     }
     @Bean(destroyMethod = "close")
     public SceneAssetOpClients tradeAssetClients() {
