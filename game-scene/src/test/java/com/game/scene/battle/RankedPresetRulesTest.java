@@ -71,10 +71,11 @@ class RankedPresetRulesTest {
         ScenePlayer veteran = WorldTestAccess.player(10002L, 3, 85, "老号", 2, List.of(), "acc2", vetState);
 
         RankedMatchContext ctx = RankedMatchContext.newBuilder()
-                .setSeasonId(1)
+                .setSeasonId(0)
                 .setRuleVersion(1)
                 .setConfigFingerprint(sceneBattleTables.ranked().configFingerprint())
                 .setTeamSize(1)
+                .setUseFreePreset(true)
                 .build();
         RankedPresetSelection sel = RankedPresetSelection.newBuilder()
                 .setCharacterPresetId(101)

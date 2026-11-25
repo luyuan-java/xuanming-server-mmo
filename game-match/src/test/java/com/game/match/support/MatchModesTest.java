@@ -19,15 +19,17 @@ class MatchModesTest {
         assertThat(MatchModes.PVE_TEAM).isEqualTo(5);
         assertThat(MatchModes.PVP_CHALLENGE).isEqualTo(6);
         assertThat(MatchModes.PVP_TEAM).isEqualTo(7);
+        assertThat(MatchModes.POLARITY_5V5).isEqualTo(8);
     }
 
     @Test
-    void 排队入口只开放五种模式() {
+    void 排队入口只开放六种模式() {
         assertThat(MatchModes.joinable(MatchModes.FIVE_V_FIVE)).isTrue();
         assertThat(MatchModes.joinable(MatchModes.ONE_V_ONE)).isTrue();
         assertThat(MatchModes.joinable(MatchModes.PVE_SOLO)).isTrue();
         assertThat(MatchModes.joinable(MatchModes.PVE_TEAM)).isTrue();
         assertThat(MatchModes.joinable(MatchModes.PVP_TEAM)).isTrue();
+        assertThat(MatchModes.joinable(MatchModes.POLARITY_5V5)).isTrue();
         assertThat(MatchModes.joinable(MatchModes.THREE_V_THREE)).isFalse();
         assertThat(MatchModes.joinable(MatchModes.PVP_CHALLENGE)).as("切磋只能经切磋入口").isFalse();
         assertThat(MatchModes.joinable(MatchModes.UNSPECIFIED)).isFalse();

@@ -120,7 +120,11 @@ public final class RankedStore {
         }
     }
 
-    /** 组装本局论剑排位权威上下文；若当前赛季正在结算中返回空（拒绝新局）。 */
+    public RankedTables tables() {
+        return tables;
+    }
+
+    /** 组装本局正式人宠会武(PVP_TEAM)权威上下文：使用本人真实养成(use_free_preset=false)；若当前赛季正在结算中返回空。 */
     public Optional<RankedMatchContext> buildRankedContext(int teamSize, List<Long> roster,
                                                            Map<Long, RankedPresetSelection> overrides) throws SQLException {
         try (Connection c = dataSource.getConnection()) {
@@ -136,8 +140,25 @@ public final class RankedStore {
                             : Integer.toUnsignedLong(current.getSeasonId()))
                     .setRuleVersion(current.getRuleVersion())
                     .setConfigFingerprint(tables.configFingerprint())
-                    .setTeamSize(teamSize);
-            for (long playerId : roster) {
+                    .setTeamSize(teamSize)
+                    .setUseFreePreset(false);
+            return Optional.of(ctx.build());
+        }
+    }
+
+    /** 组装娱乐轮换免费 3×3 预设上下文（护卫救援 109 / 物法易势 5V5 110）：season_id=0 且 use_free_preset=true。 */
+    public RankedMatchContext buildFreePresetContext(int teamSize, List<Long> roster,
+                                                     Map<Long, RankedPresetSelection> overrides) throws SQLException {
+        try (Connection c = dataSource.getConnection()) {
+            RankedMatchContext.Builder ctx = RankedMatchContext.newBuilder()
+                    .setSeasonId(0)
+                    .setRuleVersion(tables.ruleVersion())
+                    .setConfigFingerprint(tables.configFingerprint())
+                    .setTeamSize(teamSize)
+                    .setUseFreePreset(true);
+            List<Long> sortedRoster = new ArrayList<>(roster);
+            sortedRoster.sort(Long::compareUnsigned);
+            for (long playerId : sortedRoster) {
                 RankedPresetSelection sel = overrides == null ? null : overrides.get(playerId);
                 if (sel == null || !tables.isValidPair(sel.getCharacterPresetId(), sel.getPetPresetId())) {
                     MatchRankedPlayerPrefsRow prefs = readPrefs(c, playerId).orElseGet(() -> defaultPrefs(playerId));
@@ -148,7 +169,7 @@ public final class RankedStore {
                         .setPresets(sel)
                         .build());
             }
-            return Optional.of(ctx.build());
+            return ctx.build();
         }
     }
 
@@ -739,6 +760,11 @@ public final class RankedStore {
     public RankedSeasonInfo toSeasonInfo(MatchRankedSeasonRow row) {
         RankedRuleTable rule = tables.rule();
         RankedSeasonState state = RankedSeasonState.forNumber(row.getState());
+        List<Integer> allowedSizes = tables.allowedTeamSizes(
+                com.game.match.support.MatchModes.PVP_TEAM, rule.getBattleConfigId());
+        if (allowedSizes.isEmpty()) {
+            allowedSizes = List.of(1, 3);
+        }
         return RankedSeasonInfo.newBuilder()
                 .setSeasonId(row.getSeasonId())
                 .setSeasonKey(row.getSeasonKey())
@@ -759,6 +785,10 @@ public final class RankedStore {
                 .setChampionName(row.getChampionName())
                 .setChampionRatingCenti(row.getChampionRatingCenti())
                 .setRankBoardSealed(row.getRankBoardSealed())
+                .addAllAllowedTeamSizes(allowedSizes)
+                .setUsesOwnProgression(true)
+                .addAllPrimaryTeamSizes(RankedTables.PRIMARY_TEAM_SIZES)
+                .addAllSpecialTeamSizes(RankedTables.SPECIAL_TEAM_SIZES)
                 .build();
     }
 

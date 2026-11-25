@@ -126,6 +126,23 @@ class RankedParityTest {
                             RankedRewardKind.RANKED_REWARD_CARD_BACKGROUND,
                             RankedRewardKind.RANKED_REWARD_TALISMAN);
             assertThat(profile.getCosmeticLoadout().getEquippedTalismanCode()).isEqualTo("s1_qingyun_talisman");
+            assertThat(profile.getCurrentSeason().getUsesOwnProgression()).isTrue();
+            assertThat(profile.getCurrentSeason().getAllowedTeamSizesList()).containsExactly(1, 3);
+            assertThat(profile.getCurrentSeason().getPrimaryTeamSizesList()).containsExactly(1, 3, 5);
+            assertThat(profile.getCurrentSeason().getSpecialTeamSizesList()).containsExactly(2, 4);
+
+            // 3. 正式排位上下文 use_free_preset=false，娱乐轮换(物法易势/护卫救援) use_free_preset=true 且 season_id=0
+            RankedMatchContext formalCtx = rankedStore.buildRankedContext(1, List.of(p1, p2), Map.of()).orElseThrow();
+            assertThat(formalCtx.getSeasonId()).isEqualTo(1);
+            assertThat(formalCtx.getUseFreePreset()).isFalse();
+            assertThat(formalCtx.getMembersList()).isEmpty();
+            assertThat(TABLES.usesFreePreset(MatchModes.POLARITY_5V5, 110)).isTrue();
+            assertThat(TABLES.usesFreePreset(MatchModes.PVE_SOLO, 109)).isTrue();
+            assertThat(TABLES.usesFreePreset(MatchModes.PVP_TEAM, 5)).isFalse();
+            RankedMatchContext freeCtx = rankedStore.buildFreePresetContext(5, List.of(p2, p1), Map.of());
+            assertThat(freeCtx.getSeasonId()).isZero();
+            assertThat(freeCtx.getUseFreePreset()).isTrue();
+            assertThat(freeCtx.getMembersList()).extracting(RankedMemberLoadout::getPlayerId).containsExactly(p1, p2);
         }
     }
 

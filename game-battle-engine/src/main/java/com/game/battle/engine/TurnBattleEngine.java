@@ -286,16 +286,16 @@ public final class TurnBattleEngine {
      */
     private BattleStart.Rejected initPets() {
         long petIndex = 0;
-        boolean ranked = isRankedBattle();
+        boolean allowTempPet = usesFreePreset();
         for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
             for (BattlePetSnapshot pet : snapshot.getPetsList()) {
                 boolean competitiveTemp = pet.getCompetitiveTemporary();
-                if (competitiveTemp && !ranked) {
+                if (competitiveTemp && !allowTempPet) {
                     return new BattleStart.Rejected(InitRejection.PET_ID_ZERO,
-                            "非排位对局禁止临时竞技宝宝: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                            "非免费预设对局禁止临时竞技宝宝: battle_id=" + Long.toUnsignedString(request.getBattleId())
                                     + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
                 }
-                if (pet.getPetId() == 0 && !(competitiveTemp && ranked)) {
+                if (pet.getPetId() == 0 && !(competitiveTemp && allowTempPet)) {
                     return new BattleStart.Rejected(InitRejection.PET_ID_ZERO,
                             "宝宝 pet_id 为 0: battle_id=" + Long.toUnsignedString(request.getBattleId())
                                     + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
@@ -475,8 +475,14 @@ public final class TurnBattleEngine {
     }
 
     /** 是否为论剑排位对局（{@code ranked_context.season_id != 0}）。 */
+    /** 是否为正式论剑排位局（按 season_id != 0 判定）。 */
     public boolean isRankedBattle() {
         return request.hasRankedContext() && request.getRankedContext().getSeasonId() != 0;
+    }
+
+    /** 是否为免费 3×3 预设娱乐场（护卫救援 / 物法易势 5V5）：仅此开关放行临时竞技宠并隔离场外养成。 */
+    public boolean usesFreePreset() {
+        return request.hasRankedContext() && request.getRankedContext().getUseFreePreset();
     }
 
     /** 标记参战者已建立战斗直连或成功拉取房间状态。 */
@@ -1382,10 +1388,14 @@ public final class TurnBattleEngine {
                     .setIsDead(other.isDead());
         }
 
+        settlement.setUseFreePreset(usesFreePreset());
         if (isRankedBattle()) {
             settlement.setCompetitiveRanked(true)
                     .setSeasonId(request.getRankedContext().getSeasonId())
                     .setRankedRuleVersion(request.getRankedContext().getRuleVersion())
+                    .setParticipated(didPlayerParticipate(playerId));
+        } else if (usesFreePreset()) {
+            settlement.setRankedRuleVersion(request.getRankedContext().getRuleVersion())
                     .setParticipated(didPlayerParticipate(playerId));
         }
 

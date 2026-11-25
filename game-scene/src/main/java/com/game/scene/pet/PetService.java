@@ -501,6 +501,52 @@ public final class PetService {
         return OK;
     }
 
+    /** 灵狐：新角色进场景一次性起步首宠模板 ID（对齐 C++ PetSystem::kStarterPetTableId）。 */
+    public static final int STARTER_PET_TABLE_ID = 1;
+
+    /** 起步首宠发放判定结果。 */
+    public enum StarterGrantResult { SKIPPED, MARKED_EXISTING, GRANTED }
+
+    /**
+     * 新角色进场景一次性起步灵狐发放（对齐 C++ {@code PetSystem::EnsureStarterPetGranted}）：
+     * <ul>
+     *   <li>冻结中、数据含未知字段或已标记 {@code starter_pet_granted} → 直接跳过；</li>
+     *   <li>已有宝宝的老号 → 保留原宠、仅置位标记（防止召回/放生后误补发）；</li>
+     *   <li>无宠且未领过的角色 → 自动发放 1 只灵狐并设为出战宠、置位标记。</li>
+     * </ul>
+     */
+    public StarterGrantResult ensureStarterPetGranted(ScenePlayer player) {
+        if (player.frozen() || player.inBattle()) {
+            return StarterGrantResult.SKIPPED;
+        }
+        PlayerPets pets = player.pets();
+        if (!pets.acquisitionStateValid() || pets.starterPetGranted()) {
+            return StarterGrantResult.SKIPPED;
+        }
+        if (pets.size() > 0) {
+            pets.markStarterPetGranted();
+            return StarterGrantResult.MARKED_EXISTING;
+        }
+        PetTable row = tables.pet(STARTER_PET_TABLE_ID);
+        if (row == null || tables.pool() == null) {
+            log.warn("起步灵狐跳过：缺少宝宝表行或宝宝池 pet_table_id={} player={}", STARTER_PET_TABLE_ID,
+                    Long.toUnsignedString(player.playerId()));
+            return StarterGrantResult.SKIPPED;
+        }
+        long[] minted = guids.tryMint(1);
+        if (minted == null) {
+            log.warn("起步灵狐延迟：全服号源暂不可用 player={}", Long.toUnsignedString(player.playerId()));
+            return StarterGrantResult.SKIPPED;
+        }
+        Pet starter = newPet(player, row, minted[0]);
+        pets.add(starter);
+        pets.setActivePetId(starter.petId());
+        pets.markStarterPetGranted();
+        log.info("自动发放起步灵狐并出战 player={} pet_id={} pet_table_id={}", Long.toUnsignedString(player.playerId()),
+                Long.toUnsignedString(starter.petId()), STARTER_PET_TABLE_ID);
+        return StarterGrantResult.GRANTED;
+    }
+
     /** GM 发放（基线 GrantPet）：铸号、掷资质、按主人等级定级、满血满蓝出生。 */
     public Grant grant(ScenePlayer player, int petTableId) {
         int writable = checkWritable(player);

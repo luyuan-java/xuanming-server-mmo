@@ -307,8 +307,16 @@ public final class SceneWorld {
         return this;
     }
 
+    private java.util.function.Consumer<ScenePlayer> onEnteredPostBattle = p -> {};
+
     public SceneWorld withActiveSeason(java.util.function.IntSupplier supplier) {
         this.activeSeasonSupplier = supplier == null ? () -> 0 : supplier;
+        return this;
+    }
+
+    /** 进场景战斗恢复后的扩展钩子（用于起步首宠灵狐一次性发放等场景逻辑线程后置动作）。 */
+    public SceneWorld withOnEnteredPostBattle(java.util.function.Consumer<ScenePlayer> hook) {
+        this.onEnteredPostBattle = hook == null ? p -> {} : hook;
         return this;
     }
 
@@ -1786,6 +1794,10 @@ public final class SceneWorld {
         teamFollow.onEnteredScene(this, player);
         // 进场恢复（scene-battle-spec §7.8）：组队跟随之后（同基线组队 3.5 步在战斗 6 步之前）；同 epoch 接替旧实例时沿用它的冻结
         battle.onEntered(this, player, previous != null && previous.ownerEpoch() == epoch ? previous : null);
+        // 6.5 起步首宠一次性发放（core-gameplay-loop.md §3）：在战斗进场恢复之后、收件箱拉取之前执行
+        if (playersById.get(playerId) == player) {
+            onEnteredPostBattle.accept(player);
+        }
         // 收件箱落地拉取（mmorpg 设计 §7.3 第 1 条）：战斗进场恢复之后；同 epoch 接替旧实例时沿用它的运行时（不算新落地）
         inbox.onEntered(this, player, previous != null && previous.ownerEpoch() == epoch ? previous : null);
     }

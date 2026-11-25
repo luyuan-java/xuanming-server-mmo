@@ -270,6 +270,12 @@ public final class GlobalMatchService implements AutoCloseable {
             if(mode==MatchModes.PVE_TEAM&&maximum==0)return MatchTips.joinRejected(MatchTip.JOIN_TEAM_SIZE_NOT_CONFIGURED);
             if(size<1) return MatchTips.joinRejected(mode==MatchModes.PVE_TEAM
                     ? MatchTip.JOIN_TEAM_SIZE_OVER_LIMIT : MatchTip.JOIN_MODE_NOT_OPEN);
+            if((mode==MatchModes.PVP_TEAM||mode==MatchModes.PVE_TEAM)&&rankedTables!=null){
+                int perSide=mode==MatchModes.PVP_TEAM?size/2:size;
+                if(!rankedTables.isAllowedTeamSize(mode,request.getBattleConfigId(),perSide)){
+                    return MatchTips.joinRejected(MatchTip.JOIN_MODE_NOT_OPEN);
+                }
+            }
             if(mode==MatchModes.PVP_TEAM&&rankedStore!=null&&rankedTables!=null){
                 try{
                     var season=rankedStore.ensureActiveSeason();
@@ -281,24 +287,30 @@ public final class GlobalMatchService implements AutoCloseable {
                         return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
                                 .setId(com.game.table.MatchErrorTip.match_error.kMatchRankedRuleVersionMismatch_VALUE)).build();
                     }
+                }catch(java.sql.SQLException rankedErr){
+                    log.error("全球排位排队校验失败 player={}",Long.toUnsignedString(session.getPlayerId()),rankedErr);
+                    return MatchTips.joinRejected(MatchTip.BUSY);
+                }
+            }else if(rankedStore!=null&&rankedTables!=null&&rankedTables.usesFreePreset(mode,request.getBattleConfigId())){
+                try{
+                    if(request.getRankedRuleVersion()!=0&&request.getRankedRuleVersion()!=rankedTables.ruleVersion()){
+                        return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
+                                .setId(com.game.table.MatchErrorTip.match_error.kMatchRankedRuleVersionMismatch_VALUE)).build();
+                    }
                     if(request.getCharacterPresetId()!=0||request.getPetPresetId()!=0){
                         var write=rankedStore.savePreset(session.getPlayerId(),request.getCharacterPresetId(),
                                 request.getPetPresetId(),request.getRankedRuleVersion());
-                        if(write.status()==com.game.match.ranked.RankedStore.WriteStatus.SEASON_SETTLING){
-                            return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
-                                    .setId(com.game.table.MatchErrorTip.match_error.kMatchRankedSeasonSettling_VALUE)).build();
-                        }
                         if(write.status()==com.game.match.ranked.RankedStore.WriteStatus.RULE_VERSION_MISMATCH){
                             return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
                                     .setId(com.game.table.MatchErrorTip.match_error.kMatchRankedRuleVersionMismatch_VALUE)).build();
                         }
-                        if(write.status()!=com.game.match.ranked.RankedStore.WriteStatus.OK){
+                        if(write.status()==com.game.match.ranked.RankedStore.WriteStatus.PRESET_INVALID){
                             return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
                                     .setId(com.game.table.MatchErrorTip.match_error.kMatchRankedPresetInvalid_VALUE)).build();
                         }
                     }
                 }catch(java.sql.SQLException rankedErr){
-                    log.error("全球排位排队校验失败 player={}",Long.toUnsignedString(session.getPlayerId()),rankedErr);
+                    log.error("全球免费预设偏好保存失败 player={}",Long.toUnsignedString(session.getPlayerId()),rankedErr);
                     return MatchTips.joinRejected(MatchTip.BUSY);
                 }
             }
@@ -600,6 +612,8 @@ public final class GlobalMatchService implements AutoCloseable {
             List<Long> roster=f.getMembersList().stream().map(GlobalMember::getPlayerId).toList();
             int[] teams=TeamAssignment.assign(MatchMode.forNumber(f.getMode()),roster,ratings.loadAllCentiOrDefault(roster));
             boolean isRanked = f.getMode() == MatchModes.PVP_TEAM && rankedStore != null && rankedTables != null;
+            boolean isFreePreset = !isRanked && rankedStore != null && rankedTables != null
+                    && rankedTables.usesFreePreset(f.getMode(), f.getConfigId());
             RankedMatchContext rankedContext = null;
             if (isRanked) {
                 int perSide = Math.max(1, roster.size() / 2);
@@ -609,12 +623,16 @@ public final class GlobalMatchService implements AutoCloseable {
                     return GatherResult.failed(GatherOutcome.PREPARE_FAILED, f.getBattleId());
                 }
                 rankedContext = maybeCtx.get();
+            } else if (isFreePreset) {
+                int sideSize = f.getMode() == MatchModes.POLARITY_5V5 ? Math.max(1, roster.size() / 2) : roster.size();
+                rankedContext = rankedStore.buildFreePresetContext(sideSize, roster, Map.of());
             }
             List<BattlePlayerSnapshot> snapshots=new ArrayList<>();List<FingerprintCheck.Member> fingerprints=new ArrayList<>();
             for(int i=0;i<roster.size();i++) {
                 long player=roster.get(i);
                 PrepareBattleRequest.Builder prepBuilder = PrepareBattleRequest.newBuilder().setPlayerId(player).setBattleId(f.getBattleId()).setBattleNodeId(f.getNodeId())
-                        .setDeadlineMs(f.getDeadlineMs()).setPrepareDeadlineMs(Math.min(f.getCreatedMs()+120_000,f.getRetryMs()-1000));
+                        .setDeadlineMs(f.getDeadlineMs()).setPrepareDeadlineMs(Math.min(f.getCreatedMs()+120_000,f.getRetryMs()-1000))
+                        .setBattleConfigId(f.getConfigId()).setMatchMode(f.getMode());
                 if (rankedContext != null) {
                     prepBuilder.setRankedContext(rankedContext);
                 }
@@ -638,7 +656,7 @@ public final class GlobalMatchService implements AutoCloseable {
             // 观战可见性建房时决定一次，随 formation 持久的 create_request 冻结；之后观战各处只读这份原件，不按模式重算
             request.setSpectateVisibility(com.game.match.spectate.SpectateVisibilityPolicy.decide(MatchMode.forNumber(f.getMode()),
                     request.hasActivityContext()?request.getActivityContext():null));
-            if(scriptResolver!=null && !isRanked) {
+            if(scriptResolver!=null && (rankedContext == null || !rankedContext.getUseFreePreset())) {
                 request.addAllTeamScripts(scriptResolver.resolveForBattle(f.getBattleId(),f.getMode(),f.getConfigId(),snapshots));
             }
             var preflight=query(f);

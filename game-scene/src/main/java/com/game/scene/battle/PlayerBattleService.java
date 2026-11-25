@@ -225,8 +225,22 @@ public final class PlayerBattleService implements BattleHooks {
         if (!readyForNextBattle(player, battleId)) {
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.NOT_READY);
         }
-        boolean isRanked = request.hasRankedContext() && request.getRankedContext().getSeasonId() != 0;
-        if (!isRanked && player.attributes().health() == 0) {
+        boolean useFreePreset = request.hasRankedContext() && request.getRankedContext().getUseFreePreset();
+        boolean isFormalRanked = request.hasRankedContext() && request.getRankedContext().getSeasonId() != 0;
+        var dungeonRow = request.getBattleConfigId() != 0 ? tables.dungeon(request.getBattleConfigId()) : null;
+        int bossTrialKind = dungeonRow != null ? dungeonRow.getBossTrialKind() : 0;
+        boolean isBossTrial = bossTrialKind >= 1 && bossTrialKind <= 4;
+        boolean isGuardRescue = bossTrialKind == 5;
+        // 困难首领试炼准入硬校验（core-gameplay-loop.md §1）：任意普通首领首通后持久解锁，组队困难全员各校一次。
+        if (isBossTrial && dungeonRow.getDifficulty() >= 2 && !player.trialJournal().normalBossTrialCleared()) {
+            log.warn("备战被拒：困难首领试炼尚未通关任意普通首领试炼 player={} battle_id={} battle_config_id={}",
+                    Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
+                    Integer.toUnsignedString(request.getBattleConfigId()));
+            return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
+        }
+        // 免费预设娱乐场、正式人宠会武与首领试炼均以局内满血蓝无耗材快照入场，不受场外残血或 0 血阻断。
+        boolean isolateBattleTempState = useFreePreset || isFormalRanked || isBossTrial || isGuardRescue;
+        if (!isolateBattleTempState && player.attributes().health() == 0) {
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.DEAD);
         }
         BattleRouting route = routing.of(player);
@@ -237,7 +251,7 @@ public final class PlayerBattleService implements BattleHooks {
             return prepareRejected(SESSION_NOT_FOUND, Prepare.NOT_HERE);
         }
         BattlePlayerSnapshot snapshot;
-        if (isRanked) {
+        if (useFreePreset) {
             com.game.proto.RankedPresetSelection playerPresets = null;
             for (var m : request.getRankedContext().getMembersList()) {
                 if (m.getPlayerId() == playerId && m.hasPresets()) {
@@ -250,16 +264,28 @@ public final class PlayerBattleService implements BattleHooks {
                     playerPresets,
                     route, clock.epochMillis() / 1000L);
             if (rankedSnap.isEmpty()) {
-                log.warn("备战被拒：论剑排位预设或规则指纹校验失败 player={} battle_id={} season={} rule_version={}",
+                log.warn("备战被拒：免费预设娱乐场规则指纹或预设校验失败 player={} battle_id={} rule_version={}",
                         Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
-                        request.getRankedContext().getSeasonId(), request.getRankedContext().getRuleVersion());
+                        request.getRankedContext().getRuleVersion());
                 return prepareRejected(INVALID_PARAMETER, Prepare.INVALID);
             }
             snapshot = rankedSnap.get();
         } else {
-            snapshot = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route,
+            BattlePlayerSnapshot.Builder snapBuilder = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route,
                             world == null ? 0 : world.activeSeasonId()).toBuilder()
-                    .setPetCaptureSlots(pets.availableCaptureSlots(player)).build();
+                    .setPetCaptureSlots(pets.availableCaptureSlots(player));
+            if (isolateBattleTempState) {
+                snapBuilder.getBaseAttributesBuilder()
+                        .setHealth(snapBuilder.getMaxHealth())
+                        .setMana(snapBuilder.getMaxMana());
+                for (var petSnap : snapBuilder.getPetsBuilderList()) {
+                    petSnap.getBaseAttributesBuilder()
+                            .setHealth(petSnap.getMaxHealth())
+                            .setMana(petSnap.getMaxMana());
+                }
+                snapBuilder.clearItems().setPetCaptureSlots(0);
+            }
+            snapshot = snapBuilder.build();
         }
         // 快照构建后，在冻结提交点再次校验原工作代次截止。
         if(Long.compareUnsigned(prepareDeadline,clock.epochMillis())<=0)return prepareRejected(INVALID_PARAMETER,Prepare.INVALID);

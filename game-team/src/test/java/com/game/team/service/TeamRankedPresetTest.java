@@ -61,12 +61,11 @@ class TeamRankedPresetTest {
                 TeamMatchFixture.deadline());
         assertThat(badPreset.getErrorMessage().getId()).isEqualTo(TeamTips.RANKED_PRESET_INVALID);
 
-        // 2. 未确认时发起 PVP_TEAM 排位被 4033 拦截，且 parameters[0] 指向首位未确认成员
-        TeamResponse blocked1 = fx.service.startTeamMatch(leader, StartTeamMatchRequest.newBuilder()
+        // 2. 正式人宠会武(PVP_TEAM)已解耦为本人真实养成：仅校验规则版本，不阻塞于免费预设确认
+        TeamResponse badVerEarly = fx.service.startTeamMatch(leader, StartTeamMatchRequest.newBuilder()
                 .setExpectedTeamId(teamId).setBattleConfigId(5).setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM)
-                .setRankedRuleVersion(1).build(), TeamMatchFixture.deadline());
-        assertThat(blocked1.getErrorMessage().getId()).isEqualTo(TeamTips.RANKED_PRESET_UNCONFIRMED);
-        assertThat(blocked1.getErrorMessage().getParametersList()).containsExactly(Long.toUnsignedString(leader));
+                .setRankedRuleVersion(99).build(), TeamMatchFixture.deadline());
+        assertThat(badVerEarly.getErrorMessage().getId()).isEqualTo(TeamTips.RANKED_PRESET_INVALID);
 
         // 3. 队长确认后视图仅队长已确认，整体仍未全员确认，且向队友推送 RANKED_PRESET_CONFIRMED
         TeamResponse cLeader = fx.service.confirmRankedPreset(leader, ConfirmRankedPresetRequest.newBuilder()
@@ -82,14 +81,7 @@ class TeamRankedPresetTest {
         assertThat(TeamMatchFixture.byReason(fx.takePushes(), TeamChangeReason.TEAM_CHANGE_REASON_RANKED_PRESET_CONFIRMED))
                 .hasSize(1);
 
-        // 4. 仅剩队友未确认 -> PVP_TEAM 拦截并指向队友
-        TeamResponse blocked2 = fx.service.startTeamMatch(leader, StartTeamMatchRequest.newBuilder()
-                .setExpectedTeamId(teamId).setBattleConfigId(5).setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM)
-                .setRankedRuleVersion(1).build(), TeamMatchFixture.deadline());
-        assertThat(blocked2.getErrorMessage().getId()).isEqualTo(TeamTips.RANKED_PRESET_UNCONFIRMED);
-        assertThat(blocked2.getErrorMessage().getParametersList()).containsExactly(Long.toUnsignedString(member));
-
-        // 5. 队友确认 -> 全员已确认；若请求带旧/错规则版本则回 4034
+        // 4. 队友确认 -> 全员已确认；若请求带旧/错规则版本则回 4034
         TeamResponse cMember = fx.service.confirmRankedPreset(member, ConfirmRankedPresetRequest.newBuilder()
                 .setExpectedTeamId(teamId).setCharacterPresetId(103).setPetPresetId(201).setRuleVersion(1).build(),
                 TeamMatchFixture.deadline());

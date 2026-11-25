@@ -123,8 +123,10 @@ public final class BattleSettlementService {
         if(player.battle().applying())throw new IllegalStateException("战斗Inbox结算重入");
         player.battle().setApplying(true);
         try{
-            if (settlement.getCompetitiveRanked()) {
-                // 论剑排位零资产侵入：不动气血/法力/宠物/背包/金币/经验/任务，仅原子累计材料自选额度、赛季进度与近期战果。
+            if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset()) {
+                // 正式人宠会武(competitive_ranked)与免费预设娱乐场(use_free_preset)零资产侵入：
+                // 不动气血/法力/宠物/背包/金币/经验/任务，仅原子累计材料自选额度、赛季进度、试炼志与近期战果。
+                markNormalBossTrialIfCleared(player, settlement);
                 recordBattleResult(player, settlement, 0L, Map.of(), Map.of());
                 return Result.APPLIED;
             }
@@ -210,6 +212,7 @@ public final class BattleSettlementService {
                 long got = wanted - shortfalls.getOrDefault(cfg, 0L);
                 if (got > 0) actualConsumed.put(cfg, got);
             });
+            markNormalBossTrialIfCleared(player, settlement);
             recordBattleResult(player, settlement, gold > 0 && goldTip == 0 ? gold : 0L, gained, actualConsumed);
             return Result.APPLIED;
         }finally{player.battle().setApplying(false);}
@@ -256,9 +259,11 @@ public final class BattleSettlementService {
                     Long.toUnsignedString(battleId), ledger.invalidReason());
             return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
         }
-        if (settlement.getCompetitiveRanked()) {
-            // 论剑排位零资产侵入：跳过宠物/金币/气血法力/消耗/掉落/击杀，只记材料自选额度、赛季进度、近期战果与结算账本。
+        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset()) {
+            // 正式人宠会武(competitive_ranked)与免费预设娱乐场(use_free_preset)零资产侵入：
+            // 跳过宠物/金币/气血法力/消耗/掉落/击杀，只记材料自选额度、赛季进度、试炼志与近期战果，返回前请求落盘。
             try {
+                step("试炼志首领首通", player, battleId, () -> markNormalBossTrialIfCleared(player, settlement));
                 step("近期战果", player, battleId, () -> recordBattleResult(player, settlement, 0L, Map.of(), Map.of()));
             } finally {
                 long evicted = ledger.record(battleId, clock.epochMillis());
@@ -310,6 +315,7 @@ public final class BattleSettlementService {
                     missions.onMonsterKilled(player, defeat.getMonsterConfigId(), defeat.getCount());
                 }
             });
+            step("试炼志首领首通", player, battleId, () -> markNormalBossTrialIfCleared(player, settlement));
             step("近期战果", player, battleId, () -> recordBattleResult(player, settlement, gold, actualGained, actualConsumed));
         } finally {
             long evicted = ledger.record(battleId, clock.epochMillis());
@@ -433,6 +439,28 @@ public final class BattleSettlementService {
                 .addAllItemsConsumed(consumedLines)
                 .setLinesTruncated(truncGained || truncConsumed);
         player.battleResults().record(entry);
+    }
+
+    /** 任意普通难度首领试炼（boss_trial_kind 1..4 且 difficulty == 1）获胜未逃时持久标记解锁困难首领试炼。 */
+    private void markNormalBossTrialIfCleared(ScenePlayer player, BattleSettlementData settlement) {
+        if (settlement.getFled() || settlement.getBattleConfigId() == 0) {
+            return;
+        }
+        var dungeon = tables.dungeon(settlement.getBattleConfigId());
+        if (dungeon == null) {
+            return;
+        }
+        int kind = dungeon.getBossTrialKind();
+        if (kind < 1 || kind > 4 || dungeon.getDifficulty() != 1) {
+            return;
+        }
+        boolean won = (settlement.getPlayerTeamIndex() == 0
+                && settlement.getOutcome() == com.game.proto.eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                || (settlement.getPlayerTeamIndex() == 1
+                && settlement.getOutcome() == com.game.proto.eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN);
+        if (won) {
+            player.trialJournal().markNormalBossTrialCleared();
+        }
     }
 
     /** i：掉落（数量夹到 uint32 后按配置累加；主包失败时没进去的部分改投临时格；两处都放不下丢失并 ERROR，不让整笔失败）。 */

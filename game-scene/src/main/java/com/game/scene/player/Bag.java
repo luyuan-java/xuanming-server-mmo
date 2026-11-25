@@ -94,7 +94,8 @@ public final class Bag {
         }
         int slot = slotForNew(spec, catalog);
         if (slot < 0) return NO_SPACE;
-        BagItem restored = new BagItem(source.getItemUuid(), source.getConfigId(), 1, nextAcquireSeq++, source.getUnknownFields());
+        BagItem restored = new BagItem(source.getItemUuid(), source.getConfigId(), 1, nextAcquireSeq++,
+                source.getBound(), source.getUnknownFields());
         if (source.hasEquipment()) restored.equipment(source.getEquipment());
         place(restored, slot);
         return OK;
@@ -138,7 +139,8 @@ public final class Bag {
             List<BagItem> partials = new ArrayList<>();
             long mergeCap = 0;
             for (BagItem existing : itemsByAcquireOrder()) {
-                if (existing.configId() == source.configId() && existing.equipment() == null
+                if (existing.configId() == source.configId() && existing.bound() == source.bound()
+                        && existing.equipment() == null
                         && existing.unknownFields().asMap().isEmpty() && existing.size() < maxStack) {
                     partials.add(existing);
                     mergeCap += maxStack - existing.size();
@@ -162,7 +164,8 @@ public final class Bag {
                 left -= add;
             }
             if (left > 0) {
-                BagItem placed = new BagItem(source.guid(), source.configId(), left, nextAcquireSeq++, source.unknownFields());
+                BagItem placed = new BagItem(source.guid(), source.configId(), left, nextAcquireSeq++,
+                        source.bound(), source.unknownFields());
                 place(placed, slot);
             }
             return OK;
@@ -171,7 +174,8 @@ public final class Bag {
         if (slot < 0) {
             return NO_SPACE;
         }
-        BagItem moved = new BagItem(source.guid(), source.configId(), source.size(), nextAcquireSeq++, source.unknownFields());
+        BagItem moved = new BagItem(source.guid(), source.configId(), source.size(), nextAcquireSeq++,
+                source.bound(), source.unknownFields());
         if (source.equipment() != null) {
             moved.equipment(source.equipment());
         }
@@ -241,6 +245,11 @@ public final class Bag {
      * @return 0 = 成功；6004 数量非法或发不出号；1001 表里没有；1002 堆叠上限为 0；6006 放不下（含装备栏部位不符）
      */
     public AddResult add(Map<Integer, Long> counts, ItemCatalog catalog, ItemGuids guids) {
+        return add(counts, false, catalog, guids);
+    }
+
+    /** 批量入包，按 {@code bound} 隔离堆叠（绑定与可交易绝不跨堆合并）。 */
+    public AddResult add(Map<Integer, Long> counts, boolean bound, ItemCatalog catalog, ItemGuids guids) {
         TreeMap<Integer, Long> ordered = new TreeMap<>(Integer::compareUnsigned);
         for (Map.Entry<Integer, Long> e : counts.entrySet()) {
             long count = e.getValue();
@@ -278,7 +287,7 @@ public final class Bag {
         Plan plan;
         while (true) {
             Set<BagItem> victims = identitySet(fifo.subList(0, victimCount));
-            plan = plan(ordered, specs, victims);
+            plan = plan(ordered, specs, victims, bound);
             if (fits(plan, victims.size(), catalog)) {
                 break;
             }
@@ -329,7 +338,7 @@ public final class Bag {
             while (remaining > 0) {
                 long size = Math.min(max, remaining);
                 BagItem item = new BagItem(minted[nextGuid], need.configId(), size, nextAcquireSeq++,
-                        UnknownFieldSet.getDefaultInstance());
+                        bound, UnknownFieldSet.getDefaultInstance());
                 item.equipment(equipment.get(nextGuid++));
                 place(item, slotForNew(need.spec(), catalog));
                 remaining -= size;
@@ -340,7 +349,7 @@ public final class Bag {
         return new AddResult(OK, List.copyOf(written), List.copyOf(evicted));
     }
 
-    private Plan plan(TreeMap<Integer, Long> counts, Map<Integer, ItemSpec> specs, Set<BagItem> excluded) {
+    private Plan plan(TreeMap<Integer, Long> counts, Map<Integer, ItemSpec> specs, Set<BagItem> excluded, boolean bound) {
         List<Need> needs = new ArrayList<>(counts.size());
         long total = 0;
         for (Map.Entry<Integer, Long> e : counts.entrySet()) {
@@ -350,7 +359,8 @@ public final class Bag {
             long room = 0;
             if (spec.stackable()) {
                 for (BagItem item : sortedItems(BagItem.ACQUIRE_ORDER)) {
-                    if (item.configId() == e.getKey() && plain(item) && item.size() < max && !excluded.contains(item)) {
+                    if (item.configId() == e.getKey() && item.bound() == bound && plain(item)
+                            && item.size() < max && !excluded.contains(item)) {
                         targets.add(item);
                         room += max - item.size();
                     }
@@ -402,45 +412,80 @@ public final class Bag {
         return byGuid.values().stream().filter(i -> i.configId() == configId && plain(i)).mapToLong(BagItem::size).sum();
     }
 
+    /** 能安全按数量消费的纯可交易普通单位（不含 bound=true 堆）。 */
+    public long plainTradableQuantity(int configId) {
+        return byGuid.values().stream().filter(i -> i.configId() == configId && !i.bound() && plain(i)).mapToLong(BagItem::size).sum();
+    }
+
+    /** 普通单位精确扣减结果：附带是否实际消耗过绑定堆（用于防染毒绑定传导）。 */
+    public record DrainOutcome(List<Drawn> drawn, boolean consumedBound) {
+    }
+
     private static boolean plain(BagItem item) {
         return item.equipment() == null && item.unknownFields().asMap().isEmpty();
     }
 
-    /** 装备材料的候选扣除：先问足量，再只抽普通单位，版本不认识的整实例保持原样。 */
+    /** 装备材料的候选扣除：先问足量，再只抽普通单位（优先扣绑定堆，保留可交易堆），版本不认识的整实例保持原样。 */
     public List<Drawn> drainPlainExact(int configId, long count) {
-        if (count < 0 || plainQuantity(configId) < count) throw new IllegalArgumentException("普通物品数量不足");
-        List<Drawn> drawn = new ArrayList<>();
-        long remaining = count;
+        return drainPlainExact(configId, count, false).drawn();
+    }
+
+    /**
+     * 按精确数量扣减普通单位；{@code tradableOnly=true} 时仅从可交易堆扣减，{@code false} 时优先扣绑定堆。
+     */
+    public DrainOutcome drainPlainExact(int configId, long count, boolean tradableOnly) {
+        long available = tradableOnly ? plainTradableQuantity(configId) : plainQuantity(configId);
+        if (count < 0 || available < count) throw new IllegalArgumentException("普通物品数量不足");
+        List<BagItem> candidates = new ArrayList<>();
         for (BagItem item : items()) {
+            if (item.configId() == configId && plain(item) && item.size() > 0 && (!tradableOnly || !item.bound())) {
+                candidates.add(item);
+            }
+        }
+        // 优先扣绑定堆，同绑定态按格子号升序（与 C++ ItemStore::DrainStacks 同口径）。
+        candidates.sort(Comparator.comparing(BagItem::bound).reversed().thenComparingInt(BagItem::slot));
+        List<Drawn> drawn = new ArrayList<>();
+        boolean consumedBound = false;
+        long remaining = count;
+        for (BagItem item : candidates) {
             if (remaining == 0) break;
-            if (item.configId() != configId || !plain(item) || item.size() == 0) continue;
             long take = Math.min(item.size(), remaining);
+            if (item.bound()) consumedBound = true;
             item.size(item.size() - take);
             remaining -= take;
             drawn.add(new Drawn(item.guid(), configId, take));
             if (item.size() == 0) remove(item);
         }
-        return List.copyOf(drawn);
+        return new DrainOutcome(List.copyOf(drawn), consumedBound);
     }
 
     /**
-     * 按持有夹紧扣除某配置（回合制战斗结算的消耗；基线 {@code RemoveItemsClamped}）：按<b>格子号升序</b>逐个实例抽取（scene-battle-spec D22，
-     * 基线是 entt 视图序、没有规定），直到抽满 {@code count} 或没有了；抽空的实例当场回收。扣不满不报错。
+     * 按持有夹紧扣除某配置（回合制战斗结算的消耗；基线 {@code RemoveItemsClamped}）：优先扣绑定堆、同绑定态按<b>格子号升序</b>
+     * 逐个实例抽取，直到抽满 {@code count} 或没有了；抽空的实例当场回收。扣不满不报错。
      *
      * @return 被抽到的实例（按抽取顺序）；没有持有为空表
      */
     public List<Drawn> drainClamped(int configId, long count) {
+        return drainClamped(configId, count, false);
+    }
+
+    /** 按持有夹紧扣除某配置，{@code tradableOnly=true} 时仅扣可交易堆（交易/寄售资产扣减专用）。 */
+    public List<Drawn> drainClamped(int configId, long count, boolean tradableOnly) {
         if (count <= 0) {
             return List.of();
         }
+        List<BagItem> candidates = new ArrayList<>();
+        for (BagItem item : items()) {
+            if (item.configId() == configId && item.size() > 0 && (!tradableOnly || !item.bound())) {
+                candidates.add(item);
+            }
+        }
+        candidates.sort(Comparator.comparing(BagItem::bound).reversed().thenComparingInt(BagItem::slot));
         List<Drawn> drawn = new ArrayList<>();
         long remaining = count;
-        for (BagItem item : items()) {
+        for (BagItem item : candidates) {
             if (remaining == 0) {
                 break;
-            }
-            if (item.configId() != configId || item.size() == 0) {
-                continue;
             }
             long take = Math.min(item.size(), remaining);
             item.size(item.size() - take);
@@ -469,16 +514,24 @@ public final class Bag {
      * 合并同配置的零头堆、回收空实例，{@code reorder} 时再按（配置号升序、堆叠数降序）重铺到 0..n-1（基线 MergeAndCompact）。
      * 装备栏不重排。已经最优时什么都不改、返回 changed=false（狂点整理不刷流水、不触发存盘）。
      */
+    private record StackKey(int configId, boolean bound) implements Comparable<StackKey> {
+        @Override
+        public int compareTo(StackKey o) {
+            int c = Integer.compareUnsigned(configId, o.configId);
+            return c != 0 ? c : Boolean.compare(bound, o.bound);
+        }
+    }
+
     public SortResult mergeAndCompact(boolean reorder, ItemCatalog catalog) {
         boolean willReorder = reorder && type.compactable();
-        Map<Integer, List<BagItem>> partials = partialStacks(catalog);
+        Map<StackKey, List<BagItem>> partials = partialStacks(catalog);
         boolean mergeable = partials.values().stream().anyMatch(group -> group.size() >= 2);
         boolean hasEmpty = byGuid.values().stream().anyMatch(item -> item.size() == 0);
         if (!mergeable && !hasEmpty && (!willReorder || isCompactAndOrdered())) {
             return SortResult.UNCHANGED;
         }
-        for (Map.Entry<Integer, List<BagItem>> e : partials.entrySet()) {
-            long max = catalog.item(e.getKey()).maxStack();
+        for (Map.Entry<StackKey, List<BagItem>> e : partials.entrySet()) {
+            long max = catalog.item(e.getKey().configId()).maxStack();
             long pool = 0;
             for (BagItem item : e.getValue()) {
                 pool += item.size();
@@ -510,13 +563,13 @@ public final class Bag {
         return new SortResult(true, List.copyOf(retired));
     }
 
-    /** 可叠加、表里有、未满（含空）的堆，按配置分组，组内按实例序。 */
-    private Map<Integer, List<BagItem>> partialStacks(ItemCatalog catalog) {
-        Map<Integer, List<BagItem>> groups = new TreeMap<>(Integer::compareUnsigned);
+    /** 可叠加、表里有、未满（含空）的堆，按 (配置号, 绑定态) 严格分组，绑定与可交易绝不跨组并堆。 */
+    private Map<StackKey, List<BagItem>> partialStacks(ItemCatalog catalog) {
+        Map<StackKey, List<BagItem>> groups = new TreeMap<>();
         for (BagItem item : sortedItems(BagItem.ACQUIRE_ORDER)) {
             ItemSpec spec = catalog.item(item.configId());
             if (spec != null && spec.stackable() && plain(item) && item.size() < spec.maxStack()) {
-                groups.computeIfAbsent(item.configId(), k -> new ArrayList<>()).add(item);
+                groups.computeIfAbsent(new StackKey(item.configId(), item.bound()), k -> new ArrayList<>()).add(item);
             }
         }
         return groups;

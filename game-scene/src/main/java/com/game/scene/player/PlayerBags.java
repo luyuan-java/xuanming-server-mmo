@@ -169,7 +169,7 @@ public final class PlayerBags {
         for (BagItemState entry : entries) {
             long seq = entry.getAcquireSeq() != 0 ? entry.getAcquireSeq() : nextSeq++;
             BagItem item = new BagItem(entry.getItemUuid(), entry.getConfigId(), Integer.toUnsignedLong(entry.getStackSize()),
-                    seq, entry.getUnknownFields());
+                    seq, entry.getBound(), entry.getUnknownFields());
             if (entry.hasEquipment()) item.equipment(entry.getEquipment());
             items.add(item);
             savedSlots.add(entry.getPos());
@@ -255,6 +255,7 @@ public final class PlayerBags {
                         .setPos(item.slot())
                         .setBagType(type.code())
                         .setAcquireSeq(item.acquireSeq())
+                        .setBound(item.bound())
                         .setUnknownFields(item.unknownFields());
                 if (item.equipment() != null) stored.setEquipment(item.equipment());
                 state.addItems(stored);

@@ -1,39 +1,56 @@
 package com.game.match.ranked;
 
+import com.game.match.support.MatchModes;
 import com.game.proto.BattleParticipationFact;
 import com.game.proto.match.RankedPresetView;
 import com.game.proto.match.RankedTier;
 import com.game.table.ConfigTables;
+import com.game.table.DungeonTable;
+import com.game.table.PlayModeTable;
 import com.game.table.RankedPresetTable;
 import com.game.table.RankedRuleTable;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
-/** 论剑排位首发 V1 配表只读视图（{@code RankedRule} id=1 + {@code RankedPreset} 6 套正式预设）。 */
+/** 论剑排位首发 V1 与玩法白名单配表只读视图（{@code RankedRule} id=1 + {@code RankedPreset} + {@code PlayMode} + {@code Dungeon}）。 */
 public final class RankedTables {
 
     public static final int ROLE_KIND_CHARACTER = 1;
     public static final int ROLE_KIND_PET = 2;
+    public static final int BOSS_TRIAL_KIND_GUARD_RESCUE = 5;
+    public static final int BOSS_TRIAL_KIND_POLARITY = 6;
     public static final long INITIAL_RATING_CENTI = 150_000L;
+    public static final List<Integer> PRIMARY_TEAM_SIZES = List.of(1, 3, 5);
+    public static final List<Integer> SPECIAL_TEAM_SIZES = List.of(2, 4);
 
     private final RankedRuleTable rule;
     private final Map<Integer, RankedPresetTable> presetsById;
     private final List<RankedPresetView> presetViews;
     private final String configFingerprint;
+    private final Map<Long, List<Integer>> allowedTeamSizesByModeConfig;
+    private final Map<Integer, Integer> bossTrialKindByDungeon;
 
     private RankedTables(RankedRuleTable rule, Map<Integer, RankedPresetTable> presetsById,
-                         List<RankedPresetView> presetViews, String configFingerprint) {
+                         List<RankedPresetView> presetViews, String configFingerprint,
+                         Map<Long, List<Integer>> allowedTeamSizesByModeConfig,
+                         Map<Integer, Integer> bossTrialKindByDungeon) {
         this.rule = rule;
         this.presetsById = presetsById;
         this.presetViews = presetViews;
         this.configFingerprint = configFingerprint;
+        this.allowedTeamSizesByModeConfig = allowedTeamSizesByModeConfig;
+        this.bossTrialKindByDungeon = bossTrialKindByDungeon;
     }
 
     public static RankedTables from(ConfigTables config) {
@@ -58,7 +75,79 @@ public final class RankedTables {
                 .sorted(Comparator.comparingInt(RankedPresetTable::getId))
                 .toList();
         String fingerprint = computeConfigFingerprint(rule, byIdAsc);
-        return new RankedTables(rule, Map.copyOf(byId), List.copyOf(views), fingerprint);
+        Map<Long, List<Integer>> allowedSizes = parsePlayModeAllowedSizes(config.playMode().all());
+        Map<Integer, Integer> bossKinds = new HashMap<>();
+        for (DungeonTable dungeon : config.dungeon().all()) {
+            if (dungeon.getBossTrialKind() != 0) {
+                bossKinds.put(dungeon.getId(), dungeon.getBossTrialKind());
+            }
+        }
+        return new RankedTables(rule, Map.copyOf(byId), List.copyOf(views), fingerprint,
+                Map.copyOf(allowedSizes), Map.copyOf(bossKinds));
+    }
+
+    static Map<Long, List<Integer>> parsePlayModeAllowedSizes(List<PlayModeTable> rows) {
+        Map<Long, List<Integer>> result = new HashMap<>();
+        for (PlayModeTable row : rows) {
+            int mode = row.getMatchMode();
+            int teamSizeMax = row.getTeamSizeMax();
+            List<Integer> rawAllowed = row.getAllowedTeamSizesList();
+            if (!rawAllowed.isEmpty()) {
+                if (mode == MatchModes.PVE_SOLO) {
+                    throw new IllegalStateException("PlayMode id=" + row.getId() + ": PVE_SOLO 不允许配置 allowed_team_sizes");
+                }
+                if (mode != MatchModes.PVE_TEAM && mode != MatchModes.PVP_TEAM) {
+                    throw new IllegalStateException("PlayMode id=" + row.getId() + ": 固定人数模式不允许配置 allowed_team_sizes");
+                }
+                Set<Integer> seen = new HashSet<>();
+                List<Integer> cleaned = new ArrayList<>(rawAllowed.size());
+                for (int size : rawAllowed) {
+                    if (size < 1 || size > teamSizeMax) {
+                        throw new IllegalStateException("PlayMode id=" + row.getId()
+                                + ": allowed_team_sizes 项 " + size + " 超出 1..team_size_max(" + teamSizeMax + ")");
+                    }
+                    if (!seen.add(size)) {
+                        throw new IllegalStateException("PlayMode id=" + row.getId()
+                                + ": allowed_team_sizes 含重复人数档 " + size);
+                    }
+                    cleaned.add(size);
+                }
+                cleaned.sort(Integer::compareTo);
+                result.put(modeConfigKey(mode, row.getBattleConfigId()), List.copyOf(cleaned));
+            } else if ((mode == MatchModes.PVE_TEAM || mode == MatchModes.PVP_TEAM) && teamSizeMax >= 1) {
+                List<Integer> all = new ArrayList<>(teamSizeMax);
+                for (int s = 1; s <= teamSizeMax; s++) {
+                    all.add(s);
+                }
+                result.put(modeConfigKey(mode, row.getBattleConfigId()), List.copyOf(all));
+            }
+        }
+        return result;
+    }
+
+    private static long modeConfigKey(int mode, int configId) {
+        return (Integer.toUnsignedLong(mode) << 32) | Integer.toUnsignedLong(configId);
+    }
+
+    /** 返回 (mode, configId) 当前全部开放的人数档（升序）；未配置时返回空列表。 */
+    public List<Integer> allowedTeamSizes(int mode, int configId) {
+        return allowedTeamSizesByModeConfig.getOrDefault(modeConfigKey(mode, configId), List.of());
+    }
+
+    /** 判断指定人数档是否在 PlayMode 白名单内（若表中未登记该组合则回落按默认放行）。 */
+    public boolean isAllowedTeamSize(int mode, int configId, int size) {
+        List<Integer> allowed = allowedTeamSizes(mode, configId);
+        return allowed.isEmpty() || allowed.contains(size);
+    }
+
+    /** 返回 Dungeon 表的 boss_trial_kind（0=常规，1..4=首领试炼，5=护卫救援，6=物法易势）。 */
+    public int bossTrialKind(int configId) {
+        return bossTrialKindByDungeon.getOrDefault(configId, 0);
+    }
+
+    /** 娱乐轮换免费 3×3 预设判定：物法易势 5V5 或 护卫救援（Dungeon 109, boss_trial_kind=5）。 */
+    public boolean usesFreePreset(int mode, int configId) {
+        return mode == MatchModes.POLARITY_5V5 || bossTrialKind(configId) == BOSS_TRIAL_KIND_GUARD_RESCUE;
     }
 
     public String configFingerprint() {

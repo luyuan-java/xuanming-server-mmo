@@ -90,12 +90,14 @@ class TableBattleDataTest {
             assertThat(found.getGoldReward()).as("无金币奖励 id=%d", row.getId()).isNotZero();
         }
         assertThat(tables.dungeon().all()).as("Dungeon 表为空 = 没有可打的副本").isNotEmpty();
-        // PVP 玩法（如 PlayMode 6 = MATCH_MODE_PVP_TEAM 引用的 dungeon 5）不配怪物组；所有 PVE 副本必须有怪且每只怪存在
+        // PVP 玩法（含论剑 PVP_TEAM、物法易势 POLARITY_5V5、锦标赛 SEASON_TOURNAMENT）不配怪物组；所有 PVE 副本必须有怪且每只怪存在
         java.util.Set<Integer> pvpOnlyDungeons = tables.playMode().all().stream()
                 .filter(pm -> pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_PVP_TEAM_VALUE
                         || pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_1V1_VALUE
                         || pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_5V5_VALUE
-                        || pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_PVP_CHALLENGE_VALUE)
+                        || pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_PVP_CHALLENGE_VALUE
+                        || pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_POLARITY_5V5_VALUE
+                        || pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE)
                 .map(com.game.table.PlayModeTable::getBattleConfigId).collect(java.util.stream.Collectors.toSet());
         java.util.Set<Integer> pveDungeons = tables.playMode().all().stream()
                 .filter(pm -> pm.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_PVE_SOLO_VALUE

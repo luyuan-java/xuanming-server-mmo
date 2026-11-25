@@ -17,18 +17,29 @@ public final class BagItem {
     private final long guid;
     private final int configId;
     private final long acquireSeq;
+    private final boolean bound;
     private final UnknownFieldSet unknownFields;
     private long size;
     private int slot;
     private EquipmentState equipment;
 
     BagItem(long guid, int configId, long size, long acquireSeq, UnknownFieldSet unknownFields) {
+        this(guid, configId, size, acquireSeq, false, unknownFields);
+    }
+
+    BagItem(long guid, int configId, long size, long acquireSeq, boolean bound, UnknownFieldSet unknownFields) {
         this.guid = guid;
         this.configId = configId;
         this.size = size;
         this.acquireSeq = acquireSeq;
+        this.bound = bound;
         this.unknownFields = unknownFields;
         this.slot = -1;
+    }
+
+    /** 仅自用绑定标记：true = 不可交易/寄售/赠送，且与可交易堆严格分堆隔离。 */
+    public boolean bound() {
+        return bound;
     }
 
     /** 不可变存档值；null 与空值严格区分，空值代表已完成初始化。 */

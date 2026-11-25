@@ -37,7 +37,8 @@ public final class TeamAssignment {
     public static int[] assign(MatchMode mode, List<Long> members, Map<Long, Long> ratingCenti) {
         Objects.requireNonNull(mode, "mode");
         Objects.requireNonNull(members, "members");
-        if (mode == MatchMode.MATCH_MODE_5V5 || mode == MatchMode.MATCH_MODE_PVP_TEAM) {
+        if (mode == MatchMode.MATCH_MODE_5V5 || mode == MatchMode.MATCH_MODE_PVP_TEAM
+                || mode == MatchMode.MATCH_MODE_POLARITY_5V5) {
             return snake(members, ratingCenti == null ? Map.of() : ratingCenti);
         }
         int[] teams = new int[members.size()];

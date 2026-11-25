@@ -278,6 +278,8 @@ public final class GatherPipeline {
 
             // 2.6 分队
             boolean isRanked = mode == MatchMode.MATCH_MODE_PVP_TEAM && rankedStore != null;
+            boolean isFreePreset = !isRanked && rankedStore != null
+                    && rankedStore.tables().usesFreePreset(mode.getNumber(), plan.battleConfigId());
             int[] teams = TeamAssignment.assign(mode, plan.members(),
                     (mode == MatchMode.MATCH_MODE_5V5 || mode == MatchMode.MATCH_MODE_PVP_TEAM) ? loadRatings(battle) : Map.of());
             com.game.proto.RankedMatchContext rankedContext = null;
@@ -293,6 +295,14 @@ public final class GatherPipeline {
                     log.error("[gather] 构建排位上下文失败 battle_id={}", battle, e);
                     return fail(GatherOutcome.INTERNAL, 0);
                 }
+            } else if (isFreePreset) {
+                try {
+                    int sideSize = mode == MatchMode.MATCH_MODE_POLARITY_5V5 ? Math.max(1, n / 2) : n;
+                    rankedContext = rankedStore.buildFreePresetContext(sideSize, plan.members(), Map.of());
+                } catch (java.sql.SQLException e) {
+                    log.error("[gather] 构建免费预设上下文失败 battle_id={}", battle, e);
+                    return fail(GatherOutcome.INTERNAL, 0);
+                }
             }
 
             // 3. 逐人串行备战
@@ -300,7 +310,8 @@ public final class GatherPipeline {
             for (int i = 0; i < n; i++) {
                 long playerId = plan.members().get(i);
                 PrepareBattleRequest.Builder reqBuilder = PrepareBattleRequest.newBuilder().setPlayerId(playerId).setBattleId(battleId)
-                        .setBattleNodeId(node.info().getNodeId()).setDeadlineMs(deadlineMs).setPrepareDeadlineMs(prepareDeadlineMs);
+                        .setBattleNodeId(node.info().getNodeId()).setDeadlineMs(deadlineMs).setPrepareDeadlineMs(prepareDeadlineMs)
+                        .setBattleConfigId(plan.battleConfigId()).setMatchMode(mode.getNumber());
                 if (rankedContext != null) {
                     reqBuilder.setRankedContext(rankedContext);
                 }
@@ -367,7 +378,7 @@ public final class GatherPipeline {
             }
             // 观战可见性在建房时决定一次、随建房原件冻结（battle 第二道闸只认它）；落点记录抄同一份冻结值，不按模式另算
             create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext()));
-            if (scriptResolver != null && !isRanked) {
+            if (scriptResolver != null && (rankedContext == null || !rankedContext.getUseFreePreset())) {
                 create.addAllTeamScripts(scriptResolver.resolveForBattle(battleId, mode.getNumber(), plan.battleConfigId(), create.getPlayersList()));
             }
             CreateBattleRequest createRequest = create.build();

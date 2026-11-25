@@ -111,7 +111,8 @@ public final class BagFeature implements SceneFeature {
             BagItemInfo.Builder entry = BagItemInfo.newBuilder()
                     .setItemId(item.guid())
                     .setConfigId(item.configId())
-                    .setCount((int) item.size());
+                    .setCount((int) item.size())
+                    .setBound(item.bound());
             ItemSpec spec = bags.tables().item(item.configId());
             if (spec != null) {
                 entry.setMaxStack(spec.maxStackSize()).setEquipKind(spec.equipKind());

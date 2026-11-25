@@ -55,6 +55,74 @@ message PlayerState {
   PlayerMysteryMerchantState mystery_merchant = 17;
   // 单槽赛季印存档记录（按 season_id 索引，保留历史赛季记录与未知字段，同事务围栏提交）。
   PlayerSeasonState season = 18;
+  // 五行试炼志 V2 永久位图、最佳回合手记、卷三赛季隔离档案与普通首领首通门禁（同事务围栏提交）。
+  PlayerTrialJournalState trial_journal = 19;
+  // 轻量化手艺熟练度、未学技能书架、永久解锁技能与宗师原子代打配置（同事务围栏提交）。
+  PlayerCraftState craft = 20;
+}
+
+message PlayerTrialJournalState {
+  bytes lit_seal_bits = 1;
+  bytes claimed_milestone_bits = 2;
+  uint64 state_revision = 3;
+  repeated TrialJournalEntryRecordState records = 4;
+  repeated SeasonTrialJournalArchiveState season_records = 5;
+  bool normal_boss_trial_cleared = 6;
+}
+
+message TrialJournalLoadoutSnapshotState {
+  uint32 pet_table_id = 1;
+  repeated uint32 artifact_effect_ids = 2;
+  uint32 season_seal_id = 3;
+}
+
+message TrialJournalSoloRecordState {
+  uint32 best_rounds = 1;
+  uint64 achieved_at_ms = 2;
+  TrialJournalLoadoutSnapshotState loadout = 3;
+}
+
+message TrialJournalCoopRecordState {
+  uint32 best_rounds = 1;
+  uint32 party_size = 2;
+  uint64 achieved_at_ms = 3;
+  uint32 pet_table_id = 4;
+  repeated string teammate_names = 5;
+}
+
+message TrialJournalEntryRecordState {
+  uint32 entry_id = 1;
+  uint32 rule_version = 2;
+  TrialJournalSoloRecordState solo_best = 3;
+  TrialJournalCoopRecordState coop_best = 4;
+}
+
+message SeasonTrialJournalArchiveState {
+  uint32 season_id = 1;
+  repeated uint32 lit_seal_ids = 2;
+  repeated uint32 claimed_milestone_ids = 3;
+}
+
+message CraftedSkillBookEntryState {
+  uint64 book_id = 1;
+  uint32 skill_table_id = 2;
+  uint32 scroll_id = 3;
+  uint32 rarity_tier = 4;
+  bool bound = 5;
+  string crafter_name = 6;
+  uint64 crafter_player_id = 7;
+}
+
+message PlayerCraftState {
+  uint32 forge_mastery_exp = 1;
+  uint32 scroll_mastery_exp = 2;
+  uint64 scroll_craft_revision = 3;
+  uint64 next_book_seq = 4;
+  repeated CraftedSkillBookEntryState skill_books = 5;
+  bool proxy_stall_open = 6;
+  uint64 proxy_forge_fee_gold = 7;
+  uint64 proxy_scroll_fee_gold = 8;
+  repeated uint32 book_unlocked_skill_ids = 9;
 }
 
 message BattleResultHistoryState {
@@ -83,6 +151,12 @@ message BattleResultEntryState {
   uint64 exp_gain = 18;
   uint32 material_credit_units_added = 19;
   uint32 season_id = 20;
+  uint32 trial_journal_entry_id = 21;
+  repeated uint32 trial_newly_lit_seal_ids = 22;
+  bool trial_new_solo_best = 23;
+  bool trial_new_coop_best = 24;
+  uint32 material_tradable_units_added = 25;
+  bool material_pvp_loss_ineligible = 26;
 }
 
 message BattleResultCurrencyState {
@@ -117,6 +191,21 @@ message ClientRequestRecordState {
   uint32 enhancement_stone_count = 12;
   uint32 season_catchup_points = 13;
   uint64 season_catchup_spent = 14;
+  uint32 trial_milestone_id = 15;
+  uint32 trial_milestone_sand_count = 16;
+  uint32 trial_milestone_voucher_count = 17;
+  uint64 redeemed_artifact_item_id = 18;
+  uint32 redeemed_artifact_config_id = 19;
+  uint32 enhance_pity_count = 20;
+  uint32 crafting_tradable_count = 21;
+  uint32 enhancement_tradable_count = 22;
+  uint32 equipment_quality_tier = 23;
+  uint32 equipment_polish_pity_count = 24;
+  bool equipment_guaranteed_by_pity = 25;
+  uint64 crafted_skill_book_id = 26;
+  uint32 crafted_skill_table_id = 27;
+  uint64 scroll_craft_revision = 28;
+  uint32 scroll_bonus_fragments = 29;
 }
 
 message EquipmentMaterialRewardLedgerState {
@@ -124,6 +213,12 @@ message EquipmentMaterialRewardLedgerState {
   uint32 earned_today = 2;
   uint64 available_units = 3;
   uint64 revision = 4;
+  uint32 lifetime_earned = 5;
+  uint32 tradable_earned_total = 6;
+  uint64 available_tradable_units = 7;
+  uint64 week_starts_at_ms = 8;
+  uint32 earned_this_week = 9;
+  bool migrated_to_v2 = 10;
 }
 
 message PlayerMysteryMerchantState {
@@ -291,6 +386,8 @@ message PetState {
   uint32 last_purchase_pet_table_id = 4;
   uint64 last_purchase_pet_id = 5;
   uint64 last_purchase_price_gold = 6;
+  // true = 已完成一次性起步灵狐判定（已发放或老号已有宠不再补发）。
+  bool starter_pet_granted = 7;
 }
 
 // 一只宝宝（mmorpg PetInstance 的 Java 自有对应）。
@@ -357,6 +454,8 @@ message BagItemState {
   uint64 acquire_seq = 6;
   // presence 表示已初始化，即使随机属性为空。恢复、穿脱与资产搬运不得重掷。
   EquipmentState equipment = 7;
+  // 仅自用绑定标记：true = 不可交易、不可寄售、不可赠送；与可交易分堆隔离。
+  bool bound = 8;
 }
 
 // Java 自有装备存档；显示名、上限与现算加成不落库，未知字段沿实例完整保留。
@@ -365,10 +464,15 @@ message EquipmentState {
   uint32 enhance_level = 2;
   repeated EquipmentGemState gems = 3;
   repeated EquipmentFixedAffixState fixed_affixes = 4;
+  uint32 enhance_pity_count = 5;
+  string crafter_name = 6;
+  uint64 crafter_player_id = 7;
 }
 message EquipmentFixedAffixState {
   uint32 slot = 1;
   uint32 affix_id = 2;
+  uint32 quality_tier = 3;
+  uint32 polish_pity_count = 4;
 }
 message EquipmentAffixState {
   uint32 attr_id = 1;

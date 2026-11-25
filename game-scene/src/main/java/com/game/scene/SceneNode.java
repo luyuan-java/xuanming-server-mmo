@@ -571,6 +571,17 @@ public class SceneNode implements SmartLifecycle {
         if (seasonService != null) {
             sceneWorld.withActiveSeason(seasonService::activeSeasonId);
         }
+        final int starterPetListPushId = registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged");
+        sceneWorld.withOnEnteredPostBattle(player -> {
+            PetService.StarterGrantResult grant = petService.ensureStarterPetGranted(player);
+            if (grant == PetService.StarterGrantResult.GRANTED) {
+                sceneWorld.sendTo(player, com.game.scene.world.SceneMessageIds.push(starterPetListPushId,
+                        com.game.proto.PetListChangedS2C.newBuilder().setPets(petService.buildList(player)).build()));
+                sceneWorld.requestSave(player);
+            } else if (grant == PetService.StarterGrantResult.MARKED_EXISTING) {
+                sceneWorld.requestSave(player);
+            }
+        });
         battle.withInboxFailureHandler((player,failure)->sceneWorld.discardUnpersistedBattleEffect(player,player.ownerEpoch(),failure));
         repository.onFinalApplied(sceneWorld::onFinalApplied);
         repository.startFinalRecovery(scheduler);

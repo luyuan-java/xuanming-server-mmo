@@ -44,7 +44,27 @@ class RankedBattleEngineTest {
                 .setSeasonId(1)
                 .setRuleVersion(1)
                 .setTeamSize(teamSize)
+                .setUseFreePreset(false)
                 .build();
+    }
+
+    private static RankedMatchContext freePresetCtx(int teamSize) {
+        return RankedMatchContext.newBuilder()
+                .setSeasonId(0)
+                .setRuleVersion(1)
+                .setTeamSize(teamSize)
+                .setUseFreePreset(true)
+                .build();
+    }
+
+    private static BattlePlayerSnapshot playerWithRealPet(long playerId, long petId, int teamIndex, long speed,
+                                                          RankedPresetTable charPreset, RankedPresetTable petPreset) {
+        BattlePlayerSnapshot base = playerWithTempPet(playerId, teamIndex, speed, charPreset, petPreset);
+        BattlePetSnapshot realPet = base.getPets(0).toBuilder()
+                .setPetId(petId)
+                .setCompetitiveTemporary(false)
+                .build();
+        return base.toBuilder().setPets(0, realPet).build();
     }
 
     private static BattlePlayerSnapshot playerWithTempPet(long playerId, int teamIndex, long speed,
@@ -92,13 +112,13 @@ class RankedBattleEngineTest {
     }
 
     @Test
-    void 零宠物临时竞技宝宝仅排位允许且不回写永久宝宝结算() {
+    void 零宠物临时竞技宝宝仅免费预设娱乐场允许且正式排位拒绝临时宠() {
         RankedPresetTable charPreset = tables.rankedPreset().find(101).orElseThrow();
         RankedPresetTable petPreset = tables.rankedPreset().find(201).orElseThrow();
         BattlePlayerSnapshot p1 = playerWithTempPet(5001L, 0, 200L, charPreset, petPreset);
         BattlePlayerSnapshot p2 = playerWithTempPet(5002L, 1, 200L, charPreset, petPreset);
 
-        // 非排位拒绝 competitive_temporary=true 临时宝宝
+        // 非免费预设普通局拒绝 competitive_temporary=true 临时宝宝
         CreateBattleRequest nonRankedReq = CreateBattleRequest.newBuilder()
                 .setBattleId(9001L)
                 .setBattleConfigId(5)
@@ -109,12 +129,36 @@ class RankedBattleEngineTest {
                 .build();
         assertThat(TurnBattleEngine.start(nonRankedReq, data)).isInstanceOf(BattleStart.Rejected.class);
 
-        // 排位允许 pet_id=0 临时宝宝，分配局内 actor_id，且结算不包含该临时宝宝
-        CreateBattleRequest rankedReq = nonRankedReq.toBuilder()
+        // 正式排位(use_free_preset=false)同样拒绝临时竞技宝宝，必须走本人真实宝宝
+        CreateBattleRequest formalRankedWithTempPet = nonRankedReq.toBuilder()
                 .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
                 .setRankedContext(rankedCtx(1))
                 .build();
-        BattleStart started = TurnBattleEngine.start(rankedReq, data);
+        assertThat(TurnBattleEngine.start(formalRankedWithTempPet, data)).isInstanceOf(BattleStart.Rejected.class);
+
+        // 正式排位带真实宝宝正常开局，结算标 competitive_ranked=true 且 use_free_preset=false
+        CreateBattleRequest formalRankedReal = CreateBattleRequest.newBuilder()
+                .setBattleId(9002L)
+                .setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setSeed(42L)
+                .setRankedContext(rankedCtx(1))
+                .addPlayers(playerWithRealPet(5001L, 80001L, 0, 200L, charPreset, petPreset))
+                .addPlayers(playerWithRealPet(5002L, 80002L, 1, 200L, charPreset, petPreset))
+                .build();
+        BattleStart formalStarted = TurnBattleEngine.start(formalRankedReal, data);
+        assertThat(formalStarted).isInstanceOf(BattleStart.Started.class);
+        BattleSettlementData formalSettlement = ((BattleStart.Started) formalStarted).engine().buildSettlement(5001L);
+        assertThat(formalSettlement.getCompetitiveRanked()).isTrue();
+        assertThat(formalSettlement.getUseFreePreset()).isFalse();
+        assertThat(formalSettlement.getSeasonId()).isEqualTo(1);
+
+        // 免费预设娱乐场(use_free_preset=true)允许 pet_id=0 临时宝宝，分配局内 actor_id，且结算标 use_free_preset=true 且不回写该临时宝宝
+        CreateBattleRequest freePresetReq = nonRankedReq.toBuilder()
+                .setMatchMode(MatchMode.MATCH_MODE_POLARITY_5V5_VALUE)
+                .setRankedContext(freePresetCtx(1))
+                .build();
+        BattleStart started = TurnBattleEngine.start(freePresetReq, data);
         assertThat(started).isInstanceOf(BattleStart.Started.class);
         TurnBattleEngine engine = ((BattleStart.Started) started).engine();
         BattleStateS2C state = engine.buildStateSnapshot();
@@ -128,8 +172,9 @@ class RankedBattleEngineTest {
             assertThat(petActor.getActorId() & BattleConstants.ENGINE_LOCAL_ACTOR_ID_FLAG).isNotZero();
         }
         BattleSettlementData s1 = engine.buildSettlement(5001L);
-        assertThat(s1.getCompetitiveRanked()).isTrue();
-        assertThat(s1.getSeasonId()).isEqualTo(1);
+        assertThat(s1.getCompetitiveRanked()).isFalse();
+        assertThat(s1.getUseFreePreset()).isTrue();
+        assertThat(s1.getSeasonId()).isZero();
         assertThat(s1.getPetsList()).isEmpty();
     }
 
@@ -145,8 +190,8 @@ class RankedBattleEngineTest {
                     .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
                     .setSeed(seed)
                     .setRankedContext(rankedCtx(1))
-                    .addPlayers(playerWithTempPet(5001L, 0, 220L, charPreset, petPreset))
-                    .addPlayers(playerWithTempPet(5002L, 1, 220L, charPreset, petPreset))
+                    .addPlayers(playerWithRealPet(5001L, 81001L, 0, 220L, charPreset, petPreset))
+                    .addPlayers(playerWithRealPet(5002L, 81002L, 1, 220L, charPreset, petPreset))
                     .build();
             TurnBattleEngine e1 = ((BattleStart.Started) TurnBattleEngine.start(req, data)).engine();
             TurnBattleEngine e2 = ((BattleStart.Started) TurnBattleEngine.start(req, data)).engine();
@@ -172,8 +217,8 @@ class RankedBattleEngineTest {
                 .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
                 .setSeed(77L)
                 .setRankedContext(rankedCtx(1))
-                .addPlayers(playerWithTempPet(5001L, 0, 260L, charPreset, petPreset))
-                .addPlayers(playerWithTempPet(5002L, 1, 180L, charPreset, petPreset))
+                .addPlayers(playerWithRealPet(5001L, 82001L, 0, 260L, charPreset, petPreset))
+                .addPlayers(playerWithRealPet(5002L, 82002L, 1, 180L, charPreset, petPreset))
                 .build();
         TurnBattleEngine engine = ((BattleStart.Started) TurnBattleEngine.start(req, data)).engine();
         // P1 进场并手动出招；P2 从未进场、从未手动或显式开启自动
@@ -202,7 +247,7 @@ class RankedBattleEngineTest {
     }
 
     @Test
-    void 排位九种人宠搭配均可正常开局与运转() {
+    void 免费预设九种人宠搭配均可正常开局与运转() {
         List<RankedPresetTable> chars = tables.rankedPreset().all().stream().filter(r -> r.getRoleKind() == 1).toList();
         List<RankedPresetTable> pets = tables.rankedPreset().all().stream().filter(r -> r.getRoleKind() == 2).toList();
         assertThat(chars).hasSize(3);
@@ -214,9 +259,9 @@ class RankedBattleEngineTest {
                 CreateBattleRequest req = CreateBattleRequest.newBuilder()
                         .setBattleId(id)
                         .setBattleConfigId(5)
-                        .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                        .setMatchMode(MatchMode.MATCH_MODE_POLARITY_5V5_VALUE)
                         .setSeed(id)
-                        .setRankedContext(rankedCtx(1))
+                        .setRankedContext(freePresetCtx(1))
                         .addPlayers(playerWithTempPet(6001L, 0, 210L, c, p))
                         .addPlayers(playerWithTempPet(6002L, 1, 200L, c, p))
                         .build();

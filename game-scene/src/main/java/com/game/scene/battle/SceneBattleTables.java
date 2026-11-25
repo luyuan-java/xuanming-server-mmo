@@ -4,6 +4,7 @@ import com.game.battle.engine.BattleRules;
 import com.game.battle.engine.BattleTableFingerprint;
 import com.game.table.ClassTable;
 import com.game.table.ConfigTables;
+import com.game.table.DungeonTable;
 import com.game.table.ItemTable;
 import com.game.table.SkillTable;
 import java.util.HashMap;
@@ -15,17 +16,23 @@ import java.util.Set;
  * scene 出战斗快照、应用结算要用的配表视图（启动时从同一份配表快照建一次；scene 没有表热更）：
  * 战斗配表指纹（{@code BattleTableFingerprint.compute}，快照与应答两处同值，§7.5 第 5 步）、技能可施放判据
  * （{@code BattleRules.isTurnBattleCastableSkill}，与引擎共用，engine-spec D7）、道具 {@code battle_usable}（快照与结算消耗共用一个判据，
- * 基线 {@code IsBattleUsableItem}）、职业初值（快照的护甲 / 力量 / 暴击 / 抗性，D8）。不可变、线程安全。
+ * 基线 {@code IsBattleUsableItem}）、职业初值（快照的护甲 / 力量 / 暴击 / 抗性，D8）及副本元信息（首领试炼困难门禁与普通首通判定）。不可变、线程安全。
  *
  * @param fingerprint 战斗配表指纹（32 位小写 hex）
  */
 public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
                                 Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes,
-                                RankedPresetRules.Tables ranked) {
+                                RankedPresetRules.Tables ranked, Map<Integer, DungeonTable> dungeons) {
 
     public SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
                              Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes) {
-        this(fingerprint, skills, castableSkills, battleUsableItems, classes, null);
+        this(fingerprint, skills, castableSkills, battleUsableItems, classes, null, Map.of());
+    }
+
+    public SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
+                             Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes,
+                             RankedPresetRules.Tables ranked) {
+        this(fingerprint, skills, castableSkills, battleUsableItems, classes, ranked, Map.of());
     }
 
     public SceneBattleTables {
@@ -33,6 +40,7 @@ public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Int
         castableSkills = Set.copyOf(castableSkills);
         battleUsableItems = Set.copyOf(battleUsableItems);
         classes = Map.copyOf(classes);
+        dungeons = dungeons == null ? Map.of() : Map.copyOf(dungeons);
     }
 
     public static SceneBattleTables from(ConfigTables tables) {
@@ -54,8 +62,17 @@ public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Int
         for (ClassTable row : tables.classTable().all()) {
             classes.put(row.getId(), row);
         }
+        Map<Integer, DungeonTable> dungeons = new HashMap<>();
+        for (DungeonTable row : tables.dungeon().all()) {
+            dungeons.put(row.getId(), row);
+        }
         return new SceneBattleTables(BattleTableFingerprint.compute(tables), skills, castable, usable, classes,
-                RankedPresetRules.Tables.from(tables));
+                RankedPresetRules.Tables.from(tables), dungeons);
+    }
+
+    /** 副本行（首领试炼/护卫救援/物法易势判定）；没有为 null。 */
+    public DungeonTable dungeon(int configId) {
+        return dungeons.get(configId);
     }
 
     /** 技能表里有这一行。 */

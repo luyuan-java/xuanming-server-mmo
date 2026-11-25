@@ -373,7 +373,7 @@ public final class RankedPresetRules {
                                                                           BattleRouting routing,
                                                                           long nowEpochSec) {
         Tables tables = battleTables.ranked();
-        if (tables == null || !tables.isValid() || rankedCtx == null || rankedCtx.getSeasonId() == 0) {
+        if (tables == null || !tables.isValid() || rankedCtx == null || !rankedCtx.getUseFreePreset()) {
             return Optional.empty();
         }
         RankedRuleTable rule = tables.rule();

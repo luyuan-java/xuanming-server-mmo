@@ -210,6 +210,7 @@ public final class PlayerPets {
     private int lastPurchasePetTableId;
     private long lastPurchasePetId;
     private long lastPurchasePriceGold;
+    private boolean starterPetGranted;
     private final UnknownFieldSet unknownFields;
 
     private PlayerPets(UnknownFieldSet unknownFields) {
@@ -231,6 +232,7 @@ public final class PlayerPets {
         restored.lastPurchasePetTableId = state.getLastPurchasePetTableId();
         restored.lastPurchasePetId = state.getLastPurchasePetId();
         restored.lastPurchasePriceGold = state.getLastPurchasePriceGold();
+        restored.starterPetGranted = state.getStarterPetGranted();
         return restored;
     }
 
@@ -277,7 +279,12 @@ public final class PlayerPets {
         lastPurchasePetTableId = candidate.lastPurchasePetTableId;
         lastPurchasePetId = candidate.lastPurchasePetId;
         lastPurchasePriceGold = candidate.lastPurchasePriceGold;
+        starterPetGranted = candidate.starterPetGranted;
     }
+
+    public boolean starterPetGranted() { return starterPetGranted; }
+
+    public void markStarterPetGranted() { this.starterPetGranted = true; }
 
     public long lastPurchaseSequence() { return lastPurchaseSequence; }
     public int lastPurchasePetTableId() { return lastPurchasePetTableId; }
@@ -310,16 +317,18 @@ public final class PlayerPets {
         this.activePetId = petId;
     }
 
-    /** 没有宝宝、未出战、没有不认识的字段：持久化时整段省略。 */
+    /** 没有宝宝、未出战、未标记起步首宠、没有不认识的字段：持久化时整段省略。 */
     public boolean isPristine() {
-        return pets.isEmpty() && activePetId == 0 && lastPurchaseSequence == 0 && lastPurchasePetTableId == 0
+        return pets.isEmpty() && activePetId == 0 && !starterPetGranted
+                && lastPurchaseSequence == 0 && lastPurchasePetTableId == 0
                 && lastPurchasePetId == 0 && lastPurchasePriceGold == 0 && unknownFields.asMap().isEmpty();
     }
 
     public PetState toState() {
         PetState.Builder state = PetState.newBuilder().setActivePetId(activePetId).setUnknownFields(unknownFields)
                 .setLastPurchaseSequence(lastPurchaseSequence).setLastPurchasePetTableId(lastPurchasePetTableId)
-                .setLastPurchasePetId(lastPurchasePetId).setLastPurchasePriceGold(lastPurchasePriceGold);
+                .setLastPurchasePetId(lastPurchasePetId).setLastPurchasePriceGold(lastPurchasePriceGold)
+                .setStarterPetGranted(starterPetGranted);
         for (Pet pet : pets) {
             state.addPets(pet.toEntry());
         }

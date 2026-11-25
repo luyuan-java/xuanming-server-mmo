@@ -55,11 +55,17 @@ public final class BagService {
 
     /** 装备打造 / 材料自选候选入包，沿用封禁、铸号与容量规则；此处不写玩家、不发审计。 */
     public Bag.AddResult prepareEquipmentGrant(ScenePlayer player, com.game.scene.player.PlayerBags candidate, Map<Integer, Long> counts) {
+        return prepareEquipmentGrant(player, candidate, counts, false);
+    }
+
+    /** 装备打造 / 材料自选 / 试炼志发奖候选入包，支持按 {@code bound} 隔离入绑定堆或可交易堆。 */
+    public Bag.AddResult prepareEquipmentGrant(ScenePlayer player, com.game.scene.player.PlayerBags candidate,
+                                               Map<Integer, Long> counts, boolean bound) {
         if (!writable(player)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
         for (int config : counts.keySet()) {
             if (isItemGainBlocked(player, config)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
         }
-        return candidate.bag(BagType.INVENTORY).add(counts, tables, guids);
+        return candidate.bag(BagType.INVENTORY).add(counts, bound, tables, guids);
     }
 
     /** 完整候选已提交后的材料/宝石流水；旁路失败不能把成功的资产变更误报成可重试。 */
@@ -126,7 +132,8 @@ public final class BagService {
         if (!writable(player)) return failedTransfer(player, REFUSED);
         for (var entry : counts.entrySet()) {
             var spec = tables.item(entry.getKey());
-            if (spec == null || !spec.stackable() || entry.getValue() <= 0 || bag.total(entry.getKey()) < entry.getValue()
+            // 交易/寄售资产通道只允许扣纯可交易堆，严禁扣减 bound=true 仅自用物品。
+            if (spec == null || !spec.stackable() || entry.getValue() <= 0 || bag.plainTradableQuantity(entry.getKey()) < entry.getValue()
                     || bag.items().stream().anyMatch(item -> item.configId() == entry.getKey() && item.equipment() != null)) {
                 return failedTransfer(player, com.game.table.AssetErrorTip.asset_error.kAssetInvalidBundle_VALUE);
             }
@@ -134,13 +141,13 @@ public final class BagService {
         for (long guid : guidsToTake) {
             var item = bag.item(guid);
             var spec = item == null ? null : tables.item(item.configId());
-            if (!unique.add(guid) || item == null || item.size() != 1 || spec == null || spec.maxStackSize() != 1) {
+            if (!unique.add(guid) || item == null || item.bound() || item.size() != 1 || spec == null || spec.maxStackSize() != 1) {
                 return failedTransfer(player, com.game.table.AssetErrorTip.asset_error.kAssetInvalidBundle_VALUE);
             }
             var raw = snapshot.getItemsList().stream().filter(stored -> stored.getItemUuid() == guid).findFirst().orElseThrow();
             instances.add(raw.toBuilder().clearPos().clearBagType().clearAcquireSeq().build());
         }
-        for (var entry : new TreeMap<>(counts).entrySet()) removed.addAll(bag.drainClamped(entry.getKey(), entry.getValue()));
+        for (var entry : new TreeMap<>(counts).entrySet()) removed.addAll(bag.drainClamped(entry.getKey(), entry.getValue(), true));
         for (var instance : instances) {
             bag.takeInstance(instance.getItemUuid());
             removed.add(new Bag.Drawn(instance.getItemUuid(), instance.getConfigId(), 1));
@@ -264,6 +271,12 @@ public final class BagService {
      */
     public Bag.AddResult addItems(ScenePlayer player, BagType type, Map<Integer, Long> counts, AssetAudit.Reason reason,
                                   long correlationId, String extra) {
+        return addItems(player, type, counts, false, reason, correlationId, extra);
+    }
+
+    /** 批量入包，支持按 {@code bound} 隔离入绑定堆或可交易堆。 */
+    public Bag.AddResult addItems(ScenePlayer player, BagType type, Map<Integer, Long> counts, boolean bound,
+                                  AssetAudit.Reason reason, long correlationId, String extra) {
         if (!writable(player)) {
             return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
         }
@@ -275,7 +288,7 @@ public final class BagService {
                 return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
             }
         }
-        Bag.AddResult result = player.bags().bag(type).add(ordered, tables, guids);
+        Bag.AddResult result = player.bags().bag(type).add(ordered, bound, tables, guids);
         for (Bag.Removed evicted : result.evicted()) {
             audit.itemDestroyed(player.playerId(), evicted.guid(), evicted.configId(), evicted.size(),
                     AssetAudit.Reason.ITEM_DESTROY, 0, "");
