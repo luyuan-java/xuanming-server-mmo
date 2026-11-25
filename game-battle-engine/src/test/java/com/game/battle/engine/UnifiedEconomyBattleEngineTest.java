@@ -73,7 +73,9 @@ class UnifiedEconomyBattleEngineTest {
         List<BattleActorState> duoMonsters = duo.buildStateSnapshot().getActorsList().stream()
                 .filter(a -> a.getActorType() == eBattleActorType.BATTLE_ACTOR_TYPE_MONSTER).toList();
         assertThat(soloMonsters).hasSize(2);
-        assertThat(duoMonsters).hasSize(2);
+        // V2 精简精英阵：2 人单卫局刷 1 首领 + 1 回春护卫 + 1 策应卫·破军(109)，首领血量仍为单人 2 倍
+        assertThat(duoMonsters).hasSize(3);
+        assertThat(duoMonsters).anyMatch(m -> m.getMonsterTableId() == BattleConstants.BOSS_TRIAL_MONSTER_SUPPORT_BREAKER);
         assertThat(soloMonsters).anyMatch(BattleActorState::getIsBoss);
         assertThat(duoMonsters.get(0).getMaxHealth()).isEqualTo(soloMonsters.get(0).getMaxHealth() * 2L);
 

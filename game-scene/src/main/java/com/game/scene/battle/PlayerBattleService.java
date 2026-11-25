@@ -235,7 +235,7 @@ public final class PlayerBattleService implements BattleHooks {
         boolean isFormalRanked = request.hasRankedContext() && request.getRankedContext().getSeasonId() != 0;
         var dungeonRow = request.getBattleConfigId() != 0 ? tables.dungeon(request.getBattleConfigId()) : null;
         int bossTrialKind = dungeonRow != null ? dungeonRow.getBossTrialKind() : 0;
-        boolean isBossTrial = bossTrialKind >= 1 && bossTrialKind <= 4;
+        boolean isBossTrial = (bossTrialKind >= 1 && bossTrialKind <= 4) || bossTrialKind == 8;
         boolean isGuardRescue = bossTrialKind == 5;
         // 困难首领试炼准入硬校验（core-gameplay-loop.md §1）：任意普通首领首通后持久解锁，组队困难全员各校一次。
         boolean hardUnlocked = trialJournalService != null

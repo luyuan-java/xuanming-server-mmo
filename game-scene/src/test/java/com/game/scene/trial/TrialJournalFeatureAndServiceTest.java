@@ -57,13 +57,13 @@ class TrialJournalFeatureAndServiceTest {
         alignActiveSeason(f);
         ScenePlayer p = f.enter(11, 2001L);
 
-        // 1. 初始快照：3 卷全部可见，永久分母 24 枚，未通普通首领时困难未解锁
+        // 1. 初始快照：3 卷全部可见，永久分母 27 枚（含 V2 双卫同阵 1051..1053），未通普通首领时困难未解锁
         GetTrialJournalResponse initResp = rpc(f, p, SERVICE, "GetTrialJournal",
                 GetTrialJournalRequest.getDefaultInstance(), GetTrialJournalResponse.parser());
         assertThat(initResp.getErrorMessage().getId()).isZero();
         TrialJournalSnapshot initSnap = initResp.getSnapshot();
         assertThat(initSnap.getAvailable()).isTrue();
-        assertThat(initSnap.getTotalPermanentSeals()).isEqualTo(24);
+        assertThat(initSnap.getTotalPermanentSeals()).isEqualTo(27);
         assertThat(initSnap.getTotalPermanentLitSeals()).isZero();
         assertThat(initSnap.getHardBossTrialUnlocked()).isFalse();
         assertThat(initSnap.getChaptersList()).hasSize(3);

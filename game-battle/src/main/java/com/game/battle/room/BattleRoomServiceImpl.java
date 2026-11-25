@@ -1007,13 +1007,16 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
 
     /**
-     * 装填回合窗口：全员就绪（含空真）取 max(2000, 上一回合出手单位数 × 250) ms，否则 6000 ms；
+     * 装填回合窗口：全员就绪（含空真）取 max(2000, 上一回合出手单位数 × 250) ms，首领试炼取 18000 ms，其余取 6000 ms；
      * 之后切换挂机不改变本回合的窗口。
      */
     private void armRoundTimer(BattleRoom room) {
+        long manualWindowMs = room.engine.isBossTrialBattle()
+                ? BattleConstants.BOSS_TRIAL_ACTION_TIMEOUT_MS
+                : BattleConstants.ROUND_DURATION_MS;
         long windowMs = room.engine.allPlayersReady()
                 ? BattleConstants.autoRoundIntervalMsFor(room.engine.lastActionOrder().size())
-                : BattleConstants.ROUND_DURATION_MS;
+                : manualWindowMs;
         room.actionDeadlineMs = clock.epochMillis() + windowMs;
         room.roundTimer = scheduler.after(windowMs, () -> {
             if (isCurrent(room)) {

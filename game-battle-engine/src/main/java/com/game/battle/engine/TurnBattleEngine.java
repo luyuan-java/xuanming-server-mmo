@@ -433,15 +433,16 @@ public final class TurnBattleEngine {
                 referenceLevel = snapshot.getLevel();
             }
         }
+        ctx.encounter.setInitialAttackerHumanCount(attackerCount);
         boolean isBossTrialOrRescue = ctx.encounter.isBossTrialOrRescue();
-        List<Integer> monsterIds = ctx.data().dungeonMonsterIds(request.getBattleConfigId());
+        List<Integer> monsterIds = new ArrayList<>(ctx.data().dungeonMonsterIds(request.getBattleConfigId()));
         if (monsterIds.isEmpty()) {
             monsterIds = new ArrayList<>(request.getPlayersCount());
             for (int i = 0; i < request.getPlayersCount(); i++) {
                 monsterIds.add(0);
             }
         } else if (!isBossTrialOrRescue && attackerCount > 0 && request.getActivityContext().getKindValue() == 0) {
-            // 未知非零活动 kind 也视为活动；首领试炼与护卫救援固定 1 首领 + 1 护卫，仅线性缩放血量，不复制额外怪。
+            // 未知非零活动 kind 也视为活动；首领试炼改走精简精英阵，不复制白板杂兵。
             long perPlayer = Integer.toUnsignedLong(ctx.data().dungeonMonstersPerPlayer(request.getBattleConfigId()));
             if (perPlayer > 0) {
                 int count = (int) Math.min(BattleConstants.MAX_SCALED_PVE_MONSTERS,
@@ -453,13 +454,36 @@ public final class TurnBattleEngine {
                 monsterIds = scaled;
             }
         }
+        // 首领试炼 V2 精简精英阵：单卫 2..3 人加破军卫(109)、4..5 人加鼓噪卫(110)；双卫 3..5 人加破军卫(109)；全场至多 4 怪。
+        if (ctx.encounter.isBossTrial()) {
+            if (ctx.encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_BREAK_DUAL_GUARD) {
+                if (attackerCount >= 3 && ctx.data().monster(BattleConstants.BOSS_TRIAL_MONSTER_SUPPORT_BREAKER).isPresent()) {
+                    monsterIds.add(BattleConstants.BOSS_TRIAL_MONSTER_SUPPORT_BREAKER);
+                }
+            } else {
+                if (attackerCount >= 2 && ctx.data().monster(BattleConstants.BOSS_TRIAL_MONSTER_SUPPORT_BREAKER).isPresent()) {
+                    monsterIds.add(BattleConstants.BOSS_TRIAL_MONSTER_SUPPORT_BREAKER);
+                }
+                if (attackerCount >= 4 && ctx.data().monster(BattleConstants.BOSS_TRIAL_MONSTER_SUPPORT_DRUMMER).isPresent()) {
+                    monsterIds.add(BattleConstants.BOSS_TRIAL_MONSTER_SUPPORT_DRUMMER);
+                }
+            }
+        }
         long hpScale = isBossTrialOrRescue ? Math.max(1, attackerCount) : 1L;
         int monsterIndex = 0;
         for (int monsterTableId : monsterIds) {
             appendMonsterActor(monsterTableId, monsterIndex, referenceLevel);
             BattleUnit spawned = ctx.units().getLast();
-            if (hpScale > 1L) {
-                long scaledHp = spawned.maxHealth() * hpScale;
+            boolean isSupportGuard = monsterTableId == BattleConstants.BOSS_TRIAL_MONSTER_SUPPORT_BREAKER
+                    || monsterTableId == BattleConstants.BOSS_TRIAL_MONSTER_SUPPORT_DRUMMER;
+            long baseHp = spawned.maxHealth();
+            if (ctx.encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_BREAK_DUAL_GUARD
+                    && !spawned.isBoss() && !isSupportGuard) {
+                baseHp = Math.max(1L, Long.divideUnsigned(baseHp * BattleConstants.BOSS_DUAL_GUARD_HP_KEEP_PCT, 100L));
+            }
+            long unitHpScale = isSupportGuard ? Math.max(1L, (attackerCount + 1L) / 2L) : hpScale;
+            long scaledHp = baseHp * unitHpScale;
+            if (scaledHp != spawned.maxHealth()) {
                 spawned.state().setMaxHealth(scaledHp);
                 spawned.setHealth(scaledHp);
             }
@@ -551,6 +575,11 @@ public final class TurnBattleEngine {
     /** 是否为竞技 PVP（人宠会武 / 物法易势 / 战队锦标赛）：启用凝锋主目标与战意渐盛。 */
     public boolean isCompetitivePvpBattle() {
         return ctx.isCompetitivePvp();
+    }
+
+    /** 是否为首领试炼对局（boss_trial_kind 1..4 或 8 双卫同阵；用于 18 秒行动窗口与确定退出）。 */
+    public boolean isBossTrialBattle() {
+        return ctx.encounter.isBossTrial();
     }
 
     public int maxRounds() {
@@ -910,6 +939,10 @@ public final class TurnBattleEngine {
             unit.setDefending(false);
         }
         updateOutcome();
+        if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING && ctx.encounter.isBossTrial()) {
+            ctx.encounter.processBossTrialRoundEnd(checks);
+            updateOutcome();
+        }
         rollDrops();
 
         int settledRound = ctx.roundIndex();
@@ -928,6 +961,7 @@ public final class TurnBattleEngine {
         pendingActions.clear();
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             ctx.advanceRound();
+            ctx.encounter.advanceRoundCleanup();
             expireSurrenderVotesForRoundAdvance();
             ctx.encounter.updatePolarityForRound(request.getMatchMode());
             ctx.encounter.refreshTelegraphs(maxRounds);
@@ -1251,6 +1285,9 @@ public final class TurnBattleEngine {
             if (kind == eBattleHitKind.BATTLE_HIT_COMBO) hit.damageOrdinal = 1;
             long landed = ctx.configured.impact.damage(actor,target,damage,CombatDamageRules.PHYSICAL_DAMAGE,hit,kind);
             hit.actualDamage = landed;
+            if (landed != 0 && kind == eBattleHitKind.BATTLE_HIT_NORMAL && target.isActive()) {
+                ctx.encounter.applyBreakerSunder(actor, target);
+            }
             if (landed != 0 && kind == eBattleHitKind.BATTLE_HIT_NORMAL && actor.isActive())
                 ctx.configured.trigger(actor,target,BattleEffect.AFTER_BASIC,CombatDamageRules.PHYSICAL_DAMAGE,hit);
             if (kind != eBattleHitKind.BATTLE_HIT_COUNTER) tryReflectDamage(actor,target,landed);
@@ -1272,6 +1309,10 @@ public final class TurnBattleEngine {
                 .setIsCritical(finalDamage.critical())
                 .setTargetHealthAfter(target.health())
                 .setTargetManaAfter(target.mana()).setHitKind(kind);
+
+        if (dealt != 0 && kind == eBattleHitKind.BATTLE_HIT_NORMAL && target.health() != 0) {
+            ctx.encounter.applyBreakerSunder(actor, target);
+        }
 
         if (target.health() == 0) {
             ctx.handleDeath(target, actor.actorId());
@@ -1406,25 +1447,33 @@ public final class TurnBattleEngine {
                     ctx.effectivePhysicalAttack(actor), actor.magicAttack());
             BattleContext.FinalDamage finalDamage = ctx.calculateFinalDamage(actor, target, baseDamage, attack,
                     row.getAttackMultiplier(), row.getDamageType());
+            boolean isAreaSkill = BattleRules.isAreaSkill(row);
             if (ctx.configured.activeFor(actor,target)) {
                 var hit = new BattleEffect.Hit(row.getId(),1,BattleEffect.DIRECT,primaryTargetId);
                 hit.critical = finalDamage.critical();
+                hit.isMultiTargetSkill = isAreaSkill;
                 ctx.configured.impact.damage(actor,target,finalDamage.value(),row.getDamageType(),hit,eBattleHitKind.BATTLE_HIT_NORMAL);
             } else {
             double legacySkillDamage = finalDamage.value();
             if (ctx.escalationStacks() > 0) {
                 legacySkillDamage *= ctx.escalationDamagePct() / 100.0;
             }
-            long dealt = ctx.encounter.applyLegacyDamage(actor, target, legacySkillDamage, row.getDamageType(), true);
+            boolean isPrimaryTarget = primaryTargetId == 0L || target.actorId() == primaryTargetId;
+            boolean[] splashReduced = new boolean[1];
+            long dealt = ctx.encounter.applyLegacyDamage(actor, target, legacySkillDamage, row.getDamageType(), true,
+                    isAreaSkill, isPrimaryTarget, splashReduced);
             ctx.encounter.recordTrialDirectDamage(actor, target, row.getDamageType(), dealt);
             if (dealt != 0) ctx.encounter.recordEffectiveContribution(actor);
 
-            ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
+            var dmgEv = ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, actor.actorId(), target.actorId())
                     .setSkillTableId(action.getSkillTableId())
                     .setValue(dealt)
                     .setIsCritical(finalDamage.critical())
                     .setTargetHealthAfter(target.health())
                     .setTargetManaAfter(target.mana());
+            if (splashReduced[0]) {
+                dmgEv.setIsSplashReduced(true);
+            }
 
             if (target.health() == 0) {
                 ctx.handleDeath(target, actor.actorId());
@@ -1497,7 +1546,10 @@ public final class TurnBattleEngine {
      */
     private void executeFlee(BattleUnit actor) {
         boolean success = false;
-        if (ctx.isPve()) {
+        if (ctx.encounter.isBossTrial() && actor.isPlayer()) {
+            // 首领试炼确定退出（boss-trial-planning-ui.md §6.2）：无随机逃跑失败、不消耗 RNG，本人及宝宝原子离场。
+            success = true;
+        } else if (ctx.isPve()) {
             double chance = BattleRules.fleeChance(ctx.effectiveSpeed(actor), ctx.maxAliveEnemySpeed(actor));
             success = ctx.rng().rand01() < chance;
         }
@@ -1505,6 +1557,18 @@ public final class TurnBattleEngine {
                 .setSuccess(success);
         if (success) {
             actor.markFled();
+            if (ctx.encounter.isBossTrial() && actor.isPlayer()) {
+                for (BattleUnit other : ctx.units()) {
+                    if (other.isPet() && other.ownerPlayerId() == actor.actorId() && !other.fled()) {
+                        boolean wasActive = other.isActive();
+                        other.markFled();
+                        if (wasActive) {
+                            ctx.events().append(eBattleEventType.BATTLE_EVENT_FLEE, other.actorId(), other.actorId())
+                                    .setSuccess(true);
+                        }
+                    }
+                }
+            }
         }
     }
 

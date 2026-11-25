@@ -81,11 +81,23 @@ class TableBattleDataTest {
     void 每只配置的怪都有战斗属性与奖励_副本引用的怪都存在() {
         // 【C++ 断言】tdp_test.cpp:103-129（uint64 的 > 0 即非 0）
         assertThat(tables.monster().all()).as("Monster 表为空 = PVE 全靠引擎回退常量").isNotEmpty();
+        java.util.Set<Integer> festivalBeastMonsters = tables.dungeon().all().stream()
+                .filter(d -> d.getBossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_FESTIVAL_BEAST)
+                .flatMap(d -> data.dungeonMonsterIds(d.getId()).stream())
+                .collect(java.util.stream.Collectors.toSet());
         for (MonsterTable row : tables.monster().all()) {
             MonsterTable found = data.monster(row.getId()).orElseThrow();
             assertThat(found.getHealth()).as("0 血怪物开局即死 id=%d", row.getId()).isNotZero();
-            assertThat(found.getStrength()).as("0 力量怪物打不出伤害 id=%d", row.getId()).isNotZero();
             assertThat(found.getSpeed()).as("0 速度怪物破坏出手序 id=%d", row.getId()).isNotZero();
+            if (festivalBeastMonsters.contains(row.getId())) {
+                // 瑞兽迎春首领按档位覆盖物理攻击并关闭普通经验/银两/暴击/捕捉（对齐 C++ table_battle_data_provider_test.cpp）。
+                assertThat(found.getExpReward()).as("瑞兽迎春不应配普通经验 id=%d", row.getId()).isZero();
+                assertThat(found.getGoldReward()).as("瑞兽迎春不应配普通银两 id=%d", row.getId()).isZero();
+                assertThat(found.getCritchance()).as("瑞兽迎春暴击应为 0 id=%d", row.getId()).isZero();
+                assertThat(found.getCapturePetTableId()).as("瑞兽迎春不应可捕捉 id=%d", row.getId()).isZero();
+                continue;
+            }
+            assertThat(found.getStrength()).as("0 力量怪物打不出伤害 id=%d", row.getId()).isNotZero();
             assertThat(found.getExpReward()).as("无经验奖励 id=%d", row.getId()).isNotZero();
             assertThat(found.getGoldReward()).as("无金币奖励 id=%d", row.getId()).isNotZero();
         }

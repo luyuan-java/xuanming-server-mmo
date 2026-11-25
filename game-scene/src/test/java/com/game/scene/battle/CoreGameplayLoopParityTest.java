@@ -224,7 +224,7 @@ class CoreGameplayLoopParityTest {
         p.attributes().setHealth(0);
         p.attributes().setMana(0);
 
-        // 1. 困难首领试炼(Dungeon 102: boss_trial_kind=1, difficulty=2) 未首通任意普通首领时被 1006 拦截
+        // 1. 困难首领试炼(Dungeon 102 与 V2 双卫同阵 Dungeon 112) 未首通任意普通首领时均被 1006 拦截
         PrepareBattleRequest hardReq = f.prepareRequest(301L, 9001L).toBuilder()
                 .setBattleConfigId(102)
                 .setMatchMode(MatchMode.MATCH_MODE_PVE_SOLO_VALUE)
@@ -232,6 +232,15 @@ class CoreGameplayLoopParityTest {
         CompletableFuture<PrepareBattleResponse> hardBlockedFut = f.battle.prepare(hardReq);
         f.drain();
         assertThat(hardBlockedFut.join().getErrorMessage().getId())
+                .isEqualTo(CommonErrorTip.common_error.kFeatureUnavailable_VALUE);
+
+        PrepareBattleRequest dualGuardHardReq = f.prepareRequest(301L, 9012L).toBuilder()
+                .setBattleConfigId(112)
+                .setMatchMode(MatchMode.MATCH_MODE_PVE_SOLO_VALUE)
+                .build();
+        CompletableFuture<PrepareBattleResponse> dualBlockedFut = f.battle.prepare(dualGuardHardReq);
+        f.drain();
+        assertThat(dualBlockedFut.join().getErrorMessage().getId())
                 .isEqualTo(CommonErrorTip.common_error.kFeatureUnavailable_VALUE);
 
         // 2. 通关普通首领试炼(Dungeon 101: boss_trial_kind=1, difficulty=1) -> 持久解锁困难门禁
@@ -253,7 +262,7 @@ class CoreGameplayLoopParityTest {
         f.completeSaves(com.game.scene.world.PlayerRepository.ProgressResult.SAVED);
         assertThat(p.persistedState().getTrialJournal().getNormalBossTrialCleared()).isTrue();
 
-        // 现可正常备战困难首领试炼(Dungeon 102)，且快照满血满蓝无耗材
+        // 现可正常备战困难首领试炼(Dungeon 102 与双卫同阵 Dungeon 112)，且快照满血满蓝无耗材
         p.attributes().setHealth(0);
         CompletableFuture<PrepareBattleResponse> hardOkFut = f.battle.prepare(hardReq);
         f.drain();
@@ -264,12 +273,22 @@ class CoreGameplayLoopParityTest {
         f.cancel(301L, 9001L);
         f.drain();
 
+        p.attributes().setHealth(0);
+        CompletableFuture<PrepareBattleResponse> dualOkFut = f.battle.prepare(dualGuardHardReq);
+        f.drain();
+        PrepareBattleResponse dualOk = dualOkFut.join();
+        assertThat(dualOk.getErrorMessage().getId()).isZero();
+        assertThat(dualOk.getSnapshot().getBaseAttributes().getHealth()).isEqualTo(dualOk.getSnapshot().getMaxHealth());
+        f.cancel(301L, 9012L);
+        f.drain();
+
+        int activeRuleVersion = battleTables.ranked().rule().getRuleVersion();
         // 3. 正式人宠会武(PVP_TEAM, season_id=1, use_free_preset=false)：使用本人真实等级/职业快照，不走 30 级免费预设
         PrepareBattleRequest formalRankedReq = f.prepareRequest(301L, 9002L).toBuilder()
                 .setBattleConfigId(5)
                 .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
                 .setRankedContext(RankedMatchContext.newBuilder()
-                        .setSeasonId(1).setRuleVersion(1).setTeamSize(1)
+                        .setSeasonId(1).setRuleVersion(activeRuleVersion).setTeamSize(1)
                         .setConfigFingerprint(battleTables.ranked().configFingerprint())
                         .setUseFreePreset(false))
                 .build();
@@ -287,7 +306,7 @@ class CoreGameplayLoopParityTest {
                 .setBattleConfigId(110)
                 .setMatchMode(MatchMode.MATCH_MODE_POLARITY_5V5_VALUE)
                 .setRankedContext(RankedMatchContext.newBuilder()
-                        .setSeasonId(0).setRuleVersion(1).setTeamSize(5)
+                        .setSeasonId(0).setRuleVersion(activeRuleVersion).setTeamSize(5)
                         .setConfigFingerprint(battleTables.ranked().configFingerprint())
                         .setUseFreePreset(true)
                         .addMembers(RankedMemberLoadout.newBuilder()

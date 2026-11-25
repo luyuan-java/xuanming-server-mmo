@@ -50,6 +50,8 @@ public final class TrialJournalRules {
     public static final int COND_POLARITY_WIN = 10;
     public static final int COND_ARTIFACT_SHIELD_BREAK = 11;
     public static final int COND_ANTI_CONTROL_OR_SEASON_SKILL = 12;
+    public static final int COND_DUAL_GUARD_BREAK = 13;
+    public static final int COND_PERFECT_CLEAVE_PARRY = 14;
 
     private TrialJournalRules() {
     }
@@ -131,12 +133,17 @@ public final class TrialJournalRules {
                     && facts.getSelfTriggeredShieldBreak();
             case COND_ANTI_CONTROL_OR_SEASON_SKILL -> (won || settlement.getParticipated())
                     && facts.getSelfTriggeredAntiControlOrSeasonSkill();
+            case COND_DUAL_GUARD_BREAK -> won
+                    && (facts.getGuardStanceDispelled()
+                    || (facts.getTeamDealtPhysicalDirectDamage() && facts.getTeamDealtMagicDirectDamage()))
+                    && (facts.getBossGuardHealTotal() == 0L || facts.getHealInterruptBacklashCount() > 0);
+            case COND_PERFECT_CLEAVE_PARRY -> won && facts.getAllSelfCleavesParried();
             default -> false;
         };
     }
 
     public static boolean isValidConditionType(int conditionType) {
-        return conditionType >= COND_CLEAR && conditionType <= COND_ANTI_CONTROL_OR_SEASON_SKILL;
+        return conditionType >= COND_CLEAR && conditionType <= COND_PERFECT_CLEAVE_PARRY;
     }
 
     public static boolean isValidSealSlotKind(int slotKind) {

@@ -16,6 +16,8 @@ public final class BattleConstants {
 
     /** 一回合等效的挂钟毫秒数：rounds = max(1, ceil(ms / 6000))（{@code constants.h:15}）。 */
     public static final long ROUND_DURATION_MS = 6000;
+    /** 首领试炼手动行动收集窗口（18 秒，对齐 C++ {@code kBossTrialActionTimeoutMs}）。 */
+    public static final long BOSS_TRIAL_ACTION_TIMEOUT_MS = 18_000;
     /** {@code DungeonTable.time_limit} 为 0（或查不到副本行）时的回合上限（{@code constants.h:18}）。 */
     public static final int DEFAULT_MAX_ROUNDS = 300;
 
@@ -39,6 +41,52 @@ public final class BattleConstants {
     public static final int BOSS_TRIAL_KIND_VENOM = 4;
     public static final int BOSS_TRIAL_KIND_GUARDIAN_RESCUE = 5;
     public static final int BOSS_TRIAL_KIND_POLARITY_5V5 = 6;
+    public static final int BOSS_TRIAL_KIND_FESTIVAL_BEAST = 7;
+    public static final int BOSS_TRIAL_KIND_BREAK_DUAL_GUARD = 8;
+
+    public static boolean isBossTrialKind(int kind) {
+        return (kind >= BOSS_TRIAL_KIND_BREAK_REJUV && kind <= BOSS_TRIAL_KIND_VENOM)
+                || kind == BOSS_TRIAL_KIND_BREAK_DUAL_GUARD;
+    }
+
+    public static boolean isBossTrialOrRescueKind(int kind) {
+        return isBossTrialKind(kind) || kind == BOSS_TRIAL_KIND_GUARDIAN_RESCUE;
+    }
+
+    public static boolean isBossStanceTrialKind(int kind) {
+        return kind == BOSS_TRIAL_KIND_BREAK_STANCE || kind == BOSS_TRIAL_KIND_BREAK_DUAL_GUARD;
+    }
+
+    public static boolean isBossRejuvTrialKind(int kind) {
+        return kind == BOSS_TRIAL_KIND_BREAK_REJUV || kind == BOSS_TRIAL_KIND_BREAK_DUAL_GUARD;
+    }
+
+    // ---- 首领试炼 V2 怪物角色定位 ID、核心标尺与机制事件（镜像 turn_battle_constants.h） ----
+
+    public static final int BOSS_TRIAL_MONSTER_GUARD_REJUV = 102;
+    public static final int BOSS_TRIAL_MONSTER_GUARD_STANCE = 103;
+    public static final int BOSS_TRIAL_MONSTER_SUPPORT_BREAKER = 109;
+    public static final int BOSS_TRIAL_MONSTER_SUPPORT_DRUMMER = 110;
+
+    public static final long BOSS_TRIAL_SPLASH_KEEP_PCT = 60L;
+    public static final int BOSS_EXPOSED_FULL_PCT = 35;
+    public static final int BOSS_EXPOSED_PARTIAL_PCT = 20;
+    public static final int BOSS_PHASE_TWO_VULN_PCT = 15;
+    public static final int BOSS_MOMENTUM_MAX_STACKS = 3;
+    public static final int BOSS_MOMENTUM_PER_STACK_PCT = 12;
+    public static final long BOSS_HEAL_BACKLASH_PCT = 6L;
+    public static final long BOSS_DRUMMER_DEATH_SHOCK_PCT = 4L;
+    public static final long BOSS_DUAL_GUARD_HP_KEEP_PCT = 75L;
+
+    public static final int BOSS_MECHANIC_CLEAVE_PARRY_EXPOSE = 1;
+    public static final int BOSS_MECHANIC_HEAL_BACKLASH = 2;
+    public static final int BOSS_MECHANIC_STANCE_BREAK = 3;
+    public static final int BOSS_MECHANIC_SUPPORT_SHOCK = 4;
+    public static final int BOSS_MECHANIC_PHASE_TWO_ENRAGE = 5;
+    public static final int BOSS_MECHANIC_MOMENTUM_GAIN = 6;
+    public static final int BOSS_MECHANIC_BREAKER_SUNDER = 7;
+    public static final int BOSS_MECHANIC_REJUV_CLEANSE = 8;
+    public static final int BOSS_MECHANIC_ANTI_HEAL_DISHEARTEN = 9;
 
     // ---- 首领 / 护卫公开预告意图与状态 ----
 
@@ -50,6 +98,7 @@ public final class BattleConstants {
     public static final int TELEGRAPH_KIND_GUARD_BIND = 6;
     public static final int TELEGRAPH_KIND_BOSS_MAGIC_STRIKE = 7;
     public static final int TELEGRAPH_KIND_BOSS_VENOM_AOE = 8;
+    public static final int TELEGRAPH_KIND_FESTIVAL_HEAVY_STRIKE = 9;
 
     public static final int TELEGRAPH_STATUS_UPCOMING = 1;
     public static final int TELEGRAPH_STATUS_EXECUTING = 2;

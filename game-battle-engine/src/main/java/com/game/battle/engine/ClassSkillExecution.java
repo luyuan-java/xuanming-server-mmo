@@ -122,15 +122,22 @@ final class ClassSkillExecution {
                 BattleContext.FinalDamage damage = ctx.calculateFinalDamage(actor, target, baseDamage, attack,
                         skill.getAttackMultiplier(), skill.getDamageType());
                 double amount = damage.value() * ClassSkillRules.damageRankFactor(rank);
+                boolean isMultiTarget = skill.getMaxTargets() > 1;
                 if (ctx.configured.activeFor(actor,target)) {
                     var hit = new BattleEffect.Hit(skill.getId(),rank,BattleEffect.DIRECT,primary);
                     hit.critical = damage.critical();
+                    hit.isMultiTargetSkill = isMultiTarget;
                     ctx.configured.impact.damage(actor,target,amount,skill.getDamageType(),hit,com.game.proto.eBattleHitKind.BATTLE_HIT_NORMAL);
                 } else {
-                    long dealt = ctx.encounter.applyLegacyDamage(actor, target, amount, skill.getDamageType(), true);
+                    boolean isPrimaryTarget = primary == 0L || target.actorId() == primary;
+                    boolean[] splashReduced = new boolean[1];
+                    long dealt = ctx.encounter.applyLegacyDamage(actor, target, amount, skill.getDamageType(), true,
+                            isMultiTarget, isPrimaryTarget, splashReduced);
                     ctx.encounter.recordTrialDirectDamage(actor, target, skill.getDamageType(), dealt);
                     if (dealt != 0) ctx.encounter.recordEffectiveContribution(actor);
-                    event(eBattleEventType.BATTLE_EVENT_DAMAGE, actor, target, skill).setValue(dealt).setIsCritical(damage.critical());
+                    var dmgEv = event(eBattleEventType.BATTLE_EVENT_DAMAGE, actor, target, skill)
+                            .setValue(dealt).setIsCritical(damage.critical());
+                    if (splashReduced[0]) dmgEv.setIsSplashReduced(true);
                     if (target.health() == 0) ctx.handleDeath(target, actor.actorId());
                 }
             }
@@ -156,6 +163,8 @@ final class ClassSkillExecution {
         if (skill.getDispelCount() != 0) {
             if (actor.teamIndex() != target.teamIndex()) {
                 ctx.encounter.tryDispelBossStance(actor, target);
+            } else if (ctx.encounter.clearSunder(target.actorId())) {
+                ctx.encounter.recordEffectiveContribution(actor);
             }
             if (buffs.dispelDebuffs(target, skill.getDispelCount()) > 0) {
                 ctx.encounter.recordEffectiveContribution(actor);

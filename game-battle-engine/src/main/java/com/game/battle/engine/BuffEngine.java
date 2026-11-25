@@ -242,7 +242,7 @@ final class BuffEngine {
     }
 
     /** 删除该下标的条目并出 BUFF_REMOVE（source = 条目的施法者，不填 value）（{@code RemoveBuffAt}，{@code engine.cpp:1553-1564}）。 */
-    private void removeBuffAt(BattleUnit target, int buffIndex) {
+    void removeBuffAt(BattleUnit target, int buffIndex) {
         if (buffIndex < 0 || buffIndex >= target.state().getBuffsCount()) {
             return;
         }

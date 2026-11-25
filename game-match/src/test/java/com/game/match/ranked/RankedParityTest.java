@@ -251,7 +251,7 @@ class RankedParityTest {
 
     @Test
     void 试炼志上下文解析覆盖全三卷并隔离活动战与跨季排位() {
-        // 卷一普通/困难首领试炼 101..108
+        // 卷一普通/困难首领试炼 101..108 与困难双卫同阵 112
         for (int dungeonId = 101; dungeonId <= 108; dungeonId++) {
             var ctx = TABLES.trialContextFor(MatchModes.PVE_SOLO, dungeonId, null, null);
             assertThat(ctx).as("dungeon=%d", dungeonId).isPresent();
@@ -260,6 +260,11 @@ class RankedParityTest {
             assertThat(ctx.get().getSeasonId()).isZero();
             assertThat(ctx.get().getGuardMonsterTableId()).isPositive();
         }
+        var dualGuard = TABLES.trialContextFor(MatchModes.PVE_SOLO, 112, null, null);
+        assertThat(dualGuard).isPresent();
+        assertThat(dualGuard.get().getJournalEntryId()).isEqualTo(105);
+        assertThat(dualGuard.get().getSeasonId()).isZero();
+        assertThat(TABLES.bossTrialKind(112)).isEqualTo(8);
         // 卷三护卫救援(109) 与 物法易势 5V5(110) 搭配免费预设上下文（season_id=0, use_free_preset=true）保留试炼志上下文
         RankedMatchContext freePreset = RankedMatchContext.newBuilder().setUseFreePreset(true).build();
         var rescue = TABLES.trialContextFor(MatchModes.PVE_TEAM, 109, null, freePreset);

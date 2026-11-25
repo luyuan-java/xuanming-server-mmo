@@ -176,6 +176,9 @@ final class ConfiguredEffects {
             }
             battle.remove(target, victim.getBuffId());
         }
+        if (row.getBattleOp() == DISPEL_DEBUFF && ctx.encounter.clearSunder(target.actorId())) {
+            ctx.encounter.recordEffectiveContribution(source);
+        }
         if (row.getBattleOp() == DISPEL_BUFF && source.teamIndex() != target.teamIndex()) {
             ctx.encounter.tryDispelBossStance(source, target);
         }

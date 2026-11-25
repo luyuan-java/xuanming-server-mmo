@@ -35,6 +35,7 @@ final class BattleEffect {
         boolean critical;
         boolean primaryFocusBonus;
         boolean isPrimaryFocus;
+        boolean isMultiTargetSkill;
 
         Hit(int skill, int rank, int origin, long primary) {
             this.skill = skill;
@@ -54,6 +55,7 @@ final class BattleEffect {
             next.damageOrdinal = damageOrdinal;
             next.healOrdinal = healOrdinal;
             next.shieldOrdinal = shieldOrdinal;
+            next.isMultiTargetSkill = isMultiTargetSkill;
             return next;
         }
     }

@@ -176,6 +176,7 @@ final class ConfiguredBattle {
                 && subjectMaxTargets > 1
                 && explicitPrimarySelected
                 && targets.size() < subjectMaxTargets;
+        cast.isMultiTargetSkill = (actor.isPet() ? skill.getPetMaxTargets() : skill.getMaxTargets()) > 1;
         ctx.events().append(BATTLE_EVENT_SKILL, actor.actorId(), cast.primary).setSkillTableId(skill.getId())
                 .setHitKind(origin == MIRRORED ? BATTLE_HIT_MIRROR : BATTLE_HIT_NORMAL);
         if (origin == DIRECT || origin == CONFUSED) {

@@ -1,6 +1,7 @@
 package com.game.battle.engine;
 
 import com.game.proto.BattleEventItem;
+import com.game.proto.BattleTelegraphEntry;
 import com.game.proto.TurnResultS2C;
 import com.game.proto.eBattleEventType;
 
@@ -68,5 +69,17 @@ final class EventLog {
                 .setTargetId(targetId)
                 .setGroupId(groupId)
                 .setHitIndex(hitIndex);
+    }
+
+    int eventCount() {
+        return sink.getEventsCount();
+    }
+
+    BattleEventItem eventAt(int index) {
+        return sink.getEvents(index);
+    }
+
+    void addResolvedTelegraph(BattleTelegraphEntry entry) {
+        sink.addResolvedTelegraphs(entry);
     }
 }

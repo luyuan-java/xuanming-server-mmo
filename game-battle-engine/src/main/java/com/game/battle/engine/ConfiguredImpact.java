@@ -82,8 +82,11 @@ final class ConfiguredImpact {
             damage *= ctx.escalationDamagePct() / 100.0;
         }
         long remaining = CombatDamageRules.damageToHealth(damage,-1L);
+        boolean isPrimaryTarget = hit.primary == 0L || target.actorId() == hit.primary;
+        boolean[] splashReduced = new boolean[1];
         remaining = ctx.encounter.applyDamageModifiers(source, target, remaining, type,
-                direct && hit.origin == DIRECT && kind != BATTLE_HIT_COUNTER);
+                direct && hit.origin == DIRECT && kind != BATTLE_HIT_COUNTER,
+                hit.isMultiTargetSkill, isPrimaryTarget, splashReduced);
         var defenses = direct ? target.state().getBuffsList().stream().filter(e -> {
             var row = battle.row(e);
             return row != null && ConfiguredBattle.matches(row,type);
@@ -142,6 +145,9 @@ final class ConfiguredImpact {
                 .setInstigatorId(hit.instigator).setIsCritical(hit.critical);
         if (hit.isPrimaryFocus) {
             dmgEvent.setIsPrimaryFocus(true);
+        }
+        if (splashReduced[0]) {
+            dmgEvent.setIsSplashReduced(true);
         }
         if (dealt != 0) for (var entry : List.copyOf(target.state().getBuffsList())) {
             var row = battle.row(entry);

@@ -234,12 +234,22 @@ final class BattleContext {
 
     // ---- 战斗原语 ----
 
-    long effectivePhysicalAttack(BattleUnit actor) { return effective(actor, actor.physicalAttack(), ClassSkillCombat.Stat.PHYSICAL_ATTACK, BattleEffect.PHYSICAL_ATTACK); }
+    long effectivePhysicalAttack(BattleUnit actor) {
+        double multiplier = classSkills.statMultiplier(actor, ClassSkillCombat.Stat.PHYSICAL_ATTACK, 0)
+                * Math.max(0.1, 1 + configured.modifier(actor, BattleEffect.PHYSICAL_ATTACK));
+        if (actor.isBoss() && encounter.isBossDisheartened()) {
+            multiplier *= 0.85;
+        }
+        return multiplier == 1 ? actor.physicalAttack() : ClassSkillRules.floorRatio(actor.physicalAttack(), multiplier);
+    }
 
     long effectiveDefense(BattleUnit actor) {
         double multiplier = classSkills.statMultiplier(actor, ClassSkillCombat.Stat.DEFENSE, 0)
                 * Math.max(0.1, 1 + configured.modifier(actor, BattleEffect.DEFENSE)
                 + configured.modifier(actor, BattleEffect.SELF_GROWING_DEFENSE));
+        if (encounter.isActorSundered(actor.actorId())) {
+            multiplier *= 0.80;
+        }
         return multiplier == 1 ? actor.defense() : ClassSkillRules.floorRatio(actor.defense(), multiplier);
     }
 
@@ -366,5 +376,8 @@ final class BattleContext {
                 configured.remove(target,entry.getBuffId());
         }
         events.append(eBattleEventType.BATTLE_EVENT_DEATH, target.actorId(), target.actorId());
+        if (target.isMonster() && target.teamIndex() == 1 && BattleConstants.isBossTrialKind(encounter.bossTrialKind())) {
+            encounter.handleBossTrialMonsterDeath(target);
+        }
     }
 }

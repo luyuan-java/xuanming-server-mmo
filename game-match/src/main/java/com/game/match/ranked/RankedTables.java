@@ -171,6 +171,7 @@ public final class RankedTables {
             case 4 -> new TrialVariantKey(1, difficulty, "venom");
             case 5 -> new TrialVariantKey(2, difficulty, "rescue");
             case 6 -> new TrialVariantKey(3, difficulty, "polarity_5v5");
+            case 8 -> new TrialVariantKey(1, difficulty, "dual_guard");
             default -> null;
         };
     }
