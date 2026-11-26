@@ -1828,6 +1828,21 @@ public final class TurnBattleEngine {
                 }
             }
         }
+        // 论剑 V6 宿敌交手提示：仅投影本人视角的敌方宿敌，观众与第三方清空。
+        for (com.game.proto.RankedRivalryEncounter enc : request.getRankedContext().getRivalryEncountersList()) {
+            if (enc.getPlayerId() != viewerPlayerId || enc.getOpponentId() == 0L) {
+                continue;
+            }
+            BattleUnit opp = ctx.findActor(enc.getOpponentId());
+            if (opp == null || !opp.isPlayer() || opp.teamIndex() == selfOpt.teamIndex) {
+                continue;
+            }
+            com.game.proto.RankedRivalryEncounter.Builder dst = enc.toBuilder();
+            if (dst.getOpponentName().isEmpty() && !opp.state().getName().isEmpty()) {
+                dst.setOpponentName(opp.state().getName());
+            }
+            out.addSelfRivalries(dst.build());
+        }
         return out.build();
     }
 
@@ -3036,6 +3051,72 @@ public final class TurnBattleEngine {
                 }
             }
             settlement.setEndedOpponentStreak(maxEnemyStreak);
+        }
+        settlement.setPlayerDisplayName(actor.state().getName());
+        if (isRankedBattle() && playerWon && completedRounds() > 0) {
+            com.game.proto.RankedRivalryEncounter bestRevenge = null;
+            String bestRevengeName = "";
+            for (com.game.proto.RankedRivalryEncounter enc : request.getRankedContext().getRivalryEncountersList()) {
+                if (enc.getPlayerId() != playerId || !enc.getRevengeTarget() || enc.getOpponentId() == 0L) {
+                    continue;
+                }
+                BattleUnit opp = ctx.findActor(enc.getOpponentId());
+                if (opp == null || !opp.isPlayer() || opp.teamIndex() == actor.teamIndex()) {
+                    continue;
+                }
+                boolean better = bestRevenge == null
+                        || Integer.compareUnsigned(enc.getLosses(), bestRevenge.getLosses()) > 0
+                        || (enc.getLosses() == bestRevenge.getLosses()
+                                && Integer.compareUnsigned(enc.getWins(), bestRevenge.getWins()) > 0)
+                        || (enc.getLosses() == bestRevenge.getLosses()
+                                && enc.getWins() == bestRevenge.getWins()
+                                && Long.compareUnsigned(enc.getOpponentId(), bestRevenge.getOpponentId()) < 0);
+                if (better) {
+                    bestRevenge = enc;
+                    bestRevengeName = !enc.getOpponentName().isEmpty() ? enc.getOpponentName() : opp.state().getName();
+                }
+            }
+            if (bestRevenge != null) {
+                settlement.setRevengedRival(true)
+                        .setRevengedOpponentName(bestRevengeName)
+                        .setRevengedWinsAfter(bestRevenge.getWins() + 1)
+                        .setRevengedLossesAfter(bestRevenge.getLosses());
+            }
+        }
+        if (isRankedBattle() && !usesFreePreset()) {
+            if (actor.state().getEquipmentEffects().hasSeasonSeal()) {
+                settlement.setFinalSeasonSealId(actor.state().getEquipmentEffects().getSeasonSeal().getSealId());
+            }
+            int starterPetTableId = 0;
+            PrepPlayerOptions prepOpt = prepOptionsByPlayer.get(playerId);
+            if (prepOpt != null && prepOpt.selectedPetId != 0L) {
+                for (BattlePetSnapshot pet : prepOpt.availablePets) {
+                    if (pet.getPetId() == prepOpt.selectedPetId) {
+                        starterPetTableId = pet.getPetTableId();
+                        break;
+                    }
+                }
+            }
+            if (starterPetTableId == 0) {
+                for (BattleUnit other : ctx.units()) {
+                    if (other.isPet() && other.ownerPlayerId() == playerId && other.state().getPetTableId() != 0) {
+                        starterPetTableId = other.state().getPetTableId();
+                        break;
+                    }
+                }
+            }
+            settlement.setStarterPetTableId(starterPetTableId);
+            settlement.clearCoreSkillIds();
+            java.util.Set<Integer> seenSkills = new java.util.HashSet<>();
+            for (int sid : actor.state().getSkillTableIdsList()) {
+                if (sid == 0 || !seenSkills.add(sid)) {
+                    continue;
+                }
+                settlement.addCoreSkillIds(sid);
+                if (settlement.getCoreSkillIdsCount() >= 4) {
+                    break;
+                }
+            }
         }
 
         for (BattleUnit other : ctx.units()) {

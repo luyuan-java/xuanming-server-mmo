@@ -181,6 +181,23 @@ public final class GlobalMatchStore {
     }
     /** 内部咨询只读；缺票返回终止视图，不能在未知原身份时补写玩家占位。 */
     public GlobalTicketRow ticket(long player) { return tx(c -> db.findOneByPk(c,GlobalTicketRow.newBuilder().setPlayerId(player).build()).orElse(GlobalTicketRow.newBuilder().setPlayerId(player).setState(4).build())); }
+    /** 读取单人匹配票据对应的持久化 JoinQueueRequest 原件（用于恢复残局/奇谈的可选免费预设意愿）。 */
+    public java.util.Optional<com.game.proto.match.JoinQueueRequest> joinRequestForTicket(long player, String ticketId) {
+        if (ticketId == null || ticketId.isEmpty()) return java.util.Optional.empty();
+        return tx(c -> {
+            var ticket = db.findOneByPk(c, GlobalTicketRow.newBuilder().setPlayerId(player).build()).orElse(null);
+            if (ticket == null || !ticketId.equals(ticket.getTicket()) || ticket.getRequestId().isEmpty()) {
+                return java.util.Optional.empty();
+            }
+            var intent = db.findOneByPk(c, intentKey(player, ticket.getRequestId())).orElse(null);
+            if (intent == null || intent.getRequestPayload().isEmpty()) return java.util.Optional.empty();
+            try {
+                return java.util.Optional.of(com.game.proto.match.JoinQueueRequest.parseFrom(intent.getRequestPayload()));
+            } catch (com.google.protobuf.InvalidProtocolBufferException bad) {
+                throw new IllegalStateException("Join原件损坏", bad);
+            }
+        });
+    }
     public GlobalProfileRow profile(long player) { return tx(c -> db.findOneByPk(c,
             GlobalProfileRow.newBuilder().setPlayerId(player).build()).orElseThrow()); }
     public void plan(long player, GlobalProbeProfile profile, long expiry) {

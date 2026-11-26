@@ -1,0 +1,195 @@
+package com.game.battle.engine;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.game.proto.BaseAttributesComp;
+import com.game.proto.BattleAction;
+import com.game.proto.BattlePetSnapshot;
+import com.game.proto.BattlePlayerSnapshot;
+import com.game.proto.BattlePrepState;
+import com.game.proto.BattleStateS2C;
+import com.game.proto.CreateBattleRequest;
+import com.game.proto.CustomDuelRules;
+import com.game.proto.RankedMatchContext;
+import com.game.proto.TurnResultS2C;
+import com.game.proto.eBattleActionType;
+import com.game.proto.match.MatchMode;
+import com.game.table.ConfigTables;
+import com.game.table.RankedPresetTable;
+import java.nio.file.Path;
+import java.util.List;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+/** 战前每方 3 Ban（方案 A）权威闭环测试：表候选池、25 秒窗、队内聚合平票裁决、视角脱敏、对称禁用、A41 复制拦截与切磋纯禁招。 */
+final class PrepSkillBanBattleEngineTest {
+
+    private static ConfigTables tables;
+    private static TableBattleData data;
+
+    @BeforeAll
+    static void loadTables() throws Exception {
+        Path tablesDir = Path.of("../../xuanming-server-mmo-cpp/generated/tables").toAbsolutePath().normalize();
+        if (!java.nio.file.Files.isDirectory(tablesDir)) {
+            tablesDir = Path.of("../xuanming-server-mmo-cpp/generated/tables").toAbsolutePath().normalize();
+        }
+        tables = ConfigTables.load(tablesDir);
+        data = new TableBattleData(tables);
+    }
+
+    private static BattlePlayerSnapshot makePlayer(long playerId, long petId, int team, long speed,
+                                                   RankedPresetTable petPreset, boolean captain, int... skillIds) {
+        BattlePetSnapshot.Builder pet = BattlePetSnapshot.newBuilder()
+                .setPetId(petId)
+                .setOwnerPlayerId(playerId)
+                .setPetTableId(petPreset.getPetTableId())
+                .setPetName(petPreset.getName())
+                .setLevel(30)
+                .setMaxHealth(1200)
+                .setMaxMana(400)
+                .setPhysicalAttack(120)
+                .setMagicAttack(120)
+                .setDefense(60)
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(1200).setMana(400).setSpeed(speed));
+        BattlePlayerSnapshot.Builder player = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(playerId)
+                .setTeamIndex(team)
+                .setPlayerName("P" + playerId)
+                .setLevel(30)
+                .setActiveSeasonId(1)
+                .setIsTeamCaptain(captain)
+                .setMaxHealth(5000)
+                .setMaxMana(1500)
+                .setPhysicalAttack(300)
+                .setMagicAttack(300)
+                .setDefense(100)
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(5000).setMana(1500).setSpeed(speed))
+                .addPets(pet);
+        for (int sid : skillIds) {
+            player.addSkillTableIds(sid).putSkillRanks(sid, 1);
+        }
+        return player.build();
+    }
+
+    @Test
+    void prepThreeSkillBanFullFlowPrivacyCaptainTiebreakAndEnforcement() {
+        List<Integer> s1Pool = data.banEligibleSkillIds(1);
+        assertThat(s1Pool).hasSize(55);
+        assertThat(s1Pool).doesNotContain(10002, 10006, 10010, 10015, 10018, 11011, 11012, 11015);
+        assertThat(s1Pool).contains(10003, 10008, 10019, 10041, 15001);
+        assertThat(s1Pool).doesNotContain(15101);
+
+        RankedPresetTable petA = tables.rankedPreset().find(201).orElseThrow();
+        BattlePlayerSnapshot pA1 = makePlayer(6501L, 96001L, 0, 260L, petA, true, 10002, 10003, 10008, 10019);
+        BattlePlayerSnapshot pA2 = makePlayer(6502L, 96002L, 0, 250L, petA, false, 10002, 10003);
+        BattlePlayerSnapshot pB1 = makePlayer(6503L, 96003L, 1, 240L, petA, true, 10002, 10003, 10041);
+
+        CreateBattleRequest req = CreateBattleRequest.newBuilder()
+                .setBattleId(9901L)
+                .setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setSeed(777L)
+                .setRankedContext(RankedMatchContext.newBuilder()
+                        .setSeasonId(1)
+                        .setSeasonKey("s1")
+                        .setRuleVersion(2)
+                        .setTeamSize(2)
+                        .setUseFreePreset(false)
+                        .setSkillBanSlotsPerTeam(3)
+                        .build())
+                .addPlayers(pA1)
+                .addPlayers(pA2)
+                .addPlayers(pB1)
+                .build();
+
+        TurnBattleEngine engine = ((BattleStart.Started) TurnBattleEngine.start(req, data)).engine();
+        assertThat(engine.isInPrepPhase()).isTrue();
+        assertThat(engine.prepDurationSeconds()).isEqualTo(BattleConstants.TACTICAL_PREP_WITH_BAN_DURATION_SECONDS);
+        assertThat(engine.prepTimeoutMs()).isEqualTo(BattleConstants.TACTICAL_PREP_WITH_BAN_TIMEOUT_MS);
+
+        // 非候选（基础技能 10002）与重复提交必须被拒
+        assertThat(engine.updateBattlePrep(6501L, 0, 0L, false, true, List.of(10002)).errorTip())
+                .isEqualTo(ActionChecks.INVALID_PARAMETER);
+        assertThat(engine.updateBattlePrep(6501L, 0, 0L, false, true, List.of(10003, 10003)).errorTip())
+                .isEqualTo(ActionChecks.INVALID_PARAMETER);
+
+        // A队队长提名 [10003, 10008, 10019]；A队队员提名 [10003, 10012, 10016]
+        // 汇总：10003(2票) 第一；槽位1平票 10008(队长) 胜 10012(非队长) 第二；10012(槽位1) 胜 10019(槽位2) 第三
+        assertThat(engine.updateBattlePrep(6501L, 0, 0L, true, true, List.of(10003, 10008, 10019)).errorTip()).isZero();
+        assertThat(engine.updateBattlePrep(6502L, 0, 0L, true, true, List.of(10003, 10012, 10016)).errorTip()).isZero();
+
+        // 严格同队脱敏：B队和观众均不得看到 A 队提名或生效禁招
+        BattlePrepState bPrep = engine.prepStateForViewer(6503L, 12345L);
+        assertThat(bPrep.getTeamEffectiveBanSkillIdsList()).isEmpty();
+        assertThat(bPrep.getTeamStatesList()).allSatisfy(ts -> assertThat(ts.getTeamIndex()).isEqualTo(1));
+        BattlePrepState obsPrep = engine.prepStateForViewer(0L, 12345L);
+        assertThat(obsPrep.getTeamEffectiveBanSkillIdsList()).isEmpty();
+        assertThat(obsPrep.getTeamStatesList()).isEmpty();
+        assertThat(obsPrep.getBanCandidateSkillIdsList()).isEmpty();
+
+        // B队提名 [10003, 15001]（与 A 队撞车 10003）并锁定
+        assertThat(engine.updateBattlePrep(6503L, 0, 0L, true, true, List.of(10003, 15001)).errorTip()).isZero();
+        assertThat(engine.allPrepPlayersReady()).isTrue();
+        assertThat(engine.finalizePrepPhase()).isTrue();
+
+        BattleStateS2C state = engine.buildStateSnapshot();
+        assertThat(state.getTeamABannedSkillIdsList()).containsExactly(10003, 10008, 10012);
+        assertThat(state.getTeamBBannedSkillIdsList()).containsExactly(10003, 15001);
+        assertThat(state.getBannedSkillIdsList()).containsExactly(10003, 10008, 10012, 15001);
+
+        // 双方均无法施放被禁技能 10003（返回 kSkillBannedInBattle），但基础技 10002 可用
+        BattleAction cast10003 = BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                .setSkillTableId(10003)
+                .setTargetId(6503L)
+                .build();
+        BattleAction cast10002 = BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                .setSkillTableId(10002)
+                .setTargetId(6503L)
+                .build();
+        assertThat(engine.validateAction(6501L, cast10003)).isEqualTo(ActionChecks.SKILL_BANNED_IN_BATTLE);
+        assertThat(engine.validateAction(6503L, cast10003.toBuilder().setTargetId(6501L).build()))
+                .isEqualTo(ActionChecks.SKILL_BANNED_IN_BATTLE);
+        assertThat(engine.validateAction(6501L, cast10002)).isEqualTo(ActionChecks.SUCCESS);
+
+        // A41 玄镜映法(10041) 对 6502(仅学了 10002 与被禁的 10003) 施放时绝不复制到被禁技能 10003
+        BattleAction castCopy = BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                .setSkillTableId(10041)
+                .setTargetId(6502L)
+                .build();
+        assertThat(engine.validateAction(6503L, castCopy)).isEqualTo(ActionChecks.SUCCESS);
+        engine.submitAction(6501L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        engine.submitAction(6502L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        engine.submitAction(6503L, castCopy);
+        TurnResultS2C r1 = engine.resolveCurrentRound();
+        assertThat(r1.getEventsList()).noneMatch(e -> e.getSkillTableId() == 10003);
+
+        // 自定义切磋：免费模板与 3 Ban 互斥必须被拒；自养纯 3 Ban 可正常开局且仅开禁招不开换宠/换印
+        CreateBattleRequest badDuel = CreateBattleRequest.newBuilder()
+                .setBattleId(9902L)
+                .setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_CHALLENGE_VALUE)
+                .setSeed(888L)
+                .setCustomDuelRules(CustomDuelRules.newBuilder()
+                        .setUseFreePreset(true).setSkillBanSlotsPerTeam(3).build())
+                .addPlayers(pA1)
+                .addPlayers(pB1)
+                .build();
+        assertThat(TurnBattleEngine.start(badDuel, data)).isInstanceOf(BattleStart.Rejected.class);
+
+        CreateBattleRequest okDuel = badDuel.toBuilder()
+                .setBattleId(9903L)
+                .setCustomDuelRules(CustomDuelRules.newBuilder()
+                        .setUseFreePreset(false).setSkillBanSlotsPerTeam(3).build())
+                .build();
+        TurnBattleEngine duelEngine = ((BattleStart.Started) TurnBattleEngine.start(okDuel, data)).engine();
+        assertThat(duelEngine.isInPrepPhase()).isTrue();
+        assertThat(duelEngine.prepDurationSeconds()).isEqualTo(BattleConstants.TACTICAL_PREP_WITH_BAN_DURATION_SECONDS);
+        BattlePrepState duelPrep = duelEngine.prepStateForViewer(6501L, 99999L);
+        assertThat(duelPrep.getSkillBanSlotsPerTeam()).isEqualTo(3);
+        assertThat(duelPrep.getSelfAvailableSealsList()).isEmpty();
+        assertThat(duelPrep.getSelfAvailablePetsList()).isEmpty();
+    }
+}

@@ -2,9 +2,11 @@ package com.game.match.ranked;
 
 import com.game.common.token.NetworkProbes;
 import com.game.match.feature.pb.MatchRankedBattleRow;
+import com.game.match.feature.pb.MatchRankedFeaturedBuildRow;
 import com.game.match.feature.pb.MatchRankedPlayerPrefsRow;
 import com.game.match.feature.pb.MatchRankedPlayerSeasonRow;
 import com.game.match.feature.pb.MatchRankedRewardRow;
+import com.game.match.feature.pb.MatchRankedRivalryRow;
 import com.game.match.feature.pb.MatchRankedSeasonRow;
 import com.game.pbmysql.PbMysql;
 import com.game.proto.BattleParticipationFact;
@@ -12,15 +14,18 @@ import com.game.proto.BattleSettlementData;
 import com.game.proto.RankedMatchContext;
 import com.game.proto.RankedMemberLoadout;
 import com.game.proto.RankedPresetSelection;
+import com.game.proto.RankedRivalryEncounter;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.contracts.kafka.BattleResultTeam;
 import com.game.proto.eBattleOutcome;
 import com.game.proto.match.RankedBattleSettlementView;
 import com.game.proto.match.RankedCosmeticLoadout;
+import com.game.proto.match.RankedFeaturedBuildView;
 import com.game.proto.match.RankedMatchRatingStatus;
 import com.game.proto.match.RankedPlayerSeasonSummary;
 import com.game.proto.match.RankedRewardEntitlement;
 import com.game.proto.match.RankedRewardKind;
+import com.game.proto.match.RankedRivalrySummary;
 import com.game.proto.match.RankedSeasonInfo;
 import com.game.proto.match.RankedSeasonState;
 import com.game.proto.match.RankedTier;
@@ -57,7 +62,9 @@ public final class RankedStore {
                               MatchRankedPlayerPrefsRow prefs,
                               List<MatchRankedRewardRow> entitlements,
                               List<MatchRankedPlayerSeasonRow> history,
-                              List<MatchRankedSeasonRow> pastSeasons) {
+                              List<MatchRankedSeasonRow> pastSeasons,
+                              List<RankedFeaturedBuildView> featuredBuilds,
+                              List<RankedRivalrySummary> topRivals) {
     }
 
     public record SettlementInput(long playerId, long battleId, int seasonId, int teamSize,
@@ -109,7 +116,9 @@ public final class RankedStore {
                 history = readPlayerHistory(c, playerId, current.getSeasonId());
                 pastSeasons = readPastSeasons(c, current.getSeasonId());
             }
-            return new ProfileData(current, progress, prefs, rewards, history, pastSeasons);
+            List<RankedFeaturedBuildView> featuredBuilds = readTopFeaturedBuilds(c, current.getSeasonId(), 5);
+            List<RankedRivalrySummary> topRivals = readTopRivals(c, current.getSeasonId(), playerId, 8);
+            return new ProfileData(current, progress, prefs, rewards, history, pastSeasons, featuredBuilds, topRivals);
         }
     }
 
@@ -165,6 +174,12 @@ public final class RankedStore {
             if (ruleBanSlots > 0 && hasMemberRating
                     && minRatingCenti >= Integer.toUnsignedLong(tables.rule().getSkillBanMinRatingCenti())) {
                 ctx.setSkillBanSlotsPerTeam(ruleBanSlots);
+            }
+            if (roster != null && roster.size() >= 2) {
+                int split = Math.min(Math.max(1, teamSize), roster.size() / 2);
+                List<Long> sideA = roster.subList(0, split);
+                List<Long> sideB = roster.subList(split, roster.size());
+                ctx.addAllRivalryEncounters(loadRivalryEncountersForRoster(c, current.getSeasonId(), sideA, sideB));
             }
             return Optional.of(ctx.build());
         }
@@ -465,6 +480,26 @@ public final class RankedStore {
             preSeasonRows.put(pid, readPlayerSeason(c, seasonId, pid)
                     .orElseGet(() -> defaultProgress(seasonId, pid, preCenti.getOrDefault(pid, RankedTables.INITIAL_RATING_CENTI))));
         }
+        // 论剑 V6：预读双方历史宿敌行，供本局雪耻复仇判定与同事务更新。
+        record RivalryPair(long playerId, long opponentId) {}
+        Map<RivalryPair, MatchRankedRivalryRow> priorRivalries = new HashMap<>();
+        if (event.getTotalRounds() != 0) {
+            List<RivalryPair> pairs = new ArrayList<>();
+            for (long pid : sortedPlayers) {
+                int myTeam = teamByPlayer.getOrDefault(pid, 0);
+                for (long oppId : sortedPlayers) {
+                    if (teamByPlayer.getOrDefault(oppId, 0) != myTeam) {
+                        pairs.add(new RivalryPair(pid, oppId));
+                    }
+                }
+            }
+            pairs.sort(java.util.Comparator.<RivalryPair>comparingLong(RivalryPair::playerId)
+                    .thenComparingLong(RivalryPair::opponentId));
+            for (RivalryPair pair : pairs) {
+                readRivalryRow(c, seasonId, pair.playerId(), pair.opponentId())
+                        .ifPresent(row -> priorRivalries.put(pair, row));
+            }
+        }
         for (long playerId : sortedPlayers) {
             Optional<MatchRankedBattleRow> existing = readBattleRow(c, playerId, event.getBattleId());
             if (existing.isPresent()) {
@@ -583,6 +618,57 @@ public final class RankedStore {
             if (qualifiedAfter) {
                 qualifiedScores.put(playerId, afterRating);
             }
+            boolean revengedRival = false;
+            String revengedOpponentName = "";
+            int revengedWinsAfter = 0;
+            int revengedLossesAfter = 0;
+            if (event.getTotalRounds() != 0) {
+                boolean isDraw = event.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_DRAW;
+                long bestRevengeOpp = 0L;
+                MatchRankedRivalryRow bestRevengePrior = null;
+                for (long oppId : sortedPlayers) {
+                    if (teamByPlayer.getOrDefault(oppId, 0) == teamIndex) {
+                        continue;
+                    }
+                    MatchRankedRivalryRow prior = priorRivalries.get(new RivalryPair(playerId, oppId));
+                    BattleSettlementData oppSt = settlementsByPlayer.get(oppId);
+                    String oppName = (oppSt != null && !oppSt.getPlayerDisplayName().isEmpty())
+                            ? oppSt.getPlayerDisplayName()
+                            : (prior != null ? prior.getOpponentName() : "");
+                    if (playerWon && isRivalryRevengeTarget(prior)) {
+                        boolean better = bestRevengePrior == null
+                                || Integer.compareUnsigned(prior.getLosses(), bestRevengePrior.getLosses()) > 0
+                                || (prior.getLosses() == bestRevengePrior.getLosses()
+                                        && Integer.compareUnsigned(prior.getWins(), bestRevengePrior.getWins()) > 0)
+                                || (prior.getLosses() == bestRevengePrior.getLosses()
+                                        && prior.getWins() == bestRevengePrior.getWins()
+                                        && Long.compareUnsigned(oppId, bestRevengeOpp) < 0);
+                        if (better) {
+                            bestRevengeOpp = oppId;
+                            bestRevengePrior = prior;
+                            revengedOpponentName = oppName;
+                        }
+                    }
+                    MatchRankedRivalryRow nextRivalry = buildNextRivalryRow(seasonId, playerId, oppId, oppName,
+                            prior, isDraw, playerWon, event.getBattleId(), nowMs);
+                    upsertRivalryRow(c, nextRivalry);
+                }
+                BattleSettlementData selfSt = settlementsByPlayer.get(playerId);
+                if (bestRevengePrior != null) {
+                    revengedRival = true;
+                    revengedWinsAfter = bestRevengePrior.getWins() + 1;
+                    revengedLossesAfter = bestRevengePrior.getLosses();
+                } else if (playerWon && selfSt != null && selfSt.getRevengedRival()) {
+                    revengedRival = true;
+                    revengedOpponentName = selfSt.getRevengedOpponentName();
+                    revengedWinsAfter = selfSt.getRevengedWinsAfter();
+                    revengedLossesAfter = selfSt.getRevengedLossesAfter();
+                }
+                if (!ctx.getUseFreePreset() && participated && selfSt != null) {
+                    upsertFeaturedBuild(c, seasonId, rule.getTierQingfengCenti(), event.getBattleId(),
+                            playerId, selfSt, afterRating, teamSize, event.getTotalRounds(), playerWon, nowMs);
+                }
+            }
             RankedTier tierAfter = tables.tierFor(afterRating, qualifiedAfter);
             RankedBattleSettlementView view = RankedBattleSettlementView.newBuilder()
                     .setBattleId(event.getBattleId())
@@ -607,6 +693,10 @@ public final class RankedStore {
                     .setPetPresetId(petPresetId)
                     .setWinStreakAfter(curStreak)
                     .setEndedOpponentStreak(endedOpponentStreak)
+                    .setRevengedRival(revengedRival)
+                    .setRevengedOpponentName(revengedOpponentName)
+                    .setRevengedWinsAfter(revengedWinsAfter)
+                    .setRevengedLossesAfter(revengedLossesAfter)
                     .build();
             byte[] rewardBlob = NetworkProbes.bytes(RankedBattleSettlementView.newBuilder()
                     .addAllNewlyUnlockedRewards(unlocked).build());
@@ -634,6 +724,10 @@ public final class RankedStore {
                     .setPetPresetId(petPresetId)
                     .setWinStreakAfter(curStreak)
                     .setEndedOpponentStreak(endedOpponentStreak)
+                    .setRevengedRival(revengedRival)
+                    .setRevengedOpponentName(revengedOpponentName)
+                    .setRevengedWinsAfter(revengedWinsAfter)
+                    .setRevengedLossesAfter(revengedLossesAfter)
                     .build());
             views.put(playerId, view);
         }
@@ -1261,7 +1355,7 @@ public final class RankedStore {
                 "SELECT player_id,battle_id,season_id,team_size,status,outcome,player_team_index,total_rounds,participated,fled,"
                         + "rating_before_centi,rating_after_centi,rating_delta_centi,tier_before,tier_after,newly_qualified,"
                         + "season_valid_matches_after,newly_unlocked_rewards_proto,settled_at_ms,character_preset_id,pet_preset_id,"
-                        + "win_streak_after,ended_opponent_streak "
+                        + "win_streak_after,ended_opponent_streak,revenged_rival,revenged_opponent_name,revenged_wins_after,revenged_losses_after "
                         + "FROM match_ranked_battle WHERE player_id=? AND battle_id=?")) {
             ps.setObject(1, PbMysql.uint64(playerId));
             ps.setObject(2, PbMysql.uint64(battleId));
@@ -1276,7 +1370,7 @@ public final class RankedStore {
                 "SELECT player_id,battle_id,season_id,team_size,status,outcome,player_team_index,total_rounds,participated,fled,"
                         + "rating_before_centi,rating_after_centi,rating_delta_centi,tier_before,tier_after,newly_qualified,"
                         + "season_valid_matches_after,newly_unlocked_rewards_proto,settled_at_ms,character_preset_id,pet_preset_id,"
-                        + "win_streak_after,ended_opponent_streak "
+                        + "win_streak_after,ended_opponent_streak,revenged_rival,revenged_opponent_name,revenged_wins_after,revenged_losses_after "
                         + "FROM match_ranked_battle WHERE player_id=? ORDER BY settled_at_ms DESC,battle_id DESC LIMIT 1")) {
             ps.setObject(1, PbMysql.uint64(playerId));
             try (ResultSet rs = ps.executeQuery()) {
@@ -1290,8 +1384,8 @@ public final class RankedStore {
                 "INSERT INTO match_ranked_battle(player_id,battle_id,season_id,team_size,status,outcome,player_team_index,total_rounds,participated,fled,"
                         + "rating_before_centi,rating_after_centi,rating_delta_centi,tier_before,tier_after,newly_qualified,"
                         + "season_valid_matches_after,newly_unlocked_rewards_proto,settled_at_ms,character_preset_id,pet_preset_id,"
-                        + "win_streak_after,ended_opponent_streak) "
-                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                        + "win_streak_after,ended_opponent_streak,revenged_rival,revenged_opponent_name,revenged_wins_after,revenged_losses_after) "
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
             ins.setObject(1, PbMysql.uint64(row.getPlayerId()));
             ins.setObject(2, PbMysql.uint64(row.getBattleId()));
             ins.setInt(3, row.getSeasonId());
@@ -1315,12 +1409,17 @@ public final class RankedStore {
             ins.setInt(21, row.getPetPresetId());
             ins.setInt(22, row.getWinStreakAfter());
             ins.setInt(23, row.getEndedOpponentStreak());
+            ins.setBoolean(24, row.getRevengedRival());
+            ins.setString(25, row.getRevengedOpponentName());
+            ins.setInt(26, row.getRevengedWinsAfter());
+            ins.setInt(27, row.getRevengedLossesAfter());
             ins.executeUpdate();
         }
     }
 
     private static MatchRankedBattleRow scanBattleRow(ResultSet rs) throws SQLException {
         byte[] blob = rs.getBytes(18);
+        String revName = rs.getString(25);
         return MatchRankedBattleRow.newBuilder()
                 .setPlayerId(Long.parseUnsignedLong(rs.getString(1)))
                 .setBattleId(Long.parseUnsignedLong(rs.getString(2)))
@@ -1345,6 +1444,10 @@ public final class RankedStore {
                 .setPetPresetId(rs.getInt(21))
                 .setWinStreakAfter(rs.getInt(22))
                 .setEndedOpponentStreak(rs.getInt(23))
+                .setRevengedRival(rs.getBoolean(24))
+                .setRevengedOpponentName(revName == null ? "" : revName)
+                .setRevengedWinsAfter(rs.getInt(26))
+                .setRevengedLossesAfter(rs.getInt(27))
                 .build();
     }
 
@@ -1374,7 +1477,11 @@ public final class RankedStore {
                 .setCharacterPresetId(row.getCharacterPresetId())
                 .setPetPresetId(row.getPetPresetId())
                 .setWinStreakAfter(row.getWinStreakAfter())
-                .setEndedOpponentStreak(row.getEndedOpponentStreak());
+                .setEndedOpponentStreak(row.getEndedOpponentStreak())
+                .setRevengedRival(row.getRevengedRival())
+                .setRevengedOpponentName(row.getRevengedOpponentName())
+                .setRevengedWinsAfter(row.getRevengedWinsAfter())
+                .setRevengedLossesAfter(row.getRevengedLossesAfter());
         if (!row.getNewlyUnlockedRewardsProto().isEmpty()) {
             try {
                 RankedBattleSettlementView holder = RankedBattleSettlementView.parseFrom(row.getNewlyUnlockedRewardsProto());
@@ -1427,5 +1534,387 @@ public final class RankedStore {
         } catch (SQLException rollback) {
             primary.addSuppressed(rollback);
         }
+    }
+
+    // ---- 论剑 V6：宿敌恩怨账本与问道名局热门流派（对齐 Go ranked.go） ----
+
+    /** 允许全服玩家观摩「问道名局」高段热门流派代表战报（fail-closed：查 featured_battle_id 索引）。 */
+    public boolean isFeaturedRankedReplayAllowed(long battleId) {
+        if (battleId == 0L) {
+            return false;
+        }
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT 1 FROM match_ranked_featured_build WHERE featured_battle_id=? LIMIT 1")) {
+            ps.setObject(1, PbMysql.uint64(battleId));
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+
+    private static boolean isRivalryRevengeTarget(MatchRankedRivalryRow row) {
+        if (row == null || (row.getWins() + row.getLosses()) == 0) {
+            return false;
+        }
+        return row.getLastOutcome() == 2 || Integer.compareUnsigned(row.getLosses(), row.getWins()) > 0;
+    }
+
+    private static MatchRankedRivalryRow buildNextRivalryRow(int seasonId, long playerId, long opponentId,
+                                                             String opponentName, MatchRankedRivalryRow prior,
+                                                             boolean isDraw, boolean playerWon,
+                                                             long battleId, long nowMs) {
+        int wins = prior != null ? prior.getWins() : 0;
+        int losses = prior != null ? prior.getLosses() : 0;
+        int draws = prior != null ? prior.getDraws() : 0;
+        String name = (opponentName != null && !opponentName.isEmpty())
+                ? opponentName
+                : (prior != null ? prior.getOpponentName() : "");
+        int lastOutcome;
+        if (isDraw) {
+            draws++;
+            lastOutcome = 3;
+        } else if (playerWon) {
+            wins++;
+            lastOutcome = 1;
+        } else {
+            losses++;
+            lastOutcome = 2;
+        }
+        return MatchRankedRivalryRow.newBuilder()
+                .setSeasonId(seasonId)
+                .setPlayerId(playerId)
+                .setOpponentId(opponentId)
+                .setOpponentName(name)
+                .setWins(wins)
+                .setLosses(losses)
+                .setDraws(draws)
+                .setLastOutcome(lastOutcome)
+                .setLastBattleId(battleId)
+                .setUpdatedMs(nowMs)
+                .build();
+    }
+
+    private Optional<MatchRankedRivalryRow> readRivalryRow(Connection c, int seasonId, long playerId, long opponentId) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT season_id,player_id,opponent_id,opponent_name,wins,losses,draws,last_outcome,last_battle_id,updated_ms "
+                        + "FROM match_ranked_rivalry WHERE season_id=? AND player_id=? AND opponent_id=?")) {
+            ps.setInt(1, seasonId);
+            ps.setObject(2, PbMysql.uint64(playerId));
+            ps.setObject(3, PbMysql.uint64(opponentId));
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(scanRivalryRow(rs)) : Optional.empty();
+            }
+        }
+    }
+
+    private void upsertRivalryRow(Connection c, MatchRankedRivalryRow row) throws SQLException {
+        try (PreparedStatement upd = c.prepareStatement(
+                "UPDATE match_ranked_rivalry SET opponent_name=?,wins=?,losses=?,draws=?,last_outcome=?,last_battle_id=?,updated_ms=? "
+                        + "WHERE season_id=? AND player_id=? AND opponent_id=?")) {
+            upd.setString(1, row.getOpponentName());
+            upd.setInt(2, row.getWins());
+            upd.setInt(3, row.getLosses());
+            upd.setInt(4, row.getDraws());
+            upd.setInt(5, row.getLastOutcome());
+            upd.setObject(6, PbMysql.uint64(row.getLastBattleId()));
+            upd.setObject(7, PbMysql.uint64(row.getUpdatedMs()));
+            upd.setInt(8, row.getSeasonId());
+            upd.setObject(9, PbMysql.uint64(row.getPlayerId()));
+            upd.setObject(10, PbMysql.uint64(row.getOpponentId()));
+            if (upd.executeUpdate() > 0) {
+                return;
+            }
+        }
+        try (PreparedStatement ins = c.prepareStatement(
+                "INSERT INTO match_ranked_rivalry(season_id,player_id,opponent_id,opponent_name,wins,losses,draws,last_outcome,last_battle_id,updated_ms) "
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?)")) {
+            ins.setInt(1, row.getSeasonId());
+            ins.setObject(2, PbMysql.uint64(row.getPlayerId()));
+            ins.setObject(3, PbMysql.uint64(row.getOpponentId()));
+            ins.setString(4, row.getOpponentName());
+            ins.setInt(5, row.getWins());
+            ins.setInt(6, row.getLosses());
+            ins.setInt(7, row.getDraws());
+            ins.setInt(8, row.getLastOutcome());
+            ins.setObject(9, PbMysql.uint64(row.getLastBattleId()));
+            ins.setObject(10, PbMysql.uint64(row.getUpdatedMs()));
+            ins.executeUpdate();
+        }
+    }
+
+    private List<RankedRivalryEncounter> loadRivalryEncountersForRoster(Connection c, int seasonId,
+                                                                        List<Long> sideA, List<Long> sideB) throws SQLException {
+        List<RankedRivalryEncounter> out = new ArrayList<>();
+        for (long a : sideA) {
+            for (long b : sideB) {
+                appendRivalryEncounter(c, seasonId, a, b, out);
+                appendRivalryEncounter(c, seasonId, b, a, out);
+            }
+        }
+        out.sort(java.util.Comparator.comparingLong(RankedRivalryEncounter::getPlayerId)
+                .thenComparingLong(RankedRivalryEncounter::getOpponentId));
+        return out;
+    }
+
+    private void appendRivalryEncounter(Connection c, int seasonId, long playerId, long opponentId,
+                                        List<RankedRivalryEncounter> out) throws SQLException {
+        Optional<MatchRankedRivalryRow> row = readRivalryRow(c, seasonId, playerId, opponentId);
+        if (row.isEmpty()) {
+            return;
+        }
+        MatchRankedRivalryRow r = row.get();
+        if (r.getWins() + r.getLosses() == 0) {
+            return;
+        }
+        out.add(RankedRivalryEncounter.newBuilder()
+                .setPlayerId(r.getPlayerId())
+                .setOpponentId(r.getOpponentId())
+                .setOpponentName(r.getOpponentName())
+                .setWins(r.getWins())
+                .setLosses(r.getLosses())
+                .setRevengeTarget(isRivalryRevengeTarget(r))
+                .build());
+    }
+
+    private List<RankedRivalrySummary> readTopRivals(Connection c, int seasonId, long playerId, int limit) throws SQLException {
+        List<RankedRivalrySummary> out = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT season_id,player_id,opponent_id,opponent_name,wins,losses,draws,last_outcome,last_battle_id,updated_ms "
+                        + "FROM match_ranked_rivalry WHERE season_id=? AND player_id=? "
+                        + "ORDER BY (wins+losses) DESC,updated_ms DESC LIMIT ?")) {
+            ps.setInt(1, seasonId);
+            ps.setObject(2, PbMysql.uint64(playerId));
+            ps.setInt(3, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    MatchRankedRivalryRow r = scanRivalryRow(rs);
+                    if (r.getWins() + r.getLosses() + r.getDraws() == 0) {
+                        continue;
+                    }
+                    out.add(RankedRivalrySummary.newBuilder()
+                            .setOpponentId(r.getOpponentId())
+                            .setOpponentName(r.getOpponentName())
+                            .setWins(r.getWins())
+                            .setLosses(r.getLosses())
+                            .setDraws(r.getDraws())
+                            .setLastOutcome(r.getLastOutcome())
+                            .setLastBattleId(r.getLastBattleId())
+                            .setUpdatedMs(r.getUpdatedMs())
+                            .build());
+                }
+            }
+        }
+        return out;
+    }
+
+    private static MatchRankedRivalryRow scanRivalryRow(ResultSet rs) throws SQLException {
+        String name = rs.getString(4);
+        return MatchRankedRivalryRow.newBuilder()
+                .setSeasonId(rs.getInt(1))
+                .setPlayerId(Long.parseUnsignedLong(rs.getString(2)))
+                .setOpponentId(Long.parseUnsignedLong(rs.getString(3)))
+                .setOpponentName(name == null ? "" : name)
+                .setWins(rs.getInt(5))
+                .setLosses(rs.getInt(6))
+                .setDraws(rs.getInt(7))
+                .setLastOutcome(rs.getInt(8))
+                .setLastBattleId(Long.parseUnsignedLong(rs.getString(9)))
+                .setUpdatedMs(Long.parseUnsignedLong(rs.getString(10)))
+                .build();
+    }
+
+    private record CanonicalBuild(String buildKey, String skillCsv, List<Integer> skills) {}
+
+    private static CanonicalBuild canonicalBuild(int sealId, int petTableId, List<Integer> rawSkills) {
+        java.util.TreeSet<Integer> sorted = new java.util.TreeSet<>();
+        if (rawSkills != null) {
+            for (int sid : rawSkills) {
+                if (sid > 0) {
+                    sorted.add(sid);
+                }
+            }
+        }
+        List<Integer> norm = new ArrayList<>(4);
+        for (int sid : sorted) {
+            norm.add(sid);
+            if (norm.size() >= 4) {
+                break;
+            }
+        }
+        if (sealId == 0 && petTableId == 0 && norm.isEmpty()) {
+            return new CanonicalBuild("", "", List.of());
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < norm.size(); i++) {
+            if (i > 0) sb.append(',');
+            sb.append(Integer.toUnsignedString(norm.get(i)));
+        }
+        String csv = sb.toString();
+        String key = Integer.toUnsignedString(sealId) + ":" + Integer.toUnsignedString(petTableId) + ":" + csv;
+        return new CanonicalBuild(key, csv, norm);
+    }
+
+    private static List<Integer> parseSkillCsv(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return List.of();
+        }
+        List<Integer> out = new ArrayList<>(4);
+        for (String token : csv.split(",")) {
+            String trimmed = token.trim();
+            if (trimmed.isEmpty()) continue;
+            try {
+                int v = Integer.parseUnsignedInt(trimmed);
+                if (v > 0) out.add(v);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return out;
+    }
+
+    private void upsertFeaturedBuild(Connection c, int seasonId, int tierQingfengCenti, long battleId,
+                                     long playerId, BattleSettlementData st, long afterRating,
+                                     int teamSize, int totalRounds, boolean playerWon, long nowMs) throws SQLException {
+        CanonicalBuild cb = canonicalBuild(st.getFinalSeasonSealId(), st.getStarterPetTableId(), st.getCoreSkillIdsList());
+        if (cb.buildKey().isEmpty()) {
+            return;
+        }
+        long highTierMin = tierQingfengCenti > 0 ? Integer.toUnsignedLong(tierQingfengCenti) : 152000L;
+        boolean highTierWin = playerWon && afterRating >= highTierMin;
+        MatchRankedFeaturedBuildRow existing = readFeaturedBuildRow(c, seasonId, cb.buildKey()).orElse(null);
+        MatchRankedFeaturedBuildRow.Builder b = existing != null
+                ? existing.toBuilder()
+                : MatchRankedFeaturedBuildRow.newBuilder()
+                        .setSeasonId(seasonId)
+                        .setBuildKey(cb.buildKey())
+                        .setSeasonSealId(st.getFinalSeasonSealId())
+                        .setStarterPetTableId(st.getStarterPetTableId())
+                        .setCoreSkillIds(cb.skillCsv());
+        b.setAppearances(b.getAppearances() + 1);
+        if (playerWon) {
+            b.setWins(b.getWins() + 1);
+            if (highTierWin) {
+                b.setHighTierWins(b.getHighTierWins() + 1);
+            }
+            if (b.getFeaturedBattleId() == 0L || afterRating >= b.getFeaturedRatingCenti()) {
+                b.setFeaturedBattleId(battleId)
+                        .setFeaturedPlayerId(playerId)
+                        .setFeaturedPlayerName(st.getPlayerDisplayName())
+                        .setFeaturedRatingCenti(afterRating)
+                        .setFeaturedTeamSize(teamSize)
+                        .setFeaturedTotalRounds(totalRounds);
+            }
+        }
+        b.setUpdatedMs(nowMs);
+        MatchRankedFeaturedBuildRow next = b.build();
+        if (existing != null) {
+            try (PreparedStatement upd = c.prepareStatement(
+                    "UPDATE match_ranked_featured_build SET appearances=?,wins=?,high_tier_wins=?,featured_battle_id=?,featured_player_id=?,featured_player_name=?,featured_rating_centi=?,featured_team_size=?,featured_total_rounds=?,updated_ms=? "
+                            + "WHERE season_id=? AND build_key=?")) {
+                upd.setInt(1, next.getAppearances());
+                upd.setInt(2, next.getWins());
+                upd.setInt(3, next.getHighTierWins());
+                upd.setObject(4, PbMysql.uint64(next.getFeaturedBattleId()));
+                upd.setObject(5, PbMysql.uint64(next.getFeaturedPlayerId()));
+                upd.setString(6, next.getFeaturedPlayerName());
+                upd.setLong(7, next.getFeaturedRatingCenti());
+                upd.setInt(8, next.getFeaturedTeamSize());
+                upd.setInt(9, next.getFeaturedTotalRounds());
+                upd.setObject(10, PbMysql.uint64(next.getUpdatedMs()));
+                upd.setInt(11, next.getSeasonId());
+                upd.setString(12, next.getBuildKey());
+                upd.executeUpdate();
+            }
+            return;
+        }
+        try (PreparedStatement ins = c.prepareStatement(
+                "INSERT INTO match_ranked_featured_build(season_id,build_key,season_seal_id,starter_pet_table_id,core_skill_ids,appearances,wins,high_tier_wins,featured_battle_id,featured_player_id,featured_player_name,featured_rating_centi,featured_team_size,featured_total_rounds,updated_ms) "
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+            ins.setInt(1, next.getSeasonId());
+            ins.setString(2, next.getBuildKey());
+            ins.setInt(3, next.getSeasonSealId());
+            ins.setInt(4, next.getStarterPetTableId());
+            ins.setString(5, next.getCoreSkillIds());
+            ins.setInt(6, next.getAppearances());
+            ins.setInt(7, next.getWins());
+            ins.setInt(8, next.getHighTierWins());
+            ins.setObject(9, PbMysql.uint64(next.getFeaturedBattleId()));
+            ins.setObject(10, PbMysql.uint64(next.getFeaturedPlayerId()));
+            ins.setString(11, next.getFeaturedPlayerName());
+            ins.setLong(12, next.getFeaturedRatingCenti());
+            ins.setInt(13, next.getFeaturedTeamSize());
+            ins.setInt(14, next.getFeaturedTotalRounds());
+            ins.setObject(15, PbMysql.uint64(next.getUpdatedMs()));
+            ins.executeUpdate();
+        }
+    }
+
+    private Optional<MatchRankedFeaturedBuildRow> readFeaturedBuildRow(Connection c, int seasonId, String buildKey) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT season_id,build_key,season_seal_id,starter_pet_table_id,core_skill_ids,appearances,wins,high_tier_wins,featured_battle_id,featured_player_id,featured_player_name,featured_rating_centi,featured_team_size,featured_total_rounds,updated_ms "
+                        + "FROM match_ranked_featured_build WHERE season_id=? AND build_key=?")) {
+            ps.setInt(1, seasonId);
+            ps.setString(2, buildKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(scanFeaturedBuildRow(rs)) : Optional.empty();
+            }
+        }
+    }
+
+    private List<RankedFeaturedBuildView> readTopFeaturedBuilds(Connection c, int seasonId, int limit) throws SQLException {
+        List<RankedFeaturedBuildView> out = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT season_id,build_key,season_seal_id,starter_pet_table_id,core_skill_ids,appearances,wins,high_tier_wins,featured_battle_id,featured_player_id,featured_player_name,featured_rating_centi,featured_team_size,featured_total_rounds,updated_ms "
+                        + "FROM match_ranked_featured_build WHERE season_id=? AND wins>0 "
+                        + "ORDER BY high_tier_wins DESC,wins DESC,featured_rating_centi DESC,updated_ms DESC LIMIT ?")) {
+            ps.setInt(1, seasonId);
+            ps.setInt(2, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    MatchRankedFeaturedBuildRow r = scanFeaturedBuildRow(rs);
+                    out.add(RankedFeaturedBuildView.newBuilder()
+                            .setBuildKey(r.getBuildKey())
+                            .setSeasonSealId(r.getSeasonSealId())
+                            .setStarterPetTableId(r.getStarterPetTableId())
+                            .addAllCoreSkillIds(parseSkillCsv(r.getCoreSkillIds()))
+                            .setAppearances(r.getAppearances())
+                            .setWins(r.getWins())
+                            .setHighTierWins(r.getHighTierWins())
+                            .setFeaturedBattleId(r.getFeaturedBattleId())
+                            .setFeaturedPlayerId(r.getFeaturedPlayerId())
+                            .setFeaturedPlayerName(r.getFeaturedPlayerName())
+                            .setFeaturedRatingCenti(r.getFeaturedRatingCenti())
+                            .setFeaturedTeamSize(r.getFeaturedTeamSize())
+                            .setFeaturedTotalRounds(r.getFeaturedTotalRounds())
+                            .setUpdatedMs(r.getUpdatedMs())
+                            .build());
+                }
+            }
+        }
+        return out;
+    }
+
+    private static MatchRankedFeaturedBuildRow scanFeaturedBuildRow(ResultSet rs) throws SQLException {
+        String csv = rs.getString(5);
+        String name = rs.getString(11);
+        return MatchRankedFeaturedBuildRow.newBuilder()
+                .setSeasonId(rs.getInt(1))
+                .setBuildKey(rs.getString(2))
+                .setSeasonSealId(rs.getInt(3))
+                .setStarterPetTableId(rs.getInt(4))
+                .setCoreSkillIds(csv == null ? "" : csv)
+                .setAppearances(rs.getInt(6))
+                .setWins(rs.getInt(7))
+                .setHighTierWins(rs.getInt(8))
+                .setFeaturedBattleId(Long.parseUnsignedLong(rs.getString(9)))
+                .setFeaturedPlayerId(Long.parseUnsignedLong(rs.getString(10)))
+                .setFeaturedPlayerName(name == null ? "" : name)
+                .setFeaturedRatingCenti(rs.getLong(12))
+                .setFeaturedTeamSize(rs.getInt(13))
+                .setFeaturedTotalRounds(rs.getInt(14))
+                .setUpdatedMs(Long.parseUnsignedLong(rs.getString(15)))
+                .build();
     }
 }

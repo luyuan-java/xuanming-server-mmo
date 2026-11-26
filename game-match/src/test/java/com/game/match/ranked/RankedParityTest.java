@@ -342,4 +342,21 @@ class RankedParityTest {
             assertThat(prof1After.getCurrentProgress().getBestWinStreak()).isEqualTo(3);
         }
     }
+
+    @Test
+    void 归元城木桩禁免费预设_残局奇谈支持可选免费预设() {
+        // 演武试招木桩（301/302, kind=9）强制本人真实养成，严禁走免费预设
+        assertThat(TABLES.bossTrialKind(301)).isEqualTo(RankedTables.BOSS_TRIAL_KIND_PRACTICE_DUMMY);
+        assertThat(TABLES.bossTrialKind(302)).isEqualTo(RankedTables.BOSS_TRIAL_KIND_PRACTICE_DUMMY);
+        assertThat(TABLES.usesFreePreset(MatchModes.PVE_SOLO, 301)).isFalse();
+        assertThat(TABLES.allowsOptionalFreePreset(301)).isFalse();
+        assertThat(TABLES.allowsOptionalFreePreset(302)).isFalse();
+
+        // 回合残局（311..313, kind=10）与归元人物奇谈（321..323, kind=11）允许单人按票据选配免费 3×3 预设
+        for (int id : List.of(311, 312, 313, 321, 322, 323)) {
+            assertThat(TABLES.usesFreePreset(MatchModes.PVE_SOLO, id)).isFalse();
+            assertThat(TABLES.allowsOptionalFreePreset(id)).isTrue();
+            assertThat(TABLES.trialContextFor(MatchModes.PVE_SOLO, id, null, null)).isEmpty();
+        }
+    }
 }

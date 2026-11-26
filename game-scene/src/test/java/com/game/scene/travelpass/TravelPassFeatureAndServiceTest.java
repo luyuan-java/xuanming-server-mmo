@@ -266,14 +266,10 @@ class TravelPassFeatureAndServiceTest {
 
     private static <R extends Message> R call(BattleFixture f, ScenePlayer player, String method, Message req,
                                               com.google.protobuf.Parser<R> parser) throws InvalidProtocolBufferException {
-        int id = Contracts.REGISTRY.requireId(SERVICE, method);
-        f.sink.clear();
-        f.handler.handle(player.session(), MessageContent.newBuilder()
-                .setMessageId(id)
-                .setId(77L)
-                .setSerializedMessage(req.toByteString())
-                .build());
-        assertThat(f.sink.sent()).isNotEmpty();
-        return parser.parseFrom(f.sink.sent().getLast().frame().getSerializedMessage());
+        int msgId = Contracts.REGISTRY.requireId(SERVICE, method);
+        long reqId = f.request(player, msgId, req);
+        MessageContent reply = f.pushes(player, msgId).stream()
+                .filter(m -> m.getId() == reqId).findFirst().orElseThrow();
+        return parser.parseFrom(reply.getSerializedMessage());
     }
 }

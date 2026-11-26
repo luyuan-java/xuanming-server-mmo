@@ -86,8 +86,11 @@ public class MatchFeatureConfiguration {
 
     @Bean
     public BattleReportStore battleReportStore(DataSource dataSource, TournamentStore tournamentStore,
+                                               RankedStore rankedStore,
                                                FeatureSchemaReady schemaReady) {
-        return new BattleReportStore(dataSource, tournamentStore::isPublicKnockoutReplayAllowed);
+        return new BattleReportStore(dataSource,
+                battleId -> tournamentStore.isPublicKnockoutReplayAllowed(battleId)
+                        || rankedStore.isFeaturedRankedReplayAllowed(battleId));
     }
 
     @Bean

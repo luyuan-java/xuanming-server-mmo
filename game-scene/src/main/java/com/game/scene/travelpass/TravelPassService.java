@@ -16,7 +16,6 @@ import com.game.proto.PlayerActivityInfo;
 import com.game.proto.PlayerActivityRewardItem;
 import com.game.proto.PlayerActivityRewardType;
 import com.game.proto.PlayerActivityStatus;
-import com.game.proto.PlayerAppearanceEntry;
 import com.game.proto.PlayerAppearanceInfo;
 import com.game.proto.SpiritShopInfo;
 import com.game.proto.SpiritShopLimitGroupView;
@@ -215,8 +214,7 @@ public final class TravelPassService {
         Wallet.Change deducted = currency.deduct(player, season.premiumCurrencyType(), cost,
                 AssetAudit.Reason.TRAVEL_PASS_UNLOCK, clientRequestId);
         if (!deducted.ok()) {
-            return rejectUnlock(deducted.tipId() == Wallet.FROZEN ? FROZEN
-                    : deducted.tipId() == Wallet.INSUFFICIENT ? CURRENCY_NOT_ENOUGH : UNAVAILABLE);
+            return rejectUnlock(deducted.tipId() == Wallet.FROZEN ? FROZEN : CURRENCY_NOT_ENOUGH);
         }
 
         comp.replaceFrom(candidate);
@@ -651,7 +649,7 @@ public final class TravelPassService {
             if (totalCount > 0) {
                 int ownedCount = 0;
                 int trialAvailableCount = 0;
-                for (PlayerAppearanceEntry app : appInfo.getAppearancesList()) {
+                for (var app : appInfo.getAppearancesList()) {
                     if (app.getOwned()) {
                         ownedCount++;
                     } else if (!app.getTrialUsed()) {

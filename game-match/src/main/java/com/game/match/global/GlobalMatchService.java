@@ -291,7 +291,9 @@ public final class GlobalMatchService implements AutoCloseable {
                     log.error("全球排位排队校验失败 player={}",Long.toUnsignedString(session.getPlayerId()),rankedErr);
                     return MatchTips.joinRejected(MatchTip.BUSY);
                 }
-            }else if(rankedStore!=null&&rankedTables!=null&&rankedTables.usesFreePreset(mode,request.getBattleConfigId())){
+            }else if(rankedStore!=null&&rankedTables!=null&&(rankedTables.usesFreePreset(mode,request.getBattleConfigId())
+                    ||(rankedTables.allowsOptionalFreePreset(request.getBattleConfigId())
+                        &&(request.getCharacterPresetId()!=0||request.getPetPresetId()!=0)))){
                 try{
                     if(request.getRankedRuleVersion()!=0&&request.getRankedRuleVersion()!=rankedTables.ruleVersion()){
                         return JoinQueueResponse.newBuilder().setErrorMessage(TipInfoMessage.newBuilder()
@@ -623,8 +625,14 @@ public final class GlobalMatchService implements AutoCloseable {
             List<Long> roster=f.getMembersList().stream().map(GlobalMember::getPlayerId).toList();
             int[] teams=TeamAssignment.assign(MatchMode.forNumber(f.getMode()),roster,ratings.loadAllCentiOrDefault(roster));
             boolean isRanked = f.getMode() == MatchModes.PVP_TEAM && rankedStore != null && rankedTables != null;
-            boolean isFreePreset = !isRanked && rankedStore != null && rankedTables != null
-                    && rankedTables.usesFreePreset(f.getMode(), f.getConfigId());
+            boolean isOptionalFreePreset = !isRanked && rankedStore != null && rankedTables != null
+                    && rankedTables.allowsOptionalFreePreset(f.getConfigId())
+                    && f.getMembersCount() == 1
+                    && store.joinRequestForTicket(f.getMembers(0).getPlayerId(), f.getMembers(0).getTicket())
+                            .map(req -> req.getCharacterPresetId() != 0 || req.getPetPresetId() != 0)
+                            .orElse(false);
+            boolean isFreePreset = (!isRanked && rankedStore != null && rankedTables != null
+                    && rankedTables.usesFreePreset(f.getMode(), f.getConfigId())) || isOptionalFreePreset;
             RankedMatchContext rankedContext = null;
             if (isRanked) {
                 int perSide = Math.max(1, roster.size() / 2);

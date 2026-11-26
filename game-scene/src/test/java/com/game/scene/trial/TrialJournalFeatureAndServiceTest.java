@@ -4,10 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.battle.engine.TrialJournalRules;
 import com.game.player.store.state.PlayerTrialJournalState;
+import com.game.player.store.state.SeasonTrialJournalArchiveState;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleTrialJournalFacts;
 import com.game.proto.ClaimTrialJournalMilestoneRequest;
 import com.game.proto.ClaimTrialJournalMilestoneResponse;
+import com.game.proto.GetAppearanceInfoRequest;
+import com.game.proto.GetAppearanceInfoResponse;
 import com.game.proto.GetRecentBattleResultsRequest;
 import com.game.proto.GetRecentBattleResultsResponse;
 import com.game.proto.GetTrialJournalRequest;
@@ -289,5 +292,82 @@ class TrialJournalFeatureAndServiceTest {
         assertThat(p.bags().bag(BagType.INVENTORY).total(TrialJournalRules.BOUND_ARTIFACT_VOUCHER_ITEM_ID))
                 .isEqualTo(vouchersFullBefore);
         assertThat(p.trialJournal().state().getStateRevision()).isEqualTo(revBefore);
+    }
+
+    @Test
+    void 里程碑M302授灵宠幻化月弦师_M105授技能特效寒星流华且支持幂等重放与专属校验() throws Exception {
+        BattleFixture f = new BattleFixture();
+        alignActiveSeason(f);
+        ScenePlayer p = f.enter(11, 2003L);
+
+        // 1. 快照正确带出 M105（寒星流华）与 M302（月弦师）专属外观展示字段，且表校验拦截可购买外观
+        GetTrialJournalResponse initResp = rpc(f, p, SERVICE, "GetTrialJournal",
+                GetTrialJournalRequest.getDefaultInstance(), GetTrialJournalResponse.parser());
+        TrialJournalMilestoneView m105View = initResp.getSnapshot().getMilestonesList().stream()
+                .filter(m -> m.getMilestoneId() == 105).findFirst().orElseThrow();
+        assertThat(m105View.getGrantSkillVfxId()).isEqualTo(3);
+        assertThat(m105View.getGrantSkillVfxName()).isEqualTo("寒星流华");
+
+        TrialJournalMilestoneView m302View = initResp.getSnapshot().getMilestonesList().stream()
+                .filter(m -> m.getMilestoneId() == 302).findFirst().orElseThrow();
+        assertThat(m302View.getGrantPetCosmeticId()).isEqualTo(3);
+        assertThat(m302View.getGrantPetCosmeticName()).isEqualTo("月弦师");
+
+        assertThat(f.trialJournalTables.isValidExclusivePetCosmetic(1)).isFalse();
+        assertThat(f.trialJournalTables.isValidExclusivePetCosmetic(3)).isTrue();
+        assertThat(f.trialJournalTables.isValidExclusiveSkillVfx(1)).isFalse();
+        assertThat(f.trialJournalTables.isValidExclusiveSkillVfx(3)).isTrue();
+
+        // 2. 点亮卷一全部 15 枚战法印（bit 0..11 + 30..32）与卷三 S1 的 4 枚赛季印
+        byte[] ch1All15 = new byte[5];
+        ch1All15[0] = (byte) 0xFF; // 1011..1032 (bits 0..7)
+        ch1All15[1] = (byte) 0x0F; // 1033..1043 (bits 8..11)
+        ch1All15[3] = (byte) 0xC0; // 1051..1052 (bits 30..31)
+        ch1All15[4] = (byte) 0x01; // 1053 (bit 32)
+        p.trialJournal().replace(PlayerTrialJournalState.newBuilder()
+                .setLitSealBits(ByteString.copyFrom(ch1All15))
+                .addSeasonRecords(SeasonTrialJournalArchiveState.newBuilder()
+                        .setSeasonId(f.season.activeSeasonId())
+                        .addAllLitSealIds(List.of(3011, 3012, 3021, 3022)))
+                .build());
+
+        // 3. 领取 M302：永久解锁灵宠幻化 #3「月弦师」并支持幂等重放
+        ClaimTrialJournalMilestoneRequest m302Req = ClaimTrialJournalMilestoneRequest.newBuilder()
+                .setClientRequestId(7001L).setMilestoneId(302).build();
+        ClaimTrialJournalMilestoneResponse m302Resp = rpc(f, p, SERVICE, "ClaimTrialJournalMilestone",
+                m302Req, ClaimTrialJournalMilestoneResponse.parser());
+        assertThat(m302Resp.getErrorMessage().getId()).isZero();
+        assertThat(m302Resp.getGrantedSandCount()).isEqualTo(1);
+        assertThat(m302Resp.getGrantedPetCosmeticId()).isEqualTo(3);
+
+        ClaimTrialJournalMilestoneResponse m302Replay = rpc(f, p, SERVICE, "ClaimTrialJournalMilestone",
+                m302Req, ClaimTrialJournalMilestoneResponse.parser());
+        assertThat(m302Replay.getErrorMessage().getId()).isZero();
+        assertThat(m302Replay.getReplayed()).isTrue();
+        assertThat(m302Replay.getGrantedPetCosmeticId()).isEqualTo(3);
+
+        // 4. 领取 M105：永久解锁技能特效 #3「寒星流华」并支持幂等重放（不自动穿戴）
+        ClaimTrialJournalMilestoneRequest m105Req = ClaimTrialJournalMilestoneRequest.newBuilder()
+                .setClientRequestId(7002L).setMilestoneId(105).build();
+        ClaimTrialJournalMilestoneResponse m105Resp = rpc(f, p, SERVICE, "ClaimTrialJournalMilestone",
+                m105Req, ClaimTrialJournalMilestoneResponse.parser());
+        assertThat(m105Resp.getErrorMessage().getId()).isZero();
+        assertThat(m105Resp.getGrantedSkillVfxId()).isEqualTo(3);
+
+        ClaimTrialJournalMilestoneResponse m105Replay = rpc(f, p, SERVICE, "ClaimTrialJournalMilestone",
+                m105Req, ClaimTrialJournalMilestoneResponse.parser());
+        assertThat(m105Replay.getErrorMessage().getId()).isZero();
+        assertThat(m105Replay.getReplayed()).isTrue();
+        assertThat(m105Replay.getGrantedSkillVfxId()).isEqualTo(3);
+
+        // 5. 衣柜快照核验 #3 月弦师与 #3 寒星流华均已永久拥有，且未自动替玩家穿戴
+        GetAppearanceInfoResponse appResp = rpc(f, p, "SceneAppearanceClientPlayer", "GetAppearanceInfo",
+                GetAppearanceInfoRequest.getDefaultInstance(), GetAppearanceInfoResponse.parser());
+        assertThat(appResp.getErrorMessage().getId()).isZero();
+        assertThat(appResp.getInfo().getPetCosmeticsList().stream()
+                .filter(c -> c.getConfigId() == 3).findFirst().orElseThrow().getOwned()).isTrue();
+        assertThat(appResp.getInfo().getSkillVfxCosmeticsList().stream()
+                .filter(c -> c.getConfigId() == 3).findFirst().orElseThrow().getOwned()).isTrue();
+        assertThat(appResp.getInfo().getEquippedSkillVfxMap()).isEmpty();
     }
 }

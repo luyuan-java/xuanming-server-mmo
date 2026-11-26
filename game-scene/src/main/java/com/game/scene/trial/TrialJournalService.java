@@ -261,8 +261,16 @@ public final class TrialJournalService {
                     .setGrantedVoucherCount(prev.getTrialMilestoneVoucherCount())
                     .setSnapshot(buildSnapshot(player, nowMs));
             TrialJournalMilestoneTable row = tables.milestone(prev.getTrialMilestoneId());
-            if (row != null && !row.getGrantAppearanceId().isEmpty()) {
-                rep.setGrantedAppearanceId(row.getGrantAppearanceId());
+            if (row != null) {
+                if (!row.getGrantAppearanceId().isEmpty()) {
+                    rep.setGrantedAppearanceId(row.getGrantAppearanceId());
+                }
+                if (row.getGrantPetCosmeticId() != 0) {
+                    rep.setGrantedPetCosmeticId(row.getGrantPetCosmeticId());
+                }
+                if (row.getGrantSkillVfxId() != 0) {
+                    rep.setGrantedSkillVfxId(row.getGrantSkillVfxId());
+                }
             }
             return new ClaimOutcome(rep.build(), false);
         }
@@ -292,7 +300,9 @@ public final class TrialJournalService {
         if (Integer.compareUnsigned(counts.forScope(milestone.getScopeChapterId()), milestone.getRequiredSeals()) < 0) {
             return new ClaimOutcome(claimError(player, nowMs, MILESTONE_NOT_REACHED), false);
         }
-        if (!tables.isValidExclusiveAppearance(milestone.getGrantAppearanceId())) {
+        if (!tables.isValidExclusiveAppearance(milestone.getGrantAppearanceId())
+                || !tables.isValidExclusivePetCosmetic(milestone.getGrantPetCosmeticId())
+                || !tables.isValidExclusiveSkillVfx(milestone.getGrantSkillVfxId())) {
             return new ClaimOutcome(claimError(player, nowMs, UNAVAILABLE), false);
         }
 
@@ -333,6 +343,24 @@ public final class TrialJournalService {
                 return new ClaimOutcome(claimError(player, nowMs, grantErr), false);
             }
         }
+        if (milestone.getGrantPetCosmeticId() != 0) {
+            if (appearance == null) {
+                return new ClaimOutcome(claimError(player, nowMs, UNAVAILABLE), false);
+            }
+            int grantErr = appearance.grantPetCosmetic(world, player, milestone.getGrantPetCosmeticId());
+            if (grantErr != OK) {
+                return new ClaimOutcome(claimError(player, nowMs, grantErr), false);
+            }
+        }
+        if (milestone.getGrantSkillVfxId() != 0) {
+            if (appearance == null) {
+                return new ClaimOutcome(claimError(player, nowMs, UNAVAILABLE), false);
+            }
+            int grantErr = appearance.grantSkillVfx(world, player, milestone.getGrantSkillVfxId());
+            if (grantErr != OK) {
+                return new ClaimOutcome(claimError(player, nowMs, grantErr), false);
+            }
+        }
 
         if (candidateBags != null) {
             player.bags().commitPrepared(candidateBags);
@@ -348,10 +376,11 @@ public final class TrialJournalService {
                 .setTrialMilestoneSandCount(milestone.getBoundSandCount())
                 .setTrialMilestoneVoucherCount(milestone.getBoundArtifactVoucherCount()));
 
-        log.info("[PlayerTrialJournal] 里程碑已领取 player={} milestone_id={} bound_sand={} bound_voucher={} appearance={}",
+        log.info("[PlayerTrialJournal] 里程碑已领取 player={} milestone_id={} bound_sand={} bound_voucher={} appearance={} pet_cosmetic={} skill_vfx={}",
                 Long.toUnsignedString(player.playerId()), milestone.getId(),
                 milestone.getBoundSandCount(), milestone.getBoundArtifactVoucherCount(),
-                milestone.getGrantAppearanceId());
+                milestone.getGrantAppearanceId(), milestone.getGrantPetCosmeticId(),
+                milestone.getGrantSkillVfxId());
 
         ClaimTrialJournalMilestoneResponse.Builder response = ClaimTrialJournalMilestoneResponse.newBuilder()
                 .setErrorMessage(tip(OK))
@@ -360,6 +389,12 @@ public final class TrialJournalService {
                 .setSnapshot(buildSnapshot(player, nowMs));
         if (!milestone.getGrantAppearanceId().isEmpty()) {
             response.setGrantedAppearanceId(milestone.getGrantAppearanceId());
+        }
+        if (milestone.getGrantPetCosmeticId() != 0) {
+            response.setGrantedPetCosmeticId(milestone.getGrantPetCosmeticId());
+        }
+        if (milestone.getGrantSkillVfxId() != 0) {
+            response.setGrantedSkillVfxId(milestone.getGrantSkillVfxId());
         }
         return new ClaimOutcome(response.build(), true);
     }
@@ -596,6 +631,10 @@ public final class TrialJournalService {
                     .setCommentaryBody(m.getCommentaryBody())
                     .setGrantAppearanceId(m.getGrantAppearanceId())
                     .setGrantAppearanceName(tables.appearanceDisplayName(m.getGrantAppearanceId()))
+                    .setGrantPetCosmeticId(m.getGrantPetCosmeticId())
+                    .setGrantPetCosmeticName(tables.petCosmeticDisplayName(m.getGrantPetCosmeticId()))
+                    .setGrantSkillVfxId(m.getGrantSkillVfxId())
+                    .setGrantSkillVfxName(tables.skillVfxDisplayName(m.getGrantSkillVfxId()))
                     .setReached(reached)
                     .setClaimed(claimed)
                     .setClaimable(reached && !claimed && writableErr == OK));

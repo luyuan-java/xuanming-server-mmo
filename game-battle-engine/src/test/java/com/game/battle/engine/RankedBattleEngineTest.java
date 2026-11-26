@@ -875,138 +875,94 @@ class RankedBattleEngineTest {
     }
 
     @Test
-    void prepThreeSkillBanFullFlowPrivacyCaptainTiebreakAndEnforcement() {
-        List<Integer> s1Pool = data.banEligibleSkillIds(1);
-        assertThat(s1Pool).hasSize(55);
-        assertThat(s1Pool).doesNotContain(10002, 10006, 10010, 10015, 10018, 11011, 11012, 11015);
-        assertThat(s1Pool).contains(10003, 10007, 10019, 10027, 15001);
-        assertThat(s1Pool).doesNotContain(15101);
-
-        RankedPresetTable charPreset = tables.rankedPreset().find(101).orElseThrow();
-        RankedPresetTable petA = tables.rankedPreset().find(201).orElseThrow();
-
-        // A队2人（6501 队长 + 6502 队员），B队1人（6503），检验队内票数→槽位→队长平票裁决 + 对手/观众脱敏 + 对称禁用
-        BattlePlayerSnapshot pA1 = playerWithRealPet(6501L, 96001L, 0, 260L, charPreset, petA).toBuilder()
-                .setActiveSeasonId(1)
-                .setIsTeamCaptain(true)
-                .clearSkillTableIds().clearSkillRanks()
-                .addSkillTableIds(10002).putSkillRanks(10002, 1)
-                .addSkillTableIds(10003).putSkillRanks(10003, 1)
-                .addSkillTableIds(10007).putSkillRanks(10007, 1)
-                .addSkillTableIds(10019).putSkillRanks(10019, 1)
+    void 论剑V6宿敌战前脱敏雪耻复仇与问道名局配招快照() {
+        FakeBattleData data = baseData();
+        SeasonSealEffect seal101 = SeasonSealEffect.newBuilder()
+                .setSeasonId(1).setSealId(101).setEffectId(1).setEffectValue(10).setName("破阵锐印").build();
+        SeasonSealEffect seal103 = SeasonSealEffect.newBuilder()
+                .setSeasonId(1).setSealId(103).setEffectId(6).setEffectValue(10).setName("固阵守印").build();
+        BattlePetSnapshot petFox = BattlePetSnapshot.newBuilder()
+                .setPetId(9501L).setOwnerPlayerId(6601L).setPetTableId(1).setPetName("灵狐")
+                .setLevel(30).setMaxHealth(2000).setMaxMana(500).setPhysicalAttack(100).setDefense(50)
+                .setBaseAttributes(BattleAttributes.newBuilder().setHealth(2000).setMana(500).setSpeed(150))
                 .build();
-        BattlePlayerSnapshot pA2 = playerWithRealPet(6502L, 96002L, 0, 250L, charPreset, petA).toBuilder()
-                .setActiveSeasonId(1)
-                .clearSkillTableIds().clearSkillRanks()
-                .addSkillTableIds(10002).putSkillRanks(10002, 1)
-                .addSkillTableIds(10003).putSkillRanks(10003, 1)
+        BattlePetSnapshot petStone = BattlePetSnapshot.newBuilder()
+                .setPetId(9502L).setOwnerPlayerId(6601L).setPetTableId(2).setPetName("石灵")
+                .setLevel(30).setMaxHealth(2500).setMaxMana(500).setPhysicalAttack(100).setDefense(80)
+                .setBaseAttributes(BattleAttributes.newBuilder().setHealth(2500).setMana(500).setSpeed(120))
                 .build();
-        BattlePlayerSnapshot pB1 = playerWithRealPet(6503L, 96003L, 1, 240L, charPreset, petA).toBuilder()
-                .setActiveSeasonId(1)
-                .clearSkillTableIds().clearSkillRanks()
-                .addSkillTableIds(10002).putSkillRanks(10002, 1)
-                .addSkillTableIds(10003).putSkillRanks(10003, 1)
-                .addSkillTableIds(10027).putSkillRanks(10027, 1) // A41 玄镜映法
+
+        BattlePlayerSnapshot pA = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(6601L).setTeamIndex(0).setPlayerName("青云").setLevel(30).setActiveSeasonId(1)
+                .setMaxHealth(10000).setMaxMana(2000).setPhysicalAttack(6000).setDefense(100)
+                .setBaseAttributes(BattleAttributes.newBuilder().setHealth(10000).setMana(2000).setSpeed(300))
+                .addSkillTableIds(10002).addSkillTableIds(10003)
+                .setEquipmentEffects(BattleEquipmentEffects.newBuilder().setSeasonSeal(seal101))
+                .addAvailableSeasonSeals(seal101).addAvailableSeasonSeals(seal103)
+                .addPets(petFox).addStandbyPets(petStone)
+                .build();
+        BattlePlayerSnapshot pB = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(6602L).setTeamIndex(1).setPlayerName("玄烈").setLevel(30).setActiveSeasonId(1)
+                .setMaxHealth(500).setMaxMana(500).setPhysicalAttack(100).setDefense(0)
+                .setBaseAttributes(BattleAttributes.newBuilder().setHealth(500).setMana(500).setSpeed(100))
+                .addSkillTableIds(10002)
+                .setEquipmentEffects(BattleEquipmentEffects.newBuilder().setSeasonSeal(seal101))
+                .addAvailableSeasonSeals(seal101)
                 .build();
 
         CreateBattleRequest req = CreateBattleRequest.newBuilder()
-                .setBattleId(9901L)
+                .setBattleId(9961L)
                 .setBattleConfigId(5)
                 .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
-                .setSeed(777L)
-                .setRankedContext(rankedCtx(1).toBuilder().setSkillBanSlotsPerTeam(3).build())
-                .addPlayers(pA1)
-                .addPlayers(pA2)
-                .addPlayers(pB1)
+                .setSeed(661L)
+                .setRankedContext(RankedMatchContext.newBuilder()
+                        .setSeasonId(1).setSeasonKey("s1").setRankGeneration(1).setRuleVersion(2)
+                        .setTeamSize(1).setUseFreePreset(false)
+                        .addRivalryEncounters(com.game.proto.RankedRivalryEncounter.newBuilder()
+                                .setPlayerId(6601L).setOpponentId(6602L).setWins(1).setLosses(2).setRevengeTarget(true))
+                        .addRivalryEncounters(com.game.proto.RankedRivalryEncounter.newBuilder()
+                                .setPlayerId(6602L).setOpponentId(6601L).setOpponentName("青云").setWins(2).setLosses(1).setRevengeTarget(false)))
+                .addPlayers(pA)
+                .addPlayers(pB)
                 .build();
 
         TurnBattleEngine engine = ((BattleStart.Started) TurnBattleEngine.start(req, data)).engine();
         assertThat(engine.isInPrepPhase()).isTrue();
-        assertThat(engine.prepDurationSeconds()).isEqualTo(BattleConstants.TACTICAL_PREP_WITH_BAN_DURATION_SECONDS);
-        assertThat(engine.prepTimeoutMs()).isEqualTo(BattleConstants.TACTICAL_PREP_WITH_BAN_TIMEOUT_MS);
 
-        // 非候选（基础技能 10002）与重复提交必须被拒
-        assertThat(engine.updateBattlePrep(6501L, 0, 0L, false, true, List.of(10002)).errorTip())
-                .isEqualTo(ActionChecks.INVALID_PARAMETER);
-        assertThat(engine.updateBattlePrep(6501L, 0, 0L, false, true, List.of(10003, 10003)).errorTip())
-                .isEqualTo(ActionChecks.INVALID_PARAMETER);
+        BattlePrepState prepA = engine.prepStateForViewer(6601L, 999L);
+        assertThat(prepA.getSelfRivalriesList()).hasSize(1);
+        assertThat(prepA.getSelfRivalries(0).getOpponentName()).isEqualTo("玄烈");
+        assertThat(prepA.getSelfRivalries(0).getRevengeTarget()).isTrue();
 
-        // A队队长提名 [10003, 10007, 10019]；A队队员提名 [10003, 10011, 10016]
-        // 汇总：10003(2票) 第一；槽位1平票 10007(队长) 胜 10011(非队长) 第二；10011(槽位1) 胜 10019(槽位2) 第三
-        assertThat(engine.updateBattlePrep(6501L, 0, 0L, true, true, List.of(10003, 10007, 10019)).errorTip()).isZero();
-        assertThat(engine.updateBattlePrep(6502L, 0, 0L, true, true, List.of(10003, 10011, 10016)).errorTip()).isZero();
+        BattlePrepState prepB = engine.prepStateForViewer(6602L, 999L);
+        assertThat(prepB.getSelfRivalriesList()).hasSize(1);
+        assertThat(prepB.getSelfRivalries(0).getRevengeTarget()).isFalse();
 
-        // 严格同队脱敏：B队和观众均不得看到 A 队提名或生效禁招
-        BattlePrepState bPrep = engine.prepStateForViewer(6503L, 12345L);
-        assertThat(bPrep.getTeamEffectiveBanSkillIdsList()).isEmpty();
-        assertThat(bPrep.getTeamStatesList()).allSatisfy(ts -> assertThat(ts.getTeamIndex()).isEqualTo(1));
-        BattlePrepState obsPrep = engine.prepStateForViewer(0L, 12345L);
-        assertThat(obsPrep.getTeamEffectiveBanSkillIdsList()).isEmpty();
-        assertThat(obsPrep.getTeamStatesList()).isEmpty();
+        BattlePrepState prepObs = engine.prepStateForViewer(0L, 999L);
+        assertThat(prepObs.getSelfRivalriesList()).isEmpty();
 
-        // B队提名 [10003, 15001]（与 A 队撞车 10003）并锁定
-        assertThat(engine.updateBattlePrep(6503L, 0, 0L, true, true, List.of(10003, 15001)).errorTip()).isZero();
-        assertThat(engine.allPrepPlayersReady()).isTrue();
+        assertThat(engine.updateBattlePrep(6601L, 103, 9502L, true).errorCode()).isZero();
+        assertThat(engine.updateBattlePrep(6602L, 0, 0L, true).errorCode()).isZero();
         assertThat(engine.finalizePrepPhase()).isTrue();
 
-        BattleStateS2C state = engine.buildStateSnapshot();
-        assertThat(state.getTeamABannedSkillIdsList()).containsExactly(10003, 10007, 10011);
-        assertThat(state.getTeamBBannedSkillIdsList()).containsExactly(10003, 15001);
-        assertThat(state.getBannedSkillIdsList()).containsExactly(10003, 10007, 10011, 15001);
-
-        // 双方均无法施放被禁技能 10003（返回 kSkillBannedInBattle），但基础技 10002 与未禁技 10019 可用
-        BattleAction cast10003 = BattleAction.newBuilder()
-                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
-                .setSkillTableId(10003)
-                .setTargetId(6503L)
-                .build();
-        BattleAction cast10002 = BattleAction.newBuilder()
-                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
-                .setSkillTableId(10002)
-                .setTargetId(6503L)
-                .build();
-        assertThat(engine.validateAction(6501L, cast10003)).isEqualTo(ActionChecks.SKILL_BANNED_IN_BATTLE);
-        assertThat(engine.validateAction(6503L, cast10003.toBuilder().setTargetId(6501L).build()))
-                .isEqualTo(ActionChecks.SKILL_BANNED_IN_BATTLE);
-        assertThat(engine.validateAction(6501L, cast10002)).isEqualTo(ActionChecks.SUCCESS);
-
-        // A41 玄镜映法(10027) 对 6502(仅学了 10002 与被禁的 10003) 施放时绝不复制到被禁技能 10003
-        assertThat(engine.submitAction(6501L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build()))
+        assertThat(engine.submitAction(6601L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_ATTACK).setTargetId(6602L).build()))
                 .isEqualTo(ActionChecks.SUCCESS);
-        assertThat(engine.submitAction(6502L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build()))
-                .isEqualTo(ActionChecks.SUCCESS);
-        assertThat(engine.submitAction(6503L, BattleAction.newBuilder()
-                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
-                .setSkillTableId(10027)
-                .setTargetId(6502L)
-                .build())).isEqualTo(ActionChecks.SUCCESS);
-        TurnResultS2C r1 = engine.resolveCurrentRound();
-        assertThat(r1.getEventsList()).noneMatch(e -> e.getSkillTableId() == 10003);
+        engine.submitAction(6602L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        engine.resolveCurrentRound();
+        assertThat(engine.outcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN);
 
-        // 自定义切磋：免费模板与 3 Ban 互斥必须被拒；自养纯 3 Ban 可正常开局且仅开禁招不开换宠/换印
-        CreateBattleRequest badDuel = CreateBattleRequest.newBuilder()
-                .setBattleId(9902L)
-                .setBattleConfigId(5)
-                .setMatchMode(MatchMode.MATCH_MODE_PVP_CHALLENGE_VALUE)
-                .setSeed(888L)
-                .setCustomDuelRules(com.game.proto.CustomDuelRules.newBuilder()
-                        .setUseFreePreset(true).setSkillBanSlotsPerTeam(3).build())
-                .addPlayers(pA1)
-                .addPlayers(pB1)
-                .build();
-        assertThat(TurnBattleEngine.start(badDuel, data)).isInstanceOf(BattleStart.Rejected.class);
+        BattleSettlementData settleA = engine.buildSettlement(6601L);
+        assertThat(settleA.getRevengedRival()).isTrue();
+        assertThat(settleA.getRevengedOpponentName()).isEqualTo("玄烈");
+        assertThat(settleA.getRevengedWinsAfter()).isEqualTo(2);
+        assertThat(settleA.getRevengedLossesAfter()).isEqualTo(2);
+        assertThat(settleA.getFinalSeasonSealId()).isEqualTo(103);
+        assertThat(settleA.getStarterPetTableId()).isEqualTo(2);
+        assertThat(settleA.getPlayerDisplayName()).isEqualTo("青云");
+        assertThat(settleA.getCoreSkillIdsList()).contains(10002, 10003);
 
-        CreateBattleRequest okDuel = badDuel.toBuilder()
-                .setBattleId(9903L)
-                .setCustomDuelRules(com.game.proto.CustomDuelRules.newBuilder()
-                        .setUseFreePreset(false).setSkillBanSlotsPerTeam(3).build())
-                .build();
-        TurnBattleEngine duelEngine = ((BattleStart.Started) TurnBattleEngine.start(okDuel, data)).engine();
-        assertThat(duelEngine.isInPrepPhase()).isTrue();
-        assertThat(duelEngine.prepDurationSeconds()).isEqualTo(BattleConstants.TACTICAL_PREP_WITH_BAN_DURATION_SECONDS);
-        BattlePrepState duelPrep = duelEngine.prepStateForViewer(6501L, 99999L);
-        assertThat(duelPrep.getSkillBanSlotsPerTeam()).isEqualTo(3);
-        assertThat(duelPrep.getSelfAvailableSealsList()).isEmpty();
-        assertThat(duelPrep.getSelfAvailablePetsList()).isEmpty();
+        BattleSettlementData settleB = engine.buildSettlement(6602L);
+        assertThat(settleB.getRevengedRival()).isFalse();
     }
 }

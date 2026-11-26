@@ -21,6 +21,7 @@ import com.game.scene.player.BagType;
 import com.game.scene.player.PlayerBags;
 import com.game.scene.player.PlayerClientRequestLedger;
 import com.game.scene.player.PlayerClientRequestLedger.Verdict;
+import com.game.scene.player.PlayerLevels;
 import com.game.scene.player.PlayerSpiritShop;
 import com.game.scene.player.Wallet;
 import com.game.scene.spiritshop.SpiritShopTables.ItemGrant;
@@ -62,6 +63,9 @@ public final class SpiritShopService {
     public static final int FROZEN = SpiritShopErrorTip.spirit_shop_error.kSpiritShopFrozen_VALUE;
     public static final int IN_BATTLE = SpiritShopErrorTip.spirit_shop_error.kSpiritShopInBattle_VALUE;
     public static final int ITEM_BLOCKED = SpiritShopErrorTip.spirit_shop_error.kSpiritShopItemBlocked_VALUE;
+    public static final int NOT_IN_SALE_WINDOW = SpiritShopErrorTip.spirit_shop_error.kSpiritShopNotInSaleWindow_VALUE;
+    public static final int LEVEL_NOT_MET = SpiritShopErrorTip.spirit_shop_error.kSpiritShopLevelNotMet_VALUE;
+    public static final int INVALID_CHOICE = SpiritShopErrorTip.spirit_shop_error.kSpiritShopInvalidChoice_VALUE;
 
     private final SpiritShopTables tables;
     private final BagService bags;
@@ -116,7 +120,11 @@ public final class SpiritShopService {
                     .setNextResetMs(group.resetKind() == PlayerSpiritShop.RESET_WEEKLY ? nextResetMs : 0L));
         }
 
+        int effLevel = effectiveLevel(player);
         for (ResolvedGoods g : tables.sellableGoods()) {
+            if (!g.isInSaleWindow(nowMs) || !g.isLevelEligible(effLevel)) {
+                continue;
+            }
             long bought = shop.boughtCount(g.goodsId(), g.limitResetKind(), weekStartMs);
             SpiritShopGoodsView.Builder gv = SpiritShopGoodsView.newBuilder()
                     .setGoodsId(g.goodsId())
@@ -135,7 +143,13 @@ public final class SpiritShopService {
                     .setLimitGroupId(g.limitGroupId())
                     .setLimitGroupWeight(g.limitGroupWeight())
                     .setNextResetMs(g.limitCount() > 0 && g.limitResetKind() == PlayerSpiritShop.RESET_WEEKLY
-                            ? nextResetMs : 0L);
+                            ? nextResetMs : 0L)
+                    .setStartTimeMs(g.startTimeMs())
+                    .setEndTimeMs(g.endTimeMs())
+                    .setGrantMode(g.grantMode())
+                    .setOriginalPrice(g.originalPrice())
+                    .setMinLevel(g.minLevel())
+                    .setMaxLevel(g.maxLevel());
             for (ItemGrant grant : g.items()) {
                 gv.addItems(SpiritShopItemEntry.newBuilder()
                         .setItemConfigId(grant.itemConfigId())
@@ -147,7 +161,7 @@ public final class SpiritShopService {
         return out.build();
     }
 
-    /** 510 BuySpiritShopGoods：严格按 §2.6 不可重排顺序执行幂等、闸门、报价、限购、封禁与原子提交。 */
+    /** 510 BuySpiritShopGoods：严格按 §2.6 不可重排顺序执行幂等、闸门、定时窗、等级、自选、报价、限购、封禁与原子提交。 */
     public BuySpiritShopGoodsResponse buy(SceneWorld world, ScenePlayer player, BuySpiritShopGoodsRequest req,
                                           BagFeature bagView, long nowMs) {
         // 1. 参数与幂等查重（排在一切状态预检之前）
@@ -177,18 +191,29 @@ public final class SpiritShopService {
             return rejectBuy(IN_BATTLE);
         }
 
-        // 3. 查表校验与报价防呆
+        // 3. 查表校验、定时上下架、等级阶段、自选下标与报价防呆
         ResolvedGoods goods = tables.sellableGoods(req.getGoodsId());
         if (goods == null) {
             return rejectBuy(GOODS_OFF_SHELF);
+        }
+        if (!goods.isInSaleWindow(nowMs)) {
+            return rejectBuy(NOT_IN_SALE_WINDOW);
+        }
+        if (!goods.isLevelEligible(effectiveLevel(player))) {
+            return rejectBuy(LEVEL_NOT_MET);
         }
         int rawCount = req.getCount();
         if (rawCount == 0 || Integer.compareUnsigned(rawCount, goods.maxBuyPerRequest()) > 0) {
             return rejectBuy(INVALID_COUNT);
         }
+        int chosenItemIndex = req.getChosenItemIndex();
+        List<ItemGrant> selectedItems = goods.resolveSelectedItems(chosenItemIndex);
+        if (selectedItems == null) {
+            return rejectBuy(INVALID_CHOICE);
+        }
         if (req.getExpectedCurrencyType() != goods.currencyType()
                 || req.getExpectedUnitPrice() != goods.unitPrice()
-                || !itemsMatch(req.getExpectedItemsList(), goods.items())) {
+                || !itemsMatch(req.getExpectedItemsList(), selectedItems)) {
             return rejectBuy(PRICE_CHANGED);
         }
 
@@ -235,8 +260,8 @@ public final class SpiritShopService {
             return rejectBuy(UNAVAILABLE);
         }
 
-        // 5. 封禁、余额与数量边界预检（严格按 currency_type 校验，绝不拿绑定灵石抵扣灵石）
-        for (ItemGrant grant : goods.items()) {
+        // 5. 封禁、余额与数量边界预检（仅对本次实际发放的 selectedItems 校验，绝不拿绑定灵石抵扣灵石）
+        for (ItemGrant grant : selectedItems) {
             if (bags.isItemGainBlocked(player, grant.itemConfigId())) {
                 return rejectBuy(ITEM_BLOCKED);
             }
@@ -253,11 +278,11 @@ public final class SpiritShopService {
             return rejectBuy(CURRENCY_NOT_ENOUGH);
         }
 
-        // 6. 原子候选规划与单事务提交（先克隆背包全量规划双物品与绑定分堆，再扣灵石与背包同帧发布）
+        // 6. 原子候选规划与单事务提交（先克隆背包全量规划 1..4 项物品与绑定分堆，再扣灵石与背包同帧发布）
         PlayerBags candidateBags = PlayerBags.restore(player.bags().toState());
         candidateBags.normalize(bags.tables());
-        List<Bag.Written> allWritten = new ArrayList<>(goods.items().size());
-        for (ItemGrant grant : goods.items()) {
+        List<Bag.Written> allWritten = new ArrayList<>(selectedItems.size());
+        for (ItemGrant grant : selectedItems) {
             long totalQty = Integer.toUnsignedLong(grant.itemCount()) * count;
             Bag.AddResult added = bags.prepareEquipmentGrant(player, candidateBags,
                     Map.of(grant.itemConfigId(), totalQty), grant.bound());
@@ -278,7 +303,9 @@ public final class SpiritShopService {
                 + ",\"count\":" + count
                 + ",\"unit_price\":" + Long.toUnsignedString(goods.unitPrice())
                 + ",\"currency_type\":" + goods.currencyType()
-                + ",\"bound\":" + goods.allBound() + "}";
+                + ",\"grant_mode\":" + goods.grantMode()
+                + ",\"chosen_item_index\":" + Integer.toUnsignedString(chosenItemIndex)
+                + ",\"bound\":" + ResolvedGoods.allBound(selectedItems) + "}";
         deduction.commit(candidateBags, AssetAudit.Reason.SPIRIT_SHOP_BUY, clientRequestId, extra);
         shop.recordPurchase(goods.goodsId(), count, goods.limitResetKind(),
                 goods.limitGroupId(), addWeight, groupResetKind, weekStartMs);
@@ -293,6 +320,10 @@ public final class SpiritShopService {
             world.requestKeyProgressSave(player);
         }
         return successBuy(player, bagView, nowMs, false);
+    }
+
+    private static int effectiveLevel(ScenePlayer player) {
+        return PlayerLevels.effective(PlayerLevels.clampStored(player.level()));
     }
 
     private static boolean hasUnknownFields(BuySpiritShopGoodsRequest req) {

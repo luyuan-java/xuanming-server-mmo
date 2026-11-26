@@ -6,9 +6,11 @@ import com.game.match.feature.pb.MatchBattleScriptReviewRow;
 import com.game.match.feature.pb.MatchBattleScriptRow;
 import com.game.match.feature.pb.MatchPlayerBattleReportRow;
 import com.game.match.feature.pb.MatchRankedBattleRow;
+import com.game.match.feature.pb.MatchRankedFeaturedBuildRow;
 import com.game.match.feature.pb.MatchRankedPlayerPrefsRow;
 import com.game.match.feature.pb.MatchRankedPlayerSeasonRow;
 import com.game.match.feature.pb.MatchRankedRewardRow;
+import com.game.match.feature.pb.MatchRankedRivalryRow;
 import com.game.match.feature.pb.MatchRankedSeasonRow;
 import com.game.match.feature.pb.MatchTournamentCheerRow;
 import com.game.match.feature.pb.MatchTournamentInviteRow;
@@ -41,6 +43,8 @@ public final class MatchFeatureTables {
     public static final String RANKED_PLAYER_SEASON = "match_ranked_player_season";
     public static final String RANKED_REWARD = "match_ranked_reward";
     public static final String RANKED_BATTLE = "match_ranked_battle";
+    public static final String RANKED_RIVALRY = "match_ranked_rivalry";
+    public static final String RANKED_FEATURED_BUILD = "match_ranked_featured_build";
     public static final String TOURNAMENT_SEASON = "match_tournament_season";
     public static final String TOURNAMENT_SQUAD = "match_tournament_squad";
     public static final String TOURNAMENT_MEMBER = "match_tournament_member";
@@ -63,6 +67,8 @@ public final class MatchFeatureTables {
             MatchRankedPlayerSeasonRow.getDefaultInstance(),
             MatchRankedRewardRow.getDefaultInstance(),
             MatchRankedBattleRow.getDefaultInstance(),
+            MatchRankedRivalryRow.getDefaultInstance(),
+            MatchRankedFeaturedBuildRow.getDefaultInstance(),
             MatchTournamentSeasonRow.getDefaultInstance(),
             MatchTournamentSquadRow.getDefaultInstance(),
             MatchTournamentMemberRow.getDefaultInstance(),

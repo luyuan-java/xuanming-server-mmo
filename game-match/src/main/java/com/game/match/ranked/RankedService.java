@@ -65,6 +65,8 @@ public final class RankedService {
                     .setSelectedPresets(store.toPresetSelection(data.prefs()))
                     .setCosmeticLoadout(store.toCosmeticLoadout(data.prefs(), data.entitlements()))
                     .addAllPresets(tables.presetViews())
+                    .addAllFeaturedBuilds(data.featuredBuilds())
+                    .addAllTopRivals(data.topRivals())
                     .setServerTimeMs(clockMs.getAsLong());
             for (MatchRankedRewardRow r : data.entitlements()) {
                 resp.addEntitlements(RankedStore.toEntitlement(r));

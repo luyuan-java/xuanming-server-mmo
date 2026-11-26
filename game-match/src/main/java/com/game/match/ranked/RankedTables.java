@@ -35,8 +35,11 @@ public final class RankedTables {
     public static final int ROLE_KIND_CHARACTER = 1;
     public static final int ROLE_KIND_PET = 2;
     public static final int BOSS_TRIAL_KIND_GUARD_RESCUE = 5;
-    public static final int BOSS_TRIAL_KIND_FESTIVAL_BEAST = 7;
     public static final int BOSS_TRIAL_KIND_POLARITY = 6;
+    public static final int BOSS_TRIAL_KIND_FESTIVAL_BEAST = 7;
+    public static final int BOSS_TRIAL_KIND_PRACTICE_DUMMY = 9;
+    public static final int BOSS_TRIAL_KIND_TACTICAL_PUZZLE = 10;
+    public static final int BOSS_TRIAL_KIND_CHARACTER_TALE = 11;
     public static final long INITIAL_RATING_CENTI = 150_000L;
     public static final List<Integer> PRIMARY_TEAM_SIZES = List.of(1, 3, 5);
     public static final List<Integer> SPECIAL_TEAM_SIZES = List.of(2, 4);
@@ -279,6 +282,12 @@ public final class RankedTables {
     /** 娱乐轮换免费 3×3 预设判定：物法易势 5V5 或 护卫救援（Dungeon 109, boss_trial_kind=5）。 */
     public boolean usesFreePreset(int mode, int configId) {
         return mode == MatchModes.POLARITY_5V5 || bossTrialKind(configId) == BOSS_TRIAL_KIND_GUARD_RESCUE;
+    }
+
+    /** 归元城残局考题（10）与人物奇谈（11）允许单人按票据选配免费 3×3 预设；演武木桩（9）禁止预设。 */
+    public boolean allowsOptionalFreePreset(int configId) {
+        int kind = bossTrialKind(configId);
+        return kind == BOSS_TRIAL_KIND_TACTICAL_PUZZLE || kind == BOSS_TRIAL_KIND_CHARACTER_TALE;
     }
 
     public String configFingerprint() {

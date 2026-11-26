@@ -5,6 +5,8 @@ import com.game.table.CharacterAppearanceTable;
 import com.game.table.ConfigTables;
 import com.game.table.EquipArtifactTable;
 import com.game.table.ItemTable;
+import com.game.table.PetCosmeticTable;
+import com.game.table.SkillVfxCosmeticTable;
 import com.game.table.TrialJournalEntryTable;
 import com.game.table.TrialJournalMilestoneTable;
 import com.game.table.TrialJournalSealTable;
@@ -63,6 +65,8 @@ public final class TrialJournalTables {
     private final List<RedeemableArtifact> redeemableArtifacts;
     private final Map<Integer, RedeemableArtifact> redeemableByItemId;
     private final Map<String, CharacterAppearanceTable> appearanceById;
+    private final Map<Integer, PetCosmeticTable> petCosmeticById;
+    private final Map<Integer, SkillVfxCosmeticTable> skillVfxById;
 
     private TrialJournalTables(List<TrialJournalEntryTable> entries,
                                Map<Integer, TrialJournalEntryTable> entryById,
@@ -73,7 +77,9 @@ public final class TrialJournalTables {
                                Map<Integer, Integer> milestoneBitIndex,
                                List<RedeemableArtifact> redeemableArtifacts,
                                Map<Integer, RedeemableArtifact> redeemableByItemId,
-                               Map<String, CharacterAppearanceTable> appearanceById) {
+                               Map<String, CharacterAppearanceTable> appearanceById,
+                               Map<Integer, PetCosmeticTable> petCosmeticById,
+                               Map<Integer, SkillVfxCosmeticTable> skillVfxById) {
         this.entries = entries;
         this.entryById = entryById;
         this.sealsByEntryId = sealsByEntryId;
@@ -84,6 +90,8 @@ public final class TrialJournalTables {
         this.redeemableArtifacts = redeemableArtifacts;
         this.redeemableByItemId = redeemableByItemId;
         this.appearanceById = appearanceById;
+        this.petCosmeticById = petCosmeticById;
+        this.skillVfxById = skillVfxById;
     }
 
     public static TrialJournalTables from(ConfigTables config) {
@@ -107,6 +115,14 @@ public final class TrialJournalTables {
             if (!row.getAppearanceId().isEmpty()) {
                 appearances.put(row.getAppearanceId(), row);
             }
+        }
+        Map<Integer, PetCosmeticTable> petCosmetics = new HashMap<>();
+        for (PetCosmeticTable row : config.petCosmetic().all()) {
+            petCosmetics.put(row.getId(), row);
+        }
+        Map<Integer, SkillVfxCosmeticTable> skillVfxs = new HashMap<>();
+        for (SkillVfxCosmeticTable row : config.skillVfxCosmetic().all()) {
+            skillVfxs.put(row.getId(), row);
         }
 
         Map<Integer, TrialJournalEntryTable> entryMap = new LinkedHashMap<>(entryRows.size() * 2);
@@ -157,6 +173,14 @@ public final class TrialJournalTables {
                 throw new IllegalStateException("TrialJournalMilestone id=" + m.getId()
                         + " 的 grant_appearance_id=" + m.getGrantAppearanceId() + " 缺失、停用或允许卡解锁");
             }
+            if (!isValidExclusivePetCosmetic(m.getGrantPetCosmeticId(), petCosmetics)) {
+                throw new IllegalStateException("TrialJournalMilestone id=" + m.getId()
+                        + " 的 grant_pet_cosmetic_id=" + m.getGrantPetCosmeticId() + " 缺失、停用或属于可购买外观");
+            }
+            if (!isValidExclusiveSkillVfx(m.getGrantSkillVfxId(), skillVfxs)) {
+                throw new IllegalStateException("TrialJournalMilestone id=" + m.getId()
+                        + " 的 grant_skill_vfx_id=" + m.getGrantSkillVfxId() + " 缺失、停用或属于可购买外观");
+            }
             milestoneMap.put(m.getId(), m);
         }
 
@@ -184,7 +208,7 @@ public final class TrialJournalTables {
                 milestoneRows, Map.copyOf(milestoneMap),
                 Map.copyOf(sealBits), Map.copyOf(milestoneBits),
                 List.copyOf(artifacts), Map.copyOf(artifactMap),
-                Map.copyOf(appearances));
+                Map.copyOf(appearances), Map.copyOf(petCosmetics), Map.copyOf(skillVfxs));
     }
 
     private static boolean isValidExclusiveAppearance(String appearanceId,
@@ -196,8 +220,36 @@ public final class TrialJournalTables {
         return row != null && row.getEnabled() != 0 && row.getCardUnlockable() == 0;
     }
 
+    private static boolean isValidExclusivePetCosmetic(int cosmeticId,
+                                                       Map<Integer, PetCosmeticTable> petCosmetics) {
+        if (cosmeticId == 0) {
+            return true;
+        }
+        PetCosmeticTable row = petCosmetics.get(cosmeticId);
+        return row != null && row.getEnabled() != 0 && row.getCardItemId() == 0
+                && row.getMallSkuId() == 0L && row.getSpiritShopGoodsId() == 0;
+    }
+
+    private static boolean isValidExclusiveSkillVfx(int cosmeticId,
+                                                    Map<Integer, SkillVfxCosmeticTable> skillVfxs) {
+        if (cosmeticId == 0) {
+            return true;
+        }
+        SkillVfxCosmeticTable row = skillVfxs.get(cosmeticId);
+        return row != null && row.getEnabled() != 0 && row.getCardItemId() == 0
+                && row.getMallSkuId() == 0L && row.getSpiritShopGoodsId() == 0;
+    }
+
     public boolean isValidExclusiveAppearance(String appearanceId) {
         return isValidExclusiveAppearance(appearanceId, appearanceById);
+    }
+
+    public boolean isValidExclusivePetCosmetic(int cosmeticId) {
+        return isValidExclusivePetCosmetic(cosmeticId, petCosmeticById);
+    }
+
+    public boolean isValidExclusiveSkillVfx(int cosmeticId) {
+        return isValidExclusiveSkillVfx(cosmeticId, skillVfxById);
     }
 
     public String appearanceDisplayName(String appearanceId) {
@@ -205,6 +257,22 @@ public final class TrialJournalTables {
             return "";
         }
         CharacterAppearanceTable row = appearanceById.get(appearanceId);
+        return row == null ? "" : row.getName();
+    }
+
+    public String petCosmeticDisplayName(int cosmeticId) {
+        if (cosmeticId == 0) {
+            return "";
+        }
+        PetCosmeticTable row = petCosmeticById.get(cosmeticId);
+        return row == null ? "" : row.getName();
+    }
+
+    public String skillVfxDisplayName(int cosmeticId) {
+        if (cosmeticId == 0) {
+            return "";
+        }
+        SkillVfxCosmeticTable row = skillVfxById.get(cosmeticId);
         return row == null ? "" : row.getName();
     }
 

@@ -299,6 +299,176 @@ class SpiritShopFeatureAndServiceTest {
         assertThat(invalidShop.toState().getGoodsRecordsCount()).isEqualTo(2);
     }
 
+    @Test
+    void V2_定时上下架_等级解锁_四件大礼包原子回滚与多选一自选包全链路() {
+        // 2027 春节礼盒定时窗：2027-02-05 00:00:00 +08:00 ~ 2027-02-20 23:59:59 +08:00
+        long springStartMs = 1_801_756_800_000L;
+        long springEndMs = 1_803_139_199_000L;
+
+        // 1. V2 配表 fail-closed 拦截坏行（时间倒挂、原价<=现价、等级倒挂、跳槽填 item3、单物品设为多选一）
+        SpiritShopGoodsTable badWindow = SpiritShopGoodsTable.newBuilder()
+                .setId(601).setTabId(4).setSortOrder(1).setEnabled(1).setName("时间倒挂")
+                .setCurrencyType(Wallet.DIAMOND).setPrice(100).setMaxBuyPerRequest(1)
+                .setItemId1(3405).setItemCount1(1).setItemBound1(1)
+                .setStartTimeMs(springEndMs).setEndTimeMs(springStartMs).build();
+        SpiritShopGoodsTable badOriginalPrice = SpiritShopGoodsTable.newBuilder()
+                .setId(602).setTabId(4).setSortOrder(2).setEnabled(1).setName("原价不高于现价")
+                .setCurrencyType(Wallet.DIAMOND).setPrice(100).setOriginalPrice(100).setMaxBuyPerRequest(1)
+                .setItemId1(3405).setItemCount1(1).setItemBound1(1).build();
+        SpiritShopGoodsTable badLevelRange = SpiritShopGoodsTable.newBuilder()
+                .setId(603).setTabId(4).setSortOrder(3).setEnabled(1).setName("等级倒挂")
+                .setCurrencyType(Wallet.DIAMOND).setPrice(100).setMaxBuyPerRequest(1)
+                .setItemId1(3405).setItemCount1(1).setItemBound1(1)
+                .setMinLevel(30).setMaxLevel(20).build();
+        SpiritShopGoodsTable badGap = SpiritShopGoodsTable.newBuilder()
+                .setId(604).setTabId(4).setSortOrder(4).setEnabled(1).setName("跳槽填物品3")
+                .setCurrencyType(Wallet.DIAMOND).setPrice(100).setMaxBuyPerRequest(1)
+                .setItemId1(3001).setItemCount1(1).setItemBound1(1)
+                .setItemId3(3405).setItemCount3(1).setItemBound3(1).build();
+        SpiritShopGoodsTable badChooseOne = SpiritShopGoodsTable.newBuilder()
+                .setId(605).setTabId(4).setSortOrder(5).setEnabled(1).setName("单物品自选")
+                .setCurrencyType(Wallet.DIAMOND).setPrice(100).setMaxBuyPerRequest(1)
+                .setGrantMode(SpiritShopTables.GRANT_MODE_CHOOSE_ONE)
+                .setItemId1(3405).setItemCount1(1).setItemBound1(1).build();
+        SpiritShopTables checkedBad = new SpiritShopTables(
+                List.of(), List.of(badWindow, badOriginalPrice, badLevelRange, badGap, badChooseOne),
+                BattleFixture.CONFIG.item().all());
+        assertThat(checkedBad.sellableGoods()).isEmpty();
+
+        // 2. 真实 2027 春节礼盒（401 / 402）定时窗与等级门槛
+        BattleFixture f = new BattleFixture();
+        ScenePlayer player = f.enter(11, 1004);
+        assertThat(f.currency.add(player, Wallet.DIAMOND, 1000L, Reason.GM_GRANT).ok()).isTrue();
+        SpiritShopService service = new SpiritShopService(
+                SpiritShopTables.from(BattleFixture.CONFIG), f.bags, f.currency, f.clock, f.sceneMetrics);
+        BagFeature bagFeature = new BagFeature(f.bags);
+
+        player.setLevel(20);
+        // 开售前 1ms：隐藏 401/402，仅 9 件常驻
+        assertThat(service.buildInfo(player, springStartMs - 1).getGoodsList()).hasSize(9);
+
+        // 先在活动期拉一份 401 与 402 报价
+        List<SpiritShopGoodsView> inWindowGoods = service.buildInfo(player, springStartMs).getGoodsList();
+        assertThat(inWindowGoods).hasSize(11);
+        SpiritShopGoodsView g401 = goodsView(inWindowGoods, 401);
+        SpiritShopGoodsView g402 = goodsView(inWindowGoods, 402);
+        assertThat(g401.getTabId()).isEqualTo(4);
+        assertThat(g401.getUnitPrice()).isEqualTo(180L);
+        assertThat(g401.getOriginalPrice()).isEqualTo(300L);
+        assertThat(g401.getGrantMode()).isEqualTo(SpiritShopTables.GRANT_MODE_ALL);
+        assertThat(g401.getItemsCount()).isEqualTo(4);
+        assertThat(g402.getTabId()).isEqualTo(4);
+        assertThat(g402.getUnitPrice()).isEqualTo(120L);
+        assertThat(g402.getOriginalPrice()).isEqualTo(180L);
+        assertThat(g402.getGrantMode()).isEqualTo(SpiritShopTables.GRANT_MODE_CHOOSE_ONE);
+        assertThat(g402.getItemsCount()).isEqualTo(4);
+
+        BuySpiritShopGoodsRequest buy401 = buyReq(9501L, g401, 1);
+        // 开售前直接发包 -> 37011
+        assertThat(service.buy(f.world, player, buy401, bagFeature, springStartMs - 1).getErrorMessage().getId())
+                .isEqualTo(SpiritShopService.NOT_IN_SALE_WINDOW);
+
+        // 活动期内但等级 9 < min_level(10) -> 货架隐藏 + 购买回 37012
+        player.setLevel(9);
+        assertThat(service.buildInfo(player, springStartMs).getGoodsList()).hasSize(9);
+        assertThat(service.buy(f.world, player, buy401, bagFeature, springStartMs).getErrorMessage().getId())
+                .isEqualTo(SpiritShopService.LEVEL_NOT_MET);
+
+        // 3. 满包 4 物品原子回滚：把背包填到仅剩 3 格空位 -> 401 需要 4 格，必须整批回滚 37007 零扣费零发物
+        player.setLevel(10);
+        Bag inv = player.bags().bag(BagType.INVENTORY);
+        int fillSlots = inv.capacity() - 3;
+        int singleStackItemId = BattleFixture.CONFIG.item().all().stream()
+                .filter(it -> it.getMaxStackSize() == 1)
+                .findFirst().orElseThrow().getId();
+        assertThat(f.bags.addItems(player, BagType.INVENTORY, Map.of(singleStackItemId, (long) fillSlots),
+                true, Reason.GM_GRANT, 0L, "").ok()).isTrue();
+        assertThat(service.buy(f.world, player, buy401, bagFeature, springStartMs).getErrorMessage().getId())
+                .isEqualTo(SpiritShopService.BAG_FULL);
+        assertThat(player.wallet().balance(Wallet.DIAMOND)).isEqualTo(1000L);
+        assertThat(inv.total(3001)).isZero();
+        assertThat(inv.total(3402)).isZero();
+
+        // 腾出足够空间（清空测试占位物品）
+        assertThat(f.bags.removeItems(player, BagType.INVENTORY, Map.of(singleStackItemId, (long) fillSlots),
+                Reason.GM_DEDUCT, 0L, "").ok()).isTrue();
+
+        // 4. ALL 礼包传非 0 chosen_item_index -> 37013；正常购买 -> 按折后价 180 扣费并发 4 件绑定物
+        assertThat(service.buy(f.world, player, buy401.toBuilder().setClientRequestId(9502L).setChosenItemIndex(1).build(),
+                bagFeature, springStartMs).getErrorMessage().getId())
+                .isEqualTo(SpiritShopService.INVALID_CHOICE);
+
+        BuySpiritShopGoodsResponse r401 = service.buy(f.world, player, buy401, bagFeature, springStartMs);
+        assertThat(r401.getErrorMessage().getId()).isZero();
+        assertThat(player.wallet().balance(Wallet.DIAMOND)).isEqualTo(820L);
+        assertThat(boundQuantity(inv, 3001)).isEqualTo(60L);
+        assertThat(boundQuantity(inv, 3002)).isEqualTo(60L);
+        assertThat(boundQuantity(inv, 3405)).isEqualTo(2L);
+        assertThat(boundQuantity(inv, 3402)).isEqualTo(1L);
+        assertThat(service.buy(f.world, player, buy401.toBuilder().setClientRequestId(9503L).build(),
+                bagFeature, springStartMs).getErrorMessage().getId())
+                .isEqualTo(SpiritShopService.LIMIT_REACHED);
+
+        // 5. 多选一自选包（402）：越界下标 37013、下标与 expected_items 错配 37002、仅校验选中项封禁、限购 2 份
+        BuySpiritShopGoodsRequest buy402Choice1 = BuySpiritShopGoodsRequest.newBuilder()
+                .setClientRequestId(9601L)
+                .setGoodsId(402)
+                .setCount(1)
+                .setExpectedCurrencyType(g402.getCurrencyType())
+                .setExpectedUnitPrice(g402.getUnitPrice())
+                .setChosenItemIndex(1)
+                .addExpectedItems(g402.getItems(1)) // 3412 x1
+                .build();
+        assertThat(service.buy(f.world, player, buy402Choice1.toBuilder().setClientRequestId(9600L).setChosenItemIndex(4).build(),
+                bagFeature, springStartMs).getErrorMessage().getId())
+                .isEqualTo(SpiritShopService.INVALID_CHOICE);
+        assertThat(service.buy(f.world, player, buy402Choice1.toBuilder().setClientRequestId(9600L).setChosenItemIndex(0).build(),
+                bagFeature, springStartMs).getErrorMessage().getId())
+                .isEqualTo(SpiritShopService.PRICE_CHANGED);
+
+        // 封禁未选中的候选项 3405（下标 3）：选下标 1（3412）不受影响照常买成，选下标 3 拒回 37010
+        assertThat(f.bags.blockItemGain(player, 3405)).isZero();
+        BuySpiritShopGoodsResponse r402c1 = service.buy(f.world, player, buy402Choice1, bagFeature, springStartMs);
+        assertThat(r402c1.getErrorMessage().getId()).isZero();
+        assertThat(player.wallet().balance(Wallet.DIAMOND)).isEqualTo(700L);
+        assertThat(boundQuantity(inv, 3412)).isEqualTo(1L);
+        assertThat(inv.total(3408)).isZero();
+
+        BuySpiritShopGoodsRequest buy402Choice3 = BuySpiritShopGoodsRequest.newBuilder()
+                .setClientRequestId(9602L)
+                .setGoodsId(402)
+                .setCount(1)
+                .setExpectedCurrencyType(g402.getCurrencyType())
+                .setExpectedUnitPrice(g402.getUnitPrice())
+                .setChosenItemIndex(3)
+                .addExpectedItems(g402.getItems(3)) // 3405 x3
+                .build();
+        assertThat(service.buy(f.world, player, buy402Choice3, bagFeature, springStartMs).getErrorMessage().getId())
+                .isEqualTo(SpiritShopService.ITEM_BLOCKED);
+        assertThat(f.bags.unblockItemGain(player, 3405)).isZero();
+
+        assertThat(service.buy(f.world, player, buy402Choice3, bagFeature, springStartMs).getErrorMessage().getId()).isZero();
+        assertThat(player.wallet().balance(Wallet.DIAMOND)).isEqualTo(580L);
+        assertThat(boundQuantity(inv, 3405)).isEqualTo(5L); // 401 给的 2 + 402 选的 3
+
+        // 同幂等键 9601 篡改下标 -> 1005；过期后新单拒回 37011，但旧 9601 仍幂等重放成功且零重复发物
+        assertThat(service.buy(f.world, player,
+                buy402Choice1.toBuilder().setChosenItemIndex(2).clearExpectedItems().addExpectedItems(g402.getItems(2)).build(),
+                bagFeature, springStartMs).getErrorMessage().getId())
+                .isEqualTo(SpiritShopService.INVALID_PARAMETER);
+
+        assertThat(service.buildInfo(player, springEndMs).getGoodsList()).hasSize(9);
+        assertThat(service.buy(f.world, player, buy402Choice1.toBuilder().setClientRequestId(9699L).build(),
+                bagFeature, springEndMs).getErrorMessage().getId())
+                .isEqualTo(SpiritShopService.NOT_IN_SALE_WINDOW);
+
+        BuySpiritShopGoodsResponse expiredReplay = service.buy(f.world, player, buy402Choice1, bagFeature, springEndMs + 1000L);
+        assertThat(expiredReplay.getErrorMessage().getId()).isZero();
+        assertThat(expiredReplay.getReplayed()).isTrue();
+        assertThat(boundQuantity(inv, 3412)).isEqualTo(1L);
+        assertThat(player.wallet().balance(Wallet.DIAMOND)).isEqualTo(580L);
+    }
+
     private static SpiritShopGoodsView goodsView(List<SpiritShopGoodsView> list, int goodsId) {
         return list.stream().filter(g -> g.getGoodsId() == goodsId).findFirst().orElseThrow();
     }
