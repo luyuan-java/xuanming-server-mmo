@@ -229,6 +229,8 @@ public final class SceneWorld {
     private final Map<SessionKey, ScenePlayer> playersBySession = new HashMap<>();
     /** 场景实体号 → 玩家（节点内全部场景；技能目标按实体号找人，同基线 actorRegistry）。 */
     private final Map<Long, ScenePlayer> playersByEntity = new HashMap<>();
+    /** 关键进度存盘撞到已有在途写时记下待补存标记，等当前写回调完成后立即补发，不丢关键进度。 */
+    private final java.util.Set<Long> pendingKeyProgressSaves = new java.util.HashSet<>();
     /** 已收到 PlayerEnter、正在加载存档的会话。离开 / 断链时删掉即取消，加载回来发现不在就丢弃。 */
     private final Map<SessionKey, PendingEnter> pendingEnters = new HashMap<>();
     private record FinalKey(long playerId,long epoch) { }
@@ -1727,6 +1729,11 @@ public final class SceneWorld {
             log.warn("存档等级超出上限，压回 {} player={} 存档等级={}", level, playerId, Integer.toUnsignedLong(data.level()));
         }
         PlayerState state = data.state();
+        String appearanceId = data.appearanceId();
+        String name = data.name();
+        long renamedMs = data.renamedMs();
+        long afkPassExpiresAt = data.afkPassExpiresAt();
+        long afkPassLastReqId = data.afkPassLastReqId();
         List<Integer> skills = tables.initialSkills(data.classId());
         if (previous != null) {
             // 本节点上还挂着这个玩家的旧实例，而库里的归属已经被这次进场夺走——只会发生在旧实例失去归属之后
@@ -1735,11 +1742,16 @@ public final class SceneWorld {
             if (previous.ownerEpoch() == epoch
                     || previous.lastPersisted() != null && sameContent(previous.lastPersisted(), data.asPersisted())) {
                 // 同一 epoch 的重复进场（旧实例仍持有归属，不可能有别的写者），或库里仍是旧实例最近一次确认写进去的样子
-                // （期间没有别的节点写过）：旧实例的内存只会更新，沿用它。
+                // （期间没有别的节点写过）：旧实例的内存只会更新，沿用它（含形象、改名冷却、月卡标量列，防顶号丢状态）。
                 savedConfigId = previous.scene().configId();
                 savedPosition = previous.position();
                 level = previous.level();
                 state = previous.persistentState();
+                appearanceId = previous.appearanceId();
+                name = previous.name();
+                renamedMs = previous.renamedMs();
+                afkPassExpiresAt = previous.afkPassExpiresAt();
+                afkPassLastReqId = previous.toSave().afkPassLastReqId();
                 // 持久技能已包含在 previous.persistentState()；只补本职业种子。
             } else {
                 // 期间别的节点夺过归属并写过库（或旧实例上次存盘结局不明）：库里那份才是权威，沿用旧内存会把别人已落库的改动
@@ -1756,9 +1768,12 @@ public final class SceneWorld {
         ScenePlayer player = new ScenePlayer(playerId, actorEntity, key, epoch, data.classId(),
                 data.gender(), data.appearanceId(), level, skills,
                 resolveEnterPosition(scene.configId(), savedConfigId, savedPosition), state, clock.nanoTime(), tables.classSkills());
-        player.setName(data.name());
-        player.setRenamedMs(data.renamedMs());
-        player.restoreAfkPass(data.afkPassExpiresAt(), data.afkPassLastReqId());
+        if (!java.util.Objects.equals(appearanceId, data.appearanceId())) {
+            player.setPermanentAppearanceId(appearanceId);
+        }
+        player.setName(name);
+        player.setRenamedMs(renamedMs);
+        player.restoreAfkPass(afkPassExpiresAt, afkPassLastReqId);
         if (pending.admission() != null) player.bindAdmission(pending.admission());
         if (previous != null && previous.ownerEpoch() == epoch) {
             player.continueLocationSeq(previous.locationSeq());
@@ -1816,6 +1831,7 @@ public final class SceneWorld {
     /** 两份写回内容相同（不比 owner_epoch：库里的 epoch 已被这次进场夺权改掉）。 */
     private static boolean sameContent(PlayerSave a, PlayerSave b) {
         return a.level() == b.level() && a.sceneConfigId() == b.sceneConfigId() && a.position().equals(b.position())
+                && java.util.Objects.equals(a.appearanceId(), b.appearanceId())
                 && a.state().equals(b.state())
                 && a.afkPassExpiresAt() == b.afkPassExpiresAt()
                 && a.afkPassLastReqId() == b.afkPassLastReqId();
@@ -3550,6 +3566,9 @@ public final class SceneWorld {
                     if (afkPassService != null) {
                         afkPassService.onSaveCommitted(player, snapshot.afkPassExpiresAt());
                     }
+                    if (pendingKeyProgressSaves.remove(player.playerId())) {
+                        requestKeyProgressSave(player);
+                    }
                 }
             }
             case FAILED -> {
@@ -3608,6 +3627,7 @@ public final class SceneWorld {
         List<ScenePlayer> watchers = player.scene().remove(player);
         noteOccupancy(player.scene());
         playersById.remove(player.playerId(), player);
+        pendingKeyProgressSaves.remove(player.playerId());
         if (player.session() != null) {
             playersBySession.remove(player.session(), player);
         }
@@ -3923,12 +3943,17 @@ public final class SceneWorld {
 
     // ------------------------------------------------------------------ 挂机月卡 / 断线保留离线托管 / 组队跟随桥接
 
-    /** 关键进度变动（开通/GM 设置挂机月卡）后立即提交一次在线存盘（若无在途写且未停服）。 */
+    /** 关键进度变动（开通/GM 设置挂机月卡等）后立即提交一次在线存盘；若已有在途写则挂起待补存标记，完工后立刻跟进。 */
     public void requestKeyProgressSave(ScenePlayer player) {
-        if (player == null || periodicSaveStopped || player.progressSaveInFlight() || player.frozen()
+        if (player == null || periodicSaveStopped || player.frozen()
                 || playersById.get(player.playerId()) != player) {
             return;
         }
+        if (player.progressSaveInFlight()) {
+            pendingKeyProgressSaves.add(player.playerId());
+            return;
+        }
+        pendingKeyProgressSaves.remove(player.playerId());
         if (!repository.acceptsProgress()) {
             return;
         }

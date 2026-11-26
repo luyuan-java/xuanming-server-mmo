@@ -83,7 +83,8 @@ public final class MysteryMerchantTables {
             return null;
         }
         int currencyType = row.getCurrencyType();
-        if (Integer.compareUnsigned(currencyType, Wallet.TYPE_COUNT) >= 0) {
+        // 神秘商人货品入包可交易，严禁绑定灵石/绑定银两购买（防绑定产出洗白）
+        if (currencyType != Wallet.GOLD && currencyType != Wallet.DIAMOND) {
             return null;
         }
         long originalPrice = row.getPrice();

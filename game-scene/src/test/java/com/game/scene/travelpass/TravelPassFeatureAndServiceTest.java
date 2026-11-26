@@ -240,6 +240,28 @@ class TravelPassFeatureAndServiceTest {
         assertThat(invalid.toState()).isEqualTo(bad);
     }
 
+    @Test
+    void 重叠启用期次failClosed双双排除且典藏价货币仅限真实灵石() {
+        var real = BattleFixture.CONFIG;
+        var baseSeason = real.travelPassSeason().all().getFirst();
+        var s1 = baseSeason.toBuilder().setId(101).setEnabled(1).setStartsAtMs(1_000L).setEndsAtMs(10_000L)
+                .setPremiumCurrencyType(Wallet.DIAMOND).build();
+        var s2 = baseSeason.toBuilder().setId(102).setEnabled(1).setStartsAtMs(5_000L).setEndsAtMs(20_000L)
+                .setPremiumCurrencyType(Wallet.DIAMOND).build();
+        var sBadCur = baseSeason.toBuilder().setId(103).setEnabled(1).setStartsAtMs(30_000L).setEndsAtMs(40_000L)
+                .setPremiumCurrencyType(Wallet.BOUND_GOLD).build();
+        var baseTier = real.travelPassTier().all().getFirst();
+        var tiers = List.of(
+                baseTier.toBuilder().setId(9101).setPassId(101).setTierIndex(1).build(),
+                baseTier.toBuilder().setId(9102).setPassId(102).setTierIndex(1).build(),
+                baseTier.toBuilder().setId(9103).setPassId(103).setTierIndex(1).build());
+        TravelPassTables parsed = new TravelPassTables(List.of(s1, s2, sBadCur), tiers, real.item().all());
+        assertThat(parsed.season(101)).as("时间窗重叠的启用期次 A 必须排除").isNull();
+        assertThat(parsed.season(102)).as("时间窗重叠的启用期次 B 必须排除").isNull();
+        assertThat(parsed.season(103)).as("绑定银两定价的典藏手记必须拒绝加载").isNull();
+        assertThat(parsed.enabledSeasons()).isEmpty();
+    }
+
     private static BattleSettlementData battle(long battleId, long playerId, int matchMode, int difficulty,
                                                eBattleOutcome outcome, boolean participated, boolean fled,
                                                int totalRounds, int manualRounds, boolean effectiveContrib,

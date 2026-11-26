@@ -269,6 +269,15 @@ public final class AssetOpService {
         if (!trade && (hasInstanceFields(request.getBundle()) || rpc == AssetRpc.DEBIT && request.getBundle().getItemsCount() > 0)) {
             why = "当前调用方无权转移实例";
         }
+        // 双银两与绑钻物理隔离：交易流与帮会扣款流严禁流转绑定灵石/绑定银两
+        if (why == null && (trade || request.getStream() == AssetStream.ASSET_STREAM_GUILD_DEBIT)) {
+            for (AssetCurrency c : request.getBundle().getCurrenciesList()) {
+                if (c.getCurrencyType() == Wallet.BOUND_DIAMOND || c.getCurrencyType() == Wallet.BOUND_GOLD) {
+                    why = "交易或帮会扣款流禁止使用绑定货币";
+                    break;
+                }
+            }
+        }
         if (why != null) {
             log.warn("[AssetOp] 包内容非法 rpc={} player={} seq={} why={}", rpc.wireName(),
                     Long.toUnsignedString(request.getPlayerId()), Long.toUnsignedString(request.getSeq()), why);

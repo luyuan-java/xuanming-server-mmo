@@ -372,8 +372,12 @@ public final class PetService {
         if (Integer.compareUnsigned(effectiveLevel, currentRow.getAscendMinPetLevel()) < 0) {
             return failAscend(player, reqId, TIER_LEVEL_NOT_ENOUGH);
         }
+        boolean transferable = species.getTransferPolicy() == 0;
         long costGold = currentRow.getAscendCostGold();
-        if (costGold != 0L && (costGold < 0L || !player.wallet().canAffordGoldWithBind(costGold))) {
+        boolean canAffordGold = transferable
+                ? player.wallet().balance(Wallet.GOLD) >= costGold
+                : player.wallet().canAffordGoldWithBind(costGold);
+        if (costGold != 0L && (costGold < 0L || !canAffordGold)) {
             return failAscend(player, reqId, GOLD_NOT_ENOUGH);
         }
         int costItemId = currentRow.getAscendCostItemId();
@@ -388,17 +392,22 @@ public final class PetService {
                 return failAscend(player, reqId, FEATURE_UNAVAILABLE);
             }
             Bag inventory = player.bags().bag(BagType.INVENTORY);
-            if (inventory.plainQuantity(costItemId) < costItemCount) {
+            long availableMat = transferable
+                    ? inventory.plainTradableQuantity(costItemId)
+                    : inventory.plainQuantity(costItemId);
+            if (availableMat < costItemCount) {
                 return failAscend(player, reqId,
-                        inventory.total(costItemId) >= costItemCount ? FEATURE_UNAVAILABLE : TIER_MATERIAL_NOT_ENOUGH);
+                        !transferable && inventory.total(costItemId) >= costItemCount ? FEATURE_UNAVAILABLE : TIER_MATERIAL_NOT_ENOUGH);
             }
             candidateBags = PlayerBags.restore(player.bags().toState());
             candidateBags.normalize(bags.tables());
-            drawn = candidateBags.bag(BagType.INVENTORY).drainPlainExact(costItemId, costItemCount, false).drawn();
+            drawn = candidateBags.bag(BagType.INVENTORY).drainPlainExact(costItemId, costItemCount, transferable).drawn();
         }
         CurrencyService.PreparedDeduction payment = null;
         if (costGold > 0L) {
-            payment = currency.prepareGoldPreferBindDeduction(player, costGold);
+            payment = transferable
+                    ? currency.prepareDeduction(player, Wallet.GOLD, costGold)
+                    : currency.prepareGoldPreferBindDeduction(player, costGold);
             if (payment.tipId() != 0) {
                 return failAscend(player, reqId, payment.tipId());
             }
@@ -901,9 +910,10 @@ public final class PetService {
             return new Grant(INVALID_TABLE_DATA, 0);
         if (ownerLevel(player) < Integer.toUnsignedLong(row.getUnlockLevel())) return new Grant(OWNER_LEVEL_NOT_ENOUGH, 0);
         if (!hasNormalPetSlot(current)) return new Grant(SLOT_FULL, 0);
-        if (!player.wallet().canAffordGoldWithBind(priceGold))
+        // 可交易宠物商店直购严禁消耗绑定银两（防激励视频等绑定产出洗白为可交易宠物）
+        if (player.wallet().balance(Wallet.GOLD) < priceGold)
             return new Grant(GOLD_NOT_ENOUGH, 0);
-        var deduction = currency.prepareGoldPreferBindDeduction(player, priceGold);
+        var deduction = currency.prepareDeduction(player, Wallet.GOLD, priceGold);
         if (deduction.tipId() != 0) return new Grant(deduction.tipId(), 0);
         long[] minted = guids.tryMint(1);
         if (minted == null) return new Grant(ID_GENERATE_FAILED, 0);
@@ -1271,7 +1281,9 @@ public final class PetService {
         var before = derived(pet, species);
         pet.setSkillRank(skillId, rank);
         recalculateOne(player, pet, RecalcReason.ALLOCATE, before);
-        var payment = currency.prepareGoldPreferBindDeduction(player, cost);
+        var payment = species.getTransferPolicy() == 0
+                ? currency.prepareDeduction(player, Wallet.GOLD, cost)
+                : currency.prepareGoldPreferBindDeduction(player, cost);
         if (payment.tipId() != 0) return payment.tipId();
         payment.commitPets(candidate, AssetAudit.Reason.SKILL_UPGRADE, Integer.toUnsignedLong(skillId));
         return OK;

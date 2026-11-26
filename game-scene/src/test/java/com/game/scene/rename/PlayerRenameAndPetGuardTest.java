@@ -191,6 +191,34 @@ class PlayerRenameAndPetGuardTest {
     }
 
     @Test
+    void 绑定改名卡改名失败退还必须保持绑定_绝不洗成可交易卡_且可交易宠物禁扣绑定银两() throws Exception {
+        PlayerRenameTables.Rule rule = renameTables.rule();
+        int renameId = Contracts.REGISTRY.requireId("SceneClientPlayerCommon", "RenamePlayer");
+        int notifyId = Contracts.REGISTRY.requireId("SceneClientPlayerCommon", "NotifyPlayerRenamed");
+        // 发一张绑定改名卡（bound=true），故意触发敏感词拒单，校验退还后仍为绑定卡（totalTradable == 0）
+        assertThat(bags.addItems(player, BagType.INVENTORY,
+                Map.of(rule.renameItemId(), rule.renameItemCount()), true, Reason.GM_GRANT, 0, "").tip()).isZero();
+        assertThat(player.bags().bag(BagType.INVENTORY).totalTradable(rule.renameItemId())).isZero();
+        guardRef.set((scene, pid, text) -> CheckTextResponse.newBuilder().setVerdict(TextVerdict.TEXT_VERDICT_REJECT).build());
+        assertThat(sendRename(renameId, "敏感绑定名").getErrorMessage().getId()).isZero();
+        assertThat(lastNotify(notifyId).getErrorMessage().getId())
+                .isEqualTo(LoginErrorTip.login_error.kRoleNameSensitive_VALUE);
+        assertThat(player.bags().bag(BagType.INVENTORY).total(rule.renameItemId())).isEqualTo(rule.renameItemCount());
+        assertThat(player.bags().bag(BagType.INVENTORY).totalTradable(rule.renameItemId()))
+                .as("绑定改名卡失败退还后必须保持 bound=true，禁止洗成可交易").isZero();
+
+        // 仅有绑定银两、无流通银两时，不可购买可交易商店宠物（防激励视频绑定银两洗白）
+        assertThat(currency.add(player, Wallet.BOUND_GOLD, 10_000_000L, Reason.GM_GRANT).ok()).isTrue();
+        var shop = petService.shop(player);
+        assertThat(shop.getOffersList()).isNotEmpty();
+        var offer = shop.getOffers(0);
+        var buyWithBindOnly = petService.buy(player, offer.getPetTableId(), shop.getNextPurchaseSequence(), offer.getPriceGold());
+        assertThat(buyWithBindOnly.tip()).as("可交易宠物直购不得扣绑定银两").isNotZero();
+        assertThat(buyWithBindOnly.petId()).isZero();
+        assertThat(player.wallet().balance(Wallet.BOUND_GOLD)).isEqualTo(10_000_000L);
+    }
+
+    @Test
     void 宝宝改名接入内容安全_敏感回26017不可用回1003均不扣金币_通过后扣金币改名() throws Exception {
         assertThat(currency.add(player, Wallet.GOLD, 1_000_000L, Reason.GM_GRANT).ok()).isTrue();
         long petId = petService.grant(player, 1).petId();

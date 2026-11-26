@@ -108,16 +108,23 @@ public final class TravelPassTables {
             }
         }
 
-        // 检查启用期次时间窗重叠（告警并排除冲突项）
+        // 检查启用期次时间窗重叠（fail-closed：记录错误并将互相冲突的启用期次全部移出启用与索引表）
+        java.util.Set<Integer> overlappingIds = new java.util.HashSet<>();
         for (int i = 0; i < enabled.size(); i++) {
             for (int j = i + 1; j < enabled.size(); j++) {
                 ResolvedSeason a = enabled.get(i);
                 ResolvedSeason b = enabled.get(j);
                 if (windowsOverlap(a.startsAtMs(), a.endsAtMs(), b.startsAtMs(), b.endsAtMs())) {
-                    log.error("[TravelPass] overlapping enabled seasons pass_a={} pass_b={}",
+                    log.error("[TravelPass] overlapping enabled seasons excluded pass_a={} pass_b={}",
                             Integer.toUnsignedString(a.id()), Integer.toUnsignedString(b.id()));
+                    overlappingIds.add(a.id());
+                    overlappingIds.add(b.id());
                 }
             }
+        }
+        if (!overlappingIds.isEmpty()) {
+            enabled.removeIf(s -> overlappingIds.contains(s.id()));
+            overlappingIds.forEach(validSeasons::remove);
         }
 
         for (TravelPassTierTable tier : tierRows) {
@@ -191,7 +198,8 @@ public final class TravelPassTables {
         }
         int currencyType = row.getPremiumCurrencyType();
         long price = row.getPremiumPrice();
-        if (Integer.compareUnsigned(currencyType, Wallet.TYPE_COUNT) >= 0
+        // 典藏手记仅允许真实灵石解锁，禁止绑定灵石或绑定银两绕过付费门槛
+        if (currencyType != Wallet.DIAMOND
                 || price == 0L || Long.compareUnsigned(price, MAX_UNIT_PRICE) > 0) {
             log.error("[TravelPass] invalid TravelPassSeason price id={} currency={} price={}",
                     Integer.toUnsignedString(id), currencyType, Long.toUnsignedString(price));

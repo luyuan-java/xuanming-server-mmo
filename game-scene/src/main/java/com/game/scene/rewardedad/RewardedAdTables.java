@@ -25,6 +25,7 @@ public final class RewardedAdTables {
 
     public RewardedAdTables(List<RewardedAdSlotTable> rows) {
         Map<Integer, SlotConfig> valid = new LinkedHashMap<>();
+        java.util.Set<Integer> duplicates = new java.util.HashSet<>();
         boolean allValid = true;
         for (RewardedAdSlotTable row : rows) {
             int enabled = row.getEnabled();
@@ -47,10 +48,18 @@ public final class RewardedAdTables {
                     row.getRewardAmount(),
                     requireSsv == 1,
                     row.getPlatformMask());
+            if (duplicates.contains(cfg.slotId()) || valid.containsKey(cfg.slotId())) {
+                log.error("[RewardedAd] conflicting duplicate RewardedAdSlot row id={}",
+                        Integer.toUnsignedString(row.getId()));
+                duplicates.add(cfg.slotId());
+                valid.remove(cfg.slotId());
+                allValid = false;
+                continue;
+            }
             String reason = RewardedAdRules.validateSlotConfig(cfg);
-            if (reason != null || valid.containsKey(cfg.slotId())) {
+            if (reason != null) {
                 log.error("[RewardedAd] invalid RewardedAdSlot row id={} reason={}",
-                        Integer.toUnsignedString(row.getId()), reason != null ? reason : "duplicate slot id");
+                        Integer.toUnsignedString(row.getId()), reason);
                 allValid = false;
                 continue;
             }

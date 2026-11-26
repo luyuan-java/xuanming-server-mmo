@@ -108,6 +108,9 @@ public final class RewardedAdService {
         if (!ledger.isValid()) {
             return rejectBegin(UNAVAILABLE);
         }
+        if (!tables.allRowsValid()) {
+            return rejectBegin(UNAVAILABLE);
+        }
         SlotConfig cfg = tables.slot(req.getSlotId());
         if (cfg == null) {
             log.warn("[RewardedAd] metric=rewarded_ad_session_rejected reason=invalid_slot player_id={} slot_id={}",
@@ -216,6 +219,9 @@ public final class RewardedAdService {
         }
 
         // 3. 配表、等级、日限、冷却校验
+        if (!tables.allRowsValid()) {
+            return rejectClaim(UNAVAILABLE);
+        }
         SlotConfig cfg = tables.slot(req.getSlotId());
         if (cfg == null) {
             return rejectClaim(UNAVAILABLE);

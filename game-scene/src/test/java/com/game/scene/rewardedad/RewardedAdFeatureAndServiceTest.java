@@ -222,6 +222,23 @@ class RewardedAdFeatureAndServiceTest {
                 .isEqualTo(RewardedAdService.FROZEN);
     }
 
+    @Test
+    void 重复冲突广告位failClosed整槽移除且拒绝下发与领奖() {
+        RewardedAdTables dupTables = new RewardedAdTables(List.of(
+                enabledSlot(1, false),
+                enabledSlot(1, true)));
+        assertThat(dupTables.allRowsValid()).isFalse();
+        assertThat(dupTables.slot(1)).as("冲突重复广告位必须整槽剔除").isNull();
+        BattleFixture f = new BattleFixture();
+        ScenePlayer player = f.enter(11, 2002L);
+        player.setLevel(15);
+        RewardedAdService svc = new RewardedAdService(dupTables, f.currency, f.clock, f.sceneMetrics);
+        assertThat(svc.beginSession(f.world, player,
+                BeginRewardedAdSessionRequest.newBuilder().setSlotId(1)
+                        .setClientPlatform(AdClientPlatform.AD_CLIENT_PLATFORM_WECHAT_MINIGAME_VALUE).build(),
+                BASE_DAY_MS).getErrorMessage().getId()).isEqualTo(RewardedAdService.UNAVAILABLE);
+    }
+
     private static <T extends Message> T call(BattleFixture f, ScenePlayer player, String method,
                                               Message req, com.google.protobuf.Parser<T> parser)
             throws InvalidProtocolBufferException {

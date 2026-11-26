@@ -323,6 +323,13 @@ public final class SpiritShopTables {
                     Integer.toUnsignedString(id), grants.size());
             return null;
         }
+        // 严禁激励视频绑定银两购买百宝阁商品，且绑定灵石仅允许购买全绑定货品（防绑定货币洗白为可交易商品）
+        if (currencyType == Wallet.BOUND_GOLD
+                || (currencyType == Wallet.BOUND_DIAMOND && !ResolvedGoods.allBound(grants))) {
+            log.error("[SpiritShop] bound currency cannot purchase goods_id={} currency_type={} all_bound={}",
+                    Integer.toUnsignedString(id), currencyType, ResolvedGoods.allBound(grants));
+            return null;
+        }
 
         String name = row.getName();
         if (name.isEmpty()) {
