@@ -15,6 +15,8 @@ import com.game.proto.BattleTicketPayload;
 import com.game.proto.BattleTokenVerifyRequest;
 import com.game.proto.ClientRequest;
 import com.game.proto.GetBattleStateRequest;
+import com.game.proto.SendBattlePingRequest;
+import com.game.proto.SendBattlePingResponse;
 import com.game.proto.SetAutoBattleRequest;
 import com.game.proto.SetAutoBattleResponse;
 import com.game.proto.StopWatchBattleRequest;
@@ -432,6 +434,13 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
                     UpdateBattlePrepRequest req = UpdateBattlePrepRequest.parseFrom(body);
                     if(req.getBattleId()!=s.battleId()){s.forceClose(Disconnect.REPLACED);return;}
                     UpdateBattlePrepResponse resp = rooms.updateBattlePrep(playerId, req);
+                    response = resp;
+                    businessError = resp.hasErrorMessage();
+                }
+                case SEND_BATTLE_PING -> {
+                    SendBattlePingRequest req = SendBattlePingRequest.parseFrom(body);
+                    if(req.getBattleId()!=s.battleId()){s.forceClose(Disconnect.REPLACED);return;}
+                    SendBattlePingResponse resp = rooms.sendBattlePing(playerId, req);
                     response = resp;
                     businessError = resp.hasErrorMessage();
                 }

@@ -452,6 +452,7 @@ public final class BattleSettlementService {
                 .setTeamIndex(settlement.getPlayerTeamIndex())
                 .setIsDead(settlement.getIsDead())
                 .setFled(settlement.getFled())
+                .setSurrendered(settlement.getSurrendered())
                 .setTotalRounds(settlement.getTotalRounds())
                 .setFinishedAtMs(settlement.getFinishedAtMs())
                 .setSettledAtMs(nowMs)

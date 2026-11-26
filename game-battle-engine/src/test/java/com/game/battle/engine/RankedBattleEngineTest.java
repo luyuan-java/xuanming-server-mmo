@@ -6,13 +6,16 @@ import com.game.proto.BaseAttributesComp;
 import com.game.proto.BattleAction;
 import com.game.proto.BattleActorState;
 import com.game.proto.BattleEventItem;
+import com.game.proto.BattleHighlightKind;
 import com.game.proto.BattleParticipationFact;
 import com.game.proto.BattlePetSnapshot;
+import com.game.proto.BattlePingKind;
 import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.BattlePrepState;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.BattleSurrenderVoteState;
+import com.game.proto.BattleTacticalPing;
 import com.game.proto.CreateBattleRequest;
 import com.game.proto.EquipmentEffects;
 import com.game.proto.RankedMatchContext;
@@ -657,5 +660,106 @@ class RankedBattleEngineTest {
                         .addStandbyPets(noChoiceReq.getPlayers(1).getPets(0).toBuilder().setOwnerPlayerId(5201L)))
                 .build();
         assertThat(TurnBattleEngine.start(dupStandbyReq, data)).isInstanceOf(BattleStart.Rejected.class);
+    }
+
+    @Test
+    void 论剑V4队内战术标点隔离限频与复盘高光破势终结() {
+        RankedPresetTable charPreset = tables.rankedPresets().get(101);
+        RankedPresetTable petA = tables.rankedPresets().get(201);
+
+        // 1. 1V1 不开放队内标点
+        CreateBattleRequest soloReq = CreateBattleRequest.newBuilder()
+                .setBattleId(9701L).setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setSeed(201L).setRankedContext(rankedCtx(1))
+                .addPlayers(playerWithRealPet(6101L, 94001L, 0, 200L, charPreset, petA))
+                .addPlayers(playerWithRealPet(6201L, 94002L, 1, 200L, charPreset, petA))
+                .build();
+        TurnBattleEngine solo = ((BattleStart.Started) TurnBattleEngine.start(soloReq, data)).engine();
+        assertThat(solo.submitBattlePing(6101L, 6201L, BattlePingKind.BATTLE_PING_FOCUS).errorTip())
+                .isEqualTo(ActionChecks.FEATURE_UNAVAILABLE);
+
+        // 2. 2V2 队内标点：阵营校验、每回合 2 次限频、覆写前条、同队可见/敌方观众不可见、回合推进清空
+        CreateBattleRequest duoReq = CreateBattleRequest.newBuilder()
+                .setBattleId(9702L).setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setSeed(202L).setRankedContext(rankedCtx(2))
+                .addPlayers(playerWithRealPet(6101L, 94101L, 0, 200L, charPreset, petA))
+                .addPlayers(playerWithRealPet(6102L, 94102L, 0, 200L, charPreset, petA))
+                .addPlayers(playerWithRealPet(6201L, 94201L, 1, 200L, charPreset, petA))
+                .addPlayers(playerWithRealPet(6202L, 94202L, 1, 200L, charPreset, petA))
+                .build();
+        TurnBattleEngine duo = ((BattleStart.Started) TurnBattleEngine.start(duoReq, data)).engine();
+        assertThat(duo.submitBattlePing(6101L, 6102L, BattlePingKind.BATTLE_PING_FOCUS).errorTip())
+                .isEqualTo(ActionChecks.INVALID_PARAMETER);
+        assertThat(duo.submitBattlePing(6101L, 6201L, BattlePingKind.BATTLE_PING_PROTECT).errorTip())
+                .isEqualTo(ActionChecks.INVALID_PARAMETER);
+
+        var p1 = duo.submitBattlePing(6101L, 6201L, BattlePingKind.BATTLE_PING_FOCUS);
+        assertThat(p1.errorTip()).isZero();
+        assertThat(p1.ping().getKind()).isEqualTo(BattlePingKind.BATTLE_PING_FOCUS);
+        var p2 = duo.submitBattlePing(6101L, 6102L, BattlePingKind.BATTLE_PING_PROTECT);
+        assertThat(p2.errorTip()).isZero();
+        assertThat(duo.submitBattlePing(6101L, 6202L, BattlePingKind.BATTLE_PING_DISPEL).errorTip())
+                .isEqualTo(ActionChecks.RATE_LIMIT_EXCEEDED);
+        assertThat(duo.submitBattlePing(6201L, 6202L, BattlePingKind.BATTLE_PING_PROTECT).errorTip()).isZero();
+
+        List<BattleTacticalPing> teamAPings = duo.teamPingsForViewer(6102L);
+        assertThat(teamAPings).hasSize(1);
+        assertThat(teamAPings.getFirst().getKind()).isEqualTo(BattlePingKind.BATTLE_PING_PROTECT);
+        assertThat(duo.teamPingsForViewer(6202L)).hasSize(1);
+        assertThat(duo.teamPingsForViewer(0L)).isEmpty();
+
+        BattleAction defend = BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build();
+        duo.submitAction(6101L, defend);
+        duo.submitAction(6102L, defend);
+        duo.submitAction(6201L, defend);
+        duo.submitAction(6202L, defend);
+        duo.resolveCurrentRound();
+        assertThat(duo.teamPingsForViewer(6101L)).isEmpty();
+        assertThat(duo.submitBattlePing(6101L, 6201L, BattlePingKind.BATTLE_PING_CONTROL).errorTip()).isZero();
+
+        // 3. 连胜旗标透传 + 绝境翻盘徽记 + 破势终结
+        BattlePlayerSnapshot strongA = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(6301L).setTeamIndex(0).setPlayerName("A").setLevel(30)
+                .setMaxHealth(1000L).setMaxMana(1000L)
+                .setBaseAttributes(BaseAttributesComp.newBuilder()
+                        .setHealth(1000L).setMana(1000L).setAttack(600L).setSpeed(50L).build())
+                .build();
+        BattlePlayerSnapshot streakB = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(6302L).setTeamIndex(1).setPlayerName("B").setLevel(30)
+                .setMaxHealth(500L).setMaxMana(1000L)
+                .setBaseAttributes(BaseAttributesComp.newBuilder()
+                        .setHealth(500L).setMana(1000L).setAttack(850L).setSpeed(150L).build())
+                .build();
+        CreateBattleRequest streakReq = CreateBattleRequest.newBuilder()
+                .setBattleId(9703L).setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setSeed(203L)
+                .setRankedContext(rankedCtx(1).toBuilder()
+                        .putMemberWinStreaks(6301L, 2)
+                        .putMemberWinStreaks(6302L, 5))
+                .addPlayers(strongA)
+                .addPlayers(streakB)
+                .build();
+        TurnBattleEngine streakEngine = ((BattleStart.Started) TurnBattleEngine.start(streakReq, data)).engine();
+        BattleStateS2C startSnap = streakEngine.buildStateSnapshot();
+        assertThat(startSnap.getActorsList().stream().filter(a -> a.getActorId() == 6301L).findFirst().orElseThrow().getWinStreak())
+                .isZero();
+        assertThat(startSnap.getActorsList().stream().filter(a -> a.getActorId() == 6302L).findFirst().orElseThrow().getWinStreak())
+                .isEqualTo(5);
+
+        streakEngine.submitAction(6301L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_ATTACK).setTargetId(6302L).build());
+        streakEngine.submitAction(6302L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_ATTACK).setTargetId(6301L).build());
+        TurnResultS2C r1 = streakEngine.resolveCurrentRound();
+        assertThat(r1.getState().getOutcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN);
+
+        BattleSettlementData settleA = streakEngine.buildSettlement(6301L);
+        BattleSettlementData settleB = streakEngine.buildSettlement(6302L);
+        assertThat(settleA.getDamageTaken()).isPositive();
+        assertThat(settleA.getTotalDamageDealt()).isPositive();
+        assertThat(settleA.getHighlightKind()).isEqualTo(BattleHighlightKind.BATTLE_HIGHLIGHT_CLUTCH_COMEBACK);
+        assertThat(settleA.getEndedOpponentStreak()).isEqualTo(5);
+        assertThat(settleB.getEndedOpponentStreak()).isZero();
     }
 }

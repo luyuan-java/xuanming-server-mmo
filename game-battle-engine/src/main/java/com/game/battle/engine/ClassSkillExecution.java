@@ -162,18 +162,25 @@ final class ClassSkillExecution {
         }
         if (skill.getDispelCount() != 0) {
             boolean clearedWeekly = false;
+            int dispelledTotal = 0;
             if (actor.teamIndex() != target.teamIndex()) {
                 ctx.encounter.tryDispelBossStance(actor, target);
             } else if (ctx.encounter.clearSunder(target.actorId())) {
                 ctx.encounter.recordEffectiveContribution(actor);
                 clearedWeekly = true;
+                dispelledTotal++;
             }
-            if (buffs.dispelDebuffs(target, skill.getDispelCount()) > 0) {
+            int clearedDebuffs = buffs.dispelDebuffs(target, skill.getDispelCount());
+            if (clearedDebuffs > 0) {
                 ctx.encounter.recordEffectiveContribution(actor);
                 clearedWeekly = true;
+                dispelledTotal += clearedDebuffs;
                 if (actor.teamIndex() == target.teamIndex()) {
                     ctx.encounter.markAntiControlOrSeasonSkill(EncounterMechanics.ownerPlayerIdOf(actor));
                 }
+            }
+            if (dispelledTotal > 0) {
+                ctx.recordDispelLanded(actor.actorId(), dispelledTotal);
             }
             if (clearedWeekly) {
                 ctx.encounter.onWeeklyAffixDispelTriggered(actor);

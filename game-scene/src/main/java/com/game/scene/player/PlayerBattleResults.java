@@ -174,6 +174,7 @@ public final class PlayerBattleResults {
                 .setTeamIndex(e.getTeamIndex())
                 .setIsDead(e.getIsDead())
                 .setFled(e.getFled())
+                .setSurrendered(e.getSurrendered())
                 .setTotalRounds(e.getTotalRounds())
                 .setFinishedAtMs(e.getFinishedAtMs())
                 .setSettledAtMs(e.getSettledAtMs())

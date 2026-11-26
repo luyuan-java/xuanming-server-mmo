@@ -293,4 +293,53 @@ class RankedParityTest {
         assertThat(TABLES.trialContextFor(MatchModes.PVP_CHALLENGE, 101, null, null)).isEmpty();
         assertThat(TABLES.trialContextFor(MatchModes.PVE_SOLO, 1, null, null)).isEmpty();
     }
+
+    @Test
+    void 论剑V4连胜累计透传与破势终结纯荣誉口径() throws Exception {
+        try (RatingTestDatabase db = RatingTestDatabase.h2()) {
+            AtomicLong now = new AtomicLong(1_730_000_000_000L);
+            RankedStore rankedStore = new RankedStore(db.dataSource, TABLES, now::get);
+            RatingStore ratingStore = new RatingStore(
+                    RatingStore.connections(db.dataSource), cfg -> 0,
+                    new MatchMetrics(new SimpleMeterRegistry(), new com.game.match.metrics.MetricLabels(id -> true)),
+                    now::get).withRankedStore(rankedStore);
+            rankedStore.ensureActiveSeason();
+
+            long p1 = 41001L, p2 = 41002L;
+            // p1 连胜 3 场：每场后 current_win_streak / best_win_streak 递增
+            for (int i = 1; i <= 3; i++) {
+                now.addAndGet(5_000L);
+                BattleResultEvent ev = rankedBattle(5000L + i, 1, 1, p1, p2,
+                        eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, true, true);
+                assertThat(ratingStore.apply(ev).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+            }
+            RankedService service = new RankedService(rankedStore, TABLES, now::get);
+            var prof1 = service.getProfile(p1, GetRankedProfileRequest.getDefaultInstance());
+            assertThat(prof1.getCurrentProgress().getCurrentWinStreak()).isEqualTo(3);
+            assertThat(prof1.getCurrentProgress().getBestWinStreak()).isEqualTo(3);
+
+            // 达到 3 连胜后，buildRankedContext 透传 member_win_streaks 且保持 members 为空
+            RankedMatchContext ctx = rankedStore.buildRankedContext(1, List.of(p1, p2), Map.of()).orElseThrow();
+            assertThat(ctx.getMembersList()).isEmpty();
+            assertThat(ctx.getMemberWinStreaksMap()).containsEntry(p1, 3).doesNotContainKey(p2);
+
+            // p2 击败 3 连胜的 p1 -> p1 连胜归零(best 保留 3)，p2 触发破势终结(ended_opponent_streak=3)
+            now.addAndGet(5_000L);
+            BattleResultEvent upset = rankedBattle(5010L, 1, 1, p1, p2,
+                    eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN, true, true);
+            assertThat(ratingStore.apply(upset).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+
+            var viewP2 = rankedStore.getBattleResult(p2, 5010L).orElseThrow();
+            assertThat(viewP2.getWinStreakAfter()).isEqualTo(1);
+            assertThat(viewP2.getEndedOpponentStreak()).isEqualTo(3);
+
+            var viewP1 = rankedStore.getBattleResult(p1, 5010L).orElseThrow();
+            assertThat(viewP1.getWinStreakAfter()).isZero();
+            assertThat(viewP1.getEndedOpponentStreak()).isZero();
+
+            var prof1After = service.getProfile(p1, GetRankedProfileRequest.getDefaultInstance());
+            assertThat(prof1After.getCurrentProgress().getCurrentWinStreak()).isZero();
+            assertThat(prof1After.getCurrentProgress().getBestWinStreak()).isEqualTo(3);
+        }
+    }
 }

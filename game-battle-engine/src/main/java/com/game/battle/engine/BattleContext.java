@@ -50,6 +50,8 @@ final class BattleContext {
     private final List<BattleUnit> units = new ArrayList<>();
     private final List<BattleMonsterDefeat> defeatedMonsters = new ArrayList<>();
     private final NavigableMap<Long, BattleSettlementData.Builder> settlements = new TreeMap<>(Long::compareUnsigned);
+    /** 论剑 V4 驱散/净化成功计数（按施法者归属玩家统计，含出战宝宝）。 */
+    private final NavigableMap<Long, Integer> totalDispelsLandedByPlayer = new TreeMap<>(Long::compareUnsigned);
     /** 回合排速时刻冻结的有效速度快照，供副目标策略「本回合排速最低」稳定读取。 */
     private final Map<Long, Long> roundStartSpeeds = new HashMap<>();
     /** uint32；正在收集 / 结算的回合号，从 1 开始（{@code engine.h:227}）。 */
@@ -501,5 +503,24 @@ final class BattleContext {
         if (target.isMonster() && target.teamIndex() == 1 && BattleConstants.isBossTrialKind(encounter.bossTrialKind())) {
             encounter.handleBossTrialMonsterDeath(target);
         }
+    }
+
+    void recordDispelLanded(long casterActorId, int count) {
+        if (casterActorId == 0L || count <= 0) {
+            return;
+        }
+        BattleUnit caster = findActor(casterActorId);
+        if (caster == null) {
+            return;
+        }
+        long ownerId = caster.isPlayer() ? caster.actorId()
+                : (caster.isPet() ? caster.ownerPlayerId() : 0L);
+        if (ownerId != 0L) {
+            totalDispelsLandedByPlayer.put(ownerId, totalDispelsLandedByPlayer.getOrDefault(ownerId, 0) + count);
+        }
+    }
+
+    int totalDispelsLanded(long playerId) {
+        return totalDispelsLandedByPlayer.getOrDefault(playerId, 0);
     }
 }

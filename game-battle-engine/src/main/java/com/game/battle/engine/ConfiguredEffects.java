@@ -206,6 +206,7 @@ final class ConfiguredEffects {
             }
         }
         if (count > 0 || clearedSunder) {
+            ctx.recordDispelLanded(source.actorId(), count + (clearedSunder ? 1 : 0));
             ctx.encounter.onWeeklyAffixDispelTriggered(source);
         }
     }

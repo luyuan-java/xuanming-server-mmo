@@ -19,6 +19,7 @@ import com.game.proto.AddObserverRequest;
 import com.game.proto.AddObserverResponse;
 import com.game.proto.BattleAssignedS2C;
 import com.game.proto.BattleEndS2C;
+import com.game.proto.BattlePingS2C;
 import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.BattlePrepState;
 import com.game.proto.BattlePrepUpdateS2C;
@@ -35,6 +36,8 @@ import com.game.proto.IssueBattleTicketResponse;
 import com.game.proto.MessageContent;
 import com.game.proto.RemoveObserverRequest;
 import com.game.proto.RemoveObserverResponse;
+import com.game.proto.SendBattlePingRequest;
+import com.game.proto.SendBattlePingResponse;
 import com.game.proto.SetAutoBattleRequest;
 import com.game.proto.SetAutoBattleResponse;
 import com.game.proto.SpectateEndS2C;
@@ -253,7 +256,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             long playerId = entry.getKey();
             ViewerState view = BattleViews.forParticipant(start, playerId, engine.selfItems(playerId),
                     engine.surrenderVoteForViewer(playerId),
-                    engine.prepStateForViewer(playerId, room.prepDeadlineMs));
+                    engine.prepStateForViewer(playerId, room.prepDeadlineMs),
+                    engine.teamPingsForViewer(playerId));
             // 177 先于 143（R5、O1）：同一批交给出口，经 gate 时是一条 GatePush{message_batch}
             outbound.pushLobby(battleId, playerId, room.directOf(playerId), List.of(
                     outbound.announcement(Notify.BATTLE_ASSIGNED, assignments.get(playerId)),
@@ -905,7 +909,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                         room.engine.surrenderVoteForViewer(playerId),
                         room.pendingCompletion == null
                                 ? room.engine.prepStateForViewer(playerId, room.prepDeadlineMs)
-                                : null)
+                                : null,
+                        room.engine.teamPingsForViewer(playerId))
                 : observerView(room, full);
         return view.state();
     }
@@ -1067,6 +1072,47 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         return built;
     }
 
+    @Override
+    public SendBattlePingResponse sendBattlePing(long playerId, SendBattlePingRequest request) {
+        scheduler.assertInLoop();
+        SendBattlePingResponse.Builder response = SendBattlePingResponse.newBuilder();
+        if (playerId == 0) {
+            return response.setErrorMessage(tip(PLAYER_NOT_FOUND_IN_SESSION)).build();
+        }
+        BattleRoom room = rooms.find(request.getBattleId());
+        if (room == null || !room.isParticipant(playerId)) {
+            return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
+        }
+        if (room.pendingCompletion != null) {
+            return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
+        }
+        room.engine.markPlayerEntered(playerId);
+        TurnBattleEngine.BattlePingResult res = room.engine.submitBattlePing(
+                playerId, request.getTargetActorId(), request.getKind());
+        if (res.errorTip() != 0) {
+            return response.setErrorMessage(tip(res.errorTip())).build();
+        }
+        SendBattlePingResponse built = response.setPing(res.ping()).build();
+        OptionalInt actorTeam = room.engine.teamIndexOfPlayer(playerId);
+        if (actorTeam.isPresent()) {
+            int teamIndex = actorTeam.getAsInt();
+            BattlePingS2C notify = BattlePingS2C.newBuilder()
+                    .setBattleId(room.battleId)
+                    .setPing(res.ping())
+                    .build();
+            MessageContent frame = outbound.frame(Notify.BATTLE_PING, notify);
+            for (long memberId : room.routingByPlayer.keySet()) {
+                OptionalInt memberTeam = room.engine.teamIndexOfPlayer(memberId);
+                if (memberTeam.isEmpty() || memberTeam.getAsInt() != teamIndex) {
+                    continue;
+                }
+                outbound.pushBattleFrame(room.battleId, memberId, room.directOf(memberId),
+                        Notify.BATTLE_PING, frame);
+            }
+        }
+        return built;
+    }
+
     // ===================================================================================== 任意线程
 
     @Override
@@ -1116,7 +1162,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         }
         for (long playerId : room.routingByPlayer.keySet()) {
             ViewerState view = BattleViews.forParticipant(start, playerId, room.engine.selfItems(playerId),
-                    room.engine.surrenderVoteForViewer(playerId));
+                    room.engine.surrenderVoteForViewer(playerId), null, room.engine.teamPingsForViewer(playerId));
             outbound.pushLobby(room.battleId, playerId, room.directOf(playerId),
                     List.of(outbound.announcement(Notify.BATTLE_START, view.toBattleStart(room.battleId))));
         }

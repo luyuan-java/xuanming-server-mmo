@@ -32,7 +32,9 @@ public final class BattleMessageIds {
         /** 479 PVP 延迟投降 / 表决 → {@code SurrenderBattleResponse}。 */
         SURRENDER_BATTLE("SurrenderBattle"),
         /** 504 论剑 V3 战前 15 秒明牌变阵提交 → {@code UpdateBattlePrepResponse}。 */
-        UPDATE_BATTLE_PREP("UpdateBattlePrep");
+        UPDATE_BATTLE_PREP("UpdateBattlePrep"),
+        /** 532 论剑 V4 队内一键战术标点提交 → {@code SendBattlePingResponse}。 */
+        SEND_BATTLE_PING("SendBattlePing");
 
         private final String method;
 
@@ -65,7 +67,9 @@ public final class BattleMessageIds {
         /** 480 {@code SurrenderVoteS2C}：同队 PVP 投降投票进度推送（仅推送给同队成员）。 */
         SURRENDER_VOTE("NotifySurrenderVote", PushCategory.BATTLE_FRAME),
         /** 505 {@code BattlePrepUpdateS2C}：论剑 V3 同队战前变阵进度推送（仅推送给同队成员）。 */
-        BATTLE_PREP_UPDATE("NotifyBattlePrepUpdate", PushCategory.BATTLE_FRAME);
+        BATTLE_PREP_UPDATE("NotifyBattlePrepUpdate", PushCategory.BATTLE_FRAME),
+        /** 533 {@code BattlePingS2C}：论剑 V4 同队战术标点推送（仅推送给同队成员）。 */
+        BATTLE_PING("NotifyBattlePing", PushCategory.BATTLE_FRAME);
 
         private final String method;
         private final PushCategory category;

@@ -143,6 +143,14 @@ public final class RankedStore {
                     .setConfigFingerprint(tables.configFingerprint())
                     .setTeamSize(teamSize)
                     .setUseFreePreset(false);
+            if (roster != null) {
+                for (long pid : roster) {
+                    Optional<MatchRankedPlayerSeasonRow> row = readPlayerSeason(c, current.getSeasonId(), pid);
+                    if (row.isPresent() && row.get().getCurrentWinStreak() >= 3) {
+                        ctx.putMemberWinStreaks(pid, row.get().getCurrentWinStreak());
+                    }
+                }
+            }
             return Optional.of(ctx.build());
         }
     }
@@ -279,14 +287,21 @@ public final class RankedStore {
                 int wins = prev.getWins();
                 int losses = prev.getLosses();
                 int draws = prev.getDraws();
+                int curStreak = prev.getCurrentWinStreak();
+                int bestStreak = prev.getBestWinStreak();
                 if (confirmed) {
                     if (in.outcome() == eBattleOutcome.BATTLE_OUTCOME_DRAW) {
                         draws++;
                     } else if ((in.playerTeamIndex() == 0 && in.outcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
                             || (in.playerTeamIndex() == 1 && in.outcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN)) {
                         wins++;
+                        curStreak++;
+                        if (curStreak > bestStreak) {
+                            bestStreak = curStreak;
+                        }
                     } else {
                         losses++;
+                        curStreak = 0;
                     }
                 }
                 long peak = qualifiedAfter ? Math.max(prev.getPeakRatingCenti(), afterRating) : prev.getPeakRatingCenti();
@@ -329,6 +344,8 @@ public final class RankedStore {
                         .setQualifiedAtMs(qualifiedAt)
                         .setMilestoneBits(bits)
                         .setUpdatedMs(now)
+                        .setCurrentWinStreak(curStreak)
+                        .setBestWinStreak(bestStreak)
                         .build();
                 upsertPlayerSeason(c, nextProgress);
 
@@ -353,7 +370,8 @@ public final class RankedStore {
                         .addAllNewlyUnlockedRewards(unlocked)
                         .setSettledAtMs(now)
                         .setCharacterPresetId(in.characterPresetId())
-                        .setPetPresetId(in.petPresetId());
+                        .setPetPresetId(in.petPresetId())
+                        .setWinStreakAfter(curStreak);
                 byte[] rewardBlob = NetworkProbes.bytes(RankedBattleSettlementView.newBuilder()
                         .addAllNewlyUnlockedRewards(unlocked).build());
                 insertBattleRow(c, MatchRankedBattleRow.newBuilder()
@@ -378,6 +396,7 @@ public final class RankedStore {
                         .setSettledAtMs(now)
                         .setCharacterPresetId(in.characterPresetId())
                         .setPetPresetId(in.petPresetId())
+                        .setWinStreakAfter(curStreak)
                         .build());
                 c.commit();
                 return viewBuilder.build();
@@ -426,6 +445,11 @@ public final class RankedStore {
         List<Long> sortedPlayers = new ArrayList<>(nextCenti.keySet());
         sortedPlayers.sort(Long::compareUnsigned);
         RankedRuleTable rule = tables.rule();
+        Map<Long, MatchRankedPlayerSeasonRow> preSeasonRows = new HashMap<>();
+        for (long pid : sortedPlayers) {
+            preSeasonRows.put(pid, readPlayerSeason(c, seasonId, pid)
+                    .orElseGet(() -> defaultProgress(seasonId, pid, preCenti.getOrDefault(pid, RankedTables.INITIAL_RATING_CENTI))));
+        }
         for (long playerId : sortedPlayers) {
             Optional<MatchRankedBattleRow> existing = readBattleRow(c, playerId, event.getBattleId());
             if (existing.isPresent()) {
@@ -453,8 +477,7 @@ public final class RankedStore {
             int charPresetId = presets != null ? presets.getCharacterPresetId() : rule.getDefaultCharacterPresetId();
             int petPresetId = presets != null ? presets.getPetPresetId() : rule.getDefaultPetPresetId();
 
-            MatchRankedPlayerSeasonRow prev = readPlayerSeason(c, seasonId, playerId)
-                    .orElseGet(() -> defaultProgress(seasonId, playerId, beforeRating));
+            MatchRankedPlayerSeasonRow prev = preSeasonRows.get(playerId);
             RankedTier tierBefore = tables.tierFor(beforeRating, prev.getQualified());
             boolean qualifiedAfter = prev.getQualified() || participated;
             boolean newlyQualified = !prev.getQualified() && qualifiedAfter;
@@ -463,13 +486,41 @@ public final class RankedStore {
             int wins = prev.getWins();
             int losses = prev.getLosses();
             int draws = prev.getDraws();
+            int curStreak = prev.getCurrentWinStreak();
+            int bestStreak = prev.getBestWinStreak();
+            int endedOpponentStreak = 0;
             if (event.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_DRAW) {
                 draws++;
             } else if ((teamIndex == 0 && event.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
                     || (teamIndex == 1 && event.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN)) {
                 wins++;
+                curStreak++;
+                if (curStreak > bestStreak) {
+                    bestStreak = curStreak;
+                }
+                BattleSettlementData st = settlementsByPlayer.get(playerId);
+                if (st != null && st.getEndedOpponentStreak() >= 3) {
+                    endedOpponentStreak = st.getEndedOpponentStreak();
+                } else {
+                    for (Map.Entry<Long, Integer> opp : teamByPlayer.entrySet()) {
+                        if (opp.getValue() == teamIndex) {
+                            continue;
+                        }
+                        int oppStreak = ctx.getMemberWinStreaksOrDefault(opp.getKey(), 0);
+                        if (oppStreak < 3) {
+                            MatchRankedPlayerSeasonRow oppRow = preSeasonRows.get(opp.getKey());
+                            if (oppRow != null) {
+                                oppStreak = oppRow.getCurrentWinStreak();
+                            }
+                        }
+                        if (oppStreak >= 3 && oppStreak > endedOpponentStreak) {
+                            endedOpponentStreak = oppStreak;
+                        }
+                    }
+                }
             } else {
                 losses++;
+                curStreak = 0;
             }
             long peak = qualifiedAfter ? Math.max(prev.getPeakRatingCenti(), afterRating) : prev.getPeakRatingCenti();
             int bits = prev.getMilestoneBits();
@@ -510,6 +561,8 @@ public final class RankedStore {
                     .setQualifiedAtMs(qualifiedAt)
                     .setMilestoneBits(bits)
                     .setUpdatedMs(nowMs)
+                    .setCurrentWinStreak(curStreak)
+                    .setBestWinStreak(bestStreak)
                     .build();
             upsertPlayerSeason(c, nextProgress);
             if (qualifiedAfter) {
@@ -537,6 +590,8 @@ public final class RankedStore {
                     .setSettledAtMs(nowMs)
                     .setCharacterPresetId(charPresetId)
                     .setPetPresetId(petPresetId)
+                    .setWinStreakAfter(curStreak)
+                    .setEndedOpponentStreak(endedOpponentStreak)
                     .build();
             byte[] rewardBlob = NetworkProbes.bytes(RankedBattleSettlementView.newBuilder()
                     .addAllNewlyUnlockedRewards(unlocked).build());
@@ -562,6 +617,8 @@ public final class RankedStore {
                     .setSettledAtMs(nowMs)
                     .setCharacterPresetId(charPresetId)
                     .setPetPresetId(petPresetId)
+                    .setWinStreakAfter(curStreak)
+                    .setEndedOpponentStreak(endedOpponentStreak)
                     .build());
             views.put(playerId, view);
         }
@@ -653,7 +710,7 @@ public final class RankedStore {
                 long now = clockMs.getAsLong();
                 List<MatchRankedPlayerSeasonRow> qualified = new ArrayList<>();
                 try (PreparedStatement ps = c.prepareStatement(
-                        "SELECT season_id,player_id,qualified,rating_centi,peak_rating_centi,valid_matches,wins,losses,draws,qualified_at_ms,milestone_bits,final_rank,champion_awarded,updated_ms "
+                        "SELECT season_id,player_id,qualified,rating_centi,peak_rating_centi,valid_matches,wins,losses,draws,qualified_at_ms,milestone_bits,final_rank,champion_awarded,updated_ms,current_win_streak,best_win_streak "
                                 + "FROM match_ranked_player_season WHERE season_id=? AND qualified=1")) {
                     ps.setInt(1, seasonId);
                     try (ResultSet rs = ps.executeQuery()) {
@@ -841,6 +898,8 @@ public final class RankedStore {
                 .setMilestoneBits(row.getMilestoneBits())
                 .setFinalRank(row.getFinalRank())
                 .setChampionAwarded(row.getChampionAwarded())
+                .setCurrentWinStreak(row.getCurrentWinStreak())
+                .setBestWinStreak(row.getBestWinStreak())
                 .build();
     }
 
@@ -1046,7 +1105,7 @@ public final class RankedStore {
 
     private Optional<MatchRankedPlayerSeasonRow> readPlayerSeason(Connection c, int seasonId, long playerId) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
-                "SELECT season_id,player_id,qualified,rating_centi,peak_rating_centi,valid_matches,wins,losses,draws,qualified_at_ms,milestone_bits,final_rank,champion_awarded,updated_ms "
+                "SELECT season_id,player_id,qualified,rating_centi,peak_rating_centi,valid_matches,wins,losses,draws,qualified_at_ms,milestone_bits,final_rank,champion_awarded,updated_ms,current_win_streak,best_win_streak "
                         + "FROM match_ranked_player_season WHERE season_id=? AND player_id=?")) {
             ps.setInt(1, seasonId);
             ps.setObject(2, PbMysql.uint64(playerId));
@@ -1059,7 +1118,7 @@ public final class RankedStore {
     private List<MatchRankedPlayerSeasonRow> readPlayerHistory(Connection c, long playerId, int currentSeasonId) throws SQLException {
         List<MatchRankedPlayerSeasonRow> out = new ArrayList<>();
         try (PreparedStatement ps = c.prepareStatement(
-                "SELECT season_id,player_id,qualified,rating_centi,peak_rating_centi,valid_matches,wins,losses,draws,qualified_at_ms,milestone_bits,final_rank,champion_awarded,updated_ms "
+                "SELECT season_id,player_id,qualified,rating_centi,peak_rating_centi,valid_matches,wins,losses,draws,qualified_at_ms,milestone_bits,final_rank,champion_awarded,updated_ms,current_win_streak,best_win_streak "
                         + "FROM match_ranked_player_season WHERE player_id=? AND season_id<? ORDER BY season_id DESC")) {
             ps.setObject(1, PbMysql.uint64(playerId));
             ps.setInt(2, currentSeasonId);
@@ -1088,6 +1147,8 @@ public final class RankedStore {
                 .setFinalRank(Long.parseUnsignedLong(rs.getString(12)))
                 .setChampionAwarded(rs.getBoolean(13))
                 .setUpdatedMs(Long.parseUnsignedLong(rs.getString(14)))
+                .setCurrentWinStreak(rs.getInt(15))
+                .setBestWinStreak(rs.getInt(16))
                 .build();
     }
 
@@ -1099,7 +1160,7 @@ public final class RankedStore {
             del.executeUpdate();
         }
         try (PreparedStatement ins = c.prepareStatement(
-                "INSERT INTO match_ranked_player_season(season_id,player_id,qualified,rating_centi,peak_rating_centi,valid_matches,wins,losses,draws,qualified_at_ms,milestone_bits,final_rank,champion_awarded,updated_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                "INSERT INTO match_ranked_player_season(season_id,player_id,qualified,rating_centi,peak_rating_centi,valid_matches,wins,losses,draws,qualified_at_ms,milestone_bits,final_rank,champion_awarded,updated_ms,current_win_streak,best_win_streak) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
             ins.setInt(1, row.getSeasonId());
             ins.setObject(2, PbMysql.uint64(row.getPlayerId()));
             ins.setBoolean(3, row.getQualified());
@@ -1114,6 +1175,8 @@ public final class RankedStore {
             ins.setObject(12, PbMysql.uint64(row.getFinalRank()));
             ins.setBoolean(13, row.getChampionAwarded());
             ins.setObject(14, PbMysql.uint64(row.getUpdatedMs()));
+            ins.setInt(15, row.getCurrentWinStreak());
+            ins.setInt(16, row.getBestWinStreak());
             ins.executeUpdate();
         }
     }
@@ -1182,7 +1245,8 @@ public final class RankedStore {
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT player_id,battle_id,season_id,team_size,status,outcome,player_team_index,total_rounds,participated,fled,"
                         + "rating_before_centi,rating_after_centi,rating_delta_centi,tier_before,tier_after,newly_qualified,"
-                        + "season_valid_matches_after,newly_unlocked_rewards_proto,settled_at_ms,character_preset_id,pet_preset_id "
+                        + "season_valid_matches_after,newly_unlocked_rewards_proto,settled_at_ms,character_preset_id,pet_preset_id,"
+                        + "win_streak_after,ended_opponent_streak "
                         + "FROM match_ranked_battle WHERE player_id=? AND battle_id=?")) {
             ps.setObject(1, PbMysql.uint64(playerId));
             ps.setObject(2, PbMysql.uint64(battleId));
@@ -1196,7 +1260,8 @@ public final class RankedStore {
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT player_id,battle_id,season_id,team_size,status,outcome,player_team_index,total_rounds,participated,fled,"
                         + "rating_before_centi,rating_after_centi,rating_delta_centi,tier_before,tier_after,newly_qualified,"
-                        + "season_valid_matches_after,newly_unlocked_rewards_proto,settled_at_ms,character_preset_id,pet_preset_id "
+                        + "season_valid_matches_after,newly_unlocked_rewards_proto,settled_at_ms,character_preset_id,pet_preset_id,"
+                        + "win_streak_after,ended_opponent_streak "
                         + "FROM match_ranked_battle WHERE player_id=? ORDER BY settled_at_ms DESC,battle_id DESC LIMIT 1")) {
             ps.setObject(1, PbMysql.uint64(playerId));
             try (ResultSet rs = ps.executeQuery()) {
@@ -1209,8 +1274,9 @@ public final class RankedStore {
         try (PreparedStatement ins = c.prepareStatement(
                 "INSERT INTO match_ranked_battle(player_id,battle_id,season_id,team_size,status,outcome,player_team_index,total_rounds,participated,fled,"
                         + "rating_before_centi,rating_after_centi,rating_delta_centi,tier_before,tier_after,newly_qualified,"
-                        + "season_valid_matches_after,newly_unlocked_rewards_proto,settled_at_ms,character_preset_id,pet_preset_id) "
-                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                        + "season_valid_matches_after,newly_unlocked_rewards_proto,settled_at_ms,character_preset_id,pet_preset_id,"
+                        + "win_streak_after,ended_opponent_streak) "
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
             ins.setObject(1, PbMysql.uint64(row.getPlayerId()));
             ins.setObject(2, PbMysql.uint64(row.getBattleId()));
             ins.setInt(3, row.getSeasonId());
@@ -1232,6 +1298,8 @@ public final class RankedStore {
             ins.setObject(19, PbMysql.uint64(row.getSettledAtMs()));
             ins.setInt(20, row.getCharacterPresetId());
             ins.setInt(21, row.getPetPresetId());
+            ins.setInt(22, row.getWinStreakAfter());
+            ins.setInt(23, row.getEndedOpponentStreak());
             ins.executeUpdate();
         }
     }
@@ -1260,6 +1328,8 @@ public final class RankedStore {
                 .setSettledAtMs(Long.parseUnsignedLong(rs.getString(19)))
                 .setCharacterPresetId(rs.getInt(20))
                 .setPetPresetId(rs.getInt(21))
+                .setWinStreakAfter(rs.getInt(22))
+                .setEndedOpponentStreak(rs.getInt(23))
                 .build();
     }
 
@@ -1287,7 +1357,9 @@ public final class RankedStore {
                 .setSeasonValidMatchesAfter(row.getSeasonValidMatchesAfter())
                 .setSettledAtMs(row.getSettledAtMs())
                 .setCharacterPresetId(row.getCharacterPresetId())
-                .setPetPresetId(row.getPetPresetId());
+                .setPetPresetId(row.getPetPresetId())
+                .setWinStreakAfter(row.getWinStreakAfter())
+                .setEndedOpponentStreak(row.getEndedOpponentStreak());
         if (!row.getNewlyUnlockedRewardsProto().isEmpty()) {
             try {
                 RankedBattleSettlementView holder = RankedBattleSettlementView.parseFrom(row.getNewlyUnlockedRewardsProto());

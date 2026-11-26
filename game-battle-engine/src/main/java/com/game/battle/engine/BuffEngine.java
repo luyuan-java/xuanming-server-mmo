@@ -88,7 +88,10 @@ final class BuffEngine {
                 return;
             }
         }
-        dispelBuffsByTag(target, row);
+        int removedByTag = dispelBuffsByTag(target, row);
+        if (removedByTag > 0) {
+            ctx.recordDispelLanded(casterId, removedByTag);
+        }
         if (caster != null && (row.getBuffType() == BattleConstants.BUFF_TYPE_DISPEL || row.getDispelTagCount() > 0)) {
             if (caster.teamIndex() != target.teamIndex()) {
                 ctx.encounter.tryDispelBossStance(caster, target);
@@ -180,9 +183,9 @@ final class BuffEngine {
      * 驱散（{@code DispelBuffsByTag}，{@code engine.cpp:1499-1523}）：新 buff 的 dispel_tag 非空时，先按下标升序收集表行存在、且其 tag
      * 含 dispel_tag 任一键的现存条目，再<strong>按下标降序</strong>逐个移除，所以 BUFF_REMOVE 按插入序的逆序产出。不分施法者。
      */
-    private void dispelBuffsByTag(BattleUnit target, BuffTable row) {
+    private int dispelBuffsByTag(BattleUnit target, BuffTable row) {
         if (row.getDispelTagCount() == 0) {
-            return;
+            return 0;
         }
         int count = target.state().getBuffsCount();
         int[] dispelIndexes = new int[count];
@@ -202,6 +205,7 @@ final class BuffEngine {
         for (int i = found - 1; i >= 0; i--) {
             removeBuffAt(target, dispelIndexes[i]);
         }
+        return found;
     }
 
     /**

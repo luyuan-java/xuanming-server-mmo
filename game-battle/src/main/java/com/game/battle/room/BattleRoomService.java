@@ -11,6 +11,8 @@ import com.game.proto.IssueBattleTicketRequest;
 import com.game.proto.IssueBattleTicketResponse;
 import com.game.proto.RemoveObserverRequest;
 import com.game.proto.RemoveObserverResponse;
+import com.game.proto.SendBattlePingRequest;
+import com.game.proto.SendBattlePingResponse;
 import com.game.proto.SetAutoBattleRequest;
 import com.game.proto.SetAutoBattleResponse;
 import com.game.proto.StopWatchBattleRequest;
@@ -179,6 +181,14 @@ public interface BattleRoomService {
     /** 504 论剑 V3 战前 15 秒明牌变阵提交（换赛季印 / 换首发灵宠 / 锁定；仅同队同步）。 */
     default UpdateBattlePrepResponse updateBattlePrep(long playerId, UpdateBattlePrepRequest request) {
         return UpdateBattlePrepResponse.newBuilder()
+                .setErrorMessage(com.game.proto.TipInfoMessage.newBuilder()
+                        .setId(com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE))
+                .build();
+    }
+
+    /** 532 论剑 V4 队内一键战术标点提交（零文字战术信号；严格仅向同队推送）。 */
+    default SendBattlePingResponse sendBattlePing(long playerId, SendBattlePingRequest request) {
+        return SendBattlePingResponse.newBuilder()
                 .setErrorMessage(com.game.proto.TipInfoMessage.newBuilder()
                         .setId(com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE))
                 .build();

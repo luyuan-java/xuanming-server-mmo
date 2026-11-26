@@ -5,6 +5,7 @@ import com.game.proto.BattleItemEntry;
 import com.game.proto.BattlePrepState;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.BattleSurrenderVoteState;
+import com.game.proto.BattleTacticalPing;
 import com.game.battle.engine.TurnBattleEngine;
 import java.util.List;
 
@@ -44,6 +45,12 @@ final class BattleViews {
 
     static ViewerState forParticipant(BattleStateS2C full, long viewer, List<BattleItemEntry> selfItems,
                                       BattleSurrenderVoteState surrenderVote, BattlePrepState prepState) {
+        return forParticipant(full, viewer, selfItems, surrenderVote, prepState, List.of());
+    }
+
+    static ViewerState forParticipant(BattleStateS2C full, long viewer, List<BattleItemEntry> selfItems,
+                                      BattleSurrenderVoteState surrenderVote, BattlePrepState prepState,
+                                      List<BattleTacticalPing> teamPings) {
         BattleStateS2C.Builder state = redact(full, viewer);
         if (viewer != 0) {
             state.addAllSelfItems(selfItems);
@@ -52,6 +59,9 @@ final class BattleViews {
             }
             if (prepState != null) {
                 state.setPrepState(prepState);
+            }
+            if (teamPings != null && !teamPings.isEmpty()) {
+                state.addAllTeamPings(teamPings);
             }
         }
         return new ViewerState(state.build());
@@ -72,7 +82,8 @@ final class BattleViews {
     }
 
     private static BattleStateS2C.Builder redact(BattleStateS2C full, long viewer) {
-        BattleStateS2C.Builder state = full.toBuilder().clearSelfItems().clearSurrenderVote().clearPrepState();
+        BattleStateS2C.Builder state = full.toBuilder()
+                .clearSelfItems().clearSurrenderVote().clearPrepState().clearTeamPings();
         TurnBattleEngine.stripEngineOnlyState(state);
         for (BattleActorState.Builder actor : state.getActorsBuilderList()) {
             boolean own = viewer != 0 && (actor.getActorId() == viewer || actor.getOwnerPlayerId() == viewer);

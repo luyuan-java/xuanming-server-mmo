@@ -8,10 +8,12 @@ import com.game.proto.BattleAction;
 import com.game.proto.BattleActorState;
 import com.game.proto.BattleBuffEntry;
 import com.game.proto.BattleEventItem;
+import com.game.proto.BattleHighlightKind;
 import com.game.proto.BattleItemEntry;
 import com.game.proto.BattleMonsterDefeat;
 import com.game.proto.BattleParticipationFact;
 import com.game.proto.BattlePetSnapshot;
+import com.game.proto.BattlePingKind;
 import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.BattlePrepPetOption;
 import com.game.proto.BattlePrepPlayerState;
@@ -20,6 +22,7 @@ import com.game.proto.BattlePrepState;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.BattleSurrenderVoteState;
+import com.game.proto.BattleTacticalPing;
 import com.game.proto.CreateBattleRequest;
 import com.game.proto.FestivalBeastBattleContext;
 import com.game.proto.SeasonSealEffect;
@@ -104,10 +107,22 @@ public final class TurnBattleEngine {
             BattleSurrenderVoteState.newBuilder()
     };
     private final NavigableMap<Long, Integer> consecutiveIdleRoundsByPlayer = new TreeMap<>(Long::compareUnsigned);
-    /** 群仙问道赛 V3 MVP 评定累计统计（本人及本人出战宝宝，每回合末从权威事件流确定性汇总）。 */
+    /** 群仙问道赛 V3 MVP & 论剑 V4 复盘高光累计统计（本人及本人出战宝宝，每回合末从权威事件流确定性汇总）。 */
     private final NavigableMap<Long, Long> totalDamageDealtByPlayer = new TreeMap<>(Long::compareUnsigned);
     private final NavigableMap<Long, Long> totalHealingDoneByPlayer = new TreeMap<>(Long::compareUnsigned);
     private final NavigableMap<Long, Integer> totalControlsLandedByPlayer = new TreeMap<>(Long::compareUnsigned);
+    private final NavigableMap<Long, Long> primaryFocusDamageByPlayer = new TreeMap<>(Long::compareUnsigned);
+    private final NavigableMap<Long, Long> totalShieldGrantedByPlayer = new TreeMap<>(Long::compareUnsigned);
+    private final NavigableMap<Long, Long> damageTakenByPlayer = new TreeMap<>(Long::compareUnsigned);
+    private final TreeSet<Long> lowHpExperiencedPlayers = new TreeSet<>(Long::compareUnsigned);
+    private int peakEscalationStacks;
+    /** 论剑 V4 队内一键战术标点（按阵营隔离，每名队友至多保留 1 条最新意图，回合推进清空）。 */
+    @SuppressWarnings("unchecked")
+    private final NavigableMap<Long, BattleTacticalPing>[] teamPings = new NavigableMap[] {
+            new TreeMap<Long, BattleTacticalPing>(Long::compareUnsigned),
+            new TreeMap<Long, BattleTacticalPing>(Long::compareUnsigned)
+    };
+    private final NavigableMap<Long, Integer> roundPingCountByPlayer = new TreeMap<>(Long::compareUnsigned);
     /** 论剑 V3 战前 15 秒明牌变阵状态（纯确定性，零墙钟）。 */
     private boolean prepActive;
     private long nextPetActorIndex;
@@ -128,6 +143,9 @@ public final class TurnBattleEngine {
     }
 
     public record UpdatePrepResult(int errorTip, BattlePrepState prepState) {
+    }
+
+    public record BattlePingResult(int errorTip, BattleTacticalPing ping) {
     }
 
     private TurnBattleEngine(CreateBattleRequest request, BattleData data) {
@@ -434,6 +452,12 @@ public final class TurnBattleEngine {
                     .setMagicAttack(snapshot.getMagicAttack())
                     .setDefense(snapshot.getDefense())
                     .setFormationSlot(ctx.nextFormationSlot(snapshot.getTeamIndex()));
+            if (isRankedBattle()) {
+                int streak = request.getRankedContext().getMemberWinStreaksOrDefault(playerId, 0);
+                if (Integer.compareUnsigned(streak, BattleConstants.MIN_WIN_STREAK_HIGHLIGHT) >= 0) {
+                    actor.setWinStreak(streak);
+                }
+            }
             // 只复制明确提供的玩家加成；缺省子消息不能因读取而产生 presence，宝宝与怪物不继承主人的装备。
             ctx.configured.equipment.inspectLearnedSkills(snapshot);
             if (snapshot.hasEquipmentEffects() && !BattleEquipment.initialize(actor,snapshot.getEquipmentEffects()))
@@ -1253,6 +1277,7 @@ public final class TurnBattleEngine {
         }
 
         prepActive = false;
+        roundPingCountByPlayer.clear();
         // 在最终亮牌阵容上一次性初始化全部开场光环/成长被动，杜绝被换掉宠物的残留光环。
         ctx.configured.initialize();
         return true;
@@ -1264,6 +1289,73 @@ public final class TurnBattleEngine {
             return null;
         }
         return buildPrepStateForViewer(viewerPlayerId, deadlineMs);
+    }
+
+    /** 论剑 V4 队内一键战术标点提交（每名玩家每回合至多 2 次，仅同队可见），对齐 C++ {@code SubmitBattlePing}。 */
+    public BattlePingResult submitBattlePing(long playerId, long targetActorId, BattlePingKind kind) {
+        if (outcome != eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
+            return new BattlePingResult(ActionChecks.FEATURE_UNAVAILABLE, BattleTacticalPing.getDefaultInstance());
+        }
+        BattleUnit sender = ctx.findActor(playerId);
+        if (sender == null || !sender.isPlayer() || sender.fled()) {
+            return new BattlePingResult(ActionChecks.INVALID_PARAMETER, BattleTacticalPing.getDefaultInstance());
+        }
+        int senderTeam = sender.teamIndex();
+        if (senderTeam < 0 || senderTeam > 1) {
+            return new BattlePingResult(ActionChecks.INVALID_PARAMETER, BattleTacticalPing.getDefaultInstance());
+        }
+        int teamPlayerCount = 0;
+        for (BattleUnit unit : ctx.units()) {
+            if (unit.isPlayer() && unit.teamIndex() == senderTeam) {
+                teamPlayerCount++;
+            }
+        }
+        if (teamPlayerCount < 2) {
+            return new BattlePingResult(ActionChecks.FEATURE_UNAVAILABLE, BattleTacticalPing.getDefaultInstance());
+        }
+        if (kind == null || (kind != BattlePingKind.BATTLE_PING_FOCUS
+                && kind != BattlePingKind.BATTLE_PING_CONTROL
+                && kind != BattlePingKind.BATTLE_PING_PROTECT
+                && kind != BattlePingKind.BATTLE_PING_DISPEL)) {
+            return new BattlePingResult(ActionChecks.INVALID_PARAMETER, BattleTacticalPing.getDefaultInstance());
+        }
+        BattleUnit target = ctx.findActor(targetActorId);
+        if (target == null || !target.isActive()) {
+            return new BattlePingResult(ActionChecks.INVALID_PARAMETER, BattleTacticalPing.getDefaultInstance());
+        }
+        if ((kind == BattlePingKind.BATTLE_PING_FOCUS || kind == BattlePingKind.BATTLE_PING_CONTROL)
+                && target.teamIndex() == senderTeam) {
+            return new BattlePingResult(ActionChecks.INVALID_PARAMETER, BattleTacticalPing.getDefaultInstance());
+        }
+        if (kind == BattlePingKind.BATTLE_PING_PROTECT && target.teamIndex() != senderTeam) {
+            return new BattlePingResult(ActionChecks.INVALID_PARAMETER, BattleTacticalPing.getDefaultInstance());
+        }
+        int used = roundPingCountByPlayer.getOrDefault(playerId, 0);
+        if (used >= BattleConstants.MAX_BATTLE_PINGS_PER_ROUND) {
+            return new BattlePingResult(ActionChecks.RATE_LIMIT_EXCEEDED, BattleTacticalPing.getDefaultInstance());
+        }
+        roundPingCountByPlayer.put(playerId, used + 1);
+
+        BattleTacticalPing ping = BattleTacticalPing.newBuilder()
+                .setSenderPlayerId(playerId)
+                .setTargetActorId(targetActorId)
+                .setKind(kind)
+                .setRoundIndex(prepActive ? 0 : ctx.roundIndex())
+                .build();
+        teamPings[senderTeam].put(playerId, ping);
+        return new BattlePingResult(0, ping);
+    }
+
+    /** 仅向同队参战者返回本队当前有效战术标点（对手与观众为空）。 */
+    public List<BattleTacticalPing> teamPingsForViewer(long viewerPlayerId) {
+        if (viewerPlayerId == 0L || outcome != eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
+            return List.of();
+        }
+        OptionalInt team = teamIndexOfPlayer(viewerPlayerId);
+        if (team.isEmpty() || team.getAsInt() < 0 || team.getAsInt() > 1) {
+            return List.of();
+        }
+        return List.copyOf(teamPings[team.getAsInt()].values());
     }
 
     public void fillPrepStateForViewer(BattleStateS2C.Builder state, long viewerPlayerId, long deadlineMs) {
@@ -1539,18 +1631,22 @@ public final class TurnBattleEngine {
             }
         }
 
+        int resolvedEscalation = ctx.escalationStacks();
         pendingActions.clear();
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             ctx.advanceRound();
             ctx.encounter.advanceRoundCleanup();
             expireSurrenderVotesForRoundAdvance();
+            teamPings[0].clear();
+            teamPings[1].clear();
+            roundPingCountByPlayer.clear();
             ctx.encounter.updatePolarityForRound(request.getMatchMode());
             ctx.encounter.refreshTelegraphs(maxRounds);
         } else {
             ctx.encounter.clearActiveTelegraphs();
         }
         ctx.events().endRound();
-        accumulateRoundMvpMetrics(result);
+        accumulateRoundMvpMetrics(result, resolvedEscalation);
         return result.setState(buildStateSnapshot()).build();
     }
 
@@ -1576,50 +1672,86 @@ public final class TurnBattleEngine {
         return false;
     }
 
-    private void accumulateRoundMvpMetrics(TurnResultS2C.Builder result) {
+    private void accumulateRoundMvpMetrics(TurnResultS2C.Builder result, int resolvedEscalation) {
+        if (resolvedEscalation > peakEscalationStacks) {
+            peakEscalationStacks = resolvedEscalation;
+        }
         int count = result.getEventsCount();
         for (int i = 0; i < count; i++) {
             BattleEventItem ev = result.getEvents(i);
             BattleUnit source = ctx.findActor(ev.getSourceId());
-            if (source == null) {
-                continue;
-            }
-            long ownerId = source.isPlayer() ? source.actorId()
-                    : (source.isPet() ? source.ownerPlayerId() : 0L);
-            if (ownerId == 0L) {
-                continue;
-            }
             BattleUnit target = ctx.findActor(ev.getTargetId());
+            long ownerId = source == null ? 0L
+                    : (source.isPlayer() ? source.actorId()
+                    : (source.isPet() ? source.ownerPlayerId() : 0L));
+            long targetOwnerId = target == null ? 0L
+                    : (target.isPlayer() ? target.actorId()
+                    : (target.isPet() ? target.ownerPlayerId() : 0L));
             switch (ev.getEventType()) {
                 case BATTLE_EVENT_DAMAGE -> {
-                    if (target == null || target.teamIndex() != source.teamIndex()) {
-                        long dealt = EquipmentCombatRules.addSaturated(ev.getValue(), ev.getAbsorbed());
-                        if (Long.compareUnsigned(dealt, 0L) > 0) {
+                    long dealt = EquipmentCombatRules.addSaturated(ev.getValue(), ev.getAbsorbed());
+                    if (Long.compareUnsigned(dealt, 0L) > 0) {
+                        if (ownerId != 0L && source != null
+                                && (target == null || target.teamIndex() != source.teamIndex())) {
                             long prev = totalDamageDealtByPlayer.getOrDefault(ownerId, 0L);
                             totalDamageDealtByPlayer.put(ownerId, EquipmentCombatRules.addSaturated(prev, dealt));
+                            if (ev.getIsPrimaryFocus()) {
+                                long prevFocus = primaryFocusDamageByPlayer.getOrDefault(ownerId, 0L);
+                                primaryFocusDamageByPlayer.put(ownerId,
+                                        EquipmentCombatRules.addSaturated(prevFocus, dealt));
+                            }
+                        }
+                        if (targetOwnerId != 0L && target != null
+                                && (source == null || target.teamIndex() != source.teamIndex())) {
+                            long prevTaken = damageTakenByPlayer.getOrDefault(targetOwnerId, 0L);
+                            damageTakenByPlayer.put(targetOwnerId,
+                                    EquipmentCombatRules.addSaturated(prevTaken, dealt));
                         }
                     }
+                    noteLowHpExperienced(target, ev.getTargetHealthAfter());
                 }
-                case BATTLE_EVENT_HEAL, BATTLE_EVENT_SHIELD -> {
-                    if (Long.compareUnsigned(ev.getValue(), 0L) > 0
+                case BATTLE_EVENT_HEAL -> {
+                    if (ownerId != 0L && source != null
+                            && Long.compareUnsigned(ev.getValue(), 0L) > 0
                             && (target == null || target.teamIndex() == source.teamIndex())) {
                         long prev = totalHealingDoneByPlayer.getOrDefault(ownerId, 0L);
                         totalHealingDoneByPlayer.put(ownerId, EquipmentCombatRules.addSaturated(prev, ev.getValue()));
                     }
                 }
+                case BATTLE_EVENT_SHIELD -> {
+                    if (ownerId != 0L && source != null
+                            && Long.compareUnsigned(ev.getValue(), 0L) > 0
+                            && (target == null || target.teamIndex() == source.teamIndex())) {
+                        long prev = totalHealingDoneByPlayer.getOrDefault(ownerId, 0L);
+                        totalHealingDoneByPlayer.put(ownerId, EquipmentCombatRules.addSaturated(prev, ev.getValue()));
+                        long prevShield = totalShieldGrantedByPlayer.getOrDefault(ownerId, 0L);
+                        totalShieldGrantedByPlayer.put(ownerId,
+                                EquipmentCombatRules.addSaturated(prevShield, ev.getValue()));
+                    }
+                }
                 case BATTLE_EVENT_BUFF_TICK -> {
                     if (Long.compareUnsigned(ev.getValue(), 0L) > 0 && target != null) {
-                        if (target.teamIndex() != source.teamIndex()) {
-                            long prev = totalDamageDealtByPlayer.getOrDefault(ownerId, 0L);
-                            totalDamageDealtByPlayer.put(ownerId, EquipmentCombatRules.addSaturated(prev, ev.getValue()));
-                        } else {
+                        if (source == null || target.teamIndex() != source.teamIndex()) {
+                            if (ownerId != 0L) {
+                                long prev = totalDamageDealtByPlayer.getOrDefault(ownerId, 0L);
+                                totalDamageDealtByPlayer.put(ownerId,
+                                        EquipmentCombatRules.addSaturated(prev, ev.getValue()));
+                            }
+                            if (targetOwnerId != 0L) {
+                                long prevTaken = damageTakenByPlayer.getOrDefault(targetOwnerId, 0L);
+                                damageTakenByPlayer.put(targetOwnerId,
+                                        EquipmentCombatRules.addSaturated(prevTaken, ev.getValue()));
+                            }
+                            noteLowHpExperienced(target, ev.getTargetHealthAfter());
+                        } else if (ownerId != 0L) {
                             long prev = totalHealingDoneByPlayer.getOrDefault(ownerId, 0L);
-                            totalHealingDoneByPlayer.put(ownerId, EquipmentCombatRules.addSaturated(prev, ev.getValue()));
+                            totalHealingDoneByPlayer.put(ownerId,
+                                    EquipmentCombatRules.addSaturated(prev, ev.getValue()));
                         }
                     }
                 }
                 case BATTLE_EVENT_BUFF_ADD -> {
-                    if (ev.getBuffTableId() != 0 && target != null
+                    if (ownerId != 0L && source != null && ev.getBuffTableId() != 0 && target != null
                             && target.teamIndex() != source.teamIndex()
                             && isHardControlBuff(ev.getBuffTableId())) {
                         totalControlsLandedByPlayer.put(ownerId,
@@ -1630,6 +1762,63 @@ public final class TurnBattleEngine {
                 }
             }
         }
+    }
+
+    private void noteLowHpExperienced(BattleUnit target, long hpAfter) {
+        if (target == null || !target.isPlayer()) {
+            return;
+        }
+        long maxHp = target.maxHealth();
+        if (Long.compareUnsigned(hpAfter, 0L) <= 0 || Long.compareUnsigned(maxHp, 0L) <= 0) {
+            return;
+        }
+        long limit = Long.divideUnsigned(-1L, BattleConstants.CLUTCH_COMEBACK_LOW_HP_DENOMINATOR);
+        if (Long.compareUnsigned(hpAfter, limit) <= 0
+                && Long.compareUnsigned(hpAfter * BattleConstants.CLUTCH_COMEBACK_LOW_HP_DENOMINATOR, maxHp) < 0) {
+            lowHpExperiencedPlayers.add(target.actorId());
+        }
+    }
+
+    private BattleHighlightKind computeHighlightKind(long playerId, int teamIndex, boolean playerWon, boolean isDead) {
+        if (playerWon && (peakEscalationStacks >= BattleConstants.CLUTCH_COMEBACK_MIN_ESCALATION_STACKS
+                || (!isDead && lowHpExperiencedPlayers.contains(playerId)))) {
+            return BattleHighlightKind.BATTLE_HIGHLIGHT_CLUTCH_COMEBACK;
+        }
+        long maxFocus = 0L;
+        int maxCtrl = 0;
+        long maxSupport = 0L;
+        long maxTaken = 0L;
+        for (BattleUnit member : ctx.units()) {
+            if (!member.isPlayer() || member.teamIndex() != teamIndex) {
+                continue;
+            }
+            long pid = member.actorId();
+            long focus = primaryFocusDamageByPlayer.getOrDefault(pid, 0L);
+            if (Long.compareUnsigned(focus, maxFocus) > 0) maxFocus = focus;
+            int ctrl = totalControlsLandedByPlayer.getOrDefault(pid, 0) + ctx.totalDispelsLanded(pid);
+            if (ctrl > maxCtrl) maxCtrl = ctrl;
+            long support = totalHealingDoneByPlayer.getOrDefault(pid, 0L);
+            if (Long.compareUnsigned(support, maxSupport) > 0) maxSupport = support;
+            long taken = damageTakenByPlayer.getOrDefault(pid, 0L);
+            if (Long.compareUnsigned(taken, maxTaken) > 0) maxTaken = taken;
+        }
+        long selfFocus = primaryFocusDamageByPlayer.getOrDefault(playerId, 0L);
+        if (Long.compareUnsigned(selfFocus, 0L) > 0 && selfFocus == maxFocus) {
+            return BattleHighlightKind.BATTLE_HIGHLIGHT_PRIMARY_FOCUS;
+        }
+        int selfCtrl = totalControlsLandedByPlayer.getOrDefault(playerId, 0) + ctx.totalDispelsLanded(playerId);
+        if (selfCtrl >= BattleConstants.HIGHLIGHT_CONTROL_MIN_COUNT && selfCtrl == maxCtrl) {
+            return BattleHighlightKind.BATTLE_HIGHLIGHT_TACTICAL_CONTROL;
+        }
+        long selfSupport = totalHealingDoneByPlayer.getOrDefault(playerId, 0L);
+        if (Long.compareUnsigned(selfSupport, 0L) > 0 && selfSupport == maxSupport) {
+            return BattleHighlightKind.BATTLE_HIGHLIGHT_SAVIOR_SUPPORT;
+        }
+        long selfTaken = damageTakenByPlayer.getOrDefault(playerId, 0L);
+        if (Long.compareUnsigned(selfTaken, 0L) > 0 && selfTaken == maxTaken) {
+            return BattleHighlightKind.BATTLE_HIGHLIGHT_IRON_GUARD;
+        }
+        return BattleHighlightKind.BATTLE_HIGHLIGHT_NONE;
     }
 
     /** 只读查询指定怪物当前的 Boss HFSM 阶段（未绑定 AI 时返回空）。 */
@@ -2418,7 +2607,26 @@ public final class TurnBattleEngine {
                 .setSurrendered(surrenderedTeam >= 0 && actor.teamIndex() == surrenderedTeam)
                 .setTotalDamageDealt(totalDamageDealtByPlayer.getOrDefault(playerId, 0L))
                 .setTotalHealingDone(totalHealingDoneByPlayer.getOrDefault(playerId, 0L))
-                .setTotalControlsLanded(totalControlsLandedByPlayer.getOrDefault(playerId, 0));
+                .setTotalControlsLanded(totalControlsLandedByPlayer.getOrDefault(playerId, 0))
+                .setPrimaryFocusDamageDealt(primaryFocusDamageByPlayer.getOrDefault(playerId, 0L))
+                .setTotalShieldGranted(totalShieldGrantedByPlayer.getOrDefault(playerId, 0L))
+                .setTotalDispelsLanded(ctx.totalDispelsLanded(playerId))
+                .setDamageTaken(damageTakenByPlayer.getOrDefault(playerId, 0L));
+        boolean playerWon = (actor.teamIndex() == 0 && outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                || (actor.teamIndex() == 1 && outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN);
+        settlement.setHighlightKind(computeHighlightKind(playerId, actor.teamIndex(), playerWon, actor.isDead()));
+        if (playerWon) {
+            int maxEnemyStreak = 0;
+            for (BattleUnit other : ctx.units()) {
+                if (other.isPlayer() && other.teamIndex() != actor.teamIndex()) {
+                    int st = other.state().getWinStreak();
+                    if (st >= BattleConstants.MIN_WIN_STREAK_HIGHLIGHT && st > maxEnemyStreak) {
+                        maxEnemyStreak = st;
+                    }
+                }
+            }
+            settlement.setEndedOpponentStreak(maxEnemyStreak);
+        }
 
         for (BattleUnit other : ctx.units()) {
             if (!other.isPet() || other.ownerPlayerId() != playerId || other.competitiveTemporary()) {
