@@ -164,7 +164,8 @@ public final class TurnBattleEngine {
         this.request = request;
         boolean competitivePvp = (request.hasRankedContext() && request.getRankedContext().getSeasonId() != 0)
                 || request.getMatchMode() == BattleConstants.MATCH_MODE_POLARITY_5V5
-                || request.getMatchMode() == BattleConstants.MATCH_MODE_SEASON_TOURNAMENT;
+                || request.getMatchMode() == BattleConstants.MATCH_MODE_SEASON_TOURNAMENT
+                || request.getMatchMode() == BattleConstants.MATCH_MODE_JIANGHU_DUEL;
         // 基线 Initialize 第 4 步：拷请求、rng.seed(seed)、roundIndex = 1、outcome = ONGOING（engine.cpp:69-72）
         this.ctx = new BattleContext(data, request.getMatchMode(), request.getSeed(), competitivePvp);
         this.ctx.bindPendingActions(java.util.Collections.unmodifiableMap(pendingActions));
@@ -265,6 +266,17 @@ public final class TurnBattleEngine {
             }
             if (!hasExplicitRoundLimit) {
                 engine.maxRounds = Math.min(engine.maxRounds, BattleConstants.GUILD_WAR_DEFAULT_MAX_ROUNDS);
+            }
+        }
+        // 天墉生死状一期：默认 30 回合上限（支持 1..100 覆盖），打满双方存活权威判平。
+        if (engine.isJianghuDuelBattle()) {
+            int overrideRounds = request.hasJianghuDuelContext()
+                    ? request.getJianghuDuelContext().getRoundLimitOverride()
+                    : 0;
+            if (overrideRounds >= 1 && overrideRounds <= 100) {
+                engine.maxRounds = overrideRounds;
+            } else {
+                engine.maxRounds = BattleConstants.JIANGHU_DUEL_DEFAULT_MAX_ROUNDS;
             }
         }
         // 瑞兽迎春硬性准入门禁：boss_trial_kind=7 必须且仅能携带合法冻结的 FESTIVAL_BEAST 上下文、单人携单只锁定出战宝宝。
@@ -368,17 +380,12 @@ public final class TurnBattleEngine {
         }
         engine.bindDungeonMonsterAis(monsterAiProfiles);
         engine.ctx.encounter.initSpecialState(request.getMatchMode(), engine.maxRounds);
-        // 锦标赛 V2 五行灵脉初始化：设置生效灵脉，土厚灵脉开场赋予全体 8% 气血护盾（与 C++ 引擎逐项对齐）。
+        // 锦标赛 V2 五行灵脉初始化：设置生效灵脉；土厚灵脉 8% 护盾在非变阵期立刻赋予，变阵期延后到 finalizePrepPhase 锁阵后统一赋予。
         if (request.hasTournamentContext()) {
             var leyline = request.getTournamentContext().getLeylineElement();
             engine.ctx.setActiveTournamentLeyline(leyline);
-            if (leyline == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_EARTH) {
-                for (BattleUnit unit : engine.ctx.units()) {
-                    if (unit.isActive() && Long.compareUnsigned(unit.maxHealth(), 0L) > 0) {
-                        long shield = Math.max(1L, Long.divideUnsigned(unit.maxHealth() * 8L, 100L));
-                        unit.addTournamentEarthShield(shield);
-                    }
-                }
+            if (!engine.prepActive) {
+                engine.applyTournamentEarthShieldIfActive();
             }
         }
         // 赛季全员对称周环境词缀：未启用锦标赛五行灵脉、非瑞兽迎春/五行幻境爬塔且全体玩家快照一致携带 1..4 时激活，分歧 fail-closed 退回 0。
@@ -738,9 +745,10 @@ public final class TurnBattleEngine {
                     }
                 }
                 for (SeasonSealEffect seal : snapshot.getAvailableSeasonSealsList()) {
-                    if (!SeasonRules.validSealEffect(seal.getSeasonId(), seal.getSealId(), seal.getEffectId(),
+                    if (!SeasonRules.validSealDefinition(seal.getSeasonId(), seal.getSealId(), seal.getEffectId(),
                             seal.getBonusBps(), seal.getCapBps(), seal.getPerRoundLimit(),
-                            seal.getBattleLimit(), seal.getActiveRounds(), seal.getHealthThresholdBps())) {
+                            seal.getBattleLimit(), seal.getActiveRounds(), seal.getHealthThresholdBps(),
+                            seal.getResonanceSkillId(), seal.getResonanceKind(), seal.getResonanceParam())) {
                         return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
                                 "战前候选赛季印非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
                                         + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId())
@@ -1011,7 +1019,12 @@ public final class TurnBattleEngine {
         return request.hasRankedContext() && request.getRankedContext().getUseFreePreset();
     }
 
-    /** 是否为竞技 PVP（人宠会武 / 物法易势 / 战队锦标赛）：启用凝锋主目标与战意渐盛。 */
+    /** 是否为天墉生死状一期对局（MATCH_MODE_JIANGHU_DUEL=12）。 */
+    public boolean isJianghuDuelBattle() {
+        return request.getMatchMode() == BattleConstants.MATCH_MODE_JIANGHU_DUEL;
+    }
+
+    /** 是否为竞技 PVP（人宠会武 / 物法易势 / 战队锦标赛 / 天墉生死状）：启用凝锋主目标与战意渐盛。 */
     public boolean isCompetitivePvpBattle() {
         return ctx.isCompetitivePvp();
     }
@@ -1432,6 +1445,7 @@ public final class TurnBattleEngine {
                                 actor.state().clearSeasonSealState();
                                 actor.state().getSeasonSealStateBuilder()
                                         .setItemId(Integer.toUnsignedLong(seal.getSealId()));
+                                ctx.clearSeasonSealRuntime(playerId);
                                 if (actor.state().getEntryMaxHealth() == 0L) {
                                     actor.state().setEntryMaxHealth(actor.maxHealth());
                                 }
@@ -1508,9 +1522,23 @@ public final class TurnBattleEngine {
         prepActive = false;
         roundPingCountByPlayer.clear();
         rebuildMidBattleStandbyPools();
-        // 在最终亮牌阵容上一次性初始化全部开场光环/成长被动，杜绝被换掉宠物的残留光环。
+        // 在最终亮牌阵容上一次性初始化全部开场光环/成长被动，杜绝被换掉宠物的残留光环，并补齐土灵脉开场护盾。
         ctx.configured.initialize();
+        applyTournamentEarthShieldIfActive();
         return true;
+    }
+
+    private void applyTournamentEarthShieldIfActive() {
+        if (ctx.activeTournamentLeyline() != com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_EARTH) {
+            return;
+        }
+        for (BattleUnit unit : ctx.units()) {
+            if (unit.isActive() && Long.compareUnsigned(unit.maxHealth(), 0L) > 0
+                    && unit.tournamentEarthShield() == 0L) {
+                long shield = Math.max(1L, Long.divideUnsigned(unit.maxHealth() * 8L, 100L));
+                unit.addTournamentEarthShield(shield);
+            }
+        }
     }
 
     /** 论剑 V5 临阵唤灵是否开启（正式自养论剑与赛季战队锦标赛开启，免费预设/PVE/切磋/帮战关闭）。 */
@@ -1672,6 +1700,9 @@ public final class TurnBattleEngine {
         nextPetActorIndex++;
 
         BattleUnit summoned = new BattleUnit(rebuilt);
+        if (actor.isAuto() && summoned.state().getSkillRanksCount() != 0) {
+            summoned.setAuto(true);
+        }
         if (existingIdx >= 0) {
             pendingActions.remove(ctx.units().get(existingIdx).actorId());
             ctx.units().set(existingIdx, summoned);
@@ -2058,9 +2089,9 @@ public final class TurnBattleEngine {
         int resolvedEscalation = ctx.escalationStacks();
         pendingActions.clear();
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
+            expireSurrenderVotesForRoundAdvance();
             ctx.advanceRound();
             ctx.encounter.advanceRoundCleanup();
-            expireSurrenderVotesForRoundAdvance();
             teamPings[0].clear();
             teamPings[1].clear();
             roundPingCountByPlayer.clear();
@@ -2615,10 +2646,15 @@ public final class TurnBattleEngine {
                 || !ctx.rng().rollPercent(defender.combat().getReflectRate())) return;
         // 用整数实扣计算，不再过抗性 / 必杀 / 防御姿态；ceil 在 uint64 上也不溢出。
         long reflected = EquipmentCombatRules.percentCeil(dealt, BattleConstants.REFLECT_DAMAGE_PERCENT);
-        reflected = Unsigned.minUnsigned(attacker.health(), reflected == 0 ? 1 : reflected);
-        attacker.setHealth(attacker.health() - reflected);
+        long amount = reflected == 0 ? 1 : reflected;
+        if (ctx.configured.hasEffects(attacker) || ctx.configured.hasEffects(defender)) {
+            ctx.configured.reflectDamage(defender, attacker, amount);
+            return;
+        }
+        long landed = Unsigned.minUnsigned(attacker.health(), amount);
+        attacker.setHealth(attacker.health() - landed);
         ctx.events().append(eBattleEventType.BATTLE_EVENT_DAMAGE, defender.actorId(), attacker.actorId())
-                .setValue(reflected).setHitKind(eBattleHitKind.BATTLE_HIT_REFLECT)
+                .setValue(landed).setHitKind(eBattleHitKind.BATTLE_HIT_REFLECT)
                 .setTargetHealthAfter(attacker.health()).setTargetManaAfter(attacker.mana());
         if (attacker.health() == 0) ctx.handleDeath(attacker, defender.actorId());
     }
@@ -2931,6 +2967,7 @@ public final class TurnBattleEngine {
         } else if (Integer.compareUnsigned(ctx.roundIndex(), maxRounds) >= 0) {
             boolean drawOnCap = isRankedBattle()
                     || BattleConstants.isGuildWarMatchMode(request.getMatchMode())
+                    || isJianghuDuelBattle()
                     || ctx.encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_POLARITY_5V5
                     || request.getMatchMode() == BattleConstants.MATCH_MODE_POLARITY_5V5;
             outcome = drawOnCap ? eBattleOutcome.BATTLE_OUTCOME_DRAW : eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
@@ -3083,10 +3120,16 @@ public final class TurnBattleEngine {
                         .setRevengedLossesAfter(bestRevenge.getLosses());
             }
         }
-        if (isRankedBattle() && !usesFreePreset()) {
-            if (actor.state().getEquipmentEffects().hasSeasonSeal()) {
-                settlement.setFinalSeasonSealId(actor.state().getEquipmentEffects().getSeasonSeal().getSealId());
+        if (actor.state().getEquipmentEffects().hasSeasonSeal()) {
+            settlement.setFinalSeasonSealId(actor.state().getEquipmentEffects().getSeasonSeal().getSealId());
+            var rt = ctx.findSeasonSealRuntime(playerId);
+            if (rt != null) {
+                settlement.setSeasonSealContributionValue(rt.contributionValue);
+                settlement.setSeasonSealTriggerCount(rt.triggerCount);
+                settlement.setSeasonSealResonanceCount(rt.resonanceCount);
             }
+        }
+        if (isRankedBattle() && !usesFreePreset()) {
             int starterPetTableId = 0;
             PrepPlayerOptions prepOpt = prepOptionsByPlayer.get(playerId);
             if (prepOpt != null && prepOpt.selectedPetId != 0L) {
@@ -3147,6 +3190,9 @@ public final class TurnBattleEngine {
 
         if (isFestivalBeastBattle()) {
             settlement.setFestivalBeast(request.getActivityContext().getFestivalBeast());
+        }
+        if (request.hasJianghuDuelContext()) {
+            settlement.setJianghuDuel(request.getJianghuDuelContext());
         }
 
         if (!isFestivalBeastBattle() && outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN && actor.teamIndex() == 0

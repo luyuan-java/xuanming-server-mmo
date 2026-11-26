@@ -353,6 +353,20 @@ public final class GuildWarService {
                         .setFinishedAtMs(br.finishedAtMs())
                         .build());
             }
+            GuildWarStore.FeudLookup feudLookup = store.getActiveOrPendingFeud(guild.guildId(), now);
+            feudLookup.justFinished().ifPresent(fin -> broadcastFeudAlert(GuildWarAlertKind.GUILD_WAR_ALERT_KIND_FEUD_ENDED, fin, d));
+            feudLookup.activeOrPending().ifPresent(f -> resp.setActiveFeud(toFeudView(f)));
+            store.getLastFinishedFeud(guild.guildId()).ifPresent(fin ->
+                    resp.setLastFeudSummary(GuildWarRules.formatFeudSummary(fin.status(), fin.issuerGuildId(),
+                            fin.issuerGuildName(), fin.targetGuildId(), fin.targetGuildName(),
+                            fin.issuerWins(), fin.targetWins(), fin.winnerGuildId())));
+            long lastFeudAt = store.getLastFeudIssuedAt(guild.guildId());
+            if (lastFeudAt > 0) {
+                long nextAllowed = lastFeudAt + GuildWarRules.DEFAULT_FEUD_COOLDOWN_SEC * 1000L;
+                if (Long.compareUnsigned(nextAllowed, now) > 0) {
+                    resp.setNextFeudIssueAtMs(nextAllowed);
+                }
+            }
             return resp.build();
         } catch (SQLException e) {
             throw new IllegalStateException("读取帮战总览失败", e);
@@ -961,6 +975,8 @@ public final class GuildWarService {
                     .setBannerHpBefore(r.bannerHpBefore())
                     .setBannerHpAfter(r.bannerHpAfter())
                     .setBannerShielded(r.bannerShielded() != 0)
+                    .setFeudBonus(r.summaryPayload() != null
+                            && new String(r.summaryPayload(), StandardCharsets.UTF_8).contains("\"fb\":true"))
                     .build();
         } catch (SQLException e) {
             throw new IllegalStateException("查询帮战结算失败", e);
@@ -1025,6 +1041,114 @@ public final class GuildWarService {
         }
     }
 
+    // ── 11. IssueGuildWarFeud & RespondGuildWarFeud（2 小时宿敌约战战书） ──────
+
+    public IssueGuildWarFeudResponse issueGuildWarFeud(long playerId, IssueGuildWarFeudRequest req, Deadline d) {
+        Optional<GuildData> guildOpt = guilds.findByPlayer(playerId, d);
+        if (guildOpt.isEmpty()) {
+            return IssueGuildWarFeudResponse.newBuilder().setErrorMessage(tip(GuildTips.NOT_IN_GUILD)).build();
+        }
+        GuildData guild = guildOpt.get();
+        GuildData.Member self = guild.member(playerId);
+        if (self == null || !GuildRoles.rank(self.role()).atLeast(GuildRoles.Rank.OFFICER)) {
+            return IssueGuildWarFeudResponse.newBuilder().setErrorMessage(tip(GuildTips.RANK_TOO_LOW)).build();
+        }
+        long targetGuildId = req.getTargetGuildId();
+        if (targetGuildId == 0 || targetGuildId == guild.guildId()) {
+            return IssueGuildWarFeudResponse.newBuilder().setErrorMessage(tip(GuildTips.WAR_FEUD_INVALID_TARGET)).build();
+        }
+        Optional<GuildData> targetOpt = guilds.findByGuildId(targetGuildId, d);
+        if (targetOpt.isEmpty()) {
+            return IssueGuildWarFeudResponse.newBuilder().setErrorMessage(tip(GuildTips.WAR_FEUD_INVALID_TARGET)).build();
+        }
+        long now = now();
+        long feudId = ids.getAsLong();
+        GuildWarStore.FeudRow input = new GuildWarStore.FeudRow(
+                feudId, guild.zoneId(), guild.guildId(), guild.name(),
+                targetGuildId, targetOpt.get().name(), 1, 0, 0, 0L, 0L, now,
+                now + GuildWarRules.DEFAULT_FEUD_ACCEPT_WINDOW_SEC * 1000L, 0L, 0L, 0L, now);
+        try {
+            GuildWarStore.FeudRow created = store.issueFeud(input, GuildWarRules.DEFAULT_FEUD_COOLDOWN_SEC, now);
+            broadcastFeudAlert(GuildWarAlertKind.GUILD_WAR_ALERT_KIND_FEUD_CHALLENGE, created, d);
+            return IssueGuildWarFeudResponse.newBuilder()
+                    .setFeud(toFeudView(created))
+                    .setNextIssueAtMs(now + GuildWarRules.DEFAULT_FEUD_COOLDOWN_SEC * 1000L)
+                    .build();
+        } catch (GuildWarStore.WarRuleException e) {
+            int tipId = switch (e.code) {
+                case "feud_active" -> GuildTips.WAR_FEUD_ALREADY_ACTIVE;
+                case "feud_cooldown" -> GuildTips.WAR_FEUD_COOLDOWN;
+                default -> GuildTips.WAR_SERVICE_BUSY;
+            };
+            return IssueGuildWarFeudResponse.newBuilder().setErrorMessage(tip(tipId)).build();
+        } catch (SQLException e) {
+            throw new IllegalStateException("下发帮会宿敌约战战书失败", e);
+        }
+    }
+
+    public RespondGuildWarFeudResponse respondGuildWarFeud(long playerId, RespondGuildWarFeudRequest req, Deadline d) {
+        Optional<GuildData> guildOpt = guilds.findByPlayer(playerId, d);
+        if (guildOpt.isEmpty()) {
+            return RespondGuildWarFeudResponse.newBuilder().setErrorMessage(tip(GuildTips.NOT_IN_GUILD)).build();
+        }
+        GuildData guild = guildOpt.get();
+        GuildData.Member self = guild.member(playerId);
+        if (self == null || !GuildRoles.rank(self.role()).atLeast(GuildRoles.Rank.OFFICER)) {
+            return RespondGuildWarFeudResponse.newBuilder().setErrorMessage(tip(GuildTips.RANK_TOO_LOW)).build();
+        }
+        long now = now();
+        try {
+            GuildWarStore.FeudRow updated = store.respondFeud(
+                    req.getFeudId(), guild.guildId(), req.getAccept(), GuildWarRules.DEFAULT_FEUD_DURATION_SEC, now);
+            if (req.getAccept() && updated.status() == 2) {
+                broadcastFeudAlert(GuildWarAlertKind.GUILD_WAR_ALERT_KIND_FEUD_STARTED, updated, d);
+            }
+            return RespondGuildWarFeudResponse.newBuilder().setFeud(toFeudView(updated)).build();
+        } catch (GuildWarStore.WarRuleException e) {
+            return RespondGuildWarFeudResponse.newBuilder().setErrorMessage(tip(GuildTips.WAR_FEUD_NOT_FOUND)).build();
+        } catch (SQLException e) {
+            throw new IllegalStateException("应答帮会宿敌约战战书失败", e);
+        }
+    }
+
+    private void broadcastFeudAlert(GuildWarAlertKind kind, GuildWarStore.FeudRow f, Deadline d) {
+        if (f == null) return;
+        List<Long> recipients = new ArrayList<>();
+        guilds.findByGuildId(f.targetGuildId(), d).ifPresent(g -> g.members().forEach(m -> recipients.add(m.playerId())));
+        if (kind != GuildWarAlertKind.GUILD_WAR_ALERT_KIND_FEUD_CHALLENGE) {
+            guilds.findByGuildId(f.issuerGuildId(), d).ifPresent(g -> g.members().forEach(m -> recipients.add(m.playerId())));
+        }
+        if (recipients.isEmpty()) return;
+        alerts.send(GuildWarAlertS2C.newBuilder()
+                .setKind(kind)
+                .setAttackerGuildName(f.issuerGuildName())
+                .setDefenderGuildName(f.targetGuildName())
+                .setFeudId(f.feudId())
+                .setIssuerWins(f.issuerWins())
+                .setTargetWins(f.targetWins())
+                .build(), recipients);
+    }
+
+    private static GuildWarFeudView toFeudView(GuildWarStore.FeudRow f) {
+        return GuildWarFeudView.newBuilder()
+                .setFeudId(f.feudId())
+                .setIssuerGuildId(f.issuerGuildId())
+                .setIssuerGuildName(f.issuerGuildName())
+                .setTargetGuildId(f.targetGuildId())
+                .setTargetGuildName(f.targetGuildName())
+                .setStatus(GuildWarFeudStatus.forNumber(f.status()))
+                .setIssuerWins(f.issuerWins())
+                .setTargetWins(f.targetWins())
+                .setIssuerMerit(f.issuerMerit())
+                .setTargetMerit(f.targetMerit())
+                .setCreatedAtMs(f.createdAtMs())
+                .setAcceptDeadlineMs(f.acceptDeadlineMs())
+                .setStartedAtMs(f.startedAtMs())
+                .setEndsAtMs(f.endsAtMs())
+                .setWinnerGuildId(f.winnerGuildId())
+                .build();
+    }
+
     // ── Kafka 帮战终局幂等结算 ────────────────────────────────────────────────
 
     public boolean settleBattleResult(BattleResultEvent event) throws SQLException {
@@ -1055,11 +1179,21 @@ public final class GuildWarService {
         GuildWarBattleKind warKind = GuildWarBattleKind.forNumber(gw.getWarBattleKind());
         if (warKind == null) warKind = GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_PANEL_PVP;
 
+        Optional<GuildWarStore.FeudRow> activeFeud = store.getActiveFeudBetween(
+                gw.getAttackerGuildId(), gw.getDefenderGuildId(), now);
+        boolean feudActive = activeFeud.isPresent();
+
         GuildWarRules.SideReward atkReward = GuildWarRules.computeSideReward(
-                warKind, atkWon, draw, 100, gw.getGoldLeylineBonus(), gw.getRivalryBonus(), rule);
+                warKind, atkWon, draw, 100, gw.getGoldLeylineBonus(), gw.getRivalryBonus(), feudActive, rule);
         GuildWarRules.SideReward defReward = defIds.isEmpty()
                 ? new GuildWarRules.SideReward(0, 0, 0, 0)
-                : GuildWarRules.computeSideReward(warKind, defWon, draw, 100, gw.getGoldLeylineBonus(), gw.getRivalryBonus(), rule);
+                : GuildWarRules.computeSideReward(warKind, defWon, draw, 100, gw.getGoldLeylineBonus(), gw.getRivalryBonus(), feudActive, rule);
+
+        int endedLoserStreak = 0;
+        long preLoserId = (!draw && !atkIds.isEmpty() && !defIds.isEmpty()) ? (defWon ? atkIds.get(0) : defIds.get(0)) : 0L;
+        if (preLoserId != 0L) {
+            endedLoserStreak = store.getOrDefaultPlayerState(preLoserId, gw.getZoneId(), weekKey).streakCount();
+        }
 
         int hpBefore = 0, hpAfter = 0, shielded = 0;
         boolean captured = false;
@@ -1151,11 +1285,41 @@ public final class GuildWarService {
                 hpBefore, hpAfter, shielded, outcomeTag, jackpotContrib, jackpotSilver, 100,
                 atkReward.contribution(), atkReward.silver(), atkReward.guildFunds(), atkReward.merit(),
                 defReward.contribution(), defReward.silver(), defReward.guildFunds(), defReward.merit(),
-                "{}".getBytes(StandardCharsets.UTF_8), now);
+                (feudActive ? "{\"fb\":true}" : "{}").getBytes(StandardCharsets.UTF_8), now);
         boolean settled = store.settleBattle(rec, weekKey, dayKey, atkIds, defIds, captured, nextShieldUntil,
                 bountyResolved, nextBountyStatus, nextCounterKills, nextCounterKillers, winnerPid,
                 bountyImmunitySec, protectSec, now);
         if (settled) {
+            Deadline bg = Deadline.after(1500);
+            if (feudActive) {
+                GuildWarStore.FeudBattleResult fRes = store.recordFeudBattle(activeFeud.get().feudId(),
+                        gw.getAttackerGuildId(), gw.getDefenderGuildId(), atkWon, defWon,
+                        atkReward.merit() * atkIds.size(), defReward.merit() * defIds.size(), now);
+                if (fRes.justFinished() && fRes.feud().isPresent()) {
+                    broadcastFeudAlert(GuildWarAlertKind.GUILD_WAR_ALERT_KIND_FEUD_ENDED, fRes.feud().get(), bg);
+                }
+            }
+            if (!draw && !atkIds.isEmpty() && !defIds.isEmpty()) {
+                long winPid = defWon ? defIds.get(0) : atkIds.get(0);
+                long losePid = defWon ? atkIds.get(0) : defIds.get(0);
+                int newStreak = store.getOrDefaultPlayerState(winPid, gw.getZoneId(), weekKey).streakCount();
+                if (GuildWarRules.shouldBroadcastStreakAlert(newStreak, endedLoserStreak)) {
+                    Map<Long, String> pNames = names.resolve(List.of(winPid, losePid), bg);
+                    List<Long> recips = new ArrayList<>();
+                    guilds.findByGuildId(gw.getAttackerGuildId(), bg).ifPresent(g -> g.members().forEach(m -> recips.add(m.playerId())));
+                    guilds.findByGuildId(gw.getDefenderGuildId(), bg).ifPresent(g -> g.members().forEach(m -> recips.add(m.playerId())));
+                    if (!recips.isEmpty()) {
+                        alerts.send(GuildWarAlertS2C.newBuilder()
+                                .setKind(GuildWarAlertKind.GUILD_WAR_ALERT_KIND_STREAK_BOUNTY)
+                                .setActorName(nameOf(winPid, pNames))
+                                .setTargetName(nameOf(losePid, pNames))
+                                .setBattleId(event.getBattleId())
+                                .setRewardSilver(jackpotSilver)
+                                .setStreakCount(endedLoserStreak >= GuildWarRules.STREAK_BROADCAST_MIN ? endedLoserStreak : newStreak)
+                                .build(), recips);
+                    }
+                }
+            }
             log.info("[guild-war] settled battle_id={} kind={} outcome={} leyline={} hp={}->{}",
                     Long.toUnsignedString(event.getBattleId()), warKind, event.getOutcomeValue(),
                     gw.getLeylineId(), hpBefore, hpAfter);

@@ -206,6 +206,20 @@ public final class PlayerAttributes {
         return id;
     }
 
+    /** 统一战法·加点流派方案 1:1 绑定专用：按显式 schemeId 确保属性方案存在（免费自动补建），推进游标避免冲突。 */
+    public Scheme ensureScheme(int schemeId, String defaultName) {
+        Scheme existing = scheme(schemeId);
+        if (existing != null) {
+            return existing;
+        }
+        Scheme created = new Scheme(schemeId, defaultName, new HashMap<>(), UnknownFieldSet.getDefaultInstance());
+        schemes.add(created);
+        if (Integer.compareUnsigned(nextSchemeId, schemeId + 1) < 0) {
+            nextSchemeId = schemeId + 1;
+        }
+        return created;
+    }
+
     public Derived derived() {
         return derived;
     }

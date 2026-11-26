@@ -31,6 +31,8 @@ import com.game.proto.friend.AcceptFriendRequest;
 import com.game.proto.friend.AcceptFriendResponse;
 import com.game.proto.friend.AddFriendRequest;
 import com.game.proto.friend.AddFriendResponse;
+import com.game.proto.friend.BatchCheckSocialRelationsRequest;
+import com.game.proto.friend.BatchCheckSocialRelationsResponse;
 import com.game.proto.friend.BlockEntry;
 import com.game.proto.friend.BlockRequest;
 import com.game.proto.friend.BlockResponse;
@@ -397,6 +399,30 @@ public final class FriendService {
 
     private FriendStore storeFor(SessionContext session) {
         return store.forActor(session.getPlayerId(), session.getAccount(), session.getOwnerRevision());
+    }
+
+    // ================================================================ 内部只读批量关系校验
+
+    /** 供 match 天墉生死状校验两队间拉黑与全员好友关系（CLIENT_RPC_SERVER_ONLY，客户端入口已挡住）。 */
+    public BatchCheckSocialRelationsResponse batchCheckSocialRelations(BatchCheckSocialRelationsRequest request, Deadline deadline) {
+        if (request == null || request.getSideAPlayerIdsCount() == 0 || request.getSideBPlayerIdsCount() == 0
+                || request.getSideAPlayerIdsCount() > 5 || request.getSideBPlayerIdsCount() > 5) {
+            return BatchCheckSocialRelationsResponse.newBuilder()
+                    .setErrorMessage(tip(INVALID_PARAMETER, "invalid side player ids"))
+                    .build();
+        }
+        try {
+            FriendStore.SocialRelationSummary res = store.batchCheckSocialRelations(
+                    request.getSideAPlayerIdsList(), request.getSideBPlayerIdsList(), listLimit, deadline);
+            return BatchCheckSocialRelationsResponse.newBuilder()
+                    .setHasAnyBlock(res.hasAnyBlock())
+                    .setAllAreFriends(res.allAreFriends())
+                    .build();
+        } catch (RuntimeException e) {
+            return BatchCheckSocialRelationsResponse.newBuilder()
+                    .setErrorMessage(fault("BatchCheckSocialRelations", e))
+                    .build();
+        }
     }
 
     // ================================================================ 推送

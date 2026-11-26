@@ -108,6 +108,10 @@ class GuildTipsTest {
         codes.put("WAR_BOUNTY_NOT_FOUND", GuildTips.WAR_BOUNTY_NOT_FOUND);
         codes.put("WAR_TRACK_COOLDOWN", GuildTips.WAR_TRACK_COOLDOWN);
         codes.put("WAR_SERVICE_BUSY", GuildTips.WAR_SERVICE_BUSY);
+        codes.put("WAR_FEUD_COOLDOWN", GuildTips.WAR_FEUD_COOLDOWN);
+        codes.put("WAR_FEUD_ALREADY_ACTIVE", GuildTips.WAR_FEUD_ALREADY_ACTIVE);
+        codes.put("WAR_FEUD_NOT_FOUND", GuildTips.WAR_FEUD_NOT_FOUND);
+        codes.put("WAR_FEUD_INVALID_TARGET", GuildTips.WAR_FEUD_INVALID_TARGET);
         return codes;
     }
 

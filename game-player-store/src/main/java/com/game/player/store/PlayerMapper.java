@@ -238,7 +238,8 @@ public interface PlayerMapper {
 
     @Select("""
             SELECT player_id, owner_epoch, save_seq, protocol_version, source_instance, status,
-                   level, scene_config_id, pos_x, pos_y, pos_z, data, payload_digest
+                   level, scene_config_id, pos_x, pos_y, pos_z, appearance_id, afk_pass_expires_at, afk_pass_last_req_id,
+                   data, payload_digest
               FROM player_final_save WHERE player_id = #{playerId} AND owner_epoch = #{epoch} FOR UPDATE
             """)
     @ConstructorArgs({
@@ -247,7 +248,9 @@ public interface PlayerMapper {
             @Arg(column="source_instance", javaType=String.class), @Arg(column="status", javaType=String.class),
             @Arg(column="level", javaType=Long.class), @Arg(column="scene_config_id", javaType=Long.class),
             @Arg(column="pos_x", javaType=Double.class), @Arg(column="pos_y", javaType=Double.class),
-            @Arg(column="pos_z", javaType=Double.class), @Arg(column="data", javaType=byte[].class),
+            @Arg(column="pos_z", javaType=Double.class), @Arg(column="appearance_id", javaType=String.class),
+            @Arg(column="afk_pass_expires_at", javaType=Long.class), @Arg(column="afk_pass_last_req_id", javaType=Long.class),
+            @Arg(column="data", javaType=byte[].class),
             @Arg(column="payload_digest", javaType=byte[].class)})
     PlayerStore.FinalSaveRow selectFinalSave(@Param("playerId") long playerId, @Param("epoch") long epoch);
 
@@ -273,14 +276,16 @@ public interface PlayerMapper {
 
     @Insert("""
             INSERT INTO player_final_save (player_id,owner_epoch,save_seq,protocol_version,source_instance,status,
-                    level,scene_config_id,pos_x,pos_y,pos_z,data,payload_digest,created_at,next_attempt_at)
+                    level,scene_config_id,pos_x,pos_y,pos_z,appearance_id,afk_pass_expires_at,afk_pass_last_req_id,
+                    data,payload_digest,created_at,next_attempt_at)
             VALUES (#{row.playerId},#{row.ownerEpoch},1,1,#{source},'PENDING',#{row.level},(CASE WHEN #{row.sceneConfigId}<0 THEN #{row.sceneConfigId}+4294967296 ELSE #{row.sceneConfigId} END),
-                    #{row.posX},#{row.posY},#{row.posZ},#{data},#{digest},#{now},#{now})
+                    #{row.posX},#{row.posY},#{row.posZ},#{row.appearanceId},#{row.afkPassExpiresAt},#{row.afkPassLastReqId},
+                    #{data},#{digest},#{now},#{now})
             """)
     int insertFinalSave(@Param("row") PlayerRow row,@Param("data") byte[] data,@Param("digest") byte[] digest,
                         @Param("source") String source,@Param("now") long now);
 
-    @Update("UPDATE player_final_save SET status='PENDING',level=#{row.level},scene_config_id=(CASE WHEN #{row.sceneConfigId}<0 THEN #{row.sceneConfigId}+4294967296 ELSE #{row.sceneConfigId} END),pos_x=#{row.posX},pos_y=#{row.posY},pos_z=#{row.posZ},data=#{data},payload_digest=#{digest},created_at=#{now},next_attempt_at=#{now} WHERE player_id=#{row.playerId} AND owner_epoch=#{row.ownerEpoch} AND " + EXACT_OPEN + " AND save_seq=1 AND protocol_version=1 AND source_instance=#{source}")
+    @Update("UPDATE player_final_save SET status='PENDING',level=#{row.level},scene_config_id=(CASE WHEN #{row.sceneConfigId}<0 THEN #{row.sceneConfigId}+4294967296 ELSE #{row.sceneConfigId} END),pos_x=#{row.posX},pos_y=#{row.posY},pos_z=#{row.posZ},appearance_id=#{row.appearanceId},afk_pass_expires_at=#{row.afkPassExpiresAt},afk_pass_last_req_id=#{row.afkPassLastReqId},data=#{data},payload_digest=#{digest},created_at=#{now},next_attempt_at=#{now} WHERE player_id=#{row.playerId} AND owner_epoch=#{row.ownerEpoch} AND " + EXACT_OPEN + " AND save_seq=1 AND protocol_version=1 AND source_instance=#{source}")
     int registerOpenFinalSave(@Param("row") PlayerRow row,@Param("data") byte[] data,@Param("digest") byte[] digest,
                              @Param("source") String source,@Param("now") long now);
 

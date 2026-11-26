@@ -172,6 +172,44 @@ public class SceneNodeConfiguration {
         return view;
     }
 
+    /** 可选直连 MailAdminService（配置 {@code game.dubbo.mail-url} 且提供 {@code MAIL_PRODUCER_SECRET_BATTLE} 时启用跨节点/离线名匠代打邮件出箱投递）。 */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(name = "game.dubbo.mail-url")
+    static class MailAdminClientConfiguration {
+
+        private static final Duration CALL_TIMEOUT = Duration.ofMillis(4000);
+
+        @Bean(destroyMethod = "close")
+        com.game.api.rpc.NodeRpcClients<com.game.api.MailAdminService> sceneMailAdminClients() {
+            return new com.game.api.rpc.NodeRpcClients<>(
+                    "scene-mail-admin", com.game.api.MailAdminService.class,
+                    com.game.api.DubboGroups.MAIL, CALL_TIMEOUT, "scene-mail-admin-connect");
+        }
+
+        @Bean
+        com.game.scene.mail.PlayerMailOutboxService.MailSender sceneMailOutboxSender(
+                com.game.api.rpc.NodeRpcClients<com.game.api.MailAdminService> clients,
+                @Value("${game.dubbo.mail-url}") String url,
+                Environment environment) {
+            String secret = environment.getProperty("MAIL_PRODUCER_SECRET_BATTLE");
+            if (secret == null || secret.length() < 32) {
+                log.warn("MAIL_PRODUCER_SECRET_BATTLE missing or shorter than 32 bytes; mail outbox sender disabled");
+                return null;
+            }
+            java.net.URI uri = java.net.URI.create(url == null ? "" : url.trim());
+            if (!"tri".equals(uri.getScheme()) || uri.getHost() == null || uri.getPort() < 1) {
+                throw new IllegalArgumentException("game.dubbo.mail-url 必须是 tri://host:port: " + url);
+            }
+            var target = new com.game.api.rpc.NodeRpcClients.Target(uri.getHost(), uri.getPort(), "");
+            return request -> {
+                var signed = com.game.discovery.serviceauth.ServiceCallSignatures.sign(
+                        com.game.api.MailAdminService.PERSONAL_METHOD, request, "battle", secret,
+                        System.currentTimeMillis());
+                return clients.call(target, CALL_TIMEOUT, svc -> svc.sendPersonalMail(signed));
+            };
+        }
+    }
+
     /** 可选直连 MatchInternalService（配置 {@code game.dubbo.match-url} 时启用瑞兽迎春活动开局调用）。 */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnProperty(name = "game.dubbo.match-url")
@@ -303,6 +341,7 @@ public class SceneNodeConfiguration {
                                com.game.scene.progression.BattleProgressionTables battleProgressionTables,
                                ObjectProvider<java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
                                        java.util.concurrent.CompletableFuture<com.game.proto.match.StartActivityBattleResponse>>> matchActivityStarter,
+                               ObjectProvider<com.game.scene.mail.PlayerMailOutboxService.MailSender> mailOutboxSender,
                                ObjectProvider<SceneTextGuard> textGuard, NodeLinkAuth nodeLinkAuth,
                                SceneMetrics sceneMetrics, AuditProperties audit, KafkaNames kafkaNames,
                                SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source,
@@ -325,6 +364,7 @@ public class SceneNodeConfiguration {
                 .withRewardedAdTables(rewardedAdTables)
                 .withBattleProgressionTables(battleProgressionTables)
                 .withMatchActivityStarter(matchActivityStarter.getIfAvailable())
+                .withMailOutboxSender(mailOutboxSender.getIfAvailable())
                 .withTextGuard(textGuard.getIfAvailable())
                 .withMaintenanceBoot(boot);
     }

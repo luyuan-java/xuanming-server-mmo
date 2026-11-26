@@ -320,4 +320,27 @@ class TurnBattleEquipmentTest {
             assertThat(zero.rngDrawsForTest()).isEqualTo(original.rngDrawsForTest());
         }
     }
+
+    @Test
+    void 控辅强化上限3584与1696放行_速度上限200绝不松动() {
+        var validActor = BattleActorState.newBuilder().setMaxHealth(1000).setMaxMana(500);
+        var enhancedSupport = com.game.proto.EquipmentEffects.newBuilder()
+                .setOutgoingHealBps(3584)
+                .setShieldCapacityBps(3584)
+                .setSpeedBps(200)
+                .putAilmentHitBps(1, 1696)
+                .build();
+        assertThat(BattleEquipment.initialize(validActor, enhancedSupport)).isTrue();
+        assertThat(validActor.getEquipmentEffects().getOutgoingHealBps()).isEqualTo(3584);
+        assertThat(validActor.getEquipmentEffects().getShieldCapacityBps()).isEqualTo(3584);
+        assertThat(validActor.getEquipmentEffects().getAilmentHitBpsOrDefault(1, 0)).isEqualTo(1696);
+
+        // 超出 +11 克制上限（3585 / 1697）或速度超 200 一律拒绝
+        assertThat(BattleEquipment.initialize(BattleActorState.newBuilder(),
+                com.game.proto.EquipmentEffects.newBuilder().setOutgoingHealBps(3585).build())).isFalse();
+        assertThat(BattleEquipment.initialize(BattleActorState.newBuilder(),
+                com.game.proto.EquipmentEffects.newBuilder().putAilmentHitBps(1, 1697).build())).isFalse();
+        assertThat(BattleEquipment.initialize(BattleActorState.newBuilder(),
+                com.game.proto.EquipmentEffects.newBuilder().setSpeedBps(201).build())).isFalse();
+    }
 }

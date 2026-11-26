@@ -65,12 +65,18 @@ public final class EquipmentDisplay {
         }
         int sequence = 0;
         for (var base : row.getBaseAttrList()) {
-            if (!EquipmentRules.accepted(rules.tables().attribute(base.getBaseAttrId()))) continue;
+            var attr = rules.tables().attribute(base.getBaseAttrId());
+            if (!EquipmentRules.accepted(attr)) continue;
             long original = Integer.toUnsignedLong(base.getBaseAttrValue());
-            long current = EquipmentRules.scale(original, currentBonus);
+            boolean enhances = EquipmentRules.enhancesBaseAttribute(profile, attr);
+            long current = enhances ? EquipmentRules.scale(original, currentBonus) : original;
             var line = line(new EquipmentRules.AttributeValue(base.getBaseAttrId(), current, 0, 0, sequence++))
                     .setEnhanceBonus(current - original);
-            if (info.hasEnhanceNext()) line.setEnhanceNextValue(EquipmentRules.scale(original, Integer.toUnsignedLong(next.getBonusPermyriad())));
+            if (info.hasEnhanceNext()) {
+                line.setEnhanceNextValue(enhances
+                        ? EquipmentRules.scale(original, Integer.toUnsignedLong(next.getBonusPermyriad()))
+                        : original);
+            }
             info.addBaseAttrs(line);
         }
         rules.values(item).stream().filter(v -> v.tier() != 0)
@@ -101,6 +107,7 @@ public final class EquipmentDisplay {
         info.clearFixedAffixSlots().clearArtifact();
         if (profile == 1 || profile == 2) {
             boolean valid = item != null && item.equipment() != null && FixedEquipmentEffects.validSelections(item, profile, rules.tables());
+            long itemEnhanceBonus = (valid && profile == 1) ? rules.v1ItemEnhanceBonusPermyriad(item) : 0L;
             for (int slot = 1; slot <= 2; slot++) {
                 EquipFixedAffixSlotInfo.Builder shown = EquipFixedAffixSlotInfo.newBuilder()
                         .setSlot(slot)
@@ -110,7 +117,7 @@ public final class EquipmentDisplay {
                         if (selected.getSlot() == slot) {
                             var affix = rules.tables().fixedAffix(selected.getAffixId());
                             if (affix != null) {
-                                shown.setSelected(affixInstanceInfo(affix, selected, rules.tables()));
+                                shown.setSelected(affixInstanceInfo(affix, selected, profile, itemEnhanceBonus, rules.tables()));
                             }
                         }
                     }
@@ -156,17 +163,31 @@ public final class EquipmentDisplay {
 
     public static EquipFixedAffixInfo affixInstanceInfo(com.game.table.EquipV1AffixTable row,
             com.game.player.store.state.EquipmentFixedAffixState selected, EquipmentTables tables) {
+        return affixInstanceInfo(row, selected, 0, 0L, tables);
+    }
+
+    public static EquipFixedAffixInfo affixInstanceInfo(com.game.table.EquipV1AffixTable row,
+            com.game.player.store.state.EquipmentFixedAffixState selected,
+            int equipProfile, long enhanceBonusPermyriad, EquipmentTables tables) {
         boolean exempt = EquipCraftQualityRules.isPolishExempt(row.getEffect());
         int tier = EquipCraftQualityRules.effectiveQualityTier(selected.getQualityTier(), exempt);
         int ratioPct = tables.qualityRatioPct(tier);
-        return affixInfo(row).toBuilder()
+        int qualityScaled = EquipCraftQualityRules.scaleValueByQuality(row.getValuePermyriad(), ratioPct);
+        int effectiveValue = EquipmentRules.scaleV1FixedAffixByEnhance(
+                equipProfile, row.getEffect(), qualityScaled, enhanceBonusPermyriad);
+        var builder = affixInfo(row).toBuilder()
                 .setQualityTier(tier)
                 .setQualityName(tables.qualityName(tier))
                 .setQualityRatioPct(ratioPct)
-                .setValueBps(EquipCraftQualityRules.scaleValueByQuality(row.getValuePermyriad(), ratioPct))
+                .setValueBps(effectiveValue)
                 .setPolishPityCount((exempt || tier >= EquipCraftQualityRules.MAX_QUALITY_TIER)
-                        ? 0 : selected.getPolishPityCount())
-                .build();
+                        ? 0 : selected.getPolishPityCount());
+        if (enhanceBonusPermyriad > 0L
+                && EquipmentRules.v1FixedAffixEnhanceSharePermyriad(equipProfile, row.getEffect()) > 0) {
+            builder.setSourceCapBps(EquipmentRules.scaleV1FixedAffixByEnhance(
+                    equipProfile, row.getEffect(), row.getSourceCap(), enhanceBonusPermyriad));
+        }
+        return builder.build();
     }
 
     public static EquipArtifactInfo artifactInfo(com.game.table.EquipArtifactTable row) {

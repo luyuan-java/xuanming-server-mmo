@@ -23,9 +23,9 @@ public final class AfkPassRules {
     public static final long PROJECTION_TTL_BUFFER_SECONDS = 120L;
     /** 离线托管期间定期刷新 Redis 投影的周期（60 秒）。 */
     public static final long PROJECTION_REFRESH_PERIOD_SECONDS = 60L;
-    /** 仙途轻享卡纯便利方案槽位扩展（免费 3 格 → 轻享卡生效 6 格，零战力加成）。 */
-    public static final int BASE_LOADOUT_SLOTS = 3;
-    public static final int LIGHT_CARD_BONUS_LOADOUT_SLOTS = 3;
+    /** 仙途轻享卡纯便利方案槽位扩展（免费 2 套 + 轻享卡额外 +2 套 = 4 套，叠加按月租用最高 7 套，零战力加成）。 */
+    public static final int BASE_LOADOUT_SLOTS = 2;
+    public static final int LIGHT_CARD_BONUS_LOADOUT_SLOTS = 2;
     public static final int LIGHT_CARD_LOADOUT_SLOTS = BASE_LOADOUT_SLOTS + LIGHT_CARD_BONUS_LOADOUT_SLOTS;
 
     public static int unlockedLoadoutSlots(boolean active) {

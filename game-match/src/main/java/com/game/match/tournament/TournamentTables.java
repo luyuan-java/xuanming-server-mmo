@@ -21,7 +21,7 @@ import java.util.Optional;
 /** 全服赛季战队锦标赛《群仙问道赛》V1 配表只读视图（{@code TournamentRule} id=1 + {@code TournamentReward} 全部档位）。 */
 public final class TournamentTables {
 
-    // 锦标赛名次/助威/竞猜/观道致敬银两奖励一律发放不可交易绑定银两（3），严禁误发付费灵石（1）。
+    // 锦标赛名次/助威/竞猜银两奖励一律发放不可交易绑定银两（3），严禁误发付费灵石（1）。
     public static final int GOLD_CURRENCY_TYPE = CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE;
     public static final int DEFAULT_RULE_ID = 1;
 
@@ -159,37 +159,6 @@ public final class TournamentTables {
             }
         }
         return att.build();
-    }
-
-    /** 构造每日免费观道致敬的绑定自用邮件附件（与 Go 侧 BuildSaluteMailAttachments 同口径）。 */
-    public static MailAttachments buildSaluteMailAttachments(TournamentRuleTable rule) {
-        MailAttachments.Builder att = MailAttachments.newBuilder();
-        if (rule != null) {
-            long gold = Integer.toUnsignedLong(rule.getSaluteGoldAmount());
-            if (gold > 0L) {
-                att.addCurrencies(MailCurrency.newBuilder()
-                        .setCurrencyType(GOLD_CURRENCY_TYPE)
-                        .setAmount(gold)
-                        .build());
-            }
-            if (rule.getSaluteItemId() != 0 && rule.getSaluteItemCount() != 0) {
-                att.addItems(MailItem.newBuilder()
-                        .setConfigId(rule.getSaluteItemId())
-                        .setCount(rule.getSaluteItemCount())
-                        .build());
-            }
-        }
-        return att.build();
-    }
-
-    public static List<TournamentRewardItem> saluteRewardItems(TournamentRuleTable rule) {
-        if (rule == null || rule.getSaluteItemId() == 0 || rule.getSaluteItemCount() == 0) {
-            return List.of();
-        }
-        return List.of(TournamentRewardItem.newBuilder()
-                .setItemId(rule.getSaluteItemId())
-                .setCount(rule.getSaluteItemCount())
-                .build());
     }
 
     private static TournamentRewardTierView toTierView(TournamentRewardTable row) {

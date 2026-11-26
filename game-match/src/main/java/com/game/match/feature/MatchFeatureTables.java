@@ -19,7 +19,6 @@ import com.game.match.feature.pb.MatchTournamentMatchRow;
 import com.game.match.feature.pb.MatchTournamentMemberRow;
 import com.game.match.feature.pb.MatchTournamentPredictionRow;
 import com.game.match.feature.pb.MatchTournamentRewardRow;
-import com.game.match.feature.pb.MatchTournamentSaluteRow;
 import com.game.match.feature.pb.MatchTournamentSeasonRow;
 import com.game.match.feature.pb.MatchTournamentSquadRow;
 import com.game.pbmysql.PbMysql;
@@ -53,7 +52,6 @@ public final class MatchFeatureTables {
     public static final String TOURNAMENT_MATCH_GAME = "match_tournament_match_game";
     public static final String TOURNAMENT_CHEER = "match_tournament_cheer";
     public static final String TOURNAMENT_REWARD = "match_tournament_reward";
-    public static final String TOURNAMENT_SALUTE = "match_tournament_salute";
     public static final String TOURNAMENT_PREDICTION = "match_tournament_prediction";
 
     public static final List<Message> PROTOTYPES = List.of(
@@ -77,7 +75,6 @@ public final class MatchFeatureTables {
             MatchTournamentMatchGameRow.getDefaultInstance(),
             MatchTournamentCheerRow.getDefaultInstance(),
             MatchTournamentRewardRow.getDefaultInstance(),
-            MatchTournamentSaluteRow.getDefaultInstance(),
             MatchTournamentPredictionRow.getDefaultInstance());
 
     @FunctionalInterface

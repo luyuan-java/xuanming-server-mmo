@@ -600,13 +600,14 @@ class EquipQualityAndSkillCraftTest {
         assertThat(proxyInstall.getErrorMessage().getId()).isZero();
         assertThat(proxyInstall.getResultQualityTier()).isEqualTo(5);
         assertThat(buyer.wallet().balance(Wallet.GOLD)).isEqualTo(buyerGoldBefore - 100L);
-        assertThat(master.wallet().balance(Wallet.GOLD)).isEqualTo(masterGoldBefore + 95L);
+        assertThat(master.wallet().balance(Wallet.GOLD)).isEqualTo(masterGoldBefore); // 95g 走异步出箱入账，不直接改他人内存钱包
+        assertThat(buyer.mailOutbox().size()).isEqualTo(1);
         assertThat(buyer.craft().forgeMasteryExp()).isEqualTo(buyerForgeExpBeforeProxy); // 代打不涨买家熟练度
         BagItem signedEquip = buyer.bags().bag(BagType.INVENTORY).item(baseEquip.getItemId());
         assertThat(signedEquip.equipment().getCrafterPlayerId()).isEqualTo(master.playerId());
         assertThat(signedEquip.equipment().getCrafterName()).isNotEmpty();
 
-        // 买家使用宗师代制常规技能书（触发宗师 10% 额外返 2 张绑定残页 + 宗师署名 + 80g 扣款 / 76g 净入账）
+        // 买家使用宗师代制常规技能书（触发宗师 10% 额外返 2 张绑定残页 + 宗师署名 + 80g 扣款 / 76g 净银两入出箱）
         SkillScrollCraftTable regularScroll = f.skillCraftTables.enabledScrolls().stream()
                 .filter(s -> s.getRarityTier() == 0).findFirst().orElseThrow();
         int targetSkill = f.skillCraftTables.scrollSkillIds(regularScroll.getId()).getFirst();
@@ -630,7 +631,24 @@ class EquipQualityAndSkillCraftTest {
         assertThat(buyer.craft().scrollMasteryExp()).isZero(); // 代制不涨买家制卷熟练度
         assertThat(buyer.wallet().balance(Wallet.GOLD))
                 .isEqualTo(buyerGold2 - regularScroll.getTargetedGoldCost() - 80L);
-        assertThat(master.wallet().balance(Wallet.GOLD)).isEqualTo(masterGold2 + 76L); // 80 - ceil(4) = 76
+        assertThat(master.wallet().balance(Wallet.GOLD)).isEqualTo(masterGold2);
+        assertThat(buyer.mailOutbox().size()).isEqualTo(2);
+
+        // 落盘确认前绝不投递（防回档刷钱）；落盘确认后 Tick 逐条投递 95g 与 76g 给宗师并清空出箱
+        f.mailOutbox.tick(f.world);
+        f.drain();
+        assertThat(f.sentOutboxMails).isEmpty();
+        for (int i = 0; i < 6; i++) {
+            f.completeSaves(com.game.scene.world.PlayerRepository.ProgressResult.SAVED);
+            f.mailOutbox.tick(f.world);
+            f.drain();
+        }
+        assertThat(buyer.mailOutbox().isEmpty()).isTrue();
+        assertThat(f.sentOutboxMails).hasSize(2);
+        assertThat(f.sentOutboxMails.get(0).getRecipientPlayerId()).isEqualTo(master.playerId());
+        assertThat(f.sentOutboxMails.get(0).getAttachments().getCurrencies(0).getAmount()).isEqualTo(95L);
+        assertThat(f.sentOutboxMails.get(1).getRecipientPlayerId()).isEqualTo(master.playerId());
+        assertThat(f.sentOutboxMails.get(1).getAttachments().getCurrencies(0).getAmount()).isEqualTo(76L);
         // 返还的 2 张悟道残页必须为绑定堆
         long boundFrags = buyer.bags().bag(BagType.INVENTORY).total(EquipCraftQualityRules.SCROLL_FRAGMENT_CONFIG_ID)
                 - buyer.bags().bag(BagType.INVENTORY).totalTradable(EquipCraftQualityRules.SCROLL_FRAGMENT_CONFIG_ID);
@@ -854,5 +872,164 @@ class EquipQualityAndSkillCraftTest {
         assertThat(player.craft().forgeMasteryExp()).isEqualTo(masteryBefore); // 解封不涨铸器熟练度
         assertThat(player.bags().bag(BagType.INVENTORY).total(EquipCraftQualityRules.UNSEAL_TALISMAN_CONFIG_ID)).isZero();
         assertThat(player.bags().bag(BagType.INVENTORY).total(EquipCraftQualityRules.INHERIT_TALISMAN_CONFIG_ID)).isZero();
+    }
+
+    @Test
+    void 跨节点与离线宗师代打_24小时营业_本地掷品相署名与异步邮件分成() throws Exception {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer master = f.enter(11, 3101L);
+        ScenePlayer buyer = f.enter(12, 3102L);
+        assertThat(f.attributes.gmSetLevel(buyer, 60)).isZero();
+        assertThat(f.currency.add(buyer, Wallet.GOLD, 10_000L, Reason.GM_GRANT).ok()).isTrue();
+
+        master.craft().replace(PlayerCraftState.newBuilder()
+                .setForgeMasteryExp(EquipCraftQualityRules.MASTER_EXP_THRESHOLD)
+                .setScrollMasteryExp(EquipCraftQualityRules.MASTER_EXP_THRESHOLD)
+                .build());
+        SetCraftProxyStallResponse opened = call(f, master, SKILL_SERVICE, "SetCraftProxyStall",
+                SetCraftProxyStallRequest.newBuilder().setOpen(true).setProxyForgeFeeGold(100L).setProxyScrollFeeGold(80L).build(),
+                SetCraftProxyStallResponse.parser());
+        assertThat(opened.getErrorMessage().getId()).isZero();
+
+        // 宗师下线离场（不再位于本 scene 节点内存中）
+        f.world.onPlayerLeave(BattleFixture.LINK, com.game.api.proto.PlayerLeave.newBuilder()
+                .setSessionId(11).setPlayerId(master.playerId()).build());
+        f.repo.completeAll();
+        assertThat(f.world.playerById(3101L)).isNull();
+
+        // 共享目录依然展示离线宗师摊位
+        ListCraftProxyStallsResponse stalls = call(f, buyer, SKILL_SERVICE, "ListCraftProxyStalls",
+                ListCraftProxyStallsRequest.getDefaultInstance(), ListCraftProxyStallsResponse.parser());
+        assertThat(stalls.getStallsList()).singleElement().satisfies(s -> {
+            assertThat(s.getMasterPlayerId()).isEqualTo(3101L);
+            assertThat(s.getProxyForgeFeeGold()).isEqualTo(100L);
+            assertThat(s.getProxyScrollFeeGold()).isEqualTo(80L);
+        });
+
+        // 买家向离线宗师下装备代打单：本地原子掷品相与署名 + 扣 100g 流通银两 + 95g 进买家待寄出箱
+        GetEquipmentCraftRulesResponse rules = call(f, buyer, BAG_SERVICE, "GetEquipmentCraftRules",
+                GetEquipmentCraftRulesRequest.getDefaultInstance(), GetEquipmentCraftRulesResponse.parser());
+        var recipe = rules.getRecipesList().stream().filter(r -> r.getProduct().getEquipProfile() == 1).findFirst().orElseThrow();
+        var affix = rules.getAffixesList().stream().filter(a -> a.getPool() == 1 && !a.getPolishExempt()).findFirst().orElseThrow();
+        Map<Integer, Long> mats = new java.util.LinkedHashMap<>();
+        mats.merge(recipe.getMaterialConfigId(), 50L, Long::sum);
+        mats.merge(affix.getMaterialConfigId(), 50L, Long::sum);
+        assertThat(f.bags.addItems(buyer, BagType.INVENTORY, mats, false, Reason.GM_GRANT, 0, "").tip()).isZero();
+
+        CommitEquipmentCraftResponse base = call(f, buyer, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(7001L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(0L)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.CREATE_ITEM)
+                                .setConfigId(recipe.getProduct().getConfigId()))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(base.getErrorMessage().getId()).isZero();
+
+        long goldBefore = buyer.wallet().balance(Wallet.GOLD);
+        f.craft.setQualityRollForTest(bound -> 9200); // 宗师档 9200 命中 5 档极品
+        CommitEquipmentCraftResponse proxyInstall = call(f, buyer, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(7002L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(1L)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.INSTALL_AFFIX)
+                                .setItemId(base.getItemId()).setAffixSlot(1).setAffixId(affix.getAffixId())
+                                .setProxyMasterPlayerId(3101L))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(proxyInstall.getErrorMessage().getId()).isZero();
+        assertThat(proxyInstall.getResultQualityTier()).isEqualTo(5);
+        assertThat(buyer.wallet().balance(Wallet.GOLD)).isEqualTo(goldBefore - 100L);
+        assertThat(buyer.bags().bag(BagType.INVENTORY).item(base.getItemId()).equipment().getCrafterPlayerId()).isEqualTo(3101L);
+        assertThat(buyer.mailOutbox().size()).isEqualTo(1);
+
+        // 模拟收件人已删角(kMailRecipientDeleted)：出箱干净摘除该条，不永久卡死买家队列
+        f.nextOutboxReplyTip = com.game.table.MailErrorTip.mail_error.kMailRecipientDeleted_VALUE;
+        for (int i = 0; i < 4; i++) {
+            f.completeSaves(com.game.scene.world.PlayerRepository.ProgressResult.SAVED);
+            f.mailOutbox.tick(f.world);
+            f.drain();
+        }
+        assertThat(f.sentOutboxMails).hasSize(1);
+        assertThat(f.sentOutboxMails.get(0).getRecipientPlayerId()).isEqualTo(3101L);
+        assertThat(f.sentOutboxMails.get(0).getAttachments().getCurrencies(0).getAmount()).isEqualTo(95L);
+        assertThat(buyer.mailOutbox().isEmpty()).isTrue();
+    }
+
+    @Test
+    void 控辅强化公平受益_气血与奶盾控场克制放大且速度永不随强化放大() throws Exception {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer player = f.enter(11, 3201L);
+        assertThat(f.attributes.gmSetLevel(player, 80)).isZero();
+
+        // 穿戴四件 80 级基础装（3181 武器 / 3182 帽子 / 3183 衣服 / 3184 鞋子），均装满品相 D03 施放治疗(103, 800 bps)
+        int[] configs = {3181, 3182, 3183, 3184};
+        long[] ids = new long[configs.length];
+        for (int i = 0; i < configs.length; i++) {
+            var add = f.bags.addItems(player, BagType.INVENTORY, Map.of(configs[i], 1L), false, Reason.GM_GRANT, 0, "");
+            assertThat(add.tip()).isZero();
+            ids[i] = add.written().getFirst().guids().getFirst();
+            BagItem it = player.bags().bag(BagType.INVENTORY).item(ids[i]);
+            it.equipment(EquipmentState.newBuilder()
+                    .addFixedAffixes(EquipmentFixedAffixState.newBuilder()
+                            .setSlot(1).setAffixId(103).setQualityTier(5))
+                    .build());
+            assertThat(f.equipment.equip(player, ids[i]).tip()).isZero();
+        }
+
+        // +0 时 4 件 D03 = 3200 bps，与旧口径完全一致
+        assertThat(player.attributes().equipment().effects().getOutgoingHealBps()).isEqualTo(3200);
+        assertThat(com.game.battle.engine.SupportEffectRules.begin(player.attributes().equipment().effects())
+                .build().getHealing().getEquipmentCapBps()).isEqualTo(3200);
+
+        // 单件武器升到 +10（+20% * 50% = +10% -> 800->880，其余三件仍 +0=2400，总计 3280，有效上限 3520）
+        BagItem weapon = player.bags().bag(BagType.EQUIPMENT).item(ids[0]);
+        weapon.equipment(weapon.equipment().toBuilder().setEnhanceLevel(10).build());
+        f.attributes.equipmentChanged(player);
+        assertThat(player.attributes().equipment().effects().getOutgoingHealBps()).isEqualTo(3280);
+        var equipBagSnap = call(f, player, BAG_SERVICE, "GetBag",
+                GetBagRequest.newBuilder().setBagType(BagType.EQUIPMENT.code()).build(), GetBagResponse.parser());
+        BagItemInfo weaponInfo = equipBagSnap.getBag().getItemsList().stream()
+                .filter(i -> i.getItemId() == ids[0]).findFirst().orElseThrow();
+        assertThat(weaponInfo.getFixedAffixSlots(0).getSelected().getValueBps()).isEqualTo(880);
+
+        // 四件全 +11（+24% * 50% = +12% -> 单件 896，四件 3584，不被旧 3200 上限吞掉）
+        for (long id : ids) {
+            BagItem piece = player.bags().bag(BagType.EQUIPMENT).item(id);
+            piece.equipment(piece.equipment().toBuilder().setEnhanceLevel(11).build());
+        }
+        f.attributes.equipmentChanged(player);
+        assertThat(player.attributes().equipment().effects().getOutgoingHealBps()).isEqualTo(3584);
+        assertThat(com.game.battle.engine.SupportEffectRules.begin(player.attributes().equipment().effects())
+                .build().getHealing().getEquipmentCapBps()).isEqualTo(3584);
+
+        // 鞋子(3184) +11 速度红线：防御按 +24% 放大，基础速度(attr 11)增幅严格为 0！
+        var shoesSnap = call(f, player, BAG_SERVICE, "GetBag",
+                GetBagRequest.newBuilder().setBagType(BagType.EQUIPMENT.code()).build(), GetBagResponse.parser());
+        BagItemInfo shoesInfo = shoesSnap.getBag().getItemsList().stream()
+                .filter(i -> i.getItemId() == ids[3]).findFirst().orElseThrow();
+        assertThat(shoesInfo.getBaseAttrsList()).anySatisfy(line -> {
+            assertThat(line.getAttrId()).isEqualTo(8); // 防御
+            assertThat(line.getEnhanceBonus()).isGreaterThan(0L);
+        });
+        assertThat(shoesInfo.getBaseAttrsList()).anySatisfy(line -> {
+            assertThat(line.getAttrId()).isEqualTo(11); // 速度
+            assertThat(line.getEnhanceBonus()).isZero();
+        });
+
+        // 控场命中(D05=105, 400 bps) 在 +11 武器上按 25% 份额受益：400 -> 424；纯输出 D01(101, 800 bps) 保持 800 不重复放大
+        weapon.equipment(weapon.equipment().toBuilder().clearFixedAffixes()
+                .addFixedAffixes(EquipmentFixedAffixState.newBuilder().setSlot(1).setAffixId(105).setQualityTier(5))
+                .build());
+        f.attributes.equipmentChanged(player);
+        assertThat(player.attributes().equipment().effects().getAilmentHitBpsOrDefault(1, 0)).isEqualTo(424);
+
+        weapon.equipment(weapon.equipment().toBuilder().clearFixedAffixes()
+                .addFixedAffixes(EquipmentFixedAffixState.newBuilder().setSlot(1).setAffixId(101).setQualityTier(5))
+                .build());
+        f.attributes.equipmentChanged(player);
+        assertThat(player.attributes().equipment().effects().getPhysicalAttackBps()).isEqualTo(800);
     }
 }

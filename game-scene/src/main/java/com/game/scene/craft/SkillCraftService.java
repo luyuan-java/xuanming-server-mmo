@@ -29,6 +29,7 @@ import com.game.scene.bag.BagService;
 import com.game.scene.currency.CurrencyService;
 import com.game.scene.equip.EquipCraftQualityRules;
 import com.game.scene.equip.EquipmentCraftService;
+import com.game.scene.mail.PlayerMailOutboxService;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.pet.PetService;
 import com.game.scene.player.Bag;
@@ -82,6 +83,8 @@ public final class SkillCraftService {
     private final PetService pets;
     private final SceneClock clock;
     private final SceneMetrics metrics;
+    private CraftProxyStallDirectory proxyDirectory;
+    private PlayerMailOutboxService mailOutbox;
     private boolean craftUnlockGateEnabled;
     private IntUnaryOperator craftRoll;
 
@@ -98,6 +101,14 @@ public final class SkillCraftService {
 
     public SkillCraftTables tables() {
         return tables;
+    }
+
+    /** 绑定跨节点/离线名匠代打共享摊位目录与待寄个人邮件出箱服务。 */
+    public SkillCraftService withProxyInfrastructure(CraftProxyStallDirectory proxyDirectory,
+                                                     PlayerMailOutboxService mailOutbox) {
+        this.proxyDirectory = proxyDirectory;
+        this.mailOutbox = mailOutbox;
+        return this;
     }
 
     public boolean isCraftUnlockGateEnabled() {
@@ -314,22 +325,24 @@ public final class SkillCraftService {
             return failCraft(player, reqId, kInvalidParameter_VALUE);
         }
 
-        // 解析可选主城宗师原子代制摊位（零物品移交，只读摊主制卷宗师档位并付净银两手工费）。
+        // 解析可选主城宗师原子代制摊位（支持跨节点/离线 24 小时营业，只读共享目录宗师档位，95% 净银两走邮件出箱异步入账）。
         long proxyMasterId = request.getProxyMasterPlayerId();
-        ScenePlayer proxyMaster = null;
         long proxyFeeGold = 0L;
         long proxyNetGold = 0L;
         String proxyMasterName = "";
         int effectiveScrollTier = EquipCraftQualityRules.masteryTierForExp(craft.getScrollMasteryExp());
-        long nowSec = clock.epochMillis() / 1000L;
         if (proxyMasterId != 0L) {
-            proxyMaster = resolveValidProxyScrollMaster(player, proxyMasterId, world, nowSec);
-            if (proxyMaster == null) {
+            CraftProxyStallInfo stall = resolveValidProxyScrollStall(player, proxyMasterId);
+            if (stall == null) {
                 return failCraft(player, reqId, kEquipProxyMasterUnavailable_VALUE);
             }
-            proxyFeeGold = proxyMaster.craft().state().getProxyScrollFeeGold();
+            proxyFeeGold = stall.getProxyScrollFeeGold();
             proxyNetGold = EquipCraftQualityRules.proxyNetGold(proxyFeeGold);
-            proxyMasterName = EquipmentCraftService.playerDisplayName(proxyMaster);
+            if (proxyNetGold > 0L && (mailOutbox == null || !mailOutbox.canAccept(player))) {
+                return failCraft(player, reqId, kEquipProxyMasterUnavailable_VALUE);
+            }
+            proxyMasterName = stall.getMasterName().isEmpty()
+                    ? ("宗师#" + Long.toUnsignedString(proxyMasterId)) : stall.getMasterName();
             effectiveScrollTier = EquipCraftQualityRules.MASTERY_MASTER;
         }
 
@@ -417,8 +430,10 @@ public final class SkillCraftService {
         } else {
             player.bags().commitPrepared(candidate);
         }
-        if (proxyMaster != null && proxyNetGold > 0L) {
-            currency.add(proxyMaster, Wallet.GOLD, proxyNetGold, AssetAudit.Reason.CRAFT_PROXY_FEE, reqId, nowSec);
+        if (proxyMasterId != 0L && proxyNetGold > 0L && mailOutbox != null) {
+            // 95% 净银两写入买家同事务 PlayerState.mail_outbox，落盘确认后经 game-mail -> asset_op 异步入账。
+            mailOutbox.enqueueProxyFee(player, proxyMasterId, proxyNetGold, reqId,
+                    EquipmentCraftService.playerDisplayName(player));
         }
 
         PlayerCraftState.Builder nextCraft = craft.toBuilder()
@@ -447,7 +462,7 @@ public final class SkillCraftService {
                 .setCraftedBook(toProtoBook(builtBook))
                 .setBonusFragmentsGranted(bonusFragments)
                 .setState(buildStateSnapshot(player))
-                .build(), true, proxyMaster);
+                .build(), true, null);
     }
 
     /** 461 研习未学技能书：永久解锁技能并给人物或宝宝直接获得 1 重，绝不顶掉任何已有技能。 */
@@ -654,6 +669,9 @@ public final class SkillCraftService {
         PlayerCraftState craft = player.craft().state();
         if (!request.getOpen()) {
             player.craft().replace(craft.toBuilder().setProxyStallOpen(false).build());
+            if (proxyDirectory != null) {
+                proxyDirectory.syncPlayer(player);
+            }
             return new StallOutcome(SetCraftProxyStallResponse.newBuilder()
                     .setErrorMessage(tip(OK)).setState(buildStateSnapshot(player)).build(), true);
         }
@@ -685,13 +703,22 @@ public final class SkillCraftService {
                 .setProxyForgeFeeGold(forgeMaster ? request.getProxyForgeFeeGold() : 0L)
                 .setProxyScrollFeeGold(scrollMaster ? request.getProxyScrollFeeGold() : 0L)
                 .build());
+        if (proxyDirectory != null) {
+            proxyDirectory.syncPlayer(player);
+        }
         return new StallOutcome(SetCraftProxyStallResponse.newBuilder()
                 .setErrorMessage(tip(OK)).setState(buildStateSnapshot(player)).build(), true);
     }
 
-    /** 464 查询当前场景服在线营业中的宗师原子代打摊位列表（按玩家 ID 无符号升序）。 */
+    /** 464 查询同区跨节点/离线营业中的宗师原子代打摊位列表（按玩家 ID 无符号升序）。 */
     public ListCraftProxyStallsResponse listProxyStalls(SceneWorld world) {
         ListCraftProxyStallsResponse.Builder out = ListCraftProxyStallsResponse.newBuilder().setErrorMessage(tip(OK));
+        if (proxyDirectory != null) {
+            for (CraftProxyStallInfo stall : proxyDirectory.listStalls()) {
+                out.addStalls(stall);
+            }
+            return out.build();
+        }
         if (world == null) {
             return out.build();
         }
@@ -700,56 +727,37 @@ public final class SkillCraftService {
             if (p.playerId() == 0L || p.frozen() || p.switchPhase() != SwitchPhase.NONE) {
                 continue;
             }
-            PlayerCraftState craft = p.craft().state();
-            if (!craft.getProxyStallOpen()) {
-                continue;
+            if (CraftProxyStallDirectory.buildStallInfo(p) != null) {
+                masters.add(p);
             }
-            int forgeTier = EquipCraftQualityRules.masteryTierForExp(craft.getForgeMasteryExp());
-            int scrollTier = EquipCraftQualityRules.masteryTierForExp(craft.getScrollMasteryExp());
-            if (forgeTier < EquipCraftQualityRules.MASTERY_MASTER && scrollTier < EquipCraftQualityRules.MASTERY_MASTER) {
-                continue;
-            }
-            masters.add(p);
         }
         masters.sort(Comparator.comparing(ScenePlayer::playerId, Long::compareUnsigned));
         for (ScenePlayer p : masters) {
-            PlayerCraftState craft = p.craft().state();
-            int forgeTier = EquipCraftQualityRules.masteryTierForExp(craft.getForgeMasteryExp());
-            int scrollTier = EquipCraftQualityRules.masteryTierForExp(craft.getScrollMasteryExp());
-            out.addStalls(CraftProxyStallInfo.newBuilder()
-                    .setMasterPlayerId(p.playerId())
-                    .setMasterName(EquipmentCraftService.playerDisplayName(p))
-                    .setForgeMasteryTier(forgeTier)
-                    .setScrollMasteryTier(scrollTier)
-                    .setTopQualityRateBps(EquipCraftQualityRules.forgeTopQualityRateBps(forgeTier))
-                    .setScrollBonusRateBps(EquipCraftQualityRules.scrollBonusFragmentRateBps(scrollTier))
-                    .setProxyForgeFeeGold(forgeTier >= EquipCraftQualityRules.MASTERY_MASTER ? craft.getProxyForgeFeeGold() : 0L)
-                    .setProxyScrollFeeGold(scrollTier >= EquipCraftQualityRules.MASTERY_MASTER ? craft.getProxyScrollFeeGold() : 0L));
+            CraftProxyStallInfo info = CraftProxyStallDirectory.buildStallInfo(p);
+            if (info != null) {
+                out.addStalls(info);
+            }
         }
         return out.build();
     }
 
     // ------------------------------------------------------------------ 内部辅助
 
-    private ScenePlayer resolveValidProxyScrollMaster(ScenePlayer buyer, long masterId, SceneWorld world, long nowSec) {
-        if (masterId == 0L || masterId == buyer.playerId() || world == null) {
+    private CraftProxyStallInfo resolveValidProxyScrollStall(ScenePlayer buyer, long masterId) {
+        if (masterId == 0L || masterId == buyer.playerId() || proxyDirectory == null) {
             return null;
         }
-        ScenePlayer master = world.playerById(masterId);
-        if (master == null || master.frozen() || master.switchPhase() != SwitchPhase.NONE) {
+        CraftProxyStallInfo stall = proxyDirectory.find(masterId);
+        if (stall == null
+                || stall.getScrollMasteryTier() < EquipCraftQualityRules.MASTERY_MASTER
+                || !EquipCraftQualityRules.validProxyFee(stall.getProxyScrollFeeGold())) {
             return null;
         }
-        PlayerCraftState mc = master.craft().state();
-        if (!mc.getProxyStallOpen()
-                || EquipCraftQualityRules.masteryTierForExp(mc.getScrollMasteryExp()) < EquipCraftQualityRules.MASTERY_MASTER
-                || !EquipCraftQualityRules.validProxyFee(mc.getProxyScrollFeeGold())) {
+        long netFee = EquipCraftQualityRules.proxyNetGold(stall.getProxyScrollFeeGold());
+        if (netFee > 0L && currency.isGloballyBlocked(Wallet.GOLD)) {
             return null;
         }
-        long netFee = EquipCraftQualityRules.proxyNetGold(mc.getProxyScrollFeeGold());
-        if (netFee > 0L && currency.checkAdd(master, Wallet.GOLD, netFee, nowSec) != 0) {
-            return null;
-        }
-        return master;
+        return stall;
     }
 
     private static int findBookIndex(PlayerCraftState craft, long bookId) {

@@ -27,6 +27,10 @@ public final class ManualClock implements SceneClock {
         epochMillis += millis;
     }
 
+    public void advanceSeconds(long seconds) {
+        advanceMillis(TimeUnit.SECONDS.toMillis(seconds));
+    }
+
     public void setEpochMillis(long epochMillis) {
         this.epochMillis = epochMillis;
     }

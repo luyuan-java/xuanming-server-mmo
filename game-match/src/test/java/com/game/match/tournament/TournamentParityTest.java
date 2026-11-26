@@ -32,7 +32,6 @@ import com.game.proto.match.ListTournamentStandingsRequest;
 import com.game.proto.match.MatchMode;
 import com.game.proto.match.PredictTournamentMatchRequest;
 import com.game.proto.match.RespondTournamentInviteRequest;
-import com.game.proto.match.SaluteTournamentChampionRequest;
 import com.game.proto.match.SendTournamentSpectateCheerRequest;
 import com.game.proto.match.StartTournamentMatchRequest;
 import com.game.proto.match.StartTournamentWarmupRequest;
@@ -108,7 +107,7 @@ class TournamentParityTest {
         List<Long> ids = List.of(101L, 202L, 303L);
         assertThat(TournamentRules.decodeLineup(TournamentRules.encodeLineup(ids))).containsExactlyElementsOf(ids);
 
-        // V2: BO3 规则、五行地脉确定性不重复抽签、UTC+8 自然日与预设喝彩白名单
+        // V2: BO3 规则、五行地脉确定性不重复抽签与预设喝彩白名单
         assertThat(TournamentRules.bestOfForKnockout(16, 1, true)).isEqualTo(1);
         assertThat(TournamentRules.bestOfForKnockout(16, 2, true)).isEqualTo(1);
         assertThat(TournamentRules.bestOfForKnockout(16, 3, true)).isEqualTo(3);
@@ -561,7 +560,7 @@ class TournamentParityTest {
             assertThat(reportStore.getReport(9999L, finalG1BattleId)).isPresent();
             assertThat(reportStore.getReport(9999L, q1b.getBattleId())).isEmpty();
 
-            // 4. 推进结算（SETTLED）：验证冠军殿堂 + 每日观道致敬（同日防刷、跨日刷新）+ 奖励领取
+            // 4. 推进结算（SETTLED）：验证冠军殿堂与赛季/季军/神机/助威奖励领取
             store.advanceSeason(now.get(), idGen::incrementAndGet);
             var settledView = service.getOverview(1004L, GetTournamentOverviewRequest.newBuilder().setIncludeHistory(true).build());
             assertThat(settledView.getCurrentSeason().getStage()).isEqualTo(TournamentStage.TOURNAMENT_STAGE_SETTLED);
@@ -605,27 +604,10 @@ class TournamentParityTest {
             assertThat(predClaim.getErrorMessage().getId()).isZero();
             assertThat(predClaim.getClaimedRewards(0).getTierKind())
                     .isEqualTo(TournamentRewardTierKind.TOURNAMENT_REWARD_TIER_PREDICTION);
-            assertThat(settledView.getCurrentSeason().getSalutedToday()).isFalse();
             assertThat(settledView.getHallOfFameCount()).isEqualTo(1);
             assertThat(settledView.getMyRewardsList())
                     .extracting(r -> r.getTierKind())
                     .containsExactly(TournamentRewardTierKind.TOURNAMENT_REWARD_TIER_CHAMPION);
-
-            // 每日一次免费观道致敬
-            var salute1 = service.saluteChampion(9501L, SaluteTournamentChampionRequest.getDefaultInstance());
-            assertThat(salute1.getErrorMessage().getId()).isZero();
-            assertThat(salute1.getChampionSaluteCount()).isEqualTo(1L);
-            assertThat(salute1.getGoldAmount()).isEqualTo(tables.rule().getSaluteGoldAmount());
-            assertThat(salute1.getSalutedToday()).isTrue();
-            assertThat(service.saluteChampion(9501L, SaluteTournamentChampionRequest.getDefaultInstance())
-                    .getErrorMessage().getId())
-                    .isEqualTo(MatchErrorTip.match_error.kMatchTournamentAlreadySalutedToday_VALUE);
-            assertThat(service.getOverview(9501L, GetTournamentOverviewRequest.getDefaultInstance())
-                    .getCurrentSeason().getSalutedToday()).isTrue();
-            now.addAndGet(86_400_000L);
-            var saluteNextDay = service.saluteChampion(9501L, SaluteTournamentChampionRequest.getDefaultInstance());
-            assertThat(saluteNextDay.getErrorMessage().getId()).isZero();
-            assertThat(saluteNextDay.getChampionSaluteCount()).isEqualTo(2L);
 
             var claimedSub = service.claimReward(1004L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build());
             assertThat(claimedSub.getErrorMessage().getId()).isZero();
@@ -741,39 +723,16 @@ class TournamentParityTest {
                     .getErrorMessage().getId())
                     .isEqualTo(MatchErrorTip.match_error.kMatchTournamentRewardUnavailable_VALUE);
 
-            // 5. 校验锦标赛奖励与观道致敬一律发绑定银两（3）严禁误发灵石（1），以及超大页码不触发 int32 乘法溢出
+            // 5. 校验锦标赛奖励一律发绑定银两（3）严禁误发灵石（1），以及超大页码不触发 int32 乘法溢出
             assertThat(TournamentTables.GOLD_CURRENCY_TYPE)
                     .isEqualTo(com.game.proto.common.base.CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE);
-            var saluteAtt = TournamentTables.buildSaluteMailAttachments(tables.rule());
-            assertThat(saluteAtt.getCurrenciesList()).allSatisfy(c -> assertThat(c.getCurrencyType())
+            var rewardAtt = TournamentTables.buildMailAttachments(tables.rewardForPlacement(1, 0).orElseThrow());
+            assertThat(rewardAtt.getCurrenciesList()).allSatisfy(c -> assertThat(c.getCurrencyType())
                     .isEqualTo(com.game.proto.common.base.CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE));
             var hugePage = service.listStandings(101L, ListTournamentStandingsRequest.newBuilder()
                     .setSeasonId(1).setPage(0x1000_0000).setPageSize(16).build());
             assertThat(hugePage.getErrorMessage().getId()).isZero();
             assertThat(hugePage.getStandingsList()).isEmpty();
-
-            // 6. 观道致敬邮件瞬时投递失败后，后台重试器凭原 reward_id 幂等补发并回填 mail_id
-            AtomicLong saluteAttempts = new AtomicLong(0);
-            AtomicLong firstRewardId = new AtomicLong(0);
-            AtomicLong retryRewardId = new AtomicLong(0);
-            AtomicLong saluteIdGen = new AtomicLong(990_000L);
-            TournamentService flakyMailService = new TournamentService(store, saluteIdGen::incrementAndGet, null, null,
-                    (pid, reward, title, body) -> {
-                        if (saluteAttempts.incrementAndGet() == 1L) {
-                            firstRewardId.set(reward.rewardId());
-                            throw new IllegalStateException("mail transient outage");
-                        }
-                        retryRewardId.set(reward.rewardId());
-                        return 777001L;
-                    });
-            var saluteResp = flakyMailService.saluteChampion(101L,
-                    com.game.proto.match.SaluteTournamentChampionRequest.newBuilder().setSeasonId(1).build());
-            assertThat(saluteResp.getErrorMessage().getId()).isZero();
-            assertThat(saluteResp.getMailId()).isZero();
-            assertThat(store.listPendingSaluteMails(10)).hasSize(1);
-            assertThat(flakyMailService.retryPendingSaluteMails(10)).isEqualTo(1);
-            assertThat(retryRewardId.get()).isEqualTo(firstRewardId.get()).isPositive();
-            assertThat(store.listPendingSaluteMails(10)).isEmpty();
         }
     }
 

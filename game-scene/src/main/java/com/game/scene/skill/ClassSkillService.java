@@ -5,10 +5,13 @@ import static com.game.table.SkillErrorTip.skill_error.*;
 
 import com.game.battle.engine.ClassSkillRules;
 import com.game.battle.engine.SeasonRules;
+import com.game.player.store.state.ClientRequestRecordState;
 import com.game.player.store.state.SkillLoadoutSchemeState;
 import com.game.proto.ListSkillsResponse;
 import com.game.proto.PlayerSkillComp;
 import com.game.proto.PlayerSkillListComp;
+import com.game.proto.RentSkillLoadoutSlotsRequest;
+import com.game.proto.RentSkillLoadoutSlotsResponse;
 import com.game.proto.SaveSkillLoadoutRequest;
 import com.game.proto.SaveSkillLoadoutResponse;
 import com.game.proto.SkillCatalogEntry;
@@ -19,6 +22,7 @@ import com.game.proto.UpgradeSkillResponse;
 import com.game.scene.attribute.AttributeService;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.pet.PetService;
+import com.game.scene.player.PlayerClientRequestLedger;
 import com.game.table.PetErrorTip;
 import com.game.table.SeasonErrorTip;
 import com.game.proto.SupportSkillPreview;
@@ -31,6 +35,7 @@ import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SwitchPhase;
 import com.game.table.CommonErrorTip;
 import com.game.table.SkillTable;
+import com.google.protobuf.ByteString;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -65,9 +70,14 @@ public final class ClassSkillService {
         return this;
     }
 
+    private static int freeSchemesFor(ScenePlayer player) {
+        return SkillLoadoutRules.freeSchemesForLevel(PlayerLevels.effective(player.level()));
+    }
+
     private static int unlockedSchemesFor(ScenePlayer player, long nowSec) {
         boolean active = com.game.scene.afkpass.AfkPassRules.isActive(player.afkPassExpiresAt(), nowSec);
-        return SkillLoadoutRules.unlockedSchemes(active);
+        PlayerSkills owned = player.learnedSkills();
+        return SkillLoadoutRules.unlockedSchemes(freeSchemesFor(player), active, owned.rentedExtraSlots(), owned.rentExpiresAtSec(), nowSec);
     }
 
     private long nowSeconds() {
@@ -121,6 +131,11 @@ public final class ClassSkillService {
     }
 
     public static ListSkillsResponse book(ScenePlayer player, int activeSeasonId, boolean craftGateEnabled, long nowSec) {
+        return book(player, activeSeasonId, craftGateEnabled, nowSec, null);
+    }
+
+    public static ListSkillsResponse book(ScenePlayer player, int activeSeasonId, boolean craftGateEnabled, long nowSec,
+                                          AttributeService attributes) {
         var catalog = player.skillCatalog();
         var owned = player.learnedSkills();
         int level = PlayerLevels.effective(player.level());
@@ -148,10 +163,34 @@ public final class ClassSkillService {
                 list.addSkillList(PlayerSkillComp.newBuilder().setSkillTableId(row.getId()).setRank(effRank));
             }
         }
+        boolean lightCardActive = com.game.scene.afkpass.AfkPassRules.isActive(player.afkPassExpiresAt(), nowSec);
+        java.util.function.IntFunction<AttributeService.SchemeAllocationSummary> attrProvider = attributes != null
+                ? sid -> attributes.schemeAllocationSummary(player, sid)
+                : sid -> {
+                    var sc = player.attributes().scheme(sid);
+                    if (sc == null) return new AttributeService.SchemeAllocationSummary(java.util.Map.of(), 0, 0);
+                    var alloc = new java.util.LinkedHashMap<Integer, Integer>();
+                    int sum = 0;
+                    for (var e : sc.allocatedView().entrySet()) {
+                        int v = (int) Math.min(Integer.MAX_VALUE, Math.max(0L, e.getValue()));
+                        if (v > 0) {
+                            alloc.put(e.getKey(), v);
+                            sum += v;
+                        }
+                    }
+                    return new AttributeService.SchemeAllocationSummary(alloc, 0, sum);
+                };
+        var loadoutCtx = new SkillLoadoutRules.SnapshotContext(
+                lightCardActive,
+                nowSec,
+                player.wallet().balance(Wallet.DIAMOND),
+                attributes != null ? attributes.playerPoolResetCostGold(player) : 0L,
+                attributes != null ? attributes.switchCooldownUntil(player) : 0L,
+                player.attributes().activeSchemeId(),
+                attrProvider);
         var result = ListSkillsResponse.newBuilder().setErrorMessage(tip(0)).setSkillList(list)
                 .setClassId(player.classId()).setPlayerLevel(level).setCurrencyBalance(balance)
-                .setLoadout(SkillLoadoutRules.buildSnapshot(catalog, player.classId(), level, owned,
-                        unlockedSchemesFor(player, nowSec)));
+                .setLoadout(SkillLoadoutRules.buildSnapshot(catalog, player.classId(), level, owned, loadoutCtx));
         Set<Integer> equippedNonActive = SkillLoadoutRules.collectEquippedNonActiveSkills(
                 catalog, player.classId(), level, owned);
         var previews = new java.util.HashMap<Integer, SupportSkillPreview>();
@@ -171,6 +210,12 @@ public final class ClassSkillService {
             result.addCatalog(view);
         }
         return result.build();
+    }
+
+    /** 实例查询接口：绑定本服务持有的 AttributeService 与时钟，供 ListSkills 入口产出完整一体化快照。 */
+    public ListSkillsResponse bookFor(ScenePlayer player, long petId) {
+        if (petId != 0) return book(player, petId, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean());
+        return book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean(), nowSeconds(), attributes);
     }
 
     public static ListSkillsResponse book(ScenePlayer player, long petId) {
@@ -271,11 +316,11 @@ public final class ClassSkillService {
         payment.commitSkills(candidate, AssetAudit.Reason.SKILL_UPGRADE, Integer.toUnsignedLong(row.getId()));
         if (ClassSkillCatalog.passive(row)) attributes.skillsChanged(player);
         return UpgradeSkillResponse.newBuilder().setErrorMessage(tip(0))
-                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                .setState(bookForService(player))
                 .setUpgradedCount(plan.steps()).setStopTipId(plan.steps() < request.getCount() ? stop(plan.stop()) : 0).build();
     }
 
-    /** 502 保存人物战法构筑方案（3 被动 + 1 追击 + 1 开场，乐观锁 + 幂等回执）。 */
+    /** 502 保存人物「战法·加点」一体化流派方案（1..7，乐观锁 + 幂等回执 + 自定义命名 + 四维加点）。 */
     public SaveSkillLoadoutResponse saveLoadout(ScenePlayer player, SaveSkillLoadoutRequest request) {
         String reqId = request.getRequestId();
         if (!SkillLoadoutRules.validRequestId(reqId)) {
@@ -303,6 +348,9 @@ public final class ClassSkillService {
         if (request.getStateVersion() != currentVersion || owned.loadoutStateVersion() == -1L) {
             return failSaveLoadout(player, reqId, kSkillLoadoutVersionChanged_VALUE);
         }
+        if (!request.getName().isEmpty() && !SkillLoadoutRules.validateSchemeName(request.getName())) {
+            return failSaveLoadout(player, reqId, kSkillLoadoutNameInvalid_VALUE);
+        }
         List<Integer> passiveIds = new ArrayList<>(request.getPassiveSkillIdsList());
         List<Integer> pursuitIds = new ArrayList<>(request.getPursuitSkillIdsList());
         List<Integer> openingIds = new ArrayList<>(request.getOpeningSkillIdsList());
@@ -313,13 +361,32 @@ public final class ClassSkillService {
         if (err != 0) {
             return failSaveLoadout(player, reqId, err);
         }
+        AttributeService.PreparedSchemeAllocation preparedAttr = null;
+        if (request.getUpdateAttributeAllocation()) {
+            preparedAttr = attributes.prepareSchemeAllocation(player, request.getSchemeId(),
+                    request.getAttributeAllocatedMap(), request.getResetAttributeIfNeeded());
+            if (!preparedAttr.ok()) {
+                return failSaveLoadout(player, reqId, preparedAttr.tipError());
+            }
+        }
+        SkillLoadoutSchemeState existing = owned.loadoutScheme(request.getSchemeId());
+        String finalName = !request.getName().isEmpty()
+                ? request.getName()
+                : (existing != null && !existing.getName().isEmpty()
+                        ? existing.getName()
+                        : SkillLoadoutRules.defaultSchemeName(request.getSchemeId()));
+        var attrCommit = attributes.commitSchemeAllocationAndSwitch(player, request.getSchemeId(), finalName,
+                request.getUpdateAttributeAllocation(), preparedAttr);
+        if (!attrCommit.ok()) {
+            return failSaveLoadout(player, reqId, attrCommit.tipError());
+        }
         passiveIds.sort(Integer::compareUnsigned);
         pursuitIds.sort(Integer::compareUnsigned);
         openingIds.sort(Integer::compareUnsigned);
-        SkillLoadoutSchemeState existing = owned.loadoutScheme(request.getSchemeId());
         SkillLoadoutSchemeState updated = (existing == null
                 ? SkillLoadoutSchemeState.newBuilder().setSchemeId(request.getSchemeId())
                 : existing.toBuilder().clearPassiveSkillIds().clearPursuitSkillIds().clearOpeningSkillIds())
+                .setName(finalName)
                 .setRoleTag(request.getRoleTag())
                 .addAllPassiveSkillIds(passiveIds)
                 .addAllPursuitSkillIds(pursuitIds)
@@ -328,20 +395,23 @@ public final class ClassSkillService {
         owned.putLoadoutScheme(updated);
         owned.commitLoadout(request.getSchemeId(), currentVersion + 1, reqId, request.getStateVersion(), request.getSchemeId());
         attributes.skillsChanged(player);
-        return SaveSkillLoadoutResponse.newBuilder()
+        var out = SaveSkillLoadoutResponse.newBuilder()
                 .setErrorMessage(tip(0))
                 .setRequestId(reqId)
-                .setState(bookForService(player))
-                .build();
+                .setState(bookForService(player));
+        if (!attrCommit.notice().isEmpty()) {
+            out.setAttributeSyncNotice(attrCommit.notice());
+        }
+        return out.build();
     }
 
-    /** 503 一键切换人物战法构筑流派方案（1..3，乐观锁 + 幂等回执）。 */
+    /** 503 一键切换人物「战法·加点」流派方案（1..7，乐观锁 + 幂等回执 + 联动切换加点）。 */
     public SwitchSkillLoadoutResponse switchLoadout(ScenePlayer player, SwitchSkillLoadoutRequest request) {
         String reqId = request.getRequestId();
         if (!SkillLoadoutRules.validRequestId(reqId)) {
             return failSwitchLoadout(player, reqId, CommonErrorTip.common_error.kInvalidParameter_VALUE);
         }
-        if (!SkillLoadoutRules.validSchemeId(request.getSchemeId(), unlockedSchemesFor(player, nowSeconds()))) {
+        if (!SkillLoadoutRules.validSchemeId(request.getSchemeId(), SkillLoadoutRules.MAX_SCHEMES)) {
             return failSwitchLoadout(player, reqId, kSkillLoadoutSchemeInvalid_VALUE);
         }
         PlayerSkills owned = player.learnedSkills();
@@ -358,6 +428,9 @@ public final class ClassSkillService {
                     .setState(bookForService(player))
                     .build();
         }
+        if (!SkillLoadoutRules.validSchemeId(request.getSchemeId(), unlockedSchemesFor(player, nowSeconds()))) {
+            return failSwitchLoadout(player, reqId, kSkillLoadoutSchemeInvalid_VALUE);
+        }
         int busy = checkWritable(player);
         if (busy != 0) {
             return failSwitchLoadout(player, reqId, busy);
@@ -366,20 +439,115 @@ public final class ClassSkillService {
         if (request.getStateVersion() != currentVersion || owned.loadoutStateVersion() == -1L) {
             return failSwitchLoadout(player, reqId, kSkillLoadoutVersionChanged_VALUE);
         }
-        if (owned.loadoutScheme(request.getSchemeId()) == null) {
-            owned.putLoadoutScheme(SkillLoadoutSchemeState.newBuilder().setSchemeId(request.getSchemeId()).build());
+        SkillLoadoutSchemeState existing = owned.loadoutScheme(request.getSchemeId());
+        if (existing == null) {
+            existing = SkillLoadoutSchemeState.newBuilder()
+                    .setSchemeId(request.getSchemeId())
+                    .setName(SkillLoadoutRules.defaultSchemeName(request.getSchemeId()))
+                    .build();
+            owned.putLoadoutScheme(existing);
         }
+        String schemeName = existing.getName().isEmpty()
+                ? SkillLoadoutRules.defaultSchemeName(request.getSchemeId())
+                : existing.getName();
         owned.commitLoadout(request.getSchemeId(), currentVersion + 1, reqId, request.getStateVersion(), request.getSchemeId());
+        String attrNotice = request.getSkipAttributeSync()
+                ? ""
+                : attributes.trySyncLinkedScheme(player, request.getSchemeId(), schemeName);
         attributes.skillsChanged(player);
-        return SwitchSkillLoadoutResponse.newBuilder()
+        var out = SwitchSkillLoadoutResponse.newBuilder()
                 .setErrorMessage(tip(0))
                 .setRequestId(reqId)
+                .setState(bookForService(player));
+        if (!attrNotice.isEmpty()) {
+            out.setAttributeSyncNotice(attrNotice);
+        }
+        return out.build();
+    }
+
+    /** 565 按套按月灵石租用 / 补差价扩容 / 续期流派方案槽位（仅扣真实灵石，持久化幂等键去重）。 */
+    public RentSkillLoadoutSlotsResponse rentLoadoutSlots(ScenePlayer player, RentSkillLoadoutSlotsRequest request) {
+        long clientRequestId = request.getClientRequestId();
+        if (clientRequestId == 0L) {
+            return failRentLoadout(player, 0L, CommonErrorTip.common_error.kInvalidParameter_VALUE);
+        }
+        ByteString fp = PlayerClientRequestLedger.fingerprint(
+                request.toBuilder().clearClientRequestId().build());
+        PlayerClientRequestLedger ledger = player.clientRequestLedger();
+        if (!ledger.isValid()) {
+            return failRentLoadout(player, clientRequestId, CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+        }
+        var check = ledger.check(clientRequestId, PlayerClientRequestLedger.KIND_RENT_SKILL_LOADOUT_SLOTS, fp);
+        if (check.verdict() == PlayerClientRequestLedger.Verdict.REPLAY) {
+            var rec = check.record();
+            return RentSkillLoadoutSlotsResponse.newBuilder()
+                    .setErrorMessage(tip(0))
+                    .setClientRequestId(clientRequestId)
+                    .setReplayed(true)
+                    .setRentedExtraSlots(rec.getSkillLoadoutRentedSlots())
+                    .setRentExpiresAtSec(rec.getSkillLoadoutRentExpiresAtSec())
+                    .setSpentDiamond(rec.getSkillLoadoutRentSpentDiamond())
+                    .setState(bookForService(player))
+                    .build();
+        }
+        if (check.verdict() == PlayerClientRequestLedger.Verdict.MISMATCH) {
+            return failRentLoadout(player, clientRequestId, CommonErrorTip.common_error.kInvalidParameter_VALUE);
+        }
+        int busy = checkWritable(player);
+        if (busy != 0) {
+            return failRentLoadout(player, clientRequestId, busy);
+        }
+        long nowSec = nowSeconds();
+        int freeSchemes = freeSchemesFor(player);
+        boolean lightCardActive = com.game.scene.afkpass.AfkPassRules.isActive(player.afkPassExpiresAt(), nowSec);
+        PlayerSkills owned = player.learnedSkills();
+        var plan = SkillLoadoutRules.planRent(freeSchemes, lightCardActive, owned.rentedExtraSlots(), owned.rentExpiresAtSec(),
+                nowSec, request.getTargetRentedSlots(), request.getAddPeriods());
+        if (!plan.ok()) {
+            return failRentLoadout(player, clientRequestId, plan.tipError());
+        }
+        if (request.getExpectedCostDiamond() != plan.totalCostDiamond()) {
+            return failRentLoadout(player, clientRequestId, kSkillLoadoutRentPriceChanged_VALUE);
+        }
+        if (plan.totalCostDiamond() <= 0
+                || Long.compareUnsigned(player.wallet().balance(Wallet.DIAMOND), plan.totalCostDiamond()) < 0) {
+            return failRentLoadout(player, clientRequestId, kSkillLoadoutRentDiamondNotEnough_VALUE);
+        }
+        PlayerSkills candidate = PlayerSkills.restore(owned.toState());
+        candidate.setRental(plan.newRentedSlots(), plan.newExpiresAtSec());
+        var payment = currency.prepareDeduction(player, Wallet.DIAMOND, plan.totalCostDiamond());
+        if (payment.tipId() != 0) {
+            return failRentLoadout(player, clientRequestId, payment.tipId());
+        }
+        payment.commitSkills(candidate, AssetAudit.Reason.SKILL_LOADOUT_RENT, clientRequestId);
+        ledger.remember(ClientRequestRecordState.newBuilder()
+                .setKey(clientRequestId)
+                .setKind(PlayerClientRequestLedger.KIND_RENT_SKILL_LOADOUT_SLOTS)
+                .setFingerprint(fp)
+                .setSkillLoadoutRentedSlots(plan.newRentedSlots())
+                .setSkillLoadoutRentExpiresAtSec(plan.newExpiresAtSec())
+                .setSkillLoadoutRentSpentDiamond(plan.totalCostDiamond()));
+        return RentSkillLoadoutSlotsResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setClientRequestId(clientRequestId)
+                .setReplayed(false)
+                .setRentedExtraSlots(plan.newRentedSlots())
+                .setRentExpiresAtSec(plan.newExpiresAtSec())
+                .setSpentDiamond(plan.totalCostDiamond())
                 .setState(bookForService(player))
                 .build();
     }
 
     private ListSkillsResponse bookForService(ScenePlayer player) {
-        return book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean(), nowSeconds());
+        return book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean(), nowSeconds(), attributes);
+    }
+
+    private RentSkillLoadoutSlotsResponse failRentLoadout(ScenePlayer player, long clientRequestId, int error) {
+        return RentSkillLoadoutSlotsResponse.newBuilder()
+                .setErrorMessage(tip(error))
+                .setClientRequestId(clientRequestId)
+                .setState(bookForService(player))
+                .build();
     }
 
     private SaveSkillLoadoutResponse failSaveLoadout(ScenePlayer player, String reqId, int error) {

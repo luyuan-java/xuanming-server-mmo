@@ -19,6 +19,8 @@ import com.game.proto.SeasonSealOption;
 import com.game.proto.SeasonSkillSummary;
 import com.game.proto.SeasonStateSnapshot;
 import com.game.proto.SeasonWeeklyAffixView;
+import com.game.proto.SetRetroHonorTargetRequest;
+import com.game.proto.SetRetroHonorTargetResponse;
 import com.game.proto.eBattleOutcome;
 import com.game.proto.match.MatchMode;
 import com.game.scene.attribute.AttributeService;
@@ -29,6 +31,7 @@ import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.player.PlayerClientRequestLedger;
 import com.game.scene.player.PlayerClientRequestLedger.Verdict;
 import com.game.scene.player.PlayerLevels;
+import com.game.scene.player.PlayerSeason;
 import com.game.scene.player.Wallet;
 import com.game.scene.world.SceneClock;
 import com.game.scene.world.ScenePlayer;
@@ -44,7 +47,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 赛季技能与单槽赛季印场景侧服务（453–455；对齐 C++ {@code PlayerSeasonSystem}）。
+ * 赛季技能与单槽赛季印场景侧服务（453–455、569；对齐 C++ {@code PlayerSeasonSystem} V4）。
  * 仅在场景逻辑线程调用。
  */
 public final class SeasonService {
@@ -60,10 +63,21 @@ public final class SeasonService {
     public record CatchupOutcome(CatchupSeasonSealResponse response, boolean changed) {
     }
 
+    public record RetroHonorTargetOutcome(SetRetroHonorTargetResponse response, boolean changed) {
+    }
+
     public record BattleCreditOutcome(int seasonId, boolean pointsIncreased,
                                       int pointsAdded, int progressAfter, int maxPoints,
-                                      boolean honorNewlyUnlocked) {
-        public static final BattleCreditOutcome NONE = new BattleCreditOutcome(0, false, 0, 0, 0, false);
+                                      boolean honorNewlyUnlocked,
+                                      int retroHonorSeasonId, int retroHonorPointsAdded,
+                                      int retroHonorProgressAfter, int retroHonorMaxPoints,
+                                      boolean retroHonorNewlyUnlocked) {
+        public static final BattleCreditOutcome NONE =
+                new BattleCreditOutcome(0, false, 0, 0, 0, false, 0, 0, 0, 0, false);
+    }
+
+    private record EffectiveProgress(int progress, int battlePoints, int catchupPoints) {
+        static final EffectiveProgress ZERO = new EffectiveProgress(0, 0, 0);
     }
 
     private final SeasonTables tables;
@@ -99,11 +113,13 @@ public final class SeasonService {
     }
 
     public int activeWeeklyAffixId(long nowMs) {
-        SeasonRuleTable rule = tables.activeSeason(nowMs);
-        if (rule == null) {
+        SeasonTables.ActiveSeason active = tables.resolveActive(nowMs);
+        if (active == null) {
             return SeasonRules.WEEKLY_AFFIX_NONE;
         }
-        return SeasonRules.weeklyAffixAt(rule.getId(), rule.getStartsAtMs(), nowMs);
+        int affixSeed = active.resolved().cyclePoolSize() > 0
+                ? active.resolved().seasonTerm() : active.rule().getId();
+        return SeasonRules.weeklyAffixAt(affixSeed, active.resolved().termStartMs(), nowMs);
     }
 
     /** 向角色 {@link EquipmentEffects} 注入当季轻属性（气血/防御 ≤ 500 bps）与单槽赛季印机制。 */
@@ -112,17 +128,18 @@ public final class SeasonService {
         if (player == null) {
             return;
         }
-        SeasonRuleTable rule = tables.activeSeason(nowMs);
-        if (rule == null) {
+        SeasonTables.ActiveSeason active = tables.resolveActive(nowMs);
+        if (active == null) {
             return;
         }
+        SeasonRuleTable rule = active.rule();
         PlayerSeasonSealRecordState record = player.season().record(rule.getId());
         int sealId = effectiveSealId(rule, record);
         SeasonSealTable seal = tables.validSealForSeason(rule.getId(), sealId);
         if (seal == null) {
             return;
         }
-        int progress = record == null ? 0 : Math.min(record.getProgressPoints(), rule.getSealMaxPoints());
+        int progress = readEffectiveTermProgress(record, active.resolved().seasonTerm(), rule.getSealMaxPoints()).progress();
         out.setSeasonMaxHealthBps(SeasonRules.scaledBonusBps(progress, rule.getSealMaxPoints(), rule.getMaxHealthBpsCap()));
         out.setSeasonDefenseBps(SeasonRules.scaledBonusBps(progress, rule.getSealMaxPoints(), rule.getDefenseBpsCap()));
         out.setSeasonSeal(toSealEffect(rule.getId(), seal));
@@ -157,6 +174,9 @@ public final class SeasonService {
                 .setActiveRounds(seal.getActiveRounds())
                 .setHealthThresholdBps(seal.getHealthThresholdBps())
                 .setName(seal.getName())
+                .setResonanceSkillId(seal.getResonanceSkillId())
+                .setResonanceKind(seal.getResonanceKind())
+                .setResonanceParam(seal.getResonanceParam())
                 .build();
     }
 
@@ -170,10 +190,11 @@ public final class SeasonService {
 
     /** 454 战外免费切换当前赛季印，立即重算属性。 */
     public EquipOutcome equipSeal(ScenePlayer player, EquipSeasonSealRequest request, long nowMs) {
-        SeasonRuleTable rule = tables.activeSeason(nowMs);
-        if (rule == null) {
+        SeasonTables.ActiveSeason active = tables.resolveActive(nowMs);
+        if (active == null) {
             return new EquipOutcome(equipReply(player, nowMs, kSeasonNotOpen_VALUE), false);
         }
+        SeasonRuleTable rule = active.rule();
         if (request.getSeasonId() == 0 || request.getSeasonId() != rule.getId()) {
             return new EquipOutcome(equipReply(player, nowMs, kSeasonMismatch_VALUE), false);
         }
@@ -188,9 +209,7 @@ public final class SeasonService {
         if (effectiveSealId(rule, existing) == request.getSealId()) {
             return new EquipOutcome(equipReply(player, nowMs, kSeasonSealAlreadyEquipped_VALUE), false);
         }
-        PlayerSeasonSealRecordState.Builder next = existing == null
-                ? PlayerSeasonSealRecordState.newBuilder().setSeasonId(rule.getId())
-                : existing.toBuilder();
+        PlayerSeasonSealRecordState.Builder next = syncRecordForTerm(player.season(), rule, active.resolved().seasonTerm());
         next.setEquippedSealId(request.getSealId());
         if (next.getRevision() != -1L) {
             next.setRevision(next.getRevision() + 1L);
@@ -202,7 +221,7 @@ public final class SeasonService {
         return new EquipOutcome(equipReply(player, nowMs, OK), true);
     }
 
-    /** 455 幂等小额追赶赛季印进度（重放查账优先于冻结/战斗闸）。 */
+    /** 455 幂等小额追赶赛季印进度（重放查账优先于冻结/战斗闸；绝不溢出至往季追忆）。 */
     public CatchupOutcome catchup(ScenePlayer player, CatchupSeasonSealRequest request, long nowMs) {
         long reqId = request.getClientRequestId();
         if (reqId == 0) {
@@ -222,10 +241,11 @@ public final class SeasonService {
         if (check.verdict() == Verdict.MISMATCH) {
             return new CatchupOutcome(catchupReply(player, nowMs, INVALID_PARAMETER, false, 0, 0), false);
         }
-        SeasonRuleTable rule = tables.activeSeason(nowMs);
-        if (rule == null) {
+        SeasonTables.ActiveSeason active = tables.resolveActive(nowMs);
+        if (active == null) {
             return new CatchupOutcome(catchupReply(player, nowMs, kSeasonNotOpen_VALUE, false, 0, 0), false);
         }
+        SeasonRuleTable rule = active.rule();
         if (request.getSeasonId() == 0 || request.getSeasonId() != rule.getId()) {
             return new CatchupOutcome(catchupReply(player, nowMs, kSeasonMismatch_VALUE, false, 0, 0), false);
         }
@@ -237,7 +257,7 @@ public final class SeasonService {
             return new CatchupOutcome(catchupReply(player, nowMs, writableErr, false, 0, 0), false);
         }
         PlayerSeasonSealRecordState existing = player.season().record(rule.getId());
-        int currentPoints = existing == null ? 0 : Math.min(existing.getProgressPoints(), rule.getSealMaxPoints());
+        int currentPoints = readEffectiveTermProgress(existing, active.resolved().seasonTerm(), rule.getSealMaxPoints()).progress();
         if (Integer.compareUnsigned(currentPoints, rule.getSealMaxPoints()) >= 0) {
             return new CatchupOutcome(catchupReply(player, nowMs, kSeasonSealAlreadyMax_VALUE, false, 0, 0), false);
         }
@@ -256,14 +276,20 @@ public final class SeasonService {
         if (!deducted.ok()) {
             return new CatchupOutcome(catchupReply(player, nowMs, deducted.tipId(), false, 0, 0), false);
         }
-        PlayerSeasonSealRecordState.Builder next = existing == null
-                ? PlayerSeasonSealRecordState.newBuilder().setSeasonId(rule.getId())
-                : existing.toBuilder();
+        PlayerSeasonSealRecordState.Builder next = syncRecordForTerm(player.season(), rule, active.resolved().seasonTerm());
         if (next.getEquippedSealId() == 0) {
             next.setEquippedSealId(rule.getDefaultSealId());
         }
-        next.setProgressPoints(currentPoints + plan.pointsToBuy());
+        int afterPoints = currentPoints + plan.pointsToBuy();
+        next.setProgressPoints(afterPoints);
         next.setCatchupPoints(next.getCatchupPoints() + plan.pointsToBuy());
+        if (Integer.compareUnsigned(afterPoints, rule.getSealMaxPoints()) >= 0) {
+            player.season().setHonorBit(rule.getId());
+            player.season().removeRetroHonorProgress(rule.getId());
+            if (player.season().retroHonorTargetSeasonId() == rule.getId()) {
+                player.season().setRetroHonorTargetSeasonId(0);
+            }
+        }
         if (next.getRevision() != -1L) {
             next.setRevision(next.getRevision() + 1L);
         }
@@ -281,40 +307,113 @@ public final class SeasonService {
         return new CatchupOutcome(catchupReply(player, nowMs, OK, false, plan.pointsToBuy(), plan.totalPrice()), true);
     }
 
-    /** 结算应用同帧原子累计本季进度点，超封顶夹取。 */
+    /** 569 设定/清除「往季徽章追忆」指定目标（0=自动顺延首个未解锁往季；纯免费零收费）。 */
+    public RetroHonorTargetOutcome setRetroHonorTarget(ScenePlayer player, SetRetroHonorTargetRequest request, long nowMs) {
+        int writableErr = checkWritable(player, true);
+        if (writableErr != OK) {
+            return new RetroHonorTargetOutcome(retroTargetReply(player, nowMs, writableErr), false);
+        }
+        syncLegacyHonorsToBitmap(player.season());
+        int targetSeasonId = request.getSeasonId();
+        if (targetSeasonId == 0) {
+            player.season().setRetroHonorTargetSeasonId(0);
+            return new RetroHonorTargetOutcome(retroTargetReply(player, nowMs, OK), true);
+        }
+        SeasonRuleTable targetRule = tables.ruleById(targetSeasonId);
+        SeasonRuleTable activeRule = tables.activeSeason(nowMs);
+        if (targetRule == null || targetRule.getSealMaxPoints() == 0
+                || (activeRule != null && activeRule.getId() == targetSeasonId)) {
+            return new RetroHonorTargetOutcome(retroTargetReply(player, nowMs, kSeasonHonorTargetInvalid_VALUE), false);
+        }
+        if (isSeasonHonorUnlocked(player.season(), targetSeasonId)) {
+            return new RetroHonorTargetOutcome(retroTargetReply(player, nowMs, kSeasonHonorAlreadyUnlocked_VALUE), false);
+        }
+        player.season().setRetroHonorTargetSeasonId(targetSeasonId);
+        log.info("season_retro_honor_target_updated player={} target_season_id={}",
+                Long.toUnsignedString(player.playerId()), targetSeasonId);
+        return new RetroHonorTargetOutcome(retroTargetReply(player, nowMs, OK), true);
+    }
+
+    /** 结算应用同帧原子累计本季进度点，满级后免费溢出至「往季徽章追忆」。 */
     public BattleCreditOutcome creditBattlePoints(ScenePlayer player, BattleSettlementData settlement, long nowMs) {
         if (!isEligibleBattle(settlement)) {
             return BattleCreditOutcome.NONE;
         }
-        SeasonRuleTable rule = tables.activeSeason(nowMs);
-        if (rule == null) {
+        SeasonTables.ActiveSeason active = tables.resolveActive(nowMs);
+        if (active == null) {
             return BattleCreditOutcome.NONE;
         }
+        SeasonRuleTable rule = active.rule();
         int gain = battlePointsFor(rule, settlement);
         if (gain == 0) {
-            return new BattleCreditOutcome(rule.getId(), false, 0, 0, 0, false);
+            return new BattleCreditOutcome(rule.getId(), false, 0, 0, 0, false, 0, 0, 0, 0, false);
         }
-        PlayerSeasonSealRecordState existing = player.season().record(rule.getId());
-        PlayerSeasonSealRecordState.Builder next = existing == null
-                ? PlayerSeasonSealRecordState.newBuilder().setSeasonId(rule.getId())
-                : existing.toBuilder();
+        PlayerSeason ps = player.season();
+        PlayerSeasonSealRecordState.Builder next = syncRecordForTerm(ps, rule, active.resolved().seasonTerm());
         if (next.getEquippedSealId() == 0) {
             next.setEquippedSealId(rule.getDefaultSealId());
         }
-        int before = Math.min(next.getProgressPoints(), rule.getSealMaxPoints());
-        if (before >= rule.getSealMaxPoints()) {
-            return new BattleCreditOutcome(rule.getId(), false, 0, before, rule.getSealMaxPoints(), false);
+        int maxPoints = rule.getSealMaxPoints();
+        int before = Math.min(next.getProgressPoints(), maxPoints);
+        boolean wasAlreadyUnlocked = isSeasonHonorUnlocked(ps, rule.getId());
+        int usedForCurrent = before < maxPoints ? Math.min(gain, maxPoints - before) : 0;
+        int after = before + usedForCurrent;
+        boolean currentHonorNewlyUnlocked = false;
+        boolean pointsIncreased = false;
+        if (usedForCurrent > 0) {
+            next.setProgressPoints(after);
+            next.setBattlePoints(next.getBattlePoints() + usedForCurrent);
+            pointsIncreased = true;
+            if (after >= maxPoints) {
+                boolean newlySet = ps.setHonorBit(rule.getId());
+                currentHonorNewlyUnlocked = newlySet && !wasAlreadyUnlocked;
+                ps.removeRetroHonorProgress(rule.getId());
+                if (ps.retroHonorTargetSeasonId() == rule.getId()) {
+                    ps.setRetroHonorTargetSeasonId(0);
+                }
+            }
         }
-        int added = Math.min(gain, rule.getSealMaxPoints() - before);
-        int after = before + added;
-        boolean newlyUnlocked = before < rule.getSealMaxPoints() && after >= rule.getSealMaxPoints();
-        next.setProgressPoints(after);
-        next.setBattlePoints(next.getBattlePoints() + added);
-        player.season().putRecord(next.build());
-        if (added > 0) {
+        ps.putRecord(next.build());
+        if (usedForCurrent > 0) {
             attributes.equipmentChanged(player);
         }
-        return new BattleCreditOutcome(rule.getId(), added > 0, added, after, rule.getSealMaxPoints(), newlyUnlocked);
+
+        int retroSeasonId = 0;
+        int retroAdded = 0;
+        int retroAfter = 0;
+        int retroMax = 0;
+        boolean retroUnlocked = false;
+        int overflow = gain - usedForCurrent;
+        if (overflow > 0) {
+            int retroTargetId = resolveRetroHonorTarget(ps, rule.getId(), null);
+            if (retroTargetId != 0) {
+                SeasonRuleTable targetRule = tables.ruleById(retroTargetId);
+                if (targetRule != null && targetRule.getSealMaxPoints() > 0) {
+                    int targetMax = targetRule.getSealMaxPoints();
+                    int prevRetro = Math.min(ps.retroHonorProgress(retroTargetId), targetMax);
+                    int add = prevRetro < targetMax ? Math.min(overflow, targetMax - prevRetro) : 0;
+                    int afterRetro = prevRetro + add;
+                    if (add > 0) {
+                        pointsIncreased = true;
+                        retroSeasonId = retroTargetId;
+                        retroAdded = add;
+                        retroAfter = afterRetro;
+                        retroMax = targetMax;
+                        if (afterRetro >= targetMax) {
+                            retroUnlocked = ps.setHonorBit(retroTargetId);
+                            ps.removeRetroHonorProgress(retroTargetId);
+                            if (ps.retroHonorTargetSeasonId() == retroTargetId) {
+                                ps.setRetroHonorTargetSeasonId(0);
+                            }
+                        } else {
+                            ps.putRetroHonorProgress(retroTargetId, afterRetro);
+                        }
+                    }
+                }
+            }
+        }
+        return new BattleCreditOutcome(rule.getId(), pointsIncreased, usedForCurrent, after, maxPoints,
+                currentHonorNewlyUnlocked, retroSeasonId, retroAdded, retroAfter, retroMax, retroUnlocked);
     }
 
     public static boolean isEligibleBattle(BattleSettlementData settlement) {
@@ -365,6 +464,91 @@ public final class SeasonService {
         };
     }
 
+    private boolean isSeasonHonorUnlocked(PlayerSeason ps, int seasonId) {
+        if (seasonId == 0) {
+            return false;
+        }
+        if (ps.isHonorBitSet(seasonId)) {
+            return true;
+        }
+        SeasonRuleTable rule = tables.ruleById(seasonId);
+        if (rule == null || rule.getSealMaxPoints() == 0) {
+            return false;
+        }
+        PlayerSeasonSealRecordState rec = ps.record(seasonId);
+        return rec != null && Integer.compareUnsigned(rec.getProgressPoints(), rule.getSealMaxPoints()) >= 0;
+    }
+
+    private void syncLegacyHonorsToBitmap(PlayerSeason ps) {
+        for (int sid : ps.seasonIds()) {
+            SeasonRuleTable rule = tables.ruleById(sid);
+            PlayerSeasonSealRecordState rec = ps.record(sid);
+            if (rule != null && rule.getSealMaxPoints() > 0 && rec != null
+                    && Integer.compareUnsigned(rec.getProgressPoints(), rule.getSealMaxPoints()) >= 0) {
+                ps.setHonorBit(sid);
+                ps.removeRetroHonorProgress(sid);
+                if (ps.retroHonorTargetSeasonId() == sid) {
+                    ps.setRetroHonorTargetSeasonId(0);
+                }
+            }
+        }
+    }
+
+    private static EffectiveProgress readEffectiveTermProgress(PlayerSeasonSealRecordState rec,
+                                                               int currentTerm, int maxPoints) {
+        if (rec == null || maxPoints == 0) {
+            return EffectiveProgress.ZERO;
+        }
+        boolean sameTerm = rec.getLastTerm() == currentTerm || (rec.getLastTerm() == 0 && currentTerm == 1);
+        if (!sameTerm) {
+            return EffectiveProgress.ZERO;
+        }
+        int progress = Math.min(rec.getProgressPoints(), maxPoints);
+        int battlePts = Math.min(rec.getBattlePoints(), progress);
+        int catchupPts = Math.min(rec.getCatchupPoints(), progress);
+        return new EffectiveProgress(progress, battlePts, catchupPts);
+    }
+
+    private PlayerSeasonSealRecordState.Builder syncRecordForTerm(PlayerSeason ps, SeasonRuleTable rule, int currentTerm) {
+        syncLegacyHonorsToBitmap(ps);
+        PlayerSeasonSealRecordState existing = ps.record(rule.getId());
+        PlayerSeasonSealRecordState.Builder builder = existing == null
+                ? PlayerSeasonSealRecordState.newBuilder().setSeasonId(rule.getId())
+                : existing.toBuilder();
+        if (builder.getLastTerm() == 0 && currentTerm == 1) {
+            builder.setLastTerm(1);
+        } else if (builder.getLastTerm() != currentTerm) {
+            builder.setProgressPoints(0)
+                    .setBattlePoints(0)
+                    .setCatchupPoints(0)
+                    .setLastTerm(currentTerm);
+        }
+        return builder;
+    }
+
+    private int resolveRetroHonorTarget(PlayerSeason ps, int activeSeasonId, boolean[] outExplicit) {
+        if (outExplicit != null && outExplicit.length > 0) {
+            outExplicit[0] = false;
+        }
+        int explicitId = ps.retroHonorTargetSeasonId();
+        if (explicitId != 0 && explicitId != activeSeasonId) {
+            SeasonRuleTable rule = tables.ruleById(explicitId);
+            if (rule != null && rule.getSealMaxPoints() > 0 && !isSeasonHonorUnlocked(ps, explicitId)) {
+                if (outExplicit != null && outExplicit.length > 0) {
+                    outExplicit[0] = true;
+                }
+                return explicitId;
+            }
+        }
+        for (int sid : tables.allRuleIdsAsc()) {
+            SeasonRuleTable rule = tables.ruleById(sid);
+            if (sid != activeSeasonId && rule != null && rule.getSealMaxPoints() > 0 && !isSeasonHonorUnlocked(ps, sid)) {
+                return sid;
+            }
+        }
+        return 0;
+    }
+
     private int effectiveSealId(SeasonRuleTable rule, PlayerSeasonSealRecordState record) {
         if (record != null && record.getEquippedSealId() != 0
                 && tables.validSealForSeason(rule.getId(), record.getEquippedSealId()) != null) {
@@ -404,19 +588,34 @@ public final class SeasonService {
                 .build();
     }
 
+    private SetRetroHonorTargetResponse retroTargetReply(ScenePlayer player, long nowMs, int tipId) {
+        return SetRetroHonorTargetResponse.newBuilder()
+                .setErrorMessage(tip(tipId))
+                .setState(buildSnapshot(player, nowMs))
+                .build();
+    }
+
     private SeasonStateSnapshot buildSnapshot(ScenePlayer player, long nowMs) {
         SeasonStateSnapshot.Builder out = SeasonStateSnapshot.newBuilder().setServerNowMs(nowMs);
-        SeasonRuleTable rule = tables.activeSeason(nowMs);
-        if (rule == null) {
-            fillHonors(player, 0, out);
+        SeasonTables.ActiveSeason active = tables.resolveActive(nowMs);
+        int activeSeasonId = active == null ? 0 : active.rule().getId();
+        boolean[] retroExplicit = new boolean[1];
+        int retroTargetId = resolveRetroHonorTarget(player.season(), activeSeasonId, retroExplicit);
+        out.setRetroHonorTargetSeasonId(retroTargetId)
+                .setRetroHonorTargetExplicit(retroExplicit[0]);
+        if (active == null) {
+            fillHonors(player, 0, 0, retroTargetId, out);
             return out.setAvailable(false).setUnavailableReason("当前暂无进行中的赛季").build();
         }
-        fillHonors(player, rule.getId(), out);
+        SeasonRuleTable rule = active.rule();
+        SeasonRules.ResolvedSeason resolved = active.resolved();
+        fillHonors(player, rule.getId(), resolved.seasonTerm(), retroTargetId, out);
         PlayerSeasonSealRecordState record = player.season().record(rule.getId());
         int equippedId = effectiveSealId(rule, record);
-        int progress = record == null ? 0 : Math.min(record.getProgressPoints(), rule.getSealMaxPoints());
-        int battlePts = record == null ? 0 : Math.min(record.getBattlePoints(), progress);
-        int catchupPts = record == null ? 0 : Math.min(record.getCatchupPoints(), progress);
+        EffectiveProgress eff = readEffectiveTermProgress(record, resolved.seasonTerm(), rule.getSealMaxPoints());
+        int progress = eff.progress();
+        int battlePts = eff.battlePoints();
+        int catchupPts = eff.catchupPoints();
         int healthBps = SeasonRules.scaledBonusBps(progress, rule.getSealMaxPoints(), rule.getMaxHealthBpsCap());
         int defenseBps = SeasonRules.scaledBonusBps(progress, rule.getSealMaxPoints(), rule.getDefenseBpsCap());
         SeasonRules.CatchupPlan fullPlan = SeasonRules.computeCatchupPlan(
@@ -427,8 +626,11 @@ public final class SeasonService {
                 .setSeasonId(rule.getId())
                 .setSeasonName(rule.getName())
                 .setSeasonDesc(rule.getDesc())
-                .setStartsAtMs(rule.getStartsAtMs())
-                .setEndsAtMs(rule.getEndsAtMs())
+                .setStartsAtMs(resolved.termStartMs())
+                .setEndsAtMs(resolved.termEndMs())
+                .setSeasonTerm(resolved.seasonTerm())
+                .setCycleIndex(resolved.cycleIndex())
+                .setCyclePoolSize(resolved.cyclePoolSize())
                 .setEquippedSealId(equippedId)
                 .setProgressPoints(progress)
                 .setMaxPoints(rule.getSealMaxPoints())
@@ -467,9 +669,13 @@ public final class SeasonService {
                     .setBattleLimit(seal.getBattleLimit())
                     .setActiveRounds(seal.getActiveRounds())
                     .setHealthThresholdBps(seal.getHealthThresholdBps())
-                    .setEquipped(seal.getId() == equippedId));
+                    .setEquipped(seal.getId() == equippedId)
+                    .setResonanceSkillId(seal.getResonanceSkillId())
+                    .setResonanceKind(seal.getResonanceKind())
+                    .setResonanceParam(seal.getResonanceParam())
+                    .setResonanceDesc(seal.getResonanceDesc()));
         }
-        fillWeeklyAffix(rule, nowMs, validSeals, out);
+        fillWeeklyAffix(active, nowMs, validSeals, out);
         int level = PlayerLevels.effective(player.level());
         for (SkillTable skill : tables.seasonSkillsOf(rule.getId())) {
             int effRank = SeasonRules.effectiveSeasonalSkillRank(level, skill.getUnlockLevel(), skill.getMaxRank());
@@ -494,26 +700,24 @@ public final class SeasonService {
         return out.build();
     }
 
-    private void fillHonors(ScenePlayer player, int activeSeasonId, SeasonStateSnapshot.Builder out) {
-        java.util.TreeSet<Integer> seasonIds = new java.util.TreeSet<>(Integer::compareUnsigned);
-        for (Integer sid : player.season().seasonIds()) {
-            if (sid != null && sid != 0) {
-                seasonIds.add(sid);
-            }
-        }
-        if (activeSeasonId != 0) {
-            seasonIds.add(activeSeasonId);
-        }
-        for (int sid : seasonIds) {
+    private void fillHonors(ScenePlayer player, int activeSeasonId, int activeTerm,
+                            int retroTargetSeasonId, SeasonStateSnapshot.Builder out) {
+        PlayerSeason ps = player.season();
+        for (int sid : tables.allRuleIdsAsc()) {
             SeasonRuleTable rule = tables.ruleById(sid);
             if (rule == null || rule.getSealMaxPoints() == 0) {
                 continue;
             }
-            PlayerSeasonSealRecordState rec = player.season().record(sid);
-            int progress = rec == null ? 0 : Math.min(rec.getProgressPoints(), rule.getSealMaxPoints());
-            boolean unlocked = Integer.compareUnsigned(progress, rule.getSealMaxPoints()) >= 0;
-            if (!unlocked && sid != activeSeasonId) {
-                continue;
+            boolean unlocked = isSeasonHonorUnlocked(ps, sid);
+            boolean isCurrent = sid == activeSeasonId;
+            int retroPts = unlocked ? 0 : Math.min(ps.retroHonorProgress(sid), rule.getSealMaxPoints());
+            int progress;
+            if (unlocked) {
+                progress = rule.getSealMaxPoints();
+            } else if (isCurrent) {
+                progress = readEffectiveTermProgress(ps.record(sid), activeTerm, rule.getSealMaxPoints()).progress();
+            } else {
+                progress = retroPts;
             }
             out.addHonors(SeasonHonorView.newBuilder()
                     .setSeasonId(sid)
@@ -523,14 +727,18 @@ public final class SeasonService {
                     .setProgressPoints(progress)
                     .setMaxPoints(rule.getSealMaxPoints())
                     .setUnlocked(unlocked)
-                    .setIsCurrentSeason(sid == activeSeasonId));
+                    .setIsCurrentSeason(isCurrent)
+                    .setIsRetroTarget(!unlocked && sid == retroTargetSeasonId)
+                    .setRetroProgressPoints(retroPts));
         }
     }
 
-    private static void fillWeeklyAffix(SeasonRuleTable rule, long nowMs, List<SeasonSealTable> validSeals,
+    private static void fillWeeklyAffix(SeasonTables.ActiveSeason active, long nowMs, List<SeasonSealTable> validSeals,
                                         SeasonStateSnapshot.Builder out) {
-        int weekIndex = SeasonRules.computeSeasonWeekIndex(rule.getStartsAtMs(), nowMs);
-        int affixId = SeasonRules.weeklyAffixForWeek(rule.getId(), weekIndex);
+        int affixSeed = active.resolved().cyclePoolSize() > 0
+                ? active.resolved().seasonTerm() : active.rule().getId();
+        int weekIndex = SeasonRules.computeSeasonWeekIndex(active.resolved().termStartMs(), nowMs);
+        int affixId = SeasonRules.weeklyAffixForWeek(affixSeed, weekIndex);
         if (!SeasonRules.isValidWeeklyAffixId(affixId)) {
             return;
         }

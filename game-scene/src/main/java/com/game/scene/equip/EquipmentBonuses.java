@@ -40,6 +40,6 @@ public record EquipmentBonuses(Map<Integer, Long> primary, long allPrimary, Deri
                         .setCounterRate(combat[4]).setReflectRate(combat[5]).setSkillLevelBonus(combat[6]).setIgnoreAilmentResist(combat[7])
                         .setResistPoison(combat[8]).setResistFreeze(combat[9]).setResistSleep(combat[10]).setResistForget(combat[11])
                         .setResistConfusion(combat[12]).setResistAllAilment(combat[13]).setMagicResist(combat[14]).setPhysicalResist(combat[15]).build(),
-                FixedEquipmentEffects.collect(bags, rules.tables()));
+                FixedEquipmentEffects.collect(bags, rules));
     }
 }

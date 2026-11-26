@@ -16,9 +16,14 @@ import java.util.Map;
 final class FixedEquipmentEffects {
     private FixedEquipmentEffects() {}
     private record Channel(int effect, int parameter) {}
-    private record Total(long raw, int cap) {}
+    private record Total(long raw, int cap, long maxEnhanceBonus) {}
 
     static EquipmentEffects collect(PlayerBags bags, EquipmentTables tables) {
+        return collect(bags, new EquipmentRules(tables, bound -> 0));
+    }
+
+    static EquipmentEffects collect(PlayerBags bags, EquipmentRules rules) {
+        EquipmentTables tables = rules.tables();
         var result = EquipmentEffects.newBuilder().setSupportSourcesComplete(true);
         Map<Channel,Total> totals = new HashMap<>();
         var items = bags.bag(BagType.EQUIPMENT).items().stream()
@@ -30,16 +35,22 @@ final class FixedEquipmentEffects {
             int profile = template.getEquipProfile();
             if (profile < 1 || profile > 3) continue;
             if (!validSelections(item, profile, tables)) { result.setSupportSourcesComplete(false); continue; }
+            long itemEnhanceBonus = profile == 1 ? rules.v1ItemEnhanceBonusPermyriad(item) : 0L;
             for (var choice : item.equipment().getFixedAffixesList().stream()
                     .sorted((a,b) -> Integer.compareUnsigned(a.getAffixId(), b.getAffixId())).toList()) {
                 var affix = tables.fixedAffix(choice.getAffixId());
                 boolean exempt = EquipCraftQualityRules.isPolishExempt(affix.getEffect());
                 int tier = EquipCraftQualityRules.effectiveQualityTier(choice.getQualityTier(), exempt);
-                int scaledValue = EquipCraftQualityRules.scaleValueByQuality(
+                int qualityScaled = EquipCraftQualityRules.scaleValueByQuality(
                         affix.getValuePermyriad(), tables.qualityRatioPct(tier));
+                int scaledValue = EquipmentRules.scaleV1FixedAffixByEnhance(
+                        profile, affix.getEffect(), qualityScaled, itemEnhanceBonus);
+                long channelEnhance = EquipmentRules.v1FixedAffixEnhanceSharePermyriad(profile, affix.getEffect()) > 0
+                        ? itemEnhanceBonus : 0L;
                 var channel = new Channel(affix.getEffect(), affix.getEffectParam());
-                totals.merge(channel, new Total(scaledValue, affix.getSourceCap()),
-                        (a,b) -> new Total(a.raw + b.raw, Math.min(a.cap, b.cap)));
+                totals.merge(channel, new Total(scaledValue, affix.getSourceCap(), channelEnhance),
+                        (a,b) -> new Total(a.raw + b.raw, Math.min(a.cap, b.cap),
+                                Math.max(a.maxEnhanceBonus, b.maxEnhanceBonus)));
                 if (affix.getEffect() == 5 || affix.getEffect() == 6) {
                     result.addSupportSources(SupportEffectSource.newBuilder().setKind(1).setEffectKind(affix.getEffect() - 4)
                             .setItemId(item.guid()).setAffixId(affix.getId()).setRawBonusBps(scaledValue)
@@ -58,15 +69,25 @@ final class FixedEquipmentEffects {
                         .setActiveRounds(artifact.getActiveRounds()).setHealthThresholdBps(artifact.getHealthThresholdBps()));
             }
         }
+        int[] supportEffectiveCaps = {0, 3200, 3200};
         totals.forEach((channel,total) -> {
-            int bps = (int) Math.min(total.raw, total.cap);
+            int effectiveCap = total.maxEnhanceBonus > 0L
+                    ? EquipmentRules.scaleV1FixedAffixByEnhance(1, channel.effect, total.cap, total.maxEnhanceBonus)
+                    : total.cap;
+            int bps = (int) Math.min(total.raw, effectiveCap);
             switch (channel.effect) {
                 case 1 -> result.setPhysicalAttackBps(bps);
                 case 2 -> result.setMagicAttackBps(bps);
                 case 3 -> result.setMaxHealthBps(bps);
                 case 4 -> result.setSpeedBps(bps);
-                case 5 -> result.setOutgoingHealBps(bps);
-                case 6 -> result.setShieldCapacityBps(bps);
+                case 5 -> {
+                    result.setOutgoingHealBps(bps);
+                    supportEffectiveCaps[1] = effectiveCap;
+                }
+                case 6 -> {
+                    result.setShieldCapacityBps(bps);
+                    supportEffectiveCaps[2] = effectiveCap;
+                }
                 case 7 -> result.setPhysicalCritBps(bps);
                 case 8 -> result.setMagicCritBps(bps);
                 case 9 -> result.setPhysicalResistBps(bps);
@@ -79,9 +100,11 @@ final class FixedEquipmentEffects {
         });
         int[] remaining = {0, result.getOutgoingHealBps(), result.getShieldCapacityBps()};
         for (var source : result.getSupportSourcesBuilderList()) {
-            int used = Math.min(remaining[source.getEffectKind()], (int) source.getRawBonusBps());
+            int kind = source.getEffectKind();
+            source.setSourceCapBps(supportEffectiveCaps[kind]);
+            int used = Math.min(remaining[kind], (int) source.getRawBonusBps());
             source.setEffectiveBonusBps(used);
-            remaining[source.getEffectKind()] -= used;
+            remaining[kind] -= used;
             if (used < source.getRawBonusBps()) source.setReason("装备同类来源上限已截取");
         }
         return result.build();

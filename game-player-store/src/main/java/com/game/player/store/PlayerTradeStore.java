@@ -499,14 +499,17 @@ public final class PlayerTradeStore {
         if (snapshot == null || !"APPLIED".equals(row.get("status"))) return false;
         byte[] data = (byte[]) row.get("data");
         long config = Integer.toUnsignedLong(snapshot.getSceneConfigId());
-        var players = sql.queryForList("SELECT level,scene_config_id,pos_x,pos_y,pos_z FROM player WHERE player_id=?", receipt.playerId());
+        var players = sql.queryForList("SELECT level,scene_config_id,pos_x,pos_y,pos_z,appearance_id,afk_pass_expires_at,afk_pass_last_req_id FROM player WHERE player_id=?", receipt.playerId());
         if (players.size() != 1) return false;
         var player = players.getFirst();
         if (((Number) player.get("level")).longValue() != snapshot.getLevel()
                 || ((Number) player.get("scene_config_id")).longValue() != config
                 || Double.doubleToRawLongBits(((Number) player.get("pos_x")).doubleValue()) != Double.doubleToRawLongBits(snapshot.getPosX())
                 || Double.doubleToRawLongBits(((Number) player.get("pos_y")).doubleValue()) != Double.doubleToRawLongBits(snapshot.getPosY())
-                || Double.doubleToRawLongBits(((Number) player.get("pos_z")).doubleValue()) != Double.doubleToRawLongBits(snapshot.getPosZ())) return false;
+                || Double.doubleToRawLongBits(((Number) player.get("pos_z")).doubleValue()) != Double.doubleToRawLongBits(snapshot.getPosZ())
+                || (!snapshot.getAppearanceId().isEmpty() && !snapshot.getAppearanceId().equals(player.get("appearance_id")))
+                || (snapshot.getAfkPassExpiresAt() != null && (!(player.get("afk_pass_expires_at") instanceof Number exp) || exp.longValue() != snapshot.getAfkPassExpiresAt()))
+                || (snapshot.getAfkPassLastReqId() != null && (!(player.get("afk_pass_last_req_id") instanceof Number req) || req.longValue() != snapshot.getAfkPassLastReqId()))) return false;
         var saved = sql.queryForList("SELECT data,saved_epoch FROM player_state WHERE player_id=?", receipt.playerId());
         return saved.size() == 1 && ((Number) saved.getFirst().get("saved_epoch")).longValue() == receipt.ownerEpoch()
                 && saved.getFirst().get("data") instanceof byte[] actual && Arrays.equals(data, actual);
@@ -515,13 +518,19 @@ public final class PlayerTradeStore {
         try {
             if (((Number) row.get("save_seq")).longValue() != 1
                     || ((Number) row.get("protocol_version")).intValue() != 1 || !(row.get("data") instanceof byte[] data)
-                    || !(row.get("payload_digest") instanceof byte[] expected)) return null;
+                    || !(row.get("payload_digest") instanceof byte[] expected)
+                    || !(row.get("appearance_id") instanceof String appearanceId)) return null;
             PlayerRow snapshot = new PlayerRow(); snapshot.setPlayerId(receipt.playerId()); snapshot.setOwnerEpoch(receipt.ownerEpoch());
             long config = ((Number) row.get("scene_config_id")).longValue();
             if (config < 0 || config > 0xffff_ffffL) return null;
             snapshot.setLevel(((Number) row.get("level")).longValue()); snapshot.setSceneConfigId((int) config);
             snapshot.setPosX(((Number) row.get("pos_x")).doubleValue()); snapshot.setPosY(((Number) row.get("pos_y")).doubleValue());
             snapshot.setPosZ(((Number) row.get("pos_z")).doubleValue());
+            snapshot.setAppearanceId(appearanceId);
+            Object expObj = row.get("afk_pass_expires_at");
+            if (expObj != null) { if (!(expObj instanceof Number n)) return null; snapshot.setAfkPassExpiresAt(n.longValue()); }
+            Object reqObj = row.get("afk_pass_last_req_id");
+            if (reqObj != null) { if (!(reqObj instanceof Number n)) return null; snapshot.setAfkPassLastReqId(n.longValue()); }
             com.game.player.store.state.PlayerState.parseFrom(data);
             return MessageDigest.isEqual(expected, PlayerStore.finalSaveDigest(snapshot, data)) ? snapshot : null;
         } catch (IllegalArgumentException | NullPointerException | com.google.protobuf.InvalidProtocolBufferException corrupt) { return null; }

@@ -359,4 +359,86 @@ class RankedParityTest {
             assertThat(TABLES.trialContextFor(MatchModes.PVE_SOLO, id, null, null)).isEmpty();
         }
     }
+
+    @Test
+    void 论剑V6宿敌恩怨复仇与问道名局公开回放汇总() throws Exception {
+        try (RatingTestDatabase db = RatingTestDatabase.h2()) {
+            AtomicLong now = new AtomicLong(1_732_000_000_000L);
+            RankedStore rankedStore = new RankedStore(db.dataSource, TABLES, now::get);
+            RatingStore ratingStore = new RatingStore(
+                    RatingStore.connections(db.dataSource), cfg -> 0,
+                    new MatchMetrics(new SimpleMeterRegistry(), new com.game.match.metrics.MetricLabels(id -> true)),
+                    now::get).withRankedStore(rankedStore);
+            rankedStore.ensureActiveSeason();
+
+            long p1 = 60001L, p2 = 60002L;
+            db.putRating(p1, 165_000L, 10);
+            db.putRating(p2, 166_000L, 10);
+
+            // 第 1 局：p2 胜 p1，携带 V6 自养配招快照
+            BattleResultEvent b1 = BattleResultEvent.newBuilder()
+                    .setBattleId(66001L)
+                    .setMatchMode(MatchModes.PVP_TEAM)
+                    .setBattleConfigId(5)
+                    .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN)
+                    .setTotalRounds(6)
+                    .addTeams(BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(p1))
+                    .addTeams(BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(p2))
+                    .setRankedContext(RankedMatchContext.newBuilder()
+                            .setSeasonId(1).setRuleVersion(2).setConfigFingerprint(TABLES.configFingerprint())
+                            .setTeamSize(1).setUseFreePreset(false))
+                    .addParticipationFacts(BattleParticipationFact.newBuilder()
+                            .setPlayerId(p1).setEnteredRoom(true).setManualActionAccepted(true))
+                    .addParticipationFacts(BattleParticipationFact.newBuilder()
+                            .setPlayerId(p2).setEnteredRoom(true).setManualActionAccepted(true))
+                    .addSettlements(com.game.proto.BattleSettlementData.newBuilder()
+                            .setBattleId(66001L).setPlayerId(p1).setParticipated(true)
+                            .setManualActionRounds(6).setEffectiveCombatContribution(true)
+                            .setPlayerDisplayName("青云").setFinalSeasonSealId(101).setStarterPetTableId(1)
+                            .addCoreSkillIds(10002).addCoreSkillIds(10018))
+                    .addSettlements(com.game.proto.BattleSettlementData.newBuilder()
+                            .setBattleId(66001L).setPlayerId(p2).setParticipated(true)
+                            .setManualActionRounds(6).setEffectiveCombatContribution(true)
+                            .setPlayerDisplayName("玄烈").setFinalSeasonSealId(102).setStarterPetTableId(2)
+                            .addCoreSkillIds(10021).addCoreSkillIds(10002))
+                    .build();
+            assertThat(ratingStore.apply(b1).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+
+            // 再匹配时：buildRankedContext 透传宿敌记录，p1 对 p2 标记可雪耻
+            RankedMatchContext ctx = rankedStore.buildRankedContext(1, List.of(p1, p2), Map.of()).orElseThrow();
+            assertThat(ctx.getRivalryEncountersList())
+                    .anySatisfy(r -> {
+                        assertThat(r.getPlayerId()).isEqualTo(p1);
+                        assertThat(r.getOpponentId()).isEqualTo(p2);
+                        assertThat(r.getOpponentName()).isEqualTo("玄烈");
+                        assertThat(r.getWins()).isZero();
+                        assertThat(r.getLosses()).isEqualTo(1);
+                        assertThat(r.getRevengeTarget()).isTrue();
+                    });
+
+            // 第 2 局：p1 复仇成功，结算落盘 revenged_rival=true，且 66001 / 66002 进入名局公开回放白名单
+            now.addAndGet(10_000L);
+            BattleResultEvent b2 = b1.toBuilder()
+                    .setBattleId(66002L)
+                    .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                    .setSettlements(0, b1.getSettlements(0).toBuilder().setBattleId(66002L))
+                    .setSettlements(1, b1.getSettlements(1).toBuilder().setBattleId(66002L))
+                    .build();
+            assertThat(ratingStore.apply(b2).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+
+            RankedBattleSettlementView v1 = rankedStore.getBattleResult(p1, 66002L).orElseThrow();
+            assertThat(v1.getRevengedRival()).isTrue();
+            assertThat(v1.getRevengedOpponentName()).isEqualTo("玄烈");
+            assertThat(v1.getRevengedWinsAfter()).isEqualTo(1);
+            assertThat(v1.getRevengedLossesAfter()).isEqualTo(1);
+
+            RankedService service = new RankedService(rankedStore, TABLES, now::get);
+            GetRankedProfileResponse prof1 = service.getProfile(p1, GetRankedProfileRequest.getDefaultInstance());
+            assertThat(prof1.getTopRivalsList()).hasSize(1);
+            assertThat(prof1.getTopRivals(0).getOpponentName()).isEqualTo("玄烈");
+            assertThat(prof1.getFeaturedBuildsList()).hasSize(2);
+            assertThat(rankedStore.isFeaturedRankedReplayAllowed(66002L)).isTrue();
+            assertThat(rankedStore.isFeaturedRankedReplayAllowed(999999L)).isFalse();
+        }
+    }
 }

@@ -31,7 +31,9 @@ import com.game.scene.attribute.AttributeService;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.bag.BagFeature;
 import com.game.scene.bag.BagService;
+import com.game.scene.craft.CraftProxyStallDirectory;
 import com.game.scene.currency.CurrencyService;
+import com.game.scene.mail.PlayerMailOutboxService;
 import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.player.Bag;
 import com.game.scene.player.BagItem;
@@ -133,6 +135,7 @@ public final class EquipmentCraftService {
         boolean polishExempt;
         boolean rerollQualityOnReforge;
         boolean tradableOnly;
+        boolean allowBindForBaseFee;
         boolean willBindItem;
         boolean bindConfirmBlocked;
     }
@@ -146,6 +149,8 @@ public final class EquipmentCraftService {
     private final SceneClock clock;
     private final int rulesError;
     private final GetEquipmentCraftRulesResponse baseRules;
+    private CraftProxyStallDirectory proxyDirectory;
+    private PlayerMailOutboxService mailOutbox;
     private IntUnaryOperator qualityRoll;
 
     public EquipmentCraftService(EquipmentRules rules, BagService bags, AttributeService attributes,
@@ -165,6 +170,14 @@ public final class EquipmentCraftService {
         GetEquipmentCraftRulesResponse.Builder built = GetEquipmentCraftRulesResponse.newBuilder();
         this.rulesError = buildBaseRules(rules.tables(), display, built);
         this.baseRules = this.rulesError == OK ? built.build() : GetEquipmentCraftRulesResponse.getDefaultInstance();
+    }
+
+    /** 绑定跨节点/离线名匠代打共享摊位目录与待寄个人邮件出箱服务（未绑定时不支持离线代打）。 */
+    public EquipmentCraftService withProxyInfrastructure(CraftProxyStallDirectory proxyDirectory,
+                                                         PlayerMailOutboxService mailOutbox) {
+        this.proxyDirectory = proxyDirectory;
+        this.mailOutbox = mailOutbox;
+        return this;
     }
 
     /** 仅测试注入确定性品相掷骰函数（传 null 恢复默认随机源）。 */
@@ -362,21 +375,21 @@ public final class EquipmentCraftService {
             nextEquip.setCrafterPlayerId(signerId).setCrafterName(signerName);
         }
 
-        long totalGold = prepared.baseGoldCost + prepared.proxyFeeGold;
-        long nowSec = clock.epochMillis() / 1000L;
-        ScenePlayer proxyMaster = null;
         long proxyNetGold = 0L;
         if (prepared.proxyMasterPlayerId != 0L) {
-            proxyMaster = resolveValidProxyForgeMaster(player, prepared.proxyMasterPlayerId, world, prepared.proxyFeeGold, nowSec);
-            if (proxyMaster == null) {
+            var stall = resolveValidProxyForgeStall(player, prepared.proxyMasterPlayerId, prepared.proxyFeeGold);
+            if (stall == null) {
                 return new CommitResult(rejectCraft(reqId, ledger.forgeRevision(),
                         equip_error.kEquipProxyMasterUnavailable_VALUE, true), false);
             }
             proxyNetGold = EquipCraftQualityRules.proxyNetGold(prepared.proxyFeeGold);
+            if (proxyNetGold > 0L && (mailOutbox == null || !mailOutbox.canAccept(player))) {
+                return new CommitResult(rejectCraft(reqId, ledger.forgeRevision(),
+                        equip_error.kEquipProxyMasterUnavailable_VALUE, true), false);
+            }
         }
 
-        boolean allowBindForBaseFee = op != EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE
-                && prepared.resultBound;
+        boolean allowBindForBaseFee = prepared.allowBindForBaseFee;
         long strictGold = prepared.proxyFeeGold + (allowBindForBaseFee ? 0L : prepared.baseGoldCost);
         long preferBindGold = allowBindForBaseFee ? prepared.baseGoldCost : 0L;
         CurrencyService.PreparedDeduction payment = null;
@@ -457,8 +470,9 @@ public final class EquipmentCraftService {
         } else {
             player.bags().commitPrepared(candidate);
         }
-        if (proxyMaster != null && proxyNetGold > 0L && currency != null) {
-            currency.add(proxyMaster, Wallet.GOLD, proxyNetGold, AssetAudit.Reason.CRAFT_PROXY_FEE, reqId, nowSec);
+        if (prepared.proxyMasterPlayerId != 0L && proxyNetGold > 0L && mailOutbox != null) {
+            // 95% 净银两写入买家同事务 PlayerState.mail_outbox，落盘确认后经 game-mail -> asset_op 异步入账。
+            mailOutbox.enqueueProxyFee(player, prepared.proxyMasterPlayerId, proxyNetGold, reqId, playerDisplayName(player));
         }
         // 本人打造/装条/打磨自然涨 1 点铸器熟练度（无体力、无日清、只增不减；代打、重铸、解封、继承与无损升档不涨）。
         if (prepared.proxyMasterPlayerId == 0L
@@ -487,7 +501,7 @@ public final class EquipmentCraftService {
         }
         return new CommitResult(appliedCraft(player, reqId, resultItemId, newRevision,
                 resultQualityTier, resultPolishPityCount, guaranteedByPity, false, bagView),
-                wornChanged, true, proxyMaster);
+                wornChanged, true, null);
     }
 
     /** 407 查询装备材料自选快照。 */
@@ -828,29 +842,25 @@ public final class EquipmentCraftService {
         return OK;
     }
 
-    private ScenePlayer resolveValidProxyForgeMaster(ScenePlayer buyer, long proxyMasterId, SceneWorld world,
-                                                     Long expectedFeeGold, long nowSec) {
-        if (proxyMasterId == 0L || proxyMasterId == buyer.playerId() || world == null || currency == null) {
+    private com.game.proto.CraftProxyStallInfo resolveValidProxyForgeStall(ScenePlayer buyer, long proxyMasterId,
+                                                                           Long expectedFeeGold) {
+        if (proxyMasterId == 0L || proxyMasterId == buyer.playerId() || currency == null || proxyDirectory == null) {
             return null;
         }
-        ScenePlayer master = world.playerById(proxyMasterId);
-        if (master == null || master.frozen() || master.switchPhase() != SwitchPhase.NONE) {
+        var stall = proxyDirectory.find(proxyMasterId);
+        if (stall == null
+                || stall.getForgeMasteryTier() < EquipCraftQualityRules.MASTERY_MASTER
+                || !EquipCraftQualityRules.validProxyFee(stall.getProxyForgeFeeGold())) {
             return null;
         }
-        var craftState = master.craft().state();
-        if (!craftState.getProxyStallOpen()
-                || EquipCraftQualityRules.masteryTierForExp(craftState.getForgeMasteryExp()) < EquipCraftQualityRules.MASTERY_MASTER
-                || !EquipCraftQualityRules.validProxyFee(craftState.getProxyForgeFeeGold())) {
+        if (expectedFeeGold != null && stall.getProxyForgeFeeGold() != expectedFeeGold) {
             return null;
         }
-        if (expectedFeeGold != null && craftState.getProxyForgeFeeGold() != expectedFeeGold) {
+        long netFee = EquipCraftQualityRules.proxyNetGold(stall.getProxyForgeFeeGold());
+        if (netFee > 0L && currency.isGloballyBlocked(Wallet.GOLD)) {
             return null;
         }
-        long netFee = EquipCraftQualityRules.proxyNetGold(craftState.getProxyForgeFeeGold());
-        if (netFee > 0L && currency.checkAdd(master, Wallet.GOLD, netFee, nowSec) != 0) {
-            return null;
-        }
-        return master;
+        return stall;
     }
 
     private int resolveProxyMaster(ScenePlayer buyer, long proxyMasterId, SceneWorld world, Prepared prepared) {
@@ -858,14 +868,18 @@ public final class EquipmentCraftService {
             prepared.effectiveMasteryTier = EquipCraftQualityRules.masteryTierForExp(buyer.craft().forgeMasteryExp());
             return OK;
         }
-        long nowSec = clock.epochMillis() / 1000L;
-        ScenePlayer master = resolveValidProxyForgeMaster(buyer, proxyMasterId, world, null, nowSec);
-        if (master == null) {
+        var stall = resolveValidProxyForgeStall(buyer, proxyMasterId, null);
+        if (stall == null) {
+            return equip_error.kEquipProxyMasterUnavailable_VALUE;
+        }
+        long netFee = EquipCraftQualityRules.proxyNetGold(stall.getProxyForgeFeeGold());
+        if (netFee > 0L && (mailOutbox == null || !mailOutbox.canAccept(buyer))) {
             return equip_error.kEquipProxyMasterUnavailable_VALUE;
         }
         prepared.proxyMasterPlayerId = proxyMasterId;
-        prepared.proxyFeeGold = master.craft().state().getProxyForgeFeeGold();
-        prepared.proxyMasterName = playerDisplayName(master);
+        prepared.proxyFeeGold = stall.getProxyForgeFeeGold();
+        prepared.proxyMasterName = stall.getMasterName().isEmpty()
+                ? ("宗师#" + Long.toUnsignedString(proxyMasterId)) : stall.getMasterName();
         prepared.effectiveMasteryTier = EquipCraftQualityRules.MASTERY_MASTER;
         return OK;
     }
@@ -1108,6 +1122,7 @@ public final class EquipmentCraftService {
             prepared.baseGoldCost = EquipCraftQualityRules.REFORGE_GOLD_COST;
             prepared.consumed.merge(prepared.materialId, Integer.toUnsignedLong(prepared.materialCount), Long::sum);
             planBoundPolicy(inventory, choice, false, prepared);
+            prepared.allowBindForBaseFee = prepared.resultBound;
             return prepared;
         }
 
@@ -1190,6 +1205,7 @@ public final class EquipmentCraftService {
                 prepared.consumed.merge(prepared.extraMaterialId, 1L, Long::sum);
             }
             planBoundPolicy(inventory, choice, false, prepared);
+            prepared.allowBindForBaseFee = prepared.resultBound;
             return prepared;
         }
 
@@ -1213,7 +1229,8 @@ public final class EquipmentCraftService {
             }
             ItemTable row = tables.item(found.configId());
             EquipmentState current = found.equipment();
-            if (row == null || row.getEquipKind() == 0 || found.size() != 1 || current == null) {
+            // 禁止解封 equip_profile == 3 的试炼志免费绑定法宝（无强化/词条可剥离，解封即零损洗白）。
+            if (row == null || row.getEquipKind() == 0 || row.getEquipProfile() == 3 || found.size() != 1 || current == null) {
                 errorOut[0] = INVALID_PARAMETER;
                 return null;
             }
@@ -1406,7 +1423,8 @@ public final class EquipmentCraftService {
         if (prepared.bindConfirmBlocked) {
             return equip_error.kEquipBindConfirmRequired_VALUE;
         }
-        boolean allowBindForBaseFee = prepared.resultBound;
+        // UPGRADE_TIER 即使目标当前已绑定也严禁扣绑银（升档后的高阶 configId 不会被 UNSEAL_TO_TRADABLE 清空，防绑银洗白）。
+        boolean allowBindForBaseFee = prepared.allowBindForBaseFee;
         long strictGold = prepared.proxyFeeGold + (allowBindForBaseFee ? 0L : prepared.baseGoldCost);
         long preferBindGold = allowBindForBaseFee ? prepared.baseGoldCost : 0L;
         if (strictGold > 0L || preferBindGold > 0L) {

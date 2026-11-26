@@ -80,4 +80,52 @@ public interface FriendStore {
 
     /** 我拉黑的人（至多 {@code limit} 条，直读、不缓存）。 */
     List<BlockEdge> blocks(long me, int limit, Deadline deadline);
+
+    /** 批量社交关系校验结论（供天墉生死状校验双向拉黑与全员互为好友）。 */
+    record SocialRelationSummary(boolean hasAnyBlock, boolean allAreFriends) {
+    }
+
+    /**
+     * 批量检查两队跨队成员是否存在任意单向/双向拉黑，以及跨队成员是否两两均为好友。
+     * 缺省基于权威 {@link #blocks} 与 {@link #friends} 读组合实现；存储层可按需覆写批量 SQL 优化。
+     */
+    default SocialRelationSummary batchCheckSocialRelations(List<Long> sideA, List<Long> sideB, int listLimit, Deadline deadline) {
+        if (sideA == null || sideB == null || sideA.isEmpty() || sideB.isEmpty()) {
+            return new SocialRelationSummary(false, false);
+        }
+        int cap = Math.max(1, listLimit);
+        java.util.Set<Long> bSet = new java.util.HashSet<>(sideB);
+        java.util.Set<Long> aSet = new java.util.HashSet<>(sideA);
+        for (long a : sideA) {
+            for (BlockEdge blk : blocks(a, cap, deadline)) {
+                if (bSet.contains(blk.blockedPlayerId())) {
+                    return new SocialRelationSummary(true, false);
+                }
+            }
+        }
+        for (long b : sideB) {
+            for (BlockEdge blk : blocks(b, cap, deadline)) {
+                if (aSet.contains(blk.blockedPlayerId())) {
+                    return new SocialRelationSummary(true, false);
+                }
+            }
+        }
+        boolean allFriends = true;
+        for (long a : sideA) {
+            java.util.Set<Long> myFriends = new java.util.HashSet<>();
+            for (FriendEdge edge : friends(a, cap, deadline)) {
+                myFriends.add(edge.friendPlayerId());
+            }
+            for (long b : sideB) {
+                if (!myFriends.contains(b)) {
+                    allFriends = false;
+                    break;
+                }
+            }
+            if (!allFriends) {
+                break;
+            }
+        }
+        return new SocialRelationSummary(false, allFriends);
+    }
 }

@@ -50,6 +50,10 @@ public final class BattleConstants {
     public static final int MATCH_MODE_GUILD_WAR_SIEGE = 10;
     /** 跨服战队锦标赛（镜像 {@code MatchMode.MATCH_MODE_SEASON_TOURNAMENT}）。 */
     public static final int MATCH_MODE_SEASON_TOURNAMENT = 11;
+    /** 天墉生死状一期（镜像 {@code MatchMode.MATCH_MODE_JIANGHU_DUEL}）。 */
+    public static final int MATCH_MODE_JIANGHU_DUEL = 12;
+    /** 天墉生死状默认回合上限（打满双方存活判平，镜像 {@code kJianghuDuelDefaultMaxRounds}）。 */
+    public static final int JIANGHU_DUEL_DEFAULT_MAX_ROUNDS = 30;
 
     public static boolean isGuildWarMatchMode(int matchMode) {
         return matchMode == MATCH_MODE_GUILD_WAR_PVP || matchMode == MATCH_MODE_GUILD_WAR_SIEGE;

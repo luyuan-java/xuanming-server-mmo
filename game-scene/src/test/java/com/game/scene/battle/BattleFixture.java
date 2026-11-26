@@ -193,6 +193,12 @@ public final class BattleFixture {
     public final com.game.scene.trial.TrialJournalTables trialJournalTables = com.game.scene.trial.TrialJournalTables.from(CONFIG);
     public final com.game.scene.trial.TrialJournalService trialJournal;
     public final com.game.scene.craft.SkillCraftTables skillCraftTables = com.game.scene.craft.SkillCraftTables.from(CONFIG);
+    public final com.game.scene.craft.CraftProxyStallDirectory proxyDirectory = new com.game.scene.craft.CraftProxyStallDirectory();
+    public final java.util.List<com.game.proto.mail.SendMailRequest> sentOutboxMails = new java.util.ArrayList<>();
+    public int nextOutboxReplyTip;
+    private final AtomicLong outboxMailIdSeq = new AtomicLong(7000);
+    private final AtomicLong outboxReqIdSeq = new AtomicLong(900_000);
+    public final com.game.scene.mail.PlayerMailOutboxService mailOutbox;
     public final com.game.scene.craft.SkillCraftService skillCraft;
     public final com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables = com.game.scene.festivalbeast.FestivalBeastTables.from(CONFIG);
     public final com.game.scene.festivalbeast.FestivalBeastService festivalBeast;
@@ -262,7 +268,18 @@ public final class BattleFixture {
         bags = new BagService(BagTables.from(CONFIG, equipmentRules), guids, audit, GainAnomalyDetector.off(), sceneMetrics);
         attributes = new AttributeService(AttributeTables.from(CONFIG), clock, currency, sceneMetrics, equipmentRules);
         equipment = new com.game.scene.equip.EquipmentService(equipmentRules, bags, currency, attributes, sceneMetrics);
-        craft = new com.game.scene.equip.EquipmentCraftService(equipmentRules, bags, currency, attributes, sceneMetrics, clock);
+        mailOutbox = new com.game.scene.mail.PlayerMailOutboxService(
+                request -> {
+                    sentOutboxMails.add(request);
+                    int tip = nextOutboxReplyTip;
+                    var resp = com.game.proto.mail.SendMailResponse.newBuilder()
+                            .setErrorMessage(TipInfoMessage.newBuilder().setId(tip))
+                            .setMailId(tip == 0 ? outboxMailIdSeq.incrementAndGet() : 0L)
+                            .build();
+                    return CompletableFuture.completedFuture(resp);
+                }, outboxReqIdSeq::incrementAndGet, clock, logic);
+        craft = new com.game.scene.equip.EquipmentCraftService(equipmentRules, bags, currency, attributes, sceneMetrics, clock)
+                .withProxyInfrastructure(proxyDirectory, mailOutbox);
         merchant = new com.game.scene.merchant.MysteryMerchantService(merchantTables, bags, currency, clock, sceneMetrics);
         spiritShop = new com.game.scene.spiritshop.SpiritShopService(spiritShopTables, bags, currency, clock, sceneMetrics);
         travelPass = new com.game.scene.travelpass.TravelPassService(travelPassTables, bags, currency, clock, sceneMetrics);
@@ -277,7 +294,8 @@ public final class BattleFixture {
         appearance = new com.game.scene.appearance.AppearanceService(appearanceTables, bags, clock, Contracts.REGISTRY);
         trialJournal = new com.game.scene.trial.TrialJournalService(trialJournalTables, bags, appearance, clock, sceneMetrics,
                 season::activeSeasonId);
-        skillCraft = new com.game.scene.craft.SkillCraftService(skillCraftTables, bags, currency, attributes, pets, clock, sceneMetrics);
+        skillCraft = new com.game.scene.craft.SkillCraftService(skillCraftTables, bags, currency, attributes, pets, clock, sceneMetrics)
+                .withProxyInfrastructure(proxyDirectory, mailOutbox);
         festivalBeast = new com.game.scene.festivalbeast.FestivalBeastService(festivalBeastTables, pets, clock, petListChangedId);
         classSkill = new com.game.scene.skill.ClassSkillService(currency, attributes, pets)
                 .withMetrics(sceneMetrics)
@@ -300,6 +318,9 @@ public final class BattleFixture {
                     attributes.initializeOnLoad(player);
                     pets.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
+                    if (player.craft().state().getProxyStallOpen()) {
+                        proxyDirectory.syncPlayer(player);
+                    }
                     AssetOpService.checkLedgerOnLoad(player);
                     PlayerBattleService.checkLedgerOnLoad(player);
                 }, PlayerSnapshots.NONE, PlayerLocations.NONE, teamFollow,

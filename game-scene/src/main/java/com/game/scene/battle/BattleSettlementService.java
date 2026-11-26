@@ -78,6 +78,7 @@ public final class BattleSettlementService {
     private com.game.scene.trial.TrialJournalService trialJournalService;
     private com.game.scene.festivalbeast.FestivalBeastService festivalBeastService;
     private com.game.scene.travelpass.TravelPassService travelPassService;
+    private com.game.scene.jianghu.JianghuService jianghuService;
     private com.game.scene.attribute.AttributeService attributeService;
     private com.game.scene.progression.BattleProgressionTables progressionTables =
             com.game.scene.progression.BattleProgressionTables.EMPTY;
@@ -115,6 +116,11 @@ public final class BattleSettlementService {
         return this;
     }
 
+    public BattleSettlementService withJianghuService(com.game.scene.jianghu.JianghuService jianghuService) {
+        this.jianghuService = jianghuService;
+        return this;
+    }
+
     public BattleSettlementService withProgression(com.game.scene.attribute.AttributeService attributeService,
                                                    com.game.scene.progression.BattleProgressionTables progressionTables) {
         this.attributeService = attributeService;
@@ -130,6 +136,13 @@ public final class BattleSettlementService {
 
     private static boolean isWuxingTower(BattleSettlementData settlement) {
         return settlement.hasTowerSettlement() && settlement.getTowerSettlement().getFloor() != 0;
+    }
+
+    private static long silverBeforeInCandidateWeek(
+            com.game.player.store.state.BattleEconomyLedgerState existing,
+            com.game.player.store.state.BattleEconomyLedgerState candidate) {
+        return Long.compareUnsigned(candidate.getWeekStartsAtMs(), existing.getWeekStartsAtMs()) > 0
+                ? 0L : existing.getBattleSilverThisWeek();
     }
 
     private com.game.scene.progression.BattleProgressionRules.PreparedEconomy prepareProgression(
@@ -172,13 +185,23 @@ public final class BattleSettlementService {
         player.battle().setApplying(true);
         try{
             boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(settlement.getMatchMode());
+            boolean isJianghuDuel = settlement.getMatchMode() == com.game.battle.engine.BattleConstants.MATCH_MODE_JIANGHU_DUEL;
             boolean festivalBattle = isFestivalBeast(settlement);
             boolean npcIsolated = com.game.battle.engine.BattleConstants.isNpcIsolatedEncounterKind(settlement.getBossTrialKind());
             boolean isolatedMode = settlement.getCompetitiveRanked() || settlement.getUseFreePreset()
-                    || isGuildWar || isWuxingTower(settlement) || festivalBattle || npcIsolated;
+                    || isGuildWar || isJianghuDuel || isWuxingTower(settlement) || festivalBattle || npcIsolated;
             long now = currency.nowSeconds();
             long nowMs = clock.epochMillis();
             if (isolatedMode) {
+                // 天墉生死状一期：零经验/零银两/零 660 装备材料/零赛季试炼游历外溢，仅落战败社交印记。
+                if (isJianghuDuel) {
+                    if (jianghuService != null) {
+                        jianghuService.applyDuelSettlement(player, settlement);
+                    }
+                    recordBattleResult(world, player, settlement, 0L, Map.of(), Map.of(),
+                            com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta.NONE);
+                    return Result.APPLIED;
+                }
                 // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)、五行幻境、帮战与归元城NPC玩法：
                 // 零战损侵入（不动战斗残血/法力/宠物血量/背包消耗与掉落）；瑞兽迎春与归元城NPC演武/残局/奇谈零战斗经验银两。
                 if (festivalBattle || npcIsolated) {
@@ -192,7 +215,7 @@ public final class BattleSettlementService {
                 var prepared = prepareProgression(player, settlement, nowMs, 0L);
                 var delta = prepared.delta();
                 var economyCandidate = prepared.candidateLedger();
-                long silverBefore = player.clientRequestLedger().battleEconomy().getBattleSilverThisWeek();
+                long silverBefore = silverBeforeInCandidateWeek(player.clientRequestLedger().battleEconomy(), economyCandidate);
                 long silverToCredit = delta.silverGain();
                 if (silverToCredit < 0L) {
                     return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_CURRENCY);
@@ -243,7 +266,7 @@ public final class BattleSettlementService {
             var prepared = prepareProgression(player, settlement, nowMs, explicitSilver);
             var delta = prepared.delta();
             var economyCandidate = prepared.candidateLedger();
-            long silverBefore = player.clientRequestLedger().battleEconomy().getBattleSilverThisWeek();
+            long silverBefore = silverBeforeInCandidateWeek(player.clientRequestLedger().battleEconomy(), economyCandidate);
             long gold = delta.silverGain();
             int goldTip = gold > 0L ? currency.checkAdd(player, Wallet.GOLD, gold, now) : 0;
             // 产出封禁是明确跳过该奖励的业务决定；冻结、溢出等仍须整笔延后，不能丢掉应补发的金币。
@@ -397,20 +420,20 @@ public final class BattleSettlementService {
             return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
         }
         boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(settlement.getMatchMode());
+        boolean isJianghuDuel = isJianghuDuel(settlement);
         boolean festivalBattle = isFestivalBeast(settlement);
         boolean npcIsolated = com.game.battle.engine.BattleConstants.isNpcIsolatedEncounterKind(settlement.getBossTrialKind());
         long nowMs = clock.epochMillis();
-        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isGuildWar || isWuxingTower(settlement) || festivalBattle || npcIsolated) {
-            // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)、五行幻境、帮战与归元城NPC玩法：零战损侵入。
+        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isGuildWar || isJianghuDuel || isWuxingTower(settlement) || festivalBattle || npcIsolated) {
+            // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)、五行幻境、帮战、天墉生死状与归元城NPC玩法：零战损侵入。
             var deltaRef = new com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta[] {
                     com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta.NONE
             };
             long actualSilver = 0L;
-            if (!festivalBattle && !npcIsolated) {
+            if (!festivalBattle && !npcIsolated && !isJianghuDuel) {
                 var prepared = prepareProgression(player, settlement, nowMs, 0L);
                 var delta = prepared.delta();
                 var economyCandidate = prepared.candidateLedger();
-                long silverBefore = player.clientRequestLedger().battleEconomy().getBattleSilverThisWeek();
                 if (delta.silverGain() > 0L) {
                     Wallet.Change change = currency.add(player, Wallet.GOLD, delta.silverGain(), AssetAudit.Reason.BATTLE_REWARD, battleId);
                     if (!change.ok()) {
@@ -429,9 +452,14 @@ public final class BattleSettlementService {
                 }
                 deltaRef[0] = delta;
             }
+            if (isJianghuDuel && jianghuService != null) {
+                jianghuService.applyDuelSettlement(player, settlement);
+            }
             final long credited = actualSilver;
             try {
-                step("试炼志首领首通", player, battleId, () -> markNormalBossTrialIfCleared(player, settlement));
+                if (!isJianghuDuel) {
+                    step("试炼志首领首通", player, battleId, () -> markNormalBossTrialIfCleared(player, settlement));
+                }
                 step("近期战果", player, battleId, () -> recordBattleResult(world, player, settlement, credited, Map.of(), Map.of(), deltaRef[0]));
             } finally {
                 long evicted = ledger.record(battleId, clock.epochMillis());
@@ -593,7 +621,10 @@ public final class BattleSettlementService {
                                     com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta progressionDelta) {
         long nowMs = clock.epochMillis();
         boolean festivalBattle = isFestivalBeast(settlement);
-        var materialDelta = com.game.scene.equip.EquipmentCraftService.creditBattleMaterialRewardDelta(player, settlement, nowMs);
+        boolean jianghuDuel = isJianghuDuel(settlement);
+        var materialDelta = jianghuDuel
+                ? com.game.scene.equip.EquipmentCraftService.BattleCreditDelta.NONE
+                : com.game.scene.equip.EquipmentCraftService.creditBattleMaterialRewardDelta(player, settlement, nowMs);
         if (materialDelta.tradableUnitsAdded() > 0 && world != null) {
             var rewardState = player.clientRequestLedger().materialReward();
             if (rewardState.getMigratedToV2()
@@ -601,16 +632,16 @@ public final class BattleSettlementService {
                 world.syncAccountStage1Tradable(player, nowMs);
             }
         }
-        var seasonCredit = (festivalBattle || seasonService == null)
+        var seasonCredit = (festivalBattle || jianghuDuel || seasonService == null)
                 ? com.game.scene.season.SeasonService.BattleCreditOutcome.NONE
                 : seasonService.creditBattlePoints(player, settlement, nowMs);
-        var trialDelta = (festivalBattle || trialJournalService == null)
+        var trialDelta = (festivalBattle || jianghuDuel || trialJournalService == null)
                 ? com.game.scene.trial.TrialJournalService.SettlementDelta.NONE
                 : trialJournalService.applyBattleCredit(player, settlement, nowMs);
-        var festivalDelta = (!festivalBattle || festivalBeastService == null)
+        var festivalDelta = (!festivalBattle || jianghuDuel || festivalBeastService == null)
                 ? com.game.scene.festivalbeast.FestivalBeastService.SettlementDelta.NONE
                 : festivalBeastService.applyBattleSettlement(player, settlement, nowMs);
-        if (!festivalBattle && travelPassService != null) {
+        if (!festivalBattle && !jianghuDuel && travelPassService != null) {
             travelPassService.creditBattlePoints(player, settlement, nowMs);
         }
         var materialAfter = com.game.scene.festivalbeast.FestivalBeastService.buildMaterialSummary(player, nowMs);
@@ -640,7 +671,12 @@ public final class BattleSettlementService {
                 .setSeasonSealPointsAdded(seasonCredit.pointsAdded())
                 .setSeasonSealProgressAfter(seasonCredit.progressAfter())
                 .setSeasonSealMaxPoints(seasonCredit.maxPoints())
-                .setSeasonHonorNewlyUnlocked(seasonCredit.honorNewlyUnlocked());
+                .setSeasonHonorNewlyUnlocked(seasonCredit.honorNewlyUnlocked())
+                .setRetroHonorSeasonId(seasonCredit.retroHonorSeasonId())
+                .setRetroHonorPointsAdded(seasonCredit.retroHonorPointsAdded())
+                .setRetroHonorProgressAfter(seasonCredit.retroHonorProgressAfter())
+                .setRetroHonorMaxPoints(seasonCredit.retroHonorMaxPoints())
+                .setRetroHonorNewlyUnlocked(seasonCredit.retroHonorNewlyUnlocked());
         if (progressionDelta != null) {
             entry.setExpGain(progressionDelta.expGain())
                     .setLevelBefore(progressionDelta.levelBefore())
@@ -743,6 +779,11 @@ public final class BattleSettlementService {
         log.error("战斗掉落主包与临时格都放不下（或被获取封禁），道具丢失 player={} battle_id={} items={} 主包 tip={} 临时格 tip={}",
                 Long.toUnsignedString(player.playerId()), Long.toUnsignedString(battleId), missing, added.tip(), overflow.tip());
         return credited;
+    }
+
+    private static boolean isJianghuDuel(BattleSettlementData settlement) {
+        return settlement != null
+                && settlement.getMatchMode() == com.game.battle.engine.BattleConstants.MATCH_MODE_JIANGHU_DUEL;
     }
 
     private static long clampCount(long count) {

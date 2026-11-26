@@ -97,7 +97,15 @@ public interface AssetAudit {
         /** 游历手记典藏解锁扣款（TX_TRAVEL_PASS_UNLOCK = 45）。 */
         TRAVEL_PASS_UNLOCK,
         /** 游历手记双轨奖励发放（TX_TRAVEL_PASS_REWARD = 46）。 */
-        TRAVEL_PASS_REWARD
+        TRAVEL_PASS_REWARD,
+        /** 7 套非永久流派方案槽位按月灵石租用/扩容/续期（TX_SKILL_LOADOUT_RENT = 48）。 */
+        SKILL_LOADOUT_RENT,
+        /** 天墉生死状普通战书银两预扣。 */
+        JIANGHU_DUEL_FEE,
+        /** 天墉生死状普通战书作废退还。 */
+        JIANGHU_DUEL_REFUND,
+        /** 天墉生死状清风洗尘（银两或洗尘符清除败绩印记）。 */
+        JIANGHU_CLEAR_MARK
     }
 
     /**

@@ -203,6 +203,7 @@ public class SceneNode implements SmartLifecycle {
     private com.game.scene.progression.BattleProgressionTables battleProgressionTables;
     private java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
             java.util.concurrent.CompletableFuture<com.game.proto.match.StartActivityBattleResponse>> matchActivityStarter;
+    private com.game.scene.mail.PlayerMailOutboxService.MailSender mailOutboxSender;
     private com.game.scene.player.SceneTextGuard textGuard;
     private final NodeLinkAuth linkAuth;
     private final SceneMetrics metrics;
@@ -298,6 +299,13 @@ public class SceneNode implements SmartLifecycle {
         return this;
     }
 
+    public synchronized SceneNode withMailOutboxSender(
+            com.game.scene.mail.PlayerMailOutboxService.MailSender mailOutboxSender) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.mailOutboxSender = mailOutboxSender;
+        return this;
+    }
+
     public synchronized SceneNode withTextGuard(com.game.scene.player.SceneTextGuard textGuard) {
         if (running) throw new IllegalStateException("节点已启动");
         this.textGuard = textGuard;
@@ -345,6 +353,7 @@ public class SceneNode implements SmartLifecycle {
     private volatile DubboInboxTransport inboxTransport;
     private volatile InboxService inboxService;
     private volatile ScheduledFuture<?> inboxTask;
+    private volatile ScheduledFuture<?> mailOutboxTask;
     /** 回合制战斗（批次 6.3）：逻辑线程上的业务与它的 Dubbo 提供方（与资产通道同一个端口、同一个回写池）。 */
     private volatile PlayerBattleService battleService;
     private volatile SceneBattleProvider battleProvider;
@@ -354,6 +363,7 @@ public class SceneNode implements SmartLifecycle {
     private volatile ScheduledFuture<?> locationTask;
     private volatile ScheduledFuture<?> drainTask;
     private volatile ScheduledFuture<?> mysteryMerchantTask;
+    private volatile ScheduledFuture<?> craftProxyStallTask;
     private volatile ChannelPlanFollower channelFollower;
     private volatile NodeLinkServer linkServer;
     private volatile SceneDirectoryPublisher publisher;
@@ -495,8 +505,37 @@ public class SceneNode implements SmartLifecycle {
                 .withProgressionTables(battleProgressionTables);
         BagFeature bagFeature = new BagFeature(bags);
         EquipmentService equipment = new EquipmentService(equipmentRules, bags, currency, attributes, metrics);
+        String proxyStallKey = redisKeys.craftProxyStalls(zoneId);
+        com.game.scene.craft.CraftProxyStallDirectory craftProxyDirectory = new com.game.scene.craft.CraftProxyStallDirectory(
+                new com.game.scene.craft.CraftProxyStallDirectory.BackingStore() {
+                    @Override
+                    public java.util.concurrent.CompletionStage<Void> putAsync(long masterPlayerId, byte[] payload) {
+                        byte[] field = Long.toUnsignedString(masterPlayerId).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        return redis.<byte[], byte[]>getMap(proxyStallKey, ByteArrayCodec.INSTANCE)
+                                .fastPutAsync(field, payload).thenAccept(ignored -> { })
+                                .exceptionally(err -> {
+                                    log.warn("craft_proxy_stall_put_failed zone={} master_id={}", zoneId,
+                                            Long.toUnsignedString(masterPlayerId), err);
+                                    return null;
+                                });
+                    }
+                    @Override
+                    public java.util.concurrent.CompletionStage<Void> removeAsync(long masterPlayerId) {
+                        byte[] field = Long.toUnsignedString(masterPlayerId).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        return redis.<byte[], byte[]>getMap(proxyStallKey, ByteArrayCodec.INSTANCE)
+                                .fastRemoveAsync(field).thenAccept(ignored -> { })
+                                .exceptionally(err -> {
+                                    log.warn("craft_proxy_stall_del_failed zone={} master_id={}", zoneId,
+                                            Long.toUnsignedString(masterPlayerId), err);
+                                    return null;
+                                });
+                    }
+                }, logic);
+        com.game.scene.mail.PlayerMailOutboxService mailOutboxService = new com.game.scene.mail.PlayerMailOutboxService(
+                mailOutboxSender, snowflake::nextId, SceneClock.SYSTEM, logic);
         com.game.scene.equip.EquipmentCraftService equipmentCraft = new com.game.scene.equip.EquipmentCraftService(
-                equipmentRules, bags, currency, attributes, metrics, SceneClock.SYSTEM);
+                equipmentRules, bags, currency, attributes, metrics, SceneClock.SYSTEM)
+                .withProxyInfrastructure(craftProxyDirectory, mailOutboxService);
         com.game.scene.merchant.MysteryMerchantService mysteryMerchantService = mysteryMerchantTables == null ? null
                 : new com.game.scene.merchant.MysteryMerchantService(mysteryMerchantTables, bags, currency, SceneClock.SYSTEM, metrics);
         com.game.scene.spiritshop.SpiritShopService spiritShopService = spiritShopTables == null ? null
@@ -648,6 +687,9 @@ public class SceneNode implements SmartLifecycle {
                     if (appearanceService != null) {
                         appearanceService.initializeOnLoad(player);
                     }
+                    if (player.craft().state().getProxyStallOpen()) {
+                        craftProxyDirectory.syncPlayer(player);
+                    }
                     AssetOpService.checkLedgerOnLoad(player);
                     InboxService.checkLedgerOnLoad(player);
                     // 战斗结算账本损坏时大声报一次（结算一律延后、备战一律 1006，原样保留；scene-battle-spec §7.12，D24）
@@ -719,7 +761,8 @@ public class SceneNode implements SmartLifecycle {
         }
         com.game.scene.craft.SkillCraftService skillCraftService = skillCraftTables == null ? null
                 : new com.game.scene.craft.SkillCraftService(skillCraftTables, bags, currency, attributes, petService,
-                        SceneClock.SYSTEM, metrics);
+                        SceneClock.SYSTEM, metrics)
+                        .withProxyInfrastructure(craftProxyDirectory, mailOutboxService);
         if (skillCraftService != null) {
             sceneWorld.withCraftUnlockGate(skillCraftService::isCraftUnlockGateEnabled);
         }
@@ -828,6 +871,13 @@ public class SceneNode implements SmartLifecycle {
                 log.error("持久收件箱这一秒出错，条目保留 PENDING，下一秒照常", e);
             }
         }, 1, 1, TimeUnit.SECONDS);
+        mailOutboxTask = logicLoop.scheduleAtFixedRate(() -> {
+            try {
+                mailOutboxService.tick(sceneWorld);
+            } catch (RuntimeException e) {
+                log.error("待寄邮件出箱这一秒出错，条目保留，下一秒照常", e);
+            }
+        }, 1, 1, TimeUnit.SECONDS);
         // 场景帧：固定周期触发，SceneTicker 按单调时钟补帧（每次最多 5 帧），帧内异常只记日志、不让定时任务停掉。
         SceneTicker ticker = new SceneTicker(sceneWorld::step, SceneClock.SYSTEM::nanoTime);
         long periodNanos = SceneTicker.STEP_NANOS;
@@ -871,6 +921,20 @@ public class SceneNode implements SmartLifecycle {
                 }
             }, 0, 5, TimeUnit.SECONDS);
         }
+        craftProxyStallTask = scheduler.scheduleWithFixedDelay(() -> {
+            try {
+                java.util.Map<byte[], byte[]> raw = redis.<byte[], byte[]>getMap(proxyStallKey, ByteArrayCodec.INSTANCE).readAllMap();
+                java.util.Map<String, byte[]> snapshot = new java.util.HashMap<>(raw.size());
+                for (var entry : raw.entrySet()) {
+                    if (entry.getKey() != null && entry.getValue() != null) {
+                        snapshot.put(new String(entry.getKey(), java.nio.charset.StandardCharsets.UTF_8), entry.getValue());
+                    }
+                }
+                postToLogic(() -> craftProxyDirectory.applyRemoteSnapshot(snapshot));
+            } catch (Exception e) {
+                log.warn("craft_proxy_stall_poll_failed zone={}", zoneId, e);
+            }
+        }, 0, 5, TimeUnit.SECONDS);
 
         // 归属：接管请求（login → 全部 scene）与续约。都要在接受链路之前就绪：进场的玩家一上来就需要续约、可被接管。
         takeoverSubscriber = new OwnerTakeoverSubscriber(
@@ -1274,6 +1338,10 @@ public class SceneNode implements SmartLifecycle {
         if (inboxChecks != null) {
             inboxChecks.cancel(false);
         }
+        ScheduledFuture<?> outboxChecks = mailOutboxTask;
+        if (outboxChecks != null) {
+            outboxChecks.cancel(false);
+        }
         ScheduledFuture<?> reaper = battleReaperTask;
         if (reaper != null) {
             reaper.cancel(false);
@@ -1285,6 +1353,10 @@ public class SceneNode implements SmartLifecycle {
         ScheduledFuture<?> merchantPoll = mysteryMerchantTask;
         if (merchantPoll != null) {
             merchantPoll.cancel(false);
+        }
+        ScheduledFuture<?> proxyStallPoll = craftProxyStallTask;
+        if (proxyStallPoll != null) {
+            proxyStallPoll.cancel(false);
         }
         ScheduledFuture<?> saves = saveTask;
         if (saves != null) {

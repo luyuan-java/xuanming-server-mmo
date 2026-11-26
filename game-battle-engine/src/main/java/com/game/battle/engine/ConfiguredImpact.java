@@ -33,18 +33,69 @@ final class ConfiguredImpact {
     void heal(BattleUnit source, BattleUnit target, double amount, Hit hit, boolean equipmentHeal, boolean snapshot) {
         double bonus = snapshot ? 0 : equipmentHeal ? battle.equipment.healingBonus(source) : battle.modifier(source,OUT_HEAL);
         double received = Math.max(0,1+battle.modifier(target,IN_HEAL));
+        List<int[]> artifactContribs = new java.util.ArrayList<>();
+        long[] artifactGains = new long[4];
+        int artifactCount = 0;
+        long seasonSealHealGain = 0L;
         if (equipmentHeal && hit.origin == DIRECT && hit.primary == target.actorId() && hit.healOrdinal == 0) {
             for (int index : battle.equipment.available(source,4)) {
                 if (toDouble(target.health()) * 10000 > toDouble(target.maxHealth()) * battle.equipment.healthThresholdBps(source, index)) continue;
                 long before = ctx.landedHeal(target, SupportEffectRules.applyBonus(amount,bonus) * received);
                 bonus += battle.equipment.bonusBps(source, index)/10000.0;
                 long after = ctx.landedHeal(target, SupportEffectRules.applyBonus(amount,bonus) * received);
-                if (Long.compareUnsigned(after,before) > 0) battle.equipment.use(source,index,target,after-before);
+                if (Long.compareUnsigned(after,before) > 0) {
+                    if (index == BattleEquipment.SEASON_SEAL_INDEX) {
+                        seasonSealHealGain = after - before;
+                    } else if (artifactCount < artifactGains.length) {
+                        artifactContribs.add(new int[]{index, artifactCount});
+                        artifactGains[artifactCount++] = after - before;
+                    }
+                }
             }
         }
+        long beforeNextRoundHealBoost = 0L;
+        boolean applyNextRoundHealBoost = false;
+        if (hit.origin == DIRECT
+                && ctx.activeNextRoundBoostCasterId == source.actorId()
+                && ctx.activeNextRoundBoostKind == SeasonRules.RESONANCE_GUARD_HEAL_BOOST
+                && ctx.activeNextRoundBoostPct > 0) {
+            beforeNextRoundHealBoost = ctx.landedHeal(target, SupportEffectRules.applyBonus(amount, bonus) * received);
+            amount *= (100.0 + Integer.toUnsignedLong(ctx.activeNextRoundBoostPct)) / 100.0;
+            applyNextRoundHealBoost = true;
+        }
         long healed = ctx.applyHeal(target, SupportEffectRules.applyBonus(amount,bonus) * received);
+        if (applyNextRoundHealBoost && Long.compareUnsigned(healed, beforeNextRoundHealBoost) > 0) {
+            ctx.activeNextRoundBoostExtra = EquipmentCombatRules.addSaturated(
+                    ctx.activeNextRoundBoostExtra, healed - beforeNextRoundHealBoost);
+        }
         ctx.encounter.recordTrialMonsterHeal(source, target, healed);
         if (healed != 0) ctx.encounter.recordEffectiveContribution(source);
+        for (int[] entry : artifactContribs) {
+            battle.equipment.use(source, entry[0], target, artifactGains[entry[1]]);
+        }
+        if (seasonSealHealGain != 0L && battle.equipment.available(source, 4).contains(BattleEquipment.SEASON_SEAL_INDEX)) {
+            var seal = source.state().getEquipmentEffects().getSeasonSeal();
+            battle.equipment.use(source, BattleEquipment.SEASON_SEAL_INDEX, target, seasonSealHealGain);
+            if (seal.getResonanceKind() == SeasonRules.RESONANCE_EMERGENCY_HEAL_REFUND
+                    && seal.getResonanceSkillId() == hit.skill
+                    && seal.getResonanceParam() > 0) {
+                long manaBefore = source.mana();
+                long missingMana = Long.compareUnsigned(source.maxMana(), manaBefore) > 0
+                        ? source.maxMana() - manaBefore : 0L;
+                long refund = minUnsigned(missingMana,
+                        SeasonRules.computeManaPctCeil(hit.paidMana, seal.getResonanceParam()));
+                if (refund != 0L) {
+                    source.setMana(manaBefore + refund);
+                    ctx.events().append(BATTLE_EVENT_MANA, source.actorId(), source.actorId())
+                            .setSkillTableId(hit.skill)
+                            .setValue(refund)
+                            .setManaDelta(EventLog.signedManaDelta(refund, true))
+                            .setTargetManaAfter(source.mana());
+                    battle.equipment.emitSeasonResonance(source, source.actorId(),
+                            SeasonRules.RESONANCE_EVENT_EMERGENCY_HEAL_REFUND, refund);
+                }
+            }
+        }
         ctx.events().append(BATTLE_EVENT_HEAL,source.actorId(),target.actorId()).setSkillTableId(hit.skill).setValue(healed).setTargetHealthAfter(target.health());
     }
 

@@ -4,9 +4,6 @@ import com.game.proto.BattleSettlementData;
 import com.game.proto.TournamentLeylineElement;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -33,7 +30,6 @@ public final class TournamentRules {
     public static final int HONOR_BIT_COMEBACK = 1 << 3;  // 逆转乾坤：赢下打满 3 局的 BO3 淘汰赛
     public static final int HONOR_BIT_SWEEP = 1 << 4;     // 零封强敌：BO3 淘汰赛 2:0 零封晋级
     public static final int HONOR_BIT_CHAMPION = 1 << 5;  // 问鼎群仙：夺得本赛季总冠军
-    private static final ZoneOffset UTC_PLUS_8 = ZoneOffset.ofHours(8);
 
     private TournamentRules() {
     }
@@ -342,12 +338,6 @@ public final class TournamentRules {
             return TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED;
         }
         return seq.get(gameIndex - 1);
-    }
-
-    /** 将 Unix 毫秒转换为 UTC+8 自然日键 YYYYMMDD（每日免费观道致敬重置口径，与 Go Utc8DayKey 完全一致）。 */
-    public static int utc8DayKey(long unixMs) {
-        ZonedDateTime dt = Instant.ofEpochMilli(unixMs).atZone(UTC_PLUS_8);
-        return dt.getYear() * 10000 + dt.getMonthValue() * 100 + dt.getDayOfMonth();
     }
 
     public static boolean isValidSpectateCheerPhrase(int phraseId) {

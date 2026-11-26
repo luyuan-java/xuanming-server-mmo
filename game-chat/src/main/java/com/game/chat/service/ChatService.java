@@ -14,6 +14,8 @@ import com.game.proto.TipInfoMessage;
 import com.game.proto.chat.ChatChannelType;
 import com.game.proto.chat.ChatMessage;
 import com.game.proto.chat.ChatRetractedNotify;
+import com.game.proto.chat.PublishSystemWorldNoticeRequest;
+import com.game.proto.chat.PublishSystemWorldNoticeResponse;
 import com.game.proto.chat.PullChatHistoryRequest;
 import com.game.proto.chat.PullChatHistoryResponse;
 import com.game.proto.chat.ReportChatRequest;
@@ -118,6 +120,14 @@ public final class ChatService implements AutoCloseable {
     private final ChatStore store;
     private final JdbcChatStore authority;
     private final ChatMetrics metrics;
+    /** 进程内系统播报 notice_id 有界 FIFO 幂等去重窗（容量 4096，满时只淘汰最早一条，不整集清空）。 */
+    private final java.util.Map<String, Boolean> publishedNoticeIds = java.util.Collections.synchronizedMap(
+            new java.util.LinkedHashMap<>(256, 0.75f, false) {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, Boolean> eldest) {
+                    return size() > 4096;
+                }
+            });
     private final int maxContentBytes;
     private final int rateLimitPerSecond;
     private final int historyMaxEntries;
@@ -734,6 +744,34 @@ public final class ChatService implements AutoCloseable {
 
     private static ReportChatResponse reject(ReportChatResponse.Builder builder, int tip) {
         return (ReportChatResponse) rejectRaw(builder, tip);
+    }
+
+    /** 内部白名单模板全服系统播报（CLIENT_RPC_SERVER_ONLY，按 notice_id 严格幂等，严禁接受自由文本）。 */
+    public PublishSystemWorldNoticeResponse publishSystemWorldNotice(PublishSystemWorldNoticeRequest request) {
+        if (request == null || request.getNoticeId().isBlank() || request.getNoticeId().length() > 128) {
+            return PublishSystemWorldNoticeResponse.newBuilder()
+                    .setErrorMessage(TipInfoMessage.newBuilder().setId(INVALID_PARAMETER).build())
+                    .build();
+        }
+        String content = SystemWorldNoticeTemplates.render(request);
+        if (content == null) {
+            return PublishSystemWorldNoticeResponse.newBuilder()
+                    .setErrorMessage(TipInfoMessage.newBuilder().setId(INVALID_PARAMETER).build())
+                    .build();
+        }
+        synchronized (publishedNoticeIds) {
+            if (publishedNoticeIds.putIfAbsent(request.getNoticeId(), Boolean.TRUE) != null) {
+                return PublishSystemWorldNoticeResponse.newBuilder().setDeduplicated(true).build();
+            }
+        }
+        ChatMessage msg = ChatMessage.newBuilder()
+                .setChannel(ChatChannelType.CHAT_CHANNEL_TYPE_WORLD)
+                .setSenderPlayerId(0L)
+                .setContent(content)
+                .setSendTimeMs(clockMs.getAsLong())
+                .build();
+        worldPublisher.publishMessage(msg);
+        return PublishSystemWorldNoticeResponse.newBuilder().setDeduplicated(false).build();
     }
 
     private static RetractWorldChatResponse reject(RetractWorldChatResponse.Builder builder, int tip) {

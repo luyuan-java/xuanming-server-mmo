@@ -29,30 +29,23 @@ public final class TournamentSeasonDriver implements SmartLifecycle, AutoCloseab
     private final LongSupplier idGenerator;
     private final long intervalMs;
     private final IntermissionLauncher intermissionLauncher;
-    private final Runnable saluteMailRetrier;
     private final AtomicBoolean running = new AtomicBoolean();
     private ScheduledExecutorService scheduler;
 
     public TournamentSeasonDriver(TournamentStore store, LongSupplier idGenerator) {
-        this(store, idGenerator, DEFAULT_INTERVAL_MS, null, null);
+        this(store, idGenerator, DEFAULT_INTERVAL_MS, null);
     }
 
     public TournamentSeasonDriver(TournamentStore store, LongSupplier idGenerator, long intervalMs) {
-        this(store, idGenerator, intervalMs, null, null);
+        this(store, idGenerator, intervalMs, null);
     }
 
     public TournamentSeasonDriver(TournamentStore store, LongSupplier idGenerator, long intervalMs,
                                   IntermissionLauncher intermissionLauncher) {
-        this(store, idGenerator, intervalMs, intermissionLauncher, null);
-    }
-
-    public TournamentSeasonDriver(TournamentStore store, LongSupplier idGenerator, long intervalMs,
-                                  IntermissionLauncher intermissionLauncher, Runnable saluteMailRetrier) {
         this.store = Objects.requireNonNull(store, "store");
         this.idGenerator = Objects.requireNonNull(idGenerator, "idGenerator");
         this.intervalMs = Math.max(50L, intervalMs);
         this.intermissionLauncher = intermissionLauncher;
-        this.saluteMailRetrier = saluteMailRetrier;
     }
 
     @Override
@@ -87,13 +80,6 @@ public final class TournamentSeasonDriver implements SmartLifecycle, AutoCloseab
                 }
             } catch (Exception e) {
                 log.warn("[tournament] takeDueIntermissionLaunches tick failed: {}", e.getMessage());
-            }
-        }
-        if (saluteMailRetrier != null) {
-            try {
-                saluteMailRetrier.run();
-            } catch (Exception e) {
-                log.warn("[tournament] saluteMailRetrier tick failed: {}", e.getMessage());
             }
         }
     }

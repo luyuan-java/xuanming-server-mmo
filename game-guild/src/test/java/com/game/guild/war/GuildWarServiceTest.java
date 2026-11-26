@@ -217,6 +217,68 @@ final class GuildWarServiceTest {
         assertThat(GuildWarRules.isSafeZoneScene(0)).as("未知场景号必须 fail-closed 视为安全区").isTrue();
         assertThat(GuildWarRules.isSafeZoneScene(1)).isTrue();
         assertThat(GuildWarRules.isSafeZoneScene(5)).isFalse();
+
+        // V2.5 约战前 3 场 100% 免递减 + +25% 约战收益替代 +20% 宿敌
+        assertThat(GuildWarRules.diminishPercentForRepeat(2, true)).isEqualTo(100);
+        assertThat(GuildWarRules.diminishPercentForRepeat(3, true)).isEqualTo(20);
+        GuildWarRules.SideReward feudWin = GuildWarRules.computeSideReward(
+                GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_PANEL_PVP, true, false, 100, false, true, true, null);
+        assertThat(feudWin.contribution()).isEqualTo(100L);
+        assertThat(GuildWarRules.shouldBroadcastStreakAlert(5, 0)).isTrue();
+        assertThat(GuildWarRules.shouldBroadcastStreakAlert(4, 3)).isFalse();
+    }
+
+    @Test
+    void feudIssueRespondLiveScoreBonusAndCooldown() throws SQLException {
+        Deadline d = Deadline.after(3000);
+        IssueGuildWarFeudResponse issued = service.issueGuildWarFeud(
+                101L, IssueGuildWarFeudRequest.newBuilder().setTargetGuildId(1002L).build(), d);
+        assertThat(issued.getErrorMessage().getId()).isZero();
+        long feudId = issued.getFeud().getFeudId();
+        assertThat(issued.getFeud().getStatus()).isEqualTo(GuildWarFeudStatus.GUILD_WAR_FEUD_STATUS_PENDING);
+        assertThat(alerts).anyMatch(a -> a.getKind() == GuildWarAlertKind.GUILD_WAR_ALERT_KIND_FEUD_CHALLENGE
+                && a.getFeudId() == feudId);
+
+        RespondGuildWarFeudResponse accepted = service.respondGuildWarFeud(
+                201L, RespondGuildWarFeudRequest.newBuilder().setFeudId(feudId).setAccept(true).build(), d);
+        assertThat(accepted.getErrorMessage().getId()).isZero();
+        assertThat(accepted.getFeud().getStatus()).isEqualTo(GuildWarFeudStatus.GUILD_WAR_FEUD_STATUS_ACTIVE);
+        assertThat(alerts).anyMatch(a -> a.getKind() == GuildWarAlertKind.GUILD_WAR_ALERT_KIND_FEUD_STARTED
+                && a.getFeudId() == feudId);
+
+        BattleResultEvent feudBattle = BattleResultEvent.newBuilder()
+                .setBattleId(770_001L)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                .setTotalRounds(5)
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(101L))
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(201L))
+                .setActivityContext(BattleActivityContext.newBuilder()
+                        .setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR)
+                        .setGuildWar(GuildWarBattleContext.newBuilder()
+                                .setWarBattleKind(GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_PANEL_PVP_VALUE)
+                                .setAttackerGuildId(1001L)
+                                .setDefenderGuildId(1002L)
+                                .setZoneId(1)
+                                .build()))
+                .build();
+        assertThat(service.settleBattleResult(feudBattle)).isTrue();
+        GetGuildWarBattleResultResponse res = service.getGuildWarBattleResult(
+                101L, GetGuildWarBattleResultRequest.newBuilder().setBattleId(770_001L).build(), d);
+        assertThat(res.getFeudBonus()).isTrue();
+        assertThat(res.getContributionGain()).isEqualTo(100L);
+
+        GetGuildWarOverviewResponse ov = service.getGuildWarOverview(101L, GetGuildWarOverviewRequest.getDefaultInstance(), d);
+        assertThat(ov.getActiveFeud().getIssuerWins()).isEqualTo(1);
+        assertThat(ov.getActiveFeud().getTargetWins()).isZero();
+
+        now.addAndGet(7_300_000L);
+        GetGuildWarOverviewResponse afterEnd = service.getGuildWarOverview(101L, GetGuildWarOverviewRequest.getDefaultInstance(), d);
+        assertThat(afterEnd.hasActiveFeud()).isFalse();
+        assertThat(afterEnd.getLastFeudSummary()).contains("约战大捷").contains("1:0");
+
+        IssueGuildWarFeudResponse cdBlocked = service.issueGuildWarFeud(
+                101L, IssueGuildWarFeudRequest.newBuilder().setTargetGuildId(1002L).build(), d);
+        assertThat(cdBlocked.getErrorMessage().getId()).isEqualTo(GuildTips.WAR_FEUD_COOLDOWN);
     }
 
     @Test
@@ -373,6 +435,7 @@ final class GuildWarServiceTest {
         private final Map<Long, PlayerStateRow> players = new HashMap<>();
         private final Map<Long, BountyRow> bounties = new HashMap<>();
         private final Map<Long, BattleRow> battles = new HashMap<>();
+        private final Map<Long, FeudRow> feuds = new HashMap<>();
 
         void setLeylineOwner(int zoneId, int leylineId, long ownerGuildId) {
             ensureZoneLeylines(zoneId, 1L);
@@ -550,6 +613,108 @@ final class GuildWarServiceTest {
                 }
             }
             return true;
+        }
+
+        @Override
+        public FeudLookup getActiveOrPendingFeud(long guildId, long nowMs) {
+            for (FeudRow f : feuds.values()) {
+                if ((f.issuerGuildId() == guildId || f.targetGuildId() == guildId) && (f.status() == 1 || f.status() == 2)) {
+                    if (f.status() == 1 && f.acceptDeadlineMs() > 0 && Long.compareUnsigned(nowMs, f.acceptDeadlineMs()) >= 0) {
+                        feuds.put(f.feudId(), new FeudRow(f.feudId(), f.zoneId(), f.issuerGuildId(), f.issuerGuildName(),
+                                f.targetGuildId(), f.targetGuildName(), 5, f.issuerWins(), f.targetWins(), f.issuerMerit(),
+                                f.targetMerit(), f.createdAtMs(), f.acceptDeadlineMs(), f.startedAtMs(), f.endsAtMs(), 0L, nowMs));
+                        return new FeudLookup(Optional.empty(), Optional.empty());
+                    }
+                    if (f.status() == 2 && f.endsAtMs() > 0 && Long.compareUnsigned(nowMs, f.endsAtMs()) >= 0) {
+                        long win = GuildWarRules.resolveFeudWinner(f.issuerGuildId(), f.targetGuildId(),
+                                f.issuerWins(), f.targetWins(), f.issuerMerit(), f.targetMerit());
+                        FeudRow fin = new FeudRow(f.feudId(), f.zoneId(), f.issuerGuildId(), f.issuerGuildName(),
+                                f.targetGuildId(), f.targetGuildName(), 3, f.issuerWins(), f.targetWins(), f.issuerMerit(),
+                                f.targetMerit(), f.createdAtMs(), f.acceptDeadlineMs(), f.startedAtMs(), f.endsAtMs(), win, nowMs);
+                        feuds.put(f.feudId(), fin);
+                        return new FeudLookup(Optional.empty(), Optional.of(fin));
+                    }
+                    return new FeudLookup(Optional.of(f), Optional.empty());
+                }
+            }
+            return new FeudLookup(Optional.empty(), Optional.empty());
+        }
+
+        @Override
+        public Optional<FeudRow> getLastFinishedFeud(long guildId) {
+            return feuds.values().stream()
+                    .filter(f -> (f.issuerGuildId() == guildId || f.targetGuildId() == guildId) && f.status() == 3)
+                    .max(Comparator.comparingLong(FeudRow::endsAtMs));
+        }
+
+        @Override
+        public long getLastFeudIssuedAt(long issuerGuildId) {
+            return feuds.values().stream()
+                    .filter(f -> f.issuerGuildId() == issuerGuildId && (f.status() == 1 || f.status() == 2 || f.status() == 3))
+                    .mapToLong(FeudRow::createdAtMs).max().orElse(0L);
+        }
+
+        @Override
+        public FeudRow issueFeud(FeudRow rec, int cooldownSec, long nowMs) {
+            getActiveOrPendingFeud(rec.issuerGuildId(), nowMs);
+            getActiveOrPendingFeud(rec.targetGuildId(), nowMs);
+            boolean busy = feuds.values().stream().anyMatch(f -> (f.status() == 1 || f.status() == 2)
+                    && (f.issuerGuildId() == rec.issuerGuildId() || f.targetGuildId() == rec.issuerGuildId()
+                    || f.issuerGuildId() == rec.targetGuildId() || f.targetGuildId() == rec.targetGuildId()));
+            if (busy) throw new WarRuleException("feud_active");
+            long last = getLastFeudIssuedAt(rec.issuerGuildId());
+            if (last > 0 && Long.compareUnsigned(nowMs, last + cooldownSec * 1000L) < 0) {
+                throw new WarRuleException("feud_cooldown");
+            }
+            feuds.put(rec.feudId(), rec);
+            return rec;
+        }
+
+        @Override
+        public FeudRow respondFeud(long feudId, long responderGuildId, boolean accept, int durationSec, long nowMs) {
+            FeudRow f = feuds.get(feudId);
+            if (f == null || f.status() != 1) throw new WarRuleException("feud_not_found");
+            if (accept && responderGuildId != f.targetGuildId()) throw new WarRuleException("feud_not_found");
+            FeudRow updated = accept
+                    ? new FeudRow(f.feudId(), f.zoneId(), f.issuerGuildId(), f.issuerGuildName(), f.targetGuildId(),
+                    f.targetGuildName(), 2, 0, 0, 0L, 0L, f.createdAtMs(), f.acceptDeadlineMs(), nowMs,
+                    nowMs + durationSec * 1000L, 0L, nowMs)
+                    : new FeudRow(f.feudId(), f.zoneId(), f.issuerGuildId(), f.issuerGuildName(), f.targetGuildId(),
+                    f.targetGuildName(), 4, 0, 0, 0L, 0L, f.createdAtMs(), f.acceptDeadlineMs(), 0L, 0L, 0L, nowMs);
+            feuds.put(feudId, updated);
+            return updated;
+        }
+
+        @Override
+        public Optional<FeudRow> getActiveFeudBetween(long g1, long g2, long nowMs) {
+            return feuds.values().stream()
+                    .filter(f -> f.status() == 2 && Long.compareUnsigned(nowMs, f.endsAtMs()) < 0
+                            && ((f.issuerGuildId() == g1 && f.targetGuildId() == g2)
+                            || (f.issuerGuildId() == g2 && f.targetGuildId() == g1)))
+                    .findFirst();
+        }
+
+        @Override
+        public FeudBattleResult recordFeudBattle(long feudId, long atkGuildId, long defGuildId, boolean atkWon,
+                                                 boolean defWon, long atkMerit, long defMerit, long nowMs) {
+            FeudRow f = feuds.get(feudId);
+            if (f == null || f.status() != 2) return new FeudBattleResult(Optional.empty(), false);
+            int iw = f.issuerWins(), tw = f.targetWins();
+            long im = f.issuerMerit(), tm = f.targetMerit();
+            if (atkGuildId == f.issuerGuildId()) {
+                if (atkWon) iw++; else if (defWon) tw++;
+                im += atkMerit; tm += defMerit;
+            } else {
+                if (atkWon) tw++; else if (defWon) iw++;
+                tm += atkMerit; im += defMerit;
+            }
+            boolean fin = Long.compareUnsigned(nowMs, f.endsAtMs()) >= 0;
+            long win = fin ? GuildWarRules.resolveFeudWinner(f.issuerGuildId(), f.targetGuildId(), iw, tw, im, tm) : 0L;
+            FeudRow updated = new FeudRow(f.feudId(), f.zoneId(), f.issuerGuildId(), f.issuerGuildName(),
+                    f.targetGuildId(), f.targetGuildName(), fin ? 3 : 2, iw, tw, im, tm, f.createdAtMs(),
+                    f.acceptDeadlineMs(), f.startedAtMs(), f.endsAtMs(), win, nowMs);
+            feuds.put(feudId, updated);
+            return new FeudBattleResult(Optional.of(updated), fin);
         }
     }
 }

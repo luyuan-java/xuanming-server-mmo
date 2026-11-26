@@ -36,8 +36,6 @@ import com.game.proto.match.RegisterTournamentSquadRequest;
 import com.game.proto.match.RegisterTournamentSquadResponse;
 import com.game.proto.match.RespondTournamentInviteRequest;
 import com.game.proto.match.RespondTournamentInviteResponse;
-import com.game.proto.match.SaluteTournamentChampionRequest;
-import com.game.proto.match.SaluteTournamentChampionResponse;
 import com.game.proto.match.SendTournamentSpectateCheerRequest;
 import com.game.proto.match.SendTournamentSpectateCheerResponse;
 import com.game.proto.match.StartTournamentMatchRequest;
@@ -54,7 +52,6 @@ import com.game.proto.match.UpdateTournamentLineupResponse;
 import com.game.proto.match.UpdateTournamentSquadEmblemRequest;
 import com.game.proto.match.UpdateTournamentSquadEmblemResponse;
 import com.game.table.MatchErrorTip;
-import com.game.table.TournamentRuleTable;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.sql.SQLException;
@@ -395,85 +392,6 @@ public final class TournamentService {
         }
     }
 
-    public SaluteTournamentChampionResponse saluteChampion(long playerId, SaluteTournamentChampionRequest req) {
-        if (playerId == 0L) {
-            return SaluteTournamentChampionResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
-        }
-        long rewardId = idGenerator.getAsLong();
-        if (rewardId == 0L) {
-            return SaluteTournamentChampionResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
-        }
-        try {
-            TournamentStore.SaluteOutcome res = store.saluteChampion(playerId, req.getSeasonId(), rewardId);
-            TournamentRuleTable rule = store.tables().rule();
-            long mailId = 0L;
-            if (mailSender != null) {
-                byte[] attBytes = TournamentTables.buildSaluteMailAttachments(rule).toByteArray();
-                TournamentStore.ClaimableReward reward = new TournamentStore.ClaimableReward(
-                        res.rewardId(), res.seasonId(), 0, 0, attBytes);
-                try {
-                    mailId = mailSender.send(playerId, reward,
-                            "群仙问道赛·观道致敬小礼",
-                            "感谢道友向本服总冠军致敬，谨奉绑定修道薄礼一份，请查收附件。");
-                    if (mailId != 0L) {
-                        store.updateSaluteMailId(playerId, res.saluteDay(), mailId);
-                    }
-                } catch (Exception mailErr) {
-                    log.warn("[tournament] salute mail delivery failed player={} reward={}: {}",
-                            Long.toUnsignedString(playerId), Long.toUnsignedString(res.rewardId()), mailErr.getMessage());
-                }
-            }
-            return SaluteTournamentChampionResponse.newBuilder()
-                    .setErrorMessage(tip(0))
-                    .setSeasonId(res.seasonId())
-                    .setChampionSaluteCount(res.championSaluteCount())
-                    .setSalutedToday(true)
-                    .setGoldAmount(rule.getSaluteGoldAmount())
-                    .addAllItems(TournamentTables.saluteRewardItems(rule))
-                    .setMailId(mailId)
-                    .build();
-        } catch (TournamentStore.DomainException e) {
-            return SaluteTournamentChampionResponse.newBuilder().setErrorMessage(tip(e.tipId())).build();
-        } catch (SQLException e) {
-            log.error("[tournament] saluteChampion failed player={}", Long.toUnsignedString(playerId), e);
-            return SaluteTournamentChampionResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
-        }
-    }
-
-    /** 幂等补发因瞬时故障未落盘 mail_id 的观道致敬邮件（复用原 reward_id，避免重复发奖或永久丢礼）。 */
-    public int retryPendingSaluteMails(int limit) {
-        if (mailSender == null) {
-            return 0;
-        }
-        int delivered = 0;
-        try {
-            List<TournamentStore.PendingSaluteMail> pending = store.listPendingSaluteMails(limit);
-            if (pending.isEmpty()) {
-                return 0;
-            }
-            byte[] attBytes = TournamentTables.buildSaluteMailAttachments(store.tables().rule()).toByteArray();
-            for (TournamentStore.PendingSaluteMail item : pending) {
-                try {
-                    TournamentStore.ClaimableReward reward = new TournamentStore.ClaimableReward(
-                            item.rewardId(), item.seasonId(), 0, 0, attBytes);
-                    long mailId = mailSender.send(item.playerId(), reward,
-                            "群仙问道赛·观道致敬小礼",
-                            "感谢道友向本服总冠军致敬，谨奉绑定修道薄礼一份，请查收附件。");
-                    if (mailId != 0L) {
-                        store.updateSaluteMailId(item.playerId(), item.saluteDay(), mailId);
-                        delivered++;
-                    }
-                } catch (Exception mailErr) {
-                    log.warn("[tournament] salute mail retry failed player={} reward={}: {}",
-                            Long.toUnsignedString(item.playerId()), Long.toUnsignedString(item.rewardId()), mailErr.getMessage());
-                }
-            }
-        } catch (SQLException e) {
-            log.warn("[tournament] listPendingSaluteMails failed: {}", e.getMessage());
-        }
-        return delivered;
-    }
-
     public SendTournamentSpectateCheerResponse sendSpectateCheer(long playerId, SendTournamentSpectateCheerRequest req) {
         if (playerId == 0L) {
             return SendTournamentSpectateCheerResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
@@ -691,9 +609,6 @@ public final class TournamentService {
                 handler(MatchMethods.CLAIM_TOURNAMENT_REWARD,
                         (s, b) -> claimReward(pid(s), ClaimTournamentRewardRequest.parseFrom(b)),
                         () -> ClaimTournamentRewardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
-                handler(MatchMethods.SALUTE_TOURNAMENT_CHAMPION,
-                        (s, b) -> saluteChampion(pid(s), SaluteTournamentChampionRequest.parseFrom(b)),
-                        () -> SaluteTournamentChampionResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
                 handler(MatchMethods.SEND_TOURNAMENT_SPECTATE_CHEER,
                         (s, b) -> sendSpectateCheer(pid(s), SendTournamentSpectateCheerRequest.parseFrom(b)),
                         () -> SendTournamentSpectateCheerResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),

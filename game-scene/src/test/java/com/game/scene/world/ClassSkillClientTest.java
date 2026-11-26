@@ -158,6 +158,9 @@ class ClassSkillClientTest {
                 .allSatisfy(e -> assertThat(e.getCasterMask() & 1).isEqualTo(1));
         assertThat(book.hasLoadout()).isTrue();
         assertThat(book.getLoadout().getSchemesList()).hasSize(3);
+        assertThat(book.getLoadout().getFreeSchemes()).isEqualTo(3);
+        assertThat(book.getLoadout().getUnlockedSchemes()).isEqualTo(3);
+        assertThat(book.getLoadout().getMaxSchemes()).isEqualTo(7);
         assertThat(book.getClassId()).isEqualTo(1);
         assertThat(book.getPlayerLevel()).isEqualTo(85);
         assertThat(book.getCurrencyBalance()).isEqualTo(10_000);

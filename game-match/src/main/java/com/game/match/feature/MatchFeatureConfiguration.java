@@ -13,6 +13,7 @@ import com.game.match.global.GlobalMatchService;
 import com.game.match.global.pb.GlobalDirectIntentRow;
 import com.game.match.global.pb.GlobalFormationRow;
 import com.game.match.id.MatchIds;
+import com.game.match.jianghu.JianghuDuelService;
 import com.game.match.precheck.MemberPrecheck;
 import com.game.match.ranked.RankedService;
 import com.game.match.ranked.RankedStore;
@@ -358,7 +359,7 @@ public class MatchFeatureConfiguration {
     public TournamentSeasonDriver tournamentSeasonDriver(TournamentStore store, MatchIds matchIds,
                                                          TournamentService tournamentService) {
         return new TournamentSeasonDriver(store, () -> matchIds.nextBattleId().orElse(0L),
-                5_000L, tournamentService::launchSpec, () -> tournamentService.retryPendingSaluteMails(16));
+                5_000L, tournamentService::launchSpec);
     }
 
     private static ByteString encodeTournamentLaunchPayload(TournamentStore.LaunchSpec spec) {
@@ -441,47 +442,88 @@ public class MatchFeatureConfiguration {
     }
 
     @Bean
-    public MatchMethodHandler saluteTournamentChampionHandler(TournamentService service) {
+    public MatchMethodHandler sendTournamentSpectateCheerHandler(TournamentService service) {
         return service.clientHandlers().get(11);
     }
 
     @Bean
-    public MatchMethodHandler sendTournamentSpectateCheerHandler(TournamentService service) {
+    public MatchMethodHandler getTournamentSpectateCheerHandler(TournamentService service) {
         return service.clientHandlers().get(12);
     }
 
     @Bean
-    public MatchMethodHandler getTournamentSpectateCheerHandler(TournamentService service) {
+    public MatchMethodHandler updateTournamentSquadEmblemHandler(TournamentService service) {
         return service.clientHandlers().get(13);
     }
 
     @Bean
-    public MatchMethodHandler updateTournamentSquadEmblemHandler(TournamentService service) {
+    public MatchMethodHandler startTournamentWarmupHandler(TournamentService service) {
         return service.clientHandlers().get(14);
     }
 
     @Bean
-    public MatchMethodHandler startTournamentWarmupHandler(TournamentService service) {
+    public MatchMethodHandler predictTournamentMatchHandler(TournamentService service) {
         return service.clientHandlers().get(15);
     }
 
     @Bean
-    public MatchMethodHandler predictTournamentMatchHandler(TournamentService service) {
+    public MatchMethodHandler getTournamentPredictionBoardHandler(TournamentService service) {
         return service.clientHandlers().get(16);
     }
 
     @Bean
-    public MatchMethodHandler getTournamentPredictionBoardHandler(TournamentService service) {
+    public MatchMethodHandler banTournamentLeylineHandler(TournamentService service) {
         return service.clientHandlers().get(17);
     }
 
     @Bean
-    public MatchMethodHandler banTournamentLeylineHandler(TournamentService service) {
+    public MatchMethodHandler getTournamentHighlightsHandler(TournamentService service) {
         return service.clientHandlers().get(18);
     }
 
+    // ---- 江湖恩怨与天墉生死状一期(548..554) ----
+
     @Bean
-    public MatchMethodHandler getTournamentHighlightsHandler(TournamentService service) {
-        return service.clientHandlers().get(19);
+    public JianghuDuelService jianghuDuelService(ConfigTables config, MatchIds matchIds) {
+        return new JianghuDuelService(
+                () -> config.jianghuRule().find(1).orElse(null),
+                new JianghuDuelService.Ports() { },
+                System::currentTimeMillis,
+                () -> matchIds.nextBattleId().orElse(0L));
+    }
+
+    @Bean
+    public MatchMethodHandler createJianghuDuelInviteHandler(JianghuDuelService service) {
+        return service.clientHandlers().get(0);
+    }
+
+    @Bean
+    public MatchMethodHandler confirmJianghuDuelMemberHandler(JianghuDuelService service) {
+        return service.clientHandlers().get(1);
+    }
+
+    @Bean
+    public MatchMethodHandler respondJianghuDuelInviteHandler(JianghuDuelService service) {
+        return service.clientHandlers().get(2);
+    }
+
+    @Bean
+    public MatchMethodHandler listJianghuGrudgesHandler(JianghuDuelService service) {
+        return service.clientHandlers().get(3);
+    }
+
+    @Bean
+    public MatchMethodHandler dismissJianghuGrudgeHandler(JianghuDuelService service) {
+        return service.clientHandlers().get(4);
+    }
+
+    @Bean
+    public MatchMethodHandler notifyJianghuDuelInviteHandler(JianghuDuelService service) {
+        return service.clientHandlers().get(5);
+    }
+
+    @Bean
+    public MatchMethodHandler notifyJianghuDuelStatusHandler(JianghuDuelService service) {
+        return service.clientHandlers().get(6);
     }
 }

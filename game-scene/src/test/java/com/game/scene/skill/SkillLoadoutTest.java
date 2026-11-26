@@ -10,6 +10,8 @@ import com.game.player.store.state.PlayerSkillBookState;
 import com.game.player.store.state.PlayerState;
 import com.game.player.store.state.SkillLoadoutSchemeState;
 import com.game.proto.BattleRouting;
+import com.game.proto.RentSkillLoadoutSlotsRequest;
+import com.game.proto.RentSkillLoadoutSlotsResponse;
 import com.game.proto.SaveSkillLoadoutRequest;
 import com.game.proto.SaveSkillLoadoutResponse;
 import com.game.proto.SwitchSkillLoadoutRequest;
@@ -101,6 +103,14 @@ class SkillLoadoutTest {
             var reply = sink.to(1, 11).stream().filter(m -> m.getMessageId() == msgId).reduce((a, b) -> b).orElseThrow();
             return SwitchSkillLoadoutResponse.parseFrom(reply.getSerializedMessage());
         }
+
+        RentSkillLoadoutSlotsResponse dispatchRent(RentSkillLoadoutSlotsRequest req) throws Exception {
+            int msgId = Contracts.REGISTRY.requireId("SceneSkillClientPlayer", "RentSkillLoadoutSlots");
+            handler.onClientForward(1, ClientForward.newBuilder().setSessionId(11).setPlayerId(7)
+                    .setRequestId(103).setMessageId(msgId).setBody(req.toByteString()).build());
+            var reply = sink.to(1, 11).stream().filter(m -> m.getMessageId() == msgId).reduce((a, b) -> b).orElseThrow();
+            return RentSkillLoadoutSlotsResponse.parseFrom(reply.getSerializedMessage());
+        }
     }
 
     @Test
@@ -115,10 +125,12 @@ class SkillLoadoutTest {
         player.learnedSkills().setRank(13101, 1);
         player.learnedSkills().setRank(14001, 1);
 
-        // 兼容态（未自定义保存）：12101 生效而同互斥组较高 ID 的 12102 不生效。
+        // 兼容态（未自定义保存；85 级满级永久免费 3 套）：12101 生效而同互斥组较高 ID 的 12102 不生效。
         var compatBook = ClassSkillService.book(player);
         assertThat(compatBook.getLoadout().getCustomEnabled()).isFalse();
         assertThat(compatBook.getLoadout().getSchemesList()).hasSize(3);
+        assertThat(compatBook.getLoadout().getFreeSchemes()).isEqualTo(3);
+        assertThat(compatBook.getLoadout().getMaxSchemes()).isEqualTo(7);
         assertThat(compatBook.getCatalogList()).filteredOn(c -> c.getSkillTableId() == 12101)
                 .singleElement().satisfies(c -> {
                     assertThat(c.getExclusiveGroup()).isEqualTo(1);
@@ -234,19 +246,21 @@ class SkillLoadoutTest {
     }
 
     @Test
-    void 仙途轻享卡扩展战法与属性方案3到6_到期保留已存方案不丢失() {
+    void 仙途轻享卡扩展战法方案2到4_到期保留已存方案不丢失() {
         var f = new Fixture();
         f.service.withClock(f.clock);
         ScenePlayer player = f.player();
+        player.setLevel(80);
         player.learnedSkills().setRank(12005, 1);
         long nowSec = Math.floorDiv(f.clock.epochMillis(), 1000L);
         player.setAfkPassExpiresAt(0L);
 
-        // 1. 未开通轻享卡：战法与属性上限均为 3；写方案 4 拒绝。
-        var bookFree = ClassSkillService.book(player, 0, false, nowSec);
-        assertThat(bookFree.getLoadout().getUnlockedSchemes()).isEqualTo(3);
-        assertThat(bookFree.getLoadout().getMaxSchemes()).isEqualTo(6);
-        assertThat(bookFree.getLoadout().getSchemesList()).hasSize(3);
+        // 1. 未开通轻享卡且未租用：战法永久免费 2 套，属性保底 3 套；写方案 4 拒绝。
+        var bookFree = ClassSkillService.book(player, 0, false, nowSec, f.attributes);
+        assertThat(bookFree.getLoadout().getFreeSchemes()).isEqualTo(2);
+        assertThat(bookFree.getLoadout().getUnlockedSchemes()).isEqualTo(2);
+        assertThat(bookFree.getLoadout().getMaxSchemes()).isEqualTo(7);
+        assertThat(bookFree.getLoadout().getSchemesList()).hasSize(2);
         assertThat(f.attributes.buildPanel(player).getMaxSchemes()).isEqualTo(3);
 
         var denySave4 = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
@@ -254,25 +268,26 @@ class SkillLoadoutTest {
                 .setStateVersion(1L).setRequestId("loadout-lc-deny-0001").build());
         assertThat(denySave4.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutSchemeInvalid_VALUE);
 
-        // 2. 开通轻享卡：战法与属性上限升至 6；可保存并激活方案 4，属性可开第 4 套方案。
+        // 2. 开通轻享卡：战法与属性上限升至 4；可保存并激活方案 4。
         player.setAfkPassExpiresAt(nowSec + 3600L);
-        var bookActive = ClassSkillService.book(player, 0, false, nowSec);
-        assertThat(bookActive.getLoadout().getUnlockedSchemes()).isEqualTo(6);
-        assertThat(bookActive.getLoadout().getSchemesList()).hasSize(6);
-        assertThat(f.attributes.buildPanel(player).getMaxSchemes()).isEqualTo(6);
+        var bookActive = ClassSkillService.book(player, 0, false, nowSec, f.attributes);
+        assertThat(bookActive.getLoadout().getLightCardBonusSchemes()).isEqualTo(2);
+        assertThat(bookActive.getLoadout().getUnlockedSchemes()).isEqualTo(4);
+        assertThat(bookActive.getLoadout().getSchemesList()).hasSize(4);
+        assertThat(f.attributes.buildPanel(player).getMaxSchemes()).isEqualTo(4);
 
         var save4 = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
                 .setSchemeId(4).setRoleTag(1).addPassiveSkillIds(12005)
                 .setStateVersion(1L).setRequestId("loadout-lc-save4-001").build());
         assertThat(save4.getErrorMessage().getId()).isZero();
         assertThat(save4.getState().getLoadout().getActiveSchemeId()).isEqualTo(4);
-        assertThat(save4.getState().getLoadout().getUnlockedSchemes()).isEqualTo(6);
+        assertThat(save4.getState().getLoadout().getUnlockedSchemes()).isEqualTo(4);
 
-        // 3. 轻享卡到期：解锁数回落 3，但已存方案 4 完整保留在快照中；切回方案 1 成功，再切回方案 4 被拒。
+        // 3. 轻享卡到期：解锁数回落 2，但已存方案 4 完整保留在快照中；切回方案 1 成功，再切回方案 4 被拒。
         player.setAfkPassExpiresAt(nowSec - 1L);
-        var bookExpired = ClassSkillService.book(player, 0, false, nowSec);
-        assertThat(bookExpired.getLoadout().getUnlockedSchemes()).isEqualTo(3);
-        assertThat(bookExpired.getLoadout().getSchemesList()).hasSize(4); // 1,2,3 + 保留的 4
+        var bookExpired = ClassSkillService.book(player, 0, false, nowSec, f.attributes);
+        assertThat(bookExpired.getLoadout().getUnlockedSchemes()).isEqualTo(2);
+        assertThat(bookExpired.getLoadout().getSchemesList()).hasSize(3); // 1,2 + 保留的 4
         assertThat(f.attributes.buildPanel(player).getMaxSchemes()).isEqualTo(3);
 
         var sw1 = f.service.switchLoadout(player, SwitchSkillLoadoutRequest.newBuilder()
@@ -281,5 +296,205 @@ class SkillLoadoutTest {
         var sw4Denied = f.service.switchLoadout(player, SwitchSkillLoadoutRequest.newBuilder()
                 .setSchemeId(4).setStateVersion(3L).setRequestId("loadout-lc-sw4-00001").build());
         assertThat(sw4Denied.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutSchemeInvalid_VALUE);
+    }
+
+    @Test
+    void 按套按月租用7套流派槽位_补差价扩容_180天封顶_防溢买_仅扣真实灵石与幂等重放() throws Exception {
+        var f = new Fixture();
+        f.service.withClock(f.clock);
+        ScenePlayer player = f.player();
+        player.setLevel(80);
+        // 充 5000 绑定灵石 + 100 真实灵石：验证严格禁止混扣绑灵。
+        f.currency.add(player, com.game.scene.player.Wallet.BOUND_DIAMOND, 5000L, com.game.scene.audit.AssetAudit.Reason.GM_GRANT);
+        f.currency.add(player, com.game.scene.player.Wallet.DIAMOND, 100L, com.game.scene.audit.AssetAudit.Reason.GM_GRANT);
+        long nowSec = Math.floorDiv(f.clock.epochMillis(), 1000L);
+        long period = SkillLoadoutRules.RENT_PERIOD_SECONDS;
+
+        // 1. 仅真实灵石可付：租 5 套需 150 灵石，5000 绑灵不可抵扣。
+        var noDiamond = f.dispatchRent(RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(91001L).setTargetRentedSlots(5).setAddPeriods(1).setExpectedCostDiamond(150L).build());
+        assertThat(noDiamond.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutRentDiamondNotEnough_VALUE);
+        assertThat(player.wallet().balance(com.game.scene.player.Wallet.DIAMOND)).isEqualTo(100L);
+        assertThat(player.wallet().balance(com.game.scene.player.Wallet.BOUND_DIAMOND)).isEqualTo(5000L);
+
+        // 2. 报价不符拒绝。
+        var badQuote = f.dispatchRent(RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(91002L).setTargetRentedSlots(1).setAddPeriods(1).setExpectedCostDiamond(29L).build());
+        assertThat(badQuote.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutRentPriceChanged_VALUE);
+
+        // 3. 走真实 565 分发新租 1 套 × 30 天 = 30 灵石；重放幂等不二扣，同键换参拒绝。
+        var rentReq = RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(91003L).setTargetRentedSlots(1).setAddPeriods(1).setExpectedCostDiamond(30L).build();
+        var rented = f.dispatchRent(rentReq);
+        assertThat(rented.getErrorMessage().getId()).isZero();
+        assertThat(rented.getReplayed()).isFalse();
+        assertThat(rented.getRentedExtraSlots()).isEqualTo(1);
+        assertThat(rented.getRentExpiresAtSec()).isEqualTo(nowSec + period);
+        assertThat(rented.getSpentDiamond()).isEqualTo(30L);
+        assertThat(rented.getState().getLoadout().getUnlockedSchemes()).isEqualTo(3);
+        assertThat(player.wallet().balance(com.game.scene.player.Wallet.DIAMOND)).isEqualTo(70L);
+
+        var replay = f.dispatchRent(rentReq);
+        assertThat(replay.getErrorMessage().getId()).isZero();
+        assertThat(replay.getReplayed()).isTrue();
+        assertThat(replay.getSpentDiamond()).isEqualTo(30L);
+        assertThat(player.wallet().balance(com.game.scene.player.Wallet.DIAMOND)).isEqualTo(70L);
+
+        var mismatch = f.dispatchRent(rentReq.toBuilder().setTargetRentedSlots(2).setExpectedCostDiamond(60L).build());
+        assertThat(mismatch.getErrorMessage().getId()).isEqualTo(CommonErrorTip.common_error.kInvalidParameter_VALUE);
+
+        // 4. 推进 15 天后补差价扩容 1 → 3 套（add_periods=0）：ceil(2*30*0.5)=30，到期日不变。
+        f.clock.advanceSeconds(period / 2);
+        var expand = f.dispatchRent(RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(91004L).setTargetRentedSlots(3).setAddPeriods(0).setExpectedCostDiamond(30L).build());
+        assertThat(expand.getErrorMessage().getId()).isZero();
+        assertThat(expand.getRentedExtraSlots()).isEqualTo(3);
+        assertThat(expand.getRentExpiresAtSec()).isEqualTo(nowSec + period);
+        assertThat(expand.getState().getLoadout().getUnlockedSchemes()).isEqualTo(5);
+        assertThat(f.attributes.buildPanel(player).getMaxSchemes()).isEqualTo(5);
+
+        // 5. 租期内禁止缩减，且 180 天封顶拦截。
+        var shrink = f.dispatchRent(RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(91005L).setTargetRentedSlots(2).setAddPeriods(1).setExpectedCostDiamond(60L).build());
+        assertThat(shrink.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutRentSlotsInvalid_VALUE);
+
+        f.currency.add(player, com.game.scene.player.Wallet.DIAMOND, 1000L, com.game.scene.audit.AssetAudit.Reason.GM_GRANT);
+        var overCap = f.dispatchRent(RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(91006L).setTargetRentedSlots(3).setAddPeriods(6).setExpectedCostDiamond(540L).build());
+        assertThat(overCap.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutRentStackLimit_VALUE);
+
+        // 6. 轻享卡生效期防溢买：2免费+2轻享卡，仅可租最多 3 套（总 7 套），租 4 套拒绝。
+        player.setAfkPassExpiresAt(nowSec + period * 10);
+        var overbuy = f.dispatchRent(RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(91007L).setTargetRentedSlots(4).setAddPeriods(0).setExpectedCostDiamond(1L).build());
+        assertThat(overbuy.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutRentSlotsInvalid_VALUE);
+        assertThat(f.attributes.buildPanel(player).getMaxSchemes()).isEqualTo(7);
+    }
+
+    @Test
+    void 一体化保存与切换绑定四维加点_方案名合规过滤与洗点确认() {
+        var f = new Fixture();
+        f.service.withClock(f.clock);
+        ScenePlayer player = f.player();
+        player.setLevel(80);
+        player.learnedSkills().setRank(12005, 1);
+
+        // 1. 敏感词与尖括号命名拒绝。
+        var badName = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
+                .setSchemeId(1).setName("官方方案").setRoleTag(1).setStateVersion(1L)
+                .setRequestId("loadout-java-badname-1").build());
+        assertThat(badName.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutNameInvalid_VALUE);
+
+        // 2. 一体化保存方案 1（含自定义名、生存 tag=4 与四维加点）。
+        var save1 = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
+                .setSchemeId(1).setName("日常速刷").setRoleTag(4).addPassiveSkillIds(12005)
+                .setStateVersion(1L).setRequestId("loadout-java-uni-s1-1")
+                .setUpdateAttributeAllocation(true)
+                .putAttributeAllocated(101, 10)
+                .putAttributeAllocated(103, 30).build());
+        assertThat(save1.getErrorMessage().getId()).isZero();
+        assertThat(save1.getState().getLoadout().getSchemes(0).getName()).isEqualTo("日常速刷");
+        assertThat(save1.getState().getLoadout().getSchemes(0).getAttributeAllocatedMap())
+                .containsEntry(101, 10).containsEntry(103, 30);
+
+        // 3. 降低已分配属性但不确认洗点 → 拒回 kSkillLoadoutAttributeResetRequired。
+        long goldBefore = player.wallet().spendableGoldWithBind();
+        var lowerDeny = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
+                .setSchemeId(1).setRoleTag(1).addPassiveSkillIds(12005)
+                .setStateVersion(2L).setRequestId("loadout-java-low-deny1")
+                .setUpdateAttributeAllocation(true)
+                .putAttributeAllocated(101, 20)
+                .putAttributeAllocated(103, 20)
+                .setResetAttributeIfNeeded(false).build());
+        assertThat(lowerDeny.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutAttributeResetRequired_VALUE);
+        assertThat(player.wallet().spendableGoldWithBind()).isEqualTo(goldBefore);
+
+        // 4. 确认洗点后保存成功并按表扣洗点银两。
+        var lowerOk = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
+                .setSchemeId(1).setRoleTag(1).addPassiveSkillIds(12005)
+                .setStateVersion(2L).setRequestId("loadout-java-low-ok001")
+                .setUpdateAttributeAllocation(true)
+                .putAttributeAllocated(101, 20)
+                .putAttributeAllocated(103, 20)
+                .setResetAttributeIfNeeded(true).build());
+        assertThat(lowerOk.getErrorMessage().getId()).isZero();
+        assertThat(lowerOk.getState().getLoadout().getSchemes(0).getAttributeAllocatedMap())
+                .containsEntry(101, 20).containsEntry(103, 20);
+        assertThat(player.wallet().spendableGoldWithBind())
+                .isEqualTo(goldBefore - lowerOk.getState().getLoadout().getAttributeResetCostGold());
+
+        // 5. 一体化保存方案 2（免费自动补建第 2 套属性方案 + 联动切换），立即切回方案 1 提示 60 秒属性切换冷却。
+        var save2 = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
+                .setSchemeId(2).setName("全敏先手").setRoleTag(2)
+                .setStateVersion(3L).setRequestId("loadout-java-uni-s2-1")
+                .setUpdateAttributeAllocation(true)
+                .putAttributeAllocated(104, 40).build());
+        assertThat(save2.getErrorMessage().getId()).isZero();
+        assertThat(save2.getState().getLoadout().getActiveAttributeSchemeId()).isEqualTo(2);
+
+        var sw1 = f.service.switchLoadout(player, SwitchSkillLoadoutRequest.newBuilder()
+                .setSchemeId(1).setStateVersion(4L).setRequestId("loadout-java-sw1-cd01").build());
+        assertThat(sw1.getErrorMessage().getId()).isZero();
+        assertThat(sw1.getAttributeSyncNotice()).isNotEmpty();
+        assertThat(sw1.getState().getLoadout().getActiveAttributeSchemeId()).isEqualTo(2);
+    }
+
+    @Test
+    void 满级85自动永久赠第3套免费槽_防溢买上限同步收紧且不卡中途满级续期() throws Exception {
+        var f = new Fixture();
+        f.service.withClock(f.clock);
+        ScenePlayer player = f.player();
+        player.setLevel(84);
+        player.setAfkPassExpiresAt(0L);
+        player.learnedSkills().setRank(12005, 1);
+        f.currency.add(player, com.game.scene.player.Wallet.DIAMOND, 500L, com.game.scene.audit.AssetAudit.Reason.GM_GRANT);
+        long nowSec = Math.floorDiv(f.clock.epochMillis(), 1000L);
+        long period = SkillLoadoutRules.RENT_PERIOD_SECONDS;
+
+        // 1. 84 级零氪免费 2 套，写第 3 套被拒；升 85 级满级自动免费 3 套，写第 3 套通过。
+        var lv84Book = ClassSkillService.book(player, 0, false, nowSec, f.attributes);
+        assertThat(lv84Book.getLoadout().getFreeSchemes()).isEqualTo(2);
+        assertThat(lv84Book.getLoadout().getUnlockedSchemes()).isEqualTo(2);
+        var deny3 = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
+                .setSchemeId(3).setName("零氪三号").setRoleTag(2).addPassiveSkillIds(12005)
+                .setStateVersion(1L).setRequestId("loadout-lv84-deny3-01").build());
+        assertThat(deny3.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutSchemeInvalid_VALUE);
+
+        player.setLevel(85);
+        var lv85Book = ClassSkillService.book(player, 0, false, nowSec, f.attributes);
+        assertThat(lv85Book.getLoadout().getFreeSchemes()).isEqualTo(3);
+        assertThat(lv85Book.getLoadout().getUnlockedSchemes()).isEqualTo(3);
+        var allow3 = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
+                .setSchemeId(3).setName("零氪三号").setRoleTag(2).addPassiveSkillIds(12005)
+                .setStateVersion(1L).setRequestId("loadout-lv85-ok003-01").build());
+        assertThat(allow3.getErrorMessage().getId()).isZero();
+        assertThat(allow3.getState().getLoadout().getActiveSchemeId()).isEqualTo(3);
+
+        // 2. 85 级无轻享卡最多可租 4 套（3+4=7），租 5 套防溢买拒回。
+        var over5 = f.dispatchRent(RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(92001L).setTargetRentedSlots(5).setAddPeriods(1).setExpectedCostDiamond(150L).build());
+        assertThat(over5.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutRentSlotsInvalid_VALUE);
+
+        // 3. 84 级轻享卡曾租满 3 套（2+2+3=7），中途升 85 级后可按新上限 2 套续期 30 天（60 灵石）而不被缩减拦住。
+        player.setLevel(84);
+        player.setAfkPassExpiresAt(nowSec + period * 10);
+        var rent3 = f.dispatchRent(RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(92002L).setTargetRentedSlots(3).setAddPeriods(1).setExpectedCostDiamond(90L).build());
+        assertThat(rent3.getErrorMessage().getId()).isZero();
+        assertThat(rent3.getState().getLoadout().getUnlockedSchemes()).isEqualTo(7);
+
+        player.setLevel(85);
+        f.clock.advanceSeconds(100);
+        var over3 = f.dispatchRent(RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(92003L).setTargetRentedSlots(3).setAddPeriods(1).setExpectedCostDiamond(90L).build());
+        assertThat(over3.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutRentSlotsInvalid_VALUE);
+
+        var renew2 = f.dispatchRent(RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(92004L).setTargetRentedSlots(2).setAddPeriods(1).setExpectedCostDiamond(60L).build());
+        assertThat(renew2.getErrorMessage().getId()).isZero();
+        assertThat(renew2.getRentedExtraSlots()).isEqualTo(2);
+        assertThat(renew2.getSpentDiamond()).isEqualTo(60L);
+        assertThat(renew2.getState().getLoadout().getFreeSchemes()).isEqualTo(3);
+        assertThat(renew2.getState().getLoadout().getUnlockedSchemes()).isEqualTo(7);
     }
 }

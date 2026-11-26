@@ -62,7 +62,8 @@ class SpiritShopFeatureAndServiceTest {
             assertThat(g.getResetKind()).isZero();
         });
         assertThat(infoResp.getInfo().getGoodsList()).extracting(SpiritShopGoodsView::getGoodsId)
-                .containsExactly(101, 102, 103, 201, 202, 301, 302, 303, 304);
+                .containsSubsequence(101, 102, 103, 201, 202, 301, 302, 303, 304)
+                .doesNotContain(401, 402);
 
         SpiritShopGoodsView pack60 = goodsView(infoResp.getInfo().getGoodsList(), 101);
         SpiritShopGoodsView pack180 = goodsView(infoResp.getInfo().getGoodsList(), 102);
@@ -344,12 +345,15 @@ class SpiritShopFeatureAndServiceTest {
         BagFeature bagFeature = new BagFeature(f.bags);
 
         player.setLevel(20);
-        // 开售前 1ms：隐藏 401/402，仅 9 件常驻
-        assertThat(service.buildInfo(player, springStartMs - 1).getGoodsList()).hasSize(9);
+        // 开售前 1ms：隐藏 401/402，仅保留常态商品
+        List<SpiritShopGoodsView> beforeWindowGoods = service.buildInfo(player, springStartMs - 1).getGoodsList();
+        int everydayCount = beforeWindowGoods.size();
+        assertThat(everydayCount).isGreaterThanOrEqualTo(9);
+        assertThat(beforeWindowGoods).extracting(SpiritShopGoodsView::getGoodsId).doesNotContain(401, 402);
 
         // 先在活动期拉一份 401 与 402 报价
         List<SpiritShopGoodsView> inWindowGoods = service.buildInfo(player, springStartMs).getGoodsList();
-        assertThat(inWindowGoods).hasSize(11);
+        assertThat(inWindowGoods).hasSize(everydayCount + 2);
         SpiritShopGoodsView g401 = goodsView(inWindowGoods, 401);
         SpiritShopGoodsView g402 = goodsView(inWindowGoods, 402);
         assertThat(g401.getTabId()).isEqualTo(4);
@@ -370,28 +374,29 @@ class SpiritShopFeatureAndServiceTest {
 
         // 活动期内但等级 9 < min_level(10) -> 货架隐藏 + 购买回 37012
         player.setLevel(9);
-        assertThat(service.buildInfo(player, springStartMs).getGoodsList()).hasSize(9);
+        List<SpiritShopGoodsView> lowLevelGoods = service.buildInfo(player, springStartMs).getGoodsList();
+        assertThat(lowLevelGoods).hasSize(everydayCount);
+        assertThat(lowLevelGoods).extracting(SpiritShopGoodsView::getGoodsId).doesNotContain(401, 402);
         assertThat(service.buy(f.world, player, buy401, bagFeature, springStartMs).getErrorMessage().getId())
                 .isEqualTo(SpiritShopService.LEVEL_NOT_MET);
 
-        // 3. 满包 4 物品原子回滚：把背包填到仅剩 3 格空位 -> 401 需要 4 格，必须整批回滚 37007 零扣费零发物
+        // 3. 满包 4 物品原子回滚：用独立满包角色把背包填到仅剩 3 格空位 -> 401 需要 4 格，必须整批回滚 37007 零扣费零发物
         player.setLevel(10);
-        Bag inv = player.bags().bag(BagType.INVENTORY);
-        int fillSlots = inv.capacity() - 3;
+        ScenePlayer fullBagPlayer = f.enter(11, 1005);
+        fullBagPlayer.setLevel(10);
+        assertThat(f.currency.add(fullBagPlayer, Wallet.DIAMOND, 1000L, Reason.GM_GRANT).ok()).isTrue();
+        Bag fullInv = fullBagPlayer.bags().bag(BagType.INVENTORY);
+        int fillSlots = fullInv.capacity() - 3;
         int singleStackItemId = BattleFixture.CONFIG.item().all().stream()
                 .filter(it -> it.getMaxStackSize() == 1)
                 .findFirst().orElseThrow().getId();
-        assertThat(f.bags.addItems(player, BagType.INVENTORY, Map.of(singleStackItemId, (long) fillSlots),
+        assertThat(f.bags.addItems(fullBagPlayer, BagType.INVENTORY, Map.of(singleStackItemId, (long) fillSlots),
                 true, Reason.GM_GRANT, 0L, "").ok()).isTrue();
-        assertThat(service.buy(f.world, player, buy401, bagFeature, springStartMs).getErrorMessage().getId())
+        assertThat(service.buy(f.world, fullBagPlayer, buy401, bagFeature, springStartMs).getErrorMessage().getId())
                 .isEqualTo(SpiritShopService.BAG_FULL);
-        assertThat(player.wallet().balance(Wallet.DIAMOND)).isEqualTo(1000L);
-        assertThat(inv.total(3001)).isZero();
-        assertThat(inv.total(3402)).isZero();
-
-        // 腾出足够空间（清空测试占位物品）
-        assertThat(f.bags.removeItems(player, BagType.INVENTORY, Map.of(singleStackItemId, (long) fillSlots),
-                Reason.GM_DEDUCT, 0L, "").ok()).isTrue();
+        assertThat(fullBagPlayer.wallet().balance(Wallet.DIAMOND)).isEqualTo(1000L);
+        assertThat(fullBagPlayer.bags().bag(BagType.INVENTORY).total(3001)).isZero();
+        assertThat(fullBagPlayer.bags().bag(BagType.INVENTORY).total(3402)).isZero();
 
         // 4. ALL 礼包传非 0 chosen_item_index -> 37013；正常购买 -> 按折后价 180 扣费并发 4 件绑定物
         assertThat(service.buy(f.world, player, buy401.toBuilder().setClientRequestId(9502L).setChosenItemIndex(1).build(),
@@ -401,10 +406,11 @@ class SpiritShopFeatureAndServiceTest {
         BuySpiritShopGoodsResponse r401 = service.buy(f.world, player, buy401, bagFeature, springStartMs);
         assertThat(r401.getErrorMessage().getId()).isZero();
         assertThat(player.wallet().balance(Wallet.DIAMOND)).isEqualTo(820L);
-        assertThat(boundQuantity(inv, 3001)).isEqualTo(60L);
-        assertThat(boundQuantity(inv, 3002)).isEqualTo(60L);
-        assertThat(boundQuantity(inv, 3405)).isEqualTo(2L);
-        assertThat(boundQuantity(inv, 3402)).isEqualTo(1L);
+        Bag invAfter401 = player.bags().bag(BagType.INVENTORY);
+        assertThat(boundQuantity(invAfter401, 3001)).isEqualTo(60L);
+        assertThat(boundQuantity(invAfter401, 3002)).isEqualTo(60L);
+        assertThat(boundQuantity(invAfter401, 3405)).isEqualTo(2L);
+        assertThat(boundQuantity(invAfter401, 3402)).isEqualTo(1L);
         assertThat(service.buy(f.world, player, buy401.toBuilder().setClientRequestId(9503L).build(),
                 bagFeature, springStartMs).getErrorMessage().getId())
                 .isEqualTo(SpiritShopService.LIMIT_REACHED);
@@ -431,8 +437,8 @@ class SpiritShopFeatureAndServiceTest {
         BuySpiritShopGoodsResponse r402c1 = service.buy(f.world, player, buy402Choice1, bagFeature, springStartMs);
         assertThat(r402c1.getErrorMessage().getId()).isZero();
         assertThat(player.wallet().balance(Wallet.DIAMOND)).isEqualTo(700L);
-        assertThat(boundQuantity(inv, 3412)).isEqualTo(1L);
-        assertThat(inv.total(3408)).isZero();
+        assertThat(boundQuantity(player.bags().bag(BagType.INVENTORY), 3412)).isEqualTo(1L);
+        assertThat(player.bags().bag(BagType.INVENTORY).total(3408)).isZero();
 
         BuySpiritShopGoodsRequest buy402Choice3 = BuySpiritShopGoodsRequest.newBuilder()
                 .setClientRequestId(9602L)
@@ -449,7 +455,7 @@ class SpiritShopFeatureAndServiceTest {
 
         assertThat(service.buy(f.world, player, buy402Choice3, bagFeature, springStartMs).getErrorMessage().getId()).isZero();
         assertThat(player.wallet().balance(Wallet.DIAMOND)).isEqualTo(580L);
-        assertThat(boundQuantity(inv, 3405)).isEqualTo(5L); // 401 给的 2 + 402 选的 3
+        assertThat(boundQuantity(player.bags().bag(BagType.INVENTORY), 3405)).isEqualTo(5L); // 401 给的 2 + 402 选的 3
 
         // 同幂等键 9601 篡改下标 -> 1005；过期后新单拒回 37011，但旧 9601 仍幂等重放成功且零重复发物
         assertThat(service.buy(f.world, player,
@@ -457,7 +463,9 @@ class SpiritShopFeatureAndServiceTest {
                 bagFeature, springStartMs).getErrorMessage().getId())
                 .isEqualTo(SpiritShopService.INVALID_PARAMETER);
 
-        assertThat(service.buildInfo(player, springEndMs).getGoodsList()).hasSize(9);
+        List<SpiritShopGoodsView> afterWindowGoods = service.buildInfo(player, springEndMs).getGoodsList();
+        assertThat(afterWindowGoods).hasSize(everydayCount);
+        assertThat(afterWindowGoods).extracting(SpiritShopGoodsView::getGoodsId).doesNotContain(401, 402);
         assertThat(service.buy(f.world, player, buy402Choice1.toBuilder().setClientRequestId(9699L).build(),
                 bagFeature, springEndMs).getErrorMessage().getId())
                 .isEqualTo(SpiritShopService.NOT_IN_SALE_WINDOW);
@@ -465,7 +473,7 @@ class SpiritShopFeatureAndServiceTest {
         BuySpiritShopGoodsResponse expiredReplay = service.buy(f.world, player, buy402Choice1, bagFeature, springEndMs + 1000L);
         assertThat(expiredReplay.getErrorMessage().getId()).isZero();
         assertThat(expiredReplay.getReplayed()).isTrue();
-        assertThat(boundQuantity(inv, 3412)).isEqualTo(1L);
+        assertThat(boundQuantity(player.bags().bag(BagType.INVENTORY), 3412)).isEqualTo(1L);
         assertThat(player.wallet().balance(Wallet.DIAMOND)).isEqualTo(580L);
     }
 

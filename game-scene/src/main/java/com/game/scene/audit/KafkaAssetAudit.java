@@ -123,6 +123,10 @@ public final class KafkaAssetAudit implements AssetAudit {
             case SPIRIT_SHOP_BUY -> TransactionReason.TX_SPIRIT_SHOP_BUY;
             case TRAVEL_PASS_UNLOCK -> TransactionReason.TX_TRAVEL_PASS_UNLOCK;
             case TRAVEL_PASS_REWARD -> TransactionReason.TX_TRAVEL_PASS_REWARD;
+            case SKILL_LOADOUT_RENT -> TransactionReason.TX_SKILL_LOADOUT_RENT;
+            case JIANGHU_DUEL_FEE -> TransactionReason.TX_SHOP_BUY;
+            case JIANGHU_DUEL_REFUND -> TransactionReason.TX_SYSTEM_GRANT;
+            case JIANGHU_CLEAR_MARK -> TransactionReason.TX_ITEM_DESTROY;
         };
     }
 }

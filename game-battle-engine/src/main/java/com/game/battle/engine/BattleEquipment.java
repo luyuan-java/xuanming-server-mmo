@@ -43,6 +43,9 @@ final class BattleEquipment {
 
     /** 哨兵下标：标识单槽赛季印（不进入永久法宝数组，使用独立 {@code season_seal_state} 与 {@code season_seal_id}）。 */
     static final int SEASON_SEAL_INDEX = -1;
+    /** 控辅 V1 基础装 +11 克制强化受益后的有效全身上限（施放治疗/护盾 50% 份额 3200->3584，控场命中 25% 份额 1600->1696；速度恒定 200）。 */
+    static final int MAX_EFFECTIVE_SUPPORT_BPS = 3584;
+    static final int MAX_EFFECTIVE_AILMENT_HIT_BPS = 1696;
 
     private static boolean validArtifact(EquipmentArtifactSource a) {
         return a.getItemId() > 0 && SeasonRules.validArtifactDefinition(a.getEffectId(), a.getBonusBps(),
@@ -50,19 +53,20 @@ final class BattleEquipment {
     }
 
     private static boolean validSeasonSeal(SeasonSealEffect s) {
-        return SeasonRules.validSealEffect(s.getSeasonId(), s.getSealId(), s.getEffectId(), s.getBonusBps(),
-                s.getCapBps(), s.getPerRoundLimit(), s.getBattleLimit(), s.getActiveRounds(), s.getHealthThresholdBps());
+        return SeasonRules.validSealDefinition(s.getSeasonId(), s.getSealId(), s.getEffectId(), s.getBonusBps(),
+                s.getCapBps(), s.getPerRoundLimit(), s.getBattleLimit(), s.getActiveRounds(), s.getHealthThresholdBps(),
+                s.getResonanceSkillId(), s.getResonanceKind(), s.getResonanceParam());
     }
 
     static boolean initialize(BattleActorState.Builder actor, EquipmentEffects equipment) {
         int[] values = {equipment.getPhysicalAttackBps(),equipment.getMagicAttackBps(),equipment.getMaxHealthBps(),
                 equipment.getSpeedBps(),equipment.getOutgoingHealBps(),equipment.getShieldCapacityBps(),equipment.getPhysicalCritBps(),
                 equipment.getMagicCritBps(),equipment.getPhysicalResistBps(),equipment.getMagicResistBps()};
-        int[] limits = {3200,3200,800,200,3200,3200,800,800,600,600};
+        int[] limits = {3200,3200,800,200,MAX_EFFECTIVE_SUPPORT_BPS,MAX_EFFECTIVE_SUPPORT_BPS,800,800,600,600};
         for (int i = 0; i < values.length; i++) if (Integer.compareUnsigned(values[i],limits[i]) > 0) return false;
         if (Integer.compareUnsigned(equipment.getSeasonMaxHealthBps(), SeasonRules.HARD_STAT_CAP_BPS) > 0
                 || Integer.compareUnsigned(equipment.getSeasonDefenseBps(), SeasonRules.HARD_STAT_CAP_BPS) > 0) return false;
-        if (!bounded(equipment.getAilmentHitBpsMap(),7,1600) || !bounded(equipment.getAilmentResistBpsMap(),7,1600)
+        if (!bounded(equipment.getAilmentHitBpsMap(),7,MAX_EFFECTIVE_AILMENT_HIT_BPS) || !bounded(equipment.getAilmentResistBpsMap(),7,1600)
                 || !bounded(equipment.getManaReductionBpsMap(),12,1200) || equipment.getArtifactsCount() > 2) return false;
         var ids = new HashSet<Long>();
         var copy = equipment.toBuilder().clearArtifacts();
@@ -148,10 +152,53 @@ final class BattleEquipment {
         if (index == SEASON_SEAL_INDEX) {
             var seal = source.state().getEquipmentEffects().getSeasonSeal();
             ev.setSeasonSealId(seal.getSealId()).setArtifactEffectId(seal.getEffectId());
+            var rt = ctx.seasonSealRuntime(source.actorId());
+            rt.triggerCount += 1;
+            rt.contributionValue = EquipmentCombatRules.addSaturated(rt.contributionValue, value);
         } else {
             var a = source.state().getEquipmentEffects().getArtifacts(index);
             ev.setArtifactItemId(a.getItemId()).setArtifactEffectId(a.getEffectId());
         }
+    }
+
+    boolean hasAnyRegularShield(BattleUnit target) {
+        if (target == null) return false;
+        for (var entry : target.state().getBuffsList()) {
+            if (entry.getRemainingCapacity() == 0L) continue;
+            var row = battle.row(entry);
+            if (row != null && row.getBattleOp() == SHIELD && row.getHitLimit() == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int defendManaDiscountResonancePct(BattleUnit actor, int skillId) {
+        if (actor == null || !actor.isPlayer()
+                || !actor.state().getEquipmentEffects().hasSeasonSeal()) {
+            return 0;
+        }
+        var seal = actor.state().getEquipmentEffects().getSeasonSeal();
+        if (seal.getResonanceKind() != SeasonRules.RESONANCE_DEFEND_MANA_DISCOUNT
+                || seal.getResonanceSkillId() != skillId
+                || seal.getResonanceParam() == 0) {
+            return 0;
+        }
+        var rt = ctx.findSeasonSealRuntime(actor.actorId());
+        return rt != null && rt.defendResonanceReadyRound == ctx.roundIndex() ? seal.getResonanceParam() : 0;
+    }
+
+    void emitSeasonResonance(BattleUnit actor, long targetId, int resonanceEffectId, long value) {
+        if (actor == null || !actor.state().getEquipmentEffects().hasSeasonSeal()) return;
+        var seal = actor.state().getEquipmentEffects().getSeasonSeal();
+        var rt = ctx.seasonSealRuntime(actor.actorId());
+        rt.resonanceCount += 1;
+        ctx.events().append(BATTLE_EVENT_ARTIFACT, actor.actorId(), targetId)
+                .setArtifactItemId(0L)
+                .setArtifactEffectId(resonanceEffectId)
+                .setSeasonSealId(seal.getSealId())
+                .setValue(value)
+                .setSuccess(true);
     }
 
     static long floorBps(long amount, int bps) {
@@ -166,7 +213,12 @@ final class BattleEquipment {
     long manaCost(BattleUnit source, SkillTable skill) {
         long base = SupportEffectRules.discountMana(ClassSkillRules.manaCost(source.maxMana(), skill.getManaPercent()),
                 discount(source, skill));
-        return ctx.encounter.adjustWeeklySkillManaCost(source, skill, base);
+        long cost = ctx.encounter.adjustWeeklySkillManaCost(source, skill, base);
+        int discountPct = defendManaDiscountResonancePct(source, skill.getId());
+        if (discountPct > 0) {
+            cost = SeasonRules.computeManaDiscounted(cost, discountPct);
+        }
+        return cost;
     }
 
     double healingBonus(BattleUnit source) {
@@ -174,7 +226,9 @@ final class BattleEquipment {
                 + source.state().getEquipmentEffects().getOutgoingHealBps()/10000.0 + PetCultivationRules.healBonus(source);
     }
 
-    double shield(BattleUnit source, BattleUnit target, double base, Hit hit, List<Integer> contributions) {
+    double shield(BattleUnit source, BattleUnit target, double base, Hit hit, List<Integer> contributions,
+                  long[] outSeasonSealGain) {
+        if (outSeasonSealGain != null && outSeasonSealGain.length > 0) outSeasonSealGain[0] = 0L;
         double modifier = battle.modifier(source,OUT_SHIELD);
         if (source.isPet()) return SupportEffectRules.applyBonus(base,modifier + PetCultivationRules.rate(source.state().getPetCultivation().getShieldCapacityBps()));
         if (!source.isPlayer()) return base;
@@ -183,10 +237,46 @@ final class BattleEquipment {
             for (int index : available(source,5)) {
                 double previous = bonus;
                 bonus += bonusBps(source, index)/10000.0;
-                if (Math.floor(base*(1+bonus)) > Math.floor(base*(1+previous))) contributions.add(index);
+                long beforeFloor = fromDoubleSaturating(Math.floor(Math.max(0.0, base*(1+previous))));
+                long afterFloor = fromDoubleSaturating(Math.floor(Math.max(0.0, base*(1+bonus))));
+                if (Long.compareUnsigned(afterFloor, beforeFloor) > 0) {
+                    if (index == SEASON_SEAL_INDEX) {
+                        if (outSeasonSealGain != null && outSeasonSealGain.length > 0) {
+                            outSeasonSealGain[0] = afterFloor - beforeFloor;
+                        }
+                    } else {
+                        contributions.add(index);
+                    }
+                }
             }
         }
         return SupportEffectRules.applyBonus(base,bonus);
+    }
+
+    void commitSeasonSealShield(BattleUnit source, BattleUnit target, long seasonSealGain, int castSkillId) {
+        if (seasonSealGain == 0L || !available(source, 5).contains(SEASON_SEAL_INDEX)) {
+            return;
+        }
+        var seal = source.state().getEquipmentEffects().getSeasonSeal();
+        use(source, SEASON_SEAL_INDEX, target, seasonSealGain);
+        if (seal.getResonanceKind() == SeasonRules.RESONANCE_FIRST_SHIELD_MANA
+                && seal.getResonanceSkillId() == castSkillId
+                && seal.getResonanceParam() > 0) {
+            long manaBefore = source.mana();
+            long missingMana = Long.compareUnsigned(source.maxMana(), manaBefore) > 0
+                    ? source.maxMana() - manaBefore : 0L;
+            long gain = minUnsigned(missingMana, floorBps(source.state().getEntryMaxMana(), seal.getResonanceParam()));
+            if (gain != 0L) {
+                source.setMana(manaBefore + gain);
+                ctx.events().append(BATTLE_EVENT_MANA, source.actorId(), source.actorId())
+                        .setSkillTableId(castSkillId)
+                        .setValue(gain)
+                        .setManaDelta(EventLog.signedManaDelta(gain, true))
+                        .setTargetManaAfter(source.mana());
+                emitSeasonResonance(source, source.actorId(),
+                        SeasonRules.RESONANCE_EVENT_FIRST_SHIELD_MANA, gain);
+            }
+        }
     }
 
     void defend(BattleUnit actor) {
@@ -197,6 +287,13 @@ final class BattleEquipment {
             if (gain == 0) continue;
             total += gain;
             use(actor,index,actor,gain);
+            if (index == SEASON_SEAL_INDEX) {
+                var seal = actor.state().getEquipmentEffects().getSeasonSeal();
+                if (seal.getResonanceKind() == SeasonRules.RESONANCE_DEFEND_MANA_DISCOUNT
+                        || seal.getResonanceKind() == SeasonRules.RESONANCE_DEFEND_SHIELD_BOOST) {
+                    ctx.seasonSealRuntime(actor.actorId()).defendResonanceReadyRound = ctx.roundIndex() + 1;
+                }
+            }
         }
         if (total == 0) return;
         actor.setMana(actor.mana()+total);
@@ -211,6 +308,16 @@ final class BattleEquipment {
             if (diff == 0) continue;
             remaining -= diff;
             use(target,index,target,diff);
+            if (index == SEASON_SEAL_INDEX) {
+                var seal = target.state().getEquipmentEffects().getSeasonSeal();
+                if (seal.getResonanceKind() == SeasonRules.RESONANCE_GUARD_SHIELD_BOOST
+                        || seal.getResonanceKind() == SeasonRules.RESONANCE_GUARD_HEAL_BOOST) {
+                    var rt = ctx.seasonSealRuntime(target.actorId());
+                    if (!rt.guardResonanceConsumed) {
+                        rt.guardResonanceReadyRound = ctx.roundIndex() + 1;
+                    }
+                }
+            }
         }
         return remaining;
     }
@@ -243,6 +350,34 @@ final class BattleEquipment {
             if (removed != 0) {
                 use(source,index,target,removed);
                 if (source.isPlayer()) ctx.encounter.markShieldBreak(source);
+                if (index == SEASON_SEAL_INDEX) {
+                    var seal = source.state().getEquipmentEffects().getSeasonSeal();
+                    if (seal.getResonanceSkillId() == hit.skill && seal.getResonanceParam() > 0) {
+                        if (seal.getResonanceKind() == SeasonRules.RESONANCE_SHARP_MANA_REFUND
+                                && !hasAnyRegularShield(target)) {
+                            long manaBefore = source.mana();
+                            long missingMana = Long.compareUnsigned(source.maxMana(), manaBefore) > 0
+                                    ? source.maxMana() - manaBefore : 0L;
+                            long refund = minUnsigned(missingMana,
+                                    SeasonRules.computeManaPctCeil(hit.paidMana, seal.getResonanceParam()));
+                            if (refund != 0L) {
+                                source.setMana(manaBefore + refund);
+                                ctx.events().append(BATTLE_EVENT_MANA, source.actorId(), source.actorId())
+                                        .setSkillTableId(hit.skill)
+                                        .setValue(refund)
+                                        .setManaDelta(EventLog.signedManaDelta(refund, true))
+                                        .setTargetManaAfter(source.mana());
+                                emitSeasonResonance(source, source.actorId(),
+                                        SeasonRules.RESONANCE_EVENT_SHARP_MANA_REFUND, refund);
+                            }
+                        } else if (seal.getResonanceKind() == SeasonRules.RESONANCE_BREAK_EXTEND_DEBUFF) {
+                            ctx.pendingMysticExtendCasterId = source.actorId();
+                            ctx.pendingMysticExtendTargetId = target.actorId();
+                            ctx.pendingMysticExtendSkillId = hit.skill;
+                            ctx.pendingMysticExtendBonusRounds = seal.getResonanceParam();
+                        }
+                    }
+                }
             }
         }
     }

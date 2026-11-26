@@ -55,6 +55,19 @@ public class GuildWarStore {
                             byte[] summaryPayload, long finishedAtMs) {
     }
 
+    public record FeudRow(long feudId, int zoneId, long issuerGuildId, String issuerGuildName,
+                          long targetGuildId, String targetGuildName, int status,
+                          int issuerWins, int targetWins, long issuerMerit, long targetMerit,
+                          long createdAtMs, long acceptDeadlineMs, long startedAtMs, long endsAtMs,
+                          long winnerGuildId, long updatedMs) {
+    }
+
+    public record FeudLookup(Optional<FeudRow> activeOrPending, Optional<FeudRow> justFinished) {
+    }
+
+    public record FeudBattleResult(Optional<FeudRow> feud, boolean justFinished) {
+    }
+
     private final DataSource dataSource;
 
     public GuildWarStore(DataSource dataSource) {
@@ -203,6 +216,28 @@ public class GuildWarStore {
                       mutual_bounty INT NOT NULL DEFAULT 0,
                       updated_ms BIGINT NOT NULL DEFAULT 0,
                       PRIMARY KEY (guild_a_id, guild_b_id, week_key)
+                    )
+                    """);
+            st.execute("""
+                    CREATE TABLE IF NOT EXISTS guild_war_feud (
+                      feud_id BIGINT NOT NULL,
+                      zone_id INT NOT NULL,
+                      issuer_guild_id BIGINT NOT NULL,
+                      issuer_guild_name VARCHAR(64) NOT NULL DEFAULT '',
+                      target_guild_id BIGINT NOT NULL,
+                      target_guild_name VARCHAR(64) NOT NULL DEFAULT '',
+                      status INT NOT NULL DEFAULT 1,
+                      issuer_wins INT NOT NULL DEFAULT 0,
+                      target_wins INT NOT NULL DEFAULT 0,
+                      issuer_merit BIGINT NOT NULL DEFAULT 0,
+                      target_merit BIGINT NOT NULL DEFAULT 0,
+                      created_at_ms BIGINT NOT NULL DEFAULT 0,
+                      accept_deadline_ms BIGINT NOT NULL DEFAULT 0,
+                      started_at_ms BIGINT NOT NULL DEFAULT 0,
+                      ends_at_ms BIGINT NOT NULL DEFAULT 0,
+                      winner_guild_id BIGINT NOT NULL DEFAULT 0,
+                      updated_ms BIGINT NOT NULL DEFAULT 0,
+                      PRIMARY KEY (feud_id)
                     )
                     """);
         }
@@ -971,6 +1006,277 @@ public class GuildWarStore {
         try (Connection c = dataSource.getConnection()) {
             upsertPlayerState(c, updated);
         }
+    }
+
+    // ── 帮战 V2.5 · 宿敌约战战书仓储 ──────────────────────────────────────────
+
+    public FeudLookup getActiveOrPendingFeud(long guildId, long nowMs) throws SQLException {
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT feud_id, zone_id, issuer_guild_id, issuer_guild_name, target_guild_id, target_guild_name, status, issuer_wins, target_wins, issuer_merit, target_merit, created_at_ms, accept_deadline_ms, started_at_ms, ends_at_ms, winner_guild_id, updated_ms FROM guild_war_feud WHERE (issuer_guild_id = ? OR target_guild_id = ?) AND status IN (1, 2) ORDER BY created_at_ms DESC LIMIT 1")) {
+            ps.setLong(1, guildId);
+            ps.setLong(2, guildId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return new FeudLookup(Optional.empty(), Optional.empty());
+                }
+                FeudRow row = readFeud(rs);
+                if (row.status() == 1 && row.acceptDeadlineMs() > 0 && Long.compareUnsigned(nowMs, row.acceptDeadlineMs()) >= 0) {
+                    try (PreparedStatement upd = c.prepareStatement("UPDATE guild_war_feud SET status = 5, updated_ms = ? WHERE feud_id = ? AND status = 1")) {
+                        upd.setLong(1, nowMs);
+                        upd.setLong(2, row.feudId());
+                        upd.executeUpdate();
+                    }
+                    return new FeudLookup(Optional.empty(), Optional.empty());
+                }
+                if (row.status() == 2 && row.endsAtMs() > 0 && Long.compareUnsigned(nowMs, row.endsAtMs()) >= 0) {
+                    long winner = GuildWarRules.resolveFeudWinner(row.issuerGuildId(), row.targetGuildId(),
+                            row.issuerWins(), row.targetWins(), row.issuerMerit(), row.targetMerit());
+                    try (PreparedStatement upd = c.prepareStatement("UPDATE guild_war_feud SET status = 3, winner_guild_id = ?, updated_ms = ? WHERE feud_id = ? AND status = 2")) {
+                        upd.setLong(1, winner);
+                        upd.setLong(2, nowMs);
+                        upd.setLong(3, row.feudId());
+                        if (upd.executeUpdate() > 0) {
+                            FeudRow fin = new FeudRow(row.feudId(), row.zoneId(), row.issuerGuildId(), row.issuerGuildName(),
+                                    row.targetGuildId(), row.targetGuildName(), 3, row.issuerWins(), row.targetWins(),
+                                    row.issuerMerit(), row.targetMerit(), row.createdAtMs(), row.acceptDeadlineMs(),
+                                    row.startedAtMs(), row.endsAtMs(), winner, nowMs);
+                            return new FeudLookup(Optional.empty(), Optional.of(fin));
+                        }
+                    }
+                    return new FeudLookup(Optional.empty(), Optional.empty());
+                }
+                return new FeudLookup(Optional.of(row), Optional.empty());
+            }
+        }
+    }
+
+    public Optional<FeudRow> getLastFinishedFeud(long guildId) throws SQLException {
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT feud_id, zone_id, issuer_guild_id, issuer_guild_name, target_guild_id, target_guild_name, status, issuer_wins, target_wins, issuer_merit, target_merit, created_at_ms, accept_deadline_ms, started_at_ms, ends_at_ms, winner_guild_id, updated_ms FROM guild_war_feud WHERE (issuer_guild_id = ? OR target_guild_id = ?) AND status = 3 ORDER BY ends_at_ms DESC LIMIT 1")) {
+            ps.setLong(1, guildId);
+            ps.setLong(2, guildId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(readFeud(rs)) : Optional.empty();
+            }
+        }
+    }
+
+    public long getLastFeudIssuedAt(long issuerGuildId) throws SQLException {
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT COALESCE(MAX(created_at_ms), 0) FROM guild_war_feud WHERE issuer_guild_id = ? AND status IN (1, 2, 3)")) {
+            ps.setLong(1, issuerGuildId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        }
+    }
+
+    public FeudRow issueFeud(FeudRow rec, int cooldownSec, long nowMs) throws SQLException {
+        getActiveOrPendingFeud(rec.issuerGuildId(), nowMs);
+        getActiveOrPendingFeud(rec.targetGuildId(), nowMs);
+        try (Connection c = dataSource.getConnection()) {
+            c.setAutoCommit(false);
+            try {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT COUNT(1) FROM guild_war_feud WHERE status IN (1, 2) AND (issuer_guild_id IN (?, ?) OR target_guild_id IN (?, ?))")) {
+                    ps.setLong(1, rec.issuerGuildId());
+                    ps.setLong(2, rec.targetGuildId());
+                    ps.setLong(3, rec.issuerGuildId());
+                    ps.setLong(4, rec.targetGuildId());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next() && rs.getInt(1) > 0) {
+                            c.rollback();
+                            throw new WarRuleException("feud_active");
+                        }
+                    }
+                }
+                long lastIssued = 0L;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT COALESCE(MAX(created_at_ms), 0) FROM guild_war_feud WHERE issuer_guild_id = ? AND status IN (1, 2, 3)")) {
+                    ps.setLong(1, rec.issuerGuildId());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) lastIssued = rs.getLong(1);
+                    }
+                }
+                if (lastIssued > 0 && Long.compareUnsigned(nowMs, lastIssued + cooldownSec * 1000L) < 0) {
+                    c.rollback();
+                    throw new WarRuleException("feud_cooldown");
+                }
+                try (PreparedStatement ins = c.prepareStatement(
+                        "INSERT INTO guild_war_feud (feud_id, zone_id, issuer_guild_id, issuer_guild_name, target_guild_id, target_guild_name, status, issuer_wins, target_wins, issuer_merit, target_merit, created_at_ms, accept_deadline_ms, started_at_ms, ends_at_ms, winner_guild_id, updated_ms) VALUES (?,?,?,?,?,?,1,0,0,0,0,?,?,0,0,0,?)")) {
+                    ins.setLong(1, rec.feudId());
+                    ins.setInt(2, rec.zoneId());
+                    ins.setLong(3, rec.issuerGuildId());
+                    ins.setString(4, rec.issuerGuildName());
+                    ins.setLong(5, rec.targetGuildId());
+                    ins.setString(6, rec.targetGuildName());
+                    ins.setLong(7, rec.createdAtMs());
+                    ins.setLong(8, rec.acceptDeadlineMs());
+                    ins.setLong(9, nowMs);
+                    ins.executeUpdate();
+                }
+                c.commit();
+                return new FeudRow(rec.feudId(), rec.zoneId(), rec.issuerGuildId(), rec.issuerGuildName(),
+                        rec.targetGuildId(), rec.targetGuildName(), 1, 0, 0, 0L, 0L, rec.createdAtMs(),
+                        rec.acceptDeadlineMs(), 0L, 0L, 0L, nowMs);
+            } catch (SQLException | RuntimeException e) {
+                c.rollback();
+                throw e;
+            } finally {
+                c.setAutoCommit(true);
+            }
+        }
+    }
+
+    public FeudRow respondFeud(long feudId, long responderGuildId, boolean accept, int durationSec, long nowMs) throws SQLException {
+        try (Connection c = dataSource.getConnection()) {
+            c.setAutoCommit(false);
+            try {
+                FeudRow row = null;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT feud_id, zone_id, issuer_guild_id, issuer_guild_name, target_guild_id, target_guild_name, status, issuer_wins, target_wins, issuer_merit, target_merit, created_at_ms, accept_deadline_ms, started_at_ms, ends_at_ms, winner_guild_id, updated_ms FROM guild_war_feud WHERE feud_id = ? FOR UPDATE")) {
+                    ps.setLong(1, feudId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) row = readFeud(rs);
+                    }
+                }
+                if (row == null || row.status() != 1) {
+                    c.rollback();
+                    throw new WarRuleException("feud_not_found");
+                }
+                if (row.acceptDeadlineMs() > 0 && Long.compareUnsigned(nowMs, row.acceptDeadlineMs()) >= 0) {
+                    try (PreparedStatement upd = c.prepareStatement("UPDATE guild_war_feud SET status = 5, updated_ms = ? WHERE feud_id = ?")) {
+                        upd.setLong(1, nowMs);
+                        upd.setLong(2, feudId);
+                        upd.executeUpdate();
+                    }
+                    c.commit();
+                    throw new WarRuleException("feud_not_found");
+                }
+                FeudRow updated;
+                if (accept) {
+                    if (responderGuildId != row.targetGuildId()) {
+                        c.rollback();
+                        throw new WarRuleException("feud_not_found");
+                    }
+                    long endsAt = nowMs + durationSec * 1000L;
+                    try (PreparedStatement upd = c.prepareStatement("UPDATE guild_war_feud SET status = 2, started_at_ms = ?, ends_at_ms = ?, updated_ms = ? WHERE feud_id = ?")) {
+                        upd.setLong(1, nowMs);
+                        upd.setLong(2, endsAt);
+                        upd.setLong(3, nowMs);
+                        upd.setLong(4, feudId);
+                        upd.executeUpdate();
+                    }
+                    updated = new FeudRow(row.feudId(), row.zoneId(), row.issuerGuildId(), row.issuerGuildName(),
+                            row.targetGuildId(), row.targetGuildName(), 2, 0, 0, 0L, 0L, row.createdAtMs(),
+                            row.acceptDeadlineMs(), nowMs, endsAt, 0L, nowMs);
+                } else {
+                    if (responderGuildId != row.targetGuildId() && responderGuildId != row.issuerGuildId()) {
+                        c.rollback();
+                        throw new WarRuleException("feud_not_found");
+                    }
+                    try (PreparedStatement upd = c.prepareStatement("UPDATE guild_war_feud SET status = 4, updated_ms = ? WHERE feud_id = ?")) {
+                        upd.setLong(1, nowMs);
+                        upd.setLong(2, feudId);
+                        upd.executeUpdate();
+                    }
+                    updated = new FeudRow(row.feudId(), row.zoneId(), row.issuerGuildId(), row.issuerGuildName(),
+                            row.targetGuildId(), row.targetGuildName(), 4, 0, 0, 0L, 0L, row.createdAtMs(),
+                            row.acceptDeadlineMs(), 0L, 0L, 0L, nowMs);
+                }
+                c.commit();
+                return updated;
+            } catch (SQLException | RuntimeException e) {
+                c.rollback();
+                throw e;
+            } finally {
+                c.setAutoCommit(true);
+            }
+        }
+    }
+
+    public Optional<FeudRow> getActiveFeudBetween(long g1, long g2, long nowMs) throws SQLException {
+        if (g1 == 0 || g2 == 0 || g1 == g2) return Optional.empty();
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT feud_id, zone_id, issuer_guild_id, issuer_guild_name, target_guild_id, target_guild_name, status, issuer_wins, target_wins, issuer_merit, target_merit, created_at_ms, accept_deadline_ms, started_at_ms, ends_at_ms, winner_guild_id, updated_ms FROM guild_war_feud WHERE status = 2 AND ((issuer_guild_id = ? AND target_guild_id = ?) OR (issuer_guild_id = ? AND target_guild_id = ?)) LIMIT 1")) {
+            ps.setLong(1, g1);
+            ps.setLong(2, g2);
+            ps.setLong(3, g2);
+            ps.setLong(4, g1);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                FeudRow row = readFeud(rs);
+                if (row.endsAtMs() > 0 && Long.compareUnsigned(nowMs, row.endsAtMs()) >= 0) {
+                    return Optional.empty();
+                }
+                return Optional.of(row);
+            }
+        }
+    }
+
+    public FeudBattleResult recordFeudBattle(long feudId, long atkGuildId, long defGuildId, boolean atkWon,
+                                             boolean defWon, long atkMerit, long defMerit, long nowMs) throws SQLException {
+        try (Connection c = dataSource.getConnection()) {
+            c.setAutoCommit(false);
+            try {
+                FeudRow row = null;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT feud_id, zone_id, issuer_guild_id, issuer_guild_name, target_guild_id, target_guild_name, status, issuer_wins, target_wins, issuer_merit, target_merit, created_at_ms, accept_deadline_ms, started_at_ms, ends_at_ms, winner_guild_id, updated_ms FROM guild_war_feud WHERE feud_id = ? FOR UPDATE")) {
+                    ps.setLong(1, feudId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) row = readFeud(rs);
+                    }
+                }
+                if (row == null || row.status() != 2) {
+                    c.rollback();
+                    return new FeudBattleResult(Optional.empty(), false);
+                }
+                int iw = row.issuerWins(), tw = row.targetWins();
+                long im = row.issuerMerit(), tm = row.targetMerit();
+                if (atkGuildId == row.issuerGuildId() && defGuildId == row.targetGuildId()) {
+                    if (atkWon) iw++; else if (defWon) tw++;
+                    im += atkMerit; tm += defMerit;
+                } else if (atkGuildId == row.targetGuildId() && defGuildId == row.issuerGuildId()) {
+                    if (atkWon) tw++; else if (defWon) iw++;
+                    tm += atkMerit; im += defMerit;
+                }
+                boolean finished = row.endsAtMs() > 0 && Long.compareUnsigned(nowMs, row.endsAtMs()) >= 0;
+                int nextStatus = finished ? 3 : 2;
+                long winner = finished ? GuildWarRules.resolveFeudWinner(row.issuerGuildId(), row.targetGuildId(), iw, tw, im, tm) : 0L;
+                try (PreparedStatement upd = c.prepareStatement(
+                        "UPDATE guild_war_feud SET status=?, issuer_wins=?, target_wins=?, issuer_merit=?, target_merit=?, winner_guild_id=?, updated_ms=? WHERE feud_id=?")) {
+                    upd.setInt(1, nextStatus);
+                    upd.setInt(2, iw);
+                    upd.setInt(3, tw);
+                    upd.setLong(4, im);
+                    upd.setLong(5, tm);
+                    upd.setLong(6, winner);
+                    upd.setLong(7, nowMs);
+                    upd.setLong(8, feudId);
+                    upd.executeUpdate();
+                }
+                c.commit();
+                FeudRow updated = new FeudRow(row.feudId(), row.zoneId(), row.issuerGuildId(), row.issuerGuildName(),
+                        row.targetGuildId(), row.targetGuildName(), nextStatus, iw, tw, im, tm, row.createdAtMs(),
+                        row.acceptDeadlineMs(), row.startedAtMs(), row.endsAtMs(), winner, nowMs);
+                return new FeudBattleResult(Optional.of(updated), finished);
+            } catch (SQLException | RuntimeException e) {
+                c.rollback();
+                throw e;
+            } finally {
+                c.setAutoCommit(true);
+            }
+        }
+    }
+
+    private static FeudRow readFeud(ResultSet rs) throws SQLException {
+        return new FeudRow(rs.getLong(1), rs.getInt(2), rs.getLong(3), rs.getString(4), rs.getLong(5),
+                rs.getString(6), rs.getInt(7), rs.getInt(8), rs.getInt(9), rs.getLong(10), rs.getLong(11),
+                rs.getLong(12), rs.getLong(13), rs.getLong(14), rs.getLong(15), rs.getLong(16), rs.getLong(17));
     }
 
     private void addGuildWeeklyMerit(Connection c, long guildId, int weekKey, long delta, long nowMs) throws SQLException {

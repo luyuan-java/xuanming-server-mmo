@@ -130,6 +130,8 @@ public final class ScenePlayer {
     private final com.game.scene.player.PlayerProgression progression;
     /** 青云游历手记双轨进度、已解锁典藏与零战力纪念外显。 */
     private final com.game.scene.player.PlayerTravelPass travelPass;
+    /** 待寄个人邮件出箱（名匠代打 95% 净银两分成等，与货币/背包同事务落盘）。 */
+    private final com.game.scene.player.PlayerMailOutbox mailOutbox;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -252,6 +254,9 @@ public final class ScenePlayer {
         this.travelPass = state.hasTravelPass()
                 ? com.game.scene.player.PlayerTravelPass.restore(state.getTravelPass())
                 : com.game.scene.player.PlayerTravelPass.empty();
+        this.mailOutbox = state.hasMailOutbox()
+                ? com.game.scene.player.PlayerMailOutbox.restore(state.getMailOutbox())
+                : com.game.scene.player.PlayerMailOutbox.empty();
     }
 
     public long playerId() {
@@ -630,6 +635,9 @@ public final class ScenePlayer {
         if (!travelPass.isPristine()) {
             state.setTravelPass(travelPass.toState());
         }
+        if (!mailOutbox.isPristine()) {
+            state.setMailOutbox(mailOutbox.toState());
+        }
         return state.build();
     }
 
@@ -700,6 +708,11 @@ public final class ScenePlayer {
     /** 青云游历手记双轨进度、已解锁典藏与零战力纪念外显运行态（逻辑线程上读写；写入只经 {@code TravelPassService}）。 */
     public com.game.scene.player.PlayerTravelPass travelPass() {
         return travelPass;
+    }
+
+    /** 玩家待寄个人邮件出箱（逻辑线程上读写；写入与消费只经 {@code PlayerMailOutboxService}）。 */
+    public com.game.scene.player.PlayerMailOutbox mailOutbox() {
+        return mailOutbox;
     }
 
     /** 收件箱消费账本（逻辑线程上读写；写入只经收件箱消费端）。 */

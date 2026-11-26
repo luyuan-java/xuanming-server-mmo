@@ -78,12 +78,12 @@ class GuildDispatcherTest {
     // ================================================================ 路由与启动校验
 
     @Test
-    void 接管GuildService的全部40个号() {
+    void 接管GuildService的全部43个号() {
         Set<Integer> expected = new HashSet<>();
         for (String method : GuildMethods.all()) {
             expected.add(id(method));
         }
-        assertThat(expected).hasSize(40);
+        assertThat(expected).hasSize(43);
         GuildDispatcher d = dispatcher();
         assertThat(d.routedMessageIds()).isEqualTo(expected);
         assertThat(d.messageIdsOf(GuildMethods.CLIENT_REQUESTS)).hasSize(17);
@@ -91,8 +91,9 @@ class GuildDispatcherTest {
         assertThat(d.messageIdsOf(GuildMethods.FORBIDDEN)).containsExactlyInAnyOrder(8, 220, 494);
         assertThat(d.messageIdsOf(GuildMethods.PLACEHOLDERS)).containsExactlyInAnyOrder(239, 240, 241, 242, 243);
         assertThat(d.messageIdsOf(GuildMethods.GUILD_WAR_PLACEHOLDERS))
-                .containsExactlyInAnyOrder(485, 486, 487, 488, 489, 490, 491, 492, 493, 499);
-        // 契约里的 GuildService 恰好就是这 40 个
+                .containsExactlyInAnyOrder(485, 486, 487, 488, 489, 490, 491, 492, 493, 499, 567, 568);
+        assertThat(d.messageIdsOf(GuildMethods.JIANGHU_PLACEHOLDERS)).containsExactlyInAnyOrder(547);
+        // 契约里的 GuildService 恰好就是这 43 个
         Set<String> contract = new HashSet<>();
         for (MessageMethod m : REGISTRY.all()) {
             if (GuildMethods.SERVICE.equals(m.serviceName())) {

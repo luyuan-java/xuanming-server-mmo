@@ -233,6 +233,7 @@ class InBattleGateMatrixTest {
             new Row(542, REWARDED_AD, "ClaimRewardedAd", BattlePolicy.GATED, REWARDED_AD_IN_BATTLE),
             new Row(454, SEASON, "EquipSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(455, SEASON, "CatchupSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
+            new Row(569, SEASON, "SetRetroHonorTarget", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(457, TRIAL_JOURNAL, "ClaimTrialJournalMilestone", BattlePolicy.GATED, TRIAL_JOURNAL_IN_BATTLE),
             new Row(458, TRIAL_JOURNAL, "RedeemBoundArtifactVoucher", BattlePolicy.GATED, TRIAL_JOURNAL_IN_BATTLE),
             new Row(460, SKILL, "CraftSkillBook", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
@@ -241,6 +242,7 @@ class InBattleGateMatrixTest {
             new Row(463, SKILL, "SetCraftProxyStall", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
             new Row(502, SKILL, "SaveSkillLoadout", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
             new Row(503, SKILL, "SwitchSkillLoadout", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
+            new Row(565, SKILL, "RentSkillLoadoutSlots", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
             // 批次 5.4：226 跨 zone 传送自己判战斗在途（基线 kZoneTravelInBattle，player_lifecycle.cpp:2784-2788），计在 zone_travel 闸上
             new Row(226, SCENE, "TravelToZone", BattlePolicy.GATED, ZONE_TRAVEL_IN_BATTLE),
             // ALLOW：只读
@@ -731,6 +733,8 @@ class InBattleGateMatrixTest {
                     .setExpectedTotalPrice(rule.getCatchupPricePerPoint())
                     .build();
         });
+        out.put(SEASON + "SetRetroHonorTarget", s -> com.game.proto.SetRetroHonorTargetRequest.newBuilder()
+                .setSeasonId(2).build());
         out.put(BATTLE_RESULT + "GetRecentBattleResults", s -> com.game.proto.GetRecentBattleResultsRequest.getDefaultInstance());
         out.put(BATTLE_RESULT + "AckBattleResults", s -> com.game.proto.AckBattleResultsRequest.getDefaultInstance());
         out.put(BAG + "SortBag", s -> SortBagRequest.newBuilder().setBagType(BagType.INVENTORY.code()).build());
@@ -805,6 +809,8 @@ class InBattleGateMatrixTest {
                 .setSchemeId(1).setRoleTag(1).setStateVersion(1L).setRequestId("battle-loadout-000001").build());
         out.put(SKILL + "SwitchSkillLoadout", s -> com.game.proto.SwitchSkillLoadoutRequest.newBuilder()
                 .setSchemeId(2).setStateVersion(1L).setRequestId("battle-loadout-000002").build());
+        out.put(SKILL + "RentSkillLoadoutSlots", s -> com.game.proto.RentSkillLoadoutSlotsRequest.newBuilder()
+                .setClientRequestId(9204L).setTargetRentedSlots(1).setAddPeriods(1).setExpectedCostDiamond(30L).build());
         out.put(ACTIVITY + "GetFestivalBeastDetail", s -> com.game.proto.GetFestivalBeastDetailRequest.getDefaultInstance());
         out.put(ACTIVITY + "StartFestivalBeastChallenge", s -> com.game.proto.StartFestivalBeastChallengeRequest.newBuilder()
                 .setClientRequestId("11111111-1111-4111-8111-111111111111")
@@ -1272,6 +1278,10 @@ class InBattleGateMatrixTest {
         if (row.service().equals(SPIRIT_SHOP) && row.method().equals("BuySpiritShopGoods")) {
             var g = w.spiritShopTables.sellableGoods().getFirst();
             assertThat(w.currency.add(subject.player(), g.currencyType(), g.unitPrice() * 2, Reason.GM_GRANT).ok()).isTrue();
+            w.sink.clear();
+        }
+        if (row.service().equals(SKILL) && row.method().equals("RentSkillLoadoutSlots")) {
+            assertThat(w.currency.add(subject.player(), com.game.scene.player.Wallet.DIAMOND, 100L, Reason.GM_GRANT).ok()).isTrue();
             w.sink.clear();
         }
         if (row.service().equals(ACTIVITY) && (row.method().equals("UnlockTravelPassPremium")

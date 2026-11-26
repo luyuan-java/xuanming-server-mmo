@@ -54,11 +54,15 @@ class MatchMethodsTest {
                 MatchMethods.REGISTER_TOURNAMENT_SQUAD, MatchMethods.LIST_TOURNAMENT_STANDINGS,
                 MatchMethods.START_TOURNAMENT_MATCH, MatchMethods.CHEER_TOURNAMENT_SQUAD,
                 MatchMethods.CLAIM_TOURNAMENT_REWARD,
-                MatchMethods.SALUTE_TOURNAMENT_CHAMPION, MatchMethods.SEND_TOURNAMENT_SPECTATE_CHEER,
+                MatchMethods.SEND_TOURNAMENT_SPECTATE_CHEER,
                 MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER,
                 MatchMethods.UPDATE_TOURNAMENT_SQUAD_EMBLEM, MatchMethods.START_TOURNAMENT_WARMUP,
                 MatchMethods.PREDICT_TOURNAMENT_MATCH, MatchMethods.GET_TOURNAMENT_PREDICTION_BOARD,
-                MatchMethods.BAN_TOURNAMENT_LEYLINE, MatchMethods.GET_TOURNAMENT_HIGHLIGHTS)) {
+                MatchMethods.BAN_TOURNAMENT_LEYLINE, MatchMethods.GET_TOURNAMENT_HIGHLIGHTS,
+                MatchMethods.CREATE_JIANGHU_DUEL_INVITE, MatchMethods.CONFIRM_JIANGHU_DUEL_MEMBER,
+                MatchMethods.RESPOND_JIANGHU_DUEL_INVITE, MatchMethods.LIST_JIANGHU_GRUDGES,
+                MatchMethods.DISMISS_JIANGHU_GRUDGE, MatchMethods.NOTIFY_JIANGHU_DUEL_INVITE,
+                MatchMethods.NOTIFY_JIANGHU_DUEL_STATUS)) {
             expected.put(tournamentMethod, REGISTRY.requireId(MatchMethods.SERVICE, tournamentMethod));
         }
 
@@ -84,8 +88,12 @@ class MatchMethodsTest {
         for (String method : MatchMethods.ALL) {
             MessageMethod contract = REGISTRY.byId(REGISTRY.requireId(MatchMethods.SERVICE, method)).orElseThrow();
             boolean empty = contract.responsePrototype() instanceof Empty;
-            assertThat(empty).as(method).isEqualTo(Set.of(MatchMethods.CANCEL_QUEUE, MatchMethods.NOTIFY_CHALLENGE_INVITE,
-                    MatchMethods.NOTIFY_CHALLENGE_RESULT).contains(method));
+            assertThat(empty).as(method).isEqualTo(Set.of(
+                    MatchMethods.CANCEL_QUEUE,
+                    MatchMethods.NOTIFY_CHALLENGE_INVITE,
+                    MatchMethods.NOTIFY_CHALLENGE_RESULT,
+                    MatchMethods.NOTIFY_JIANGHU_DUEL_INVITE,
+                    MatchMethods.NOTIFY_JIANGHU_DUEL_STATUS).contains(method));
         }
     }
 

@@ -876,37 +876,41 @@ class RankedBattleEngineTest {
 
     @Test
     void 论剑V6宿敌战前脱敏雪耻复仇与问道名局配招快照() {
-        FakeBattleData data = baseData();
-        SeasonSealEffect seal101 = SeasonSealEffect.newBuilder()
-                .setSeasonId(1).setSealId(101).setEffectId(1).setEffectValue(10).setName("破阵锐印").build();
-        SeasonSealEffect seal103 = SeasonSealEffect.newBuilder()
-                .setSeasonId(1).setSealId(103).setEffectId(6).setEffectValue(10).setName("固阵守印").build();
+        SeasonSealEffect seal101 = makeSeal(1, 101, 7, "破阵锐印");
+        SeasonSealEffect seal103 = makeSeal(1, 103, 8, "固阵守印");
         BattlePetSnapshot petFox = BattlePetSnapshot.newBuilder()
                 .setPetId(9501L).setOwnerPlayerId(6601L).setPetTableId(1).setPetName("灵狐")
                 .setLevel(30).setMaxHealth(2000).setMaxMana(500).setPhysicalAttack(100).setDefense(50)
-                .setBaseAttributes(BattleAttributes.newBuilder().setHealth(2000).setMana(500).setSpeed(150))
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(2000).setMana(500).setSpeed(150))
                 .build();
         BattlePetSnapshot petStone = BattlePetSnapshot.newBuilder()
                 .setPetId(9502L).setOwnerPlayerId(6601L).setPetTableId(2).setPetName("石灵")
                 .setLevel(30).setMaxHealth(2500).setMaxMana(500).setPhysicalAttack(100).setDefense(80)
-                .setBaseAttributes(BattleAttributes.newBuilder().setHealth(2500).setMana(500).setSpeed(120))
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(2500).setMana(500).setSpeed(120))
                 .build();
 
-        BattlePlayerSnapshot pA = BattlePlayerSnapshot.newBuilder()
-                .setPlayerId(6601L).setTeamIndex(0).setPlayerName("青云").setLevel(30).setActiveSeasonId(1)
+        RankedPresetTable charPreset = tables.rankedPreset().find(101).orElseThrow();
+        List<Integer> expectedSkills = charPreset.getSkillIdsList().stream()
+                .filter(sid -> tables.skill().find(sid).map(BattleRules::isTurnBattleCastableSkill).orElse(false))
+                .limit(4)
+                .toList();
+        BattlePlayerSnapshot.Builder pABuilder = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(6601L).setTeamIndex(0).setPlayerName("青云").setClassId(1).setLevel(30).setActiveSeasonId(1)
                 .setMaxHealth(10000).setMaxMana(2000).setPhysicalAttack(6000).setDefense(100)
-                .setBaseAttributes(BattleAttributes.newBuilder().setHealth(10000).setMana(2000).setSpeed(300))
-                .addSkillTableIds(10002).addSkillTableIds(10003)
-                .setEquipmentEffects(BattleEquipmentEffects.newBuilder().setSeasonSeal(seal101))
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(10000).setMana(2000).setSpeed(300))
+                .setEquipmentEffects(EquipmentEffects.newBuilder().setSeasonSeal(seal101))
                 .addAvailableSeasonSeals(seal101).addAvailableSeasonSeals(seal103)
-                .addPets(petFox).addStandbyPets(petStone)
-                .build();
+                .addPets(petFox).addStandbyPets(petStone);
+        for (int sid : expectedSkills) {
+            pABuilder.addSkillTableIds(sid).putSkillRanks(sid, 1);
+        }
+        BattlePlayerSnapshot pA = pABuilder.build();
         BattlePlayerSnapshot pB = BattlePlayerSnapshot.newBuilder()
                 .setPlayerId(6602L).setTeamIndex(1).setPlayerName("玄烈").setLevel(30).setActiveSeasonId(1)
                 .setMaxHealth(500).setMaxMana(500).setPhysicalAttack(100).setDefense(0)
-                .setBaseAttributes(BattleAttributes.newBuilder().setHealth(500).setMana(500).setSpeed(100))
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(500).setMana(500).setSpeed(100))
                 .addSkillTableIds(10002)
-                .setEquipmentEffects(BattleEquipmentEffects.newBuilder().setSeasonSeal(seal101))
+                .setEquipmentEffects(EquipmentEffects.newBuilder().setSeasonSeal(seal101))
                 .addAvailableSeasonSeals(seal101)
                 .build();
 
@@ -941,13 +945,14 @@ class RankedBattleEngineTest {
         BattlePrepState prepObs = engine.prepStateForViewer(0L, 999L);
         assertThat(prepObs.getSelfRivalriesList()).isEmpty();
 
-        assertThat(engine.updateBattlePrep(6601L, 103, 9502L, true).errorCode()).isZero();
-        assertThat(engine.updateBattlePrep(6602L, 0, 0L, true).errorCode()).isZero();
+        assertThat(engine.updateBattlePrep(6601L, 103, 9502L, true).errorTip()).isZero();
+        assertThat(engine.updateBattlePrep(6602L, 0, 0L, true).errorTip()).isZero();
         assertThat(engine.finalizePrepPhase()).isTrue();
 
-        assertThat(engine.submitAction(6601L, BattleAction.newBuilder()
-                .setActionType(eBattleActionType.BATTLE_ACTION_ATTACK).setTargetId(6602L).build()))
-                .isEqualTo(ActionChecks.SUCCESS);
+        BattleAction attackB = BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_ATTACK).setTargetId(6602L).build();
+        assertThat(engine.validateAction(6601L, attackB)).isEqualTo(ActionChecks.SUCCESS);
+        engine.submitAction(6601L, attackB);
         engine.submitAction(6602L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
         engine.resolveCurrentRound();
         assertThat(engine.outcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN);
@@ -960,7 +965,7 @@ class RankedBattleEngineTest {
         assertThat(settleA.getFinalSeasonSealId()).isEqualTo(103);
         assertThat(settleA.getStarterPetTableId()).isEqualTo(2);
         assertThat(settleA.getPlayerDisplayName()).isEqualTo("青云");
-        assertThat(settleA.getCoreSkillIdsList()).contains(10002, 10003);
+        assertThat(settleA.getCoreSkillIdsList()).containsExactlyElementsOf(expectedSkills);
 
         BattleSettlementData settleB = engine.buildSettlement(6602L);
         assertThat(settleB.getRevengedRival()).isFalse();

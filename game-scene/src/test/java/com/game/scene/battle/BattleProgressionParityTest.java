@@ -284,6 +284,20 @@ class BattleProgressionParityTest {
         assertThat(blockedPlayer.progression().totalExp()).isEqualTo(1000L);
         assertThat(blockedPlayer.wallet().balance(Wallet.GOLD)).isZero();
         assertThat(blockedPlayer.clientRequestLedger().battleEconomy().getBattleSilverThisWeek()).isZero();
+
+        // 跨周首局遇金币封禁时，不得把上周 battleSilverThisWeek 回写到新周账本。
+        long curWeekStart = blockedPlayer.clientRequestLedger().battleEconomy().getWeekStartsAtMs();
+        blockedPlayer.clientRequestLedger().setBattleEconomy(BattleEconomyLedgerState.newBuilder()
+                .setWeekStartsAtMs(curWeekStart > 7L * 86_400_000L ? curWeekStart - 7L * 86_400_000L : 1L)
+                .setBattleSilverThisWeek(25_000L)
+                .build());
+        BattleSettlementData crossWeekBlocked = baseSettlement(blockedPlayer, 7503L)
+                .setMatchMode(MatchMode.MATCH_MODE_PVE_SOLO_VALUE)
+                .setBattleDifficulty(1)
+                .build();
+        assertThat(f.settlements.applyInbox(f.world, blockedPlayer, crossWeekBlocked).outcome())
+                .isEqualTo(BattleSettlementService.Outcome.APPLIED);
+        assertThat(blockedPlayer.clientRequestLedger().battleEconomy().getBattleSilverThisWeek()).isZero();
     }
 
     @Test

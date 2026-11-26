@@ -284,7 +284,7 @@ class EconomyTablesTest {
         assertThat(lookup.donateOption(2).getCostAmount()).isEqualTo(100_000);
         assertThat(lookup.donateOption(0)).isNull();
         assertThat(lookup.sortedShopRows()).extracting(GuildShopTable::getId)
-                .containsExactly(101, 102, 103, 104, 105, 201, 202, 203, 204, 205, 206, 301, 302, 303, 304, 305);
+                .containsExactly(101, 102, 103, 104, 105, 201, 202, 203, 204, 205, 206, 301, 302, 303, 304, 305, 306);
         assertThat(lookup.shopGoods(202).getItemId()).isEqualTo(12);
         assertThat(lookup.shopGoods(999)).isNull();
         assertThat(lookup.itemMaxStack(12)).hasValue(1);

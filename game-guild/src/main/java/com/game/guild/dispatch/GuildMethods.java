@@ -70,6 +70,9 @@ public final class GuildMethods {
     public static final String TRACK_GUILD_WAR_BOUNTY = "TrackGuildWarBounty";
     public static final String GET_GUILD_WAR_BATTLE_RESULT = "GetGuildWarBattleResult";
     public static final String INSPECT_FIELD_WAR_TARGETS = "InspectFieldWarTargets";
+    public static final String ISSUE_GUILD_WAR_FEUD = "IssueGuildWarFeud";
+    public static final String RESPOND_GUILD_WAR_FEUD = "RespondGuildWarFeud";
+    public static final String GET_GUILD_JIANGHU_GRUDGE_WALL = "GetGuildJianghuGrudgeWall";
 
     public static final List<String> CLIENT_REQUESTS = List.of(CREATE_GUILD, GET_GUILD, GET_PLAYER_GUILD, LEAVE_GUILD,
             DISBAND_GUILD, SET_ANNOUNCEMENT, RENAME_GUILD, SET_GUILD_MEMBER_ROLE, KICK_GUILD_MEMBER, TRANSFER_GUILD_LEADER,
@@ -86,14 +89,18 @@ public final class GuildMethods {
 
     public static final List<String> GUILD_WAR_PLACEHOLDERS = List.of(GET_GUILD_WAR_OVERVIEW, SET_GUILD_WAR_STANCE,
             REGISTER_GUILD_WAR_GARRISON, START_GUILD_WAR_BATTLE, CLAIM_GUILD_WAR_MILESTONE, CLAIM_GUILD_WAR_DIVIDEND,
-            POST_GUILD_WAR_BOUNTY, TRACK_GUILD_WAR_BOUNTY, GET_GUILD_WAR_BATTLE_RESULT, INSPECT_FIELD_WAR_TARGETS);
+            POST_GUILD_WAR_BOUNTY, TRACK_GUILD_WAR_BOUNTY, GET_GUILD_WAR_BATTLE_RESULT, INSPECT_FIELD_WAR_TARGETS,
+            ISSUE_GUILD_WAR_FEUD, RESPOND_GUILD_WAR_FEUD);
+
+    public static final List<String> JIANGHU_PLACEHOLDERS = List.of(GET_GUILD_JIANGHU_GRUDGE_WALL);
 
     private GuildMethods() {
     }
 
-    /** 全部 40 个方法（启动校验：每个都必须在 message_id.txt 里）。 */
+    /** 全部 43 个方法（启动校验：每个都必须在 message_id.txt 里）。 */
     public static List<String> all() {
-        return java.util.stream.Stream.of(CLIENT_REQUESTS, ECONOMY_REQUESTS, FORBIDDEN, PLACEHOLDERS, GUILD_WAR_PLACEHOLDERS)
+        return java.util.stream.Stream.of(CLIENT_REQUESTS, ECONOMY_REQUESTS, FORBIDDEN, PLACEHOLDERS,
+                        GUILD_WAR_PLACEHOLDERS, JIANGHU_PLACEHOLDERS)
                 .flatMap(List::stream)
                 .toList();
     }

@@ -56,8 +56,9 @@ final class ConfiguredEffects {
             value = SupportEffectRules.applyBonus(value,PetCultivationRules.rate(source.state().getPetCultivation().getPoisonDamageBps()));
         if (op == REVIVE) value = SupportEffectRules.applyBonus(value,battle.equipment.healingBonus(source));
         List<Integer> artifacts = new ArrayList<>();
+        long[] seasonSealShieldGain = new long[1];
         if (op == SHIELD && (source.isPet() || row.getHitLimit() == 0))
-            value = battle.equipment.shield(source,receiver,value,hit,artifacts);
+            value = battle.equipment.shield(source,receiver,value,hit,artifacts,seasonSealShieldGain);
         if (op == SHIELD && ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_WOOD)
             value *= 110.0 / 100.0;
         if (op == SHIELD) {
@@ -68,6 +69,19 @@ final class ConfiguredEffects {
         }
         if (op == SHIELD && ctx.escalationStacks() > 0)
             value *= ctx.escalationSupportPct() / 100.0;
+        long nextRoundShieldGain = 0L;
+        if (op == SHIELD && hit.origin == DIRECT
+                && ctx.activeNextRoundBoostCasterId == source.actorId()
+                && (ctx.activeNextRoundBoostKind == SeasonRules.RESONANCE_GUARD_SHIELD_BOOST
+                    || ctx.activeNextRoundBoostKind == SeasonRules.RESONANCE_DEFEND_SHIELD_BOOST)
+                && ctx.activeNextRoundBoostPct > 0) {
+            long beforeShield = fromDoubleSaturating(value);
+            value *= (100.0 + Integer.toUnsignedLong(ctx.activeNextRoundBoostPct)) / 100.0;
+            long afterShield = fromDoubleSaturating(value);
+            if (Long.compareUnsigned(afterShield, beforeShield) > 0) {
+                nextRoundShieldGain = afterShield - beforeShield;
+            }
+        }
         if (instant(op) && row.getTriggerEvent() == 0) {
             switch (op) {
                 case DAMAGE -> {
@@ -178,9 +192,27 @@ final class ConfiguredEffects {
         }
         if (previous != null) battle.remove(receiver,previous.getBuffId());
         long instance = battle.legacy.nextInstance();
+        int appliedRemainRounds = row.getDurationRounds();
+        boolean mysticResonanceExtended = false;
+        int mysticBonusRounds = 0;
+        if (hostile && op == MODIFIER && appliedRemainRounds > 0
+                && hit.origin == DIRECT
+                && ctx.pendingMysticExtendSkillId != 0
+                && hit.skill == ctx.pendingMysticExtendSkillId
+                && source.actorId() == ctx.pendingMysticExtendCasterId
+                && receiver.actorId() == ctx.pendingMysticExtendTargetId
+                && ctx.pendingMysticExtendBonusRounds > 0) {
+            mysticBonusRounds = ctx.pendingMysticExtendBonusRounds;
+            appliedRemainRounds += mysticBonusRounds;
+            ctx.pendingMysticExtendCasterId = 0L;
+            ctx.pendingMysticExtendTargetId = 0L;
+            ctx.pendingMysticExtendSkillId = 0;
+            ctx.pendingMysticExtendBonusRounds = 0;
+            mysticResonanceExtended = true;
+        }
         var added = receiver.state().addBuffsBuilder().setBuffId(instance).setBuffTableId(id).setCasterId(source.actorId())
                 .setSourceSkillId(hit.skill).setLayer(1).setSnapshotValue(strength).setRemainingCapacity(fromDoubleSaturating(value))
-                .setRemainingHits(row.getHitLimit()).setRemainingTicks(row.getTickCount()).setRemainRounds(row.getDurationRounds())
+                .setRemainingHits(row.getHitLimit()).setRemainingTicks(row.getTickCount()).setRemainRounds(appliedRemainRounds)
                 .setAppliedRound(ctx.roundIndex()).setTickRound(ctx.roundIndex() + (row.getTickOnApply() != 0 ? 0 : 1))
                 .setExtensionsUsed(previous == null ? 0 : previous.getExtensionsUsed());
         if (op == REVIVE) added.setOutgoingHealSnapshot(value);
@@ -201,7 +233,19 @@ final class ConfiguredEffects {
         if (hostile && (op == CONTROL || op == PERIODIC)) ctx.encounter.recordEffectiveContribution(source);
         if (op == SHIELD) {
             event.setShieldAfter(fromDoubleSaturating(value));
-            for (int index : artifacts) battle.equipment.use(source,index,receiver,source.state().getEquipmentEffects().getArtifacts(index).getBonusBps());
+            if (nextRoundShieldGain != 0L) {
+                ctx.activeNextRoundBoostExtra = EquipmentCombatRules.addSaturated(
+                        ctx.activeNextRoundBoostExtra, nextRoundShieldGain);
+            }
+            for (int index : artifacts) battle.equipment.use(source,index,receiver,battle.equipment.bonusBps(source,index));
+            if (seasonSealShieldGain[0] != 0L) {
+                battle.equipment.commitSeasonSealShield(source, receiver, seasonSealShieldGain[0], hit.skill);
+            }
+        }
+        if (mysticResonanceExtended) {
+            battle.equipment.emitSeasonResonance(source, receiver.actorId(),
+                    SeasonRules.RESONANCE_EVENT_MYSTIC_EXTEND_DEBUFF,
+                    Integer.toUnsignedLong(mysticBonusRounds));
         }
         if (row.getTriggerEvent() == 0 && op != PURSUIT && op != PREPARE_CAST) {
             for (int child : row.getSubBuffList()) {

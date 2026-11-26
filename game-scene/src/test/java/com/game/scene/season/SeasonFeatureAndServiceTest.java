@@ -419,13 +419,14 @@ class SeasonFeatureAndServiceTest {
         var initState = service.getState(player, nowMs).getState();
         assertThat(initState.getWeeklyAffix().getAffixId()).isEqualTo(weeklyAffix);
         assertThat(initState.getWeeklyAffix().getRecommendedSealIdsCount()).isPositive();
-        assertThat(initState.getHonorsList()).singleElement().satisfies(h -> {
+        assertThat(initState.getHonorsList()).hasSize(10);
+        assertThat(initState.getHonors(0)).satisfies(h -> {
             assertThat(h.getSeasonId()).isEqualTo(1);
             assertThat(h.getHonorTitleName()).isEqualTo("破阵宗师");
             assertThat(h.getUnlocked()).isFalse();
         });
 
-        // 2. 11 -> 12 结算首次解锁纪念荣誉；满级后再打 pointsAdded=0 且 honorNewlyUnlocked=false
+        // 2. 11 -> 12 结算首次解锁纪念荣誉；满级后再打当前季 pointsAdded=0 且溢出流向往季追忆（S2）
         player.season().putRecord(com.game.player.store.state.PlayerSeasonSealRecordState.newBuilder()
                 .setSeasonId(1).setEquippedSealId(101).setProgressPoints(11).setBattlePoints(11).build());
         var pveWin = BattleSettlementData.newBuilder()
@@ -439,14 +440,18 @@ class SeasonFeatureAndServiceTest {
         assertThat(c1.progressAfter()).isEqualTo(12);
         assertThat(c1.maxPoints()).isEqualTo(12);
         assertThat(c1.honorNewlyUnlocked()).isTrue();
+        assertThat(c1.retroHonorSeasonId()).isZero();
 
         var c2 = service.creditBattlePoints(player, pveWin, nowMs);
         assertThat(c2.pointsAdded()).isZero();
         assertThat(c2.progressAfter()).isEqualTo(12);
         assertThat(c2.maxPoints()).isEqualTo(12);
         assertThat(c2.honorNewlyUnlocked()).isFalse();
+        assertThat(c2.retroHonorSeasonId()).isEqualTo(2);
+        assertThat(c2.retroHonorPointsAdded()).isEqualTo(1);
+        assertThat(c2.retroHonorProgressAfter()).isEqualTo(1);
 
-        // 3. 切到预埋的 S2「玄脉之季」：S2 4 印 4 技生效，进度清零，S1 纪念荣誉永久留存
+        // 3. 切到预埋的 S2「玄脉之季」：S2 4 印 4 技生效，进度清零，S1 纪念荣誉永久留存，荣誉墙全量 10 季
         var s2Rules = BattleFixture.CONFIG.seasonRule().all().stream()
                 .map(r -> r.toBuilder().setEnabled(r.getId() == 2).build())
                 .toList();
@@ -461,22 +466,148 @@ class SeasonFeatureAndServiceTest {
         assertThat(s2Snap.getProgressPoints()).isZero();
         assertThat(s2Snap.getSealsCount()).isEqualTo(4);
         assertThat(s2Snap.getSeasonSkillsCount()).isEqualTo(4);
-        assertThat(s2Snap.getHonorsList()).hasSize(2);
+        assertThat(s2Snap.getHonorsList()).hasSize(10);
         assertThat(s2Snap.getHonors(0).getSeasonId()).isEqualTo(1);
         assertThat(s2Snap.getHonors(0).getUnlocked()).isTrue();
         assertThat(s2Snap.getHonors(1).getSeasonId()).isEqualTo(2);
         assertThat(s2Snap.getHonors(1).getUnlocked()).isFalse();
 
-        // 4. 休赛期依然返回历史永久纪念荣誉
+        // 4. 休赛期依然返回完整荣誉墙且 S1 永久留存
         var offRules = s2Rules.stream().map(r -> r.toBuilder().setEnabled(false).build()).toList();
         SeasonService offService = new SeasonService(
                 new SeasonTables(offRules, BattleFixture.CONFIG.seasonSeal().all(), BattleFixture.CONFIG.skill().all()),
                 f.currency, f.attributes, f.clock, f.sceneMetrics);
         var offSnap = offService.getState(player, nowMs).getState();
         assertThat(offSnap.getAvailable()).isFalse();
-        assertThat(offSnap.getHonorsList()).singleElement().satisfies(h -> {
+        assertThat(offSnap.getHonorsList()).hasSize(10);
+        assertThat(offSnap.getHonors(0)).satisfies(h -> {
             assertThat(h.getSeasonId()).isEqualTo(1);
             assertThat(h.getUnlocked()).isTrue();
         });
+    }
+
+    @Test
+    void 十季无限循环期号重置_往季追忆569与未知字段往返保留() throws Exception {
+        BattleFixture f = new BattleFixture();
+        long anchorMs = 1_760_000_000_000L;
+        long periodMs = 28L * 24L * 3600L * 1000L;
+        var cycleRules = BattleFixture.CONFIG.seasonRule().all().stream()
+                .map(r -> r.toBuilder()
+                        .setEnabled(true)
+                        .setStartsAtMs(anchorMs)
+                        .setEndsAtMs(0L)
+                        .setCycleDurationDays(28)
+                        .build())
+                .toList();
+        SeasonTables cycleTables = new SeasonTables(cycleRules,
+                BattleFixture.CONFIG.seasonSeal().all(), BattleFixture.CONFIG.skill().all());
+        assertThat(cycleTables.isValid()).isTrue();
+        assertThat(cycleTables.allRuleIdsAsc()).hasSize(10);
+
+        // Term 1 = S1, Term 2 = S2, Term 11 = Cycle 2 S1
+        var t1 = cycleTables.resolveActive(anchorMs + 1000L);
+        assertThat(t1).isNotNull();
+        assertThat(t1.rule().getId()).isEqualTo(1);
+        assertThat(t1.resolved().seasonTerm()).isEqualTo(1);
+        assertThat(t1.resolved().cycleIndex()).isEqualTo(1);
+        assertThat(t1.resolved().cyclePoolSize()).isEqualTo(10);
+
+        var t11 = cycleTables.resolveActive(anchorMs + 10L * periodMs + 1000L);
+        assertThat(t11).isNotNull();
+        assertThat(t11.rule().getId()).isEqualTo(1);
+        assertThat(t11.resolved().seasonTerm()).isEqualTo(11);
+        assertThat(t11.resolved().cycleIndex()).isEqualTo(2);
+
+        // 在 Term 1 满级解锁 S1 -> 进 Term 11 时进度清零但 S1 永久徽章永不收回
+        ScenePlayer player = enterLevelPlayer(f, 55, 7201L, 40);
+        SeasonService cycleSvc = new SeasonService(cycleTables, f.currency, f.attributes, f.clock, f.sceneMetrics);
+        long t1Ms = anchorMs + 1000L;
+        player.season().putRecord(com.game.player.store.state.PlayerSeasonSealRecordState.newBuilder()
+                .setSeasonId(1).setEquippedSealId(101).setProgressPoints(11).setBattlePoints(11).build());
+        var pvpWin = BattleSettlementData.newBuilder()
+                .setBattleId(99001L).setPlayerId(player.playerId()).setPlayerTeamIndex(0)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                .setMatchMode(MatchMode.MATCH_MODE_1V1_VALUE)
+                .setTotalRounds(3)
+                .build();
+        // PVP 胜 +2 点：1 点补满 S1，1 点溢出流向往季追忆（默认 S2）
+        var c1 = cycleSvc.creditBattlePoints(player, pvpWin, t1Ms);
+        assertThat(c1.pointsAdded()).isEqualTo(1);
+        assertThat(c1.progressAfter()).isEqualTo(12);
+        assertThat(c1.honorNewlyUnlocked()).isTrue();
+        assertThat(c1.retroHonorSeasonId()).isEqualTo(2);
+        assertThat(c1.retroHonorPointsAdded()).isEqualTo(1);
+
+        // RPC 569 指定往季追忆目标为 S5；指定当季 S1 或已解锁 S1 均拒绝
+        f.clock.setEpochMillis(t1Ms);
+        var badCur = cycleSvc.setRetroHonorTarget(player,
+                com.game.proto.SetRetroHonorTargetRequest.newBuilder().setSeasonId(1).build(), t1Ms);
+        assertThat(badCur.response().getErrorMessage().getId()).isEqualTo(kSeasonHonorTargetInvalid_VALUE);
+
+        var okS5 = cycleSvc.setRetroHonorTarget(player,
+                com.game.proto.SetRetroHonorTargetRequest.newBuilder().setSeasonId(5).build(), t1Ms);
+        assertThat(okS5.response().getErrorMessage().getId()).isZero();
+        assertThat(okS5.response().getState().getRetroHonorTargetSeasonId()).isEqualTo(5);
+        assertThat(okS5.response().getState().getRetroHonorTargetExplicit()).isTrue();
+
+        // 继续打 6 场 PVP 胜（12 点）免费追忆解锁 S5 永久徽章并自动顺延回 S2
+        SeasonService.BattleCreditOutcome last = null;
+        for (int i = 0; i < 6; i++) {
+            last = cycleSvc.creditBattlePoints(player, pvpWin, t1Ms);
+        }
+        assertThat(last).isNotNull();
+        assertThat(last.retroHonorSeasonId()).isEqualTo(5);
+        assertThat(last.retroHonorNewlyUnlocked()).isTrue();
+        assertThat(player.season().isHonorBitSet(5)).isTrue();
+        var afterS5 = cycleSvc.getState(player, t1Ms).getState();
+        assertThat(afterS5.getRetroHonorTargetSeasonId()).isEqualTo(2);
+        assertThat(afterS5.getRetroHonorTargetExplicit()).isFalse();
+
+        // 已解锁 S5 再次选为目标 -> kSeasonHonorAlreadyUnlocked
+        var dupS5 = cycleSvc.setRetroHonorTarget(player,
+                com.game.proto.SetRetroHonorTargetRequest.newBuilder().setSeasonId(5).build(), t1Ms);
+        assertThat(dupS5.response().getErrorMessage().getId()).isEqualTo(kSeasonHonorAlreadyUnlocked_VALUE);
+
+        // 进入第 2 轮 Term 11（S1 回归）：进度自动清零 0/12，S1 & S5 永久徽章永不收回；追赶只补本季，不溢出到往季追忆
+        long t11Ms = anchorMs + 10L * periodMs + 1000L;
+        var t11Snap = cycleSvc.getState(player, t11Ms).getState();
+        assertThat(t11Snap.getSeasonId()).isEqualTo(1);
+        assertThat(t11Snap.getSeasonTerm()).isEqualTo(11);
+        assertThat(t11Snap.getCycleIndex()).isEqualTo(2);
+        assertThat(t11Snap.getProgressPoints()).isZero();
+        assertThat(t11Snap.getHonors(0).getUnlocked()).isTrue();
+        assertThat(t11Snap.getHonors(4).getUnlocked()).isTrue();
+
+        // 569 端到端路由验证（经由 SeasonFeature）
+        ensureActiveSeason(f);
+        ScenePlayer routed = enterLevelPlayer(f, 56, 7202L, 30);
+        long r569 = f.request(routed, SERVICE, "SetRetroHonorTarget",
+                com.game.proto.SetRetroHonorTargetRequest.newBuilder().setSeasonId(3).build());
+        var resp569 = com.game.proto.SetRetroHonorTargetResponse.parseFrom(
+                lastReply(f, routed, SERVICE, "SetRetroHonorTarget", r569).getSerializedMessage());
+        assertThat(resp569.getErrorMessage().getId()).isZero();
+        assertThat(resp569.getState().getRetroHonorTargetSeasonId()).isEqualTo(3);
+
+        // 持久化未知字段往返证据（PlayerSeasonState & PlayerSeasonSealRecordState）
+        var unknownState = com.google.protobuf.UnknownFieldSet.newBuilder()
+                .addField(991, com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(12345L).build())
+                .build();
+        var unknownRecord = com.google.protobuf.UnknownFieldSet.newBuilder()
+                .addField(992, com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(67890L).build())
+                .build();
+        var rawRecord = com.game.player.store.state.PlayerSeasonSealRecordState.newBuilder()
+                .setSeasonId(1).setEquippedSealId(101).setProgressPoints(3).setLastTerm(1)
+                .setUnknownFields(unknownRecord).build();
+        var rawSeason = com.game.player.store.state.PlayerSeasonState.newBuilder()
+                .addRecords(rawRecord).setRetroHonorTargetSeasonId(4)
+                .setUnknownFields(unknownState).build();
+        var restored = com.game.scene.player.PlayerSeason.restore(rawSeason);
+        restored.setHonorBit(2);
+        restored.putRecord(restored.record(1).toBuilder().setProgressPoints(5).build());
+        var saved = restored.toState();
+        assertThat(saved.getUnknownFields().getField(991).getVarintList()).containsExactly(12345L);
+        assertThat(saved.getRecords(0).getUnknownFields().getField(992).getVarintList()).containsExactly(67890L);
+        assertThat(saved.getRecords(0).getProgressPoints()).isEqualTo(5);
+        assertThat(saved.getUnlockedHonorWordsList()).containsExactly(2L);
     }
 }

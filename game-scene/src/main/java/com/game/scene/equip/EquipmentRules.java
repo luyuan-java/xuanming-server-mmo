@@ -82,6 +82,9 @@ public final class EquipmentRules {
     public static final int V1_MAX_ENHANCE_LEVEL = 11;
     public static final int V1_ENHANCE_BONUS_PER_LEVEL = 200;
     public static final int V1_TOP_ENHANCE_BONUS_PERMYRIAD = 2400;
+    /** 控辅强化公平受益份额（万分比，对齐 C++ equip_attribute_rules.h）：奶盾 50%、控场命中 25%、速度永不缩放。 */
+    public static final int V1_SUPPORT_ENHANCE_SHARE_PERMYRIAD = 5000;
+    public static final int V1_CONTROL_ENHANCE_SHARE_PERMYRIAD = 2500;
 
     public int level(BagItem item) {
         if (item.equipment() == null) return 0;
@@ -132,13 +135,64 @@ public final class EquipmentRules {
             default -> false;
         };
     }
+
+    /**
+     * 某条基础属性是否随强化放大（对齐 C++ {@code equiprules::EnhancesBaseAttribute}）：
+     * V1 基础装放大基础气血(1)、物攻(3)、法攻(4)、双攻(effect=4)、防御(6)；速度(5)永不随强化放大。
+     */
+    public static boolean enhancesBaseAttribute(int equipProfile, EquipAttributeTable row) {
+        if (!accepted(row)) return false;
+        if (equipProfile == 0) return true;
+        if (equipProfile != 1) return false;
+        if (row.getEffect() == 4) return true;
+        if (row.getEffect() != 3) return false;
+        int param = row.getEffectParam();
+        return param == 1 || param == 3 || param == 4 || param == 6;
+    }
+
+    /** V1 基础装固定词条享受强化的克制份额（万分比）：施放治疗(5)/护盾(6)=5000(50%)，控场命中(11)=2500(25%)，其余含速度(4)=0。 */
+    public static int v1FixedAffixEnhanceSharePermyriad(int equipProfile, int effect) {
+        if (equipProfile != 1) return 0;
+        if (effect == 5 || effect == 6) return V1_SUPPORT_ENHANCE_SHARE_PERMYRIAD;
+        if (effect == 11) return V1_CONTROL_ENHANCE_SHARE_PERMYRIAD;
+        return 0;
+    }
+
+    public static long v1FixedAffixEnhanceBonusPermyriad(int equipProfile, int effect, long itemEnhanceBonusPermyriad) {
+        int share = v1FixedAffixEnhanceSharePermyriad(equipProfile, effect);
+        if (share == 0 || itemEnhanceBonusPermyriad <= 0) return 0L;
+        return itemEnhanceBonusPermyriad * share / 10_000L;
+    }
+
+    public static int scaleV1FixedAffixByEnhance(int equipProfile, int effect, int valueBps, long itemEnhanceBonusPermyriad) {
+        long affixBonus = v1FixedAffixEnhanceBonusPermyriad(equipProfile, effect, itemEnhanceBonusPermyriad);
+        if (affixBonus <= 0 || valueBps <= 0) return valueBps;
+        return (int) Math.min(Integer.MAX_VALUE, scale(Integer.toUnsignedLong(valueBps), affixBonus));
+    }
+
+    public static int maxV1FixedAffixEffectiveCap(int effect, int baseCapBps) {
+        return scaleV1FixedAffixByEnhance(1, effect, baseCapBps, V1_TOP_ENHANCE_BONUS_PERMYRIAD);
+    }
+
+    public long v1ItemEnhanceBonusPermyriad(BagItem item) {
+        if (item == null || item.equipment() == null) return 0L;
+        var row = tables.item(item.configId());
+        if (row == null || row.getEquipProfile() != 1) return 0L;
+        return bonus(1, level(item));
+    }
+
     public List<AttributeValue> values(BagItem item) {
         var row = tables.item(item.configId());
         if (row == null || row.getEquipKind() == 0) return List.of();
         List<AttributeValue> out = new ArrayList<>();
         int profile = row.getEquipProfile();
-        for (var base : row.getBaseAttrList()) if (accepted(tables.attribute(base.getBaseAttrId())))
-            out.add(new AttributeValue(base.getBaseAttrId(), scale(Integer.toUnsignedLong(base.getBaseAttrValue()), bonus(profile, level(item))), 0, 0, 0));
+        long itemBonus = bonus(profile, level(item));
+        for (var base : row.getBaseAttrList()) {
+            var attr = tables.attribute(base.getBaseAttrId());
+            if (!accepted(attr)) continue;
+            long appliedBonus = enhancesBaseAttribute(profile, attr) ? itemBonus : 0L;
+            out.add(new AttributeValue(base.getBaseAttrId(), scale(Integer.toUnsignedLong(base.getBaseAttrValue()), appliedBonus), 0, 0, 0));
+        }
         if (item.equipment() == null) return List.copyOf(out);
         for (var affix : item.equipment().getAffixesList()) {
             if (affix.getTier() < 1 || affix.getTier() > 4 || !accepted(tables.attribute(affix.getAttrId()))) continue;

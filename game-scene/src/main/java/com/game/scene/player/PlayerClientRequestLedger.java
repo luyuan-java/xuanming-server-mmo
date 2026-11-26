@@ -53,6 +53,7 @@ public final class PlayerClientRequestLedger {
     public static final int KIND_UNLOCK_TRAVEL_PASS_PREMIUM = 16;
     public static final int KIND_CLAIM_TRAVEL_PASS_REWARD = 17;
     public static final int KIND_CLAIM_REWARDED_AD = 21;
+    public static final int KIND_RENT_SKILL_LOADOUT_SLOTS = 30;
 
     public enum Verdict {
         NEW, REPLAY, MISMATCH

@@ -71,6 +71,7 @@ final class RedisKeysSamples {
                 new Sample("worldChannelDirectory", k -> k.worldChannelDirectory(1, 2), "game:world:{z:1}:directory:2"),
                 new Sample("worldMapOverview", k -> k.worldMapOverview(1), "game:world:{z:1}:overview"),
                 new Sample("mysteryMerchant", k -> k.mysteryMerchant(1), "game:world:{z:1}:mystery-merchant"),
+                new Sample("craftProxyStalls", k -> k.craftProxyStalls(1), "game:world:{z:1}:craft-proxy-stalls"),
                 new Sample("channelSwitchCooldown", k -> k.channelSwitchCooldown(3), "game:player:3:channel-switch-cooldown"),
                 new Sample("worldDesired", k -> k.worldDesired(1), "game:world:{z:1}:desired"),
                 new Sample("worldCooldown", k -> k.worldCooldown(1), "game:world:{z:1}:cooldown"),

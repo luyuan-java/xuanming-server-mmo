@@ -120,7 +120,7 @@ class MatchClientMessageServiceTest {
             MatchMethods.REGISTER_TOURNAMENT_SQUAD, MatchMethods.LIST_TOURNAMENT_STANDINGS,
             MatchMethods.START_TOURNAMENT_MATCH, MatchMethods.CHEER_TOURNAMENT_SQUAD,
             MatchMethods.CLAIM_TOURNAMENT_REWARD,
-            MatchMethods.SALUTE_TOURNAMENT_CHAMPION, MatchMethods.SEND_TOURNAMENT_SPECTATE_CHEER,
+            MatchMethods.SEND_TOURNAMENT_SPECTATE_CHEER,
             MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER,
             MatchMethods.UPDATE_TOURNAMENT_SQUAD_EMBLEM, MatchMethods.START_TOURNAMENT_WARMUP,
             MatchMethods.PREDICT_TOURNAMENT_MATCH, MatchMethods.GET_TOURNAMENT_PREDICTION_BOARD,

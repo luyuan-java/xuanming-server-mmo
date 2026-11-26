@@ -780,6 +780,7 @@ public class PlayerStore {
     /** 仅 SQL 行适配，玩法仍使用原 PlayerState 字节；OPEN 不含最终快照。 */
     public record FinalSaveRow(long playerId,long ownerEpoch,long saveSeq,int protocolVersion,String sourceInstance,
                                String status,Long level,Long sceneConfigId,Double posX,Double posY,Double posZ,
+                               String appearanceId,Long afkPassExpiresAt,Long afkPassLastReqId,
                                byte[] data,byte[] payloadDigest) {
         public FinalSaveRow { data=data==null?null:data.clone();payloadDigest=payloadDigest==null?null:payloadDigest.clone(); }
         @Override public byte[] data(){return data==null?null:data.clone();}
@@ -793,26 +794,36 @@ public class PlayerStore {
     private static PlayerRow finalScalars(PlayerRow row) {
         if(row==null || row.getPlayerId()==0 || row.getOwnerEpoch()<=0 || row.getOwnerEpoch()==Long.MAX_VALUE || row.getLevel()<0
                 || row.getLevel()>0xffff_ffffL || !Double.isFinite(row.getPosX())
-                || !Double.isFinite(row.getPosY()) || !Double.isFinite(row.getPosZ())) {
+                || !Double.isFinite(row.getPosY()) || !Double.isFinite(row.getPosZ())
+                || row.getAppearanceId()==null || row.getAppearanceId().length()>64) {
             throw new IllegalArgumentException("非法最终玩家快照");
         }
         PlayerRow copy=new PlayerRow();copy.setPlayerId(row.getPlayerId());copy.setOwnerEpoch(row.getOwnerEpoch());
         copy.setLevel(row.getLevel());copy.setSceneConfigId(row.getSceneConfigId());copy.setPosX(row.getPosX());
-        copy.setPosY(row.getPosY());copy.setPosZ(row.getPosZ());return copy;
+        copy.setPosY(row.getPosY());copy.setPosZ(row.getPosZ());copy.setAppearanceId(row.getAppearanceId());
+        copy.setAfkPassExpiresAt(row.getAfkPassExpiresAt());copy.setAfkPassLastReqId(row.getAfkPassLastReqId());return copy;
     }
     /** 内容摘要不包括传输来源；source_instance 单独不可变等值认重，不允许恢复者改绑。 */
     public static byte[] finalSaveDigest(PlayerRow row,byte[] bytes) {
         PlayerRow snapshot=finalScalars(row);
         if(bytes==null || bytes.length>FINAL_SAVE_MAX_BYTES) throw new IllegalArgumentException("最终玩法快照超界");
         try {
+            byte[] appearance=snapshot.getAppearanceId().getBytes(java.nio.charset.StandardCharsets.UTF_8);
             var digest=java.security.MessageDigest.getInstance("SHA-256");
-            digest.update("game-final-save/v1\0".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            digest.update(java.nio.ByteBuffer.allocate(9*Long.BYTES).putLong(snapshot.getPlayerId())
+            digest.update("game-final-save/v2\0".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            digest.update(java.nio.ByteBuffer.allocate(9*Long.BYTES+Integer.BYTES+appearance.length+2*(1+Long.BYTES))
+                    .putLong(snapshot.getPlayerId())
                     .putLong(snapshot.getOwnerEpoch()).putLong(1).putLong(snapshot.getLevel())
                     .putLong(Integer.toUnsignedLong(snapshot.getSceneConfigId()))
                     .putLong(Double.doubleToRawLongBits(snapshot.getPosX()))
                     .putLong(Double.doubleToRawLongBits(snapshot.getPosY()))
-                    .putLong(Double.doubleToRawLongBits(snapshot.getPosZ())).putLong(bytes.length).array());
+                    .putLong(Double.doubleToRawLongBits(snapshot.getPosZ()))
+                    .putInt(appearance.length).put(appearance)
+                    .put((byte)(snapshot.getAfkPassExpiresAt()!=null?1:0))
+                    .putLong(snapshot.getAfkPassExpiresAt()!=null?snapshot.getAfkPassExpiresAt():0L)
+                    .put((byte)(snapshot.getAfkPassLastReqId()!=null?1:0))
+                    .putLong(snapshot.getAfkPassLastReqId()!=null?snapshot.getAfkPassLastReqId():0L)
+                    .putLong(bytes.length).array());
             return digest.digest(bytes);
         } catch(java.security.NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}
     }
@@ -826,10 +837,13 @@ public class PlayerStore {
     private static PlayerRow snapshotOf(FinalSaveRow row) {
         if(row.protocolVersion()!=1 || row.saveSeq()!=1 || row.level()==null || row.sceneConfigId()==null
                 || row.sceneConfigId()<0 || row.sceneConfigId()>0xffff_ffffL || row.posX()==null
-                || row.posY()==null || row.posZ()==null) throw new IllegalArgumentException("最终SQL快照元数据损坏");
+                || row.posY()==null || row.posZ()==null || row.appearanceId()==null)
+            throw new IllegalArgumentException("最终SQL快照元数据损坏");
         PlayerRow snapshot=new PlayerRow();snapshot.setPlayerId(row.playerId());snapshot.setOwnerEpoch(row.ownerEpoch());
         snapshot.setLevel(row.level());snapshot.setSceneConfigId((int)(long)row.sceneConfigId());
-        snapshot.setPosX(row.posX());snapshot.setPosY(row.posY());snapshot.setPosZ(row.posZ());return finalScalars(snapshot);
+        snapshot.setPosX(row.posX());snapshot.setPosY(row.posY());snapshot.setPosZ(row.posZ());
+        snapshot.setAppearanceId(row.appearanceId());snapshot.setAfkPassExpiresAt(row.afkPassExpiresAt());
+        snapshot.setAfkPassLastReqId(row.afkPassLastReqId());return finalScalars(snapshot);
     }
     private static boolean validFinal(FinalSaveRow row) {
         try {
@@ -847,7 +861,10 @@ public class PlayerStore {
                 && old.level()==row.getLevel() && old.sceneConfigId()==Integer.toUnsignedLong(row.getSceneConfigId())
                 && Double.doubleToRawLongBits(old.posX())==Double.doubleToRawLongBits(row.getPosX())
                 && Double.doubleToRawLongBits(old.posY())==Double.doubleToRawLongBits(row.getPosY())
-                && Double.doubleToRawLongBits(old.posZ())==Double.doubleToRawLongBits(row.getPosZ());
+                && Double.doubleToRawLongBits(old.posZ())==Double.doubleToRawLongBits(row.getPosZ())
+                && Objects.equals(old.appearanceId(),row.getAppearanceId())
+                && Objects.equals(old.afkPassExpiresAt(),row.getAfkPassExpiresAt())
+                && Objects.equals(old.afkPassLastReqId(),row.getAfkPassLastReqId());
     }
     private static void independentFinalTransaction() {
         if(TransactionSynchronizationManager.isActualTransactionActive()) {

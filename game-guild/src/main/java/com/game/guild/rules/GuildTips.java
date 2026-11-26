@@ -134,6 +134,11 @@ public final class GuildTips {
     public static final int WAR_TRACK_COOLDOWN = GuildErrorTip.guild_error.kGuildWarTrackCooldown_VALUE;
     /** 帮战匹配或外部服务不可用（fault = 1）。 */
     public static final int WAR_SERVICE_BUSY = GuildErrorTip.guild_error.kGuildWarServiceBusy_VALUE;
+    /** 帮战 V2.5 · 宿敌约战战书（14072–14075）。 */
+    public static final int WAR_FEUD_COOLDOWN = GuildErrorTip.guild_error.kGuildWarFeudCooldown_VALUE;
+    public static final int WAR_FEUD_ALREADY_ACTIVE = GuildErrorTip.guild_error.kGuildWarFeudAlreadyActive_VALUE;
+    public static final int WAR_FEUD_NOT_FOUND = GuildErrorTip.guild_error.kGuildWarFeudNotFound_VALUE;
+    public static final int WAR_FEUD_INVALID_TARGET = GuildErrorTip.guild_error.kGuildWarFeudInvalidTarget_VALUE;
 
     // ---- 通用段（tip_text.json） ----
 

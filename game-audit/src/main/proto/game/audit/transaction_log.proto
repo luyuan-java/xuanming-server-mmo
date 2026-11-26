@@ -69,6 +69,8 @@ enum TransactionReason {
   // 游历手记典藏解锁与双轨领奖（数值同 mmorpg TransactionType = 45..46）
   TX_TRAVEL_PASS_UNLOCK = 45;
   TX_TRAVEL_PASS_REWARD = 46;
+  // 7 套非永久「战法·加点」流派方案槽位按月租用/扩容/续期（数值同 mmorpg TransactionType = 48）
+  TX_SKILL_LOADOUT_RENT = 48;
   // 运维面（game-data 直写，数值同 mmorpg TransactionType；基线有枚举值、没有写入方）：
   // 回档恢复（余额 / 实例变化，correlation_id = 作业号）、精确回收、批量回收
   TX_ROLLBACK_RESTORE = 16;

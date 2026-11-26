@@ -9,6 +9,7 @@ import com.game.common.deadline.Deadline;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
 import com.game.proto.TipInfoMessage;
+import com.game.proto.chat.PublishSystemWorldNoticeRequest;
 import com.game.proto.chat.PullChatHistoryRequest;
 import com.game.proto.chat.ReportChatRequest;
 import com.game.proto.chat.RetractWorldChatRequest;
@@ -41,6 +42,7 @@ public final class ChatDispatcher {
     static final String PULL = "PullChatHistory";
     static final String REPORT = "ReportChat";
     static final String RETRACT_WORLD = "RetractWorldChat";
+    static final String PUBLISH_SYSTEM_NOTICE = "PublishSystemWorldNotice";
 
     private final MessageIdRegistry registry;
     private final ChatService service;
@@ -50,6 +52,7 @@ public final class ChatDispatcher {
     private final int pullId;
     private final int reportId;
     private final int retractWorldId;
+    private final int publishSystemNoticeId;
 
     public ChatDispatcher(MessageIdRegistry registry, ChatService service, ChatMetrics metrics, long budgetMillis) {
         this.registry = registry;
@@ -60,6 +63,7 @@ public final class ChatDispatcher {
         this.pullId = requireMethod(registry, PULL, PullChatHistoryRequest.class);
         this.reportId = requireMethod(registry, REPORT, ReportChatRequest.class);
         this.retractWorldId = requireMethod(registry, RETRACT_WORLD, RetractWorldChatRequest.class);
+        this.publishSystemNoticeId = requireMethod(registry, PUBLISH_SYSTEM_NOTICE, PublishSystemWorldNoticeRequest.class);
     }
 
     private static int requireMethod(MessageIdRegistry registry, String method, Class<?> requestType) {
@@ -106,11 +110,12 @@ public final class ChatDispatcher {
                 return service.report(call.getSession(), request, budget).toCompletableFuture()
                         .handle((response, error) -> finish(sample, REPORT, response, error));
             }
-            if (messageId == retractWorldId) {
-                // RetractWorldChat(434) 标了 CLIENT_RPC_SERVER_ONLY：纵深防御，客户端入口一律回信封 1003（同 GuildDispatcher 拒 8）
-                log.warn("[chat] 拒绝客户端上行 SERVER_ONLY 方法 RetractWorldChat gate={} session={} player={}",
-                        call.getSession().getGateNodeId(), call.getSession().getSessionId(), call.getSession().getPlayerId());
-                metrics.requestCompleted(sample, RETRACT_WORLD, RequestResult.UNSUPPORTED);
+            if (messageId == retractWorldId || messageId == publishSystemNoticeId) {
+                String method = messageId == retractWorldId ? RETRACT_WORLD : PUBLISH_SYSTEM_NOTICE;
+                // SERVER_ONLY 方法：纵深防御，客户端入口一律回信封 1003
+                log.warn("[chat] 拒绝客户端上行 SERVER_ONLY 方法 {} gate={} session={} player={}",
+                        method, call.getSession().getGateNodeId(), call.getSession().getSessionId(), call.getSession().getPlayerId());
+                metrics.requestCompleted(sample, method, RequestResult.UNSUPPORTED);
                 return CompletableFuture.completedFuture(envelope(CommonErrorTip.common_error.kServiceUnavailable_VALUE));
             }
         } catch (InvalidProtocolBufferException e) {
@@ -132,6 +137,7 @@ public final class ChatDispatcher {
         if (messageId == pullId) return PULL;
         if (messageId == reportId) return REPORT;
         if (messageId == retractWorldId) return RETRACT_WORLD;
+        if (messageId == publishSystemNoticeId) return PUBLISH_SYSTEM_NOTICE;
         return ChatMetrics.UNROUTED;
     }
 

@@ -284,6 +284,11 @@ public final class CurrencyService {
         return player.wallet().checkAdd(type, amount, globalBlocks.blocksCurrency(type), nowSeconds);
     }
 
+    /** 币种当前是否被全服产出封禁（跨节点/离线代打入账前门禁使用）。 */
+    public boolean isGloballyBlocked(int type) {
+        return globalBlocks.blocksCurrency(type);
+    }
+
     /** GM 封禁获取（94）：冻结中 1005（同基线，先于参数校验）；否则同 {@link Wallet#block}。返回 tip。 */
     public int block(ScenePlayer player, int type) {
         return player.frozen() ? INVALID_PARAMETER : player.wallet().block(type);

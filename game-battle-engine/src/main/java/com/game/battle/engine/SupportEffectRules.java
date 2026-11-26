@@ -72,13 +72,20 @@ public final class SupportEffectRules {
         var summary = SupportEffectSummary.newBuilder();
         for (int kind = 1; kind <= 2; kind++) {
             var part = kind == 1 ? summary.getHealingBuilder() : summary.getShieldBuilder();
-            part.setEquipmentCapBps(3200).setComplete(equipment.getSupportSourcesComplete())
+            int capBps = 3200;
+            boolean hasExplicitCap = false;
+            part.setEquipmentCapBps(capBps).setComplete(equipment.getSupportSourcesComplete())
                     .setTotalBonusBps(kind == 1 ? equipment.getOutgoingHealBps() : equipment.getShieldCapacityBps());
             for (var source : equipment.getSupportSourcesList()) {
                 if (source.getEffectKind() != kind) continue;
                 part.addSources(source);
-                if (source.getSourceCapBps() > 0) part.setEquipmentCapBps(Math.min(part.getEquipmentCapBps(), source.getSourceCapBps()));
+                if (source.getSourceCapBps() > 0) {
+                    int boundedCap = Math.min(source.getSourceCapBps(), BattleEquipment.MAX_EFFECTIVE_SUPPORT_BPS);
+                    capBps = hasExplicitCap ? Math.min(capBps, boundedCap) : boundedCap;
+                    hasExplicitCap = true;
+                }
             }
+            part.setEquipmentCapBps(capBps);
             for (var artifact : equipment.getArtifactsList()) {
                 if (artifact.getEffectId() != kind + 3) continue;
                 String condition = kind == 1 ? "主目标首段即时治疗且气血≤" + artifact.getHealthThresholdBps() / 100.0 + "%" : "主目标首个独立容量盾";

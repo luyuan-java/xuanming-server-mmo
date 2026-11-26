@@ -18,6 +18,8 @@ public final class PlayerSkills {
     private String loadoutLastRequestId;
     private long loadoutLastBaseVersion;
     private int loadoutLastSchemeId;
+    private int rentedExtraSlots;
+    private long rentExpiresAtSec;
     private final UnknownFieldSet unknownFields;
 
     private PlayerSkills(PlayerSkillBookState state) {
@@ -36,6 +38,8 @@ public final class PlayerSkills {
         loadoutLastRequestId = state.getLoadoutLastRequestId();
         loadoutLastBaseVersion = state.getLoadoutLastBaseVersion();
         loadoutLastSchemeId = state.getLoadoutLastSchemeId();
+        rentedExtraSlots = state.getRentedExtraSlots();
+        rentExpiresAtSec = state.getRentExpiresAtSec();
     }
 
     public static PlayerSkills restore(PlayerSkillBookState state) { return new PlayerSkills(state); }
@@ -51,6 +55,18 @@ public final class PlayerSkills {
     public String loadoutLastRequestId() { return loadoutLastRequestId; }
     public long loadoutLastBaseVersion() { return loadoutLastBaseVersion; }
     public int loadoutLastSchemeId() { return loadoutLastSchemeId; }
+    public int rentedExtraSlots() { return rentedExtraSlots; }
+    public long rentExpiresAtSec() { return rentExpiresAtSec; }
+
+    /** 更新按套按月租用的额外方案槽位与统一到期日，并递增装配版本号。 */
+    public void setRental(int rentedExtraSlots, long rentExpiresAtSec) {
+        this.rentedExtraSlots = rentedExtraSlots;
+        this.rentExpiresAtSec = rentExpiresAtSec;
+        long current = this.loadoutStateVersion == 0L ? 1L : this.loadoutStateVersion;
+        if (current != -1L) {
+            this.loadoutStateVersion = current + 1L;
+        }
+    }
 
     /** 更新原条目保留未知字段；初始补发与已预检的修习调用。 */
     public void setRank(int id, int rank) {
@@ -85,6 +101,8 @@ public final class PlayerSkills {
                 .setLoadoutLastRequestId(loadoutLastRequestId)
                 .setLoadoutLastBaseVersion(loadoutLastBaseVersion)
                 .setLoadoutLastSchemeId(loadoutLastSchemeId)
+                .setRentedExtraSlots(rentedExtraSlots)
+                .setRentExpiresAtSec(rentExpiresAtSec)
                 .build();
     }
 
@@ -96,6 +114,8 @@ public final class PlayerSkills {
                 && loadoutLastRequestId.isEmpty()
                 && loadoutLastBaseVersion == 0
                 && loadoutLastSchemeId == 0
+                && rentedExtraSlots == 0
+                && rentExpiresAtSec == 0
                 && unknownFields.asMap().isEmpty();
     }
 
@@ -108,5 +128,7 @@ public final class PlayerSkills {
         loadoutLastRequestId = candidate.loadoutLastRequestId;
         loadoutLastBaseVersion = candidate.loadoutLastBaseVersion;
         loadoutLastSchemeId = candidate.loadoutLastSchemeId;
+        rentedExtraSlots = candidate.rentedExtraSlots;
+        rentExpiresAtSec = candidate.rentExpiresAtSec;
     }
 }

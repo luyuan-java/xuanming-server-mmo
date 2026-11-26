@@ -175,6 +175,30 @@ class TournamentLeylineBattleEngineTest {
         assertThat(unit.health()).isZero();
     }
 
+    @Test
+    void 投降投票自然过期冷却按发起回合起算不顺延一回合() {
+        MemoryBattleData data = new MemoryBattleData();
+        var req = request(3, 77);
+        addPlayer(req, PLAYER_A, 0, 10_000, 10_000, 100, 0, 0, 100);
+        addPlayer(req, PLAYER_A + 10, 0, 10_000, 10_000, 100, 0, 0, 90);
+        addPlayer(req, PLAYER_B, 1, 10_000, 10_000, 100, 0, 0, 80);
+        addPlayer(req, PLAYER_B + 10, 1, 10_000, 10_000, 100, 0, 0, 70);
+        var eng = TestBattles.start(req, data);
+        for (int r = 1; r < BattleConstants.PVP_SURRENDER_UNLOCK_ROUND; r++) {
+            eng.submitAction(PLAYER_A + 10, action(BATTLE_ACTION_DEFEND));
+            eng.resolveCurrentRound();
+        }
+        int voteRound = eng.buildStateSnapshot().getRoundIndex();
+        assertThat(eng.submitSurrenderVote(PLAYER_A, true).errorTip()).isZero();
+        // 另一活跃队友未表态，本回合结束投票自然过期：冷却应为 voteRound + PVP_SURRENDER_EXPIRE_COOLDOWN_ROUNDS。
+        eng.submitAction(PLAYER_A + 10, action(BATTLE_ACTION_DEFEND));
+        eng.resolveCurrentRound();
+        var vote = eng.surrenderVoteForViewer(PLAYER_A);
+        assertThat(vote).isNotNull();
+        assertThat(vote.getRejected()).isTrue();
+        assertThat(vote.getNextAllowedRound()).isEqualTo(voteRound + BattleConstants.PVP_SURRENDER_EXPIRE_COOLDOWN_ROUNDS);
+    }
+
     private static long runOneHeal(MemoryBattleData data, TournamentLeylineElement leyline) {
         var req = request(3, 55);
         if (leyline != TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED) {

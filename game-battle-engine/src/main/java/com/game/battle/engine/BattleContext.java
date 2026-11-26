@@ -39,6 +39,16 @@ final class BattleContext {
     record FinalDamage(double value, boolean critical) {
     }
 
+    /** 赛季玩法 V3：每名参战玩家的赛季印局内共鸣窗口与本场功劳统计（纯引擎内状态，不写入公开快照）。 */
+    static final class SeasonSealRuntimeState {
+        int guardResonanceReadyRound;
+        boolean guardResonanceConsumed;
+        int defendResonanceReadyRound;
+        long contributionValue;
+        int triggerCount;
+        int resonanceCount;
+    }
+
     private final BattleData data;
     private final int matchMode;
     private final boolean pve;
@@ -62,6 +72,17 @@ final class BattleContext {
     private int maxRounds = BattleConstants.DEFAULT_MAX_ROUNDS;
     private TournamentLeylineElement activeTournamentLeyline = TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED;
     private int activeSeasonWeeklyAffixId = SeasonRules.WEEKLY_AFFIX_NONE;
+    /** 赛季玩法 V3：按玩家 actor_id 维护的赛季印共鸣窗口与功劳累计。 */
+    private final Map<Long, SeasonSealRuntimeState> seasonSealRuntime = new HashMap<>();
+    /** 单次技能施放内暂存的表驱动共鸣上下文（施放结束后立即清空）。 */
+    long pendingMysticExtendCasterId;
+    long pendingMysticExtendTargetId;
+    int pendingMysticExtendSkillId;
+    int pendingMysticExtendBonusRounds;
+    long activeNextRoundBoostCasterId;
+    int activeNextRoundBoostKind;
+    int activeNextRoundBoostPct;
+    long activeNextRoundBoostExtra;
     /** 本局战前 3 Ban 合并去重后的全局禁招集合（对双方人物与灵宠对称生效）。 */
     private final java.util.TreeSet<Integer> bannedSkillIds = new java.util.TreeSet<>(Integer::compareUnsigned);
 
@@ -175,9 +196,25 @@ final class BattleContext {
                 : SeasonRules.WEEKLY_AFFIX_NONE;
     }
 
+    SeasonSealRuntimeState seasonSealRuntime(long actorId) {
+        return seasonSealRuntime.computeIfAbsent(actorId, k -> new SeasonSealRuntimeState());
+    }
+
+    SeasonSealRuntimeState findSeasonSealRuntime(long actorId) {
+        return seasonSealRuntime.get(actorId);
+    }
+
+    void clearSeasonSealRuntime(long actorId) {
+        seasonSealRuntime.remove(actorId);
+    }
+
     boolean hasAnyActiveShield(BattleUnit target) {
         if (target == null) {
             return false;
+        }
+        if (encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_BARRIER
+                && target.isBoss() && Long.compareUnsigned(encounter.bossBarrierShield(), 0L) > 0) {
+            return true;
         }
         if (Long.compareUnsigned(target.tournamentEarthShield(), 0L) > 0) {
             return true;

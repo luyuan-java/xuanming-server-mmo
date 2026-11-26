@@ -186,12 +186,13 @@ class MessageRoutesTest {
                 "RespondGuildTrialInvite");
         List<String> guildWarV2 = List.of("GetGuildWarOverview", "SetGuildWarStance", "RegisterGuildWarGarrison",
                 "StartGuildWarBattle", "ClaimGuildWarMilestone", "ClaimGuildWarDividend", "PostGuildWarBounty",
-                "TrackGuildWarBounty", "GetGuildWarBattleResult", "InspectFieldWarTargets", "GetGuildJianghuGrudgeWall");
+                "TrackGuildWarBounty", "GetGuildWarBattleResult", "InspectFieldWarTargets", "GetGuildJianghuGrudgeWall",
+                "IssueGuildWarFeud", "RespondGuildWarFeud");
         List<MessageMethod> guild = registry.all().stream().filter(m -> m.serviceName().equals("GuildService")).toList();
         assertThat(guild).as("契约里 GuildService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.of(core, internalAndPush, economyAndActivity, guildWarV2)
                         .flatMap(List::stream).toList())
-                .hasSize(41);
+                .hasSize(43);
         for (MessageMethod method : guild) {
             MessageRoute route = routes.clientRoute(method.messageId());
             assertThat(route).as(method.key()).isNotNull();
@@ -261,12 +262,12 @@ class MessageRoutesTest {
                 "ListBattleReports", "GetBattleReport",
                 // 战斗剧本 389–392：gate 照转，game-match 尚无处理器（PARITY「战斗剧本」Java 待做）
                 "ListBattleScripts", "SubmitBattleScript", "DeleteBattleScript", "SetBattleScriptLoadout",
-                // 排位资料与预设 448–451 + 赛季战队锦标赛 V1/V2/V3/V4 465–475、506–508、511–514、534–535 + 江湖生死状 548–552
+                // 排位资料与预设 448–451 + 赛季战队锦标赛 V1/V2/V3/V4 465–475、507–508（506 已永久停用）、511–514、534–535 + 江湖生死状 548–552
                 "GetRankedProfile", "SaveRankedPreset", "UpdateRankedCosmetic", "GetRankedBattleResult",
                 "GetTournamentOverview", "CreateTournamentSquad", "InviteTournamentMember", "RespondTournamentInvite",
                 "LeaveTournamentSquad", "UpdateTournamentLineup", "RegisterTournamentSquad", "ListTournamentStandings",
                 "StartTournamentMatch", "CheerTournamentSquad", "ClaimTournamentReward",
-                "SaluteTournamentChampion", "SendTournamentSpectateCheer", "GetTournamentSpectateCheer",
+                "SendTournamentSpectateCheer", "GetTournamentSpectateCheer",
                 "UpdateTournamentSquadEmblem", "StartTournamentWarmup", "PredictTournamentMatch",
                 "GetTournamentPredictionBoard", "BanTournamentLeyline", "GetTournamentHighlights",
                 "CreateJianghuDuelInvite", "ConfirmJianghuDuelMember", "RespondJianghuDuelInvite",
@@ -274,10 +275,10 @@ class MessageRoutesTest {
         List<MessageMethod> match = registry.all().stream().filter(m -> m.serviceName().equals("MatchService")).toList();
         assertThat(match).as("契约里 MatchService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.concat(noReply.stream(), replied.stream()).toList());
-        // 既有 36 个号逐个钉住 + V3/V4 与江湖生死状新增 13 个号从契约表读取（正式同步 message_id.txt 后自动对齐）。
+        // 既有 35 个号逐个钉住（506 已停用）+ V3/V4 与江湖生死状新增 13 个号从契约表读取（正式同步 message_id.txt 后自动对齐）。
         List<Integer> expectedMatchIds = Stream.concat(
                 Stream.of(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392,
-                        448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 506, 507, 508),
+                        448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 507, 508),
                 Stream.of("UpdateTournamentSquadEmblem", "StartTournamentWarmup", "PredictTournamentMatch",
                         "GetTournamentPredictionBoard", "BanTournamentLeyline", "GetTournamentHighlights",
                         "CreateJianghuDuelInvite", "ConfirmJianghuDuelMember", "RespondJianghuDuelInvite",

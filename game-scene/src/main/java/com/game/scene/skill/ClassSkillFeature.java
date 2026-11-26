@@ -2,6 +2,7 @@ package com.game.scene.skill;
 
 import com.game.contract.MessageIdRegistry;
 import com.game.proto.AttributePanelChangedS2C;
+import com.game.proto.RentSkillLoadoutSlotsRequest;
 import com.game.proto.SaveSkillLoadoutRequest;
 import com.game.proto.SwitchSkillLoadoutRequest;
 import com.game.proto.UpgradeSkillRequest;
@@ -32,6 +33,9 @@ public final class ClassSkillFeature implements SceneFeature {
     }
 
     @Override public void register(Registrar r) {
+        r.on("SceneSkillClientPlayer", "ListSkills", com.game.proto.ListSkillsRequest.class,
+                FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                (call, request) -> call.reply(skills.bookFor(call.player(), request.getPetId())));
         r.on("SceneSkillClientPlayer", "UpgradeSkill", UpgradeSkillRequest.class,
                 FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
                     var result = skills.upgrade(call.player(), request);
@@ -58,6 +62,16 @@ public final class ClassSkillFeature implements SceneFeature {
         r.on("SceneSkillClientPlayer", "SwitchSkillLoadout", SwitchSkillLoadoutRequest.class,
                 FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
                     var result = skills.switchLoadout(call.player(), request);
+                    if (result.getErrorMessage().getId() == 0 && !result.getReplayed()) {
+                        call.world().requestSave(call.player());
+                        call.push(notifyPanel, AttributePanelChangedS2C.newBuilder()
+                                .setPanel(attributes.buildPanel(call.player())).build());
+                    }
+                    call.reply(result);
+                });
+        r.on("SceneSkillClientPlayer", "RentSkillLoadoutSlots", RentSkillLoadoutSlotsRequest.class,
+                FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
+                    var result = skills.rentLoadoutSlots(call.player(), request);
                     if (result.getErrorMessage().getId() == 0 && !result.getReplayed()) {
                         call.world().requestSave(call.player());
                         call.push(notifyPanel, AttributePanelChangedS2C.newBuilder()

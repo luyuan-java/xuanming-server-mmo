@@ -59,8 +59,7 @@ public final class MatchMethods {
     public static final String START_TOURNAMENT_MATCH = "StartTournamentMatch";
     public static final String CHEER_TOURNAMENT_SQUAD = "CheerTournamentSquad";
     public static final String CLAIM_TOURNAMENT_REWARD = "ClaimTournamentReward";
-    /** 506–508：全服赛季战队锦标赛《群仙问道赛》V2 每日观道致敬与观战预设喝彩。 */
-    public static final String SALUTE_TOURNAMENT_CHAMPION = "SaluteTournamentChampion";
+    /** 507–508：全服赛季战队锦标赛《群仙问道赛》V2 观战预设喝彩（原 506 每日观道致敬已移除并永久保留号段）。 */
     public static final String SEND_TOURNAMENT_SPECTATE_CHEER = "SendTournamentSpectateCheer";
     public static final String GET_TOURNAMENT_SPECTATE_CHEER = "GetTournamentSpectateCheer";
     /** 全服赛季战队锦标赛《群仙问道赛》V3 队徽更换、零积分热身约战与神机免费竞猜。 */
@@ -71,8 +70,16 @@ public final class MatchMethods {
     /** 全服赛季战队锦标赛《群仙问道赛》V4 BO3灵脉禁选与本季名局录。 */
     public static final String BAN_TOURNAMENT_LEYLINE = "BanTournamentLeyline";
     public static final String GET_TOURNAMENT_HIGHLIGHTS = "GetTournamentHighlights";
+    /** 江湖恩怨与天墉生死状一期(548..554)。 */
+    public static final String CREATE_JIANGHU_DUEL_INVITE = "CreateJianghuDuelInvite";
+    public static final String CONFIRM_JIANGHU_DUEL_MEMBER = "ConfirmJianghuDuelMember";
+    public static final String RESPOND_JIANGHU_DUEL_INVITE = "RespondJianghuDuelInvite";
+    public static final String LIST_JIANGHU_GRUDGES = "ListJianghuGrudges";
+    public static final String DISMISS_JIANGHU_GRUDGE = "DismissJianghuGrudge";
+    public static final String NOTIFY_JIANGHU_DUEL_INVITE = "NotifyJianghuDuelInvite";
+    public static final String NOTIFY_JIANGHU_DUEL_STATUS = "NotifyJianghuDuelStatus";
 
-    /** 全部 42 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
+    /** 全部 48 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
     public static final List<String> ALL = List.of(JOIN_QUEUE, CANCEL_QUEUE, GET_QUEUE_STATUS, CHALLENGE_PLAYER, RESPOND_CHALLENGE,
             NOTIFY_CHALLENGE_INVITE, NOTIFY_CHALLENGE_RESULT, WATCH_BATTLE, LIST_WATCHABLE_BATTLES, REQUEST_BATTLE_TICKET,
             GET_NETWORK_PROBE_PLAN, COMMIT_NETWORK_PROBE,
@@ -82,9 +89,11 @@ public final class MatchMethods {
             GET_TOURNAMENT_OVERVIEW, CREATE_TOURNAMENT_SQUAD, INVITE_TOURNAMENT_MEMBER, RESPOND_TOURNAMENT_INVITE,
             LEAVE_TOURNAMENT_SQUAD, UPDATE_TOURNAMENT_LINEUP, REGISTER_TOURNAMENT_SQUAD, LIST_TOURNAMENT_STANDINGS,
             START_TOURNAMENT_MATCH, CHEER_TOURNAMENT_SQUAD, CLAIM_TOURNAMENT_REWARD,
-            SALUTE_TOURNAMENT_CHAMPION, SEND_TOURNAMENT_SPECTATE_CHEER, GET_TOURNAMENT_SPECTATE_CHEER,
+            SEND_TOURNAMENT_SPECTATE_CHEER, GET_TOURNAMENT_SPECTATE_CHEER,
             UPDATE_TOURNAMENT_SQUAD_EMBLEM, START_TOURNAMENT_WARMUP, PREDICT_TOURNAMENT_MATCH, GET_TOURNAMENT_PREDICTION_BOARD,
-            BAN_TOURNAMENT_LEYLINE, GET_TOURNAMENT_HIGHLIGHTS);
+            BAN_TOURNAMENT_LEYLINE, GET_TOURNAMENT_HIGHLIGHTS,
+            CREATE_JIANGHU_DUEL_INVITE, CONFIRM_JIANGHU_DUEL_MEMBER, RESPOND_JIANGHU_DUEL_INVITE,
+            LIST_JIANGHU_GRUDGES, DISMISS_JIANGHU_GRUDGE, NOTIFY_JIANGHU_DUEL_INVITE, NOTIFY_JIANGHU_DUEL_STATUS);
 
     private MatchMethods() {
     }

@@ -1458,6 +1458,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
     }
 
     private static void attachRankedResultFacts(BattleRoom room, BattleResultEvent.Builder eventBuilder) {
+        if (room.originalCreate != null && room.originalCreate.hasJianghuDuelContext()) {
+            eventBuilder.setJianghuDuelContext(room.originalCreate.getJianghuDuelContext());
+        }
         if (room.originalCreate != null && room.originalCreate.hasRankedContext()
                 && room.originalCreate.getRankedContext().getSeasonId() != 0) {
             eventBuilder.setRankedContext(room.originalCreate.getRankedContext());

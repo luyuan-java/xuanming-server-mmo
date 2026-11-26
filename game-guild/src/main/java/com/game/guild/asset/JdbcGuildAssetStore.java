@@ -18,6 +18,7 @@ import com.game.guild.store.JdbcGuildStore;
 import com.game.guild.store.pb.GuildAssetOpKind;
 import com.game.guild.store.pb.GuildAssetOpRow;
 import com.game.guild.store.pb.GuildAssetOpStatus;
+import com.game.proto.guild.GuildWarBountyStatus;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.math.BigInteger;
 import java.sql.SQLException;
@@ -492,10 +493,13 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
                 // 只 CAS：帮贡与资金在入队事务里已记完，无需回退对侧
             }
             case GUILD_ASSET_OP_KIND_BOUNTY_ESCROW -> {
-                int nextBountyStatus = status == AssetOpStatus.APPLIED ? 2 : 5;
+                int nextBountyStatus = status == AssetOpStatus.APPLIED
+                        ? GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ACTIVE_VALUE
+                        : GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_EXPIRED_VALUE;
                 long resolvedMs = status == AssetOpStatus.APPLIED ? 0L : nowMs;
-                t.update("UPDATE guild_war_bounty SET status = ?, resolved_at_ms = ? WHERE escrow_op_id = ? AND status = 1",
-                        nextBountyStatus, resolvedMs, opId);
+                t.update("UPDATE guild_war_bounty SET status = ?, resolved_at_ms = ? WHERE escrow_op_id = ? AND status = ?",
+                        nextBountyStatus, resolvedMs, opId,
+                        GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ESCROW_PENDING_VALUE);
                 touched = true;
             }
             default -> unknownKind = true;

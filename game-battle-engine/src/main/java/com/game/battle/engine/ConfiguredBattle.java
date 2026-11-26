@@ -34,6 +34,12 @@ final class ConfiguredBattle {
                 || target.state().hasEquipmentEffects() || source.state().hasPetCultivation();
     }
 
+    /** 装备反震在存在配置态效果时接入配置管线，确保无敌、护盾、土灵脉与唤醒沉睡一致生效（对齐 C++ TryReflectDamage）。 */
+    void reflectDamage(BattleUnit defender, BattleUnit attacker, long reflected) {
+        impact.damage(defender, attacker, Unsigned.toDouble(reflected), CombatDamageRules.PHYSICAL_DAMAGE,
+                new Hit(0, 1, REFLECTED, attacker.actorId()), BATTLE_HIT_REFLECT);
+    }
+
     BuffTable row(int id) { return ctx.data().buff(id).orElse(null); }
     BuffTable row(BattleBuffEntry entry) { return row(entry.getBuffTableId()); }
     SkillTable skill(int id) { return ctx.data().skill(id).orElse(null); }
@@ -319,12 +325,24 @@ final class ConfiguredBattle {
             if (actor.isPlayer() && skill.getSeasonId() != 0) {
                 ctx.encounter.markAntiControlOrSeasonSkill(actor.actorId());
             }
+            boolean consumeBreathResonance = equipment.defendManaDiscountResonancePct(actor, skill.getId()) > 0;
             cast.paidMana = equipment.manaCost(actor, skill);
             if (cast.paidMana != 0) {
                 actor.setMana(actor.mana() - cast.paidMana);
                 ctx.events().append(BATTLE_EVENT_MANA, actor.actorId(), actor.actorId()).setSkillTableId(skill.getId())
                         .setValue(cast.paidMana).setManaDelta(EventLog.signedManaDelta(cast.paidMana, false))
                         .setTargetHealthAfter(actor.health()).setTargetManaAfter(actor.mana());
+            }
+            if (consumeBreathResonance) {
+                var rt = ctx.seasonSealRuntime(actor.actorId());
+                rt.defendResonanceReadyRound = 0;
+                long fullCost = equipment.manaCost(actor, skill);
+                long saved = Long.compareUnsigned(fullCost, cast.paidMana) > 0 ? fullCost - cast.paidMana : 0L;
+                if (saved != 0L) {
+                    rt.contributionValue = EquipmentCombatRules.addSaturated(rt.contributionValue, saved);
+                    equipment.emitSeasonResonance(actor, actor.actorId(),
+                            SeasonRules.RESONANCE_EVENT_BREATH_HALF_MANA, saved);
+                }
             }
             if (skill.getCooldownRounds() > 0) actor.state().putSkillCooldownRounds(skill.getId(), skill.getCooldownRounds());
             actor.state().putAbilityUseCounts(skill.getId(), actor.state().getAbilityUseCountsOrDefault(skill.getId(), 0) + 1);
@@ -339,6 +357,37 @@ final class ConfiguredBattle {
         }
         int effectsBegin = ctx.events().eventCount();
         boolean castSupportEffect = false;
+        boolean nextRoundBoostActive = false;
+        int nextRoundBoostKind = SeasonRules.RESONANCE_NONE;
+        if (origin == DIRECT && actor.isPlayer()
+                && actor.state().getEquipmentEffects().hasSeasonSeal()) {
+            var seal = actor.state().getEquipmentEffects().getSeasonSeal();
+            int kind = seal.getResonanceKind();
+            if (seal.getResonanceSkillId() == skill.getId() && seal.getResonanceParam() > 0) {
+                var rt = ctx.seasonSealRuntime(actor.actorId());
+                if ((kind == SeasonRules.RESONANCE_GUARD_SHIELD_BOOST
+                        || kind == SeasonRules.RESONANCE_GUARD_HEAL_BOOST)
+                        && !rt.guardResonanceConsumed && rt.guardResonanceReadyRound == ctx.roundIndex()) {
+                    rt.guardResonanceConsumed = true;
+                    rt.guardResonanceReadyRound = 0;
+                    nextRoundBoostActive = true;
+                    nextRoundBoostKind = kind;
+                    ctx.activeNextRoundBoostCasterId = actor.actorId();
+                    ctx.activeNextRoundBoostKind = kind;
+                    ctx.activeNextRoundBoostPct = seal.getResonanceParam();
+                    ctx.activeNextRoundBoostExtra = 0L;
+                } else if (kind == SeasonRules.RESONANCE_DEFEND_SHIELD_BOOST
+                        && rt.defendResonanceReadyRound == ctx.roundIndex()) {
+                    rt.defendResonanceReadyRound = 0;
+                    nextRoundBoostActive = true;
+                    nextRoundBoostKind = kind;
+                    ctx.activeNextRoundBoostCasterId = actor.actorId();
+                    ctx.activeNextRoundBoostKind = kind;
+                    ctx.activeNextRoundBoostPct = seal.getResonanceParam();
+                    ctx.activeNextRoundBoostExtra = 0L;
+                }
+            }
+        }
         for (int i = 0; i < targets.size(); i++) {
             BattleUnit target = targets.get(i);
             if (target.fled()) continue;
@@ -366,6 +415,23 @@ final class ConfiguredBattle {
                     case REVIVE -> castSupportEffect = true;
                     default -> { }
                 }
+            }
+            ctx.pendingMysticExtendCasterId = 0L;
+            ctx.pendingMysticExtendTargetId = 0L;
+            ctx.pendingMysticExtendSkillId = 0;
+            ctx.pendingMysticExtendBonusRounds = 0;
+        }
+        if (nextRoundBoostActive && ctx.activeNextRoundBoostCasterId == actor.actorId()) {
+            long extra = ctx.activeNextRoundBoostExtra;
+            ctx.activeNextRoundBoostCasterId = 0L;
+            ctx.activeNextRoundBoostKind = SeasonRules.RESONANCE_NONE;
+            ctx.activeNextRoundBoostPct = 0;
+            ctx.activeNextRoundBoostExtra = 0L;
+            if (extra != 0L) {
+                var rt = ctx.seasonSealRuntime(actor.actorId());
+                rt.contributionValue = EquipmentCombatRules.addSaturated(rt.contributionValue, extra);
+                equipment.emitSeasonResonance(actor, actor.actorId(),
+                        SeasonRules.RESONANCE_EVENT_BASE + nextRoundBoostKind, extra);
             }
         }
         ctx.events().setHitIndex(0);

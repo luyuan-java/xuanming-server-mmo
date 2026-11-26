@@ -248,7 +248,8 @@ public final class GuildMetrics implements GuildTxListener, GuildCacheMetrics, G
                 timer(method, result);
             }
         }
-        for (List<String> placeholders : List.of(GuildMethods.PLACEHOLDERS, GuildMethods.GUILD_WAR_PLACEHOLDERS)) {
+        for (List<String> placeholders : List.of(GuildMethods.PLACEHOLDERS, GuildMethods.GUILD_WAR_PLACEHOLDERS,
+                GuildMethods.JIANGHU_PLACEHOLDERS)) {
             for (String method : placeholders) {
                 for (RequestResult result : List.of(RequestResult.UNSUPPORTED, RequestResult.BAD_REQUEST,
                         RequestResult.UNAUTHENTICATED)) {

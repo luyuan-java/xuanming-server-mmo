@@ -129,6 +129,12 @@ public final class ClientRequestHandler {
         for (SceneFeature feature : features) {
             feature.register(registrar);
         }
+        // 未挂载 ClassSkillFeature 的纯核心单测保留兜底 ListSkills 注册；挂载后走带 AttributeService 的完整快照
+        if (!handlers.containsKey(ids.listSkills())) {
+            register(ids.listSkills(), com.game.proto.ListSkillsRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
+                    (call, req) -> call.reply(com.game.scene.skill.ClassSkillService.book(
+                            call.player(), req.getPetId(), world.activeSeasonId(), world.isCraftUnlockGateEnabled())));
+        }
     }
 
     private void registerCore() {
@@ -139,9 +145,6 @@ public final class ClientRequestHandler {
                 (call, req) -> world.applyMove(call.player(), MoveInput.of(req)));
         register(ids.moveStop(), MoveStopC2S.class, FreezePolicy.DROP, BattlePolicy.STOP_ONLY,
                 (call, req) -> world.applyMove(call.player(), MoveInput.of(req)));
-        register(ids.listSkills(), com.game.proto.ListSkillsRequest.class, FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
-                (call, req) -> call.reply(com.game.scene.skill.ClassSkillService.book(
-                        call.player(), req.getPetId(), world.activeSeasonId(), world.isCraftUnlockGateEnabled())));
         // 63 自己判在途（选目标中 / 冻结中都回 3014），冻结闸对它放行
         // 63 自己判战斗在途（3023，先于换图在途 3014，scene-battle-spec §7.13）
         register(ids.enterScene(), EnterSceneC2SRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED, this::enterScene);

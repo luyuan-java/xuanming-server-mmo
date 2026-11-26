@@ -117,9 +117,6 @@ public final class TournamentStore {
     public record ClaimableReward(long rewardId, int seasonId, int tierKind, int tierId, byte[] attachments) {
     }
 
-    public record SaluteOutcome(int seasonId, int saluteDay, long championSaluteCount, long rewardId) {
-    }
-
     public record PredictOutcome(int countA, int countB) {
     }
 
@@ -128,7 +125,7 @@ public final class TournamentStore {
                              long settleStartMs, long endMs, int battleTeamSize, int rosterMaxSize,
                              int knockoutTeamCount, long championSquadId, String championSquadName,
                              String championMemberSummary, long settledMs, long updatedMs,
-                             byte[] championMembersBlob, long championSaluteCount,
+                             byte[] championMembersBlob,
                              int championEmblemId, long thirdPlaceSquadId, String thirdPlaceSquadName,
                              int thirdPlaceEmblemId, long finalMvpPlayerId, String finalMvpPlayerName,
                              int finalMvpScore, int championHonorBits) {
@@ -1162,9 +1159,8 @@ public final class TournamentStore {
         return inTx(c -> {
             SeasonRow cur = ensureSeasonTx(c, now);
             int regCount = countRegisteredSquadsTx(c, cur.seasonId());
-            boolean salutedToday = salutedTodayTx(c, playerId, now);
             GetTournamentOverviewResponse.Builder resp = GetTournamentOverviewResponse.newBuilder()
-                    .setCurrentSeason(toSeasonView(cur, regCount, salutedToday))
+                    .setCurrentSeason(toSeasonView(cur, regCount))
                     .addAllRewardTiers(tables.rewardTierViews())
                     .setServerTimeMs(now);
             long mySquadId = findPlayerSquadIdTx(c, cur.seasonId(), playerId);
@@ -1259,7 +1255,7 @@ public final class TournamentStore {
                     ps.setInt(1, TournamentStage.TOURNAMENT_STAGE_SETTLED_VALUE);
                     try (ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) {
-                            resp.addHallOfFame(toSeasonView(scanSeason(rs), 0, salutedToday));
+                            resp.addHallOfFame(toSeasonView(scanSeason(rs), 0));
                         }
                     }
                 }
@@ -1277,7 +1273,6 @@ public final class TournamentStore {
             if (season == null) {
                 throw new DomainException(MatchErrorTip.match_error.kMatchTournamentSquadNotFound_VALUE);
             }
-            boolean salutedToday = playerId != 0L && salutedTodayTx(c, playerId, now);
             List<SquadRow> all = new ArrayList<>();
             Map<Long, SquadRow> byId = new LinkedHashMap<>();
             try (PreparedStatement ps = c.prepareStatement(
@@ -1303,7 +1298,7 @@ public final class TournamentStore {
             int start = (int) Math.min((long) (p - 1) * psLimit, all.size());
             int end = Math.min(start + psLimit, all.size());
             ListTournamentStandingsResponse.Builder resp = ListTournamentStandingsResponse.newBuilder()
-                    .setSeason(toSeasonView(season, all.size(), salutedToday))
+                    .setSeason(toSeasonView(season, all.size()))
                     .setTotalSquads(all.size())
                     .setServerTimeMs(now);
             for (SquadRow sq : all.subList(start, end)) {
@@ -2079,10 +2074,10 @@ public final class TournamentStore {
                         + "(season_id,season_key,season_name,rule_version,stage,registration_start_ms,qualifier_start_ms,"
                         + "knockout_start_ms,settle_start_ms,end_ms,battle_team_size,roster_max_size,knockout_team_count,"
                         + "champion_squad_id,champion_squad_name,champion_member_summary,settled_ms,updated_ms,"
-                        + "champion_members_blob,champion_salute_count,"
+                        + "champion_members_blob,"
                         + "champion_emblem_id,third_place_squad_id,third_place_squad_name,third_place_emblem_id,"
                         + "final_mvp_player_id,final_mvp_player_name,final_mvp_score,champion_honor_bits) "
-                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,'','',0,?,?,0,0,0,'',0,0,'',0,0) "
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,'','',0,?,?,0,0,'',0,0,'',0,0) "
                         + "ON DUPLICATE KEY UPDATE season_id=season_id")) {
             ps.setInt(1, seasonId);
             ps.setString(2, "ts" + seasonId);
@@ -2413,21 +2408,6 @@ public final class TournamentStore {
         return ids;
     }
 
-    private boolean salutedTodayTx(Connection c, long playerId, long nowMs) throws SQLException {
-        if (playerId == 0L) {
-            return false;
-        }
-        int day = TournamentRules.utc8DayKey(nowMs);
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT 1 FROM " + MatchFeatureTables.TOURNAMENT_SALUTE + " WHERE player_id=? AND salute_day=? LIMIT 1")) {
-            ps.setLong(1, playerId);
-            ps.setInt(2, day);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
-            }
-        }
-    }
-
     /** 扫描 BO3 局间换阵倒计时到期的淘汰赛对局，按上局合法阵容自动切 READY 并返回建房规格。 */
     public List<LaunchSpec> takeDueIntermissionLaunches(long nowOverrideMs) throws SQLException {
         long now = nowOverrideMs > 0L ? nowOverrideMs : clockMs.getAsLong();
@@ -2497,117 +2477,6 @@ public final class TournamentStore {
             }
             return specs;
         });
-    }
-
-    /** 原子执行每日一次免费观道致敬（主键 (player_id, salute_day) 防刷，累加全服致敬计数）。 */
-    public SaluteOutcome saluteChampion(long playerId, int requestedSeasonId, long rewardId) throws SQLException {
-        requireOpen();
-        if (playerId == 0L || rewardId == 0L) {
-            throw new DomainException(MatchErrorTip.match_error.kMatchInternal_VALUE);
-        }
-        long now = clockMs.getAsLong();
-        return inTx(c -> {
-            SeasonRow season = null;
-            if (requestedSeasonId != 0) {
-                try (PreparedStatement ps = c.prepareStatement(
-                        "SELECT * FROM " + MatchFeatureTables.TOURNAMENT_SEASON
-                                + " WHERE season_id=? AND champion_squad_id>0 FOR UPDATE")) {
-                    ps.setInt(1, requestedSeasonId);
-                    try (ResultSet rs = ps.executeQuery()) {
-                        if (rs.next()) {
-                            season = scanSeason(rs);
-                        }
-                    }
-                }
-            } else {
-                try (PreparedStatement ps = c.prepareStatement(
-                        "SELECT * FROM " + MatchFeatureTables.TOURNAMENT_SEASON
-                                + " WHERE champion_squad_id>0 ORDER BY season_id DESC LIMIT 1 FOR UPDATE")) {
-                    try (ResultSet rs = ps.executeQuery()) {
-                        if (rs.next()) {
-                            season = scanSeason(rs);
-                        }
-                    }
-                }
-            }
-            if (season == null) {
-                throw new DomainException(MatchErrorTip.match_error.kMatchTournamentNoChampionToSalute_VALUE);
-            }
-            int saluteDay = TournamentRules.utc8DayKey(now);
-            try (PreparedStatement check = c.prepareStatement(
-                    "SELECT 1 FROM " + MatchFeatureTables.TOURNAMENT_SALUTE
-                            + " WHERE player_id=? AND salute_day=? FOR UPDATE")) {
-                check.setLong(1, playerId);
-                check.setInt(2, saluteDay);
-                try (ResultSet rs = check.executeQuery()) {
-                    if (rs.next()) {
-                        throw new DomainException(MatchErrorTip.match_error.kMatchTournamentAlreadySalutedToday_VALUE);
-                    }
-                }
-            }
-            try (PreparedStatement ps = c.prepareStatement(
-                    "INSERT INTO " + MatchFeatureTables.TOURNAMENT_SALUTE
-                            + "(player_id,salute_day,season_id,reward_id,mail_id,created_ms) VALUES(?,?,?,?,0,?)")) {
-                ps.setLong(1, playerId);
-                ps.setInt(2, saluteDay);
-                ps.setInt(3, season.seasonId());
-                ps.setLong(4, rewardId);
-                ps.setLong(5, now);
-                ps.executeUpdate();
-            } catch (java.sql.SQLIntegrityConstraintViolationException dup) {
-                throw new DomainException(MatchErrorTip.match_error.kMatchTournamentAlreadySalutedToday_VALUE);
-            }
-            long newCount = season.championSaluteCount() + 1L;
-            try (PreparedStatement ps = c.prepareStatement(
-                    "UPDATE " + MatchFeatureTables.TOURNAMENT_SEASON
-                            + " SET champion_salute_count=?,updated_ms=? WHERE season_id=?")) {
-                ps.setLong(1, newCount);
-                ps.setLong(2, now);
-                ps.setInt(3, season.seasonId());
-                ps.executeUpdate();
-            }
-            return new SaluteOutcome(season.seasonId(), saluteDay, newCount, rewardId);
-        });
-    }
-
-    /** 待补发的观道致敬邮件记录（mail_id=0 代表上次发信失败，后台可凭原 reward_id 幂等补发）。 */
-    public record PendingSaluteMail(long playerId, int saluteDay, int seasonId, long rewardId) {
-    }
-
-    /** 事务外观道致敬邮件投递成功后回填 mail_id 供审计。 */
-    public void updateSaluteMailId(long playerId, int saluteDay, long mailId) throws SQLException {
-        if (playerId == 0L || saluteDay == 0 || mailId == 0L) {
-            return;
-        }
-        inTx(c -> {
-            try (PreparedStatement ps = c.prepareStatement(
-                    "UPDATE " + MatchFeatureTables.TOURNAMENT_SALUTE
-                            + " SET mail_id=? WHERE player_id=? AND salute_day=?")) {
-                ps.setLong(1, mailId);
-                ps.setLong(2, playerId);
-                ps.setInt(3, saluteDay);
-                ps.executeUpdate();
-            }
-            return null;
-        });
-    }
-
-    /** 查询尚未确认投递成功（mail_id=0）的观道致敬邮件，供后台驱动器按原 reward_id 幂等补发。 */
-    public List<PendingSaluteMail> listPendingSaluteMails(int limit) throws SQLException {
-        int cap = Math.max(1, Math.min(limit, 100));
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(
-                     "SELECT player_id,salute_day,season_id,reward_id FROM " + MatchFeatureTables.TOURNAMENT_SALUTE
-                             + " WHERE mail_id=0 AND reward_id<>0 ORDER BY created_ms ASC LIMIT ?")) {
-            ps.setInt(1, cap);
-            List<PendingSaluteMail> out = new ArrayList<>();
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    out.add(new PendingSaluteMail(rs.getLong(1), rs.getInt(2), rs.getInt(3), rs.getLong(4)));
-                }
-            }
-            return out;
-        }
     }
 
     /** 校验 battle_id 是否允许全服公开回放（仅淘汰赛且配表开关开启，绝不放行海选/私密切磋）。 */
@@ -3470,7 +3339,7 @@ public final class TournamentStore {
         return new TournamentRules.KnockoutTieMetrics(squadId, seedRank, units, hpSum);
     }
 
-    private TournamentSeasonView toSeasonView(SeasonRow r, int regCount, boolean salutedToday) {
+    private TournamentSeasonView toSeasonView(SeasonRow r, int regCount) {
         TournamentRuleTable rule = tables.rule();
         TournamentStage stage = TournamentStage.forNumber(r.stage());
         TournamentSeasonView.Builder b = TournamentSeasonView.newBuilder()
@@ -3496,8 +3365,6 @@ public final class TournamentStore {
                 .setChampionSquadId(r.championSquadId())
                 .setChampionSquadName(r.championSquadName())
                 .setChampionMemberSummary(r.championMemberSummary())
-                .setChampionSaluteCount(r.championSaluteCount())
-                .setSalutedToday(salutedToday)
                 .setChampionEmblemId(r.championEmblemId())
                 .setThirdPlaceSquadId(r.thirdPlaceSquadId())
                 .setThirdPlaceSquadName(r.thirdPlaceSquadName() == null ? "" : r.thirdPlaceSquadName())
@@ -3626,7 +3493,7 @@ public final class TournamentStore {
                 rs.getInt("battle_team_size"), rs.getInt("roster_max_size"), rs.getInt("knockout_team_count"),
                 rs.getLong("champion_squad_id"), rs.getString("champion_squad_name"),
                 rs.getString("champion_member_summary"), rs.getLong("settled_ms"), rs.getLong("updated_ms"),
-                blob == null ? new byte[0] : blob, rs.getLong("champion_salute_count"),
+                blob == null ? new byte[0] : blob,
                 rs.getInt("champion_emblem_id"), rs.getLong("third_place_squad_id"),
                 thirdName == null ? "" : thirdName, rs.getInt("third_place_emblem_id"),
                 rs.getLong("final_mvp_player_id"), finalMvpName == null ? "" : finalMvpName,

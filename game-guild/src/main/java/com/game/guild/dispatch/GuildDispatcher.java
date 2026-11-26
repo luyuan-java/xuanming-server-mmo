@@ -37,8 +37,10 @@ import com.game.proto.guild.GetGuildShopRequest;
 import com.game.proto.guild.GetGuildWarBattleResultRequest;
 import com.game.proto.guild.GetGuildWarOverviewRequest;
 import com.game.proto.guild.InspectFieldWarTargetsRequest;
+import com.game.proto.guild.IssueGuildWarFeudRequest;
 import com.game.proto.guild.PostGuildWarBountyRequest;
 import com.game.proto.guild.RegisterGuildWarGarrisonRequest;
+import com.game.proto.guild.RespondGuildWarFeudRequest;
 import com.game.proto.guild.SetGuildWarStanceRequest;
 import com.game.proto.guild.StartGuildWarBattleRequest;
 import com.game.proto.guild.TrackGuildWarBountyRequest;
@@ -214,6 +216,11 @@ public final class GuildDispatcher {
             client(byId, GuildMethods.TRACK_GUILD_WAR_BOUNTY, TrackGuildWarBountyRequest.class, (s, r, d) -> war.trackGuildWarBounty(s.getPlayerId(), r, d));
             client(byId, GuildMethods.GET_GUILD_WAR_BATTLE_RESULT, GetGuildWarBattleResultRequest.class, (s, r, d) -> war.getGuildWarBattleResult(s.getPlayerId(), r, d));
             client(byId, GuildMethods.INSPECT_FIELD_WAR_TARGETS, InspectFieldWarTargetsRequest.class, (s, r, d) -> war.inspectFieldWarTargets(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.ISSUE_GUILD_WAR_FEUD, IssueGuildWarFeudRequest.class, (s, r, d) -> war.issueGuildWarFeud(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.RESPOND_GUILD_WAR_FEUD, RespondGuildWarFeudRequest.class, (s, r, d) -> war.respondGuildWarFeud(s.getPlayerId(), r, d));
+        }
+        for (String method : GuildMethods.JIANGHU_PLACEHOLDERS) {
+            other(byId, method, Kind.PLACEHOLDER);
         }
         if(activities==null){
             // 旧切片构造器兼容；生产装配必须显式注入完整活动服务。

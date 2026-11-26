@@ -67,6 +67,8 @@ message PlayerState {
   PlayerProgressionState progression = 23;
   // 青云游历手记双轨进度、已解锁典藏与零战力纪念外显（同事务围栏提交）。
   PlayerTravelPassState travel_pass = 24;
+  // 待寄个人邮件出箱（名匠代打 95% 净银两分成等，与货币/背包同事务围栏提交，落盘确认后再经 MailAdmin 异步投递）。
+  PlayerMailOutboxState mail_outbox = 25;
 }
 
 message TravelPassSeasonProgressState {
@@ -278,6 +280,11 @@ message BattleResultEntryState {
   uint64 battle_silver_weekly_used = 44;
   uint64 battle_silver_weekly_soft_cap = 45;
   bool battle_silver_diminished = 46;
+  uint32 retro_honor_season_id = 47;
+  uint32 retro_honor_points_added = 48;
+  uint32 retro_honor_progress_after = 49;
+  uint32 retro_honor_max_points = 50;
+  bool retro_honor_newly_unlocked = 51;
 }
 
 message BattleResultCurrencyState {
@@ -348,6 +355,9 @@ message ClientRequestRecordState {
   uint32 rewarded_ad_currency_type = 30;
   uint64 rewarded_ad_amount = 31;
   uint32 travel_pass_claimed_count = 32;
+  uint32 skill_loadout_rented_slots = 33;
+  uint64 skill_loadout_rent_expires_at_sec = 34;
+  uint64 skill_loadout_rent_spent_diamond = 35;
 }
 
 message EquipmentMaterialRewardLedgerState {
@@ -376,6 +386,9 @@ message PlayerMysteryMerchantPurchaseState {
 
 message PlayerSeasonState {
   repeated PlayerSeasonSealRecordState records = 1;
+  repeated uint64 unlocked_honor_words = 2;
+  uint32 retro_honor_target_season_id = 3;
+  map<uint32, uint32> retro_honor_progress = 4;
 }
 
 message PlayerSeasonSealRecordState {
@@ -385,6 +398,7 @@ message PlayerSeasonSealRecordState {
   uint32 battle_points = 4;
   uint32 catchup_points = 5;
   uint64 revision = 6;
+  uint32 last_term = 7;
 }
 
 message ItemGainBlockState {
@@ -447,6 +461,7 @@ message SkillLoadoutSchemeState {
   repeated uint32 passive_skill_ids = 3;
   repeated uint32 pursuit_skill_ids = 4;
   repeated uint32 opening_skill_ids = 5;
+  string name = 6;
 }
 
 message PlayerSkillBookState {
@@ -457,6 +472,8 @@ message PlayerSkillBookState {
   string loadout_last_request_id = 5;
   uint64 loadout_last_base_version = 6;
   uint32 loadout_last_scheme_id = 7;
+  uint32 rented_extra_slots = 8;
+  uint64 rent_expires_at_sec = 9;
 }
 
 message PlayerSkillEntry {
@@ -730,4 +747,28 @@ message ActiveMission {
   repeated uint32 progress = 2;
   // 接取时刻（UTC 毫秒，基线 mission_begin_time；客户端不可见，完成后不再保留）。
   uint64 accepted_at_ms = 3;
+}
+
+// 待寄个人邮件单条货币附件（currency_type 对应 common.base.CurrencyType，amount > 0）。
+message MailOutboxCurrencyState {
+  int32 currency_type = 1;
+  int64 amount = 2;
+}
+
+// 玩家持久待寄个人邮件条目（与资产扣款同事务落盘；按 request_id 幂等交给 game-mail）。
+message MailOutboxEntryState {
+  uint64 request_id = 1;
+  // 1 = battle_overflow, 2 = craft_proxy_fee
+  uint32 source = 2;
+  uint64 source_id = 3;
+  uint64 created_ms = 4;
+  string title = 5;
+  string body = 6;
+  // 收件人玩家 ID；0 表示发给本出箱归属者本人。
+  uint64 recipient_player_id = 7;
+  repeated MailOutboxCurrencyState currencies = 8;
+}
+
+message PlayerMailOutboxState {
+  repeated MailOutboxEntryState entries = 1;
 }

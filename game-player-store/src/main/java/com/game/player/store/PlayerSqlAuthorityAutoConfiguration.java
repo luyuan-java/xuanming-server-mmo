@@ -163,8 +163,8 @@ public class PlayerSqlAuthorityAutoConfiguration {
     static void verifyFinalSaveSchema(java.sql.Connection connection) throws java.sql.SQLException {
         try (var statement=connection.prepareStatement("""
                 SELECT player_id,owner_epoch,save_seq,protocol_version,source_instance,status,
-                       level,scene_config_id,pos_x,pos_y,pos_z,data,payload_digest,created_at,
-                       next_attempt_at,attempt_count,last_error_code,applied_at,admission_proto
+                       level,scene_config_id,pos_x,pos_y,pos_z,appearance_id,afk_pass_expires_at,afk_pass_last_req_id,
+                       data,payload_digest,created_at,next_attempt_at,attempt_count,last_error_code,applied_at,admission_proto
                   FROM player_final_save WHERE 1=0
                 """); var ignored=statement.executeQuery()) {
             // 只验证投影，不读取任何玩家payload。
@@ -198,6 +198,10 @@ public class PlayerSqlAuthorityAutoConfiguration {
         }
         for(String name:java.util.List.of("pos_x","pos_y","pos_z")) {
             requireFinalColumn(columns,name,java.sql.Types.DOUBLE,true);
+        }
+        requireFinalWidth(requireFinalColumn(columns,"appearance_id",java.sql.Types.VARCHAR,true),64,"appearance_id");
+        for(String name:java.util.List.of("afk_pass_expires_at","afk_pass_last_req_id")) {
+            requireFinalColumn(columns,name,java.sql.Types.BIGINT,true);
         }
         requireFinalWidth(requireFinalColumn(columns,"source_instance",java.sql.Types.VARCHAR,false),64,"source_instance");
         requireFinalWidth(requireFinalColumn(columns,"status",java.sql.Types.VARCHAR,false),16,"status");

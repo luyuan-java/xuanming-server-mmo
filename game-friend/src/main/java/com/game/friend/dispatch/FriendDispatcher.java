@@ -58,6 +58,7 @@ public final class FriendDispatcher {
     /** proto/friend/friend.proto 的客户端服务名（message_id.txt 的键前缀）。 */
     public static final String SERVICE = "ClientPlayerFriend";
     static final String NOTIFY_METHOD = "NotifyFriendEvent";
+    static final String BATCH_CHECK_SOCIAL_METHOD = "BatchCheckSocialRelations";
     static final String ERROR_MESSAGE_FIELD = "error_message";
 
     @FunctionalInterface
@@ -84,6 +85,7 @@ public final class FriendDispatcher {
     private final MessageIdRegistry registry;
     private final Map<Integer, Route<?>> routes;
     private final int notifyMessageId;
+    private final int batchCheckSocialMessageId;
     private final Executor executor;
     private final FriendMetrics metrics;
     private final long budgetMillis;
@@ -98,6 +100,7 @@ public final class FriendDispatcher {
         this.metrics = metrics;
         this.budgetMillis = budgetMillis;
         this.notifyMessageId = registry.requireId(SERVICE, NOTIFY_METHOD);
+        this.batchCheckSocialMessageId = registry.requireId(SERVICE, BATCH_CHECK_SOCIAL_METHOD);
         Map<Integer, Route<?>> byId = new HashMap<>();
         add(byId, "AddFriend", AddFriendRequest.class, service::addFriend);
         add(byId, "AcceptFriend", AcceptFriendRequest.class, service::acceptFriend);
@@ -148,9 +151,10 @@ public final class FriendDispatcher {
     public CompletableFuture<ClientReply> dispatch(ClientCall call, Optional<Deadline> caller) {
         var sample = metrics.startTimer();
         int messageId = call.getMessageId();
-        if (messageId == notifyMessageId) {
-            log.warn("[friend] 客户端上行了服务端推送的消息号 {} {}", messageId, describe(call.getSession()));
-            metrics.requestCompleted(sample, NOTIFY_METHOD, RequestResult.FORBIDDEN);
+        if (messageId == notifyMessageId || messageId == batchCheckSocialMessageId) {
+            String forbiddenMethod = messageId == notifyMessageId ? NOTIFY_METHOD : BATCH_CHECK_SOCIAL_METHOD;
+            log.warn("[friend] 客户端上行了禁止调用的内部/推送消息号 {} ({}) {}", messageId, forbiddenMethod, describe(call.getSession()));
+            metrics.requestCompleted(sample, forbiddenMethod, RequestResult.FORBIDDEN);
             return CompletableFuture.completedFuture(envelope(CommonErrorTip.common_error.kServiceUnavailable_VALUE));
         }
         Route<?> route = routes.get(messageId);

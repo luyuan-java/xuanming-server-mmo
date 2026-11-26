@@ -92,6 +92,25 @@ public final class AttributeService {
     public record SchemeCreation(int tipId, int schemeId) {
     }
 
+    /** 一体化战法·加点方案快照中某套方案的四维加点摘要。 */
+    public record SchemeAllocationSummary(Map<Integer, Integer> allocated, int remaining, int totalPoints) {
+    }
+
+    /** 一体化战法·加点方案保存的纯预检结果（不扣费不改状态）。 */
+    public record PreparedSchemeAllocation(int tipError, int poolId, long resetCostGold, boolean needsReset,
+                                           Map<Integer, Long> target) {
+        public boolean ok() {
+            return tipError == 0;
+        }
+    }
+
+    /** 一体化属性方案提交与切换结果。 */
+    public record UnifiedCommitResult(int tipError, String notice) {
+        public boolean ok() {
+            return tipError == 0;
+        }
+    }
+
     private final AttributeTables tables;
     private final SceneClock clock;
     private final CurrencyService currency;
@@ -346,11 +365,165 @@ public final class AttributeService {
     // ------------------------------------------------------------------ 面板
 
     private int maxSchemesFor(ScenePlayer player) {
-        int base = tables.maxSchemes();
         long nowSec = Math.floorDiv(clock.epochMillis(), 1000L);
-        return com.game.scene.afkpass.AfkPassRules.isActive(player.afkPassExpiresAt(), nowSec)
-                ? base + com.game.scene.afkpass.AfkPassRules.LIGHT_CARD_BONUS_LOADOUT_SLOTS
-                : base;
+        int freeSchemes = com.game.scene.skill.SkillLoadoutRules.freeSchemesForLevel(level(player));
+        boolean lightCard = com.game.scene.afkpass.AfkPassRules.isActive(player.afkPassExpiresAt(), nowSec);
+        int loadoutUnlocked = com.game.scene.skill.SkillLoadoutRules.unlockedSchemes(
+                freeSchemes,
+                lightCard,
+                player.learnedSkills().rentedExtraSlots(),
+                player.learnedSkills().rentExpiresAtSec(),
+                nowSec);
+        return Math.max(tables.maxSchemes(), loadoutUnlocked);
+    }
+
+    private AttributePoolTable primaryPlayerPool() {
+        List<AttributePoolTable> pools = tables.playerPools();
+        return pools.isEmpty() ? null : pools.get(0);
+    }
+
+    public SchemeAllocationSummary schemeAllocationSummary(ScenePlayer player, int schemeId) {
+        AttributePoolTable pool = primaryPlayerPool();
+        if (pool == null) {
+            return null;
+        }
+        int level = level(player);
+        long total = AttributeRules.totalPoints(AttributeTables.toRule(pool), level, 0);
+        Scheme scheme = player.attributes().scheme(schemeId);
+        long used = scheme != null ? usedPoints(scheme, pool.getId()) : 0;
+        Map<Integer, Integer> alloc = new LinkedHashMap<>();
+        for (AttributeDimensionTable dim : tables.dimensionsOf(pool.getId())) {
+            long pts = scheme != null ? scheme.allocated(dim.getId()) : 0L;
+            alloc.put(dim.getId(), (int) Math.min(pts, AttributeRules.UINT32_MAX));
+        }
+        long remaining = total > used ? total - used : 0L;
+        return new SchemeAllocationSummary(alloc, (int) remaining, (int) total);
+    }
+
+    public long playerPoolResetCostGold(ScenePlayer player) {
+        AttributePoolTable pool = primaryPlayerPool();
+        return pool == null ? 0L : resetCost(pool, level(player));
+    }
+
+    public long switchCooldownUntil(ScenePlayer player) {
+        long cooldown = tables.switchCooldownSeconds();
+        if (cooldown <= 0) {
+            return 0L;
+        }
+        return player.attributes().lastSwitchTime() + cooldown;
+    }
+
+    public PreparedSchemeAllocation prepareSchemeAllocation(ScenePlayer player, int schemeId,
+                                                            Map<Integer, Integer> target, boolean resetIfNeeded) {
+        int writable = checkWritable(player);
+        if (writable != 0) {
+            return new PreparedSchemeAllocation(writable, 0, 0L, false, Map.of());
+        }
+        AttributePoolTable pool = primaryPlayerPool();
+        if (pool == null) {
+            return new PreparedSchemeAllocation(POOL_NOT_FOUND, 0, 0L, false, Map.of());
+        }
+        Scheme existing = player.attributes().scheme(schemeId);
+        Map<Integer, Long> current = new LinkedHashMap<>();
+        for (AttributeDimensionTable dim : tables.dimensionsOf(pool.getId())) {
+            current.put(dim.getId(), existing != null ? existing.allocated(dim.getId()) : 0L);
+        }
+        long cap = Integer.toUnsignedLong(pool.getDimensionCap());
+        for (Map.Entry<Integer, Integer> e : target.entrySet()) {
+            if (!current.containsKey(e.getKey())) {
+                return new PreparedSchemeAllocation(
+                        com.game.table.SkillErrorTip.skill_error.kSkillLoadoutAttributeInvalid_VALUE, 0, 0L, false, Map.of());
+            }
+            long want = Integer.toUnsignedLong(e.getValue());
+            if (cap > 0 && want > cap) {
+                return new PreparedSchemeAllocation(
+                        com.game.table.SkillErrorTip.skill_error.kSkillLoadoutAttributeInvalid_VALUE, 0, 0L, false, Map.of());
+            }
+        }
+        int level = level(player);
+        long total = AttributeRules.totalPoints(AttributeTables.toRule(pool), level, 0);
+        Map<Integer, Long> finalTarget = new LinkedHashMap<>();
+        long newUsed = 0L;
+        long oldUsed = 0L;
+        boolean decreased = false;
+        for (Map.Entry<Integer, Long> e : current.entrySet()) {
+            int dimId = e.getKey();
+            long curVal = e.getValue();
+            oldUsed += curVal;
+            long want = target.containsKey(dimId) ? Integer.toUnsignedLong(target.get(dimId)) : 0L;
+            newUsed += want;
+            if (want < curVal) {
+                decreased = true;
+            }
+            finalTarget.put(dimId, want);
+        }
+        if (!AttributeRules.isUnlocked(AttributeTables.toRule(pool), level) && newUsed > 0) {
+            return new PreparedSchemeAllocation(
+                    com.game.table.SkillErrorTip.skill_error.kSkillLoadoutAttributeInvalid_VALUE, 0, 0L, false, Map.of());
+        }
+        if (newUsed > total) {
+            return new PreparedSchemeAllocation(
+                    com.game.table.SkillErrorTip.skill_error.kSkillLoadoutAttributeInvalid_VALUE, 0, 0L, false, Map.of());
+        }
+        long resetGold = 0L;
+        if (decreased) {
+            if (!resetIfNeeded) {
+                return new PreparedSchemeAllocation(
+                        com.game.table.SkillErrorTip.skill_error.kSkillLoadoutAttributeResetRequired_VALUE, 0, 0L, false, Map.of());
+            }
+            resetGold = oldUsed > 0 ? resetCost(pool, level) : 0L;
+            if (resetGold > 0 && !player.wallet().canAffordGoldWithBind(resetGold)) {
+                return new PreparedSchemeAllocation(GOLD_NOT_ENOUGH, 0, 0L, false, Map.of());
+            }
+        }
+        return new PreparedSchemeAllocation(0, pool.getId(), resetGold, decreased, finalTarget);
+    }
+
+    public UnifiedCommitResult commitSchemeAllocationAndSwitch(ScenePlayer player, int schemeId, String schemeName,
+                                                               boolean applyAllocation, PreparedSchemeAllocation prepared) {
+        if (applyAllocation && prepared.needsReset() && prepared.resetCostGold() > 0) {
+            int paid = payGold(player, prepared.resetCostGold(), AssetAudit.Reason.ATTRIBUTE_RESET);
+            if (paid != 0) {
+                return new UnifiedCommitResult(paid, "");
+            }
+        }
+        PlayerAttributes attrs = player.attributes();
+        Scheme scheme = attrs.ensureScheme(schemeId, schemeName.isEmpty() ? defaultSchemeName(schemeId) : schemeName);
+        if (!schemeName.isEmpty()) {
+            scheme.rename(schemeName);
+        }
+        if (applyAllocation) {
+            prepared.target().forEach(scheme::setAllocated);
+        }
+        String notice = "";
+        if (attrs.activeSchemeId() != schemeId) {
+            long now = Math.floorDiv(clock.epochMillis(), 1000L);
+            long cooldown = tables.switchCooldownSeconds();
+            if (cooldown > 0 && attrs.lastSwitchTime() + cooldown > now) {
+                notice = "战法与加点方案已保存，但加点切换处于冷却中，冷却结束后可切换生效";
+            } else {
+                attrs.switchTo(schemeId, now);
+            }
+        }
+        return new UnifiedCommitResult(0, notice);
+    }
+
+    public String trySyncLinkedScheme(ScenePlayer player, int schemeId, String schemeName) {
+        PlayerAttributes attrs = player.attributes();
+        Scheme scheme = attrs.ensureScheme(schemeId, schemeName.isEmpty() ? defaultSchemeName(schemeId) : schemeName);
+        if (!schemeName.isEmpty() && scheme.name().isEmpty()) {
+            scheme.rename(schemeName);
+        }
+        if (attrs.activeSchemeId() == schemeId) {
+            return "";
+        }
+        long now = Math.floorDiv(clock.epochMillis(), 1000L);
+        long cooldown = tables.switchCooldownSeconds();
+        if (cooldown > 0 && attrs.lastSwitchTime() + cooldown > now) {
+            return "战法已切换；加点方案处于60秒切换冷却中，冷却结束后可重新切换同步";
+        }
+        attrs.switchTo(schemeId, now);
+        return "";
     }
 
     /** 全量面板（客户端零配表：维度名 / 说明 / 上限 / 剩余点 / 二级属性都在这里）。只读，不改状态。 */

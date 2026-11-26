@@ -255,7 +255,8 @@ message MatchTournamentSeasonRow {
   uint64 settled_ms = 17;
   uint64 updated_ms = 18;
   bytes champion_members_blob = 19;
-  uint64 champion_salute_count = 20;
+  reserved 20;
+  reserved "champion_salute_count";
   uint32 champion_emblem_id = 21;
   uint64 third_place_squad_id = 22;
   string third_place_squad_name = 23;
@@ -388,19 +389,6 @@ message MatchTournamentMatchGameRow {
   uint64 winner_squad_id = 7;
   uint32 outcome = 8;
   uint64 finished_ms = 9;
-}
-
-message MatchTournamentSaluteRow {
-  option (proto2mysql.table_name) = "match_tournament_salute";
-  option (proto2mysql.primary_key) = "player_id,salute_day";
-  option (proto2mysql.index) = "season_id,salute_day,player_id";
-
-  uint64 player_id = 1;
-  uint32 salute_day = 2;
-  uint32 season_id = 3;
-  uint64 reward_id = 4;
-  uint64 mail_id = 5;
-  uint64 created_ms = 6;
 }
 
 message MatchTournamentCheerRow {

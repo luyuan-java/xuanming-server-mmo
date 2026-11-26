@@ -426,6 +426,35 @@ class MysteryMerchantAndEquipmentCraftTest {
                         .setOperation(EquipmentCraftChoice.Operation.UPGRADE_TIER)
                         .setItemId(weaponId).setConfigId(3132).build()).build(),
                 PreviewEquipmentCraftResponse.parser()).getErrorMessage().getId()).isEqualTo(1005);
+
+        // 5. 绑定装升档严禁扣绑银（防升档后再解封洗白绑银），且 equip_profile == 3 法宝禁止解封为可交易。
+        after.setBound(true);
+        f.currency.add(player, com.game.scene.player.Wallet.BOUND_GOLD, 10_000L, Reason.GM_GRANT, 3L);
+        EquipmentCraftChoice upgradeBoundTo60 = EquipmentCraftChoice.newBuilder()
+                .setOperation(EquipmentCraftChoice.Operation.UPGRADE_TIER)
+                .setItemId(weaponId).setConfigId(3161).build();
+        player.setLevel(60);
+        PreviewEquipmentCraftResponse boundPreview = call(f, player, BAG_SERVICE, "PreviewEquipmentCraft",
+                PreviewEquipmentCraftRequest.newBuilder().setChoice(upgradeBoundTo60).build(),
+                PreviewEquipmentCraftResponse.parser());
+        assertThat(boundPreview.getPreview().getAvailable()).isFalse();
+        assertThat(boundPreview.getPreview().getUnavailableTip())
+                .isEqualTo(com.game.table.EquipErrorTip.equip_error.kEquipCraftGoldNotEnough_VALUE);
+
+        var artifactRecipe = rules.getRecipesList().stream()
+                .filter(r -> r.getProduct().getEquipProfile() == 3).findFirst().orElseThrow();
+        int artifactConfig = artifactRecipe.getProduct().getConfigId();
+        assertThat(f.bags.addItems(player, BagType.INVENTORY,
+                Map.of(EquipCraftQualityRules.UNSEAL_TALISMAN_CONFIG_ID, 1L), true, Reason.GM_GRANT, 4L, "").tip()).isZero();
+        var artGrant = f.bags.addItems(player, BagType.INVENTORY, Map.of(artifactConfig, 1L), true, Reason.GM_GRANT, 5L, "");
+        assertThat(artGrant.ok()).isTrue();
+        long artId = artGrant.written().getFirst().guids().getFirst();
+        PreviewEquipmentCraftResponse artUnseal = call(f, player, BAG_SERVICE, "PreviewEquipmentCraft",
+                PreviewEquipmentCraftRequest.newBuilder().setChoice(EquipmentCraftChoice.newBuilder()
+                        .setOperation(EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE)
+                        .setItemId(artId).build()).build(),
+                PreviewEquipmentCraftResponse.parser());
+        assertThat(artUnseal.getErrorMessage().getId()).isEqualTo(1005);
     }
 
     private static <T extends Message> T call(BattleFixture f, ScenePlayer player, String service, String method,

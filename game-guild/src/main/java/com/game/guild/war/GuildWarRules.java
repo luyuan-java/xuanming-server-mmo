@@ -43,6 +43,12 @@ public final class GuildWarRules {
     public static final int DEFAULT_TRACK_COOLDOWN_SEC = 15;
     public static final int DEFAULT_GOLD_LEYLINE_BONUS_BPS = 15000;
     public static final int DEFAULT_RIVALRY_BONUS_BPS = 2000;
+    public static final int DEFAULT_FEUD_BONUS_BPS = 2500;
+    public static final int DEFAULT_FEUD_ACCEPT_WINDOW_SEC = 900;
+    public static final int DEFAULT_FEUD_DURATION_SEC = 7200;
+    public static final int DEFAULT_FEUD_COOLDOWN_SEC = 86400;
+    public static final int FEUD_FREE_DIMINISH_FIGHTS = 3;
+    public static final int STREAK_BROADCAST_MIN = 5;
     public static final int RIVALRY_CLASH_THRESHOLD = 5;
 
     public record LeylineMeta(int id, String name, int sceneConfigId) {
@@ -127,12 +133,51 @@ public final class GuildWarRules {
     }
 
     public static int diminishPercentForRepeat(int priorMatchesInWindow) {
+        return diminishPercentForRepeat(priorMatchesInWindow, false);
+    }
+
+    public static int diminishPercentForRepeat(int priorMatchesInWindow, boolean feudActive) {
+        if (feudActive) {
+            if (priorMatchesInWindow < FEUD_FREE_DIMINISH_FIGHTS) {
+                return 100;
+            }
+            return priorMatchesInWindow == FEUD_FREE_DIMINISH_FIGHTS ? 20 : 0;
+        }
         return switch (priorMatchesInWindow) {
             case 0 -> 100;
             case 1 -> 50;
             case 2 -> 20;
             default -> 0;
         };
+    }
+
+    public static long resolveFeudWinner(long issuerGuildId, long targetGuildId,
+                                         int issuerWins, int targetWins,
+                                         long issuerMerit, long targetMerit) {
+        if (issuerWins > targetWins) return issuerGuildId;
+        if (targetWins > issuerWins) return targetGuildId;
+        if (issuerMerit > targetMerit) return issuerGuildId;
+        if (targetMerit > issuerMerit) return targetGuildId;
+        return 0L;
+    }
+
+    public static String formatFeudSummary(int status, long issuerGuildId, String issuerGuildName,
+                                           long targetGuildId, String targetGuildName,
+                                           int issuerWins, int targetWins, long winnerGuildId) {
+        if (status != 3) {
+            return "";
+        }
+        if (winnerGuildId != 0 && winnerGuildId == issuerGuildId) {
+            return "约战大捷：" + issuerGuildName + " " + issuerWins + ":" + targetWins + " 胜 " + targetGuildName;
+        }
+        if (winnerGuildId != 0 && winnerGuildId == targetGuildId) {
+            return "约战大捷：" + targetGuildName + " " + targetWins + ":" + issuerWins + " 胜 " + issuerGuildName;
+        }
+        return "势均力敌：" + issuerGuildName + " " + issuerWins + ":" + targetWins + " 平 " + targetGuildName;
+    }
+
+    public static boolean shouldBroadcastStreakAlert(int newStreak, int endedLoserStreak) {
+        return newStreak == 5 || newStreak == 8 || endedLoserStreak >= STREAK_BROADCAST_MIN;
     }
 
     public static StreakJackpot streakBountyJackpot(int defeatedStreak, int distinctOpponents) {
@@ -170,6 +215,12 @@ public final class GuildWarRules {
 
     public static SideReward computeSideReward(GuildWarBattleKind kind, boolean won, boolean draw, int diminishPct,
                                                boolean goldLeyline, boolean rivalGuild, GuildWarRuleTable rule) {
+        return computeSideReward(kind, won, draw, diminishPct, goldLeyline, rivalGuild, false, rule);
+    }
+
+    public static SideReward computeSideReward(GuildWarBattleKind kind, boolean won, boolean draw, int diminishPct,
+                                               boolean goldLeyline, boolean rivalGuild, boolean feudActive,
+                                               GuildWarRuleTable rule) {
         if (diminishPct <= 0) {
             return new SideReward(0L, 0L, 0L, 0L);
         }
@@ -205,13 +256,16 @@ public final class GuildWarRules {
 
         int goldBps = rule != null && rule.getGoldLeylineMultiplierBps() > 0 ? rule.getGoldLeylineMultiplierBps() : DEFAULT_GOLD_LEYLINE_BONUS_BPS;
         int rivalBps = rule != null && rule.getRivalryBonusBps() > 0 ? rule.getRivalryBonusBps() : DEFAULT_RIVALRY_BONUS_BPS;
+        if (feudActive && DEFAULT_FEUD_BONUS_BPS > rivalBps) {
+            rivalBps = DEFAULT_FEUD_BONUS_BPS;
+        }
         if (goldLeyline) {
             baseContrib = (baseContrib * goldBps) / 10_000L;
             baseSilver = (baseSilver * goldBps) / 10_000L;
             baseFunds = (baseFunds * goldBps) / 10_000L;
             baseMerit = (baseMerit * goldBps) / 10_000L;
         }
-        if (rivalGuild) {
+        if (rivalGuild || feudActive) {
             baseContrib = (baseContrib * (10_000L + rivalBps)) / 10_000L;
             baseSilver = (baseSilver * (10_000L + rivalBps)) / 10_000L;
             baseFunds = (baseFunds * (10_000L + rivalBps)) / 10_000L;

@@ -307,6 +307,11 @@ public final class RedisKeys {
         return worldZonePrefix(zoneId) + "mystery-merchant";
     }
 
+    /** 本 zone 跨节点/离线名匠代打共享摊位目录（Hash：字段为摊主玩家号无符号十进制，值为 {@code CraftProxyStallInfo} protobuf 字节）。 */
+    public String craftProxyStalls(int zoneId) {
+        return worldZonePrefix(zoneId) + "craft-proxy-stalls";
+    }
+
     /** 玩家主动切线冷却（STRING，短 TTL）；全局 player 维度，跨节点/zone不重置。 */
     public String channelSwitchCooldown(long playerId) {
         return prefix + "player:" + Long.toUnsignedString(playerId) + ":channel-switch-cooldown";
