@@ -159,6 +159,22 @@ class TournamentLeylineBattleEngineTest {
         assertThat(snap.getTournamentContext().getIsThirdPlace()).isTrue();
     }
 
+    @Test
+    void 土灵脉护盾必须先按原始伤害抵扣再按当前气血封顶_高伤不能留盾保命() {
+        var state = com.game.proto.BattleActorState.newBuilder()
+                .setActorId(101L)
+                .setTeamIndex(0)
+                .setMaxHealth(1_000L)
+                .setAttributes(com.game.proto.BaseAttributesComp.newBuilder().setHealth(100L))
+                .build();
+        BattleUnit unit = new BattleUnit(state.toBuilder());
+        unit.setTournamentEarthShield(500L);
+        long dealt = unit.applyDamage(1_000.0);
+        assertThat(unit.tournamentEarthShield()).as("1000 伤应先打空 500 盾").isZero();
+        assertThat(dealt).as("溢出 500 伤再按 100 当前气血封顶").isEqualTo(100L);
+        assertThat(unit.health()).isZero();
+    }
+
     private static long runOneHeal(MemoryBattleData data, TournamentLeylineElement leyline) {
         var req = request(3, 55);
         if (leyline != TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED) {

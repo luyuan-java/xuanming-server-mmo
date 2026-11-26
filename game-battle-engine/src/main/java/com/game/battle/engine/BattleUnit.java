@@ -247,8 +247,13 @@ final class BattleUnit {
             rawDamage *= 0.5;
         }
         long healthBefore = attributes.getHealth();
-        long damage = CombatDamageRules.damageToHealth(rawDamage, healthBefore);
-        damage -= absorbTournamentEarthShield(damage);
+        if (!Double.isFinite(rawDamage) || healthBefore == 0L) {
+            return 0L;
+        }
+        // 先按完整向上取整伤害抵扣锦标赛土灵脉护盾，再以当前气血封顶，避免高伤先被低血封顶导致护盾余量异常保命
+        long incoming = Unsigned.fromDoubleSaturating(Math.ceil(rawDamage));
+        long remaining = incoming - absorbTournamentEarthShield(incoming);
+        long damage = Unsigned.minUnsigned(remaining, healthBefore);
         attributes.setHealth(healthBefore - damage);
         return damage;
     }

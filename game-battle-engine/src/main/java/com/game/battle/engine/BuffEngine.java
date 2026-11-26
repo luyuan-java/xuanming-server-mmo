@@ -191,6 +191,9 @@ final class BuffEngine {
         int[] dispelIndexes = new int[count];
         int found = 0;
         for (int index = 0; index < count; index++) {
+            if (ctx.configured.listener(target.state().getBuffs(index))) {
+                continue;
+            }
             Optional<BuffTable> existingRow = ctx.data().buff(target.state().getBuffsOrBuilder(index).getBuffTableId());
             if (existingRow.isEmpty()) {
                 continue;
@@ -245,13 +248,18 @@ final class BuffEngine {
         return false;
     }
 
-    /** 删除该下标的条目并出 BUFF_REMOVE（source = 条目的施法者，不填 value）（{@code RemoveBuffAt}，{@code engine.cpp:1553-1564}）。 */
+    /** 删除该下标的条目并出 BUFF_REMOVE（source = 条目的施法者，不填 value）；配置态 buff 委托 {@code ctx.configured.remove} 清理临时血量与蓄力态。 */
     void removeBuffAt(BattleUnit target, int buffIndex) {
         if (buffIndex < 0 || buffIndex >= target.state().getBuffsCount()) {
             return;
         }
         BattleBuffEntryOrBuilder entry = target.state().getBuffsOrBuilder(buffIndex);
         int buffTableId = entry.getBuffTableId();
+        var row = ctx.data().buff(buffTableId);
+        if (row.isPresent() && row.get().getBattleOp() != 0) {
+            ctx.configured.remove(target, entry.getBuffId());
+            return;
+        }
         long casterId = entry.getCasterId();
         target.state().removeBuffs(buffIndex);
         ctx.events().append(eBattleEventType.BATTLE_EVENT_BUFF_REMOVE, casterId, target.actorId())
