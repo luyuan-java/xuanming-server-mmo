@@ -76,12 +76,12 @@ class MemberPrecheckTest {
     @Test
     void 有战斗锁_IN_BATTLE_读锁出错是LOCK_READ_FAILED_都不去碰票据() {
         players.inBattle(A, true);
-        assertThat(precheck.check(List.of(A, B), d())).isEqualTo(Result.failed(Reason.IN_BATTLE, A));
+        assertThat(precheck.check(List.of(A, B), d())).isEqualTo(Result.failed(Reason.IN_BATTLE, A, 1L));
 
         players.inBattle(A, false).failLock(A);
         assertThat(precheck.check(List.of(A, B), d())).isEqualTo(Result.failed(Reason.LOCK_READ_FAILED, A));
 
-        assertThat(players.reads).containsExactly("presence:1001", "lock:1001", "presence:1001", "lock:1001");
+        assertThat(players.reads).containsExactly("presence:1001", "lock:1001", "lock:1001", "presence:1001", "lock:1001");
         assertThat(healing.calls).as("票据的 ready 自愈以「没有战斗锁」为前提：锁没确认就不许调").isEmpty();
     }
 

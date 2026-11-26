@@ -21,6 +21,8 @@ public final class TournamentSpectateCheerHub {
     private static final int RING_LIMIT = 32;
     private static final int INITIAL_RETURN = 12;
     private static final long ROOM_IDLE_TTL_MS = 2L * 3600 * 1000;
+    private static final long EVICT_SWEEP_INTERVAL_MS = 60_000L;
+    private static final int COOLDOWN_PRUNE_THRESHOLD = 1024;
     private static final int MAX_SENDER_NAME_CODEPOINTS = 16;
 
     public record Snapshot(long battleId, long countA, long countB, long cooldownUntilMs,
@@ -40,6 +42,7 @@ public final class TournamentSpectateCheerHub {
     }
 
     private final Map<Long, Room> rooms = new HashMap<>();
+    private long lastEvictMs;
 
     public synchronized SendOutcome send(long battleId, long playerId, String senderName, int phraseId, int side, long nowMs) {
         if (battleId == 0L || playerId == 0L
@@ -79,6 +82,9 @@ public final class TournamentSpectateCheerHub {
         }
         long nextUntil = nowMs + COOLDOWN_MS;
         room.cooldowns.put(playerId, nextUntil);
+        if (room.cooldowns.size() > COOLDOWN_PRUNE_THRESHOLD) {
+            room.cooldowns.entrySet().removeIf(e -> e.getValue() <= nowMs);
+        }
         return new SendOutcome(new Snapshot(
                 battleId, room.countA, room.countB, nextUntil, List.of(item), nowMs), false, false);
     }
@@ -99,9 +105,13 @@ public final class TournamentSpectateCheerHub {
     }
 
     private void evictIdleLocked(long nowMs) {
-        if (rooms.size() < 64) {
+        if (rooms.isEmpty()) {
             return;
         }
+        if (rooms.size() < 64 && lastEvictMs != 0L && nowMs > lastEvictMs && nowMs - lastEvictMs < EVICT_SWEEP_INTERVAL_MS) {
+            return;
+        }
+        lastEvictMs = nowMs;
         Iterator<Map.Entry<Long, Room>> it = rooms.entrySet().iterator();
         while (it.hasNext()) {
             Room r = it.next().getValue();

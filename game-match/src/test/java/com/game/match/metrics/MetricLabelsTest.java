@@ -30,11 +30,12 @@ class MetricLabelsTest {
         assertThat(MetricLabels.mode(9)).isEqualTo("MATCH_MODE_GUILD_WAR_PVP");
         assertThat(MetricLabels.mode(10)).isEqualTo("MATCH_MODE_GUILD_WAR_SIEGE");
         assertThat(MetricLabels.mode(11)).isEqualTo("MATCH_MODE_SEASON_TOURNAMENT");
+        assertThat(MetricLabels.mode(12)).isEqualTo("MATCH_MODE_JIANGHU_DUEL");
     }
 
     @Test
     void 模式_契约里没有的值一律unknown_不输出数字串() {
-        assertThat(MetricLabels.mode(12)).isEqualTo("unknown");
+        assertThat(MetricLabels.mode(13)).isEqualTo("unknown");
         assertThat(MetricLabels.mode(-1)).isEqualTo("unknown");
         assertThat(MetricLabels.mode(Integer.MAX_VALUE)).isEqualTo("unknown");
         assertThat(MetricLabels.mode(MatchMode.UNRECOGNIZED)).isEqualTo("unknown");
@@ -51,7 +52,7 @@ class MetricLabelsTest {
         assertThat(seen).containsExactlyInAnyOrder("MATCH_MODE_UNSPECIFIED", "MATCH_MODE_5V5", "MATCH_MODE_3V3",
                 "MATCH_MODE_1V1", "MATCH_MODE_PVE_SOLO", "MATCH_MODE_PVE_TEAM", "MATCH_MODE_PVP_CHALLENGE",
                 "MATCH_MODE_PVP_TEAM", "MATCH_MODE_POLARITY_5V5", "MATCH_MODE_GUILD_WAR_PVP",
-                "MATCH_MODE_GUILD_WAR_SIEGE", "MATCH_MODE_SEASON_TOURNAMENT", "unknown");
+                "MATCH_MODE_GUILD_WAR_SIEGE", "MATCH_MODE_SEASON_TOURNAMENT", "MATCH_MODE_JIANGHU_DUEL", "unknown");
     }
 
     @Test

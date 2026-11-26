@@ -48,7 +48,9 @@ public class GlobalMatchConfiguration {
     @Bean @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     GlobalMatchStore globalMatchStore(DataSource source,GlobalMatchProperties config,MatchProperties properties)throws java.sql.SQLException{return new GlobalMatchStore(source,config,properties);}
     @Bean(initMethod="start",destroyMethod="close") @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
-    RatingRankOutbox ratingRankOutbox(DataSource source,GlobalRankProperties config,GlobalMatchStore schema){return new RatingRankOutbox(source,config);}
+    RatingRankOutbox ratingRankOutbox(DataSource source,GlobalRankProperties config,GlobalMatchStore schema,
+            ObjectProvider<com.game.match.ranked.RankedStore> rankedStore){
+        return new RatingRankOutbox(source,config).withRankedStore(rankedStore.getIfAvailable());}
     @Bean(initMethod="start",destroyMethod="close") @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     GlobalMatchService globalMatchService(GlobalMatchStore store,GlobalMatchProperties config,MatchProperties props,NodeDirectory<BattleNodeInfo> directory,
             MatchIds ids,RatingReader ratings,ScenePreparer scenes,NodeCalls<BattleNodeService> calls,PlayerStatusReader players,PlacementStore projections,GatherHooks hooks,

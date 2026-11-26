@@ -440,6 +440,40 @@ public final class TournamentService {
         }
     }
 
+    /** 幂等补发因瞬时故障未落盘 mail_id 的观道致敬邮件（复用原 reward_id，避免重复发奖或永久丢礼）。 */
+    public int retryPendingSaluteMails(int limit) {
+        if (mailSender == null) {
+            return 0;
+        }
+        int delivered = 0;
+        try {
+            List<TournamentStore.PendingSaluteMail> pending = store.listPendingSaluteMails(limit);
+            if (pending.isEmpty()) {
+                return 0;
+            }
+            byte[] attBytes = TournamentTables.buildSaluteMailAttachments(store.tables().rule()).toByteArray();
+            for (TournamentStore.PendingSaluteMail item : pending) {
+                try {
+                    TournamentStore.ClaimableReward reward = new TournamentStore.ClaimableReward(
+                            item.rewardId(), item.seasonId(), 0, 0, attBytes);
+                    long mailId = mailSender.send(item.playerId(), reward,
+                            "群仙问道赛·观道致敬小礼",
+                            "感谢道友向本服总冠军致敬，谨奉绑定修道薄礼一份，请查收附件。");
+                    if (mailId != 0L) {
+                        store.updateSaluteMailId(item.playerId(), item.saluteDay(), mailId);
+                        delivered++;
+                    }
+                } catch (Exception mailErr) {
+                    log.warn("[tournament] salute mail retry failed player={} reward={}: {}",
+                            Long.toUnsignedString(item.playerId()), Long.toUnsignedString(item.rewardId()), mailErr.getMessage());
+                }
+            }
+        } catch (SQLException e) {
+            log.warn("[tournament] listPendingSaluteMails failed: {}", e.getMessage());
+        }
+        return delivered;
+    }
+
     public SendTournamentSpectateCheerResponse sendSpectateCheer(long playerId, SendTournamentSpectateCheerRequest req) {
         if (playerId == 0L) {
             return SendTournamentSpectateCheerResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();

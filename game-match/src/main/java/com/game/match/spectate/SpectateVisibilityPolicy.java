@@ -58,6 +58,8 @@ public final class SpectateVisibilityPolicy {
         table.put(MatchMode.MATCH_MODE_GUILD_WAR_SIEGE, eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         // 全服赛季战队锦标赛《群仙问道赛》：全服公开观战，优先升 L2 赛事广播
         table.put(MatchMode.MATCH_MODE_SEASON_TOURNAMENT, eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
+        // 江湖恩怨·天墉生死状：全对局公开观战
+        table.put(MatchMode.MATCH_MODE_JIANGHU_DUEL, eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         return Collections.unmodifiableMap(table);
     }
 
@@ -65,11 +67,12 @@ public final class SpectateVisibilityPolicy {
      * 建房时决定这局的观战可见性（只在组 {@code CreateBattleRequest} 时调用一次，结果随建房原件冻结）。
      *
      * @param mode     这局的匹配模式；{@code null} 与 {@code UNRECOGNIZED}（数值不在契约里）都按私密
-     * @param activity 建房原件里的活动上下文；{@code null} 或 kind 为 NONE 表示普通对局。活动局一律私密，与模式无关
+     * @param activity 建房原件里的活动上下文；{@code null} 或 kind 为 NONE/GUILD_WAR 按模式决策，其余活动局一律私密
      * @return 永不为 {@code UNSPECIFIED}：调用方据此填进建房请求，battle 与 match 不必再区分「没填」与「私密」
      */
     public static eSpectateVisibility decide(MatchMode mode, BattleActivityContext activity) {
-        if (activity != null && activity.getKind() != eBattleActivityKind.BATTLE_ACTIVITY_KIND_NONE) {
+        if (activity != null && activity.getKind() != eBattleActivityKind.BATTLE_ACTIVITY_KIND_NONE
+                && activity.getKind() != eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR) {
             return eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE;
         }
         if (mode == null) {

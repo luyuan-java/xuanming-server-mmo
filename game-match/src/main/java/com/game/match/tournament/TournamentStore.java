@@ -1115,7 +1115,12 @@ public final class TournamentStore {
     public void advanceSeason(long nowOverrideMs, LongSupplier idGenerator) throws SQLException {
         long now = nowOverrideMs > 0L ? nowOverrideMs : clockMs.getAsLong();
         inTx(c -> {
-            SeasonRow cur = ensureSeasonTx(c, now);
+            SeasonRow latest = ensureSeasonTx(c, now);
+            // 始终先对当前赛季行加 FOR UPDATE，防止多副本并发重复生成淘汰赛对阵或重复结算。
+            SeasonRow cur = readSeasonForUpdateTx(c, latest.seasonId());
+            if (cur == null) {
+                return null;
+            }
             switch (TournamentStage.forNumber(cur.stage())) {
                 case TOURNAMENT_STAGE_REGISTRATION -> {
                     if (now >= cur.qualifierStartMs()) {
@@ -1130,6 +1135,9 @@ public final class TournamentStore {
                 case TOURNAMENT_STAGE_KNOCKOUT -> {
                     resolveOverdueKnockoutTx(c, cur, now);
                     SeasonRow refreshed = readSeasonForUpdateTx(c, cur.seasonId());
+                    if (refreshed == null || refreshed.stage() != TournamentStage.TOURNAMENT_STAGE_KNOCKOUT_VALUE) {
+                        return null;
+                    }
                     boolean canSettle = refreshed.knockoutTeamCount() == 0
                             || now >= refreshed.settleStartMs()
                             || (refreshed.championSquadId() != 0L && !hasOpenThirdPlaceMatchTx(c, refreshed.seasonId()));
@@ -1265,7 +1273,7 @@ public final class TournamentStore {
         int psLimit = pageSize <= 0 ? 20 : Math.min(pageSize, 50);
         long now = clockMs.getAsLong();
         return inTx(c -> {
-            SeasonRow season = seasonId == 0 ? ensureSeasonTx(c, now) : readSeasonForUpdateTx(c, seasonId);
+            SeasonRow season = seasonId == 0 ? ensureSeasonTx(c, now) : readSeasonTx(c, seasonId);
             if (season == null) {
                 throw new DomainException(MatchErrorTip.match_error.kMatchTournamentSquadNotFound_VALUE);
             }
@@ -1292,7 +1300,7 @@ public final class TournamentStore {
                     .thenComparingLong(SquadRow::registeredMs)
                     .thenComparing((a, b) -> Long.compareUnsigned(a.squadId(), b.squadId())));
 
-            int start = Math.min((p - 1) * psLimit, all.size());
+            int start = (int) Math.min((long) (p - 1) * psLimit, all.size());
             int end = Math.min(start + psLimit, all.size());
             ListTournamentStandingsResponse.Builder resp = ListTournamentStandingsResponse.newBuilder()
                     .setSeason(toSeasonView(season, all.size(), salutedToday))
@@ -2074,7 +2082,8 @@ public final class TournamentStore {
                         + "champion_members_blob,champion_salute_count,"
                         + "champion_emblem_id,third_place_squad_id,third_place_squad_name,third_place_emblem_id,"
                         + "final_mvp_player_id,final_mvp_player_name,final_mvp_score,champion_honor_bits) "
-                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,'','',0,?,?,0,0,0,'',0,0,'',0,0)")) {
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,'','',0,?,?,0,0,0,'',0,0,'',0,0) "
+                        + "ON DUPLICATE KEY UPDATE season_id=season_id")) {
             ps.setInt(1, seasonId);
             ps.setString(2, "ts" + seasonId);
             ps.setString(3, "第" + seasonId + "赛季·群仙问道赛");
@@ -2125,6 +2134,16 @@ public final class TournamentStore {
             ps.setInt(12, TournamentRewardDeliveryState.TOURNAMENT_REWARD_DELIVERY_CLAIMABLE_VALUE);
             ps.setLong(13, now);
             ps.executeUpdate();
+        }
+    }
+
+    private SeasonRow readSeasonTx(Connection c, int seasonId) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM " + MatchFeatureTables.TOURNAMENT_SEASON + " WHERE season_id=?")) {
+            ps.setInt(1, seasonId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? scanSeason(rs) : null;
+            }
         }
     }
 
@@ -2551,6 +2570,10 @@ public final class TournamentStore {
         });
     }
 
+    /** 待补发的观道致敬邮件记录（mail_id=0 代表上次发信失败，后台可凭原 reward_id 幂等补发）。 */
+    public record PendingSaluteMail(long playerId, int saluteDay, int seasonId, long rewardId) {
+    }
+
     /** 事务外观道致敬邮件投递成功后回填 mail_id 供审计。 */
     public void updateSaluteMailId(long playerId, int saluteDay, long mailId) throws SQLException {
         if (playerId == 0L || saluteDay == 0 || mailId == 0L) {
@@ -2567,6 +2590,24 @@ public final class TournamentStore {
             }
             return null;
         });
+    }
+
+    /** 查询尚未确认投递成功（mail_id=0）的观道致敬邮件，供后台驱动器按原 reward_id 幂等补发。 */
+    public List<PendingSaluteMail> listPendingSaluteMails(int limit) throws SQLException {
+        int cap = Math.max(1, Math.min(limit, 100));
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT player_id,salute_day,season_id,reward_id FROM " + MatchFeatureTables.TOURNAMENT_SALUTE
+                             + " WHERE mail_id=0 AND reward_id<>0 ORDER BY created_ms ASC LIMIT ?")) {
+            ps.setInt(1, cap);
+            List<PendingSaluteMail> out = new ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new PendingSaluteMail(rs.getLong(1), rs.getInt(2), rs.getInt(3), rs.getLong(4)));
+                }
+            }
+            return out;
+        }
     }
 
     /** 校验 battle_id 是否允许全服公开回放（仅淘汰赛且配表开关开启，绝不放行海选/私密切磋）。 */
@@ -2918,7 +2959,7 @@ public final class TournamentStore {
     public GetTournamentPredictionBoardResponse loadPredictionBoard(int seasonId, long playerId) throws SQLException {
         long now = clockMs.getAsLong();
         return inTx(c -> {
-            SeasonRow season = seasonId == 0 ? ensureSeasonTx(c, now) : readSeasonForUpdateTx(c, seasonId);
+            SeasonRow season = seasonId == 0 ? ensureSeasonTx(c, now) : readSeasonTx(c, seasonId);
             if (season == null) {
                 throw new DomainException(MatchErrorTip.match_error.kMatchTournamentSquadNotFound_VALUE);
             }
@@ -3143,8 +3184,7 @@ public final class TournamentStore {
                 throw new DomainException(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE);
             }
             if (m.bestOf() < 3 || m.winsA() > 0 || m.winsB() > 0 || m.squadAId() == 0L || m.squadBId() == 0L
-                    || (m.state() != TournamentMatchState.TOURNAMENT_MATCH_STATE_WAITING_OPPONENT_VALUE
-                    && m.state() != TournamentMatchState.TOURNAMENT_MATCH_STATE_READY_VALUE)) {
+                    || m.state() != TournamentMatchState.TOURNAMENT_MATCH_STATE_WAITING_OPPONENT_VALUE) {
                 throw new DomainException(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE);
             }
             SquadRow sqA = readSquadTx(c, m.squadAId());
@@ -3155,8 +3195,15 @@ public final class TournamentStore {
             int banA = m.bannedLeylineA();
             int banB = m.bannedLeylineB();
             if (captainId == sqA.captainPlayerId()) {
+                // 每队队长限锁 1 次灵脉禁选且必须在未就绪前，防反复探测 SplitMix64 洗选序列或开战后篡改。
+                if (banA != 0 || m.readyA()) {
+                    throw new DomainException(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE);
+                }
                 banA = leyline.getNumber();
             } else if (captainId == sqB.captainPlayerId()) {
+                if (banB != 0 || m.readyB()) {
+                    throw new DomainException(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE);
+                }
                 banB = leyline.getNumber();
             } else {
                 throw new DomainException(MatchErrorTip.match_error.kMatchTournamentNotCaptain_VALUE);
@@ -3189,7 +3236,7 @@ public final class TournamentStore {
     public GetTournamentHighlightsResponse loadHighlights(int seasonId) throws SQLException {
         long now = clockMs.getAsLong();
         return inTx(c -> {
-            SeasonRow season = seasonId == 0 ? ensureSeasonTx(c, now) : readSeasonForUpdateTx(c, seasonId);
+            SeasonRow season = seasonId == 0 ? ensureSeasonTx(c, now) : readSeasonTx(c, seasonId);
             if (season == null) {
                 throw new DomainException(MatchErrorTip.match_error.kMatchTournamentSquadNotFound_VALUE);
             }
@@ -3517,6 +3564,7 @@ public final class TournamentStore {
         List<Long> battleIds = gameBattleIds == null ? List.of() : gameBattleIds;
         boolean publicReplay = m.phase() == TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_KNOCKOUT_VALUE
                 && tables.rule().getPublicKnockoutReplay()
+                && (m.state() == TournamentMatchState.TOURNAMENT_MATCH_STATE_FINISHED_VALUE || m.winsA() > 0 || m.winsB() > 0)
                 && (m.battleId() != 0L || !battleIds.isEmpty());
         TournamentMatchView.Builder b = TournamentMatchView.newBuilder()
                 .setMatchId(m.matchId())

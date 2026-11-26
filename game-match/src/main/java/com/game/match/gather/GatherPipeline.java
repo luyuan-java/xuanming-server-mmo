@@ -289,7 +289,7 @@ public final class GatherPipeline {
             com.game.proto.RankedMatchContext rankedContext = null;
             if (isRanked) {
                 try {
-                    var maybeCtx = rankedStore.buildRankedContext(Math.max(1, n / 2), plan.members(), Map.of());
+                    var maybeCtx = rankedStore.buildRankedContext(Math.max(1, n / 2), plan.members(), teams, Map.of());
                     if (maybeCtx.isEmpty()) {
                         log.warn("[gather] 排位赛季结算中，拒绝开局 battle_id={}", battle);
                         return fail(GatherOutcome.PREPARE_FAILED, 0);

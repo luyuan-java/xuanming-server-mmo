@@ -322,6 +322,7 @@ public class MatchFeatureConfiguration {
             MailAttachments atts = reward.attachments().length > 0
                     ? MailAttachments.parseFrom(reward.attachments())
                     : MailAttachments.getDefaultInstance();
+            // expire_ms 置 0 由 game-mail 缺省补 30 天，保证重试摘要确定性且不受跨节点时钟偏移影响。
             long nowMs = System.currentTimeMillis();
             SendMailRequest request = SendMailRequest.newBuilder()
                     .setSenderKind(TOURNAMENT_MAIL_SENDER_KIND)
@@ -330,7 +331,7 @@ public class MatchFeatureConfiguration {
                     .setTitle(title)
                     .setBody(body)
                     .setAttachments(atts)
-                    .setExpireMs(nowMs + TOURNAMENT_MAIL_TTL_MS)
+                    .setExpireMs(0L)
                     .build();
             SendMailRequest signed = ServiceCallSignatures.sign(
                     MailAdminService.PERSONAL_METHOD, request, TOURNAMENT_MAIL_CALLER, trimmedSecret, nowMs);
@@ -357,7 +358,7 @@ public class MatchFeatureConfiguration {
     public TournamentSeasonDriver tournamentSeasonDriver(TournamentStore store, MatchIds matchIds,
                                                          TournamentService tournamentService) {
         return new TournamentSeasonDriver(store, () -> matchIds.nextBattleId().orElse(0L),
-                5_000L, tournamentService::launchSpec);
+                5_000L, tournamentService::launchSpec, () -> tournamentService.retryPendingSaluteMails(16));
     }
 
     private static ByteString encodeTournamentLaunchPayload(TournamentStore.LaunchSpec spec) {

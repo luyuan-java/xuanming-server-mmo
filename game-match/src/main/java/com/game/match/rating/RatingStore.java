@@ -283,15 +283,23 @@ public final class RatingStore {
                 for (Long pid : ascending) {
                     pre.put(pid, lockRow(c, pid));
                 }
-                EloRules.Settlement settlement = EloRules.settle(scored, pre);
-                for (Long pid : ascending) {
-                    updateRow(c, pid, settlement.nextCenti().get(pid), now);
+                boolean rankedMode = rankedStore != null
+                        && event.getMatchMode() == com.game.match.support.MatchModes.PVP_TEAM
+                        && event.hasRankedContext() && event.getRankedContext().getSeasonId() != 0;
+                boolean zeroRoundRanked = rankedMode && event.getTotalRounds() == 0;
+                EloRules.Settlement settlement = zeroRoundRanked
+                        ? new EloRules.Settlement(0.0, 0.0, 0.0, pre)
+                        : EloRules.settle(scored, pre);
+                if (!zeroRoundRanked) {
+                    for (Long pid : ascending) {
+                        updateRow(c, pid, settlement.nextCenti().get(pid), now);
+                    }
                 }
                 long deltaACenti = settlement.deltaACenti();
                 setDelta(c, battleId, deltaACenti);
-                if (rankedStore != null && event.getMatchMode() == com.game.match.support.MatchModes.PVP_TEAM
-                        && event.hasRankedContext() && event.getRankedContext().getSeasonId() != 0) {
-                    var rankedCommit = rankedStore.recordBattleResultInTx(c, event, pre, settlement.nextCenti(), now);
+                if (rankedMode) {
+                    var rankedCommit = rankedStore.recordBattleResultInTx(
+                            c, event, pre, settlement.nextCenti(), scored.roundCapDraw(), now);
                     if (commitHook != null) {
                         commitHook.appendRanked(c, event, rankedCommit, now);
                     }

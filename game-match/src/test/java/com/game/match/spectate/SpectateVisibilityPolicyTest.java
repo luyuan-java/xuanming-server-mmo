@@ -30,7 +30,15 @@ class SpectateVisibilityPolicyTest {
         assertThat(SpectateVisibilityPolicy.decide(MatchMode.MATCH_MODE_PVE_TEAM, null)).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         assertThat(SpectateVisibilityPolicy.decide(MatchMode.MATCH_MODE_GUILD_WAR_PVP, null)).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         assertThat(SpectateVisibilityPolicy.decide(MatchMode.MATCH_MODE_GUILD_WAR_SIEGE, null)).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
+        BattleActivityContext guildWar = BattleActivityContext.newBuilder()
+                .setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR).setGuildId(555).build();
+        assertThat(SpectateVisibilityPolicy.decide(MatchMode.MATCH_MODE_GUILD_WAR_PVP, guildWar))
+                .as("帮战 V2 活动上下文不得被活动开关误压成私密")
+                .isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
+        assertThat(SpectateVisibilityPolicy.decide(MatchMode.MATCH_MODE_GUILD_WAR_SIEGE, guildWar))
+                .isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         assertThat(SpectateVisibilityPolicy.decide(MatchMode.MATCH_MODE_SEASON_TOURNAMENT, null)).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
+        assertThat(SpectateVisibilityPolicy.decide(MatchMode.MATCH_MODE_JIANGHU_DUEL, null)).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
         for (MatchMode closed : List.of(MatchMode.MATCH_MODE_1V1, MatchMode.MATCH_MODE_5V5, MatchMode.MATCH_MODE_PVP_CHALLENGE,
                 MatchMode.MATCH_MODE_PVP_TEAM, MatchMode.MATCH_MODE_POLARITY_5V5, MatchMode.MATCH_MODE_3V3, MatchMode.MATCH_MODE_UNSPECIFIED)) {
             assertThat(SpectateVisibilityPolicy.decide(closed, null)).as(closed.name()).isEqualTo(eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);

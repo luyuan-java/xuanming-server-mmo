@@ -1,5 +1,6 @@
 package com.game.match.tournament;
 
+import com.game.proto.common.base.CurrencyType;
 import com.game.proto.mail.MailAttachments;
 import com.game.proto.mail.MailCurrency;
 import com.game.proto.mail.MailItem;
@@ -20,7 +21,8 @@ import java.util.Optional;
 /** 全服赛季战队锦标赛《群仙问道赛》V1 配表只读视图（{@code TournamentRule} id=1 + {@code TournamentReward} 全部档位）。 */
 public final class TournamentTables {
 
-    public static final int GOLD_CURRENCY_TYPE = 1;
+    // 锦标赛名次/助威/竞猜/观道致敬银两奖励一律发放不可交易绑定银两（3），严禁误发付费灵石（1）。
+    public static final int GOLD_CURRENCY_TYPE = CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE;
     public static final int DEFAULT_RULE_ID = 1;
 
     private final TournamentRuleTable rule;

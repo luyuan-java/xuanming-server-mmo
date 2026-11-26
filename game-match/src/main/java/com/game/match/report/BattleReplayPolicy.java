@@ -33,6 +33,7 @@ public final class BattleReplayPolicy {
         table.put(MatchMode.MATCH_MODE_GUILD_WAR_PVP, Boolean.TRUE);
         table.put(MatchMode.MATCH_MODE_GUILD_WAR_SIEGE, Boolean.FALSE);
         table.put(MatchMode.MATCH_MODE_SEASON_TOURNAMENT, Boolean.TRUE);
+        table.put(MatchMode.MATCH_MODE_JIANGHU_DUEL, Boolean.TRUE);
         return Collections.unmodifiableMap(table);
     }
 

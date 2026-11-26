@@ -336,6 +336,10 @@ public final class ActivityBattleService {
             humans.add(pid);
         }
 
+        if (global != null) {
+            return startGlobalGuildWar(request, kind, mode, humans, memberTeams, aiDefenders, d);
+        }
+
         MemberPrecheck.Result checked = precheck.check(humans, d);
         if (!checked.passed()) {
             return switch (checked.reason()) {
@@ -394,6 +398,78 @@ public final class ActivityBattleService {
         });
         metrics.activityBattle(kind, ActivityResult.STARTED);
         return StartGuildWarBattleResponse.newBuilder().setBattleId(battleId).build();
+    }
+
+    /** 生产全球 SQL 权威模式下的帮战直打入口（kind=6，保留攻守阵营与守旗阵 AI 守卫快照）。 */
+    private StartGuildWarBattleResponse startGlobalGuildWar(StartGuildWarBattleRequest request, int kind, MatchMode mode,
+                                                            List<Long> humans, Map<Long, Integer> memberTeams,
+                                                            List<BattlePlayerSnapshot> aiDefenders, Deadline d) {
+        long requestId = request.getRequestId();
+        if (requestId == 0L) {
+            OptionalLong issued = ids.nextBattleId();
+            if (issued.isEmpty()) {
+                return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+            }
+            requestId = issued.getAsLong();
+        }
+        long ownerGuildId = request.getActivityContext().getGuildWar().getAttackerGuildId();
+        if (ownerGuildId == 0L) {
+            ownerGuildId = humans.getFirst();
+        }
+        com.google.protobuf.ByteString stablePayload = request.toBuilder().clearAuth().build().toByteString();
+        try {
+            var key = com.game.match.global.pb.GlobalDirectIntentRow.newBuilder()
+                    .setKind(6)
+                    .setOwnerId(ownerGuildId)
+                    .setRequestLow(requestId)
+                    .build();
+            var old = global.store().direct(key);
+            if (old != null) {
+                if (old.getCancelled()) {
+                    return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+                }
+                if (!old.getPayload().equals(stablePayload)) {
+                    return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0L, 0L);
+                }
+                var f = old.getBattleId() != 0L
+                        ? global.store().formation(old.getBattleId())
+                        : global.reserveDirectGuildWar(key, stablePayload, mode.getNumber(), request.getBattleConfigId(),
+                                humans, memberTeams, request.getActivityContext(), aiDefenders);
+                if (f == null || f.getBattleId() == 0L || f.getState() == 5) {
+                    return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+                }
+                global.launchCommitted(f);
+                return StartGuildWarBattleResponse.newBuilder()
+                        .setBattleId(f.getBattleId())
+                        .setFormationState(f.getState())
+                        .build();
+            }
+            MemberPrecheck.Result checked = precheck.check(humans, d);
+            if (!checked.passed()) {
+                return switch (checked.reason()) {
+                    case OFFLINE -> rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_OFFLINE, checked.offender(), 0L);
+                    case IN_BATTLE -> rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE,
+                            checked.offender(), checked.offenderBattleId());
+                    case NO_LOCATION, TICKET_IN_FLIGHT -> rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_NOT_READY,
+                            checked.offender(), 0L);
+                    default -> rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+                };
+            }
+            var f = global.reserveDirectGuildWar(key, stablePayload, mode.getNumber(), request.getBattleConfigId(),
+                    humans, memberTeams, request.getActivityContext(), aiDefenders);
+            if (f == null || f.getBattleId() == 0L || f.getState() == 5) {
+                return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+            }
+            global.launchCommitted(f);
+            metrics.activityBattle(kind, ActivityResult.STARTED);
+            return StartGuildWarBattleResponse.newBuilder()
+                    .setBattleId(f.getBattleId())
+                    .setFormationState(f.getState())
+                    .build();
+        } catch (RuntimeException e) {
+            log.warn("[match] 全球帮战直打原意图提交结果尚未确认", e);
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+        }
     }
 
     public StartGuildWarBattleResponse unavailableGuildWar(StartGuildWarBattleRequest request) {

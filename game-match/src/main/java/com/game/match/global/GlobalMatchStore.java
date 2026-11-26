@@ -439,6 +439,10 @@ public final class GlobalMatchStore {
             Map<Long,GlobalTicketRow> locked = new HashMap<>();
             for (var target : sorted) locked.put(target.getPlayerId(), locked(c,target.getPlayerId()));
             long stamp = now(c);
+            Map<Long, Integer> presetTeams = new HashMap<>();
+            for (var preset : formation.getMembersList()) {
+                presetTeams.put(preset.getPlayerId(), preset.getTeamIndex());
+            }
             var members = GlobalFormationRow.newBuilder().mergeFrom(formation).clearMembers();
             for (var target : expected) {
                 var row = locked.get(target.getPlayerId());
@@ -457,7 +461,8 @@ public final class GlobalMatchStore {
                     throw new IllegalStateException("成局时 RTT 已失效");
                 db.updateByPk(c, row.toBuilder().setState(2).setFormationId(formation.getBattleId()).setSelectedRegion(formation.getRegion()).build());
                 regions.clear(c,row.getPlayerId());
-                members.addMembers(GlobalMember.newBuilder().setPlayerId(row.getPlayerId()).setTicket(row.getTicket()));
+                members.addMembers(GlobalMember.newBuilder().setPlayerId(row.getPlayerId()).setTicket(row.getTicket())
+                        .setTeamIndex(presetTeams.getOrDefault(row.getPlayerId(), 0)));
             }
             if(!direct) {
                 boolean local=expected.stream().allMatch(t->t.getPreferredRegion()==formation.getRegion());
@@ -509,7 +514,7 @@ public final class GlobalMatchStore {
     private GlobalDirectIntentRow prepareDirect(Connection c,GlobalDirectIntentRow key,ByteString payload,List<GlobalTicketRow> members,GlobalFormationRow formation)throws Exception {
         owners(c,members);
         if(key.getKind()==2)GlobalActivityLaunchAuthority.lock(c,payload,members);
-        if(key.getKind()!=2&&key.getKind()!=4&&key.getKind()!=5&&members.stream().noneMatch(t->t.getPlayerId()==key.getOwnerId()&&t.getOwnerAccount().equals(key.getOwnerAccount())&&t.getOwnerRevision()==key.getOwnerRevision()))throw new SecurityException("直接准入原发起者不在名单");
+        if(key.getKind()!=2&&key.getKind()!=4&&key.getKind()!=5&&key.getKind()!=6&&members.stream().noneMatch(t->t.getPlayerId()==key.getOwnerId()&&t.getOwnerAccount().equals(key.getOwnerAccount())&&t.getOwnerRevision()==key.getOwnerRevision()))throw new SecurityException("直接准入原发起者不在名单");
         var prior=db.findOneByPkForUpdate(c,key);
         if(prior.isPresent()){
             var original=prior.get();if(!original.getPayload().equals(payload)||!original.getOwnerAccount().equals(key.getOwnerAccount())||original.getOwnerRevision()!=key.getOwnerRevision()||original.getCancelled())throw new SecurityException("原direct请求已变更或取消");
@@ -554,9 +559,9 @@ public final class GlobalMatchStore {
             if(invite!=null)db.updateByPk(c,invite.toBuilder().setState(2).setBattleId(result.getBattleId()).build());return result;
         });
     }
-    public GlobalDirectIntentRow pendingDirectUpper(){return tx(c->{var rows=db.findAll(c,GlobalDirectIntentRow.class,"admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3,4,5) ORDER BY kind DESC,owner_id DESC,request_high DESC,request_low DESC LIMIT 1");return rows.isEmpty()?null:rows.getFirst();});}
+    public GlobalDirectIntentRow pendingDirectUpper(){return tx(c->{var rows=db.findAll(c,GlobalDirectIntentRow.class,"admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3,4,5,6) ORDER BY kind DESC,owner_id DESC,request_high DESC,request_low DESC LIMIT 1");return rows.isEmpty()?null:rows.getFirst();});}
     public List<GlobalDirectIntentRow> pendingDirects(int kind,long owner,long high,long low,GlobalDirectIntentRow upper){return tx(c->db.findAll(c,GlobalDirectIntentRow.class,
-        "admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3,4,5) AND (kind>? OR (kind=? AND (owner_id>? OR (owner_id=? AND (request_high>? OR (request_high=? AND request_low>?)))))) AND (kind<? OR (kind=? AND (owner_id<? OR (owner_id=? AND (request_high<? OR (request_high=? AND request_low<=?)))))) ORDER BY kind,owner_id,request_high,request_low LIMIT 8",
+        "admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3,4,5,6) AND (kind>? OR (kind=? AND (owner_id>? OR (owner_id=? AND (request_high>? OR (request_high=? AND request_low>?)))))) AND (kind<? OR (kind=? AND (owner_id<? OR (owner_id=? AND (request_high<? OR (request_high=? AND request_low<=?)))))) ORDER BY kind,owner_id,request_high,request_low LIMIT 8",
         kind,kind,PbMysql.uint64(owner),PbMysql.uint64(owner),PbMysql.uint64(high),PbMysql.uint64(high),PbMysql.uint64(low),upper.getKind(),upper.getKind(),PbMysql.uint64(upper.getOwnerId()),PbMysql.uint64(upper.getOwnerId()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestLow())));}
     /** 新意图仅此处捕获目标归属；旧邀请/接受绝不再用当前归属补原件。 */
     private SessionContext newTarget(Connection c,long player)throws SQLException {
@@ -965,30 +970,49 @@ public final class GlobalMatchStore {
 
     /** Create提交与COMPLETE提交都核同一持久原件，不能让出站前校验替代终局事务校验。 */
     private static void validateCreateBinding(GlobalFormationRow formation,com.game.proto.CreateBattleRequest create)throws Exception {
+        var mode=com.game.proto.match.MatchMode.forNumber(formation.getMode());
+        if(mode==null||mode==com.game.proto.match.MatchMode.MATCH_MODE_UNSPECIFIED
+                ||mode==com.game.proto.match.MatchMode.MATCH_MODE_3V3)throw new SecurityException("固定Create模式不支持");
+        int humanCount=formation.getMembersCount();
+        int aiCount=mode==com.game.proto.match.MatchMode.MATCH_MODE_GUILD_WAR_SIEGE?formation.getAiDefenderSnapshotsCount():0;
         if(create.getBattleId()!=formation.getBattleId()||create.getBattleConfigId()!=formation.getConfigId()
                 ||create.getMatchMode()!=formation.getMode()||!create.getPlacementOperationId().equals(formation.getOperationId())
                 ||!create.getTargetInstanceId().equals(formation.getInstanceId())||create.getRequiredPhysicalRegion()!=formation.getRegion()
                 ||create.getCreatedAtMs()<=0||create.getCreatedAtMs()<formation.getCreatedMs()
                 ||create.getDeadlineMs()!=formation.getDeadlineMs()||create.getDeadlineMs()<=create.getCreatedAtMs()
-                ||create.getPlayersCount()!=formation.getMembersCount()||create.getPlayersCount()==0
+                ||create.getPlayersCount()!=humanCount+aiCount||create.getPlayersCount()==0
                 ||!create.getActivityContext().equals(com.game.proto.BattleActivityContext.parseFrom(formation.getActivityContext())))
             throw new SecurityException("固定Create范围、时间或完整人数不同");
         Set<Long> unique=new HashSet<>();int teamA=0,teamB=0;
-        var mode=com.game.proto.match.MatchMode.forNumber(formation.getMode());
-        if(mode==null||mode==com.game.proto.match.MatchMode.MATCH_MODE_UNSPECIFIED
-                ||mode==com.game.proto.match.MatchMode.MATCH_MODE_3V3)throw new SecurityException("固定Create模式不支持");
         for(int i=0;i<create.getPlayersCount();i++) {
             var player=create.getPlayers(i);
-            if(player.getPlayerId()==0||!unique.add(player.getPlayerId())||player.getPlayerId()!=formation.getMembers(i).getPlayerId())
-                throw new SecurityException("固定Create完整成员/顺序与formation不同");
+            if(i<humanCount){
+                if(player.getPlayerId()==0||!unique.add(player.getPlayerId())||player.getPlayerId()!=formation.getMembers(i).getPlayerId())
+                    throw new SecurityException("固定Create完整成员/顺序与formation不同");
+            } else {
+                if(player.getPlayerId()==0||!unique.add(player.getPlayerId())||!player.getAiControlled()||player.getTeamIndex()!=1)
+                    throw new SecurityException("固定Create守旗阵AI守卫不合法");
+            }
             int team=player.getTeamIndex();
+            boolean twoTeamMode = mode==com.game.proto.match.MatchMode.MATCH_MODE_5V5
+                    || mode==com.game.proto.match.MatchMode.MATCH_MODE_PVP_TEAM
+                    || mode==com.game.proto.match.MatchMode.MATCH_MODE_POLARITY_5V5
+                    || mode==com.game.proto.match.MatchMode.MATCH_MODE_SEASON_TOURNAMENT
+                    || mode==com.game.proto.match.MatchMode.MATCH_MODE_GUILD_WAR_PVP
+                    || mode==com.game.proto.match.MatchMode.MATCH_MODE_GUILD_WAR_SIEGE
+                    || mode==com.game.proto.match.MatchMode.MATCH_MODE_JIANGHU_DUEL;
             if(mode==com.game.proto.match.MatchMode.MATCH_MODE_1V1||mode==com.game.proto.match.MatchMode.MATCH_MODE_PVP_CHALLENGE) {
                 if(create.getPlayersCount()!=2||team!=i)throw new SecurityException("固定单挑队伍不同");
-            } else if(mode!=com.game.proto.match.MatchMode.MATCH_MODE_5V5&&team!=0)throw new SecurityException("固定PVE队伍不同");
+            } else if(!twoTeamMode&&team!=0)throw new SecurityException("固定PVE队伍不同");
             if(team==0)teamA++;else if(team==1)teamB++;else throw new SecurityException("固定Create队号非法");
         }
-        if(mode==com.game.proto.match.MatchMode.MATCH_MODE_5V5&&(teamA!=5||teamB!=5)
-                ||mode==com.game.proto.match.MatchMode.MATCH_MODE_PVE_SOLO&&create.getPlayersCount()!=1)
+        boolean symmetricTeamMode = mode==com.game.proto.match.MatchMode.MATCH_MODE_PVP_TEAM
+                || mode==com.game.proto.match.MatchMode.MATCH_MODE_SEASON_TOURNAMENT
+                || mode==com.game.proto.match.MatchMode.MATCH_MODE_JIANGHU_DUEL;
+        if((mode==com.game.proto.match.MatchMode.MATCH_MODE_5V5||mode==com.game.proto.match.MatchMode.MATCH_MODE_POLARITY_5V5)&&(teamA!=5||teamB!=5)
+                || symmetricTeamMode&&(teamA!=teamB||teamA<1||teamA>5)
+                || (mode==com.game.proto.match.MatchMode.MATCH_MODE_GUILD_WAR_PVP||mode==com.game.proto.match.MatchMode.MATCH_MODE_GUILD_WAR_SIEGE)&&(teamA<1||teamB<1)
+                || mode==com.game.proto.match.MatchMode.MATCH_MODE_PVE_SOLO&&create.getPlayersCount()!=1)
             throw new SecurityException("固定Create模式人数不符");
     }
 
@@ -1137,6 +1161,66 @@ public final class GlobalMatchStore {
             units.finished(c,f,after,success,stamp);
             var finished=f.toBuilder().setState(success ? 4 : 5).build();
             db.updateByPk(c,finished);return finished;
+        });
+    }
+
+    /** 固定执行端已明确返回 BATTLE_CREATION_ABORTED（房间未建且墓碑生效）时，原子落盘 v1 SQL ABORT 并释放/回队票据。 */
+    public GlobalFormationRow abortConfirmedNoRoom(GlobalFormationRow work) {
+        long battle = work.getBattleId();
+        return tx(c -> {
+            List<GlobalTicketRow> originals = new ArrayList<>();
+            for (var member : work.getMembersList()) {
+                originals.add(db.findOneByPk(c, GlobalTicketRow.newBuilder().setPlayerId(member.getPlayerId()).build()).orElseThrow());
+            }
+            owners(c, originals);
+            var originalUnits = units.beforeFinish(c, originals);
+            Map<Long, GlobalTicketRow> lockedTickets = new HashMap<>();
+            for (var original : originals.stream().sorted((a, b) -> Long.compareUnsigned(a.getPlayerId(), b.getPlayerId())).toList()) {
+                lockedTickets.put(original.getPlayerId(), locked(c, original.getPlayerId()));
+            }
+            var f = db.findOneByPkForUpdate(c, GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElseThrow();
+            var terminalOpt = db.findOneByPkForUpdate(c, com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+            if (terminalOpt.isPresent()) {
+                var terminal = terminalOpt.get();
+                if (!terminal.getPlacementOperationId().equals(work.getOperationId())
+                        || !terminal.getTargetInstanceId().equals(work.getInstanceId())) {
+                    throw new SecurityException("中止目标不是原局操作或实例");
+                }
+                if (terminal.getTerminalDecision() == 1) {
+                    throw new IllegalStateException("并发终局已是COMPLETE，禁止中止");
+                }
+                if (terminal.getTerminalDecision() == 2) {
+                    return f;
+                }
+                if (terminal.getAdoptedOutcomeObserved() && terminal.getAdoptedOutcomeProtocolVersion() != 1) {
+                    throw new SecurityException("真实adopted非v1，不能落盘v1 ABORT");
+                }
+            }
+            requireWork(c, f, work);
+            long stamp = now(c);
+            if (terminalOpt.isPresent()) {
+                db.updateByPk(c, terminalOpt.get().toBuilder().setTerminalDecision(2).build());
+            }
+            List<GlobalTicketRow> after = new ArrayList<>();
+            for (var m : f.getMembersList().stream().sorted((a, b) -> Long.compareUnsigned(a.getPlayerId(), b.getPlayerId())).toList()) {
+                var row = lockedTickets.get(m.getPlayerId());
+                if (row.getFormationId() != battle || !row.getTicket().equals(m.getTicket())) {
+                    throw new IllegalStateException("成局票据不变量损坏");
+                }
+                var next = row.toBuilder().setState(4);
+                var unit = originalUnits.get(row.getQueueUnitId());
+                boolean canRequeue = unit == null || unit.getExpiresMs() > stamp && (unit.getTeamId() == 0 || unit.getTargetSize() > unit.getMemberCount());
+                if (f.getRequeueOnFailure() && canRequeue) {
+                    next.setState(1).setFormationId(0).setSelectedRegion(0).setNotBeforeMs(stamp + 1000);
+                }
+                db.updateByPk(c, next.build());
+                regions.replace(c, next.build(), stamp);
+                after.add(next.build());
+            }
+            units.finished(c, f, after, false, stamp);
+            var finished = f.toBuilder().setState(5).build();
+            db.updateByPk(c, finished);
+            return finished;
         });
     }
     private static void requireUncreated(GlobalFormationRow original,GlobalFormationRow work,boolean hasCompletion){

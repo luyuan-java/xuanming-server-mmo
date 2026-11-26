@@ -987,6 +987,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         if (room.pendingCompletion != null) {
             return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
         }
+        // 在推进投降终局前冻结可见态，避免 Match SQL 确认 COMPLETE 前对外泄露终局 outcome。
+        BattleStateS2C visibleBefore = fullState(room);
         TurnBattleEngine.SurrenderVoteResult voteResult = room.engine.submitSurrenderVote(playerId, request.getAgree());
         if (voteResult.errorTip() != 0) {
             return response.setErrorMessage(tip(voteResult.errorTip())).build();
@@ -1014,9 +1016,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         eBattleOutcome outcome = room.engine.outcome();
         if (voteResult.voteState().getPassed() && outcome != eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             room.roundTimer.cancel();
+            if (room.replay != null) {
+                room.replay.markDeadlineDraw(BattleViews.forObserver(fullState(room)));
+            }
             if (room.requiresResultConfirmation) {
                 beginResultCommit(room, outcome, eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED, null,
-                        fullState(room), RoomEnd.FINISHED);
+                        visibleBefore, RoomEnd.FINISHED);
             } else {
                 finishBattle(room, outcome, eSpectateEndReason.SPECTATE_END_BATTLE_FINISHED);
                 eraseRoom(room, RoomEnd.FINISHED);

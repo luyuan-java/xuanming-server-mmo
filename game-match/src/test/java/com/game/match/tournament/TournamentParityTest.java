@@ -365,6 +365,12 @@ class TournamentParityTest {
                     .setLeylineElement(TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL).build());
             assertThat(banA.getErrorMessage().getId()).isZero();
             assertThat(banA.getMatch().getBannedLeylineA()).isEqualTo(TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL);
+            // 同一队长禁止反复改禁试探 SplitMix64 灵脉序列
+            assertThat(service.banLeyline(sf1CapA, BanTournamentLeylineRequest.newBuilder()
+                    .setMatchId(sf1.getMatchId())
+                    .setLeylineElement(TournamentLeylineElement.TOURNAMENT_LEYLINE_WOOD).build())
+                    .getErrorMessage().getId())
+                    .isEqualTo(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE);
             var banB = service.banLeyline(sf1CapB, BanTournamentLeylineRequest.newBuilder()
                     .setMatchId(sf1.getMatchId())
                     .setLeylineElement(TournamentLeylineElement.TOURNAMENT_LEYLINE_FIRE).build());
@@ -734,6 +740,40 @@ class TournamentParityTest {
             assertThat(service.claimReward(101L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build())
                     .getErrorMessage().getId())
                     .isEqualTo(MatchErrorTip.match_error.kMatchTournamentRewardUnavailable_VALUE);
+
+            // 5. 校验锦标赛奖励与观道致敬一律发绑定银两（3）严禁误发灵石（1），以及超大页码不触发 int32 乘法溢出
+            assertThat(TournamentTables.GOLD_CURRENCY_TYPE)
+                    .isEqualTo(com.game.proto.common.base.CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE);
+            var saluteAtt = TournamentTables.buildSaluteMailAttachments(tables.rule());
+            assertThat(saluteAtt.getCurrenciesList()).allSatisfy(c -> assertThat(c.getCurrencyType())
+                    .isEqualTo(com.game.proto.common.base.CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE));
+            var hugePage = service.listStandings(101L, ListTournamentStandingsRequest.newBuilder()
+                    .setSeasonId(1).setPage(0x1000_0000).setPageSize(16).build());
+            assertThat(hugePage.getErrorMessage().getId()).isZero();
+            assertThat(hugePage.getStandingsList()).isEmpty();
+
+            // 6. 观道致敬邮件瞬时投递失败后，后台重试器凭原 reward_id 幂等补发并回填 mail_id
+            AtomicLong saluteAttempts = new AtomicLong(0);
+            AtomicLong firstRewardId = new AtomicLong(0);
+            AtomicLong retryRewardId = new AtomicLong(0);
+            AtomicLong saluteIdGen = new AtomicLong(990_000L);
+            TournamentService flakyMailService = new TournamentService(store, saluteIdGen::incrementAndGet, null, null,
+                    (pid, reward, title, body) -> {
+                        if (saluteAttempts.incrementAndGet() == 1L) {
+                            firstRewardId.set(reward.rewardId());
+                            throw new IllegalStateException("mail transient outage");
+                        }
+                        retryRewardId.set(reward.rewardId());
+                        return 777001L;
+                    });
+            var saluteResp = flakyMailService.saluteChampion(101L,
+                    com.game.proto.match.SaluteTournamentChampionRequest.newBuilder().setSeasonId(1).build());
+            assertThat(saluteResp.getErrorMessage().getId()).isZero();
+            assertThat(saluteResp.getMailId()).isZero();
+            assertThat(store.listPendingSaluteMails(10)).hasSize(1);
+            assertThat(flakyMailService.retryPendingSaluteMails(10)).isEqualTo(1);
+            assertThat(retryRewardId.get()).isEqualTo(firstRewardId.get()).isPositive();
+            assertThat(store.listPendingSaluteMails(10)).isEmpty();
         }
     }
 

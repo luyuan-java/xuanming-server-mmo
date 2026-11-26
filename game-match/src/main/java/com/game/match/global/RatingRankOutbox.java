@@ -32,12 +32,14 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
     private final NodeRpcClients<RankAdminService> calls;
     private final NodeRpcClients.Target target;
     private final ScheduledExecutorService timer=Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("match-rank-outbox").daemon(true).factory());
+    private volatile com.game.match.ranked.RankedStore rankedStore;
     public RatingRankOutbox(DataSource source,GlobalRankProperties config){
         if(config.secret().getBytes(java.nio.charset.StandardCharsets.UTF_8).length<32)throw new IllegalArgumentException("评级投榜必须注入 RANK_PRODUCER_SECRET_MATCH");
         this.source=source;this.config=config;db.register(GlobalRankSourceRow.getDefaultInstance());db.register(GlobalRankOutboxRow.getDefaultInstance());
         target=new NodeRpcClients.Target(config.host(),config.port(),"");
         calls=new NodeRpcClients<>("game-match-rank-outbox",RankAdminService.class,DubboGroups.RANK,Duration.ofSeconds(3),"match-rank-connect");
     }
+    public RatingRankOutbox withRankedStore(com.game.match.ranked.RankedStore rankedStore){this.rankedStore=rankedStore;return this;}
     private static byte[] digest(BattleResultEvent event){try{return MessageDigest.getInstance("SHA-256").digest(NetworkProbes.bytes(event));}
         catch(java.security.NoSuchAlgorithmException e){throw new IllegalStateException(e);}}
     @Override public boolean alreadyApplied(Connection c,BattleResultEvent event)throws SQLException{
@@ -106,24 +108,47 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
     private void publishOwned()throws Exception{
         GlobalRankSourceRow guard;
         try(var c=source.getConnection()){guard=db.findOneByPk(c,GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build()).orElse(null);}
-        if(guard==null)return;
-        long board=guard.getBoardId(),committed=guard.getCommittedCursor();
-        if(board==0){
-            var request=OpenRankGenerationRequest.newBuilder().setBoard(RankBoardKey.newBuilder().setBoardType(1).setScope(RankScope.RANK_SCOPE_GLOBAL)
-                    .setPeriod("all").setGeneration(1)).setProducer("match").setSourceEpoch(1).setRequestId(1).build();
-            var response=call(s->s.openRankGeneration(sign(RankAdminService.OPEN_METHOD,request)));
-            if(response.getErrorMessage().getId()!=0||response.getBoardId()==0)throw new IllegalStateException("评级榜代次打开被拒");
-            board=response.getBoardId();
-            mutate("UPDATE match_global_rank_source SET board_id=? WHERE source_epoch=1 AND board_id=0",board);
+        if(guard!=null){
+            long board=guard.getBoardId(),committed=guard.getCommittedCursor();
+            if(board==0){
+                var request=OpenRankGenerationRequest.newBuilder().setBoard(RankBoardKey.newBuilder().setBoardType(1).setScope(RankScope.RANK_SCOPE_GLOBAL)
+                        .setPeriod("all").setGeneration(1)).setProducer("match").setSourceEpoch(1).setRequestId(1).build();
+                var response=call(s->s.openRankGeneration(sign(RankAdminService.OPEN_METHOD,request)));
+                if(response.getErrorMessage().getId()!=0||response.getBoardId()==0)throw new IllegalStateException("评级榜代次打开被拒");
+                board=response.getBoardId();
+                mutate("UPDATE match_global_rank_source SET board_id=? WHERE source_epoch=1 AND board_id=0",board);
+            }
+            for(int sent=0;sent<16&&committed<guard.getProducedCursor();sent++){
+                GlobalRankOutboxRow out;
+                try(var c=source.getConnection()){out=db.findOneByPk(c,GlobalRankOutboxRow.newBuilder().setSourceEpoch(1).setSourceCursor(committed+1).build()).orElseThrow();}
+                var request=SubmitRankScoresRequest.parseFrom(out.getEntries()).toBuilder().setBoardId(board).build();
+                var response=call(s->s.submitRankScores(sign(RankAdminService.SUBMIT_METHOD,request)));
+                if(response.getErrorMessage().getId()!=0||response.getCommittedCursor()!=request.getSourceCursor())throw new IllegalStateException("评级榜尚未确认连续游标");
+                mutate("UPDATE match_global_rank_source SET committed_cursor=? WHERE source_epoch=1 AND committed_cursor=?",request.getSourceCursor(),committed);
+                committed=request.getSourceCursor();
+            }
         }
-        for(int sent=0;sent<16&&committed<guard.getProducedCursor();sent++){
-            GlobalRankOutboxRow out;
-            try(var c=source.getConnection()){out=db.findOneByPk(c,GlobalRankOutboxRow.newBuilder().setSourceEpoch(1).setSourceCursor(committed+1).build()).orElseThrow();}
-            var request=SubmitRankScoresRequest.parseFrom(out.getEntries()).toBuilder().setBoardId(board).build();
-            var response=call(s->s.submitRankScores(sign(RankAdminService.SUBMIT_METHOD,request)));
-            if(response.getErrorMessage().getId()!=0||response.getCommittedCursor()!=request.getSourceCursor())throw new IllegalStateException("评级榜尚未确认连续游标");
-            mutate("UPDATE match_global_rank_source SET committed_cursor=? WHERE source_epoch=1 AND committed_cursor=?",request.getSourceCursor(),committed);
-            committed=request.getSourceCursor();
+        publishPendingRankedSeasons();
+    }
+    /** 扫描所有未追平游标的排位赛季来源代次（source_epoch >= 10000）并按赛季投递至 game-rank。 */
+    private void publishPendingRankedSeasons()throws Exception{
+        var rs=rankedStore;
+        if(rs==null)return;
+        List<Long> epochs=new ArrayList<>();
+        try(var c=source.getConnection();
+            var ps=c.prepareStatement("SELECT source_epoch FROM match_global_rank_source WHERE source_epoch>=? AND committed_cursor<produced_cursor ORDER BY source_epoch LIMIT 16")){
+            ps.setQueryTimeout(3);
+            ps.setObject(1,PbMysql.uint64(RANKED_SOURCE_EPOCH_BASE));
+            try(var rows=ps.executeQuery()){
+                while(rows.next())epochs.add(Long.parseUnsignedLong(rows.getString(1)));
+            }
+        }
+        for(long epoch:epochs){
+            if(Long.compareUnsigned(epoch,RANKED_SOURCE_EPOCH_BASE)<=0)continue;
+            int seasonId=(int)(epoch-RANKED_SOURCE_EPOCH_BASE);
+            var season=rs.findSeason(seasonId).orElse(null);
+            if(season==null)continue;
+            publishRankedSeason(seasonId,season.getSeasonKey(),season.getRankGeneration());
         }
     }
     private void mutate(String sql,long...values)throws SQLException {
