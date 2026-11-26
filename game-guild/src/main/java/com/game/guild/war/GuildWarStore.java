@@ -257,24 +257,58 @@ public class GuildWarStore {
     }
 
     public PlayerStateRow getOrDefaultPlayerState(long playerId, int zoneId, int weekKey) throws SQLException {
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(
-                     "SELECT player_id, zone_id, peace_mode, peace_ready_at_ms, open_challenge, protect_until_ms, streak_count, streak_distinct_count, last_streak_opponent_id, week_key, weekly_merit, milestone_claimed_mask, dividend_claimed_count, bounty_immunity_until_ms, bounty_payout_day_key, bounty_payout_count_today, next_garrison_refresh_ms, next_track_at_ms, updated_ms FROM guild_war_player_state WHERE player_id = ?")) {
+        try (Connection c = dataSource.getConnection()) {
+            return readPlayerStateTx(c, playerId, zoneId, weekKey, false);
+        }
+    }
+
+    /** 在既有事务连接上加行锁读取玩家帮战状态（不存在则同连接插入默认行再加 FOR UPDATE，杜绝嵌套借连接死锁与并发覆盖）。 */
+    private PlayerStateRow lockOrDefaultPlayerStateTx(Connection c, long playerId, int zoneId, int weekKey) throws SQLException {
+        PlayerStateRow existing = readPlayerStateOrNullTx(c, playerId, weekKey, true);
+        if (existing != null) {
+            return existing;
+        }
+        try (PreparedStatement ins = c.prepareStatement(
+                "INSERT INTO guild_war_player_state (player_id, zone_id, peace_mode, peace_ready_at_ms, open_challenge, protect_until_ms, streak_count, streak_distinct_count, last_streak_opponent_id, week_key, weekly_merit, milestone_claimed_mask, dividend_claimed_count, bounty_immunity_until_ms, bounty_payout_day_key, bounty_payout_count_today, next_garrison_refresh_ms, next_track_at_ms, updated_ms) VALUES (?,?,0,0,1,0,0,0,0,?,0,0,0,0,0,0,0,0,0)")) {
+            ins.setLong(1, playerId);
+            ins.setInt(2, zoneId);
+            ins.setInt(3, weekKey);
+            ins.executeUpdate();
+        } catch (SQLException dup) {
+            // 并发线程已抢先插入，回落重新 FOR UPDATE 读出提交态行
+        }
+        return readPlayerStateTx(c, playerId, zoneId, weekKey, true);
+    }
+
+    private PlayerStateRow readPlayerStateTx(Connection c, long playerId, int zoneId, int weekKey, boolean forUpdate) throws SQLException {
+        PlayerStateRow found = readPlayerStateOrNullTx(c, playerId, weekKey, forUpdate);
+        if (found != null) {
+            return found;
+        }
+        return new PlayerStateRow(playerId, zoneId, 0, 0L, 1, 0L, 0, 0, 0L, weekKey, 0L, 0, 0, 0L, 0, 0, 0L, 0L, 0L);
+    }
+
+    private PlayerStateRow readPlayerStateOrNullTx(Connection c, long playerId, int weekKey, boolean forUpdate) throws SQLException {
+        String sql = "SELECT player_id, zone_id, peace_mode, peace_ready_at_ms, open_challenge, protect_until_ms, streak_count, streak_distinct_count, last_streak_opponent_id, week_key, weekly_merit, milestone_claimed_mask, dividend_claimed_count, bounty_immunity_until_ms, bounty_payout_day_key, bounty_payout_count_today, next_garrison_refresh_ms, next_track_at_ms, updated_ms FROM guild_war_player_state WHERE player_id = ?"
+                + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setLong(1, playerId);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
                     int storedWeek = rs.getInt(10);
-                    long weeklyMerit = storedWeek == weekKey ? rs.getLong(11) : 0L;
-                    int mask = storedWeek == weekKey ? rs.getInt(12) : 0;
-                    int divClaimed = storedWeek == weekKey ? rs.getInt(13) : 0;
+                    boolean keepWeek = weekKey == 0 || storedWeek == weekKey;
+                    int effectiveWeek = weekKey == 0 ? storedWeek : weekKey;
+                    long weeklyMerit = keepWeek ? rs.getLong(11) : 0L;
+                    int mask = keepWeek ? rs.getInt(12) : 0;
+                    int divClaimed = keepWeek ? rs.getInt(13) : 0;
                     return new PlayerStateRow(rs.getLong(1), rs.getInt(2), rs.getInt(3), rs.getLong(4),
                             rs.getInt(5), rs.getLong(6), rs.getInt(7), rs.getInt(8), rs.getLong(9),
-                            weekKey, weeklyMerit, mask, divClaimed, rs.getLong(14), rs.getInt(15),
+                            effectiveWeek, weeklyMerit, mask, divClaimed, rs.getLong(14), rs.getInt(15),
                             rs.getInt(16), rs.getLong(17), rs.getLong(18), rs.getLong(19));
                 }
             }
         }
-        return new PlayerStateRow(playerId, zoneId, 0, 0L, 1, 0L, 0, 0, 0L, weekKey, 0L, 0, 0, 0L, 0, 0, 0L, 0L, 0L);
+        return null;
     }
 
     public void upsertPlayerState(Connection c, PlayerStateRow st) throws SQLException {
@@ -329,9 +363,20 @@ public class GuildWarStore {
     }
 
     public WeeklyProgressRow getOrDefaultWeeklyProgress(long guildId, int weekKey) throws SQLException {
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(
-                     "SELECT guild_id, week_key, guild_merit, dividend_pool_count, mvp1_player_id, mvp1_merit, mvp2_player_id, mvp2_merit, first_win_names_json, first_win_at_ms, updated_ms FROM guild_war_weekly_progress WHERE guild_id = ? AND week_key = ?")) {
+        try (Connection c = dataSource.getConnection()) {
+            return readWeeklyProgressTx(c, guildId, weekKey, false);
+        }
+    }
+
+    /** 同事务连接读取帮会周战功进度（加 FOR UPDATE，避免跨连接嵌套借池死锁）。 */
+    private WeeklyProgressRow lockOrDefaultWeeklyProgressTx(Connection c, long guildId, int weekKey) throws SQLException {
+        return readWeeklyProgressTx(c, guildId, weekKey, true);
+    }
+
+    private WeeklyProgressRow readWeeklyProgressTx(Connection c, long guildId, int weekKey, boolean forUpdate) throws SQLException {
+        String sql = "SELECT guild_id, week_key, guild_merit, dividend_pool_count, mvp1_player_id, mvp1_merit, mvp2_player_id, mvp2_merit, first_win_names_json, first_win_at_ms, updated_ms FROM guild_war_weekly_progress WHERE guild_id = ? AND week_key = ?"
+                + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setLong(1, guildId);
             ps.setInt(2, weekKey);
             try (ResultSet rs = ps.executeQuery()) {
@@ -368,7 +413,7 @@ public class GuildWarStore {
         try (Connection c = dataSource.getConnection()) {
             c.setAutoCommit(false);
             try {
-                PlayerStateRow st = getOrDefaultPlayerState(targetPlayerId, zoneId, weekKey);
+                PlayerStateRow st = lockOrDefaultPlayerStateTx(c, targetPlayerId, zoneId, weekKey);
                 if (!withdraw && Long.compareUnsigned(nowMs, st.nextGarrisonRefreshMs()) < 0) {
                     c.rollback();
                     throw new WarRuleException("garrison_cooldown");
@@ -539,8 +584,14 @@ public class GuildWarStore {
         try (Connection c = dataSource.getConnection()) {
             c.setAutoCommit(false);
             try {
+                // 先锁目标玩家状态行串行化对同一目标的并发发单，再用同连接查重与豁免期
+                PlayerStateRow targetState = lockOrDefaultPlayerStateTx(c, targetPlayerId, zoneId, 0);
+                if (Long.compareUnsigned(nowMs, targetState.bountyImmunityUntilMs()) < 0) {
+                    c.rollback();
+                    throw new WarRuleException("bounty_active");
+                }
                 try (PreparedStatement dup = c.prepareStatement(
-                        "SELECT 1 FROM guild_war_bounty WHERE target_player_id = ? AND status IN (1, 2) AND expires_at_ms > ?")) {
+                        "SELECT 1 FROM guild_war_bounty WHERE target_player_id = ? AND status IN (1, 2) AND expires_at_ms > ? FOR UPDATE")) {
                     dup.setLong(1, targetPlayerId);
                     dup.setLong(2, nowMs);
                     try (ResultSet rs = dup.executeQuery()) {
@@ -549,11 +600,6 @@ public class GuildWarStore {
                             throw new WarRuleException("bounty_active");
                         }
                     }
-                }
-                PlayerStateRow targetState = getOrDefaultPlayerState(targetPlayerId, zoneId, 0);
-                if (Long.compareUnsigned(nowMs, targetState.bountyImmunityUntilMs()) < 0) {
-                    c.rollback();
-                    throw new WarRuleException("bounty_active");
                 }
                 long expiresAtMs = nowMs + ttlSec * 1000L;
                 try (PreparedStatement ins = c.prepareStatement(
@@ -591,7 +637,7 @@ public class GuildWarStore {
         try (Connection c = dataSource.getConnection()) {
             c.setAutoCommit(false);
             try {
-                PlayerStateRow st = getOrDefaultPlayerState(playerId, zoneId, weekKey);
+                PlayerStateRow st = lockOrDefaultPlayerStateTx(c, playerId, zoneId, weekKey);
                 if (Long.compareUnsigned(nowMs, st.nextTrackAtMs()) < 0) {
                     c.rollback();
                     throw new WarRuleException("track_cooldown");
@@ -623,8 +669,8 @@ public class GuildWarStore {
         try (Connection c = dataSource.getConnection()) {
             c.setAutoCommit(false);
             try {
-                WeeklyProgressRow prog = getOrDefaultWeeklyProgress(guildId, weekKey);
-                PlayerStateRow st = getOrDefaultPlayerState(playerId, zoneId, weekKey);
+                WeeklyProgressRow prog = lockOrDefaultWeeklyProgressTx(c, guildId, weekKey);
+                PlayerStateRow st = lockOrDefaultPlayerStateTx(c, playerId, zoneId, weekKey);
                 if ((st.milestoneClaimedMask() & bit) != 0) {
                     c.rollback();
                     throw new WarRuleException("milestone_claimed");
@@ -656,8 +702,8 @@ public class GuildWarStore {
         try (Connection c = dataSource.getConnection()) {
             c.setAutoCommit(false);
             try {
-                WeeklyProgressRow prog = getOrDefaultWeeklyProgress(guildId, weekKey);
-                PlayerStateRow st = getOrDefaultPlayerState(playerId, zoneId, weekKey);
+                WeeklyProgressRow prog = lockOrDefaultWeeklyProgressTx(c, guildId, weekKey);
+                PlayerStateRow st = lockOrDefaultPlayerStateTx(c, playerId, zoneId, weekKey);
                 if (st.weeklyMerit() < minPersonalMerit) {
                     c.rollback();
                     throw new WarRuleException("dividend_empty");
@@ -757,8 +803,14 @@ public class GuildWarStore {
                         }
                     }
                 }
-                // 1. 灵脉旗势更新
+                // 1. 灵脉旗势更新（先 FOR UPDATE 锁灵脉行，按表序 13 推进）
                 if (battle.leylineId() != 0 && battle.bannerShielded() == 0) {
+                    try (PreparedStatement lockLey = c.prepareStatement(
+                            "SELECT 1 FROM guild_war_leyline WHERE zone_id=? AND leyline_id=? FOR UPDATE")) {
+                        lockLey.setInt(1, battle.zoneId());
+                        lockLey.setInt(2, battle.leylineId());
+                        lockLey.executeQuery().close();
+                    }
                     if (capturedLeyline) {
                         try (PreparedStatement upd = c.prepareStatement(
                                 "UPDATE guild_war_leyline SET owner_guild_id=?, banner_hp=?, shield_until_ms=?, captured_at_ms=?, updated_ms=? WHERE zone_id=? AND leyline_id=?")) {
@@ -783,26 +835,52 @@ public class GuildWarStore {
                         }
                     }
                 }
-                // 2. 周战功累计
-                if (battle.attackerMerit() > 0 && battle.attackerGuildId() != 0) {
-                    addGuildWeeklyMerit(c, battle.attackerGuildId(), weekKey, battle.attackerMerit(), nowMs);
+                // 2. 周战功累计（按 guild_id 升序更新，防两帮互打成环死锁）
+                long g1 = battle.attackerGuildId();
+                long g2 = battle.defenderGuildId();
+                if (g1 != 0 && g2 != 0 && g1 != g2) {
+                    if (Long.compareUnsigned(g1, g2) <= 0) {
+                        if (battle.attackerMerit() > 0) addGuildWeeklyMerit(c, g1, weekKey, battle.attackerMerit(), nowMs);
+                        if (battle.defenderMerit() > 0) addGuildWeeklyMerit(c, g2, weekKey, battle.defenderMerit(), nowMs);
+                    } else {
+                        if (battle.defenderMerit() > 0) addGuildWeeklyMerit(c, g2, weekKey, battle.defenderMerit(), nowMs);
+                        if (battle.attackerMerit() > 0) addGuildWeeklyMerit(c, g1, weekKey, battle.attackerMerit(), nowMs);
+                    }
+                } else {
+                    if (battle.attackerMerit() > 0 && g1 != 0) addGuildWeeklyMerit(c, g1, weekKey, battle.attackerMerit(), nowMs);
+                    if (battle.defenderMerit() > 0 && g2 != 0) addGuildWeeklyMerit(c, g2, weekKey, battle.defenderMerit(), nowMs);
                 }
-                if (battle.defenderMerit() > 0 && battle.defenderGuildId() != 0) {
-                    addGuildWeeklyMerit(c, battle.defenderGuildId(), weekKey, battle.defenderMerit(), nowMs);
-                }
-                // 3. 玩家战功、战后 10s 保护与连胜
+                // 3. 玩家战功、战后保护、免战冷却与连胜（按 player_id 无符号升序同连接 FOR UPDATE，避免双人互锁与覆盖）
                 boolean atkWon = battle.outcome() == 1;
                 boolean defWon = battle.outcome() == 2;
                 long oppOfAtk = defenderIds.isEmpty() ? 0L : defenderIds.get(0);
                 long oppOfDef = attackerIds.isEmpty() ? 0L : attackerIds.get(0);
-                for (long pid : attackerIds) {
-                    updateParticipantState(c, pid, battle.zoneId(), weekKey, battle.attackerMerit(), atkWon, defWon, oppOfAtk, protectSec, nowMs);
-                }
+                java.util.Set<Long> atkSet = new java.util.HashSet<>(attackerIds);
+                java.util.List<Long> allParticipants = new ArrayList<>(attackerIds.size() + defenderIds.size());
+                allParticipants.addAll(attackerIds);
                 for (long pid : defenderIds) {
-                    updateParticipantState(c, pid, battle.zoneId(), weekKey, battle.defenderMerit(), defWon, atkWon, oppOfDef, protectSec, nowMs);
+                    if (!atkSet.contains(pid)) {
+                        allParticipants.add(pid);
+                    }
                 }
-                // 4. 追杀令推进 / 结单 / 反杀撕单
+                allParticipants.sort(Long::compareUnsigned);
+                for (long pid : allParticipants) {
+                    boolean isAtk = atkSet.contains(pid);
+                    updateParticipantState(c, pid, battle.zoneId(), weekKey,
+                            isAtk ? battle.attackerMerit() : battle.defenderMerit(),
+                            isAtk ? atkWon : defWon,
+                            isAtk ? defWon : atkWon,
+                            isAtk ? oppOfAtk : oppOfDef,
+                            protectSec, nowMs);
+                }
+                // 4. 追杀令推进 / 结单 / 反杀撕单（先 FOR UPDATE 锁追杀令行，且仅在本次真正结单时给目标挂免疫期，同连接读防覆盖战功）
                 if (battle.bountyId() != 0) {
+                    int bountyUpdated;
+                    try (PreparedStatement lockB = c.prepareStatement(
+                            "SELECT 1 FROM guild_war_bounty WHERE bounty_id=? FOR UPDATE")) {
+                        lockB.setLong(1, battle.bountyId());
+                        lockB.executeQuery().close();
+                    }
                     try (PreparedStatement upd = c.prepareStatement(
                             "UPDATE guild_war_bounty SET status=?, counter_kills=?, counter_killers_json=?, resolved_at_ms=?, winner_player_id=? WHERE bounty_id=? AND status=2")) {
                         upd.setInt(1, nextBountyStatus);
@@ -811,10 +889,10 @@ public class GuildWarStore {
                         upd.setLong(4, bountyResolved ? nowMs : 0L);
                         upd.setLong(5, winnerPlayerId);
                         upd.setLong(6, battle.bountyId());
-                        upd.executeUpdate();
+                        bountyUpdated = upd.executeUpdate();
                     }
-                    if (bountyResolved && !defenderIds.isEmpty() && bountyImmunitySec > 0) {
-                        PlayerStateRow targetSt = getOrDefaultPlayerState(defenderIds.get(0), battle.zoneId(), weekKey);
+                    if (bountyResolved && bountyUpdated == 1 && !defenderIds.isEmpty() && bountyImmunitySec > 0) {
+                        PlayerStateRow targetSt = lockOrDefaultPlayerStateTx(c, defenderIds.get(0), battle.zoneId(), weekKey);
                         upsertPlayerState(c, new PlayerStateRow(targetSt.playerId(), battle.zoneId(), targetSt.peaceMode(),
                                 targetSt.peaceReadyAtMs(), targetSt.openChallenge(), targetSt.protectUntilMs(),
                                 targetSt.streakCount(), targetSt.streakDistinctCount(), targetSt.lastStreakOpponentId(),
@@ -919,7 +997,7 @@ public class GuildWarStore {
     private void updateParticipantState(Connection c, long playerId, int zoneId, int weekKey, long meritDelta,
                                         boolean won, boolean lost, long opponentId, long protectSec,
                                         long nowMs) throws SQLException {
-        PlayerStateRow st = getOrDefaultPlayerState(playerId, zoneId, weekKey);
+        PlayerStateRow st = lockOrDefaultPlayerStateTx(c, playerId, zoneId, weekKey);
         int nextStreak = st.streakCount();
         int nextDistinct = st.streakDistinctCount();
         long nextLastOpp = st.lastStreakOpponentId();
@@ -935,11 +1013,34 @@ public class GuildWarStore {
             nextLastOpp = 0L;
         }
         long protectUntil = Math.max(st.protectUntilMs(), nowMs + protectSec * 1000L);
-        upsertPlayerState(c, new PlayerStateRow(playerId, zoneId, st.peaceMode(), st.peaceReadyAtMs(),
+        long peaceReadyAt = Math.max(st.peaceReadyAtMs(), nowMs + GuildWarRules.DEFAULT_PEACE_COOLDOWN_SEC * 1000L);
+        upsertPlayerState(c, new PlayerStateRow(playerId, zoneId, st.peaceMode(), peaceReadyAt,
                 st.openChallenge(), protectUntil, nextStreak, nextDistinct, nextLastOpp, weekKey,
                 st.weeklyMerit() + meritDelta, st.milestoneClaimedMask(), st.dividendClaimedCount(),
                 st.bountyImmunityUntilMs(), st.bountyPayoutDayKey(), st.bountyPayoutCountToday(),
                 st.nextGarrisonRefreshMs(), st.nextTrackAtMs(), nowMs));
+    }
+
+    /** 退帮 / 踢人 / 注销同事务清理守旗阵槽位。 */
+    public static void cleanupGarrisonTx(com.game.guild.store.GuildJdbc tx, long guildId, List<Long> playerIds)
+            throws SQLException {
+        if (guildId == 0L || playerIds == null || playerIds.isEmpty()) {
+            return;
+        }
+        for (long pid : playerIds) {
+            tx.update("DELETE FROM guild_war_garrison WHERE guild_id = ? AND player_id = ?", guildId, pid);
+        }
+    }
+
+    /** 帮会解散同事务清空守旗阵并释放其占领的灵脉归属。 */
+    public static void cleanupDisbandTx(com.game.guild.store.GuildJdbc tx, long guildId, long nowMs)
+            throws SQLException {
+        if (guildId == 0L) {
+            return;
+        }
+        tx.update("DELETE FROM guild_war_garrison WHERE guild_id = ?", guildId);
+        tx.update("UPDATE guild_war_leyline SET owner_guild_id = 0, shield_until_ms = 0, updated_ms = ? WHERE owner_guild_id = ?",
+                nowMs, guildId);
     }
 
     private static List<GarrisonRow> listGarrisonTx(Connection c, long guildId) throws SQLException {

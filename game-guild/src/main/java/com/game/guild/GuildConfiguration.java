@@ -203,9 +203,41 @@ public class GuildConfiguration {
     }
 
     /** 4.5 填上的事务钩子：踢人 / 退帮 / 解散在同一事务里把本帮未决捐献的截止提前到 now（guild-economy-spec §2.9）。 */
-    @Bean
+    /** 测试直接装配入口（不依赖帮战表）。 */
     public GuildStore guildStore(GuildTx guildTx, SchemaReady guildSchemaReady) {
         return new JdbcGuildStore(guildTx, EconomyTxHooks.INSTANCE);
+    }
+
+    @Bean("guildStore")
+    public GuildStore guildStore(GuildTx guildTx, SchemaReady guildSchemaReady,
+                                 ObjectProvider<com.game.guild.war.GuildWarStore> warStoreProvider) {
+        if (warStoreProvider.getIfAvailable() == null) {
+            return new JdbcGuildStore(guildTx, EconomyTxHooks.INSTANCE);
+        }
+        com.game.guild.store.GuildTxHooks hooks = new com.game.guild.store.GuildTxHooks() {
+            @Override
+            public void accelerateDonationDeadlines(com.game.guild.store.GuildJdbc tx, long guildId,
+                                                    java.util.List<Long> playerIds, long nowMs) throws SQLException {
+                EconomyTxHooks.INSTANCE.accelerateDonationDeadlines(tx, guildId, playerIds, nowMs);
+            }
+
+            @Override
+            public void deleteGuildActivityProgress(com.game.guild.store.GuildJdbc tx, long guildId) throws SQLException {
+                EconomyTxHooks.INSTANCE.deleteGuildActivityProgress(tx, guildId);
+            }
+
+            @Override
+            public void cleanupGuildWarGarrison(com.game.guild.store.GuildJdbc tx, long guildId,
+                                                java.util.List<Long> playerIds) throws SQLException {
+                com.game.guild.war.GuildWarStore.cleanupGarrisonTx(tx, guildId, playerIds);
+            }
+
+            @Override
+            public void cleanupGuildWarOnDisband(com.game.guild.store.GuildJdbc tx, long guildId, long nowMs) throws SQLException {
+                com.game.guild.war.GuildWarStore.cleanupDisbandTx(tx, guildId, nowMs);
+            }
+        };
+        return new JdbcGuildStore(guildTx, hooks);
     }
 
     /** 经济请求路径存储（捐献 / 兑换预留、升级、读页；GuildTx 事务基座）。 */
@@ -596,11 +628,13 @@ public class GuildConfiguration {
                 if (read == null || read.status() != PlayerLocationDirectory.LocationStatus.ONLINE || read.location() == null) {
                     return com.game.guild.war.GuildWarService.SceneLocation.OFFLINE;
                 }
-                return new com.game.guild.war.GuildWarService.SceneLocation(true, 0, 1, read.location().getSceneId());
+                return new com.game.guild.war.GuildWarService.SceneLocation(
+                        true, read.location().getSceneConfigId(), 1, read.location().getSceneId());
             } catch (Exception ignored) {
                 return com.game.guild.war.GuildWarService.SceneLocation.OFFLINE;
             }
         };
+        com.game.guild.war.GuildWarRules.validate(guildConfigTables);
         com.game.guild.war.GuildWarService.NameResolver nameResolver = (idsCol, d) -> {
             try {
                 java.util.Map<Long, PlayerProfiles.Profile> loaded =

@@ -432,6 +432,9 @@ public final class GuildWarService {
                 return RegisterGuildWarGarrisonResponse.newBuilder().setErrorMessage(tip(GuildTips.RANK_TOO_LOW)).build();
             }
         }
+        if (!withdraw && guild.member(targetPid) == null) {
+            return RegisterGuildWarGarrisonResponse.newBuilder().setErrorMessage(tip(GuildTips.NOT_IN_GUILD)).build();
+        }
         long now = now();
         int weekKey = GameDay.weekKey(now);
         GuildWarRuleTable rule = rule();
@@ -500,7 +503,8 @@ public final class GuildWarService {
             GuildWarTargetKind targetKind = req.getTargetKind();
             int leylineId = req.getLeylineId();
             long targetPid = req.getTargetPlayerId();
-            long bountyId = req.getBountyId();
+            // 仅 BOUNTY 分支采信客户端 bounty_id；其他模式必须按真实目标查库匹配，防伪造 bounty_id 劫持他人赏金
+            long bountyId = 0L;
             long defenderGuildId = 0L;
             MatchMode matchMode = MatchMode.MATCH_MODE_GUILD_WAR_PVP;
             GuildWarBattleKind warKind = GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_PANEL_PVP;
@@ -508,15 +512,37 @@ public final class GuildWarService {
             List<BattlePlayerSnapshot> aiDefenders = new ArrayList<>();
 
             if (targetKind == GuildWarTargetKind.GUILD_WAR_TARGET_KIND_BOUNTY) {
+                bountyId = req.getBountyId();
                 Optional<GuildWarStore.BountyRow> bOpt = store.getBounty(bountyId);
-                if (bOpt.isEmpty() || bOpt.get().status() != 2 || bOpt.get().expiresAtMs() <= now) {
+                if (bOpt.isEmpty() || bOpt.get().status() != 2 || bOpt.get().expiresAtMs() <= now
+                        || (bOpt.get().publicBoard() == 0 && bOpt.get().issuerGuildId() != guild.guildId())) {
                     return com.game.proto.guild.StartGuildWarBattleResponse.newBuilder()
                             .setErrorMessage(tip(GuildTips.WAR_BOUNTY_NOT_FOUND)).build();
                 }
                 GuildWarStore.BountyRow b = bOpt.get();
+                if (b.targetPlayerId() == playerId) {
+                    return com.game.proto.guild.StartGuildWarBattleResponse.newBuilder()
+                            .setErrorMessage(tip(GuildTips.WAR_BOUNTY_INVALID_TARGET)).build();
+                }
                 if (b.targetGuildId() == guild.guildId()) {
                     return com.game.proto.guild.StartGuildWarBattleResponse.newBuilder()
                             .setErrorMessage(tip(GuildTips.WAR_SAME_GUILD)).build();
+                }
+                GuildWarStore.PlayerStateRow tSt = store.getOrDefaultPlayerState(b.targetPlayerId(), zoneId, weekKey);
+                if (tSt.peaceMode() != 0) {
+                    return com.game.proto.guild.StartGuildWarBattleResponse.newBuilder()
+                            .setErrorMessage(tip(GuildTips.WAR_TARGET_PEACE_MODE)).build();
+                }
+                if (Long.compareUnsigned(now, tSt.protectUntilMs()) < 0) {
+                    return com.game.proto.guild.StartGuildWarBattleResponse.newBuilder()
+                            .setErrorMessage(tip(GuildTips.WAR_TARGET_PROTECTED)).build();
+                }
+                long targetBattle = battleLocks.battleIdOf(b.targetPlayerId(), d);
+                if (targetBattle != 0L) {
+                    return com.game.proto.guild.StartGuildWarBattleResponse.newBuilder()
+                            .setErrorMessage(tip(GuildTips.WAR_TARGET_IN_BATTLE))
+                            .setOffenderPlayerId(b.targetPlayerId())
+                            .setOffenderBattleId(targetBattle).build();
                 }
                 SceneLocation loc = sceneLocator.locate(zoneId, b.targetPlayerId(), d);
                 if (!loc.online()) {
@@ -580,12 +606,11 @@ public final class GuildWarService {
                         warKind = GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_FIELD_ROAD;
                     }
                 }
-                if (bountyId == 0) {
-                    Optional<GuildWarStore.BountyRow> activeB = store.activeBountyByTarget(targetPid, now);
-                    if (activeB.isPresent() && activeB.get().status() == 2) {
-                        bountyId = activeB.get().bountyId();
-                        warKind = GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_BOUNTY_HUNT;
-                    }
+                Optional<GuildWarStore.BountyRow> activeB = store.activeBountyByTarget(targetPid, now);
+                if (activeB.isPresent() && activeB.get().status() == 2
+                        && (activeB.get().publicBoard() != 0 || activeB.get().issuerGuildId() == guild.guildId())) {
+                    bountyId = activeB.get().bountyId();
+                    warKind = GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_BOUNTY_HUNT;
                 }
                 defenderPids.add(targetPid);
             } else {
@@ -618,6 +643,10 @@ public final class GuildWarService {
                             defenderGuildId = lr.ownerGuildId();
                             break;
                         }
+                    }
+                    if (defenderGuildId == guild.guildId()) {
+                        return com.game.proto.guild.StartGuildWarBattleResponse.newBuilder()
+                                .setErrorMessage(tip(GuildTips.WAR_SAME_GUILD)).build();
                     }
                     if (defenderGuildId != 0 && defenderGuildId != guild.guildId()) {
                         for (var gSlot : store.listGarrison(defenderGuildId)) {
@@ -982,7 +1011,8 @@ public final class GuildWarService {
                         .setBattleId(bid)
                         .setIsRivalGuild(tgId != 0 && rivals.contains(tgId))
                         .setCanAttackNow(canAttack);
-                if (activeB.isPresent() && activeB.get().status() == 2) {
+                if (activeB.isPresent() && activeB.get().status() == 2
+                        && (activeB.get().publicBoard() != 0 || activeB.get().issuerGuildId() == guild.guildId())) {
                     brief.setActiveBountyId(activeB.get().bountyId())
                             .setActiveBountyRewardSilver(activeB.get().escrowSilver())
                             .setActiveBountyTier(GuildWarBountyTier.forNumber(activeB.get().tier()));
@@ -1075,7 +1105,10 @@ public final class GuildWarService {
         long winnerPid = 0L;
         if (gw.getBountyId() != 0) {
             Optional<GuildWarStore.BountyRow> bOpt = store.getBounty(gw.getBountyId());
-            if (bOpt.isPresent() && bOpt.get().status() == 2) {
+            if (bOpt.isPresent() && bOpt.get().status() == 2
+                    && bOpt.get().targetGuildId() != gw.getAttackerGuildId()
+                    && defIds.contains(bOpt.get().targetPlayerId())
+                    && !atkIds.contains(bOpt.get().targetPlayerId())) {
                 GuildWarStore.BountyRow b = bOpt.get();
                 nextCounterKills = b.counterKills();
                 nextCounterKillers = b.counterKillersJson();

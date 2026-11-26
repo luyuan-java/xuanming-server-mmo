@@ -214,6 +214,155 @@ final class GuildWarServiceTest {
         assertThat(alreadyOwnsOne.brokeBanner()).isTrue();
         assertThat(alreadyOwnsOne.captured()).isFalse();
         assertThat(alreadyOwnsOne.bonusSilver()).isEqualTo(5000L);
+        assertThat(GuildWarRules.isSafeZoneScene(0)).as("未知场景号必须 fail-closed 视为安全区").isTrue();
+        assertThat(GuildWarRules.isSafeZoneScene(1)).isTrue();
+        assertThat(GuildWarRules.isSafeZoneScene(5)).isFalse();
+    }
+
+    @Test
+    void securityGuardsRejectForgedBountyPrivateBountySelfSiegeAndOutsiderGarrison() throws SQLException {
+        Deadline d = Deadline.after(3000);
+        // 1. 帮主尝试把外帮玩家 201 塞进本帮守旗阵 -> 拒绝
+        RegisterGuildWarGarrisonResponse outsider = service.registerGuildWarGarrison(
+                101L, RegisterGuildWarGarrisonRequest.newBuilder().setAction(1).setTargetPlayerId(201L).build(), d);
+        assertThat(outsider.getErrorMessage().getId()).isEqualTo(GuildTips.NOT_IN_GUILD);
+
+        // 2. 帮会 A 对 201 发私密追杀令，客户端在 LIVE_PLAYER 里伪造无关 bountyId=99999 不得带入开战上下文
+        PostGuildWarBountyResponse priv = service.postGuildWarBounty(
+                101L, PostGuildWarBountyRequest.newBuilder()
+                        .setTargetPlayerId(201L)
+                        .setTier(GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_NORMAL_SILVER)
+                        .setPublicBoard(false).build(), d);
+        assertThat(priv.getErrorMessage().getId()).isZero();
+        long privBountyId = priv.getBounty().getBountyId();
+
+        // 201 所在帮会 B 试图用私密追杀令 BOUNTY 发起攻击 -> 不可见直接拒绝
+        com.game.proto.guild.StartGuildWarBattleResponse hiddenBounty = service.startGuildWarBattle(
+                201L, com.game.proto.guild.StartGuildWarBattleRequest.newBuilder()
+                        .setTargetKind(GuildWarTargetKind.GUILD_WAR_TARGET_KIND_BOUNTY)
+                        .setBountyId(privBountyId).build(), d);
+        assertThat(hiddenBounty.getErrorMessage().getId()).isEqualTo(GuildTips.WAR_BOUNTY_NOT_FOUND);
+
+        // 3. 帮会 A 试图踢馆自己占领的灵脉 -> WAR_SAME_GUILD
+        store.setLeylineOwner(1, 2, 1001L);
+        com.game.proto.guild.StartGuildWarBattleResponse selfSiege = service.startGuildWarBattle(
+                101L, com.game.proto.guild.StartGuildWarBattleRequest.newBuilder()
+                        .setTargetKind(GuildWarTargetKind.GUILD_WAR_TARGET_KIND_LEYLINE_GARRISON)
+                        .setLeylineId(2).build(), d);
+        assertThat(selfSiege.getErrorMessage().getId()).isEqualTo(GuildTips.WAR_SAME_GUILD);
+
+        // 4. 终局结算若 bounty_id 目标不在守方阵容（伪造绑定），不得错误结单或没收赏金
+        BattleResultEvent mismatched = BattleResultEvent.newBuilder()
+                .setBattleId(700_999L)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                .setTotalRounds(3)
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(101L))
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(999L))
+                .setActivityContext(BattleActivityContext.newBuilder()
+                        .setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR)
+                        .setGuildWar(GuildWarBattleContext.newBuilder()
+                                .setWarBattleKind(GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_BOUNTY_HUNT_VALUE)
+                                .setBountyId(privBountyId)
+                                .setAttackerGuildId(1001L)
+                                .setDefenderGuildId(1002L)
+                                .setZoneId(1).build()))
+                .build();
+        assertThat(service.settleBattleResult(mismatched)).isTrue();
+        assertThat(store.getBounty(privBountyId).orElseThrow().status()).as("目标不符时悬赏必须保持 ACTIVE").isEqualTo(2);
+    }
+
+    @Test
+    void jdbcWarStoreUsesSingleConnectionWithoutPoolDeadlockAndPreservesDefenderMeritOnBountySettle() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger checkedOut = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.List<String> executedSql = new ArrayList<>();
+        // 内存状态表模拟单连接 READ_COMMITTED 可见性：仅单连接读写可见同事务内更新；若再次调用 getConnection() 立刻失败模拟连接池耗尽
+        java.util.Map<Long, Object[]> playerRows = new HashMap<>();
+        javax.sql.DataSource ds = org.mockito.Mockito.mock(javax.sql.DataSource.class);
+        org.mockito.Mockito.when(ds.getConnection()).thenAnswer(inv -> {
+            if (checkedOut.incrementAndGet() > 1) {
+                throw new IllegalStateException("嵌套借用第二条 JDBC 连接，单连接池必然死锁");
+            }
+            java.sql.Connection conn = org.mockito.Mockito.mock(java.sql.Connection.class);
+            org.mockito.Mockito.doAnswer(cInv -> {
+                checkedOut.decrementAndGet();
+                return null;
+            }).when(conn).close();
+            org.mockito.Mockito.when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenAnswer(pInv -> {
+                String sql = pInv.getArgument(0, String.class);
+                executedSql.add(sql);
+                java.sql.PreparedStatement ps = org.mockito.Mockito.mock(java.sql.PreparedStatement.class);
+                Object[] bound = new Object[32];
+                org.mockito.Mockito.doAnswer(a -> { bound[(Integer) a.getArgument(0)] = a.getArgument(1); return null; })
+                        .when(ps).setLong(org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyLong());
+                org.mockito.Mockito.doAnswer(a -> { bound[(Integer) a.getArgument(0)] = a.getArgument(1); return null; })
+                        .when(ps).setInt(org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt());
+                org.mockito.Mockito.doAnswer(a -> { bound[(Integer) a.getArgument(0)] = a.getArgument(1); return null; })
+                        .when(ps).setString(org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyString());
+                org.mockito.Mockito.doAnswer(a -> { bound[(Integer) a.getArgument(0)] = a.getArgument(1); return null; })
+                        .when(ps).setBytes(org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.any());
+                org.mockito.Mockito.when(ps.executeQuery()).thenAnswer(qInv -> {
+                    java.sql.ResultSet rs = org.mockito.Mockito.mock(java.sql.ResultSet.class);
+                    if (sql.contains("FROM guild_war_player_state WHERE player_id = ?")) {
+                        long pid = (Long) bound[1];
+                        Object[] row = playerRows.get(pid);
+                        org.mockito.Mockito.when(rs.next()).thenReturn(row != null, false);
+                        if (row != null) {
+                            org.mockito.Mockito.when(rs.getLong(org.mockito.ArgumentMatchers.anyInt()))
+                                    .thenAnswer(g -> ((Number) row[(Integer) g.getArgument(0)]).longValue());
+                            org.mockito.Mockito.when(rs.getInt(org.mockito.ArgumentMatchers.anyInt()))
+                                    .thenAnswer(g -> ((Number) row[(Integer) g.getArgument(0)]).intValue());
+                        }
+                    } else {
+                        org.mockito.Mockito.when(rs.next()).thenReturn(false);
+                    }
+                    return rs;
+                });
+                org.mockito.Mockito.when(ps.executeUpdate()).thenAnswer(uInv -> {
+                    if (sql.startsWith("INSERT INTO guild_war_player_state")) {
+                        long pid = (Long) bound[1];
+                        if (sql.contains("VALUES (?,?,0,0,1")) {
+                            playerRows.putIfAbsent(pid, new Object[]{null, pid, bound[2], 0, 0L, 1, 0L, 0, 0, 0L,
+                                    bound[3], 0L, 0, 0, 0L, 0, 0, 0L, 0L, 0L});
+                        } else {
+                            Object[] r = new Object[20];
+                            System.arraycopy(bound, 1, r, 1, 19);
+                            playerRows.put(pid, r);
+                        }
+                        return 1;
+                    }
+                    if (sql.startsWith("UPDATE guild_war_player_state")) {
+                        long pid = (Long) bound[19];
+                        if (!playerRows.containsKey(pid)) return 0;
+                        Object[] r = new Object[20];
+                        r[1] = pid;
+                        for (int i = 1; i <= 18; i++) r[i + 1] = bound[i];
+                        playerRows.put(pid, r);
+                        return 1;
+                    }
+                    return 1;
+                });
+                return ps;
+            });
+            return conn;
+        });
+
+        GuildWarStore jdbc = new GuildWarStore(ds);
+        long t = now.get();
+        int weekKey = 202648;
+        GuildWarStore.BattleRow rec = new GuildWarStore.BattleRow(
+                900_001L, 1, GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_BOUNTY_HUNT_VALUE, 0, 8001L,
+                1001L, 1002L, 1, 5, 0, 0, 0, 2, 0L, 4500L, 100,
+                60L, 1000L, 50L, 30L, 20L, 500L, 10L, 15L, "{}".getBytes(), t);
+        assertThat(jdbc.settleBattle(rec, weekKey, 20261126, List.of(101L), List.of(201L),
+                false, 0L, true, 3, 0, "", 101L, 600L, 10L, t)).isTrue();
+        assertThat(checkedOut.get()).isZero();
+        assertThat(executedSql).anyMatch(s -> s.contains("guild_war_player_state WHERE player_id = ? FOR UPDATE"));
+        assertThat(executedSql).anyMatch(s -> s.contains("guild_war_bounty WHERE bounty_id=? FOR UPDATE"));
+        Object[] defRow = playerRows.get(201L);
+        assertThat(defRow).isNotNull();
+        assertThat(((Number) defRow[11]).longValue()).as("悬赏豁免期更新不得覆盖本场刚累计的守方战功").isEqualTo(15L);
+        assertThat(((Number) defRow[14]).longValue()).as("悬赏豁免期必须落盘").isEqualTo(t + 600_000L);
+        assertThat(((Number) defRow[4]).longValue()).as("参战后必须刷新免战冷却").isGreaterThan(t);
     }
 
     /** 轻量级内存仓储替身，仅单测使用（无外部 MySQL / H2 依赖）。 */
@@ -224,6 +373,14 @@ final class GuildWarServiceTest {
         private final Map<Long, PlayerStateRow> players = new HashMap<>();
         private final Map<Long, BountyRow> bounties = new HashMap<>();
         private final Map<Long, BattleRow> battles = new HashMap<>();
+
+        void setLeylineOwner(int zoneId, int leylineId, long ownerGuildId) {
+            ensureZoneLeylines(zoneId, 1L);
+            LeylineRow cur = leylines.get(zoneId + ":" + leylineId);
+            leylines.put(zoneId + ":" + leylineId, new LeylineRow(cur.zoneId(), cur.leylineId(), ownerGuildId,
+                    cur.bannerHp(), cur.shieldUntilMs(), cur.capturedAtMs(), cur.lastDividendAtMs(),
+                    cur.dividendWeekKey(), cur.weeklyDividendCount(), cur.lastSiegeAlertMs(), cur.updatedMs()));
+        }
 
         @Override
         public void ensureZoneLeylines(int zoneId, long nowMs) {

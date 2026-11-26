@@ -92,8 +92,27 @@ public final class GuildWarRules {
         return Optional.empty();
     }
 
+    /** 场景号未知（<=0）或位于主城安全区（天墉城=1）时默认视为安全区，fail-closed 拦截野外帮战强开。 */
     public static boolean isSafeZoneScene(int sceneConfigId) {
-        return sceneConfigId == SAFE_ZONE_SCENE_ID;
+        return sceneConfigId <= 0 || sceneConfigId == SAFE_ZONE_SCENE_ID;
+    }
+
+    /** 启动期配表硬校验：拦截非法战意冷却/分红上限/悬赏税率，避免线上零冷却或税率越界。 */
+    public static void validate(com.game.table.ConfigTables tables) {
+        if (tables == null || tables.guildWarRule() == null) {
+            return;
+        }
+        for (GuildWarRuleTable row : tables.guildWarRule().all()) {
+            if (row.getLeylineMaxBannerHp() <= 0 || row.getPeaceCooldownSec() <= 0
+                    || row.getGarrisonMaxSlots() <= 0 || row.getDividendPlayerWeeklyCap() <= 0
+                    || row.getBountyTtlSec() <= 0) {
+                throw new IllegalStateException("GuildWarRuleTable 配置非法 id=" + row.getId());
+            }
+            if (row.getBountyNormalSilver() < 0 || row.getBountyHeavySilver() < 0
+                    || row.getBountyTaxBps() < 0 || row.getBountyTaxBps() > 10_000) {
+                throw new IllegalStateException("GuildWarRuleTable 追杀令银两或税率配置非法 id=" + row.getId());
+            }
+        }
     }
 
     public static GoldLeylineWindow goldLeylineForHour(long nowMs) {

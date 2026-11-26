@@ -358,6 +358,7 @@ public final class JdbcGuildStore implements GuildStore {
             // I3：成员行消失即清该玩家的全部申请（持有他的状态行，候选集完整）
             deleteApplicationsOfPlayer(t, targetId);
             hooks.accelerateDonationDeadlines(t, guildId, List.of(targetId), nowMs);
+            hooks.cleanupGuildWarGarrison(t, guildId, List.of(targetId));
             GuildData snapshot = loadGuild(t, guildId);
             return snapshot == null ? TxOutcome.reject(GuildReject.GUILD_GONE)
                     : TxOutcome.ok(new Kicked(snapshot, actorId, targetId));
@@ -438,6 +439,7 @@ public final class JdbcGuildStore implements GuildStore {
             t.updateExactlyOne("退帮 " + id(playerId) + " @ " + id(guildId), DELETE_MEMBER, guildId, playerId);
             deleteApplicationsOfPlayer(t, playerId); // I3
             hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
+            hooks.cleanupGuildWarGarrison(t, guildId, List.of(playerId));
             GuildData snapshot = loadGuild(t, guildId);
             return snapshot == null ? TxOutcome.reject(GuildReject.GUILD_GONE)
                     : TxOutcome.ok(new Left(snapshot, playerId));
@@ -658,6 +660,7 @@ public final class JdbcGuildStore implements GuildStore {
             deleteApplicationRows(t, keys);
             hooks.accelerateDonationDeadlines(t, guildId, members, nowMs);
             hooks.deleteGuildActivityProgress(t, guildId);
+            hooks.cleanupGuildWarOnDisband(t, guildId, nowMs);
             int deleted = t.update(DELETE_GUILD, guildId);
             if (deleted == 0) {
                 return TxOutcome.reject(GuildReject.GUILD_GONE);
@@ -912,6 +915,7 @@ public final class JdbcGuildStore implements GuildStore {
                 t.updateExactlyOne("注销删普通成员 " + id(playerId), DELETE_MEMBER, guildId, playerId);
                 deleteApplicationRows(t, applicationKeysOfPlayers(t, List.of(playerId)));
                 hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
+                hooks.cleanupGuildWarGarrison(t, guildId, List.of(playerId));
                 return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.REMOVED, guildId, guild.zoneId(), 0L));
             }
             Long successor = t.one(SELECT_SUCCESSOR_MEMBER, rs -> GuildJdbc.u64(rs, 1), guildId, playerId);
@@ -922,6 +926,7 @@ public final class JdbcGuildStore implements GuildStore {
                 t.updateExactlyOne("注销删除原帮主成员行 " + id(playerId), DELETE_MEMBER, guildId, playerId);
                 deleteApplicationRows(t, applicationKeysOfPlayers(t, List.of(playerId)));
                 hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
+                hooks.cleanupGuildWarGarrison(t, guildId, List.of(playerId));
                 return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.LEADER_TRANSFERRED, guildId, guild.zoneId(), successor));
             }
             // 仅剩帮主一人：直接解散帮会并清理全部关联记录
@@ -934,6 +939,7 @@ public final class JdbcGuildStore implements GuildStore {
             deleteApplicationRows(t, keys);
             hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
             hooks.deleteGuildActivityProgress(t, guildId);
+            hooks.cleanupGuildWarOnDisband(t, guildId, nowMs);
             t.updateExactlyOne("注销解散删帮会 " + id(guildId), DELETE_GUILD, guildId);
             return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.DISBANDED, guildId, guild.zoneId(), 0L));
         });

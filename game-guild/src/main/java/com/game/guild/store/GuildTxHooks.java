@@ -28,6 +28,14 @@ public interface GuildTxHooks {
      */
     void deleteGuildActivityProgress(GuildJdbc tx, long guildId) throws SQLException;
 
+    /** 退帮 / 踢人 / 注销时同事务清理帮战守旗阵槽位（防止已离帮成员继续替原帮守旗）。 */
+    default void cleanupGuildWarGarrison(GuildJdbc tx, long guildId, List<Long> playerIds) throws SQLException {
+    }
+
+    /** 帮会解散时同事务清空本帮守旗阵并释放所占灵脉归属（owner_guild_id 归 0）。 */
+    default void cleanupGuildWarOnDisband(GuildJdbc tx, long guildId, long nowMs) throws SQLException {
+    }
+
     /** 4.4：两张表都还不存在，空操作。 */
     GuildTxHooks NONE = new GuildTxHooks() {
         @Override
