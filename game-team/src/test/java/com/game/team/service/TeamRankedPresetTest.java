@@ -39,12 +39,12 @@ class TeamRankedPresetTest {
     @Test
     void 真实配表加载与非法预设版本校验() {
         TeamRankedRules rules = TeamRankedRules.from(ConfigTables.load(Path.of("../config-data/tables")));
-        assertThat(rules.ruleVersion()).isEqualTo(1);
-        assertThat(rules.isValidSelection(101, 201, 1)).isTrue();
-        assertThat(rules.isValidSelection(103, 203, 1)).isTrue();
-        assertThat(rules.isValidSelection(201, 101, 1)).isFalse();
-        assertThat(rules.isValidSelection(101, 201, 2)).isFalse();
-        assertThat(rules.isValidSelection(999, 201, 1)).isFalse();
+        assertThat(rules.ruleVersion()).isEqualTo(2);
+        assertThat(rules.isValidSelection(101, 201, 2)).isTrue();
+        assertThat(rules.isValidSelection(103, 203, 2)).isTrue();
+        assertThat(rules.isValidSelection(201, 101, 2)).isFalse();
+        assertThat(rules.isValidSelection(101, 201, 1)).isFalse();
+        assertThat(rules.isValidSelection(999, 201, 2)).isFalse();
     }
 
     @Test

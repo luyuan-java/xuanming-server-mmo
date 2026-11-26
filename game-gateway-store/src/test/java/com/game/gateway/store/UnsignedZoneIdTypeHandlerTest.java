@@ -61,7 +61,7 @@ class UnsignedZoneIdTypeHandlerTest {
         String prefix = GatewayStoreMapper.class.getName() + ".";
         var zone = config.getResultMap(prefix + "zoneRow").getConstructorResultMappings();
         var white = config.getResultMap(prefix + "whitelistRow").getConstructorResultMappings();
-        assertThat(zone).hasSize(10);
+        assertThat(zone).hasSize(12);
         assertThat(white).hasSize(3);
         assertThat(zone.get(0).getTypeHandler()).isInstanceOf(UnsignedZoneIdTypeHandler.class);
         assertThat(white.get(0).getTypeHandler()).isInstanceOf(UnsignedZoneIdTypeHandler.class);
