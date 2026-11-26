@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-26 率土式交互叠层成长战法 V2（卷 7《兵法叠势卷》`12023..12028` 6 项行为触发成长被动，零新协议 / 零 Schema 变更）
+
+| 范围 | C++ / Go 权威版 | Java 版 | 状态 |
+|---|---|---|---|
+| **卷 7《兵法叠势卷》6 项交互触发叠层至战斗结束被动**（冻结卷 1–6；`SkillScrollCraft` `id=7`、`Skill` `12023..12028` (`G04..G09`)、`Buff` `120230..120280`；全部 `stack_limit=5`、`per_round_limit=1`、`infinite_duration=1`、`forbid_copy=1`、不可普通驱散、全常规 `rarity_tier=0` 稀世占比 `8/95=8.42%<=10%`；复用 `BattleEffectOp::GrowingAura=25` 与 `keep_on_death=0` 易失层清零，零新 `.proto` / 零配表 Schema 变更）：① `12023 承锋蓄势`（受敌方直伤或 `A36` 援护分担扣血叠直伤 `+6%/层`，上限 `+30%`）；② `12024 循隙破甲`（主动攻击命中敌方扣血叠无视护甲与防御 `+4%/层`，上限 `20%`）；③ `12025 蚀骨愈深`（自身中毒/灼烧造成跳伤叠持续伤害 `+6%/层`，上限 `+30%`）；④ `12026 磐石道心`（成为敌方 6 类行动控制目标无论命中/抵抗/护阵抵挡皆叠全行动控制抵抗 `+5%/层`，上限 `+25%`，独立轴 `AllControlResist=28` 不影响宝宝 `P16`）；⑤ `12027 厚泽蓄灵`（主动施放含治疗/护盾/回生印技能叠施放护盾容量 `+5%/层`，上限 `+25%`）；⑥ `12028 兽威渐盛`（灵宠专属，主动攻击命中叠直伤 `+6%/层`，上限 `+30%`，阵亡或被 `B09` 劝退清零层数并保留被动本体以便复活/重召后重新叠层） | `docs/planning/{growing-passive-skills-v2.md,ui-handoff/growing-passive-skills-v2-ui-handoff.md}`、`data/{Skill,Buff,SkillScrollCraft}.xlsx`（`libprotoc 35.1` 导表 81 表 Deploy 14 OK）；C++ `battle`（`battle_effect_constants.h` 新增 `BattleModifier` `25..28` 与 `BattleTrigger` `7..9`、`configured_battle_effects.cpp`、`equipment_battle_effects.cpp`、`turn_battle_engine.{h,cpp}`、`modern_skill_test.cpp` 目录 89→95、`growing_passive_skill_test.cpp`）；Unity 客户端（`sync_tables.ps1` 81/81 SHA-256 逐字节一致，动态复用 `UI/Skills/{id}` 与 `scroll_7` 零硬编码，缺图安全回退）；验证：`test_cpp_no_raw_pointer_member.py` **13/13**、`check_log_text_english.py` **PASS**、串行 MSBuild `/m:1`（`battle.lib`/`turn_battle_engine_test.exe`/`battle.exe`）**0 错误**、`turn_battle_engine_test.exe` **521/521 PASS（45 套件）**、Unity `client_compile_check.ps1` **781/781 0 错误** | 精准同步 `config-data/tables/{skill,buff,skillscrollcraft}.pb`（与 C++/Unity SHA-256 逐字节一致）及 `manifest.json`；`game-battle-engine`（`BattleEffect`、`ConfiguredBattle`、`ConfiguredEffects`、`ConfiguredImpact`、`BattleEquipment`、`BattleContext`、`GrowingPassiveSkillTest` 9 项、`ConfiguredBattleCatalogTest` 103/108/78）；验证：`ConfiguredBattleCatalogTest + GrowingPassiveSkillTest + TableBattleDataTest` **37/37 PASS**、`RankedBattleEngineTest` **11/11 PASS**、`game-scene` `EquipQualityAndSkillCraftTest` **5/5 PASS** | 已对齐 |
+
 ## 2026-11-26 G2（V1 装备原地无损升档）与 G4（「仙途轻享卡」3→6 方案槽位 + 阶段二可交易资格全链路闭环，零新 RPC / 零 DB schema 变更）
 
 | 范围 | C++ / Go 权威版 | Java 版 | 状态 |
