@@ -4,6 +4,7 @@ import static com.game.scene.world.SceneMessageIds.tip;
 
 import com.game.player.store.state.ClientRequestRecordState;
 import com.game.player.store.state.EquipmentFixedAffixState;
+import com.game.player.store.state.EquipmentGemState;
 import com.game.player.store.state.EquipmentMaterialRewardLedgerState;
 import com.game.player.store.state.EquipmentState;
 import com.game.player.store.state.PlayerState;
@@ -115,6 +116,7 @@ public final class EquipmentCraftService {
         int configId;
         long itemId;
         boolean originalBound;
+        boolean resultBound;
         EquipmentState resultEquipment = EquipmentState.getDefaultInstance();
         BagType holder = BagType.INVENTORY;
         final Map<Integer, Long> consumed = new LinkedHashMap<>();
@@ -249,7 +251,7 @@ public final class EquipmentCraftService {
                 .setRulesFingerprint(baseRules.getRulesFingerprint())
                 .setExpectedForgeRevision(player.clientRequestLedger().forgeRevision())
                 .setResult(buildProductPreview(prepared.configId, prepared.itemId,
-                        prepared.originalBound || prepared.willBindItem, previewEquipment))
+                        prepared.resultBound, previewEquipment))
                 .setMaterial(buildMaterial(player, prepared.materialId, prepared.materialCount, prepared.tradableOnly))
                 .setGoldCost(prepared.baseGoldCost)
                 .setProxyFeeGold(prepared.proxyFeeGold)
@@ -420,7 +422,11 @@ public final class EquipmentCraftService {
                 return new CommitResult(rejectCraft(reqId, ledger.forgeRevision(), equip_error.kEquipItemNotFound_VALUE, true), false);
             }
             target.equipment(nextEquip.build());
-            if (consumedBound && !target.bound()) {
+            if (op == EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE) {
+                target.setBound(false);
+            } else if (op == EquipmentCraftChoice.Operation.INHERIT_ENHANCE) {
+                target.setBound(true);
+            } else if (consumedBound && !target.bound()) {
                 target.setBound(true);
             }
             wornChanged = prepared.holder == BagType.EQUIPMENT;
@@ -444,8 +450,11 @@ public final class EquipmentCraftService {
         if (proxyMaster != null && proxyNetGold > 0L && currency != null) {
             currency.add(proxyMaster, Wallet.GOLD, proxyNetGold, AssetAudit.Reason.CRAFT_PROXY_FEE, reqId, nowSec);
         }
-        // 本人打造/装条/打磨自然涨 1 点铸器熟练度（无体力、无日清、只增不减；代打与重铸不涨）。
-        if (prepared.proxyMasterPlayerId == 0L && op != EquipmentCraftChoice.Operation.REFORGE_AFFIX) {
+        // 本人打造/装条/打磨自然涨 1 点铸器熟练度（无体力、无日清、只增不减；代打、重铸、解封与继承不涨）。
+        if (prepared.proxyMasterPlayerId == 0L
+                && op != EquipmentCraftChoice.Operation.REFORGE_AFFIX
+                && op != EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE
+                && op != EquipmentCraftChoice.Operation.INHERIT_ENHANCE) {
             int curExp = player.craft().forgeMasteryExp();
             if (curExp != -1) {
                 player.craft().replace(player.craft().state().toBuilder().setForgeMasteryExp(curExp + 1).build());
@@ -546,7 +555,8 @@ public final class EquipmentCraftService {
         if (enforceAccountQuota && batchTradable > 0 && curState.getMigratedToV2()
                 && Integer.compareUnsigned(curState.getTradableEarnedTotal(), curState.getStage1TradableConfirmed()) > 0) {
             world.syncAccountStage1Tradable(player, nowMs);
-            return rejectMaterial(reqId, currentRev, SERVICE_UNAVAILABLE, false);
+            return rejectMaterial(reqId, currentRev, SERVICE_UNAVAILABLE, false)
+                    .toBuilder().setSnapshot(snap).build();
         }
         long craftingTradable = Math.min(craftingCount, batchTradable);
         long craftingBound = craftingCount - craftingTradable;
@@ -723,7 +733,7 @@ public final class EquipmentCraftService {
             }
             case MatchMode.MATCH_MODE_1V1_VALUE, MatchMode.MATCH_MODE_5V5_VALUE,
                     MatchMode.MATCH_MODE_PVP_TEAM_VALUE, MatchMode.MATCH_MODE_POLARITY_5V5_VALUE,
-                    MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE -> {
+                    MatchMode.MATCH_MODE_GUILD_WAR_PVP_VALUE, MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE -> {
                 if (settlement.getCompetitiveRanked() && !settlement.getParticipated()) {
                     yield new BattleEvaluation(false, false, !playerWon, 0, 0);
                 }
@@ -736,6 +746,12 @@ public final class EquipmentCraftService {
                     yield new BattleEvaluation(false, false, true, 0, 0);
                 }
                 yield new BattleEvaluation(true, false, false, BATTLE_UNITS, 0);
+            }
+            case MatchMode.MATCH_MODE_GUILD_WAR_SIEGE_VALUE -> {
+                if (!playerWon) {
+                    yield BattleEvaluation.INELIGIBLE;
+                }
+                yield new BattleEvaluation(true, true, false, BATTLE_UNITS, 0);
             }
             default -> BattleEvaluation.INELIGIBLE;
         };
@@ -862,15 +878,18 @@ public final class EquipmentCraftService {
             if (!choice.getAllowBoundMaterials() && allTradableEnough) {
                 prepared.tradableOnly = true;
                 prepared.willBindItem = false;
+                prepared.resultBound = false;
                 return;
             }
             prepared.tradableOnly = false;
             prepared.willBindItem = anyBoundPresent;
+            prepared.resultBound = prepared.willBindItem;
             return;
         }
         if (prepared.originalBound) {
             prepared.tradableOnly = false;
             prepared.willBindItem = false;
+            prepared.resultBound = true;
             return;
         }
         // 既有可交易装备：可交易材料充足时一律强制 TRADEABLE_ONLY（哪怕包里另有绑定堆或透传 allow_bound_materials=true，
@@ -879,16 +898,19 @@ public final class EquipmentCraftService {
         if (allTradableEnough) {
             prepared.tradableOnly = true;
             prepared.willBindItem = false;
+            prepared.resultBound = false;
             return;
         }
         if (!choice.getAllowBoundMaterials()) {
             prepared.tradableOnly = true;
             prepared.willBindItem = true;
             prepared.bindConfirmBlocked = true;
+            prepared.resultBound = true;
             return;
         }
         prepared.tradableOnly = false;
         prepared.willBindItem = anyBoundPresent;
+        prepared.resultBound = prepared.willBindItem;
     }
 
     private static BagItem locateEquipment(ScenePlayer player, long itemId, BagType[] holderOut) {
@@ -1156,6 +1178,133 @@ public final class EquipmentCraftService {
                 prepared.consumed.merge(prepared.extraMaterialId, 1L, Long::sum);
             }
             planBoundPolicy(inventory, choice, false, prepared);
+            return prepared;
+        }
+
+        if (choice.getOperation() == EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE) {
+            if (choice.getConfigId() != 0 || choice.getItemId() == 0 || choice.getAffixSlot() != 0
+                    || choice.getAffixId() != 0 || choice.getSourceItemId() != 0
+                    || choice.getUseGuaranteeCharm() || choice.getProxyMasterPlayerId() != 0L
+                    || choice.hasExpectedPolishPityCount()) {
+                errorOut[0] = INVALID_PARAMETER;
+                return null;
+            }
+            if (tables.item(EquipCraftQualityRules.UNSEAL_TALISMAN_CONFIG_ID) == null) {
+                errorOut[0] = INVALID_TABLE_DATA;
+                return null;
+            }
+            BagType[] holderOut = new BagType[1];
+            BagItem found = locateEquipment(player, choice.getItemId(), holderOut);
+            if (found == null) {
+                errorOut[0] = equip_error.kEquipItemNotFound_VALUE;
+                return null;
+            }
+            ItemTable row = tables.item(found.configId());
+            EquipmentState current = found.equipment();
+            if (row == null || row.getEquipKind() == 0 || found.size() != 1 || current == null) {
+                errorOut[0] = INVALID_PARAMETER;
+                return null;
+            }
+            if (!current.getUnknownFields().asMap().isEmpty()) {
+                errorOut[0] = FEATURE_UNAVAILABLE;
+                return null;
+            }
+            if (!found.bound()) {
+                errorOut[0] = INVALID_PARAMETER;
+                return null;
+            }
+            // 要求先取下所有宝石，防止剥离过程误销毁玩家宝石。
+            for (EquipmentGemState gem : current.getGemsList()) {
+                if (gem.getGemConfigId() != 0) {
+                    errorOut[0] = INVALID_PARAMETER;
+                    return null;
+                }
+            }
+            EquipmentState cleared = current.toBuilder()
+                    .setEnhanceLevel(0)
+                    .setEnhancePityCount(0)
+                    .clearFixedAffixes()
+                    .clearCrafterName()
+                    .setCrafterPlayerId(0L)
+                    .build();
+            prepared.configId = found.configId();
+            prepared.itemId = found.guid();
+            prepared.originalBound = found.bound();
+            prepared.resultBound = false;
+            prepared.resultEquipment = cleared;
+            prepared.holder = holderOut[0];
+            prepared.materialId = EquipCraftQualityRules.UNSEAL_TALISMAN_CONFIG_ID;
+            prepared.materialCount = 1;
+            prepared.consumed.merge(prepared.materialId, 1L, Long::sum);
+            prepared.tradableOnly = false;
+            prepared.willBindItem = false;
+            return prepared;
+        }
+
+        if (choice.getOperation() == EquipmentCraftChoice.Operation.INHERIT_ENHANCE) {
+            if (choice.getConfigId() != 0 || choice.getItemId() == 0 || choice.getSourceItemId() == 0
+                    || choice.getSourceItemId() == choice.getItemId() || choice.getAffixSlot() != 0
+                    || choice.getAffixId() != 0 || choice.getUseGuaranteeCharm()
+                    || choice.getProxyMasterPlayerId() != 0L || choice.hasExpectedPolishPityCount()) {
+                errorOut[0] = INVALID_PARAMETER;
+                return null;
+            }
+            if (tables.item(EquipCraftQualityRules.INHERIT_TALISMAN_CONFIG_ID) == null) {
+                errorOut[0] = INVALID_TABLE_DATA;
+                return null;
+            }
+            BagType[] holderOut = new BagType[1];
+            BagItem found = locateEquipment(player, choice.getItemId(), holderOut);
+            if (found == null) {
+                errorOut[0] = equip_error.kEquipItemNotFound_VALUE;
+                return null;
+            }
+            BagType[] sourceHolderOut = new BagType[1];
+            BagItem sourceItem = locateEquipment(player, choice.getSourceItemId(), sourceHolderOut);
+            if (sourceItem == null) {
+                errorOut[0] = equip_error.kEquipItemNotFound_VALUE;
+                return null;
+            }
+            ItemTable targetRow = tables.item(found.configId());
+            ItemTable sourceRow = tables.item(sourceItem.configId());
+            EquipmentState targetEquip = found.equipment();
+            EquipmentState sourceEquip = sourceItem.equipment();
+            if (targetRow == null || sourceRow == null || targetRow.getEquipKind() == 0
+                    || targetRow.getEquipKind() != sourceRow.getEquipKind()
+                    || targetRow.getEquipProfile() != sourceRow.getEquipProfile()
+                    || targetRow.getEquipLevel() != sourceRow.getEquipLevel()
+                    || found.size() != 1 || sourceItem.size() != 1
+                    || targetEquip == null || sourceEquip == null) {
+                errorOut[0] = INVALID_PARAMETER;
+                return null;
+            }
+            if (!targetEquip.getUnknownFields().asMap().isEmpty()
+                    || !sourceEquip.getUnknownFields().asMap().isEmpty()) {
+                errorOut[0] = FEATURE_UNAVAILABLE;
+                return null;
+            }
+            int sourceLevel = sourceEquip.getEnhanceLevel();
+            int targetLevel = targetEquip.getEnhanceLevel();
+            if (sourceLevel == 0 || Integer.compareUnsigned(sourceLevel, targetLevel) <= 0) {
+                errorOut[0] = INVALID_PARAMETER;
+                return null;
+            }
+            EquipmentState inherited = targetEquip.toBuilder()
+                    .setEnhanceLevel(sourceLevel)
+                    .setEnhancePityCount(sourceEquip.getEnhancePityCount())
+                    .build();
+            prepared.configId = found.configId();
+            prepared.itemId = found.guid();
+            prepared.originalBound = found.bound();
+            prepared.resultBound = true;
+            prepared.resultEquipment = inherited;
+            prepared.holder = holderOut[0];
+            // 目标副套装备强制绑定仅自用，避免通过流派副套继承复制/洗白多件可交易高强成品。
+            prepared.willBindItem = !found.bound();
+            prepared.materialId = EquipCraftQualityRules.INHERIT_TALISMAN_CONFIG_ID;
+            prepared.materialCount = 1;
+            prepared.consumed.merge(prepared.materialId, 1L, Long::sum);
+            prepared.tradableOnly = false;
             return prepared;
         }
 

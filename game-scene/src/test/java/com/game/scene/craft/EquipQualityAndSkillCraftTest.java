@@ -3,6 +3,7 @@ package com.game.scene.craft;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.player.store.state.EquipmentFixedAffixState;
+import com.game.player.store.state.EquipmentGemState;
 import com.game.player.store.state.EquipmentState;
 import com.game.player.store.state.PlayerCraftState;
 import com.game.proto.BagItemInfo;
@@ -716,5 +717,142 @@ class EquipQualityAndSkillCraftTest {
         // 5 份绑定料应完整保留，只扣了可交易料
         assertThat(player.bags().bag(BagType.INVENTORY).total(normalAffix.getMaterialConfigId())).isEqualTo(5L);
         assertThat(player.bags().bag(BagType.INVENTORY).plainTradableQuantity(normalAffix.getMaterialConfigId())).isZero();
+    }
+
+    @Test
+    void 解封剥离符清空绑定养成恢复纯T原胚_且流派副套继承符无损继承并强制转绑() throws Exception {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer player = f.enter(11, 2105L);
+        assertThat(f.attributes.gmSetLevel(player, 60)).isZero();
+
+        GetEquipmentCraftRulesResponse rules = call(f, player, BAG_SERVICE, "GetEquipmentCraftRules",
+                GetEquipmentCraftRulesRequest.getDefaultInstance(), GetEquipmentCraftRulesResponse.parser());
+        var weaponRecipe = rules.getRecipesList().stream()
+                .filter(r -> r.getProduct().getEquipProfile() == 1)
+                .findFirst().orElseThrow();
+        var affix = rules.getAffixesList().stream()
+                .filter(a -> a.getPool() == 1)
+                .findFirst().orElseThrow();
+
+        // 发放打造材料 + 1 张绑定解封剥离符(3409) + 1 张绑定流派副套继承符(3410)
+        assertThat(f.bags.addItems(player, BagType.INVENTORY,
+                Map.of(weaponRecipe.getMaterialConfigId(), (long) weaponRecipe.getMaterialCount() * 2L),
+                false, Reason.GM_GRANT, 0, "").tip()).isZero();
+        assertThat(f.bags.addItems(player, BagType.INVENTORY,
+                Map.of(EquipCraftQualityRules.UNSEAL_TALISMAN_CONFIG_ID, 1L,
+                        EquipCraftQualityRules.INHERIT_TALISMAN_CONFIG_ID, 1L),
+                true, Reason.GM_GRANT, 0, "").tip()).isZero();
+
+        // 打造两件同部位同等级段武器：源武器(设为绑定 +5 / pity=3 / 含词条与宗师署名) 与 副套武器(纯可交易 +0)
+        CommitEquipmentCraftResponse craftSrc = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(6001L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(0L)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.CREATE_ITEM)
+                                .setConfigId(weaponRecipe.getProduct().getConfigId()))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(craftSrc.getOutcome()).isEqualTo(CommitEquipmentCraftResponse.Outcome.APPLIED);
+        long srcId = craftSrc.getItemId();
+
+        CommitEquipmentCraftResponse craftAlt = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(6002L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(1L)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.CREATE_ITEM)
+                                .setConfigId(weaponRecipe.getProduct().getConfigId()))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(craftAlt.getOutcome()).isEqualTo(CommitEquipmentCraftResponse.Outcome.APPLIED);
+        long altId = craftAlt.getItemId();
+
+        BagItem srcItem = player.bags().bag(BagType.INVENTORY).item(srcId);
+        srcItem.setBound(true);
+        srcItem.equipment(srcItem.equipment().toBuilder()
+                .setEnhanceLevel(5)
+                .setEnhancePityCount(3)
+                .addFixedAffixes(EquipmentFixedAffixState.newBuilder()
+                        .setSlot(1).setAffixId(affix.getAffixId()).setQualityTier(5))
+                .setCrafterPlayerId(999L)
+                .setCrafterName("测试宗师")
+                .addGems(EquipmentGemState.newBuilder().setSocket(1).setGemConfigId(3201))
+                .build());
+        int masteryBefore = player.craft().forgeMasteryExp();
+
+        // 1. 流派副套继承符(3410)：预览 will_bind_item=true、result.bound=true、enhance_level=5；提交后副套 +5/pity=3 且强制转绑，源武器不动
+        EquipmentCraftChoice inheritChoice = EquipmentCraftChoice.newBuilder()
+                .setOperation(EquipmentCraftChoice.Operation.INHERIT_ENHANCE)
+                .setItemId(altId)
+                .setSourceItemId(srcId)
+                .build();
+        PreviewEquipmentCraftResponse inheritPreview = call(f, player, BAG_SERVICE, "PreviewEquipmentCraft",
+                PreviewEquipmentCraftRequest.newBuilder().setChoice(inheritChoice).build(),
+                PreviewEquipmentCraftResponse.parser());
+        assertThat(inheritPreview.getErrorMessage().getId()).isZero();
+        assertThat(inheritPreview.getPreview().getAvailable()).isTrue();
+        assertThat(inheritPreview.getPreview().getWillBindItem()).isTrue();
+        assertThat(inheritPreview.getPreview().getResult().getBound()).isTrue();
+        assertThat(inheritPreview.getPreview().getResult().getEnhanceLevel()).isEqualTo(5);
+
+        CommitEquipmentCraftResponse inheritResp = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(6003L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(2L)
+                        .setChoice(inheritChoice)
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(inheritResp.getOutcome()).isEqualTo(CommitEquipmentCraftResponse.Outcome.APPLIED);
+        BagItem altAfter = player.bags().bag(BagType.INVENTORY).item(altId);
+        assertThat(altAfter.bound()).isTrue();
+        assertThat(altAfter.equipment().getEnhanceLevel()).isEqualTo(5);
+        assertThat(altAfter.equipment().getEnhancePityCount()).isEqualTo(3);
+        assertThat(player.craft().forgeMasteryExp()).isEqualTo(masteryBefore); // 继承不涨铸器熟练度
+
+        // 2. 解封剥离符(3409)：镶嵌宝石时拒绝；摘除宝石后预览与提交成功：强化/保底/词条/署名全清空、转为纯可交易 T，即便消耗绑定剥离符也不回绑
+        EquipmentCraftChoice unsealChoice = EquipmentCraftChoice.newBuilder()
+                .setOperation(EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE)
+                .setItemId(srcId)
+                .build();
+        CommitEquipmentCraftResponse blockedUnseal = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(6004L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(3L)
+                        .setChoice(unsealChoice)
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(blockedUnseal.getOutcome()).isEqualTo(CommitEquipmentCraftResponse.Outcome.REJECTED);
+
+        srcItem = player.bags().bag(BagType.INVENTORY).item(srcId);
+        srcItem.equipment(srcItem.equipment().toBuilder().clearGems().build());
+
+        PreviewEquipmentCraftResponse unsealPreview = call(f, player, BAG_SERVICE, "PreviewEquipmentCraft",
+                PreviewEquipmentCraftRequest.newBuilder().setChoice(unsealChoice).build(),
+                PreviewEquipmentCraftResponse.parser());
+        assertThat(unsealPreview.getErrorMessage().getId()).isZero();
+        assertThat(unsealPreview.getPreview().getAvailable()).isTrue();
+        assertThat(unsealPreview.getPreview().getWillBindItem()).isFalse();
+        assertThat(unsealPreview.getPreview().getResult().getBound()).isFalse();
+        assertThat(unsealPreview.getPreview().getResult().getEnhanceLevel()).isZero();
+
+        CommitEquipmentCraftResponse unsealResp = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(6005L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(3L)
+                        .setChoice(unsealChoice)
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(unsealResp.getOutcome()).isEqualTo(CommitEquipmentCraftResponse.Outcome.APPLIED);
+        BagItem srcAfter = player.bags().bag(BagType.INVENTORY).item(srcId);
+        assertThat(srcAfter.bound()).isFalse();
+        assertThat(srcAfter.equipment().getEnhanceLevel()).isZero();
+        assertThat(srcAfter.equipment().getEnhancePityCount()).isZero();
+        assertThat(srcAfter.equipment().getFixedAffixesCount()).isZero();
+        assertThat(srcAfter.equipment().getCrafterName()).isEmpty();
+        assertThat(srcAfter.equipment().getCrafterPlayerId()).isZero();
+        assertThat(player.craft().forgeMasteryExp()).isEqualTo(masteryBefore); // 解封不涨铸器熟练度
+        assertThat(player.bags().bag(BagType.INVENTORY).total(EquipCraftQualityRules.UNSEAL_TALISMAN_CONFIG_ID)).isZero();
+        assertThat(player.bags().bag(BagType.INVENTORY).total(EquipCraftQualityRules.INHERIT_TALISMAN_CONFIG_ID)).isZero();
     }
 }

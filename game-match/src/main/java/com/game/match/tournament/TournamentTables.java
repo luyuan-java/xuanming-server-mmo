@@ -87,8 +87,19 @@ public final class TournamentTables {
 
     /** 返回名次对应的最高一档奖励；不在前 16 且完赛达标则返回参赛保底档。 */
     public Optional<TournamentRewardTable> rewardForPlacement(int finalRank, int qualifierPlayed) {
+        if (finalRank == 3 && rule.getThirdPlaceMatchEnabled()) {
+            for (TournamentRewardTable row : orderedRewards) {
+                if (row.getTierKind() == TournamentRewardTierKind.TOURNAMENT_REWARD_TIER_THIRD_PLACE_VALUE) {
+                    return Optional.of(row);
+                }
+            }
+        }
         if (finalRank > 0) {
             for (TournamentRewardTable row : orderedRewards) {
+                if (row.getTierKind() == TournamentRewardTierKind.TOURNAMENT_REWARD_TIER_THIRD_PLACE_VALUE
+                        && !rule.getThirdPlaceMatchEnabled()) {
+                    continue;
+                }
                 if (row.getMinRank() > 0 && finalRank >= row.getMinRank() && finalRank <= row.getMaxRank()) {
                     return Optional.of(row);
                 }
@@ -108,6 +119,16 @@ public final class TournamentTables {
     public Optional<TournamentRewardTable> cheerReward() {
         for (TournamentRewardTable row : orderedRewards) {
             if (row.getTierKind() == TournamentRewardTierKind.TOURNAMENT_REWARD_TIER_CHEER_VALUE) {
+                return Optional.of(row);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** 返回神机竞猜命中达标的纪念奖励档（V3）。 */
+    public Optional<TournamentRewardTable> predictionReward() {
+        for (TournamentRewardTable row : orderedRewards) {
+            if (row.getTierKind() == TournamentRewardTierKind.TOURNAMENT_REWARD_TIER_PREDICTION_VALUE) {
                 return Optional.of(row);
             }
         }

@@ -4,6 +4,7 @@ import com.game.api.match.MatchBudgets;
 import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.TicketRef;
 import com.game.proto.BattleActivityContext;
+import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.TournamentBattleContext;
 import com.game.proto.match.MatchMode;
 import java.util.ArrayList;
@@ -31,11 +32,19 @@ import java.util.Set;
  */
 public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
                          FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext,
-                         TournamentBattleContext tournamentContext) {
+                         TournamentBattleContext tournamentContext,
+                         Map<Long, Integer> memberTeams,
+                         List<BattlePlayerSnapshot> aiDefenderSnapshots) {
 
     public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
                       FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext) {
-        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, null);
+        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, null, Map.of(), List.of());
+    }
+
+    public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
+                      FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext,
+                      TournamentBattleContext tournamentContext) {
+        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext, Map.of(), List.of());
     }
 
     public GatherPlan {
@@ -43,6 +52,8 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
         Objects.requireNonNull(onFail, "onFail");
         Objects.requireNonNull(members, "members");
         Objects.requireNonNull(tickets, "tickets");
+        memberTeams = memberTeams == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(memberTeams));
+        aiDefenderSnapshots = aiDefenderSnapshots == null ? List.of() : List.copyOf(aiDefenderSnapshots);
         if (mode == MatchMode.UNRECOGNIZED || mode == MatchMode.MATCH_MODE_UNSPECIFIED) {
             throw new IllegalArgumentException("gather 的模式必须是已知的具体模式: " + mode);
         }
@@ -147,7 +158,20 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
             throw new IllegalArgumentException("锦标赛开战必须预先发号");
         }
         return new GatherPlan(MatchMode.MATCH_MODE_SEASON_TOURNAMENT, battleConfigId, roster, Map.of(),
-                FailPolicy.NO_TICKETS, presetBattleId, null, tournamentContext);
+                FailPolicy.NO_TICKETS, presetBattleId, null, tournamentContext, Map.of(), List.of());
+    }
+
+    /** 帮会全天帮战 V2 零匹配池直打开局（支持真人显式阵营与守旗阵 AI 快照托管）。 */
+    public static GatherPlan guildWar(MatchMode mode, int battleConfigId, List<Long> humanRoster,
+                                      Map<Long, Integer> memberTeams, Map<Long, String> tickets,
+                                      long presetBattleId, BattleActivityContext activityContext,
+                                      List<BattlePlayerSnapshot> aiDefenders) {
+        if (presetBattleId == 0) {
+            throw new IllegalArgumentException("帮战开战必须预先发号");
+        }
+        Objects.requireNonNull(activityContext, "activityContext");
+        return new GatherPlan(mode, battleConfigId, humanRoster, tickets, FailPolicy.DELETE_ALL,
+                presetBattleId, activityContext, null, memberTeams, aiDefenders);
     }
 
     // ---------------------------------------------------------------- 管线用的小工具

@@ -380,7 +380,7 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
             if (t.update(casSql, casArgs) != 1) {
                 return Terminated.NO; // 已被别的副本 / 人工终结：不是错误，也不做对侧账
             }
-            return new Terminated(true, applyCounterparty(t, row, status, locks, nowMs));
+            return new Terminated(true, applyCounterparty(t, opId, row, status, locks, nowMs));
         });
         if (!done.finalized()) {
             return FinalizeResult.NOT_FINALIZED;
@@ -444,7 +444,7 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
      * 对侧账（applyCounterparty，asset_store.go:834-905；guild-economy-spec §2.8 的表）。增量为 0 的列跳过：useAffectedRows 下「加 0」
      * 影响 0 行，会被「恰好一行」的自检误判。
      */
-    private static Counterparty applyCounterparty(GuildJdbc t, Immutable row, AssetOpStatus status, Locks locks, long nowMs)
+    private static Counterparty applyCounterparty(GuildJdbc t, long opId, Immutable row, AssetOpStatus status, Locks locks, long nowMs)
             throws SQLException {
         if (status == AssetOpStatus.APPLIED_PARTIAL) {
             return Counterparty.NONE; // 只 CAS：部分发放转人工补偿，不退次数、不退帮贡
@@ -486,8 +486,17 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
                     }
                 }
             }
-            case GUILD_ASSET_OP_KIND_ACTIVITY_REWARD -> {
-                // 只 CAS：帮贡与资金在入队事务里已记完（4.6）
+            case GUILD_ASSET_OP_KIND_ACTIVITY_REWARD,
+                    GUILD_ASSET_OP_KIND_WAR_REWARD,
+                    GUILD_ASSET_OP_KIND_BOUNTY_PAYOUT -> {
+                // 只 CAS：帮贡与资金在入队事务里已记完，无需回退对侧
+            }
+            case GUILD_ASSET_OP_KIND_BOUNTY_ESCROW -> {
+                int nextBountyStatus = status == AssetOpStatus.APPLIED ? 2 : 5;
+                long resolvedMs = status == AssetOpStatus.APPLIED ? 0L : nowMs;
+                t.update("UPDATE guild_war_bounty SET status = ?, resolved_at_ms = ? WHERE escrow_op_id = ? AND status = 1",
+                        nextBountyStatus, resolvedMs, opId);
+                touched = true;
             }
             default -> unknownKind = true;
         }

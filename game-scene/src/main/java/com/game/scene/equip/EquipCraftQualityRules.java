@@ -18,6 +18,10 @@ public final class EquipCraftQualityRules {
     public static final int SCROLL_FRAGMENT_CONFIG_ID = 3406;
     public static final int RARE_SCROLL_PAGE_CONFIG_ID = 3407;
     public static final int RARE_SCROLL_INK_CONFIG_ID = 3408;
+    /** 解封剥离符：清空绑定养成，仅恢复纯 T 原胚。 */
+    public static final int UNSEAL_TALISMAN_CONFIG_ID = 3409;
+    /** 流派副套继承符：无损继承强化等级至同部位副套（目标转绑定）。 */
+    public static final int INHERIT_TALISMAN_CONFIG_ID = 3410;
 
     public static final int MIN_QUALITY_TIER = 1;
     public static final int MAX_QUALITY_TIER = 5;

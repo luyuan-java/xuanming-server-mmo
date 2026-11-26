@@ -35,14 +35,17 @@ final class ItemLedger {
 
     ItemLedger(BattleContext ctx, CreateBattleRequest request) {
         this.ctx = ctx;
+        boolean clearItems = BattleConstants.isGuildWarMatchMode(request.getMatchMode());
         for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
             // 基线 FindItemEntry 遇到第一份 player_id 相同的快照就停（重复参战会在开局时被拒，这里只是保持同一口径）
             if (items.containsKey(snapshot.getPlayerId())) {
                 continue;
             }
-            List<BattleItemEntry.Builder> entries = new ArrayList<>(snapshot.getItemsCount());
-            for (BattleItemEntry item : snapshot.getItemsList()) {
-                entries.add(item.toBuilder());
+            List<BattleItemEntry.Builder> entries = new ArrayList<>(clearItems ? 0 : snapshot.getItemsCount());
+            if (!clearItems) {
+                for (BattleItemEntry item : snapshot.getItemsList()) {
+                    entries.add(item.toBuilder());
+                }
             }
             items.put(snapshot.getPlayerId(), entries);
         }

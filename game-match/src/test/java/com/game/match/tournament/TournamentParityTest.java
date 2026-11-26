@@ -17,25 +17,33 @@ import com.game.proto.eBattleOutcome;
 import com.game.proto.eBattleReplayCodec;
 import com.game.proto.content_guard.CheckTextResponse;
 import com.game.proto.content_guard.TextVerdict;
+import com.game.proto.match.BanTournamentLeylineRequest;
 import com.game.proto.match.CheerTournamentSquadRequest;
 import com.game.proto.match.ClaimTournamentRewardRequest;
 import com.game.proto.match.CreateTournamentSquadRequest;
+import com.game.proto.match.GetTournamentHighlightsRequest;
 import com.game.proto.match.GetTournamentOverviewRequest;
 import com.game.proto.match.GetTournamentOverviewResponse;
+import com.game.proto.match.GetTournamentPredictionBoardRequest;
 import com.game.proto.match.GetTournamentSpectateCheerRequest;
 import com.game.proto.match.InviteTournamentMemberRequest;
 import com.game.proto.match.LeaveTournamentSquadRequest;
 import com.game.proto.match.ListTournamentStandingsRequest;
 import com.game.proto.match.MatchMode;
+import com.game.proto.match.PredictTournamentMatchRequest;
 import com.game.proto.match.RespondTournamentInviteRequest;
 import com.game.proto.match.SaluteTournamentChampionRequest;
 import com.game.proto.match.SendTournamentSpectateCheerRequest;
 import com.game.proto.match.StartTournamentMatchRequest;
+import com.game.proto.match.StartTournamentWarmupRequest;
+import com.game.proto.match.TournamentHighlightTag;
+import com.game.proto.match.TournamentMatchPhase;
 import com.game.proto.match.TournamentMatchState;
 import com.game.proto.match.TournamentRewardTierKind;
 import com.game.proto.match.TournamentSquadState;
 import com.game.proto.match.TournamentStage;
 import com.game.proto.match.UpdateTournamentLineupRequest;
+import com.game.proto.match.UpdateTournamentSquadEmblemRequest;
 import com.game.table.ConfigTables;
 import com.game.table.MatchErrorTip;
 import com.google.protobuf.ByteString;
@@ -119,6 +127,52 @@ class TournamentParityTest {
         assertThat(TournamentRules.isValidSpectateCheerSide(0)).isTrue();
         assertThat(TournamentRules.isValidSpectateCheerSide(1)).isTrue();
         assertThat(TournamentRules.isValidSpectateCheerSide(2)).isFalse();
+
+        // V3: 队徽白名单、神机竞猜轮次权重与确定性 MVP 评定
+        assertThat(TournamentRules.normalizeEmblemId(0)).contains(1);
+        assertThat(TournamentRules.normalizeEmblemId(8)).contains(8);
+        assertThat(TournamentRules.normalizeEmblemId(9)).isEmpty();
+        assertThat(TournamentRules.predictionWeightForRound(16, 1, false)).isEqualTo(1);
+        assertThat(TournamentRules.predictionWeightForRound(16, 2, false)).isEqualTo(2);
+        assertThat(TournamentRules.predictionWeightForRound(16, 3, false)).isEqualTo(3);
+        assertThat(TournamentRules.predictionWeightForRound(16, 4, false)).isEqualTo(5);
+        assertThat(TournamentRules.predictionWeightForRound(16, 4, true)).isEqualTo(3);
+        var mvpOpt = TournamentRules.computeMatchMvp(List.of(
+                BattleSettlementData.newBuilder().setPlayerId(1001L).setPlayerTeamIndex(0).setTotalDamageDealt(10_000).setTotalControlsLanded(1).build(),
+                BattleSettlementData.newBuilder().setPlayerId(1002L).setPlayerTeamIndex(0).setTotalDamageDealt(4_000).setTotalHealingDone(8_000).setTotalControlsLanded(2).build(),
+                BattleSettlementData.newBuilder().setPlayerId(2001L).setPlayerTeamIndex(1).setTotalDamageDealt(20_000).setIsDead(true).build()
+        ), 0);
+        assertThat(mvpOpt).isPresent();
+        assertThat(mvpOpt.get().playerId()).isEqualTo(1002L);
+        assertThat(mvpOpt.get().score()).isEqualTo(560);
+
+        // V4: BO3 灵脉禁选、战队荣耀铭牌位掩码与名局录分级
+        List<TournamentLeylineElement> bannedDraw = TournamentRules.drawLeylinesWithBans(
+                1, 900123L, 3,
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL,
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_FIRE);
+        assertThat(bannedDraw).hasSize(3)
+                .doesNotContain(TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL, TournamentLeylineElement.TOURNAMENT_LEYLINE_FIRE);
+        assertThat(new HashSet<>(bannedDraw)).hasSize(3);
+        assertThat(TournamentRules.drawLeylinesWithBans(
+                1, 900123L, 3,
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL,
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_FIRE)).isEqualTo(bannedDraw);
+
+        int qBits = TournamentRules.computeQualifierHonorBits(0, 3, 3, 0, 2);
+        assertThat(qBits).isEqualTo(
+                TournamentRules.HONOR_BIT_DEBUT | TournamentRules.HONOR_BIT_STREAK | TournamentRules.HONOR_BIT_UNBEATEN);
+        int kBits = TournamentRules.computeKnockoutSeriesHonorBits(qBits, 3, 2, 1, false);
+        assertThat(kBits & TournamentRules.HONOR_BIT_COMEBACK).isNotZero();
+        assertThat(kBits & TournamentRules.HONOR_BIT_SWEEP).isZero();
+        int champBits = TournamentRules.computeKnockoutSeriesHonorBits(kBits, 3, 2, 0, true);
+        assertThat(champBits & TournamentRules.HONOR_BIT_SWEEP).isNotZero();
+        assertThat(champBits & TournamentRules.HONOR_BIT_CHAMPION).isNotZero();
+
+        assertThat(TournamentRules.classifyHighlightTag(false, 2, 2, 3, 2, 0).tag()).isEqualTo(1);
+        assertThat(TournamentRules.classifyHighlightTag(false, 1, 2, 3, 2, 1).tag()).isEqualTo(2);
+        assertThat(TournamentRules.classifyHighlightTag(true, 2, 2, 3, 2, 0).tag()).isEqualTo(3);
+        assertThat(TournamentRules.classifyHighlightTag(false, 1, 2, 3, 2, 0).tag()).isEqualTo(4);
     }
 
     @Test
@@ -127,7 +181,7 @@ class TournamentParityTest {
         assertThat(tables.rule().getEnabled()).isTrue();
         assertThat(tables.rule().getBattleTeamSize()).isEqualTo(3);
         assertThat(tables.rule().getRosterMaxSize()).isEqualTo(4);
-        assertThat(tables.rewardTierViews()).hasSize(7);
+        assertThat(tables.rewardTierViews()).hasSize(9);
 
         try (RatingTestDatabase db = RatingTestDatabase.h2()) {
             AtomicLong now = new AtomicLong(1_800_000_000_000L);
@@ -197,6 +251,43 @@ class TournamentParityTest {
                     .getErrorMessage().getId())
                     .isEqualTo(MatchErrorTip.match_error.kMatchTournamentAlreadyCheered_VALUE);
 
+            // V3: 队徽更换、越界拒绝、报名期零积分热身约战与零污染隔离 + 真实外观自动回填
+            assertThat(service.updateSquadEmblem(1001L, UpdateTournamentSquadEmblemRequest.newBuilder().setEmblemId(9).build())
+                    .getErrorMessage().getId())
+                    .isEqualTo(MatchErrorTip.match_error.kMatchTournamentEmblemInvalid_VALUE);
+            var embOk = service.updateSquadEmblem(1001L, UpdateTournamentSquadEmblemRequest.newBuilder().setEmblemId(6).build());
+            assertThat(embOk.getErrorMessage().getId()).isZero();
+            assertThat(embOk.getSquad().getEmblemId()).isEqualTo(6);
+
+            // 报名期定向热身约战（自选火炽灵脉）并结单，核验绝不污染海选场次/积分
+            var warmA = service.startWarmup(1001L, StartTournamentWarmupRequest.newBuilder()
+                    .setTargetSquadId(squadIds[1])
+                    .setLeylineElement(TournamentLeylineElement.TOURNAMENT_LEYLINE_FIRE)
+                    .build());
+            assertThat(warmA.getErrorMessage().getId()).isZero();
+            assertThat(warmA.getBattleId()).isZero();
+            assertThat(warmA.getMatch().getPhase()).isEqualTo(TournamentMatchPhase.TOURNAMENT_MATCH_PHASE_WARMUP);
+            var warmB = service.startWarmup(2001L, StartTournamentWarmupRequest.newBuilder()
+                    .setTargetSquadId(squadIds[0])
+                    .build());
+            assertThat(warmB.getErrorMessage().getId()).isZero();
+            assertThat(warmB.getBattleId()).isPositive();
+            assertThat(ratingStore.apply(BattleResultEvent.newBuilder()
+                    .setBattleId(warmB.getBattleId())
+                    .setMatchMode(MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE)
+                    .setBattleConfigId(tables.rule().getBattleConfigId())
+                    .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                    .setTotalRounds(4)
+                    .build()).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+            assertThat(service.getOverview(1001L, GetTournamentOverviewRequest.getDefaultInstance())
+                    .getMySquad().getQualifierPlayed()).isZero();
+
+            // 模拟建房时场景快照自动回填冠军成员真实角色名与外观 ID
+            store.syncMemberProfiles(1, List.of(
+                    BattlePlayerSnapshot.newBuilder().setPlayerId(1001L).setPlayerName("姜太公").setClassId(1).setGender(1).setAppearanceId("jiangziya").build(),
+                    BattlePlayerSnapshot.newBuilder().setPlayerId(1002L).setPlayerName("吕纯阳").setClassId(2).setGender(1).setAppearanceId("ludongbin").build()
+            ));
+
             // 2. 推进至海选（QUALIFIER），通过 RatingStore.apply 结算 2 场海选赛（校验重复投递幂等）
             GetTournamentOverviewResponse regView = service.getOverview(1001L, GetTournamentOverviewRequest.getDefaultInstance());
             now.set(regView.getCurrentSeason().getQualifierStartMs() + 1000L);
@@ -231,13 +322,28 @@ class TournamentParityTest {
                     .setTotalRounds(7)
                     .build()).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
 
-            // 3. 推进至淘汰赛（KNOCKOUT）：生成 4 强单败签表（2 场 BO3 半决赛 + 1 场 BO3 决赛 = 3 场）
+            // 3. 推进至淘汰赛（KNOCKOUT）：生成 4 强单败签表（2 场 BO3 半决赛 + 1 场 BO3 决赛 + 1 场 BO3 季军争夺战 = 4 场）
             now.set(regView.getCurrentSeason().getKnockoutStartMs() + 1000L);
             store.advanceSeason(now.get(), idGen::incrementAndGet);
             var standings = service.listStandings(1001L, ListTournamentStandingsRequest.newBuilder().setPage(1).setPageSize(20).build());
             assertThat(standings.getSeason().getStage()).isEqualTo(TournamentStage.TOURNAMENT_STAGE_KNOCKOUT);
             assertThat(standings.getSeason().getKnockoutTeamCount()).isEqualTo(4);
-            assertThat(standings.getKnockoutBracketCount()).isEqualTo(3);
+            assertThat(standings.getKnockoutBracketCount()).isEqualTo(4);
+            assertThat(standings.getKnockoutBracket(3).getIsThirdPlace()).isTrue();
+
+            // V3 神机问道免费竞猜：路人 9601 开战前预测 SF1 与 SF2 胜者（开战后改投被拒）
+            var sf1Init = standings.getKnockoutBracket(0);
+            var sf2Init = standings.getKnockoutBracket(1);
+            assertThat(service.predictMatch(9601L, PredictTournamentMatchRequest.newBuilder()
+                    .setMatchId(sf1Init.getMatchId()).setPredictedSquadId(999_999L).build()).getErrorMessage().getId())
+                    .isEqualTo(MatchErrorTip.match_error.kMatchTournamentPredictionTargetInvalid_VALUE);
+            var predSf1 = service.predictMatch(9601L, PredictTournamentMatchRequest.newBuilder()
+                    .setMatchId(sf1Init.getMatchId()).setPredictedSquadId(sf1Init.getSquadAId()).build());
+            assertThat(predSf1.getErrorMessage().getId()).isZero();
+            assertThat(predSf1.getPredictCountA()).isEqualTo(1);
+            assertThat(service.predictMatch(9601L, PredictTournamentMatchRequest.newBuilder()
+                    .setMatchId(sf2Init.getMatchId()).setPredictedSquadId(sf2Init.getSquadAId()).build())
+                    .getErrorMessage().getId()).isZero();
 
             // 半决赛 1（round 1, slot 0，BO3）：
             // G1 打满回合判平时按存活数+血量四级决胜让 A 拿 1:0 -> 进入 INTERMISSION；
@@ -248,10 +354,36 @@ class TournamentParityTest {
             assertThat(new HashSet<>(sf1.getLeylineSequenceList())).hasSize(3);
             long sf1CapA = captainOf(sf1.getSquadAId(), squadIds, captainsAndMembers);
             long sf1CapB = captainOf(sf1.getSquadBId(), squadIds, captainsAndMembers);
+            // V4 模块 H：BO3 首局开战前双方队长各禁 1 条灵脉，非队长被拒，重算后 3 局均不含被禁灵脉
+            assertThat(service.banLeyline(9999L, BanTournamentLeylineRequest.newBuilder()
+                    .setMatchId(sf1.getMatchId())
+                    .setLeylineElement(TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL).build())
+                    .getErrorMessage().getId())
+                    .isEqualTo(MatchErrorTip.match_error.kMatchTournamentNotCaptain_VALUE);
+            var banA = service.banLeyline(sf1CapA, BanTournamentLeylineRequest.newBuilder()
+                    .setMatchId(sf1.getMatchId())
+                    .setLeylineElement(TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL).build());
+            assertThat(banA.getErrorMessage().getId()).isZero();
+            assertThat(banA.getMatch().getBannedLeylineA()).isEqualTo(TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL);
+            var banB = service.banLeyline(sf1CapB, BanTournamentLeylineRequest.newBuilder()
+                    .setMatchId(sf1.getMatchId())
+                    .setLeylineElement(TournamentLeylineElement.TOURNAMENT_LEYLINE_FIRE).build());
+            assertThat(banB.getErrorMessage().getId()).isZero();
+            assertThat(banB.getMatch().getBannedLeylineB()).isEqualTo(TournamentLeylineElement.TOURNAMENT_LEYLINE_FIRE);
+            assertThat(banB.getMatch().getLeylineSequenceList()).hasSize(3)
+                    .doesNotContain(TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL, TournamentLeylineElement.TOURNAMENT_LEYLINE_FIRE);
+            assertThat(new HashSet<>(banB.getMatch().getLeylineSequenceList())).hasSize(3);
+
             service.startMatch(sf1CapA, StartTournamentMatchRequest.newBuilder().setMatchId(sf1.getMatchId()).build());
             var sf1G1 = service.startMatch(sf1CapB, StartTournamentMatchRequest.newBuilder().setMatchId(sf1.getMatchId()).build());
             assertThat(sf1G1.getBattleId()).isPositive();
             assertThat(sf1G1.getMatch().getFeaturedSpectate()).isTrue();
+            // 首局开战后禁止再改灵脉禁选
+            assertThat(service.banLeyline(sf1CapA, BanTournamentLeylineRequest.newBuilder()
+                    .setMatchId(sf1.getMatchId())
+                    .setLeylineElement(TournamentLeylineElement.TOURNAMENT_LEYLINE_WATER).build())
+                    .getErrorMessage().getId())
+                    .isEqualTo(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE);
 
             // 观战预设喝彩：非锦标赛 battle_id 拒绝；非法短语拒绝；首次发送成功；5 秒内二次发送受冷却拦截；跨 5 秒后放行
             assertThat(service.sendSpectateCheer(9101L, SendTournamentSpectateCheerRequest.newBuilder()
@@ -334,13 +466,26 @@ class TournamentParityTest {
                         .build());
             }
 
-            // 决赛（round 2, slot 0，BO3）：两位胜者对决，A 2:0 夺冠
+            // 决赛（round 2, slot 0，BO3）与季军争夺战（round 2, slot 1，BO3）：
             var bracketBeforeFinal = service.listStandings(1001L, ListTournamentStandingsRequest.getDefaultInstance());
             var fin = bracketBeforeFinal.getKnockoutBracket(2);
+            var thirdMatch = bracketBeforeFinal.getKnockoutBracket(3);
             assertThat(fin.getSquadAId()).isEqualTo(sf1.getSquadAId());
             assertThat(fin.getSquadBId()).isEqualTo(sf2.getSquadAId());
+            assertThat(thirdMatch.getIsThirdPlace()).isTrue();
+            assertThat(thirdMatch.getSquadAId()).isEqualTo(sf1.getSquadBId());
+            assertThat(thirdMatch.getSquadBId()).isEqualTo(sf2.getSquadBId());
             assertThat(bracketBeforeFinal.getKnockoutBracket(0).getGameBattleIdsCount()).isEqualTo(2);
             assertThat(bracketBeforeFinal.getKnockoutBracket(0).getPublicReplayAvailable()).isTrue();
+
+            // 路人 9601 预测总决赛 A 胜；SF1 已完赛再猜必拒
+            assertThat(service.predictMatch(9601L, PredictTournamentMatchRequest.newBuilder()
+                    .setMatchId(sf1.getMatchId()).setPredictedSquadId(sf1.getSquadAId()).build()).getErrorMessage().getId())
+                    .isEqualTo(MatchErrorTip.match_error.kMatchTournamentPredictionClosed_VALUE);
+            assertThat(service.predictMatch(9601L, PredictTournamentMatchRequest.newBuilder()
+                    .setMatchId(fin.getMatchId()).setPredictedSquadId(fin.getSquadAId()).build()).getErrorMessage().getId())
+                    .isZero();
+
             long finCapA = captainOf(fin.getSquadAId(), squadIds, captainsAndMembers);
             long finCapB = captainOf(fin.getSquadBId(), squadIds, captainsAndMembers);
             long finalG1BattleId = 0L;
@@ -356,6 +501,30 @@ class TournamentParityTest {
                         .setBattleConfigId(tables.rule().getBattleConfigId())
                         .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
                         .setTotalRounds(8)
+                        .addSettlements(BattleSettlementData.newBuilder().setPlayerId(1001L).setPlayerTeamIndex(0)
+                                .setTotalDamageDealt(18_000).setTotalHealingDone(2_400).setTotalControlsLanded(2))
+                        .addSettlements(BattleSettlementData.newBuilder().setPlayerId(finCapB).setPlayerTeamIndex(1)
+                                .setTotalDamageDealt(5_000).setIsDead(true))
+                        .build());
+            }
+
+            // 决赛已打完但季军战尚未打完：未到 settleStartMs 时不得提前封榜
+            store.advanceSeason(now.get(), idGen::incrementAndGet);
+            assertThat(service.getOverview(1001L, GetTournamentOverviewRequest.getDefaultInstance())
+                    .getCurrentSeason().getStage()).isEqualTo(TournamentStage.TOURNAMENT_STAGE_KNOCKOUT);
+
+            // 打完季军争夺战（BO3）：A 2:0 获季军(final_rank=3)，B 第4名(final_rank=4)
+            long thirdCapA = captainOf(thirdMatch.getSquadAId(), squadIds, captainsAndMembers);
+            long thirdCapB = captainOf(thirdMatch.getSquadBId(), squadIds, captainsAndMembers);
+            for (int g = 0; g < 2; g++) {
+                service.startMatch(thirdCapA, StartTournamentMatchRequest.newBuilder().setMatchId(thirdMatch.getMatchId()).build());
+                var tLaunch = service.startMatch(thirdCapB, StartTournamentMatchRequest.newBuilder().setMatchId(thirdMatch.getMatchId()).build());
+                ratingStore.apply(BattleResultEvent.newBuilder()
+                        .setBattleId(tLaunch.getBattleId())
+                        .setMatchMode(MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE)
+                        .setBattleConfigId(tables.rule().getBattleConfigId())
+                        .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                        .setTotalRounds(6)
                         .build());
             }
 
@@ -391,7 +560,45 @@ class TournamentParityTest {
             var settledView = service.getOverview(1004L, GetTournamentOverviewRequest.newBuilder().setIncludeHistory(true).build());
             assertThat(settledView.getCurrentSeason().getStage()).isEqualTo(TournamentStage.TOURNAMENT_STAGE_SETTLED);
             assertThat(settledView.getCurrentSeason().getChampionSquadId()).isEqualTo(squadIds[0]);
+            assertThat(settledView.getCurrentSeason().getChampionEmblemId()).isEqualTo(6);
+            assertThat(settledView.getCurrentSeason().getThirdPlaceSquadId()).isEqualTo(thirdMatch.getSquadAId());
+            assertThat(settledView.getCurrentSeason().getFinalMvpPlayerId()).isEqualTo(1001L);
+            assertThat(settledView.getCurrentSeason().getFinalMvpPlayerName()).isEqualTo("姜太公");
+            assertThat(settledView.getCurrentSeason().getFinalMvpScore()).isPositive();
             assertThat(settledView.getCurrentSeason().getChampionMembersCount()).isEqualTo(4);
+            assertThat(settledView.getCurrentSeason().getChampionMembers(0).getAppearanceId()).isEqualTo("jiangziya");
+            // V4 模块 J：冠军战队至少同时持有「零封强敌」(2:0 半决赛/决赛) 与「问鼎群仙」铭牌，并同步落库至赛季快照
+            int champHonor = settledView.getCurrentSeason().getChampionHonorBits();
+            assertThat(champHonor & TournamentRules.HONOR_BIT_SWEEP).isNotZero();
+            assertThat(champHonor & TournamentRules.HONOR_BIT_CHAMPION).isNotZero();
+            assertThat(settledView.getMySquad().getHonorBits()).isEqualTo(champHonor);
+
+            // V4 模块 I：本季名局录 Top 10 确定性策展（总决赛居首 -> 决胜三局 SF2 居次 -> 季军战第三 -> SF1 第四）
+            var highlights = service.getHighlights(GetTournamentHighlightsRequest.newBuilder().setSeasonId(1).build());
+            assertThat(highlights.getErrorMessage().getId()).isZero();
+            assertThat(highlights.getHighlightsCount()).isEqualTo(4);
+            assertThat(highlights.getHighlights(0).getTag()).isEqualTo(TournamentHighlightTag.TOURNAMENT_HIGHLIGHT_TAG_FINAL);
+            assertThat(highlights.getHighlights(1).getTag()).isEqualTo(TournamentHighlightTag.TOURNAMENT_HIGHLIGHT_TAG_BO3_THRILLER);
+            assertThat(highlights.getHighlights(2).getTag()).isEqualTo(TournamentHighlightTag.TOURNAMENT_HIGHLIGHT_TAG_THIRD_PLACE);
+            assertThat(highlights.getHighlights(3).getTag()).isEqualTo(TournamentHighlightTag.TOURNAMENT_HIGHLIGHT_TAG_HIGH_MVP);
+            assertThat(highlights.getHighlights(0).getMatch().getGameBattleIdsList()).contains(finalG1BattleId);
+
+            // V3 季军战队成员获得独立季军奖（Tier 8），路人 9601 命中 3 场获神机竞猜礼（Tier 9）并登顶神机榜
+            var thirdClaim = service.claimReward(thirdCapA, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build());
+            assertThat(thirdClaim.getErrorMessage().getId()).isZero();
+            assertThat(thirdClaim.getClaimedRewards(0).getTierKind())
+                    .isEqualTo(TournamentRewardTierKind.TOURNAMENT_REWARD_TIER_THIRD_PLACE);
+
+            var predBoard = service.getPredictionBoard(9601L, GetTournamentPredictionBoardRequest.newBuilder().setSeasonId(1).build());
+            assertThat(predBoard.getErrorMessage().getId()).isZero();
+            assertThat(predBoard.getMyHitCount()).isEqualTo(3);
+            assertThat(predBoard.getMyTotalPoints()).isEqualTo(11); // 3 + 3 + 5
+            assertThat(predBoard.getMyRank()).isEqualTo(1);
+            assertThat(predBoard.getTopPredictorsCount()).isEqualTo(1);
+            var predClaim = service.claimReward(9601L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build());
+            assertThat(predClaim.getErrorMessage().getId()).isZero();
+            assertThat(predClaim.getClaimedRewards(0).getTierKind())
+                    .isEqualTo(TournamentRewardTierKind.TOURNAMENT_REWARD_TIER_PREDICTION);
             assertThat(settledView.getCurrentSeason().getSalutedToday()).isFalse();
             assertThat(settledView.getHallOfFameCount()).isEqualTo(1);
             assertThat(settledView.getMyRewardsList())

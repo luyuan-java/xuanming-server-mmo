@@ -32,8 +32,16 @@ public final class BattleConstants {
     public static final int MATCH_MODE_PVE_TEAM = 5;
     /** 物法易势 5V5（镜像 {@code MatchMode.MATCH_MODE_POLARITY_5V5}）。 */
     public static final int MATCH_MODE_POLARITY_5V5 = 8;
+    /** 帮会全天帮战 V2 · 真人直打（镜像 {@code MatchMode.MATCH_MODE_GUILD_WAR_PVP}）。 */
+    public static final int MATCH_MODE_GUILD_WAR_PVP = 9;
+    /** 帮会全天帮战 V2 · 守旗阵踢馆（镜像 {@code MatchMode.MATCH_MODE_GUILD_WAR_SIEGE}）。 */
+    public static final int MATCH_MODE_GUILD_WAR_SIEGE = 10;
     /** 跨服战队锦标赛（镜像 {@code MatchMode.MATCH_MODE_SEASON_TOURNAMENT}）。 */
     public static final int MATCH_MODE_SEASON_TOURNAMENT = 11;
+
+    public static boolean isGuildWarMatchMode(int matchMode) {
+        return matchMode == MATCH_MODE_GUILD_WAR_PVP || matchMode == MATCH_MODE_GUILD_WAR_SIEGE;
+    }
 
     // ---- 首领试炼 / 轮换玩法类型（镜像 DungeonTable.boss_trial_kind） ----
 
@@ -90,6 +98,7 @@ public final class BattleConstants {
     public static final int BOSS_MECHANIC_BREAKER_SUNDER = 7;
     public static final int BOSS_MECHANIC_REJUV_CLEANSE = 8;
     public static final int BOSS_MECHANIC_ANTI_HEAL_DISHEARTEN = 9;
+    public static final int BOSS_MECHANIC_WEEKLY_AFFIX_TRIGGER = 10;
 
     // ---- 首领 / 护卫公开预告意图与状态 ----
 
@@ -111,6 +120,10 @@ public final class BattleConstants {
 
     /** 正式论剑排位未显式配 round_limit 时的默认逻辑回合上限。 */
     public static final int RANKED_DEFAULT_MAX_ROUNDS = 20;
+    /** 帮会全天帮战 V2 默认逻辑回合上限与第 12 回合「决胜煞气」标尺（镜像 turn_battle_constants.h）。 */
+    public static final int GUILD_WAR_DEFAULT_MAX_ROUNDS = 20;
+    public static final int GUILD_WAR_ESCALATION_START_ROUND = 12;
+    public static final long GUILD_WAR_ESCALATION_STEP_PCT = 15L;
     /** 物法易势 5V5 默认逻辑回合上限与强势增伤分数（×115/100）。 */
     public static final int POLARITY_DEFAULT_MAX_ROUNDS = 16;
     public static final long POLARITY_DAMAGE_NUM = 115L;

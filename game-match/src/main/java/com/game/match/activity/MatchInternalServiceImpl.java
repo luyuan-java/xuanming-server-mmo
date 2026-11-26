@@ -8,6 +8,8 @@ import com.game.match.MatchProperties;
 import com.game.match.dispatch.MatchWorkers;
 import com.game.proto.match.StartActivityBattleRequest;
 import com.game.proto.match.StartActivityBattleResponse;
+import com.game.proto.match.StartGuildWarBattleRequest;
+import com.game.proto.match.StartGuildWarBattleResponse;
 import com.game.proto.match.CancelActivityBattleRequest;
 import com.game.proto.match.CancelActivityBattleResponse;
 import com.game.discovery.serviceauth.ServiceCallSignatures;
@@ -235,6 +237,34 @@ public class MatchInternalServiceImpl implements MatchInternalService {
         } catch (RejectedExecutionException e) {
             log.warn("[match] 活动开战：工作队列已满，回 INTERNAL");
             reply.complete(service.unavailable(request));
+        }
+        return reply;
+    }
+
+    @Override
+    public CompletableFuture<StartGuildWarBattleResponse> startGuildWarBattle(StartGuildWarBattleRequest request) {
+        Deadline d = MatchRpcAttachments.deadlineFromCall(budgetMs);
+        CompletableFuture<StartGuildWarBattleResponse> reply = new CompletableFuture<>();
+        try {
+            workers.execute(() -> {
+                try {
+                    if (d.expired()) {
+                        log.warn("[match] 帮战直打请求在工作队列里等过了预算，回 INTERNAL");
+                        reply.complete(service.unavailableGuildWar(request));
+                    } else {
+                        reply.complete(service.startGuildWar(request, d));
+                    }
+                } catch (RuntimeException e) {
+                    log.error("[match] 帮战直打处理失败，回 INTERNAL", e);
+                    reply.complete(service.unavailableGuildWar(request));
+                } catch (Error e) {
+                    reply.completeExceptionally(e);
+                    throw e;
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            log.warn("[match] 帮战直打：工作队列已满，回 INTERNAL");
+            reply.complete(service.unavailableGuildWar(request));
         }
         return reply;
     }

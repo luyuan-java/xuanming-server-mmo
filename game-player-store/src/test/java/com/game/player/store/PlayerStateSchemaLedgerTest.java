@@ -11,9 +11,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** 正常 Maven test/verify 的持久字段门禁；不写台账，不在缺少原件时自动重新建立基线。 */
 class PlayerStateSchemaLedgerTest {
-    // 第一至七代登记技能、宠物回执、宝宝条目与培养阶、角色形象试用/永久衣柜、宝宝技能重数和装备固定词条。第八代追加 ItemGainBlockState 与 ActivityVitalityState；第九代追加近期战斗结果、客户端请求幂等账本与神秘商人限购；第十代追加单槽赛季印与赛季追赶幂等回执；第十一代追加物品绑定、起步首宠、装备品相/保底/宗师署名、两阶段材料总账、近期战果试炼/材料回显、五行试炼志与手艺制书；第十二代追加瑞兽迎春活动进度/领奖/开局意图、近期战果瑞兽进度增量与账号级阶段一可交易配额确认水位；第十三代追加宝宝条目 3 套预设方案与灵阶突破幂等回执、人物战法构筑 3 套装配方案与乐观锁回执；第十四代追加官方灵石百宝阁个人与共享组限购记录。
+    // 第一至七代登记技能、宠物回执、宝宝条目与培养阶、角色形象试用/永久衣柜、宝宝技能重数和装备固定词条。第八代追加 ItemGainBlockState 与 ActivityVitalityState；第九代追加近期战斗结果、客户端请求幂等账本与神秘商人限购；第十代追加单槽赛季印与赛季追赶幂等回执；第十一代追加物品绑定、起步首宠、装备品相/保底/宗师署名、两阶段材料总账、近期战果试炼/材料回显、五行试炼志与手艺制书；第十二代追加瑞兽迎春活动进度/领奖/开局意图、近期战果瑞兽进度增量与账号级阶段一可交易配额确认水位；第十三代追加宝宝条目 3 套预设方案与灵阶突破幂等回执、人物战法构筑 3 套装配方案与乐观锁回执；第十四代追加官方灵石百宝阁个人与共享组限购记录；第十五代追加近期战果赛季印结算增量与首次解锁永久零数值纪念称谓标记。
     private static final String GENESIS_SHA256 = "3cd2f18d61634eaabe7d5805df027877451816242bb41ff5aecb704177d7877d";
-    private static final String HEAD_SHA256 = "566fdfe96a1b8c94dcfea4f366e88c9aa764b2cd0b714debfdcf076616d1329e";
+    private static final String HEAD_SHA256 = "20541532507d1c8593d6323cee6008ddb7d3aeecb490fe5da01d446a235fa1b1";
 
     // 仅登记已经存在的领域 restore→修改→toState 未知字段往返证据；protobuf 自己的 parse/serialize 不能替代它。
     private static final Set<String> ALLOW_ADDITIONS = Set.of(
@@ -38,7 +38,7 @@ class PlayerStateSchemaLedgerTest {
         var current = PersistentSchemaSnapshot.capture(PlayerState.getDescriptor());
         int generation = verifyRegisteredSchema(Path.of("src/test/resources/persistent-schema"),
                 GENESIS_SHA256, HEAD_SHA256, current, ALLOW_ADDITIONS);
-        assertThat(generation).isEqualTo(14);
+        assertThat(generation).isEqualTo(15);
     }
 
     /** 已合法退役为不可达的类型仍须保留历史解冻政策，不能只用当前闭包判定策略名有效。 */

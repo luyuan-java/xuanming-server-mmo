@@ -101,6 +101,64 @@ class TournamentLeylineBattleEngineTest {
         assertThat(woodHeal).isGreaterThan(baseHeal);
     }
 
+    @Test
+    void V3结算累计伤害治疗硬控统计与季军队徽透传() {
+        var data = standard();
+        data.addSkill(19002)
+                .setName("青木回春V3")
+                .setClassId(7)
+                .setTargetTeam(3)
+                .setMaxTargets(1)
+                .setDamageType(1)
+                .setHealPerLevel(120)
+                .setUnlockLevel(1)
+                .setMaxRank(10);
+        data.addBuff(19210)
+                .setBuffType(BattleConstants.BUFF_TYPE_SILENCE)
+                .setDuration(12.0);
+        data.addSkill(19003)
+                .addTargetingMode(1)
+                .addSkillType(BattleConstants.SKILL_TYPE_BIT_GENERAL)
+                .addEffect(19210);
+
+        var req = request(BattleConstants.MATCH_MODE_SEASON_TOURNAMENT, 777);
+        req.setTournamentContext(TournamentBattleContext.newBuilder()
+                .setSeasonId(3).setMatchId(9901).setBestOf(1).setGameIndex(1)
+                .setSquadAId(101).setSquadAName("青云剑派").setSquadAEmblemId(2)
+                .setSquadBId(102).setSquadBName("天墉问道").setSquadBEmblemId(6)
+                .setIsThirdPlace(true));
+        var a = addPlayer(req, PLAYER_A, 0, 4_000, 10_000, 1000, 0, 0, 200)
+                .setClassId(7).setMaxMana(5000).setPhysicalAttack(1000).setMagicAttack(500)
+                .addSkillTableIds(19002).putSkillRanks(19002, 1)
+                .addSkillTableIds(19003);
+        a.getBaseAttributesBuilder().setMana(5000);
+        addPlayer(req, PLAYER_B, 1, 10_000, 10_000, 100, 0, 0, 50);
+
+        var eng = TestBattles.start(req, data);
+        // 第 1 回合普攻伤害
+        eng.submitAction(PLAYER_A, action(BATTLE_ACTION_ATTACK, PLAYER_B));
+        eng.submitAction(PLAYER_B, action(BATTLE_ACTION_DEFEND));
+        eng.resolveCurrentRound();
+        // 第 2 回合硬控沉默
+        eng.submitAction(PLAYER_A, action(BATTLE_ACTION_SKILL, PLAYER_B, 19003));
+        eng.submitAction(PLAYER_B, action(BATTLE_ACTION_DEFEND));
+        eng.resolveCurrentRound();
+        // 第 3 回合治疗
+        eng.submitAction(PLAYER_A, action(BATTLE_ACTION_SKILL, PLAYER_A, 19002));
+        eng.submitAction(PLAYER_B, action(BATTLE_ACTION_DEFEND));
+        eng.resolveCurrentRound();
+
+        var stA = eng.buildSettlement(PLAYER_A);
+        assertThat(stA.getTotalDamageDealt()).isPositive();
+        assertThat(stA.getTotalHealingDone()).isPositive();
+        assertThat(stA.getTotalControlsLanded()).isEqualTo(1);
+
+        var snap = eng.buildStateSnapshot();
+        assertThat(snap.getTournamentContext().getSquadAEmblemId()).isEqualTo(2);
+        assertThat(snap.getTournamentContext().getSquadBEmblemId()).isEqualTo(6);
+        assertThat(snap.getTournamentContext().getIsThirdPlace()).isTrue();
+    }
+
     private static long runOneHeal(MemoryBattleData data, TournamentLeylineElement leyline) {
         var req = request(3, 55);
         if (leyline != TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED) {

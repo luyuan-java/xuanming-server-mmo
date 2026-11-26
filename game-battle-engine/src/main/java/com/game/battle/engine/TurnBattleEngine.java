@@ -7,6 +7,7 @@ import com.game.proto.BaseAttributesComp;
 import com.game.proto.BattleAction;
 import com.game.proto.BattleActorState;
 import com.game.proto.BattleBuffEntry;
+import com.game.proto.BattleEventItem;
 import com.game.proto.BattleItemEntry;
 import com.game.proto.BattleMonsterDefeat;
 import com.game.proto.BattleParticipationFact;
@@ -29,6 +30,7 @@ import com.game.proto.eBattleActorType;
 import com.game.proto.eBattleEventType;
 import com.game.proto.eBattleHitKind;
 import com.game.proto.eBattleOutcome;
+import com.game.table.BuffTable;
 import com.game.table.DungeonTable;
 import com.game.table.MatchErrorTip;
 import com.game.table.MonsterTable;
@@ -93,6 +95,8 @@ public final class TurnBattleEngine {
     private final TreeSet<Long> manualActionPlayers = new TreeSet<>(Long::compareUnsigned);
     private final TreeSet<Long> explicitAutoPlayers = new TreeSet<>(Long::compareUnsigned);
     private final TreeSet<Long> hadOperableTurnPlayers = new TreeSet<>(Long::compareUnsigned);
+    /** 帮战守旗阵 AI 托管玩家集合：强制自动出手、拒收手动输入、不建个人结算。 */
+    private final TreeSet<Long> aiControlledPlayers = new TreeSet<>(Long::compareUnsigned);
     /** PVP 延迟投降状态与连续未手动挂机计数（确定性、零挂钟）。 */
     private int surrenderedTeam = -1;
     private final BattleSurrenderVoteState.Builder[] teamSurrenderVotes = new BattleSurrenderVoteState.Builder[] {
@@ -100,6 +104,10 @@ public final class TurnBattleEngine {
             BattleSurrenderVoteState.newBuilder()
     };
     private final NavigableMap<Long, Integer> consecutiveIdleRoundsByPlayer = new TreeMap<>(Long::compareUnsigned);
+    /** 群仙问道赛 V3 MVP 评定累计统计（本人及本人出战宝宝，每回合末从权威事件流确定性汇总）。 */
+    private final NavigableMap<Long, Long> totalDamageDealtByPlayer = new TreeMap<>(Long::compareUnsigned);
+    private final NavigableMap<Long, Long> totalHealingDoneByPlayer = new TreeMap<>(Long::compareUnsigned);
+    private final NavigableMap<Long, Integer> totalControlsLandedByPlayer = new TreeMap<>(Long::compareUnsigned);
     /** 论剑 V3 战前 15 秒明牌变阵状态（纯确定性，零墙钟）。 */
     private boolean prepActive;
     private long nextPetActorIndex;
@@ -214,6 +222,19 @@ public final class TurnBattleEngine {
                 engine.maxRounds = BattleConstants.POLARITY_DEFAULT_MAX_ROUNDS;
             }
         }
+        // 帮会全天帮战 V2 门禁：MATCH_MODE_GUILD_WAR_PVP(9) / SIEGE(10) 与 BATTLE_ACTIVITY_KIND_GUILD_WAR 必须互为充要条件。
+        boolean isGuildWarMode = BattleConstants.isGuildWarMatchMode(request.getMatchMode());
+        boolean hasGuildWarActivity = request.hasActivityContext()
+                && request.getActivityContext().getKind() == eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR;
+        if (isGuildWarMode || hasGuildWarActivity) {
+            if (!isGuildWarMode || !hasGuildWarActivity || !request.getActivityContext().hasGuildWar()) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "帮会全天帮战 V2 缺少合法上下文或匹配模式不匹配: battle_id=" + Long.toUnsignedString(request.getBattleId()));
+            }
+            if (!hasExplicitRoundLimit) {
+                engine.maxRounds = Math.min(engine.maxRounds, BattleConstants.GUILD_WAR_DEFAULT_MAX_ROUNDS);
+            }
+        }
         // 瑞兽迎春硬性准入门禁：boss_trial_kind=7 必须且仅能携带合法冻结的 FESTIVAL_BEAST 上下文、单人携单只锁定出战宝宝。
         boolean hasFestivalActivity = request.hasActivityContext()
                 && request.getActivityContext().getKind() == eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST;
@@ -248,8 +269,18 @@ public final class TurnBattleEngine {
             engine.ctx.encounter.configureFestivalBeast(fb);
         }
 
+        if (!BossTrialWeeklyAffixRules.isValidOverride(request.getBossWeeklyAffixId())) {
+            return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                    "首领试炼周常五行词缀覆盖值非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                            + " affix=" + Integer.toUnsignedString(request.getBossWeeklyAffixId()));
+        }
+
         engine.ctx.setMaxRounds(engine.maxRounds);
         engine.ctx.encounter.configure(bossTrialKind, battleDifficulty);
+        int weeklyAffixId = BossTrialWeeklyAffixRules.resolveForBattle(
+                BattleConstants.isBossTrialKind(bossTrialKind), false,
+                request.getCreatedAtMs(), request.getBossWeeklyAffixId());
+        engine.ctx.encounter.configureWeeklyAffix(weeklyAffixId);
         if (request.hasTrialContext()) {
             engine.ctx.encounter.configureTrial(
                     request.getTrialContext().getGuardMonsterTableId(),
@@ -312,8 +343,46 @@ public final class TurnBattleEngine {
                 for (BattleUnit unit : engine.ctx.units()) {
                     if (unit.isActive() && Long.compareUnsigned(unit.maxHealth(), 0L) > 0) {
                         long shield = Math.max(1L, Long.divideUnsigned(unit.maxHealth() * 8L, 100L));
-                        unit.setTournamentEarthShield(shield);
+                        unit.addTournamentEarthShield(shield);
                     }
+                }
+            }
+        }
+        // 赛季全员对称周环境词缀：未启用锦标赛五行灵脉、非瑞兽迎春/五行幻境爬塔且全体玩家快照一致携带 1..4 时激活，分歧 fail-closed 退回 0。
+        boolean hasFestival = request.hasActivityContext()
+                && request.getActivityContext().getKind() == eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST;
+        boolean hasTower = request.getPlayersList().stream()
+                .anyMatch(p -> p.hasTowerContext() && p.getTowerContext().getFloor() != 0);
+        if (engine.ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED
+                && !hasFestival && !hasTower && !request.hasCustomDuelRules()
+                && request.getPlayersCount() > 0) {
+            int unanimous = SeasonRules.WEEKLY_AFFIX_NONE;
+            boolean consistent = true;
+            for (BattlePlayerSnapshot snap : request.getPlayersList()) {
+                int candidate = snap.getSeasonWeeklyAffixId();
+                if (!SeasonRules.isValidWeeklyAffixId(candidate)) {
+                    consistent = false;
+                    break;
+                }
+                if (unanimous == SeasonRules.WEEKLY_AFFIX_NONE) {
+                    unanimous = candidate;
+                } else if (unanimous != candidate) {
+                    consistent = false;
+                    break;
+                }
+            }
+            if (consistent && SeasonRules.isValidWeeklyAffixId(unanimous)) {
+                engine.ctx.setActiveSeasonWeeklyAffixId(unanimous);
+            }
+        }
+        // 首领试炼周常金周反向考验：敌方全体开局获得 8% 最大气血金甲护盾。
+        if (weeklyAffixId == BossTrialWeeklyAffixRules.AFFIX_METAL) {
+            for (BattleUnit unit : engine.ctx.units()) {
+                if (unit.isActive() && unit.isMonster() && unit.teamIndex() == 1
+                        && Long.compareUnsigned(unit.maxHealth(), 0L) > 0) {
+                    long shield = Math.max(1L, Long.divideUnsigned(
+                            unit.maxHealth() * BossTrialWeeklyAffixRules.METAL_ENEMY_OPENING_SHIELD_PCT, 100L));
+                    unit.addTournamentEarthShield(shield);
                 }
             }
         }
@@ -405,11 +474,17 @@ public final class TurnBattleEngine {
                         && actor.getSkillRanksOrDefault(skillTableId, 0) == 0) continue;
                 actor.addSkillTableIds(skillTableId);
             }
+            if (snapshot.getAiControlled()) {
+                actor.setIsAuto(true);
+                aiControlledPlayers.add(playerId);
+            }
             ctx.units().add(new BattleUnit(actor));
 
-            ctx.settlements().put(playerId, BattleSettlementData.newBuilder()
-                    .setBattleId(request.getBattleId())
-                    .setPlayerId(playerId));
+            if (!snapshot.getAiControlled()) {
+                ctx.settlements().put(playerId, BattleSettlementData.newBuilder()
+                        .setBattleId(request.getBattleId())
+                        .setPlayerId(playerId));
+            }
         }
         return null;
     }
@@ -1265,8 +1340,8 @@ public final class TurnBattleEngine {
             return ActionChecks.FEATURE_UNAVAILABLE;
         }
         BattleUnit unit = ctx.findActor(actorId);
-        if (unit == null ||
-                !(unit.isPlayer() && unit.actorId() == owner || unit.isPet() && unit.ownerPlayerId() == owner))
+        if (unit == null || aiControlledPlayers.contains(owner)
+                || !(unit.isPlayer() && unit.actorId() == owner || unit.isPet() && unit.ownerPlayerId() == owner))
             return ActionChecks.INVALID_PARAMETER;
         return checks.checkActionPrerequisites(unit,action);
     }
@@ -1289,7 +1364,7 @@ public final class TurnBattleEngine {
             return ActionChecks.FEATURE_UNAVAILABLE;
         }
         BattleUnit actor = ctx.findActor(actorId);
-        if (actor == null || !actor.isPlayer()) {
+        if (actor == null || !actor.isPlayer() || aiControlledPlayers.contains(actorId)) {
             return ActionChecks.INVALID_PARAMETER;
         }
         if (!actor.isActive()) {
@@ -1308,7 +1383,7 @@ public final class TurnBattleEngine {
             return false;
         }
         BattleUnit actor = ctx.findActor(actorId);
-        if (actor != null && actor.isPlayer() && actor.isActive()
+        if (actor != null && actor.isPlayer() && !aiControlledPlayers.contains(actorId) && actor.isActive()
                 && checks.checkActionPrerequisites(actor, action) == ActionChecks.SUCCESS) {
             pendingActions.put(actorId, action);
             manualActionPlayers.add(actorId);
@@ -1330,7 +1405,7 @@ public final class TurnBattleEngine {
             return ActionChecks.FEATURE_UNAVAILABLE;
         }
         BattleUnit actor = ctx.findActor(actorId);
-        if (actor == null || !actor.isPlayer()) {
+        if (actor == null || !actor.isPlayer() || aiControlledPlayers.contains(actorId)) {
             return ActionChecks.INVALID_PARAMETER;
         }
         if (actor.isDead() || actor.fled()) {
@@ -1475,7 +1550,86 @@ public final class TurnBattleEngine {
             ctx.encounter.clearActiveTelegraphs();
         }
         ctx.events().endRound();
+        accumulateRoundMvpMetrics(result);
         return result.setState(buildStateSnapshot()).build();
+    }
+
+    private boolean isHardControlBuff(int buffTableId) {
+        if (buffTableId == 0) {
+            return false;
+        }
+        Optional<BuffTable> opt = ctx.data().buff(buffTableId);
+        if (opt.isEmpty()) {
+            return false;
+        }
+        BuffTable row = opt.get();
+        int bt = row.getBuffType();
+        if (bt == BattleConstants.BUFF_TYPE_STUN
+                || bt == BattleConstants.BUFF_TYPE_SILENCE
+                || bt == BattleConstants.BUFF_TYPE_FREEZE) {
+            return true;
+        }
+        if (row.getBattleOp() == BattleEffect.CONTROL) {
+            int sk = row.getStateKind();
+            return sk >= BattleEffect.SEAL_ACTIVE && sk <= BattleEffect.FREEZE;
+        }
+        return false;
+    }
+
+    private void accumulateRoundMvpMetrics(TurnResultS2C.Builder result) {
+        int count = result.getEventsCount();
+        for (int i = 0; i < count; i++) {
+            BattleEventItem ev = result.getEvents(i);
+            BattleUnit source = ctx.findActor(ev.getSourceId());
+            if (source == null) {
+                continue;
+            }
+            long ownerId = source.isPlayer() ? source.actorId()
+                    : (source.isPet() ? source.ownerPlayerId() : 0L);
+            if (ownerId == 0L) {
+                continue;
+            }
+            BattleUnit target = ctx.findActor(ev.getTargetId());
+            switch (ev.getEventType()) {
+                case BATTLE_EVENT_DAMAGE -> {
+                    if (target == null || target.teamIndex() != source.teamIndex()) {
+                        long dealt = EquipmentCombatRules.addSaturated(ev.getValue(), ev.getAbsorbed());
+                        if (Long.compareUnsigned(dealt, 0L) > 0) {
+                            long prev = totalDamageDealtByPlayer.getOrDefault(ownerId, 0L);
+                            totalDamageDealtByPlayer.put(ownerId, EquipmentCombatRules.addSaturated(prev, dealt));
+                        }
+                    }
+                }
+                case BATTLE_EVENT_HEAL, BATTLE_EVENT_SHIELD -> {
+                    if (Long.compareUnsigned(ev.getValue(), 0L) > 0
+                            && (target == null || target.teamIndex() == source.teamIndex())) {
+                        long prev = totalHealingDoneByPlayer.getOrDefault(ownerId, 0L);
+                        totalHealingDoneByPlayer.put(ownerId, EquipmentCombatRules.addSaturated(prev, ev.getValue()));
+                    }
+                }
+                case BATTLE_EVENT_BUFF_TICK -> {
+                    if (Long.compareUnsigned(ev.getValue(), 0L) > 0 && target != null) {
+                        if (target.teamIndex() != source.teamIndex()) {
+                            long prev = totalDamageDealtByPlayer.getOrDefault(ownerId, 0L);
+                            totalDamageDealtByPlayer.put(ownerId, EquipmentCombatRules.addSaturated(prev, ev.getValue()));
+                        } else {
+                            long prev = totalHealingDoneByPlayer.getOrDefault(ownerId, 0L);
+                            totalHealingDoneByPlayer.put(ownerId, EquipmentCombatRules.addSaturated(prev, ev.getValue()));
+                        }
+                    }
+                }
+                case BATTLE_EVENT_BUFF_ADD -> {
+                    if (ev.getBuffTableId() != 0 && target != null
+                            && target.teamIndex() != source.teamIndex()
+                            && isHardControlBuff(ev.getBuffTableId())) {
+                        totalControlsLandedByPlayer.put(ownerId,
+                                totalControlsLandedByPlayer.getOrDefault(ownerId, 0) + 1);
+                    }
+                }
+                default -> {
+                }
+            }
+        }
     }
 
     /** 只读查询指定怪物当前的 Boss HFSM 阶段（未绑定 AI 时返回空）。 */
@@ -2016,7 +2170,7 @@ public final class TurnBattleEngine {
      * （uint64）；MANA 事件 source = target = 施法者，value = 实耗，mana_delta 为负的实际量，越过 sint64 时饱和显示。
      */
     private void consumeSkillMana(BattleUnit actor, SkillTable row, int skillTableId) {
-        long manaCost = BattleRules.skillManaCost(row);
+        long manaCost = ctx.encounter.adjustWeeklySkillManaCost(actor, row, BattleRules.skillManaCost(row));
         if (manaCost == 0) {
             return;
         }
@@ -2038,7 +2192,17 @@ public final class TurnBattleEngine {
      */
     private void executeDefend(BattleUnit actor) {
         actor.setDefending(true);
-        ctx.events().append(eBattleEventType.BATTLE_EVENT_DEFEND, actor.actorId(), actor.actorId());
+        var ev = ctx.events().append(eBattleEventType.BATTLE_EVENT_DEFEND, actor.actorId(), actor.actorId());
+        int manaRegenBps = SeasonRules.defendBonusManaRegenBps(ctx.activeSeasonWeeklyAffixId());
+        if (manaRegenBps > 0 && Long.compareUnsigned(actor.maxMana(), 0L) > 0
+                && Long.compareUnsigned(actor.mana(), actor.maxMana()) < 0) {
+            long curMana = actor.mana();
+            long missing = actor.maxMana() - curMana;
+            long raw = Long.divideUnsigned(actor.maxMana() * Integer.toUnsignedLong(manaRegenBps), 10000L);
+            long gain = Long.compareUnsigned(missing, Math.max(1L, raw)) < 0 ? missing : Math.max(1L, raw);
+            actor.setMana(curMana + gain);
+            ev.setValue(gain);
+        }
         ctx.configured.equipment.defend(actor);
     }
 
@@ -2152,6 +2316,7 @@ public final class TurnBattleEngine {
             outcome = eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN;
         } else if (Integer.compareUnsigned(ctx.roundIndex(), maxRounds) >= 0) {
             boolean drawOnCap = isRankedBattle()
+                    || BattleConstants.isGuildWarMatchMode(request.getMatchMode())
                     || ctx.encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_POLARITY_5V5
                     || request.getMatchMode() == BattleConstants.MATCH_MODE_POLARITY_5V5;
             outcome = drawOnCap ? eBattleOutcome.BATTLE_OUTCOME_DRAW : eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
@@ -2250,7 +2415,10 @@ public final class TurnBattleEngine {
                 .setMana(actor.mana())
                 .setIsDead(actor.isDead())
                 .setFled(actor.fled())
-                .setSurrendered(surrenderedTeam >= 0 && actor.teamIndex() == surrenderedTeam);
+                .setSurrendered(surrenderedTeam >= 0 && actor.teamIndex() == surrenderedTeam)
+                .setTotalDamageDealt(totalDamageDealtByPlayer.getOrDefault(playerId, 0L))
+                .setTotalHealingDone(totalHealingDoneByPlayer.getOrDefault(playerId, 0L))
+                .setTotalControlsLanded(totalControlsLandedByPlayer.getOrDefault(playerId, 0));
 
         for (BattleUnit other : ctx.units()) {
             if (!other.isPet() || other.ownerPlayerId() != playerId || other.competitiveTemporary()) {
@@ -2326,6 +2494,9 @@ public final class TurnBattleEngine {
         if (request.hasTournamentContext() && request.getTournamentContext().getMatchId() != 0L) {
             state.setTournamentContext(request.getTournamentContext());
         }
+        if (ctx.activeSeasonWeeklyAffixId() != SeasonRules.WEEKLY_AFFIX_NONE) {
+            state.setSeasonWeeklyAffixId(ctx.activeSeasonWeeklyAffixId());
+        }
         for (BattleUnit unit : ctx.units()) {
             var visible = state.addActorsBuilder().mergeFrom(unit.snapshot());
             if (unit.isPlayer()) visible.setSupportEffects(ctx.configured.equipment.summary(unit));
@@ -2370,6 +2541,11 @@ public final class TurnBattleEngine {
     public long tournamentEarthShieldOf(long actorId) {
         BattleUnit unit = ctx.findActor(actorId);
         return unit == null ? 0L : unit.tournamentEarthShield();
+    }
+
+    /** 本局冻结的首领试炼周常五行词缀（0=无/非首领试炼，1金/2木/3水/4火/5土）。 */
+    public int bossWeeklyAffixId() {
+        return ctx.encounter.bossWeeklyAffixId();
     }
 
     // =====================================================================================================

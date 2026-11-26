@@ -240,6 +240,11 @@ message BattleResultEntryState {
   bool festival_newly_eligible = 32;
   uint64 material_available_units_after = 33;
   uint32 material_earnable_remaining_after = 34;
+  uint32 season_seal_points_added = 35;
+  uint32 season_seal_progress_after = 36;
+  uint32 season_seal_max_points = 37;
+  bool season_honor_newly_unlocked = 38;
+  bool surrendered = 39;
 }
 
 message BattleResultCurrencyState {

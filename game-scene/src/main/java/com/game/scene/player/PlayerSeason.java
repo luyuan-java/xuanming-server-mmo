@@ -41,6 +41,10 @@ public final class PlayerSeason {
         return seasonId == 0 ? null : records.get(seasonId);
     }
 
+    public java.util.List<Integer> seasonIds() {
+        return java.util.List.copyOf(records.keySet());
+    }
+
     public void putRecord(PlayerSeasonSealRecordState record) {
         if (record == null || record.getSeasonId() == 0) {
             return;

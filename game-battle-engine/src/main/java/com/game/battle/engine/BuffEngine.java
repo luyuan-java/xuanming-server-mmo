@@ -423,6 +423,12 @@ final class BuffEngine {
                 int layer = entry.getLayer();
                 // std::max(1u, layer)：0 层按 1 层算（uint32）
                 double rawDamage = row.getIntervalEffect(0) * (double) Integer.toUnsignedLong(layer == 0 ? 1 : layer);
+                if (ctx.encounter.bossWeeklyAffixId() == BossTrialWeeklyAffixRules.AFFIX_WATER && actor.teamIndex() == 1) {
+                    BattleUnit source = ctx.findActor(entry.getCasterId());
+                    if (source != null && source.teamIndex() == 0) {
+                        rawDamage = rawDamage * (100.0 + BossTrialWeeklyAffixRules.WATER_CHARGE_OR_PERIODIC_DAMAGE_BONUS_PCT) / 100.0;
+                    }
+                }
                 long dealt = actor.applyDamage(rawDamage);
                 if (dealt != 0) {
                     ctx.events().append(eBattleEventType.BATTLE_EVENT_BUFF_TICK, entry.getCasterId(), actor.actorId())

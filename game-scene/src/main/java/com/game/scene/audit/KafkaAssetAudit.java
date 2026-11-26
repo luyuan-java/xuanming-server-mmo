@@ -95,6 +95,9 @@ public final class KafkaAssetAudit implements AssetAudit {
             case GUILD_DONATE -> TransactionReason.TX_GUILD_DONATE;
             case GUILD_SHOP -> TransactionReason.TX_GUILD_SHOP;
             case GUILD_ACTIVITY_REWARD -> TransactionReason.TX_GUILD_ACTIVITY_REWARD;
+            case GUILD_BOUNTY_ESCROW -> TransactionReason.TX_GUILD_BOUNTY_ESCROW;
+            case GUILD_WAR_REWARD -> TransactionReason.TX_GUILD_WAR_REWARD;
+            case GUILD_BOUNTY_PAYOUT -> TransactionReason.TX_GUILD_BOUNTY_PAYOUT;
             case AUCTION_SELL -> TransactionReason.TX_AUCTION_SELL;
             case AUCTION_BUY -> TransactionReason.TX_AUCTION_BUY;
             case TRADE -> TransactionReason.TX_TRADE;

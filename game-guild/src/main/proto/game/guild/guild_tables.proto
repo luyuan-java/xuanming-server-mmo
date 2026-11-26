@@ -125,6 +125,9 @@ enum GuildAssetOpKind {
   GUILD_ASSET_OP_KIND_DONATE = 1;           // 捐献：GUILD_DEBIT 流扣货币
   GUILD_ASSET_OP_KIND_SHOP = 2;             // 商店：GUILD_CREDIT 流发物品
   GUILD_ASSET_OP_KIND_ACTIVITY_REWARD = 3;  // 活动发奖（4.6）：GUILD_CREDIT 流
+  GUILD_ASSET_OP_KIND_WAR_REWARD = 5;       // 帮战奖励（银两/宝箱/分红）：GUILD_CREDIT 流
+  GUILD_ASSET_OP_KIND_BOUNTY_ESCROW = 6;    // 发布追杀令银两托管扣款：GUILD_DEBIT 流
+  GUILD_ASSET_OP_KIND_BOUNTY_PAYOUT = 7;    // 追杀/反杀赏金与过期退本金：GUILD_CREDIT 流
 }
 
 // 计数种类（guild_db.proto:117-122）。
@@ -133,6 +136,8 @@ enum GuildDailyCounterKind {
   GUILD_DAILY_COUNTER_KIND_DONATE = 1;
   GUILD_DAILY_COUNTER_KIND_SHOP = 2;
   GUILD_DAILY_COUNTER_KIND_ACTIVITY = 3;    // 4.6
+  GUILD_DAILY_COUNTER_KIND_WAR_BOUNTY_PUBLIC = 4;  // 帮会每日公费追杀令计数
+  GUILD_DAILY_COUNTER_KIND_WAR_BOUNTY_PAYOUT = 5;  // 角色每日追杀/反杀领赏次数
 }
 
 // Q：每个 (玩家, 流) 的序号行（锁序位置 5，guild_db.proto:124-136）。无二级索引；行建出后永不删除（economy_repo.go:145、:772）。

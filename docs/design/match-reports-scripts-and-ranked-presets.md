@@ -1,6 +1,6 @@
 # 战报回放（379/380）、战斗剧本与运营审核（387–392）及论剑排位预设档案（448–452）设计文档
 
-对应权威参考：`xuanming-server-mmo-cpp` `go/match/internal/{authority,logic,battlescript}`、`docs/design/ranked-play-v1-implementation.md`，以及已同步契约 `proto/match/{match_service,match_internal}.proto`、`proto/team/team.proto`、`RankedRule` / `RankedPreset` 表。
+对应权威参考：`xuanming-server-mmo-cpp` `go/match/internal/{authority,logic,battlescript}`、`docs/planning/ranked-play-v1-implementation.md`，以及已同步契约 `proto/match/{match_service,match_internal}.proto`、`proto/team/team.proto`、`RankedRule` / `RankedPreset` 表。
 
 ## 1. 需求分析
 

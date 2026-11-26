@@ -363,7 +363,7 @@ mmorpg has two combat stacks. (1) Realtime combat in the scene (cpp/libs/service
 - hazards: It sits outside the assigned combat directories and may also be inventoried under the player/attribute area, so de-duplicate. summon_cooldown_seconds and kPetSummonCooldown appear unused in the baseline.
 
 ### battle-art-gen — 回合制战斗美术程序化生成工具
-- mmorpg: tools/battle_art_gen/*.go; docs/design/battle-art-prompts.md; docs/design/turn-battle-presentation.md
+- mmorpg: tools/battle_art_gen/*.go; docs/planning/ui-handoff/battle-art-prompts.md; docs/planning/turn-battle-presentation.md
 - client messages: none
 - tables: Buff
 - depends on: none

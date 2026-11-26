@@ -48,6 +48,12 @@ public interface AssetAudit {
         GUILD_SHOP,
         /** 帮会活动发奖。 */
         GUILD_ACTIVITY_REWARD,
+        /** 帮会全天帮战 V2：发布江湖追杀令托管银两扣款。 */
+        GUILD_BOUNTY_ESCROW,
+        /** 帮会全天帮战 V2：帮战奖励 / 战功箱 / 灵脉分红发放。 */
+        GUILD_WAR_REWARD,
+        /** 帮会全天帮战 V2：追杀赏金 / 反杀赏金 / 过期退还发放。 */
+        GUILD_BOUNTY_PAYOUT,
         /** 聚宝斋卖出扣款（交易二期）。 */
         AUCTION_SELL,
         /** 聚宝斋买到发放（交易二期）。 */

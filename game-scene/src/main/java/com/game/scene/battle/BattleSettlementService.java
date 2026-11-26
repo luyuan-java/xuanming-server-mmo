@@ -139,7 +139,8 @@ public final class BattleSettlementService {
         if(player.battle().applying())throw new IllegalStateException("战斗Inbox结算重入");
         player.battle().setApplying(true);
         try{
-            if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isFestivalBeast(settlement)) {
+            boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(settlement.getMatchMode());
+        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isGuildWar || isFestivalBeast(settlement)) {
                 // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)与瑞兽迎春零资产侵入：
                 // 不动气血/法力/宠物/背包/金币/经验/任务，仅原子累计材料自选额度、赛季进度、试炼志、瑞兽进度与近期战果。
                 markNormalBossTrialIfCleared(player, settlement);
@@ -275,7 +276,8 @@ public final class BattleSettlementService {
                     Long.toUnsignedString(battleId), ledger.invalidReason());
             return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
         }
-        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isFestivalBeast(settlement)) {
+        boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(settlement.getMatchMode());
+        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isGuildWar || isFestivalBeast(settlement)) {
             // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)与瑞兽迎春零资产侵入：
             // 跳过宠物/金币/气血法力/消耗/掉落/击杀，只记材料自选额度、赛季进度、试炼志、瑞兽进度与近期战果，返回前请求落盘。
             try {
@@ -464,7 +466,11 @@ public final class BattleSettlementService {
                 .setTrialNewSoloBest(trialDelta.newSoloBest())
                 .setTrialNewCoopBest(trialDelta.newCoopBest())
                 .setMaterialAvailableUnitsAfter(materialAfter.getAvailableUnits())
-                .setMaterialEarnableRemainingAfter(materialAfter.getEarnableRemainingUnits());
+                .setMaterialEarnableRemainingAfter(materialAfter.getEarnableRemainingUnits())
+                .setSeasonSealPointsAdded(seasonCredit.pointsAdded())
+                .setSeasonSealProgressAfter(seasonCredit.progressAfter())
+                .setSeasonSealMaxPoints(seasonCredit.maxPoints())
+                .setSeasonHonorNewlyUnlocked(seasonCredit.honorNewlyUnlocked());
         if (festivalDelta.active()) {
             entry.setFestivalActivityInstanceId(festivalDelta.activityInstanceId())
                     .setFestivalRewardIdentity(festivalDelta.rewardIdentity())

@@ -129,4 +129,12 @@ enum match_error {
 
   kMatchTournamentSpectateCheerInvalid = 16059;
 
+  kMatchTournamentEmblemInvalid = 16060;
+
+  kMatchTournamentPredictionClosed = 16061;
+
+  kMatchTournamentPredictionTargetInvalid = 16062;
+
+  kMatchTournamentWarmupUnavailable = 16063;
+
 };

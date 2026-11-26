@@ -22,6 +22,84 @@ public final class SeasonRules {
     public record CatchupPlan(int pointsToBuy, long totalPrice) {
     }
 
+    /** 赛季全员对称周环境词缀（零养成门槛、敌我对称、每周自动轮换；0 表示无词缀）。 */
+    public static final int WEEKLY_AFFIX_NONE = 0;
+    public static final int WEEKLY_AFFIX_SHIELD_OVERLOAD = 1;
+    public static final int WEEKLY_AFFIX_SPIRIT_RECOVERY = 2;
+    public static final int WEEKLY_AFFIX_OPENING_GUARD = 3;
+    public static final int WEEKLY_AFFIX_SHARP_TEMPO = 4;
+    public static final int WEEKLY_AFFIX_COUNT = 4;
+
+    public static final int WEEKLY_AFFIX_SHIELD_BONUS_PCT = 15;
+    public static final int WEEKLY_AFFIX_DEFEND_MANA_BPS = 300;
+    public static final int WEEKLY_AFFIX_OPENING_GUARD_REDUCE_PCT = 8;
+    public static final int WEEKLY_AFFIX_OPENING_GUARD_ROUNDS = 2;
+    public static final int WEEKLY_AFFIX_SHARP_TEMPO_BONUS_PCT = 5;
+
+    private static final long MS_PER_WEEK = 7L * 24L * 3600L * 1000L;
+    private static final long MONDAY_05_CST_OFFSET_MS = (3L * 24L - 3L) * 3600L * 1000L;
+
+    public static boolean isValidWeeklyAffixId(int affixId) {
+        return Integer.compareUnsigned(affixId, 1) >= 0
+                && Integer.compareUnsigned(affixId, WEEKLY_AFFIX_COUNT) <= 0;
+    }
+
+    /** 计算当前权威赛季周次（1 起）：有明确开季时间时按 7 天递增；首测常开（startsAtMs == 0）对齐 UTC+8 周一 05:00。 */
+    public static int computeSeasonWeekIndex(long startsAtMs, long nowMs) {
+        if (startsAtMs != 0L) {
+            if (Long.compareUnsigned(nowMs, startsAtMs) <= 0) {
+                return 1;
+            }
+            return (int) Long.divideUnsigned(nowMs - startsAtMs, MS_PER_WEEK) + 1;
+        }
+        return (int) Long.divideUnsigned(nowMs + MONDAY_05_CST_OFFSET_MS, MS_PER_WEEK) + 1;
+    }
+
+    public static int weeklyAffixForWeek(int seasonId, int weekIndex) {
+        if (seasonId == 0 || weekIndex == 0) {
+            return WEEKLY_AFFIX_NONE;
+        }
+        long sum = Integer.toUnsignedLong(seasonId - 1) + Integer.toUnsignedLong(weekIndex - 1);
+        return (int) Long.remainderUnsigned(sum, WEEKLY_AFFIX_COUNT) + 1;
+    }
+
+    public static int weeklyAffixAt(int seasonId, long startsAtMs, long nowMs) {
+        if (seasonId == 0) {
+            return WEEKLY_AFFIX_NONE;
+        }
+        return weeklyAffixForWeek(seasonId, computeSeasonWeekIndex(startsAtMs, nowMs));
+    }
+
+    public static boolean isSealEffectRecommendedForAffix(int affixId, int effectId) {
+        return switch (affixId) {
+            case WEEKLY_AFFIX_SHIELD_OVERLOAD, WEEKLY_AFFIX_SHARP_TEMPO -> effectId == 1 || effectId == 2;
+            case WEEKLY_AFFIX_SPIRIT_RECOVERY, WEEKLY_AFFIX_OPENING_GUARD -> effectId == 6 || effectId == 7;
+            default -> false;
+        };
+    }
+
+    public static int shieldOverloadBonusPct(int affixId) {
+        return affixId == WEEKLY_AFFIX_SHIELD_OVERLOAD ? WEEKLY_AFFIX_SHIELD_BONUS_PCT : 0;
+    }
+
+    public static int defendBonusManaRegenBps(int affixId) {
+        return affixId == WEEKLY_AFFIX_SPIRIT_RECOVERY ? WEEKLY_AFFIX_DEFEND_MANA_BPS : 0;
+    }
+
+    public static int openingGuardDamageReducePct(int affixId, int roundIndex) {
+        return affixId == WEEKLY_AFFIX_OPENING_GUARD
+                && Integer.compareUnsigned(roundIndex, 1) >= 0
+                && Integer.compareUnsigned(roundIndex, WEEKLY_AFFIX_OPENING_GUARD_ROUNDS) <= 0
+                ? WEEKLY_AFFIX_OPENING_GUARD_REDUCE_PCT
+                : 0;
+    }
+
+    public static int sharpTempoUnshieldedDamageBonusPct(int affixId, boolean targetHasShield) {
+        return affixId == WEEKLY_AFFIX_SHARP_TEMPO && !targetHasShield
+                ? WEEKLY_AFFIX_SHARP_TEMPO_BONUS_PCT
+                : 0;
+    }
+
     private SeasonRules() {
     }
 

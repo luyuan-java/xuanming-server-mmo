@@ -310,7 +310,8 @@ final class ActionChecks {
 
     /** 法力：技能耗蓝（uint64）&gt; 当前法力（无符号比较）→ 7004（{@code CheckSkillCost}，{@code engine.cpp:495-503}）。 */
     private int checkSkillCost(BattleUnit actor, SkillTable row) {
-        if (Long.compareUnsigned(BattleRules.skillManaCost(row, actor.maxMana()), actor.mana()) > 0) {
+        long cost = ctx.encounter.adjustWeeklySkillManaCost(actor, row, BattleRules.skillManaCost(row, actor.maxMana()));
+        if (Long.compareUnsigned(cost, actor.mana()) > 0) {
             return SKILL_CANNOT_CAST_IN_STATE;
         }
         return SUCCESS;

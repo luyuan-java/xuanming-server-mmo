@@ -27,6 +27,11 @@ public interface PlayerStatusReader {
      */
     boolean inBattle(long playerId, Deadline d);
 
+    /** 读取玩家当前战斗锁指向的 battle_id（0 = 无锁或不支持）；仅用于抢点并发时返回一键观战对局号。 */
+    default long battleLockId(long playerId, Deadline d) {
+        return 0L;
+    }
+
     /**
      * 在线目录的严格读：玩家此刻在哪个 gate 的哪个会话上；不在游戏里（没有条目）为空。目录只在「在游戏里」时存在，断线的重连租约期间不存在。
      * 条目损坏或与键不符算故障（抛异常），不算不在线。

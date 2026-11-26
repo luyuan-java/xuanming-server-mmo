@@ -13,10 +13,12 @@ import com.game.proto.EquipSeasonSealRequest;
 import com.game.proto.EquipSeasonSealResponse;
 import com.game.proto.EquipmentEffects;
 import com.game.proto.GetSeasonStateResponse;
+import com.game.proto.SeasonHonorView;
 import com.game.proto.SeasonSealEffect;
 import com.game.proto.SeasonSealOption;
 import com.game.proto.SeasonSkillSummary;
 import com.game.proto.SeasonStateSnapshot;
+import com.game.proto.SeasonWeeklyAffixView;
 import com.game.proto.eBattleOutcome;
 import com.game.proto.match.MatchMode;
 import com.game.scene.attribute.AttributeService;
@@ -58,8 +60,10 @@ public final class SeasonService {
     public record CatchupOutcome(CatchupSeasonSealResponse response, boolean changed) {
     }
 
-    public record BattleCreditOutcome(int seasonId, boolean pointsIncreased) {
-        public static final BattleCreditOutcome NONE = new BattleCreditOutcome(0, false);
+    public record BattleCreditOutcome(int seasonId, boolean pointsIncreased,
+                                      int pointsAdded, int progressAfter, int maxPoints,
+                                      boolean honorNewlyUnlocked) {
+        public static final BattleCreditOutcome NONE = new BattleCreditOutcome(0, false, 0, 0, 0, false);
     }
 
     private final SeasonTables tables;
@@ -92,6 +96,14 @@ public final class SeasonService {
     public int activeSeasonId(long nowMs) {
         SeasonRuleTable rule = tables.activeSeason(nowMs);
         return rule == null ? 0 : rule.getId();
+    }
+
+    public int activeWeeklyAffixId(long nowMs) {
+        SeasonRuleTable rule = tables.activeSeason(nowMs);
+        if (rule == null) {
+            return SeasonRules.WEEKLY_AFFIX_NONE;
+        }
+        return SeasonRules.weeklyAffixAt(rule.getId(), rule.getStartsAtMs(), nowMs);
     }
 
     /** 向角色 {@link EquipmentEffects} 注入当季轻属性（气血/防御 ≤ 500 bps）与单槽赛季印机制。 */
@@ -280,7 +292,7 @@ public final class SeasonService {
         }
         int gain = battlePointsFor(rule, settlement);
         if (gain == 0) {
-            return new BattleCreditOutcome(rule.getId(), false);
+            return new BattleCreditOutcome(rule.getId(), false, 0, 0, 0, false);
         }
         PlayerSeasonSealRecordState existing = player.season().record(rule.getId());
         PlayerSeasonSealRecordState.Builder next = existing == null
@@ -291,16 +303,18 @@ public final class SeasonService {
         }
         int before = Math.min(next.getProgressPoints(), rule.getSealMaxPoints());
         if (before >= rule.getSealMaxPoints()) {
-            return new BattleCreditOutcome(rule.getId(), false);
+            return new BattleCreditOutcome(rule.getId(), false, 0, before, rule.getSealMaxPoints(), false);
         }
         int added = Math.min(gain, rule.getSealMaxPoints() - before);
-        next.setProgressPoints(before + added);
+        int after = before + added;
+        boolean newlyUnlocked = before < rule.getSealMaxPoints() && after >= rule.getSealMaxPoints();
+        next.setProgressPoints(after);
         next.setBattlePoints(next.getBattlePoints() + added);
         player.season().putRecord(next.build());
         if (added > 0) {
             attributes.equipmentChanged(player);
         }
-        return new BattleCreditOutcome(rule.getId(), added > 0);
+        return new BattleCreditOutcome(rule.getId(), added > 0, added, after, rule.getSealMaxPoints(), newlyUnlocked);
     }
 
     public static boolean isEligibleBattle(BattleSettlementData settlement) {
@@ -393,8 +407,10 @@ public final class SeasonService {
         SeasonStateSnapshot.Builder out = SeasonStateSnapshot.newBuilder().setServerNowMs(nowMs);
         SeasonRuleTable rule = tables.activeSeason(nowMs);
         if (rule == null) {
+            fillHonors(player, 0, out);
             return out.setAvailable(false).setUnavailableReason("当前暂无进行中的赛季").build();
         }
+        fillHonors(player, rule.getId(), out);
         PlayerSeasonSealRecordState record = player.season().record(rule.getId());
         int equippedId = effectiveSealId(rule, record);
         int progress = record == null ? 0 : Math.min(record.getProgressPoints(), rule.getSealMaxPoints());
@@ -436,7 +452,8 @@ public final class SeasonService {
         } else if (writableErr != OK) {
             out.setActionUnavailableReason("当前角色状态暂时不能操作赛季印，请稍后再试");
         }
-        for (SeasonSealTable seal : tables.validSealsOf(rule.getId())) {
+        List<SeasonSealTable> validSeals = tables.validSealsOf(rule.getId());
+        for (SeasonSealTable seal : validSeals) {
             out.addSeals(SeasonSealOption.newBuilder()
                     .setSealId(seal.getId())
                     .setName(seal.getName())
@@ -451,6 +468,7 @@ public final class SeasonService {
                     .setHealthThresholdBps(seal.getHealthThresholdBps())
                     .setEquipped(seal.getId() == equippedId));
         }
+        fillWeeklyAffix(rule, nowMs, validSeals, out);
         int level = PlayerLevels.effective(player.level());
         for (SkillTable skill : tables.seasonSkillsOf(rule.getId())) {
             int effRank = SeasonRules.effectiveSeasonalSkillRank(level, skill.getUnlockLevel(), skill.getMaxRank());
@@ -473,5 +491,76 @@ public final class SeasonService {
                     .setActionTags(skill.getActionTags()));
         }
         return out.build();
+    }
+
+    private void fillHonors(ScenePlayer player, int activeSeasonId, SeasonStateSnapshot.Builder out) {
+        java.util.TreeSet<Integer> seasonIds = new java.util.TreeSet<>(Integer::compareUnsigned);
+        for (Integer sid : player.season().seasonIds()) {
+            if (sid != null && sid != 0) {
+                seasonIds.add(sid);
+            }
+        }
+        if (activeSeasonId != 0) {
+            seasonIds.add(activeSeasonId);
+        }
+        for (int sid : seasonIds) {
+            SeasonRuleTable rule = tables.ruleById(sid);
+            if (rule == null || rule.getSealMaxPoints() == 0) {
+                continue;
+            }
+            PlayerSeasonSealRecordState rec = player.season().record(sid);
+            int progress = rec == null ? 0 : Math.min(rec.getProgressPoints(), rule.getSealMaxPoints());
+            boolean unlocked = Integer.compareUnsigned(progress, rule.getSealMaxPoints()) >= 0;
+            if (!unlocked && sid != activeSeasonId) {
+                continue;
+            }
+            out.addHonors(SeasonHonorView.newBuilder()
+                    .setSeasonId(sid)
+                    .setSeasonName(rule.getName())
+                    .setHonorTitleName(rule.getHonorTitleName())
+                    .setHonorBadgeIconKey(rule.getHonorBadgeIconKey())
+                    .setProgressPoints(progress)
+                    .setMaxPoints(rule.getSealMaxPoints())
+                    .setUnlocked(unlocked)
+                    .setIsCurrentSeason(sid == activeSeasonId));
+        }
+    }
+
+    private static void fillWeeklyAffix(SeasonRuleTable rule, long nowMs, List<SeasonSealTable> validSeals,
+                                        SeasonStateSnapshot.Builder out) {
+        int weekIndex = SeasonRules.computeSeasonWeekIndex(rule.getStartsAtMs(), nowMs);
+        int affixId = SeasonRules.weeklyAffixForWeek(rule.getId(), weekIndex);
+        if (!SeasonRules.isValidWeeklyAffixId(affixId)) {
+            return;
+        }
+        SeasonWeeklyAffixView.Builder affix = SeasonWeeklyAffixView.newBuilder()
+                .setWeekIndex(weekIndex)
+                .setAffixId(affixId);
+        switch (affixId) {
+            case SeasonRules.WEEKLY_AFFIX_SHIELD_OVERLOAD -> affix
+                    .setName("护盾过载周")
+                    .setDescription("全员对称：本季常规对局中双方技能施加的护盾量额外 +15%。")
+                    .setStrategyTip("推荐搭配破盾赛季印与破甲/护盾技能抢占节奏。");
+            case SeasonRules.WEEKLY_AFFIX_SPIRIT_RECOVERY -> affix
+                    .setName("灵息充盈周")
+                    .setDescription("全员对称：本季常规对局中双方执行普通防御额外回复 3% 最大法力。")
+                    .setStrategyTip("推荐搭配聚息援印或固阵守印打稳守蓄蓝反击。");
+            case SeasonRules.WEEKLY_AFFIX_OPENING_GUARD -> affix
+                    .setName("先机守势周")
+                    .setDescription("全员对称：本季常规对局前 2 回合双方受到的直伤降低 8%。")
+                    .setStrategyTip("前两回合爆发更克制，推荐蓄势增益或固阵守印后发制人。");
+            case SeasonRules.WEEKLY_AFFIX_SHARP_TEMPO -> affix
+                    .setName("锋芒竞速周")
+                    .setDescription("全员对称：本季常规对局中攻击无护盾目标的直伤提升 5%。")
+                    .setStrategyTip("先破盾再集火收益更高，推荐破阵锐印/玄印联动群攻技。");
+            default -> {
+            }
+        }
+        for (SeasonSealTable seal : validSeals) {
+            if (SeasonRules.isSealEffectRecommendedForAffix(affixId, seal.getEffectId())) {
+                affix.addRecommendedSealIds(seal.getId());
+            }
+        }
+        out.setWeeklyAffix(affix);
     }
 }

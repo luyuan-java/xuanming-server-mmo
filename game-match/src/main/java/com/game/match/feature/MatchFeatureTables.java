@@ -15,6 +15,7 @@ import com.game.match.feature.pb.MatchTournamentInviteRow;
 import com.game.match.feature.pb.MatchTournamentMatchGameRow;
 import com.game.match.feature.pb.MatchTournamentMatchRow;
 import com.game.match.feature.pb.MatchTournamentMemberRow;
+import com.game.match.feature.pb.MatchTournamentPredictionRow;
 import com.game.match.feature.pb.MatchTournamentRewardRow;
 import com.game.match.feature.pb.MatchTournamentSaluteRow;
 import com.game.match.feature.pb.MatchTournamentSeasonRow;
@@ -49,6 +50,7 @@ public final class MatchFeatureTables {
     public static final String TOURNAMENT_CHEER = "match_tournament_cheer";
     public static final String TOURNAMENT_REWARD = "match_tournament_reward";
     public static final String TOURNAMENT_SALUTE = "match_tournament_salute";
+    public static final String TOURNAMENT_PREDICTION = "match_tournament_prediction";
 
     public static final List<Message> PROTOTYPES = List.of(
             MatchBattleReportRow.getDefaultInstance(),
@@ -69,7 +71,8 @@ public final class MatchFeatureTables {
             MatchTournamentMatchGameRow.getDefaultInstance(),
             MatchTournamentCheerRow.getDefaultInstance(),
             MatchTournamentRewardRow.getDefaultInstance(),
-            MatchTournamentSaluteRow.getDefaultInstance());
+            MatchTournamentSaluteRow.getDefaultInstance(),
+            MatchTournamentPredictionRow.getDefaultInstance());
 
     @FunctionalInterface
     public interface SchemaSync {

@@ -55,7 +55,11 @@ public interface MemberPrecheck {
      *                 （整队把读锁出错映射成 4025[这名成员]，活动映射成 INTERNAL、offender 置 0）
      * @param zones    {@link Reason#OK} 时：每名成员位置记录里的 zone（按名单顺序）；否则为空表
      */
-    record Result(Reason reason, long offender, Map<Long, Integer> zones) {
+    record Result(Reason reason, long offender, Map<Long, Integer> zones, long offenderBattleId) {
+
+        public Result(Reason reason, long offender, Map<Long, Integer> zones) {
+            this(reason, offender, zones, 0L);
+        }
 
         public Result {
             Objects.requireNonNull(reason, "reason");
@@ -69,14 +73,18 @@ public interface MemberPrecheck {
         }
 
         public static Result ok(Map<Long, Integer> zones) {
-            return new Result(Reason.OK, 0, zones);
+            return new Result(Reason.OK, 0, zones, 0L);
         }
 
         public static Result failed(Reason reason, long offender) {
+            return failed(reason, offender, 0L);
+        }
+
+        public static Result failed(Reason reason, long offender, long offenderBattleId) {
             if (reason == Reason.OK) {
                 throw new IllegalArgumentException("failed 不能是 OK");
             }
-            return new Result(reason, offender, Map.of());
+            return new Result(reason, offender, Map.of(), offenderBattleId);
         }
 
         public boolean passed() {

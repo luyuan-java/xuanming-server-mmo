@@ -42,7 +42,28 @@ public final class GuildActivityRuntime implements SmartLifecycle {
     private final GuildActivityService.Effects effects;
     private final GuildTrialCancellation cancellation;
     private volatile boolean running;
+    private volatile java.util.function.Consumer<BattleResultEvent> guildWarSettler;
     private volatile Consumer<String, byte[]> consumer;
+
+    public void setGuildWarSettler(java.util.function.Consumer<BattleResultEvent> settler) {
+        this.guildWarSettler = settler;
+    }
+
+    /** 经与同道历练共用的 MatchInternalService 发起帮战 V2 零匹配池直打。 */
+    public com.game.proto.match.StartGuildWarBattleResponse startGuildWarBattle(
+            com.game.proto.match.StartGuildWarBattleRequest request, Deadline d) {
+        if (match == null) {
+            return null;
+        }
+        long budgetMs = Math.max(500L, Math.min(3000L, d == null ? 3000L : d.remainingMillis()));
+        try {
+            return MatchRpcAttachments.callWithBudget(budgetMs, budgetMs, () -> match.startGuildWarBattle(request))
+                    .get(budgetMs + 200L, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            LOG.warn("帮战直打调用 MatchInternal 失败 failure={}", e.getClass().getSimpleName());
+            return null;
+        }
+    }
     private volatile GuildActivityResults resultLoop;
     private ScheduledExecutorService timer;
     private Thread resultThread;
@@ -200,6 +221,14 @@ public final class GuildActivityRuntime implements SmartLifecycle {
         }
     }
     public void settle(BattleResultEvent event) throws Exception {
+        if (event.getActivityContext().getKindValue() == com.game.proto.eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR_VALUE) {
+            var settler = this.guildWarSettler;
+            if (settler != null) {
+                settler.accept(event);
+                count("result", true);
+            }
+            return;
+        }
         if (event.getActivityContext().getKindValue() != 1)
             return;
         boolean poisoned = false;

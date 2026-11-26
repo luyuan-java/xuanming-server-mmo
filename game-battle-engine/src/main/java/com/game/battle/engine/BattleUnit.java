@@ -216,6 +216,14 @@ final class BattleUnit {
         this.tournamentEarthShield = Long.compareUnsigned(shield, 0L) > 0 ? shield : 0L;
     }
 
+    long addTournamentEarthShield(long gain) {
+        if (gain == 0L) {
+            return tournamentEarthShield;
+        }
+        this.tournamentEarthShield = EquipmentCombatRules.addSaturated(this.tournamentEarthShield, gain);
+        return this.tournamentEarthShield;
+    }
+
     long absorbTournamentEarthShield(long damage) {
         if (damage == 0L || tournamentEarthShield == 0L) {
             return 0L;

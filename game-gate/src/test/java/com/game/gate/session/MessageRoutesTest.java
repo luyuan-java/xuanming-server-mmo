@@ -266,14 +266,23 @@ class MessageRoutesTest {
                 "GetTournamentOverview", "CreateTournamentSquad", "InviteTournamentMember", "RespondTournamentInvite",
                 "LeaveTournamentSquad", "UpdateTournamentLineup", "RegisterTournamentSquad", "ListTournamentStandings",
                 "StartTournamentMatch", "CheerTournamentSquad", "ClaimTournamentReward",
-                "SaluteTournamentChampion", "SendTournamentSpectateCheer", "GetTournamentSpectateCheer");
+                "SaluteTournamentChampion", "SendTournamentSpectateCheer", "GetTournamentSpectateCheer",
+                "UpdateTournamentSquadEmblem", "StartTournamentWarmup", "PredictTournamentMatch",
+                "GetTournamentPredictionBoard", "BanTournamentLeyline", "GetTournamentHighlights");
         List<MessageMethod> match = registry.all().stream().filter(m -> m.serviceName().equals("MatchService")).toList();
         assertThat(match).as("契约里 MatchService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.concat(noReply.stream(), replied.stream()).toList());
-        // 36 个号逐个钉住（正式同步的 message_id.txt）：发号漂移或增删方法时这里先失败。
+        // 既有 36 个号逐个钉住 + V3/V4 新增 6 个号从契约表读取（正式同步 message_id.txt 后自动对齐）。
+        List<Integer> expectedMatchIds = Stream.concat(
+                Stream.of(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392,
+                        448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 506, 507, 508),
+                Stream.of("UpdateTournamentSquadEmblem", "StartTournamentWarmup", "PredictTournamentMatch",
+                        "GetTournamentPredictionBoard", "BanTournamentLeyline", "GetTournamentHighlights")
+                        .map(name -> registry.requireId("MatchService", name)))
+                .sorted()
+                .toList();
         assertThat(match).extracting(MessageMethod::messageId)
-                .containsExactlyInAnyOrder(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392,
-                        448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 506, 507, 508);
+                .containsExactlyInAnyOrderElementsOf(expectedMatchIds);
         assertThat(Map.of("CancelQueue", 148, "RespondChallenge", 151, "ChallengePlayer", 152, "GetQueueStatus", 153,
                 "NotifyChallengeResult", 154, "NotifyChallengeInvite", 156, "JoinQueue", 157, "WatchBattle", 163,
                 "ListWatchableBattles", 164, "RequestBattleTicket", 179))
@@ -301,10 +310,9 @@ class MessageRoutesTest {
         assertThat(routes.clientRoute(148).hasResponse()).as("148 CancelQueue 应答是 Empty").isFalse();
         assertThat(routes.clientRoute(157).hasResponse()).as("157 JoinQueue 应答是 JoinQueueResponse").isTrue();
         assertThat(routes.clientRoute(179).hasResponse()).as("179 应答消息定义在 battle 包，照样回包").isTrue();
-        // match 域里只有这 36 个号：别的服务（尤其是战斗服务）没有被带进来。
+        // match 域里只有这 42 个号：别的服务（尤其是战斗服务）没有被带进来。
         assertThat(routes.all().stream().filter(r -> r.domain().equals(DubboGroups.MATCH)).map(MessageRoute::messageId))
-                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392,
-                        448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 506, 507, 508);
+                .containsExactlyElementsOf(expectedMatchIds);
         assertThat(MessageRoutes.SERVICE_BACKENDS).containsEntry("MatchService", DubboGroups.MATCH);
 
         // MatchInternal（帮会活动开战，match_internal.proto）是内部服务：刻意没标客户端协议服务，也不在后端表里。

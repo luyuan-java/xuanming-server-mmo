@@ -281,8 +281,9 @@ public final class PlayerBattleService implements BattleHooks {
                     Integer.toUnsignedString(request.getBattleConfigId()));
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
         }
-        // 免费预设娱乐场、正式人宠会武、首领试炼与瑞兽迎春均以局内满血蓝无耗材快照入场，不受场外残血或 0 血阻断。
-        boolean isolateBattleTempState = useFreePreset || isFormalRanked || isBossTrial || isGuardRescue || isFestivalBeast;
+        // 免费预设娱乐场、正式人宠会武、帮会全天帮战 V2、首领试炼与瑞兽迎春均以局内满血蓝无耗材快照入场，不受场外残血或 0 血阻断。
+        boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(request.getMatchMode());
+        boolean isolateBattleTempState = useFreePreset || isFormalRanked || isGuildWar || isBossTrial || isGuardRescue || isFestivalBeast;
         if (!isolateBattleTempState && player.attributes().health() == 0) {
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.DEAD);
         }
@@ -317,6 +318,12 @@ public final class PlayerBattleService implements BattleHooks {
             BattlePlayerSnapshot.Builder snapBuilder = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route,
                             world == null ? 0 : world.activeSeasonId()).toBuilder()
                     .setPetCaptureSlots(pets.availableCaptureSlots(player));
+            if (seasonService != null) {
+                int weeklyAffix = seasonService.activeWeeklyAffixId(clock.epochMillis());
+                if (weeklyAffix != 0) {
+                    snapBuilder.setSeasonWeeklyAffixId(weeklyAffix);
+                }
+            }
             if (isolateBattleTempState) {
                 snapBuilder.getBaseAttributesBuilder()
                         .setHealth(snapBuilder.getMaxHealth())
@@ -1329,7 +1336,11 @@ public final class PlayerBattleService implements BattleHooks {
         if (recorded != null) {
             endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded())
                     .setMaterialTradableUnitsAdded(recorded.getMaterialTradableUnitsAdded())
-                    .setMaterialPvpLossIneligible(recorded.getMaterialPvpLossIneligible());
+                    .setMaterialPvpLossIneligible(recorded.getMaterialPvpLossIneligible())
+                    .setSeasonSealPointsAdded(recorded.getSeasonSealPointsAdded())
+                    .setSeasonSealProgressAfter(recorded.getSeasonSealProgressAfter())
+                    .setSeasonSealMaxPoints(recorded.getSeasonSealMaxPoints())
+                    .setSeasonHonorNewlyUnlocked(recorded.getSeasonHonorNewlyUnlocked());
             if (recorded.getSeasonId() != 0) {
                 endPush.setSeasonId(recorded.getSeasonId());
             }

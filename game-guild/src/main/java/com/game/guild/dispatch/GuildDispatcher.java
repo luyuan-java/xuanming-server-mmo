@@ -21,16 +21,27 @@ import com.game.guild.service.GuildEconomyService;
 import com.game.guild.service.GuildManageService;
 import com.game.guild.service.GuildRankService;
 import com.game.guild.service.GuildService;
+import com.game.guild.war.GuildWarService;
 import com.game.proto.Empty;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.guild.ApplyJoinGuildRequest;
 import com.game.proto.guild.BuyGuildShopGoodsRequest;
 import com.game.proto.guild.CancelGuildApplicationRequest;
+import com.game.proto.guild.ClaimGuildWarDividendRequest;
+import com.game.proto.guild.ClaimGuildWarMilestoneRequest;
 import com.game.proto.guild.CreateGuildRequest;
 import com.game.proto.guild.DisbandGuildRequest;
 import com.game.proto.guild.DonateToGuildRequest;
 import com.game.proto.guild.GetGuildDonateOptionsRequest;
 import com.game.proto.guild.GetGuildShopRequest;
+import com.game.proto.guild.GetGuildWarBattleResultRequest;
+import com.game.proto.guild.GetGuildWarOverviewRequest;
+import com.game.proto.guild.InspectFieldWarTargetsRequest;
+import com.game.proto.guild.PostGuildWarBountyRequest;
+import com.game.proto.guild.RegisterGuildWarGarrisonRequest;
+import com.game.proto.guild.SetGuildWarStanceRequest;
+import com.game.proto.guild.StartGuildWarBattleRequest;
+import com.game.proto.guild.TrackGuildWarBountyRequest;
 import com.game.proto.guild.UpgradeGuildRequest;
 import com.game.proto.guild.GetGuildRankByGuildRequest;
 import com.game.proto.guild.GetGuildRankRequest;
@@ -147,6 +158,12 @@ public final class GuildDispatcher {
     public GuildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
                            GuildRankService ranks, GuildEconomyService economy, GuildActivityService activities,
                            Executor executor, GuildMetrics metrics, long budgetMillis) {
+        this(registry, guilds, manage, ranks, economy, activities, null, executor, metrics, budgetMillis);
+    }
+
+    public GuildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
+                           GuildRankService ranks, GuildEconomyService economy, GuildActivityService activities,
+                           GuildWarService war, Executor executor, GuildMetrics metrics, long budgetMillis) {
         this.registry = registry;
         this.executor = executor;
         this.metrics = metrics;
@@ -182,8 +199,21 @@ public final class GuildDispatcher {
         for (String method : GuildMethods.FORBIDDEN) {
             other(byId, method, Kind.FORBIDDEN);
         }
-        for (String method : GuildMethods.GUILD_WAR_PLACEHOLDERS) {
-            other(byId, method, Kind.PLACEHOLDER);
+        if (war == null) {
+            for (String method : GuildMethods.GUILD_WAR_PLACEHOLDERS) {
+                other(byId, method, Kind.PLACEHOLDER);
+            }
+        } else {
+            client(byId, GuildMethods.GET_GUILD_WAR_OVERVIEW, GetGuildWarOverviewRequest.class, (s, r, d) -> war.getGuildWarOverview(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.SET_GUILD_WAR_STANCE, SetGuildWarStanceRequest.class, (s, r, d) -> war.setGuildWarStance(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.REGISTER_GUILD_WAR_GARRISON, RegisterGuildWarGarrisonRequest.class, (s, r, d) -> war.registerGuildWarGarrison(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.START_GUILD_WAR_BATTLE, StartGuildWarBattleRequest.class, (s, r, d) -> war.startGuildWarBattle(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.CLAIM_GUILD_WAR_MILESTONE, ClaimGuildWarMilestoneRequest.class, (s, r, d) -> war.claimGuildWarMilestone(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.CLAIM_GUILD_WAR_DIVIDEND, ClaimGuildWarDividendRequest.class, (s, r, d) -> war.claimGuildWarDividend(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.POST_GUILD_WAR_BOUNTY, PostGuildWarBountyRequest.class, (s, r, d) -> war.postGuildWarBounty(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.TRACK_GUILD_WAR_BOUNTY, TrackGuildWarBountyRequest.class, (s, r, d) -> war.trackGuildWarBounty(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.GET_GUILD_WAR_BATTLE_RESULT, GetGuildWarBattleResultRequest.class, (s, r, d) -> war.getGuildWarBattleResult(s.getPlayerId(), r, d));
+            client(byId, GuildMethods.INSPECT_FIELD_WAR_TARGETS, InspectFieldWarTargetsRequest.class, (s, r, d) -> war.inspectFieldWarTargets(s.getPlayerId(), r, d));
         }
         if(activities==null){
             // 旧切片构造器兼容；生产装配必须显式注入完整活动服务。

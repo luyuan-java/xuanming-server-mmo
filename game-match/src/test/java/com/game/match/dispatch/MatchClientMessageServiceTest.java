@@ -121,7 +121,10 @@ class MatchClientMessageServiceTest {
             MatchMethods.START_TOURNAMENT_MATCH, MatchMethods.CHEER_TOURNAMENT_SQUAD,
             MatchMethods.CLAIM_TOURNAMENT_REWARD,
             MatchMethods.SALUTE_TOURNAMENT_CHAMPION, MatchMethods.SEND_TOURNAMENT_SPECTATE_CHEER,
-            MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER);
+            MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER,
+            MatchMethods.UPDATE_TOURNAMENT_SQUAD_EMBLEM, MatchMethods.START_TOURNAMENT_WARMUP,
+            MatchMethods.PREDICT_TOURNAMENT_MATCH, MatchMethods.GET_TOURNAMENT_PREDICTION_BOARD,
+            MatchMethods.BAN_TOURNAMENT_LEYLINE, MatchMethods.GET_TOURNAMENT_HIGHLIGHTS);
 
     private static final Map<String, Integer> IDS = new java.util.HashMap<>(Map.of(
             MatchMethods.JOIN_QUEUE, 157, MatchMethods.CANCEL_QUEUE, 148, MatchMethods.GET_QUEUE_STATUS, 153,

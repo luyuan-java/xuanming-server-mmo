@@ -565,6 +565,7 @@ final class ConfiguredBattle {
 
         int rank = Math.max(1, actor.state().getSkillRanksOrDefault(skillRow.getId(), 1));
         Hit cast = new Hit(skillRow.getId(), rank, DIRECT, chosen.getFirst().actorId());
+        cast.isPreparedCast = true;
         int subjectMaxTargets = actor.isPet()
                 ? (skillRow.getPetMaxTargets() > 0 ? skillRow.getPetMaxTargets() : skillRow.getMaxTargets())
                 : skillRow.getMaxTargets();

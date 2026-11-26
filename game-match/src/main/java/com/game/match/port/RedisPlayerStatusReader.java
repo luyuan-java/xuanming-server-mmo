@@ -22,12 +22,13 @@ import java.util.function.LongFunction;
 public final class RedisPlayerStatusReader implements PlayerStatusReader {
 
     private final LongFunction<? extends CompletionStage<Boolean>> lockExists;
+    private final LongFunction<? extends CompletionStage<Long>> lockBattleId;
     private final LongFunction<? extends CompletionStage<Optional<PlayerPresence>>> presences;
     private final LongFunction<? extends CompletionStage<HolderRead>> holders;
 
     /** 生产装配。 */
     public RedisPlayerStatusReader(BattleLockReader locks, PlayerPresenceDirectory presence, PlayerLocationDirectory locations) {
-        this(locks::exists, presence::findStrictAsync, locations::findHolderAsync);
+        this(locks::exists, locks::battleId, presence::findStrictAsync, locations::findHolderAsync);
     }
 
     /**
@@ -38,7 +39,15 @@ public final class RedisPlayerStatusReader implements PlayerStatusReader {
     public RedisPlayerStatusReader(LongFunction<? extends CompletionStage<Boolean>> lockExists,
                                    LongFunction<? extends CompletionStage<Optional<PlayerPresence>>> presences,
                                    LongFunction<? extends CompletionStage<HolderRead>> holders) {
+        this(lockExists, null, presences, holders);
+    }
+
+    public RedisPlayerStatusReader(LongFunction<? extends CompletionStage<Boolean>> lockExists,
+                                   LongFunction<? extends CompletionStage<Long>> lockBattleId,
+                                   LongFunction<? extends CompletionStage<Optional<PlayerPresence>>> presences,
+                                   LongFunction<? extends CompletionStage<HolderRead>> holders) {
         this.lockExists = Objects.requireNonNull(lockExists, "lockExists");
+        this.lockBattleId = lockBattleId;
         this.presences = Objects.requireNonNull(presences, "presences");
         this.holders = Objects.requireNonNull(holders, "holders");
     }
@@ -50,6 +59,19 @@ public final class RedisPlayerStatusReader implements PlayerStatusReader {
             throw new Deadline.DependencyException("读战斗锁返回了空值");
         }
         return locked;
+    }
+
+    @Override
+    public long battleLockId(long playerId, Deadline d) {
+        if (lockBattleId == null || d.expired()) {
+            return 0L;
+        }
+        try {
+            Long id = d.await(start(lockBattleId, playerId, "读战斗锁对局号"), "读战斗锁对局号");
+            return id == null ? 0L : id;
+        } catch (RuntimeException ignored) {
+            return 0L;
+        }
     }
 
     @Override

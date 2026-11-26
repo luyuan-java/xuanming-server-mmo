@@ -8,14 +8,20 @@ import com.game.proto.TipInfoMessage;
 import com.game.proto.content_guard.CheckTextResponse;
 import com.game.proto.content_guard.TextScene;
 import com.game.proto.content_guard.TextVerdict;
+import com.game.proto.match.BanTournamentLeylineRequest;
+import com.game.proto.match.BanTournamentLeylineResponse;
 import com.game.proto.match.CheerTournamentSquadRequest;
 import com.game.proto.match.CheerTournamentSquadResponse;
 import com.game.proto.match.ClaimTournamentRewardRequest;
 import com.game.proto.match.ClaimTournamentRewardResponse;
 import com.game.proto.match.CreateTournamentSquadRequest;
 import com.game.proto.match.CreateTournamentSquadResponse;
+import com.game.proto.match.GetTournamentHighlightsRequest;
+import com.game.proto.match.GetTournamentHighlightsResponse;
 import com.game.proto.match.GetTournamentOverviewRequest;
 import com.game.proto.match.GetTournamentOverviewResponse;
+import com.game.proto.match.GetTournamentPredictionBoardRequest;
+import com.game.proto.match.GetTournamentPredictionBoardResponse;
 import com.game.proto.match.GetTournamentSpectateCheerRequest;
 import com.game.proto.match.GetTournamentSpectateCheerResponse;
 import com.game.proto.match.InviteTournamentMemberRequest;
@@ -24,6 +30,8 @@ import com.game.proto.match.LeaveTournamentSquadRequest;
 import com.game.proto.match.LeaveTournamentSquadResponse;
 import com.game.proto.match.ListTournamentStandingsRequest;
 import com.game.proto.match.ListTournamentStandingsResponse;
+import com.game.proto.match.PredictTournamentMatchRequest;
+import com.game.proto.match.PredictTournamentMatchResponse;
 import com.game.proto.match.RegisterTournamentSquadRequest;
 import com.game.proto.match.RegisterTournamentSquadResponse;
 import com.game.proto.match.RespondTournamentInviteRequest;
@@ -34,12 +42,17 @@ import com.game.proto.match.SendTournamentSpectateCheerRequest;
 import com.game.proto.match.SendTournamentSpectateCheerResponse;
 import com.game.proto.match.StartTournamentMatchRequest;
 import com.game.proto.match.StartTournamentMatchResponse;
+import com.game.proto.match.StartTournamentWarmupRequest;
+import com.game.proto.match.StartTournamentWarmupResponse;
 import com.game.proto.match.TournamentInviteView;
 import com.game.proto.match.TournamentMatchState;
+import com.game.proto.match.TournamentMatchView;
 import com.game.proto.match.TournamentPlayerRewardView;
 import com.game.proto.match.TournamentSquadView;
 import com.game.proto.match.UpdateTournamentLineupRequest;
 import com.game.proto.match.UpdateTournamentLineupResponse;
+import com.game.proto.match.UpdateTournamentSquadEmblemRequest;
+import com.game.proto.match.UpdateTournamentSquadEmblemResponse;
 import com.game.table.MatchErrorTip;
 import com.game.table.TournamentRuleTable;
 import com.google.protobuf.ByteString;
@@ -134,7 +147,7 @@ public final class TournamentService {
             return CreateTournamentSquadResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
         }
         try {
-            TournamentSquadView sq = store.createSquad(playerId, "", zoneId, req.getSquadName(), squadId);
+            TournamentSquadView sq = store.createSquad(playerId, "", zoneId, req.getSquadName(), req.getEmblemId(), squadId);
             return CreateTournamentSquadResponse.newBuilder().setErrorMessage(tip(0)).setSquad(sq).build();
         } catch (TournamentStore.DomainException e) {
             return CreateTournamentSquadResponse.newBuilder().setErrorMessage(tip(e.tipId())).build();
@@ -488,6 +501,124 @@ public final class TournamentService {
                 .build();
     }
 
+    public UpdateTournamentSquadEmblemResponse updateSquadEmblem(long playerId, UpdateTournamentSquadEmblemRequest req) {
+        if (playerId == 0L) {
+            return UpdateTournamentSquadEmblemResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+        try {
+            TournamentSquadView sq = store.updateSquadEmblem(playerId, req.getEmblemId());
+            return UpdateTournamentSquadEmblemResponse.newBuilder().setErrorMessage(tip(0)).setSquad(sq).build();
+        } catch (TournamentStore.DomainException e) {
+            return UpdateTournamentSquadEmblemResponse.newBuilder().setErrorMessage(tip(e.tipId())).build();
+        } catch (SQLException e) {
+            log.error("[tournament] updateSquadEmblem failed player={}", Long.toUnsignedString(playerId), e);
+            return UpdateTournamentSquadEmblemResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+    }
+
+    public StartTournamentWarmupResponse startWarmup(long playerId, StartTournamentWarmupRequest req) {
+        if (playerId == 0L) {
+            return StartTournamentWarmupResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+        long newMatchId = idGenerator.getAsLong();
+        try {
+            TournamentStore.PrepareMatchOutcome outcome = store.prepareWarmup(
+                    playerId, req.getTargetSquadId(), req.getLeylineElement(), req.getLineupPlayerIdsList(), newMatchId);
+            if (outcome.launch() == null) {
+                return StartTournamentWarmupResponse.newBuilder()
+                        .setErrorMessage(tip(0))
+                        .setMatch(outcome.match())
+                        .build();
+            }
+            if (launcher != null) {
+                long battleId = launchSpec(outcome.launch());
+                if (battleId == 0L) {
+                    return StartTournamentWarmupResponse.newBuilder()
+                            .setErrorMessage(tip(MatchErrorTip.match_error.kMatchTournamentMatchNotReady_VALUE))
+                            .setMatch(outcome.match())
+                            .build();
+                }
+                return StartTournamentWarmupResponse.newBuilder()
+                        .setErrorMessage(tip(0))
+                        .setMatch(outcome.match().toBuilder()
+                                .setBattleId(battleId)
+                                .setState(TournamentMatchState.TOURNAMENT_MATCH_STATE_IN_BATTLE)
+                                .build())
+                        .setBattleId(battleId)
+                        .build();
+            }
+            return StartTournamentWarmupResponse.newBuilder()
+                    .setErrorMessage(tip(0))
+                    .setMatch(outcome.match())
+                    .build();
+        } catch (TournamentStore.DomainException e) {
+            return StartTournamentWarmupResponse.newBuilder().setErrorMessage(tip(e.tipId())).build();
+        } catch (SQLException e) {
+            log.error("[tournament] startWarmup failed player={}", Long.toUnsignedString(playerId), e);
+            return StartTournamentWarmupResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+    }
+
+    public PredictTournamentMatchResponse predictMatch(long playerId, PredictTournamentMatchRequest req) {
+        if (playerId == 0L) {
+            return PredictTournamentMatchResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+        try {
+            TournamentStore.PredictOutcome out = store.predictMatch(playerId, "", req.getMatchId(), req.getPredictedSquadId());
+            return PredictTournamentMatchResponse.newBuilder()
+                    .setErrorMessage(tip(0))
+                    .setMatchId(req.getMatchId())
+                    .setPredictedSquadId(req.getPredictedSquadId())
+                    .setPredictCountA(out.countA())
+                    .setPredictCountB(out.countB())
+                    .build();
+        } catch (TournamentStore.DomainException e) {
+            return PredictTournamentMatchResponse.newBuilder().setErrorMessage(tip(e.tipId())).build();
+        } catch (SQLException e) {
+            log.error("[tournament] predictMatch failed player={} match={}",
+                    Long.toUnsignedString(playerId), Long.toUnsignedString(req.getMatchId()), e);
+            return PredictTournamentMatchResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+    }
+
+    public GetTournamentPredictionBoardResponse getPredictionBoard(long playerId, GetTournamentPredictionBoardRequest req) {
+        try {
+            return store.loadPredictionBoard(req.getSeasonId(), playerId).toBuilder().setErrorMessage(tip(0)).build();
+        } catch (TournamentStore.DomainException e) {
+            return GetTournamentPredictionBoardResponse.newBuilder().setErrorMessage(tip(e.tipId())).build();
+        } catch (SQLException e) {
+            log.error("[tournament] getPredictionBoard failed season={}", req.getSeasonId(), e);
+            return GetTournamentPredictionBoardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+    }
+
+    public BanTournamentLeylineResponse banLeyline(long playerId, BanTournamentLeylineRequest req) {
+        if (playerId == 0L) {
+            return BanTournamentLeylineResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+        try {
+            TournamentMatchView match = store.banLeyline(playerId, req.getMatchId(), req.getLeylineElement());
+            return BanTournamentLeylineResponse.newBuilder().setErrorMessage(tip(0)).setMatch(match).build();
+        } catch (TournamentStore.DomainException e) {
+            return BanTournamentLeylineResponse.newBuilder().setErrorMessage(tip(e.tipId())).build();
+        } catch (SQLException e) {
+            log.error("[tournament] banLeyline failed player={} match={}",
+                    Long.toUnsignedString(playerId), Long.toUnsignedString(req.getMatchId()), e);
+            return BanTournamentLeylineResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+    }
+
+    public GetTournamentHighlightsResponse getHighlights(GetTournamentHighlightsRequest req) {
+        try {
+            return store.loadHighlights(req.getSeasonId()).toBuilder().setErrorMessage(tip(0)).build();
+        } catch (TournamentStore.DomainException e) {
+            return GetTournamentHighlightsResponse.newBuilder().setErrorMessage(tip(e.tipId())).build();
+        } catch (SQLException e) {
+            log.error("[tournament] getHighlights failed season={}", req.getSeasonId(), e);
+            return GetTournamentHighlightsResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+        }
+    }
+
     public List<MatchMethodHandler> clientHandlers() {
         return List.of(
                 handler(MatchMethods.GET_TOURNAMENT_OVERVIEW,
@@ -534,7 +665,25 @@ public final class TournamentService {
                         () -> SendTournamentSpectateCheerResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
                 handler(MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER,
                         (s, b) -> getSpectateCheer(pid(s), GetTournamentSpectateCheerRequest.parseFrom(b)),
-                        () -> GetTournamentSpectateCheerResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build())
+                        () -> GetTournamentSpectateCheerResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
+                handler(MatchMethods.UPDATE_TOURNAMENT_SQUAD_EMBLEM,
+                        (s, b) -> updateSquadEmblem(pid(s), UpdateTournamentSquadEmblemRequest.parseFrom(b)),
+                        () -> UpdateTournamentSquadEmblemResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
+                handler(MatchMethods.START_TOURNAMENT_WARMUP,
+                        (s, b) -> startWarmup(pid(s), StartTournamentWarmupRequest.parseFrom(b)),
+                        () -> StartTournamentWarmupResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
+                handler(MatchMethods.PREDICT_TOURNAMENT_MATCH,
+                        (s, b) -> predictMatch(pid(s), PredictTournamentMatchRequest.parseFrom(b)),
+                        () -> PredictTournamentMatchResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
+                handler(MatchMethods.GET_TOURNAMENT_PREDICTION_BOARD,
+                        (s, b) -> getPredictionBoard(pid(s), GetTournamentPredictionBoardRequest.parseFrom(b)),
+                        () -> GetTournamentPredictionBoardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
+                handler(MatchMethods.BAN_TOURNAMENT_LEYLINE,
+                        (s, b) -> banLeyline(pid(s), BanTournamentLeylineRequest.parseFrom(b)),
+                        () -> BanTournamentLeylineResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build()),
+                handler(MatchMethods.GET_TOURNAMENT_HIGHLIGHTS,
+                        (s, b) -> getHighlights(GetTournamentHighlightsRequest.parseFrom(b)),
+                        () -> GetTournamentHighlightsResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build())
         );
     }
 

@@ -55,7 +55,10 @@ class MatchMethodsTest {
                 MatchMethods.START_TOURNAMENT_MATCH, MatchMethods.CHEER_TOURNAMENT_SQUAD,
                 MatchMethods.CLAIM_TOURNAMENT_REWARD,
                 MatchMethods.SALUTE_TOURNAMENT_CHAMPION, MatchMethods.SEND_TOURNAMENT_SPECTATE_CHEER,
-                MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER)) {
+                MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER,
+                MatchMethods.UPDATE_TOURNAMENT_SQUAD_EMBLEM, MatchMethods.START_TOURNAMENT_WARMUP,
+                MatchMethods.PREDICT_TOURNAMENT_MATCH, MatchMethods.GET_TOURNAMENT_PREDICTION_BOARD,
+                MatchMethods.BAN_TOURNAMENT_LEYLINE, MatchMethods.GET_TOURNAMENT_HIGHLIGHTS)) {
             expected.put(tournamentMethod, REGISTRY.requireId(MatchMethods.SERVICE, tournamentMethod));
         }
 

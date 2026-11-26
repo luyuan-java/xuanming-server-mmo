@@ -151,6 +151,11 @@ enum TransactionType
   // ── 官方灵石百宝阁直购(docs/design/spirit-shop-and-starter-packs-v1.md §2.4) ──
   // 扣灵石与发绑定物品共用同一 correlation_id = client_request_id。只追加,不复用旧编号。
   TX_SPIRIT_SHOP_BUY = 44;
+
+  // ── 游历手记典藏解锁与双轨领奖(docs/design/activity-travel-pass-and-showcase-v1.md §2.4) ──
+  // correlation_id = client_request_id。只追加,不复用旧编号。
+  TX_TRAVEL_PASS_UNLOCK = 45;
+  TX_TRAVEL_PASS_REWARD = 46;
 }
 
 // A single transaction log entry.  Written to Kafka → Go DB → MySQL.

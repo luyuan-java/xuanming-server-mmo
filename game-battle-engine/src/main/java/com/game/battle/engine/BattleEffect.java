@@ -41,6 +41,7 @@ final class BattleEffect {
         boolean primaryFocusBonus;
         boolean isPrimaryFocus;
         boolean isMultiTargetSkill;
+        boolean isPreparedCast;
 
         Hit(int skill, int rank, int origin, long primary) {
             this.skill = skill;
@@ -61,6 +62,7 @@ final class BattleEffect {
             next.healOrdinal = healOrdinal;
             next.shieldOrdinal = shieldOrdinal;
             next.isMultiTargetSkill = isMultiTargetSkill;
+            next.isPreparedCast = isPreparedCast;
             return next;
         }
     }

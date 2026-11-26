@@ -90,7 +90,9 @@ final class ConfiguredImpact {
         boolean[] splashReduced = new boolean[1];
         remaining = ctx.encounter.applyDamageModifiers(source, target, remaining, type,
                 direct && hit.origin == DIRECT && kind != BATTLE_HIT_COUNTER,
-                hit.isMultiTargetSkill, isPrimaryTarget, splashReduced);
+                hit.isMultiTargetSkill, isPrimaryTarget, splashReduced,
+                hit.isPreparedCast || hit.origin == DOT,
+                hit.origin == PURSUED);
         var defenses = direct ? target.state().getBuffsList().stream().filter(e -> {
             var row = battle.row(e);
             return row != null && ConfiguredBattle.matches(row,type);

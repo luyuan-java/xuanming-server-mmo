@@ -2,6 +2,8 @@ package com.game.api;
 
 import com.game.proto.match.StartActivityBattleRequest;
 import com.game.proto.match.StartActivityBattleResponse;
+import com.game.proto.match.StartGuildWarBattleRequest;
+import com.game.proto.match.StartGuildWarBattleResponse;
 import com.game.proto.match.CancelActivityBattleRequest;
 import com.game.proto.match.CancelActivityBattleResponse;
 import java.util.concurrent.CompletableFuture;
@@ -45,6 +47,12 @@ public interface MatchInternalService {
     }
 
     CompletableFuture<StartActivityBattleResponse> startActivityBattle(StartActivityBattleRequest request);
+
+    /** 帮会全天帮战 V2 零匹配池直打开局（支持真人 PVP 与守旗阵 AI 托管，目标刚入战时带回 offender_battle_id 供一键观战）。 */
+    default CompletableFuture<StartGuildWarBattleResponse> startGuildWarBattle(StartGuildWarBattleRequest request) {
+        return CompletableFuture.completedFuture(StartGuildWarBattleResponse.newBuilder()
+                .setReject(com.game.proto.match.ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL).build());
+    }
 
     /** 取消绑定完整原Start；零battle墓碑或签名的持久ABORT可确认安全取消，COMPLETE恢复原结果投递，UNKNOWN继续等待。 */
     default CompletableFuture<CancelActivityBattleResponse> cancelActivityBattle(CancelActivityBattleRequest request) {

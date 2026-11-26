@@ -317,7 +317,9 @@ public class GuildConfiguration {
     public GuildPushes guildPushes(PlayerPushes pushes, GuildMetrics metrics, GuildProperties props,
                                    MessageIdRegistry registry) {
         return new GuildPushes(pushes::pushToPlayers, metrics,
-                registry.requireId(GuildMethods.SERVICE, GuildMethods.NOTIFY_GUILD_CHANGED), props.pushTimeout());
+                registry.requireId(GuildMethods.SERVICE, GuildMethods.NOTIFY_GUILD_CHANGED),
+                registry.requireId(GuildMethods.SERVICE, GuildMethods.NOTIFY_GUILD_WAR_ALERT),
+                props.pushTimeout());
     }
 
     // ================================================================ 第 5 步：资产指令账本与通道
@@ -548,14 +550,96 @@ public class GuildConfiguration {
     }
 
     @Bean
+    public com.game.guild.war.GuildWarStore guildWarStore(DataSource dataSource, SchemaReady guildSchemaReady) throws SQLException {
+        com.game.guild.war.GuildWarStore warStore = new com.game.guild.war.GuildWarStore(dataSource);
+        warStore.ensureSchema();
+        return warStore;
+    }
+
+    @Bean
+    public com.game.guild.war.GuildWarService guildWarService(
+            com.game.guild.war.GuildWarStore warStore,
+            GuildStore store,
+            ConfigTables guildConfigTables,
+            ObjectProvider<com.game.guild.activity.GuildActivityRuntime> activityRuntimeProvider,
+            RedissonClient redis,
+            RedisKeys redisKeys,
+            GuildPushes pushes,
+            PlayerProfiles profiles,
+            GuildIds guildIds) {
+        com.game.discovery.battle.BattleLockReader locks = new com.game.discovery.battle.BattleLockReader(redis, redisKeys);
+        PlayerLocationDirectory locations = new PlayerLocationDirectory(redis, redisKeys);
+        com.game.guild.activity.GuildActivityRuntime runtime = activityRuntimeProvider.getIfAvailable();
+        com.game.guild.war.GuildWarService.GuildLookup lookup = new com.game.guild.war.GuildWarService.GuildLookup() {
+            @Override
+            public java.util.Optional<com.game.guild.store.GuildData> findByPlayer(long playerId, Deadline d) {
+                long gid = store.playerGuildId(playerId, d);
+                return gid == 0 ? java.util.Optional.empty() : store.loadGuild(gid, d);
+            }
+
+            @Override
+            public java.util.Optional<com.game.guild.store.GuildData> findByGuildId(long guildId, Deadline d) {
+                return guildId == 0 ? java.util.Optional.empty() : store.loadGuild(guildId, d);
+            }
+        };
+        com.game.guild.war.GuildWarService.BattleLockLookup lockLookup = (pid, d) -> {
+            try {
+                Long id = locks.battleId(pid).get(500, java.util.concurrent.TimeUnit.MILLISECONDS);
+                return id == null ? 0L : id;
+            } catch (Exception ignored) {
+                return 0L;
+            }
+        };
+        com.game.guild.war.GuildWarService.SceneLocator locator = (zoneId, pid, d) -> {
+            try {
+                var read = locations.findHolderAsync(pid).toCompletableFuture().get(500, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (read == null || read.status() != PlayerLocationDirectory.LocationStatus.ONLINE || read.location() == null) {
+                    return com.game.guild.war.GuildWarService.SceneLocation.OFFLINE;
+                }
+                return new com.game.guild.war.GuildWarService.SceneLocation(true, 0, 1, read.location().getSceneId());
+            } catch (Exception ignored) {
+                return com.game.guild.war.GuildWarService.SceneLocation.OFFLINE;
+            }
+        };
+        com.game.guild.war.GuildWarService.NameResolver nameResolver = (idsCol, d) -> {
+            try {
+                java.util.Map<Long, PlayerProfiles.Profile> loaded =
+                        profiles.loadStrictOnce(new java.util.ArrayList<>(idsCol), d);
+                java.util.Map<Long, String> out = new java.util.HashMap<>(loaded.size());
+                loaded.forEach((k, v) -> out.put(k, v.name()));
+                return out;
+            } catch (Exception ignored) {
+                return java.util.Map.of();
+            }
+        };
+        com.game.guild.war.GuildWarService service = new com.game.guild.war.GuildWarService(
+                warStore, lookup, () -> guildConfigTables,
+                runtime != null ? runtime::startGuildWarBattle : null,
+                lockLookup, locator, pushes::notifyWarAlert, nameResolver,
+                guildIds::nextId, System::currentTimeMillis);
+        if (runtime != null) {
+            runtime.setGuildWarSettler(ev -> {
+                try {
+                    service.settleBattleResult(ev);
+                } catch (SQLException e) {
+                    throw new IllegalStateException("帮战结算写库失败", e);
+                }
+            });
+        }
+        return service;
+    }
+
+    @Bean
     public GuildDispatcher guildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
                                            GuildRankService ranks, GuildEconomyService economy, GuildActivityService activities,
+                                           com.game.guild.war.GuildWarService war,
                                            @Qualifier("guildWorkerPool") GuildWorkerPool guildWorkerPool, GuildMetrics metrics,
                                            GuildProperties props) {
-        GuildDispatcher dispatcher = new GuildDispatcher(registry, guilds, manage, ranks, economy, activities, guildWorkerPool, metrics,
+        GuildDispatcher dispatcher = new GuildDispatcher(registry, guilds, manage, ranks, economy, activities, war, guildWorkerPool, metrics,
                 props.requestBudget().toMillis());
-        log.info("guild 接管的消息号: C2S={} 经济={} 拒绝上行={} 活动={} 请求预算={} 缓存 TTL={} 推送上限={} 资产通道={}",
+        log.info("guild 接管的消息号: C2S={} 经济={} 帮战={} 拒绝上行={} 活动={} 请求预算={} 缓存 TTL={} 推送上限={} 资产通道={}",
                 dispatcher.messageIdsOf(GuildMethods.CLIENT_REQUESTS), dispatcher.messageIdsOf(GuildMethods.ECONOMY_REQUESTS),
+                dispatcher.messageIdsOf(GuildMethods.GUILD_WAR_PLACEHOLDERS),
                 dispatcher.messageIdsOf(GuildMethods.FORBIDDEN), dispatcher.messageIdsOf(GuildMethods.PLACEHOLDERS),
                 props.requestBudget(), props.cacheTtl(), props.pushTimeout(), economy.assetChannelEnabled() ? "开启" : "关闭");
         return dispatcher;

@@ -26,12 +26,18 @@ public final class SeasonTables {
 
     private final boolean valid;
     private final List<SeasonRuleTable> rules;
+    private final Map<Integer, SeasonRuleTable> rulesById;
     private final Map<Integer, SeasonSealTable> sealsById;
     private final Map<Integer, List<SeasonSealTable>> sealsBySeason;
     private final Map<Integer, List<SkillTable>> skillsBySeason;
 
     public SeasonTables(List<SeasonRuleTable> rules, List<SeasonSealTable> seals, List<SkillTable> skills) {
         this.rules = List.copyOf(rules);
+        Map<Integer, SeasonRuleTable> ruleMap = new LinkedHashMap<>();
+        for (SeasonRuleTable r : rules) {
+            ruleMap.putIfAbsent(r.getId(), r);
+        }
+        this.rulesById = Collections.unmodifiableMap(ruleMap);
         Map<Integer, SeasonSealTable> byId = new LinkedHashMap<>();
         Map<Integer, List<SeasonSealTable>> bySeason = new HashMap<>();
         for (SeasonSealTable seal : seals) {
@@ -67,6 +73,10 @@ public final class SeasonTables {
 
     public boolean isValid() {
         return valid;
+    }
+
+    public SeasonRuleTable ruleById(int seasonId) {
+        return seasonId == 0 ? null : rulesById.get(seasonId);
     }
 
     public SeasonRuleTable activeSeason(long nowMs) {

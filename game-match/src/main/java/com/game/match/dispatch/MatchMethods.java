@@ -63,8 +63,16 @@ public final class MatchMethods {
     public static final String SALUTE_TOURNAMENT_CHAMPION = "SaluteTournamentChampion";
     public static final String SEND_TOURNAMENT_SPECTATE_CHEER = "SendTournamentSpectateCheer";
     public static final String GET_TOURNAMENT_SPECTATE_CHEER = "GetTournamentSpectateCheer";
+    /** 全服赛季战队锦标赛《群仙问道赛》V3 队徽更换、零积分热身约战与神机免费竞猜。 */
+    public static final String UPDATE_TOURNAMENT_SQUAD_EMBLEM = "UpdateTournamentSquadEmblem";
+    public static final String START_TOURNAMENT_WARMUP = "StartTournamentWarmup";
+    public static final String PREDICT_TOURNAMENT_MATCH = "PredictTournamentMatch";
+    public static final String GET_TOURNAMENT_PREDICTION_BOARD = "GetTournamentPredictionBoard";
+    /** 全服赛季战队锦标赛《群仙问道赛》V4 BO3灵脉禁选与本季名局录。 */
+    public static final String BAN_TOURNAMENT_LEYLINE = "BanTournamentLeyline";
+    public static final String GET_TOURNAMENT_HIGHLIGHTS = "GetTournamentHighlights";
 
-    /** 全部 36 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
+    /** 全部 42 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
     public static final List<String> ALL = List.of(JOIN_QUEUE, CANCEL_QUEUE, GET_QUEUE_STATUS, CHALLENGE_PLAYER, RESPOND_CHALLENGE,
             NOTIFY_CHALLENGE_INVITE, NOTIFY_CHALLENGE_RESULT, WATCH_BATTLE, LIST_WATCHABLE_BATTLES, REQUEST_BATTLE_TICKET,
             GET_NETWORK_PROBE_PLAN, COMMIT_NETWORK_PROBE,
@@ -74,7 +82,9 @@ public final class MatchMethods {
             GET_TOURNAMENT_OVERVIEW, CREATE_TOURNAMENT_SQUAD, INVITE_TOURNAMENT_MEMBER, RESPOND_TOURNAMENT_INVITE,
             LEAVE_TOURNAMENT_SQUAD, UPDATE_TOURNAMENT_LINEUP, REGISTER_TOURNAMENT_SQUAD, LIST_TOURNAMENT_STANDINGS,
             START_TOURNAMENT_MATCH, CHEER_TOURNAMENT_SQUAD, CLAIM_TOURNAMENT_REWARD,
-            SALUTE_TOURNAMENT_CHAMPION, SEND_TOURNAMENT_SPECTATE_CHEER, GET_TOURNAMENT_SPECTATE_CHEER);
+            SALUTE_TOURNAMENT_CHAMPION, SEND_TOURNAMENT_SPECTATE_CHEER, GET_TOURNAMENT_SPECTATE_CHEER,
+            UPDATE_TOURNAMENT_SQUAD_EMBLEM, START_TOURNAMENT_WARMUP, PREDICT_TOURNAMENT_MATCH, GET_TOURNAMENT_PREDICTION_BOARD,
+            BAN_TOURNAMENT_LEYLINE, GET_TOURNAMENT_HIGHLIGHTS);
 
     private MatchMethods() {
     }

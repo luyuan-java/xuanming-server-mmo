@@ -448,4 +448,34 @@ public class MatchFeatureConfiguration {
     public MatchMethodHandler getTournamentSpectateCheerHandler(TournamentService service) {
         return service.clientHandlers().get(13);
     }
+
+    @Bean
+    public MatchMethodHandler updateTournamentSquadEmblemHandler(TournamentService service) {
+        return service.clientHandlers().get(14);
+    }
+
+    @Bean
+    public MatchMethodHandler startTournamentWarmupHandler(TournamentService service) {
+        return service.clientHandlers().get(15);
+    }
+
+    @Bean
+    public MatchMethodHandler predictTournamentMatchHandler(TournamentService service) {
+        return service.clientHandlers().get(16);
+    }
+
+    @Bean
+    public MatchMethodHandler getTournamentPredictionBoardHandler(TournamentService service) {
+        return service.clientHandlers().get(17);
+    }
+
+    @Bean
+    public MatchMethodHandler banTournamentLeylineHandler(TournamentService service) {
+        return service.clientHandlers().get(18);
+    }
+
+    @Bean
+    public MatchMethodHandler getTournamentHighlightsHandler(TournamentService service) {
+        return service.clientHandlers().get(19);
+    }
 }

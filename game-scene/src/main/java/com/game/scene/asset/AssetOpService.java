@@ -88,9 +88,10 @@ public final class AssetOpService {
 
     private static final Map<AssetStream, StreamRule> STREAM_RULES = Map.of(
             AssetStream.ASSET_STREAM_GUILD_DEBIT, new StreamRule(Direction.DEBIT,
-                    Map.of(24, AssetAudit.Reason.GUILD_DONATE)),
+                    Map.of(24, AssetAudit.Reason.GUILD_DONATE, 41, AssetAudit.Reason.GUILD_BOUNTY_ESCROW)),
             AssetStream.ASSET_STREAM_GUILD_CREDIT, new StreamRule(Direction.CREDIT,
-                    Map.of(25, AssetAudit.Reason.GUILD_SHOP, 26, AssetAudit.Reason.GUILD_ACTIVITY_REWARD)),
+                    Map.of(25, AssetAudit.Reason.GUILD_SHOP, 26, AssetAudit.Reason.GUILD_ACTIVITY_REWARD,
+                            42, AssetAudit.Reason.GUILD_WAR_REWARD, 43, AssetAudit.Reason.GUILD_BOUNTY_PAYOUT)),
             AssetStream.ASSET_STREAM_TRADE_DEBIT, new StreamRule(Direction.DEBIT,
                     Map.of(3, AssetAudit.Reason.AUCTION_SELL, 31, AssetAudit.Reason.PAYMENT_REVERSAL)),
             AssetStream.ASSET_STREAM_TRADE_CREDIT, new StreamRule(Direction.CREDIT,

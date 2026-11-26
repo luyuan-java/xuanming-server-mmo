@@ -1,5 +1,6 @@
 package com.game.match.tournament;
 
+import com.game.proto.BattleSettlementData;
 import com.game.proto.TournamentLeylineElement;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -22,6 +23,16 @@ public final class TournamentRules {
     public static final int MIN_SPECTATE_CHEER_PHRASE_ID = 1;
     public static final int MAX_SPECTATE_CHEER_PHRASE_ID = 6;
     public static final int DEFAULT_INTERMISSION_SEC = 60;
+    public static final int MIN_SQUAD_EMBLEM_ID = 1;
+    public static final int MAX_SQUAD_EMBLEM_ID = 8;
+    public static final int DEFAULT_EMBLEM_ID = 1;
+    // V4 模块 J：战队单赛季纯荣誉铭牌位掩码（零战力加成，单调累加）。
+    public static final int HONOR_BIT_DEBUT = 1 << 0;     // 问道初成：海选完赛达标
+    public static final int HONOR_BIT_STREAK = 1 << 1;    // 连胜破竹：海选累计胜 >= 3
+    public static final int HONOR_BIT_UNBEATEN = 1 << 2;  // 不败金身：海选完赛 >= 3 且 0 负
+    public static final int HONOR_BIT_COMEBACK = 1 << 3;  // 逆转乾坤：赢下打满 3 局的 BO3 淘汰赛
+    public static final int HONOR_BIT_SWEEP = 1 << 4;     // 零封强敌：BO3 淘汰赛 2:0 零封晋级
+    public static final int HONOR_BIT_CHAMPION = 1 << 5;  // 问鼎群仙：夺得本赛季总冠军
     private static final ZoneOffset UTC_PLUS_8 = ZoneOffset.ofHours(8);
 
     private TournamentRules() {
@@ -179,20 +190,51 @@ public final class TournamentRules {
         return x ^ (x >>> 31);
     }
 
+    /** 校验五行灵脉枚举是否为 1..5（金/木/水/火/土）。 */
+    public static boolean isValidLeylineElement(TournamentLeylineElement e) {
+        return e != null
+                && e.getNumber() >= TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL_VALUE
+                && e.getNumber() <= TournamentLeylineElement.TOURNAMENT_LEYLINE_EARTH_VALUE;
+    }
+
     /** 确定性无放回抽取 BO3 五行灵脉顺序（与 Go 侧 DrawLeylines 逐字节同源）。 */
     public static List<TournamentLeylineElement> drawLeylines(int seasonId, long matchId, int bestOf) {
+        return drawLeylinesWithBans(seasonId, matchId, bestOf,
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED,
+                TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED);
+    }
+
+    /** V4 模块 H：剔除双方队长禁选（UNSPECIFIED 表示未禁）后以 SplitMix64 确定性无放回抽取 bestOf 条灵脉（与 Go DrawLeylinesWithBans 逐字节同源）。 */
+    public static List<TournamentLeylineElement> drawLeylinesWithBans(
+            int seasonId, long matchId, int bestOf,
+            TournamentLeylineElement bannedA, TournamentLeylineElement bannedB) {
         if (bestOf <= 1) {
             return List.of();
         }
-        TournamentLeylineElement[] pool = new TournamentLeylineElement[]{
+        TournamentLeylineElement[] all = new TournamentLeylineElement[]{
                 TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL,
                 TournamentLeylineElement.TOURNAMENT_LEYLINE_WOOD,
                 TournamentLeylineElement.TOURNAMENT_LEYLINE_WATER,
                 TournamentLeylineElement.TOURNAMENT_LEYLINE_FIRE,
                 TournamentLeylineElement.TOURNAMENT_LEYLINE_EARTH
         };
+        List<TournamentLeylineElement> poolList = new ArrayList<>(all.length);
+        for (TournamentLeylineElement e : all) {
+            if ((isValidLeylineElement(bannedA) && e == bannedA) || (isValidLeylineElement(bannedB) && e == bannedB)) {
+                continue;
+            }
+            poolList.add(e);
+        }
+        TournamentLeylineElement[] pool = poolList.isEmpty()
+                ? all
+                : poolList.toArray(new TournamentLeylineElement[0]);
         int count = Math.min(bestOf, pool.length);
         long state = (Integer.toUnsignedLong(seasonId) << 32) ^ matchId;
+        if (isValidLeylineElement(bannedA) || isValidLeylineElement(bannedB)) {
+            int banA = isValidLeylineElement(bannedA) ? bannedA.getNumber() : 0;
+            int banB = isValidLeylineElement(bannedB) ? bannedB.getNumber() : 0;
+            state ^= (Integer.toUnsignedLong(banA) << 56) ^ (Integer.toUnsignedLong(banB) << 48);
+        }
         List<TournamentLeylineElement> out = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             state = splitMix64(state + (i + 1L));
@@ -204,6 +246,57 @@ public final class TournamentRules {
             out.add(pool[i]);
         }
         return List.copyOf(out);
+    }
+
+    /** V4 模块 J：海选每场结束后单调累加战队荣耀铭牌（问道初成/连胜破竹/不败金身）。 */
+    public static int computeQualifierHonorBits(int existing, int played, int wins, int losses, int minParticipation) {
+        int bits = existing;
+        int minReq = minParticipation > 0 ? minParticipation : 2;
+        if (played >= minReq) {
+            bits |= HONOR_BIT_DEBUT;
+        }
+        if (wins >= 3) {
+            bits |= HONOR_BIT_STREAK;
+        }
+        if (played >= 3 && losses == 0) {
+            bits |= HONOR_BIT_UNBEATEN;
+        }
+        return bits;
+    }
+
+    /** V4 模块 J：淘汰赛大场决胜后单调累加胜方战队荣耀铭牌（逆转乾坤/零封强敌/问鼎群仙）。 */
+    public static int computeKnockoutSeriesHonorBits(int existing, int bestOf, int winnerWins, int loserWins, boolean isChampion) {
+        int bits = existing;
+        if (bestOf >= 3) {
+            if (winnerWins + loserWins >= 3) {
+                bits |= HONOR_BIT_COMEBACK;
+            }
+            if (winnerWins >= 2 && loserWins == 0) {
+                bits |= HONOR_BIT_SWEEP;
+            }
+        }
+        if (isChampion) {
+            bits |= HONOR_BIT_CHAMPION;
+        }
+        return bits;
+    }
+
+    public record HighlightClass(int tag, String label, int priority) {
+    }
+
+    /** V4 模块 I：为已完赛的公开淘汰赛判定名局录标签与确定性排序优先级（0 最高，与 Go ClassifyHighlightTag 同源）。 */
+    public static HighlightClass classifyHighlightTag(
+            boolean isThirdPlace, int roundIndex, int maxRound, int bestOf, int winsA, int winsB) {
+        if (!isThirdPlace && maxRound > 0 && roundIndex >= maxRound) {
+            return new HighlightClass(1, "总决赛巅峰局", 0);
+        }
+        if (bestOf >= 3 && winsA + winsB >= 3) {
+            return new HighlightClass(2, "决胜三局激战", 1);
+        }
+        if (isThirdPlace) {
+            return new HighlightClass(3, "季军争夺战", 2);
+        }
+        return new HighlightClass(4, "高光问鼎局", 3);
     }
 
     public static String encodeLeylineSequence(List<TournamentLeylineElement> seq) {
@@ -263,5 +356,85 @@ public final class TournamentRules {
 
     public static boolean isValidSpectateCheerSide(int side) {
         return side == 0 || side == 1;
+    }
+
+    /** 校验官方预设道家队徽白名单（1..8）。 */
+    public static boolean isValidEmblemId(int id) {
+        return id >= MIN_SQUAD_EMBLEM_ID && id <= MAX_SQUAD_EMBLEM_ID;
+    }
+
+    /** 建队时将 0 归一化为默认 1 青剑；非 0 须落在 1..8，否则返回 empty。 */
+    public static Optional<Integer> normalizeEmblemId(int id) {
+        if (id == 0) {
+            return Optional.of(DEFAULT_EMBLEM_ID);
+        }
+        return isValidEmblemId(id) ? Optional.of(id) : Optional.empty();
+    }
+
+    /** 返回淘汰赛命中神机预测对应的慧眼分权重：16强=1，8强=2，半决赛=3，季军战=3，总决赛=5。 */
+    public static int predictionWeightForRound(int bracketSize, int roundIndex, boolean isThirdPlace) {
+        if (isThirdPlace) {
+            return 3;
+        }
+        int total = totalKnockoutRounds(bracketSize);
+        if (total == 0 || roundIndex < 1 || roundIndex > total) {
+            return 1;
+        }
+        int remaining = bracketSize >> (roundIndex - 1);
+        return switch (remaining) {
+            case 2 -> 5;
+            case 4 -> 3;
+            case 8 -> 2;
+            default -> 1;
+        };
+    }
+
+    public record MatchMvpResult(long playerId, int teamIndex, int score, long damage, long healing, int controls) {
+    }
+
+    /** 基于 BattleSettlementData 权威累计统计确定性评定本局 MVP（与 Go ComputeMatchMvp 逐条同构）。 */
+    public static Optional<MatchMvpResult> computeMatchMvp(List<BattleSettlementData> settlements, int winnerTeamIndex) {
+        if (settlements == null || settlements.isEmpty()) {
+            return Optional.empty();
+        }
+        MatchMvpResult best = null;
+        boolean bestWin = false;
+        boolean bestAlive = false;
+        long bestContrib = 0L;
+        for (BattleSettlementData s : settlements) {
+            if (s == null || s.getPlayerId() == 0L) {
+                continue;
+            }
+            long dmg = s.getTotalDamageDealt();
+            long heal = s.getTotalHealingDone();
+            int ctrl = s.getTotalControlsLanded();
+            boolean alive = !s.getIsDead() && !s.getFled();
+            boolean onWin = winnerTeamIndex >= 0 && s.getPlayerTeamIndex() == winnerTeamIndex;
+            long raw = Long.divideUnsigned(dmg, 100L)
+                    + Long.divideUnsigned(heal, 80L)
+                    + Integer.toUnsignedLong(ctrl) * 60L
+                    + (alive ? 120L : 0L)
+                    + (onWin ? 180L : 0L);
+            if (Long.compareUnsigned(raw, 100_000L) > 0) {
+                raw = 100_000L;
+            }
+            int score = (int) raw;
+            long contrib = dmg + heal;
+            MatchMvpResult cand = new MatchMvpResult(s.getPlayerId(), s.getPlayerTeamIndex(), score, dmg, heal, ctrl);
+            boolean better = best == null
+                    || Integer.compareUnsigned(cand.score(), best.score()) > 0
+                    || (cand.score() == best.score() && Long.compareUnsigned(contrib, bestContrib) > 0)
+                    || (cand.score() == best.score() && contrib == bestContrib && onWin && !bestWin)
+                    || (cand.score() == best.score() && contrib == bestContrib && onWin == bestWin && alive && !bestAlive)
+                    || (cand.score() == best.score() && contrib == bestContrib && onWin == bestWin && alive == bestAlive
+                        && Long.compareUnsigned(cand.playerId(), best.playerId()) < 0);
+            if (better) {
+                best = cand;
+                bestWin = onWin;
+                bestAlive = alive;
+                bestContrib = contrib;
+            }
+        }
+        return Optional.ofNullable(best);
     }
 }

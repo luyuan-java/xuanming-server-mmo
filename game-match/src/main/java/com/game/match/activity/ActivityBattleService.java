@@ -12,9 +12,14 @@ import com.game.match.team.GroupTickets;
 import com.game.match.ticket.TicketStore;
 import com.game.match.ticket.TicketStore.GroupMember;
 import com.game.proto.BattleActivityContext;
+import com.game.proto.BattlePlayerSnapshot;
+import com.game.proto.eBattleActivityKind;
 import com.game.proto.match.ActivityBattleReject;
+import com.game.proto.match.MatchMode;
 import com.game.proto.match.StartActivityBattleRequest;
 import com.game.proto.match.StartActivityBattleResponse;
+import com.game.proto.match.StartGuildWarBattleRequest;
+import com.game.proto.match.StartGuildWarBattleResponse;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -291,6 +296,126 @@ public final class ActivityBattleService {
     /**
      * 请求没能执行（工作池满 / 排队超预算 / 处理中出了未分类的异常）时的应答：{@code INTERNAL}、offender = 0，计入同步出口的 internal。
      */
+    /** 帮会全天帮战 V2 零匹配池直打开局（支持真人 PVP 与守旗阵 AI 托管，目标刚入战时带回 offender_battle_id 供一键观战）。 */
+    public StartGuildWarBattleResponse startGuildWar(StartGuildWarBattleRequest request, Deadline d) {
+        int kind = eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR_VALUE;
+        if (request == null || !request.hasActivityContext()
+                || request.getActivityContext().getKind() != eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR
+                || !request.getActivityContext().hasGuildWar()) {
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0L, 0L);
+        }
+        MatchMode mode = MatchMode.forNumber(request.getMatchMode());
+        if (mode != MatchMode.MATCH_MODE_GUILD_WAR_PVP && mode != MatchMode.MATCH_MODE_GUILD_WAR_SIEGE) {
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0L, 0L);
+        }
+        List<Long> attackers = request.getAttackerPlayerIdsList();
+        List<Long> defenders = request.getDefenderPlayerIdsList();
+        List<BattlePlayerSnapshot> aiDefenders = request.getAiDefenderSnapshotsList();
+        if (attackers.isEmpty() || attackers.size() > 5) {
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0L, 0L);
+        }
+        if (mode == MatchMode.MATCH_MODE_GUILD_WAR_PVP && (defenders.isEmpty() || defenders.size() > 5)) {
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0L, 0L);
+        }
+        if (mode == MatchMode.MATCH_MODE_GUILD_WAR_SIEGE && (aiDefenders.isEmpty() || aiDefenders.size() > 5)) {
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0L, 0L);
+        }
+
+        List<Long> humans = new ArrayList<>(attackers.size() + defenders.size());
+        Map<Long, Integer> memberTeams = new LinkedHashMap<>();
+        for (long pid : attackers) {
+            if (pid == 0L || memberTeams.put(pid, 0) != null) {
+                return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0L, 0L);
+            }
+            humans.add(pid);
+        }
+        for (long pid : defenders) {
+            if (pid == 0L || memberTeams.put(pid, 1) != null) {
+                return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT, 0L, 0L);
+            }
+            humans.add(pid);
+        }
+
+        MemberPrecheck.Result checked = precheck.check(humans, d);
+        if (!checked.passed()) {
+            return switch (checked.reason()) {
+                case OFFLINE -> rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_OFFLINE, checked.offender(), 0L);
+                case IN_BATTLE -> rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE,
+                        checked.offender(), checked.offenderBattleId());
+                case NO_LOCATION, TICKET_IN_FLIGHT -> rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_NOT_READY,
+                        checked.offender(), 0L);
+                default -> rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+            };
+        }
+
+        OptionalLong issued = ids.nextBattleId();
+        if (issued.isEmpty()) {
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+        }
+        long battleId = issued.getAsLong();
+
+        Map<Long, String> tickets = new LinkedHashMap<>();
+        List<GroupMember> group = new ArrayList<>(humans.size());
+        for (long pid : humans) {
+            String ticketId = ticketIds.get();
+            tickets.put(pid, ticketId);
+            group.add(new GroupMember(pid, ticketId, checked.zones().getOrDefault(pid, 0)));
+        }
+        int configId = request.getBattleConfigId();
+        GroupTickets.Outcome created = groupTickets.create(configId, 0, group, d, "帮战直打");
+        if (created instanceof GroupTickets.Outcome.Conflict conflict) {
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_NOT_READY, conflict.playerId(), 0L);
+        }
+        if (!(created instanceof GroupTickets.Outcome.Created)) {
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+        }
+        if (d.expired()) {
+            groupTickets.rollback(group, "帮战直打");
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+        }
+
+        GatherPlan plan = GatherPlan.guildWar(mode, configId, humans, memberTeams, tickets, battleId,
+                request.getActivityContext(), aiDefenders);
+        CompletableFuture<GatherResult> launched;
+        try {
+            launched = gather.launch(plan);
+        } catch (RuntimeException e) {
+            log.error("[match] 帮战直打交给开局管线失败，回滚票据 battle={}", Long.toUnsignedString(battleId), e);
+            groupTickets.rollback(group, "帮战直打");
+            return rejectedWar(kind, ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+        }
+        launched.whenComplete((result, error) -> {
+            boolean ok = error == null && result != null && result.ok();
+            metrics.activityBattle(kind, ok ? ActivityResult.GATHER_OK : ActivityResult.GATHER_FAILED);
+            if (!ok) {
+                log.error("[match] 帮战直打 gather 失败 battle={} outcome={}", Long.toUnsignedString(battleId),
+                        result == null ? "error" : result.outcome().label(), error);
+            }
+        });
+        metrics.activityBattle(kind, ActivityResult.STARTED);
+        return StartGuildWarBattleResponse.newBuilder().setBattleId(battleId).build();
+    }
+
+    public StartGuildWarBattleResponse unavailableGuildWar(StartGuildWarBattleRequest request) {
+        return rejectedWar(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR_VALUE,
+                ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0L, 0L);
+    }
+
+    private StartGuildWarBattleResponse rejectedWar(int kind, ActivityBattleReject reject, long offender, long offenderBattleId) {
+        metrics.activityBattle(kind, switch (reject) {
+            case ACTIVITY_BATTLE_REJECT_INVALID_ARGUMENT -> ActivityResult.INVALID;
+            case ACTIVITY_BATTLE_REJECT_MEMBER_OFFLINE -> ActivityResult.OFFLINE;
+            case ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE -> ActivityResult.IN_BATTLE;
+            case ACTIVITY_BATTLE_REJECT_MEMBER_NOT_READY -> ActivityResult.NOT_READY;
+            default -> ActivityResult.INTERNAL;
+        });
+        return StartGuildWarBattleResponse.newBuilder()
+                .setReject(reject)
+                .setOffenderPlayerId(offender)
+                .setOffenderBattleId(offenderBattleId)
+                .build();
+    }
+
     public StartActivityBattleResponse unavailable(StartActivityBattleRequest request) {
         return rejected(request.getActivityContext().getKindValue(), ActivityBattleReject.ACTIVITY_BATTLE_REJECT_INTERNAL, 0);
     }

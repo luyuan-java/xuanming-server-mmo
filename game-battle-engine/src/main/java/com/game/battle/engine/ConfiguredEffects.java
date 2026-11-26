@@ -57,6 +57,12 @@ final class ConfiguredEffects {
             value = battle.equipment.shield(source,receiver,value,hit,artifacts);
         if (op == SHIELD && ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_WOOD)
             value *= 110.0 / 100.0;
+        if (op == SHIELD) {
+            int seasonShieldPct = SeasonRules.shieldOverloadBonusPct(ctx.activeSeasonWeeklyAffixId());
+            if (seasonShieldPct > 0) {
+                value *= (100.0 + seasonShieldPct) / 100.0;
+            }
+        }
         if (op == SHIELD && ctx.escalationStacks() > 0)
             value *= ctx.escalationSupportPct() / 100.0;
         if (instant(op) && row.getTriggerEvent() == 0) {
@@ -185,8 +191,10 @@ final class ConfiguredEffects {
             }
             battle.remove(target, victim.getBuffId());
         }
+        boolean clearedSunder = false;
         if (row.getBattleOp() == DISPEL_DEBUFF && ctx.encounter.clearSunder(target.actorId())) {
             ctx.encounter.recordEffectiveContribution(source);
+            clearedSunder = true;
         }
         if (row.getBattleOp() == DISPEL_BUFF && source.teamIndex() != target.teamIndex()) {
             ctx.encounter.tryDispelBossStance(source, target);
@@ -196,6 +204,9 @@ final class ConfiguredEffects {
             if (row.getBattleOp() == DISPEL_DEBUFF && source.teamIndex() == target.teamIndex()) {
                 ctx.encounter.markAntiControlOrSeasonSkill(EncounterMechanics.ownerPlayerIdOf(source));
             }
+        }
+        if (count > 0 || clearedSunder) {
+            ctx.encounter.onWeeklyAffixDispelTriggered(source);
         }
     }
 

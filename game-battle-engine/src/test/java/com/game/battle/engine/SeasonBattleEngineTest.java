@@ -126,4 +126,97 @@ class SeasonBattleEngineTest {
         assertThat(TurnBattleEngine.start(req.build(), standard()))
                 .isInstanceOf(BattleStart.Rejected.class);
     }
+
+    @Test
+    void 全员对称赛季周环境词缀四项生效且分歧或灵脉存在时退回0() {
+        var data = standard();
+        data.addSkill(15999)
+                .setName("测试护盾")
+                .setBattleModel(1)
+                .setCasterMask(1)
+                .setAbilityKind(1)
+                .setTargetTeam(2)
+                .setMaxTargets(1)
+                .setUnlockLevel(1)
+                .setMaxRank(10)
+                .addEffect(159990);
+        data.addBuff(159990)
+                .setBattleOp(BattleEffect.SHIELD)
+                .setDurationRounds(2)
+                .setMaxLayer(1)
+                .setRefreshPolicy(2)
+                .setFlatValue(1000.0);
+
+        // 1. 双方词缀不一致 fail-closed 退回 0
+        var reqMismatch = request(3, 7);
+        addPlayer(reqMismatch, PLAYER_A, 0, 10_000, 5_000, 0, 0, 0, 100)
+                .setMaxMana(10_000).setSeasonWeeklyAffixId(SeasonRules.WEEKLY_AFFIX_SPIRIT_RECOVERY);
+        addPlayer(reqMismatch, PLAYER_B, 1, 10_000, 5_000, 0, 0, 0, 10)
+                .setMaxMana(10_000).setSeasonWeeklyAffixId(SeasonRules.WEEKLY_AFFIX_OPENING_GUARD);
+        assertThat(TestBattles.start(reqMismatch, data).buildStateSnapshot().getSeasonWeeklyAffixId()).isZero();
+
+        // 2. 灵息充盈周 (2)：双方防御均额外回复 3% 最大法力（+300）
+        var reqMana = request(3, 7);
+        var manaA = addPlayer(reqMana, PLAYER_A, 0, 10_000, 10_000, 0, 0, 0, 100)
+                .setMaxMana(10_000).setSeasonWeeklyAffixId(SeasonRules.WEEKLY_AFFIX_SPIRIT_RECOVERY);
+        manaA.getBaseAttributesBuilder().setMana(5_000);
+        var manaB = addPlayer(reqMana, PLAYER_B, 1, 10_000, 10_000, 0, 0, 0, 10)
+                .setMaxMana(10_000).setSeasonWeeklyAffixId(SeasonRules.WEEKLY_AFFIX_SPIRIT_RECOVERY);
+        manaB.getBaseAttributesBuilder().setMana(5_000);
+        var manaEng = TestBattles.start(reqMana, data);
+        assertThat(manaEng.buildStateSnapshot().getSeasonWeeklyAffixId())
+                .isEqualTo(SeasonRules.WEEKLY_AFFIX_SPIRIT_RECOVERY);
+        manaEng.submitAction(PLAYER_A, action(BATTLE_ACTION_DEFEND));
+        manaEng.submitAction(PLAYER_B, action(BATTLE_ACTION_DEFEND));
+        manaEng.resolveCurrentRound();
+        assertThat(stateActor(manaEng.buildStateSnapshot(), PLAYER_A).getAttributes().getMana()).isEqualTo(5_300L);
+        assertThat(stateActor(manaEng.buildStateSnapshot(), PLAYER_B).getAttributes().getMana()).isEqualTo(5_300L);
+
+        // 3. 锦标赛五行灵脉存在时压制周词缀
+        reqMana.getTournamentContextBuilder()
+                .setMatchId(101L)
+                .setLeylineElement(com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_WATER);
+        assertThat(TestBattles.start(reqMana, data).buildStateSnapshot().getSeasonWeeklyAffixId()).isZero();
+
+        // 4. 先机守势周 (3) 首回合减伤 vs 锋芒竞速周 (4) 无盾增伤
+        java.util.function.IntToLongFunction round1Damage = affixId -> {
+            var r = request(3, 19);
+            addPlayer(r, PLAYER_A, 0, 10_000, 10_000, 0, 0, 0, 100)
+                    .setPhysicalAttack(2000).setSeasonWeeklyAffixId(affixId);
+            addPlayer(r, PLAYER_B, 1, 10_000, 10_000, 0, 0, 0, 10)
+                    .setPhysicalAttack(2000).setSeasonWeeklyAffixId(affixId);
+            var e = TestBattles.start(r, data);
+            e.submitAction(PLAYER_A, action(BATTLE_ACTION_ATTACK, PLAYER_B));
+            e.submitAction(PLAYER_B, action(BATTLE_ACTION_ATTACK, PLAYER_A));
+            e.resolveCurrentRound();
+            return 10_000L - stateActor(e.buildStateSnapshot(), PLAYER_B).getAttributes().getHealth();
+        };
+        long baseDmg = round1Damage.applyAsLong(SeasonRules.WEEKLY_AFFIX_NONE);
+        long guardDmg = round1Damage.applyAsLong(SeasonRules.WEEKLY_AFFIX_OPENING_GUARD);
+        long sharpDmg = round1Damage.applyAsLong(SeasonRules.WEEKLY_AFFIX_SHARP_TEMPO);
+        assertThat(guardDmg).isLessThan(baseDmg);
+        assertThat(sharpDmg).isGreaterThan(baseDmg);
+
+        // 5. 护盾过载周 (1)：技能护盾量 +15%
+        java.util.function.IntToLongFunction shieldCapacity = affixId -> {
+            var r = request(3, 23);
+            addPlayer(r, PLAYER_A, 0, 10_000, 10_000, 0, 0, 0, 100)
+                    .addSkillTableIds(15999).putSkillRanks(15999, 1)
+                    .setSeasonWeeklyAffixId(affixId);
+            addPlayer(r, PLAYER_B, 1, 10_000, 10_000, 0, 0, 0, 10)
+                    .setSeasonWeeklyAffixId(affixId);
+            var e = TestBattles.start(r, data);
+            e.submitAction(PLAYER_A, action(com.game.proto.eBattleActionType.BATTLE_ACTION_SKILL, PLAYER_A, 15999));
+            e.submitAction(PLAYER_B, action(BATTLE_ACTION_DEFEND));
+            e.resolveCurrentRound();
+            return stateActor(e.buildStateSnapshot(), PLAYER_A).getBuffsList().stream()
+                    .filter(b -> b.getBuffTableId() == 159990)
+                    .mapToLong(com.game.proto.BattleBuffEntry::getRemainingCapacity)
+                    .sum();
+        };
+        long baseShield = shieldCapacity.applyAsLong(SeasonRules.WEEKLY_AFFIX_NONE);
+        long overloadShield = shieldCapacity.applyAsLong(SeasonRules.WEEKLY_AFFIX_SHIELD_OVERLOAD);
+        assertThat(baseShield).isPositive();
+        assertThat(overloadShield).isGreaterThan(baseShield);
+    }
 }

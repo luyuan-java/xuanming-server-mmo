@@ -55,9 +55,11 @@ public class GlobalMatchConfiguration {
             com.game.match.spectate.SqlSpectateStore spectators,com.game.match.metrics.MatchMetrics metrics,
             ObjectProvider<com.game.match.script.BattleScriptResolver> scriptResolver,
             ObjectProvider<com.game.match.ranked.RankedStore> rankedStore,
-            ObjectProvider<com.game.match.ranked.RankedTables> rankedTables){
+            ObjectProvider<com.game.match.ranked.RankedTables> rankedTables,
+            ObjectProvider<com.game.match.tournament.TournamentStore> tournamentStore){
         return new GlobalMatchService(store,config,props,directory,ids,ratings,scenes,calls,players,projections,hooks)
                 .withSpectators(spectators).withMetrics(metrics)
                 .withBattleScriptResolver(scriptResolver.getIfAvailable())
-                .withRanked(rankedStore.getIfAvailable(),rankedTables.getIfAvailable());}
+                .withRanked(rankedStore.getIfAvailable(),rankedTables.getIfAvailable())
+                .withTournamentStore(tournamentStore.getIfAvailable());}
 }

@@ -17,6 +17,7 @@ import com.game.proto.eBattleEventType;
 import com.game.proto.eBattleHitKind;
 import com.game.proto.eBattleOutcome;
 import com.game.table.BuffTable;
+import com.game.table.SkillTable;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
@@ -44,6 +45,10 @@ final class EncounterMechanics {
     private final BattleContext ctx;
     private int bossTrialKind = BattleConstants.BOSS_TRIAL_KIND_NONE;
     private int battleDifficulty;
+    private int bossWeeklyAffixId = BossTrialWeeklyAffixRules.AFFIX_NONE;
+    private int weeklyAffixWoodTeamBoostUntilRound;
+    private int weeklyAffixEarthTeamBoostUntilRound;
+    private final TreeSet<Long> weeklyAffixWoodManaTriggeredActors = new TreeSet<>(Long::compareUnsigned);
     private FestivalBeastBattleContext festivalBeast;
     private int initialAttackerHumanCount;
     private int trialGuardMonsterTableId;
@@ -89,6 +94,102 @@ final class EncounterMechanics {
     void configure(int bossTrialKind, int battleDifficulty) {
         this.bossTrialKind = bossTrialKind;
         this.battleDifficulty = battleDifficulty;
+    }
+
+    void configureWeeklyAffix(int affixId) {
+        this.bossWeeklyAffixId = affixId;
+    }
+
+    int bossWeeklyAffixId() {
+        return bossWeeklyAffixId;
+    }
+
+    boolean isActorExposed(long actorId) {
+        if (actorId == 0L) {
+            return false;
+        }
+        ExposedState state = exposedActors.get(actorId);
+        return state != null && state.pct > 0 && Integer.compareUnsigned(state.untilRound, ctx.roundIndex()) >= 0;
+    }
+
+    boolean isWeeklyWaterDiscountSkill(SkillTable skill) {
+        if (skill == null) {
+            return false;
+        }
+        for (int buffId : skill.getEffectList()) {
+            BuffTable row = ctx.data().buff(buffId).orElse(null);
+            if (row == null) {
+                continue;
+            }
+            int op = row.getBattleOp();
+            if (op == BattleEffect.PREPARE_CAST || op == BattleEffect.PERIODIC
+                    || op == BattleEffect.CONSUME || op == BattleEffect.EXTEND
+                    || row.getBuffType() == BattleConstants.BUFF_TYPE_POISON
+                    || row.getBuffType() == BattleConstants.BUFF_TYPE_BURN) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    long adjustWeeklySkillManaCost(BattleUnit actor, SkillTable skill, long baseCost) {
+        if (bossWeeklyAffixId == BossTrialWeeklyAffixRules.AFFIX_WATER
+                && actor != null && actor.teamIndex() == 0 && isWeeklyWaterDiscountSkill(skill)) {
+            return BossTrialWeeklyAffixRules.discountWaterManaCost(baseCost);
+        }
+        return baseCost;
+    }
+
+    void onWeeklyAffixDispelTriggered(BattleUnit caster) {
+        if (bossWeeklyAffixId != BossTrialWeeklyAffixRules.AFFIX_WOOD
+                || caster == null || caster.teamIndex() != 0 || !caster.isActive()) {
+            return;
+        }
+        int nextUntil = ctx.roundIndex() + 1;
+        if (Integer.compareUnsigned(nextUntil, weeklyAffixWoodTeamBoostUntilRound) > 0) {
+            weeklyAffixWoodTeamBoostUntilRound = nextUntil;
+        }
+        if (caster.maxMana() == 0L || !weeklyAffixWoodManaTriggeredActors.add(caster.actorId())) {
+            return;
+        }
+        long rawGain = Math.max(1L, Long.divideUnsigned(
+                caster.maxMana() * BossTrialWeeklyAffixRules.WOOD_DISPEL_MANA_REGEN_PCT, 100L));
+        long gained = caster.restoreMana(rawGain);
+        if (gained != 0L) {
+            ctx.events().append(eBattleEventType.BATTLE_EVENT_MANA, caster.actorId(), caster.actorId())
+                    .setValue(gained)
+                    .setManaDelta(EventLog.signedManaDelta(gained, true))
+                    .setTargetHealthAfter(caster.health())
+                    .setTargetManaAfter(caster.mana());
+        }
+        emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_WEEKLY_AFFIX_TRIGGER,
+                caster.actorId(), caster.actorId(), gained);
+    }
+
+    void onWeeklyAffixParryTriggered(long bossActorId) {
+        if (bossWeeklyAffixId != BossTrialWeeklyAffixRules.AFFIX_EARTH) {
+            return;
+        }
+        int nextUntil = ctx.roundIndex() + 1;
+        if (Integer.compareUnsigned(nextUntil, weeklyAffixEarthTeamBoostUntilRound) > 0) {
+            weeklyAffixEarthTeamBoostUntilRound = nextUntil;
+        }
+        long shieldedCount = 0L;
+        for (BattleUnit actor : ctx.units()) {
+            if (actor.teamIndex() != 0 || !actor.isActive() || actor.maxHealth() == 0L) {
+                continue;
+            }
+            long gain = Math.max(1L, Long.divideUnsigned(
+                    actor.maxHealth() * BossTrialWeeklyAffixRules.EARTH_PARRY_TEAM_SHIELD_PCT, 100L));
+            long after = actor.addTournamentEarthShield(gain);
+            ctx.events().append(eBattleEventType.BATTLE_EVENT_SHIELD, actor.actorId(), actor.actorId())
+                    .setShieldAfter(after);
+            shieldedCount++;
+        }
+        if (shieldedCount != 0L) {
+            emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_WEEKLY_AFFIX_TRIGGER,
+                    bossActorId, bossActorId, shieldedCount);
+        }
     }
 
     void configureTrial(int guardMonsterTableId, int guardStanceBuffId) {
@@ -466,10 +567,41 @@ final class EncounterMechanics {
             }
         }
 
-        // 3. 二阶段「决战姿态（破釜）」：全部特殊护卫阵亡或首领气血 <= 50%，整场仅触发一次且绝不回合中途连劈（V7）。
-        boolean halfHpOrBelow = Long.compareUnsigned(boss.health(), Long.divideUnsigned(boss.maxHealth(), 2L)) <= 0
-                && Long.compareUnsigned(boss.health() * 2L, boss.maxHealth()) <= 0;
-        if (bossPhase < 2 && (!anySpecialGuardAlive || halfHpOrBelow)) {
+        // 2.5 首领试炼周常五行词缀回合末反向考验（仅真实首领试炼生效，零时钟确定性）。
+        if (bossWeeklyAffixId == BossTrialWeeklyAffixRules.AFFIX_WOOD
+                && BossTrialWeeklyAffixRules.isWoodRegenRound(ctx.roundIndex())
+                && !isActorControlLocked(boss, checks)) {
+            double incomingHealMod = ctx.configured.modifier(boss, BattleEffect.IN_HEAL);
+            if (incomingHealMod >= 0.0 && boss.maxHealth() != 0L
+                    && Long.compareUnsigned(boss.health(), boss.maxHealth()) < 0) {
+                long rawHeal = Math.max(1L, Long.divideUnsigned(
+                        boss.maxHealth() * BossTrialWeeklyAffixRules.WOOD_BOSS_REGEN_HP_PCT, 100L));
+                long healed = ctx.applyHeal(boss, Unsigned.toDouble(rawHeal));
+                if (healed != 0L) {
+                    ctx.events().append(eBattleEventType.BATTLE_EVENT_HEAL, boss.actorId(), boss.actorId())
+                            .setValue(healed)
+                            .setTargetHealthAfter(boss.health())
+                            .setTargetManaAfter(boss.mana());
+                    emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_WEEKLY_AFFIX_TRIGGER,
+                            boss.actorId(), boss.actorId(), healed);
+                }
+            }
+        } else if (bossWeeklyAffixId == BossTrialWeeklyAffixRules.AFFIX_WATER
+                && BossTrialWeeklyAffixRules.isWaterMomentumRound(ctx.roundIndex())
+                && !isActorControlLocked(boss, checks)
+                && bossMomentumStacks < BattleConstants.BOSS_MOMENTUM_MAX_STACKS) {
+            bossMomentumStacks++;
+            emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_MOMENTUM_GAIN,
+                    boss.actorId(), boss.actorId(), Integer.toUnsignedLong(bossMomentumStacks));
+        }
+
+        // 3. 二阶段「决战姿态（破釜）」：全部特殊护卫阵亡或首领气血 <= 50%（火周提前至 <= 60%），整场仅触发一次且绝不回合中途连劈（V7）。
+        boolean phaseTwoHpReached = bossWeeklyAffixId == BossTrialWeeklyAffixRules.AFFIX_FIRE
+                ? BossTrialWeeklyAffixRules.isHealthAtOrBelowPct(
+                        boss.health(), boss.maxHealth(), BossTrialWeeklyAffixRules.FIRE_BOSS_PHASE_TWO_HP_PCT)
+                : (Long.compareUnsigned(boss.health(), Long.divideUnsigned(boss.maxHealth(), 2L)) <= 0
+                        && Long.compareUnsigned(boss.health() * 2L, boss.maxHealth()) <= 0);
+        if (bossPhase < 2 && (!anySpecialGuardAlive || phaseTwoHpReached)) {
             bossPhase = 2;
             int nextRound = ctx.roundIndex() + 1;
             boolean hasNextRoundCleave = false;
@@ -487,6 +619,7 @@ final class EncounterMechanics {
 
     void advanceRoundCleanup() {
         attackerTriggeredStanceCounterThisRound.clear();
+        weeklyAffixWoodManaTriggeredActors.clear();
         int currentRound = ctx.roundIndex();
         exposedActors.entrySet().removeIf(e -> Integer.compareUnsigned(e.getValue().untilRound, currentRound) < 0);
         sunderUntilRound.entrySet().removeIf(e -> Integer.compareUnsigned(e.getValue(), currentRound) < 0);
@@ -559,12 +692,19 @@ final class EncounterMechanics {
     }
 
     long applyDamageModifiers(BattleUnit source, BattleUnit target, long damage, int damageType, boolean isDirectPrimary) {
-        return applyDamageModifiers(source, target, damage, damageType, isDirectPrimary, false, true, null);
+        return applyDamageModifiers(source, target, damage, damageType, isDirectPrimary, false, true, null, false, false);
     }
 
-    /** 物法易势 ×1.15、首领试炼 V2 聚火/溅射 60%、护势联防阵 35%/40%+蓄势反制、统一破绽+二阶段易伤、灵障护盾吸收。 */
     long applyDamageModifiers(BattleUnit source, BattleUnit target, long damage, int damageType, boolean isDirectPrimary,
                               boolean isMultiTargetSkill, boolean isPrimaryTarget, boolean[] outSplashReduced) {
+        return applyDamageModifiers(source, target, damage, damageType, isDirectPrimary,
+                isMultiTargetSkill, isPrimaryTarget, outSplashReduced, false, false);
+    }
+
+    /** 物法易势 ×1.15、首领试炼 V2 聚火/溅射 60%、护势联防阵 35%/40%+蓄势反制、统一破绽+二阶段易伤、周常五行词缀与灵障护盾吸收。 */
+    long applyDamageModifiers(BattleUnit source, BattleUnit target, long damage, int damageType, boolean isDirectPrimary,
+                              boolean isMultiTargetSkill, boolean isPrimaryTarget, boolean[] outSplashReduced,
+                              boolean isWeeklyChargedOrPeriodic, boolean isPursuit) {
         if (outSplashReduced != null && outSplashReduced.length > 0) {
             outSplashReduced[0] = false;
         }
@@ -616,6 +756,50 @@ final class EncounterMechanics {
             }
             if (vulnPct > 0) {
                 result = Long.divideUnsigned(result * (100L + Integer.toUnsignedLong(vulnPct)), 100L);
+            }
+        }
+        // 4.5 首领试炼周常五行词缀正向增伤与破绽灼伤（仅真实首领试炼生效，整数定点数倍率，与 C++ 逐项对齐）。
+        if (bossWeeklyAffixId != BossTrialWeeklyAffixRules.AFFIX_NONE
+                && source != null && source.teamIndex() == 0 && target.teamIndex() == 1) {
+            switch (bossWeeklyAffixId) {
+                case BossTrialWeeklyAffixRules.AFFIX_METAL -> {
+                    if (isDirectPrimary && isPrimaryTarget && isActorExposed(target.actorId())) {
+                        result = Long.divideUnsigned(
+                                result * (100L + BossTrialWeeklyAffixRules.METAL_EXPOSED_PRIMARY_BONUS_PCT), 100L);
+                    }
+                }
+                case BossTrialWeeklyAffixRules.AFFIX_WOOD -> {
+                    if (Integer.compareUnsigned(weeklyAffixWoodTeamBoostUntilRound, ctx.roundIndex()) >= 0) {
+                        result = Long.divideUnsigned(
+                                result * (100L + BossTrialWeeklyAffixRules.WOOD_TEAM_DAMAGE_BONUS_PCT), 100L);
+                    }
+                }
+                case BossTrialWeeklyAffixRules.AFFIX_WATER -> {
+                    if (isWeeklyChargedOrPeriodic) {
+                        result = Long.divideUnsigned(
+                                result * (100L + BossTrialWeeklyAffixRules.WATER_CHARGE_OR_PERIODIC_DAMAGE_BONUS_PCT), 100L);
+                    }
+                }
+                case BossTrialWeeklyAffixRules.AFFIX_FIRE -> {
+                    if ((source.isPet() && isDirectPrimary) || isPursuit) {
+                        result = Long.divideUnsigned(
+                                result * (100L + BossTrialWeeklyAffixRules.FIRE_PET_OR_FOLLOWUP_DAMAGE_BONUS_PCT), 100L);
+                    }
+                    if (isDirectPrimary && isActorExposed(target.actorId()) && target.maxHealth() != 0L) {
+                        long rawBurn = Math.max(1L, Long.divideUnsigned(
+                                target.maxHealth() * BossTrialWeeklyAffixRules.FIRE_EXPOSED_BURN_MAX_HP_PCT, 100L));
+                        result = EquipmentCombatRules.addSaturated(result,
+                                Unsigned.minUnsigned(rawBurn, BossTrialWeeklyAffixRules.FIRE_EXPOSED_BURN_CAP));
+                    }
+                }
+                case BossTrialWeeklyAffixRules.AFFIX_EARTH -> {
+                    if (Integer.compareUnsigned(weeklyAffixEarthTeamBoostUntilRound, ctx.roundIndex()) >= 0) {
+                        result = Long.divideUnsigned(
+                                result * (100L + BossTrialWeeklyAffixRules.EARTH_PARRY_NEXT_ROUND_DAMAGE_BONUS_PCT), 100L);
+                    }
+                }
+                default -> {
+                }
             }
         }
         // 5. 灵障首领：灵障护盾在生命扣血前优先吸收伤害，击破时记破盾者与有效贡献。
@@ -690,6 +874,7 @@ final class EncounterMechanics {
         }
         if (dispelledAny) {
             recordEffectiveContribution(source);
+            onWeeklyAffixDispelTriggered(source);
         }
     }
 
@@ -1071,6 +1256,9 @@ final class EncounterMechanics {
                         if (bossPhase >= 2) {
                             scale *= 1.10;
                         }
+                        if (bossWeeklyAffixId == BossTrialWeeklyAffixRules.AFFIX_EARTH) {
+                            scale *= BossTrialWeeklyAffixRules.EARTH_BOSS_CLEAVE_MULTIPLIER;
+                        }
                     }
                     int validTargets = 0;
                     int invalidTargets = 0;
@@ -1128,12 +1316,14 @@ final class EncounterMechanics {
                                 cleaveParryCount++;
                                 emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_CLEAVE_PARRY_EXPOSE,
                                         source.actorId(), source.actorId(), BattleConstants.BOSS_EXPOSED_FULL_PCT);
+                                onWeeklyAffixParryTriggered(source.actorId());
                             } else if (targetIds.size() >= 2 && parriedTargets >= 1) {
                                 // V3 防线：多人裂地双劈 1/2 化解给予轻度破绽 +20%，保留认真防守队友的正反馈。
                                 applyBossExposed(source.actorId(), BattleConstants.BOSS_EXPOSED_PARTIAL_PCT, r + 1);
                                 cleaveParryCount++;
                                 emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_CLEAVE_PARRY_EXPOSE,
                                         source.actorId(), source.actorId(), BattleConstants.BOSS_EXPOSED_PARTIAL_PCT);
+                                onWeeklyAffixParryTriggered(source.actorId());
                             }
                             recordResolved(roundResolved, entry,
                                     BattleConstants.TELEGRAPH_STATUS_EXECUTED, "慢速重劈已发动");
@@ -1153,6 +1343,9 @@ final class EncounterMechanics {
                         }
                         if (bossPhase >= 2) {
                             scale *= 1.10;
+                        }
+                        if (bossWeeklyAffixId == BossTrialWeeklyAffixRules.AFFIX_EARTH) {
+                            scale *= BossTrialWeeklyAffixRules.EARTH_BOSS_CLEAVE_MULTIPLIER;
                         }
                     }
                     int validTargets = 0;
@@ -1201,11 +1394,13 @@ final class EncounterMechanics {
                             cleaveParryCount++;
                             emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_CLEAVE_PARRY_EXPOSE,
                                     source.actorId(), source.actorId(), BattleConstants.BOSS_EXPOSED_FULL_PCT);
+                            onWeeklyAffixParryTriggered(source.actorId());
                         } else if (validTargets >= 2 && parriedTargets * 2 >= validTargets) {
                             applyBossExposed(source.actorId(), BattleConstants.BOSS_EXPOSED_PARTIAL_PCT, r + 1);
                             cleaveParryCount++;
                             emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_CLEAVE_PARRY_EXPOSE,
                                     source.actorId(), source.actorId(), BattleConstants.BOSS_EXPOSED_PARTIAL_PCT);
+                            onWeeklyAffixParryTriggered(source.actorId());
                         }
                     }
                     recordResolved(roundResolved, entry, BattleConstants.TELEGRAPH_STATUS_EXECUTED, "玄毒冲击已发动");
@@ -1369,6 +1564,9 @@ final class EncounterMechanics {
         if (isBossTrial()) {
             state.setBossPhase(bossPhase)
                     .setBossMomentumStacks(bossMomentumStacks);
+            if (bossWeeklyAffixId != BossTrialWeeklyAffixRules.AFFIX_NONE) {
+                state.setBossWeeklyAffixId(bossWeeklyAffixId);
+            }
             if (bossStanceType != POLARITY_NONE && bossStanceRemainRounds > 0) {
                 state.setBossStanceType(bossStanceType)
                         .setBossStanceRemainRounds(bossStanceRemainRounds);

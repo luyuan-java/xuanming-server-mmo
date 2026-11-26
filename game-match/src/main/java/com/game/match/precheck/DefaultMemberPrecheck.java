@@ -62,8 +62,9 @@ public final class DefaultMemberPrecheck implements MemberPrecheck {
             // 2. 战斗锁
             try {
                 if (players.inBattle(playerId, d)) {
-                    log.info("[precheck] 成员在战斗中 player={}", id(playerId));
-                    return Result.failed(Reason.IN_BATTLE, playerId);
+                    long battleId = players.battleLockId(playerId, d);
+                    log.info("[precheck] 成员在战斗中 player={} battle_id={}", id(playerId), Long.toUnsignedString(battleId));
+                    return Result.failed(Reason.IN_BATTLE, playerId, battleId);
                 }
             } catch (Deadline.DependencyException e) {
                 log.error("[precheck] 读战斗锁失败 player={}", id(playerId), e);

@@ -209,6 +209,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         room.originalCreate=request;
         room.requiresResultConfirmation = !request.getPlacementOperationId().isEmpty() && origin.publishesResult();
         for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
+            if (snapshot.getAiControlled()) {
+                continue;
+            }
             room.routingByPlayer.put(snapshot.getPlayerId(), snapshot.getRouting());
         }
         // 7 fail-closed 预签：插表、装计时器、推送、发确认之前给全体参战者签好；任一人签不出整局拒绝，零副作用
@@ -280,12 +283,20 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         if (request.getBattleId() == 0 || request.getPlayersCount() == 0) {
             return "battle_id 为 0 或没有玩家: players=" + request.getPlayersCount();
         }
+        int humanCount = 0;
         for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
+            if (snapshot.getAiControlled()) {
+                continue;
+            }
+            humanCount++;
             BattleRouting routing = snapshot.getRouting();
             if (routing.getGateInstanceId().isEmpty() || routing.getSceneInstanceId().isEmpty()) {
                 return "路由信息不完整: player_id=" + Long.toUnsignedString(snapshot.getPlayerId()) + " gate_instance_id="
                         + routing.getGateInstanceId() + " scene_instance_id=" + routing.getSceneInstanceId();
             }
+        }
+        if (humanCount == 0) {
+            return "至少需要一名真人参战者: players=" + request.getPlayersCount();
         }
         return null;
     }

@@ -39,6 +39,7 @@ final class BattleContext {
     }
 
     private final BattleData data;
+    private final int matchMode;
     private final boolean pve;
     private final boolean competitivePvp;
     private final BattleRandom rng;
@@ -55,6 +56,7 @@ final class BattleContext {
     private int roundIndex = 1;
     private int maxRounds = BattleConstants.DEFAULT_MAX_ROUNDS;
     private TournamentLeylineElement activeTournamentLeyline = TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED;
+    private int activeSeasonWeeklyAffixId = SeasonRules.WEEKLY_AFFIX_NONE;
 
     /**
      * @param matchMode 请求里的 match_mode（uint32）；只有 4 / 5 算 PVE，其余一律非 PVE（{@code IsPveMatch}，{@code engine.cpp:1312-1315}）
@@ -66,6 +68,7 @@ final class BattleContext {
 
     BattleContext(BattleData data, int matchMode, long seed, boolean competitivePvp) {
         this.data = data;
+        this.matchMode = matchMode;
         this.pve = matchMode == BattleConstants.MATCH_MODE_PVE_SOLO || matchMode == BattleConstants.MATCH_MODE_PVE_TEAM;
         this.competitivePvp = competitivePvp;
         this.rng = new BattleRandom(seed);
@@ -95,6 +98,9 @@ final class BattleContext {
     }
 
     int escalationStartRound() {
+        if (BattleConstants.isGuildWarMatchMode(matchMode)) {
+            return BattleConstants.GUILD_WAR_ESCALATION_START_ROUND;
+        }
         if (!competitivePvp || Integer.compareUnsigned(maxRounds, BattleConstants.ESCALATION_MIN_ROUND_LIMIT) < 0) {
             return 0;
         }
@@ -110,11 +116,17 @@ final class BattleContext {
     }
 
     long escalationDamagePct() {
-        return 100L + Integer.toUnsignedLong(escalationStacks()) * BattleConstants.ESCALATION_STEP_PCT;
+        long step = BattleConstants.isGuildWarMatchMode(matchMode)
+                ? BattleConstants.GUILD_WAR_ESCALATION_STEP_PCT
+                : BattleConstants.ESCALATION_STEP_PCT;
+        return 100L + Integer.toUnsignedLong(escalationStacks()) * step;
     }
 
     long escalationSupportPct() {
-        long penalty = Integer.toUnsignedLong(escalationStacks()) * BattleConstants.ESCALATION_STEP_PCT;
+        long step = BattleConstants.isGuildWarMatchMode(matchMode)
+                ? BattleConstants.GUILD_WAR_ESCALATION_STEP_PCT
+                : BattleConstants.ESCALATION_STEP_PCT;
+        long penalty = Integer.toUnsignedLong(escalationStacks()) * step;
         return penalty >= 100L - BattleConstants.ESCALATION_SUPPORT_FLOOR_PCT
                 ? BattleConstants.ESCALATION_SUPPORT_FLOOR_PCT
                 : 100L - penalty;
@@ -128,6 +140,35 @@ final class BattleContext {
         this.activeTournamentLeyline = element == null
                 ? TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED
                 : element;
+    }
+
+    int activeSeasonWeeklyAffixId() {
+        return activeSeasonWeeklyAffixId;
+    }
+
+    void setActiveSeasonWeeklyAffixId(int affixId) {
+        this.activeSeasonWeeklyAffixId = SeasonRules.isValidWeeklyAffixId(affixId)
+                ? affixId
+                : SeasonRules.WEEKLY_AFFIX_NONE;
+    }
+
+    boolean hasAnyActiveShield(BattleUnit target) {
+        if (target == null) {
+            return false;
+        }
+        if (Long.compareUnsigned(target.tournamentEarthShield(), 0L) > 0) {
+            return true;
+        }
+        for (var entry : target.state().getBuffsList()) {
+            if (entry.getRemainingCapacity() == 0L) {
+                continue;
+            }
+            var row = data.buff(entry.getBuffTableId());
+            if (row.isPresent() && row.get().getBattleOp() == BattleEffect.SHIELD) {
+                return true;
+            }
+        }
+        return false;
     }
 
     long landedHeal(BattleUnit target, double rawHeal) {
@@ -349,6 +390,11 @@ final class BattleContext {
                                      double attackMultiplier, int damageType) {
         double finalDamage = damageBeforeCriticalRoll(caster, target, baseDamage, attack, attackMultiplier, damageType);
         double critChance = criticalChance(caster, damageType);
+        if (encounter.bossWeeklyAffixId() == BossTrialWeeklyAffixRules.AFFIX_METAL
+                && caster.teamIndex() == 0 && target.teamIndex() == 1
+                && encounter.isActorExposed(target.actorId())) {
+            critChance = Math.min(1.0, critChance + BossTrialWeeklyAffixRules.METAL_EXPOSED_CRIT_BONUS_PCT / 100.0);
+        }
         boolean critical = false;
         // 满暴击依然掷一次，零概率短路；纯计算拆分不能平移本局后续 RNG 序列。
         if (critChance > 0.0 && rng.rand01() < critChance) {
@@ -382,6 +428,16 @@ final class BattleContext {
             case TOURNAMENT_LEYLINE_EARTH -> damage *= 95.0 / 100.0;
             default -> {
             }
+        }
+        // 赛季全员对称周环境词缀（对齐 C++ TurnBattleEngine::DamageBeforeCriticalRoll）。
+        int openingReducePct = SeasonRules.openingGuardDamageReducePct(activeSeasonWeeklyAffixId, roundIndex);
+        if (openingReducePct > 0) {
+            damage *= (100.0 - openingReducePct) / 100.0;
+        }
+        int sharpBonusPct = SeasonRules.sharpTempoUnshieldedDamageBonusPct(
+                activeSeasonWeeklyAffixId, hasAnyActiveShield(target));
+        if (sharpBonusPct > 0) {
+            damage *= (100.0 + sharpBonusPct) / 100.0;
         }
         return damage;
     }

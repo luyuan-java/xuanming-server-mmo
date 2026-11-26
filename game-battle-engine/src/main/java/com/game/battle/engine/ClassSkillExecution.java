@@ -102,7 +102,7 @@ final class ClassSkillExecution {
     }
 
     private void consumeMana(BattleUnit actor, SkillTable skill) {
-        long cost = BattleRules.skillManaCost(skill, actor.maxMana());
+        long cost = ctx.encounter.adjustWeeklySkillManaCost(actor, skill, BattleRules.skillManaCost(skill, actor.maxMana()));
         if (cost == 0) return;
         long before = actor.mana();
         actor.setMana(Long.compareUnsigned(before, cost) > 0 ? before - cost : 0);
@@ -161,16 +161,22 @@ final class ClassSkillExecution {
                     .setManaDelta(EventLog.signedManaDelta(restored, true));
         }
         if (skill.getDispelCount() != 0) {
+            boolean clearedWeekly = false;
             if (actor.teamIndex() != target.teamIndex()) {
                 ctx.encounter.tryDispelBossStance(actor, target);
             } else if (ctx.encounter.clearSunder(target.actorId())) {
                 ctx.encounter.recordEffectiveContribution(actor);
+                clearedWeekly = true;
             }
             if (buffs.dispelDebuffs(target, skill.getDispelCount()) > 0) {
                 ctx.encounter.recordEffectiveContribution(actor);
+                clearedWeekly = true;
                 if (actor.teamIndex() == target.teamIndex()) {
                     ctx.encounter.markAntiControlOrSeasonSkill(EncounterMechanics.ownerPlayerIdOf(actor));
                 }
+            }
+            if (clearedWeekly) {
+                ctx.encounter.onWeeklyAffixDispelTriggered(actor);
             }
         }
         double percent = skill.getBuffPercent() * ClassSkillRules.supportRankFactor(rank);

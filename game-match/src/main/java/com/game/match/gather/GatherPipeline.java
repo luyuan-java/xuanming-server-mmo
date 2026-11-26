@@ -141,10 +141,12 @@ public final class GatherPipeline {
     private com.game.match.script.BattleScriptResolver scriptResolver;
     private com.game.match.ranked.RankedStore rankedStore;
     private com.game.match.ranked.RankedTables rankedTables;
+    private com.game.match.tournament.TournamentStore tournamentStore;
     public GatherPipeline withGlobal(com.game.match.global.GlobalMatchService global){this.global=global;return this;}
     public GatherPipeline withBattleScriptResolver(com.game.match.script.BattleScriptResolver resolver){this.scriptResolver=resolver;return this;}
     public GatherPipeline withRankedStore(com.game.match.ranked.RankedStore store){this.rankedStore=store;return this;}
     public GatherPipeline withRankedTables(com.game.match.ranked.RankedTables tables){this.rankedTables=tables;return this;}
+    public GatherPipeline withTournamentStore(com.game.match.tournament.TournamentStore store){this.tournamentStore=store;return this;}
 
     /**
      * 生产装配。
@@ -324,7 +326,8 @@ public final class GatherPipeline {
                 switch (parts.scenes().prepare(request)) {
                     case ScenePreparer.Prepare.Ok ok -> {
                         cancels.add(new Compensation.Cancel(playerId, ok.endpoint()));
-                        prepared.add(new Prepared(playerId, ok.response().getSnapshot().toBuilder().setTeamIndex(teams[i]).build(),
+                        int assignedTeam = plan.memberTeams().getOrDefault(playerId, teams[i]);
+                        prepared.add(new Prepared(playerId, ok.response().getSnapshot().toBuilder().setTeamIndex(assignedTeam).build(),
                                 ok.response().getTableFingerprint()));
                     }
                     case ScenePreparer.Prepare.Failed failed -> {
@@ -375,6 +378,13 @@ public final class GatherPipeline {
                 create.addPlayers(member.snapshot());
                 record.addPlayerNames(member.snapshot().getPlayerName());
             }
+            for (BattlePlayerSnapshot aiDef : plan.aiDefenderSnapshots()) {
+                BattlePlayerSnapshot forced = aiDef.toBuilder().setTeamIndex(1).setAiControlled(true).build();
+                create.addPlayers(forced);
+                if (!forced.getPlayerName().isEmpty()) {
+                    record.addPlayerNames(forced.getPlayerName());
+                }
+            }
             if (rankedContext != null) {
                 create.setRankedContext(rankedContext);
             }
@@ -383,6 +393,9 @@ public final class GatherPipeline {
             }
             if (plan.tournamentContext() != null) {
                 create.setTournamentContext(plan.tournamentContext());
+                if (tournamentStore != null && plan.tournamentContext().getSeasonId() != 0) {
+                    tournamentStore.syncMemberProfiles(plan.tournamentContext().getSeasonId(), create.getPlayersList());
+                }
             }
             com.game.match.ranked.RankedTables catalogTables = rankedTables != null ? rankedTables
                     : (rankedStore != null ? rankedStore.tables() : null);

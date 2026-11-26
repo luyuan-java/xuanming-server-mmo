@@ -164,7 +164,9 @@ final class BattleEquipment {
     }
 
     long manaCost(BattleUnit source, SkillTable skill) {
-        return SupportEffectRules.discountMana(ClassSkillRules.manaCost(source.maxMana(),skill.getManaPercent()),discount(source,skill));
+        long base = SupportEffectRules.discountMana(ClassSkillRules.manaCost(source.maxMana(), skill.getManaPercent()),
+                discount(source, skill));
+        return ctx.encounter.adjustWeeklySkillManaCost(source, skill, base);
     }
 
     double healingBonus(BattleUnit source) {

@@ -312,12 +312,14 @@ class EnhancePityAndMaterialLedgerTest {
         assertThat(delta.totalUnitsAdded()).isEqualTo(15);
         assertThat(delta.tradableUnitsAdded()).isEqualTo(1);
 
-        // 未经账号目录确认前，领取含可交易份数的批次必须 fail-closed 拒回 kServiceUnavailable
+        // 未经账号目录确认前，领取含可交易份数的批次必须 fail-closed 拒回 kServiceUnavailable，并附带可用快照供客户端识别核验中提示
         var blockedClaim = f.craft.claimMaterialReward(alt, ClaimEquipmentMaterialRewardRequest.newBuilder()
                 .setClientRequestId(9201L).setExpectedRevision(0L)
                 .setCraftingMaterialCount(10).setEnhancementStoneCount(5).build(), bagView, monWeek1, f.world);
         assertThat(blockedClaim.getErrorMessage().getId())
                 .isEqualTo(com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+        assertThat(blockedClaim.getOutcome()).isEqualTo(com.game.proto.ClaimEquipmentMaterialRewardResponse.Outcome.UNKNOWN);
+        assertThat(blockedClaim.getSnapshot().getAvailable()).isTrue();
 
         // 账号目录回包：该账号已用 60/60，本小号确认额度 0 -> 本地超额未确认可交易额平滑降级为绑定自用（总份数 15 不变）
         pendingSyncs.removeFirst().complete(new com.game.player.store.PlayerStore.Stage1TradableQuotaOutcome(true, 0, accountUsed.get()));

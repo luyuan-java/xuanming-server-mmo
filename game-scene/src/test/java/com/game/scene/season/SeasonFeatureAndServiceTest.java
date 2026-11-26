@@ -363,8 +363,11 @@ class SeasonFeatureAndServiceTest {
 
         // 换季 / 休赛期（显式验证有界窗口结束后赛季技能与赛季印全部退出不残留）
         SeasonRuleTable boundedRule = rule.toBuilder().setStartsAtMs(1_000L).setEndsAtMs(5_000L).build();
+        var ruleSeals = BattleFixture.CONFIG.seasonSeal().all().stream()
+                .filter(s -> s.getSeasonId() == rule.getId())
+                .toList();
         SeasonTables boundedTables = new SeasonTables(
-                List.of(boundedRule), BattleFixture.CONFIG.seasonSeal().all(), BattleFixture.CONFIG.skill().all());
+                List.of(boundedRule), ruleSeals, BattleFixture.CONFIG.skill().all());
         SeasonService boundedSeason = new SeasonService(boundedTables, f.currency, f.attributes, f.clock, f.sceneMetrics);
         f.attributes.withSeason((p, out) -> boundedSeason.collectEffects(p, f.clock.epochMillis(), out),
                 boundedSeason::activeSeasonId);
@@ -389,11 +392,91 @@ class SeasonFeatureAndServiceTest {
         SeasonSealTable seal2 = BattleFixture.CONFIG.seasonSeal().all().getFirst().toBuilder()
                 .setId(999).setSeasonId(overlap.getId()).build();
         overlap = overlap.toBuilder().setDefaultSealId(999).build();
-        var seals = new java.util.ArrayList<>(BattleFixture.CONFIG.seasonSeal().all());
+        var seals = new java.util.ArrayList<>(BattleFixture.CONFIG.seasonSeal().all().stream()
+                .filter(s -> s.getSeasonId() == r1.getId())
+                .toList());
         seals.add(seal2);
 
         SeasonTables bad = new SeasonTables(List.of(r1, overlap), seals, BattleFixture.CONFIG.skill().all());
         assertThat(bad.isValid()).isFalse();
         assertThat(bad.activeSeason(r1.getStartsAtMs() + 1000L)).isNull();
+    }
+
+    @Test
+    void 周词缀结算增量S2预埋换季与永久零数值纪念称谓() {
+        var f = new BattleFixture();
+        ensureActiveSeason(f);
+        var player = enterLevelPlayer(f, 99, 7109L, 30);
+        long nowMs = f.clock.epochMillis();
+        SeasonTables realTables = SeasonTables.from(BattleFixture.CONFIG);
+        assertThat(realTables.isValid()).isTrue();
+        SeasonService service = new SeasonService(realTables, f.currency, f.attributes, f.clock, f.sceneMetrics);
+
+        // 1. S1 默认活跃且携带周词缀与未解锁的「破阵宗师」纪念荣誉
+        assertThat(service.activeSeasonId(nowMs)).isEqualTo(1);
+        int weeklyAffix = service.activeWeeklyAffixId(nowMs);
+        assertThat(com.game.battle.engine.SeasonRules.isValidWeeklyAffixId(weeklyAffix)).isTrue();
+        var initState = service.getState(player, nowMs).getState();
+        assertThat(initState.getWeeklyAffix().getAffixId()).isEqualTo(weeklyAffix);
+        assertThat(initState.getWeeklyAffix().getRecommendedSealIdsCount()).isPositive();
+        assertThat(initState.getHonorsList()).singleElement().satisfies(h -> {
+            assertThat(h.getSeasonId()).isEqualTo(1);
+            assertThat(h.getHonorTitleName()).isEqualTo("破阵宗师");
+            assertThat(h.getUnlocked()).isFalse();
+        });
+
+        // 2. 11 -> 12 结算首次解锁纪念荣誉；满级后再打 pointsAdded=0 且 honorNewlyUnlocked=false
+        player.season().putRecord(com.game.player.store.state.PlayerSeasonSealRecordState.newBuilder()
+                .setSeasonId(1).setEquippedSealId(101).setProgressPoints(11).setBattlePoints(11).build());
+        var pveWin = BattleSettlementData.newBuilder()
+                .setBattleId(88001L).setPlayerId(player.playerId()).setPlayerTeamIndex(0)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                .setMatchMode(MatchMode.MATCH_MODE_PVE_SOLO_VALUE)
+                .setTotalRounds(3)
+                .build();
+        var c1 = service.creditBattlePoints(player, pveWin, nowMs);
+        assertThat(c1.pointsAdded()).isEqualTo(1);
+        assertThat(c1.progressAfter()).isEqualTo(12);
+        assertThat(c1.maxPoints()).isEqualTo(12);
+        assertThat(c1.honorNewlyUnlocked()).isTrue();
+
+        var c2 = service.creditBattlePoints(player, pveWin, nowMs);
+        assertThat(c2.pointsAdded()).isZero();
+        assertThat(c2.progressAfter()).isEqualTo(12);
+        assertThat(c2.maxPoints()).isEqualTo(12);
+        assertThat(c2.honorNewlyUnlocked()).isFalse();
+
+        // 3. 切到预埋的 S2「玄脉之季」：S2 4 印 4 技生效，进度清零，S1 纪念荣誉永久留存
+        var s2Rules = BattleFixture.CONFIG.seasonRule().all().stream()
+                .map(r -> r.toBuilder().setEnabled(r.getId() == 2).build())
+                .toList();
+        SeasonTables s2Tables = new SeasonTables(s2Rules, BattleFixture.CONFIG.seasonSeal().all(), BattleFixture.CONFIG.skill().all());
+        assertThat(s2Tables.isValid()).isTrue();
+        SeasonService s2Service = new SeasonService(s2Tables, f.currency, f.attributes, f.clock, f.sceneMetrics);
+        var s2Snap = s2Service.getState(player, nowMs).getState();
+        assertThat(s2Snap.getAvailable()).isTrue();
+        assertThat(s2Snap.getSeasonId()).isEqualTo(2);
+        assertThat(s2Snap.getSeasonName()).isEqualTo("玄脉之季");
+        assertThat(s2Snap.getEquippedSealId()).isEqualTo(201);
+        assertThat(s2Snap.getProgressPoints()).isZero();
+        assertThat(s2Snap.getSealsCount()).isEqualTo(4);
+        assertThat(s2Snap.getSeasonSkillsCount()).isEqualTo(4);
+        assertThat(s2Snap.getHonorsList()).hasSize(2);
+        assertThat(s2Snap.getHonors(0).getSeasonId()).isEqualTo(1);
+        assertThat(s2Snap.getHonors(0).getUnlocked()).isTrue();
+        assertThat(s2Snap.getHonors(1).getSeasonId()).isEqualTo(2);
+        assertThat(s2Snap.getHonors(1).getUnlocked()).isFalse();
+
+        // 4. 休赛期依然返回历史永久纪念荣誉
+        var offRules = s2Rules.stream().map(r -> r.toBuilder().setEnabled(false).build()).toList();
+        SeasonService offService = new SeasonService(
+                new SeasonTables(offRules, BattleFixture.CONFIG.seasonSeal().all(), BattleFixture.CONFIG.skill().all()),
+                f.currency, f.attributes, f.clock, f.sceneMetrics);
+        var offSnap = offService.getState(player, nowMs).getState();
+        assertThat(offSnap.getAvailable()).isFalse();
+        assertThat(offSnap.getHonorsList()).singleElement().satisfies(h -> {
+            assertThat(h.getSeasonId()).isEqualTo(1);
+            assertThat(h.getUnlocked()).isTrue();
+        });
     }
 }

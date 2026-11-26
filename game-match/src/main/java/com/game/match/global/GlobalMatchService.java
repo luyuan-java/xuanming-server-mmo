@@ -608,9 +608,13 @@ public final class GlobalMatchService implements AutoCloseable {
     private com.game.match.script.BattleScriptResolver scriptResolver;
     private com.game.match.ranked.RankedStore rankedStore;
     private com.game.match.ranked.RankedTables rankedTables;
+    private com.game.match.tournament.TournamentStore tournamentStore;
     public GlobalMatchService withBattleScriptResolver(com.game.match.script.BattleScriptResolver resolver){this.scriptResolver=resolver;return this;}
     public GlobalMatchService withRanked(com.game.match.ranked.RankedStore store,com.game.match.ranked.RankedTables tables){
         this.rankedStore=store;this.rankedTables=tables;return this;
+    }
+    public GlobalMatchService withTournamentStore(com.game.match.tournament.TournamentStore store){
+        this.tournamentStore=store;return this;
     }
     private GatherResult execute(GlobalFormationRow initial) {
         var f=initial;
@@ -665,7 +669,11 @@ public final class GlobalMatchService implements AutoCloseable {
                 request.setRankedContext(rankedContext);
             }
             if(!f.getActivityContext().isEmpty())request.setActivityContext(BattleActivityContext.parseFrom(f.getActivityContext()));
-            if(!f.getTournamentContext().isEmpty())request.setTournamentContext(com.game.proto.TournamentBattleContext.parseFrom(f.getTournamentContext()));
+            if(!f.getTournamentContext().isEmpty()){
+                var tCtx=com.game.proto.TournamentBattleContext.parseFrom(f.getTournamentContext());
+                request.setTournamentContext(tCtx);
+                if(tournamentStore!=null&&tCtx.getSeasonId()!=0){tournamentStore.syncMemberProfiles(tCtx.getSeasonId(),snapshots);}
+            }
             if (rankedTables != null) {
                 rankedTables.trialContextFor(f.getMode(), f.getConfigId(),
                                 request.hasActivityContext() ? request.getActivityContext() : null, rankedContext)

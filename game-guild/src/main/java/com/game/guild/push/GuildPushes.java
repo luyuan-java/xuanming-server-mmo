@@ -89,6 +89,7 @@ public final class GuildPushes {
     private final Pusher pusher;
     private final PushMetrics metrics;
     private final int messageId;
+    private final int warAlertMessageId;
     private final long timeoutMillis;
 
     /**
@@ -96,10 +97,46 @@ public final class GuildPushes {
      * @param timeout   一批推送的上界（{@code game.guild.push-timeout}）
      */
     public GuildPushes(Pusher pusher, PushMetrics metrics, int messageId, Duration timeout) {
+        this(pusher, metrics, messageId, 0, timeout);
+    }
+
+    public GuildPushes(Pusher pusher, PushMetrics metrics, int messageId, int warAlertMessageId, Duration timeout) {
         this.pusher = pusher;
         this.metrics = metrics;
         this.messageId = messageId;
+        this.warAlertMessageId = warAlertMessageId;
         this.timeoutMillis = timeout.toMillis();
+    }
+
+    /** 异步向在线目标推送帮战/追杀预警横幅（至多一次、不阻塞 RPC）。 */
+    public void notifyWarAlert(com.game.proto.guild.GuildWarAlertS2C alert, Collection<Long> recipients) {
+        if (alert == null || warAlertMessageId == 0) {
+            return;
+        }
+        List<Long> ids;
+        try {
+            ids = uniqueNonZero(recipients);
+        } catch (RuntimeException e) {
+            return;
+        }
+        if (ids.isEmpty()) {
+            return;
+        }
+        try {
+            MessageContent content = MessageContent.newBuilder()
+                    .setMessageId(warAlertMessageId)
+                    .setSerializedMessage(alert.toByteString())
+                    .build();
+            pusher.push(ids, content).toCompletableFuture()
+                    .orTimeout(timeoutMillis, TimeUnit.MILLISECONDS)
+                    .whenComplete((outcomes, error) -> {
+                        if (error != null) {
+                            log.warn("[guild] 帮战预警推送失败 recipients={}: {}", ids.size(), error.toString());
+                        }
+                    });
+        } catch (RuntimeException e) {
+            log.warn("[guild] 帮战预警推送发不出去 recipients={}: {}", ids.size(), e.toString());
+        }
     }
 
     /**

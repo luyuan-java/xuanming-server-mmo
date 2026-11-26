@@ -32,6 +32,7 @@ public final class FakePlayerStatus implements PlayerStatusReader {
     /** 读的次序：{@code "lock:<pid>"} / {@code "presence:<pid>"} / {@code "location:<pid>"}。 */
     public final List<String> reads = new CopyOnWriteArrayList<>();
     private final Map<Long, Boolean> locks = new ConcurrentHashMap<>();
+    private final Map<Long, Long> lockBattleIds = new ConcurrentHashMap<>();
     private final Map<Long, PlayerPresence> presences = new ConcurrentHashMap<>();
     private final Map<Long, HolderRead> locations = new ConcurrentHashMap<>();
     private final Map<String, Boolean> failing = new ConcurrentHashMap<>();
@@ -93,6 +94,19 @@ public final class FakePlayerStatus implements PlayerStatusReader {
 
     public FakePlayerStatus inBattle(long playerId, boolean locked) {
         locks.put(playerId, locked);
+        if (!locked) {
+            lockBattleIds.remove(playerId);
+        }
+        return this;
+    }
+
+    public FakePlayerStatus inBattle(long playerId, long battleId) {
+        locks.put(playerId, battleId != 0L);
+        if (battleId != 0L) {
+            lockBattleIds.put(playerId, battleId);
+        } else {
+            lockBattleIds.remove(playerId);
+        }
         return this;
     }
 
@@ -125,6 +139,15 @@ public final class FakePlayerStatus implements PlayerStatusReader {
     public boolean inBattle(long playerId, Deadline d) {
         enter("lock", playerId, "读战斗锁");
         return locks.getOrDefault(playerId, false);
+    }
+
+    @Override
+    public long battleLockId(long playerId, Deadline d) {
+        enter("lock", playerId, "读战斗锁");
+        if (!locks.getOrDefault(playerId, false)) {
+            return 0L;
+        }
+        return lockBattleIds.getOrDefault(playerId, 1L);
     }
 
     @Override
