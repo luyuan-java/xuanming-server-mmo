@@ -80,6 +80,41 @@ class PlayerTradeGuardAndReferencePriceTest {
         assertThat(res.requireCoolingLock()).isFalse();
         assertThat(res.reason()).isEqualTo("strict_consumables_ok");
 
+        // 事务连接复用路径应将传入的 Connection 直接交给 DailyPlayerTradeTracker
+        var seenConn = new java.util.concurrent.atomic.AtomicReference<Connection>();
+        Connection fakeTxConn = (Connection) Proxy.newProxyInstance(
+                Connection.class.getClassLoader(), new Class<?>[] {Connection.class}, (p, m, a) -> null);
+        var txGuard = new PlayerTradeGuard(
+                new PlayerTradeGuard.Policy(
+                        PlayerTradeGuard.MODE_STRICT_CONSUMABLES,
+                        Set.of(501, 502),
+                        10_000L,
+                        GOLD,
+                        0L, 0, 0L, false),
+                null,
+                null,
+                new PlayerTradeGuard.DailyPlayerTradeTracker() {
+                    @Override
+                    public long dailyCurrencyOutflow(long playerId, int currencyType, long dayStartMs) {
+                        throw new AssertionError("有事务连接时不得回退到无连接方法");
+                    }
+
+                    @Override
+                    public long dailyCurrencyOutflow(Connection c, long playerId, int currencyType, long dayStartMs) {
+                        seenConn.set(c);
+                        return 7_000L;
+                    }
+                });
+        var txRes = txGuard.evaluate(
+                fakeTxConn,
+                101L,
+                202L,
+                TradeAssetSelection.newBuilder().putItems(501, 5).setCurrencyType(GOLD).setCurrencyAmount(3_000L).build(),
+                TradeAssetSelection.newBuilder().putItems(502, 2).build(),
+                now);
+        assertThat(txRes.requireCoolingLock()).isFalse();
+        assertThat(seenConn.get()).isSameAs(fakeTxConn);
+
         // 拒绝：超过单日累计银两上限（7000 + 3001 > 10000）
         assertRefusal(
                 CommerceRules.NOT_TRADABLE,

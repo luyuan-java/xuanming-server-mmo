@@ -74,7 +74,7 @@ class BattleUplinkRejectedTest {
     void 大厅上发战斗服务的每个号_都回带id的信封1003_不计非法包不断连不转发() {
         EmbeddedChannel ch = verified(16, STRICT, Map.of("friend", friend));
         assertThat(battle).extracting(MessageMethod::messageId)
-                .containsExactly(139, 140, 143, 144, 149, 150, 158, 161, 162, 165, 166, 177, 479, 480, 504, 505);
+                .containsExactly(139, 140, 143, 144, 149, 150, 158, 161, 162, 165, 166, 177, 479, 480, 504, 505, 532, 533);
 
         long requestId = 1;
         for (MessageMethod method : battle) {
@@ -92,7 +92,7 @@ class BattleUplinkRejectedTest {
         assertThat(login.calls).as("不转给 login").isEmpty();
         assertThat(friend.calls).as("不转给任何后端").isEmpty();
         assertThat(links.sent).as("不转给 scene").isEmpty();
-        assertThat(battleRejected()).as("16 个号各计一次 result=battle_rejected").hasSize(16)
+        assertThat(battleRejected()).as("18 个号各计一次 result=battle_rejected").hasSize(18)
                 .extracting(Counter::count).containsOnly(1.0);
         assertThat(battleRejected()).extracting(c -> c.getId().getTag("route")).containsOnly(UNSUPPORTED);
         assertThat(requestCounters("unsupported")).as("6.2 的口径（缺省分支的 unsupported）不再出现").isEmpty();
@@ -109,7 +109,7 @@ class BattleUplinkRejectedTest {
         EmbeddedChannel ch = verified(16, STRICT, Map.of());
 
         Collection<Counter> prebuilt = meters.find("game.gate.client.requests").counters();
-        assertThat(prebuilt).as("还没有任何请求：只有预建的 16 条").hasSize(16).allSatisfy(c -> {
+        assertThat(prebuilt).as("还没有任何请求：只有预建的 18 条").hasSize(18).allSatisfy(c -> {
             assertThat(c.count()).isZero();
             assertThat(c.getId().getTag("result")).isEqualTo("battle_rejected");
             assertThat(c.getId().getTag("route")).isEqualTo(UNSUPPORTED);
@@ -122,8 +122,8 @@ class BattleUplinkRejectedTest {
         expectRejected(ch, submit.key(), 1, submit.messageId());
 
         assertThat(rejected(submit)).isEqualTo(1);
-        assertThat(meters.find("game.gate.client.requests").counters()).as("计在预建的那条上，没有新序列").hasSize(16);
-        assertThat(battleRejected()).extracting(Counter::count).containsOnlyOnce(1.0).filteredOn(v -> v == 0.0).hasSize(15);
+        assertThat(meters.find("game.gate.client.requests").counters()).as("计在预建的那条上，没有新序列").hasSize(18);
+        assertThat(battleRejected()).extracting(Counter::count).containsOnlyOnce(1.0).filteredOn(v -> v == 0.0).hasSize(17);
     }
 
     @Test
@@ -147,7 +147,7 @@ class BattleUplinkRejectedTest {
         }
         assertThat(session.inFlight).isTrue();
         assertThat(login.calls).hasSize(1);
-        assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(16);
+        assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(18);
 
         // login 回来：先回它自己的应答，再轮到排队的 scene 请求（没进场景 → 带请求 id 的信封 1003，2026-10-15 起，原为 23 {1003}）；
         // 战斗拒绝不会再发第二遍
@@ -158,7 +158,7 @@ class BattleUplinkRejectedTest {
         assertThat(reply.getId()).isEqualTo(1);
         assertThat(reply.getSerializedMessage().toStringUtf8()).isEqualTo("login-resp");
         expectRejected(ch, "排队的 scene 请求（没进场景）", 2, listSkills);
-        assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(16);
+        assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(18);
         assertThat(ch.isOpen()).isTrue();
     }
 
@@ -184,7 +184,7 @@ class BattleUplinkRejectedTest {
         assertThat(session.illegalPackets).isZero();
         assertThat(disconnects()).isZero();
         assertThat(requestCounters("overflow")).isEmpty();
-        assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(16);
+        assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(18);
         assertThat(login.calls).hasSize(1);
 
         // 对照：队列确实是满的——再来一条普通请求就溢出断开
@@ -226,7 +226,7 @@ class BattleUplinkRejectedTest {
             assertThat(blocked).as("没有一条记成热关停短路").isEmpty();
             assertThat(requestCounters("killed")).isEmpty();
             assertThat(rejected(submit)).isEqualTo(3);
-            assertThat(battleRejected()).extracting(Counter::count).containsOnly(2.0, 3.0).hasSize(16);
+            assertThat(battleRejected()).extracting(Counter::count).containsOnly(2.0, 3.0).hasSize(18);
             assertThat(session().illegalPackets).isZero();
 
             // 对照：全局规则还在，同一连接上的普通请求回的是带请求 id 的信封 1003，并记一次短路
@@ -266,7 +266,7 @@ class BattleUplinkRejectedTest {
         assertThat(session().backendQueue).isEmpty();
         assertThat(session().backendInFlight).isFalse();
         assertThat(requestCounters("forwarded")).isEmpty();
-        assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(16);
+        assertThat(battleRejected()).extracting(Counter::count).containsOnly(1.0).hasSize(18);
     }
 
     @Test
@@ -340,7 +340,7 @@ class BattleUplinkRejectedTest {
         ch.writeInbound(request(1, method("SubmitBattleAction").messageId(), "action"));
         assertThat((Object) ch.readOutbound()).isNull();
         assertThat(ch.isOpen()).isFalse();
-        assertThat(battleRejected()).extracting(Counter::count).containsOnly(0.0).hasSize(16);
+        assertThat(battleRejected()).extracting(Counter::count).containsOnly(0.0).hasSize(18);
     }
 
     // ================================================================ 工具

@@ -6,9 +6,11 @@ import com.game.api.proto.SessionDirective;
 import com.game.login.account.AccountLogin;
 import com.game.login.dispatch.ClientMessageHandler;
 import com.game.login.dispatch.HandlerReply;
+import com.game.login.dispatch.Tips;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.login.LoginRequest;
 import com.game.proto.login.LoginResponse;
+import com.game.table.LoginErrorTip;
 import com.google.protobuf.Message;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -49,6 +51,12 @@ public final class LoginHandler implements ClientMessageHandler<LoginRequest> {
 
     @Override
     public CompletableFuture<HandlerReply> handle(SessionContext session, LoginRequest request) {
+        // 已进游戏角色必须先 LeaveGame 解绑，禁止同连接重登覆盖账号并绕过未成年人防沉迷计时。
+        if (session.getPlayerId() != 0) {
+            return CompletableFuture.completedFuture(HandlerReply.of(LoginResponse.newBuilder()
+                    .setErrorMessage(Tips.of(LoginErrorTip.login_error.kLoginSessionNotFound_VALUE))
+                    .build()));
+        }
         AccountLogin.Outcome outcome = accountLogin.loginOnSession(session, request);
         if (!outcome.succeeded()) {
             return CompletableFuture.completedFuture(HandlerReply.of(outcome.response()));

@@ -2357,6 +2357,36 @@ class ClientDispatcherTest {
     }
 
     @Test
+    void 已进游戏的未成年人会话收到BindAccount时不覆盖账号也不取消防沉迷踢线() {
+        EmbeddedChannel ch = verified();
+        long deadlineMs = NOW * 1000L + 50L;
+        ch.writeInbound(request(901, LOGIN_MSG, "minor-login"));
+        login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder()
+                        .setBindAccount(BindAccount.newBuilder().setAccount("minor_1").setPlayDeadlineMs(deadlineMs)))
+                .addDirectives(SessionDirective.newBuilder().setEnterScene(enterScene()))
+                .build());
+        ch.runPendingTasks();
+        ch.readOutbound();
+
+        // 已在游戏内时若异常收到成人 BindAccount（无 deadline），必须忽略且保留原未成年人定时踢线
+        ch.writeInbound(request(902, LOGIN_MSG, "adult-relogin"));
+        login.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder()
+                        .setBindAccount(BindAccount.newBuilder().setAccount("adult_override")))
+                .build());
+        ch.runPendingTasks();
+        ch.readOutbound();
+
+        ch.advanceTimeBy(60, TimeUnit.MILLISECONDS);
+        ch.runScheduledPendingTasks();
+        Object kickFrame = ch.readOutbound();
+        assertThat(kickFrame).isNotNull();
+        assertThat(tipOf(kickFrame)).isEqualTo(ClientDispatcher.TIP_MINOR_PLAY_TIME_OVER);
+        assertThat(ch.isOpen()).isFalse();
+    }
+
+    @Test
     void 绑定账号后周期合成RenewSession并承接未成年人兜底踢线() {
         MessageRoute loginRoute = new MessageRoute(LOGIN_MSG, "login", true, "ClientPlayerLogin.Login");
         MessageRoute renewRoute = new MessageRoute(394, "login", true, "ClientPlayerLogin.RenewSession",

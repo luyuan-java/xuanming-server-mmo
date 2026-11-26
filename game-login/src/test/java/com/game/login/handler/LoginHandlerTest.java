@@ -360,4 +360,16 @@ class LoginHandlerTest {
         devices.broken = true;
         flow.closeDeviceSession(bound);   // 存储故障只记日志（按登记有效期自愈），不抛
     }
+
+    @Test
+    void 已进游戏会话再次Login拒绝2028_不覆盖账号也不触碰存储() throws Exception {
+        SessionContext inGame = session(7).toBuilder().setAccount("robot_minor").setPlayerId(9001L).build();
+
+        HandlerReply reply = handler.handle(inGame, passwordLogin("robot_adult")).join();
+
+        assertThat(response(reply).getErrorMessage().getId())
+                .isEqualTo(LoginErrorTip.login_error.kLoginSessionNotFound_VALUE);
+        assertThat(reply.directives()).isEmpty();
+        verify(store, never()).ensureAccount(anyString());
+    }
 }

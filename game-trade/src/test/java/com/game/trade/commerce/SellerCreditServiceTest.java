@@ -524,6 +524,108 @@ class SellerCreditServiceTest {
                 .isEmpty();
     }
 
+    @Test
+    void SqlStore单事务行锁防并发覆盖与违约提交原子性() throws Exception {
+        long now = 1_760_000_000_000L;
+        var connectionsOpened = new java.util.concurrent.atomic.AtomicInteger();
+        var commits = new java.util.concurrent.atomic.AtomicInteger();
+        var rollbacks = new java.util.concurrent.atomic.AtomicInteger();
+        var executedSql = new java.util.ArrayList<String>();
+        var autoCommits = new java.util.ArrayList<Boolean>();
+        var seenProfileRow = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        javax.sql.DataSource ds = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(
+                javax.sql.DataSource.class.getClassLoader(),
+                new Class<?>[] {javax.sql.DataSource.class},
+                (p, m, a) -> {
+                    if (!"getConnection".equals(m.getName())) {
+                        return null;
+                    }
+                    connectionsOpened.incrementAndGet();
+                    return java.lang.reflect.Proxy.newProxyInstance(
+                            java.sql.Connection.class.getClassLoader(),
+                            new Class<?>[] {java.sql.Connection.class},
+                            (cp, cm, ca) -> switch (cm.getName()) {
+                                case "setAutoCommit" -> {
+                                    autoCommits.add((Boolean) ca[0]);
+                                    yield null;
+                                }
+                                case "commit" -> {
+                                    commits.incrementAndGet();
+                                    yield null;
+                                }
+                                case "rollback" -> {
+                                    rollbacks.incrementAndGet();
+                                    yield null;
+                                }
+                                case "prepareStatement" -> {
+                                    String sql = (String) ca[0];
+                                    executedSql.add(sql);
+                                    yield java.lang.reflect.Proxy.newProxyInstance(
+                                            java.sql.PreparedStatement.class.getClassLoader(),
+                                            new Class<?>[] {java.sql.PreparedStatement.class},
+                                            (sp, sm, sa) -> switch (sm.getName()) {
+                                                case "executeUpdate" -> {
+                                                    if (sql.startsWith("INSERT IGNORE INTO trade_seller_credit")) {
+                                                        seenProfileRow.set(true);
+                                                    }
+                                                    yield 1;
+                                                }
+                                                case "executeQuery" -> {
+                                                    boolean[] hasRow = {sql.contains("FROM trade_seller_credit WHERE seller_player_id")
+                                                            && seenProfileRow.get()};
+                                                    yield java.lang.reflect.Proxy.newProxyInstance(
+                                                            java.sql.ResultSet.class.getClassLoader(),
+                                                            new Class<?>[] {java.sql.ResultSet.class},
+                                                            (rp, rm, ra) -> switch (rm.getName()) {
+                                                                case "next" -> {
+                                                                    boolean r = hasRow[0];
+                                                                    hasRow[0] = false;
+                                                                    yield r;
+                                                                }
+                                                                case "getString" -> switch ((Integer) ra[0]) {
+                                                                    case 1 -> "9001";
+                                                                    case 2 -> "1";
+                                                                    case 3 -> "acct-s";
+                                                                    case 5, 6, 7, 8, 9, 10, 11, 13, 14 -> "0";
+                                                                    case 15, 16 -> "";
+                                                                    case 17 -> "[]";
+                                                                    case 21 -> "new_or_transferred";
+                                                                    default -> "0";
+                                                                };
+                                                                case "getBoolean" -> false;
+                                                                case "getInt" -> switch ((Integer) ra[0]) {
+                                                                    case 18 -> 60;
+                                                                    case 19 -> 30;
+                                                                    default -> 0;
+                                                                };
+                                                                default -> null;
+                                                            });
+                                                }
+                                                default -> null;
+                                            });
+                                }
+                                default -> null;
+                            });
+                });
+
+        var idSeq = new java.util.concurrent.atomic.AtomicLong(100);
+        var svc = new SellerCreditService(
+                new SqlStore(ds, idSeq::incrementAndGet, () -> now, new com.fasterxml.jackson.databind.ObjectMapper()),
+                null,
+                Policy.defaults());
+        var viol = svc.recordViolation(new ViolationRecord(
+                "CASE-TX-1", "ord-tx-1", 9001L, "acct-s", 1L, "fraud", now));
+        assertThat(viol.violationCount()).isEqualTo(1L);
+        assertThat(viol.riskTier()).isEqualTo(RiskTier.RESTRICTED);
+        assertThat(connectionsOpened.get()).as("整笔违约读写必须复用同一 JDBC 连接").isEqualTo(1);
+        assertThat(autoCommits).containsExactly(false);
+        assertThat(commits.get()).isEqualTo(1);
+        assertThat(rollbacks.get()).isZero();
+        assertThat(executedSql).anyMatch(s -> s.contains("FROM trade_seller_credit") && s.contains("FOR UPDATE"));
+        assertThat(executedSql).anyMatch(s -> s.startsWith("INSERT IGNORE INTO trade_seller_credit"));
+    }
+
     private static void assertRefusal(int expectedTip, org.assertj.core.api.ThrowableAssert.ThrowingCallable call) {
         assertThatThrownBy(call)
                 .isInstanceOf(CommerceRules.Refusal.class)

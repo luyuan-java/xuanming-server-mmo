@@ -303,6 +303,22 @@ public final class SellerCreditService {
 
     /** 卖家信用、成交计数、评价与违约记录的持久层抽象。 */
     public interface Store {
+        @FunctionalInterface
+        interface StoreWork<T> {
+            T run(Store txStore) throws SQLException;
+        }
+
+        /** 在单事务内按卖家 (player_id, owner_revision) 串行化读写，防止并发评价/违约相互覆盖或绕过频控。 */
+        default <T> T inTransaction(CreditKey lockKey, StoreWork<T> work) throws SQLException {
+            return work.run(this);
+        }
+
+        default void insertProfileIfAbsent(Profile profile) throws SQLException {
+            if (getProfile(new CreditKey(profile.sellerPlayerId(), profile.ownerRevision())).isEmpty()) {
+                saveProfile(profile);
+            }
+        }
+
         Optional<Profile> getProfile(CreditKey key) throws SQLException;
 
         boolean hasPriorEpoch(long sellerPlayerId, long currentRevision) throws SQLException;
@@ -344,9 +360,12 @@ public final class SellerCreditService {
         if (playerId == 0 || newAccount == null || newAccount.isEmpty() || newOwnerRevision == 0) {
             throw new CommerceRules.Refusal(INVALID);
         }
-        Profile fresh = newInitialProfile(playerId, newAccount, newOwnerRevision, true, nowMs);
-        store.saveProfile(fresh);
-        return fresh;
+        CreditKey key = new CreditKey(playerId, newOwnerRevision);
+        return store.inTransaction(key, tx -> {
+            Profile fresh = newInitialProfile(playerId, newAccount, newOwnerRevision, true, nowMs);
+            tx.saveProfile(fresh);
+            return fresh;
+        });
     }
 
     /**
@@ -367,93 +386,96 @@ public final class SellerCreditService {
                 || (ip.isEmpty() && device.isEmpty())) {
             throw new CommerceRules.Refusal(INVALID);
         }
-        Profile profile = ensureEpochProfile(
-                ev.sellerPlayerId(), ev.ownerAccount(), ev.ownerRevision(), ev.observedAtMs());
+        CreditKey key = new CreditKey(ev.sellerPlayerId(), ev.ownerRevision());
+        return store.inTransaction(key, tx -> {
+            Profile profile = ensureEpochProfile(
+                    tx, ev.sellerPlayerId(), ev.ownerAccount(), ev.ownerRevision(), ev.observedAtMs());
 
-        boolean ipChanged = !ip.isEmpty() && !profile.lastIp().isEmpty() && !ip.equals(profile.lastIp());
-        boolean hasDeviceBaseline = !profile.knownDevices().isEmpty() || !profile.lastDeviceId().isEmpty();
-        boolean isUnknownNewDevice = !device.isEmpty()
-                && hasDeviceBaseline
-                && !profile.knownDevices().contains(device)
-                && !device.equals(profile.lastDeviceId());
+            boolean ipChanged = !ip.isEmpty() && !profile.lastIp().isEmpty() && !ip.equals(profile.lastIp());
+            boolean hasDeviceBaseline = !profile.knownDevices().isEmpty() || !profile.lastDeviceId().isEmpty();
+            boolean isUnknownNewDevice = !device.isEmpty()
+                    && hasDeviceBaseline
+                    && !profile.knownDevices().contains(device)
+                    && !device.equals(profile.lastDeviceId());
 
-        boolean updated = false;
-        String nextIp = profile.lastIp();
-        if (!ip.isEmpty() && !ip.equals(nextIp)) {
-            nextIp = ip;
-            updated = true;
-        }
-
-        boolean cleared = false;
-        Profile next;
-        if (isUnknownNewDevice && ipChanged) {
-            // 严禁清空 negativeReviews 与 violationCount，防止借异地换机洗白黑历史。
-            next = recompute(new Profile(
-                    profile.sellerPlayerId(),
-                    profile.ownerAccount(),
-                    profile.ownerRevision(),
-                    profile.ownershipChanged(),
-                    profile.ownershipChangedAtMs(),
-                    profile.epochStartedAtMs(),
-                    0L,
-                    0L,
-                    0L,
-                    profile.negativeReviews(),
-                    profile.violationCount(),
-                    true,
-                    profile.envResetCount() + 1L,
-                    ev.observedAtMs(),
-                    nextIp,
-                    device,
-                    List.of(device),
-                    0,
-                    0,
-                    0,
-                    RiskTier.RESTRICTED));
-            cleared = true;
-            updated = true;
-        } else {
-            String nextDevice = profile.lastDeviceId();
-            List<String> nextKnown = profile.knownDevices();
-            if (!device.isEmpty()) {
-                if (!device.equals(nextDevice)) {
-                    nextDevice = device;
-                    updated = true;
-                }
-                if (!nextKnown.contains(device)) {
-                    nextKnown = rememberKnownDevice(nextKnown, device);
-                    updated = true;
-                }
+            boolean updated = false;
+            String nextIp = profile.lastIp();
+            if (!ip.isEmpty() && !ip.equals(nextIp)) {
+                nextIp = ip;
+                updated = true;
             }
-            next = updated
-                    ? new Profile(
-                            profile.sellerPlayerId(),
-                            profile.ownerAccount(),
-                            profile.ownerRevision(),
-                            profile.ownershipChanged(),
-                            profile.ownershipChangedAtMs(),
-                            profile.epochStartedAtMs(),
-                            profile.completedOrders(),
-                            profile.positiveReviews(),
-                            profile.neutralReviews(),
-                            profile.negativeReviews(),
-                            profile.violationCount(),
-                            profile.envCreditCleared(),
-                            profile.envResetCount(),
-                            profile.lastEnvChangedAtMs(),
-                            nextIp,
-                            nextDevice,
-                            nextKnown,
-                            profile.creditScore(),
-                            profile.starRatingTenths(),
-                            profile.positiveRateBps(),
-                            profile.riskTier())
-                    : profile;
-        }
-        if (updated) {
-            store.saveProfile(next);
-        }
-        return new EnvironmentUpdate(next, cleared);
+
+            boolean cleared = false;
+            Profile next;
+            if (isUnknownNewDevice && ipChanged) {
+                // 严禁清空 negativeReviews 与 violationCount，防止借异地换机洗白黑历史。
+                next = recompute(new Profile(
+                        profile.sellerPlayerId(),
+                        profile.ownerAccount(),
+                        profile.ownerRevision(),
+                        profile.ownershipChanged(),
+                        profile.ownershipChangedAtMs(),
+                        profile.epochStartedAtMs(),
+                        0L,
+                        0L,
+                        0L,
+                        profile.negativeReviews(),
+                        profile.violationCount(),
+                        true,
+                        profile.envResetCount() + 1L,
+                        ev.observedAtMs(),
+                        nextIp,
+                        device,
+                        List.of(device),
+                        0,
+                        0,
+                        0,
+                        RiskTier.RESTRICTED));
+                cleared = true;
+                updated = true;
+            } else {
+                String nextDevice = profile.lastDeviceId();
+                List<String> nextKnown = profile.knownDevices();
+                if (!device.isEmpty()) {
+                    if (!device.equals(nextDevice)) {
+                        nextDevice = device;
+                        updated = true;
+                    }
+                    if (!nextKnown.contains(device)) {
+                        nextKnown = rememberKnownDevice(nextKnown, device);
+                        updated = true;
+                    }
+                }
+                next = updated
+                        ? new Profile(
+                                profile.sellerPlayerId(),
+                                profile.ownerAccount(),
+                                profile.ownerRevision(),
+                                profile.ownershipChanged(),
+                                profile.ownershipChangedAtMs(),
+                                profile.epochStartedAtMs(),
+                                profile.completedOrders(),
+                                profile.positiveReviews(),
+                                profile.neutralReviews(),
+                                profile.negativeReviews(),
+                                profile.violationCount(),
+                                profile.envCreditCleared(),
+                                profile.envResetCount(),
+                                profile.lastEnvChangedAtMs(),
+                                nextIp,
+                                nextDevice,
+                                nextKnown,
+                                profile.creditScore(),
+                                profile.starRatingTenths(),
+                                profile.positiveRateBps(),
+                                profile.riskTier())
+                        : profile;
+            }
+            if (updated) {
+                tx.saveProfile(next);
+            }
+            return new EnvironmentUpdate(next, cleared);
+        });
     }
 
     /** 查询卖家在当前权威持有周期下的信用档案；角色一旦过户自动切换至全新清空档案。 */
@@ -468,7 +490,7 @@ public final class SellerCreditService {
         if (owned == null || owned.ownerRevision() == 0 || owned.account() == null || owned.account().isEmpty()) {
             throw new CommerceRules.Refusal(CONFLICT);
         }
-        return ensureEpochProfile(sellerPlayerId, owned.account(), owned.ownerRevision(), nowMs);
+        return ensureEpochProfile(store, sellerPlayerId, owned.account(), owned.ownerRevision(), nowMs);
     }
 
     /** 官方托管真实成交结案后按 {@code orderId} 幂等累加卖家成交笔数，拒绝自买自卖。 */
@@ -489,9 +511,14 @@ public final class SellerCreditService {
             throw new CommerceRules.Refusal(SELF);
         }
         CreditKey key = new CreditKey(fact.sellerPlayerId(), fact.sellerOwnerRevision());
+        return store.inTransaction(key, tx -> recordCompletedTradeInTx(tx, fact));
+    }
+
+    private Profile recordCompletedTradeInTx(Store tx, CompletedTradeFact fact) throws SQLException {
+        CreditKey key = new CreditKey(fact.sellerPlayerId(), fact.sellerOwnerRevision());
         Profile profile = ensureEpochProfile(
-                fact.sellerPlayerId(), fact.sellerAccount(), fact.sellerOwnerRevision(), fact.settledAtMs());
-        boolean inserted = store.markOrderCompleted(fact.orderId(), key);
+                tx, fact.sellerPlayerId(), fact.sellerAccount(), fact.sellerOwnerRevision(), fact.settledAtMs());
+        boolean inserted = tx.markOrderCompleted(fact.orderId(), key);
         if (inserted) {
             profile = recompute(withCounters(
                     profile,
@@ -500,7 +527,7 @@ public final class SellerCreditService {
                     profile.neutralReviews(),
                     profile.negativeReviews(),
                     profile.violationCount()));
-            store.saveProfile(profile);
+            tx.saveProfile(profile);
         }
         return profile;
     }
@@ -535,82 +562,85 @@ public final class SellerCreditService {
             throw new CommerceRules.Refusal(ENDED);
         }
 
-        Optional<ReviewRecord> existing = store.getReviewByOrder(t.orderId());
-        if (existing.isPresent()) {
-            ReviewRecord prior = existing.get();
-            if (prior.rating() != in.rating()
-                    || prior.buyerPlayerId() != t.buyerPlayerId()
-                    || prior.sellerPlayerId() != t.sellerPlayerId()) {
-                throw new CommerceRules.Refusal(REQUEST_CONFLICT);
-            }
-            Profile profile = ensureEpochProfile(
-                    t.sellerPlayerId(), t.sellerAccount(), t.sellerOwnerRevision(), nowMs);
-            return new ReviewSubmission(prior, profile, true);
-        }
-
-        Profile profile = recordCompletedTrade(t);
-
-        String buyerKey = (t.buyerAccount() == null || t.buyerAccount().isEmpty())
-                ? "player:" + Long.toUnsignedString(t.buyerPlayerId())
-                : t.buyerAccount();
-        String sellerIp = normalizeEnvToken(t.sellerIp());
-        if (sellerIp.isEmpty()) {
-            sellerIp = profile.lastIp();
-        }
-        String sellerDev = normalizeEnvToken(t.sellerDeviceId());
-        if (sellerDev.isEmpty()) {
-            sellerDev = profile.lastDeviceId();
-        }
-        String buyerIp = normalizeEnvToken(t.buyerIp());
-        String buyerDev = normalizeEnvToken(t.buyerDeviceId());
-
         CreditKey key = new CreditKey(t.sellerPlayerId(), t.sellerOwnerRevision());
-        long windowStart = Long.compareUnsigned(nowMs, p.pairScoreWindowMs()) > 0
-                ? nowMs - p.pairScoreWindowMs()
-                : 0L;
-        int pairCount = store.countPairScoredReviews(key, buyerKey, buyerIp, buyerDev, windowStart, nowMs);
+        return store.inTransaction(key, tx -> {
+            // 先锁卖家信用档案行，再查重/计数/插评价/回写分数，杜绝并发超频刷分与覆盖违约记录。
+            Profile lockedBase = ensureEpochProfile(
+                    tx, t.sellerPlayerId(), t.sellerAccount(), t.sellerOwnerRevision(), nowMs);
+            Optional<ReviewRecord> existing = tx.getReviewByOrder(t.orderId());
+            if (existing.isPresent()) {
+                ReviewRecord prior = existing.get();
+                if (prior.rating() != in.rating()
+                        || prior.buyerPlayerId() != t.buyerPlayerId()
+                        || prior.sellerPlayerId() != t.sellerPlayerId()) {
+                    throw new CommerceRules.Refusal(REQUEST_CONFLICT);
+                }
+                return new ReviewSubmission(prior, lockedBase, true);
+            }
 
-        boolean counted = true;
-        if ((!sellerIp.isEmpty() && !buyerIp.isEmpty() && sellerIp.equals(buyerIp))
-                || (!sellerDev.isEmpty() && !buyerDev.isEmpty() && sellerDev.equals(buyerDev))) {
-            counted = false;
-        }
-        if (in.rating() == Rating.POSITIVE
-                && Long.compareUnsigned(t.amountMinor(), p.minScoreAmountMinor()) < 0) {
-            counted = false;
-        }
-        if (pairCount >= p.maxScoredReviewsPerPairInWindow()) {
-            counted = false;
-        }
-        if (in.rating() == Rating.POSITIVE
-                && p.postEnvChangeScoreCooldownMs() > 0
-                && profile.lastEnvChangedAtMs() != 0
-                && Long.compareUnsigned(nowMs, profile.lastEnvChangedAtMs()) >= 0
-                && Long.compareUnsigned(nowMs - profile.lastEnvChangedAtMs(), p.postEnvChangeScoreCooldownMs()) < 0) {
-            counted = false;
-        }
+            Profile profile = recordCompletedTradeInTx(tx, t);
 
-        ReviewRecord rec = new ReviewRecord(
-                t.orderId(),
-                t.sellerPlayerId(),
-                t.sellerOwnerRevision(),
-                t.buyerPlayerId(),
-                buyerKey,
-                buyerIp,
-                buyerDev,
-                in.rating(),
-                counted,
-                in.comment() == null ? "" : in.comment().trim(),
-                nowMs);
-        store.saveReview(rec);
-        if (counted) {
-            long pos = profile.positiveReviews() + (in.rating() == Rating.POSITIVE ? 1L : 0L);
-            long neu = profile.neutralReviews() + (in.rating() == Rating.NEUTRAL ? 1L : 0L);
-            long neg = profile.negativeReviews() + (in.rating() == Rating.NEGATIVE ? 1L : 0L);
-            profile = recompute(withCounters(profile, profile.completedOrders(), pos, neu, neg, profile.violationCount()));
-            store.saveProfile(profile);
-        }
-        return new ReviewSubmission(rec, profile, false);
+            String buyerKey = (t.buyerAccount() == null || t.buyerAccount().isEmpty())
+                    ? "player:" + Long.toUnsignedString(t.buyerPlayerId())
+                    : t.buyerAccount();
+            String sellerIp = normalizeEnvToken(t.sellerIp());
+            if (sellerIp.isEmpty()) {
+                sellerIp = profile.lastIp();
+            }
+            String sellerDev = normalizeEnvToken(t.sellerDeviceId());
+            if (sellerDev.isEmpty()) {
+                sellerDev = profile.lastDeviceId();
+            }
+            String buyerIp = normalizeEnvToken(t.buyerIp());
+            String buyerDev = normalizeEnvToken(t.buyerDeviceId());
+
+            long windowStart = Long.compareUnsigned(nowMs, p.pairScoreWindowMs()) > 0
+                    ? nowMs - p.pairScoreWindowMs()
+                    : 0L;
+            int pairCount = tx.countPairScoredReviews(key, buyerKey, buyerIp, buyerDev, windowStart, nowMs);
+
+            boolean counted = true;
+            if ((!sellerIp.isEmpty() && !buyerIp.isEmpty() && sellerIp.equals(buyerIp))
+                    || (!sellerDev.isEmpty() && !buyerDev.isEmpty() && sellerDev.equals(buyerDev))) {
+                counted = false;
+            }
+            if (in.rating() == Rating.POSITIVE
+                    && Long.compareUnsigned(t.amountMinor(), p.minScoreAmountMinor()) < 0) {
+                counted = false;
+            }
+            if (pairCount >= p.maxScoredReviewsPerPairInWindow()) {
+                counted = false;
+            }
+            if (in.rating() == Rating.POSITIVE
+                    && p.postEnvChangeScoreCooldownMs() > 0
+                    && profile.lastEnvChangedAtMs() != 0
+                    && Long.compareUnsigned(nowMs, profile.lastEnvChangedAtMs()) >= 0
+                    && Long.compareUnsigned(nowMs - profile.lastEnvChangedAtMs(), p.postEnvChangeScoreCooldownMs()) < 0) {
+                counted = false;
+            }
+
+            ReviewRecord rec = new ReviewRecord(
+                    t.orderId(),
+                    t.sellerPlayerId(),
+                    t.sellerOwnerRevision(),
+                    t.buyerPlayerId(),
+                    buyerKey,
+                    buyerIp,
+                    buyerDev,
+                    in.rating(),
+                    counted,
+                    in.comment() == null ? "" : in.comment().trim(),
+                    nowMs);
+            tx.saveReview(rec);
+            if (counted) {
+                long pos = profile.positiveReviews() + (in.rating() == Rating.POSITIVE ? 1L : 0L);
+                long neu = profile.neutralReviews() + (in.rating() == Rating.NEUTRAL ? 1L : 0L);
+                long neg = profile.negativeReviews() + (in.rating() == Rating.NEGATIVE ? 1L : 0L);
+                profile = recompute(withCounters(profile, profile.completedOrders(), pos, neu, neg, profile.violationCount()));
+                tx.saveProfile(profile);
+            }
+            return new ReviewSubmission(rec, profile, false);
+        });
     }
 
     /** 记入经核实的违约/欺诈/恶意拒付，按 {@code caseId} 幂等扣减当任信用并立即降级为 {@code RESTRICTED}。 */
@@ -624,21 +654,24 @@ public final class SellerCreditService {
                 || rec.sellerAccount().isEmpty()) {
             throw new CommerceRules.Refusal(INVALID);
         }
-        Profile profile = ensureEpochProfile(
-                rec.sellerPlayerId(), rec.sellerAccount(), rec.sellerOwnerRevision(), rec.recordedAtMs());
-        if (store.hasViolation(rec.caseId())) {
+        CreditKey key = new CreditKey(rec.sellerPlayerId(), rec.sellerOwnerRevision());
+        return store.inTransaction(key, tx -> {
+            Profile profile = ensureEpochProfile(
+                    tx, rec.sellerPlayerId(), rec.sellerAccount(), rec.sellerOwnerRevision(), rec.recordedAtMs());
+            if (tx.hasViolation(rec.caseId())) {
+                return profile;
+            }
+            tx.saveViolation(rec);
+            profile = recompute(withCounters(
+                    profile,
+                    profile.completedOrders(),
+                    profile.positiveReviews(),
+                    profile.neutralReviews(),
+                    profile.negativeReviews(),
+                    profile.violationCount() + 1L));
+            tx.saveProfile(profile);
             return profile;
-        }
-        store.saveViolation(rec);
-        profile = recompute(withCounters(
-                profile,
-                profile.completedOrders(),
-                profile.positiveReviews(),
-                profile.neutralReviews(),
-                profile.negativeReviews(),
-                profile.violationCount() + 1L));
-        store.saveProfile(profile);
-        return profile;
+        });
     }
 
     /**
@@ -720,23 +753,29 @@ public final class SellerCreditService {
                 settledAtMs));
     }
 
-    private Profile ensureEpochProfile(long playerId, String account, long revision, long nowMs) throws SQLException {
+    private Profile ensureEpochProfile(Store s, long playerId, String account, long revision, long nowMs)
+            throws SQLException {
         CreditKey key = new CreditKey(playerId, revision);
-        Optional<Profile> existing = store.getProfile(key);
-        if (existing.isPresent()) {
-            Profile p = existing.get();
-            if (!p.ownerAccount().isEmpty() && !account.isEmpty() && !p.ownerAccount().equals(account)) {
-                Profile reset = newInitialProfile(playerId, account, revision, true, nowMs);
-                store.saveProfile(reset);
-                return reset;
+        Optional<Profile> existing = s.getProfile(key);
+        if (existing.isEmpty()) {
+            boolean hasPrior = s.hasPriorEpoch(playerId, revision);
+            boolean changed = hasPrior || Long.compareUnsigned(revision, 1L) > 0;
+            Profile fresh = newInitialProfile(playerId, account, revision, changed, nowMs);
+            // INSERT IGNORE 确保首建行存在，再以 FOR UPDATE 重读锁定，消除并发首建丢失更新。
+            s.insertProfileIfAbsent(fresh);
+            existing = s.getProfile(key);
+            if (existing.isEmpty()) {
+                s.saveProfile(fresh);
+                return fresh;
             }
-            return p;
         }
-        boolean hasPrior = store.hasPriorEpoch(playerId, revision);
-        boolean changed = hasPrior || Long.compareUnsigned(revision, 1L) > 0;
-        Profile fresh = newInitialProfile(playerId, account, revision, changed, nowMs);
-        store.saveProfile(fresh);
-        return fresh;
+        Profile p = existing.get();
+        if (!p.ownerAccount().isEmpty() && !account.isEmpty() && !p.ownerAccount().equals(account)) {
+            Profile reset = newInitialProfile(playerId, account, revision, true, nowMs);
+            s.saveProfile(reset);
+            return reset;
+        }
+        return p;
     }
 
     private static Profile newInitialProfile(
@@ -873,6 +912,11 @@ public final class SellerCreditService {
         private final Map<String, ReviewRecord> reviewsByOrder = new HashMap<>();
         private final List<ReviewRecord> reviews = new ArrayList<>();
         private final Map<String, ViolationRecord> violations = new HashMap<>();
+
+        @Override
+        public synchronized <T> T inTransaction(CreditKey lockKey, StoreWork<T> work) throws SQLException {
+            return work.run(this);
+        }
 
         @Override
         public synchronized Optional<Profile> getProfile(CreditKey key) {
@@ -1020,8 +1064,11 @@ public final class SellerCreditService {
                         + "credit_score,star_rating_tenths,positive_rate_bps,risk_tier,updated_ms";
         private static final String SELECT_PROFILE =
                 "SELECT " + PROFILE_COLUMNS + " FROM trade_seller_credit WHERE seller_player_id=? AND owner_revision=?";
+        private static final String SELECT_PROFILE_FOR_UPDATE = SELECT_PROFILE + " FOR UPDATE";
         private static final String SELECT_PRIOR_EPOCH =
                 "SELECT 1 FROM trade_seller_credit WHERE seller_player_id=? AND owner_revision<? LIMIT 1";
+        private static final String INSERT_PROFILE_IGNORE =
+                "INSERT IGNORE INTO trade_seller_credit (" + PROFILE_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
         private static final String UPSERT_PROFILE =
                 "INSERT INTO trade_seller_credit (" + PROFILE_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                         + "ON DUPLICATE KEY UPDATE owner_account=VALUES(owner_account),ownership_changed=VALUES(ownership_changed),"
@@ -1063,9 +1110,103 @@ public final class SellerCreditService {
         }
 
         @Override
+        public <T> T inTransaction(CreditKey lockKey, StoreWork<T> work) throws SQLException {
+            try (Connection c = source.getConnection()) {
+                c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                c.setAutoCommit(false);
+                try {
+                    T result = work.run(new BoundTxStore(c));
+                    c.commit();
+                    return result;
+                } catch (SQLException | RuntimeException | Error failure) {
+                    try {
+                        c.rollback();
+                    } catch (SQLException rollback) {
+                        failure.addSuppressed(rollback);
+                    }
+                    throw failure;
+                }
+            }
+        }
+
+        @Override
         public Optional<Profile> getProfile(CreditKey key) throws SQLException {
-            try (Connection c = source.getConnection();
-                    PreparedStatement stmt = c.prepareStatement(SELECT_PROFILE)) {
+            try (Connection c = source.getConnection()) {
+                return readProfile(c, SELECT_PROFILE, key);
+            }
+        }
+
+        @Override
+        public boolean hasPriorEpoch(long sellerPlayerId, long currentRevision) throws SQLException {
+            try (Connection c = source.getConnection()) {
+                return hasPriorEpoch(c, sellerPlayerId, currentRevision);
+            }
+        }
+
+        @Override
+        public void insertProfileIfAbsent(Profile p) throws SQLException {
+            try (Connection c = source.getConnection()) {
+                writeProfile(c, INSERT_PROFILE_IGNORE, p);
+            }
+        }
+
+        @Override
+        public void saveProfile(Profile p) throws SQLException {
+            try (Connection c = source.getConnection()) {
+                writeProfile(c, UPSERT_PROFILE, p);
+            }
+        }
+
+        @Override
+        public boolean markOrderCompleted(String orderId, CreditKey key) throws SQLException {
+            try (Connection c = source.getConnection()) {
+                return markOrderCompleted(c, orderId, key);
+            }
+        }
+
+        @Override
+        public Optional<ReviewRecord> getReviewByOrder(String orderId) throws SQLException {
+            try (Connection c = source.getConnection()) {
+                return getReviewByOrder(c, orderId);
+            }
+        }
+
+        @Override
+        public int countPairScoredReviews(
+                CreditKey key,
+                String buyerKey,
+                String buyerIp,
+                String buyerDeviceId,
+                long sinceMs,
+                long nowMs) throws SQLException {
+            try (Connection c = source.getConnection()) {
+                return countPairScoredReviews(c, key, buyerKey, buyerIp, buyerDeviceId, sinceMs, nowMs);
+            }
+        }
+
+        @Override
+        public void saveReview(ReviewRecord rec) throws SQLException {
+            try (Connection c = source.getConnection()) {
+                saveReview(c, rec);
+            }
+        }
+
+        @Override
+        public boolean hasViolation(String caseId) throws SQLException {
+            try (Connection c = source.getConnection()) {
+                return hasViolation(c, caseId);
+            }
+        }
+
+        @Override
+        public void saveViolation(ViolationRecord rec) throws SQLException {
+            try (Connection c = source.getConnection()) {
+                saveViolation(c, rec);
+            }
+        }
+
+        private Optional<Profile> readProfile(Connection c, String sql, CreditKey key) throws SQLException {
+            try (PreparedStatement stmt = c.prepareStatement(sql)) {
                 stmt.setQueryTimeout(2);
                 bindUnsignedLong(stmt, 1, key.sellerPlayerId());
                 bindUnsignedLong(stmt, 2, key.ownerRevision());
@@ -1111,10 +1252,8 @@ public final class SellerCreditService {
             }
         }
 
-        @Override
-        public boolean hasPriorEpoch(long sellerPlayerId, long currentRevision) throws SQLException {
-            try (Connection c = source.getConnection();
-                    PreparedStatement stmt = c.prepareStatement(SELECT_PRIOR_EPOCH)) {
+        private boolean hasPriorEpoch(Connection c, long sellerPlayerId, long currentRevision) throws SQLException {
+            try (PreparedStatement stmt = c.prepareStatement(SELECT_PRIOR_EPOCH)) {
                 stmt.setQueryTimeout(2);
                 bindUnsignedLong(stmt, 1, sellerPlayerId);
                 bindUnsignedLong(stmt, 2, currentRevision);
@@ -1124,8 +1263,7 @@ public final class SellerCreditService {
             }
         }
 
-        @Override
-        public void saveProfile(Profile p) throws SQLException {
+        private void writeProfile(Connection c, String sql, Profile p) throws SQLException {
             String knownJson = "[]";
             if (!p.knownDevices().isEmpty()) {
                 try {
@@ -1134,8 +1272,7 @@ public final class SellerCreditService {
                     throw new SQLException("序列化常用设备指纹列表失败", err);
                 }
             }
-            try (Connection c = source.getConnection();
-                    PreparedStatement stmt = c.prepareStatement(UPSERT_PROFILE)) {
+            try (PreparedStatement stmt = c.prepareStatement(sql)) {
                 stmt.setQueryTimeout(2);
                 bindUnsignedLong(stmt, 1, p.sellerPlayerId());
                 bindUnsignedLong(stmt, 2, p.ownerRevision());
@@ -1163,11 +1300,9 @@ public final class SellerCreditService {
             }
         }
 
-        @Override
-        public boolean markOrderCompleted(String orderId, CreditKey key) throws SQLException {
+        private boolean markOrderCompleted(Connection c, String orderId, CreditKey key) throws SQLException {
             long recordId = ids.getAsLong();
-            try (Connection c = source.getConnection();
-                    PreparedStatement stmt = c.prepareStatement(INSERT_COMPLETED_ORDER)) {
+            try (PreparedStatement stmt = c.prepareStatement(INSERT_COMPLETED_ORDER)) {
                 stmt.setQueryTimeout(2);
                 bindUnsignedLong(stmt, 1, recordId);
                 stmt.setString(2, orderId);
@@ -1178,10 +1313,8 @@ public final class SellerCreditService {
             }
         }
 
-        @Override
-        public Optional<ReviewRecord> getReviewByOrder(String orderId) throws SQLException {
-            try (Connection c = source.getConnection();
-                    PreparedStatement stmt = c.prepareStatement(SELECT_REVIEW_BY_ORDER)) {
+        private Optional<ReviewRecord> getReviewByOrder(Connection c, String orderId) throws SQLException {
+            try (PreparedStatement stmt = c.prepareStatement(SELECT_REVIEW_BY_ORDER)) {
                 stmt.setQueryTimeout(2);
                 stmt.setString(1, orderId);
                 try (var rs = stmt.executeQuery()) {
@@ -1204,8 +1337,8 @@ public final class SellerCreditService {
             }
         }
 
-        @Override
-        public int countPairScoredReviews(
+        private int countPairScoredReviews(
+                Connection c,
                 CreditKey key,
                 String buyerKey,
                 String buyerIp,
@@ -1214,8 +1347,7 @@ public final class SellerCreditService {
                 long nowMs) throws SQLException {
             String safeIp = buyerIp == null ? "" : buyerIp;
             String safeDev = buyerDeviceId == null ? "" : buyerDeviceId;
-            try (Connection c = source.getConnection();
-                    PreparedStatement stmt = c.prepareStatement(COUNT_PAIR_REVIEWS)) {
+            try (PreparedStatement stmt = c.prepareStatement(COUNT_PAIR_REVIEWS)) {
                 stmt.setQueryTimeout(2);
                 bindUnsignedLong(stmt, 1, key.sellerPlayerId());
                 bindUnsignedLong(stmt, 2, key.ownerRevision());
@@ -1232,11 +1364,9 @@ public final class SellerCreditService {
             }
         }
 
-        @Override
-        public void saveReview(ReviewRecord rec) throws SQLException {
+        private void saveReview(Connection c, ReviewRecord rec) throws SQLException {
             long reviewId = ids.getAsLong();
-            try (Connection c = source.getConnection();
-                    PreparedStatement stmt = c.prepareStatement(INSERT_REVIEW)) {
+            try (PreparedStatement stmt = c.prepareStatement(INSERT_REVIEW)) {
                 stmt.setQueryTimeout(2);
                 bindUnsignedLong(stmt, 1, reviewId);
                 stmt.setString(2, rec.orderId());
@@ -1254,10 +1384,8 @@ public final class SellerCreditService {
             }
         }
 
-        @Override
-        public boolean hasViolation(String caseId) throws SQLException {
-            try (Connection c = source.getConnection();
-                    PreparedStatement stmt = c.prepareStatement(SELECT_VIOLATION)) {
+        private boolean hasViolation(Connection c, String caseId) throws SQLException {
+            try (PreparedStatement stmt = c.prepareStatement(SELECT_VIOLATION)) {
                 stmt.setQueryTimeout(2);
                 stmt.setString(1, caseId);
                 try (var rs = stmt.executeQuery()) {
@@ -1266,11 +1394,9 @@ public final class SellerCreditService {
             }
         }
 
-        @Override
-        public void saveViolation(ViolationRecord rec) throws SQLException {
+        private void saveViolation(Connection c, ViolationRecord rec) throws SQLException {
             long violationId = ids.getAsLong();
-            try (Connection c = source.getConnection();
-                    PreparedStatement stmt = c.prepareStatement(INSERT_VIOLATION)) {
+            try (PreparedStatement stmt = c.prepareStatement(INSERT_VIOLATION)) {
                 stmt.setQueryTimeout(2);
                 bindUnsignedLong(stmt, 1, violationId);
                 stmt.setString(2, rec.caseId());
@@ -1281,6 +1407,75 @@ public final class SellerCreditService {
                 stmt.setString(7, rec.reason() == null ? "" : rec.reason());
                 bindUnsignedLong(stmt, 8, rec.recordedAtMs());
                 stmt.executeUpdate();
+            }
+        }
+
+        private final class BoundTxStore implements Store {
+            private final Connection c;
+
+            private BoundTxStore(Connection c) {
+                this.c = c;
+            }
+
+            @Override
+            public <T> T inTransaction(CreditKey lockKey, StoreWork<T> work) throws SQLException {
+                return work.run(this);
+            }
+
+            @Override
+            public Optional<Profile> getProfile(CreditKey key) throws SQLException {
+                return readProfile(c, SELECT_PROFILE_FOR_UPDATE, key);
+            }
+
+            @Override
+            public boolean hasPriorEpoch(long sellerPlayerId, long currentRevision) throws SQLException {
+                return SqlStore.this.hasPriorEpoch(c, sellerPlayerId, currentRevision);
+            }
+
+            @Override
+            public void insertProfileIfAbsent(Profile profile) throws SQLException {
+                writeProfile(c, INSERT_PROFILE_IGNORE, profile);
+            }
+
+            @Override
+            public void saveProfile(Profile profile) throws SQLException {
+                writeProfile(c, UPSERT_PROFILE, profile);
+            }
+
+            @Override
+            public boolean markOrderCompleted(String orderId, CreditKey key) throws SQLException {
+                return SqlStore.this.markOrderCompleted(c, orderId, key);
+            }
+
+            @Override
+            public Optional<ReviewRecord> getReviewByOrder(String orderId) throws SQLException {
+                return SqlStore.this.getReviewByOrder(c, orderId);
+            }
+
+            @Override
+            public int countPairScoredReviews(
+                    CreditKey key,
+                    String buyerKey,
+                    String buyerIp,
+                    String buyerDeviceId,
+                    long sinceMs,
+                    long nowMs) throws SQLException {
+                return SqlStore.this.countPairScoredReviews(c, key, buyerKey, buyerIp, buyerDeviceId, sinceMs, nowMs);
+            }
+
+            @Override
+            public void saveReview(ReviewRecord record) throws SQLException {
+                SqlStore.this.saveReview(c, record);
+            }
+
+            @Override
+            public boolean hasViolation(String caseId) throws SQLException {
+                return SqlStore.this.hasViolation(c, caseId);
+            }
+
+            @Override
+            public void saveViolation(ViolationRecord record) throws SQLException {
+                SqlStore.this.saveViolation(c, record);
             }
         }
     }

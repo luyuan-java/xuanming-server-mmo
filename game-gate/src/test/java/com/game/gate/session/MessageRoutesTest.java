@@ -115,9 +115,9 @@ class MessageRoutesTest {
                         + "这一批就要接的，照 MatchService 的做法加进 SERVICE_BACKENDS 与 GateConfiguration；留到以后的，把这条断言改成"
                         + "钉住那份清单（containsExactlyInAnyOrder），并在 PARITY.md 登记")
                 .isEmpty();
-        // 落到 unsupported 域的客户端路由只剩只走直连的那 16 个战斗号（含 479/480 投降与 504/505 战前变阵）
+        // 落到 unsupported 域的客户端路由只剩只走直连的那 18 个战斗号（含 479/480 投降、504/505 战前变阵与 532/533 队内标点）
         assertThat(routes.all().stream().filter(r -> r.domain().equals(MessageRoutes.BACKEND_UNSUPPORTED)))
-                .hasSize(16).allSatisfy(r -> assertThat(r.directOnly()).as(r.method()).isTrue());
+                .hasSize(18).allSatisfy(r -> assertThat(r.directOnly()).as(r.method()).isTrue());
         // 反过来：后端表里的每个服务名契约里都真有、是客户端协议服务且不是玩家服务（拼错的、契约里已删掉的服务名不会悄悄留在表里）
         for (Map.Entry<String, String> backend : MessageRoutes.SERVICE_BACKENDS.entrySet()) {
             List<MessageMethod> methods = registry.all().stream()
@@ -156,8 +156,7 @@ class MessageRoutesTest {
         List<String> pushes = List.of("NotifyTeamEvent", "NotifyTeamSnapshot", "NotifyTeamInvite");
         List<String> requests = List.of("CreateTeam", "GetMyTeam", "ApplyJoinTeam", "HandleApplication", "InviteToTeam",
                 "RespondInvite", "ListMyInvites", "LeaveTeam", "KickMember", "TransferLeader", "DisbandTeam", "StartTeamMatch",
-                // 排位预设确认 452：gate 照转，game-team 尚无处理器（PARITY「排位预设与规则」Java 待做）
-                "ConfirmRankedPreset");
+                "ConfirmRankedPreset", "SetTeamFormation", "RecallTeamMembers");
         List<MessageMethod> team = registry.all().stream()
                 .filter(m -> m.serviceName().equals("ClientPlayerTeam")).toList();
         assertThat(team).as("契约里 ClientPlayerTeam 的方法").extracting(MessageMethod::methodName)
@@ -187,12 +186,12 @@ class MessageRoutesTest {
                 "RespondGuildTrialInvite");
         List<String> guildWarV2 = List.of("GetGuildWarOverview", "SetGuildWarStance", "RegisterGuildWarGarrison",
                 "StartGuildWarBattle", "ClaimGuildWarMilestone", "ClaimGuildWarDividend", "PostGuildWarBounty",
-                "TrackGuildWarBounty", "GetGuildWarBattleResult", "InspectFieldWarTargets");
+                "TrackGuildWarBounty", "GetGuildWarBattleResult", "InspectFieldWarTargets", "GetGuildJianghuGrudgeWall");
         List<MessageMethod> guild = registry.all().stream().filter(m -> m.serviceName().equals("GuildService")).toList();
         assertThat(guild).as("契约里 GuildService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.of(core, internalAndPush, economyAndActivity, guildWarV2)
                         .flatMap(List::stream).toList())
-                .hasSize(40);
+                .hasSize(41);
         for (MessageMethod method : guild) {
             MessageRoute route = routes.clientRoute(method.messageId());
             assertThat(route).as(method.key()).isNotNull();
@@ -255,29 +254,34 @@ class MessageRoutesTest {
         // MatchService 标了 OptionIsClientProtocolService、没标 OptionIsPlayerService，14 个号整体转给
         // game-match（Dubbo group match）。148 CancelQueue 与两个推送占位 154 / 156 的应答类型是 Empty → tip 为 0 时 gate 不回包（§8.1、M4；
         // tip ≠ 0 照样回信封）；其余方法一律回包（全默认值的应答是 0 字节也要回）。
-        List<String> noReply = List.of("CancelQueue", "NotifyChallengeInvite", "NotifyChallengeResult");
+        List<String> noReply = List.of("CancelQueue", "NotifyChallengeInvite", "NotifyChallengeResult",
+                "NotifyJianghuDuelInvite", "NotifyJianghuDuelStatus");
         List<String> replied = List.of("JoinQueue", "GetQueueStatus", "ChallengePlayer", "RespondChallenge", "WatchBattle",
                 "ListWatchableBattles", "RequestBattleTicket", "GetNetworkProbePlan", "CommitNetworkProbe",
                 "ListBattleReports", "GetBattleReport",
                 // 战斗剧本 389–392：gate 照转，game-match 尚无处理器（PARITY「战斗剧本」Java 待做）
                 "ListBattleScripts", "SubmitBattleScript", "DeleteBattleScript", "SetBattleScriptLoadout",
-                // 排位资料与预设 448–451 + 赛季战队锦标赛 V1/V2 465–475、506–508
+                // 排位资料与预设 448–451 + 赛季战队锦标赛 V1/V2/V3/V4 465–475、506–508、511–514、534–535 + 江湖生死状 548–552
                 "GetRankedProfile", "SaveRankedPreset", "UpdateRankedCosmetic", "GetRankedBattleResult",
                 "GetTournamentOverview", "CreateTournamentSquad", "InviteTournamentMember", "RespondTournamentInvite",
                 "LeaveTournamentSquad", "UpdateTournamentLineup", "RegisterTournamentSquad", "ListTournamentStandings",
                 "StartTournamentMatch", "CheerTournamentSquad", "ClaimTournamentReward",
                 "SaluteTournamentChampion", "SendTournamentSpectateCheer", "GetTournamentSpectateCheer",
                 "UpdateTournamentSquadEmblem", "StartTournamentWarmup", "PredictTournamentMatch",
-                "GetTournamentPredictionBoard", "BanTournamentLeyline", "GetTournamentHighlights");
+                "GetTournamentPredictionBoard", "BanTournamentLeyline", "GetTournamentHighlights",
+                "CreateJianghuDuelInvite", "ConfirmJianghuDuelMember", "RespondJianghuDuelInvite",
+                "ListJianghuGrudges", "DismissJianghuGrudge");
         List<MessageMethod> match = registry.all().stream().filter(m -> m.serviceName().equals("MatchService")).toList();
         assertThat(match).as("契约里 MatchService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.concat(noReply.stream(), replied.stream()).toList());
-        // 既有 36 个号逐个钉住 + V3/V4 新增 6 个号从契约表读取（正式同步 message_id.txt 后自动对齐）。
+        // 既有 36 个号逐个钉住 + V3/V4 与江湖生死状新增 13 个号从契约表读取（正式同步 message_id.txt 后自动对齐）。
         List<Integer> expectedMatchIds = Stream.concat(
                 Stream.of(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392,
                         448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 506, 507, 508),
                 Stream.of("UpdateTournamentSquadEmblem", "StartTournamentWarmup", "PredictTournamentMatch",
-                        "GetTournamentPredictionBoard", "BanTournamentLeyline", "GetTournamentHighlights")
+                        "GetTournamentPredictionBoard", "BanTournamentLeyline", "GetTournamentHighlights",
+                        "CreateJianghuDuelInvite", "ConfirmJianghuDuelMember", "RespondJianghuDuelInvite",
+                        "ListJianghuGrudges", "DismissJianghuGrudge", "NotifyJianghuDuelInvite", "NotifyJianghuDuelStatus")
                         .map(name -> registry.requireId("MatchService", name)))
                 .sorted()
                 .toList();
@@ -355,7 +359,8 @@ class MessageRoutesTest {
         List<String> methods = List.of("NotifyTurnResult", "GetBattleState", "NotifyBattleStart", "NotifyBattleReconnect",
                 "SubmitBattleAction", "NotifyBattleEnd", "NotifySpectateTurnResult", "NotifySpectateState", "SetAutoBattle",
                 "StopWatchBattle", "NotifySpectateEnd", "NotifyBattleAssigned",
-                "SurrenderBattle", "NotifySurrenderVote", "UpdateBattlePrep", "NotifyBattlePrepUpdate");
+                "SurrenderBattle", "NotifySurrenderVote", "UpdateBattlePrep", "NotifyBattlePrepUpdate",
+                "SendBattlePing", "NotifyBattlePing");
         List<MessageMethod> battle = registry.all().stream()
                 .filter(m -> m.serviceName().equals("BattleClientPlayer")).toList();
         assertThat(battle).as("契约里 BattleClientPlayer 的方法").extracting(MessageMethod::methodName)
@@ -372,9 +377,9 @@ class MessageRoutesTest {
             // player_battle.proto 没有 proto package：热关停键是 BattleClientPlayer/<Method>（直连闸排在热关停之前，这些键对 gate 无效）
             assertThat(route.rpcPath()).isEqualTo("/BattleClientPlayer/" + method.methodName());
         }
-        // 16 个号逐个钉住（scene-battle-spec §2.5；message_id.txt）：发号漂移或增删方法时这里先失败
+        // 18 个号逐个钉住（scene-battle-spec §2.5；message_id.txt）：发号漂移或增删方法时这里先失败
         assertThat(battle).extracting(MessageMethod::messageId)
-                .containsExactlyInAnyOrder(139, 140, 143, 144, 149, 150, 158, 161, 162, 165, 166, 177, 479, 480, 504, 505);
+                .containsExactlyInAnyOrder(139, 140, 143, 144, 149, 150, 158, 161, 162, 165, 166, 177, 479, 480, 504, 505, 532, 533);
         assertThat(MessageRoutes.DIRECT_ONLY_SERVICES).containsExactly("BattleClientPlayer");
         assertThat(MessageRoutes.SERVICE_BACKENDS).doesNotContainKey("BattleClientPlayer");
         assertThat(MessageRoutes.SERVICE_BACKENDS.keySet()).as("只走直连的服务不能同时有后端")
@@ -386,7 +391,7 @@ class MessageRoutesTest {
         List<MessageMethod> clients = registry.all().stream().filter(MessageMethod::clientService).toList();
         List<Integer> direct = clients.stream().map(m -> routes.clientRoute(m.messageId()))
                 .filter(MessageRoute::directOnly).map(MessageRoute::messageId).toList();
-        assertThat(direct).containsExactlyInAnyOrder(139, 140, 143, 144, 149, 150, 158, 161, 162, 165, 166, 177, 479, 480, 504, 505);
+        assertThat(direct).containsExactlyInAnyOrder(139, 140, 143, 144, 149, 150, 158, 161, 162, 165, 166, 177, 479, 480, 504, 505, 532, 533);
         // 登录 / scene / 好友 / 聚宝斋 / 匹配 各取一个：没有被误标（179 补签的请求 / 应答消息定义在 battle 包，照样经 gate 中继）
         for (String[] m : new String[][] {{"ClientPlayerLogin", "Login"}, {"SceneSkillClientPlayer", "ListSkills"},
                 {"ClientPlayerFriend", "AddFriend"}, {"ClientPlayerJubaozhai", "BrowseListings"},
@@ -432,7 +437,7 @@ class MessageRoutesTest {
                 .map(MessageMethod::messageId).sorted().toList();
         assertThat(all).extracting(MessageRoute::messageId).containsExactlyElementsOf(clientIds);
         assertThat(all).allSatisfy(route -> assertThat(routes.clientRoute(route.messageId())).isSameAs(route));
-        assertThat(all.stream().filter(MessageRoute::directOnly)).hasSize(16);
+        assertThat(all.stream().filter(MessageRoute::directOnly)).hasSize(18);
         MessageRoutes handwritten = id -> new MessageRoute(id, "scene");
         assertThat(handwritten.all()).isEmpty();
     }

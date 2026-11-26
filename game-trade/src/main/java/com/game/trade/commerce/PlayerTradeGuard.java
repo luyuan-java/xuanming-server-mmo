@@ -44,6 +44,12 @@ public final class PlayerTradeGuard {
     @FunctionalInterface
     public interface DailyPlayerTradeTracker {
         long dailyCurrencyOutflow(long playerId, int currencyType, long dayStartMs) throws SQLException;
+
+        /** 在已持锁的交易 SQL 事务连接内复用查询，避免开启第二连接及消除 TOCTOU 竞争。 */
+        default long dailyCurrencyOutflow(Connection c, long playerId, int currencyType, long dayStartMs)
+                throws SQLException {
+            return dailyCurrencyOutflow(playerId, currencyType, dayStartMs);
+        }
     }
 
     /** 游戏内当面交易防骗策略参数。 */
@@ -126,6 +132,17 @@ public final class PlayerTradeGuard {
             TradeAssetSelection sellerAssets,
             TradeAssetSelection buyerAssets,
             long nowMs) throws SQLException {
+        return evaluate(null, sellerId, buyerId, sellerAssets, buyerAssets, nowMs);
+    }
+
+    /** 同 {@link #evaluate(long, long, TradeAssetSelection, TradeAssetSelection, long)}，可在已有 SQL 事务内复用连接校验当日限额。 */
+    public EvaluationResult evaluate(
+            Connection txConnection,
+            long sellerId,
+            long buyerId,
+            TradeAssetSelection sellerAssets,
+            TradeAssetSelection buyerAssets,
+            long nowMs) throws SQLException {
         if (policy.mode().isEmpty()) {
             return EvaluationResult.PASS;
         }
@@ -136,24 +153,28 @@ public final class PlayerTradeGuard {
             throw new CommerceRules.Refusal(INVALID);
         }
         return switch (policy.mode()) {
-            case MODE_STRICT_CONSUMABLES -> evalStrictConsumables(sellerId, buyerId, sellerAssets, buyerAssets, nowMs);
-            case MODE_ACQUAINTANCE_LOCKED -> evalAcquaintanceLocked(sellerId, buyerId, sellerAssets, buyerAssets, nowMs);
+            case MODE_STRICT_CONSUMABLES ->
+                evalStrictConsumables(txConnection, sellerId, buyerId, sellerAssets, buyerAssets, nowMs);
+            case MODE_ACQUAINTANCE_LOCKED ->
+                evalAcquaintanceLocked(txConnection, sellerId, buyerId, sellerAssets, buyerAssets, nowMs);
             default -> throw new CommerceRules.Refusal(NOT_TRADABLE);
         };
     }
 
     private EvaluationResult evalStrictConsumables(
+            Connection txConnection,
             long sellerId, long buyerId, TradeAssetSelection sellerAssets, TradeAssetSelection buyerAssets, long nowMs)
             throws SQLException {
         if (!isConsumableOnly(sellerAssets) || !isConsumableOnly(buyerAssets)) {
             throw new CommerceRules.Refusal(NOT_TRADABLE);
         }
-        checkCurrencyCap(sellerId, sellerAssets, nowMs);
-        checkCurrencyCap(buyerId, buyerAssets, nowMs);
+        checkCurrencyCap(txConnection, sellerId, sellerAssets, nowMs);
+        checkCurrencyCap(txConnection, buyerId, buyerAssets, nowMs);
         return new EvaluationResult(false, 0L, "strict_consumables_ok");
     }
 
     private EvaluationResult evalAcquaintanceLocked(
+            Connection txConnection,
             long sellerId, long buyerId, TradeAssetSelection sellerAssets, TradeAssetSelection buyerAssets, long nowMs)
             throws SQLException {
         boolean oneSided = selectionEmpty(sellerAssets) || selectionEmpty(buyerAssets);
@@ -165,7 +186,7 @@ public final class PlayerTradeGuard {
                 && (policy.maxDailyCurrencyAmount() == 0
                         || (Long.compareUnsigned(sellerCurrency, policy.maxDailyCurrencyAmount()) <= 0
                                 && Long.compareUnsigned(buyerCurrency, policy.maxDailyCurrencyAmount()) <= 0));
-        if (smallConsumableSwap && passesCurrencyCapForBoth(sellerId, sellerAssets, buyerId, buyerAssets, nowMs)) {
+        if (smallConsumableSwap && passesCurrencyCapForBoth(txConnection, sellerId, sellerAssets, buyerId, buyerAssets, nowMs)) {
             return new EvaluationResult(false, 0L, "small_consumable_swap_ok");
         }
 
@@ -220,11 +241,12 @@ public final class PlayerTradeGuard {
     }
 
     private boolean passesCurrencyCapForBoth(
+            Connection txConnection,
             long sellerId, TradeAssetSelection sellerAssets, long buyerId, TradeAssetSelection buyerAssets, long nowMs)
             throws SQLException {
         try {
-            checkCurrencyCap(sellerId, sellerAssets, nowMs);
-            checkCurrencyCap(buyerId, buyerAssets, nowMs);
+            checkCurrencyCap(txConnection, sellerId, sellerAssets, nowMs);
+            checkCurrencyCap(txConnection, buyerId, buyerAssets, nowMs);
             return true;
         } catch (CommerceRules.Refusal exceeded) {
             // 超单日小额互助上限时不再视作免检小额，转入熟人硬锁裁决。
@@ -232,7 +254,7 @@ public final class PlayerTradeGuard {
         }
     }
 
-    private void checkCurrencyCap(long playerId, TradeAssetSelection sel, long nowMs) throws SQLException {
+    private void checkCurrencyCap(Connection txConnection, long playerId, TradeAssetSelection sel, long nowMs) throws SQLException {
         if (sel == null || sel.getCurrencyAmount() == 0) {
             return;
         }
@@ -242,7 +264,9 @@ public final class PlayerTradeGuard {
         }
         if (dailyOut != null) {
             long dayStart = Long.divideUnsigned(nowMs, DAY_MS) * DAY_MS;
-            long used = dailyOut.dailyCurrencyOutflow(playerId, sel.getCurrencyType(), dayStart);
+            long used = txConnection != null
+                    ? dailyOut.dailyCurrencyOutflow(txConnection, playerId, sel.getCurrencyType(), dayStart)
+                    : dailyOut.dailyCurrencyOutflow(playerId, sel.getCurrencyType(), dayStart);
             if (Long.compareUnsigned(used, cap) > 0
                     || Long.compareUnsigned(sel.getCurrencyAmount(), cap - used) > 0) {
                 throw new CommerceRules.Refusal(NOT_TRADABLE);
@@ -322,10 +346,19 @@ public final class PlayerTradeGuard {
                 throw new CommerceRules.Refusal(INVALID);
             }
             try (Connection c = source.getConnection()) {
-                long sellerSum = sumSide(c, SELLER_QUERY, playerId, currencyType, dayStartMs, true);
-                long buyerSum = sumSide(c, BUYER_QUERY, playerId, currencyType, dayStartMs, false);
-                return saturatingAddUnsigned(sellerSum, buyerSum);
+                return dailyCurrencyOutflow(c, playerId, currencyType, dayStartMs);
             }
+        }
+
+        @Override
+        public long dailyCurrencyOutflow(Connection c, long playerId, int currencyType, long dayStartMs)
+                throws SQLException {
+            if (playerId == 0 || CurrencyType.forNumber(currencyType) == null) {
+                throw new CommerceRules.Refusal(INVALID);
+            }
+            long sellerSum = sumSide(c, SELLER_QUERY, playerId, currencyType, dayStartMs, true);
+            long buyerSum = sumSide(c, BUYER_QUERY, playerId, currencyType, dayStartMs, false);
+            return saturatingAddUnsigned(sellerSum, buyerSum);
         }
 
         private static long sumSide(

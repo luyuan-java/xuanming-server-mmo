@@ -934,6 +934,12 @@ public final class ClientDispatcher {
     }
 
     private void applyBindAccount(ClientSession s, com.game.api.proto.BindAccount bind) {
+        // 防御纵深：已进游戏会话禁止通过 BindAccount 覆写账号或取消未成年人防沉迷踢线定时器。
+        if (s.playerId != 0) {
+            log.warn("已进游戏会话拒绝覆盖账号绑定 session={} player={} currentAccount={} ignoredAccount={}",
+                    sid(s), s.playerId, s.account, bind.getAccount());
+            return;
+        }
         s.account = bind.getAccount();
         if (s.account.isEmpty()) {
             s.cancelSessionRenew();

@@ -128,8 +128,18 @@ public final class CommerceEngine {
             throw new Refusal(REQUEST_CONFLICT);
         return prior;
     }
+    @FunctionalInterface
+    private interface PostLockCheck {
+        void verify(Connection connection, long nowMs) throws SQLException;
+    }
+
     TradeCommerceRow create(long me, String request, Message input, TradeCommerceRow.Builder row,
         TradeCommerceWorkflow.Builder w, Deadline deadline) throws SQLException {
+        return create(me, request, input, row, w, deadline, null);
+    }
+
+    private TradeCommerceRow create(long me, String request, Message input, TradeCommerceRow.Builder row,
+        TradeCommerceWorkflow.Builder w, Deadline deadline, PostLockCheck postLockCheck) throws SQLException {
         var prior = priorRequest(me, request, input, deadline);
         if (prior != null)
             return prior;
@@ -147,6 +157,9 @@ public final class CommerceEngine {
             return store.transaction(deadline, c -> {
                 CommerceStore.lockAssetOwners(c, row.getSellerPlayerId(), row.getBuyerPlayerId());
                 verifyActor(c, me);
+                if (postLockCheck != null) {
+                    postLockCheck.verify(c, now);
+                }
                 if (row.getSellerPlayerId() != 0) w.setSellerIdentity(CommerceStore.roleIdentity(c, row.getSellerPlayerId()));
                 if (row.getBuyerPlayerId() != 0) w.setBuyerIdentity(CommerceStore.roleIdentity(c, row.getBuyerPlayerId()));
                 row.setWorkflowProto(w.build().toByteString());
@@ -170,10 +183,14 @@ public final class CommerceEngine {
             throw new Refusal(SELF);
         policy.selection(in.getSellerAssets());
         policy.selection(in.getBuyerAssets());
-        if (playerTradeGuard != null) {
-            playerTradeGuard.evaluate(me, in.getBuyerPlayerId(), in.getSellerAssets(), in.getBuyerAssets(),
-                    clock.getAsLong());
-        }
+        PostLockCheck guardCheck = playerTradeGuard == null ? null : (c, nowMs) -> {
+            var eval = playerTradeGuard.evaluate(
+                    c, me, in.getBuyerPlayerId(), in.getSellerAssets(), in.getBuyerAssets(), nowMs);
+            // shortcut: TradeCommerceWorkflow 与场景物品暂未落盘 48h 冷静锁契约，触发冷静锁时先 fail-closed 拒放，待契约扩展后升级。
+            if (eval.requireCoolingLock()) {
+                throw new Refusal(NOT_TRADABLE);
+            }
+        };
         return create(me, in.getClientRequestId(), in,
             TradeCommerceRow.newBuilder()
                 .setKind(2)
@@ -185,7 +202,8 @@ public final class CommerceEngine {
                 .setSellerAssets(in.getSellerAssets())
                 .setBuyerAssets(in.getBuyerAssets())
                 .setStage("offer_escrow"),
-            d);
+            d,
+            guardCheck);
     }
     public TradeCommerceRow consignment(long me, CreateConsignmentRequest in, Deadline d) throws SQLException {
         policy.selection(in.getAssets());

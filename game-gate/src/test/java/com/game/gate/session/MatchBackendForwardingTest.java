@@ -103,7 +103,7 @@ class MatchBackendForwardingTest {
         EmbeddedChannel ch = verified(Map.of(DubboGroups.MATCH, match, DubboGroups.FRIEND, friend));
         enterGame(ch);
         assertThat(matchMethods).extracting(MessageMethod::messageId)
-                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392, 448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 506, 507, 508);
+                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392, 448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 506, 507, 508, 511, 512, 513, 514, 534, 535, 548, 549, 550, 551, 552, 553, 554);
 
         long requestId = 100;
         for (MessageMethod method : matchMethods) {
@@ -126,7 +126,7 @@ class MatchBackendForwardingTest {
             ch.runPendingTasks();
 
             boolean replied = routes.clientRoute(id).hasResponse();
-            assertThat(replied).as(method.key() + " 是否回包").isEqualTo(id != 148 && id != 154 && id != 156);
+            assertThat(replied).as(method.key() + " 是否回包").isEqualTo(id != 148 && id != 154 && id != 156 && id != 553 && id != 554);
             MessageContent out = ch.readOutbound();
             if (replied) {
                 assertThat(out).as(method.key() + " 回包").isNotNull();
