@@ -138,6 +138,7 @@ class InBattleGateMatrixTest {
     private static final int SEASON_IN_BATTLE = 34009;
     private static final int TRIAL_JOURNAL_IN_BATTLE = 35002;
     private static final int SPIRIT_SHOP_IN_BATTLE = 37009;
+    private static final int TRAVEL_PASS_IN_BATTLE = 38011;
     private static final int REWARDED_AD_IN_BATTLE = 39010;
     private static final int REWARDED_AD_DISABLED = 39001;
     private static final java.util.Set<String> EQUIPMENT_METHODS = java.util.Set.of(
@@ -226,6 +227,8 @@ class InBattleGateMatrixTest {
             new Row(408, BAG, "ClaimEquipmentMaterialReward", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
             new Row(315, MYSTERY_MERCHANT, "BuyMysteryMerchantGoods", BattlePolicy.GATED, MYSTERY_MERCHANT_IN_BATTLE),
             new Row(510, SPIRIT_SHOP, "BuySpiritShopGoods", BattlePolicy.GATED, SPIRIT_SHOP_IN_BATTLE),
+            new Row(527, ACTIVITY, "UnlockTravelPassPremium", BattlePolicy.GATED, TRAVEL_PASS_IN_BATTLE),
+            new Row(528, ACTIVITY, "ClaimTravelPassReward", BattlePolicy.GATED, TRAVEL_PASS_IN_BATTLE),
             new Row(541, REWARDED_AD, "BeginRewardedAdSession", BattlePolicy.GATED, REWARDED_AD_IN_BATTLE),
             new Row(542, REWARDED_AD, "ClaimRewardedAd", BattlePolicy.GATED, REWARDED_AD_IN_BATTLE),
             new Row(454, SEASON, "EquipSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
@@ -262,6 +265,8 @@ class InBattleGateMatrixTest {
             new Row(476, ACTIVITY, "GetFestivalBeastDetail", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(477, ACTIVITY, "StartFestivalBeastChallenge", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(478, ACTIVITY, "ClaimFestivalBeastReward", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(526, ACTIVITY, "GetTravelPassState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(529, ACTIVITY, "EquipTravelPassCosmetic", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(191, BAG, "GetBag", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(374, BAG, "RetrieveTemporaryItems", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(404, BAG, "GetEquipmentCraftRules", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -810,6 +815,30 @@ class InBattleGateMatrixTest {
                 .setClientRequestId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
                 .setRewardIdentity("festival_beast_chunxishou_v1")
                 .build());
+        out.put(ACTIVITY + "GetTravelPassState", s -> com.game.proto.GetTravelPassStateRequest.getDefaultInstance());
+        out.put(ACTIVITY + "UnlockTravelPassPremium", s -> {
+            var season = s.world().travelPassTables.enabledSeasons().getFirst();
+            return com.game.proto.UnlockTravelPassPremiumRequest.newBuilder()
+                    .setClientRequestId(9251L)
+                    .setPassId(season.id())
+                    .setExpectedCurrencyType(season.premiumCurrencyType())
+                    .setExpectedPrice(season.premiumPrice())
+                    .setExpectedConfigRevision(season.configRevision())
+                    .build();
+        });
+        out.put(ACTIVITY + "ClaimTravelPassReward", s -> {
+            var season = s.world().travelPassTables.enabledSeasons().getFirst();
+            return com.game.proto.ClaimTravelPassRewardRequest.newBuilder()
+                    .setClientRequestId(9252L)
+                    .setPassId(season.id())
+                    .setTierIndex(season.tiers().getFirst().tierIndex())
+                    .setPremiumTrack(false)
+                    .build();
+        });
+        out.put(ACTIVITY + "EquipTravelPassCosmetic", s -> com.game.proto.EquipTravelPassCosmeticRequest.newBuilder()
+                .setCosmeticSlot(com.game.scene.player.PlayerTravelPass.COSMETIC_SLOT_FRAME)
+                .setCosmeticKey("")
+                .build());
         out.put(REWARDED_AD + "GetRewardedAdInfo", s -> com.game.proto.GetRewardedAdInfoRequest.newBuilder()
                 .setClientPlatform(com.game.proto.AdClientPlatform.AD_CLIENT_PLATFORM_WECHAT_MINIGAME_VALUE)
                 .build());
@@ -1245,6 +1274,18 @@ class InBattleGateMatrixTest {
             assertThat(w.currency.add(subject.player(), g.currencyType(), g.unitPrice() * 2, Reason.GM_GRANT).ok()).isTrue();
             w.sink.clear();
         }
+        if (row.service().equals(ACTIVITY) && (row.method().equals("UnlockTravelPassPremium")
+                || row.method().equals("ClaimTravelPassReward"))) {
+            var season = w.travelPassTables.enabledSeasons().getFirst();
+            if (row.method().equals("UnlockTravelPassPremium")) {
+                assertThat(w.currency.add(subject.player(), season.premiumCurrencyType(),
+                        season.premiumPrice() * 2, Reason.GM_GRANT).ok()).isTrue();
+                w.sink.clear();
+            } else {
+                var prog = subject.player().travelPass().findOrAddSeason(season.id());
+                prog.setProgressPoints(season.tiers().getFirst().requiredPoints());
+            }
+        }
         if (row.service().equals(SEASON)) {
             var rule = w.seasonTables.activeSeason(w.clock.epochMillis());
             if (rule == null) {
@@ -1457,7 +1498,7 @@ class InBattleGateMatrixTest {
 
     /** 包含跨区、装备、神秘商人与赛季的全部闸（{@code game_scene_battle_gate_rejects_total{gate}}）。 */
     private static final List<String> GATES = List.of("enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default",
-            "zone_travel", "equipment", "mystery_merchant", "season", "trial_journal", "spirit_shop", "rewarded_ad");
+            "zone_travel", "equipment", "mystery_merchant", "season", "trial_journal", "spirit_shop", "rewarded_ad", "travel_pass");
 
     private Map<String, Double> gateRejectsByGate() {
         Map<String, Double> out = new TreeMap<>();
@@ -1487,6 +1528,7 @@ class InBattleGateMatrixTest {
             case BAG -> EQUIPMENT_METHODS.contains(row.method()) ? "equipment" : "bag_sort";
             case MYSTERY_MERCHANT -> "mystery_merchant";
             case SPIRIT_SHOP -> "spirit_shop";
+            case ACTIVITY -> "travel_pass";
             case REWARDED_AD -> "rewarded_ad";
             case SEASON -> "season";
             case TRIAL_JOURNAL -> "trial_journal";

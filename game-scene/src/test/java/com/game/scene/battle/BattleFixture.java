@@ -184,6 +184,8 @@ public final class BattleFixture {
     public final com.game.scene.merchant.MysteryMerchantService merchant;
     public final com.game.scene.spiritshop.SpiritShopTables spiritShopTables = com.game.scene.spiritshop.SpiritShopTables.from(CONFIG);
     public final com.game.scene.spiritshop.SpiritShopService spiritShop;
+    public final com.game.scene.travelpass.TravelPassTables travelPassTables = com.game.scene.travelpass.TravelPassTables.from(CONFIG);
+    public final com.game.scene.travelpass.TravelPassService travelPass;
     public final com.game.scene.rewardedad.RewardedAdTables rewardedAdTables = com.game.scene.rewardedad.RewardedAdTables.from(CONFIG);
     public final com.game.scene.rewardedad.RewardedAdService rewardedAd;
     public final com.game.scene.season.SeasonTables seasonTables = com.game.scene.season.SeasonTables.from(CONFIG);
@@ -263,6 +265,7 @@ public final class BattleFixture {
         craft = new com.game.scene.equip.EquipmentCraftService(equipmentRules, bags, currency, attributes, sceneMetrics, clock);
         merchant = new com.game.scene.merchant.MysteryMerchantService(merchantTables, bags, currency, clock, sceneMetrics);
         spiritShop = new com.game.scene.spiritshop.SpiritShopService(spiritShopTables, bags, currency, clock, sceneMetrics);
+        travelPass = new com.game.scene.travelpass.TravelPassService(travelPassTables, bags, currency, clock, sceneMetrics);
         rewardedAd = new com.game.scene.rewardedad.RewardedAdService(rewardedAdTables, currency, clock, sceneMetrics);
         season = new com.game.scene.season.SeasonService(seasonTables, currency, attributes, clock, sceneMetrics);
         attributes.withSeason((p, out) -> season.collectEffects(p, clock.epochMillis(), out), season::activeSeasonId);
@@ -283,7 +286,8 @@ public final class BattleFixture {
         settlements = new BattleSettlementService(currency, bags, pets, missions, tables, battleMetrics, clock, petListChangedId)
                 .withSeasonService(season)
                 .withTrialJournalService(trialJournal)
-                .withFestivalBeastService(festivalBeast);
+                .withFestivalBeastService(festivalBeast)
+                .withTravelPassService(travelPass);
         battle = new PlayerBattleService(locks, settlements, tables, pets, this::routing, teamFollow, battleMetrics, clock, logic,
                 reconnectHintId, battleEndId)
                 .withTrialJournalService(trialJournal)
@@ -329,8 +333,12 @@ public final class BattleFixture {
                 new com.game.scene.season.SeasonFeature(season, attributes, Contracts.REGISTRY),
                 new com.game.scene.trial.TrialJournalFeature(trialJournal),
                 new BattleResultFeature(),
-                new MissionFeature(missions), new ActivityFeature(missions).withFestivalBeastService(festivalBeast),
-                new com.game.scene.festivalbeast.FestivalBeastFeature(festivalBeast), new SkillFeature(skills),
+                new MissionFeature(missions), new ActivityFeature(missions)
+                        .withFestivalBeastService(festivalBeast)
+                        .withTravelPassCatalog(travelPass, appearance, spiritShop),
+                new com.game.scene.festivalbeast.FestivalBeastFeature(festivalBeast),
+                new com.game.scene.travelpass.TravelPassFeature(travelPass, bagFeature),
+                new SkillFeature(skills),
                 new com.game.scene.skill.ClassSkillFeature(classSkill, attributes, Contracts.REGISTRY, pets),
                 new com.game.scene.craft.SkillCraftFeature(skillCraft, attributes, pets, Contracts.REGISTRY),
                 petFeature);
