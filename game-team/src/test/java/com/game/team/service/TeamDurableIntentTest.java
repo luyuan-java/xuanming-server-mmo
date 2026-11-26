@@ -54,4 +54,20 @@ class TeamDurableIntentTest {
         }
     }
 
+    @Test void invalidTargetTeamSizeRejectedBeforeLockingTeam(){
+        var fx=new TeamMatchFixture(TeamMatchFixture.inMemory(),MatchTeamBattle.IntentMode.SQL_AUTHORITY);
+        try{
+            long[] team=fx.team(2);long caller=team[1],id=team[0];
+            for(int badTarget:new int[]{1,99,-1}){
+                var reply=fx.service.startTeamMatch(actor(caller),StartTeamMatchRequest.newBuilder()
+                        .setExpectedTeamId(id).setBattleConfigId(TeamMatchFixture.CONFIG)
+                        .setTargetTeamSize(badTarget).setRequestId(UUID.randomUUID().toString()).build(),
+                        TeamMatchFixture.deadline());
+                assertThat(reply.getErrorMessage().getId()).isEqualTo(com.game.team.rules.TeamTips.SIZE_EXCEEDED);
+                assertThat(fx.record(id).getMatchLockToken()).isEmpty();
+                assertThat(fx.match.tickets).isEmpty();
+            }
+        }finally{fx.cleanup();}
+    }
+
 }

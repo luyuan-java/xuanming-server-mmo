@@ -97,8 +97,13 @@ public final class MatchTeamBattle implements TeamBattlePort {
 
     @Override
     public Check checkTeamMatch(int battleConfigId, List<Long> roster, Deadline deadline) {
+        return checkTeamMatch(battleConfigId, roster, 0, deadline);
+    }
+
+    @Override
+    public Check checkTeamMatch(int battleConfigId, List<Long> roster, int targetTeamSize, Deadline deadline) {
         TeamMatchCheckRequest request = TeamMatchCheckRequest.newBuilder().setBattleConfigId(battleConfigId)
-                .addAllRoster(roster).build();
+                .addAllRoster(roster).setTargetTeamSize(targetTeamSize).build();
         TeamMatchCheckReply reply;
         try {
             reply = call("checkTeamMatch", deadline, () -> match.checkTeamMatch(request));

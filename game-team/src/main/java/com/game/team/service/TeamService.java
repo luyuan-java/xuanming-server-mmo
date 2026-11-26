@@ -546,7 +546,13 @@ public final class TeamService {
                 }
             }
             List<Long> roster = TeamRules.matchRoster(rec);
-            TeamBattlePort.Check check = battle.checkTeamMatch(configId, roster, deadline);
+            int targetTeamSize = request.getTargetTeamSize();
+            if (targetTeamSize != 0
+                    && (Integer.compareUnsigned(targetTeamSize, roster.size()) < 0
+                            || Integer.compareUnsigned(targetTeamSize, com.game.team.rules.TeamLimits.CAPACITY) > 0)) {
+                return matchReject(caller, TeamTips.SIZE_EXCEEDED, 0, snap, deadline);
+            }
+            TeamBattlePort.Check check = battle.checkTeamMatch(configId, roster, targetTeamSize, deadline);
             if (!check.ok()) {
                 return matchReject(caller, check.code(), check.param(), snap, deadline);
             }

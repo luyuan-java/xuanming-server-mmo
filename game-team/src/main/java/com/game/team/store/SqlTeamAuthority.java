@@ -218,7 +218,11 @@ final class SqlTeamAuthority {
         return run(d,c->{var owners=lockPeople(c,participants(expected,caller,0),d);var snap=snapshot(c,caller,expected.teamId(),true);
             var previous=launch(c,requestId,true);if(previous!=null)return PinnedResult.committed(launchCommit(previous));
             if(snap.version()!=expected.version()||!Objects.equals(snap.record(),expected.record()))return PinnedResult.retry(List.of());
-            verifyRecord(snap.record(),owners);Decision decision=TeamRules.lockMatch(snap.record(),caller,token,roster,expiry,snap.nowMs());
+            verifyRecord(snap.record(),owners);
+            com.game.proto.team.StartTeamMatchRequest request;try{request=com.game.proto.team.StartTeamMatchRequest.parseFrom(payload);}catch(com.google.protobuf.InvalidProtocolBufferException invalid){throw new SQLException("开局原请求损坏",invalid);}
+            int targetTeamSize=request.getTargetTeamSize();
+            if(targetTeamSize!=0&&(Integer.compareUnsigned(targetTeamSize,roster.size())<0||Integer.compareUnsigned(targetTeamSize,com.game.team.rules.TeamLimits.CAPACITY)>0))return PinnedResult.rejected(TeamTips.SIZE_EXCEEDED,0);
+            Decision decision=TeamRules.lockMatch(snap.record(),caller,token,roster,expiry,snap.nowMs());
             if(decision.code()!=0)return PinnedResult.rejected(decision.code(),decision.param());
             com.game.common.player.MatchEntryAuthority.requireFree(c.connection(),roster,"",0,timeout(d));
             decision=withRecord(decision,decision.record().toBuilder().setLaunchRequestId(requestId).build());
@@ -229,7 +233,6 @@ final class SqlTeamAuthority {
             var prepared=TeamLaunchSubmission.newBuilder().putAllZones(homes).setLockTtlSeconds(lockSeconds);
             committed.indexes().forEach((p,i)->prepared.addIndexes(TeamMemberAuthorityRow.newBuilder().setPlayerId(p).setTeamId(i.teamId()).setEpoch(i.epoch())));
             var submission=prepared.build();
-            com.game.proto.team.StartTeamMatchRequest request;try{request=com.game.proto.team.StartTeamMatchRequest.parseFrom(payload);}catch(com.google.protobuf.InvalidProtocolBufferException invalid){throw new SQLException("开局原请求损坏",invalid);}
             var original=com.game.proto.team.TeamLaunchOriginal.newBuilder().setActor(com.game.proto.team.TeamOriginalRole.newBuilder().setPlayerId(caller).setOwnerAccount(actor.getAccount()).setOwnerRevision(actor.getOwnerRevision()))
                     .setTeamId(snap.teamId()).setTeamVersion(committed.version()).setLockToken(token).setRequest(request).putAllZones(homes).setLockTtlSeconds(lockSeconds).setEnqueuedMs(snap.nowMs()).setNotBeforeMs(snap.nowMs());
             int order=0;for(long p:roster){var o=owners.get(p);original.addMembers(com.game.proto.team.TeamLaunchMember.newBuilder().setOriginal(com.game.proto.team.TeamOriginalRole.newBuilder().setPlayerId(p).setOwnerAccount(o.account()).setOwnerRevision(o.revision())).setRosterOrder(++order).setTicket(TeamStore.ticketId(requestId,p)));}

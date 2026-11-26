@@ -146,6 +146,20 @@ class MatchTeamServiceImplTest {
     }
 
     @Test
+    void 检查_目标成团人数超过副本上限或小于当前名单_SIZE_EXCEEDED_不做预检() {
+        // 副本 3 配 2 人：1 人队传 target_team_size=5 必须预检即拒，不能落锁后再在建票期抛异常。
+        TeamMatchCheckRequest overLimit = TeamMatchCheckRequest.newBuilder()
+                .setBattleConfigId(3).addRoster(A).setTargetTeamSize(5).build();
+        assertThat(service.check(overLimit, d()).getResult())
+                .isEqualTo(TeamMatchCheckResult.TEAM_MATCH_CHECK_SIZE_EXCEEDED);
+        TeamMatchCheckRequest underRoster = TeamMatchCheckRequest.newBuilder()
+                .setBattleConfigId(1).addRoster(A).addRoster(B).setTargetTeamSize(1).build();
+        assertThat(service.check(underRoster, d()).getResult())
+                .isEqualTo(TeamMatchCheckResult.TEAM_MATCH_CHECK_SIZE_EXCEEDED);
+        assertThat(precheck.rosters).isEmpty();
+    }
+
+    @Test
     void 检查_人数上限是配置值按5收口_超员_SIZE_EXCEEDED_不做预检() {
         assertThat(service.check(checkRequest(3, A, B, C), d()).getResult()).as("副本 3 配 2 人，来了 3 人")
                 .isEqualTo(TeamMatchCheckResult.TEAM_MATCH_CHECK_SIZE_EXCEEDED);

@@ -42,6 +42,8 @@ message TeamMatchCheckRequest {
   uint32 battle_config_id = 1;
   // 参战名单：队长在前，其余按 join_seq；预检按这个顺序逐人做，第一个不满足的人即为结论。
   repeated uint64 roster = 2;
+  // 目标成团人数（0 = 按当前名单直接开战；非 0 须落在 [roster.size(), 副本上限] 之间）。
+  uint32 target_team_size = 3;
 }
 
 // 调用方（game-team）对 OK 的应答再做两条校验，不满足按传输失败处理（4030），不拿缺省值顶替：

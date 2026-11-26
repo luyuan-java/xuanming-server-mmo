@@ -235,6 +235,12 @@ public class MatchTeamServiceImpl implements MatchTeamService {
         if (roster.size() > limit) {
             return counted(TeamCallResult.SIZE_EXCEEDED, checked(TeamMatchCheckResult.TEAM_MATCH_CHECK_SIZE_EXCEEDED, 0));
         }
+        int targetTeamSize = request.getTargetTeamSize();
+        if (targetTeamSize != 0
+                && (Integer.compareUnsigned(targetTeamSize, roster.size()) < 0
+                        || Integer.compareUnsigned(targetTeamSize, limit) > 0)) {
+            return counted(TeamCallResult.SIZE_EXCEEDED, checked(TeamMatchCheckResult.TEAM_MATCH_CHECK_SIZE_EXCEEDED, 0));
+        }
         String invalid = invalidRoster(roster);
         if (invalid != null) {
             log.error("[match] checkTeamMatch 名单不合法：{} roster={}", invalid, roster);

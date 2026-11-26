@@ -81,7 +81,7 @@ class MatchControlContractTest {
 
     @Test
     void 字段号钉住() {
-        assertFields(TeamMatchCheckRequest.getDescriptor(), "battle_config_id", 1, "roster", 2);
+        assertFields(TeamMatchCheckRequest.getDescriptor(), "battle_config_id", 1, "roster", 2, "target_team_size", 3);
         assertFields(TeamMatchCheckReply.getDescriptor(), "result", 1, "offender", 2, "zones", 3, "lock_ttl_seconds", 4);
         assertFields(TeamTicketsRequest.getDescriptor(), "battle_config_id", 1, "team_id", 2, "roster", 3, "zones", 4, "ticket_ids", 5,"request_id",6,"initiator_player_id",7,"client_request",8,"owner_account",9,"owner_revision",10,"launch_original",11);
         assertFields(com.game.api.proto.TeamMatchIntentQuery.getDescriptor(),"player_id",1,"request_id",2,"client_request",3,"owner_account",4,"owner_revision",5);
@@ -159,7 +159,7 @@ class MatchControlContractTest {
         Method method = MatchInternalService.class.getDeclaredMethod("startActivityBattle", StartActivityBattleRequest.class);
         assertThat(method.getReturnType()).isEqualTo(CompletableFuture.class);
         assertThat(MatchInternalService.class.getDeclaredMethods()).extracting(Method::getName)
-            .containsExactlyInAnyOrder("startActivityBattle","cancelActivityBattle","commitBattleOutcome","listPendingBattleScripts","reviewBattleScript");
+            .containsExactlyInAnyOrder("startActivityBattle","cancelActivityBattle","commitBattleOutcome","listPendingBattleScripts","reviewBattleScript","startGuildWarBattle");
         Method cancel=MatchInternalService.class.getDeclaredMethod("cancelActivityBattle",com.game.proto.match.CancelActivityBattleRequest.class);
         assertThat(cancel.getGenericReturnType().getTypeName()).contains(com.game.proto.match.CancelActivityBattleResponse.class.getName());
         Method commit=MatchInternalService.class.getDeclaredMethod("commitBattleOutcome",com.game.proto.match.CommitBattleOutcomeRequest.class);

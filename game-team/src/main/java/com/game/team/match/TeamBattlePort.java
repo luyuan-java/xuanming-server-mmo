@@ -121,6 +121,11 @@ public interface TeamBattlePort {
      */
     Check checkTeamMatch(int battleConfigId, List<Long> roster, Deadline deadline);
 
+    /** 带目标成团人数的整队开战预检；默认回落 3 参版本以兼容既有测试替身。 */
+    default Check checkTeamMatch(int battleConfigId, List<Long> roster, int targetTeamSize, Deadline deadline) {
+        return checkTeamMatch(battleConfigId, roster, deadline);
+    }
+
     /**
      * 按调用方给的每人 ticket id 原子建全员的 matched 票（带 team_id、不入队）。
      *
