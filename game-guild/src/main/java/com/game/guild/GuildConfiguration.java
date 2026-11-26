@@ -592,6 +592,9 @@ public class GuildConfiguration {
     public com.game.guild.war.GuildWarService guildWarService(
             com.game.guild.war.GuildWarStore warStore,
             GuildStore store,
+            EconomyStore economyStore,
+            GuildAssetRuntime guildAssetRuntime,
+            GuildProperties props,
             ConfigTables guildConfigTables,
             ObjectProvider<com.game.guild.activity.GuildActivityRuntime> activityRuntimeProvider,
             RedissonClient redis,
@@ -646,11 +649,17 @@ public class GuildConfiguration {
                 return java.util.Map.of();
             }
         };
+        com.game.guild.war.GuildWarService.AssetOpStatusReader opStatusReader = (opId, d) -> economyStore.opState(opId, d)
+                .map(s -> com.game.guild.service.EconomyViews.orderViewOf(s.status(), s.lastReason(), s.reasonTipId()))
+                .orElse(new com.game.guild.service.EconomyViews.OrderView(
+                        com.game.proto.guild.GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_PENDING, 0));
         com.game.guild.war.GuildWarService service = new com.game.guild.war.GuildWarService(
                 warStore, lookup, () -> guildConfigTables,
                 runtime != null ? runtime::startGuildWarBattle : null,
                 lockLookup, locator, pushes::notifyWarAlert, nameResolver,
-                guildIds::nextId, System::currentTimeMillis);
+                guildIds::nextId, System::currentTimeMillis,
+                guildAssetRuntime.loop().orElse(null), opStatusReader,
+                props.assetOp().lease(), true);
         if (runtime != null) {
             runtime.setGuildWarSettler(ev -> {
                 try {

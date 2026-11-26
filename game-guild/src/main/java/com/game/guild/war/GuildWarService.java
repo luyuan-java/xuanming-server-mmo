@@ -1,13 +1,23 @@
 package com.game.guild.war;
 
+import com.game.api.proto.AssetBundle;
+import com.game.api.proto.AssetCurrency;
+import com.game.api.proto.AssetItem;
 import com.game.common.deadline.Deadline;
 import com.game.common.time.GameDay;
+import com.game.guild.asset.AssetOp;
+import com.game.guild.asset.AssetOpDecisions;
+import com.game.guild.asset.AssetOpProcessor;
+import com.game.guild.asset.DeliveryOrigin;
+import com.game.guild.rules.GuildLimits;
 import com.game.guild.rules.GuildRoles;
 import com.game.guild.rules.GuildTips;
+import com.game.guild.service.EconomyViews;
 import com.game.guild.store.GuildData;
 import com.game.proto.BaseAttributesComp;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.BattlePlayerSnapshot;
+import com.game.proto.common.base.CurrencyType;
 import com.game.proto.GuildWarBattleContext;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.contracts.kafka.BattleResultEvent;
@@ -22,7 +32,9 @@ import com.game.table.ConfigTables;
 import com.game.table.GuildWarMilestoneTable;
 import com.game.table.GuildWarRuleTable;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -35,6 +47,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.random.RandomGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -79,6 +92,13 @@ public final class GuildWarService {
         Map<Long, String> resolve(Collection<Long> playerIds, Deadline d);
     }
 
+    @FunctionalInterface
+    public interface AssetOpStatusReader {
+        EconomyViews.OrderView read(long opId, Deadline d);
+    }
+
+    private static final long DEFAULT_ASSET_LEASE_MS = 30_000L;
+
     private final GuildWarStore store;
     private final GuildLookup guilds;
     private final Supplier<ConfigTables> tables;
@@ -89,10 +109,26 @@ public final class GuildWarService {
     private final NameResolver names;
     private final LongSupplier ids;
     private final LongSupplier nowMs;
+    private final AssetOpProcessor assetChannel;
+    private final AssetOpStatusReader opStatusReader;
+    private final long assetLeaseMs;
+    private final boolean requireAssetChannel;
+    private final RandomGenerator tokens;
 
+    /** 纯内存 / 轻量单测构造器（不启用资产通道；生产装配请走带 {@link AssetOpProcessor} 的重载）。 */
     public GuildWarService(GuildWarStore store, GuildLookup guilds, Supplier<ConfigTables> tables,
                            MatchLauncher match, BattleLockLookup battleLocks, SceneLocator sceneLocator,
                            AlertSink alerts, NameResolver names, LongSupplier ids, LongSupplier nowMs) {
+        this(store, guilds, tables, match, battleLocks, sceneLocator, alerts, names, ids, nowMs,
+                null, null, Duration.ofMillis(DEFAULT_ASSET_LEASE_MS), false);
+    }
+
+    /** 生产装配构造器：全量贯通帮战资产通道（里程碑、灵脉分红、追杀令托管/赏金、战局奖励）。 */
+    public GuildWarService(GuildWarStore store, GuildLookup guilds, Supplier<ConfigTables> tables,
+                           MatchLauncher match, BattleLockLookup battleLocks, SceneLocator sceneLocator,
+                           AlertSink alerts, NameResolver names, LongSupplier ids, LongSupplier nowMs,
+                           AssetOpProcessor assetChannel, AssetOpStatusReader opStatusReader,
+                           Duration assetLease, boolean requireAssetChannel) {
         this.store = Objects.requireNonNull(store, "store");
         this.guilds = Objects.requireNonNull(guilds, "guilds");
         this.tables = Objects.requireNonNull(tables, "tables");
@@ -103,6 +139,72 @@ public final class GuildWarService {
         this.names = names != null ? names : (p, d) -> Map.of();
         this.ids = Objects.requireNonNull(ids, "ids");
         this.nowMs = Objects.requireNonNull(nowMs, "nowMs");
+        this.assetChannel = assetChannel;
+        this.opStatusReader = opStatusReader;
+        this.assetLeaseMs = assetLease != null && assetLease.toMillis() > 0 ? assetLease.toMillis() : DEFAULT_ASSET_LEASE_MS;
+        this.requireAssetChannel = requireAssetChannel;
+        this.tokens = new SecureRandom();
+    }
+
+    private boolean useAssetChannel() {
+        return requireAssetChannel || assetChannel != null;
+    }
+
+    private long mintOpId() {
+        try {
+            return ids.getAsLong();
+        } catch (RuntimeException e) {
+            log.warn("[guild-war] 发号器暂不可用: {}", e.toString());
+            return 0L;
+        }
+    }
+
+    static AssetBundle buildRewardBundle(long silver, int item1Id, int item1Count, int item2Id, int item2Count) {
+        AssetBundle.Builder b = AssetBundle.newBuilder();
+        if (silver > 0) {
+            b.addCurrencies(AssetCurrency.newBuilder()
+                    .setCurrencyType(CurrencyType.CURRENCY_TYPE_GOLD_VALUE)
+                    .setAmount(silver));
+        }
+        if (item1Id != 0 && item1Count > 0) {
+            b.addItems(AssetItem.newBuilder().setConfigId(item1Id).setCount(item1Count));
+        }
+        if (item2Id != 0 && item2Count > 0) {
+            b.addItems(AssetItem.newBuilder().setConfigId(item2Id).setCount(item2Count));
+        }
+        return (b.getCurrenciesCount() == 0 && b.getItemsCount() == 0) ? null : b.build();
+    }
+
+    private EconomyViews.OrderView syncDeliverWarOp(AssetOp op, Deadline d) {
+        if (op == null) {
+            return new EconomyViews.OrderView(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED, 0);
+        }
+        if (assetChannel == null) {
+            return new EconomyViews.OrderView(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_PENDING, 0);
+        }
+        long budget = Math.min(GuildLimits.ASSET_SYNC_BUDGET_MS,
+                d.remainingMillis() - GuildLimits.ASSET_SYNC_TAIL_RESERVE_MS);
+        if (budget >= GuildLimits.ASSET_SYNC_MIN_BUDGET_MS) {
+            try {
+                assetChannel.processOne(op, DeliveryOrigin.SYNC, budget)
+                        .get(budget + 500L, TimeUnit.MILLISECONDS);
+            } catch (Exception e) {
+                log.warn("[guild-war] 帮战资产同步投递延后至重投循环 op_id={}: {}",
+                        Long.toUnsignedString(op.opId()), e.toString());
+            }
+        }
+        if (opStatusReader == null) {
+            return new EconomyViews.OrderView(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_PENDING, 0);
+        }
+        try {
+            EconomyViews.OrderView view = opStatusReader.read(op.opId(), d);
+            return view != null ? view
+                    : new EconomyViews.OrderView(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_PENDING, 0);
+        } catch (RuntimeException e) {
+            log.warn("[guild-war] 回读帮战资产指令状态失败 op_id={}: {}",
+                    Long.toUnsignedString(op.opId()), e.toString());
+            return new EconomyViews.OrderView(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_PENDING, 0);
+        }
     }
 
     private GuildWarRuleTable rule() {
@@ -772,8 +874,34 @@ public final class GuildWarService {
         long now = now();
         int weekKey = GameDay.weekKey(now);
         try {
-            store.claimMilestone(playerId, guild.guildId(), guild.zoneId(), weekKey,
-                    row.getId(), row.getRequiredGuildMerit(), minMerit, now);
+            GuildAssetOrderStatus orderStatus;
+            if (useAssetChannel()) {
+                AssetBundle bundle = buildRewardBundle(row.getRewardSilver(),
+                        row.getRewardItem1Id(), row.getRewardItem1Count(),
+                        row.getRewardItem2Id(), row.getRewardItem2Count());
+                long opId = 0L;
+                if (bundle != null) {
+                    if (assetChannel == null) {
+                        return ClaimGuildWarMilestoneResponse.newBuilder().setErrorMessage(tip(GuildTips.WAR_SERVICE_BUSY)).build();
+                    }
+                    opId = mintOpId();
+                    if (opId == 0L) {
+                        return ClaimGuildWarMilestoneResponse.newBuilder().setErrorMessage(tip(GuildTips.ID_GEN_UNAVAILABLE)).build();
+                    }
+                }
+                GuildWarStore.MilestoneClaimResult claimed = store.claimMilestoneWithAsset(
+                        playerId, guild.guildId(), guild.zoneId(), weekKey,
+                        row.getId(), row.getRequiredGuildMerit(), minMerit,
+                        row.getRewardContribution(), opId, bundle,
+                        now + assetLeaseMs, AssetOpDecisions.leaseToken(tokens), now);
+                orderStatus = claimed.assetOp() == null
+                        ? GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED
+                        : syncDeliverWarOp(claimed.assetOp(), d).status();
+            } else {
+                store.claimMilestone(playerId, guild.guildId(), guild.zoneId(), weekKey,
+                        row.getId(), row.getRequiredGuildMerit(), minMerit, now);
+                orderStatus = GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED;
+            }
             return ClaimGuildWarMilestoneResponse.newBuilder()
                     .setMilestone(GuildWarMilestoneView.newBuilder()
                             .setMilestoneId(row.getId())
@@ -784,10 +912,15 @@ public final class GuildWarService {
                             .setRewardSilver(row.getRewardSilver())
                             .setRewardContribution(row.getRewardContribution())
                             .build())
-                    .setAssetOrderStatus(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED)
+                    .setAssetOrderStatus(orderStatus)
                     .build();
         } catch (GuildWarStore.WarRuleException e) {
-            int tipId = "milestone_claimed".equals(e.code) ? GuildTips.WAR_MILESTONE_CLAIMED : GuildTips.WAR_MILESTONE_LOCKED;
+            int tipId = switch (e.code) {
+                case "milestone_claimed" -> GuildTips.WAR_MILESTONE_CLAIMED;
+                case "asset_pending" -> GuildTips.ASSET_PENDING;
+                case "not_member" -> GuildTips.NOT_IN_GUILD;
+                default -> GuildTips.WAR_MILESTONE_LOCKED;
+            };
             return ClaimGuildWarMilestoneResponse.newBuilder().setErrorMessage(tip(tipId)).build();
         } catch (SQLException e) {
             throw new IllegalStateException("领取战功宝箱失败", e);
@@ -807,10 +940,33 @@ public final class GuildWarService {
                 ? rule.getDividendMinPersonalMerit() : GuildWarRules.DEFAULT_DIVIDEND_MIN_MERIT;
         int playerCap = rule != null && rule.getDividendPlayerWeeklyCap() > 0
                 ? rule.getDividendPlayerWeeklyCap() : GuildWarRules.DEFAULT_DIVIDEND_PLAYER_WEEKLY_CAP;
+        int guildCap = rule != null && rule.getDividendGuildWeeklyCap() > 0
+                ? rule.getDividendGuildWeeklyCap() : GuildWarRules.DEFAULT_DIVIDEND_GUILD_WEEKLY_CAP;
         long now = now();
         int weekKey = GameDay.weekKey(now);
         try {
-            int claimed = store.claimDividend(playerId, guild.guildId(), guild.zoneId(), weekKey, minMerit, playerCap, now);
+            int claimed;
+            GuildAssetOrderStatus orderStatus;
+            if (useAssetChannel()) {
+                if (assetChannel == null) {
+                    return ClaimGuildWarDividendResponse.newBuilder().setErrorMessage(tip(GuildTips.WAR_SERVICE_BUSY)).build();
+                }
+                long opId = mintOpId();
+                if (opId == 0L) {
+                    return ClaimGuildWarDividendResponse.newBuilder().setErrorMessage(tip(GuildTips.ID_GEN_UNAVAILABLE)).build();
+                }
+                GuildWarStore.DividendClaimResult res = store.claimDividendWithAsset(
+                        playerId, guild.guildId(), guild.zoneId(), weekKey, minMerit, playerCap,
+                        GuildWarRules.DEFAULT_DIVIDEND_SILVER, GuildWarRules.DEFAULT_DIVIDEND_CONTRIBUTION,
+                        opId, now + assetLeaseMs, AssetOpDecisions.leaseToken(tokens), now);
+                claimed = res.claimedCount();
+                orderStatus = res.assetOp() == null
+                        ? GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED
+                        : syncDeliverWarOp(res.assetOp(), d).status();
+            } else {
+                claimed = store.claimDividend(playerId, guild.guildId(), guild.zoneId(), weekKey, minMerit, playerCap, now);
+                orderStatus = GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED;
+            }
             GuildWarStore.PlayerStateRow st = store.getOrDefaultPlayerState(playerId, guild.zoneId(), weekKey);
             GuildWarStore.WeeklyProgressRow prog = store.getOrDefaultWeeklyProgress(guild.guildId(), weekKey);
             return ClaimGuildWarDividendResponse.newBuilder()
@@ -820,13 +976,19 @@ public final class GuildWarService {
                             .setClaimedThisWeek(st.dividendClaimedCount())
                             .setWeeklyCap(playerCap)
                             .setGuildProducedThisWeek(prog.dividendPoolCount())
-                            .setGuildWeeklyCap(GuildWarRules.DEFAULT_DIVIDEND_GUILD_WEEKLY_CAP)
+                            .setGuildWeeklyCap(guildCap)
                             .setMinPersonalMerit(minMerit)
                             .build())
-                    .setAssetOrderStatus(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED)
+                    .setAssetOrderStatus(orderStatus)
                     .build();
         } catch (GuildWarStore.WarRuleException e) {
-            return ClaimGuildWarDividendResponse.newBuilder().setErrorMessage(tip(GuildTips.WAR_DIVIDEND_EMPTY)).build();
+            int tipId = switch (e.code) {
+                case "asset_pending" -> GuildTips.ASSET_PENDING;
+                case "write_conflict" -> GuildTips.BUSY_RETRY;
+                case "not_member" -> GuildTips.NOT_IN_GUILD;
+                default -> GuildTips.WAR_DIVIDEND_EMPTY;
+            };
+            return ClaimGuildWarDividendResponse.newBuilder().setErrorMessage(tip(tipId)).build();
         } catch (SQLException e) {
             throw new IllegalStateException("领取灵脉分红失败", e);
         }
@@ -864,11 +1026,54 @@ public final class GuildWarService {
             }
         }
         long now = now();
+        int dayKey = GameDay.dayKey(now);
         int ttlSec = rule != null && rule.getBountyTtlSec() > 0 ? rule.getBountyTtlSec() : GuildWarRules.DEFAULT_BOUNTY_TTL_SEC;
-        long bountyId = ids.getAsLong();
+        int pubDailyLimit = rule != null && rule.getBountyPublicDailyLimit() > 0
+                ? rule.getBountyPublicDailyLimit() : GuildWarRules.DEFAULT_BOUNTY_PUBLIC_DAILY_LIMIT;
+        long bountyId = mintOpId();
+        if (bountyId == 0L) {
+            return PostGuildWarBountyResponse.newBuilder().setErrorMessage(tip(GuildTips.ID_GEN_UNAVAILABLE)).build();
+        }
         try {
-            GuildWarStore.BountyRow row = store.postBounty(bountyId, guild.zoneId(), playerId, guild.guildId(),
-                    targetPid, tgOpt.get().guildId(), req.getTier(), spec, req.getPublicBoard(), ttlSec, now, 2, 0L);
+            GuildWarStore.BountyRow row;
+            if (useAssetChannel()) {
+                long opId = 0L;
+                AssetBundle debitBundle = null;
+                if (spec.costSilver() > 0) {
+                    if (assetChannel == null) {
+                        return PostGuildWarBountyResponse.newBuilder().setErrorMessage(tip(GuildTips.WAR_SERVICE_BUSY)).build();
+                    }
+                    opId = mintOpId();
+                    if (opId == 0L) {
+                        return PostGuildWarBountyResponse.newBuilder().setErrorMessage(tip(GuildTips.ID_GEN_UNAVAILABLE)).build();
+                    }
+                    debitBundle = buildRewardBundle(spec.costSilver(), 0, 0, 0, 0);
+                }
+                GuildWarStore.PostBountyResult posted = store.postBountyWithAsset(
+                        bountyId, guild.zoneId(), dayKey, playerId, guild.guildId(),
+                        targetPid, tgOpt.get().guildId(), req.getTier(), spec, req.getPublicBoard(),
+                        pubDailyLimit, ttlSec, now, opId, debitBundle,
+                        now + assetLeaseMs, AssetOpDecisions.leaseToken(tokens));
+                row = posted.bounty();
+                if (posted.escrowOp() != null) {
+                    EconomyViews.OrderView view = syncDeliverWarOp(posted.escrowOp(), d);
+                    row = store.getBounty(bountyId).orElse(row);
+                    if (view.status() == GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_REJECTED
+                            || view.status() == GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_ABORTED
+                            || row.status() == GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_EXPIRED_VALUE) {
+                        int rejectTip = view.reason() == AssetOpDecisions.REASON_CURRENCY_INSUFFICIENT
+                                ? GuildTips.CURRENCY_INSUFFICIENT : GuildTips.ASSET_REJECTED;
+                        return PostGuildWarBountyResponse.newBuilder().setErrorMessage(tip(rejectTip)).build();
+                    }
+                }
+            } else {
+                row = store.postBounty(bountyId, guild.zoneId(), playerId, guild.guildId(),
+                        targetPid, tgOpt.get().guildId(), req.getTier(), spec, req.getPublicBoard(), ttlSec, now, 2, 0L);
+            }
+            GuildWarBountyStatus statusEnum = GuildWarBountyStatus.forNumber(row.status());
+            if (statusEnum == null) {
+                statusEnum = GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ACTIVE;
+            }
             return PostGuildWarBountyResponse.newBuilder()
                     .setBounty(GuildWarBountyView.newBuilder()
                             .setBountyId(row.bountyId())
@@ -880,13 +1085,21 @@ public final class GuildWarService {
                             .setTier(req.getTier())
                             .setRewardSilver(row.escrowSilver())
                             .setPublicBoard(row.publicBoard() != 0)
-                            .setStatus(GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ACTIVE)
+                            .setStatus(statusEnum)
                             .setCounterKillsToTear(GuildWarRules.DEFAULT_BOUNTY_COUNTER_KILL_TEAR)
                             .setExpiresAtMs(row.expiresAtMs())
                             .build())
                     .build();
         } catch (GuildWarStore.WarRuleException e) {
-            return PostGuildWarBountyResponse.newBuilder().setErrorMessage(tip(GuildTips.WAR_BOUNTY_ALREADY_ACTIVE)).build();
+            int tipId = switch (e.code) {
+                case "funds_insufficient" -> GuildTips.FUNDS_INSUFFICIENT;
+                case "rank_too_low" -> GuildTips.RANK_TOO_LOW;
+                case "not_member" -> GuildTips.NOT_IN_GUILD;
+                case "asset_pending" -> GuildTips.ASSET_PENDING;
+                case "bounty_limit" -> GuildTips.WAR_BOUNTY_LIMIT;
+                default -> GuildTips.WAR_BOUNTY_ALREADY_ACTIVE;
+            };
+            return PostGuildWarBountyResponse.newBuilder().setErrorMessage(tip(tipId)).build();
         } catch (SQLException e) {
             throw new IllegalStateException("发布追杀令失败", e);
         }
@@ -1198,7 +1411,7 @@ public final class GuildWarService {
         int hpBefore = 0, hpAfter = 0, shielded = 0;
         boolean captured = false;
         long nextShieldUntil = 0L;
-        long jackpotContrib = 0L, jackpotSilver = 0L;
+        long jackpotContrib = 0L, bannerBonusSilver = 0L, bountyPayoutSilver = 0L;
         int outcomeTag = 0;
         if (gw.getLeylineId() != 0) {
             store.ensureZoneLeylines(gw.getZoneId(), now);
@@ -1226,7 +1439,7 @@ public final class GuildWarService {
                     if (dec.brokeBanner()) {
                         outcomeTag = 5;
                         jackpotContrib += dec.bonusContribution();
-                        jackpotSilver += dec.bonusSilver();
+                        bannerBonusSilver += dec.bonusSilver();
                     }
                 }
             }
@@ -1251,7 +1464,7 @@ public final class GuildWarService {
                     nextBountyStatus = 3; // COMPLETED
                     winnerPid = atkIds.get(0);
                     outcomeTag = 2;
-                    jackpotSilver += b.escrowSilver();
+                    bountyPayoutSilver += b.escrowSilver();
                 } else if (defWon && !atkIds.isEmpty()) {
                     String killerToken = Long.toUnsignedString(atkIds.get(0));
                     Set<String> seen = new HashSet<>();
@@ -1271,13 +1484,14 @@ public final class GuildWarService {
                         nextBountyStatus = 4; // TORN_UP
                         winnerPid = b.targetPlayerId();
                         outcomeTag = 4;
-                        jackpotSilver += b.escrowSilver() / 2L;
+                        bountyPayoutSilver += b.escrowSilver() / 2L;
                     } else {
                         outcomeTag = 3;
                     }
                 }
             }
         }
+        long jackpotSilver = bannerBonusSilver + bountyPayoutSilver;
 
         GuildWarStore.BattleRow rec = new GuildWarStore.BattleRow(
                 event.getBattleId(), gw.getZoneId(), warKind.getNumber(), gw.getLeylineId(), gw.getBountyId(),
@@ -1286,11 +1500,62 @@ public final class GuildWarService {
                 atkReward.contribution(), atkReward.silver(), atkReward.guildFunds(), atkReward.merit(),
                 defReward.contribution(), defReward.silver(), defReward.guildFunds(), defReward.merit(),
                 (feudActive ? "{\"fb\":true}" : "{}").getBytes(StandardCharsets.UTF_8), now);
-        boolean settled = store.settleBattle(rec, weekKey, dayKey, atkIds, defIds, captured, nextShieldUntil,
-                bountyResolved, nextBountyStatus, nextCounterKills, nextCounterKillers, winnerPid,
-                bountyImmunitySec, protectSec, now);
+        boolean settled;
+        List<AssetOp> createdOps = List.of();
+        if (useAssetChannel()) {
+            List<GuildWarStore.PlayerBattleCredit> credits = new ArrayList<>(atkIds.size() + defIds.size());
+            Set<Long> seenPlayers = new HashSet<>();
+            for (int i = 0; i < atkIds.size(); i++) {
+                long pid = atkIds.get(i);
+                if (!seenPlayers.add(pid)) continue;
+                long contrib = atkReward.contribution() + (atkWon && i == 0 ? jackpotContrib : 0L);
+                long silver = atkReward.silver() + (atkWon && i == 0 ? bannerBonusSilver : 0L);
+                long opId = (silver > 0 && assetChannel != null) ? mintOpId() : 0L;
+                AssetBundle bundle = opId != 0L ? buildRewardBundle(silver, 0, 0, 0, 0) : null;
+                credits.add(new GuildWarStore.PlayerBattleCredit(pid, gw.getAttackerGuildId(), contrib, silver,
+                        opId, bundle, opId != 0L ? AssetOpDecisions.leaseToken(tokens) : 0L));
+            }
+            for (int i = 0; i < defIds.size(); i++) {
+                long pid = defIds.get(i);
+                if (!seenPlayers.add(pid)) continue;
+                long contrib = defReward.contribution() + (defWon && i == 0 ? jackpotContrib : 0L);
+                long silver = defReward.silver() + (defWon && i == 0 ? bannerBonusSilver : 0L);
+                long opId = (silver > 0 && assetChannel != null) ? mintOpId() : 0L;
+                AssetBundle bundle = opId != 0L ? buildRewardBundle(silver, 0, 0, 0, 0) : null;
+                credits.add(new GuildWarStore.PlayerBattleCredit(pid, gw.getDefenderGuildId(), contrib, silver,
+                        opId, bundle, opId != 0L ? AssetOpDecisions.leaseToken(tokens) : 0L));
+            }
+            GuildWarStore.SettleBattleResult res = store.settleBattleWithAssets(rec, weekKey, dayKey, atkIds, defIds,
+                    captured, nextShieldUntil, bountyResolved, nextBountyStatus, nextCounterKills, nextCounterKillers,
+                    winnerPid, bountyImmunitySec, protectSec, atkReward.guildFunds(), defReward.guildFunds(),
+                    credits, now + assetLeaseMs, now);
+            settled = res.settled();
+            if (settled) {
+                List<AssetOp> allOps = new ArrayList<>(res.createdOps());
+                if (bountyResolved && res.bountyUpdated() && bountyPayoutSilver > 0 && winnerPid != 0 && assetChannel != null) {
+                    long bopId = mintOpId();
+                    AssetBundle payoutBundle = bopId != 0L ? buildRewardBundle(bountyPayoutSilver, 0, 0, 0, 0) : null;
+                    if (payoutBundle != null) {
+                        long winnerGuildId = defIds.contains(winnerPid) ? gw.getDefenderGuildId() : gw.getAttackerGuildId();
+                        int dailyPayCap = rule != null && rule.getBountyDailyPayoutLimit() > 0
+                                ? rule.getBountyDailyPayoutLimit() : GuildWarRules.DEFAULT_BOUNTY_DAILY_PAYOUT_CAP;
+                        store.enqueueBountyPayout(winnerPid, winnerGuildId, gw.getZoneId(), weekKey, dayKey, dailyPayCap,
+                                bopId, payoutBundle, now + assetLeaseMs, AssetOpDecisions.leaseToken(tokens), now)
+                                .ifPresent(allOps::add);
+                    }
+                }
+                createdOps = allOps;
+            }
+        } else {
+            settled = store.settleBattle(rec, weekKey, dayKey, atkIds, defIds, captured, nextShieldUntil,
+                    bountyResolved, nextBountyStatus, nextCounterKills, nextCounterKillers, winnerPid,
+                    bountyImmunitySec, protectSec, now);
+        }
         if (settled) {
             Deadline bg = Deadline.after(1500);
+            for (AssetOp op : createdOps) {
+                syncDeliverWarOp(op, bg);
+            }
             if (feudActive) {
                 GuildWarStore.FeudBattleResult fRes = store.recordFeudBattle(activeFeud.get().feudId(),
                         gw.getAttackerGuildId(), gw.getDefenderGuildId(), atkWon, defWon,

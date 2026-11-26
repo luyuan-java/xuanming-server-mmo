@@ -194,7 +194,9 @@ public final class GuildPushes {
         GuildChangeKind change;
         switch (kind == null ? GuildAssetOpKind.UNRECOGNIZED : kind) {
             case GUILD_ASSET_OP_KIND_DONATE -> change = GuildChangeKind.GUILD_CHANGE_KIND_FUNDS_CHANGED;
-            case GUILD_ASSET_OP_KIND_SHOP, GUILD_ASSET_OP_KIND_ACTIVITY_REWARD ->
+            case GUILD_ASSET_OP_KIND_SHOP, GUILD_ASSET_OP_KIND_ACTIVITY_REWARD,
+                    GUILD_ASSET_OP_KIND_WAR_REWARD, GUILD_ASSET_OP_KIND_BOUNTY_ESCROW,
+                    GUILD_ASSET_OP_KIND_BOUNTY_PAYOUT ->
                     change = GuildChangeKind.GUILD_CHANGE_KIND_DELIVERY_DONE;
             default -> {
                 log.error("[GuildEconomy] finalized op of unknown kind={} guild={} player={}, no push", kind,

@@ -427,6 +427,181 @@ final class GuildWarServiceTest {
         assertThat(((Number) defRow[4]).longValue()).as("参战后必须刷新免战冷却").isGreaterThan(t);
     }
 
+    @Test
+    void assetChannelFailClosedBountyEscrowDividendAndBattlePayouts() throws Exception {
+        Deadline d = Deadline.after(5000);
+        GuildWarService.GuildLookup lookup = new GuildWarService.GuildLookup() {
+            @Override public Optional<GuildData> findByPlayer(long playerId, Deadline dl) {
+                if (playerId == 101L || playerId == 102L) return Optional.of(GUILD_A);
+                if (playerId == 201L) return Optional.of(GUILD_B);
+                return Optional.empty();
+            }
+            @Override public Optional<GuildData> findByGuildId(long guildId, Deadline dl) {
+                if (guildId == 1001L) return Optional.of(GUILD_A);
+                if (guildId == 1002L) return Optional.of(GUILD_B);
+                return Optional.empty();
+            }
+        };
+
+        // 1. 生产模式 requireAssetChannel=true 且通道关闭 -> 严禁伪造 APPLIED 或免费发追杀令
+        GuildWarService disabled = new GuildWarService(store, lookup, () -> null, null, null, null, null, null,
+                idGen::incrementAndGet, now::get, null, null, java.time.Duration.ofSeconds(30), true);
+        assertThat(disabled.claimGuildWarDividend(101L, ClaimGuildWarDividendRequest.getDefaultInstance(), d)
+                .getErrorMessage().getId()).isEqualTo(GuildTips.WAR_SERVICE_BUSY);
+        assertThat(disabled.postGuildWarBounty(101L, PostGuildWarBountyRequest.newBuilder()
+                .setTargetPlayerId(201L).setTier(GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_NORMAL_SILVER)
+                .setPublicBoard(true).build(), d).getErrorMessage().getId()).isEqualTo(GuildTips.WAR_SERVICE_BUSY);
+
+        // 2. 启用资产通道：先测银两不足拒单（托管失败 -> EXPIRED + 返回 CURRENCY_INSUFFICIENT）
+        List<com.game.guild.asset.AssetOp> delivered = new ArrayList<>();
+        Map<Long, com.game.guild.service.EconomyViews.OrderView> opViews = new HashMap<>();
+        java.util.concurrent.atomic.AtomicBoolean rejectEscrow = new java.util.concurrent.atomic.AtomicBoolean(true);
+        com.game.guild.asset.AssetOpProcessor processor = (op, origin, budgetMs) -> {
+            delivered.add(op);
+            if (op.txType() == com.game.proto.TransactionType.TX_GUILD_BOUNTY_ESCROW_VALUE) {
+                if (rejectEscrow.get()) {
+                    opViews.put(op.opId(), new com.game.guild.service.EconomyViews.OrderView(
+                            GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_REJECTED,
+                            com.game.guild.asset.AssetOpDecisions.REASON_CURRENCY_INSUFFICIENT));
+                    store.finalizeEscrowBounty(op.opId(), GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_EXPIRED_VALUE);
+                } else {
+                    opViews.put(op.opId(), new com.game.guild.service.EconomyViews.OrderView(
+                            GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED, 0));
+                    store.finalizeEscrowBounty(op.opId(), GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ACTIVE_VALUE);
+                }
+            } else {
+                opViews.put(op.opId(), new com.game.guild.service.EconomyViews.OrderView(
+                        GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED, 0));
+            }
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        };
+        GuildWarService wired = new GuildWarService(store, lookup, () -> null, null, null, null, null, null,
+                idGen::incrementAndGet, now::get, processor,
+                (opId, dl) -> opViews.getOrDefault(opId, new com.game.guild.service.EconomyViews.OrderView(
+                        GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_PENDING, 0)),
+                java.time.Duration.ofSeconds(30), true);
+
+        PostGuildWarBountyResponse rejected = wired.postGuildWarBounty(101L, PostGuildWarBountyRequest.newBuilder()
+                .setTargetPlayerId(201L).setTier(GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_NORMAL_SILVER)
+                .setPublicBoard(true).build(), d);
+        assertThat(rejected.getErrorMessage().getId()).isEqualTo(GuildTips.CURRENCY_INSUFFICIENT);
+        assertThat(delivered).hasSize(1);
+        assertThat(delivered.getFirst().stream()).isEqualTo(com.game.api.proto.AssetStream.ASSET_STREAM_GUILD_DEBIT_VALUE);
+        assertThat(delivered.getFirst().bundle().getCurrencies(0).getAmount()).isEqualTo(5000L);
+        assertThat(store.activeBountyByTarget(201L, now.get())).isEmpty();
+
+        // 3. 银两充足 -> 托管扣款成功，追杀令翻 ACTIVE(2)
+        rejectEscrow.set(false);
+        PostGuildWarBountyResponse posted = wired.postGuildWarBounty(101L, PostGuildWarBountyRequest.newBuilder()
+                .setTargetPlayerId(201L).setTier(GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_NORMAL_SILVER)
+                .setPublicBoard(true).build(), d);
+        assertThat(posted.getErrorMessage().getId()).isZero();
+        assertThat(posted.getBounty().getStatus()).isEqualTo(GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ACTIVE);
+        long bountyId = posted.getBounty().getBountyId();
+
+        // 4. 领取灵脉分红 -> 走 GUILD_CREDIT 通道投递 2*2000 银两并回读真实状态
+        int weekKey = com.game.common.time.GameDay.weekKey(now.get());
+        store.seedDividend(1001L, 101L, 1, weekKey, 100L, 2);
+        ClaimGuildWarDividendResponse div = wired.claimGuildWarDividend(101L,
+                ClaimGuildWarDividendRequest.getDefaultInstance(), d);
+        assertThat(div.getErrorMessage().getId()).isZero();
+        assertThat(div.getClaimedCount()).isEqualTo(2);
+        assertThat(div.getAssetOrderStatus()).isEqualTo(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED);
+        assertThat(delivered).anyMatch(op -> op.txType() == com.game.proto.TransactionType.TX_GUILD_WAR_REWARD_VALUE
+                && op.bundle().getCurrencies(0).getAmount() == 4000L);
+
+        // 5. 帮战终局结算 -> 同时投递参战银两 WAR_REWARD 与追杀赏金 BOUNTY_PAYOUT(4500)
+        delivered.clear();
+        BattleResultEvent winBounty = BattleResultEvent.newBuilder()
+                .setBattleId(881_001L)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                .setTotalRounds(4)
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(101L))
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(201L))
+                .setActivityContext(BattleActivityContext.newBuilder()
+                        .setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR)
+                        .setGuildWar(GuildWarBattleContext.newBuilder()
+                                .setWarBattleKind(GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_BOUNTY_HUNT_VALUE)
+                                .setBountyId(bountyId)
+                                .setAttackerGuildId(1001L)
+                                .setDefenderGuildId(1002L)
+                                .setZoneId(1).build()))
+                .build();
+        assertThat(wired.settleBattleResult(winBounty)).isTrue();
+        assertThat(delivered).anyMatch(op -> op.txType() == com.game.proto.TransactionType.TX_GUILD_WAR_REWARD_VALUE
+                && op.playerId() == 101L);
+        assertThat(delivered).anyMatch(op -> op.txType() == com.game.proto.TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE
+                && op.playerId() == 101L && op.bundle().getCurrencies(0).getAmount() == 4500L);
+    }
+
+    @Test
+    void jdbcWarStoreAssetChannelEnforcesSingleConnectionLockOrderAndAssetOpInsert() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger checkedOut = new java.util.concurrent.atomic.AtomicInteger();
+        List<String> executedSql = new ArrayList<>();
+        javax.sql.DataSource ds = org.mockito.Mockito.mock(javax.sql.DataSource.class);
+        org.mockito.Mockito.when(ds.getConnection()).thenAnswer(inv -> {
+            if (checkedOut.incrementAndGet() > 1) {
+                throw new IllegalStateException("嵌套借用第二条 JDBC 连接");
+            }
+            java.sql.Connection conn = org.mockito.Mockito.mock(java.sql.Connection.class);
+            org.mockito.Mockito.doAnswer(cInv -> { checkedOut.decrementAndGet(); return null; }).when(conn).close();
+            org.mockito.Mockito.when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenAnswer(pInv -> {
+                String sql = pInv.getArgument(0, String.class);
+                executedSql.add(sql);
+                java.sql.PreparedStatement ps = org.mockito.Mockito.mock(java.sql.PreparedStatement.class);
+                org.mockito.Mockito.when(ps.executeQuery()).thenAnswer(qInv -> {
+                    java.sql.ResultSet rs = org.mockito.Mockito.mock(java.sql.ResultSet.class);
+                    if (sql.contains("FROM guild WHERE guild_id = ? FOR UPDATE")) {
+                        org.mockito.Mockito.when(rs.next()).thenReturn(true, false);
+                        org.mockito.Mockito.when(rs.getLong(1)).thenReturn(10_000L);
+                    } else if (sql.contains("FROM guild_member WHERE guild_id = ? AND player_id = ? FOR UPDATE")) {
+                        org.mockito.Mockito.when(rs.next()).thenReturn(true, false);
+                        org.mockito.Mockito.when(rs.getInt(1)).thenReturn(GuildRoles.LEADER);
+                    } else if (sql.contains("FROM guild_player_op_seq WHERE player_id = ? AND stream = ? FOR UPDATE")) {
+                        org.mockito.Mockito.when(rs.next()).thenReturn(true, false);
+                        org.mockito.Mockito.when(rs.getLong(1)).thenReturn(1L);
+                        org.mockito.Mockito.when(rs.getLong(2)).thenReturn(1_795_430_400_000L);
+                    } else {
+                        org.mockito.Mockito.when(rs.next()).thenReturn(false);
+                    }
+                    return rs;
+                });
+                org.mockito.Mockito.when(ps.executeUpdate()).thenReturn(1);
+                return ps;
+            });
+            return conn;
+        });
+
+        GuildWarStore jdbc = new GuildWarStore(ds);
+        long t = now.get();
+        GuildWarRules.BountyTierSpec silverSpec = GuildWarRules.resolveBountyTier(null,
+                GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_NORMAL_SILVER).orElseThrow();
+        com.game.api.proto.AssetBundle debit = GuildWarService.buildRewardBundle(silverSpec.costSilver(), 0, 0, 0, 0);
+        GuildWarStore.PostBountyResult res = jdbc.postBountyWithAsset(91001L, 1, 20261126, 101L, 1001L, 201L, 1002L,
+                GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_NORMAL_SILVER, silverSpec, true, 2, 86400, t,
+                99001L, debit, t + 30_000L, 12345L);
+        assertThat(checkedOut.get()).isZero();
+        assertThat(res.bounty().status()).isEqualTo(GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ESCROW_PENDING_VALUE);
+        assertThat(res.bounty().escrowOpId()).isEqualTo(99001L);
+        assertThat(res.escrowOp()).isNotNull();
+        assertThat(res.escrowOp().stream()).isEqualTo(com.game.api.proto.AssetStream.ASSET_STREAM_GUILD_DEBIT_VALUE);
+        assertThat(res.escrowOp().deadlineMs()).isEqualTo(t + 60_000L);
+        int memberIdx = -1, seqIdx = -1, opIdx = -1, stateIdx = -1, bountyIdx = -1;
+        for (int i = 0; i < executedSql.size(); i++) {
+            String s = executedSql.get(i);
+            if (memberIdx < 0 && s.contains("FROM guild_member")) memberIdx = i;
+            if (seqIdx < 0 && s.contains("FROM guild_player_op_seq") && s.contains("FOR UPDATE")) seqIdx = i;
+            if (opIdx < 0 && s.startsWith("INSERT INTO guild_asset_op")) opIdx = i;
+            if (stateIdx < 0 && s.contains("guild_war_player_state")) stateIdx = i;
+            if (bountyIdx < 0 && s.startsWith("INSERT INTO guild_war_bounty")) bountyIdx = i;
+        }
+        assertThat(memberIdx).isGreaterThanOrEqualTo(0);
+        assertThat(seqIdx).isGreaterThan(memberIdx);
+        assertThat(opIdx).isGreaterThan(seqIdx);
+        assertThat(stateIdx).isGreaterThan(opIdx);
+        assertThat(bountyIdx).isGreaterThan(stateIdx);
+    }
+
     /** 轻量级内存仓储替身，仅单测使用（无外部 MySQL / H2 依赖）。 */
     private static final class InMemoryWarStore extends GuildWarStore {
         private final Map<String, LeylineRow> leylines = new HashMap<>();
@@ -443,6 +618,105 @@ final class GuildWarServiceTest {
             leylines.put(zoneId + ":" + leylineId, new LeylineRow(cur.zoneId(), cur.leylineId(), ownerGuildId,
                     cur.bannerHp(), cur.shieldUntilMs(), cur.capturedAtMs(), cur.lastDividendAtMs(),
                     cur.dividendWeekKey(), cur.weeklyDividendCount(), cur.lastSiegeAlertMs(), cur.updatedMs()));
+        }
+
+        void seedDividend(long guildId, long playerId, int zoneId, int weekKey, long merit, int poolCount) {
+            weekly.put(guildId + ":" + weekKey, new WeeklyProgressRow(guildId, weekKey, merit, poolCount,
+                    0L, 0L, 0L, 0L, "", 0L, 1L));
+            PlayerStateRow st = getOrDefaultPlayerState(playerId, zoneId, weekKey);
+            players.put(playerId, new PlayerStateRow(playerId, zoneId, st.peaceMode(), st.peaceReadyAtMs(),
+                    st.openChallenge(), st.protectUntilMs(), st.streakCount(), st.streakDistinctCount(),
+                    st.lastStreakOpponentId(), weekKey, merit, st.milestoneClaimedMask(), st.dividendClaimedCount(),
+                    st.bountyImmunityUntilMs(), st.bountyPayoutDayKey(), st.bountyPayoutCountToday(),
+                    st.nextGarrisonRefreshMs(), st.nextTrackAtMs(), 1L));
+        }
+
+        void finalizeEscrowBounty(long escrowOpId, int nextStatus) {
+            for (var e : bounties.entrySet()) {
+                BountyRow b = e.getValue();
+                if (b.escrowOpId() == escrowOpId && b.status() == 1) {
+                    e.setValue(new BountyRow(b.bountyId(), b.zoneId(), b.issuerPlayerId(), b.issuerGuildId(),
+                            b.targetPlayerId(), b.targetGuildId(), b.tier(), b.escrowSilver(), b.taxSilver(),
+                            b.publicBoard(), nextStatus, b.counterKills(), b.counterKillersJson(), b.escrowOpId(),
+                            b.createdAtMs(), b.expiresAtMs(), b.resolvedAtMs(), b.winnerPlayerId()));
+                }
+            }
+        }
+
+        @Override
+        public PostBountyResult postBountyWithAsset(long bountyId, int zoneId, int dayKey, long issuerPlayerId,
+                                                    long issuerGuildId, long targetPlayerId, long targetGuildId,
+                                                    GuildWarBountyTier tier, GuildWarRules.BountyTierSpec spec,
+                                                    boolean publicBoard, int pubDailyLimit, int ttlSec, long nowMs,
+                                                    long opId, com.game.api.proto.AssetBundle debitBundle,
+                                                    long leaseUntilMs, long leaseToken) {
+            int initStatus = (spec.costSilver() > 0 && opId != 0 && debitBundle != null) ? 1 : 2;
+            BountyRow row = postBounty(bountyId, zoneId, issuerPlayerId, issuerGuildId, targetPlayerId, targetGuildId,
+                    tier, spec, publicBoard, ttlSec, nowMs, initStatus, initStatus == 1 ? opId : 0L);
+            com.game.guild.asset.AssetOp op = initStatus == 1
+                    ? new com.game.guild.asset.AssetOp(opId, issuerPlayerId,
+                    com.game.api.proto.AssetStream.ASSET_STREAM_GUILD_DEBIT_VALUE, 1L, nowMs, opId,
+                    com.game.proto.TransactionType.TX_GUILD_BOUNTY_ESCROW_VALUE, debitBundle, 0, nowMs + 60_000L, leaseToken, 0)
+                    : null;
+            return new PostBountyResult(row, op);
+        }
+
+        @Override
+        public DividendClaimResult claimDividendWithAsset(long playerId, long guildId, int zoneId, int weekKey,
+                                                          long minPersonalMerit, int playerWeeklyCap,
+                                                          long silverPerShare, long contribPerShare,
+                                                          long opId, long leaseUntilMs, long leaseToken, long nowMs) {
+            WeeklyProgressRow prog = getOrDefaultWeeklyProgress(guildId, weekKey);
+            PlayerStateRow st = getOrDefaultPlayerState(playerId, zoneId, weekKey);
+            if (st.weeklyMerit() < minPersonalMerit) throw new WarRuleException("dividend_empty");
+            int claimable = Math.min(prog.dividendPoolCount(), playerWeeklyCap) - st.dividendClaimedCount();
+            if (claimable <= 0) throw new WarRuleException("dividend_empty");
+            players.put(playerId, new PlayerStateRow(playerId, zoneId, st.peaceMode(), st.peaceReadyAtMs(),
+                    st.openChallenge(), st.protectUntilMs(), st.streakCount(), st.streakDistinctCount(),
+                    st.lastStreakOpponentId(), weekKey, st.weeklyMerit(), st.milestoneClaimedMask(),
+                    st.dividendClaimedCount() + claimable, st.bountyImmunityUntilMs(), st.bountyPayoutDayKey(),
+                    st.bountyPayoutCountToday(), st.nextGarrisonRefreshMs(), st.nextTrackAtMs(), nowMs));
+            com.game.api.proto.AssetBundle bundle = GuildWarService.buildRewardBundle(claimable * silverPerShare, 0, 0, 0, 0);
+            com.game.guild.asset.AssetOp op = new com.game.guild.asset.AssetOp(opId, playerId,
+                    com.game.api.proto.AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE, 1L, nowMs, opId,
+                    com.game.proto.TransactionType.TX_GUILD_WAR_REWARD_VALUE, bundle, 0, 0L, leaseToken, 0);
+            return new DividendClaimResult(claimable, op);
+        }
+
+        @Override
+        public SettleBattleResult settleBattleWithAssets(BattleRow battle, int weekKey, int dayKey,
+                                                         List<Long> attackerIds, List<Long> defenderIds,
+                                                         boolean capturedLeyline, long nextShieldUntilMs,
+                                                         boolean bountyResolved, int nextBountyStatus,
+                                                         int nextCounterKills, String nextCounterKillersJson,
+                                                         long winnerPlayerId, long bountyImmunitySec, long protectSec,
+                                                         long attackerGuildFunds, long defenderGuildFunds,
+                                                         List<PlayerBattleCredit> credits, long leaseUntilMs, long nowMs) {
+            boolean wasActive = battle.bountyId() != 0 && bounties.containsKey(battle.bountyId())
+                    && bounties.get(battle.bountyId()).status() == 2;
+            boolean ok = settleBattle(battle, weekKey, dayKey, attackerIds, defenderIds, capturedLeyline, nextShieldUntilMs,
+                    bountyResolved, nextBountyStatus, nextCounterKills, nextCounterKillersJson, winnerPlayerId,
+                    bountyImmunitySec, protectSec, nowMs);
+            if (!ok) return new SettleBattleResult(false, false, List.of());
+            List<com.game.guild.asset.AssetOp> ops = new ArrayList<>();
+            for (PlayerBattleCredit cr : credits) {
+                if (cr.silverGain() > 0 && cr.opId() != 0 && cr.bundle() != null) {
+                    ops.add(new com.game.guild.asset.AssetOp(cr.opId(), cr.playerId(),
+                            com.game.api.proto.AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE, 1L, nowMs, cr.opId(),
+                            com.game.proto.TransactionType.TX_GUILD_WAR_REWARD_VALUE, cr.bundle(), 0, 0L, cr.leaseToken(), 0));
+                }
+            }
+            return new SettleBattleResult(true, wasActive && bountyResolved, ops);
+        }
+
+        @Override
+        public Optional<com.game.guild.asset.AssetOp> enqueueBountyPayout(long playerId, long guildId, int zoneId,
+                                                                          int weekKey, int dayKey, int dailyPayoutLimit,
+                                                                          long opId, com.game.api.proto.AssetBundle bundle,
+                                                                          long leaseUntilMs, long leaseToken, long nowMs) {
+            return Optional.of(new com.game.guild.asset.AssetOp(opId, playerId,
+                    com.game.api.proto.AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE, 2L, nowMs, opId,
+                    com.game.proto.TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE, bundle, 0, 0L, leaseToken, 0));
         }
 
         @Override
