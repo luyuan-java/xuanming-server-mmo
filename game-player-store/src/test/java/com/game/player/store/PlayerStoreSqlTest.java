@@ -482,6 +482,45 @@ class PlayerStoreSqlTest {
     }
 
     @Test
+    void 最终存盘完整保留外观与挂机月卡标量_篡改月卡列摘要冲突且显式清零生效() {
+        long p = finalSavePlayer(19101, "终存外观月卡");
+        PlayerRow firstFinal = save(p, 1, 2, 42.5);
+        firstFinal.setAppearanceId("skin_lotus_01");
+        firstFinal.setAfkPassExpiresAt(1_900_000_000L);
+        firstFinal.setAfkPassLastReqId(88001L);
+        byte[] stateBytes = facing(0.9).toByteArray();
+        var accepted = store.registerFinalSave(firstFinal, stateBytes, FINAL_SOURCE, TX_TIMEOUT);
+        assertThat(accepted.status()).isEqualTo(FinalSaveStatus.ACCEPTED);
+
+        // 篡改 player_final_save 的月卡到期列后必须按摘要冲突拦截，绝不静默落库。
+        schemaJdbc().update("UPDATE player_final_save SET afk_pass_expires_at = ? WHERE player_id = ? AND owner_epoch = 1",
+                1_900_000_999L, p);
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.CONFLICT);
+        schemaJdbc().update("UPDATE player_final_save SET afk_pass_expires_at = ? WHERE player_id = ? AND owner_epoch = 1",
+                1_900_000_000L, p);
+
+        assertThat(store.completeFinalSave(p, 1, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+        PlayerRow afterFirst = store.findPlayer(p).orElseThrow();
+        assertThat(afterFirst.getAppearanceId()).isEqualTo("skin_lotus_01");
+        assertThat(afterFirst.getAfkPassExpiresAt()).isEqualTo(1_900_000_000L);
+        assertThat(afterFirst.getAfkPassLastReqId()).isEqualTo(88001L);
+
+        // 下一代 GM 显式清零（0L）经最终存盘必须覆盖库内旧到期时间；外观为空串则沿用库内旧外观。
+        assertThat(store.claimOwnership(p)).isEqualTo(new ClaimResult.Claimed(2));
+        assertThat(store.loadForScene(p, 2, OTHER_SOURCE, TX_TIMEOUT)).isPresent();
+        PlayerRow clearFinal = save(p, 2, 2, 43.0);
+        clearFinal.setAfkPassExpiresAt(0L);
+        clearFinal.setAfkPassLastReqId(88001L);
+        assertThat(store.registerFinalSave(clearFinal, facing(1.2).toByteArray(), OTHER_SOURCE, TX_TIMEOUT).status())
+                .isEqualTo(FinalSaveStatus.ACCEPTED);
+        assertThat(store.completeFinalSave(p, 2, TX_TIMEOUT).status()).isEqualTo(FinalSaveStatus.APPLIED);
+        PlayerRow afterClear = store.findPlayer(p).orElseThrow();
+        assertThat(afterClear.getAppearanceId()).isEqualTo("skin_lotus_01");
+        assertThat(afterClear.getAfkPassExpiresAt()).isZero();
+        assertThat(afterClear.getAfkPassLastReqId()).isEqualTo(88001L);
+    }
+
+    @Test
     void 损坏或原epoch已被外部改动的PENDING不删除不改绑也不写回() {
         long p = finalSavePlayer(1911, "终存子");
         registerFinal(p);
@@ -790,6 +829,8 @@ class PlayerStoreSqlTest {
                 sql -> sql.replaceFirst("\\bdata\\s+MEDIUMBLOB\\s+NULL", "data MEDIUMBLOB NOT NULL"),
                 sql -> sql.replace("BINARY(32) NULL", "BINARY(16) NULL"),
                 sql -> sql.replace("source_instance    VARCHAR(64)", "source_instance    VARCHAR(8)"),
+                sql -> sql.replace("appearance_id      VARCHAR(64)", "appearance_id      VARCHAR(8)"),
+                sql -> sql.replace("afk_pass_expires_at BIGINT UNSIGNED NULL", "afk_pass_expires_at INT NULL"),
                 sql -> sql.replace("next_attempt_at    BIGINT", "next_attempt_at    INT"),
                 sql -> sql.replace("pos_x              DOUBLE", "pos_x              VARCHAR(64)"));
         for (var change : incompatible) {

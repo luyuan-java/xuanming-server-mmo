@@ -275,11 +275,13 @@ class PlayerStoreTest {
     void 最终摘要固定版本向量包含player原epoch与全部标量和原bytes() {
         byte[] bytes = {1, 2, 3};
         assertThat(java.util.HexFormat.of().formatHex(PlayerStore.finalSaveDigest(finalRow(), bytes)))
-                .isEqualTo("095e099fb7bac61b190e641d1cd00e44ed2b56cef80d7466f5c3a3d922ae0fed");
+                .isEqualTo("6d7d1af3f3ca5d56c03b2537c8fd3ed563eeea2eb942f12dfafbfd25d76115cc");
         byte[] original = PlayerStore.finalSaveDigest(finalRow(), bytes);
         for (java.util.function.Consumer<PlayerRow> change : List.<java.util.function.Consumer<PlayerRow>>of(
                 r -> r.setPlayerId(10), r -> r.setOwnerEpoch(7), r -> r.setLevel(4),
-                r -> r.setSceneConfigId(3), r -> r.setPosX(42.6), r -> r.setPosY(-0.0), r -> r.setPosZ(1))) {
+                r -> r.setSceneConfigId(3), r -> r.setPosX(42.6), r -> r.setPosY(-0.0), r -> r.setPosZ(1),
+                r -> r.setAppearanceId("skin_01"), r -> r.setAfkPassExpiresAt(0L), r -> r.setAfkPassExpiresAt(1_800_000_000L),
+                r -> r.setAfkPassLastReqId(0L), r -> r.setAfkPassLastReqId(777L))) {
             PlayerRow different = finalRow();
             change.accept(different);
             assertThat(PlayerStore.finalSaveDigest(different, bytes)).isNotEqualTo(original);
@@ -292,10 +294,10 @@ class PlayerStoreTest {
     void 最终摘要的uint32高位配置按无符号位模式进入固定向量() {
         PlayerRow row=finalRow();row.setSceneConfigId(Integer.MIN_VALUE);
         assertThat(java.util.HexFormat.of().formatHex(PlayerStore.finalSaveDigest(row,new byte[]{1,2,3})))
-                .isEqualTo("6aea345f3eeee6b83ea9917debf44c32d862fe5eb24544eacb862e933e0b3c4b");
+                .isEqualTo("2e026f9d50601dcfeb5229122a0a80b464fa585ce1b0267995e052cbd381e911");
         row.setSceneConfigId(-1);
         assertThat(java.util.HexFormat.of().formatHex(PlayerStore.finalSaveDigest(row,new byte[]{1,2,3})))
-                .isEqualTo("307bbf270502e146b724d04393142828b5b98010d38765003a7d34328d89a165");
+                .isEqualTo("79956651459ef98e6f1f3c9526bdfb6413490b6c55cd2b73869fa1bf8ad53859");
         verifyNoInteractions(mapper);
     }
 
@@ -305,7 +307,7 @@ class PlayerStoreTest {
                 r -> r.setPlayerId(0), r -> r.setOwnerEpoch(0), r -> r.setOwnerEpoch(-1),
                 r -> r.setOwnerEpoch(Long.MAX_VALUE), r -> r.setLevel(-1), r -> r.setLevel(0x1_0000_0000L),
                 r -> r.setPosX(Double.NaN), r -> r.setPosY(Double.POSITIVE_INFINITY),
-                r -> r.setPosZ(Double.NEGATIVE_INFINITY))) {
+                r -> r.setPosZ(Double.NEGATIVE_INFINITY), r -> r.setAppearanceId("a".repeat(65)))) {
             PlayerRow row = finalRow();
             invalid.accept(row);
             assertThatThrownBy(() -> PlayerStore.finalSaveDigest(row, new byte[0]))
