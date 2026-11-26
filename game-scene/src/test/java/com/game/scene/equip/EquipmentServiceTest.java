@@ -296,4 +296,11 @@ class EquipmentServiceTest {
         assertThatThrownBy(() -> current.commit(candidate, AssetAudit.Reason.EQUIP_ENHANCE, 77, "")).isInstanceOf(IllegalStateException.class);
         assertThat(f.player.wallet().balance(Wallet.GOLD)).isEqualTo(1000);
     }
+    @Test void 绑定宝石禁止镶嵌防拆卸洗白() {
+        var f = new EquipmentFixture(); long id = f.grant(1, 1);
+        assertThat(f.bags.addItems(f.player, BagType.INVENTORY, Map.of(11, 1L), true, AssetAudit.Reason.GM_GRANT, 0, "").tip()).isZero();
+        assertThat(f.equipment.inlay(f.player, id, 0, 11).tip()).isEqualTo(28016);
+        assertThat(f.player.bags().bag(BagType.INVENTORY).total(11)).isEqualTo(1L);
+        assertThat(f.player.bags().bag(BagType.INVENTORY).plainTradableQuantity(11)).isZero();
+    }
 }

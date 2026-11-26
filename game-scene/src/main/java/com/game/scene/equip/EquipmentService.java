@@ -260,6 +260,8 @@ public final class EquipmentService {
     public Outcome inlay(ScenePlayer p, long id, int socket, int config) {
         int gate = writable(p); if (gate != 0) return Outcome.refused(gate);
         Located found = locate(p.bags(), id); if (found.tip() != 0) return Outcome.refused(found.tip());
+        // 对齐 C++ player_equip.cpp:1466：V1 装备（equip_profile != 0）未开放旧孔位镶嵌。
+        if (found.row().getEquipProfile() != 0) return Outcome.refused(equip_error.kEquipGemSocketInvalid_VALUE);
         var state = found.item().equipment();
         if (state == null) return Outcome.refused(equip_error.kEquipGemSocketInvalid_VALUE);
         var gem = rules.tables().gem(config); ItemTable gemItem = rules.tables().item(config);
@@ -274,8 +276,11 @@ public final class EquipmentService {
         if (state.getGemsCount() >= 8) return Outcome.refused(equip_error.kEquipInternalError_VALUE);
         int gemTip = quantityTip(p, config, 1, equip_error.kEquipGemNotOwned_VALUE);
         if (gemTip != 0) return Outcome.refused(gemTip);
+        // shortcut: EquipmentGemState lacks per-gem bound bit, upgrade when adding bound field to player_state.proto and C++ EquipGem
+        if (p.bags().bag(BagType.INVENTORY).plainTradableQuantity(config) < 1L)
+            return Outcome.refused(equip_error.kEquipGemNotOwned_VALUE);
         PlayerBags next = candidate(p);
-        var removed = next.bag(BagType.INVENTORY).drainPlainExact(config, 1);
+        var removed = next.bag(BagType.INVENTORY).drainPlainExact(config, 1, true).drawn();
         locate(next, id).item().equipment(state.toBuilder().addGems(EquipmentGemState.newBuilder().setSocket(socket).setGemConfigId(config)).build());
         Outcome result = commit(p, next, found.worn(), true, 0);
         bags.auditEquipment(p, removed, List.of(), AssetAudit.Reason.EQUIP_INLAY, id, "{\"socket\":" + Integer.toUnsignedString(socket) + "}");
