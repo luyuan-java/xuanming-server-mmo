@@ -395,6 +395,18 @@ public final class GatherPipeline {
                 create.setTournamentContext(plan.tournamentContext());
                 if (tournamentStore != null && plan.tournamentContext().getSeasonId() != 0) {
                     tournamentStore.syncMemberProfiles(plan.tournamentContext().getSeasonId(), create.getPlayersList());
+                    Set<Long> captains = tournamentStore.loadSquadCaptains(
+                            plan.tournamentContext().getSeasonId(),
+                            plan.tournamentContext().getSquadAId(),
+                            plan.tournamentContext().getSquadBId());
+                    if (!captains.isEmpty()) {
+                        for (int idx = 0; idx < create.getPlayersCount(); idx++) {
+                            BattlePlayerSnapshot snap = create.getPlayers(idx);
+                            if (captains.contains(snap.getPlayerId())) {
+                                create.setPlayers(idx, snap.toBuilder().setIsTeamCaptain(true).build());
+                            }
+                        }
+                    }
                 }
             }
             com.game.match.ranked.RankedTables catalogTables = rankedTables != null ? rankedTables

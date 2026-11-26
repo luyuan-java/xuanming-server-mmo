@@ -123,8 +123,14 @@ public final class TurnBattleEngine {
             new TreeMap<Long, BattleTacticalPing>(Long::compareUnsigned)
     };
     private final NavigableMap<Long, Integer> roundPingCountByPlayer = new TreeMap<>(Long::compareUnsigned);
-    /** 论剑 V3 战前 15 秒明牌变阵状态（纯确定性，零墙钟）。 */
+    /** 论剑 V3 战前明牌变阵（及每队 3 禁招）状态（纯确定性，零墙钟）。 */
     private boolean prepActive;
+    private int prepSkillBanSlotsPerTeam;
+    private final List<Integer> banCandidateSkillIds = new ArrayList<>();
+    private final TreeSet<Integer> banCandidateSkillSet = new TreeSet<>(Integer::compareUnsigned);
+    private final List<Integer> teamABannedSkillIds = new ArrayList<>();
+    private final List<Integer> teamBBannedSkillIds = new ArrayList<>();
+    private final List<Integer> bannedSkillIds = new ArrayList<>();
     private long nextPetActorIndex;
     private final NavigableMap<Long, PrepPlayerOptions> prepOptionsByPlayer = new TreeMap<>(Long::compareUnsigned);
     /** 论剑 V5 临阵唤灵：validatedPetsByPlayer 冻结开局合规全量宠，standbyPetPoolByPlayer 冻结开打后剩余可唤宠。 */
@@ -136,11 +142,13 @@ public final class TurnBattleEngine {
         int teamIndex;
         int activeSeasonId;
         boolean aiControlled;
+        boolean isTeamCaptain;
         boolean ready;
         int selectedSealId;
         long selectedPetId;
         final List<SeasonSealEffect> availableSeals = new ArrayList<>();
         final List<BattlePetSnapshot> availablePets = new ArrayList<>();
+        final List<Integer> nominatedBanSkillIds = new ArrayList<>();
     }
 
     public record SurrenderVoteResult(int errorTip, BattleSurrenderVoteState voteState) {
@@ -617,19 +625,94 @@ public final class TurnBattleEngine {
         return actor;
     }
 
-    /** 论剑 V3 战前 15 秒明牌变阵初始化（对齐 C++ {@code InitTacticalPrep}）。 */
+    /** 论剑 V3 战前明牌变阵（及每队 3 禁招）初始化（对齐 C++ {@code InitTacticalPrep}）。 */
     private BattleStart.Rejected initTacticalPrep() {
         prepActive = false;
+        prepSkillBanSlotsPerTeam = 0;
+        banCandidateSkillIds.clear();
+        banCandidateSkillSet.clear();
+        teamABannedSkillIds.clear();
+        teamBBannedSkillIds.clear();
+        bannedSkillIds.clear();
+        ctx.setBannedSkills(List.of());
         prepOptionsByPlayer.clear();
         validatedPetsByPlayer.clear();
         standbyPetPoolByPlayer.clear();
         summonPetRemainingByPlayer.clear();
-        // 仅正式自养论剑与赛季战队锦标赛开启战前 15 秒明牌变阵；PVE / 免费预设娱乐场 / 切磋 / 帮战零打扰。
-        boolean modeEligible = !ctx.isPve() && !usesFreePreset()
+
+        if (request.hasCustomDuelRules()) {
+            var rules = request.getCustomDuelRules();
+            int duelBanSlots = rules.getSkillBanSlotsPerTeam();
+            if (duelBanSlots != 0 && duelBanSlots != BattleConstants.PREP_SKILL_BAN_SLOTS_PER_TEAM) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "切磋自定义禁招槽数非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                + " slots=" + Integer.toUnsignedString(duelBanSlots));
+            }
+            if (rules.getUseFreePreset() && duelBanSlots != 0) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "切磋免费预设与战前禁招互斥: battle_id=" + Long.toUnsignedString(request.getBattleId()));
+            }
+        }
+
+        // 正式自养论剑与赛季战队锦标赛开启战前明牌变阵（换印/换宠 + 可选 3 Ban）；
+        // 道友切磋坊 1V1 开启 3 Ban 时仅跑 25 秒纯禁招；其余模式零打扰。
+        boolean isFormalCompetitive = !ctx.isPve() && !usesFreePreset()
                 && (isRankedBattle() || request.getMatchMode() == BattleConstants.MATCH_MODE_SEASON_TOURNAMENT);
-        if (!modeEligible) {
+        int requestedBanSlots = 0;
+        if (!ctx.isPve() && !usesFreePreset()) {
+            if (request.getMatchMode() == BattleConstants.MATCH_MODE_SEASON_TOURNAMENT && request.hasTournamentContext()) {
+                requestedBanSlots = request.getTournamentContext().getSkillBanSlotsPerTeam();
+            } else if (isRankedBattle() && request.hasRankedContext()) {
+                requestedBanSlots = request.getRankedContext().getSkillBanSlotsPerTeam();
+            } else if (request.hasCustomDuelRules() && !request.getCustomDuelRules().getUseFreePreset()) {
+                requestedBanSlots = request.getCustomDuelRules().getSkillBanSlotsPerTeam();
+            }
+        }
+        if (Integer.compareUnsigned(requestedBanSlots, BattleConstants.PREP_SKILL_BAN_SLOTS_PER_TEAM) > 0) {
+            return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                    "CreateBattle skill_ban_slots_per_team 越界: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                            + " slots=" + Integer.toUnsignedString(requestedBanSlots));
+        }
+        boolean isCustomDuelBan = !isFormalCompetitive && requestedBanSlots > 0;
+        if (!isFormalCompetitive && !isCustomDuelBan) {
             return null;
         }
+
+        if (requestedBanSlots > 0) {
+            int battleActiveSeasonId = 0;
+            for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
+                if (snapshot.getActiveSeasonId() != 0) {
+                    battleActiveSeasonId = snapshot.getActiveSeasonId();
+                    break;
+                }
+            }
+            boolean banControlInDuel = request.hasCustomDuelRules() && request.getCustomDuelRules().getBanControlSkills();
+            for (int skillId : ctx.data().banEligibleSkillIds(battleActiveSeasonId)) {
+                Optional<SkillTable> rowOpt = ctx.data().skill(skillId);
+                if (rowOpt.isEmpty()) {
+                    continue;
+                }
+                SkillTable row = rowOpt.get();
+                if (row.getBattleModel() != 1 || row.getAbilityKind() != 1
+                        || row.getBanPoolCategory() < 1 || row.getBanPoolCategory() > 4) {
+                    continue;
+                }
+                if (row.getSeasonId() != 0 && (battleActiveSeasonId == 0 || row.getSeasonId() != battleActiveSeasonId)) {
+                    continue;
+                }
+                if (banControlInDuel && row.getBanPoolCategory() == 1) {
+                    continue;
+                }
+                if (banCandidateSkillSet.add(skillId)) {
+                    banCandidateSkillIds.add(skillId);
+                }
+            }
+            banCandidateSkillIds.sort(Integer::compareUnsigned);
+            if (!banCandidateSkillIds.isEmpty()) {
+                prepSkillBanSlotsPerTeam = requestedBanSlots;
+            }
+        }
+
         TreeSet<Long> allBattlePetIds = new TreeSet<>(Long::compareUnsigned);
         for (BattleUnit unit : ctx.units()) {
             if (unit.isPet() && unit.petId() != 0L) {
@@ -642,73 +725,77 @@ public final class TurnBattleEngine {
             opt.teamIndex = snapshot.getTeamIndex();
             opt.activeSeasonId = snapshot.getActiveSeasonId();
             opt.aiControlled = snapshot.getAiControlled();
+            opt.isTeamCaptain = snapshot.getIsTeamCaptain();
             opt.ready = snapshot.getAiControlled();
 
-            TreeSet<Integer> seenSealIds = new TreeSet<>(Integer::compareUnsigned);
-            if (snapshot.hasEquipmentEffects() && snapshot.getEquipmentEffects().hasSeasonSeal()) {
-                SeasonSealEffect equippedSeal = snapshot.getEquipmentEffects().getSeasonSeal();
-                opt.selectedSealId = equippedSeal.getSealId();
-                if (seenSealIds.add(equippedSeal.getSealId())) {
-                    opt.availableSeals.add(equippedSeal);
+            if (isFormalCompetitive) {
+                TreeSet<Integer> seenSealIds = new TreeSet<>(Integer::compareUnsigned);
+                if (snapshot.hasEquipmentEffects() && snapshot.getEquipmentEffects().hasSeasonSeal()) {
+                    SeasonSealEffect equippedSeal = snapshot.getEquipmentEffects().getSeasonSeal();
+                    opt.selectedSealId = equippedSeal.getSealId();
+                    if (seenSealIds.add(equippedSeal.getSealId())) {
+                        opt.availableSeals.add(equippedSeal);
+                    }
                 }
-            }
-            for (SeasonSealEffect seal : snapshot.getAvailableSeasonSealsList()) {
-                if (!SeasonRules.validSealEffect(seal.getSeasonId(), seal.getSealId(), seal.getEffectId(),
-                        seal.getBonusBps(), seal.getCapBps(), seal.getPerRoundLimit(),
-                        seal.getBattleLimit(), seal.getActiveRounds(), seal.getHealthThresholdBps())) {
-                    return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
-                            "战前候选赛季印非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
-                                    + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId())
-                                    + " seal_id=" + Integer.toUnsignedString(seal.getSealId()));
+                for (SeasonSealEffect seal : snapshot.getAvailableSeasonSealsList()) {
+                    if (!SeasonRules.validSealEffect(seal.getSeasonId(), seal.getSealId(), seal.getEffectId(),
+                            seal.getBonusBps(), seal.getCapBps(), seal.getPerRoundLimit(),
+                            seal.getBattleLimit(), seal.getActiveRounds(), seal.getHealthThresholdBps())) {
+                        return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                                "战前候选赛季印非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                        + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId())
+                                        + " seal_id=" + Integer.toUnsignedString(seal.getSealId()));
+                    }
+                    if (snapshot.getActiveSeasonId() != 0 && seal.getSeasonId() != snapshot.getActiveSeasonId()) {
+                        return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                                "战前候选赛季印赛季归属不匹配: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                        + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
+                    }
+                    if (seenSealIds.add(seal.getSealId())) {
+                        opt.availableSeals.add(seal);
+                    }
                 }
-                if (snapshot.getActiveSeasonId() != 0 && seal.getSeasonId() != snapshot.getActiveSeasonId()) {
-                    return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
-                            "战前候选赛季印赛季归属不匹配: battle_id=" + Long.toUnsignedString(request.getBattleId())
-                                    + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
-                }
-                if (seenSealIds.add(seal.getSealId())) {
-                    opt.availableSeals.add(seal);
-                }
-            }
-            opt.availableSeals.sort((a, b) -> Integer.compareUnsigned(a.getSealId(), b.getSealId()));
+                opt.availableSeals.sort((a, b) -> Integer.compareUnsigned(a.getSealId(), b.getSealId()));
 
-            if (snapshot.getPetsCount() > 0) {
-                opt.availablePets.add(snapshot.getPets(0));
-                opt.selectedPetId = snapshot.getPets(0).getPetId();
-            }
-            for (BattlePetSnapshot standby : snapshot.getStandbyPetsList()) {
-                if (standby.getCompetitiveTemporary() || standby.getPetId() == 0L) {
-                    return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
-                            "备选灵宠 pet_id 非法或误带临时标记: battle_id=" + Long.toUnsignedString(request.getBattleId())
-                                    + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
+                if (snapshot.getPetsCount() > 0) {
+                    opt.availablePets.add(snapshot.getPets(0));
+                    opt.selectedPetId = snapshot.getPets(0).getPetId();
                 }
-                if (standby.getOwnerPlayerId() != 0L && standby.getOwnerPlayerId() != snapshot.getPlayerId()) {
-                    return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
-                            "备选灵宠归属不一致: battle_id=" + Long.toUnsignedString(request.getBattleId())
-                                    + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
+                for (BattlePetSnapshot standby : snapshot.getStandbyPetsList()) {
+                    if (standby.getCompetitiveTemporary() || standby.getPetId() == 0L) {
+                        return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                                "备选灵宠 pet_id 非法或误带临时标记: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                        + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
+                    }
+                    if (standby.getOwnerPlayerId() != 0L && standby.getOwnerPlayerId() != snapshot.getPlayerId()) {
+                        return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                                "备选灵宠归属不一致: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                        + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
+                    }
+                    if (!BattleEquipment.validPet(standby.getPetCultivation())) {
+                        return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                                "备选灵宠养成快照非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                        + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
+                    }
+                    if (standby.getPetId() == opt.selectedPetId) {
+                        continue;
+                    }
+                    if (!allBattlePetIds.add(standby.getPetId())) {
+                        return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                                "备选灵宠 pet_id 跨场重复: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                        + " pet_id=" + Long.toUnsignedString(standby.getPetId()));
+                    }
+                    opt.availablePets.add(standby);
                 }
-                if (!BattleEquipment.validPet(standby.getPetCultivation())) {
-                    return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
-                            "备选灵宠养成快照非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
-                                    + " player_id=" + Long.toUnsignedString(snapshot.getPlayerId()));
-                }
-                if (standby.getPetId() == opt.selectedPetId) {
-                    continue;
-                }
-                if (!allBattlePetIds.add(standby.getPetId())) {
-                    return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
-                            "备选灵宠 pet_id 跨场重复: battle_id=" + Long.toUnsignedString(request.getBattleId())
-                                    + " pet_id=" + Long.toUnsignedString(standby.getPetId()));
-                }
-                opt.availablePets.add(standby);
             }
 
             if (!opt.aiControlled
-                    && (opt.availableSeals.size() > 1 || opt.availablePets.size() > 1
+                    && (prepSkillBanSlotsPerTeam > 0
+                    || opt.availableSeals.size() > 1 || opt.availablePets.size() > 1
                     || (opt.selectedPetId == 0L && !opt.availablePets.isEmpty()))) {
                 hasAnyChoice = true;
             }
-            if (!opt.aiControlled && !opt.availablePets.isEmpty()) {
+            if (isFormalCompetitive && !opt.aiControlled && !opt.availablePets.isEmpty()) {
                 validatedPetsByPlayer.put(snapshot.getPlayerId(), List.copyOf(opt.availablePets));
             }
             prepOptionsByPlayer.put(snapshot.getPlayerId(), opt);
@@ -717,6 +804,9 @@ public final class TurnBattleEngine {
         if (hasAnyChoice) {
             prepActive = true;
         } else {
+            prepSkillBanSlotsPerTeam = 0;
+            banCandidateSkillIds.clear();
+            banCandidateSkillSet.clear();
             prepOptionsByPlayer.clear();
         }
         return null;
@@ -1139,9 +1229,91 @@ public final class TurnBattleEngine {
      * 零副作用的提交预检（{@code ValidateAction}，{@code engine.cpp:333-346}；规格 §2.2）：已结束 → 1005；单位不存在或不是玩家 → 1005；
      * 已死或已逃 → 1009；其余返回校验链结果。与 {@link #submitAction} 的接受条件逐条同源：{@code == 1000} 等价于这次提交会被收下。
      */
-    /** 论剑 V3 是否处于战前 15 秒明牌变阵期。 */
+    /** 论剑 V3 是否处于战前明牌变阵期。 */
     public boolean isInPrepPhase() {
         return prepActive;
+    }
+
+    /** 本局战前窗口总时长毫秒（启用禁招为 25s，否则 15s）。 */
+    public long prepTimeoutMs() {
+        return prepSkillBanSlotsPerTeam > 0
+                ? BattleConstants.TACTICAL_PREP_WITH_BAN_TIMEOUT_MS
+                : BattleConstants.TACTICAL_PREP_TIMEOUT_MS;
+    }
+
+    /** 本局战前窗口总时长秒（启用禁招为 25，否则 15）。 */
+    public int prepDurationSeconds() {
+        return prepSkillBanSlotsPerTeam > 0
+                ? BattleConstants.TACTICAL_PREP_WITH_BAN_DURATION_SECONDS
+                : BattleConstants.TACTICAL_PREP_DURATION_SECONDS;
+    }
+
+    public boolean isSkillBanned(int skillTableId) {
+        return ctx.isSkillBanned(skillTableId);
+    }
+
+    private static final class BanVoteEntry {
+        final int skillId;
+        int votes;
+        int bestSlotRank = Integer.MAX_VALUE;
+        boolean nominatedByCaptain;
+
+        BanVoteEntry(int skillId) {
+            this.skillId = skillId;
+        }
+    }
+
+    /** 确定性汇总单队有效禁招（与 C++ AggregateTeamBans 逐条一致：票数降序→最高槽位升序→队长提名→SplitMix64(seed^skillId)→skillId）。 */
+    private List<Integer> aggregateTeamBans(int teamIndex) {
+        if (prepSkillBanSlotsPerTeam <= 0) {
+            return List.of();
+        }
+        Map<Integer, BanVoteEntry> tally = new java.util.HashMap<>();
+        for (PrepPlayerOptions opt : prepOptionsByPlayer.values()) {
+            if (opt.aiControlled || opt.teamIndex != teamIndex) {
+                continue;
+            }
+            for (int idx = 0; idx < opt.nominatedBanSkillIds.size(); idx++) {
+                int sid = opt.nominatedBanSkillIds.get(idx);
+                BanVoteEntry entry = tally.computeIfAbsent(sid, BanVoteEntry::new);
+                entry.votes++;
+                if (idx < entry.bestSlotRank) {
+                    entry.bestSlotRank = idx;
+                }
+                if (opt.isTeamCaptain) {
+                    entry.nominatedByCaptain = true;
+                }
+            }
+        }
+        if (tally.isEmpty()) {
+            return List.of();
+        }
+        List<BanVoteEntry> ordered = new ArrayList<>(tally.values());
+        long seed = request.getSeed();
+        ordered.sort((lhs, rhs) -> {
+            if (lhs.votes != rhs.votes) {
+                return Integer.compare(rhs.votes, lhs.votes);
+            }
+            if (lhs.bestSlotRank != rhs.bestSlotRank) {
+                return Integer.compare(lhs.bestSlotRank, rhs.bestSlotRank);
+            }
+            if (lhs.nominatedByCaptain != rhs.nominatedByCaptain) {
+                return lhs.nominatedByCaptain ? -1 : 1;
+            }
+            long lh = splitMix64(seed ^ Integer.toUnsignedLong(lhs.skillId));
+            long rh = splitMix64(seed ^ Integer.toUnsignedLong(rhs.skillId));
+            int hc = Long.compareUnsigned(lh, rh);
+            if (hc != 0) {
+                return hc;
+            }
+            return Integer.compareUnsigned(lhs.skillId, rhs.skillId);
+        });
+        int limit = Math.min(ordered.size(), prepSkillBanSlotsPerTeam);
+        List<Integer> out = new ArrayList<>(limit);
+        for (int i = 0; i < limit; i++) {
+            out.add(ordered.get(i).skillId);
+        }
+        return out;
     }
 
     /** 所有真人参战者是否已锁定战前变阵（AI 托管位默认锁定）。 */
@@ -1157,8 +1329,14 @@ public final class TurnBattleEngine {
         return true;
     }
 
-    /** 论剑 V3 战前变阵提交（换赛季印 / 换首发灵宠 / 锁定），对齐 C++ {@code UpdateBattlePrep}。 */
+    /** 论剑 V3 战前变阵提交兼容重载（不含禁招提名）。 */
     public UpdatePrepResult updateBattlePrep(long playerId, int selectedSealId, long selectedPetId, boolean ready) {
+        return updateBattlePrep(playerId, selectedSealId, selectedPetId, ready, false, List.of());
+    }
+
+    /** 论剑 V3 战前变阵提交（换赛季印 / 换首发灵宠 / 每队 3 禁招提名 / 锁定），对齐 C++ {@code UpdateBattlePrep}。 */
+    public UpdatePrepResult updateBattlePrep(long playerId, int selectedSealId, long selectedPetId, boolean ready,
+                                             boolean updateBannedSkills, List<Integer> bannedSkillIdsInput) {
         if (outcome != eBattleOutcome.BATTLE_OUTCOME_ONGOING || !prepActive) {
             return new UpdatePrepResult(ActionChecks.FEATURE_UNAVAILABLE, BattlePrepState.getDefaultInstance());
         }
@@ -1166,10 +1344,12 @@ public final class TurnBattleEngine {
         if (opt == null || opt.aiControlled) {
             return new UpdatePrepResult(ActionChecks.INVALID_PARAMETER, BattlePrepState.getDefaultInstance());
         }
+        List<Integer> banInput = bannedSkillIdsInput == null ? List.of() : bannedSkillIdsInput;
         if (opt.ready) {
             boolean sealChanged = selectedSealId != 0 && selectedSealId != opt.selectedSealId;
             boolean petChanged = selectedPetId != 0L && selectedPetId != opt.selectedPetId;
-            if (sealChanged || petChanged) {
+            boolean banChanged = updateBannedSkills && !banInput.equals(opt.nominatedBanSkillIds);
+            if (sealChanged || petChanged || banChanged) {
                 return new UpdatePrepResult(ActionChecks.FEATURE_UNAVAILABLE, BattlePrepState.getDefaultInstance());
             }
             return new UpdatePrepResult(0, buildPrepStateForViewer(playerId, 0L));
@@ -1198,11 +1378,32 @@ public final class TurnBattleEngine {
                 return new UpdatePrepResult(ActionChecks.INVALID_PARAMETER, BattlePrepState.getDefaultInstance());
             }
         }
+        if (updateBannedSkills) {
+            if (prepSkillBanSlotsPerTeam == 0) {
+                if (!banInput.isEmpty()) {
+                    return new UpdatePrepResult(ActionChecks.FEATURE_UNAVAILABLE, BattlePrepState.getDefaultInstance());
+                }
+            } else {
+                if (banInput.size() > prepSkillBanSlotsPerTeam) {
+                    return new UpdatePrepResult(ActionChecks.INVALID_PARAMETER, BattlePrepState.getDefaultInstance());
+                }
+                TreeSet<Integer> seen = new TreeSet<>(Integer::compareUnsigned);
+                for (int sid : banInput) {
+                    if (!banCandidateSkillSet.contains(sid) || !seen.add(sid)) {
+                        return new UpdatePrepResult(ActionChecks.INVALID_PARAMETER, BattlePrepState.getDefaultInstance());
+                    }
+                }
+            }
+        }
         if (selectedSealId != 0) {
             opt.selectedSealId = selectedSealId;
         }
         if (selectedPetId != 0L) {
             opt.selectedPetId = selectedPetId;
+        }
+        if (updateBannedSkills) {
+            opt.nominatedBanSkillIds.clear();
+            opt.nominatedBanSkillIds.addAll(banInput);
         }
         if (ready) {
             opt.ready = true;
@@ -1289,6 +1490,19 @@ public final class TurnBattleEngine {
                     }
                 }
             }
+        }
+
+        if (prepSkillBanSlotsPerTeam > 0) {
+            teamABannedSkillIds.clear();
+            teamABannedSkillIds.addAll(aggregateTeamBans(0));
+            teamBBannedSkillIds.clear();
+            teamBBannedSkillIds.addAll(aggregateTeamBans(1));
+            TreeSet<Integer> merged = new TreeSet<>(Integer::compareUnsigned);
+            merged.addAll(teamABannedSkillIds);
+            merged.addAll(teamBBannedSkillIds);
+            bannedSkillIds.clear();
+            bannedSkillIds.addAll(merged);
+            ctx.setBannedSkills(bannedSkillIds);
         }
 
         prepActive = false;
@@ -1565,13 +1779,17 @@ public final class TurnBattleEngine {
         BattlePrepState.Builder out = BattlePrepState.newBuilder()
                 .setActive(true)
                 .setDeadlineMs(deadlineMs)
-                .setDurationSeconds(BattleConstants.TACTICAL_PREP_DURATION_SECONDS);
+                .setDurationSeconds(prepDurationSeconds())
+                .setSkillBanSlotsPerTeam(prepSkillBanSlotsPerTeam);
         if (viewerPlayerId == 0L) {
             return out.build();
         }
         PrepPlayerOptions selfOpt = prepOptionsByPlayer.get(viewerPlayerId);
         if (selfOpt == null) {
             return out.build();
+        }
+        if (prepSkillBanSlotsPerTeam > 0) {
+            out.addAllBanCandidateSkillIds(banCandidateSkillIds);
         }
         for (SeasonSealEffect seal : selfOpt.availableSeals) {
             out.addSelfAvailableSeals(BattlePrepSealOption.newBuilder()
@@ -1581,6 +1799,9 @@ public final class TurnBattleEngine {
         }
         for (BattlePetSnapshot pet : selfOpt.availablePets) {
             out.addSelfAvailablePets(toPetOption(pet));
+        }
+        if (prepSkillBanSlotsPerTeam > 0) {
+            out.addAllTeamEffectiveBanSkillIds(aggregateTeamBans(selfOpt.teamIndex));
         }
         // 同队互见、对手严密盲选：仅投影与收信者同 teamIndex 的成员状态。
         for (Map.Entry<Long, PrepPlayerOptions> entry : prepOptionsByPlayer.entrySet()) {
@@ -1594,6 +1815,9 @@ public final class TurnBattleEngine {
                     .setSelectedSealId(opt.selectedSealId)
                     .setSelectedPetId(opt.selectedPetId)
                     .setReady(opt.ready);
+            if (prepSkillBanSlotsPerTeam > 0) {
+                ps.addAllNominatedBanSkillIds(opt.nominatedBanSkillIds);
+            }
             if (opt.selectedPetId != 0L) {
                 for (BattlePetSnapshot pet : opt.availablePets) {
                     if (pet.getPetId() == opt.selectedPetId) {
@@ -2897,11 +3121,21 @@ public final class TurnBattleEngine {
             if (unit.isPlayer()) visible.setSupportEffects(ctx.configured.equipment.summary(unit));
         }
         ctx.encounter.populateStateSnapshot(state, outcome, maxRounds);
+        if (!bannedSkillIds.isEmpty()) {
+            state.addAllBannedSkillIds(bannedSkillIds);
+        }
+        if (!teamABannedSkillIds.isEmpty()) {
+            state.addAllTeamABannedSkillIds(teamABannedSkillIds);
+        }
+        if (!teamBBannedSkillIds.isEmpty()) {
+            state.addAllTeamBBannedSkillIds(teamBBannedSkillIds);
+        }
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             if (prepActive) {
                 state.getPrepStateBuilder()
                         .setActive(true)
-                        .setDurationSeconds(BattleConstants.TACTICAL_PREP_DURATION_SECONDS);
+                        .setDurationSeconds(prepDurationSeconds())
+                        .setSkillBanSlotsPerTeam(prepSkillBanSlotsPerTeam);
             } else {
                 for (BattleUnit unit : ctx.units()) {
                     if ((!unit.isPlayer() && !unit.isPet()) || !unit.isActive()) {

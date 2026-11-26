@@ -71,6 +71,10 @@ public final class TournamentTables {
         if (maxTeams != 2 && maxTeams != 4 && maxTeams != 8 && maxTeams != 16) {
             throw new IllegalStateException("TournamentRule.knockout_max_teams 必须为 2/4/8/16: " + maxTeams);
         }
+        if (Integer.compareUnsigned(rule.getSkillBanSlotsPerTeam(), 3) > 0) {
+            throw new IllegalStateException("TournamentRule.skill_ban_slots_per_team 越界: "
+                    + Integer.toUnsignedString(rule.getSkillBanSlotsPerTeam()));
+        }
     }
 
     public TournamentRuleTable rule() {

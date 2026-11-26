@@ -1041,7 +1041,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         }
         room.engine.markPlayerEntered(playerId);
         TurnBattleEngine.UpdatePrepResult res = room.engine.updateBattlePrep(
-                playerId, request.getSelectedSealId(), request.getSelectedPetId(), request.getReady());
+                playerId, request.getSelectedSealId(), request.getSelectedPetId(), request.getReady(),
+                request.getUpdateBannedSkills(), request.getBannedSkillIdsList());
         if (res.errorTip() != 0) {
             return response.setErrorMessage(tip(res.errorTip())).build();
         }
@@ -1136,11 +1137,12 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         return !room.closed && rooms.find(room.battleId) == room;
     }
 
-    /** 装填论剑 V3 战前 15 秒明牌变阵倒计时；到期自动锁阵亮牌开打。 */
+    /** 装填战前明牌变阵（及每队 3 禁招）倒计时；到期自动锁阵亮牌开打。 */
     private void armPrepTimer(BattleRoom room) {
+        long timeoutMs = room.engine.prepTimeoutMs();
         room.actionDeadlineMs = 0L;
-        room.prepDeadlineMs = clock.epochMillis() + BattleConstants.TACTICAL_PREP_TIMEOUT_MS;
-        room.prepTimer = scheduler.after(BattleConstants.TACTICAL_PREP_TIMEOUT_MS, () -> {
+        room.prepDeadlineMs = clock.epochMillis() + timeoutMs;
+        room.prepTimer = scheduler.after(timeoutMs, () -> {
             if (isCurrent(room)) {
                 finalizeBattlePrep(room);
             }

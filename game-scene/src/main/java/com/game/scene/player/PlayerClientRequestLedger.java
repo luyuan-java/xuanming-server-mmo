@@ -50,6 +50,8 @@ public final class PlayerClientRequestLedger {
     public static final int KIND_LEARN_SKILL_BOOK = 13;
     public static final int KIND_DISMANTLE_SKILL_BOOK = 14;
     public static final int KIND_BUY_SPIRIT_SHOP = 15;
+    public static final int KIND_UNLOCK_TRAVEL_PASS_PREMIUM = 16;
+    public static final int KIND_CLAIM_TRAVEL_PASS_REWARD = 17;
     public static final int KIND_CLAIM_REWARDED_AD = 21;
 
     public enum Verdict {

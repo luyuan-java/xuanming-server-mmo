@@ -77,6 +77,7 @@ public final class BattleSettlementService {
     private com.game.scene.season.SeasonService seasonService;
     private com.game.scene.trial.TrialJournalService trialJournalService;
     private com.game.scene.festivalbeast.FestivalBeastService festivalBeastService;
+    private com.game.scene.travelpass.TravelPassService travelPassService;
     private com.game.scene.attribute.AttributeService attributeService;
     private com.game.scene.progression.BattleProgressionTables progressionTables =
             com.game.scene.progression.BattleProgressionTables.EMPTY;
@@ -106,6 +107,11 @@ public final class BattleSettlementService {
 
     public BattleSettlementService withFestivalBeastService(com.game.scene.festivalbeast.FestivalBeastService festivalBeastService) {
         this.festivalBeastService = festivalBeastService;
+        return this;
+    }
+
+    public BattleSettlementService withTravelPassService(com.game.scene.travelpass.TravelPassService travelPassService) {
+        this.travelPassService = travelPassService;
         return this;
     }
 
@@ -604,6 +610,9 @@ public final class BattleSettlementService {
         var festivalDelta = (!festivalBattle || festivalBeastService == null)
                 ? com.game.scene.festivalbeast.FestivalBeastService.SettlementDelta.NONE
                 : festivalBeastService.applyBattleSettlement(player, settlement, nowMs);
+        if (!festivalBattle && travelPassService != null) {
+            travelPassService.creditBattlePoints(player, settlement, nowMs);
+        }
         var materialAfter = com.game.scene.festivalbeast.FestivalBeastService.buildMaterialSummary(player, nowMs);
         int recordedSeasonId = settlement.getSeasonId() != 0 ? settlement.getSeasonId() : seasonCredit.seasonId();
         com.game.player.store.state.BattleResultEntryState.Builder entry = com.game.player.store.state.BattleResultEntryState.newBuilder()

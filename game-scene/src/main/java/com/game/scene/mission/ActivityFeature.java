@@ -30,6 +30,9 @@ public final class ActivityFeature implements SceneFeature {
 
     private final MissionService missions;
     private com.game.scene.festivalbeast.FestivalBeastService festivalBeastService;
+    private com.game.scene.travelpass.TravelPassService travelPassService;
+    private com.game.scene.appearance.AppearanceService appearanceService;
+    private com.game.scene.spiritshop.SpiritShopService spiritShopService;
 
     public ActivityFeature(MissionService missions) {
         this.missions = missions;
@@ -37,6 +40,15 @@ public final class ActivityFeature implements SceneFeature {
 
     public ActivityFeature withFestivalBeastService(com.game.scene.festivalbeast.FestivalBeastService festivalBeastService) {
         this.festivalBeastService = festivalBeastService;
+        return this;
+    }
+
+    public ActivityFeature withTravelPassCatalog(com.game.scene.travelpass.TravelPassService travelPassService,
+                                                 com.game.scene.appearance.AppearanceService appearanceService,
+                                                 com.game.scene.spiritshop.SpiritShopService spiritShopService) {
+        this.travelPassService = travelPassService;
+        this.appearanceService = appearanceService;
+        this.spiritShopService = spiritShopService;
         return this;
     }
 
@@ -63,6 +75,9 @@ public final class ActivityFeature implements SceneFeature {
             if (festivalEntry != null) {
                 activities.add(festivalEntry);
             }
+        }
+        if (travelPassService != null) {
+            travelPassService.appendActivityCatalogEntries(player, nowMs, appearanceService, spiritShopService, activities);
         }
         return GetActivityListResponse.newBuilder()
                 .setErrorMessage(tip(MissionService.OK))

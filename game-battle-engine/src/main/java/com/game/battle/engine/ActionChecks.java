@@ -38,6 +38,7 @@ final class ActionChecks {
     /** 「当前状态不可施放」；法力不足也借用这个码（基线 tip 表没有专用码，{@code engine.cpp:497-501}）。 */
     static final int SKILL_CANNOT_CAST_IN_STATE = SkillErrorTip.skill_error.kSkillCannotBeCastInCurrentState_VALUE;
     static final int SKILL_STUN_RESTRICTION = SkillErrorTip.skill_error.kSkillCannotBeCastStunRestriction_VALUE;
+    static final int SKILL_BANNED_IN_BATTLE = SkillErrorTip.skill_error.kSkillBannedInBattle_VALUE;
 
     private final BattleContext ctx;
     private final ItemLedger ledger;
@@ -137,6 +138,9 @@ final class ActionChecks {
         // 快照携带的技能列表即战斗内可用技能全集（线性查找）
         if (!actor.state().getSkillTableIdsList().contains(action.getSkillTableId())) {
             return INVALID_PARAMETER;
+        }
+        if (ctx.isSkillBanned(action.getSkillTableId())) {
+            return SKILL_BANNED_IN_BATTLE;
         }
         // 第二道闸：开局已剔除不可施放的类型，这里防有人绕过 skill_table_ids
         if (row.getBattleModel() == 1) {

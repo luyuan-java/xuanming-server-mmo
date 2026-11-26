@@ -93,7 +93,11 @@ public interface AssetAudit {
         /** 主城宗师原子代打费与 5% 系统税回收（TX_CRAFT_PROXY_FEE = 40）。 */
         CRAFT_PROXY_FEE,
         /** 官方灵石百宝阁直购（TX_SPIRIT_SHOP_BUY = 44）。 */
-        SPIRIT_SHOP_BUY
+        SPIRIT_SHOP_BUY,
+        /** 游历手记典藏解锁扣款（TX_TRAVEL_PASS_UNLOCK = 45）。 */
+        TRAVEL_PASS_UNLOCK,
+        /** 游历手记双轨奖励发放（TX_TRAVEL_PASS_REWARD = 46）。 */
+        TRAVEL_PASS_REWARD
     }
 
     /**

@@ -62,6 +62,8 @@ final class BattleContext {
     private int maxRounds = BattleConstants.DEFAULT_MAX_ROUNDS;
     private TournamentLeylineElement activeTournamentLeyline = TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED;
     private int activeSeasonWeeklyAffixId = SeasonRules.WEEKLY_AFFIX_NONE;
+    /** 本局战前 3 Ban 合并去重后的全局禁招集合（对双方人物与灵宠对称生效）。 */
+    private final java.util.TreeSet<Integer> bannedSkillIds = new java.util.TreeSet<>(Integer::compareUnsigned);
 
     /**
      * @param matchMode 请求里的 match_mode（uint32）；只有 4 / 5 算 PVE，其余一律非 PVE（{@code IsPveMatch}，{@code engine.cpp:1312-1315}）
@@ -96,6 +98,22 @@ final class BattleContext {
 
     int maxRounds() {
         return maxRounds;
+    }
+
+    boolean isSkillBanned(int skillTableId) {
+        return skillTableId != 0 && bannedSkillIds.contains(skillTableId);
+    }
+
+    void setBannedSkills(java.util.Collection<Integer> ids) {
+        bannedSkillIds.clear();
+        if (ids == null) {
+            return;
+        }
+        for (int id : ids) {
+            if (id != 0) {
+                bannedSkillIds.add(id);
+            }
+        }
     }
 
     void setMaxRounds(int maxRounds) {

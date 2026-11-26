@@ -67,6 +67,7 @@ final class ConfiguredBattle {
 
     boolean isSkillCopyableFor(BattleUnit caster, SkillTable skill) {
         if (skill.getBattleModel() != 1 || skill.getAbilityKind() != 1) return false;
+        if (ctx.isSkillBanned(skill.getId())) return false;
         if (skill.getForbidCopy() != 0 || skill.getHealthCostMode() != 0 || skill.getMaxBattleUses() != 0) return false;
         for (int effectId : skill.getEffectList()) {
             BuffTable effect = row(effectId);
@@ -177,6 +178,7 @@ final class ConfiguredBattle {
     }
 
     int check(BattleUnit actor, BattleAction action, SkillTable skill) {
+        if (ctx.isSkillBanned(skill.getId())) return ActionChecks.SKILL_BANNED_IN_BATTLE;
         if (!subject(actor.state(), skill) || actor.state().getSkillRanksOrDefault(skill.getId(), 0) == 0
                 || skill.getAbilityKind() != 1 || hasState(actor, SEAL_ACTIVE)
                 || ((skill.getActionTags() & 1) != 0 && (hasState(actor, SEAL_PHYSICAL) || isPhysicalForbidden(actor)))
@@ -485,7 +487,7 @@ final class ConfiguredBattle {
                     if ((type == CombatDamageRules.PHYSICAL_DAMAGE && isPhysicalForbidden(owner))
                             || (type == CombatDamageRules.MAGIC_DAMAGE && isMagicForbidden(owner))) break;
                     SkillTable incoming = skill(hit.skill);
-                    if (incoming != null && (other.isBoss() || incoming.getForbidCopy() != 0)) break;
+                    if (incoming != null && (other.isBoss() || incoming.getForbidCopy() != 0 || ctx.isSkillBanned(incoming.getId()))) break;
                     double scale = row.getRatio() > 0 ? row.getRatio() : 1;
                     if (incoming != null && incoming.getBattleModel() == 1) cast(owner, incoming, other.actorId(), MIRRORED, scale);
                     else impact.weaponHit(owner,other,type,scale,hit.derived(MIRRORED),BATTLE_HIT_MIRROR);
@@ -633,6 +635,7 @@ final class ConfiguredBattle {
         BuffTable prepareRow = row(saved);
         SkillTable skillRow = skill(saved.getSourceSkillId());
         boolean blocked = prepareRow == null || skillRow == null
+                || ctx.isSkillBanned(skillRow.getId())
                 || ctx.actorHasBuffOfType(actor, BattleConstants.BUFF_TYPE_STUN)
                 || ctx.actorHasBuffOfType(actor, BattleConstants.BUFF_TYPE_FREEZE)
                 || hasState(actor, FREEZE)

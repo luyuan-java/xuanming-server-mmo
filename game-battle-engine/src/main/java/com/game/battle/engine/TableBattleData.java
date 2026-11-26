@@ -162,6 +162,27 @@ public final class TableBattleData implements BattleData {
                 .orElse(0.0);
     }
 
+    @Override
+    public List<Integer> banEligibleSkillIds(int activeSeasonId) {
+        List<Integer> ids = new ArrayList<>();
+        for (SkillTable row : tables.skill().all()) {
+            if (row.getBattleModel() != 1 || row.getAbilityKind() != 1) {
+                continue;
+            }
+            int cat = row.getBanPoolCategory();
+            if (cat < 1 || cat > 4) {
+                continue;
+            }
+            int season = row.getSeasonId();
+            if (season != 0 && (activeSeasonId == 0 || season != activeSeasonId)) {
+                continue;
+            }
+            ids.add(row.getId());
+        }
+        ids.sort(Integer::compareUnsigned);
+        return List.copyOf(ids);
+    }
+
     /** 公式原文是否调用了 {@code random()}（口径见 {@link #RANDOM_CALL}）。 */
     static boolean callsRandom(String formula) {
         return formula != null && RANDOM_CALL.matcher(formula).find();

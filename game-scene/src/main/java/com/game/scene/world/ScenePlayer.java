@@ -128,6 +128,8 @@ public final class ScenePlayer {
     private final com.game.scene.player.PlayerSpiritShop spiritShop;
     /** 角色累计总经验（与 player.level 列同一次存盘提交）。 */
     private final com.game.scene.player.PlayerProgression progression;
+    /** 青云游历手记双轨进度、已解锁典藏与零战力纪念外显。 */
+    private final com.game.scene.player.PlayerTravelPass travelPass;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -247,6 +249,9 @@ public final class ScenePlayer {
         this.progression = state.hasProgression()
                 ? com.game.scene.player.PlayerProgression.restore(state.getProgression())
                 : com.game.scene.player.PlayerProgression.empty();
+        this.travelPass = state.hasTravelPass()
+                ? com.game.scene.player.PlayerTravelPass.restore(state.getTravelPass())
+                : com.game.scene.player.PlayerTravelPass.empty();
     }
 
     public long playerId() {
@@ -622,6 +627,9 @@ public final class ScenePlayer {
         if (!progression.isPristine()) {
             state.setProgression(progression.toState());
         }
+        if (!travelPass.isPristine()) {
+            state.setTravelPass(travelPass.toState());
+        }
         return state.build();
     }
 
@@ -687,6 +695,11 @@ public final class ScenePlayer {
     /** 官方灵石百宝阁个人与共享组限购运行态（逻辑线程上读写；写入只经 {@code SpiritShopService}）。 */
     public com.game.scene.player.PlayerSpiritShop spiritShop() {
         return spiritShop;
+    }
+
+    /** 青云游历手记双轨进度、已解锁典藏与零战力纪念外显运行态（逻辑线程上读写；写入只经 {@code TravelPassService}）。 */
+    public com.game.scene.player.PlayerTravelPass travelPass() {
+        return travelPass;
     }
 
     /** 收件箱消费账本（逻辑线程上读写；写入只经收件箱消费端）。 */

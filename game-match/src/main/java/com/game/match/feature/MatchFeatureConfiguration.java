@@ -210,11 +210,13 @@ public class MatchFeatureConfiguration {
             ObjectProvider<GlobalMatchService> globalMatchProvider,
             GatherLauncher gatherLauncher,
             MemberPrecheck memberPrecheck,
-            MatchIds matchIds) {
+            MatchIds matchIds,
+            TournamentTables tournamentTables) {
         return spec -> {
             List<Long> members = new ArrayList<>(spec.teamA().size() + spec.teamB().size());
             members.addAll(spec.teamA());
             members.addAll(spec.teamB());
+            int banSlots = tournamentTables.rule().getSkillBanSlotsPerTeam();
             GlobalMatchService global = globalMatchProvider.getIfAvailable();
             if (global != null) {
                 try {
@@ -227,7 +229,7 @@ public class MatchFeatureConfiguration {
                     ByteString payload = encodeTournamentLaunchPayload(spec);
                     GlobalFormationRow formation = global.reserveDirect(
                             key, payload, MatchMode.MATCH_MODE_SEASON_TOURNAMENT_VALUE,
-                            spec.battleConfigId(), members, Map.of(), 0L, null, spec.toBattleContext());
+                            spec.battleConfigId(), members, Map.of(), 0L, null, spec.toBattleContext(banSlots));
                     if (formation == null || formation.getBattleId() == 0L || formation.getState() == 5) {
                         return 0L;
                     }
@@ -252,7 +254,7 @@ public class MatchFeatureConfiguration {
                 log.error("[tournament] local battle_id allocation failed match={}", Long.toUnsignedString(spec.matchId()));
                 return 0L;
             }
-            gatherLauncher.launch(GatherPlan.tournament(spec.battleConfigId(), members, battleId, spec.toBattleContext()))
+            gatherLauncher.launch(GatherPlan.tournament(spec.battleConfigId(), members, battleId, spec.toBattleContext(banSlots)))
                     .whenComplete((result, err) -> {
                         boolean ok = err == null && result != null && result.ok();
                         if (!ok) {

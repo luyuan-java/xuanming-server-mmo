@@ -156,6 +156,11 @@ public class SceneNodeConfiguration {
     }
 
     @Bean
+    public com.game.scene.travelpass.TravelPassTables travelPassTables(ConfigTables tables) {
+        return com.game.scene.travelpass.TravelPassTables.from(tables);
+    }
+
+    @Bean
     public com.game.scene.rewardedad.RewardedAdTables rewardedAdTables(ConfigTables tables) {
         return com.game.scene.rewardedad.RewardedAdTables.from(tables);
     }
@@ -293,6 +298,7 @@ public class SceneNodeConfiguration {
                                com.game.scene.craft.SkillCraftTables skillCraftTables,
                                com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables,
                                com.game.scene.spiritshop.SpiritShopTables spiritShopTables,
+                               com.game.scene.travelpass.TravelPassTables travelPassTables,
                                com.game.scene.rewardedad.RewardedAdTables rewardedAdTables,
                                com.game.scene.progression.BattleProgressionTables battleProgressionTables,
                                ObjectProvider<java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
@@ -315,6 +321,7 @@ public class SceneNodeConfiguration {
                 .withSkillCraftTables(skillCraftTables)
                 .withFestivalBeastTables(festivalBeastTables)
                 .withSpiritShopTables(spiritShopTables)
+                .withTravelPassTables(travelPassTables)
                 .withRewardedAdTables(rewardedAdTables)
                 .withBattleProgressionTables(battleProgressionTables)
                 .withMatchActivityStarter(matchActivityStarter.getIfAvailable())

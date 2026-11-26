@@ -174,7 +174,8 @@ public final class RankedPresetRules {
 
         private boolean validateInternal() {
             if (rule == null || rule.getRuleVersion() == 0 || rule.getBattleConfigId() == 0
-                    || rule.getReferenceClassId() == 0 || rule.getCompetitiveLevel() == 0) {
+                    || rule.getReferenceClassId() == 0 || rule.getCompetitiveLevel() == 0
+                    || Integer.compareUnsigned(rule.getSkillBanSlotsPerTeam(), 3) > 0) {
                 return false;
             }
             DungeonTable dungeon = dungeonsById.get(rule.getBattleConfigId());
@@ -330,6 +331,8 @@ public final class RankedPresetRules {
                 .append(",lvl=").append(Integer.toUnsignedString(rule.getCompetitiveLevel()))
                 .append(",defc=").append(Integer.toUnsignedString(rule.getDefaultCharacterPresetId()))
                 .append(",defp=").append(Integer.toUnsignedString(rule.getDefaultPetPresetId()))
+                .append(",bans=").append(Integer.toUnsignedString(rule.getSkillBanSlotsPerTeam()))
+                .append(",banmin=").append(Integer.toUnsignedString(rule.getSkillBanMinRatingCenti()))
                 .append('\n');
         for (RankedPresetTable p : sortedPresets) {
             sb.append("preset:").append(Integer.toUnsignedString(p.getId()))

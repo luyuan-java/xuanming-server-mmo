@@ -198,6 +198,7 @@ public class SceneNode implements SmartLifecycle {
     private com.game.scene.craft.SkillCraftTables skillCraftTables;
     private com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables;
     private com.game.scene.spiritshop.SpiritShopTables spiritShopTables;
+    private com.game.scene.travelpass.TravelPassTables travelPassTables;
     private com.game.scene.rewardedad.RewardedAdTables rewardedAdTables;
     private com.game.scene.progression.BattleProgressionTables battleProgressionTables;
     private java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
@@ -244,6 +245,12 @@ public class SceneNode implements SmartLifecycle {
     public synchronized SceneNode withSpiritShopTables(com.game.scene.spiritshop.SpiritShopTables spiritShopTables) {
         if (running) throw new IllegalStateException("节点已启动");
         this.spiritShopTables = java.util.Objects.requireNonNull(spiritShopTables);
+        return this;
+    }
+
+    public synchronized SceneNode withTravelPassTables(com.game.scene.travelpass.TravelPassTables travelPassTables) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.travelPassTables = java.util.Objects.requireNonNull(travelPassTables);
         return this;
     }
 
@@ -494,6 +501,8 @@ public class SceneNode implements SmartLifecycle {
                 : new com.game.scene.merchant.MysteryMerchantService(mysteryMerchantTables, bags, currency, SceneClock.SYSTEM, metrics);
         com.game.scene.spiritshop.SpiritShopService spiritShopService = spiritShopTables == null ? null
                 : new com.game.scene.spiritshop.SpiritShopService(spiritShopTables, bags, currency, SceneClock.SYSTEM, metrics);
+        com.game.scene.travelpass.TravelPassService travelPassService = travelPassTables == null ? null
+                : new com.game.scene.travelpass.TravelPassService(travelPassTables, bags, currency, SceneClock.SYSTEM, metrics);
         com.game.scene.rewardedad.RewardedAdService rewardedAdService = rewardedAdTables == null ? null
                 : new com.game.scene.rewardedad.RewardedAdService(rewardedAdTables, currency, SceneClock.SYSTEM, metrics);
         com.game.scene.season.SeasonService seasonService = seasonTables == null ? null
@@ -580,6 +589,9 @@ public class SceneNode implements SmartLifecycle {
                 .withProgression(attributes, battleProgressionTables);
         if (seasonService != null) {
             settlements.withSeasonService(seasonService);
+        }
+        if (travelPassService != null) {
+            settlements.withTravelPassService(travelPassService);
         }
         com.game.scene.trial.TrialJournalService trialJournalService = trialJournalTables == null ? null
                 : new com.game.scene.trial.TrialJournalService(trialJournalTables, bags, appearanceService,
@@ -723,6 +735,9 @@ public class SceneNode implements SmartLifecycle {
         if (festivalBeastService != null) {
             activityFeature.withFestivalBeastService(festivalBeastService);
         }
+        if (travelPassService != null) {
+            activityFeature.withTravelPassCatalog(travelPassService, appearanceService, spiritShopService);
+        }
         java.util.List<com.game.scene.world.SceneFeature> features = new java.util.ArrayList<>(List.of(
                 new CurrencyFeature(currency), new AttributeFeature(attributes, registry, call -> {
                     pets.onOwnerLevelChanged(call);
@@ -749,6 +764,9 @@ public class SceneNode implements SmartLifecycle {
         }
         if (spiritShopService != null) {
             features.add(new com.game.scene.spiritshop.SpiritShopFeature(spiritShopService, bagFeature));
+        }
+        if (travelPassService != null) {
+            features.add(new com.game.scene.travelpass.TravelPassFeature(travelPassService, bagFeature));
         }
         if (rewardedAdService != null) {
             features.add(new com.game.scene.rewardedad.RewardedAdFeature(rewardedAdService));

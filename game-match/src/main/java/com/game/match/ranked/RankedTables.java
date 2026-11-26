@@ -86,6 +86,10 @@ public final class RankedTables {
                 || defPet == null || defPet.getRoleKind() != ROLE_KIND_PET) {
             throw new IllegalStateException("RankedRule 默认人物/宝宝预设无效");
         }
+        if (Integer.compareUnsigned(rule.getSkillBanSlotsPerTeam(), 3) > 0) {
+            throw new IllegalStateException("RankedRule.skill_ban_slots_per_team 越界: "
+                    + Integer.toUnsignedString(rule.getSkillBanSlotsPerTeam()));
+        }
         List<RankedPresetView> views = sorted.stream().map(RankedTables::toView).toList();
         List<RankedPresetTable> byIdAsc = config.rankedPreset().all().stream()
                 .sorted(Comparator.comparingInt(RankedPresetTable::getId))
@@ -330,6 +334,8 @@ public final class RankedTables {
                 .append(",lvl=").append(Integer.toUnsignedString(rule.getCompetitiveLevel()))
                 .append(",defc=").append(Integer.toUnsignedString(rule.getDefaultCharacterPresetId()))
                 .append(",defp=").append(Integer.toUnsignedString(rule.getDefaultPetPresetId()))
+                .append(",bans=").append(Integer.toUnsignedString(rule.getSkillBanSlotsPerTeam()))
+                .append(",banmin=").append(Integer.toUnsignedString(rule.getSkillBanMinRatingCenti()))
                 .append('\n');
         for (RankedPresetTable p : presetsByIdAsc) {
             sb.append("preset:").append(Integer.toUnsignedString(p.getId()))

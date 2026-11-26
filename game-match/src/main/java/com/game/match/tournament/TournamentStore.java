@@ -86,6 +86,10 @@ public final class TournamentStore {
                              long squadBId, String squadBName, int squadBEmblemId,
                              boolean isWarmup, boolean isThirdPlace) {
         public TournamentBattleContext toBattleContext() {
+            return toBattleContext(0);
+        }
+
+        public TournamentBattleContext toBattleContext(int skillBanSlotsPerTeam) {
             return TournamentBattleContext.newBuilder()
                     .setSeasonId(seasonId)
                     .setMatchId(matchId)
@@ -102,6 +106,7 @@ public final class TournamentStore {
                     .setSquadBEmblemId(emblemOrDefault(squadBEmblemId))
                     .setIsWarmup(isWarmup)
                     .setIsThirdPlace(isThirdPlace)
+                    .setSkillBanSlotsPerTeam(skillBanSlotsPerTeam)
                     .build();
         }
     }
@@ -3084,6 +3089,37 @@ public final class TournamentStore {
         } catch (SQLException ignored) {
             // 最佳努力外观回填，绝不阻断建房主路径
         }
+    }
+
+    /** 读取锦标赛对阵双方战队队长 player_id（用于建房快照标记 is_team_captain，供战前 3 Ban 平票优先级使用）。 */
+    public Set<Long> loadSquadCaptains(int seasonId, long squadAId, long squadBId) {
+        if (seasonId == 0 || (squadAId == 0L && squadBId == 0L)) {
+            return Set.of();
+        }
+        Set<Long> captains = new HashSet<>();
+        try {
+            inTx(c -> {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT captain_player_id FROM " + MatchFeatureTables.TOURNAMENT_SQUAD
+                                + " WHERE season_id=? AND squad_id IN (?,?)")) {
+                    ps.setInt(1, seasonId);
+                    ps.setLong(2, squadAId);
+                    ps.setLong(3, squadBId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            long cid = rs.getLong(1);
+                            if (cid != 0L) {
+                                captains.add(cid);
+                            }
+                        }
+                    }
+                }
+                return null;
+            });
+        } catch (SQLException ignored) {
+            // 最佳努力读取队长标记，绝不阻断建房主路径
+        }
+        return captains;
     }
 
     /** V4 模块 H：BO3 淘汰赛首局开战前，参战两队队长各禁 1 条五行灵脉并立即重算 3 局灵脉序列。 */

@@ -70,4 +70,9 @@ public interface BattleData {
      * schema 里第二个参数名叫 {@code health}，但引擎传的是已损失气血（基线 {@code engine.cpp:1125-1128}）。
      */
     double buffHealthRegeneration(int buffTableId, double level, double lostHealth);
+
+    /** 返回当前赛季可被战前 3 Ban 选中的技能 ID 升序列表（{@code ban_pool_category ∈ [1..4]}，常驻 + 活跃赛季）。 */
+    default List<Integer> banEligibleSkillIds(int activeSeasonId) {
+        return List.of();
+    }
 }

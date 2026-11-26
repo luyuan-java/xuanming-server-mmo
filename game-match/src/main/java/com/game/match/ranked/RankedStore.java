@@ -143,13 +143,28 @@ public final class RankedStore {
                     .setConfigFingerprint(tables.configFingerprint())
                     .setTeamSize(teamSize)
                     .setUseFreePreset(false);
+            long minRatingCenti = 0L;
+            boolean hasMemberRating = false;
             if (roster != null) {
                 for (long pid : roster) {
                     Optional<MatchRankedPlayerSeasonRow> row = readPlayerSeason(c, current.getSeasonId(), pid);
-                    if (row.isPresent() && row.get().getCurrentWinStreak() >= 3) {
-                        ctx.putMemberWinStreaks(pid, row.get().getCurrentWinStreak());
+                    long ratingCenti = RankedTables.INITIAL_RATING_CENTI;
+                    if (row.isPresent()) {
+                        ratingCenti = row.get().getRatingCenti();
+                        if (row.get().getCurrentWinStreak() >= 3) {
+                            ctx.putMemberWinStreaks(pid, row.get().getCurrentWinStreak());
+                        }
+                    }
+                    if (!hasMemberRating || ratingCenti < minRatingCenti) {
+                        minRatingCenti = ratingCenti;
+                        hasMemberRating = true;
                     }
                 }
+            }
+            int ruleBanSlots = tables.rule().getSkillBanSlotsPerTeam();
+            if (ruleBanSlots > 0 && hasMemberRating
+                    && minRatingCenti >= Integer.toUnsignedLong(tables.rule().getSkillBanMinRatingCenti())) {
+                ctx.setSkillBanSlotsPerTeam(ruleBanSlots);
             }
             return Optional.of(ctx.build());
         }

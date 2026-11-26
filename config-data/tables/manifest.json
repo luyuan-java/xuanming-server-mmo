@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
-  "schema_digest": "8a563f7a854d5bc4",
-  "version": 90,
-  "content_digest": "1e51de589add41ec5b98083cdde31f625cb6ff87c7c66aaf0ecb5f0acd28db10",
-  "generated_at": "2026-11-26T09:08:28Z",
+  "schema_digest": "27e35dca107a0fae",
+  "version": 93,
+  "content_digest": "ac77c21f5bb971d4a021a1d4cabaf2d21f7f2df580797552bc8159fa577d9bf5",
+  "generated_at": "2026-11-26T10:15:52Z",
   "source_rev": {
-    "commit": "88418681484a87cd95cea8d13c1d66d0b08a34b3",
+    "commit": "0dd674d20ef239d05adcd50d15ef10dc425d3ad0",
     "data_dirty": true
   },
   "table_count": 82,
@@ -1089,24 +1089,24 @@
       "name": "Item",
       "hot_reload": false,
       "ids_permanent": true,
-      "rows": 145,
+      "rows": 146,
       "source": {
         "file": "Item.xlsx",
-        "size": 15868,
-        "sha256": "40734e05a33f03595a2de7503c765310c8cbbb4f911d719cf06b746c6b45982e"
+        "size": 16043,
+        "sha256": "3c2a73ce783b5e0d0df8d63330e6253148bf8c3774eb88521d2e49f378228810"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "item.json",
-          "size": 58145,
-          "sha256": "27b16ad25ea0a50b9481ba3ff1407cc29cbc69bc375af0cb3e4d691f10131f38"
+          "size": 58693,
+          "sha256": "42a535c2513f89fc70836851d3c6ebb72bf972dc321ec3d5172bba78ecc2978f"
         },
         {
           "kind": "binary",
           "file": "item.pb",
-          "size": 13832,
-          "sha256": "7d6d186ec3ac6269f5ddd99fbdba3746aa13a96510dc19f3bda3908b3213039b"
+          "size": 14017,
+          "sha256": "48a6438960a80fc69cc2ea0b9e2b2143d85dcc6fc306c28778fd0403c6376607"
         }
       ]
     },
@@ -1114,24 +1114,24 @@
       "name": "MessageLimiter",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 118,
+      "rows": 120,
       "source": {
         "file": "MessageLimiter.xlsx",
-        "size": 6962,
-        "sha256": "a15700f112014e79a9e9e7e55dac5241683da1bb5e94d630b1c85ed40edc0cea"
+        "size": 7000,
+        "sha256": "6e7cd353f5923f58b291e5368ecfc48867c29b50014030d2c5a422150a265ecf"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "messagelimiter.json",
-          "size": 10547,
-          "sha256": "e4ca103e6da008ad5cff0dc28ed28e898781a31350764184ffe8016a5509d718"
+          "size": 10725,
+          "sha256": "432c44e6828ed8dae420774734fe98e6447bd9a82ab395b7a17b405c3e48061a"
         },
         {
           "kind": "binary",
           "file": "messagelimiter.pb",
-          "size": 1396,
-          "sha256": "2a0e59616ebdf9640061d32ba19b62f1e2a24c7aabdd9b29d1db6a09b139b205"
+          "size": 1420,
+          "sha256": "9680402bbc0028bccbb71b1375dd56885c260f1e0b74ccc231a09a6abf401682"
         }
       ]
     },
@@ -1492,21 +1492,21 @@
       "rows": 1,
       "source": {
         "file": "RankedRule.xlsx",
-        "size": 5747,
-        "sha256": "e487d4e503ea6c20dac27e8a3ed9e093a9912b7641f16245151775101b4ee1c9"
+        "size": 5867,
+        "sha256": "a6851bc68826adc9da0a4a892f23eaa5cc586dfa5522e644535e4d5199087905"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "rankedrule.json",
-          "size": 814,
-          "sha256": "c336daa0508d2b22e8de9f358bf3d761b68a5729ca251d0ee5b4b1e5c6390220"
+          "size": 889,
+          "sha256": "89a078a401c875bdca1539417738c14aa1ab61cec2afdac7440f898b42594e9c"
         },
         {
           "kind": "binary",
           "file": "rankedrule.pb",
-          "size": 169,
-          "sha256": "e64198d27e0acefded2cde2e81a75a3692fa3bbe7ff58c9a4b96ce1e04847150"
+          "size": 177,
+          "sha256": "808f77bc50e88b2e7a15f8c718d339f450ee889b6404aaa57a39970091d1c92f"
         }
       ]
     },
@@ -1642,21 +1642,21 @@
       "rows": 149,
       "source": {
         "file": "Skill.xlsx",
-        "size": 31318,
-        "sha256": "aa50a701ad689c92eef8675442f38fcfb29889a4d0859491028ae71bd87c3a23"
+        "size": 31590,
+        "sha256": "e6c5c902edd609c9bb807c014762f4f35257f93394d06e8220a6589be80e14f8"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "skill.json",
-          "size": 146366,
-          "sha256": "e605ca136c78d83ac7f9b0193bccb4ee20fe8ce37674cfa682af727c1e3951f5"
+          "size": 147959,
+          "sha256": "46e5e8499481667fe7cabf22ca0b0e687ee29c2f6edb36b3a08b87ecf625d360"
         },
         {
           "kind": "binary",
           "file": "skill.pb",
-          "size": 30664,
-          "sha256": "290bc6749443f8ea80a797d97054b4e2d0ef17c1491a530f019bc5a6da7d352c"
+          "size": 30841,
+          "sha256": "5f3e342c0d896669a47ac9fd3ba5cf61244b227fcb0e61e065caafaf20ca2e57"
         }
       ]
     },
@@ -1717,21 +1717,21 @@
       "rows": 3,
       "source": {
         "file": "SkillVfxCosmetic.xlsx",
-        "size": 6331,
-        "sha256": "13393d4532729c6a1d1a35f9e75ecd75b16ae016207053c6866a976f13a640fd"
+        "size": 6288,
+        "sha256": "49c6fbdc51d26c3ae133ffa7d79f0dc8ce2ac974be29c013d69b62dca3d2494b"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "skillvfxcosmetic.json",
-          "size": 1702,
-          "sha256": "6e0fd86d00774a6f0f9b6250a5eafcd4b19f00f2a0fa60b6859d031845d504b6"
+          "size": 1646,
+          "sha256": "30c491520f66c8921dc15bdb05857620230e7477696d8ac51f8e53f77d87c878"
         },
         {
           "kind": "binary",
           "file": "skillvfxcosmetic.pb",
-          "size": 825,
-          "sha256": "3597736a6397ff56a5d9d76f001235917bccd7e42b90db174a124f246c2fd6f1"
+          "size": 820,
+          "sha256": "d01561ef7859e824702b2e519fbce2664172e9015e6f21cc8605222b3db3ae89"
         }
       ]
     },
@@ -1739,24 +1739,24 @@
       "name": "SpiritShopGoods",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 9,
+      "rows": 11,
       "source": {
         "file": "SpiritShopGoods.xlsx",
-        "size": 7577,
-        "sha256": "452fb60898534d5f2bc8767e19845d08612f30a42cfe363755aef0b98c9c155a"
+        "size": 8817,
+        "sha256": "158756a5d50a81b653a193382d668be477a20c2e54ccd7988275f1a339c51c7b"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "spiritshopgoods.json",
-          "size": 5948,
-          "sha256": "1b72aa936a2699cb05d4fd6a3b93f274ca42860a2b549b9a311f18c33a8bf2ed"
+          "size": 10157,
+          "sha256": "a28407900270f97ceb54ff61a59c5732b2570e94f2052b3076075be617762932"
         },
         {
           "kind": "binary",
           "file": "spiritshopgoods.pb",
-          "size": 2235,
-          "sha256": "4f2fcbbd75bc4da8d7e8faea0a5eadb518198bec2ba88bea68d914e7dc8ac899"
+          "size": 2880,
+          "sha256": "24027cd2d5ce1a3f68e734a5a0b1c0cd4e2bc96878a49b0d19a44c7d2e0f9791"
         }
       ]
     },
@@ -1867,21 +1867,21 @@
       "rows": 1,
       "source": {
         "file": "TournamentRule.xlsx",
-        "size": 6158,
-        "sha256": "8491053ef300ad2a9deb0de671e8605bf5fbeba17816e6292541df5a2deeecca"
+        "size": 6191,
+        "sha256": "dfe4024bf09a8f15e6f0db9748ca453a77147b160989aca5421a6609c912afc7"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "tournamentrule.json",
-          "size": 1082,
-          "sha256": "308584fb59d895c560dc8360c40284c783324985f8b4da73aac42eae901e25c6"
+          "size": 1116,
+          "sha256": "bfd52dfc1963ef4f7ae3c5992c652e8ca0a1b1e12d47c1c530e3712b137f34dd"
         },
         {
           "kind": "binary",
           "file": "tournamentrule.pb",
-          "size": 261,
-          "sha256": "e3d2cfa9a27ea7a62d0c62c56ec47bc457fe3bd86ca8d12b62acf97ceab08a3e"
+          "size": 264,
+          "sha256": "f3f7c7fa60450e1d944d53c4dd6045d23ca238e1680669bbd41a27b8571e7bcd"
         }
       ]
     },

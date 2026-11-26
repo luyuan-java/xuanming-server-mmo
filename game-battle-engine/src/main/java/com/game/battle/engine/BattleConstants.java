@@ -21,6 +21,10 @@ public final class BattleConstants {
     /** 论剑 V3 战前 15 秒明牌变阵窗口（毫秒与秒，对齐 C++ {@code kTacticalPrepTimeoutMs}）。 */
     public static final long TACTICAL_PREP_TIMEOUT_MS = 15_000;
     public static final int TACTICAL_PREP_DURATION_SECONDS = 15;
+    /** 战前每队 3 禁招（与变阵同窗口，启用禁招时窗口延长至 25 秒，对齐 C++ turn_battle_constants.h）。 */
+    public static final int PREP_SKILL_BAN_SLOTS_PER_TEAM = 3;
+    public static final long TACTICAL_PREP_WITH_BAN_TIMEOUT_MS = 25_000;
+    public static final int TACTICAL_PREP_WITH_BAN_DURATION_SECONDS = 25;
     /** 论剑 V4 队内一键战术标点、复盘高光徽记与连胜破势门槛（镜像 turn_battle_constants.h）。 */
     public static final int MAX_BATTLE_PINGS_PER_ROUND = 2;
     public static final int MIN_WIN_STREAK_HIGHLIGHT = 3;

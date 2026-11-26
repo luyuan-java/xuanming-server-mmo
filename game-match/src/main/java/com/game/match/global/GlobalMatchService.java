@@ -672,7 +672,18 @@ public final class GlobalMatchService implements AutoCloseable {
             if(!f.getTournamentContext().isEmpty()){
                 var tCtx=com.game.proto.TournamentBattleContext.parseFrom(f.getTournamentContext());
                 request.setTournamentContext(tCtx);
-                if(tournamentStore!=null&&tCtx.getSeasonId()!=0){tournamentStore.syncMemberProfiles(tCtx.getSeasonId(),snapshots);}
+                if(tournamentStore!=null&&tCtx.getSeasonId()!=0){
+                    tournamentStore.syncMemberProfiles(tCtx.getSeasonId(),snapshots);
+                    var captains=tournamentStore.loadSquadCaptains(tCtx.getSeasonId(),tCtx.getSquadAId(),tCtx.getSquadBId());
+                    if(!captains.isEmpty()){
+                        for(int idx=0;idx<request.getPlayersCount();idx++){
+                            var snap=request.getPlayers(idx);
+                            if(captains.contains(snap.getPlayerId())){
+                                request.setPlayers(idx,snap.toBuilder().setIsTeamCaptain(true).build());
+                            }
+                        }
+                    }
+                }
             }
             if (rankedTables != null) {
                 rankedTables.trialContextFor(f.getMode(), f.getConfigId(),

@@ -65,6 +65,26 @@ message PlayerState {
   PlayerSpiritShopState spirit_shop = 22;
   // 角色累计总经验（与 player.level 列同事务围栏提交，1..85 平滑升级曲线）。
   PlayerProgressionState progression = 23;
+  // 青云游历手记双轨进度、已解锁典藏与零战力纪念外显（同事务围栏提交）。
+  PlayerTravelPassState travel_pass = 24;
+}
+
+message TravelPassSeasonProgressState {
+  uint32 pass_id = 1;
+  uint32 progress_points = 2;
+  bool premium_unlocked = 3;
+  uint64 premium_unlocked_at_ms = 4;
+  uint64 free_claimed_mask = 5;
+  uint64 premium_claimed_mask = 6;
+  repeated string unlocked_cosmetic_keys = 7;
+  uint64 last_updated_at_ms = 8;
+}
+
+message PlayerTravelPassState {
+  repeated TravelPassSeasonProgressState seasons = 1;
+  string equipped_frame_key = 2;
+  string equipped_title_key = 3;
+  uint64 pass_revision = 4;
 }
 
 message PlayerProgressionState {
@@ -327,6 +347,7 @@ message ClientRequestRecordState {
   uint32 scroll_bonus_fragments = 29;
   uint32 rewarded_ad_currency_type = 30;
   uint64 rewarded_ad_amount = 31;
+  uint32 travel_pass_claimed_count = 32;
 }
 
 message EquipmentMaterialRewardLedgerState {
