@@ -1245,6 +1245,33 @@ class PrepareBattleTest {
         assertThat(f.prepares("stale")).isEqualTo(1);
     }
 
+    @Test
+    void 野外灵宠栖息地必须在对应野外图备战_主城演练不受限() {
+        // 玩家在主城(scene1, configId=1)请求八景岛栖息地(Dungeon 202, allow_pet_capture=1, scene_id=2) -> 必须回 1006 且不写锁。
+        f.enter(SESSION, PLAYER);
+        var mismatchReq = f.prepareRequest(PLAYER, BATTLE, f.deadline(), f.prepareDeadline())
+                .toBuilder().setBattleConfigId(202).build();
+        var mismatchResp = BattleFixture.done(f.battle.prepare(mismatchReq));
+        assertThat(BattleFixture.tipOf(mismatchResp)).isEqualTo(FEATURE_UNAVAILABLE);
+        assertThat(f.locks.ops()).isEmpty();
+
+        // 玩家在主城(1)请求普通捕宠演练(Dungeon 4, allow_pet_capture=1, scene_id=1) -> 正常通过。
+        var practiceReq = f.prepareRequest(PLAYER, BATTLE + 1, f.deadline(), f.prepareDeadline())
+                .toBuilder().setBattleConfigId(4).build();
+        var practiceReply = f.battle.prepare(practiceReq);
+        f.drain();
+        assertThat(BattleFixture.tipOf(BattleFixture.done(practiceReply))).isZero();
+
+        // 另一名玩家身处八景岛(scene2, configId=2)请求八景岛栖息地(Dungeon 202) -> 正常通过。
+        long wildPlayer = PLAYER + 1;
+        f.enter(SESSION + 1, wildPlayer, 1, f.scene2, PlayerState.getDefaultInstance());
+        var habitatReq = f.prepareRequest(wildPlayer, BATTLE + 2, f.deadline(), f.prepareDeadline())
+                .toBuilder().setBattleConfigId(202).build();
+        var habitatReply = f.battle.prepare(habitatReq);
+        f.drain();
+        assertThat(BattleFixture.tipOf(BattleFixture.done(habitatReply))).isZero();
+    }
+
     private void leave() {
         f.world.onPlayerLeave(BattleFixture.LINK, PlayerLeave.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER)
                 .setVoluntary(true).build());

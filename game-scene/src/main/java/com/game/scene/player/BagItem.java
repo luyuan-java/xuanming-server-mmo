@@ -15,7 +15,7 @@ public final class BagItem {
             .thenComparing(BagItem::guid, Long::compareUnsigned);
 
     private final long guid;
-    private final int configId;
+    private int configId;
     private final long acquireSeq;
     private boolean bound;
     private final UnknownFieldSet unknownFields;
@@ -57,6 +57,11 @@ public final class BagItem {
 
     public int configId() {
         return configId;
+    }
+
+    /** V1 装备原地无损升档专用（仅允许在单件装备校验通过后升至同部位更高档模板，不改 guid/槽位/入包序）。 */
+    public void setConfigId(int configId) {
+        this.configId = configId;
     }
 
     /** 堆叠数（uint32 范围内，long 表示）。 */

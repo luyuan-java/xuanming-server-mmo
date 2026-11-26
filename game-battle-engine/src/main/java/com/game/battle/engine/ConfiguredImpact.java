@@ -61,11 +61,12 @@ final class ConfiguredImpact {
             double typedOutgoing = type == CombatDamageRules.PHYSICAL_DAMAGE
                     ? battle.modifier(source, OUT_PHYSICAL_DAMAGE)
                     : battle.modifier(source, OUT_MAGIC_DAMAGE);
+            double selfGrowingDirect = battle.modifier(source, SELF_GROWING_DIRECT_DAMAGE);
             double oneShotOutgoing = hit.origin == DIRECT
                     ? battle.modifier(source, type == CombatDamageRules.PHYSICAL_DAMAGE
                             ? NEXT_PHYSICAL_ATTACK : NEXT_MAGIC_ATTACK)
                     : 0.0;
-            damage *= Math.max(0, 1 + battle.modifier(source, OUT_DAMAGE) + typedOutgoing + oneShotOutgoing);
+            damage *= Math.max(0, 1 + battle.modifier(source, OUT_DAMAGE) + typedOutgoing + selfGrowingDirect + oneShotOutgoing);
             if (hit.origin == DIRECT && kind != BATTLE_HIT_COUNTER) damage *= 1 + PetCultivationRules.damageBonus(source,type);
             damage *= Math.max(0,1+battle.modifier(target,IN_DAMAGE)+battle.hitVulnerabilityBonus(target));
             if (type == CombatDamageRules.MAGIC_DAMAGE) damage *= Math.max(0,1-battle.modifier(target,MAGIC_REDUCTION));
@@ -79,6 +80,8 @@ final class ConfiguredImpact {
                     battle.remove(source,entry.getBuffId());
                 }
             }
+        } else if (hit.origin == DOT) {
+            damage *= Math.max(0.0, 1.0 + battle.modifier(source, PERIODIC_DAMAGE_BONUS));
         }
         if (ctx.actorHasBuffOfType(target,BattleConstants.BUFF_TYPE_INVINCIBILITY)) damage = 0;
         if (target.isDefending() && hit.origin != REFLECTED && hit.origin != REDIRECT) damage *= 0.5;
@@ -171,7 +174,7 @@ final class ConfiguredImpact {
         battle.equipment.breakShields(source,target,shieldDamage,type,hit,defenses);
         Hit trigger = hit.derived(hit.origin);
         trigger.actualDamage = dealt;
-        if (dealt != 0 && hit.origin == DIRECT && target.isActive()) battle.trigger(target,source,AFTER_TAKE,type,trigger);
+        if (dealt != 0 && (hit.origin == DIRECT || hit.origin == REDIRECT) && target.isActive()) battle.trigger(target,source,AFTER_TAKE,type,trigger);
         if (dealt != 0 && hit.origin == DOT && source.isActive()) battle.trigger(source,target,AFTER_PERIODIC,type,trigger);
         return dealt;
     }

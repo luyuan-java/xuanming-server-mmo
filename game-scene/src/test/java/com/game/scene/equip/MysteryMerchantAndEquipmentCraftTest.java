@@ -331,6 +331,103 @@ class MysteryMerchantAndEquipmentCraftTest {
         assertThat(stale.getErrorMessage().getId()).isEqualTo(1006);
     }
 
+    @Test
+    void 装备V1原地无损升档_纯银两保留强化保底词条品相署名与可交易状态() throws Exception {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer player = f.enter(11, 1099);
+        assertThat(f.bags.addItems(player, BagType.INVENTORY,
+                Map.of(EquipmentCraftService.CRAFTING_MATERIAL_ID, 100L),
+                Reason.GM_GRANT, 1L, "").tip()).isZero();
+
+        GetEquipmentCraftRulesResponse rules = call(f, player, BAG_SERVICE, "GetEquipmentCraftRules",
+                GetEquipmentCraftRulesRequest.getDefaultInstance(), GetEquipmentCraftRulesResponse.parser());
+        assertThat(rules.getErrorMessage().getId()).isZero();
+
+        // 打造 1 级可交易武器 (3101) 并装上固定词条、设置强化+10/保底7/品相4/打磨保底5/宗师署名
+        CommitEquipmentCraftResponse crafted = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(9101L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(0L)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.CREATE_ITEM)
+                                .setConfigId(3101).build()).build(),
+                CommitEquipmentCraftResponse.parser());
+        assertThat(crafted.getOutcome()).isEqualTo(CommitEquipmentCraftResponse.Outcome.APPLIED);
+        long weaponId = crafted.getItemId();
+        var item = player.bags().bag(BagType.INVENTORY).item(weaponId);
+        assertThat(item).isNotNull();
+        item.setBound(false);
+        item.equipment(com.game.player.store.state.EquipmentState.newBuilder()
+                .setEnhanceLevel(10)
+                .setEnhancePityCount(7)
+                .setCrafterPlayerId(42L)
+                .setCrafterName("天工宗师")
+                .addFixedAffixes(com.game.player.store.state.EquipmentFixedAffixState.newBuilder()
+                        .setSlot(1).setAffixId(101).setQualityTier(4).setPolishPityCount(5))
+                .build());
+
+        EquipmentCraftChoice upgradeTo30 = EquipmentCraftChoice.newBuilder()
+                .setOperation(EquipmentCraftChoice.Operation.UPGRADE_TIER)
+                .setItemId(weaponId)
+                .setConfigId(3131).build();
+
+        // 1. 等级不足 (Lv1 -> Lv30) 预览不可用，但准确给出 300 银两且无打造材料消耗
+        player.setLevel(1);
+        PreviewEquipmentCraftResponse lowLevel = call(f, player, BAG_SERVICE, "PreviewEquipmentCraft",
+                PreviewEquipmentCraftRequest.newBuilder().setChoice(upgradeTo30).build(),
+                PreviewEquipmentCraftResponse.parser());
+        assertThat(lowLevel.getPreview().getAvailable()).isFalse();
+        assertThat(lowLevel.getPreview().getGoldCost()).isEqualTo(300L);
+        assertThat(lowLevel.getPreview().hasMaterial()).isFalse();
+
+        // 2. 30级且银两充足（350）提交原地无损升档：扣 300 银两、0 打造材料、全部养成与纯可交易 100% 保留
+        player.setLevel(30);
+        f.currency.add(player, com.game.scene.player.Wallet.GOLD, 350L, Reason.GM_GRANT, 2L);
+        long matBefore = player.bags().bag(BagType.INVENTORY).total(EquipmentCraftService.CRAFTING_MATERIAL_ID);
+        CommitEquipmentCraftRequest upgradeReq = CommitEquipmentCraftRequest.newBuilder()
+                .setClientRequestId(9102L)
+                .setRulesFingerprint(rules.getRulesFingerprint())
+                .setExpectedForgeRevision(crafted.getResultForgeRevision())
+                .setChoice(upgradeTo30).build();
+        CommitEquipmentCraftResponse upgraded = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                upgradeReq, CommitEquipmentCraftResponse.parser());
+        assertThat(upgraded.getOutcome()).isEqualTo(CommitEquipmentCraftResponse.Outcome.APPLIED);
+        assertThat(upgraded.getItemId()).isEqualTo(weaponId);
+        assertThat(player.wallet().balance(com.game.scene.player.Wallet.GOLD)).isEqualTo(50L);
+        assertThat(player.bags().bag(BagType.INVENTORY).total(EquipmentCraftService.CRAFTING_MATERIAL_ID)).isEqualTo(matBefore);
+
+        var after = player.bags().bag(BagType.INVENTORY).item(weaponId);
+        assertThat(after).isNotNull();
+        assertThat(after.configId()).isEqualTo(3131);
+        assertThat(after.bound()).isFalse();
+        assertThat(after.equipment().getEnhanceLevel()).isEqualTo(10);
+        assertThat(after.equipment().getEnhancePityCount()).isEqualTo(7);
+        assertThat(after.equipment().getCrafterPlayerId()).isEqualTo(42L);
+        assertThat(after.equipment().getCrafterName()).isEqualTo("天工宗师");
+        assertThat(after.equipment().getFixedAffixes(0).getAffixId()).isEqualTo(101);
+        assertThat(after.equipment().getFixedAffixes(0).getQualityTier()).isEqualTo(4);
+        assertThat(after.equipment().getFixedAffixes(0).getPolishPityCount()).isEqualTo(5);
+
+        // 3. 幂等重放不重复扣银两
+        CommitEquipmentCraftResponse replayed = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                upgradeReq, CommitEquipmentCraftResponse.parser());
+        assertThat(replayed.getReplayed()).isTrue();
+        assertThat(player.wallet().balance(com.game.scene.player.Wallet.GOLD)).isEqualTo(50L);
+
+        // 4. 拒绝降级（3131->3101）与跨部位（3131->3132）
+        assertThat(call(f, player, BAG_SERVICE, "PreviewEquipmentCraft",
+                PreviewEquipmentCraftRequest.newBuilder().setChoice(EquipmentCraftChoice.newBuilder()
+                        .setOperation(EquipmentCraftChoice.Operation.UPGRADE_TIER)
+                        .setItemId(weaponId).setConfigId(3101).build()).build(),
+                PreviewEquipmentCraftResponse.parser()).getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(call(f, player, BAG_SERVICE, "PreviewEquipmentCraft",
+                PreviewEquipmentCraftRequest.newBuilder().setChoice(EquipmentCraftChoice.newBuilder()
+                        .setOperation(EquipmentCraftChoice.Operation.UPGRADE_TIER)
+                        .setItemId(weaponId).setConfigId(3132).build()).build(),
+                PreviewEquipmentCraftResponse.parser()).getErrorMessage().getId()).isEqualTo(1005);
+    }
+
     private static <T extends Message> T call(BattleFixture f, ScenePlayer player, String service, String method,
                                               Message req, com.google.protobuf.Parser<T> parser)
             throws InvalidProtocolBufferException {

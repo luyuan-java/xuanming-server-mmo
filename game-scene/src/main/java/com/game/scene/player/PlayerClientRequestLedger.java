@@ -1,5 +1,6 @@
 package com.game.scene.player;
 
+import com.game.player.store.state.BattleEconomyLedgerState;
 import com.game.player.store.state.ClientRequestLedgerState;
 import com.game.player.store.state.ClientRequestRecordState;
 import com.game.player.store.state.EquipmentMaterialRewardLedgerState;
@@ -62,6 +63,7 @@ public final class PlayerClientRequestLedger {
     private long nextSeq;
     private long forgeRevision;
     private EquipmentMaterialRewardLedgerState materialReward = EquipmentMaterialRewardLedgerState.getDefaultInstance();
+    private BattleEconomyLedgerState battleEconomy = BattleEconomyLedgerState.getDefaultInstance();
     private UnknownFieldSet unknownFields = UnknownFieldSet.getDefaultInstance();
 
     private PlayerClientRequestLedger() {
@@ -81,6 +83,9 @@ public final class PlayerClientRequestLedger {
         out.forgeRevision = state.getForgeRevision();
         if (state.hasMaterialReward()) {
             out.materialReward = state.getMaterialReward();
+        }
+        if (state.hasBattleEconomy()) {
+            out.battleEconomy = state.getBattleEconomy();
         }
         out.unknownFields = state.getUnknownFields();
         return out;
@@ -247,9 +252,20 @@ public final class PlayerClientRequestLedger {
                 : materialReward;
     }
 
+    public BattleEconomyLedgerState battleEconomy() {
+        return battleEconomy;
+    }
+
+    public void setBattleEconomy(BattleEconomyLedgerState battleEconomy) {
+        this.battleEconomy = battleEconomy == null
+                ? BattleEconomyLedgerState.getDefaultInstance()
+                : battleEconomy;
+    }
+
     public boolean isPristine() {
         return records.isEmpty() && nextSeq == 0 && forgeRevision == 0
                 && materialReward.equals(EquipmentMaterialRewardLedgerState.getDefaultInstance())
+                && battleEconomy.equals(BattleEconomyLedgerState.getDefaultInstance())
                 && unknownFields.asMap().isEmpty();
     }
 
@@ -263,6 +279,9 @@ public final class PlayerClientRequestLedger {
                 .addAllRecords(ordered);
         if (!materialReward.equals(EquipmentMaterialRewardLedgerState.getDefaultInstance())) {
             b.setMaterialReward(materialReward);
+        }
+        if (!battleEconomy.equals(BattleEconomyLedgerState.getDefaultInstance())) {
+            b.setBattleEconomy(battleEconomy);
         }
         return b.build();
     }

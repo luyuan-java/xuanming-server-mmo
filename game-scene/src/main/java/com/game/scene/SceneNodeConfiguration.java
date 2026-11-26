@@ -155,6 +155,13 @@ public class SceneNodeConfiguration {
         return com.game.scene.spiritshop.SpiritShopTables.from(tables);
     }
 
+    @Bean
+    public com.game.scene.progression.BattleProgressionTables battleProgressionTables(ConfigTables tables) {
+        var view = com.game.scene.progression.BattleProgressionTables.from(tables);
+        view.validate();
+        return view;
+    }
+
     /** 可选直连 MatchInternalService（配置 {@code game.dubbo.match-url} 时启用瑞兽迎春活动开局调用）。 */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnProperty(name = "game.dubbo.match-url")
@@ -281,6 +288,7 @@ public class SceneNodeConfiguration {
                                com.game.scene.craft.SkillCraftTables skillCraftTables,
                                com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables,
                                com.game.scene.spiritshop.SpiritShopTables spiritShopTables,
+                               com.game.scene.progression.BattleProgressionTables battleProgressionTables,
                                ObjectProvider<java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
                                        java.util.concurrent.CompletableFuture<com.game.proto.match.StartActivityBattleResponse>>> matchActivityStarter,
                                ObjectProvider<SceneTextGuard> textGuard, NodeLinkAuth nodeLinkAuth,
@@ -301,6 +309,7 @@ public class SceneNodeConfiguration {
                 .withSkillCraftTables(skillCraftTables)
                 .withFestivalBeastTables(festivalBeastTables)
                 .withSpiritShopTables(spiritShopTables)
+                .withBattleProgressionTables(battleProgressionTables)
                 .withMatchActivityStarter(matchActivityStarter.getIfAvailable())
                 .withTextGuard(textGuard.getIfAvailable())
                 .withMaintenanceBoot(boot);

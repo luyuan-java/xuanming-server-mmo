@@ -4,6 +4,8 @@ import com.game.table.AppearanceRuleTable;
 import com.game.table.AppearanceSeriesTable;
 import com.game.table.CharacterAppearanceTable;
 import com.game.table.ConfigTables;
+import com.game.table.PetCosmeticTable;
+import com.game.table.SkillVfxCosmeticTable;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -13,9 +15,10 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 角色形象切换、永久收藏系列与 1 小时免费试用的不可变配表视图（来自 {@code CharacterAppearance}、{@code AppearanceSeries} 与 {@code AppearanceRule}）。
+ * 角色形象切换、永久收藏系列、灵宠幻化、技能特效与 1 小时免费试用的不可变配表视图
+ * （来自 {@code CharacterAppearance}、{@code AppearanceSeries}、{@code AppearanceRule}、{@code PetCosmetic} 与 {@code SkillVfxCosmetic}）。
  *
- * <p>位索引按永久主键 {@code id - 1} 计算（与 {@code characterappearance_mapping.json} 一致：1..11 -> bit 0..10）。
+ * <p>位索引按永久主键 {@code id - 1} 计算（与 {@code *_mapping.json} 一致）。
  */
 public final class AppearanceTables {
 
@@ -32,19 +35,39 @@ public final class AppearanceTables {
     public record Entry(int configId, int bitIndex, String appearanceId, String name, int sortOrder,
                         boolean starterCreatable, boolean cardUnlockable, int seriesId) { }
 
+    public record PetCosmetic(int configId, int bitIndex, String cosmeticKey, String name,
+                              int targetPetTableId, int visualPetTableId, String visualArtKey,
+                              int sortOrder, long mallSkuId, String acquireHint, String desc) { }
+
+    public record SkillVfxCosmetic(int configId, int bitIndex, String vfxKey, String name,
+                                   int skillTableId, String fxId, String projectileFxId,
+                                   String telegraphFxId, String tintHex, int sortOrder,
+                                   long mallSkuId, String acquireHint, String desc) { }
+
     private final Rule rule;
     private final List<Entry> enabledEntries;
     private final Map<String, Entry> enabledByAppearanceId;
     private final Map<String, Entry> allByAppearanceId;
     private final List<Series> enabledSeries;
+    private final List<PetCosmetic> enabledPetCosmetics;
+    private final Map<Integer, PetCosmetic> enabledPetCosmeticsById;
+    private final List<SkillVfxCosmetic> enabledSkillVfxCosmetics;
+    private final Map<Integer, SkillVfxCosmetic> enabledSkillVfxCosmeticsById;
 
     private AppearanceTables(Rule rule, List<Entry> enabledEntries, Map<String, Entry> enabledByAppearanceId,
-                             Map<String, Entry> allByAppearanceId, List<Series> enabledSeries) {
+                             Map<String, Entry> allByAppearanceId, List<Series> enabledSeries,
+                             List<PetCosmetic> enabledPetCosmetics, Map<Integer, PetCosmetic> enabledPetCosmeticsById,
+                             List<SkillVfxCosmetic> enabledSkillVfxCosmetics,
+                             Map<Integer, SkillVfxCosmetic> enabledSkillVfxCosmeticsById) {
         this.rule = rule;
         this.enabledEntries = enabledEntries;
         this.enabledByAppearanceId = enabledByAppearanceId;
         this.allByAppearanceId = allByAppearanceId;
         this.enabledSeries = enabledSeries;
+        this.enabledPetCosmetics = enabledPetCosmetics;
+        this.enabledPetCosmeticsById = enabledPetCosmeticsById;
+        this.enabledSkillVfxCosmetics = enabledSkillVfxCosmetics;
+        this.enabledSkillVfxCosmeticsById = enabledSkillVfxCosmeticsById;
     }
 
     public static AppearanceTables from(ConfigTables tables) {
@@ -130,8 +153,89 @@ public final class AppearanceTables {
                     + entries.size() + " starter=" + starterCount);
         }
         entries.sort(Comparator.comparingInt(Entry::sortOrder).thenComparingInt(Entry::configId));
+
+        List<PetCosmetic> petCosmetics = new ArrayList<>();
+        Map<Integer, PetCosmetic> petCosmeticsById = new LinkedHashMap<>();
+        Set<String> petCosmeticKeys = new HashSet<>();
+        for (PetCosmeticTable row : tables.petCosmetic().all()) {
+            if (row.getId() <= 0 || row.getCosmeticKey().isBlank() || row.getName().isBlank()) {
+                throw new IllegalStateException("PetCosmetic 非法行: id=" + row.getId());
+            }
+            if (row.getVisualArtKey().isBlank() && row.getVisualPetTableId() == 0) {
+                throw new IllegalStateException("PetCosmetic 缺少视觉资源键或复用灵宠 ID: id=" + row.getId());
+            }
+            if (row.getTargetPetTableId() != 0 && !tables.pet().contains(row.getTargetPetTableId())) {
+                throw new IllegalStateException("PetCosmetic target_pet_table_id 不存在: id=" + row.getId());
+            }
+            if (row.getVisualPetTableId() != 0 && !tables.pet().contains(row.getVisualPetTableId())) {
+                throw new IllegalStateException("PetCosmetic visual_pet_table_id 不存在: id=" + row.getId());
+            }
+            if (!petCosmeticKeys.add(row.getCosmeticKey())) {
+                throw new IllegalStateException("PetCosmetic 重复 cosmetic_key=" + row.getCosmeticKey());
+            }
+            if (row.getEnabled() == 0) {
+                continue;
+            }
+            PetCosmetic item = new PetCosmetic(
+                    row.getId(), row.getId() - 1, row.getCosmeticKey(), row.getName(),
+                    row.getTargetPetTableId(), row.getVisualPetTableId(), row.getVisualArtKey(),
+                    row.getSortOrder(), row.getMallSkuId(), row.getAcquireHint(), row.getDesc());
+            petCosmetics.add(item);
+            petCosmeticsById.put(item.configId(), item);
+        }
+        petCosmetics.sort(Comparator.comparingInt(PetCosmetic::sortOrder).thenComparingInt(PetCosmetic::configId));
+
+        List<SkillVfxCosmetic> skillVfxs = new ArrayList<>();
+        Map<Integer, SkillVfxCosmetic> skillVfxsById = new LinkedHashMap<>();
+        Set<String> skillVfxKeys = new HashSet<>();
+        for (SkillVfxCosmeticTable row : tables.skillVfxCosmetic().all()) {
+            if (row.getId() <= 0 || row.getVfxKey().isBlank() || row.getName().isBlank()
+                    || row.getFxId().isBlank() || row.getSkillTableId() <= 0) {
+                throw new IllegalStateException("SkillVfxCosmetic 非法行: id=" + row.getId());
+            }
+            if (!tables.skill().contains(row.getSkillTableId())) {
+                throw new IllegalStateException("SkillVfxCosmetic skill_table_id 不存在: id=" + row.getId());
+            }
+            if (!validTintHex(row.getTintHex())) {
+                throw new IllegalStateException("SkillVfxCosmetic tint_hex 非法: id=" + row.getId());
+            }
+            if (!skillVfxKeys.add(row.getVfxKey())) {
+                throw new IllegalStateException("SkillVfxCosmetic 重复 vfx_key=" + row.getVfxKey());
+            }
+            if (row.getEnabled() == 0) {
+                continue;
+            }
+            SkillVfxCosmetic item = new SkillVfxCosmetic(
+                    row.getId(), row.getId() - 1, row.getVfxKey(), row.getName(),
+                    row.getSkillTableId(), row.getFxId(), row.getProjectileFxId(),
+                    row.getTelegraphFxId(), row.getTintHex(), row.getSortOrder(),
+                    row.getMallSkuId(), row.getAcquireHint(), row.getDesc());
+            skillVfxs.add(item);
+            skillVfxsById.put(item.configId(), item);
+        }
+        skillVfxs.sort(Comparator.comparingInt(SkillVfxCosmetic::sortOrder).thenComparingInt(SkillVfxCosmetic::configId));
+
         return new AppearanceTables(parsedRule, List.copyOf(entries), Map.copyOf(byAppearanceId),
-                Map.copyOf(allById), List.copyOf(seriesList));
+                Map.copyOf(allById), List.copyOf(seriesList),
+                List.copyOf(petCosmetics), Map.copyOf(petCosmeticsById),
+                List.copyOf(skillVfxs), Map.copyOf(skillVfxsById));
+    }
+
+    public static boolean validTintHex(String hex) {
+        if (hex == null || hex.isEmpty()) {
+            return true;
+        }
+        if (hex.length() != 7 || hex.charAt(0) != '#') {
+            return false;
+        }
+        for (int i = 1; i < 7; i++) {
+            char c = hex.charAt(i);
+            boolean isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!isHex) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -185,5 +289,21 @@ public final class AppearanceTables {
 
     public List<Series> enabledSeries() {
         return enabledSeries;
+    }
+
+    public List<PetCosmetic> enabledPetCosmetics() {
+        return enabledPetCosmetics;
+    }
+
+    public PetCosmetic findEnabledPetCosmetic(int configId) {
+        return enabledPetCosmeticsById.get(configId);
+    }
+
+    public List<SkillVfxCosmetic> enabledSkillVfxCosmetics() {
+        return enabledSkillVfxCosmetics;
+    }
+
+    public SkillVfxCosmetic findEnabledSkillVfxCosmetic(int configId) {
+        return enabledSkillVfxCosmeticsById.get(configId);
     }
 }

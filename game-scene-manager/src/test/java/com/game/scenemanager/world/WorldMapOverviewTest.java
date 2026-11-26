@@ -89,20 +89,22 @@ class WorldMapOverviewTest {
         Map<Integer, SceneChannelDirectory> dirs = Map.of(
                 1, dir(1, channel(10001, 1, 10, SceneChannelState.SCENE_CHANNEL_STATE_SMOOTH)),
                 2, dir(2, channel(20001, 1, 3, SceneChannelState.SCENE_CHANNEL_STATE_SMOOTH)),
-                3, dir(3, channel(30001, 1, 50, SceneChannelState.SCENE_CHANNEL_STATE_SMOOTH)),
+                3, dir(3, channel(30001, 1, 2, SceneChannelState.SCENE_CHANNEL_STATE_SMOOTH)),
+                4, dir(4, channel(40001, 1, 50, SceneChannelState.SCENE_CHANNEL_STATE_SMOOTH)),
                 5, dir(5, channel(50001, 1, 0, SceneChannelState.SCENE_CHANNEL_STATE_SMOOTH))
         );
-        long nowMs = (3600L + 600L) * 1000L;
+        long nowMs = (2 * 3600L + 600L) * 1000L; // roundIndex=2 -> candidates[2]=5 灵潮激活中
         WorldMapOverview overview = WorldMapOverviewBuilder.build(1, WorldChannelProperties.WorldMapPlay.defaults(), dirs, nowMs);
         assertThat(overview.getZoneId()).isEqualTo(1);
         assertThat(overview.getTide().getActive()).isTrue();
         assertThat(overview.getTide().getSceneConfigId()).isEqualTo(5);
         assertThat(overview.getTide().getRecommendedSceneId()).isEqualTo(50001L);
-        assertThat(overview.getMapsList()).extracting(e -> e.getSceneConfigId()).containsExactly(1, 2, 5);
+        assertThat(overview.getMapsList()).extracting(e -> e.getSceneConfigId()).containsExactly(1, 2, 3, 5);
         assertThat(overview.getMaps(0).getHeatLevel()).isEqualTo(WorldMapHeatLevel.WORLD_MAP_HEAT_LEVEL_CROWDED);
         assertThat(overview.getMaps(1).getHeatLevel()).isEqualTo(WorldMapHeatLevel.WORLD_MAP_HEAT_LEVEL_ACTIVE);
-        assertThat(overview.getMaps(2).getHeatLevel()).isEqualTo(WorldMapHeatLevel.WORLD_MAP_HEAT_LEVEL_QUIET);
-        assertThat(overview.getMaps(2).getIsTideMap()).isTrue();
+        assertThat(overview.getMaps(2).getHeatLevel()).isEqualTo(WorldMapHeatLevel.WORLD_MAP_HEAT_LEVEL_ACTIVE);
+        assertThat(overview.getMaps(3).getHeatLevel()).isEqualTo(WorldMapHeatLevel.WORLD_MAP_HEAT_LEVEL_QUIET);
+        assertThat(overview.getMaps(3).getIsTideMap()).isTrue();
     }
 
     private static SceneChannelDirectory dir(int confId, SceneChannelInfo... channels) {

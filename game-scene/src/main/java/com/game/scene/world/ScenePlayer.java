@@ -126,6 +126,8 @@ public final class ScenePlayer {
     private final com.game.scene.player.PlayerFestivalBeast festivalBeast;
     /** 官方灵石百宝阁个人与共享组限购记录。 */
     private final com.game.scene.player.PlayerSpiritShop spiritShop;
+    /** 角色累计总经验（与 player.level 列同一次存盘提交）。 */
+    private final com.game.scene.player.PlayerProgression progression;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -242,6 +244,9 @@ public final class ScenePlayer {
         this.spiritShop = state.hasSpiritShop()
                 ? com.game.scene.player.PlayerSpiritShop.restore(state.getSpiritShop())
                 : com.game.scene.player.PlayerSpiritShop.empty();
+        this.progression = state.hasProgression()
+                ? com.game.scene.player.PlayerProgression.restore(state.getProgression())
+                : com.game.scene.player.PlayerProgression.empty();
     }
 
     public long playerId() {
@@ -350,6 +355,11 @@ public final class ScenePlayer {
     /** 只供属性系统调用（GM 设等级；调用方负责校验 1..85 并随后重算）。 */
     public void setLevel(int level) {
         this.level = level;
+    }
+
+    /** 角色累计总经验持久状态（逻辑线程上读写；与 player.level 同事务落盘）。 */
+    public com.game.scene.player.PlayerProgression progression() {
+        return progression;
     }
 
     public List<Integer> skills() {
@@ -608,6 +618,9 @@ public final class ScenePlayer {
         }
         if (!spiritShop.isPristine()) {
             state.setSpiritShop(spiritShop.toState());
+        }
+        if (!progression.isPristine()) {
+            state.setProgression(progression.toState());
         }
         return state.build();
     }

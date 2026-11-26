@@ -252,11 +252,13 @@ public final class EquipmentCraftService {
                 .setExpectedForgeRevision(player.clientRequestLedger().forgeRevision())
                 .setResult(buildProductPreview(prepared.configId, prepared.itemId,
                         prepared.resultBound, previewEquipment))
-                .setMaterial(buildMaterial(player, prepared.materialId, prepared.materialCount, prepared.tradableOnly))
                 .setGoldCost(prepared.baseGoldCost)
                 .setProxyFeeGold(prepared.proxyFeeGold)
                 .setWillBindItem(prepared.willBindItem)
                 .setAvailable(unavailable == OK);
+        if (prepared.materialId != 0 && prepared.materialCount != 0) {
+            preview.setMaterial(buildMaterial(player, prepared.materialId, prepared.materialCount, prepared.tradableOnly));
+        }
         if (prepared.extraMaterialId != 0 && prepared.extraMaterialCount != 0) {
             preview.setExtraMaterial(buildMaterial(player, prepared.extraMaterialId, prepared.extraMaterialCount, prepared.tradableOnly));
         }
@@ -422,7 +424,9 @@ public final class EquipmentCraftService {
                 return new CommitResult(rejectCraft(reqId, ledger.forgeRevision(), equip_error.kEquipItemNotFound_VALUE, true), false);
             }
             target.equipment(nextEquip.build());
-            if (op == EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE) {
+            if (op == EquipmentCraftChoice.Operation.UPGRADE_TIER) {
+                target.setConfigId(prepared.configId);
+            } else if (op == EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE) {
                 target.setBound(false);
             } else if (op == EquipmentCraftChoice.Operation.INHERIT_ENHANCE) {
                 target.setBound(true);
@@ -433,11 +437,13 @@ public final class EquipmentCraftService {
         }
 
         AssetAudit.Reason goldReason = (op == EquipmentCraftChoice.Operation.POLISH_AFFIX
-                || op == EquipmentCraftChoice.Operation.REFORGE_AFFIX)
+                || op == EquipmentCraftChoice.Operation.REFORGE_AFFIX
+                || op == EquipmentCraftChoice.Operation.UPGRADE_TIER)
                 ? AssetAudit.Reason.EQUIP_POLISH_REFORGE
                 : AssetAudit.Reason.CRAFT_PROXY_FEE;
         AssetAudit.Reason itemReason = (op == EquipmentCraftChoice.Operation.POLISH_AFFIX
-                || op == EquipmentCraftChoice.Operation.REFORGE_AFFIX)
+                || op == EquipmentCraftChoice.Operation.REFORGE_AFFIX
+                || op == EquipmentCraftChoice.Operation.UPGRADE_TIER)
                 ? AssetAudit.Reason.EQUIP_POLISH_REFORGE
                 : AssetAudit.Reason.EQUIP_CRAFT;
 
@@ -450,11 +456,12 @@ public final class EquipmentCraftService {
         if (proxyMaster != null && proxyNetGold > 0L && currency != null) {
             currency.add(proxyMaster, Wallet.GOLD, proxyNetGold, AssetAudit.Reason.CRAFT_PROXY_FEE, reqId, nowSec);
         }
-        // 本人打造/装条/打磨自然涨 1 点铸器熟练度（无体力、无日清、只增不减；代打、重铸、解封与继承不涨）。
+        // 本人打造/装条/打磨自然涨 1 点铸器熟练度（无体力、无日清、只增不减；代打、重铸、解封、继承与无损升档不涨）。
         if (prepared.proxyMasterPlayerId == 0L
                 && op != EquipmentCraftChoice.Operation.REFORGE_AFFIX
                 && op != EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE
-                && op != EquipmentCraftChoice.Operation.INHERIT_ENHANCE) {
+                && op != EquipmentCraftChoice.Operation.INHERIT_ENHANCE
+                && op != EquipmentCraftChoice.Operation.UPGRADE_TIER) {
             int curExp = player.craft().forgeMasteryExp();
             if (curExp != -1) {
                 player.craft().replace(player.craft().state().toBuilder().setForgeMasteryExp(curExp + 1).build());
@@ -1305,6 +1312,53 @@ public final class EquipmentCraftService {
             prepared.materialCount = 1;
             prepared.consumed.merge(prepared.materialId, 1L, Long::sum);
             prepared.tradableOnly = false;
+            return prepared;
+        }
+
+        if (choice.getOperation() == EquipmentCraftChoice.Operation.UPGRADE_TIER) {
+            if (choice.getConfigId() == 0 || choice.getItemId() == 0 || choice.getSourceItemId() != 0L
+                    || choice.getAffixSlot() != 0 || choice.getAffixId() != 0 || choice.getUseGuaranteeCharm()
+                    || choice.getProxyMasterPlayerId() != 0L || choice.hasExpectedPolishPityCount()) {
+                errorOut[0] = INVALID_PARAMETER;
+                return null;
+            }
+            BagType[] holderOut = new BagType[1];
+            BagItem found = locateEquipment(player, choice.getItemId(), holderOut);
+            if (found == null) {
+                errorOut[0] = equip_error.kEquipItemNotFound_VALUE;
+                return null;
+            }
+            ItemTable sourceRow = tables.item(found.configId());
+            ItemTable targetRow = tables.item(choice.getConfigId());
+            EquipmentState currentEquip = found.equipment();
+            if (sourceRow == null || targetRow == null
+                    || !validTemplate(sourceRow, tables) || !validTemplate(targetRow, tables)
+                    || !EquipCraftQualityRules.canUpgradeTier(
+                            sourceRow.getEquipProfile(), sourceRow.getEquipKind(),
+                            sourceRow.getEquipLevel(), sourceRow.getEquipClass(),
+                            targetRow.getEquipProfile(), targetRow.getEquipKind(),
+                            targetRow.getEquipLevel(), targetRow.getEquipClass())
+                    || found.size() != 1 || currentEquip == null
+                    || !FixedEquipmentEffects.validSelections(found, sourceRow.getEquipProfile(), tables)) {
+                errorOut[0] = INVALID_PARAMETER;
+                return null;
+            }
+            if (!currentEquip.getUnknownFields().asMap().isEmpty()) {
+                errorOut[0] = FEATURE_UNAVAILABLE;
+                return null;
+            }
+            prepared.configId = targetRow.getId();
+            prepared.itemId = found.guid();
+            prepared.originalBound = found.bound();
+            prepared.resultBound = found.bound();
+            prepared.resultEquipment = currentEquip;
+            prepared.holder = holderOut[0];
+            prepared.baseGoldCost = EquipCraftQualityRules.upgradeTierGoldCost(
+                    sourceRow.getEquipProfile(), sourceRow.getEquipLevel(), targetRow.getEquipLevel());
+            prepared.materialId = 0;
+            prepared.materialCount = 0;
+            prepared.tradableOnly = false;
+            prepared.willBindItem = false;
             return prepared;
         }
 

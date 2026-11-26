@@ -106,7 +106,10 @@ final class ConfiguredEffects {
                             - PetCultivationRules.rate(receiver.state().getPetCultivation().getRetreatResistBps()),0,1);
                     boolean success = chance >= 1 || (chance > 0 && ctx.rng().rand01() < chance);
                     ctx.events().append(BATTLE_EVENT_PET_RETREAT,source.actorId(),receiver.actorId()).setSuccess(success).setValue(1);
-                    if (success) receiver.state().setFled(true).setWithdrawUntilRound(ctx.roundIndex()+Math.max(1,row.getDurationRounds())+1);
+                    if (success) {
+                        receiver.state().setFled(true).setWithdrawUntilRound(ctx.roundIndex()+Math.max(1,row.getDurationRounds())+1);
+                        battle.resetVolatileGrowingStacks(receiver);
+                    }
                 }
                 default -> { }
             }
@@ -124,14 +127,26 @@ final class ConfiguredEffects {
             previous = entry;
             break;
         }
-        if (hostile && op == CONTROL && row.getStateKind() >= 1 && row.getStateKind() <= 6) {
-            if (battle.tryConsumeControlImmunity(source, receiver, row)) return false;
+        boolean hostileActionControl = hostile && op == CONTROL && row.getStateKind() >= 1 && row.getStateKind() <= 6;
+        if (hostileActionControl) {
+            if (battle.tryConsumeControlImmunity(source, receiver, row)) {
+                battle.trigger(receiver, source, AFTER_CONTROL_ATTEMPT, 0, hit);
+                return false;
+            }
         }
         if (hostile && row.getStateKind() >= 1 && row.getStateKind() <= 7 && (op == CONTROL || op == PERIODIC)) {
-            if (!battle.equipment.controlRoll(source,receiver,row,hit)) return false;
+            if (!battle.equipment.controlRoll(source,receiver,row,hit)) {
+                if (hostileActionControl) {
+                    battle.trigger(receiver, source, AFTER_CONTROL_ATTEMPT, 0, hit);
+                }
+                return false;
+            }
         } else if (hostile && row.getApplicationChance() > 0 && row.getApplicationChance() < 1 && ctx.rng().rand01() >= row.getApplicationChance()) {
             ctx.events().append(BATTLE_EVENT_RESIST,source.actorId(),receiver.actorId()).setBuffTableId(id);
             return false;
+        }
+        if (hostileActionControl) {
+            battle.trigger(receiver, source, AFTER_CONTROL_ATTEMPT, 0, hit);
         }
         if (previous != null) battle.remove(receiver,previous.getBuffId());
         long instance = battle.legacy.nextInstance();

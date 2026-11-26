@@ -9,7 +9,14 @@ import com.game.proto.AppearanceStateNotify;
 import com.game.proto.CancelAppearanceTrialResponse;
 import com.game.proto.CharacterAppearanceEntry;
 import com.game.proto.CharacterAppearanceSeriesProgress;
+import com.game.proto.EquipPetCosmeticRequest;
+import com.game.proto.EquipPetCosmeticResponse;
+import com.game.proto.EquipSkillVfxRequest;
+import com.game.proto.EquipSkillVfxResponse;
+import com.game.proto.PetCosmeticEntry;
+import com.game.proto.PetEquippedCosmetic;
 import com.game.proto.PlayerAppearanceInfo;
+import com.game.proto.SkillVfxCosmeticEntry;
 import com.game.proto.StartAppearanceTrialRequest;
 import com.game.proto.StartAppearanceTrialResponse;
 import com.game.proto.SwitchAppearanceRequest;
@@ -18,6 +25,7 @@ import com.game.scene.audit.AssetAudit;
 import com.game.scene.bag.BagService;
 import com.game.scene.player.BagType;
 import com.game.scene.player.PlayerAppearance;
+import com.game.scene.player.PlayerPets;
 import com.game.scene.world.SceneClock;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
@@ -50,6 +58,7 @@ public final class AppearanceService {
     public static final int APPEARANCE_NOT_CARD_UNLOCKABLE = AppearanceErrorTip.appearance_error.kAppearanceNotCardUnlockable_VALUE;
     public static final int APPEARANCE_ALREADY_OWNED = AppearanceErrorTip.appearance_error.kAppearanceAlreadyOwned_VALUE;
     public static final int APPEARANCE_NOT_OWNED = AppearanceErrorTip.appearance_error.kAppearanceNotOwned_VALUE;
+    public static final int PET_NOT_FOUND = com.game.table.PetErrorTip.pet_error.kPetNotFound_VALUE;
 
     private final AppearanceTables tables;
     private final BagService bags;
@@ -120,7 +129,9 @@ public final class AppearanceService {
                 .setMallSkuId(rule.mallSkuId())
                 .setMallPriceFen(rule.mallPriceFen())
                 .setTrialUsedBits(ByteString.copyFrom(appearance.trialUsedBitsCopy()))
-                .setOwnedBits(ByteString.copyFrom(ownedBits));
+                .setOwnedBits(ByteString.copyFrom(ownedBits))
+                .setPetCosmeticOwnedBits(ByteString.copyFrom(appearance.petCosmeticOwnedBitsCopy()))
+                .setSkillVfxOwnedBits(ByteString.copyFrom(appearance.skillVfxOwnedBitsCopy()));
         if (trialActive) {
             info.setTrialAppearanceId(appearance.trialAppearanceId())
                     .setTrialExpiresAt(appearance.trialExpiresAt());
@@ -164,7 +175,70 @@ public final class AppearanceService {
                 info.addSeriesProgress(progress.build());
             }
         }
+        for (AppearanceTables.PetCosmetic petCosmetic : tables.enabledPetCosmetics()) {
+            info.addPetCosmetics(PetCosmeticEntry.newBuilder()
+                    .setConfigId(petCosmetic.configId())
+                    .setCosmeticKey(petCosmetic.cosmeticKey())
+                    .setName(petCosmetic.name())
+                    .setTargetPetTableId(petCosmetic.targetPetTableId())
+                    .setVisualPetTableId(petCosmetic.visualPetTableId())
+                    .setVisualArtKey(petCosmetic.visualArtKey())
+                    .setSortOrder(petCosmetic.sortOrder())
+                    .setOwned(appearance.isPetCosmeticOwned(petCosmetic.bitIndex()))
+                    .setMallSkuId(petCosmetic.mallSkuId())
+                    .setAcquireHint(petCosmetic.acquireHint())
+                    .setDesc(petCosmetic.desc())
+                    .build());
+        }
+        for (PlayerPets.Pet pet : player.pets().pets()) {
+            int cosmeticId = resolveEffectivePetCosmeticId(player, pet);
+            if (cosmeticId != 0) {
+                info.addEquippedPetCosmetics(PetEquippedCosmetic.newBuilder()
+                        .setPetId(pet.petId())
+                        .setCosmeticId(cosmeticId)
+                        .build());
+            }
+        }
+        for (AppearanceTables.SkillVfxCosmetic skillVfx : tables.enabledSkillVfxCosmetics()) {
+            info.addSkillVfxCosmetics(SkillVfxCosmeticEntry.newBuilder()
+                    .setConfigId(skillVfx.configId())
+                    .setVfxKey(skillVfx.vfxKey())
+                    .setName(skillVfx.name())
+                    .setSkillTableId(skillVfx.skillTableId())
+                    .setFxId(skillVfx.fxId())
+                    .setProjectileFxId(skillVfx.projectileFxId())
+                    .setTelegraphFxId(skillVfx.telegraphFxId())
+                    .setTintHex(skillVfx.tintHex())
+                    .setSortOrder(skillVfx.sortOrder())
+                    .setOwned(appearance.isSkillVfxOwned(skillVfx.bitIndex()))
+                    .setMallSkuId(skillVfx.mallSkuId())
+                    .setAcquireHint(skillVfx.acquireHint())
+                    .setDesc(skillVfx.desc())
+                    .build());
+        }
+        appearance.equippedSkillVfxView().forEach((skillId, cosmeticId) -> {
+            AppearanceTables.SkillVfxCosmetic entry = tables.findEnabledSkillVfxCosmetic(cosmeticId);
+            if (entry != null && entry.skillTableId() == skillId
+                    && appearance.isSkillVfxOwned(entry.bitIndex())) {
+                info.putEquippedSkillVfx(skillId, cosmeticId);
+            }
+        });
         return info.build();
+    }
+
+    private int resolveEffectivePetCosmeticId(ScenePlayer player, PlayerPets.Pet pet) {
+        int cosmeticId = pet.cosmeticId();
+        if (cosmeticId <= 0) {
+            return 0;
+        }
+        AppearanceTables.PetCosmetic entry = tables.findEnabledPetCosmetic(cosmeticId);
+        if (entry == null || !player.appearance().isPetCosmeticOwned(entry.bitIndex())) {
+            return 0;
+        }
+        if (entry.targetPetTableId() != 0 && entry.targetPetTableId() != pet.petTableId()) {
+            return 0;
+        }
+        return cosmeticId;
     }
 
     public SwitchAppearanceResponse switchAppearance(SceneWorld world, ScenePlayer player, SwitchAppearanceRequest request) {
@@ -270,6 +344,134 @@ public final class AppearanceService {
         log.info("[PlayerAppearance] metric=appearance_granted player_id={} appearance_id={} config_id={}",
                 Long.toUnsignedString(player.playerId()), targetAppearanceId, entry.configId());
         return 0;
+    }
+
+    /** 服务端内部权威授形入口（灵宠幻化）：置位永久拥有位图并推衣柜快照，绝不自动替玩家穿戴。 */
+    public int grantPetCosmetic(SceneWorld world, ScenePlayer player, int cosmeticId) {
+        if (player.frozen()) {
+            return APPEARANCE_FROZEN;
+        }
+        AppearanceTables.PetCosmetic entry = tables.findEnabledPetCosmetic(cosmeticId);
+        if (entry == null) {
+            return APPEARANCE_INVALID;
+        }
+        if (player.appearance().isPetCosmeticOwned(entry.bitIndex())) {
+            return 0;
+        }
+        player.appearance().markPetCosmeticOwned(entry.bitIndex());
+        long nowSec = nowSeconds();
+        if (world != null) {
+            world.requestSave(player);
+            world.sendTo(player, push(notifyAppearanceStateId, AppearanceStateNotify.newBuilder()
+                    .setInfo(buildInfo(player, nowSec))
+                    .setTrialExpired(false)
+                    .build()));
+        }
+        log.info("[PlayerAppearance] metric=pet_cosmetic_granted player_id={} cosmetic_id={}",
+                Long.toUnsignedString(player.playerId()), cosmeticId);
+        return 0;
+    }
+
+    /** 服务端内部权威授形入口（技能特效）：置位永久拥有位图并推衣柜快照，绝不自动替玩家启用。 */
+    public int grantSkillVfx(SceneWorld world, ScenePlayer player, int cosmeticId) {
+        if (player.frozen()) {
+            return APPEARANCE_FROZEN;
+        }
+        AppearanceTables.SkillVfxCosmetic entry = tables.findEnabledSkillVfxCosmetic(cosmeticId);
+        if (entry == null) {
+            return APPEARANCE_INVALID;
+        }
+        if (player.appearance().isSkillVfxOwned(entry.bitIndex())) {
+            return 0;
+        }
+        player.appearance().markSkillVfxOwned(entry.bitIndex());
+        long nowSec = nowSeconds();
+        if (world != null) {
+            world.requestSave(player);
+            world.sendTo(player, push(notifyAppearanceStateId, AppearanceStateNotify.newBuilder()
+                    .setInfo(buildInfo(player, nowSec))
+                    .setTrialExpired(false)
+                    .build()));
+        }
+        log.info("[PlayerAppearance] metric=skill_vfx_granted player_id={} cosmetic_id={}",
+                Long.toUnsignedString(player.playerId()), cosmeticId);
+        return 0;
+    }
+
+    public EquipPetCosmeticResponse equipPetCosmetic(SceneWorld world, ScenePlayer player, EquipPetCosmeticRequest request) {
+        long nowSec = nowSeconds();
+        if (request.getClientRequestId() == 0 || request.getPetId() == 0) {
+            return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER)).build();
+        }
+        if (player.frozen()) {
+            return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_FROZEN)).build();
+        }
+        PlayerPets.Pet pet = player.pets().find(request.getPetId());
+        if (pet == null) {
+            return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(PET_NOT_FOUND)).build();
+        }
+        int cosmeticId = request.getCosmeticId();
+        if (cosmeticId != 0) {
+            AppearanceTables.PetCosmetic entry = tables.findEnabledPetCosmetic(cosmeticId);
+            if (entry == null) {
+                return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_INVALID)).build();
+            }
+            if (entry.targetPetTableId() != 0 && entry.targetPetTableId() != pet.petTableId()) {
+                return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_INVALID)).build();
+            }
+            if (!player.appearance().isPetCosmeticOwned(entry.bitIndex())) {
+                return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_OWNED)).build();
+            }
+        }
+        if (pet.cosmeticId() != cosmeticId) {
+            pet.setCosmeticId(cosmeticId);
+            if (world != null) {
+                world.requestSave(player);
+            }
+            log.info("[PlayerAppearance] metric=pet_cosmetic_updated player_id={} pet_id={} cosmetic_id={}",
+                    Long.toUnsignedString(player.playerId()), Long.toUnsignedString(pet.petId()), cosmeticId);
+        }
+        return EquipPetCosmeticResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setInfo(buildInfo(player, nowSec))
+                .setPetId(pet.petId())
+                .setEquippedCosmeticId(cosmeticId)
+                .build();
+    }
+
+    public EquipSkillVfxResponse equipSkillVfx(SceneWorld world, ScenePlayer player, EquipSkillVfxRequest request) {
+        long nowSec = nowSeconds();
+        if (request.getClientRequestId() == 0 || request.getSkillTableId() == 0) {
+            return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER)).build();
+        }
+        if (player.frozen()) {
+            return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(APPEARANCE_FROZEN)).build();
+        }
+        int skillTableId = request.getSkillTableId();
+        int cosmeticId = request.getCosmeticId();
+        if (cosmeticId != 0) {
+            AppearanceTables.SkillVfxCosmetic entry = tables.findEnabledSkillVfxCosmetic(cosmeticId);
+            if (entry == null || entry.skillTableId() != skillTableId) {
+                return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(APPEARANCE_INVALID)).build();
+            }
+            if (!player.appearance().isSkillVfxOwned(entry.bitIndex())) {
+                return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_OWNED)).build();
+            }
+        }
+        if (player.appearance().equippedSkillVfx(skillTableId) != cosmeticId) {
+            player.appearance().setEquippedSkillVfx(skillTableId, cosmeticId);
+            if (world != null) {
+                world.requestSave(player);
+            }
+            log.info("[PlayerAppearance] metric=skill_vfx_updated player_id={} skill_table_id={} cosmetic_id={}",
+                    Long.toUnsignedString(player.playerId()), Integer.toUnsignedString(skillTableId), cosmeticId);
+        }
+        return EquipSkillVfxResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setInfo(buildInfo(player, nowSec))
+                .setSkillTableId(skillTableId)
+                .setEquippedCosmeticId(cosmeticId)
+                .build();
     }
 
     public StartAppearanceTrialResponse startTrial(SceneWorld world, ScenePlayer player, StartAppearanceTrialRequest request) {

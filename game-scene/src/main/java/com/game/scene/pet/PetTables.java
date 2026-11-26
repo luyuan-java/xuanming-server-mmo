@@ -6,6 +6,7 @@ import com.game.table.AttributeAutoPlanTable;
 import com.game.table.AttributeDimensionTable;
 import com.game.table.AttributePoolTable;
 import com.game.table.ConfigTables;
+import com.game.table.PetCosmeticTable;
 import com.game.table.PetRuleTable;
 import com.game.table.PetTable;
 import com.game.table.PetEntryTable;
@@ -39,9 +40,11 @@ public final class PetTables {
     private final AttributeAutoPlanTable autoPlan;
     private final List<PetEntryTable> entries;
     private final List<PetTierTable> tiers;
+    private final Map<Integer, PetCosmeticTable> petCosmetics;
     final ClassSkillCatalog skills;
     List<PetEntryTable> entries() { return entries; }
     PetTierTable tier(int id) { return tiers.stream().filter(t -> t.getId() == id).findFirst().orElse(null); }
+    PetCosmeticTable petCosmetic(int id) { return petCosmetics.get(id); }
     int entryVersion() { return rule == null ? 0 : rule.getEntryConfigVersion(); }
     long entryBudget() { return rule == null ? 0 : Integer.toUnsignedLong(rule.getEntryTotalPoints()); }
     long entryDirections() { return rule == null ? 0 : Integer.toUnsignedLong(rule.getEntryMaxDirections()); }
@@ -49,14 +52,16 @@ public final class PetTables {
 
     PetTables(Map<Integer, PetTable> pets, PetRuleTable rule, AttributePoolTable pool,
               List<AttributeDimensionTable> dimensions, AttributeAutoPlanTable autoPlan) {
-        this(pets, rule, pool, dimensions, autoPlan, List.of(), List.of(),
+        this(pets, rule, pool, dimensions, autoPlan, List.of(), List.of(), Map.of(),
                 ClassSkillCatalog.generic(pets.values().stream().flatMap(p -> p.getSkillList().stream()).toList()));
     }
     private PetTables(Map<Integer, PetTable> pets, PetRuleTable rule, AttributePoolTable pool,
                       List<AttributeDimensionTable> dimensions, AttributeAutoPlanTable autoPlan,
-                      List<PetEntryTable> entries, List<PetTierTable> tiers, ClassSkillCatalog skills) {
+                      List<PetEntryTable> entries, List<PetTierTable> tiers,
+                      Map<Integer, PetCosmeticTable> petCosmetics, ClassSkillCatalog skills) {
         this.skills = skills;
         this.entries = List.copyOf(entries); this.tiers = List.copyOf(tiers);
+        this.petCosmetics = Map.copyOf(petCosmetics);
         this.pets = Map.copyOf(pets);
         this.rule = rule;
         this.pool = pool;
@@ -68,6 +73,12 @@ public final class PetTables {
         Map<Integer, PetTable> pets = new HashMap<>();
         for (PetTable row : tables.pet().all()) {
             pets.put(row.getId(), row);
+        }
+        Map<Integer, PetCosmeticTable> cosmetics = new HashMap<>();
+        for (PetCosmeticTable row : tables.petCosmetic().all()) {
+            if (row.getEnabled() != 0 && row.getId() > 0) {
+                cosmetics.put(row.getId(), row);
+            }
         }
         List<PetRuleTable> rules = tables.petRule().all();
         AttributePoolTable pool = null;
@@ -91,7 +102,7 @@ public final class PetTables {
             }
         }
         return new PetTables(pets, rules.isEmpty() ? null : rules.get(0), pool, dimensions, plan,
-                tables.petEntry().all(), tables.petTier().all(), ClassSkillCatalog.from(tables));
+                tables.petEntry().all(), tables.petTier().all(), cosmetics, ClassSkillCatalog.from(tables));
     }
 
     /** 种类行；表里没有为 null。 */

@@ -476,6 +476,14 @@ public final class PetService {
             info.setQuality(row.getQuality()).setModelId(row.getModelId()).setDesc(row.getDesc());
             info.addAllSkillTableIds(tables.skills.petSkills(pet, row).keySet());
         }
+        int resolvedCosmeticId = resolvePetCosmeticId(player, pet);
+        if (resolvedCosmeticId != 0) {
+            var cosmetic = tables.petCosmetic(resolvedCosmeticId);
+            info.setCosmeticId(resolvedCosmeticId);
+            if (cosmetic != null && !cosmetic.getVisualArtKey().isEmpty()) {
+                info.setCosmeticArtKey(cosmetic.getVisualArtKey());
+            }
+        }
         long total = AttributeRules.totalPoints(tables.poolRule(), pet.level(), 0);
         long used = usedPoints(pet);
         info.setTotalPoints((int) total)
@@ -506,6 +514,21 @@ public final class PetService {
         }
         derivedInfo.setHealth(pet.health()).setMana(pet.mana());
         return info.setDerived(derivedInfo).build();
+    }
+
+    private int resolvePetCosmeticId(ScenePlayer player, Pet pet) {
+        int cosmeticId = pet.cosmeticId();
+        if (cosmeticId <= 0) {
+            return 0;
+        }
+        var cosmetic = tables.petCosmetic(cosmeticId);
+        if (cosmetic == null || !player.appearance().isPetCosmeticOwned(cosmeticId - 1)) {
+            return 0;
+        }
+        if (cosmetic.getTargetPetTableId() != 0 && cosmetic.getTargetPetTableId() != pet.petTableId()) {
+            return 0;
+        }
+        return cosmeticId;
     }
 
     private void fillTierAscension(ScenePlayer player, Pet pet, PetTable species, PetInfo.Builder info) {
@@ -1066,6 +1089,14 @@ public final class PetService {
                 .setMagicAttack(derived.magicAttack())
                 .setDefense(derived.defense());
         if (PetEntries.enabled(tables)) snapshot.setPetCultivation(PetEntries.info(tables, pet).getEffects());
+        int resolvedCosmeticId = resolvePetCosmeticId(player, pet);
+        if (resolvedCosmeticId != 0) {
+            var cosmetic = tables.petCosmetic(resolvedCosmeticId);
+            snapshot.setCosmeticId(resolvedCosmeticId);
+            if (cosmetic != null && !cosmetic.getVisualArtKey().isEmpty()) {
+                snapshot.setCosmeticArtKey(cosmetic.getVisualArtKey());
+            }
+        }
         tables.skills.petSkills(pet, row).forEach((id, rank) -> {
             var skill = tables.skills.row(id);
             if (BattleRules.isTurnBattleCastableSkill(skill)) snapshot.addSkillTableIds(id);

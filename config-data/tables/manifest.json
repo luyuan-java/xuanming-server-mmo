@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
-  "schema_digest": "af570e9ed72da480",
-  "version": 77,
-  "content_digest": "93e3bb901df7c8c5cd5f0b5aa6ee697e4a92f16b3b5b2994bc6d032c1f228280",
-  "generated_at": "2026-11-26T03:55:07Z",
+  "schema_digest": "194fb8bba93c9b8d",
+  "version": 82,
+  "content_digest": "ad921bdbc8114dc551bfe40b39ea0577359a80abda27d6ee7563690556bd570a",
+  "generated_at": "2026-11-26T07:22:29Z",
   "source_rev": {
-    "commit": "0f9bc81d68f0af285497d6ffc5cea8a87c5c5fc9",
+    "commit": "0ff72b1e49bdf4a5027a4866ef7b011918863624",
     "data_dirty": true
   },
-  "table_count": 78,
+  "table_count": 81,
   "tables": [
     {
       "name": "ActivitySchedule",
@@ -361,27 +361,77 @@
       ]
     },
     {
+      "name": "BattleProgressionReward",
+      "hot_reload": true,
+      "ids_permanent": false,
+      "rows": 20,
+      "source": {
+        "file": "BattleProgressionReward.xlsx",
+        "size": 5659,
+        "sha256": "dd4c08703ce7a4e492d1917e2891b5b485ae5eeffad9dec794e60ba20fe6d5e8"
+      },
+      "artifacts": [
+        {
+          "kind": "json",
+          "file": "battleprogressionreward.json",
+          "size": 2544,
+          "sha256": "b633bcf3d18a312ac49ad857982cba2d22e2e7f0ca648e552049e8548b48e15d"
+        },
+        {
+          "kind": "binary",
+          "file": "battleprogressionreward.pb",
+          "size": 279,
+          "sha256": "2c497d742070aae9d194e83c599e1273dd5ad3f0046214ed7036d9d03ebdb276"
+        }
+      ]
+    },
+    {
+      "name": "BattleProgressionRule",
+      "hot_reload": true,
+      "ids_permanent": false,
+      "rows": 1,
+      "source": {
+        "file": "BattleProgressionRule.xlsx",
+        "size": 5099,
+        "sha256": "dcf90a3fec7f973468f0db7ac4b876d9c8a0b8ab4ecc45c04217829a64e288ce"
+      },
+      "artifacts": [
+        {
+          "kind": "json",
+          "file": "battleprogressionrule.json",
+          "size": 146,
+          "sha256": "6eb07dc5898ce3910c25d9c28fe9d126f42156bafaf045d5e8b88357dd25b1af"
+        },
+        {
+          "kind": "binary",
+          "file": "battleprogressionrule.pb",
+          "size": 15,
+          "sha256": "1e8a2a04f56aeaf7970bfe4b8e35639c3d9f431a598476b423ed8d568b18973b"
+        }
+      ]
+    },
+    {
       "name": "Buff",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 128,
+      "rows": 134,
       "source": {
         "file": "Buff.xlsx",
-        "size": 13449,
-        "sha256": "a622744785e336ecb2c0a1202729bd8b7b70b11969c02c00e4fd9b03ec9b2a29"
+        "size": 13990,
+        "sha256": "044d3eb2239ceb35ed25ee96d4f1a1290e7c465780e5eb6ac803daa242932454"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "buff.json",
-          "size": 33458,
-          "sha256": "345c974265002c203cf2d8150cf6a7344c5c4dd8a842362b62d81354e16f3e83"
+          "size": 35720,
+          "sha256": "2bd12a2293fa90432822009c9207e98fe17bc82af3dffca2a516cea9c72db355"
         },
         {
           "kind": "binary",
           "file": "buff.pb",
-          "size": 6226,
-          "sha256": "124d3399f96d1a718c2fd669297c9a22680c67e64de139fb7e1983a7de2a88d2"
+          "size": 6535,
+          "sha256": "6be4749038ee87a125cf7a774e43a25ab6c0677f66db0d77a67f086c5868ce24"
         }
       ]
     },
@@ -489,24 +539,24 @@
       "name": "Dungeon",
       "hot_reload": false,
       "ids_permanent": false,
-      "rows": 17,
+      "rows": 20,
       "source": {
         "file": "Dungeon.xlsx",
-        "size": 5986,
-        "sha256": "57e173235feb68360e3264b08f20213a21d18deb7b5c05d806ceaa7da798fa01"
+        "size": 6115,
+        "sha256": "a663091576c381e8a2c740f500c05b1188bb8886aa2624bf17f42162abf8e01c"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "dungeon.json",
-          "size": 3644,
-          "sha256": "9fa26c24b5a188247fb7c73160d23d525463d0e22e69e258435b4d8fc560e2f1"
+          "size": 4325,
+          "sha256": "73d8031ae1deb08d6ff889d31cb3a4b511c4da7d11cfd13b2afca1e057defacf"
         },
         {
           "kind": "binary",
           "file": "dungeon.pb",
-          "size": 322,
-          "sha256": "c5f48528733220ce64b965af993034d25dadb8cf021e65382e254d90e01cf599"
+          "size": 394,
+          "sha256": "46d111c30fd62ca7d3163583b2c31be990412ab08827d24c5e0a0c1a9ec5cd0d"
         }
       ]
     },
@@ -964,24 +1014,24 @@
       "name": "GuildShop",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 16,
+      "rows": 17,
       "source": {
         "file": "GuildShop.xlsx",
-        "size": 6245,
-        "sha256": "dbeff1e19e15df06f10cae20040e1658307fc95fb8103edb0533eb427fbf1274"
+        "size": 6298,
+        "sha256": "ee6ba92226c3c510356daff52471d43088eecd52af673d3b413d4244e6c272f5"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "guildshop.json",
-          "size": 3342,
-          "sha256": "f036db0a0c15a9fea047cf67f9a38e615f1571a1341f2a735ab700de4fcb9293"
+          "size": 3552,
+          "sha256": "94d5f0dde2d83638d8cbb42cf5540ce27045f71a72c50b4f035300182a8effcc"
         },
         {
           "kind": "binary",
           "file": "guildshop.pb",
-          "size": 532,
-          "sha256": "5b796cdd4ef9f6cc01e0d81954578c88aa0b464a5a4073ba48b3ac754dc97e6a"
+          "size": 567,
+          "sha256": "f2217aeb74b0a5cdd5e46c125b5bfaab70689444d4f08be674ea9e4ad225cd5c"
         }
       ]
     },
@@ -992,21 +1042,21 @@
       "rows": 4,
       "source": {
         "file": "GuildWarMilestone.xlsx",
-        "size": 5374,
-        "sha256": "8f5e3cee96fef7649df60ef8f949459dd05050657c250faf5968ad1a23d1eba1"
+        "size": 5390,
+        "sha256": "866cdb1bafd07589baae5a5c164f7f47b0f7bd1ec6d9b527013481a88a838142"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "guildwarmilestone.json",
-          "size": 1179,
-          "sha256": "505df67d644a73332e0b4615fb1224d49e375146602bb11d3c9b73b419be485d"
+          "size": 1182,
+          "sha256": "ad22132f2616322e13329e74ef850858b78f5bbfefc8adf4a8f7f0360ed2b06c"
         },
         {
           "kind": "binary",
           "file": "guildwarmilestone.pb",
-          "size": 272,
-          "sha256": "3a466c7881758e2b1271673102ee2675c7bd086840b392cacf61a20335b87bc1"
+          "size": 275,
+          "sha256": "31e72b5f9e6a43ab148b843fa90a0ce9c34ac8320ef66092113dbc446bd93169"
         }
       ]
     },
@@ -1139,24 +1189,24 @@
       "name": "Monster",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 26,
+      "rows": 35,
       "source": {
         "file": "Monster.xlsx",
-        "size": 6755,
-        "sha256": "690e95113750c2685f30bca77c7bc0d08c7f418f31d6de578202922ace19f171"
+        "size": 7368,
+        "sha256": "59dc3e947372759c5454a5e9fb6920e0ee99370f7c61af4442a6e5d7efd9eb1b"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "monster.json",
-          "size": 6746,
-          "sha256": "7ef9432ebb57dd0a88068cfd77c38a6e03eadac4197e4cd20333fa73e469c78d"
+          "size": 10021,
+          "sha256": "b67e11d9c598e28c632b85455c20ab1fcd720a0d40fa9544ffa3ee53a5d611e7"
         },
         {
           "kind": "binary",
           "file": "monster.pb",
-          "size": 653,
-          "sha256": "93ffb12640955fac0ceb94a0ae00fc2bd5f637dd13162466165a8e65c92f12c4"
+          "size": 988,
+          "sha256": "5b0a8f8189ff2e9fd872c25bd833bfabe369d95a5fcae27d6b611ba8950e0a3a"
         }
       ]
     },
@@ -1214,24 +1264,24 @@
       "name": "MysteryMerchantSpot",
       "hot_reload": false,
       "ids_permanent": false,
-      "rows": 12,
+      "rows": 15,
       "source": {
         "file": "MysteryMerchantSpot.xlsx",
-        "size": 5731,
-        "sha256": "0914a78da807d4be4b0004ddc46d7a38dae4a7f9baeac1e5cddf39541081669e"
+        "size": 5899,
+        "sha256": "ae61c1264f0b68f4bd2e8441f8620d2319847d2c777c139a306120a1be29a09e"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "mysterymerchantspot.json",
-          "size": 1918,
-          "sha256": "a41323d6e696ebc3fbdf9eab7e720404d7d917afc0f1816dfd5653ef1e3c3852"
+          "size": 2368,
+          "sha256": "a1d73684dfdc8f9f072fd53088e10b6de94dd13853824b7934b331b9c5943d02"
         },
         {
           "kind": "binary",
           "file": "mysterymerchantspot.pb",
-          "size": 923,
-          "sha256": "eb107c831339ff700cde211905227bd59cebc205863b6075bb092cdca0bd7211"
+          "size": 1124,
+          "sha256": "34330038ff69278fe27daf9b5ee2802d8ed9dd5cea14bda65eee2e8a65d2e7ee"
         }
       ]
     },
@@ -1364,24 +1414,49 @@
       "name": "PlayMode",
       "hot_reload": false,
       "ids_permanent": false,
-      "rows": 28,
+      "rows": 31,
       "source": {
         "file": "PlayMode.xlsx",
-        "size": 6124,
-        "sha256": "aee8a6c43d690adbf4586346bdfef38c22966396b8df5343dedac11d4984477a"
+        "size": 6192,
+        "sha256": "1d868a55d16b09af689cf6484f6146c567361e082cc8ec5c9cd3728e4fd395f8"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "playmode.json",
-          "size": 3198,
-          "sha256": "31cec82d060eac2b7fa70686f0cbc9ba378c74fbe405f9d775c21e0e2ee0d3f2"
+          "size": 3537,
+          "sha256": "534b0612c4ee0e930e5a5113c12cea1b8749a56e8031f49bcbb3ae8f06bc570c"
         },
         {
           "kind": "binary",
           "file": "playmode.pb",
-          "size": 341,
-          "sha256": "e5ec0f336462578e2341eff998aee87920860815c88757cb59e011108bffaae3"
+          "size": 383,
+          "sha256": "0d605f0d279aac4d3d3ed580bde2934c7cb4059f24217b4e6a0d99b09ed167f7"
+        }
+      ]
+    },
+    {
+      "name": "PlayerLevelExp",
+      "hot_reload": true,
+      "ids_permanent": false,
+      "rows": 85,
+      "source": {
+        "file": "PlayerLevelExp.xlsx",
+        "size": 6144,
+        "sha256": "3d3b6ed1490e784c01b5b192b26d25fbb79fec366d42916622b2f03743cc982a"
+      },
+      "artifacts": [
+        {
+          "kind": "json",
+          "file": "playerlevelexp.json",
+          "size": 4507,
+          "sha256": "f9631ed55f707d9bd2bb6b442bcc70c77be3aedd18b5fbe1984590c5a19f1290"
+        },
+        {
+          "kind": "binary",
+          "file": "playerlevelexp.pb",
+          "size": 651,
+          "sha256": "d7bfd99db1bd098df44ae58a56f7b6fca654504a0d642b4531d999ab7179e287"
         }
       ]
     },
@@ -1539,24 +1614,24 @@
       "name": "Skill",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 143,
+      "rows": 149,
       "source": {
         "file": "Skill.xlsx",
-        "size": 30334,
-        "sha256": "f9ba53deac96702d3584d7a6557498de95407c805c7987afe0ceb1ee3b117599"
+        "size": 31301,
+        "sha256": "13195366195a4fec000dbddbf7b6caa9633c0ad34016dd084cf73db952dec69b"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "skill.json",
-          "size": 141639,
-          "sha256": "62ed5bc14208b070401d42bee3f34602236d5746bfd4e6a27ee60f30359024be"
+          "size": 146387,
+          "sha256": "8ce3dbef65c53164b2093bce4d86a47ad4c25a9097bd4f18d0b43402b813b374"
         },
         {
           "kind": "binary",
           "file": "skill.pb",
-          "size": 28505,
-          "sha256": "4f7a7fdb9c1e7303be49c37ed9c1ede125b6e1839cd904f7b8395ecaec50bf38"
+          "size": 30685,
+          "sha256": "da62b4572743a5ad74c72ab9b663a18523b31ddc72132a7bbccb778c46a7d265"
         }
       ]
     },
@@ -1589,24 +1664,24 @@
       "name": "SkillScrollCraft",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 6,
+      "rows": 7,
       "source": {
         "file": "SkillScrollCraft.xlsx",
-        "size": 6157,
-        "sha256": "6a678dafe2cbe0c66f0701240497359a09299306e423ad799a1c6ac73590fa0c"
+        "size": 6340,
+        "sha256": "6a76cc90ea57508db1bab8fadec19124757d0dfe423c8da5a96731dc0d9f8cfe"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "skillscrollcraft.json",
-          "size": 3369,
-          "sha256": "f0e0ee61b4999b520b258f9102cd05691f298963e56a5f941d0239f2140a3814"
+          "size": 4024,
+          "sha256": "defeec5e4e7d3199dcae0b326afad51b1b7dd323defd365996a59f0be1add3cf"
         },
         {
           "kind": "binary",
           "file": "skillscrollcraft.pb",
-          "size": 1039,
-          "sha256": "c837619ca49ce7ebb06dd15e590f504d863a87e21b9d17e679b6fb0231886074"
+          "size": 1308,
+          "sha256": "1b14be5c85fbb47ba38c886a2fafd02756dd80e913808f4a681c6437cc051686"
         }
       ]
     },
@@ -1742,21 +1817,21 @@
       "rows": 9,
       "source": {
         "file": "TournamentReward.xlsx",
-        "size": 6472,
-        "sha256": "cdec96dc0accb2ef6bdccaeeae74dca2ca6a1e225d76ac31a1e75e7e9bfea8af"
+        "size": 6525,
+        "sha256": "5d044352bab0b4f8d4374bc88664d3c448ac947bd265bf4cd4f514e1fc3d3a19"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "tournamentreward.json",
-          "size": 4382,
-          "sha256": "364be86292f7f320fb22473437999545a5c4288d5e1e877a2d7b635a0df79b1d"
+          "size": 4484,
+          "sha256": "512ddb8b040db2f4a3d0c1d0c0ed20323abeaf865fcd4c60bca0eec5fde46d4e"
         },
         {
           "kind": "binary",
           "file": "tournamentreward.pb",
-          "size": 2123,
-          "sha256": "eddb30aa52358b54dd7d034bd4dc506a42e72be8886a9029b140c23aea300c3c"
+          "size": 2141,
+          "sha256": "bb09936beca5925f08cd1ed75d9e451a0fdc7765e5c02735c90f5a50f6f1c2f7"
         }
       ]
     },
@@ -1767,21 +1842,21 @@
       "rows": 1,
       "source": {
         "file": "TournamentRule.xlsx",
-        "size": 6093,
-        "sha256": "30e9a1c22fb6cbd4d5c40d007e711073d0a9dc8b1bcc2074b9b0994f64a2559a"
+        "size": 6158,
+        "sha256": "8491053ef300ad2a9deb0de671e8605bf5fbeba17816e6292541df5a2deeecca"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "tournamentrule.json",
-          "size": 1050,
-          "sha256": "f59418c49ae10913778d187d92637d55378aacae7ca6b206d6fd1d25a82c210d"
+          "size": 1082,
+          "sha256": "308584fb59d895c560dc8360c40284c783324985f8b4da73aac42eae901e25c6"
         },
         {
           "kind": "binary",
           "file": "tournamentrule.pb",
-          "size": 258,
-          "sha256": "c30356316c34c1eea624b2c8994c2b0318868469be8cbb31fd0ebfcbbd3add38"
+          "size": 261,
+          "sha256": "e3d2cfa9a27ea7a62d0c62c56ec47bc457fe3bd86ca8d12b62acf97ceab08a3e"
         }
       ]
     },

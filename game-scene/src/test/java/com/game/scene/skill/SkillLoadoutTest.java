@@ -232,4 +232,54 @@ class SkillLoadoutTest {
         assertThat(restored.getUnknownFields()).isEqualTo(bookExtra);
         assertThat(restored.getLoadoutSchemes(0).getUnknownFields()).isEqualTo(schemeExtra);
     }
+
+    @Test
+    void 仙途轻享卡扩展战法与属性方案3到6_到期保留已存方案不丢失() {
+        var f = new Fixture();
+        f.service.withClock(f.clock);
+        ScenePlayer player = f.player();
+        player.learnedSkills().setRank(12005, 1);
+        long nowSec = Math.floorDiv(f.clock.epochMillis(), 1000L);
+        player.setAfkPassExpiresAt(0L);
+
+        // 1. 未开通轻享卡：战法与属性上限均为 3；写方案 4 拒绝。
+        var bookFree = ClassSkillService.book(player, 0, false, nowSec);
+        assertThat(bookFree.getLoadout().getUnlockedSchemes()).isEqualTo(3);
+        assertThat(bookFree.getLoadout().getMaxSchemes()).isEqualTo(6);
+        assertThat(bookFree.getLoadout().getSchemesList()).hasSize(3);
+        assertThat(f.attributes.buildPanel(player).getMaxSchemes()).isEqualTo(3);
+
+        var denySave4 = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
+                .setSchemeId(4).setRoleTag(1).addPassiveSkillIds(12005)
+                .setStateVersion(1L).setRequestId("loadout-lc-deny-0001").build());
+        assertThat(denySave4.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutSchemeInvalid_VALUE);
+
+        // 2. 开通轻享卡：战法与属性上限升至 6；可保存并激活方案 4，属性可开第 4 套方案。
+        player.setAfkPassExpiresAt(nowSec + 3600L);
+        var bookActive = ClassSkillService.book(player, 0, false, nowSec);
+        assertThat(bookActive.getLoadout().getUnlockedSchemes()).isEqualTo(6);
+        assertThat(bookActive.getLoadout().getSchemesList()).hasSize(6);
+        assertThat(f.attributes.buildPanel(player).getMaxSchemes()).isEqualTo(6);
+
+        var save4 = f.service.saveLoadout(player, SaveSkillLoadoutRequest.newBuilder()
+                .setSchemeId(4).setRoleTag(1).addPassiveSkillIds(12005)
+                .setStateVersion(1L).setRequestId("loadout-lc-save4-001").build());
+        assertThat(save4.getErrorMessage().getId()).isZero();
+        assertThat(save4.getState().getLoadout().getActiveSchemeId()).isEqualTo(4);
+        assertThat(save4.getState().getLoadout().getUnlockedSchemes()).isEqualTo(6);
+
+        // 3. 轻享卡到期：解锁数回落 3，但已存方案 4 完整保留在快照中；切回方案 1 成功，再切回方案 4 被拒。
+        player.setAfkPassExpiresAt(nowSec - 1L);
+        var bookExpired = ClassSkillService.book(player, 0, false, nowSec);
+        assertThat(bookExpired.getLoadout().getUnlockedSchemes()).isEqualTo(3);
+        assertThat(bookExpired.getLoadout().getSchemesList()).hasSize(4); // 1,2,3 + 保留的 4
+        assertThat(f.attributes.buildPanel(player).getMaxSchemes()).isEqualTo(3);
+
+        var sw1 = f.service.switchLoadout(player, SwitchSkillLoadoutRequest.newBuilder()
+                .setSchemeId(1).setStateVersion(2L).setRequestId("loadout-lc-sw1-00001").build());
+        assertThat(sw1.getErrorMessage().getId()).isZero();
+        var sw4Denied = f.service.switchLoadout(player, SwitchSkillLoadoutRequest.newBuilder()
+                .setSchemeId(4).setStateVersion(3L).setRequestId("loadout-lc-sw4-00001").build());
+        assertThat(sw4Denied.getErrorMessage().getId()).isEqualTo(SkillErrorTip.skill_error.kSkillLoadoutSchemeInvalid_VALUE);
+    }
 }

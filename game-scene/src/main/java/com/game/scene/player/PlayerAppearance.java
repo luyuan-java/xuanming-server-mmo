@@ -28,6 +28,9 @@ public final class PlayerAppearance {
 
     private byte[] ownedBits;
     private byte[] trialUsedBits;
+    private byte[] petCosmeticOwnedBits;
+    private byte[] skillVfxOwnedBits;
+    private final java.util.TreeMap<Integer, Integer> equippedSkillVfx;
     private String trialAppearanceId;
     private long trialExpiresAt;
     private long switchSeq;
@@ -35,11 +38,16 @@ public final class PlayerAppearance {
     private final Map<Long, Receipt> receipts;
     private final UnknownFieldSet unknownFields;
 
-    private PlayerAppearance(byte[] ownedBits, byte[] trialUsedBits, String trialAppearanceId, long trialExpiresAt,
+    private PlayerAppearance(byte[] ownedBits, byte[] trialUsedBits, byte[] petCosmeticOwnedBits,
+                             byte[] skillVfxOwnedBits, java.util.TreeMap<Integer, Integer> equippedSkillVfx,
+                             String trialAppearanceId, long trialExpiresAt,
                              long switchSeq, Map<Long, Receipt> receipts, long nextReceiptSeq,
                              UnknownFieldSet unknownFields) {
         this.ownedBits = ownedBits;
         this.trialUsedBits = trialUsedBits;
+        this.petCosmeticOwnedBits = petCosmeticOwnedBits;
+        this.skillVfxOwnedBits = skillVfxOwnedBits;
+        this.equippedSkillVfx = equippedSkillVfx;
         this.trialAppearanceId = trialAppearanceId == null ? "" : trialAppearanceId;
         this.trialExpiresAt = trialExpiresAt;
         this.switchSeq = switchSeq;
@@ -49,7 +57,9 @@ public final class PlayerAppearance {
     }
 
     public static PlayerAppearance empty() {
-        return new PlayerAppearance(new byte[0], new byte[0], "", 0, 0, new LinkedHashMap<>(), 1, UnknownFieldSet.getDefaultInstance());
+        return new PlayerAppearance(new byte[0], new byte[0], new byte[0], new byte[0],
+                new java.util.TreeMap<>(Integer::compareUnsigned),
+                "", 0, 0, new LinkedHashMap<>(), 1, UnknownFieldSet.getDefaultInstance());
     }
 
     public static PlayerAppearance restore(AppearanceState state) {
@@ -70,9 +80,18 @@ public final class PlayerAppearance {
                 }
             }
         }
+        java.util.TreeMap<Integer, Integer> vfxMap = new java.util.TreeMap<>(Integer::compareUnsigned);
+        state.getEquippedSkillVfxMap().forEach((skillId, cosmeticId) -> {
+            if (skillId != 0 && cosmeticId != 0) {
+                vfxMap.put(skillId, cosmeticId);
+            }
+        });
         return new PlayerAppearance(
                 state.getOwnedBits().toByteArray(),
                 state.getTrialUsedBits().toByteArray(),
+                state.getPetCosmeticOwnedBits().toByteArray(),
+                state.getSkillVfxOwnedBits().toByteArray(),
+                vfxMap,
                 state.getTrialAppearanceId(),
                 state.getTrialExpiresAt(),
                 state.getSwitchSeq(),
@@ -84,6 +103,9 @@ public final class PlayerAppearance {
     public boolean isPristine() {
         return ownedBits.length == 0
                 && trialUsedBits.length == 0
+                && petCosmeticOwnedBits.length == 0
+                && skillVfxOwnedBits.length == 0
+                && equippedSkillVfx.isEmpty()
                 && trialAppearanceId.isEmpty()
                 && trialExpiresAt == 0
                 && switchSeq == 0
@@ -97,6 +119,46 @@ public final class PlayerAppearance {
 
     public byte[] trialUsedBitsCopy() {
         return Arrays.copyOf(trialUsedBits, trialUsedBits.length);
+    }
+
+    public byte[] petCosmeticOwnedBitsCopy() {
+        return Arrays.copyOf(petCosmeticOwnedBits, petCosmeticOwnedBits.length);
+    }
+
+    public byte[] skillVfxOwnedBitsCopy() {
+        return Arrays.copyOf(skillVfxOwnedBits, skillVfxOwnedBits.length);
+    }
+
+    public boolean isPetCosmeticOwned(int bitIndex) {
+        return isBitSet(petCosmeticOwnedBits, bitIndex);
+    }
+
+    public void markPetCosmeticOwned(int bitIndex) {
+        petCosmeticOwnedBits = setBit(petCosmeticOwnedBits, bitIndex);
+    }
+
+    public boolean isSkillVfxOwned(int bitIndex) {
+        return isBitSet(skillVfxOwnedBits, bitIndex);
+    }
+
+    public void markSkillVfxOwned(int bitIndex) {
+        skillVfxOwnedBits = setBit(skillVfxOwnedBits, bitIndex);
+    }
+
+    public Map<Integer, Integer> equippedSkillVfxView() {
+        return java.util.Collections.unmodifiableMap(equippedSkillVfx);
+    }
+
+    public int equippedSkillVfx(int skillTableId) {
+        return equippedSkillVfx.getOrDefault(skillTableId, 0);
+    }
+
+    public void setEquippedSkillVfx(int skillTableId, int cosmeticId) {
+        if (cosmeticId == 0) {
+            equippedSkillVfx.remove(skillTableId);
+        } else {
+            equippedSkillVfx.put(skillTableId, cosmeticId);
+        }
     }
 
     public String trialAppearanceId() {
@@ -200,6 +262,15 @@ public final class PlayerAppearance {
         }
         if (trialUsedBits.length > 0) {
             builder.setTrialUsedBits(ByteString.copyFrom(trialUsedBits));
+        }
+        if (petCosmeticOwnedBits.length > 0) {
+            builder.setPetCosmeticOwnedBits(ByteString.copyFrom(petCosmeticOwnedBits));
+        }
+        if (skillVfxOwnedBits.length > 0) {
+            builder.setSkillVfxOwnedBits(ByteString.copyFrom(skillVfxOwnedBits));
+        }
+        if (!equippedSkillVfx.isEmpty()) {
+            builder.putAllEquippedSkillVfx(equippedSkillVfx);
         }
         if (!trialAppearanceId.isEmpty()) {
             builder.setTrialAppearanceId(trialAppearanceId);

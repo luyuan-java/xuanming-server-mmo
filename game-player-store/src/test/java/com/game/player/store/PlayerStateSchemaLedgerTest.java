@@ -11,9 +11,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** 正常 Maven test/verify 的持久字段门禁；不写台账，不在缺少原件时自动重新建立基线。 */
 class PlayerStateSchemaLedgerTest {
-    // 第一至七代登记技能、宠物回执、宝宝条目与培养阶、角色形象试用/永久衣柜、宝宝技能重数和装备固定词条。第八代追加 ItemGainBlockState 与 ActivityVitalityState；第九代追加近期战斗结果、客户端请求幂等账本与神秘商人限购；第十代追加单槽赛季印与赛季追赶幂等回执；第十一代追加物品绑定、起步首宠、装备品相/保底/宗师署名、两阶段材料总账、近期战果试炼/材料回显、五行试炼志与手艺制书；第十二代追加瑞兽迎春活动进度/领奖/开局意图、近期战果瑞兽进度增量与账号级阶段一可交易配额确认水位；第十三代追加宝宝条目 3 套预设方案与灵阶突破幂等回执、人物战法构筑 3 套装配方案与乐观锁回执；第十四代追加官方灵石百宝阁个人与共享组限购记录；第十五代追加近期战果赛季印结算增量与首次解锁永久零数值纪念称谓标记。
+    // 第一至七代登记技能、宠物回执、宝宝条目与培养阶、角色形象试用/永久衣柜、宝宝技能重数和装备固定词条。第八代追加 ItemGainBlockState 与 ActivityVitalityState；第九代追加近期战斗结果、客户端请求幂等账本与神秘商人限购；第十代追加单槽赛季印与赛季追赶幂等回执；第十一代追加物品绑定、起步首宠、装备品相/保底/宗师署名、两阶段材料总账、近期战果试炼/材料回显、五行试炼志与手艺制书；第十二代追加瑞兽迎春活动进度/领奖/开局意图、近期战果瑞兽进度增量与账号级阶段一可交易配额确认水位；第十三代追加宝宝条目 3 套预设方案与灵阶突破幂等回执、人物战法构筑 3 套装配方案与乐观锁回执；第十四代追加官方灵石百宝阁个人与共享组限购记录；第十五代追加近期战果赛季印结算增量与首次解锁永久零数值纪念称谓标记；第十六代追加近期战果 PVP 延迟投降标记 surrendered；第十七代追加衣柜灵宠幻化/技能特效永久拥有位图与穿戴字段（AppearanceState 7..9、PetEntry 26）；第十八代追加角色累计经验 PlayerProgressionState、全玩法周银两账本 BattleEconomyLedgerState 与近期战果成长字段（BattleResultEntryState 40..46）。
     private static final String GENESIS_SHA256 = "3cd2f18d61634eaabe7d5805df027877451816242bb41ff5aecb704177d7877d";
-    private static final String HEAD_SHA256 = "20541532507d1c8593d6323cee6008ddb7d3aeecb490fe5da01d446a235fa1b1";
+    private static final String HEAD_SHA256 = "231481661e2cc431a138f3308707bb0bb6647f9def38a1ede8fd77e56d1ff99d";
 
     // 仅登记已经存在的领域 restore→修改→toState 未知字段往返证据；protobuf 自己的 parse/serialize 不能替代它。
     private static final Set<String> ALLOW_ADDITIONS = Set.of(
@@ -26,6 +26,7 @@ class PlayerStateSchemaLedgerTest {
             "game.storage.AssetOpRejectionState", // AssetOpLedgerTest：各层记账前后保留。
             "game.storage.AppearanceState", // PlayerAppearanceTest：试用位图、未知高位与未知字段往返保留。
             "game.storage.EquipmentState", // EquipmentServiceTest：拆宝石、跨玩家搬运再存盘保留固定词条及嵌套未知字段。
+            "game.storage.ClientRequestLedgerState", // BattleProgressionParityTest：PlayerClientRequestLedger 恢复与存盘保留未知字段往返。
             "game.storage.ClientRequestRecordState", // PlayerClientRequestLedger：toBuilder 原样保留已有记录及未知字段。
             "game.storage.BagItemState", // CoreGameplayLoopParityTest：BagItem 原样保留未知字段并跨绑定分堆/搬运往返。
             "game.storage.EquipmentFixedAffixState", // CoreGameplayLoopParityTest：EquipmentState 嵌套固定词条保留未知字段往返。
@@ -38,7 +39,7 @@ class PlayerStateSchemaLedgerTest {
         var current = PersistentSchemaSnapshot.capture(PlayerState.getDescriptor());
         int generation = verifyRegisteredSchema(Path.of("src/test/resources/persistent-schema"),
                 GENESIS_SHA256, HEAD_SHA256, current, ALLOW_ADDITIONS);
-        assertThat(generation).isEqualTo(15);
+        assertThat(generation).isEqualTo(18);
     }
 
     /** 已合法退役为不可达的类型仍须保留历史解冻政策，不能只用当前闭包判定策略名有效。 */

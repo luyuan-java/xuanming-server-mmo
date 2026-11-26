@@ -83,6 +83,16 @@ public final class BattleSnapshots {
         if (activeSeasonId != 0) {
             snapshot.setActiveSeasonId(activeSeasonId);
         }
+        player.appearance().equippedSkillVfxView().forEach((skillId, cosmeticId) -> {
+            if (skillId == 0 || cosmeticId <= 0) {
+                return;
+            }
+            var vfx = tables.skillVfxCosmetic(cosmeticId);
+            if (vfx != null && vfx.getSkillTableId() == skillId
+                    && player.appearance().isSkillVfxOwned(cosmeticId - 1)) {
+                snapshot.putEquippedSkillVfx(skillId, cosmeticId);
+            }
+        });
         // 无装备战斗属性时保持旧快照的缺省 presence；消费者按 0 处理。
         if (!attributes.combat().equals(com.game.proto.CombatAttributes.getDefaultInstance())) {
             snapshot.setCombat(attributes.combat());

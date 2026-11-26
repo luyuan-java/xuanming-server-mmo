@@ -80,5 +80,5 @@ message TournamentRuleTable {
   // 四强及以上淘汰赛是否加赛季军争夺战(V3,默认 true)
   bool third_place_match_enabled = 30;
   // BO3 淘汰赛首局开战前是否开启双方队长五行灵脉禁选(V4,默认 true)
-  reserved 31; // leyline_ban_enabled：schema 已声明、本批导表产物里还没有（ContractSync 改写）
+  bool leyline_ban_enabled = 31;
 }

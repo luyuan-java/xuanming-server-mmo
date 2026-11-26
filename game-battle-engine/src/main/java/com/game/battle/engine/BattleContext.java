@@ -409,8 +409,17 @@ final class BattleContext {
     /** 只算暴击前伤害，不落血、不掷骰，供执行路径及后续选择器共用。 */
     double damageBeforeCriticalRoll(BattleUnit caster, BattleUnit target, double baseDamage, long attack,
                                     double attackMultiplier, int damageType) {
+        double penetration = Math.clamp(configured.modifier(caster, BattleEffect.DEFENSE_PENETRATION), 0.0, 0.5);
+        double defenseKeep = 1.0 - penetration;
+        long effectiveArmor = penetration > 0.0
+                ? Unsigned.fromDoubleSaturating(Math.floor(Unsigned.toDouble(target.armor()) * defenseKeep))
+                : target.armor();
+        long targetDefense = effectiveDefense(target);
+        long effectiveDefense = penetration > 0.0
+                ? Unsigned.fromDoubleSaturating(Math.floor(Unsigned.toDouble(targetDefense) * defenseKeep))
+                : targetDefense;
         double damage = CombatDamageRules.damageBeforeCritical(baseDamage, caster.strength(), attack, attackMultiplier,
-                target.armor(), effectiveDefense(target),
+                effectiveArmor, effectiveDefense,
                 EquipmentCombatRules.resistance(target.resistance(), target.combat(), damageType), target.level());
         var equipment = target.state().getEquipmentEffects();
         int typed = damageType == CombatDamageRules.PHYSICAL_DAMAGE ? equipment.getPhysicalResistBps()
@@ -418,9 +427,9 @@ final class BattleContext {
         if (typed != 0) {
             long resistance = EquipmentCombatRules.resistance(target.resistance(),target.combat(),damageType);
             double coefficient = 360.0 + 120.0 * Math.clamp(Integer.toUnsignedLong(target.level()),1,85);
-            double ratio = Math.max(0.4, coefficient / (Unsigned.toDouble(target.armor()) + Unsigned.toDouble(effectiveDefense(target)) + coefficient)
+            double ratio = Math.max(0.4, coefficient / (Unsigned.toDouble(effectiveArmor) + Unsigned.toDouble(effectiveDefense) + coefficient)
                     * (1 - Math.clamp(Unsigned.toDouble(resistance) / 100 + typed / 10000.0,0,1)));
-            damage *= ratio / CombatDamageRules.receivedRatio(target.armor(),effectiveDefense(target),resistance,target.level());
+            damage *= ratio / CombatDamageRules.receivedRatio(effectiveArmor,effectiveDefense,resistance,target.level());
         }
         if (!pve) damage *= BattleConstants.PVP_DAMAGE_SCALE;
         // 锦标赛 V2 五行灵脉伤害缩放（与 C++ 引擎逐项对齐）：金锐破防 +4%、火炽 +6%、土厚减伤 -5%。
@@ -494,10 +503,13 @@ final class BattleContext {
         for (var artifact : target.state().getArtifactStatesBuilderList()) artifact.clearPendingAilmentKind().clearPendingRound();
         if (target.state().hasSeasonSealState()) target.state().getSeasonSealStateBuilder().clearPendingAilmentKind().clearPendingRound();
         if (!configured.hasEffects(target)) target.state().clearBuffs();
-        else for (var entry : List.copyOf(target.state().getBuffsList())) {
-            var row = configured.row(entry);
-            if (row == null || (row.getKeepOnDeath() == 0 && !configured.listener(entry) && !row.containsTag("Passive")))
-                configured.remove(target,entry.getBuffId());
+        else {
+            for (var entry : List.copyOf(target.state().getBuffsList())) {
+                var row = configured.row(entry);
+                if (row == null || (row.getKeepOnDeath() == 0 && !configured.listener(entry) && !row.containsTag("Passive")))
+                    configured.remove(target,entry.getBuffId());
+            }
+            configured.resetVolatileGrowingStacks(target);
         }
         events.append(eBattleEventType.BATTLE_EVENT_DEATH, target.actorId(), target.actorId());
         if (target.isMonster() && target.teamIndex() == 1 && BattleConstants.isBossTrialKind(encounter.bossTrialKind())) {

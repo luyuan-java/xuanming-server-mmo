@@ -77,6 +77,9 @@ public final class BattleSettlementService {
     private com.game.scene.season.SeasonService seasonService;
     private com.game.scene.trial.TrialJournalService trialJournalService;
     private com.game.scene.festivalbeast.FestivalBeastService festivalBeastService;
+    private com.game.scene.attribute.AttributeService attributeService;
+    private com.game.scene.progression.BattleProgressionTables progressionTables =
+            com.game.scene.progression.BattleProgressionTables.EMPTY;
 
     /** @param notifyPetListChanged 184 的消息号（{@code ScenePetClientPlayer.NotifyPetListChanged}） */
     public BattleSettlementService(CurrencyService currency, BagService bags, PetService pets, MissionService missions,
@@ -106,8 +109,31 @@ public final class BattleSettlementService {
         return this;
     }
 
+    public BattleSettlementService withProgression(com.game.scene.attribute.AttributeService attributeService,
+                                                   com.game.scene.progression.BattleProgressionTables progressionTables) {
+        this.attributeService = attributeService;
+        this.progressionTables = progressionTables == null
+                ? com.game.scene.progression.BattleProgressionTables.EMPTY
+                : progressionTables;
+        return this;
+    }
+
     private static boolean isFestivalBeast(BattleSettlementData settlement) {
         return settlement.hasFestivalBeast() && settlement.getFestivalBeast().getActivityInstanceId() != 0;
+    }
+
+    private static boolean isWuxingTower(BattleSettlementData settlement) {
+        return settlement.hasTowerSettlement() && settlement.getTowerSettlement().getFloor() != 0;
+    }
+
+    private com.game.scene.progression.BattleProgressionRules.PreparedEconomy prepareProgression(
+            ScenePlayer player, BattleSettlementData settlement, long nowMs, long explicitSilver) {
+        long[] week = com.game.scene.equip.EquipmentCraftService.resolveWeek(nowMs);
+        long weekStartMs = week != null ? week[0] : 0L;
+        return com.game.scene.progression.BattleProgressionRules.prepareEconomyLedger(
+                player.clientRequestLedger().battleEconomy(), weekStartMs, settlement,
+                settlement.getExpGain(), explicitSilver,
+                progressionTables.rewardRows(), progressionTables.weeklySilverRule());
     }
 
     /**
@@ -140,18 +166,87 @@ public final class BattleSettlementService {
         player.battle().setApplying(true);
         try{
             boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(settlement.getMatchMode());
-        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isGuildWar || isFestivalBeast(settlement)) {
-                // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)与瑞兽迎春零资产侵入：
-                // 不动气血/法力/宠物/背包/金币/经验/任务，仅原子累计材料自选额度、赛季进度、试炼志、瑞兽进度与近期战果。
+            boolean festivalBattle = isFestivalBeast(settlement);
+            boolean isolatedMode = settlement.getCompetitiveRanked() || settlement.getUseFreePreset()
+                    || isGuildWar || isWuxingTower(settlement) || festivalBattle;
+            long now = currency.nowSeconds();
+            long nowMs = clock.epochMillis();
+            if (isolatedMode) {
+                // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)、五行幻境与帮战：
+                // 零战损侵入（不动战斗残血/法力/宠物血量/背包消耗与掉落），但瑞兽迎春之外按配表发经验与周软上限银两。
+                if (festivalBattle) {
+                    markNormalBossTrialIfCleared(player, settlement);
+                    recordBattleResult(world, player, settlement, 0L, Map.of(), Map.of(),
+                            com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta.NONE);
+                    return Result.APPLIED;
+                }
+                var prepared = prepareProgression(player, settlement, nowMs, 0L);
+                var delta = prepared.delta();
+                var economyCandidate = prepared.candidateLedger();
+                long silverBefore = player.clientRequestLedger().battleEconomy().getBattleSilverThisWeek();
+                long silverToCredit = delta.silverGain();
+                if (silverToCredit < 0L) {
+                    return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_CURRENCY);
+                }
+                int silverTip = silverToCredit > 0L ? currency.checkAdd(player, Wallet.GOLD, silverToCredit, now) : 0;
+                if (silverTip != 0 && silverTip != Wallet.BLOCKED) {
+                    return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_CURRENCY);
+                }
+                if (attributeService != null && delta.expGain() != 0L) {
+                    if (com.game.scene.progression.BattleProgressionRules.resolveLevelForExp(
+                            player.level(), player.progression().totalExp(), delta.expGain(),
+                            progressionTables.levelExpRows()) == null) {
+                        return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
+                    }
+                }
+                long actualSilver = 0L;
+                if (silverToCredit > 0L) {
+                    if (silverTip == Wallet.BLOCKED) {
+                        // 被产出封禁跳过银两时，绝不消耗本周银两软上限额度。
+                        economyCandidate = economyCandidate.toBuilder().setBattleSilverThisWeek(silverBefore).build();
+                        delta = delta.withSilverBlocked(silverBefore);
+                        log.warn("隔离模式战斗银两奖励按产出封禁跳过 battle={} player={} silver={}",
+                                Long.toUnsignedString(settlement.getBattleId()), Long.toUnsignedString(player.playerId()), silverToCredit);
+                    } else {
+                        var change = currency.add(player, Wallet.GOLD, silverToCredit, AssetAudit.Reason.BATTLE_REWARD,
+                                settlement.getBattleId(), now);
+                        if (change.tipId() != 0) throw new IllegalStateException("战斗银两预检与同任务提交不一致");
+                        actualSilver = silverToCredit;
+                    }
+                }
+                if (delta.ledgerChanged()) {
+                    player.clientRequestLedger().setBattleEconomy(economyCandidate);
+                }
+                if (attributeService != null && delta.expGain() != 0L) {
+                    var lp = attributeService.applyBattleExpAndLevelUp(player, delta.expGain(), pets, missions);
+                    if (lp != null) {
+                        delta = delta.withLevelProgress(lp);
+                    }
+                }
                 markNormalBossTrialIfCleared(player, settlement);
-                recordBattleResult(world, player, settlement, 0L, Map.of(), Map.of());
+                recordBattleResult(world, player, settlement, actualSilver, Map.of(), Map.of(), delta);
                 return Result.APPLIED;
             }
-            long now=currency.nowSeconds(),gold=settlement.getGoldGain();
-            int goldTip=gold>0?currency.checkAdd(player,Wallet.GOLD,gold,now):0;
+            long explicitSilver = com.game.scene.progression.BattleProgressionRules.extractExplicitSilver(settlement);
+            if (explicitSilver < 0L) {
+                return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_CURRENCY);
+            }
+            var prepared = prepareProgression(player, settlement, nowMs, explicitSilver);
+            var delta = prepared.delta();
+            var economyCandidate = prepared.candidateLedger();
+            long silverBefore = player.clientRequestLedger().battleEconomy().getBattleSilverThisWeek();
+            long gold = delta.silverGain();
+            int goldTip = gold > 0L ? currency.checkAdd(player, Wallet.GOLD, gold, now) : 0;
             // 产出封禁是明确跳过该奖励的业务决定；冻结、溢出等仍须整笔延后，不能丢掉应补发的金币。
-            if(gold<0||goldTip!=0&&goldTip!=Wallet.BLOCKED)
-                return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_CURRENCY);
+            if (gold < 0L || goldTip != 0 && goldTip != Wallet.BLOCKED)
+                return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_CURRENCY);
+            if (attributeService != null && delta.expGain() != 0L) {
+                if (com.game.scene.progression.BattleProgressionRules.resolveLevelForExp(
+                        player.level(), player.progression().totalExp(), delta.expGain(),
+                        progressionTables.levelExpRows()) == null) {
+                    return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
+                }
+            }
             // 未知/损坏的持久组件仍整笔拒绝；合法空组件不等于损坏。
             var petState=player.pets().toState();
             java.util.Set<Long> owned=new java.util.HashSet<>();
@@ -194,11 +289,21 @@ public final class BattleSettlementService {
             var captured = pets.prepareCapturedPets(player, settlement.getCapturedPetTableIdsList());
             if (captured.tip() != 0) return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
             // 正常业务拒绝已全部预检。普通异常交给组合根不存盘隔离，绝不逐步catch后登记APPLIED。
-            if(gold>0){
-                var change=currency.add(player,Wallet.GOLD,gold,AssetAudit.Reason.BATTLE_REWARD,settlement.getBattleId(),now);
-                if(change.tipId()!=goldTip)throw new IllegalStateException("战斗金币预检与同任务提交不一致");
-                if(goldTip==Wallet.BLOCKED)log.warn("战斗金币奖励按产出封禁跳过，其它结算仍应用 battle={} player={} gold={}",
-                        Long.toUnsignedString(settlement.getBattleId()),Long.toUnsignedString(player.playerId()),gold);
+            long actualGold = 0L;
+            if (gold > 0L) {
+                if (goldTip == Wallet.BLOCKED) {
+                    economyCandidate = economyCandidate.toBuilder().setBattleSilverThisWeek(silverBefore).build();
+                    delta = delta.withSilverBlocked(silverBefore);
+                    log.warn("战斗金币奖励按产出封禁跳过，其它结算仍应用 battle={} player={} gold={}",
+                            Long.toUnsignedString(settlement.getBattleId()), Long.toUnsignedString(player.playerId()), gold);
+                } else {
+                    var change = currency.add(player, Wallet.GOLD, gold, AssetAudit.Reason.BATTLE_REWARD, settlement.getBattleId(), now);
+                    if (change.tipId() != 0) throw new IllegalStateException("战斗金币预检与同任务提交不一致");
+                    actualGold = gold;
+                }
+            }
+            if (delta.ledgerChanged()) {
+                player.clientRequestLedger().setBattleEconomy(economyCandidate);
             }
             bag.commitBattle(settlement.getBattleId());applyVitals(player,settlement);
             pets.commitCapturedPets(player, captured);
@@ -222,15 +327,21 @@ public final class BattleSettlementService {
                 }
             });
             for(var defeat:settlement.getDefeatedMonstersList())missions.onMonsterKilled(player,defeat.getMonsterConfigId(),defeat.getCount());
-            // 自动领奖失败的claimable仍在同份玩家状态，不删资格；经验产品边界仍不冒已到账。
-            if(settlement.getExpGain()!=0)metrics.expIgnored();
+            if (attributeService != null && delta.expGain() != 0L) {
+                var lp = attributeService.applyBattleExpAndLevelUp(player, delta.expGain(), pets, missions);
+                if (lp != null) {
+                    delta = delta.withLevelProgress(lp);
+                }
+            } else if (attributeService == null && settlement.getExpGain() != 0) {
+                metrics.expIgnored();
+            }
             Map<Integer, Long> actualConsumed = new TreeMap<>(Integer::compareUnsigned);
             consumed.forEach((cfg, wanted) -> {
                 long got = wanted - shortfalls.getOrDefault(cfg, 0L);
                 if (got > 0) actualConsumed.put(cfg, got);
             });
             markNormalBossTrialIfCleared(player, settlement);
-            recordBattleResult(world, player, settlement, gold > 0 && goldTip == 0 ? gold : 0L, gained, actualConsumed);
+            recordBattleResult(world, player, settlement, actualGold, gained, actualConsumed, delta);
             return Result.APPLIED;
         }finally{player.battle().setApplying(false);}
     }
@@ -277,12 +388,41 @@ public final class BattleSettlementService {
             return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
         }
         boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(settlement.getMatchMode());
-        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isGuildWar || isFestivalBeast(settlement)) {
-            // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)与瑞兽迎春零资产侵入：
-            // 跳过宠物/金币/气血法力/消耗/掉落/击杀，只记材料自选额度、赛季进度、试炼志、瑞兽进度与近期战果，返回前请求落盘。
+        boolean festivalBattle = isFestivalBeast(settlement);
+        long nowMs = clock.epochMillis();
+        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isGuildWar || isWuxingTower(settlement) || festivalBattle) {
+            // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)、五行幻境与帮战：零战损侵入，非瑞兽按表发经验与银两。
+            var deltaRef = new com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta[] {
+                    com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta.NONE
+            };
+            long actualSilver = 0L;
+            if (!festivalBattle) {
+                var prepared = prepareProgression(player, settlement, nowMs, 0L);
+                var delta = prepared.delta();
+                var economyCandidate = prepared.candidateLedger();
+                long silverBefore = player.clientRequestLedger().battleEconomy().getBattleSilverThisWeek();
+                if (delta.silverGain() > 0L) {
+                    Wallet.Change change = currency.add(player, Wallet.GOLD, delta.silverGain(), AssetAudit.Reason.BATTLE_REWARD, battleId);
+                    if (!change.ok()) {
+                        return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_CURRENCY);
+                    }
+                    actualSilver = delta.silverGain();
+                }
+                if (delta.ledgerChanged()) {
+                    player.clientRequestLedger().setBattleEconomy(economyCandidate);
+                }
+                if (attributeService != null && delta.expGain() != 0L) {
+                    var lp = attributeService.applyBattleExpAndLevelUp(player, delta.expGain(), pets, missions);
+                    if (lp != null) {
+                        delta = delta.withLevelProgress(lp);
+                    }
+                }
+                deltaRef[0] = delta;
+            }
+            final long credited = actualSilver;
             try {
                 step("试炼志首领首通", player, battleId, () -> markNormalBossTrialIfCleared(player, settlement));
-                step("近期战果", player, battleId, () -> recordBattleResult(world, player, settlement, 0L, Map.of(), Map.of()));
+                step("近期战果", player, battleId, () -> recordBattleResult(world, player, settlement, credited, Map.of(), Map.of(), deltaRef[0]));
             } finally {
                 long evicted = ledger.record(battleId, clock.epochMillis());
                 if (evicted != 0) {
@@ -298,13 +438,19 @@ public final class BattleSettlementService {
         var captured = pets.prepareCapturedPets(player, settlement.getCapturedPetTableIdsList());
         if (captured.tip() != 0) return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
         // d. 金币先行（唯一会正常失败的入账，之前不得有任何副作用）
-        long gold = settlement.getGoldGain();
-        if (gold < 0) {
+        long explicitSilver = com.game.scene.progression.BattleProgressionRules.extractExplicitSilver(settlement);
+        if (explicitSilver < 0L) {
             log.error("战斗结算金币超出 int64（坏数据），延后 player={} battle_id={} gold={}", Long.toUnsignedString(playerId),
-                    Long.toUnsignedString(battleId), Long.toUnsignedString(gold));
+                    Long.toUnsignedString(battleId), Long.toUnsignedString(settlement.getGoldGain()));
             return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_CURRENCY);
         }
-        if (gold > 0) {
+        var prepared = prepareProgression(player, settlement, nowMs, explicitSilver);
+        var delta = prepared.delta();
+        long gold = delta.silverGain();
+        if (gold < 0L) {
+            return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_CURRENCY);
+        }
+        if (gold > 0L) {
             Wallet.Change change = currency.add(player, Wallet.GOLD, gold, AssetAudit.Reason.BATTLE_REWARD, battleId);
             if (!change.ok()) {
                 log.warn("战斗结算金币入账失败（封禁 / 溢出 / 冻结），整笔延后 player={} battle_id={} gold={} tip={}",
@@ -312,13 +458,22 @@ public final class BattleSettlementService {
                 return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_CURRENCY);
             }
         }
+        if (delta.ledgerChanged()) {
+            player.clientRequestLedger().setBattleEconomy(prepared.candidateLedger());
+        }
+        final var deltaBox = new com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta[] { delta };
         // e–j：金币已入账，之后任何一步出错都不得让整笔失败；k 在 finally 里登记账本
         try {
             pets.commitCapturedPets(player, captured);
             step("气血法力", player, battleId, () -> applyVitals(player, settlement));
             step("宝宝", player, battleId, () -> applyPets(world, player, settlement));
             step("经验", player, battleId, () -> {
-                if (settlement.getExpGain() != 0) {
+                if (attributeService != null && deltaBox[0].expGain() != 0L) {
+                    var lp = attributeService.applyBattleExpAndLevelUp(player, deltaBox[0].expGain(), pets, missions);
+                    if (lp != null) {
+                        deltaBox[0] = deltaBox[0].withLevelProgress(lp);
+                    }
+                } else if (attributeService == null && settlement.getExpGain() != 0) {
                     metrics.expIgnored();
                     log.info("战斗结算经验（没有经验系统，只记日志） player={} battle_id={} exp={}", Long.toUnsignedString(playerId),
                             Long.toUnsignedString(battleId), Long.toUnsignedString(settlement.getExpGain()));
@@ -334,7 +489,7 @@ public final class BattleSettlementService {
                 }
             });
             step("试炼志首领首通", player, battleId, () -> markNormalBossTrialIfCleared(player, settlement));
-            step("近期战果", player, battleId, () -> recordBattleResult(world, player, settlement, gold, actualGained, actualConsumed));
+            step("近期战果", player, battleId, () -> recordBattleResult(world, player, settlement, gold, actualGained, actualConsumed, deltaBox[0]));
         } finally {
             long evicted = ledger.record(battleId, clock.epochMillis());
             if (evicted != 0) {
@@ -424,7 +579,8 @@ public final class BattleSettlementService {
 
     /** 结算应用同帧写入本人近期战斗结果（确认落盘后才对 371/372 可见），并按游戏日上限累计装备材料自选额度。 */
     private void recordBattleResult(SceneWorld world, ScenePlayer player, BattleSettlementData settlement, long goldCredited,
-                                    Map<Integer, Long> itemsGained, Map<Integer, Long> itemsConsumed) {
+                                    Map<Integer, Long> itemsGained, Map<Integer, Long> itemsConsumed,
+                                    com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta progressionDelta) {
         long nowMs = clock.epochMillis();
         boolean festivalBattle = isFestivalBeast(settlement);
         var materialDelta = com.game.scene.equip.EquipmentCraftService.creditBattleMaterialRewardDelta(player, settlement, nowMs);
@@ -472,6 +628,16 @@ public final class BattleSettlementService {
                 .setSeasonSealProgressAfter(seasonCredit.progressAfter())
                 .setSeasonSealMaxPoints(seasonCredit.maxPoints())
                 .setSeasonHonorNewlyUnlocked(seasonCredit.honorNewlyUnlocked());
+        if (progressionDelta != null) {
+            entry.setExpGain(progressionDelta.expGain())
+                    .setLevelBefore(progressionDelta.levelBefore())
+                    .setLevelAfter(progressionDelta.levelAfter())
+                    .setTotalExpAfter(progressionDelta.totalExpAfter())
+                    .setNextLevelTotalExp(progressionDelta.nextLevelTotalExp())
+                    .setBattleSilverWeeklyUsed(progressionDelta.weeklySilverUsedAfter())
+                    .setBattleSilverWeeklySoftCap(progressionDelta.weeklySilverSoftCap())
+                    .setBattleSilverDiminished(progressionDelta.silverDiminished());
+        }
         if (festivalDelta.active()) {
             entry.setFestivalActivityInstanceId(festivalDelta.activityInstanceId())
                     .setFestivalRewardIdentity(festivalDelta.rewardIdentity())

@@ -63,6 +63,12 @@ message PlayerState {
   PlayerFestivalBeastState festival_beast = 21;
   // 官方灵石百宝阁个人与共享组限购记录（同事务围栏提交）。
   PlayerSpiritShopState spirit_shop = 22;
+  // 角色累计总经验（与 player.level 列同事务围栏提交，1..85 平滑升级曲线）。
+  PlayerProgressionState progression = 23;
+}
+
+message PlayerProgressionState {
+  uint64 total_exp = 1;
 }
 
 message SpiritShopGoodsPurchaseState {
@@ -245,6 +251,13 @@ message BattleResultEntryState {
   uint32 season_seal_max_points = 37;
   bool season_honor_newly_unlocked = 38;
   bool surrendered = 39;
+  uint32 level_before = 40;
+  uint32 level_after = 41;
+  uint64 total_exp_after = 42;
+  uint64 next_level_total_exp = 43;
+  uint64 battle_silver_weekly_used = 44;
+  uint64 battle_silver_weekly_soft_cap = 45;
+  bool battle_silver_diminished = 46;
 }
 
 message BattleResultCurrencyState {
@@ -262,6 +275,13 @@ message ClientRequestLedgerState {
   uint64 next_seq = 2;
   uint64 forge_revision = 3;
   EquipmentMaterialRewardLedgerState material_reward = 4;
+  BattleEconomyLedgerState battle_economy = 5;
+}
+
+message BattleEconomyLedgerState {
+  uint64 week_starts_at_ms = 1;
+  uint64 battle_silver_this_week = 2;
+  uint64 battle_exp_this_week = 3;
 }
 
 message ClientRequestRecordState {
@@ -372,6 +392,12 @@ message AppearanceState {
   repeated AppearanceRequestReceipt recent_requests = 5;
   // 永久已拥有形象位图（按 CharacterAppearance 主键 bit_index 紧凑低位在前）；当前永久 player.appearance_id 隐式视为已拥有。
   bytes owned_bits = 6;
+  // 灵宠幻化永久拥有位图（按 PetCosmetic 主键 bit_index 紧凑低位在前）。
+  bytes pet_cosmetic_owned_bits = 7;
+  // 技能特效永久拥有位图（按 SkillVfxCosmetic 主键 bit_index 紧凑低位在前）。
+  bytes skill_vfx_owned_bits = 8;
+  // 技能特效穿戴映射（skill_table_id -> SkillVfxCosmetic.id；按无符号键升序写出）。
+  map<uint32, uint32> equipped_skill_vfx = 9;
 }
 
 message AppearanceRequestReceipt {
@@ -537,6 +563,8 @@ message PetEntry {
   uint32 tier_last_result_tier = 23;
   uint32 entry_last_preset_slot = 24;
   uint32 entry_last_preset_tag = 25;
+  // 当前穿戴的灵宠幻化配置 ID（0 = 灵宠原形；纯外观零数值）。
+  uint32 cosmetic_id = 26;
 }
 
 // 当前气血 / 法力。health == 0 = 阵亡：进场按上限回满（基础复活）；活着的进场只按新上限往下夹，不补。

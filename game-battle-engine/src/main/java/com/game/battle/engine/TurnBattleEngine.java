@@ -451,7 +451,8 @@ public final class TurnBattleEngine {
                     .setPhysicalAttack(snapshot.getPhysicalAttack())
                     .setMagicAttack(snapshot.getMagicAttack())
                     .setDefense(snapshot.getDefense())
-                    .setFormationSlot(ctx.nextFormationSlot(snapshot.getTeamIndex()));
+                    .setFormationSlot(ctx.nextFormationSlot(snapshot.getTeamIndex()))
+                    .putAllEquippedSkillVfx(snapshot.getEquippedSkillVfxMap());
             if (isRankedBattle()) {
                 int streak = request.getRankedContext().getMemberWinStreaksOrDefault(playerId, 0);
                 if (Integer.compareUnsigned(streak, BattleConstants.MIN_WIN_STREAK_HIGHLIGHT) >= 0) {
@@ -584,6 +585,7 @@ public final class TurnBattleEngine {
                 .setMagicAttack(pet.getMagicAttack())
                 .setDefense(pet.getDefense())
                 .setFormationSlot(formationSlot)
+                .setPetCosmeticArtKey(pet.getCosmeticArtKey())
                 // 宝宝没有客户端行动权：标挂机，由默认行动路径代打，也不卡 allPlayersReady（engine.cpp:228-230）
                 .setIsAuto(true);
         pet.getSkillRanksMap().forEach((id, stored) -> ctx.data().skill(id).ifPresent(row -> {

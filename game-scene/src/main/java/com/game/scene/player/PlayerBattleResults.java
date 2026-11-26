@@ -199,7 +199,18 @@ public final class PlayerBattleResults {
                 .setFestivalRequiredWins(e.getFestivalRequiredWins())
                 .setFestivalNewlyEligible(e.getFestivalNewlyEligible())
                 .setMaterialAvailableUnitsAfter(e.getMaterialAvailableUnitsAfter())
-                .setMaterialEarnableRemainingAfter(e.getMaterialEarnableRemainingAfter());
+                .setMaterialEarnableRemainingAfter(e.getMaterialEarnableRemainingAfter())
+                .setSeasonSealPointsAdded(e.getSeasonSealPointsAdded())
+                .setSeasonSealProgressAfter(e.getSeasonSealProgressAfter())
+                .setSeasonSealMaxPoints(e.getSeasonSealMaxPoints())
+                .setSeasonHonorNewlyUnlocked(e.getSeasonHonorNewlyUnlocked())
+                .setLevelBefore(e.getLevelBefore())
+                .setLevelAfter(e.getLevelAfter())
+                .setTotalExpAfter(e.getTotalExpAfter())
+                .setNextLevelTotalExp(e.getNextLevelTotalExp())
+                .setBattleSilverWeeklyUsed(e.getBattleSilverWeeklyUsed())
+                .setBattleSilverWeeklySoftCap(e.getBattleSilverWeeklySoftCap())
+                .setBattleSilverDiminished(e.getBattleSilverDiminished());
         for (BattleResultCurrencyState c : e.getCurrenciesList()) {
             b.addCurrencies(PlayerBattleResultCurrency.newBuilder()
                     .setCurrencyType(c.getCurrencyType())

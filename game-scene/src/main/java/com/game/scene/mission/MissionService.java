@@ -210,7 +210,11 @@ public final class MissionService {
 
     /** 等级变了（GM 175 成功后，等级没变也发，同基线）：等级条件按原始等级覆盖进度。 */
     public void onLevelChanged(ScenePlayer player) {
-        int level = player.level();
+        onLevelReached(player, player.level());
+    }
+
+    /** 跨级经验升级按跨越的每一级逐级派发条件事实（如 1→4 依次触发 2/3/4）。 */
+    public void onLevelReached(ScenePlayer player, int level) {
         dispatch(player, MissionFact.of(MissionTables.CATEGORY_LEVEL, level, Integer.toUnsignedLong(level)));
     }
 

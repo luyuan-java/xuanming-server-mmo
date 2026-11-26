@@ -198,6 +198,7 @@ public class SceneNode implements SmartLifecycle {
     private com.game.scene.craft.SkillCraftTables skillCraftTables;
     private com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables;
     private com.game.scene.spiritshop.SpiritShopTables spiritShopTables;
+    private com.game.scene.progression.BattleProgressionTables battleProgressionTables;
     private java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
             java.util.concurrent.CompletableFuture<com.game.proto.match.StartActivityBattleResponse>> matchActivityStarter;
     private com.game.scene.player.SceneTextGuard textGuard;
@@ -242,6 +243,12 @@ public class SceneNode implements SmartLifecycle {
     public synchronized SceneNode withSpiritShopTables(com.game.scene.spiritshop.SpiritShopTables spiritShopTables) {
         if (running) throw new IllegalStateException("节点已启动");
         this.spiritShopTables = java.util.Objects.requireNonNull(spiritShopTables);
+        return this;
+    }
+
+    public synchronized SceneNode withBattleProgressionTables(com.game.scene.progression.BattleProgressionTables battleProgressionTables) {
+        if (running) throw new IllegalStateException("节点已启动");
+        this.battleProgressionTables = java.util.Objects.requireNonNull(battleProgressionTables);
         return this;
     }
 
@@ -470,7 +477,8 @@ public class SceneNode implements SmartLifecycle {
         startGainBlockSync(currency, bags, settings);
         EquipmentRules equipmentRules = bagTables.equipmentRules() == null
                 ? new EquipmentRules(EquipmentTables.empty(), bound -> 0) : bagTables.equipmentRules();
-        AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency, metrics, equipmentRules);
+        AttributeService attributes = new AttributeService(attributeTables, SceneClock.SYSTEM, currency, metrics, equipmentRules)
+                .withProgressionTables(battleProgressionTables);
         BagFeature bagFeature = new BagFeature(bags);
         EquipmentService equipment = new EquipmentService(equipmentRules, bags, currency, attributes, metrics);
         com.game.scene.equip.EquipmentCraftService equipmentCraft = new com.game.scene.equip.EquipmentCraftService(
@@ -559,7 +567,8 @@ public class SceneNode implements SmartLifecycle {
         // 回合制战斗（批次 6.3，scene-battle-spec §7）：冻结 / 确认 / 进场恢复 / reaper / 结算应用 / 销账都在逻辑线程上，Redis 脚本异步；
         // 世界的战斗钩子就是它（进场恢复、落盘后销账、原地解冻后重跑进场恢复），世界建好后再绑定
         BattleSettlementService settlements = new BattleSettlementService(currency, bags, petService, missions, battleTables,
-                battleMetrics, SceneClock.SYSTEM, registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged"));
+                battleMetrics, SceneClock.SYSTEM, registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged"))
+                .withProgression(attributes, battleProgressionTables);
         if (seasonService != null) {
             settlements.withSeasonService(seasonService);
         }
@@ -592,7 +601,10 @@ public class SceneNode implements SmartLifecycle {
         PlayerBattleService battle = new PlayerBattleService(BattleLocks.redis(new BattleRedis(redis, redisKeys)), settlements,
                 battleTables, petService, player -> battleRouting(gateLinks, player, zoneId, nodeId), teamFollow, battleMetrics,
                 SceneClock.SYSTEM, logic, registry.requireId("BattleClientPlayer", "NotifyBattleReconnect"),
-                registry.requireId("BattleClientPlayer", "NotifyBattleEnd"));
+                registry.requireId("BattleClientPlayer", "NotifyBattleEnd"))
+                .withProgressionPush(attributes,
+                        registry.requireId("SceneAttributeClientPlayer", "NotifyAttributePanelChanged"),
+                        registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged"));
         if (trialJournalService != null) {
             battle.withTrialJournalService(trialJournalService);
         }

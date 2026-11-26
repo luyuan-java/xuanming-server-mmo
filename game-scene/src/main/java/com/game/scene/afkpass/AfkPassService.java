@@ -197,9 +197,13 @@ public final class AfkPassService {
     }
 
     public AfkPassInfo buildInfo(ScenePlayer player, long nowSec) {
+        long expiresAt = player.afkPassExpiresAt();
+        boolean active = AfkPassRules.isActive(expiresAt, nowSec);
         AfkPassInfo.Builder b = AfkPassInfo.newBuilder()
-                .setExpiresAt(player.afkPassExpiresAt())
-                .setServerNow(nowSec);
+                .setExpiresAt(expiresAt)
+                .setServerNow(nowSec)
+                .setUnlockedLoadoutSlots(AfkPassRules.unlockedLoadoutSlots(active))
+                .setStage2TradableEnabled(active);
         AfkPassTables.Rule rule = tables.rule();
         if (rule != null) {
             b.setPriceCurrencyType(rule.priceCurrencyType())

@@ -99,6 +99,8 @@ public final class AttributeService {
     private final com.game.scene.equip.EquipmentRules equipment;
     private java.util.function.BiConsumer<ScenePlayer, com.game.proto.EquipmentEffects.Builder> seasonEffects;
     private java.util.function.IntSupplier activeSeason = () -> 0;
+    private com.game.scene.progression.BattleProgressionTables progressionTables =
+            com.game.scene.progression.BattleProgressionTables.EMPTY;
 
     public AttributeService(AttributeTables tables, SceneClock clock, CurrencyService currency) {
         this(tables, clock, currency, SceneMetrics.noop());
@@ -121,6 +123,14 @@ public final class AttributeService {
 
     /** 装备变更保持当前血蓝比例，不提供穿脱回血入口。 */
     public void equipmentChanged(ScenePlayer player) { recalculate(player, RecalcReason.EQUIPMENT); }
+
+    /** 绑定平滑升级曲线表视图（供面板经验展示与战斗结算升级使用）。 */
+    public AttributeService withProgressionTables(com.game.scene.progression.BattleProgressionTables progressionTables) {
+        this.progressionTables = progressionTables == null
+                ? com.game.scene.progression.BattleProgressionTables.EMPTY
+                : progressionTables;
+        return this;
+    }
 
     /** 修习被动与换装同样按比例保留当前血蓝。 */
     public void skillsChanged(ScenePlayer player) { recalculate(player, RecalcReason.SKILL); }
@@ -335,16 +345,30 @@ public final class AttributeService {
 
     // ------------------------------------------------------------------ 面板
 
+    private int maxSchemesFor(ScenePlayer player) {
+        int base = tables.maxSchemes();
+        long nowSec = Math.floorDiv(clock.epochMillis(), 1000L);
+        return com.game.scene.afkpass.AfkPassRules.isActive(player.afkPassExpiresAt(), nowSec)
+                ? base + com.game.scene.afkpass.AfkPassRules.LIGHT_CARD_BONUS_LOADOUT_SLOTS
+                : base;
+    }
+
     /** 全量面板（客户端零配表：维度名 / 说明 / 上限 / 剩余点 / 二级属性都在这里）。只读，不改状态。 */
     public AttributePanelInfo buildPanel(ScenePlayer player) {
         PlayerAttributes attributes = player.attributes();
         Scheme scheme = attributes.activeScheme();
         int level = level(player);
+        var expDisplay = com.game.scene.progression.BattleProgressionRules.computeLevelExpDisplay(
+                level, player.progression().totalExp(), progressionTables.levelExpRows());
         AttributePanelInfo.Builder panel = AttributePanelInfo.newBuilder()
                 .setSupportEffects(com.game.scene.skill.CharacterSupport.build(player))
                 .setLevel(level)
+                .setTotalExp(expDisplay.totalExp())
+                .setCurrentLevelExp(expDisplay.currentLevelExp())
+                .setNextLevelExp(expDisplay.nextLevelExp())
+                .setIsMaxLevel(expDisplay.isMaxLevel())
                 .setActiveSchemeId(attributes.activeSchemeId())
-                .setMaxSchemes(tables.maxSchemes())
+                .setMaxSchemes(maxSchemesFor(player))
                 .setCreateSchemeCostGold(tables.createSchemeCost(attributes.schemes().size()));
         long cooldown = tables.switchCooldownSeconds();
         if (cooldown > 0) {
@@ -540,7 +564,7 @@ public final class AttributeService {
         }
         PlayerAttributes attributes = player.attributes();
         int count = attributes.schemes().size();
-        if (count >= tables.maxSchemes()) {
+        if (count >= maxSchemesFor(player)) {
             return new SchemeCreation(SCHEME_LIMIT, 0);
         }
         String finalName = name.isEmpty() ? defaultSchemeName(count + 1) : name;
@@ -615,6 +639,38 @@ public final class AttributeService {
         log.info("GM 设等级 player={} {} -> {}", player.playerId(), old, level);
         recalculate(player, RecalcReason.LEVEL_CHANGED);
         return 0;
+    }
+
+    /**
+     * 战斗结算经验入账与平滑升级（不推面板、不额外触发存盘，由收件箱确认落盘后统一公开）。
+     * 严守混版本超上限与 GM 调高级号只升不降保护；total_exp 无符号溢出返回 null。
+     */
+    public com.game.scene.progression.BattleProgressionRules.LevelProgressResult applyBattleExpAndLevelUp(
+            ScenePlayer player, long expGain,
+            com.game.scene.pet.PetService pets,
+            com.game.scene.mission.MissionService missions) {
+        var result = com.game.scene.progression.BattleProgressionRules.resolveLevelForExp(
+                player.level(), player.progression().totalExp(), expGain, progressionTables.levelExpRows());
+        if (result == null) {
+            return null;
+        }
+        player.progression().setTotalExp(result.totalExpAfter());
+        if (result.leveledUp()) {
+            player.setLevel(result.storedLevelAfter());
+            recalculate(player, RecalcReason.LEVEL_CHANGED);
+            if (pets != null) {
+                pets.onOwnerLevelChanged(player);
+            }
+            if (missions != null) {
+                for (int lvl = result.levelBefore() + 1; lvl <= result.levelAfter(); lvl++) {
+                    missions.onLevelReached(player, lvl);
+                }
+            }
+            log.info("战斗经验升级 player={} {} -> {} total_exp={}",
+                    Long.toUnsignedString(player.playerId()), result.levelBefore(), result.levelAfter(),
+                    Long.toUnsignedString(result.totalExpAfter()));
+        }
+        return result;
     }
 
     // ------------------------------------------------------------------ 内部

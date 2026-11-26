@@ -58,7 +58,7 @@ final class GuildWarMatchStartTest {
     void startGuildWarPvpAssignsExplicitTeamsAndLaunchesGather() {
         StartGuildWarBattleResponse resp = service.startGuildWar(
                 StartGuildWarBattleRequest.newBuilder()
-                        .setMatchMode(MatchMode.MATCH_MODE_GUILD_WAR_PVP)
+                        .setMatchMode(MatchMode.MATCH_MODE_GUILD_WAR_PVP_VALUE)
                         .setBattleConfigId(2)
                         .addAttackerPlayerIds(ATK)
                         .addDefenderPlayerIds(DEF)
@@ -68,9 +68,9 @@ final class GuildWarMatchStartTest {
 
         assertThat(resp.getReject()).isEqualTo(ActivityBattleReject.ACTIVITY_BATTLE_REJECT_NONE);
         assertThat(resp.getBattleId()).isNotZero();
-        assertThat(gather.launched).hasSize(1);
-        GatherPlan plan = gather.launched.get(0);
-        assertThat(plan.mode()).isEqualTo(MatchMode.MATCH_MODE_GUILD_WAR_PVP_VALUE);
+        assertThat(gather.plans).hasSize(1);
+        GatherPlan plan = gather.plans.get(0);
+        assertThat(plan.mode()).isEqualTo(MatchMode.MATCH_MODE_GUILD_WAR_PVP);
         assertThat(plan.memberTeams()).containsEntry(ATK, 0).containsEntry(DEF, 1);
         assertThat(plan.aiDefenderSnapshots()).isEmpty();
     }
@@ -79,13 +79,13 @@ final class GuildWarMatchStartTest {
     void startGuildWarSiegePassesAiDefenderSnapshotsToGather() {
         BattlePlayerSnapshot aiDef = BattlePlayerSnapshot.newBuilder()
                 .setPlayerId(900_001L)
-                .setName("青云守旗弟子")
+                .setPlayerName("青云守旗弟子")
                 .setTeamIndex(1)
                 .setAiControlled(true)
                 .build();
         StartGuildWarBattleResponse resp = service.startGuildWar(
                 StartGuildWarBattleRequest.newBuilder()
-                        .setMatchMode(MatchMode.MATCH_MODE_GUILD_WAR_SIEGE)
+                        .setMatchMode(MatchMode.MATCH_MODE_GUILD_WAR_SIEGE_VALUE)
                         .setBattleConfigId(2)
                         .addAttackerPlayerIds(ATK)
                         .addAiDefenderSnapshots(aiDef)
@@ -95,8 +95,8 @@ final class GuildWarMatchStartTest {
 
         assertThat(resp.getReject()).isEqualTo(ActivityBattleReject.ACTIVITY_BATTLE_REJECT_NONE);
         assertThat(resp.getBattleId()).isNotZero();
-        GatherPlan plan = gather.launched.get(0);
-        assertThat(plan.mode()).isEqualTo(MatchMode.MATCH_MODE_GUILD_WAR_SIEGE_VALUE);
+        GatherPlan plan = gather.plans.get(0);
+        assertThat(plan.mode()).isEqualTo(MatchMode.MATCH_MODE_GUILD_WAR_SIEGE);
         assertThat(plan.memberTeams()).containsEntry(ATK, 0).hasSize(1);
         assertThat(plan.aiDefenderSnapshots()).hasSize(1);
         assertThat(plan.aiDefenderSnapshots().get(0).getAiControlled()).isTrue();
@@ -107,7 +107,7 @@ final class GuildWarMatchStartTest {
         players.inBattle(DEF, 777_888L);
         StartGuildWarBattleResponse resp = service.startGuildWar(
                 StartGuildWarBattleRequest.newBuilder()
-                        .setMatchMode(MatchMode.MATCH_MODE_GUILD_WAR_PVP)
+                        .setMatchMode(MatchMode.MATCH_MODE_GUILD_WAR_PVP_VALUE)
                         .setBattleConfigId(2)
                         .addAttackerPlayerIds(ATK)
                         .addDefenderPlayerIds(DEF)
@@ -118,6 +118,6 @@ final class GuildWarMatchStartTest {
         assertThat(resp.getReject()).isEqualTo(ActivityBattleReject.ACTIVITY_BATTLE_REJECT_MEMBER_IN_BATTLE);
         assertThat(resp.getOffenderPlayerId()).isEqualTo(DEF);
         assertThat(resp.getOffenderBattleId()).isEqualTo(777_888L);
-        assertThat(gather.launched).isEmpty();
+        assertThat(gather.plans).isEmpty();
     }
 }

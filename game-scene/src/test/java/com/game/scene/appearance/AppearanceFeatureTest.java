@@ -12,6 +12,10 @@ import com.game.proto.ActorAppearanceChangedS2C;
 import com.game.proto.AppearanceStateNotify;
 import com.game.proto.CancelAppearanceTrialRequest;
 import com.game.proto.CancelAppearanceTrialResponse;
+import com.game.proto.EquipPetCosmeticRequest;
+import com.game.proto.EquipPetCosmeticResponse;
+import com.game.proto.EquipSkillVfxRequest;
+import com.game.proto.EquipSkillVfxResponse;
 import com.game.proto.GetAppearanceInfoRequest;
 import com.game.proto.GetAppearanceInfoResponse;
 import com.game.proto.MessageContent;
@@ -368,5 +372,99 @@ class AppearanceFeatureTest {
             assertThat(row.getBiographySummary()).doesNotContain("闻砚生");
             assertThat(row.getStoryBody()).doesNotContain("闻砚生");
         });
+    }
+
+    @Test
+    void 灵宠幻化与技能特效_未拥有拒绝_授形不自动穿戴_按实例隔离与战斗快照透传() throws Exception {
+        start("00_reference_topright_boy", 0);
+        ScenePlayer player = WorldTestAccess.player(world, LINK, SESSION);
+        var petA = new com.game.scene.player.PlayerPets.Pet(70001L, 12, 10, 1000L);
+        var petB = new com.game.scene.player.PlayerPets.Pet(70002L, 12, 10, 1001L);
+        player.pets().add(petA);
+        player.pets().add(petB);
+
+        // 初始目录完整但全部未拥有，未拥有穿戴必须被拒绝
+        GetAppearanceInfoResponse init = GetAppearanceInfoResponse.parseFrom(
+                call("GetAppearanceInfo", GetAppearanceInfoRequest.getDefaultInstance()).getSerializedMessage());
+        assertThat(init.getInfo().getPetCosmeticsCount()).isEqualTo(3);
+        assertThat(init.getInfo().getSkillVfxCosmeticsCount()).isEqualTo(3);
+        assertThat(init.getInfo().getPetCosmeticsList()).allSatisfy(e -> assertThat(e.getOwned()).isFalse());
+        assertThat(init.getInfo().getSkillVfxCosmeticsList()).allSatisfy(e -> assertThat(e.getOwned()).isFalse());
+
+        EquipPetCosmeticResponse notOwnedPet = EquipPetCosmeticResponse.parseFrom(
+                call("EquipPetCosmetic", EquipPetCosmeticRequest.newBuilder()
+                        .setClientRequestId(8001L).setPetId(70001L).setCosmeticId(1).build())
+                        .getSerializedMessage());
+        assertThat(notOwnedPet.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NOT_OWNED);
+
+        EquipPetCosmeticResponse missingPet = EquipPetCosmeticResponse.parseFrom(
+                call("EquipPetCosmetic", EquipPetCosmeticRequest.newBuilder()
+                        .setClientRequestId(8002L).setPetId(99999L).setCosmeticId(1).build())
+                        .getSerializedMessage());
+        assertThat(missingPet.getErrorMessage().getId()).isEqualTo(AppearanceService.PET_NOT_FOUND);
+
+        // 授形灵宠幻化 #1：只置位拥有位图，不自动穿戴
+        assertThat(appearanceService.grantPetCosmetic(world, player, 1)).isZero();
+        assertThat(petA.cosmeticId()).isZero();
+        assertThat(petB.cosmeticId()).isZero();
+
+        // 给 petA 穿戴 #1：petB 仍保持原形（按灵宠实例隔离）
+        EquipPetCosmeticResponse eqPet = EquipPetCosmeticResponse.parseFrom(
+                call("EquipPetCosmetic", EquipPetCosmeticRequest.newBuilder()
+                        .setClientRequestId(8003L).setPetId(70001L).setCosmeticId(1).build())
+                        .getSerializedMessage());
+        assertThat(eqPet.getErrorMessage().getId()).isZero();
+        assertThat(eqPet.getEquippedCosmeticId()).isEqualTo(1);
+        assertThat(petA.cosmeticId()).isEqualTo(1);
+        assertThat(petB.cosmeticId()).isZero();
+        assertThat(eqPet.getInfo().getEquippedPetCosmeticsCount()).isEqualTo(1);
+        assertThat(eqPet.getInfo().getEquippedPetCosmetics(0).getPetId()).isEqualTo(70001L);
+
+        // 恢复原形
+        EquipPetCosmeticResponse clearPet = EquipPetCosmeticResponse.parseFrom(
+                call("EquipPetCosmetic", EquipPetCosmeticRequest.newBuilder()
+                        .setClientRequestId(8004L).setPetId(70001L).setCosmeticId(0).build())
+                        .getSerializedMessage());
+        assertThat(clearPet.getErrorMessage().getId()).isZero();
+        assertThat(petA.cosmeticId()).isZero();
+        assertThat(clearPet.getInfo().getEquippedPetCosmeticsCount()).isZero();
+
+        // 技能特效：未拥有拒绝、技能错配拒绝、授形不自动启用、启用后透传 BattlePlayerSnapshot
+        EquipSkillVfxResponse notOwnedVfx = EquipSkillVfxResponse.parseFrom(
+                call("EquipSkillVfx", EquipSkillVfxRequest.newBuilder()
+                        .setClientRequestId(8005L).setSkillTableId(1201).setCosmeticId(1).build())
+                        .getSerializedMessage());
+        assertThat(notOwnedVfx.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NOT_OWNED);
+
+        assertThat(appearanceService.grantSkillVfx(world, player, 1)).isZero();
+        assertThat(player.appearance().equippedSkillVfx(1201)).isZero();
+
+        EquipSkillVfxResponse wrongSkill = EquipSkillVfxResponse.parseFrom(
+                call("EquipSkillVfx", EquipSkillVfxRequest.newBuilder()
+                        .setClientRequestId(8006L).setSkillTableId(1202).setCosmeticId(1).build())
+                        .getSerializedMessage());
+        assertThat(wrongSkill.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_INVALID);
+
+        EquipSkillVfxResponse eqVfx = EquipSkillVfxResponse.parseFrom(
+                call("EquipSkillVfx", EquipSkillVfxRequest.newBuilder()
+                        .setClientRequestId(8007L).setSkillTableId(1201).setCosmeticId(1).build())
+                        .getSerializedMessage());
+        assertThat(eqVfx.getErrorMessage().getId()).isZero();
+        assertThat(eqVfx.getEquippedCosmeticId()).isEqualTo(1);
+        assertThat(eqVfx.getInfo().getEquippedSkillVfxMap()).containsEntry(1201, 1);
+
+        // 战斗快照透传技能特效，不影响任何战斗数值
+        var battleTables = com.game.scene.battle.SceneBattleTables.from(config);
+        var snap = com.game.scene.battle.BattleSnapshots.build(
+                player, battleTables, List.of(), com.game.proto.BattleRouting.getDefaultInstance());
+        assertThat(snap.getEquippedSkillVfxMap()).containsEntry(1201, 1);
+
+        // 恢复默认特效
+        EquipSkillVfxResponse clearVfx = EquipSkillVfxResponse.parseFrom(
+                call("EquipSkillVfx", EquipSkillVfxRequest.newBuilder()
+                        .setClientRequestId(8008L).setSkillTableId(1201).setCosmeticId(0).build())
+                        .getSerializedMessage());
+        assertThat(clearVfx.getErrorMessage().getId()).isZero();
+        assertThat(clearVfx.getInfo().getEquippedSkillVfxMap()).isEmpty();
     }
 }

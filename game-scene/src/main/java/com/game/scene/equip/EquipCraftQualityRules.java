@@ -41,6 +41,32 @@ public final class EquipCraftQualityRules {
     /** 5% 主城代打摊位银两税销毁。 */
     public static final long PROXY_TAX_BPS = 500L;
 
+    /** V1 装备原地无损升档（基础装 profile=1 / 首饰 profile=2）：纯银两消耗，每跨一档（10级）按档计费，0 打造材料，不污染可交易状态。 */
+    public static final long UPGRADE_TIER_BASE_GOLD_PER_STEP = 100L;
+    public static final long UPGRADE_TIER_ACCESSORY_GOLD_PER_STEP = 60L;
+
+    public static boolean canUpgradeTier(int sourceProfile, int sourceKind, int sourceLevel, int sourceClass,
+                                         int targetProfile, int targetKind, int targetLevel, int targetClass) {
+        if (sourceProfile != 1 && sourceProfile != 2) {
+            return false;
+        }
+        if (targetProfile != sourceProfile || targetKind != sourceKind || targetClass != sourceClass) {
+            return false;
+        }
+        return Integer.compareUnsigned(targetLevel, sourceLevel) > 0;
+    }
+
+    public static long upgradeTierGoldCost(int equipProfile, int sourceLevel, int targetLevel) {
+        if ((equipProfile != 1 && equipProfile != 2) || Integer.compareUnsigned(targetLevel, sourceLevel) <= 0) {
+            return 0L;
+        }
+        long srcTier = Integer.toUnsignedLong(sourceLevel) / 10L;
+        long dstTier = Integer.toUnsignedLong(targetLevel) / 10L;
+        long steps = dstTier > srcTier ? (dstTier - srcTier) : 1L;
+        long perStep = equipProfile == 1 ? UPGRADE_TIER_BASE_GOLD_PER_STEP : UPGRADE_TIER_ACCESSORY_GOLD_PER_STEP;
+        return steps * perStep;
+    }
+
     public static final int SCROLL_BONUS_FRAGMENTS_COUNT = 2;
     /** 永久技能稀世占比硬红线 <= 10%。 */
     public static final int MAX_RARE_SKILL_RATIO_BPS = 1000;

@@ -41,6 +41,7 @@ public final class ClassSkillService {
     private final AttributeService attributes;
     private final PetService pets;
     private SceneMetrics metrics = SceneMetrics.noop();
+    private com.game.scene.world.SceneClock clock = com.game.scene.world.SceneClock.SYSTEM;
     private java.util.function.IntSupplier activeSeason = () -> 0;
     private java.util.function.BooleanSupplier craftUnlockGate = () -> false;
 
@@ -57,6 +58,20 @@ public final class ClassSkillService {
     public ClassSkillService withMetrics(SceneMetrics metrics) {
         this.metrics = metrics == null ? SceneMetrics.noop() : metrics;
         return this;
+    }
+
+    public ClassSkillService withClock(com.game.scene.world.SceneClock clock) {
+        this.clock = clock == null ? com.game.scene.world.SceneClock.SYSTEM : clock;
+        return this;
+    }
+
+    private static int unlockedSchemesFor(ScenePlayer player, long nowSec) {
+        boolean active = com.game.scene.afkpass.AfkPassRules.isActive(player.afkPassExpiresAt(), nowSec);
+        return SkillLoadoutRules.unlockedSchemes(active);
+    }
+
+    private long nowSeconds() {
+        return Math.floorDiv(clock.epochMillis(), 1000L);
     }
 
     public ClassSkillService withActiveSeason(java.util.function.IntSupplier activeSeason) {
@@ -102,6 +117,10 @@ public final class ClassSkillService {
     }
 
     public static ListSkillsResponse book(ScenePlayer player, int activeSeasonId, boolean craftGateEnabled) {
+        return book(player, activeSeasonId, craftGateEnabled, Math.floorDiv(System.currentTimeMillis(), 1000L));
+    }
+
+    public static ListSkillsResponse book(ScenePlayer player, int activeSeasonId, boolean craftGateEnabled, long nowSec) {
         var catalog = player.skillCatalog();
         var owned = player.learnedSkills();
         int level = PlayerLevels.effective(player.level());
@@ -131,7 +150,8 @@ public final class ClassSkillService {
         }
         var result = ListSkillsResponse.newBuilder().setErrorMessage(tip(0)).setSkillList(list)
                 .setClassId(player.classId()).setPlayerLevel(level).setCurrencyBalance(balance)
-                .setLoadout(SkillLoadoutRules.buildSnapshot(catalog, player.classId(), level, owned));
+                .setLoadout(SkillLoadoutRules.buildSnapshot(catalog, player.classId(), level, owned,
+                        unlockedSchemesFor(player, nowSec)));
         Set<Integer> equippedNonActive = SkillLoadoutRules.collectEquippedNonActiveSkills(
                 catalog, player.classId(), level, owned);
         var previews = new java.util.HashMap<Integer, SupportSkillPreview>();
@@ -272,7 +292,7 @@ public final class ClassSkillService {
                     .setErrorMessage(tip(0))
                     .setRequestId(reqId)
                     .setReplayed(true)
-                    .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                    .setState(bookForService(player))
                     .build();
         }
         int busy = checkWritable(player);
@@ -286,9 +306,10 @@ public final class ClassSkillService {
         List<Integer> passiveIds = new ArrayList<>(request.getPassiveSkillIdsList());
         List<Integer> pursuitIds = new ArrayList<>(request.getPursuitSkillIdsList());
         List<Integer> openingIds = new ArrayList<>(request.getOpeningSkillIdsList());
+        int unlocked = unlockedSchemesFor(player, nowSeconds());
         int err = SkillLoadoutRules.validateScheme(request.getSchemeId(), request.getRoleTag(),
                 passiveIds, pursuitIds, openingIds,
-                player.skillCatalog(), player.classId(), PlayerLevels.effective(player.level()), owned);
+                player.skillCatalog(), player.classId(), PlayerLevels.effective(player.level()), owned, unlocked);
         if (err != 0) {
             return failSaveLoadout(player, reqId, err);
         }
@@ -310,7 +331,7 @@ public final class ClassSkillService {
         return SaveSkillLoadoutResponse.newBuilder()
                 .setErrorMessage(tip(0))
                 .setRequestId(reqId)
-                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                .setState(bookForService(player))
                 .build();
     }
 
@@ -320,7 +341,7 @@ public final class ClassSkillService {
         if (!SkillLoadoutRules.validRequestId(reqId)) {
             return failSwitchLoadout(player, reqId, CommonErrorTip.common_error.kInvalidParameter_VALUE);
         }
-        if (!SkillLoadoutRules.validSchemeId(request.getSchemeId())) {
+        if (!SkillLoadoutRules.validSchemeId(request.getSchemeId(), unlockedSchemesFor(player, nowSeconds()))) {
             return failSwitchLoadout(player, reqId, kSkillLoadoutSchemeInvalid_VALUE);
         }
         PlayerSkills owned = player.learnedSkills();
@@ -334,7 +355,7 @@ public final class ClassSkillService {
                     .setErrorMessage(tip(0))
                     .setRequestId(reqId)
                     .setReplayed(true)
-                    .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                    .setState(bookForService(player))
                     .build();
         }
         int busy = checkWritable(player);
@@ -353,15 +374,19 @@ public final class ClassSkillService {
         return SwitchSkillLoadoutResponse.newBuilder()
                 .setErrorMessage(tip(0))
                 .setRequestId(reqId)
-                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                .setState(bookForService(player))
                 .build();
+    }
+
+    private ListSkillsResponse bookForService(ScenePlayer player) {
+        return book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean(), nowSeconds());
     }
 
     private SaveSkillLoadoutResponse failSaveLoadout(ScenePlayer player, String reqId, int error) {
         return SaveSkillLoadoutResponse.newBuilder()
                 .setErrorMessage(tip(error))
                 .setRequestId(reqId)
-                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                .setState(bookForService(player))
                 .build();
     }
 
@@ -369,7 +394,7 @@ public final class ClassSkillService {
         return SwitchSkillLoadoutResponse.newBuilder()
                 .setErrorMessage(tip(error))
                 .setRequestId(reqId)
-                .setState(book(player, activeSeason.getAsInt(), craftUnlockGate.getAsBoolean()))
+                .setState(bookForService(player))
                 .build();
     }
 

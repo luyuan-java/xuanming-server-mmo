@@ -20,7 +20,8 @@ import java.util.Set;
  */
 public final class SkillLoadoutRules {
 
-    public static final int MAX_SCHEMES = 3;
+    public static final int BASE_MAX_SCHEMES = 3;
+    public static final int MAX_SCHEMES = 6;
     public static final int MAX_ROLE_TAG = 3;
     public static final int MAX_PASSIVE_SLOTS = 3;
     public static final int MAX_PURSUIT_SLOTS = 1;
@@ -28,9 +29,17 @@ public final class SkillLoadoutRules {
 
     private SkillLoadoutRules() { }
 
+    public static int unlockedSchemes(boolean lightCardActive) {
+        return lightCardActive ? MAX_SCHEMES : BASE_MAX_SCHEMES;
+    }
+
     public static boolean validSchemeId(int schemeId) {
+        return validSchemeId(schemeId, MAX_SCHEMES);
+    }
+
+    public static boolean validSchemeId(int schemeId, int maxAllowed) {
         long u = Integer.toUnsignedLong(schemeId);
-        return u >= 1 && u <= MAX_SCHEMES;
+        return u >= 1 && u <= Integer.toUnsignedLong(maxAllowed);
     }
 
     public static boolean validRoleTag(int roleTag) {
@@ -49,7 +58,15 @@ public final class SkillLoadoutRules {
     public static int validateScheme(int schemeId, int roleTag, List<Integer> passiveIds,
                                      List<Integer> pursuitIds, List<Integer> openingIds,
                                      ClassSkillCatalog catalog, int classId, int level, PlayerSkills owned) {
-        if (!validSchemeId(schemeId) || !validRoleTag(roleTag)) {
+        return validateScheme(schemeId, roleTag, passiveIds, pursuitIds, openingIds,
+                catalog, classId, level, owned, MAX_SCHEMES);
+    }
+
+    public static int validateScheme(int schemeId, int roleTag, List<Integer> passiveIds,
+                                     List<Integer> pursuitIds, List<Integer> openingIds,
+                                     ClassSkillCatalog catalog, int classId, int level, PlayerSkills owned,
+                                     int maxAllowedSchemes) {
+        if (!validSchemeId(schemeId, maxAllowedSchemes) || !validRoleTag(roleTag)) {
             return kSkillLoadoutSchemeInvalid_VALUE;
         }
         if (passiveIds.size() > MAX_PASSIVE_SLOTS
@@ -147,9 +164,15 @@ public final class SkillLoadoutRules {
         return catalog.usable(classId, level, owned, skillId) ? row : null;
     }
 
-    /** 构造下发给客户端的 3 套流派构筑快照；未自定义前为方案 1 生成建议初始装配。 */
+    /** 构造下发给客户端的流派构筑快照；免费 3 套，仙途轻享卡生效期扩展至 6 套，到期保留已存方案。 */
     public static SkillLoadoutSnapshot buildSnapshot(ClassSkillCatalog catalog, int classId,
                                                      int level, PlayerSkills owned) {
+        return buildSnapshot(catalog, classId, level, owned, BASE_MAX_SCHEMES);
+    }
+
+    public static SkillLoadoutSnapshot buildSnapshot(ClassSkillCatalog catalog, int classId,
+                                                     int level, PlayerSkills owned, int unlockedSchemes) {
+        int clampedUnlocked = Math.max(BASE_MAX_SCHEMES, Math.min(MAX_SCHEMES, unlockedSchemes));
         boolean customEnabled = validSchemeId(owned.activeLoadoutSchemeId());
         SkillLoadoutSnapshot.Builder out = SkillLoadoutSnapshot.newBuilder()
                 .setCustomEnabled(customEnabled)
@@ -158,10 +181,15 @@ public final class SkillLoadoutRules {
                 .setMaxPassiveSlots(MAX_PASSIVE_SLOTS)
                 .setMaxPursuitSlots(MAX_PURSUIT_SLOTS)
                 .setMaxOpeningSlots(MAX_OPENING_SLOTS)
-                .setLastRequestId(owned.loadoutLastRequestId());
+                .setLastRequestId(owned.loadoutLastRequestId())
+                .setUnlockedSchemes(clampedUnlocked)
+                .setMaxSchemes(MAX_SCHEMES);
         for (int schemeId = 1; schemeId <= MAX_SCHEMES; schemeId++) {
-            SkillLoadoutSchemeInfo.Builder info = SkillLoadoutSchemeInfo.newBuilder().setSchemeId(schemeId);
             SkillLoadoutSchemeState stored = owned.loadoutScheme(schemeId);
+            if (schemeId > clampedUnlocked && stored == null) {
+                continue;
+            }
+            SkillLoadoutSchemeInfo.Builder info = SkillLoadoutSchemeInfo.newBuilder().setSchemeId(schemeId);
             if (stored != null) {
                 info.setRoleTag(stored.getRoleTag())
                         .addAllPassiveSkillIds(stored.getPassiveSkillIdsList())

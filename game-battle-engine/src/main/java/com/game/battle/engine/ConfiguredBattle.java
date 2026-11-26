@@ -274,6 +274,7 @@ final class ConfiguredBattle {
             }
         }
         int effectsBegin = ctx.events().eventCount();
+        boolean castSupportEffect = false;
         for (int i = 0; i < targets.size(); i++) {
             BattleUnit target = targets.get(i);
             if (target.fled()) continue;
@@ -290,8 +291,15 @@ final class ConfiguredBattle {
                 effects.apply(actor, target, effect.getId(), hit, 0);
                 switch (effect.getBattleOp()) {
                     case DAMAGE -> hit.damageOrdinal++;
-                    case HEAL -> hit.healOrdinal++;
-                    case SHIELD -> hit.shieldOrdinal++;
+                    case HEAL -> {
+                        hit.healOrdinal++;
+                        castSupportEffect = true;
+                    }
+                    case SHIELD -> {
+                        hit.shieldOrdinal++;
+                        castSupportEffect = true;
+                    }
+                    case REVIVE -> castSupportEffect = true;
                     default -> { }
                 }
             }
@@ -312,6 +320,9 @@ final class ConfiguredBattle {
         }
         if (origin == DIRECT && hitDirectly && actor.isActive()) {
             trigger(actor, targets.getFirst(), AFTER_SKILL, skill.getDamageType(), cast);
+        }
+        if (origin == DIRECT && castSupportEffect && actor.isActive()) {
+            trigger(actor, actor, AFTER_SUPPORT_CAST, 0, cast);
         }
     }
 
@@ -377,17 +388,27 @@ final class ConfiguredBattle {
     }
 
     void trigger(BattleUnit owner, BattleUnit other, int trigger, int type, Hit hit) {
-        if (!owner.isActive() || (hit.origin != DIRECT && trigger != AFTER_PERIODIC)) return;
+        boolean redirectedTake = trigger == AFTER_TAKE && hit.origin == REDIRECT;
+        boolean controlAttempt = trigger == AFTER_CONTROL_ATTEMPT;
+        if (!owner.isActive() || (hit.origin != DIRECT && trigger != AFTER_PERIODIC && !redirectedTake && !controlAttempt)) return;
         for (var initial : List.copyOf(owner.state().getBuffsList())) {
             int index = owner.findBuffIndex(initial.getBuffId());
             if (!owner.isActive() || index < 0) continue;
             var saved = owner.state().getBuffs(index);
             BuffTable row = row(saved);
-            if (row == null || row.getBattleOp() == 0 || row.getTriggerEvent() != trigger || !matches(row,type)) continue;
+            if (row == null || row.getBattleOp() == 0) continue;
+            boolean triggerMatches = row.getTriggerEvent() == trigger
+                    || (row.getTriggerEvent() == AFTER_DIRECT_ATTACK && (trigger == AFTER_BASIC || trigger == AFTER_SKILL));
+            if (!triggerMatches || !matches(row,type)) continue;
+            // A36 援护分担转伤仅允许触发 GrowingAura 叠层，绝不递归触发反击、反伤或回蓝。
+            if (redirectedTake && row.getBattleOp() != AURA) continue;
             if (trigger == AFTER_PERIODIC && !row.getRequiredTag().isEmpty()) {
                 if (!(row.getRequiredTag().equals("Poison") && hit.periodicState == POISON)
                         && !(row.getRequiredTag().equals("Burn") && hit.periodicState == BURN)) continue;
+            } else if (trigger == AFTER_PERIODIC) {
+                if (hit.periodicState != POISON && hit.periodicState != BURN) continue;
             } else if (!tagged(other,row.getRequiredTag()) && (row.getSecondRequiredTag().isEmpty() || !tagged(other,row.getSecondRequiredTag()))) continue;
+            if (row.getBattleOp() == AURA && trigger != AFTER_SUPPORT_CAST && owner.teamIndex() == other.teamIndex()) continue;
             int count = saved.getLastTriggerRound() == ctx.roundIndex() ? saved.getTriggerCount() : 0;
             if (row.getPerRoundLimit() > 0 && count >= row.getPerRoundLimit()) continue;
             if (row.getTriggerChance() > 0 && row.getTriggerChance() < 1 && ctx.rng().rand01() >= row.getTriggerChance()) continue;
@@ -423,6 +444,12 @@ final class ConfiguredBattle {
                 case CHILDREN, EVASION_CHARGE -> {
                     for (int id : row.getSubBuffList()) effects.apply(owner,owner,id,child,1);
                     for (int id : row.getTargetSubBuffList()) effects.apply(owner,other,id,child,1);
+                }
+                case AURA -> {
+                    int cap = Math.max(1, row.getStackLimit());
+                    if (saved.getStacks() < cap) {
+                        owner.state().getBuffsBuilder(index).setStacks(saved.getStacks() + 1);
+                    }
                 }
                 default -> { }
             }
@@ -636,10 +663,20 @@ final class ConfiguredBattle {
             actor.state().clearRoundEffectUsage();
             for (var entry : actor.state().getBuffsBuilderList()) {
                 BuffTable row = row(entry.getBuffTableId());
-                if (row == null || row.getBattleOp() != AURA || ctx.roundIndex() < Math.max(1,row.getStartRound())) continue;
+                if (row == null || row.getBattleOp() != AURA || row.getTriggerEvent() != ROUND_START
+                        || ctx.roundIndex() < Math.max(1,row.getStartRound())) continue;
                 var source = ctx.findActor(entry.getCasterId());
                 if (row.getRequireLivingCaster() == 0 || (source != null && source.isActive()))
                     entry.setStacks(Math.min(Math.max(1,row.getStackLimit()),entry.getStacks()+1));
+            }
+        }
+    }
+
+    void resetVolatileGrowingStacks(BattleUnit actor) {
+        for (var entry : actor.state().getBuffsBuilderList()) {
+            BuffTable row = row(entry.getBuffTableId());
+            if (row != null && row.getBattleOp() == AURA && row.getKeepOnDeath() == 0 && entry.getStacks() > 0) {
+                entry.setStacks(0);
             }
         }
     }

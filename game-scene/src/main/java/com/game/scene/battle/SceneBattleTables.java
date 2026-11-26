@@ -7,6 +7,7 @@ import com.game.table.ConfigTables;
 import com.game.table.DungeonTable;
 import com.game.table.ItemTable;
 import com.game.table.SkillTable;
+import com.game.table.SkillVfxCosmeticTable;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -22,17 +23,24 @@ import java.util.Set;
  */
 public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
                                 Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes,
-                                RankedPresetRules.Tables ranked, Map<Integer, DungeonTable> dungeons) {
+                                RankedPresetRules.Tables ranked, Map<Integer, DungeonTable> dungeons,
+                                Map<Integer, SkillVfxCosmeticTable> skillVfxCosmetics) {
 
     public SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
                              Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes) {
-        this(fingerprint, skills, castableSkills, battleUsableItems, classes, null, Map.of());
+        this(fingerprint, skills, castableSkills, battleUsableItems, classes, null, Map.of(), Map.of());
     }
 
     public SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
                              Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes,
                              RankedPresetRules.Tables ranked) {
-        this(fingerprint, skills, castableSkills, battleUsableItems, classes, ranked, Map.of());
+        this(fingerprint, skills, castableSkills, battleUsableItems, classes, ranked, Map.of(), Map.of());
+    }
+
+    public SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
+                             Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes,
+                             RankedPresetRules.Tables ranked, Map<Integer, DungeonTable> dungeons) {
+        this(fingerprint, skills, castableSkills, battleUsableItems, classes, ranked, dungeons, Map.of());
     }
 
     public SceneBattleTables {
@@ -41,6 +49,7 @@ public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Int
         battleUsableItems = Set.copyOf(battleUsableItems);
         classes = Map.copyOf(classes);
         dungeons = dungeons == null ? Map.of() : Map.copyOf(dungeons);
+        skillVfxCosmetics = skillVfxCosmetics == null ? Map.of() : Map.copyOf(skillVfxCosmetics);
     }
 
     public static SceneBattleTables from(ConfigTables tables) {
@@ -66,8 +75,19 @@ public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Int
         for (DungeonTable row : tables.dungeon().all()) {
             dungeons.put(row.getId(), row);
         }
+        Map<Integer, SkillVfxCosmeticTable> skillVfxs = new HashMap<>();
+        for (SkillVfxCosmeticTable row : tables.skillVfxCosmetic().all()) {
+            if (row.getEnabled() != 0 && row.getId() > 0) {
+                skillVfxs.put(row.getId(), row);
+            }
+        }
         return new SceneBattleTables(BattleTableFingerprint.compute(tables), skills, castable, usable, classes,
-                RankedPresetRules.Tables.from(tables), dungeons);
+                RankedPresetRules.Tables.from(tables), dungeons, skillVfxs);
+    }
+
+    /** 已启用的技能特效外观行；未启用或不存在为 null。 */
+    public SkillVfxCosmeticTable skillVfxCosmetic(int configId) {
+        return skillVfxCosmetics.get(configId);
     }
 
     /** 副本行（首领试炼/护卫救援/物法易势判定）；没有为 null。 */

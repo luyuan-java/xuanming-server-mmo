@@ -664,8 +664,8 @@ class RankedBattleEngineTest {
 
     @Test
     void 论剑V4队内战术标点隔离限频与复盘高光破势终结() {
-        RankedPresetTable charPreset = tables.rankedPresets().get(101);
-        RankedPresetTable petA = tables.rankedPresets().get(201);
+        RankedPresetTable charPreset = tables.rankedPreset().find(101).orElseThrow();
+        RankedPresetTable petA = tables.rankedPreset().find(201).orElseThrow();
 
         // 1. 1V1 不开放队内标点
         CreateBattleRequest soloReq = CreateBattleRequest.newBuilder()
@@ -722,15 +722,15 @@ class RankedBattleEngineTest {
         // 3. 连胜旗标透传 + 绝境翻盘徽记 + 破势终结
         BattlePlayerSnapshot strongA = BattlePlayerSnapshot.newBuilder()
                 .setPlayerId(6301L).setTeamIndex(0).setPlayerName("A").setLevel(30)
-                .setMaxHealth(1000L).setMaxMana(1000L)
+                .setMaxHealth(1000L).setMaxMana(1000L).setPhysicalAttack(2000L)
                 .setBaseAttributes(BaseAttributesComp.newBuilder()
-                        .setHealth(1000L).setMana(1000L).setAttack(600L).setSpeed(50L).build())
+                        .setHealth(1000L).setMana(1000L).setSpeed(50L).build())
                 .build();
         BattlePlayerSnapshot streakB = BattlePlayerSnapshot.newBuilder()
                 .setPlayerId(6302L).setTeamIndex(1).setPlayerName("B").setLevel(30)
-                .setMaxHealth(500L).setMaxMana(1000L)
+                .setMaxHealth(500L).setMaxMana(1000L).setPhysicalAttack(2800L)
                 .setBaseAttributes(BaseAttributesComp.newBuilder()
-                        .setHealth(500L).setMana(1000L).setAttack(850L).setSpeed(150L).build())
+                        .setHealth(500L).setMana(1000L).setSpeed(150L).build())
                 .build();
         CreateBattleRequest streakReq = CreateBattleRequest.newBuilder()
                 .setBattleId(9703L).setBattleConfigId(5)

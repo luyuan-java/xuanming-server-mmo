@@ -219,8 +219,8 @@ public record WorldChannelProperties(
      */
     public record WorldMapPlay(List<Integer> openWorldMapIds, List<Integer> tideCandidateMapIds,
                                Duration tideInterval, Duration tideDuration, Integer crowdedPlayerThreshold) {
-        public static final List<Integer> DEFAULT_OPEN_WORLD_MAPS = List.of(1, 2, 5);
-        public static final List<Integer> DEFAULT_TIDE_CANDIDATES = List.of(2, 5);
+        public static final List<Integer> DEFAULT_OPEN_WORLD_MAPS = List.of(1, 2, 3, 5);
+        public static final List<Integer> DEFAULT_TIDE_CANDIDATES = List.of(2, 3, 5);
         public static final Duration DEFAULT_TIDE_INTERVAL = Duration.ofHours(1);
         public static final Duration DEFAULT_TIDE_DURATION = Duration.ofMinutes(40);
         public static final int DEFAULT_CROWDED_THRESHOLD = 8;

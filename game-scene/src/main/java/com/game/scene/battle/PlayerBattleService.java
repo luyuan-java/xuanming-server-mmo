@@ -143,6 +143,9 @@ public final class PlayerBattleService implements BattleHooks {
     private com.game.scene.trial.TrialJournalService trialJournalService;
     private com.game.scene.festivalbeast.FestivalBeastService festivalBeastService;
     private com.game.scene.season.SeasonService seasonService;
+    private com.game.scene.attribute.AttributeService attributeService;
+    private int notifyAttributePanelChanged;
+    private int notifyPetListChanged;
     private java.util.function.BiConsumer<ScenePlayer,RuntimeException> inboxFailure;
     /** 仅通知缓存，不参与授权/去重；永久依据仍为Inbox SQL原收据和存档域水位。 */
     private final Map<ScenePlayer,BattleSettlementData> inboxNotifications=new java.util.WeakHashMap<>();
@@ -159,6 +162,15 @@ public final class PlayerBattleService implements BattleHooks {
 
     public PlayerBattleService withSeasonService(com.game.scene.season.SeasonService service) {
         this.seasonService = service;
+        return this;
+    }
+
+    public PlayerBattleService withProgressionPush(com.game.scene.attribute.AttributeService attributeService,
+                                                   int notifyAttributePanelChanged,
+                                                   int notifyPetListChanged) {
+        this.attributeService = attributeService;
+        this.notifyAttributePanelChanged = notifyAttributePanelChanged;
+        this.notifyPetListChanged = notifyPetListChanged;
         return this;
     }
 
@@ -246,6 +258,19 @@ public final class PlayerBattleService implements BattleHooks {
         boolean useFreePreset = request.hasRankedContext() && request.getRankedContext().getUseFreePreset();
         boolean isFormalRanked = request.hasRankedContext() && request.getRankedContext().getSeasonId() != 0;
         var dungeonRow = request.getBattleConfigId() != 0 ? tables.dungeon(request.getBattleConfigId()) : null;
+        // 野外灵宠栖息地场景权威校验（world-map-play-v2 §10，与 C++ PlayerBattleSystem::PrepareBattle 同口径）：
+        // 允许捕宠且绑定了野外地图（scene_id > 1）的栖息地副本，必须身处对应野外地图才能备战，防原地跨图遇敌。
+        if (dungeonRow != null && dungeonRow.getAllowPetCapture() == 1 && dungeonRow.getSceneId() > 1) {
+            int currentSceneConfigId = player.scene() != null ? player.scene().configId() : 0;
+            if (currentSceneConfigId != dungeonRow.getSceneId()) {
+                log.warn("备战被拒：野外灵宠栖息地场景不匹配 player={} battle_id={} battle_config_id={} required_scene={} current_scene={}",
+                        Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
+                        Integer.toUnsignedString(request.getBattleConfigId()),
+                        Integer.toUnsignedString(dungeonRow.getSceneId()),
+                        Integer.toUnsignedString(currentSceneConfigId));
+                return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
+            }
+        }
         int bossTrialKind = dungeonRow != null ? dungeonRow.getBossTrialKind() : 0;
         boolean isBossTrial = (bossTrialKind >= 1 && bossTrialKind <= 4) || bossTrialKind == 8;
         boolean isGuardRescue = bossTrialKind == 5;
@@ -1322,6 +1347,23 @@ public final class PlayerBattleService implements BattleHooks {
                     inboxNotifications.remove(player);
                     world.sendTo(player, push(battleEndId,
                             buildBattleEndPush(player, notification.getBattleId(), notification)));
+                    var recorded = player.battleResults().findByBattleId(notification.getBattleId());
+                    if (recorded != null) {
+                        boolean leveledUp = Integer.compareUnsigned(recorded.getLevelAfter(), recorded.getLevelBefore()) > 0;
+                        if (attributeService != null && notifyAttributePanelChanged != 0
+                                && (recorded.getExpGain() != 0L || leveledUp)) {
+                            world.sendTo(player, push(notifyAttributePanelChanged,
+                                    com.game.proto.AttributePanelChangedS2C.newBuilder()
+                                            .setPanel(attributeService.buildPanel(player))
+                                            .build()));
+                        }
+                        if (notifyPetListChanged != 0 && leveledUp) {
+                            world.sendTo(player, push(notifyPetListChanged,
+                                    com.game.proto.PetListChangedS2C.newBuilder()
+                                            .setPets(pets.buildList(player))
+                                            .build()));
+                        }
+                    }
                 }
             }
         }
@@ -1340,7 +1382,22 @@ public final class PlayerBattleService implements BattleHooks {
                     .setSeasonSealPointsAdded(recorded.getSeasonSealPointsAdded())
                     .setSeasonSealProgressAfter(recorded.getSeasonSealProgressAfter())
                     .setSeasonSealMaxPoints(recorded.getSeasonSealMaxPoints())
-                    .setSeasonHonorNewlyUnlocked(recorded.getSeasonHonorNewlyUnlocked());
+                    .setSeasonHonorNewlyUnlocked(recorded.getSeasonHonorNewlyUnlocked())
+                    .setLevelBefore(recorded.getLevelBefore())
+                    .setLevelAfter(recorded.getLevelAfter())
+                    .setExpGain(recorded.getExpGain())
+                    .setTotalExpAfter(recorded.getTotalExpAfter())
+                    .setNextLevelTotalExp(recorded.getNextLevelTotalExp())
+                    .setBattleSilverDiminished(recorded.getBattleSilverDiminished());
+            long silverGain = 0L;
+            for (var c : recorded.getCurrenciesList()) {
+                if (c.getCurrencyType() == com.game.scene.player.Wallet.GOLD) {
+                    silverGain += c.getAmount();
+                }
+            }
+            if (silverGain != 0L) {
+                endPush.setSilverGain(silverGain);
+            }
             if (recorded.getSeasonId() != 0) {
                 endPush.setSeasonId(recorded.getSeasonId());
             }

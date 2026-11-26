@@ -40,8 +40,10 @@ public final class PlayerPets {
         private final Map<Integer, PetEntryPresetState> entryPresets = new TreeMap<>(Integer::compareUnsigned);
         private long entryStateVersion, entryLastBaseVersion, tierLastRequestId;
         private int entryLastConfigVersion, cultivationTier, activeEntryPresetSlot,
-                tierLastExpectedTier, tierLastResultTier, entryLastPresetSlot, entryLastPresetTag;
+                tierLastExpectedTier, tierLastResultTier, entryLastPresetSlot, entryLastPresetTag, cosmeticId;
         private String entryLastRequestId = "";
+        public int cosmeticId() { return cosmeticId; }
+        public void setCosmeticId(int value) { cosmeticId = value; }
         public Map<Integer,Integer> entryAllocated() { return Collections.unmodifiableMap(entryAllocated); }
         public long entryStateVersion() { return entryStateVersion == 0 ? 1 : entryStateVersion; }
         public long rawEntryStateVersion() { return entryStateVersion; }
@@ -246,6 +248,7 @@ public final class PlayerPets {
                     .setTierLastResultTier(tierLastResultTier)
                     .setEntryLastPresetSlot(entryLastPresetSlot)
                     .setEntryLastPresetTag(entryLastPresetTag)
+                    .setCosmeticId(cosmeticId)
                     .setUnknownFields(unknownFields);
             allocated.forEach((dimension, points) -> entry.putAllocated(dimension, (int) (long) points));
             aptitude.forEach((dimension, value) -> entry.putAptitude(dimension, (int) (long) value));
@@ -279,6 +282,7 @@ public final class PlayerPets {
             restored.tierLastResultTier = entry.getTierLastResultTier();
             restored.entryLastPresetSlot = entry.getEntryLastPresetSlot();
             restored.entryLastPresetTag = entry.getEntryLastPresetTag();
+            restored.cosmeticId = entry.getCosmeticId();
             return restored;
         }
 

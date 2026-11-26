@@ -159,8 +159,8 @@ class ConfiguredBattleCatalogTest {
 
     @Test void 每个正式主动技能都能被许可主体实际施放() {
         var catalog = TABLES.skill().all().stream().filter(s -> s.getBattleModel() == 1).toList();
-        assertThat(catalog).hasSize(93);
-        assertThat(TABLES.buff().all().stream().filter(b -> b.getBattleOp() != 0).count()).isEqualTo(102);
+        assertThat(catalog).hasSize(103);
+        assertThat(TABLES.buff().all().stream().filter(b -> b.getBattleOp() != 0).count()).isEqualTo(108);
         assertThat(DATA.skill(10040).orElseThrow().getName()).isEqualTo("太清灵盾");
         assertThat(DATA.skill(10115).orElseThrow().getForbidCopy()).isEqualTo(1);
         assertThat(DATA.skill(10116).orElseThrow().getForbidCopy()).isEqualTo(1);
@@ -183,7 +183,7 @@ class ConfiguredBattleCatalogTest {
                 casts++;
             }
         }
-        assertThat(casts).isEqualTo(74);
+        assertThat(casts).isEqualTo(78);
     }
 
     @Test void 策略战法副目标按确定性策略补选且一次性攻印随伤害消耗() {
