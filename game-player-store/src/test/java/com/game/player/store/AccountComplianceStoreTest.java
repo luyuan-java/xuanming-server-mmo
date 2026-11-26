@@ -83,11 +83,20 @@ class AccountComplianceStoreTest {
         assertThat(store.createPlayer(newPlayer(201, "acc_rn", "实名测试号"))).isEqualTo(CreateResult.CREATED);
         assertThat(store.findRealNamePiByPlayerId(201)).isEqualTo(PI_ADULT);
 
-        // 渠道身份写入与按角色号回查
+        // 渠道身份写入与按角色号回查；后续空 openId 重连不得抹掉已有 openId
         store.upsertAccountChannelIdentity("acc_rn", "wechat", "openid_xyz");
+        store.upsertAccountChannelIdentity("acc_rn", "wechat", "");
         AccountChannelIdentity id = store.findPlayerChannelIdentity(201).orElseThrow();
         assertThat(id.channel()).isEqualTo("wechat");
         assertThat(id.openId()).isEqualTo("openid_xyz");
+
+        // 尚未回填 account_channel_identity 的角色也应回查出所属账号以支持前缀路由
+        store.ensureAccount("wx_legacy_openid");
+        assertThat(store.createPlayer(newPlayer(202, "wx_legacy_openid", "老渠道角色"))).isEqualTo(CreateResult.CREATED);
+        AccountChannelIdentity legacy = store.findPlayerChannelIdentity(202).orElseThrow();
+        assertThat(legacy.account()).isEqualTo("wx_legacy_openid");
+        assertThat(legacy.channel()).isEmpty();
+        assertThat(legacy.openId()).isEmpty();
 
         // 客服重置后清零，再次重置幂等返回 hadRealName=false
         ResetRealNameOutcome reset1 = store.resetAccountRealName("acc_rn");

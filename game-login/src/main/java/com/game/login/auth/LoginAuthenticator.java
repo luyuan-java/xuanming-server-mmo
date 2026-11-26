@@ -39,10 +39,18 @@ public final class LoginAuthenticator {
      * @param channelAuthType 原始登录渠道（{@code access_token} 场景保留签发令牌时的原始渠道如 {@code wechat}/{@code qq}，
      *                        供防沉迷与渠道身份判定使用；直登场景与 {@code authType} 相同）
      */
-    public record Authenticated(String account, String authType, String channelAuthType) {
+    public record Authenticated(String account, String authType, String channelAuthType, String openId) {
+
+        public Authenticated {
+            openId = openId == null ? "" : openId;
+        }
 
         public Authenticated(String account, String authType) {
-            this(account, authType, authType);
+            this(account, authType, authType, "");
+        }
+
+        public Authenticated(String account, String authType, String channelAuthType) {
+            this(account, authType, channelAuthType, "");
         }
 
         /** access token 登录不再签新令牌（基线：避免令牌搅动）。 */
@@ -130,7 +138,8 @@ public final class LoginAuthenticator {
             return Optional.empty();
         }
         try {
-            return provider.authenticate(request.getAuthToken()).map(account -> new Authenticated(account, authType));
+            return provider.authenticateWithIdentity(request.getAuthToken())
+                    .map(id -> new Authenticated(id.account(), authType, authType, id.openId()));
         } catch (AuthProviderUnavailableException e) {
             // 消息由本包实现给出，只带固定说明与渠道错误码，不含凭据
             log.warn("外部认证渠道故障 auth_type={} reason={}", authType, e.getMessage());

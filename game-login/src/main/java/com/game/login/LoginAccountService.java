@@ -14,6 +14,8 @@ import com.game.login.token.LoginTokens;
 import com.game.login.token.TokenData;
 import com.game.player.store.AccountLifecycle;
 import com.game.player.store.PlayerStore;
+import com.game.proto.data_service.GetPlayerChannelIdentityRequest;
+import com.game.proto.data_service.GetPlayerChannelIdentityResponse;
 import com.game.proto.login.AccountDeletionRequest;
 import com.game.proto.login.AccountDeletionResponse;
 import com.game.proto.login.CancelAccountDeletionRequest;
@@ -107,6 +109,27 @@ public class LoginAccountService implements AccountLoginService {
             return CompletableFuture.failedFuture(new IllegalStateException("player store not wired"));
         }
         return onWorkers(() -> store.countByZone(zoneId));
+    }
+
+    @Override
+    public CompletableFuture<GetPlayerChannelIdentityResponse> getPlayerChannelIdentity(
+            GetPlayerChannelIdentityRequest request) {
+        if (store == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("player store not wired"));
+        }
+        return onWorkers(() -> {
+            if (request == null || request.getPlayerId() == 0L) {
+                return GetPlayerChannelIdentityResponse.getDefaultInstance();
+            }
+            return store.findPlayerChannelIdentity(request.getPlayerId())
+                    .map(id -> GetPlayerChannelIdentityResponse.newBuilder()
+                            .setFound(true)
+                            .setAccount(id.account())
+                            .setChannel(id.channel())
+                            .setOpenId(id.openId())
+                            .build())
+                    .orElseGet(GetPlayerChannelIdentityResponse::getDefaultInstance);
+        });
     }
 
     /** 实名提交（对齐 {@code SubmitRealNameLogic}）：未开防沉迷回空应答；令牌无效回 2000，其余按带内 tip。 */

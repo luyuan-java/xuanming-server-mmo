@@ -8,6 +8,13 @@ import java.util.Optional;
  */
 public interface ExternalAuthProvider {
 
+    /** 认证通过的账号与原始渠道 openid（微信等平台内容安全审核需要 openid，即使账号主键采用 unionid）。 */
+    record VerifiedIdentity(String account, String openId) {
+        public VerifiedIdentity {
+            openId = openId == null ? "" : openId;
+        }
+    }
+
     /**
      * 认证通过返回账号；凭据无效为空（登录回 2000）。渠道或本服务渠道配置的故障（HTTP 失败 / 非 2xx / 坏应答、渠道侧错误码、
      * 缺必需的 unionid）抛 {@link AuthProviderUnavailableException}（登录回故障码 kLoginAuthProviderUnavailable）；
@@ -15,4 +22,9 @@ public interface ExternalAuthProvider {
      * 可阻塞（Redis / HTTP），只在 login 工作线程上调用。实现不得把凭据写进日志或异常消息。
      */
     Optional<String> authenticate(String authToken);
+
+    /** 认证并返回账号与原始渠道 openid；默认沿用 {@link #authenticate(String)} 并留空 openId。 */
+    default Optional<VerifiedIdentity> authenticateWithIdentity(String authToken) {
+        return authenticate(authToken).map(account -> new VerifiedIdentity(account, ""));
+    }
 }

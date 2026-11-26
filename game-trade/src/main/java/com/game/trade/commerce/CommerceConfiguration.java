@@ -120,6 +120,7 @@ public class CommerceConfiguration {
                     var resp = contentGuard.checkText(com.game.proto.content_guard.CheckTextRequest.newBuilder()
                             .setScene(com.game.proto.content_guard.TextScene.TEXT_SCENE_TRADE_TITLE)
                             .setPlayerId(playerId)
+                            .setAccount(account == null ? "" : account)
                             .setText(title)
                             .build());
                     if (resp == null) {

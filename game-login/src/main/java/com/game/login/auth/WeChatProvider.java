@@ -61,6 +61,11 @@ public final class WeChatProvider implements ExternalAuthProvider, AutoCloseable
 
     @Override
     public Optional<String> authenticate(String code) {
+        return authenticateWithIdentity(code).map(VerifiedIdentity::account);
+    }
+
+    @Override
+    public Optional<VerifiedIdentity> authenticateWithIdentity(String code) {
         if (code == null || code.isEmpty()) {
             return Optional.empty();
         }
@@ -96,9 +101,9 @@ public final class WeChatProvider implements ExternalAuthProvider, AutoCloseable
             if (requireUnionId) {
                 throw new AuthProviderUnavailableException("微信认证没有返回 unionid（应用未绑定开放平台主体；require-union-id=true）");
             }
-            return Optional.of("wx_" + openid);
+            return Optional.of(new VerifiedIdentity("wx_" + openid, openid));
         }
-        return Optional.of("wx_" + unionid);
+        return Optional.of(new VerifiedIdentity("wx_" + unionid, openid));
     }
 
     @Override

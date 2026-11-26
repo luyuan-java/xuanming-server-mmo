@@ -144,6 +144,31 @@ final class PlatformReviewerTest {
         assertEquals(2, dyCheckCalls.get());
     }
 
+    @Test
+    void 半配平台凭据或缺渠道回查依赖必须启动期拒绝() {
+        var halfWx = new ContentGuardProperties(false, 4096, "",
+                new ContentGuardProperties.PlatformProperties(1500, 250, 2500, 150, "wx_app", "", baseUrl, "", "", ""));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> ContentGuardApplication.createPlatformReviewer(halfWx, json, http, pid -> PlatformReviewer.Identity.EMPTY));
+
+        var halfDy = new ContentGuardProperties(false, 4096, "",
+                new ContentGuardProperties.PlatformProperties(1500, 250, 2500, 150, "", "", "", "", "dy_sec", baseUrl));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> ContentGuardApplication.createPlatformReviewer(halfDy, json, http, pid -> PlatformReviewer.Identity.EMPTY));
+
+        var fullWx = new ContentGuardProperties(false, 4096, "",
+                new ContentGuardProperties.PlatformProperties(1500, 250, 2500, 150, "wx_app", "wx_sec", baseUrl, "", "", ""));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> ContentGuardApplication.createPlatformReviewer(fullWx, json, http, null));
+
+        wxReject = true;
+        PlatformReviewer wired = ContentGuardApplication.createPlatformReviewer(fullWx, json, http,
+                pid -> new PlatformReviewer.Identity("wechat", "openid_after_login", "wx_union_1"));
+        ReviewResult postLogin = wired.review(TextScene.TEXT_SCENE_ROLE_NAME, 9001L, "", "含违规词内容", false);
+        assertEquals(Outcome.REJECT, postLogin.outcome());
+        assertEquals(1, wxCheckCalls.get());
+    }
+
     private static void respondJson(HttpExchange ex, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().add("Content-Type", "application/json");

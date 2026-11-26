@@ -439,15 +439,18 @@ public interface PlayerMapper {
             INSERT INTO account_channel_identity (account, channel, open_id, updated_at)
             VALUES (#{account}, #{channel}, #{openId}, #{updatedAt})
             ON DUPLICATE KEY UPDATE channel = VALUES(channel),
-                                    open_id = VALUES(open_id),
+                                    open_id = CASE WHEN VALUES(open_id) <> '' THEN VALUES(open_id) ELSE open_id END,
                                     updated_at = VALUES(updated_at)
             """)
     int upsertAccountChannelIdentity(@Param("account") String account, @Param("channel") String channel,
                                      @Param("openId") String openId, @Param("updatedAt") long updatedAt);
 
     @Select("""
-            SELECT c.account, c.channel, c.open_id, c.updated_at
-              FROM player p JOIN account_channel_identity c ON c.account = p.account
+            SELECT p.account,
+                   COALESCE(c.channel, '') AS channel,
+                   COALESCE(c.open_id, '') AS open_id,
+                   COALESCE(c.updated_at, 0) AS updated_at
+              FROM player p LEFT JOIN account_channel_identity c ON c.account = p.account
              WHERE p.player_id = #{playerId}
             """)
     @ConstructorArgs({

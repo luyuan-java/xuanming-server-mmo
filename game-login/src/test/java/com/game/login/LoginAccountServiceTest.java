@@ -66,4 +66,19 @@ class LoginAccountServiceTest {
         assertThatThrownBy(() -> full.login(LoginRequest.getDefaultInstance()).join())
                 .isInstanceOf(CompletionException.class).hasCauseInstanceOf(RejectedExecutionException.class);
     }
+
+    @Test
+    void 按角色号回查登录渠道与openid供内容安全平台审核路由() {
+        when(store.findPlayerChannelIdentity(8801L))
+                .thenReturn(java.util.Optional.of(new com.game.player.store.AccountChannelIdentity(
+                        "wx_u1", "wechat", "openid_real_8801", 1000L)));
+        LoginAccountService full = new LoginAccountService(accountLogin, new RefreshTokenHandler(tokens),
+                tokens, store, null, null, Runnable::run);
+        var resp = full.getPlayerChannelIdentity(
+                com.game.proto.data_service.GetPlayerChannelIdentityRequest.newBuilder().setPlayerId(8801L).build()).join();
+        assertThat(resp.getFound()).isTrue();
+        assertThat(resp.getAccount()).isEqualTo("wx_u1");
+        assertThat(resp.getChannel()).isEqualTo("wechat");
+        assertThat(resp.getOpenId()).isEqualTo("openid_real_8801");
+    }
 }

@@ -192,7 +192,7 @@ public final class AccountLogin {
                 }
                 throw e;
             }
-            recordChannelIdentityQuietly(account, channelAuthType);
+            recordChannelIdentityQuietly(account, channelAuthType, authenticated.get().openId());
 
             if (deviceKey != null && antiAddiction != null) {
                 try {
@@ -355,12 +355,12 @@ public final class AccountLogin {
         return res == null ? Optional.empty() : res;
     }
 
-    private void recordChannelIdentityQuietly(String account, String channel) {
+    private void recordChannelIdentityQuietly(String account, String channel, String openId) {
         if (channel == null || channel.isEmpty() || "access_token".equals(channel)) {
             return;
         }
         try {
-            store.upsertAccountChannelIdentity(account, channel, "");
+            store.upsertAccountChannelIdentity(account, channel, openId == null ? "" : openId);
         } catch (RuntimeException e) {
             log.debug("记录账号渠道身份失败（不影响登录） account={} channel={}: {}", account, channel, e.getClass().getSimpleName());
         }

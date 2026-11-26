@@ -1,5 +1,7 @@
 package com.game.api;
 
+import com.game.proto.data_service.GetPlayerChannelIdentityRequest;
+import com.game.proto.data_service.GetPlayerChannelIdentityResponse;
 import com.game.proto.login.AccountDeletionRequest;
 import com.game.proto.login.AccountDeletionResponse;
 import com.game.proto.login.CancelAccountDeletionRequest;
@@ -42,5 +44,10 @@ public interface AccountLoginService {
     /** 统计该区历史上已建角色总数（含已删除角色，删角不减；供网关按角色软上限自动暂停创角）。 */
     default CompletableFuture<Long> countZoneRoles(int zoneId) {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("countZoneRoles not implemented"));
+    }
+
+    /** 按角色号查询所属账号与登录渠道/openid（供 game-content-guard 登录后平台内容安全审核路由使用）。 */
+    default CompletableFuture<GetPlayerChannelIdentityResponse> getPlayerChannelIdentity(GetPlayerChannelIdentityRequest request) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("getPlayerChannelIdentity not implemented"));
     }
 }

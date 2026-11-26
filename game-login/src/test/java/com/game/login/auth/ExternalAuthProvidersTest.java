@@ -76,6 +76,8 @@ class ExternalAuthProvidersTest {
         WeChatProvider wechat = new WeChatProvider("wx_app", "app-secret", endpoint, LOCAL);
         wechatBody = "{\"access_token\":\"t\",\"openid\":\"o1\",\"unionid\":\"u1\"}";
         assertThat(wechat.authenticate("code&1")).contains("wx_u1");
+        assertThat(wechat.authenticateWithIdentity("code&1"))
+                .contains(new ExternalAuthProvider.VerifiedIdentity("wx_u1", "o1"));
         assertThat(requests.get(0)).containsEntry("appid", "wx_app").containsEntry("secret", "app-secret")
                 .containsEntry("code", "code&1").containsEntry("grant_type", "authorization_code");
     }
