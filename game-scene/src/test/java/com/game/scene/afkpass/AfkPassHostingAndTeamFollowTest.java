@@ -163,6 +163,71 @@ class AfkPassHostingAndTeamFollowTest {
     }
 
     @Test
+    void 购买与GM修改挂机月卡实时推送属性面板变更_重放不重复推送() throws Exception {
+        java.nio.file.Path dir = java.nio.file.Files.isDirectory(java.nio.file.Path.of("../config-data/tables"))
+                ? java.nio.file.Path.of("../config-data/tables") : java.nio.file.Path.of("config-data/tables");
+        com.game.table.ConfigTables config = com.game.table.ConfigTables.load(dir);
+
+        ManualClock clock = new ManualClock();
+        clock.advanceMillis(1_800_000_000_000L);
+        SceneMetrics metrics = new SceneMetrics(new SimpleMeterRegistry());
+        CurrencyService currency = new CurrencyService(AssetAudit.log(), GainAnomalyDetector.off(), metrics, clock);
+        com.game.scene.attribute.AttributeService attributes = new com.game.scene.attribute.AttributeService(
+                com.game.scene.attribute.AttributeTables.from(config), clock, currency);
+        AfkPassTables tables = AfkPassTables.of(new AfkPassTables.Rule(30, CURRENCY_JADE, 300, 60, 72));
+        AfkPassService afkPass = new AfkPassService(tables, currency, clock);
+
+        RecordingSink clientSink = new RecordingSink();
+        FakePlayerRepository repo = new FakePlayerRepository();
+        AtomicLong ids = new AtomicLong(500);
+        SceneWorld world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, clientSink, repo, ids::incrementAndGet,
+                clock, metrics, attributes::initializeOnLoad, PlayerSnapshots.NONE).withAfkPassService(afkPass);
+        ClientRequestHandler handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV,
+                List.of(new AfkPassFeature(afkPass, attributes, Contracts.REGISTRY)));
+
+        Scene scene = world.createScene(1);
+        enterPlayer(world, repo, 4001L, 1, 401, scene.sceneId(), 1L);
+        ScenePlayer p = world.playerById(4001L);
+        currency.add(p, CURRENCY_JADE, 1000, AssetAudit.Reason.GM_GRANT, 0);
+        int baseMaxSchemes = attributes.buildPanel(p).getMaxSchemes();
+        assertThat(baseMaxSchemes).isLessThan(4);
+
+        int buyId = Contracts.REGISTRY.requireId(AfkPassFeature.SERVICE, "BuyAfkPass");
+        int gmId = Contracts.REGISTRY.requireId(AfkPassFeature.SERVICE, "GmSetAfkPass");
+        int notifyPanelId = Contracts.REGISTRY.requireId("SceneAttributeClientPlayer", "NotifyAttributePanelChanged");
+
+        // 首次购买：推送属性面板变更（maxSchemes 提升至 4）
+        clientSink.clear();
+        forward(handler, 1, 401, 4001L, buyId, 1, BuyAfkPassRequest.newBuilder()
+                .setClientRequestId(901L).setExpectedCurrencyType(CURRENCY_JADE).setExpectedPrice(300L)
+                .build().toByteString());
+        List<MessageContent> afterBuy = clientSink.to(1, 401);
+        List<MessageContent> buyPanels = afterBuy.stream().filter(m -> m.getMessageId() == notifyPanelId).toList();
+        assertThat(buyPanels).hasSize(1);
+        assertThat(com.game.proto.AttributePanelChangedS2C.parseFrom(buyPanels.getFirst().getSerializedMessage())
+                .getPanel().getMaxSchemes()).isEqualTo(4);
+        assertThat(BuyAfkPassResponse.parseFrom(lastBody(clientSink, 1, 401)).getReplayed()).isFalse();
+
+        // 幂等重放：不重复推送属性面板
+        clientSink.clear();
+        forward(handler, 1, 401, 4001L, buyId, 2, BuyAfkPassRequest.newBuilder()
+                .setClientRequestId(901L).setExpectedCurrencyType(CURRENCY_JADE).setExpectedPrice(300L)
+                .build().toByteString());
+        assertThat(clientSink.to(1, 401).stream().filter(m -> m.getMessageId() == notifyPanelId).toList()).isEmpty();
+        assertThat(BuyAfkPassResponse.parseFrom(lastBody(clientSink, 1, 401)).getReplayed()).isTrue();
+
+        // GM 清零：推送属性面板变更（maxSchemes 回到基线）
+        clientSink.clear();
+        forward(handler, 1, 401, 4001L, gmId, 3,
+                GmSetAfkPassRequest.newBuilder().setRemainingSeconds(0).build().toByteString());
+        List<MessageContent> gmPanels = clientSink.to(1, 401).stream()
+                .filter(m -> m.getMessageId() == notifyPanelId).toList();
+        assertThat(gmPanels).hasSize(1);
+        assertThat(com.game.proto.AttributePanelChangedS2C.parseFrom(gmPanels.getFirst().getSerializedMessage())
+                .getPanel().getMaxSchemes()).isEqualTo(baseMaxSchemes);
+    }
+
+    @Test
     void 断线保留25秒退出_有挂机月卡自动离线托管并支持无损接回与到期退场() {
         ManualClock clock = new ManualClock();
         clock.advanceMillis(1_800_000_000_000L);

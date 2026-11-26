@@ -800,7 +800,7 @@ public class SceneNode implements SmartLifecycle {
             features.add(new com.game.scene.rename.PlayerRenameFeature(renameService));
         }
         if (afkPassService != null) {
-            features.add(new com.game.scene.afkpass.AfkPassFeature(afkPassService));
+            features.add(new com.game.scene.afkpass.AfkPassFeature(afkPassService, attributes, registry));
         }
         if (mysteryMerchantService != null) {
             features.add(new com.game.scene.merchant.MysteryMerchantFeature(mysteryMerchantService, bagFeature));
