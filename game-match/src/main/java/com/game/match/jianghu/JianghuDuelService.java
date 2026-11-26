@@ -774,21 +774,26 @@ public final class JianghuDuelService {
         if (!refundedInviteIds.add(duelInviteId)) {
             return;
         }
-        long nowMs = clockMs.getAsLong();
-        ports.sendSilverRefundMail(SendMailRequest.newBuilder()
-                .setSenderKind(6)
-                .setRequestId(duelInviteId)
-                .setRecipientPlayerId(payerId)
-                .setTitle("天墉生死状战书银两退还")
-                .setBody("您发起的天墉生死状未能正常开战或作废，已全额退还普通战书银两，请查收附件。")
-                .setAttachments(MailAttachments.newBuilder()
-                        .addCurrencies(MailCurrency.newBuilder()
-                                .setCurrencyType(CurrencyType.CURRENCY_TYPE_GOLD_VALUE)
-                                .setAmount(silverCost)
-                                .build())
-                        .build())
-                .setExpireMs(nowMs + 30L * 24 * 3600 * 1000)
-                .build());
+        try {
+            // expire_ms 传 0 交由 game-mail 套用默认 30 天有效期，确保同 request_id 跨秒重试摘要字节级一致
+            ports.sendSilverRefundMail(SendMailRequest.newBuilder()
+                    .setSenderKind(6)
+                    .setRequestId(duelInviteId)
+                    .setRecipientPlayerId(payerId)
+                    .setTitle("天墉生死状战书银两退还")
+                    .setBody("您发起的天墉生死状未能正常开战或作废，已全额退还普通战书银两，请查收附件。")
+                    .setAttachments(MailAttachments.newBuilder()
+                            .addCurrencies(MailCurrency.newBuilder()
+                                    .setCurrencyType(CurrencyType.CURRENCY_TYPE_GOLD_VALUE)
+                                    .setAmount(silverCost)
+                                    .build())
+                            .build())
+                    .setExpireMs(0L)
+                    .build());
+        } catch (RuntimeException e) {
+            refundedInviteIds.remove(duelInviteId);
+            throw e;
+        }
     }
 
     private List<Long> resolveSide(long captainId, List<Long> requested) {

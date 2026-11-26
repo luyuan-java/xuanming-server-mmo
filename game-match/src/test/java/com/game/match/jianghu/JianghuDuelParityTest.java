@@ -138,6 +138,7 @@ class JianghuDuelParityTest {
         svc.applyBattleResult(voidEv, revs);
         svc.applyBattleResult(voidEv, revs);
         assertThat(refundMails).hasSize(1);
+        assertThat(refundMails.get(0).getExpireMs()).isZero();
         assertThat(refundMails.get(0).getAttachments().getCurrencies(0).getCurrencyType())
                 .isEqualTo(CurrencyType.CURRENCY_TYPE_GOLD_VALUE);
         assertThat(refundMails.get(0).getAttachments().getCurrencies(0).getAmount()).isEqualTo(500L);
