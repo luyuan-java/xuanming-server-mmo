@@ -49,7 +49,7 @@ class SpiritShopFeatureAndServiceTest {
         assertThat(f.currency.add(player, Wallet.DIAMOND, 400L, Reason.GM_GRANT).ok()).isTrue();
         assertThat(f.currency.add(player, Wallet.BOUND_DIAMOND, 500L, Reason.GM_GRANT).ok()).isTrue();
 
-        // 1. 509 查询：7 件在售商品按 (tab_id, sort_order, goods_id) 排好，双余额分别展示
+        // 1. 509 查询：9 件在售商品按 (tab_id, sort_order, goods_id) 排好，双余额分别展示
         GetSpiritShopInfoResponse infoResp = call(f, player, "GetSpiritShopInfo",
                 GetSpiritShopInfoRequest.getDefaultInstance(), GetSpiritShopInfoResponse.parser());
         assertThat(infoResp.getErrorMessage().getId()).isZero();
@@ -62,7 +62,7 @@ class SpiritShopFeatureAndServiceTest {
             assertThat(g.getResetKind()).isZero();
         });
         assertThat(infoResp.getInfo().getGoodsList()).extracting(SpiritShopGoodsView::getGoodsId)
-                .containsExactly(101, 102, 103, 201, 202, 301, 302);
+                .containsExactly(101, 102, 103, 201, 202, 301, 302, 303, 304);
 
         SpiritShopGoodsView pack60 = goodsView(infoResp.getInfo().getGoodsList(), 101);
         SpiritShopGoodsView pack180 = goodsView(infoResp.getInfo().getGoodsList(), 102);

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.game.proto.BattleActorState;
 import com.game.proto.BattleBuffEntry;
 import com.game.proto.BattleItemEntry;
+import com.game.proto.BattlePrepPetOption;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.CombatAttributes;
 import com.game.proto.TurnResultS2C;
@@ -127,5 +128,34 @@ class BattleViewsTest {
         assertThat(find(personal.getState(), A).getSkillCooldownRoundsMap()).isEmpty();
         assertThat(find(personal.getState(), B).getSkillCooldownRoundsMap()).containsEntry(103, 2);
         assertThat(personal.getState().getActorsList()).noneMatch(BattleActorState::hasCombat);
+    }
+
+    @Test
+    void 临阵唤灵私有备选宠仅本人可见_对手与观众清空() {
+        BattlePrepPetOption opt = BattlePrepPetOption.newBuilder()
+                .setPetId(99001L).setPetTableId(2).setPetName("石灵").setLevel(30).build();
+        BattleStateS2C polluted = full().toBuilder()
+                .setSummonPetUnlockRound(2)
+                .setSelfSummonPetRemaining(1)
+                .addSelfStandbyPets(opt)
+                .build();
+
+        BattleStateS2C selfView = BattleViews.forParticipant(polluted, A, List.of(), null, null, List.of(),
+                List.of(opt), 1).state();
+        BattleStateS2C enemyView = BattleViews.forParticipant(polluted, B, List.of(), null, null, List.of(),
+                List.of(), 0).state();
+        BattleStateS2C obsView = BattleViews.forObserver(polluted).state();
+
+        assertThat(selfView.getSummonPetUnlockRound()).isEqualTo(2);
+        assertThat(selfView.getSelfSummonPetRemaining()).isEqualTo(1);
+        assertThat(selfView.getSelfStandbyPetsList()).extracting(BattlePrepPetOption::getPetId).containsExactly(99001L);
+
+        assertThat(enemyView.getSummonPetUnlockRound()).isEqualTo(2);
+        assertThat(enemyView.getSelfSummonPetRemaining()).isZero();
+        assertThat(enemyView.getSelfStandbyPetsList()).isEmpty();
+
+        assertThat(obsView.getSummonPetUnlockRound()).isEqualTo(2);
+        assertThat(obsView.getSelfSummonPetRemaining()).isZero();
+        assertThat(obsView.getSelfStandbyPetsList()).isEmpty();
     }
 }

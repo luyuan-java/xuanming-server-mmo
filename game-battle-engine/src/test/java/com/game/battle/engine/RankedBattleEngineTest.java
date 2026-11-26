@@ -11,6 +11,7 @@ import com.game.proto.BattleParticipationFact;
 import com.game.proto.BattlePetSnapshot;
 import com.game.proto.BattlePingKind;
 import com.game.proto.BattlePlayerSnapshot;
+import com.game.proto.BattlePrepPetOption;
 import com.game.proto.BattlePrepState;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.BattleStateS2C;
@@ -761,5 +762,115 @@ class RankedBattleEngineTest {
         assertThat(settleA.getHighlightKind()).isEqualTo(BattleHighlightKind.BATTLE_HIGHLIGHT_CLUTCH_COMEBACK);
         assertThat(settleA.getEndedOpponentStreak()).isEqualTo(5);
         assertThat(settleB.getEndedOpponentStreak()).isZero();
+    }
+
+    @Test
+    void 论剑V5临阵唤灵_联动变阵第2回合解锁单局限1次与视角脱敏() {
+        RankedPresetTable charPreset = tables.rankedPreset().find(101).orElseThrow();
+        RankedPresetTable petA = tables.rankedPreset().find(201).orElseThrow();
+        RankedPresetTable petB = tables.rankedPreset().find(202).orElseThrow();
+        RankedPresetTable petC = tables.rankedPreset().find(203).orElseThrow();
+
+        BattlePlayerSnapshot p1Base = playerWithRealPet(6401L, 94001L, 0, 260L, charPreset, petA);
+        BattlePetSnapshot standby1 = playerWithRealPet(6401L, 94002L, 0, 140L, charPreset, petB)
+                .getPets(0).toBuilder().setPetName("玄岩二宠").build();
+        BattlePetSnapshot standby2 = playerWithRealPet(6401L, 94003L, 0, 130L, charPreset, petC)
+                .getPets(0).toBuilder().setPetName("清风三宠").build();
+        BattlePlayerSnapshot p1 = p1Base.toBuilder()
+                .addStandbyPets(standby1)
+                .addStandbyPets(standby2)
+                .build();
+        BattlePlayerSnapshot p2 = playerWithRealPet(6402L, 95001L, 1, 200L, charPreset, petA);
+
+        CreateBattleRequest req = CreateBattleRequest.newBuilder()
+                .setBattleId(9801L)
+                .setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setSeed(301L)
+                .setRankedContext(rankedCtx(1))
+                .addPlayers(p1)
+                .addPlayers(p2)
+                .build();
+
+        TurnBattleEngine engine = ((BattleStart.Started) TurnBattleEngine.start(req, data)).engine();
+        assertThat(engine.isInPrepPhase()).isTrue();
+        assertThat(engine.summonPetRemaining(6401L)).isZero();
+        assertThat(engine.standbyPetsForViewer(6401L)).isEmpty();
+
+        // 战前换为 94002 首发并锁阵 -> 原首发 94001 与 94003 自动进入中盘备选池
+        assertThat(engine.updateBattlePrep(6401L, 0, 94002L, true).errorTip()).isZero();
+        assertThat(engine.updateBattlePrep(6402L, 0, 0L, true).errorTip()).isZero();
+        assertThat(engine.finalizePrepPhase()).isTrue();
+
+        BattleStateS2C r1Snap = engine.buildStateSnapshot();
+        assertThat(r1Snap.getSummonPetUnlockRound()).isEqualTo(2);
+        assertThat(engine.summonPetRemaining(6401L)).isEqualTo(1);
+        assertThat(engine.standbyPetsForViewer(6401L)).extracting(BattlePrepPetOption::getPetId)
+                .containsExactly(94001L, 94003L);
+        assertThat(engine.summonPetRemaining(6402L)).isZero();
+        assertThat(engine.standbyPetsForViewer(6402L)).isEmpty();
+        assertThat(engine.standbyPetsForViewer(0L)).isEmpty();
+
+        BattleActorState r1Pet = r1Snap.getActorsList().stream()
+                .filter(a -> a.getActorType() == eBattleActorType.BATTLE_ACTOR_TYPE_PET && a.getOwnerPlayerId() == 6401L)
+                .findFirst().orElseThrow();
+        long oldPetActorId = r1Pet.getActorId();
+        int oldPetSlot = r1Pet.getFormationSlot();
+
+        BattleAction summon94001 = BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SUMMON_PET)
+                .setSummonPetId(94001L)
+                .build();
+        BattleAction defend = BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build();
+
+        // 第 1 回合禁止唤灵；宠物不得唤灵
+        assertThat(engine.validateAction(6401L, summon94001)).isEqualTo(ActionChecks.FEATURE_UNAVAILABLE);
+        assertThat(engine.validateOwnedAction(6401L, oldPetActorId, summon94001)).isEqualTo(ActionChecks.INVALID_PARAMETER);
+
+        // 推进至第 2 回合
+        engine.submitAction(6401L, defend);
+        engine.submitOwnedAction(6401L, oldPetActorId, defend);
+        engine.submitAction(6402L, defend);
+        engine.resolveCurrentRound();
+        assertThat(engine.currentRoundIndex()).isEqualTo(2);
+
+        // 伪造对手宠物或当前在场宠被拒
+        assertThat(engine.validateAction(6401L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SUMMON_PET).setSummonPetId(95001L).build()))
+                .isEqualTo(ActionChecks.INVALID_PARAMETER);
+        assertThat(engine.validateAction(6401L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SUMMON_PET).setSummonPetId(94002L).build()))
+                .isEqualTo(ActionChecks.INVALID_PARAMETER);
+
+        // 第 2 回合主角先手唤出 94001，旧宠虽已提交普攻也不得执行，新宠本轮不抢跑
+        assertThat(engine.validateAction(6401L, summon94001)).isEqualTo(ActionChecks.SUCCESS);
+        engine.submitAction(6401L, summon94001);
+        engine.submitOwnedAction(6401L, oldPetActorId, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_ATTACK).setTargetId(6402L).build());
+        engine.submitAction(6402L, defend);
+        TurnResultS2C r2 = engine.resolveCurrentRound();
+
+        BattleEventItem summonEv = r2.getEventsList().stream()
+                .filter(e -> e.getEventType() == eBattleEventType.BATTLE_EVENT_SUMMON_PET)
+                .findFirst().orElseThrow();
+        long newPetActorId = summonEv.getTargetId();
+        assertThat(summonEv.getSourceId()).isEqualTo(6401L);
+        assertThat(newPetActorId).isNotEqualTo(oldPetActorId);
+        assertThat(summonEv.getSuccess()).isTrue();
+        assertThat(r2.getEventsList()).noneMatch(e -> e.getEventType() == eBattleEventType.BATTLE_EVENT_ATTACK
+                && (e.getSourceId() == oldPetActorId || e.getSourceId() == newPetActorId));
+
+        BattleActorState summonedPet = r2.getState().getActorsList().stream()
+                .filter(a -> a.getActorType() == eBattleActorType.BATTLE_ACTOR_TYPE_PET && a.getOwnerPlayerId() == 6401L)
+                .findFirst().orElseThrow();
+        assertThat(summonedPet.getActorId()).isEqualTo(newPetActorId);
+        assertThat(summonedPet.getPetId()).isEqualTo(94001L);
+        assertThat(summonedPet.getFormationSlot()).isEqualTo(oldPetSlot);
+        assertThat(engine.summonPetRemaining(6401L)).isZero();
+        assertThat(engine.standbyPetsForViewer(6401L)).isEmpty();
+        assertThat(engine.validateAction(6401L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SUMMON_PET).setSummonPetId(94003L).build()))
+                .isEqualTo(ActionChecks.FEATURE_UNAVAILABLE);
+        assertThat(engine.validateOwnedAction(6401L, newPetActorId, defend)).isEqualTo(ActionChecks.SUCCESS);
     }
 }

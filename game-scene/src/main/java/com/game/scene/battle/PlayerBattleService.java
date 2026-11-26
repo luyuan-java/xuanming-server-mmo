@@ -270,10 +270,40 @@ public final class PlayerBattleService implements BattleHooks {
                         Integer.toUnsignedString(currentSceneConfigId));
                 return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
             }
+            // 灵潮珍兽潮专属副本（ID 210..219）：除身处对应野外图外，还必须处于该图灵潮激活窗口。
+            int dungeonId = dungeonRow.getId();
+            if (dungeonId >= 210 && dungeonId <= 219
+                    && !isWorldTideActiveOnScene(clock.epochMillis() / 1000L, dungeonRow.getSceneId())) {
+                log.warn("备战被拒：野外灵潮珍兽潮未激活 player={} battle_id={} battle_config_id={} required_scene={}",
+                        Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
+                        Integer.toUnsignedString(request.getBattleConfigId()),
+                        Integer.toUnsignedString(dungeonRow.getSceneId()));
+                return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
+            }
         }
         int bossTrialKind = dungeonRow != null ? dungeonRow.getBossTrialKind() : 0;
         boolean isBossTrial = (bossTrialKind >= 1 && bossTrialKind <= 4) || bossTrialKind == 8;
         boolean isGuardRescue = bossTrialKind == 5;
+        boolean isNpcIsolatedEncounter = com.game.battle.engine.BattleConstants.isNpcIsolatedEncounterKind(bossTrialKind);
+        if (isNpcIsolatedEncounter && dungeonRow != null) {
+            if (dungeonRow.getSceneId() != 0) {
+                int currentSceneConfigId = player.scene() != null ? player.scene().configId() : 0;
+                if (currentSceneConfigId != dungeonRow.getSceneId()) {
+                    log.warn("备战被拒：归元城NPC玩法场景不匹配 player={} battle_id={} battle_config_id={} required_scene={} current_scene={}",
+                            Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
+                            Integer.toUnsignedString(request.getBattleConfigId()),
+                            Integer.toUnsignedString(dungeonRow.getSceneId()),
+                            Integer.toUnsignedString(currentSceneConfigId));
+                    return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
+                }
+            }
+            if (com.game.battle.engine.BattleConstants.isPracticeDummyKind(bossTrialKind) && useFreePreset) {
+                log.warn("备战被拒：演武试招木桩禁止挂载免费预设 player={} battle_id={} battle_config_id={}",
+                        Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
+                        Integer.toUnsignedString(request.getBattleConfigId()));
+                return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
+            }
+        }
         boolean isFestivalBeast = bossTrialKind == com.game.scene.festivalbeast.FestivalBeastRules.BOSS_TRIAL_KIND_FESTIVAL_BEAST
                 || (request.hasActivityContext()
                 && request.getActivityContext().getKind() == com.game.proto.eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST);
@@ -306,9 +336,9 @@ public final class PlayerBattleService implements BattleHooks {
                     Integer.toUnsignedString(request.getBattleConfigId()));
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
         }
-        // 免费预设娱乐场、正式人宠会武、帮会全天帮战 V2、首领试炼与瑞兽迎春均以局内满血蓝无耗材快照入场，不受场外残血或 0 血阻断。
+        // 免费预设娱乐场、正式人宠会武、帮会全天帮战 V2、首领试炼、瑞兽迎春与归元城演武/残局/奇谈均以局内满血蓝无耗材快照入场，不受场外残血或 0 血阻断。
         boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(request.getMatchMode());
-        boolean isolateBattleTempState = useFreePreset || isFormalRanked || isGuildWar || isBossTrial || isGuardRescue || isFestivalBeast;
+        boolean isolateBattleTempState = useFreePreset || isFormalRanked || isGuildWar || isBossTrial || isGuardRescue || isFestivalBeast || isNpcIsolatedEncounter;
         if (!isolateBattleTempState && player.attributes().health() == 0) {
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.DEAD);
         }
@@ -1594,6 +1624,24 @@ public final class PlayerBattleService implements BattleHooks {
         world.sendTo(player, push(reconnectHintId, BattleReconnectS2C.newBuilder().setBattleId(battleId).build()));
         log.info("推 144 战斗重连提示 player={} battle_id={} trigger={}", Long.toUnsignedString(player.playerId()),
                 Long.toUnsignedString(battleId), trigger);
+    }
+
+    /**
+     * 判定指定 UTC 秒时刻某野外图是否处于灵潮珍兽激活窗口（与 Go world_map_overview.go / C++ PlayerBattleSystem 同口径）。
+     */
+    static boolean isWorldTideActiveOnScene(long nowUnixSec, int sceneConfigId) {
+        // shortcut: uses default tide schedule [2,3,5]/3600s/2400s, read WorldMapOverview snapshot if ops customizes tide schedule
+        if (sceneConfigId <= 0 || nowUnixSec < 0) {
+            return false;
+        }
+        long offset = nowUnixSec % 3600L;
+        if (offset >= 2400L) {
+            return false;
+        }
+        long roundIndex = nowUnixSec / 3600L;
+        int mod = (int) (roundIndex % 3L);
+        int tideScene = mod == 0 ? 2 : (mod == 1 ? 3 : 5);
+        return tideScene == sceneConfigId;
     }
 
     /** 解析待结算记录（{@code BattleSettlementEvent} 字节）；坏字节为 null。 */

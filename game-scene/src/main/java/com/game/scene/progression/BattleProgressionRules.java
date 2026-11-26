@@ -221,7 +221,8 @@ public final class BattleProgressionRules {
                 || settlement.getFled()) {
             return null;
         }
-        if (settlement.hasFestivalBeast() && settlement.getFestivalBeast().getActivityInstanceId() != 0) {
+        if ((settlement.hasFestivalBeast() && settlement.getFestivalBeast().getActivityInstanceId() != 0)
+                || BattleConstants.isNpcIsolatedEncounterKind(settlement.getBossTrialKind())) {
             return null;
         }
         int mode = settlement.getMatchMode();

@@ -37,12 +37,14 @@ public final class AppearanceTables {
 
     public record PetCosmetic(int configId, int bitIndex, String cosmeticKey, String name,
                               int targetPetTableId, int visualPetTableId, String visualArtKey,
-                              int sortOrder, long mallSkuId, String acquireHint, String desc) { }
+                              int sortOrder, long mallSkuId, String acquireHint, String desc,
+                              int cardItemId, int cardItemCount, int spiritShopGoodsId) { }
 
     public record SkillVfxCosmetic(int configId, int bitIndex, String vfxKey, String name,
                                    int skillTableId, String fxId, String projectileFxId,
                                    String telegraphFxId, String tintHex, int sortOrder,
-                                   long mallSkuId, String acquireHint, String desc) { }
+                                   long mallSkuId, String acquireHint, String desc,
+                                   int cardItemId, int cardItemCount, int spiritShopGoodsId) { }
 
     private final Rule rule;
     private final List<Entry> enabledEntries;
@@ -154,6 +156,11 @@ public final class AppearanceTables {
         }
         entries.sort(Comparator.comparingInt(Entry::sortOrder).thenComparingInt(Entry::configId));
 
+        Map<Integer, Integer> spiritShopGoodsItem1 = new LinkedHashMap<>();
+        for (var g : tables.spiritShopGoods().all()) {
+            spiritShopGoodsItem1.put(g.getId(), g.getItemId1());
+        }
+
         List<PetCosmetic> petCosmetics = new ArrayList<>();
         Map<Integer, PetCosmetic> petCosmeticsById = new LinkedHashMap<>();
         Set<String> petCosmeticKeys = new HashSet<>();
@@ -170,6 +177,20 @@ public final class AppearanceTables {
             if (row.getVisualPetTableId() != 0 && !tables.pet().contains(row.getVisualPetTableId())) {
                 throw new IllegalStateException("PetCosmetic visual_pet_table_id 不存在: id=" + row.getId());
             }
+            if (row.getCardItemId() != 0) {
+                if (!tables.item().contains(row.getCardItemId())
+                        || row.getCardItemCount() <= 0 || row.getCardItemCount() > MAX_CARD_ITEM_COUNT) {
+                    throw new IllegalStateException("PetCosmetic 外观券配置非法: id=" + row.getId());
+                }
+            } else if (row.getCardItemCount() != 0) {
+                throw new IllegalStateException("PetCosmetic 无 card_item_id 却填了 card_item_count: id=" + row.getId());
+            }
+            if (row.getSpiritShopGoodsId() != 0) {
+                Integer goodsItem = spiritShopGoodsItem1.get(row.getSpiritShopGoodsId());
+                if (goodsItem == null || (row.getCardItemId() != 0 && goodsItem != row.getCardItemId())) {
+                    throw new IllegalStateException("PetCosmetic spirit_shop_goods_id 非法: id=" + row.getId());
+                }
+            }
             if (!petCosmeticKeys.add(row.getCosmeticKey())) {
                 throw new IllegalStateException("PetCosmetic 重复 cosmetic_key=" + row.getCosmeticKey());
             }
@@ -179,7 +200,8 @@ public final class AppearanceTables {
             PetCosmetic item = new PetCosmetic(
                     row.getId(), row.getId() - 1, row.getCosmeticKey(), row.getName(),
                     row.getTargetPetTableId(), row.getVisualPetTableId(), row.getVisualArtKey(),
-                    row.getSortOrder(), row.getMallSkuId(), row.getAcquireHint(), row.getDesc());
+                    row.getSortOrder(), row.getMallSkuId(), row.getAcquireHint(), row.getDesc(),
+                    row.getCardItemId(), row.getCardItemCount(), row.getSpiritShopGoodsId());
             petCosmetics.add(item);
             petCosmeticsById.put(item.configId(), item);
         }
@@ -199,6 +221,20 @@ public final class AppearanceTables {
             if (!validTintHex(row.getTintHex())) {
                 throw new IllegalStateException("SkillVfxCosmetic tint_hex 非法: id=" + row.getId());
             }
+            if (row.getCardItemId() != 0) {
+                if (!tables.item().contains(row.getCardItemId())
+                        || row.getCardItemCount() <= 0 || row.getCardItemCount() > MAX_CARD_ITEM_COUNT) {
+                    throw new IllegalStateException("SkillVfxCosmetic 外观券配置非法: id=" + row.getId());
+                }
+            } else if (row.getCardItemCount() != 0) {
+                throw new IllegalStateException("SkillVfxCosmetic 无 card_item_id 却填了 card_item_count: id=" + row.getId());
+            }
+            if (row.getSpiritShopGoodsId() != 0) {
+                Integer goodsItem = spiritShopGoodsItem1.get(row.getSpiritShopGoodsId());
+                if (goodsItem == null || (row.getCardItemId() != 0 && goodsItem != row.getCardItemId())) {
+                    throw new IllegalStateException("SkillVfxCosmetic spirit_shop_goods_id 非法: id=" + row.getId());
+                }
+            }
             if (!skillVfxKeys.add(row.getVfxKey())) {
                 throw new IllegalStateException("SkillVfxCosmetic 重复 vfx_key=" + row.getVfxKey());
             }
@@ -209,7 +245,8 @@ public final class AppearanceTables {
                     row.getId(), row.getId() - 1, row.getVfxKey(), row.getName(),
                     row.getSkillTableId(), row.getFxId(), row.getProjectileFxId(),
                     row.getTelegraphFxId(), row.getTintHex(), row.getSortOrder(),
-                    row.getMallSkuId(), row.getAcquireHint(), row.getDesc());
+                    row.getMallSkuId(), row.getAcquireHint(), row.getDesc(),
+                    row.getCardItemId(), row.getCardItemCount(), row.getSpiritShopGoodsId());
             skillVfxs.add(item);
             skillVfxsById.put(item.configId(), item);
         }

@@ -397,4 +397,154 @@ class ConfiguredBattleCatalogTest {
         }
         assertThat(capacities[1]).isGreaterThan(capacities[0]);
     }
+
+    @Test void 玄镜映法优先复制目标本回合选定技能按自身面板和重数折算且不递归() {
+        var req = request();
+        req.getPlayersBuilder(0).putSkillRanks(10041, 3).addSkillTableIds(10041);
+        req.getPlayersBuilder(0).setMagicAttack(1000).getBaseAttributesBuilder().setSpeed(300);
+        // 敌方习得 10006(法攻) 与 10002(物攻)，本回合显式选定 10006，施法者先手仍应精准复制 10006。
+        req.getPlayersBuilder(2).putSkillRanks(10002, 1).addSkillTableIds(10002)
+                .putSkillRanks(10006, 1).addSkillTableIds(10006);
+        req.getPlayersBuilder(2).setMagicAttack(100).getBaseAttributesBuilder().setSpeed(50);
+
+        var engine = TestBattles.start(req, DATA);
+        for (var unit : engine.buildStateSnapshot().getActorsList()) {
+            long owner = unit.getOwnerPlayerId() == 0 ? unit.getActorId() : unit.getOwnerPlayerId();
+            engine.submitOwnedAction(owner, unit.getActorId(), TestBattles.action(BATTLE_ACTION_DEFEND));
+        }
+        engine.submitOwnedAction(SELF, SELF, TestBattles.action(BATTLE_ACTION_SKILL, ENEMY, 10041));
+        engine.submitOwnedAction(ENEMY, ENEMY, TestBattles.action(BATTLE_ACTION_SKILL, SELF, 10006));
+        var result = engine.resolveCurrentRound();
+
+        assertThat(result.getEventsList()).anyMatch(e -> e.getEventType() == BATTLE_EVENT_SKILL
+                && e.getSourceId() == SELF && e.getSkillTableId() == 10041
+                && e.getHitKind() == eBattleHitKind.BATTLE_HIT_NORMAL);
+        assertThat(result.getEventsList()).anyMatch(e -> e.getEventType() == BATTLE_EVENT_SKILL
+                && e.getSourceId() == SELF && e.getSkillTableId() == 10006
+                && e.getHitKind() == eBattleHitKind.BATTLE_HIT_MIRROR);
+        var mirroredHit = result.getEventsList().stream()
+                .filter(e -> e.getEventType() == BATTLE_EVENT_DAMAGE && e.getSourceId() == SELF
+                        && e.getTargetId() == ENEMY && e.getSkillTableId() == 10006
+                        && e.getHitKind() == eBattleHitKind.BATTLE_HIT_MIRROR)
+                .findFirst().orElseThrow();
+        assertThat(mirroredHit.getValue()).isPositive();
+        // 10041 瞬发不给目标挂 100410 持久 Buff；被复制技能不进施法者冷却、不额外扣蓝。
+        var enemyAfter = TestBattles.stateActor(result.getState(), ENEMY);
+        assertThat(enemyAfter.getBuffsList()).noneMatch(b -> b.getBuffTableId() == 100410);
+        var selfAfter = TestBattles.stateActor(result.getState(), SELF);
+        assertThat(selfAfter.getSkillCooldownRoundsOrDefault(10041, 0)).isEqualTo(2);
+        assertThat(selfAfter.getSkillCooldownRoundsOrDefault(10006, 0)).isZero();
+        long manaEvents = result.getEventsList().stream()
+                .filter(e -> e.getEventType() == BATTLE_EVENT_MANA && e.getSourceId() == SELF).count();
+        assertThat(manaEvents).isEqualTo(1);
+    }
+
+    @Test void 玄镜映法目标未选技能时按方案A从已学池兜底且全不可复制时发抵抗() {
+        // 1. 目标本回合选择防御，但已学 10006 -> 兜底从已学池抽出 10006 释放。
+        var fallbackReq = request();
+        learn(fallbackReq, 10041, false);
+        fallbackReq.getPlayersBuilder(2).putSkillRanks(10006, 1).addSkillTableIds(10006);
+        var fallbackEngine = TestBattles.start(fallbackReq, DATA);
+        for (var unit : fallbackEngine.buildStateSnapshot().getActorsList()) {
+            long owner = unit.getOwnerPlayerId() == 0 ? unit.getActorId() : unit.getOwnerPlayerId();
+            fallbackEngine.submitOwnedAction(owner, unit.getActorId(), TestBattles.action(BATTLE_ACTION_DEFEND));
+        }
+        fallbackEngine.submitOwnedAction(SELF, SELF, TestBattles.action(BATTLE_ACTION_SKILL, ENEMY, 10041));
+        var fallbackResult = fallbackEngine.resolveCurrentRound();
+        assertThat(fallbackResult.getEventsList()).anyMatch(e -> e.getEventType() == BATTLE_EVENT_SKILL
+                && e.getSourceId() == SELF && e.getSkillTableId() == 10006
+                && e.getHitKind() == eBattleHitKind.BATTLE_HIT_MIRROR);
+
+        // 2. 目标仅会不可复制技能（10041 本身与 forbid_copy=1 的 10115）-> 发出 RESIST(100410) 且不产生镜像技能。
+        var blockedReq = request();
+        learn(blockedReq, 10041, false);
+        blockedReq.getPlayersBuilder(2).putSkillRanks(10041, 1).addSkillTableIds(10041)
+                .putSkillRanks(10115, 1).addSkillTableIds(10115);
+        var blockedEngine = TestBattles.start(blockedReq, DATA);
+        for (var unit : blockedEngine.buildStateSnapshot().getActorsList()) {
+            long owner = unit.getOwnerPlayerId() == 0 ? unit.getActorId() : unit.getOwnerPlayerId();
+            blockedEngine.submitOwnedAction(owner, unit.getActorId(), TestBattles.action(BATTLE_ACTION_DEFEND));
+        }
+        blockedEngine.submitOwnedAction(SELF, SELF, TestBattles.action(BATTLE_ACTION_SKILL, ENEMY, 10041));
+        blockedEngine.submitOwnedAction(ENEMY, ENEMY, TestBattles.action(BATTLE_ACTION_SKILL, SELF, 10115));
+        var blockedResult = blockedEngine.resolveCurrentRound();
+        assertThat(blockedResult.getEventsList()).anyMatch(e -> e.getEventType() == BATTLE_EVENT_RESIST
+                && e.getSourceId() == SELF && e.getTargetId() == ENEMY && e.getBuffTableId() == 100410);
+        assertThat(blockedResult.getEventsList()).noneMatch(e -> e.getEventType() == BATTLE_EVENT_SKILL
+                && e.getSourceId() == SELF && e.getHitKind() == eBattleHitKind.BATTLE_HIT_MIRROR);
+    }
+
+    @Test void 玄镜映法复制敌方治疗技能自动切回己方阵营并按折算系数生效() {
+        var req = request();
+        learn(req, 10041, false);
+        req.getPlayersBuilder(0).getBaseAttributesBuilder().setHealth(1000);
+        req.getPlayersBuilder(2).getBaseAttributesBuilder().setHealth(1000);
+        req.getPlayersBuilder(2).putSkillRanks(10010, 1).addSkillTableIds(10010);
+        var engine = TestBattles.start(req, DATA);
+        for (var unit : engine.buildStateSnapshot().getActorsList()) {
+            long owner = unit.getOwnerPlayerId() == 0 ? unit.getActorId() : unit.getOwnerPlayerId();
+            engine.submitOwnedAction(owner, unit.getActorId(), TestBattles.action(BATTLE_ACTION_DEFEND));
+        }
+        engine.submitOwnedAction(SELF, SELF, TestBattles.action(BATTLE_ACTION_SKILL, ENEMY, 10041));
+        engine.submitOwnedAction(ENEMY, ENEMY, TestBattles.action(BATTLE_ACTION_SKILL, ENEMY, 10010));
+        var result = engine.resolveCurrentRound();
+
+        // 等级 30 的 A10 原值 600，经 0.85 镜像折算为 510，且作用于己方而非敌方。
+        var mirroredHeal = result.getEventsList().stream()
+                .filter(e -> e.getEventType() == BATTLE_EVENT_HEAL && e.getSourceId() == SELF && e.getSkillTableId() == 10010)
+                .findFirst().orElseThrow();
+        assertThat(mirroredHeal.getTargetId()).isEqualTo(SELF);
+        assertThat(mirroredHeal.getValue()).isEqualTo(510L);
+    }
+
+    @Test void 玄镜映法禁止选择首领目标且携带SkillCopy免疫标时发抵抗() {
+        // 1. PVE 副本 3 首领（monster_id=16, is_boss=1）不可被 10041 选定。
+        var pve = TestBattles.request(BattleConstants.MATCH_MODE_PVE_SOLO, 20261126).setBattleConfigId(3);
+        var player = TestBattles.addPlayer(pve, SELF, 0, 5000, 10000, 0, 0, 0, 200);
+        player.setLevel(30).setMaxMana(10000).setMagicAttack(600).setPhysicalAttack(500)
+                .clearSkillTableIds().putSkillRanks(10041, 1).addSkillTableIds(10041);
+        player.getBaseAttributesBuilder().setMana(10000);
+        var pveEngine = TestBattles.start(pve, DATA);
+        var boss = pveEngine.buildStateSnapshot().getActorsList().stream()
+                .filter(BattleActorState::getIsBoss).findFirst().orElseThrow();
+        assertThat(pveEngine.validateAction(SELF, TestBattles.action(BATTLE_ACTION_SKILL, boss.getActorId(), 10041)))
+                .isEqualTo(ActionChecks.SKILL_INVALID_TARGET);
+
+        // 2. 目标带有 immune_tag["SkillCopy"] 时发出 RESIST(100410) 且不触发镜像。
+        int immuneBuffId = 990041;
+        var immuneRow = com.game.table.BuffTable.newBuilder()
+                .setId(immuneBuffId).setInfiniteDuration(1).putImmuneTag("SkillCopy", true).build();
+        BattleData withImmune = new BattleData() {
+            @Override public java.util.Optional<com.game.table.BuffTable> buff(int id) {
+                return id == immuneBuffId ? java.util.Optional.of(immuneRow) : DATA.buff(id);
+            }
+            @Override public java.util.Optional<com.game.table.DungeonTable> dungeon(int id) { return DATA.dungeon(id); }
+            @Override public java.util.Optional<com.game.table.MonsterTable> monster(int id) { return DATA.monster(id); }
+            @Override public java.util.Optional<com.game.table.SkillTable> skill(int id) { return DATA.skill(id); }
+            @Override public java.util.Optional<com.game.table.ItemTable> item(int id) { return DATA.item(id); }
+            @Override public java.util.Optional<com.game.table.PetTable> pet(int id) { return DATA.pet(id); }
+            @Override public java.util.Optional<com.game.table.SkillPermissionTable> skillPermission(int id) { return DATA.skillPermission(id); }
+            @Override public java.util.List<Integer> dungeonMonsterIds(int id) { return DATA.dungeonMonsterIds(id); }
+            @Override public int dungeonMonstersPerPlayer(int id) { return DATA.dungeonMonstersPerPlayer(id); }
+            @Override public long cooldownDurationMs(int id) { return DATA.cooldownDurationMs(id); }
+            @Override public double skillDamage(int id, double lvl) { return DATA.skillDamage(id, lvl); }
+            @Override public double buffHealthRegeneration(int id, double lvl, double lost) { return DATA.buffHealthRegeneration(id, lvl, lost); }
+        };
+        var pvp = request();
+        learn(pvp, 10041, false);
+        pvp.getPlayersBuilder(2).putSkillRanks(10006, 1).addSkillTableIds(10006)
+                .addBuffsBuilder().setBuffId(77).setBuffTableId(immuneBuffId);
+        var immuneEngine = TestBattles.start(pvp, withImmune);
+        for (var unit : immuneEngine.buildStateSnapshot().getActorsList()) {
+            long owner = unit.getOwnerPlayerId() == 0 ? unit.getActorId() : unit.getOwnerPlayerId();
+            immuneEngine.submitOwnedAction(owner, unit.getActorId(), TestBattles.action(BATTLE_ACTION_DEFEND));
+        }
+        immuneEngine.submitOwnedAction(SELF, SELF, TestBattles.action(BATTLE_ACTION_SKILL, ENEMY, 10041));
+        immuneEngine.submitOwnedAction(ENEMY, ENEMY, TestBattles.action(BATTLE_ACTION_SKILL, SELF, 10006));
+        var immuneResult = immuneEngine.resolveCurrentRound();
+        assertThat(immuneResult.getEventsList()).anyMatch(e -> e.getEventType() == BATTLE_EVENT_RESIST
+                && e.getSourceId() == SELF && e.getTargetId() == ENEMY && e.getBuffTableId() == 100410);
+        assertThat(immuneResult.getEventsList()).noneMatch(e -> e.getEventType() == BATTLE_EVENT_SKILL
+                && e.getSourceId() == SELF && e.getHitKind() == eBattleHitKind.BATTLE_HIT_MIRROR);
+    }
 }

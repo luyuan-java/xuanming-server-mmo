@@ -2,6 +2,7 @@ package com.game.battle.engine;
 
 import com.game.common.combat.CombatDamageRules;
 import com.game.common.math.Unsigned;
+import com.game.proto.BattleAction;
 import com.game.proto.BattleBuffEntryOrBuilder;
 import com.game.proto.BattleMonsterDefeat;
 import com.game.proto.BattleSettlementData;
@@ -54,6 +55,8 @@ final class BattleContext {
     private final NavigableMap<Long, Integer> totalDispelsLandedByPlayer = new TreeMap<>(Long::compareUnsigned);
     /** 回合排速时刻冻结的有效速度快照，供副目标策略「本回合排速最低」稳定读取。 */
     private final Map<Long, Long> roundStartSpeeds = new HashMap<>();
+    /** 本回合已提交/补齐的行动只读视图，供 A41 玄镜映法优先复制目标本回合选定技能。 */
+    private Map<Long, BattleAction> pendingActionsView = Map.of();
     /** uint32；正在收集 / 结算的回合号，从 1 开始（{@code engine.h:227}）。 */
     private int roundIndex = 1;
     private int maxRounds = BattleConstants.DEFAULT_MAX_ROUNDS;
@@ -534,5 +537,13 @@ final class BattleContext {
 
     int totalDispelsLanded(long playerId) {
         return totalDispelsLandedByPlayer.getOrDefault(playerId, 0);
+    }
+
+    void bindPendingActions(Map<Long, BattleAction> view) {
+        this.pendingActionsView = view == null ? Map.of() : view;
+    }
+
+    BattleAction pendingAction(long actorId) {
+        return pendingActionsView.get(actorId);
     }
 }

@@ -42,8 +42,13 @@ final class ActionChecks {
     private final BattleContext ctx;
     private final ItemLedger ledger;
     private com.game.proto.CreateBattleRequest captureRequest = com.game.proto.CreateBattleRequest.getDefaultInstance();
+    private java.util.function.BiFunction<BattleUnit, Long, Integer> summonPetChecker;
 
     void setCaptureRequest(com.game.proto.CreateBattleRequest request) { captureRequest = request; }
+
+    void setSummonPetChecker(java.util.function.BiFunction<BattleUnit, Long, Integer> checker) {
+        summonPetChecker = checker;
+    }
 
     ActionChecks(BattleContext ctx, ItemLedger ledger) {
         this.ctx = ctx;
@@ -73,6 +78,11 @@ final class ActionChecks {
                 return pet != null && pet.isPet() && actor.isPlayer() && pet.ownerPlayerId() == actor.actorId()
                         && pet.fled() && !pet.isDead() && pet.state().getWithdrawUntilRound() != 0
                         && ctx.roundIndex() >= pet.state().getWithdrawUntilRound() ? SUCCESS : INVALID_PARAMETER;
+            }
+            case eBattleActionType.BATTLE_ACTION_SUMMON_PET_VALUE -> {
+                return summonPetChecker != null
+                        ? summonPetChecker.apply(actor, action.getSummonPetId())
+                        : FEATURE_UNAVAILABLE;
             }
             case eBattleActionType.BATTLE_ACTION_DEFEND_VALUE -> {
                 return SUCCESS;

@@ -27,6 +27,8 @@ public final class BattleConstants {
     public static final int CLUTCH_COMEBACK_MIN_ESCALATION_STACKS = 2;
     public static final long CLUTCH_COMEBACK_LOW_HP_DENOMINATOR = 4L;
     public static final int HIGHLIGHT_CONTROL_MIN_COUNT = 2;
+    /** 论剑 V5 临阵唤灵：正式自养竞技第 2 回合起解锁，每人整局限 1 次唤出备选灵宠（镜像 kPvpSummonPetUnlockRound）。 */
+    public static final int PVP_SUMMON_PET_UNLOCK_ROUND = 2;
     /** {@code DungeonTable.time_limit} 为 0（或查不到副本行）时的回合上限（{@code constants.h:18}）。 */
     public static final int DEFAULT_MAX_ROUNDS = 300;
 
@@ -60,10 +62,25 @@ public final class BattleConstants {
     public static final int BOSS_TRIAL_KIND_POLARITY_5V5 = 6;
     public static final int BOSS_TRIAL_KIND_FESTIVAL_BEAST = 7;
     public static final int BOSS_TRIAL_KIND_BREAK_DUAL_GUARD = 8;
+    public static final int BOSS_TRIAL_KIND_PRACTICE_DUMMY = 9;
+    public static final int BOSS_TRIAL_KIND_TACTICAL_PUZZLE = 10;
+    public static final int BOSS_TRIAL_KIND_CHARACTER_TALE = 11;
 
     public static boolean isBossTrialKind(int kind) {
         return (kind >= BOSS_TRIAL_KIND_BREAK_REJUV && kind <= BOSS_TRIAL_KIND_VENOM)
                 || kind == BOSS_TRIAL_KIND_BREAK_DUAL_GUARD;
+    }
+
+    public static boolean isPracticeDummyKind(int kind) {
+        return kind == BOSS_TRIAL_KIND_PRACTICE_DUMMY;
+    }
+
+    public static boolean isNpcIsolatedEncounterKind(int kind) {
+        return kind >= BOSS_TRIAL_KIND_PRACTICE_DUMMY && kind <= BOSS_TRIAL_KIND_CHARACTER_TALE;
+    }
+
+    public static boolean allowsOptionalFreePresetKind(int kind) {
+        return kind == BOSS_TRIAL_KIND_TACTICAL_PUZZLE || kind == BOSS_TRIAL_KIND_CHARACTER_TALE;
     }
 
     public static boolean isBossTrialOrRescueKind(int kind) {

@@ -319,7 +319,8 @@ public final class SeasonService {
 
     public static boolean isEligibleBattle(BattleSettlementData settlement) {
         if (settlement.getBattleId() == 0 || settlement.getPlayerId() == 0 || settlement.getFled()
-                || settlement.getTotalRounds() == 0 || Integer.compareUnsigned(settlement.getPlayerTeamIndex(), 1) > 0) {
+                || settlement.getTotalRounds() == 0 || Integer.compareUnsigned(settlement.getPlayerTeamIndex(), 1) > 0
+                || com.game.battle.engine.BattleConstants.isNpcIsolatedEncounterKind(settlement.getBossTrialKind())) {
             return false;
         }
         eBattleOutcome outcome = settlement.getOutcome();

@@ -51,9 +51,63 @@ final class ConfiguredBattle {
         if (actor == target && skill.getHealthCostMode() == 2) return false;
         for (int id : skill.getEffectList()) {
             BuffTable effect = row(id);
-            if (effect != null && effect.getBattleOp() == RETREAT && !target.isPet()) return false;
+            if (effect == null) continue;
+            if (effect.getBattleOp() == RETREAT && !target.isPet()) return false;
+            if (effect.getBattleOp() == COPY_TARGET_SKILL && target.isBoss()) return false;
         }
         return true;
+    }
+
+    boolean hasValidTarget(BattleUnit caster, SkillTable skill) {
+        for (BattleUnit candidate : ctx.units()) {
+            if (targetAllowed(caster, candidate, skill)) return true;
+        }
+        return false;
+    }
+
+    boolean isSkillCopyableFor(BattleUnit caster, SkillTable skill) {
+        if (skill.getBattleModel() != 1 || skill.getAbilityKind() != 1) return false;
+        if (skill.getForbidCopy() != 0 || skill.getHealthCostMode() != 0 || skill.getMaxBattleUses() != 0) return false;
+        for (int effectId : skill.getEffectList()) {
+            BuffTable effect = row(effectId);
+            if (effect == null) continue;
+            if (effect.getBattleOp() == COPY_TARGET_SKILL) return false;
+            // 依赖已付气血/法力的转换技在零耗蓝镜像中无有效基数，结构上禁止复制。
+            if (effect.getValueBasis() == 5 || effect.getValueBasis() == 6) return false;
+        }
+        return hasValidTarget(caster, skill);
+    }
+
+    boolean hasCopyableSkillFor(BattleUnit caster, BattleUnit target) {
+        if (target.isBoss()) return false;
+        for (int skillId : target.state().getSkillTableIdsList()) {
+            SkillTable candidate = skill(skillId);
+            if (candidate != null && isSkillCopyableFor(caster, candidate)) return true;
+        }
+        return false;
+    }
+
+    Optional<Integer> selectCopiedSkillId(BattleUnit caster, BattleUnit target) {
+        // 优先复制目标本回合选定的可复制主动技能（不依赖双方出手先后）。
+        BattleAction plannedAction = ctx.pendingAction(target.actorId());
+        if (plannedAction != null && plannedAction.getActionType() == eBattleActionType.BATTLE_ACTION_SKILL) {
+            SkillTable planned = skill(plannedAction.getSkillTableId());
+            if (planned != null && isSkillCopyableFor(caster, planned)) return Optional.of(planned.getId());
+        }
+        // 方案 A 兜底：目标本回合未选可复制技能时，从其已学可复制主动技能池按 ID 排序去重后确定性抽取。
+        List<Integer> candidates = new ArrayList<>();
+        for (int skillId : target.state().getSkillTableIdsList()) {
+            SkillTable candidate = skill(skillId);
+            if (candidate != null && isSkillCopyableFor(caster, candidate)) candidates.add(skillId);
+        }
+        candidates.sort(Integer::compareUnsigned);
+        List<Integer> unique = new ArrayList<>(candidates.size());
+        for (int id : candidates) {
+            if (unique.isEmpty() || unique.getLast() != id) unique.add(id);
+        }
+        if (unique.isEmpty()) return Optional.empty();
+        int pick = unique.size() == 1 ? 0 : (int) ctx.rng().randIndex(unique.size());
+        return Optional.of(unique.get(pick));
     }
 
     boolean hasState(BattleUnit target, int state) {
@@ -219,23 +273,31 @@ final class ConfiguredBattle {
         }
     }
 
+    void initializeForActor(BattleUnit actor) {
+        for (int id : actor.state().getSkillRanksMap().keySet().stream().sorted(Integer::compareUnsigned).toList()) {
+            SkillTable skill = skill(id);
+            if (skill == null || !subject(actor.state(), skill)) continue;
+            actor.state().addRuntimeSkills(id);
+            Hit hit = new Hit(id, actor.state().getSkillRanksOrThrow(id), DIRECT, 0);
+            var targets = skill.getAbilityKind() == 4 ? targets(actor, skill, actor.isPet() ? actor.ownerPlayerId() : actor.actorId()) : List.of(actor);
+            for (var target : targets) for (int effect : skill.getInitEffectList()) effects.apply(actor, target, effect, hit, 0);
+        }
+    }
+
     void initialize() {
         for (BattleUnit actor : ctx.units()) {
-            for (int id : actor.state().getSkillRanksMap().keySet().stream().sorted(Integer::compareUnsigned).toList()) {
-                SkillTable skill = skill(id);
-                if (skill == null || !subject(actor.state(), skill)) continue;
-                actor.state().addRuntimeSkills(id);
-                Hit hit = new Hit(id, actor.state().getSkillRanksOrThrow(id), DIRECT, 0);
-                var targets = skill.getAbilityKind() == 4 ? targets(actor, skill, actor.isPet() ? actor.ownerPlayerId() : actor.actorId()) : List.of(actor);
-                for (var target : targets) for (int effect : skill.getInitEffectList()) effects.apply(actor, target, effect, hit, 0);
-            }
+            initializeForActor(actor);
         }
     }
 
     void cast(BattleUnit actor, SkillTable skill, long selected, int origin, double scale) {
+        cast(actor, skill, selected, origin, scale, 0);
+    }
+
+    void cast(BattleUnit actor, SkillTable skill, long selected, int origin, double scale, int rankOverride) {
         List<BattleUnit> targets = origin == CONFUSED ? List.of(ctx.findActor(selected)) : targets(actor, skill, selected);
         if (targets.isEmpty()) return;
-        int rank = actor.state().getSkillRanksOrDefault(skill.getId(), 0);
+        int rank = rankOverride > 0 ? rankOverride : actor.state().getSkillRanksOrDefault(skill.getId(), 0);
         Hit cast = new Hit(skill.getId(), origin == MIRRORED ? Math.max(1,rank) : rank, origin, targets.getFirst().actorId());
         cast.scale = scale;
         int subjectMaxTargets = actor.isPet()
@@ -338,6 +400,7 @@ final class ConfiguredBattle {
                     if (effect == null) continue;
                     if (effect.getBattleOp() == HEAL) useful = ClassSkillCombat.healthRatio(target) < 0.7;
                     else if (effect.getBattleOp() == MANA) useful = Unsigned.toDouble(target.mana()) < Unsigned.toDouble(target.maxMana()) * 0.4;
+                    else if (effect.getBattleOp() == COPY_TARGET_SKILL) useful = !legacy.isImmuneToBuff(target, effect) && hasCopyableSkillFor(actor, target);
                     else if (!instant(effect.getBattleOp())) useful |= target.state().getBuffsList().stream().noneMatch(e -> e.getBuffTableId() == effectId);
                 }
                 BattleAction action = action(id, target.actorId());

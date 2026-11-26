@@ -155,6 +155,25 @@ public final class BagService {
         return new PreparedTransfer(player, candidate, instances, removed, java.util.List.of(), 0);
     }
 
+    /** 角色本人消费可叠加消耗品（支持绑定仅自用券与可交易堆，用于易容卡、灵宠幻化符、技能特效卷等自用解锁）。 */
+    public PreparedTransfer prepareSelfConsume(ScenePlayer player, Map<Integer, Long> counts) {
+        if (!writable(player)) return failedTransfer(player, REFUSED);
+        var snapshot = player.bags().toState();
+        var candidate = com.game.scene.player.PlayerBags.restore(snapshot);
+        candidate.normalize(tables);
+        var bag = candidate.bag(BagType.INVENTORY);
+        var removed = new java.util.ArrayList<Bag.Drawn>();
+        for (var entry : counts.entrySet()) {
+            var spec = tables.item(entry.getKey());
+            if (spec == null || !spec.stackable() || entry.getValue() <= 0 || bag.total(entry.getKey()) < entry.getValue()
+                    || bag.items().stream().anyMatch(item -> item.configId() == entry.getKey() && item.equipment() != null)) {
+                return failedTransfer(player, com.game.table.AssetErrorTip.asset_error.kAssetInvalidBundle_VALUE);
+            }
+        }
+        for (var entry : new TreeMap<>(counts).entrySet()) removed.addAll(bag.drainClamped(entry.getKey(), entry.getValue()));
+        return new PreparedTransfer(player, candidate, java.util.List.of(), removed, java.util.List.of(), 0);
+    }
+
     public PreparedTransfer prepareCredit(ScenePlayer player, Map<Integer, Long> counts,
                                            java.util.List<com.game.player.store.state.BagItemState> instances) {
         if (!writable(player)) return failedTransfer(player, REFUSED);

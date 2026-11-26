@@ -8,9 +8,11 @@ import static com.game.common.math.Unsigned.*;
 import com.game.common.combat.CombatDamageRules;
 import com.game.proto.BattleBuffEntry;
 import com.game.table.BuffTable;
+import com.game.table.SkillTable;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 
 /** 每个效果按原始表顺序求值，只有成功覆盖后才登记护盾法宝收益。 */
 final class ConfiguredEffects {
@@ -49,6 +51,7 @@ final class ConfiguredEffects {
         boolean hostile = source.teamIndex() != receiver.teamIndex();
         if (receiver.fled() || (receiver.isDead() && op != REVIVE) || (hostile && battle.hasState(receiver,FREEZE))) return false;
         double value = value(source,receiver,row,hit);
+        if (hit.scale != 1.0) value *= hit.scale;
         if (op == PERIODIC && row.getStateKind() == POISON && source.isPet())
             value = SupportEffectRules.applyBonus(value,PetCultivationRules.rate(source.state().getPetCultivation().getPoisonDamageBps()));
         if (op == REVIVE) value = SupportEffectRules.applyBonus(value,battle.equipment.healingBonus(source));
@@ -110,6 +113,31 @@ final class ConfiguredEffects {
                         receiver.state().setFled(true).setWithdrawUntilRound(ctx.roundIndex()+Math.max(1,row.getDurationRounds())+1);
                         battle.resetVolatileGrowingStacks(receiver);
                     }
+                }
+                case COPY_TARGET_SKILL -> {
+                    if (hit.origin == MIRRORED) break;
+                    if (receiver.isBoss() || battle.legacy.isImmuneToBuff(receiver, row)) {
+                        ctx.events().append(BATTLE_EVENT_RESIST, source.actorId(), receiver.actorId())
+                                .setBuffTableId(row.getId());
+                        break;
+                    }
+                    Optional<Integer> copiedSkillId = battle.selectCopiedSkillId(source, receiver);
+                    if (copiedSkillId.isEmpty()) {
+                        ctx.events().append(BATTLE_EVENT_RESIST, source.actorId(), receiver.actorId())
+                                .setBuffTableId(row.getId());
+                        break;
+                    }
+                    SkillTable copiedSkill = battle.skill(copiedSkillId.get());
+                    if (copiedSkill == null) break;
+                    long copiedTarget;
+                    if (copiedSkill.getTargetTeam() == 2 || copiedSkill.getTargetTeam() == 3) {
+                        // 复制到友方辅助/治疗/护盾或自身技能时，自动切回己方阵营，避免反手资敌。
+                        copiedTarget = battle.targetAllowed(source, source, copiedSkill) ? source.actorId() : 0L;
+                    } else {
+                        copiedTarget = battle.targetAllowed(source, receiver, copiedSkill) ? receiver.actorId() : 0L;
+                    }
+                    double mirrorScale = row.getRatio() > 0 ? row.getRatio() : 1.0;
+                    battle.cast(source, copiedSkill, copiedTarget, MIRRORED, mirrorScale, hit.rank);
                 }
                 default -> { }
             }

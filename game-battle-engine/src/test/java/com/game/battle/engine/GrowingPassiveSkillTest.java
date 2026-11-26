@@ -23,8 +23,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * 率土式「每回合叠加至战斗结束（5 层封顶）」3 个永久成长战法战斗引擎单测：
- * 12020 愈战愈勇（物理直伤）、12021 深谋远虑（法术直伤）、12022 步步为营（自身防御）。
+ * 率土式持续叠加至战斗结束永久成长战法战斗引擎单测：
+ * 卷 3 原有（每回合 +5%、5 层封顶）：12020 愈战愈勇、12021 深谋远虑、12022 步步为营；
+ * 卷 7 新增（交互触发每层 +1%、伤害类 300 层 / 机制类 40~50 层封顶）：12023 承锋蓄势、12024 循隙破甲、12025 蚀骨愈深、12026 磐石道心、12027 厚泽蓄灵、12028 兽威渐盛。
  */
 class GrowingPassiveSkillTest {
 
@@ -365,7 +366,8 @@ class GrowingPassiveSkillTest {
     }
 
     @Test
-    void 承锋蓄势仅敌方直击与援护分担叠层且每回合限1层封顶5层() {
+    void 承锋蓄势仅敌方直击与援护分担叠层且每回合限1层每层加1() {
+        assertThat(data.buff(BUFF_TAKE_MOMENTUM).orElseThrow().getStackLimit()).isEqualTo(300);
         CreateBattleRequest.Builder req = baseRequest(0);
         req.getPlayersBuilder(0).putSkillRanks(SKILL_TAKE_MOMENTUM, 1).putSkillRanks(SKILL_A36, 1).addSkillTableIds(SKILL_A36);
         addPlayer(req, 202L, 1, 90, 0);
@@ -396,24 +398,29 @@ class GrowingPassiveSkillTest {
         res = engine.resolveCurrentRound();
         assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_TAKE_MOMENTUM)).isEqualTo(2);
 
-        for (int r = 4; r <= 7; r++) {
+        for (int r = 4; r <= 8; r++) {
             engine.submitAction(HERO, cast(TEST_PHYS_STRIKE, ENEMY));
             engine.submitAction(ALLY, cast(TEST_IDLE_SKILL, ALLY));
             engine.submitAction(ENEMY, cast(TEST_PHYS_STRIKE, HERO));
             engine.submitAction(202L, cast(TEST_IDLE_SKILL, 202L));
             res = engine.resolveCurrentRound();
             if (r == 7) {
-                assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_TAKE_MOMENTUM)).isEqualTo(5);
-                assertThat(firstDamageTo(res, HERO, ENEMY)).isEqualTo(780L);
+                assertThat(firstDamageTo(res, HERO, ENEMY)).isEqualTo(630L);
+                assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_TAKE_MOMENTUM)).isEqualTo(6);
+            }
+            if (r == 8) {
+                assertThat(firstDamageTo(res, HERO, ENEMY)).isEqualTo(636L);
+                assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_TAKE_MOMENTUM)).isEqualTo(7);
             }
         }
     }
 
     @Test
-    void 循隙破甲主动普攻与技能命中叠穿防且满5层封顶() {
+    void 循隙破甲主动普攻与技能命中叠穿防且满50层封顶() {
+        assertThat(data.buff(BUFF_PENETRATION).orElseThrow().getStackLimit()).isEqualTo(50);
         CreateBattleRequest.Builder req = baseRequest(0);
         req.getPlayersBuilder(0).putSkillRanks(SKILL_PENETRATION, 1);
-        req.getPlayersBuilder(2).setDefense(2400L);
+        req.getPlayersBuilder(2).setDefense(2400L).setMaxHealth(100000L).getBaseAttributesBuilder().setHealth(100000L);
         TurnBattleEngine engine = start(req.build());
 
         engine.submitAction(HERO, cast(TEST_IDLE_SKILL, HERO));
@@ -428,24 +435,25 @@ class GrowingPassiveSkillTest {
         res = engine.resolveCurrentRound();
         assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_PENETRATION)).isEqualTo(1);
 
-        long r3Dmg = 0, r7Dmg = 0, r8Dmg = 0;
-        for (int r = 3; r <= 8; r++) {
+        long r3Dmg = 0, r52Dmg = 0, r53Dmg = 0;
+        for (int r = 3; r <= 53; r++) {
             engine.submitAction(HERO, cast(TEST_PHYS_STRIKE, ENEMY));
             engine.submitAction(ALLY, cast(TEST_IDLE_SKILL, ALLY));
             engine.submitAction(ENEMY, cast(TEST_IDLE_SKILL, ENEMY));
             res = engine.resolveCurrentRound();
             long dmg = firstDamageTo(res, HERO, ENEMY);
             if (r == 3) r3Dmg = dmg;
-            if (r == 7) r7Dmg = dmg;
-            if (r == 8) r8Dmg = dmg;
+            if (r == 52) r52Dmg = dmg;
+            if (r == 53) r53Dmg = dmg;
         }
-        assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_PENETRATION)).isEqualTo(5);
-        assertThat(r7Dmg).isGreaterThan(r3Dmg);
-        assertThat(r8Dmg).isEqualTo(r7Dmg);
+        assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_PENETRATION)).isEqualTo(50);
+        assertThat(r52Dmg).isGreaterThan(r3Dmg);
+        assertThat(r53Dmg).isEqualTo(r52Dmg);
     }
 
     @Test
-    void 蚀骨愈深随持续伤害跳伤叠至5层并逐跳放大() {
+    void 蚀骨愈深随持续伤害跳伤每层加1逐跳放大() {
+        assertThat(data.buff(BUFF_DOT_GROWTH).orElseThrow().getStackLimit()).isEqualTo(300);
         CreateBattleRequest.Builder req = baseRequest(0);
         req.getPlayersBuilder(0).putSkillRanks(SKILL_DOT_GROWTH, 1).putSkillRanks(TEST_BURN_SKILL, 1).addSkillTableIds(TEST_BURN_SKILL);
         TurnBattleEngine engine = start(req.build());
@@ -457,22 +465,24 @@ class GrowingPassiveSkillTest {
         assertThat(firstPeriodicDamageTo(res, HERO, ENEMY)).isEqualTo(100L);
         assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_DOT_GROWTH)).isEqualTo(1);
 
-        long[] expected = {106L, 113L, 118L, 124L, 130L};
+        long[] expected = {101L, 102L, 103L, 104L, 105L};
         for (int i = 0; i < expected.length; i++) {
             engine.submitAction(HERO, cast(TEST_IDLE_SKILL, HERO));
             engine.submitAction(ALLY, cast(TEST_IDLE_SKILL, ALLY));
             engine.submitAction(ENEMY, cast(TEST_IDLE_SKILL, ENEMY));
             res = engine.resolveCurrentRound();
             assertThat(firstPeriodicDamageTo(res, HERO, ENEMY)).as("tick=%d", i + 2).isEqualTo(expected[i]);
-            assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_DOT_GROWTH)).isEqualTo(Math.min(5, i + 2));
+            assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_DOT_GROWTH)).isEqualTo(i + 2);
         }
     }
 
     @Test
-    void 磐石道心与厚泽蓄灵均由交互触发叠至5层封顶并正确生效() {
+    void 磐石道心40层封顶与厚泽蓄灵50层封顶均由交互触发并正确生效() {
+        assertThat(data.buff(BUFF_SHIELD_GROW).orElseThrow().getStackLimit()).isEqualTo(50);
+        assertThat(data.buff(BUFF_CTRL_RESIST).orElseThrow().getStackLimit()).isEqualTo(40);
         CreateBattleRequest.Builder shieldReq = baseRequest(0);
         shieldReq.getPlayersBuilder(0).putSkillRanks(SKILL_SHIELD_GROW, 1).putSkillRanks(SKILL_A40, 1).addSkillTableIds(SKILL_A40);
-        data.addSkill(SKILL_A40).setCooldownRounds(0);
+        data.addSkill(SKILL_A40).setCooldownRounds(0).setManaPercent(0.0);
         TurnBattleEngine shieldEngine = start(shieldReq.build());
         // 第 1 回合待机不放辅助技：维持 0 层。
         shieldEngine.submitAction(HERO, cast(TEST_IDLE_SKILL, HERO));
@@ -481,20 +491,20 @@ class GrowingPassiveSkillTest {
         TurnResultS2C idleRes = shieldEngine.resolveCurrentRound();
         assertThat(buffStacks(findActor(idleRes.getState(), HERO), BUFF_SHIELD_GROW)).isZero();
 
-        long r2Shield = 0, r7Shield = 0, r8Shield = 0;
-        for (int r = 2; r <= 8; r++) {
+        long r2Shield = 0, r52Shield = 0, r53Shield = 0;
+        for (int r = 2; r <= 53; r++) {
             shieldEngine.submitAction(HERO, cast(SKILL_A40, HERO));
             shieldEngine.submitAction(ALLY, cast(TEST_IDLE_SKILL, ALLY));
             shieldEngine.submitAction(ENEMY, cast(TEST_IDLE_SKILL, ENEMY));
             TurnResultS2C res = shieldEngine.resolveCurrentRound();
             long cap = shieldCapacity(findActor(res.getState(), HERO), SKILL_A40);
             if (r == 2) r2Shield = cap;
-            if (r == 7) r7Shield = cap;
-            if (r == 8) r8Shield = cap;
-            assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_SHIELD_GROW)).isEqualTo(Math.min(5, r - 1));
+            if (r == 52) r52Shield = cap;
+            if (r == 53) r53Shield = cap;
+            assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_SHIELD_GROW)).isEqualTo(Math.min(50, r - 1));
         }
-        assertThat(r7Shield).isGreaterThan(r2Shield);
-        assertThat(r8Shield).isEqualTo(r7Shield);
+        assertThat(r52Shield).isGreaterThan(r2Shield);
+        assertThat(r53Shield).isEqualTo(r52Shield);
 
         int baselineLanded = countSealLanded(false);
         int resistedLanded = countSealLanded(true);
@@ -505,6 +515,7 @@ class GrowingPassiveSkillTest {
         int landed = 0;
         for (int seed = 1; seed <= 40; seed++) {
             CreateBattleRequest.Builder req = baseRequest(0).setSeed(9000L + seed);
+            req.getPlayersBuilder(2).setMaxHealth(200000L).getBaseAttributesBuilder().setHealth(200000L);
             if (withCtrlResist) req.getPlayersBuilder(0).putSkillRanks(SKILL_CTRL_RESIST, 1);
             req.getPlayersBuilder(2).putSkillRanks(TEST_SEAL_ACTIVE_SKILL, 1).addSkillTableIds(TEST_SEAL_ACTIVE_SKILL);
             TurnBattleEngine eng = start(req.build());
@@ -516,7 +527,7 @@ class GrowingPassiveSkillTest {
             if (withCtrlResist) {
                 assertThat(buffStacks(findActor(r1.getState(), HERO), BUFF_CTRL_RESIST)).isZero();
             }
-            for (int r = 2; r <= 6; r++) {
+            for (int r = 2; r <= 41; r++) {
                 eng.submitAction(HERO, basicAttack(ENEMY));
                 eng.submitAction(ALLY, cast(TEST_IDLE_SKILL, ALLY));
                 eng.submitAction(ENEMY, cast(TEST_SEAL_ACTIVE_SKILL, HERO));
@@ -527,7 +538,7 @@ class GrowingPassiveSkillTest {
             eng.submitAction(ENEMY, cast(TEST_SEAL_ACTIVE_SKILL, HERO));
             TurnResultS2C res = eng.resolveCurrentRound();
             if (withCtrlResist) {
-                assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_CTRL_RESIST)).isEqualTo(5);
+                assertThat(buffStacks(findActor(res.getState(), HERO), BUFF_CTRL_RESIST)).isEqualTo(40);
             }
             if (hasBuff(findActor(res.getState(), HERO), TEST_SEAL_ACTIVE_SKILL)) landed++;
         }
@@ -536,6 +547,7 @@ class GrowingPassiveSkillTest {
 
     @Test
     void 兽威渐盛仅宝宝生效且阵亡与劝退清零复活后重叠() {
+        assertThat(data.buff(BUFF_PET_GROWTH).orElseThrow().getStackLimit()).isEqualTo(300);
         CreateBattleRequest.Builder heroReq = baseRequest(0);
         heroReq.getPlayersBuilder(0).putSkillRanks(SKILL_PET_GROWTH, 1);
         TurnBattleEngine heroEngine = start(heroReq.build());
@@ -553,7 +565,7 @@ class GrowingPassiveSkillTest {
             engine.submitAction(ENEMY, cast(TEST_IDLE_SKILL, ENEMY));
             TurnResultS2C res = engine.resolveCurrentRound();
             assertThat(buffStacks(findActor(res.getState(), petActorId), BUFF_PET_GROWTH)).isEqualTo(r);
-            if (r == 2) assertThat(firstDamageTo(res, petActorId, ENEMY)).isEqualTo(636L);
+            if (r == 2) assertThat(firstDamageTo(res, petActorId, ENEMY)).isEqualTo(606L);
         }
 
         // 阵亡清零但保留被动本体。

@@ -127,6 +127,10 @@ public final class TurnBattleEngine {
     private boolean prepActive;
     private long nextPetActorIndex;
     private final NavigableMap<Long, PrepPlayerOptions> prepOptionsByPlayer = new TreeMap<>(Long::compareUnsigned);
+    /** 论剑 V5 临阵唤灵：validatedPetsByPlayer 冻结开局合规全量宠，standbyPetPoolByPlayer 冻结开打后剩余可唤宠。 */
+    private final NavigableMap<Long, List<BattlePetSnapshot>> validatedPetsByPlayer = new TreeMap<>(Long::compareUnsigned);
+    private final NavigableMap<Long, List<BattlePetSnapshot>> standbyPetPoolByPlayer = new TreeMap<>(Long::compareUnsigned);
+    private final NavigableMap<Long, Integer> summonPetRemainingByPlayer = new TreeMap<>(Long::compareUnsigned);
 
     private static final class PrepPlayerOptions {
         int teamIndex;
@@ -155,9 +159,11 @@ public final class TurnBattleEngine {
                 || request.getMatchMode() == BattleConstants.MATCH_MODE_SEASON_TOURNAMENT;
         // 基线 Initialize 第 4 步：拷请求、rng.seed(seed)、roundIndex = 1、outcome = ONGOING（engine.cpp:69-72）
         this.ctx = new BattleContext(data, request.getMatchMode(), request.getSeed(), competitivePvp);
+        this.ctx.bindPendingActions(java.util.Collections.unmodifiableMap(pendingActions));
         this.ledger = new ItemLedger(ctx, request);
         this.checks = new ActionChecks(ctx, ledger);
         this.checks.setCaptureRequest(request);
+        this.checks.setSummonPetChecker(this::checkSummonPet);
         this.buffs = ctx.configured.legacy;
         this.classSkills = new ClassSkillExecution(ctx, buffs, checks);
         this.autoClassSkills = new AutoClassSkillSelector(ctx, checks, classSkills, buffs);
@@ -349,6 +355,7 @@ public final class TurnBattleEngine {
         }
         // 战前 15 秒明牌变阵期间延迟到 finalizePrepPhase 锁阵后再初始化开场光环/被动，防止被换掉的首发宠残留旧光环。
         if (!engine.prepActive) {
+            engine.rebuildMidBattleStandbyPools();
             engine.ctx.configured.initialize();
         }
         engine.bindDungeonMonsterAis(monsterAiProfiles);
@@ -614,6 +621,9 @@ public final class TurnBattleEngine {
     private BattleStart.Rejected initTacticalPrep() {
         prepActive = false;
         prepOptionsByPlayer.clear();
+        validatedPetsByPlayer.clear();
+        standbyPetPoolByPlayer.clear();
+        summonPetRemainingByPlayer.clear();
         // 仅正式自养论剑与赛季战队锦标赛开启战前 15 秒明牌变阵；PVE / 免费预设娱乐场 / 切磋 / 帮战零打扰。
         boolean modeEligible = !ctx.isPve() && !usesFreePreset()
                 && (isRankedBattle() || request.getMatchMode() == BattleConstants.MATCH_MODE_SEASON_TOURNAMENT);
@@ -697,6 +707,9 @@ public final class TurnBattleEngine {
                     && (opt.availableSeals.size() > 1 || opt.availablePets.size() > 1
                     || (opt.selectedPetId == 0L && !opt.availablePets.isEmpty()))) {
                 hasAnyChoice = true;
+            }
+            if (!opt.aiControlled && !opt.availablePets.isEmpty()) {
+                validatedPetsByPlayer.put(snapshot.getPlayerId(), List.copyOf(opt.availablePets));
             }
             prepOptionsByPlayer.put(snapshot.getPlayerId(), opt);
         }
@@ -1280,9 +1293,189 @@ public final class TurnBattleEngine {
 
         prepActive = false;
         roundPingCountByPlayer.clear();
+        rebuildMidBattleStandbyPools();
         // 在最终亮牌阵容上一次性初始化全部开场光环/成长被动，杜绝被换掉宠物的残留光环。
         ctx.configured.initialize();
         return true;
+    }
+
+    /** 论剑 V5 临阵唤灵是否开启（正式自养论剑与赛季战队锦标赛开启，免费预设/PVE/切磋/帮战关闭）。 */
+    public boolean isSummonPetEnabled() {
+        return !ctx.isPve() && !usesFreePreset()
+                && (isRankedBattle() || request.getMatchMode() == BattleConstants.MATCH_MODE_SEASON_TOURNAMENT);
+    }
+
+    public int summonPetUnlockRound() {
+        return isSummonPetEnabled() ? BattleConstants.PVP_SUMMON_PET_UNLOCK_ROUND : 0;
+    }
+
+    public int summonPetRemaining(long playerId) {
+        if (prepActive || !isSummonPetEnabled()) {
+            return 0;
+        }
+        return summonPetRemainingByPlayer.getOrDefault(playerId, 0);
+    }
+
+    /** 仅向收信本人返回中盘剩余备选灵宠列表（对手与观众恒为空）。 */
+    public List<BattlePrepPetOption> standbyPetsForViewer(long viewerPlayerId) {
+        if (viewerPlayerId == 0L || prepActive || !isSummonPetEnabled() || summonPetRemaining(viewerPlayerId) <= 0) {
+            return List.of();
+        }
+        List<BattlePetSnapshot> pool = standbyPetPoolByPlayer.get(viewerPlayerId);
+        if (pool == null || pool.isEmpty()) {
+            return List.of();
+        }
+        List<BattlePrepPetOption> out = new ArrayList<>(pool.size());
+        for (BattlePetSnapshot pet : pool) {
+            out.add(toPetOption(pet));
+        }
+        return out;
+    }
+
+    private static BattlePrepPetOption toPetOption(BattlePetSnapshot pet) {
+        return BattlePrepPetOption.newBuilder()
+                .setPetId(pet.getPetId())
+                .setPetTableId(pet.getPetTableId())
+                .setPetName(pet.getPetName())
+                .setLevel(pet.getLevel())
+                .setMaxHealth(fallbackMax(pet.getMaxHealth(), pet.getBaseAttributes().getHealth()))
+                .setSpeed(pet.getBaseAttributes().getSpeed())
+                .setPhysicalAttack(pet.getPhysicalAttack())
+                .setMagicAttack(pet.getMagicAttack())
+                .setDefense(pet.getDefense())
+                .addAllSkillTableIds(pet.getSkillTableIdsList())
+                .build();
+    }
+
+    private void rebuildMidBattleStandbyPools() {
+        standbyPetPoolByPlayer.clear();
+        summonPetRemainingByPlayer.clear();
+        if (!isSummonPetEnabled()) {
+            return;
+        }
+        for (Map.Entry<Long, List<BattlePetSnapshot>> entry : validatedPetsByPlayer.entrySet()) {
+            long playerId = entry.getKey();
+            long activePetId = 0L;
+            for (BattleUnit unit : ctx.units()) {
+                if (unit.isPet() && unit.ownerPlayerId() == playerId && unit.petId() != 0L) {
+                    activePetId = unit.petId();
+                    break;
+                }
+            }
+            List<BattlePetSnapshot> reserve = new ArrayList<>();
+            for (BattlePetSnapshot pet : entry.getValue()) {
+                if (pet.getPetId() != 0L && pet.getPetId() != activePetId) {
+                    reserve.add(pet);
+                }
+            }
+            if (!reserve.isEmpty()) {
+                standbyPetPoolByPlayer.put(playerId, reserve);
+                summonPetRemainingByPlayer.put(playerId, 1);
+            }
+        }
+    }
+
+    private int checkSummonPet(BattleUnit actor, long summonPetId) {
+        if (!actor.isPlayer()) {
+            return ActionChecks.INVALID_PARAMETER;
+        }
+        if (!isSummonPetEnabled() || ctx.roundIndex() < BattleConstants.PVP_SUMMON_PET_UNLOCK_ROUND) {
+            return ActionChecks.FEATURE_UNAVAILABLE;
+        }
+        if (summonPetRemaining(actor.actorId()) <= 0) {
+            return ActionChecks.FEATURE_UNAVAILABLE;
+        }
+        if (summonPetId == 0L) {
+            return ActionChecks.INVALID_PARAMETER;
+        }
+        List<BattlePetSnapshot> pool = standbyPetPoolByPlayer.get(actor.actorId());
+        if (pool == null) {
+            return ActionChecks.FEATURE_UNAVAILABLE;
+        }
+        boolean found = false;
+        for (BattlePetSnapshot pet : pool) {
+            if (pet.getPetId() == summonPetId) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return ActionChecks.INVALID_PARAMETER;
+        }
+        for (BattleUnit unit : ctx.units()) {
+            if (unit.isPet() && unit.ownerPlayerId() == actor.actorId() && unit.petId() == summonPetId) {
+                return ActionChecks.INVALID_PARAMETER;
+            }
+        }
+        return ActionChecks.SUCCESS;
+    }
+
+    private void executeSummonPet(BattleUnit actor, long summonPetId) {
+        if (checkSummonPet(actor, summonPetId) != ActionChecks.SUCCESS) {
+            return;
+        }
+        long ownerId = actor.actorId();
+        int ownerTeam = actor.teamIndex();
+
+        BattlePlayerSnapshot ownerSnap = null;
+        for (BattlePlayerSnapshot snap : request.getPlayersList()) {
+            if (snap.getPlayerId() == ownerId) {
+                ownerSnap = snap;
+                break;
+            }
+        }
+        List<BattlePetSnapshot> pool = standbyPetPoolByPlayer.get(ownerId);
+        if (ownerSnap == null || pool == null) {
+            return;
+        }
+        BattlePetSnapshot chosenPet = null;
+        for (BattlePetSnapshot pet : pool) {
+            if (pet.getPetId() == summonPetId) {
+                chosenPet = pet;
+                break;
+            }
+        }
+        if (chosenPet == null) {
+            return;
+        }
+
+        int existingIdx = -1;
+        for (int i = 0; i < ctx.units().size(); i++) {
+            BattleUnit unit = ctx.units().get(i);
+            if (unit.isPet() && unit.ownerPlayerId() == ownerId) {
+                existingIdx = i;
+                break;
+            }
+        }
+        int formationSlot = existingIdx >= 0
+                ? ctx.units().get(existingIdx).state().getFormationSlot()
+                : ctx.nextFormationSlot(ownerTeam);
+        long newActorId = BattleConstants.PET_ACTOR_ID_BASE + nextPetActorIndex;
+        BattleActorState.Builder rebuilt = buildPetActor(ownerSnap, chosenPet, newActorId, formationSlot);
+        if (rebuilt == null) {
+            return;
+        }
+        nextPetActorIndex++;
+
+        BattleUnit summoned = new BattleUnit(rebuilt);
+        if (existingIdx >= 0) {
+            pendingActions.remove(ctx.units().get(existingIdx).actorId());
+            ctx.units().set(existingIdx, summoned);
+        } else {
+            ctx.units().add(summoned);
+        }
+
+        summonPetRemainingByPlayer.put(ownerId, 0);
+        standbyPetPoolByPlayer.remove(ownerId);
+        ctx.encounter.recordEffectiveContribution(actor);
+
+        ctx.events().append(eBattleEventType.BATTLE_EVENT_SUMMON_PET, ownerId, newActorId)
+                .setSkillTableId(summoned.state().getPetTableId())
+                .setSuccess(true)
+                .setTargetHealthAfter(summoned.health())
+                .setTargetManaAfter(summoned.mana());
+        // 仅初始化新唤出灵宠的运行技能与开场被动/光环，新宠从下一回合起正常排表出手。
+        ctx.configured.initializeForActor(summoned);
     }
 
     /** 返回收信视角对应的战前变阵状态（非变阵期返回 null；viewerPlayerId == 0 为观众视角，仅暴露倒计时）。 */
@@ -1387,17 +1580,7 @@ public final class TurnBattleEngine {
                     .setName(seal.getName()));
         }
         for (BattlePetSnapshot pet : selfOpt.availablePets) {
-            out.addSelfAvailablePets(BattlePrepPetOption.newBuilder()
-                    .setPetId(pet.getPetId())
-                    .setPetTableId(pet.getPetTableId())
-                    .setPetName(pet.getPetName())
-                    .setLevel(pet.getLevel())
-                    .setMaxHealth(fallbackMax(pet.getMaxHealth(), pet.getBaseAttributes().getHealth()))
-                    .setSpeed(pet.getBaseAttributes().getSpeed())
-                    .setPhysicalAttack(pet.getPhysicalAttack())
-                    .setMagicAttack(pet.getMagicAttack())
-                    .setDefense(pet.getDefense())
-                    .addAllSkillTableIds(pet.getSkillTableIdsList()));
+            out.addSelfAvailablePets(toPetOption(pet));
         }
         // 同队互见、对手严密盲选：仅投影与收信者同 teamIndex 的成员状态。
         for (Map.Entry<Long, PrepPlayerOptions> entry : prepOptionsByPlayer.entrySet()) {
@@ -2084,6 +2267,7 @@ public final class TurnBattleEngine {
                 ctx.events().append(eBattleEventType.BATTLE_EVENT_PET_RETREAT,actor.actorId(),pet.actorId())
                         .setValue(0).setSuccess(true).setTargetHealthAfter(pet.health());
             }
+            case eBattleActionType.BATTLE_ACTION_SUMMON_PET_VALUE -> executeSummonPet(actor, action.getSummonPetId());
             case eBattleActionType.BATTLE_ACTION_FLEE_VALUE -> executeFlee(actor);
             default -> {
                 // 未知类型：什么也不做
@@ -2700,7 +2884,8 @@ public final class TurnBattleEngine {
                 .setRoundLimit(maxRounds)
                 .setEscalationStacks(escalationStacks())
                 .setEscalationStartRound(escalationStartRound())
-                .setSurrenderUnlockRound(surrenderUnlockRound());
+                .setSurrenderUnlockRound(surrenderUnlockRound())
+                .setSummonPetUnlockRound(summonPetUnlockRound());
         if (request.hasTournamentContext() && request.getTournamentContext().getMatchId() != 0L) {
             state.setTournamentContext(request.getTournamentContext());
         }

@@ -30,7 +30,8 @@ final class BattleEffect {
 
     static boolean instant(int op) {
         return switch (op) {
-            case DAMAGE, HEAL, MANA, DISPEL_DEBUFF, DISPEL_BUFF, CONSUME, EXTEND, DRAIN, RETREAT -> true;
+            case DAMAGE, HEAL, MANA, DISPEL_DEBUFF, DISPEL_BUFF, CONSUME, EXTEND, DRAIN, RETREAT,
+                    COPY_TARGET_SKILL -> true;
             default -> false;
         };
     }

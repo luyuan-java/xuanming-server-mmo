@@ -2,6 +2,7 @@ package com.game.battle.room;
 
 import com.game.proto.BattleActorState;
 import com.game.proto.BattleItemEntry;
+import com.game.proto.BattlePrepPetOption;
 import com.game.proto.BattlePrepState;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.BattleSurrenderVoteState;
@@ -51,6 +52,13 @@ final class BattleViews {
     static ViewerState forParticipant(BattleStateS2C full, long viewer, List<BattleItemEntry> selfItems,
                                       BattleSurrenderVoteState surrenderVote, BattlePrepState prepState,
                                       List<BattleTacticalPing> teamPings) {
+        return forParticipant(full, viewer, selfItems, surrenderVote, prepState, teamPings, List.of(), 0);
+    }
+
+    static ViewerState forParticipant(BattleStateS2C full, long viewer, List<BattleItemEntry> selfItems,
+                                      BattleSurrenderVoteState surrenderVote, BattlePrepState prepState,
+                                      List<BattleTacticalPing> teamPings,
+                                      List<BattlePrepPetOption> selfStandbyPets, int selfSummonPetRemaining) {
         BattleStateS2C.Builder state = redact(full, viewer);
         if (viewer != 0) {
             state.addAllSelfItems(selfItems);
@@ -62,6 +70,12 @@ final class BattleViews {
             }
             if (teamPings != null && !teamPings.isEmpty()) {
                 state.addAllTeamPings(teamPings);
+            }
+            if (selfSummonPetRemaining > 0) {
+                state.setSelfSummonPetRemaining(selfSummonPetRemaining);
+                if (selfStandbyPets != null && !selfStandbyPets.isEmpty()) {
+                    state.addAllSelfStandbyPets(selfStandbyPets);
+                }
             }
         }
         return new ViewerState(state.build());
@@ -83,7 +97,8 @@ final class BattleViews {
 
     private static BattleStateS2C.Builder redact(BattleStateS2C full, long viewer) {
         BattleStateS2C.Builder state = full.toBuilder()
-                .clearSelfItems().clearSurrenderVote().clearPrepState().clearTeamPings();
+                .clearSelfItems().clearSurrenderVote().clearPrepState().clearTeamPings()
+                .clearSelfStandbyPets().clearSelfSummonPetRemaining();
         TurnBattleEngine.stripEngineOnlyState(state);
         for (BattleActorState.Builder actor : state.getActorsBuilderList()) {
             boolean own = viewer != 0 && (actor.getActorId() == viewer || actor.getOwnerPlayerId() == viewer);

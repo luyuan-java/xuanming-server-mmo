@@ -176,6 +176,9 @@ public final class AppearanceService {
             }
         }
         for (AppearanceTables.PetCosmetic petCosmetic : tables.enabledPetCosmetics()) {
+            int voucherOwned = petCosmetic.cardItemId() > 0
+                    ? (int) Math.min(player.bags().bag(BagType.INVENTORY).total(petCosmetic.cardItemId()), Integer.MAX_VALUE)
+                    : 0;
             info.addPetCosmetics(PetCosmeticEntry.newBuilder()
                     .setConfigId(petCosmetic.configId())
                     .setCosmeticKey(petCosmetic.cosmeticKey())
@@ -188,6 +191,10 @@ public final class AppearanceService {
                     .setMallSkuId(petCosmetic.mallSkuId())
                     .setAcquireHint(petCosmetic.acquireHint())
                     .setDesc(petCosmetic.desc())
+                    .setCardItemId(petCosmetic.cardItemId())
+                    .setCardItemCount(petCosmetic.cardItemCount())
+                    .setOwnedCardCount(voucherOwned)
+                    .setSpiritShopGoodsId(petCosmetic.spiritShopGoodsId())
                     .build());
         }
         for (PlayerPets.Pet pet : player.pets().pets()) {
@@ -200,6 +207,9 @@ public final class AppearanceService {
             }
         }
         for (AppearanceTables.SkillVfxCosmetic skillVfx : tables.enabledSkillVfxCosmetics()) {
+            int voucherOwned = skillVfx.cardItemId() > 0
+                    ? (int) Math.min(player.bags().bag(BagType.INVENTORY).total(skillVfx.cardItemId()), Integer.MAX_VALUE)
+                    : 0;
             info.addSkillVfxCosmetics(SkillVfxCosmeticEntry.newBuilder()
                     .setConfigId(skillVfx.configId())
                     .setVfxKey(skillVfx.vfxKey())
@@ -214,6 +224,10 @@ public final class AppearanceService {
                     .setMallSkuId(skillVfx.mallSkuId())
                     .setAcquireHint(skillVfx.acquireHint())
                     .setDesc(skillVfx.desc())
+                    .setCardItemId(skillVfx.cardItemId())
+                    .setCardItemCount(skillVfx.cardItemCount())
+                    .setOwnedCardCount(voucherOwned)
+                    .setSpiritShopGoodsId(skillVfx.spiritShopGoodsId())
                     .build());
         }
         appearance.equippedSkillVfxView().forEach((skillId, cosmeticId) -> {
@@ -285,8 +299,8 @@ public final class AppearanceService {
             if (!entry.cardUnlockable()) {
                 return SwitchAppearanceResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_CARD_UNLOCKABLE)).build();
             }
-            BagService.PreparedTransfer debit = bags.prepareDebit(
-                    player, Map.of(rule.cardItemId(), (long) rule.cardItemCount()), List.of());
+            BagService.PreparedTransfer debit = bags.prepareSelfConsume(
+                    player, Map.of(rule.cardItemId(), (long) rule.cardItemCount()));
             if (debit.tip() != 0) {
                 return SwitchAppearanceResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NO_CARD)).build();
             }
@@ -400,8 +414,26 @@ public final class AppearanceService {
 
     public EquipPetCosmeticResponse equipPetCosmetic(SceneWorld world, ScenePlayer player, EquipPetCosmeticRequest request) {
         long nowSec = nowSeconds();
-        if (request.getClientRequestId() == 0 || request.getPetId() == 0) {
+        long clientRequestId = request.getClientRequestId();
+        if (clientRequestId == 0 || request.getPetId() == 0) {
             return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER)).build();
+        }
+        String receiptTarget = Long.toUnsignedString(request.getPetId()) + ":"
+                + Integer.toUnsignedString(request.getCosmeticId()) + ":" + request.getExpectFreeEquip();
+        switch (player.appearance().checkIdempotency(clientRequestId, PlayerAppearance.KIND_EQUIP_PET_COSMETIC, receiptTarget)) {
+            case REPLAY -> {
+                return EquipPetCosmeticResponse.newBuilder()
+                        .setErrorMessage(tip(0))
+                        .setInfo(buildInfo(player, nowSec))
+                        .setPetId(request.getPetId())
+                        .setEquippedCosmeticId(request.getCosmeticId())
+                        .setReplayed(true)
+                        .build();
+            }
+            case MISMATCH -> {
+                return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER)).build();
+            }
+            case NEW -> { }
         }
         if (player.frozen()) {
             return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_FROZEN)).build();
@@ -411,19 +443,57 @@ public final class AppearanceService {
             return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(PET_NOT_FOUND)).build();
         }
         int cosmeticId = request.getCosmeticId();
+        boolean consumeVoucher = false;
+        AppearanceTables.PetCosmetic targetEntry = null;
         if (cosmeticId != 0) {
-            AppearanceTables.PetCosmetic entry = tables.findEnabledPetCosmetic(cosmeticId);
-            if (entry == null) {
+            targetEntry = tables.findEnabledPetCosmetic(cosmeticId);
+            if (targetEntry == null) {
                 return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_INVALID)).build();
             }
-            if (entry.targetPetTableId() != 0 && entry.targetPetTableId() != pet.petTableId()) {
+            if (targetEntry.targetPetTableId() != 0 && targetEntry.targetPetTableId() != pet.petTableId()) {
                 return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_INVALID)).build();
             }
-            if (!player.appearance().isPetCosmeticOwned(entry.bitIndex())) {
-                return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_OWNED)).build();
+            if (!player.appearance().isPetCosmeticOwned(targetEntry.bitIndex())) {
+                if (request.getExpectFreeEquip()) {
+                    return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_OWNED)).build();
+                }
+                if (targetEntry.cardItemId() <= 0 || targetEntry.cardItemCount() <= 0) {
+                    return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_CARD_UNLOCKABLE)).build();
+                }
+                BagService.PreparedTransfer debit = bags.prepareSelfConsume(
+                        player, Map.of(targetEntry.cardItemId(), (long) targetEntry.cardItemCount()));
+                if (debit.tip() != 0) {
+                    return EquipPetCosmeticResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NO_CARD)).build();
+                }
+                debit.commit(AssetAudit.Reason.ITEM_DESTROY, clientRequestId);
+                player.appearance().markPetCosmeticOwned(targetEntry.bitIndex());
+                consumeVoucher = true;
             }
         }
-        if (pet.cosmeticId() != cosmeticId) {
+        if (consumeVoucher) {
+            pet.setCosmeticId(cosmeticId);
+            player.appearance().rememberIdempotency(clientRequestId, PlayerAppearance.KIND_EQUIP_PET_COSMETIC, receiptTarget);
+            if (world != null) {
+                world.requestSave(player);
+            }
+            log.info("[PlayerAppearance] metric=pet_cosmetic_unlocked player_id={} pet_id={} cosmetic_id={} card_item_id={} client_request_id={}",
+                    Long.toUnsignedString(player.playerId()), Long.toUnsignedString(pet.petId()), cosmeticId,
+                    targetEntry.cardItemId(), Long.toUnsignedString(clientRequestId));
+            PlayerAppearanceInfo info = buildInfo(player, nowSec);
+            if (world != null) {
+                world.sendTo(player, push(notifyAppearanceStateId, AppearanceStateNotify.newBuilder()
+                        .setInfo(info).setTrialExpired(false).build()));
+            }
+            return EquipPetCosmeticResponse.newBuilder()
+                    .setErrorMessage(tip(0))
+                    .setInfo(info)
+                    .setPetId(pet.petId())
+                    .setEquippedCosmeticId(cosmeticId)
+                    .setReplayed(false)
+                    .build();
+        }
+        boolean replayed = (pet.cosmeticId() == cosmeticId);
+        if (!replayed) {
             pet.setCosmeticId(cosmeticId);
             if (world != null) {
                 world.requestSave(player);
@@ -436,29 +506,86 @@ public final class AppearanceService {
                 .setInfo(buildInfo(player, nowSec))
                 .setPetId(pet.petId())
                 .setEquippedCosmeticId(cosmeticId)
+                .setReplayed(replayed)
                 .build();
     }
 
     public EquipSkillVfxResponse equipSkillVfx(SceneWorld world, ScenePlayer player, EquipSkillVfxRequest request) {
         long nowSec = nowSeconds();
-        if (request.getClientRequestId() == 0 || request.getSkillTableId() == 0) {
+        long clientRequestId = request.getClientRequestId();
+        if (clientRequestId == 0 || request.getSkillTableId() == 0) {
             return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER)).build();
+        }
+        String receiptTarget = Integer.toUnsignedString(request.getSkillTableId()) + ":"
+                + Integer.toUnsignedString(request.getCosmeticId()) + ":" + request.getExpectFreeEquip();
+        switch (player.appearance().checkIdempotency(clientRequestId, PlayerAppearance.KIND_EQUIP_SKILL_VFX, receiptTarget)) {
+            case REPLAY -> {
+                return EquipSkillVfxResponse.newBuilder()
+                        .setErrorMessage(tip(0))
+                        .setInfo(buildInfo(player, nowSec))
+                        .setSkillTableId(request.getSkillTableId())
+                        .setEquippedCosmeticId(request.getCosmeticId())
+                        .setReplayed(true)
+                        .build();
+            }
+            case MISMATCH -> {
+                return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER)).build();
+            }
+            case NEW -> { }
         }
         if (player.frozen()) {
             return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(APPEARANCE_FROZEN)).build();
         }
         int skillTableId = request.getSkillTableId();
         int cosmeticId = request.getCosmeticId();
+        boolean consumeVoucher = false;
+        AppearanceTables.SkillVfxCosmetic targetEntry = null;
         if (cosmeticId != 0) {
-            AppearanceTables.SkillVfxCosmetic entry = tables.findEnabledSkillVfxCosmetic(cosmeticId);
-            if (entry == null || entry.skillTableId() != skillTableId) {
+            targetEntry = tables.findEnabledSkillVfxCosmetic(cosmeticId);
+            if (targetEntry == null || targetEntry.skillTableId() != skillTableId) {
                 return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(APPEARANCE_INVALID)).build();
             }
-            if (!player.appearance().isSkillVfxOwned(entry.bitIndex())) {
-                return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_OWNED)).build();
+            if (!player.appearance().isSkillVfxOwned(targetEntry.bitIndex())) {
+                if (request.getExpectFreeEquip()) {
+                    return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_OWNED)).build();
+                }
+                if (targetEntry.cardItemId() <= 0 || targetEntry.cardItemCount() <= 0) {
+                    return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NOT_CARD_UNLOCKABLE)).build();
+                }
+                BagService.PreparedTransfer debit = bags.prepareSelfConsume(
+                        player, Map.of(targetEntry.cardItemId(), (long) targetEntry.cardItemCount()));
+                if (debit.tip() != 0) {
+                    return EquipSkillVfxResponse.newBuilder().setErrorMessage(tip(APPEARANCE_NO_CARD)).build();
+                }
+                debit.commit(AssetAudit.Reason.ITEM_DESTROY, clientRequestId);
+                player.appearance().markSkillVfxOwned(targetEntry.bitIndex());
+                consumeVoucher = true;
             }
         }
-        if (player.appearance().equippedSkillVfx(skillTableId) != cosmeticId) {
+        if (consumeVoucher) {
+            player.appearance().setEquippedSkillVfx(skillTableId, cosmeticId);
+            player.appearance().rememberIdempotency(clientRequestId, PlayerAppearance.KIND_EQUIP_SKILL_VFX, receiptTarget);
+            if (world != null) {
+                world.requestSave(player);
+            }
+            log.info("[PlayerAppearance] metric=skill_vfx_unlocked player_id={} skill_table_id={} cosmetic_id={} card_item_id={} client_request_id={}",
+                    Long.toUnsignedString(player.playerId()), Integer.toUnsignedString(skillTableId), cosmeticId,
+                    targetEntry.cardItemId(), Long.toUnsignedString(clientRequestId));
+            PlayerAppearanceInfo info = buildInfo(player, nowSec);
+            if (world != null) {
+                world.sendTo(player, push(notifyAppearanceStateId, AppearanceStateNotify.newBuilder()
+                        .setInfo(info).setTrialExpired(false).build()));
+            }
+            return EquipSkillVfxResponse.newBuilder()
+                    .setErrorMessage(tip(0))
+                    .setInfo(info)
+                    .setSkillTableId(skillTableId)
+                    .setEquippedCosmeticId(cosmeticId)
+                    .setReplayed(false)
+                    .build();
+        }
+        boolean replayed = (player.appearance().equippedSkillVfx(skillTableId) == cosmeticId);
+        if (!replayed) {
             player.appearance().setEquippedSkillVfx(skillTableId, cosmeticId);
             if (world != null) {
                 world.requestSave(player);
@@ -471,6 +598,7 @@ public final class AppearanceService {
                 .setInfo(buildInfo(player, nowSec))
                 .setSkillTableId(skillTableId)
                 .setEquippedCosmeticId(cosmeticId)
+                .setReplayed(replayed)
                 .build();
     }
 

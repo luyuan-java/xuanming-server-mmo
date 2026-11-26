@@ -1272,6 +1272,99 @@ class PrepareBattleTest {
         assertThat(BattleFixture.tipOf(BattleFixture.done(habitatReply))).isZero();
     }
 
+    @Test
+    void 野外灵潮珍兽潮必须同时满足对应野外图与灵潮激活窗口() {
+        // 校验确定性灵潮窗口（[2, 3, 5] 每小时轮转，前 40 分钟激活，后 20 分钟休潮）。
+        assertThat(PlayerBattleService.isWorldTideActiveOnScene(0L, 2)).isTrue();
+        assertThat(PlayerBattleService.isWorldTideActiveOnScene(2399L, 2)).isTrue();
+        assertThat(PlayerBattleService.isWorldTideActiveOnScene(2400L, 2)).isFalse();
+        assertThat(PlayerBattleService.isWorldTideActiveOnScene(3600L, 3)).isTrue();
+        assertThat(PlayerBattleService.isWorldTideActiveOnScene(7200L, 5)).isTrue();
+
+        // 对齐 ManualClock 到八景岛(2)灵潮激活窗口起点（roundIndex % 3 == 0, offset = 0）。
+        long sec = f.clock.epochMillis() / 1000L;
+        long targetRound = ((sec / 3600L) / 3L + 1L) * 3L;
+        long activeMs = targetRound * 3600_000L + 60_000L;
+        f.advance(activeMs - f.clock.epochMillis());
+        assertThat(PlayerBattleService.isWorldTideActiveOnScene(f.clock.epochMillis() / 1000L, 2)).isTrue();
+
+        // 身处八景岛(2)在八景岛灵潮期请求 Dungeon 212 -> 通过。
+        f.enter(SESSION, PLAYER, 1, f.scene2, PlayerState.getDefaultInstance());
+        var okReply = f.battle.prepare(f.prepareRequest(PLAYER, BATTLE, f.deadline(), f.prepareDeadline())
+                .toBuilder().setBattleConfigId(212).build());
+        f.drain();
+        assertThat(BattleFixture.tipOf(BattleFixture.done(okReply))).isZero();
+
+        // 另一名玩家身处主城(1)在八景岛灵潮期请求 Dungeon 212 -> 场景不符，回 1006 且不写锁。
+        long cityPlayer = PLAYER + 1;
+        f.enter(SESSION + 1, cityPlayer, 1, f.scene1, PlayerState.getDefaultInstance());
+        var wrongMapResp = BattleFixture.done(f.battle.prepare(
+                f.prepareRequest(cityPlayer, BATTLE + 1, f.deadline(), f.prepareDeadline())
+                        .toBuilder().setBattleConfigId(212).build()));
+        assertThat(BattleFixture.tipOf(wrongMapResp)).isEqualTo(FEATURE_UNAVAILABLE);
+
+        // 推进时钟至休潮期（offset = 2460s >= 2400s）：八景岛玩家请求灵潮珍兽(212)被拒(1006)，但常态栖息地(202)仍通过。
+        f.advance(2_400_000L);
+        assertThat(PlayerBattleService.isWorldTideActiveOnScene(f.clock.epochMillis() / 1000L, 2)).isFalse();
+        long restPlayer = PLAYER + 2;
+        f.enter(SESSION + 2, restPlayer, 1, f.scene2, PlayerState.getDefaultInstance());
+        var restTideResp = BattleFixture.done(f.battle.prepare(
+                f.prepareRequest(restPlayer, BATTLE + 2, f.deadline(), f.prepareDeadline())
+                        .toBuilder().setBattleConfigId(212).build()));
+        assertThat(BattleFixture.tipOf(restTideResp)).isEqualTo(FEATURE_UNAVAILABLE);
+
+        var restNormalReply = f.battle.prepare(f.prepareRequest(restPlayer, BATTLE + 3, f.deadline(), f.prepareDeadline())
+                .toBuilder().setBattleConfigId(202).build());
+        f.drain();
+        assertThat(BattleFixture.tipOf(BattleFixture.done(restNormalReply))).isZero();
+    }
+
+    @Test
+    void 归元城原创NPC演武木桩残局奇谈须在归元城备战_木桩禁预设_结算零刷取() {
+        // 玩家在野外八景岛(scene2, configId=2)请求归元城演武木桩(301)/残局(311)/奇谈(321) -> 场景不符拒回 1006 且不写锁。
+        f.enter(SESSION, PLAYER, 1, f.scene2, PlayerState.getDefaultInstance());
+        for (int cfgId : new int[] { 301, 311, 321 }) {
+            var wrongMap = BattleFixture.done(f.battle.prepare(
+                    f.prepareRequest(PLAYER, BATTLE + cfgId, f.deadline(), f.prepareDeadline())
+                            .toBuilder().setBattleConfigId(cfgId).build()));
+            assertThat(BattleFixture.tipOf(wrongMap)).isEqualTo(FEATURE_UNAVAILABLE);
+        }
+        assertThat(f.locks.ops()).isEmpty();
+
+        // 玩家在归元城(scene1, configId=1)：演武木桩(301)挂免费预设被拒，本人真实养成放行。
+        long cityPlayer = PLAYER + 10;
+        f.enter(SESSION + 10, cityPlayer, 1, f.scene1, PlayerState.getDefaultInstance());
+        var dummyWithPreset = BattleFixture.done(f.battle.prepare(
+                f.prepareRequest(cityPlayer, BATTLE + 401, f.deadline(), f.prepareDeadline())
+                        .toBuilder()
+                        .setBattleConfigId(301)
+                        .setRankedContext(com.game.proto.RankedMatchContext.newBuilder().setUseFreePreset(true))
+                        .build()));
+        assertThat(BattleFixture.tipOf(dummyWithPreset)).isEqualTo(FEATURE_UNAVAILABLE);
+
+        var dummyRealReply = f.battle.prepare(
+                f.prepareRequest(cityPlayer, BATTLE + 402, f.deadline(), f.prepareDeadline())
+                        .toBuilder().setBattleConfigId(301).build());
+        f.drain();
+        assertThat(BattleFixture.tipOf(BattleFixture.done(dummyRealReply))).isZero();
+
+        // 结算防刷验证：kind=9/10/11 全部零材料、零赛季印、零经验银两。
+        for (int kind : new int[] { 9, 10, 11 }) {
+            var settlement = com.game.proto.BattleSettlementData.newBuilder()
+                    .setBattleId(9900L + kind)
+                    .setPlayerId(cityPlayer)
+                    .setMatchMode(com.game.proto.match.MatchMode.MATCH_MODE_PVE_SOLO_VALUE)
+                    .setOutcome(com.game.proto.eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                    .setPlayerTeamIndex(0)
+                    .setTotalRounds(4)
+                    .setBossTrialKind(kind)
+                    .build();
+            assertThat(com.game.scene.equip.EquipmentCraftService.isEligibleBattle(settlement)).isFalse();
+            assertThat(com.game.scene.season.SeasonService.isEligibleBattle(settlement)).isFalse();
+            assertThat(com.game.scene.progression.BattleProgressionRules.resolveBattleLookupKey(settlement)).isNull();
+        }
+    }
+
     private void leave() {
         f.world.onPlayerLeave(BattleFixture.LINK, PlayerLeave.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER)
                 .setVoluntary(true).build());

@@ -257,7 +257,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             ViewerState view = BattleViews.forParticipant(start, playerId, engine.selfItems(playerId),
                     engine.surrenderVoteForViewer(playerId),
                     engine.prepStateForViewer(playerId, room.prepDeadlineMs),
-                    engine.teamPingsForViewer(playerId));
+                    engine.teamPingsForViewer(playerId),
+                    engine.standbyPetsForViewer(playerId),
+                    engine.summonPetRemaining(playerId));
             // 177 先于 143（R5、O1）：同一批交给出口，经 gate 时是一条 GatePush{message_batch}
             outbound.pushLobby(battleId, playerId, room.directOf(playerId), List.of(
                     outbound.announcement(Notify.BATTLE_ASSIGNED, assignments.get(playerId)),
@@ -910,7 +912,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                         room.pendingCompletion == null
                                 ? room.engine.prepStateForViewer(playerId, room.prepDeadlineMs)
                                 : null,
-                        room.engine.teamPingsForViewer(playerId))
+                        room.engine.teamPingsForViewer(playerId),
+                        room.engine.standbyPetsForViewer(playerId),
+                        room.engine.summonPetRemaining(playerId))
                 : observerView(room, full);
         return view.state();
     }
@@ -1162,7 +1166,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         }
         for (long playerId : room.routingByPlayer.keySet()) {
             ViewerState view = BattleViews.forParticipant(start, playerId, room.engine.selfItems(playerId),
-                    room.engine.surrenderVoteForViewer(playerId), null, room.engine.teamPingsForViewer(playerId));
+                    room.engine.surrenderVoteForViewer(playerId), null, room.engine.teamPingsForViewer(playerId),
+                    room.engine.standbyPetsForViewer(playerId), room.engine.summonPetRemaining(playerId));
             outbound.pushLobby(room.battleId, playerId, room.directOf(playerId),
                     List.of(outbound.announcement(Notify.BATTLE_START, view.toBattleStart(room.battleId))));
         }
@@ -1285,7 +1290,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         BattleStateS2C full = result.getState();
         for (long playerId : room.routingByPlayer.keySet()) {
             ViewerState view = BattleViews.forParticipant(full, playerId, room.engine.selfItems(playerId),
-                    room.engine.surrenderVoteForViewer(playerId));
+                    room.engine.surrenderVoteForViewer(playerId), null, room.engine.teamPingsForViewer(playerId),
+                    room.engine.standbyPetsForViewer(playerId), room.engine.summonPetRemaining(playerId));
             outbound.pushBattleFrame(room.battleId, playerId, room.directOf(playerId), Notify.TURN_RESULT,
                     outbound.frame(Notify.TURN_RESULT, view.toTurnResult(result)));
         }

@@ -68,6 +68,7 @@ class AppearanceFeatureTest {
     private final AtomicLong requestSeq = new AtomicLong(1);
     private SceneWorld world;
     private ClientRequestHandler handler;
+    private BagService bagService;
     private AppearanceService appearanceService;
 
     @BeforeAll
@@ -81,7 +82,7 @@ class AppearanceFeatureTest {
     private void start(String initialAppearance, int cardCount) {
         BagTables bagTables = BagTables.from(config);
         AppearanceTables appearanceTables = AppearanceTables.from(config);
-        BagService bagService = new BagService(bagTables, count -> {
+        bagService = new BagService(bagTables, count -> {
             long[] out = new long[count];
             for (int i = 0; i < count; i++) out[i] = guidSeq.incrementAndGet();
             return out;
@@ -393,9 +394,16 @@ class AppearanceFeatureTest {
 
         EquipPetCosmeticResponse notOwnedPet = EquipPetCosmeticResponse.parseFrom(
                 call("EquipPetCosmetic", EquipPetCosmeticRequest.newBuilder()
-                        .setClientRequestId(8001L).setPetId(70001L).setCosmeticId(1).build())
+                        .setClientRequestId(8001L).setPetId(70001L).setCosmeticId(1)
+                        .setExpectFreeEquip(true).build())
                         .getSerializedMessage());
         assertThat(notOwnedPet.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NOT_OWNED);
+
+        EquipPetCosmeticResponse noCardPet = EquipPetCosmeticResponse.parseFrom(
+                call("EquipPetCosmetic", EquipPetCosmeticRequest.newBuilder()
+                        .setClientRequestId(80011L).setPetId(70001L).setCosmeticId(1).build())
+                        .getSerializedMessage());
+        assertThat(noCardPet.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NO_CARD);
 
         EquipPetCosmeticResponse missingPet = EquipPetCosmeticResponse.parseFrom(
                 call("EquipPetCosmetic", EquipPetCosmeticRequest.newBuilder()
@@ -429,12 +437,19 @@ class AppearanceFeatureTest {
         assertThat(petA.cosmeticId()).isZero();
         assertThat(clearPet.getInfo().getEquippedPetCosmeticsCount()).isZero();
 
-        // 技能特效：未拥有拒绝、技能错配拒绝、授形不自动启用、启用后透传 BattlePlayerSnapshot
+        // 技能特效：未拥有免费穿戴拒绝、无券拒绝、技能错配拒绝、授形不自动启用、启用后透传 BattlePlayerSnapshot
         EquipSkillVfxResponse notOwnedVfx = EquipSkillVfxResponse.parseFrom(
                 call("EquipSkillVfx", EquipSkillVfxRequest.newBuilder()
-                        .setClientRequestId(8005L).setSkillTableId(1201).setCosmeticId(1).build())
+                        .setClientRequestId(8005L).setSkillTableId(1201).setCosmeticId(1)
+                        .setExpectFreeEquip(true).build())
                         .getSerializedMessage());
         assertThat(notOwnedVfx.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NOT_OWNED);
+
+        EquipSkillVfxResponse noCardVfx = EquipSkillVfxResponse.parseFrom(
+                call("EquipSkillVfx", EquipSkillVfxRequest.newBuilder()
+                        .setClientRequestId(80051L).setSkillTableId(1201).setCosmeticId(1).build())
+                        .getSerializedMessage());
+        assertThat(noCardVfx.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NO_CARD);
 
         assertThat(appearanceService.grantSkillVfx(world, player, 1)).isZero();
         assertThat(player.appearance().equippedSkillVfx(1201)).isZero();
@@ -466,5 +481,80 @@ class AppearanceFeatureTest {
                         .getSerializedMessage());
         assertThat(clearVfx.getErrorMessage().getId()).isZero();
         assertThat(clearVfx.getInfo().getEquippedSkillVfxMap()).isEmpty();
+    }
+
+    @Test
+    void 灵宠幻化与技能特效支持百宝阁外观券原子解锁_幂等重放与专属拦截() throws Exception {
+        start("00_reference_topright_boy", 0);
+        ScenePlayer player = WorldTestAccess.player(world, LINK, SESSION);
+        var pet = new com.game.scene.player.PlayerPets.Pet(71001L, 12, 10, 1000L);
+        player.pets().add(pet);
+        assertThat(bagService.addItems(player, com.game.scene.player.BagType.INVENTORY,
+                java.util.Map.of(3411, 2L, 3412, 2L), true,
+                com.game.scene.audit.AssetAudit.Reason.GM_GRANT, 0L, "").ok()).isTrue();
+
+        GetAppearanceInfoResponse info = GetAppearanceInfoResponse.parseFrom(
+                call("GetAppearanceInfo", GetAppearanceInfoRequest.getDefaultInstance()).getSerializedMessage());
+        assertThat(info.getInfo().getPetCosmetics(0).getCardItemId()).isEqualTo(3411);
+        assertThat(info.getInfo().getPetCosmetics(0).getOwnedCardCount()).isEqualTo(2);
+        assertThat(info.getInfo().getPetCosmetics(0).getSpiritShopGoodsId()).isEqualTo(303);
+        assertThat(info.getInfo().getPetCosmetics(2).getCardItemId()).isZero();
+        assertThat(info.getInfo().getSkillVfxCosmetics(0).getCardItemId()).isEqualTo(3412);
+        assertThat(info.getInfo().getSkillVfxCosmetics(0).getOwnedCardCount()).isEqualTo(2);
+        assertThat(info.getInfo().getSkillVfxCosmetics(0).getSpiritShopGoodsId()).isEqualTo(304);
+        assertThat(info.getInfo().getSkillVfxCosmetics(2).getCardItemId()).isZero();
+
+        // 专属幻化 #3 拒绝耗券
+        EquipPetCosmeticResponse exclusivePet = EquipPetCosmeticResponse.parseFrom(
+                call("EquipPetCosmetic", EquipPetCosmeticRequest.newBuilder()
+                        .setClientRequestId(9101L).setPetId(71001L).setCosmeticId(3).build())
+                        .getSerializedMessage());
+        assertThat(exclusivePet.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NOT_CARD_UNLOCKABLE);
+
+        // 耗 1 张 3411 解锁并穿戴 #1 + 同键重放不二次扣券 + 换参拒绝
+        EquipPetCosmeticRequest petUnlockReq = EquipPetCosmeticRequest.newBuilder()
+                .setClientRequestId(9102L).setPetId(71001L).setCosmeticId(1).build();
+        EquipPetCosmeticResponse petUnlocked = EquipPetCosmeticResponse.parseFrom(
+                call("EquipPetCosmetic", petUnlockReq).getSerializedMessage());
+        assertThat(petUnlocked.getErrorMessage().getId()).isZero();
+        assertThat(petUnlocked.getReplayed()).isFalse();
+        assertThat(petUnlocked.getInfo().getPetCosmetics(0).getOwned()).isTrue();
+        assertThat(petUnlocked.getInfo().getPetCosmetics(0).getOwnedCardCount()).isEqualTo(1);
+        assertThat(player.bags().bag(com.game.scene.player.BagType.INVENTORY).total(3411)).isEqualTo(1L);
+
+        EquipPetCosmeticResponse petReplay = EquipPetCosmeticResponse.parseFrom(
+                call("EquipPetCosmetic", petUnlockReq).getSerializedMessage());
+        assertThat(petReplay.getErrorMessage().getId()).isZero();
+        assertThat(petReplay.getReplayed()).isTrue();
+        assertThat(player.bags().bag(com.game.scene.player.BagType.INVENTORY).total(3411)).isEqualTo(1L);
+
+        EquipPetCosmeticResponse petMismatch = EquipPetCosmeticResponse.parseFrom(
+                call("EquipPetCosmetic", EquipPetCosmeticRequest.newBuilder()
+                        .setClientRequestId(9102L).setPetId(71001L).setCosmeticId(2).build())
+                        .getSerializedMessage());
+        assertThat(petMismatch.getErrorMessage().getId()).isEqualTo(AppearanceService.INVALID_PARAMETER);
+
+        // 专属特效 #3 拒绝耗券；耗 1 张 3412 解锁并启用 #1 + 同键重放幂等
+        EquipSkillVfxResponse exclusiveVfx = EquipSkillVfxResponse.parseFrom(
+                call("EquipSkillVfx", EquipSkillVfxRequest.newBuilder()
+                        .setClientRequestId(9201L).setSkillTableId(1203).setCosmeticId(3).build())
+                        .getSerializedMessage());
+        assertThat(exclusiveVfx.getErrorMessage().getId()).isEqualTo(AppearanceService.APPEARANCE_NOT_CARD_UNLOCKABLE);
+
+        EquipSkillVfxRequest vfxUnlockReq = EquipSkillVfxRequest.newBuilder()
+                .setClientRequestId(9202L).setSkillTableId(1201).setCosmeticId(1).build();
+        EquipSkillVfxResponse vfxUnlocked = EquipSkillVfxResponse.parseFrom(
+                call("EquipSkillVfx", vfxUnlockReq).getSerializedMessage());
+        assertThat(vfxUnlocked.getErrorMessage().getId()).isZero();
+        assertThat(vfxUnlocked.getReplayed()).isFalse();
+        assertThat(vfxUnlocked.getInfo().getSkillVfxCosmetics(0).getOwned()).isTrue();
+        assertThat(vfxUnlocked.getInfo().getSkillVfxCosmetics(0).getOwnedCardCount()).isEqualTo(1);
+        assertThat(player.bags().bag(com.game.scene.player.BagType.INVENTORY).total(3412)).isEqualTo(1L);
+
+        EquipSkillVfxResponse vfxReplay = EquipSkillVfxResponse.parseFrom(
+                call("EquipSkillVfx", vfxUnlockReq).getSerializedMessage());
+        assertThat(vfxReplay.getErrorMessage().getId()).isZero();
+        assertThat(vfxReplay.getReplayed()).isTrue();
+        assertThat(player.bags().bag(com.game.scene.player.BagType.INVENTORY).total(3412)).isEqualTo(1L);
     }
 }

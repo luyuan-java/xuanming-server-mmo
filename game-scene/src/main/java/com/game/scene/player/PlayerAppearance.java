@@ -21,6 +21,8 @@ public final class PlayerAppearance {
     public static final int KIND_SWITCH = 1;
     public static final int KIND_START_TRIAL = 2;
     public static final int KIND_FREE_SWITCH = 3;
+    public static final int KIND_EQUIP_PET_COSMETIC = 4;
+    public static final int KIND_EQUIP_SKILL_VFX = 5;
 
     public enum IdempotencyVerdict { NEW, REPLAY, MISMATCH }
 

@@ -85,6 +85,10 @@ class TableBattleDataTest {
                 .filter(d -> d.getBossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_FESTIVAL_BEAST)
                 .flatMap(d -> data.dungeonMonsterIds(d.getId()).stream())
                 .collect(java.util.stream.Collectors.toSet());
+        java.util.Set<Integer> npcIsolatedMonsters = tables.dungeon().all().stream()
+                .filter(d -> BattleConstants.isNpcIsolatedEncounterKind(d.getBossTrialKind()))
+                .flatMap(d -> data.dungeonMonsterIds(d.getId()).stream())
+                .collect(java.util.stream.Collectors.toSet());
         for (MonsterTable row : tables.monster().all()) {
             MonsterTable found = data.monster(row.getId()).orElseThrow();
             assertThat(found.getHealth()).as("0 血怪物开局即死 id=%d", row.getId()).isNotZero();
@@ -95,6 +99,14 @@ class TableBattleDataTest {
                 assertThat(found.getGoldReward()).as("瑞兽迎春不应配普通银两 id=%d", row.getId()).isZero();
                 assertThat(found.getCritchance()).as("瑞兽迎春暴击应为 0 id=%d", row.getId()).isZero();
                 assertThat(found.getCapturePetTableId()).as("瑞兽迎春不应可捕捉 id=%d", row.getId()).isZero();
+                continue;
+            }
+            if (npcIsolatedMonsters.contains(row.getId())) {
+                // 归元城原创 NPC 演武木桩 / 残局 / 奇谈怪物必须零普通经验、零银两、不可捕捉（对齐 C++ table_battle_data_provider_test.cpp）。
+                assertThat(found.getStrength()).as("0 力量怪物打不出伤害 id=%d", row.getId()).isNotZero();
+                assertThat(found.getExpReward()).as("归元城NPC隔离玩法不应配普通经验 id=%d", row.getId()).isZero();
+                assertThat(found.getGoldReward()).as("归元城NPC隔离玩法不应配普通银两 id=%d", row.getId()).isZero();
+                assertThat(found.getCapturePetTableId()).as("归元城NPC隔离玩法不应可捕捉 id=%d", row.getId()).isZero();
                 continue;
             }
             assertThat(found.getStrength()).as("0 力量怪物打不出伤害 id=%d", row.getId()).isNotZero();

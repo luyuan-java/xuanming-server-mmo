@@ -167,15 +167,18 @@ public final class BattleSettlementService {
         try{
             boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(settlement.getMatchMode());
             boolean festivalBattle = isFestivalBeast(settlement);
+            boolean npcIsolated = com.game.battle.engine.BattleConstants.isNpcIsolatedEncounterKind(settlement.getBossTrialKind());
             boolean isolatedMode = settlement.getCompetitiveRanked() || settlement.getUseFreePreset()
-                    || isGuildWar || isWuxingTower(settlement) || festivalBattle;
+                    || isGuildWar || isWuxingTower(settlement) || festivalBattle || npcIsolated;
             long now = currency.nowSeconds();
             long nowMs = clock.epochMillis();
             if (isolatedMode) {
-                // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)、五行幻境与帮战：
-                // 零战损侵入（不动战斗残血/法力/宠物血量/背包消耗与掉落），但瑞兽迎春之外按配表发经验与周软上限银两。
-                if (festivalBattle) {
-                    markNormalBossTrialIfCleared(player, settlement);
+                // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)、五行幻境、帮战与归元城NPC玩法：
+                // 零战损侵入（不动战斗残血/法力/宠物血量/背包消耗与掉落）；瑞兽迎春与归元城NPC演武/残局/奇谈零战斗经验银两。
+                if (festivalBattle || npcIsolated) {
+                    if (festivalBattle) {
+                        markNormalBossTrialIfCleared(player, settlement);
+                    }
                     recordBattleResult(world, player, settlement, 0L, Map.of(), Map.of(),
                             com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta.NONE);
                     return Result.APPLIED;
@@ -389,14 +392,15 @@ public final class BattleSettlementService {
         }
         boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(settlement.getMatchMode());
         boolean festivalBattle = isFestivalBeast(settlement);
+        boolean npcIsolated = com.game.battle.engine.BattleConstants.isNpcIsolatedEncounterKind(settlement.getBossTrialKind());
         long nowMs = clock.epochMillis();
-        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isGuildWar || isWuxingTower(settlement) || festivalBattle) {
-            // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)、五行幻境与帮战：零战损侵入，非瑞兽按表发经验与银两。
+        if (settlement.getCompetitiveRanked() || settlement.getUseFreePreset() || isGuildWar || isWuxingTower(settlement) || festivalBattle || npcIsolated) {
+            // 正式人宠会武(competitive_ranked)、免费预设娱乐场(use_free_preset)、五行幻境、帮战与归元城NPC玩法：零战损侵入。
             var deltaRef = new com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta[] {
                     com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta.NONE
             };
             long actualSilver = 0L;
-            if (!festivalBattle) {
+            if (!festivalBattle && !npcIsolated) {
                 var prepared = prepareProgression(player, settlement, nowMs, 0L);
                 var delta = prepared.delta();
                 var economyCandidate = prepared.candidateLedger();
