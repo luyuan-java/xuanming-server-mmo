@@ -26,14 +26,16 @@ import java.util.TreeMap;
  */
 public final class Wallet {
 
-    /** 币种：金币。 */
+    /** 币种：银两。 */
     public static final int GOLD = 0;
-    /** 币种：钻石。 */
+    /** 币种：灵石。 */
     public static final int DIAMOND = 1;
-    /** 币种：绑定钻石。 */
+    /** 币种：绑定灵石。 */
     public static final int BOUND_DIAMOND = 2;
+    /** 币种：绑定银两（仅个人绑定养成消耗，严禁玩家间交易/流通）。 */
+    public static final int BOUND_GOLD = 3;
     /** 币种数（基线 kCurrencyMax）。 */
-    public static final int TYPE_COUNT = 3;
+    public static final int TYPE_COUNT = 4;
 
     static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
     /** 被封禁获取（全服或本人）：27005 {@code kAssetBlocked}。 */
@@ -108,6 +110,13 @@ public final class Wallet {
     /** 存档里本版本不认识的字段（更新版本写的）：原样带回，滚动升级 / 回滚时不被旧节点抹掉。 */
     private final UnknownFieldSet unknownFields;
 
+    /** 复合银两（绑定银两优先 + 流通银两补齐）一次原子扣款的结局。 */
+    public record SplitDeduction(int tipId, Change bindChange, Change goldChange) {
+        public boolean ok() {
+            return tipId == 0;
+        }
+    }
+
     /** 提交同一逻辑线程预检完成的纯扣款；不改变欠款、封禁或未知字段。 */
     public void commitDeduction(Change prepared) {
         if (!prepared.ok() || !known(prepared.type()) || balances[prepared.type()] != prepared.before()
@@ -115,6 +124,29 @@ public final class Wallet {
             throw new IllegalStateException("钱包候选已过期或不是扣款");
         }
         balances[prepared.type()] = prepared.after();
+    }
+
+    /** 原子提交复合银两预检扣款（先校验两项均未漂移再写入）。 */
+    public void commitSplitDeduction(SplitDeduction prepared) {
+        if (!prepared.ok()) {
+            throw new IllegalStateException("钱包复合候选不是成功扣款");
+        }
+        Change b = prepared.bindChange();
+        Change g = prepared.goldChange();
+        if (b != null && (b.type() != BOUND_GOLD || balances[BOUND_GOLD] != b.before()
+                || Long.compareUnsigned(b.after(), b.before()) > 0)) {
+            throw new IllegalStateException("绑定银两候选已过期");
+        }
+        if (g != null && (g.type() != GOLD || balances[GOLD] != g.before()
+                || Long.compareUnsigned(g.after(), g.before()) > 0)) {
+            throw new IllegalStateException("银两候选已过期");
+        }
+        if (b != null) {
+            balances[BOUND_GOLD] = b.after();
+        }
+        if (g != null) {
+            balances[GOLD] = g.after();
+        }
     }
 
     private Wallet(long[] balances, List<Integer> blocked, TreeMap<Integer, Debt> debts, UnknownFieldSet unknownFields) {
@@ -233,6 +265,68 @@ public final class Wallet {
         }
         balances[type] = before - amount;
         return new Change(0, type, before, balances[type]);
+    }
+
+    /** 绑定银两 + 流通银两总可用额（溢出夹紧到 Long.MAX_VALUE）。 */
+    public long spendableGoldWithBind() {
+        long bind = balances[BOUND_GOLD];
+        long gold = balances[GOLD];
+        return gold > Long.MAX_VALUE - bind ? Long.MAX_VALUE : bind + gold;
+    }
+
+    /** 只读预检：绑定银两 + 流通银两是否足够支付 amount。 */
+    public boolean canAffordGoldWithBind(long amount) {
+        return amount > 0 && spendableGoldWithBind() >= amount;
+    }
+
+    /** 复合银两只读预检：strictGold 严守流通银两，preferBindGold 优先消耗绑定银两、不足由剩余流通银两补齐。 */
+    public boolean canAffordSplitGold(long strictGold, long preferBindGold) {
+        if (strictGold < 0 || preferBindGold < 0) {
+            return false;
+        }
+        long gold = balances[GOLD];
+        if (gold < strictGold) {
+            return false;
+        }
+        if (preferBindGold == 0) {
+            return true;
+        }
+        long remainingGold = gold - strictGold;
+        long bind = balances[BOUND_GOLD];
+        return bind >= preferBindGold || (preferBindGold - bind) <= remainingGold;
+    }
+
+    /** 原子优先扣绑定银两，不足部分由流通银两补齐（先完整预检，绝不半扣）。 */
+    public SplitDeduction deductGoldPreferBind(long amount) {
+        if (amount <= 0) {
+            return new SplitDeduction(INVALID_PARAMETER, null, null);
+        }
+        return deductSplitGold(0L, amount);
+    }
+
+    /** 原子复合银两扣款：strictGold 严格只扣 GOLD，preferBindGold 优先扣 BOUND_GOLD 再用剩余 GOLD 补齐。 */
+    public SplitDeduction deductSplitGold(long strictGold, long preferBindGold) {
+        if (strictGold < 0 || preferBindGold < 0 || (strictGold == 0 && preferBindGold == 0)) {
+            return new SplitDeduction(INVALID_PARAMETER, null, null);
+        }
+        if (!canAffordSplitGold(strictGold, preferBindGold)) {
+            return new SplitDeduction(INSUFFICIENT, null, null);
+        }
+        long bindBefore = balances[BOUND_GOLD];
+        long goldBefore = balances[GOLD];
+        long spentBind = Math.min(bindBefore, preferBindGold);
+        long spentGold = strictGold + (preferBindGold - spentBind);
+        Change bindChange = null;
+        Change goldChange = null;
+        if (spentBind > 0) {
+            balances[BOUND_GOLD] = bindBefore - spentBind;
+            bindChange = new Change(0, BOUND_GOLD, bindBefore, balances[BOUND_GOLD]);
+        }
+        if (spentGold > 0) {
+            balances[GOLD] = goldBefore - spentGold;
+            goldChange = new Change(0, GOLD, goldBefore, balances[GOLD]);
+        }
+        return new SplitDeduction(0, bindChange, goldChange);
     }
 
     /** GM 封禁获取：币种越界 1005；已封禁幂等成功。返回 tip。 */

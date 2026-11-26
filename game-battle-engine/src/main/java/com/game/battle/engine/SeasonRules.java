@@ -10,8 +10,8 @@ public final class SeasonRules {
     public static final int HARD_STAT_CAP_BPS = 500;
     public static final int HARD_MAX_PROGRESS_POINTS = 1000;
     public static final long HARD_MAX_CATCHUP_PRICE_PER_POINT = 1_000_000_000L;
-    /** 0 银两 / 1 灵石 / 2 绑定灵石。 */
-    public static final int MAX_VALID_CURRENCY_TYPE = 2;
+    /** 0 银两 / 1 灵石 / 2 绑定灵石 / 3 绑定银两。 */
+    public static final int MAX_VALID_CURRENCY_TYPE = 3;
 
     public record RuleParams(int seasonId, long startsAtMs, long endsAtMs, boolean enabled,
                              int sealMaxPoints, int pveWinPoints, int pvpWinPoints, int pvpOtherPoints,

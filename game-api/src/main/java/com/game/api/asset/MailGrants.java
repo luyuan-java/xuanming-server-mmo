@@ -3,6 +3,7 @@ package com.game.api.asset;
 import com.game.api.proto.AssetBundle;
 import com.game.api.proto.AssetCurrency;
 import com.game.api.proto.AssetItem;
+import com.game.proto.common.base.CurrencyType;
 import com.game.proto.mail.MailAttachments;
 import java.util.HashSet;
 import java.util.function.IntPredicate;
@@ -17,7 +18,9 @@ public final class MailGrants {
         var currencies = new HashSet<Integer>();
         var items = new HashSet<Integer>();
         for (var value : input.getCurrenciesList()) {
-            if (!value.getUnknownFields().asMap().isEmpty() || Integer.compareUnsigned(value.getCurrencyType(), 2) > 0
+            if (!value.getUnknownFields().asMap().isEmpty()
+                    || value.getCurrencyType() < 0
+                    || CurrencyType.forNumber(value.getCurrencyType()) == null
                     || value.getAmount() <= 0 || !currencies.add(value.getCurrencyType()))
                 throw new IllegalArgumentException("邮件货币无效");
             out.addCurrencies(AssetCurrency.newBuilder().setCurrencyType(value.getCurrencyType()).setAmount(value.getAmount()));

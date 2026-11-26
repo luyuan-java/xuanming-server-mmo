@@ -1,6 +1,7 @@
 package com.game.trade.commerce;
 
 import com.game.proto.*;
+import com.game.proto.common.base.CurrencyType;
 import com.game.proto.trade.*;
 import com.game.table.CommonErrorTip;
 import com.game.table.TradeErrorTip;
@@ -38,13 +39,17 @@ public final class CommerceRules {
             currencies = Set.copyOf(currencies);
             markets = List.copyOf(markets);
         }
+        private static boolean isBoundCurrency(int currencyType) {
+            return currencyType == CurrencyType.CURRENCY_TYPE_BIND_DIAMOND_VALUE
+                    || currencyType == CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE;
+        }
         public void selection(TradeAssetSelection v) {
             if (v.getItemsCount() > 16 || v.getItemUuidsCount() > 8
                 || v.getItemsCount() + v.getItemUuidsCount() == 0 && v.getPetId() == 0 && v.getCurrencyAmount() == 0)
                 throw new Refusal(INVALID);
             if (v.getCurrencyAmount() < 0 || v.getCurrencyAmount() == 0 && v.getCurrencyType() != 0)
                 throw new Refusal(INVALID);
-            if (v.getCurrencyAmount() > 0 && !currencies.contains(v.getCurrencyType()))
+            if (v.getCurrencyAmount() > 0 && (isBoundCurrency(v.getCurrencyType()) || !currencies.contains(v.getCurrencyType())))
                 throw new Refusal(NOT_TRADABLE);
             long total = 0;
             for (var i : v.getItemsMap().entrySet()) {
@@ -68,7 +73,7 @@ public final class CommerceRules {
             return !v.hasPet() || pets.contains(v.getPet().getPetTableId());
         }
         public void price(long price, int type) {
-            if (price <= 0 || !currencies.contains(type))
+            if (price <= 0 || isBoundCurrency(type) || !currencies.contains(type))
                 throw new Refusal(INVALID);
         }
     }

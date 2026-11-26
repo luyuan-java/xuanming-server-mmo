@@ -214,7 +214,10 @@ public final class EquipmentService {
             }
         }
         if (row.getCostGold() < 0) return Outcome.refused(equip_error.kEquipEnhanceGoldNotEnough_VALUE);
-        var debit = currency.prepareDeduction(p, Wallet.GOLD, row.getCostGold());
+        // 已绑定(B)装备强化允许优先消耗绑定银两；可交易(T)装备严格只扣流通银两(防绑定染毒与洗白)。
+        var debit = equipCurrentlyBound
+                ? currency.prepareGoldPreferBindDeduction(p, row.getCostGold())
+                : currency.prepareDeduction(p, Wallet.GOLD, row.getCostGold());
         if (debit.tipId() != 0) return Outcome.refused(equip_error.kEquipEnhanceGoldNotEnough_VALUE);
         int pityLimit = row.getPityLimit();
         var roll = rules.rollEnhanceWithPity(row.getSuccessRate(), currentPity, pityLimit);

@@ -184,6 +184,8 @@ public final class BattleFixture {
     public final com.game.scene.merchant.MysteryMerchantService merchant;
     public final com.game.scene.spiritshop.SpiritShopTables spiritShopTables = com.game.scene.spiritshop.SpiritShopTables.from(CONFIG);
     public final com.game.scene.spiritshop.SpiritShopService spiritShop;
+    public final com.game.scene.rewardedad.RewardedAdTables rewardedAdTables = com.game.scene.rewardedad.RewardedAdTables.from(CONFIG);
+    public final com.game.scene.rewardedad.RewardedAdService rewardedAd;
     public final com.game.scene.season.SeasonTables seasonTables = com.game.scene.season.SeasonTables.from(CONFIG);
     public final com.game.scene.season.SeasonService season;
     public final com.game.scene.trial.TrialJournalTables trialJournalTables = com.game.scene.trial.TrialJournalTables.from(CONFIG);
@@ -261,6 +263,7 @@ public final class BattleFixture {
         craft = new com.game.scene.equip.EquipmentCraftService(equipmentRules, bags, currency, attributes, sceneMetrics, clock);
         merchant = new com.game.scene.merchant.MysteryMerchantService(merchantTables, bags, currency, clock, sceneMetrics);
         spiritShop = new com.game.scene.spiritshop.SpiritShopService(spiritShopTables, bags, currency, clock, sceneMetrics);
+        rewardedAd = new com.game.scene.rewardedad.RewardedAdService(rewardedAdTables, currency, clock);
         season = new com.game.scene.season.SeasonService(seasonTables, currency, attributes, clock, sceneMetrics);
         attributes.withSeason((p, out) -> season.collectEffects(p, clock.epochMillis(), out), season::activeSeasonId);
         missions = new MissionService(MissionTables.from(CONFIG), bags, clock);
@@ -322,6 +325,7 @@ public final class BattleFixture {
                 bagFeature, new com.game.scene.equip.EquipmentFeature(equipment, craft, bagFeature, attributes, Contracts.REGISTRY),
                 new com.game.scene.merchant.MysteryMerchantFeature(merchant, bagFeature),
                 new com.game.scene.spiritshop.SpiritShopFeature(spiritShop, bagFeature),
+                new com.game.scene.rewardedad.RewardedAdFeature(rewardedAd),
                 new com.game.scene.season.SeasonFeature(season, attributes, Contracts.REGISTRY),
                 new com.game.scene.trial.TrialJournalFeature(trialJournal),
                 new BattleResultFeature(),

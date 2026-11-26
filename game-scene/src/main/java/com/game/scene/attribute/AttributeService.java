@@ -694,15 +694,15 @@ public final class AttributeService {
         return 0;
     }
 
-    /** 扣金币（cost 为 uint64）：0 不扣；余额不足回 25012（基线 CanAfford）；扣成功记一条流水。 */
+    /** 扣银两（优先消耗绑定银两，不足由流通银两补齐）：0 不扣；余额不足回 25012。 */
     private int payGold(ScenePlayer player, long cost, AssetAudit.Reason reason) {
         if (cost == 0) {
             return 0;
         }
-        if (Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), cost) < 0) {
+        if (cost < 0 || !player.wallet().canAffordGoldWithBind(cost)) {
             return GOLD_NOT_ENOUGH;
         }
-        Wallet.Change change = currency.deduct(player, Wallet.GOLD, cost, reason);
+        Wallet.SplitDeduction change = currency.deductGoldPreferBind(player, cost, reason);
         return change.ok() ? 0 : change.tipId();
     }
 

@@ -373,7 +373,7 @@ public final class PetService {
             return failAscend(player, reqId, TIER_LEVEL_NOT_ENOUGH);
         }
         long costGold = currentRow.getAscendCostGold();
-        if (costGold != 0L && (costGold < 0L || Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), costGold) < 0)) {
+        if (costGold != 0L && (costGold < 0L || !player.wallet().canAffordGoldWithBind(costGold))) {
             return failAscend(player, reqId, GOLD_NOT_ENOUGH);
         }
         int costItemId = currentRow.getAscendCostItemId();
@@ -398,7 +398,7 @@ public final class PetService {
         }
         CurrencyService.PreparedDeduction payment = null;
         if (costGold > 0L) {
-            payment = currency.prepareDeduction(player, Wallet.GOLD, costGold);
+            payment = currency.prepareGoldPreferBindDeduction(player, costGold);
             if (payment.tipId() != 0) {
                 return failAscend(player, reqId, payment.tipId());
             }
@@ -556,7 +556,7 @@ public final class PetService {
             blockTip = TIER_MATERIAL_NOT_ENOUGH;
         } else if (currentRow.getAscendCostGold() != 0L
                 && (currentRow.getAscendCostGold() < 0L
-                || Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), currentRow.getAscendCostGold()) < 0)) {
+                || !player.wallet().canAffordGoldWithBind(currentRow.getAscendCostGold()))) {
             blockTip = GOLD_NOT_ENOUGH;
         }
         info.setNextTier(PetTierAscensionInfo.newBuilder()
@@ -742,7 +742,7 @@ public final class PetService {
             return NOTHING_TO_CHANGE;
         }
         long cost = tables.renameCostGold();
-        if (cost > 0 && Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), cost) < 0) {
+        if (cost > 0 && !player.wallet().canAffordGoldWithBind(cost)) {
             return GOLD_NOT_ENOUGH;
         }
         return OK;
@@ -901,9 +901,9 @@ public final class PetService {
             return new Grant(INVALID_TABLE_DATA, 0);
         if (ownerLevel(player) < Integer.toUnsignedLong(row.getUnlockLevel())) return new Grant(OWNER_LEVEL_NOT_ENOUGH, 0);
         if (!hasNormalPetSlot(current)) return new Grant(SLOT_FULL, 0);
-        if (Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), priceGold) < 0)
+        if (!player.wallet().canAffordGoldWithBind(priceGold))
             return new Grant(GOLD_NOT_ENOUGH, 0);
-        var deduction = currency.prepareDeduction(player, Wallet.GOLD, priceGold);
+        var deduction = currency.prepareGoldPreferBindDeduction(player, priceGold);
         if (deduction.tipId() != 0) return new Grant(deduction.tipId(), 0);
         long[] minted = guids.tryMint(1);
         if (minted == null) return new Grant(ID_GENERATE_FAILED, 0);
@@ -1155,15 +1155,15 @@ public final class PetService {
         return OK;
     }
 
-    /** 扣金币（uint64）：0 不扣；余额不足回 26013；扣成功记一条流水（货币服务内部还有封禁等校验）。 */
+    /** 扣银两（优先消耗绑定银两，不足由流通银两补齐）：0 不扣；余额不足回 26013。 */
     private int payGold(ScenePlayer player, long cost, AssetAudit.Reason reason) {
         if (cost == 0) {
             return OK;
         }
-        if (Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), cost) < 0) {
+        if (cost < 0 || !player.wallet().canAffordGoldWithBind(cost)) {
             return GOLD_NOT_ENOUGH;
         }
-        Wallet.Change change = currency.deduct(player, Wallet.GOLD, cost, reason);
+        Wallet.SplitDeduction change = currency.deductGoldPreferBind(player, cost, reason);
         return change.ok() ? OK : change.tipId();
     }
 
@@ -1271,7 +1271,7 @@ public final class PetService {
         var before = derived(pet, species);
         pet.setSkillRank(skillId, rank);
         recalculateOne(player, pet, RecalcReason.ALLOCATE, before);
-        var payment = currency.prepareDeduction(player, Wallet.GOLD, cost);
+        var payment = currency.prepareGoldPreferBindDeduction(player, cost);
         if (payment.tipId() != 0) return payment.tipId();
         payment.commitPets(candidate, AssetAudit.Reason.SKILL_UPGRADE, Integer.toUnsignedLong(skillId));
         return OK;

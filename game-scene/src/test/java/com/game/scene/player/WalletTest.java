@@ -66,19 +66,52 @@ class WalletTest {
         Wallet w = Wallet.empty();
         w.block(Wallet.BOUND_DIAMOND);
         w.block(Wallet.GOLD);
-        assertThat(w.toClient().getValuesList()).containsExactly(0L, 0L, 0L);
+        assertThat(w.toClient().getValuesList()).containsExactly(0L, 0L, 0L, 0L);
         assertThat(w.toClient().getBlockedTypesList()).containsExactly(Wallet.BOUND_DIAMOND, Wallet.GOLD);
     }
 
     @Test
     void 持久化往返_多出的币种槽保留_没动过的可省略() {
         assertThat(Wallet.empty().isPristine()).isTrue();
-        CurrencyState stored = CurrencyState.newBuilder().addBalances(7).addBalances(0).addBalances(3).addBalances(99)
-                .addBlockedTypes(1).build();
+        CurrencyState stored = CurrencyState.newBuilder().addBalances(7).addBalances(0).addBalances(3).addBalances(11)
+                .addBalances(99).addBlockedTypes(1).build();
         Wallet w = Wallet.restore(stored);
         assertThat(w.toState()).isEqualTo(stored);
         assertThat(w.isPristine()).isFalse();
         assertThat(Wallet.restore(CurrencyState.newBuilder().addBalances(5).build()).balance(Wallet.DIAMOND)).isZero();
+    }
+
+    @Test
+    void 双银两优先扣绑定银两与防洗白拆分扣款() {
+        Wallet w = Wallet.empty();
+        assertThat(w.add(Wallet.BOUND_GOLD, 300).ok()).isTrue();
+        assertThat(w.add(Wallet.GOLD, 200).ok()).isTrue();
+        assertThat(w.spendableGoldWithBind()).isEqualTo(500);
+        assertThat(w.canAffordGoldWithBind(500)).isTrue();
+        assertThat(w.canAffordGoldWithBind(501)).isFalse();
+
+        // A类先扣绑银再补流通银两
+        Wallet.SplitDeduction a = w.deductGoldPreferBind(350);
+        assertThat(a.ok()).isTrue();
+        assertThat(a.bindChange()).isEqualTo(new Wallet.Change(0, Wallet.BOUND_GOLD, 300, 0));
+        assertThat(a.goldChange()).isEqualTo(new Wallet.Change(0, Wallet.GOLD, 200, 150));
+        assertThat(w.balance(Wallet.BOUND_GOLD)).isZero();
+        assertThat(w.balance(Wallet.GOLD)).isEqualTo(150);
+
+        // 复合扣款防洗白：strictGold=100 只能用流通银两，preferBindGold=400 优先用绑银
+        assertThat(w.add(Wallet.BOUND_GOLD, 350).ok()).isTrue();
+        assertThat(w.canAffordSplitGold(160, 100)).as("流通银两不足以支付 strictGold，即使绑银很富也必须拒").isFalse();
+        Wallet.SplitDeduction fail = w.deductSplitGold(160, 100);
+        assertThat(fail.tipId()).isEqualTo(27000);
+        assertThat(w.balance(Wallet.BOUND_GOLD)).isEqualTo(350);
+        assertThat(w.balance(Wallet.GOLD)).isEqualTo(150);
+
+        Wallet.SplitDeduction ok = w.deductSplitGold(100, 400);
+        assertThat(ok.ok()).isTrue();
+        assertThat(ok.bindChange()).isEqualTo(new Wallet.Change(0, Wallet.BOUND_GOLD, 350, 0));
+        assertThat(ok.goldChange()).isEqualTo(new Wallet.Change(0, Wallet.GOLD, 150, 0));
+        assertThat(w.balance(Wallet.BOUND_GOLD)).isZero();
+        assertThat(w.balance(Wallet.GOLD)).isZero();
     }
 
     @Test

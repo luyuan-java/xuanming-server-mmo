@@ -4,6 +4,7 @@ import com.game.player.store.state.BattleEconomyLedgerState;
 import com.game.player.store.state.ClientRequestLedgerState;
 import com.game.player.store.state.ClientRequestRecordState;
 import com.game.player.store.state.EquipmentMaterialRewardLedgerState;
+import com.game.player.store.state.RewardedAdLedgerState;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
 import com.google.protobuf.UnknownFieldSet;
@@ -49,6 +50,7 @@ public final class PlayerClientRequestLedger {
     public static final int KIND_LEARN_SKILL_BOOK = 13;
     public static final int KIND_DISMANTLE_SKILL_BOOK = 14;
     public static final int KIND_BUY_SPIRIT_SHOP = 15;
+    public static final int KIND_CLAIM_REWARDED_AD = 21;
 
     public enum Verdict {
         NEW, REPLAY, MISMATCH
@@ -64,6 +66,7 @@ public final class PlayerClientRequestLedger {
     private long forgeRevision;
     private EquipmentMaterialRewardLedgerState materialReward = EquipmentMaterialRewardLedgerState.getDefaultInstance();
     private BattleEconomyLedgerState battleEconomy = BattleEconomyLedgerState.getDefaultInstance();
+    private RewardedAdLedgerState rewardedAd = RewardedAdLedgerState.getDefaultInstance();
     private UnknownFieldSet unknownFields = UnknownFieldSet.getDefaultInstance();
 
     private PlayerClientRequestLedger() {
@@ -86,6 +89,9 @@ public final class PlayerClientRequestLedger {
         }
         if (state.hasBattleEconomy()) {
             out.battleEconomy = state.getBattleEconomy();
+        }
+        if (state.hasRewardedAd()) {
+            out.rewardedAd = state.getRewardedAd();
         }
         out.unknownFields = state.getUnknownFields();
         return out;
@@ -262,10 +268,21 @@ public final class PlayerClientRequestLedger {
                 : battleEconomy;
     }
 
+    public RewardedAdLedgerState rewardedAd() {
+        return rewardedAd;
+    }
+
+    public void setRewardedAd(RewardedAdLedgerState rewardedAd) {
+        this.rewardedAd = rewardedAd == null
+                ? RewardedAdLedgerState.getDefaultInstance()
+                : rewardedAd;
+    }
+
     public boolean isPristine() {
         return records.isEmpty() && nextSeq == 0 && forgeRevision == 0
                 && materialReward.equals(EquipmentMaterialRewardLedgerState.getDefaultInstance())
                 && battleEconomy.equals(BattleEconomyLedgerState.getDefaultInstance())
+                && rewardedAd.equals(RewardedAdLedgerState.getDefaultInstance())
                 && unknownFields.asMap().isEmpty();
     }
 
@@ -282,6 +299,9 @@ public final class PlayerClientRequestLedger {
         }
         if (!battleEconomy.equals(BattleEconomyLedgerState.getDefaultInstance())) {
             b.setBattleEconomy(battleEconomy);
+        }
+        if (!rewardedAd.equals(RewardedAdLedgerState.getDefaultInstance())) {
+            b.setRewardedAd(rewardedAd);
         }
         return b.build();
     }

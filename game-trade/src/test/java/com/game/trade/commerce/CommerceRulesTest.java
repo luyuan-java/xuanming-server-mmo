@@ -3,6 +3,7 @@ package com.game.trade.commerce;
 import static org.assertj.core.api.Assertions.*;
 
 import com.game.proto.*;
+import com.game.proto.common.base.CurrencyType;
 import com.game.proto.trade.*;
 import com.google.protobuf.ByteString;
 import java.util.*;
@@ -18,6 +19,25 @@ class CommerceRulesTest {
         assertThatThrownBy(
             () -> policy.selection(TradeAssetSelection.newBuilder().putItems(10, 2048).putItems(11, 2049).build()))
             .isInstanceOf(CommerceRules.Refusal.class);
+    }
+
+    @Test
+    void 绑定银两禁止进入玩家交易托管与定价() {
+        var policy = new CommerceRules.Policy(
+            Set.of(), Set.of(),
+            Set.of(CurrencyType.CURRENCY_TYPE_GOLD_VALUE, CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE),
+            false, List.of());
+        assertThatThrownBy(
+            () -> policy.selection(TradeAssetSelection.newBuilder()
+                .setCurrencyType(CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE)
+                .setCurrencyAmount(100L).build()))
+            .isInstanceOf(CommerceRules.Refusal.class);
+        assertThatThrownBy(
+            () -> policy.price(100L, CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE))
+            .isInstanceOf(CommerceRules.Refusal.class);
+        assertThatCode(
+            () -> policy.price(100L, CurrencyType.CURRENCY_TYPE_GOLD_VALUE))
+            .doesNotThrowAnyException();
     }
     @Test
     void 托管转换credit清掉debit选择字段_原实例未知字段完整保留_逐个核对身份() {

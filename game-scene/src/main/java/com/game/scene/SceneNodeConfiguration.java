@@ -156,6 +156,11 @@ public class SceneNodeConfiguration {
     }
 
     @Bean
+    public com.game.scene.rewardedad.RewardedAdTables rewardedAdTables(ConfigTables tables) {
+        return com.game.scene.rewardedad.RewardedAdTables.from(tables);
+    }
+
+    @Bean
     public com.game.scene.progression.BattleProgressionTables battleProgressionTables(ConfigTables tables) {
         var view = com.game.scene.progression.BattleProgressionTables.from(tables);
         view.validate();
@@ -288,6 +293,7 @@ public class SceneNodeConfiguration {
                                com.game.scene.craft.SkillCraftTables skillCraftTables,
                                com.game.scene.festivalbeast.FestivalBeastTables festivalBeastTables,
                                com.game.scene.spiritshop.SpiritShopTables spiritShopTables,
+                               com.game.scene.rewardedad.RewardedAdTables rewardedAdTables,
                                com.game.scene.progression.BattleProgressionTables battleProgressionTables,
                                ObjectProvider<java.util.function.Function<com.game.proto.match.StartActivityBattleRequest,
                                        java.util.concurrent.CompletableFuture<com.game.proto.match.StartActivityBattleResponse>>> matchActivityStarter,
@@ -309,6 +315,7 @@ public class SceneNodeConfiguration {
                 .withSkillCraftTables(skillCraftTables)
                 .withFestivalBeastTables(festivalBeastTables)
                 .withSpiritShopTables(spiritShopTables)
+                .withRewardedAdTables(rewardedAdTables)
                 .withBattleProgressionTables(battleProgressionTables)
                 .withMatchActivityStarter(matchActivityStarter.getIfAvailable())
                 .withTextGuard(textGuard.getIfAvailable())

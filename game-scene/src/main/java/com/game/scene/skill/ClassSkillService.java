@@ -124,7 +124,7 @@ public final class ClassSkillService {
         var catalog = player.skillCatalog();
         var owned = player.learnedSkills();
         int level = PlayerLevels.effective(player.level());
-        long balance = player.wallet().balance(Wallet.GOLD);
+        long balance = player.wallet().spendableGoldWithBind();
         var list = PlayerSkillListComp.newBuilder();
         for (int id : player.skills()) {
             SkillTable row = catalog.row(id);
@@ -190,7 +190,7 @@ public final class ClassSkillService {
         var species = catalog.species(pet.petTableId());
         if (species == null) return result.setErrorMessage(tip(PetErrorTip.pet_error.kPetTableRowMissing_VALUE)).build();
         int level = ClassSkillCatalog.petLevel(pet, species);
-        long balance = player.wallet().balance(Wallet.GOLD);
+        long balance = player.wallet().spendableGoldWithBind();
         result.setPlayerLevel(level).setCurrencyBalance(balance).setErrorMessage(tip(0));
         var owned = result.getSkillListBuilder();
         catalog.petSkills(pet, species).forEach((id, rank) -> owned.addSkillList(PlayerSkillComp.newBuilder()
@@ -258,7 +258,7 @@ public final class ClassSkillService {
         if (oldRank != request.getExpectedRank()) return rejected(player, kSkillRankChanged_VALUE);
         int limit = ClassSkillRules.rankLimit(PlayerLevels.effective(player.level()), row.getUnlockLevel(), row.getMaxRank());
         var plan = ClassSkillRules.planUpgrade(oldRank, row.getMaxRank(), limit, row.getUnlockLevel(),
-                player.wallet().balance(Wallet.GOLD), request.getCount());
+                player.wallet().spendableGoldWithBind(), request.getCount());
         if (plan.steps() == 0) return rejected(player, stop(plan.stop()));
 
         PlayerSkills candidate = PlayerSkills.restore(player.learnedSkills().toState());
@@ -266,7 +266,7 @@ public final class ClassSkillService {
         if (oldRank == 0) {
             SkillLoadoutRules.tryAutoSlotNewlyLearned(player.skillCatalog(), candidate, row);
         }
-        var payment = currency.prepareDeduction(player, Wallet.GOLD, plan.totalCost());
+        var payment = currency.prepareGoldPreferBindDeduction(player, plan.totalCost());
         if (payment.tipId() != 0) return rejected(player, payment.tipId());
         payment.commitSkills(candidate, AssetAudit.Reason.SKILL_UPGRADE, Integer.toUnsignedLong(row.getId()));
         if (ClassSkillCatalog.passive(row)) attributes.skillsChanged(player);
@@ -423,7 +423,7 @@ public final class ClassSkillService {
             else {
                 int limit = ClassSkillRules.rankLimit(level, row.getUnlockLevel(), row.getMaxRank());
                 var plan = ClassSkillRules.planUpgrade(rank, row.getMaxRank(), limit, row.getUnlockLevel(),
-                        player.wallet().balance(Wallet.GOLD), request.getCount());
+                        player.wallet().spendableGoldWithBind(), request.getCount());
                 error = plan.steps() == 0 ? stop(plan.stop()) : pets.commitSkillUpgrade(player, petId, row.getId(), plan.finalRank(), plan.totalCost());
                 if (error == 0) response.setUpgradedCount(plan.steps()).setStopTipId(plan.steps() < request.getCount() ? stop(plan.stop()) : 0);
             }

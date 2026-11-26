@@ -21,30 +21,64 @@ import com.game.table.CommonErrorTip;
  */
 public final class CurrencyService {
 
-    /** 装备锻造的候选扣款：校验完成后与完整候选背包在同一逻辑线程提交，审计异常不拆散提交。 */
+    /** 装备锻造/技能/宠物等的候选扣款：支持单币种或复合银两（绑银优先+流通银两补齐），审计异常不拆散提交。 */
     public final class PreparedDeduction {
         private final ScenePlayer player;
         private final Wallet.Change change;
+        private final Wallet.SplitDeduction split;
         private final com.game.player.store.state.BagState originalBags;
         private final com.game.player.store.state.PlayerSkillBookState originalSkills;
         private final com.game.player.store.state.PetState originalPets;
         private boolean committed;
         private PreparedDeduction(ScenePlayer player, Wallet.Change change) {
-            this.player = player; this.change = change; this.originalBags = player.bags().toState();
+            this.player = player; this.change = change; this.split = null;
+            this.originalBags = player.bags().toState();
             this.originalSkills = player.learnedSkills().toState();
             this.originalPets = player.pets().toState();
         }
-        public int tipId() { return change.tipId(); }
+        private PreparedDeduction(ScenePlayer player, Wallet.SplitDeduction split) {
+            this.player = player; this.change = null; this.split = split;
+            this.originalBags = player.bags().toState();
+            this.originalSkills = player.learnedSkills().toState();
+            this.originalPets = player.pets().toState();
+        }
+        public int tipId() { return split != null ? split.tipId() : change.tipId(); }
+        private boolean ok() { return tipId() == 0; }
+        private void applyWallet() {
+            if (split != null) {
+                player.wallet().commitSplitDeduction(split);
+            } else {
+                player.wallet().commitDeduction(change);
+            }
+        }
+        private void recordAudit(AssetAudit.Reason reason, long correlation, String extra) {
+            if (split != null) {
+                if (split.bindChange() != null && split.bindChange().before() != split.bindChange().after()) {
+                    Wallet.Change b = split.bindChange();
+                    if (extra != null) audit.currencyChanged(player.playerId(), b.type(), b.after() - b.before(), b.before(), b.after(), reason, correlation, extra);
+                    else audit.currencyChanged(player.playerId(), b.type(), b.after() - b.before(), b.before(), b.after(), reason, correlation);
+                }
+                if (split.goldChange() != null && split.goldChange().before() != split.goldChange().after()) {
+                    Wallet.Change g = split.goldChange();
+                    if (extra != null) audit.currencyChanged(player.playerId(), g.type(), g.after() - g.before(), g.before(), g.after(), reason, correlation, extra);
+                    else audit.currencyChanged(player.playerId(), g.type(), g.after() - g.before(), g.before(), g.after(), reason, correlation);
+                }
+                return;
+            }
+            if (change.before() != change.after()) {
+                if (extra != null) audit.currencyChanged(player.playerId(), change.type(), change.after() - change.before(), change.before(), change.after(), reason, correlation, extra);
+                else audit.currencyChanged(player.playerId(), change.type(), change.after() - change.before(), change.before(), change.after(), reason, correlation);
+            }
+        }
         /** 两份候选一次提交；审计异常不得把扣款和技能升级拆开。 */
         public void commitSkills(com.game.scene.player.PlayerSkills candidate, AssetAudit.Reason reason, long skillId) {
-            if (committed || !change.ok() || player.frozen() || player.inBattle()
+            if (committed || !ok() || player.frozen() || player.inBattle()
                     || !originalSkills.equals(player.learnedSkills().toState()))
                 throw new IllegalStateException("stale skill upgrade candidate");
-            player.wallet().commitDeduction(change);
+            applyWallet();
             player.learnedSkills().commitPrepared(candidate);
             committed = true;
-            try { audit.currencyChanged(player.playerId(), change.type(), change.after() - change.before(),
-                    change.before(), change.after(), reason, skillId); }
+            try { recordAudit(reason, skillId, null); }
             catch (RuntimeException failure) {
                 org.slf4j.LoggerFactory.getLogger(CurrencyService.class)
                         .error("Skill upgrade committed but audit failed skill={}", skillId, failure);
@@ -57,15 +91,14 @@ public final class CurrencyService {
         }
 
         public void commitPets(com.game.scene.player.PlayerPets candidate, AssetAudit.Reason reason, long correlation) {
-            if (committed || !change.ok() || player.frozen() || player.inBattle()
+            if (committed || !ok() || player.frozen() || player.inBattle()
                     || !originalPets.equals(player.pets().toState()))
                 throw new IllegalStateException("stale pet purchase candidate");
-            player.wallet().commitDeduction(change);
+            applyWallet();
             player.pets().commitPrepared(candidate);
             committed = true;
             try {
-                audit.currencyChanged(player.playerId(), change.type(), change.after() - change.before(),
-                          change.before(), change.after(), reason, correlation);
+                recordAudit(reason, correlation, null);
             } catch (RuntimeException failure) {
                 org.slf4j.LoggerFactory.getLogger(CurrencyService.class)
                         .error("Pet update committed but audit failed correlation={}", correlation, failure);
@@ -73,18 +106,15 @@ public final class CurrencyService {
         }
 
         public void commit(com.game.scene.player.PlayerBags candidate, AssetAudit.Reason reason, long correlation, String extra) {
-            if (committed || !change.ok() || !candidate.normalized() || player.frozen()
+            if (committed || !ok() || !candidate.normalized() || player.frozen()
                     || !originalBags.equals(player.bags().toState())) throw new IllegalStateException("非法或已过期的装备资产候选");
-            player.wallet().commitDeduction(change);
+            applyWallet();
             player.bags().commitPrepared(candidate);
             committed = true;
-            if (change.before() != change.after()) {
-                try { audit.currencyChanged(player.playerId(), change.type(), change.after() - change.before(),
-                        change.before(), change.after(), reason, correlation, extra); }
-                catch (RuntimeException failure) {
-                    org.slf4j.LoggerFactory.getLogger(CurrencyService.class).error("装备候选已提交，扣款审计失败 correlation={}",
-                            Long.toUnsignedString(correlation), failure);
-                }
+            try { recordAudit(reason, correlation, extra); }
+            catch (RuntimeException failure) {
+                org.slf4j.LoggerFactory.getLogger(CurrencyService.class).error("装备候选已提交，扣款审计失败 correlation={}",
+                        Long.toUnsignedString(correlation), failure);
             }
         }
     }
@@ -97,6 +127,26 @@ public final class CurrencyService {
                 : amount == 0 ? new Wallet.Change(0, type, candidate.balance(type), candidate.balance(type), 0)
                 : candidate.deduct(type, amount);
         return new PreparedDeduction(player, result);
+    }
+
+    /** 预检并构造优先消耗绑定银两、不足由流通银两补齐的候选扣款。 */
+    public PreparedDeduction prepareGoldPreferBindDeduction(ScenePlayer player, long amount) {
+        return prepareSplitGoldDeduction(player, 0L, amount);
+    }
+
+    /** 预检并构造复合银两候选扣款（strictGold 严格只扣 GOLD，preferBindGold 优先扣 BOUND_GOLD 再补 GOLD）。 */
+    public PreparedDeduction prepareSplitGoldDeduction(ScenePlayer player, long strictGold, long preferBindGold) {
+        if (strictGold < 0 || preferBindGold < 0) {
+            return new PreparedDeduction(player, new Wallet.SplitDeduction(INVALID_PARAMETER, null, null));
+        }
+        if (player.frozen()) {
+            return new PreparedDeduction(player, new Wallet.SplitDeduction(Wallet.FROZEN, null, null));
+        }
+        if (strictGold == 0 && preferBindGold == 0) {
+            return new PreparedDeduction(player, new Wallet.SplitDeduction(0, null, null));
+        }
+        Wallet candidate = Wallet.restore(player.wallet().toState());
+        return new PreparedDeduction(player, candidate.deductSplitGold(strictGold, preferBindGold));
     }
 
     private static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
@@ -191,6 +241,36 @@ public final class CurrencyService {
                     correlationId);
         }
         return change;
+    }
+
+    /** 原子优先扣绑定银两、不足由流通银两补齐（关联号 0）。 */
+    public Wallet.SplitDeduction deductGoldPreferBind(ScenePlayer player, long amount, AssetAudit.Reason reason) {
+        return deductGoldPreferBind(player, amount, reason, 0L);
+    }
+
+    /** 原子优先扣绑定银两、不足由流通银两补齐；两项流水共享同一 correlationId。 */
+    public Wallet.SplitDeduction deductGoldPreferBind(ScenePlayer player, long amount, AssetAudit.Reason reason,
+                                                      long correlationId) {
+        if (amount <= 0) {
+            return new Wallet.SplitDeduction(INVALID_PARAMETER, null, null);
+        }
+        if (player.frozen()) {
+            return new Wallet.SplitDeduction(Wallet.FROZEN, null, null);
+        }
+        Wallet.SplitDeduction res = player.wallet().deductGoldPreferBind(amount);
+        if (res.ok()) {
+            if (res.bindChange() != null) {
+                Wallet.Change b = res.bindChange();
+                audit.currencyChanged(player.playerId(), b.type(), b.after() - b.before(), b.before(), b.after(),
+                        reason, correlationId);
+            }
+            if (res.goldChange() != null) {
+                Wallet.Change g = res.goldChange();
+                audit.currencyChanged(player.playerId(), g.type(), g.after() - g.before(), g.before(), g.after(),
+                        reason, correlationId);
+            }
+        }
+        return res;
     }
 
     /**

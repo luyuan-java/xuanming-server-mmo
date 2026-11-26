@@ -333,9 +333,13 @@ public final class SkillCraftService {
             effectiveScrollTier = EquipCraftQualityRules.MASTERY_MASTER;
         }
 
-        long totalGold = baseGoldCost + proxyFeeGold;
-        if (totalGold > 0L && (Long.compareUnsigned(totalGold, Long.MAX_VALUE) > 0
-                || Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), totalGold) < 0)) {
+        // 防洗白硬隔离：代工费严格只扣流通银两，仅 TARGETED_RARE（产物必绑定）系统费允许优先扣绑定银两。
+        boolean allowBindForBaseFee = mode == CraftSkillBookRequest.CraftMode.TARGETED_RARE;
+        long strictGold = proxyFeeGold + (allowBindForBaseFee ? 0L : baseGoldCost);
+        long preferBindGold = allowBindForBaseFee ? baseGoldCost : 0L;
+        if ((strictGold > 0L || preferBindGold > 0L)
+                && (strictGold < 0L || preferBindGold < 0L
+                || !player.wallet().canAffordSplitGold(strictGold, preferBindGold))) {
             return failCraft(player, reqId, kSkillGoldNotEnough_VALUE);
         }
 
@@ -356,8 +360,8 @@ public final class SkillCraftService {
         }
 
         CurrencyService.PreparedDeduction payment = null;
-        if (totalGold > 0L) {
-            payment = currency.prepareDeduction(player, Wallet.GOLD, totalGold);
+        if (strictGold > 0L || preferBindGold > 0L) {
+            payment = currency.prepareSplitGoldDeduction(player, strictGold, preferBindGold);
             if (payment.tipId() != 0) {
                 return failCraft(player, reqId, kSkillGoldNotEnough_VALUE);
             }

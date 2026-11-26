@@ -276,6 +276,17 @@ message ClientRequestLedgerState {
   uint64 forge_revision = 3;
   EquipmentMaterialRewardLedgerState material_reward = 4;
   BattleEconomyLedgerState battle_economy = 5;
+  RewardedAdLedgerState rewarded_ad = 6;
+}
+
+message RewardedAdLedgerState {
+  uint64 day_starts_at_ms = 1;
+  uint32 claimed_today = 2;
+  uint64 last_claim_at_ms = 3;
+  uint64 total_claimed_lifetime = 4;
+  uint64 active_session_id = 5;
+  uint64 active_session_issued_ms = 6;
+  uint32 active_session_slot_id = 7;
 }
 
 message BattleEconomyLedgerState {
@@ -314,6 +325,8 @@ message ClientRequestRecordState {
   uint32 crafted_skill_table_id = 27;
   uint64 scroll_craft_revision = 28;
   uint32 scroll_bonus_fragments = 29;
+  uint32 rewarded_ad_currency_type = 30;
+  uint64 rewarded_ad_amount = 31;
 }
 
 message EquipmentMaterialRewardLedgerState {
@@ -630,7 +643,7 @@ message EquipmentGemState {
 }
 
 message CurrencyState {
-  // 下标 = 币种（0 金币、1 钻石、2 绑钻，同 mmorpg kCurrency*）；缺的槽按 0。
+  // 下标 = 币种（0 银两、1 灵石、2 绑定灵石、3 绑定银两，同 mmorpg kCurrency*）；缺的槽按 0。
   repeated uint64 balances = 1;
   // GM 封禁获取的币种（按封禁先后）。
   repeated uint32 blocked_types = 2;

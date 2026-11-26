@@ -375,13 +375,17 @@ public final class EquipmentCraftService {
             proxyNetGold = EquipCraftQualityRules.proxyNetGold(prepared.proxyFeeGold);
         }
 
+        boolean allowBindForBaseFee = op != EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE
+                && prepared.resultBound;
+        long strictGold = prepared.proxyFeeGold + (allowBindForBaseFee ? 0L : prepared.baseGoldCost);
+        long preferBindGold = allowBindForBaseFee ? prepared.baseGoldCost : 0L;
         CurrencyService.PreparedDeduction payment = null;
-        if (totalGold > 0L) {
-            if (currency == null || Long.compareUnsigned(totalGold, Long.MAX_VALUE) > 0) {
+        if (strictGold > 0L || preferBindGold > 0L) {
+            if (currency == null || strictGold < 0L || preferBindGold < 0L) {
                 return new CommitResult(rejectCraft(reqId, ledger.forgeRevision(),
                         equip_error.kEquipCraftGoldNotEnough_VALUE, true), false);
             }
-            payment = currency.prepareDeduction(player, Wallet.GOLD, totalGold);
+            payment = currency.prepareSplitGoldDeduction(player, strictGold, preferBindGold);
             if (payment.tipId() != 0) {
                 return new CommitResult(rejectCraft(reqId, ledger.forgeRevision(),
                         equip_error.kEquipCraftGoldNotEnough_VALUE, true), false);
@@ -1402,10 +1406,12 @@ public final class EquipmentCraftService {
         if (prepared.bindConfirmBlocked) {
             return equip_error.kEquipBindConfirmRequired_VALUE;
         }
-        long totalGold = prepared.baseGoldCost + prepared.proxyFeeGold;
-        if (totalGold > 0L) {
-            if (Long.compareUnsigned(totalGold, Long.MAX_VALUE) > 0
-                    || Long.compareUnsigned(player.wallet().balance(Wallet.GOLD), totalGold) < 0) {
+        boolean allowBindForBaseFee = prepared.resultBound;
+        long strictGold = prepared.proxyFeeGold + (allowBindForBaseFee ? 0L : prepared.baseGoldCost);
+        long preferBindGold = allowBindForBaseFee ? prepared.baseGoldCost : 0L;
+        if (strictGold > 0L || preferBindGold > 0L) {
+            if (strictGold < 0L || preferBindGold < 0L
+                    || !player.wallet().canAffordSplitGold(strictGold, preferBindGold)) {
                 return equip_error.kEquipCraftGoldNotEnough_VALUE;
             }
         }
