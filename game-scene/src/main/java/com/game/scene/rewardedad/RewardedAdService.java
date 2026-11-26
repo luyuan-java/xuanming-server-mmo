@@ -13,6 +13,7 @@ import com.game.proto.GetRewardedAdInfoResponse;
 import com.game.proto.RewardedAdSlotView;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.currency.CurrencyService;
+import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.player.PlayerClientRequestLedger;
 import com.game.scene.player.PlayerClientRequestLedger.Verdict;
 import com.game.scene.player.PlayerLevels;
@@ -58,12 +59,14 @@ public final class RewardedAdService {
     private final RewardedAdTables tables;
     private final CurrencyService currency;
     private final SceneClock clock;
+    private final SceneMetrics metrics;
     private final SecureRandom random = new SecureRandom();
 
-    public RewardedAdService(RewardedAdTables tables, CurrencyService currency, SceneClock clock) {
+    public RewardedAdService(RewardedAdTables tables, CurrencyService currency, SceneClock clock, SceneMetrics metrics) {
         this.tables = Objects.requireNonNull(tables, "tables");
         this.currency = Objects.requireNonNull(currency, "currency");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
     }
 
     public long nowMillis() {
@@ -95,6 +98,7 @@ public final class RewardedAdService {
     public BeginRewardedAdSessionResponse beginSession(SceneWorld world, ScenePlayer player,
                                                        BeginRewardedAdSessionRequest req, long nowMs) {
         if (player.inBattle()) {
+            metrics.battleGateReject(SceneMetrics.BattleGate.REWARDED_AD);
             return rejectBegin(IN_BATTLE);
         }
         if (player.frozen()) {
@@ -204,6 +208,7 @@ public final class RewardedAdService {
 
         // 2. 运行态校验
         if (player.inBattle()) {
+            metrics.battleGateReject(SceneMetrics.BattleGate.REWARDED_AD);
             return rejectClaim(IN_BATTLE);
         }
         if (player.frozen()) {

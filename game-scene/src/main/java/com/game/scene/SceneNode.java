@@ -495,7 +495,7 @@ public class SceneNode implements SmartLifecycle {
         com.game.scene.spiritshop.SpiritShopService spiritShopService = spiritShopTables == null ? null
                 : new com.game.scene.spiritshop.SpiritShopService(spiritShopTables, bags, currency, SceneClock.SYSTEM, metrics);
         com.game.scene.rewardedad.RewardedAdService rewardedAdService = rewardedAdTables == null ? null
-                : new com.game.scene.rewardedad.RewardedAdService(rewardedAdTables, currency, SceneClock.SYSTEM);
+                : new com.game.scene.rewardedad.RewardedAdService(rewardedAdTables, currency, SceneClock.SYSTEM, metrics);
         com.game.scene.season.SeasonService seasonService = seasonTables == null ? null
                 : new com.game.scene.season.SeasonService(seasonTables, currency, attributes, SceneClock.SYSTEM, metrics);
         if (seasonService != null) {

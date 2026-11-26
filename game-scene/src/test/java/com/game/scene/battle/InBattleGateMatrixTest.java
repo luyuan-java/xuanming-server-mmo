@@ -138,6 +138,8 @@ class InBattleGateMatrixTest {
     private static final int SEASON_IN_BATTLE = 34009;
     private static final int TRIAL_JOURNAL_IN_BATTLE = 35002;
     private static final int SPIRIT_SHOP_IN_BATTLE = 37009;
+    private static final int REWARDED_AD_IN_BATTLE = 39010;
+    private static final int REWARDED_AD_DISABLED = 39001;
     private static final java.util.Set<String> EQUIPMENT_METHODS = java.util.Set.of(
             "EquipItem", "UnequipItem", "GmGrantItem", "EnhanceEquip", "InlayGem", "RemoveGem",
             "CommitEquipmentCraft", "ClaimEquipmentMaterialReward");
@@ -168,6 +170,7 @@ class InBattleGateMatrixTest {
     private static final String BATTLE_RESULT = "SceneBattleResultClientPlayer";
     private static final String MYSTERY_MERCHANT = "SceneMysteryMerchantClientPlayer";
     private static final String SPIRIT_SHOP = "SceneSpiritShopClientPlayer";
+    private static final String REWARDED_AD = "SceneRewardedAdClientPlayer";
     private static final String SEASON = "SceneSeasonClientPlayer";
     private static final String TRIAL_JOURNAL = "SceneTrialJournalClientPlayer";
 
@@ -223,6 +226,8 @@ class InBattleGateMatrixTest {
             new Row(408, BAG, "ClaimEquipmentMaterialReward", BattlePolicy.GATED, EQUIPMENT_IN_BATTLE),
             new Row(315, MYSTERY_MERCHANT, "BuyMysteryMerchantGoods", BattlePolicy.GATED, MYSTERY_MERCHANT_IN_BATTLE),
             new Row(510, SPIRIT_SHOP, "BuySpiritShopGoods", BattlePolicy.GATED, SPIRIT_SHOP_IN_BATTLE),
+            new Row(541, REWARDED_AD, "BeginRewardedAdSession", BattlePolicy.GATED, REWARDED_AD_IN_BATTLE),
+            new Row(542, REWARDED_AD, "ClaimRewardedAd", BattlePolicy.GATED, REWARDED_AD_IN_BATTLE),
             new Row(454, SEASON, "EquipSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(455, SEASON, "CatchupSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(457, TRIAL_JOURNAL, "ClaimTrialJournalMilestone", BattlePolicy.GATED, TRIAL_JOURNAL_IN_BATTLE),
@@ -240,6 +245,7 @@ class InBattleGateMatrixTest {
             new Row(253, SCENE, "GetSyncDigest", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(314, MYSTERY_MERCHANT, "GetMysteryMerchantInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(509, SPIRIT_SHOP, "GetSpiritShopInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(540, REWARDED_AD, "GetRewardedAdInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(453, SEASON, "GetSeasonState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(456, TRIAL_JOURNAL, "GetTrialJournal", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(459, SKILL, "GetSkillCraftingState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -559,7 +565,12 @@ class InBattleGateMatrixTest {
                 assertThat(gateRejected).as("恰好计一次 gate_rejects{move}，别的闸不计").isEqualTo(Map.of("move", 1.0));
             }
             default -> {
-                assertThat(normal.tip()).as("对照：%s 这条请求不在战斗时是成功的（战斗中的拒绝码才说明是闸拒的）", key).isZero();
+                if (row.inBattle() == REWARDED_AD_IN_BATTLE) {
+                    assertThat(normal.tip()).as("对照：%s 首审默认关闭返回 DISABLED，战斗中须先于关闭闸拒", key)
+                            .isEqualTo(REWARDED_AD_DISABLED);
+                } else {
+                    assertThat(normal.tip()).as("对照：%s 这条请求不在战斗时是成功的（战斗中的拒绝码才说明是闸拒的）", key).isZero();
+                }
                 assertThat(inBattle.tip()).as("%s 战斗中的码", key).isEqualTo(row.inBattle());
                 assertThat(inBattle.messageIds()).as("只回这一条应答，不带任何推送").containsExactly(row.specId());
                 assertThat(BattleFixture.persistentState(player)).as("被闸拒的请求不改任何可持久化状态").isEqualTo(stateBefore);
@@ -798,6 +809,18 @@ class InBattleGateMatrixTest {
         out.put(ACTIVITY + "ClaimFestivalBeastReward", s -> com.game.proto.ClaimFestivalBeastRewardRequest.newBuilder()
                 .setClientRequestId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
                 .setRewardIdentity("festival_beast_chunxishou_v1")
+                .build());
+        out.put(REWARDED_AD + "GetRewardedAdInfo", s -> com.game.proto.GetRewardedAdInfoRequest.newBuilder()
+                .setClientPlatform(com.game.proto.AdClientPlatform.AD_CLIENT_PLATFORM_WECHAT_MINIGAME_VALUE)
+                .build());
+        out.put(REWARDED_AD + "BeginRewardedAdSession", s -> com.game.proto.BeginRewardedAdSessionRequest.newBuilder()
+                .setSlotId(1)
+                .setClientPlatform(com.game.proto.AdClientPlatform.AD_CLIENT_PLATFORM_WECHAT_MINIGAME_VALUE)
+                .build());
+        out.put(REWARDED_AD + "ClaimRewardedAd", s -> com.game.proto.ClaimRewardedAdRequest.newBuilder()
+                .setClientRequestId(9301L)
+                .setSlotId(1)
+                .setAdSessionId(1L)
                 .build());
         return out;
     }
@@ -1434,7 +1457,7 @@ class InBattleGateMatrixTest {
 
     /** 包含跨区、装备、神秘商人与赛季的全部闸（{@code game_scene_battle_gate_rejects_total{gate}}）。 */
     private static final List<String> GATES = List.of("enter_scene", "skill", "attribute", "pet", "bag_sort", "asset", "move", "default",
-            "zone_travel", "equipment", "mystery_merchant", "season", "trial_journal", "spirit_shop");
+            "zone_travel", "equipment", "mystery_merchant", "season", "trial_journal", "spirit_shop", "rewarded_ad");
 
     private Map<String, Double> gateRejectsByGate() {
         Map<String, Double> out = new TreeMap<>();
@@ -1464,6 +1487,7 @@ class InBattleGateMatrixTest {
             case BAG -> EQUIPMENT_METHODS.contains(row.method()) ? "equipment" : "bag_sort";
             case MYSTERY_MERCHANT -> "mystery_merchant";
             case SPIRIT_SHOP -> "spirit_shop";
+            case REWARDED_AD -> "rewarded_ad";
             case SEASON -> "season";
             case TRIAL_JOURNAL -> "trial_journal";
             default -> throw new AssertionError(row.key() + " 是 GATED，但没有登记它计在哪个闸上（规格 §9 的 gate 取值）");

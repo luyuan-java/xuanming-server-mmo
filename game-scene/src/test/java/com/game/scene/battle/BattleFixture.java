@@ -263,7 +263,7 @@ public final class BattleFixture {
         craft = new com.game.scene.equip.EquipmentCraftService(equipmentRules, bags, currency, attributes, sceneMetrics, clock);
         merchant = new com.game.scene.merchant.MysteryMerchantService(merchantTables, bags, currency, clock, sceneMetrics);
         spiritShop = new com.game.scene.spiritshop.SpiritShopService(spiritShopTables, bags, currency, clock, sceneMetrics);
-        rewardedAd = new com.game.scene.rewardedad.RewardedAdService(rewardedAdTables, currency, clock);
+        rewardedAd = new com.game.scene.rewardedad.RewardedAdService(rewardedAdTables, currency, clock, sceneMetrics);
         season = new com.game.scene.season.SeasonService(seasonTables, currency, attributes, clock, sceneMetrics);
         attributes.withSeason((p, out) -> season.collectEffects(p, clock.epochMillis(), out), season::activeSeasonId);
         missions = new MissionService(MissionTables.from(CONFIG), bags, clock);

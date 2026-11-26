@@ -88,7 +88,7 @@ class RewardedAdFeatureAndServiceTest {
         BattleFixture f = new BattleFixture();
         ScenePlayer player = f.enter(11, 2001);
         RewardedAdTables tables = new RewardedAdTables(List.of(enabledSlot(1, false)));
-        RewardedAdService svc = new RewardedAdService(tables, f.currency, f.clock);
+        RewardedAdService svc = new RewardedAdService(tables, f.currency, f.clock, f.sceneMetrics);
 
         // 1. 等级 < 10 与未开放平台被拒
         player.setLevel(9);

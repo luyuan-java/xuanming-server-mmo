@@ -529,7 +529,7 @@ public final class SceneMetrics {
      * 码与 63 的 3023 不同，所以单列一个取值；裁决 J4）。装备扩展增加 equipment，六个写入口每次拒绝只计一次。
      */
     public enum BattleGate {
-        ENTER_SCENE, SKILL, ATTRIBUTE, PET, BAG_SORT, ASSET, MOVE, DEFAULT, ZONE_TRAVEL, EQUIPMENT, MYSTERY_MERCHANT, SEASON, TRIAL_JOURNAL, SPIRIT_SHOP
+        ENTER_SCENE, SKILL, ATTRIBUTE, PET, BAG_SORT, ASSET, MOVE, DEFAULT, ZONE_TRAVEL, EQUIPMENT, MYSTERY_MERCHANT, SEASON, TRIAL_JOURNAL, SPIRIT_SHOP, REWARDED_AD
     }
 
     /** 目标节点上交出进场（{@code PlayerEnter.transfer = true}）的结果（{@code game.scene.transfer.enters{result}}）。 */
