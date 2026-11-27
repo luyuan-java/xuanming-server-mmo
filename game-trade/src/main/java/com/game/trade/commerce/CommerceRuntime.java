@@ -232,11 +232,18 @@ public final class CommerceRuntime implements AutoCloseable {
         });
     }
     private void deferContract(TradeCommerceRow row, Exception failure, Deadline budget) {
-        String category = failure instanceof CommerceEngine.CorruptContract ? "corrupt"
+        // 人民币寄售(kind=6)的归属变化不走 owner_changed 自动隔离（由商城订单与过户流程处理）。
+        boolean ownerChanged = failure instanceof CommerceEngine.OwnerChangedContract && row.getKind() != 6;
+        String category = ownerChanged ? "owner_changed"
+            : failure instanceof CommerceEngine.CorruptContract ? "corrupt"
             : failure instanceof CommerceStore.PendingBackpressure ? "too_many_pending" : "retry";
-        if (category.equals("corrupt"))
+        if (category.equals("owner_changed") || category.equals("corrupt"))
             try {
-                if (e.store.quarantine(row, budget)) {
+                boolean quarantined = category.equals("owner_changed")
+                        ? e.store.quarantine(row, CommerceRules.MANUAL_REASON_OWNER_CHANGED, failure.getMessage(),
+                                e.clock.getAsLong(), budget)
+                        : e.store.quarantine(row, budget);
+                if (quarantined) {
                     log.error("交易合同隔离为人工 class={} commerce_id={} version={}", category,
                         Long.toUnsignedString(row.getCommerceId()), row.getVersion(), failure);
                     return;
@@ -244,7 +251,9 @@ public final class CommerceRuntime implements AutoCloseable {
             } catch (SQLException | RuntimeException quarantineFailure) {
                 log.error("交易合同隔离失败 commerce_id={}", Long.toUnsignedString(row.getCommerceId()), quarantineFailure);
             }
-        long base = category.equals("too_many_pending") ? 60000 : 10000;
+        // 角色冻结/投票中暂态冲突（CONFLICT）推迟 5 分钟复查（jubaozhai-market.md §15.7.1）。
+        long base = (failure instanceof CommerceRules.Refusal ref && ref.tip() == CommerceRules.CONFLICT) ? 300_000L
+            : category.equals("too_many_pending") ? 60_000L : 10_000L;
         long until = e.clock.getAsLong() + (long) (base * ThreadLocalRandom.current().nextDouble(0.8, 1.2));
         try {
             boolean deferred = e.store.defer(row, until, budget);

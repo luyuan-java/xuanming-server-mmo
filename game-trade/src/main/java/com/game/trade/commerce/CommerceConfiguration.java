@@ -167,6 +167,13 @@ public class CommerceConfiguration {
             properties.currencies(), resolveTextGuard(textGuard.getIfAvailable(), com.game.common.RunMode.parse(runMode)),
             ownership.getIfAvailable());
     }
+    @Bean
+    public ManualContractService manualContractService(
+            CommerceStore store, DataSource source,
+            @org.springframework.beans.factory.annotation.Value("${game.trade.manual-resolution.environment:}") String env) {
+        return new ManualContractService(store, new ManualContractService.SqlRoleFactReader(source),
+                System::currentTimeMillis, env);
+    }
     @Bean(initMethod = "start", destroyMethod = "close")
     public com.game.discovery.workshard.RedisWorkShardMembership tradeWorkShardMembership(
             RedissonClient redis, RedisKeys keys,

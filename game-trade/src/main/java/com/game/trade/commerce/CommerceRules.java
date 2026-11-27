@@ -12,6 +12,75 @@ import java.util.*;
 public final class CommerceRules {
     public static final int WAITING = 1, ESCROWING = 3, DELIVERING = 4, DELIVERED = 5, CANCEL_PENDING = 6,
                             CANCELLED = 7, MANUAL = 10, SETTLED = 11, BID_KIND = 100;
+    /** 合同转人工的原因类别（写进 {@code TradeCommerceQuarantine.reason}，对齐 Go manual.go）。 */
+    public static final String MANUAL_REASON_CORRUPT = "corrupt";
+    public static final String MANUAL_REASON_BAD_COUNTERPARTY = "bad_counterparty";
+    public static final String MANUAL_REASON_APPLIED_PARTIAL = "applied_partial";
+    public static final String MANUAL_REASON_FINAL_CREDIT = "final_credit_failed";
+    public static final String MANUAL_REASON_RMB_RETURN = "rmb_return_failed";
+    public static final String MANUAL_REASON_PAYMENT_REVERSAL = "payment_reversal_failed";
+    public static final String MANUAL_REASON_OWNER_CHANGED = "owner_changed";
+    private static final int QUARANTINE_DETAIL_MAX_BYTES = 256;
+
+    /** 把合同转人工并保留转人工前的阶段、状态与原因；已在 manual 状态时不覆盖首次记录。 */
+    static void markManual(TradeCommerceRow.Builder r, TradeCommerceWorkflow.Builder w,
+            String reason, String detail, long nowMs) {
+        if (!"manual".equals(w.getStage())) {
+            w.setQuarantine(TradeCommerceQuarantine.newBuilder()
+                    .setStage(w.getStage())
+                    .setStatus(r.getStatus())
+                    .setReason(reason == null ? "" : reason)
+                    .setDetail(truncateUtf8(detail, QUARANTINE_DETAIL_MAX_BYTES))
+                    .setAtMs(nowMs)
+                    .build());
+        }
+        r.setStatus(MANUAL);
+        w.setStage("manual");
+    }
+
+    static String truncateUtf8(String s, int maxBytes) {
+        if (s == null || s.isEmpty()) {
+            return "";
+        }
+        byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if (bytes.length <= maxBytes) {
+            return s;
+        }
+        int end = maxBytes;
+        while (end > 0 && (bytes[end] & 0xC0) == 0x80) {
+            end--;
+        }
+        return new String(bytes, 0, end, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    static boolean isEmptyBundle(AssetBundle b) {
+        return b == null
+                || (b.getCurrenciesCount() == 0 && b.getItemsCount() == 0
+                    && b.getItemInstancesCount() == 0 && b.getItemUuidsCount() == 0
+                    && !b.hasPetInstance() && b.getPetId() == 0);
+    }
+
+    /** 计算市场单（kind=4, side!=0）未成交剩余托管包（与撤单、人工整单退回共用同一算法）。 */
+    static AssetBundle marketRemainder(com.game.trade.store.pb.TradeCommerceRowOrBuilder r) {
+        long qty = Integer.toUnsignedLong(r.getQuantity());
+        long filled = Integer.toUnsignedLong(r.getFilledQuantity());
+        if (filled > qty) {
+            throw new IllegalStateException("市场单已成交量超过总量");
+        }
+        long remaining = qty - filled;
+        var remainingBundle = AssetBundle.newBuilder();
+        if (remaining > 0) {
+            if (r.getSide() == 1) {
+                remainingBundle.addCurrencies(CurrencyAmount.newBuilder()
+                        .setCurrencyType(r.getCurrencyType())
+                        .setAmount(Math.multiplyExact(remaining, r.getUnitPrice())));
+            } else {
+                remainingBundle.addItems(
+                        ItemGrant.newBuilder().setConfigId(r.getItemConfigId()).setCount((int) remaining));
+            }
+        }
+        return remainingBundle.build();
+    }
     public static final int INVALID = CommonErrorTip.common_error.kInvalidParameter_VALUE;
     public static final int MISSING = TradeErrorTip.trade_error.kTradeOrderNotFound_VALUE;
     public static final int CONFLICT = TradeErrorTip.trade_error.kTradeOrderStateConflict_VALUE;
@@ -212,6 +281,10 @@ public final class CommerceRules {
 
     /** 在交付阶段处理买家腿终局未到账：能自动整单退回则建退回腿转 return/CANCEL_PENDING，否则转 MANUAL 继续压住卖家所得。 */
     static void settleBuyerFirstDelivery(TradeCommerceRow.Builder r, TradeCommerceWorkflow.Builder w) {
+        settleBuyerFirstDelivery(r, w, 0L);
+    }
+
+    static void settleBuyerFirstDelivery(TradeCommerceRow.Builder r, TradeCommerceWorkflow.Builder w, long nowMs) {
         var buyer = currentLeg(w, "buyer_receive");
         if (buyer == null || !done(buyer) || applied(buyer)) {
             return;
@@ -221,8 +294,7 @@ public final class CommerceRules {
             return;
         }
         if (!unwindable(w)) {
-            w.setStage("manual");
-            r.setStatus(MANUAL);
+            markManual(r, w, MANUAL_REASON_FINAL_CREDIT, "买家交付腿未到账且无法自动退回", nowMs);
             return;
         }
         if (leg(w, "seller_return") != null || leg(w, "buyer_return") != null) {
@@ -325,8 +397,7 @@ public final class CommerceRules {
             r.setStatus(8);
             return;
         }
-        w.setStage("manual");
-        r.setStatus(MANUAL);
+        markManual(r, w, MANUAL_REASON_PAYMENT_REVERSAL, "官方订单付款修订扣回或补发未到账", 0L);
     }
 
     /** 官方订单回报商城扣回待办的结论；空串表示合同尚未收敛到当前修订号。 */
@@ -349,10 +420,10 @@ public final class CommerceRules {
                 return l;
         return null;
     }
-    static boolean done(TradeCommerceLeg.Builder l) {
+    static boolean done(TradeCommerceLegOrBuilder l) {
         return l != null && l.getOutcome() != 0;
     }
-    static boolean applied(TradeCommerceLeg.Builder l) {
+    static boolean applied(TradeCommerceLegOrBuilder l) {
         return l != null && l.getOutcome() == 2;
     }
     static void add(TradeCommerceWorkflow.Builder w, String role, long player, int stream, AssetBundle b) {
@@ -520,25 +591,13 @@ public final class CommerceRules {
             var sellerDebit = leg(w, "seller_debit");
             AssetBundle b = transfer(sellerDebit.build());
             if (r.getKind() == 4) {
-                long remaining =
-                    Integer.toUnsignedLong(r.getQuantity()) - Integer.toUnsignedLong(r.getFilledQuantity());
-                var remainingBundle = AssetBundle.newBuilder();
-                if (remaining > 0) {
-                    if (r.getSide() == 1)
-                        remainingBundle.addCurrencies(CurrencyAmount.newBuilder()
-                                .setCurrencyType(r.getCurrencyType())
-                                .setAmount(Math.multiplyExact(remaining, r.getUnitPrice())));
-                    else
-                        remainingBundle.addItems(
-                            ItemGrant.newBuilder().setConfigId(r.getItemConfigId()).setCount((int) remaining));
-                }
-                b = remainingBundle.build();
+                b = marketRemainder(r);
             }
-            if (b.getCurrenciesCount() + b.getItemsCount() + b.getItemInstancesCount() > 0 || b.hasPetInstance())
+            if (!isEmptyBundle(b))
                 addEscrowLeg(w, "seller_return", r.getSellerPlayerId(), sellerDebit.getPlayerId(), b);
         }
         if (w.getStage().equals("deliver")) {
-            settleBuyerFirstDelivery(r, w);
+            settleBuyerFirstDelivery(r, w, now);
         }
         if (w.getStage().equals("deliver") || w.getStage().equals("return")) {
             boolean ready = true, ok = true;
@@ -548,8 +607,12 @@ public final class CommerceRules {
                     ok &= applied(l);
                 }
             if (ready) {
-                w.setStage("done");
-                r.setStatus(!ok ? MANUAL : r.getStatus() == CANCEL_PENDING ? CANCELLED : SETTLED);
+                if (!ok) {
+                    markManual(r, w, MANUAL_REASON_FINAL_CREDIT, "最终发放腿未全部到账", now);
+                } else {
+                    w.setStage("done");
+                    r.setStatus(r.getStatus() == CANCEL_PENDING ? CANCELLED : SETTLED);
+                }
             }
         }
     }

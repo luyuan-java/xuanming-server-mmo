@@ -174,11 +174,11 @@ public final class CommerceStore {
                 bind(statement, id);
                 try (var row = statement.executeQuery()) {
                     if (!row.next()) {
-                        throw new CommerceEngine.CorruptContract("合同参与者角色已删除，隔离等待人工介入");
+                        throw new CommerceEngine.OwnerChangedContract("合同参与者角色已删除，隔离等待人工介入 player_id=" + Long.toUnsignedString(id));
                     }
                     long currentRevision = nativeRevision(row.getString(2));
                     if (!expected.getAccount().equals(row.getString(1)) || expected.getOwnerRevision() != currentRevision) {
-                        throw new CommerceEngine.CorruptContract("合同参与者归属已变更，隔离等待人工介入");
+                        throw new CommerceEngine.OwnerChangedContract("合同参与者归属已变更，隔离等待人工介入 player_id=" + Long.toUnsignedString(id));
                     }
                     if (!"0".equals(row.getString(3))) {
                         throw new CommerceRules.Refusal(CommerceRules.CONFLICT);
@@ -317,22 +317,54 @@ public final class CommerceStore {
             return null;
         });
     }
-    /** 只隔离自身已损坏的合同，保留资产、待办与坏原件；不发补偿。 */
+    /** 只隔离自身已损坏或归属变更的合同，保留资产、待办与坏原件；不发补偿。 */
     public boolean quarantine(TradeCommerceRow observed, Deadline deadline) throws SQLException {
+        return quarantine(observed, CommerceRules.MANUAL_REASON_CORRUPT, "合同数据损坏", 0L, deadline);
+    }
+
+    public boolean quarantine(TradeCommerceRow observed, String reason, String detail, long nowMs, Deadline deadline)
+            throws SQLException {
         return transaction(deadline, c -> {
             var current = lock(c, observed.getCommerceId());
             if (current == null || current.getVersion() != observed.getVersion()
                 || current.getStatus() == CommerceRules.MANUAL)
                 return false;
             try {
-                var workflow = CommerceEngine.workflow(current).setStage("manual");
-                save(c, current.toBuilder().setStatus(CommerceRules.MANUAL).setWorkflowProto(workflow.build().toByteString()));
+                var builder = current.toBuilder();
+                var workflow = CommerceEngine.workflow(current);
+                long at = nowMs > 0 ? nowMs : sqlNow(c);
+                CommerceRules.markManual(builder, workflow, reason, detail, at);
+                save(c, builder.setWorkflowProto(workflow.build().toByteString()).setUpdatedMs(at));
             } catch (CommerceEngine.CorruptContract corrupted) {
                 execute(c, "UPDATE trade_commerce SET status=?,on_order_book=0,version=version+1 WHERE commerce_id=? AND version=?",
                     CommerceRules.MANUAL, current.getCommerceId(), current.getVersion());
             }
             return true;
         });
+    }
+
+    /** 锁拍品或市场互斥守卫行（与 acceptBid / match 统一锁序：先角色 → 再 guard → 再拍品 → 再出价）。 */
+    public static void lockAuctionGuard(Connection c, long guardId) throws SQLException {
+        execute(c, "INSERT IGNORE INTO trade_commerce_guard(guard_id) VALUES(?)", guardId);
+        try (var s = c.prepareStatement("SELECT guard_id FROM trade_commerce_guard WHERE guard_id=? FOR UPDATE")) {
+            s.setQueryTimeout(2);
+            bind(s, guardId);
+            try (var rs = s.executeQuery()) {
+                if (!rs.next()) {
+                    throw new SQLException("交易守卫行锁定失败");
+                }
+            }
+        }
+    }
+
+    /** 分页列所有处于人工隔离态（status=MANUAL）的合同，最早转人工的在前。 */
+    public List<TradeCommerceRow> listManual(long afterUpdatedMs, long afterCommerceId, int limit) throws SQLException {
+        int capped = Math.max(1, Math.min(500, limit));
+        if (afterUpdatedMs == 0L && afterCommerceId == 0L) {
+            return list("status=? ORDER BY updated_ms,commerce_id LIMIT ?", CommerceRules.MANUAL, capped);
+        }
+        return list("status=? AND (updated_ms>? OR (updated_ms=? AND commerce_id>?)) ORDER BY updated_ms,commerce_id LIMIT ?",
+                CommerceRules.MANUAL, afterUpdatedMs, afterUpdatedMs, afterCommerceId, capped);
     }
     public List<TradeAssetOpRow> ackDue(long after, int limit) throws SQLException {
         return ackDue(after, limit, com.game.common.workshard.WorkShard.SqlFilter.ALL);

@@ -20,12 +20,18 @@ import org.slf4j.LoggerFactory;
 public final class CommerceEngine {
     private static final Logger log = LoggerFactory.getLogger(CommerceEngine.class);
     /** 确定的持久数据错误，只隔离这一份合同，不能每轮阻塞全服。 */
-    static final class CorruptContract extends SQLException {
+    static class CorruptContract extends SQLException {
         CorruptContract(String message) {
             super(message);
         }
         CorruptContract(String message, Throwable cause) {
             super(message, cause);
+        }
+    }
+    /** 参与方角色已换主或已删除（不可逆失配）：当场转人工并记 reason=owner_changed，供 redirect 改绑。 */
+    static final class OwnerChangedContract extends CorruptContract {
+        OwnerChangedContract(String message) {
+            super(message);
         }
     }
     final CommerceStore store;
@@ -653,20 +659,12 @@ public final class CommerceEngine {
                     throw new CorruptContract("交易资产待办状态非法");
                 if (op.getStatus() == 5) {
                     l.setOutcome(OUTCOME_PARTIAL);
-                    w.setStage("manual");
-                    r.setStatus(MANUAL);
+                    markManual(r, w, MANUAL_REASON_APPLIED_PARTIAL,
+                            "资产指令部分到账/部分扣出 leg=" + l.getRole() + " op_id=" + Long.toUnsignedString(op.getOpId()),
+                            now);
                     r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(now);
                     TradeCommerceRow quarantined = store.save(c, r);
-                    List<Long> wakeOnManual = new ArrayList<>(2);
-                    if (quarantined.getKind() == 4 && quarantined.getSide() == 0) {
-                        if (quarantined.getParentId() != 0L) {
-                            wakeOnManual.add(quarantined.getParentId());
-                        }
-                        if (quarantined.getCounterpartyId() != 0L) {
-                            wakeOnManual.add(quarantined.getCounterpartyId());
-                        }
-                    }
-                    return new AdvanceOutcome(quarantined, Optional.empty(), wakeOnManual);
+                    return new AdvanceOutcome(quarantined, Optional.empty(), List.of());
                 }
                 if (op.getStatus() != 1) {
                     l.setOutcome(op.getStatus());
@@ -799,12 +797,8 @@ public final class CommerceEngine {
             return;
         var children = store.list(
             c, "kind=4 AND side=0 AND (parent_id=? OR counterparty_id=?)", r.getCommerceId(), r.getCommerceId());
+        // 成交子单转人工不再连带母单（jubaozhai-market.md §15.7.1 第 4 类）：母单只等子单进入 SETTLED/CANCELLED 终态。
         boolean pending = children.stream().anyMatch(v -> v.getStatus() != SETTLED && v.getStatus() != CANCELLED);
-        if (children.stream().anyMatch(v -> v.getStatus() == MANUAL)) {
-            w.setStage("manual");
-            r.setStatus(MANUAL);
-            return;
-        }
         if (w.getStage().equals("done") && pending) {
             w.setStage("market_wait");
             r.setStatus(CANCEL_PENDING);

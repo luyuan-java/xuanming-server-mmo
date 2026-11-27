@@ -1954,21 +1954,20 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 
 > 2026-11-26 核对结论（架构不适用）：按 `docs/porting/scene-drain-spec.md` §5.13/E11，Java 版无 etcd `death_at` / `reentry_barrier` / 死节点副本实例清理队列；副本实例随 `SceneNodeInfo` 15s TTL 自然过期，玩家归属由 MySQL `owner_epoch` 围栏与 30s 租约保障，主世界频道死节点重铺已由 `WorldChannelCoordinator` 持 Lua 令牌围栏领导者独占执行。
 
-### 2026-11-12 交易转人工合同四类残余的处置出口与管理 RPC(主仓缺口清单第 2 条残余已落码未编译,Java 待做)
+### 2026-11-12 交易转人工合同四类残余的处置出口与管理 RPC（Java 已对齐）
 
-主仓设计见 `docs/design/jubaozhai-market.md` §15.7.1,手册 `docs/ops/trade-commerce-quarantine-runbook.md` §4.2、§4.3,进度见主仓 `docs/PROGRESS.md` 2026-11-12 同名条目。Java 版还没有 11-05 的人工恢复入口(本表上面「转人工交易合同的恢复入口」一行),移植时直接按下面的口径做。全部是服务端内部(合同行、管理 RPC),不改客户端契约。
+主仓设计见 `docs/design/jubaozhai-market.md` §15.7.1，手册 `docs/ops/trade-commerce-quarantine-runbook.md` §4.2、§4.3。全部为服务端内部能力，不改客户端契约。
 
-| 功能 | 主仓 | Java | 待做内容 |
-|---|---|---|---|
-| 换主当场转人工 | 已落码未编译 | 待做 | 角色冲突推迟之前读两方的角色护栏副本:副本修订号超过合同原身份、同修订号换账号、账号清空(删角)当场转人工,原因 `owner_changed`;冻结、投票中照旧 5 分钟复查;人民币寄售不走这条 |
-| `redirect` 改绑 | 已落码未编译 | 待做 | 锁序先角色(升序)后合同;核对这一方确实已不归原身份、目标角色属于原账号且没冻结没删、不是另一方;没发出的腿原地改投,发往原角色没到账的发放腿补发给目标角色;留痕记原身份 |
-| `partial` 部分发放 | 已落码未编译 | 待做 | 缺口只含实例、宝宝、整条货币,按 scene 应用顺序校验(发放缺后缀;扣款有实例没扣到时宝宝与货币也没扣到);发放腿只补缺口;托管扣款腿按整单退回、只退扣到的部分,扣到实例或宝宝就拒绝;一次给出全部部分发放的腿 |
-| 出价与拍品 | 已落码未编译 | 待做 | 拍品不引用的出价可以单独退回;`void-auction` 同一事务(guard → 拍品 → 出价,两个版本都核)退拍品托管、出价改 `bid_refund`;有发放到账拒绝 |
-| 部分成交的市场单 | 已落码未编译 | 待做 | 整单退回只退剩余(与撤单共用剩余算法);成交子单转人工不再连带母单;子单结案唤醒买单与卖单两张母单 |
-| `refund` 不能跑两次 | 已落码未编译 | 待做 | 合同里已有整单退回腿时拒绝,退回没到账用 `reissue`(旧写法会丢托管) |
-| 管理 RPC | 已落码未编译 | 待做 | 列表与 SHOW / DRY_RUN / EXECUTE;专用 serviceauth 调用方、核对环境名、缺省关闭;运维工具只调 RPC、不连库;审计行自由文本加引号 |
-
-**验证**(Java 仓口径):移植主仓用例 `manual_test.go`(四类每类的正常与拒绝、`refund` 跑两次、归属判定表)、`manual_db_test.go`(每类正常路径、重跑落空、与引擎或另一个操作人并发)、`logic/manual_contract_ops_test.go`(准入、环境名、结论映射、审计行)。
+- **2026-11-27 Java 对齐完成**：
+  - **换主当场转人工**：`CommerceStore.lockAdvanceOwners` 对角色已删、账号变更或归属修订变更抛 `CommerceEngine.OwnerChangedContract`，`CommerceRuntime.deferContract` 对非人民币寄售（`kind != 6`）当场隔离为 `MANUAL` 并写入 `TradeCommerceQuarantine(reason="owner_changed")`；冻结/投票中暂态冲突（`CONFLICT`）保持 5 分钟复查。
+  - **六动作纯规则引擎（`ManualContractPlanner`）**：完整对齐 `resume` / `reissue` / `refund` / `partial` / `redirect` / `void-auction`：
+    - `redirect` 核对原方确已变更且目标角色归原账号、未冻结未删、非另一方；未发腿原地改投、已失败发放腿补发到目标角色并保留原托管者，双变更时维持 `MANUAL` 等另一方改绑，留痕记录 `identity_before`/`identity_after`；
+    - `partial` 按 scene 固定应用顺序校验实例/宝宝/货币缺口（发放缺后缀、扣款有实例未扣齐则宝宝与货币皆未扣且拒退已扣实例或宝宝），强制一次给齐全部部分发放腿；
+    - `void-auction` 同事务按「角色升序 → `trade_commerce_guard` → 拍品 → 出价」双版本核对并联动退拍品托管与出价转 `bid_refund`，拍品未引用的出价允许单独 `refund`；
+    - 部分成交市场单 `refund` 复用 `CommerceRules.marketRemainder` 仅退未成交剩余，且 `CommerceEngine.marketBarrier` 解除「成交子单转人工连带母单」；
+    - `refund` 二次重跑由 `isRefundLeg` 显式拦截（引导改用 `reissue`），防丢失托管。
+  - **服务与管理端口（`ManualContractService` / `ManualContractAdminController`）**：支持 `ListManualContracts`（游标分页上限 500）与 `ResolveManualContract`（`SHOW` / `DRY_RUN` / `EXECUTE`），默认关闭（`game.trade.manual-resolution.enabled=false`），需独立 ≥32B `GAME_TRADE_MANUAL_SECRET` 验签专用调用方 `ops-commerce` 的 `ServiceCallAuth`、逐字核对环境名 `expect_target`、`EXECUTE` 强制双人复核（`approval_id` 幂等重放）并输出自由文本双引号转义的 `[CommerceManual]` 审计行。
+  - **验证**：`game-trade` `ManualContractOpsTest` 5/5 + `TradeShardingAndEventWakeTest` 4/4 + `CommerceRuntimeTest` 9/9（1 TiDB IT 跳过）+ `DeliveryOrderAndTxTypeTest` 5/5 + `WantedSkillBookTest` 6/6 + `TradeAdminAuthFilterTest` 6/6 + `TradeMetricsTest` 3/3 = **38/38 PASS**。
 
 ### 2026-11-12 全服匹配热池拆分:按首选机房与子池拆写者(主仓缺口清单第 24 条已落码未编译,Java 待做)
 
