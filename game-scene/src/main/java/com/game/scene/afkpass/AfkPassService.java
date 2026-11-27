@@ -3,13 +3,19 @@ package com.game.scene.afkpass;
 import static com.game.scene.world.SceneMessageIds.tip;
 
 import com.game.proto.AfkPassInfo;
+import com.game.proto.AfkPassPlanView;
 import com.game.proto.BuyAfkPassRequest;
 import com.game.proto.BuyAfkPassResponse;
 import com.game.proto.GetAfkPassResponse;
 import com.game.proto.GmSetAfkPassRequest;
 import com.game.proto.GmSetAfkPassResponse;
 import com.game.scene.audit.AssetAudit;
+import com.game.scene.bag.BagFeature;
+import com.game.scene.bag.BagService;
 import com.game.scene.currency.CurrencyService;
+import com.game.scene.player.Bag;
+import com.game.scene.player.BagType;
+import com.game.scene.player.PlayerBags;
 import com.game.scene.player.Wallet;
 import com.game.scene.world.SceneClock;
 import com.game.scene.world.ScenePlayer;
@@ -17,6 +23,8 @@ import com.game.scene.world.SceneWorld;
 import com.game.table.AfkPassErrorTip;
 import com.game.table.CommonErrorTip;
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
@@ -47,6 +55,8 @@ public final class AfkPassService {
     public static final int STACK_LIMIT = AfkPassErrorTip.afk_pass_error.kAfkPassStackLimit_VALUE;
     public static final int FROZEN = AfkPassErrorTip.afk_pass_error.kAfkPassFrozen_VALUE;
     public static final int UNAVAILABLE = AfkPassErrorTip.afk_pass_error.kAfkPassUnavailable_VALUE;
+    public static final int BAG_FULL = AfkPassErrorTip.afk_pass_error.kAfkPassBagFull_VALUE;
+    public static final int PLAN_INVALID = AfkPassErrorTip.afk_pass_error.kAfkPassPlanInvalid_VALUE;
 
     /** Redis 投影异步写接口（成功完成返回 true，失败或异常视为未确认，后续自愈重发）。 */
     public interface ProjectionSink {
@@ -68,7 +78,13 @@ public final class AfkPassService {
     private final SceneClock clock;
     private final ProjectionSink projection;
     private final Executor logicExecutor;
+    private volatile BagService bags;
     private volatile java.util.function.LongFunction<ScenePlayer> playerLookup;
+
+    public AfkPassService withBags(BagService bags) {
+        this.bags = bags;
+        return this;
+    }
 
     public AfkPassService bindPlayerLookup(java.util.function.LongFunction<ScenePlayer> lookup) {
         this.playerLookup = Objects.requireNonNull(lookup, "lookup");
@@ -100,8 +116,12 @@ public final class AfkPassService {
                 .build();
     }
 
-    /** 431 BuyAfkPass：幂等开通/续费（查账先于冻结/报价/上限/余额，同键换报价参数回 1005，账本损坏 fail-closed 回 32004）。 */
+    /** 431 BuyAfkPass：支持多套餐（30天月卡/90天季享卡）+ 开卡一次性绑定道具/头像框原子直赠 + 满包零扣费防呆。 */
     public BuyAfkPassResponse buy(SceneWorld world, ScenePlayer player, BuyAfkPassRequest req) {
+        return buy(world, player, req, null);
+    }
+
+    public BuyAfkPassResponse buy(SceneWorld world, ScenePlayer player, BuyAfkPassRequest req, BagFeature bagView) {
         long nowSec = nowSeconds();
         long reqId = req.getClientRequestId();
         if (reqId == 0) {
@@ -124,7 +144,6 @@ public final class AfkPassService {
         if (check.verdict() == com.game.scene.player.PlayerClientRequestLedger.Verdict.MISMATCH) {
             return buyError(INVALID_PARAMETER);
         }
-        // 兼容未写入 client_request_ledger 的旧存档单键列
         if (player.hasAfkPassRequest(reqId)) {
             return BuyAfkPassResponse.newBuilder()
                     .setErrorMessage(tip(0))
@@ -135,11 +154,17 @@ public final class AfkPassService {
         if (!isPlayerMutable(world, player)) {
             return buyError(FROZEN);
         }
-        AfkPassTables.Rule rule = tables.rule();
-        if (rule == null) {
+        if (tables.rule() == null) {
             return buyError(UNAVAILABLE);
         }
-        if (req.getExpectedCurrencyType() != rule.priceCurrencyType() || req.getExpectedPrice() != rule.price()) {
+        AfkPassTables.Rule rule = tables.plan(req.getPlanId());
+        if (rule == null) {
+            return buyError(PLAN_INVALID);
+        }
+        int expectedDays = req.getExpectedPeriodDays();
+        if (req.getExpectedCurrencyType() != rule.priceCurrencyType()
+                || req.getExpectedPrice() != rule.price()
+                || (expectedDays != 0 && expectedDays != rule.periodDays())) {
             return BuyAfkPassResponse.newBuilder()
                     .setErrorMessage(tip(PRICE_CHANGED))
                     .setInfo(buildInfo(player, nowSec))
@@ -150,12 +175,45 @@ public final class AfkPassService {
         if (afterOpt.isEmpty()) {
             return buyError(STACK_LIMIT);
         }
+
+        // 先规划开卡一次性绑定直赠道具，满包直接拒回（零扣费、零副作用）。
+        PlayerBags candidateBags = null;
+        List<Bag.Written> written = List.of();
+        BagService bagSvc = this.bags;
+        boolean hasBonusItem = rule.bonusItemId() != 0 && rule.bonusItemCount() > 0;
+        if (hasBonusItem && bagSvc != null) {
+            candidateBags = PlayerBags.restore(player.bags().toState());
+            candidateBags.normalize(bagSvc.tables());
+            Bag.AddResult addRes = bagSvc.prepareEquipmentGrant(
+                    player, candidateBags, Map.of(rule.bonusItemId(), (long) rule.bonusItemCount()), true);
+            if (!addRes.ok()) {
+                int tipId = addRes.tip() == Bag.NO_SPACE ? BAG_FULL
+                        : addRes.tip() == BagService.REFUSED && player.frozen() ? FROZEN : UNAVAILABLE;
+                return buyError(tipId);
+            }
+            written = addRes.written();
+        }
+        if (!rule.bonusFrameKey().isEmpty() && !player.travelPass().isValid()) {
+            return buyError(UNAVAILABLE);
+        }
+
         Wallet.Change deducted = currency.deduct(player, rule.priceCurrencyType(), rule.price(),
                 AssetAudit.Reason.AFK_PASS_BUY, reqId);
         if (!deducted.ok()) {
             int tipId = deducted.tipId() == Wallet.FROZEN ? FROZEN : CURRENCY_NOT_ENOUGH;
             return buyError(tipId);
         }
+
+        if (candidateBags != null) {
+            player.bags().commitPrepared(candidateBags);
+            String extra = "{\"source\":\"afk_pass_bonus\",\"plan_id\":" + rule.planId() + "}";
+            bagSvc.auditEquipment(player, List.of(), written, AssetAudit.Reason.AFK_PASS_BONUS_GRANT, reqId, extra);
+        }
+        if (!rule.bonusFrameKey().isEmpty()) {
+            player.travelPass().addBonusCosmeticKey(rule.bonusFrameKey());
+            player.travelPass().bumpRevision();
+        }
+
         long after = afterOpt.getAsLong();
         player.setAfkPassExpiresAt(after);
         player.recordAfkPassRequest(reqId);
@@ -164,14 +222,17 @@ public final class AfkPassService {
                 .setKind(com.game.scene.player.PlayerClientRequestLedger.KIND_BUY_AFK_PASS)
                 .setFingerprint(fingerprint));
         world.requestKeyProgressSave(player);
-        log.info("[AfkPass] metric=afk_pass_bought player_id={} expires_before={} expires_after={} price={} currency_type={} client_request_id={}",
-                Long.toUnsignedString(player.playerId()), before, after, rule.price(), rule.priceCurrencyType(),
+        log.info("[AfkPass] metric=afk_pass_bought player_id={} plan_id={} expires_before={} expires_after={} price={} currency_type={} client_request_id={}",
+                Long.toUnsignedString(player.playerId()), rule.planId(), before, after, rule.price(), rule.priceCurrencyType(),
                 Long.toUnsignedString(reqId));
-        return BuyAfkPassResponse.newBuilder()
+        BuyAfkPassResponse.Builder resp = BuyAfkPassResponse.newBuilder()
                 .setErrorMessage(tip(0))
                 .setInfo(buildInfo(player, nowSec))
-                .setReplayed(false)
-                .build();
+                .setReplayed(false);
+        if (hasBonusItem && bagView != null) {
+            resp.setBag(bagView.snapshot(player, BagType.INVENTORY));
+        }
+        return resp.build();
     }
 
     /** 432 GmSetAfkPass：dev/test 专用设定剩余时长（0 = 清除）。 */
@@ -227,11 +288,19 @@ public final class AfkPassService {
     public AfkPassInfo buildInfo(ScenePlayer player, long nowSec) {
         long expiresAt = player.afkPassExpiresAt();
         boolean active = AfkPassRules.isActive(expiresAt, nowSec);
+        int weeklyQuota = AfkPassRules.weeklyFreeTrialQuota(active);
+        int weeklyUsed = active
+                ? Math.min(weeklyQuota, player.appearance().lightCardTrialUsedForWeek(AfkPassRules.utc8Monday05WeekStartMs(nowSec * 1000L)))
+                : 0;
         AfkPassInfo.Builder b = AfkPassInfo.newBuilder()
                 .setExpiresAt(expiresAt)
                 .setServerNow(nowSec)
                 .setUnlockedLoadoutSlots(AfkPassRules.unlockedLoadoutSlots(active))
-                .setStage2TradableEnabled(active);
+                .setStage2TradableEnabled(active)
+                .setMarketListingLimit(AfkPassRules.marketListingLimit(active))
+                .setStallDurationHours(AfkPassRules.stallDurationHours(active))
+                .setWeeklyFreeTrialQuota(weeklyQuota)
+                .setWeeklyFreeTrialUsed(weeklyUsed);
         AfkPassTables.Rule rule = tables.rule();
         if (rule != null) {
             b.setPriceCurrencyType(rule.priceCurrencyType())
@@ -240,6 +309,19 @@ public final class AfkPassService {
                     .setMaxRemainingDays(rule.maxRemainingDays())
                     .setRemindBeforeHours(rule.remindBeforeHours())
                     .setBalance(player.wallet().balance(rule.priceCurrencyType()));
+        }
+        for (AfkPassTables.Rule p : tables.plans()) {
+            b.addPlans(AfkPassPlanView.newBuilder()
+                    .setPlanId(p.planId())
+                    .setPlanName(p.planName())
+                    .setPeriodDays(p.periodDays())
+                    .setPriceCurrencyType(p.priceCurrencyType())
+                    .setPrice(p.price())
+                    .setBonusItemId(p.bonusItemId())
+                    .setBonusItemCount(p.bonusItemCount())
+                    .setBonusItemName(p.bonusItemName())
+                    .setBonusFrameKey(p.bonusFrameKey())
+                    .setIconKey(p.iconKey()));
         }
         return b.build();
     }

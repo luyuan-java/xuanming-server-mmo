@@ -1095,26 +1095,14 @@ Java 版 `0.1.0-SNAPSHOT` 的节点链路已有等价机制,不需要改代码:
 - `RankRewardWorker`：同步对齐收到 `kMailRecipientDeleted(17011)` 时调用 `RankStore.abandon` 终结放弃不再无限重试。
 - **验证**：`game-rank` `RankIndexAndLimitTest`（3）+ `RankProductionPolicyTest`（3）**6/6 PASS**。
 
-### 2026-11-05 玩家断线保留与短重连回原处(Java 待做)
+### 2026-11-05 玩家断线保留与短重连回原处（Java 已对齐）
 
-主仓设计见 `docs/design/player-connection-lost-hold.md`。C++ / Go 版已落码(随主仓快照提交 `0f484db0d`、`6452b949d` 入库),未编译、未测试,说明见主仓 `docs/PROGRESS.md` 2026-11-05 同名条目。Java 版 `0.1.0-SNAPSHOT` 待做,做同一组行为:
-
-1. **断线带原因**:同步 `game-proto` 里 `proto/scene/player_lifecycle.proto` 的 `ExitGameReason` 与 `GameNodeExitGameRequest.reason`。这是服务端内部字段,不是客户端契约。gate 的客户端连接断开时:意外断开填 DISCONNECTED;LeaveGame 填 LOGOUT;断线租约到期后关残留连接填 LEASE_EXPIRED。
-2. **scene 断线保留**:收到 DISCONNECTED 时,角色停步,留在场景与 AOI 里 25 秒。
-   - 实体摘掉已断开的会话,登录身份不变;交接、队伍跟随、排空改派都按"没有活会话"跳过它。
-   - 进入保留时请求一次关键进度存盘;到期按客户端断线退出,与原来的断线退出同一条路。
-   - 已在退出中、交接在途、整节点疏散中、没有会话的,不保留,立即退出。
-   - 任何别的退出发起时摘掉保留,并按"会话已断"作废改派。
-3. **新会话接回**:同一角色的新会话进场时摘掉保留,按换会话先离场、再完整入场,补入场通知、自身与当前邻居。
-   - 判据(11-06 补,主仓两处修正):「换会话」与「接回保留」都比实体此前放行过的登录身份。会话号不同,或会话号相同而登录代次更大,才算新的一次登录(gate 以同一 node_id 重启后会话序号从头发,新登录可能拿回断开的那个号)。同一次登录的重复进场不离场、不重发入场通知,也不摘保留。不能拿已摘掉的会话来比(主仓 `player-connection-lost-hold.md` §5 第 0.1、3 步)。
-4. **重连回原场景**:scene_manager 收到没有任何去向的进场(短重连 / 顶号),且 location 落在本 zone 的具体节点上时,先按 location 的场景解析;解析不出来再回落默认大世界,并计 `resume_scene_fallback`。原场景是正在回收的频道时不回去,按排空的去向落默认大世界(11-06 补)。
-5. **时序**:保留 25 秒 + 扫描 1 秒 + 余量 4 秒 ≤ login 断线租约 30 秒,两边常量互相注明。
-
-先核对:Java 目前断链清退玩家的策略与 C++ 不同(主仓 `muduo-rpc-channel.md` §8.3 末段)。动手前确认 Java gate 客户端断开时是否也是立即让 scene 退出角色,短重连的落点是否也只跟随 zone。
-
-验证按 Java 仓自己的口径(见其 `AGENTS.md`):同步 proto 后整编;新增用例覆盖保留、重复通知不延长、新会话接回、到期退出、被别的退出取代、回原场景与回落;联调按主仓设计 §10 第 5 条。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-api` / `game-gate` / `game-scene` / `game-scene-manager` 完整对齐（设计见主仓 `docs/design/player-connection-lost-hold.md`）：
+1. **断线带原因**：`game-api` `node_link.proto` 新增 `ExitGameReason`（`DISCONNECTED`/`LOGOUT`/`LEASE_EXPIRED`）与 `PlayerLeave.reason = 5`；`game-gate` `ClientDispatcher` 在断线、`LeaveGame` 与强制立即关闭路径显式填入原因。
+2. **scene 断线保留与关键存盘**：`SceneWorld.onPlayerLeave` 仅对 `DISCONNECTED`（非主动、非 `LEASE_EXPIRED`、非 `immediate_exit`、未越过未成年人可玩截止、非整节点疏散、非交接在途且有活会话）进入 25 秒断线保留（与 login 30 秒断线租约留 5 秒安全余量），进入保留时停步、摘掉活会话并触发关键进度存盘；任何其他退出均立即摘除保留并写离场位置。
+3. **登录身份判据与无损接回**：`ConnectionLostHold.isNewLoginIdentity` 对比实体此前放行过的 `(lostSession, loginGeneration)`——新会话或同会话号且 `loginGeneration` 严格更大时无损接回并补发入场/自身/邻居/追赶移动，同一次登录的重复进场静默忽略、不摘保留也不重发入场通知。
+4. **短重连回原场景与回落指标**：`game-scene-manager` `SceneAssigner` 对 `preferred_scene_id != 0` 跳过不在或 `draining` 实例并回落地图/默认大世界，同步导出低基数计数器 `game.scene_manager.resume_scene_fallback`。
+5. **验证**：`game-gate` `ClientDispatcherTest` + `SceneLaneAndGateMigrationTest` **114/114 PASS**、`game-scene-manager` `Batch4T2BSceneManagerParityTest` + `SceneAssignerTest` 等 **114/114 PASS**、`game-scene` `Batch4T2BSceneParityTest` + `AfkPassHostingAndTeamFollowTest` + `ConnectionLostHoldReconnectTest` 等 **57/57 PASS**。
 
 ### 2026-11-05 人数档真人 PVP 的两条组队限制（Java 已对齐）
 
@@ -1256,16 +1244,12 @@ Java 版 `0.1.0-SNAPSHOT` 的节点链路已有等价机制,不需要改代码:
 - 资产变动存盘通知仍在记流水判定之后无条件触发（即便流水超限/拒收也会触发尽快存盘）。
 - **验证**：`game-scene` `Batch4T2ASceneParityTest`（验证未存盘不放行、被围栏丢弃清空、存盘提交后精确放行）等 **196/196 PASS**。
 
-### 2026-11-06 开通挂机的玩家断线后离线托管(Java 待做)
+### 2026-11-06 开通挂机的玩家断线后离线托管（Java 已对齐）
 
-主仓设计见 `docs/design/player-connection-lost-hold.md` §4.1,C++ 版已落码(工作区未提交),未编译、未测试,说明见主仓 `docs/PROGRESS.md` 2026-11-06 同名条目。客户端契约不变,属于服务端行为对齐;依赖上面「玩家断线保留与短重连回原处(Java 待做)」先落地。
-
-1. **事实源**:挂机月卡键 `player:afk_pass:{<player_id>}`(值为到期 Unix 秒,与主仓 `go/shared/redisslot.AfkPassKey` 同形);player_locator 在月卡有效期间每 5 分钟给断线会话续租。
-2. **game-scene**:断线保留开始时异步读一次;月卡有效且离到期超过 5 秒(扫描周期 1 + 退出存盘余量 4)就不按 25 秒退出;到期前 5 秒再读一次,续了就继续,没续就按客户端断线退出;读失败时,还不知道的按 25 秒窗口计并在窗口内重读,托管中的到期后 30 秒仍确认不了就退出。值解析不了按没有月卡。判定以主仓 `connection_lost_hold.h` 的 `ParseAfkPass` / `JudgeHold` 为准(纯函数,可逐条移植)。
-3. **托管开始**:第一次确认月卡有效时,玩家在队伍里就由服务器开启组队跟随(与同日「组队跟随:服务器沿队长轨迹驱动队员」条目配套)。
-4. **验证**(Java 仓口径):移植主仓 `ConnectionLostHoldAfkPass.*`(3 条)与 `ConnectionLostHoldAfkPassEcs.*`(4 条)的用例。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-discovery` / `game-scene` 完整对齐（设计见主仓 `docs/design/player-connection-lost-hold.md` §4.1）：
+- **挂机月卡解析与异步探针**：`RedisKeys.playerAfkPass(playerId)` 对齐 `player:afk_pass:{<player_id>}` 同槽键；`ConnectionLostHold` 新增纯解析函数 `parseAfkPass(String)`（非法/非正/空值均视为无月卡）与 `AfkPassProbe` 异步读取接口，配合 `judgeHold` 覆盖 `UNKNOWN` 25 秒重读窗口、托管有效保活、到期前提前复查、读失败未确认宽限与未成年人防沉迷截止硬封顶；
+- **托管启动与自动跟随**：首次确认挂机月卡有效且离到期还远时自动标记离线托管、写入在场心跳与归位元数据，并开启服务器驱动组队跟随与 15 秒错峰兜底重查；
+- **验证**：`game-scene` `Batch4T2BSceneParityTest` + `AfkPassHostingAndTeamFollowTest` + `ConnectionLostHoldReconnectTest` 等 **57/57 PASS**。
 
 ### 2026-11-06 审计流水链路水平扩展（Java 已对齐）
 
@@ -1501,21 +1485,13 @@ C++ 版设计见 C++ 仓 `docs/design/gate-client-heartbeat.md` §14。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-10 组队跟随:跨节点跟随,离线托管的队员跨场景跟随(主仓已落码未编译,Java 待做)
+### 2026-11-10 组队跟随:跨节点跟随,离线托管的队员跨场景跟随（Java 已对齐）
 
-补 11-06「组队跟随:服务器沿队长轨迹驱动队员」「开通挂机的玩家断线后离线托管」两条。主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待做。设计见主仓 `docs/design/team-follow-server-trail.md` §3.7、`docs/design/player-connection-lost-hold.md` §4.2,说明见主仓 `docs/PROGRESS.md` 同日条目。
-
-用户要求:开通挂机月卡的队员完全关掉客户端之后,队长穿过传送点换图、换线(同节点或换到本 zone 的别的节点),队员也跟过去,到了之后照常被服务器接到队长身后。
-
-**要对齐的行为**(客户端协议没有变化;主仓新增的 `EnterSceneRequest.hosted_placement` 与 `PlayerHostedPlacementEvent` 都是服务端内部契约,Java 按自己的进程间通信写法实现,不照抄):
-
-1. **跨节点也跟**:队长在本 zone 的另一个场景节点上时,队员照样跟过去,走与玩家自己换图到别的节点同一条交接链(源端存盘、出示落盘凭证,目标端以新归属代次载入)。服务器发起的交接未成只记日志,不给客户端推失败提示。跨 zone 仍不跟。
-2. **离线托管的队员跨场景跟随**:只限断线保留中、挂机月卡确认有效且离到期还远的角色;普通断线保留(没开通挂机)不搬。没有客户端会话时由服务端直接把角色放进目标场景:目标端用断开的那次登录作登录身份,不绑定会话、不推送;入场后按断线托管重建保留状态并重新确认月卡,确认有效即由服务器开启跟随,接到队长身后。
-3. **原随从的唤醒**:队长离开本节点导致队形解散时,原随从等队长的去留(队长离开本节点,或交接作废),有结论后再跑一次跟随检查;最多等 90 秒。
-   托管中的兜底(主仓 2026-11-11 补):在队伍里、想跟却没接在队长身后的托管角色,服务器每 15 秒(按玩家号错开到不同的秒)替他重新跑一次跟随检查,相当于在线客户端每 5 秒重新声明跟随;已接上的不发任何读。
-4. **验证**(Java 仓口径):移植主仓 `cpp/tests/cross_zone_test/player_team_follow_test.cpp` 的 `LeaderOnAnotherNodeOfTheZoneIsFollowedBySceneChange`、`HostedOfflineMemberFollowsWithAHostedPlacement`、`OfflineMemberWithoutConfirmedHostingDoesNotChangeScene` 与 `TeamFollowDriveTest` 里等队长去留的 4 条,`cross_zone_test.cpp` 的 `HostedPlacementReentry.*`;联机验收"队员开挂机卡后杀掉客户端,队长穿过传送点换图,队员跟过去并继续沿路跟"。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-api` / `game-scene` 完整对齐（设计见主仓 `docs/design/team-follow-server-trail.md` §3.7 与 `docs/design/player-connection-lost-hold.md` §4.2）：
+- **跨节点同 zone 静默跟随**：`TeamFollowService` 新增 `LeaderLocationReader` 与 `withCrossNodeFollow(localZoneId, ...)`，队长不在本节点时异步查询其位置，仅当同 zone 时调用 `SceneWorld.followLeaderCrossNode` 沿同一交接链切至队长所在节点/场景（`PlayerSwitch.teamFollow` 置 `silentOnFailure=true`，失败只记日志、绝不给客户端推错提示；跨 zone 拒绝）；
+- **离线托管队员跨场景跟随与普通保留隔离**：`node_link.proto` 新增 `PlayerEnter.hosted_placement = 10`；已确认挂机托管且离到期还远的队员走服务端托管落点搬迁（无 gate 会话、目标端落入后重建 `ConnectionLostHold` 并重新确认月卡与自动开启跟随）；普通 25s 未确认保留禁止跨场景/跨节点跟随；
+- **队长离场等待 90s 与 15s 错峰兜底**：`TeamFollowCoordinator` 在队长离场/交接解散队形时登记原随从等待队长去留（上限 `90s`），队长离开本节点或交接作废回原地时通过 `notifyLeaderOutcome` 立即唤醒原随从复查；托管中未接上队长者每 `15s` 错峰重查；
+- **验证**：`game-scene` `Batch4T2BSceneParityTest` + `TeamFollowServiceTest` + `AfkPassHostingAndTeamFollowTest` 等 **57/57 PASS**。
 
 ### 2026-11-11 写者名册按槽位换代（Java 已对齐；补 11-10「写者闸门的读闸门与写者名册换代」）
 
@@ -1574,19 +1550,13 @@ C++ 版设计见 C++ 仓 `docs/design/gate-client-heartbeat.md` §14。
 - `SqlWriterSlotCatalog.classifyLockedSlots` 与 `WriterAuthority.begin` 将读不到 slot 行确定性判定为一代已结束（目录侧抛 `GenerationAlreadyEndedException`，写者闸门两路径均以 SQLState `40001` 拒绝）；`deploy/sql/authority_operator_role.sql` 同步更新权限（注册账号对 `writer_slot` 仅 `SELECT,INSERT,DELETE`，维护账号 `SELECT,UPDATE,DELETE`）。
 - **验证**：`game-common` `WriterGateReadAndMergeTest`（3/3）+ `game-data` `SqlWriterSlotSuccessionAndRetirerTest`（3/3，含 1100 代后 slot 恒 64 行、已被换代再退休回确定拒绝、`classifyLockedSlots` 分类与人工退休幂等重放）全部 PASS。
 
-### 2026-11-11 scene 节点计划排空:重启、缩容、滚动升级时把玩家疏散到别的节点(Java 待做)
+### 2026-11-11 scene 节点计划排空:重启、缩容、滚动升级时把玩家疏散到别的节点（Java 已对齐）
 
-主仓设计 `docs/design/scene-node-planned-drain.md`,2026-11-11 批 1~4 落码(工作区未提交,main;未生成协议、未编译)。Java 版 `0.1.0-SNAPSHOT` 待做,本轮不写 Java 代码。上面「全类型节点平滑停机」一行里「Scene 尚缺完整节点级在线疏散」对主仓已不成立,对 Java 版仍成立。
-
-Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照抄主仓的 etcd / gRPC 细节):
-
-1. **SIGTERM 先计划排空**:进程照常服务,关建场景准入、对外发布「排空中」(选点提示,不是存活判定);完成或到预算(Pod 宽限期 − 普通停机所需)才走现有停机存盘;人工中断(SIGINT)仍立即停机。
-2. **先迁频道再搬人**:场景编排方看到节点排空,就把它托着的主世界频道迁到别的节点(同一个频道号、有人也迁,老实例在住户走光前保留);老节点按限速疏散住户,疏散请求带原频道与原地图,编排方按「原频道 → 同图最空频道 → 默认大世界」解析,不选排空中的节点。副本与没赶上迁移的,到自疏散时刻(预算一半)由节点自己疏散;整 zone 没有可去的节点时提前结束。
-3. **新版本优先**:节点上报部署构建标识;有节点在排空的构建算「外出构建」,迁频道、选频道、放副本都优先选别的构建。
-4. **数据一致性**:疏散沿用本版现有的跨节点交接(存盘落地之后才改派、owner epoch 围栏),不新增提交点。
-5. **battle**:同一套计划排空 —— 关建房准入、等房间清零再停机;缺省关闭,部署按对局时长给宽限期与预算才打开。
-
-主仓顺带修掉的问题 Java 版也要核对:疏散 / 频道缩容的改派若一律落默认大世界,非默认地图上的玩家会被换地图。
+2026-11-27 已在 `game-scene` / `game-scene-manager` / `game-battle` 完整对齐（设计见主仓 `docs/design/scene-node-planned-drain.md`）：
+1. **计划排空、半预算自疏散与无目标早退**：`SceneNode.stop()` 停机前执行 `evacuateBeforeStop()`（关进场准入、发布 `evacuating=true`、有预算内疏散与每 1s 探查 `hasOtherEvacuationTarget()` 无目标早退）；`NodeEvacuation.halfBudgetReached` 与 `SceneWorld.drainStep` 在预算过半时将剩余未排空场景/副本一并转入自疏散；疏散沿用既有跨节点交接（存盘落地 + `owner_epoch` 围栏），且按 `relocationConfigId` 保留原地图（`同图最空频道 → 默认大世界`，绝不把非默认图玩家一律落回默认图）。
+2. **先迁频道与新版本优先**：`SceneNode` 在目录 `SceneNodeInfo.deployment_build_id` 上报部署代次（镜像构建 + 工作负载修订）；`DirectoryView.Node` 透传构建标识；`WorldChannelCoordinator`（`DRAIN_EVACUATE` + 同批补建）与 `ChannelSelector` 均接入 `BuildGenerationSelector`，凡有节点排空的构建判为外出构建，频道迁移、补建与选线优先落到非外出构建节点（无新一代时优雅回退）。
+3. **battle 计划排空**：`BattleProperties` 新增 `plannedDrainBudget`（缺省 `Duration.ZERO` 关闭、负数拒启）；开启时 `BattleNode` 停机先删目录、关建房准入并等待在打房间归零或预算到期再进入既有补交与拆房流程。
+4. **验证**：`game-scene-manager` **114/114 PASS**（含 `Batch4T2BSceneManagerParityTest` / `WorldChannelCoordinatorTest` / `WorldChannelPlannerTest` / `SwitchTargetSelectorTest`）、`game-scene` `NodeEvacuationTest` + `NodeEvacuationLifecycleTest` + `Batch4T2BSceneParityTest` 等 **57/57 PASS**、`game-battle` `BattlePlannedDrainTest` + `BattleNodeTest` **PASS**。
 
 ### 2026-11-11 排行榜前 N 名精确、之后显示 N+（Java 已对齐）
 
@@ -1699,26 +1669,13 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 - `deploy/k8s/sql-writer-slot-retirer.yaml` 为 Job 模板配置 `ttlSecondsAfterFinished: 600` 自动回收手工一次性任务。
 - **验证**：`SqlWriterSlotSuccessionAndRetirerTest` **3/3 PASS**。
 
-### 2026-11-12 离线托管角色随排空 / 疏散搬走,托管落点没建起来时有界重试(主仓已落码未编译,Java 待做;补 11-10「离线托管的队员跨场景跟随」)
+### 2026-11-12 离线托管角色随排空 / 疏散搬走,托管落点没建起来时有界重试（Java 已对齐；补 11-10「离线托管的队员跨场景跟随」）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/player-connection-lost-hold.md` §4.3、§4.4,
-说明与验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「离线托管角色随排空 / 疏散搬走」。上面「无感重启收尾批」表里「离线托管角色随排空搬走」一行以本条为准。
-不涉及客户端契约(托管落点、改派请求都是服务端内部)。
-
-**要对齐的行为**:
-
-1. 节点重启 / 缩容 / 频道缩容 / 失去身份时,离线托管中的角色(断线保留 + 挂机月卡确认有效,没有客户端)不再存盘下线,而是与在线玩家走同一条
-   改派:存盘落地之后替他申请落点(身份是断开的那次登录,不带网关),落到别的节点后接着托管、接着组队跟随。普通断线保留(还没确认月卡)只存盘。
-2. 改派是否生效要确认到底(主仓是待确认表):没生效时托管角色不推送任何踢线(没有在场的客户端,旧会话号可能已被新登录拿回);能证明落点
-   服务没放行他(没发出去、在任何落点写之前的可重试拒绝、过了结算窗口的结果未知)时,先重读确认他仍在原处,再等 5 秒 / 20 秒各重发一次。
-3. 落点到了目标节点却没把人建起来(角色登记、认领载入一时失败):目标节点按 5 / 20 / 60 秒退避最多重试 3 次,每次先读权威落点,仍是本节点、
-   这个场景、同一次登录、同一归属代次才重试;任何一项变了就结清不动。总预算 8 分钟,用尽放弃(数据在盘上,下次登录照常进入)。
-4. 退出途中到达的同一次登录的托管落点不作废改派票据(托管落点不取消退出)。
-
-**Java 版自己定**:Java 版的落点与入场若不是"源节点存盘 → 落点服务放行 → 目标节点认领"的结构,按自己的结构守住同一组结论:托管角色被搬走而不是下线;
-搬不走时不打扰别的会话;落点没建起来时有界重试,重试前先核实落点仍指着自己。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-scene` 完整对齐（设计见主仓 `docs/design/player-connection-lost-hold.md` §4.3、§4.4）：
+- **排空分流与零踢线**：`SceneWorld.relocateResidents` 与 `sendTransfer` 对已确认挂机月卡的离线托管角色沿同一交接链落盘后经 `HostedPlacementController` 走托管落点搬迁至目标节点（绝不向旧会话推任何踢线，目标节点入场后重建断线托管与组队跟随）；普通 25s 未确认断线保留仅存盘退出；
+- **源端与目标端有界重试**：`HostedPlacementController` 实现源端写前可重试/超窗未知时先复核仍在原处再按 `5s / 20s` 最多重试 2 次；目标端实体建不起来时按 `5s / 20s / 60s`（最多 3 次、总预算 8 分钟）退避重试，每次重试前先读权威落点校验 `(selfNodeId, sceneId, sessionId, loginGeneration, ownerEpoch)`，任一项变化即结清停止；
+- **退出途中不取消退出**：`SceneWorld.onPlayerEnter` 对已在 `finalizing` / `tradeDrains` 最终退出中的 `(playerId, epoch)` 一律拒绝同代托管落点，不取消在途退出；
+- **验证**：`game-scene` `Batch4T2BSceneParityTest` 等 **57/57 PASS**。
 
 ### 2026-11-12 RPC 热关停补「节点」一级与受保护方法（Java 已对齐；补「按方法热关停」行）
 
@@ -1799,13 +1756,13 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 
 主仓设计见 `docs/design/player-inbox-service.md` §9.1。2026-11-27 已对齐：删除 `game-inbox` 中空转的 `InboxMaintenance.sweepRound`、`InboxMaintenanceStore.sweepTerminal`、`InboxProperties` / `application.yaml` 的 `terminalRetention` 与 `sweepInterval`（Spring Boot 默认忽略未知配置键，旧配置照常启动）以及 `InboxMetrics` 的 `SWEEP_DELETED`；`BattleInboxRecoveryTest`（6/6）与 `InboxOwnerAdmissionTest`（6/6）12/12 PASS。
 
-### 2026-11-12 断线重连清单收尾(主仓 R18 重连抖动、R7 世界频道登记不超过期望数、R8 两把锁已落码未编译,Java 待做)
+### 2026-11-12 断线重连清单收尾（Java 已对齐；R18 重连抖动、R7 频道登记围栏、R8 两把锁未知清理）
 
-主仓规则见 `docs/design/infra-reconnect-overview.md` §4.1 的 R7、R8、R18 行,验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「断线重连清单收尾」条目。Java 版按自己的组件核对，下面三项都是待做或待核对，本次没有改 Java 代码:
-
-1. **Redis 重连带抖动(R18)**:主仓 C++ 每条连接的重连周期 = 3s + [0, 1s) 抖动，每次建连抽一次。Java 用 Lettuce,核对 `ClientResources.reconnectDelay` 当前取值是否带抖动;不带就配成带抖动的退避(如 `Delay.fullJitter` / `Delay.decorrelatedJitter`),避免 Redis 重启时全体网关与服务同一刻回连。
-2. **世界频道登记不超过期望数(R7)**:主仓把「在役频道数不小于期望数就不登记」放进登记脚本的同一步，补建锁丢了也不会多建频道。核对 Java 场景管理的频道补建是不是「数缺几个、补几个」靠一把 Redis 锁串行;是的话照同一做法把判断放进登记的原子步骤里。
-3. **锁命令结局未知时的收拾(R8)**:主仓两处——拿锁的 SET NX 报错时按同一个令牌做一次条件删除;客户端自动重发导致回「已存在」时，读回锁值核对是不是自己的。核对 Java 里用 Redis 锁的地方(帮会榜维护、频道补建等)在 Lettuce 超时 / 断线重发时是否会把自己的锁当成别人的、或留下没人持有的锁。
+2026-11-27 已在 `game-discovery` / `game-guild` / `game-scene-manager` 逐项核对并补齐（规则见主仓 `docs/design/infra-reconnect-overview.md` §4.1 R7、R8、R18）：
+1. **R18 Redis 重连带抖动**：`game-discovery` `RedisAutoConfiguration.configure` 在保留固定命令 `retryDelay`（确保单条命令最坏阻塞 < 5s）的同时，新增 `server.setReconnectionDelay(new EqualJitterDelay(1s, 4s))`，避免 Redis 重启时全体网关与服务同刻惊群回连；
+2. **R7 世界频道登记不超过期望数**：核对 `RedissonWorldChannelStore.WRITE` 单段原子 Lua 同时校验领导者锁值（`GET KEYS[1] == ARGV[1]`）与计划版本 CAS（`(GET KEYS[5] or '0') == ARGV[2]`），锁失或并发写回 `-1`/`-2` 零写入，结合 `WorldChannelPlanner` 按快照期望数补建彻底杜绝超额登记；
+3. **R8 锁命令结局未知收拾**：`RedissonWorldChannelStore.LEADER_TRY` 与 `RedissonGuildRankRedis.TRY_LOCK` 均已将 `holder == ARGV[1]` 判为幂等续期成功；`GuildRanks.acquire` 已在异常路径按同令牌释放；补齐 `WorldLeaderLock.tryAcquire` 在未持有状态下拿锁抛异常时按同一令牌尽力条件放锁（且清理失败不遮蔽原异常）；
+4. **验证**：`game-discovery` `RedisPropertiesTest` + `WorldLeaderLockTest` + `RedisKeysGoldenTest` 等 **31/31 PASS**、`game-guild` `GuildRanksTest` **18/18 PASS**、`game-scene-manager` `Batch4T2BSceneManagerParityTest` + `WorldChannelCoordinatorTest` 等 **114/114 PASS**。
 
 ### 2026-11-12 gate 连接准入:accept 处拒绝并发 RST、新建连接速率闸、连接类指标（Java 已对齐）
 
@@ -1814,27 +1771,13 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 - `game-gate` `ClientChannelHandler` / `GateNode` 在创建会话前执行准入判定，拒绝走 `SO_LINGER=0` RST 关闭且不消耗后序闸门名额；`GateMetrics.bindAdmission` 导出与 `deploy/k8s/gate-connection-alerts.yaml` 同名全部 Prometheus 指标（`gate_connections_current/max`、`gate_unauthenticated_connections`、`gate_accepted_total`、`gate_rejected_total{reason}`、`gate_accept_rate_limit_per_second`、`gate_accept_burst`、`gate_handshake_duration_ms`、`gate_preauth_reaped_total`）。
 - **验证**：`game-common` `ConnectionAdmissionControllerTest` + `NetProtectionTest` **7/7 PASS**，`game-gate` `PreAuthAdmissionLifecycleTest` + `ClientDispatcherTest` + `ClientRedirectTest` + `ClientPipelineTest` + `ClientHeartbeatTest` + `GateMetricsTest` **162/162 PASS**。
 
-### 2026-11-12 托管归位:没有节点持有的离线托管角色由会话服务放回世界(主仓已落码未编译,Java 待做;补同日「离线托管角色随排空 / 疏散搬走」)
+### 2026-11-12 托管归位:没有节点持有的离线托管角色由会话服务放回世界（Java 已对齐；补同日「离线托管角色随排空 / 疏散搬走」）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/player-connection-lost-hold.md` §4.5,
-验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「托管归位」。上面「离线托管角色随排空 / 疏散搬走」一节末尾那几类"不在世界里、等下次登录"的残余以本条为准。
-不涉及客户端契约(心跳键、归位请求、释放的 keep_held 都是服务端内部)。
-
-**要对齐的行为**:
-
-1. 对离线托管角色负责的场景节点(托管着他、改派途中、落点看护中)周期续一个短存活的在场心跳(主仓 20 秒一次、存活 60 秒);
-   托管着他的节点另记一份归位信息:所在 zone、归属修订、断开那次登录的会话号与代次,存活到月卡到期;角色不在任何节点上托管时,
-   会话服务每次续租按当下的月卡对齐它的存活(2026-11-13 补,月卡续费不会让归位断掉)。
-2. 会话服务给托管角色续断线租约时顺带对账:心跳不在、归位信息就是这条会话那一次登录、月卡还剩至少 1 分钟,就替他向角色所在 zone 的落点服务
-   申请一次托管落点(不带网关、不带去向,回原场景,不在了回默认大世界),归属修订用归位信息里的;修订被判失效(交易 / 封存 / 换号)就删掉归位信息、不再归位。
-3. 落点服务按登录重连同一条进场链处理;撞上"location 指着的节点没交出"时,与登录撞门同样请那个节点补凭证、拿不出资格时带围栏撤销,
-   但只替 location 记的那一次登录请,而且请求要求持有节点**有实体就不动**(主仓 `keep_held`),只在完全不持有时补凭证。
-4. 会话服务按 slot 分片、不按 zone 分时,归位请求要发给角色所在 zone 的落点服务,不能发给本 zone 的。
-
-**Java 版自己定**:Java 的会话、落点与节点结构不同时,守住同一组结论:托管角色在没有任何节点持有他时会被放回世界;放回只针对没人持有的角色,
-不退掉任何节点上正在托管他的实体;放回请求代表的是断开的那次登录,归属授权来自原链路,不从目录反查补权。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-api` / `game-discovery` / `game-login` / `game-scene` 完整对齐（设计见主仓 `docs/design/player-connection-lost-hold.md` §4.5）：
+- **同槽心跳键与归位信息**：`game-discovery` `RedisKeys` 新增与 `player:afk_pass:{id}` 同槽的 `playerHostedPresence(id)`（`game:player:hosted_presence:{id}`，20s 续期 / 60s TTL）与 `playerHostedHoming(id)`（`game:player:hosted_homing:{id}`，记录 `zoneId|ownerRevision|sessionId|loginGeneration|expiresAtSec`，TTL 对齐月卡到期）；`SceneWorld` 在托管中、搬迁与重试看护期间周期维护心跳与归位信息；
+- **会话续租对账与按角色 zone 路由**：`game-login` 新增 `HostedHomingReconciler` 并接入 `RenewSessionHandler`——有心跳跳过；无节点托管时先把归位信息 TTL 对齐最新月卡到期（月卡续费不中断归位）；月卡剩余 ≥ 60s 且匹配当前会话与登录身份时向**角色所属 zone**（而非登录服本地 zone）发起托管落点并使用归位信息中的 `ownerRevision`，修订失效（交易/封存/换号）即删除归位信息；
+- **`keep_held` 存活保活**：`game-api` `ownership.proto` 为 `OwnerTakeover` 追加 `bool keep_held = 3`；`OwnerTakeovers.requestKeepHeld` / `OwnerTakeoverSubscriber` / `SceneWorld.onTakeoverRequested(playerId, ownerEpoch, keepHeld)` 全链路贯通——`keep_held = true` 命中存活实体时绝不移出也不踢线；
+- **验证**：`game-discovery` `RedisKeysGoldenTest`（115 键）**31/31 PASS**、`game-login` `HostedHomingReconcilerTest` + `RenewSessionHandlerTest` **7/7 PASS**、`game-scene` `Batch4T2BSceneParityTest` 等 **57/57 PASS**。
 
 ### 2026-11-12 场景 lane 收尾定案（Java 已对齐；补上一条「换场景节点期间客户端请求在 gate 暂存并按序重投」）
 

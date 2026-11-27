@@ -107,7 +107,11 @@ public interface AssetAudit {
         /** 天墉生死状普通战书作废退还。 */
         JIANGHU_DUEL_REFUND,
         /** 天墉生死状清风洗尘（银两或洗尘符清除败绩印记）。 */
-        JIANGHU_CLEAR_MARK;
+        JIANGHU_CLEAR_MARK,
+        /** 衣柜收藏系列 Steam 式按缺口折扣一键补齐（TX_APPEARANCE_SERIES_BUNDLE = 52）。 */
+        APPEARANCE_SERIES_BUNDLE,
+        /** 仙途轻享卡/季享卡开卡一次性绑定直赠（TX_AFK_PASS_BONUS_GRANT = 53）。 */
+        AFK_PASS_BONUS_GRANT;
 
         /**
          * 本次入账是否属于「新增获得」（受全服与单玩家获取封禁约束）。

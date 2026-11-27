@@ -38,16 +38,22 @@ public record DirectoryView(Map<Integer, Node> nodes) {
      * @param scenes             场景号 → 场景（无符号升序）
      */
     public record Node(int nodeId, String instanceId, long appliedPlanVersion, Map<Long, Scene> scenes,
-                       boolean evacuating, long leaseEpoch) {
+                       boolean evacuating, long leaseEpoch, String deploymentBuildId) {
 
         public Node {
             TreeMap<Long, Scene> sorted = new TreeMap<>(Long::compareUnsigned);
             sorted.putAll(scenes);
             scenes = Collections.unmodifiableSortedMap(sorted);
+            deploymentBuildId = deploymentBuildId == null ? "" : deploymentBuildId;
+        }
+
+        public Node(int nodeId, String instanceId, long appliedPlanVersion, Map<Long, Scene> scenes,
+                    boolean evacuating, long leaseEpoch) {
+            this(nodeId, instanceId, appliedPlanVersion, scenes, evacuating, leaseEpoch, "");
         }
 
         public Node(int nodeId, String instanceId, long appliedPlanVersion, Map<Long, Scene> scenes) {
-            this(nodeId, instanceId, appliedPlanVersion, scenes, false, 0);
+            this(nodeId, instanceId, appliedPlanVersion, scenes, false, 0, "");
         }
 
         /** 节点上报里有这个场景、且没在排空（「已建出且可分配」）。 */
@@ -106,7 +112,7 @@ public record DirectoryView(Map<Integer, Node> nodes) {
                         entry.getSourceSceneId()));
             }
             nodes.put(info.getNodeId(), new Node(info.getNodeId(), info.getInstanceId(), info.getAppliedPlanVersion(), scenes,
-                    info.getEvacuating(), info.getLeaseEpoch()));
+                    info.getEvacuating(), info.getLeaseEpoch(), info.getDeploymentBuildId()));
         }
         return new DirectoryView(nodes);
     }

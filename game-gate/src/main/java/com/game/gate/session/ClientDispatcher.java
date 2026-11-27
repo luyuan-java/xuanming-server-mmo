@@ -7,6 +7,7 @@ import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientForward;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.EnterScene;
+import com.game.api.proto.ExitGameReason;
 import com.game.api.proto.NodeLinkFrame;
 import com.game.api.proto.PlayerEnter;
 import com.game.api.proto.PlayerEnterResult;
@@ -762,7 +763,12 @@ public final class ClientDispatcher {
         s.cancelSessionRenew();
         discardPending(s, RequestResult.DROPPED);
         // 已重定向的会话没有场景绑定，这里什么也不发
-        leaveScene(s, s.leaveGameRequests > 0, s.exitSceneImmediatelyOnClose);
+        ExitGameReason disconnectReason = s.leaveGameRequests > 0
+                ? ExitGameReason.EXIT_GAME_REASON_LOGOUT
+                : (s.exitSceneImmediatelyOnClose
+                        ? ExitGameReason.EXIT_GAME_REASON_LEASE_EXPIRED
+                        : ExitGameReason.EXIT_GAME_REASON_DISCONNECTED);
+        leaveScene(s, s.leaveGameRequests > 0, s.exitSceneImmediatelyOnClose, disconnectReason);
         if (s.inFlight) {
             // 等在途的 login 调用完成后再通知 login（见 onLoginCompleted），否则 login 可能先收到断线、后处理完进游戏。
             return;
@@ -2014,10 +2020,11 @@ public final class ClientDispatcher {
     }
 
     private void leaveScene(ClientSession s, boolean voluntary) {
-        leaveScene(s, voluntary, false);
+        leaveScene(s, voluntary, false,
+                voluntary ? ExitGameReason.EXIT_GAME_REASON_LOGOUT : ExitGameReason.EXIT_GAME_REASON_DISCONNECTED);
     }
 
-    private void leaveScene(ClientSession s, boolean voluntary, boolean immediateExit) {
+    private void leaveScene(ClientSession s, boolean voluntary, boolean immediateExit, ExitGameReason reason) {
         PendingSceneEntry pending = s.pendingSceneEntry;
         if (pending != null) {
             boolean cancelled = pending.knownUnsent || links.cancelQueuedEnter(pending.nodeId, pending.generation, pending.enter);
@@ -2035,7 +2042,8 @@ public final class ClientDispatcher {
         PlayerLeave.Builder leave = PlayerLeave.newBuilder()
                 .setSessionId(s.sessionId())
                 .setPlayerId(s.scenePlayerId)
-                .setVoluntary(voluntary);
+                .setVoluntary(voluntary)
+                .setReason(reason);
         if (immediateExit) {
             leave.setImmediateExit(true);
         }

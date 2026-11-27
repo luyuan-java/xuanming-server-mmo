@@ -370,6 +370,8 @@ public final class BattleNode implements SmartLifecycle {
                 p.stop(true);
             }
         }
+        // 第 1.5 步：若开启计划排空预算（默认 0 关闭），关建房准入并等待既有房间自然打完归零或预算耗尽
+        plannedDrainBeforeAbort();
         // 第 2 步：关闸后有界补交 SQL v1 原终局，取得决定或记下逐局未知后才拆房。
         closeAdmissionAndAbortRooms();
         // 第 3 步：直连面停止接受，等优雅关闭的连接把终局包与 FIN 写完（至多 shutdown-flush-timeout），再强关剩余连接
@@ -414,6 +416,47 @@ public final class BattleNode implements SmartLifecycle {
         if (sc != null) {
             sc.shutdownNow();
         }
+    }
+
+    /** 战斗服计划排空（默认关闭，仅在配置 plannedDrainBudget > 0 时启用）：关建房准入、等既有房间归零或预算到期再进入强拆。 */
+    private void plannedDrainBeforeAbort() {
+        Duration budget = props.plannedDrainBudget();
+        BattleScheduler s = scheduler;
+        BattleRoomService r = rooms;
+        if (budget == null || budget.isZero() || budget.isNegative() || s == null || r == null) {
+            return;
+        }
+        try {
+            callOnLogic(() -> {
+                admission.close();
+                return null;
+            }, LOGIC_CALL_TIMEOUT);
+        } catch (Exception ex) {
+            admission.close();
+            if (ex instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        long startNanos = System.nanoTime();
+        long deadlineNanos = startNanos + budget.toNanos();
+        String outcome = "drained";
+        while (r.roomCount() > 0) {
+            long leftNanos = deadlineNanos - System.nanoTime();
+            if (leftNanos <= 0L) {
+                outcome = "budget_exceeded";
+                break;
+            }
+            try {
+                TimeUnit.NANOSECONDS.sleep(Math.min(TimeUnit.MILLISECONDS.toNanos(50L), leftNanos));
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                outcome = "interrupted";
+                break;
+            }
+        }
+        log.info("battle planned drain finished outcome={} remaining_rooms={} elapsed_ms={}",
+                outcome, r.roomCount(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos));
     }
 
     private void closeAdmissionAndAbortRooms() {

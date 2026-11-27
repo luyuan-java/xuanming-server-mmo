@@ -5,6 +5,7 @@ import org.redisson.Redisson;
 import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
 import org.redisson.config.ConstantDelay;
+import org.redisson.config.EqualJitterDelay;
 import org.redisson.config.SingleServerConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +42,10 @@ public class RedisAutoConfiguration {
         return Redisson.create(config);
     }
 
+    /** 断线重连退避（R18）：1s 起步、4s 封顶的等比例抖动，避免 Redis 重启时全体网关与服务同一刻回连。 */
+    static final Duration RECONNECT_BASE_DELAY = Duration.ofSeconds(1);
+    static final Duration RECONNECT_MAX_DELAY = Duration.ofSeconds(4);
+
     /** 把配置写进 Redisson 单机配置（包内可见供测试核对接线）。 */
     static SingleServerConfig configure(SingleServerConfig server, RedisProperties props) {
         return server
@@ -51,6 +56,7 @@ public class RedisAutoConfiguration {
                 .setTimeout(props.timeoutMs())
                 .setRetryAttempts(props.retryAttempts())
                 .setRetryDelay(new ConstantDelay(Duration.ofMillis(props.retryDelayMs())))
+                .setReconnectionDelay(new EqualJitterDelay(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY))
                 .setConnectionPoolSize(props.connectionPoolSize())
                 .setConnectionMinimumIdleSize(props.connectionMinimumIdleSize())
                 .setSubscriptionConnectionPoolSize(props.subscriptionConnectionPoolSize())

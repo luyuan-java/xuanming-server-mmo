@@ -41,14 +41,23 @@ public record BattleProperties(
         Integer rpcMaxInflight,
         Duration shutdownFlushTimeout,
         String clientAdvertiseHost,
-        String clientWsBaseUrl) {
+        String clientWsBaseUrl,
+        Duration plannedDrainBudget) {
+
+    public BattleProperties(Integer clientPort, String clientBindHost, Integer advertisePort, Integer rpcPort,
+                            Integer maxConnections, Duration handshakeTimeout, Integer illegalPacketThreshold,
+                            FingerprintMode tableFingerprintMode, Integer rpcMaxInflight, Duration shutdownFlushTimeout,
+                            String clientAdvertiseHost, String clientWsBaseUrl) {
+        this(clientPort, clientBindHost, advertisePort, rpcPort, maxConnections, handshakeTimeout, illegalPacketThreshold,
+                tableFingerprintMode, rpcMaxInflight, shutdownFlushTimeout, clientAdvertiseHost, clientWsBaseUrl, Duration.ZERO);
+    }
 
     public BattleProperties(Integer clientPort, String clientBindHost, Integer advertisePort, Integer rpcPort,
                             Integer maxConnections, Duration handshakeTimeout, Integer illegalPacketThreshold,
                             FingerprintMode tableFingerprintMode, Integer rpcMaxInflight, Duration shutdownFlushTimeout,
                             String clientAdvertiseHost) {
         this(clientPort, clientBindHost, advertisePort, rpcPort, maxConnections, handshakeTimeout, illegalPacketThreshold,
-                tableFingerprintMode, rpcMaxInflight, shutdownFlushTimeout, clientAdvertiseHost, null);
+                tableFingerprintMode, rpcMaxInflight, shutdownFlushTimeout, clientAdvertiseHost, null, Duration.ZERO);
     }
 
     public static final int DEFAULT_CLIENT_PORT = 12000;
@@ -102,11 +111,16 @@ public record BattleProperties(
         // 空白视同不配（环境变量占位符缺省展开成空串）
         clientAdvertiseHost = clientAdvertiseHost == null || clientAdvertiseHost.isBlank() ? null : clientAdvertiseHost.strip();
         clientWsBaseUrl = com.game.common.net.ClientWsUrls.parseBaseUrl(clientWsBaseUrl);
+        if (plannedDrainBudget == null) {
+            plannedDrainBudget = Duration.ZERO;
+        } else if (plannedDrainBudget.isNegative()) {
+            throw new IllegalArgumentException("game.battle.planned-drain-budget 不能为负: " + plannedDrainBudget);
+        }
     }
 
     /** 全部取缺省值（测试用）。 */
     public static BattleProperties defaults() {
-        return new BattleProperties(null, null, null, null, null, null, null, null, null, null, null, null);
+        return new BattleProperties(null, null, null, null, null, null, null, null, null, null, null, null, Duration.ZERO);
     }
 
     /**

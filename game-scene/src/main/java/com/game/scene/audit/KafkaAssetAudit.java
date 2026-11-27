@@ -144,6 +144,8 @@ public final class KafkaAssetAudit implements AssetAudit {
             case JIANGHU_DUEL_FEE -> TransactionReason.TX_SHOP_BUY;
             case JIANGHU_DUEL_REFUND -> TransactionReason.TX_SYSTEM_GRANT;
             case JIANGHU_CLEAR_MARK -> TransactionReason.TX_ITEM_DESTROY;
+            case APPEARANCE_SERIES_BUNDLE -> TransactionReason.TX_SHOP_BUY;
+            case AFK_PASS_BONUS_GRANT -> TransactionReason.TX_SYSTEM_GRANT;
         };
     }
 }

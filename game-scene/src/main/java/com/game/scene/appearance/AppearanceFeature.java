@@ -2,6 +2,7 @@ package com.game.scene.appearance;
 
 import static com.game.scene.world.SceneMessageIds.tip;
 
+import com.game.proto.BuyAppearanceSeriesBundleRequest;
 import com.game.proto.CancelAppearanceTrialRequest;
 import com.game.proto.EquipPetCosmeticRequest;
 import com.game.proto.EquipSkillVfxRequest;
@@ -46,5 +47,7 @@ public final class AppearanceFeature implements SceneFeature {
                 (call, req) -> call.reply(service.equipPetCosmetic(call.world(), call.player(), req)));
         r.on(SERVICE, "EquipSkillVfx", EquipSkillVfxRequest.class, FreezePolicy.GATED, BattlePolicy.ALLOW,
                 (call, req) -> call.reply(service.equipSkillVfx(call.world(), call.player(), req)));
+        r.on(SERVICE, "BuyAppearanceSeriesBundle", BuyAppearanceSeriesBundleRequest.class, FreezePolicy.GATED, BattlePolicy.ALLOW,
+                (call, req) -> call.reply(service.buySeriesBundle(call.world(), call.player(), req)));
     }
 }

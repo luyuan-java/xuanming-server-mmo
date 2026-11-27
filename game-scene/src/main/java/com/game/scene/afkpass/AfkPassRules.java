@@ -27,9 +27,35 @@ public final class AfkPassRules {
     public static final int BASE_LOADOUT_SLOTS = 2;
     public static final int LIGHT_CARD_BONUS_LOADOUT_SLOTS = 2;
     public static final int LIGHT_CARD_LOADOUT_SLOTS = BASE_LOADOUT_SLOTS + LIGHT_CARD_BONUS_LOADOUT_SLOTS;
+    public static final int BASE_MARKET_LISTING_LIMIT = 10;
+    public static final int LIGHT_CARD_MARKET_LISTING_LIMIT = 20;
+    public static final int BASE_STALL_DURATION_HOURS = 48;
+    public static final int LIGHT_CARD_STALL_DURATION_HOURS = 96;
+    public static final int LIGHT_CARD_WEEKLY_FREE_TRIAL_QUOTA = 3;
+    private static final long UTC8_MONDAY_05_ANCHOR_MS = 334_800_000L;
+    private static final long WEEK_MS = 7L * 86_400_000L;
 
     public static int unlockedLoadoutSlots(boolean active) {
         return active ? LIGHT_CARD_LOADOUT_SLOTS : BASE_LOADOUT_SLOTS;
+    }
+
+    public static int marketListingLimit(boolean active) {
+        return active ? LIGHT_CARD_MARKET_LISTING_LIMIT : BASE_MARKET_LISTING_LIMIT;
+    }
+
+    public static int stallDurationHours(boolean active) {
+        return active ? LIGHT_CARD_STALL_DURATION_HOURS : BASE_STALL_DURATION_HOURS;
+    }
+
+    public static int weeklyFreeTrialQuota(boolean active) {
+        return active ? LIGHT_CARD_WEEKLY_FREE_TRIAL_QUOTA : 0;
+    }
+
+    public static long utc8Monday05WeekStartMs(long nowMs) {
+        if (nowMs < UTC8_MONDAY_05_ANCHOR_MS) {
+            return 0L;
+        }
+        return UTC8_MONDAY_05_ANCHOR_MS + ((nowMs - UTC8_MONDAY_05_ANCHOR_MS) / WEEK_MS) * WEEK_MS;
     }
 
     private AfkPassRules() {

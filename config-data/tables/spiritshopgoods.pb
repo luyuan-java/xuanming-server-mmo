@@ -25,3 +25,7 @@ X�`h�永久衣柜
 ��2 *金帖生死状2�仅自用绑定战书：在天墉生死擂成局后触发金色全服播报与金框战报（纯排面零数值，拒战/作废不扣）。:)UI/Ugui/JianghuDuelV1/item_gold_duel_writ@HPX�`h�江湖战书
 ��< *清风洗尘符2�仅自用绑定符箓：立即消除天墉生死状战败印记并赠 30 分钟「清风拂尘」徽记（纯社交零数值）。:+UI/Ugui/JianghuDuelV1/item_clear_dust_charm@H
 PX�`h�江湖洗尘
+�� *解封剥离符2�仅自用绑定配套符箓：救回拥有可交易血统（origin_tradeable）的绑定装备原胚，剥离后清空绑定养成并恢复可交易，绝不洗白非原胚。:+UI/Ugui/EconomyTradeV1/icon_unseal_talisman@H<P
+X�`h�解封原胚
+��( *流派副套继承符2�仅自用绑定配套符箓：将当前高阶装备的强化等级与养成进度平迁继承至同部位副套装备，方便零焦虑切换多流派，不突破战力上限。:,UI/Ugui/EconomyTradeV2/icon_inherit_talisman@HxP
+X�`h�副套继承

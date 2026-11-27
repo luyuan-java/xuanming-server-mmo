@@ -8,6 +8,7 @@ import com.game.proto.GetAfkPassRequest;
 import com.game.proto.GmSetAfkPassRequest;
 import com.game.proto.GmSetAfkPassResponse;
 import com.game.scene.attribute.AttributeService;
+import com.game.scene.bag.BagFeature;
 import com.game.scene.world.BattlePolicy;
 import com.game.scene.world.FreezePolicy;
 import com.game.scene.world.PlayerCall;
@@ -21,17 +22,24 @@ public final class AfkPassFeature implements SceneFeature {
 
     private final AfkPassService service;
     private final AttributeService attributes;
+    private final BagFeature bags;
     private final int notifyPanel;
 
     public AfkPassFeature(AfkPassService service) {
         this.service = Objects.requireNonNull(service, "service");
         this.attributes = null;
+        this.bags = null;
         this.notifyPanel = 0;
     }
 
     public AfkPassFeature(AfkPassService service, AttributeService attributes, MessageIdRegistry registry) {
+        this(service, attributes, registry, null);
+    }
+
+    public AfkPassFeature(AfkPassService service, AttributeService attributes, MessageIdRegistry registry, BagFeature bags) {
         this.service = Objects.requireNonNull(service, "service");
         this.attributes = Objects.requireNonNull(attributes, "attributes");
+        this.bags = bags;
         this.notifyPanel = Objects.requireNonNull(registry, "registry")
                 .requireId("SceneAttributeClientPlayer", "NotifyAttributePanelChanged");
     }
@@ -49,7 +57,7 @@ public final class AfkPassFeature implements SceneFeature {
                 (call, req) -> call.reply(service.getInfo(call.player())));
         registrar.on(SERVICE, "BuyAfkPass", BuyAfkPassRequest.class, FreezePolicy.GATED, BattlePolicy.ALLOW,
                 (call, req) -> {
-                    BuyAfkPassResponse resp = service.buy(call.world(), call.player(), req);
+                    BuyAfkPassResponse resp = service.buy(call.world(), call.player(), req, bags);
                     if (resp.getErrorMessage().getId() == 0 && !resp.getReplayed()) {
                         pushPanel(call);
                     }

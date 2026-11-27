@@ -30,7 +30,13 @@ public final class AppearanceTables {
     public record Rule(int cardItemId, int cardItemCount, int trialDurationSeconds, long mallSkuId, long mallPriceFen) { }
 
     public record Series(int seriesId, String seriesKey, String name, int sortOrder,
-                         String completionBadgeName, String epilogueTitle) { }
+                         String completionBadgeName, String epilogueTitle,
+                         int bundleDiscountBps, long unitPriceDiamond) {
+        public Series(int seriesId, String seriesKey, String name, int sortOrder,
+                      String completionBadgeName, String epilogueTitle) {
+            this(seriesId, seriesKey, name, sortOrder, completionBadgeName, epilogueTitle, 0, 0L);
+        }
+    }
 
     public record Entry(int configId, int bitIndex, String appearanceId, String name, int sortOrder,
                         boolean starterCreatable, boolean cardUnlockable, int seriesId) { }
@@ -106,7 +112,9 @@ public final class AppearanceTables {
                     s.getName(),
                     s.getSortOrder(),
                     s.getCompletionBadgeName(),
-                    s.getEpilogueTitle()));
+                    s.getEpilogueTitle(),
+                    s.getBundleDiscountBps(),
+                    s.getUnitPriceDiamond()));
         }
         seriesList.sort(Comparator.comparingInt(Series::sortOrder).thenComparingInt(Series::seriesId));
 

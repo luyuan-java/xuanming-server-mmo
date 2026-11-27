@@ -140,6 +140,8 @@ final class RedisKeysSamples {
                 new Sample("chatWorldTopic", RedisKeys::chatWorldTopic, "game:chat:world:events"),
                 new Sample("loginIdTokenUsed", k -> k.loginIdTokenUsed("apple", "deadbeef"), "game:login:id-token-used:apple:deadbeef"),
                 new Sample("playerAfkPass", k -> k.playerAfkPass(42), "game:player:afk_pass:{42}"),
+                new Sample("playerHostedPresence", k -> k.playerHostedPresence(42), "game:player:hosted_presence:{42}"),
+                new Sample("playerHostedHoming", k -> k.playerHostedHoming(42), "game:player:hosted_homing:{42}"),
                 new Sample("matchSpectateChatSeq", k -> k.matchSpectateChatSeq(9), "game:spectate:chat:{9}:seq"),
                 new Sample("matchSpectateChatMessages", k -> k.matchSpectateChatMessages(9), "game:spectate:chat:{9}:msgs"),
                 new Sample("matchSpectateChatCooldown", k -> k.matchSpectateChatCooldown(9), "game:spectate:chat:{9}:cd"),

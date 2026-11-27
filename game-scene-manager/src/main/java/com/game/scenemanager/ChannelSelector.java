@@ -3,6 +3,7 @@ package com.game.scenemanager;
 import com.game.api.ChannelKinds;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
+import com.game.discovery.BuildGenerationSelector;
 import com.game.discovery.world.ReservationCandidate;
 import com.game.discovery.world.ReservationPick;
 import com.game.discovery.world.WorldChannelStore;
@@ -11,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 在一张世界地图的频道里选一个并软预占（scene-channels-spec §4.11 第 2、5 步，D7、D13、D20）。login 进游戏经 {@link SceneAssigner} 用它；
@@ -98,16 +100,17 @@ public final class ChannelSelector {
     /** 同上，目录已由调用方读好并过滤过（{@link SceneAssigner} 一次分配只读一次目录）。 */
     Optional<Choice> select(int zoneId, List<SceneNodeInfo> usableNodes, int sceneConfigId, long excludeSceneId,
                             long playerId) {
-        List<Choice> candidates = new ArrayList<>();
-        for (SceneNodeInfo node : usableNodes) {
-            for (SceneEntry scene : node.getScenesList()) {
-                if (scene.getSceneConfigId() != sceneConfigId || scene.getSceneId() == 0 || scene.getDraining()
-                        || !ChannelKinds.isWorldChannel(scene.getKind())
-                        || (excludeSceneId != 0 && scene.getSceneId() == excludeSceneId)) {
-                    continue;
-                }
-                candidates.add(new Choice(node.getNodeId(), scene));
-            }
+        // 滚动重启/缩容新版本优先：凡是有节点在排空的部署代次算外出构建，在合格候选中优先挑不属于外出构建的节点
+        Set<String> outgoingBuilds = BuildGenerationSelector.outgoingBuilds(
+                usableNodes, SceneNodeInfo::getEvacuating, SceneNodeInfo::getDeploymentBuildId);
+        List<SceneNodeInfo> nonEvacuating = usableNodes.stream()
+                .filter(n -> !n.getEvacuating())
+                .toList();
+        List<SceneNodeInfo> preferredNodes = BuildGenerationSelector.preferNonOutgoing(
+                nonEvacuating, outgoingBuilds, SceneNodeInfo::getDeploymentBuildId);
+        List<Choice> candidates = collectCandidates(preferredNodes, sceneConfigId, excludeSceneId);
+        if (candidates.isEmpty() && preferredNodes.size() < nonEvacuating.size()) {
+            candidates = collectCandidates(nonEvacuating, sceneConfigId, excludeSceneId);
         }
         if (candidates.isEmpty()) {
             return Optional.empty();
@@ -125,6 +128,21 @@ public final class ChannelSelector {
             throw new IllegalStateException("预占脚本回了越界的下标 " + pick.index() + "（候选 " + candidates.size() + " 个）");
         }
         return Optional.of(candidates.get(pick.index()));
+    }
+
+    private static List<Choice> collectCandidates(List<SceneNodeInfo> nodes, int sceneConfigId, long excludeSceneId) {
+        List<Choice> candidates = new ArrayList<>();
+        for (SceneNodeInfo node : nodes) {
+            for (SceneEntry scene : node.getScenesList()) {
+                if (scene.getSceneConfigId() != sceneConfigId || scene.getSceneId() == 0 || scene.getDraining()
+                        || !ChannelKinds.isWorldChannel(scene.getKind())
+                        || (excludeSceneId != 0 && scene.getSceneId() == excludeSceneId)) {
+                    continue;
+                }
+                candidates.add(new Choice(node.getNodeId(), scene));
+            }
+        }
+        return candidates;
     }
 
     /**

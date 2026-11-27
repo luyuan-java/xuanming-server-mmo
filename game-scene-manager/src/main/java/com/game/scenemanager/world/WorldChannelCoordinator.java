@@ -244,13 +244,19 @@ public final class WorldChannelCoordinator {
             referenced.add(channel.getNodeId());
         }
         Map<Integer, Long> absent = state.absence.update(referenced, view.nodes().keySet(), now);
-        List<Integer> live = new ArrayList<>();
+        List<DirectoryView.Node> healthyNodes = new ArrayList<>();
         for (int nodeId : view.nodes().keySet()) {
-            if (!view.node(nodeId).evacuating() && availability.acceptsNewChannels(zoneId, nodeId)) {
-                live.add(nodeId);
+            DirectoryView.Node node = view.node(nodeId);
+            if (!node.evacuating() && availability.acceptsNewChannels(zoneId, nodeId)) {
+                healthyNodes.add(node);
             }
         }
-        live = ChannelPlacement.sortNodes(live);
+        // 新版本优先：有节点在排空/疏散的部署构建算外出构建，迁频道与补建优先落到非外出构建节点
+        Set<String> outgoingBuilds = com.game.discovery.BuildGenerationSelector.outgoingBuilds(
+                view.nodes().values(), DirectoryView.Node::evacuating, DirectoryView.Node::deploymentBuildId);
+        List<DirectoryView.Node> preferredHealthy = com.game.discovery.BuildGenerationSelector.preferNonOutgoing(
+                healthyNodes, outgoingBuilds, DirectoryView.Node::deploymentBuildId);
+        List<Integer> live = ChannelPlacement.sortNodes(preferredHealthy.stream().map(DirectoryView.Node::nodeId).toList());
 
         boolean autoscaleDue = props.autoscale().enabled()
                 && (!state.autoscaleRan || now - state.lastAutoscaleNanos >= props.autoscale().checkInterval().toNanos());

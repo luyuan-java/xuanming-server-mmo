@@ -437,7 +437,8 @@ class ClientDispatcherTest {
         assertThat((Object) ch.readOutbound()).as("LeaveGame 应答类型是 Empty，不回包").isNull();
         assertThat(links.last().sceneNodeId()).isEqualTo(SCENE_NODE);
         assertThat(links.last().frame().getPlayerLeave())
-                .isEqualTo(PlayerLeave.newBuilder().setSessionId(sid).setPlayerId(PLAYER).setVoluntary(true).build());
+                .isEqualTo(PlayerLeave.newBuilder().setSessionId(sid).setPlayerId(PLAYER).setVoluntary(true)
+                        .setReason(com.game.api.proto.ExitGameReason.EXIT_GAME_REASON_LOGOUT).build());
 
         // 不在场景里了：scene 域消息回带请求 id 的信封 1003，不再转发。
         int framesBefore = links.sent.size();
@@ -1249,7 +1250,8 @@ class ClientDispatcherTest {
 
         assertThat(links.last().sceneNodeId()).isEqualTo(SCENE_NODE);
         assertThat(links.last().frame().getPlayerLeave())
-                .isEqualTo(PlayerLeave.newBuilder().setSessionId(sid).setPlayerId(PLAYER).setVoluntary(false).build());
+                .isEqualTo(PlayerLeave.newBuilder().setSessionId(sid).setPlayerId(PLAYER).setVoluntary(false)
+                        .setReason(com.game.api.proto.ExitGameReason.EXIT_GAME_REASON_DISCONNECTED).build());
         assertThat(login.closed).hasSize(1);
         SessionClosed closed = login.closed.get(0);
         assertThat(closed.getVoluntary()).isFalse();
@@ -1944,7 +1946,8 @@ class ClientDispatcherTest {
 
         assertThat(links.last().sceneNodeId()).isEqualTo(TARGET_NODE);
         assertThat(links.last().frame().getPlayerLeave()).isEqualTo(PlayerLeave.newBuilder()
-                .setSessionId(sessionId()).setPlayerId(PLAYER).setVoluntary(false).build());
+                .setSessionId(sessionId()).setPlayerId(PLAYER).setVoluntary(false)
+                .setReason(com.game.api.proto.ExitGameReason.EXIT_GAME_REASON_DISCONNECTED).build());
         assertThat(login.closed).hasSize(1);
         assertThat(disconnects("transfer_failed")).isZero();
     }
@@ -1994,7 +1997,8 @@ class ClientDispatcherTest {
                 .containsExactly(tuple(PLAYER, 6L));
         assertThat(sentSince(framesBefore)).as("没改绑：断线流程向源节点发 PlayerLeave")
                 .containsExactly(new FakeLinks.Sent(SCENE_NODE, NodeLinkFrame.newBuilder()
-                        .setPlayerLeave(PlayerLeave.newBuilder().setSessionId(sessionId()).setPlayerId(PLAYER))
+                        .setPlayerLeave(PlayerLeave.newBuilder().setSessionId(sessionId()).setPlayerId(PLAYER)
+                                .setReason(com.game.api.proto.ExitGameReason.EXIT_GAME_REASON_DISCONNECTED))
                         .build()));
         assertThat(sceneTransfers("invalid")).isEqualTo(1);
         assertThat(disconnects("transfer_failed")).isEqualTo(1);

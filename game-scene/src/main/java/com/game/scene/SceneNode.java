@@ -642,7 +642,8 @@ public class SceneNode implements SmartLifecycle {
         }
         PetFeature pets = new PetFeature(petService, registry, textGuard, guardPool, logic);
         com.game.scene.appearance.AppearanceService appearanceService = appearanceTables == null ? null
-                : new com.game.scene.appearance.AppearanceService(appearanceTables, bags, SceneClock.SYSTEM, registry);
+                : new com.game.scene.appearance.AppearanceService(appearanceTables, bags, SceneClock.SYSTEM, registry)
+                        .withCurrency(currency);
         com.game.scene.rename.PlayerRenameService renameService = renameTables == null ? null
                 : new com.game.scene.rename.PlayerRenameService(renameTables, bags, SceneClock.SYSTEM, registry,
                         textGuard, guardPool, logic);
@@ -890,7 +891,8 @@ public class SceneNode implements SmartLifecycle {
             features.add(new com.game.scene.rename.PlayerRenameFeature(renameService));
         }
         if (afkPassService != null) {
-            features.add(new com.game.scene.afkpass.AfkPassFeature(afkPassService, attributes, registry));
+            afkPassService.withBags(bags);
+            features.add(new com.game.scene.afkpass.AfkPassFeature(afkPassService, attributes, registry, bagFeature));
         }
         if (mysteryMerchantService != null) {
             features.add(new com.game.scene.merchant.MysteryMerchantFeature(mysteryMerchantService, bagFeature));
@@ -1052,7 +1054,7 @@ public class SceneNode implements SmartLifecycle {
         // 归属：接管请求（login → 全部 scene）与续约。都要在接受链路之前就绪：进场的玩家一上来就需要续约、可被接管。
         takeoverSubscriber = new OwnerTakeoverSubscriber(
                 redis.getTopic(redisKeys.ownerTakeoverTopic(), ByteArrayCodec.INSTANCE),
-                (playerId, epoch) -> postToLogic(() -> sceneWorld.onTakeoverRequested(playerId, epoch)));
+                (playerId, epoch, keepHeld) -> postToLogic(() -> sceneWorld.onTakeoverRequested(playerId, epoch, keepHeld)));
         takeoverSubscriber.start();
         leaseRenewer = new OwnerLeaseRenewer(() -> callOnLogic(sceneWorld::ownedPlayers), playerStore, storageExecutor,
                 lost -> postToLogic(() -> sceneWorld.onOwnershipLost(lost)));
@@ -1079,6 +1081,8 @@ public class SceneNode implements SmartLifecycle {
                 props.advertiseHost(), settings.assetRpcPort());
         assetRpc = rpc;
 
+        String deploymentBuildId = com.game.discovery.BuildGenerationSelector.composeBuildId(
+                System.getenv("GAME_DEPLOYMENT_BUILD_ID"), System.getenv("GAME_WORKLOAD_REVISION"));
         SceneNodeInfo info = SceneNodeInfo.newBuilder()
                 .setZoneId(zoneId)
                 .setNodeId(nodeId)
@@ -1088,6 +1092,7 @@ public class SceneNode implements SmartLifecycle {
                 .setRpcHost(props.advertiseHost())
                 .setRpcPort(rpc.port())
                 .setInboxConsumerEnabled(inbox.consumerEnabled())
+                .setDeploymentBuildId(deploymentBuildId)
                 .build();
         publisher = new SceneDirectoryPublisher(new NodeDirectory<>(redis, redisKeys, NodeTypes.SCENE, SceneNodeInfo.parser()), info,
                 () -> callOnLogic(() -> {

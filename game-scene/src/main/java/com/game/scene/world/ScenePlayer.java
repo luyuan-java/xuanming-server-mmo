@@ -167,6 +167,10 @@ public final class ScenePlayer {
     private ConnectionLostHold.State connectionLostHold;
     /** 未成年人防沉迷可玩截止时刻（Unix 毫秒，0 = 不限）；由 login 进场带入，封顶断线保留与月卡离线托管。 */
     private long minorPlayDeadlineMs;
+    /** 本次登录的登录代次（跨场景交接与断线保留期间保持，用于区分同 sessionId 的新旧登录）。 */
+    private long loginGeneration;
+    /** true = 以服务端托管落点无会话进场。 */
+    private boolean hostedPlacement;
     /** 账号级阶段一可交易 60 份配额异步同步运行态（逻辑线程内存态，不持久化）。 */
     private boolean accountStage1TradableLoaded;
     private boolean accountStage1TradableSyncInFlight;
@@ -974,6 +978,22 @@ public final class ScenePlayer {
 
     void setMinorPlayDeadlineMs(long minorPlayDeadlineMs) {
         this.minorPlayDeadlineMs = Math.max(0L, minorPlayDeadlineMs);
+    }
+
+    public long loginGeneration() {
+        return loginGeneration;
+    }
+
+    void setLoginGeneration(long loginGeneration) {
+        this.loginGeneration = loginGeneration;
+    }
+
+    public boolean hostedPlacement() {
+        return hostedPlacement;
+    }
+
+    void setHostedPlacement(boolean hostedPlacement) {
+        this.hostedPlacement = hostedPlacement;
     }
 
     /**

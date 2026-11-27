@@ -29,4 +29,12 @@ enum appearance_error {
 
   kAppearanceNotOwned = 33009;
 
+  kAppearanceSeriesBundleUnavailable = 33010;
+
+  kAppearanceSeriesAlreadyCompleted = 33011;
+
+  kAppearanceSeriesBundlePriceChanged = 33012;
+
+  kAppearanceSeriesBundleCurrencyNotEnough = 33013;
+
 };

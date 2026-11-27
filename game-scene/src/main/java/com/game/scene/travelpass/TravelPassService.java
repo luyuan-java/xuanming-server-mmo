@@ -17,8 +17,11 @@ import com.game.proto.PlayerActivityRewardItem;
 import com.game.proto.PlayerActivityRewardType;
 import com.game.proto.PlayerActivityStatus;
 import com.game.proto.PlayerAppearanceInfo;
+import com.game.proto.SelectActiveTravelPassRequest;
+import com.game.proto.SelectActiveTravelPassResponse;
 import com.game.proto.SpiritShopInfo;
 import com.game.proto.SpiritShopLimitGroupView;
+import com.game.proto.TravelPassCatalogEntry;
 import com.game.proto.TravelPassSnapshot;
 import com.game.proto.TravelPassTierView;
 import com.game.proto.UnlockTravelPassPremiumRequest;
@@ -178,7 +181,7 @@ public final class TravelPassService {
 
         ResolvedSeason season = tables.season(req.getPassId());
         if (season == null || season.enabled() == 0
-                || !TravelPassTables.isWindowOpen(season.startsAtMs(), season.endsAtMs(), nowMs)) {
+                || (!season.archived() && !TravelPassTables.isWindowOpen(season.startsAtMs(), season.endsAtMs(), nowMs))) {
             return rejectUnlock(NOT_OPEN);
         }
         if (req.getExpectedCurrencyType() != season.premiumCurrencyType()
@@ -488,7 +491,87 @@ public final class TravelPassService {
                 .build();
     }
 
-    /** 战斗结算原子推进游历点（严格过滤逃跑/挂机/归元演武隔离局；已解锁典藏历史期未满点继续自动涨点）。 */
+    /** 591 SelectActiveTravelPass：切换永不绝版书架的当前在研手记（仅 1 册累计游历点，零消耗随时切换）。 */
+    public SelectActiveTravelPassResponse selectActivePass(SceneWorld world, ScenePlayer player,
+                                                           SelectActiveTravelPassRequest req, long nowMs) {
+        int passId = req.getPassId();
+        if (passId == 0 || !req.getUnknownFields().asMap().isEmpty()) {
+            return SelectActiveTravelPassResponse.newBuilder().setErrorMessage(tip(INVALID_PARAMETER)).build();
+        }
+        if (player.frozen()) {
+            return SelectActiveTravelPassResponse.newBuilder().setErrorMessage(tip(FROZEN)).build();
+        }
+        if (player.inBattle()) {
+            metrics.battleGateReject(SceneMetrics.BattleGate.TRAVEL_PASS);
+            return SelectActiveTravelPassResponse.newBuilder().setErrorMessage(tip(IN_BATTLE)).build();
+        }
+        PlayerTravelPass comp = player.travelPass();
+        if (!comp.isValid()) {
+            return SelectActiveTravelPassResponse.newBuilder().setErrorMessage(tip(UNAVAILABLE)).build();
+        }
+        ResolvedSeason season = tables.season(passId);
+        SeasonProgress prog = comp.season(passId);
+        boolean unlocked = prog != null && prog.premiumUnlocked();
+        if (season == null || !isSeasonOpenForPlayer(season, nowMs, unlocked)) {
+            return SelectActiveTravelPassResponse.newBuilder().setErrorMessage(tip(NOT_OPEN)).build();
+        }
+        if (comp.activePassId() != passId) {
+            comp.setActivePassId(passId);
+            comp.bumpRevision();
+            if (world != null) {
+                world.requestKeyProgressSave(player);
+            }
+        }
+        return SelectActiveTravelPassResponse.newBuilder()
+                .setErrorMessage(tip(OK))
+                .setSnapshot(fillSnapshot(player, nowMs, comp, season))
+                .build();
+    }
+
+    private static boolean isSeasonOpenForPlayer(ResolvedSeason season, long nowMs, boolean unlocked) {
+        if (season.enabled() == 0) {
+            return unlocked;
+        }
+        return unlocked || season.archived() || TravelPassTables.isWindowOpen(season.startsAtMs(), season.endsAtMs(), nowMs);
+    }
+
+    private ResolvedSeason resolveActiveSeason(PlayerTravelPass comp, long nowMs) {
+        List<ResolvedSeason> enabled = tables.enabledSeasons();
+        if (enabled.isEmpty()) {
+            return null;
+        }
+        int chosenId = comp.activePassId();
+        if (chosenId != 0) {
+            for (ResolvedSeason s : enabled) {
+                if (s.id() == chosenId) {
+                    SeasonProgress p = comp.season(s.id());
+                    boolean unlocked = p != null && p.premiumUnlocked();
+                    if (isSeasonOpenForPlayer(s, nowMs, unlocked)) {
+                        return s;
+                    }
+                    break;
+                }
+            }
+        }
+        for (ResolvedSeason s : enabled) {
+            SeasonProgress p = comp.season(s.id());
+            int pts = p == null ? 0 : Math.min(p.progressPoints(), s.maxPoints());
+            boolean unlocked = p != null && p.premiumUnlocked();
+            if (isSeasonOpenForPlayer(s, nowMs, unlocked) && Integer.compareUnsigned(pts, s.maxPoints()) < 0) {
+                return s;
+            }
+        }
+        for (ResolvedSeason s : enabled) {
+            SeasonProgress p = comp.season(s.id());
+            boolean unlocked = p != null && p.premiumUnlocked();
+            if (isSeasonOpenForPlayer(s, nowMs, unlocked)) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    /** 战斗结算原子推进游历点（M-1 单册在研防多期同时吃满；满档自动切下一未满册）。 */
     public boolean creditBattlePoints(ScenePlayer player, BattleSettlementData settlement, long nowMs) {
         if (!isEligibleBattle(settlement)) {
             return false;
@@ -497,45 +580,41 @@ public final class TravelPassService {
         if (!comp.isValid()) {
             return false;
         }
-        Set<Integer> eligiblePassIds = new TreeSet<>(Integer::compareUnsigned);
-        for (ResolvedSeason s : tables.enabledSeasons()) {
-            if (TravelPassTables.isWindowOpen(s.startsAtMs(), s.endsAtMs(), nowMs)) {
-                eligiblePassIds.add(s.id());
+        ResolvedSeason active = resolveActiveSeason(comp, nowMs);
+        if (active == null) {
+            return false;
+        }
+        int gain = computeBattlePoints(active, settlement);
+        if (gain <= 0) {
+            return false;
+        }
+        SeasonProgress prog = comp.findOrAddSeason(active.id());
+        if (prog == null) {
+            return false;
+        }
+        int before = Math.min(prog.progressPoints(), active.maxPoints());
+        if (before >= active.maxPoints()) {
+            return false;
+        }
+        int after = before + Math.min(gain, active.maxPoints() - before);
+        prog.setProgressPoints(after);
+        prog.setLastUpdatedAtMs(nowMs);
+        if (after >= active.maxPoints()) {
+            for (ResolvedSeason nxt : tables.enabledSeasons()) {
+                if (nxt.id() == active.id()) {
+                    continue;
+                }
+                SeasonProgress np = comp.season(nxt.id());
+                int nPts = np == null ? 0 : Math.min(np.progressPoints(), nxt.maxPoints());
+                boolean nUnlocked = np != null && np.premiumUnlocked();
+                if (isSeasonOpenForPlayer(nxt, nowMs, nUnlocked) && Integer.compareUnsigned(nPts, nxt.maxPoints()) < 0) {
+                    comp.setActivePassId(nxt.id());
+                    break;
+                }
             }
         }
-        for (SeasonProgress prog : comp.seasons()) {
-            if (prog.premiumUnlocked()) {
-                eligiblePassIds.add(prog.passId());
-            }
-        }
-
-        boolean increased = false;
-        for (int passId : eligiblePassIds) {
-            ResolvedSeason season = tables.season(passId);
-            if (season == null) {
-                continue;
-            }
-            int gain = computeBattlePoints(season, settlement);
-            if (gain <= 0) {
-                continue;
-            }
-            SeasonProgress prog = comp.findOrAddSeason(passId);
-            if (prog == null) {
-                continue;
-            }
-            int before = Math.min(prog.progressPoints(), season.maxPoints());
-            if (before >= season.maxPoints()) {
-                continue;
-            }
-            int added = Math.min(gain, season.maxPoints() - before);
-            prog.setProgressPoints(before + added);
-            prog.setLastUpdatedAtMs(nowMs);
-            increased = true;
-        }
-        if (increased) {
-            comp.bumpRevision();
-        }
-        return increased;
+        comp.bumpRevision();
+        return true;
     }
 
     public static boolean isEligibleBattle(BattleSettlementData settlement) {
@@ -602,7 +681,13 @@ public final class TravelPassService {
         if (player.travelPass().isValid()) {
             TravelPassSnapshot snap = buildSnapshot(player, nowMs, 0);
             if (snap.getAvailable()) {
-                int claimableTotal = snap.getClaimableFreeCount() + snap.getClaimablePremiumCount();
+                int bookshelfClaimable = 0;
+                for (TravelPassCatalogEntry b : snap.getBookshelfList()) {
+                    bookshelfClaimable += b.getClaimableCount();
+                }
+                int claimableTotal = bookshelfClaimable > 0
+                        ? bookshelfClaimable
+                        : (snap.getClaimableFreeCount() + snap.getClaimablePremiumCount());
                 String desc = claimableTotal > 0
                         ? "有 " + claimableTotal + " 档游历好礼待领取 · 免费轨可领，典藏轨可先玩满再补票"
                         : snap.getPremiumUnlocked()
@@ -720,17 +805,9 @@ public final class TravelPassService {
         if (requestedPassId != 0) {
             return tables.season(requestedPassId);
         }
-        ResolvedSeason bestOpen = null;
-        for (ResolvedSeason s : tables.enabledSeasons()) {
-            if (!TravelPassTables.isWindowOpen(s.startsAtMs(), s.endsAtMs(), nowMs)) {
-                continue;
-            }
-            if (bestOpen == null || Integer.compareUnsigned(s.id(), bestOpen.id()) > 0) {
-                bestOpen = s;
-            }
-        }
-        if (bestOpen != null) {
-            return bestOpen;
+        ResolvedSeason active = resolveActiveSeason(comp, nowMs);
+        if (active != null) {
+            return active;
         }
         ResolvedSeason bestCarryover = null;
         for (SeasonProgress prog : comp.seasons()) {
@@ -750,20 +827,28 @@ public final class TravelPassService {
         return bestCarryover;
     }
 
-    private static boolean hasUnclaimedReward(ResolvedSeason season, SeasonProgress progress) {
+    private static int countClaimable(ResolvedSeason season, SeasonProgress progress) {
+        if (progress == null) {
+            return 0;
+        }
+        int count = 0;
         for (ResolvedTier tier : season.tiers()) {
             if (Integer.compareUnsigned(progress.progressPoints(), tier.requiredPoints()) < 0) {
                 continue;
             }
             if (tier.hasFreeReward() && !PlayerTravelPass.isTierClaimed(progress.freeClaimedMask(), tier.tierIndex())) {
-                return true;
+                count++;
             }
             if (progress.premiumUnlocked() && tier.hasPremiumReward()
                     && !PlayerTravelPass.isTierClaimed(progress.premiumClaimedMask(), tier.tierIndex())) {
-                return true;
+                count++;
             }
         }
-        return false;
+        return count;
+    }
+
+    private static boolean hasUnclaimedReward(ResolvedSeason season, SeasonProgress progress) {
+        return countClaimable(season, progress) > 0;
     }
 
     private TravelPassSnapshot fillSnapshot(ScenePlayer player, long nowMs, PlayerTravelPass comp, ResolvedSeason season) {
@@ -773,7 +858,9 @@ public final class TravelPassService {
         long freeMask = progress == null ? 0L : progress.freeClaimedMask();
         long premiumMask = progress == null ? 0L : progress.premiumClaimedMask();
         boolean windowOpen = season.enabled() != 0
-                && TravelPassTables.isWindowOpen(season.startsAtMs(), season.endsAtMs(), nowMs);
+                && (season.archived() || TravelPassTables.isWindowOpen(season.startsAtMs(), season.endsAtMs(), nowMs));
+        ResolvedSeason activeSeason = resolveActiveSeason(comp, nowMs);
+        int activePassId = activeSeason == null ? 0 : activeSeason.id();
 
         TravelPassSnapshot.Builder out = TravelPassSnapshot.newBuilder()
                 .setAvailable(true)
@@ -799,7 +886,27 @@ public final class TravelPassService {
                 .setPremiumCurrencyType(season.premiumCurrencyType())
                 .setPremiumPrice(season.premiumPrice())
                 .setDiamondBalance(player.wallet().balance(Wallet.DIAMOND))
-                .setBindDiamondBalance(player.wallet().balance(Wallet.BOUND_DIAMOND));
+                .setBindDiamondBalance(player.wallet().balance(Wallet.BOUND_DIAMOND))
+                .setActivePassId(activePassId);
+        for (ResolvedSeason shelf : tables.enabledSeasons()) {
+            SeasonProgress sp = comp.season(shelf.id());
+            boolean sUnlocked = sp != null && sp.premiumUnlocked();
+            if (!isSeasonOpenForPlayer(shelf, nowMs, sUnlocked)) {
+                continue;
+            }
+            out.addBookshelf(TravelPassCatalogEntry.newBuilder()
+                    .setPassId(shelf.id())
+                    .setName(shelf.name())
+                    .setSortOrder(shelf.sortOrder())
+                    .setIsArchived(shelf.archived())
+                    .setIsActive(shelf.id() == activePassId)
+                    .setProgressPoints(sp == null ? 0 : Math.min(sp.progressPoints(), shelf.maxPoints()))
+                    .setMaxPoints(shelf.maxPoints())
+                    .setPremiumUnlocked(sUnlocked)
+                    .setClaimableCount(countClaimable(shelf, sp))
+                    .setIconKey(shelf.iconKey())
+                    .setBannerAssetKey(shelf.bannerAssetKey()));
+        }
 
         int claimableFree = 0;
         int claimablePremium = 0;

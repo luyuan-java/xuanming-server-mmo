@@ -7,6 +7,7 @@ import com.game.scene.metrics.SceneMetrics;
 import com.game.scene.metrics.SceneMetrics.TeamFollowResult;
 import com.game.scene.metrics.SceneMetrics.TeleportReason;
 import com.game.scene.metrics.SceneMetrics.TeleportResult;
+import com.game.scene.world.ConnectionLostHold;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
 import java.util.ArrayList;
@@ -14,6 +15,7 @@ import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
@@ -47,6 +49,17 @@ public final class TeamFollowService implements TeamFollow {
         BattleLockProbe NONE = playerId -> CompletableFuture.completedFuture(false);
     }
 
+    /** 队长在本 zone 另一场景节点上的位置快照（供跨节点跟随与离线托管队员跨场景跟随）。 */
+    public record LeaderLocation(int zoneId, int sceneNodeId, long sceneId, int sceneConfigId) {
+    }
+
+    /** 跨节点读取队长所在位置（不得阻塞逻辑线程）。 */
+    @FunctionalInterface
+    public interface LeaderLocationReader {
+        CompletionStage<Optional<LeaderLocation>> readAsync(long leaderId);
+        LeaderLocationReader NONE = leaderId -> CompletableFuture.completedFuture(Optional.empty());
+    }
+
     private enum Mode { REFRESH_ONLY, FOLLOW_ONLY, FOLLOW_AND_FANOUT }
 
     /** 只由逻辑线程读写；等待队长补读时也保留令牌，新提示会使旧归队决定失效。 */
@@ -68,6 +81,8 @@ public final class TeamFollowService implements TeamFollow {
     private final Executor logic;
     private final SceneMetrics metrics;
     private final Map<ScenePlayer, ReadState> pending = new IdentityHashMap<>();
+    private LeaderLocationReader leaderLocations = LeaderLocationReader.NONE;
+    private int localZoneId;
     /** switchScene 同步触发的进场只能跟随，不能重新扇出。 */
     private boolean following;
 
@@ -80,6 +95,12 @@ public final class TeamFollowService implements TeamFollow {
         this.battleLocks = battleLocks;
         this.logic = logic;
         this.metrics = metrics;
+    }
+
+    public TeamFollowService withCrossNodeFollow(int localZoneId, LeaderLocationReader leaderLocations) {
+        this.localZoneId = localZoneId;
+        this.leaderLocations = leaderLocations == null ? LeaderLocationReader.NONE : leaderLocations;
+        return this;
     }
 
     @Override
@@ -243,8 +264,27 @@ public final class TeamFollowService implements TeamFollow {
         }
         ScenePlayer leader = world.playerById(leaderId);
         if (leader == null) {
-            metrics.teamFollow(TeamFollowResult.LEADER_NOT_ON_NODE);
-            return false;
+            if (leaderLocations == LeaderLocationReader.NONE) {
+                metrics.teamFollow(TeamFollowResult.LEADER_NOT_ON_NODE);
+                return false;
+            }
+            // 普通断线保留（未确认挂机月卡托管或临近到期）绝不换场景；只有在线或已确认托管的队员才跨节点跟随
+            if (!canChangeSceneForFollow(world, player)) {
+                metrics.teamFollow(TeamFollowResult.LEADER_NOT_ON_NODE);
+                return false;
+            }
+            try {
+                leaderLocations.readAsync(leaderId).toCompletableFuture()
+                        .orTimeout(5, TimeUnit.SECONDS)
+                        .whenComplete((locOpt, err) -> post(player.playerId(),
+                                () -> onCrossNodeLeaderLocation(world, player, state, leaderId, locOpt, err)));
+                return true;
+            } catch (RuntimeException error) {
+                log.warn("跨节点跟随读队长位置失败 player={} leader={}: {}",
+                        Long.toUnsignedString(player.playerId()), Long.toUnsignedString(leaderId), error.toString());
+                metrics.teamFollow(TeamFollowResult.LEADER_NOT_ON_NODE);
+                return false;
+            }
         }
         // 队长 PRECHECK / RESOLVING 尚未失去可跟随性；只检查已进入冻结的归属交接。
         if (leader.frozen()) {
@@ -294,6 +334,10 @@ public final class TeamFollowService implements TeamFollow {
             metrics.teamFollow(TeamFollowResult.LEADER_SCENE_DRAINING);
             return false;
         }
+        if (!canChangeSceneForFollow(world, player)) {
+            metrics.teamFollow(TeamFollowResult.SAME_SCENE);
+            return false;
+        }
         // 换场景会同步进入下一次检查；旧状态必须先退休，不能把新场景检查合进已完成的读取。
         finish(player, state, true);
         boolean outer = following;
@@ -305,6 +349,46 @@ public final class TeamFollowService implements TeamFollow {
         }
         metrics.teamFollow(TeamFollowResult.FOLLOWED);
         return false;
+    }
+
+    /** 只有在线玩家，或处于已确认挂机月卡托管（离到期还远）的离线托管角色允许跟随跨场景/跨节点；普通 25s 断线保留不换场景。 */
+    private static boolean canChangeSceneForFollow(SceneWorld world, ScenePlayer player) {
+        ConnectionLostHold.State hold = player.connectionLostHold();
+        if (hold == null) {
+            return true;
+        }
+        long nowMs = world.epochMillis();
+        long nowSec = Math.floorDiv(nowMs, 1000L);
+        return ConnectionLostHold.isHosting(hold.hostingStarted(), hold.afkPass(), hold.afkPassExpiresAtSec(),
+                nowSec, player.minorPlayDeadlineMs(), nowMs);
+    }
+
+    private void onCrossNodeLeaderLocation(SceneWorld world, ScenePlayer player, ReadState state, long leaderId,
+                                           Optional<LeaderLocation> locOpt, Throwable err) {
+        if (pending.get(player) != state) {
+            return;
+        }
+        finish(player, state, err == null);
+        if (!current(world, player, state) || world.switchInFlight(player) || player.inBattle()
+                || !canChangeSceneForFollow(world, player)) {
+            return;
+        }
+        if (err != null || locOpt == null || locOpt.isEmpty()) {
+            metrics.teamFollow(TeamFollowResult.LEADER_NOT_ON_NODE);
+            return;
+        }
+        LeaderLocation loc = locOpt.get();
+        // 跨 zone 仍不跟随
+        if (localZoneId != 0 && loc.zoneId() != 0 && loc.zoneId() != localZoneId) {
+            metrics.teamFollow(TeamFollowResult.LEADER_NOT_ON_NODE);
+            return;
+        }
+        if (loc.sceneNodeId() == 0 || loc.sceneId() == 0) {
+            metrics.teamFollow(TeamFollowResult.LEADER_NOT_ON_NODE);
+            return;
+        }
+        boolean initiated = world.followLeaderCrossNode(player, loc.sceneNodeId(), loc.sceneId(), loc.sceneConfigId());
+        metrics.teamFollow(initiated ? TeamFollowResult.FOLLOWED : TeamFollowResult.LEADER_NOT_ON_NODE);
     }
 
     static boolean shouldRegroup(double horizontalDistance, boolean mutuallyVisible) {

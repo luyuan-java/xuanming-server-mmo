@@ -28,4 +28,11 @@ public record NodeEvacuation(Cause cause, long sinceNanos, long deadlineNanos) {
     }
 
     public boolean expired(long now) { return cause != Cause.ADMIN && now - deadlineNanos >= 0; }
+
+    /** 自疏散时刻（停服/冲突计划排空预算过半时触发剩余副本或未赶上频道迁移的住户自疏散）。 */
+    public boolean halfBudgetReached(long now) {
+        if (cause == Cause.ADMIN) return false;
+        long total = deadlineNanos - sinceNanos;
+        return total > 0 && (now - sinceNanos) >= (total / 2L);
+    }
 }

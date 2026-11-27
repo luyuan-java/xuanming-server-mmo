@@ -64,10 +64,23 @@ public final class TeamFollowCoordinator {
         }
     }
 
+    /** 队长离开本节点导致队形解散后，原随从最多等待队长去留结论的时长：90 秒（对齐主仓）。 */
+    public static final long LEADER_OUTCOME_WAIT_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(90L);
+
+    private static final class PendingLeaderOutcome {
+        final Set<Long> followerIds = new HashSet<>();
+        long deadlineNanos;
+
+        PendingLeaderOutcome(long deadlineNanos) {
+            this.deadlineNanos = deadlineNanos;
+        }
+    }
+
     private final Map<Long, FormationEntry> formations = new HashMap<>();
     private final Map<Long, FollowerEntry> followers = new HashMap<>();
     private final Set<Long> followIntents = new HashSet<>();
     private final Map<Long, Integer> joinSeqs = new HashMap<>();
+    private final Map<Long, PendingLeaderOutcome> waitingForLeaderOutcome = new HashMap<>();
     private SkillService skills;
 
     public void attachSkills(SkillService skills) {
@@ -238,6 +251,47 @@ public final class TeamFollowCoordinator {
         joinSeqs.remove(id);
         detach(world, player, TeamFollowStopReason.TEAM_FOLLOW_STOP_REASON_LEAVING);
         dissolveFormation(world, id, TeamFollowStopReason.TEAM_FOLLOW_STOP_REASON_LEADER_GONE);
+        // 队长离开本节点：唤醒在等队长去留的原随从重跑跟随检查（跨节点跟过去）
+        notifyLeaderOutcome(world, id);
+    }
+
+    /** 队长去留有结论（离开本节点或跨节点交接作废/原地解冻）时，立即唤醒等待中的原随从重跑跟随检查。 */
+    public void notifyLeaderOutcome(SceneWorld world, long leaderId) {
+        PendingLeaderOutcome pending = waitingForLeaderOutcome.remove(leaderId);
+        if (pending == null || pending.followerIds.isEmpty()) {
+            return;
+        }
+        for (long followerId : pending.followerIds) {
+            ScenePlayer follower = world.playerById(followerId);
+            if (follower != null && followIntents.contains(followerId)) {
+                world.recheckTeamFollow(follower);
+            }
+        }
+    }
+
+    /** 检查等待队长去留是否到达 90 秒上限，到期唤醒原随从复查。 */
+    public void sweepLeaderOutcomeWaits(SceneWorld world, long nowNanos) {
+        if (waitingForLeaderOutcome.isEmpty()) {
+            return;
+        }
+        List<Long> expiredLeaders = null;
+        for (Map.Entry<Long, PendingLeaderOutcome> entry : waitingForLeaderOutcome.entrySet()) {
+            if (nowNanos - entry.getValue().deadlineNanos >= 0L) {
+                if (expiredLeaders == null) {
+                    expiredLeaders = new ArrayList<>();
+                }
+                expiredLeaders.add(entry.getKey());
+            }
+        }
+        if (expiredLeaders != null) {
+            for (long leaderId : expiredLeaders) {
+                notifyLeaderOutcome(world, leaderId);
+            }
+        }
+    }
+
+    public int waitingLeaderOutcomeCount() {
+        return waitingForLeaderOutcome.size();
     }
 
     /** 每逻辑帧调用（紧随 {@code integrate} 之后），推进所有活跃队形并回收空/失效队形。 */
@@ -519,16 +573,28 @@ public final class TeamFollowCoordinator {
         if (comp == null) {
             return;
         }
+        boolean waitLeaderOutcome = reason == TeamFollowStopReason.TEAM_FOLLOW_STOP_REASON_LEADER_GONE;
+        PendingLeaderOutcome waiter = null;
+        if (waitLeaderOutcome) {
+            waiter = waitingForLeaderOutcome.computeIfAbsent(leaderId,
+                    ignored -> new PendingLeaderOutcome(world.nanoTime() + LEADER_OUTCOME_WAIT_NANOS));
+        }
         for (TeamFollowFormation.Member m : new ArrayList<>(comp.formation.members())) {
             ScenePlayer f = world.playerById(m.playerId);
             FollowerEntry d = followers.get(m.playerId);
             if (d != null && d.leaderPlayerId == leaderId) {
+                if (waiter != null && f != null && followIntents.contains(m.playerId)) {
+                    waiter.followerIds.add(m.playerId);
+                }
                 if (f != null) {
                     releaseFollower(world, f, reason);
                 } else {
                     followers.remove(m.playerId);
                 }
             }
+        }
+        if (waiter != null && waiter.followerIds.isEmpty()) {
+            waitingForLeaderOutcome.remove(leaderId, waiter);
         }
     }
 

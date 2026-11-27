@@ -149,12 +149,29 @@ class WorldLeaderLockTest {
     }
 
     @Test
-    void 竞选出错原样抛出_持有状态不变() {
+    void 竞选出错原样抛出_持有状态不变_且尽力条件清理孤儿锁() {
         store.acquire.add(() -> {
             throw new IllegalStateException("Redis 断开");
         });
+        store.release.add(() -> true);
         assertThatThrownBy(lock::tryAcquire).isInstanceOf(IllegalStateException.class);
         assertThat(lock.isHeld()).isFalse();
+        assertThat(store.released).as("R8: 拿锁结果未知时按同令牌做条件删除，不留孤儿锁")
+                .containsExactly("7/inst:tok");
+
+        // 清理阶段本身也异常时不得遮蔽原异常
+        store.acquire.add(() -> {
+            throw new IllegalStateException("Redis 超时");
+        });
+        store.release.add(() -> {
+            throw new IllegalStateException("清理也断");
+        });
+        assertThatThrownBy(lock::tryAcquire).isInstanceOf(IllegalStateException.class)
+                .hasMessage("Redis 超时");
+        assertThat(lock.isHeld()).isFalse();
+        assertThat(RedissonWorldChannelStore.LEADER_TRY).contains("holder == ARGV[1]");
+        assertThat(RedissonWorldChannelStore.WRITE).contains("redis.call('GET', KEYS[1]) ~= ARGV[1]")
+                .contains("(redis.call('GET', KEYS[5]) or '0') ~= ARGV[2]");
     }
 
     @Test

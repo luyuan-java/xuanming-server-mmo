@@ -85,9 +85,13 @@ final class PlayerSwitch {
     private boolean clientChannelPick;
     private int channelCooldownSeconds;
     private boolean channelCooldownStarted;
+    /** true = 服务端自动发起（如跨节点组队跟随），失败时只记日志、绝不向客户端推错提示。 */
+    private boolean silentOnFailure;
 
     void clientChannelPick(boolean value) { clientChannelPick = value; }
     boolean clientChannelPick() { return clientChannelPick; }
+    void silentOnFailure(boolean value) { silentOnFailure = value; }
+    boolean silentOnFailure() { return silentOnFailure; }
     void channelCooldownSeconds(int seconds) { channelCooldownSeconds = clientChannelPick ? seconds : 0; }
     int channelCooldownSeconds() { return channelCooldownSeconds; }
     boolean channelCooldownStarted() { return channelCooldownStarted; }
@@ -104,6 +108,14 @@ final class PlayerSwitch {
     static PlayerSwitch evacuate(long token, int wantConfigId, long resolveDeadlineNanos) {
         return new PlayerSwitch(token, SwitchReason.EVACUATE, Purpose.REMOTE_SWITCH, SwitchPhase.RESOLVING,
                 0, wantConfigId, 0, null, resolveDeadlineNanos);
+    }
+
+    /** 服务端自动跨节点组队跟随（走同条交接链，失败静默只记日志）。 */
+    static PlayerSwitch teamFollow(long token, long wantSceneId, int wantConfigId, long resolveDeadlineNanos) {
+        PlayerSwitch sw = new PlayerSwitch(token, SwitchReason.PLAYER, Purpose.REMOTE_SWITCH, SwitchPhase.RESOLVING,
+                wantSceneId, wantConfigId, 0, null, resolveDeadlineNanos);
+        sw.silentOnFailure(true);
+        return sw;
     }
 
     private PlayerSwitch(long token, SwitchReason reason, Purpose purpose, SwitchPhase phase, long wantSceneId, int wantConfigId,

@@ -25,17 +25,34 @@ public final class RedisOwnerTakeovers implements OwnerTakeovers {
 
     @Override
     public void request(long playerId, long heldEpoch) {
-        byte[] message = OwnerTakeover.newBuilder().setPlayerId(playerId).setOwnerEpoch(heldEpoch).build().toByteArray();
+        publish(playerId, heldEpoch, false);
+    }
+
+    @Override
+    public void requestKeepHeld(long playerId, long heldEpoch) {
+        publish(playerId, heldEpoch, true);
+    }
+
+    private void publish(long playerId, long heldEpoch, boolean keepHeld) {
+        byte[] message = OwnerTakeover.newBuilder()
+                .setPlayerId(playerId)
+                .setOwnerEpoch(heldEpoch)
+                .setKeepHeld(keepHeld)
+                .build()
+                .toByteArray();
         try {
             topic.publishAsync(message).whenComplete((receivers, error) -> {
                 if (error != null) {
-                    log.warn("发布归属接管请求失败（等租约过期兜底） player={} epoch={}: {}", playerId, heldEpoch, error.toString());
+                    log.warn("发布归属接管请求失败（等租约过期兜底） player={} epoch={} keep_held={}: {}",
+                            playerId, heldEpoch, keepHeld, error.toString());
                 } else {
-                    log.debug("已发布归属接管请求 player={} epoch={} 订阅者={}", playerId, heldEpoch, receivers);
+                    log.debug("已发布归属接管请求 player={} epoch={} keep_held={} 订阅者={}",
+                            playerId, heldEpoch, keepHeld, receivers);
                 }
             });
         } catch (RuntimeException e) {
-            log.warn("发布归属接管请求失败（等租约过期兜底） player={} epoch={}: {}", playerId, heldEpoch, e.toString());
+            log.warn("发布归属接管请求失败（等租约过期兜底） player={} epoch={} keep_held={}: {}",
+                    playerId, heldEpoch, keepHeld, e.toString());
         }
     }
 }

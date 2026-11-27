@@ -14,4 +14,11 @@ public interface OwnerTakeovers {
      * @param heldEpoch 夺权时读到的当前持有 epoch：只有持有正是这个 epoch 的实例才让出
      */
     void request(long playerId, long heldEpoch);
+
+    /**
+     * 托管归位探测（对齐主仓 {@code keep_held = true}）：仅在节点不持有该存活实体时让出/补发凭证，若仍持有存活实体绝不打扰也不踢线。
+     */
+    default void requestKeepHeld(long playerId, long heldEpoch) {
+        request(playerId, heldEpoch);
+    }
 }

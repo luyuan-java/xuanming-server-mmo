@@ -63,8 +63,9 @@ public class SceneManagerConfiguration {
     }
 
     @Bean
-    public SceneAssigner sceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector channelSelector) {
-        return new SceneAssigner(source, worldConfigs, channelSelector);
+    public SceneAssigner sceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector channelSelector,
+                                       io.micrometer.core.instrument.MeterRegistry meterRegistry) {
+        return new SceneAssigner(source, worldConfigs, channelSelector, null, meterRegistry);
     }
 
     /** 在线换图选跨节点目标（批次 5.2，scene-handoff-spec §5.4）：与进游戏分配共用目录、世界地图集合与选频道 + 软预占。 */

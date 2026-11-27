@@ -62,6 +62,11 @@ class RedisPropertiesTest {
         assertThat(server.getRetryAttempts()).isEqualTo(2);
         assertThat(server.getRetryDelay().calcDelay(0)).isEqualTo(Duration.ofMillis(50));
         assertThat(server.getRetryDelay().calcDelay(5)).as("固定间隔，不指数退避").isEqualTo(Duration.ofMillis(50));
+        assertThat(server.getReconnectionDelay())
+                .as("R18: 重连退避必须带抖动，避免 Redis 重启时全体网关与服务同刻惊群回连")
+                .isInstanceOf(org.redisson.config.EqualJitterDelay.class);
+        Duration reconnect0 = server.getReconnectionDelay().calcDelay(0);
+        assertThat(reconnect0).isBetween(Duration.ofMillis(500), Duration.ofSeconds(4));
         assertThat(props.worstCaseCommandMillis()).isEqualTo(3 * 1200 + 2 * 50);
     }
 

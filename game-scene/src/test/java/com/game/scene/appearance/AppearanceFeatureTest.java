@@ -557,4 +557,89 @@ class AppearanceFeatureTest {
         assertThat(vfxReplay.getReplayed()).isTrue();
         assertThat(player.bags().bag(com.game.scene.player.BagType.INVENTORY).total(3412)).isEqualTo(1L);
     }
+
+    @Test
+    void 季享卡直赠与每周衣柜试穿_Steam式系列85折补齐包与严禁绑石() throws Exception {
+        com.game.scene.battle.BattleFixture f = new com.game.scene.battle.BattleFixture();
+        ScenePlayer player = f.enter(11, 1088);
+        assertThat(f.currency.add(player, com.game.scene.player.Wallet.BOUND_DIAMOND, 999L,
+                com.game.scene.audit.AssetAudit.Reason.GM_GRANT).ok()).isTrue();
+        assertThat(f.currency.add(player, com.game.scene.player.Wallet.DIAMOND, 1000L,
+                com.game.scene.audit.AssetAudit.Reason.GM_GRANT).ok()).isTrue();
+
+        int getAfkId = Contracts.REGISTRY.requireId(com.game.scene.afkpass.AfkPassFeature.SERVICE, "GetAfkPass");
+        int buyAfkId = Contracts.REGISTRY.requireId(com.game.scene.afkpass.AfkPassFeature.SERVICE, "BuyAfkPass");
+        long r1 = f.request(player, getAfkId, com.game.proto.GetAfkPassRequest.getDefaultInstance());
+        var afkBefore = com.game.proto.GetAfkPassResponse.parseFrom(
+                f.pushes(player, getAfkId).stream().filter(m -> m.getId() == r1).findFirst().orElseThrow().getSerializedMessage());
+        assertThat(afkBefore.getInfo().getPlansCount()).isEqualTo(2);
+        assertThat(afkBefore.getInfo().getMarketListingLimit()).isEqualTo(10);
+        assertThat(afkBefore.getInfo().getStallDurationHours()).isEqualTo(48);
+
+        // 买 90 天季享卡 (plan_id=2, 780 真实灵石): 直赠 3 张绑定 3405 + frame_lightcard_season_s1
+        long r2 = f.request(player, buyAfkId, com.game.proto.BuyAfkPassRequest.newBuilder()
+                .setClientRequestId(9301L).setPlanId(2).setExpectedCurrencyType(com.game.scene.player.Wallet.DIAMOND)
+                .setExpectedPrice(780L).build());
+        var afkBought = com.game.proto.BuyAfkPassResponse.parseFrom(
+                f.pushes(player, buyAfkId).stream().filter(m -> m.getId() == r2).findFirst().orElseThrow().getSerializedMessage());
+        assertThat(afkBought.getErrorMessage().getId()).isZero();
+        assertThat(afkBought.getInfo().getMarketListingLimit()).isEqualTo(20);
+        assertThat(afkBought.getInfo().getStallDurationHours()).isEqualTo(96);
+        assertThat(afkBought.getInfo().getWeeklyFreeTrialQuota()).isEqualTo(3);
+        assertThat(player.wallet().balance(com.game.scene.player.Wallet.DIAMOND)).isEqualTo(220L);
+        assertThat(player.bags().bag(com.game.scene.player.BagType.INVENTORY).total(3405)).isEqualTo(3L);
+        assertThat(player.travelPass().hasCosmeticKey("frame_lightcard_season_s1")).isTrue();
+
+        // 月卡生效期间：同一角色试用完一次取消后，可用每周 3 次月卡随心试穿再次试穿
+        int trialId = Contracts.REGISTRY.requireId(SERVICE, "StartAppearanceTrial");
+        int cancelId = Contracts.REGISTRY.requireId(SERVICE, "CancelAppearanceTrial");
+        long t1 = f.request(player, trialId, StartAppearanceTrialRequest.newBuilder()
+                .setClientRequestId(9311L).setAppearanceId("01_ice_sword_girl").build());
+        assertThat(StartAppearanceTrialResponse.parseFrom(
+                f.pushes(player, trialId).stream().filter(m -> m.getId() == t1).findFirst().orElseThrow().getSerializedMessage())
+                .getErrorMessage().getId()).isZero();
+        f.request(player, cancelId, CancelAppearanceTrialRequest.getDefaultInstance());
+        long t2 = f.request(player, trialId, StartAppearanceTrialRequest.newBuilder()
+                .setClientRequestId(9312L).setAppearanceId("01_ice_sword_girl").build());
+        var secondTrial = StartAppearanceTrialResponse.parseFrom(
+                f.pushes(player, trialId).stream().filter(m -> m.getId() == t2).findFirst().orElseThrow().getSerializedMessage());
+        assertThat(secondTrial.getErrorMessage().getId()).isZero();
+        assertThat(secondTrial.getInfo().getLightCardTrialUsed()).isEqualTo(1);
+        assertThat(secondTrial.getInfo().getLightCardTrialQuota()).isEqualTo(3);
+
+        // Steam 式系列补齐包 (series_id=1，先查出权威缺口与 8.5 折价)
+        int infoId = Contracts.REGISTRY.requireId(SERVICE, "GetAppearanceInfo");
+        long i1 = f.request(player, infoId, GetAppearanceInfoRequest.getDefaultInstance());
+        var appInfo = GetAppearanceInfoResponse.parseFrom(
+                f.pushes(player, infoId).stream().filter(m -> m.getId() == i1).findFirst().orElseThrow().getSerializedMessage());
+        var s1 = appInfo.getInfo().getSeriesProgressList().stream()
+                .filter(sp -> sp.getSeriesId() == 1).findFirst().orElseThrow();
+        assertThat(s1.getMissingUnlockableCount()).isEqualTo(2);
+        assertThat(s1.getBundleDiscountDiamond()).isEqualTo(170L);
+
+        int bundleId = Contracts.REGISTRY.requireId(SERVICE, "BuyAppearanceSeriesBundle");
+        var bundleReq = com.game.proto.BuyAppearanceSeriesBundleRequest.newBuilder()
+                .setClientRequestId(9321L)
+                .setSeriesId(1)
+                .addAllExpectedMissingAppearanceIds(s1.getMissingAppearanceIdsList())
+                .setExpectedPriceDiamond(170L)
+                .build();
+        long b1 = f.request(player, bundleId, bundleReq);
+        var bundleResp = com.game.proto.BuyAppearanceSeriesBundleResponse.parseFrom(
+                f.pushes(player, bundleId).stream().filter(m -> m.getId() == b1).findFirst().orElseThrow().getSerializedMessage());
+        assertThat(bundleResp.getErrorMessage().getId()).isZero();
+        assertThat(bundleResp.getReplayed()).isFalse();
+        assertThat(bundleResp.getUnlockedCount()).isEqualTo(2);
+        assertThat(bundleResp.getSpentDiamond()).isEqualTo(170L);
+        assertThat(player.wallet().balance(com.game.scene.player.Wallet.DIAMOND)).isEqualTo(50L);
+        assertThat(player.wallet().balance(com.game.scene.player.Wallet.BOUND_DIAMOND)).isEqualTo(999L);
+
+        // 同键重放幂等
+        long b2 = f.request(player, bundleId, bundleReq);
+        var bundleReplay = com.game.proto.BuyAppearanceSeriesBundleResponse.parseFrom(
+                f.pushes(player, bundleId).stream().filter(m -> m.getId() == b2).findFirst().orElseThrow().getSerializedMessage());
+        assertThat(bundleReplay.getErrorMessage().getId()).isZero();
+        assertThat(bundleReplay.getReplayed()).isTrue();
+        assertThat(player.wallet().balance(com.game.scene.player.Wallet.DIAMOND)).isEqualTo(50L);
+    }
 }

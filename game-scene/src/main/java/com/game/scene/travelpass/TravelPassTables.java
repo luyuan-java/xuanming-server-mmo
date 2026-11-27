@@ -41,6 +41,8 @@ public final class TravelPassTables {
             int premiumCurrencyType,
             long premiumPrice,
             int configRevision,
+            int sortOrder,
+            boolean archived,
             List<ResolvedTier> tiers) {
     }
 
@@ -108,25 +110,7 @@ public final class TravelPassTables {
             }
         }
 
-        // 检查启用期次时间窗重叠（fail-closed：记录错误并将互相冲突的启用期次全部移出启用与索引表）
-        java.util.Set<Integer> overlappingIds = new java.util.HashSet<>();
-        for (int i = 0; i < enabled.size(); i++) {
-            for (int j = i + 1; j < enabled.size(); j++) {
-                ResolvedSeason a = enabled.get(i);
-                ResolvedSeason b = enabled.get(j);
-                if (windowsOverlap(a.startsAtMs(), a.endsAtMs(), b.startsAtMs(), b.endsAtMs())) {
-                    log.error("[TravelPass] overlapping enabled seasons excluded pass_a={} pass_b={}",
-                            Integer.toUnsignedString(a.id()), Integer.toUnsignedString(b.id()));
-                    overlappingIds.add(a.id());
-                    overlappingIds.add(b.id());
-                }
-            }
-        }
-        if (!overlappingIds.isEmpty()) {
-            enabled.removeIf(s -> overlappingIds.contains(s.id()));
-            overlappingIds.forEach(validSeasons::remove);
-        }
-
+        // 永不绝版书架制允许多个已启用期次并存，玩家每次仅选定 1 册在研累计游历点，不再拒绝时间窗重叠。
         for (TravelPassTierTable tier : tierRows) {
             if (!validSeasons.containsKey(tier.getPassId())) {
                 log.error("[TravelPass] TravelPassTier references unknown/invalid pass_id tier_id={} pass_id={}",
@@ -134,7 +118,7 @@ public final class TravelPassTables {
             }
         }
 
-        enabled.sort(Comparator.comparingInt(ResolvedSeason::id));
+        enabled.sort(Comparator.comparingInt(ResolvedSeason::sortOrder).thenComparingInt(ResolvedSeason::id));
         this.seasonsById = Collections.unmodifiableMap(validSeasons);
         this.enabledSeasons = List.copyOf(enabled);
     }
@@ -236,7 +220,9 @@ public final class TravelPassTables {
                 id, enabled, row.getName(), row.getDescription(), row.getIconKey(), row.getBannerAssetKey(),
                 startsAt, endsAt, row.getMaxPoints(), row.getPveWinPoints(),
                 row.getHardOrPvpWinPoints(), row.getPvpQualifiedOtherPoints(),
-                currencyType, price, row.getConfigRevision(), List.copyOf(resolvedTiers));
+                currencyType, price, row.getConfigRevision(),
+                row.getSortOrder(), row.getIsArchived() != 0,
+                List.copyOf(resolvedTiers));
     }
 
     private static ResolvedTier validateTier(TravelPassTierTable row, int maxPoints, Map<Integer, ItemTable> itemsById) {

@@ -19,9 +19,10 @@ import java.util.TreeSet;
  */
 public final class PlayerTravelPass {
 
-    public static final int MAX_SEASONS = 32;
+    public static final int MAX_SEASONS = 64;
     public static final int MAX_TIERS_PER_SEASON = 64;
     public static final int MAX_COSMETICS_PER_SEASON = 64;
+    public static final int MAX_BONUS_COSMETICS = 64;
     public static final int MAX_COSMETIC_KEY_LENGTH = 64;
 
     public static final int COSMETIC_SLOT_FRAME = 1;
@@ -156,6 +157,8 @@ public final class PlayerTravelPass {
     private String equippedFrameKey = "";
     private String equippedTitleKey = "";
     private long passRevision;
+    private int activePassId;
+    private final List<String> bonusCosmeticKeys = new ArrayList<>();
     private boolean valid = true;
     private PlayerTravelPassState rawInvalidState;
     private UnknownFieldSet unknownFields = UnknownFieldSet.getDefaultInstance();
@@ -199,11 +202,20 @@ public final class PlayerTravelPass {
         out.equippedFrameKey = state.getEquippedFrameKey();
         out.equippedTitleKey = state.getEquippedTitleKey();
         out.passRevision = state.getPassRevision();
+        out.activePassId = state.getActivePassId();
         out.unknownFields = state.getUnknownFields();
-        if (state.getSeasonsCount() > MAX_SEASONS) {
+        if (state.getSeasonsCount() > MAX_SEASONS || state.getBonusCosmeticKeysCount() > MAX_BONUS_COSMETICS) {
             out.valid = false;
             out.rawInvalidState = state;
             return out;
+        }
+        for (String key : state.getBonusCosmeticKeysList()) {
+            if (!isValidCosmeticKey(key) || out.bonusCosmeticKeys.contains(key)) {
+                out.valid = false;
+                out.rawInvalidState = state;
+                return out;
+            }
+            out.bonusCosmeticKeys.add(key);
         }
         for (TravelPassSeasonProgressState s : state.getSeasonsList()) {
             if (s.getPassId() == 0 || out.seasons.containsKey(s.getPassId())
@@ -244,6 +256,8 @@ public final class PlayerTravelPass {
         out.equippedFrameKey = equippedFrameKey;
         out.equippedTitleKey = equippedTitleKey;
         out.passRevision = passRevision;
+        out.activePassId = activePassId;
+        out.bonusCosmeticKeys.addAll(bonusCosmeticKeys);
         out.valid = valid;
         out.rawInvalidState = rawInvalidState;
         out.unknownFields = unknownFields;
@@ -258,6 +272,9 @@ public final class PlayerTravelPass {
         this.equippedFrameKey = candidate.equippedFrameKey;
         this.equippedTitleKey = candidate.equippedTitleKey;
         this.passRevision = candidate.passRevision;
+        this.activePassId = candidate.activePassId;
+        this.bonusCosmeticKeys.clear();
+        this.bonusCosmeticKeys.addAll(candidate.bonusCosmeticKeys);
         this.valid = candidate.valid;
         this.rawInvalidState = candidate.rawInvalidState;
         this.unknownFields = candidate.unknownFields;
@@ -268,8 +285,34 @@ public final class PlayerTravelPass {
     }
 
     public boolean isPristine() {
-        return valid && seasons.isEmpty() && equippedFrameKey.isEmpty() && equippedTitleKey.isEmpty()
+        return valid && seasons.isEmpty() && bonusCosmeticKeys.isEmpty() && activePassId == 0
+                && equippedFrameKey.isEmpty() && equippedTitleKey.isEmpty()
                 && passRevision == 0L && unknownFields.asMap().isEmpty();
+    }
+
+    public int activePassId() {
+        return activePassId;
+    }
+
+    public void setActivePassId(int activePassId) {
+        this.activePassId = activePassId;
+    }
+
+    public boolean addBonusCosmeticKey(String key) {
+        if (key == null || key.isEmpty()) {
+            return true;
+        }
+        if (!isValidCosmeticKey(key)) {
+            return false;
+        }
+        if (bonusCosmeticKeys.contains(key)) {
+            return true;
+        }
+        if (bonusCosmeticKeys.size() >= MAX_BONUS_COSMETICS) {
+            return false;
+        }
+        bonusCosmeticKeys.add(key);
+        return true;
     }
 
     public long passRevision() {
@@ -325,6 +368,9 @@ public final class PlayerTravelPass {
         if (key == null || key.isEmpty()) {
             return false;
         }
+        if (bonusCosmeticKeys.contains(key)) {
+            return true;
+        }
         for (SeasonProgress s : seasons.values()) {
             if (s.unlockedCosmeticKeys.contains(key)) {
                 return true;
@@ -334,7 +380,7 @@ public final class PlayerTravelPass {
     }
 
     public Set<String> allUnlockedCosmeticsSorted() {
-        Set<String> out = new TreeSet<>();
+        Set<String> out = new TreeSet<>(bonusCosmeticKeys);
         for (SeasonProgress s : seasons.values()) {
             out.addAll(s.unlockedCosmeticKeys);
         }
@@ -349,6 +395,8 @@ public final class PlayerTravelPass {
                 .setEquippedFrameKey(equippedFrameKey)
                 .setEquippedTitleKey(equippedTitleKey)
                 .setPassRevision(passRevision)
+                .setActivePassId(activePassId)
+                .addAllBonusCosmeticKeys(bonusCosmeticKeys)
                 .setUnknownFields(unknownFields);
         for (SeasonProgress s : seasons.values()) {
             b.addSeasons(s.toState());

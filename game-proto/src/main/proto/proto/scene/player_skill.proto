@@ -475,6 +475,8 @@ service SceneSkillClientPlayer {
   rpc BatchDismantleSkillBooks (BatchDismantleSkillBooksRequest) returns (BatchDismantleSkillBooksResponse);
   // 悬赏求书四条(560~563 PostSkillBookWantedOrder / CancelSkillBookWantedOrder / ListSkillBookWantedOrders /
   // FulfillSkillBookWantedOrder)2026-11-27 退役,改走 trade 求购单(ClientPlayerJubaozhai 582~584);号由 message_id.txt 墓碑保留。
+  // (与下一行之间留空行:这是独立注释,不能被生成器当成 RentSkillLoadoutSlots 的说明。)
+
   rpc RentSkillLoadoutSlots (RentSkillLoadoutSlotsRequest) returns (RentSkillLoadoutSlotsResponse);
   rpc AckCraftProxyDigest (AckCraftProxyDigestRequest) returns (AckCraftProxyDigestResponse);
 }

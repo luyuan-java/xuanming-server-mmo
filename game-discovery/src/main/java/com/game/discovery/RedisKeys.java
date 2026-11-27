@@ -770,6 +770,22 @@ public final class RedisKeys {
     }
 
     /**
+     * 离线托管在场心跳 {@code game:player:hosted_presence:{<player_id>}}（STRING，值 = 持有节点标识，TTL 60 秒、每 20 秒续期）。
+     * 与 {@link #playerAfkPass} 共用 hash tag {@code {<player_id>}}，供托管归位与队伍「托管中」徽章只读判定。
+     */
+    public String playerHostedPresence(long playerId) {
+        return prefix + "player:hosted_presence:{" + Long.toUnsignedString(playerId) + "}";
+    }
+
+    /**
+     * 离线托管归位元数据 {@code game:player:hosted_homing:{<player_id>}}（STRING/JSON，记录 zone_id、owner_revision、session_id、login_generation，
+     * TTL 对齐挂机月卡到期时刻），供会话续租侧在无节点持有时替玩家发起同 zone 托管落点。
+     */
+    public String playerHostedHoming(long playerId) {
+        return prefix + "player:hosted_homing:{" + Long.toUnsignedString(playerId) + "}";
+    }
+
+    /**
      * 观战中继的 Redis 分片 pub/sub 频道 {@code game:spectate:{<battle_id>}}（§15.7 Java 口径：一场一个频道；消息 = 契约 {@code contracts.kafka.SpectateFrameEvent} 字节）。
      * battle 每帧发布一次；只有有本机观众的 gate 才订阅。与 {@link #spectateState} 共用 hash tag，上 Cluster 时在同一个分片。
      */

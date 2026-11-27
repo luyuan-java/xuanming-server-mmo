@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
-  "schema_digest": "88750c2d961d8710",
-  "version": 105,
-  "content_digest": "2a8c40b2f757c6b5205c720c66b934d0f5046070e5ef7b9c0d99b8139e22a3de",
-  "generated_at": "2026-11-27T08:39:19Z",
+  "schema_digest": "9720c8176a76c4e6",
+  "version": 108,
+  "content_digest": "2664d41b2b02ac8f029a9f8f5d3f8506db577688bec4eeadc8f02858a534bdea",
+  "generated_at": "2026-11-27T17:33:00Z",
   "source_rev": {
-    "commit": "940729e1f4d7d8b6e2bfa8746cd9283b2d47f83c",
+    "commit": "5e5bc546859a25c0fc7c80ceb59d403c9c368c7a",
     "data_dirty": true
   },
   "table_count": 83,
@@ -139,24 +139,24 @@
       "name": "AfkPassRule",
       "hot_reload": false,
       "ids_permanent": false,
-      "rows": 1,
+      "rows": 2,
       "source": {
         "file": "AfkPassRule.xlsx",
-        "size": 5302,
-        "sha256": "2f8d64370ef8f74fcf92d4e23faf52488677f215242b518b2df42c9bd402a0c9"
+        "size": 5864,
+        "sha256": "39dd5be2e00c63d66c3080c98cd2cca8c151381115b2f3eacbdee28ce3a84cdf"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "afkpassrule.json",
-          "size": 211,
-          "sha256": "f0e6556040bbcc3bfa8107371d856110aa9622609c69c130d97db42c019be2fc"
+          "size": 914,
+          "sha256": "956f5231b60fc90132c97d963fae29b120a8a27f36de3ee4666d85bea8d37ac8"
         },
         {
           "kind": "binary",
           "file": "afkpassrule.pb",
-          "size": 50,
-          "sha256": "5dbd31d065af0c3432da64d94c29c3e2749d27f83888123e9f6c1eaf35c74dd0"
+          "size": 399,
+          "sha256": "814f39d675fa4208cdd642ead7c3823e45cf3f098ddef6b3fa280e13309183f8"
         }
       ]
     },
@@ -192,21 +192,21 @@
       "rows": 3,
       "source": {
         "file": "AppearanceSeries.xlsx",
-        "size": 6778,
-        "sha256": "3b75eca9b204575c8fa6f9fffd4469677c0d51d50b728e4fd7f18b3638c32084"
+        "size": 7019,
+        "sha256": "ac348fe3eeab9728ee7f316ad5125b5df7cb2c6d6412ce942ffe20d665a4b6c4"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "appearanceseries.json",
-          "size": 2458,
-          "sha256": "81acc4b7df4979eb35d50e50bf744500b1086cc182b4c86586608b1d7aebbfcc"
+          "size": 2644,
+          "sha256": "4fe51e73c901df6393152ebd0453e01b70498e7a6c5ec08c6132aed633e5c697"
         },
         {
           "kind": "binary",
           "file": "appearanceseries.pb",
-          "size": 1929,
-          "sha256": "bdea95496dfe3ab1c337475685983fc47a7d7756a3a409065a5074e11d5f69c4"
+          "size": 1944,
+          "sha256": "85b3a9eb632b17672bc691a8cb8347affe88fe2a087f5fbe0e7cef6dd4973066"
         }
       ]
     },
@@ -1139,24 +1139,24 @@
       "name": "MessageLimiter",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 141,
+      "rows": 139,
       "source": {
         "file": "MessageLimiter.xlsx",
-        "size": 7376,
-        "sha256": "9ac91c34432010b890b6e7636e915d853db646deb5907ffc717b6d24d38e9554"
+        "size": 7346,
+        "sha256": "faf3de71907a8d6f3078bd055300f92789103043bf1ef1c675e7baa3ba606839"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "messagelimiter.json",
-          "size": 12609,
-          "sha256": "9da588ea1781d1b4515de6ef9c35154e44bd5b3baa81d9892ce1f72ca3dcdd32"
+          "size": 12432,
+          "sha256": "f63d81cee1a9802434d4ad63df83bf91ffdad7e567030f237d12d84aaaafb171"
         },
         {
           "kind": "binary",
           "file": "messagelimiter.pb",
-          "size": 1672,
-          "sha256": "e43bec9b96c563c6c60aec093d355d007cdad4f5dbcd3080b2441b1f64f4f718"
+          "size": 1648,
+          "sha256": "ac27d76321f88ecfbffe6324a92de424c198049bc506cd5b815315d63ee29c0e"
         }
       ]
     },
@@ -1764,24 +1764,24 @@
       "name": "SpiritShopGoods",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 13,
+      "rows": 15,
       "source": {
         "file": "SpiritShopGoods.xlsx",
-        "size": 9290,
-        "sha256": "f91494e6a799fbfa4f664c06a480fc2406f8e7e807d2b51be59d63954d2dd918"
+        "size": 9790,
+        "sha256": "028322d32b055f3136707b211a55e80aa73927fb7aa6d9c3c4dc0547dc163915"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "spiritshopgoods.json",
-          "size": 11968,
-          "sha256": "ff861125d2b8b1443e696bdbb6a1f110127cecfada739343cf2b8b273907d07f"
+          "size": 13872,
+          "sha256": "9cf37cdd6f173fd67d2e382508a05a5a387e1a3b57c92b51edbfee6d765f3df3"
         },
         {
           "kind": "binary",
           "file": "spiritshopgoods.pb",
-          "size": 3357,
-          "sha256": "1acd43a5780af063f6de3ac67669621a7748b92644430bb17c3ef546d4a284c6"
+          "size": 3926,
+          "sha256": "4bcb753e1621b87d108f9733966329fd4ec123d621cfed0674a93756038503d9"
         }
       ]
     },
@@ -1914,24 +1914,24 @@
       "name": "TravelPassSeason",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 1,
+      "rows": 6,
       "source": {
         "file": "TravelPassSeason.xlsx",
-        "size": 5991,
-        "sha256": "72bc0f215d0fe49b130b7a46f5093711f1299b83e3bf270a6b4882719c0d79c1"
+        "size": 6658,
+        "sha256": "1f63bdff471982feab98bbac31f11a761f45751cb5ba018022c67088fe300498"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "travelpassseason.json",
-          "size": 664,
-          "sha256": "2a445ce3e767f42e9fcf8ad4bbf49d835e33f214d8f19a9a4bc0048594d9f4cf"
+          "size": 4155,
+          "sha256": "c2d1babeff645e0ee22906c99362b5ec2885f609f2b1e8ef6ccddb70087f598e"
         },
         {
           "kind": "binary",
           "file": "travelpassseason.pb",
-          "size": 320,
-          "sha256": "cf49f4a3a1564a6eb2be408712adf0791430419ba4e2352034842092aa7ac746"
+          "size": 1943,
+          "sha256": "32657dac113b8ae91e96fe7b7a19ee1071a969abfe1766e10a1af0eed85210b5"
         }
       ]
     },
@@ -1939,24 +1939,24 @@
       "name": "TravelPassTier",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 10,
+      "rows": 60,
       "source": {
         "file": "TravelPassTier.xlsx",
-        "size": 6116,
-        "sha256": "24b41a6d91256651956b0ee335973bd9a7a292229f8e63938002584e06246dee"
+        "size": 8256,
+        "sha256": "180a92c8bf3f6a90fabf43717429009ac162a0bee8b777fa71ab54abd3f1a77e"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "travelpasstier.json",
-          "size": 2643,
-          "sha256": "755c1059992de6eee2bee93e378a5dcf8fd4a83c40e88b50bf0f56321a160884"
+          "size": 15776,
+          "sha256": "d410099a3af691893e0b54087cd62354f1870d6095ae504728af1d718ae196ea"
         },
         {
           "kind": "binary",
           "file": "travelpasstier.pb",
-          "size": 319,
-          "sha256": "4a225401a802cbc3206c5398a6710a5feb34312cddc4bc6c8074a2ddc6138c75"
+          "size": 1962,
+          "sha256": "ed7bf2c281c868080490d768dd661e418399c7151faa79d6bc929f3ae5928613"
         }
       ]
     },

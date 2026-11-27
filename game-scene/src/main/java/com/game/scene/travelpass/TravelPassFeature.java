@@ -3,6 +3,7 @@ package com.game.scene.travelpass;
 import com.game.proto.ClaimTravelPassRewardRequest;
 import com.game.proto.EquipTravelPassCosmeticRequest;
 import com.game.proto.GetTravelPassStateRequest;
+import com.game.proto.SelectActiveTravelPassRequest;
 import com.game.proto.UnlockTravelPassPremiumRequest;
 import com.game.scene.bag.BagFeature;
 import com.game.scene.world.BattlePolicy;
@@ -39,5 +40,8 @@ public final class TravelPassFeature implements SceneFeature {
         r.on(SERVICE, "EquipTravelPassCosmetic", EquipTravelPassCosmeticRequest.class,
                 FreezePolicy.GATED, BattlePolicy.ALLOW,
                 (call, request) -> call.reply(service.equipCosmetic(call.world(), call.player(), request, service.nowMillis())));
+        r.on(SERVICE, "SelectActiveTravelPass", SelectActiveTravelPassRequest.class,
+                FreezePolicy.GATED, BattlePolicy.ALLOW,
+                (call, request) -> call.reply(service.selectActivePass(call.world(), call.player(), request, service.nowMillis())));
     }
 }

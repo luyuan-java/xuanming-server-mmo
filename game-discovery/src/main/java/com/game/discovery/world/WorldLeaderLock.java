@@ -107,11 +107,25 @@ public final class WorldLeaderLock {
 
     /**
      * 竞选一次（{@code SET NX PX}；已是本令牌时续期）。成功即持有并以本次发出前的时刻起算有效期；失败（别人持有）即不持有。
-     * Redis 出错原样抛出，持有状态不变。
+     * Redis 出错（结果未知，R8）时：若此前未持有本锁，尽力按同一令牌做一次条件删除以免留下孤儿锁，再原样抛出异常且持有状态不变。
      */
     public boolean tryAcquire() {
         long sentAt = nanoClock.getAsLong();
-        boolean ok = store.tryAcquireLeader(zoneId, token, ttl);
+        boolean wasHeldBefore = held;
+        boolean ok;
+        try {
+            ok = store.tryAcquireLeader(zoneId, token, ttl);
+        } catch (RuntimeException e) {
+            if (!wasHeldBefore) {
+                try {
+                    store.releaseLeader(zoneId, token);
+                } catch (RuntimeException cleanupError) {
+                    log.debug("竞选结果未知后的条件放锁清理失败（TTL 到期后自动回收） zone={}",
+                            Integer.toUnsignedString(zoneId), cleanupError);
+                }
+            }
+            throw e;
+        }
         synchronized (this) {
             if (ok) {
                 boolean was = held;

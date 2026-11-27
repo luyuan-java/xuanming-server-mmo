@@ -5,8 +5,11 @@ import com.game.api.proto.AssignSceneResponse;
 import com.game.api.proto.SceneEntry;
 import com.game.api.proto.SceneNodeInfo;
 import com.game.table.SceneErrorTip;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,26 +53,43 @@ public final class SceneAssigner {
     /** 请求参数不合法（zone_id 为 0）。调用方编程错误，不是玩家能触发的状态。 */
     public static final int TIP_BAD_REQUEST = SceneErrorTip.scene_error.kEnterSceneParamError_VALUE;
 
+    public static final String RESUME_SCENE_FALLBACK_METRIC = "game.scene_manager.resume_scene_fallback";
+
     private final SceneNodeSource source;
     private final WorldSceneConfigs worldConfigs;
     private final ChannelSelector selector;
     private final OnDemandWorldBootstrap bootstrap;
+    private final Counter resumeSceneFallbackCounter;
+    private final AtomicLong resumeSceneFallbackCount = new AtomicLong();
 
     /** 不预占（只按目录人数选；单测与只读场景用）。 */
     public SceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs) {
-        this(source, worldConfigs, ChannelSelector.withoutReservations(source), null);
+        this(source, worldConfigs, ChannelSelector.withoutReservations(source), null, null);
     }
 
     public SceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector selector) {
-        this(source, worldConfigs, selector, null);
+        this(source, worldConfigs, selector, null, null);
     }
 
     public SceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector selector,
                          OnDemandWorldBootstrap bootstrap) {
+        this(source, worldConfigs, selector, bootstrap, null);
+    }
+
+    public SceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector selector,
+                         OnDemandWorldBootstrap bootstrap, MeterRegistry meterRegistry) {
         this.source = source;
         this.worldConfigs = worldConfigs;
         this.selector = selector;
         this.bootstrap = bootstrap;
+        this.resumeSceneFallbackCounter = meterRegistry == null ? null : Counter.builder(RESUME_SCENE_FALLBACK_METRIC)
+                .description("短重连/顶号回原场景失败（原实例不在或排空中）而回落地图/默认大世界的次数")
+                .register(meterRegistry);
+    }
+
+    /** 回原场景失败而回落重选的累计次数（单测与自检用）。 */
+    public long resumeSceneFallbackCount() {
+        return resumeSceneFallbackCount.get();
     }
 
     public AssignSceneResponse assign(AssignSceneRequest request) {
@@ -90,6 +110,10 @@ public final class SceneAssigner {
                 selector.reserveInstance(zoneId, instance.scene().getSceneId(), playerId);
                 best = Optional.of(instance);
             } else {
+                resumeSceneFallbackCount.incrementAndGet();
+                if (resumeSceneFallbackCounter != null) {
+                    resumeSceneFallbackCounter.increment();
+                }
                 log.info("原场景实例{}，按地图重选 player={} node={} scene={} preferred={}",
                         instance == null ? "已不在" : "在排空中", playerId, request.getPreferredSceneNodeId(),
                         Long.toUnsignedString(request.getPreferredSceneId()), preferred);

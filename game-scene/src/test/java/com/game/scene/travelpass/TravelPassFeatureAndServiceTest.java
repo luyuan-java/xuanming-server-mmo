@@ -17,6 +17,8 @@ import com.game.proto.GetTravelPassStateResponse;
 import com.game.proto.MessageContent;
 import com.game.proto.PlayerActivityEntryKind;
 import com.game.proto.PlayerActivityInfo;
+import com.game.proto.SelectActiveTravelPassRequest;
+import com.game.proto.SelectActiveTravelPassResponse;
 import com.game.proto.UnlockTravelPassPremiumRequest;
 import com.game.proto.UnlockTravelPassPremiumResponse;
 import com.game.proto.eBattleOutcome;
@@ -241,7 +243,7 @@ class TravelPassFeatureAndServiceTest {
     }
 
     @Test
-    void 重叠启用期次failClosed双双排除且典藏价货币仅限真实灵石() {
+    void 书架模式支持多期并存且典藏价货币仅限真实灵石() {
         var real = BattleFixture.CONFIG;
         var baseSeason = real.travelPassSeason().all().getFirst();
         var s1 = baseSeason.toBuilder().setId(101).setEnabled(1).setStartsAtMs(1_000L).setEndsAtMs(10_000L)
@@ -256,10 +258,52 @@ class TravelPassFeatureAndServiceTest {
                 baseTier.toBuilder().setId(9102).setPassId(102).setTierIndex(1).build(),
                 baseTier.toBuilder().setId(9103).setPassId(103).setTierIndex(1).build());
         TravelPassTables parsed = new TravelPassTables(List.of(s1, s2, sBadCur), tiers, real.item().all());
-        assertThat(parsed.season(101)).as("时间窗重叠的启用期次 A 必须排除").isNull();
-        assertThat(parsed.season(102)).as("时间窗重叠的启用期次 B 必须排除").isNull();
+        assertThat(parsed.season(101)).as("永不绝版书架制允许多个合法启用期次并存 A").isNotNull();
+        assertThat(parsed.season(102)).as("永不绝版书架制允许多个合法启用期次并存 B").isNotNull();
         assertThat(parsed.season(103)).as("绑定银两定价的典藏手记必须拒绝加载").isNull();
-        assertThat(parsed.enabledSeasons()).isEmpty();
+        assertThat(parsed.enabledSeasons()).hasSize(2);
+    }
+
+    @Test
+    void 永不绝版书架制_切换在研期次单册涨点与满档自动推进() throws Exception {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer player = f.enter(11, 1009);
+        long nowMs = f.clock.epochMillis();
+
+        GetTravelPassStateResponse init = call(f, player, "GetTravelPassState",
+                GetTravelPassStateRequest.getDefaultInstance(), GetTravelPassStateResponse.parser());
+        assertThat(init.getErrorMessage().getId()).isZero();
+        assertThat(init.getSnapshot().getBookshelfCount()).isEqualTo(6);
+        assertThat(init.getSnapshot().getActivePassId()).isEqualTo(1);
+
+        // 切换到第 2 期在研
+        SelectActiveTravelPassResponse switched = call(f, player, "SelectActiveTravelPass",
+                SelectActiveTravelPassRequest.newBuilder().setPassId(2).build(),
+                SelectActiveTravelPassResponse.parser());
+        assertThat(switched.getErrorMessage().getId()).isZero();
+        assertThat(switched.getSnapshot().getActivePassId()).isEqualTo(2);
+
+        // 战后仅给当前在研第 2 期涨点（M-1 单期加点，不给第 1 期多刷）
+        assertThat(f.travelPass.creditBattlePoints(player, battle(901L, player.playerId(),
+                MatchMode.MATCH_MODE_PVE_SOLO_VALUE, 1, eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN,
+                true, false, 3, 2, true, 0), nowMs)).isTrue();
+        GetTravelPassStateResponse afterHit = call(f, player, "GetTravelPassState",
+                GetTravelPassStateRequest.getDefaultInstance(), GetTravelPassStateResponse.parser());
+        var s1 = afterHit.getSnapshot().getBookshelfList().stream().filter(s -> s.getPassId() == 1).findFirst().orElseThrow();
+        var s2 = afterHit.getSnapshot().getBookshelfList().stream().filter(s -> s.getPassId() == 2).findFirst().orElseThrow();
+        assertThat(s1.getProgressPoints()).isZero();
+        assertThat(s2.getProgressPoints()).isEqualTo(20);
+
+        // 第 2 期打满后继续战斗：自动推进到下一个未满档期次（第 1 期）
+        player.travelPass().findOrAddSeason(2).setProgressPoints(300);
+        assertThat(f.travelPass.creditBattlePoints(player, battle(902L, player.playerId(),
+                MatchMode.MATCH_MODE_PVE_SOLO_VALUE, 1, eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN,
+                true, false, 3, 2, true, 0), nowMs + 1000L)).isTrue();
+        GetTravelPassStateResponse afterAuto = call(f, player, "GetTravelPassState",
+                GetTravelPassStateRequest.getDefaultInstance(), GetTravelPassStateResponse.parser());
+        assertThat(afterAuto.getSnapshot().getActivePassId()).isEqualTo(1);
+        assertThat(afterAuto.getSnapshot().getBookshelfList().stream().filter(s -> s.getPassId() == 1).findFirst().orElseThrow()
+                .getProgressPoints()).isEqualTo(20);
     }
 
     private static BattleSettlementData battle(long battleId, long playerId, int matchMode, int difficulty,

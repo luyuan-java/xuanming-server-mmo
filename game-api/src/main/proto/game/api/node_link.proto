@@ -73,6 +73,8 @@ message PlayerEnter {
   uint64 login_generation = 8;
   // 未成年人防沉迷可玩截止时刻（Unix 毫秒，0 = 不限）；跨节点换图由 gate 原样带入目标 scene 封顶离线托管。
   uint64 minor_play_deadline_ms = 9;
+  // true = 离线托管角色的服务端托管落点（跨场景跟随、节点疏散搬迁、托管归位）：无 gate 会话、不推送，落地后直接重建断线保留并复查挂机月卡。
+  bool hosted_placement = 10;
 }
 
 // scene → gate：进场结果。普通进场失败时 gate 解绑会话上的场景与玩家（会话回到「已登录、未进游戏」）并把 tip 发给客户端；
@@ -121,6 +123,17 @@ message PlayerTransfer {
   ZoneRedirect redirect = 7;
 }
 
+// 玩家离场原因（服务端内部字段，对齐主仓 player_lifecycle.proto ExitGameReason）。
+enum ExitGameReason {
+  EXIT_GAME_REASON_UNSPECIFIED = 0;
+  // 客户端连接意外断开（可进入 25 秒断线保留 / 挂机月卡离线托管）。
+  EXIT_GAME_REASON_DISCONNECTED = 1;
+  // 客户端主动 LeaveGame（干净登出，跳过断线保留与离线托管）。
+  EXIT_GAME_REASON_LOGOUT = 2;
+  // 断线租约到期后清理残留连接（跳过断线保留与离线托管）。
+  EXIT_GAME_REASON_LEASE_EXPIRED = 3;
+}
+
 // gate → scene：玩家离开（断线或主动离开），scene 写回数据并移除玩家。
 message PlayerLeave {
   uint32 session_id = 1;
@@ -128,6 +141,8 @@ message PlayerLeave {
   bool voluntary = 3;
   // true = 强制立即存盘退场（如未成年人防沉迷到点下线或 login 兜底踢线），跳过 25 秒断线保留与月卡离线托管。
   bool immediate_exit = 4;
+  // 离场原因；旧版发送方未填（UNSPECIFIED）时按 voluntary 回退判定（voluntary ? LOGOUT : DISCONNECTED）。
+  ExitGameReason reason = 5;
 }
 
 // gate → scene：进场后的客户端消息。

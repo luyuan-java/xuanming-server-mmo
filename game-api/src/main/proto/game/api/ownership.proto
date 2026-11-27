@@ -15,4 +15,6 @@ message OwnerTakeover {
   // 请求让出的 epoch（login 读到的当前持有 epoch）。只有持有的正是这个 epoch 的实例才让出，
   // 迟到的旧请求碰不到之后新进场的实例。
   uint64 owner_epoch = 2;
+  // true = 托管归位探测（对齐主仓 keep_held）：若节点仍持有该玩家的存活实体则绝不打扰也不踢线，仅当本节点完全不持有该实体时释放/补发交出凭证。
+  bool keep_held = 3;
 }

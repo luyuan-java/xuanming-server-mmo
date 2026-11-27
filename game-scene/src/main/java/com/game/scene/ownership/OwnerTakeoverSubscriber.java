@@ -18,16 +18,29 @@ public final class OwnerTakeoverSubscriber {
 
     private static final Logger log = LoggerFactory.getLogger(OwnerTakeoverSubscriber.class);
 
+    /** 接管请求回调：(player_id, owner_epoch, keep_held)。 */
+    @FunctionalInterface
+    public interface Handler {
+        void onTakeover(long playerId, long ownerEpoch, boolean keepHeld);
+    }
+
     private final RTopic topic;
-    private final BiConsumer<Long, Long> onTakeover;
+    private final Handler handler;
     private int listenerId = -1;
 
     /**
      * @param onTakeover (player_id, owner_epoch)，实现负责投递到逻辑线程且不阻塞
      */
     public OwnerTakeoverSubscriber(RTopic topic, BiConsumer<Long, Long> onTakeover) {
+        this(topic, (playerId, ownerEpoch, keepHeld) -> onTakeover.accept(playerId, ownerEpoch));
+    }
+
+    /**
+     * @param handler (player_id, owner_epoch, keep_held)，支持托管归位探测（keep_held=true 时有实体不动）
+     */
+    public OwnerTakeoverSubscriber(RTopic topic, Handler handler) {
         this.topic = topic;
-        this.onTakeover = onTakeover;
+        this.handler = handler;
     }
 
     public synchronized void start() {
@@ -60,6 +73,6 @@ public final class OwnerTakeoverSubscriber {
             log.warn("归属接管请求缺 player_id 或 owner_epoch，丢弃");
             return;
         }
-        onTakeover.accept(takeover.getPlayerId(), takeover.getOwnerEpoch());
+        handler.onTakeover(takeover.getPlayerId(), takeover.getOwnerEpoch(), takeover.getKeepHeld());
     }
 }

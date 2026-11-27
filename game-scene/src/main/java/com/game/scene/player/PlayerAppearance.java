@@ -36,6 +36,8 @@ public final class PlayerAppearance {
     private String trialAppearanceId;
     private long trialExpiresAt;
     private long switchSeq;
+    private long lightCardTrialWeekStartMs;
+    private int lightCardTrialUsed;
     private long nextReceiptSeq;
     private final Map<Long, Receipt> receipts;
     private final UnknownFieldSet unknownFields;
@@ -43,7 +45,8 @@ public final class PlayerAppearance {
     private PlayerAppearance(byte[] ownedBits, byte[] trialUsedBits, byte[] petCosmeticOwnedBits,
                              byte[] skillVfxOwnedBits, java.util.TreeMap<Integer, Integer> equippedSkillVfx,
                              String trialAppearanceId, long trialExpiresAt,
-                             long switchSeq, Map<Long, Receipt> receipts, long nextReceiptSeq,
+                             long switchSeq, long lightCardTrialWeekStartMs, int lightCardTrialUsed,
+                             Map<Long, Receipt> receipts, long nextReceiptSeq,
                              UnknownFieldSet unknownFields) {
         this.ownedBits = ownedBits;
         this.trialUsedBits = trialUsedBits;
@@ -53,6 +56,8 @@ public final class PlayerAppearance {
         this.trialAppearanceId = trialAppearanceId == null ? "" : trialAppearanceId;
         this.trialExpiresAt = trialExpiresAt;
         this.switchSeq = switchSeq;
+        this.lightCardTrialWeekStartMs = lightCardTrialWeekStartMs;
+        this.lightCardTrialUsed = lightCardTrialUsed;
         this.receipts = receipts;
         this.nextReceiptSeq = nextReceiptSeq;
         this.unknownFields = unknownFields == null ? UnknownFieldSet.getDefaultInstance() : unknownFields;
@@ -61,7 +66,7 @@ public final class PlayerAppearance {
     public static PlayerAppearance empty() {
         return new PlayerAppearance(new byte[0], new byte[0], new byte[0], new byte[0],
                 new java.util.TreeMap<>(Integer::compareUnsigned),
-                "", 0, 0, new LinkedHashMap<>(), 1, UnknownFieldSet.getDefaultInstance());
+                "", 0, 0, 0L, 0, new LinkedHashMap<>(), 1, UnknownFieldSet.getDefaultInstance());
     }
 
     public static PlayerAppearance restore(AppearanceState state) {
@@ -97,6 +102,8 @@ public final class PlayerAppearance {
                 state.getTrialAppearanceId(),
                 state.getTrialExpiresAt(),
                 state.getSwitchSeq(),
+                state.getLightCardTrialWeekStartMs(),
+                state.getLightCardTrialUsed(),
                 map,
                 maxSeq + 1,
                 state.getUnknownFields());
@@ -111,6 +118,8 @@ public final class PlayerAppearance {
                 && trialAppearanceId.isEmpty()
                 && trialExpiresAt == 0
                 && switchSeq == 0
+                && lightCardTrialWeekStartMs == 0
+                && lightCardTrialUsed == 0
                 && receipts.isEmpty()
                 && unknownFields.asMap().isEmpty();
     }
@@ -223,6 +232,23 @@ public final class PlayerAppearance {
         this.trialExpiresAt = expiresAtSec;
     }
 
+    public int lightCardTrialUsedForWeek(long weekStartMs) {
+        if (Long.compareUnsigned(lightCardTrialWeekStartMs, weekStartMs) < 0) {
+            return 0;
+        }
+        return lightCardTrialUsed;
+    }
+
+    public void startLightCardExtraTrial(String targetAppearanceId, long expiresAtSec, long weekStartMs) {
+        if (Long.compareUnsigned(weekStartMs, lightCardTrialWeekStartMs) > 0) {
+            lightCardTrialWeekStartMs = weekStartMs;
+            lightCardTrialUsed = 0;
+        }
+        lightCardTrialUsed++;
+        this.trialAppearanceId = targetAppearanceId;
+        this.trialExpiresAt = expiresAtSec;
+    }
+
     public void clearTrial() {
         this.trialAppearanceId = "";
         this.trialExpiresAt = 0;
@@ -282,6 +308,12 @@ public final class PlayerAppearance {
         }
         if (switchSeq != 0) {
             builder.setSwitchSeq(switchSeq);
+        }
+        if (lightCardTrialWeekStartMs != 0) {
+            builder.setLightCardTrialWeekStartMs(lightCardTrialWeekStartMs);
+        }
+        if (lightCardTrialUsed != 0) {
+            builder.setLightCardTrialUsed(lightCardTrialUsed);
         }
         for (Receipt r : receipts.values()) {
             builder.addRecentRequests(AppearanceRequestReceipt.newBuilder()

@@ -49,6 +49,11 @@ message CharacterAppearanceSeriesProgress
 	string completion_badge_name = 8;        // 集齐印章/铭牌展示名(纯装饰,无数值)
 	string epilogue_title = 9;               // 集齐解锁合篇故事篇名(正文由客户端查 AppearanceSeries 本地配表)
 	repeated string member_appearance_ids = 10; // 该系列当前启用的成员 appearance_id(按 sort_order 升序)
+	uint32 missing_unlockable_count = 11;       // 该系列中当前缺失且可卡换解锁的成员数
+	uint64 bundle_original_diamond = 12;        // 补齐缺失成员折前原价(真实灵石)
+	uint64 bundle_discount_diamond = 13;        // Steam 式按缺口补齐折后总价(真实灵石，向上取整防 0 元)
+	uint32 bundle_discount_bps = 14;            // 补齐折扣万分比（如 8500 = 8.5 折；0 = 不支持补齐）
+	repeated string missing_appearance_ids = 15;// 当前缺失且可补齐的 appearance_id（排序去重，客户端下单原样回传做报价防呆）
 }
 
 message PlayerAppearanceInfo
@@ -74,6 +79,10 @@ message PlayerAppearanceInfo
 	bytes skill_vfx_owned_bits = 19;                  // 已永久拥有的技能特效位图(低位在前,与 SkillVfxCosmetic bit_index 对应)
 	repeated SkillVfxCosmeticEntry skill_vfx_cosmetics = 20; // 当前开放的技能特效目录(按 sort_order 升序,纯画面零数值)
 	map<uint32, uint32> equipped_skill_vfx = 21;      // 当前实际生效的技能特效映射(skill_table_id -> SkillVfxCosmetic.id)
+	uint32 light_card_trial_quota = 22;               // 仙途轻享卡本周额外随心试穿额度（未生效 0 / 生效 3）
+	uint32 light_card_trial_used = 23;                // 仙途轻享卡本周已用随心试穿次数
+	uint64 diamond_balance = 24;                      // 玩家当前真实充值灵石余额（系列补齐包仅扣真实灵石）
+	uint64 bind_diamond_balance = 25;                 // 玩家当前绑定灵石余额（只供展示，不可抵扣系列补齐包）
 }
 
 // 灵宠幻化目录项（纯外观表现，零战斗/成长属性）。
@@ -224,6 +233,24 @@ message AppearanceStateNotify
 	bool trial_expired = 2; // true = 因 1 小时试用到期自动还原
 }
 
+// Steam 式按缺口 8.5 折一键补齐收藏系列缺失角色（仅扣真实充值灵石，强制幂等键与报价防呆）。
+message BuyAppearanceSeriesBundleRequest
+{
+	uint64 client_request_id = 1;                  // 必须非 0
+	uint32 series_id = 2;                          // AppearanceSeries.id
+	repeated string expected_missing_appearance_ids = 3; // 客户端预览的缺失角色 ID 列表（防并发已获导致多扣）
+	uint64 expected_price_diamond = 4;             // 客户端预览的折后灵石总价
+}
+
+message BuyAppearanceSeriesBundleResponse
+{
+	TipInfoMessage error_message = 1;
+	PlayerAppearanceInfo info = 2;
+	bool replayed = 3;
+	uint32 unlocked_count = 4;
+	uint64 spent_diamond = 5;
+}
+
 service SceneAppearanceClientPlayer
 {
 	option (OptionIsPlayerService) = true;
@@ -238,4 +265,5 @@ service SceneAppearanceClientPlayer
 	// ── 以下只许在末尾追加:生成的 CallMethod 按 method index 分发 ──
 	rpc EquipPetCosmetic (EquipPetCosmeticRequest) returns (EquipPetCosmeticResponse);
 	rpc EquipSkillVfx (EquipSkillVfxRequest) returns (EquipSkillVfxResponse);
+	rpc BuyAppearanceSeriesBundle (BuyAppearanceSeriesBundleRequest) returns (BuyAppearanceSeriesBundleResponse);
 }

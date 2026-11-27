@@ -62,8 +62,16 @@ class SpiritShopFeatureAndServiceTest {
             assertThat(g.getResetKind()).isZero();
         });
         assertThat(infoResp.getInfo().getGoodsList()).extracting(SpiritShopGoodsView::getGoodsId)
-                .containsSubsequence(101, 102, 103, 201, 202, 301, 302, 303, 304)
+                .containsSubsequence(101, 102, 103, 201, 202, 203, 204, 301, 302, 303, 304)
                 .doesNotContain(401, 402);
+        SpiritShopGoodsView unseal = goodsView(infoResp.getInfo().getGoodsList(), 203);
+        SpiritShopGoodsView inherit = goodsView(infoResp.getInfo().getGoodsList(), 204);
+        assertThat(unseal.getUnitPrice()).isEqualTo(60L);
+        assertThat(unseal.getItems(0).getItemConfigId()).isEqualTo(3409);
+        assertThat(unseal.getItems(0).getBound()).isTrue();
+        assertThat(inherit.getUnitPrice()).isEqualTo(120L);
+        assertThat(inherit.getItems(0).getItemConfigId()).isEqualTo(3410);
+        assertThat(inherit.getItems(0).getBound()).isTrue();
 
         SpiritShopGoodsView pack60 = goodsView(infoResp.getInfo().getGoodsList(), 101);
         SpiritShopGoodsView pack180 = goodsView(infoResp.getInfo().getGoodsList(), 102);

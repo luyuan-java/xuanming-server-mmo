@@ -291,7 +291,8 @@ public final class BattleFixture {
         pets = new PetService(PetTables.from(CONFIG), currency, guids, clock, new SplittableRandom(7), sceneMetrics)
                 .withBags(bags);
         PetFeature petFeature = new PetFeature(pets, Contracts.REGISTRY);
-        appearance = new com.game.scene.appearance.AppearanceService(appearanceTables, bags, clock, Contracts.REGISTRY);
+        appearance = new com.game.scene.appearance.AppearanceService(appearanceTables, bags, clock, Contracts.REGISTRY)
+                .withCurrency(currency);
         trialJournal = new com.game.scene.trial.TrialJournalService(trialJournalTables, bags, appearance, clock, sceneMetrics,
                 season::activeSeasonId);
         skillCraft = new com.game.scene.craft.SkillCraftService(skillCraftTables, bags, currency, attributes, pets, clock, sceneMetrics)
@@ -338,14 +339,15 @@ public final class BattleFixture {
         repo.setRenameClock(clock::epochMillis);
         renameService = new com.game.scene.rename.PlayerRenameService(renameTables, bags, clock, Contracts.REGISTRY);
         afkPassService = new com.game.scene.afkpass.AfkPassService(afkPassTables, currency, clock,
-                com.game.scene.afkpass.AfkPassService.ProjectionSink.NOOP, logic);
+                com.game.scene.afkpass.AfkPassService.ProjectionSink.NOOP, logic)
+                .withBags(bags);
         world.withAfkPassService(afkPassService);
         world.withActiveSeason(season::activeSeasonId)
                 .withCraftUnlockGate(skillCraft::isCraftUnlockGateEnabled);
         features = List.of(
                 new com.game.scene.appearance.AppearanceFeature(appearance),
                 new com.game.scene.rename.PlayerRenameFeature(renameService),
-                new com.game.scene.afkpass.AfkPassFeature(afkPassService),
+                new com.game.scene.afkpass.AfkPassFeature(afkPassService, attributes, Contracts.REGISTRY, bagFeature),
                 new CurrencyFeature(currency),
                 new AttributeFeature(attributes, Contracts.REGISTRY, call -> {
                     petFeature.onOwnerLevelChanged(call);

@@ -124,6 +124,8 @@ message PlayerTravelPassState {
   string equipped_frame_key = 2;
   string equipped_title_key = 3;
   uint64 pass_revision = 4;
+  uint32 active_pass_id = 5;
+  repeated string bonus_cosmetic_keys = 6;
 }
 
 message PlayerProgressionState {
@@ -417,6 +419,8 @@ message ClientRequestRecordState {
   uint32 skill_loadout_rented_slots = 33;
   uint64 skill_loadout_rent_expires_at_sec = 34;
   uint64 skill_loadout_rent_spent_diamond = 35;
+  uint32 appearance_bundle_unlocked_count = 36;
+  uint64 appearance_bundle_spent_diamond = 37;
 }
 
 message EquipmentMaterialRewardLedgerState {
@@ -506,6 +510,9 @@ message AppearanceState {
   bytes skill_vfx_owned_bits = 8;
   // 技能特效穿戴映射（skill_table_id -> SkillVfxCosmetic.id；按无符号键升序写出）。
   map<uint32, uint32> equipped_skill_vfx = 9;
+  // 仙途轻享卡本周衣柜随心试穿周起点（UTC+8 周一 05:00 毫秒）与已用次数。
+  uint64 light_card_trial_week_start_ms = 10;
+  uint32 light_card_trial_used = 11;
 }
 
 message AppearanceRequestReceipt {
