@@ -37,6 +37,11 @@ class TacticalPuzzleParityTest {
                         .build())
                 .build();
         assertTrue(TacticalPuzzleSpecValidator.isValidSpec(valid));
+        assertTrue(TacticalPuzzleSpecValidator.isValidSpec(valid.toBuilder()
+                .setLeylineElement(com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_WOOD)
+                .setBannedSkillId(10020) // 102 控场携带
+                .build()));
+        assertFalse(TacticalPuzzleSpecValidator.isValidSpec(valid.toBuilder().setBannedSkillId(10039).build()));
         assertFalse(TacticalPuzzleSpecValidator.isValidSpec(valid.toBuilder().setRoundLimit(7).build()));
         assertFalse(TacticalPuzzleSpecValidator.isValidSpec(valid.toBuilder().setPetPresetId(205).build()));
 

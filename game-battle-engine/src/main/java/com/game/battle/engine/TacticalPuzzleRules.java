@@ -39,6 +39,28 @@ public final class TacticalPuzzleRules {
     public static final int MIN_SPEED_DELTA_PCT = -30;
     public static final int MAX_SPEED_DELTA_PCT = 30;
     public static final int MAX_ENEMY_BUFF_KIND = 4;
+    public static final int MAX_LEYLINE_ELEMENT = 5;
+
+    public static boolean isAllowedPresetSkill(int charPresetId, int petPresetId, int skillId) {
+        if (skillId == 0) {
+            return true;
+        }
+        boolean inChar = switch (charPresetId) {
+            case 101 -> skillId == 10002 || skillId == 10039 || skillId == 10025 || skillId == 10035;
+            case 102 -> skillId == 10006 || skillId == 10020 || skillId == 10034 || skillId == 10041;
+            case 103 -> skillId == 10010 || skillId == 10033 || skillId == 10040 || skillId == 10026;
+            default -> false;
+        };
+        if (inChar) {
+            return true;
+        }
+        return switch (petPresetId) {
+            case 201 -> skillId == 10002 || skillId == 10018 || skillId == 10016 || skillId == 13005;
+            case 202 -> skillId == 10006 || skillId == 10019 || skillId == 10034 || skillId == 13006;
+            case 203 -> skillId == 10014 || skillId == 10010 || skillId == 11006 || skillId == 11005;
+            default -> false;
+        };
+    }
 
     public static final int SHIELD_BUFF_ID = 100400;
     public static final int DEBUFF_ATK_DOWN_BUFF_ID = 100031;
@@ -117,6 +139,13 @@ public final class TacticalPuzzleRules {
         }
         int playerDebuff = spec.getPlayerInitialDebuffKind();
         if (playerDebuff < 0 || playerDebuff > MAX_PLAYER_DEBUFF_KIND) {
+            return false;
+        }
+        int leylineVal = spec.getLeylineElementValue();
+        if (leylineVal < 0 || leylineVal > MAX_LEYLINE_ELEMENT) {
+            return false;
+        }
+        if (!isAllowedPresetSkill(charPreset, petPreset, spec.getBannedSkillId())) {
             return false;
         }
         int enemyCount = spec.getEnemiesCount();

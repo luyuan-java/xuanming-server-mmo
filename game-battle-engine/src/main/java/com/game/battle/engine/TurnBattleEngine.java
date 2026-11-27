@@ -442,6 +442,15 @@ public final class TurnBattleEngine {
         engine.ctx.encounter.initSpecialState(request.getMatchMode(), engine.maxRounds);
         if (engine.tacticalPuzzleContext != null) {
             engine.applyTacticalPuzzleSetup();
+            var puzzleSpec = engine.tacticalPuzzleContext.getSpec();
+            if (puzzleSpec.getBannedSkillId() != 0) {
+                engine.bannedSkillIds.add(puzzleSpec.getBannedSkillId());
+                engine.ctx.setBannedSkills(engine.bannedSkillIds);
+            }
+            if (puzzleSpec.getLeylineElement() != com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED) {
+                engine.ctx.setActiveTournamentLeyline(puzzleSpec.getLeylineElement());
+                engine.applyTournamentEarthShieldIfActive();
+            }
         }
         // 锦标赛 V2 五行灵脉初始化：设置生效灵脉；土厚灵脉 8% 护盾在非变阵期立刻赋予，变阵期延后到 finalizePrepPhase 锁阵后统一赋予。
         if (request.hasTournamentContext()) {
@@ -3678,5 +3687,15 @@ public final class TurnBattleEngine {
     /** 测试钩子（包私有）：读取首领试炼 / 护卫救援 / 物法易势权威机制状态。 */
     EncounterMechanics encounterForTest() {
         return ctx.encounter;
+    }
+
+    /** 测试钩子（包私有）：读取本局生效的五行灵脉元素。 */
+    com.game.proto.TournamentLeylineElement activeTournamentLeylineForTest() {
+        return ctx.activeTournamentLeyline();
+    }
+
+    /** 测试钩子（包私有）：判定指定技能是否已被本局禁招拦截。 */
+    boolean isSkillBannedForTest(int skillTableId) {
+        return ctx.isSkillBanned(skillTableId);
     }
 }

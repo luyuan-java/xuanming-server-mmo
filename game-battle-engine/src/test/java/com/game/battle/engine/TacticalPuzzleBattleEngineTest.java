@@ -69,6 +69,8 @@ class TacticalPuzzleBattleEngineTest {
                 .setPlayerInitialMpPct(60)
                 .setPlayerInitialShieldPct(20)
                 .setPlayerInitialDebuffKind(3)
+                .setLeylineElement(com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL)
+                .setBannedSkillId(10039)
                 .addEnemies(TacticalPuzzleEnemySpec.newBuilder()
                         .setMonsterTableId(311)
                         .setInitialHpPct(40)
@@ -123,6 +125,9 @@ class TacticalPuzzleBattleEngineTest {
         BattleStateS2C state = engine.buildStateSnapshot();
         assertEquals(2, state.getRoundLimit());
         assertEquals(3, state.getTeamAFormationId());
+        assertEquals(com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL, engine.activeTournamentLeylineForTest());
+        assertTrue(engine.isSkillBannedForTest(10039));
+        assertTrue(state.getBannedSkillIdsList().contains(10039));
         assertTrue(state.hasTacticalPuzzleContext());
         assertEquals(88001L, state.getTacticalPuzzleContext().getPuzzleId());
         assertEquals(3, state.getActorsCount());
@@ -176,6 +181,12 @@ class TacticalPuzzleBattleEngineTest {
                 .setRankedContext(RankedMatchContext.newBuilder().setUseFreePreset(false))
                 .build();
         assertInstanceOf(BattleStart.Rejected.class, TurnBattleEngine.start(noPreset, data));
+
+        CreateBattleRequest badBan = req.toBuilder()
+                .setTacticalPuzzleContext(req.getTacticalPuzzleContext().toBuilder()
+                        .setSpec(req.getTacticalPuzzleContext().getSpec().toBuilder().setBannedSkillId(10020)))
+                .build();
+        assertInstanceOf(BattleStart.Rejected.class, TurnBattleEngine.start(badBan, data));
     }
 
     private static boolean hasBuff(List<BattleBuffEntry> buffs, int tableId, long expectedShield) {
