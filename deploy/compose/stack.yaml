@@ -108,6 +108,7 @@ services:
       GAME_LOGIN_DEV_PASSWORD: "${GAME_LOGIN_DEV_PASSWORD:?缺少 GAME_LOGIN_DEV_PASSWORD}"
       GAME_DUBBO_SCENEMANAGERURL: "tri://game-scene-manager:20882"
       GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
+      GAME_LOGIN_CONTENT_GUARD_ENABLED: "true"
       GAME_LOGIN_MODE: "dev"
     depends_on:
       route-init: {condition: service_completed_successfully}
@@ -158,6 +159,7 @@ services:
       GAME_ADVERTISE_HOST: "game-chat"
       GAME_DUBBO_SECRET: "${GAME_DUBBO_SECRET:?缺少 GAME_DUBBO_SECRET}"
       GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
+      GAME_CHAT_CONTENT_GUARD_ENABLED: "true"
     depends_on:
       route-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
@@ -239,12 +241,15 @@ services:
       RANK_PRODUCER_SECRET_MATCH: "${RANK_PRODUCER_SECRET_MATCH:?}"
       GAME_SPECTATE_TOKEN_SECRET: "${GAME_SPECTATE_TOKEN_SECRET:?缺少 GAME_SPECTATE_TOKEN_SECRET}"
       GAME_MATCH_SPECTATE_RELAY_ENABLED: "${GAME_MATCH_SPECTATE_RELAY_ENABLED:-true}"
+      GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
+      GAME_MATCH_CONTENT_GUARD_ENABLED: "true"
       GLOBAL_MATCH_ENABLED: "false"
     depends_on:
       route-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       kafka: {condition: service_healthy}
       game-rank: {condition: service_healthy}
+      game-content-guard: {condition: service_healthy}
     healthcheck:
       <<: *health
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18113/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-match/20888'"]
@@ -290,6 +295,7 @@ services:
       GAME_ASSET_OP_SECRET_GUILD: "${GAME_ASSET_OP_SECRET_GUILD:?缺少 GAME_ASSET_OP_SECRET_GUILD}"
       GAME_MATCH_URL: "tri://game-match:20888"
       GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
+      GAME_GUILD_CONTENT_GUARD_ENABLED: "true"
     depends_on:
       route-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
@@ -377,6 +383,7 @@ services:
       GAME_TRADE_MALL_ENABLED: "true"
       GAME_TRADE_COMMERCE_ENABLED: "true"
       GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
+      GAME_TRADE_CONTENT_GUARD_ENABLED: "true"
       GAME_ASSET_OP_SECRET_TRADE: "${GAME_ASSET_OP_SECRET_TRADE:?缺少 GAME_ASSET_OP_SECRET_TRADE}"
     depends_on:
       route-init: {condition: service_completed_successfully}
@@ -384,6 +391,7 @@ services:
       kafka: {condition: service_healthy}
       game-login: {condition: service_healthy}
       game-mall: {condition: service_healthy}
+      game-content-guard: {condition: service_healthy}
     healthcheck:
       <<: *health
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18111/actuator/health/readiness > /dev/null && timeout 2 bash -c 'exec 3<>/dev/tcp/game-trade/20887'"]
@@ -496,6 +504,7 @@ services:
       GAME_SCENE_SCENEMANAGERURL: "tri://game-scene-manager:20882"
       GAME_SCENE_INBOX_URL: "tri://game-inbox:20918"
       GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
+      GAME_SCENE_CONTENT_GUARD_ENABLED: "true"
       GAME_ASSET_OP_SECRET_TRADE: "${GAME_ASSET_OP_SECRET_TRADE:?缺少 GAME_ASSET_OP_SECRET_TRADE}"
     depends_on:
       route-init: {condition: service_completed_successfully}

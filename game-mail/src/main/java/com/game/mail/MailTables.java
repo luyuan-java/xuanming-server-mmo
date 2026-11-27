@@ -9,8 +9,9 @@ public final class MailTables {
     public static PbMysql registry() {
         var db = new PbMysql();
         for (Message value : java.util.List.<Message>of(MailIdRow.getDefaultInstance(), MailRow.getDefaultInstance(),
-                     MailCampaignRow.getDefaultInstance(), MailCampaignShardRow.getDefaultInstance(),
-                     MailCampaignRecipientRow.getDefaultInstance(), MailBoxRow.getDefaultInstance(), MailStateRow.getDefaultInstance(),
+                     MailRequestReceiptRow.getDefaultInstance(), MailCampaignRow.getDefaultInstance(),
+                     MailCampaignShardRow.getDefaultInstance(), MailCampaignRecipientRow.getDefaultInstance(),
+                     MailBoxRow.getDefaultInstance(), MailStateRow.getDefaultInstance(),
                      MailPlayerOpSeqRow.getDefaultInstance(), MailAssetOpRow.getDefaultInstance()))
             db.register(value);
         return db;

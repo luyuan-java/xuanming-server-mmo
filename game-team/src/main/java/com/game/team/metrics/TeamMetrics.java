@@ -225,6 +225,9 @@ public final class TeamMetrics {
         if (TeamTips.isFault(code)) {
             return MatchOutcome.INTERNAL;
         }
+        if (code == com.game.table.MatchErrorTip.match_error.kMatchRankedRuleVersionMismatch_VALUE) {
+            return MatchOutcome.REJECTED;
+        }
         return TeamTips.isTeamCode(code) ? MatchOutcome.REJECTED : MatchOutcome.UNKNOWN_CODE;
     }
 

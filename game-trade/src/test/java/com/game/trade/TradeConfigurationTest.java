@@ -53,4 +53,13 @@ class TradeConfigurationTest {
         local.setResources(new org.springframework.core.io.ClassPathResource("application.yaml"));
         assertThat(local.getObject().getProperty("game.dubbo.player-trade-url")).contains("127.0.0.1:20881");
     }
+
+    @Test
+    void 生产模式未启用内容安全时交易UGC审核必须fail_closed() {
+        var prodGuard = com.game.trade.commerce.CommerceConfiguration.resolveTextGuard(null, com.game.common.RunMode.PROD);
+        assertThat(prodGuard.checkTitle(1L, "acc", "title", Deadline.after(1_000)))
+                .isEqualTo(com.game.trade.commerce.CommerceRules.TEXT_CHECK_UNAVAILABLE);
+        var devGuard = com.game.trade.commerce.CommerceConfiguration.resolveTextGuard(null, com.game.common.RunMode.DEV);
+        assertThat(devGuard.checkTitle(1L, "acc", "title", Deadline.after(1_000))).isZero();
+    }
 }

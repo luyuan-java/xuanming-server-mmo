@@ -3185,7 +3185,7 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 2. **帮战入账不被一人挡住、不给已删角色入账(§7.4 r2-gw#5、#6)**:入账目标的资产指令未决已满或角色冻结中时,改记一张待入账表、由循环用预发的同一个 op_id 补插;已删除的角色不写;按人分流、不整笔拒绝。
 3. **追杀令表索引与清理、点选不泄露(§7.4 r2-gw#7、#8)**:扣款终结按 escrow_op_id 找行要有索引;终态行保留 30 天后分批删;点选野外目标时「仅本帮可见」的追杀令不显示给别帮。
 4. **群仙问道赛领奖(批 W,主仓 `docs/planning/season-team-tournament-v1.md` 第七节)**:带附件而发件没装配时回可重试错误、不落已领取;邮件请求只由奖励行构造(过期时刻不传、标题正文在结算时冻结进奖励行),同一奖励每次重发逐字节相同;一条失败不挡其余。Java 的 match 发件身份与 mail 的生产者名单两边要对上。
-5. **生死状普通战书银两(批 X,主仓 `docs/planning/battle-jianghu-grudge-duel-phase1-implementation-plan.md` 末尾定案一节)**:退费只留 scene 一条通道(Java 现在用 `match_jianghu_refund` 加邮件退费,结果不明时与在线退双退或丢,要改);待退银两与道具预留共用同一次 SQL 终局复核,ABORT 或没有可裁决原件才退;先入账再清标记;别的局没结清时拒绝新备战;退费不受获取封禁拦。
+5. **生死状普通战书银两(批 X,主仓 `docs/planning/battle-jianghu-grudge-duel-phase1-implementation-plan.md` 末尾定案一节)**:退费只留 scene 一条通道(Java 现在用 `match_jianghu_refund` 加邮件退费,结果不明时与在线退双退或丢,要改);待退银两与道具预留共用同一次 SQL 终局复核,ABORT 或没有可裁决原件才退;先入账再清标记;别的局没结清时拒绝新备战;退费不受获取封禁拦。2026-11-27 补:资格预检也判这一条,scene 回 `CheckJianghuDuelEligibilityResponse.payer_silver_fee_pending = 4`,match 回新 tip `kJianghuDuelSilverFeePending`(Tip 表 `//jianghu_error` 段末,`ContractSync` 要同步);帮战 EXPIRED 注释改成实际含义、客户端补了状态 6 文案(共享客户端已改,Java 不用动);删角收尾补删帮战三张个人表(`guild_war_garrison` / `guild_war_player_state` / `guild_war_credit_owed`),删角触发的解散释放灵脉,Java 的注销清单同步核对。
 
 **验证**(Java 仓口径):按主仓各设计稿列的用例场景移植,至少覆盖:非追杀局带追杀令号不结单、灵脉快照不符重算、到期退回只退一次、满上限不结单;未装配发件不落已领取、重领请求逐字节相同;别局未结清拒绝备战、入账失败保留标记、终局 ABORT 退一次。
 

@@ -517,9 +517,21 @@ public class GuildConfiguration {
     @Bean
     public GuildService guildService(GuildStore store, GuildCache cache, GuildAccess access, GuildViews views,
                                      GuildRanks ranks, GuildPushes pushes, GuildIds guildIds, GuildTableLookup tables,
-                                     ObjectProvider<GuildService.TextGuard> textGuardProvider) {
+                                     ObjectProvider<GuildService.TextGuard> textGuardProvider,
+                                     @Value("${game.run-mode:prod}") String runMode) {
         return new GuildService(store, cache, access, views, ranks, pushes, guildIds::nextId, tables,
-                System::currentTimeMillis, textGuardProvider.getIfAvailable());
+                System::currentTimeMillis,
+                resolveTextGuard(textGuardProvider.getIfAvailable(), com.game.common.RunMode.parse(runMode)));
+    }
+
+    static GuildService.TextGuard resolveTextGuard(GuildService.TextGuard configured, com.game.common.RunMode runMode) {
+        if (configured != null || runMode != com.game.common.RunMode.PROD) {
+            return configured;
+        }
+        log.warn("[guild] prod 模式下未启用 game.guild.content-guard-enabled，帮会名/公告内容审核将 fail-closed 拒收");
+        return (scene, playerId, text) -> {
+            throw new IllegalStateException("content guard disabled in prod");
+        };
     }
 
     @Bean

@@ -68,4 +68,13 @@ class ChatSqlConfigurationTest {
                     assertNotNull(context.getBean(com.game.discovery.RedisKeys.class));
                 });
     }
+
+    @Test void 生产模式未启用内容安全时必须fail_closed_开发测试模式保持可选() {
+        var prodGuard = ChatConfiguration.resolveTextGuard(null, com.game.common.RunMode.PROD);
+        assertNotNull(prodGuard);
+        assertThrows(IllegalStateException.class, () -> prodGuard.check(
+                com.game.proto.content_guard.TextScene.TEXT_SCENE_CHAT_WORLD, 1L, "hello", true));
+        assertNull(ChatConfiguration.resolveTextGuard(null, com.game.common.RunMode.DEV));
+        assertNull(ChatConfiguration.resolveTextGuard(null, com.game.common.RunMode.TEST));
+    }
 }

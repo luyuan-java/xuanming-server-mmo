@@ -540,10 +540,11 @@ public final class TeamService {
                 return matchReject(caller, code, 0, snap, deadline);
             }
             if (request.getMatchMode() == MatchMode.MATCH_MODE_PVP_TEAM) {
-                // 正式人宠会武(PVP_TEAM)走本人真实养成，仅校验规则版本，不再强制要求确认免费预设。
+                // 正式人宠会武(PVP_TEAM)走本人真实养成，仅校验规则版本（对齐 Go sql_launch.go:261-262 返回 kMatchRankedRuleVersionMismatch）。
                 int reqVer = request.getRankedRuleVersion();
                 if (reqVer != 0 && reqVer != rankedRules.ruleVersion()) {
-                    return matchReject(caller, TeamTips.RANKED_PRESET_INVALID, 0, snap, deadline);
+                    return matchReject(caller, com.game.table.MatchErrorTip.match_error.kMatchRankedRuleVersionMismatch_VALUE,
+                            0, snap, deadline);
                 }
             }
             List<Long> roster = TeamRules.matchRoster(rec);

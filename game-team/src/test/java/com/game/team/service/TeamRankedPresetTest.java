@@ -71,11 +71,12 @@ class TeamRankedPresetTest {
                 TeamMatchFixture.deadline());
         assertThat(badPreset.getErrorMessage().getId()).isEqualTo(TeamTips.RANKED_PRESET_INVALID);
 
-        // 2. 正式人宠会武(PVP_TEAM)已解耦为本人真实养成：仅校验规则版本，不阻塞于免费预设确认
+        // 2. 正式人宠会武(PVP_TEAM)已解耦为本人真实养成：仅校验规则版本（不匹配回 kMatchRankedRuleVersionMismatch）
         TeamResponse badVerEarly = fx.service.startTeamMatch(leader, StartTeamMatchRequest.newBuilder()
                 .setExpectedTeamId(teamId).setBattleConfigId(5).setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM)
                 .setRankedRuleVersion(99).build(), TeamMatchFixture.deadline());
-        assertThat(badVerEarly.getErrorMessage().getId()).isEqualTo(TeamTips.RANKED_PRESET_INVALID);
+        assertThat(badVerEarly.getErrorMessage().getId())
+                .isEqualTo(com.game.table.MatchErrorTip.match_error.kMatchRankedRuleVersionMismatch_VALUE);
 
         // 3. 队长确认后视图仅队长已确认，整体仍未全员确认，且向队友推送 RANKED_PRESET_CONFIRMED
         TeamResponse cLeader = fx.service.confirmRankedPreset(leader, ConfirmRankedPresetRequest.newBuilder()
@@ -101,7 +102,8 @@ class TeamRankedPresetTest {
         TeamResponse badVerStart = fx.service.startTeamMatch(leader, StartTeamMatchRequest.newBuilder()
                 .setExpectedTeamId(teamId).setBattleConfigId(5).setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM)
                 .setRankedRuleVersion(99).build(), TeamMatchFixture.deadline());
-        assertThat(badVerStart.getErrorMessage().getId()).isEqualTo(TeamTips.RANKED_PRESET_INVALID);
+        assertThat(badVerStart.getErrorMessage().getId())
+                .isEqualTo(com.game.table.MatchErrorTip.match_error.kMatchRankedRuleVersionMismatch_VALUE);
 
         // 6. 新成员加入使原全员确认失效，但保留各自上次预设选择
         long third = fx.player();

@@ -2122,8 +2122,9 @@ public final class RankedStore {
     }
 
     /**
-     * 删角收尾清理（对齐 Go {@code role_fence_purge.go:190-258}）：
-     * 清空该角色在 {@code match_ranked_featured_build} 的展示名、清空对手宿敌行里的对方名并删除本人宿敌账本行。
+     * 删角收尾清理（对齐 Go {@code role_fence_purge.go:11-26, 186-258}）：
+     * 清空该角色在 {@code match_ranked_featured_build} 的展示名、清空对手宿敌行里的对方名并删除本人宿敌账本行，
+     * 随后整删该玩家在论剑四张个人表（{@code match_ranked_player_prefs / player_season / reward / battle}）中的全部行。
      */
     public static void purgePlayerRankedData(Connection c, long playerId) throws SQLException {
         java.util.TreeSet<Integer> seasons = new java.util.TreeSet<>();
@@ -2142,6 +2143,15 @@ public final class RankedStore {
                             seasons.add(sid);
                         }
                     }
+                }
+            }
+        }
+        try (PreparedStatement ps = c.prepareStatement("SELECT season_id FROM match_ranked_season");
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                int sid = rs.getInt(1);
+                if (sid != 0) {
+                    seasons.add(sid);
                 }
             }
         }
@@ -2179,6 +2189,18 @@ public final class RankedStore {
                     del.setObject(2, PbMysql.uint64(playerId));
                     del.executeUpdate();
                 }
+            }
+        }
+        String[] personalDeletes = {
+                "DELETE FROM match_ranked_player_prefs WHERE player_id=?",
+                "DELETE FROM match_ranked_player_season WHERE player_id=?",
+                "DELETE FROM match_ranked_reward WHERE player_id=?",
+                "DELETE FROM match_ranked_battle WHERE player_id=?"
+        };
+        for (String delSql : personalDeletes) {
+            try (PreparedStatement del = c.prepareStatement(delSql)) {
+                del.setObject(1, PbMysql.uint64(playerId));
+                del.executeUpdate();
             }
         }
     }

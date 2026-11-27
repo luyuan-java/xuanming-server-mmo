@@ -179,4 +179,15 @@ class GuildPropertiesTest {
         local.setResources(new org.springframework.core.io.ClassPathResource("application.yaml"));
         assertThat(local.getObject().getProperty("game.guild.activity.match-url")).contains("127.0.0.1:20888");
     }
+
+    @Test
+    void 生产模式未启用内容安全时帮会UGC审核必须fail_closed_开发测试模式保持可选() {
+        var prodGuard = GuildConfiguration.resolveTextGuard(null, com.game.common.RunMode.PROD);
+        assertThat(prodGuard).isNotNull();
+        assertThatThrownBy(() -> prodGuard.check(
+                com.game.proto.content_guard.TextScene.TEXT_SCENE_GUILD_NAME, 1L, "青云宗"))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(GuildConfiguration.resolveTextGuard(null, com.game.common.RunMode.DEV)).isNull();
+        assertThat(GuildConfiguration.resolveTextGuard(null, com.game.common.RunMode.TEST)).isNull();
+    }
 }

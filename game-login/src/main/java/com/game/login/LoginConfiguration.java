@@ -411,8 +411,18 @@ public class LoginConfiguration {
                                                    ObjectProvider<CreatePlayerHandler.TextGuard> textGuard,
                                                    ObjectProvider<com.game.login.handler.ZoneCreateRolePolicy> createRolePolicy) {
         return createPlayerHandler(store, characterRules, playerIds, props, loginMetrics, accountLogin,
-                zoneMergeFence, redis, redisKeys, textGuard.getIfAvailable(),
+                zoneMergeFence, redis, redisKeys, resolveTextGuard(textGuard.getIfAvailable(), props),
                 createRolePolicy.getIfAvailable(() -> com.game.login.handler.ZoneCreateRolePolicy.OPEN));
+    }
+
+    static CreatePlayerHandler.TextGuard resolveTextGuard(CreatePlayerHandler.TextGuard configured, LoginProperties props) {
+        if (configured != null || (props != null && props.devMode())) {
+            return configured;
+        }
+        log.warn("[login] prod 模式下未启用 game.login.content-guard-enabled，建角角色名内容审核将 fail-closed 拒收");
+        return (account, displayName) -> {
+            throw new IllegalStateException("content guard disabled in prod");
+        };
     }
 
     private CreatePlayerHandler createPlayerHandler(PlayerStore store, CharacterRules characterRules,

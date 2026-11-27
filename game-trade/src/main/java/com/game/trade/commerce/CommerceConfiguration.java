@@ -123,7 +123,7 @@ public class CommerceConfiguration {
                             .setAccount(account == null ? "" : account)
                             .setText(title)
                             .build());
-                    if (resp == null) {
+                    if (resp == null || resp.getVerdict() == com.game.proto.content_guard.TextVerdict.TEXT_VERDICT_UNSPECIFIED) {
                         return CommerceRules.TEXT_CHECK_UNAVAILABLE;
                     }
                     return resp.getVerdict() == com.game.proto.content_guard.TextVerdict.TEXT_VERDICT_PASS
@@ -134,15 +134,29 @@ public class CommerceConfiguration {
             };
         }
     }
+    /** 生产模式下未开启 content-guard 时必须 fail-closed（返回 TEXT_CHECK_UNAVAILABLE），禁止静默放行 UGC。 */
+    public static RmbConsignmentService.TextGuard resolveTextGuard(
+            RmbConsignmentService.TextGuard configured, com.game.common.RunMode runMode) {
+        if (configured != null) {
+            return configured;
+        }
+        if (runMode == com.game.common.RunMode.PROD) {
+            org.slf4j.LoggerFactory.getLogger(CommerceConfiguration.class)
+                    .warn("[trade] prod 模式下未启用 game.trade.content-guard-enabled，寄售标题/卖家评价内容审核将 fail-closed 拒收");
+            return (playerId, account, title, deadline) -> CommerceRules.TEXT_CHECK_UNAVAILABLE;
+        }
+        return RmbConsignmentService.TextGuard.ALLOW;
+    }
     @Bean
     @ConditionalOnProperty(name = "game.trade.rmb.enabled", havingValue = "true")
     public RmbConsignmentService rmbConsignmentService(CommerceEngine engine, OfficialMallClient mall,
             RmbConsignmentProperties properties,
             org.springframework.beans.factory.ObjectProvider<RmbConsignmentService.TextGuard> textGuard,
-            org.springframework.beans.factory.ObjectProvider<SellerCreditService.RoleOwnershipLookup> ownership) {
+            org.springframework.beans.factory.ObjectProvider<SellerCreditService.RoleOwnershipLookup> ownership,
+            @org.springframework.beans.factory.annotation.Value("${game.run-mode:prod}") String runMode) {
         return new RmbConsignmentService(engine, new RmbConsignmentClient(mall),
             new PlayerTradeClient(playerTrades, System.getenv("GAME_PLAYER_TRADE_SECRET")),
-            properties.currencies(), textGuard.getIfAvailable(() -> RmbConsignmentService.TextGuard.ALLOW),
+            properties.currencies(), resolveTextGuard(textGuard.getIfAvailable(), com.game.common.RunMode.parse(runMode)),
             ownership.getIfAvailable());
     }
     @Bean(initMethod = "start", destroyMethod = "close")

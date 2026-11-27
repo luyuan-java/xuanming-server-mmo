@@ -253,13 +253,17 @@ public final class RankStore {
             return FreezeRankGenerationResponse.newBuilder().setSettlementId(settlement).setWinnerCount(winners.size()).build();
         });
     }
+    /** 后台管理（经双人复核）可按单条摘除任意榜上作弊条目；整代隐藏仍严格仅允许开榜方。 */
+    public static final String ADMIN_CALLER = "admin";
     public void remove(String caller, RemoveRankEntryRequest in, boolean hide, Deadline d) throws SQLException {
         require(in.getBoardId() != 0 && in.getGeneration() != 0 && in.getRequestId() != 0
                         && (hide ? in.getEntityId() == 0 : in.getEntityId() != 0),
                 INVALID);
         String hash = (hide ? "hide:" : "remove:") + ServiceCallSignatures.digest(in);
         sql.tx(d, s -> {
-            var b = owned(s, in.getBoardId(), caller, in.getGeneration(), 0);
+            var b = s.one("SELECT " + BC + " FROM rank_board WHERE board_id=? FOR UPDATE", RankStore::board, U(in.getBoardId()));
+            require(b != null, NOT_FOUND);
+            require((b.producer.equals(caller) || (!hide && ADMIN_CALLER.equals(caller))) && b.generation == in.getGeneration(), CONFLICT);
             var old = s.one("SELECT request_hash FROM rank_mutation WHERE board_id=? AND generation=? AND request_id=?",
                     r -> r.getString(1), U(b.id), U(b.generation), U(in.getRequestId()));
             if (old != null) {

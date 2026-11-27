@@ -99,9 +99,21 @@ public class ChatConfiguration {
     @org.springframework.context.annotation.DependsOn("chatSqlReady")
     public ChatService chatService(JdbcChatStore store, RedisKeys keys, ChatMetrics metrics, ChatProperties props,
                                    ObjectProvider<ChatService.TextGuard> textGuard,
-                                   ObjectProvider<ChatService.WorldPublisher> worldPublisher) {
+                                   ObjectProvider<ChatService.WorldPublisher> worldPublisher,
+                                   @org.springframework.beans.factory.annotation.Value("${game.run-mode:prod}") String runMode) {
         return new ChatService(store, metrics, props, keys,
-                textGuard.getIfAvailable(), worldPublisher.getIfAvailable(() -> ChatService.WorldPublisher.NOOP));
+                resolveTextGuard(textGuard.getIfAvailable(), com.game.common.RunMode.parse(runMode)),
+                worldPublisher.getIfAvailable(() -> ChatService.WorldPublisher.NOOP));
+    }
+
+    static ChatService.TextGuard resolveTextGuard(ChatService.TextGuard configured, com.game.common.RunMode runMode) {
+        if (configured != null || runMode != com.game.common.RunMode.PROD) {
+            return configured;
+        }
+        log.warn("[chat] prod 模式下未启用 game.chat.content-guard-enabled，聊天内容审核将 fail-closed 拒收");
+        return (scene, playerId, text, allowAsyncPlatform) -> {
+            throw new IllegalStateException("content guard disabled in prod");
+        };
     }
 
     /** 显式开启 game.chat.content-guard-enabled=true 时接入内容安全 Dubbo 服务。 */

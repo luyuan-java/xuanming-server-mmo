@@ -107,6 +107,7 @@ public final class MailStore {
     }
     private record Mail(long id, long owner, long guild, int kind, int sender, long request, String hash, String title, String body,
             byte[] attachments, long sent, long expire, long campaign, long generation) {}
+    private record Receipt(long mailId, String hash, int kind) {}
     private record State(long read, long deleted, int claim, long op, long version, int reason) {}
     private static Mail mail(ResultSet r) throws SQLException {
         return new Mail(u64(r, 1), u64(r, 2), u64(r, 3), r.getInt(4), r.getInt(5), u64(r, 6), r.getString(7), r.getString(8),
@@ -211,6 +212,10 @@ public final class MailStore {
         try {
             return sql.tx(d, s -> {
                 lock(s, guard);
+                var receipt = findReceipt(s, in.getSenderKind(), in.getRequestId());
+                if (receipt != null) {
+                    return duplicateOrConflict(receipt, kind, hash);
+                }
                 var previous = s.one("SELECT " + MC + " FROM mail_message WHERE sender_kind=? AND request_id=?", MailStore::mail,
                         in.getSenderKind(), U(in.getRequestId()));
                 if (previous != null) {
@@ -234,6 +239,12 @@ public final class MailStore {
                     limit = maxActiveSystemMails;
                 }
                 require(count < limit, FULL);
+                // 发件判重收据与非活动邮件同事务写入，过期清理不删，确保清理后重试仍命中原 mail_id 绝不重复发物。
+                if (!campaign) {
+                    s.update("INSERT INTO mail_request_receipt (sender_kind,request_id,mail_id,request_hash,kind,created_ms) "
+                             + "VALUES (?,?,?,?,?,?)",
+                            in.getSenderKind(), U(in.getRequestId()), U(id), hash, kind, now);
+                }
                 s.update("INSERT INTO mail_message (" + MC + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", U(id), U(in.getRecipientPlayerId()),
                         U(in.getGuildId()), campaign ? 0 : kind, in.getSenderKind(), U(in.getRequestId()), hash, in.getTitle(), in.getBody(),
                         payload, now, expire, U(in.getCampaignId()), U(in.getManifestGeneration()));
@@ -266,8 +277,22 @@ public final class MailStore {
         }
     }
 
+    private static Receipt findReceipt(AuthorityJdbc.Session s, int senderKind, long requestId) throws SQLException {
+        return s.one("SELECT mail_id,request_hash,kind FROM mail_request_receipt WHERE sender_kind=? AND request_id=?",
+                r -> new Receipt(u64(r, 1), r.getString(2), r.getInt(3)), senderKind, U(requestId));
+    }
+
+    private static SendMailResponse duplicateOrConflict(Receipt receipt, int kind, String hash) {
+        require(receipt.hash.equals(hash) && receipt.kind == kind, CONFLICT);
+        return SendMailResponse.newBuilder().setMailId(receipt.mailId).setDuplicated(true).build();
+    }
+
     private SendMailResponse findExistingSend(Deadline d, int senderKind, long requestId, int kind, String hash) throws SQLException {
         return sql.read(d, s -> {
+            var receipt = findReceipt(s, senderKind, requestId);
+            if (receipt != null) {
+                return duplicateOrConflict(receipt, kind, hash);
+            }
             var old = s.one("SELECT " + MC + " FROM mail_message WHERE sender_kind=? AND request_id=?",
                     MailStore::mail, senderKind, U(requestId));
             return old == null ? null : duplicateOrConflict(s, old, kind, hash);

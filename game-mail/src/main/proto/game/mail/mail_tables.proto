@@ -40,6 +40,17 @@ message MailRow {
   uint64 campaign_id = 13;
   uint64 manifest_generation = 14;
 }
+// 发件判重收据：非活动邮件首次建信同事务落盘，过期清理不删，避免清行后上游重试重复发物。
+message MailRequestReceiptRow {
+  option (proto2mysql.table_name) = "mail_request_receipt";
+  option (proto2mysql.primary_key) = "sender_kind,request_id";
+  uint32 sender_kind = 1;
+  uint64 request_id = 2;
+  uint64 mail_id = 3;
+  string request_hash = 4;
+  uint32 kind = 5;
+  uint64 created_ms = 6;
+}
 // 有附件的系统邮件只在名单完整seal的同事务插入mail_message；导入中的活动不可见。
 message MailCampaignRow {
   option (proto2mysql.table_name) = "mail_campaign";

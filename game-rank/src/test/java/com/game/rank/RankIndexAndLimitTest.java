@@ -257,4 +257,53 @@ class RankIndexAndLimitTest {
         when(rs.getBoolean(anyInt())).thenAnswer(inv -> (Boolean) rows.get(idx[0])[(int) inv.getArgument(0) - 1]);
         return rs;
     }
+
+    @Test
+    void 后台admin可按单条摘除任意生产者榜上作弊条目_整代隐藏与非开榜方仍拒收() throws Exception {
+        AuthorityJdbc sql = mock(AuthorityJdbc.class);
+        AuthorityJdbc.Session session = mock(AuthorityJdbc.Session.class);
+        ResultSet boardRs = mock(ResultSet.class);
+        when(boardRs.getObject(1)).thenReturn(801L);
+        when(boardRs.getInt(2)).thenReturn(1);
+        when(boardRs.getInt(3)).thenReturn(1);
+        when(boardRs.getObject(4)).thenReturn(0L);
+        when(boardRs.getString(5)).thenReturn("s1");
+        when(boardRs.getObject(6)).thenReturn(1L);
+        when(boardRs.getString(7)).thenReturn("match");
+        when(boardRs.getObject(8)).thenReturn(1L);
+        when(boardRs.getObject(9)).thenReturn(10L);
+        when(boardRs.getBoolean(10)).thenReturn(false);
+        when(boardRs.getInt(11)).thenReturn(1);
+        when(boardRs.getObject(12)).thenReturn(0L);
+        when(boardRs.getString(13)).thenReturn("open-hash");
+        when(boardRs.getObject(14)).thenReturn(0L);
+        when(boardRs.getObject(15)).thenReturn(5L);
+
+        when(session.one(contains("FROM rank_board WHERE board_id=? FOR UPDATE"), any(), any()))
+                .thenAnswer(inv -> ((AuthorityJdbc.Row<?>) inv.getArgument(1)).apply(boardRs));
+        when(session.one(contains("FROM rank_mutation WHERE"), any(), any(), any(), any())).thenReturn(null);
+        when(session.update(anyString(), any())).thenReturn(1);
+        when(sql.tx(any(), any())).thenAnswer(inv -> ((AuthorityJdbc.Work<?>) inv.getArgument(1)).apply(session));
+
+        RankStore store = new RankStore(sql, mock(AuthorityIds.class), id -> true, () -> 10_000L);
+        RemoveRankEntryRequest removeOne = RemoveRankEntryRequest.newBuilder()
+                .setBoardId(801L).setGeneration(1L).setEntityId(999L).setRequestId(1001L).build();
+        // admin 摘除 match 榜单个作弊条目 -> 允许
+        store.remove("admin", removeOne, false, Deadline.after(5_000));
+        verify(session).update(contains("DELETE FROM rank_score"), any(), any(), any());
+
+        // admin 隐藏 match 榜整代 -> 拒绝 CONFLICT（整代隐藏严格仅开榜方）
+        RemoveRankEntryRequest hideAll = RemoveRankEntryRequest.newBuilder()
+                .setBoardId(801L).setGeneration(1L).setRequestId(1002L).build();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> store.remove("admin", hideAll, true, Deadline.after(5_000)))
+                .isInstanceOf(RankStore.Reject.class)
+                .extracting(e -> ((RankStore.Reject) e).tip)
+                .isEqualTo(RankStore.CONFLICT);
+
+        // 非开榜方且非 admin -> 单条摘除也拒绝 CONFLICT
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> store.remove("guild", removeOne, false, Deadline.after(5_000)))
+                .isInstanceOf(RankStore.Reject.class)
+                .extracting(e -> ((RankStore.Reject) e).tip)
+                .isEqualTo(RankStore.CONFLICT);
+    }
 }

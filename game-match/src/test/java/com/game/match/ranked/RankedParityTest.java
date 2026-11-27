@@ -502,7 +502,8 @@ class RankedParityTest {
             now.addAndGet(600_001L);
             assertThat(rankedStore.validateRankedRematchSource(66003L, p1, p2, 600_000L)).isFalse();
 
-            // 删角收尾：清空注销角色在 featured_build 与对手宿敌行的展示名并删除本人宿敌行。
+            // 删角收尾：清空注销角色在 featured_build 与对手宿敌行的展示名，并整删四张论剑个人表及本人宿敌行。
+            rankedStore.savePreset(p2, 101, 201, TABLES.ruleVersion());
             try (java.sql.Connection c = db.dataSource.getConnection()) {
                 c.setAutoCommit(false);
                 RankedStore.purgePlayerRankedData(c, p2);
@@ -513,12 +514,27 @@ class RankedParityTest {
             assertThat(prof1AfterPurge.getTopRivals(0).getOpponentName()).isEmpty();
             GetRankedProfileResponse prof2AfterPurge = service.getProfile(p2, GetRankedProfileRequest.getDefaultInstance());
             assertThat(prof2AfterPurge.getTopRivalsList()).isEmpty();
+            assertThat(countRows(db, "match_ranked_player_prefs", p2)).isZero();
+            assertThat(countRows(db, "match_ranked_player_season", p2)).isZero();
+            assertThat(countRows(db, "match_ranked_reward", p2)).isZero();
+            assertThat(countRows(db, "match_ranked_battle", p2)).isZero();
+            assertThat(countRows(db, "match_ranked_battle", p1)).isPositive();
 
             // 换季封榜释放旧季全部代表局 ref_count（66001 / 66003 均从 3 回到 2）。
             rankedStore.sealSeasonAndOpenNext(1, Map.of(), null);
             assertThat(refCount(db, 66001L)).isEqualTo(2);
             assertThat(refCount(db, 66003L)).isEqualTo(2);
             assertThat(rankedStore.isFeaturedRankedReplayAllowed(66003L)).isFalse();
+        }
+    }
+
+    private static int countRows(RatingTestDatabase db, String table, long playerId) throws Exception {
+        try (java.sql.Connection c = db.dataSource.getConnection();
+             java.sql.PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM " + table + " WHERE player_id=?")) {
+            ps.setObject(1, com.game.pbmysql.PbMysql.uint64(playerId));
+            try (java.sql.ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : -1;
+            }
         }
     }
 

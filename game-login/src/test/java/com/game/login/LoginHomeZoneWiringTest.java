@@ -178,4 +178,14 @@ class LoginHomeZoneWiringTest {
         assertThat(allowed.getPlayers(0).getPlayer().getZoneId()).isEqualTo(3);
         assertThat(asked).containsExactly(2, 3);
     }
+
+    @Test
+    void 生产模式未启用内容安全时建角审核必须fail_closed_开发模式保持可选() {
+        var prodGuard = LoginConfiguration.resolveTextGuard(null, props);
+        assertThat(prodGuard).isNotNull();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> prodGuard.checkRoleName("acc", "道友"))
+                .isInstanceOf(IllegalStateException.class);
+        LoginProperties devProps = new LoginProperties("dev", null, null, null, null, null, null, null, null, null, null, null);
+        assertThat(LoginConfiguration.resolveTextGuard(null, devProps)).isNull();
+    }
 }

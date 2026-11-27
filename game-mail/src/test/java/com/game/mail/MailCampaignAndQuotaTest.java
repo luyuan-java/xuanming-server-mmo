@@ -267,6 +267,48 @@ class MailCampaignAndQuotaTest {
                 .isEqualTo(MailErrorTip.mail_error.kMailRequestConflict_VALUE);
     }
 
+    @Test
+    void 邮件过期清行后重发凭mail_request_receipt判重不重复发物且摘要不符回CONFLICT() throws Exception {
+        assertThat(MailTables.registry().tables().keySet()).contains("mail_request_receipt");
+
+        AuthorityJdbc sql = mock(AuthorityJdbc.class);
+        AuthorityIds ids = mock(AuthorityIds.class);
+        SendMailRequest req = SendMailRequest.newBuilder()
+                .setSenderKind(MailStore.sender("match"))
+                .setRequestId(77001L)
+                .setRecipientPlayerId(10001L)
+                .setTitle("论剑赛季奖励")
+                .setBody("请查收附件")
+                .build();
+        String expectedHash = com.game.discovery.serviceauth.ServiceCallSignatures.digest(req);
+
+        AuthorityJdbc.Session readSession = mock(AuthorityJdbc.Session.class);
+        ResultSet receiptRs = mock(ResultSet.class);
+        when(receiptRs.getObject(1)).thenReturn(99001L);
+        when(receiptRs.getString(2)).thenReturn(expectedHash);
+        when(receiptRs.getInt(3)).thenReturn(1);
+        when(readSession.one(contains("FROM mail_request_receipt WHERE sender_kind=? AND request_id=?"), any(), any(), any()))
+                .thenAnswer(inv -> ((AuthorityJdbc.Row<?>) inv.getArgument(1)).apply(receiptRs));
+        // mail_message 已被过期清理删除（回 null）
+        when(readSession.one(contains("FROM mail_message WHERE sender_kind=? AND request_id=?"), any(), any(), any()))
+                .thenReturn(null);
+        when(sql.read(any(), any())).thenAnswer(inv -> ((AuthorityJdbc.Work<?>) inv.getArgument(1)).apply(readSession));
+
+        MailStore store = new MailStore(sql, ids, id -> true, () -> 2_000_000L);
+        SendMailResponse replayed = store.send("match", 1, req, budget());
+        assertThat(replayed.getMailId()).isEqualTo(99001L);
+        assertThat(replayed.getDuplicated()).isTrue();
+        verify(sql, never()).tx(any(), any());
+
+        // 同键不同请求内容（篡改正文/附件）必须回 CONFLICT，不放行也不重插
+        SendMailRequest tampered = req.toBuilder().setBody("篡改内容").build();
+        assertThatThrownBy(() -> store.send("match", 1, tampered, budget()))
+                .isInstanceOf(MailStore.Reject.class)
+                .extracting(e -> ((MailStore.Reject) e).tip)
+                .isEqualTo(MailErrorTip.mail_error.kMailRequestConflict_VALUE);
+        verify(sql, never()).tx(any(), any());
+    }
+
     private static void stubCampaign(AuthorityJdbc.Session session, long expectedCount, int shardCount) throws Exception {
         when(session.one(contains("FROM mail_campaign WHERE"), any(), any(), any(), any())).thenAnswer(inv -> {
             AuthorityJdbc.Row<?> mapper = inv.getArgument(1);
