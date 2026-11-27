@@ -374,6 +374,27 @@ final class GuildWarServiceTest {
                             org.mockito.Mockito.when(rs.getInt(org.mockito.ArgumentMatchers.anyInt()))
                                     .thenAnswer(g -> ((Number) row[(Integer) g.getArgument(0)]).intValue());
                         }
+                    } else if (sql.contains("FROM guild_war_bounty WHERE bounty_id = ? FOR UPDATE")) {
+                        org.mockito.Mockito.when(rs.next()).thenReturn(true, false);
+                        org.mockito.Mockito.when(rs.getLong(1)).thenReturn(8001L);
+                        org.mockito.Mockito.when(rs.getInt(2)).thenReturn(1);
+                        org.mockito.Mockito.when(rs.getLong(3)).thenReturn(101L);
+                        org.mockito.Mockito.when(rs.getLong(4)).thenReturn(1001L);
+                        org.mockito.Mockito.when(rs.getLong(5)).thenReturn(201L);
+                        org.mockito.Mockito.when(rs.getLong(6)).thenReturn(1002L);
+                        org.mockito.Mockito.when(rs.getInt(7)).thenReturn(GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_NORMAL_SILVER_VALUE);
+                        org.mockito.Mockito.when(rs.getLong(8)).thenReturn(4500L);
+                        org.mockito.Mockito.when(rs.getLong(9)).thenReturn(500L);
+                        org.mockito.Mockito.when(rs.getInt(10)).thenReturn(1);
+                        org.mockito.Mockito.when(rs.getInt(11)).thenReturn(2);
+                        org.mockito.Mockito.when(rs.getInt(12)).thenReturn(0);
+                        org.mockito.Mockito.when(rs.getString(13)).thenReturn("");
+                        org.mockito.Mockito.when(rs.getLong(14)).thenReturn(0L);
+                        org.mockito.Mockito.when(rs.getLong(15)).thenReturn(now.get() - 10_000L);
+                        org.mockito.Mockito.when(rs.getLong(16)).thenReturn(now.get() + 60_000L);
+                        org.mockito.Mockito.when(rs.getLong(17)).thenReturn(0L);
+                        org.mockito.Mockito.when(rs.getLong(18)).thenReturn(0L);
+                        org.mockito.Mockito.when(rs.getLong(19)).thenReturn(0L);
                     } else {
                         org.mockito.Mockito.when(rs.next()).thenReturn(false);
                     }
@@ -415,16 +436,30 @@ final class GuildWarServiceTest {
                 900_001L, 1, GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_BOUNTY_HUNT_VALUE, 0, 8001L,
                 1001L, 1002L, 1, 5, 0, 0, 0, 2, 0L, 4500L, 100,
                 60L, 1000L, 50L, 30L, 20L, 500L, 10L, 15L, "{}".getBytes(), t);
+        GuildWarStore.BountySettlePlan plan = new GuildWarStore.BountySettlePlan(
+                true, true, 0, "", 3, 0, "", 101L, 1001L, 4500L, 0L, null, 0L, 0,
+                101L, 1001L, 0L, 0L, null, 0L, 0L);
         assertThat(jdbc.settleBattle(rec, weekKey, 20261126, List.of(101L), List.of(201L),
-                false, 0L, true, 3, 0, "", 101L, 600L, 10L, t)).isTrue();
+                null, false, 0L, plan, 600L, 10L, t)).isTrue();
         assertThat(checkedOut.get()).isZero();
         assertThat(executedSql).anyMatch(s -> s.contains("guild_war_player_state WHERE player_id = ? FOR UPDATE"));
-        assertThat(executedSql).anyMatch(s -> s.contains("guild_war_bounty WHERE bounty_id=? FOR UPDATE"));
+        assertThat(executedSql).anyMatch(s -> s.contains("guild_war_bounty WHERE bounty_id = ? FOR UPDATE"));
+        int playerStateIdx = -1, bountyLockIdx = -1;
+        for (int i = 0; i < executedSql.size(); i++) {
+            if (playerStateIdx < 0 && executedSql.get(i).contains("guild_war_player_state WHERE player_id = ? FOR UPDATE")) playerStateIdx = i;
+            if (bountyLockIdx < 0 && executedSql.get(i).contains("guild_war_bounty WHERE bounty_id = ? FOR UPDATE")) bountyLockIdx = i;
+        }
+        assertThat(bountyLockIdx).as("严格锁序 16(player_state) -> 17(bounty)").isGreaterThan(playerStateIdx);
         Object[] defRow = playerRows.get(201L);
         assertThat(defRow).isNotNull();
         assertThat(((Number) defRow[11]).longValue()).as("悬赏豁免期更新不得覆盖本场刚累计的守方战功").isEqualTo(15L);
         assertThat(((Number) defRow[14]).longValue()).as("悬赏豁免期必须落盘").isEqualTo(t + 600_000L);
+        assertThat(((Number) defRow[15]).intValue()).as("守方并非领赏人，不得误改其 bounty_payout_day_key").isZero();
         assertThat(((Number) defRow[4]).longValue()).as("参战后必须刷新免战冷却").isGreaterThan(t);
+        Object[] atkRow = playerRows.get(101L);
+        assertThat(atkRow).isNotNull();
+        assertThat(((Number) atkRow[15]).intValue()).as("猎手领赏后记录当日 dayKey").isEqualTo(20261126);
+        assertThat(((Number) atkRow[16]).intValue()).as("猎手当日领赏次数自增为 1").isEqualTo(1);
     }
 
     @Test
@@ -463,7 +498,7 @@ final class GuildWarServiceTest {
                     opViews.put(op.opId(), new com.game.guild.service.EconomyViews.OrderView(
                             GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_REJECTED,
                             com.game.guild.asset.AssetOpDecisions.REASON_CURRENCY_INSUFFICIENT));
-                    store.finalizeEscrowBounty(op.opId(), GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_EXPIRED_VALUE);
+                    store.finalizeEscrowBounty(op.opId(), GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ESCROW_FAILED_VALUE);
                 } else {
                     opViews.put(op.opId(), new com.game.guild.service.EconomyViews.OrderView(
                             GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED, 0));
@@ -561,6 +596,27 @@ final class GuildWarServiceTest {
                         org.mockito.Mockito.when(rs.next()).thenReturn(true, false);
                         org.mockito.Mockito.when(rs.getLong(1)).thenReturn(1L);
                         org.mockito.Mockito.when(rs.getLong(2)).thenReturn(1_795_430_400_000L);
+                    } else if (sql.contains("FROM guild_war_bounty WHERE bounty_id = ? FOR UPDATE")) {
+                        org.mockito.Mockito.when(rs.next()).thenReturn(true, false);
+                        org.mockito.Mockito.when(rs.getLong(1)).thenReturn(8001L);
+                        org.mockito.Mockito.when(rs.getInt(2)).thenReturn(1);
+                        org.mockito.Mockito.when(rs.getLong(3)).thenReturn(101L);
+                        org.mockito.Mockito.when(rs.getLong(4)).thenReturn(1001L);
+                        org.mockito.Mockito.when(rs.getLong(5)).thenReturn(201L);
+                        org.mockito.Mockito.when(rs.getLong(6)).thenReturn(1002L);
+                        org.mockito.Mockito.when(rs.getInt(7)).thenReturn(GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_NORMAL_SILVER_VALUE);
+                        org.mockito.Mockito.when(rs.getLong(8)).thenReturn(4500L);
+                        org.mockito.Mockito.when(rs.getLong(9)).thenReturn(500L);
+                        org.mockito.Mockito.when(rs.getInt(10)).thenReturn(1);
+                        org.mockito.Mockito.when(rs.getInt(11)).thenReturn(2);
+                        org.mockito.Mockito.when(rs.getInt(12)).thenReturn(0);
+                        org.mockito.Mockito.when(rs.getString(13)).thenReturn("");
+                        org.mockito.Mockito.when(rs.getLong(14)).thenReturn(0L);
+                        org.mockito.Mockito.when(rs.getLong(15)).thenReturn(now.get() - 10_000L);
+                        org.mockito.Mockito.when(rs.getLong(16)).thenReturn(now.get() + 60_000L);
+                        org.mockito.Mockito.when(rs.getLong(17)).thenReturn(0L);
+                        org.mockito.Mockito.when(rs.getLong(18)).thenReturn(0L);
+                        org.mockito.Mockito.when(rs.getLong(19)).thenReturn(0L);
                     } else {
                         org.mockito.Mockito.when(rs.next()).thenReturn(false);
                     }
@@ -602,6 +658,152 @@ final class GuildWarServiceTest {
         assertThat(bountyIdx).isGreaterThan(stateIdx);
     }
 
+    @Test
+    void batchVPreventsForgedLeylineThirdPartyChipCounterKillWipeDailyCapLossAndRefundsTearUpAndExpiry() throws Exception {
+        Deadline d = Deadline.after(3000);
+
+        // 1. LIVE_PLAYER / BOUNTY 携带伪造 leyline_id 必须归零（r2-gw#1）
+        com.game.proto.guild.StartGuildWarBattleResponse liveForged = service.startGuildWarBattle(
+                101L, com.game.proto.guild.StartGuildWarBattleRequest.newBuilder()
+                        .setTargetKind(GuildWarTargetKind.GUILD_WAR_TARGET_KIND_LIVE_PLAYER)
+                        .setTargetPlayerId(201L)
+                        .setLeylineId(2)
+                        .build(), d);
+        assertThat(liveForged.getErrorMessage().getId()).isZero();
+        assertThat(lastMatchReq.getActivityContext().getGuildWar().getLeylineId()).isZero();
+
+        // 2. 第三方灵脉防蹭旗：帮会 1003 占领 2 号灵脉，帮会 1001 vs 1002 在 2 号灵脉结算不得掉 1003 的旗血（r2-gw#1）
+        store.setLeylineOwner(1, 2, 1003L);
+        int hpBeforeThirdParty = store.listLeylines(1).stream()
+                .filter(l -> l.leylineId() == 2).findFirst().orElseThrow().bannerHp();
+        BattleResultEvent thirdPartyFight = BattleResultEvent.newBuilder()
+                .setBattleId(890_001L)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                .setTotalRounds(3)
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(101L))
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(201L))
+                .setActivityContext(BattleActivityContext.newBuilder()
+                        .setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR)
+                        .setGuildWar(GuildWarBattleContext.newBuilder()
+                                .setWarBattleKind(GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_LEYLINE_PVP_VALUE)
+                                .setLeylineId(2)
+                                .setAttackerGuildId(1001L)
+                                .setDefenderGuildId(1002L)
+                                .setZoneId(1).build()))
+                .build();
+        assertThat(service.settleBattleResult(thirdPartyFight)).isTrue();
+        assertThat(store.listLeylines(1).stream().filter(l -> l.leylineId() == 2).findFirst().orElseThrow().bannerHp())
+                .isEqualTo(hpBeforeThirdParty);
+
+        // 3. 灵脉快照并发过时自动重试并基于最新旗血扣减（r2-gw#3）
+        store.setLeylineOwner(1, 2, 1002L);
+        store.injectStaleLeylineOnce();
+        BattleResultEvent retryFight = thirdPartyFight.toBuilder().setBattleId(890_002L).build();
+        assertThat(service.settleBattleResult(retryFight)).isTrue();
+        // 首次尝试时并发扣了 50 -> 550，重试后按 550 - 120 = 430 落库
+        assertThat(store.listLeylines(1).stream().filter(l -> l.leylineId() == 2).findFirst().orElseThrow().bannerHp())
+                .isEqualTo(hpBeforeThirdParty - 50 - GuildWarRules.DEFAULT_LEYLINE_PVP_DAMAGE);
+
+        // 4. 非追杀局或伪造对局携 bounty_id 不得清空已有 counter_kills
+        PostGuildWarBountyResponse posted = service.postGuildWarBounty(101L, PostGuildWarBountyRequest.newBuilder()
+                .setTargetPlayerId(201L)
+                .setTier(GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_NORMAL_SILVER)
+                .setPublicBoard(true).build(), d);
+        long bountyId = posted.getBounty().getBountyId();
+        BattleResultEvent counter1 = BattleResultEvent.newBuilder()
+                .setBattleId(890_003L)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN)
+                .setTotalRounds(4)
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(101L))
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(201L))
+                .setActivityContext(BattleActivityContext.newBuilder()
+                        .setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR)
+                        .setGuildWar(GuildWarBattleContext.newBuilder()
+                                .setWarBattleKind(GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_BOUNTY_HUNT_VALUE)
+                                .setBountyId(bountyId)
+                                .setAttackerGuildId(1001L)
+                                .setDefenderGuildId(1002L)
+                                .setZoneId(1).build()))
+                .build();
+        assertThat(service.settleBattleResult(counter1)).isTrue();
+        assertThat(store.getBounty(bountyId).orElseThrow().counterKills()).isEqualTo(1);
+
+        // 同一 bounty_id 被塞进 PANEL_PVP 非追杀局：必须忽略且保留 counterKills == 1
+        BattleResultEvent nonBountyKind = counter1.toBuilder()
+                .setBattleId(890_004L)
+                .setActivityContext(BattleActivityContext.newBuilder()
+                        .setKind(eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR)
+                        .setGuildWar(GuildWarBattleContext.newBuilder()
+                                .setWarBattleKind(GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_PANEL_PVP_VALUE)
+                                .setBountyId(bountyId)
+                                .setAttackerGuildId(1001L)
+                                .setDefenderGuildId(1002L)
+                                .setZoneId(1).build()))
+                .build();
+        assertThat(service.settleBattleResult(nonBountyKind)).isTrue();
+        assertThat(store.getBounty(bountyId).orElseThrow().counterKills()).isEqualTo(1);
+
+        // 5. 猎手达到每日领赏上限时不得结单吞托管，保持 ACTIVE（r2-gw#2）
+        int weekKey = com.game.common.time.GameDay.weekKey(now.get());
+        int dayKey = com.game.common.time.GameDay.dayKey(now.get());
+        GuildWarStore.PlayerStateRow cappedState = new GuildWarStore.PlayerStateRow(
+                101L, 1, 0, 0L, 1, 0L, 0, 0, 0L, weekKey, 0L, 0, 0, 0L,
+                dayKey, GuildWarRules.DEFAULT_BOUNTY_DAILY_PAYOUT_CAP, 0L, 0L, now.get());
+        store.updateStance(cappedState);
+        BattleResultEvent cappedWin = counter1.toBuilder()
+                .setBattleId(890_005L)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
+                .build();
+        assertThat(service.settleBattleResult(cappedWin)).isTrue();
+        assertThat(store.getBounty(bountyId).orElseThrow().status()).isEqualTo(2);
+
+        // 6. 资产通道下反杀撕单：目标拿一半银两、发布者同事务拿回另一半银两；公费档撕单退一半帮会资金（r2-gw#2）
+        List<com.game.guild.asset.AssetOp> delivered = new ArrayList<>();
+        GuildWarService wired = new GuildWarService(store, new GuildWarService.GuildLookup() {
+            @Override
+            public Optional<GuildData> findByPlayer(long playerId, Deadline dl) {
+                return playerId == 201L ? Optional.of(GUILD_B) : Optional.of(GUILD_A);
+            }
+            @Override
+            public Optional<GuildData> findByGuildId(long guildId, Deadline dl) {
+                return guildId == 1002L ? Optional.of(GUILD_B) : Optional.of(GUILD_A);
+            }
+        }, () -> null, null, null, null, null, null, idGen::incrementAndGet, now::get,
+                (op, origin, budgetMs) -> {
+                    delivered.add(op);
+                    return java.util.concurrent.CompletableFuture.completedFuture(null);
+                },
+                (opId, dl) -> new com.game.guild.service.EconomyViews.OrderView(
+                        GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED, 0),
+                java.time.Duration.ofSeconds(30), true);
+        BattleResultEvent tearUpSilver = counter1.toBuilder()
+                .setBattleId(890_006L)
+                .clearTeams()
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(102L))
+                .addTeams(BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(201L))
+                .build();
+        assertThat(wired.settleBattleResult(tearUpSilver)).isTrue();
+        assertThat(store.getBounty(bountyId).orElseThrow().status()).isEqualTo(4);
+        assertThat(delivered).anyMatch(op -> op.txType() == com.game.proto.TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE
+                && op.playerId() == 201L && op.bundle().getCurrencies(0).getAmount() == 2250L);
+        assertThat(delivered).anyMatch(op -> op.txType() == com.game.proto.TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE
+                && op.playerId() == 101L && op.bundle().getCurrencies(0).getAmount() == 2250L);
+
+        // 7. 公费档到期扫描退款：置 EXPIRED(5) 并原路退回全额预扣帮会资金，二次扫描幂等为 0（r2-gw#2）
+        PostGuildWarBountyResponse pubPosted = service.postGuildWarBounty(101L, PostGuildWarBountyRequest.newBuilder()
+                .setTargetPlayerId(201L)
+                .setTier(GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_GUILD_PUBLIC)
+                .setPublicBoard(true).build(), d);
+        assertThat(pubPosted.getErrorMessage().getId()).isZero();
+        long pubId = pubPosted.getBounty().getBountyId();
+        now.addAndGet(GuildWarRules.DEFAULT_BOUNTY_TTL_SEC * 1000L + 1_000L);
+        assertThat(wired.expireDueBounties(16, d)).isEqualTo(1);
+        assertThat(store.getBounty(pubId).orElseThrow().status())
+                .isEqualTo(GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_EXPIRED_VALUE);
+        assertThat(store.guildFundsRefunded(1001L)).isEqualTo(GuildWarRules.DEFAULT_BOUNTY_PUBLIC_FUNDS);
+        assertThat(wired.expireDueBounties(16, d)).isZero();
+    }
+
     /** 轻量级内存仓储替身，仅单测使用（无外部 MySQL / H2 依赖）。 */
     private static final class InMemoryWarStore extends GuildWarStore {
         private final Map<String, LeylineRow> leylines = new HashMap<>();
@@ -638,9 +840,52 @@ final class GuildWarServiceTest {
                     e.setValue(new BountyRow(b.bountyId(), b.zoneId(), b.issuerPlayerId(), b.issuerGuildId(),
                             b.targetPlayerId(), b.targetGuildId(), b.tier(), b.escrowSilver(), b.taxSilver(),
                             b.publicBoard(), nextStatus, b.counterKills(), b.counterKillersJson(), b.escrowOpId(),
-                            b.createdAtMs(), b.expiresAtMs(), b.resolvedAtMs(), b.winnerPlayerId()));
+                            b.createdAtMs(), b.expiresAtMs(), b.resolvedAtMs(), b.winnerPlayerId(), b.escrowGuildFunds()));
                 }
             }
+        }
+
+        private final Map<Long, Long> guildFundsRefunded = new HashMap<>();
+        private int failStaleLeylineOnce;
+
+        void injectStaleLeylineOnce() {
+            failStaleLeylineOnce = 1;
+        }
+
+        long guildFundsRefunded(long guildId) {
+            return guildFundsRefunded.getOrDefault(guildId, 0L);
+        }
+
+        @Override
+        public List<BountyRow> listExpiredActiveBounties(long nowMs, int limit) {
+            return bounties.values().stream()
+                    .filter(b -> b.status() == 2 && Long.compareUnsigned(b.expiresAtMs(), nowMs) <= 0)
+                    .limit(limit).toList();
+        }
+
+        @Override
+        public ExpireBountyResult expireBountyWithRefund(BountyRow candidate, long refundOpId,
+                                                         com.game.api.proto.AssetBundle refundBundle,
+                                                         long leaseUntilMs, long leaseToken, long nowMs) {
+            BountyRow cur = bounties.get(candidate.bountyId());
+            if (cur == null || cur.status() != 2 || Long.compareUnsigned(cur.expiresAtMs(), nowMs) > 0) {
+                return new ExpireBountyResult(false, null);
+            }
+            boolean isPublic = cur.tier() == GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_GUILD_PUBLIC_VALUE;
+            if (isPublic && cur.escrowGuildFunds() > 0) {
+                guildFundsRefunded.merge(cur.issuerGuildId(), cur.escrowGuildFunds(), Long::sum);
+            }
+            com.game.guild.asset.AssetOp op = (!isPublic && cur.escrowSilver() > 0 && refundOpId != 0 && refundBundle != null)
+                    ? new com.game.guild.asset.AssetOp(refundOpId, cur.issuerPlayerId(),
+                    com.game.api.proto.AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE, 3L, nowMs, refundOpId,
+                    com.game.proto.TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE, refundBundle, 0, 0L, leaseToken, 0)
+                    : null;
+            bounties.put(cur.bountyId(), new BountyRow(cur.bountyId(), cur.zoneId(), cur.issuerPlayerId(),
+                    cur.issuerGuildId(), cur.targetPlayerId(), cur.targetGuildId(), cur.tier(), cur.escrowSilver(),
+                    cur.taxSilver(), cur.publicBoard(), 5, cur.counterKills(), cur.counterKillersJson(),
+                    cur.escrowOpId(), cur.createdAtMs(), cur.expiresAtMs(), nowMs, cur.winnerPlayerId(),
+                    cur.escrowGuildFunds()));
+            return new ExpireBountyResult(true, op);
         }
 
         @Override
@@ -686,17 +931,28 @@ final class GuildWarServiceTest {
         @Override
         public SettleBattleResult settleBattleWithAssets(BattleRow battle, int weekKey, int dayKey,
                                                          List<Long> attackerIds, List<Long> defenderIds,
-                                                         boolean capturedLeyline, long nextShieldUntilMs,
-                                                         boolean bountyResolved, int nextBountyStatus,
-                                                         int nextCounterKills, String nextCounterKillersJson,
-                                                         long winnerPlayerId, long bountyImmunitySec, long protectSec,
+                                                         LeylineBasis leylineBasis, boolean capturedLeyline,
+                                                         long nextShieldUntilMs, BountySettlePlan bountyPlan,
+                                                         long bountyImmunitySec, long protectSec,
                                                          long attackerGuildFunds, long defenderGuildFunds,
                                                          List<PlayerBattleCredit> credits, long leaseUntilMs, long nowMs) {
-            boolean wasActive = battle.bountyId() != 0 && bounties.containsKey(battle.bountyId())
+            BountySettlePlan plan = bountyPlan == null ? BountySettlePlan.NONE : bountyPlan;
+            if (leylineBasis != null && failStaleLeylineOnce > 0) {
+                failStaleLeylineOnce--;
+                String k = battle.zoneId() + ":" + leylineBasis.leylineId();
+                LeylineRow cur = leylines.get(k);
+                if (cur != null) {
+                    leylines.put(k, new LeylineRow(cur.zoneId(), cur.leylineId(), cur.ownerGuildId(),
+                            Math.max(0, cur.bannerHp() - 50), cur.shieldUntilMs(), cur.capturedAtMs(),
+                            cur.lastDividendAtMs(), cur.dividendWeekKey(), cur.weeklyDividendCount(),
+                            cur.lastSiegeAlertMs(), nowMs));
+                }
+                throw new WarRuleException("stale_snapshot");
+            }
+            boolean wasActive = plan.touch() && battle.bountyId() != 0 && bounties.containsKey(battle.bountyId())
                     && bounties.get(battle.bountyId()).status() == 2;
-            boolean ok = settleBattle(battle, weekKey, dayKey, attackerIds, defenderIds, capturedLeyline, nextShieldUntilMs,
-                    bountyResolved, nextBountyStatus, nextCounterKills, nextCounterKillersJson, winnerPlayerId,
-                    bountyImmunitySec, protectSec, nowMs);
+            boolean ok = settleBattle(battle, weekKey, dayKey, attackerIds, defenderIds, leylineBasis, capturedLeyline,
+                    nextShieldUntilMs, plan, bountyImmunitySec, protectSec, nowMs);
             if (!ok) return new SettleBattleResult(false, false, List.of());
             List<com.game.guild.asset.AssetOp> ops = new ArrayList<>();
             for (PlayerBattleCredit cr : credits) {
@@ -706,17 +962,24 @@ final class GuildWarServiceTest {
                             com.game.proto.TransactionType.TX_GUILD_WAR_REWARD_VALUE, cr.bundle(), 0, 0L, cr.leaseToken(), 0));
                 }
             }
-            return new SettleBattleResult(true, wasActive && bountyResolved, ops);
-        }
-
-        @Override
-        public Optional<com.game.guild.asset.AssetOp> enqueueBountyPayout(long playerId, long guildId, int zoneId,
-                                                                          int weekKey, int dayKey, int dailyPayoutLimit,
-                                                                          long opId, com.game.api.proto.AssetBundle bundle,
-                                                                          long leaseUntilMs, long leaseToken, long nowMs) {
-            return Optional.of(new com.game.guild.asset.AssetOp(opId, playerId,
-                    com.game.api.proto.AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE, 2L, nowMs, opId,
-                    com.game.proto.TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE, bundle, 0, 0L, leaseToken, 0));
+            if (plan.touch() && plan.resolved()) {
+                if (plan.rewardSilver() > 0 && plan.rewardOpId() != 0 && plan.rewardBundle() != null) {
+                    ops.add(new com.game.guild.asset.AssetOp(plan.rewardOpId(), plan.winnerPlayerId(),
+                            com.game.api.proto.AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE, 2L, nowMs, plan.rewardOpId(),
+                            com.game.proto.TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE, plan.rewardBundle(), 0, 0L,
+                            plan.rewardLeaseToken(), 0));
+                }
+                if (plan.issuerRefundSilver() > 0 && plan.issuerRefundOpId() != 0 && plan.issuerRefundBundle() != null) {
+                    ops.add(new com.game.guild.asset.AssetOp(plan.issuerRefundOpId(), plan.issuerPlayerId(),
+                            com.game.api.proto.AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE, 3L, nowMs, plan.issuerRefundOpId(),
+                            com.game.proto.TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE, plan.issuerRefundBundle(), 0, 0L,
+                            plan.issuerRefundLeaseToken(), 0));
+                }
+                if (plan.issuerRefundGuildFunds() > 0 && plan.issuerGuildId() != 0) {
+                    guildFundsRefunded.merge(plan.issuerGuildId(), plan.issuerRefundGuildFunds(), Long::sum);
+                }
+            }
+            return new SettleBattleResult(true, wasActive && plan.resolved(), ops);
         }
 
         @Override
@@ -829,7 +1092,7 @@ final class GuildWarServiceTest {
             }
             BountyRow row = new BountyRow(bountyId, zoneId, issuerPlayerId, issuerGuildId, targetPlayerId, targetGuildId,
                     tier.getNumber(), spec.poolSilver(), spec.taxSilver(), publicBoard ? 1 : 0, status, 0, "",
-                    escrowOpId, nowMs, nowMs + ttlSec * 1000L, 0L, 0L);
+                    escrowOpId, nowMs, nowMs + ttlSec * 1000L, 0L, 0L, spec.costGuildFunds());
             bounties.put(bountyId, row);
             return row;
         }
@@ -868,22 +1131,59 @@ final class GuildWarServiceTest {
 
         @Override
         public boolean settleBattle(BattleRow battle, int weekKey, int dayKey, List<Long> attackerIds,
-                                    List<Long> defenderIds, boolean capturedLeyline, long nextShieldUntilMs,
-                                    boolean bountyResolved, int nextBountyStatus, int nextCounterKills,
-                                    String nextCounterKillersJson, long winnerPlayerId, long bountyImmunitySec,
+                                    List<Long> defenderIds, LeylineBasis leylineBasis, boolean capturedLeyline,
+                                    long nextShieldUntilMs, BountySettlePlan bountyPlan, long bountyImmunitySec,
                                     long protectSec, long nowMs) {
+            BountySettlePlan plan = bountyPlan == null ? BountySettlePlan.NONE : bountyPlan;
             if (battles.containsKey(battle.battleId())) {
                 return false;
             }
+            if (leylineBasis != null && battle.leylineId() != 0 && battle.bannerShielded() == 0) {
+                if (failStaleLeylineOnce > 0) {
+                    failStaleLeylineOnce--;
+                    String k = battle.zoneId() + ":" + leylineBasis.leylineId();
+                    LeylineRow cur = leylines.get(k);
+                    if (cur != null) {
+                        leylines.put(k, new LeylineRow(cur.zoneId(), cur.leylineId(), cur.ownerGuildId(),
+                                Math.max(0, cur.bannerHp() - 50), cur.shieldUntilMs(), cur.capturedAtMs(),
+                                cur.lastDividendAtMs(), cur.dividendWeekKey(), cur.weeklyDividendCount(),
+                                cur.lastSiegeAlertMs(), nowMs));
+                    }
+                    throw new WarRuleException("stale_snapshot");
+                }
+                String k = battle.zoneId() + ":" + battle.leylineId();
+                LeylineRow cur = leylines.get(k);
+                if (cur != null) {
+                    leylines.put(k, new LeylineRow(cur.zoneId(), cur.leylineId(),
+                            capturedLeyline ? battle.attackerGuildId() : cur.ownerGuildId(),
+                            battle.bannerHpAfter(), nextShieldUntilMs,
+                            capturedLeyline ? nowMs : cur.capturedAtMs(), cur.lastDividendAtMs(),
+                            cur.dividendWeekKey(), cur.weeklyDividendCount(), cur.lastSiegeAlertMs(), nowMs));
+                }
+            }
             battles.put(battle.battleId(), battle);
-            if (battle.bountyId() != 0 && bounties.containsKey(battle.bountyId())) {
+            if (plan.touch() && battle.bountyId() != 0 && bounties.containsKey(battle.bountyId())) {
                 BountyRow b = bounties.get(battle.bountyId());
                 if (b.status() == 2) {
                     bounties.put(battle.bountyId(), new BountyRow(b.bountyId(), b.zoneId(), b.issuerPlayerId(),
                             b.issuerGuildId(), b.targetPlayerId(), b.targetGuildId(), b.tier(), b.escrowSilver(),
-                            b.taxSilver(), b.publicBoard(), nextBountyStatus, nextCounterKills,
-                            nextCounterKillersJson == null ? "" : nextCounterKillersJson, b.escrowOpId(),
-                            b.createdAtMs(), b.expiresAtMs(), bountyResolved ? nowMs : 0L, winnerPlayerId));
+                            b.taxSilver(), b.publicBoard(), plan.nextStatus(), plan.nextCounterKills(),
+                            plan.nextCounterKillersJson() == null ? "" : plan.nextCounterKillersJson(), b.escrowOpId(),
+                            b.createdAtMs(), b.expiresAtMs(), plan.resolved() ? nowMs : 0L, plan.winnerPlayerId(),
+                            b.escrowGuildFunds()));
+                    if (plan.resolved() && plan.rewardSilver() > 0 && plan.winnerPlayerId() != 0) {
+                        PlayerStateRow wst = getOrDefaultPlayerState(plan.winnerPlayerId(), battle.zoneId(), weekKey);
+                        int nextCnt = wst.bountyPayoutDayKey() == dayKey ? wst.bountyPayoutCountToday() + 1 : 1;
+                        players.put(plan.winnerPlayerId(), new PlayerStateRow(wst.playerId(), wst.zoneId(),
+                                wst.peaceMode(), wst.peaceReadyAtMs(), wst.openChallenge(), wst.protectUntilMs(),
+                                wst.streakCount(), wst.streakDistinctCount(), wst.lastStreakOpponentId(),
+                                weekKey, wst.weeklyMerit(), wst.milestoneClaimedMask(), wst.dividendClaimedCount(),
+                                wst.bountyImmunityUntilMs(), dayKey, nextCnt,
+                                wst.nextGarrisonRefreshMs(), wst.nextTrackAtMs(), nowMs));
+                    }
+                    if (plan.resolved() && plan.issuerRefundGuildFunds() > 0 && plan.issuerGuildId() != 0) {
+                        guildFundsRefunded.merge(plan.issuerGuildId(), plan.issuerRefundGuildFunds(), Long::sum);
+                    }
                 }
             }
             return true;

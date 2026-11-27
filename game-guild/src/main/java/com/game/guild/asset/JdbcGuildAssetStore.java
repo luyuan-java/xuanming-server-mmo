@@ -493,9 +493,10 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
                 // 只 CAS：帮贡与资金在入队事务里已记完，无需回退对侧
             }
             case GUILD_ASSET_OP_KIND_BOUNTY_ESCROW -> {
+                // 扣款失败置 ESCROW_FAILED(6)，与到期退款终态 EXPIRED(5) 严格隔离（r2-gw#2）。
                 int nextBountyStatus = status == AssetOpStatus.APPLIED
                         ? GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ACTIVE_VALUE
-                        : GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_EXPIRED_VALUE;
+                        : GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ESCROW_FAILED_VALUE;
                 long resolvedMs = status == AssetOpStatus.APPLIED ? 0L : nowMs;
                 t.update("UPDATE guild_war_bounty SET status = ?, resolved_at_ms = ? WHERE escrow_op_id = ? AND status = ?",
                         nextBountyStatus, resolvedMs, opId,

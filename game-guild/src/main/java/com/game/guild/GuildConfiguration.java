@@ -672,6 +672,28 @@ public class GuildConfiguration {
         return service;
     }
 
+    /** 到期追杀令定时扫描退款任务（每 30s 派发到 guild-worker 执行，避免阻塞调度线程）。 */
+    @Bean(destroyMethod = "close")
+    public AutoCloseable guildWarBountyExpirySweeper(
+            com.game.guild.war.GuildWarService war,
+            @Qualifier("guildBackgroundScheduler") ScheduledExecutorService background,
+            @Qualifier("guildWorkerPool") GuildWorkerPool guildWorkerPool) {
+        var task = background.scheduleWithFixedDelay(() -> {
+            try {
+                guildWorkerPool.execute(() -> {
+                    try {
+                        war.expireDueBounties(16, Deadline.after(3_000));
+                    } catch (Exception e) {
+                        log.warn("到期追杀令退款扫描异常", e);
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                // 队列忙时跳过本轮，下轮重扫
+            }
+        }, 30, 30, java.util.concurrent.TimeUnit.SECONDS);
+        return () -> task.cancel(false);
+    }
+
     @Bean
     public GuildDispatcher guildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
                                            GuildRankService ranks, GuildEconomyService economy, GuildActivityService activities,

@@ -617,7 +617,8 @@ public final class GuildWarService {
 
             store.ensureZoneLeylines(zoneId, now);
             GuildWarTargetKind targetKind = req.getTargetKind();
-            int leylineId = req.getLeylineId();
+            // 仅踢馆守旗阵分支采信客户端 leyline_id，野外遇敌由场景配置推导；防 BOUNTY/LIVE_PLAYER 伪造灵脉号蹭旗（r2-gw#1）
+            int leylineId = 0;
             long targetPid = req.getTargetPlayerId();
             // 仅 BOUNTY 分支采信客户端 bounty_id；其他模式必须按真实目标查库匹配，防伪造 bounty_id 劫持他人赏金
             long bountyId = 0L;
@@ -630,7 +631,8 @@ public final class GuildWarService {
             if (targetKind == GuildWarTargetKind.GUILD_WAR_TARGET_KIND_BOUNTY) {
                 bountyId = req.getBountyId();
                 Optional<GuildWarStore.BountyRow> bOpt = store.getBounty(bountyId);
-                if (bOpt.isEmpty() || bOpt.get().status() != 2 || bOpt.get().expiresAtMs() <= now
+                if (bOpt.isEmpty() || bOpt.get().zoneId() != zoneId || bOpt.get().status() != 2
+                        || Long.compareUnsigned(bOpt.get().expiresAtMs(), now) <= 0
                         || (bOpt.get().publicBoard() == 0 && bOpt.get().issuerGuildId() != guild.guildId())) {
                     return com.game.proto.guild.StartGuildWarBattleResponse.newBuilder()
                             .setErrorMessage(tip(GuildTips.WAR_BOUNTY_NOT_FOUND)).build();
@@ -723,7 +725,7 @@ public final class GuildWarService {
                     }
                 }
                 Optional<GuildWarStore.BountyRow> activeB = store.activeBountyByTarget(targetPid, now);
-                if (activeB.isPresent() && activeB.get().status() == 2
+                if (activeB.isPresent() && activeB.get().zoneId() == zoneId && activeB.get().status() == 2
                         && (activeB.get().publicBoard() != 0 || activeB.get().issuerGuildId() == guild.guildId())) {
                     bountyId = activeB.get().bountyId();
                     warKind = GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_BOUNTY_HUNT;
@@ -745,6 +747,7 @@ public final class GuildWarService {
                     }
                 }
                 if (defenderPids.isEmpty()) {
+                    leylineId = req.getLeylineId();
                     if (leylineId == 0) {
                         leylineId = GuildWarRules.goldLeylineForHour(now).leylineId();
                     }
@@ -1060,6 +1063,7 @@ public final class GuildWarService {
                     row = store.getBounty(bountyId).orElse(row);
                     if (view.status() == GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_REJECTED
                             || view.status() == GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_ABORTED
+                            || row.status() == GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_ESCROW_FAILED_VALUE
                             || row.status() == GuildWarBountyStatus.GUILD_WAR_BOUNTY_STATUS_EXPIRED_VALUE) {
                         int rejectTip = view.reason() == AssetOpDecisions.REASON_CURRENCY_INSUFFICIENT
                                 ? GuildTips.CURRENCY_INSUFFICIENT : GuildTips.ASSET_REJECTED;
@@ -1120,7 +1124,8 @@ public final class GuildWarService {
                 ? rule.getTrackCooldownSec() : GuildWarRules.DEFAULT_TRACK_COOLDOWN_SEC;
         try {
             Optional<GuildWarStore.BountyRow> bOpt = store.getBounty(req.getBountyId());
-            if (bOpt.isEmpty() || bOpt.get().status() != 2 || bOpt.get().expiresAtMs() <= now
+            if (bOpt.isEmpty() || bOpt.get().zoneId() != guild.zoneId() || bOpt.get().status() != 2
+                    || Long.compareUnsigned(bOpt.get().expiresAtMs(), now) <= 0
                     || (bOpt.get().publicBoard() == 0 && bOpt.get().issuerGuildId() != guild.guildId())) {
                 return TrackGuildWarBountyResponse.newBuilder().setErrorMessage(tip(GuildTips.WAR_BOUNTY_NOT_FOUND)).build();
             }
@@ -1240,7 +1245,7 @@ public final class GuildWarService {
                         .setBattleId(bid)
                         .setIsRivalGuild(tgId != 0 && rivals.contains(tgId))
                         .setCanAttackNow(canAttack);
-                if (activeB.isPresent() && activeB.get().status() == 2
+                if (activeB.isPresent() && activeB.get().zoneId() == guild.zoneId() && activeB.get().status() == 2
                         && (activeB.get().publicBoard() != 0 || activeB.get().issuerGuildId() == guild.guildId())) {
                     brief.setActiveBountyId(activeB.get().bountyId())
                             .setActiveBountyRewardSilver(activeB.get().escrowSilver())
@@ -1408,148 +1413,201 @@ public final class GuildWarService {
             endedLoserStreak = store.getOrDefaultPlayerState(preLoserId, gw.getZoneId(), weekKey).streakCount();
         }
 
-        int hpBefore = 0, hpAfter = 0, shielded = 0;
-        boolean captured = false;
-        long nextShieldUntil = 0L;
-        long jackpotContrib = 0L, bannerBonusSilver = 0L, bountyPayoutSilver = 0L;
-        int outcomeTag = 0;
-        if (gw.getLeylineId() != 0) {
-            store.ensureZoneLeylines(gw.getZoneId(), now);
-            List<GuildWarStore.LeylineRow> leylines = store.listLeylines(gw.getZoneId());
-            boolean ownsOther = false;
-            GuildWarStore.LeylineRow targetLey = null;
-            for (var lr : leylines) {
-                if (lr.leylineId() == gw.getLeylineId()) targetLey = lr;
-                else if (lr.ownerGuildId() == gw.getAttackerGuildId()) ownsOther = true;
-            }
-            if (targetLey != null) {
-                hpBefore = targetLey.bannerHp();
-                if (Long.compareUnsigned(now, targetLey.shieldUntilMs()) < 0) {
-                    shielded = 1;
-                    hpAfter = hpBefore;
-                    nextShieldUntil = targetLey.shieldUntilMs();
-                } else {
-                    boolean isPvp = warKind != GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_GARRISON_SIEGE;
-                    GuildWarRules.BannerDecision dec = GuildWarRules.applyBannerImpact(
-                            rule, now, gw.getAttackerGuildId(), hpBefore, targetLey.shieldUntilMs(),
-                            100, ownsOther, atkWon, isPvp, defWon);
-                    hpAfter = dec.hpAfter();
-                    captured = dec.captured();
-                    nextShieldUntil = dec.newShieldUntilMs();
-                    if (dec.brokeBanner()) {
-                        outcomeTag = 5;
-                        jackpotContrib += dec.bonusContribution();
-                        bannerBonusSilver += dec.bonusSilver();
-                    }
+        int dailyPayCap = rule != null && rule.getBountyDailyPayoutLimit() > 0
+                ? rule.getBountyDailyPayoutLimit() : GuildWarRules.DEFAULT_BOUNTY_DAILY_PAYOUT_CAP;
+        boolean settled = false;
+        List<AssetOp> createdOps = List.of();
+        int hpBefore = 0, hpAfter = 0;
+        long jackpotSilver = 0L;
+        boolean winnerCapped = false;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            hpBefore = 0;
+            hpAfter = 0;
+            int shielded = 0;
+            boolean captured = false;
+            long nextShieldUntil = 0L;
+            long jackpotContrib = 0L, bannerBonusSilver = 0L, bountyPayoutSilver = 0L;
+            int outcomeTag = 0;
+            GuildWarStore.LeylineBasis leylineBasis = null;
+            if (gw.getLeylineId() != 0) {
+                store.ensureZoneLeylines(gw.getZoneId(), now);
+                List<GuildWarStore.LeylineRow> leylines = store.listLeylines(gw.getZoneId());
+                boolean ownsOther = false;
+                GuildWarStore.LeylineRow targetLey = null;
+                for (var lr : leylines) {
+                    if (lr.leylineId() == gw.getLeylineId()) targetLey = lr;
+                    else if (gw.getAttackerGuildId() != 0 && lr.ownerGuildId() == gw.getAttackerGuildId()) ownsOther = true;
                 }
-            }
-        }
-
-        boolean bountyResolved = false;
-        int nextBountyStatus = 2;
-        int nextCounterKills = 0;
-        String nextCounterKillers = "";
-        long winnerPid = 0L;
-        if (gw.getBountyId() != 0) {
-            Optional<GuildWarStore.BountyRow> bOpt = store.getBounty(gw.getBountyId());
-            if (bOpt.isPresent() && bOpt.get().status() == 2
-                    && bOpt.get().targetGuildId() != gw.getAttackerGuildId()
-                    && defIds.contains(bOpt.get().targetPlayerId())
-                    && !atkIds.contains(bOpt.get().targetPlayerId())) {
-                GuildWarStore.BountyRow b = bOpt.get();
-                nextCounterKills = b.counterKills();
-                nextCounterKillers = b.counterKillersJson();
-                if (atkWon && !atkIds.isEmpty()) {
-                    bountyResolved = true;
-                    nextBountyStatus = 3; // COMPLETED
-                    winnerPid = atkIds.get(0);
-                    outcomeTag = 2;
-                    bountyPayoutSilver += b.escrowSilver();
-                } else if (defWon && !atkIds.isEmpty()) {
-                    String killerToken = Long.toUnsignedString(atkIds.get(0));
-                    Set<String> seen = new HashSet<>();
-                    if (!nextCounterKillers.isEmpty()) {
-                        for (String part : nextCounterKillers.split(",")) {
-                            if (!part.isBlank()) seen.add(part.trim());
+                // 仅守方正是该灵脉归属帮（含中立 0 踢馆）才影响旗势；第三方外帮互殴不得蹭掉他帮旗血（r2-gw#1）
+                if (targetLey != null && targetLey.ownerGuildId() == gw.getDefenderGuildId()) {
+                    hpBefore = targetLey.bannerHp();
+                    if (Long.compareUnsigned(now, targetLey.shieldUntilMs()) < 0) {
+                        shielded = 1;
+                        hpAfter = hpBefore;
+                        nextShieldUntil = targetLey.shieldUntilMs();
+                    } else {
+                        boolean isPvp = warKind != GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_GARRISON_SIEGE;
+                        GuildWarRules.BannerDecision dec = GuildWarRules.applyBannerImpact(
+                                rule, now, gw.getAttackerGuildId(), hpBefore, targetLey.shieldUntilMs(),
+                                100, ownsOther, atkWon, isPvp, defWon);
+                        hpAfter = dec.hpAfter();
+                        captured = dec.captured();
+                        nextShieldUntil = dec.newShieldUntilMs();
+                        leylineBasis = new GuildWarStore.LeylineBasis(
+                                targetLey.leylineId(), targetLey.ownerGuildId(), hpBefore,
+                                targetLey.shieldUntilMs(), ownsOther);
+                        if (dec.brokeBanner()) {
+                            outcomeTag = 5;
+                            jackpotContrib += dec.bonusContribution();
+                            bannerBonusSilver += dec.bonusSilver();
                         }
                     }
-                    if (seen.add(killerToken)) {
-                        nextCounterKills = seen.size();
-                        nextCounterKillers = String.join(",", seen);
-                    }
-                    int tearNeed = rule != null && rule.getBountyCounterKillTear() > 0
-                            ? rule.getBountyCounterKillTear() : GuildWarRules.DEFAULT_BOUNTY_COUNTER_KILL_TEAR;
-                    if (nextCounterKills >= tearNeed) {
-                        bountyResolved = true;
-                        nextBountyStatus = 4; // TORN_UP
-                        winnerPid = b.targetPlayerId();
-                        outcomeTag = 4;
-                        bountyPayoutSilver += b.escrowSilver() / 2L;
-                    } else {
-                        outcomeTag = 3;
-                    }
                 }
             }
-        }
-        long jackpotSilver = bannerBonusSilver + bountyPayoutSilver;
 
-        GuildWarStore.BattleRow rec = new GuildWarStore.BattleRow(
-                event.getBattleId(), gw.getZoneId(), warKind.getNumber(), gw.getLeylineId(), gw.getBountyId(),
-                gw.getAttackerGuildId(), gw.getDefenderGuildId(), event.getOutcomeValue(), event.getTotalRounds(),
-                hpBefore, hpAfter, shielded, outcomeTag, jackpotContrib, jackpotSilver, 100,
-                atkReward.contribution(), atkReward.silver(), atkReward.guildFunds(), atkReward.merit(),
-                defReward.contribution(), defReward.silver(), defReward.guildFunds(), defReward.merit(),
-                (feudActive ? "{\"fb\":true}" : "{}").getBytes(StandardCharsets.UTF_8), now);
-        boolean settled;
-        List<AssetOp> createdOps = List.of();
-        if (useAssetChannel()) {
-            List<GuildWarStore.PlayerBattleCredit> credits = new ArrayList<>(atkIds.size() + defIds.size());
-            Set<Long> seenPlayers = new HashSet<>();
-            for (int i = 0; i < atkIds.size(); i++) {
-                long pid = atkIds.get(i);
-                if (!seenPlayers.add(pid)) continue;
-                long contrib = atkReward.contribution() + (atkWon && i == 0 ? jackpotContrib : 0L);
-                long silver = atkReward.silver() + (atkWon && i == 0 ? bannerBonusSilver : 0L);
-                long opId = (silver > 0 && assetChannel != null) ? mintOpId() : 0L;
-                AssetBundle bundle = opId != 0L ? buildRewardBundle(silver, 0, 0, 0, 0) : null;
-                credits.add(new GuildWarStore.PlayerBattleCredit(pid, gw.getAttackerGuildId(), contrib, silver,
-                        opId, bundle, opId != 0L ? AssetOpDecisions.leaseToken(tokens) : 0L));
-            }
-            for (int i = 0; i < defIds.size(); i++) {
-                long pid = defIds.get(i);
-                if (!seenPlayers.add(pid)) continue;
-                long contrib = defReward.contribution() + (defWon && i == 0 ? jackpotContrib : 0L);
-                long silver = defReward.silver() + (defWon && i == 0 ? bannerBonusSilver : 0L);
-                long opId = (silver > 0 && assetChannel != null) ? mintOpId() : 0L;
-                AssetBundle bundle = opId != 0L ? buildRewardBundle(silver, 0, 0, 0, 0) : null;
-                credits.add(new GuildWarStore.PlayerBattleCredit(pid, gw.getDefenderGuildId(), contrib, silver,
-                        opId, bundle, opId != 0L ? AssetOpDecisions.leaseToken(tokens) : 0L));
-            }
-            GuildWarStore.SettleBattleResult res = store.settleBattleWithAssets(rec, weekKey, dayKey, atkIds, defIds,
-                    captured, nextShieldUntil, bountyResolved, nextBountyStatus, nextCounterKills, nextCounterKillers,
-                    winnerPid, bountyImmunitySec, protectSec, atkReward.guildFunds(), defReward.guildFunds(),
-                    credits, now + assetLeaseMs, now);
-            settled = res.settled();
-            if (settled) {
-                List<AssetOp> allOps = new ArrayList<>(res.createdOps());
-                if (bountyResolved && res.bountyUpdated() && bountyPayoutSilver > 0 && winnerPid != 0 && assetChannel != null) {
-                    long bopId = mintOpId();
-                    AssetBundle payoutBundle = bopId != 0L ? buildRewardBundle(bountyPayoutSilver, 0, 0, 0, 0) : null;
-                    if (payoutBundle != null) {
-                        long winnerGuildId = defIds.contains(winnerPid) ? gw.getDefenderGuildId() : gw.getAttackerGuildId();
-                        int dailyPayCap = rule != null && rule.getBountyDailyPayoutLimit() > 0
-                                ? rule.getBountyDailyPayoutLimit() : GuildWarRules.DEFAULT_BOUNTY_DAILY_PAYOUT_CAP;
-                        store.enqueueBountyPayout(winnerPid, winnerGuildId, gw.getZoneId(), weekKey, dayKey, dailyPayCap,
-                                bopId, payoutBundle, now + assetLeaseMs, AssetOpDecisions.leaseToken(tokens), now)
-                                .ifPresent(allOps::add);
+            GuildWarStore.BountySettlePlan bountyPlan = GuildWarStore.BountySettlePlan.NONE;
+            if (gw.getBountyId() != 0 && warKind == GuildWarBattleKind.GUILD_WAR_BATTLE_KIND_BOUNTY_HUNT) {
+                Optional<GuildWarStore.BountyRow> bOpt = store.getBounty(gw.getBountyId());
+                if (bOpt.isPresent() && bOpt.get().status() == 2
+                        && bOpt.get().zoneId() == gw.getZoneId()
+                        && Long.compareUnsigned(bOpt.get().expiresAtMs(), now) > 0
+                        && (bOpt.get().publicBoard() != 0 || bOpt.get().issuerGuildId() == gw.getAttackerGuildId())
+                        && bOpt.get().targetGuildId() != gw.getAttackerGuildId()
+                        && defIds.contains(bOpt.get().targetPlayerId())
+                        && !atkIds.contains(bOpt.get().targetPlayerId())) {
+                    GuildWarStore.BountyRow b = bOpt.get();
+                    int nextCounterKills = b.counterKills();
+                    String nextCounterKillers = b.counterKillersJson();
+                    if (atkWon && !atkIds.isEmpty()) {
+                        long winPid = atkIds.get(0);
+                        long rewardSilver = b.escrowSilver();
+                        boolean capped = winnerCapped || isBountyPayoutCapped(winPid, gw.getZoneId(), weekKey, dayKey, dailyPayCap);
+                        if (!capped) {
+                            long bopId = (useAssetChannel() && rewardSilver > 0 && assetChannel != null) ? mintOpId() : 0L;
+                            AssetBundle payoutBundle = bopId != 0L ? buildRewardBundle(rewardSilver, 0, 0, 0, 0) : null;
+                            if (!useAssetChannel() || rewardSilver == 0 || payoutBundle != null) {
+                                outcomeTag = 2;
+                                bountyPayoutSilver += rewardSilver;
+                                bountyPlan = new GuildWarStore.BountySettlePlan(
+                                        true, true, b.counterKills(), b.counterKillersJson(),
+                                        3, nextCounterKills, nextCounterKillers,
+                                        winPid, gw.getAttackerGuildId(),
+                                        rewardSilver, bopId, payoutBundle,
+                                        bopId != 0L ? AssetOpDecisions.leaseToken(tokens) : 0L, dailyPayCap,
+                                        b.issuerPlayerId(), b.issuerGuildId(), 0L, 0L, null, 0L, 0L);
+                            }
+                        }
+                    } else if (defWon && !atkIds.isEmpty()) {
+                        String killerToken = Long.toUnsignedString(atkIds.get(0));
+                        Set<String> seen = new HashSet<>();
+                        if (!nextCounterKillers.isEmpty()) {
+                            for (String part : nextCounterKillers.split(",")) {
+                                if (!part.isBlank()) seen.add(part.trim());
+                            }
+                        }
+                        if (seen.add(killerToken)) {
+                            nextCounterKills = seen.size();
+                            nextCounterKillers = String.join(",", seen);
+                            int tearNeed = rule != null && rule.getBountyCounterKillTear() > 0
+                                    ? rule.getBountyCounterKillTear() : GuildWarRules.DEFAULT_BOUNTY_COUNTER_KILL_TEAR;
+                            if (nextCounterKills >= tearNeed) {
+                                long winPid = b.targetPlayerId();
+                                long rewardSilver = b.escrowSilver() / 2L;
+                                boolean capped = winnerCapped || isBountyPayoutCapped(winPid, gw.getZoneId(), weekKey, dayKey, dailyPayCap);
+                                if (!capped) {
+                                    boolean isPublic = b.tier() == GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_GUILD_PUBLIC_VALUE;
+                                    long issuerRefundFunds = isPublic
+                                            ? b.escrowGuildFunds() - b.escrowGuildFunds() / 2L : 0L;
+                                    long issuerRefundSilver = isPublic ? 0L : (b.escrowSilver() - rewardSilver);
+                                    long bopId = (useAssetChannel() && rewardSilver > 0 && assetChannel != null) ? mintOpId() : 0L;
+                                    AssetBundle payoutBundle = bopId != 0L ? buildRewardBundle(rewardSilver, 0, 0, 0, 0) : null;
+                                    long refOpId = (useAssetChannel() && issuerRefundSilver > 0 && assetChannel != null) ? mintOpId() : 0L;
+                                    AssetBundle refBundle = refOpId != 0L ? buildRewardBundle(issuerRefundSilver, 0, 0, 0, 0) : null;
+                                    boolean opsReady = !useAssetChannel()
+                                            || ((rewardSilver == 0 || payoutBundle != null)
+                                            && (issuerRefundSilver == 0 || refBundle != null));
+                                    if (opsReady) {
+                                        outcomeTag = 4;
+                                        bountyPayoutSilver += rewardSilver;
+                                        bountyPlan = new GuildWarStore.BountySettlePlan(
+                                                true, true, b.counterKills(), b.counterKillersJson(),
+                                                4, nextCounterKills, nextCounterKillers,
+                                                winPid, gw.getDefenderGuildId(),
+                                                rewardSilver, bopId, payoutBundle,
+                                                bopId != 0L ? AssetOpDecisions.leaseToken(tokens) : 0L, dailyPayCap,
+                                                b.issuerPlayerId(), b.issuerGuildId(),
+                                                issuerRefundSilver, refOpId, refBundle,
+                                                refOpId != 0L ? AssetOpDecisions.leaseToken(tokens) : 0L,
+                                                issuerRefundFunds);
+                                    }
+                                }
+                            } else {
+                                outcomeTag = 3;
+                                bountyPlan = new GuildWarStore.BountySettlePlan(
+                                        true, false, b.counterKills(), b.counterKillersJson(),
+                                        2, nextCounterKills, nextCounterKillers,
+                                        0L, 0L, 0L, 0L, null, 0L, 0,
+                                        b.issuerPlayerId(), b.issuerGuildId(), 0L, 0L, null, 0L, 0L);
+                            }
+                        }
                     }
                 }
-                createdOps = allOps;
             }
-        } else {
-            settled = store.settleBattle(rec, weekKey, dayKey, atkIds, defIds, captured, nextShieldUntil,
-                    bountyResolved, nextBountyStatus, nextCounterKills, nextCounterKillers, winnerPid,
-                    bountyImmunitySec, protectSec, now);
+            jackpotSilver = bannerBonusSilver + bountyPayoutSilver;
+
+            GuildWarStore.BattleRow rec = new GuildWarStore.BattleRow(
+                    event.getBattleId(), gw.getZoneId(), warKind.getNumber(), gw.getLeylineId(), gw.getBountyId(),
+                    gw.getAttackerGuildId(), gw.getDefenderGuildId(), event.getOutcomeValue(), event.getTotalRounds(),
+                    hpBefore, hpAfter, shielded, outcomeTag, jackpotContrib, jackpotSilver, 100,
+                    atkReward.contribution(), atkReward.silver(), atkReward.guildFunds(), atkReward.merit(),
+                    defReward.contribution(), defReward.silver(), defReward.guildFunds(), defReward.merit(),
+                    (feudActive ? "{\"fb\":true}" : "{}").getBytes(StandardCharsets.UTF_8), now);
+            try {
+                if (useAssetChannel()) {
+                    List<GuildWarStore.PlayerBattleCredit> credits = new ArrayList<>(atkIds.size() + defIds.size());
+                    Set<Long> seenPlayers = new HashSet<>();
+                    for (int i = 0; i < atkIds.size(); i++) {
+                        long pid = atkIds.get(i);
+                        if (!seenPlayers.add(pid)) continue;
+                        long contrib = atkReward.contribution() + (atkWon && i == 0 ? jackpotContrib : 0L);
+                        long silver = atkReward.silver() + (atkWon && i == 0 ? bannerBonusSilver : 0L);
+                        long opId = (silver > 0 && assetChannel != null) ? mintOpId() : 0L;
+                        AssetBundle bundle = opId != 0L ? buildRewardBundle(silver, 0, 0, 0, 0) : null;
+                        credits.add(new GuildWarStore.PlayerBattleCredit(pid, gw.getAttackerGuildId(), contrib, silver,
+                                opId, bundle, opId != 0L ? AssetOpDecisions.leaseToken(tokens) : 0L));
+                    }
+                    for (int i = 0; i < defIds.size(); i++) {
+                        long pid = defIds.get(i);
+                        if (!seenPlayers.add(pid)) continue;
+                        long contrib = defReward.contribution() + (defWon && i == 0 ? jackpotContrib : 0L);
+                        long silver = defReward.silver() + (defWon && i == 0 ? bannerBonusSilver : 0L);
+                        long opId = (silver > 0 && assetChannel != null) ? mintOpId() : 0L;
+                        AssetBundle bundle = opId != 0L ? buildRewardBundle(silver, 0, 0, 0, 0) : null;
+                        credits.add(new GuildWarStore.PlayerBattleCredit(pid, gw.getDefenderGuildId(), contrib, silver,
+                                opId, bundle, opId != 0L ? AssetOpDecisions.leaseToken(tokens) : 0L));
+                    }
+                    GuildWarStore.SettleBattleResult res = store.settleBattleWithAssets(rec, weekKey, dayKey, atkIds, defIds,
+                            leylineBasis, captured, nextShieldUntil, bountyPlan, bountyImmunitySec, protectSec,
+                            atkReward.guildFunds(), defReward.guildFunds(), credits, now + assetLeaseMs, now);
+                    settled = res.settled();
+                    if (settled) {
+                        createdOps = res.createdOps();
+                    }
+                } else {
+                    settled = store.settleBattle(rec, weekKey, dayKey, atkIds, defIds, leylineBasis, captured,
+                            nextShieldUntil, bountyPlan, bountyImmunitySec, protectSec, now);
+                }
+                break;
+            } catch (GuildWarStore.WarRuleException e) {
+                if ("bounty_daily_cap".equals(e.code) && !winnerCapped) {
+                    winnerCapped = true;
+                    continue;
+                }
+                if ("stale_snapshot".equals(e.code) && attempt < 3) {
+                    continue;
+                }
+                throw e;
+            }
         }
         if (settled) {
             Deadline bg = Deadline.after(1500);
@@ -1590,6 +1648,47 @@ public final class GuildWarService {
                     gw.getLeylineId(), hpBefore, hpAfter);
         }
         return settled;
+    }
+
+    private boolean isBountyPayoutCapped(long playerId, int zoneId, int weekKey, int dayKey, int dailyCap)
+            throws SQLException {
+        if (dailyCap <= 0 || playerId == 0L) {
+            return false;
+        }
+        GuildWarStore.PlayerStateRow st = store.getOrDefaultPlayerState(playerId, zoneId, weekKey);
+        return st.bountyPayoutDayKey() == dayKey && st.bountyPayoutCountToday() >= dailyCap;
+    }
+
+    /** 到期 ACTIVE 追杀令扫描退款（r2-gw#2）：银两档原路退发布者、公费档原路退发单帮资金，每单原子 CAS 只退一次。 */
+    public int expireDueBounties(int limit, Deadline d) throws SQLException {
+        long now = now();
+        List<GuildWarStore.BountyRow> due = store.listExpiredActiveBounties(now, limit);
+        int expired = 0;
+        for (GuildWarStore.BountyRow b : due) {
+            boolean isPublic = b.tier() == GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_GUILD_PUBLIC_VALUE;
+            long refundOpId = 0L;
+            AssetBundle refundBundle = null;
+            if (!isPublic && b.escrowSilver() > 0 && useAssetChannel()) {
+                if (assetChannel == null) {
+                    continue;
+                }
+                refundOpId = mintOpId();
+                if (refundOpId == 0L) {
+                    continue;
+                }
+                refundBundle = buildRewardBundle(b.escrowSilver(), 0, 0, 0, 0);
+            }
+            GuildWarStore.ExpireBountyResult res = store.expireBountyWithRefund(
+                    b, refundOpId, refundBundle, now + assetLeaseMs,
+                    refundOpId != 0L ? AssetOpDecisions.leaseToken(tokens) : 0L, now);
+            if (res.expired()) {
+                expired++;
+                if (res.refundOp() != null) {
+                    syncDeliverWarOp(res.refundOp(), d);
+                }
+            }
+        }
+        return expired;
     }
 
     private String lookupGuildName(long guildId, Map<Long, String> cache, Deadline d) {

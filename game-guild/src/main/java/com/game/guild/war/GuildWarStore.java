@@ -57,8 +57,46 @@ public class GuildWarStore {
     public record BountyRow(long bountyId, int zoneId, long issuerPlayerId, long issuerGuildId, long targetPlayerId,
                             long targetGuildId, int tier, long escrowSilver, long taxSilver, int publicBoard,
                             int status, int counterKills, String counterKillersJson, long escrowOpId,
-                            long createdAtMs, long expiresAtMs, long resolvedAtMs, long winnerPlayerId) {
+                            long createdAtMs, long expiresAtMs, long resolvedAtMs, long winnerPlayerId,
+                            long escrowGuildFunds) {
+        public BountyRow(long bountyId, int zoneId, long issuerPlayerId, long issuerGuildId, long targetPlayerId,
+                         long targetGuildId, int tier, long escrowSilver, long taxSilver, int publicBoard,
+                         int status, int counterKills, String counterKillersJson, long escrowOpId,
+                         long createdAtMs, long expiresAtMs, long resolvedAtMs, long winnerPlayerId) {
+            this(bountyId, zoneId, issuerPlayerId, issuerGuildId, targetPlayerId, targetGuildId, tier,
+                    escrowSilver, taxSilver, publicBoard, status, counterKills, counterKillersJson, escrowOpId,
+                    createdAtMs, expiresAtMs, resolvedAtMs, winnerPlayerId, 0L);
+        }
     }
+
+    /** 事务外计算灵脉旗势变更所依据的快照，事务内按 leyline_id 升序行锁逐项核验（r2-gw#3）。 */
+    public record LeylineBasis(int leylineId, long ownerGuildId, int bannerHp, long shieldUntilMs,
+                               boolean attackerOwnsOther) {
+    }
+
+    /** 追杀令原子结算计划：与对局终局同事务校验、落态、发赏及撕单退另一半（r2-gw#1 / r2-gw#2）。 */
+    public record BountySettlePlan(
+            boolean touch, boolean resolved,
+            int expectedCounterKills, String expectedCounterKillersJson,
+            int nextStatus, int nextCounterKills, String nextCounterKillersJson,
+            long winnerPlayerId, long winnerGuildId,
+            long rewardSilver, long rewardOpId, AssetBundle rewardBundle, long rewardLeaseToken,
+            int dailyPayoutLimit,
+            long issuerPlayerId, long issuerGuildId,
+            long issuerRefundSilver, long issuerRefundOpId, AssetBundle issuerRefundBundle,
+            long issuerRefundLeaseToken, long issuerRefundGuildFunds) {
+        public static final BountySettlePlan NONE = new BountySettlePlan(
+                false, false, 0, "", 2, 0, "", 0L, 0L, 0L, 0L, null, 0L, 0, 0L, 0L, 0L, 0L, null, 0L, 0L);
+    }
+
+    /** 到期追杀令同事务置 EXPIRED(5) 并原路退款的结果（r2-gw#2）。 */
+    public record ExpireBountyResult(boolean expired, AssetOp refundOp) {
+    }
+
+    private static final String BOUNTY_COLS =
+            "bounty_id, zone_id, issuer_player_id, issuer_guild_id, target_player_id, target_guild_id, tier, "
+                    + "escrow_silver, tax_silver, public_board, status, counter_kills, counter_killers_json, "
+                    + "escrow_op_id, created_at_ms, expires_at_ms, resolved_at_ms, winner_player_id, escrow_guild_funds";
 
     public record BattleRow(long battleId, int zoneId, int warBattleKind, int leylineId, long bountyId,
                             long attackerGuildId, long defenderGuildId, int outcome, int totalRounds,
@@ -203,9 +241,15 @@ public class GuildWarStore {
                       expires_at_ms BIGINT NOT NULL DEFAULT 0,
                       resolved_at_ms BIGINT NOT NULL DEFAULT 0,
                       winner_player_id BIGINT NOT NULL DEFAULT 0,
+                      escrow_guild_funds BIGINT NOT NULL DEFAULT 0,
                       PRIMARY KEY (bounty_id)
                     )
                     """);
+            try {
+                st.execute("ALTER TABLE guild_war_bounty ADD COLUMN escrow_guild_funds BIGINT NOT NULL DEFAULT 0");
+            } catch (SQLException ignored) {
+                // 列已存在（新表或已升级表）时忽略
+            }
             st.execute("""
                     CREATE TABLE IF NOT EXISTS guild_war_battle (
                       battle_id BIGINT NOT NULL,
@@ -600,7 +644,7 @@ public class GuildWarStore {
         List<BountyRow> out = new ArrayList<>();
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(
-                     "SELECT bounty_id, zone_id, issuer_player_id, issuer_guild_id, target_player_id, target_guild_id, tier, escrow_silver, tax_silver, public_board, status, counter_kills, counter_killers_json, escrow_op_id, created_at_ms, expires_at_ms, resolved_at_ms, winner_player_id FROM guild_war_bounty WHERE zone_id = ? AND status = 2 AND expires_at_ms > ? AND (public_board = 1 OR issuer_guild_id = ?) ORDER BY created_at_ms DESC LIMIT 50")) {
+                     "SELECT " + BOUNTY_COLS + " FROM guild_war_bounty WHERE zone_id = ? AND status = 2 AND expires_at_ms > ? AND (public_board = 1 OR issuer_guild_id = ?) ORDER BY created_at_ms DESC LIMIT 50")) {
             ps.setInt(1, zoneId);
             ps.setLong(2, nowMs);
             ps.setLong(3, guildId);
@@ -616,7 +660,7 @@ public class GuildWarStore {
     public Optional<BountyRow> activeBountyByTarget(long targetPlayerId, long nowMs) throws SQLException {
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(
-                     "SELECT bounty_id, zone_id, issuer_player_id, issuer_guild_id, target_player_id, target_guild_id, tier, escrow_silver, tax_silver, public_board, status, counter_kills, counter_killers_json, escrow_op_id, created_at_ms, expires_at_ms, resolved_at_ms, winner_player_id FROM guild_war_bounty WHERE target_player_id = ? AND status IN (1, 2) AND expires_at_ms > ? LIMIT 1")) {
+                     "SELECT " + BOUNTY_COLS + " FROM guild_war_bounty WHERE target_player_id = ? AND status IN (1, 2) AND expires_at_ms > ? LIMIT 1")) {
             ps.setLong(1, targetPlayerId);
             ps.setLong(2, nowMs);
             try (ResultSet rs = ps.executeQuery()) {
@@ -631,7 +675,7 @@ public class GuildWarStore {
     public Optional<BountyRow> getBounty(long bountyId) throws SQLException {
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(
-                     "SELECT bounty_id, zone_id, issuer_player_id, issuer_guild_id, target_player_id, target_guild_id, tier, escrow_silver, tax_silver, public_board, status, counter_kills, counter_killers_json, escrow_op_id, created_at_ms, expires_at_ms, resolved_at_ms, winner_player_id FROM guild_war_bounty WHERE bounty_id = ?")) {
+                     "SELECT " + BOUNTY_COLS + " FROM guild_war_bounty WHERE bounty_id = ?")) {
             ps.setLong(1, bountyId);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
@@ -640,6 +684,91 @@ public class GuildWarStore {
             }
         }
         return Optional.empty();
+    }
+
+    public List<BountyRow> listExpiredActiveBounties(long nowMs, int limit) throws SQLException {
+        if (limit <= 0) {
+            return List.of();
+        }
+        List<BountyRow> out = new ArrayList<>();
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT " + BOUNTY_COLS + " FROM guild_war_bounty WHERE status = 2 AND expires_at_ms <= ? ORDER BY expires_at_ms ASC LIMIT ?")) {
+            ps.setLong(1, nowMs);
+            ps.setInt(2, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(readBounty(rs));
+                }
+            }
+        }
+        return out;
+    }
+
+    /** 到期 ACTIVE 追杀令收尾（r2-gw#2）：同事务置 EXPIRED(5) 并原路退回托管（银两档退发布者、公费档退发单帮资金）。 */
+    public ExpireBountyResult expireBountyWithRefund(BountyRow candidate, long refundOpId, AssetBundle refundBundle,
+                                                     long leaseUntilMs, long leaseToken, long nowMs) throws SQLException {
+        if (candidate == null || candidate.bountyId() == 0L) {
+            return new ExpireBountyResult(false, null);
+        }
+        boolean isGuildPublic = candidate.tier() == GuildWarBountyTier.GUILD_WAR_BOUNTY_TIER_GUILD_PUBLIC_VALUE;
+        long refundFunds = isGuildPublic ? candidate.escrowGuildFunds() : 0L;
+        long refundSilver = isGuildPublic ? 0L : candidate.escrowSilver();
+        try (Connection c = dataSource.getConnection()) {
+            c.setAutoCommit(false);
+            try {
+                // 严格锁序：G(公费档退资金) -> M -> Q -> O(银两档退款指令) -> 17(guild_war_bounty 点锁复核)
+                if (refundFunds > 0 && candidate.issuerGuildId() != 0) {
+                    creditGuildFundsTx(c, candidate.issuerGuildId(), refundFunds);
+                }
+                AssetOp refundOp = null;
+                if (refundSilver > 0 && refundOpId != 0 && refundBundle != null && candidate.issuerPlayerId() != 0) {
+                    if (candidate.issuerGuildId() != 0) {
+                        lockGuildMemberRoleTx(c, candidate.issuerGuildId(), candidate.issuerPlayerId());
+                    }
+                    refundOp = enqueueWarAssetOpTx(c, refundOpId, candidate.issuerPlayerId(), candidate.issuerGuildId(),
+                            AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE,
+                            GuildAssetOpKind.GUILD_ASSET_OP_KIND_BOUNTY_PAYOUT,
+                            TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE,
+                            refundBundle, 1, 1, 0, 0L, leaseUntilMs, leaseToken, nowMs);
+                    if (refundOp == null) {
+                        c.rollback();
+                        return new ExpireBountyResult(false, null);
+                    }
+                }
+                BountyRow locked = loadBountyForUpdateTx(c, candidate.bountyId());
+                if (locked == null || locked.status() != 2 || Long.compareUnsigned(locked.expiresAtMs(), nowMs) > 0) {
+                    c.rollback();
+                    return new ExpireBountyResult(false, null);
+                }
+                try (PreparedStatement upd = c.prepareStatement(
+                        "UPDATE guild_war_bounty SET status = 5, resolved_at_ms = ? WHERE bounty_id = ? AND status = 2")) {
+                    upd.setLong(1, nowMs);
+                    upd.setLong(2, candidate.bountyId());
+                    if (upd.executeUpdate() != 1) {
+                        c.rollback();
+                        return new ExpireBountyResult(false, null);
+                    }
+                }
+                c.commit();
+                return new ExpireBountyResult(true, refundOp);
+            } catch (SQLException | RuntimeException e) {
+                c.rollback();
+                throw e;
+            } finally {
+                c.setAutoCommit(true);
+            }
+        }
+    }
+
+    private static BountyRow loadBountyForUpdateTx(Connection c, long bountyId) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT " + BOUNTY_COLS + " FROM guild_war_bounty WHERE bounty_id = ? FOR UPDATE")) {
+            ps.setLong(1, bountyId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? readBounty(rs) : null;
+            }
+        }
     }
 
     public PostBountyResult postBountyWithAsset(long bountyId, int zoneId, int dayKey, long issuerPlayerId,
@@ -723,7 +852,7 @@ public class GuildWarStore {
                 }
                 long expiresAtMs = nowMs + ttlSec * 1000L;
                 try (PreparedStatement ins = c.prepareStatement(
-                        "INSERT INTO guild_war_bounty (bounty_id, zone_id, issuer_player_id, issuer_guild_id, target_player_id, target_guild_id, tier, escrow_silver, tax_silver, public_board, status, counter_kills, counter_killers_json, escrow_op_id, created_at_ms, expires_at_ms, resolved_at_ms, winner_player_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,'',?,?,?,0,0)")) {
+                        "INSERT INTO guild_war_bounty (bounty_id, zone_id, issuer_player_id, issuer_guild_id, target_player_id, target_guild_id, tier, escrow_silver, tax_silver, public_board, status, counter_kills, counter_killers_json, escrow_op_id, created_at_ms, expires_at_ms, resolved_at_ms, winner_player_id, escrow_guild_funds) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,'',?,?,?,0,0,?)")) {
                     ins.setLong(1, bountyId);
                     ins.setInt(2, zoneId);
                     ins.setLong(3, issuerPlayerId);
@@ -738,12 +867,13 @@ public class GuildWarStore {
                     ins.setLong(12, escrowOpId);
                     ins.setLong(13, nowMs);
                     ins.setLong(14, expiresAtMs);
+                    ins.setLong(15, spec.costGuildFunds());
                     ins.executeUpdate();
                 }
                 c.commit();
                 BountyRow row = new BountyRow(bountyId, zoneId, issuerPlayerId, issuerGuildId, targetPlayerId, targetGuildId,
                         tier.getNumber(), spec.poolSilver(), spec.taxSilver(), publicBoard ? 1 : 0, initialStatus,
-                        0, "", escrowOpId, nowMs, expiresAtMs, 0L, 0L);
+                        0, "", escrowOpId, nowMs, expiresAtMs, 0L, 0L, spec.costGuildFunds());
                 return new PostBountyResult(row, escrowOp);
             } catch (SQLException | RuntimeException e) {
                 c.rollback();
@@ -780,7 +910,7 @@ public class GuildWarStore {
                 }
                 long expiresAtMs = nowMs + ttlSec * 1000L;
                 try (PreparedStatement ins = c.prepareStatement(
-                        "INSERT INTO guild_war_bounty (bounty_id, zone_id, issuer_player_id, issuer_guild_id, target_player_id, target_guild_id, tier, escrow_silver, tax_silver, public_board, status, counter_kills, counter_killers_json, escrow_op_id, created_at_ms, expires_at_ms, resolved_at_ms, winner_player_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,'',?,?,?,0,0)")) {
+                        "INSERT INTO guild_war_bounty (bounty_id, zone_id, issuer_player_id, issuer_guild_id, target_player_id, target_guild_id, tier, escrow_silver, tax_silver, public_board, status, counter_kills, counter_killers_json, escrow_op_id, created_at_ms, expires_at_ms, resolved_at_ms, winner_player_id, escrow_guild_funds) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,'',?,?,?,0,0,?)")) {
                     ins.setLong(1, bountyId);
                     ins.setInt(2, zoneId);
                     ins.setLong(3, issuerPlayerId);
@@ -795,12 +925,13 @@ public class GuildWarStore {
                     ins.setLong(12, escrowOpId);
                     ins.setLong(13, nowMs);
                     ins.setLong(14, expiresAtMs);
+                    ins.setLong(15, spec.costGuildFunds());
                     ins.executeUpdate();
                 }
                 c.commit();
                 return new BountyRow(bountyId, zoneId, issuerPlayerId, issuerGuildId, targetPlayerId, targetGuildId,
                         tier.getNumber(), spec.poolSilver(), spec.taxSilver(), publicBoard ? 1 : 0, initialStatus,
-                        0, "", escrowOpId, nowMs, expiresAtMs, 0L, 0L);
+                        0, "", escrowOpId, nowMs, expiresAtMs, 0L, 0L, spec.costGuildFunds());
             } catch (SQLException | RuntimeException e) {
                 c.rollback();
                 throw e;
@@ -1107,25 +1238,22 @@ public class GuildWarStore {
 
     /** 幂等写入单局帮战结算、更新灵脉旗势、周战功、宿敌计数、连胜与追杀令状态（已结算返回 false）。 */
     public boolean settleBattle(BattleRow battle, int weekKey, int dayKey, List<Long> attackerIds,
-                                List<Long> defenderIds, boolean capturedLeyline, long nextShieldUntilMs,
-                                boolean bountyResolved, int nextBountyStatus, int nextCounterKills,
-                                String nextCounterKillersJson, long winnerPlayerId, long bountyImmunitySec,
+                                List<Long> defenderIds, LeylineBasis leylineBasis, boolean capturedLeyline,
+                                long nextShieldUntilMs, BountySettlePlan bountyPlan, long bountyImmunitySec,
                                 long protectSec, long nowMs) throws SQLException {
-        return settleBattleWithAssets(battle, weekKey, dayKey, attackerIds, defenderIds, capturedLeyline,
-                nextShieldUntilMs, bountyResolved, nextBountyStatus, nextCounterKills, nextCounterKillersJson,
-                winnerPlayerId, bountyImmunitySec, protectSec, 0L, 0L, List.of(), 0L, nowMs).settled();
+        return settleBattleWithAssets(battle, weekKey, dayKey, attackerIds, defenderIds, leylineBasis, capturedLeyline,
+                nextShieldUntilMs, bountyPlan, bountyImmunitySec, protectSec, 0L, 0L, List.of(), 0L, nowMs).settled();
     }
 
-    /** 完整带资产通道的幂等终局结算（严格锁序：G -> M -> Q -> O -> 13..19）。 */
+    /** 完整带资产通道的幂等终局结算（严格锁序：G -> M -> Q -> O -> C -> 13..19，零跨事务丢赏金与丢更新）。 */
     public SettleBattleResult settleBattleWithAssets(BattleRow battle, int weekKey, int dayKey, List<Long> attackerIds,
-                                                     List<Long> defenderIds, boolean capturedLeyline,
-                                                     long nextShieldUntilMs, boolean bountyResolved,
-                                                     int nextBountyStatus, int nextCounterKills,
-                                                     String nextCounterKillersJson, long winnerPlayerId,
-                                                     long bountyImmunitySec, long protectSec,
-                                                     long attackerGuildFunds, long defenderGuildFunds,
+                                                     List<Long> defenderIds, LeylineBasis leylineBasis,
+                                                     boolean capturedLeyline, long nextShieldUntilMs,
+                                                     BountySettlePlan bountyPlan, long bountyImmunitySec,
+                                                     long protectSec, long attackerGuildFunds, long defenderGuildFunds,
                                                      List<PlayerBattleCredit> credits, long leaseUntilMs,
                                                      long nowMs) throws SQLException {
+        BountySettlePlan plan = bountyPlan == null ? BountySettlePlan.NONE : bountyPlan;
         List<AssetOp> createdOps = new ArrayList<>();
         try (Connection c = dataSource.getConnection()) {
             c.setAutoCommit(false);
@@ -1142,57 +1270,126 @@ public class GuildWarStore {
                 }
                 long g1 = battle.attackerGuildId();
                 long g2 = battle.defenderGuildId();
-                // 0a. 帮会资金入账（G：按 guild_id 无符号升序锁表防互锁）
-                if (attackerGuildFunds > 0 || defenderGuildFunds > 0) {
-                    if (g1 != 0 && g2 != 0 && g1 != g2) {
-                        if (Long.compareUnsigned(g1, g2) <= 0) {
-                            if (attackerGuildFunds > 0) creditGuildFundsTx(c, g1, attackerGuildFunds);
-                            if (defenderGuildFunds > 0) creditGuildFundsTx(c, g2, defenderGuildFunds);
-                        } else {
-                            if (defenderGuildFunds > 0) creditGuildFundsTx(c, g2, defenderGuildFunds);
-                            if (attackerGuildFunds > 0) creditGuildFundsTx(c, g1, attackerGuildFunds);
+                // 0a. 帮会资金入账（G：合并参战资金与公费撕单退一半资金，按 guild_id 无符号升序锁表防互锁）
+                java.util.TreeMap<Long, Long> guildFunds = new java.util.TreeMap<>(Long::compareUnsigned);
+                if (attackerGuildFunds > 0 && g1 != 0) guildFunds.merge(g1, attackerGuildFunds, Long::sum);
+                if (defenderGuildFunds > 0 && g2 != 0) guildFunds.merge(g2, defenderGuildFunds, Long::sum);
+                if (plan.touch() && plan.resolved() && plan.issuerRefundGuildFunds() > 0 && plan.issuerGuildId() != 0) {
+                    guildFunds.merge(plan.issuerGuildId(), plan.issuerRefundGuildFunds(), Long::sum);
+                }
+                for (var entry : guildFunds.entrySet()) {
+                    creditGuildFundsTx(c, entry.getKey(), entry.getValue());
+                }
+                // 0b. 锁成员行并记帮贡（M：按 (guild_id, player_id) 无符号升序，合并追杀领赏/退款方成员锁）
+                record MemberLock(long guildId, long playerId, long contrib) {}
+                List<MemberLock> memberLocks = new ArrayList<>();
+                if (credits != null) {
+                    for (PlayerBattleCredit cr : credits) {
+                        if (cr.guildId() != 0 && cr.playerId() != 0) {
+                            memberLocks.add(new MemberLock(cr.guildId(), cr.playerId(), cr.contributionGain()));
+                        }
+                    }
+                }
+                if (plan.touch() && plan.resolved()) {
+                    if (plan.rewardSilver() > 0 && plan.rewardOpId() != 0 && plan.rewardBundle() != null
+                            && plan.winnerGuildId() != 0 && plan.winnerPlayerId() != 0) {
+                        memberLocks.add(new MemberLock(plan.winnerGuildId(), plan.winnerPlayerId(), 0L));
+                    }
+                    if (plan.issuerRefundSilver() > 0 && plan.issuerRefundOpId() != 0 && plan.issuerRefundBundle() != null
+                            && plan.issuerGuildId() != 0 && plan.issuerPlayerId() != 0) {
+                        memberLocks.add(new MemberLock(plan.issuerGuildId(), plan.issuerPlayerId(), 0L));
+                    }
+                }
+                memberLocks.sort(Comparator.comparing(MemberLock::guildId, Long::compareUnsigned)
+                        .thenComparing(MemberLock::playerId, Long::compareUnsigned));
+                for (MemberLock ml : memberLocks) {
+                    Integer r = lockGuildMemberRoleTx(c, ml.guildId(), ml.playerId());
+                    if (r != null && ml.contrib() > 0) {
+                        creditGuildMemberContributionTx(c, ml.guildId(), ml.playerId(), ml.contrib());
+                    }
+                }
+                // 0c. 参战银两与追杀赏金/撕单退款资产指令合并按 player_id 无符号升序入队（Q -> O）
+                record AssetCredit(long playerId, long guildId, long opId, AssetBundle bundle, long leaseToken,
+                                   GuildAssetOpKind kind, int txType, int refId, int periodKey, boolean required) {}
+                List<AssetCredit> assetCredits = new ArrayList<>();
+                if (credits != null) {
+                    for (PlayerBattleCredit cr : credits) {
+                        if (cr.silverGain() > 0 && cr.opId() != 0 && cr.bundle() != null) {
+                            assetCredits.add(new AssetCredit(cr.playerId(), cr.guildId(), cr.opId(), cr.bundle(),
+                                    cr.leaseToken(), GuildAssetOpKind.GUILD_ASSET_OP_KIND_WAR_REWARD,
+                                    TransactionType.TX_GUILD_WAR_REWARD_VALUE, battle.warBattleKind(), weekKey, false));
+                        }
+                    }
+                }
+                if (plan.touch() && plan.resolved()) {
+                    if (plan.rewardSilver() > 0 && plan.rewardOpId() != 0 && plan.rewardBundle() != null
+                            && plan.winnerPlayerId() != 0) {
+                        assetCredits.add(new AssetCredit(plan.winnerPlayerId(), plan.winnerGuildId(),
+                                plan.rewardOpId(), plan.rewardBundle(), plan.rewardLeaseToken(),
+                                GuildAssetOpKind.GUILD_ASSET_OP_KIND_BOUNTY_PAYOUT,
+                                TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE, 1, dayKey, true));
+                    }
+                    if (plan.issuerRefundSilver() > 0 && plan.issuerRefundOpId() != 0 && plan.issuerRefundBundle() != null
+                            && plan.issuerPlayerId() != 0) {
+                        assetCredits.add(new AssetCredit(plan.issuerPlayerId(), plan.issuerGuildId(),
+                                plan.issuerRefundOpId(), plan.issuerRefundBundle(), plan.issuerRefundLeaseToken(),
+                                GuildAssetOpKind.GUILD_ASSET_OP_KIND_BOUNTY_PAYOUT,
+                                TransactionType.TX_GUILD_BOUNTY_PAYOUT_VALUE, 1, dayKey, true));
+                    }
+                }
+                assetCredits.sort(Comparator.comparing(AssetCredit::playerId, Long::compareUnsigned));
+                for (AssetCredit ac : assetCredits) {
+                    AssetOp op = enqueueWarAssetOpTx(c, ac.opId(), ac.playerId(), ac.guildId(),
+                            AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE, ac.kind(), ac.txType(),
+                            ac.bundle(), ac.refId(), 1, ac.periodKey(), 0L, leaseUntilMs, ac.leaseToken(), nowMs);
+                    if (op == null) {
+                        if (ac.required()) {
+                            c.rollback();
+                            throw new WarRuleException("asset_pending");
                         }
                     } else {
-                        if (attackerGuildFunds > 0 && g1 != 0) creditGuildFundsTx(c, g1, attackerGuildFunds);
-                        if (defenderGuildFunds > 0 && g2 != 0) creditGuildFundsTx(c, g2, defenderGuildFunds);
+                        createdOps.add(op);
                     }
                 }
-                // 0b & 0c. 参战帮贡与银两资产指令（严格 M -> Q -> O，按 (guild_id, player_id) / player_id 升序）
-                if (credits != null && !credits.isEmpty()) {
-                    List<PlayerBattleCredit> byMember = new ArrayList<>(credits);
-                    byMember.sort(Comparator.comparingLong(PlayerBattleCredit::guildId)
-                            .thenComparing(PlayerBattleCredit::playerId, Long::compareUnsigned));
-                    for (PlayerBattleCredit cr : byMember) {
-                        if (cr.guildId() != 0 && cr.playerId() != 0) {
-                            Integer r = lockGuildMemberRoleTx(c, cr.guildId(), cr.playerId());
-                            if (r != null && cr.contributionGain() > 0) {
-                                creditGuildMemberContributionTx(c, cr.guildId(), cr.playerId(), cr.contributionGain());
-                            }
-                        }
-                    }
-                    List<PlayerBattleCredit> byPlayer = new ArrayList<>(credits);
-                    byPlayer.sort((a, b) -> Long.compareUnsigned(a.playerId(), b.playerId()));
-                    for (PlayerBattleCredit cr : byPlayer) {
-                        if (cr.silverGain() > 0 && cr.opId() != 0 && cr.bundle() != null) {
-                            AssetOp op = enqueueWarAssetOpTx(c, cr.opId(), cr.playerId(), cr.guildId(),
-                                    AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE,
-                                    GuildAssetOpKind.GUILD_ASSET_OP_KIND_WAR_REWARD,
-                                    TransactionType.TX_GUILD_WAR_REWARD_VALUE,
-                                    cr.bundle(), battle.warBattleKind(), 1, weekKey, 0L,
-                                    leaseUntilMs, cr.leaseToken(), nowMs);
-                            if (op != null) {
-                                createdOps.add(op);
-                            }
-                        }
+                // 0d. 追杀领赏每日上限强一致计数（C：超上限回滚并抛 bounty_daily_cap，由外层重算保持追杀令 ACTIVE 不吞托管）
+                if (plan.touch() && plan.resolved() && plan.rewardSilver() > 0
+                        && plan.dailyPayoutLimit() > 0 && plan.winnerPlayerId() != 0) {
+                    if (!incrementDailyCounterTx(c, plan.winnerPlayerId(),
+                            GuildDailyCounterKind.GUILD_DAILY_COUNTER_KIND_WAR_BOUNTY_PAYOUT, 1, dayKey,
+                            plan.dailyPayoutLimit(), nowMs)) {
+                        c.rollback();
+                        throw new WarRuleException("bounty_daily_cap");
                     }
                 }
-                // 1. 灵脉旗势更新（先 FOR UPDATE 锁灵脉行，按表序 13 推进）
-                if (battle.leylineId() != 0 && battle.bannerShielded() == 0) {
+                // 1. 灵脉旗势更新（锁序 13：按 leyline_id 升序锁本区全部灵脉并逐项核对事务外快照，防并发覆盖与一帮双占 r2-gw#3）
+                if (leylineBasis != null && battle.leylineId() != 0 && battle.bannerShielded() == 0) {
+                    LeylineRow lockedTarget = null;
+                    boolean lockedOwnsOther = false;
                     try (PreparedStatement lockLey = c.prepareStatement(
-                            "SELECT 1 FROM guild_war_leyline WHERE zone_id=? AND leyline_id=? FOR UPDATE")) {
+                            "SELECT leyline_id, owner_guild_id, banner_hp, shield_until_ms FROM guild_war_leyline WHERE zone_id=? ORDER BY leyline_id ASC FOR UPDATE")) {
                         lockLey.setInt(1, battle.zoneId());
-                        lockLey.setInt(2, battle.leylineId());
-                        lockLey.executeQuery().close();
+                        try (ResultSet rs = lockLey.executeQuery()) {
+                            while (rs.next()) {
+                                int lid = rs.getInt(1);
+                                long owner = rs.getLong(2);
+                                int hp = rs.getInt(3);
+                                long shield = rs.getLong(4);
+                                if (lid == leylineBasis.leylineId()) {
+                                    lockedTarget = new LeylineRow(battle.zoneId(), lid, owner, hp, shield,
+                                            0L, 0L, 0, 0, 0L, 0L);
+                                } else if (battle.attackerGuildId() != 0 && owner == battle.attackerGuildId()) {
+                                    lockedOwnsOther = true;
+                                }
+                            }
+                        }
+                    }
+                    if (lockedTarget == null
+                            || lockedTarget.ownerGuildId() != leylineBasis.ownerGuildId()
+                            || lockedTarget.bannerHp() != leylineBasis.bannerHp()
+                            || lockedTarget.shieldUntilMs() != leylineBasis.shieldUntilMs()
+                            || lockedOwnsOther != leylineBasis.attackerOwnsOther()) {
+                        c.rollback();
+                        throw new WarRuleException("stale_snapshot");
                     }
                     if (capturedLeyline) {
                         try (PreparedStatement upd = c.prepareStatement(
@@ -1218,7 +1415,7 @@ public class GuildWarStore {
                         }
                     }
                 }
-                // 2. 周战功累计（按 guild_id 升序更新，防两帮互打成环死锁）
+                // 2. 周战功累计（锁序 15：按 guild_id 升序更新，防两帮互打成环死锁）
                 if (g1 != 0 && g2 != 0 && g1 != g2) {
                     if (Long.compareUnsigned(g1, g2) <= 0) {
                         if (battle.attackerMerit() > 0) addGuildWeeklyMerit(c, g1, weekKey, battle.attackerMerit(), nowMs);
@@ -1231,11 +1428,15 @@ public class GuildWarStore {
                     if (battle.attackerMerit() > 0 && g1 != 0) addGuildWeeklyMerit(c, g1, weekKey, battle.attackerMerit(), nowMs);
                     if (battle.defenderMerit() > 0 && g2 != 0) addGuildWeeklyMerit(c, g2, weekKey, battle.defenderMerit(), nowMs);
                 }
-                // 3. 玩家战功、战后保护、免战冷却与连胜（按 player_id 无符号升序同连接 FOR UPDATE，避免双人互锁与覆盖）
+                // 3. 玩家战功、战后保护、免战冷却、连胜、追杀免疫与当日领赏计数（锁序 16，按 player_id 无符号升序，杜绝 17->16 逆序与日切清零错写）
                 boolean atkWon = battle.outcome() == 1;
                 boolean defWon = battle.outcome() == 2;
                 long oppOfAtk = defenderIds.isEmpty() ? 0L : defenderIds.get(0);
                 long oppOfDef = attackerIds.isEmpty() ? 0L : attackerIds.get(0);
+                long bountyTargetId = (plan.touch() && plan.resolved() && !defenderIds.isEmpty() && bountyImmunitySec > 0)
+                        ? defenderIds.get(0) : 0L;
+                long bountyPayoutWinnerId = (plan.touch() && plan.resolved() && plan.rewardSilver() > 0)
+                        ? plan.winnerPlayerId() : 0L;
                 java.util.Set<Long> atkSet = new java.util.HashSet<>(attackerIds);
                 java.util.List<Long> allParticipants = new ArrayList<>(attackerIds.size() + defenderIds.size());
                 allParticipants.addAll(attackerIds);
@@ -1247,40 +1448,41 @@ public class GuildWarStore {
                 allParticipants.sort(Long::compareUnsigned);
                 for (long pid : allParticipants) {
                     boolean isAtk = atkSet.contains(pid);
-                    updateParticipantState(c, pid, battle.zoneId(), weekKey,
+                    long immunityUntil = (bountyTargetId != 0L && pid == bountyTargetId)
+                            ? nowMs + bountyImmunitySec * 1000L : 0L;
+                    boolean incPayout = bountyPayoutWinnerId != 0L && pid == bountyPayoutWinnerId;
+                    updateParticipantState(c, pid, battle.zoneId(), weekKey, dayKey,
                             isAtk ? battle.attackerMerit() : battle.defenderMerit(),
                             isAtk ? atkWon : defWon,
                             isAtk ? defWon : atkWon,
                             isAtk ? oppOfAtk : oppOfDef,
-                            protectSec, nowMs);
+                            protectSec, immunityUntil, incPayout, nowMs);
                 }
-                // 4. 追杀令推进 / 结单 / 反杀撕单（先 FOR UPDATE 锁追杀令行，且仅在本次真正结单时给目标挂免疫期，同连接读防覆盖战功）
+                // 4. 追杀令推进 / 结单 / 反杀撕单（锁序 17：仅 plan.touch=true 才锁写，行锁内复核原快照防并发覆盖与清零反杀数）
                 int bountyUpdated = 0;
-                if (battle.bountyId() != 0) {
-                    try (PreparedStatement lockB = c.prepareStatement(
-                            "SELECT 1 FROM guild_war_bounty WHERE bounty_id=? FOR UPDATE")) {
-                        lockB.setLong(1, battle.bountyId());
-                        lockB.executeQuery().close();
+                if (plan.touch() && battle.bountyId() != 0) {
+                    BountyRow locked = loadBountyForUpdateTx(c, battle.bountyId());
+                    if (locked == null || locked.status() != 2
+                            || Long.compareUnsigned(locked.expiresAtMs(), nowMs) <= 0
+                            || locked.counterKills() != plan.expectedCounterKills()
+                            || !Objects.equals(locked.counterKillersJson(),
+                            plan.expectedCounterKillersJson() == null ? "" : plan.expectedCounterKillersJson())) {
+                        c.rollback();
+                        throw new WarRuleException("stale_snapshot");
                     }
                     try (PreparedStatement upd = c.prepareStatement(
                             "UPDATE guild_war_bounty SET status=?, counter_kills=?, counter_killers_json=?, resolved_at_ms=?, winner_player_id=? WHERE bounty_id=? AND status=2")) {
-                        upd.setInt(1, nextBountyStatus);
-                        upd.setInt(2, nextCounterKills);
-                        upd.setString(3, nextCounterKillersJson == null ? "" : nextCounterKillersJson);
-                        upd.setLong(4, bountyResolved ? nowMs : 0L);
-                        upd.setLong(5, winnerPlayerId);
+                        upd.setInt(1, plan.nextStatus());
+                        upd.setInt(2, plan.nextCounterKills());
+                        upd.setString(3, plan.nextCounterKillersJson() == null ? "" : plan.nextCounterKillersJson());
+                        upd.setLong(4, plan.resolved() ? nowMs : 0L);
+                        upd.setLong(5, plan.winnerPlayerId());
                         upd.setLong(6, battle.bountyId());
                         bountyUpdated = upd.executeUpdate();
                     }
-                    if (bountyResolved && bountyUpdated == 1 && !defenderIds.isEmpty() && bountyImmunitySec > 0) {
-                        PlayerStateRow targetSt = lockOrDefaultPlayerStateTx(c, defenderIds.get(0), battle.zoneId(), weekKey);
-                        upsertPlayerState(c, new PlayerStateRow(targetSt.playerId(), battle.zoneId(), targetSt.peaceMode(),
-                                targetSt.peaceReadyAtMs(), targetSt.openChallenge(), targetSt.protectUntilMs(),
-                                targetSt.streakCount(), targetSt.streakDistinctCount(), targetSt.lastStreakOpponentId(),
-                                weekKey, targetSt.weeklyMerit(), targetSt.milestoneClaimedMask(),
-                                targetSt.dividendClaimedCount(), nowMs + bountyImmunitySec * 1000L,
-                                dayKey, targetSt.bountyPayoutCountToday(), targetSt.nextGarrisonRefreshMs(),
-                                targetSt.nextTrackAtMs(), nowMs));
+                    if (bountyUpdated != 1) {
+                        c.rollback();
+                        throw new WarRuleException("stale_snapshot");
                     }
                 }
                 // 5. 宿敌计数
@@ -1874,8 +2076,9 @@ public class GuildWarStore {
         }
     }
 
-    private void updateParticipantState(Connection c, long playerId, int zoneId, int weekKey, long meritDelta,
-                                        boolean won, boolean lost, long opponentId, long protectSec,
+    private void updateParticipantState(Connection c, long playerId, int zoneId, int weekKey, int dayKey,
+                                        long meritDelta, boolean won, boolean lost, long opponentId, long protectSec,
+                                        long bountyImmunityUntil, boolean incrementBountyPayout,
                                         long nowMs) throws SQLException {
         PlayerStateRow st = lockOrDefaultPlayerStateTx(c, playerId, zoneId, weekKey);
         int nextStreak = st.streakCount();
@@ -1894,10 +2097,18 @@ public class GuildWarStore {
         }
         long protectUntil = Math.max(st.protectUntilMs(), nowMs + protectSec * 1000L);
         long peaceReadyAt = Math.max(st.peaceReadyAtMs(), nowMs + GuildWarRules.DEFAULT_PEACE_COOLDOWN_SEC * 1000L);
+        long nextImmunity = bountyImmunityUntil > 0L
+                ? Math.max(st.bountyImmunityUntilMs(), bountyImmunityUntil) : st.bountyImmunityUntilMs();
+        int nextPayoutDayKey = st.bountyPayoutDayKey();
+        int nextPayoutCount = st.bountyPayoutCountToday();
+        if (incrementBountyPayout) {
+            nextPayoutCount = st.bountyPayoutDayKey() == dayKey ? st.bountyPayoutCountToday() + 1 : 1;
+            nextPayoutDayKey = dayKey;
+        }
         upsertPlayerState(c, new PlayerStateRow(playerId, zoneId, st.peaceMode(), peaceReadyAt,
                 st.openChallenge(), protectUntil, nextStreak, nextDistinct, nextLastOpp, weekKey,
                 st.weeklyMerit() + meritDelta, st.milestoneClaimedMask(), st.dividendClaimedCount(),
-                st.bountyImmunityUntilMs(), st.bountyPayoutDayKey(), st.bountyPayoutCountToday(),
+                nextImmunity, nextPayoutDayKey, nextPayoutCount,
                 st.nextGarrisonRefreshMs(), st.nextTrackAtMs(), nowMs));
     }
 
@@ -1950,7 +2161,7 @@ public class GuildWarStore {
         return new BountyRow(rs.getLong(1), rs.getInt(2), rs.getLong(3), rs.getLong(4),
                 rs.getLong(5), rs.getLong(6), rs.getInt(7), rs.getLong(8), rs.getLong(9),
                 rs.getInt(10), rs.getInt(11), rs.getInt(12), rs.getString(13), rs.getLong(14),
-                rs.getLong(15), rs.getLong(16), rs.getLong(17), rs.getLong(18));
+                rs.getLong(15), rs.getLong(16), rs.getLong(17), rs.getLong(18), rs.getLong(19));
     }
 
     private static BattleRow readBattle(ResultSet rs) throws SQLException {
