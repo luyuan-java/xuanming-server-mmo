@@ -58,4 +58,12 @@ public interface AccountLoginService {
     default CompletableFuture<String> resolveAccessTokenAccount(String accessToken) {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("resolveAccessTokenAccount not implemented"));
     }
+
+    /**
+     * 检查账号的全部角色是否已有会话或有效重连租约落在 {@code zoneId}（以在线目录 {@code gate_zone_id} 为权威，
+     * 闭环合服并入角色原 gate 掉线与跨区在线误免排队两类场景）：命中返回对应 {@code player_id}（> 0），否则返回 0。
+     */
+    default CompletableFuture<Long> findReconnectingPlayer(String account, int zoneId) {
+        return CompletableFuture.completedFuture(0L);
+    }
 }

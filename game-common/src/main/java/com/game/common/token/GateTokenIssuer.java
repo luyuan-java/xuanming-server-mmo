@@ -2,6 +2,9 @@ package com.game.common.token;
 
 import com.game.proto.GateTokenPayload;
 import com.google.protobuf.ByteString;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -46,19 +49,59 @@ public final class GateTokenIssuer {
         this.random = random;
     }
 
-    /** 为选中的 gate 签一张新令牌；有效期从本次调用时刻起算。 */
+    /** 票据绑定账号的摘要长度（SHA-256 前 16 字节，同主仓 {@code loginqueue.TicketAccountDigest}）。 */
+    public static final int ACCOUNT_DIGEST_BYTES = 16;
+
+    /** 返回票据里绑定账号的 16 字节摘要（{@code SHA-256("gate-ticket-account|" + account)[0..16]}）；空账号返回空串表示不绑。 */
+    public static ByteString ticketAccountDigest(String account) {
+        if (account == null || account.isEmpty()) {
+            return ByteString.EMPTY;
+        }
+        try {
+            byte[] sum = MessageDigest.getInstance("SHA-256")
+                    .digest(("gate-ticket-account|" + account).getBytes(StandardCharsets.UTF_8));
+            return ByteString.copyFrom(sum, 0, ACCOUNT_DIGEST_BYTES);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
+    }
+
+    /** 判断一张 gate 票据是否发给 {@code account}；摘要为空表示未绑账号（放行），否则恒定时间逐字节比对。 */
+    public static boolean ticketIssuedTo(ByteString digest, String account) {
+        if (digest == null || digest.isEmpty()) {
+            return true;
+        }
+        if (account == null || account.isEmpty()) {
+            return false;
+        }
+        return MessageDigest.isEqual(digest.toByteArray(), ticketAccountDigest(account).toByteArray());
+    }
+
+    /** 为选中的 gate 签一张新令牌（不绑账号）；有效期从本次调用时刻起算。 */
     public IssuedGateToken issue(int gateNodeId, int zoneId) {
+        return issueWithAccountDigest(gateNodeId, zoneId, ByteString.EMPTY);
+    }
+
+    /** 为选中的 gate 签一张绑定持票账号的新令牌（{@code GateTokenPayload.account_digest = 7}）。 */
+    public IssuedGateToken issue(int gateNodeId, int zoneId, String account) {
+        return issueWithAccountDigest(gateNodeId, zoneId, ticketAccountDigest(account));
+    }
+
+    /** 为选中的 gate 签一张携带预计算账号摘要的令牌（供排队放行取票时使用）。 */
+    public IssuedGateToken issueWithAccountDigest(int gateNodeId, int zoneId, ByteString accountDigest) {
         long deadline = clock.instant().plus(TOKEN_TTL).getEpochSecond();
         byte[] sessionKey = new byte[SESSION_KEY_BYTES];
         random.nextBytes(sessionKey);
-        ByteString payload = GateTokenPayload.newBuilder()
+        GateTokenPayload.Builder payloadBuilder = GateTokenPayload.newBuilder()
                 .setGateNodeId(gateNodeId)
                 .setZoneId(zoneId)
                 .setExpireTimestamp(deadline)
                 .setHmacSessionKey(ByteString.copyFrom(sessionKey))
-                .setTargetZoneId(zoneId)
-                .build()
-                .toByteString();
+                .setTargetZoneId(zoneId);
+        if (accountDigest != null && !accountDigest.isEmpty()) {
+            payloadBuilder.setAccountDigest(accountDigest);
+        }
+        ByteString payload = payloadBuilder.build().toByteString();
         return new IssuedGateToken(payload, tokens.sign(payload), deadline);
     }
 

@@ -48,9 +48,17 @@ public final class AssignGateMetrics {
     private final MeterRegistry registry;
     private final ConcurrentHashMap<Key, Counter> counters = new ConcurrentHashMap<>();
     private final java.util.EnumMap<AuthOutcome, Counter> authCounters = new java.util.EnumMap<>(AuthOutcome.class);
+    private final Counter queueFullCounter;
+    private final Counter reconnectBypassCounter;
 
     public AssignGateMetrics(MeterRegistry registry) {
         this.registry = registry;
+        this.queueFullCounter = Counter.builder("game.gateway.queue.full")
+                .description("登录排队队列触达长度上限拒入队计数（持续非零说明需扩容或调大 max-queue-length）")
+                .register(registry);
+        this.reconnectBypassCounter = Counter.builder("game.gateway.queue.reconnect.bypass")
+                .description("已在本区游戏中的账号重连/顶号免排队放行计数")
+                .register(registry);
         for (AuthOutcome outcome : AuthOutcome.values()) {
             authCounters.put(outcome, Counter.builder(AUTH_NAME)
                     .description("assign-gate access_token 鉴权结局计数")
@@ -100,6 +108,16 @@ public final class AssignGateMetrics {
         if (outcome != null) {
             authCounters.get(outcome).increment();
         }
+    }
+
+    /** 记一次队列满拒入队事件。 */
+    public void recordQueueFull() {
+        queueFullCounter.increment();
+    }
+
+    /** 记一次已在本区游戏中的账号重连/顶号免排队放行。 */
+    public void recordReconnectBypass() {
+        reconnectBypassCounter.increment();
     }
 
     /** 记一次排队轮询（{@code /api/queue-status}）的结局。 */

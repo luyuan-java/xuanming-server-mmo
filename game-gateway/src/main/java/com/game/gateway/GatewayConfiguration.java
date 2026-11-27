@@ -149,8 +149,11 @@ public class GatewayConfiguration {
 
     /** 登录排队的存储（构造不碰 Redis；排队关闭时也建，没有调用方）。 */
     @Bean
-    public LoginQueue loginQueue(RedissonClient redis, RedisKeys redisKeys, GatewayProperties properties, Clock clock) {
-        return new LoginQueue(redis, redisKeys, clock::millis, properties.queue().entryTtl(), properties.queue().admitTtl());
+    public LoginQueue loginQueue(RedissonClient redis, RedisKeys redisKeys, GatewayProperties properties,
+                                 Environment environment, Clock clock) {
+        return new LoginQueue(redis, redisKeys, clock::millis, properties.queue().entryTtl(),
+                properties.queue().admitTtl(), gateSecret(environment).getBytes(StandardCharsets.UTF_8),
+                properties.queue().maxQueueLength());
     }
 
     @Bean
@@ -190,8 +193,23 @@ public class GatewayConfiguration {
                 throw new IllegalStateException("access_token 校验调用失败", e);
             }
         };
+        AssignGateService.ReconnectingPlayerLookup reconnectingLookup = loginService == null
+                ? AssignGateService.ReconnectingPlayerLookup.NONE
+                : (account, zoneId) -> {
+                    try {
+                        Long pid = loginService.findReconnectingPlayer(account, zoneId).get(2, TimeUnit.SECONDS);
+                        return pid == null ? 0L : pid;
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return 0L;
+                    } catch (Exception e) {
+                        log.warn("调用 login.findReconnectingPlayer 失败 zone={}: {}", zoneId, e.toString());
+                        return 0L;
+                    }
+                };
         return new AssignGateService(zones, gates, issuer, queueing, rateLimiter, clock, gateInflight,
-                authenticator, Boolean.TRUE.equals(properties.legacyGateLoginEnabled()), assignGateMetrics::recordAuth);
+                authenticator, Boolean.TRUE.equals(properties.legacyGateLoginEnabled()), assignGateMetrics::recordAuth,
+                reconnectingLookup, assignGateMetrics::recordQueueFull, assignGateMetrics::recordReconnectBypass, null);
     }
 
     /** 开服限流（关闭时 check 一律放行，不碰 Redis；存储出错 fail-open）。 */
@@ -225,7 +243,8 @@ public class GatewayConfiguration {
         }
         Counter admits = Counter.builder("game.gateway.queue.admits").description("排队放行的人数").register(meterRegistry);
         return new QueueDispatcherRunner(redis, redisKeys, properties.queue().dispatchInterval(),
-                leadership -> new QueueDispatcher(queue, capacity, zones, gates, leadership, admits::increment, gateInflight));
+                leadership -> new QueueDispatcher(queue, capacity, zones, gates, leadership, admits::increment,
+                        gateInflight, properties.queue().maxDispatchPerTick()));
     }
 
     /** 开放区数 / 可建角区数指标（与区服列表同源，供「无区可建角」告警使用）。 */

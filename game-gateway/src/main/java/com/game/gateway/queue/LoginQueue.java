@@ -1,13 +1,20 @@
 package com.game.gateway.queue;
 
 import com.game.api.proto.GateNodeInfo;
+import com.game.common.token.GateTokenIssuer;
 import com.game.discovery.RedisKeys;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.nio.charset.StandardCharsets;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.LongSupplier;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.ByteArrayCodec;
@@ -35,9 +42,20 @@ public final class LoginQueue {
      * 在线人数里，占位得替它占着；基线取走即撤占位，开区时每轮都按「在线 0」再放一满批，能放进几倍容量。
      */
     static final Duration TAKEN_GRACE = Duration.ofSeconds(15);
+    private static final byte[] DEFAULT_HMAC_SECRET = "login-queue-default".getBytes(StandardCharsets.UTF_8);
 
-    /** 一次入队的结果。{@code rank} 从 0 起（0 = 下一个）。 */
-    public record Enqueued(String queueId, long rank, long total) {
+    /**
+     * 一次入队的结果。{@code rank} 从 0 起（0 = 下一个）。
+     * {@code full == true} 表示队列达到上限未入队（调用方回 100 ratelimit 30~40s）。
+     */
+    public record Enqueued(String queueId, long rank, long total, boolean rejoined, boolean admitWaiting, boolean full) {
+        public Enqueued(String queueId, long rank, long total) {
+            this(queueId, rank, total, false, false, false);
+        }
+
+        public static Enqueued full(long total) {
+            return new Enqueued("", 0L, total, false, false, true);
+        }
     }
 
     /** 一次放行的结果：弹出的个数 = 放行 + 已过期（元数据不在，客户端早走了）。 */
@@ -51,8 +69,11 @@ public final class LoginQueue {
     public sealed interface Lookup permits Admitted, Waiting, Expired {
     }
 
-    /** 已放行：取走了放行槽（只取一次）。 */
-    public record Admitted(GateNodeInfo gate, long enqueuedAtMs) implements Lookup {
+    /** 已放行：取走了放行槽（只取一次）；携带入队时的账号摘要（供签票绑定持票账号）。 */
+    public record Admitted(GateNodeInfo gate, long enqueuedAtMs, ByteString accountDigest) implements Lookup {
+        public Admitted(GateNodeInfo gate, long enqueuedAtMs) {
+            this(gate, enqueuedAtMs, ByteString.EMPTY);
+        }
     }
 
     /** 还在排：{@code rank} 从 0 起。 */
@@ -63,13 +84,35 @@ public final class LoginQueue {
     public record Expired() implements Lookup {
     }
 
+    /**
+     * 账号单条目入队与长度上限判定（同主仓 enqueueScript）：
+     * KEYS[1]=queue ZSET, KEYS[2]=meta Hash, KEYS[3]=admit slot
+     * ARGV[1]=queueId, ARGV[2]=nowMs, ARGV[3]=entryTtlMs, ARGV[4]=zoneId, ARGV[5]=maxQueueLength(0=不限), ARGV[6]=acctDigestHex
+     * 返回 {code, rank, total}：1=KEPT(原位不动), 2=ADMIT_WAITING(已放行待取), 3=NEW(队尾新建), 4=FULL(满队未写)。
+     */
     private static final String ENQUEUE = """
+            if redis.call('exists', KEYS[3]) == 1 then
+              return {2, 0, redis.call('zcard', KEYS[1])}
+            end
+            local existing = redis.call('zrank', KEYS[1], ARGV[1])
+            if existing and redis.call('exists', KEYS[2]) == 1 and redis.call('hget', KEYS[2], 'admitted') ~= '1' then
+              redis.call('pexpire', KEYS[1], ARGV[3])
+              redis.call('pexpire', KEYS[2], ARGV[3])
+              return {1, existing, redis.call('zcard', KEYS[1])}
+            end
+            local limit = tonumber(ARGV[5])
+            if limit > 0 and not existing then
+              local cur = redis.call('zcard', KEYS[1])
+              if cur >= limit then
+                return {4, 0, cur}
+              end
+            end
             redis.call('zadd', KEYS[1], ARGV[2], ARGV[1])
             redis.call('pexpire', KEYS[1], ARGV[3])
             redis.call('del', KEYS[2])
-            redis.call('hset', KEYS[2], 'zone', ARGV[4], 'created', ARGV[2], 'admitted', '0')
+            redis.call('hset', KEYS[2], 'zone', ARGV[4], 'created', ARGV[2], 'admitted', '0', 'acct_digest', ARGV[6])
             redis.call('pexpire', KEYS[2], ARGV[3])
-            return {redis.call('zrank', KEYS[1], ARGV[1]), redis.call('zcard', KEYS[1])}
+            return {3, redis.call('zrank', KEYS[1], ARGV[1]), redis.call('zcard', KEYS[1])}
             """;
 
     /** 清掉过期占位后的占位数。ARGV: now_ms。 */
@@ -78,15 +121,29 @@ public final class LoginQueue {
             return redis.call('zcard', KEYS[1])
             """;
 
-    /** 快速通道原子占位（同基线 reserveFastPathSlotScript）：占位数没到预算才占（1），否则 0。ARGV: now, budget, member, expiry, ttl_ms。 */
+    /**
+     * 快速通道原子占位（同主仓 reserveFastPathSlotScript）：
+     * 同一账号的成员已在集合里时不重复占名额、仅续期；否则未到期占位 < budget 才占（1），满则 0。
+     * ARGV: now, budget, member, expiry, ttl_ms。
+     */
     private static final String RESERVE_FAST = """
             redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1])
-            if redis.call('zcard', KEYS[1]) >= tonumber(ARGV[2]) then
+            if not redis.call('zscore', KEYS[1], ARGV[3]) and redis.call('zcard', KEYS[1]) >= tonumber(ARGV[2]) then
               return 0
             end
             redis.call('zadd', KEYS[1], ARGV[4], ARGV[3])
             if redis.call('pttl', KEYS[1]) < tonumber(ARGV[5]) then
               redis.call('pexpire', KEYS[1], ARGV[5])
+            end
+            return 1
+            """;
+
+    /** 重连 / 顶号免排队在途占位（不看预算，按 player_id 幂等续期）：ARGV: now, member, expiry, ttl_ms。 */
+    private static final String HOLD_RECONNECT = """
+            redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1])
+            redis.call('zadd', KEYS[1], ARGV[3], ARGV[2])
+            if redis.call('pttl', KEYS[1]) < tonumber(ARGV[4]) then
+              redis.call('pexpire', KEYS[1], ARGV[4])
             end
             return 1
             """;
@@ -126,7 +183,7 @@ public final class LoginQueue {
             """;
 
     /**
-     * 轮询：有放行槽就取走 → {1, slot, created}——占位改为再留 {@link #TAKEN_GRACE}，元数据记下本次请求号与放行槽，
+     * 轮询：有放行槽就取走 → {1, slot, created, acct_digest}——占位改为再留 {@link #TAKEN_GRACE}，元数据记下本次请求号与放行槽，
      * 同一请求被 Redisson 重发时认得出来、照样回 {1, ...}（别的请求再拿同一令牌回 {3}，放行槽只取一次）；
      * 还在队里 → {2, rank, total}；其余（过期、已取走、放行槽超时没取）→ {3}。
      * KEYS: admit, admitted, queue, meta；ARGV: queue_id, request_id, grace_expiry_ms, grace_ms。
@@ -142,10 +199,10 @@ public final class LoginQueue {
               if redis.call('exists', KEYS[4]) == 1 then
                 redis.call('hset', KEYS[4], 'taken_by', ARGV[2], 'slot', slot)
               end
-              return {1, slot, redis.call('hget', KEYS[4], 'created') or '0'}
+              return {1, slot, redis.call('hget', KEYS[4], 'created') or '0', redis.call('hget', KEYS[4], 'acct_digest') or ''}
             end
             if redis.call('hget', KEYS[4], 'taken_by') == ARGV[2] then
-              return {1, redis.call('hget', KEYS[4], 'slot'), redis.call('hget', KEYS[4], 'created') or '0'}
+              return {1, redis.call('hget', KEYS[4], 'slot'), redis.call('hget', KEYS[4], 'created') or '0', redis.call('hget', KEYS[4], 'acct_digest') or ''}
             end
             local rank = redis.call('zrank', KEYS[3], ARGV[1])
             if rank then
@@ -159,6 +216,8 @@ public final class LoginQueue {
     private final LongSupplier nowMs;
     private final Duration entryTtl;
     private final Duration admitTtl;
+    private final byte[] hmacSecret;
+    private final int maxQueueLength;
 
     /**
      * @param redisKeys 本进程部署命名空间的键名
@@ -166,23 +225,60 @@ public final class LoginQueue {
      * @param admitTtl 放行有效期：放行后多久内来取，也是没取走时占位的存活时长（基线 AdmitTTL 60 s）
      */
     public LoginQueue(RedissonClient redis, RedisKeys redisKeys, LongSupplier nowMs, Duration entryTtl, Duration admitTtl) {
+        this(redis, redisKeys, nowMs, entryTtl, admitTtl, DEFAULT_HMAC_SECRET, QueueSettings.DEFAULT_MAX_QUEUE_LENGTH);
+    }
+
+    public LoginQueue(RedissonClient redis, RedisKeys redisKeys, LongSupplier nowMs, Duration entryTtl, Duration admitTtl,
+                      byte[] hmacSecret, int maxQueueLength) {
         this.redis = redis;
         this.redisKeys = redisKeys;
         this.nowMs = nowMs;
         this.entryTtl = entryTtl;
         this.admitTtl = admitTtl;
+        this.hmacSecret = hmacSecret == null || hmacSecret.length == 0 ? DEFAULT_HMAC_SECRET : hmacSecret.clone();
+        this.maxQueueLength = Math.max(0, maxQueueLength);
     }
 
     public Duration entryTtl() {
         return entryTtl;
     }
 
+    /** 账号在本区的确定性排队条目号（{@code a-<hmac-sha256前32位hex>}）：同一账号同区复用同一位置与同一在途名额。 */
+    public static String queueIdForAccount(byte[] secret, int zoneId, String account) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret == null || secret.length == 0 ? DEFAULT_HMAC_SECRET : secret, "HmacSHA256"));
+            byte[] sum = mac.doFinal(("queue-entry|" + Integer.toUnsignedString(zoneId) + "|" + account)
+                    .getBytes(StandardCharsets.UTF_8));
+            return "a-" + HexFormat.of().formatHex(sum, 0, 16);
+        } catch (NoSuchAlgorithmException | InvalidKeyException e) {
+            throw new IllegalStateException("HMAC-SHA256 不可用", e);
+        }
+    }
+
     public Enqueued enqueue(int zoneId) {
-        String queueId = QueueTokens.newQueueId();
+        return enqueue(zoneId, null);
+    }
+
+    /**
+     * 入队：带账号时按确定性条目号去重（已在排沿用原位、已放行未取回名次 0）；
+     * 超出 {@code maxQueueLength} 时不写 Redis，返回 {@link Enqueued#full()}。
+     */
+    public Enqueued enqueue(int zoneId, String account) {
+        boolean hasAccount = account != null && !account.isEmpty();
+        String queueId = hasAccount ? queueIdForAccount(hmacSecret, zoneId, account) : QueueTokens.newQueueId();
+        String acctDigestHex = hasAccount ? HexFormat.of().formatHex(GateTokenIssuer.ticketAccountDigest(account).toByteArray()) : "";
         List<Object> result = eval(ENQUEUE, RScript.ReturnType.MULTI,
-                List.of(redisKeys.loginQueue(zoneId), redisKeys.loginQueueMeta(queueId)),
-                ascii(queueId), number(nowMs.getAsLong()), number(entryTtl.toMillis()), number(zoneId));
-        return new Enqueued(queueId, asLong(result.get(0)), asLong(result.get(1)));
+                List.of(redisKeys.loginQueue(zoneId), redisKeys.loginQueueMeta(queueId), redisKeys.loginQueueAdmit(queueId)),
+                ascii(queueId), number(nowMs.getAsLong()), number(entryTtl.toMillis()), number(zoneId),
+                number(maxQueueLength), ascii(acctDigestHex));
+        long code = asLong(result.get(0));
+        long rank = asLong(result.get(1));
+        long total = asLong(result.get(2));
+        if (code == 4L) {
+            return Enqueued.full(total);
+        }
+        return new Enqueued(queueId, rank, total, code != 3L, code == 2L, false);
     }
 
     public long queueLength(int zoneId) {
@@ -198,20 +294,40 @@ public final class LoginQueue {
         return n == null ? 0 : n;
     }
 
-    /** 快速通道占位：占位数没到 {@code budget} 才占。 */
+    /** 快速通道占位（匿名兼容）。 */
     public boolean tryReserveFastPath(int zoneId, long budget) {
+        return tryReserveFastPath(zoneId, budget, null);
+    }
+
+    /** 快速通道占位：带账号时按账号定名成员（同账号反复请求只占 1 个名额），未到 {@code budget} 才占。 */
+    public boolean tryReserveFastPath(int zoneId, long budget, String account) {
         if (budget <= 0) {
             return false;
         }
         long now = nowMs.getAsLong();
+        long holdMs = Math.min(admitTtl.toMillis(), TAKEN_GRACE.toMillis());
+        String member = (account != null && !account.isEmpty())
+                ? queueIdForAccount(hmacSecret, zoneId, account)
+                : "fast:" + UUID.randomUUID();
         Long reserved = eval(RESERVE_FAST, RScript.ReturnType.INTEGER, List.of(redisKeys.loginQueueAdmitted(zoneId)),
-                number(now), number(budget), ascii("fast:" + UUID.randomUUID()), number(now + admitTtl.toMillis()),
-                number(admitTtl.toMillis()));
+                number(now), number(budget), ascii(member), number(now + holdMs), number(admitTtl.toMillis()));
         return reserved != null && reserved == 1;
     }
 
+    /** 免排队重连 / 顶号在连上 gate 之前占一个在途名额（按 player_id 幂等续期，不看预算）。 */
+    public void holdReconnectSlot(int zoneId, long playerId) {
+        if (playerId == 0L) {
+            return;
+        }
+        long now = nowMs.getAsLong();
+        long holdMs = Math.min(admitTtl.toMillis(), TAKEN_GRACE.toMillis());
+        String member = "reconnect:" + Long.toUnsignedString(playerId);
+        eval(HOLD_RECONNECT, RScript.ReturnType.INTEGER, List.of(redisKeys.loginQueueAdmitted(zoneId)),
+                number(now), ascii(member), number(now + holdMs), number(admitTtl.toMillis()));
+    }
+
     /**
-     * 放行一批到 {@code gate}：至多 {@code max} 个，且不超过 {@code budget}（容量 − 在线）减未过期占位。
+     * 放行一批：至多 {@code max} 个，且不超过 {@code budget}（容量 − 在线）减未过期占位。
      *
      * @return 放行数与弹出的过期条目数；弹出数小于 {@code max} 说明队列空了或空位用完了
      */
@@ -241,8 +357,15 @@ public final class LoginQueue {
         if (kind == 1) {
             try {
                 GateNodeInfo gate = GateNodeInfo.parseFrom((byte[]) result.get(1));
-                return new Admitted(gate, Long.parseLong(text(result.get(2))));
-            } catch (InvalidProtocolBufferException | NumberFormatException e) {
+                ByteString accountDigest = ByteString.EMPTY;
+                if (result.size() > 3 && result.get(3) != null) {
+                    String hex = text(result.get(3));
+                    if (!hex.isEmpty()) {
+                        accountDigest = ByteString.copyFrom(HexFormat.of().parseHex(hex));
+                    }
+                }
+                return new Admitted(gate, Long.parseLong(text(result.get(2))), accountDigest);
+            } catch (InvalidProtocolBufferException | IllegalArgumentException e) {
                 throw new IllegalStateException("放行槽损坏 queue_id=" + queueId, e);
             }
         }

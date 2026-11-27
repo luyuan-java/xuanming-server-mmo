@@ -157,6 +157,8 @@ public final class GateMetrics {
     public enum DisconnectReason {
         CLIENT_IDLE,
         HANDSHAKE_TIMEOUT,
+        /** 验签后 60 秒内未完成登录绑定（防已验签连接只发心跳不登录长期占满 gate 人数）。 */
+        LOGIN_TIMEOUT,
         HANDSHAKE_REJECTED,
         NO_HANDSHAKE,
         /** 非法包累计到阈值。 */

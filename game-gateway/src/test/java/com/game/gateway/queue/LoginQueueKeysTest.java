@@ -44,7 +44,7 @@ class LoginQueueKeysTest {
         RScript script = mock(RScript.class);
         when(redis.getScript(ByteArrayCodec.INSTANCE)).thenReturn(script);
         List<Call> calls = new ArrayList<>();
-        Deque<List<?>> results = new ArrayDeque<>(List.of(List.of(0L, 1L), List.of(1L, 0L), List.of(3L)));
+        Deque<List<?>> results = new ArrayDeque<>(List.of(List.of(3L, 0L, 1L), List.of(1L, 0L), List.of(3L)));
         when(script.eval(any(RScript.Mode.class), anyString(), any(RScript.ReturnType.class), anyList(), any(Object[].class)))
                 .thenAnswer(invocation -> {
                     Object[] args = invocation.getArguments();
@@ -66,7 +66,8 @@ class LoginQueueKeysTest {
     @Test
     void 缺省game_KEYS与ARGV前缀与以前逐字节相同() {
         Round r = run("game");
-        assertThat(r.enqueue().keys()).containsExactly("game:login-queue:7", "game:login-queue-meta:" + r.queueId());
+        assertThat(r.enqueue().keys()).containsExactly("game:login-queue:7", "game:login-queue-meta:" + r.queueId(),
+                "game:login-queue-admit:" + r.queueId());
         assertThat(r.dispatch().keys()).containsExactly("game:login-queue:7", "game:login-queue-admitted:7");
         assertThat(r.dispatch().argv().subList(5, 7)).as("放行脚本的 ARGV[6] / ARGV[7]：放行槽与元数据的键前缀")
                 .containsExactly("game:login-queue-admit:", "game:login-queue-meta:");
@@ -77,7 +78,8 @@ class LoginQueueKeysTest {
     @Test
     void 另一个命名空间的实例_全部键与ARGV前缀换成它的前缀() {
         Round r = run("nstest");
-        assertThat(r.enqueue().keys()).containsExactly("nstest:login-queue:7", "nstest:login-queue-meta:" + r.queueId());
+        assertThat(r.enqueue().keys()).containsExactly("nstest:login-queue:7", "nstest:login-queue-meta:" + r.queueId(),
+                "nstest:login-queue-admit:" + r.queueId());
         assertThat(r.dispatch().keys()).containsExactly("nstest:login-queue:7", "nstest:login-queue-admitted:7");
         assertThat(r.dispatch().argv().subList(5, 7)).containsExactly("nstest:login-queue-admit:", "nstest:login-queue-meta:");
         assertThat(r.lookup().keys()).containsExactly("nstest:login-queue-admit:" + r.queueId(), "nstest:login-queue-admitted:7",

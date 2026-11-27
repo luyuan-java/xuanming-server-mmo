@@ -15,13 +15,17 @@ import static org.mockito.Mockito.when;
 import com.game.api.proto.GateNodeInfo;
 import com.game.common.token.GateTokenIssuer;
 import com.game.common.token.GateTokens;
+import com.game.discovery.gate.GateInflight;
 import com.game.discovery.gate.GateSource;
+import com.game.gateway.assign.AssignGateMetrics;
 import com.game.gateway.assign.AssignGateResponse;
 import com.game.gateway.assign.AssignGateService;
 import com.game.gateway.ratelimit.RateLimitDecision;
 import com.game.gateway.ratelimit.RateLimiter;
 import com.game.gateway.store.ZoneRow;
 import com.game.gateway.zone.ZoneDirectory;
+import com.game.proto.GateTokenPayload;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Clock;
@@ -29,6 +33,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
@@ -45,9 +50,16 @@ class QueueAssignTest {
     private final GateSource gates = mock(GateSource.class);
     private final LoginQueue queue = mock(LoginQueue.class);
     private final QueueTokens tokens = new QueueTokens("s".getBytes(StandardCharsets.UTF_8));
+    private final AssignGateService.AccessTokenAuthenticator auth = tok -> "tok-alice".equals(tok)
+            ? Optional.of("alice") : Optional.empty();
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    private final AssignGateMetrics metrics = new AssignGateMetrics(meters);
     private final AssignGateService service = new AssignGateService(zones, gates,
             new GateTokenIssuer(GateTokens.ofUtf8("s"), CLOCK, new SecureRandom()),
-            new AssignGateService.Queueing(queue, new QueueCapacity(1.5), tokens, 2000), CLOCK);
+            new AssignGateService.Queueing(queue, new QueueCapacity(1.5), tokens, 2000), null, CLOCK,
+            new GateInflight(), auth, true, metrics::recordAuth,
+            AssignGateService.ReconnectingPlayerLookup.NONE, metrics::recordQueueFull, metrics::recordReconnectBypass,
+            () -> 35_000L);
 
     {
         when(gates.listGates(1)).thenReturn(List.of(GATE));
@@ -55,20 +67,31 @@ class QueueAssignTest {
     }
 
     @Test
-    void 队列空且快速通道占位成功_直接签_预算是容量减在线() {
+    void 队列空且快速通道占位成功_直接签绑定账号的票_预算是容量减在线() throws Exception {
         when(queue.queueLength(1)).thenReturn(0L);
-        when(queue.tryReserveFastPath(1, 90)).thenReturn(true);
-        AssignGateResponse resp = service.assign(1, null);
+        when(queue.tryReserveFastPath(1, 90, "alice")).thenReturn(true);
+        AssignGateResponse resp = service.assign(1, null, "1.1.1.1", null, "tok-alice");
         assertThat(resp.code()).isZero();
         assertThat(resp.gateIp()).isEqualTo("10.0.0.4");
-        verify(queue, never()).enqueue(anyInt());
+        GateTokenPayload payload = GateTokenPayload.parseFrom(resp.tokenPayload());
+        assertThat(GateTokenIssuer.ticketIssuedTo(payload.getAccountDigest(), "alice")).isTrue();
+        assertThat(GateTokenIssuer.ticketIssuedTo(payload.getAccountDigest(), "bob")).isFalse();
+        verify(queue, never()).enqueue(anyInt(), anyString());
     }
 
     @Test
-    void 有人在排或占位失败_入队回100_令牌可验() {
+    void 排队开启时拒绝不带accessToken的匿名分配() {
+        AssignGateResponse denied = service.assign(1, null);
+        assertThat(denied.code()).isEqualTo(AssignGateResponse.CODE_AUTH_REJECTED);
+        assertThat(denied.error()).isEqualTo(AssignGateResponse.ERR_AUTH_REQUIRED);
+        verifyNoInteractions(queue);
+    }
+
+    @Test
+    void 有人在排或占位失败_入队回100_队列满回100ratelimit并计数() {
         when(queue.queueLength(1)).thenReturn(3L);
-        when(queue.enqueue(1)).thenReturn(new LoginQueue.Enqueued(QueueTokens.newQueueId(), 3, 4));
-        AssignGateResponse resp = service.assign(1, "");
+        when(queue.enqueue(1, "alice")).thenReturn(new LoginQueue.Enqueued(QueueTokens.newQueueId(), 3, 4));
+        AssignGateResponse resp = service.assign(1, "", "1.1.1.1", null, "tok-alice");
         assertThat(resp.code()).isEqualTo(100);
         assertThat(resp.queueSource()).isEqualTo("login");
         assertThat(resp.queueRank()).isEqualTo(3);
@@ -76,11 +99,39 @@ class QueueAssignTest {
         assertThat(resp.retryAfterMs()).isEqualTo(2000);
         assertThat(tokens.verify(resp.queueToken(), CLOCK.millis() / 1000)).get()
                 .extracting(QueueTokens.Claims::zoneId).isEqualTo(1);
-        verify(queue, never()).tryReserveFastPath(anyInt(), anyLong());
+        verify(queue, never()).tryReserveFastPath(anyInt(), anyLong(), anyString());
+
+        // 队列达到上限：不入队，回 100 queue_source=ratelimit 与 30~40s 重试提示，并递增 queue.full 计数
+        when(queue.enqueue(1, "alice")).thenReturn(LoginQueue.Enqueued.full(1_000_000L));
+        AssignGateResponse full = service.assign(1, "", "1.1.1.1", null, "tok-alice");
+        assertThat(full.code()).isEqualTo(100);
+        assertThat(full.queueSource()).isEqualTo(AssignGateResponse.QUEUE_SOURCE_RATELIMIT);
+        assertThat(full.queueToken()).isNull();
+        assertThat(full.retryAfterMs()).isEqualTo(35_000L);
+        assertThat(meters.counter("game.gateway.queue.full").count()).isEqualTo(1.0);
     }
 
     @Test
-    void 带令牌轮询_还在排回100同一令牌_放行签gate令牌_过期410() {
+    void 重连顶号免排队_占在途名额并签绑定账号的票() throws Exception {
+        AssignGateService withReconnect = new AssignGateService(zones, gates,
+                new GateTokenIssuer(GateTokens.ofUtf8("s"), CLOCK, new SecureRandom()),
+                new AssignGateService.Queueing(queue, new QueueCapacity(1.5), tokens, 2000), null, CLOCK,
+                new GateInflight(), auth, true, metrics::recordAuth,
+                (acct, z) -> "alice".equals(acct) && z == 1 ? 999L : 0L,
+                metrics::recordQueueFull, metrics::recordReconnectBypass, () -> 35_000L);
+
+        AssignGateResponse resp = withReconnect.assign(1, null, "1.1.1.1", null, "tok-alice");
+        assertThat(resp.code()).isZero();
+        verify(queue).holdReconnectSlot(1, 999L);
+        verify(queue, never()).enqueue(anyInt(), anyString());
+        assertThat(meters.counter("game.gateway.queue.reconnect.bypass").count()).isEqualTo(1.0);
+        GateTokenPayload payload = GateTokenPayload.parseFrom(resp.tokenPayload());
+        assertThat(GateTokenIssuer.ticketIssuedTo(payload.getAccountDigest(), "alice")).isTrue();
+        assertThat(GateTokenIssuer.ticketIssuedTo(payload.getAccountDigest(), "eve")).isFalse();
+    }
+
+    @Test
+    void 带令牌轮询_还在排回100同一令牌_放行签绑定账号的gate令牌_过期410() throws Exception {
         String id = QueueTokens.newQueueId();
         String token = tokens.sign(id, 1, CLOCK.millis() / 1000 + 60);
         when(queue.lookup(1, id)).thenReturn(new LoginQueue.Waiting(2, 5));
@@ -89,11 +140,14 @@ class QueueAssignTest {
         assertThat(waiting.queueToken()).isEqualTo(token);
         assertThat(waiting.queueRank()).isEqualTo(2);
 
-        when(queue.lookup(1, id)).thenReturn(new LoginQueue.Admitted(GATE, 0));
+        when(queue.lookup(1, id)).thenReturn(new LoginQueue.Admitted(GATE, 0, GateTokenIssuer.ticketAccountDigest("alice")));
         AssignGateResponse admitted = service.queueStatus(1, token);
         assertThat(admitted.code()).isZero();
         assertThat(admitted.gatePort()).isEqualTo(11004);
         assertThat(admitted.tokenPayload()).isNotEmpty();
+        GateTokenPayload payload = GateTokenPayload.parseFrom(admitted.tokenPayload());
+        assertThat(GateTokenIssuer.ticketIssuedTo(payload.getAccountDigest(), "alice")).isTrue();
+        assertThat(GateTokenIssuer.ticketIssuedTo(payload.getAccountDigest(), "bob")).isFalse();
 
         when(queue.lookup(1, id)).thenReturn(new LoginQueue.Expired());
         assertThat(service.queueStatus(0, token).error()).as("没带区取令牌里的区").isEqualTo("queue_token_expired");
@@ -130,7 +184,7 @@ class QueueAssignTest {
     @Test
     void 排队存储出错_500_queue_unavailable_不签令牌() {
         when(queue.queueLength(1)).thenThrow(new IllegalStateException("Redis 不可达"));
-        assertThat(service.assign(1, null).error()).isEqualTo("queue_unavailable");
+        assertThat(service.assign(1, null, "1.1.1.1", null, "tok-alice").error()).isEqualTo("queue_unavailable");
         String id = QueueTokens.newQueueId();
         when(queue.lookup(eq(1), eq(id))).thenThrow(new IllegalStateException("Redis 不可达"));
         assertThat(service.queueStatus(1, tokens.sign(id, 1, CLOCK.millis() / 1000 + 60)).error())
@@ -151,16 +205,17 @@ class QueueAssignTest {
         when(limiter.check(anyInt(), any(), any(), any())).thenReturn(RateLimitDecision.deny(RateLimitDecision.IP_RATE_LIMIT));
         GateTokenIssuer issuer = new GateTokenIssuer(GateTokens.ofUtf8("s"), CLOCK, new SecureRandom());
         AssignGateService limited = new AssignGateService(zones, gates, issuer,
-                new AssignGateService.Queueing(queue, new QueueCapacity(1.5), tokens, 2000), limiter, CLOCK);
+                new AssignGateService.Queueing(queue, new QueueCapacity(1.5), tokens, 2000), limiter, CLOCK,
+                new GateInflight(), auth, true, metrics::recordAuth);
         String id = QueueTokens.newQueueId();
         when(queue.lookup(1, id)).thenReturn(new LoginQueue.Waiting(0, 1));
 
         assertThat(limited.assign(1, tokens.sign(id, 1, CLOCK.millis() / 1000 + 60), "1.1.1.1", "a").code()).isEqualTo(100);
         verifyNoInteractions(limiter);
-        AssignGateResponse denied = limited.assign(1, null, "1.1.1.1", "a");
+        AssignGateResponse denied = limited.assign(1, null, "1.1.1.1", null, "tok-alice");
         assertThat(denied.code()).isEqualTo(429);
         assertThat(denied.error()).isEqualTo("IP_RATE_LIMIT");
-        verify(queue, never()).enqueue(anyInt());
+        verify(queue, never()).enqueue(anyInt(), anyString());
 
         AssignGateService off = new AssignGateService(zones, gates, issuer, null, limiter, CLOCK);
         assertThat(off.assign(1, "q", "1.1.1.1", "a").code()).isEqualTo(429);

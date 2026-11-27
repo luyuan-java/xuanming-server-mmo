@@ -72,7 +72,11 @@ public final class JianghuDuelService {
     public record SocialRelationCheck(boolean hasAnyBlock, boolean allAreFriends) {
     }
 
-    public record EligibilityCheck(boolean selfRefusesStrangers, boolean targetRefusesStrangers, boolean payerSufficientFee) {
+    public record EligibilityCheck(boolean selfRefusesStrangers, boolean targetRefusesStrangers,
+                                   boolean payerSufficientFee, boolean payerSilverFeePending) {
+        public EligibilityCheck(boolean selfRefusesStrangers, boolean targetRefusesStrangers, boolean payerSufficientFee) {
+            this(selfRefusesStrangers, targetRefusesStrangers, payerSufficientFee, false);
+        }
     }
 
     public record GuildSummary(long guildId, String guildName) {
@@ -306,6 +310,10 @@ public final class JianghuDuelService {
                     .setErrorMessage(tip(JianghuErrorTip.jianghu_error.kJianghuBlockedByPeer_VALUE)).build();
         }
         EligibilityCheck elig = ports.checkSceneEligibility(sideA, sideB, callerId, tier);
+        if (elig.payerSilverFeePending()) {
+            return CreateJianghuDuelInviteResponse.newBuilder()
+                    .setErrorMessage(tip(JianghuErrorTip.jianghu_error.kJianghuDuelSilverFeePending_VALUE)).build();
+        }
         if (!elig.payerSufficientFee()) {
             return CreateJianghuDuelInviteResponse.newBuilder()
                     .setErrorMessage(tip(JianghuErrorTip.jianghu_error.kJianghuInsufficientWritOrSilver_VALUE)).build();

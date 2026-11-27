@@ -251,10 +251,18 @@ final class JianghuSilverFeeReviewTest {
         PrepareBattleResponse p3 = f.prepareSilverDuel(1003L, 5003L);
         assertThat(p3.hasErrorMessage()).isFalse();
         assertThat(f.player.wallet().balance(Wallet.GOLD)).isEqualTo(1_500L);
+        assertThat(f.jianghu.checkEligibility(
+                com.game.proto.CheckJianghuDuelEligibilityRequest.newBuilder()
+                        .setPayerPlayerId(1001L).setWritTier(1).setSilverCost(500L).build(),
+                pid -> pid == 1001L ? f.player : null).getPayerSilverFeePending()).isTrue();
         f.battle.cancel(CancelBattlePrepareRequest.newBuilder()
                 .setPlayerId(1001L).setBattleId(1003L).setSkipJianghuSilverRefund(true).build()).join();
         assertThat(f.player.wallet().balance(Wallet.GOLD)).isEqualTo(2_000L);
         assertThat(f.jianghu.stateOf(1001L).getPendingSilverFeeBattleId()).isZero();
+        assertThat(f.jianghu.checkEligibility(
+                com.game.proto.CheckJianghuDuelEligibilityRequest.newBuilder()
+                        .setPayerPlayerId(1001L).setWritTier(1).setSilverCost(500L).build(),
+                pid -> pid == 1001L ? f.player : null).getPayerSilverFeePending()).isFalse();
     }
 
     @Test

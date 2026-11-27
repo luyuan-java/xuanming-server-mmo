@@ -462,6 +462,16 @@ public class LoginConfiguration {
         return new RedisOwnerTakeovers(redis, redisKeys);
     }
 
+    @Bean
+    public com.game.discovery.presence.PlayerPresenceDirectory playerPresenceDirectory(RedissonClient redis, RedisKeys redisKeys) {
+        return new com.game.discovery.presence.PlayerPresenceDirectory(redis, redisKeys);
+    }
+
+    @Bean
+    public PlayerLocationDirectory playerLocationDirectory(RedissonClient redis, RedisKeys redisKeys) {
+        return new PlayerLocationDirectory(redis, redisKeys);
+    }
+
     /**
      * 进游戏。去向按位置记录与连接握手时的票据定（批次 5.4：持票者校验、票据钉 zone、登录期重定向 GO-5）；
      * 落地路径上问合服围栏（检查点 F2，判角色的归属区）。{@code game.zone-id} 只在会话没带 zone 时兜底。

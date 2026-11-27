@@ -1,6 +1,7 @@
 package com.game.login.account;
 
 import com.game.api.proto.SessionContext;
+import com.game.common.token.GateTokenIssuer;
 import com.game.login.auth.AuthProviderUnavailableException;
 import com.game.login.auth.LoginAuthenticator;
 import com.game.login.auth.LoginAuthenticator.Authenticated;
@@ -131,6 +132,12 @@ public final class AccountLogin {
             return Outcome.failed(LoginErrorTip.login_error.kLoginAccountNotFound_VALUE);
         }
         String account = authenticated.get().account();
+        // 票据绑定账号校验（防在线账号反复领免排队票转给他人、防排队令牌转卖；抢账号锁之前即拒绝且不产生副作用）
+        if (session != null && !GateTokenIssuer.ticketIssuedTo(session.getTicketAccountDigest(), account)) {
+            log.warn("gate 票据绑定账号不符，拒绝登录 account={} session={}",
+                    account, Integer.toUnsignedString(session.getSessionId()));
+            return Outcome.failed(LoginErrorTip.login_error.kLoginUnknownError_VALUE);
+        }
         if (!accountsInFlight.tryAcquire(account)) {
             log.info("同一账号登录在途，拒绝 account={} path={}", account, path(session));
             return Outcome.failed(LoginErrorTip.login_error.kLoginInProgress_VALUE);

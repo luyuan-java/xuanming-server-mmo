@@ -13,6 +13,7 @@ import com.game.gateway.ratelimit.RateLimitDecision;
 import com.game.gateway.ratelimit.RateLimiter;
 import com.game.gateway.store.ZoneRow;
 import com.game.gateway.zone.ZoneDirectory;
+import com.google.protobuf.ByteString;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -20,7 +21,9 @@ import java.time.Clock;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,6 +62,17 @@ public final class AssignGateService {
         Optional<String> verify(String accessToken);
     }
 
+    /** 重连/顶号免排队查口：检查账号的全部角色是否已有会话或有效重连租约落在本区（返回 player_id > 0 命中，0 未命中）。 */
+    @FunctionalInterface
+    public interface ReconnectingPlayerLookup {
+        long find(String account, int zoneId);
+
+        ReconnectingPlayerLookup NONE = (account, zoneId) -> 0L;
+    }
+
+    public static final long QUEUE_FULL_RETRY_MIN_MS = 30_000L;
+    public static final long QUEUE_FULL_RETRY_JITTER_MS = 10_000L;
+
     private final ZoneDirectory zones;
     private final GateSource gates;
     private final GateTokenIssuer issuer;
@@ -69,6 +83,10 @@ public final class AssignGateService {
     private final AccessTokenAuthenticator authenticator;
     private final boolean legacyGateLoginEnabled;
     private final Consumer<AssignGateMetrics.AuthOutcome> authObserver;
+    private final ReconnectingPlayerLookup reconnectingLookup;
+    private final Runnable onQueueFull;
+    private final Runnable onReconnectBypass;
+    private final LongSupplier fullRetryAfterMs;
 
     /** 不排队。 */
     public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer) {
@@ -99,6 +117,17 @@ public final class AssignGateService {
                              RateLimiter limiter, Clock clock, GateInflight inflight,
                              AccessTokenAuthenticator authenticator, boolean legacyGateLoginEnabled,
                              Consumer<AssignGateMetrics.AuthOutcome> authObserver) {
+        this(zones, gates, issuer, queueing, limiter, clock, inflight, authenticator, legacyGateLoginEnabled,
+                authObserver, ReconnectingPlayerLookup.NONE, () -> { }, () -> { },
+                () -> QUEUE_FULL_RETRY_MIN_MS + ThreadLocalRandom.current().nextLong(QUEUE_FULL_RETRY_JITTER_MS));
+    }
+
+    public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer, Queueing queueing,
+                             RateLimiter limiter, Clock clock, GateInflight inflight,
+                             AccessTokenAuthenticator authenticator, boolean legacyGateLoginEnabled,
+                             Consumer<AssignGateMetrics.AuthOutcome> authObserver,
+                             ReconnectingPlayerLookup reconnectingLookup,
+                             Runnable onQueueFull, Runnable onReconnectBypass, LongSupplier fullRetryAfterMs) {
         this.zones = zones;
         this.gates = gates;
         this.issuer = issuer;
@@ -109,6 +138,12 @@ public final class AssignGateService {
         this.authenticator = authenticator;
         this.legacyGateLoginEnabled = legacyGateLoginEnabled;
         this.authObserver = authObserver == null ? outcome -> { } : authObserver;
+        this.reconnectingLookup = reconnectingLookup == null ? ReconnectingPlayerLookup.NONE : reconnectingLookup;
+        this.onQueueFull = onQueueFull == null ? () -> { } : onQueueFull;
+        this.onReconnectBypass = onReconnectBypass == null ? () -> { } : onReconnectBypass;
+        this.fullRetryAfterMs = fullRetryAfterMs == null
+                ? () -> QUEUE_FULL_RETRY_MIN_MS + ThreadLocalRandom.current().nextLong(QUEUE_FULL_RETRY_JITTER_MS)
+                : fullRetryAfterMs;
     }
 
     public AssignGateResponse assign(int zoneId) {
@@ -137,6 +172,7 @@ public final class AssignGateService {
             return poll(zoneId, queueToken);
         }
         String cooldownKey = null;
+        String authenticatedAccount = "";
         if (accessToken != null && !accessToken.isBlank()) {
             if (authenticator == null) {
                 authObserver.accept(AssignGateMetrics.AuthOutcome.ERROR);
@@ -158,8 +194,10 @@ public final class AssignGateService {
                         AssignGateResponse.ERR_AUTH_REJECTED);
             }
             authObserver.accept(AssignGateMetrics.AuthOutcome.AUTHENTICATED);
+            authenticatedAccount = verifiedAccount.get();
             cooldownKey = tokenCooldownKey(accessToken);
-        } else if (!legacyGateLoginEnabled) {
+        } else if (!legacyGateLoginEnabled || queueing != null) {
+            // 排队开启时必须持有有效 access_token，禁止匿名分配（否则单账号单槽、票据绑账号、重连免排队全部失效）
             authObserver.accept(AssignGateMetrics.AuthOutcome.ANONYMOUS_DENIED);
             return AssignGateResponse.rejected(AssignGateResponse.CODE_AUTH_REJECTED,
                     AssignGateResponse.ERR_AUTH_REQUIRED);
@@ -189,15 +227,33 @@ public final class AssignGateService {
             return AssignGateResponse.rejected(AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_NO_GATE_AVAILABLE);
         }
         if (queueing == null) {
-            return signAndRecord(zoneId, picked.get());
+            return signAndRecord(zoneId, picked.get(), authenticatedAccount);
+        }
+        // 重连 / 顶号免排队：账号任一角色已在本区在线或重连租约内 -> 记在途占位后直接签票（票据绑定账号）
+        long reconnectingPlayerId = findReconnectingPlayerBestEffort(authenticatedAccount, zoneId);
+        if (reconnectingPlayerId != 0L) {
+            try {
+                queueing.queue().holdReconnectSlot(zoneId, reconnectingPlayerId);
+            } catch (RuntimeException e) {
+                log.warn("重连免排队写占位失败（继续放行） zone={} player={}: {}",
+                        zoneId, Long.toUnsignedString(reconnectingPlayerId), e.toString());
+            }
+            onReconnectBypass.run();
+            return signAndRecord(zoneId, picked.get(), authenticatedAccount);
         }
         try {
             ZoneRow zone = zones.find(zoneId).orElseThrow();
             if (queueing.queue().queueLength(zoneId) == 0
-                    && queueing.queue().tryReserveFastPath(zoneId, queueing.capacity().budget(zone, candidates))) {
-                return signAndRecord(zoneId, picked.get());
+                    && queueing.queue().tryReserveFastPath(zoneId, queueing.capacity().budget(zone, candidates),
+                            authenticatedAccount)) {
+                return signAndRecord(zoneId, picked.get(), authenticatedAccount);
             }
-            LoginQueue.Enqueued enqueued = queueing.queue().enqueue(zoneId);
+            LoginQueue.Enqueued enqueued = queueing.queue().enqueue(zoneId, authenticatedAccount);
+            if (enqueued.full()) {
+                onQueueFull.run();
+                log.error("登录排队已满，拒绝入队 zone={} total={}", zoneId, enqueued.total());
+                return AssignGateResponse.rateLimitQueueing(fullRetryAfterMs.getAsLong(), -1L);
+            }
             long expire = clock.millis() / 1000 + queueing.queue().entryTtl().toSeconds();
             String token = queueing.tokens().sign(enqueued.queueId(), zoneId, expire);
             return AssignGateResponse.loginQueueing(token, enqueued.rank(), enqueued.total(), queueing.retryAfterMs());
@@ -260,7 +316,7 @@ public final class AssignGateService {
         return switch (lookup) {
             case LoginQueue.Admitted admitted -> {
                 log.debug("排队放行取走 zone={} 等待 {} ms", zoneId, clock.millis() - admitted.enqueuedAtMs());
-                yield sign(zoneId, recheckAdmittedGate(zoneId, admitted.gate()));
+                yield signWithDigest(zoneId, recheckAdmittedGate(zoneId, admitted.gate()), admitted.accountDigest());
             }
             case LoginQueue.Waiting waiting -> AssignGateResponse.loginQueueing(queueToken, waiting.rank(), waiting.total(),
                     queueing.retryAfterMs());
@@ -338,16 +394,28 @@ public final class AssignGateService {
         };
     }
 
-    private AssignGateResponse signAndRecord(int zoneId, GateNodeInfo gate) {
-        AssignGateResponse resp = sign(zoneId, gate);
+    private long findReconnectingPlayerBestEffort(String account, int zoneId) {
+        if (account == null || account.isBlank()) {
+            return 0L;
+        }
+        try {
+            return reconnectingLookup.find(account, zoneId);
+        } catch (RuntimeException e) {
+            log.warn("查询重连免排队失败（按新登录继续） zone={}: {}", zoneId, e.toString());
+            return 0L;
+        }
+    }
+
+    private AssignGateResponse signAndRecord(int zoneId, GateNodeInfo gate, String account) {
+        AssignGateResponse resp = signWithDigest(zoneId, gate, GateTokenIssuer.ticketAccountDigest(account));
         if (inflight != null) {
             inflight.record(gate.getNodeId());
         }
         return resp;
     }
 
-    private AssignGateResponse sign(int zoneId, GateNodeInfo gate) {
-        IssuedGateToken token = issuer.issue(gate.getNodeId(), zoneId);
+    private AssignGateResponse signWithDigest(int zoneId, GateNodeInfo gate, ByteString accountDigest) {
+        IssuedGateToken token = issuer.issueWithAccountDigest(gate.getNodeId(), zoneId, accountDigest);
         log.debug("已分配 gate zone={} node={} 在线={}", zoneId, gate.getNodeId(), Integer.toUnsignedLong(gate.getPlayerCount()));
         return AssignGateResponse.admitted(gate.getClientHost(), gate.getClientPort(), gate.getClientWsUrl(),
                 token.payload().toByteArray(), token.signature().toByteArray(), token.deadlineEpochSec());

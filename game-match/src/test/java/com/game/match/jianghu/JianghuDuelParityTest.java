@@ -213,6 +213,22 @@ class JianghuDuelParityTest {
         assertThat(failedLaunch.getInvite().getBattleId()).isZero();
     }
 
+    @Test
+    void 发单人尚有未结清待退银两时前置返回40014() {
+        JianghuDuelService.Ports pendingPorts = new JianghuDuelService.Ports() {
+            @Override
+            public JianghuDuelService.EligibilityCheck checkSceneEligibility(
+                    List<Long> sideA, List<Long> sideB, long payerId, JianghuWritTier tier) {
+                return new JianghuDuelService.EligibilityCheck(false, false, true, true);
+            }
+        };
+        JianghuDuelService svc = new JianghuDuelService(() -> null, pendingPorts, () -> 1_730_000_000_000L, () -> 901L);
+        var resp = svc.createInvite(session(1001L), CreateJianghuDuelInviteRequest.newBuilder()
+                .setTargetPlayerId(2001L).setWritTier(JianghuWritTier.JIANGHU_WRIT_TIER_SILVER).build());
+        assertThat(resp.getErrorMessage().getId())
+                .isEqualTo(JianghuErrorTip.jianghu_error.kJianghuDuelSilverFeePending_VALUE);
+    }
+
     private static BattleResultEvent makeResult(long battleId, eBattleOutcome outcome, int rounds) {
         return BattleResultEvent.newBuilder()
                 .setBattleId(battleId)

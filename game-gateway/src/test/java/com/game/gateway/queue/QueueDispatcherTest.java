@@ -125,4 +125,22 @@ class QueueDispatcherTest {
         broken.tick();
         broken.tick();
     }
+
+    @Test
+    void 单区单拍受每拍放行上限封顶() {
+        when(queue.queueLength(1)).thenReturn(500L);
+        when(gates.listGates(1)).thenReturn(List.of(gate(1, 0)));
+        when(queue.dispatch(eq(1), anyLong(), anyInt(), any())).thenAnswer(inv -> {
+            int max = inv.getArgument(2);
+            return new LoginQueue.Dispatched(max, 0);
+        });
+        QueueDispatcher capped = new QueueDispatcher(queue, new QueueCapacity(1.5), zones(10_000), gates,
+                QueueDispatcher.always(), admits::addAndGet, null, 75);
+
+        capped.tick();
+
+        assertThat(admits.get()).as("单拍上限 75 = 50 + 25，不再继续弹出").isEqualTo(75);
+        verify(queue, times(1)).dispatch(1, 10_000L, 50, gate(1, 0));
+        verify(queue, times(1)).dispatch(1, 10_000L, 25, gate(1, 0));
+    }
 }

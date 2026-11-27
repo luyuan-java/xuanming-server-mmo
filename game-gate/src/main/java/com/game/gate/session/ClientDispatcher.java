@@ -166,8 +166,11 @@ public final class ClientDispatcher {
 
     static final int HEARTBEAT_INTERVAL_MS = 10_000;
     static final int HEARTBEAT_TIMEOUT_MS = 30_000;
+    /** 验签通过后必须完成一次 Login（BindAccount）的期限（同主仓 {@code kLoginDeadlineAfterVerify = 60s}）。 */
+    static final long LOGIN_DEADLINE_AFTER_VERIFY_MS = 60_000L;
     private static final long HEARTBEAT_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_INTERVAL_MS);
     private static final long HEARTBEAT_TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_TIMEOUT_MS);
+    private static final long LOGIN_DEADLINE_AFTER_VERIFY_NANOS = TimeUnit.MILLISECONDS.toNanos(LOGIN_DEADLINE_AFTER_VERIFY_MS);
     private static final ClientTokenVerifyResponse VERIFY_OK = ClientTokenVerifyResponse.newBuilder().setSuccess(true)
             .setHeartbeatIntervalMs(HEARTBEAT_INTERVAL_MS).setHeartbeatTimeoutMs(HEARTBEAT_TIMEOUT_MS).build();
 
@@ -482,8 +485,35 @@ public final class ClientDispatcher {
             s.lastInboundNanos = nanoClock.getAsLong();
             metrics.heartbeat(GateMetrics.HeartbeatResult.TRACKED);
             scheduleIdleCheck(s, s.lastInboundNanos, HEARTBEAT_TIMEOUT_NANOS);
+            if (s.account.isEmpty()) {
+                scheduleLoginDeadlineCheck(s, s.lastInboundNanos, LOGIN_DEADLINE_AFTER_VERIFY_NANOS);
+            }
         }
         s.send(VERIFY_OK);
+    }
+
+    /** 验签后 60 秒内须完成登录绑定（即使持续发心跳也不续期），否则关连接释放在线人数与排队名额。 */
+    private void scheduleLoginDeadlineCheck(ClientSession s, long now, long delay) {
+        WeakReference<ClientSession> owner = new WeakReference<>(s);
+        long due = now + delay;
+        s.scheduleLoginDeadline(delay, () -> {
+            ClientSession current = owner.get();
+            if (current == null || current.closed || current.closing || registry.get(current.sessionId()) != current) {
+                return;
+            }
+            if (!current.account.isEmpty()) {
+                return;
+            }
+            long checked = nanoClock.getAsLong();
+            if (checked - due > TimeUnit.SECONDS.toNanos(2)) {
+                metrics.heartbeat(GateMetrics.HeartbeatResult.DEFERRED);
+                scheduleLoginDeadlineCheck(current, checked, TimeUnit.SECONDS.toNanos(1));
+                return;
+            }
+            log.info("验签后超时未登录，关闭连接 session={} peer={}", sid(current), current.clientIp());
+            metrics.disconnected(DisconnectReason.LOGIN_TIMEOUT);
+            closeNow(current);
+        });
     }
 
     private void noteInboundFrame(ClientSession s) {
@@ -673,6 +703,7 @@ public final class ClientDispatcher {
         s.closing = true;
         s.cancelHandshakeTimeout();
         s.cancelIdleTimeout();
+        s.cancelLoginDeadline();
         spectate.drop(s);
         // 客户端先关（已重定向的会话正常就是这样收场）：收口定时器作废
         s.cancelRedirectLinger();
@@ -1045,6 +1076,9 @@ public final class ClientDispatcher {
             return;
         }
         s.account = bind.getAccount();
+        if (!s.account.isEmpty()) {
+            s.cancelLoginDeadline();
+        }
         long deadlineMs = bind.getPlayDeadlineMs();
         if (s.account.isEmpty()) {
             s.cancelSessionRenew();

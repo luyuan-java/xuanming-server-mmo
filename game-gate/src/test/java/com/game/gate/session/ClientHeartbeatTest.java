@@ -201,6 +201,10 @@ class ClientHeartbeatTest {
     @Test void 正常心跳持续保活() throws Exception {
         try (var f = new Fixture()) {
             f.verify();
+            // 已登录会话（完成 BindAccount）可通过心跳持续保活超过 60s
+            ClientSession s = f.sessions.all().iterator().next();
+            s.account = "alice";
+            s.cancelLoginDeadline();
             for (int i = 0; i < 12; i++) {
                 f.send(ClientHeartbeatRequest.newBuilder().setSeq(i).build());
                 assertThat(f.read()).isInstanceOf(ClientHeartbeatResponse.class);
@@ -208,6 +212,27 @@ class ClientHeartbeatTest {
                 assertThat(f.channel.isOpen()).isTrue();
             }
             assertThat(f.count("idle_closed")).isZero();
+        }
+    }
+
+    @Test void 验签后只发心跳不登录_六十秒到期关闭() throws Exception {
+        try (var f = new Fixture()) {
+            f.verify();
+            // 每 10 秒发一次心跳保持空闲计时不断，但始终不完成 Login（BindAccount）
+            for (int i = 0; i < 5; i++) {
+                f.send(ClientHeartbeatRequest.newBuilder().setSeq(i).build());
+                assertThat(f.read()).isInstanceOf(ClientHeartbeatResponse.class);
+                f.advance(10_000);
+                assertThat(f.channel.isOpen()).isTrue();
+            }
+            f.send(ClientHeartbeatRequest.newBuilder().setSeq(5).build());
+            assertThat(f.read()).isInstanceOf(ClientHeartbeatResponse.class);
+            f.advance(9_999);
+            assertThat(f.channel.isOpen()).isTrue();
+            f.advance(1);
+            assertThat(f.channel.isOpen()).as("验签后 60 秒仍未登录必须关闭连接").isFalse();
+            assertThat(f.meters.get("game.gate.disconnects").tag("reason", "login_timeout").counter().count()).isEqualTo(1.0);
+            assertThat(f.sessions.size()).isZero();
         }
     }
 

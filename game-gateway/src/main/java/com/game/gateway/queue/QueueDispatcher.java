@@ -47,16 +47,22 @@ public final class QueueDispatcher {
     private final Leadership leadership;
     private final LongConsumer onAdmit;
     private final GateInflight inflight;
+    private final int maxDispatchPerTick;
     private boolean leader;
 
     /** @param onAdmit 每段放行后以放行人数调用（计数） */
     public QueueDispatcher(LoginQueue queue, QueueCapacity capacity, ZoneDirectory zones, GateSource gates,
                            Leadership leadership, LongConsumer onAdmit) {
-        this(queue, capacity, zones, gates, leadership, onAdmit, null);
+        this(queue, capacity, zones, gates, leadership, onAdmit, null, QueueSettings.DEFAULT_MAX_DISPATCH_PER_TICK);
     }
 
     public QueueDispatcher(LoginQueue queue, QueueCapacity capacity, ZoneDirectory zones, GateSource gates,
                            Leadership leadership, LongConsumer onAdmit, GateInflight inflight) {
+        this(queue, capacity, zones, gates, leadership, onAdmit, inflight, QueueSettings.DEFAULT_MAX_DISPATCH_PER_TICK);
+    }
+
+    public QueueDispatcher(LoginQueue queue, QueueCapacity capacity, ZoneDirectory zones, GateSource gates,
+                           Leadership leadership, LongConsumer onAdmit, GateInflight inflight, int maxDispatchPerTick) {
         this.queue = queue;
         this.capacity = capacity;
         this.zones = zones;
@@ -64,6 +70,7 @@ public final class QueueDispatcher {
         this.leadership = leadership;
         this.onAdmit = onAdmit;
         this.inflight = inflight;
+        this.maxDispatchPerTick = Math.max(1, maxDispatchPerTick);
     }
 
     /**
@@ -138,11 +145,12 @@ public final class QueueDispatcher {
                 .thenComparingLong(g -> Integer.toUnsignedLong(g.getNodeId()));
         int admitted = 0;
         int expired = 0;
-        // 上限：开头的队长按段数走完（之后新入队的下一轮再放）
+        // 单区单拍封顶 maxDispatchPerTick（缺省 2000），避免大空位一拍瞬时洪峰打爆 gate
         long chunks = queued / CHUNK + 1;
-        for (long i = 0; i < chunks; i++) {
+        for (long i = 0; i < chunks && admitted < maxDispatchPerTick; i++) {
+            int batch = Math.min(CHUNK, maxDispatchPerTick - admitted);
             GateNodeInfo gate = eligible.stream().min(load).orElseThrow();
-            LoginQueue.Dispatched d = queue.dispatch(zoneId, budget, CHUNK, gate);
+            LoginQueue.Dispatched d = queue.dispatch(zoneId, budget, batch, gate);
             admitted += d.admitted();
             expired += d.expired();
             if (d.admitted() > 0) {
@@ -152,7 +160,7 @@ public final class QueueDispatcher {
                 }
                 onAdmit.accept(d.admitted());
             }
-            if (d.popped() < CHUNK) {
+            if (d.popped() < batch) {
                 break;
             }
         }

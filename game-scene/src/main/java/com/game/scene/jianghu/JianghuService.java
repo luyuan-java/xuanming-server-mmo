@@ -262,14 +262,17 @@ public final class JianghuService {
             ScenePlayer payer = playerLookup.apply(payerId);
             if (payer == null) {
                 resp.setPayerHasSufficientFee(false);
-            } else if (req.getWritTier() == 2) {
-                int itemId = req.getItemConfigId() > 0 ? req.getItemConfigId() : goldWritItemId();
-                resp.setPayerHasSufficientFee(countItem(payer, itemId) >= 1);
-            } else if (req.getWritTier() == 1) {
-                long cost = req.getSilverCost() > 0 ? req.getSilverCost() : silverWritCost();
-                resp.setPayerHasSufficientFee(payer.wallet().balance(Wallet.GOLD) >= cost);
             } else {
-                resp.setPayerHasSufficientFee(false);
+                resp.setPayerSilverFeePending(stateOf(payerId).getPendingSilverFeeBattleId() != 0L);
+                if (req.getWritTier() == 2) {
+                    int itemId = req.getItemConfigId() > 0 ? req.getItemConfigId() : goldWritItemId();
+                    resp.setPayerHasSufficientFee(countItem(payer, itemId) >= 1);
+                } else if (req.getWritTier() == 1) {
+                    long cost = req.getSilverCost() > 0 ? req.getSilverCost() : silverWritCost();
+                    resp.setPayerHasSufficientFee(payer.wallet().balance(Wallet.GOLD) >= cost);
+                } else {
+                    resp.setPayerHasSufficientFee(false);
+                }
             }
         }
         return resp.build();

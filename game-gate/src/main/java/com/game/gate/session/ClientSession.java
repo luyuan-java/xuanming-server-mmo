@@ -139,6 +139,8 @@ public final class ClientSession {
     /** 按消息号的发送频率限制（C++ MessageLimiter 同义；与 battle 直连面共用 game-net 的实现）。 */
     final MessageRateLimiter rateLimiter = new MessageRateLimiter();
     private ScheduledFuture<?> handshakeTimeout;
+    /** 验签后限时登录定时器（60s 内须完成 BindAccount，否则关闭连接；断线或登录绑定后撤销）。 */
+    private ScheduledFuture<?> loginDeadlineTimeout;
     /** 已重定向会话的收口定时器（{@link #redirected} 之后挂上，断线时撤销）。 */
     private ScheduledFuture<?> redirectLinger;
     /**
@@ -264,6 +266,22 @@ public final class ClientSession {
         if (idleTimeout != null) {
             idleTimeout.cancel(false);
             idleTimeout = null;
+        }
+    }
+
+    void scheduleLoginDeadline(long delayNanos, Runnable onTimeout) {
+        cancelLoginDeadline();
+        try {
+            loginDeadlineTimeout = channel.eventLoop().schedule(onTimeout, Math.max(1L, delayNanos), TimeUnit.NANOSECONDS);
+        } catch (RejectedExecutionException e) {
+            log.debug("会话线程已关闭，不挂验签后登录期限定时器 session={}", Integer.toUnsignedString(sessionId));
+        }
+    }
+
+    void cancelLoginDeadline() {
+        if (loginDeadlineTimeout != null) {
+            loginDeadlineTimeout.cancel(false);
+            loginDeadlineTimeout = null;
         }
     }
 
