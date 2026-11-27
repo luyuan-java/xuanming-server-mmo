@@ -63,7 +63,11 @@ class MovementBroadcastTest extends MovementFixture {
     @Test
     void T2_纠偏先给本人137_旁人133使用截断点() throws Exception {
         ScenePlayer a = enterNew(11, 1001);
-        enterNew(12, 1002);
+        enterSaved(12, 1002, new Vec3(130, 200, 0));
+        moveStop(12, 1002, new Vec3(110, 200, 0), FACING, 1);
+        clock.advanceMillis(2_000);
+        moveStop(12, 1002, new Vec3(95, 200, 0), FACING, 2);
+        steps(2);
         sink.clear();
         moveSync(11, 1001, new Vec3(230, 200, 0), FACING, Vec3.ORIGIN, 7);
         assertThat(sink.messageIdsTo(LINK, 11)).containsExactly(137);
@@ -205,10 +209,14 @@ class MovementBroadcastTest extends MovementFixture {
     @Test
     void T8_帧内先47补135再64_已离开者不再收到133() throws Exception {
         ScenePlayer observer = enterNew(11, 1001);
-        ScenePlayer lost = enterSaved(12, 1002, new Vec3(175, 200, 0));
-        ScenePlayer fresh = enterSaved(13, 1003, new Vec3(205, 200, 0));
+        ScenePlayer lost = enterSaved(12, 1002, new Vec3(135, 200, 0));
+        moveStop(12, 1002, new Vec3(115, 200, 0), FACING, 1);
+        clock.advanceMillis(2_000);
+        moveStop(12, 1002, new Vec3(95, 200, 0), FACING, 2);
+        steps(2);
+        ScenePlayer fresh = enterSaved(13, 1003, new Vec3(250, 200, 0));
         moveStart(13, 1003, fresh.position(), FACING, new Vec3(1, 0, 0), 1);
-        moveStop(11, 1001, new Vec3(200, 200, 0), FACING, 2);
+        moveStop(11, 1001, new Vec3(201, 200, 0), FACING, 2);
         sink.clear();
         world.step();
         assertThat(sink.messageIdsTo(LINK, 11)).startsWith(47, 135, 64);

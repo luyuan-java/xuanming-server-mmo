@@ -22,7 +22,7 @@ class ViewIndexTest {
     @Test
     void 进场_视野内双向建立_视野外不建立() {
         ScenePlayer a = player(1, 180, 200, 0);
-        ScenePlayer far = player(2, 180, 230, 0);
+        ScenePlayer far = player(2, 180, 260, 0);
         view.enter(a);
         view.enter(far);
 
@@ -38,24 +38,24 @@ class ViewIndexTest {
     }
 
     @Test
-    void 恰好10米可见_三维距离含高度() {
+    void 恰好50米可见_三维距离含高度() {
         ScenePlayer a = player(1, 180, 200, 0);
         view.enter(a);
 
-        assertThat(view.enter(player(2, 190, 200, 0)).seen()).as("恰好 10 m，含等号").containsExactly(a);
-        assertThat(view.enter(player(3, 174, 200, 8.1)).seen()).as("水平 6 m、高差 8.1 m，三维超过 10 m").isEmpty();
-        assertThat(view.enter(player(4, 180, 210.000001, 0)).seen()).isEmpty();
+        assertThat(view.enter(player(2, 230, 200, 0)).seen()).as("恰好 50 m，含等号").containsExactly(a);
+        assertThat(view.enter(player(3, 150, 200, 40.1)).seen()).as("水平 30 m、高差 40.1 m，三维超过 50 m").isEmpty();
+        assertThat(view.enter(player(4, 180, 250.000001, 0)).seen()).isEmpty();
     }
 
     @Test
     void 同一邻域内走近_下次刷新就进视野_双方各记一条() {
         ScenePlayer a = player(1, 180, 200, 0);
-        ScenePlayer b = player(2, 180, 215, 0);
+        ScenePlayer b = player(2, 180, 255, 0);
         view.enter(a);
         view.enter(b);
         assertThat(view.watching(a)).isEmpty();
 
-        moveTo(b, 180, 205, 0);
+        moveTo(b, 180, 245, 0);
         assertThat(view.pendingMoves()).isEqualTo(1);
         view.refresh(changes);
 
@@ -68,22 +68,22 @@ class ViewIndexTest {
     }
 
     @Test
-    void 滞回_走出10米仍可见_超过20米才出视野_双方各记一条() {
+    void 滞回_走出50米仍可见_超过100米才出视野_双方各记一条() {
         ScenePlayer a = player(1, 180, 200, 0);
         ScenePlayer b = player(2, 185, 200, 0);
         view.enter(a);
         view.enter(b);
 
-        moveTo(b, 199, 200, 0);
+        moveTo(b, 279, 200, 0);
         view.refresh(changes);
-        assertThat(changes.isEmpty()).as("19 m：还在滞回带里").isTrue();
+        assertThat(changes.isEmpty()).as("99 m：还在滞回带里").isTrue();
         assertThat(view.watching(a)).containsExactly(b);
 
-        moveTo(b, 200, 200, 0);
+        moveTo(b, 280, 200, 0);
         view.refresh(changes);
-        assertThat(changes.isEmpty()).as("恰好 20 m 不出视野").isTrue();
+        assertThat(changes.isEmpty()).as("恰好 100 m 不出视野").isTrue();
 
-        moveTo(b, 200.5, 200, 0);
+        moveTo(b, 280.5, 200, 0);
         view.refresh(changes);
         assertThat(changes.of(b).removed()).containsExactly(a);
         assertThat(changes.of(a).removed()).containsExactly(b);
@@ -97,12 +97,12 @@ class ViewIndexTest {
     void 一大步跨过好几格_旧邻域的人出视野_新邻域的人进视野() {
         ScenePlayer a = player(1, 0, 0, 0);
         ScenePlayer b = player(2, 5, 0, 0);
-        ScenePlayer c = player(3, 100, 0, 0);
+        ScenePlayer c = player(3, 250, 0, 0);
         view.enter(a);
         view.enter(b);
         view.enter(c);
 
-        moveTo(b, 95, 0, 0);
+        moveTo(b, 245, 0, 0);
         view.refresh(changes);
 
         assertThat(changes.of(b).removed()).containsExactly(a);
@@ -117,13 +117,13 @@ class ViewIndexTest {
     @Test
     void 两次刷新之间多次移动只登记一次_刷新后重新登记() {
         ScenePlayer a = player(1, 0, 0, 0);
-        ScenePlayer b = player(2, 30, 0, 0);
+        ScenePlayer b = player(2, 70, 0, 0);
         view.enter(a);
         view.enter(b);
 
-        moveTo(b, 25, 0, 0);
-        moveTo(b, 15, 0, 0);
-        moveTo(b, 8, 0, 0);
+        moveTo(b, 65, 0, 0);
+        moveTo(b, 55, 0, 0);
+        moveTo(b, 48, 0, 0);
         assertThat(view.pendingMoves()).isEqualTo(1);
         view.refresh(changes);
         assertThat(changes.of(a).added()).containsExactly(b);
@@ -138,11 +138,11 @@ class ViewIndexTest {
     @Test
     void 静止的人挪一点_下次刷新立即重判() {
         ScenePlayer a = player(1, 180, 200, 0);
-        ScenePlayer b = player(2, 180, 210.2, 0);
+        ScenePlayer b = player(2, 180, 250.2, 0);
         view.enter(a);
         view.enter(b);
 
-        moveTo(b, 180, 209.9, 0);
+        moveTo(b, 180, 249.9, 0);
         view.refresh(changes);
 
         assertThat(view.watching(a)).containsExactly(b);
@@ -153,18 +153,18 @@ class ViewIndexTest {
     @Test
     void 移动中累计位移不足1米_推迟重判并留在名单里_够1米再判() {
         ScenePlayer a = player(1, 180, 200, 0);
-        ScenePlayer b = player(2, 180, 210.5, 0);
+        ScenePlayer b = player(2, 180, 250.5, 0);
         view.enter(a);
         view.enter(b);
         b.setVelocity(new Vec3(0, -1, 0));
 
-        moveTo(b, 180, 209.9, 0);
+        moveTo(b, 180, 249.9, 0);
         view.refresh(changes);
-        assertThat(view.watching(a)).as("已在 10 m 内，但只走了 0.6 m：推迟").isEmpty();
+        assertThat(view.watching(a)).as("已在 50 m 内，但只走了 0.6 m：推迟").isEmpty();
         assertThat(changes.isEmpty()).isTrue();
         assertThat(view.pendingMoves()).isEqualTo(1);
 
-        moveTo(b, 180, 209.5, 0);
+        moveTo(b, 180, 249.5, 0);
         view.refresh(changes);
         assertThat(view.watching(a)).as("累计 1 m").containsExactly(b);
         assertThat(view.watching(b)).containsExactly(a);
@@ -176,11 +176,11 @@ class ViewIndexTest {
     @Test
     void 推迟中的人停下_即使位置不再变_下次刷新按停下的位置重判() {
         ScenePlayer a = player(1, 180, 200, 0);
-        ScenePlayer b = player(2, 180, 210.3, 0);
+        ScenePlayer b = player(2, 180, 250.3, 0);
         view.enter(a);
         view.enter(b);
         b.setVelocity(new Vec3(0, -1, 0));
-        moveTo(b, 180, 209.9, 0);
+        moveTo(b, 180, 249.9, 0);
         view.refresh(changes);
         assertThat(view.watching(a)).isEmpty();
 
@@ -199,16 +199,16 @@ class ViewIndexTest {
         ScenePlayer b = player(2, 0, 5, 0);
         view.enter(a);
         view.enter(b);
-        moveTo(b, 0, 19.5, 0);
+        moveTo(b, 0, 99.5, 0);
         view.refresh(changes);
-        assertThat(view.watching(a)).as("19.5 m 仍在滞回带内").containsExactly(b);
+        assertThat(view.watching(a)).as("99.5 m 仍在滞回带内").containsExactly(b);
         b.setVelocity(new Vec3(0, 1, 0));
 
-        moveTo(b, 0, 20.4, 0);
+        moveTo(b, 0, 100.4, 0);
         view.refresh(changes);
-        assertThat(view.watching(a)).as("超过 20 m，但只走了 0.9 m：推迟").containsExactly(b);
+        assertThat(view.watching(a)).as("超过 100 m，但只走了 0.9 m：推迟").containsExactly(b);
 
-        moveTo(b, 0, 20.6, 0);
+        moveTo(b, 0, 100.6, 0);
         view.refresh(changes);
         assertThat(view.watching(a)).isEmpty();
         assertThat(view.watching(b)).isEmpty();
@@ -360,10 +360,10 @@ class ViewIndexTest {
     }
 
     @Test
-    void V2b_reenter不重建十至二十米旧关系() {
+    void V2b_reenter不重建五十至一百米旧关系() {
         ScenePlayer a = player(1, 0, 0, 0), b = player(2, 1, 0, 0);
         view.enter(a); view.enter(b);
-        a.setPosition(new Vec3(16, 0, 0));
+        a.setPosition(new Vec3(66, 0, 0));
         ViewIndex.Reentered result = view.reenter(a);
         assertThat(result.lostWatching()).containsExactly(b);
         assertThat(result.lostWatchers()).containsExactly(b);

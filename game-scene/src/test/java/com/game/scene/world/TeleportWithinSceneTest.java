@@ -28,7 +28,7 @@ import org.junit.jupiter.api.Test;
 
 /** 规格 §11.3 V1–V11 与 §11.4 S4–S7；消息顺序、差集、落位副作用逐项钉住。 */
 class TeleportWithinSceneTest extends MovementFixture {
-    private static final Vec3 FAR = new Vec3(230, 200, 0);
+    private static final Vec3 FAR = new Vec3(300, 200, 0);
 
     @Test
     void V1_远距离本人130销毁差集创建差集_旁人销毁或创建_指标与所有状态() throws Exception {
@@ -142,7 +142,7 @@ class TeleportWithinSceneTest extends MovementFixture {
         assertThat(aoi("enter") - entered).isEqualTo(1);
         assertThat(aoi("leave") - left).isEqualTo(1);
         sink.clear();
-        world.teleportWithinScene(a, new Vec3(195, 200, 0), null, ADMIN);
+        world.teleportWithinScene(a, new Vec3(255, 200, 0), null, ADMIN);
         assertThat(sink.messageIdsTo(LINK, 11)).containsExactly(130, 64);
         assertThat(destroyed(11)).containsExactly(b.entity());
         assertThat(sink.messageIdsTo(LINK, 12)).containsExactly(64);
@@ -297,7 +297,7 @@ class TeleportWithinSceneTest extends MovementFixture {
         ScenePlayer a = enterNew(11, 1001);
         world.teleportWithinScene(a, FAR, null, ADMIN);
         sink.clear();
-        Vec3 settled = new Vec3(232, 200, 0);
+        Vec3 settled = new Vec3(302, 200, 0);
         moveStart(11, 1001, settled, FACING, new Vec3(1, 0, 0), 1);
         assertThat(a.teleportSettle()).isNull();
         assertThat(a.position()).isEqualTo(settled);
@@ -305,8 +305,8 @@ class TeleportWithinSceneTest extends MovementFixture {
         assertThat(a.moveGuard().allowance()).isEqualTo(22);
         assertThat(a.moveBroadcastPending()).isTrue();
         assertThat(count("game.scene.teleport.settles", "result", "settled")).isEqualTo(1);
-        moveStop(11, 1001, new Vec3(300, 200, 0), FACING, 2);
-        assertThat(a.position()).isEqualTo(new Vec3(254, 200, 0));
+        moveStop(11, 1001, new Vec3(370, 200, 0), FACING, 2);
+        assertThat(a.position()).isEqualTo(new Vec3(324, 200, 0));
         assertThat(sink.messageIdsTo(LINK, 11)).containsExactly(137);
     }
 

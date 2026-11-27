@@ -412,10 +412,10 @@ class MovementSyncTest extends MovementFixture {
         assertThat(forB.getTransform().getRotation()).isEqualTo(FACING);
         assertThat(Vec3.fromVelocity(forB.getVelocity())).isEqualTo(new Vec3(1, 0, 0));
 
-        // 帧内进视野路径：1004 从 19 m 外走进视野。
-        ScenePlayer d = enterSaved(14, 1004, new Vec3(200, 200, 0));
+        // 帧内进视野路径：1004 从 50 m 外走进视野。
+        ScenePlayer d = enterSaved(14, 1004, new Vec3(245, 200, 0));
         assertThat(sink.messageIdsTo(LINK, 14)).as("进场时谁都看不见").containsExactly(79, 21);
-        moveStop(14, 1004, new Vec3(188, 200, 0), FACING, 1);
+        moveStop(14, 1004, new Vec3(225, 200, 0), FACING, 1);
         steps(2); // 第 5 帧刷新视野发 47，第 6 帧同步
         List<MessageContent> toD = sink.to(LINK, 14);
         assertThat(toD).extracting(MessageContent::getMessageId).containsExactly(79, 21, 47, 135, 66);
@@ -424,7 +424,7 @@ class MovementSyncTest extends MovementFixture {
         ActorBaseAttributesS2C forD = ActorBaseAttributesS2C.parseFrom(toD.get(4).getSerializedMessage());
         assertThat(forD.getEntityId()).isEqualTo(1001L);
         assertThat(Vec3.fromVelocity(forD.getVelocity())).isEqualTo(new Vec3(1, 0, 0));
-        assertThat(d.position()).isEqualTo(new Vec3(188, 200, 0));
+        assertThat(d.position()).isEqualTo(new Vec3(225, 200, 0));
     }
 
     // ------------------------------------------------------------------ 视野：进出通知
@@ -432,11 +432,11 @@ class MovementSyncTest extends MovementFixture {
     @Test
     void 走近走远_双方各收一次47与64_47先于66_64之后不再有66_离场不给已看不见的人发51() throws Exception {
         ScenePlayer a = enterNew(11, 1001);
-        ScenePlayer b = enterSaved(12, 1002, new Vec3(180, 215, 0));
-        assertThat(sink.messageIdsTo(LINK, 11)).as("15 m 外进场，互不可见").containsExactly(79, 21);
+        ScenePlayer b = enterSaved(12, 1002, new Vec3(180, 260, 0));
+        assertThat(sink.messageIdsTo(LINK, 11)).as("60 m 外进场，互不可见").containsExactly(79, 21);
         sink.clear();
 
-        moveSync(12, 1002, new Vec3(180, 205, 0), FACING, Vec3.ORIGIN, 1);
+        moveSync(12, 1002, new Vec3(180, 245, 0), FACING, Vec3.ORIGIN, 1);
         world.step(); // 第 0 帧
         assertThat(sink.messageIdsTo(LINK, 11)).containsExactly(47, 66);
         assertThat(sink.messageIdsTo(LINK, 12)).as("静止、从没上报过朝向的 1001 没有要补的 66").containsExactly(47);
@@ -445,29 +445,37 @@ class MovementSyncTest extends MovementFixture {
         assertThat(ActorListCreateS2C.parseFrom(sink.to(LINK, 12).get(0).getSerializedMessage()).getActorList(0)
                 .getEntity()).isEqualTo(a.entity());
 
+        // 穿过滞回带走到 90 m（仍在 100 m 离开半径内），再一步走出 100 m 出视野
         clock.advanceMillis(2_000);
-        moveSync(12, 1002, new Vec3(180, 225.5, 0), FACING, Vec3.ORIGIN, 2);
-        steps(4); // 第 1 帧出视野（64），第 2、4 帧同步时 1001 已不在 1002 的观察者里
-        assertThat(sink.messageIdsTo(LINK, 11)).containsExactly(47, 66, 133, 64);
-        assertThat(sink.messageIdsTo(LINK, 12)).containsExactly(47, 64);
-        assertThat(ActorListDestroyS2C.parseFrom(sink.to(LINK, 11).get(3).getSerializedMessage()).getEntityList())
+        moveSync(12, 1002, new Vec3(180, 268, 0), FACING, Vec3.ORIGIN, 2);
+        steps(2);
+        clock.advanceMillis(2_000);
+        moveSync(12, 1002, new Vec3(180, 290, 0), FACING, Vec3.ORIGIN, 3);
+        steps(2);
+        sink.clear();
+        clock.advanceMillis(2_000);
+        moveSync(12, 1002, new Vec3(180, 305.5, 0), FACING, Vec3.ORIGIN, 4);
+        steps(4); // 出视野（64）后同步帧不再给 1001 发 66
+        assertThat(sink.messageIdsTo(LINK, 11)).containsExactly(133, 64);
+        assertThat(sink.messageIdsTo(LINK, 12)).containsExactly(64);
+        assertThat(ActorListDestroyS2C.parseFrom(sink.to(LINK, 11).get(1).getSerializedMessage()).getEntityList())
                 .containsExactly(b.entity());
-        assertThat(ActorListDestroyS2C.parseFrom(sink.to(LINK, 12).get(1).getSerializedMessage()).getEntityList())
+        assertThat(ActorListDestroyS2C.parseFrom(sink.to(LINK, 12).get(0).getSerializedMessage()).getEntityList())
                 .containsExactly(a.entity());
 
         world.onPlayerLeave(LINK, leave(12, 1002));
-        assertThat(sink.messageIdsTo(LINK, 11)).as("没有残影，也不收多余的 51").containsExactly(47, 66, 133, 64);
+        assertThat(sink.messageIdsTo(LINK, 11)).as("没有残影，也不收多余的 51").containsExactly(133, 64);
     }
 
     @Test
     void 移动中走近_累计不足1米推迟重判_停下那一帧按精确位置进视野() {
         enterNew(11, 1001);
-        ScenePlayer b = enterSaved(12, 1002, new Vec3(180, 210.3, 0));
+        ScenePlayer b = enterSaved(12, 1002, new Vec3(180, 250.3, 0));
         sink.clear();
 
-        moveStart(12, 1002, new Vec3(180, 210.3, 0), FACING, new Vec3(0, -1, 0), 1);
-        steps(8); // 每帧 0.05 m：走到约 9.9 m 处，累计才 0.4 m
-        assertThat(b.position().y()).isCloseTo(209.9, within(1e-9));
+        moveStart(12, 1002, new Vec3(180, 250.3, 0), FACING, new Vec3(0, -1, 0), 1);
+        steps(8); // 每帧 0.05 m：走到约 49.9 m 处，累计才 0.4 m
+        assertThat(b.position().y()).isCloseTo(249.9, within(1e-9));
         assertThat(sink.messageIdsTo(LINK, 11)).as("移动中不足 1 m，还没重判").isEmpty();
         assertThat(sink.messageIdsTo(LINK, 12)).isEmpty();
 

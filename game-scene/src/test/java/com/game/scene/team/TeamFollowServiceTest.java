@@ -516,27 +516,28 @@ class TeamFollowServiceTest {
     }
 
     @Test
-    void 恰好8米且互相可见不瞬移_超过8或只有高度导致不可见就归队() {
+    void 恰好24米且互相可见不瞬移_超过24或只有高度导致不可见就归队() {
         team(LEADER, LEADER, M1);
         ScenePlayer leader = enter(LEADER, map1);
         ScenePlayer member = enter(M1, map1);
         settle();
-        world.teleportWithinScene(member, leader.position().plus(new Vec3(8, 0, 0)), null, TeleportReason.ADMIN);
+        world.teleportWithinScene(member, leader.position().plus(new Vec3(24, 0, 0)), null, TeleportReason.ADMIN);
         world.refreshTeam(M1, true);
         settle();
-        assertThat(member.position().horizontalDistance(leader.position())).isEqualTo(8);
+        assertThat(member.position().horizontalDistance(leader.position())).isEqualTo(24);
         assertThat(count(TeamFollowResult.REGROUPED)).isZero();
-        world.teleportWithinScene(member, leader.position().plus(new Vec3(8.000001, 0, 0)), null, TeleportReason.ADMIN);
+        world.teleportWithinScene(member, leader.position().plus(new Vec3(24.000001, 0, 0)), null, TeleportReason.ADMIN);
         world.refreshTeam(M1, true);
         settle();
         assertThat(member.position()).isEqualTo(leader.position());
-        world.teleportWithinScene(member, leader.position().plus(new Vec3(0, 0, 21)), null, TeleportReason.ADMIN);
+        world.teleportWithinScene(member, leader.position().plus(new Vec3(0, 0, 51)), null, TeleportReason.ADMIN);
         assertThat(world.mutuallyVisible(leader, member)).isFalse();
         world.refreshTeam(M1, true);
         settle();
         assertThat(member.position()).isEqualTo(leader.position());
         assertThat(count(TeamFollowResult.REGROUPED)).isEqualTo(2);
-        assertThat(TeamFollowService.shouldRegroup(8, true)).isFalse();
+        assertThat(TeamFollowService.shouldRegroup(24, true)).isFalse();
+        assertThat(TeamFollowService.shouldRegroup(24.000001, true)).isTrue();
         assertThat(TeamFollowService.shouldRegroup(0, false)).isTrue();
     }
 

@@ -435,6 +435,29 @@ class SkillFeatureTest {
         assertThat(resent.getStateSeq()).isEqualTo(4L);
     }
 
+    @Test
+    void 指定目标施法实时转向目标偏航角并保留垂直同点旧朝向() throws Exception {
+        start();
+        ScenePlayer caster = player(A);
+        ScenePlayer target = player(B);
+        world.relocateTeamFollower(caster, new com.game.scene.world.Vec3(10, 10, 0));
+        world.relocateTeamFollower(target, new com.game.scene.world.Vec3(10, 20, 0));
+        caster.setRotation(com.game.proto.Rotation.newBuilder().setZ(15).build());
+
+        assertThat(release(1, entity(B))).isZero();
+        assertThat(caster.rotation().getX()).isZero();
+        assertThat(caster.rotation().getY()).isZero();
+        assertThat(caster.rotation().getZ()).isEqualTo(90.0);
+
+        // 目标与施法者仅垂直偏差 -> 不更新朝向
+        clock.advanceMillis(2_100);
+        world.relocateTeamFollower(target, new com.game.scene.world.Vec3(10, 10, 5));
+        assertThat(release(1, entity(B))).isZero();
+        assertThat(caster.rotation().getZ()).isEqualTo(90.0);
+        assertThat(SkillService.lookAtYawDegrees(new com.game.scene.world.Vec3(0, 0, 0),
+                new com.game.scene.world.Vec3(0, 0, 3))).isNull();
+    }
+
     private static SkillTables withActionMatrix(StateMutexMatrix action) {
         Map<Integer, SkillTables.SkillDef> skills = new HashMap<>();
         for (int id : new int[] {1, 2, 13}) {

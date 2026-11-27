@@ -595,6 +595,61 @@ class AttributeFeatureTest {
                 .getErrorMessage().getId()).isZero();
     }
 
+    @Test
+    void 开新方案幂等去重_重放免扣费且穿透冻结与上限_换参1005_失败不记键_账本损坏1003_跨存盘生效() throws Exception {
+        start();
+        player().wallet().add(Wallet.GOLD, 5_000);
+        // 业务拒绝（非法名称）不记键：同一 client_request_id 随后改合法名可成功
+        CreateAttributeSchemeResponse badName = createWithKey("a".repeat(65), 801L);
+        assertThat(badName.getErrorMessage().getId()).isEqualTo(25009);
+
+        CreateAttributeSchemeResponse first = createWithKey("副本专精", 801L);
+        assertThat(first.getErrorMessage().getId()).isZero();
+        assertThat(first.getSchemeId()).isEqualTo(2);
+        assertThat(first.getReplayed()).isFalse();
+        assertThat(player().wallet().balance(Wallet.GOLD)).isEqualTo(4_000);
+
+        // 同键不同名 -> 1005
+        CreateAttributeSchemeResponse mismatch = createWithKey("PVP专精", 801L);
+        assertThat(mismatch.getErrorMessage().getId()).isEqualTo(1005);
+        assertThat(player().wallet().balance(Wallet.GOLD)).isEqualTo(4_000);
+
+        // 开满上限 + 冻结状态下重放原键 -> 仍返回原方案号且 replayed=true、零扣费
+        assertThat(createWithKey("方案三", 802L).getErrorMessage().getId()).isZero();
+        long goldAfterScheme3 = player().wallet().balance(Wallet.GOLD);
+        assertThat(goldAfterScheme3).isLessThan(4_000);
+        WorldTestAccess.startFreezing(player());
+        CreateAttributeSchemeResponse replayedFrozen = createWithKey("副本专精", 801L);
+        assertThat(replayedFrozen.getErrorMessage().getId()).isZero();
+        assertThat(replayedFrozen.getSchemeId()).isEqualTo(2);
+        assertThat(replayedFrozen.getReplayed()).isTrue();
+        assertThat(player().wallet().balance(Wallet.GOLD)).isEqualTo(goldAfterScheme3);
+        WorldTestAccess.clearSwitch(player());
+
+        // 离场存盘重进后，原幂等键仍可重放
+        world.onPlayerLeave(LINK, PlayerLeave.newBuilder().setSessionId(SESSION).setPlayerId(PLAYER).setVoluntary(true).build());
+        PlayerSave saved = repo.saves().getLast();
+        sink.clear();
+        start(RunMode.DEV, 1, saved.level(), saved.state(), saved.ownerEpoch() + 1);
+        CreateAttributeSchemeResponse replayedReloaded = createWithKey("副本专精", 801L);
+        assertThat(replayedReloaded.getErrorMessage().getId()).isZero();
+        assertThat(replayedReloaded.getSchemeId()).isEqualTo(2);
+        assertThat(replayedReloaded.getReplayed()).isTrue();
+
+        // 损坏账本 fail-closed -> 1003
+        PlayerState corrupt = PlayerState.newBuilder()
+                .setClientRequestLedger(com.game.player.store.state.ClientRequestLedgerState.newBuilder()
+                        .addRecords(com.game.player.store.state.ClientRequestRecordState.newBuilder().setKey(0).setKind(3).setSeq(1))
+                        .setNextSeq(2))
+                .build();
+        sink.clear();
+        start(RunMode.DEV, 1, 1, corrupt, saved.ownerEpoch() + 2);
+        player().wallet().add(Wallet.GOLD, 5_000);
+        CreateAttributeSchemeResponse blocked = createWithKey("损坏测", 803L);
+        assertThat(blocked.getErrorMessage().getId()).isEqualTo(1003);
+        assertThat(player().wallet().balance(Wallet.GOLD)).isEqualTo(5_000);
+    }
+
     // ------------------------------------------------------------------ 工具
 
     private ScenePlayer player() {
@@ -646,6 +701,12 @@ class AttributeFeatureTest {
     private CreateAttributeSchemeResponse create(String name) throws InvalidProtocolBufferException {
         return CreateAttributeSchemeResponse.parseFrom(call("CreateAttributeScheme",
                 CreateAttributeSchemeRequest.newBuilder().setName(name).build()).getSerializedMessage());
+    }
+
+    private CreateAttributeSchemeResponse createWithKey(String name, long clientRequestId) throws InvalidProtocolBufferException {
+        return CreateAttributeSchemeResponse.parseFrom(call("CreateAttributeScheme",
+                CreateAttributeSchemeRequest.newBuilder().setName(name).setClientRequestId(clientRequestId).build())
+                .getSerializedMessage());
     }
 
     private RenameAttributeSchemeResponse rename(int schemeId, String name) throws InvalidProtocolBufferException {

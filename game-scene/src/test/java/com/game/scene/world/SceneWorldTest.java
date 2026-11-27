@@ -634,14 +634,19 @@ class SceneWorldTest {
         assertThat(aoiChanges("enter")).as("进场者的 47 一个条目 + 给先到者的 21").isEqualTo(2);
 
         ScenePlayer second = world.playerBySession(new SessionKey(LINK, 12));
-        world.applyMove(second, standAt(new Vec3(180 + 23, 200, 0)));
+        for (int step = 1; step <= 5; step++) {
+            clock.advanceMillis(3_000);
+            world.applyMove(second, standAt(new Vec3(180 + step * 21, 200, 0)));
+        }
         world.step();
-        assertThat(aoiChanges("leave")).as("走出离开半径：双方各一条 64").isEqualTo(2);
+        assertThat(aoiChanges("leave")).as("走出离开半径(>100m)：双方各一条 64").isEqualTo(2);
 
-        clock.advanceMillis(2_000);
-        world.applyMove(second, standAt(FakeSceneTables.SPAWN_1));
+        for (int step = 4; step >= 0; step--) {
+            clock.advanceMillis(3_000);
+            world.applyMove(second, standAt(new Vec3(180 + step * 21, 200, 0)));
+        }
         world.step();
-        assertThat(aoiChanges("enter")).as("走回视野：双方各一条 47").isEqualTo(4);
+        assertThat(aoiChanges("enter")).as("走回视野(<=50m)：双方各一条 47").isEqualTo(4);
 
         world.onPlayerLeave(LINK, leave(12, 1002));
         assertThat(aoiChanges("leave")).as("只有旁观者收到 51").isEqualTo(3);

@@ -74,16 +74,16 @@ class TeamViewIndexTest {
     @Test
     void 队友不放宽三维距离_滞回带仍按原规则_离队后普通实体不能挤队友() {
         ViewIndex view = new ViewIndex(1);
-        ScenePlayer leader = player(1, 0, 0, 0), member = player(2, 0, 0, 11), normal = player(3, 1, 0, 0);
+        ScenePlayer leader = player(1, 0, 0, 0), member = player(2, 0, 0, 51), normal = player(3, 1, 0, 0);
         leader.applyTeamMembership(99, 1); member.applyTeamMembership(99, 1);
         view.enter(leader); view.enter(member); view.enter(normal);
         assertThat(view.watching(leader)).containsExactly(normal);
-        member.setPosition(new Vec3(0, 0, 10)); view.moved(member);
+        member.setPosition(new Vec3(0, 0, 50)); view.moved(member);
         ViewChanges changes = new ViewChanges(); view.refresh(changes);
         assertThat(view.watching(leader)).containsExactly(member);
-        member.setPosition(new Vec3(0, 0, 20)); view.moved(member); view.refresh(changes);
+        member.setPosition(new Vec3(0, 0, 100)); view.moved(member); view.refresh(changes);
         assertThat(view.watching(leader)).containsExactly(member);
-        member.setPosition(new Vec3(0, 0, 20.001)); view.moved(member); view.refresh(changes);
+        member.setPosition(new Vec3(0, 0, 100.001)); view.moved(member); view.refresh(changes);
         assertThat(view.watching(leader)).doesNotContain(member);
         assertMirror(view, List.of(leader, member, normal));
     }

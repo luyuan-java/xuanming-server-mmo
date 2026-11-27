@@ -177,8 +177,8 @@ class PeriodicSaveTest {
                 .addField(3, UnknownFieldSet.Field.newBuilder().addVarint(7).build()).build();
         long id = 1000;
         for (CurrencyState currency : List.of(
-                CurrencyState.newBuilder().addBalances(5).addBalances(0).addBalances(0).setUnknownFields(debts).build(),
-                CurrencyState.newBuilder().addBalances(0).addBalances(0).addBalances(0).setUnknownFields(debts).build())) {
+                CurrencyState.newBuilder().addBalances(5).addBalances(0).addBalances(0).addBalances(0).setUnknownFields(debts).build(),
+                CurrencyState.newBuilder().addBalances(0).addBalances(0).addBalances(0).addBalances(0).setUnknownFields(debts).build())) {
             PlayerState stored = FACING_EAST.toBuilder().setCurrency(currency).build();
             repo.put(new PlayerData(id, 1, 2, 0, "", 5, 1, SAVED_AT, stored));
             ScenePlayer player = enter((int) id, id);
@@ -260,5 +260,19 @@ class PeriodicSaveTest {
         world.shutdown();
         assertThat(world.requestSave(other)).isEqualTo(SceneWorld.SaveRequest.STOPPED);
         assertThat(repo.pendingProgress()).isZero();
+    }
+
+    @Test
+    void 周期存盘记录分段耗时与超10毫秒慢回调指标() {
+        enterChanged(11, 1000);
+        assertThat(world.saveDuePlayers(1)).isEqualTo(1);
+        assertThat(meters.timer("game.scene.save.stage", "stage", "assemble").count()).isEqualTo(1);
+        assertThat(meters.timer("game.scene.save.stage", "stage", "dirty_check").count()).isEqualTo(1);
+        assertThat(meters.timer("game.scene.save.periodic.callback").count()).isEqualTo(1);
+        assertThat(meters.counter("game.scene.save.periodic.slow").count()).isZero();
+
+        SceneMetrics direct = new SceneMetrics(meters);
+        direct.periodicSaveCallback(10_000_001L);
+        assertThat(meters.counter("game.scene.save.periodic.slow").count()).isEqualTo(1);
     }
 }

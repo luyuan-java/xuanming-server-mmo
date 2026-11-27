@@ -326,9 +326,9 @@ class AfkPassHostingAndTeamFollowTest {
                 .build().toByteString());
         assertThat(follower.position()).isEqualTo(posBeforeClientMove);
 
-        // 队长向前走 5 米，每 tick 推进队形 -> 随从自动沿队长轨迹跟进
+        // 队长向前走 6 米，每 tick 推进队形 -> 随从按 3.0m 间距沿队长轨迹跟进
         Vec3 leaderStart = leader.position();
-        for (int i = 1; i <= 20; i++) {
+        for (int i = 1; i <= 24; i++) {
             world.relocateTeamFollower(leader, new Vec3(leaderStart.x() + i * 0.25, leaderStart.y(), leaderStart.z()));
             clock.advanceMillis(50L);
             world.step();
@@ -397,6 +397,135 @@ class AfkPassHostingAndTeamFollowTest {
         clock.advanceMillis(60_000L);
         assertThat(world.sweepConnectionLostHolds()).isEqualTo(1);
         assertThat(world.playerById(5002L)).isNull();
+    }
+
+    @Test
+    void 挂机月卡幂等键换参数拒1005与账本损坏闭路拒1003() throws Exception {
+        ManualClock clock = new ManualClock();
+        clock.advanceMillis(1_800_000_000_000L);
+        AfkPassTables tables = AfkPassTables.of(new AfkPassTables.Rule(30, CURRENCY_JADE, 300, 60, 72));
+        SceneMetrics metrics = new SceneMetrics(new SimpleMeterRegistry());
+        CurrencyService currency = new CurrencyService(AssetAudit.log(), GainAnomalyDetector.off(), metrics, clock);
+        AfkPassService afkPass = new AfkPassService(tables, currency, clock);
+
+        RecordingSink sink = new RecordingSink();
+        FakePlayerRepository repo = new FakePlayerRepository();
+        SceneWorld world = newWorld(clock, sink, repo, metrics).withAfkPassService(afkPass);
+        ClientRequestHandler handler = new ClientRequestHandler(world, Contracts.REGISTRY, Contracts.IDS, RunMode.DEV,
+                List.of(new AfkPassFeature(afkPass)));
+        Scene scene = world.createScene(1);
+        int buyId = Contracts.REGISTRY.requireId(AfkPassFeature.SERVICE, "BuyAfkPass");
+
+        enterPlayer(world, repo, 6001L, 1, 601, scene.sceneId(), 1L);
+        currency.add(world.playerById(6001L), CURRENCY_JADE, 1000, AssetAudit.Reason.GM_GRANT, 0);
+        forward(handler, 1, 601, 6001L, buyId, 1, BuyAfkPassRequest.newBuilder()
+                .setClientRequestId(777L).setExpectedCurrencyType(CURRENCY_JADE).setExpectedPrice(300L)
+                .build().toByteString());
+        assertThat(BuyAfkPassResponse.parseFrom(lastBody(sink, 1, 601)).getErrorMessage().getId()).isZero();
+
+        // 同键改 expected_price -> 1005 拒绝且不重复扣费
+        forward(handler, 1, 601, 6001L, buyId, 2, BuyAfkPassRequest.newBuilder()
+                .setClientRequestId(777L).setExpectedCurrencyType(CURRENCY_JADE).setExpectedPrice(299L)
+                .build().toByteString());
+        assertThat(BuyAfkPassResponse.parseFrom(lastBody(sink, 1, 601)).getErrorMessage().getId())
+                .isEqualTo(AfkPassService.INVALID_PARAMETER);
+        assertThat(world.playerById(6001L).wallet().balance(CURRENCY_JADE)).isEqualTo(700L);
+
+        // 损坏账本（key=0）fail-closed -> UNAVAILABLE (1003)
+        com.game.player.store.state.PlayerState corruptState = com.game.player.store.state.PlayerState.newBuilder()
+                .setClientRequestLedger(com.game.player.store.state.ClientRequestLedgerState.newBuilder()
+                        .addRecords(com.game.player.store.state.ClientRequestRecordState.newBuilder().setKey(0).setKind(6).setSeq(1))
+                        .setNextSeq(2))
+                .build();
+        repo.put(new PlayerData(6002L, 1L, 1, 1, "00_default", 10, 1, new Vec3(10, 10, 0), corruptState));
+        world.onPlayerEnter(1L, PlayerEnter.newBuilder()
+                .setSessionId(602).setPlayerId(6002L).setSceneId(scene.sceneId()).setOwnerEpoch(1L).build());
+        repo.completeAll();
+        currency.add(world.playerById(6002L), CURRENCY_JADE, 1000, AssetAudit.Reason.GM_GRANT, 0);
+        forward(handler, 1, 602, 6002L, buyId, 3, BuyAfkPassRequest.newBuilder()
+                .setClientRequestId(778L).setExpectedCurrencyType(CURRENCY_JADE).setExpectedPrice(300L)
+                .build().toByteString());
+        assertThat(BuyAfkPassResponse.parseFrom(lastBody(sink, 1, 602)).getErrorMessage().getId())
+                .isEqualTo(AfkPassService.UNAVAILABLE);
+        assertThat(world.playerById(6002L).wallet().balance(CURRENCY_JADE)).isEqualTo(1000L);
+    }
+
+    @Test
+    void 统一入场重推跟随态_多随从合并广播135_已确认队长跳过15秒重查() throws Exception {
+        ManualClock clock = new ManualClock();
+        clock.advanceMillis(1_800_000_000_000L);
+        RecordingSink sink = new RecordingSink();
+        FakePlayerRepository repo = new FakePlayerRepository();
+        java.util.List<Long> rechecked = new java.util.ArrayList<>();
+        com.game.scene.team.TeamFollow spyFollow = new com.game.scene.team.TeamFollow() {
+            @Override public void onEnteredScene(SceneWorld w, ScenePlayer p) { }
+            @Override public void onRefresh(SceneWorld w, ScenePlayer p, boolean follow) {
+                rechecked.add(p.playerId());
+            }
+        };
+        SceneWorld world = new SceneWorld(new FakeSceneTables(), Contracts.IDS, sink, repo, new AtomicLong(100)::incrementAndGet,
+                clock, new SceneMetrics(new SimpleMeterRegistry()), p -> { }, PlayerSnapshots.NONE,
+                com.game.scene.world.PlayerLocations.NONE, spyFollow).withConnectionLostHold(true);
+        Scene scene = world.createScene(1);
+
+        // 1. 多随从合并广播 ActorMoveListS2C (135)
+        enterPlayer(world, repo, 7001L, 1, 701, scene.sceneId(), 1L);
+        enterPlayer(world, repo, 7002L, 1, 702, scene.sceneId(), 1L);
+        enterPlayer(world, repo, 7003L, 1, 703, scene.sceneId(), 1L);
+        ScenePlayer leader = world.playerById(7001L);
+        ScenePlayer f1 = world.playerById(7002L);
+        ScenePlayer f2 = world.playerById(7003L);
+        world.applyTeamMembership(leader, 99L, 1L, true);
+        world.applyTeamMembership(f1, 99L, 1L, false);
+        world.applyTeamMembership(f2, 99L, 1L, false);
+        world.teamFollowCoordinator().tryAttach(world, f1, leader, true);
+        world.teamFollowCoordinator().tryAttach(world, f2, leader, true);
+
+        // 队长走出 8 米并停稳，让 2 个随从（间距 3m / 6m）均落到各自槽位停步，再同 tick 一起起步触发合并广播 135
+        Vec3 start = leader.position();
+        for (int i = 1; i <= 32; i++) {
+            world.relocateTeamFollower(leader, new Vec3(start.x() + i * 0.25, start.y(), start.z()));
+            clock.advanceMillis(50L);
+            world.step();
+        }
+        for (int i = 0; i < 20; i++) {
+            clock.advanceMillis(50L);
+            world.step();
+        }
+        sink.clear();
+        world.relocateTeamFollower(leader, new Vec3(start.x() + 8.5, start.y(), start.z()));
+        clock.advanceMillis(50L);
+        world.step();
+        List<MessageContent> toLeader = sink.to(1, 701);
+        List<MessageContent> moveLists = toLeader.stream()
+                .filter(m -> m.getMessageId() == Contracts.IDS.notifyActorMoveList()).toList();
+        assertThat(moveLists).hasSize(1);
+        assertThat(com.game.proto.ActorMoveListS2C.parseFrom(moveLists.getFirst().getSerializedMessage()).getMovesList())
+                .extracting(com.game.proto.ActorMoveS2C::getEntity)
+                .containsExactly(f1.entity(), f2.entity());
+
+        // 2. 离线托管断线无损接回时，通过统一 resendStateAfterEntry 重推驱动态
+        f1.setAfkPassExpiresAt(clock.epochMillis() / 1000L + 300L);
+        world.onPlayerLeave(1L, PlayerLeave.newBuilder().setSessionId(702).setPlayerId(7002L).setVoluntary(false).build());
+        sink.clear();
+        world.onPlayerEnter(1L, PlayerEnter.newBuilder().setSessionId(799).setPlayerId(7002L)
+                .setSceneId(scene.sceneId()).setOwnerEpoch(1L).build());
+        assertThat(sink.messageIdsTo(1, 799)).contains(Contracts.IDS.notifyTeamFollowState());
+
+        // 3. 已确认队长在离线托管期间即使带有跟随意图也跳过 15s 重查，而普通队员正常触发
+        leader.setAfkPassExpiresAt(clock.epochMillis() / 1000L + 300L);
+        f2.setAfkPassExpiresAt(clock.epochMillis() / 1000L + 300L);
+        world.teamFollowCoordinator().detach(world, f2, TeamFollowStopReason.TEAM_FOLLOW_STOP_REASON_LEFT_FOLLOW);
+        world.onPlayerLeave(1L, PlayerLeave.newBuilder().setSessionId(701).setPlayerId(7001L).setVoluntary(false).build());
+        world.onPlayerLeave(1L, PlayerLeave.newBuilder().setSessionId(703).setPlayerId(7003L).setVoluntary(false).build());
+        assertThat(world.teamFollowCoordinator().wantsFollow(7001L)).isTrue();
+        assertThat(world.teamFollowCoordinator().wantsFollow(7003L)).isTrue();
+        rechecked.clear();
+        for (int s = 0; s < 16; s++) {
+            clock.advanceMillis(1_000L);
+            world.sweepConnectionLostHolds();
+        }
+        assertThat(rechecked).contains(7003L).doesNotContain(7001L);
     }
 
     private static SceneWorld newWorld(ManualClock clock, RecordingSink sink, FakePlayerRepository repo,

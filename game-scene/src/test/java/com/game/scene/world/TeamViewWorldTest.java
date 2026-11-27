@@ -38,7 +38,7 @@ class TeamViewWorldTest extends MovementFixture {
     void 满表归队瞬移_本人130后47_队长先销毁被替换者再21_不再反复失去队长() throws Exception {
         ScenePlayer leader = enterNew(1, 1);
         for (int i = 2; i <= 101; i++) enterNew(i, i);
-        ScenePlayer member = enterSaved(102, 102, SPAWN.plus(new Vec3(50, 0, 0)));
+        ScenePlayer member = enterSaved(102, 102, SPAWN.plus(new Vec3(60, 0, 0)));
         world.applyTeamMembership(leader, 99, 1);
         world.applyTeamMembership(member, 99, 1);
         sink.clear();
