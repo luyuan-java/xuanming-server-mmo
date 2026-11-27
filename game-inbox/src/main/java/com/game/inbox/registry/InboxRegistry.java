@@ -67,6 +67,16 @@ public final class InboxRegistry {
     /** 欠款过期时刻（Unix 秒）的上限 9999-12-31T23:59:59Z：只挡「把毫秒当秒」这一类量级错误，不依赖当前时间。 */
     static final long MAX_DEBT_EXPIRES_AT_SECONDS = 253_402_300_799L;
 
+    /** 作废战斗结算允许出现的七个字段编号（按“只许出现哪些字段”判，不逐个列举效果字段）。 */
+    static final java.util.Set<Integer> VOID_BATTLE_SETTLEMENT_FIELDS = java.util.Set.of(
+            com.game.proto.BattleSettlementData.BATTLE_ID_FIELD_NUMBER,
+            com.game.proto.BattleSettlementData.PLAYER_ID_FIELD_NUMBER,
+            com.game.proto.BattleSettlementData.OUTCOME_FIELD_NUMBER,
+            com.game.proto.BattleSettlementData.PLAYER_TEAM_INDEX_FIELD_NUMBER,
+            com.game.proto.BattleSettlementData.FINISHED_AT_MS_FIELD_NUMBER,
+            com.game.proto.BattleSettlementData.MATCH_MODE_FIELD_NUMBER,
+            com.game.proto.BattleSettlementData.BATTLE_CONFIG_ID_FIELD_NUMBER);
+
     /** 按类型平铺的校验函数表（不用宏 / 反射生成；构造时双向核对，漏登记即拒启）。 */
     static final Map<PlayerInboxMessageType, PayloadRule> PAYLOAD_RULES = Map.of(
             PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_BLOCK_CURRENCY_GAIN,
@@ -80,11 +90,24 @@ public final class InboxRegistry {
             PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_UNBLOCK_ITEM_GAIN,
             new PayloadRule(GmItemGainPayload.getDefaultInstance(), InboxRegistry::validateItemGain),
             PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT,
-            new PayloadRule(com.game.proto.BattleSettlementData.getDefaultInstance(), message -> {
-                var value = (com.game.proto.BattleSettlementData) message;
-                return hasUnknownField(message) || value.getPlayerId() == 0 || value.getBattleId() == 0
-                        || value.getOutcomeValue() < 1 || value.getOutcomeValue() > 3 ? "战斗结算身份或终局无效" : null;
-            }));
+            new PayloadRule(com.game.proto.BattleSettlementData.getDefaultInstance(), InboxRegistry::validateBattleSettlement));
+
+    static String validateBattleSettlement(Message message) {
+        var value = (com.game.proto.BattleSettlementData) message;
+        if (hasUnknownField(message) || value.getPlayerId() == 0 || value.getBattleId() == 0) {
+            return "战斗结算身份或未知字段无效";
+        }
+        int outcome = value.getOutcomeValue();
+        if (outcome == com.game.proto.eBattleOutcome.BATTLE_OUTCOME_VOID_VALUE) {
+            for (var fd : value.getAllFields().keySet()) {
+                if (!VOID_BATTLE_SETTLEMENT_FIELDS.contains(fd.getNumber())) {
+                    return "作废战斗结算出现白名单外字段:" + fd.getNumber();
+                }
+            }
+            return null;
+        }
+        return outcome < 1 || outcome > 3 ? "战斗结算身份或终局无效" : null;
+    }
 
     /** 新资产语义可能藏在宠物/物品等子消息里；旧执行器不得忽略后仍登记APPLIED。 */
     private static boolean hasUnknownField(Message message) {

@@ -171,8 +171,12 @@ public final class GlobalMatchStore {
     public GlobalTicketRow ticket(SessionContext session){return tx(c->{actor(c,session);return locked(c,session.getPlayerId());});}
     private GlobalTicketRow locked(Connection c, long player) throws SQLException {
         var key = GlobalTicketRow.newBuilder().setPlayerId(player).build();
-        db.insertIgnore(c, key.toBuilder().setState(4).build());
-        var row = db.findOneByPkForUpdate(c, key).orElseThrow();
+        var existing = db.findOneByPkForUpdate(c, key);
+        if (existing.isEmpty()) {
+            db.insertIgnore(c, key.toBuilder().setState(4).build());
+            existing = db.findOneByPkForUpdate(c, key);
+        }
+        var row = existing.orElseThrow();
         if(row.getState()==0&&row.getTicket().isEmpty()&&row.getRequestId().isEmpty()&&row.getProfile().isEmpty()&&row.getFormationId()==0) {
             row=row.toBuilder().setState(4).build();db.updateByPk(c,row);
         }
@@ -1172,14 +1176,117 @@ public final class GlobalMatchStore {
             validateCreateBinding(f,create);
             db.updateByPk(c,t.toBuilder().setTerminalDecision(2).build());
             db.updateByPk(c,f.toBuilder().setState(5).build());
+            Map<Long,GlobalTicketRow> lockedMap=new HashMap<>();
             List<GlobalTicketRow> abortedTickets=new ArrayList<>();
             for(var member:f.getMembersList()) {
                 var p=locked(c,member.getPlayerId());if(p.getFormationId()!=battle||!p.getTicket().equals(member.getTicket()))throw new SecurityException("中止原票已变更");
+                lockedMap.put(member.getPlayerId(),p);
                 var aborted=p.toBuilder().setState(4).build();db.updateByPk(c,aborted);abortedTickets.add(aborted);
             }
+            writeVoidPersonalCompletionsInTx(c,f,create,lockedMap,stamp);
             if(f.getState()<4)units.finished(c,f,abortedTickets,false,now(c));
             return 2;
         });
+    }
+
+    /**
+     * 原战斗执行实例经两次独立失活观察（相隔不少于 30 秒）确认不在后，在截止前提前竞争落盘 SQL ABORT，
+     * 并在同一事务里为全员写入七字段作废个人结算与释放原票。与 {@link #commitOutcome} 竞争同一把行锁，必唯一落一份。
+     */
+    public int abortConfirmedDeadInstance(long battle) {
+        return tx(c -> {
+            var known = db.findOneByPk(c, com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+            if (known.isPresent() && known.get().getAdoptedOutcomeObserved() && known.get().getAdoptedOutcomeProtocolVersion() != 1) {
+                throw new SecurityException("真实adopted非v1，不能提前作废");
+            }
+            if (known.isPresent() && known.get().getTerminalDecision() != 0) {
+                return known.get().getTerminalDecision();
+            }
+            var seen = db.findOneByPk(c, GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElseThrow();
+            List<GlobalTicketRow> original = new ArrayList<>();
+            for (var member : seen.getMembersList()) {
+                original.add(db.findOneByPk(c, GlobalTicketRow.newBuilder().setPlayerId(member.getPlayerId()).build()).orElseThrow());
+            }
+            owners(c, original);
+            if (seen.getState() < 4) {
+                units.beforeFinish(c, original);
+            }
+            for (var p : original.stream().sorted((a, b) -> Long.compareUnsigned(a.getPlayerId(), b.getPlayerId())).toList()) {
+                locked(c, p.getPlayerId());
+            }
+            var f = db.findOneByPkForUpdate(c, GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElseThrow();
+            var maybe = db.findOneByPkForUpdate(c, com.game.match.completion.pb.BattleCompletionRow.newBuilder().setBattleId(battle).build());
+            if (maybe.isEmpty()) {
+                return 0;
+            }
+            var t = maybe.get();
+            if (t.getTerminalDecision() != 0) {
+                return t.getTerminalDecision();
+            }
+            if (t.getAdoptedOutcomeObserved() && t.getAdoptedOutcomeProtocolVersion() != 1) {
+                throw new SecurityException("真实adopted非v1，不能提前作废");
+            }
+            if (t.getOutcomeProtocolVersion() != 1 || t.getPreflightSupportedVersion() != 1
+                    || !t.getPreflightInstanceId().equals(f.getInstanceId())
+                    || !t.getPlacementOperationId().equals(f.getOperationId())
+                    || !t.getTargetInstanceId().equals(f.getInstanceId())
+                    || f.getState() < 2 || f.getState() > 4 || f.getCreateRequest().isEmpty()) {
+                return 0;
+            }
+            var create = com.game.proto.CreateBattleRequest.parseFrom(f.getCreateRequest());
+            if (create.getOutcomeProtocolVersion() != 1) {
+                return 0;
+            }
+            validateCreateBinding(f, create);
+            long stamp = now(c);
+            db.updateByPk(c, t.toBuilder().setTerminalDecision(2).build());
+            db.updateByPk(c, f.toBuilder().setState(5).build());
+            Map<Long, GlobalTicketRow> lockedMap = new HashMap<>();
+            List<GlobalTicketRow> abortedTickets = new ArrayList<>();
+            for (var member : f.getMembersList()) {
+                var p = locked(c, member.getPlayerId());
+                if (p.getFormationId() != battle || !p.getTicket().equals(member.getTicket())) {
+                    throw new SecurityException("提前作废原票已变更");
+                }
+                lockedMap.put(member.getPlayerId(), p);
+                var aborted = p.toBuilder().setState(4).build();
+                db.updateByPk(c, aborted);
+                abortedTickets.add(aborted);
+            }
+            writeVoidPersonalCompletionsInTx(c, f, create, lockedMap, stamp);
+            if (f.getState() < 4) {
+                units.finished(c, f, abortedTickets, false, stamp);
+            }
+            return 2;
+        });
+    }
+
+    /** 在写作废决定（terminal_decision=2）的同一事务里，为每名成员写入七字段作废个人结算，复用个人投递与去重。 */
+    private void writeVoidPersonalCompletionsInTx(Connection c, GlobalFormationRow f,
+                                                  com.game.proto.CreateBattleRequest create,
+                                                  Map<Long, GlobalTicketRow> tickets, long stamp) throws Exception {
+        Map<Long, Integer> teams = new HashMap<>();
+        if (create != null) {
+            for (var player : create.getPlayersList()) {
+                teams.put(player.getPlayerId(), player.getTeamIndex());
+            }
+        }
+        for (var member : f.getMembersList()) {
+            var ticket = tickets.get(member.getPlayerId());
+            int teamIndex = teams.getOrDefault(member.getPlayerId(), member.getTeamIndex());
+            var settlement = VoidSettlements.build(
+                    f.getBattleId(), member.getPlayerId(), teamIndex, stamp, f.getMode(), f.getConfigId());
+            var raw = ByteString.copyFrom(com.game.common.token.NetworkProbes.bytes(settlement));
+            var existing = db.findOneByPk(c, com.game.match.completion.pb.BattlePlayerCompletionRow.newBuilder()
+                    .setBattleId(f.getBattleId()).setPlayerId(member.getPlayerId()).build());
+            if (existing.isEmpty()) {
+                db.insert(c, com.game.match.completion.pb.BattlePlayerCompletionRow.newBuilder()
+                        .setBattleId(f.getBattleId()).setPlayerId(member.getPlayerId())
+                        .setOriginal(raw).setOriginalDigest(com.game.match.rating.BattleCompletionStore.digest(raw))
+                        .setOwnerAccount(ticket.getOwnerAccount()).setOwnerRevision(ticket.getOwnerRevision())
+                        .setIssuedAtMs(stamp).setRetryMs(stamp).build());
+            }
+        }
     }
 
     public void prepared(GlobalFormationRow work, GlobalPreparedEndpoint endpoint) {
@@ -1307,6 +1414,9 @@ public final class GlobalMatchStore {
             long stamp = now(c);
             if (terminalOpt.isPresent()) {
                 db.updateByPk(c, terminalOpt.get().toBuilder().setTerminalDecision(2).build());
+                com.game.proto.CreateBattleRequest parsedCreate = f.getCreateRequest().isEmpty()
+                        ? null : com.game.proto.CreateBattleRequest.parseFrom(f.getCreateRequest());
+                writeVoidPersonalCompletionsInTx(c, f, parsedCreate, lockedTickets, stamp);
             }
             List<GlobalTicketRow> after = new ArrayList<>();
             for (var m : f.getMembersList().stream().sorted((a, b) -> Long.compareUnsigned(a.getPlayerId(), b.getPlayerId())).toList()) {

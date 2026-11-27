@@ -51,6 +51,43 @@ public final class BattleSettlementService {
     /** 道具数量的上限（uint64 → uint32 夹紧，§7.11 h / i 步）。 */
     static final long UINT32_MAX = 0xFFFF_FFFFL;
 
+    /** 作废战斗结算允许出现的七个字段编号（按“只许出现哪些字段”判）。 */
+    static final java.util.Set<Integer> VOID_ALLOWED_FIELDS = java.util.Set.of(
+            BattleSettlementData.BATTLE_ID_FIELD_NUMBER,
+            BattleSettlementData.PLAYER_ID_FIELD_NUMBER,
+            BattleSettlementData.OUTCOME_FIELD_NUMBER,
+            BattleSettlementData.PLAYER_TEAM_INDEX_FIELD_NUMBER,
+            BattleSettlementData.FINISHED_AT_MS_FIELD_NUMBER,
+            BattleSettlementData.MATCH_MODE_FIELD_NUMBER,
+            BattleSettlementData.BATTLE_CONFIG_ID_FIELD_NUMBER);
+
+    static boolean isValidVoidSettlement(BattleSettlementData settlement) {
+        if (settlement == null || settlement.getBattleId() == 0 || settlement.getPlayerId() == 0
+                || settlement.getOutcome() != com.game.proto.eBattleOutcome.BATTLE_OUTCOME_VOID
+                || !settlement.getUnknownFields().asMap().isEmpty()) {
+            return false;
+        }
+        for (var fd : settlement.getAllFields().keySet()) {
+            if (!VOID_ALLOWED_FIELDS.contains(fd.getNumber())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void recordVoidBattleResult(ScenePlayer player, BattleSettlementData settlement) {
+        long nowMs = clock.epochMillis();
+        com.game.player.store.state.BattleResultEntryState.Builder entry = com.game.player.store.state.BattleResultEntryState.newBuilder()
+                .setBattleId(settlement.getBattleId())
+                .setOutcome(settlement.getOutcomeValue())
+                .setTeamIndex(settlement.getPlayerTeamIndex())
+                .setFinishedAtMs(settlement.getFinishedAtMs())
+                .setSettledAtMs(nowMs)
+                .setMatchMode(settlement.getMatchMode())
+                .setBattleConfigId(settlement.getBattleConfigId());
+        player.battleResults().record(entry);
+    }
+
     /** 一次应用的结论。 */
     public enum Outcome {
         APPLIED, ALREADY_APPLIED, DEFERRED, DISCARDED
@@ -184,6 +221,17 @@ public final class BattleSettlementService {
         if(player.battle().applying())throw new IllegalStateException("战斗Inbox结算重入");
         player.battle().setApplying(true);
         try{
+            if (settlement.getOutcome() == com.game.proto.eBattleOutcome.BATTLE_OUTCOME_VOID) {
+                if (!isValidVoidSettlement(settlement)) {
+                    log.error("作废战斗结算正文包含白名单外字段，整笔延后等待排查 player={} battle_id={}",
+                            Long.toUnsignedString(player.playerId()), Long.toUnsignedString(settlement.getBattleId()));
+                    return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
+                }
+                // 场景侧短路：不回写血蓝/宠物/货币/经验/道具/任务/赛季额度，只记一条空明细 VOID 近期战果；
+                // 存盘确认后由调用方统一解冻、放锁并推 BattleEndS2C{outcome=VOID}。
+                recordVoidBattleResult(player, settlement);
+                return Result.APPLIED;
+            }
             boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(settlement.getMatchMode());
             boolean isJianghuDuel = settlement.getMatchMode() == com.game.battle.engine.BattleConstants.MATCH_MODE_JIANGHU_DUEL;
             boolean festivalBattle = isFestivalBeast(settlement);
@@ -418,6 +466,26 @@ public final class BattleSettlementService {
             log.error("战斗结算账本损坏，结算延后（等 GM 修复） player={} battle_id={} 原因={}", Long.toUnsignedString(playerId),
                     Long.toUnsignedString(battleId), ledger.invalidReason());
             return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
+        }
+        if (settlement.getOutcome() == com.game.proto.eBattleOutcome.BATTLE_OUTCOME_VOID) {
+            if (!isValidVoidSettlement(settlement)) {
+                log.error("作废战斗结算正文包含白名单外字段，整笔延后等待排查 player={} battle_id={}",
+                        Long.toUnsignedString(playerId), Long.toUnsignedString(battleId));
+                return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
+            }
+            try {
+                step("作废近期战果", player, battleId, () -> recordVoidBattleResult(player, settlement));
+            } finally {
+                long evicted = ledger.record(battleId, clock.epochMillis());
+                if (evicted != 0) {
+                    metrics.ledgerEvicted();
+                    log.error("战斗结算账本满 {}，淘汰最旧项 player={} evicted={} battle_id={}",
+                            BattleLedger.CAPACITY, Long.toUnsignedString(playerId), Long.toUnsignedString(evicted),
+                            Long.toUnsignedString(battleId));
+                }
+            }
+            world.requestSave(player);
+            return Result.APPLIED;
         }
         boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(settlement.getMatchMode());
         boolean isJianghuDuel = isJianghuDuel(settlement);

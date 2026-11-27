@@ -409,7 +409,13 @@ class BattleTerminalRecoveryTest {
                 var abort = workers.submit(() -> { start.await(); return store.resolveTerminalAfterDeadline(902); });
                 int a = complete.get(10, TimeUnit.SECONDS), b = abort.get(10, TimeUnit.SECONDS);
                 assertEquals(a, b); assertTrue(a == 1 || a == 2);
-                assertEquals(a == 1 ? 2 : 0, new BattleCompletionStore(data).pendingPlayers(0, 0).size());
+                var personalRows = new BattleCompletionStore(data).pendingPlayers(0, 0);
+                assertEquals(2, personalRows.size());
+                for (var row : personalRows) {
+                    var parsed = com.game.proto.BattleSettlementData.parseFrom(row.getOriginal());
+                    assertEquals(a == 1 ? com.game.proto.eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN : com.game.proto.eBattleOutcome.BATTLE_OUTCOME_VOID, parsed.getOutcome());
+                    if (a == 2) assertTrue(com.game.match.global.VoidSettlements.isValid(parsed));
+                }
                 assertEquals(a, store.resolveTerminalAfterDeadline(902));
                 if(a==2){assertDoesNotThrow(()->store.finish(expired,false));assertThrows(RuntimeException.class,()->store.finish(expired,true));}
             }
@@ -433,7 +439,7 @@ class BattleTerminalRecoveryTest {
                     for(var member:f.getMembersList())assertEquals(4,store.ticket(member.getPlayerId()).getState());
                 }
                 assertEquals(1,store.terminal(919).getTerminalDecision());assertEquals(3,store.ticket(1).getState());
-                assertEquals(2,completion.pendingPlayers(0,0).size());
+                assertEquals(7,completion.pendingPlayers(0,0).size());
             }
         }
         @Test void 两恢复副本并发巡检_旧协议及实际adopted0保持UNKNOWN_未到截止不变() throws Exception {

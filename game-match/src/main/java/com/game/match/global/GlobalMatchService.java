@@ -956,16 +956,61 @@ public final class GlobalMatchService implements AutoCloseable {
                 .setSpectateChatEnabled(request.getSpectateChatEnabled());
         projections.write(p.build());try{hooks.onStarted(p.build());}catch(RuntimeException e){log.warn("观战展示投影稍后恢复",e);}
     }
+    private final BattleInstanceDeathTracker deathTracker = new BattleInstanceDeathTracker();
+
+    public BattleInstanceDeathTracker deathTracker() {
+        return deathTracker;
+    }
+
+    /**
+     * 对被标记为可疑的对局执行一次只读失活探查（截止前只读，绝不发 DestroyBattle 立拒收墓碑）。
+     * 原实例应答即撤除怀疑；同一实例累计两次失活观察且相隔不少于 30 秒时，提前竞争落盘 SQL ABORT 并投作废结算。
+     *
+     * @return 提前作废结果：0=未达条件或无变更，1=已被正常 COMPLETE，2=已提前作废 ABORT
+     */
+    public int probeSuspectBattle(long battleId,
+                                  Function<GlobalFormationRow, BattleInstanceDeathTracker.ProbeOutcome> probe,
+                                  long nowMs) {
+        var f = store.formation(battleId);
+        if (f == null || f.getState() == 5) {
+            deathTracker.clearBattle(battleId);
+            return 0;
+        }
+        var terminal = store.terminal(battleId);
+        if (terminal != null && terminal.getTerminalDecision() != 0) {
+            deathTracker.clearBattle(battleId);
+            return terminal.getTerminalDecision();
+        }
+        var outcome = probe.apply(f);
+        if (outcome instanceof BattleInstanceDeathTracker.ProbeOutcome.OriginalAlive) {
+            deathTracker.recordAlive(f.getInstanceId());
+            return 0;
+        }
+        if (outcome instanceof BattleInstanceDeathTracker.ProbeOutcome.ObservedDead dead) {
+            if (deathTracker.recordObservation(f.getInstanceId(), dead.kind(), nowMs)) {
+                int decision = store.abortConfirmedDeadInstance(battleId);
+                if (decision != 0) {
+                    deathTracker.clearBattle(battleId);
+                }
+                return decision;
+            }
+        }
+        return 0;
+    }
+
     public RequestBattleTicketResponse reissue(long player,long battle) {
         throw new SecurityException("全球补票必须保留原会话身份");
     }
     public RequestBattleTicketResponse reissue(SessionContext actor,long battle,Deadline deadline) {
+        GlobalFormationRow formation = null;
         try {
             current(actor,deadline);
             if(spectators==null)throw new IllegalStateException("SQL参战/观战准入未装配");
             String operation=spectators.authority().reissue(actor,battle,deadline);
-            var f=store.formation(battle);if(f==null||f.getState()==5)return RequestBattleTicketResponse.newBuilder().setErrorMessage(MatchTip.REISSUE_BATTLE_GONE.proto()).build();
+            var f=store.formation(battle);formation=f;
+            if(f==null||f.getState()==5)return RequestBattleTicketResponse.newBuilder().setErrorMessage(MatchTip.REISSUE_BATTLE_GONE.proto()).build();
             var state=query(f).getState();
+            deathTracker.recordAlive(f.getInstanceId());
             if(state==BattleCreationState.BATTLE_CREATION_ABSENT||state==BattleCreationState.BATTLE_CREATION_ABORTED)
                 return RequestBattleTicketResponse.newBuilder().setErrorMessage(MatchTip.REISSUE_BATTLE_GONE.proto()).build();
             if(state!=BattleCreationState.BATTLE_CREATION_PRESENT)throw new IllegalStateException("建房结局未知");
@@ -973,7 +1018,12 @@ public final class GlobalMatchService implements AutoCloseable {
             var result=invoke(f,s->s.issueBattleTicket(IssueBattleTicketRequest.newBuilder().setPlayerId(actor.getPlayerId()).setBattleId(battle)
                 .setSpectatorOperationId(operation).setTargetInstanceId(f.getInstanceId()).build()));
             return RequestBattleTicketResponse.newBuilder().setAssignment(result.getAssignment()).setErrorMessage(result.getErrorMessage()).build();
-        }catch(Exception e){return RequestBattleTicketResponse.newBuilder().setErrorMessage(MatchTip.REISSUE_BATTLE_UNAVAILABLE.proto()).build();}
+        }catch(Exception e){
+            if (formation != null) {
+                deathTracker.markSuspect(battle, formation.getInstanceId());
+            }
+            return RequestBattleTicketResponse.newBuilder().setErrorMessage(MatchTip.REISSUE_BATTLE_UNAVAILABLE.proto()).build();
+        }
     }
     @Override public void close(){var live=this.liveness;if(live!=null){live.close();}admissionTimer.shutdownNow();workers.shutdown();try{if(!workers.awaitTermination(10,TimeUnit.SECONDS))workers.shutdownNow();}
         catch(InterruptedException e){Thread.currentThread().interrupt();workers.shutdownNow();}}

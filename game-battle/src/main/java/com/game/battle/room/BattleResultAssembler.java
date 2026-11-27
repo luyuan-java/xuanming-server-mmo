@@ -42,6 +42,15 @@ final class BattleResultAssembler {
      */
     static BattleResultEvent assemble(long battleId, int matchMode, int battleConfigId, BattleActivityContext activity,
                                       eBattleOutcome outcome, List<BattleSettlementData> settlements, long finishedAtMs) {
+        if (outcome == null || outcome == eBattleOutcome.BATTLE_OUTCOME_VOID
+                || outcome.getNumber() < 1 || outcome.getNumber() > 3) {
+            throw new IllegalArgumentException("战斗引擎不得产出无效或作废终局: " + outcome);
+        }
+        for (BattleSettlementData settlement : settlements) {
+            if (settlement.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_VOID) {
+                throw new IllegalArgumentException("战斗引擎个人结算不得携带 BATTLE_OUTCOME_VOID");
+            }
+        }
         List<BattleSettlementData> ordered = new ArrayList<>(settlements);
         ordered.sort(BY_PLAYER);
 

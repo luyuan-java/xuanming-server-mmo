@@ -1924,31 +1924,14 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-12 战斗进程失效的提前作废与作废通知(主仓与客户端已落码未编译,Java 待做;含客户端契约)
+### 2026-11-12 战斗进程失效的提前作废与作废通知（Java 已对齐；含客户端契约）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做。设计见主仓 `docs/design/battle-instance-loss-early-abort.md`,说明见主仓 `docs/PROGRESS.md` 2026-11-12 同名条目。Java 现状见本仓 `docs/porting/battle-node-spec.md` §4.7:节点崩溃只靠 scene 的 reaper 到期解冻,参战者没有任何通知。
+2026-11-27 已跨 `game-battle`、`game-inbox`、`game-match`、`game-scene` 完整对齐（设计见 `docs/design/battle-instance-loss-early-abort.md`）：
 
-**客户端契约(两版共用,客户端已按它改)**:
-
-1. `eBattleOutcome` 新增 `BATTLE_OUTCOME_VOID = 4`(`proto/battle/battle_data.proto`)。只由 match 的作废决定产生,战斗引擎不产出;battle 冻结终局、match 收终局时都拒收它。
-2. 一局被作废时,每名参战者经大厅收到 `BattleEndS2C{outcome = VOID}`,`settlement` 只带 `battle_id`、`player_id`、`outcome`、`player_team_index`、`finished_at_ms`、`match_mode`、`battle_config_id`,没有任何奖励、消耗、血量终值。客户端显示「本局作废」,不按胜负处理。
-3. 近期战斗结果(`PlayerBattleResult.outcome`)会出现 VOID,明细全空。
-
-**要对齐的行为**:
-
-1. **所有作废都给成员投作废结算**:写作废决定的同一事务里,给每名成员写一份个人结算来源(载荷见上),走与正常结算相同的个人投递与去重;原票仍在作废事务里直接放回。作废入口不止节点失效:截止作废、帮会取消、没建成房、人工处置都算。
-2. **收件箱 / 结算入口的校验**:结局取值放行 VOID,条件是正文只出现上面七个字段。按「只许出现哪些字段」判,不要逐个列效果字段。
-3. **场景侧短路**:在任何效果路径之前认出 VOID —— 不回写血量(载荷里的 0 会把血量写成 0)、不发奖励、不扣消耗;释放这一局的道具预留(Java 有预留时),记一条 VOID 近期结果;存档确认后解冻、放锁、推 `BattleEndS2C`。正文不合格整笔延后并告警。
-4. **原执行进程确认不在时提前作废**(主仓 §4):
-   - 触发:参战者补签问不到原实例时把这一局记为可疑;
-   - 一次观察认三种:原地址上应答的是另一个实例;原端口当场拒连且注册中心已摘除;K8s 里已没有存活的 Pod 持有原 IP。原实例亲口应答则撤出;
-   - 复核:同一个实例两次观察相隔不少于 30 秒(盖住停机排空 15 秒加最后一次提交的调用期限 10 秒),按实例记、各局共用;
-   - 截止之前对原实例只做只读查询,不能发会立拒收墓碑的销毁请求;
-   - 截止作废的取证共用同一条复核。
-   Java 的 battle 节点形态与发现方式不同(spec 写明 Agones 不移植),证据种类按 Java 的部署实际取舍,但「单次观察不作数、按实例复核、截止前只读」三条要保持。
-5. **验证**(Java 仓口径):作废结算的字段白名单、场景侧不改血量与资产、作废与正常终局并发只落一份、复核间隔的边界;联机验收「杀掉 battle 进程后参战者约 1 分钟内收到作废并能再排队」。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- **引擎与收件箱契约**：`game-proto` 已同步 `BATTLE_OUTCOME_VOID = 4`；`game-battle` `BattleResultAssembler.assemble` 与 `game-match` `BattleCompletionStore.validateTerminal` 均拒收战斗引擎产出的 `VOID`；`game-inbox` `InboxRegistry.validateBattleSettlement` 对 `VOID` 实行严格七字段白名单（仅允许 `battle_id`/`player_id`/`outcome`/`player_team_index`/`finished_at_ms`/`match_mode`/`battle_config_id` 且无未知字段，不逐项枚举效果字段）。
+- **所有作废同事务投递作废结算 & 实例失活提前作废**：`game-match` 新增 `VoidSettlements` 与 `BattleInstanceDeathTracker`（补签失败记可疑、原实例应答即撤销、同一实例按 30 秒间隔两次独立失活观察才确认、跨局共享、截止前只读探查不发 `DestroyBattle`）；`GlobalMatchStore.resolveTerminalAfterDeadline`、`abortConfirmedNoRoom` 及新增 `abortConfirmedDeadInstance`（与 `commitOutcome` 竞争同一把行锁，全员唯一落正常或作废）均在写 `terminal_decision=2` 同一 SQL 事务内为全员写入七字段 `VOID` 个人来源并释放原票，`GlobalMatchService.reissue` / `probeSuspectBattle` 接入可疑登记与只读探查。
+- **场景侧短路**：`game-scene` `BattleSettlementService`（`applyInbox` 与 `applyOnce`）在任何效果路径前拦截 `BATTLE_OUTCOME_VOID`：校验七字段白名单（不合格整笔 `DEFERRED` 并记 ERROR），合格则零修改血蓝/宠物/货币/经验/道具/任务/赛季额度，仅写入空明细 `VOID` 近期战果，存盘确认后解冻放锁并推送 `BattleEndS2C{outcome=VOID}`。
+- **验证**：`game-battle` `BattleResultAssemblerVoidTest`（1/1）、`game-inbox` `InboxVoidSettlementTest`（1/1）、`game-match` `VoidSettlementAndEarlyAbortTest`（3/3）+ `GlobalMatchTransferIntentTest`（1/1）、`game-scene` `VoidSettlementSceneTest`（2/2）+ `SettlementApplyTest`（24/24），合计 **32/32 PASS**（`BattleTerminalRecoveryTest` 真 TiDB 用例同步更新为全员作废来源口径；真实进程强杀联机演练待集成环境联调）。
 
 ### 2026-11-12 战斗掉落两包都放不下改投邮件、背包显示被预留占住的数量(主仓已落码未编译,Java 待做;补 11-10「战斗道具预留」)
 
