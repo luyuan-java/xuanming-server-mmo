@@ -3170,24 +3170,20 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 (验签前不建会话不发号、验签成功才发号且会话沿用代次、未验签断开不留会话、票据被占时不建会话、dev 免验签建连即建会话、发号跳过在用的号与保留哨兵)
 与 `client_heartbeat_test.cpp` 的握手期限四条(到点关且删记录、只关到期的表头、期限内验签才建会话、事件循环卡过只推迟)。
 
-### 2026-11-27 数据覆写审计 r2 第 4 轮批 V、W、X 与 §7.4 五条(主仓已落码未编译,Java 待做)
+### 2026-11-27 数据覆写审计 r2 第 4 轮批 V、W、X 与 §7.4 五条（已对齐）
 
-主仓 `docs/handoff/data-overwrite-audit-r2-round4-handoff-20261126.md` §7.1～§7.4。本条只登记待做,没有修改 Java 代码,也没有核对 Java 源码里是否已有等价修复,动手前先按主仓口径逐条核对 Java 实现。Java 版已有帮战 V2、群仙问道赛、江湖生死状(见本文件 2026-11-24～11-26 各条)。
+主仓 `docs/handoff/data-overwrite-audit-r2-round4-handoff-20261126.md` §7.1～§7.4。
 
-**Java 待做**:
+1. **帮战追杀令与灵脉（批 V）**：服务端推导目标、追杀令行锁内五项复核、灵脉按号升序点锁与快照重算、赏金/撕单退款同事务与 `ESCROW_FAILED=6` 及零墙钟发号已对齐（含前期 `3e7023e3` 与 `GuildWarStore` 同事务逻辑）。
+2. **帮战入账不被一人挡住、不给已删角色入账（§7.4 `r2-gw#5`、`#6`）**：`GuildWarStore` 新增 `CreditFenceState`/`RoleFence`（`GuildConfiguration.guildWarStore` 生产装配启用 `RoleFence.PLAYER_TABLE` 按 `player_id` 升序首锁 `player` 表行）与 `guild_war_credit_owed` 待入账表；已删除角色不写任何帮战表（领赏人已删抛 `bounty_winner_deleted` 保留追杀令 `ACTIVE`），角色冻结或未决窗口满时保留预发 `op_id` 落 `guild_war_credit_owed`、按人分流不整笔拒；`convertCreditOwed` 严格按 `P -> Q -> 24` 锁序用原 `op_id` 补插并挂接至 `guildWarBountyExpirySweeper`。
+3. **追杀令表索引与清理、点选不泄露（§7.4 `r2-gw#7`、`#8`）**：`GuildWarStore.ensureSchema()` 补齐 `idx_guild_war_bounty_escrow_op` 与 `idx_guild_war_bounty_status_resolved` 索引；新增 `purgeTerminalBounties` 保留 30 天后单行短事务分批删终态 `{3,4,5,6}` 并挂接至定时清理器；点选野外目标在 `GuildWarService` 已隔离「仅本帮可见」追杀令；帮会解散 `cleanupDisbandTx` 已清空守旗阵并释放占领灵脉（删角收尾清理 `guild_war_garrison` / `guild_war_player_state` / `guild_war_credit_owed` 随删角注销条目联动补齐）。
+4. **群仙问道赛领奖（批 W）**：`TournamentService` 带附件且发件器未装配时 fail-closed 不落已领取、冻结标题正文且 `expire_ms=0` 重领逐字节一致、单条失败不挡其余，新增 `MailRejectedException` 并在 `MatchFeatureConfiguration` 透传收件箱满（`kMailRecipientBoxFull`）保持 `CLAIMABLE`；`match` 发件身份（`senderKind=6` / `"match"`）与 `game-mail` 生产者名单对齐。
+5. **生死状普通战书银两单通道退费与终局复核（批 X）**：删除 `game-match/.../JianghuDuelService` 中的 `refundSilverOnce` / `sendSilverRefundMail` 邮件退费通道；`game-scene/.../JianghuService` 与 `PlayerBattleService` 统一由 scene 单通道处理（`validatePrepareFee` 别局未结清拒新备战、`commitPrepareFee` 登记 `pending_silver_fee_review_after_ms`、`refundPendingSilverFee` 冻结拒绝且先经豁免获取封禁的 `JIANGHU_DUEL_REFUND` 入账成功再清标记、`cancel` 忽略废弃 `skip_jianghu_silver_refund`、`reap` 到期经 `BattleTerminalReviewer` 复核终局仅 `ABORTED`/`NOT_FOUND` 退费、`COMPLETE` 且本地已应用时仅打 ERROR 清标记不退）。（注：`CheckJianghuDuelEligibilityResponse.payer_silver_fee_pending=4` 与 `kJianghuDuelSilverFeePending` 属 2026-11-27 契约新增字段，待下次 `ContractSync` 从最新主仓同步后补齐预检显式字段回传。）
 
-1. **帮战追杀令与灵脉(批 V,主仓 `docs/planning/guild-play-v2-implementation-plan.md` 末尾定案一节)**:
-   - 开战只采信服务端推出的目标:灵脉号只在打守旗阵时采信,追杀令号只在追杀榜直打时采信,其余由服务端按目标推或清零;自动挂钩与追踪都要核区服与接单资格(公开榜或发单帮)。
-   - 结算在追杀令行锁内复核(局种是追杀局、区服一致、被击败方就是目标、攻方有接单资格、状态有效),不符不动追杀令;旗势只在防守帮就是灵脉主人时才变。
-   - 灵脉结算在事务里按灵脉号升序点锁本区灵脉、与事务外快照比对,不符整笔重算(有界重试),不改结果消息的 key。
-   - 赏金与撕单退款进结算同一事务(撕单另一半:银两档退发布者,公费档按实扣资金退帮会);领赏人当日满上限不结单;追杀令到期原路退回(行锁 + 状态 CAS,多副本只退一次);扣款失败与「到期已退回」分成两个状态(主仓新增状态 6 ESCROW_FAILED,客户端可见,两版同批)。
-   - 发号失败一律报错,不用墙钟时间顶替。
-2. **帮战入账不被一人挡住、不给已删角色入账(§7.4 r2-gw#5、#6)**:入账目标的资产指令未决已满或角色冻结中时,改记一张待入账表、由循环用预发的同一个 op_id 补插;已删除的角色不写;按人分流、不整笔拒绝。
-3. **追杀令表索引与清理、点选不泄露(§7.4 r2-gw#7、#8)**:扣款终结按 escrow_op_id 找行要有索引;终态行保留 30 天后分批删;点选野外目标时「仅本帮可见」的追杀令不显示给别帮。
-4. **群仙问道赛领奖(批 W,主仓 `docs/planning/season-team-tournament-v1.md` 第七节)**:带附件而发件没装配时回可重试错误、不落已领取;邮件请求只由奖励行构造(过期时刻不传、标题正文在结算时冻结进奖励行),同一奖励每次重发逐字节相同;一条失败不挡其余。Java 的 match 发件身份与 mail 的生产者名单两边要对上。
-5. **生死状普通战书银两(批 X,主仓 `docs/planning/battle-jianghu-grudge-duel-phase1-implementation-plan.md` 末尾定案一节)**:退费只留 scene 一条通道(Java 现在用 `match_jianghu_refund` 加邮件退费,结果不明时与在线退双退或丢,要改);待退银两与道具预留共用同一次 SQL 终局复核,ABORT 或没有可裁决原件才退;先入账再清标记;别的局没结清时拒绝新备战;退费不受获取封禁拦。2026-11-27 补:资格预检也判这一条,scene 回 `CheckJianghuDuelEligibilityResponse.payer_silver_fee_pending = 4`,match 回新 tip `kJianghuDuelSilverFeePending`(Tip 表 `//jianghu_error` 段末,`ContractSync` 要同步);帮战 EXPIRED 注释改成实际含义、客户端补了状态 6 文案(共享客户端已改,Java 不用动);删角收尾补删帮战三张个人表(`guild_war_garrison` / `guild_war_player_state` / `guild_war_credit_owed`),删角触发的解散释放灵脉,Java 的注销清单同步核对。
-
-**验证**(Java 仓口径):按主仓各设计稿列的用例场景移植,至少覆盖:非追杀局带追杀令号不结单、灵脉快照不符重算、到期退回只退一次、满上限不结单;未装配发件不落已领取、重领请求逐字节相同;别局未结清拒绝备战、入账失败保留标记、终局 ABORT 退一次。
+**验证**：
+- `game-guild`：`GuildWarCreditOwedAndPurgeTest`（3/3）+ `GuildWarServiceTest`（9/9）= **12/12 PASS**；
+- `game-match`：`TournamentParityTest` + `JianghuDuelParityTest` **100% PASS**；
+- `game-scene`：`JianghuSilverFeeReviewTest`（2/2）+ `PrepareBattleTest` + `CancelBattlePrepareTest` + `BattleReaperTest` + `SettlementApplyTest` = **142/142 PASS**。
 
 ### 2026-11-27 悬赏求书改走 trade 托管合同(kind 7 求购单,数据覆写审计 r2-craft#1;主仓批 A 已落码未编译,Java 待做)
 

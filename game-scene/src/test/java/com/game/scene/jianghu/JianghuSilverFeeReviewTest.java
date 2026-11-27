@@ -31,8 +31,11 @@ import com.game.scene.testing.FakePlayerRepository;
 import com.game.scene.testing.FakeSceneTables;
 import com.game.scene.testing.ManualClock;
 import com.game.scene.testing.RecordingSink;
+import com.game.scene.world.CrossNodeSwitch;
+import com.game.scene.world.PlayerLocations;
 import com.game.scene.world.PlayerSnapshots;
 import com.game.scene.world.Scene;
+import com.game.scene.world.SceneInstances;
 import com.game.scene.world.ScenePlayer;
 import com.game.scene.world.SceneWorld;
 import com.game.scene.world.WorldTestAccess;
@@ -185,8 +188,10 @@ final class JianghuSilverFeeReviewTest {
                     new AtomicLong(5000)::incrementAndGet, clock, SceneMetrics.noop(),
                     p -> {
                         bags.initializeOnLoad(p);
+                        p.attributes().setHealth(100);
                         p.wallet().add(Wallet.GOLD, 2_000L);
-                    }, PlayerSnapshots.NONE, null, TeamFollow.NONE, null, null, battle, null, null, null);
+                    }, PlayerSnapshots.NONE, PlayerLocations.NONE, TeamFollow.NONE,
+                    CrossNodeSwitch.DISABLED, SceneInstances.DISABLED, battle);
             battle.attach(world);
             Scene scene = world.createScene(1);
             repo.putNewPlayer(1001L, 1L);
