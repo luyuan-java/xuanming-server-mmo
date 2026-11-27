@@ -3117,18 +3117,21 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 
 > 2026-11-26 核对结论（架构不适用）：Java 无 `player_locator` 服务与 `LeaseMonitor`（零引用 `PlayerLeaseExpiredEvent`）；`PlayerLocationDirectory` 的 30s 断线租约仅靠 Redis TTL 静默过期不踢 gate；场景向 gate 发出的唯一归属踢线 `PlayerKicked` 在 `ClientDispatcher.onPlayerKicked` 已按 `(sceneNodeId, sceneLinkGen, scenePlayerId, sceneOwnerEpoch)` 四重校验，不会误踢回绕后的新连接。
 
-### 2026-11-26 数据覆写审计 r2 第 4 轮九条、人工终结见证、修复身份(主仓已落码未编译,Java 待做 / 不适用)
+### 2026-11-26 数据覆写审计 r2 第 4 轮九条、人工终结见证、修复身份（已对齐 / 不适用）
 
-主仓 `docs/handoff/data-overwrite-audit-r2-round4-handoff-20261126.md` §6.1、`docs/handoff/review-suggestions-remaining-handoff-20261126.md` §2~§5。下面每条都按 Java 源码 grep 核过。本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+主仓 `docs/handoff/data-overwrite-audit-r2-round4-handoff-20261126.md` §6.1、`docs/handoff/review-suggestions-remaining-handoff-20261126.md` §2~§5。
 
-**Java 待做**:
+1. **技能书架上限（`r2-craft#2`）**：`game-scene` 的 `SkillCraftService.craftSkillBook` 在代工摊位校验、扣费与扣材前新增 `MAX_SKILL_BOOKSHELF_SIZE = 100` 上限校验，满 100 本直接拒绝并返回共享 tip `kSkillBookshelfFull`（7036）。
+2. **名匠口碑离线回账（`r2-craft#4`）**：`CraftProxyStallDirectory.drainPendingReputation` 已改用 Redis 单飞原子 Lua `HMGET + HDEL` 取走并仅按实际取走数额入账，宗师离场/冻结或存盘失败原样还回。
+3. **帮会资产人工终结工具的三列见证与观察窗口**：`guild_tables.proto` 补齐 `last_send_ms = 29`（`GuildTablesTest` 与 `GuildAssetOpRecord` 逐字节全量一致，移除排除项）；`AssetOpColumns` 插行维护 `last_send_ms = max(last_send_ms, created_ms)`，`JdbcGuildAssetStore` 在 `CLAIM` 折入旧租约、非本地 `RESCHEDULE` / `RESCHEDULE_WITHOUT_ANSWER` 推进 `last_send_ms`，新增 `QuietWitness` 与 `resolveManuallyIfQuiet`（`WHERE op_id = ? AND status = ? AND lease_until_ms = ? AND last_send_ms = ? AND attempts = ?`）；`AssetOpFixMain` 判 `aborted`（从未应用）前在本机单调时钟（`System.nanoTime()`）等满 `max(1 分钟, 2 × 租约)` 观察窗口后重读行，跨窗口只比租约与发送时刻，条件写使用第二次读到的三列见证（注：从已提交玩家资产账本自动判别证据仍留于 2026-11-06 遗留修复条目）。
+4. **商城人工单处置整块（`jubaozhai-market.md` §16.1）**：`game-mall` 新增 `ManualAdminApi`、`ManualAdminStore` 并在 `CatalogAdminController` / `MallAuthentication` 开放 `/internal/admin/manual/{list,orders/resolve,refunds/resolve,consignments/resolve}`（连同已有 `/internal/admin/manual/incomes/dispute`），全链路按 `commerce_admin_command` 幂等与固定锁序落库；寄售人工单严禁在绑定付款仍为 `PAID` 时执行 `RETURN_TO_SELLER`，新增 `RETRY_DELIVERY` 清 `MANUAL` 交付回执并将待办置回 `PENDING` 交由 trade 重新回执，仅付款已 `REVOKED` 且无卖家收入时放行 `RETURN_TO_SELLER`，并支持 `UNFREEZE_INCOME` / `FORFEIT_INCOME` 与官方订单/退款人工处置。
 
-1. **技能书架上限(r2-craft#2)**:`game-scene` 的 `SkillCraftService` 制书 `addSkillBooks` 之前没有条数上限。按主仓口径在制书入口判 100 本,回共享 tip `kSkillBookshelfFull`(主仓 Tip.xlsx `//skill_error` 段末新码,导表后两版共用)。Java 没有封卷和悬赏,只这一处。
-2. **名匠口碑离线回账(r2-craft#4)**:`CraftProxyStallDirectory.drainPendingReputation` 照镜像数额入账、再发 `HINCRBY` 负值,跨节点陈旧镜像会重复回账。改成 Lua 原子取走(HMGET + HDEL)、只认取走到的数额入账,宗师离开或存盘失败时原样还回(主仓 `docs/design/craft-proxy-reputation-digest-and-hot-ranking.md` §2.5)。
-3. **帮会资产人工终结工具的见证**:`game-guild` 的 `AssetOpFixMain` 仍是主仓 11-06 之前的口径(凭流水判、只比 status),本文件已登记「改用已提交账本作证据……终结时以 CAS 复核」一条。做那一条时按主仓 11-26 的口径:见证是租约、最后一次发送时刻与 attempts 三列;判「从未应用」时先在本机单调时钟上等 max(1 分钟, 2×租约) 的观察窗口,再读行与账本,跨窗口只比租约与发送时刻,条件写用第二次读到的见证(主仓 `docs/design/data-consistency-guarantee-map-20261020.md` §6.2 第 2 条补记)。
-4. **商城人工单处置整块**:主仓 11-21 在 `java/mall_game` 补了官方商城与人民币寄售的人工处置(`ManualAdminApi` / `ManualAdminStore`,11-26 又改了寄售:付款仍 PAID 不许退还托管,新增 RETRY_DELIVERY 由交易服重新回执,主仓 `docs/design/jubaozhai-market.md` §16.1)。Java 版 `game-mall` 没有这块,寄售转人工之后没有任何出口(卡住,但不会被错误终结)。实现时按主仓 §16.1 的口径。
+**验证**：
+- `game-scene`：`EquipQualityAndSkillCraftTest` **12/12 PASS**（含书架 100 本上限与 `kSkillBookshelfFull`、离线口碑 Lua 原子取走与回滚）；
+- `game-guild`：`GuildTablesTest` + `EconomyStoreUnitTest` + `JdbcGuildAssetStoreUnitTest` + `AssetOpFixMainTest` + `GuildWarCreditOwedAndPurgeTest` + `GuildWarServiceTest` = **49/49 PASS**；
+- `game-mall`：`ManualAdminStoreTest` + `CatalogAdminHttpTest` + `RmbConsignmentStoreTest`（22/22，全模块 89/89 仅 11 项条件跳过真 TiDB）**100% PASS**。
 
-**不适用**:r2-mall#1 的缺陷本身(Java 没有人工处置入口);r2-craft#1、#3(Java 没有悬赏求书;`game-mail` 不物理删邮件行);r2-ops#1(Java 没有表包回滚工具,按热更设计 §14 复用主仓工具);r2-ops#2(Java 的存盘是进程内调用,不走 Dubbo,热关停拦不到);r2-oa#1(Java 没有这套归属权威);r2-jh#3(Java 的去重集合本来就独立于展示列表);snowflake LegacyPrefix 整删(Java 没有 etcd 槽位申领);dbmove 修复身份核对与迁移提醒(主仓工具,Java 复用)。
+**不适用**：`r2-mall#1` 的历史缺陷本身；`r2-craft#1/#3`（悬赏求书另见 2026-11-27 独立条目，`game-mail` 不物理删行）；`r2-ops#1/#2`、`r2-oa#1`、`r2-jh#3`、`snowflake LegacyPrefix`、`dbmove`（主仓复用工具）。
 
 ### 2026-11-26 《论剑 / 人宠会武》V6/V7 生产级强一致性与水平扩展加固（主仓已落码，Java 待做 TODO）
 
