@@ -271,6 +271,47 @@ class PlayerRenameAndPetGuardTest {
         assertThat(player.pets().find(petId).name()).isEqualTo("白泽一号");
     }
 
+    @Test
+    void 生产模式未配内容安全门禁必须failClosed_未指定裁决按服务不可用处理() throws Exception {
+        assertThat(com.game.scene.SceneNodeConfiguration.resolveTextGuard(null, RunMode.DEV)).isNull();
+        SceneTextGuard prodGuard = com.game.scene.SceneNodeConfiguration.resolveTextGuard(null, RunMode.PROD);
+        assertThat(prodGuard).isNotNull();
+
+        int renameId = Contracts.REGISTRY.requireId("SceneClientPlayerCommon", "RenamePlayer");
+        int notifyId = Contracts.REGISTRY.requireId("SceneClientPlayerCommon", "NotifyPlayerRenamed");
+        int renamePetId = Contracts.REGISTRY.requireId("ScenePetClientPlayer", "RenamePet");
+        PlayerRenameTables.Rule rule = renameTables.rule();
+        assertThat(bags.addItems(player, BagType.INVENTORY,
+                Map.of(rule.renameItemId(), rule.renameItemCount()), Reason.GM_GRANT, 0, "").tip()).isZero();
+        assertThat(currency.add(player, Wallet.GOLD, 1_000_000L, Reason.GM_GRANT).ok()).isTrue();
+        long petId = petService.grant(player, 1).petId();
+        assertThat(petId).isNotZero();
+
+        // 1. PROD 未配置 content-guard：角色改名与宝宝改名均 fail-closed 退回不可用且退卡
+        guardRef.set(prodGuard);
+        RenamePlayerResponse ack = sendRename(renameId, "生产改名");
+        assertThat(ack.getErrorMessage().getId()).isZero();
+        assertThat(lastNotify(notifyId).getErrorMessage().getId())
+                .isEqualTo(LoginErrorTip.login_error.kRoleNameCheckUnavailable_VALUE);
+        assertThat(player.bags().bag(BagType.INVENTORY).total(rule.renameItemId())).isEqualTo(rule.renameItemCount());
+
+        RenamePetResponse petFail = sendRenamePet(renamePetId, petId, "生产宠名");
+        assertThat(petFail.getErrorMessage().getId())
+                .isEqualTo(CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+
+        // 2. TEXT_VERDICT_UNSPECIFIED 按审核服务不可用处理（不误报敏感词）
+        guardRef.set((scene, pid, text) -> CheckTextResponse.newBuilder()
+                .setVerdict(TextVerdict.TEXT_VERDICT_UNSPECIFIED).build());
+        sendRename(renameId, "未知裁决名");
+        assertThat(lastNotify(notifyId).getErrorMessage().getId())
+                .isEqualTo(LoginErrorTip.login_error.kRoleNameCheckUnavailable_VALUE);
+        assertThat(player.bags().bag(BagType.INVENTORY).total(rule.renameItemId())).isEqualTo(rule.renameItemCount());
+
+        RenamePetResponse petUnspecified = sendRenamePet(renamePetId, petId, "未知裁决宠");
+        assertThat(petUnspecified.getErrorMessage().getId())
+                .isEqualTo(CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+    }
+
     private RenamePlayerResponse sendRename(int msgId, String name) throws Exception {
         sink.clear();
         handler.onClientForward(LINK, ClientForward.newBuilder()

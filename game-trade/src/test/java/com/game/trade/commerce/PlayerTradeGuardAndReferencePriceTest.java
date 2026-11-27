@@ -431,6 +431,63 @@ class PlayerTradeGuardAndReferencePriceTest {
         });
     }
 
+    @Test
+    void 好友关系SQL读取器校验双向边与无符号ID及建交时长() throws Exception {
+        long now = 1_760_000_000_000L;
+        long eightDaysAgo = now - 8L * PlayerTradeGuard.DAY_MS;
+        long threeDaysAgo = now - 3L * PlayerTradeGuard.DAY_MS;
+        long unsignedA = Long.parseUnsignedLong("18000000000000000001");
+        long unsignedB = Long.parseUnsignedLong("18000000000000000002");
+
+        // 1. 双向边齐全且满 8 天（两侧不一致时取较晚建交时刻的保守时长）
+        var mutual = new PlayerTradeGuard.SqlFriendRelationReader(friendQueryDataSource(List.of(
+                new Object[] {new java.math.BigInteger(Long.toUnsignedString(unsignedA)), eightDaysAgo},
+                new Object[] {new java.math.BigInteger(Long.toUnsignedString(unsignedB)), eightDaysAgo + 1_000L})));
+        var ok = mutual.friendshipDurationMs(unsignedA, unsignedB, now);
+        assertThat(ok.isFriend()).isTrue();
+        assertThat(ok.durationMs()).isEqualTo(8L * PlayerTradeGuard.DAY_MS - 1_000L);
+
+        // 2. 仅单边存在（半边脏数据）必须判非好友（fail-closed）
+        var halfEdge = new PlayerTradeGuard.SqlFriendRelationReader(friendQueryDataSource(List.<Object[]>of(
+                new Object[] {101L, eightDaysAgo})));
+        var half = halfEdge.friendshipDurationMs(101L, 202L, now);
+        assertThat(half.isFriend()).isFalse();
+        assertThat(half.durationMs()).isZero();
+
+        // 3. 建交不足 7 天或时钟倒流（now < since）按 0/实际时长拦截
+        var tooNew = new PlayerTradeGuard.SqlFriendRelationReader(friendQueryDataSource(List.of(
+                new Object[] {101L, threeDaysAgo},
+                new Object[] {202L, threeDaysAgo})));
+        var shortStatus = tooNew.friendshipDurationMs(101L, 202L, now);
+        assertThat(shortStatus.isFriend()).isTrue();
+        assertThat(shortStatus.durationMs()).isEqualTo(3L * PlayerTradeGuard.DAY_MS);
+
+        var skewed = new PlayerTradeGuard.SqlFriendRelationReader(friendQueryDataSource(List.of(
+                new Object[] {101L, now + 60_000L},
+                new Object[] {202L, now + 60_000L})));
+        assertThat(skewed.friendshipDurationMs(101L, 202L, now)).isEqualTo(new PlayerTradeGuard.FriendshipStatus(true, 0L));
+
+        // 4. 0 或同人直接拒认
+        assertThat(mutual.friendshipDurationMs(101L, 101L, now).isFriend()).isFalse();
+        assertThat(mutual.friendshipDurationMs(0L, 202L, now).isFriend()).isFalse();
+    }
+
+    private static DataSource friendQueryDataSource(List<Object[]> rows) {
+        return stubDataSource(sql -> {
+            assertThat(sql).contains("FROM friend");
+            int[] idx = {-1};
+            return (ResultSet) Proxy.newProxyInstance(
+                    ResultSet.class.getClassLoader(),
+                    new Class<?>[] {ResultSet.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "next" -> ++idx[0] < rows.size();
+                        case "getObject" -> rows.get(idx[0])[((Integer) args[0]) - 1];
+                        case "close" -> null;
+                        default -> throw new UnsupportedOperationException(method.getName());
+                    });
+        });
+    }
+
     private static DataSource fillQueryDataSource(List<Object[]> rows) {
         return stubDataSource(sql -> {
             int[] idx = {-1};

@@ -21,8 +21,10 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import com.game.discovery.RedisKeys;
 import org.apache.dubbo.config.annotation.DubboReference;
 import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
+import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.actuate.health.Health;
@@ -93,12 +95,26 @@ public class ContentGuardApplication {
 
     @Bean
     PlatformReviewer platformReviewer(ContentGuardProperties props, ObjectMapper json, HttpClient http,
-                                      ObjectProvider<PlatformReviewer.IdentityLookup> lookupProvider) {
-        return createPlatformReviewer(props, json, http, lookupProvider == null ? null : lookupProvider.getIfAvailable());
+                                      ObjectProvider<PlatformReviewer.IdentityLookup> lookupProvider,
+                                      ObjectProvider<RedissonClient> redisProvider,
+                                      ObjectProvider<RedisKeys> redisKeysProvider) {
+        RedissonClient redis = redisProvider == null ? null : redisProvider.getIfAvailable();
+        RedisKeys keys = redisKeysProvider == null ? null : redisKeysProvider.getIfAvailable();
+        DouyinAdapter.TokenStore douyinStore = (redis != null && keys != null)
+                ? DouyinAdapter.redisTokenStore(redis, keys.prefix() + "content_guard:platform_token:douyin", Clock.systemUTC())
+                : null;
+        return createPlatformReviewer(props, json, http,
+                lookupProvider == null ? null : lookupProvider.getIfAvailable(), douyinStore);
     }
 
     static PlatformReviewer createPlatformReviewer(ContentGuardProperties props, ObjectMapper json, HttpClient http,
                                                    PlatformReviewer.IdentityLookup identityLookup) {
+        return createPlatformReviewer(props, json, http, identityLookup, null);
+    }
+
+    static PlatformReviewer createPlatformReviewer(ContentGuardProperties props, ObjectMapper json, HttpClient http,
+                                                   PlatformReviewer.IdentityLookup identityLookup,
+                                                   DouyinAdapter.TokenStore douyinTokenStore) {
         ContentGuardProperties.PlatformProperties p = props.platform();
         // 半配凭据（只填 appId 或只填 appSecret）必须 fail-closed 拒启，杜绝生产静默降级跳过平台内容安全审核。
         if (p.wechatAppId().isBlank() != p.wechatAppSecret().isBlank()) {
@@ -113,7 +129,11 @@ public class ContentGuardApplication {
             adapters.add(new WeChatAdapter(p.wechatAppId(), p.wechatAppSecret(), p.wechatBaseUrl(), http, json, clock));
         }
         if (!p.douyinAppId().isBlank()) {
-            adapters.add(new DouyinAdapter(p.douyinAppId(), p.douyinAppSecret(), p.douyinBaseUrl(), http, json, clock));
+            DouyinAdapter douyin = new DouyinAdapter(p.douyinAppId(), p.douyinAppSecret(), p.douyinBaseUrl(), http, json, clock);
+            if (douyinTokenStore != null) {
+                douyin.withSharedToken(douyinTokenStore);
+            }
+            adapters.add(douyin);
         }
         if (!adapters.isEmpty() && identityLookup == null) {
             throw new IllegalStateException("已启用外部平台内容安全审核，必须装配玩家渠道身份查询（IdentityLookup）");

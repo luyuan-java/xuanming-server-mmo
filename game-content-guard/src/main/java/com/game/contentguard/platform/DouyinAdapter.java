@@ -20,18 +20,82 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import org.redisson.api.RScript;
+import org.redisson.api.RedissonClient;
+import org.redisson.client.codec.StringCodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 抖音小游戏内容安全适配器（antidirt，对齐 Go {@code platform/douyin.go}）。
- * 响应体限 64 KiB；HTTP 401 或业务码 401/40002/40020 时清 token 缓存并重试一次。
+ * 抖音小游戏内容安全适配器（antidirt，对齐 Go {@code platform/douyin.go} 与 {@code token_store.go}）。
+ * 响应体限 64 KiB；支持多副本经 {@link TokenStore} CAS 共享 access_token 防止互相顶掉；
+ * HTTP 401 或业务码 401/40002/40020 时标记旧凭据为 stale 并刷新重试一次。
  */
 public final class DouyinAdapter implements PlatformAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(DouyinAdapter.class);
     private static final String DEFAULT_BASE_URL = "https://developer.toutiao.com";
     private static final Duration REFRESH_MARGIN = Duration.ofMinutes(5);
+    private static final String REDIS_CAS_LUA =
+            "local cur = redis.call('GET', KEYS[1]) "
+                    + "if (not cur and ARGV[1] == '') or cur == ARGV[1] then "
+                    + "redis.call('SET', KEYS[1], ARGV[2], 'PX', tonumber(ARGV[3])) "
+                    + "return 1 end return 0";
+
+    /** 多副本共享平台调用凭据存储（对齐 Go {@code platform.TokenStore}；读写异常不阻断审核，降级为本副本直取）。 */
+    public interface TokenStore {
+        /** @param version 用于 CAS 写回比对的当前版本串（键不存在时为空串）。 */
+        record Snapshot(String token, Instant expiresAt, String version) {
+            public static final Snapshot EMPTY = new Snapshot("", Instant.EPOCH, "");
+        }
+
+        Snapshot load() throws Exception;
+
+        boolean compareAndStore(String expectedVersion, String token, Instant expiresAt) throws Exception;
+    }
+
+    /** 基于 Redis 单键 Lua CAS 的多副本共享凭据存储（只存 token 与过期时间戳，AppSecret 不进 Redis）。 */
+    public static TokenStore redisTokenStore(RedissonClient redis, String key, Clock clock) {
+        Objects.requireNonNull(redis, "redis");
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(clock, "clock");
+        return new TokenStore() {
+            @Override
+            public Snapshot load() {
+                String raw = redis.<String>getBucket(key, StringCodec.INSTANCE).get();
+                if (raw == null || raw.isEmpty()) {
+                    return Snapshot.EMPTY;
+                }
+                int sep = raw.indexOf('\n');
+                if (sep <= 0 || sep >= raw.length() - 1) {
+                    // 损坏值带原 raw 作版本号，允许下一次刷新原子覆盖。
+                    return new Snapshot("", Instant.EPOCH, raw);
+                }
+                try {
+                    long expMs = Long.parseLong(raw.substring(0, sep));
+                    String tok = raw.substring(sep + 1);
+                    return new Snapshot(tok, Instant.ofEpochMilli(expMs), raw);
+                } catch (NumberFormatException bad) {
+                    return new Snapshot("", Instant.EPOCH, raw);
+                }
+            }
+
+            @Override
+            public boolean compareAndStore(String expectedVersion, String token, Instant expiresAt) {
+                long ttlMs = Math.max(60_000L, expiresAt.toEpochMilli() - clock.millis());
+                String nextRaw = expiresAt.toEpochMilli() + "\n" + token;
+                Long ok = redis.getScript(StringCodec.INSTANCE).eval(
+                        RScript.Mode.READ_WRITE,
+                        REDIS_CAS_LUA,
+                        RScript.ReturnType.INTEGER,
+                        List.of(key),
+                        expectedVersion == null ? "" : expectedVersion,
+                        nextRaw,
+                        Long.toString(ttlMs));
+                return ok != null && ok == 1L;
+            }
+        };
+    }
 
     private final String appId;
     private final String appSecret;
@@ -39,10 +103,12 @@ public final class DouyinAdapter implements PlatformAdapter {
     private final HttpClient httpClient;
     private final ObjectMapper json;
     private final Clock clock;
+    private volatile TokenStore sharedStore;
 
     private final Object tokenLock = new Object();
     private String cachedToken = "";
     private Instant tokenExpiresAt = Instant.EPOCH;
+    private String staleToken = "";
     private CompletableFuture<String> inFlightRefresh;
 
     public DouyinAdapter(String appId, String appSecret, String baseUrl, HttpClient httpClient, ObjectMapper json, Clock clock) {
@@ -52,6 +118,12 @@ public final class DouyinAdapter implements PlatformAdapter {
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.json = Objects.requireNonNull(json, "json");
         this.clock = Objects.requireNonNull(clock, "clock");
+    }
+
+    /** 装配多副本共享凭据存储（null 表示退回单副本本地缓存）。 */
+    public DouyinAdapter withSharedToken(TokenStore shared) {
+        this.sharedStore = shared;
+        return this;
     }
 
     @Override
@@ -77,7 +149,7 @@ public final class DouyinAdapter implements PlatformAdapter {
                 log.error("[content_guard/douyin] token fetch interrupted");
                 return ReviewResult.unavailable(PROVIDER_DOUYIN);
             } catch (Exception e) {
-                log.error("[content_guard/douyin] token fetch failed: {}", e.getMessage());
+                log.error("[content_guard/douyin] token fetch failed: {}", WeChatAdapter.sanitizeError(e));
                 return ReviewResult.unavailable(PROVIDER_DOUYIN);
             }
             try {
@@ -123,7 +195,7 @@ public final class DouyinAdapter implements PlatformAdapter {
                 Thread.currentThread().interrupt();
                 return ReviewResult.unavailable(PROVIDER_DOUYIN);
             } catch (Exception e) {
-                log.error("[content_guard/douyin] antidirt request failed: {}", e.getMessage());
+                log.error("[content_guard/douyin] antidirt request failed: {}", WeChatAdapter.sanitizeError(e));
                 return ReviewResult.unavailable(PROVIDER_DOUYIN);
             }
         }
@@ -134,10 +206,12 @@ public final class DouyinAdapter implements PlatformAdapter {
         Instant now = clock.instant();
         CompletableFuture<String> mine = null;
         CompletableFuture<String> existing;
+        String stale;
         synchronized (tokenLock) {
             if (!cachedToken.isEmpty() && now.plus(REFRESH_MARGIN).isBefore(tokenExpiresAt)) {
                 return cachedToken;
             }
+            stale = staleToken;
             existing = inFlightRefresh;
             if (existing == null) {
                 mine = new CompletableFuture<>();
@@ -154,6 +228,25 @@ public final class DouyinAdapter implements PlatformAdapter {
             }
         }
         try {
+            TokenStore shared = this.sharedStore;
+            String expectedVersion = "";
+            boolean sharedActive = shared != null;
+            if (sharedActive) {
+                try {
+                    TokenStore.Snapshot snap = shared.load();
+                    if (isUsable(snap, stale)) {
+                        remember(snap.token(), snap.expiresAt(), mine);
+                        mine.complete(snap.token());
+                        return snap.token();
+                    }
+                    expectedVersion = snap == null ? "" : snap.version();
+                } catch (Exception e) {
+                    log.warn("[content_guard/douyin] shared token read failed, falling back to local fetch: {}",
+                            WeChatAdapter.sanitizeError(e));
+                    sharedActive = false;
+                }
+            }
+
             byte[] payload = json.writeValueAsBytes(Map.of(
                     "appid", appId,
                     "secret", appSecret,
@@ -178,13 +271,24 @@ public final class DouyinAdapter implements PlatformAdapter {
             if (ttl.compareTo(REFRESH_MARGIN) <= 0) {
                 ttl = REFRESH_MARGIN.plusMinutes(1);
             }
-            synchronized (tokenLock) {
-                cachedToken = token;
-                tokenExpiresAt = clock.instant().plus(ttl);
-                if (inFlightRefresh == mine) {
-                    inFlightRefresh = null;
+            Instant expiresAt = clock.instant().plus(ttl);
+            if (sharedActive) {
+                try {
+                    boolean stored = shared.compareAndStore(expectedVersion, token, expiresAt);
+                    if (!stored) {
+                        // 别的副本抢先写回：尽量改用对方写入的新凭据，全集群收敛到同一份。
+                        TokenStore.Snapshot winner = shared.load();
+                        if (isUsable(winner, stale)) {
+                            token = winner.token();
+                            expiresAt = winner.expiresAt();
+                        }
+                    }
+                } catch (Exception e) {
+                    log.warn("[content_guard/douyin] shared token write failed, using local token: {}",
+                            WeChatAdapter.sanitizeError(e));
                 }
             }
+            remember(token, expiresAt, mine);
             mine.complete(token);
             return token;
         } catch (Throwable t) {
@@ -204,8 +308,28 @@ public final class DouyinAdapter implements PlatformAdapter {
         }
     }
 
+    private boolean isUsable(TokenStore.Snapshot snap, String stale) {
+        return snap != null
+                && snap.token() != null
+                && !snap.token().isEmpty()
+                && !snap.token().equals(stale)
+                && snap.expiresAt() != null
+                && clock.instant().plus(REFRESH_MARGIN).isBefore(snap.expiresAt());
+    }
+
+    private void remember(String token, Instant expiresAt, CompletableFuture<String> mine) {
+        synchronized (tokenLock) {
+            cachedToken = token;
+            tokenExpiresAt = expiresAt;
+            if (inFlightRefresh == mine) {
+                inFlightRefresh = null;
+            }
+        }
+    }
+
     private void invalidateToken(String stale) {
         synchronized (tokenLock) {
+            staleToken = stale == null ? "" : stale;
             if (cachedToken.equals(stale)) {
                 cachedToken = "";
                 tokenExpiresAt = Instant.EPOCH;

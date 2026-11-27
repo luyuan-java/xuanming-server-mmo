@@ -210,7 +210,7 @@ public final class PetFeature implements SceneFeature {
                                 deferred.cancel();
                                 return;
                             }
-                            if (finalResp == null) {
+                            if (finalResp == null || finalResp.getVerdict() == TextVerdict.TEXT_VERDICT_UNSPECIFIED) {
                                 deferred.reply(RenamePetResponse.newBuilder().setErrorMessage(tip(PetService.SERVICE_UNAVAILABLE)).build());
                                 return;
                             }

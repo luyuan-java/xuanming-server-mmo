@@ -234,6 +234,86 @@ final class PlatformReviewerTest {
         assertEquals(2, wxCheckCalls.get(), "App 渠道与未知 wx_ 前缀不得调用小游戏接口");
     }
 
+    @Test
+    void douyinSharesTokenAcrossReplicasHandlesCasConflictStale401AndStoreFailure() {
+        var mem = new java.util.concurrent.atomic.AtomicReference<>(DouyinAdapter.TokenStore.Snapshot.EMPTY);
+        DouyinAdapter.TokenStore shared = new DouyinAdapter.TokenStore() {
+            @Override
+            public Snapshot load() {
+                return mem.get();
+            }
+
+            @Override
+            public boolean compareAndStore(String expectedVersion, String token, java.time.Instant expiresAt) {
+                Snapshot cur = mem.get();
+                if (!cur.version().equals(expectedVersion == null ? "" : expectedVersion)) {
+                    return false;
+                }
+                String nextVer = "v" + (cur.version().length() + 1) + ":" + token;
+                return mem.compareAndSet(cur, new Snapshot(token, expiresAt, nextVer));
+            }
+        };
+
+        DouyinAdapter replica1 = new DouyinAdapter("dyApp", "dySec", baseUrl, http, json, Clock.systemUTC())
+                .withSharedToken(shared);
+        DouyinAdapter replica2 = new DouyinAdapter("dyApp", "dySec", baseUrl, http, json, Clock.systemUTC())
+                .withSharedToken(shared);
+
+        // 1. 副本 1 拉取后写入共享存储，副本 2 直接复用，不再重复打 /api/apps/v2/token
+        assertEquals(Outcome.PASS, replica1.check(TextScene.TEXT_SCENE_GUILD_NAME, "", "正常帮名", Duration.ofSeconds(2)).outcome());
+        assertEquals(Outcome.PASS, replica2.check(TextScene.TEXT_SCENE_GUILD_NAME, "", "正常帮名", Duration.ofSeconds(2)).outcome());
+        assertEquals(1, dyTokenCalls.get(), "两副本共享 TokenStore 只应拉取一次凭据");
+
+        // 2. 401 使旧凭据失效时标记 stale，不再从共享存储把同一份失效凭据读回来
+        dyCheckCalls.set(0);
+        dyExpireFirstCheck = true;
+        assertEquals(Outcome.PASS, replica1.check(TextScene.TEXT_SCENE_GUILD_NAME, "", "刷新重审", Duration.ofSeconds(2)).outcome());
+        assertEquals(2, dyTokenCalls.get(), "401 后必须跳过共享库里的 stale 凭据并向平台刷新");
+        assertEquals("dy_tok_2", mem.get().token());
+
+        // 3. CAS 冲突时自动采纳先写胜出副本的凭据
+        DouyinAdapter.TokenStore conflictStore = new DouyinAdapter.TokenStore() {
+            int loads;
+            @Override
+            public Snapshot load() {
+                if (++loads == 1) {
+                    return Snapshot.EMPTY;
+                }
+                return new Snapshot("winner_tok", Clock.systemUTC().instant().plus(Duration.ofHours(1)), "v-win");
+            }
+
+            @Override
+            public boolean compareAndStore(String expectedVersion, String token, java.time.Instant expiresAt) {
+                return false;
+            }
+        };
+        dyExpireFirstCheck = false;
+        DouyinAdapter conflictReplica = new DouyinAdapter("dyApp", "dySec", baseUrl, http, json, Clock.systemUTC())
+                .withSharedToken(conflictStore);
+        assertEquals(Outcome.PASS, conflictReplica.check(TextScene.TEXT_SCENE_GUILD_NAME, "", "CAS收敛", Duration.ofSeconds(2)).outcome());
+        assertEquals(3, dyTokenCalls.get());
+        // 下一次直接命中本地缓存（采纳的 winner_tok），不再重取
+        assertEquals(Outcome.PASS, conflictReplica.check(TextScene.TEXT_SCENE_GUILD_NAME, "", "CAS复用", Duration.ofSeconds(2)).outcome());
+        assertEquals(3, dyTokenCalls.get());
+
+        // 4. 共享存储异常不得阻断审核，降级为本地直取
+        DouyinAdapter.TokenStore brokenStore = new DouyinAdapter.TokenStore() {
+            @Override
+            public Snapshot load() {
+                throw new RuntimeException("redis down");
+            }
+
+            @Override
+            public boolean compareAndStore(String expectedVersion, String token, java.time.Instant expiresAt) {
+                throw new RuntimeException("redis down");
+            }
+        };
+        DouyinAdapter fallbackReplica = new DouyinAdapter("dyApp", "dySec", baseUrl, http, json, Clock.systemUTC())
+                .withSharedToken(brokenStore);
+        assertEquals(Outcome.PASS, fallbackReplica.check(TextScene.TEXT_SCENE_GUILD_NAME, "", "降级直取", Duration.ofSeconds(2)).outcome());
+        assertEquals(4, dyTokenCalls.get());
+    }
+
     private static void respondJson(HttpExchange ex, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().add("Content-Type", "application/json");

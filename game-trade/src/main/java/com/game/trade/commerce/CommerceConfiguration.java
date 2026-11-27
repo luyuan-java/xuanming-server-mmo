@@ -47,6 +47,10 @@ public class CommerceConfiguration {
         return new ReferencePrice.SqlReader(source);
     }
     @Bean
+    public PlayerTradeGuard.FriendRelationReader tradeFriendRelationReader(DataSource source) {
+        return new PlayerTradeGuard.SqlFriendRelationReader(source);
+    }
+    @Bean
     public SellerCreditService sellerCreditService(
             DataSource source, ListingIds ids, SellerCreditService.RoleOwnershipLookup ownership,
             CommerceProperties p, com.fasterxml.jackson.databind.ObjectMapper json, SchemaReady ready) {

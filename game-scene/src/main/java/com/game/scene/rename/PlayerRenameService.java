@@ -155,7 +155,7 @@ public final class PlayerRenameService {
             }
             return;
         }
-        if (resp == null) {
+        if (resp == null || resp.getVerdict() == TextVerdict.TEXT_VERDICT_UNSPECIFIED) {
             current.setRenameInFlight(false);
             refundRenameCard(current, rule.renameItemId(), boundDeducted, tradableDeducted);
             pushFailure(world, current, ROLE_NAME_CHECK_UNAVAILABLE, 0);

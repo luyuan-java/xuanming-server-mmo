@@ -386,4 +386,79 @@ public final class PlayerTradeGuard {
             return total;
         }
     }
+
+    /**
+     * 直查权威 {@code friend} 表校验两名角色的双向系统好友边与最短建交时长（对齐 friend_tables.proto 双向边不变式）。
+     * 任一侧缺边、{@code since_ms==0} 或时钟回拨均按非好友 / 0 时长处理（fail-closed）。
+     */
+    public static final class SqlFriendRelationReader implements FriendRelationReader {
+        private static final String QUERY =
+                "SELECT player_id, since_ms FROM friend "
+                        + "WHERE (player_id=? AND friend_player_id=?) OR (player_id=? AND friend_player_id=?)";
+
+        private final DataSource source;
+
+        public SqlFriendRelationReader(DataSource source) {
+            this.source = Objects.requireNonNull(source, "好友关系数据源未装配");
+        }
+
+        @Override
+        public FriendshipStatus friendshipDurationMs(long playerA, long playerB, long nowMs) throws SQLException {
+            if (playerA == 0L || playerB == 0L || playerA == playerB) {
+                return new FriendshipStatus(false, 0L);
+            }
+            Object aObj = toUnsignedParam(playerA);
+            Object bObj = toUnsignedParam(playerB);
+            boolean hasAB = false;
+            boolean hasBA = false;
+            long sinceAB = 0L;
+            long sinceBA = 0L;
+            try (Connection c = source.getConnection(); var stmt = c.prepareStatement(QUERY)) {
+                stmt.setQueryTimeout(2);
+                stmt.setObject(1, aObj);
+                stmt.setObject(2, bObj);
+                stmt.setObject(3, bObj);
+                stmt.setObject(4, aObj);
+                try (var rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        long pid = readUnsignedLong(rs.getObject(1));
+                        long since = readUnsignedLong(rs.getObject(2));
+                        if (pid == playerA) {
+                            hasAB = true;
+                            sinceAB = since;
+                        } else if (pid == playerB) {
+                            hasBA = true;
+                            sinceBA = since;
+                        }
+                    }
+                }
+            }
+            if (!hasAB || !hasBA) {
+                return new FriendshipStatus(false, 0L);
+            }
+            // 取两侧较晚的建交时刻作为保守口径，防止残缺脏数据抬高好友时长。
+            long since = Long.compareUnsigned(sinceAB, sinceBA) >= 0 ? sinceAB : sinceBA;
+            if (since == 0L || Long.compareUnsigned(nowMs, since) <= 0) {
+                return new FriendshipStatus(true, 0L);
+            }
+            return new FriendshipStatus(true, nowMs - since);
+        }
+
+        private static Object toUnsignedParam(long value) {
+            return value < 0L ? new BigInteger(Long.toUnsignedString(value)) : value;
+        }
+
+        private static long readUnsignedLong(Object raw) {
+            if (raw == null) {
+                return 0L;
+            }
+            if (raw instanceof BigInteger bi) {
+                return bi.longValue();
+            }
+            if (raw instanceof Number n) {
+                return n.longValue();
+            }
+            return Long.parseUnsignedLong(raw.toString().trim());
+        }
+    }
 }

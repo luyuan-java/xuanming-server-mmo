@@ -250,7 +250,7 @@ public final class WeChatAdapter implements PlatformAdapter {
         }
     }
 
-    private static String sanitizeError(Throwable e) {
+    static String sanitizeError(Throwable e) {
         String msg = e.getMessage();
         if (msg == null || msg.isBlank()) {
             return e.getClass().getSimpleName();

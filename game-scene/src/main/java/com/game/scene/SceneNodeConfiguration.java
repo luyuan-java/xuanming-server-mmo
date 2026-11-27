@@ -323,6 +323,17 @@ public class SceneNodeConfiguration {
         return battleTables;
     }
 
+    /** 生产模式下未开启 content-guard 时必须 fail-closed（走异常退化为审核不可用），禁止静默跳过角色/宝宝改名审核。 */
+    public static SceneTextGuard resolveTextGuard(SceneTextGuard configured, RunMode runMode) {
+        if (configured != null || runMode != RunMode.PROD) {
+            return configured;
+        }
+        log.warn("[scene] prod 模式下未启用 game.scene.content-guard-enabled，角色改名与宝宝改名内容审核将 fail-closed 拒收");
+        return (scene, playerId, text) -> {
+            throw new IllegalStateException("content guard disabled in prod");
+        };
+    }
+
     @Bean
     public SceneNode sceneNode(SceneNodeProperties props, RedissonClient redis, RedisKeys redisKeys, PlayerStore playerStore, PlayerTradeStore playerTrades,
                                MessageIdRegistry registry, SceneTables tables, AttributeTables attributeTables,
@@ -347,7 +358,8 @@ public class SceneNodeConfiguration {
                                SceneBattleTables sceneBattleTables, SceneBattleMetrics sceneBattleMetrics,javax.sql.DataSource source,
                                com.game.common.sql.WriterAuthority boot,
                                EvacuationProperties evacuation, GmShutdownController.ProcessExit processExit) {
-        if (audit.enabled()) audit.validateFor(RunMode.parse(props.runMode()));
+        RunMode runMode = RunMode.parse(props.runMode());
+        if (audit.enabled()) audit.validateFor(runMode);
         return new SceneNode(props, redis, redisKeys, playerStore, playerTrades, registry, tables, attributeTables, bagTables, missionTables,
                 skillTables, petTables, nodeLinkAuth, sceneMetrics, audit, kafkaNames, sceneBattleTables, sceneBattleMetrics,
                 source, evacuation, processExit::exitSoon)
@@ -365,7 +377,7 @@ public class SceneNodeConfiguration {
                 .withBattleProgressionTables(battleProgressionTables)
                 .withMatchActivityStarter(matchActivityStarter.getIfAvailable())
                 .withMailOutboxSender(mailOutboxSender.getIfAvailable())
-                .withTextGuard(textGuard.getIfAvailable())
+                .withTextGuard(resolveTextGuard(textGuard.getIfAvailable(), runMode))
                 .withMaintenanceBoot(boot);
     }
 
