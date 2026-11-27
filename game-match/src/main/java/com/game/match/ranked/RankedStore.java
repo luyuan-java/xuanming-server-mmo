@@ -49,6 +49,16 @@ import javax.sql.DataSource;
 public final class RankedStore {
 
     private static final long MILLIS_PER_DAY = 86_400_000L;
+    private static final long FEATURED_CACHE_TTL_MS = 5_000L;
+
+    private record FeaturedCacheKey(int seasonId, int limit) {
+    }
+
+    private record FeaturedCacheEntry(long loadedAtMs, List<RankedFeaturedBuildView> builds) {
+    }
+
+    private final java.util.concurrent.ConcurrentHashMap<FeaturedCacheKey, FeaturedCacheEntry> featuredCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     public enum WriteStatus {
         OK, SEASON_SETTLING, PRESET_INVALID, RULE_VERSION_MISMATCH
@@ -116,7 +126,7 @@ public final class RankedStore {
                 history = readPlayerHistory(c, playerId, current.getSeasonId());
                 pastSeasons = readPastSeasons(c, current.getSeasonId());
             }
-            List<RankedFeaturedBuildView> featuredBuilds = readTopFeaturedBuilds(c, current.getSeasonId(), 5);
+            List<RankedFeaturedBuildView> featuredBuilds = readTopFeaturedBuildsCached(c, current.getSeasonId(), 5);
             List<RankedRivalrySummary> topRivals = readTopRivals(c, current.getSeasonId(), playerId, 8);
             return new ProfileData(current, progress, prefs, rewards, history, pastSeasons, featuredBuilds, topRivals);
         }
@@ -259,7 +269,7 @@ public final class RankedStore {
                     c.rollback();
                     return new PrefsWriteResult(WriteStatus.SEASON_SETTLING, null, currentRuleVer);
                 }
-                MatchRankedPlayerPrefsRow existing = readPrefs(c, playerId).orElseGet(() -> defaultPrefs(playerId));
+                MatchRankedPlayerPrefsRow existing = readPrefsForUpdate(c, playerId).orElseGet(() -> defaultPrefs(playerId));
                 long now = clockMs.getAsLong();
                 MatchRankedPlayerPrefsRow updated = existing.toBuilder()
                         .setPlayerId(playerId)
@@ -294,7 +304,7 @@ public final class RankedStore {
                     c.rollback();
                     return new PrefsWriteResult(WriteStatus.PRESET_INVALID, null, tables.ruleVersion());
                 }
-                MatchRankedPlayerPrefsRow existing = readPrefs(c, playerId).orElseGet(() -> defaultPrefs(playerId));
+                MatchRankedPlayerPrefsRow existing = readPrefsForUpdate(c, playerId).orElseGet(() -> defaultPrefs(playerId));
                 long now = clockMs.getAsLong();
                 MatchRankedPlayerPrefsRow updated = existing.toBuilder()
                         .setPlayerId(playerId)
@@ -332,7 +342,7 @@ public final class RankedStore {
                 int seasonId = season.getSeasonId();
                 long now = clockMs.getAsLong();
                 long carryRating = readCarryOverRating(c, in.playerId());
-                MatchRankedPlayerSeasonRow prev = readPlayerSeason(c, seasonId, in.playerId())
+                MatchRankedPlayerSeasonRow prev = readPlayerSeasonForUpdate(c, seasonId, in.playerId())
                         .orElseGet(() -> defaultProgress(seasonId, in.playerId(), carryRating));
 
                 long beforeRating = prev.getRatingCenti();
@@ -532,13 +542,16 @@ public final class RankedStore {
                     }
                 }
             }
-            pairs.sort(java.util.Comparator.<RivalryPair>comparingLong(RivalryPair::playerId)
-                    .thenComparingLong(RivalryPair::opponentId));
+            pairs.sort((a, b) -> {
+                int cmp = Long.compareUnsigned(a.playerId(), b.playerId());
+                return cmp != 0 ? cmp : Long.compareUnsigned(a.opponentId(), b.opponentId());
+            });
             for (RivalryPair pair : pairs) {
                 readRivalryRowForUpdate(c, seasonId, pair.playerId(), pair.opponentId())
                         .ifPresent(row -> priorRivalries.put(pair, row));
             }
         }
+        Map<String, FeaturedBuildMatchDelta> buildDeltas = new java.util.TreeMap<>();
         for (long playerId : sortedPlayers) {
             Optional<MatchRankedBattleRow> existing = readBattleRow(c, playerId, event.getBattleId());
             if (existing.isPresent()) {
@@ -754,8 +767,8 @@ public final class RankedStore {
                     revengedLossesAfter = selfSt.getRevengedLossesAfter();
                 }
                 if (!ctx.getUseFreePreset() && participated && selfSt != null) {
-                    upsertFeaturedBuild(c, seasonId, rule.getTierQingfengCenti(), event.getBattleId(),
-                            playerId, selfSt, afterRating, teamSize, event.getTotalRounds(), playerWon, nowMs);
+                    collectFeaturedBuildDelta(buildDeltas, rule.getTierQingfengCenti(),
+                            playerId, selfSt, afterRating, playerWon);
                 }
             }
             RankedTier tierAfter = tables.tierFor(afterRating, qualifiedAfter);
@@ -819,6 +832,9 @@ public final class RankedStore {
                     .setRevengedLossesAfter(revengedLossesAfter)
                     .build());
             views.put(playerId, view);
+        }
+        if (!buildDeltas.isEmpty()) {
+            applyFeaturedBuildDeltasTx(c, seasonId, event.getBattleId(), teamSize, event.getTotalRounds(), nowMs, buildDeltas);
         }
         long rankGen = season.getRankGeneration() != 0L ? season.getRankGeneration() : Integer.toUnsignedLong(seasonId);
         return new SeasonCommitResult(seasonId, season.getSeasonKey(), rankGen,
@@ -961,6 +977,7 @@ public final class RankedStore {
                             .setUpdatedMs(now)
                             .build());
                 }
+                releaseSeasonFeaturedReplaysTx(c, seasonId);
                 try (PreparedStatement upd = c.prepareStatement(
                         "UPDATE match_ranked_season SET state=?,champion_player_id=?,champion_name=?,champion_rating_centi=?,rank_board_sealed=1 WHERE season_id=?")) {
                     upd.setInt(1, RankedSeasonState.RANKED_SEASON_STATE_CLOSED_VALUE);
@@ -972,6 +989,7 @@ public final class RankedStore {
                 }
                 if (alreadyNext.isPresent()) {
                     c.commit();
+                    invalidateFeaturedCache(seasonId);
                     return alreadyNext.get();
                 }
                 RankedRuleTable rule = tables.rule();
@@ -1006,6 +1024,7 @@ public final class RankedStore {
                     ins.executeUpdate();
                 }
                 c.commit();
+                invalidateFeaturedCache(seasonId);
                 return nextSeason;
             } catch (Exception e) {
                 rollbackQuietly(c, e);
@@ -1266,9 +1285,17 @@ public final class RankedStore {
     }
 
     private Optional<MatchRankedPlayerPrefsRow> readPrefs(Connection c, long playerId) throws SQLException {
+        return readPrefsInternal(c, playerId, false);
+    }
+
+    private Optional<MatchRankedPlayerPrefsRow> readPrefsForUpdate(Connection c, long playerId) throws SQLException {
+        return readPrefsInternal(c, playerId, true);
+    }
+
+    private Optional<MatchRankedPlayerPrefsRow> readPrefsInternal(Connection c, long playerId, boolean forUpdate) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT player_id,character_preset_id,pet_preset_id,rule_version,equipped_talisman_code,equipped_avatar_pattern_code,equipped_card_bg_code,equipped_title_code,hide_talisman,updated_ms "
-                        + "FROM match_ranked_player_prefs WHERE player_id=?")) {
+                        + "FROM match_ranked_player_prefs WHERE player_id=?" + (forUpdate ? " FOR UPDATE" : ""))) {
             ps.setObject(1, PbMysql.uint64(playerId));
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
@@ -1291,12 +1318,13 @@ public final class RankedStore {
     }
 
     private void upsertPrefs(Connection c, MatchRankedPlayerPrefsRow row) throws SQLException {
-        try (PreparedStatement del = c.prepareStatement("DELETE FROM match_ranked_player_prefs WHERE player_id=?")) {
-            del.setObject(1, PbMysql.uint64(row.getPlayerId()));
-            del.executeUpdate();
-        }
         try (PreparedStatement ins = c.prepareStatement(
-                "INSERT INTO match_ranked_player_prefs(player_id,character_preset_id,pet_preset_id,rule_version,equipped_talisman_code,equipped_avatar_pattern_code,equipped_card_bg_code,equipped_title_code,hide_talisman,updated_ms) VALUES(?,?,?,?,?,?,?,?,?,?)")) {
+                "INSERT INTO match_ranked_player_prefs(player_id,character_preset_id,pet_preset_id,rule_version,equipped_talisman_code,equipped_avatar_pattern_code,equipped_card_bg_code,equipped_title_code,hide_talisman,updated_ms) "
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?) "
+                        + "ON DUPLICATE KEY UPDATE character_preset_id=VALUES(character_preset_id),pet_preset_id=VALUES(pet_preset_id),"
+                        + "rule_version=VALUES(rule_version),equipped_talisman_code=VALUES(equipped_talisman_code),"
+                        + "equipped_avatar_pattern_code=VALUES(equipped_avatar_pattern_code),equipped_card_bg_code=VALUES(equipped_card_bg_code),"
+                        + "equipped_title_code=VALUES(equipped_title_code),hide_talisman=VALUES(hide_talisman),updated_ms=VALUES(updated_ms)")) {
             ins.setObject(1, PbMysql.uint64(row.getPlayerId()));
             ins.setInt(2, row.getCharacterPresetId());
             ins.setInt(3, row.getPetPresetId());
@@ -1762,8 +1790,10 @@ public final class RankedStore {
                 appendRivalryEncounter(c, seasonId, b, a, out);
             }
         }
-        out.sort(java.util.Comparator.comparingLong(RankedRivalryEncounter::getPlayerId)
-                .thenComparingLong(RankedRivalryEncounter::getOpponentId));
+        out.sort((a, b) -> {
+            int cmp = Long.compareUnsigned(a.getPlayerId(), b.getPlayerId());
+            return cmp != 0 ? cmp : Long.compareUnsigned(a.getOpponentId(), b.getOpponentId());
+        });
         return out;
     }
 
@@ -1882,63 +1912,274 @@ public final class RankedStore {
         return out;
     }
 
-    private void upsertFeaturedBuild(Connection c, int seasonId, int tierQingfengCenti, long battleId,
-                                     long playerId, BattleSettlementData st, long afterRating,
-                                     int teamSize, int totalRounds, boolean playerWon, long nowMs) throws SQLException {
+    private static final class FeaturedBuildMatchDelta {
+        final String buildKey;
+        final int seasonSealId;
+        final int starterPetTableId;
+        final String coreSkillCsv;
+        int appearances;
+        int wins;
+        int highTierWins;
+        boolean hasWinner;
+        long bestWinnerPlayerId;
+        String bestWinnerName = "";
+        long bestWinnerRating;
+
+        FeaturedBuildMatchDelta(String buildKey, int seasonSealId, int starterPetTableId, String coreSkillCsv) {
+            this.buildKey = buildKey;
+            this.seasonSealId = seasonSealId;
+            this.starterPetTableId = starterPetTableId;
+            this.coreSkillCsv = coreSkillCsv;
+        }
+    }
+
+    private static void collectFeaturedBuildDelta(Map<String, FeaturedBuildMatchDelta> deltas,
+                                                  int tierQingfengCenti, long playerId,
+                                                  BattleSettlementData st, long afterRating, boolean playerWon) {
         CanonicalBuild cb = canonicalBuild(st.getFinalSeasonSealId(), st.getStarterPetTableId(), st.getCoreSkillIdsList());
         if (cb.buildKey().isEmpty()) {
             return;
         }
-        long highTierMin = tierQingfengCenti > 0 ? Integer.toUnsignedLong(tierQingfengCenti) : 152000L;
-        boolean highTierWin = playerWon && afterRating >= highTierMin;
-        MatchRankedFeaturedBuildRow existing = readFeaturedBuildRow(c, seasonId, cb.buildKey()).orElse(null);
-        MatchRankedFeaturedBuildRow.Builder b = existing != null
-                ? existing.toBuilder()
-                : MatchRankedFeaturedBuildRow.newBuilder()
-                        .setSeasonId(seasonId)
-                        .setBuildKey(cb.buildKey())
-                        .setSeasonSealId(st.getFinalSeasonSealId())
-                        .setStarterPetTableId(st.getStarterPetTableId())
-                        .setCoreSkillIds(cb.skillCsv());
-        b.setAppearances(b.getAppearances() + 1);
+        long highTierMin = tierQingfengCenti > 0 ? Integer.toUnsignedLong(tierQingfengCenti) : 152_000L;
+        FeaturedBuildMatchDelta d = deltas.computeIfAbsent(cb.buildKey(),
+                k -> new FeaturedBuildMatchDelta(k, st.getFinalSeasonSealId(), st.getStarterPetTableId(), cb.skillCsv()));
+        d.appearances++;
         if (playerWon) {
-            b.setWins(b.getWins() + 1);
-            if (highTierWin) {
-                b.setHighTierWins(b.getHighTierWins() + 1);
+            d.wins++;
+            if (afterRating >= highTierMin) {
+                d.highTierWins++;
             }
-            if (b.getFeaturedBattleId() == 0L || afterRating >= b.getFeaturedRatingCenti()) {
-                b.setFeaturedBattleId(battleId)
-                        .setFeaturedPlayerId(playerId)
-                        .setFeaturedPlayerName(st.getPlayerDisplayName())
-                        .setFeaturedRatingCenti(afterRating)
-                        .setFeaturedTeamSize(teamSize)
-                        .setFeaturedTotalRounds(totalRounds);
+            if (!d.hasWinner
+                    || afterRating > d.bestWinnerRating
+                    || (afterRating == d.bestWinnerRating && Long.compareUnsigned(playerId, d.bestWinnerPlayerId) < 0)) {
+                d.hasWinner = true;
+                d.bestWinnerPlayerId = playerId;
+                d.bestWinnerName = st.getPlayerDisplayName();
+                d.bestWinnerRating = afterRating;
             }
         }
-        b.setUpdatedMs(nowMs);
-        MatchRankedFeaturedBuildRow next = b.build();
-        try (PreparedStatement ins = c.prepareStatement(
-                "INSERT INTO match_ranked_featured_build(season_id,build_key,season_seal_id,starter_pet_table_id,core_skill_ids,appearances,wins,high_tier_wins,featured_battle_id,featured_player_id,featured_player_name,featured_rating_centi,featured_team_size,featured_total_rounds,updated_ms) "
-                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                        + "ON DUPLICATE KEY UPDATE appearances=VALUES(appearances),wins=VALUES(wins),high_tier_wins=VALUES(high_tier_wins),"
-                        + "featured_battle_id=VALUES(featured_battle_id),featured_player_id=VALUES(featured_player_id),featured_player_name=VALUES(featured_player_name),"
-                        + "featured_rating_centi=VALUES(featured_rating_centi),featured_team_size=VALUES(featured_team_size),featured_total_rounds=VALUES(featured_total_rounds),updated_ms=VALUES(updated_ms)")) {
-            ins.setInt(1, next.getSeasonId());
-            ins.setString(2, next.getBuildKey());
-            ins.setInt(3, next.getSeasonSealId());
-            ins.setInt(4, next.getStarterPetTableId());
-            ins.setString(5, next.getCoreSkillIds());
-            ins.setInt(6, next.getAppearances());
-            ins.setInt(7, next.getWins());
-            ins.setInt(8, next.getHighTierWins());
-            ins.setObject(9, PbMysql.uint64(next.getFeaturedBattleId()));
-            ins.setObject(10, PbMysql.uint64(next.getFeaturedPlayerId()));
-            ins.setString(11, next.getFeaturedPlayerName());
-            ins.setLong(12, next.getFeaturedRatingCenti());
-            ins.setInt(13, next.getFeaturedTeamSize());
-            ins.setInt(14, next.getFeaturedTotalRounds());
-            ins.setObject(15, PbMysql.uint64(next.getUpdatedMs()));
-            ins.executeUpdate();
+    }
+
+    /**
+     * 按 build_key 升序原子落库本局聚合流派计数（杜绝按 playerId 乱序加锁引发 AB-BA 死锁），
+     * 仅在本局确有战报正文时更新 featured_battle_id，并在事务末尾按 battle_id 升序统一增减
+     * {@code match_battle_report.ref_count}（对齐 Go {@code applyFeaturedBuildDeltasTx}）。
+     */
+    private void applyFeaturedBuildDeltasTx(Connection c, int seasonId, long battleId,
+                                            int teamSize, int totalRounds, long nowMs,
+                                            Map<String, FeaturedBuildMatchDelta> deltas) throws SQLException {
+        if (deltas.isEmpty()) {
+            return;
+        }
+        boolean battleHasReplay = false;
+        try (PreparedStatement ps = c.prepareStatement("SELECT 1 FROM match_battle_report WHERE battle_id=?")) {
+            ps.setObject(1, PbMysql.uint64(battleId));
+            try (ResultSet rs = ps.executeQuery()) {
+                battleHasReplay = rs.next();
+            }
+        }
+        List<String> sortedKeys = new ArrayList<>(deltas.keySet());
+        java.util.Collections.sort(sortedKeys);
+        Map<Long, Long> reportRefDelta = new java.util.TreeMap<>(Long::compareUnsigned);
+        for (String key : sortedKeys) {
+            FeaturedBuildMatchDelta d = deltas.get(key);
+            MatchRankedFeaturedBuildRow existing = readFeaturedBuildRow(c, seasonId, key).orElse(null);
+            MatchRankedFeaturedBuildRow.Builder b = existing != null
+                    ? existing.toBuilder()
+                    : MatchRankedFeaturedBuildRow.newBuilder()
+                            .setSeasonId(seasonId)
+                            .setBuildKey(d.buildKey)
+                            .setSeasonSealId(d.seasonSealId)
+                            .setStarterPetTableId(d.starterPetTableId)
+                            .setCoreSkillIds(d.coreSkillCsv);
+            b.setAppearances(b.getAppearances() + d.appearances)
+                    .setWins(b.getWins() + d.wins)
+                    .setHighTierWins(b.getHighTierWins() + d.highTierWins);
+            if (battleHasReplay && d.hasWinner
+                    && (b.getFeaturedBattleId() == 0L || d.bestWinnerRating >= b.getFeaturedRatingCenti())) {
+                long oldBattleId = b.getFeaturedBattleId();
+                b.setFeaturedBattleId(battleId)
+                        .setFeaturedPlayerId(d.bestWinnerPlayerId)
+                        .setFeaturedPlayerName(d.bestWinnerName)
+                        .setFeaturedRatingCenti(d.bestWinnerRating)
+                        .setFeaturedTeamSize(teamSize)
+                        .setFeaturedTotalRounds(totalRounds);
+                if (oldBattleId != battleId) {
+                    reportRefDelta.merge(battleId, 1L, Long::sum);
+                    if (oldBattleId != 0L) {
+                        reportRefDelta.merge(oldBattleId, -1L, Long::sum);
+                    }
+                }
+            }
+            b.setUpdatedMs(nowMs);
+            MatchRankedFeaturedBuildRow next = b.build();
+            try (PreparedStatement ins = c.prepareStatement(
+                    "INSERT INTO match_ranked_featured_build(season_id,build_key,season_seal_id,starter_pet_table_id,core_skill_ids,appearances,wins,high_tier_wins,featured_battle_id,featured_player_id,featured_player_name,featured_rating_centi,featured_team_size,featured_total_rounds,updated_ms) "
+                            + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                            + "ON DUPLICATE KEY UPDATE appearances=VALUES(appearances),wins=VALUES(wins),high_tier_wins=VALUES(high_tier_wins),"
+                            + "featured_battle_id=VALUES(featured_battle_id),featured_player_id=VALUES(featured_player_id),featured_player_name=VALUES(featured_player_name),"
+                            + "featured_rating_centi=VALUES(featured_rating_centi),featured_team_size=VALUES(featured_team_size),featured_total_rounds=VALUES(featured_total_rounds),updated_ms=VALUES(updated_ms)")) {
+                ins.setInt(1, next.getSeasonId());
+                ins.setString(2, next.getBuildKey());
+                ins.setInt(3, next.getSeasonSealId());
+                ins.setInt(4, next.getStarterPetTableId());
+                ins.setString(5, next.getCoreSkillIds());
+                ins.setInt(6, next.getAppearances());
+                ins.setInt(7, next.getWins());
+                ins.setInt(8, next.getHighTierWins());
+                ins.setObject(9, PbMysql.uint64(next.getFeaturedBattleId()));
+                ins.setObject(10, PbMysql.uint64(next.getFeaturedPlayerId()));
+                ins.setString(11, next.getFeaturedPlayerName());
+                ins.setLong(12, next.getFeaturedRatingCenti());
+                ins.setInt(13, next.getFeaturedTeamSize());
+                ins.setInt(14, next.getFeaturedTotalRounds());
+                ins.setObject(15, PbMysql.uint64(next.getUpdatedMs()));
+                ins.executeUpdate();
+            }
+        }
+        com.game.match.report.BattleReportStore.adjustRefCounts(c, reportRefDelta);
+        invalidateFeaturedCache(seasonId);
+    }
+
+    /** 换季封榜释放旧季全部热门流派代表战报的 ref_count 护航引用，避免旧赛季永久钉死录像正文（对齐 Go ranked_rollover.go）。 */
+    private static void releaseSeasonFeaturedReplaysTx(Connection c, int seasonId) throws SQLException {
+        Map<Long, Integer> released = new java.util.TreeMap<>(Long::compareUnsigned);
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT featured_battle_id FROM match_ranked_featured_build WHERE season_id=? AND featured_battle_id>0")) {
+            ps.setInt(1, seasonId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    long bid = Long.parseUnsignedLong(rs.getString(1));
+                    if (bid != 0L) {
+                        released.merge(bid, 1, Integer::sum);
+                    }
+                }
+            }
+        }
+        if (released.isEmpty()) {
+            return;
+        }
+        try (PreparedStatement upd = c.prepareStatement(
+                "UPDATE match_ranked_featured_build SET featured_battle_id=0 WHERE season_id=? AND featured_battle_id>0")) {
+            upd.setInt(1, seasonId);
+            upd.executeUpdate();
+        }
+        com.game.match.report.BattleReportStore.releaseBodies(c, released);
+    }
+
+    private List<RankedFeaturedBuildView> readTopFeaturedBuildsCached(Connection c, int seasonId, int limit) throws SQLException {
+        long now = clockMs.getAsLong();
+        FeaturedCacheKey key = new FeaturedCacheKey(seasonId, limit);
+        FeaturedCacheEntry cached = featuredCache.get(key);
+        if (cached != null && now >= cached.loadedAtMs() && (now - cached.loadedAtMs()) < FEATURED_CACHE_TTL_MS) {
+            return cached.builds();
+        }
+        List<RankedFeaturedBuildView> fresh = List.copyOf(readTopFeaturedBuilds(c, seasonId, limit));
+        featuredCache.put(key, new FeaturedCacheEntry(now, fresh));
+        return fresh;
+    }
+
+    private void invalidateFeaturedCache(int seasonId) {
+        featuredCache.keySet().removeIf(k -> k.seasonId() == seasonId);
+    }
+
+    /**
+     * 论剑 V7「不服再战」权威防伪校验（对齐 Go {@code ValidateRankedRematchSource}）：
+     * 1. {@code sourceBattleId} 必须是双方刚刚结算的正式自养 1V1 论剑排位对局（{@code season_id > 0}、{@code team_size == 1}、
+     *    非作废、两人分属敌对阵营）；
+     * 2. 距终局落账时间不超过 {@code maxAgeMs}（默认 10 分钟），防止伪造任意 battle_id 骚扰陌生人或重放陈年旧局。
+     */
+    public boolean validateRankedRematchSource(long sourceBattleId, long challengerId, long targetId, long maxAgeMs)
+            throws SQLException {
+        if (sourceBattleId == 0L || challengerId == 0L || targetId == 0L || challengerId == targetId) {
+            return false;
+        }
+        try (Connection c = dataSource.getConnection()) {
+            Optional<MatchRankedBattleRow> rowA = readBattleRow(c, challengerId, sourceBattleId);
+            Optional<MatchRankedBattleRow> rowB = readBattleRow(c, targetId, sourceBattleId);
+            if (rowA.isEmpty() || rowB.isEmpty()) {
+                return false;
+            }
+            MatchRankedBattleRow a = rowA.get();
+            MatchRankedBattleRow b = rowB.get();
+            if (a.getSeasonId() == 0 || a.getSeasonId() != b.getSeasonId()
+                    || a.getTeamSize() != 1 || b.getTeamSize() != 1
+                    || a.getStatus() != RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED_VALUE
+                    || b.getStatus() != RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED_VALUE
+                    || a.getPlayerTeamIndex() == b.getPlayerTeamIndex()) {
+                return false;
+            }
+            if (maxAgeMs > 0L) {
+                long now = clockMs.getAsLong();
+                long settled = a.getSettledAtMs();
+                if (Long.compareUnsigned(now, settled) > 0
+                        && Long.compareUnsigned(now - settled, maxAgeMs) > 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /**
+     * 删角收尾清理（对齐 Go {@code role_fence_purge.go:190-258}）：
+     * 清空该角色在 {@code match_ranked_featured_build} 的展示名、清空对手宿敌行里的对方名并删除本人宿敌账本行。
+     */
+    public static void purgePlayerRankedData(Connection c, long playerId) throws SQLException {
+        java.util.TreeSet<Integer> seasons = new java.util.TreeSet<>();
+        String[] seasonQueries = {
+                "SELECT DISTINCT season_id FROM match_ranked_player_season WHERE player_id=?",
+                "SELECT DISTINCT season_id FROM match_ranked_rivalry WHERE player_id=?",
+                "SELECT DISTINCT season_id FROM match_ranked_featured_build WHERE featured_player_id=?"
+        };
+        for (String sql : seasonQueries) {
+            try (PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setObject(1, PbMysql.uint64(playerId));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        int sid = rs.getInt(1);
+                        if (sid != 0) {
+                            seasons.add(sid);
+                        }
+                    }
+                }
+            }
+        }
+        for (int seasonId : seasons) {
+            try (PreparedStatement upd = c.prepareStatement(
+                    "UPDATE match_ranked_featured_build SET featured_player_name='' WHERE season_id=? AND featured_player_id=?")) {
+                upd.setInt(1, seasonId);
+                upd.setObject(2, PbMysql.uint64(playerId));
+                upd.executeUpdate();
+            }
+            List<Long> opponents = new ArrayList<>();
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT opponent_id FROM match_ranked_rivalry WHERE season_id=? AND player_id=? ORDER BY opponent_id")) {
+                ps.setInt(1, seasonId);
+                ps.setObject(2, PbMysql.uint64(playerId));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        opponents.add(Long.parseUnsignedLong(rs.getString(1)));
+                    }
+                }
+            }
+            for (long oppId : opponents) {
+                try (PreparedStatement upd = c.prepareStatement(
+                        "UPDATE match_ranked_rivalry SET opponent_name='' WHERE season_id=? AND player_id=? AND opponent_id=?")) {
+                    upd.setInt(1, seasonId);
+                    upd.setObject(2, PbMysql.uint64(oppId));
+                    upd.setObject(3, PbMysql.uint64(playerId));
+                    upd.executeUpdate();
+                }
+            }
+            if (!opponents.isEmpty()) {
+                try (PreparedStatement del = c.prepareStatement(
+                        "DELETE FROM match_ranked_rivalry WHERE season_id=? AND player_id=?")) {
+                    del.setInt(1, seasonId);
+                    del.setObject(2, PbMysql.uint64(playerId));
+                    del.executeUpdate();
+                }
+            }
         }
     }
 

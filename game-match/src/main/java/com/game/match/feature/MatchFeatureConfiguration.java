@@ -387,9 +387,18 @@ public class MatchFeatureConfiguration {
     public TournamentService tournamentService(TournamentStore store, MatchIds matchIds,
                                                ObjectProvider<TournamentService.MatchLauncher> launcher,
                                                ObjectProvider<TournamentService.TextGuard> textGuard,
-                                               ObjectProvider<TournamentService.RewardMailSender> mailSender) {
+                                               ObjectProvider<TournamentService.RewardMailSender> mailSender,
+                                               ObjectProvider<com.game.common.RunMode> runModeProvider) {
+        TournamentService.TextGuard effectiveGuard = textGuard.getIfAvailable();
+        com.game.common.RunMode runMode = runModeProvider.getIfAvailable(() -> com.game.common.RunMode.PROD);
+        if (effectiveGuard == null && runMode == com.game.common.RunMode.PROD) {
+            log.warn("[tournament] prod 模式下未启用 game.match.content-guard-enabled，UGC 战队名审核将 fail-closed 拒收");
+            effectiveGuard = (scene, playerId, text) -> {
+                throw new IllegalStateException("content guard disabled in prod");
+            };
+        }
         return new TournamentService(store, () -> matchIds.nextBattleId().orElse(0L),
-                launcher.getIfAvailable(), textGuard.getIfAvailable(), mailSender.getIfAvailable());
+                launcher.getIfAvailable(), effectiveGuard, mailSender.getIfAvailable());
     }
 
     @Bean
@@ -578,23 +587,31 @@ public class MatchFeatureConfiguration {
             MatchIds matchIds,
             ObjectProvider<TournamentService.TextGuard> tournamentTextGuard,
             ObjectProvider<GatherLauncher> gatherLauncher,
-            ObjectProvider<RankedTables> rankedTables) {
+            ObjectProvider<RankedTables> rankedTables,
+            ObjectProvider<com.game.common.RunMode> runModeProvider) {
         TournamentService.TextGuard guard = tournamentTextGuard.getIfAvailable();
-        com.game.match.puzzle.TacticalPuzzleService.TextGuard puzzleGuard = guard == null
-                ? null
-                : (playerId, text) -> {
-                    try {
-                        var resp = guard.check(com.game.proto.content_guard.TextScene.TEXT_SCENE_GUILD_NAME, playerId, text);
-                        if (resp == null) {
-                            return com.game.match.puzzle.TacticalPuzzleService.TextVerdict.UNAVAILABLE;
-                        }
-                        return resp.getVerdict() == com.game.proto.content_guard.TextVerdict.TEXT_VERDICT_PASS
-                                ? com.game.match.puzzle.TacticalPuzzleService.TextVerdict.PASS
-                                : com.game.match.puzzle.TacticalPuzzleService.TextVerdict.REJECT;
-                    } catch (RuntimeException e) {
+        com.game.common.RunMode runMode = runModeProvider.getIfAvailable(() -> com.game.common.RunMode.PROD);
+        com.game.match.puzzle.TacticalPuzzleService.TextGuard puzzleGuard;
+        if (guard != null) {
+            puzzleGuard = (playerId, text) -> {
+                try {
+                    var resp = guard.check(com.game.proto.content_guard.TextScene.TEXT_SCENE_GUILD_NAME, playerId, text);
+                    if (resp == null) {
                         return com.game.match.puzzle.TacticalPuzzleService.TextVerdict.UNAVAILABLE;
                     }
-                };
+                    return resp.getVerdict() == com.game.proto.content_guard.TextVerdict.TEXT_VERDICT_PASS
+                            ? com.game.match.puzzle.TacticalPuzzleService.TextVerdict.PASS
+                            : com.game.match.puzzle.TacticalPuzzleService.TextVerdict.REJECT;
+                } catch (RuntimeException e) {
+                    return com.game.match.puzzle.TacticalPuzzleService.TextVerdict.UNAVAILABLE;
+                }
+            };
+        } else if (runMode == com.game.common.RunMode.PROD) {
+            log.warn("[tactical_puzzle] prod 模式下未启用 game.match.content-guard-enabled，UGC 残局标题/提示审核将 fail-closed 拒收");
+            puzzleGuard = (playerId, text) -> com.game.match.puzzle.TacticalPuzzleService.TextVerdict.UNAVAILABLE;
+        } else {
+            puzzleGuard = null;
+        }
         GatherLauncher launcherBean = gatherLauncher.getIfAvailable();
         com.game.match.puzzle.TacticalPuzzleService.BattleLauncher puzzleLauncher = launcherBean == null
                 ? null

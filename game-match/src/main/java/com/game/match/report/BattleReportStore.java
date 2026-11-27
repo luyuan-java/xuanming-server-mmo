@@ -275,6 +275,7 @@ public final class BattleReportStore {
             }
         }
         TrialChallengeCardStore.purgePlayerCards(c, playerId, released);
+        com.game.match.ranked.RankedStore.purgePlayerRankedData(c, playerId);
         releaseBodies(c, released);
         return deleted;
     }
@@ -308,21 +309,50 @@ public final class BattleReportStore {
         return evicted;
     }
 
-    static void releaseBodies(Connection c, Map<Long, Integer> released) throws SQLException {
+    public static void releaseBodies(Connection c, Map<Long, Integer> released) throws SQLException {
+        if (released == null || released.isEmpty()) {
+            return;
+        }
+        Map<Long, Long> deltas = new TreeMap<>(Long::compareUnsigned);
         for (Map.Entry<Long, Integer> e : released.entrySet()) {
-            long id = e.getKey();
-            int n = e.getValue();
-            try (PreparedStatement upd = c.prepareStatement(
-                    "UPDATE match_battle_report SET ref_count=CASE WHEN ref_count>? THEN ref_count-? ELSE 0 END WHERE battle_id=?")) {
-                upd.setInt(1, n);
-                upd.setInt(2, n);
-                upd.setObject(3, PbMysql.uint64(id));
-                upd.executeUpdate();
+            if (e.getValue() > 0) {
+                deltas.put(e.getKey(), -((long) e.getValue()));
             }
-            try (PreparedStatement del = c.prepareStatement(
-                    "DELETE FROM match_battle_report WHERE battle_id=? AND ref_count=0")) {
-                del.setObject(1, PbMysql.uint64(id));
-                del.executeUpdate();
+        }
+        adjustRefCounts(c, deltas);
+    }
+
+    /** 按无符号 battle_id 升序统一增减战报正文引用计数（正数护航、负数释放并在归零时删行），消除 AB-BA 死锁。 */
+    public static void adjustRefCounts(Connection c, Map<Long, Long> deltas) throws SQLException {
+        if (deltas == null || deltas.isEmpty()) {
+            return;
+        }
+        Map<Long, Long> ordered = new TreeMap<>(Long::compareUnsigned);
+        ordered.putAll(deltas);
+        for (Map.Entry<Long, Long> e : ordered.entrySet()) {
+            long id = e.getKey();
+            long delta = e.getValue();
+            if (delta > 0L) {
+                try (PreparedStatement upd = c.prepareStatement(
+                        "UPDATE match_battle_report SET ref_count=ref_count+? WHERE battle_id=?")) {
+                    upd.setLong(1, delta);
+                    upd.setObject(2, PbMysql.uint64(id));
+                    upd.executeUpdate();
+                }
+            } else if (delta < 0L) {
+                long n = -delta;
+                try (PreparedStatement upd = c.prepareStatement(
+                        "UPDATE match_battle_report SET ref_count=CASE WHEN ref_count>? THEN ref_count-? ELSE 0 END WHERE battle_id=?")) {
+                    upd.setLong(1, n);
+                    upd.setLong(2, n);
+                    upd.setObject(3, PbMysql.uint64(id));
+                    upd.executeUpdate();
+                }
+                try (PreparedStatement del = c.prepareStatement(
+                        "DELETE FROM match_battle_report WHERE battle_id=? AND ref_count=0")) {
+                    del.setObject(1, PbMysql.uint64(id));
+                    del.executeUpdate();
+                }
             }
         }
     }

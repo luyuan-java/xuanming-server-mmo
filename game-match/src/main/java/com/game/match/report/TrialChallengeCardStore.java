@@ -95,6 +95,25 @@ public final class TrialChallengeCardStore {
                                                             LongSupplier nextCardId) throws SQLException {
         long nowMs = clockMs.getAsLong();
 
+        // 0. 串行化同一玩家的约战帖签发（对齐 Go lockActor）：READ COMMITTED 下 0->1 / 9->10 并发若无行锁锚点，
+        // 两次 SELECT ... FOR UPDATE 都锁不到新行会导致同局重复签发双倍 ref_count 或突破 10 张上限。
+        // 锁序：match_rating(player_id) -> match_trial_challenge_card -> match_battle_report(battle_id ASC)，与 RatingStore 同向无死锁。
+        try (PreparedStatement ensure = c.prepareStatement(
+                "INSERT INTO match_rating (player_id, rating_centi, games, updated_at_ms) VALUES (?, ?, 0, ?) "
+                        + "ON DUPLICATE KEY UPDATE player_id = player_id")) {
+            ensure.setObject(1, PbMysql.uint64(ownerPlayerId));
+            ensure.setLong(2, com.game.match.rating.RatingReader.DEFAULT_CENTI);
+            ensure.setLong(3, nowMs);
+            ensure.executeUpdate();
+        }
+        try (PreparedStatement lockActor = c.prepareStatement(
+                "SELECT 1 FROM match_rating WHERE player_id=? FOR UPDATE")) {
+            lockActor.setObject(1, PbMysql.uint64(ownerPlayerId));
+            try (ResultSet ignored = lockActor.executeQuery()) {
+                // 行锁已持有
+            }
+        }
+
         // 1. 核验本人参战战报列表包含该局，防越权把他人对局签成约战帖。
         byte[] summaryBytes = null;
         try (PreparedStatement ps = c.prepareStatement(
