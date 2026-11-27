@@ -137,7 +137,10 @@ public final class ClientMessageDispatcher {
         } catch (RejectedExecutionException e) {
             log.warn("login 工作队列已满，拒绝请求 message_id={} {}", messageId, describe(call.getSession()));
             metrics.requestCompleted(sample, method, RequestResult.OVERLOADED);
-            return CompletableFuture.completedFuture(route.failure(CommonErrorTip.common_error.kServiceUnavailable_VALUE));
+            int overloadedTip = "EnterGame".equals(method)
+                    ? com.game.table.LoginErrorTip.login_error.kLoginEnterGameBusy_VALUE
+                    : CommonErrorTip.common_error.kServiceUnavailable_VALUE;
+            return CompletableFuture.completedFuture(route.failure(overloadedTip));
         }
         return outcome.handle((done, error) -> {
             if (error != null) {

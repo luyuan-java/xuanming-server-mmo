@@ -369,7 +369,9 @@ Schema 是 `RoleNameRuleTable{id=1,min_chars=2,max_chars=3,generated_prefix=4,ge
 | 2011 kLoginEnterGameGuid | 票据持有者不符；或角色不属于本账号（账号目录里没有，反向索引缺失或指向其它账号） |
 | 2028 kLoginSessionNotFound | `login_session` 不存在（常见原因：已经进过游戏一次而没有重新 Login） |
 | 2021 kLoginRedisError | 玩家锁 SETNX 时 Redis 出错 |
-| 2005 kLoginInProgress | 玩家锁被占用（同一角色的 EnterGame 异步链还没结束），或预加载池已满 |
+| 2005 kLoginInProgress | 本连接已绑定别的角色；或同一角色的 EnterGame 异步链还没结束 |
+| 2057 kLoginRoleTradeFrozen | 角色正处于聚宝斋角色交易挂单冻结期，禁止进游戏 |
+| 2058 kLoginEnterGameBusy | 预加载池已满（进场链未启动），客户端可退避重试 |
 | 2000 kLoginAccountNotFound | 读账号目录失败，包括键不存在（141-146 行） |
 | 2022 kLoginDataParseFailed | 账号目录反序列化失败 |
 
@@ -441,6 +443,7 @@ Schema 是 `RoleNameRuleTable{id=1,min_chars=2,max_chars=3,generated_prefix=4,ge
 | 2023 | kLoginRedisSetFailed | 2024 | kTooManyDevices |
 | 2028 | kLoginSessionNotFound | 2032 | kRoleNameInvalid（params [min,max]） |
 | 2033 | kRoleNameTaken | 2034 | kRoleNameSensitive |
+| 2057 | kLoginRoleTradeFrozen | 2058 | kLoginEnterGameBusy |
 | 3023 | kEnterSceneFailed（scene_error） | | |
 
 ---

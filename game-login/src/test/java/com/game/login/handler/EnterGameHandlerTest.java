@@ -100,7 +100,7 @@ class EnterGameHandlerTest {
         var row = LoginHandlerTest.row(PLAYER, ACCOUNT, "冻结角色");
         row.setTradeListingId(101);
         when(store.findPlayer(PLAYER)).thenReturn(Optional.of(row));
-        assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginInProgress_VALUE);
+        assertError(enter(SESSION, PLAYER), LoginErrorTip.login_error.kLoginRoleTradeFrozen_VALUE);
         verify(scenes, never()).assign(any());
         verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
     }
@@ -170,16 +170,18 @@ class EnterGameHandlerTest {
         assertError(enter(SESSION.toBuilder().clearAccount().build(), PLAYER),
                 LoginErrorTip.login_error.kLoginSessionNotFound_VALUE);
         assertError(enter(SESSION.toBuilder().setPlayerId(PLAYER + 1).build(), PLAYER),
-                LoginErrorTip.login_error.kLoginSessionNotFound_VALUE);
+                LoginErrorTip.login_error.kLoginInProgress_VALUE);
         verify(scenes, never()).assign(any());
     }
 
     @Test
-    void 已绑定同一角色的会话再次进游戏回2028_不分配也不夺权() throws Exception {
-        // 回归：曾放行「同一角色再次 EnterGame」，夺权抢在旧实例最终写回之前，旧写回被围栏拒掉、在线进度全部丢失。
-        // 基线进游戏成功即删除登录会话，之后的 EnterGame 一律 2028；进场异步失败后 gate 会解绑玩家，重试不受影响。
-        assertError(enter(SESSION.toBuilder().setPlayerId(PLAYER).build(), PLAYER),
-                LoginErrorTip.login_error.kLoginSessionNotFound_VALUE);
+    void 已绑定同一角色的会话再次进游戏幂等放行_换角回2005_不分配也不夺权() throws Exception {
+        // 第一轮审计 §4 第 9 条统一两版口径：同角色重试幂等放行（不二次夺权）；换另一个角色回 2005 kLoginInProgress。
+        HandlerReply sameRole = enter(SESSION.toBuilder().setPlayerId(PLAYER).build(), PLAYER);
+        assertThat(response(sameRole).hasErrorMessage()).isFalse();
+        assertThat(response(sameRole).getPlayerId()).isEqualTo(PLAYER);
+        assertError(enter(SESSION.toBuilder().setPlayerId(PLAYER).build(), PLAYER + 1),
+                LoginErrorTip.login_error.kLoginInProgress_VALUE);
         verify(scenes, never()).assign(any());
         verify(store, never()).claimOwnership(anyLong(), any(String.class), anyLong(), any(Duration.class));
     }

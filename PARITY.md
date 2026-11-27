@@ -1,10 +1,16 @@
 # 双版本对账本（PARITY）
 
-## 2026-11-27 Actor 隔离改造审阅后的 Java 待做（`87f79f19` 场景跨线程回调与逻辑线程断言的两处收尾）
+## 2026-11-27 名匠代打西市热榜改为真正的近 24 小时（按 UTC 小时分桶 + 25 小时过期）
 
 | 范围 | C++ / Go 权威版 + Unity 客户端 | Java / Python 版 | 状态 |
 |---|---|---|---|
-| ① **逻辑线程断言没有用例覆盖**：`SceneWorld.playerById` / `step` 越线即抛 `IllegalStateException`，但 `SceneWorld` 默认守卫恒放行，只有 `SceneNode` 绑定 `logicLoop::inEventLoop`，现有 `game-scene` 用例都没在守卫下跑过（审阅时 53 处调用逐处核过都先回逻辑线程）。<br>② **迟到确认清锁分支收窄**：`PlayerBattleService.onLateConfirm` 的「Inbox 已落盘 → 删迟到确认锁」一支改成只认同一实例；玩家已换实例时不再清，靠下次进场恢复读兜底 | 审阅结论见 mmorpg 仓 `docs/design/actor-isolation-review-20261127.md` §3 | **Java 待做**：① 在 `SceneWorld` 测试夹具里绑定单线程守卫（或单线程执行器 + 守卫）把 `game-scene` 套件跑一遍；② 「Inbox 已落盘」一支只要求 `player != null`（按玩家持久收件箱账本判断，与实例无关），恢复原清锁行为 | Java 待做 |
+| 西市热榜 `recent_24h_orders` / `recent_24h_supreme` 原先只累加、从不归零，几天后「近 24 小时」就成了开摊以来的累计，热榜变成老宗师的累计榜 | C++ 改为每个 UTC 小时一个桶 `craft_proxy_hot:{ctl:<zone>}:<UTC 秒/3600>`（字段 `<宗师>:o` / `:s`，`HINCRBY` 后 `EXPIRE` 25 小时），刷新时用一段同槽只读 Lua 把当前小时与前 23 个小时的桶求和；待回账表停写 `:24o` / `:24s`。客户端协议不变。设计见 mmorpg 仓 `docs/design/craft-proxy-reputation-digest-and-hot-ranking.md` §2.6 | Python 版同步（同键同字段，Python 仓 `docs/design/craft-proxy-shared-ledger-redis.md` §2.4）。**Java 待做**：`CraftProxyStallDirectory` 的 `hotCounters` 与 `:24o` / `:24s` 仍是累计，改成同样的小时分桶窗口（Java 用自己的键前缀即可，口径一致：当前小时 + 前 23 个小时、桶 25 小时过期） | Java 待做 |
+
+## 2026-11-27 Actor 隔离改造审阅后的 Java 收尾（Java 已对齐）
+
+| 范围 | C++ / Go 权威版 + Unity 客户端 | Java / Python 版 | 状态 |
+|---|---|---|---|
+| ① **逻辑线程断言用例覆盖**：`SceneWorld.withLogicThreadGuard` 绑定单线程守卫。<br>② **迟到确认清锁分支恢复**：`PlayerBattleService.onLateConfirm` 的「Inbox 已落盘 → 删迟到确认锁」一支按玩家持久收件箱账本判断，与实例代次无关 | 审阅结论见 mmorpg 仓 `docs/design/actor-isolation-review-20261127.md` §3 | **Java 已对齐**：① `BattleFixture` 绑定单测逻辑线程守卫 `world.withLogicThreadGuard(...)`，`Batch4S2AndActorGuardTest` 在单线程执行器内实测放行与跨线程越线抛 `IllegalStateException`；② `PlayerBattleService.onLateConfirm` 已恢复为 `player != null && inboxPersistedApplied(player, battleId)` 即可清迟到确认锁。验证：`game-scene` 78/78 PASS | 已对齐 |
 
 ## 2026-11-27 局外人观战交流模式与个人禁交开关 V1（开局冻结开关 + 全房单一公开频道 + ContentGuard fail-closed + 严禁禁观战，RPC `587..590`，Tip `16073..16078`，Java 第 27 代持久台账 `0027.schema`）
 
@@ -1015,29 +1021,14 @@ Java 既有断链策略仍会关闭 Gate 会话，并由 Scene 移除玩家、�
 - 握手/建链失败退避：`SceneLinkManager` 新增每 `sceneNodeId` 失败冷却（`0.5s` 起翻倍、`8s` 封顶、±25% 抖动，`onLinkReady` 清零；冷却期内 `send` 返回 `0` 交由会话 `PendingSceneEntry` 抖动重试）。
 - **验证**：`game-gate` `SceneLinkCooldownAndDisconnectRetryTest`（2/2）+ `PendingSceneEntryTest`（1/1）全部 PASS。
 
-### 2026-11-05 历练 v1 终局与收件箱评审修复（Java 待做）
+### 2026-11-05 历练 v1 终局与收件箱评审修复（Java 已对齐）
 
-主仓对应改动：C++ 的 Battle 收件箱结算与冻结窗口、Go 的 Match 终局发件箱与 PlayerInbox，已随主仓快照提交入库（截至 `993b6da9d`），均未编译。逐项说明见主仓 `docs/handoff/global-economy-claude-review-20261022.md`「2026-11-05 Claude 修复记录」。
-
-Java 版 `0.1.0-SNAPSHOT` 待做：
-
-1. **已写未跑，接手先核对完整性**（10-30 落在 `a6d2e137`，未编译、未测试；D-2 与 D-11 写到一半时代理中断，可能编译不过）：
-   - D-1：`InboxService` 战斗域同一 battle 换新 seq 重投时，直接记 APPLIED，不重复发奖（只认最近结局环，有界缓解）。
-   - D-3：`InboxConsumers` 新增 `VersionSkew`，坏字节、未知字段一律停域；`PlayerInboxRuntime` 加 `VERSION_SKEW`；`InboxService` 加战斗域守卫，ACK_UNKNOWN 或回放非 APPLIED 时停域。
-   - D-9：`PlayerTradeStore` 旧 OPEN 恢复改为对两个 zone 持锁核验标记；`RecoverTradeAdmission` 输出分类码、已提交时退出码 3。主仓同类维护恢复链已随「玩家存档只存 TiDB」整体删除，接手先确认 Java 这条工具是否仍需保留。
-   - D-2（只做了一半）：`BattleSettlementService.applyInbox` 剔除配置行已删的掉落/消耗，其余照常 APPLIED。
-   - D-11（只做了一半）：`BattleFreeze.fightingReleaseAtMs` / `PlayerBattleService` 的 FIGHTING 冻结到 deadline + `MatchBudgets.TERMINAL_OUTCOME_GRACE_MS`(60s) + 收件箱投递余量 60s 才解冻；锁 TTL 覆盖同一窗口；冻结释放后仍夹紧时打专用计数。
-2. **未做**：
-   - 补完 D-2、D-11，补齐对应测试（含 `FightingOutcomeWindowTest`）。
-   - 产出封禁口径与主仓统一：被封部分跳过、其余 APPLIED、解封不补发。Java 现在金币封禁已经跳过，物品全局封禁仍整笔 DEFERRED。
-   - D-4：Inbox 与 Go 语义对齐。具体四处：Battle 来源 Ack 非 APPLIED 改为逐条回 ACK_CONFLICT，不再整批回滚；issuedAt 未来窗只对新建检查；Battle 入箱走 EnqueueTypes 白名单；`PlayerInboxProvider.battleCall` 区分永久冲突与暂时故障。
-   - D-5：`RatingConfiguration` 缺 `MMORPG_PLAYER_INBOX_SECRET_MATCH` 时给出明确报错（不再是无消息 NPE），并在 application.yaml、env.example、stack.yaml 登记 inbox 地址与两个密钥；`PlayerInboxProvider` 缺密钥时启动打 ERROR，不拒启。
-   - D-6：不可恢复成局（过截止、形状不合格）的滞留 gauge 与 ERROR，与 Go 的 `match_global_expired_stranded_formations` 对齐。
-   - D-7：个人发件箱批量与轮询间隔做成配置，补积压条数与最老待投年龄 gauge。
-   - D-8：v1 原件分支的 `cancelPrepared` 挪到 SQL ABORT 成功之后，与 Go 一致（只有唯一的 SQL ABORT 才清原备战）。
-3. **验证命令**（按 Java 仓 AGENTS.md）：`./mvnw -B -pl game-scene,game-inbox,game-match,game-player-store,game-data -am test`；真库组另加 `-Dgame.it.mysql` 与 `MATCH_IT_TIDB`，跳过的用例如实报告为未运行。
-
-本条只登记待做，未修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已跨 `game-inbox`、`game-match`、`game-scene` 完成全部 D-1 ~ D-11 及产出封禁统一收口：
+- **产出封禁统一**：`BattleSettlementService.applyInbox` 新增 `dropBlockedItems`，命中全服或个人物品产出封禁的掉落项按业务跳过（记 WARN、解封不补发），其余奖励照常 `APPLIED`，不再整笔 `DEFERRED`；
+- **D-4 收件箱对齐**：`InboxStore` 战斗入箱校验 `enqueueTypes` 白名单、仅新建时检查 `issuedAtMs` 未来窗（不拦截幂等重放）、`ackLocked` 战斗源非 `APPLIED` 改为逐条返回 `PLAYER_INBOX_ACK_CONFLICT` 不回滚整批；`PlayerInboxProvider` 启动缺密钥打 ERROR 不阻启、`battleCall` 区分永久冲突与暂态故障；
+- **D-5 / D-6 / D-7 / D-8 Match 对齐**：`RatingConfiguration` 缺 `MMORPG_PLAYER_INBOX_SECRET_MATCH` 抛明确 `IllegalStateException`；`BattleCompletionReplay` 新增 `withOutboxTuning` 可配批量与轮询间隔及 `match_global_expired_stranded_formations` 滞留 gauge + ERROR；`GlobalMatchService.abortConfirmedNoRoom` 已在 SQL ABORT 成功后调 `cancelPrepared`；
+- **D-2 / D-11 Scene 结算与冻结窗**：`BattleSettlementService` 跳过已删配置项、`BattleFreeze.fightingReleaseAtMs` 覆盖终局宽限 + 收件箱投递余量；
+- **验证**：`game-inbox` `BattleInboxRecoveryTest`（6/6）、`game-match` `Rating*` + `BattleCompletionReplay*`（102 tests / 0 fail，39 TiDB skip）、`game-scene` 78/78 全部 PASS。
 
 ## 2026-11-05 永久 ID 发号:三份预留记录与全局号源登记处（Java 已对齐）
 
@@ -1262,71 +1253,15 @@ Java 版 `0.1.0-SNAPSHOT` 待做：
 
 原待办各项（协议 379/380、`game-gate` 路由与限频、`game-match` `BattleReportStore`/`BattleReportHandlers`/`BattleReplayPolicy` 与 `GatherPipeline`/`GlobalMatchService` 冻结 `record_replay`、`game-battle` `BattleReplayRecorder`/四处录制钩子/`SignedOutcomeSink` 提交）均已补齐并完成单测验证，详见本文顶部「2026-11-24 战报回放（379/380）…」与「2026-11-25 回合制战斗战报回放录制与 PVP 策略补齐」条目。
 
-### 2026-11-06 数据覆写审计第二轮遗留修复（Java 待做）
+### 2026-11-06 数据覆写审计第二轮遗留修复（Java 已对齐）
 
-主仓审计见 `docs/design/data-overwrite-rollback-audit-r2-20261019.md` §6「2026-11-05 续做」，各批的修法、文件与验证命令见主仓 `docs/PROGRESS.md` 2026-11-05～06 标题以「数据审计遗留」开头的条目。C++ / Go 版都已落码，未编译、未测试。下面只列 Java 版 `0.1.0-SNAPSHOT` 要做的事；核对后不适用或已有等价做法的条目只写在主仓文档里，这里不登记。Java 按自己的惯用方式实现，不照抄主仓。
-
-- **改了客户端契约，要同批同步（ContractSync）**：
-  - 强化乐观比较（r2-equip#1）：`EnhanceEquipRequest.expected_level = 2`（uint32，客户端填它看到的 `BagItemInfo.enhance_level`，0 级填 0）。服务器在扣金币、扣材料、掷骰之前，把它与有效等级（存档值按表上限夹取，即快照下发的那个值）比较，不一致回 `EquipEnhanceLevelChanged`，什么都不动。Java 强化现在没有这道比较。
-  - 临时格满即拒并可取回（cpp-economy#2）：新增 `SceneBagClientPlayer.RetrieveTemporaryItems`（消息号 374），请求 `item_id = 1` / `take_all = 2` 二选一，应答 `error_message = 1`、`bag = 2`、`temporary = 3`。语义：
-    - 全或无：人物背包放不下就整批拒绝，两个包都不动；
-    - 搬的是实例本身：装备的 guid、随机属性、强化等级、宝石不变；可叠加物品先并入人物背包已有的未满堆，不铸新号；
-    - 只在交接 / 传送冻结时拒绝，**战斗中放行**。两包都满、整笔延后的那一局要等结算应用之后才解除战斗状态，局中不让取回就永远补不上。取回对人物背包只进不出，结算按持有量扣消耗时只会扣得更足；
-    - 该件已不在临时格时回 `BagTemporaryItemNotFound`，所以重发天然幂等。
-    - 临时格满时不再挤掉旧物（Java 现在仍按先进先出淘汰，会真丢物品）。战斗结算人物背包、临时格都放不下时，整笔延后，由来源保留，取回腾位之后再补发（Java 现在会丢物）。
-  - 4 个 tip 码在 `Tip.xlsx` 的 bag_error / equip_error 组尾，由导表器发号，都是业务拒绝：`BagTemporaryItemNotFound`、`BagTemporaryRetrieveBagFull`、`BagTemporaryRetrieveBusy`（文案「交接或传送途中,暂时不能从临时格取回」，战斗中不拒）、`EquipEnhanceLevelChanged`。
-  - 取回成功之后主动唤醒因背包放不下而延后的收件箱域，不等退避。
-  - 已绑定会话再发 EnterGame（第一轮审计 §4 第 9 条），两版的回码与放行口径不一致，按 C++ 统一：
-    - 同一角色重发 EnterGame（超时或 1003 之后的重试）放行，幂等。
-    - 换成另一个角色回 2005 `kLoginInProgress`，不转发；先 LeaveGame 才能换。C++ 的 login 会话栅栏与 gate 换角闸都是这个码。
-    - Java 现在对已绑定会话的任何 EnterGame 都回 2028 `kLoginSessionNotFound`：同角色重试也被拒，而且码的意思是「登录会话不存在」，客户端会误判成要重新登录。
-    - 进场失败（3023）之后，C++ gate 与 login 栅栏都还绑着原角色；Java（`ClientDispatcher`）回到「已登录、未进游戏」，绑定清零。客户端统一按「3023 之后先 LeaveGame 再换角」实现，两版都能用。Java 要保证未进游戏时收到 LeaveGame 回成功（幂等），不报错、不断线。
-    - 同形用例：同角色重发放行、换角回 2005、3023 后 LeaveGame 成功。
-- **服务端内部（不改客户端契约）**：
-  - 欠款扣还守卫（r2-ps#6）：欠款记录带本版本不认识的字段（新版本写的）时，收入不扣还、不删欠款，按冻结处理，收入全额入账，并打 `persist_version_skew where=currency_clawback`。Java `clawbackOf` 不看未知字段。
-  - 排行奖励终态（r2-mail#2 / social-global#2）：`game-rank` 的 `RankRewardWorker` 现在按 created + 30 天发、2 秒后无限重投、没有终态。要改成：
-    - 封榜事务里写定 `expire_ms` = 封榜 + min(30 天, 邮件个人邮件最长有效期)；
-    - 明确拒收时退避从 1 分钟起翻倍、1 小时封顶，下次尝试不晚于过期时刻；
-    - 到发件截止点转「放弃」终态，配指标与告警。截止点在过期前留出可领取的最短剩余有效期，具体取值以主仓 `leaderboard-system.md` 定稿为准；否则过期前最后一投会生成一封马上过期、却记为已投的邮件。尝试次数只设兜底上限（主仓 50000），防时钟或数据异常。上限必须远大于窗口内按退避能达到的次数，否则结果未知持续一段时间后，第一次拒收就会提前放弃；
-    - 故障码与传输失败按结果未知处理，不转终态；
-    - 人工重投语句写进文档。
-  - 网关区服写入（第一轮 §4 第 18 条）：`ZoneAdminController` 的 `ZoneBody.toRow` 缺省 OPEN，POST 走 `upsertZone` 全列覆盖。要改成：
-    - PUT 按完整资源替换：缺字段、越界、体内 zone_id 与路径不符都回 400，不碰库；
-    - POST 只插不改：已存在且设置不同回 409 并带原行，相同回 200；
-    - 局部修改只走 /maintenance、/open。
-  - 商城重复付款（第一轮 §4 第 19 条）：`MallOrderStore` 已付订单收到不同流水时回 409；退款两表以 order_sn 为主键，存不进第二笔钱。要改成：
-    - 每笔付款各占一行回执，以交易键为全局唯一键；
-    - 已付单收到新流水时，记一条重复付款记录和一条 `DUPLICATE_PAYMENT` 退款待办，订单、库存、交付都不动；同一流水重放幂等；
-    - 退款待办与回执按被退的那笔付款识别，只有订单本身那笔推进 REFUNDED。
-  - 发号租约墙钟（第一轮 §4 第 20 条同类）：`NodeIdLease.isValid()` 只看 `System.nanoTime`，VM 挂起后会把已过期的租约当成有效。判有效要同时看墙钟截止时间。
-  - GM 回收去重（第一轮 §4 第 7 条下游）：Java 回收的 dry-run 只按 tx_id 去重，同一指令重投产生的第二条流水会被算两遍。要按指令（to_player, correlation_id）汇总。只有同时满足以下四条才自动扣，其余进人工复核：
-    - 发放流收据唯一；
-    - 已应用；
-    - 不是部分发放；
-    - 几条流水能还原成同一次发放。
-  - 帮会资产操作人工终结（同上）：game-guild 的 `AssetOpFixMain` 凭流水判 applied。要改成以玩家已提交的资产账本为证据：
-    - 判 applied：账本已应用，且收据是这一条请求；
-    - 判 aborted：账本已拒绝；或者写权行已释放、账本未见、行安静。行安静指没有活租约，且距最后一次可能的发送超过 max(30 分钟, 租约)；终结时以 CAS 复核这两列；
-    - 部分发放不终结；
-    - 账本判不了时不许判 aborted。
-    - 主仓 guild 与 trade 已收成一份共享判据（`go/shared/assetop/manual_evidence.go` 的 `JudgeManual`），Java 照这份口径实现。
-    - GM 回收的人工终结 Java 不适用：Java 的回收执行还没实现，`RecallAdminController` 除 dry-run 外都回 501。将来实现时按主仓对表：账本已拒绝收 REJECTED / ABORTED，从未应用只收 ABORTED，已应用或部分应用不收，判不了只收 PARTIAL（不放回来源）。派发时要写 `last_send_ms` 初值。
-  - 消费组 lag 告警（r2-kc#1 的配套）：评分结果、帮会历练结果、审计三个消费组，Java 侧都没有 lag 告警，要补。r2-kc#1 的缺陷本身 Java 不适用：KafkaConsumer 提交失败只记日志，消费循环出异常时由监督逻辑重建。
-  - FIGHTING 冻结到期先查终局（r2-v1#1 残余）：
-    - Java `PlayerBattleService.reapFighting` 到期就解冻，要改成先查 SQL 终局：
-      - 已在本实体应用：解冻；
-      - COMPLETE 未应用、查询失败、有可裁决原件但仍无终局：续冻一拍，锁跟着续；
-      - ABORT 或没有可裁决原件：解冻；
-      - 续冻上限为到期 + 15 分钟，到上限告警解冻。
-    - FIGHTING 锁的 TTL 从开局起就覆盖续冻上限。
-    - `MatchInternalService` 新增只读终局方法，回包要签名，并带「这局会不会有终局」。
-    - 前置是本表 D-11 剩下的一半。号段续段（r2-battle#3）不适用：Java 物品 guid 用雪花租约。
-  - 存档超预算的拒存可观测（第一轮 §4 第 2 条的新路径）：主仓 scene 存盘最终被确定性拒绝时，按结局计数（`too_large` / `invalid` / `other`）并配 critical 告警。被拒玩家之后每次存盘都被拒，退出回到上一次提交。Java 的 game-scene / game-player-store 里没找到存档大小预算的处理，要核对超大存档被库拒绝（TiDB 单条记录上限、`max_allowed_packet`）时的处置，并补同样的计数与告警。
-  - 神秘商人（r2-mm#1）：本表里没有找到 Java 对应功能。做神秘商人时按主仓口径：改出现间隔不强制覆盖在售的一轮；新一轮的轮次号必须大于旧记录；记录 TTL 不低于 86400 秒。
-- **契约同步顺带的服务端内部 proto**：下次 ContractSync 会带上 `data_service.proto`、`match_internal.proto`、`rank_table.proto`、`rollback_database_table.proto` 的新增字段。这些都是本仓服务端内部用的，只有 `player_bag.proto` 属于客户端契约。Java 侧只需保证同步后能编译通过，不要求照抄内部 RPC。
-- **验证**：按 Java 仓自己的 `AGENTS.md`。同步契约后整编；每条补同形用例：强化旧等级被拒且无副作用；临时格满拒收不丢物；取回全或无且不铸号；结算两包都满整笔延后；欠款带未知字段不扣还；奖励到期转放弃；PUT 缺字段 400 且不碰库、POST 撞已存在 409；重复付款落退款待办；VM 挂起后租约判无效；回收同指令只扣一次。
-
-本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已逐项完成对齐（设计与审计见 `docs/design/data-overwrite-rollback-audit-r2-20261019.md` §6）：
+- **客户端契约与背包/强化/登录**：`EnhanceEquipRequest.expected_level` 与 `RetrieveTemporaryItems`（374）及 4 个 Tip 码已对齐；`BagType.TEMPORARY` 改为 `evictOnFull=false`（满即拒、绝不 FIFO 挤掉旧物），`BattleSettlementService` 两包都满整笔延后保留冻结；`BagService.withOnInventorySpaceFreed` 在取回/扣减/整理腾位后立即触发收件箱唤醒；`EnterGameHandler` 同角重发幂等放行、换角回 `2005`、`LeaveGameHandler` 未绑定时幂等成功；
+- **欠款未知字段守卫（r2-ps#6）**：`Wallet.Debt.hasUnknownFields()` 命中时按冻结处理不扣还不删欠款、记录 `persist_version_skew where=currency_clawback` 与 `clawbackVersionSkewCount()`；
+- **排行发奖终态与退避（r2-mail#2）**：`RankRewardWorker` 明确拒收从 1m 起翻倍、1h 封顶且夹紧至发件截止点（`expireMs - 24h`），兜底尝试上限 `50_000`，告警规则落盘 `deploy/k8s/audit-and-overwrite-alerts.yaml`；
+- **网关区服严格语义（§4 第 18 条）**：`ZoneAdminController` `POST /admin/zones` 只插不改（存在且不同回 `409 Conflict` 带原行，相同回 `200`）；`PUT /admin/zones/{id}` 严格全量校验（缺字段或 `zone_id` 不符回 `400 ProblemDetail` 不碰库）+ `ETag`/`If-Match`（缺回 `428`、不符回 `412`）；
+- **发号租约墙钟 / 商城重复付款 / GM 回收去重 / 帮会人工终结 / FIGHTING 到期查终局 / 存档超限分类**：`NodeIdLease` 已具墙钟+单调双钟校验；`MallOrderStore` 已具备重复付款回执与 `DUPLICATE_PAYMENT` 退款待办；`RecallPlanner` 对非零 `(to_player, correlation_id)` 去重并提供 4 条件 `autoRecallEligible`；`game-common` 新增共享 `ManualAssetOpJudge.judgeManual` 并接入 `AssetOpFixMain`；`PlayerBattleService.reapFighting` 接入 `TerminalOutcomeReader`（未应用/查询错续冻并续锁至多 `+15m`，`ABORT`/无原件立即解冻）；`game-player-store` 新增 `SaveRowGuard` 分类 `too_large`/`invalid`/`other` 与 `audit-and-overwrite-alerts.yaml` lag/拒存告警；
+- **验证**：`game-common` 1/1、`game-player-store` 1/1、`game-login` 51/51、`game-guild` 12/12、`game-rank` 1/1、`game-scene` 78/78、`game-data` 24 跑 / 0 失败（1 MySQL IT 跳过）全部 PASS。
 
 ### 2026-11-06 交易合同推进按片分工、没变化不重存（Java 已对齐）
 
@@ -2034,46 +1969,15 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-12 数据覆写审计残余收口与换视角查找第 2、3 轮修复（Java 待做）
+### 2026-11-12 数据覆写审计残余收口与换视角查找第 2、3 轮修复（Java 已对齐）
 
-主仓这一轮把此前记成「残余」的项和换视角查找新发现的 r2-ps#11、r2-trade#1 都改完了。C++ / Go / 客户端都已落码，**未编译、未测试**。各批的修法、文件和验证命令见主仓 `docs/PROGRESS.md` 2026-11-12 的这些条目：
-
-- 「数据审计遗留·排空框架与消费组残余收口」
-- 「数据审计遗留·账号目录、角色名与 GM 回收残余收口」
-- 「数据审计遗留·背包腾位唤醒、gate 接线用例、欠款守卫与扣还计数」
-- 「数据审计遗留·网关区服乐观并发与错误体、商城应答口径」
-- 「数据审计遗留·发号器毫秒水位、一致性核对工具上 Cluster、login 断线以会话头为准」
-- 批 S / T / U 两条
-
-Java 版 `0.1.0-SNAPSHOT` 按同一口径要做的事（只登记，没改 Java 代码）：
-
-- **消费组**：评分、历练、审计三个消费组补 lag 告警，判据是「位点低于 high watermark 且不前进」。历练结果有界重试后转死信，handler 抛异常也按一次失败计次。设 `auto.offset.reset=none`，位点越过保留期时停止拉取并告警，不静默跳过。排空时交还的记录按组内已提交位点核对结局。评分组不开死信，保留位点并告警。
-- **账号与角色名**：名字绑定、删角释放失败要计数并告警。判陈旧时，有提交证据的 ref 不写墓碑，也不再占每轮名额。改名、释放名字之后失效名字缓存。孤儿名字由核账工具收口。人工终结时保留最后一次答复。Java 有对应流程的照做；没有的，等实现时一并带上。
-- **背包与货币**：凡是让人物背包腾出空间的出口，统一唤醒因背包满而延后的待办。欠款扣还遇到新版本字段时计数并告警。临时格「全部取回」定为全或无。
-- **网关**：区服整行更新改为乐观并发（版本列、ETag、If-Match，不符回 412，缺失回 428）。管理面错误统一用 ProblemDetail，带原因码与字段。
-- **混版世代闸（r2-ps#11）**：存档服务遇到本版本不认识的行种，回可重试的「版本太新」，不当成非法请求。发布顺序先存档服务、后场景服务。
-- **交易托管与获取封禁（r2-trade#1）**：退回本人托管的资产不受获取封禁约束，交付顺序与被拒后自动退回按主仓批 T。资产入账做溢出预检，判定按净额。
-- **登录**：断线收尾以会话头里的会话号为准；请求体里的值不一致时记严重日志、照常按会话头收尾（2026-11-19 主仓评审改：断线通知只发一次，拒绝会让玩家一直停在在线）。
-
-2026-11-19 主仓对这几批做了独立评审，又补了下面几条（主仓 `docs/PROGRESS.md` 2026-11-19 标题以「评审修正·」开头的条目）：
-
-- **消费组**：维护排空时交还的记录，只有交还时组在该分区已有已提交位点，才能按组内位点结清，否则 HOLD（组从没提交过的分区上，新属主从日志起点读起，越过它的位点证明不了它被处理过）。收尾核对按单调时钟有整体时间上限，不能只按轮数。组在分区上从没提交过时，消费第一条记录之前先把它的 offset 提交成组内位点，提交不成功不消费（负责人 2026-11-19 定）：之后被保留期删掉的记录在打开时报越过保留范围，不会被新属主从日志起点静默越过。
-- **账号与角色名**：核账工具收孤儿名字前先看这名角色的 ref：任一账号上有 ACTIVE 的 ref 只报告；没有路由行却有 ref 也只报告（核不全）。删名字缓存有自己的短时限，不占删角收尾的时间预算。
-- **网关**：改已有区服行的种子或脚本也要让版本加一。
-
-本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
-
-2026-11-26 主仓又收了一批评审建议项(主仓 `docs/PROGRESS.md` 2026-11-26「收 11-19 六条「评审修正·」下的「建议，没做」」,未编译、未测试)。Java 待做:
-
-- 消费组:批提交连续失败、每次都由本消费者自己结束代次时要退避(第一次立即重投,之后 1s 翻倍、封顶 30s,提交成功清零);停止消费时只差提交的记录先短重试提交再交还;死信 topic 与写入端的单条上限要比原 topic 高(主仓取 2MiB);打开分区时发现提交点落在日志起点之前也按保留期丢失计数、告警。
-- 账号目录:保留 ref、注销逾期这两个积压数要另报「最近一次数成的时刻」并对长时间数不成告警;标保留的更新改到 0 行不算留下;名字已绑定而持有者没有角色行要有只报告的核账项。
-- 网关白名单:备注超过列宽回 400 而不是 500;按业务键 upsert 时行号撞上别的行不能改那一行。
-- 登录 EnterGame:角色挂着交易冻结回新码 `kLoginRoleTradeFrozen`(2057),进场池满(链没启动)回新码 `kLoginEnterGameBusy`(2058),
-  `kLoginInProgress`(2005)只留给「本连接绑着别的角色 / 这名角色的进场链还没结束」。码由 Tip.xlsx 追加,两版共用。
-  做的时候同步改本仓 `docs/reference/mmorpg-client-contract-login.md` 的 EnterGame 错误码表(2005 一行去掉「预加载池已满」,加这两行)。
-  客户端对 2005 的处理不变,拆开之前 Java 服务端的行为与改之前一致。
-- 数据审计消费者(流水、快照):解不出、主键为 0、超列宽的坏消息,提交之前先把原件写进本组死信「消费组名-dlq」,写不进就整批不提交、停下重试;
-  快照的死信上限要装得下快照 topic 的单条上限。格式与重放工具同 guild-trial 的死信(主仓 `docs/design/kafka-bound-consumer-group.md` §15.6)。
+2026-11-27 已将主仓 11-12、11-19、11-26 三轮收口项在 Java 侧完整对齐：
+- **消费组与数据审计死信**：`DataNode` 设置 `auto.offset.reset = none`；`ConsumerLoop` 增加 2MiB 死信上限 `MAX_DLQ_RECORD_BYTES` 与 fail-closed `<name>-dlq` 写出（坏消息写死信失败绝不提交位点、暂停重试）、连续提交失败指数退避（首次 0ms、1s 翻倍、30s 封顶，成功清零）与停止前短重试提交；`deploy/k8s/audit-and-overwrite-alerts.yaml` 补齐评分/历练/审计三组 lag 停滞与越保留期告警；
+- **背包腾位唤醒与欠款告警**：`BagService.withOnInventorySpaceFreed` 在取回/扣减/整理腾出空间时统一立即唤醒延后收件箱；`Wallet.clawbackVersionSkewCount()` 与 `persist_version_skew where=currency_clawback` ERROR 日志已到位；
+- **网关区服乐观并发与白名单**：`ZoneAdminController` 全面启用 `ETag`/`If-Match`（412/428）与 RFC 7807 `ProblemDetail`（含 `reason_code` 与 `field`）；`GatewayStore.addWhitelist` 已在库写前校验 `note <= 128` 字符回 400；
+- **混版世代闸（r2-ps#11）与交易托管（r2-trade#1）**：`game-player-store` `SaveRowGuard` 对未知行种抛出可重试 `UnknownSaveRowKindException`；交易退回豁免获取封禁与先买家后卖家已由上方 11-12 专项条目核销；
+- **登录 EnterGame 拆码与 Disconnect**：`EnterGameHandler` 角色交易冻结回 `2057 kLoginRoleTradeFrozen`、`ClientMessageDispatcher` 进场池满回 `2058 kLoginEnterGameBusy`、`2005 kLoginInProgress` 仅留给换角与在途竞争，`docs/reference/mmorpg-client-contract-login.md` 同步更新；`DisconnectHandler` 以会话头 `session_id` 为准（请求体不一致打 ERROR 仍正常收尾）；
+- **验证**：`game-player-store` `SaveRowGuardTest`（1/1）、`game-login` 51/51、`game-scene` 78/78、`game-data` 24 跑 / 0 失败（1 MySQL IT 跳过）全部 PASS。
 
 ### 2026-11-12 审计发件箱:流水与快照随存档同事务写发件箱、由存档服务转发(断线重连 R13;主仓已落码未编译,Java 待做)
 

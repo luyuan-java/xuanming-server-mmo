@@ -797,8 +797,7 @@ public final class PlayerBattleService implements BattleHooks {
     private void onLateConfirm(long playerId, long playerInstanceId, long ownerEpoch, long battleId, long deadline,
                                Map<String, String> fields, Throwable error) {
         ScenePlayer player = world.playerById(playerId);
-        if (player != null && player.instanceId() == playerInstanceId && player.ownerEpoch() == ownerEpoch
-                && inboxPersistedApplied(player, battleId)) {
+        if (player != null && inboxPersistedApplied(player, battleId)) {
             onLogic(locks.deleteIfMatch(playerId, battleId), (ignored, failed) -> logScriptError("已持久Inbox结算清迟到确认锁", playerId, battleId, failed));
             return;
         }
@@ -1208,13 +1207,78 @@ public final class PlayerBattleService implements BattleHooks {
         });
     }
 
+    /** r2-v1#1：FIGHTING 到期前查询 Match 权威 SQL 终局的只读探针（返回本局终局状态与是否存在可裁决原件）。 */
+    public enum SqlTerminalVerdict {
+        /** 终局已 COMPLETE 且尚未在本实体应用，或有可裁决原件仍无终局：续冻一拍。 */
+        HOLD_AND_EXTEND,
+        /** 终局已 ABORT 或无任何可裁决原件：可安全解冻。 */
+        SAFE_TO_RELEASE,
+        /** 查询失败：按保守策略在 15 分钟上限内续冻，不提前解冻。 */
+        QUERY_ERROR
+    }
+
+    @FunctionalInterface
+    public interface TerminalOutcomeReader {
+        SqlTerminalVerdict queryTerminal(long playerId, long battleId);
+    }
+
+    private volatile TerminalOutcomeReader terminalOutcomeReader;
+
+    public PlayerBattleService withTerminalOutcomeReader(TerminalOutcomeReader reader) {
+        this.terminalOutcomeReader = reader;
+        return this;
+    }
+
     /**
-     * FIGHTING 的到期处理。基准是冻结的有效期限 = 战斗期限 + 终局宽限 + 收件箱投递余量（{@link BattleFreeze#effectiveDeadlineMs()}），不是战斗期限本身：
-     * Match 在期限之后的终局宽限内仍接受 COMPLETE，个人结算随后才经收件箱到达，在此之前判废会让资产通道在结算之前放行（消耗被夹紧，可刷物品）。
-     * 有效期限之后再等 D21 宽限才读本局记录（rescue），过了有效期限 + 60 s 不读直接判废。
+     * FIGHTING 的到期处理（r2-v1#1）：到期后先查权威 SQL 终局再决定解冻或续冻：
+     * <ul>
+     *   <li>已在本实体应用 → 立即解冻；</li>
+     *   <li>COMPLETE 未应用、查询失败、或有可裁决原件仍无终局 → 续冻一拍并续锁（上限有效期限 + 15 分钟）；</li>
+     *   <li>ABORT 或无任何可裁决原件 → 解冻；</li>
+     *   <li>到达 +15 分钟上限 → 打 ERROR 告警后解冻。</li>
+     * </ul>
      */
     private void reapFighting(ScenePlayer player, BattleFreeze freeze, long now) {
         long deadline = freeze.effectiveDeadlineMs();
+        TerminalOutcomeReader reader = this.terminalOutcomeReader;
+        if (reader != null && now > deadline) {
+            if ((player.battleLedger().invalidReason() == null && player.battleLedger().has(freeze.battleId()))
+                    || inboxPersistedApplied(player, freeze.battleId())) {
+                clearFreeze(player, LockAction.DELETE_IF_MATCH);
+                return;
+            }
+            if (now > deadline + BattleFreeze.MAX_FIGHTING_EXTEND_MS) {
+                clearFreeze(player, LockAction.DELETE_IF_MATCH);
+                if (festivalBeastService != null) {
+                    festivalBeastService.onBattlePrepareCancelledOrVoid(world, player, freeze.battleId());
+                }
+                metrics.rescue(Rescue.GAVE_UP);
+                metrics.freezeExpired(SceneBattleMetrics.Phase.FIGHTING);
+                log.error("FIGHTING 续冻达到 15 分钟上限仍未收到结算，告警并解冻 player={} battle_id={} deadline={}",
+                        Long.toUnsignedString(player.playerId()), Long.toUnsignedString(freeze.battleId()), freeze.deadlineMs());
+                return;
+            }
+            SqlTerminalVerdict verdict;
+            try {
+                verdict = reader.queryTerminal(player.playerId(), freeze.battleId());
+            } catch (RuntimeException e) {
+                verdict = SqlTerminalVerdict.QUERY_ERROR;
+            }
+            if (verdict == SqlTerminalVerdict.SAFE_TO_RELEASE) {
+                clearFreeze(player, LockAction.DELETE_IF_MATCH);
+                if (festivalBeastService != null) {
+                    festivalBeastService.onBattlePrepareCancelledOrVoid(world, player, freeze.battleId());
+                }
+                metrics.freezeExpired(SceneBattleMetrics.Phase.FIGHTING);
+                return;
+            }
+            // HOLD_AND_EXTEND / QUERY_ERROR：续冻并续锁，等待权威终局到达
+            long extendTtlSec = BattleRedis.lockTtlSec(deadline + BattleFreeze.MAX_FIGHTING_EXTEND_MS, now);
+            if (extendTtlSec > 0) {
+                locks.hold(player.playerId(), freeze.battleId(), extendTtlSec);
+            }
+            return;
+        }
         if (now > deadline + BattleRedis.LOCK_EXTRA_TTL_SEC * 1000) {
             // 有效期限 + 60 s 仍读不到本局记录（锁也已过期）：不读、直接判废
             clearFreeze(player, LockAction.DELETE_IF_MATCH);

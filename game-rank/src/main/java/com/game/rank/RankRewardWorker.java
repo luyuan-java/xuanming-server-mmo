@@ -65,6 +65,19 @@ public final class RankRewardWorker implements SmartLifecycle, AutoCloseable {
     }
     /** 领奖邮件最低有效领取窗口（对齐 Go MinRewardMailClaimWindow = 24h）：不足 24h 放弃发信避免发出即过期。 */
     static final long MIN_REWARD_CLAIM_WINDOW_MS = 24L * 3600_000L;
+    /** 明确拒收时的退避窗口：1 分钟起翻倍、1 小时封顶，下次尝试不晚于发件截止点。 */
+    static final long EXPLICIT_REJECT_INITIAL_BACKOFF_MS = 60_000L;
+    static final long EXPLICIT_REJECT_MAX_BACKOFF_MS = 3_600_000L;
+    /** 尝试次数兜底上限（防时钟或数据异常无限循环，远大于 30 天内退避可达次数）。 */
+    static final int MAX_SAFETY_ATTEMPTS = 50_000;
+
+    /** 计算下一次重试时刻：从 1 分钟起翻倍、1 小时封顶，且不超过 {@code expireMs - MIN_REWARD_CLAIM_WINDOW_MS}。 */
+    static long nextRejectAttemptMs(long nowMs, int attempts, long expireMs) {
+        int shift = Math.min(6, Math.max(0, attempts - 1));
+        long backoff = Math.min(EXPLICIT_REJECT_MAX_BACKOFF_MS, EXPLICIT_REJECT_INITIAL_BACKOFF_MS << shift);
+        long sendDeadline = expireMs - MIN_REWARD_CLAIM_WINDOW_MS;
+        return Math.min(nowMs + backoff, Math.max(nowMs, sendDeadline));
+    }
 
     static boolean isPermanentMailRejection(int errorId) {
         return errorId == com.game.table.MailErrorTip.mail_error.kMailRecipientDeleted_VALUE

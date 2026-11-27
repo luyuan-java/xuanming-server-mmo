@@ -42,6 +42,10 @@ public final class PlayerInboxProvider implements PlayerInboxService, AutoClosea
         this.battleSecret = System.getenv(PlayerInboxService.BATTLE_SECRET_ENV);
         this.battleSignatures = battleSecret == null || battleSecret.isBlank() ? null
                 : new com.game.discovery.serviceauth.ServiceCallSignatures(java.util.Map.of("match", battleSecret), System::currentTimeMillis);
+        if (this.battleSignatures == null) {
+            // D-5：缺战斗签名密钥时启动打 ERROR 但不阻断启动（普通 GM 收件箱照常提供服务）
+            log.error("[PlayerInbox] 缺少环境变量 {}，战斗终局入箱/查单将被拒绝（不阻断启动）", PlayerInboxService.BATTLE_SECRET_ENV);
+        }
         this.budgetMs = properties.requestBudget().toMillis();
         this.workers = new ThreadPoolExecutor(properties.workerThreads(), properties.workerThreads(), 0, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(properties.workerQueueCapacity()), Thread.ofPlatform().name("inbox-rpc-", 0).daemon(true).factory(),
@@ -73,8 +77,18 @@ public final class PlayerInboxProvider implements PlayerInboxService, AutoClosea
                     var actual = store.battleSettlement(Deadline.after(budgetMs), request, enqueue);
                     result.complete(com.game.discovery.serviceauth.ServiceCallSignatures.sign(method + "/reply", actual,
                             "inbox", battleSecret, System.currentTimeMillis()));
-                } catch (Exception failure) { result.completeExceptionally(failure); }
-                catch (Error failure) { result.completeExceptionally(failure); throw failure; }
+                } catch (SecurityException | IllegalArgumentException permanent) {
+                    // D-4：永久冲突/参数非法与暂时故障区分记录，便于调用方与告警识别
+                    log.error("[PlayerInbox] 战斗终局永久冲突 method={} player={} battle={} reason={}",
+                            method, Long.toUnsignedString(request.getPlayerId()), Long.toUnsignedString(request.getBattleId()),
+                            permanent.getMessage());
+                    result.completeExceptionally(permanent);
+                } catch (Exception transientFailure) {
+                    log.warn("[PlayerInbox] 战斗终局暂时故障 method={} player={} battle={} reason={}",
+                            method, Long.toUnsignedString(request.getPlayerId()), Long.toUnsignedString(request.getBattleId()),
+                            transientFailure.toString());
+                    result.completeExceptionally(transientFailure);
+                } catch (Error failure) { result.completeExceptionally(failure); throw failure; }
             });
         } catch (RuntimeException failure) { result.completeExceptionally(failure); }
         return result;

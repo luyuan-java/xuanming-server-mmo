@@ -91,10 +91,14 @@ public final class Wallet {
             return paid;
         }
 
-        /** 现在能不能抵扣：有剩余、未冻结、未过期（到期时间 0 = 不过期）。 */
+        /** 现在能不能抵扣：有剩余、未冻结、未过期（到期时间 0 = 不过期），且不含本版本不认识的新字段（r2-ps#6）。 */
         boolean active(long nowSeconds) {
             boolean expired = expiresAt != 0 && Long.compareUnsigned(nowSeconds, expiresAt) >= 0;
-            return remaining() != 0 && !frozen && !expired;
+            return remaining() != 0 && !frozen && !expired && !hasUnknownFields();
+        }
+
+        public boolean hasUnknownFields() {
+            return stored != null && !stored.getUnknownFields().asMap().isEmpty();
         }
 
         CurrencyDebtState toState() {
@@ -257,9 +261,25 @@ public final class Wallet {
         return balances[type] > Long.MAX_VALUE - net ? INVALID_PARAMETER : 0;
     }
 
-    /** 这笔收入里要抵补缴欠款的部分：min(收入, 剩余)，欠款不在生效期为 0。 */
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(Wallet.class);
+    private static final java.util.concurrent.atomic.AtomicLong CLAWBACK_VERSION_SKEW_COUNT = new java.util.concurrent.atomic.AtomicLong();
+
+    /** r2-ps#6：欠款扣还遇到新版本未知字段的累计次数（供 persist_version_skew 告警/单测核对）。 */
+    public static long clawbackVersionSkewCount() {
+        return CLAWBACK_VERSION_SKEW_COUNT.get();
+    }
+
+    /** 这笔收入里要抵补缴欠款的部分：min(收入, 剩余)，欠款不在生效期或含未知字段为 0（r2-ps#6）。 */
     private static long clawbackOf(Debt debt, long amount, long nowSeconds) {
-        if (debt == null || !debt.active(nowSeconds)) {
+        if (debt == null) {
+            return 0;
+        }
+        if (debt.hasUnknownFields()) {
+            CLAWBACK_VERSION_SKEW_COUNT.incrementAndGet();
+            LOG.error("persist_version_skew where=currency_clawback：欠款记录含本版本不认识的字段，按冻结处理不扣还不删欠款");
+            return 0;
+        }
+        if (!debt.active(nowSeconds)) {
             return 0;
         }
         long remaining = debt.remaining();

@@ -35,6 +35,9 @@ public final class BattleFreeze {
      * FIGHTING 冻结的到期时刻：战斗期限 + {@link MatchBudgets#TERMINAL_OUTCOME_GRACE_MS} + {@link #INBOX_DELIVERY_MARGIN_MS}（饱和加法）。
      * 期限 ≤ 0（缺失 / 损坏）原样返回，不凭空给出窗口。确认续锁、按锁重建复核、reaper 判到期都用它，锁 TTL 按它的剩余 + 60 s。
      */
+    /** r2-v1#1：FIGHTING 到期查 SQL 终局后的最大续冻上限（到期 + 15 分钟），到上限告警后解冻。 */
+    public static final long MAX_FIGHTING_EXTEND_MS = 15L * 60_000L;
+
     public static long fightingReleaseAtMs(long deadlineMs) {
         if (deadlineMs <= 0) {
             return deadlineMs;

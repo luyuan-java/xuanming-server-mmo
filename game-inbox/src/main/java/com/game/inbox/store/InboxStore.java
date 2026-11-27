@@ -192,10 +192,13 @@ public final class InboxStore {
                 .setPlayerId(request.getPlayerId()).setBattleId(request.getBattleId())
                 .setRequestDigest(ServiceCallSignatures.digest(request));
         if (request.getPlayerId() == 0 || request.getBattleId() == 0 || request.getExpectedOwnerAccount().isBlank()
-                || request.getExpectedOwnerRevision() == 0 || request.getIssuedAtMs() <= 0
-                || request.getIssuedAtMs() > nowMs.getAsLong() + 300_000) throw new SecurityException("战斗来源原身份或时间无效");
-        var validation = registry.validatePayload(type, Set.of(type), payload);
-        if (validation.tip() != 0) throw new IllegalArgumentException("战斗来源载荷不符合已登记规格");
+                || request.getExpectedOwnerRevision() == 0 || request.getIssuedAtMs() <= 0) {
+            throw new SecurityException("战斗来源原身份或时间无效");
+        }
+        // D-4：入箱校验 EnqueueTypes 白名单（查单不卡白名单，允许已入箱回放收尾）
+        Set<PlayerInboxMessageType> effectiveAllow = enqueue ? allowed : Set.of(type);
+        var validation = registry.validatePayload(type, effectiveAllow, payload);
+        if (validation.tip() != 0) throw new IllegalArgumentException("战斗来源载荷不符合已登记规格或未在入箱白名单");
         com.game.proto.BattleSettlementData settlement;
         try { settlement = com.game.proto.BattleSettlementData.parseFrom(payload); }
         catch (com.google.protobuf.InvalidProtocolBufferException invalid) { throw new IllegalArgumentException("战斗来源载荷损坏", invalid); }
@@ -222,6 +225,10 @@ public final class InboxStore {
                         .setContentSha256(com.google.protobuf.ByteString.copyFrom(digest)).build();
             }
             if (!enqueue) return response.build();
+            // D-4：issuedAt 未来窗只在新建条目时检查（幂等重放不受时钟漂移误拦）
+            if (request.getIssuedAtMs() > nowMs.getAsLong() + 300_000) {
+                throw new SecurityException("战斗来源签发时刻超出未来窗");
+            }
             // released只结束在线写租约；离线也可入箱，仍逐字核原account/revision，不改绑新主人。
             if (!owner.account().equals(request.getExpectedOwnerAccount()) || owner.revision() != request.getExpectedOwnerRevision())
                 throw new SecurityException("战斗来源不能借当前目录替换原归属");
@@ -612,8 +619,15 @@ public final class InboxStore {
         for (PlayerInboxDecisionReport report : req.getDecisionsList()) {
             var original = rows.get(report.getSeq());
             if (original != null && original.getMsgType() == PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT_VALUE
-                    && report.getOutcome() != com.game.proto.player_inbox.PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED)
-                throw new SQLException("战斗来源只能由真实SQL落盘的APPLIED终结");
+                    && report.getOutcome() != com.game.proto.player_inbox.PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED) {
+                // D-4：Battle 来源非 APPLIED 改为逐条回 ACK_CONFLICT，不整批回滚影响同批其他合法条目
+                results.add(PlayerInboxAckItem.newBuilder()
+                        .setSeq(report.getSeq())
+                        .setResult(com.game.proto.player_inbox.PlayerInboxAckResult.PLAYER_INBOX_ACK_CONFLICT)
+                        .setStateValue(original.getState())
+                        .build());
+                continue;
+            }
             InboxRules.AckDecision decision = InboxRules.decideAck(original, report);
             if (decision.finalizes()) {
                 requireOne(s.update("UPDATE " + ITEM_TABLE + " SET `state` = ?, `finalized_by` = ?, `decided_epoch` = ?, `outcome_reason` = ?,"

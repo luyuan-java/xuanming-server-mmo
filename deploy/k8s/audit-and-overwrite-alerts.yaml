@@ -1,0 +1,46 @@
+# 消费组 lag、保留期越界（auto.offset.reset=none）与玩家存档超预算拒存告警（对齐 r2-kc#1、第一轮 §4 第 2 条与 2026-11-12/26 审计收口）
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: audit-and-overwrite-alerts
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: consumer-group-lag-and-save-refusal.rules
+      interval: 30s
+      rules:
+        - alert: KafkaConsumerGroupLagStalled
+          expr: |
+            kafka_consumergroup_lag{consumergroup=~"game-(match-rating|guild-trial|data-txlog|data-snapshot).*"} > 0
+            and delta(kafka_consumergroup_current_offset{consumergroup=~"game-(match-rating|guild-trial|data-txlog|data-snapshot).*"}[5m]) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "关键消费组（评分 / 帮会历练 / 审计）存在积压且位点 5 分钟未前进"
+            description: "消费组 {{ $labels.consumergroup }} 分区 {{ $labels.partition }} 位点低于 high watermark 且未前进，请立即检查毒丸消息、DLQ 写入或数据库健康。"
+        - alert: KafkaConsumerOffsetOutOfRetention
+          expr: increase(game_kafka_consumer_offset_out_of_retention_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "消费组位点越过 Kafka 保留期（auto.offset.reset=none 已停拉）"
+            description: "检测到提交位点早于日志起点，消费端按 auto.offset.reset=none 停止拉取并告警，禁止静默跳过。"
+        - alert: ScenePlayerStoreSaveRefused
+          expr: increase(game_scene_player_store_save_refused_total{kind=~"too_large|invalid|other"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "玩家存档遭到确定性拒存（{{ $labels.kind }}）"
+            description: "玩家存档被底层库确定性拒绝（如超 TiDB 单条上限/max_allowed_packet），请立即排查该类写入防止退出回档。"
+        - alert: RankRewardAbandonedHigh
+          expr: increase(game_rank_reward_abandoned_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "排行榜结算奖励进入永久放弃终态"
+            description: "存在排行奖励因窗口不足、永久拒收或达兜底尝试上限被转入放弃终态，请按运维手册核对并决定是否人工重投。"

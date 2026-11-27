@@ -232,7 +232,7 @@ public final class DataNode implements SmartLifecycle {
         p.put(ConsumerConfig.GROUP_ID_CONFIG, group);
         p.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId(group));
         p.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-        p.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        p.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "none");
         p.put(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG, "false");
         p.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, Integer.toString(settings.maxPollRecords()));
         p.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, "500");

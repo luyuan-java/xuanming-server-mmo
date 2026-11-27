@@ -262,7 +262,7 @@ class BagTest {
     }
 
     @Test
-    void 临时格满了挤掉最早的_回执带真实数量() {
+    void 临时格满时直接拒绝不挤掉旧物() {
         Bag bag = new Bag(BagType.TEMPORARY, 3);
         long a = add(bag, 1, 1).written().get(0).guids().get(0);
         long b = add(bag, 2, 1).written().get(0).guids().get(0);
@@ -270,9 +270,11 @@ class BagTest {
 
         AddResult result = add(bag, 2, 1);
 
-        assertThat(result.ok()).isTrue();
-        assertThat(result.evicted()).containsExactly(new Removed(a, 1, 1));
+        assertThat(result.ok()).isFalse();
+        assertThat(result.tip()).isEqualTo(6006);
+        assertThat(result.evicted()).isEmpty();
         assertThat(bag.itemCount()).isEqualTo(3);
+        assertThat(bag.item(a)).isNotNull();
         assertThat(bag.item(b)).isNotNull();
         assertThat(bag.item(c)).isNotNull();
     }
@@ -288,50 +290,29 @@ class BagTest {
     }
 
     @Test
-    void 淘汰算到不动点_被挤掉的零头不能再并入() {
+    void 临时格有未满堆仍可并入但需要新槽且已满时拒收() {
         Bag bag = new Bag(BagType.TEMPORARY, 2);
         add(bag, 9, 1);
         add(bag, 1, 1);
 
-        AddResult result = add(bag, 9, 3);
+        // 9 的 maxStack=2：补 1 个可并入现有未满堆；补 3 个需要额外槽，整批拒绝且旧物保留
+        assertThat(add(bag, 9, 3).tip()).isEqualTo(6006);
+        assertThat(bag.total(9)).isEqualTo(1);
+        assertThat(bag.total(1)).isEqualTo(1);
 
-        assertThat(result.ok()).isTrue();
-        assertThat(result.evicted()).hasSize(2);
-        assertThat(bag.total(9)).isEqualTo(3);
-        assertThat(bag.itemCount()).isEqualTo(2);
+        AddResult merged = add(bag, 9, 1);
+        assertThat(merged.ok()).isTrue();
+        assertThat(merged.evicted()).isEmpty();
+        assertThat(bag.total(9)).isEqualTo(2);
     }
 
     @Test
-    void 最早的不是零头时零头照常并入() {
-        Bag bag = new Bag(BagType.TEMPORARY, 2);
-        add(bag, 1, 1);
-        add(bag, 9, 1);
-
-        AddResult result = add(bag, 9, 3);
-
-        assertThat(result.ok()).isTrue();
-        assertThat(result.evicted()).extracting(Removed::configId).containsExactly(1);
-        assertThat(bag.total(9)).isEqualTo(4);
-    }
-
-    @Test
-    void 先进先出按入包序号而不是guid() {
-        Bag bag = new Bag(BagType.TEMPORARY, 2);
-        put(bag, 900001, 1, 1, 2, 0);
-        put(bag, 900002, 1, 1, 1, 1);
-
-        AddResult result = add(bag, 2, 1);
-
-        assertThat(result.evicted()).extracting(Removed::guid).containsExactly(900002L);
-    }
-
-    @Test
-    void 发号源不可用时先判号_一件都不淘汰() {
+    void 发号源不可用且无空槽时拒收且不淘汰旧物() {
         Bag bag = new Bag(BagType.TEMPORARY, 2);
         add(bag, 1, 2);
         guids.budget = 0;
         AddResult result = add(bag, 1, 1);
-        assertThat(result.tip()).isEqualTo(6004);
+        assertThat(result.ok()).isFalse();
         assertThat(result.evicted()).isEmpty();
         assertThat(bag.itemCount()).isEqualTo(2);
     }

@@ -51,7 +51,8 @@ final class BattleInboxRecoveryTest {
                 try(var c=base.source.getConnection();var q=c.prepareStatement("INSERT INTO player_final_save VALUES(1,1,'battle-inbox-scene',1,1,'OPEN',?)")){
                     q.setBytes(1,SceneAdmissionAuthority.original(identity()));assertEquals(1,q.executeUpdate());
                 }
-                store=new InboxStore(base.jdbc,InboxRegistry.load(),Set.of(),new JdbcPlayerTables(base.jdbc),ConsumerGate.ALWAYS_OPEN,
+                store=new InboxStore(base.jdbc,InboxRegistry.load(),Set.of(PlayerInboxMessageType.PLAYER_INBOX_MSG_BATTLE_SETTLEMENT),
+                        new JdbcPlayerTables(base.jdbc),ConsumerGate.ALWAYS_OPEN,
                         Notifier.NONE,new InboxMetrics(base.metrics),clock::get,new ServiceCallSignatures(Map.of(InboxCallContract.CALLER,SECRET),clock::get));
             }catch(Exception|AssertionError failure){try{base.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
         }
@@ -86,7 +87,7 @@ final class BattleInboxRecoveryTest {
             var original=request(91);var first=f.store.battleSettlement(budget(),original,true);
             assertTrue(first.getSeq()!=0);assertEquals(PlayerInboxItemState.PLAYER_INBOX_ITEM_PENDING,first.getState());
             assertEquals(1,f.fetch().getItemsCount());
-            assertThrows(SQLException.class,()->f.ack(first.getSeq(),91,PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_UNKNOWN));
+            assertEquals(PlayerInboxAckResult.PLAYER_INBOX_ACK_CONFLICT,f.ack(first.getSeq(),91,PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_UNKNOWN).getResults(0).getResult());
             assertEquals(PlayerInboxItemState.PLAYER_INBOX_ITEM_PENDING_VALUE,f.item(91).getState());
             assertEquals(PlayerInboxAckResult.PLAYER_INBOX_ACK_FINALIZED,f.ack(first.getSeq(),91,PlayerInboxOutcome.PLAYER_INBOX_OUTCOME_APPLIED).getResults(0).getResult());
             f.clock.addAndGet(TimeUnit.DAYS.toMillis(10));

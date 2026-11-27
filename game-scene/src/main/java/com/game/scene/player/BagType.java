@@ -14,7 +14,8 @@ public enum BagType {
     INVENTORY(0, 100, Layout.FLAT, false),
     WAREHOUSE(1, 200, Layout.FLAT, false),
     EQUIPMENT(2, 10, Layout.SLOTTED, false),
-    TEMPORARY(3, 200, Layout.FLAT, true);
+    /** cpp-economy#2：临时格满时整批拒绝不挤掉旧物，避免静默丢物。 */
+    TEMPORARY(3, 200, Layout.FLAT, false);
 
     /** 格子布局：扁平（一个实例一格，first-fit）或具名槽（槽号 = EquipSlot.id，按部位分桶）。 */
     public enum Layout {

@@ -11,11 +11,14 @@ import com.game.gateway.store.ZoneManualStatus;
 import com.game.gateway.store.ZoneRow;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -23,6 +26,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -96,26 +100,76 @@ public class ZoneAdminController {
     }
 
     @PostMapping(PATH)
-    public ZoneView create(@RequestBody ZoneBody body, HttpServletRequest request) {
-        if (body.zoneId() == null || body.name() == null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 与 name 必填");
+    public ResponseEntity<?> create(@RequestBody ZoneBody body, HttpServletRequest request) {
+        if (body == null || body.zoneId() == null || body.name() == null) {
+            return problem(HttpStatus.BAD_REQUEST, "missing_required_field", "zone_id", "zone_id 与 name 必填");
         }
         if (body.zoneId() <= 0 || body.zoneId() > ZoneIds.MAX) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "zone_id 须在 1–4294967295");
+            return problem(HttpStatus.BAD_REQUEST, "invalid_zone_id", "zone_id", "zone_id 须在 1–4294967295");
         }
-        ZoneRow stored = checked(() -> store.upsertZone(body.toRow(ZoneIds.requiredBits(body.zoneId()))));
-        audit.warn("zone upsert zone_id={} status={} operator={}", Integer.toUnsignedLong(stored.zoneId()), stored.manualStatus(),
+        int bits = ZoneIds.requiredBits(body.zoneId());
+        ZoneRow target = body.toRow(bits);
+        Optional<ZoneRow> existing = store.zone(bits);
+        if (existing.isPresent()) {
+            ZoneRow current = existing.get();
+            if (sameSettings(current, target)) {
+                return withEtag(current);
+            }
+            ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, "区服已存在且配置不同，拒绝覆写");
+            pd.setProperty("reason_code", "zone_already_exists");
+            pd.setProperty("field", "zone_id");
+            pd.setProperty("existing", ZoneView.of(current));
+            return ResponseEntity.status(HttpStatus.CONFLICT).eTag(etag(current)).body(pd);
+        }
+        ZoneRow stored = checked(() -> store.upsertZone(target));
+        audit.warn("zone create zone_id={} status={} operator={}", Integer.toUnsignedLong(stored.zoneId()), stored.manualStatus(),
                 operator(request));
-        return ZoneView.of(stored);
+        return withEtag(stored);
     }
 
     @PutMapping(PATH + "/{zoneId}")
-    public ResponseEntity<ZoneView> update(@PathVariable("zoneId") long zoneId, @RequestBody ZoneBody body,
-                                           HttpServletRequest request) {
-        if (body.name() == null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name 必填");
+    public ResponseEntity<?> update(@PathVariable("zoneId") long zoneId,
+                                    @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch,
+                                    @RequestBody(required = false) ZoneBody body,
+                                    HttpServletRequest request) {
+        int bits = requiredZone(zoneId);
+        if (body == null) {
+            return problem(HttpStatus.BAD_REQUEST, "missing_body", "body", "请求体必填");
         }
-        Optional<ZoneRow> stored = checked(() -> store.updateZone(requiredZone(zoneId), body.toRow(requiredZone(zoneId))));
+        if (body.zoneId() != null && body.zoneId() != zoneId) {
+            return problem(HttpStatus.BAD_REQUEST, "zone_id_mismatch", "zone_id", "请求体 zone_id 与路径不一致");
+        }
+        if (body.name() == null || body.name().isBlank()) {
+            return problem(HttpStatus.BAD_REQUEST, "missing_required_field", "name", "name 必填");
+        }
+        if (body.manualStatus() == null) {
+            return problem(HttpStatus.BAD_REQUEST, "missing_required_field", "manual_status", "PUT 整行替换必须显式提供 manual_status");
+        }
+        if (body.capacity() == null) {
+            return problem(HttpStatus.BAD_REQUEST, "missing_required_field", "capacity", "PUT 整行替换必须显式提供 capacity");
+        }
+        if (ZoneManualStatus.fromCode(body.manualStatus()).isEmpty()) {
+            return problem(HttpStatus.BAD_REQUEST, "invalid_manual_status", "manual_status", "manual_status 只能是 0–3");
+        }
+        if (body.capacity() < 0) {
+            return problem(HttpStatus.BAD_REQUEST, "invalid_capacity", "capacity", "capacity 不能为负");
+        }
+        if (ifMatch == null || ifMatch.isBlank()) {
+            return problem(HttpStatus.PRECONDITION_REQUIRED, "missing_if_match", HttpHeaders.IF_MATCH, "PUT 整行替换必须带 If-Match 版本头");
+        }
+        Optional<ZoneRow> currentOpt = store.zone(bits);
+        if (currentOpt.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        String currentEtag = etag(currentOpt.get());
+        if (!matchesEtag(ifMatch, currentEtag)) {
+            ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.PRECONDITION_FAILED, "区服版本已变化，请重新读取后重试");
+            pd.setProperty("reason_code", "etag_mismatch");
+            pd.setProperty("field", HttpHeaders.IF_MATCH);
+            pd.setProperty("current_etag", currentEtag);
+            return ResponseEntity.status(HttpStatus.PRECONDITION_FAILED).eTag(currentEtag).body(pd);
+        }
+        Optional<ZoneRow> stored = checked(() -> store.updateZone(bits, body.toRow(bits)));
         audit.warn("zone update zone_id={} found={} operator={}", zoneId, stored.isPresent(), operator(request));
         return okOrNotFound(stored);
     }
@@ -172,7 +226,50 @@ public class ZoneAdminController {
     }
 
     private static ResponseEntity<ZoneView> okOrNotFound(Optional<ZoneRow> zone) {
-        return zone.map(z -> ResponseEntity.ok(ZoneView.of(z))).orElseGet(() -> ResponseEntity.notFound().build());
+        return zone.map(ZoneAdminController::withEtag).orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    private static ResponseEntity<ZoneView> withEtag(ZoneRow row) {
+        return ResponseEntity.ok().eTag(etag(row)).body(ZoneView.of(row));
+    }
+
+    static String etag(ZoneRow row) {
+        return "\"v" + row.updatedAt() + "\"";
+    }
+
+    private static boolean matchesEtag(String ifMatch, String currentEtag) {
+        String trimmed = ifMatch.trim();
+        if ("*".equals(trimmed)) {
+            return true;
+        }
+        for (String token : trimmed.split(",")) {
+            String candidate = token.trim();
+            if (candidate.startsWith("W/")) {
+                candidate = candidate.substring(2).trim();
+            }
+            if (currentEtag.equals(candidate)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean sameSettings(ZoneRow a, ZoneRow b) {
+        return a.zoneId() == b.zoneId()
+                && Objects.equals(a.name(), b.name())
+                && a.manualStatus() == b.manualStatus()
+                && a.capacity() == b.capacity()
+                && Objects.equals(a.maintenanceMsg(), b.maintenanceMsg())
+                && Objects.equals(a.openTime(), b.openTime())
+                && a.recommended() == b.recommended()
+                && a.sortOrder() == b.sortOrder();
+    }
+
+    private static ResponseEntity<ProblemDetail> problem(HttpStatus status, String reasonCode, String field, String detail) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(status, detail);
+        pd.setProperty("reason_code", reasonCode);
+        pd.setProperty("field", field);
+        return ResponseEntity.status(status).body(pd);
     }
 
     /** 存储层的参数校验失败回 400（带原因）。 */

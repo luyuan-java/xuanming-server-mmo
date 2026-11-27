@@ -295,8 +295,15 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
             return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));
         }
         String account = session.getAccount();
-        if (account.isEmpty() || session.getPlayerId() != 0) {
+        if (account.isEmpty()) {
             return done(error(LoginErrorTip.login_error.kLoginSessionNotFound_VALUE));
+        }
+        // 第一轮审计 §4 第 9 条：同一会话已绑定不同角色 -> 2005 kLoginInProgress（须先 LeaveGame）；同角色重试幂等放行且不二次夺权。
+        if (session.getPlayerId() != 0) {
+            if (session.getPlayerId() != playerId) {
+                return done(error(LoginErrorTip.login_error.kLoginInProgress_VALUE));
+            }
+            return done(HandlerReply.of(EnterGameResponse.newBuilder().setPlayerId(playerId).build()));
         }
         Integer refused = deviceRenewal.apply(session);
         if (refused != null) {
@@ -332,7 +339,10 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         if (com.game.login.character.CharacterAppearances.isRemoved(row.getAppearanceId())) {
             return done(error(LoginErrorTip.login_error.kLoginEnterGameGuid_VALUE));
         }
-        if (row.getTradeListingId() != 0 || row.getOwnerRevision() <= 0) {
+        if (row.getTradeListingId() != 0) {
+            return done(error(LoginErrorTip.login_error.kLoginRoleTradeFrozen_VALUE));
+        }
+        if (row.getOwnerRevision() <= 0) {
             return done(error(LoginErrorTip.login_error.kLoginInProgress_VALUE));
         }
         long minorPlayDeadlineMs = 0L;

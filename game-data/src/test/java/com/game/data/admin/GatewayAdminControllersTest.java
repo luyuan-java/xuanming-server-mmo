@@ -102,12 +102,62 @@ class GatewayAdminControllersTest {
     }
 
     @Test
-    void 区服_改不存在404_缺name400_删204或404_维护与开放() throws Exception {
-        when(store.updateZone(eq(7), any())).thenReturn(Optional.empty());
-        mvc.perform(put("/admin/zones/7").contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"七区\"}"))
-                .andExpect(status().isNotFound());
+    void 区服_创建只插不改_撞已存在不同409带原行_相同200() throws Exception {
+        when(store.zone(1)).thenReturn(Optional.of(ZONE));
+        mvc.perform(post("/admin/zones").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"zone_id\":1,\"name\":\"一区改名\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.reason_code").value("zone_already_exists"))
+                .andExpect(jsonPath("$.existing.name").value("一区"));
+        verify(store, never()).upsertZone(any());
+
+        mvc.perform(post("/admin/zones").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"zone_id\":1,\"name\":\"一区\",\"manual_status\":1,\"capacity\":5000,\"maintenance_msg\":\"停服\",\"open_time\":1900000000,\"recommended\":true,\"sort_order\":2}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name").value("一区"));
+        verify(store, never()).upsertZone(any());
+    }
+
+    @Test
+    void 区服_改不存在404_缺字段400_缺IfMatch428_不符412_匹配200_删204或404_维护与开放() throws Exception {
+        // 缺必填字段 / zone_id 不符 -> 400 且完全不碰 store
         mvc.perform(put("/admin/zones/7").contentType(MediaType.APPLICATION_JSON).content("{}"))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.reason_code").value("missing_required_field"));
+        mvc.perform(put("/admin/zones/7").contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"七区\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.field").value("manual_status"));
+        mvc.perform(put("/admin/zones/7").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"zone_id\":8,\"name\":\"七区\",\"manual_status\":0,\"capacity\":1000}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.reason_code").value("zone_id_mismatch"));
+        // 缺 If-Match -> 428
+        mvc.perform(put("/admin/zones/7").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"七区\",\"manual_status\":0,\"capacity\":1000}"))
+                .andExpect(status().isPreconditionRequired())
+                .andExpect(jsonPath("$.reason_code").value("missing_if_match"));
+        verify(store, never()).updateZone(anyInt(), any());
+
+        // 不存在 -> 404
+        when(store.zone(7)).thenReturn(Optional.empty());
+        mvc.perform(put("/admin/zones/7").header("If-Match", "\"v20\"").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"七区\",\"manual_status\":0,\"capacity\":1000}"))
+                .andExpect(status().isNotFound());
+
+        // If-Match 不符 -> 412 且不更新
+        when(store.zone(1)).thenReturn(Optional.of(ZONE));
+        mvc.perform(put("/admin/zones/1").header("If-Match", "\"v999\"").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"一区新\",\"manual_status\":0,\"capacity\":6000}"))
+                .andExpect(status().isPreconditionFailed())
+                .andExpect(jsonPath("$.reason_code").value("etag_mismatch"));
+        verify(store, never()).updateZone(anyInt(), any());
+
+        // If-Match 匹配 -> 200 并更新
+        when(store.updateZone(eq(1), any())).thenReturn(Optional.of(ZONE));
+        mvc.perform(put("/admin/zones/1").header("If-Match", "\"v20\"").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"一区新\",\"manual_status\":0,\"capacity\":6000}"))
+                .andExpect(status().isOk());
+
         when(store.deleteZone(1)).thenReturn(true);
         mvc.perform(delete("/admin/zones/1")).andExpect(status().isNoContent());
         mvc.perform(delete("/admin/zones/2")).andExpect(status().isNotFound());
@@ -173,10 +223,10 @@ class GatewayAdminControllersTest {
                     .andExpect(jsonPath("$.zone_id").value(value));
             mvc.perform(get("/admin/zones")).andExpect(jsonPath("$[0].zone_id").value(value));
             mvc.perform(post("/admin/zones").contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"zone_id\":" + value + ",\"name\":\"高位\"}"))
+                            .content("{\"zone_id\":" + value + ",\"name\":\"高位\",\"manual_status\":0,\"capacity\":5000,\"sort_order\":-7}"))
                     .andExpect(status().isOk()).andExpect(jsonPath("$.zone_id").value(value));
-            mvc.perform(put("/admin/zones/" + value).contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"zone_id\":1,\"name\":\"路径\"}"))
+            mvc.perform(put("/admin/zones/" + value).header("If-Match", "\"v20\"").contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"zone_id\":" + value + ",\"name\":\"路径\",\"manual_status\":0,\"capacity\":5000}"))
                     .andExpect(status().isOk()).andExpect(jsonPath("$.zone_id").value(value));
             mvc.perform(post("/admin/zones/" + value + "/maintenance")).andExpect(status().isOk());
             mvc.perform(post("/admin/zones/" + value + "/open")).andExpect(status().isOk());
@@ -186,7 +236,7 @@ class GatewayAdminControllersTest {
                     .andExpect(status().isOk()).andExpect(jsonPath("$.zone_id").value(value));
             mvc.perform(get("/admin/whitelist/" + value)).andExpect(jsonPath("$[0].zone_id").value(value));
             mvc.perform(delete("/admin/whitelist/" + value + "/a")).andExpect(status().isNoContent());
-            verify(store).zone(bits);
+            verify(store, org.mockito.Mockito.atLeastOnce()).zone(bits);
             verify(store).removeWhitelist(bits, "a");
         }
     }

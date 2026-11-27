@@ -33,6 +33,8 @@ public final class BagService {
     private final SceneMetrics metrics;
     /** 当前生效的全服产出封禁名单（只在逻辑线程上读写）。 */
     private GlobalGainBlocks globalBlocks = GlobalGainBlocks.NONE;
+    /** 人物背包或临时格腾出空位时的唤醒回调（用于立即唤醒因包满而延后的收件箱域，不等退避）。 */
+    private java.util.function.Consumer<ScenePlayer> onInventorySpaceFreed = player -> { };
 
     public BagService(BagTables tables, ItemGuids guids, AssetAudit audit, GainAnomalyDetector anomalies,
                       SceneMetrics metrics) {
@@ -41,6 +43,21 @@ public final class BagService {
         this.audit = audit;
         this.anomalies = anomalies;
         this.metrics = metrics;
+    }
+
+    public BagService withOnInventorySpaceFreed(java.util.function.Consumer<ScenePlayer> hook) {
+        this.onInventorySpaceFreed = hook == null ? player -> { } : hook;
+        return this;
+    }
+
+    private void notifySpaceFreed(ScenePlayer player) {
+        try {
+            onInventorySpaceFreed.accept(player);
+        } catch (RuntimeException failure) {
+            org.slf4j.LoggerFactory.getLogger(BagService.class).warn(
+                    "bag_space_freed_wakeup_failed player={} reason={}",
+                    Long.toUnsignedString(player.playerId()), failure.getClass().getSimpleName());
+        }
     }
 
     public BagTables tables() {
@@ -119,6 +136,9 @@ public final class BagService {
                         anomalies.itemGained(player, item.configId(), item.count());
                     }
                 } catch (RuntimeException failure) { transferAuditFailure(correlationId, failure); }
+            }
+            if (!removed.isEmpty()) {
+                notifySpaceFreed(player);
             }
         }
     }
@@ -352,6 +372,9 @@ public final class BagService {
             audit.itemDestroyed(player.playerId(), retired.guid(), retired.configId(), 0, AssetAudit.Reason.ITEM_DESTROY,
                     0, "");
         }
+        if ((type == BagType.INVENTORY || type == BagType.TEMPORARY) && !result.retired().isEmpty()) {
+            notifySpaceFreed(player);
+        }
         return result;
     }
 
@@ -403,6 +426,7 @@ public final class BagService {
             }
         }
         player.bags().commitPrepared(candidate);
+        notifySpaceFreed(player);
         return 0;
     }
 
@@ -434,6 +458,9 @@ public final class BagService {
                 removed.put(e.getKey(), total);
             }
         }
+        if ((type == BagType.INVENTORY || type == BagType.TEMPORARY) && !removed.isEmpty()) {
+            notifySpaceFreed(player);
+        }
         return removed;
     }
 
@@ -447,6 +474,9 @@ public final class BagService {
         Bag.SortResult result = player.bags().bag(type).mergeAndCompact(false, tables);
         for (Bag.Removed retired : result.retired()) {
             audit.itemDestroyed(player.playerId(), retired.guid(), retired.configId(), 0, AssetAudit.Reason.ITEM_DESTROY, 0, "");
+        }
+        if ((type == BagType.INVENTORY || type == BagType.TEMPORARY) && !result.retired().isEmpty()) {
+            notifySpaceFreed(player);
         }
     }
 

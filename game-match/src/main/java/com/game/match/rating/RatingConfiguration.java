@@ -114,8 +114,13 @@ public class RatingConfiguration {
             ObjectProvider<com.game.discovery.workshard.RedisWorkShardMembership> workShard,
             ObjectProvider<com.game.match.spectate.RankedSpectateIndex> rankedSpectateIndex,
             ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters) {
+        String inboxSecret = System.getenv(com.game.api.PlayerInboxService.BATTLE_SECRET_ENV);
+        if (inboxSecret == null || inboxSecret.isBlank()) {
+            throw new IllegalStateException("缺少环境变量 " + com.game.api.PlayerInboxService.BATTLE_SECRET_ENV
+                    + "（全球终局回放投递收件箱的签名密钥），拒绝启动");
+        }
         var replay = new BattleCompletionReplay(source,formations,inbox.get(),publisher,
-                System.getenv(com.game.api.PlayerInboxService.BATTLE_SECRET_ENV),System::currentTimeMillis,metrics)
+                inboxSecret,System::currentTimeMillis,metrics)
                 .withRankedSpectateIndex(rankedSpectateIndex.getIfAvailable());
         var shards = workShard.getIfAvailable();
         if (shards != null) {

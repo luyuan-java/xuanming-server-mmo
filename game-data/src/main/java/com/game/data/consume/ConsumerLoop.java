@@ -38,9 +38,19 @@ import org.slf4j.LoggerFactory;
 public final class ConsumerLoop<R> implements Runnable {
 
     static final String POISON_LOGGER = "game.audit.poison";
+    /** 死信单条载荷上限（2 MiB，大于原 topic 上限，容纳原件 + 封装头）。 */
+    public static final int MAX_DLQ_RECORD_BYTES = 2 * 1024 * 1024;
+    static final long COMMIT_BACKOFF_INITIAL_MS = 1_000L;
+    static final long COMMIT_BACKOFF_MAX_MS = 30_000L;
 
     private static final Logger log = LoggerFactory.getLogger(ConsumerLoop.class);
     private static final Logger poison = LoggerFactory.getLogger(POISON_LOGGER);
+
+    /** 死信写出端（写不进抛异常；调用方据此整批不提交位点、退避重试）。 */
+    @FunctionalInterface
+    public interface DlqSink {
+        void publish(String dlqTopic, ConsumerRecord<String, byte[]> record, String reason);
+    }
 
     /** 一条记录的解码结果：成功给出行，否则给出跳过的结局。 */
     public record Decoded<R>(R row, Outcome skipped) {
@@ -82,6 +92,10 @@ public final class ConsumerLoop<R> implements Runnable {
     private final Duration retryInitial;
     private final Duration retryMax;
     private final Backoff backoff;
+    private final String dlqTopic;
+    private volatile DlqSink dlqSink;
+    /** 连续位点提交失败计数（只在本线程读写）：第 1 次 0ms 立即重投，之后 1s 翻倍、30s 封顶，成功清零。 */
+    private int consecutiveCommitFailures;
     /** 按分区并行落库并发上限（= 连接池连接数 - 1；1 时退化为单线程整批串行落库）。 */
     private final int dbConcurrency;
     private final java.util.concurrent.Semaphore dbPermits;
@@ -136,6 +150,60 @@ public final class ConsumerLoop<R> implements Runnable {
                 })
                 : null;
         this.backoff = backoff;
+        this.dlqTopic = name + "-dlq";
+    }
+
+    /** 装配死信写出端与死信 topic（默认 {@code <name>-dlq}，生产可配 {@code <group>-dlq}）；失败必须抛异常。 */
+    public ConsumerLoop<R> withDlqSink(DlqSink dlqSink) {
+        this.dlqSink = dlqSink;
+        return this;
+    }
+
+    /** 连续提交失败退避计算：第 1 次失败 0ms 立即重投，之后 1s 起翻倍、30s 封顶。 */
+    public static long commitFailureBackoffMs(int consecutiveFailures) {
+        if (consecutiveFailures <= 1) {
+            return 0L;
+        }
+        int shift = Math.min(consecutiveFailures - 2, 10);
+        return Math.min(COMMIT_BACKOFF_INITIAL_MS << shift, COMMIT_BACKOFF_MAX_MS);
+    }
+
+    private void routeBadRecordToDlq(ConsumerRecord<String, byte[]> record, String reason) {
+        DlqSink sink = this.dlqSink;
+        if (sink == null) {
+            return;
+        }
+        byte[] payload = record.value();
+        if (payload != null && payload.length > MAX_DLQ_RECORD_BYTES) {
+            throw new IllegalStateException("dlq record exceeds " + MAX_DLQ_RECORD_BYTES + " bytes: " + payload.length);
+        }
+        sink.publish(dlqTopic, record, reason);
+    }
+
+    private void commitWithBackoff(Map<TopicPartition, OffsetAndMetadata> offsets, String context) {
+        try {
+            consumer.commitSync(offsets);
+            consecutiveCommitFailures = 0;
+        } catch (WakeupException e) {
+            // 停止时若仅差提交位点，做一次短重试提交，尽量不把已落库批次交还重放
+            if (!running) {
+                try {
+                    consumer.commitSync(offsets, Duration.ofMillis(500));
+                    consecutiveCommitFailures = 0;
+                } catch (RuntimeException ignored) {
+                    log.warn("{} 停止前短重试提交{}失败（已落库，重放无害）", name, context);
+                }
+            }
+            throw e;
+        } catch (RuntimeException e) {
+            consecutiveCommitFailures++;
+            long delayMs = commitFailureBackoffMs(consecutiveCommitFailures);
+            log.warn("{} 提交{}失败（连续第 {} 次，退避 {}ms，已落库重放无害）：{}",
+                    name, context, consecutiveCommitFailures, delayMs, e.toString());
+            if (delayMs > 0L && running) {
+                backoff.await(Duration.ofMillis(delayMs), this::pollWhilePaused);
+            }
+        }
     }
 
     @Override
@@ -193,6 +261,7 @@ public final class ConsumerLoop<R> implements Runnable {
         }
         List<R> rows = new ArrayList<>(records.count());
         List<ConsumerRecord<String, byte[]>> sources = new ArrayList<>(records.count());
+        List<Map.Entry<ConsumerRecord<String, byte[]>, String>> badRecords = new ArrayList<>();
         Map<TopicPartition, OffsetAndMetadata> next = new HashMap<>();
         Map<Outcome, Long> skipped = new HashMap<>();
         for (ConsumerRecord<String, byte[]> record : records) {
@@ -202,6 +271,7 @@ public final class ConsumerLoop<R> implements Runnable {
                 sources.add(record);
             } else {
                 skipped.merge(decoded.skipped(), 1L, Long::sum);
+                badRecords.add(Map.entry(record, decoded.skipped() == null ? "invalid" : decoded.skipped().name()));
                 log.warn("{} 跳过记录 topic={} partition={} offset={} 原因={}", name, record.topic(), record.partition(),
                         record.offset(), decoded.skipped());
             }
@@ -211,17 +281,56 @@ public final class ConsumerLoop<R> implements Runnable {
         for (TopicPartition tp : records.partitions()) {
             batchStart.put(tp, records.records(tp).get(0).offset());
         }
+        if (!badRecords.isEmpty() && !flushDlqOrRetry(badRecords, next.keySet(), batchStart)) {
+            return;
+        }
         if (!rows.isEmpty() && !persist(rows, sources, next.keySet(), batchStart)) {
             return;
         }
         skipped.forEach((outcome, count) -> metrics.record(name, outcome, count));
+        commitWithBackoff(next, "位点");
+    }
+
+    private boolean flushDlqOrRetry(List<Map.Entry<ConsumerRecord<String, byte[]>, String>> badRecords,
+                                    Set<TopicPartition> partitions, Map<TopicPartition, Long> batchStart) {
+        if (dlqSink == null) {
+            return true;
+        }
+        Duration delay = retryInitial;
+        boolean paused = false;
         try {
-            consumer.commitSync(next);
-        } catch (WakeupException e) {
-            throw e;
-        } catch (RuntimeException e) {
-            // 行已落库，重放只会按主键去重
-            log.warn("{} 提交位点失败（已落库，重放无害）：{}", name, e.toString());
+            while (running) {
+                try {
+                    for (var entry : badRecords) {
+                        routeBadRecordToDlq(entry.getKey(), entry.getValue());
+                    }
+                    return true;
+                } catch (RuntimeException e) {
+                    log.error("{} 写入死信 {} 失败，拒绝提交位点，{} 后重试：{}", name, dlqTopic, delay, e.toString());
+                }
+                if (!running) {
+                    return false;
+                }
+                if (!paused) {
+                    consumer.pause(consumer.assignment());
+                    paused = true;
+                    pausedForRetry = true;
+                }
+                backoff.await(delay, this::pollWhilePaused);
+                updateLagWhilePaused(batchStart);
+                if (!running || revokedDuringBatch.stream().anyMatch(partitions::contains)) {
+                    return false;
+                }
+                delay = delay.multipliedBy(2).compareTo(retryMax) > 0 ? retryMax : delay.multipliedBy(2);
+            }
+            return false;
+        } finally {
+            if (paused) {
+                pausedForRetry = false;
+                Set<TopicPartition> resume = new HashSet<>(consumer.paused());
+                resume.retainAll(consumer.assignment());
+                consumer.resume(resume);
+            }
         }
     }
 
@@ -306,26 +415,14 @@ public final class ConsumerLoop<R> implements Runnable {
             }
         }
         if (!committed.isEmpty()) {
-            try {
-                consumer.commitSync(committed);
-            } catch (WakeupException e) {
-                throw e;
-            } catch (RuntimeException e) {
-                log.warn("{} 并行提交成功分区位点失败（已落库，重放无害）：{}", name, e.toString());
-            }
+            commitWithBackoff(committed, "并行成功分区位点");
         }
         // 遇到可恢复故障的分区回落原单分区暂停退避重试，保住组成员身份与不丢语义
         for (var slice : failedSlices) {
             if (!running || revokedDuringBatch.contains(slice.tp())) continue;
             if (persist(slice.rows(), slice.sources(), Set.of(slice.tp()), Map.of(slice.tp(), slice.startOffset()))) {
                 slice.skipped().forEach((outcome, count) -> metrics.record(name, outcome, count));
-                try {
-                    consumer.commitSync(Map.of(slice.tp(), slice.nextOffset()));
-                } catch (WakeupException e) {
-                    throw e;
-                } catch (RuntimeException e) {
-                    log.warn("{} 分区 {} 重试提交位点失败（已落库）：{}", name, slice.tp(), e.toString());
-                }
+                commitWithBackoff(Map.of(slice.tp(), slice.nextOffset()), "分区 " + slice.tp() + " 重试位点");
             }
         }
     }
@@ -409,6 +506,7 @@ public final class ConsumerLoop<R> implements Runnable {
                 }
                 rejected++;
                 ConsumerRecord<String, byte[]> source = sources.get(i);
+                routeBadRecordToDlq(source, e.getClass().getSimpleName());
                 poison.error("{} 数据库拒绝的行 topic={} partition={} offset={} row={} 错误={}", name, source.topic(),
                         source.partition(), source.offset(), rows.get(i), e.toString());
             }

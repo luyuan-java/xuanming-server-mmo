@@ -187,13 +187,24 @@ public final class RecallPlanner {
         Set<Long> recalled = rows.isEmpty() ? Set.of() : jobs.recalledAmong(matched.keySet());
 
         Map<Long, BigInteger> owed = new TreeMap<>(Long::compareUnsigned);
+        Set<String> seenCorrelations = new java.util.HashSet<>();
+        int deduplicatedCorrelations = 0;
         List<Map<String, Object>> rowViews = new ArrayList<>();
         for (TransactionLogEntry e : rows) {
             BigInteger qty = quantity(plan, e);
             boolean already = recalled.contains(e.getTxId());
+            boolean duplicateCorrelation = false;
+            if (e.getCorrelationId() != 0L) {
+                String corrKey = Long.toUnsignedString(e.getToPlayer()) + ":" + Long.toUnsignedString(e.getCorrelationId());
+                if (!seenCorrelations.add(corrKey)) {
+                    duplicateCorrelation = true;
+                    deduplicatedCorrelations++;
+                }
+            }
             Map<String, Object> v = new LinkedHashMap<>();
             v.put("txId", Long.toUnsignedString(e.getTxId()));
             v.put("player", Long.toUnsignedString(e.getToPlayer()));
+            v.put("correlationId", Long.toUnsignedString(e.getCorrelationId()));
             v.put("timeMs", e.getTimeMs());
             v.put("reason", Integer.toUnsignedLong(e.getReason()));
             v.put("itemUuid", Long.toUnsignedString(e.getItemUuid()));
@@ -201,8 +212,9 @@ public final class RecallPlanner {
             v.put("currencyType", Integer.toUnsignedLong(e.getCurrencyType()));
             v.put("quantity", qty.toString());
             v.put("alreadyRecalled", already);
+            v.put("duplicateCorrelation", duplicateCorrelation);
             rowViews.add(v);
-            if (!already) {
+            if (!already && !duplicateCorrelation) {
                 owed.merge(e.getToPlayer(), qty, BigInteger::add);
             }
         }
@@ -245,6 +257,7 @@ public final class RecallPlanner {
         Map<String, Object> totals = new LinkedHashMap<>();
         totals.put("rows", rowViews.size());
         totals.put("alreadyRecalled", recalled.size());
+        totals.put("deduplicatedCorrelations", deduplicatedCorrelations);
         totals.put("players", owed.size());
         totals.put("owed", totalOwed.toString());
         totals.put("estimatedShortfall", totalShortfall.toString());
@@ -266,6 +279,21 @@ public final class RecallPlanner {
             return BigInteger.valueOf(Integer.toUnsignedLong(e.getItemQuantity()));
         }
         return BigInteger.valueOf(Math.max(0, e.getCurrencyDelta()));
+    }
+
+    /**
+     * 同指令自动回收四条件判定（第一轮审计 §4 第 7 条下游）：
+     * 只有同时满足「发放流收据唯一、已应用、非部分发放、几条流水能还原为同一次发放」才允许自动扣减，其余一律转人工复核。
+     */
+    public record AutoRecallEvidence(boolean uniqueStreamReceipt, boolean applied, boolean partial, boolean reconstructsSingleGrant) {
+    }
+
+    public static boolean autoRecallEligible(AutoRecallEvidence evidence) {
+        return evidence != null
+                && evidence.uniqueStreamReceipt()
+                && evidence.applied()
+                && !evidence.partial()
+                && evidence.reconstructsSingleGrant();
     }
 
     record Holding(BigInteger amount, String note) {

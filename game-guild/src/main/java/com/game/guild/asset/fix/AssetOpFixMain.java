@@ -1,6 +1,7 @@
 package com.game.guild.asset.fix;
 
 import com.game.api.proto.AssetOutcome;
+import com.game.common.asset.ManualAssetOpJudge;
 import com.game.common.deadline.Deadline;
 import com.game.guild.asset.AssetOpStatus;
 import com.game.guild.asset.GuildAssetStore;
@@ -516,6 +517,16 @@ public final class AssetOpFixMain {
         return null;
     }
 
+    /** 按共享资产账本判据复核本次人工终结是否满足证据口径（复用 {@link ManualAssetOpJudge#judgeManual}）。 */
+    public static ManualAssetOpJudge.Verdict judgeManualEvidence(
+            ManualAssetOpJudge.RequestedOutcome requested,
+            GuildAssetOpRow row, ManualAssetOpJudge.LedgerStatus ledgerStatus, boolean receiptMatches,
+            boolean ownerReleased, long nowMs, long leaseMs) {
+        boolean hasLiveLease = Long.compareUnsigned(row.getLeaseUntilMs(), nowMs) > 0;
+        return ManualAssetOpJudge.judgeManual(requested, new ManualAssetOpJudge.Evidence(
+                ledgerStatus, receiptMatches, ownerReleased, hasLiveLease, row.getLastSendMs(), leaseMs, nowMs));
+    }
+
     /** 核对清单（printChecklist，main.go:449-472）：只读这一行已有的列，不查任何别的系统，结论必须由人给出。 */
     static void printChecklist(PrintStream w, GuildAssetOpRow r) {
         w.println("未带 -txlog-checked，本次不做任何改动。请先完成核对：");
@@ -526,9 +537,10 @@ public final class AssetOpFixMain {
         w.println("  0. 先确认这是 scene 真回了 UNKNOWN：该玩家所在 scene 节点可达，且日志里循环最近仍在报 \"[AssetOp] scene 回 UNKNOWN，"
                 + "不终结 op_id=" + u(r.getOpId()) + "\"。last_outcome=0 也包括从创建起只遇到过传输失败的行——那种行 scene 可能已应用、"
                 + "只是回包丢了，恢复 scene 后循环会自己终结，不要人工终结");
-        w.println("  1. 查 guild 的 [AssetOp] 日志：op_id=" + u(r.getOpId()) + " / corr=" + u(r.getOpId()) + "（每次投递、重排、告警都带它）");
-        w.println("  2. 资产流水（game-data 审计表）查 correlation_id=" + u(r.getOpId()) + "：有记录 = scene 已应用过这条指令");
-        w.println("  3. 结论：查到已应用 → -as applied；确认从未应用 → -as aborted");
+        w.println("  1. 查玩家已提交的资产账本（非仅资产流水）：op_id=" + u(r.getOpId()) + " / stream=" + Integer.toUnsignedString(r.getStream())
+                + " seq=" + u(r.getSeq()) + "；仅当账本已应用且收据匹配本请求才可判 applied，部分发放严禁人工终结，账本无法判定时不许判 aborted");
+        w.println("  2. 若账本未见且写权行已释放，须满足行安静（无活租约且距 last_send_ms 超过 max(30 分钟, 租约)）才可判 aborted；流水仅作交叉参考");
+        w.println("  3. 结论：账本确认已应用且收据匹配 → -as applied；账本已拒绝或释放+安静+未见 → -as aborted");
         if (r.getKind() == GuildAssetOpKind.GUILD_ASSET_OP_KIND_DONATE) {
             w.println("  本行是捐献：applied = 帮会资金 +" + u(r.getFundsDelta()) + "、捐献者帮贡 +" + u(r.getContributionDelta())
                     + "（帮会已解散则只记孤儿计数）；aborted = 退回今日捐献次数");

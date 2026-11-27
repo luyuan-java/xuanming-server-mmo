@@ -39,8 +39,15 @@ public final class DisconnectHandler implements ClientMessageHandler<LoginNodeDi
 
     @Override
     public CompletableFuture<HandlerReply> handle(SessionContext session, LoginNodeDisconnectRequest request) {
-        log.info("客户端主动断开 gate={} session={} account={} player={}",
-                session.getGateNodeId(), session.getSessionId(), session.getAccount(), session.getPlayerId());
+        if (request != null && request.getSessionId() != 0 && request.getSessionId() != session.getSessionId()) {
+            // 2026-11-19 评审定案：断线通知以会话头为准，请求体不一致只打 ERROR 照常收尾，绝不拒绝导致玩家滞留在线
+            log.error("客户端断线请求体 session_id 与会话头不一致（按会话头收尾） gate={} header_session={} body_session={} account={} player={}",
+                    session.getGateNodeId(), session.getSessionId(), request.getSessionId(),
+                    session.getAccount(), session.getPlayerId());
+        } else {
+            log.info("客户端主动断开 gate={} session={} account={} player={}",
+                    session.getGateNodeId(), session.getSessionId(), session.getAccount(), session.getPlayerId());
+        }
         return CompletableFuture.completedFuture(HandlerReply.none());
     }
 

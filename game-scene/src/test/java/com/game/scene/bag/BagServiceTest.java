@@ -107,7 +107,7 @@ class BagServiceTest {
     }
 
     @Test
-    void 临时格淘汰的实例各记一条销毁流水_数量是真实堆叠数_不带关联号() {
+    void 临时格满时直接拒绝不淘汰旧物_也不记流水() {
         Bag temporary = player.bags().bag(BagType.TEMPORARY);
         for (int i = 0; i < temporary.capacity(); i++) {
             service.addItems(player, BagType.TEMPORARY, Map.of(1, 1L), Reason.SYSTEM_GRANT, 0, "");
@@ -117,9 +117,11 @@ class BagServiceTest {
 
         Bag.AddResult result = service.addItems(player, BagType.TEMPORARY, Map.of(1, 1L), Reason.SYSTEM_GRANT, 9, "x");
 
-        assertThat(result.evicted()).extracting(Bag.Removed::guid).containsExactly(oldest);
-        assertThat(audit.items.get(0)).isEqualTo(new Item(false, PLAYER, oldest, 1, 1, Reason.ITEM_DESTROY, 0, ""));
-        assertThat(audit.items.get(1).gained()).isTrue();
+        assertThat(result.ok()).isFalse();
+        assertThat(result.tip()).isEqualTo(Bag.NO_SPACE);
+        assertThat(result.evicted()).isEmpty();
+        assertThat(temporary.item(oldest)).as("旧物绝不被挤掉").isNotNull();
+        assertThat(audit.items).isEmpty();
     }
 
     @Test

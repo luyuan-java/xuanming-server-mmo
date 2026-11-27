@@ -605,9 +605,9 @@ class SettlementApplyValuesTest {
         assertThat(f.count("game.scene.battle.items", "kind", "drop_overflow")).isZero();
     }
 
-    /** 临时格自己满了会淘汰最早入包的实例腾位（每个被淘汰的实例一条销毁流水）；仍算改投成功。 */
+    /** 临时格满时不再 FIFO 淘汰旧物：人物背包与临时格都放不下时整笔延后，旧物与战斗冻结均保留。 */
     @Test
-    void 主包满且临时格也满_临时格淘汰最早的实例腾位() {
+    void 主包满且临时格也满_不淘汰旧物_整笔延后() {
         BagState.Builder bag = fullInventory();
         for (int slot = 0; slot < 200; slot++) {
             bag.addItems(stack(5_000 + slot, UNSTACKABLE, 1, slot, BagType.TEMPORARY));
@@ -615,23 +615,21 @@ class SettlementApplyValuesTest {
         ScenePlayer player = f.enter(SESSION, PLAYER, PlayerState.newBuilder().setBag(bag).build());
         assertThat(temporary(player).freeCells()).isZero();
 
-        assertThat(apply(player, plain(X).addItemsGained(item(POTION, 5)).build())).isEqualTo(Result.APPLIED);
+        Result result = apply(player, plain(X).setGoldGain(12).addItemsGained(item(POTION, 5)).build());
 
-        assertThat(temporary(player).total(POTION)).isEqualTo(5);
-        assertThat(temporary(player).item(5_000)).as("最早入包的那一件被淘汰").isNull();
-        assertThat(temporary(player).item(5_001)).isNotNull();
+        assertThat(result.outcome()).isEqualTo(Outcome.DEFERRED);
+        assertThat(temporary(player).total(POTION)).isZero();
+        assertThat(temporary(player).item(5_000)).as("最早入包的那一件不得被淘汰").isNotNull();
         assertThat(temporary(player).itemCount()).isEqualTo(200);
-        assertThat(f.audit.items).extracting(RecordingAssetAudit.Item::gained).containsExactly(false, true);
-        assertThat(f.audit.items.get(0).itemUuid()).isEqualTo(5_000);
-        assertThat(f.count("game.scene.battle.items", "kind", "drop_overflow")).isEqualTo(1);
+        assertThat(f.gold(player)).as("整笔延后前不发金币").isZero();
+        assertThat(player.battleLedger().has(X)).isFalse();
     }
 
     /**
-     * 两处都放不下（主包满；掉落要 201 格、临时格全淘汰也只有 200 格）→ 道具丢失、记 ERROR 与 {@code drop_lost}，但<b>不让整笔失败</b>
-     * （金币已入账）：击杀照推、账本照记、150 照推、照常销账。
+     * 两处都放不下（主包满；掉落要 201 格超过临时格 200 格）→ 整笔延后，零丢物、保留战斗冻结与来源，不销账。
      */
     @Test
-    void 主包与临时格都放不下_掉落丢失_整笔不失败_账本照记_150照推() {
+    void 主包与临时格都放不下_整笔延后_不丢物不销账() {
         ScenePlayer player = f.enter(SESSION, PLAYER, PlayerState.newBuilder().setBag(fullInventory()).build());
         assertThat(f.missions.accept(player, 0, 7)).isZero();
         f.fighting(PLAYER, X);
@@ -642,22 +640,16 @@ class SettlementApplyValuesTest {
 
         SceneBattleReply reply = delivered(settlement);
 
-        assertThat(reply.getStatus()).isEqualTo(SceneBattleStatus.SCENE_BATTLE_HANDLED);
-        assertThat(reply.getSettlement()).isEqualTo(SettlementDisposition.SETTLEMENT_APPLIED);
-        assertThat(f.count("game.scene.battle.items", "kind", "drop_lost")).isEqualTo(1);
-        assertThat(f.count("game.scene.battle.items", "kind", "drop_overflow")).isZero();
+        assertThat(reply.getStatus()).isEqualTo(SceneBattleStatus.SCENE_BATTLE_DEFERRED);
+        assertThat(f.count("game.scene.battle.items", "kind", "drop_lost")).isZero();
         assertThat(inventory(player).total(UNSTACKABLE)).isEqualTo(99);
-        assertThat(temporary(player).itemCount()).as("临时格也没进（整批原子）").isZero();
-        assertThat(logged(Level.ERROR)).anyMatch(m -> m.contains("道具丢失") && m.contains("{3=201}"));
-        assertThat(f.gold(player)).isEqualTo(12);
-        assertThat(player.attributes().health()).isEqualTo(80);
-        assertThat(progress(player, 7)).as("掉落之后的击杀照做").isEqualTo(2);
-        assertThat(player.battleLedger().has(X)).as("账本照记").isTrue();
-        assertThat(f.battleEnds(player)).as("150 照推").hasSize(1);
-        assertThat(player.inBattle()).isFalse();
-
-        assertThat(f.completeSaves(ProgressResult.SAVED)).isEqualTo(1);
-        assertThat(f.locks.hasSettlement(PLAYER, X)).as("照常销账：丢失不重投").isFalse();
+        assertThat(temporary(player).itemCount()).isZero();
+        assertThat(f.gold(player)).isZero();
+        assertThat(progress(player, 7)).isZero();
+        assertThat(player.battleLedger().has(X)).isFalse();
+        assertThat(f.battleEnds(player)).isEmpty();
+        assertThat(player.inBattle()).isTrue();
+        assertThat(f.locks.hasSettlement(PLAYER, X)).as("来源保留待腾位重投").isTrue();
     }
 
     /** 全服封禁获取的物品走同一条失败路径：主包、临时格都被闸拒 → 丢失，整笔照常。 */
@@ -677,8 +669,7 @@ class SettlementApplyValuesTest {
     }
 
     /**
-     * 掉落数量同样夹到 {@code 0xFFFFFFFF}（评审修订第 9 条）。uint64 最大值夹成 4294967295 个：当然放不下（两处都拒），
-     * 丢失日志里的数量就是夹过的值——不夹的话传进背包的是 −1。
+     * 掉落数量同样夹到 {@code 0xFFFFFFFF}（评审修订第 9 条）。uint64 最大值夹成 4294967295 个：两包放不下整笔延后（零写入、不负溢出）。
      */
     @Test
     void 掉落数量夹到uint32上限() {
@@ -686,12 +677,10 @@ class SettlementApplyValuesTest {
 
         Result result = apply(player, plain(X).addItemsGained(item(DROP, -1L)).addItemsGained(item(POTION, 2)).build());
 
-        assertThat(result).isEqualTo(Result.APPLIED);
-        assertThat(f.count("game.scene.battle.items", "kind", "drop_lost")).isEqualTo(1);
-        assertThat(logged(Level.ERROR)).anyMatch(m -> m.contains("道具丢失") && m.contains("11=" + UINT32_MAX));
+        assertThat(result.outcome()).isEqualTo(Outcome.DEFERRED);
         assertThat(inventory(player).total(DROP)).isZero();
-        assertThat(inventory(player).total(POTION)).as("同一批里的别的掉落跟着整批落空（整批原子）").isZero();
-        assertThat(player.battleLedger().has(X)).isTrue();
+        assertThat(inventory(player).total(POTION)).as("整笔延后，零写入").isZero();
+        assertThat(player.battleLedger().has(X)).isFalse();
     }
 
     // ------------------------------------------------------------------ 流水

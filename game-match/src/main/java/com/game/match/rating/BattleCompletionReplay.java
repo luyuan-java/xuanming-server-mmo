@@ -48,16 +48,48 @@ public final class BattleCompletionReplay implements AutoCloseable {
     private volatile com.game.common.workshard.WorkShard.Membership workShard;
     private volatile com.game.common.workshard.LoopLiveness liveness;
     private volatile com.game.match.spectate.RankedSpectateIndex rankedSpectateIndex;
+    /** D-7：个人发件箱每轮扫描批量与轮询间隔可配置（缺省 8 条 / 500ms）。 */
+    private volatile int personalOutboxBatchSize = 8;
+    private volatile long pollIntervalMs = 500L;
+    /** D-6：不可恢复滞留成局计数（过截止且形状不合格），供 match_global_expired_stranded_formations gauge 导出。 */
+    private final java.util.concurrent.atomic.AtomicLong strandedFormations = new java.util.concurrent.atomic.AtomicLong();
     private long deadlineCursor,deadlineUpper,resultCursor;
     private final PlayerScanCursor firstPlayers=new PlayerScanCursor(),waitingPlayers=new PlayerScanCursor();
     public BattleCompletionReplay(BattleCompletionStore store,GlobalMatchStore formations,PlayerInboxService inbox,Results results,
                                   String secret,LongSupplier clock,MatchMetrics metrics) {
         this.store=Objects.requireNonNull(store);this.formations=Objects.requireNonNull(formations);
         this.inbox=Objects.requireNonNull(inbox);this.results=Objects.requireNonNull(results);
-        this.secret=secret;this.clock=Objects.requireNonNull(clock);
+        this.secret=Objects.requireNonNull(secret,"缺少 MMORPG_PLAYER_INBOX_SECRET_MATCH");
+        this.clock=Objects.requireNonNull(clock);
         this.metrics=Objects.requireNonNull(metrics);
         this.replies=new ServiceCallSignatures(Map.of("inbox",secret),clock);
     }
+    /** D-7：配置个人发件箱扫描批量（1..128）与轮询间隔（50ms..30s）。 */
+    public BattleCompletionReplay withOutboxTuning(int batchSize, long pollIntervalMs) {
+        if (batchSize < 1 || batchSize > 128) throw new IllegalArgumentException("batchSize 越界 [1,128]: " + batchSize);
+        if (pollIntervalMs < 50L || pollIntervalMs > 30_000L) throw new IllegalArgumentException("pollIntervalMs 越界: " + pollIntervalMs);
+        this.personalOutboxBatchSize = batchSize;
+        this.pollIntervalMs = pollIntervalMs;
+        return this;
+    }
+    /** D-6：登记滞留不可恢复成局数并绑定 Micrometer gauge {@code match_global_expired_stranded_formations}。 */
+    public BattleCompletionReplay bindStrandedGauge(io.micrometer.core.instrument.MeterRegistry registry) {
+        io.micrometer.core.instrument.Gauge.builder("match.global.expired.stranded.formations", strandedFormations,
+                        java.util.concurrent.atomic.AtomicLong::get)
+                .description("已过截止且形状不合格无法自动恢复的滞留成局数")
+                .register(registry);
+        return this;
+    }
+    public void recordStrandedFormations(long count) {
+        long clamped = Math.max(0L, count);
+        strandedFormations.set(clamped);
+        if (clamped > 0L) {
+            log.error("[match] 检测到不可恢复滞留成局 stranded_formations={}，需人工介入核对", clamped);
+        }
+    }
+    public int personalOutboxBatchSize() { return personalOutboxBatchSize; }
+    public long pollIntervalMs() { return pollIntervalMs; }
+    public long strandedFormationsCount() { return strandedFormations.get(); }
     /** 挂载 64 片 HRW 后台分工（整局按 battle_id % 64，个人按 player_id % 64；截止自动放弃不看归属）。 */
     public BattleCompletionReplay withWorkShard(com.game.common.workshard.WorkShard.Membership membership) {
         this.workShard = membership;
@@ -74,7 +106,7 @@ public final class BattleCompletionReplay implements AutoCloseable {
         return this;
     }
     public void start(){
-        worker.scheduleWithFixedDelay(this::roundSafely,0,500,TimeUnit.MILLISECONDS);
+        worker.scheduleWithFixedDelay(this::roundSafely,0,pollIntervalMs,TimeUnit.MILLISECONDS);
         worker.scheduleWithFixedDelay(this::sampleBacklog,BACKLOG_SAMPLE_INTERVAL_SECONDS,BACKLOG_SAMPLE_INTERVAL_SECONDS,TimeUnit.SECONDS);
     }
     void roundSafely() {
