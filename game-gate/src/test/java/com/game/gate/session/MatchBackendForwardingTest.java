@@ -426,11 +426,13 @@ class MatchBackendForwardingTest {
                 metrics, new RecordingPresence(), nanos::get);
     }
 
+    private long ticketSeq;
+
     /** 一条已握手的连接。 */
     private EmbeddedChannel verified(Map<String, ClientMessageService> backends) {
         EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(registry, dispatcher(backends)));
         ByteString payload = GateTokenPayload.newBuilder().setGateNodeId(GATE_NODE).setZoneId(ZONE)
-                .setExpireTimestamp(NOW + 600).build().toByteString();
+                .setExpireTimestamp(NOW + 600 + (++ticketSeq)).build().toByteString();
         ch.writeInbound(ClientTokenVerifyRequest.newBuilder().setPayload(payload).setSignature(tokens.sign(payload)).build());
         assertThat(((ClientTokenVerifyResponse) ch.readOutbound()).getSuccess()).isTrue();
         return ch;

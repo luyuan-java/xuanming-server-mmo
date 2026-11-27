@@ -633,6 +633,13 @@ class MatchClientMessageServiceTest {
         handlers.add(TrialChallengeCardHandlers.createHandler(trialCards, () -> 1L));
         handlers.add(TrialChallengeCardHandlers.getHandler(trialCards));
         handlers.add(TrialChallengeCardHandlers.sharedReplayHandler(trialCards));
+        var puzzles = new com.game.match.puzzle.TacticalPuzzleService(
+                mock(com.game.match.puzzle.TacticalPuzzleStore.class), () -> 1L, null, null, null);
+        handlers.addAll(puzzles.clientHandlers());
+        var spectateChat = new com.game.match.spectate.SpectateChatService(
+                realPlacements, new com.game.match.spectate.SpectateChatHub(com.game.match.spectate.SpectateChatHub.Config.DEFAULT),
+                null, (id, d) -> "", System::currentTimeMillis);
+        handlers.addAll(spectateChat.clientHandlers());
         return handlers;
     }
 

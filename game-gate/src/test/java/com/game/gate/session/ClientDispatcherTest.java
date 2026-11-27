@@ -157,10 +157,14 @@ class ClientDispatcherTest {
     @Test
     void 握手被拒后同一批到达的业务包不再处理() {
         EmbeddedChannel ch = connect();
-        ClientSession session = registry.all().iterator().next();
-        session.closing = true;
-        dispatcher.onRequest(session, request(1, LOGIN_MSG, "x"));
-        dispatcher.onTokenVerify(session, verifyRequest(GATE_NODE, NOW + 600));
+        // P2-4：验签前不建会话
+        assertThat(registry.size()).isZero();
+        ch.writeInbound(verifyRequest(GATE_NODE + 1, NOW + 600));
+        ClientTokenVerifyResponse rejected = ch.readOutbound();
+        assertThat(rejected.getSuccess()).isFalse();
+        assertThat(registry.size()).isZero();
+        // 关闭中的连接即使有后续业务帧到达也不分发、不转发
+        ch.writeInbound(request(1, LOGIN_MSG, "x"));
         assertThat(login.calls).isEmpty();
         assertThat((Object) ch.readOutbound()).isNull();
     }
@@ -2560,8 +2564,12 @@ class ClientDispatcherTest {
         assertThat(renewLogin.calls.get(1).getMessageId()).isEqualTo(394);
     }
 
+    private static final AtomicLong TEST_TICKET_NONCE = new AtomicLong();
+
     private static ByteString payload(int gateNodeId, long expire) {
-        return GateTokenPayload.newBuilder().setGateNodeId(gateNodeId).setZoneId(ZONE).setExpireTimestamp(expire).build().toByteString();
+        return GateTokenPayload.newBuilder().setGateNodeId(gateNodeId).setZoneId(ZONE).setExpireTimestamp(expire)
+                .setHmacSessionKey(ByteString.copyFromUtf8("k-" + TEST_TICKET_NONCE.incrementAndGet()))
+                .build().toByteString();
     }
 
     private ClientTokenVerifyRequest verifyRequest(int gateNodeId, long expire) {

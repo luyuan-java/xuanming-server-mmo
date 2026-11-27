@@ -159,24 +159,29 @@ class ClientPipelineTest {
 
     @Test
     void 达到连接硬上限时直接拒连并计入max_connections() {
+        var admission = new com.game.common.net.ConnectionAdmissionController<Channel>(
+                com.game.common.net.ConnectionAdmissionPolicy.defaults(1, 0L), registry::size);
         EmbeddedChannel first = new EmbeddedChannel(new ChannelInitializer<Channel>() {
             @Override
             protected void initChannel(Channel ch) {
-                ClientPipeline.install(ch.pipeline(), registry, dispatcher, 1, null);
+                ClientPipeline.install(ch.pipeline(), registry, dispatcher, admission, false, false);
             }
         });
         assertThat(first.isOpen()).isTrue();
-        assertThat(registry.size()).isEqualTo(1);
+        assertThat(registry.size()).isZero();
+        assertThat(admission.preAuthCount()).isEqualTo(1);
+        assertThat(admission.totalConnections()).isEqualTo(1);
 
         EmbeddedChannel second = new EmbeddedChannel(new ChannelInitializer<Channel>() {
             @Override
             protected void initChannel(Channel ch) {
-                ClientPipeline.install(ch.pipeline(), registry, dispatcher, 1, null);
+                ClientPipeline.install(ch.pipeline(), registry, dispatcher, admission, false, false);
             }
         });
         assertThat(second.isOpen()).isFalse();
-        assertThat(registry.size()).isEqualTo(1);
+        assertThat(admission.totalConnections()).isEqualTo(1);
         assertThat(meters.get("game.gate.disconnects").tag("reason", "max_connections").counter().count()).isEqualTo(1);
+        assertThat(meters.get("gate.rejected").tag("reason", "capacity").counter().count()).isEqualTo(1);
         first.close();
     }
 

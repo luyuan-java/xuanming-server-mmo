@@ -156,16 +156,16 @@ class ClientRedirectTest {
 
     @Test
     void 他区同号gate的票据_WRONG_ZONE_回token_not_for_this_zone后断开() {
-        Client c = connect(dispatcher);
+        EmbeddedChannel ch = connectChannel(dispatcher);
         GateTokenPayload otherZone = GateTokenPayload.newBuilder().setGateNodeId(GATE_NODE).setZoneId(OTHER_ZONE)
                 .setExpireTimestamp(NOW + 300).setPlayerId(PLAYER).setTargetZoneId(OTHER_ZONE).build();
 
-        c.ch().writeInbound(verify(otherZone));
+        ch.writeInbound(verify(otherZone));
 
-        ClientTokenVerifyResponse rejected = c.ch().readOutbound();
+        ClientTokenVerifyResponse rejected = ch.readOutbound();
         assertThat(rejected.getSuccess()).isFalse();
         assertThat(rejected.getError()).isEqualTo("token not for this zone");
-        assertThat(c.ch().isOpen()).isFalse();
+        assertThat(ch.isOpen()).isFalse();
         assertThat(handshakes("wrong_zone")).isEqualTo(1);
         assertThat(disconnects("handshake_rejected")).isEqualTo(1);
         assertThat(login.calls).isEmpty();
@@ -710,11 +710,10 @@ class ClientRedirectTest {
     private record Client(EmbeddedChannel ch, int sid) {
     }
 
-    private Client connect(ClientDispatcher d) {
+    private EmbeddedChannel connectChannel(ClientDispatcher d) {
         EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(registry, d));
         ch.freezeTime();
-        int sid = registry.all().stream().filter(s -> s.channel() == ch).findFirst().orElseThrow().sessionId();
-        return new Client(ch, sid);
+        return ch;
     }
 
     private Client verified(GateTokenPayload token) {
@@ -722,11 +721,12 @@ class ClientRedirectTest {
     }
 
     private Client verified(ClientDispatcher d, GateTokenPayload token) {
-        Client c = connect(d);
-        c.ch().writeInbound(verify(token));
-        ClientTokenVerifyResponse ok = c.ch().readOutbound();
+        EmbeddedChannel ch = connectChannel(d);
+        ch.writeInbound(verify(token));
+        ClientTokenVerifyResponse ok = ch.readOutbound();
         assertThat(ok.getSuccess()).isTrue();
-        return c;
+        int sid = registry.all().stream().filter(s -> s.channel() == ch).findFirst().orElseThrow().sessionId();
+        return new Client(ch, sid);
     }
 
     /** 普通令牌握手、进游戏（EnterScene：节点 7、epoch 5、代次 11）并经 scene 确认进场（已登记在线）的会话。 */
