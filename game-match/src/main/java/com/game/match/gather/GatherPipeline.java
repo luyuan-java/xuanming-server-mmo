@@ -591,12 +591,12 @@ public final class GatherPipeline {
 
         private Map<Long, Long> loadRatings(String battle) {
             try {
-                Map<Long, Long> ratings = parts.ratings().loadAllCentiOrDefault(plan.members());
+                Map<Long, Long> ratings = parts.ratings().loadAllCentiOrDefault(plan.mode().getNumber(), plan.members());
                 if (ratings != null) {
                     return ratings;
                 }
             } catch (RuntimeException e) {
-                log.error("[gather] 5V5 分队读评分出错，全员按缺省分 battle_id={}: {}", battle, e.toString());
+                log.error("[gather] 分队读评分出错，全员按缺省分 battle_id={}: {}", battle, e.toString());
             }
             return Map.of();
         }

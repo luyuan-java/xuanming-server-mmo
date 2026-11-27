@@ -57,7 +57,28 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
         if(!MessageDigest.isEqual(old.get().getPayloadDigest().toByteArray(),digest(event)))throw new SQLException("同对局重复评分内容不同");
         return true;
     }
-    /** 论剑排位赛季榜使用的独立 source_epoch 基址（与存量 epoch=1 永久榜隔离）。 */
+    /** R5 三个计分模式各有一条独立评分榜与来源代次（客户端契约 RankBoardType 1 / 2 / 3）。 */
+    public static final List<Integer> RATED_MODES = List.of(
+            com.game.match.support.MatchModes.ONE_V_ONE,
+            com.game.match.support.MatchModes.FIVE_V_FIVE,
+            com.game.match.support.MatchModes.PVP_TEAM);
+
+    /** 计分模式 → 共享协议 RankBoardType 常量（不写裸数字；非计分模式直接拒绝）。 */
+    public static int boardTypeForMode(int mode) {
+        return switch (mode) {
+            case com.game.match.support.MatchModes.ONE_V_ONE -> RankBoardType.RANK_BOARD_TYPE_MATCH_1V1_VALUE;
+            case com.game.match.support.MatchModes.FIVE_V_FIVE -> RankBoardType.RANK_BOARD_TYPE_MATCH_5V5_VALUE;
+            case com.game.match.support.MatchModes.PVP_TEAM -> RankBoardType.RANK_BOARD_TYPE_MATCH_PVP_TEAM_VALUE;
+            default -> throw new IllegalArgumentException("不计分模式没有评级榜: mode=" + mode);
+        };
+    }
+
+    /** 计分模式 → 永久评级榜 source_epoch（1V1 沿用 1、5V5 为 2、PVP_TEAM 为 3；与赛季榜 >= 10000 隔离）。 */
+    public static long modeSourceEpoch(int mode) {
+        return Integer.toUnsignedLong(boardTypeForMode(mode));
+    }
+
+    /** 论剑排位赛季榜使用的独立 source_epoch 基址（与存量永久榜 1/2/3 隔离）。 */
     public static final long RANKED_SOURCE_EPOCH_BASE = 10_000L;
 
     /** 账号注销待摘评级榜事务发件箱表（与评分/排位行同事务写入，投榜循环异步调 RemoveRankEntry 摘除并立墓碑）。 */
@@ -83,11 +104,14 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
             return 0;
         }
         List<Long> epochs = new ArrayList<>();
-        try (PreparedStatement ps = c.prepareStatement("SELECT 1 FROM match_rating WHERE player_id=?")) {
+        try (PreparedStatement ps = c.prepareStatement("SELECT DISTINCT match_mode FROM match_rating WHERE player_id=? ORDER BY match_mode")) {
             ps.setObject(1, PbMysql.uint64(playerId));
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    epochs.add(1L);
+                while (rs.next()) {
+                    int mode = rs.getInt(1);
+                    if (com.game.match.support.MatchModes.rated(mode)) {
+                        epochs.add(modeSourceEpoch(mode));
+                    }
                 }
             }
         } catch (SQLException e) {
@@ -155,24 +179,37 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
     }
 
     @Override public void append(Connection c,BattleResultEvent event,Map<Long,Long> next,long stamp)throws SQLException{
-        var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build();ensureSourceRow(c,1L);
+        append(c, event, next, Map.of(), stamp);
+    }
+
+    @Override public void append(Connection c,BattleResultEvent event,Map<Long,Long> next,Map<Long,Long> scoreVersions,long stamp)throws SQLException{
+        int mode = event.getMatchMode();
+        long epoch = modeSourceEpoch(mode);
+        var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build();ensureSourceRow(c,epoch);
         var guard=db.findOneByPkForUpdate(c,key).orElseThrow();
         if(guard.getStopped()){
             // 评级来源停写后：评分与入账标记照常提交，不写 outbox、不推进游标、不阻塞 Kafka 消费。
             var m = this.metrics;
             if (m != null) {
-                m.ratingUnpublished(event.getMatchMode());
+                m.ratingUnpublished(mode);
             }
-            log.info("[rating-outbox] rank source stopped; rating committed without rank outbox battle={} mode={} epoch=1",
-                    Long.toUnsignedString(event.getBattleId()), event.getMatchMode());
+            log.info("[rating-outbox] rank source stopped; rating committed without rank outbox battle={} mode={} epoch={}",
+                    Long.toUnsignedString(event.getBattleId()), mode, epoch);
             return;
         }
         long cursor=guard.getProducedCursor()+1;
-        var request=SubmitRankScoresRequest.newBuilder().setGeneration(1).setSourceEpoch(1).setSourceCursor(cursor)
+        var request=SubmitRankScoresRequest.newBuilder().setGeneration(1).setSourceEpoch(epoch).setSourceCursor(cursor)
                 .setRequestId(event.getBattleId()).setMode(RankSubmitMode.RANK_SUBMIT_SET);
-        next.keySet().stream().sorted(Long::compareUnsigned).forEach(player->request.addEntries(RankScoreInput.newBuilder()
-                .setEntityId(player).setScore(next.get(player)).setAchievedMs(stamp)));
-        db.insert(c,GlobalRankOutboxRow.newBuilder().setSourceEpoch(1).setSourceCursor(cursor).setRequestId(event.getBattleId())
+        next.keySet().stream().sorted(Long::compareUnsigned).forEach(player->{
+            RankScoreInput.Builder entry = RankScoreInput.newBuilder()
+                    .setEntityId(player).setScore(next.get(player)).setAchievedMs(stamp);
+            long version = scoreVersions == null ? 0L : scoreVersions.getOrDefault(player, 0L);
+            if (version > 0L) {
+                entry.setScoreVersion(version);
+            }
+            request.addEntries(entry);
+        });
+        db.insert(c,GlobalRankOutboxRow.newBuilder().setSourceEpoch(epoch).setSourceCursor(cursor).setRequestId(event.getBattleId())
                 .setEntries(ByteString.copyFrom(NetworkProbes.bytes(request.build()))).setPayloadDigest(ByteString.copyFrom(digest(event))).build());
         db.updateByPk(c,guard.toBuilder().setProducedCursor(cursor).build());
     }
@@ -230,32 +267,41 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
         return m == null || m.owns("rank-source:" + Long.toUnsignedString(epoch));
     }
     private void publishOwned()throws Exception{
-        if (ownsRankSource(1L)) {
-            GlobalRankSourceRow guard;
-            try(var c=source.getConnection()){guard=db.findOneByPk(c,GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build()).orElse(null);}
-            if(guard!=null){
-                long board=guard.getBoardId(),committed=guard.getCommittedCursor();
-                if(board==0){
-                    var request=OpenRankGenerationRequest.newBuilder().setBoard(RankBoardKey.newBuilder().setBoardType(1).setScope(RankScope.RANK_SCOPE_GLOBAL)
-                            .setPeriod("all").setGeneration(1)).setProducer("match").setSourceEpoch(1).setRequestId(1).build();
-                    var response=call(s->s.openRankGeneration(sign(RankAdminService.OPEN_METHOD,request)));
-                    if(response.getErrorMessage().getId()!=0||response.getBoardId()==0)throw new IllegalStateException("评级榜代次打开被拒");
-                    board=response.getBoardId();
-                    mutate("UPDATE match_global_rank_source SET board_id=? WHERE source_epoch=1 AND board_id=0",board);
-                }
-                for(int sent=0;sent<16&&committed<guard.getProducedCursor();sent++){
-                    GlobalRankOutboxRow out;
-                    try(var c=source.getConnection()){out=db.findOneByPk(c,GlobalRankOutboxRow.newBuilder().setSourceEpoch(1).setSourceCursor(committed+1).build()).orElseThrow();}
-                    var request=SubmitRankScoresRequest.parseFrom(out.getEntries()).toBuilder().setBoardId(board).build();
-                    var response=call(s->s.submitRankScores(sign(RankAdminService.SUBMIT_METHOD,request)));
-                    if(response.getErrorMessage().getId()!=0||response.getCommittedCursor()!=request.getSourceCursor())throw new IllegalStateException("评级榜尚未确认连续游标");
-                    mutate("UPDATE match_global_rank_source SET committed_cursor=? WHERE source_epoch=1 AND committed_cursor=?",request.getSourceCursor(),committed);
-                    committed=request.getSourceCursor();
-                }
-            }
+        for (int mode : RATED_MODES) {
+            publishModeSource(mode);
         }
         publishPendingRankedSeasons();
         publishPendingRankRemovals();
+    }
+
+    /** 按 R5 计分模式独立打开对应 RankBoardType（1/2/3）并顺序投递该模式 outbox 游标。 */
+    void publishModeSource(int mode) throws Exception {
+        long epoch = modeSourceEpoch(mode);
+        int boardType = boardTypeForMode(mode);
+        if (!ownsRankSource(epoch)) {
+            return;
+        }
+        GlobalRankSourceRow guard;
+        try(var c=source.getConnection()){guard=db.findOneByPk(c,GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build()).orElse(null);}
+        if(guard==null){return;}
+        long board=guard.getBoardId(),committed=guard.getCommittedCursor();
+        if(board==0){
+            var request=OpenRankGenerationRequest.newBuilder().setBoard(RankBoardKey.newBuilder().setBoardType(boardType).setScope(RankScope.RANK_SCOPE_GLOBAL)
+                    .setPeriod("all").setGeneration(1)).setProducer("match").setSourceEpoch(epoch).setRequestId(epoch).build();
+            var response=call(s->s.openRankGeneration(sign(RankAdminService.OPEN_METHOD,request)));
+            if(response.getErrorMessage().getId()!=0||response.getBoardId()==0)throw new IllegalStateException("评级榜代次打开被拒 mode=" + mode);
+            board=response.getBoardId();
+            mutate("UPDATE match_global_rank_source SET board_id=? WHERE source_epoch=? AND board_id=0",board,epoch);
+        }
+        for(int sent=0;sent<16&&committed<guard.getProducedCursor();sent++){
+            GlobalRankOutboxRow out;
+            try(var c=source.getConnection()){out=db.findOneByPk(c,GlobalRankOutboxRow.newBuilder().setSourceEpoch(epoch).setSourceCursor(committed+1).build()).orElseThrow();}
+            var request=SubmitRankScoresRequest.parseFrom(out.getEntries()).toBuilder().setBoardId(board).build();
+            var response=call(s->s.submitRankScores(sign(RankAdminService.SUBMIT_METHOD,request)));
+            if(response.getErrorMessage().getId()!=0||response.getCommittedCursor()!=request.getSourceCursor())throw new IllegalStateException("评级榜尚未确认连续游标 mode=" + mode);
+            mutate("UPDATE match_global_rank_source SET committed_cursor=? WHERE source_epoch=? AND committed_cursor=?",request.getSourceCursor(),epoch,committed);
+            committed=request.getSourceCursor();
+        }
     }
 
     /** 扫描 match_rank_removal 待摘榜行并向 game-rank 投递 RemoveRankEntry（摘除并立墓碑），成功后删发件箱行。 */
@@ -460,21 +506,43 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
         return call(s -> s.freezeRankGeneration(sign(RankAdminService.FREEZE_METHOD, request)));
     }
 
-    /** 这行锁与 append 相同；回包为真实最终游标，停写后不会再产生本代 outbox。 */
+    /** 停止默认 1V1 评级源（向后兼容）；按模式封榜请调 {@link #stopSource(int)} 或 {@link #stopAllSources()}。 */
     public long stopSource()throws SQLException{
+        return stopSource(com.game.match.support.MatchModes.ONE_V_ONE);
+    }
+
+    /** R5 按计分模式停写该模式评级源，返回该模式最终游标（不计分模式直接拒绝）。 */
+    public long stopSource(int mode)throws SQLException{
+        long epoch = modeSourceEpoch(mode);
         try(var c=source.getConnection()){
             c.setAutoCommit(false);
-            try{com.game.common.player.PlayerRouteAuthority.requireMeta(c,3,true);var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build();ensureSourceRow(c,1L);
+            try{com.game.common.player.PlayerRouteAuthority.requireMeta(c,3,true);var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build();ensureSourceRow(c,epoch);
                 var row=db.findOneByPkForUpdate(c,key).orElseThrow();db.updateByPk(c,row.toBuilder().setStopped(true).build());c.commit();return row.getProducedCursor();}
             catch(Exception e){c.rollback();throw e;}
         }
     }
-    /** 显式封榜入口：只能提交 SQL 已停写且全部投递确认的代次。报错后重试保持 request_id/rewards 不变。 */
+
+    /** 逐个计分模式（1V1 / 5V5 / PVP_TEAM）全部停写，返回各模式最终游标。 */
+    public Map<Integer, Long> stopAllSources() throws SQLException {
+        Map<Integer, Long> cursors = new LinkedHashMap<>();
+        for (int mode : RATED_MODES) {
+            cursors.put(mode, stopSource(mode));
+        }
+        return cursors;
+    }
+
+    /** 显式封榜入口（默认 1V1）；按模式封榜请调 {@link #freeze(int, FreezeRankGenerationRequest)}。 */
     public FreezeRankGenerationResponse freeze(FreezeRankGenerationRequest template)throws Exception{
-        GlobalRankSourceRow guard;try(var c=source.getConnection()){guard=db.findOneByPk(c,GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build()).orElseThrow();}
+        return freeze(com.game.match.support.MatchModes.ONE_V_ONE, template);
+    }
+
+    /** R5 按计分模式显式封榜：只能提交 SQL 已停写且全部投递确认的代次。 */
+    public FreezeRankGenerationResponse freeze(int mode, FreezeRankGenerationRequest template)throws Exception{
+        long epoch = modeSourceEpoch(mode);
+        GlobalRankSourceRow guard;try(var c=source.getConnection()){guard=db.findOneByPk(c,GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build()).orElseThrow();}
         if(!guard.getStopped()||guard.getCommittedCursor()!=guard.getProducedCursor()||template.getRequestId()==0)
-            throw new IllegalStateException("评级源尚未完成停写屏障或 outbox 未齐");
-        var request=template.toBuilder().setBoardId(guard.getBoardId()).setGeneration(1).setSourceEpoch(1).setExpectedSourceCursor(guard.getProducedCursor()).build();
+            throw new IllegalStateException("评级源尚未完成停写屏障或 outbox 未齐 mode=" + mode);
+        var request=template.toBuilder().setBoardId(guard.getBoardId()).setGeneration(1).setSourceEpoch(epoch).setExpectedSourceCursor(guard.getProducedCursor()).build();
         return call(s->s.freezeRankGeneration(sign(RankAdminService.FREEZE_METHOD,request)));
     }
     private <T extends com.google.protobuf.Message>T sign(String method,T request){return ServiceCallSignatures.sign(method,request,"match",config.secret(),System.currentTimeMillis());}
@@ -485,8 +553,10 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
         if(!publication.tryLock(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS))return false;
         try{
             try(var c=source.getConnection()){
-                var sourceRow=db.findOneByPk(c,GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build()).orElse(null);
-                if(sourceRow!=null&&(!sourceRow.getStopped()||sourceRow.getCommittedCursor()!=sourceRow.getProducedCursor()))return false;
+                for (int mode : RATED_MODES) {
+                    var sourceRow=db.findOneByPk(c,GlobalRankSourceRow.newBuilder().setSourceEpoch(modeSourceEpoch(mode)).build()).orElse(null);
+                    if(sourceRow!=null&&(!sourceRow.getStopped()||sourceRow.getCommittedCursor()!=sourceRow.getProducedCursor()))return false;
+                }
             }
             quiesced=true;timer.shutdown();
         }finally{publication.unlock();}

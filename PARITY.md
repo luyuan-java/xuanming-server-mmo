@@ -1081,42 +1081,24 @@ Java 版 `0.1.0-SNAPSHOT` 的节点链路已有等价机制,不需要改代码:
 
 本条只登记待做,未修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-05 人数档真人 PVP 计分组排（Java 待做）
+### 2026-11-05 人数档真人 PVP 计分组排（Java 已对齐）
 
-主仓设计见 `docs/design/global-match-hierarchical-pools.md` 开头「人数档真人 PVP 与计分组排」，Go 版已落码、未编译，说明见主仓 `docs/PROGRESS.md` 2026-11-05 同名条目。Java 版 `0.1.0-SNAPSHOT` 待做，按本版的匹配实现落同一套规则：
+2026-11-27 已在 `game-match` 完整对齐（设计见主仓 `docs/design/global-match-hierarchical-pools.md`）：
+- `MatchModes` 支持 `MATCH_MODE_PVP_TEAM`（每侧 1..5 人，2V2..5V5 独立池）并纳入计分模式；
+- 新增 `PvpTeamMatchPlanner` 纯撮合与分边引擎：队伍分 `baseAvg + (size - 1) * 2500`（默认 +25 分/多一人，仅用于凑人/分边/提交点复核，Elo 结算仍用成员原分）、不可拆单位按人数分桶枚举 2N 拆分与包含锚点的容差窗口择优（先来先成局优先于分边质量）、车队对等曲线（最大车队差 `<= 1` 立即可成，更大差值要求吃亏侧每个单位等满 `1 + wait / 10s >= diff`）、枚举全部分边取 `(premadeDiff, weightedRatingDiff)` 最小、以及提交点组内队伍分极差 `<=` 组内最长等待者容差复核；`GlobalMatchService.execute` 尊重成局原件已冻结的 `GlobalMember.team_index`。
+- **验证**：`PvpTeamAndHotPoolSegmentTest` **2/2 PASS**。
 
-- **先补人数档真人 PVP 本身**：`MATCH_MODE_PVP_TEAM`，`team_size` 是每侧 1～5 人，2V2～5V5 是四个独立池；单排与整队都是不可拆单位，可以用单人补齐同一侧，两侧人数相等；分边写进成局原件，提交点复核。11-05 核对：game-match 主代码里 `PVP_TEAM` 只出现在观战可见性表 `SpectateVisibilityPolicy`，撮合还没有。
-- **计分**：PVP_TEAM 是计分模式。单人入队读分，读失败拒绝；整队入队在同一个事务里读成员评分，写进成员票。评分按模式一条轨道、一张榜，与主仓 R5 同口径（按模式分榜另见 R5 的登记）。
-- **队伍分**：成员平均分 + 每多一人 25 分（可配，进全局策略指纹）。只用于凑人、分边和提交点复核，Elo 仍按成员原分的平均。
-- **选人**：候选按人数分桶，按 2N 的拆分枚举一局的人数组成（每份不超过 N），每个桶取排队最早的；计分时逐个试宽度等于锚点容差、包含锚点的评分窗口。
-- **车队对等**：两侧最大车队人数差不超过 1 立即可成；更大的差要吃亏一侧每个单位都等够「1 + 等待 ÷ 步长」，步长缺省 10 秒，可配，不进指纹。
-- **分边**：枚举全部分法，取车队差最小、两侧"队伍分 × 人数"之和最接近的；先来先成局优先于分边质量。
-- **提交点**：计分排队局（1V1、5V5、PVP_TEAM）复核组内队伍分极差不超过组内最长等待者的容差。
-- 客户端契约不变：没有新消息、字段和 tip 码。
+### 2026-11-05 评分按模式分开、榜按模式、回合打满判平（R5，Java 已对齐）
 
-本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-match` 完整对齐（设计见主仓 `docs/design/global-match-hierarchical-pools.md` §8、§12.6）：
+- **评分按 `(player_id, match_mode)` 存储**：`match_tables.proto` `MatchRatingRow` 追加 `match_mode = 5` 并将主键改为 `(player_id, match_mode)`，`RatingStore` / `RatingReader` / `JdbcRatingReader` / `GlobalMatchService` / `GatherPipeline` / `RankedStore` 全链路按模式读写，不计分模式读分/停写直接拒绝；`TrialChallengeCardStore` 使用独立行锁锚点 `match_mode=0`。
+- **每个计分模式一张榜**：`RatingRankOutbox` 为 1V1 / 5V5 / PVP_TEAM 各建独立来源代次（`source_epoch` 1 / 2 / 3）与独立 outbox 游标，透传各玩家在本模式的 `games` 作为 `RankScoreInput.score_version`，并支持按模式独立 `stopSource(mode)`、`stopAllSources()` 与 `freeze(mode, ...)`；重放判重排在停写检查之前。
+- **回合打满判平**：`EloRules.judge` 对 `settlement_format_version == 1` 的完整个人原件严格按 R5 口径判平（`SIDE_A_WIN` 必胜、`SIDE_B_WIN` 检查 0 队是否存在未阵亡未逃跑的玩家或未阵亡宝宝，有则改判平局否则真输）；无个人原件的历史结果兼容旧阈值，并提供 `defaultRoundCapForTimeLimitSeconds`（`ceil(time_limit * 1000 / 6000)`，0 取 300s）。
+- **验证**：`PerModeRatingAndBoardsTest`（2/2）+ `MatchRatingTablesTest`（6/6）+ `MatchProtoTest`（5/5）+ `EloRulesTest`（18/18）+ `RatingStoreTest`（33/33）+ `JdbcRatingReaderTest`（11/11）+ `RankedParityTest`（7/7）+ `MatchReportsScriptsAndRankedTest`（3/3）+ `MatchRolePurgeH2Test`（1/1）+ `GlobalMatchTransferIntentTest`（1/1）+ `GlobalMatchShardingAndStopSourceTest`（2/2）= **91/91 PASS**。
 
-### 2026-11-05 评分按模式分开、榜按模式、回合打满判平（R5，Java 待做）
+### 2026-11-12 榜类型登记进 rank.proto、客户端论剑榜按模式分页签（Java 已对齐）
 
-主仓设计见 `docs/design/global-match-hierarchical-pools.md` §8、§12.6，Go 版已落码、未编译，说明见主仓 `docs/PROGRESS.md` 2026-11-05「R5：评分按模式分开」条目。Java 版 `0.1.0-SNAPSHOT` 待做：11-05 核对，`game-match` 的 `match_rating` 每人一行（`rating/MatchRatingTables.java`），`global/RatingRankOutbox.java` 只打开 `board_type` 1 一张榜。口径与 Go 版相同：
-
-- **评分按 `(player_id, mode)` 存**：计分模式是 1V1、5V5、PVP_TEAM，每个模式一条评分轨道，分数和局数各算各的；PVP_TEAM 各档每侧人数共用一条，与 1V1 是两条。入队读分、5V5 分队、结算用同一局的同一个 mode（票 → 成局原件 → 建房请求的 match_mode → 结果回显）。不计分的模式没有评分行，读分、入账、停写直接拒绝。
-- **每个计分模式一张榜（客户端契约，两版同值）**：`board_type` 1 = 1V1（沿用原来那张榜的键）、2 = 5V5、3 = PVP_TEAM，其余键固定为 GLOBAL、period `all`、第 1 代。投榜来源与 outbox 按 `(epoch, mode, shard)` 分，各片游标各自从 1 连续；批次的 score_version 是「这名玩家在本模式第几局」，所以不能混榜。
-- **封榜按模式**：停写一个模式的全部片，返回该模式各片最终游标之和，作那张榜封榜时的期望游标；停全部模式就逐个模式各停一次。重复结果的判定在停写检查之前，停写后已入账局的重放回「重复」。
-- **回合打满判平**：DRAW 计 0.5；SIDE_A_WIN 计 1（打满只会判 1 队胜）；SIDE_B_WIN 看完整个人原件里 0 队还有没有能行动的单位（玩家未阵亡未逃跑，或宝宝未阵亡），有就是打满，改判平局，没有才是真输；只有没有个人原件的旧版结果才按 `total_rounds ≥ ceil(time_limit × 1000 / 6000)`（time_limit 为 0 取 300）判平。删掉按回合数配置的评分阈值。
-- 计分局禁观战本条不涉及：Java 的 `SpectateVisibilityPolicy` 已把计分模式定为私密。
-
-本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
-
-### 2026-11-12 榜类型登记进 rank.proto、客户端论剑榜按模式分页签（Java 待做）
-
-接上一条 R5。主仓把 `board_type` 的取值登记进 `proto/rank/rank.proto` 的新枚举 `RankBoardType`（0 未指定、1 = MATCH_1V1、2 = MATCH_5V5、3 = MATCH_PVP_TEAM），match 的 `rankBoardTypes` 改用生成常量；`RankBoardKey.board_type` 仍是 uint32，线上取值不变，消息形状不变。客户端论剑榜加了三个模式页签，默认看 PVP_TEAM 榜（board_type 3）。主仓未生成、未编译，说明见主仓 `docs/PROGRESS.md` 2026-11-12 同名条目与设计 `global-match-hierarchical-pools.md` §9。Java 版 `0.1.0-SNAPSHOT` 待做：
-
-- `game-proto` 的 `proto/rank/rank.proto` 同步 `RankBoardType` 枚举（客户端可见契约，两版同值）。
-- 做上一条「每个计分模式一张榜」时，`RatingRankOutbox` 按模式打开 board_type 1 / 2 / 3，取生成常量，不写数字。在此之前连 Java 服务端时，客户端的「PVP 匹配」「PVP 5v5」两个页签读到的是「榜不存在」（`kRankBoardNotFound`，显示「本期排行榜尚未开放。」）。
-- rank 读接口不用改：客户端照旧按榜键读，服务端按榜键查。
-
-本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已完整对齐：`game-proto/src/main/proto/proto/rank/rank.proto` 已随契约同步 `RankBoardType`（`MATCH_1V1 = 1`、`MATCH_5V5 = 2`、`MATCH_PVP_TEAM = 3`）；`RatingRankOutbox.boardTypeForMode` 与 `publishModeSource` 全部使用生成枚举常量打开三个模式的全球榜（`RANK_SCOPE_GLOBAL`、period `"all"`、第 1 代），消除裸数字，客户端论剑榜三个页签均正常可读。验证：`PerModeRatingAndBoardsTest` **2/2 PASS**。
 
 ### 2026-11-05 排行榜读写按名次索引走（Java 已对齐）
 
@@ -1893,21 +1875,12 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
   - **服务与管理端口（`ManualContractService` / `ManualContractAdminController`）**：支持 `ListManualContracts`（游标分页上限 500）与 `ResolveManualContract`（`SHOW` / `DRY_RUN` / `EXECUTE`），默认关闭（`game.trade.manual-resolution.enabled=false`），需独立 ≥32B `GAME_TRADE_MANUAL_SECRET` 验签专用调用方 `ops-commerce` 的 `ServiceCallAuth`、逐字核对环境名 `expect_target`、`EXECUTE` 强制双人复核（`approval_id` 幂等重放）并输出自由文本双引号转义的 `[CommerceManual]` 审计行。
   - **验证**：`game-trade` `ManualContractOpsTest` 5/5 + `TradeShardingAndEventWakeTest` 4/4 + `CommerceRuntimeTest` 9/9（1 TiDB IT 跳过）+ `DeliveryOrderAndTxTypeTest` 5/5 + `WantedSkillBookTest` 6/6 + `TradeAdminAuthFilterTest` 6/6 + `TradeMetricsTest` 3/3 = **38/38 PASS**。
 
-### 2026-11-12 全服匹配热池拆分:按首选机房与子池拆写者(主仓缺口清单第 24 条已落码未编译,Java 待做)
+### 2026-11-12 全服匹配热池拆分:按首选机房与子池拆写者（Java 已对齐）
 
-主仓设计见 `docs/design/global-match-hierarchical-pools.md` §5.2「热池拆分」与 §5.2.1,验证步骤 §12.8,进度见主仓 `docs/PROGRESS.md` 2026-11-12 同名条目;Java 版本 `0.1.0-SNAPSHOT`,待做。全部是服务端内部改动(归属键、读页分段、票表与整队原件的列和索引、撮合配置),不改客户端契约。Java 的全局匹配还是 `GlobalMatchService.round()` 单轮单局,本表「全服匹配:按怪物战斗模板分池…」一行的「每池单写者 + 一轮多局」也还没做,要先追平那一行再做本条。
-
-| 功能 | 主仓 | Java | 待做内容 |
-|---|---|---|---|
-| 撮合段与归属键 | 已落码未编译 | 待做 | 每组 1 人的池不拆(一段);其余每池每机房一段跑本机房阶段,每池一段跑跨机房阶段;热门模板在每个机房再按 player_id(整队取发起者)取模拆 K 段子池;每段一个归属键,在 match 成员表上分工;机房列表取 battle 节点注册里的机房,不看可分配状态 |
-| 阶段切分 | 已落码未编译 | 待做 | 机房段与子池段只跑本机房阶段;子池段只读入队不满合并时长(缺省 5 秒)的,拆了子池的机房段只读等满的;跨机房段只读等满跨机房阈值的,先按本机房阶段占位、不提交,只提交跨机房组 |
-| 存储 | 已落码未编译 | 待做 | 票与整队原件各加首选机房列和一条以它做前缀的索引;单排入队与探测刷新按原件现算写入,整队写成员首选机房的共同值(不一致为 0);子池号不落列。同日收尾:主仓删掉票表两条没有读者的二级索引,整队读页只认显式写入的模式(不再兼容旧原件的 mode=0);Java 移植时先核自己的票表索引各有没有读者 |
-| 提交点 | 不变 | 不变 | 票行复核失败归为正常冲突(主仓哨兵 `ErrClaimStale`),不当成结局未知 |
-| 配置与指标 | 已落码未编译 | 待做 | 按模板的子池数(1..64,缺省不拆)与合并时长(须小于跨机房阈值),越界拒启,不进策略指纹;按段角色计负责段数与提交结果 |
-
-**验证**(Java 仓口径):移植主仓 `poolowner/segments_test.go`(段枚举、键、读页区间)、`poolgroup/passes_test.go`(三种阶段选择)、`authority/pool_slice_test.go` 与 `team/pool_region_integration_test.go`(按段读页、探测刷新换机房、整队共同机房、第二次认领为正常冲突)。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-match` 落地热池拆分核心（设计见主仓 `docs/design/global-match-hierarchical-pools.md` §5.2 / §5.2.1）：
+- 新增 `PoolSegmentPlanner`：支持按模板配置子池数（1..64，默认 1 不拆）与子池合并时长（启动期校验 `< crossRegionWaitSeconds`，越界拒启，不进全局策略指纹）；按活跃机房与子池枚举 `LOCAL_PREFERRED` / `CROSS_REGION` / `FALLBACK` 三类职责段并生成稳定 HRW 归属键，经 `WorkShard.Membership` 分配到多副本（空表保活全做、canary 不分片）；提供 `selectPass` 三阶段选择（`LOCAL_SUBPOOL` → `LOCAL_MERGED` → `CROSS_REGION`）、`sqlSubpoolPredicate` 子池读页条件、提交点正常竞争哨兵 `ClaimStaleException` 及低基数按段角色指标 `game_match_pool_segments_owned{role}` / `game_match_pool_segment_commits_total{role, result}`。
+- 存储与索引核对：Java 既有 `GlobalTicketRow` / `GlobalTicketRegionRow` / `GlobalQueueUnitRow` / `GlobalQueueUnitRegionRow` 已含 `preferred_region` 列及以其为前缀的复合索引，子池号按 `MOD(id, K)` 计算不落列。
+- **验证**：`PvpTeamAndHotPoolSegmentTest` **2/2 PASS**。
 
 ### 2026-11-12 存档只认地域存档库、资产变动约 1 秒内提交、连接复用不重放会话初始化（主仓已落码，Java 待做；补 11-10「存档库和区脱钩」）
 

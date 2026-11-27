@@ -267,11 +267,16 @@ public final class RatingTestDatabase implements AutoCloseable {
 
     // ================================================================ 摆状态 / 看状态
 
-    /** 直接写一行评分（覆盖已有的）。 */
+    /** 直接写一行 1V1 评分（覆盖已有的）。 */
     public void putRating(long playerId, long ratingCenti, long games) {
-        update("DELETE FROM match_rating WHERE player_id = ?", PbMysql.uint64(playerId));
-        update("INSERT INTO match_rating (player_id, rating_centi, games, updated_at_ms) VALUES (?, ?, ?, 0)", PbMysql.uint64(playerId),
-                ratingCenti, games);
+        putRating(com.game.match.support.MatchModes.ONE_V_ONE, playerId, ratingCenti, games);
+    }
+
+    /** 按计分模式写一行评分（R5；覆盖该模式已有行）。 */
+    public void putRating(int mode, long playerId, long ratingCenti, long games) {
+        update("DELETE FROM match_rating WHERE player_id = ? AND match_mode = ?", PbMysql.uint64(playerId), mode);
+        update("INSERT INTO match_rating (player_id, rating_centi, games, updated_at_ms, match_mode) VALUES (?, ?, ?, 0, ?)",
+                PbMysql.uint64(playerId), ratingCenti, games, mode);
     }
 
     /** 直接写一行入账标记（给清理用例摆旧数据）。 */
@@ -280,11 +285,18 @@ public final class RatingTestDatabase implements AutoCloseable {
                 PbMysql.uint64(battleId), appliedAtMs);
     }
 
-    /** 评分行：{rating_centi, games, updated_at_ms}；没有行为空。 */
+    /** 评分行：{rating_centi, games, updated_at_ms}；优先取 1V1，或无指定模式时取第一行。 */
     public Optional<long[]> ratingRow(long playerId) {
-        return query("SELECT rating_centi, games, updated_at_ms FROM match_rating WHERE player_id = ?",
+        return query("SELECT rating_centi, games, updated_at_ms FROM match_rating WHERE player_id = ? ORDER BY match_mode LIMIT 1",
                 rs -> rs.next() ? Optional.of(new long[] {rs.getLong(1), rs.getLong(2), rs.getLong(3)}) : Optional.empty(),
                 PbMysql.uint64(playerId));
+    }
+
+    /** 按计分模式读评分行：{rating_centi, games, updated_at_ms}；没有行为空。 */
+    public Optional<long[]> ratingRow(int mode, long playerId) {
+        return query("SELECT rating_centi, games, updated_at_ms FROM match_rating WHERE player_id = ? AND match_mode = ?",
+                rs -> rs.next() ? Optional.of(new long[] {rs.getLong(1), rs.getLong(2), rs.getLong(3)}) : Optional.empty(),
+                PbMysql.uint64(playerId), mode);
     }
 
     public OptionalLong ratingCenti(long playerId) {

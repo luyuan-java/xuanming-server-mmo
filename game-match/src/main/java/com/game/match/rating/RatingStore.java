@@ -72,13 +72,13 @@ public final class RatingStore {
     static final String SQL_INSERT_APPLIED =
             "INSERT INTO match_rating_applied (battle_id, match_mode, delta_a_centi, applied_at_ms) VALUES (?, ?, 0, ?)";
     static final String SQL_ENSURE_ROW =
-            "INSERT INTO match_rating (player_id, rating_centi, games, updated_at_ms) VALUES (?, ?, 0, ?)"
+            "INSERT INTO match_rating (player_id, rating_centi, games, updated_at_ms, match_mode) VALUES (?, ?, 0, ?, ?)"
                     + " ON DUPLICATE KEY UPDATE player_id = player_id";
-    static final String SQL_LOCK_ROW = "SELECT rating_centi FROM match_rating WHERE player_id = ? FOR UPDATE";
+    static final String SQL_LOCK_ROW = "SELECT rating_centi, games FROM match_rating WHERE player_id = ? AND match_mode = ? FOR UPDATE";
     static final String SQL_UPDATE_ROW =
-            "UPDATE match_rating SET rating_centi = ?, games = games + 1, updated_at_ms = ? WHERE player_id = ?";
+            "UPDATE match_rating SET rating_centi = ?, games = games + 1, updated_at_ms = ? WHERE player_id = ? AND match_mode = ?";
     static final String SQL_SET_DELTA = "UPDATE match_rating_applied SET delta_a_centi = ? WHERE battle_id = ?";
-    static final String SQL_FIND_PREFIX = "SELECT player_id, rating_centi, games FROM match_rating WHERE player_id IN (";
+    static final String SQL_FIND_PREFIX = "SELECT player_id, rating_centi, games FROM match_rating WHERE match_mode = ? AND player_id IN (";
     static final String SQL_DELETE_APPLIED = "DELETE FROM match_rating_applied WHERE applied_at_ms < ? LIMIT ?";
 
     /** 一条对局结果的入账结局（终态；失败是抛异常）。 */
@@ -153,6 +153,10 @@ public final class RatingStore {
     public interface CommitHook {
         boolean alreadyApplied(Connection c,BattleResultEvent event)throws SQLException;
         void append(Connection c,BattleResultEvent event,Map<Long,Long> next,long stamp)throws SQLException;
+        /** R5 按模式投榜入口：携带各玩家在本模式的累计局数（score_version）。 */
+        default void append(Connection c,BattleResultEvent event,Map<Long,Long> next,Map<Long,Long> scoreVersions,long stamp)throws SQLException {
+            append(c, event, next, stamp);
+        }
         default void appendRanked(Connection c,BattleResultEvent event,
                                   com.game.match.ranked.RankedStore.SeasonCommitResult commit,long stamp)throws SQLException {
             if (!commit.qualifiedScores().isEmpty()) {
@@ -315,18 +319,22 @@ public final class RatingStore {
                     finished = true;
                     return Result.duplicate();
                 }
+                int mode = event.getMatchMode();
                 Map<Long, Boolean> sides = scored.sides();
                 List<Long> ascending = new ArrayList<>(sides.keySet());
                 ascending.sort(Long::compareUnsigned);
                 for (Long pid : ascending) {
-                    ensureRow(c, pid, now);
+                    ensureRow(c, pid, mode, now);
                 }
                 Map<Long, Long> pre = new LinkedHashMap<>();
+                Map<Long, Long> nextGames = new LinkedHashMap<>();
                 for (Long pid : ascending) {
-                    pre.put(pid, lockRow(c, pid));
+                    long[] locked = lockRow(c, pid, mode);
+                    pre.put(pid, locked[0]);
+                    nextGames.put(pid, locked[1] + 1L);
                 }
                 boolean rankedMode = rankedStore != null
-                        && event.getMatchMode() == com.game.match.support.MatchModes.PVP_TEAM
+                        && mode == com.game.match.support.MatchModes.PVP_TEAM
                         && event.hasRankedContext() && event.getRankedContext().getSeasonId() != 0;
                 boolean zeroRoundRanked = rankedMode && event.getTotalRounds() == 0;
                 EloRules.Settlement settlement = zeroRoundRanked
@@ -334,7 +342,7 @@ public final class RatingStore {
                         : EloRules.settle(scored, pre);
                 if (!zeroRoundRanked) {
                     for (Long pid : ascending) {
-                        updateRow(c, pid, settlement.nextCenti().get(pid), now);
+                        updateRow(c, pid, mode, settlement.nextCenti().get(pid), now);
                     }
                 }
                 long deltaACenti = settlement.deltaACenti();
@@ -346,7 +354,7 @@ public final class RatingStore {
                         commitHook.appendRanked(c, event, rankedCommit, now);
                     }
                 } else if (commitHook != null) {
-                    commitHook.append(c, event, settlement.nextCenti(), now);
+                    commitHook.append(c, event, settlement.nextCenti(), nextGames, now);
                 }
                 c.commit();
                 finished = true;
@@ -382,33 +390,36 @@ public final class RatingStore {
         }
     }
 
-    private static void ensureRow(Connection c, long playerId, long now) throws SQLException {
+    private static void ensureRow(Connection c, long playerId, int mode, long now) throws SQLException {
         try (PreparedStatement ps = prepare(c, SQL_ENSURE_ROW, APPLY_STATEMENT_TIMEOUT_SECONDS)) {
             ps.setObject(1, PbMysql.uint64(playerId));
             ps.setLong(2, RatingReader.DEFAULT_CENTI);
             ps.setLong(3, now);
+            ps.setInt(4, mode);
             ps.executeUpdate();
         }
     }
 
-    private static long lockRow(Connection c, long playerId) throws SQLException {
+    private static long[] lockRow(Connection c, long playerId, int mode) throws SQLException {
         try (PreparedStatement ps = prepare(c, SQL_LOCK_ROW, APPLY_STATEMENT_TIMEOUT_SECONDS)) {
             ps.setObject(1, PbMysql.uint64(playerId));
+            ps.setInt(2, mode);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
                     // 刚补过行、又在同一笔事务里：读不到只可能是有人在事务外删了它
-                    throw new SQLException("评分行在补行之后不见了 player=" + Long.toUnsignedString(playerId));
+                    throw new SQLException("评分行在补行之后不见了 player=" + Long.toUnsignedString(playerId) + " mode=" + mode);
                 }
-                return rs.getLong(1);
+                return new long[] {rs.getLong(1), rs.getLong(2)};
             }
         }
     }
 
-    private static void updateRow(Connection c, long playerId, long ratingCenti, long now) throws SQLException {
+    private static void updateRow(Connection c, long playerId, int mode, long ratingCenti, long now) throws SQLException {
         try (PreparedStatement ps = prepare(c, SQL_UPDATE_ROW, APPLY_STATEMENT_TIMEOUT_SECONDS)) {
             ps.setLong(1, ratingCenti);
             ps.setLong(2, now);
             ps.setObject(3, PbMysql.uint64(playerId));
+            ps.setInt(4, mode);
             ps.executeUpdate();
         }
     }
@@ -434,12 +445,21 @@ public final class RatingStore {
 
     // ================================================================ 读
 
+    /** 读一组玩家的 1V1 评分行（向后兼容旧入口）；R5 请显式传模式 {@link #find(int, Collection)}。 */
+    public Map<Long, Rating> find(Collection<Long> playerIds) {
+        return find(com.game.match.support.MatchModes.ONE_V_ONE, playerIds);
+    }
+
     /**
-     * 读一组玩家的评分行：结果<b>只含有行的人</b>（没有行 = 新号，调用方按 {@link Rating#fresh} 处理）；入参里重复的玩家号只查一次。
+     * R5 按计分模式读一组玩家的评分行：不计分模式直接拒绝；结果<b>只含有行的人</b>（没有行 = 新号，调用方按 {@link Rating#fresh} 处理）。
      *
+     * @throws IllegalArgumentException mode 不是计分模式（仅 1V1 / 5V5 / PVP_TEAM 有评分行）
      * @throws StoreException 读失败（库不可达、取连接或语句超时）
      */
-    public Map<Long, Rating> find(Collection<Long> playerIds) {
+    public Map<Long, Rating> find(int mode, Collection<Long> playerIds) {
+        if (!com.game.match.support.MatchModes.rated(mode)) {
+            throw new IllegalArgumentException("不计分模式没有评分行: mode=" + mode);
+        }
         List<Long> distinct = new ArrayList<>(new LinkedHashSet<>(playerIds));
         if (distinct.isEmpty()) {
             return Map.of();
@@ -450,8 +470,9 @@ public final class RatingStore {
                 List<Long> chunk = distinct.subList(from, Math.min(distinct.size(), from + READ_CHUNK));
                 String sql = SQL_FIND_PREFIX + String.join(", ", Collections.nCopies(chunk.size(), "?")) + ")";
                 try (PreparedStatement ps = prepare(c, sql, READ_TIMEOUT_SECONDS)) {
+                    ps.setInt(1, mode);
                     for (int i = 0; i < chunk.size(); i++) {
-                        ps.setObject(i + 1, PbMysql.uint64(chunk.get(i)));
+                        ps.setObject(i + 2, PbMysql.uint64(chunk.get(i)));
                     }
                     try (ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) {
@@ -468,9 +489,14 @@ public final class RatingStore {
         return out;
     }
 
-    /** 读一名玩家的评分行；没有行为 {@link Rating#fresh}。失败抛 {@link StoreException}。 */
+    /** 读一名玩家的 1V1 评分行；没有行为 {@link Rating#fresh}。 */
     public Rating findOrFresh(long playerId) {
-        Rating row = find(List.of(playerId)).get(playerId);
+        return findOrFresh(com.game.match.support.MatchModes.ONE_V_ONE, playerId);
+    }
+
+    /** R5 按计分模式读一名玩家的评分行；不计分模式直接拒绝，没有行为 {@link Rating#fresh}。 */
+    public Rating findOrFresh(int mode, long playerId) {
+        Rating row = find(mode, List.of(playerId)).get(playerId);
         return row == null ? Rating.fresh(playerId) : row;
     }
 

@@ -1273,10 +1273,11 @@ public final class RankedStore {
         }
     }
 
-    /** 跨季沿用 match_rating 权威 Elo；无记录或表未建时回落 150000（1500 分）。 */
+    /** 跨季沿用 match_rating(PVP_TEAM) 权威 Elo；无记录或表未建时回落 150000（1500 分）。 */
     private long readCarryOverRating(Connection c, long playerId) {
-        try (PreparedStatement ps = c.prepareStatement("SELECT rating_centi FROM match_rating WHERE player_id=?")) {
+        try (PreparedStatement ps = c.prepareStatement("SELECT rating_centi FROM match_rating WHERE player_id=? AND match_mode=?")) {
             ps.setObject(1, PbMysql.uint64(playerId));
+            ps.setInt(2, com.game.match.support.MatchModes.PVP_TEAM);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
                     return rs.getLong(1);

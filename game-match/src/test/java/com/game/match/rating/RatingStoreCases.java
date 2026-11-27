@@ -40,7 +40,7 @@ abstract class RatingStoreCases {
     static final int DRAW = eBattleOutcome.BATTLE_OUTCOME_DRAW_VALUE;
     static final String INSERT_APPLIED = "INSERT INTO match_rating_applied";
     static final String ENSURE_ROW = "INSERT INTO match_rating (";
-    static final String LOCK_ROW = "SELECT rating_centi FROM match_rating";
+    static final String LOCK_ROW = "SELECT rating_centi, games FROM match_rating";
     static final String UPDATE_ROW = "UPDATE match_rating SET";
     static final String SET_DELTA = "UPDATE match_rating_applied";
     static final long NOW = 1_800_000_000_000L;
@@ -213,16 +213,16 @@ abstract class RatingStoreCases {
 
     @Test
     void 五对五用队伍平均分_同队每人同一个增量_已有的行在原值上累加() {
-        db.putRating(12101, 160_000, 7);
-        db.putRating(12102, 140_000, 0);
+        db.putRating(MatchModes.FIVE_V_FIVE, 12101, 160_000, 7);
+        db.putRating(MatchModes.FIVE_V_FIVE, 12102, 140_000, 0);
 
         Result result = apply(event(9101, MatchModes.FIVE_V_FIVE, B_WIN, List.of(12101L, 12102L), List.of(12103L, 12104L)));
 
         assertThat(result).isEqualTo(new Result(Outcome.APPLIED, null, -1_600, false));
-        assertThat(db.ratingRow(12101)).hasValueSatisfying(row -> assertThat(row).containsExactly(158_400, 8, NOW));
-        assertThat(db.ratingRow(12102)).hasValueSatisfying(row -> assertThat(row).containsExactly(138_400, 1, NOW));
-        assertThat(db.ratingRow(12103)).hasValueSatisfying(row -> assertThat(row).containsExactly(151_600, 1, NOW));
-        assertThat(db.ratingRow(12104)).hasValueSatisfying(row -> assertThat(row).containsExactly(151_600, 1, NOW));
+        assertThat(db.ratingRow(MatchModes.FIVE_V_FIVE, 12101)).hasValueSatisfying(row -> assertThat(row).containsExactly(158_400, 8, NOW));
+        assertThat(db.ratingRow(MatchModes.FIVE_V_FIVE, 12102)).hasValueSatisfying(row -> assertThat(row).containsExactly(138_400, 1, NOW));
+        assertThat(db.ratingRow(MatchModes.FIVE_V_FIVE, 12103)).hasValueSatisfying(row -> assertThat(row).containsExactly(151_600, 1, NOW));
+        assertThat(db.ratingRow(MatchModes.FIVE_V_FIVE, 12104)).hasValueSatisfying(row -> assertThat(row).containsExactly(151_600, 1, NOW));
         assertThat(db.appliedRow(9101)).hasValueSatisfying(row -> assertThat(row).containsExactly(MatchModes.FIVE_V_FIVE, -1_600, NOW));
         assertThat(updates("MATCH_MODE_5V5", "applied")).isEqualTo(1);
     }
@@ -382,14 +382,14 @@ abstract class RatingStoreCases {
 
     @Test
     void 同队重复的玩家_平均分按名单算两次_只入账一次_局数只加1() {
-        db.putRating(13001, 160_000, 0);
-        db.putRating(13002, 140_000, 0);
+        db.putRating(MatchModes.FIVE_V_FIVE, 13001, 160_000, 0);
+        db.putRating(MatchModes.FIVE_V_FIVE, 13002, 140_000, 0);
 
         Result result = apply(event(9801, MatchModes.FIVE_V_FIVE, A_WIN, List.of(13001L, 13001L), List.of(13002L)));
 
         assertThat(result.outcome()).isEqualTo(Outcome.APPLIED);
-        assertThat(db.ratingRow(13001)).hasValueSatisfying(row -> assertThat(row).containsExactly(160_769, 1, NOW));
-        assertThat(db.ratingRow(13002)).hasValueSatisfying(row -> assertThat(row).containsExactly(139_231, 1, NOW));
+        assertThat(db.ratingRow(MatchModes.FIVE_V_FIVE, 13001)).hasValueSatisfying(row -> assertThat(row).containsExactly(160_769, 1, NOW));
+        assertThat(db.ratingRow(MatchModes.FIVE_V_FIVE, 13002)).hasValueSatisfying(row -> assertThat(row).containsExactly(139_231, 1, NOW));
         assertThat(ds.executed(UPDATE_ROW)).as("同一行只 UPDATE 一次").isEqualTo(2);
         assertThat(ds.executed(ENSURE_ROW)).isEqualTo(2);
     }
@@ -427,7 +427,7 @@ abstract class RatingStoreCases {
         assertThat(apply(event(battle, MatchModes.FIVE_V_FIVE, A_WIN, List.of(top, 7L), List.of(high, 3L))).outcome())
                 .as("大号的战斗号同样挡得住重复").isEqualTo(Outcome.DUPLICATE);
 
-        Map<Long, Rating> read = store.find(List.of(top, high, 3L, 99L));
+        Map<Long, Rating> read = store.find(MatchModes.FIVE_V_FIVE, List.of(top, high, 3L, 99L));
         assertThat(read).containsOnlyKeys(top, high, 3L);
         assertThat(read.get(top)).isEqualTo(new Rating(top, 151_600, 1));
         assertThat(read.get(high)).isEqualTo(new Rating(high, 148_400, 1));
@@ -592,7 +592,8 @@ abstract class RatingStoreCases {
         assertThat(rows.get(12001L)).isEqualTo(new Rating(12001, 162_525, 9));
         assertThat(rows.get(12002L)).as("0 分是合法的评分，不是「没有行」").isEqualTo(new Rating(12002, 0, 1));
         assertThat(ds.calls).hasSize(1);
-        assertThat(ds.calls.get(0).params()).as("去重后按首次出现的顺序").containsExactly(12001L, 12003L, 12002L);
+        assertThat(ds.calls.get(0).params()).as("模式号在前，随后去重按首次出现顺序")
+                .containsExactly(MatchModes.ONE_V_ONE, 12001L, 12003L, 12002L);
 
         assertThat(store.findOrFresh(12003)).isEqualTo(new Rating(12003, 150_000, 0));
         assertThat(store.findOrFresh(12001)).isEqualTo(new Rating(12001, 162_525, 9));
@@ -615,8 +616,8 @@ abstract class RatingStoreCases {
 
         assertThat(rows).containsOnlyKeys(2L, (long) RatingStore.READ_CHUNK + 2);
         assertThat(ds.calls).as("两批、一条连接").hasSize(2);
-        assertThat(ds.calls.get(0).params()).hasSize(RatingStore.READ_CHUNK);
-        assertThat(ds.calls.get(1).params()).hasSize(3);
+        assertThat(ds.calls.get(0).params()).hasSize(RatingStore.READ_CHUNK + 1);
+        assertThat(ds.calls.get(1).params()).hasSize(4);
         assertThat(ds.connections.get()).isEqualTo(1);
     }
 

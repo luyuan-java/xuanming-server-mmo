@@ -88,8 +88,8 @@ class RankedParityTest {
 
             // 1. V2 1584 -> 1600 跨段（青锋 -> 云章）与权威分档暴露
             long p1 = 20001L, p2 = 20002L;
-            db.putRating(p1, 158_400L, 7);
-            db.putRating(p2, 158_400L, 7);
+            db.putRating(MatchModes.PVP_TEAM, p1, 158_400L, 7);
+            db.putRating(MatchModes.PVP_TEAM, p2, 158_400L, 7);
             // 先让 p1 在本季已亮段 7 场（其中 5 胜 2 负，下一场胜即解锁 6 胜锋芒称号）
             for (int i = 0; i < 7; i++) {
                 rankedStore.recordBattleSettlement(new RankedStore.SettlementInput(
@@ -180,11 +180,11 @@ class RankedParityTest {
 
             // 同分 184999（临界无双线之下 => 无榜首）：A 亮段更早应排第 1，B 排第 2；另加一位云章 160000 校验 V2 云章起发永久徽章+称号
             long pA = 30001L, pB = 30002L, pLate = 30003L, pOpp = 30004L, pYunzhang = 30005L;
-            db.putRating(pA, 184_999L, 5);
-            db.putRating(pB, 184_999L, 5);
-            db.putRating(pLate, 150_000L, 0);
-            db.putRating(pOpp, 150_000L, 0);
-            db.putRating(pYunzhang, 160_000L, 4);
+            db.putRating(MatchModes.PVP_TEAM, pA, 184_999L, 5);
+            db.putRating(MatchModes.PVP_TEAM, pB, 184_999L, 5);
+            db.putRating(MatchModes.PVP_TEAM, pLate, 150_000L, 0);
+            db.putRating(MatchModes.PVP_TEAM, pOpp, 150_000L, 0);
+            db.putRating(MatchModes.PVP_TEAM, pYunzhang, 160_000L, 4);
             now.set(1_730_000_100_000L);
             rankedStore.recordBattleSettlement(new RankedStore.SettlementInput(
                     pA, 401L, 1, 1, RankedMatchRatingStatus.RANKED_MATCH_RATING_CONFIRMED,
@@ -372,8 +372,8 @@ class RankedParityTest {
             rankedStore.ensureActiveSeason();
 
             long p1 = 60001L, p2 = 60002L;
-            db.putRating(p1, 165_000L, 10);
-            db.putRating(p2, 166_000L, 10);
+            db.putRating(MatchModes.PVP_TEAM, p1, 165_000L, 10);
+            db.putRating(MatchModes.PVP_TEAM, p2, 166_000L, 10);
             // 预埋 66001 / 66002 的战报正文（模拟终局落库战报），验证 featured_battle_id 仅在有录像时写入且 ref_count 精准护航/替换释放。
             for (long bid : List.of(66001L, 66002L, 66003L)) {
                 db.update("INSERT INTO match_battle_report(battle_id,created_ms,match_mode,battle_config_id,envelope,envelope_digest,ref_count) VALUES(?,?,?,?,?,?,?)",

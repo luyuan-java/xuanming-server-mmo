@@ -21,7 +21,7 @@ class MatchProtoTest {
         Descriptor d = BattlePlacement.getDescriptor();
 
         assertThat(d.getFullName()).isEqualTo("game.match.BattlePlacement");
-        assertThat(d.getFields()).hasSize(12);
+        assertThat(d.getFields()).hasSize(16);
         assertField(d, "battle_id", 1, FieldDescriptor.Type.UINT64);
         assertField(d, "battle_node_id", 2, FieldDescriptor.Type.UINT32);
         assertField(d, "battle_instance_id", 3, FieldDescriptor.Type.STRING);
@@ -63,9 +63,10 @@ class MatchProtoTest {
         assertThat(ddl).as("评分是有符号的 64 位整数（× 100 的定点数）").contains("`rating_centi` bigint NOT NULL DEFAULT 0 COMMENT 'pb:2'");
         assertThat(ddl).contains("`games` int unsigned NOT NULL DEFAULT 0 COMMENT 'pb:3'");
         assertThat(ddl).contains("`updated_at_ms` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:4'");
-        assertThat(ddl).contains("PRIMARY KEY (`player_id`)");
+        assertThat(ddl).contains("`match_mode` int NOT NULL DEFAULT 0 COMMENT 'pb:5'");
+        assertThat(ddl).contains("PRIMARY KEY (`player_id`,`match_mode`)");
         assertThat(ddl).doesNotContain("INDEX `idx_match_rating_0`");
-        assertThat(columns(ddl)).isEqualTo(4);
+        assertThat(columns(ddl)).isEqualTo(5);
     }
 
     @Test

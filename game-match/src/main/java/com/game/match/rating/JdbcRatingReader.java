@@ -41,21 +41,31 @@ public final class JdbcRatingReader implements RatingReader, MeterBinder, AutoCl
     /** 调用线程最多等这么久（与语句超时同为 1 s）。 */
     static final long WAIT_MS = 1_000;
 
-    /** 读评分行的窄口（生产为 {@link RatingStore#find}）：只返回有行的人，失败抛运行期异常。 */
+    /** 读评分行的窄口（生产为 {@link RatingStore#find(int, Collection)}）：只返回有行的人，失败抛运行期异常。 */
     @FunctionalInterface
     interface Source {
         Map<Long, RatingStore.Rating> find(Collection<Long> playerIds);
     }
 
-    private final Source source;
+    /** 按计分模式读评分行的窄口（R5）。 */
+    @FunctionalInterface
+    interface ModeSource {
+        Map<Long, RatingStore.Rating> find(int mode, Collection<Long> playerIds);
+    }
+
+    private final ModeSource source;
     private final ThreadPoolExecutor pool;
     private final long waitMs;
 
     public JdbcRatingReader(RatingStore store) {
-        this(store::find, THREADS, QUEUE, WAIT_MS);
+        this((ModeSource) store::find, THREADS, QUEUE, WAIT_MS);
     }
 
     JdbcRatingReader(Source source, int threads, int queue, long waitMs) {
+        this((mode, ids) -> source.find(ids), threads, queue, waitMs);
+    }
+
+    JdbcRatingReader(ModeSource source, int threads, int queue, long waitMs) {
         this.source = Objects.requireNonNull(source, "source");
         this.waitMs = waitMs;
         this.pool = new ThreadPoolExecutor(threads, threads, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(queue),
@@ -64,24 +74,34 @@ public final class JdbcRatingReader implements RatingReader, MeterBinder, AutoCl
 
     @Override
     public long loadCentiOrDefault(long playerId) {
-        return loadAllCentiOrDefault(List.of(playerId)).get(playerId);
+        return loadCentiOrDefault(com.game.match.support.MatchModes.ONE_V_ONE, playerId);
+    }
+
+    @Override
+    public long loadCentiOrDefault(int mode, long playerId) {
+        return loadAllCentiOrDefault(mode, List.of(playerId)).get(playerId);
     }
 
     @Override
     public Map<Long, Long> loadAllCentiOrDefault(Collection<Long> playerIds) {
+        return loadAllCentiOrDefault(com.game.match.support.MatchModes.ONE_V_ONE, playerIds);
+    }
+
+    @Override
+    public Map<Long, Long> loadAllCentiOrDefault(int mode, Collection<Long> playerIds) {
         Map<Long, Long> out = new LinkedHashMap<>();
         for (Long playerId : playerIds) {
             if (playerId != null) {
                 out.put(playerId, DEFAULT_CENTI);
             }
         }
-        if (out.isEmpty()) {
-            return Map.of();
+        if (out.isEmpty() || !com.game.match.support.MatchModes.rated(mode)) {
+            return out.isEmpty() ? Map.of() : Collections.unmodifiableMap(out);
         }
         List<Long> distinct = List.copyOf(out.keySet());
         Future<Map<Long, RatingStore.Rating>> pending;
         try {
-            pending = pool.submit(() -> source.find(distinct));
+            pending = pool.submit(() -> source.find(mode, distinct));
         } catch (RejectedExecutionException e) {
             log.error("[rating] 读评分的线程池已满或已关闭，按默认 1500 处理 players={}", unsigned(distinct));
             return Collections.unmodifiableMap(out);

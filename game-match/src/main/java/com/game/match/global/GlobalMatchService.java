@@ -352,7 +352,8 @@ public final class GlobalMatchService implements AutoCloseable {
                 }
             }
             var old=store.ticket(session);releaseIfEnded(old);
-            var prepared=store.prepareJoin(session,request,size,location.location().getZoneId(),ratings.loadCentiOrDefault(session.getPlayerId()),binding(session));
+            long playerRating = MatchModes.rated(mode) ? ratings.loadCentiOrDefault(mode, session.getPlayerId()) : RatingReader.DEFAULT_CENTI;
+            var prepared=store.prepareJoin(session,request,size,location.location().getZoneId(),playerRating,binding(session));
             if(!prepared.getResponsePayload().isEmpty())try{return JoinQueueResponse.parseFrom(prepared.getResponsePayload());}catch(com.google.protobuf.InvalidProtocolBufferException bad){throw new IllegalStateException("原Join回执损坏",bad);}
             return resumeJoin(prepared,deadline);
         } catch(RuntimeException e) {log.warn("全球排队拒绝或依赖失败: {}",e.getClass().getSimpleName());return MatchTips.joinRejected(MatchTip.BUSY);}
@@ -737,14 +738,17 @@ public final class GlobalMatchService implements AutoCloseable {
             hooks.beforePrepare(f.getMembersList().stream().map(GlobalMember::getPlayerId).toList());
             List<Long> roster=f.getMembersList().stream().map(GlobalMember::getPlayerId).toList();
             int[] teams;
-            if (f.getMode() == MatchMode.MATCH_MODE_GUILD_WAR_PVP_VALUE
-                    || f.getMode() == MatchMode.MATCH_MODE_GUILD_WAR_SIEGE_VALUE) {
+            boolean hasExplicitTeams = f.getMode() == MatchMode.MATCH_MODE_GUILD_WAR_PVP_VALUE
+                    || f.getMode() == MatchMode.MATCH_MODE_GUILD_WAR_SIEGE_VALUE
+                    || (f.getMode() == MatchModes.PVP_TEAM
+                        && f.getMembersList().stream().anyMatch(m -> m.getTeamIndex() == 1));
+            if (hasExplicitTeams) {
                 teams = new int[f.getMembersCount()];
                 for (int i = 0; i < f.getMembersCount(); i++) {
                     teams[i] = f.getMembers(i).getTeamIndex();
                 }
             } else {
-                teams = TeamAssignment.assign(MatchMode.forNumber(f.getMode()), roster, ratings.loadAllCentiOrDefault(roster));
+                teams = TeamAssignment.assign(MatchMode.forNumber(f.getMode()), roster, ratings.loadAllCentiOrDefault(f.getMode(), roster));
             }
             boolean isRanked = f.getMode() == MatchModes.PVP_TEAM && rankedStore != null && rankedTables != null;
             boolean isOptionalFreePreset = !isRanked && rankedStore != null && rankedTables != null

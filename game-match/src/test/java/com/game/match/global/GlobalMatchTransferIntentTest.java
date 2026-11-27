@@ -75,7 +75,7 @@ class GlobalMatchTransferIntentTest {
         try (Connection c = ds.getConnection(); Statement s = c.createStatement()) {
             s.execute("CREATE TABLE player(player_id BIGINT PRIMARY KEY,account VARCHAR(255) NOT NULL,owner_revision BIGINT NOT NULL,trade_listing_id BIGINT NOT NULL DEFAULT 0,zone_id INT NOT NULL DEFAULT 1)");
             s.execute("CREATE TABLE team_policy(id INT PRIMARY KEY,contract BLOB,allow_cross_zone TINYINT NOT NULL DEFAULT 0,contract_digest BLOB)");
-            s.execute("CREATE TABLE match_rating(player_id BIGINT PRIMARY KEY,rating_centi BIGINT NOT NULL,games BIGINT NOT NULL DEFAULT 0,updated_at_ms BIGINT NOT NULL DEFAULT 0)");
+            s.execute("CREATE TABLE match_rating(player_id BIGINT NOT NULL,rating_centi BIGINT NOT NULL,games BIGINT NOT NULL DEFAULT 0,updated_at_ms BIGINT NOT NULL DEFAULT 0,match_mode INT NOT NULL DEFAULT 3,PRIMARY KEY(player_id,match_mode))");
             String principal;
             try (var rs = s.executeQuery("SELECT CURRENT_USER()")) {
                 rs.next();

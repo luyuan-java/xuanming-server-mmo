@@ -19,16 +19,17 @@ option java_multiple_files = true;
 option java_outer_classname = "MatchTablesProto";
 option (proto2mysql.db) = true;
 
-// 玩家评分：每个打过计分模式（1V1 / 5V5）的玩家一行；没有行 = 新号，按 1500.00 读。
+// 玩家评分：按 (player_id, match_mode) 存（R5：1V1 / 5V5 / PVP_TEAM 各一条独立评分轨道）；没有行 = 新号，按 1500.00 读。
 message MatchRatingRow {
   option (proto2mysql.table_name) = "match_rating";
-  option (proto2mysql.primary_key) = "player_id";
+  option (proto2mysql.primary_key) = "player_id,match_mode";
 
   uint64 player_id = 1;
   int64 rating_centi = 2;     // 评分 × 100（1500.00 = 150000）；下限 0。定点整数：评分保留两位小数，不存浮点
-  uint32 games = 3;           // 已入账的计分局数
+  uint32 games = 3;           // 已入账的计分局数（兼作本模式投榜 score_version）
   uint64 updated_at_ms = 4;   // 最近一次入账的时刻（服务进程时钟，Unix 毫秒；只作排障）
-  // 追加区：从 5 起。
+  int32 match_mode = 5;       // MatchMode 数值（1=5V5、3=1V1、7=PVP_TEAM；0 保留作行锁锚点）
+  // 追加区：从 6 起。
 }
 
 // 入账标记：每一局计分对局一行，主键冲突 = 重复投递（恰好一次的依据）。保留 30 天（长于结果消息在 topic 里的最长寿命，

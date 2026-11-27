@@ -26,9 +26,19 @@ public interface RatingReader {
     /** 一名玩家的评分（centi）；没有行或读失败为 {@link #DEFAULT_CENTI}。 */
     long loadCentiOrDefault(long playerId);
 
+    /** R5 按计分模式读一名玩家的评分（centi）；不计分模式或读失败回 {@link #DEFAULT_CENTI}。 */
+    default long loadCentiOrDefault(int mode, long playerId) {
+        return loadCentiOrDefault(playerId);
+    }
+
     /**
      * 一组玩家的评分（centi）：返回的 Map <b>覆盖入参里的每一个玩家号</b>（没有行或读失败的人是 {@link #DEFAULT_CENTI}），入参重复的玩家号只读一次。
      * 整批读失败时每个人都是缺省值。
      */
     Map<Long, Long> loadAllCentiOrDefault(Collection<Long> playerIds);
+
+    /** R5 按计分模式读一组玩家的评分（centi）。 */
+    default Map<Long, Long> loadAllCentiOrDefault(int mode, Collection<Long> playerIds) {
+        return loadAllCentiOrDefault(playerIds);
+    }
 }

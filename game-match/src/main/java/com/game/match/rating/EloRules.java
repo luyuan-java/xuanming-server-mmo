@@ -149,7 +149,15 @@ public final class EloRules {
             return new Verdict.Ignored(Ignore.TEAMS_MALFORMED);
         }
         boolean roundCapDraw = false;
-        if (scoreA != SCORE_DRAW) {
+        if (event.getSettlementFormatVersion() == 1 && event.getSettlementsCount() > 0) {
+            // R5 新口径：有完整个人原件（v1）时，SIDE_A_WIN 必是真胜（打满只会判 1 队胜），SIDE_B_WIN 看 0 队是否仍有可行动单位（未阵亡未逃跑的玩家或未阵亡宝宝）
+            if (event.getOutcomeValue() == eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN_VALUE
+                    && hasTeamZeroActingUnit(event)) {
+                scoreA = SCORE_DRAW;
+                roundCapDraw = true;
+            }
+        } else if (scoreA != SCORE_DRAW) {
+            // 无个人原件的历史结果兼容：按配置阈值（或默认 ceil(time_limit * 1000 / 6000)）判平
             int cap = drawRoundCapFor.applyAsInt(event.getBattleConfigId());
             // total_rounds 是 uint32：按无符号比
             if (cap > 0 && Integer.compareUnsigned(event.getTotalRounds(), cap) >= 0) {
@@ -158,6 +166,30 @@ public final class EloRules {
             }
         }
         return new Verdict.Scored(scoreA, roundCapDraw, teamA, teamB);
+    }
+
+    /** 完整个人原件里 0 队是否仍有可行动单位（玩家未阵亡未逃跑，或任一宝宝未阵亡）。 */
+    static boolean hasTeamZeroActingUnit(BattleResultEvent event) {
+        for (com.game.proto.BattleSettlementData s : event.getSettlementsList()) {
+            if (s.getPlayerTeamIndex() != 0) {
+                continue;
+            }
+            if (!s.getIsDead() && !s.getFled()) {
+                return true;
+            }
+            for (com.game.proto.BattlePetSettlementData pet : s.getPetsList()) {
+                if (!pet.getIsDead()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** 无个人原件的旧版结果默认打满回合阈值：ceil(time_limit * 1000 / 6000)，time_limit 为 0 时按 300 秒（50 回合）。 */
+    public static int defaultRoundCapForTimeLimitSeconds(int timeLimitSeconds) {
+        long seconds = timeLimitSeconds <= 0 ? 300L : Integer.toUnsignedLong(timeLimitSeconds);
+        return (int) ((seconds * 1000L + 5999L) / 6000L);
     }
 
     /** A 对 B 的期望得分：{@code 1 / (1 + 10^((B − A) / 400))}（评分点）。 */

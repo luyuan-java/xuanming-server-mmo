@@ -99,7 +99,7 @@ public final class TrialChallengeCardStore {
         // 两次 SELECT ... FOR UPDATE 都锁不到新行会导致同局重复签发双倍 ref_count 或突破 10 张上限。
         // 锁序：match_rating(player_id) -> match_trial_challenge_card -> match_battle_report(battle_id ASC)，与 RatingStore 同向无死锁。
         try (PreparedStatement ensure = c.prepareStatement(
-                "INSERT INTO match_rating (player_id, rating_centi, games, updated_at_ms) VALUES (?, ?, 0, ?) "
+                "INSERT INTO match_rating (player_id, rating_centi, games, updated_at_ms, match_mode) VALUES (?, ?, 0, ?, 0) "
                         + "ON DUPLICATE KEY UPDATE player_id = player_id")) {
             ensure.setObject(1, PbMysql.uint64(ownerPlayerId));
             ensure.setLong(2, com.game.match.rating.RatingReader.DEFAULT_CENTI);
@@ -107,7 +107,7 @@ public final class TrialChallengeCardStore {
             ensure.executeUpdate();
         }
         try (PreparedStatement lockActor = c.prepareStatement(
-                "SELECT 1 FROM match_rating WHERE player_id=? FOR UPDATE")) {
+                "SELECT 1 FROM match_rating WHERE player_id=? AND match_mode=0 FOR UPDATE")) {
             lockActor.setObject(1, PbMysql.uint64(ownerPlayerId));
             try (ResultSet ignored = lockActor.executeQuery()) {
                 // 行锁已持有

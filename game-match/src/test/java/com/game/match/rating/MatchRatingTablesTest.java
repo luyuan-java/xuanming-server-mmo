@@ -52,7 +52,8 @@ class MatchRatingTablesTest {
                   `rating_centi` bigint NOT NULL DEFAULT 0 COMMENT 'pb:2',
                   `games` int unsigned NOT NULL DEFAULT 0 COMMENT 'pb:3',
                   `updated_at_ms` bigint unsigned NOT NULL DEFAULT 0 COMMENT 'pb:4',
-                  PRIMARY KEY (`player_id`)
+                  `match_mode` int NOT NULL DEFAULT 0 COMMENT 'pb:5',
+                  PRIMARY KEY (`player_id`,`match_mode`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='match_rating';""");
     }
 
@@ -76,17 +77,17 @@ class MatchRatingTablesTest {
         List<String> ratingColumns = columns(MatchRatingRow.getDescriptor());
         List<String> appliedColumns = columns(MatchRatingAppliedRow.getDescriptor());
 
-        assertThat(ratingColumns).containsExactly("player_id", "rating_centi", "games", "updated_at_ms");
+        assertThat(ratingColumns).containsExactly("player_id", "rating_centi", "games", "updated_at_ms", "match_mode");
         assertThat(appliedColumns).containsExactly("battle_id", "match_mode", "delta_a_centi", "applied_at_ms");
 
         assertThat(RatingStore.SQL_INSERT_APPLIED).startsWith("INSERT INTO " + MatchRatingTables.APPLIED + " (" + String.join(", ", appliedColumns) + ")");
         assertThat(RatingStore.SQL_ENSURE_ROW).startsWith("INSERT INTO " + MatchRatingTables.RATING + " (" + String.join(", ", ratingColumns) + ")")
                 .as("补行不用 INSERT IGNORE").doesNotContainIgnoringCase("IGNORE").endsWith("ON DUPLICATE KEY UPDATE player_id = player_id");
-        assertThat(RatingStore.SQL_LOCK_ROW).isEqualTo("SELECT rating_centi FROM " + MatchRatingTables.RATING + " WHERE player_id = ? FOR UPDATE");
+        assertThat(RatingStore.SQL_LOCK_ROW).isEqualTo("SELECT rating_centi, games FROM " + MatchRatingTables.RATING + " WHERE player_id = ? AND match_mode = ? FOR UPDATE");
         assertThat(RatingStore.SQL_UPDATE_ROW)
-                .isEqualTo("UPDATE " + MatchRatingTables.RATING + " SET rating_centi = ?, games = games + 1, updated_at_ms = ? WHERE player_id = ?");
+                .isEqualTo("UPDATE " + MatchRatingTables.RATING + " SET rating_centi = ?, games = games + 1, updated_at_ms = ? WHERE player_id = ? AND match_mode = ?");
         assertThat(RatingStore.SQL_SET_DELTA).isEqualTo("UPDATE " + MatchRatingTables.APPLIED + " SET delta_a_centi = ? WHERE battle_id = ?");
-        assertThat(RatingStore.SQL_FIND_PREFIX).isEqualTo("SELECT player_id, rating_centi, games FROM " + MatchRatingTables.RATING + " WHERE player_id IN (");
+        assertThat(RatingStore.SQL_FIND_PREFIX).isEqualTo("SELECT player_id, rating_centi, games FROM " + MatchRatingTables.RATING + " WHERE match_mode = ? AND player_id IN (");
         assertThat(RatingStore.SQL_DELETE_APPLIED).isEqualTo("DELETE FROM " + MatchRatingTables.APPLIED + " WHERE applied_at_ms < ? LIMIT ?");
     }
 
@@ -127,7 +128,7 @@ class MatchRatingTablesTest {
                 }
             }
 
-            assertThat(ratingColumns).containsExactly("player_id", "rating_centi", "games", "updated_at_ms");
+            assertThat(ratingColumns).containsExactly("player_id", "rating_centi", "games", "updated_at_ms", "match_mode");
             assertThat(indexes).contains("idx_match_rating_applied_0");
             // 建表是幂等的：再建一次不报错、不清数据
             db.putRating(1, 150_000, 0);
