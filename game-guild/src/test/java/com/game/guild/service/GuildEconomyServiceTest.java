@@ -222,14 +222,14 @@ class GuildEconomyServiceTest {
         reserveDonationOk();
         channel.onDeliver = op -> f.economyStore.opStates.put(op.opId(),
                 new OpState(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_APPLIED, 0, 0));
-        DonateToGuildResponse resp = donate(2, d());
+        DonateToGuildResponse resp = donate(1, d());
 
         assertThat(resp.hasErrorMessage()).isFalse();
         assertThat(resp.getDonation().getStatus()).isEqualTo(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_APPLIED);
-        assertThat(resp.getDonation().getDonateId()).isEqualTo(2);
-        assertThat(resp.getDonation().getCostAmount()).isEqualTo(100_000);
-        assertThat(resp.getDonation().getContributionGain()).isEqualTo(120);
-        assertThat(resp.getDonation().getFundsGain()).isEqualTo(12_000);
+        assertThat(resp.getDonation().getDonateId()).isEqualTo(1);
+        assertThat(resp.getDonation().getCostAmount()).isEqualTo(10_000);
+        assertThat(resp.getDonation().getContributionGain()).isEqualTo(20);
+        assertThat(resp.getDonation().getFundsGain()).isEqualTo(2_000);
         assertThat(resp.getDonation().getCreatedMs()).isEqualTo(NOW);
         assertThat(resp.getGuild().getGuildId()).isEqualTo(G);
 
@@ -238,7 +238,7 @@ class GuildEconomyServiceTest {
         assertThat(in.periodKey()).isEqualTo(GameDay.weekKey(NOW));
         assertThat(in.deadlineMs()).isEqualTo(NOW + 600_000);
         assertThat(in.leaseUntilMs()).isEqualTo(NOW + 10_000);
-        assertThat(in.dailyLimit()).isEqualTo(2);
+        assertThat(in.dailyLimit()).isEqualTo(3);
         assertThat(in.leaseToken()).isNotZero();
 
         AssetOp op = channel.ops.getFirst();
@@ -249,7 +249,7 @@ class GuildEconomyServiceTest {
         assertThat(op.seq()).isEqualTo(9);
         assertThat(op.deadlineMs()).isEqualTo(NOW + 600_000);
         assertThat(op.leaseToken()).isEqualTo(in.leaseToken());
-        assertThat(op.bundle().getCurrencies(0).getAmount()).isEqualTo(100_000);
+        assertThat(op.bundle().getCurrencies(0).getAmount()).isEqualTo(10_000);
         assertThat(AssetBundle.newBuilder().addCurrencies(op.bundle().getCurrencies(0)).build().toByteString())
                 .isEqualTo(in.payload());
         assertThat(channel.budgets.getFirst()).isBetween(300L, 2_500L);
@@ -276,18 +276,18 @@ class GuildEconomyServiceTest {
         reserveDonationOk();
         channel.onDeliver = op -> f.economyStore.opStates.put(op.opId(),
                 new OpState(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_REJECTED, 27000, 27000));
-        DonateToGuildResponse resp = donate(3, d());
+        DonateToGuildResponse resp = donate(1, d());
         assertThat(resp.getErrorMessage()).isEqualTo(GuildTip.CURRENCY_INSUFFICIENT.proto());
         assertThat(resp.getDonation().getStatus()).isEqualTo(GuildAssetOrderStatus.GUILD_ASSET_ORDER_STATUS_REJECTED);
         assertThat(resp.getDonation().getReasonTipId()).isEqualTo(27000);
 
         channel.onDeliver = op -> f.economyStore.opStates.put(op.opId(),
                 new OpState(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_REJECTED, 27004, 27004));
-        assertThat(donate(3, d()).getErrorMessage()).isEqualTo(GuildTip.ASSET_REJECTED.proto());
+        assertThat(donate(1, d()).getErrorMessage()).isEqualTo(GuildTip.ASSET_REJECTED.proto());
         // ABORTED 不填 error_message
         channel.onDeliver = op -> f.economyStore.opStates.put(op.opId(),
                 new OpState(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_ABORTED, 0, 0));
-        assertThat(donate(3, d()).hasErrorMessage()).isFalse();
+        assertThat(donate(1, d()).hasErrorMessage()).isFalse();
         assertThat(economyCount("donate", "rejected")).isEqualTo(2);
         assertThat(economyCount("donate", "aborted")).isEqualTo(1);
     }
@@ -386,8 +386,8 @@ class GuildEconomyServiceTest {
         var in = f.economyStore.shopOrders.getFirst();
         assertThat(in.count()).isEqualTo(1);
         assertThat(in.cost()).isEqualTo(30);
-        assertThat(in.periodKey()).isEqualTo(GameDay.dayKey(NOW));
-        assertThat(in.limitCount()).isEqualTo(10);
+        assertThat(in.periodKey()).isZero();
+        assertThat(in.limitCount()).isZero();
         AssetOp op = channel.ops.getFirst();
         assertThat(op.stream()).isEqualTo(AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE);
         assertThat(op.txType()).isEqualTo(25);
@@ -487,7 +487,7 @@ class GuildEconomyServiceTest {
 
     @Test
     void 捐献页_选项升序_今日用量_只列本帮捐献_最近结果十分钟内终态() {
-        f.economyStore.donateUsage.put(2, 1);
+        f.economyStore.donateUsage.put(1, 1);
         f.economyStore.pending.put(1, List.of(
                 row(1, GuildAssetOpKind.GUILD_ASSET_OP_KIND_DONATE, G, GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING, NOW),
                 row(2, GuildAssetOpKind.GUILD_ASSET_OP_KIND_DONATE, 999, GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING, NOW)));
@@ -499,8 +499,8 @@ class GuildEconomyServiceTest {
         GetGuildDonateOptionsResponse resp = economy.getGuildDonateOptions(ME, GetGuildDonateOptionsRequest.getDefaultInstance(),
                 d());
         assertThat(resp.hasErrorMessage()).isFalse();
-        assertThat(resp.getOptionsList()).extracting(o -> o.getDonateId()).containsExactly(1, 2, 3);
-        assertThat(resp.getOptions(1).getUsedToday()).isEqualTo(1);
+        assertThat(resp.getOptionsList()).extracting(o -> o.getDonateId()).containsExactly(1);
+        assertThat(resp.getOptions(0).getUsedToday()).isEqualTo(1);
         assertThat(resp.getOptionsList()).allMatch(o -> o.getUnlocked());
         assertThat(resp.getPendingDonationsList()).extracting(v -> v.getOpId()).containsExactly(1L);
         assertThat(resp.getRecentResultsList()).extracting(v -> v.getOpId()).containsExactly(5L);
@@ -528,8 +528,8 @@ class GuildEconomyServiceTest {
     @Test
     void 商店页_按分类与id升序_单次上限_限购用量_只列兑换_物品缺行不失败() {
         f.economyTables.missingItems.add(23);
-        f.economyStore.shopUsage.put(new ShopUsageKey(101, GameDay.dayKey(NOW)), 4);
         f.economyStore.shopUsage.put(new ShopUsageKey(104, GameDay.weekKey(NOW)), 2);
+        f.economyStore.shopUsage.put(new ShopUsageKey(202, GameDay.LIFETIME_PERIOD_KEY), 1);
         f.economyStore.pending.put(2, List.of(
                 row(1, GuildAssetOpKind.GUILD_ASSET_OP_KIND_SHOP, 999, GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING, NOW),
                 row(2, GuildAssetOpKind.GUILD_ASSET_OP_KIND_ACTIVITY_REWARD, G, GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING,
@@ -544,8 +544,9 @@ class GuildEconomyServiceTest {
         assertThat(byId.get(204).getMaxBuyCount()).isEqualTo(1);
         assertThat(byId.get(101).getMaxBuyCount()).isEqualTo(20);
         assertThat(byId.get(303).getMaxBuyCount()).as("物品缺行：显示为不可兑换").isZero();
-        assertThat(byId.get(101).getUsedCount()).isEqualTo(4);
+        assertThat(byId.get(101).getUsedCount()).as("常规补给改为不限购").isZero();
         assertThat(byId.get(104).getUsedCount()).isEqualTo(2);
+        assertThat(byId.get(202).getUsedCount()).as("稀有藏品走终身限购").isEqualTo(1);
         assertThat(byId.get(303).getUsedCount()).as("不限购").isZero();
         assertThat(byId.get(101).getUnlocked()).isTrue();
         assertThat(byId.get(103).getUnlocked()).isFalse();

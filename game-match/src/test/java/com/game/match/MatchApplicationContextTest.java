@@ -323,7 +323,9 @@ class MatchApplicationContextTest {
                 assertThat(list.executor()).as("164 没有自己的执行器：跑在 match-worker 上").isNull();
             });
             assertThat(handlers).filteredOn(MatchMethodHandler::inline).extracting(MatchMethodHandler::method)
-                    .as("当场回的只剩 156 / 154 两个上行空操作").containsExactlyInAnyOrder(MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT);
+                    .as("当场回的仅剩切磋与江湖生死状的四个上行空操作通知").containsExactlyInAnyOrder(
+                            MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT,
+                            MatchMethods.NOTIFY_JIANGHU_DUEL_INVITE, MatchMethods.NOTIFY_JIANGHU_DUEL_STATUS);
 
             MatchLifecycle lifecycle = context.getBean(MatchLifecycle.class);
             assertThat(lifecycle.isRunning()).as("容器已把它当生命周期 bean 启动").isTrue();

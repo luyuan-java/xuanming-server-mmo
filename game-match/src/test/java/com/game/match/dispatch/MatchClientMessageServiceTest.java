@@ -21,6 +21,7 @@ import com.game.match.challenge.ChallengeService;
 import com.game.match.challenge.ChallengeStore;
 import com.game.match.dispatch.MatchMethodHandler.Reply;
 import com.game.match.id.MatchIds;
+import com.game.match.jianghu.JianghuDuelService;
 import com.game.match.metrics.MatchMetrics;
 import com.game.match.metrics.MetricLabels;
 import com.game.match.queue.QueueHandlers;
@@ -32,6 +33,8 @@ import com.game.match.reissue.BattleTicketReissue;
 import com.game.match.reissue.ReissueHandler;
 import com.game.match.report.BattleReportHandlers;
 import com.game.match.report.BattleReportStore;
+import com.game.match.report.TrialChallengeCardHandlers;
+import com.game.match.report.TrialChallengeCardStore;
 import com.game.match.script.BattleScriptCatalog;
 import com.game.match.script.BattleScriptService;
 import com.game.match.script.BattleScriptStore;
@@ -124,7 +127,16 @@ class MatchClientMessageServiceTest {
             MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER,
             MatchMethods.UPDATE_TOURNAMENT_SQUAD_EMBLEM, MatchMethods.START_TOURNAMENT_WARMUP,
             MatchMethods.PREDICT_TOURNAMENT_MATCH, MatchMethods.GET_TOURNAMENT_PREDICTION_BOARD,
-            MatchMethods.BAN_TOURNAMENT_LEYLINE, MatchMethods.GET_TOURNAMENT_HIGHLIGHTS);
+            MatchMethods.BAN_TOURNAMENT_LEYLINE, MatchMethods.GET_TOURNAMENT_HIGHLIGHTS,
+            MatchMethods.CREATE_JIANGHU_DUEL_INVITE, MatchMethods.CONFIRM_JIANGHU_DUEL_MEMBER,
+            MatchMethods.RESPOND_JIANGHU_DUEL_INVITE, MatchMethods.LIST_JIANGHU_GRUDGES,
+            MatchMethods.DISMISS_JIANGHU_GRUDGE,
+            MatchMethods.CREATE_TRIAL_CHALLENGE_CARD, MatchMethods.GET_TRIAL_CHALLENGE_CARD,
+            MatchMethods.GET_SHARED_TRIAL_REPLAY);
+
+    private static final List<String> INLINE = List.of(
+            MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT,
+            MatchMethods.NOTIFY_JIANGHU_DUEL_INVITE, MatchMethods.NOTIFY_JIANGHU_DUEL_STATUS);
 
     private static final Map<String, Integer> IDS = new java.util.HashMap<>(Map.of(
             MatchMethods.JOIN_QUEUE, 157, MatchMethods.CANCEL_QUEUE, 148, MatchMethods.GET_QUEUE_STATUS, 153,
@@ -137,8 +149,10 @@ class MatchClientMessageServiceTest {
         for (String method : FEATURE_METHODS) {
             IDS.put(method, REGISTRY.requireId(MatchMethods.SERVICE, method));
         }
+        for (String method : INLINE) {
+            IDS.putIfAbsent(method, REGISTRY.requireId(MatchMethods.SERVICE, method));
+        }
     }
-    private static final List<String> INLINE = List.of(MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT);
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final MatchMetrics metrics = new MatchMetrics(meters, new MetricLabels(id -> false));
@@ -266,6 +280,14 @@ class MatchClientMessageServiceTest {
         List<MatchMethodHandler> all = new ArrayList<>(business.values());
         all.add(inline.notifyChallengeInviteUplinkHandler());
         all.add(inline.notifyChallengeResultUplinkHandler());
+        all.add(new InlineHandlers.Inline(
+                MatchMethods.NOTIFY_JIANGHU_DUEL_INVITE,
+                REGISTRY.byId(IDS.get(MatchMethods.NOTIFY_JIANGHU_DUEL_INVITE)).orElseThrow().requestPrototype().getParserForType(),
+                Reply.empty()));
+        all.add(new InlineHandlers.Inline(
+                MatchMethods.NOTIFY_JIANGHU_DUEL_STATUS,
+                REGISTRY.byId(IDS.get(MatchMethods.NOTIFY_JIANGHU_DUEL_STATUS)).orElseThrow().requestPrototype().getParserForType(),
+                Reply.empty()));
         return new MatchClientMessageService(new MatchDispatcher(REGISTRY, all, pool, metrics, budgetMillis));
     }
 
@@ -600,6 +622,12 @@ class MatchClientMessageServiceTest {
         handlers.addAll(scripts.clientHandlers());
         handlers.addAll(ranked.clientHandlers());
         handlers.addAll(tournament.clientHandlers());
+        JianghuDuelService jianghu = new JianghuDuelService(() -> null, new JianghuDuelService.Ports() { }, System::currentTimeMillis, () -> 1L);
+        handlers.addAll(jianghu.clientHandlers());
+        TrialChallengeCardStore trialCards = mock(TrialChallengeCardStore.class);
+        handlers.add(TrialChallengeCardHandlers.createHandler(trialCards, () -> 1L));
+        handlers.add(TrialChallengeCardHandlers.getHandler(trialCards));
+        handlers.add(TrialChallengeCardHandlers.sharedReplayHandler(trialCards));
         return handlers;
     }
 

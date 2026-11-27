@@ -271,7 +271,13 @@ class LeaseLostTest {
                 MatchMethods.GET_TOURNAMENT_SPECTATE_CHEER,
                 MatchMethods.UPDATE_TOURNAMENT_SQUAD_EMBLEM, MatchMethods.START_TOURNAMENT_WARMUP,
                 MatchMethods.PREDICT_TOURNAMENT_MATCH, MatchMethods.GET_TOURNAMENT_PREDICTION_BOARD,
-                MatchMethods.BAN_TOURNAMENT_LEYLINE, MatchMethods.GET_TOURNAMENT_HIGHLIGHTS);
+                MatchMethods.BAN_TOURNAMENT_LEYLINE, MatchMethods.GET_TOURNAMENT_HIGHLIGHTS,
+                MatchMethods.CREATE_JIANGHU_DUEL_INVITE, MatchMethods.CONFIRM_JIANGHU_DUEL_MEMBER,
+                MatchMethods.RESPOND_JIANGHU_DUEL_INVITE, MatchMethods.LIST_JIANGHU_GRUDGES,
+                MatchMethods.DISMISS_JIANGHU_GRUDGE, MatchMethods.NOTIFY_JIANGHU_DUEL_INVITE,
+                MatchMethods.NOTIFY_JIANGHU_DUEL_STATUS,
+                MatchMethods.CREATE_TRIAL_CHALLENGE_CARD, MatchMethods.GET_TRIAL_CHALLENGE_CARD,
+                MatchMethods.GET_SHARED_TRIAL_REPLAY);
 
         for (String method : unaffected) {
             ClientReply reply = reply(dispatcher.dispatch(call(method, ByteString.EMPTY, 1001)));
