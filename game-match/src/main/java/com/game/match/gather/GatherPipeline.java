@@ -379,6 +379,9 @@ public final class GatherPipeline {
             if (plan.tacticalPuzzleContext() != null) {
                 create.setTacticalPuzzleContext(plan.tacticalPuzzleContext());
             }
+            if (plan.customDuelRules() != null) {
+                create.setCustomDuelRules(plan.customDuelRules());
+            }
             BattlePlacement.Builder record = BattlePlacement.newBuilder().setBattleId(battleId).setMode(mode.getNumber())
                     .setBattleConfigId(plan.battleConfigId()).setCreatedAtMs(createdAtMs).setDeadlineMs(deadlineMs);
             for (Prepared member : prepared) {

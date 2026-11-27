@@ -1,6 +1,7 @@
 package com.game.match.challenge;
 
 import com.game.common.deadline.Deadline;
+import com.google.protobuf.ByteString;
 import java.util.Optional;
 
 /**
@@ -31,7 +32,14 @@ public interface ChallengeStore {
      * @param configId     {@code battle_config_id}（uint32 的位模式；不校验，原样传给开局管线）
      * @param expiresAtMs  过期时刻（Redis {@code TIME} 的 Unix 毫秒 = 发起时刻 + TTL；也是 156 里的 {@code expires_at_ms}）
      */
-    record ChallengeRecord(long challengerId, long targetId, int configId, long expiresAtMs) {
+    record ChallengeRecord(long challengerId, long targetId, int configId, long expiresAtMs, ByteString customRulesPayload) {
+        public ChallengeRecord {
+            customRulesPayload = customRulesPayload == null ? ByteString.EMPTY : customRulesPayload;
+        }
+
+        public ChallengeRecord(long challengerId, long targetId, int configId, long expiresAtMs) {
+            this(challengerId, targetId, configId, expiresAtMs, ByteString.EMPTY);
+        }
     }
 
     /** 发起的结局（二选一）。 */
@@ -53,6 +61,12 @@ public interface ChallengeStore {
      * @param ttlMs 邀请的寿命（{@code game.match.challenge-ttl}，缺省 60 s），必须 ≥ 1
      */
     InviteResult invite(long challengeId, long challengerId, long targetId, int configId, long ttlMs, Deadline d);
+
+    /** 带自定义切磋规则载荷的原子发起；未覆写时退化为忽略载荷的无参版本（兼容测试替身）。 */
+    default InviteResult invite(long challengeId, long challengerId, long targetId, int configId, long ttlMs,
+                                ByteString customRulesPayload, Deadline d) {
+        return invite(challengeId, challengerId, targetId, configId, ttlMs, d);
+    }
 
     /**
      * 清理一条邀请（S_CH_DEL；发起后推送失败时用）：删记录；占坑的值<b>等于</b>本 {@code challengeId} 时才摘（不误摘目标后来挂上的另一条邀请）。幂等。

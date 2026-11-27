@@ -17,6 +17,7 @@ final class ChallengeScripts {
     static final String FIELD_TARGET = "target";
     static final String FIELD_CONFIG = "config";
     static final String FIELD_EXPIRES_AT = "expires_at_ms";
+    static final String FIELD_CUSTOM_RULES = "custom_rules";
 
     /** 返回数组的首元素。 */
     static final String OK = "ok";
@@ -43,7 +44,11 @@ final class ChallengeScripts {
             local t = redis.call('TIME')
             local expires = string.format('%.0f', t[1] * 1000 + math.floor(t[2] / 1000) + tonumber(ARGV[5]))
             redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[5])
-            redis.call('HSET', KEYS[1], 'challenger', ARGV[2], 'target', ARGV[3], 'config', ARGV[4], 'expires_at_ms', expires)
+            if ARGV[6] and ARGV[6] ~= '' then
+              redis.call('HSET', KEYS[1], 'challenger', ARGV[2], 'target', ARGV[3], 'config', ARGV[4], 'expires_at_ms', expires, 'custom_rules', ARGV[6])
+            else
+              redis.call('HSET', KEYS[1], 'challenger', ARGV[2], 'target', ARGV[3], 'config', ARGV[4], 'expires_at_ms', expires)
+            end
             redis.call('PEXPIRE', KEYS[1], ARGV[5])
             return {'ok', expires}
             """;
@@ -70,14 +75,14 @@ final class ChallengeScripts {
               if v then return v end
               return ''
             end
-            local done = redis.call('HMGET', KEYS[3], 'nonce', 'challenger', 'target', 'config', 'expires_at_ms', 'now_ms')
+            local done = redis.call('HMGET', KEYS[3], 'nonce', 'challenger', 'target', 'config', 'expires_at_ms', 'now_ms', 'custom_rules')
             if done[1] and done[1] == ARGV[3] then
-              return {'ok', s(done[2]), s(done[3]), s(done[4]), s(done[5]), s(done[6])}
+              return {'ok', s(done[2]), s(done[3]), s(done[4]), s(done[5]), s(done[6]), s(done[7])}
             end
             if redis.call('EXISTS', KEYS[1]) == 0 then
               return {'gone'}
             end
-            local rec = redis.call('HMGET', KEYS[1], 'challenger', 'target', 'config', 'expires_at_ms')
+            local rec = redis.call('HMGET', KEYS[1], 'challenger', 'target', 'config', 'expires_at_ms', 'custom_rules')
             if rec[2] ~= ARGV[2] then
               return {'not_target'}
             end
@@ -88,9 +93,9 @@ final class ChallengeScripts {
               redis.call('DEL', KEYS[2])
             end
             redis.call('HSET', KEYS[3], 'nonce', ARGV[3], 'challenger', s(rec[1]), 'target', s(rec[2]), 'config', s(rec[3]),
-                'expires_at_ms', s(rec[4]), 'now_ms', now)
+                'expires_at_ms', s(rec[4]), 'now_ms', now, 'custom_rules', s(rec[5]))
             redis.call('PEXPIRE', KEYS[3], ARGV[4])
-            return {'ok', s(rec[1]), s(rec[2]), s(rec[3]), s(rec[4]), now}
+            return {'ok', s(rec[1]), s(rec[2]), s(rec[3]), s(rec[4]), now, s(rec[5])}
             """;
 
     private ChallengeScripts() {

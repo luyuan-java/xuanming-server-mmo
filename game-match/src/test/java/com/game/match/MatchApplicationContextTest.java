@@ -675,6 +675,12 @@ class MatchApplicationContextTest {
                 assertThat(adminStatus(context, path, "tok-for-context-test")).as("prod：dev 口 403 %s", path).isEqualTo(403);
                 assertThat(adminStatus(context, path, "wrong")).as("令牌仍是第一道闸").isEqualTo(401);
             }
+            // prod 模式下未显式开启 content-guard-enabled 时，UGC 审核必须 fail-closed 拒收，不得静默放行
+            var tournament = context.getBean(com.game.match.tournament.TournamentService.class);
+            var squadResp = tournament.createSquad(1001L, 1,
+                    com.game.proto.match.CreateTournamentSquadRequest.newBuilder().setSquadName("青云战队").build());
+            assertThat(squadResp.getErrorMessage().getId())
+                    .isEqualTo(com.game.table.MatchErrorTip.match_error.kMatchTournamentSquadNameInvalid_VALUE);
         });
     }
 

@@ -648,7 +648,19 @@ public final class GlobalMatchService implements AutoCloseable {
             if(original.getState()!=1||!request.getAccept())result=store.decideChallenge(session,request.getChallengeId(),payload,request.getAccept(),List.of(),null);
             else {long stamp=store.now();int mode=MatchMode.MATCH_MODE_PVP_CHALLENGE_VALUE;
                 var members=directMembers(mode,original.getConfigId(),List.of(original.getChallengerId(),original.getTargetId()),Map.of(),0,stamp);
-                result=store.decideChallenge(session,request.getChallengeId(),payload,true,members,directFormation(members,mode,original.getConfigId(),stamp).build());}
+                var formBuilder=directFormation(members,mode,original.getConfigId(),stamp);
+                if(!original.getCustomRulesPayload().isEmpty()){
+                    var rules=com.game.proto.CustomDuelRules.parseFrom(original.getCustomRulesPayload());
+                    formBuilder.setCustomDuelRules(original.getCustomRulesPayload());
+                    if(rules.getUseFreePreset()){
+                        var freeCtx=com.game.match.challenge.ChallengeService.buildCustomDuelFreePresetContext(
+                                rankedTables,original.getChallengerId(),original.getTargetId(),rules,
+                                request.getResponderCharacterPresetId(),request.getResponderPetPresetId());
+                        if(freeCtx==null)throw new IllegalArgumentException("公平切磋 3x3 模板搭配无效");
+                        formBuilder.setRankedContext(ByteString.copyFrom(NetworkProbes.bytes(freeCtx)));
+                    }
+                }
+                result=store.decideChallenge(session,request.getChallengeId(),payload,true,members,formBuilder.build());}
             if(result.getState()==4){var key=GlobalDirectIntentRow.newBuilder().setKind(3).setOwnerId(result.getTargetId()).setRequestLow(result.getChallengeId()).setOwnerAccount(result.getTargetAccount()).setOwnerRevision(result.getTargetRevision()).build();
                 resumeDirect(store.direct(key),deadline);return store.invitation(session,result.getChallengeId());}
             return result;
@@ -698,8 +710,9 @@ public final class GlobalMatchService implements AutoCloseable {
                             .orElse(false);
             boolean isFreePreset = (!isRanked && rankedStore != null && rankedTables != null
                     && rankedTables.usesFreePreset(f.getMode(), f.getConfigId())) || isOptionalFreePreset;
-            RankedMatchContext rankedContext = null;
-            if (isRanked) {
+            RankedMatchContext rankedContext = f.getRankedContext().isEmpty()
+                    ? null : RankedMatchContext.parseFrom(f.getRankedContext());
+            if (rankedContext == null && isRanked) {
                 int perSide = Math.max(1, roster.size() / 2);
                 var maybeCtx = rankedStore.buildRankedContext(perSide, roster, teams, Map.of());
                 if (maybeCtx.isEmpty()) {
@@ -707,7 +720,7 @@ public final class GlobalMatchService implements AutoCloseable {
                     return GatherResult.failed(GatherOutcome.PREPARE_FAILED, f.getBattleId());
                 }
                 rankedContext = maybeCtx.get();
-            } else if (isFreePreset) {
+            } else if (rankedContext == null && isFreePreset) {
                 int sideSize = f.getMode() == MatchModes.POLARITY_5V5 ? Math.max(1, roster.size() / 2) : roster.size();
                 rankedContext = rankedStore.buildFreePresetContext(sideSize, roster, Map.of());
             }
@@ -748,6 +761,9 @@ public final class GlobalMatchService implements AutoCloseable {
                     .setOutcomeProtocolVersion(1);
             if (tacticalPuzzleCtx != null) {
                 request.setTacticalPuzzleContext(tacticalPuzzleCtx);
+            }
+            if (!f.getCustomDuelRules().isEmpty()) {
+                request.setCustomDuelRules(com.game.proto.CustomDuelRules.parseFrom(f.getCustomDuelRules()));
             }
             if (f.getAiDefenderSnapshotsCount() > 0) {
                 for (var rawAi : f.getAiDefenderSnapshotsList()) {

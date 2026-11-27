@@ -3,7 +3,9 @@ package com.game.match.challenge;
 import com.game.common.deadline.Deadline;
 import com.game.discovery.RedisKeys;
 import com.game.match.port.RedisClientWrites;
+import com.google.protobuf.ByteString;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -53,6 +55,12 @@ public final class RedissonChallengeStore implements ChallengeStore {
 
     @Override
     public InviteResult invite(long challengeId, long challengerId, long targetId, int configId, long ttlMs, Deadline d) {
+        return invite(challengeId, challengerId, targetId, configId, ttlMs, ByteString.EMPTY, d);
+    }
+
+    @Override
+    public InviteResult invite(long challengeId, long challengerId, long targetId, int configId, long ttlMs,
+                               ByteString customRulesPayload, Deadline d) {
         requireIds(challengeId, targetId);
         if (challengerId == 0) {
             throw new IllegalArgumentException("发起者不能为 0");
@@ -60,10 +68,13 @@ public final class RedissonChallengeStore implements ChallengeStore {
         if (ttlMs < 1) {
             throw new IllegalArgumentException("邀请的 TTL 必须 ≥ 1 ms: " + ttlMs);
         }
+        String encodedRules = (customRulesPayload == null || customRulesPayload.isEmpty())
+                ? ""
+                : Base64.getEncoder().encodeToString(customRulesPayload.toByteArray());
         List<Object> reply = clientWrite("发起切磋", d, ChallengeScripts.INVITE,
                 List.of(redisKeys.matchChallenge(challengeId), redisKeys.matchChallengeTarget(targetId)),
                 Long.toUnsignedString(challengeId), Long.toUnsignedString(challengerId), Long.toUnsignedString(targetId),
-                Integer.toUnsignedString(configId), Long.toString(ttlMs));
+                Integer.toUnsignedString(configId), Long.toString(ttlMs), encodedRules);
         String tag = tagOf(reply, "发起切磋");
         if (ChallengeScripts.PENDING.equals(tag)) {
             return new InviteResult.Pending();
@@ -100,7 +111,8 @@ public final class RedissonChallengeStore implements ChallengeStore {
             return Optional.empty();
         }
         return Optional.of(record(fields.get(ChallengeScripts.FIELD_CHALLENGER), fields.get(ChallengeScripts.FIELD_TARGET),
-                fields.get(ChallengeScripts.FIELD_CONFIG), fields.get(ChallengeScripts.FIELD_EXPIRES_AT)));
+                fields.get(ChallengeScripts.FIELD_CONFIG), fields.get(ChallengeScripts.FIELD_EXPIRES_AT),
+                fields.get(ChallengeScripts.FIELD_CUSTOM_RULES)));
     }
 
     @Override
@@ -123,7 +135,8 @@ public final class RedissonChallengeStore implements ChallengeStore {
         if (ChallengeScripts.OK.equals(tag) && reply.size() >= 6) {
             long nowMs = unsignedOrZero(text(reply.get(5)));
             if (nowMs != 0) {
-                return new ConsumeResult.Consumed(record(text(reply.get(1)), text(reply.get(2)), text(reply.get(3)), text(reply.get(4))), nowMs);
+                String rulesB64 = reply.size() >= 7 ? text(reply.get(6)) : "";
+                return new ConsumeResult.Consumed(record(text(reply.get(1)), text(reply.get(2)), text(reply.get(3)), text(reply.get(4)), rulesB64), nowMs);
             }
         }
         throw new Deadline.DependencyException("消费切磋记录的脚本返回了不认识的结果: " + reply);
@@ -167,8 +180,16 @@ public final class RedissonChallengeStore implements ChallengeStore {
         return value == null ? null : value.toString();
     }
 
-    private static ChallengeRecord record(String challenger, String target, String config, String expiresAt) {
-        return new ChallengeRecord(unsignedOrZero(challenger), unsignedOrZero(target), unsignedIntOrZero(config), unsignedOrZero(expiresAt));
+    private static ChallengeRecord record(String challenger, String target, String config, String expiresAt, String rulesB64) {
+        ByteString rules = ByteString.EMPTY;
+        if (rulesB64 != null && !rulesB64.isEmpty()) {
+            try {
+                rules = ByteString.copyFrom(Base64.getDecoder().decode(rulesB64));
+            } catch (IllegalArgumentException ignored) {
+                rules = ByteString.EMPTY;
+            }
+        }
+        return new ChallengeRecord(unsignedOrZero(challenger), unsignedOrZero(target), unsignedIntOrZero(config), unsignedOrZero(expiresAt), rules);
     }
 
     /** 同基线 {@code strconv.ParseUint} 忽略错误的口径：不是合法无符号十进制的字段按 0。 */

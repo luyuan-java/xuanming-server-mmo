@@ -171,6 +171,8 @@ message GlobalChallengeRow {
   bytes response_payload = 11;
   uint64 battle_id = 12;
   uint64 created_ms = 13;
+  // 道友切磋坊 / 论剑 V7 自定义规则载荷（CustomDuelRules 确定性序列化，非自定义为空）。
+  bytes custom_rules_payload = 14;
 }
 message GlobalMember {
   uint64 player_id = 1;
@@ -255,6 +257,10 @@ message GlobalFormationRow {
   uint32 trial_vow_mask = 22;
   // 万象残局坊 V1：开局冻结的 TacticalPuzzleBattleContext 字节载荷（非残局坊为空）。
   bytes tactical_puzzle_context = 23;
+  // 道友切磋坊 / 论剑 V7：开局冻结的 CustomDuelRules 字节载荷（非自定义切磋为空）。
+  bytes custom_duel_rules = 24;
+  // 公平 3×3 切磋 / 预设模式：开局冻结的 RankedMatchContext 字节载荷。
+  bytes ranked_context = 25;
 }
 message GlobalPreparedEndpoint {
   uint64 player_id = 1;

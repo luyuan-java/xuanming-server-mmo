@@ -2,6 +2,7 @@ package com.game.match.challenge;
 
 import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
+import com.game.common.token.NetworkProbes;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.match.challenge.ChallengeStore.ChallengeRecord;
@@ -17,16 +18,27 @@ import com.game.match.metrics.MatchMetrics.ChallengeStage;
 import com.game.match.metrics.MatchMetrics.PushKind;
 import com.game.match.port.PlayerPusher;
 import com.game.match.port.PlayerStatusReader;
+import com.game.match.ranked.RankedStore;
+import com.game.match.ranked.RankedTables;
 import com.game.match.support.MatchTip;
 import com.game.match.support.MatchTips;
+import com.game.proto.CustomDuelRules;
 import com.game.proto.MessageContent;
+import com.game.proto.RankedMatchContext;
+import com.game.proto.RankedMemberLoadout;
+import com.game.proto.RankedPresetSelection;
+import com.game.proto.TipInfoMessage;
 import com.game.proto.match.ChallengeInviteS2C;
 import com.game.proto.match.ChallengePlayerRequest;
 import com.game.proto.match.ChallengePlayerResponse;
 import com.game.proto.match.ChallengeResultS2C;
 import com.game.proto.match.RespondChallengeRequest;
 import com.game.proto.match.RespondChallengeResponse;
+import com.game.table.MatchErrorTip;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.MessageLite;
+import java.sql.SQLException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -59,6 +71,8 @@ import org.slf4j.LoggerFactory;
 public final class ChallengeService {
 
     private static final Logger log = LoggerFactory.getLogger(ChallengeService.class);
+    /** 论剑 V7「不服再战」发起时效窗口：仅允许在原 1V1 论剑终局后 10 分钟内发起（对齐 Go rankedRematchMaxWindowMs）。 */
+    static final long RANKED_REMATCH_MAX_WINDOW_MS = 10L * 60L * 1000L;
 
     private final PlayerStatusReader players;
     private final ChallengeStore store;
@@ -72,12 +86,82 @@ public final class ChallengeService {
     private final int resultMessageId;
     private final Supplier<String> nonces;
     private com.game.match.global.GlobalMatchService global;
+    private RankedStore rankedStore;
+    private RankedTables rankedTables;
     private java.util.function.BiFunction<Long,Deadline,String> publicNames=(player,deadline)->"";
     public ChallengeService withGlobal(com.game.match.global.GlobalMatchService global){this.global=Objects.requireNonNull(global,"global");global.challengeNotifications(result->{
         if(result.getState()==2){pushResult(result.getChallengerId(),result.getChallengeId(),true,result.getTargetId());pushResult(result.getTargetId(),result.getChallengeId(),true,result.getTargetId());}
         else if(result.getState()==3)pushResult(result.getChallengerId(),result.getChallengeId(),false,result.getTargetId());
     });return this;}
+    public ChallengeService withRanked(RankedStore rankedStore, RankedTables rankedTables) {
+        this.rankedStore = rankedStore;
+        this.rankedTables = rankedTables != null ? rankedTables : (rankedStore != null ? rankedStore.tables() : null);
+        return this;
+    }
     public ChallengeService withPublicNames(java.util.function.BiFunction<Long,Deadline,String> names){this.publicNames=Objects.requireNonNull(names);return this;}
+
+    /** 校验道友切磋坊 / 论剑 V7 自定义切磋规则（对齐 Go {@code validateCustomDuelRules}）。 */
+    public static boolean isValidCustomDuelRules(CustomDuelRules rules) {
+        if (rules == null) {
+            return true;
+        }
+        int roundLimit = rules.getRoundLimitOverride();
+        if (roundLimit != 0 && roundLimit != 8 && roundLimit != 12 && roundLimit != 20) {
+            return false;
+        }
+        int banSlots = rules.getSkillBanSlotsPerTeam();
+        if (banSlots != 0 && banSlots != 3) {
+            return false;
+        }
+        if (rules.getUseFreePreset() && banSlots > 0) {
+            return false;
+        }
+        // 论剑 V7「不服再战」固定为正式自养 1V1 复仇切磋，不允许混用免费 3×3 预设。
+        if (rules.getRematchSourceBattleId() != 0L && rules.getUseFreePreset()) {
+            return false;
+        }
+        return true;
+    }
+
+    /** 为道友切磋坊公平 3×3 免费模板构建非计分上下文（season_id=0, use_free_preset=true）；模板搭配非法返回 null。 */
+    public static RankedMatchContext buildCustomDuelFreePresetContext(
+            RankedTables tables, long challengerId, long responderId,
+            CustomDuelRules rules, int responderCharPresetId, int responderPetPresetId) {
+        int ruleVersion = 0;
+        String fingerprint = "";
+        int defChar = 101;
+        int defPet = 203;
+        if (tables != null) {
+            ruleVersion = tables.ruleVersion();
+            fingerprint = tables.configFingerprint();
+            defChar = tables.rule().getDefaultCharacterPresetId();
+            defPet = tables.rule().getDefaultPetPresetId();
+        }
+        int chChar = rules != null && rules.getChallengerCharacterPresetId() != 0
+                ? rules.getChallengerCharacterPresetId() : defChar;
+        int chPet = rules != null && rules.getChallengerPetPresetId() != 0
+                ? rules.getChallengerPetPresetId() : defPet;
+        int respChar = responderCharPresetId != 0 ? responderCharPresetId : defChar;
+        int respPet = responderPetPresetId != 0 ? responderPetPresetId : defPet;
+        if (tables != null && (!tables.isValidPair(chChar, chPet) || !tables.isValidPair(respChar, respPet))) {
+            return null;
+        }
+        return RankedMatchContext.newBuilder()
+                .setSeasonId(0)
+                .setRuleVersion(ruleVersion)
+                .setTeamSize(1)
+                .setConfigFingerprint(fingerprint)
+                .setUseFreePreset(true)
+                .addMembers(RankedMemberLoadout.newBuilder()
+                        .setPlayerId(challengerId)
+                        .setPresets(RankedPresetSelection.newBuilder()
+                                .setCharacterPresetId(chChar).setPetPresetId(chPet)))
+                .addMembers(RankedMemberLoadout.newBuilder()
+                        .setPlayerId(responderId)
+                        .setPresets(RankedPresetSelection.newBuilder()
+                                .setCharacterPresetId(respChar).setPetPresetId(respPet)))
+                .build();
+    }
 
     /**
      * @param pushExecutor    {@code match-push}（测试可传 {@code Runnable::run}）
@@ -126,6 +210,30 @@ public final class ChallengeService {
         if (targetId == 0 || targetId == challengerId) {
             return inviteRejected(ChallengeResult.SELF, MatchTip.CHALLENGE_SELF);
         }
+        CustomDuelRules customRules = request.hasCustomRules() ? request.getCustomRules() : null;
+        if (!isValidCustomDuelRules(customRules)) {
+            metrics.challenge(ChallengeStage.INVITE, ChallengeResult.INTERNAL);
+            return ChallengePlayerResponse.newBuilder()
+                    .setErrorMessage(TipInfoMessage.newBuilder()
+                            .setId(MatchTips.INVALID_PARAMETER)
+                            .addParameters("切磋回合上限仅支持默认或 8/12/20 回合"))
+                    .build();
+        }
+        if (customRules != null && customRules.getRematchSourceBattleId() != 0L) {
+            if (rankedStore == null) {
+                return inviteRejected(ChallengeResult.EXPIRED, MatchTip.CHALLENGE_EXPIRED);
+            }
+            try {
+                if (!rankedStore.validateRankedRematchSource(
+                        customRules.getRematchSourceBattleId(), challengerId, targetId, RANKED_REMATCH_MAX_WINDOW_MS)) {
+                    return inviteRejected(ChallengeResult.EXPIRED, MatchTip.CHALLENGE_EXPIRED);
+                }
+            } catch (SQLException e) {
+                log.error("[challenge] 校验论剑再战原对局失败 battle={} challenger={} target={}",
+                        id(customRules.getRematchSourceBattleId()), id(challengerId), id(targetId), e);
+                return inviteRejected(ChallengeResult.INTERNAL, MatchTip.BUSY);
+            }
+        }
         // 咨询性检查双方的战斗锁（权威复查在应战时做）；读失败也算有
         if (lockedOrUnknown(challengerId, d, "发起者")) {
             return inviteRejected(ChallengeResult.SELF_BUSY, MatchTip.CHALLENGE_SELF_BUSY);
@@ -152,17 +260,29 @@ public final class ChallengeService {
         }
         long challengeId = issued.getAsLong();
         int configId = request.getBattleConfigId();
-        long effectiveTtlMs = (request.hasCustomRules() && request.getCustomRules().getRematchSourceBattleId() != 0L)
+        long effectiveTtlMs = (customRules != null && customRules.getRematchSourceBattleId() != 0L)
                 ? Math.min(challengeTtlMs, 15_000L)
                 : challengeTtlMs;
+        ByteString rulesPayload = customRules != null
+                ? ByteString.copyFrom(NetworkProbes.bytes(customRules))
+                : ByteString.EMPTY;
 
         InviteResult invited;
         try {
-            if(global==null)invited = store.invite(challengeId, challengerId, targetId, configId, effectiveTtlMs, d);
-            else {
-                var original=global.store().invite(session,challengeId,targetId,configId,effectiveTtlMs);
-                if(original==null)invited=new InviteResult.Pending();
-                else {challengeId=original.getChallengeId();invited=new InviteResult.Created(original.getExpiresMs());}
+            if (global == null) {
+                invited = rulesPayload.isEmpty()
+                        ? store.invite(challengeId, challengerId, targetId, configId, effectiveTtlMs, d)
+                        : store.invite(challengeId, challengerId, targetId, configId, effectiveTtlMs, rulesPayload, d);
+            } else {
+                var original = rulesPayload.isEmpty()
+                        ? global.store().invite(session, challengeId, targetId, configId, effectiveTtlMs)
+                        : global.store().invite(session, challengeId, targetId, configId, effectiveTtlMs, rulesPayload);
+                if (original == null) {
+                    invited = new InviteResult.Pending();
+                } else {
+                    challengeId = original.getChallengeId();
+                    invited = new InviteResult.Created(original.getExpiresMs());
+                }
             }
         } catch (Deadline.DependencyException e) {
             // 结局不明：脚本可能已经占了坑。尽力清一次（只摘值等于本 id 的占坑），清不掉靠 TTL
@@ -272,11 +392,28 @@ public final class ChallengeService {
             return respondRejected(ChallengeResult.RESPONDER_BUSY, MatchTip.CHALLENGE_RESPONDER_BUSY);
         }
 
+        CustomDuelRules customRules = decodeCustomDuelRules(record.customRulesPayload());
+        RankedMatchContext freePresetCtx = null;
+        if (customRules != null && customRules.getUseFreePreset()) {
+            freePresetCtx = buildCustomDuelFreePresetContext(
+                    rankedTables, challengerId, responderId, customRules,
+                    request.getResponderCharacterPresetId(), request.getResponderPetPresetId());
+            if (freePresetCtx == null) {
+                pushResult(challengerId, challengeId, false, responderId);
+                metrics.challenge(ChallengeStage.RESPOND, ChallengeResult.INTERNAL);
+                return RespondChallengeResponse.newBuilder()
+                        .setErrorMessage(TipInfoMessage.newBuilder()
+                                .setId(MatchErrorTip.match_error.kMatchRankedPresetInvalid_VALUE)
+                                .addParameters("公平切磋 3x3 模板搭配无效"))
+                        .build();
+            }
+        }
+
         // 先给发起者、再给应答者推成局通知，然后才进开局管线（客户端可见的先后：154 先于 177）。只发起、不等它们完成；
         // 两条的 future 留给开局失败时用：补推的 154 false 必须排在它们之后
         CompletableFuture<PlayerPushes.Outcome> acceptedToChallenger = pushResult(challengerId, challengeId, true, responderId);
         CompletableFuture<PlayerPushes.Outcome> acceptedToResponder = pushResult(responderId, challengeId, true, responderId);
-        launchGather(challengeId, record.configId(), challengerId, responderId,
+        launchGather(challengeId, record.configId(), challengerId, responderId, customRules, freePresetCtx,
                 CompletableFuture.allOf(acceptedToChallenger, acceptedToResponder));
 
         log.info("[challenge] 已应战，进入开局管线 challenge={} challenger={} responder={} config={}", id(challengeId), id(challengerId),
@@ -290,8 +427,21 @@ public final class ChallengeService {
         try{
             if(deadline.expired()||challenge==0)return respondRejected(ChallengeResult.EXPIRED,MatchTip.CHALLENGE_EXPIRED);
             var original=global.store().invitation(session,challenge);
-            if(original.getState()==1&&request.getAccept()&&(lockedOrUnknown(original.getChallengerId(),deadline,"发起者")||lockedOrUnknown(player,deadline,"应战者")))
-                return respondRejected(ChallengeResult.RESPONDER_BUSY,MatchTip.CHALLENGE_RESPONDER_BUSY);
+            if(original.getState()==1&&request.getAccept()){
+                if(lockedOrUnknown(original.getChallengerId(),deadline,"发起者")||lockedOrUnknown(player,deadline,"应战者"))
+                    return respondRejected(ChallengeResult.RESPONDER_BUSY,MatchTip.CHALLENGE_RESPONDER_BUSY);
+                CustomDuelRules rules = decodeCustomDuelRules(original.getCustomRulesPayload());
+                if(rules!=null&&rules.getUseFreePreset()
+                        &&buildCustomDuelFreePresetContext(rankedTables,original.getChallengerId(),original.getTargetId(),rules,
+                                request.getResponderCharacterPresetId(),request.getResponderPetPresetId())==null){
+                    metrics.challenge(ChallengeStage.RESPOND,ChallengeResult.INTERNAL);
+                    return RespondChallengeResponse.newBuilder()
+                            .setErrorMessage(TipInfoMessage.newBuilder()
+                                    .setId(MatchErrorTip.match_error.kMatchRankedPresetInvalid_VALUE)
+                                    .addParameters("公平切磋 3x3 模板搭配无效"))
+                            .build();
+                }
+            }
             var result=global.decideChallenge(session,request,deadline);
             if(result.getState()==4)return respondRejected(ChallengeResult.INTERNAL,MatchTip.BUSY);
             if(result.getState()==3)pushResult(result.getChallengerId(),challenge,false,player);
@@ -313,10 +463,15 @@ public final class ChallengeService {
      *
      * @param acceptedPushes 两条 154 true 都有了结局（可能是异常完成）
      */
-    private void launchGather(long challengeId, int configId, long challengerId, long responderId, CompletableFuture<Void> acceptedPushes) {
+    private void launchGather(long challengeId, int configId, long challengerId, long responderId,
+                              CustomDuelRules customRules, RankedMatchContext freePresetCtx,
+                              CompletableFuture<Void> acceptedPushes) {
         CompletableFuture<GatherResult> launched;
         try {
-            launched = gather.launch(GatherPlan.challenge(configId, challengerId, responderId));
+            GatherPlan plan = (customRules == null && freePresetCtx == null)
+                    ? GatherPlan.challenge(configId, challengerId, responderId)
+                    : GatherPlan.challenge(configId, challengerId, responderId, customRules, freePresetCtx);
+            launched = gather.launch(plan);
         } catch (RuntimeException e) {
             // 记录损坏（发起者为 0 / 与应战者相同）才会到这里：名单不合法，当作开局失败
             launched = CompletableFuture.failedFuture(e);
@@ -402,6 +557,18 @@ public final class ChallengeService {
     private RespondChallengeResponse respondRejected(ChallengeResult result, MatchTip tip) {
         metrics.challenge(ChallengeStage.RESPOND, result);
         return MatchTips.respondRejected(tip);
+    }
+
+    private static CustomDuelRules decodeCustomDuelRules(ByteString payload) {
+        if (payload == null || payload.isEmpty()) {
+            return null;
+        }
+        try {
+            return CustomDuelRules.parseFrom(payload);
+        } catch (InvalidProtocolBufferException e) {
+            log.warn("[challenge] 自定义切磋规则载荷损坏，按无自定义规则处理", e);
+            return null;
+        }
     }
 
     private static String id(long value) {

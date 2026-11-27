@@ -374,6 +374,12 @@ class RankedParityTest {
             long p1 = 60001L, p2 = 60002L;
             db.putRating(p1, 165_000L, 10);
             db.putRating(p2, 166_000L, 10);
+            // 预埋 66001 / 66002 的战报正文（模拟终局落库战报），验证 featured_battle_id 仅在有录像时写入且 ref_count 精准护航/替换释放。
+            for (long bid : List.of(66001L, 66002L, 66003L)) {
+                db.update("INSERT INTO match_battle_report(battle_id,created_ms,match_mode,battle_config_id,envelope,envelope_digest,ref_count) VALUES(?,?,?,?,?,?,?)",
+                        com.game.pbmysql.PbMysql.uint64(bid), com.game.pbmysql.PbMysql.uint64(now.get()),
+                        MatchModes.PVP_TEAM, 5, new byte[]{1, 2, 3}, new byte[]{4, 5, 6}, 2);
+            }
 
             // 第 1 局：p2 胜 p1，携带 V6 自养配招快照
             BattleResultEvent b1 = BattleResultEvent.newBuilder()
@@ -457,8 +463,72 @@ class RankedParityTest {
             assertThat(prof1.getTopRivalsList()).hasSize(1);
             assertThat(prof1.getTopRivals(0).getOpponentName()).isEqualTo("玄烈");
             assertThat(prof1.getFeaturedBuildsList()).hasSize(2);
+            assertThat(rankedStore.isFeaturedRankedReplayAllowed(66001L)).isTrue();
             assertThat(rankedStore.isFeaturedRankedReplayAllowed(66002L)).isTrue();
             assertThat(rankedStore.isFeaturedRankedReplayAllowed(999999L)).isFalse();
+            // 66001 / 66002 各自作为流派代表战报，ref_count 从初始 2 护航至 3。
+            assertThat(refCount(db, 66001L)).isEqualTo(3);
+            assertThat(refCount(db, 66002L)).isEqualTo(3);
+
+            // 第 3 局：p1 同流派以更高分再次获胜（66003L），替换代表局时 66003 ref_count +1(=3)、旧代表局 66002 ref_count -1(=2)。
+            now.addAndGet(10_000L);
+            BattleResultEvent b3 = b2.toBuilder()
+                    .setBattleId(66003L)
+                    .setSettlements(0, b2.getSettlements(0).toBuilder().setBattleId(66003L))
+                    .setSettlements(1, b2.getSettlements(1).toBuilder().setBattleId(66003L))
+                    .build();
+            assertThat(ratingStore.apply(b3).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+            assertThat(rankedStore.isFeaturedRankedReplayAllowed(66003L)).isTrue();
+            assertThat(rankedStore.isFeaturedRankedReplayAllowed(66002L)).isFalse();
+            assertThat(refCount(db, 66003L)).isEqualTo(3);
+            assertThat(refCount(db, 66002L)).isEqualTo(2);
+
+            // 无战报正文的胜局 66004 不得篡改 featured_battle_id，避免名局回放 404。
+            now.addAndGet(10_000L);
+            BattleResultEvent b4NoReplay = b2.toBuilder()
+                    .setBattleId(66004L)
+                    .setSettlements(0, b2.getSettlements(0).toBuilder().setBattleId(66004L))
+                    .setSettlements(1, b2.getSettlements(1).toBuilder().setBattleId(66004L))
+                    .build();
+            assertThat(ratingStore.apply(b4NoReplay).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
+            assertThat(rankedStore.isFeaturedRankedReplayAllowed(66004L)).isFalse();
+            assertThat(rankedStore.isFeaturedRankedReplayAllowed(66003L)).isTrue();
+
+            // 论剑 V7「不服再战」权威防伪：10 分钟内真实 1V1 对手通过；陌生人、超时、未知局均拒绝。
+            assertThat(rankedStore.validateRankedRematchSource(66003L, p1, p2, 600_000L)).isTrue();
+            assertThat(rankedStore.validateRankedRematchSource(66003L, p2, p1, 600_000L)).isTrue();
+            assertThat(rankedStore.validateRankedRematchSource(66003L, p1, 60099L, 600_000L)).isFalse();
+            assertThat(rankedStore.validateRankedRematchSource(999999L, p1, p2, 600_000L)).isFalse();
+            now.addAndGet(600_001L);
+            assertThat(rankedStore.validateRankedRematchSource(66003L, p1, p2, 600_000L)).isFalse();
+
+            // 删角收尾：清空注销角色在 featured_build 与对手宿敌行的展示名并删除本人宿敌行。
+            try (java.sql.Connection c = db.dataSource.getConnection()) {
+                c.setAutoCommit(false);
+                RankedStore.purgePlayerRankedData(c, p2);
+                c.commit();
+            }
+            GetRankedProfileResponse prof1AfterPurge = service.getProfile(p1, GetRankedProfileRequest.getDefaultInstance());
+            assertThat(prof1AfterPurge.getTopRivalsList()).hasSize(1);
+            assertThat(prof1AfterPurge.getTopRivals(0).getOpponentName()).isEmpty();
+            GetRankedProfileResponse prof2AfterPurge = service.getProfile(p2, GetRankedProfileRequest.getDefaultInstance());
+            assertThat(prof2AfterPurge.getTopRivalsList()).isEmpty();
+
+            // 换季封榜释放旧季全部代表局 ref_count（66001 / 66003 均从 3 回到 2）。
+            rankedStore.sealSeasonAndOpenNext(1, Map.of(), null);
+            assertThat(refCount(db, 66001L)).isEqualTo(2);
+            assertThat(refCount(db, 66003L)).isEqualTo(2);
+            assertThat(rankedStore.isFeaturedRankedReplayAllowed(66003L)).isFalse();
+        }
+    }
+
+    private static int refCount(RatingTestDatabase db, long battleId) throws Exception {
+        try (java.sql.Connection c = db.dataSource.getConnection();
+             java.sql.PreparedStatement ps = c.prepareStatement("SELECT ref_count FROM match_battle_report WHERE battle_id=?")) {
+            ps.setObject(1, com.game.pbmysql.PbMysql.uint64(battleId));
+            try (java.sql.ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : -1;
+            }
         }
     }
 }

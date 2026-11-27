@@ -782,6 +782,68 @@ class ChallengeServiceTest {
         assertThat(result(pushes.sent.get(3)).getAccepted()).isFalse();
     }
 
+    @Test
+    void 自定义切磋规则校验_透传至开局计划及公平预设与再战防伪() throws Exception {
+        // 1. 非法回合上限 / 非法 ban 槽 / 免费预设混用 ban / 再战混用免费预设均直接拒绝
+        for (com.game.proto.CustomDuelRules bad : List.of(
+                com.game.proto.CustomDuelRules.newBuilder().setRoundLimitOverride(15).build(),
+                com.game.proto.CustomDuelRules.newBuilder().setSkillBanSlotsPerTeam(2).build(),
+                com.game.proto.CustomDuelRules.newBuilder().setUseFreePreset(true).setSkillBanSlotsPerTeam(3).build(),
+                com.game.proto.CustomDuelRules.newBuilder().setRematchSourceBattleId(99L).setUseFreePreset(true).build())) {
+            ChallengePlayerResponse rej = service.challenge(session(A),
+                    ChallengePlayerRequest.newBuilder().setTargetPlayerId(B).setBattleConfigId(5).setCustomRules(bad).build(), d());
+            assertThat(rej.hasErrorMessage()).isTrue();
+            assertThat(rej.getErrorMessage().getId()).isEqualTo(1005);
+        }
+
+        // 2. 无排位库绑定时伪造 rematch_source_battle_id 必须 fail-closed 拒绝（16012）
+        ChallengePlayerResponse fakeRematch = service.challenge(session(A),
+                ChallengePlayerRequest.newBuilder().setTargetPlayerId(B).setBattleConfigId(5)
+                        .setCustomRules(com.game.proto.CustomDuelRules.newBuilder().setRematchSourceBattleId(8888L)).build(), d());
+        assertTip(fakeRematch.getErrorMessage(), 16012, "切磋邀请已过期");
+
+        // 3. 合法自定义规则（公平 3×3 免费模板 + 12 回合 + 禁控 + 公开观战）经存储透传至 GatherPlan
+        com.game.match.ranked.RankedTables tables = com.game.match.ranked.RankedTables.from(
+                com.game.table.ConfigTables.load(java.nio.file.Path.of("../config-data/tables")));
+        ChallengeService withRanked = service(store).withRanked(null, tables);
+        com.game.proto.CustomDuelRules fairRules = com.game.proto.CustomDuelRules.newBuilder()
+                .setRoundLimitOverride(12)
+                .setBanControlSkills(true)
+                .setAllowPublicSpectate(true)
+                .setUseFreePreset(true)
+                .setChallengerCharacterPresetId(101)
+                .setChallengerPetPresetId(203)
+                .build();
+        ChallengePlayerResponse sent = withRanked.challenge(session(A),
+                ChallengePlayerRequest.newBuilder().setTargetPlayerId(B).setBattleConfigId(5).setCustomRules(fairRules).build(), d());
+        assertThat(sent.hasErrorMessage()).isFalse();
+        long cid = sent.getChallengeId();
+
+        // 应战者传非法免费模板搭配时拒绝并不开局
+        RespondChallengeResponse badPreset = withRanked.respond(session(B),
+                RespondChallengeRequest.newBuilder().setChallengeId(cid).setAccept(true)
+                        .setResponderCharacterPresetId(99999).setResponderPetPresetId(99999).build(), d());
+        assertThat(badPreset.hasErrorMessage()).isTrue();
+        assertThat(badPreset.getErrorMessage().getId())
+                .isEqualTo(com.game.table.MatchErrorTip.match_error.kMatchRankedPresetInvalid_VALUE);
+        assertThat(gather.plans).isEmpty();
+
+        // 重新发起并传合法模板搭配：GatherPlan 收到完整 customDuelRules 与双人 freePresetContext
+        long cid2 = withRanked.challenge(session(A),
+                ChallengePlayerRequest.newBuilder().setTargetPlayerId(B).setBattleConfigId(5).setCustomRules(fairRules).build(), d())
+                .getChallengeId();
+        RespondChallengeResponse okResp = withRanked.respond(session(B),
+                RespondChallengeRequest.newBuilder().setChallengeId(cid2).setAccept(true)
+                        .setResponderCharacterPresetId(101).setResponderPetPresetId(203).build(), d());
+        assertThat(okResp.hasErrorMessage()).isFalse();
+        assertThat(gather.plans).hasSize(1);
+        GatherPlan plan = gather.plans.getFirst();
+        assertThat(plan.customDuelRules()).isEqualTo(fairRules);
+        assertThat(plan.freePresetContext()).isNotNull();
+        assertThat(plan.freePresetContext().getUseFreePreset()).isTrue();
+        assertThat(plan.freePresetContext().getMembersCount()).isEqualTo(2);
+    }
+
     /** 读总是返回第一次读到的结果：模拟两条应答都在消费之前读到了记录（基线 G8 的竞态窗口）。 */
     private static final class StaleReads implements ChallengeStore {
         final AtomicInteger reads = new AtomicInteger();

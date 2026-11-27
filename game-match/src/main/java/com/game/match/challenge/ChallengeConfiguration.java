@@ -46,12 +46,16 @@ public class ChallengeConfiguration {
     @Bean(name="challengeService")
     public ChallengeService configuredChallengeService(PlayerStatusReader players,ChallengeStore store,MatchIds ids,PlayerPusher pusher,GatherLauncher gather,
             MatchMetrics metrics,MatchPushExecutor executor,MatchProperties props,MessageIdRegistry registry,
-            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global,javax.sql.DataSource dataSource){
+            org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchService> global,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.ranked.RankedStore> rankedStore,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.ranked.RankedTables> rankedTables,
+            javax.sql.DataSource dataSource){
         com.game.common.player.PlayerProfiles.ConnectionSource connections=dataSource instanceof com.alibaba.druid.pool.DruidDataSource pool?pool::getConnection:wait->dataSource.getConnection();
         var profiles=new com.game.common.player.PlayerProfiles(connections,1);
         var service=challengeService(players,store,ids,pusher,gather,metrics,executor,props,registry);
         // 显式开发/测试装配可以没有全球服务；生产仍由GlobalMatchConfiguration的SQL/TiDB门禁拒绝缺失。
         global.ifAvailable(service::withGlobal);
+        service.withRanked(rankedStore.getIfAvailable(), rankedTables.getIfAvailable());
         return service.withPublicNames((player,deadline)->{
             var profile=profiles.load(java.util.List.of(player),deadline).get(player);return profile==null?"":profile.name();
         });

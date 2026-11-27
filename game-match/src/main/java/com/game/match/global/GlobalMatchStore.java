@@ -603,7 +603,11 @@ public final class GlobalMatchStore {
         }
     }
     public GlobalChallengeRow invite(SessionContext session,long challenge,long target,int configId,long ttl) {
+        return invite(session,challenge,target,configId,ttl,ByteString.EMPTY);
+    }
+    public GlobalChallengeRow invite(SessionContext session,long challenge,long target,int configId,long ttl,ByteString customRulesPayload) {
         if(challenge==0||target==0||target==session.getPlayerId()||ttl<=0)throw new IllegalArgumentException("切磋邀请参数无效");
+        ByteString rulesPayload=customRulesPayload==null?ByteString.EMPTY:customRulesPayload;
         return tx(c->{
             SessionContext recipient;
             com.game.common.player.PlayerRouteAuthority.lock(c,List.of(target,session.getPlayerId()),3);
@@ -616,13 +620,15 @@ public final class GlobalMatchStore {
                 if(previous.getState()!=1)throw new IllegalStateException("目标邀请状态未知");
                 if(previous.getChallengerId()!=session.getPlayerId()||previous.getConfigId()!=configId
                         ||!previous.getChallengerAccount().equals(session.getAccount())||previous.getChallengerRevision()!=session.getOwnerRevision()
-                        ||!previous.getTargetAccount().equals(recipient.getAccount())||previous.getTargetRevision()!=recipient.getOwnerRevision())
+                        ||!previous.getTargetAccount().equals(recipient.getAccount())||previous.getTargetRevision()!=recipient.getOwnerRevision()
+                        ||!previous.getCustomRulesPayload().equals(rulesPayload))
                     return null;
                 return previous;
             }
             requireNewRoot();var row=GlobalChallengeRow.newBuilder().setChallengeId(challenge).setChallengerId(session.getPlayerId()).setTargetId(target).setConfigId(configId)
                     .setChallengerAccount(session.getAccount()).setChallengerRevision(session.getOwnerRevision())
-                    .setTargetAccount(recipient.getAccount()).setTargetRevision(recipient.getOwnerRevision()).setCreatedMs(stamp).setExpiresMs(Math.addExact(stamp,ttl)).setState(1).build();
+                    .setTargetAccount(recipient.getAccount()).setTargetRevision(recipient.getOwnerRevision()).setCreatedMs(stamp).setExpiresMs(Math.addExact(stamp,ttl)).setState(1)
+                    .setCustomRulesPayload(rulesPayload).build();
             db.insert(c,row);return row;
         });
     }

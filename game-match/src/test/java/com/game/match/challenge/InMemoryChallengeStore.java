@@ -3,6 +3,7 @@ package com.game.match.challenge;
 import com.game.common.deadline.Deadline;
 import com.game.match.testing.Faults;
 import com.game.match.testing.ManualRedisClock;
+import com.google.protobuf.ByteString;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -85,6 +86,13 @@ final class InMemoryChallengeStore implements ChallengeStore {
 
     @Override
     public InviteResult invite(long challengeId, long challengerId, long targetId, int configId, long ttlMs, Deadline d) {
+        return invite(challengeId, challengerId, targetId, configId, ttlMs, ByteString.EMPTY, d);
+    }
+
+    @Override
+    public InviteResult invite(long challengeId, long challengerId, long targetId, int configId, long ttlMs,
+                               ByteString customRulesPayload, Deadline d) {
+        ByteString payload = customRulesPayload == null ? ByteString.EMPTY : customRulesPayload;
         return run("invite", "invite(" + challengeId + "," + challengerId + "," + targetId + ")", true, () -> {
             Long held = live(slots, targetId);
             if (held != null) {
@@ -98,7 +106,7 @@ final class InMemoryChallengeStore implements ChallengeStore {
             }
             long expiresAtMs = clock.peekMs() + ttlMs;
             slots.put(targetId, new Held<>(challengeId, expiresAtMs));
-            records.put(challengeId, new Held<>(new ChallengeRecord(challengerId, targetId, configId, expiresAtMs), expiresAtMs));
+            records.put(challengeId, new Held<>(new ChallengeRecord(challengerId, targetId, configId, expiresAtMs, payload), expiresAtMs));
             return new InviteResult.Created(expiresAtMs);
         });
     }
