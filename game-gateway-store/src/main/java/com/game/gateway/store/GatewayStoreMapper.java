@@ -48,6 +48,11 @@ public interface GatewayStoreMapper {
     @Select("SELECT " + ZONE_COLUMNS + " FROM zone_config WHERE zone_id = #{zoneId," + U32 + "}")
     ZoneRow selectZone(@Param("zoneId") int zoneId);
 
+    /** TiDB 无间隙锁：修改/删除已有区服前在同一事务内按主键显式行锁核验存在性。 */
+    @ResultMap("zoneRow")
+    @Select("SELECT " + ZONE_COLUMNS + " FROM zone_config WHERE zone_id = #{zoneId," + U32 + "} FOR UPDATE")
+    ZoneRow selectZoneForUpdate(@Param("zoneId") int zoneId);
+
     /** 创建或整行覆盖基础业务列（保留 created_at、create_role_closed 与 role_capacity），同基线 create 的 upsert 语义。 */
     @Insert("INSERT INTO zone_config (" + ZONE_COLUMNS + ") VALUES (#{z.zoneId," + U32 + "}, #{z.name}, #{z.manualStatus},"
             + " #{z.capacity}, #{z.maintenanceMsg}, #{z.openTime}, #{z.recommended}, #{z.sortOrder},"

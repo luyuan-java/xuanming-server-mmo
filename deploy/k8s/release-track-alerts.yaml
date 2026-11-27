@@ -1,0 +1,52 @@
+# 灰度与金丝雀判定 Prometheus 告警规则（对齐主仓 docs/design/release-track-gray-canary.md §2.8）
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: release-track-canary-alerts
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: release-track-canary.rules
+      interval: 30s
+      rules:
+        - alert: ReleaseTrackCanaryForwardErrorsHigh
+          expr: |
+            (
+              sum(rate(game_gate_backend_calls_total{release_track="canary",result="error"}[5m]))
+              / clamp_min(sum(rate(game_gate_backend_calls_total{release_track="canary"}[5m])), 1e-9)
+            )
+            >
+            (
+              2 * (
+                sum(rate(game_gate_backend_calls_total{release_track="stable",result="error"}[5m]))
+                / clamp_min(sum(rate(game_gate_backend_calls_total{release_track="stable"}[5m])), 1e-9)
+              ) + 0.01
+            )
+            and sum(rate(game_gate_backend_calls_total{release_track="canary"}[5m])) > 0.1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "金丝雀轨道全局服务请求失败率超标（> 2×stable + 1%）"
+            description: "金丝雀会话连续 10 分钟错误率高于同时段 stable 的 2 倍加 1 个百分点（最低流量 0.1 req/s），立即按 release-track 手册中止金丝雀。"
+        - alert: ReleaseTrackCanaryForwardLatencyHigh
+          expr: |
+            histogram_quantile(0.99, sum(rate(game_gate_backend_call_duration_seconds_bucket{release_track="canary"}[5m])) by (le))
+            >
+            (
+              histogram_quantile(0.99, sum(rate(game_gate_backend_call_duration_seconds_bucket{release_track="stable"}[5m])) by (le)) * 1.5
+            )
+            and
+            histogram_quantile(0.99, sum(rate(game_gate_backend_call_duration_seconds_bucket{release_track="canary"}[5m])) by (le))
+            >
+            (
+              histogram_quantile(0.99, sum(rate(game_gate_backend_call_duration_seconds_bucket{release_track="stable"}[5m])) by (le)) + 0.05
+            )
+            and sum(rate(game_gate_backend_call_duration_seconds_count{release_track="canary"}[5m])) > 1.0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "金丝雀轨道全局服务 p99 耗时超标（> max(1.5×stable, stable+50ms)）"
+            description: "金丝雀会话连续 10 分钟 p99 延迟高于同时段 stable 的 1.5 倍且至少高 50ms（最低流量 1 req/s），中止扩量并排查退化。"

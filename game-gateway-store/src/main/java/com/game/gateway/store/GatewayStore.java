@@ -88,6 +88,9 @@ public final class GatewayStore {
         long now = nowMs.getAsLong();
         return tx.execute(status -> {
             route(zoneId);
+            if (mapper.selectZoneForUpdate(zoneId) == null) {
+                return Optional.empty();
+            }
             mapper.updateZone(zoneId, values, now);
             return zone(zoneId);
         });
@@ -101,6 +104,9 @@ public final class GatewayStore {
         long now = nowMs.getAsLong();
         return tx.execute(txStatus -> {
             route(zoneId);
+            if (mapper.selectZoneForUpdate(zoneId) == null) {
+                return Optional.empty();
+            }
             mapper.updateZoneStatus(zoneId, status.code(), maintenanceMsg, now);
             return zone(zoneId);
         });
@@ -111,6 +117,9 @@ public final class GatewayStore {
         long now = nowMs.getAsLong();
         return tx.execute(txStatus -> {
             route(zoneId);
+            if (mapper.selectZoneForUpdate(zoneId) == null) {
+                return Optional.empty();
+            }
             mapper.updateCreateRoleClosed(zoneId, closed, now);
             return zone(zoneId);
         });
@@ -124,6 +133,9 @@ public final class GatewayStore {
         long now = nowMs.getAsLong();
         return tx.execute(txStatus -> {
             route(zoneId);
+            if (mapper.selectZoneForUpdate(zoneId) == null) {
+                return Optional.empty();
+            }
             mapper.updateRoleCapacity(zoneId, roleCapacity, now);
             return zone(zoneId);
         });
@@ -137,13 +149,22 @@ public final class GatewayStore {
         long now = nowMs.getAsLong();
         return Boolean.TRUE.equals(tx.execute(txStatus -> {
             route(zoneId);
+            if (mapper.selectZoneForUpdate(zoneId) == null) {
+                return false;
+            }
             return mapper.closeCreateRoleIfRoleCapacityMatches(zoneId, expectedRoleCapacity, now) > 0;
         }));
     }
 
     /** @return 是否删了（不存在为 false） */
     public boolean deleteZone(int zoneId) {
-        return Boolean.TRUE.equals(tx.execute(status->{route(zoneId);return mapper.deleteZone(zoneId)>0;}));
+        return Boolean.TRUE.equals(tx.execute(status -> {
+            route(zoneId);
+            if (mapper.selectZoneForUpdate(zoneId) == null) {
+                return false;
+            }
+            return mapper.deleteZone(zoneId) > 0;
+        }));
     }
 
     private static void checkZone(ZoneRow zone) {

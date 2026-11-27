@@ -35,6 +35,11 @@ public interface BattleNodes {
      */
     Optional<BattleNodeInfo> pickRandom(Set<String> excludeKeys);
 
+    /** 按整局发布轨道选点（全员 canary 优先选 canary、无可用退回 stable；其余恒选 stable，绝不进 canary）。 */
+    default Optional<BattleNodeInfo> pickRandom(Set<String> excludeKeys, com.game.common.release.ReleaseTrack battleTrack) {
+        return pickRandom(excludeKeys);
+    }
+
     /**
      * 目录概况。
      *

@@ -29,6 +29,8 @@ message GateNodeInfo {
   string client_ws_url = 10;
   // gate 自报客户端连接上限；0 表示未声明上限（dev 或旧版 gate，不触发水位剔除与区容量封顶）。
   uint32 max_connections = 11;
+  // 进程发布轨道（stable / canary，空串按 stable 算）。
+  string release_track = 12;
 }
 
 message SceneNodeInfo {
@@ -58,6 +60,8 @@ message SceneNodeInfo {
   bool evacuating = 12;
   // 本实例当前持有的节点号租约代次，换代连接不得复用旧持有者。
   uint64 lease_epoch = 13;
+  // 进程发布轨道（stable / canary，空串按 stable 算）。
+  string release_track = 14;
 }
 
 message SceneEntry {
@@ -101,4 +105,6 @@ message BattleNodeInfo {
   uint32 physical_region = 11;
   // 小游戏客户端直连 / 地域测速的 WebSocket 地址；空串表示不接小游戏。
   string client_ws_url = 12;
+  // 进程发布轨道（stable / canary，空串按 stable 算）。
+  string release_track = 13;
 }

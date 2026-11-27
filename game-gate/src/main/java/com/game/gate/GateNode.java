@@ -105,6 +105,8 @@ public final class GateNode {
     /** 运行模式：只决定 GM 类客户端指令放不放行（prod 拒绝）。 */
     private final RunMode runMode;
     private final String instanceId = UUID.randomUUID().toString();
+    /** 本进程所属发布轨道（读自 MMORPG_RELEASE_TRACK，启动即校验，进程存续期间不变）。 */
+    private final com.game.common.release.ReleaseTrack releaseTrack = com.game.common.release.ReleaseTrack.fromEnv();
     /**
      * 进程启动时刻（Unix 毫秒）：构造时取定一次，之后每次刷新目录都写这同一个值（{@code GateNodeInfo.started_at_ms}，批次 5.4）。
      * 读的是墙钟：只用来在同一地址的几条目录条目之间比新旧，对钟的要求同租约（部署要求 NTP）。
@@ -202,7 +204,7 @@ public final class GateNode {
         scheduler = Executors.newScheduledThreadPool(2, Thread.ofPlatform().name("gate-bg-", 0).daemon(true).factory());
         lease = NodeIdLease.acquire(redis, keys, scheduler, NodeTypes.GATE, zoneId,
                 SessionIdAllocator.MIN_NODE_ID, SessionIdAllocator.MAX_NODE_ID, instanceId, LEASE_TTL, this::onLeaseLost);
-        GateIdentity identity = new GateIdentity(lease.nodeId(), instanceId, zoneId);
+        GateIdentity identity = new GateIdentity(lease.nodeId(), instanceId, zoneId, releaseTrack);
         registry = new SessionRegistry(new SessionIdAllocator(identity.nodeId()));
         presence = new GatePresence(new PlayerPresenceDirectory(redis, keys), zoneId, identity.nodeId(), instanceId,
                 System::currentTimeMillis);
@@ -355,6 +357,13 @@ public final class GateNode {
     static GateNodeInfo directoryEntry(int zoneId, int nodeId, String instanceId, String clientHost, int clientPort,
                                        int playerCount, long startedAtMs, long leaseEpoch, String clientWsUrl,
                                        int maxConnections) {
+        return directoryEntry(zoneId, nodeId, instanceId, clientHost, clientPort, playerCount, startedAtMs, leaseEpoch,
+                clientWsUrl, maxConnections, com.game.common.release.ReleaseTrack.STABLE);
+    }
+
+    static GateNodeInfo directoryEntry(int zoneId, int nodeId, String instanceId, String clientHost, int clientPort,
+                                       int playerCount, long startedAtMs, long leaseEpoch, String clientWsUrl,
+                                       int maxConnections, com.game.common.release.ReleaseTrack releaseTrack) {
         GateNodeInfo.Builder b = GateNodeInfo.newBuilder()
                 .setZoneId(zoneId)
                 .setNodeId(nodeId)
@@ -365,7 +374,8 @@ public final class GateNode {
                 .setDraining(false)
                 .setStartedAtMs(startedAtMs)
                 .setLeaseEpoch(leaseEpoch)
-                .setMaxConnections(Math.max(0, maxConnections));
+                .setMaxConnections(Math.max(0, maxConnections))
+                .setReleaseTrack((releaseTrack == null ? com.game.common.release.ReleaseTrack.STABLE : releaseTrack).value());
         if (clientWsUrl != null && !clientWsUrl.isEmpty()) {
             b.setClientWsUrl(clientWsUrl);
         }
@@ -377,7 +387,7 @@ public final class GateNode {
         synchronized (directoryIoLock) {
             if (acceptingStopped) return;
             GateNodeInfo info = directoryEntry(zoneId, lease.nodeId(), instanceId, advertiseHost, properties.advertisePort(),
-                    registry.size(), startedAtMs, lease.leaseEpoch(), clientWsUrl, properties.maxConnections());
+                    registry.size(), startedAtMs, lease.leaseEpoch(), clientWsUrl, properties.maxConnections(), releaseTrack);
             try {
                 gateDirectory.publish(zoneId, lease.nodeId(), info, DIRECTORY_TTL);
             } catch (RuntimeException e) {

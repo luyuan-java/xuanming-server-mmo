@@ -54,9 +54,12 @@ public final class NodeIdLease implements AutoCloseable {
     private final String instanceId;
     private final Duration ttl;
     private final long validityNanos;
+    private final long validityMillis;
+    private static final long MAX_WALL_BACKWARD_MS = 1_000L;
     private final Runnable onLost;
     private final RecoveryListener recovery;
     private final LongSupplier nanoClock;
+    private final LongSupplier wallClockMs;
     private final ScheduledFuture<?> renewTask;
     private final AtomicBoolean lost = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -64,10 +67,12 @@ public final class NodeIdLease implements AutoCloseable {
     private volatile boolean epochRequired;
     /** 最近一次成功占号 / 续期的命令<b>发出前</b>的单调时钟读数。 */
     private volatile long lastRenewedNanos;
+    /** 最近一次成功占号 / 续期的命令发出前的墙钟毫秒读数（防御虚拟机暂停或单调钟漂移）。 */
+    private volatile long lastRenewedWallMs;
 
     private NodeIdLease(RedissonClient redis, String key, String epochKey, int nodeId, long leaseEpoch, String instanceId, Duration ttl,
                         Runnable onLost, RecoveryListener recovery, ScheduledExecutorService scheduler,
-                        LongSupplier nanoClock, long acquiredAtNanos) {
+                        LongSupplier nanoClock, LongSupplier wallClockMs, long acquiredAtNanos, long acquiredAtWallMs) {
         this.redis = redis;
         this.key = key;
         this.nodeId = nodeId;
@@ -76,10 +81,13 @@ public final class NodeIdLease implements AutoCloseable {
         this.instanceId = instanceId;
         this.ttl = ttl;
         this.validityNanos = ttl.toNanos() / 3 * 2;
+        this.validityMillis = Math.max(1L, ttl.toMillis() / 3 * 2);
         this.onLost = onLost;
         this.recovery = recovery;
         this.nanoClock = nanoClock;
+        this.wallClockMs = wallClockMs;
         this.lastRenewedNanos = acquiredAtNanos;
+        this.lastRenewedWallMs = acquiredAtWallMs;
         long periodMs = Math.max(1, ttl.toMillis() / 3);
         this.renewTask = scheduler.scheduleAtFixedRate(this::renew, periodMs, periodMs, TimeUnit.MILLISECONDS);
     }
@@ -95,8 +103,9 @@ public final class NodeIdLease implements AutoCloseable {
     /** 仅需要保留原节点身份的进程使用；键空闲时复占，网络未知时挂起，发现其他持有者才永久退出。 */
     public static NodeIdLease acquireRecoverable(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler,
             String nodeType, int zoneId, int minId, int maxId, String instanceId, Duration ttl, RecoveryListener listener) {
-        return acquireRecoverable(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl, listener,
-                System::nanoTime);
+        Objects.requireNonNull(listener, "listener");
+        return acquire(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl,
+                listener::onTaken, listener, System::nanoTime, System::currentTimeMillis);
     }
 
     static NodeIdLease acquireRecoverable(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler,
@@ -104,7 +113,7 @@ public final class NodeIdLease implements AutoCloseable {
             LongSupplier nanoClock) {
         Objects.requireNonNull(listener, "listener");
         return acquire(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl,
-                listener::onTaken, listener, nanoClock);
+                listener::onTaken, listener, nanoClock, () -> nanoClock.getAsLong() / 1_000_000L);
     }
 
     /**
@@ -114,29 +123,39 @@ public final class NodeIdLease implements AutoCloseable {
      */
     public static NodeIdLease acquire(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler, String nodeType,
                                       int zoneId, int minId, int maxId, String instanceId, Duration ttl, Runnable onLost) {
-        return acquire(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl, onLost, System::nanoTime);
+        return acquire(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl, onLost, null,
+                System::nanoTime, System::currentTimeMillis);
     }
 
     /** 同上，单调时钟可注入（测试用）。 */
     static NodeIdLease acquire(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler, String nodeType, int zoneId,
                                int minId, int maxId, String instanceId, Duration ttl, Runnable onLost,
                                LongSupplier nanoClock) {
-        return acquire(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl, onLost, null, nanoClock);
+        return acquire(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl, onLost, null, nanoClock,
+                () -> nanoClock.getAsLong() / 1_000_000L);
+    }
+
+    /** 同上，单调时钟与墙钟均可注入（测试验证双钟过期/回拨判定）。 */
+    static NodeIdLease acquire(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler, String nodeType, int zoneId,
+                               int minId, int maxId, String instanceId, Duration ttl, Runnable onLost,
+                               LongSupplier nanoClock, LongSupplier wallClockMs) {
+        return acquire(redis, keys, scheduler, nodeType, zoneId, minId, maxId, instanceId, ttl, onLost, null, nanoClock, wallClockMs);
     }
 
     private static NodeIdLease acquire(RedissonClient redis, RedisKeys keys, ScheduledExecutorService scheduler, String nodeType,
             int zoneId, int minId, int maxId, String instanceId, Duration ttl, Runnable onLost,
-            RecoveryListener recovery, LongSupplier nanoClock) {
+            RecoveryListener recovery, LongSupplier nanoClock, LongSupplier wallClockMs) {
         for (int id = minId; id <= maxId; id++) {
             String key = keys.nodeId(nodeType, zoneId, id);
             long sentAt = nanoClock.getAsLong();
+            long sentWall = wallClockMs.getAsLong();
             boolean taken = redis.<String>getBucket(key, StringCodec.INSTANCE).setIfAbsent(instanceId, ttl);
             if (taken) {
                 long epoch = nextLeaseEpoch(redis, key, instanceId, keys.nodeIdEpoch(nodeType, zoneId, id));
                 log.info("节点号租约已获取 type={} zone={} nodeId={} leaseEpoch={} instance={}",
                         nodeType, zoneId, id, epoch, instanceId);
                 return new NodeIdLease(redis, key, keys.nodeIdEpoch(nodeType, zoneId, id), id, epoch, instanceId, ttl,
-                        onLost, recovery, scheduler, nanoClock, sentAt);
+                        onLost, recovery, scheduler, nanoClock, wallClockMs, sentAt, sentWall);
             }
         }
         throw new IllegalStateException("节点号已占满 type=" + nodeType + " zone=" + zoneId + " 区间=[" + minId + "," + maxId + "]");
@@ -181,8 +200,11 @@ public final class NodeIdLease implements AutoCloseable {
      * 为假时调用方必须拒绝用号（fail-closed）；续期恢复后会重新为真，除非已丢失。
      */
     public boolean isValid() {
+        long monoElapsed = nanoClock.getAsLong() - lastRenewedNanos;
+        long wallElapsed = wallClockMs.getAsLong() - lastRenewedWallMs;
         return !closed.get() && !lost.get() && !suspended && !epochRequired
-                && nanoClock.getAsLong() - lastRenewedNanos < validityNanos;
+                && monoElapsed >= 0 && monoElapsed < validityNanos
+                && wallElapsed >= -MAX_WALL_BACKWARD_MS && wallElapsed < validityMillis;
     }
 
     public boolean isSuspended() { return suspended; }
@@ -193,15 +215,17 @@ public final class NodeIdLease implements AutoCloseable {
             return;
         }
         long sentAt = nanoClock.getAsLong();
+        long sentWall = wallClockMs.getAsLong();
         try {
             Long renewed = redis.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, RENEW_LUA,
                     RScript.ReturnType.INTEGER, List.of(key), instanceId, Long.toString(ttl.toMillis()));
             if (renewed != null && renewed == 1L) {
                 if (epochRequired) {
-                    confirmNewEpoch(sentAt);
+                    confirmNewEpoch(sentAt, sentWall);
                     return;
                 }
                 lastRenewedNanos = sentAt;
+                lastRenewedWallMs = sentWall;
                 if (suspended) {
                     suspended = false;
                     notifyListener(recovery::onResumed);
@@ -209,7 +233,7 @@ public final class NodeIdLease implements AutoCloseable {
                 return;
             }
             if (recovery != null && renewed != null && renewed == 0L) {
-                reacquire(sentAt);
+                reacquire(sentAt, sentWall);
                 return;
             }
             markLost("号已不属于本实例");
@@ -225,7 +249,7 @@ public final class NodeIdLease implements AutoCloseable {
         }
     }
 
-    private void reacquire(long sentAt) {
+    private void reacquire(long sentAt, long sentWall) {
         // 先关闭本地发号门，INCR 或占号失败时绝不继续沿用旧防护代次。
         suspend("租约已过期，正在复占原号");
         epochRequired = true;
@@ -234,10 +258,10 @@ public final class NodeIdLease implements AutoCloseable {
             markLost("复占原号时发现其他持有者");
             return;
         }
-        confirmNewEpoch(sentAt);
+        confirmNewEpoch(sentAt, sentWall);
     }
 
-    private void confirmNewEpoch(long sentAt) {
+    private void confirmNewEpoch(long sentAt, long sentWall) {
         long nextEpoch = nextLeaseEpoch(redis, key, instanceId, epochKey);
         // INCR 是另一个 Redis 键；其往返可能跨过 TTL，必须再次确认本实例仍持有原号。
         Long held = redis.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, RENEW_LUA,
@@ -248,6 +272,7 @@ public final class NodeIdLease implements AutoCloseable {
         }
         leaseEpoch = nextEpoch;
         lastRenewedNanos = sentAt;
+        lastRenewedWallMs = sentWall;
         epochRequired = false;
         suspended = false;
         log.warn("节点号原号复占成功 key={} leaseEpoch={}", key, nextEpoch);

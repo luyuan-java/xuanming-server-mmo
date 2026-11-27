@@ -86,4 +86,13 @@ class GatewayStoreTest {
         verify(mapper, never()).selectZone(0);
         verify(mapper, never()).upsertWhitelist(eq(0), anyString(), anyString());
     }
+
+    @Test
+    void tidb修改和删除先按主键FOR_UPDATE判存_不存在绝不执行写语句() {
+        when(mapper.selectZoneForUpdate(99)).thenReturn(null);
+        assertThat(store.updateZone(99, new ZoneRow(99, "新名", 0, 5000, "", null, false, 0, 0, 0))).isEmpty();
+        assertThat(store.deleteZone(99)).isFalse();
+        verify(mapper, never()).updateZone(eq(99), any(), anyLong());
+        verify(mapper, never()).deleteZone(99);
+    }
 }

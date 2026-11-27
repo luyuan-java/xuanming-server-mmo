@@ -33,6 +33,8 @@ message SessionContext {
   uint64 owner_revision = 10;
   // 票据绑定的账号摘要（16 字节，来自 GateTokenPayload.account_digest = 7）；gate 验签后原样透传，login 在认证出账号后核对。
   bytes ticket_account_digest = 11;
+  // 会话发布轨道（等于所在 gate 的轨道，stable / canary；空串按 stable 算）。
+  string release_track = 12;
 }
 
 message ClientCall {

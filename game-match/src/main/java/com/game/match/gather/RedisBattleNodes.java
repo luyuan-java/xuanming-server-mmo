@@ -77,7 +77,14 @@ public final class RedisBattleNodes implements BattleNodes {
 
     @Override
     public Optional<BattleNodeInfo> pickRandom(Set<String> excludeKeys) {
+        return pickRandom(excludeKeys, com.game.common.release.ReleaseTrack.STABLE);
+    }
+
+    @Override
+    public Optional<BattleNodeInfo> pickRandom(Set<String> excludeKeys, com.game.common.release.ReleaseTrack battleTrack) {
         Objects.requireNonNull(excludeKeys, "excludeKeys");
+        com.game.common.release.ReleaseTrack targetTrack = battleTrack == null
+                ? com.game.common.release.ReleaseTrack.STABLE : battleTrack;
         List<BattleNodeInfo> entries;
         try {
             entries = directory.list();
@@ -85,12 +92,18 @@ public final class RedisBattleNodes implements BattleNodes {
             log.warn("读 battle 节点目录失败，本次选不出节点: {}", e.toString());
             return Optional.empty();
         }
-        List<BattleNodeInfo> candidates = new ArrayList<>(entries.size());
+        List<BattleNodeInfo> eligible = new ArrayList<>(entries.size());
         for (BattleNodeInfo entry : entries) {
             if (allocatable(entry) && !excludeKeys.contains(BattleNodes.key(entry))) {
-                candidates.add(entry);
+                eligible.add(entry);
             }
         }
+        List<BattleNodeInfo> candidates = com.game.common.release.ReleaseTrack.filterCandidates(
+                targetTrack,
+                eligible,
+                BattleNodeInfo::getReleaseTrack,
+                bad -> log.error("跳过无法识别发布轨道的 battle 节点 nodeId={} track={}",
+                        bad.getNodeId(), bad.getReleaseTrack()));
         if (candidates.isEmpty()) {
             return Optional.empty();
         }

@@ -45,6 +45,8 @@ public final class NodeRpcClients<S> implements AutoCloseable {
 
     /** 重连间隔与空闲心跳（理由见 {@code SceneAssetOpClients#RECONNECT_INTERVAL}）。 */
     public static final Duration RECONNECT_INTERVAL = Duration.ofSeconds(1);
+    /** 缺省空闲连接回收阈值（对齐主仓 {@code connection-fanout-subsetting-20261106.md} §3.3：10 分钟）。 */
+    public static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofMinutes(10);
     /** 本地兜底超时比这次调用的超时多给的余量：正常情况下 Dubbo 自己先超时；建引用卡住时由它兜底。 */
     private static final long LOCAL_TIMEOUT_GRACE_MS = 200;
     private static final int CONNECT_THREADS = 2;
@@ -79,6 +81,7 @@ public final class NodeRpcClients<S> implements AutoCloseable {
     private final String group;
     private final Duration referenceTimeout;
     private final String name;
+    private final java.util.function.LongSupplier nanoClock;
     private final ThreadPoolExecutor connector;
     private final Object lock = new Object();
     /** address → 条目（持锁读写）。 */
@@ -90,7 +93,32 @@ public final class NodeRpcClients<S> implements AutoCloseable {
     /** 持 this：模型已销毁，不再创建。 */
     private boolean shutDown;
 
-    private record Entry<S>(Target target, CompletableFuture<Client<S>> client) {
+    private static final class Entry<S> {
+        private final Target target;
+        private final CompletableFuture<Client<S>> client;
+        private long lastUsedNanos;
+
+        private Entry(Target target, CompletableFuture<Client<S>> client, long nowNanos) {
+            this.target = target;
+            this.client = client;
+            this.lastUsedNanos = nowNanos;
+        }
+
+        Target target() {
+            return target;
+        }
+
+        CompletableFuture<Client<S>> client() {
+            return client;
+        }
+
+        long lastUsedNanos() {
+            return lastUsedNanos;
+        }
+
+        void touch(long nowNanos) {
+            this.lastUsedNanos = nowNanos;
+        }
     }
 
     private record Client<S>(ReferenceConfig<S> reference, S service) {
@@ -104,6 +132,11 @@ public final class NodeRpcClients<S> implements AutoCloseable {
      * @param threadName       建引用的守护线程名前缀（如 {@code scene-battle-connect}）
      */
     public NodeRpcClients(String applicationName, Class<S> type, String group, Duration referenceTimeout, String threadName) {
+        this(applicationName, type, group, referenceTimeout, threadName, System::nanoTime);
+    }
+
+    NodeRpcClients(String applicationName, Class<S> type, String group, Duration referenceTimeout, String threadName,
+                   java.util.function.LongSupplier nanoClock) {
         this.applicationName = Objects.requireNonNull(applicationName, "applicationName");
         this.type = Objects.requireNonNull(type, "type");
         this.group = Objects.requireNonNull(group, "group");
@@ -112,6 +145,7 @@ public final class NodeRpcClients<S> implements AutoCloseable {
         }
         this.referenceTimeout = referenceTimeout;
         this.name = Objects.requireNonNull(threadName, "threadName");
+        this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
         AtomicInteger threads = new AtomicInteger();
         // 队列无界：任务数 ≤ 同时在建的地址数（每个地址至多一个），天然有界
         this.connector = new ThreadPoolExecutor(CONNECT_THREADS, CONNECT_THREADS, 30, TimeUnit.SECONDS,
@@ -172,9 +206,11 @@ public final class NodeRpcClients<S> implements AutoCloseable {
             if (closed) {
                 return CompletableFuture.failedFuture(new IllegalStateException(name + " 客户端缓存已关闭"));
             }
+            long now = nanoClock.getAsLong();
             Entry<S> existing = entries.get(address);
             if (existing != null && existing.target().instanceId().equals(target.instanceId())
                     && !existing.client().isCompletedExceptionally()) {
+                existing.touch(now);
                 return existing.client().thenApply(Client::service);
             }
             if (existing != null && !existing.target().instanceId().equals(target.instanceId())) {
@@ -182,7 +218,7 @@ public final class NodeRpcClients<S> implements AutoCloseable {
                 log.info("{} 目标地址换了实例，重建客户端 address={} old_instance={} new_instance={}", name, address,
                         existing.target().instanceId(), target.instanceId());
             }
-            entry = new Entry<>(target, new CompletableFuture<>());
+            entry = new Entry<>(target, new CompletableFuture<>(), now);
             entries.put(address, entry);
         }
         destroyWhenBuilt(stale);
@@ -275,6 +311,32 @@ public final class NodeRpcClients<S> implements AutoCloseable {
             });
         }
         removed.forEach(NodeRpcClients::destroyWhenBuilt);
+    }
+
+    /**
+     * 回收超过 {@code maxIdle} 未被取用的空闲连接（与 {@link #clientAsync} 共用同一把锁，刚取到的连接不会被误回收）。
+     * 调用方须保证 {@code maxIdle > referenceTimeout}，以免在途调用被回收。
+     * @return 本次回收销毁的客户端数
+     */
+    public int evictIdle(Duration maxIdle) {
+        Objects.requireNonNull(maxIdle, "maxIdle");
+        if (maxIdle.compareTo(referenceTimeout) <= 0) {
+            throw new IllegalArgumentException("空闲回收阈值必须大于单次调用超时 maxIdle=" + maxIdle + " timeout=" + referenceTimeout);
+        }
+        long thresholdNanos = maxIdle.toNanos();
+        long now = nanoClock.getAsLong();
+        List<Entry<S>> removed = new ArrayList<>();
+        synchronized (lock) {
+            entries.values().removeIf(entry -> {
+                if (now - entry.lastUsedNanos() >= thresholdNanos) {
+                    removed.add(entry);
+                    return true;
+                }
+                return false;
+            });
+        }
+        removed.forEach(NodeRpcClients::destroyWhenBuilt);
+        return removed.size();
     }
 
     /** 当前缓存的客户端数（含正在建的；指标 / 测试用）。 */

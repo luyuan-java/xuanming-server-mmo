@@ -1,0 +1,95 @@
+# 去单点第二轮 K8s 生产高可用基线（对齐主仓 no-single-node-horizontal-scaling-20261001.md §6、§9、§10）：
+# 1. gateway / mmorpg 库迁至全球权威 TiDB 单入口；DDL 仅由独立 schema-init Job 使用 schema 账号执行，常驻业务账号禁止 DDL；
+#    staging / prod 严禁指向单实例 MySQL（mysql-single / localhost）。
+# 2. Loki 在 staging / prod 采用单体模式 3 副本（memberlist + replication_factor: 3 + 外部 S3 兼容存储），消除单副本日志单点。
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-db-tidb-routing
+data:
+  SPRING_DATASOURCE_URL: "jdbc:mysql://tidb-global.db.svc.cluster.local:4000/mmorpg?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=UTC"
+  GAME_DB_FORBID_SINGLE_INSTANCE_MYSQL: "true"
+  GAME_DB_RUNTIME_DDL_ENABLED: "false"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gateway-schema-migrate
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: schema-apply
+          image: ghcr.io/luyuan-java/xuanming-server-mmo-tools:latest
+          command: ["/bin/sh", "-c", "mysql --host=tidb-global.db.svc.cluster.local --port=4000 --user=$DB_SCHEMA_USER < /sql/gateway-schema.sql"]
+          envFrom:
+            - secretRef:
+                name: tidb-schema-admin-credentials
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-ha-config
+data:
+  loki.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9095
+    common:
+      replication_factor: 3
+      ring:
+        kvstore:
+          store: memberlist
+    memberlist:
+      join_members:
+        - loki-memberlist.observability.svc.cluster.local:7946
+    schema_config:
+      configs:
+        - from: 2026-01-01
+          store: tsdb
+          object_store: s3
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    storage_config:
+      aws:
+        s3: s3://observability-loki-prod/chunks
+        s3forcepathstyle: true
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loki
+  namespace: observability
+spec:
+  serviceName: loki-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      containers:
+        - name: loki
+          image: grafana/loki:3.3.2
+          args: ["-config.file=/etc/loki/loki.yaml", "-target=all"]
+          ports:
+            - containerPort: 3100
+              name: http
+            - containerPort: 7946
+              name: memberlist
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+      volumes:
+        - name: config
+          configMap:
+            name: loki-ha-config

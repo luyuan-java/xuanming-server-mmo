@@ -74,6 +74,7 @@ final class GateSessionPayload {
         byte[] digest = s.getTicketAccountDigest().toByteArray();
         out.writeInt(digest.length);
         out.write(digest);
+        writeString(out, s.getReleaseTrack());
     }
 
     private static void writeString(DataOutputStream out, String value) throws IOException {

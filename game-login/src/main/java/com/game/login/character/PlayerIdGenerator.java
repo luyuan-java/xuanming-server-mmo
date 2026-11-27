@@ -1,29 +1,43 @@
 package com.game.login.character;
 
+import com.game.common.id.AuthoritativeIdIssuer;
 import com.game.common.id.Snowflake;
+import java.util.Objects;
 import java.util.function.BooleanSupplier;
 
 /**
- * player_id 发号器：雪花号，worker 为 game-login 的节点号租约。player_id 只由 game-login 产生（雪花节点隔离不变量）。
- *
- * <p>每次发号前检查租约<b>当前有效</b>（生产为 {@code NodeIdLease::isValid}：未丢失且最近一次成功续期不足 2/3 TTL），
- * 无效即拒绝发号（fail-closed）：只看「是否已丢失」不够——Redis 抖动期间续期失败、丢失回调还没触发时，
- * 键可能已经过期、号可能已被别的实例占用，继续发会与它撞号。续期恢复后自动恢复发号。
- * 时钟回拨超过容忍值时 {@link Snowflake} 抛异常，同样拒绝发号。线程安全。
+ * player_id 发号器：
+ * <ul>
+ *   <li>权威模式（{@link #PlayerIdGenerator(AuthoritativeIdIssuer)}）：使用三份独立预留记录 + 全局号源登记处的权威号源，
+ *       无可用可信上界或存储故障时直接抛 {@link IllegalStateException}，绝不回退本地 Snowflake；</li>
+ *   <li>兼容/单测模式（{@link #PlayerIdGenerator(Snowflake, BooleanSupplier)}）：雪花号 + 租约有效性门禁（双钟 fail-closed）。</li>
+ * </ul>
  */
 public final class PlayerIdGenerator {
 
+    private final AuthoritativeIdIssuer authoritative;
     private final Snowflake snowflake;
     private final BooleanSupplier leaseValid;
 
-    /** @param leaseValid 租约当前是否可用来发号（每次发号前调用） */
-    public PlayerIdGenerator(Snowflake snowflake, BooleanSupplier leaseValid) {
-        this.snowflake = snowflake;
-        this.leaseValid = leaseValid;
+    /** 权威三记录预留发号器（生产推荐：无跨进程重号风险，故障 fail-closed 不回退 Snowflake）。 */
+    public PlayerIdGenerator(AuthoritativeIdIssuer authoritative) {
+        this.authoritative = Objects.requireNonNull(authoritative, "authoritative");
+        this.snowflake = null;
+        this.leaseValid = null;
     }
 
-    /** @throws IllegalStateException 节点号租约无效（已丢失或续期滞后），或时钟回拨 */
+    /** @param leaseValid 租约当前是否可用来发号（每次发号前调用） */
+    public PlayerIdGenerator(Snowflake snowflake, BooleanSupplier leaseValid) {
+        this.authoritative = null;
+        this.snowflake = Objects.requireNonNull(snowflake, "snowflake");
+        this.leaseValid = Objects.requireNonNull(leaseValid, "leaseValid");
+    }
+
+    /** @throws IllegalStateException 权威预留失败、节点号租约无效（已丢失或续期滞后），或时钟回拨 */
     public long nextId() {
+        if (authoritative != null) {
+            return authoritative.nextId();
+        }
         if (!leaseValid.getAsBoolean()) {
             throw new IllegalStateException("节点号租约无效（已丢失或续期滞后），拒绝发号");
         }

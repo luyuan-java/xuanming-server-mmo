@@ -2176,7 +2176,8 @@ public final class ClientDispatcher {
                 .setOwnerRevision(s.ownerRevision)
                 .setClientIp(s.clientIp())
                 .setTicketPlayerId(s.ticketPlayerId)
-                .setTicketTargetZoneId(s.ticketTargetZoneId);
+                .setTicketTargetZoneId(s.ticketTargetZoneId)
+                .setReleaseTrack(identity.releaseTrack().value());
         if (s.ticketAccountDigest != null && !s.ticketAccountDigest.isEmpty()) {
             b.setTicketAccountDigest(s.ticketAccountDigest);
         }
@@ -2190,6 +2191,7 @@ public final class ClientDispatcher {
                 .setGateInstanceId(identity.instanceId())
                 .setSessionId(sessionId)
                 .setZoneId(identity.zoneId())
+                .setReleaseTrack(identity.releaseTrack().value())
                 .build();
     }
 

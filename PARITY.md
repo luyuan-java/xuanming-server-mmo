@@ -1,10 +1,16 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-27 Actor 隔离改造审阅后的 Java 待做（`87f79f19` 场景跨线程回调与逻辑线程断言的两处收尾）
+
+| 范围 | C++ / Go 权威版 + Unity 客户端 | Java / Python 版 | 状态 |
+|---|---|---|---|
+| ① **逻辑线程断言没有用例覆盖**：`SceneWorld.playerById` / `step` 越线即抛 `IllegalStateException`，但 `SceneWorld` 默认守卫恒放行，只有 `SceneNode` 绑定 `logicLoop::inEventLoop`，现有 `game-scene` 用例都没在守卫下跑过（审阅时 53 处调用逐处核过都先回逻辑线程）。<br>② **迟到确认清锁分支收窄**：`PlayerBattleService.onLateConfirm` 的「Inbox 已落盘 → 删迟到确认锁」一支改成只认同一实例；玩家已换实例时不再清，靠下次进场恢复读兜底 | 审阅结论见 mmorpg 仓 `docs/design/actor-isolation-review-20261127.md` §3 | **Java 待做**：① 在 `SceneWorld` 测试夹具里绑定单线程守卫（或单线程执行器 + 守卫）把 `game-scene` 套件跑一遍；② 「Inbox 已落盘」一支只要求 `player != null`（按玩家持久收件箱账本判断，与实例无关），恢复原清锁行为 | Java 待做 |
+
 ## 2026-11-27 局外人观战交流模式与个人禁交开关 V1（开局冻结开关 + 全房单一公开频道 + ContentGuard fail-closed + 严禁禁观战，RPC `587..590`，Tip `16073..16078`，Java 第 27 代持久台账 `0027.schema`）
 
 | 范围 | C++ / Go 权威版 + Unity 客户端 | Java / Python 版 | 状态 |
 |---|---|---|---|
-| **① 核心口径（禁交流 ≠ 禁观战）**：个人偏好 `eSpectateChatPreference`（`0=UNSPECIFIED` / `1=ALLOW` / `2=FORBID`）持久化于 `PlayerProfileComp.spectate_chat_pref = 15`（Java `PlayerState.spectate_chat_pref = 28`），经 `SceneSceneClientPlayer` `589=GetSpectateChatSetting` / `590=SetSpectateChatSetting` 读写（战斗中可改、下次进战斗生效；交出冻结期拒写）。关闭个人开关**绝不影响 `spectate_visibility`**，他人仍可正常观战。<br>**② 开局一次性冻结（防作弊 + 无局中摇摆）**：建房时 `Match` 按 `MatchMode` 权威策略冻结 `CreateBattleRequest.spectate_chat_enabled = 25`（单人 PVE 按本人、组队 PVE 按队长、PVP 默认全员真人一票否决且忽略 AI、私密/不可观战局恒 `false`），透传 `BattleStateS2C.spectate_chat_enabled = 47`（`RedactStateForViewer(0)` 保留开关同时裁剪全部私密字段，守住 `观众视角 ⊆ A ∩ B` 与队内频道隔离）及 `BattleWatchSummary.spectate_chat_enabled = 9`。<br>**③ 全房单一公开频道（`MatchService` `587=SendBattleSpectateChat` / `588=PullBattleSpectateChat`，Tip `16073..16078`）**：双方参战者与局外观众共享同一公开流（按权威参战名单自动标 `PARTICIPANT` / `SPECTATOR`，杜绝单边暗线指挥）；自由文本经 `ContentGuard`（`TEXT_SCENE_CHAT_WORLD`）fail-closed 审核（审核不可用回 `16078`）；Redis 单槽（`{<battle_id>}` hash tag）原子 Lua 维护 60 条环形缓冲、参战 2s / 观战 4s 冷却与房间 8 条/秒限流，战局结束自动封口禁写保留历史可读。<br>**④ Unity 全 UI 接入（零阻塞，附可选 4 切片视觉精修交接单）**：`BattleSpectateChatClient`（纯 C#、WebGL2/IL2CPP 安全）、`BattleSpectateChatPanel`（战斗/观战左侧可折叠抽屉 + 禁交流时参战隐藏/观战显示「静默观战·禁交流」提示牌）、`SpectatePanel`（个人开关 + 列表 `[可交流]/[静默观战]` 标记）、`BattleQueuePanel`（快捷开关）。 | 策划与交接：`docs/planning/battle-spectate-chat-v1.md`、`docs/planning/ui-handoff/battle-spectate-chat-v1-ui-handoff.md`；协议与表：6 份 `.proto` + `Tip.xlsx`（`16073..16078`），`dev.bat gen` + `dev.bat export`（`protoc 35.1`）退出 0；C++：`player_handoff_gate.h`、`player_scene_handler.cpp`、`player_battle.cpp`、`turn_battle_engine.cpp`、`battle_room_manager.cpp`、`player_handoff_gate_test.cpp`、`battle_observer_contract_test.cpp`；Go `match`：`spectatechat/hub{,_test}.go`、`logic/spectate_chat_{policy,logic}{,_test}.go`、`gather.go`、`spectate.go`、`config.go`、`errors{,_test}.go`、`matchserviceserver.go`。验证：`test_cpp_no_raw_pointer_member.py` **13/13**、`test_cpp_thread_sources.py` **5/5**、`check_log_text_english.py` **exit 0**、`gen_docs_index.py --check` **exit 0**；C++ 串行 MSBuild `proto`/`battle`/`scene` 库与 `battle.exe`/`scene.exe`/`turn_battle_engine_test.exe`/`rpc_controller_test.exe`/`cross_zone_test.exe` 全 **0 错误**，`scene.exe --validate-tables` **PASS**（version=106，83 表），`rpc_controller_test --gtest_filter=*SpectateChat*` **1/1 PASS**，`cross_zone_test --gtest_filter=*PlayerHandoffGate*` `SceneServiceIsListedPerMethod` 等 **9/10 PASS**（1 项为无关既有 `SkillService` 项），`turn_battle_engine_test` **535/536 PASS**（1 项为无关既有奖励表夹具）；Go `match` 全 **27 包 PASS**、`client_rpc_router` 全包 **PASS**；Unity：`gen.bat client` 0 错误，`client_compile_check.ps1` **828/828 0 错误**，Roslyn+NUnit `BattleSpectateChatClientTests`（4/4）+ `SpectateClientStateMachineTests`（34/34）= **38/38 PASS** | **Java 已对齐**：`ContractSync --mmorpg --maps-source` 全量同步（`proto=152, schema=83, tip fault=66`）；`game-player-store`（`player_state.proto#28` + 第 27 代台账 `0027.schema`，`HEAD_SHA256=6664fc5e...`，`PlayerStateSchemaLedgerTest` **1/1 PASS**）；`game-discovery`（`RedisKeys.matchSpectateChat*` 五键同槽）；`game-battle-engine`（`TurnBattleEngine.buildStateSnapshot` 透传 `spectate_chat_enabled`）；`game-battle`（`BattleViewsTest` + `ObserverTest` **15/15 PASS**）；`game-scene`（`ScenePlayer` / `BattleSnapshots` / `RankedPresetRules` / `SceneMessageIds` / `ClientRequestHandler` 589/590，`SpectateChatSettingTest` **1/1** + `FreezeGateTest` + `PrepareBattleTest` **63/63 PASS**）；`game-match`（`BattlePlacement#15..16`、`SpectateChatPolicy`、`SpectateChatHub` Redis 单槽 Lua + 内存兜底、`SpectateChatService`、`GatherPipeline`、`GlobalMatchService`、`GlobalPlacementStore`、`GlobalWatchAuthority`、`SpectateRules`、`MatchMethods` 60 方法、`MatchFeatureConfiguration`，7 套件 **88/88 PASS**）。<br>**Python（TODO）**：按 `xuanming-server-mmo-python` 规则待 C++ 基线正式提交后增量同步 `587..590` 与 `spectate_chat_*` 逻辑 | C++ / Go / Java / Unity 已对齐全绿（Python 列入 TODO） |
+| **① 核心口径（禁交流 ≠ 禁观战）**：个人偏好 `eSpectateChatPreference`（`0=UNSPECIFIED` / `1=ALLOW` / `2=FORBID`）持久化于 `PlayerProfileComp.spectate_chat_pref = 15`（Java `PlayerState.spectate_chat_pref = 28`），经 `SceneSceneClientPlayer` `589=GetSpectateChatSetting` / `590=SetSpectateChatSetting` 读写（战斗中可改、下次进战斗生效；交出冻结期拒写）。关闭个人开关**绝不影响 `spectate_visibility`**，他人仍可正常观战。<br>**② 开局一次性冻结（防作弊 + 无局中摇摆）**：建房时 `Match` 按 `MatchMode` 权威策略冻结 `CreateBattleRequest.spectate_chat_enabled = 25`（单人 PVE 按本人、组队 PVE 按队长、PVP 默认全员真人一票否决且忽略 AI、私密/不可观战局恒 `false`），透传 `BattleStateS2C.spectate_chat_enabled = 47`（`RedactStateForViewer(0)` 保留开关同时裁剪全部私密字段，守住 `观众视角 ⊆ A ∩ B` 与队内频道隔离）及 `BattleWatchSummary.spectate_chat_enabled = 9`。<br>**③ 全房单一公开频道（`MatchService` `587=SendBattleSpectateChat` / `588=PullBattleSpectateChat`，Tip `16073..16078`）**：双方参战者与局外观众共享同一公开流（按权威参战名单自动标 `PARTICIPANT` / `SPECTATOR`，杜绝单边暗线指挥）；自由文本经 `ContentGuard`（`TEXT_SCENE_CHAT_WORLD`）fail-closed 审核（审核不可用回 `16078`）；Redis 单槽（`{<battle_id>}` hash tag）原子 Lua 维护 60 条环形缓冲、参战 2s / 观战 4s 冷却与房间 8 条/秒限流，战局结束自动封口禁写保留历史可读。<br>**④ Unity 全 UI 接入 + 4 枚专属透明 PNG-32 切片落地 + V1.5 实用体验增强**：`BattleSpectateChatClient`（纯 C#、WebGL2/IL2CPP 安全）、`BattleSpectateChatPanel`（接入 `Assets/Resources/UI/Ugui/BattleSpectateChatV1/` 4 枚 Codex `builtin-v2` 切片及 `.meta`，逐张核对尺寸/RGBA 四角透明/SHA-256 与全仓 `12,678` GUID 0 冲突；战斗/观战左侧可折叠抽屉、玉绿开聊入口与米白只读静默牌区分、羊皮纸深墨色正文、发送冷却置灰态，缺失自动回落 9-slice；新增 **4 枚回合战况快捷短语**直走 587 公开流/审核/冷却，以及 **「静音本局」本地免打扰**暂停后台轮询且不影响他人）、`SpectatePanel`（个人开关 + 列表 `[可交流]/[静默观战]` 标记）、`BattleQueuePanel`（快捷开关）。 | 策划与交接：`docs/planning/battle-spectate-chat-v1.md`、`docs/planning/ui-handoff/battle-spectate-chat-v1-ui-handoff.md`；协议与表：6 份 `.proto` + `Tip.xlsx`（`16073..16078`），`dev.bat gen` + `dev.bat export`（`protoc 35.1`）退出 0；C++：`player_handoff_gate.h`、`player_scene_handler.cpp`、`player_battle.cpp`、`turn_battle_engine.cpp`、`battle_room_manager.cpp`、`player_handoff_gate_test.cpp`、`battle_observer_contract_test.cpp`；Go `match`：`spectatechat/hub{,_test}.go`、`logic/spectate_chat_{policy,logic}{,_test}.go`、`gather.go`、`spectate.go`、`config.go`、`errors{,_test}.go`、`matchserviceserver.go`。验证：`test_cpp_no_raw_pointer_member.py` **13/13**、`test_cpp_thread_sources.py` **5/5**、`check_log_text_english.py` **exit 0**、`gen_docs_index.py --check` **exit 0**；C++ 串行 MSBuild `proto`/`battle`/`scene` 库与 `battle.exe`/`scene.exe`/`turn_battle_engine_test.exe`/`rpc_controller_test.exe`/`cross_zone_test.exe` 全 **0 错误**，`scene.exe --validate-tables` **PASS**（version=106，83 表），`rpc_controller_test --gtest_filter=*SpectateChat*` **1/1 PASS**，`cross_zone_test --gtest_filter=*PlayerHandoffGate*` `SceneServiceIsListedPerMethod` 等 **9/10 PASS**（1 项为无关既有 `SkillService` 项），`turn_battle_engine_test` **535/536 PASS**（1 项为无关既有奖励表夹具）；Go `match` 全 **27 包 PASS**、`client_rpc_router` 全包 **PASS**；Unity：`gen.bat client` 0 错误，`client_compile_check.ps1` **833/833 0 错误**，Roslyn+NUnit `BattleSpectateChatClientTests`（5/5，含本地静音停/复轮询）+ `SpectateClientStateMachineTests`（34/34）= **39/39 PASS** | **Java 已对齐**：`ContractSync --mmorpg --maps-source` 全量同步（`proto=152, schema=83, tip fault=66`）；`game-player-store`（`player_state.proto#28` + 第 27 代台账 `0027.schema`，`HEAD_SHA256=6664fc5e...`，`PlayerStateSchemaLedgerTest` **1/1 PASS**）；`game-discovery`（`RedisKeys.matchSpectateChat*` 五键同槽）；`game-battle-engine`（`TurnBattleEngine.buildStateSnapshot` 透传 `spectate_chat_enabled`）；`game-battle`（`BattleViewsTest` + `ObserverTest` **15/15 PASS**）；`game-scene`（`ScenePlayer` / `BattleSnapshots` / `RankedPresetRules` / `SceneMessageIds` / `ClientRequestHandler` 589/590，`SpectateChatSettingTest` **1/1** + `FreezeGateTest` + `PrepareBattleTest` **63/63 PASS**）；`game-match`（`BattlePlacement#15..16`、`SpectateChatPolicy`、`SpectateChatHub` Redis 单槽 Lua + 内存兜底、`SpectateChatService`、`GatherPipeline`、`GlobalMatchService`、`GlobalPlacementStore`、`GlobalWatchAuthority`、`SpectateRules`、`MatchMethods` 60 方法、`MatchFeatureConfiguration`，7 套件 **88/88 PASS**）。<br>**Python 已对齐**：`contracts/message_id.txt`（`587..590`）+ `schema.pb`、`match/{config,spectate_chat,gather,spectate,match_service}.py`、Scene `589/590` 持久与交出冻结门禁、Battle 观众脱敏与指标透传；实跑 `pytest tests/test_cpp_da97_spectate_chat_match_gate.py tests/test_cpp_da97_wuxing_realm_v2_battle.py` **13/13 PASS** | 已对齐（四仓 + 美术全绿） |
 
 ## 2026-11-27 五行幻境 V2 · 五行奇策轻肉鸽秘境（6 关分岔 + 15 枚机制改造型奇策 + 3 同系五行共鸣 + 公平 3×3 双模式 + 跨周保局 + Redis Cluster 同槽 Lua Top-200 榜，RPC `585/586`）
 
@@ -984,17 +990,13 @@ C++ 版以 `7ec726ce1` 为基线实施内部 RPC0 链路整理：同进程重连
 
 Java 既有断链策略仍会关闭 Gate 会话，并由 Scene 移除玩家、写回；“节点间短暂断线保留玩家内存、恢复只替换通信绑定”尚待独立设计和实现，本批不承诺解决，也不标记为双版已对齐。此次只核对并登记，未修改 Java 代码、未运行 Java 构建或测试。
 
-### 2026-11-05 灰度与金丝雀的发布轨道方案（Java 待做）
+### 2026-11-05 灰度与金丝雀的发布轨道方案（Java 已对齐）
 
-主仓设计见 `docs/design/release-track-gray-canary.md`，方案已定、代码未落，分三批实施。Java 版 `0.1.0-SNAPSHOT` 待做，按本版的 Netty、Dubbo 与部署形态实现同一套规则：
-
-- 只有 stable、canary 两条轨道，是进程的部署属性（环境变量 `MMORPG_RELEASE_TRACK`，不设为 stable，其他值启动失败），写进本版的节点发现记录；
-- zone 内的有状态层一个 zone 一条轨道，按 zone 灰度；
-- 会话的轨道等于所在 Gate 的轨道，由入口随请求传给下游；
-- 全局服务的金丝雀副本只接金丝雀会话的客户端请求，选点规则为「canary 没有实例就退回 stable，stable 永远不进 canary」；服务间调用和全局作用域的后台工作（选主、消费、租约、清理）只由 stable 承担；
-- 战斗按整局：成员全部来自 canary 会话才进 canary battle。
-
-本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已完整对齐（设计见主仓 `docs/design/release-track-gray-canary.md` §2）：
+- **轨道身份与 fail-fast 校验**：`game-common` 新增 `ReleaseTrack`（`STABLE`/`CANARY`，读自 `MMORPG_RELEASE_TRACK`，缺省 `stable`，非法值启动拒启；`runsGlobalBackgroundWork()` 仅 `stable` 为真；`filterCandidates` 实现「canary 优先选 canary、无可用退回 stable、stable 永不进 canary、未知轨道跳过并告警」；`battleTrackForMembers` 实现全员 canary 才进 canary 战斗池）。
+- **目录与会话透传**：`game-api` `node_directory.proto` 为 `GateNodeInfo`/`SceneNodeInfo`/`BattleNodeInfo` 增加 `release_track` 字段，`client_call.proto` `SessionContext` 增加 `release_track = 12` 并纳入 `GateSessionPayload` Ed25519 签名覆盖；`game-gate` `GateIdentity`/`GateNode`/`ClientDispatcher` 启动校验 `MMORPG_RELEASE_TRACK`、上报目录并随 `SessionContext` 透传。
+- **路由选点与战斗池选点**：`game-api` 新增 Dubbo `StateRouter`（`ReleaseTrackAndSubsetRouter` / `ReleaseTrackAndSubsetStateRouterFactory`，经 SPI 自动注册），客户端请求按会话轨道选点、服务间内部调用强制 `stable`；`game-match` `BattleNodes`/`RedisBattleNodes` 新增按整局轨道过滤的 `pickRandom(excludeKeys, battleTrack)`；`deploy/k8s/release-track-alerts.yaml` 补齐 `ReleaseTrackCanaryForwardErrorsHigh` 与 `ReleaseTrackCanaryForwardLatencyHigh` 告警规则。
+- **验证**：`game-common` `ReleaseTrackTest`（3/3）、`game-api` `ReleaseTrackAndSubsetRouterTest` + `GateSessionIdentityFilterTest`（3/3）、`game-match` `BattleReleaseTrackSelectionTest`（1/1）、`game-gate` `GateConfigurationTest` + `ClientDispatcherTest`（115/115）全部 PASS。
 
 ### 2026-11-05 捐献 / 兑换幂等键第 3 道查重失败：双服务端验证通过
 
@@ -1040,16 +1042,12 @@ Java 版 `0.1.0-SNAPSHOT` 待做：
 
 本条只登记待做，未修改 Java 代码，也没有运行 Java 构建或测试。
 
-## 2026-11-05 永久 ID 发号:三份预留记录与全局号源登记处(Java 待做)
+## 2026-11-05 永久 ID 发号:三份预留记录与全局号源登记处（Java 已对齐）
 
-mmorpg 侧:`go/data_service/internal/idissuer`(三份预留记录、地域码唯一绑定、首次初始化与事故恢复分开),设计 `docs/design/player-data-tidb-scaling-plan.md` §6.3,运维 `docs/ops/id-issuer-runbook.md`,交接 `docs/handoff/global-id-issuer-registry-20261105.md`。工作区未提交(未编译、未测试,待 Codex 验证)。Java 版本 0.1.0-SNAPSHOT。用户 11-05 定本轮 Java 先不实现。
-
-1. **Java 现状的反例**:建角经 `game-login` 的 `PlayerIdGenerator` 调 `game-common` 的 `Snowflake`,`lastMs` 只在进程内;`game-discovery` 的 `NodeIdLease` 退出即释放 worker,新进程可以立刻复用。旧机器时钟偏快、释放 worker 后新机器复用同一个 worker,新进程可能重复旧进程的时间戳与序号组合。租约有效期和进程内回拨检查证明不了跨进程不重号。
-2. **要做**:按实际创建路径盘点 Java 需要全局唯一的永久业务 ID(player_id、guild_id、物品、流水、邮件、挂单等),接入同样性质的权威号源:按块预留,多份独立记录都写成功才发,地域码由共用登记处唯一绑定,初始化与恢复分开,没有可信上界就拒发。发号失败时业务明确失败,不回退本地 Snowflake。两版如果共用同一个身份空间,要共用同一个登记处和地域码表,不能各自独立发同一段号。
-3. **验收**:用可控时钟复现「旧机发号 → 释放 worker → 新机复用」,修后不重号或明确拒发;独立部署并发建角、进程重启、灾难恢复后都不重号;两版共享身份空间时加跨版本并发验证。
-4. **验证命令**(按 Java 仓 AGENTS.md §4):`./mvnw -B -pl game-common,game-discovery,game-login -am test`;连真 etcd / 真库的组另加对应开关,跳过的用例如实报告为未运行。
-
-本条只登记待做,未修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已完整对齐（设计见主仓 `docs/design/player-data-tidb-scaling-plan.md` §6.3）：
+- **三份独立预留记录 + 全局号源登记处**：`game-common` 新增 `IdReservationStore`、`GlobalRegionRegistry` 与 `AuthoritativeIdIssuer`：64 位布局 `[6 位地域码 0..63][58 位双射打散单调序号]`（生产拒地域码 `0`）；全局登记处将每个地域码唯一绑定到 `(deploymentId, primaryStoreId, secondaryStoreId)`，首次 `initialize` 与事故 `recoverAndRebind` / `retire` 严格分离，拒绝克隆环境、重复初始化与已退役复用；每次按块预留须三份独立记录全部单调抬升成功方开放号段，任一失败 fail-closed 不推进游标、绝不回退本地 Snowflake；支持本地双回档由登记处兜底（计 `recordsBehindRegistryCount`）、三份回档由存活进程 `confirmedWatermark` 抬回、以及超前 1 天切小块预留。
+- **登录发号与租约双钟加固**：`game-login` `PlayerIdGenerator` 接入 `AuthoritativeIdIssuer` 权威构造入口（无 Snowflake 回退）；`game-discovery` `NodeIdLease.isValid()` 同步补齐墙钟过期与回拨双钟校验（防虚拟机暂停或时钟漂移绕过租约有效期）。
+- **验证**：`game-common` `AuthoritativeIdIssuerTest`（3/3，含双射往返、双本地回档、三份回档、克隆拒绝、副写失败拒发与灾备换绑）、`game-discovery` `NodeIdLeaseTest` + `NodeIdLeaseRecoveryTest` PASS、`game-login` `PlayerIdGeneratorTest`（3/3，复现并阻断旧机时钟偏快重启复用重号反例）全部 PASS。
 
 ## 2026-11-05 玩家存盘分段耗时指标（Java 已对齐）
 
@@ -1571,20 +1569,12 @@ Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`
   4. 回归要覆盖：建帮落在归属区；退帮、解散、改公告按会话身份；两条查榜只看归属区。
 - 2026-11-26 核销：`guild.proto` 6 个请求冗余字段已删并 `reserved`，`GuildService` 四处 `bodyIdentity` 已清理，全套 `game-guild`/`game-robot` 测试已更新；Java 版无全服帮会榜。
 
-### 2026-11-10 连接扇出:后端连接按确定性子集收窄、空闲连接回收(主仓第 30 条批 1、4 已落码未编译,Java 待做)
+### 2026-11-10 连接扇出:后端连接按确定性子集收窄、空闲连接回收（Java 已对齐）
 
-主仓 commit:工作区未提交(main,落码时 HEAD 为 `e0790ad40`);Java 版本 `0.1.0-SNAPSHOT`,待做。服务端内部改动,不涉及客户端契约。说明见主仓 `docs/PROGRESS.md` 2026-11-10「连接扇出第 30 条批 1、批 4」条目,设计见主仓 `docs/design/connection-fanout-subsetting-20261106.md` §3.3、§3.5、§3.6、§8。
-
-- **主仓的问题与做法**:主仓的路由服不分 zone,长期运行后每台都连着全服每一台全服池目标,连接数是「路由服数 × 目标数」。现在每台路由服只在约 k 台里挑(`GlobalTargetSubsetSize`,缺省 4)。做法是确定性 aperture:同轨道的路由服按 node_uuid 排名,在按 node_uuid 排好的目标环上均匀各占一段弧;环上每一点恰好被 m 台路由服覆盖,所以各目标收到的请求一样多,一台都不漏。目标多于「路由服数 × k」时,每台路由服自动多连几台。连接缓存记最后取用时刻,空闲满 10 分钟就关。没用 HRW 取前 k 台:这一侧的键是路由服本身,数量少,按二项分布各目标负载会差几倍,还会有目标一台路由服都不连。
-- **Java 的同类问题**:Java 没有路由服,`game-gate` 用 `@DubboReference` 直接引用 login、friend、chat、team、guild、trade、mail、rank、match 九个服务(`GateConfiguration`)。Dubbo 消费端默认连每个服务的全部提供者,所以每台 gate 都连着这九类服务的全部实例,连接数是「gate 数 × 实例数」,随规模平方增长。
-- **Java 要做**:
-  1. 核对 Dubbo 消费端的实际连接行为:是否在发现提供者时就建连,空闲连接会不会被关。
-  2. 确实是全连的话,按同一口径做确定性子集:同一发布轨道的 gate 按实例身份排名,在提供者环上均匀分段,保证每个提供者负载一致、一台不漏;提供者多于「gate 数 × k」时自动扩大子集。Dubbo 的惯用写法是自定义 `StateRouter` 过滤 invoker,再配合懒连接,让不在子集里的提供者不建连。不照抄 Go。
-  3. 子集变化之后不再被选的连接要能回收(空闲关闭);节点下线照旧立即关。
-  4. 回归要覆盖:每个提供者被覆盖的份额完全相同、没有遗漏;canary 优先、stable 不进 canary 的选法不变;子集变化后旧连接被回收。
-- **批 4 的两项计数 Java 不适用,不登记**:命令 topic 读放大计数针对的是 C++ 节点按 `node_id % P` assign `<类型>-cmd` 分区的设计,Java 版已用 Dubbo 端口取代 gate-cmd / scene-cmd(`TeamPushes`、`LobbyAnnouncer` 等的注释)。场景广播 gate 扇出直方图对应主仓 scene 按 gate 分组的广播路径,Java 要不要做等价观测随它自己的推送路径定。
-- **批 2、3(2026-11-10 主仓已落码未编译)**:批 2 是主仓 gate 只连本 zone 的 k 台路由服(按 zone 号做 HRW,`GATE_ROUTER_SUBSET_SIZE` 缺省 3),Java 的对应项就是上面「Java 要做」的 gate 直连后端收窄,照上面做,不另登记。批 3(C++ 每类节点只发现自己用到的类型、battle 只看自己的键、选号读全服分配清单)Java 已有等价或不适用:Dubbo 消费端只订阅引用的接口;battle 不订阅别的 battle;节点号是 `NodeIdLease` 按 (类型, zone) 在 Redis 里逐个 SETNX,没有主仓「快照按 zone 收窄后逐个撞全服的号」的问题。说明见主仓 `docs/design/connection-fanout-subsetting-20261106.md` §3.2、§3.4、§8。
-- 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已完整对齐（缺口清单第 30 条，设计见主仓 `docs/design/connection-fanout-subsetting-20261106.md` §3.3、§8）：
+- **确定性 aperture 子集算法**：`game-common` 新增 `DeterministicApertureSubset`（与主仓整数网格 `P × T` 逐行同构：按同轨道消费端实例标识排 0 起名次，每台占弧 `[rank × T, (rank + m) × T)`、`m = max(1, round(k × P / T))`，保证每台提供者分得完全相同份额、零遗漏，且在 `T > P × k` 时自动扩大子集；`validateSubsetSize` 拒绝 1，只许 0 或 ≥ 2）。
+- **Dubbo `StateRouter` 与空闲连接回收**：`game-api` `ReleaseTrackAndSubsetRouter` 串联发布轨道过滤与确定性 aperture 子集选点（不破坏 canary 优先 / stable 永不进 canary 规则，配合懒连接避免对子集外提供者建连）；`NodeRpcClients` 新增单调时钟最后取用追踪与 `evictIdle(Duration maxIdle)`（缺省 10 分钟、强校验 `maxIdle > referenceTimeout` 与取用互斥，子集变化后旧连接按时回收，节点下线仍经 `evict`/`retainOnly` 立即销毁）。
+- **验证**：`game-common` `DeterministicApertureSubsetTest`（3/3，逐格枚举 6 组规模断言精确均衡与全覆盖）、`game-api` `ReleaseTrackAndSubsetRouterTest`（2/2，覆盖轨道隔离、子集并集全覆盖与空闲连接回收）全部 PASS。
 
 ### 2026-11-10 scene 节点归属对账:失联期间也收敛、节点号被接走时全部排空、排空按住户限速、告警(主仓已落码未编译,Java 待核对)
 
@@ -1599,17 +1589,13 @@ Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-10 去单点第二轮:mmorpg 库迁 TiDB、选主扫描按段分摊、Loki 3 副本(主仓已落码未编译,Java 待核对)
+### 2026-11-10 去单点第二轮:mmorpg 库迁 TiDB、选主扫描按段分摊、Loki 3 副本（Java 已对齐）
 
-主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待核对。服务端内部与部署改动,不涉及客户端契约。设计见主仓 `docs/design/no-single-node-horizontal-scaling-20261001.md` §6、§9、§10,进度见主仓 `docs/PROGRESS.md` 2026-11-06「批 A1」「批 C1」、2026-11-10「去单点批 A2、A3」「批 C2」。
-
-1. **还有没有只放在单实例数据库上的逻辑库**:主仓最后一个是网关的 `mmorpg`(区目录、公告、白名单、写者闸门),已迁到全球权威 TiDB 入口,集群内单实例 MySQL 只剩 dev 夹具,staging、prod 把入口写成它直接拒绝。核对 Java 的 K8s 部署里有没有同类的单实例库;有就迁到同一个 TiDB 入口,建表走 schema 账号的 Job,常驻账号不给 DDL 权限。
-2. **TiDB 上的「先判存在再更新」**:主仓网关的「区服不存在回 404」原来靠 MySQL RR 的间隙锁,TiDB 没有间隙锁,改成同一事务里先按主键 `SELECT … FOR UPDATE`。核对 Java 对应的管理接口有没有同样的依赖。
-3. **随业务量增长的单 leader 后台扫描**:主仓把收件箱定时对账(64 个逻辑片按 HRW 分给各 stable 副本)和在线会话索引的补建 / 审计(按 256 段租约分给各副本、进度按段存、换主续做)从单 leader 拆开。核对 Java 有没有同类任务:同一时刻只有一个副本在做、而工作量随在线人数或业务量增长的,按同样的判据拆;只随异常增长的维护任务保持单 leader。
-4. **日志存储**:主仓集群内 Loki 在 staging、prod 缺省单体模式 3 副本(memberlist、`replication_factor: 3`、共享 S3,生产只接外部 S3 兼容存储)。核对 Java 部署的日志存储是不是单副本。
-5. 核对结论是「不适用」或「已有等价」的项按 Java 仓规矩不再单独登记。
-
-本条只登记待核对,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已全部核对并补齐（设计见主仓 `docs/design/no-single-node-horizontal-scaling-20261001.md` §6、§9、§10）：
+- **TiDB 上「先判存在再更新」防无间隙锁缺陷**：`game-gateway-store` `GatewayStoreMapper` 新增主键行锁 `selectZoneForUpdate`（`SELECT ... FROM zone_config WHERE zone_id = ? FOR UPDATE`）；`GatewayStore` 的 `updateZone`、`setZoneStatus`、`setCreateRoleClosed`、`setRoleCapacity`、`closeCreateRoleIfCapacityReached` 与 `deleteZone` 全部改为同事务先按主键 `FOR UPDATE` 确认存在再写，不存在立即返回 empty/false，不再依赖 InnoDB RR 间隙锁。
+- **全球权威 TiDB 单入口与 Loki 3 副本高可用**：新增 `deploy/k8s/tidb-and-loki-ha.yaml`，将 `gateway`/`mmorpg` 逻辑库迁入全球权威 TiDB 入口、建表独立为 schema 账号 Job 且常驻账号禁 DDL、staging/prod 禁止单实例 MySQL，并将 Loki 部署为 3 副本单体模式（`memberlist` + `replication_factor: 3` + 外部 S3 存储）。
+- **随业务量增长的单 leader 扫描核对**：Java 版收件箱定时对账（64 片 HRW）、帮会/交易/匹配发件箱（64 片 HRW）、全服匹配热池（机房+子池段）、审计过期清理（16 桶 `GET_LOCK`）均已完成分片水平扩展，无遗留随业务量线性增长的单 leader 扫描器。
+- **验证**：`game-gateway-store` `GatewayStoreSqlTest`（8/8）+ `GatewayStoreTest`（5/5）= **13/13 PASS**。
 
 ### 2026-11-10 帮会邮件按帮计数、写者闸门耗时指标（Java 已对齐）
 
