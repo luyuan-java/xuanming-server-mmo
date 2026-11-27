@@ -394,8 +394,9 @@ public final class CommerceEngine {
         });
     }
 
-    private record AdvanceOutcome(TradeCommerceRow saved, Optional<SellerCreditService.CompletedTradeFact> creditFact) {
-        static final AdvanceOutcome SKIPPED = new AdvanceOutcome(null, Optional.empty());
+    private record AdvanceOutcome(TradeCommerceRow saved, Optional<SellerCreditService.CompletedTradeFact> creditFact,
+                                  long bidToWake) {
+        static final AdvanceOutcome SKIPPED = new AdvanceOutcome(null, Optional.empty(), 0L);
     }
 
     public TradeCommerceRow advance(TradeCommerceRow prior, Deadline d) throws SQLException {
@@ -447,11 +448,12 @@ public final class CommerceEngine {
                 if (op.getStatus() < 2 || op.getStatus() > 6)
                     throw new CorruptContract("交易资产待办状态非法");
                 if (op.getStatus() == 5) {
+                    l.setOutcome(OUTCOME_PARTIAL);
                     w.setStage("manual");
                     r.setStatus(MANUAL);
                     r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(now);
                     TradeCommerceRow quarantined = store.save(c, r);
-                    return new AdvanceOutcome(quarantined, Optional.empty());
+                    return new AdvanceOutcome(quarantined, Optional.empty(), 0L);
                 }
                 if (op.getStatus() != 1) {
                     l.setOutcome(op.getStatus());
@@ -475,7 +477,7 @@ public final class CommerceEngine {
                 throw new CorruptContract("交易合同状态自相矛盾", corrupted);
             }
             marketBarrier(c, r, w);
-            var pending = new ArrayList<>(w.getLegsBuilderList().stream().filter(l -> l.getOpId() == 0).toList());
+            var pending = new ArrayList<>(w.getLegsBuilderList().stream().filter(l -> legReadyToSend(w, l)).toList());
             pending.sort((a, b) -> {
                 int cmp = Long.compareUnsigned(a.getPlayerId(), b.getPlayerId());
                 if (cmp == 0)
@@ -494,7 +496,7 @@ public final class CommerceEngine {
                              .setStream(l.getStream())
                              .setKind(l.getStream() == 3 ? 1 : 2)
                              .setStatus(1)
-                             .setTxType(l.getStream() == 3 ? (isOfficialReverseLeg(l.getRole()) ? TX_PAYMENT_REVERSAL : 3) : 4)
+                             .setTxType(legTxType(l))
                              .setRefKind(2)
                              .setRefId(r.getCommerceId())
                              .setPayload(l.getBundle().toByteString())
@@ -518,8 +520,17 @@ public final class CommerceEngine {
             Optional<SellerCreditService.CompletedTradeFact> fact = current.getStatus() != SETTLED && saved.getStatus() == SETTLED
                     ? SellerCreditService.settledTradeFact(saved, builtWorkflow, engineNow)
                     : Optional.empty();
-            return new AdvanceOutcome(saved, fact);
+            long bidToWake = finishedLotBid(current, saved, builtWorkflow);
+            return new AdvanceOutcome(saved, fact, bidToWake);
         });
+        if (outcome != null && outcome.bidToWake() != 0L) {
+            try {
+                store.wake(outcome.bidToWake(), clock.getAsLong(), Deadline.after(Math.min(1000, Math.max(200, d.remainingMillis()))));
+            } catch (SQLException | RuntimeException wakeFailure) {
+                log.warn("拍品结案后唤醒出价失败，出价将在兜底周期自行到期 bid_id={}",
+                        Long.toUnsignedString(outcome.bidToWake()), wakeFailure);
+            }
+        }
         if (outcome != null && outcome.creditFact().isPresent()) {
             recordSettledCreditBestEffort(outcome.creditFact().get());
         }

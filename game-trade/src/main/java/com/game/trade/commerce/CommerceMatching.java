@@ -183,20 +183,26 @@ public final class CommerceMatching {
                 Math.min(buy.getQuantity() - buy.getFilledQuantity(), sell.getQuantity() - sell.getFilledQuantity());
             long now = CommerceStore.sqlNow(c);
             long dueNow = e.clock.getAsLong();
+            var buyW = buy == a ? aw : bw;
+            var sellW = sell == a ? aw : bw;
+            var buyDebit = leg(buyW, "seller_debit");
+            var sellDebit = leg(sellW, "seller_debit");
+            long buyEscrowOwner = buyDebit != null ? buyDebit.getPlayerId() : buy.getSellerPlayerId();
+            long sellEscrowOwner = sellDebit != null ? sellDebit.getPlayerId() : sell.getSellerPlayerId();
             var mw = TradeCommerceWorkflow.newBuilder().setStage("deliver");
-            mw.setSellerIdentity((sell == a ? aw : bw).getSellerIdentity())
-                .setBuyerIdentity((buy == a ? aw : bw).getSellerIdentity());
-            add(mw, "buyer_receive", buy.getSellerPlayerId(), 4,
+            mw.setSellerIdentity(sellW.getSellerIdentity())
+                .setBuyerIdentity(buyW.getSellerIdentity());
+            addEscrowLeg(mw, "buyer_receive", buy.getSellerPlayerId(), sellEscrowOwner,
                 AssetBundle.newBuilder()
                     .addItems(ItemGrant.newBuilder().setConfigId(buy.getItemConfigId()).setCount(quantity))
                     .build());
-            add(mw, "seller_receive", sell.getSellerPlayerId(), 4,
+            addEscrowLeg(mw, "seller_receive", sell.getSellerPlayerId(), buyEscrowOwner,
                 AssetBundle.newBuilder()
                     .addCurrencies(
                         CurrencyAmount.newBuilder().setCurrencyType(buy.getCurrencyType()).setAmount(quantity * unit))
                     .build());
             if (buy.getUnitPrice() > unit)
-                add(mw, "buyer_surplus", buy.getSellerPlayerId(), 4,
+                addEscrowLeg(mw, "buyer_surplus", buy.getSellerPlayerId(), buyEscrowOwner,
                     AssetBundle.newBuilder()
                         .addCurrencies(CurrencyAmount.newBuilder()
                                 .setCurrencyType(buy.getCurrencyType())

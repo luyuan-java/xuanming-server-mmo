@@ -95,7 +95,8 @@ public final class AssetOpService {
             AssetStream.ASSET_STREAM_TRADE_DEBIT, new StreamRule(Direction.DEBIT,
                     Map.of(3, AssetAudit.Reason.AUCTION_SELL, 31, AssetAudit.Reason.PAYMENT_REVERSAL)),
             AssetStream.ASSET_STREAM_TRADE_CREDIT, new StreamRule(Direction.CREDIT,
-                    Map.of(4, AssetAudit.Reason.AUCTION_BUY, 1, AssetAudit.Reason.TRADE)),
+                    Map.of(4, AssetAudit.Reason.AUCTION_BUY, 1, AssetAudit.Reason.TRADE,
+                            30, AssetAudit.Reason.AUCTION_RETURN)),
             // 邮件独占；GM 与榜奖必须通过邮件附件，不允许借此直发。
             AssetStream.ASSET_STREAM_SYSTEM_CREDIT, new StreamRule(Direction.CREDIT,
                     Map.of(2, AssetAudit.Reason.MAIL_ATTACHMENT)));
@@ -490,9 +491,9 @@ public final class AssetOpService {
                 return rejectAndRecord(player, request, INVALID_BUNDLE, nowMs);
             }
         }
-        // (a) 货币预检：封禁与溢出都必须在任何改动之前判掉
+        // (a) 货币预检：封禁与溢出都必须在任何改动之前判掉（退回本人托管资产 TX_AUCTION_RETURN 不判获取封禁）
         for (AssetCurrency c : bundle.getCurrenciesList()) {
-            int tip = currency.checkAdd(player, c.getCurrencyType(), c.getAmount(), nowSeconds);
+            int tip = currency.checkAdd(player, c.getCurrencyType(), c.getAmount(), reason, nowSeconds);
             if (tip == Wallet.FROZEN) {
                 // 第 5 步已挡掉冻结，同一线程上到不了这里；万一到了也只能是暂时条件，不记账
                 return answer(AssetOutcome.ASSET_OUTCOME_RETRY, FROZEN);
@@ -515,7 +516,7 @@ public final class AssetOpService {
                 counts.put(item.getConfigId(), Integer.toUnsignedLong(item.getCount()));
             }
             if (hasInstanceFields(bundle)) {
-                var prepared = bags.prepareCredit(player, counts, transferredItems);
+                var prepared = bags.prepareCredit(player, counts, transferredItems, reason);
                 if (prepared.tip() != 0) return itemsFailed(player, request, prepared.tip(), nowMs);
                 player.pets().commitPrepared(transferredPets);
                 prepared.commit(reason, request.getCorrelationId());

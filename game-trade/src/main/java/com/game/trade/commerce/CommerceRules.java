@@ -115,10 +115,153 @@ public final class CommerceRules {
     static final String OFFICIAL_CREDIT_ROLE = "official_credit";
     static final String OFFICIAL_REVERSE_PREFIX = "official_reverse_";
     static final String OFFICIAL_REGRANT_PREFIX = "official_regrant_";
+    static final String UNWOUND_BY = "unwound";
+    static final int OUTCOME_PARTIAL = 5;
+    static final int TX_AUCTION_SELL = 3;
+    static final int TX_AUCTION_BUY = 4;
+    static final int TX_AUCTION_RETURN = 30;
     static final int TX_PAYMENT_REVERSAL = 31;
 
     static boolean isOfficialReverseLeg(String role) {
         return role != null && role.startsWith(OFFICIAL_REVERSE_PREFIX);
+    }
+
+    static String baseRole(String role) {
+        if (role == null) return "";
+        int cut = role.indexOf('#');
+        return cut < 0 ? role : role.substring(0, cut);
+    }
+
+    /** 判断发放腿是否属于退回本人托管资产（撤单、过期、竞价退款、撮合差价、整单退回、人工退款及补发）。 */
+    static boolean isReturnLeg(String role) {
+        String base = baseRole(role);
+        return switch (base) {
+            case "seller_return", "buyer_return", "bid_return", "buyer_surplus", "rmb_return_credit" -> true;
+            default -> base.endsWith("/refund") || base.startsWith("seller_return_");
+        };
+    }
+
+    /**
+     * 计算腿进资产通道的交易类型：仅当退回腿付回托管者本人（或旧腿 escrow_owner_id=0）时带 {@link #TX_AUCTION_RETURN}（30），
+     * 改绑给同账号其他角色则按普通成交所得 {@link #TX_AUCTION_BUY}（4）受获取封禁约束。
+     */
+    static int legTxType(TradeCommerceLegOrBuilder l) {
+        if (l.getStream() == 3) {
+            return isOfficialReverseLeg(l.getRole()) ? TX_PAYMENT_REVERSAL : TX_AUCTION_SELL;
+        }
+        if (isReturnLeg(l.getRole()) && (l.getEscrowOwnerId() == 0 || l.getEscrowOwnerId() == l.getPlayerId())) {
+            return TX_AUCTION_RETURN;
+        }
+        return TX_AUCTION_BUY;
+    }
+
+    /** 卖家所得腿（seller_receive 及其补发），交付阶段需等买家交付腿到账后再发。 */
+    static boolean isSellerProceeds(TradeCommerceLegOrBuilder l) {
+        return l != null && "seller_receive".equals(baseRole(l.getRole()));
+    }
+
+    /** 沿补发链找到当前生效腿；{@link #UNWOUND_BY} 表示整单自动退回取代，停在原腿。 */
+    static TradeCommerceLeg.Builder currentLeg(TradeCommerceWorkflow.Builder w, String name) {
+        var cur = leg(w, name);
+        int hops = 0;
+        while (cur != null && !cur.getSupersededBy().isEmpty() && !UNWOUND_BY.equals(cur.getSupersededBy())) {
+            if (++hops > w.getLegsCount()) break;
+            var next = leg(w, cur.getSupersededBy());
+            if (next == null) break;
+            cur = next;
+        }
+        return cur;
+    }
+
+    /** 成交交付先买家后卖家：卖家所得腿在买家当前交付腿尚未到账前压着不发。 */
+    static boolean heldForBuyerFirst(TradeCommerceWorkflow.Builder w, TradeCommerceLegOrBuilder l) {
+        if (!isSellerProceeds(l)) return false;
+        var buyer = currentLeg(w, "buyer_receive");
+        return buyer != null && !applied(buyer);
+    }
+
+    /** 发出循环判据：未发、未被取代、未被先买家后卖家闸压住。 */
+    static boolean legReadyToSend(TradeCommerceWorkflow.Builder w, TradeCommerceLegOrBuilder l) {
+        return l.getOpId() == 0 && l.getSupersededBy().isEmpty() && !heldForBuyerFirst(w, l);
+    }
+
+    /** 交付阶段可自动整单退回：两条交付腿均为原腿、买家一点未到、卖家从未发出。 */
+    static boolean unwindable(TradeCommerceWorkflow.Builder w) {
+        var buyer = leg(w, "buyer_receive");
+        var seller = leg(w, "seller_receive");
+        return buyer != null && seller != null
+            && buyer.getSupersededBy().isEmpty() && seller.getSupersededBy().isEmpty()
+            && done(buyer) && !applied(buyer) && buyer.getOutcome() != OUTCOME_PARTIAL
+            && seller.getOpId() == 0;
+    }
+
+    /** 人工处置辅助：转人工合同里尚未发出的卖家所得可按被闸压住放过，整单退回时应一并标取代且禁止部分到账合同整单退回。 */
+    static boolean canManualFullRefund(TradeCommerceWorkflowOrBuilder w) {
+        for (var l : w.getLegsList()) {
+            if (l.getStream() == 4 && l.getOutcome() == OUTCOME_PARTIAL) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static boolean isHeldUnissuedSellerProceeds(TradeCommerceLegOrBuilder l) {
+        return l != null && l.getStream() == 4 && l.getOpId() == 0 && l.getSupersededBy().isEmpty()
+            && isSellerProceeds(l);
+    }
+
+    /** 在交付阶段处理买家腿终局未到账：能自动整单退回则建退回腿转 return/CANCEL_PENDING，否则转 MANUAL 继续压住卖家所得。 */
+    static void settleBuyerFirstDelivery(TradeCommerceRow.Builder r, TradeCommerceWorkflow.Builder w) {
+        var buyer = currentLeg(w, "buyer_receive");
+        if (buyer == null || !done(buyer) || applied(buyer)) {
+            return;
+        }
+        var seller = currentLeg(w, "seller_receive");
+        if (seller == null || seller.getOpId() != 0) {
+            return;
+        }
+        if (!unwindable(w)) {
+            w.setStage("manual");
+            r.setStatus(MANUAL);
+            return;
+        }
+        if (leg(w, "seller_return") != null || leg(w, "buyer_return") != null) {
+            throw new IllegalStateException("买家交付腿被拒要整单退回，合同里却已经有退回腿");
+        }
+        buyer.setSupersededBy(UNWOUND_BY);
+        seller.setSupersededBy(UNWOUND_BY);
+        addEscrowLeg(w, "seller_return", seller.getPlayerId(), buyer.getEscrowOwnerId(), buyer.getBundle());
+        if (r.getKind() != 5) {
+            // 拍品(kind 5)不退钱：钱仍在赢家出价合同中，由出价看到拍品撤单结案后自行退款。
+            addEscrowLeg(w, "buyer_return", buyer.getPlayerId(), seller.getEscrowOwnerId(), seller.getBundle());
+        }
+        w.setStage("return");
+        r.setStatus(CANCEL_PENDING);
+    }
+
+    /** 拍品撤单结案后校验持有中的出价冻结款是否仍安全留在出价合同里（卖家未发过款且赢家一点没到过货）。 */
+    static boolean heldBidKeepsFunds(TradeCommerceWorkflowOrBuilder lot, long bidId) {
+        if (lot.getWinningBidId() != bidId) {
+            return true;
+        }
+        for (var l : lot.getLegsList()) {
+            if ("seller_receive".equals(l.getRole()) && l.getOpId() != 0) {
+                return false;
+            }
+            if ("buyer_receive".equals(baseRole(l.getRole())) && l.getOpId() != 0
+                && (l.getOutcome() == 0 || l.getOutcome() == 2 || l.getOutcome() == OUTCOME_PARTIAL)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 判本步推进是否让一件拍品首次进入结案态（SETTLED / CANCELLED），是则返回需唤醒的赢家出价合同号。 */
+    static long finishedLotBid(TradeCommerceRow before, TradeCommerceRow after, TradeCommerceWorkflowOrBuilder w) {
+        if (after.getKind() != 5) return 0L;
+        if (before.getStatus() == SETTLED || before.getStatus() == CANCELLED) return 0L;
+        if (after.getStatus() != SETTLED && after.getStatus() != CANCELLED) return 0L;
+        return w.getWinningBidId();
     }
 
     /** 按官方合同各腿结局计算买家当前是否持有发放：发放腿(stream=4)到账后持有，扣回腿(stream=3)到账后不持有。 */
@@ -207,8 +350,13 @@ public final class CommerceRules {
         if (leg(w, role) == null)
             w.addLegs(TradeCommerceLeg.newBuilder().setRole(role).setPlayerId(player).setStream(stream).setBundle(b));
     }
+    static void addEscrowLeg(TradeCommerceWorkflow.Builder w, String role, long to, long escrowOwnerId, AssetBundle b) {
+        if (leg(w, role) == null)
+            w.addLegs(TradeCommerceLeg.newBuilder().setRole(role).setPlayerId(to).setStream(4)
+                .setEscrowOwnerId(escrowOwnerId).setBundle(b));
+    }
     static void transferred(TradeCommerceWorkflow.Builder w, String role, long to, TradeCommerceLeg.Builder from) {
-        add(w, role, to, 4, transfer(from.build()));
+        addEscrowLeg(w, role, to, from.getPlayerId(), transfer(from.build()));
     }
     public static void plan(TradeCommerceRow.Builder r, TradeCommerceWorkflow.Builder w, long now, Policy policy) {
         if (r.getKind() == 6) {
@@ -348,7 +496,7 @@ public final class CommerceRules {
             w.setStage("deliver");
             r.setStatus(DELIVERING);
             transferred(w, "buyer_receive", w.getHighestBidder(), leg(w, "seller_debit"));
-            add(w, "seller_receive", r.getSellerPlayerId(), 4, bundle(w.getBuyerAssets()));
+            addEscrowLeg(w, "seller_receive", r.getSellerPlayerId(), w.getHighestBidder(), bundle(w.getBuyerAssets()));
         }
         if ((w.getStage().equals("open") || w.getStage().equals("lot_open")) && r.getExpiresMs() <= now)
             w.setCancelRequested(true);
@@ -357,7 +505,8 @@ public final class CommerceRules {
                 || w.getStage().equals("lot_open") && w.getHighestBidder() == 0)) {
             w.setStage("return");
             r.setStatus(CANCEL_PENDING);
-            AssetBundle b = transfer(leg(w, "seller_debit").build());
+            var sellerDebit = leg(w, "seller_debit");
+            AssetBundle b = transfer(sellerDebit.build());
             if (r.getKind() == 4) {
                 long remaining =
                     Integer.toUnsignedLong(r.getQuantity()) - Integer.toUnsignedLong(r.getFilledQuantity());
@@ -374,12 +523,15 @@ public final class CommerceRules {
                 b = remainingBundle.build();
             }
             if (b.getCurrenciesCount() + b.getItemsCount() + b.getItemInstancesCount() > 0 || b.hasPetInstance())
-                add(w, "seller_return", r.getSellerPlayerId(), 4, b);
+                addEscrowLeg(w, "seller_return", r.getSellerPlayerId(), sellerDebit.getPlayerId(), b);
+        }
+        if (w.getStage().equals("deliver")) {
+            settleBuyerFirstDelivery(r, w);
         }
         if (w.getStage().equals("deliver") || w.getStage().equals("return")) {
             boolean ready = true, ok = true;
             for (var l : w.getLegsBuilderList())
-                if (l.getStream() == 4) {
+                if (l.getStream() == 4 && l.getSupersededBy().isEmpty()) {
                     ready &= done(l);
                     ok &= applied(l);
                 }

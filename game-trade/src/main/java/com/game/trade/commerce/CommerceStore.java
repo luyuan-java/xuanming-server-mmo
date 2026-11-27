@@ -203,6 +203,14 @@ public final class CommerceStore {
                        until, current.getCommerceId(), current.getVersion()) == 1;
         });
     }
+    /** 尽力唤醒指定合同（如拍品结案后唤醒持有中的出价），只把晚于 nowMs 的调度键拉回现在，不改版本。 */
+    public void wake(long commerceId, long nowMs, Deadline deadline) throws SQLException {
+        transaction(deadline, c -> {
+            execute(c, "UPDATE trade_commerce SET updated_ms=? WHERE commerce_id=? AND status IN (1,3,4,6,8) AND updated_ms>?",
+                    nowMs, commerceId, nowMs);
+            return null;
+        });
+    }
     /** 只隔离自身已损坏的合同，保留资产、待办与坏原件；不发补偿。 */
     public boolean quarantine(TradeCommerceRow observed, Deadline deadline) throws SQLException {
         return transaction(deadline, c -> {

@@ -2179,46 +2179,15 @@ robot `killswitch` 端到端补两项:type 范围关停 gate 上的一个客户�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-12 交易退回不受获取封禁约束、成交交付先买家后卖家;收件箱单人对账翻页读完(主仓已落码未编译,Java 待做;数据覆写审计 r2-trade#1、r2-doc#2)
+### 2026-11-12 交易退回不受获取封禁约束、成交交付先买家后卖家;收件箱单人对账翻页读完（Java 已对齐）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/jubaozhai-market.md` §6.2 末「获取封禁与托管交易」与
-`go/trade/internal/commerce/delivery_order.go` 文件头,审计记录见主仓 `docs/design/data-overwrite-rollback-audit-r2-20261019.md` §6「2026-11-12」,
-验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「数据覆写审计 r2 修复批次 S、T、U」。客户端可见部分不变。
-主仓 `proto/common/rollback/transaction_log.proto` 新增交易类型 `TX_AUCTION_RETURN = 30`(服务端流水用);Java 若同步这份 proto,按同号加。
+数据覆写审计 r2-trade#1、r2-doc#2。Java 版已完整对齐全部 9 条要求：
 
-**要对齐的行为**:
-
-1. **退回不算获得**:交易把玩家自己托管的资产还给他(撤单、过期、托管不成、竞价退款、交付被拒整单退回、人工整单退回及其补发),
-   带独立的交易类型;scene 的资产转入、货币增加、带交易类型的背包加物品,对它不判全服与单人获取封禁。成交所得照常判。
-   原来退回也按成交所得判:被封禁的卖家取不回自己托管的物品,买家的退款进不了账,合同只能转人工。
-2. **成交交付先买家、后卖家**:卖家所得等买家那条到账之后才发。买家那条终局没到账(判拒、中止、自动放弃)时:
-   - 两条交付腿都是原腿(没被人工补发过)、买家那份一点没到、卖家那条从没发出,就整单自动退回(货回卖家、钱回买家),按撤单结案,不转人工;
-   - 否则转人工,卖家所得继续压着,人工补齐买家那份之后自动放行。
-   撮合时买单多冻的差价退款不压。卖家那条发出之后被拒,照旧转人工、解封后补发。
-3. **拍卖**:钱在赢家的出价合同里,拍品只退货;拍品按撤单结案后,持有中的出价按被超价同一条路退款。拍品成交或撤单结案的那一步唤醒出价。
-   拍品发出过货款却按撤单结案是自相矛盾,出价按坏数据隔离成人工,不自动退款。
-4. **下单时不预检获取封禁**(主仓定案):预检挡不住下单之后才生效的封禁,提交点的判定与退回反正都得有。代价是被封禁的买家买到寄售时,这单寄售会被撤下。
-5. **收件箱单人对账读完全部行**:Java `InboxAdminStore.reconcilePlayer` 一次至多读 5000 行(`PLAYER_ITEMS_LIMIT`),超出时只打日志、回不完整的结论。
-   主仓改成按主键 (domain, seq) 键集翻页读完,读不完回错误、不回半份。条目行永久保留,老玩家的行数会超过上限。
-6. **人工处置与第 2 条同批改**(2026-11-20 主仓独立评审补,见主仓 `docs/PROGRESS.md` 2026-11-20「数据覆写审计 r2 修复批次 S、T、U 的独立评审与修正」):
-   交付阶段转人工时,卖家所得还压着、没发出。
-   - 人工处置补记结局时放过它:按角色认卖家所得,不看买家那条此刻到没到账。不放过的话,每种人工动作都因「还有腿没发出」被拒,合同出不了人工。
-   - 整单退回(含作废拍卖)把它一并标成被退回取代。不标的话,合同停在退回阶段一直等它;放行它就是双付。
-   - 有发放腿部分到账过的合同不许整单退回(会把已交出的部分再退一遍),缺口按补发处理。这一条与先买家后卖家无关,Java 若已有人工整单退回,现在就要核对。
-7. **退回只认付回托管者本人**(2026-11-20 主仓补,见主仓 `docs/PROGRESS.md` 2026-11-20「数据覆写审计 r2 批 S、T、U 评审可选项全部落码」):
-   - 每条发放腿记下付出的是谁托管的资产(主仓 `TradeCommerceLeg.escrow_owner_id`,建腿时记,补发照抄,人工改绑只换收件人)。
-   - 只有付回托管者本人才算第 1 条的「退回」、不判获取封禁;改绑到同账号另一名角色之后,按成交所得判。
-   - 撮合子单的托管者取两张母单各自扣出腿上的角色,不取下单人(母单改绑过时下单人已换)。
-   - 人工整单退回发给合同上这一方现在的角色(改绑目标),不发给已经换主的原角色。
-8. **拍卖由出价退款前,再核对赢家一点没到货**:拍品按撤单结案,而买家交付腿在途、到账或部分到账时,是自相矛盾,出价按坏数据转人工,不自动退款。
-9. **收件箱单人对账只读判定列**:第 5 条翻页时只读对账判定要用的列,不读载荷(单行最大 16KiB)。否则整次对账的调用预算装不下战斗行多的老玩家。
-
-**验证**(Java 仓口径):对应主仓 `go/trade/internal/commerce/delivery_order_test.go`(含 11-20 补的三条人工处置用例与 `TestHeldBidKeepsFundsOnlyWhenTheWinnerGotNothing`、`TestFillLegsRecordTheEscrowOwnerFromTheParentDebits`)、`manual_test.go` 的 `TestRefundAfterRedirectGoesToTheCurrentParty`、`delivery_order_db_test.go`、`leg_tx_type_test.go`(含 `TestLegTxTypeReturnsOnlyToTheEscrowOwner`)、
-`schedule_test.go` 的 `TestFinishedLotBid`,C++ `cpp/tests/currency_test/asset_op_system_test.cpp` 的 `TradeReturnOfOwnEscrowIgnoresGainBlocks`、
-`cpp/tests/bag_test/player_item_gain_block_test.cpp` 的 `TradeReturnOfOwnEscrowIsNotAGain`,收件箱 `TestIntegrationPlayerItemsPagingReadsEveryRow`
-(被拒整单退回、货款不发、退回带退回类型、拍卖由出价退款且只退一次、补发过的腿转人工、交付阶段转人工后人工动作照常可做且整单退回不双付、分页不漏不重)。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+1. **退回不算获得（`TX_AUCTION_RETURN = 30`）**：`game-audit` `transaction_log.proto` 追加 `TX_AUCTION_RETURN = 30`；`game-scene` `AssetAudit.Reason` 新增 `AUCTION_RETURN` 与 `countsAsGain()`（同步豁免 `AUCTION_RETURN` 与 `JIANGHU_DUEL_REFUND`），`AssetOpService` 将 `30` 加入 `ASSET_STREAM_TRADE_CREDIT` 允许表，`CurrencyService` / `Wallet` / `BagService`（含堆叠物品与唯一实例）对非新增获得跳过全服与单人获取封禁及异常收益计数；成交所得（`TX_AUCTION_BUY = 4`）照常判封禁。
+2. **退回仅认付回托管者本人**：`CommerceRules.addEscrowLeg` / `transferred` / `CommerceMatching` 在建腿时写入 `TradeCommerceLeg.escrow_owner_id`（撮合子单取两张母单扣出腿角色）；`CommerceRules.legTxType` 仅对付回托管者本人（或 `escrow_owner_id == 0` 存量腿）的退回腿（`seller_return`/`buyer_return`/`bid_return`/`buyer_surplus`/`rmb_return_credit`/`*/refund`/`seller_return_*` 及 `#k` 补发）发 `TX_AUCTION_RETURN`（30），改绑给同账号他人走 `TX_AUCTION_BUY`（4）。
+3. **成交交付先买家后卖家 + 拍卖由出价退款**：`CommerceRules` 新增 `heldForBuyerFirst` / `legReadyToSend` / `settleBuyerFirstDelivery` / `unwindable` / `heldBidKeepsFunds` / `finishedLotBid` 及人工处置辅助 `canManualFullRefund` / `isHeldUnissuedSellerProceeds`；`CommerceEngine.advance` 压住 `seller_receive` 至 `buyer_receive`（含补发链 `currentLeg`）到账，撮合差价 `buyer_surplus` 不压；原腿买家终局未到账自动标记 `unwound` 整单退回（拍品仅退货、结案唤醒赢家出价）；部分到账记 `outcome=5` 并转 `MANUAL` 压住卖家所得；`CommerceRuntime.settleHeldBid` 对撤单结案拍品复核 `heldBidKeepsFunds` 后转 `bid_refund` 退款，矛盾拍品隔离为 `MANUAL`。
+4. **收件箱单人对账键集翻页且只读判定列**：`game-inbox` `InboxSql.RECONCILE_ITEM_COLUMNS` + `InboxAdminStore.reconcilePlayer` 去掉 5000 行上限，按 `(domain, seq)` 键集翻页读完且不读 `payload`，预算耗尽抛错不回半份。
+5. **验证**：`game-trade` `DeliveryOrderAndTxTypeTest` 等 **28 tests / 0 fail**（1 TiDB skip）；`game-scene` `AssetOpServiceTest` 等 **50/50 PASS**；`game-inbox` `InboxAdminReconcilePaginationTest` 等 **18/18 PASS**。
 
 ### 2026-11-12 gate 续租登录态、只读方法核归属、在线服务端口白名单与 Pod 间加密（主仓已落码未编译，Java 待做；补 11-11「gate 会话身份签名改 Ed25519」）
 

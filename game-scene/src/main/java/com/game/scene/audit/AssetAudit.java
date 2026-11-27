@@ -58,6 +58,8 @@ public interface AssetAudit {
         AUCTION_SELL,
         /** 聚宝斋买到发放（交易二期）。 */
         AUCTION_BUY,
+        /** 交易 / 聚宝斋托管资产退回本人（TX_AUCTION_RETURN = 30；不受获取封禁约束）。 */
+        AUCTION_RETURN,
         /** 玩家间交易发放（交易二期）。 */
         TRADE,
         /** 邮件附件（预留）。 */
@@ -105,7 +107,16 @@ public interface AssetAudit {
         /** 天墉生死状普通战书作废退还。 */
         JIANGHU_DUEL_REFUND,
         /** 天墉生死状清风洗尘（银两或洗尘符清除败绩印记）。 */
-        JIANGHU_CLEAR_MARK
+        JIANGHU_CLEAR_MARK;
+
+        /**
+         * 本次入账是否属于「新增获得」（受全服与单玩家获取封禁约束）。
+         * 交易退回本人托管资产（{@link #AUCTION_RETURN}）与生死状战书预扣退还（{@link #JIANGHU_DUEL_REFUND}）
+         * 是同一所有者的资产回流，不算新增获得，不受获取封禁拦截（对齐 C++ {@code GainBlockService::CountsAsGain}）。
+         */
+        public boolean countsAsGain() {
+            return this != AUCTION_RETURN && this != JIANGHU_DUEL_REFUND;
+        }
     }
 
     /**

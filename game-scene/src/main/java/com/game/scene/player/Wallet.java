@@ -206,7 +206,14 @@ public final class Wallet {
      * @param nowSeconds      当前 Unix 秒（欠款到期判断）
      */
     public Change add(int type, long amount, boolean globallyBlocked, long nowSeconds) {
-        int tip = checkAdd(type, amount, globallyBlocked, nowSeconds);
+        return add(type, amount, globallyBlocked, true, nowSeconds);
+    }
+
+    /**
+     * 同 {@link #add(int, long, boolean, long)}，支持豁免个人获取封禁（仅用于交易退回本人托管资产等非新增获得路径）。
+     */
+    public Change add(int type, long amount, boolean globallyBlocked, boolean checkPersonalBlock, long nowSeconds) {
+        int tip = checkAdd(type, amount, globallyBlocked, checkPersonalBlock, nowSeconds);
         if (tip != 0) {
             return rejected(tip, type);
         }
@@ -234,11 +241,16 @@ public final class Wallet {
 
     /** 不改任何状态、只回答 {@link #add(int, long, boolean, long)} 现在会回什么：0 = 会成，否则是拒绝码。 */
     public int checkAdd(int type, long amount, boolean globallyBlocked, long nowSeconds) {
+        return checkAdd(type, amount, globallyBlocked, true, nowSeconds);
+    }
+
+    /** 不改任何状态预检加币；{@code checkPersonalBlock=false} 时跳过个人获取封禁（交易退回本人资产用）。 */
+    public int checkAdd(int type, long amount, boolean globallyBlocked, boolean checkPersonalBlock, long nowSeconds) {
         int invalid = checkRequest(type, amount);
         if (invalid != 0) {
             return invalid;
         }
-        if (globallyBlocked || isBlocked(type)) {
+        if (globallyBlocked || (checkPersonalBlock && isBlocked(type))) {
             return BLOCKED;
         }
         long net = amount - clawbackOf(debts.get(type), amount, nowSeconds);

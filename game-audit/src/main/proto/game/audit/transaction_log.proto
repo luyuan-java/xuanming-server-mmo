@@ -51,6 +51,8 @@ enum TransactionReason {
   TX_EQUIP_ENHANCE = 27;
   TX_EQUIP_INLAY = 28;
   TX_EQUIP_GEM_REMOVE = 29;
+  // 聚宝斋 / 交易托管资产退回本人（撤单、过期、整单退回、竞价退款、撮合差价退回；数值同 mmorpg TX_AUCTION_RETURN = 30）
+  TX_AUCTION_RETURN = 30;
   // 渠道撤单 / 拒付后的官方商城发放扣回（数值同 mmorpg TX_PAYMENT_REVERSAL = 31）
   TX_PAYMENT_REVERSAL = 31;
   // 五行试炼志 V2 里程碑发奖（仅自用重铸砂 / 法宝拓印）与拓印兑换仅自用法宝（数值同 mmorpg TransactionType）

@@ -204,8 +204,9 @@ public final class CurrencyService {
         if (frozenRefusal(player, type, amount)) {
             return player.wallet().rejected(Wallet.FROZEN, type);
         }
-        boolean globallyBlocked = globalBlocks.blocksCurrency(type);
-        Wallet.Change change = player.wallet().add(type, amount, globallyBlocked, nowSeconds);
+        boolean countsAsGain = reason == null || reason.countsAsGain();
+        boolean globallyBlocked = countsAsGain && globalBlocks.blocksCurrency(type);
+        Wallet.Change change = player.wallet().add(type, amount, globallyBlocked, countsAsGain, nowSeconds);
         if (change.ok()) {
             long gross = change.before() + amount;
             audit.currencyChanged(player.playerId(), change.type(), amount, change.before(), gross, reason,
@@ -217,7 +218,9 @@ public final class CurrencyService {
                         AssetAudit.Reason.DEFERRED_CLAWBACK, correlationId,
                         "{\"debt_remaining\":" + Long.toUnsignedString(remaining) + "}");
             }
-            anomalies.currencyGained(player, change.type(), amount);
+            if (countsAsGain) {
+                anomalies.currencyGained(player, change.type(), amount);
+            }
         } else if (globallyBlocked && change.tipId() == Wallet.BLOCKED) {
             metrics.gainBlocked(RedisGainBlockSource.CURRENCY);
         }
@@ -278,10 +281,17 @@ public final class CurrencyService {
      * 返回 0 = 会成；否则是 {@link #add} 会回的拒绝码（含冻结 27003）。随后的加币要传同一个时刻。
      */
     public int checkAdd(ScenePlayer player, int type, long amount, long nowSeconds) {
+        return checkAdd(player, type, amount, null, nowSeconds);
+    }
+
+    /** 按变动原因预检加币；交易退回（{@link AssetAudit.Reason#AUCTION_RETURN}）等非新增获得不判全服与个人获取封禁。 */
+    public int checkAdd(ScenePlayer player, int type, long amount, AssetAudit.Reason reason, long nowSeconds) {
         if (frozenRefusal(player, type, amount)) {
             return Wallet.FROZEN;
         }
-        return player.wallet().checkAdd(type, amount, globalBlocks.blocksCurrency(type), nowSeconds);
+        boolean countsAsGain = reason == null || reason.countsAsGain();
+        return player.wallet().checkAdd(type, amount, countsAsGain && globalBlocks.blocksCurrency(type), countsAsGain,
+                nowSeconds);
     }
 
     /** 币种当前是否被全服产出封禁（跨节点/离线代打入账前门禁使用）。 */

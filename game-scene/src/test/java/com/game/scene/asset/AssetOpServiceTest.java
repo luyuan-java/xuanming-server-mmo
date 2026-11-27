@@ -680,6 +680,48 @@ class AssetOpServiceTest {
             assertThat(AssetOpLedger.isValidStream(stream.getNumber())).isTrue();
         }
         assertThat(AssetOpService.allowedTx(AssetStream.ASSET_STREAM_TRADE_CREDIT))
-                .containsOnlyKeys(4, 1);
+                .containsOnlyKeys(4, 1, 30);
+    }
+
+    @Test
+    void 交易退回本人托管资产不受全服与单人获取封禁约束_成交所得仍判封禁() {
+        start();
+        // 同时施加全服 + 单人货币与物品封禁（涵盖可叠加物品与唯一实例物品）
+        GlobalGainBlocks blocks = new GlobalGainBlocks(Set.of(GOLD), Set.of(STACKABLE, SINGLE));
+        currency.applyGlobalBlocks(blocks);
+        bags.applyGlobalBlocks(blocks);
+        assertThat(currency.block(player, GOLD)).isZero();
+        assertThat(bags.blockItemGain(player, STACKABLE)).isZero();
+        assertThat(bags.blockItemGain(player, SINGLE)).isZero();
+
+        // 1. 成交所得（TX_AUCTION_BUY = 4）被获取封禁终局拒绝
+        var buyCurrency = request(AssetStream.ASSET_STREAM_TRADE_CREDIT, 4, 1).setBundle(gold(50));
+        assertThat(call(AssetRpc.CREDIT, buyCurrency))
+                .isEqualTo(response(AssetOutcome.ASSET_OUTCOME_REJECTED, AssetOpService.BLOCKED, false));
+        var buyItem = request(AssetStream.ASSET_STREAM_TRADE_CREDIT, 4, 2)
+                .setBundle(AssetBundle.newBuilder().addItems(AssetItem.newBuilder().setConfigId(STACKABLE).setCount(3)));
+        assertThat(call(AssetRpc.CREDIT, buyItem))
+                .isEqualTo(response(AssetOutcome.ASSET_OUTCOME_REJECTED, AssetOpService.BLOCKED, false));
+        assertThat(gold()).isZero();
+        assertThat(player.bags().bag(BagType.INVENTORY).total(STACKABLE)).isZero();
+
+        // 2. 退回本人托管资产（TX_AUCTION_RETURN = 30）：货币、可叠加物品、唯一实例物品均放行
+        var instanceState = com.game.player.store.state.BagItemState.newBuilder()
+                .setItemUuid(7777L).setConfigId(SINGLE).setStackSize(1).build();
+        var instanceBundle = AssetBundle.newBuilder()
+                .addCurrencies(AssetCurrency.newBuilder().setCurrencyType(GOLD).setAmount(50))
+                .addItems(AssetItem.newBuilder().setConfigId(STACKABLE).setCount(3))
+                .addItemInstances(com.game.api.proto.AssetItemInstance.newBuilder()
+                        .setItemUuid(7777L).setConfigId(SINGLE).setStackSize(1)
+                        .setInstanceProto(instanceState.toByteString()));
+        var returnCredit = request(AssetStream.ASSET_STREAM_TRADE_CREDIT, 30, 3).setBundle(instanceBundle);
+        assertThat(call(AssetRpc.CREDIT, returnCredit).getOutcome()).isEqualTo(AssetOutcome.ASSET_OUTCOME_APPLIED);
+        assertThat(gold()).isEqualTo(50);
+        assertThat(player.bags().bag(BagType.INVENTORY).total(STACKABLE)).isEqualTo(3);
+        assertThat(player.bags().bag(BagType.INVENTORY).item(7777L)).isNotNull();
+
+        // 3. 战书预扣退还（JIANGHU_DUEL_REFUND）同样不受全服与单人货币获取封禁约束
+        assertThat(currency.add(player, GOLD, 25, Reason.JIANGHU_DUEL_REFUND).ok()).isTrue();
+        assertThat(gold()).isEqualTo(75);
     }
 }

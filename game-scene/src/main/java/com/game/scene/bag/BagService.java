@@ -115,7 +115,9 @@ public final class BagService {
             for (var item : gained) {
                 try {
                     audit.itemGained(player.playerId(), item.guids().getFirst(), item.configId(), item.count(), gainedReason, correlationId, "");
-                    anomalies.itemGained(player, item.configId(), item.count());
+                    if (gainedReason == null || gainedReason.countsAsGain()) {
+                        anomalies.itemGained(player, item.configId(), item.count());
+                    }
                 } catch (RuntimeException failure) { transferAuditFailure(correlationId, failure); }
             }
         }
@@ -176,19 +178,29 @@ public final class BagService {
 
     public PreparedTransfer prepareCredit(ScenePlayer player, Map<Integer, Long> counts,
                                            java.util.List<com.game.player.store.state.BagItemState> instances) {
+        return prepareCredit(player, counts, instances, null);
+    }
+
+    /** 规划资产通道入包；交易退回本人托管资产（{@code !reason.countsAsGain()}）不受全服与单人获取封禁约束。 */
+    public PreparedTransfer prepareCredit(ScenePlayer player, Map<Integer, Long> counts,
+                                           java.util.List<com.game.player.store.state.BagItemState> instances,
+                                           AssetAudit.Reason reason) {
         if (!writable(player)) return failedTransfer(player, REFUSED);
+        boolean countsAsGain = reason == null || reason.countsAsGain();
         var candidate = com.game.scene.player.PlayerBags.restore(player.bags().toState());
         candidate.normalize(tables);
         var bag = candidate.bag(BagType.INVENTORY);
         var gained = new java.util.ArrayList<Bag.Written>();
-        for (int config : counts.keySet()) if (isItemGainBlocked(player, config)) return failedTransfer(player, REFUSED);
+        if (countsAsGain) {
+            for (int config : counts.keySet()) if (isItemGainBlocked(player, config)) return failedTransfer(player, REFUSED);
+        }
         if (!counts.isEmpty()) {
             var result = bag.add(counts, tables, guids);
             if (!result.ok()) return failedTransfer(player, result.tip());
             gained.addAll(result.written());
         }
         for (var instance : instances) {
-            if (isItemGainBlocked(player, instance.getConfigId())) return failedTransfer(player, REFUSED);
+            if (countsAsGain && isItemGainBlocked(player, instance.getConfigId())) return failedTransfer(player, REFUSED);
             if (candidate.toState().getItemsList().stream().anyMatch(existing -> existing.getItemUuid() == instance.getItemUuid())) return failedTransfer(player, Bag.INVALID_PARAM);
             int tip = bag.putInstance(instance, tables);
             if (tip != 0) return failedTransfer(player, tip);
@@ -299,12 +311,15 @@ public final class BagService {
         if (!writable(player)) {
             return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
         }
+        boolean countsAsGain = reason == null || reason.countsAsGain();
         TreeMap<Integer, Long> ordered = new TreeMap<>(Integer::compareUnsigned);
         ordered.putAll(counts);
-        for (int configId : ordered.keySet()) {
-            if (isItemGainBlocked(player, configId)) {
-                metrics.gainBlocked(RedisGainBlockSource.ITEM);
-                return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
+        if (countsAsGain) {
+            for (int configId : ordered.keySet()) {
+                if (isItemGainBlocked(player, configId)) {
+                    metrics.gainBlocked(RedisGainBlockSource.ITEM);
+                    return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
+                }
             }
         }
         Bag.AddResult result = player.bags().bag(type).add(ordered, bound, tables, guids);
@@ -315,7 +330,9 @@ public final class BagService {
         for (Bag.Written written : result.written()) {
             audit.itemGained(player.playerId(), written.guids().get(0), written.configId(), written.count(), reason,
                     correlationId, extra);
-            anomalies.itemGained(player, written.configId(), written.count());
+            if (countsAsGain) {
+                anomalies.itemGained(player, written.configId(), written.count());
+            }
         }
         return result;
     }

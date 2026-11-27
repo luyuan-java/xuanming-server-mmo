@@ -167,7 +167,14 @@ public final class CommerceRuntime implements AutoCloseable {
         var parent = e.store.get(row.getParentId());
         if (parent == null)
             throw new CommerceEngine.CorruptContract("持有竞价的拍品不存在");
-        if (parent.getStatus() != SETTLED) {
+        int parentStatus = parent.getStatus();
+        if (parentStatus == CANCELLED) {
+            var lw = CommerceEngine.workflow(parent);
+            if (!heldBidKeepsFunds(lw, row.getCommerceId())) {
+                throw new CommerceEngine.CorruptContract(
+                        "拍品按撤单结案，卖家所得腿却发出过或赢家那份货到过，出价冻结款不能自动退回");
+            }
+        } else if (parentStatus != SETTLED) {
             long now = e.clock.getAsLong();
             e.store.defer(row, Math.min(Math.max(parent.getExpiresMs(), now + 30000), now + 3600000), budget);
             return;
@@ -179,6 +186,12 @@ public final class CommerceRuntime implements AutoCloseable {
             var w = CommerceEngine.workflow(current);
             if (!w.getStage().equals("bid_held"))
                 return null;
+            if (parentStatus == CANCELLED) {
+                w.setStage("bid_refund");
+                e.store.save(c, current.toBuilder().setStatus(CANCEL_PENDING)
+                        .setWorkflowProto(w.build().toByteString()).setUpdatedMs(e.clock.getAsLong()));
+                return null;
+            }
             w.setStage("done");
             e.store.markConsumed(c, current.getCommerceId());
             e.store.save(c, current.toBuilder().setStatus(SETTLED)
