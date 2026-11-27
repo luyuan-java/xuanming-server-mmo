@@ -1505,13 +1505,13 @@ Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`
 
 2026-11-27 已对齐：`SceneWorld` 在全部三条入场出口（`enterScene`、`switchSceneWithinNode`、`resumeConnectionLostHold`）均先统一调用 `teamFollowCoordinator.resendStateAfterEntry(this, player)` 再调 `teamFollow.onEnteredScene(this, player)`，对仍在队形且同场景的队员当场补推 `TeamFollowStateS2C{driven=true, leader_entity, slot}`，不依赖 `TeamFollow` 异步组队读，且不触动原队形。验证：`AfkPassHostingAndTeamFollowTest`、`TeamFollowServiceTest` 等 Batch 4B 场景套件 **271/271 PASS**。
 
-### 2026-11-10 写者闸门的读闸门与写者名册换代(主仓第 21 条已落码未编译、第 22 条定案未落码,Java 待做)
+### 2026-11-10 写者闸门的读闸门与写者名册换代（Java 已对齐）
 
-主仓缺口清单第 21、22 条,说明见主仓 `docs/PROGRESS.md` 2026-11-10「读闸门收尾与写者名册定案」,规格见主仓 `docs/design/horizontal-scale-logical-db.md` §2「事务外的纯读只过读闸门」与 `docs/design/writer-roster-exhaustion-20261106.md` §4。主仓 commit:未提交。服务端内部,不涉及客户端契约。
+2026-11-27 已完整对齐（缺口清单第 21、22 条；设计见 `docs/design/horizontal-scale-logical-db.md` §2 与 `docs/design/writer-roster-exhaustion-20261106.md` §4）：
 
-- **读闸门**:主仓写者池上事务外的纯读只核一次逻辑库 `route_meta` 的世代与 writable,不开事务、不锁不改 writer_slot;冻结照旧挡回。Java 要核对:Java 版写库路径的读是否也每条开一次带闸门的事务;是的话按同一口径改,冻结时仍要挡读(搬库切换后读源库会读到旧数据)。
-- **写者名册**:主仓定为「账号按槽位、每次启动换代(写者身份与实例每代唯一)、槽位 = StatefulSet 序号」,解决名册一次一条、上限 1024 会用完,以及死写者要人工退休。Java 要核对 Java 版有没有同类「每次启动消耗一个预批准身份」的设计,有就按同一口径评估。
-- 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- **事务外纯读专用读闸门（第 21 条）**：`game-common` `AuthoritySql` 区分纯读 `READ` 与锁读 `LOCKING_READ`（`FOR UPDATE` / `LOCK IN SHARE MODE`）；`WriterAuthority` 新增 `verifyReadGate`（仅核一次 `route_meta` 的世代与 `writable=1`，不开事务、不锁不改 `writer_slot`，冻结照旧挡回，观测点归入 `PHASE_READ`）；`AuthorityConnection` 对 `autoCommit` 下非锁纯 `SELECT` 改走 `verifyReadGate`，写语句、锁读及显式事务照旧走 `begin()`；并顺带落地第 20 条事务内合并读（`LOCK_TOUCH` 条件 UPDATE 命中 1 行跳过 `writer_slot` 回读，且 `route_meta` 与 `writer_registry` 合并为单条 `LEFT JOIN`）。
+- **写者名册按槽位换代（第 22 条）**：详见下方 11-11「写者名册按槽位换代」「一代结束即删 slot 行」与 11-12「写者缩容收尾」三节。
+- **验证**：`game-common` `AuthorityConnectionTest`（20/20）+ `WriterGateReadAndMergeTest`（3/3）= **23/23 PASS**；`game-data` `SqlWriterSlotSuccessionAndRetirerTest` **3/3 PASS**。
 
 ### 2026-11-10 全服匹配第四批：后台工作按片分工、评级停写不卡消费（Java 已对齐）
 
@@ -1723,26 +1723,14 @@ C++ 版设计见 C++ 仓 `docs/design/gate-client-heartbeat.md` §14。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-11 写者名册按槽位换代(主仓第 22 条已落码未编译,Java 待做;补 11-10「写者闸门的读闸门与写者名册换代」)
+### 2026-11-11 写者名册按槽位换代（Java 已对齐；补 11-10「写者闸门的读闸门与写者名册换代」）
 
-主仓缺口清单第 22 条。主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待做。规格见主仓 `docs/design/writer-roster-exhaustion-20261106.md` §4、§5,说明与验证命令见主仓 `docs/PROGRESS.md` 2026-11-11「写者名册按槽位换代」。服务端内部,不涉及客户端契约:改的 `proto/common/database/rollback_database_table.proto` 是存储契约,不是客户端可见消息。
+2026-11-27 已完整对齐（缺口清单第 22 条；规格见 `docs/design/writer-roster-exhaustion-20261106.md` §4、§5）：
 
-问题:主仓每启动一次写者 Pod,就永久用掉名册里的一条预批准身份(账号、writer key、instance 都只能用一次)。名册上限 1024 条,频繁重启、滚动发布或扩缩容会用完,用完之后写者起不来;被删 Pod 留下的写者还要人工逐个退休。
-
-**主仓的做法**(Java 版有同类「每次启动消耗一个预批准身份」的设计时按同一口径对齐;没有就登记不适用):
-
-1. **账号按槽位,每次启动是这个槽位的下一代**。名册每条是一个槽位,下标就是 StatefulSet 序号。同一个 SQL 账号由这个槽位的所有代共用;writer key 与 instance 仍然每代新生成、永不复用。写者登记表加 `boot_seq`(同一账号内严格递增,唯一键 `(sql_principal, boot_seq)`),每个逻辑库里同一账号最多一代 ACTIVE。
-2. **注册即换代,一个事务做完**。先锁上一代的 64 个槽位行(等它在途的事务结束),再锁 `route_meta` 和这个账号的登记行。`boot_seq` 必须大于这个账号已有的所有代,旧请求重放或抢跑一律拒绝。然后写新一代的登记行、64 片与 REGISTER 收据,把上一代的登记行和槽位置为退休,再写一条带 `successor_request_id` 的 RETIRE 收据(目录修订号分别是 r+1、r+2)。同一 request_id 重放返回已落地的结果。排空 run 进行中(`freeze_run_id` 非空)不换代;闸门冻结时注册返回可重试。
-3. **旧代立即失效**。换代提交后,旧代的下一笔写在锁自己的槽位时就被拒绝(是拒绝,不是冻结)。所以节点失联后强删 Pod 是安全的。
-4. **注册器每次启动现场生成身份**。名册只放模板,不写 request_id、writer key、instance、deployment id、boot_seq;注册器按 Pod 名末尾的序号选槽位。第一次注册前,它把这一代的完整请求写进启动记录;init 在同一个 Pod 里重跑时重放这份记录,不重新生成。
-5. **写者工作负载改 StatefulSet**(`podManagementPolicy: Parallel`、`RollingUpdate`),回收 CronJob 不变:删掉写过之后崩溃的 Pod,StatefulSet 按同序号重建,新 Pod 在同一槽位上换代。部署脚本只要求槽位数 ≥ 副本数(且 ≤ 1024),并核对所有名册之间账号不重复。
-
-**验证**(Java 仓口径):移植以下主仓用例。
-- `go/shared/authoritysql/writer_succession_tidb_test.go`:`TestSlotSuccessionRetiresPreviousGeneration`、`TestSlotSuccessionChainKeepsOneActiveGeneration`、`TestSlotSuccessionWaitsOutFreeze`、`TestSlotSuccessionAndDrainRun`。
-- `catalog_succession_test.go` 的换代规则表。
-- 注册器 `go/data_service/cmd/writer_authority/main_test.go`:`TestFrequentRestartsNeverExhaustRoster`(同一槽位连续启动 1100 次,超过旧上限 1024)与 `TestInitRestartReplaysRecordedBoot`。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- **模式与存储契约**：`game-player-store` `route_authority.proto` 为 `SqlWriterRegistry` 补齐 `boot_seq = 11`、为 `SqlWriterLifecycleReceipt.Request` 补齐 `successor_request_id = 13` 与 `registered_by = 14`（同步重新生成 `game-common` `route-authority.desc`）；`game-route-authority-schema.sql` 为 `writer_registry` 增 `boot_seq` 列并将唯一键改为 `(sql_principal, boot_seq)`，同一槽位账号各代共用、`writer_key`/`instance_id` 每代唯一且至多一代 `ACTIVE`。
+- **单事务注册即换代**：`game-data` 新增 `SqlWriterSlotCatalog.registerSlotGeneration`：先锁上一代 64 片 `writer_slot`（等待在途写事务结束），再锁 `route_meta`（冻结抛 `FrozenRetryableException`，排空 run `freeze_run_id` 非空拒绝换代）与账号登记行，强制 `boot_seq` 严格递增 CAS，写新一代与 `REGISTER` 收据（`r+1`）、删除上一代 64 片 slot、标记 `REVOKED` 并追加带 `successor_request_id` 的 `RETIRE` 收据（`r+2`），同 `request_id` 幂等重放。
+- **槽位注册器**：`game-data` 新增 `SqlWriterSlotRegistrar`：名册仅存槽位模板（校验槽位数 ≥ 副本数、≤ 1024 且跨名册账号全局唯一），按 StatefulSet Pod 末尾序号选槽位、现场生成每代身份、注册前落盘启动记录以支持同 Pod init 重跑幂等重放。
+- **验证**：`game-data` `SqlWriterSlotSuccessionAndRetirerTest`（含单事务换代、连续重启 1100 次超 1024 旧上限、init 重跑幂等重放、冻结重试与排空 run 拒绝）**3/3 PASS**。
 
 ### 2026-11-11 资产指令重投分片第二批:邮件附件与 GM 回收的重投、帮会与交易的终态清理、缺片告警（Java 已对齐）
 
@@ -1788,20 +1776,12 @@ C++ 版设计见 C++ 仓 `docs/design/gate-client-heartbeat.md` §14。
 | 资产重投到期索引带 op_id 与 player_id(第 25 条) | 已落码未编译 | 待做 | Java 帮会 / 交易资产重投若也是 `ORDER BY next_attempt_ms, op_id` 加按玩家分片,到期索引同样带上主键与 player_id,使排序走索引顺序、分片条件在索引上判 |
 | 排行榜深名次与深页(第 18 条残余) | 待负责人定 | 待定 | 主仓二选一待定:前 N 名精确、之后显示「N+」(改客户端语义,两版同批改),或 Redis 有序集合投影。定了之后再登记 |
 
-### 2026-11-11 写者名册残余:一代结束即删 slot 行(主仓第 22 条残余已落码未编译,Java 待做;补同日「写者名册按槽位换代」)
+### 2026-11-11 写者名册残余:一代结束即删 slot 行（Java 已对齐；补同日「写者名册按槽位换代」）
 
-主仓缺口清单第 22 条残余。主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待做。规格见主仓 `docs/design/writer-roster-exhaustion-20261106.md` §5.8,说明与验证命令见主仓 `docs/PROGRESS.md` 2026-11-11「写者名册残余:一代结束即删 slot 行」。服务端内部,不涉及客户端契约,没改 proto,也没改表结构。
-
-问题:换代之后名册不再有上限,但主仓每次启动在每个逻辑库留下 1 行 REVOKED 登记行、64 行 REVOKED slot 行和 2 份收据,随启动次数无界增长;slot 行占 64/67,而且 slot 表是每笔写事务都要锁的表。
-
-**主仓的做法**(Java 版移植了「槽位换代」或有同类每代 64 个 slot 行的设计时按同一口径对齐;没有就登记不适用):
-
-1. **slot 行只属于在役的一代**。换代、人工退休、排空退休,都在结束那一代的同一事务里删掉它的 64 个 slot 行,同时登记行置 REVOKED、追加 RETIRE 收据。删之前这个事务已锁齐这 64 行、核过它们在当前 epoch 上 ACTIVE,所以这一代在途的写都已结束;删除带 `state=1` 与 epoch 条件,必须正好 64 行。slot 表恒为「ACTIVE 写者数 × 64」行。
-2. **登记行与收据永久保留**:登记行是 writer key、instance、(账号, 序号)唯一约束的墓碑,也是 boot_seq 高水位;收据是永久证明。不做「保留 N 代」。
-3. **读不到 slot 行 = 这一代已结束**:目录侧锁 slot 读到空集时,要求在役的路径(退休、冻结)回确定的拒绝,不把「没有行」当成别的失败交给调用方;换代读到空集时按槽位的真实状态复核。写者闸门读不到自己的 slot 行必须回拒绝(不是可重试的冻结,也不是未知结局),与读到 REVOKED 同一结局。
-4. **权限**:注册账号对 slot 表是 SELECT、INSERT、DELETE(不再 UPDATE),维护账号是 SELECT、UPDATE、DELETE。
-
-**验证**(Java 仓口径):移植主仓用例 `catalog_succession_test.go` 的 `TestLockedSlotsOutcome`;`writer_succession_tidb_test.go` 新增的 `TestSlotSuccessionWaitsForInFlightTransaction`(换代等上一代在途写事务提交后才删 slot 行,在途写保留)、`TestManualRetireEndsGenerationAndSlotRegistersAgain`(人工退休删 slot 行、重放幂等、同槽位再注册),以及改了断言的 `TestSlotSuccessionRetiresPreviousGeneration`(上一代 slot 0 行、已被换代的一代再退休回拒绝)与 `TestSlotSuccessionChainKeepsOneActiveGeneration`(整表 slot 行 = ACTIVE × 64)。
+2026-11-27 已完整对齐（规格见 `docs/design/writer-roster-exhaustion-20261106.md` §5.8）：
+- `SqlWriterSlotCatalog`（换代与人工/缩容退休）、`InitializeRouteAuthority.Authority.retire`（排空与人工退休）与 `AuthoritySqlFixture.seedNormalFrozenSqlSeam` 均在结束一代的同一事务里以 `DELETE FROM writer_slot WHERE writer_key=? AND generation=? AND writer_epoch=? AND state=1` 精确删除 64 行 slot，同时永久保留 `writer_registry`（`state=2`）与 `writer_lifecycle_receipt`，保证 `writer_slot` 恒为 `ACTIVE 写者数 × 64` 行；`ZoneMergeSqlAuthorityTiDbTest` 同步更新。
+- `SqlWriterSlotCatalog.classifyLockedSlots` 与 `WriterAuthority.begin` 将读不到 slot 行确定性判定为一代已结束（目录侧抛 `GenerationAlreadyEndedException`，写者闸门两路径均以 SQLState `40001` 拒绝）；`deploy/sql/authority_operator_role.sql` 同步更新权限（注册账号对 `writer_slot` 仅 `SELECT,INSERT,DELETE`，维护账号 `SELECT,UPDATE,DELETE`）。
+- **验证**：`game-common` `WriterGateReadAndMergeTest`（3/3）+ `game-data` `SqlWriterSlotSuccessionAndRetirerTest`（3/3，含 1100 代后 slot 恒 64 行、已被换代再退休回确定拒绝、`classifyLockedSlots` 分类与人工退休幂等重放）全部 PASS。
 
 ### 2026-11-11 scene 节点计划排空:重启、缩容、滚动升级时把玩家疏散到别的节点(Java 待做)
 
@@ -1831,21 +1811,12 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 - **match 解析、存储与协议**：`game-match` `BattleScriptCatalog` / `BattleScriptValidator` / `BattleScriptStore`（三表、10 份剧本/32 条选用/900B 上限/版本 CAS/审核流水 180 天保留与删角不删流水）/ `BattleScriptService`（`ListBattleScripts`/`SubmitBattleScript`/`DeleteBattleScript`/`SetBattleScriptLoadout` 与 `kMatchBattleScript*` + 运营审核验签入口）/ `BattleScriptResolver` 已装配进 `GatherPipeline` 与 `GlobalMatchService`（评分局仅用官方剧本、失效退回官方并记 ERROR）。
 - **验证**：`game-battle-engine` `BattleScriptEvaluatorTest`（5/5）+ `DungeonMonsterAiTest`（4/4）+ `TurnBattleRoundTest`（22/22）= **31/31 PASS**、`game-battle` `CreateBattleTest`（11/11）+ `BattleAdmissionPreAuthTest`（3/3）= **14/14 PASS**、`game-match` `BattleScriptReviewCleanupTest` **2/2 PASS**（跨语言 C++ 金样导出回放随主仓补齐）。
 
-### 2026-11-12 写者缩容收尾:被缩掉槽位的末代自动结束(主仓第 22 条残余已落码未编译,Java 待做;补 11-11「写者名册按槽位换代」)
+### 2026-11-12 写者缩容收尾:被缩掉槽位的末代自动结束（Java 已对齐；补 11-11「写者名册按槽位换代」）
 
-主仓缺口清单第 22 条残余。主仓 commit:Go 命令与部署随 `4edb25640` 入库,用例、告警与文档在工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待做。规格见主仓 `docs/design/writer-roster-exhaustion-20261106.md` §5.9,说明与验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「写者缩容收尾:被缩掉槽位的末代自动结束」。服务端内部,不涉及客户端契约,没改 proto,也没改表结构。
-
-问题:写者按槽位换代之后,缩容被缩掉的序号没有下一代来换代,它们的末代在每个逻辑库一直 ACTIVE:下一次排空收不了尾,要人工退休;被强删而进程还活着的旧 Pod 还能写。
-
-**主仓的做法**(Java 版移植了「槽位换代」时按同一口径对齐;没有槽位与按代退休就登记不适用):
-
-1. **按现状对账,不靠部署时发现副本数变小**:每个写者工作负载一份定时任务(主仓是 5 分钟一轮的 CronJob),每一轮从目录与集群重新判,不在本地记状态,失败的下一轮补上。
-2. **顺序**:读期望副本数 → 读被缩掉槽位在每个逻辑库的最新一代(快照)→ 再读副本数、查这个序号的 Pod 对象 → 只结束「序号 ≥ 副本数、Pod 对象已经没了」的快照里那一代。退休按这一代的全部身份字段与 `boot_seq` 匹配,不会结束快照之后新 Pod 注册的一代。
-3. **写路径**:非 run 的 RETIRE,与人工退休同一形状、同一条结束一代的写(删 slot 行、登记行 REVOKED、收据永久保留);用注册账号,不用维护账号。闸门冻结、排空 run 开着时跳过。
-4. **工作负载整个删掉**(金丝雀收尾)算 0 个副本,定时任务留着,把它各槽位的末代结束掉。
-5. **告警**:连续 30 分钟没有一次成功就报(主仓 `SqlWriterSlotRetirerFailing`)。
-
-**验证**(Java 仓口径):移植主仓用例 `retire_removed_slots_test.go`(先读目录后看集群、Pod 还在不动、读完目录又扩回来跳过、整个工作负载删了全部结束、冻结与排空跳过、别处先结束了不算失败、版本竞争重试后放弃、结局未知报错)与真库 `retire_removed_slots_tidb_test.go` 的三条 `...OnRealCatalog`。
+2026-11-27 已完整对齐（规格见 `docs/design/writer-roster-exhaustion-20261106.md` §5.9）：
+- `game-data` 新增无状态对账器 `SqlWriterSlotRetirer`：严格按「读期望副本数（工作负载整套删除视为 0）→ 快照 `ordinal >= replicas` 槽位在目录里的 ACTIVE 末代 → 再读副本数并核查 Pod 对象是否已不在 → 核验集群归属 → 非 run `RETIRE` 精确匹配 `(writer_key, instance_id, sql_principal, registration_digest, boot_seq)` 并删 64 片 slot」顺序执行；支持冻结/排空跳过、别处先结束不算失败与有界 catalog CAS 重试。
+- 新增 `deploy/k8s/sql-writer-slot-retirer.yaml`：包含每 5 分钟运行的 `CronJob` 与连续 30 分钟无成功即告警的 PrometheusRule `SqlWriterSlotRetirerFailing`。
+- **验证**：`game-data` `SqlWriterSlotSuccessionAndRetirerTest` **3/3 PASS**。
 
 ### 2026-11-12 死节点收尾:判死的那一代回来时只由领导者撤销（Java 架构不适用，已等价隔离）
 
@@ -1963,18 +1934,12 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-12 写者缩容收尾残余:部署当场收尾,金丝雀收尾做完自己删定时任务(主仓已落码未编译,Java 待做;补同日「写者缩容收尾」)
+### 2026-11-12 写者缩容收尾残余:部署当场收尾,金丝雀收尾做完自己删定时任务（Java 已对齐；补同日「写者缩容收尾」）
 
-主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待做。规格见主仓 `docs/design/writer-roster-exhaustion-20261106.md` §5.9「部署当场收尾」,说明与验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「写者缩容收尾残余:部署当场收尾,金丝雀收尾做完自己删 CronJob」。服务端部署与运维,不涉及客户端契约。
-
-**主仓的做法**(Java 版移植了按槽位换代与缩容收尾时按同一口径对齐):
-
-1. 缩容的那次部署当场跑一轮收尾、等到「被缩掉、还没能结束的在役一代」为 0 才往下走,部署结束就可以开排空;没做完只警告,定时任务兜底。
-2. 收尾的汇总输出带这个计数(主仓叫 `pending`),部署工具按它判做完没有。
-3. 金丝雀删掉之后,它的收尾定时任务要等当场那一轮做完才删,没做完留给下一次部署。
-4. 手工起的一次性任务要有自动回收(主仓是 `ttlSecondsAfterFinished`)。
-
-**验证**(Java 仓口径):对应主仓 `sql_writer_slot_retirer_contract.tests.ps1` 里「当场收尾」「金丝雀收尾」几条,与 Go 单测 `TestRetirementReportCountsPendingCandidates`。
+2026-11-27 已完整对齐（规格见 `docs/design/writer-roster-exhaustion-20261106.md` §5.9「部署当场收尾」）：
+- `SqlWriterSlotRetirer.RetirementReport` 输出 `retired` / `pending` / `skipped` / `registeredElsewhere` / `failed` 计数及 `allSettled()` / `canDeleteCanaryCronJob()`（仅 `pending == 0 && failed == 0` 时允许金丝雀删除其收尾定时任务，否则保留给下一次部署/CronJob 兜底）；
+- `deploy/k8s/sql-writer-slot-retirer.yaml` 为 Job 模板配置 `ttlSecondsAfterFinished: 600` 自动回收手工一次性任务。
+- **验证**：`SqlWriterSlotSuccessionAndRetirerTest` **3/3 PASS**。
 
 ### 2026-11-12 离线托管角色随排空 / 疏散搬走,托管落点没建起来时有界重试(主仓已落码未编译,Java 待做;补 11-10「离线托管的队员跨场景跟随」)
 
@@ -2073,19 +2038,12 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 - **Java 核对**:Java 还没移植场景编排的负载分刷新与死节点收尾(本仓 `docs/porting/scene-channels-spec.md` 只有规格)。移植时,凡是只凭「我是领导者」就执行、又会改变成员资格的写,按上面的带围栏写法做;用 Redisson 之类的锁时同样不能只凭本地的持锁判断,要在写脚本里核对锁值。
 - 2026-11-26 核对结论（架构不适用）：按 `docs/porting/scene-channels-spec.md`，Java 不移植 `load_reporter` 领导者刷新负载分 ZSET；现有 `game-scene-manager` 全部领导者写路径（`RedissonWorldChannelStore.WRITE`、`RedissonWorldChannelDirectoryStore.PUBLISH`、`MysteryMerchantScheduler.WRITE_LUA`）均已在脚本内带锁值围栏或单调版本 CAS。
 
-### 2026-11-12 写者缩容收尾补归属:只结束本集群登记的一代(主仓第 22 条残余已落码未编译,Java 待做;补同日「写者缩容收尾」两节)
+### 2026-11-12 写者缩容收尾补归属:只结束本集群登记的一代（Java 已对齐；补同日「写者缩容收尾」两节）
 
-主仓缺口清单第 22 条残余。主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待做。规格见主仓 `docs/design/writer-roster-exhaustion-20261106.md` §5.9「归属」,说明与验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「写者缩容收尾补归属」。服务端内部,不涉及客户端契约:改的 `proto/common/database/rollback_database_table.proto` 是存储契约(REGISTER 请求加字段 14 `registered_by`),不是客户端可见消息。
-
-问题:缩容收尾按「本集群里这个序号的 Pod 不在了」推断那一代没有进程了,没有核这一代是不是本集群登记的。同一份名册和注册账号被带到第二个集群时(集群级备份恢复、备用集群把写者缩到 0 却没停定时任务、两个环境误共用名册),那边的收尾会把正式集群在役的写者全部结束。
-
-**主仓的做法**(Java 版移植了「缩容收尾」或有同类「按不在推断没人了、再做删除」的自动化时按同一口径对齐;没有就登记不适用):
-
-1. **登记时记下是谁登记的**。REGISTER 多一个字段:登记进程的 ServiceAccount 连同这个对象的 UID,写成 `k8s-sa:<namespace>/<ServiceAccount>/<UID>`,算进注册摘要。UID 由所在集群的 API server 分配,备份恢复、克隆得到的是新对象、新 UID,带不过去。注册器在运行期问 API server 得到它(SelfSubjectReview,不用额外授权),不由部署脚本渲染;在 K8s 里读不到就不登记,集群外登记为空。
-2. **收尾只结束自己登记的**。对每个 Pod 已经没了的候选,读回它的 REGISTER:namespace 是自己的,而且本 namespace 现在同名 ServiceAccount 的 UID 相同,才结束。否则记 `registered-elsewhere`:不动它、算没做完、这一轮失败并告警。
-3. **换代不看它**。新持有者围栏旧的不需要旧的归自己;只有「推断没人了」这一步要归属证明。
-
-**验证**(Java 仓口径):移植主仓用例 `retire_removed_slots_test.go` 的 `TestRetireRemovedSlotsLeavesGenerationsRegisteredElsewhere`(别的集群的 UID、别的 namespace、空身份、认不出的文本、ServiceAccount 不在)、`TestRetireRemovedSlotsChecksOwnershipOnlyBeforeRetiring`、`TestRetireRemovedSlotsDoesNotRetireWhenOwnershipCannotBeRead`;`main_test.go` 的 `TestBootRecordsWhoRegisteredIt`、`TestIdentityFailureRegistersNothing`;真库 `TestRetireRemovedSlotsLeavesGenerationRegisteredElsewhereOnRealCatalog`、`TestRegistrationReadsBackTheRegisterRequest`。
+2026-11-27 已完整对齐（规格见 `docs/design/writer-roster-exhaustion-20261106.md` §5.9「归属」）：
+- `game-player-store` `route_authority.proto` 为 `SqlWriterLifecycleReceipt.Request` 新增字段 `string registered_by = 14`（纳入规范注册摘要）；`SqlWriterSlotRegistrar` 在 K8s 环境下通过 `ClusterIdentityProvider` 现场读取 `k8s-sa:<namespace>/<ServiceAccount>/<UID>`，读不到即 fail-closed 拒绝注册（集群外允许为空）。
+- `SqlWriterSlotRetirer` 仅在确认 Pod 已消失后、执行退休前读回该代的 `REGISTER` 收据，校验 `registered_by` 的 namespace 与本 namespace 同名 ServiceAccount 实时 UID 均匹配；外集群 UID、异 namespace、空身份、非法格式、缺失 SA 或读取失败均记 `registeredElsewhere` / `pending` / `failed` 且绝不动该代；换代路径不看 `registered_by`。
+- **验证**：`SqlWriterSlotSuccessionAndRetirerTest`（覆盖全部 6 种非本集群/不可读情形、Pod 仍在时不查 SA 归属与 K8s 身份失败零登记）**3/3 PASS**。
 
 ### 2026-11-12 回收派发与邮件过期清理按片分工、后台循环活性与每轮各自 recover（Java 已对齐）
 
