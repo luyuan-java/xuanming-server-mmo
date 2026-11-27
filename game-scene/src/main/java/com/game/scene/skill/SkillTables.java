@@ -4,6 +4,7 @@ import com.game.common.combatai.StateMutexMatrix;
 import com.game.common.combatai.StateMutexMatrix.StateMode;
 import com.game.table.ActorActionCombatStateTable;
 import com.game.table.ActorActionStateTable;
+import com.game.table.BuffTable;
 import com.game.table.ConfigTables;
 import com.game.table.CooldownTable;
 import com.game.table.SkillPermissionTable;
@@ -59,15 +60,23 @@ public final class SkillTables {
     private final StateMutexMatrix actionStateMatrix;
     private final StateMutexMatrix combatStateMatrix;
     private final Map<Integer, List<Integer>> skillPermissions;
+    private final Map<Integer, BuffTable> buffs;
 
     SkillTables(Map<Integer, SkillDef> skills, Map<Integer, Long> cooldownNanos,
                 StateMutexMatrix actionStateMatrix, StateMutexMatrix combatStateMatrix,
                 Map<Integer, List<Integer>> skillPermissions) {
+        this(skills, cooldownNanos, actionStateMatrix, combatStateMatrix, skillPermissions, Map.of());
+    }
+
+    SkillTables(Map<Integer, SkillDef> skills, Map<Integer, Long> cooldownNanos,
+                StateMutexMatrix actionStateMatrix, StateMutexMatrix combatStateMatrix,
+                Map<Integer, List<Integer>> skillPermissions, Map<Integer, BuffTable> buffs) {
         this.skills = Map.copyOf(skills);
         this.cooldownNanos = Map.copyOf(cooldownNanos);
         this.actionStateMatrix = actionStateMatrix;
         this.combatStateMatrix = combatStateMatrix;
         this.skillPermissions = Map.copyOf(skillPermissions);
+        this.buffs = buffs == null ? Map.of() : Map.copyOf(buffs);
     }
 
     public static SkillTables from(ConfigTables tables) {
@@ -107,7 +116,13 @@ public final class SkillTables {
         for (SkillPermissionTable row : tables.skillPermission().all()) {
             permissions.put(row.getId(), List.copyOf(row.getSkillTypeList()));
         }
-        return new SkillTables(skills, cooldowns, actionMatrix, combatMatrix, permissions);
+        Map<Integer, BuffTable> buffs = new HashMap<>();
+        for (BuffTable row : tables.buff().all()) {
+            if (row.getId() != 0) {
+                buffs.put(row.getId(), row);
+            }
+        }
+        return new SkillTables(skills, cooldowns, actionMatrix, combatMatrix, permissions, buffs);
     }
 
     /**
@@ -162,6 +177,16 @@ public final class SkillTables {
     /** 冷却组的时长（纳秒）；表里没有（含 0 号）为 0，即不冷却（同基线 Remaining 查不到行回 0）。 */
     public long cooldownNanos(int cooldownId) {
         return cooldownNanos.getOrDefault(cooldownId, 0L);
+    }
+
+    /** 冷却组的时长（毫秒）；与 {@link #cooldownNanos} 同源，供 UTC 墙钟毫秒冷却判定使用。 */
+    public long cooldownMillis(int cooldownId) {
+        return cooldownNanos(cooldownId) / 1_000_000L;
+    }
+
+    /** Buff 表行；查不到（含 0 号）为 null。 */
+    public BuffTable buff(int buffTableId) {
+        return buffTableId == 0 ? null : buffs.get(buffTableId);
     }
 
     /** 预编译的行为互斥矩阵（行号 = 行为：0 放技能、1 跟随、2 上坐骑、3 下坐骑）。 */

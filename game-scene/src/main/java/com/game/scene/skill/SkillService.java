@@ -93,12 +93,40 @@ public final class SkillService {
     }
 
     /**
+     * 进场加载规整（逻辑线程上调用）：
+     * 1. 将存档里开始时刻晚于本机当前 UTC 毫秒的技能冷却压回当前时刻；
+     * 2. 按当前配表恢复下线保留 Buff（查不到表行且未到期原样带回、表为 0 或已到期丢弃、层数与剩余时长夹取、重挂子 Buff）。
+     */
+    public void initializeOnLoad(ScenePlayer player) {
+        if (player == null) {
+            return;
+        }
+        long nowMs = clock.epochMillis();
+        player.skillState().clampLoadedCooldowns(nowMs);
+        player.realtimeBuffs().restorePending(tables::buff, nowMs);
+    }
+
+    /** 施加或刷新一条实时场景 Buff（再施加同源有限时长 Buff 自动重挂满时）。 */
+    public com.game.scene.player.PlayerRealtimeBuffs.ActiveBuff applyRealtimeBuff(
+            ScenePlayer target, int buffTableId, long casterEntityId) {
+        if (target == null) {
+            return null;
+        }
+        com.game.table.BuffTable row = tables.buff(buffTableId);
+        if (row == null) {
+            return null;
+        }
+        return target.realtimeBuffs().apply(row, casterEntityId, clock.epochMillis(), tables::buff);
+    }
+
+    /**
      * 放技能（两阶段零副作用门禁）。
      *
      * @return 0 成功（已广播 70，并在状态位变化时先向主角单播状态互斥位图）；否则拒绝码（零副作用，不推 33/70）
      */
     public int release(SceneWorld world, ScenePlayer caster, ReleaseSkillRequest request) {
         long now = clock.nanoTime();
+        long nowMs = clock.epochMillis();
         int skillTableId = request.getSkillTableId();
         SkillDef def = tables.skill(skillTableId);
         if (def == null || !caster.hasSkill(skillTableId)) {
@@ -131,7 +159,7 @@ public final class SkillService {
         }
 
         PlayerSkillState state = caster.skillState();
-        if (coolingDown(state, def, now)) {
+        if (coolingDown(state, def, nowMs)) {
             return reject(SkillResult.COOLDOWN, COOLDOWN_NOT_READY);
         }
 
@@ -189,7 +217,7 @@ public final class SkillService {
                 .setSkillTableId(skillTableId)
                 .setPosition(request.getPosition())
                 .build()));
-        state.startCooldown(def.cooldownId(), now);
+        state.startCooldown(def.cooldownId(), nowMs);
         if (def.general() || def.channel()) {
             Fsm<CastFsmState, CastFsmEvent, Void> fsm = newCastFsm(CastFsmState.IDLE);
             if (fsm.trigger(CastFsmEvent.START_CAST, null) && fsm.current() == CastFsmState.CASTING) {
@@ -303,11 +331,11 @@ public final class SkillService {
         return tip;
     }
 
-    /** 冷却组还在冷却：开始过、表里有时长、没走完（时长按当前表查，同基线）。 */
-    private boolean coolingDown(PlayerSkillState state, SkillDef def, long now) {
-        Long start = state.cooldownStart(def.cooldownId());
-        long duration = tables.cooldownNanos(def.cooldownId());
-        return start != null && duration > 0 && now - start < duration;
+    /** 冷却组还在冷却：开始过、表里有时长、没走完（UTC 墙钟毫秒，时长按当前表查，跨重登/换节点接着算）。 */
+    private boolean coolingDown(PlayerSkillState state, SkillDef def, long nowMs) {
+        Long startMs = state.cooldownStart(def.cooldownId());
+        long durationMs = tables.cooldownMillis(def.cooldownId());
+        return startMs != null && durationMs > 0L && (nowMs < startMs || nowMs - startMs < durationMs);
     }
 
     /**

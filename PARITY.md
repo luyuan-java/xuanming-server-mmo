@@ -1,10 +1,16 @@
 # 双版本对账本（PARITY）
 
-## 2026-11-27 万象残局坊 V1（玩家自创回合残局解谜工坊 · 公平固定模板 + 作者自证发布 + `#PUZ` 约战分享与标准解法录像，RPC `575..581`）
+## 2026-11-27 五行幻境 V2 · 五行奇策轻肉鸽秘境（6 关分岔 + 15 枚机制改造型奇策 + 3 同系五行共鸣 + 公平 3×3 双模式 + 跨周保局 + Redis Cluster 同槽 Lua Top-200 榜，RPC `585/586`）
 
-| 范围 | C++ / Go 权威版 | Java / Unity 客户端版 | 状态 |
+| 范围 | C++ / Go 权威版 + Unity 客户端 | Java / Python 版（TODO） | 状态 |
 |---|---|---|---|
-| **① 零日常 / 零战力通胀 / 零可交易产出 UGC 回合解谜闭环**：新增 `Dungeon 314`（`boss_trial_kind=10`、`scene_id=17` 满足外键且跨图放行）、`PlayMode 475`、`MatchService` 7 条 RPC（`575=ListTacticalPuzzles`、`576=GetTacticalPuzzle`、`577=SaveTacticalPuzzleDraft`、`578=DeleteTacticalPuzzle`、`579=StartTacticalPuzzleBattle`、`580=LikeTacticalPuzzle`、`581=GetTacticalPuzzleSolutionReplay`）、`match_error` Tip `16064..16072`、`MessageLimiter` `575..581` 与双权威表（`match_tactical_puzzle` / `match_tactical_puzzle_clear`），`match_formation` 扩列 `tactical_puzzle_context`。<br>**② 严格公平模板与作者自证铁律**：所有挑战者统一借用固定 3×3 免费预设（角色 `101..103`、灵宠 `0/201..203` 支持单人无宠、阵法 `0..5`、回合上限 `1..6`、我方初血/蓝/盾/不利状态 `100031/130051/100190`、1–3 名演武敌 `311..316` 初血 `10..150%`/护盾/先手速修 `±30%`/开场增益 `100140/100160/100250/110070` 物理反震）；仅作者验题局开启受控 PVE 录播（`BattleReplayPolicy`）与 `(puzzle_id, spec_revision)` 确定性 SplitMix64 种子，作者亲手打赢 1 局并存下 `verified_battle_id` 录像后方自动转 `PUBLISHED`，改题自动升 `spec_revision` 回退草稿重验；`ContentGuard`（`TEXT_SCENE_GUILD_NAME`）fail-closed 拦截题名/提示违规词；删角 `RoleFencePurge` 彻底清库；仅限通关后单次幂等点赞与纯零战力荣誉称谓。<br>**③ 10 张 V2 手绘无字透明 PNG-32 切片全量落地**：验收图仓 Azure 提交 `5e3edf364082`（`tactical-puzzle-workshop-v1` V2），SHA-256、尺寸与九宫格 `spriteBorder` 逐项核对后导入 `Assets/Resources/UI/Ugui/TacticalPuzzleV1/`，打通归元城齐问锋入口、双列大厅 + 五页签 + 6 标签筛选 + 左右双栏摆盘编辑器、世界聊天 `#PUZ:<id>#` 交互卡片、战斗回合上限/残局角标 HUD 与结算嵌入式「再试一次 / 看标准解 / 点赞 / 分享 / 返回残局坊」 | 策划：`docs/planning/tactical-puzzle-workshop-v1.md`；协议与表：5 份 `.proto` + `Dungeon`/`PlayMode`/`Tip`/`MessageLimiter.xlsx`（`dev.bat gen` exit 0，83 表）；C++ `battle`/`scene`（`tactical_puzzle_rules.h`、`turn_battle_engine.{h,cpp}`、`player_battle.cpp`、`trial_journal_battle_test.cpp`）；Go `match`（`internal/puzzle/spec{,_test}.go`、`internal/authority/{tactical_puzzle,schema,store,completion,role_fence_purge}.go`、`internal/constants/errors{,_test}.go`、`internal/logic/{tactical_puzzle_logic,tactical_puzzle_logic_test,battle_replay_policy,gather,global_match}.go`、`internal/server/matchserviceserver.go`）。验证：`test_cpp_no_raw_pointer_member.py` **13/13**、`test_cpp_thread_sources.py` **5/5**、`check_log_text_english.py` **exit 0**；串行 MSBuild `/m:1` `turn_battle_engine_test.exe` / `scene.exe` / `battle.exe` 全 **0 错误**，`turn_battle_engine_test --gtest_filter=*TacticalPuzzle*` **1/1 PASS**，`bin/scene.exe --validate-tables ../generated/tables` **PASS**（version=104，83 表）；Go `match` 5 包 **369+362 PASS / 0 fail** | Java：`game-battle-engine`（`TacticalPuzzleRules`、`TurnBattleEngine`、`TacticalPuzzleBattleEngineTest` **1/1 PASS**）；`game-scene`（`RankedPresetRules` 支持 `allowEmptyPet`、`PlayerBattleService` 放行 `Dungeon 314` 跨图开局，`PrepareBattleTest` **52/52 PASS**）；`game-match`（`match_feature_tables.proto`/`global_match_tables.proto`、`MatchFeatureTables`、`MatchMethods` 58 方法、`BattleReplayPolicy`、`GatherPlan`/`GatherPipeline`、`GlobalMatchService`/`GlobalMatchStore`、`com.game.match.puzzle.{TacticalPuzzleSpecValidator,TacticalPuzzleStore,TacticalPuzzleService}`、`MatchFeatureConfiguration`、`TacticalPuzzleParityTest`+`MatchMethodsTest`+`LeaseLostTest`+`BattleReplayPolicyTest`+`MatchApplicationContextTest` **66/66 PASS**）；`game-gate`（`MessageRoutesTest` `MatchService` 路由对齐通过）；18 模块 `test-compile` **BUILD SUCCESS**。Unity：`RpcGuard`、`GameClient.TacticalPuzzle`、`TacticalPuzzle{Models,Client}`、`TacticalPuzzle{UiArt,Window,UiRoot,BattleResultHint}`、`CityNpcWindow`、`Social{UiRoot,Window,Window.Fidelity}`、`Battle{UiRoot,Screen,ResultPanel}`、`TacticalPuzzleClientTests` 及 10 张 V2 切片+`.meta`；验证：`sync_tables.ps1`+`gen_messageids.ps1` exit 0、`client_compile_check.ps1` **825/825 0 错误**、离线 Roslyn+NUnit `TacticalPuzzleClientTests` **4/4 PASS**（`TEMP_LEFTOVER_COUNT=0`）、全仓 `12,636/12,636` `.meta` GUID 唯一无冲突（注：Python 仓移植留待后续按需同步） | 已对齐（C++/Go + Java + Unity + 美术全绿） |
+| **① 6 关分岔短局轻肉鸽（零打卡、零战力膨胀、零可交易增量）**：直接演进现役 `WuxingTower`（零新 MySQL 表、`WuxingTowerCompState#12..24` 尾插登记 `persist_schema_gen.txt`、`WuxingTowerBattleContext#6..9` / `WuxingTowerSettlementEcho#5..7`、Scene RPC `585=ChooseWuxingRealmBranch`、`586=ResolveWuxingRealmEvent`）；路线为 `1普通 → 2分岔(精英/奇遇) → 3灵脉普通 → 4分岔(精英/休整) → 5险境精英 → 6终局首领`，所有奇策出图清零。<br>**② 15 枚机制奇策（`601..643`）+ 5 项三同系共鸣 + `procDepth <= 1` 防递归守卫**：破盾返元/绝锋连斩/庚金斩煞/玄毒蔓延/生机反哺/灵宠协战/润脉免耗/寒渊延控/镜花水月/焚盾爆炎/孤注焚天/离火燃魂/镇岳倍反/绝境磐石/坤元借力 + 破军锋芒/生生不息/流云千变/焚城烈焰/不动如山；全部派生追击/溅射/传染/爆盾均受 `WuxingBoonRuntime`（零裸指针）`procDepth <= 1` 与定点数封顶约束。<br>**③ 工程强一致与水平扩展修复（同步根治 V1 历史缺陷）**：移除 V1 进程内内存榜，Scene 彻底无状态，改由 `tlsControlRedis` 使用 `{weekKey}` 同槽 Hash Tag 单条原子 Lua 脚本维护 `self` / `preset` 双榜 Top-200（`ZADD`+`HSET`+`ZREMRANGEBYRANK`+14 天 TTL）与 `15s` 读穿缓存；分离 `run_week_key` 与 `week_key` 保证周一 05:00 跨周不清空在途进度且旧周完赛不污染新周榜；公平 3×3 模式由 `Scene.PrepareBattle` 从服务端权威存档合成 `RankedMatchContext`（零客户端信任）。<br>**④ Unity 客户端全功能接入 + 8 切片预接线**：`WuxingExpansionModels`、`WuxingExpansionsUiArt`（预接线 `UI/Ugui/WuxingRealmV2/` 8 切片）、`SeasonModels`/`SeasonClient`（`585/586` + 双模式 `StartWuxingTowerRun`）、`WuxingTowerPanel`（6 关分岔路线板 + 共鸣横幅 + 奇遇/休整弹层 + 三选一奇策弹层 + 双模式隔离榜）、`CoreMainCityHubPanel` / `CityNpcModels` 与 `WuxingExpansionsTests` | 方案与作图交接：`docs/planning/wuxing-roguelike-realm-v2.md`、`docs/planning/ui-handoff/wuxing-roguelike-realm-v2-ui-handoff.md`；协议：`player_season_comp.proto`、`battle_data.proto`、`player_season.proto`（`585/586`）；C++：`wuxing_expansion_rules.h`、`turn_battle_engine.{h,cpp}`、`configured_battle_effects.cpp`、`player_season.{h,cpp}`、`player_battle.cpp`、`player_season_handler.cpp`、`season_battle_test.cpp`、`player_season_test.cpp`；Go `match` 透明透传 `is_wuxing_tower` 无需改动；Unity：`WuxingExpansionModels.cs`、`WuxingExpansionsUiArt.cs`、`SeasonModels.cs`、`SeasonClient.cs`、`WuxingTowerPanel.cs`、`CoreMainCityHubPanel.cs`、`CityNpcModels.cs`、`WuxingExpansionsTests.cs` | **TODO（按需求暂缓，待下轮同步）**：<br>1. Java：`ContractSync` 同步 3 份 `.proto` 与 `585/586`；`game-player-store` 推进持久台账追加 `WuxingTowerCompState#12..24`；`game-battle-engine` 移植 15 奇策 + 5 共鸣 + `procDepth <= 1`；`game-scene` 移植 6 关分岔/奇遇/休整/跨周保局/公平 3×3 合成与 Redis `{weekKey}` 同槽 Lua 双榜。<br>2. Python：同步 3 份 `.proto` + `schema.pb`，移植 `battle_dropin_effects` 与 `scene_season` 对应 V2 逻辑及 `pytest` | C++ + Unity 已落地（Java / Python 列入 TODO；待 Codex 8 切片导入） |
+
+## 2026-11-27 万象残局坊 V1 + V1.5（玩家自创回合残局解谜工坊 · 公平固定模板 + 作者自证发布 + `#PUZ` 约战分享与标准解法录像 + V1.5 五行灵脉阵眼与本局禁用技能，RPC `575..581`）
+
+| 范围 | C++ / Go 权威版 | Java / Python / Unity 版 | 状态 |
+|---|---|---|---|
+| **① 零日常 / 零战力通胀 / 零可交易产出 UGC 回合解谜闭环**：新增 `Dungeon 314`（`boss_trial_kind=10`、`scene_id=17` 满足外键且跨图放行）、`PlayMode 475`、`MatchService` 7 条 RPC（`575=ListTacticalPuzzles`、`576=GetTacticalPuzzle`、`577=SaveTacticalPuzzleDraft`、`578=DeleteTacticalPuzzle`、`579=StartTacticalPuzzleBattle`、`580=LikeTacticalPuzzle`、`581=GetTacticalPuzzleSolutionReplay`）、`match_error` Tip `16064..16072`、`MessageLimiter` `575..581` 与双权威表（`match_tactical_puzzle` / `match_tactical_puzzle_clear`），`match_formation` 扩列 `tactical_puzzle_context`。<br>**② 严格公平模板与作者自证铁律 + V1.5 盘面加深（零新 UI 图）**：所有挑战者统一借用固定 3×3 免费预设（角色 `101..103`、灵宠 `0/201..203` 支持单人无宠、阵法 `0..5`、回合上限 `1..6`、我方初血/蓝/盾/不利状态 `100031/130051/100190`、1–3 名演武敌 `311..316` 初血 `10..150%`/护盾/先手速修 `±30%`/开场增益 `100140/100160/100250/110070` 物理反震）；**V1.5 尾插 `TacticalPuzzleSpec` 字段 `leyline_element = 10`（全员对称五行灵脉阵眼 `0..5`）与 `banned_skill_id = 11`（须隶属本题预设白名单技能池，四仓引擎同步生效且修复 C++/Java 漏同步 `bannedSkillSet`/`ctx.setBannedSkills` 缺陷）**；仅作者验题局开启受控 PVE 录播（`BattleReplayPolicy`）与 `(puzzle_id, spec_revision)` 确定性 SplitMix64 种子，作者亲手打赢 1 局并存下 `verified_battle_id` 录像后方自动转 `PUBLISHED`，改题自动升 `spec_revision` 回退草稿重验；`ContentGuard`（`TEXT_SCENE_GUILD_NAME`）fail-closed 拦截题名/提示违规词；删角 `RoleFencePurge` 彻底清库；仅限通关后单次幂等点赞与纯零战力荣誉称谓。<br>**③ 10 张 V2 手绘无字透明 PNG-32 切片全量落地**：验收图仓 Azure 提交 `5e3edf364082`（`tactical-puzzle-workshop-v1` V2），SHA-256、尺寸与九宫格 `spriteBorder` 逐项核对后导入 `Assets/Resources/UI/Ugui/TacticalPuzzleV1/`，打通归元城齐问锋入口、双列大厅 + 五页签 + 6 标签筛选 + 左右双栏摆盘编辑器（含 V1.5 灵脉阵眼与本局禁用技选项）、世界聊天 `#PUZ:<id>#` 交互卡片、战斗回合上限/残局角标 HUD 与结算嵌入式「再试一次 / 看标准解 / 点赞 / 分享 / 返回残局坊」 | 策划：`docs/planning/tactical-puzzle-workshop-v1.md`；协议与表：5 份 `.proto` + `Dungeon`/`PlayMode`/`Tip`/`MessageLimiter.xlsx`（`dev.bat gen` exit 0，83 表）；C++ `battle`/`scene`（`tactical_puzzle_rules.h`、`turn_battle_engine.{h,cpp}`、`player_battle.cpp`、`trial_journal_battle_test.cpp`）；Go `match`（`internal/puzzle/spec{,_test}.go`、`internal/authority/{tactical_puzzle,schema,store,completion,role_fence_purge}.go`、`internal/constants/errors{,_test}.go`、`internal/logic/{tactical_puzzle_logic,tactical_puzzle_logic_test,battle_replay_policy,gather,global_match}.go`、`internal/server/matchserviceserver.go`）。验证：`test_cpp_no_raw_pointer_member.py` **13/13**、`test_cpp_thread_sources.py` **5/5**、`check_log_text_english.py` **exit 0**；串行 MSBuild `/m:1` `turn_battle_engine_test.exe` / `scene.exe` / `battle.exe` 全 **0 错误**，`turn_battle_engine_test --gtest_filter=*TacticalPuzzle*` **1/1 PASS**（含 V1.5 `ActiveTournamentLeyline` / `IsSkillBanned(10039u)`），`bin/scene.exe --validate-tables ../generated/tables` **PASS**（version=104，83 表）；Go `match` 5 包 **369 PASS / 0 fail** | Java：`game-battle-engine`（`TacticalPuzzleRules`、`TurnBattleEngine`、`TacticalPuzzleBattleEngineTest` **1/1 PASS** 含 V1.5 `isSkillBannedForTest`）；`game-scene`（`RankedPresetRules`、`PlayerBattleService`，`PrepareBattleTest` **52/52 PASS**）；`game-match`（`TacticalPuzzleSpecValidator`、`TacticalPuzzleStore`、`TacticalPuzzleService` 5 套件 **66/66 PASS**）；18 模块 `test-compile` **BUILD SUCCESS**。Python：`battle_data.proto`（`10/11`）+ `schema.pb` + `match/tactical_puzzle.py` + `nodes/{battle_dropin_effects,battle}.py` + `tests/test_cpp_6b4a_tactical_puzzle_battle_gate.py` **7/7 PASS**（含 V1.5 专项测试）+ `test_trial_journal_v4_seasonal.py` **3/3 PASS**。Unity：`TacticalPuzzle{Models,Client,UiArt,Window,UiRoot,BattleResultHint}` + `TacticalPuzzleClientTests` 及 10 张 V2 切片+`.meta`；验证：`client_compile_check.ps1` **825/825 0 错误**、离线 Roslyn+NUnit `TacticalPuzzleClientTests` **4/4 PASS**（`TEMP_LEFTOVER_COUNT=0`） | 已对齐（四仓 + 美术全绿） |
 
 ## 2026-11-27 战前技能禁选 V2（每方 3 禁 + 1 保「护招破禁」+「队友已带」防误禁 + 开局亮牌揭示，零新 RPC / 零新配表列，5 枚重做切片落地）
 
@@ -1106,17 +1112,14 @@ Java 版 `0.1.0-SNAPSHOT` 的节点链路已有等价机制,不需要改代码:
 
 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
 
-### 2026-11-05 排行榜读写按名次索引走(Java 待做)
+### 2026-11-05 排行榜读写按名次索引走（Java 已对齐）
 
-主仓缺口清单(`docs/handoff/server-gap-audit-20261101.md`)第 17、18 条,Go 版已落码、未编译,说明见主仓 `docs/PROGRESS.md` 2026-11-05「排行榜读写按名次索引走」。Java 版 `0.1.0-SNAPSHOT` 的 `game-rank` 有同样的问题:`RankStore` 分页与附近名次每次都对全榜做 `ROW_NUMBER()`(`RankStore.java` 约 :272、:292),开销随榜长线性增长;提交在榜行锁里按实体逐条读写。待做,口径与 Go 版相同:
+主仓缺口清单(`docs/handoff/server-gap-audit-20261101.md`)第 17、18 条。2026-11-27 已在 `game-rank` 完整对齐（`1084e91b`）：
 
-- 分数行加排序键 `order_key`:升序榜 = 分数,降序榜 = 分数按位取反(`-score-1`,不溢出);名次索引改为 `(board_id, generation, order_key, achieved_ms, entity_id)`,两种榜同一方向。
-- 榜行加 `entries`:提交新增实体时加、删行时减,都在榜行锁里与分数同事务;读路径的总数直接取它。
-- 分页顺着名次索引 `LIMIT / OFFSET` 取;本人名次 = 1 + 索引上严格排在他前面的行数;附近名次从本人位置前后各扫 radius 行;页、总数、本人取自同一可重复读快照。
-- 提交整批一次读、一次多行写,合并规则不变;封榜取前 N 也顺着索引取。
-- 客户端契约不变:没有新消息、字段和 tip 码;名次仍是精确值、连续不并列。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- `rank_tables.proto`：`RankScoreRow` 追加 `order_key = 7`（升序 = `score`，降序 = `~score`，`Long.MIN_VALUE` 零溢出），名次索引改为 `(board_id, generation, order_key, achieved_ms, entity_id)`；`RankBoardRow` 追加 `entries = 18`；
+- `RankStore`：`open` 初始化 `entries = 0`；`submit` 在同一事务里一次批量 `IN (...)` 读 + 一次多行 `INSERT ... ON DUPLICATE KEY UPDATE` 写 `order_key` 并按新增行数更新 `entries`；`remove` 删行时同步 `entries - 1`；`freeze` 顺名次索引 `ORDER BY order_key, achieved_ms, entity_id LIMIT ?`；`page` 与 `around` 彻底移除 `ROW_NUMBER()` 与全表 `COUNT(*)`，总数直读 `b.entries`，页与附近名次顺索引取，本人名次按严格前序行计数；
+- `RankRewardWorker`：同步对齐收到 `kMailRecipientDeleted(17011)` 时调用 `RankStore.abandon` 终结放弃不再无限重试。
+- **验证**：`game-rank` `RankIndexAndLimitTest`（3）+ `RankProductionPolicyTest`（3）**6/6 PASS**。
 
 ### 2026-11-05 玩家断线保留与短重连回原处(Java 待做)
 
@@ -1901,13 +1904,12 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 
 主仓顺带修掉的问题 Java 版也要核对:疏散 / 频道缩容的改派若一律落默认大世界,非默认地图上的玩家会被换地图。
 
-### 2026-11-11 排行榜前 N 名精确、之后显示 N+(主仓第 18 条已落码未编译,改客户端契约,Java 待做)
+### 2026-11-11 排行榜前 N 名精确、之后显示 N+（Java 已对齐）
 
-主仓说明见 `docs/PROGRESS.md` 2026-11-11「排行榜前 N 名精确、之后显示 N+」与 `docs/design/leaderboard-system.md` 同名一节。负责人在两条路里定了这一条,上面 11-11 那张表里「第 18 条残余:待定」作废。**这是客户端契约变更,两版本该同批改**;按负责人「java 留到 todo」,本轮只登记。
+主仓说明见 `docs/PROGRESS.md` 2026-11-11「排行榜前 N 名精确、之后显示 N+」与 `docs/design/leaderboard-system.md` 同名一节。2026-11-27 已在 `game-rank` 完整对齐（`1084e91b`）：
 
-| 功能 | 主仓 | Java | 待做内容 |
-|---|---|---|---|
-| 排行榜精确名次上限 N = 10000 | 已落码未编译 | 待做 | `game-rank` 的分页与附近名次照主仓口径改:翻页只到第 N 名(页数按 min(总数, N) 算,末页截在第 N 名);本人名次的范围计数最多数 N 行,附近名次最多数 N + radius 行;排在 N 之后的条目 `rank = 0`、`beyond_rank_limit = true`,回包带 `rank_limit`,`total_count` 仍是真实人数。协议字段:`RankEntry.beyond_rank_limit = 6`、`GetRankPageResponse.rank_limit = 10`、`GetRankAroundResponse.rank_limit = 5`(同一份 `proto/rank/rank.proto`)。Unity 客户端已在主仓这一轮改好(显示「10000+」) |
+- `RankStore.RANK_EXACT_LIMIT = 10_000L`：分页按 `min(entries, rankLimit)` 截断页数与末页；`page` 本人名次范围计数封顶 `rankLimit`，`around` 范围计数封顶 `rankLimit + radius`；超过 `rankLimit` 的条目返回 `rank = 0`、`beyond_rank_limit = true`，响应带 `rank_limit` 且 `total_count` 保持真实人数。
+- **验证**：`game-rank` `RankIndexAndLimitTest`（含精确上限翻页、末页截断、`N+` 本人与附近名次与 `total_count` 校验）**6/6 PASS**。
 
 ### 2026-11-12 战斗剧本(主仓已落码未编译,改客户端契约,Java 待做)
 
@@ -2632,16 +2634,14 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 2. **`GetQueueStatusResponse.request_cancelled` 与 `CancelQueue`**：`game-match` `GlobalMatchStore.requestCancelled` 在当前会话确为现主人且 `match_global_join_intent` 原件归属前主人时回 `true`；`cancel` / `cancelUnit` 在现主人点名前主人的票、Join 意图或整队单位时回成功且不动前主人原件；旧会话自身失效仍抛异常拒绝。
 3. **验证**：`game-login` `EnterGameHandlerTest` + `EnterGameZoneTravelTest` + `EnterGameSecondLegSqlTest` **79/79 PASS**；`game-match` `GlobalMatchTransferIntentTest` + `GlobalMatchStoreIntegrationTest`（72/72 离线单测 PASS）。
 
-### 2026-11-19 实时技能冷却与 Buff 跨重登保留(主仓已落码未编译,Java 待做)
+### 2026-11-19 实时技能冷却与 Buff 跨重登保留（Java 已对齐）
 
-主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。规则见主仓 `docs/design/realtime-cooldown-buff-persistence.md`,验证步骤见主仓 `docs/PROGRESS.md` 同日同名条目。客户端不可见,不涉及协议;配置表的新列两版共用。要对齐的行为:
+规则见主仓 `docs/design/realtime-cooldown-buff-persistence.md`。2026-11-27 已在 `game-player-store` 与 `game-scene` 完整落地：
 
-1. **技能冷却全部随玩家存档保留**,不设时长阈值。存冷却组号 + 开始时刻(UTC 毫秒),就绪时刻 = 开始时刻 + Cooldown 表 `duration`,离线期间照常走。下线重登、换节点、跨 zone 后冷却接着算,不能靠重登清冷却。加载时开始时刻晚于本机当前时刻的压到当前时刻。
-2. **Buff 只保留 Buff 表 `keep_on_logout = 1` 的行**(新列,字段号 54,只服务端读,现有行全是 0)。存表号、层数、到期时刻(UTC 毫秒,永久记 0);其余 Buff 实体重建即清。
-3. **恢复按加载时的表裁剪**:表里没有或改成 0 的丢弃;已到期的丢弃;层数夹到 `[1, max_layer]`;剩余时长不超过表里的时长;存档时永久、表改成有时限的从现在起算一个整时长。恢复不重跑免疫、驱散、叠层判断,按系统施加(没有施法者)处理。
-4. 保留的行在线时也不按施法者分条(按 `no_caster = 1` 叠层);挂在别的 Buff 子项表里的条目不单独存,由父项恢复后重新挂。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+1. **持久化载体与台账**：`game-player-store` `player_state.proto` 追加 `skill_cooldowns = 26`（`SkillCooldownListState`）与 `saved_buffs = 27`（`SavedBuffListState`），追加第 26 代持久结构台账 `0026.schema` 并通过 `PlayerStateSchemaLedgerTest`。
+2. **技能冷却跨重登保留**：`PlayerSkillState` 与 `SkillService` 切为 UTC 墙钟毫秒全量记录并随 `ScenePlayer.persistentState()` 落盘（按无符号 `cooldown_id` 升序写出、不按时钟过滤，离线照常计时），进场由 `SkillService.initializeOnLoad`（已接入 `SceneNode` 加载初始化钩子）将未来开始时刻压回当前时刻，空列表带未知字段往返保活。
+3. **保留 Buff（`keep_on_logout = 1`）**：新增 `PlayerRealtimeBuffs`，在线按 `no_caster = 1` 叠层、子 Buff 不单存且恢复后重挂；加载按当刻 `BuffTable` 裁剪（表为 0 或已到期丢弃、层数夹 `[1, max_layer]`、永久改有限从加载时刻起算整时长、剩余不超过表时长且未超时按原 `expire_at_ms` 零漂移保留）。
+4. **验证**：`game-player-store` `PlayerStateSchemaLedgerTest` **1/1 PASS**；`game-scene` `RealtimeCooldownBuffPersistenceTest` + `SkillFeatureTest` + `SkillRulesTest` + `BattleSnapshotsTest`（**48/48 PASS**）及 `SceneWorldTest`（**43/43 PASS**）。
 
 ### 2026-11-19 全服匹配网络探测目标在机房内按玩家分散（Java 已对齐）
 
@@ -2810,14 +2810,13 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-20 实时 Buff 再施加刷新时长、带进回合战斗按剩余时长换算(主仓已落码未编译,Java 待做)
+### 2026-11-20 实时 Buff 再施加刷新时长、带进回合战斗按剩余时长换算（Java 已对齐）
 
-主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。是 11-19「实时技能冷却与 Buff 跨重登保留」的补充,说明见主仓 `docs/design/realtime-cooldown-buff-persistence.md` §2.6 与 `docs/PROGRESS.md` 同日条目。要对齐的行为:
+2026-11-27 已随「实时技能冷却与 Buff 跨重登保留」一并对齐：
 
-1. 同一施法者再施加同一条实时 Buff:层数照旧加,剩余时长回到表里的整时长(重挂满时),与回合战斗刷新持续回合同一口径;永久与瞬时的不动。
-2. 带进回合战斗的实时 Buff 按这条剩下的时间换算回合(`max(1, ceil(ms / 6000))`),不按表里的全量时长;已经到点的不带。客户端在战斗里看到的剩余回合因此变准,协议不变。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+1. `PlayerRealtimeBuffs.apply` / `SkillService.applyRealtimeBuff` 对同表同有效施法者的再施加在叠层（上限 `max_layer`）同时将有限时长 Buff 刷新为 `nowMs + 表时长`，永久与瞬时 Buff 不动；
+2. `SceneBattleTables` 载入 `BuffTable`，`BattleSnapshots.build(..., nowMs)` 与 `PlayerBattleService` 按 `clock.epochMillis()` 将未到期的非控制/非瞬时实时 Buff 按 `max(1, ceil(remainingMs / 6000))` 换算 `remain_rounds`（永久为 0、已到期剔除、本人施法者映射为 `playerId`）。
+- **验证**：`RealtimeCooldownBuffPersistenceTest` + `BattleSnapshotsTest` **23/23 PASS**。
 
 ### 2026-11-20 活动中心的活跃度领取与领取记录保留规则（Java 已对齐）
 
@@ -2847,15 +2846,13 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 - `game-common` `SourcePrefixRateLimiter` 已按 IPv4 /24、IPv6 /64 仅对公网源地址生效（私网、回环、链路本地、CGNAT `100.64/10`、`0/8`、IPv6 `::/64` / `fc00::/7` / `fe80::/10` 全部放行不限）。
 - **验证**：`game-common` `NetProtectionTest` **2/2 PASS**、`game-battle` `BattleEdgeProtectionTest` **2/2 PASS**。
 
-### 2026-11-20 更正:实时 Buff 存档恢复时「表里查不到这一行」改为原样带回(主仓已落码未编译,Java 待做)
+### 2026-11-20 更正:实时 Buff 存档恢复时「表里查不到这一行」改为原样带回（Java 已对齐）
 
-主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。更正 11-19「实时技能冷却与 Buff 跨重登保留」第 3 条里「表里没有……的丢弃」:
+2026-11-27 已随 `PlayerRealtimeBuffs` / `PlayerSkillState` 一并落地并通过 `RealtimeCooldownBuffPersistenceTest` 验证：
 
-1. 本节点表里查不到行的保留 Buff 条目(更新版本加的行,或还没热更到)不生效,但原样带回存档(连未知字段),过了它自己的到期时刻才丢;表里有这一行而标记是 0 的,照旧丢弃。
-2. 冷却列表里没有记录、只带着更新版本字段时,也照样保留那些字段。
-3. 恢复出来的到期时刻与存档里的一字不差,重建多少次都不漂移。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+1. 本节点表里查不到行的保留 Buff 条目不生效、原样暂存于 `unresolved`（含条目未知字段）带回存档，直到超过自身 `expire_at_ms` 才清理；表里有行且 `keep_on_logout = 0` 照旧丢弃；
+2. `PlayerSkillState` 在冷却列表为空但带有更新版本列表级未知字段时照样保留往返；
+3. 未超过表时长的保留 Buff 恢复时沿用存档原始 `expire_at_ms`，连续重建存盘零漂移。
 
 ### 2026-11-20 scene 按 (gate 实例, session_id) 认会话、login 跨实例同号改回踢线（Java 已对齐）
 

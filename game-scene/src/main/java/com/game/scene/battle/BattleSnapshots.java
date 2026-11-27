@@ -1,6 +1,7 @@
 package com.game.scene.battle;
 
 import com.game.proto.BaseAttributesComp;
+import com.game.proto.BattleBuffEntry;
 import com.game.proto.BattleItemEntry;
 import com.game.proto.BattlePetSnapshot;
 import com.game.proto.BattlePlayerSnapshot;
@@ -8,7 +9,9 @@ import com.game.proto.BattleRouting;
 import com.game.scene.player.BagItem;
 import com.game.scene.player.BagType;
 import com.game.scene.player.PlayerAttributes;
+import com.game.scene.player.PlayerRealtimeBuffs;
 import com.game.scene.world.ScenePlayer;
+import com.game.table.BuffTable;
 import com.game.table.ClassTable;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +28,10 @@ public final class BattleSnapshots {
 
     /** 派生速度为 0 时的兜底（基线 {@code pb.cpp:99-102}，2026-09-14 单位 ×12）。 */
     public static final long FALLBACK_SPEED = 120;
+    private static final int BUFF_TYPE_STUN = 30;
+    private static final int BUFF_TYPE_SILENCE = 31;
+    private static final int BUFF_TYPE_FREEZE = 52;
+    private static final long MILLIS_PER_BATTLE_ROUND = 6_000L;
 
     private BattleSnapshots() {
     }
@@ -37,7 +44,7 @@ public final class BattleSnapshots {
      */
     public static BattlePlayerSnapshot build(ScenePlayer player, SceneBattleTables tables, List<BattlePetSnapshot> pets,
                                              BattleRouting routing) {
-        return build(player, tables, pets, routing, 0);
+        return build(player, tables, pets, routing, 0, System.currentTimeMillis());
     }
 
     /**
@@ -45,6 +52,14 @@ public final class BattleSnapshots {
      */
     public static BattlePlayerSnapshot build(ScenePlayer player, SceneBattleTables tables, List<BattlePetSnapshot> pets,
                                              BattleRouting routing, int activeSeasonId) {
+        return build(player, tables, pets, routing, activeSeasonId, System.currentTimeMillis());
+    }
+
+    /**
+     * 组快照（含实时 Buff 按 {@code nowMs} 剩余时长换算回合的权威入口）。
+     */
+    public static BattlePlayerSnapshot build(ScenePlayer player, SceneBattleTables tables, List<BattlePetSnapshot> pets,
+                                             BattleRouting routing, int activeSeasonId, long nowMs) {
         PlayerAttributes attributes = player.attributes();
         PlayerAttributes.Derived derived = attributes.derived();
         long health = attributes.health();
@@ -145,6 +160,41 @@ public final class BattleSnapshots {
             items.merge(item.configId(), item.size(), Long::sum);
         }
         items.forEach((config, count) -> snapshot.addItems(BattleItemEntry.newBuilder().setItemTableId(config).setCount(count)));
+        // 携带场景实时持续 Buff：剔除控制类、瞬时与已到期条目；有限时长按剩余毫秒换算回合 max(1, ceil(ms / 6000))
+        for (PlayerRealtimeBuffs.ActiveBuff buff : player.realtimeBuffs().activeBuffs()) {
+            BuffTable row = tables.buff(buff.buffTableId());
+            if (row == null) {
+                continue;
+            }
+            int type = row.getBuffType();
+            if (type == BUFF_TYPE_STUN || type == BUFF_TYPE_SILENCE || type == BUFF_TYPE_FREEZE) {
+                continue;
+            }
+            boolean permanent = row.getInfiniteDuration() != 0;
+            if (!permanent && PlayerRealtimeBuffs.finiteDurationMs(row) <= 0L) {
+                continue;
+            }
+            int remainRounds;
+            if (permanent) {
+                remainRounds = 0;
+            } else if (buff.expireAtMs() != 0L) {
+                if (PlayerRealtimeBuffs.isExpired(buff.expireAtMs(), nowMs)) {
+                    continue;
+                }
+                long remainingMs = buff.expireAtMs() - nowMs;
+                long rounds = (remainingMs + MILLIS_PER_BATTLE_ROUND - 1L) / MILLIS_PER_BATTLE_ROUND;
+                remainRounds = (int) Math.min(Integer.MAX_VALUE, Math.max(1L, rounds));
+            } else {
+                remainRounds = 0;
+            }
+            long casterId = (buff.casterId() != 0L && buff.casterId() == player.entity()) ? player.playerId() : 0L;
+            snapshot.addBuffs(BattleBuffEntry.newBuilder()
+                    .setBuffId(buff.buffId())
+                    .setBuffTableId(buff.buffTableId())
+                    .setLayer(buff.layer())
+                    .setRemainRounds(remainRounds)
+                    .setCasterId(casterId));
+        }
         return snapshot.build();
     }
 }

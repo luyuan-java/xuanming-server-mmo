@@ -733,6 +733,7 @@ public class SceneNode implements SmartLifecycle {
                     attributes.initializeOnLoad(player);
                     petService.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
+                    skills.initializeOnLoad(player);
                     if (appearanceService != null) {
                         appearanceService.initializeOnLoad(player);
                     }

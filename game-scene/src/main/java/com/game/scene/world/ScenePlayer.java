@@ -28,6 +28,7 @@ import com.game.scene.player.PlayerMissions;
 import com.game.scene.player.PlayerMysteryMerchant;
 import com.game.scene.player.PlayerSeason;
 import com.game.scene.player.PlayerPets;
+import com.game.scene.player.PlayerRealtimeBuffs;
 import com.game.scene.player.PlayerSkillState;
 import com.game.scene.player.Wallet;
 import com.google.protobuf.UnknownFieldSet;
@@ -91,8 +92,10 @@ public final class ScenePlayer {
     private final PlayerAttributes attributes;
     /** 四个固定背包（存档原样收下，进场景前由背包服务按配表规整）。 */
     private final PlayerBags bags;
-    /** 技能运行态（施法阶段、冷却、行为 / 战斗状态；不持久化，随实例清空）。 */
+    /** 技能运行态（施法阶段与行为/战斗状态不持久化；冷却开始时刻随玩家存档全量保留）。 */
     private final PlayerSkillState skillState = new PlayerSkillState();
+    /** 实时场景 Buff 运行态与下线保留存档（仅 keep_on_logout=1 的条目持久化，加载规整前原样暂存）。 */
+    private final PlayerRealtimeBuffs realtimeBuffs;
     /** 任务（存档原样收下，派生索引由任务服务在进场景前重建）。 */
     private final PlayerMissions missions;
     /** 宝宝（存档原样收下，进场景前由宝宝服务纠正出战号、同步等级）。 */
@@ -260,6 +263,12 @@ public final class ScenePlayer {
         this.mailOutbox = state.hasMailOutbox()
                 ? com.game.scene.player.PlayerMailOutbox.restore(state.getMailOutbox())
                 : com.game.scene.player.PlayerMailOutbox.empty();
+        if (state.hasSkillCooldowns()) {
+            this.skillState.restoreCooldowns(state.getSkillCooldowns());
+        }
+        this.realtimeBuffs = state.hasSavedBuffs()
+                ? PlayerRealtimeBuffs.fromSaved(state.getSavedBuffs())
+                : PlayerRealtimeBuffs.empty();
     }
 
     public long playerId() {
@@ -653,6 +662,12 @@ public final class ScenePlayer {
         if (!mailOutbox.isPristine()) {
             state.setMailOutbox(mailOutbox.toState());
         }
+        if (!skillState.isCooldownStatePristine()) {
+            state.setSkillCooldowns(skillState.toCooldownState());
+        }
+        if (!realtimeBuffs.isPristine()) {
+            state.setSavedBuffs(realtimeBuffs.toState());
+        }
         return state.build();
     }
 
@@ -683,6 +698,11 @@ public final class ScenePlayer {
 
     public PlayerSkillState skillState() {
         return skillState;
+    }
+
+    /** 玩家实时场景 Buff 运行态与下线保留存档（逻辑线程上读写；加载规整经 {@code SkillService.initializeOnLoad}）。 */
+    public PlayerRealtimeBuffs realtimeBuffs() {
+        return realtimeBuffs;
     }
 
     /** 玩家的任务（逻辑线程上读写；写入只经任务服务）。 */

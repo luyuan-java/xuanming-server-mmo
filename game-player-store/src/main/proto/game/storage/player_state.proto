@@ -69,6 +69,29 @@ message PlayerState {
   PlayerTravelPassState travel_pass = 24;
   // 待寄个人邮件出箱（名匠代打 95% 净银两分成等，与货币/背包同事务围栏提交，落盘确认后再经 MailAdmin 异步投递）。
   PlayerMailOutboxState mail_outbox = 25;
+  // 实时技能冷却开始时刻（UTC 墙钟毫秒，全量保留，跨重登/换节点/跨 zone 接着算；含未知字段保活）。
+  SkillCooldownListState skill_cooldowns = 26;
+  // 实时下线保留 Buff（仅 keep_on_logout=1 的条目，按 buff_table_id 升序写出，UTC 绝对到期毫秒，0=永久；含未知字段与查不到表行的原样带回）。
+  SavedBuffListState saved_buffs = 27;
+}
+
+message SkillCooldownEntryState {
+  uint32 cooldown_id = 1;
+  uint64 start_ms = 2;
+}
+
+message SkillCooldownListState {
+  repeated SkillCooldownEntryState entries = 1;
+}
+
+message SavedBuffEntryState {
+  uint32 buff_table_id = 1;
+  uint32 layer = 2;
+  uint64 expire_at_ms = 3;
+}
+
+message SavedBuffListState {
+  repeated SavedBuffEntryState entries = 1;
 }
 
 message TravelPassSeasonProgressState {

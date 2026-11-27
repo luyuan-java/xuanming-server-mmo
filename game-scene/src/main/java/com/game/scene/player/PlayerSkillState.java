@@ -1,6 +1,9 @@
 package com.game.scene.player;
 
 import com.game.common.combatai.StateMutexMatrix;
+import com.game.player.store.state.SkillCooldownEntryState;
+import com.game.player.store.state.SkillCooldownListState;
+import com.google.protobuf.UnknownFieldSet;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -10,12 +13,11 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 
 /**
- * 玩家的技能运行态（只在场景逻辑线程上读写；<b>不持久化</b>，随场景内的玩家实例创建与丢弃，同基线组件不进存档）：
- * 进行中的一次施法（阶段 + 截止时刻）、各冷却组的开始时刻、行为状态（战斗 / 跟随 / 骑乘）及 64 位位图缓存、
- * 战斗状态（沉默等，来源 buff 号集合）及 64 位位图缓存，以及主角权威状态位图同步基线。
+ * 玩家的技能运行态（只在场景逻辑线程上读写）：
+ * 进行中的一次施法（阶段 + 截止时刻，不持久化）、各冷却组的开始时刻（UTC 墙钟毫秒，<b>随玩家存档全量保留</b>，跨重登/换节点/跨 zone 接着算）、
+ * 行为状态（战斗 / 跟随 / 骑乘）及 64 位位图缓存、战斗状态（沉默等，来源 buff 号集合）及 64 位位图缓存，以及主角权威状态位图同步基线。
  *
- * <p>时刻都是单调时钟纳秒（{@code SceneClock.nanoTime}），比较一律用差值，不怕回绕。阶段不靠定时器推进：
- * 截止时刻存在这里，下次放技能时由技能服务按截止时刻顺次结算（前一阶段的截止时刻就是下一阶段的起点，不会因结算晚了被拉长）。
+ * <p>施法阶段时刻用单调时钟纳秒（{@code SceneClock.nanoTime}），冷却开始时刻用 UTC 墙钟毫秒（{@code SceneClock.epochMillis}）。
  */
 public final class PlayerSkillState {
 
@@ -39,8 +41,12 @@ public final class PlayerSkillState {
     }
 
     private Cast cast;
-    /** 冷却组号 → 开始时刻。 */
-    private final Map<Integer, Long> cooldownStarts = new HashMap<>();
+    /** 冷却组号 → 开始时刻（UTC 墙钟毫秒，无符号升序写出，避免存盘字节顺序抖动）。 */
+    private final TreeMap<Integer, Long> cooldownStarts = new TreeMap<>(Integer::compareUnsigned);
+    /** 冷却列表级未知字段（混版本保护：即便 entries 为空也原样保留）。 */
+    private UnknownFieldSet cooldownUnknownFields = UnknownFieldSet.getDefaultInstance();
+    /** 单条冷却记录级未知字段。 */
+    private final Map<Integer, UnknownFieldSet> cooldownEntryUnknownFields = new HashMap<>();
     /** 当前行为状态（基线 eActorState：0 战斗、1 跟随、2 骑乘），按编号升序遍历。 */
     private final TreeSet<Integer> actionStates = new TreeSet<>();
     /** 与 {@link #actionStates} 同步维护的 64 位 O(1) 行为状态位图缓存。 */
@@ -64,15 +70,70 @@ public final class PlayerSkillState {
         this.cast = cast;
     }
 
+    /** 冷却组的开始时刻（UTC 墙钟毫秒）；未记录过为 null。 */
     public Long cooldownStart(int cooldownId) {
         return cooldownStarts.get(cooldownId);
     }
 
-    public void startCooldown(int cooldownId, long nowNanos) {
+    /** 记录冷却组开始时刻（UTC 墙钟毫秒）；0 号冷却组不登记。 */
+    public void startCooldown(int cooldownId, long nowEpochMillis) {
         if (cooldownId == 0) {
             return;
         }
-        cooldownStarts.put(cooldownId, nowNanos);
+        cooldownStarts.put(cooldownId, nowEpochMillis);
+    }
+
+    /** 从存档恢复全部技能冷却与未知字段（加载规整前原样暂存，空列表但带未知字段也保留）。 */
+    public void restoreCooldowns(SkillCooldownListState state) {
+        cooldownStarts.clear();
+        cooldownEntryUnknownFields.clear();
+        if (state == null) {
+            cooldownUnknownFields = UnknownFieldSet.getDefaultInstance();
+            return;
+        }
+        cooldownUnknownFields = state.getUnknownFields();
+        for (SkillCooldownEntryState entry : state.getEntriesList()) {
+            int cooldownId = entry.getCooldownId();
+            if (cooldownId == 0) {
+                continue;
+            }
+            cooldownStarts.put(cooldownId, entry.getStartMs());
+            if (!entry.getUnknownFields().asMap().isEmpty()) {
+                cooldownEntryUnknownFields.put(cooldownId, entry.getUnknownFields());
+            }
+        }
+    }
+
+    /** 加载规整：写盘节点时钟超前导致开始时刻晚于本机当前时刻的，压回当前时刻（剩余至多一个整冷却）。 */
+    public void clampLoadedCooldowns(long nowEpochMillis) {
+        for (Map.Entry<Integer, Long> entry : cooldownStarts.entrySet()) {
+            long startMs = entry.getValue();
+            if (Long.compareUnsigned(startMs, nowEpochMillis) > 0) {
+                entry.setValue(nowEpochMillis);
+            }
+        }
+    }
+
+    /** 是否无任何持久冷却记录且无列表级未知字段（新号或老档省略写该段）。 */
+    public boolean isCooldownStatePristine() {
+        return cooldownStarts.isEmpty() && cooldownUnknownFields.asMap().isEmpty();
+    }
+
+    /** 导出持久冷却状态：不按时钟剔除到期项，保证存档字节只由状态变化驱动。 */
+    public SkillCooldownListState toCooldownState() {
+        SkillCooldownListState.Builder builder = SkillCooldownListState.newBuilder()
+                .setUnknownFields(cooldownUnknownFields);
+        for (Map.Entry<Integer, Long> entry : cooldownStarts.entrySet()) {
+            SkillCooldownEntryState.Builder row = SkillCooldownEntryState.newBuilder()
+                    .setCooldownId(entry.getKey())
+                    .setStartMs(entry.getValue());
+            UnknownFieldSet entryUnknown = cooldownEntryUnknownFields.get(entry.getKey());
+            if (entryUnknown != null && !entryUnknown.asMap().isEmpty()) {
+                row.setUnknownFields(entryUnknown);
+            }
+            builder.addEntries(row);
+        }
+        return builder.build();
     }
 
     /** 当前行为状态编号（升序，只读；修改走 {@link #addActionState} / {@link #removeActionState} 保持位图同步）。 */

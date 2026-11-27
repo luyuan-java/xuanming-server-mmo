@@ -386,7 +386,7 @@ public final class PlayerBattleService implements BattleHooks {
             snapshot = rankedSnap.get();
         } else {
             BattlePlayerSnapshot.Builder snapBuilder = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route,
-                            world == null ? 0 : world.activeSeasonId()).toBuilder()
+                            world == null ? 0 : world.activeSeasonId(), clock.epochMillis()).toBuilder()
                     .setPetCaptureSlots(pets.availableCaptureSlots(player));
             if (seasonService != null) {
                 int weeklyAffix = seasonService.activeWeeklyAffixId(clock.epochMillis());

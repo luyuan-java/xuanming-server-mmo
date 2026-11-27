@@ -2,6 +2,7 @@ package com.game.scene.battle;
 
 import com.game.battle.engine.BattleRules;
 import com.game.battle.engine.BattleTableFingerprint;
+import com.game.table.BuffTable;
 import com.game.table.ClassTable;
 import com.game.table.ConfigTables;
 import com.game.table.DungeonTable;
@@ -24,23 +25,31 @@ import java.util.Set;
 public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
                                 Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes,
                                 RankedPresetRules.Tables ranked, Map<Integer, DungeonTable> dungeons,
-                                Map<Integer, SkillVfxCosmeticTable> skillVfxCosmetics) {
+                                Map<Integer, SkillVfxCosmeticTable> skillVfxCosmetics,
+                                Map<Integer, BuffTable> buffs) {
 
     public SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
                              Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes) {
-        this(fingerprint, skills, castableSkills, battleUsableItems, classes, null, Map.of(), Map.of());
+        this(fingerprint, skills, castableSkills, battleUsableItems, classes, null, Map.of(), Map.of(), Map.of());
     }
 
     public SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
                              Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes,
                              RankedPresetRules.Tables ranked) {
-        this(fingerprint, skills, castableSkills, battleUsableItems, classes, ranked, Map.of(), Map.of());
+        this(fingerprint, skills, castableSkills, battleUsableItems, classes, ranked, Map.of(), Map.of(), Map.of());
     }
 
     public SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
                              Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes,
                              RankedPresetRules.Tables ranked, Map<Integer, DungeonTable> dungeons) {
-        this(fingerprint, skills, castableSkills, battleUsableItems, classes, ranked, dungeons, Map.of());
+        this(fingerprint, skills, castableSkills, battleUsableItems, classes, ranked, dungeons, Map.of(), Map.of());
+    }
+
+    public SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Integer> castableSkills,
+                             Set<Integer> battleUsableItems, Map<Integer, ClassTable> classes,
+                             RankedPresetRules.Tables ranked, Map<Integer, DungeonTable> dungeons,
+                             Map<Integer, SkillVfxCosmeticTable> skillVfxCosmetics) {
+        this(fingerprint, skills, castableSkills, battleUsableItems, classes, ranked, dungeons, skillVfxCosmetics, Map.of());
     }
 
     public SceneBattleTables {
@@ -50,6 +59,7 @@ public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Int
         classes = Map.copyOf(classes);
         dungeons = dungeons == null ? Map.of() : Map.copyOf(dungeons);
         skillVfxCosmetics = skillVfxCosmetics == null ? Map.of() : Map.copyOf(skillVfxCosmetics);
+        buffs = buffs == null ? Map.of() : Map.copyOf(buffs);
     }
 
     public static SceneBattleTables from(ConfigTables tables) {
@@ -81,8 +91,19 @@ public record SceneBattleTables(String fingerprint, Set<Integer> skills, Set<Int
                 skillVfxs.put(row.getId(), row);
             }
         }
+        Map<Integer, BuffTable> buffs = new HashMap<>();
+        for (BuffTable row : tables.buff().all()) {
+            if (row.getId() != 0) {
+                buffs.put(row.getId(), row);
+            }
+        }
         return new SceneBattleTables(BattleTableFingerprint.compute(tables), skills, castable, usable, classes,
-                RankedPresetRules.Tables.from(tables), dungeons, skillVfxs);
+                RankedPresetRules.Tables.from(tables), dungeons, skillVfxs, buffs);
+    }
+
+    /** Buff 表行（用于带进回合战斗的实时 Buff 过滤与剩余时长换算）；没有为 null。 */
+    public BuffTable buff(int buffTableId) {
+        return buffTableId == 0 ? null : buffs.get(buffTableId);
     }
 
     /** 已启用的技能特效外观行；未启用或不存在为 null。 */
