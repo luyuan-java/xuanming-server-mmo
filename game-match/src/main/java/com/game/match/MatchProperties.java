@@ -48,7 +48,8 @@ public record MatchProperties(
         Integer gatherMaxInflight,
         Duration requeueBackoff,
         Kafka kafka,
-        Spectate spectate) {
+        Spectate spectate,
+        Integer scriptReviewRetentionDays) {
 
     /** 整请求预算的区间。上限就是缺省值：gate 调 match 的 Dubbo 超时是 5 s。 */
     public static final Duration MIN_REQUEST_BUDGET = Duration.ofMillis(500);
@@ -57,7 +58,22 @@ public record MatchProperties(
     public static final Duration MAX_REQUEUE_BACKOFF = Duration.ofSeconds(60);
     /** PVE 组队人数的缺省配置（同基线 yaml:91-92）。 */
     public static final Map<Integer, Integer> DEFAULT_PVE_TEAM_SIZES = Map.of(1, 5);
+    /** 剧本审核流水保留期（天）：缺省 180，0 = 缺省，允许范围 30..365（battle-script.md §6.4）。 */
+    public static final int DEFAULT_SCRIPT_REVIEW_RETENTION_DAYS = 180;
+    public static final int MIN_SCRIPT_REVIEW_RETENTION_DAYS = 30;
+    public static final int MAX_SCRIPT_REVIEW_RETENTION_DAYS = 365;
 
+    /** 兼容既有 13 参测试构造（剧本审核保留期取缺省 180 天）。 */
+    public MatchProperties(
+            Worker worker, Duration requestBudget, Matcher matcher, Duration ticketTtl, Duration readyTicketTtl,
+            Duration challengeTtl, Rating rating, Map<Integer, Integer> pveTeamSizeByConfigId,
+            FingerprintMode tableFingerprintMode, Integer gatherMaxInflight, Duration requeueBackoff,
+            Kafka kafka, Spectate spectate) {
+        this(worker, requestBudget, matcher, ticketTtl, readyTicketTtl, challengeTtl, rating,
+                pveTeamSizeByConfigId, tableFingerprintMode, gatherMaxInflight, requeueBackoff, kafka, spectate, null);
+    }
+
+    @org.springframework.boot.context.properties.bind.ConstructorBinding
     public MatchProperties {
         worker = worker == null ? new Worker(null, null) : worker;
         requestBudget = positiveOr(requestBudget, MAX_REQUEST_BUDGET, "request-budget");
@@ -87,6 +103,14 @@ public record MatchProperties(
         }
         kafka = kafka == null ? new Kafka(null, null, null, null) : kafka;
         spectate = spectate == null ? new Spectate(null, null) : spectate;
+        if (scriptReviewRetentionDays == null || scriptReviewRetentionDays == 0) {
+            scriptReviewRetentionDays = DEFAULT_SCRIPT_REVIEW_RETENTION_DAYS;
+        } else if (scriptReviewRetentionDays < MIN_SCRIPT_REVIEW_RETENTION_DAYS
+                || scriptReviewRetentionDays > MAX_SCRIPT_REVIEW_RETENTION_DAYS) {
+            throw new IllegalArgumentException("game.match.script-review-retention-days 必须在 ["
+                    + MIN_SCRIPT_REVIEW_RETENTION_DAYS + ", " + MAX_SCRIPT_REVIEW_RETENTION_DAYS
+                    + "] 天内（0 = 缺省 180 天）: " + scriptReviewRetentionDays);
+        }
     }
 
     /**

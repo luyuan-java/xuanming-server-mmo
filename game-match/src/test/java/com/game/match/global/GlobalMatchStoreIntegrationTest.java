@@ -345,13 +345,34 @@ class GlobalMatchStoreIntegrationTest {
         try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE player SET owner_revision=3 WHERE player_id=2301");}
         var current=actor(2301).toBuilder().setOwnerRevision(3).build();
         assertThrows(RuntimeException.class,()->store.requestCancelled(actor(2301),request));
-        assertThrows(RuntimeException.class,()->store.requestCancelled(current,request));
-        assertThrows(RuntimeException.class,()->store.cancel(current,"",request));
+        assertTrue(store.requestCancelled(current,request));
+        assertTrue(store.cancel(current,"",request));
         assertThrows(RuntimeException.class,()->store.cancel(actor(2301),"",UUID.randomUUID().toString()));
+        // 核对过户前原件未被现主人覆盖
+        try(var c=fixture.schemaConnection();var q=c.prepareStatement("SELECT owner_revision FROM match_global_join_intent WHERE player_id=2301 AND request_id=?")){
+            q.setString(1,request);try(var r=q.executeQuery()){assertTrue(r.next());assertEquals(1L,r.getLong(1));}
+        }
         var profile=GlobalProbeProfile.newBuilder().setPlanId("new").setSessionBinding("new").setOwnerAccount(current.getAccount()).setOwnerRevision(3).build();
         assertThrows(RuntimeException.class,()->store.plan(2301,profile.toBuilder().setOwnerRevision(1).build(),store.now()+60_000));
         store.plan(2301,profile,store.now()+60_000);
         assertThrows(RuntimeException.class,()->store.join(current,request,"new","new",3,1,2,1,150_000));
+    }
+    @Test void 过户后整队原件回状态6_成员票终态4由维护关闭整队单位()throws Exception {
+        // 1. 过户后现主人查询过户前整队原件回 state=6；旧会话查询仍被拒
+        var group=party(2350,2351,2352);queued(group);
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE player SET owner_revision=2 WHERE player_id=2351");}
+        var transferredKey=group.key().toBuilder().setOwnerRevision(2).build();
+        assertThrows(RuntimeException.class,()->store.teamIntent(group.key(),group.original().getRequest().toByteString()));
+        var intent=store.teamIntent(transferredKey,group.original().getRequest().toByteString());
+        assertNotNull(intent);assertEquals(6,intent.getState());assertEquals(0L,intent.getBattleId());
+
+        // 2. 整队排队维护时若任一成员原票已为 state=4 且未成局，关闭整队释放其余成员
+        var stuck=party(2360,2361,2362);queued(stuck);
+        try(var c=fixture.schemaConnection();var q=c.createStatement()){q.executeUpdate("UPDATE match_global_ticket SET state=4,formation_id=0 WHERE player_id=2362");}
+        store.repairRegions();
+        assertEquals(4,store.ticket(2361).getState());
+        assertEquals(4,store.ticket(2362).getState());
+        assertEquals(5,store.teamIntent(stuck.key(),stuck.original().getRequest().toByteString()).getState());
     }
     @Test void 多副本策略及探测密钥不一致拒启_不能覆盖既有指纹()throws Exception {
         assertThrows(RuntimeException.class,()->new GlobalMatchStore(data,new GlobalMatchProperties(true,true,31,180,120,GlobalRegionPolicyTest.CONFIG.probeSecret())));

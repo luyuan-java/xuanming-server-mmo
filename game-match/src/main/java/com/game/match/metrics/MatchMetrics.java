@@ -101,6 +101,9 @@ public final class MatchMetrics {
     static final String SPECTATE_INFLIGHT = "game.match.spectate.inflight";
     static final String WATCH_UNPROVEN_CLOSE = "game.match.watch.unproven.close";
     static final String WATCH_REQUESTS_PURGED = "game.match.watch.requests.purged";
+    static final String SCRIPT_REVIEWS_PURGED = "game.match.script.reviews.purged";
+    static final String RETENTION_PURGE_FAILURES = "game.match.retention.purge.failures";
+    static final String RETENTION_OVERDUE_AGE = "game.match.retention.overdue.age";
 
     /** 请求耗时：与 gate / login / trade 同一套 SLO 桶（5 ms～10 s）。 */
     static final Duration[] REQUEST_BUCKETS = {
@@ -246,7 +249,10 @@ public final class MatchMetrics {
      *       它与 {@code DECODE_ERROR} 是仅有的两种「一条结果被永久丢弃」，任何增量都该报警；那一次失败同时也记了一次 {@code ERROR}。</li>
      * </ul>
      */
-    public enum RatingOutcome { APPLIED, DUPLICATE, IGNORED, ERROR, DECODE_ERROR, REJECTED }
+    public enum RatingOutcome { APPLIED, DUPLICATE, IGNORED, ERROR, DECODE_ERROR, ORIGINAL_CONFLICT, REJECTED }
+
+    /** 保留期清理对象（有界枚举）。 */
+    public enum RetentionTarget { WATCH_REQUEST, BATTLE_SCRIPT_REVIEW }
 
     /** 终局发件箱去向：整局 Kafka、个人首次入箱、已入箱等待 APPLIED。 */
     public enum TerminalDeliveryKind { RESULT, FIRST, WAITING }
@@ -472,6 +478,11 @@ public final class MatchMetrics {
             unprovenCloseCounter(reason);
         }
         purgedRequestsCounter();
+        purgedScriptReviewsCounter();
+        for (RetentionTarget target : RetentionTarget.values()) {
+            retentionPurgeFailureCounter(target);
+            retentionOverdueGauge(target);
+        }
     }
 
     // ================================================================ 请求
@@ -694,6 +705,23 @@ public final class MatchMetrics {
         }
     }
 
+    /** 剧本审核流水按保留期删掉了 {@code rows} 行（≤ 0 不计）。 */
+    public void scriptReviewsPurged(long rows) {
+        if (rows > 0) {
+            purgedScriptReviewsCounter().increment(rows);
+        }
+    }
+
+    /** 保留期清理单轮失败（配合告警）。 */
+    public void retentionPurgeFailed(RetentionTarget target) {
+        retentionPurgeFailureCounter(target).increment();
+    }
+
+    /** 保留期清理最老一行超出保留期的秒数（0 = 无逾期；持续超过 86400s 即超期一天以上触发告警）。 */
+    public void retentionOverdueAgeSeconds(RetentionTarget target, long seconds) {
+        retentionOverdueGauge(target).set(Math.max(0L, seconds));
+    }
+
     /** 接上在途 163 数的来源（163 的执行器启动时调一次；没接之前读数恒为 0）。 */
     public void bindSpectateInflight(IntSupplier inflight) {
         this.inflightWatches = Objects.requireNonNull(inflight, "inflight");
@@ -784,6 +812,32 @@ public final class MatchMetrics {
 
     private Counter purgedRequestsCounter() {
         return counter(WATCH_REQUESTS_PURGED, "观战请求历史按 7 天保留期删掉的行数");
+    }
+
+    private Counter purgedScriptReviewsCounter() {
+        return counter(SCRIPT_REVIEWS_PURGED, "剧本审核流水按保留期删掉的行数");
+    }
+
+    private Counter retentionPurgeFailureCounter(RetentionTarget target) {
+        return counter(RETENTION_PURGE_FAILURES, "保留期清理失败次数", "kind", tag(target));
+    }
+
+    private AtomicLong retentionOverdueGauge(RetentionTarget target) {
+        String label = tag(target);
+        String key = key(RETENTION_OVERDUE_AGE, label);
+        AtomicLong holder = gauges.get(key);
+        if (holder == null) {
+            holder = gauges.computeIfAbsent(key, k -> {
+                AtomicLong atomic = new AtomicLong();
+                Gauge.builder(RETENTION_OVERDUE_AGE, atomic, AtomicLong::get)
+                        .description("保留期清理目标中最老一行超出保留期的秒数（0 = 无逾期）")
+                        .baseUnit("seconds")
+                        .tag("kind", label)
+                        .register(registry);
+                return atomic;
+            });
+        }
+        return holder;
     }
 
     /** 取（或第一次时建）一个计数器。{@code tags} 是「键, 值, 键, 值…」。 */

@@ -158,7 +158,10 @@ public final class TeamStore {
     public com.game.proto.team.TeamView projectMatchView(com.game.proto.team.TeamView view,Deadline d){return authority==null?view:authority.projectMatchView(view,d);}
     public static String ticketId(String requestId,long player){return java.util.UUID.nameUUIDFromBytes((requestId+":"+Long.toUnsignedString(player)).getBytes(StandardCharsets.UTF_8)).toString();}
     public PinnedResult commitMatchLock(Snapshot snap,long caller,String token,List<Long> roster,long expiry,SessionLoader sessions,Deadline d,Map<Long,Integer> zones,int lockSeconds){
-        return authority==null?commitMatchLock(snap,caller,token,roster,expiry,sessions,d):authority.lockMatch(snap,caller,token,roster,expiry,zones,lockSeconds,d);
+        return commitMatchLock(snap,caller,token,roster,expiry,sessions,d,zones,lockSeconds,RuleConfig.DEFAULT);
+    }
+    public PinnedResult commitMatchLock(Snapshot snap,long caller,String token,List<Long> roster,long expiry,SessionLoader sessions,Deadline d,Map<Long,Integer> zones,int lockSeconds,RuleConfig cfg){
+        return authority==null?commitMatchLock(snap,caller,token,roster,expiry,sessions,d):authority.lockMatch(snap,caller,token,roster,expiry,zones,lockSeconds,cfg,d);
     }
 
     public TeamStore(TeamRedis redis, RedisKeys redisKeys) {

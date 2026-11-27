@@ -101,13 +101,20 @@ public final class SqlSpectateStore implements SpectateStore,AutoCloseable {
             }
         }catch(RuntimeException failure){log.warn("读取全球观战恢复页失败，保留游标",failure);}
     }
-    /** 删一页超过保留期的请求历史。失败只记日志、不动游标，下一轮重试：删除幂等，没有未知结局要收尾。 */
+    /** 连续清多页超过保留期的请求历史（受单轮预算与最大页数封顶）；失败记日志与失败计数、不动游标，下一轮重试。 */
     void purgeRequests(){
+        Deadline budget=Deadline.after(REQUEST_PURGE_BUDGET_MS);
         try{
-            var result=authority.purgeRequests(purgeAfter,REQUEST_PURGE_BATCH,Deadline.after(REQUEST_PURGE_BUDGET_MS));
-            purgeAfter=result.next();
-            metrics.watchRequestsPurged(result.deleted());
-        }catch(RuntimeException failure){log.warn("观战请求历史清理失败，下一轮重试",failure);}
+            for(int page=0;page<10&&!budget.expired();page++){
+                var result=authority.purgeRequests(purgeAfter,REQUEST_PURGE_BATCH,budget);
+                purgeAfter=result.next();
+                metrics.watchRequestsPurged(result.deleted());
+                if(purgeAfter.equals(GlobalWatchAuthority.RequestCursor.START))break;
+            }
+        }catch(RuntimeException failure){
+            metrics.retentionPurgeFailed(MatchMetrics.RetentionTarget.WATCH_REQUEST);
+            log.error("观战请求历史清理失败，下一轮重试",failure);
+        }
     }
     void drive(GlobalWatchingRow expected,Deadline d){
         var work=authority.lease(expected,d);if(work==null)return;

@@ -550,4 +550,68 @@ class BattleResultConsumerTest {
     @Test void maintenanceFrontierIsAbsentUntilGroupAssignment(){
         var loop=loop(event->{});consumer.schedulePollTask(()->{assertThat(loop.maintenanceFrontier()).isEmpty();loop.stop();});loop.run();assertThat(loop.maintenanceFrontier()).isEmpty();
     }
+
+    @Test
+    void 全球模式损坏消息与同局原字节冲突均不评分不推进位点且不单轮无效重试_恢复后重放只入账一次() {
+        // 1. 解码失败：不评分、不提交位点、立即退出单轮、记 DECODE_ERROR
+        AtomicInteger rated = new AtomicInteger();
+        BattleResultConsumer decodeLoop = loop(event -> rated.incrementAndGet(), BattleResultConsumer.FailurePolicy.SQL_CONFIRMED);
+        assign(List.of(TP0), record(0, 0L, "bad", new byte[] {(byte) 0xFF, (byte) 0xFF, (byte) 0xFF}));
+        org.assertj.core.api.Assertions.assertThatThrownBy(decodeLoop::run)
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(rated.get()).isZero();
+        assertThat(consumer.commits).isEmpty();
+        assertThat(delays).isEmpty();
+        assertThat(meters.get("game.match.rating.updates").tag("mode", "unknown").tag("outcome", "decode_error")
+                .counter().count()).isEqualTo(1.0);
+
+        // 2. 同局原字节冲突：不评分、不提交位点、不进单轮退避重试、记 ORIGINAL_CONFLICT
+        RecordingConsumer c2 = new RecordingConsumer();
+        List<Duration> delays2 = new ArrayList<>();
+        BattleResultConsumer conflictLoop = new BattleResultConsumer(
+                c2, TOPIC,
+                (BattleResultConsumer.SourceHandler) received -> {
+                    throw new BattleCompletionStore.OriginalConflictException("同局原字节不同");
+                },
+                metrics, Duration.ZERO, Duration.ofMillis(1), Duration.ofMillis(4),
+                (d, p) -> { delays2.add(d); p.run(); },
+                BattleResultConsumer.FailurePolicy.SQL_CONFIRMED);
+        c2.schedulePollTask(() -> {
+            c2.rebalance(List.of(TP0));
+            c2.updateBeginningOffsets(Map.of(TP0, 0L));
+            c2.addRecord(record(0L, 9001L));
+        });
+        org.assertj.core.api.Assertions.assertThatThrownBy(conflictLoop::run)
+                .isInstanceOf(BattleCompletionStore.OriginalConflictException.class);
+        assertThat(rated.get()).isZero();
+        assertThat(c2.commits).isEmpty();
+        assertThat(delays2).as("永久原字节冲突不在单轮内无效重试").isEmpty();
+        assertThat(meters.get("game.match.rating.updates").tag("mode", "MATCH_MODE_1V1").tag("outcome", "original_conflict")
+                .counter().count()).isEqualTo(1.0);
+
+        // 3. 人工恢复后按原位点重放合法原件：入账一次并推进位点，二次重放按 battle_id 幂等
+        RecordingConsumer c3 = new RecordingConsumer();
+        java.util.Set<Long> applied = new java.util.HashSet<>();
+        AtomicInteger creditCount = new AtomicInteger();
+        BattleResultConsumer replayLoop = new BattleResultConsumer(
+                c3, TOPIC,
+                (BattleResultConsumer.SourceHandler) received -> {
+                    if (applied.add(received.event().getBattleId())) {
+                        creditCount.incrementAndGet();
+                    }
+                },
+                metrics, Duration.ZERO, Duration.ofMillis(1), Duration.ofMillis(4),
+                (d, p) -> p.run(),
+                BattleResultConsumer.FailurePolicy.SQL_CONFIRMED);
+        c3.schedulePollTask(() -> {
+            c3.rebalance(List.of(TP0));
+            c3.updateBeginningOffsets(Map.of(TP0, 0L));
+            c3.addRecord(record(0L, 9001L));
+            c3.addRecord(record(1L, 9001L));
+        });
+        c3.schedulePollTask(replayLoop::stop);
+        replayLoop.run();
+        assertThat(creditCount.get()).isEqualTo(1);
+        assertThat(c3.commits).containsExactly(committed(TP0, 1L), committed(TP0, 2L));
+    }
 }

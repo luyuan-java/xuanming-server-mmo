@@ -147,6 +147,19 @@ public class MatchFeatureConfiguration {
         return new BattleScriptStore(dataSource, System::currentTimeMillis);
     }
 
+    @Bean(initMethod = "start", destroyMethod = "close")
+    public com.game.match.script.BattleScriptReviewCleanup battleScriptReviewCleanup(
+            BattleScriptStore store,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.MatchProperties> propsProvider,
+            org.springframework.beans.factory.ObjectProvider<com.game.match.metrics.MatchMetrics> metricsProvider) {
+        com.game.match.MatchProperties props = propsProvider.getIfAvailable();
+        int retentionDays = props == null
+                ? com.game.match.MatchProperties.DEFAULT_SCRIPT_REVIEW_RETENTION_DAYS
+                : props.scriptReviewRetentionDays();
+        return new com.game.match.script.BattleScriptReviewCleanup(
+                store, retentionDays, metricsProvider.getIfAvailable(), System::currentTimeMillis);
+    }
+
     @Bean
     public BattleScriptResolver battleScriptResolver(BattleScriptCatalog catalog,
                                                      BattleScriptValidator.Tables tables,

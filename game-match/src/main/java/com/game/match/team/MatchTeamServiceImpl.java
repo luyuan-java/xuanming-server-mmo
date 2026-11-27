@@ -159,6 +159,10 @@ public class MatchTeamServiceImpl implements MatchTeamService {
             var original=global.store().direct(key);
             if(original==null)return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).build();
             if(!request.getClientRequest().isEmpty()&&!original.getPayload().equals(request.getClientRequest()))throw new IllegalArgumentException("重复开局意图参数不同");
+            if(original.getBattleId()==0){
+                int state=original.getCancelled()?5:(original.getAdmissionPrepared()?1:0);
+                return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).setState(state).build();
+            }
             var f=global.store().formation(original.getBattleId());
             return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).setBattleId(f.getBattleId()).setState(f.getState()).build();
         },why->{throw new Deadline.DependencyException("开局查询过载");},error->{throw new Deadline.DependencyException("开局查询失败",error);});

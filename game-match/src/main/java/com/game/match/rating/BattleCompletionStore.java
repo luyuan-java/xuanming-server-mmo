@@ -20,6 +20,14 @@ import javax.sql.DataSource;
 /** 完成来源 Phase A：原件与全员个人来源同事务归档，不负责应用资产或推进独立业务游标。 */
 public final class BattleCompletionStore {
     public enum Outcome { ARCHIVED, DUPLICATE, LEGACY }
+
+    /** 同局完成来源原字节或摘要冲突：永久错误，消费侧必须保留位点并告警，不在单轮内无效重试。 */
+    public static final class OriginalConflictException extends RuntimeException {
+        public OriginalConflictException(String message) {
+            super(message);
+        }
+    }
+
     static final int MAX_SOURCE_BYTES=960*1024;
     private final DataSource source;
     private final PbMysql db=registry();
@@ -74,7 +82,7 @@ public final class BattleCompletionStore {
                 if(stored.getFormatVersion()!=1||stored.getPlayerCount()!=candidate.getPlayerCount()
                         ||!stored.getOriginal().equals(candidate.getOriginal())
                         ||!stored.getOriginalDigest().equals(candidate.getOriginalDigest()))
-                    throw new SQLException("同一对局的完成来源原件不同或已损坏");
+                    throw new OriginalConflictException("同一对局的完成来源原件不同或已损坏");
                 for(var entry:settlements.entrySet()) {
                     ByteString original=ByteString.copyFrom(com.game.common.token.NetworkProbes.bytes(entry.getValue()));
                     var player=BattlePlayerCompletionRow.newBuilder().setBattleId(event.getBattleId()).setPlayerId(entry.getKey())
@@ -82,15 +90,15 @@ public final class BattleCompletionStore {
                     if(inserted)db.insert(c,player);
                     else {
                         var old=db.findOneByPk(c,BattlePlayerCompletionRow.newBuilder().setBattleId(event.getBattleId())
-                                .setPlayerId(entry.getKey()).build()).orElseThrow(()->new SQLException("个人来源归档缺失"));
+                                .setPlayerId(entry.getKey()).build()).orElseThrow(()->new OriginalConflictException("个人来源归档缺失"));
                         if(!old.getOriginal().equals(original)||!old.getOriginalDigest().equals(player.getOriginalDigest()))
-                            throw new SQLException("个人完成来源原件不同或已损坏");
+                            throw new OriginalConflictException("个人完成来源原件不同或已损坏");
                     }
                 }
                 try(var query=c.prepareStatement("SELECT COUNT(*) FROM match_battle_player_completion WHERE battle_id=?")) {
                     query.setObject(1,PbMysql.uint64(event.getBattleId()));query.setQueryTimeout(3);
                     try(var result=query.executeQuery()) {
-                        if(!result.next()||result.getInt(1)!=settlements.size())throw new SQLException("个人来源归档人数与原件不符");
+                        if(!result.next()||result.getInt(1)!=settlements.size())throw new OriginalConflictException("个人来源归档人数与原件不符");
                     }
                 }
                 c.commit();return inserted?Outcome.ARCHIVED:Outcome.DUPLICATE;

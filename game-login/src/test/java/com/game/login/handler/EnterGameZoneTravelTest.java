@@ -450,7 +450,7 @@ class EnterGameZoneTravelTest {
 
         EnterGameResponse response = response(reply);
         assertThat(response.hasErrorMessage()).as("同基线：重定向是 EnterGame 的成功出口").isFalse();
-        assertThat(response).isEqualTo(EnterGameResponse.newBuilder().setPlayerId(PLAYER).build());
+        assertThat(response).isEqualTo(EnterGameResponse.newBuilder().setPlayerId(PLAYER).setOwnerRevision(1).build());
         assertThat(reply.directives()).hasSize(1);
         SessionDirective directive = reply.directives().get(0);
         assertThat(directive.hasEnterScene()).isFalse();

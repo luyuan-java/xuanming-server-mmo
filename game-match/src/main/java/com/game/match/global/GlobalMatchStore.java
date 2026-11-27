@@ -86,6 +86,10 @@ public final class GlobalMatchStore {
         this(source,config,new MatchProperties(null,null,null,null,null,null,null,null,null,null,null,null,null));
     }
     public GlobalMatchStore(DataSource source,GlobalMatchProperties config,MatchProperties properties)throws SQLException {
+        this(source,config,properties,false);
+    }
+    /** 仅包内 H2 单测跳过 information_schema 校表；生产构造始终校验。 */
+    GlobalMatchStore(DataSource source,GlobalMatchProperties config,MatchProperties properties,boolean skipSchemaSync)throws SQLException {
         this.source = source;
         this.config = config;
         this.rating=properties.rating();
@@ -99,7 +103,7 @@ public final class GlobalMatchStore {
                             || !r.getString(6).isEmpty() || r.getBoolean(7)) throw new SQLException("全球匹配物理连接强读门禁失败");
                 }
             }
-            db.syncAll(c);
+            if (!skipSchemaSync) db.syncAll(c);
         }
         tx(c->{
             var mac=javax.crypto.Mac.getInstance("HmacSHA256");
@@ -349,19 +353,31 @@ public final class GlobalMatchStore {
         if (!request.isEmpty()) intentKey(player,request);
         if (request.isEmpty() && (ticket == null || ticket.isEmpty())) throw new IllegalArgumentException("撤销需要原请求编号或票据");
         var seen=tx(c->db.findOneByPk(c,GlobalTicketRow.newBuilder().setPlayerId(player).build()).orElse(null));
-        if(seen!=null&&!seen.getQueueUnitId().isEmpty()&&((!request.isEmpty()&&request.equals(seen.getRequestId()))||(ticket!=null&&!ticket.isEmpty()&&ticket.equals(seen.getTicket()))))
+        if(seen!=null&&!seen.getQueueUnitId().isEmpty()&&((!request.isEmpty()&&request.equals(seen.getRequestId()))||(ticket!=null&&!ticket.isEmpty()&&ticket.equals(seen.getTicket())))){
+            if(session!=null&&(!seen.getOwnerAccount().equals(session.getAccount())||seen.getOwnerRevision()!=session.getOwnerRevision())){
+                // 会话确为当前主人、点名过户前的旧归属整队原件：直接回成功，原件不动（会话自身失效仍由 actor 拒绝）
+                return tx(c->{actor(c,session);return true;});
+            }
             return cancelUnit(session,seen.getQueueUnitId());
+        }
         return tx(c -> {
             String account;long revision;
             if(session!=null){actor(c,session);account=session.getAccount();revision=session.getOwnerRevision();}
             else {var p=originalProfile(c,player);owner(c,player,p.getOwnerAccount(),p.getOwnerRevision());account=p.getOwnerAccount();revision=p.getOwnerRevision();}
             var old = locked(c, player);
+            if(ticket!=null&&!ticket.isEmpty()&&old.getTicket().equals(ticket)
+                    &&(!old.getOwnerAccount().equals(account)||old.getOwnerRevision()!=revision)){
+                return true;
+            }
             String target = request.isEmpty() && old.getTicket().equals(ticket) ? old.getRequestId() : request;
             if (!target.isEmpty()) {
                 var key = intentKey(player, target);
                 var original=db.findOneByPk(c,key);
+                if(original.isPresent()&&(!original.get().getOwnerAccount().equals(account)||original.get().getOwnerRevision()!=revision)){
+                    // 当前主人点名前主人的 Join 意图：回成功且不改写前主人原件
+                    return true;
+                }
                 var previous = original.orElse(key.toBuilder().setOwnerAccount(account).setOwnerRevision(revision).build());
-                if(!previous.getOwnerAccount().equals(account)||previous.getOwnerRevision()!=revision)throw new SecurityException("不能覆盖旧归属的排队撤销原件");
                 db.upsert(c, previous.toBuilder().setCancelled(true).build());
             }
             if ((old.getState()!=1&&old.getState()!=0) || old.getState()==0&&old.getRequestId().isEmpty() || (!target.isEmpty() && !old.getRequestId().equals(target))
@@ -372,7 +388,18 @@ public final class GlobalMatchStore {
     public boolean cancelUnit(SessionContext session,String id) {
         var seen=tx(c->units.find(c,id,false));if(seen==null)return false;
         return tx(c->{
-            if(session!=null&&seen.getOriginalTicketsList().stream().noneMatch(t->t.getPlayerId()==session.getPlayerId()&&t.getOwnerAccount().equals(session.getAccount())&&t.getOwnerRevision()==session.getOwnerRevision()))throw new SecurityException("撤队原角色不在原单位");
+            if(session!=null){
+                boolean currentMember=seen.getOriginalTicketsList().stream().anyMatch(t->t.getPlayerId()==session.getPlayerId()&&t.getOwnerAccount().equals(session.getAccount())&&t.getOwnerRevision()==session.getOwnerRevision());
+                if(!currentMember){
+                    boolean priorOwnerMember=seen.getOriginalTicketsList().stream().anyMatch(t->t.getPlayerId()==session.getPlayerId());
+                    if(priorOwnerMember){
+                        actor(c,session);
+                        // 当前主人点名前主人的整队单位：回成功且不改写前主人原件
+                        return true;
+                    }
+                    throw new SecurityException("撤队原角色不在原单位");
+                }
+            }
             if(seen.getState()==4){if(session!=null)actor(c,session);return true;}
             owners(c,seen.getOriginalTicketsList());
             if(!seen.getLaunchOriginal().isEmpty()){
@@ -397,7 +424,7 @@ public final class GlobalMatchStore {
     private boolean requestCancelled(Connection c,long player,String account,long revision,String request)throws Exception {
         if(request.isEmpty())return false;
         var row=db.findOneByPk(c,intentKey(player,request));if(row.isEmpty())return false;
-        if(!row.get().getOwnerAccount().equals(account)||row.get().getOwnerRevision()!=revision)throw new SecurityException("旧归属排队撤销原件不可读取");
+        if(!row.get().getOwnerAccount().equals(account)||row.get().getOwnerRevision()!=revision)return true;
         return row.get().getCancelled();
     }
     public static UUID validateRequestId(String request){
@@ -766,12 +793,35 @@ public final class GlobalMatchStore {
     public List<GlobalQueueUnitRow> unitCandidates(long afterMs,String afterId){return tx(c->units.anchors(c,afterMs,afterId));}
     public List<GlobalQueueUnitRow> unitPeers(GlobalQueueUnitRow anchor,int region,boolean cross,long stamp,Deadline deadline){return tx(deadline,c->units.peers(c,anchor,region,cross,stamp,deadline));}
     public com.game.proto.team.TeamMatchIntent teamIntent(GlobalDirectIntentRow key,ByteString payload){
+        String requestId=new UUID(key.getRequestHigh(),key.getRequestLow()).toString();
         return tx(c->{owner(c,key.getOwnerId(),key.getOwnerAccount(),key.getOwnerRevision());
-            var direct=db.findOneByPk(c,key);if(direct.isEmpty())return null;
-            if(!direct.get().getOwnerAccount().equals(key.getOwnerAccount())||direct.get().getOwnerRevision()!=key.getOwnerRevision()||(!payload.isEmpty()&&!payload.equals(direct.get().getPayload())))throw new SecurityException("整队查询原意图不同");
+            var direct=db.findOneByPk(c,key);
+            if(direct.isEmpty()){
+                var join=db.findOneByPk(c,intentKey(key.getOwnerId(),requestId));
+                if(join.isPresent()){
+                    if(!join.get().getOwnerAccount().equals(key.getOwnerAccount())||join.get().getOwnerRevision()!=key.getOwnerRevision()){
+                        return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(requestId).setState(6).build();
+                    }
+                    if(join.get().getCancelled()){
+                        return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(requestId).setState(5).build();
+                    }
+                }
+                return null;
+            }
+            if(!direct.get().getOwnerAccount().equals(key.getOwnerAccount())||direct.get().getOwnerRevision()!=key.getOwnerRevision()){
+                // 现主人查到过户前原件：返回 state=6 供客户端释放本机意图，禁止现主人沿此请求重开
+                return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(requestId).setState(6).build();
+            }
+            if(!payload.isEmpty()&&!payload.equals(direct.get().getPayload()))throw new IllegalArgumentException("整队查询原意图参数不同");
+            if(direct.get().getBattleId()!=0)return null;
             var request=com.game.proto.team.StartTeamMatchRequest.parseFrom(direct.get().getPayload());
             var unit=units.find(c,"t:"+Long.toUnsignedString(request.getExpectedTeamId())+":"+request.getRequestId(),false);
-            if(unit==null){if(direct.get().getAdmissionPrepared()&&direct.get().getBattleId()==0)return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).setState(1).build();return null;}return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).setBattleId(unit.getBattleId()).setState(unit.getState()==1?2:unit.getState()==2?3:unit.getState()==3?4:5).build();});
+            if(unit==null){
+                if(direct.get().getCancelled())return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).setState(5).build();
+                if(direct.get().getAdmissionPrepared())return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).setState(1).build();
+                return null;
+            }
+            return com.game.proto.team.TeamMatchIntent.newBuilder().setRequestId(request.getRequestId()).setBattleId(unit.getBattleId()).setState(unit.getState()==1?2:unit.getState()==2?3:unit.getState()==3?4:5).build();});
     }
     private GlobalFormationRow reserveDirect(Connection c,GlobalDirectIntentRow key,ByteString payload,List<GlobalTicketRow> members,GlobalFormationRow formation)throws Exception {
             if(key.getKind()!=2&&key.getKind()!=4&&members.stream().noneMatch(t->t.getPlayerId()==key.getOwnerId()&&t.getOwnerAccount().equals(key.getOwnerAccount())&&t.getOwnerRevision()==key.getOwnerRevision()))

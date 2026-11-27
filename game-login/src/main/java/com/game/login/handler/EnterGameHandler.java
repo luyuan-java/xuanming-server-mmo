@@ -435,7 +435,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         metrics.sceneRedirectCompleted(result, elapsed);
         if (result == AssignResult.OK) {
             metrics.enterRouted(EnterRoute.REDIRECT);
-            return done(redirected(session, playerId, response.getRedirect()));
+            return done(redirected(session, playerId, row.getOwnerRevision(), response.getRedirect()));
         }
         metrics.enterRouted(EnterRoute.REDIRECT_FALLBACK);
         log.warn("登录期重定向没成，退化为在入口 zone 按首登进游戏 player={} session={} 入口zone={} 角色所在zone={}: {}", playerId,
@@ -474,16 +474,19 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
      * GO-5 的成功应答：{@code EnterGameResponse{player_id}}（不设 {@code error_message}，同基线重定向分支是 EnterGame 的成功出口）
      * + {@code RedirectToGate{redirect}}（scene-manager 给的原样转交，票据字节不解析、不重新序列化）。不绑定玩家、不进场景。
      */
-    private static HandlerReply redirected(SessionContext session, long playerId, ZoneRedirect redirect) {
+    private static HandlerReply redirected(SessionContext session, long playerId, long ownerRevision, ZoneRedirect redirect) {
         log.info("进游戏重定向（不夺权、不分配）player={} gate={} session={} 目标zone={} 目标gate={} {}:{} 票据到期={}", playerId,
                 session.getGateNodeId(), session.getSessionId(), Integer.toUnsignedString(redirect.getTargetZoneId()),
                 Integer.toUnsignedString(redirect.getGateNodeId()), redirect.getGateHost(),
                 Integer.toUnsignedString(redirect.getGatePort()), redirect.getTokenDeadline());
-        EnterGameResponse response = EnterGameResponse.newBuilder().setPlayerId(playerId).build();
+        EnterGameResponse.Builder response = EnterGameResponse.newBuilder().setPlayerId(playerId);
+        if (ownerRevision != 0L) {
+            response.setOwnerRevision(ownerRevision);
+        }
         SessionDirective directive = SessionDirective.newBuilder()
                 .setRedirectToGate(RedirectToGate.newBuilder().setRedirect(redirect))
                 .build();
-        return HandlerReply.of(response, directive);
+        return HandlerReply.of(response.build(), directive);
     }
 
     // ================================================================ 落地：围栏 → 分配 → 夺权
@@ -746,7 +749,10 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         log.info("进游戏受理 player={} gate={} session={} scene_node={} scene={} scene_config={} owner_epoch={}",
                 playerId, session.getGateNodeId(), session.getSessionId(), assigned.getSceneNodeId(),
                 assigned.getSceneId(), assigned.getSceneConfigId(), epoch);
-        EnterGameResponse response = EnterGameResponse.newBuilder().setPlayerId(playerId).build();
+        EnterGameResponse.Builder response = EnterGameResponse.newBuilder().setPlayerId(playerId);
+        if (ownerRevision != 0L) {
+            response.setOwnerRevision(ownerRevision);
+        }
         EnterScene.Builder enterScene = EnterScene.newBuilder()
                 .setPlayerId(playerId)
                 .setSceneNodeId(assigned.getSceneNodeId())
@@ -759,7 +765,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         SessionDirective directive = SessionDirective.newBuilder()
                 .setEnterScene(enterScene)
                 .build();
-        return HandlerReply.of(response, directive);
+        return HandlerReply.of(response.build(), directive);
     }
 
     @Override

@@ -123,7 +123,10 @@ class MatchMetricsTest {
                 "game.match.spectate.inflight",
                 // 全球观战原件的收尾与请求历史的保留期（mmorpg battle-spectate-tiered-fanout.md §15.9）
                 "game.match.watch.unproven.close",
-                "game.match.watch.requests.purged");
+                "game.match.watch.requests.purged",
+                "game.match.script.reviews.purged",
+                "game.match.retention.purge.failures",
+                "game.match.retention.overdue.age");
         assertThat(meters.get("game.match.starved.anchor.wait").gauge().getId().getBaseUnit()).as("导出成 …_wait_seconds").isEqualTo("seconds");
         assertThat(meters.get("game.match.wait").summary().getId().getBaseUnit()).isEqualTo("seconds");
     }
@@ -169,7 +172,7 @@ class MatchMetricsTest {
                 assertThat(count("game.match.activity.battles", "kind", kind, "result", result)).isZero();
             }
         }
-        for (String outcome : List.of("applied", "duplicate", "ignored", "error", "decode_error", "rejected")) {
+        for (String outcome : List.of("applied", "duplicate", "ignored", "error", "decode_error", "original_conflict", "rejected")) {
             assertThat(count("game.match.rating.updates", "mode", "MATCH_MODE_1V1", "outcome", outcome)).isZero();
             assertThat(count("game.match.rating.updates", "mode", "MATCH_MODE_5V5", "outcome", outcome)).isZero();
         }

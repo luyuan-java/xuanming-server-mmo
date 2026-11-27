@@ -20,7 +20,7 @@ import javax.sql.DataSource;
  * 预读版本变化只回到事务外重试；绝不在拿到Team锁后补P。SQL原件、epoch墓碑和请求回执无TTL。
  */
 final class SqlTeamAuthority {
-    private static final String NOW="CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)";
+    private static final String NOW="CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000.0 AS UNSIGNED)";
     private final AuthorityJdbc sql;
     private final SessionContext actor;
     private final String method, requestId;
@@ -154,7 +154,7 @@ final class SqlTeamAuthority {
         for(int attempt=0;attempt<TeamStore.COMMIT_RETRIES;attempt++){
             Snapshot before=read(bind.playerId(),bind.teamId(),d);var people=participants(before,op.caller(),originalTarget);
             Map<Long,SessionState> states=sessions(sessions,before,d);
-            try{return run(d,c->{var owners=lockPeople(c,people,d);var policy=com.game.common.team.TeamPolicyAuthority.load(c.connection(),timeout(d));if(policy.allowCrossZone()!=config.allowCrossZone())throw new SQLException("组队写策略与SQL初次准入原件不同");Snapshot snap=snapshot(c,bind.playerId(),bind.teamId(),true);
+            try{return run(d,c->{var owners=lockPeople(c,people,d);var policy=com.game.common.team.TeamPolicyAuthority.load(c.connection(),timeout(d));if(policy.allowCrossZone()!=config.allowCrossZone()||policy.pvpRatingGapMax()!=config.pvpRatingGapMax())throw new SQLException("组队写策略与SQL初次准入原件不同");Snapshot snap=snapshot(c,bind.playerId(),bind.teamId(),true);
                 if(snap.version()!=before.version()||!participants(snap,op.caller(),originalTarget).equals(people))throw new Changed();
                 if(op.kind()!=OpKind.REFRESH){var a=action(c,true);if(a!=null){
                     if(!a.getResultProto().isEmpty())return decode(a.getResultProto());
@@ -213,8 +213,9 @@ final class SqlTeamAuthority {
         },true);
     }
 
-    PinnedResult lockMatch(Snapshot expected,long caller,String token,List<Long> roster,long expiry,Map<Long,Integer> zones,int lockSeconds,Deadline d){
+    PinnedResult lockMatch(Snapshot expected,long caller,String token,List<Long> roster,long expiry,Map<Long,Integer> zones,int lockSeconds,RuleConfig config,Deadline d){
         requireActor();if(requestId.isEmpty()||!method.equals("StartTeamMatch")||caller!=actor.getPlayerId())throw new SecurityException("开局缺少原业务请求");
+        RuleConfig effectiveConfig = config == null ? RuleConfig.DEFAULT : config;
         return run(d,c->{var owners=lockPeople(c,participants(expected,caller,0),d);var snap=snapshot(c,caller,expected.teamId(),true);
             var previous=launch(c,requestId,true);if(previous!=null)return PinnedResult.committed(launchCommit(previous));
             if(snap.version()!=expected.version()||!Objects.equals(snap.record(),expected.record()))return PinnedResult.retry(List.of());
@@ -222,6 +223,23 @@ final class SqlTeamAuthority {
             com.game.proto.team.StartTeamMatchRequest request;try{request=com.game.proto.team.StartTeamMatchRequest.parseFrom(payload);}catch(com.google.protobuf.InvalidProtocolBufferException invalid){throw new SQLException("开局原请求损坏",invalid);}
             int targetTeamSize=request.getTargetTeamSize();
             if(targetTeamSize!=0&&(Integer.compareUnsigned(targetTeamSize,roster.size())<0||Integer.compareUnsigned(targetTeamSize,com.game.team.rules.TeamLimits.CAPACITY)>0))return PinnedResult.rejected(TeamTips.SIZE_EXCEEDED,0);
+            if(com.game.common.team.TeamPolicyContract.isDisallowedPvpPartySize(request.getMatchModeValue(),roster.size(),targetTeamSize))return PinnedResult.rejected(TeamTips.PVP_PARTY_SIZE_NOT_ALLOWED,0);
+            if(com.game.common.team.TeamPolicyContract.isScoredPvpTeamMode(request.getMatchModeValue())){
+                var policy=com.game.common.team.TeamPolicyAuthority.load(c.connection(),timeout(d));
+                if(policy.allowCrossZone()!=effectiveConfig.allowCrossZone()||policy.pvpRatingGapMax()!=effectiveConfig.pvpRatingGapMax())throw new SQLException("组队开战策略与SQL初次准入原件不同");
+                if(effectiveConfig.pvpRatingGapMax()>0&&roster.size()>=2){
+                    long minRating=Long.MAX_VALUE,maxRating=Long.MIN_VALUE;
+                    for(long pid:roster){
+                        Long rating=c.one("SELECT rating_centi FROM match_rating WHERE player_id=?",r->r.getLong(1),AuthorityJdbc.u64(pid));
+                        long value=rating==null?com.game.common.team.TeamPolicyContract.DEFAULT_RATING_CENTI:rating;
+                        if(value<minRating)minRating=value;
+                        if(value>maxRating)maxRating=value;
+                    }
+                    if(com.game.common.team.TeamPolicyContract.exceedsRatingGap(effectiveConfig.pvpRatingGapMax(),minRating,maxRating)){
+                        return PinnedResult.rejected(TeamTips.RATING_GAP_TOO_LARGE,0);
+                    }
+                }
+            }
             Decision decision=TeamRules.lockMatch(snap.record(),caller,token,roster,expiry,snap.nowMs());
             if(decision.code()!=0)return PinnedResult.rejected(decision.code(),decision.param());
             com.game.common.player.MatchEntryAuthority.requireFree(c.connection(),roster,"",0,timeout(d));

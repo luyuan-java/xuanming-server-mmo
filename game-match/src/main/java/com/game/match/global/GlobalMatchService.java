@@ -611,6 +611,8 @@ public final class GlobalMatchService implements AutoCloseable {
             var replay=store.teamReplay(key,request.getClientRequest(),request.getLaunchOriginal(),deadline);if(replay!=null)return replay;
             long stamp=store.now();int mode=MatchMode.MATCH_MODE_PVE_TEAM_VALUE;
             int target=original.getRequest().getTargetTeamSize();
+            if(com.game.common.team.TeamPolicyContract.isDisallowedPvpPartySize(original.getRequest().getMatchModeValue(),roster.size(),target))
+                throw new IllegalArgumentException("5v5 PVP 池不收 4 人队");
             if(target>props.pveTeamSizeFor(request.getBattleConfigId())||target!=0&&target<roster.size())throw new IllegalArgumentException("整队目标人数超出副本范围");
             int vowMask=original.getRequest().getTrialVowMask();
             if(vowMask!=0){

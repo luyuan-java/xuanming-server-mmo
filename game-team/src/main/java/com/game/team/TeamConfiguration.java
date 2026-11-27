@@ -77,7 +77,7 @@ public class TeamConfiguration {
         if(com.game.common.RunMode.parse(environment.getProperty("game.run-mode","prod"))==com.game.common.RunMode.PROD&&!required)throw new IllegalStateException("生产Team不得关闭TiDB强一致门禁");
         try(var connection=source.getConnection()){com.game.discovery.sql.StrongTiDbConnectionPolicy.verify(connection,required);}
         TeamTables.sync(source);
-        TeamTables.ensurePolicy(source,props.allowCrossZone());
+        TeamTables.ensurePolicy(source,props.allowCrossZone(),props.pvpRatingGapMax());
         try(var connection=source.getConnection()){com.game.common.player.PlayerRouteAuthority.verifySchema(connection);}
         try(var connection=source.getConnection();var statement=connection.createStatement()){
             statement.setQueryTimeout(3);
@@ -262,7 +262,7 @@ public class TeamConfiguration {
                                    TeamRankedRules rankedRules) {
         PlayerHomeZones homeZones = new PlayerHomeZones(source, props.homeZoneTimeout());
         return new TeamService(store, sessions, display, homeZones, teamIds::nextId, battle, teamMatchEndPool, pushes, metrics,
-                new RuleConfig(props.allowCrossZone()), shutdown::stopping, rankedRules);
+                new RuleConfig(props.allowCrossZone(), props.pvpRatingGapMax()), shutdown::stopping, rankedRules);
     }
 
     @Bean

@@ -70,4 +70,64 @@ class TeamDurableIntentTest {
         }finally{fx.cleanup();}
     }
 
+    @Test void transferredOwnerIntentReturnsState6OnGetAndInvalidParamWithState6OnStart(){
+        var fx=new TeamMatchFixture(TeamMatchFixture.inMemory(),MatchTeamBattle.IntentMode.SQL_AUTHORITY);
+        try{
+            long[] team=fx.team(2);long caller=team[1],id=team[0];String request=UUID.randomUUID().toString();
+            var transferred=TeamMatchIntent.newBuilder().setRequestId(request).setState(6).build();
+            fx.match.queryReply=r->CompletableFuture.completedFuture(transferred);
+
+            var view=fx.service.getMyTeam(actor(caller),GetMyTeamRequest.newBuilder().setMatchRequestId(request).build(),TeamMatchFixture.deadline());
+            assertThat(view.hasErrorMessage()).isFalse();
+            assertThat(view.getMatchIntent()).isEqualTo(transferred);
+
+            var start=fx.service.startTeamMatch(actor(caller),StartTeamMatchRequest.newBuilder()
+                    .setExpectedTeamId(id).setBattleConfigId(TeamMatchFixture.CONFIG).setRequestId(request).build(),TeamMatchFixture.deadline());
+            assertThat(start.getErrorMessage().getId()).isEqualTo(com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE);
+            assertThat(start.getMatchIntent()).isEqualTo(transferred);
+            assertThat(fx.match.tickets).isEmpty();
+            assertThat(fx.record(id).getMatchLockToken()).isEmpty();
+        }finally{fx.cleanup();}
+    }
+
+    @Test void noBattleTerminalIntentStatesShortCircuitStartWithoutSecondLaunch(){
+        for(int state:new int[]{2,5}){
+            var fx=new TeamMatchFixture(TeamMatchFixture.inMemory(),MatchTeamBattle.IntentMode.SQL_AUTHORITY);
+            try{
+                long[] team=fx.team(2);long caller=team[1],id=team[0];String request=UUID.randomUUID().toString();
+                var intent=TeamMatchIntent.newBuilder().setRequestId(request).setState(state).build();
+                fx.match.queryReply=r->CompletableFuture.completedFuture(intent);
+                var reply=fx.service.startTeamMatch(actor(caller),StartTeamMatchRequest.newBuilder()
+                        .setExpectedTeamId(id).setBattleConfigId(TeamMatchFixture.CONFIG).setRequestId(request).build(),TeamMatchFixture.deadline());
+                assertThat(reply.hasErrorMessage()).isFalse();
+                assertThat(reply.getMatchIntent()).isEqualTo(intent);
+                assertThat(fx.match.tickets).isEmpty();
+            }finally{fx.cleanup();}
+        }
+    }
+
+    @Test void pvp5v5Rejects4PlayerPartyWhile4v4AndPveAllow4PlayerParty(){
+        var fx=new TeamMatchFixture(TeamMatchFixture.inMemory(),MatchTeamBattle.IntentMode.SQL_AUTHORITY);
+        try{
+            long[] team=fx.team(4);long caller=team[1],id=team[0];
+            fx.match.queryReply=r->CompletableFuture.completedFuture(TeamMatchIntent.newBuilder().setRequestId(r.getRequestId()).build());
+            // 5v5 PVP_TEAM (target=5 and target=0) rejects 4-player party with 4031
+            for(int target:new int[]{0,5}){
+                var rejected=fx.service.startTeamMatch(actor(caller),StartTeamMatchRequest.newBuilder()
+                        .setExpectedTeamId(id).setBattleConfigId(TeamMatchFixture.CONFIG)
+                        .setMatchMode(com.game.proto.match.MatchMode.MATCH_MODE_PVP_TEAM)
+                        .setTargetTeamSize(target).setRequestId(UUID.randomUUID().toString()).build(),TeamMatchFixture.deadline());
+                assertThat(rejected.getErrorMessage().getId()).isEqualTo(com.game.team.rules.TeamTips.PVP_PARTY_SIZE_NOT_ALLOWED);
+                assertThat(fx.match.tickets).isEmpty();
+            }
+            // 4v4 PVP_TEAM (target=4) is allowed past party-size gate
+            fx.match.ticketsReply=r->CompletableFuture.completedFuture(com.game.api.proto.TeamTicketsReply.newBuilder().setStatus(com.game.api.proto.TeamTicketsStatus.TEAM_TICKETS_QUEUED).build());
+            var ok4v4=fx.service.startTeamMatch(actor(caller),StartTeamMatchRequest.newBuilder()
+                    .setExpectedTeamId(id).setBattleConfigId(TeamMatchFixture.CONFIG)
+                    .setMatchMode(com.game.proto.match.MatchMode.MATCH_MODE_PVP_TEAM)
+                    .setTargetTeamSize(4).setRequestId(UUID.randomUUID().toString()).build(),TeamMatchFixture.deadline());
+            assertThat(ok4v4.hasErrorMessage()).isFalse();
+        }finally{fx.cleanup();}
+    }
+
 }

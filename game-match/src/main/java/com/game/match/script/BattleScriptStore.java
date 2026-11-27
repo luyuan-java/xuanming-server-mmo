@@ -429,6 +429,16 @@ public final class BattleScriptStore implements BattleScriptResolver.PlayerScrip
         }
     }
 
+    /** 按时间索引取最老一条审核流水的审核时刻（空表返回 0），用于计算逾期告警年龄。 */
+    public long oldestReviewMs() throws SQLException {
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT reviewed_ms FROM match_battle_script_review ORDER BY reviewed_ms ASC LIMIT 1");
+             ResultSet rs = ps.executeQuery()) {
+            return rs.next() ? Long.parseUnsignedLong(rs.getString(1)) : 0L;
+        }
+    }
+
     private static MatchBattleScriptRow lockScript(Connection c, long scriptId) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT " + SCRIPT_COLS + " FROM match_battle_script WHERE script_id=? FOR UPDATE")) {

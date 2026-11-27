@@ -503,7 +503,8 @@ public final class TeamService {
                 var requestUuid=UUID.fromString(request.getRequestId());
                 if((requestUuid.getMostSignificantBits()==0&&requestUuid.getLeastSignificantBits()==0)||!requestUuid.toString().equals(request.getRequestId()))return respond(caller,com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE,0,deadline);
                 var previous=battle.queryIntent(original,request.getRequestId(),request.toByteString(),deadline);
-                if(previous.getBattleId()!=0)return respond(caller,TeamTips.OK,0,deadline).toBuilder().setMatchIntent(previous).build();
+                if(previous.getState()==6)return respond(caller,com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE,0,deadline).toBuilder().setMatchIntent(previous).build();
+                if(previous.getBattleId()!=0||previous.getState()==2||previous.getState()==5)return respond(caller,TeamTips.OK,0,deadline).toBuilder().setMatchIntent(previous).build();
             }catch(IllegalArgumentException invalid){return respond(caller,com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE,0,deadline);}
             catch(RuntimeException unavailable){return respond(caller,TeamTips.INTERNAL,0,deadline);}
         }
@@ -552,6 +553,10 @@ public final class TeamService {
                             || Integer.compareUnsigned(targetTeamSize, com.game.team.rules.TeamLimits.CAPACITY) > 0)) {
                 return matchReject(caller, TeamTips.SIZE_EXCEEDED, 0, snap, deadline);
             }
+            if (com.game.common.team.TeamPolicyContract.isDisallowedPvpPartySize(
+                    request.getMatchModeValue(), roster.size(), targetTeamSize)) {
+                return matchReject(caller, TeamTips.PVP_PARTY_SIZE_NOT_ALLOWED, 0, snap, deadline);
+            }
             int vowMask = request.getTrialVowMask();
             if (vowMask != 0) {
                 boolean pveMode = request.getMatchMode() == MatchMode.MATCH_MODE_UNSPECIFIED
@@ -575,7 +580,7 @@ public final class TeamService {
             long expireAtMs = snap.nowMs() + lockTtlSeconds * 1000L;
             PinnedResult lock;
             try {
-                lock = store.commitMatchLock(snap, caller, token, roster, expireAtMs, sessions, deadline,check.zones(),lockTtlSeconds);
+                lock = store.commitMatchLock(snap, caller, token, roster, expireAtMs, sessions, deadline, check.zones(), lockTtlSeconds, cfg);
             } catch (DependencyException e) {
                 log.error("[team] StartTeamMatch 开战锁提交故障 player={} team={}: {}", u(caller), u(snap.teamId()), e.toString());
                 // 结果未知：EVAL 可能已在 Redis 执行、只是回复超时 / 断连。按 token 后台清锁（锁没写入时只读不写不推），

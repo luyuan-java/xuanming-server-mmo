@@ -285,6 +285,13 @@ public final class BattleResultConsumer implements Runnable {
                 try {
                     handler.handle(received);
                     return true;
+                } catch (BattleCompletionStore.OriginalConflictException conflict) {
+                    poison.error("对局结果同局原字节冲突，保留位点等待人工处置 topic={} partition={} offset={} battle={} bytes={} 错误={}",
+                            record.topic(), record.partition(), record.offset(), battle, encoded(record.value()), conflict.getMessage());
+                    log.error("[rating] 对局结果同局原字节冲突，不评分不推进位点 battle={} partition={} offset={}: {}",
+                            battle, record.partition(), record.offset(), conflict.getMessage());
+                    metrics.ratingUpdate(event.getMatchMode(), RatingOutcome.ORIGINAL_CONFLICT);
+                    throw conflict;
                 } catch (RuntimeException e) {
                     if (failurePolicy==FailurePolicy.LEGACY_REJECT_POISON&&RatingSqlErrors.isDataError(e)) {
                         poison.error("对局结果被数据库拒绝，跳过 topic={} partition={} offset={} battle={} bytes={} 错误={}", record.topic(),

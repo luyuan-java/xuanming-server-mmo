@@ -25,11 +25,15 @@ public final class TeamTables {
         try(var connection=source.getConnection()){registry().syncAll(connection);}
     }
     public static byte[] policy(boolean allowCrossZone){return com.game.common.team.TeamPolicyAuthority.canonicalContract(allowCrossZone);}
+    public static byte[] policy(boolean allowCrossZone,int pvpRatingGapMax){return com.game.common.team.TeamPolicyAuthority.canonicalContract(allowCrossZone,pvpRatingGapMax);}
     public static void ensurePolicy(DataSource source,boolean allowCrossZone)throws SQLException{
+        ensurePolicy(source,allowCrossZone,com.game.common.team.TeamPolicyContract.DEFAULT_PVP_RATING_GAP_MAX);
+    }
+    public static void ensurePolicy(DataSource source,boolean allowCrossZone,int pvpRatingGapMax)throws SQLException{
         try(var connection=source.getConnection()){
             connection.setAutoCommit(false);
             try{
-                com.game.common.team.TeamPolicyAuthority.ensure(connection,allowCrossZone,3);
+                com.game.common.team.TeamPolicyAuthority.ensure(connection,allowCrossZone,pvpRatingGapMax,3);
                 connection.commit();
             }catch(SQLException|RuntimeException failure){try{connection.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure;}
         }

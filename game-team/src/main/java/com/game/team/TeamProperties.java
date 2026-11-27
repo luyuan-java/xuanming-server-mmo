@@ -31,12 +31,23 @@ public record TeamProperties(
         Integer pushThreads,
         Integer pushQueueCapacity,
         Integer matchEndThreads,
-        Integer matchEndQueueCapacity) {
+        Integer matchEndQueueCapacity,
+        Integer pvpRatingGapMax) {
 
     /** 整请求预算的区间（基线 teamRPCBudget = 3500 ms，赶在 gate 的 5 s Dubbo 超时之前）。 */
     public static final Duration MIN_REQUEST_BUDGET = Duration.ofMillis(500);
     public static final Duration MAX_REQUEST_BUDGET = Duration.ofMillis(3500);
 
+    /** 兼容既有 10 参测试构造（计分组排评分差上限取缺省 500 分）。 */
+    public TeamProperties(
+            Boolean allowCrossZone, Duration requestBudget, Duration pushBatchBudget, Duration homeZoneTimeout,
+            Integer workerThreads, Integer workerQueueCapacity, Integer pushThreads, Integer pushQueueCapacity,
+            Integer matchEndThreads, Integer matchEndQueueCapacity) {
+        this(allowCrossZone, requestBudget, pushBatchBudget, homeZoneTimeout, workerThreads, workerQueueCapacity,
+                pushThreads, pushQueueCapacity, matchEndThreads, matchEndQueueCapacity, null);
+    }
+
+    @org.springframework.boot.context.properties.bind.ConstructorBinding
     public TeamProperties {
         allowCrossZone = allowCrossZone != null && allowCrossZone;
         requestBudget = positiveOr(requestBudget, MAX_REQUEST_BUDGET, "request-budget");
@@ -52,6 +63,11 @@ public record TeamProperties(
         pushQueueCapacity = positiveOr(pushQueueCapacity, 1024, "push-queue-capacity");
         matchEndThreads = positiveOr(matchEndThreads, 4, "match-end-threads");
         matchEndQueueCapacity = positiveOr(matchEndQueueCapacity, 1024, "match-end-queue-capacity");
+        if (pvpRatingGapMax == null) {
+            pvpRatingGapMax = com.game.common.team.TeamPolicyContract.DEFAULT_PVP_RATING_GAP_MAX;
+        } else if (pvpRatingGapMax < 0) {
+            throw new IllegalArgumentException("game.team.pvp-rating-gap-max 不能为负（0 = 不限）: " + pvpRatingGapMax);
+        }
     }
 
     /** MySQL 单条查询超时的上限（秒）：请求预算向上取整到秒（实际取它与剩余预算的较小者）。 */

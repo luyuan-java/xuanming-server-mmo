@@ -82,8 +82,11 @@ final class GlobalQueueUnits {
         List<String> expired=new ArrayList<>();long nextMs=repairMs;String nextId=repairId;
         for(var candidate:rows){var unit=locked.get(candidate.getUnitId());nextMs=candidate.getEnqueuedMs();nextId=candidate.getUnitId();if(unit==null)throw new SQLException("单位修复原件缺失");
             if(unit.getState()==1){
-                if(unit.getExpiresMs()<=stamp&&expired.size()<2)expired.add(unit.getUnitId());
-                if(!shape(c,unit,current(c,unit)).equals(unit))throw new SQLException("单位与原票投影不一致，禁止覆盖原件");
+                var memberTickets=current(c,unit);
+                boolean memberTerminated=memberTickets.stream().anyMatch(r->r.getState()==4&&r.getFormationId()==0
+                        &&r.getMode()==unit.getMode()&&r.getConfigId()==unit.getConfigId()&&r.getTeamSize()==unit.getTargetSize());
+                if((unit.getExpiresMs()<=stamp||memberTerminated)&&expired.size()<2)expired.add(unit.getUnitId());
+                if(!memberTerminated&&!shape(c,unit,memberTickets).equals(unit))throw new SQLException("单位与原票投影不一致，禁止覆盖原件");
             }
             var expected=projections(unit,stamp);var actual=db.findAll(c,GlobalQueueUnitRegionRow.class,"unit_id=? LIMIT 17",unit.getUnitId());
             if(!new HashSet<>(actual).equals(new HashSet<>(expected))){clear(c,unit.getUnitId());for(var entry:expected)db.insert(c,entry);}
