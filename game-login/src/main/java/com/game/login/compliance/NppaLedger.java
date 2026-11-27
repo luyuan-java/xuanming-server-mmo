@@ -30,7 +30,7 @@ public final class NppaLedger {
             end
             local function lease_end(lease_ms, cap_ms)
               local e = now_ms + lease_ms
-              if cap_ms > 0 and cap_ms < e then e = cap_ms end
+              if cap_ms > now_ms and cap_ms < e then e = cap_ms end
               return e
             end
             """;
@@ -77,22 +77,33 @@ public final class NppaLedger {
             end
             local backfill = tonumber(ARGV[3])
             local due = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', num(now_ms), 'WITHSCORES', 'LIMIT', 0, tonumber(ARGV[2]))
+            local ended = 0
             for i = 1, #due, 2 do
-              local conn = due[i]
-              redis.call('ZREM', KEYS[2], conn)
+              local conn, lease_ended = due[i], tonumber(due[i + 1])
               local v = redis.call('HGET', KEYS[1], conn)
-              if v then
-                redis.call('HDEL', KEYS[1], conn)
-                local si, pi = string.match(v, '^([^|]*)|([^|]*)|')
+              if not v then
+                redis.call('ZREM', KEYS[2], conn)
+              else
+                local si, pi, cap = string.match(v, '^([^|]*)|([^|]*)|([^|]*)$')
+                cap = tonumber(cap) or 0
                 if si ~= '' then
-                  local ot = math.floor(tonumber(due[i + 1]) / 1000)
+                  local ot = math.floor(lease_ended / 1000)
                   if ot > now_s then ot = now_s end
                   if ot < now_s - backfill then ot = now_s - backfill end
                   emit(KEYS[3], 'out', ot, si, pi)
                 end
+                if cap > 0 and lease_ended == cap then
+                  redis.call('HSET', KEYS[1], conn, '||' .. num(cap))
+                  redis.call('ZADD', KEYS[2], num(now_ms + lease), conn)
+                  ended = ended + 1
+                else
+                  redis.call('HDEL', KEYS[1], conn)
+                  redis.call('ZREM', KEYS[2], conn)
+                  if si ~= '' or cap == 0 or lease_ended < cap then ended = ended + 1 end
+                end
               end
             end
-            return #due / 2
+            return ended
             """;
 
     private static final String CLAIM_SCRIPT = LUA_PRELUDE + """
@@ -148,6 +159,43 @@ public final class NppaLedger {
         } catch (NumberFormatException e) {
             return 0L;
         }
+    }
+
+    /**
+     * 读取连接在防沉迷会话账本里登记的未成年人可玩截止时刻（Unix 毫秒，0 = 成年人/平台托管/未登记）。
+     * Redis 异常不吞，由调用方按 fail-closed 拒绝进游戏。
+     */
+    public long readPlayDeadlineMs(String connId) {
+        if (connId == null || connId.isEmpty()) {
+            return 0L;
+        }
+        int shard = keys.shardOf(connId);
+        Object raw = redis.<String, String>getMap(keys.ledgerSessions(shard), StringCodec.INSTANCE).get(connId);
+        if (raw == null) {
+            return 0L;
+        }
+        String value = raw.toString();
+        int sep = value.lastIndexOf('|');
+        if (sep < 0 || sep + 1 >= value.length()) {
+            return 0L;
+        }
+        try {
+            return Math.max(0L, Long.parseLong(value.substring(sep + 1)));
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    static String luaPreludeForTest() {
+        return LUA_PRELUDE;
+    }
+
+    static String sweepScriptForTest() {
+        return SWEEP_SCRIPT;
+    }
+
+    static String renewScriptForTest() {
+        return RENEW_SCRIPT;
     }
 
     public void end(String connId) {

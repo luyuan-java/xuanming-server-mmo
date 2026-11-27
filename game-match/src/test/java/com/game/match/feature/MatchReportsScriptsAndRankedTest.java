@@ -370,6 +370,28 @@ class MatchReportsScriptsAndRankedTest {
             assertThat(latest.getResult().getBattleId()).isEqualTo(7004L);
             assertThat(latest.getResult().getRatingAfterCenti()).isEqualTo(156_400L);
             assertThat(latest.getResult().getTierAfter()).isEqualTo(RankedTier.RANKED_TIER_QINGFENG);
+
+            // 5. 试炼志 V4 多季映射校验：真实表 S1..S10 卷三并存且固定单季窗下 S1 正常解析、跨季 S2 拒挂
+            assertThat(tables.activeSeasonIdAt(now.get())).isEqualTo(1);
+            assertThat(tables.trialContextFor(com.game.match.support.MatchModes.PVE_SOLO, 109, null, null, now.get()))
+                    .isPresent().get().satisfies(c -> {
+                        assertThat(c.getJournalEntryId()).isEqualTo(301);
+                        assertThat(c.getSeasonId()).isEqualTo(1);
+                    });
+            assertThat(tables.trialContextFor(com.game.match.support.MatchModes.POLARITY_5V5, 110, null, null, now.get()))
+                    .isPresent().get().satisfies(c -> {
+                        assertThat(c.getJournalEntryId()).isEqualTo(302);
+                        assertThat(c.getSeasonId()).isEqualTo(1);
+                    });
+            assertThat(tables.trialContextFor(com.game.match.support.MatchModes.PVP_TEAM, 5, null,
+                    com.game.proto.RankedMatchContext.newBuilder().setSeasonId(1).build(), now.get()))
+                    .isPresent().get().satisfies(c -> {
+                        assertThat(c.getJournalEntryId()).isEqualTo(303);
+                        assertThat(c.getSeasonId()).isEqualTo(1);
+                    });
+            assertThat(tables.trialContextFor(com.game.match.support.MatchModes.PVP_TEAM, 5, null,
+                    com.game.proto.RankedMatchContext.newBuilder().setSeasonId(2).build(), now.get()))
+                    .isEmpty();
         }
     }
 }

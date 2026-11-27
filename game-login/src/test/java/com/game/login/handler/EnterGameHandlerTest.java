@@ -609,4 +609,40 @@ class EnterGameHandlerTest {
         when(store.claimOwnership(eq(PLAYER), eq(ACCOUNT), eq(1L), any(Duration.class))).thenReturn(new ClaimResult.Claimed(6));
         assertThat(response(enter(SESSION, PLAYER)).hasErrorMessage()).isFalse();
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void 进游戏从防沉迷会话账本读出未成年人截止时刻透传EnterScene_读失败与已超点均failClosed拒绝() throws Exception {
+        org.redisson.api.RedissonClient redis = mock(org.redisson.api.RedissonClient.class);
+        org.redisson.api.RMap<String, String> map = mock(org.redisson.api.RMap.class);
+        when(redis.<String, String>getMap(org.mockito.ArgumentMatchers.anyString(), any(org.redisson.client.codec.Codec.class))).thenReturn(map);
+        var keys = new com.game.login.compliance.NppaRedisKeys(
+                new com.game.discovery.RedisKeys(com.game.common.GameNamespace.of("game")));
+        var ledger = new com.game.login.compliance.NppaLedger(redis, keys, Duration.ofMinutes(30));
+        long nowMs = 1_800_000_000_000L;
+        long futureDeadline = nowMs + 600_000L;
+        var aa = new com.game.login.compliance.AntiAddictionGate(
+                com.game.common.compliance.AntiAddictionRules.Calendar.of(List.of()), java.util.Set.of(), null, ledger,
+                java.time.Clock.fixed(java.time.Instant.ofEpochMilli(nowMs), java.time.ZoneOffset.UTC));
+
+        EnterGameHandler gated = new EnterGameHandler(store, scenes, takeovers, Runnable::run, 7,
+                Duration.ofSeconds(5), Duration.ofSeconds(3), metrics, d -> Runnable::run, nanos::get)
+                .withAntiAddictionGate(aa);
+
+        // 1. 未成年人在可玩时段内进游戏 -> EnterScene 带上 minor_play_deadline_ms
+        when(map.get(org.mockito.ArgumentMatchers.anyString())).thenReturn("si123|pi123|" + futureDeadline);
+        HandlerReply ok = gated.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
+        assertThat(response(ok).hasErrorMessage()).isFalse();
+        assertThat(ok.directives().getFirst().getEnterScene().getMinorPlayDeadlineMs()).isEqualTo(futureDeadline);
+
+        // 2. 账本读异常 -> fail-closed 拒绝（kLoginRedisSetFailed），不分配场景也不夺权
+        org.mockito.Mockito.doThrow(new RuntimeException("redis down")).when(map).get(org.mockito.ArgumentMatchers.anyString());
+        HandlerReply failed = gated.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
+        assertError(failed, LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE);
+
+        // 3. 已越过未成年人可玩截止时刻 -> 拒绝（kLoginMinorPlayTimeOver）
+        org.mockito.Mockito.doReturn("||" + (nowMs - 1_000L)).when(map).get(org.mockito.ArgumentMatchers.anyString());
+        HandlerReply expired = gated.handle(SESSION, EnterGameRequest.newBuilder().setPlayerId(PLAYER).build()).join();
+        assertError(expired, LoginErrorTip.login_error.kLoginMinorPlayTimeOver_VALUE);
+    }
 }

@@ -2334,7 +2334,7 @@ class ClientDispatcherTest {
     @Test
     void 未成年人防沉迷可玩截止到点推送2049并断开() {
         EmbeddedChannel ch = verified();
-        long deadlineMs = NOW * 1000L + 50L;
+        long deadlineMs = NOW * 1000L + ClientDispatcher.MINOR_PLAY_CLOSE_LEAD_MS + 50L;
         ch.writeInbound(ClientRequest.newBuilder().setMessageId(LOGIN_MSG).setId(901).build());
         login.complete(ClientReply.newBuilder()
                 .addDirectives(SessionDirective.newBuilder()
@@ -2347,7 +2347,7 @@ class ClientDispatcherTest {
         assertThat(loginReply.getMessageId()).isEqualTo(LOGIN_MSG);
         assertThat(ch.isOpen()).isTrue();
 
-        // 推进 EmbeddedChannel 调度时钟越过 50ms 截止 -> 推 2049 并关闭连接
+        // 推进 EmbeddedChannel 调度时钟越过 50ms（截止前 5 秒） -> 推 2049 并关闭连接
         ch.advanceTimeBy(60, TimeUnit.MILLISECONDS);
         ch.runScheduledPendingTasks();
         Object kickFrame = ch.readOutbound();
@@ -2359,7 +2359,7 @@ class ClientDispatcherTest {
     @Test
     void 已进游戏的未成年人会话收到BindAccount时不覆盖账号也不取消防沉迷踢线() {
         EmbeddedChannel ch = verified();
-        long deadlineMs = NOW * 1000L + 50L;
+        long deadlineMs = NOW * 1000L + ClientDispatcher.MINOR_PLAY_CLOSE_LEAD_MS + 50L;
         ch.writeInbound(request(901, LOGIN_MSG, "minor-login"));
         login.complete(ClientReply.newBuilder()
                 .addDirectives(SessionDirective.newBuilder()
@@ -2384,6 +2384,67 @@ class ClientDispatcherTest {
         assertThat(kickFrame).isNotNull();
         assertThat(tipOf(kickFrame)).isEqualTo(ClientDispatcher.TIP_MINOR_PLAY_TIME_OVER);
         assertThat(ch.isOpen()).isFalse();
+    }
+
+    @Test
+    void 装配KickPlayer消息号时未成年人到点推34并通知scene立即退场_换节点透传截止时刻() throws Exception {
+        FakeLogin minorLogin = new FakeLogin();
+        FakeLinks minorLinks = new FakeLinks();
+        SessionRegistry reg = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
+        GateMetrics m = new GateMetrics(new SimpleMeterRegistry());
+        ClientDispatcher d = new ClientDispatcher(
+                new GateIdentity(GATE_NODE, "gate-inst-minor", ZONE),
+                tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)), ROUTES,
+                new PushMessageIds(TIP_MSG, 124, 34),
+                minorLogin, Map.of(), minorLinks, reg, new GateLimits(4, 3, Duration.ZERO), m, PresenceRecorder.NONE);
+        EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(reg, d));
+        ch.writeInbound(verifyRequest(GATE_NODE, NOW + 60));
+        ch.readOutbound();
+
+        long deadlineMs = NOW * 1000L + ClientDispatcher.MINOR_PLAY_CLOSE_LEAD_MS + 50L;
+        EnterScene enter = enterScene();
+        ch.writeInbound(request(905, LOGIN_MSG, "minor-enter"));
+        minorLogin.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder()
+                        .setBindAccount(BindAccount.newBuilder().setAccount("minor_2").setPlayDeadlineMs(deadlineMs)))
+                .addDirectives(SessionDirective.newBuilder()
+                        .setEnterScene(enter.toBuilder().setMinorPlayDeadlineMs(deadlineMs)))
+                .build());
+        ch.runPendingTasks();
+        ch.readOutbound();
+
+        // 1. 首次进场携带 minor_play_deadline_ms
+        assertThat(minorLinks.sent).hasSize(1);
+        assertThat(minorLinks.sent.getFirst().frame().getPlayerEnter().getMinorPlayDeadlineMs()).isEqualTo(deadlineMs);
+
+        // 2. 跨节点换图改绑后 PlayerEnter 仍原样透传 minor_play_deadline_ms
+        int sessionId = minorLinks.sent.getFirst().frame().getPlayerEnter().getSessionId();
+        ClientSession sess = reg.get(sessionId);
+        d.onPlayerTransfer(sess, enter.getSceneNodeId(), sess.sceneLinkGen, com.game.api.proto.PlayerTransfer.newBuilder()
+                .setSessionId(sessionId)
+                .setPlayerId(enter.getPlayerId())
+                .setFromEpoch(enter.getOwnerEpoch())
+                .setToEpoch(enter.getOwnerEpoch() + 1)
+                .setTargetSceneNodeId(enter.getSceneNodeId() + 1)
+                .setTargetSceneId(enter.getSceneId() + 1)
+                .build());
+        assertThat(minorLinks.sent).hasSize(2);
+        assertThat(minorLinks.sent.get(1).frame().getPlayerEnter().getTransfer()).isTrue();
+        assertThat(minorLinks.sent.get(1).frame().getPlayerEnter().getMinorPlayDeadlineMs()).isEqualTo(deadlineMs);
+
+        // 3. 到达截止前 5 秒 -> 推送 msg 34 GameKickPlayerRequest(reason=2049)，并向 scene 发 PlayerLeave{immediate_exit=true}
+        ch.advanceTimeBy(60, TimeUnit.MILLISECONDS);
+        ch.runScheduledPendingTasks();
+        MessageContent kickMsg = ch.readOutbound();
+        assertThat(kickMsg).isNotNull();
+        assertThat(kickMsg.getMessageId()).isEqualTo(34);
+        com.game.proto.GameKickPlayerRequest kickBody =
+                com.game.proto.GameKickPlayerRequest.parseFrom(kickMsg.getSerializedMessage());
+        assertThat(kickBody.getReason().getId()).isEqualTo(ClientDispatcher.TIP_MINOR_PLAY_TIME_OVER);
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(minorLinks.sent).hasSize(3);
+        assertThat(minorLinks.sent.get(2).frame().hasPlayerLeave()).isTrue();
+        assertThat(minorLinks.sent.get(2).frame().getPlayerLeave().getImmediateExit()).isTrue();
     }
 
     @Test

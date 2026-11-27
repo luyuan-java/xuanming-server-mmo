@@ -13,6 +13,7 @@ import com.game.table.DungeonTable;
 import com.game.table.PlayModeTable;
 import com.game.table.RankedPresetTable;
 import com.game.table.RankedRuleTable;
+import com.game.table.SeasonRuleTable;
 import com.game.table.TrialJournalEntryTable;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -44,7 +45,11 @@ public final class RankedTables {
     public static final List<Integer> PRIMARY_TEAM_SIZES = List.of(1, 3, 5);
     public static final List<Integer> SPECIAL_TEAM_SIZES = List.of(2, 4);
 
-    private record TrialVariantKey(int sourceKind, int difficulty, String variantKey) {
+    private record TrialVariantKey(int seasonId, int sourceKind, int difficulty, String variantKey) {
+    }
+
+    private record ResolvedSeason(int seasonId, int seasonTerm, boolean cycleMode) {
+        static final ResolvedSeason NONE = new ResolvedSeason(0, 0, false);
     }
 
     private final RankedRuleTable rule;
@@ -54,14 +59,18 @@ public final class RankedTables {
     private final Map<Long, List<Integer>> allowedTeamSizesByModeConfig;
     private final Map<Integer, Integer> bossTrialKindByDungeon;
     private final Map<Integer, TrialBattleContext> trialContextsByDungeon;
-    private final TrialBattleContext rankedTrialContext;
+    private final Map<Integer, Map<Integer, TrialBattleContext>> seasonalTrialContextsBySeason;
+    private final Map<Integer, TrialBattleContext> rankedTrialBySeason;
+    private final List<SeasonRuleTable> seasonRules;
 
     private RankedTables(RankedRuleTable rule, Map<Integer, RankedPresetTable> presetsById,
                          List<RankedPresetView> presetViews, String configFingerprint,
                          Map<Long, List<Integer>> allowedTeamSizesByModeConfig,
                          Map<Integer, Integer> bossTrialKindByDungeon,
                          Map<Integer, TrialBattleContext> trialContextsByDungeon,
-                         TrialBattleContext rankedTrialContext) {
+                         Map<Integer, Map<Integer, TrialBattleContext>> seasonalTrialContextsBySeason,
+                         Map<Integer, TrialBattleContext> rankedTrialBySeason,
+                         List<SeasonRuleTable> seasonRules) {
         this.rule = rule;
         this.presetsById = presetsById;
         this.presetViews = presetViews;
@@ -69,7 +78,9 @@ public final class RankedTables {
         this.allowedTeamSizesByModeConfig = allowedTeamSizesByModeConfig;
         this.bossTrialKindByDungeon = bossTrialKindByDungeon;
         this.trialContextsByDungeon = trialContextsByDungeon;
-        this.rankedTrialContext = rankedTrialContext;
+        this.seasonalTrialContextsBySeason = seasonalTrialContextsBySeason;
+        this.rankedTrialBySeason = rankedTrialBySeason;
+        this.seasonRules = seasonRules;
     }
 
     public static RankedTables from(ConfigTables config) {
@@ -112,18 +123,27 @@ public final class RankedTables {
         }
         Map<Long, List<Integer>> allowedSizes = parsePlayModeAllowedSizes(config.playMode().all());
         Map<Integer, TrialBattleContext> trialByDungeon = new HashMap<>();
-        TrialBattleContext rankedTrial = buildTrialContexts(config, config.dungeon().all(),
-                config.trialJournalEntry().all(), trialByDungeon);
+        Map<Integer, Map<Integer, TrialBattleContext>> seasonalBySeason = new HashMap<>();
+        Map<Integer, TrialBattleContext> rankedBySeason = new HashMap<>();
+        buildTrialContexts(config, config.dungeon().all(),
+                config.trialJournalEntry().all(), trialByDungeon, seasonalBySeason, rankedBySeason);
+        Map<Integer, Map<Integer, TrialBattleContext>> frozenSeasonal = new HashMap<>(seasonalBySeason.size() * 2);
+        seasonalBySeason.forEach((sid, m) -> frozenSeasonal.put(sid, Map.copyOf(m)));
+        List<SeasonRuleTable> seasonRules = List.copyOf(config.seasonRule().all());
         return new RankedTables(rule, Map.copyOf(byId), List.copyOf(views), fingerprint,
                 Map.copyOf(allowedSizes), Map.copyOf(bossKinds),
-                Map.copyOf(trialByDungeon), rankedTrial);
+                Map.copyOf(trialByDungeon), Map.copyOf(frozenSeasonal),
+                Map.copyOf(rankedBySeason), seasonRules);
     }
 
-    private static TrialBattleContext buildTrialContexts(ConfigTables config,
-                                                         List<DungeonTable> dungeons,
-                                                         List<TrialJournalEntryTable> entries,
-                                                         Map<Integer, TrialBattleContext> outByDungeon) {
+    private static void buildTrialContexts(ConfigTables config,
+                                           List<DungeonTable> dungeons,
+                                           List<TrialJournalEntryTable> entries,
+                                           Map<Integer, TrialBattleContext> outPermanentByDungeon,
+                                           Map<Integer, Map<Integer, TrialBattleContext>> outSeasonalBySeason,
+                                           Map<Integer, TrialBattleContext> outRankedBySeason) {
         Map<TrialVariantKey, TrialJournalEntryTable> byVariant = new HashMap<>(entries.size() * 2);
+        Set<Integer> seasons = new HashSet<>();
         for (TrialJournalEntryTable entry : entries) {
             if (!entry.getEnabled()) {
                 continue;
@@ -131,21 +151,20 @@ public final class RankedTables {
             if (entry.getId() == 0 || entry.getRuleVersion() == 0) {
                 throw new IllegalStateException("TrialJournalEntry 行 id=" + entry.getId() + " 缺少有效 id 或 rule_version");
             }
-            TrialVariantKey key = new TrialVariantKey(entry.getSourceKind(), entry.getDifficulty(), entry.getVariantKey());
+            TrialVariantKey key = new TrialVariantKey(entry.getSeasonId(), entry.getSourceKind(), entry.getDifficulty(), entry.getVariantKey());
             TrialJournalEntryTable prev = byVariant.putIfAbsent(key, entry);
             if (prev != null) {
                 throw new IllegalStateException("TrialJournalEntry 行 " + prev.getId() + " 与 " + entry.getId()
-                        + " 的 (source_kind=" + entry.getSourceKind() + ", difficulty=" + entry.getDifficulty()
-                        + ", variant_key=" + entry.getVariantKey() + ") 重复");
+                        + " 的 (season_id=" + entry.getSeasonId() + ", source_kind=" + entry.getSourceKind()
+                        + ", difficulty=" + entry.getDifficulty() + ", variant_key=" + entry.getVariantKey() + ") 重复");
+            }
+            if (entry.getSeasonId() != 0) {
+                seasons.add(entry.getSeasonId());
             }
         }
         for (DungeonTable dungeon : dungeons) {
             TrialVariantKey mapped = bossTrialVariant(dungeon.getBossTrialKind(), dungeon.getDifficulty());
             if (mapped == null) {
-                continue;
-            }
-            TrialJournalEntryTable entry = byVariant.get(mapped);
-            if (entry == null) {
                 continue;
             }
             int guardMonsterId = 0;
@@ -159,38 +178,145 @@ public final class RankedTables {
                     break;
                 }
             }
-            outByDungeon.put(dungeon.getId(), TrialBattleContext.newBuilder()
-                    .setJournalEntryId(entry.getId())
-                    .setTrialRuleVersion(entry.getRuleVersion())
-                    .setSeasonId(entry.getSeasonId())
-                    .setGuardMonsterTableId(guardMonsterId)
-                    .build());
+            TrialJournalEntryTable permEntry = byVariant.get(mapped);
+            if (permEntry != null) {
+                outPermanentByDungeon.put(dungeon.getId(), TrialBattleContext.newBuilder()
+                        .setJournalEntryId(permEntry.getId())
+                        .setTrialRuleVersion(permEntry.getRuleVersion())
+                        .setSeasonId(0)
+                        .setGuardMonsterTableId(guardMonsterId)
+                        .build());
+                continue;
+            }
+            for (int sid : seasons) {
+                TrialJournalEntryTable sEntry = byVariant.get(
+                        new TrialVariantKey(sid, mapped.sourceKind(), mapped.difficulty(), mapped.variantKey()));
+                if (sEntry == null) {
+                    continue;
+                }
+                outSeasonalBySeason.computeIfAbsent(sid, k -> new HashMap<>()).put(dungeon.getId(),
+                        TrialBattleContext.newBuilder()
+                                .setJournalEntryId(sEntry.getId())
+                                .setTrialRuleVersion(sEntry.getRuleVersion())
+                                .setSeasonId(sid)
+                                .setGuardMonsterTableId(guardMonsterId)
+                                .build());
+            }
         }
-        TrialJournalEntryTable rankedEntry = byVariant.get(new TrialVariantKey(4, 0, "ranked_pvp"));
-        if (rankedEntry == null) {
-            return null;
+        for (int sid : seasons) {
+            TrialJournalEntryTable rankedEntry = byVariant.get(new TrialVariantKey(sid, 4, 0, "ranked_pvp"));
+            if (rankedEntry != null) {
+                outRankedBySeason.put(sid, TrialBattleContext.newBuilder()
+                        .setJournalEntryId(rankedEntry.getId())
+                        .setTrialRuleVersion(rankedEntry.getRuleVersion())
+                        .setSeasonId(sid)
+                        .build());
+            }
         }
-        return TrialBattleContext.newBuilder()
-                .setJournalEntryId(rankedEntry.getId())
-                .setTrialRuleVersion(rankedEntry.getRuleVersion())
-                .setSeasonId(rankedEntry.getSeasonId())
-                .build();
     }
 
     private static TrialVariantKey bossTrialVariant(int bossTrialKind, int difficulty) {
         return switch (bossTrialKind) {
-            case 1 -> new TrialVariantKey(1, difficulty, "rejuvenation");
-            case 2 -> new TrialVariantKey(1, difficulty, "bulwark");
-            case 3 -> new TrialVariantKey(1, difficulty, "barrier");
-            case 4 -> new TrialVariantKey(1, difficulty, "venom");
-            case 5 -> new TrialVariantKey(2, difficulty, "rescue");
-            case 6 -> new TrialVariantKey(3, difficulty, "polarity_5v5");
-            case 8 -> new TrialVariantKey(1, difficulty, "dual_guard");
-            case 12 -> new TrialVariantKey(1, difficulty, "wild_wind");
-            case 13 -> new TrialVariantKey(1, difficulty, "wild_bell");
-            case 14 -> new TrialVariantKey(1, difficulty, "wild_tide");
+            case 1 -> new TrialVariantKey(0, 1, difficulty, "rejuvenation");
+            case 2 -> new TrialVariantKey(0, 1, difficulty, "bulwark");
+            case 3 -> new TrialVariantKey(0, 1, difficulty, "barrier");
+            case 4 -> new TrialVariantKey(0, 1, difficulty, "venom");
+            case 5 -> new TrialVariantKey(0, 2, difficulty, "rescue");
+            case 6 -> new TrialVariantKey(0, 3, difficulty, "polarity_5v5");
+            case 8 -> new TrialVariantKey(0, 1, difficulty, "dual_guard");
+            case 12 -> new TrialVariantKey(0, 1, difficulty, "wild_wind");
+            case 13 -> new TrialVariantKey(0, 1, difficulty, "wild_bell");
+            case 14 -> new TrialVariantKey(0, 1, difficulty, "wild_tide");
             default -> null;
         };
+    }
+
+    private static final int SEASON_MIN_CYCLE_DAYS = 7;
+    private static final int SEASON_MAX_CYCLE_DAYS = 180;
+    private static final long SEASON_MS_PER_DAY = 24L * 3600L * 1000L;
+
+    private static ResolvedSeason resolveActiveSeason(List<SeasonRuleTable> rules, long nowMs) {
+        if (rules == null || rules.isEmpty()) {
+            return ResolvedSeason.NONE;
+        }
+        boolean anyCycle = false;
+        for (SeasonRuleTable r : rules) {
+            if (r.getId() == 0 || (r.getEndsAtMs() != 0L && Long.compareUnsigned(r.getEndsAtMs(), r.getStartsAtMs()) <= 0)) {
+                return ResolvedSeason.NONE;
+            }
+            if (r.getCycleDurationDays() != 0) {
+                if (Integer.compareUnsigned(r.getCycleDurationDays(), SEASON_MIN_CYCLE_DAYS) < 0
+                        || Integer.compareUnsigned(r.getCycleDurationDays(), SEASON_MAX_CYCLE_DAYS) > 0) {
+                    return ResolvedSeason.NONE;
+                }
+                anyCycle = true;
+            }
+        }
+        if (!anyCycle) {
+            for (int i = 0; i < rules.size(); i++) {
+                SeasonRuleTable a = rules.get(i);
+                if (!a.getEnabled()) continue;
+                for (int j = i + 1; j < rules.size(); j++) {
+                    SeasonRuleTable b = rules.get(j);
+                    if (!b.getEnabled()) continue;
+                    boolean aBeforeB = a.getEndsAtMs() != 0L && Long.compareUnsigned(a.getEndsAtMs(), b.getStartsAtMs()) <= 0;
+                    boolean bBeforeA = b.getEndsAtMs() != 0L && Long.compareUnsigned(b.getEndsAtMs(), a.getStartsAtMs()) <= 0;
+                    if (!aBeforeB && !bBeforeA) {
+                        return ResolvedSeason.NONE;
+                    }
+                }
+            }
+            for (SeasonRuleTable r : rules) {
+                if (!r.getEnabled()) continue;
+                if (Long.compareUnsigned(nowMs, r.getStartsAtMs()) < 0) continue;
+                if (r.getEndsAtMs() != 0L && Long.compareUnsigned(nowMs, r.getEndsAtMs()) >= 0) continue;
+                return new ResolvedSeason(r.getId(), 1, false);
+            }
+            return ResolvedSeason.NONE;
+        }
+        List<SeasonRuleTable> pool = new ArrayList<>();
+        int sharedDuration = 0;
+        for (SeasonRuleTable r : rules) {
+            if (r.getCycleOrder() == 0) {
+                if (r.getEnabled() || r.getCycleDurationDays() != 0) {
+                    return ResolvedSeason.NONE;
+                }
+                continue;
+            }
+            if (!r.getEnabled()
+                    || Integer.compareUnsigned(r.getCycleDurationDays(), SEASON_MIN_CYCLE_DAYS) < 0
+                    || Integer.compareUnsigned(r.getCycleDurationDays(), SEASON_MAX_CYCLE_DAYS) > 0) {
+                return ResolvedSeason.NONE;
+            }
+            if (sharedDuration == 0) {
+                sharedDuration = r.getCycleDurationDays();
+            } else if (sharedDuration != r.getCycleDurationDays()) {
+                return ResolvedSeason.NONE;
+            }
+            pool.add(r);
+        }
+        if (pool.isEmpty()) {
+            return ResolvedSeason.NONE;
+        }
+        pool.sort(Comparator.comparingInt(SeasonRuleTable::getCycleOrder));
+        for (int i = 0; i < pool.size(); i++) {
+            if (pool.get(i).getCycleOrder() != i + 1) {
+                return ResolvedSeason.NONE;
+            }
+        }
+        long anchorMs = pool.getFirst().getStartsAtMs();
+        if (anchorMs == 0L || Long.compareUnsigned(nowMs, anchorMs) < 0) {
+            return ResolvedSeason.NONE;
+        }
+        long periodMs = Integer.toUnsignedLong(sharedDuration) * SEASON_MS_PER_DAY;
+        long elapsed = Long.divideUnsigned(nowMs - anchorMs, periodMs);
+        SeasonRuleTable active = pool.get((int) Long.remainderUnsigned(elapsed, pool.size()));
+        return new ResolvedSeason(active.getId(), (int) (elapsed + 1L), true);
+    }
+
+    /** 返回指定时刻活跃主题赛季 ID（与 C++ {@code PlayerSeasonSystem::ActiveSeasonId} 及 Go {@code Catalog.ActiveSeasonIdAt} 同口径）。 */
+    public int activeSeasonIdAt(long nowMs) {
+        return resolveActiveSeason(seasonRules, nowMs).seasonId();
     }
 
     /** 五行试炼志 V3 全部四项自选誓约合法位掩码（bit0 禁控 / bit1 单宝 / bit2 无宠 / bit3 紧缩回合）。 */
@@ -218,11 +344,18 @@ public final class RankedTables {
 
     /**
      * 返回本局应冻结进 {@code CreateBattleRequest.trial_context} 的试炼志上下文（对齐 Go {@code Catalog.TrialContextFor}）。
-     * 覆盖卷一/卷二首领试炼、卷三护卫救援与物法易势（允许免费预设）、卷三人宠会武；帮会活动战/切磋/普通副本/跨季返回空。
+     * 覆盖卷一/卷二/卷四永久首领试炼、卷三当季护卫救援与物法易势（允许免费预设）、卷三当季人宠会武；帮会活动战/切磋/普通副本/跨季返回空。
      */
     public Optional<TrialBattleContext> trialContextFor(int mode, int configId,
                                                         BattleActivityContext activityContext,
                                                         RankedMatchContext rankedCtx) {
+        return trialContextFor(mode, configId, activityContext, rankedCtx, System.currentTimeMillis());
+    }
+
+    public Optional<TrialBattleContext> trialContextFor(int mode, int configId,
+                                                        BattleActivityContext activityContext,
+                                                        RankedMatchContext rankedCtx,
+                                                        long nowMs) {
         if (activityContext != null) {
             return Optional.empty();
         }
@@ -230,18 +363,46 @@ public final class RankedTables {
             if (rankedCtx != null && rankedCtx.getSeasonId() != 0) {
                 return Optional.empty();
             }
-            return Optional.ofNullable(trialContextsByDungeon.get(configId));
+            TrialBattleContext perm = trialContextsByDungeon.get(configId);
+            if (perm != null) {
+                return Optional.of(perm);
+            }
+            int targetSeason = 0;
+            if (!seasonRules.isEmpty()) {
+                targetSeason = resolveActiveSeason(seasonRules, nowMs).seasonId();
+            } else if (seasonalTrialContextsBySeason.size() == 1) {
+                targetSeason = seasonalTrialContextsBySeason.keySet().iterator().next();
+            }
+            if (targetSeason == 0) {
+                return Optional.empty();
+            }
+            Map<Integer, TrialBattleContext> byDungeon = seasonalTrialContextsBySeason.get(targetSeason);
+            return byDungeon == null ? Optional.empty() : Optional.ofNullable(byDungeon.get(configId));
         }
         if (mode == MatchModes.PVP_TEAM) {
-            if (rankedTrialContext == null) {
-                return Optional.empty();
+            if (!seasonRules.isEmpty()) {
+                ResolvedSeason active = resolveActiveSeason(seasonRules, nowMs);
+                if (active.seasonId() == 0) {
+                    return Optional.empty();
+                }
+                if (rankedCtx != null && rankedCtx.getSeasonId() != 0) {
+                    if (!active.cycleMode() && rankedCtx.getSeasonId() != active.seasonId()) {
+                        return Optional.empty();
+                    }
+                    if (active.cycleMode() && rankedCtx.getSeasonId() != active.seasonId()
+                            && rankedCtx.getSeasonId() != active.seasonTerm()) {
+                        return Optional.empty();
+                    }
+                }
+                return Optional.ofNullable(rankedTrialBySeason.get(active.seasonId()));
             }
-            if (rankedCtx != null && rankedCtx.getSeasonId() != 0
-                    && rankedTrialContext.getSeasonId() != 0
-                    && rankedTrialContext.getSeasonId() != rankedCtx.getSeasonId()) {
-                return Optional.empty();
+            if (rankedCtx != null && rankedCtx.getSeasonId() != 0) {
+                return Optional.ofNullable(rankedTrialBySeason.get(rankedCtx.getSeasonId()));
             }
-            return Optional.of(rankedTrialContext);
+            if (rankedTrialBySeason.size() == 1) {
+                return Optional.ofNullable(rankedTrialBySeason.values().iterator().next());
+            }
+            return Optional.empty();
         }
         return Optional.empty();
     }

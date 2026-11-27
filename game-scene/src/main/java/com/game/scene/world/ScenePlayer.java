@@ -154,6 +154,8 @@ public final class ScenePlayer {
     private long afkPassConfirmedSeq;
     /** 断线保留 / 离线托管运行态（null = 在线正常连接）。 */
     private ConnectionLostHold.State connectionLostHold;
+    /** 未成年人防沉迷可玩截止时刻（Unix 毫秒，0 = 不限）；由 login 进场带入，封顶断线保留与月卡离线托管。 */
+    private long minorPlayDeadlineMs;
     /** 账号级阶段一可交易 60 份配额异步同步运行态（逻辑线程内存态，不持久化）。 */
     private boolean accountStage1TradableLoaded;
     private boolean accountStage1TradableSyncInFlight;
@@ -904,6 +906,14 @@ public final class ScenePlayer {
     void resumeConnectionLostHold(SessionKey newSession) {
         this.session = java.util.Objects.requireNonNull(newSession, "newSession");
         this.connectionLostHold = null;
+    }
+
+    public long minorPlayDeadlineMs() {
+        return minorPlayDeadlineMs;
+    }
+
+    void setMinorPlayDeadlineMs(long minorPlayDeadlineMs) {
+        this.minorPlayDeadlineMs = Math.max(0L, minorPlayDeadlineMs);
     }
 
     /**

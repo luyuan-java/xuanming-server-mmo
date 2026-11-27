@@ -193,6 +193,9 @@ final class BattleEquipment {
         var seal = actor.state().getEquipmentEffects().getSeasonSeal();
         var rt = ctx.seasonSealRuntime(actor.actorId());
         rt.resonanceCount += 1;
+        if (actor.isPlayer()) {
+            ctx.encounter.recordSeasonResonance(actor.actorId(), resonanceEffectId);
+        }
         ctx.events().append(BATTLE_EVENT_ARTIFACT, actor.actorId(), targetId)
                 .setArtifactItemId(0L)
                 .setArtifactEffectId(resonanceEffectId)

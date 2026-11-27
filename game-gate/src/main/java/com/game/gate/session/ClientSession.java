@@ -82,6 +82,10 @@ public final class ClientSession {
     long scenePlayerId;
     /** 进场帧里的 owner_epoch：只认同一次进场的结果 / 踢出通知，丢弃更早一次进场的迟到帧。 */
     long sceneOwnerEpoch;
+    /** 进场时由 login 带来的未成年人防沉迷可玩截止时刻（Unix 毫秒，0 = 不限），跨节点换图原样带往目标 scene。 */
+    long sceneMinorPlayDeadlineMs;
+    /** 未成年人到点踢线或 login CloseSession 下发时置位，断开时通知 scene 立即存盘退场，跳过断线保留与离线托管。 */
+    boolean exitSceneImmediatelyOnClose;
     /**
      * 当前绑定是跨节点换图的交出进场、目标节点还没回结果（{@code PlayerEnter.transfer = true} 已发出）。
      * 这期间进场失败（目标节点拒绝、建链失败）不回大厅，推 23 {tip} 后断开：源节点已交出、实例已移除，会话上没有可回的场景。

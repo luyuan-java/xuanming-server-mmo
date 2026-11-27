@@ -457,11 +457,30 @@ public class LoginConfiguration {
      * 落地路径上问合服围栏（检查点 F2，判角色的归属区）。{@code game.zone-id} 只在会话没带 zone 时兜底。
      * 整条链（含登录期重定向没成时的回落）按 {@code game.login.enter-game-budget} 收紧，赶在 gate 调 login 的超时之前应答。
      */
+    /** 兼容既有 10 参调用（如接线单测）。 */
+    public EnterGameHandler enterGameHandler(PlayerStore store, OwnerTakeovers ownerTakeovers, RedissonClient redis,
+                                             RedisKeys redisKeys, LoginWorkerPool loginWorkerPool, LoginProperties props,
+                                             LoginMetrics loginMetrics, AccountLogin accountLogin,
+                                             ZoneMergeFence zoneMergeFence, int zoneId) {
+        return enterGameHandler(store, ownerTakeovers, redis, redisKeys, loginWorkerPool, props, loginMetrics,
+                accountLogin, zoneMergeFence, (AntiAddictionGate) null, zoneId);
+    }
+
     @Bean
     public EnterGameHandler enterGameHandler(PlayerStore store, OwnerTakeovers ownerTakeovers, RedissonClient redis,
                                              RedisKeys redisKeys, LoginWorkerPool loginWorkerPool, LoginProperties props,
                                              LoginMetrics loginMetrics, AccountLogin accountLogin,
-                                             ZoneMergeFence zoneMergeFence, @Value("${game.zone-id:1}") int zoneId) {
+                                             ZoneMergeFence zoneMergeFence, ObjectProvider<AntiAddictionGate> antiAddictionGate,
+                                             @Value("${game.zone-id:1}") int zoneId) {
+        return enterGameHandler(store, ownerTakeovers, redis, redisKeys, loginWorkerPool, props, loginMetrics,
+                accountLogin, zoneMergeFence, antiAddictionGate.getIfAvailable(), zoneId);
+    }
+
+    private EnterGameHandler enterGameHandler(PlayerStore store, OwnerTakeovers ownerTakeovers, RedissonClient redis,
+                                              RedisKeys redisKeys, LoginWorkerPool loginWorkerPool, LoginProperties props,
+                                              LoginMetrics loginMetrics, AccountLogin accountLogin,
+                                              ZoneMergeFence zoneMergeFence, AntiAddictionGate antiAddictionGate,
+                                              int zoneId) {
         Duration enterLockTtl = props.enterGameBudget().plusSeconds(10);
         if (enterLockTtl.compareTo(IN_FLIGHT_TTL) < 0) {
             enterLockTtl = IN_FLIGHT_TTL;
@@ -470,7 +489,8 @@ public class LoginConfiguration {
                 props.sceneAssignTimeout(), props.ownerClaimWait(), loginMetrics, accountLogin::renewDevice,
                 new PlayerLocationDirectory(redis, redisKeys)::find, zoneMergeFence, props.enterGameBudget(),
                 InFlightKeys.distributed(redis, playerId -> redisKeys.loginInFlight("enter", Long.toUnsignedString(playerId)),
-                        enterLockTtl));
+                        enterLockTtl))
+                .withAntiAddictionGate(antiAddictionGate);
     }
 
     /**

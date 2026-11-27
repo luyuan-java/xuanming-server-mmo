@@ -40,6 +40,7 @@ import com.game.proto.ClientHeartbeatRequest;
 import com.game.proto.ClientHeartbeatResponse;
 import com.game.proto.ClientTokenVerifyRequest;
 import com.game.proto.ClientTokenVerifyResponse;
+import com.game.proto.GameKickPlayerRequest;
 import com.game.proto.MessageContent;
 import com.game.proto.RedirectToGateNotify;
 import com.game.proto.SubscribeSpectateRequest;
@@ -138,6 +139,8 @@ public final class ClientDispatcher {
     static final int TIP_ZONE_TRAVEL_FAILED = SceneErrorTip.scene_error.kZoneTravelTargetBusy_VALUE;
     /** 未成年人当日防沉迷可玩时段到期踢线提示（2049）。 */
     static final int TIP_MINOR_PLAY_TIME_OVER = LoginErrorTip.login_error.kLoginMinorPlayTimeOver_VALUE;
+    /** 对齐 C++ gate_minor_deadline::kCloseLeadMs：在 21:00 截止前 5 秒踢线，确保到点前已完成断开。 */
+    static final long MINOR_PLAY_CLOSE_LEAD_MS = 5_000L;
 
     /**
      * 会话后端 lane 的排队 + 在途总上限:超过就回带请求 id 的信封 1008、不断连、不计非法包。
@@ -179,6 +182,7 @@ public final class ClientDispatcher {
      * （只收 tip 号的旧重载）：这时重定向帧 / 重定向指令一律按内容非法收口（推 23 {3027} 后断开），绝不发消息号为 0 的包。
      */
     private final int redirectToGateMessageId;
+    private final int kickPlayerMessageId;
     private final int renewSessionMessageId;
     private final ClientMessageService login;
     /** login 以外的客户端消息后端：Dubbo group（= 消息域）→ 服务（friend ……）。 */
@@ -260,6 +264,7 @@ public final class ClientDispatcher {
         this.routes = routes;
         this.tipMessageId = pushIds.tip();
         this.redirectToGateMessageId = pushIds.redirectToGate();
+        this.kickPlayerMessageId = pushIds.kickPlayer();
         this.login = login;
         this.backends = Map.copyOf(backends);
         this.links = links;
@@ -578,7 +583,7 @@ public final class ClientDispatcher {
         s.cancelSessionRenew();
         discardPending(s, RequestResult.DROPPED);
         // 已重定向的会话没有场景绑定，这里什么也不发
-        leaveScene(s, s.leaveGameRequests > 0);
+        leaveScene(s, s.leaveGameRequests > 0, s.exitSceneImmediatelyOnClose);
         if (s.inFlight) {
             // 等在途的 login 调用完成后再通知 login（见 onLoginCompleted），否则 login 可能先收到断线、后处理完进游戏。
             return;
@@ -951,7 +956,7 @@ public final class ClientDispatcher {
             s.cancelPlayDeadline();
             return;
         }
-        long delayMs = Math.max(0L, deadlineMs - clock.millis());
+        long delayMs = Math.max(0L, deadlineMs - MINOR_PLAY_CLOSE_LEAD_MS - clock.millis());
         int sessionId = s.sessionId();
         String expectedAccount = s.account;
         s.schedulePlayDeadline(delayMs, () -> {
@@ -1087,15 +1092,19 @@ public final class ClientDispatcher {
         s.sceneNodeId = enter.getSceneNodeId();
         s.scenePlayerId = enter.getPlayerId();
         s.sceneOwnerEpoch = enter.getOwnerEpoch();
-        PlayerEnter playerEnter = PlayerEnter.newBuilder()
+        s.sceneMinorPlayDeadlineMs = enter.getMinorPlayDeadlineMs();
+        PlayerEnter.Builder playerEnterBuilder = PlayerEnter.newBuilder()
                 .setSessionId(s.sessionId())
                 .setPlayerId(enter.getPlayerId())
                 .setSceneId(enter.getSceneId())
                 .setOwnerEpoch(enter.getOwnerEpoch())
                 .setAccount(s.ownerAccount)
                 .setOwnerRevision(s.ownerRevision)
-                .setLoginGeneration(s.loginGeneration)
-                .build();
+                .setLoginGeneration(s.loginGeneration);
+        if (s.sceneMinorPlayDeadlineMs > 0L) {
+            playerEnterBuilder.setMinorPlayDeadlineMs(s.sceneMinorPlayDeadlineMs);
+        }
+        PlayerEnter playerEnter = playerEnterBuilder.build();
         long gen = beginSceneEntry(s, enter.getSceneNodeId(), playerEnter);
         if (gen == 0) {
             abandonEnter(s, enter.getPlayerId(), enter.getOwnerEpoch(), "链路层不可用");
@@ -1127,7 +1136,11 @@ public final class ClientDispatcher {
         log.info("login 指示关闭会话 session={} tip={}", sid(s), tipId);
         metrics.disconnected(DisconnectReason.SERVER_DIRECTIVE);
         s.closing = true;
-        if (tipId != 0) {
+        s.exitSceneImmediatelyOnClose = true;
+        discardPending(s, RequestResult.DROPPED);
+        if (tipId == TIP_MINOR_PLAY_TIME_OVER && kickPlayerMessageId > 0) {
+            s.sendThenClose(kickPlayer(tipId));
+        } else if (tipId != 0) {
             s.sendThenClose(tip(tipId));
         } else {
             s.close();
@@ -1399,7 +1412,7 @@ public final class ClientDispatcher {
         s.sceneOwnerEpoch = transfer.getToEpoch();
         s.transferEntering = true;
         metrics.sceneTransfer(SceneTransferResult.REBOUND);
-        PlayerEnter enter = PlayerEnter.newBuilder()
+        PlayerEnter.Builder enterBuilder = PlayerEnter.newBuilder()
                 .setSessionId(s.sessionId())
                 .setPlayerId(s.scenePlayerId)
                 .setSceneId(transfer.getTargetSceneId())
@@ -1407,8 +1420,11 @@ public final class ClientDispatcher {
                 .setAccount(s.ownerAccount)
                 .setOwnerRevision(s.ownerRevision)
                 .setLoginGeneration(s.loginGeneration)
-                .setTransfer(true)
-                .build();
+                .setTransfer(true);
+        if (s.sceneMinorPlayDeadlineMs > 0L) {
+            enterBuilder.setMinorPlayDeadlineMs(s.sceneMinorPlayDeadlineMs);
+        }
+        PlayerEnter enter = enterBuilder.build();
         long gen = beginSceneEntry(s, targetNode, enter);
         if (gen == 0) {
             log.warn("跨节点换图改绑后到目标 scene 的链路层不可用，断开 session={} player_id={} 目标 node={} epoch={}", sid(s),
@@ -1709,6 +1725,10 @@ public final class ClientDispatcher {
     }
 
     private void leaveScene(ClientSession s, boolean voluntary) {
+        leaveScene(s, voluntary, false);
+    }
+
+    private void leaveScene(ClientSession s, boolean voluntary, boolean immediateExit) {
         PendingSceneEntry pending = s.pendingSceneEntry;
         if (pending != null) {
             boolean cancelled = pending.knownUnsent || links.cancelQueuedEnter(pending.nodeId, pending.generation, pending.enter);
@@ -1723,11 +1743,13 @@ public final class ClientDispatcher {
         if (s.sceneNodeId == 0) {
             return;
         }
-        PlayerLeave leave = PlayerLeave.newBuilder()
+        PlayerLeave.Builder leave = PlayerLeave.newBuilder()
                 .setSessionId(s.sessionId())
                 .setPlayerId(s.scenePlayerId)
-                .setVoluntary(voluntary)
-                .build();
+                .setVoluntary(voluntary);
+        if (immediateExit) {
+            leave.setImmediateExit(true);
+        }
         links.send(s.sceneNodeId, s.sceneLinkGen, NodeLinkFrame.newBuilder().setPlayerLeave(leave).build());
         unbindScene(s);
     }
@@ -1745,6 +1767,7 @@ public final class ClientDispatcher {
         s.sceneLinkGen = 0;
         s.scenePlayerId = 0;
         s.sceneOwnerEpoch = 0;
+        s.sceneMinorPlayDeadlineMs = 0;
         s.transferEntering = false;
     }
 
@@ -2017,6 +2040,17 @@ public final class ClientDispatcher {
         return MessageContent.newBuilder()
                 .setMessageId(tipMessageId)
                 .setSerializedMessage(TipInfoMessage.newBuilder().setId(tipId).build().toByteString())
+                .build();
+    }
+
+    /** 下发 34 {@code GameKickPlayerRequest}（未成年人防沉迷到点/兜底踢线，携带原因码让客户端停在登录页不自动重连）。 */
+    private MessageContent kickPlayer(int reasonTipId) {
+        GameKickPlayerRequest body = GameKickPlayerRequest.newBuilder()
+                .setReason(TipInfoMessage.newBuilder().setId(reasonTipId))
+                .build();
+        return MessageContent.newBuilder()
+                .setMessageId(kickPlayerMessageId)
+                .setSerializedMessage(body.toByteString())
                 .build();
     }
 

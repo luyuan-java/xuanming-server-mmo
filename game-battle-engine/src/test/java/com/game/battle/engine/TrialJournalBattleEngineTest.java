@@ -330,4 +330,59 @@ class TrialJournalBattleEngineTest {
         CreateBattleRequest rescueVow = vowReq.toBuilder().setBattleId(88203L).setBattleConfigId(109).build();
         assertThat(TurnBattleEngine.start(rescueVow, DATA)).isInstanceOf(BattleStart.Rejected.class);
     }
+
+    @Test
+    void 试炼志V4_施放当季免费赛季技与触发R1至R8技印共鸣写入权威事实并按掩码判定() {
+        // S2 玄脉之季：玄脉灵幕(15103) + 玄脉护印(203, effect=5, R6 首盾回蓝 param=250)
+        BattlePlayerSnapshot pA = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(3001L).setPlayerName("玄脉试剑").setTeamIndex(0)
+                .setActiveSeasonId(2)
+                .setLevel(30).setClassId(1)
+                .setMaxHealth(20_000L).setMaxMana(2_000L)
+                .setPhysicalAttack(1_000L).setMagicAttack(1_000L).setDefense(200L)
+                .setBaseAttributes(BaseAttributesComp.newBuilder()
+                        .setHealth(20_000L).setMana(1_000L).setSpeed(500L))
+                .addSkillTableIds(15103).putSkillRanks(15103, 1)
+                .setEquipmentEffects(EquipmentEffects.newBuilder()
+                        .setSeasonSeal(SeasonSealEffect.newBuilder()
+                                .setSeasonId(2).setSealId(203).setEffectId(5)
+                                .setBonusBps(1200).setPerRoundLimit(1).setBattleLimit(3)
+                                .setResonanceSkillId(15103).setResonanceKind(6).setResonanceParam(250)))
+                .build();
+        BattlePlayerSnapshot pB = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(3002L).setPlayerName("对手").setTeamIndex(1)
+                .setLevel(30).setClassId(1)
+                .setMaxHealth(20_000L).setMaxMana(2_000L)
+                .setPhysicalAttack(100L).setMagicAttack(100L).setDefense(200L)
+                .setBaseAttributes(BaseAttributesComp.newBuilder()
+                        .setHealth(20_000L).setMana(2_000L).setSpeed(100L))
+                .build();
+        CreateBattleRequest req = CreateBattleRequest.newBuilder()
+                .setBattleId(88401L).setBattleConfigId(5)
+                .setMatchMode(3).setSeed(29L)
+                .addPlayers(pA).addPlayers(pB)
+                .setTrialContext(TrialBattleContext.newBuilder()
+                        .setJournalEntryId(3023).setTrialRuleVersion(1).setSeasonId(2))
+                .build();
+
+        TurnBattleEngine engine = ((BattleStart.Started) TurnBattleEngine.start(req, DATA)).engine();
+        engine.submitAction(3001L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                .setTargetId(3001L).setSkillTableId(15103).build());
+        engine.submitAction(3002L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        engine.resolveCurrentRound();
+
+        BattleSettlementData settle = engine.buildSettlement(3001L).toBuilder()
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN).build();
+        assertThat(settle.hasTrialFacts()).isTrue();
+        BattleTrialJournalFacts facts = settle.getTrialFacts();
+        assertThat(facts.getSelfCastSeasonSkill()).isTrue();
+        assertThat(facts.getSelfTriggeredSeasonResonance()).isTrue();
+        assertThat(facts.getSelfSeasonResonanceMask()).isEqualTo(1 << 5);
+        assertThat(TrialJournalRules.evaluateSealCondition(TrialJournalRules.COND_SEASON_SKILL_CAST, 0, settle)).isTrue();
+        assertThat(TrialJournalRules.evaluateSealCondition(TrialJournalRules.COND_SEASON_RESONANCE, 0, settle)).isTrue();
+        assertThat(TrialJournalRules.evaluateSealCondition(TrialJournalRules.COND_SEASON_RESONANCE, 51, settle)).isTrue();
+        assertThat(TrialJournalRules.evaluateSealCondition(TrialJournalRules.COND_SEASON_RESONANCE, 21, settle)).isFalse();
+    }
 }

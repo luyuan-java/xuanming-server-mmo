@@ -43,8 +43,16 @@ public final class ConnectionLostHold {
         return heldSeconds >= HOLD_WINDOW_SECONDS;
     }
 
-    /** 是否已正式进入离线托管（非普通 25s 保留且距离月卡到期还超过退场提前量）。 */
+    /** 是否已正式进入离线托管（非普通 25s 保留且距离月卡到期还超过退场提前量，且未越过未成年人可玩截止时刻）。 */
     public static boolean isHosting(boolean hostingStarted, AfkPassState pass, long passExpiresAtSec, long nowUnixSec) {
+        return isHosting(hostingStarted, pass, passExpiresAtSec, nowUnixSec, 0L, nowUnixSec * 1000L);
+    }
+
+    public static boolean isHosting(boolean hostingStarted, AfkPassState pass, long passExpiresAtSec,
+                                    long nowUnixSec, long minorPlayDeadlineMs, long nowUnixMs) {
+        if (minorPlayDeadlineMs > 0L && nowUnixMs >= minorPlayDeadlineMs) {
+            return false;
+        }
         return hostingStarted && pass == AfkPassState.ACTIVE
                 && nowUnixSec + HOSTING_EXIT_LEAD_SECONDS < passExpiresAtSec;
     }
@@ -57,6 +65,16 @@ public final class ConnectionLostHold {
     /** 纯判定：根据已保留时长、月卡状态、当前 Unix 秒及是否有查询在途决定保留 / 复查 / 退场。 */
     public static HoldVerdict judgeHold(long heldSeconds, AfkPassState pass, long passExpiresAtSec,
                                         long nowUnixSec, boolean probeInFlight) {
+        return judgeHold(heldSeconds, pass, passExpiresAtSec, nowUnixSec, probeInFlight, 0L, nowUnixSec * 1000L);
+    }
+
+    /** 纯判定（含未成年人可玩截止时刻封顶）：一到截止时刻立即退场，不保留也不托管。 */
+    public static HoldVerdict judgeHold(long heldSeconds, AfkPassState pass, long passExpiresAtSec,
+                                        long nowUnixSec, boolean probeInFlight,
+                                        long minorPlayDeadlineMs, long nowUnixMs) {
+        if (minorPlayDeadlineMs > 0L && nowUnixMs >= minorPlayDeadlineMs) {
+            return HoldVerdict.EXIT;
+        }
         if (pass == AfkPassState.ACTIVE) {
             if (nowUnixSec + HOSTING_EXIT_LEAD_SECONDS < passExpiresAtSec) {
                 return HoldVerdict.KEEP;

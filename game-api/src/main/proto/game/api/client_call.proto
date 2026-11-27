@@ -81,6 +81,8 @@ message EnterScene {
   // 玩家数据归属围栏：scene 写回时必须带上，旧 epoch 的写入会被拒绝。
   uint64 owner_epoch = 4;
   uint64 owner_revision = 5;
+  // 未成年人防沉迷可玩截止时刻（Unix 毫秒，0 = 不限）；由 login 进游戏时从防沉迷会话账本读出并带入 scene 封顶断线保留与离线托管。
+  uint64 minor_play_deadline_ms = 6;
 }
 
 // 让 gate 关闭会话（先把 tip 发给客户端，再断开）。

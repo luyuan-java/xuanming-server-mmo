@@ -288,9 +288,10 @@ public final class AccountLogin {
                 return new RenewOutcome(false, 0, false);
             }
         }
+        long deadlineMs = 0L;
         if (antiAddiction != null) {
             try {
-                long deadlineMs = antiAddiction.renewWatchedSession(deviceKey);
+                deadlineMs = antiAddiction.renewWatchedSession(deviceKey);
                 if (antiAddiction.isPastPlayDeadline(deadlineMs)) {
                     log.error("未成年人超过防沉迷可玩截止时刻仍在线，login 兜底踢线 account={} session={} deadline_ms={}",
                             session.getAccount(), deviceKey, deadlineMs);
@@ -303,6 +304,11 @@ public final class AccountLogin {
             }
         }
         long seconds = (sessionTtl == null ? java.time.Duration.ofMinutes(30) : sessionTtl).toSeconds() / 3L;
+        if (deadlineMs > 0L && antiAddiction != null) {
+            long remainingMs = deadlineMs - antiAddiction.now().toEpochMilli();
+            long remainingSeconds = Math.max(1L, (remainingMs + 999L) / 1000L);
+            seconds = Math.min(seconds, remainingSeconds);
+        }
         int renewAfter = (int) Math.max(1L, Math.min(Integer.MAX_VALUE, seconds));
         return new RenewOutcome(true, renewAfter, false);
     }

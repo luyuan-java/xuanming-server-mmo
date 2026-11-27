@@ -12,6 +12,7 @@ import com.game.api.proto.SessionDirective;
 import com.game.api.proto.ZoneRedirect;
 import com.game.discovery.proto.PlayerLocation;
 import com.game.discovery.zone.ZoneMergeFence;
+import com.game.login.compliance.AntiAddictionGate;
 import com.game.login.dispatch.ClientMessageHandler;
 import com.game.login.dispatch.HandlerReply;
 import com.game.login.dispatch.InFlightKeys;
@@ -20,6 +21,7 @@ import com.game.login.metrics.LoginMetrics;
 import com.game.login.metrics.LoginMetrics.AssignResult;
 import com.game.login.metrics.LoginMetrics.ClaimOutcome;
 import com.game.login.metrics.LoginMetrics.EnterRoute;
+import com.game.login.session.LoginDevices;
 import com.game.login.ownership.OwnerTakeovers;
 import com.game.player.store.PlayerRow;
 import com.game.player.store.PlayerStore;
@@ -129,6 +131,13 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     private final PlayerLocationLookup locations;
     private final ZoneMergeFence fence;
     private final InFlightKeys<Long> playersInFlight;
+    private volatile AntiAddictionGate antiAddictionGate;
+
+    /** 挂载可选防沉迷门禁：进游戏时从防沉迷会话账本读出未成年人截止时刻（读失败 fail-closed）并传给 scene 封顶离线托管。 */
+    public EnterGameHandler withAntiAddictionGate(AntiAddictionGate antiAddictionGate) {
+        this.antiAddictionGate = antiAddictionGate;
+        return this;
+    }
 
     /**
      * @param takeovers     归属仍被持有时请持有者让出
@@ -326,16 +335,34 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         if (row.getTradeListingId() != 0 || row.getOwnerRevision() <= 0) {
             return done(error(LoginErrorTip.login_error.kLoginInProgress_VALUE));
         }
+        long minorPlayDeadlineMs = 0L;
+        AntiAddictionGate aa = this.antiAddictionGate;
+        if (aa != null && aa.ledger() != null) {
+            String connId = LoginDevices.sessionKey(session.getGateInstanceId(), session.getSessionId());
+            try {
+                minorPlayDeadlineMs = aa.readWatchedSessionDeadlineMs(connId);
+            } catch (RuntimeException e) {
+                log.error("进游戏拒绝：防沉迷会话账本不可读 player={} session={} conn={}: {}",
+                        playerId, session.getSessionId(), connId, e.toString());
+                return done(error(LoginErrorTip.login_error.kLoginRedisSetFailed_VALUE));
+            }
+            if (aa.isPastPlayDeadline(minorPlayDeadlineMs)) {
+                log.info("进游戏拒绝：未成年人已过防沉迷可玩截止时刻 player={} session={} deadline_ms={}",
+                        playerId, session.getSessionId(), minorPlayDeadlineMs);
+                return done(error(LoginErrorTip.login_error.kLoginMinorPlayTimeOver_VALUE));
+            }
+        }
         int zoneId = session.getZoneId() != 0 ? session.getZoneId() : defaultZoneId;
         EnterRoutes.LocationRead location = readLocation(playerId);
         EnterRoutes.Decision decision = EnterRoutes.resolveEnterRoute(zoneId, session.getTicketPlayerId(),
                 session.getTicketTargetZoneId(), location, playerId, row.getSceneConfigId());
         logCrossZone(session, playerId, zoneId, location, decision);
+        final long playDeadlineMs = minorPlayDeadlineMs;
         return switch (decision) {
-            case EnterRoutes.Redirect go5 -> redirect(session, playerId, row, zoneId, go5, enterDeadline);
+            case EnterRoutes.Redirect go5 -> redirect(session, playerId, row, zoneId, go5, playDeadlineMs, enterDeadline);
             case EnterRoutes.Land land -> {
                 metrics.enterRouted(land.route());
-                yield land(session, playerId, row, land.assign(), enterDeadline);
+                yield land(session, playerId, row, land.assign(), playDeadlineMs, enterDeadline);
             }
         };
     }
@@ -375,18 +402,19 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
      * 成功只回应答与指令；没成按首登落在入口 zone（回落用的是签票剩下的预算）。
      */
     private CompletableFuture<HandlerReply> redirect(SessionContext session, long playerId, PlayerRow row, int zoneId,
-                                                     EnterRoutes.Redirect route, long enterDeadline) {
+                                                     EnterRoutes.Redirect route, long minorPlayDeadlineMs, long enterDeadline) {
         RedirectToZoneRequest request = RedirectToZoneRequest.newBuilder()
                 .setFromZoneId(zoneId).setToZoneId(route.toZoneId()).setPlayerId(playerId).build();
         long start = nanoClock.getAsLong();
         return callSceneManager(() -> sceneDirectory.redirectToZone(request), enterDeadline)
-                .handleAsync((response, failure) -> afterRedirect(session, playerId, row, route, response, failure, start,
+                .handleAsync((response, failure) -> afterRedirect(session, playerId, row, route, minorPlayDeadlineMs, response, failure, start,
                         enterDeadline), executor)
                 .thenCompose(Function.identity());
     }
 
     private CompletableFuture<HandlerReply> afterRedirect(SessionContext session, long playerId, PlayerRow row,
-                                                          EnterRoutes.Redirect route, RedirectToZoneResponse response,
+                                                          EnterRoutes.Redirect route, long minorPlayDeadlineMs,
+                                                          RedirectToZoneResponse response,
                                                           Throwable failure, long start, long enterDeadline) {
         long elapsed = nanoClock.getAsLong() - start;
         AssignResult result;
@@ -413,7 +441,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         log.warn("登录期重定向没成，退化为在入口 zone 按首登进游戏 player={} session={} 入口zone={} 角色所在zone={}: {}", playerId,
                 session.getSessionId(), Integer.toUnsignedString(route.fallback().getZoneId()),
                 Integer.toUnsignedString(route.toZoneId()), why);
-        return land(session, playerId, row, route.fallback(), enterDeadline);
+        return land(session, playerId, row, route.fallback(), minorPlayDeadlineMs, enterDeadline);
     }
 
     /**
@@ -462,15 +490,15 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
 
     /** 在入口 zone 落地：合服围栏检查点 F2 → 分配 → 夺权（工作线程上调用）。 */
     private CompletableFuture<HandlerReply> land(SessionContext session, long playerId, PlayerRow row,
-                                                 AssignSceneRequest assignRequest, long enterDeadline) {
+                                                 AssignSceneRequest assignRequest, long minorPlayDeadlineMs, long enterDeadline) {
         if (mergeFenced(session, playerId, row.getZoneId())) {
             return done(error(SceneErrorTip.scene_error.kEnterSceneFailed_VALUE));
         }
         long assignStart = nanoClock.getAsLong();
         long ownerRevision = row.getOwnerRevision();
         return callSceneManager(() -> sceneDirectory.assign(assignRequest), enterDeadline)
-                .handleAsync((assigned, failure) -> afterAssign(session, playerId, ownerRevision, assignRequest, assigned, failure,
-                        assignStart, enterDeadline), executor)
+                .handleAsync((assigned, failure) -> afterAssign(session, playerId, ownerRevision, minorPlayDeadlineMs,
+                        assignRequest, assigned, failure, assignStart, enterDeadline), executor)
                 .thenCompose(Function.identity());
     }
 
@@ -522,7 +550,8 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         return future.copy().orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
     }
 
-    private CompletableFuture<HandlerReply> afterAssign(SessionContext session, long playerId, long ownerRevision, AssignSceneRequest routed,
+    private CompletableFuture<HandlerReply> afterAssign(SessionContext session, long playerId, long ownerRevision,
+                                                        long minorPlayDeadlineMs, AssignSceneRequest routed,
                                                         AssignSceneResponse assigned, Throwable failure, long assignStart,
                                                         long enterDeadline) {
         long assignElapsed = nanoClock.getAsLong() - assignStart;
@@ -551,7 +580,8 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         long deadline = claimDeadline - enterDeadline < 0 ? claimDeadline : enterDeadline;
         CompletableFuture<ClaimStep> chain;
         try {
-            chain = claim(session, playerId, ownerRevision, routed, assigned, deadline, enterDeadline, FIRST_CLAIM_BACKOFF, false);
+            chain = claim(session, playerId, ownerRevision, minorPlayDeadlineMs, routed, assigned, deadline, enterDeadline,
+                    FIRST_CLAIM_BACKOFF, false);
         } catch (RuntimeException e) {
             metrics.ownerClaimCompleted(ClaimOutcome.ERROR, nanoClock.getAsLong() - claimStart);
             throw e;
@@ -571,7 +601,8 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
      * @param enterDeadline 时间预算的截止：过了它不再夺权、不再请持有者让出，夺到之后也不再复查位置
      * @param retried       之前已经撞上过「仍被持有」（夺到时记为 {@link ClaimOutcome#WAITED}）
      */
-    private CompletableFuture<ClaimStep> claim(SessionContext session, long playerId, long ownerRevision, AssignSceneRequest routed,
+    private CompletableFuture<ClaimStep> claim(SessionContext session, long playerId, long ownerRevision,
+                                               long minorPlayDeadlineMs, AssignSceneRequest routed,
                                                AssignSceneResponse assigned, long deadline, long enterDeadline,
                                                Duration backoff, boolean retried) {
         if (retried && enterDeadline - nanoClock.getAsLong() <= 0) {
@@ -598,7 +629,7 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         if (result instanceof ClaimResult.Claimed claimed) {
             ClaimOutcome outcome = retried ? ClaimOutcome.WAITED : ClaimOutcome.CLAIMED;
             return rerouteIfStale(playerId, routed, assigned, enterDeadline).thenApply(target -> new ClaimStep(
-                    accepted(session, playerId, target, claimed.ownerEpoch(), ownerRevision), outcome));
+                    accepted(session, playerId, target, claimed.ownerEpoch(), ownerRevision, minorPlayDeadlineMs), outcome));
         }
         if (result instanceof ClaimResult.NotFound) {
             log.warn("进游戏失败：夺权时角色已不存在 player={}", playerId);
@@ -637,8 +668,8 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         Duration delay = backoff.compareTo(Duration.ofNanos(remainingNanos)) < 0 ? backoff : Duration.ofNanos(remainingNanos);
         Duration nextBackoff = backoff.multipliedBy(2).compareTo(MAX_CLAIM_BACKOFF) < 0
                 ? backoff.multipliedBy(2) : MAX_CLAIM_BACKOFF;
-        return onWorkerAfter(delay).thenCompose(ignored -> claim(session, playerId, ownerRevision, routed, assigned, deadline,
-                enterDeadline, nextBackoff, true));
+        return onWorkerAfter(delay).thenCompose(ignored -> claim(session, playerId, ownerRevision, minorPlayDeadlineMs,
+                routed, assigned, deadline, enterDeadline, nextBackoff, true));
     }
 
     /**
@@ -710,17 +741,23 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
         return ready;
     }
 
-    private static HandlerReply accepted(SessionContext session, long playerId, AssignSceneResponse assigned, long epoch, long ownerRevision) {
+    private static HandlerReply accepted(SessionContext session, long playerId, AssignSceneResponse assigned, long epoch,
+                                         long ownerRevision, long minorPlayDeadlineMs) {
         log.info("进游戏受理 player={} gate={} session={} scene_node={} scene={} scene_config={} owner_epoch={}",
                 playerId, session.getGateNodeId(), session.getSessionId(), assigned.getSceneNodeId(),
                 assigned.getSceneId(), assigned.getSceneConfigId(), epoch);
         EnterGameResponse response = EnterGameResponse.newBuilder().setPlayerId(playerId).build();
+        EnterScene.Builder enterScene = EnterScene.newBuilder()
+                .setPlayerId(playerId)
+                .setSceneNodeId(assigned.getSceneNodeId())
+                .setSceneId(assigned.getSceneId())
+                .setOwnerEpoch(epoch)
+                .setOwnerRevision(ownerRevision);
+        if (minorPlayDeadlineMs > 0L) {
+            enterScene.setMinorPlayDeadlineMs(minorPlayDeadlineMs);
+        }
         SessionDirective directive = SessionDirective.newBuilder()
-                .setEnterScene(EnterScene.newBuilder()
-                        .setPlayerId(playerId)
-                        .setSceneNodeId(assigned.getSceneNodeId())
-                        .setSceneId(assigned.getSceneId())
-                        .setOwnerEpoch(epoch).setOwnerRevision(ownerRevision))
+                .setEnterScene(enterScene)
                 .build();
         return HandlerReply.of(response, directive);
     }

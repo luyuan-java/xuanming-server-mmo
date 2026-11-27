@@ -76,6 +76,8 @@ final class EncounterMechanics {
     private final TreeSet<Long> effectiveContributionPlayers = new TreeSet<>(Long::compareUnsigned);
     private final TreeSet<Long> shieldBreakPlayers = new TreeSet<>(Long::compareUnsigned);
     private final TreeSet<Long> antiControlOrSeasonSkillPlayers = new TreeSet<>(Long::compareUnsigned);
+    private final TreeSet<Long> castSeasonSkillPlayers = new TreeSet<>(Long::compareUnsigned);
+    private final NavigableMap<Long, Integer> seasonResonanceMaskByPlayer = new TreeMap<>(Long::compareUnsigned);
     private final NavigableMap<Long, ExposedState> exposedActors = new TreeMap<>(Long::compareUnsigned);
     private final NavigableMap<Long, Integer> sunderUntilRound = new TreeMap<>(Long::compareUnsigned);
     private final TreeSet<Long> attackerTriggeredStanceCounterThisRound = new TreeSet<>(Long::compareUnsigned);
@@ -351,6 +353,22 @@ final class EncounterMechanics {
     void markAntiControlOrSeasonSkill(long playerId) {
         if (playerId != 0L) {
             antiControlOrSeasonSkillPlayers.add(playerId);
+        }
+    }
+
+    void markSeasonSkillCast(long playerId) {
+        if (playerId != 0L) {
+            castSeasonSkillPlayers.add(playerId);
+        }
+    }
+
+    void recordSeasonResonance(long playerId, int resonanceEffectId) {
+        if (playerId == 0L || resonanceEffectId <= SeasonRules.RESONANCE_EVENT_BASE) {
+            return;
+        }
+        int kind = resonanceEffectId - SeasonRules.RESONANCE_EVENT_BASE;
+        if (kind >= 1 && kind <= 31) {
+            seasonResonanceMaskByPlayer.merge(playerId, 1 << (kind - 1), (a, b) -> a | b);
         }
     }
 
@@ -1730,7 +1748,11 @@ final class EncounterMechanics {
                 .setFinishedInEbbTide(bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_WILD_TIDE
                         && outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN
                         && BattleConstants.isWildTideEbbRound(ctx.roundIndex()))
-                .setChallengeVowMask(ctx.trialVowMask());
+                .setChallengeVowMask(ctx.trialVowMask())
+                .setSelfCastSeasonSkill(castSeasonSkillPlayers.contains(playerId));
+        int resMask = seasonResonanceMaskByPlayer.getOrDefault(playerId, 0);
+        facts.setSelfTriggeredSeasonResonance(resMask != 0)
+                .setSelfSeasonResonanceMask(resMask);
 
         List<Integer> rawEffects = new ArrayList<>();
         for (EquipmentArtifactSource artifact : actor.state().getEquipmentEffects().getArtifactsList()) {

@@ -40,7 +40,7 @@ public class ComplianceProperties {
         private String nppaCheckUrl = "";
         private String nppaQueryUrl = "";
         private String nppaLoginoutUrl = "";
-        private List<String> platformManagedAuthTypes = new ArrayList<>();
+        private List<String> platformManagedAuthTypes = new ArrayList<>(List.of("wechat_minigame", "douyin_minigame"));
         private List<String> extraPlayDays = new ArrayList<>();
         private int dailySubmitLimit = 5;
 

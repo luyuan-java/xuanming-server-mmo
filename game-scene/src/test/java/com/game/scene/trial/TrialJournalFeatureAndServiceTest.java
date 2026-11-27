@@ -519,4 +519,76 @@ class TrialJournalFeatureAndServiceTest {
                 ClaimTrialJournalMilestoneResponse.parser());
         assertThat(m402.getErrorMessage().getId()).isZero();
     }
+
+    @Test
+    void 卷三季游S2至S10全十季表加载与技印共鸣掩码及跨季隔离() throws Exception {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer p = f.enter(11, 2005L);
+
+        // 验证 S2..S10 共 27 格 / 54 印 / 18 档里程碑全部载入且按 season_id 归档隔离
+        for (int sid = 2; sid <= 10; sid++) {
+            int base = 3000 + sid * 10;
+            assertThat(f.trialJournalTables.entry(base + 1)).isNotNull();
+            assertThat(f.trialJournalTables.entry(base + 2)).isNotNull();
+            assertThat(f.trialJournalTables.entry(base + 3)).isNotNull();
+            assertThat(f.trialJournalTables.sealsForEntry(base + 3)).hasSize(2);
+            var m2 = f.trialJournalTables.milestone(base + 2);
+            assertThat(m2).isNotNull();
+            assertThat(m2.getBadgeKey()).isEqualTo("badge_season_s" + sid + "_trial");
+            assertThat(m2.getCommentaryKey()).isEqualTo("commentary_season_s" + sid + "_trial");
+        }
+
+        // 用独立 TrialJournalService 模拟切到 S2（玄脉之季），验证条件 15/16 掩码过滤与独立领奖
+        TrialJournalService s2Service = new TrialJournalService(
+                f.trialJournalTables, f.bags, f.appearance, f.clock, f.metrics, () -> 2);
+        GetTrialJournalResponse s2Snap = s2Service.getJournal(p, f.clock.epochMillis());
+        assertThat(s2Snap.getSnapshot().getTotalPermanentSeals()).isEqualTo(36);
+        var ch3 = s2Snap.getSnapshot().getChaptersList().stream()
+                .filter(c -> c.getChapterId() == TrialJournalRules.CHAPTER_SEASONAL).findFirst().orElseThrow();
+        assertThat(ch3.getSeasonId()).isEqualTo(2);
+        assertThat(ch3.getEntriesList()).extracting(e -> e.getEntryId()).containsExactly(3021, 3022, 3023);
+
+        // 错配共鸣（R4=bit3，不在 S2 并集掩码 51 内）只亮 30231，不亮 30232
+        var wrongRes = s2Service.applyBattleCredit(p, BattleFixture.settlement(p.playerId(), 99501L, 0L)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN).setParticipated(true)
+                .setBattleConfigId(5).setMatchMode(5).setTotalRounds(6).setFinishedAtMs(f.clock.epochMillis())
+                .setTrialFacts(BattleTrialJournalFacts.newBuilder()
+                        .setJournalEntryId(3023).setTrialRuleVersion(1).setSeasonId(2).setInitialHumanCount(1)
+                        .setSelfCastSeasonSkill(true).setSelfTriggeredSeasonResonance(true)
+                        .setSelfSeasonResonanceMask(1 << 3))
+                .build(), f.clock.epochMillis());
+        assertThat(wrongRes.newlyLitSealIds()).containsExactly(30231);
+
+        // 命中 S2 共鸣 R6=bit5 -> 点亮 30232
+        var hitRes = s2Service.applyBattleCredit(p, BattleFixture.settlement(p.playerId(), 99502L, 0L)
+                .setOutcome(eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN).setParticipated(true)
+                .setBattleConfigId(5).setMatchMode(5).setTotalRounds(6).setFinishedAtMs(f.clock.epochMillis())
+                .setTrialFacts(BattleTrialJournalFacts.newBuilder()
+                        .setJournalEntryId(3023).setTrialRuleVersion(1).setSeasonId(2).setInitialHumanCount(1)
+                        .setSelfTriggeredSeasonResonance(true).setSelfSeasonResonanceMask(1 << 5))
+                .build(), f.clock.epochMillis());
+        assertThat(hitRes.newlyLitSealIds()).containsExactly(30232);
+
+        // 补亮 3021 护卫救援 2 印，领取 S2 里程碑 3022，永久印仍为 0 且切到 S3 时 S3 为 0/6
+        var rescueS2 = s2Service.applyBattleCredit(p, BattleFixture.settlement(p.playerId(), 99503L, 0L)
+                .setBattleConfigId(109).setMatchMode(3).setTotalRounds(5).setFinishedAtMs(f.clock.epochMillis())
+                .setTrialFacts(BattleTrialJournalFacts.newBuilder()
+                        .setJournalEntryId(3021).setTrialRuleVersion(1).setSeasonId(2).setInitialHumanCount(1)
+                        .setGuardSurvived(true))
+                .build(), f.clock.epochMillis());
+        assertThat(rescueS2.newlyLitSealIds()).containsExactly(30211, 30212);
+
+        var claimed = s2Service.claimMilestone(f.world, p, ClaimTrialJournalMilestoneRequest.newBuilder()
+                .setClientRequestId(99510L).setMilestoneId(3022).build(), f.clock.epochMillis());
+        assertThat(claimed.response().getErrorMessage().getId()).isZero();
+        assertThat(claimed.response().getGrantedSandCount()).isEqualTo(1);
+        assertThat(claimed.response().getSnapshot().getTotalPermanentLitSeals()).isZero();
+
+        TrialJournalService s3Service = new TrialJournalService(
+                f.trialJournalTables, f.bags, f.appearance, f.clock, f.metrics, () -> 3);
+        var s3Ch3 = s3Service.getJournal(p, f.clock.epochMillis()).getSnapshot().getChaptersList().stream()
+                .filter(c -> c.getChapterId() == TrialJournalRules.CHAPTER_SEASONAL).findFirst().orElseThrow();
+        assertThat(s3Ch3.getSeasonId()).isEqualTo(3);
+        assertThat(s3Ch3.getLitSealCount()).isZero();
+    }
 }

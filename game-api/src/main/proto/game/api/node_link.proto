@@ -70,6 +70,8 @@ message PlayerEnter {
   uint64 owner_revision = 7;
   // 首次登录成功夺权时的原owner_epoch；跨scene交接保留，新的scene E独立递增。
   uint64 login_generation = 8;
+  // 未成年人防沉迷可玩截止时刻（Unix 毫秒，0 = 不限）；跨节点换图由 gate 原样带入目标 scene 封顶离线托管。
+  uint64 minor_play_deadline_ms = 9;
 }
 
 // scene → gate：进场结果。普通进场失败时 gate 解绑会话上的场景与玩家（会话回到「已登录、未进游戏」）并把 tip 发给客户端；
@@ -123,6 +125,8 @@ message PlayerLeave {
   uint32 session_id = 1;
   uint64 player_id = 2;
   bool voluntary = 3;
+  // true = 强制立即存盘退场（如未成年人防沉迷到点下线或 login 兜底踢线），跳过 25 秒断线保留与月卡离线托管。
+  bool immediate_exit = 4;
 }
 
 // gate → scene：进场后的客户端消息。

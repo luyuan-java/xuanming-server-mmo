@@ -6,11 +6,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
 import com.game.proto.Empty;
+import com.game.proto.GameKickPlayerRequest;
 import com.game.proto.RedirectToGateNotify;
 import com.game.proto.TipInfoMessage;
 import org.junit.jupiter.api.Test;
 
-/** gate 自己组包下发的两个推送消息号（批次 5.4 先行件）：按名字从契约解析，不写死。 */
+/** gate 自己组包下发的三个推送消息号：按名字从契约解析，不写死。 */
 class PushMessageIdsTest {
 
     private static final MessageIdRegistry REGISTRY = MessageIdRegistry.loadFromClasspath();
@@ -21,13 +22,18 @@ class PushMessageIdsTest {
 
         assertThat(ids.tip()).isEqualTo(REGISTRY.requireId("SceneClientPlayerCommon", "SendTipToClient"));
         assertThat(ids.redirectToGate()).isEqualTo(REGISTRY.requireId("SceneClientPlayerCommon", "RedirectToGate"));
+        assertThat(ids.kickPlayer()).isEqualTo(REGISTRY.requireId("SceneClientPlayerCommon", "KickPlayer"));
         assertThat(ids.tip()).isNotEqualTo(ids.redirectToGate());
+        assertThat(ids.kickPlayer()).isNotEqualTo(ids.tip()).isNotEqualTo(ids.redirectToGate());
         assertThat(ids.canRedirect()).isTrue();
         MessageMethod tip = REGISTRY.byId(ids.tip()).orElseThrow();
         MessageMethod redirect = REGISTRY.byId(ids.redirectToGate()).orElseThrow();
+        MessageMethod kick = REGISTRY.byId(ids.kickPlayer()).orElseThrow();
         assertThat(tip.requestPrototype()).as("23 的包体").isInstanceOf(TipInfoMessage.class);
         assertThat(redirect.requestPrototype()).as("124 的包体").isInstanceOf(RedirectToGateNotify.class);
         assertThat(redirect.responsePrototype()).as("124 是服务端推送，没有应答").isInstanceOf(Empty.class);
+        assertThat(kick.requestPrototype()).as("34 的包体").isInstanceOf(GameKickPlayerRequest.class);
+        assertThat(kick.responsePrototype()).as("34 是服务端推送，没有应答").isInstanceOf(Empty.class);
     }
 
     @Test
@@ -36,6 +42,7 @@ class PushMessageIdsTest {
 
         assertThat(ids.tip()).isEqualTo(23);
         assertThat(ids.redirectToGate()).isZero();
+        assertThat(ids.kickPlayer()).isZero();
         assertThat(ids.canRedirect()).isFalse();
         assertThat(new PushMessageIds(23, 124).canRedirect()).isTrue();
     }
@@ -46,6 +53,9 @@ class PushMessageIdsTest {
         assertThatThrownBy(() -> new PushMessageIds(-1, 124)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new PushMessageIds(23, -1)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new PushMessageIds(23, 23)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new PushMessageIds(23, 124, -1)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new PushMessageIds(23, 124, 23)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new PushMessageIds(23, 124, 124)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> PushMessageIds.tipOnly(0)).isInstanceOf(IllegalArgumentException.class);
     }
 }

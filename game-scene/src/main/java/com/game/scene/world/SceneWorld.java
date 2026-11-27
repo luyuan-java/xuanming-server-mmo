@@ -1562,7 +1562,8 @@ public final class SceneWorld {
             failEnter(key, playerId, epoch, transfer, "原进场身份不完整");
             return;
         }
-        PendingEnter pending = new PendingEnter(key, playerId, enter.getSceneId(), epoch, transfer, original, enter.getAccount());
+        PendingEnter pending = new PendingEnter(key, playerId, enter.getSceneId(), epoch, transfer, original,
+                enter.getAccount(), enter.getMinorPlayDeadlineMs());
         PendingEnter existing = pendingEnters.get(key);
         if (original != null && existing != null && existing.playerId() == playerId && existing.ownerEpoch() == epoch
                 && (!original.equals(existing.admission()) || !enter.getAccount().equals(existing.account()))) {
@@ -1598,6 +1599,7 @@ public final class SceneWorld {
             if (replaced != null && (replaced.playerId() != playerId || replaced.ownerEpoch() != epoch)) {
                 releaseClaim(replaced);
             }
+            held.setMinorPlayDeadlineMs(enter.getMinorPlayDeadlineMs());
             resumeConnectionLostHold(held, key);
             return;
         }
@@ -1774,6 +1776,7 @@ public final class SceneWorld {
         player.setName(name);
         player.setRenamedMs(renamedMs);
         player.restoreAfkPass(afkPassExpiresAt, afkPassLastReqId);
+        player.setMinorPlayDeadlineMs(pending.minorPlayDeadlineMs());
         if (pending.admission() != null) player.bindAdmission(pending.admission());
         if (previous != null && previous.ownerEpoch() == epoch) {
             player.continueLocationSeq(previous.locationSeq());
@@ -3306,17 +3309,20 @@ public final class SceneWorld {
                     leave.getPlayerId(), player.playerId(), key);
             return;
         }
-        if (deferLeaveIfFrozen(player, leave.getVoluntary())) {
+        boolean immediateExit = leave.getImmediateExit();
+        boolean pastMinorDeadline = player.minorPlayDeadlineMs() > 0L && clock.epochMillis() >= player.minorPlayDeadlineMs();
+        if (deferLeaveIfFrozen(player, leave.getVoluntary() || immediateExit)) {
             return;
         }
-        if (!leave.getVoluntary() && connectionLostHoldEnabled && !switchInFlight(player)) {
+        if (!leave.getVoluntary() && !immediateExit && !pastMinorDeadline
+                && connectionLostHoldEnabled && !switchInFlight(player)) {
             enterConnectionLostHold(player, key);
             return;
         }
         removePlayer(player, true);
-        // 主动离开（LeaveGame）= 干净登出：删位置记录，下次进游戏按首登落点；断线留 30 s 重连租约（同基线断线租约）
-        writeLeaveLocation(player, leave.getVoluntary());
-        log.info("玩家离场 player={} session={} 主动={}", player.playerId(), key, leave.getVoluntary());
+        // 主动离开（LeaveGame）或强制立即退场（防沉迷到点下线）= 干净登出：删位置记录；普通断线留 30 s 重连租约
+        writeLeaveLocation(player, leave.getVoluntary() || immediateExit);
+        log.info("玩家离场 player={} session={} 主动={} 强制立即退场={}", player.playerId(), key, leave.getVoluntary(), immediateExit);
     }
 
     /**
@@ -4056,13 +4062,16 @@ public final class SceneWorld {
                 continue;
             }
             long heldSec = TimeUnit.NANOSECONDS.toSeconds(Math.max(0L, nowNanos - hold.lostAtNanos()));
+            long minorDeadlineMs = player.minorPlayDeadlineMs();
             ConnectionLostHold.HoldVerdict verdict = ConnectionLostHold.judgeHold(
-                    heldSec, hold.afkPass(), hold.afkPassExpiresAtSec(), nowSec, hold.probeInFlight());
+                    heldSec, hold.afkPass(), hold.afkPassExpiresAtSec(), nowSec, hold.probeInFlight(),
+                    minorDeadlineMs, nowMs);
             if (verdict == ConnectionLostHold.HoldVerdict.PROBE) {
                 // 同步用内存中最新权威到期时刻复核（若续费/GM 修改已生效则延长托管）
                 hold.refreshPass(player.afkPassExpiresAt(), nowSec);
                 verdict = ConnectionLostHold.judgeHold(
-                        heldSec, hold.afkPass(), hold.afkPassExpiresAtSec(), nowSec, false);
+                        heldSec, hold.afkPass(), hold.afkPassExpiresAtSec(), nowSec, false,
+                        minorDeadlineMs, nowMs);
             }
             if (verdict == ConnectionLostHold.HoldVerdict.EXIT) {
                 removePlayer(player, true);
@@ -4070,7 +4079,8 @@ public final class SceneWorld {
                 exited++;
                 continue;
             }
-            if (ConnectionLostHold.isHosting(hold.hostingStarted(), hold.afkPass(), hold.afkPassExpiresAtSec(), nowSec)) {
+            if (ConnectionLostHold.isHosting(hold.hostingStarted(), hold.afkPass(), hold.afkPassExpiresAtSec(),
+                    nowSec, minorDeadlineMs, nowMs)) {
                 if (afkPassService != null
                         && nowSec - hold.lastProjectionRefreshSec() >= com.game.scene.afkpass.AfkPassRules.PROJECTION_REFRESH_PERIOD_SECONDS) {
                     hold.setLastProjectionRefreshSec(nowSec);
@@ -4210,6 +4220,6 @@ public final class SceneWorld {
 
     /** @param transfer 跨节点换图的交出进场（{@code PlayerEnter.transfer}） */
     private record PendingEnter(SessionKey session, long playerId, long sceneId, long ownerEpoch, boolean transfer,
-                                RoleAdmissionIdentity admission, String account) {
+                                RoleAdmissionIdentity admission, String account, long minorPlayDeadlineMs) {
     }
 }

@@ -324,6 +324,9 @@ final class ConfiguredBattle {
         if (origin == DIRECT || origin == CONFUSED) {
             if (actor.isPlayer() && skill.getSeasonId() != 0) {
                 ctx.encounter.markAntiControlOrSeasonSkill(actor.actorId());
+                if (origin == DIRECT) {
+                    ctx.encounter.markSeasonSkillCast(actor.actorId());
+                }
             }
             boolean consumeBreathResonance = equipment.defendManaDiscountResonancePct(actor, skill.getId()) > 0;
             cast.paidMana = equipment.manaCost(actor, skill);

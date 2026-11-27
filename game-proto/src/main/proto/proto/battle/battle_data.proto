@@ -111,6 +111,11 @@ message BattlePlayerSnapshot {
   map<uint32, uint32> equipped_skill_vfx = 31;
   // 本局所属队伍的队长标记（由 match 在锦标赛/组排成局时填入，用于 3 Ban 同票决胜；单排/路人全 false）。
   bool is_team_captain = 32;
+  // 未成年人当天能玩到的时刻(Unix 毫秒;0 = 不限:成年人、平台管的小游戏渠道、没开防沉迷的部署)。
+  // 由 match 在成局时从玩家会话记录 PlayerSession.minor_play_deadline_ms 填入,scene 不填、填了也被覆盖。
+  // battle 据此给这名参战者的票据封顶、到点关闭他的战斗直连并在本场剩余时间里拒绝他握手;战斗本身照常进行
+  // (docs/design/real-name-anti-addiction.md §5.4)。只用于直连准入,引擎不读。
+  uint64 minor_play_deadline_ms = 33;
 }
 
 // ---- 宝宝战斗快照:与主人同队、独立行动的战斗单位(设计文档 player-pet.md §5)----
@@ -534,6 +539,8 @@ message BattleSettlementData {
   // 论剑 V7：正式 1V1 排位终局对阵对手身份（仅双方各 1 名真人且非无效局填充，用于战后 15 秒切磋「不服再战」，零排位分）。
   uint64 rematch_opponent_id = 55;
   string rematch_opponent_name = 56;
+  // 万象残局坊冻结上下文回传（用于战后结算面板快速重开 / 看作者标准解 / 点赞 / 分享，非残局坊留空）。
+  TacticalPuzzleBattleContext tactical_puzzle_context = 57;
 }
 
 // ---- 出战宝宝的结算数据(随主人的 BattleSettlementData 一起回 scene)----
@@ -709,6 +716,9 @@ message BattleTrialJournalFacts {
   bool all_self_cleaves_parried = 24;          // 首领试炼 V2：本人及本人宝宝被重劈点名>=1次且100%合法化解(不含倒地/退出取消)
   bool self_parried_cleave_at_least_once = 25; // 首领试炼 V2：本人或本人宝宝至少合法化解过 1 次重劈
   uint32 challenge_vow_mask = 26;              // 五行试炼志 V3：本局生效的自选试炼誓约位掩码（0..15）
+  bool self_cast_season_skill = 27;            // 五行试炼志 V4：本人本场直接施放过当季免费赛季技能
+  bool self_triggered_season_resonance = 28;   // 五行试炼志 V4：本人本场触发过任意当季 R1..R8 技印共鸣
+  uint32 self_season_resonance_mask = 29;      // 五行试炼志 V4：本人本场触发过的技印共鸣位掩码（bit = resonance_kind - 1）
 }
 
 // ---- 全服赛季战队锦标赛《群仙问道赛》V2：BO3 与五行灵脉阵眼开局冻结上下文(docs/design/season-team-tournament-v2.md) ----
@@ -802,4 +812,36 @@ message JianghuDuelBattleContext {
   string side_b_guild_name = 10;
   uint32 round_limit_override = 11;    // 冻结的生死状回合上限（默认 30，打满双方存活权威判平）
   uint32 team_size = 12;               // 每侧人数（1..5）
+}
+
+// ---- 万象残局坊（UGC 回合解谜工坊 V1，docs/planning/tactical-puzzle-workshop-v1.md）----
+// 仅用公平模板 + 白名单预设 + 有限微调参数；出题者必须自证通关并存标准解回放后方可发布。
+message TacticalPuzzleEnemySpec {
+  uint32 monster_table_id = 1;  // 白名单 311..316（0经验/0银两/不可捕捉残局专用怪）
+  uint32 initial_hp_pct = 2;    // 开局气血百分比（10..150，100=标准满血）
+  uint32 initial_shield_pct = 3;// 开局护盾百分比（0..60，对应 Buff 100400）
+  int32 speed_delta_pct = 4;    // 开局速度微调百分比（-30..+30）
+  uint32 initial_buff_kind = 5; // 0=无 1=固守(100140) 2=疾风(100160) 3=狂怒(100250) 4=回春(110070)
+}
+
+message TacticalPuzzleSpec {
+  uint32 round_limit = 1;               // 破局回合上限（1..6，超时未清场权威判负）
+  uint32 character_preset_id = 2;       // 我方人物公平预设（白名单 101..103）
+  uint32 pet_preset_id = 3;             // 我方灵宠公平预设（0=无宠，或白名单 201..203）
+  uint32 formation_id = 4;              // 我方阵法（0=无，或 1..5）
+  uint32 player_initial_hp_pct = 5;     // 我方开局气血百分比（15..100）
+  uint32 player_initial_mp_pct = 6;     // 我方开局法力百分比（20..100）
+  uint32 player_initial_shield_pct = 7; // 我方开局护盾百分比（0..50，对应 Buff 100400）
+  uint32 player_initial_debuff_kind = 8;// 0=无 1=卸力(100031) 2=破甲(130051) 3=玄毒(100190)
+  repeated TacticalPuzzleEnemySpec enemies = 9; // 1..3 名敌方单位
+}
+
+message TacticalPuzzleBattleContext {
+  uint64 puzzle_id = 1;         // 残局永久 ID（发号器 biz_tag=battle）
+  uint32 spec_revision = 2;     // 开战时刻冻结的题面修订号（防改题后旧自证胜局误发布）
+  bool is_author_verify = 3;    // true=作者自证验题局（开局开启录回放，胜则原子发布并钉住标准解）
+  string puzzle_title = 4;      // 冻结题名（用于局内抬头与结算屏展示）
+  uint64 author_player_id = 5;  // 作者 player_id
+  string author_name = 6;       // 作者展示名
+  TacticalPuzzleSpec spec = 7;  // 开战冻结题面配置（引擎按此生成敌我盘面，不依赖外部回调）
 }

@@ -347,6 +347,58 @@ class AfkPassHostingAndTeamFollowTest {
         assertThat(detachedMsg.getReason()).isEqualTo(TeamFollowStopReason.TEAM_FOLLOW_STOP_REASON_LEFT_FOLLOW);
     }
 
+    @Test
+    void 未成年人防沉迷到点强制立即退场且离线托管不越过截止时刻() {
+        ManualClock clock = new ManualClock();
+        clock.advanceMillis(1_800_000_000_000L);
+        long nowSec = clock.epochMillis() / 1000L;
+        long deadlineMs = clock.epochMillis() + 120_000L; // 2 分钟后 21:00 截止
+
+        RecordingSink sink = new RecordingSink();
+        FakePlayerRepository repo = new FakePlayerRepository();
+        SceneWorld world = newWorld(clock, sink, repo, new SceneMetrics(new SimpleMeterRegistry()))
+                .withConnectionLostHold(true);
+        Scene scene = world.createScene(1);
+
+        // 1. 持有 30 天有效挂机月卡的未成年人，收到 gate 到点踢线的 immediate_exit=true -> 跳过断线保留与离线托管直接退场
+        repo.put(new PlayerData(5001L, 1L, 1, 1, "00_default", 10, 1, new Vec3(10, 10, 0)));
+        world.onPlayerEnter(1L, PlayerEnter.newBuilder()
+                .setSessionId(501).setPlayerId(5001L).setSceneId(scene.sceneId()).setOwnerEpoch(1L)
+                .setMinorPlayDeadlineMs(deadlineMs).build());
+        repo.completeAll();
+        ScenePlayer p1 = world.playerById(5001L);
+        p1.setAfkPassExpiresAt(nowSec + 30L * 86_400L);
+
+        world.onPlayerLeave(1L, PlayerLeave.newBuilder()
+                .setSessionId(501).setPlayerId(5001L).setVoluntary(false).setImmediateExit(true).build());
+        assertThat(world.playerById(5001L)).as("immediate_exit 必须直接移出场景").isNull();
+
+        // 2. 持有 30 天月卡的未成年人在截止前普通断线 -> 先进入离线托管，到 21:00 截止时刻巡检立刻退出
+        repo.put(new PlayerData(5002L, 2L, 1, 1, "00_default", 10, 1, new Vec3(12, 10, 0)));
+        world.onPlayerEnter(1L, PlayerEnter.newBuilder()
+                .setSessionId(502).setPlayerId(5002L).setSceneId(scene.sceneId()).setOwnerEpoch(2L)
+                .setMinorPlayDeadlineMs(deadlineMs).build());
+        repo.completeAll();
+        ScenePlayer p2 = world.playerById(5002L);
+        p2.setAfkPassExpiresAt(nowSec + 30L * 86_400L);
+
+        world.onPlayerLeave(1L, PlayerLeave.newBuilder()
+                .setSessionId(502).setPlayerId(5002L).setVoluntary(false).build());
+        assertThat(world.playerById(5002L)).isNotNull();
+        assertThat(p2.connectionLostHold()).isNotNull();
+        assertThat(p2.connectionLostHold().hostingStarted()).isTrue();
+
+        // 截止前 60 秒仍在托管
+        clock.advanceMillis(60_000L);
+        assertThat(world.sweepConnectionLostHolds()).isZero();
+        assertThat(world.playerById(5002L)).isNotNull();
+
+        // 越过 21:00 截止时刻 -> 巡检立刻退出，绝不继续离线托管
+        clock.advanceMillis(60_000L);
+        assertThat(world.sweepConnectionLostHolds()).isEqualTo(1);
+        assertThat(world.playerById(5002L)).isNull();
+    }
+
     private static SceneWorld newWorld(ManualClock clock, RecordingSink sink, FakePlayerRepository repo,
                                        SceneMetrics metrics) {
         AtomicLong ids = new AtomicLong(100);

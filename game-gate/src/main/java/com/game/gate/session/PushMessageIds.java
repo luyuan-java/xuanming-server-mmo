@@ -10,7 +10,7 @@ import com.game.contract.MessageIdRegistry;
  *                       0 = 没装配（只给不关心重定向的测试装配，见 {@link #tipOnly}）：没有号就发不出 124，
  *                       会话层遇到重定向帧 / 重定向指令时必须按「内容非法」收口，不许发一条消息号为 0 的包
  */
-public record PushMessageIds(int tip, int redirectToGate) {
+public record PushMessageIds(int tip, int redirectToGate, int kickPlayer) {
 
     private static final String COMMON_SERVICE = "SceneClientPlayerCommon";
 
@@ -21,20 +21,32 @@ public record PushMessageIds(int tip, int redirectToGate) {
         if (redirectToGate < 0) {
             throw new IllegalArgumentException("推重定向通知的消息号不能为负: " + redirectToGate);
         }
+        if (kickPlayer < 0) {
+            throw new IllegalArgumentException("推踢人通知的消息号不能为负: " + kickPlayer);
+        }
         if (redirectToGate == tip) {
             throw new IllegalArgumentException("重定向通知与 tip 不能是同一个消息号: " + tip);
         }
+        if (kickPlayer != 0 && (kickPlayer == tip || kickPlayer == redirectToGate)) {
+            throw new IllegalArgumentException("踢人通知不能与 tip 或重定向通知共用消息号: " + kickPlayer);
+        }
     }
 
-    /** 生产装配：两个号都从契约解析；缺任何一个即启动失败（同步产物与代码不一致）。 */
+    /** 兼容旧双参构造（未装配 KickPlayer 号时为 0）。 */
+    public PushMessageIds(int tip, int redirectToGate) {
+        this(tip, redirectToGate, 0);
+    }
+
+    /** 生产装配：三个号都从契约解析；缺任何一个即启动失败（同步产物与代码不一致）。 */
     public static PushMessageIds resolve(MessageIdRegistry registry) {
         return new PushMessageIds(registry.requireId(COMMON_SERVICE, "SendTipToClient"),
-                registry.requireId(COMMON_SERVICE, "RedirectToGate"));
+                registry.requireId(COMMON_SERVICE, "RedirectToGate"),
+                registry.requireId(COMMON_SERVICE, "KickPlayer"));
     }
 
-    /** 只有 tip 的号（批次 5.4 之前的装配形式，测试用）：重定向通知的号为 0。 */
+    /** 只有 tip 的号（批次 5.4 之前的装配形式，测试用）：重定向与踢人通知的号为 0。 */
     public static PushMessageIds tipOnly(int tip) {
-        return new PushMessageIds(tip, 0);
+        return new PushMessageIds(tip, 0, 0);
     }
 
     /** 是否装配了重定向通知的号。 */

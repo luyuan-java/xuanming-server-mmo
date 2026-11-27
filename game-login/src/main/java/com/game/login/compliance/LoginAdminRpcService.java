@@ -18,7 +18,10 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Supplier;
+import org.apache.dubbo.common.constants.CommonConstants;
 import org.apache.dubbo.config.annotation.DubboService;
+import org.apache.dubbo.rpc.RpcContext;
+import org.apache.dubbo.rpc.RpcException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,6 +34,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 public class LoginAdminRpcService implements LoginAdminService {
 
     private static final Logger log = LoggerFactory.getLogger(LoginAdminRpcService.class);
+    static final String ALLOWED_REAL_NAME_READER_APP = "game-payment";
 
     private final PlayerStore store;
     private final AccountDeletionService deletionService;
@@ -64,6 +68,12 @@ public class LoginAdminRpcService implements LoginAdminService {
 
     @Override
     public CompletableFuture<String> realNamePiOfPlayer(long playerId) {
+        String remoteApp = RpcContext.getServerAttachment().getAttachment(CommonConstants.REMOTE_APPLICATION_KEY);
+        if (remoteApp != null && !remoteApp.isEmpty() && !ALLOWED_REAL_NAME_READER_APP.equals(remoteApp)) {
+            log.warn("[real-name] rejected realNamePiOfPlayer from unauthorized caller={}", remoteApp);
+            return CompletableFuture.failedFuture(new RpcException(RpcException.AUTHORIZATION_EXCEPTION,
+                    "realNamePiOfPlayer caller not allowed"));
+        }
         return onWorkers(() -> store.findRealNamePiByPlayerId(playerId));
     }
 

@@ -112,6 +112,14 @@ public final class AntiAddictionGate {
         return ledger.renew(connId);
     }
 
+    /** 进游戏时从防沉迷会话账本读出未成年人可玩截止时刻（毫秒，0 = 不限）；账本不可读时抛出异常由调用方 fail-closed。 */
+    public long readWatchedSessionDeadlineMs(String connId) {
+        if (ledger == null || connId == null || connId.isEmpty()) {
+            return 0L;
+        }
+        return ledger.readPlayDeadlineMs(connId);
+    }
+
     /** 判断未成年人是否已超过可玩截止时刻（用于 gate 未按时断开时的 login 兜底踢线）。 */
     public boolean isPastPlayDeadline(long playDeadlineMs) {
         return playDeadlineMs > 0L && clock.millis() >= playDeadlineMs;

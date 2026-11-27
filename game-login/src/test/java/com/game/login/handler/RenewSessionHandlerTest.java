@@ -129,4 +129,32 @@ class RenewSessionHandlerTest {
             assertThat(keys).as("Redis Cluster 安全要求每条 Lua 脚本只传 1 个 key").hasSize(1);
         }
     }
+
+    @Test
+    void 未成年人距离截止时刻不足三分之一TTL时_续租间隔收紧至截止时刻() {
+        RedissonClient redis = mock(RedissonClient.class);
+        RScript script = mock(RScript.class);
+        when(redis.getScript(any(Codec.class))).thenReturn(script);
+        long nearDeadline = 1_045_000L; // 距当前 1_000_000L 仅剩 45 秒（远小于 30m/3 = 600s）
+        when(script.eval(eq(RScript.Mode.READ_WRITE), anyString(), eq(RScript.ReturnType.VALUE), anyList(), any(), any()))
+                .thenReturn(Long.toString(nearDeadline));
+
+        Clock clock = Clock.fixed(Instant.ofEpochMilli(1_000_000L), ZoneOffset.UTC);
+        NppaLedger ledger = new NppaLedger(redis, new NppaRedisKeys(new RedisKeys(GameNamespace.of("game"))), Duration.ofMinutes(30));
+        AntiAddictionGate aa = new AntiAddictionGate(AntiAddictionRules.Calendar.of(List.of()), Set.of(), null, ledger, clock);
+        LoginDevices devices = mock(LoginDevices.class);
+        when(devices.admit("minor2", "gate-1/102")).thenReturn(LoginDevices.Admission.ADMITTED);
+
+        AccountLogin accountLogin = new AccountLogin(mock(LoginAuthenticator.class), mock(PlayerStore.class),
+                mock(LoginTokens.class), devices, new InFlightKeys<>(), aa, false);
+        RenewSessionHandler handler = new RenewSessionHandler(accountLogin, Duration.ofMinutes(30));
+
+        SessionContext session = SessionContext.newBuilder()
+                .setGateNodeId(1).setGateInstanceId("gate-1").setSessionId(102).setAccount("minor2").build();
+        HandlerReply reply = handler.handle(session, RenewSessionRequest.getDefaultInstance()).join();
+        RenewSessionResponse body = (RenewSessionResponse) reply.body().orElseThrow();
+        assertThat(body.getRenewed()).isTrue();
+        assertThat(body.getRenewAfterSeconds()).isEqualTo(45);
+        assertThat(reply.directives()).isEmpty();
+    }
 }
