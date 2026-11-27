@@ -62,6 +62,16 @@ public final class CommerceClientService {
                 if (session == null || session.getPlayerId() == 0) {
                     return rejection(prototype, INVALID);
                 }
+                if (TradeMethods.SUBMIT_SELLER_REVIEW.equals(method) && engine != null && session.getOwnerRevision() > 0) {
+                    if (session.getAccount().isEmpty()) {
+                        return rejection(prototype, INVALID);
+                    }
+                    engine.store.transaction(d, c -> {
+                        com.game.common.player.PlayerSessionAuthority.lock(
+                                c, session.getPlayerId(), session.getAccount(), session.getOwnerRevision(), 2);
+                        return null;
+                    });
+                }
                 return handleCredit(method, session.getPlayerId(), session.getAccount(), input, prototype, d);
             }
             if (!RmbConsignmentService.METHODS.contains(method)) {
@@ -74,6 +84,7 @@ public final class CommerceClientService {
             return rmb.client(method, session, input, d);
         }
         catch (Refusal denied) { return rejection(prototype, denied.tip()); }
+        catch (SecurityException denied) { return rejection(prototype, CONFLICT); }
         catch (OfficialMallClient.HttpFailure failure) {
             return rejection(prototype, switch (failure.status()) { case 400 -> INVALID; case 404 -> MISSING;
                 case 409 -> CONFLICT; default -> com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE; });
@@ -458,6 +469,11 @@ public final class CommerceClientService {
         }
         SellerCreditService.CompletedTradeFact fact = factOpt.get();
         if (fact.buyerPlayerId() != me) {
+            throw new Refusal(MISSING);
+        }
+        // 换主后新账号不得替前任买家的历史成交打差评/改信誉分
+        if (!fact.buyerAccount().isEmpty()
+                && (account == null || account.isEmpty() || !fact.buyerAccount().equals(account))) {
             throw new Refusal(MISSING);
         }
         SellerCreditService.ReviewSubmission sub = credits.submitReview(

@@ -17,7 +17,6 @@ import javax.sql.DataSource;
 import org.apache.dubbo.config.annotation.DubboReference;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -54,18 +53,22 @@ public class GmAdminConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    @ConditionalOnBean({RedissonClient.class, RedisKeys.class})
     @ConditionalOnProperty(name = "game.gm.redis-enabled", havingValue = "true", matchIfMissing = true)
-    public PlayerPresenceDirectory gmPlayerPresenceDirectory(RedissonClient redis, RedisKeys keys) {
-        return new PlayerPresenceDirectory(redis, keys);
+    public PlayerPresenceDirectory gmPlayerPresenceDirectory(ObjectProvider<RedissonClient> redisProvider,
+                                                             ObjectProvider<RedisKeys> keysProvider) {
+        RedissonClient redis = redisProvider.getIfAvailable();
+        RedisKeys keys = keysProvider.getIfAvailable();
+        return (redis != null && keys != null) ? new PlayerPresenceDirectory(redis, keys) : null;
     }
 
     @Bean
     @ConditionalOnMissingBean
-    @ConditionalOnBean({RedissonClient.class, RedisKeys.class})
     @ConditionalOnProperty(name = "game.gm.redis-enabled", havingValue = "true", matchIfMissing = true)
-    public PlayerLocationDirectory gmPlayerLocationDirectory(RedissonClient redis, RedisKeys keys) {
-        return new PlayerLocationDirectory(redis, keys);
+    public PlayerLocationDirectory gmPlayerLocationDirectory(ObjectProvider<RedissonClient> redisProvider,
+                                                             ObjectProvider<RedisKeys> keysProvider) {
+        RedissonClient redis = redisProvider.getIfAvailable();
+        RedisKeys keys = keysProvider.getIfAvailable();
+        return (redis != null && keys != null) ? new PlayerLocationDirectory(redis, keys) : null;
     }
 
     /** 显式开启 {@code game.gm.mail-enabled=true} 时挂载邮件管理 Dubbo 引用（直连或 Nacos）。 */

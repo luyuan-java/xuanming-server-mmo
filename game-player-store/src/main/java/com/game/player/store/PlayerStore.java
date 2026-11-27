@@ -283,6 +283,14 @@ public class PlayerStore {
         return Optional.ofNullable(mapper.selectChannelIdentityByPlayerId(playerId));
     }
 
+    /** 按账号名查询最近一次登录的渠道身份（建角阶段角色尚未发号时使用）。 */
+    public Optional<AccountChannelIdentity> findAccountChannelIdentity(String account) {
+        if (account == null || account.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(mapper.selectChannelIdentityByAccount(account));
+    }
+
     /**
      * 申请账号注销：预检全部角色挂起后，在账号行锁内原子迁移 {@code 0 -> 1} 并记录冷静期截止时刻。
      * 重复申请原样返回当前状态与原到期时刻（不刷新冷静期）。

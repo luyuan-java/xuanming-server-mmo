@@ -126,6 +126,14 @@ class PaymentServiceAndStoreTest {
         ListPayChannelsResponse listResp = ListPayChannelsResponse.parseFrom(listReply.getBody());
         assertThat(listResp.getChannelsList()).containsExactly(PayChannel.PAY_CHANNEL_DEVPAY);
 
+        // 合法但未开启任何渠道的平台（如首审期 ios_app）返回空列表而非 INVALID_PARAMETER；非法平台名返回 null
+        ClientReply emptyIosReply = rpc.handle(call(ContractMessageIds.CLIENT_PLAYER_PAYMENT_LIST_PAY_CHANNELS, 1001L,
+                ListPayChannelsRequest.newBuilder().setPlatform(PayClientPlatform.PAY_CLIENT_PLATFORM_IOS_APP).build())).join();
+        ListPayChannelsResponse emptyIosResp = ListPayChannelsResponse.parseFrom(emptyIosReply.getBody());
+        assertThat(emptyIosResp.hasErrorMessage()).isFalse();
+        assertThat(emptyIosResp.getChannelsList()).isEmpty();
+        assertThat(svc.listChannels("unknown_platform")).isNull();
+
         ClientReply createReply = rpc.handle(call(ContractMessageIds.CLIENT_PLAYER_PAYMENT_CREATE_PAY_INTENT, 1001L,
                 CreatePayIntentRequest.newBuilder().setOrderId(orderId)
                         .setChannel(PayChannel.PAY_CHANNEL_DEVPAY)
@@ -208,15 +216,28 @@ class PaymentServiceAndStoreTest {
                 2001L, new RealNameReader.RealNameStatus(false, ""),
                 2002L, new RealNameReader.RealNameStatus(true, piChild7),
                 2003L, new RealNameReader.RealNameStatus(true, piTeen12),
-                2004L, new RealNameReader.RealNameStatus(true, piTeen12)); // 同一实名人的第二个账号
+                2004L, new RealNameReader.RealNameStatus(true, piTeen12), // 同一实名人的第二个账号
+                2005L, RealNameReader.RealNameStatus.NOT_FOUND,
+                2006L, new RealNameReader.RealNameStatus(true, "corrupt-pi-no-date"));
         PaymentService svc = newService(statuses::get, true);
 
-        // 未实名：desktop(devpay) 拒 31008；抖音小游戏由平台管放行
+        // 未实名：desktop(devpay) 拒 31008；抖音小游戏由平台管放行；角色不存在即使小游戏也拒 31008；pi 损坏回 BUSY
         String oUnverified = putOrder("2001", 600L);
         assertThat(svc.createIntent(new CreateRequest(2001L, oUnverified, PayChannel.PAY_CHANNEL_DEVPAY, "desktop", "", "")).tip())
                 .isEqualTo(PaymentTips.REAL_NAME_REQUIRED);
         assertThat(svc.createIntent(new CreateRequest(2001L, oUnverified, PayChannel.PAY_CHANNEL_DOUYIN_MINIGAME, "douyin_minigame", "", "")).tip())
                 .isEqualTo(PaymentTips.OK);
+        String oNotFound = putOrder("2005", 600L);
+        assertThat(svc.createIntent(new CreateRequest(2005L, oNotFound, PayChannel.PAY_CHANNEL_DOUYIN_MINIGAME, "douyin_minigame", "", "")).tip())
+                .isEqualTo(PaymentTips.REAL_NAME_REQUIRED);
+        String oBadPi = putOrder("2006", 600L);
+        assertThat(svc.createIntent(new CreateRequest(2006L, oBadPi, PayChannel.PAY_CHANNEL_DEVPAY, "desktop", "", "")).tip())
+                .isEqualTo(PaymentTips.BUSY);
+        // realNameGate=true 但未装配 realNameReader 时小游戏渠道也必须 fail-closed 回 BUSY
+        PaymentService misconfiguredSvc = newService(null, true);
+        String oMisconfig = putOrder("2001", 600L);
+        assertThat(misconfiguredSvc.createIntent(new CreateRequest(2001L, oMisconfig, PayChannel.PAY_CHANNEL_DOUYIN_MINIGAME, "douyin_minigame", "", "")).tip())
+                .isEqualTo(PaymentTips.BUSY);
 
         // 未满 8 周岁：禁止充值 31009
         String oChild = putOrder("2002", 100L);

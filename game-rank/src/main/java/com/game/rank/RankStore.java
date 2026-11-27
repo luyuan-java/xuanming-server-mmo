@@ -143,6 +143,12 @@ public final class RankStore {
             readArgs.add(U(b.generation));
             for (var e : sorted) readArgs.add(U(e.getEntityId()));
             String inMarks = String.join(",", Collections.nCopies(sorted.size(), "?"));
+            Set<Long> removed = new HashSet<>();
+            for (Long entityId : s.list("SELECT entity_id FROM rank_removed_entry WHERE board_id=? AND generation=? AND entity_id IN ("
+                            + inMarks + ")",
+                    r -> u64(r, 1), readArgs.toArray())) {
+                removed.add(entityId);
+            }
             Map<Long, long[]> existing = new HashMap<>(sorted.size() * 2);
             for (var row : s.list("SELECT entity_id,score,achieved_ms FROM rank_score WHERE board_id=? AND generation=? AND entity_id IN ("
                             + inMarks + ")",
@@ -153,6 +159,8 @@ public final class RankStore {
             var writeArgs = new ArrayList<Object>(sorted.size() * 7);
             long added = 0;
             for (var e : sorted) {
+                if (removed.contains(e.getEntityId()))
+                    continue;
                 var old = existing.get(e.getEntityId());
                 long value = e.getScore(), achieved = e.getAchievedMs();
                 if (in.getModeValue() == 3)
@@ -274,6 +282,10 @@ public final class RankStore {
                 s.update("UPDATE rank_board SET deleted_ms=? WHERE board_id=?", clock.getAsLong(), U(b.id));
             else {
                 require(b.state == 1 && b.deleted == 0, CLOSED);
+                // 墓碑与删分同事务写入，防止迟到或后续分数批次将已摘除作弊实体重新带回榜上。
+                s.update("INSERT INTO rank_removed_entry (board_id,generation,entity_id,removed_ms) VALUES (?,?,?,?) "
+                         + "ON DUPLICATE KEY UPDATE removed_ms=VALUES(removed_ms)",
+                        U(b.id), U(b.generation), U(in.getEntityId()), clock.getAsLong());
                 int deleted = s.update("DELETE FROM rank_score WHERE board_id=? AND generation=? AND entity_id=?", U(b.id), U(b.generation),
                         U(in.getEntityId()));
                 if (deleted > 0)
@@ -428,13 +440,15 @@ public final class RankStore {
     public void settle(Deadline d, Reward reward, long mail) throws SQLException {
         long now = clock.getAsLong();
         sql.tx(d, s -> {
-            var lease = s.one("SELECT status,lease_token FROM rank_mail_reward WHERE reward_id=? FOR UPDATE",
-                    r -> new long[] {r.getLong(1), u64(r, 2)}, U(reward.id));
+            var lease = s.one("SELECT status,lease_token,attempts FROM rank_mail_reward WHERE reward_id=? FOR UPDATE",
+                    r -> new long[] {r.getLong(1), u64(r, 2), r.getLong(3)}, U(reward.id));
             if (lease == null || lease[0] != 1 || lease[1] != reward.token)
                 return null;
+            // 暂态失败采用封顶指数退避（2s..300s），避免坏行每 2s 抢占全部 32 条扫描配额饿死正常新榜奖。
+            long backoffMs = mail == 0 ? Math.min(300_000L, 2_000L << Math.min(8, (int) Math.max(0L, lease[2]))) : 0L;
             s.update("UPDATE rank_mail_reward SET status=?,mail_id=?,next_attempt_ms=?,lease_until_ms=0,attempts=attempts+1,updated_ms=? "
                      + "WHERE reward_id=?",
-                    mail == 0 ? 1 : 2, U(mail), now + 2000, now, U(reward.id));
+                    mail == 0 ? 1 : 2, U(mail), mail == 0 ? now + backoffMs : 0L, now, U(reward.id));
             return null;
         });
     }

@@ -68,14 +68,25 @@ public class ContentGuardApplication {
         @Bean
         PlatformReviewer.IdentityLookup platformIdentityLookup(ContentGuardProperties props) {
             long timeoutMs = Math.max(10L, props.platform().lookupTimeoutMs());
-            return playerId -> {
-                var resp = loginService.getPlayerChannelIdentity(
-                                GetPlayerChannelIdentityRequest.newBuilder().setPlayerId(playerId).build())
-                        .get(timeoutMs, TimeUnit.MILLISECONDS);
-                if (resp == null || !resp.getFound()) {
-                    return PlatformReviewer.Identity.EMPTY;
+            return new PlatformReviewer.IdentityLookup() {
+                @Override
+                public PlatformReviewer.Identity lookup(long playerId) throws Exception {
+                    return lookup(playerId, "");
                 }
-                return new PlatformReviewer.Identity(resp.getChannel(), resp.getOpenId(), resp.getAccount());
+
+                @Override
+                public PlatformReviewer.Identity lookup(long playerId, String account) throws Exception {
+                    var req = GetPlayerChannelIdentityRequest.newBuilder().setPlayerId(playerId);
+                    if (playerId == 0L && account != null && !account.isEmpty()) {
+                        req.setAccount(account);
+                    }
+                    var resp = loginService.getPlayerChannelIdentity(req.build())
+                            .get(timeoutMs, TimeUnit.MILLISECONDS);
+                    if (resp == null || !resp.getFound()) {
+                        return PlatformReviewer.Identity.EMPTY;
+                    }
+                    return new PlatformReviewer.Identity(resp.getChannel(), resp.getOpenId(), resp.getAccount());
+                }
             };
         }
     }

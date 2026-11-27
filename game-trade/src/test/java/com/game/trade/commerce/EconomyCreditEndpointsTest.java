@@ -173,6 +173,16 @@ class EconomyCreditEndpointsTest {
                 SubmitSellerReviewResponse.getDefaultInstance(), deadline);
         assertThat(stranger.getErrorMessage().getId()).isEqualTo(TradeTips.ORDER_NOT_FOUND);
 
+        // 角色换主后新账号冒充原买家角色号评价 -> 拒绝 ORDER_NOT_FOUND
+        var transferredOwnerSession = SessionContext.newBuilder().setPlayerId(8001L).setAccount("acct-new-owner").build();
+        SubmitSellerReviewResponse transferred = (SubmitSellerReviewResponse) service.handle(
+                TradeMethods.SUBMIT_SELLER_REVIEW, transferredOwnerSession,
+                SubmitSellerReviewRequest.newBuilder()
+                        .setOrderId("commerce:9001")
+                        .setRating(SellerReviewRating.SELLER_REVIEW_RATING_NEGATIVE).build(),
+                SubmitSellerReviewResponse.getDefaultInstance(), deadline);
+        assertThat(transferred.getErrorMessage().getId()).isEqualTo(TradeTips.ORDER_NOT_FOUND);
+
         // 正常好评计分并入账；同评重放返回 replayed=true；改评返回 REQUEST_CONFLICT
         SubmitSellerReviewResponse first = (SubmitSellerReviewResponse) service.handle(
                 TradeMethods.SUBMIT_SELLER_REVIEW, buyerSession,

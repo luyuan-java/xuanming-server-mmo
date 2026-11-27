@@ -34,6 +34,10 @@ public final class WeChatAdapter implements PlatformAdapter {
     private static final String DEFAULT_BASE_URL = "https://api.weixin.qq.com";
     private static final Duration REFRESH_MARGIN = Duration.ofMinutes(5);
     private static final int MAX_RESP_BYTES = 64 * 1024;
+    /** 微信 msgSecCheck 内容含违规信息错误码（对齐 Go wechat.go: wechatErrRiskyContent）。 */
+    static final int ERR_RISKY_CONTENT = 87014;
+    /** 微信 msgSecCheck 用户近 2 小时未在小程序活跃错误码（非故障，仅走本地词库兜底）。 */
+    static final int ERR_USER_NOT_RECENTLY_ACTIVE = 61010;
 
     private final String appId;
     private final String appSecret;
@@ -86,7 +90,7 @@ public final class WeChatAdapter implements PlatformAdapter {
                 log.error("[content_guard/wechat] token fetch interrupted");
                 return ReviewResult.unavailable(PROVIDER_WECHAT);
             } catch (Exception e) {
-                log.error("[content_guard/wechat] token fetch failed: {}", e.getMessage());
+                log.error("[content_guard/wechat] token fetch failed: {}", sanitizeError(e));
                 return ReviewResult.unavailable(PROVIDER_WECHAT);
             }
             try {
@@ -109,6 +113,14 @@ public final class WeChatAdapter implements PlatformAdapter {
                         invalidateToken(token);
                         continue;
                     }
+                    if (errCode == ERR_RISKY_CONTENT) {
+                        // 平台明确判违规不得降级为 UNAVAILABLE（否则世界频道会按超时先放行导致违规内容漏过）。
+                        return ReviewResult.reject(TextCategory.TEXT_CATEGORY_OTHER, PROVIDER_WECHAT);
+                    }
+                    if (errCode == ERR_USER_NOT_RECENTLY_ACTIVE) {
+                        // 连续在线超 2 小时非平台故障，跳过外部层由本地词库兜底，避免长期阻塞改名/建帮。
+                        return ReviewResult.skip(PROVIDER_WECHAT);
+                    }
                     log.error("[content_guard/wechat] msg_sec_check errcode={} errmsg={}", errCode, root.path("errmsg").asText(""));
                     return ReviewResult.unavailable(PROVIDER_WECHAT);
                 }
@@ -121,7 +133,7 @@ public final class WeChatAdapter implements PlatformAdapter {
                 Thread.currentThread().interrupt();
                 return ReviewResult.unavailable(PROVIDER_WECHAT);
             } catch (Exception e) {
-                log.error("[content_guard/wechat] msg_sec_check request failed: {}", e.getMessage());
+                log.error("[content_guard/wechat] msg_sec_check request failed: {}", sanitizeError(e));
                 return ReviewResult.unavailable(PROVIDER_WECHAT);
             }
         }
@@ -152,9 +164,17 @@ public final class WeChatAdapter implements PlatformAdapter {
             }
         }
         try {
-            URI uri = URI.create(baseUrl + "/cgi-bin/token?grant_type=client_credential&appid="
-                    + urlEncode(appId) + "&secret=" + urlEncode(appSecret));
-            HttpRequest req = HttpRequest.newBuilder(uri).timeout(timeout).GET().build();
+            // 对齐 Go wechat.go: 使用 POST /cgi-bin/stable_token 避免多副本刷新互踢且不把 appSecret 暴露在 URL 查询串。
+            byte[] tokenReq = json.writeValueAsBytes(Map.of(
+                    "grant_type", "client_credential",
+                    "appid", appId,
+                    "secret", appSecret));
+            URI uri = URI.create(baseUrl + "/cgi-bin/stable_token");
+            HttpRequest req = HttpRequest.newBuilder(uri)
+                    .timeout(timeout)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(tokenReq))
+                    .build();
             HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
             byte[] body = readBounded(resp.body());
             if (resp.statusCode() != 200) {
@@ -228,6 +248,16 @@ public final class WeChatAdapter implements PlatformAdapter {
         try (in) {
             return in.readNBytes(MAX_RESP_BYTES);
         }
+    }
+
+    private static String sanitizeError(Throwable e) {
+        String msg = e.getMessage();
+        if (msg == null || msg.isBlank()) {
+            return e.getClass().getSimpleName();
+        }
+        String cleaned = msg.replaceAll("https?://\\S+", "<redacted-url>")
+                .replaceAll("(access_token|secret)=[^&\\s\"']+", "$1=<redacted>");
+        return e.getClass().getSimpleName() + ": " + cleaned;
     }
 
     private static String urlEncode(String value) {

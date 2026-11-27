@@ -118,10 +118,18 @@ public class LoginAccountService implements AccountLoginService {
             return CompletableFuture.failedFuture(new IllegalStateException("player store not wired"));
         }
         return onWorkers(() -> {
-            if (request == null || request.getPlayerId() == 0L) {
+            if (request == null) {
                 return GetPlayerChannelIdentityResponse.getDefaultInstance();
             }
-            return store.findPlayerChannelIdentity(request.getPlayerId())
+            Optional<com.game.player.store.AccountChannelIdentity> found;
+            if (request.getPlayerId() != 0L) {
+                found = store.findPlayerChannelIdentity(request.getPlayerId());
+            } else if (!request.getAccount().isEmpty()) {
+                found = store.findAccountChannelIdentity(request.getAccount());
+            } else {
+                return GetPlayerChannelIdentityResponse.getDefaultInstance();
+            }
+            return found
                     .map(id -> GetPlayerChannelIdentityResponse.newBuilder()
                             .setFound(true)
                             .setAccount(id.account())

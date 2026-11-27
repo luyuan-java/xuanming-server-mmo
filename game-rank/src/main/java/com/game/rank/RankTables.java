@@ -10,7 +10,8 @@ public final class RankTables {
         var db = new PbMysql();
         for (Message value : java.util.List.<Message>of(RankIdRow.getDefaultInstance(), RankBoardRow.getDefaultInstance(),
                      RankScoreRow.getDefaultInstance(), RankInputReceiptRow.getDefaultInstance(), RankSettlementRow.getDefaultInstance(),
-                     RankSnapshotRow.getDefaultInstance(), RankMailRewardRow.getDefaultInstance(), RankMutationRow.getDefaultInstance()))
+                     RankSnapshotRow.getDefaultInstance(), RankMailRewardRow.getDefaultInstance(), RankMutationRow.getDefaultInstance(),
+                     RankRemovedEntryRow.getDefaultInstance()))
             db.register(value);
         return db;
     }

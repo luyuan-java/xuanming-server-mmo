@@ -36,6 +36,18 @@ public final class PlatformReviewer {
     @FunctionalInterface
     public interface IdentityLookup {
         Identity lookup(long playerId) throws Exception;
+
+        /** 按角色号或建角阶段账号查询最近登录渠道身份（playerId=0 时按 account 查，对齐 Go IdentityLookup）。 */
+        default Identity lookup(long playerId, String account) throws Exception {
+            return playerId != 0L ? lookup(playerId) : Identity.EMPTY;
+        }
+    }
+
+    /** 缓存键：有 playerId 时仅按 playerId，playerId=0（建角前）时按 account（对齐 Go reviewer.go:112-116）。 */
+    private record IdentityKey(long playerId, String account) {
+        static IdentityKey of(long playerId, String account) {
+            return playerId != 0L ? new IdentityKey(playerId, "") : new IdentityKey(0L, account == null ? "" : account);
+        }
     }
 
     private record CachedIdentity(Identity identity, Instant expiresAt) {
@@ -46,7 +58,7 @@ public final class PlatformReviewer {
 
     private final Map<String, PlatformAdapter> adapters;
     private final IdentityLookup identityLookup;
-    private final ConcurrentHashMap<Long, CachedIdentity> identityCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<IdentityKey, CachedIdentity> identityCache = new ConcurrentHashMap<>();
     private final Duration syncTimeout;
     private final Duration worldTimeout;
     private final Duration asyncTimeout;
@@ -149,38 +161,35 @@ public final class PlatformReviewer {
     }
 
     private Resolved resolveAdapter(long playerId, String account) throws Exception {
-        if (account != null && !account.isEmpty()) {
-            String[] parsed = parseChannelAccount(account);
-            if (!parsed[0].isEmpty()) {
-                PlatformAdapter a = adapters.get(parsed[0]);
-                return a != null ? new Resolved(a, parsed[1]) : null;
-            }
-        }
-        if (playerId != 0L && identityLookup != null) {
-            Identity id = getCachedIdentity(playerId);
-            String[] parsed = providerFromIdentity(id);
-            if (!parsed[0].isEmpty()) {
-                PlatformAdapter a = adapters.get(parsed[0]);
-                return a != null ? new Resolved(a, parsed[1]) : null;
-            }
-            return null;
-        }
-        if (playerId == 0L && (account == null || account.isEmpty())) {
+        String normalizedAccount = account == null ? "" : account;
+        if (playerId == 0L && normalizedAccount.isEmpty()) {
             PlatformAdapter dy = adapters.get(PlatformAdapter.PROVIDER_DOUYIN);
             if (dy != null) {
                 return new Resolved(dy, "");
             }
+            return null;
+        }
+        // 对齐 Go reviewer.go:333-353：严禁按 wx_/dy_ 账号前缀猜测 openid（wx_ 后缀为 unionid），必须走权威目录回查。
+        if (identityLookup == null) {
+            return null;
+        }
+        Identity id = getCachedIdentity(playerId, normalizedAccount);
+        String[] parsed = providerFromIdentity(id);
+        if (!parsed[0].isEmpty()) {
+            PlatformAdapter a = adapters.get(parsed[0]);
+            return a != null ? new Resolved(a, parsed[1]) : null;
         }
         return null;
     }
 
-    private Identity getCachedIdentity(long playerId) throws Exception {
+    private Identity getCachedIdentity(long playerId, String account) throws Exception {
         Instant now = clock.instant();
-        CachedIdentity cached = identityCache.get(playerId);
+        IdentityKey key = IdentityKey.of(playerId, account);
+        CachedIdentity cached = identityCache.get(key);
         if (cached != null && now.isBefore(cached.expiresAt())) {
             return cached.identity();
         }
-        Identity loaded = identityLookup.lookup(playerId);
+        Identity loaded = identityLookup.lookup(playerId, account);
         if (loaded == null) {
             return Identity.EMPTY;
         }
@@ -188,26 +197,25 @@ public final class PlatformReviewer {
             if (identityCache.size() >= IDENTITY_CACHE_MAX_SIZE) {
                 identityCache.clear();
             }
-            identityCache.put(playerId, new CachedIdentity(loaded, now.plus(DEFAULT_IDENTITY_TTL)));
+            identityCache.put(key, new CachedIdentity(loaded, now.plus(DEFAULT_IDENTITY_TTL)));
         }
         return loaded;
     }
 
+    /**
+     * 对齐 Go reviewer.go:96-110：只认 wechat_minigame / douyin_minigame 两个小游戏渠道与目录中对应的 openid；
+     * App 侧渠道（wechat/douyin）的 openid 属于 App AppID，不能拿去调小游戏接口，更不得从 wx_ 账号后缀（unionid）回退。
+     */
     private static String[] providerFromIdentity(Identity id) {
         if (id == null) {
             return new String[] {"", ""};
         }
         String ch = id.channel() == null ? "" : id.channel().trim().toLowerCase(Locale.ROOT);
-        if ("wechat".equals(ch) || "wechat_minigame".equals(ch)) {
+        if ("wechat_minigame".equals(ch)) {
             return new String[] {PlatformAdapter.PROVIDER_WECHAT, id.openId() == null ? "" : id.openId()};
         }
-        if ("douyin".equals(ch) || "douyin_minigame".equals(ch)) {
+        if ("douyin_minigame".equals(ch)) {
             return new String[] {PlatformAdapter.PROVIDER_DOUYIN, id.openId() == null ? "" : id.openId()};
-        }
-        String[] fromAcc = parseChannelAccount(id.account());
-        if (!fromAcc[0].isEmpty()) {
-            String oid = (id.openId() != null && !id.openId().isEmpty()) ? id.openId() : fromAcc[1];
-            return new String[] {fromAcc[0], oid};
         }
         return new String[] {"", ""};
     }

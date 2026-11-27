@@ -117,8 +117,19 @@ final class ContentGuardRpcServiceTest {
                 return ReviewResult.reject(TextCategory.TEXT_CATEGORY_AD, PROVIDER_WECHAT);
             }
         };
+        PlatformReviewer.IdentityLookup lookup = new PlatformReviewer.IdentityLookup() {
+            @Override
+            public PlatformReviewer.Identity lookup(long playerId) {
+                return new PlatformReviewer.Identity("wechat_minigame", "open_123", "wx_open_123");
+            }
+
+            @Override
+            public PlatformReviewer.Identity lookup(long playerId, String account) {
+                return new PlatformReviewer.Identity("wechat_minigame", "open_123", account);
+            }
+        };
         PlatformReviewer reviewer = new PlatformReviewer(
-                List.of(rejectAll), null, Duration.ofSeconds(1), Duration.ofMillis(100), Duration.ofSeconds(2), Clock.systemUTC());
+                List.of(rejectAll), lookup, Duration.ofSeconds(1), Duration.ofMillis(100), Duration.ofSeconds(2), Clock.systemUTC());
         ContentGuardRpcService svc = new ContentGuardRpcService(engine, reviewer, true, 4096, new SimpleMeterRegistry());
 
         CheckTextResponse resp = svc.checkPlatformText(CheckTextRequest.newBuilder()

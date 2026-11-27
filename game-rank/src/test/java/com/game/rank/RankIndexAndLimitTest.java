@@ -288,9 +288,13 @@ class RankIndexAndLimitTest {
         RankStore store = new RankStore(sql, mock(AuthorityIds.class), id -> true, () -> 10_000L);
         RemoveRankEntryRequest removeOne = RemoveRankEntryRequest.newBuilder()
                 .setBoardId(801L).setGeneration(1L).setEntityId(999L).setRequestId(1001L).build();
-        // admin 摘除 match 榜单个作弊条目 -> 允许
+        // admin 摘除 match 榜单个作弊条目 -> 写墓碑并删分
         store.remove("admin", removeOne, false, Deadline.after(5_000));
+        verify(session).update(contains("INSERT INTO rank_removed_entry"), any(), any(), any(), any());
         verify(session).update(contains("DELETE FROM rank_score"), any(), any(), any());
+        assertThat(RankTables.registry().tables())
+                .extracting(com.game.pbmysql.TableSchema::tableName)
+                .contains("rank_removed_entry");
 
         // admin 隐藏 match 榜整代 -> 拒绝 CONFLICT（整代隐藏严格仅开榜方）
         RemoveRankEntryRequest hideAll = RemoveRankEntryRequest.newBuilder()
@@ -305,5 +309,51 @@ class RankIndexAndLimitTest {
                 .isInstanceOf(RankStore.Reject.class)
                 .extracting(e -> ((RankStore.Reject) e).tip)
                 .isEqualTo(RankStore.CONFLICT);
+    }
+
+    @Test
+    void 榜奖永久拒收或剩余领取不足24h直接放弃_暂态失败按attempts指数退避() throws Exception {
+        long now = System.currentTimeMillis();
+        RankStore store = mock(RankStore.class);
+        MailAdminService mail = mock(MailAdminService.class);
+        RankRewardWorker worker = new RankRewardWorker(store, SECRET, mail);
+
+        // 1) 距离到期不足 24h -> 不发信直接 abandon
+        RankStore.Reward expiring = new RankStore.Reward(
+                701L, 1001L, 1L, 1L, MailAttachments.getDefaultInstance().toByteArray(), 11L, now - 29L * 86400_000L - 3600_000L);
+        when(store.lease(any(), eq(701L), anyLong(), anyLong())).thenReturn(expiring);
+        worker.process(701L);
+        verify(store).abandon(any(), eq(expiring));
+        verify(mail, never()).sendPersonalMail(any());
+
+        // 2) 附件字节损坏 -> 直接 abandon，不陷入 2s 死循环
+        RankStore.Reward corrupt = new RankStore.Reward(702L, 1002L, 1L, 2L, new byte[] {(byte) 0xFF, (byte) 0xFF}, 12L, now);
+        when(store.lease(any(), eq(702L), anyLong(), anyLong())).thenReturn(corrupt);
+        worker.process(702L);
+        verify(store).abandon(any(), eq(corrupt));
+
+        // 3) 邮件服务回永久错误 kMailExpired -> 直接 abandon
+        RankStore.Reward expiredMail = new RankStore.Reward(
+                703L, 1003L, 1L, 3L, MailAttachments.getDefaultInstance().toByteArray(), 13L, now);
+        when(store.lease(any(), eq(703L), anyLong(), anyLong())).thenReturn(expiredMail);
+        when(mail.sendPersonalMail(any())).thenReturn(CompletableFuture.completedFuture(
+                SendMailResponse.newBuilder()
+                        .setErrorMessage(com.game.proto.TipInfoMessage.newBuilder()
+                                .setId(MailErrorTip.mail_error.kMailExpired_VALUE))
+                        .build()));
+        worker.process(703L);
+        verify(store).abandon(any(), eq(expiredMail));
+
+        // 4) 暂态失败 settle 按 attempts=3 计算指数退避（2000 << 3 = 16000ms）
+        AuthorityJdbc sql = mock(AuthorityJdbc.class);
+        AuthorityJdbc.Session session = mock(AuthorityJdbc.Session.class);
+        when(session.one(contains("SELECT status,lease_token,attempts FROM rank_mail_reward"), any(), any()))
+                .thenReturn(new long[] {1L, 99L, 3L});
+        when(sql.tx(any(), any())).thenAnswer(inv -> ((AuthorityJdbc.Work<?>) inv.getArgument(1)).apply(session));
+        long fixedNow = 100_000L;
+        RankStore realStore = new RankStore(sql, mock(AuthorityIds.class), id -> true, () -> fixedNow);
+        realStore.settle(Deadline.after(1_000), new RankStore.Reward(704L, 1004L, 1L, 4L, new byte[0], 99L, fixedNow), 0L);
+        verify(session).update(contains("UPDATE rank_mail_reward SET status=?"),
+                eq(1), any(), eq(fixedNow + 16_000L), eq(fixedNow), any());
     }
 }

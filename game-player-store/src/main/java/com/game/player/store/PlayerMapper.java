@@ -465,6 +465,21 @@ public interface PlayerMapper {
             @Arg(column = "updated_at", javaType = long.class)})
     AccountChannelIdentity selectChannelIdentityByPlayerId(@Param("playerId") long playerId);
 
+    @Select("""
+            SELECT account,
+                   COALESCE(channel, '') AS channel,
+                   COALESCE(open_id, '') AS open_id,
+                   COALESCE(updated_at, 0) AS updated_at
+              FROM account_channel_identity
+             WHERE account = #{account}
+            """)
+    @ConstructorArgs({
+            @Arg(column = "account", javaType = String.class),
+            @Arg(column = "channel", javaType = String.class),
+            @Arg(column = "open_id", javaType = String.class),
+            @Arg(column = "updated_at", javaType = long.class)})
+    AccountChannelIdentity selectChannelIdentityByAccount(@Param("account") String account);
+
     @Delete("DELETE FROM account_channel_identity WHERE account = #{account}")
     int deleteAccountChannelIdentity(@Param("account") String account);
 

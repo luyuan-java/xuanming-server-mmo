@@ -61,30 +61,55 @@ public final class RankRewardWorker implements SmartLifecycle, AutoCloseable {
             LOG.warn("榜奖扫描失败，下轮按原奖励号恢复，类型={}", failure.getClass().getSimpleName());
         }
     }
+    /** 领奖邮件最低有效领取窗口（对齐 Go MinRewardMailClaimWindow = 24h）：不足 24h 放弃发信避免发出即过期。 */
+    static final long MIN_REWARD_CLAIM_WINDOW_MS = 24L * 3600_000L;
+
+    static boolean isPermanentMailRejection(int errorId) {
+        return errorId == com.game.table.MailErrorTip.mail_error.kMailRecipientDeleted_VALUE
+                || errorId == com.game.table.MailErrorTip.mail_error.kMailExpired_VALUE
+                || errorId == com.game.table.MailErrorTip.mail_error.kMailAttachmentInvalid_VALUE
+                || errorId == com.game.table.MailErrorTip.mail_error.kMailRequestConflict_VALUE
+                || errorId == com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE;
+    }
+
     void process(long id) throws Exception {
+        long now = System.currentTimeMillis();
         var reward =
-                store.lease(Deadline.after(2000), id, System.currentTimeMillis(), ThreadLocalRandom.current().nextLong(1, Long.MAX_VALUE));
+                store.lease(Deadline.after(2000), id, now, ThreadLocalRandom.current().nextLong(1, Long.MAX_VALUE));
         if (reward == null)
             return;
+        long expireMs = reward.created() + 30L * 86400000L;
+        if (expireMs - now < MIN_REWARD_CLAIM_WINDOW_MS) {
+            LOG.warn("[rank] mail reward abandoned due to insufficient claim window reward_id={} settlement_id={}",
+                    reward.id(), reward.settlement());
+            store.abandon(Deadline.after(1500), reward);
+            return;
+        }
         long mailId = 0;
-        boolean recipientDeleted = false;
+        boolean permanentReject = false;
+        String abandonReason = "";
         try {
             var request = SendMailRequest.newBuilder()
                                   .setSenderKind(3)
                                   .setRequestId(reward.id())
-                                  .setExpireMs(reward.created() + 30L * 86400000)
+                                  .setExpireMs(expireMs)
                                   .setRecipientPlayerId(reward.player())
                                   .setTitle("排行榜结算奖励")
                                   .setBody("本次结算名次：" + Long.toUnsignedString(reward.rank()))
                                   .setAttachments(MailAttachments.parseFrom(reward.attachments()))
                                   .build();
-            var signed = ServiceCallSignatures.sign(MailAdminService.PERSONAL_METHOD, request, "rank", secret, System.currentTimeMillis());
+            var signed = ServiceCallSignatures.sign(MailAdminService.PERSONAL_METHOD, request, "rank", secret, now);
             var response = mail.sendPersonalMail(signed).get(2200, TimeUnit.MILLISECONDS);
             int errorId = response.getErrorMessage().getId();
-            if (errorId == 0)
+            if (errorId == 0) {
                 mailId = response.getMailId();
-            else if (errorId == com.game.table.MailErrorTip.mail_error.kMailRecipientDeleted_VALUE)
-                recipientDeleted = true;
+            } else if (isPermanentMailRejection(errorId)) {
+                permanentReject = true;
+                abandonReason = "tip=" + errorId;
+            }
+        } catch (com.google.protobuf.InvalidProtocolBufferException corrupt) {
+            permanentReject = true;
+            abandonReason = "corrupt_attachments";
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             LOG.warn("榜奖发信被中断，保留原幂等键下次重投 rewardId={}", id);
@@ -92,9 +117,9 @@ public final class RankRewardWorker implements SmartLifecycle, AutoCloseable {
         } catch (Exception unknown) {
             LOG.warn("榜奖发信未确认，将保持原幂等键重投，类型={}", unknown.getClass().getSimpleName());
         }
-        if (recipientDeleted) {
-            LOG.info("[rank] mail reward abandoned because recipient role is deleted reward_id={} settlement_id={}",
-                    reward.id(), reward.settlement());
+        if (permanentReject) {
+            LOG.info("[rank] mail reward abandoned permanently reason={} reward_id={} settlement_id={}",
+                    abandonReason, reward.id(), reward.settlement());
             store.abandon(Deadline.after(1500), reward);
             return;
         }

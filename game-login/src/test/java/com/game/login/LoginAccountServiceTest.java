@@ -80,6 +80,16 @@ class LoginAccountServiceTest {
         assertThat(resp.getAccount()).isEqualTo("wx_u1");
         assertThat(resp.getChannel()).isEqualTo("wechat");
         assertThat(resp.getOpenId()).isEqualTo("openid_real_8801");
+
+        // 建角阶段 player_id=0 按账号名查询最近登录渠道身份
+        when(store.findAccountChannelIdentity("wx_u_create"))
+                .thenReturn(java.util.Optional.of(new com.game.player.store.AccountChannelIdentity(
+                        "wx_u_create", "wechat_minigame", "openid_mg_create", 2000L)));
+        var byAccount = full.getPlayerChannelIdentity(
+                com.game.proto.data_service.GetPlayerChannelIdentityRequest.newBuilder().setAccount("wx_u_create").build()).join();
+        assertThat(byAccount.getFound()).isTrue();
+        assertThat(byAccount.getChannel()).isEqualTo("wechat_minigame");
+        assertThat(byAccount.getOpenId()).isEqualTo("openid_mg_create");
     }
 
     @Test

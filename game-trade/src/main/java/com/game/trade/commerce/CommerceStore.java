@@ -145,6 +145,48 @@ public final class CommerceStore {
             }
         }
     }
+    /**
+     * 后台合同推进专用的参与者归属锁（对齐 Go role_authority.go:147-150）：
+     * 角色已删、账号变更或归属修订号已变更属不可逆失配，抛 {@link CommerceEngine.CorruptContract} 隔离为 MANUAL；
+     * 仅角色寄售挂牌冻结（trade_listing_id != 0）属暂态冲突，抛 {@link CommerceRules.Refusal} 延迟重试。
+     */
+    static void lockAdvanceOwners(Connection c, java.util.Map<Long, com.game.proto.trade.TradeRoleIdentity> owners)
+            throws SQLException {
+        var sorted = new java.util.TreeMap<Long, com.game.proto.trade.TradeRoleIdentity>(Long::compareUnsigned);
+        for (var entry : owners.entrySet()) {
+            if (entry.getKey() != 0 && entry.getValue() != null) {
+                sorted.put(entry.getKey(), entry.getValue());
+            }
+        }
+        if (sorted.isEmpty()) {
+            return;
+        }
+        com.game.common.player.PlayerRouteAuthority.lock(c, sorted.keySet(), 2);
+        for (var entry : sorted.entrySet()) {
+            long id = entry.getKey();
+            var expected = entry.getValue();
+            if (expected.getAccount().isEmpty() || expected.getOwnerRevision() <= 0) {
+                throw new CommerceEngine.CorruptContract("合同参与者原账号或归属修订缺失");
+            }
+            try (var statement = c.prepareStatement(
+                    "SELECT account,owner_revision,trade_listing_id FROM player WHERE player_id=? FOR UPDATE")) {
+                statement.setQueryTimeout(2);
+                bind(statement, id);
+                try (var row = statement.executeQuery()) {
+                    if (!row.next()) {
+                        throw new CommerceEngine.CorruptContract("合同参与者角色已删除，隔离等待人工介入");
+                    }
+                    long currentRevision = nativeRevision(row.getString(2));
+                    if (!expected.getAccount().equals(row.getString(1)) || expected.getOwnerRevision() != currentRevision) {
+                        throw new CommerceEngine.CorruptContract("合同参与者归属已变更，隔离等待人工介入");
+                    }
+                    if (!"0".equals(row.getString(3))) {
+                        throw new CommerceRules.Refusal(CommerceRules.CONFLICT);
+                    }
+                }
+            }
+        }
+    }
     static com.game.proto.trade.TradeRoleIdentity roleIdentity(Connection c, long player) throws SQLException {
         try (var s = c.prepareStatement("SELECT account,owner_revision FROM player WHERE player_id=? FOR UPDATE")) {
             s.setQueryTimeout(2); bind(s, player);

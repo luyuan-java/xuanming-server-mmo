@@ -18,6 +18,8 @@ management:
 
 game:
   advertise-host: ${GAME_ADVERTISE_HOST:127.0.0.1}
+  dubbo:
+    login-url: ${GAME_LOGIN_URL:tri://127.0.0.1:20881}
   content-guard:
     require-lexicon: false
     max-text-bytes: 4096

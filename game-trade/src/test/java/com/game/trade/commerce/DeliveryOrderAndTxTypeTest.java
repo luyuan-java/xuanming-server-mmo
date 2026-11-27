@@ -205,4 +205,126 @@ class DeliveryOrderAndTxTypeTest {
         }
         verify(store).quarantine(eq(bidRow), any());
     }
+
+    @Test
+    void 零金币恶意刷单限每买家3次且不锁死正常买家_满成交市价单不可撤单_角色删改转人工() throws Exception {
+        Connection c = stubPlayerConnection(java.util.Map.of(
+                1L, new String[] {"acct-S", "1", "0"},
+                10L, new String[] {"acct-B", "2", "0"},
+                11L, new String[] {"acct-A", "1", "888"},
+                99L, new String[] {"acct-G", "1", "0"}));
+
+        // 1) 同一买家已有 3 条 buyer_debit_ 失败尝试 -> 第 4 次被拒 CONFLICT，防止 32 次把挂单永久砖化
+        CommerceStore store = mock(CommerceStore.class);
+        when(store.transaction(any(), any())).thenAnswer(inv -> {
+            CommerceStore.Transaction<?> tx = inv.getArgument(1);
+            return tx.run(c);
+        });
+        TradeCommerceWorkflow.Builder grieferWf = TradeCommerceWorkflow.newBuilder().setStage("open").setQuantityReserved(3);
+        for (int i = 1; i <= 3; i++) {
+            grieferWf.addLegs(TradeCommerceLeg.newBuilder()
+                    .setRole("buyer_debit_" + i + "_k" + i).setPlayerId(99L).setStream(3).setOutcome(3));
+        }
+        TradeCommerceRow openListing = TradeCommerceRow.newBuilder()
+                .setCommerceId(700L).setKind(3).setStatus(ESCROWING).setSellerPlayerId(1L).setBuyerPlayerId(0L)
+                .setUnitPrice(1000L).setCurrencyType(0).setExpiresMs(Long.MAX_VALUE / 2)
+                .setWorkflowProto(grieferWf.build().toByteString()).build();
+        when(store.lock(any(), eq(700L))).thenReturn(openListing);
+        CommerceEngine engine = new CommerceEngine(store, new AtomicLong(5000)::incrementAndGet, POLICY, () -> 1_000_000L);
+        assertThatThrownBy(() -> engine.mutate(99L, 700L, "buy", Deadline.after(3000), "req-attempt-4"))
+                .isInstanceOf(Refusal.class)
+                .extracting(e -> ((Refusal) e).tip()).isEqualTo(CONFLICT);
+
+        // 2) 已 100% 成交进入 DELIVERING 的市价单（stage=market_open, filled==quantity）不可撤单改写为 CANCELLED
+        TradeCommerceRow fullFilledMarket = TradeCommerceRow.newBuilder()
+                .setCommerceId(701L).setKind(4).setStatus(DELIVERING).setSellerPlayerId(1L)
+                .setQuantity(10).setFilledQuantity(10)
+                .setWorkflowProto(TradeCommerceWorkflow.newBuilder().setStage("market_open").build().toByteString()).build();
+        when(store.lock(any(), eq(701L))).thenReturn(fullFilledMarket);
+        assertThatThrownBy(() -> engine.mutate(1L, 701L, "cancel", Deadline.after(3000)))
+                .isInstanceOf(Refusal.class)
+                .extracting(e -> ((Refusal) e).tip()).isEqualTo(CONFLICT);
+
+        // 3) lockAdvanceOwners：角色已删(12)或归属已换主(10) -> CorruptContract（进 MANUAL）；仅挂牌寄售冻结(11) -> Refusal(CONFLICT) 重试
+        var expected = com.game.proto.trade.TradeRoleIdentity.newBuilder().setAccount("acct-A").setOwnerRevision(1L).build();
+        assertThatThrownBy(() -> CommerceStore.lockAdvanceOwners(c, java.util.Map.of(10L, expected)))
+                .isInstanceOf(CommerceEngine.CorruptContract.class);
+        assertThatThrownBy(() -> CommerceStore.lockAdvanceOwners(c, java.util.Map.of(12L, expected)))
+                .isInstanceOf(CommerceEngine.CorruptContract.class);
+        assertThatThrownBy(() -> CommerceStore.lockAdvanceOwners(c, java.util.Map.of(11L, expected)))
+                .isInstanceOf(Refusal.class)
+                .extracting(e -> ((Refusal) e).tip()).isEqualTo(CONFLICT);
+    }
+
+    private static Connection stubPlayerConnection(java.util.Map<Long, String[]> players) throws Exception {
+        Connection c = mock(Connection.class);
+        when(c.getAutoCommit()).thenReturn(false);
+        when(c.unwrap(com.game.common.sql.AuthorityConnection.Fence.class)).thenReturn(() -> {});
+        var dbMeta = mock(java.sql.DatabaseMetaData.class);
+        when(dbMeta.getDatabaseProductName()).thenReturn("H2");
+        when(c.getMetaData()).thenReturn(dbMeta);
+        when(c.createStatement()).thenAnswer(inv -> {
+            java.sql.Statement st = mock(java.sql.Statement.class);
+            when(st.executeQuery(anyString())).thenAnswer(q -> {
+                java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+                when(rs.next()).thenReturn(true, false);
+                when(rs.getLong(1)).thenReturn(1_000_000L);
+                return rs;
+            });
+            return st;
+        });
+        when(c.prepareStatement(anyString())).thenAnswer(inv -> {
+            String sql = inv.getArgument(0);
+            java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+            long[] arg1 = new long[1];
+            doAnswer(a -> {
+                Object v = a.getArgument(1);
+                if (v instanceof Number n) arg1[0] = n.longValue();
+                return null;
+            }).when(ps).setObject(eq(1), any());
+            when(ps.executeQuery()).thenAnswer(q -> {
+                java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+                if (sql.contains("UNIX_TIMESTAMP")) {
+                    when(rs.next()).thenReturn(true, false);
+                    when(rs.getLong(1)).thenReturn(1_000_000L);
+                } else if (sql.contains("FROM route_meta")) {
+                    when(rs.next()).thenReturn(true, false);
+                    when(rs.getString(1)).thenReturn("11111111-1111-1111-1111-111111111111");
+                    when(rs.getString(2)).thenReturn("1");
+                    when(rs.getInt(3)).thenReturn(64);
+                } else if (sql.contains("FROM zone_merged_into")) {
+                    when(rs.next()).thenReturn(false);
+                } else if (sql.contains("FROM zone_merge_fence")) {
+                    int[] shard = {-1};
+                    when(rs.next()).thenAnswer(n -> ++shard[0] < 64);
+                    when(rs.getInt(1)).thenAnswer(n -> shard[0]);
+                    when(rs.getString(2)).thenReturn("");
+                    when(rs.getLong(3)).thenReturn(1L);
+                } else if (sql.contains("SELECT zone_id FROM player")) {
+                    boolean present = players.containsKey(arg1[0]);
+                    when(rs.next()).thenReturn(present, false);
+                    when(rs.getLong(1)).thenReturn(1L);
+                    when(rs.wasNull()).thenReturn(false);
+                } else if (sql.contains("SELECT owner_revision,trade_listing_id FROM player")) {
+                    String[] p = players.get(arg1[0]);
+                    when(rs.next()).thenReturn(p != null, false);
+                    if (p != null) {
+                        when(rs.getString(1)).thenReturn(p[1]);
+                        when(rs.getString(2)).thenReturn(p[2]);
+                    }
+                } else if (sql.contains("SELECT account,owner_revision,trade_listing_id FROM player")) {
+                    String[] p = players.get(arg1[0]);
+                    when(rs.next()).thenReturn(p != null, false);
+                    if (p != null) {
+                        when(rs.getString(1)).thenReturn(p[0]);
+                        when(rs.getString(2)).thenReturn(p[1]);
+                        when(rs.getString(3)).thenReturn(p[2]);
+                    }
+                }
+                return rs;
+            });
+            return ps;
+        });
+        return c;
+    }
 }

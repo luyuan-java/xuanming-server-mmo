@@ -205,12 +205,19 @@ public final class PaymentService {
     // 客户端入口（396–399）
     // ---------------------------------------------------------------------------
 
+    private static final java.util.Set<String> KNOWN_PLATFORMS = java.util.Set.of(
+            "android_app", "ios_app", "wechat_minigame", "douyin_minigame", "desktop");
+
     public List<PayChannel> listChannels(String platform) {
-        if (platform == null || platform.isEmpty() || !opts.platforms().containsKey(platform)) {
+        if (platform == null || platform.isEmpty() || !KNOWN_PLATFORMS.contains(platform)) {
             return null;
         }
+        List<PayChannel> configured = opts.platforms().get(platform);
+        if (configured == null || configured.isEmpty()) {
+            return List.of();
+        }
         List<PayChannel> out = new ArrayList<>();
-        for (PayChannel id : opts.platforms().get(platform)) {
+        for (PayChannel id : configured) {
             if (channels.containsKey(id)) {
                 out.add(id);
             }
@@ -224,10 +231,11 @@ public final class PaymentService {
                 || in.channel() == PayChannel.PAY_CHANNEL_UNSPECIFIED) {
             return CreateResult.err(PaymentTips.INVALID_PARAMETER, null);
         }
-        if (in.platform() == null || in.platform().isEmpty() || !opts.platforms().containsKey(in.platform())) {
+        if (in.platform() == null || in.platform().isEmpty() || !KNOWN_PLATFORMS.contains(in.platform())) {
             return CreateResult.err(PaymentTips.INVALID_PARAMETER, null);
         }
-        if (!opts.platforms().get(in.platform()).contains(in.channel())) {
+        List<PayChannel> allowed = opts.platforms().get(in.platform());
+        if (allowed == null || !allowed.contains(in.channel())) {
             return CreateResult.err(PaymentTips.CHANNEL_UNAVAILABLE, null);
         }
         PaymentChannel ch = channels.get(in.channel());
@@ -358,9 +366,7 @@ public final class PaymentService {
         }
         boolean platformManaged = isPlatformManagedMiniGame(channel);
         if (realNameReader == null) {
-            if (platformManaged) {
-                return new GateResult(PaymentTips.OK, rec);
-            }
+            // 对齐 Go minor.go:54：未装配实名读口时含小游戏渠道一律 fail-closed，防止 App 已实名未成年人跨端绕过合并限额。
             metrics.countMinorGate("realname_unavailable");
             return new GateResult(PaymentTips.BUSY, rec);
         }
@@ -372,6 +378,10 @@ public final class PaymentService {
             log.error("[payment] realname lookup failed player={}: {}", rec.playerId(), e.getMessage());
             return new GateResult(PaymentTips.BUSY, rec);
         }
+        if (status != null && status.notFound()) {
+            metrics.countMinorGate("player_not_found");
+            return new GateResult(PaymentTips.REAL_NAME_REQUIRED, rec);
+        }
         if (status == null || !status.verified() || status.pi() == null || status.pi().isEmpty()) {
             if (platformManaged) {
                 metrics.countMinorGate("platform_managed");
@@ -382,8 +392,9 @@ public final class PaymentService {
         }
         LocalDate birth = AntiAddictionRules.birthDate(status.pi());
         if (birth == null) {
+            // 对齐 Go minor.go:80-85：已实名但 pi 出生日期损坏属服务异常，回 BUSY 而非误导玩家重复实名。
             metrics.countMinorGate("bad_pi");
-            return new GateResult(PaymentTips.REAL_NAME_REQUIRED, rec);
+            return new GateResult(PaymentTips.BUSY, rec);
         }
         int age = AntiAddictionRules.ageAt(birth, now);
         AntiAddictionRules.SpendLimit limit = AntiAddictionRules.spendLimitAt(age);

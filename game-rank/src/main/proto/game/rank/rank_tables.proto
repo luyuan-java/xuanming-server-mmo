@@ -114,3 +114,12 @@ message RankMutationRow {
   uint64 request_id = 4;
   uint64 created_ms = 5;
 }
+// 摘榜墓碑：与删分同事务写入，防止迟到或后续分数批次把已摘除作弊实体重新带回榜上。
+message RankRemovedEntryRow {
+  option (proto2mysql.table_name) = "rank_removed_entry";
+  option (proto2mysql.primary_key) = "board_id,generation,entity_id";
+  uint64 board_id = 1;
+  uint64 generation = 2;
+  uint64 entity_id = 3;
+  uint64 removed_ms = 4;
+}

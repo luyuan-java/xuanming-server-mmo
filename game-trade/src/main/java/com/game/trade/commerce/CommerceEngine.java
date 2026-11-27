@@ -336,7 +336,11 @@ public final class CommerceEngine {
                         throw new Refusal(SELF);
                     if (w.getDesignatedBuyerPlayerId() != 0 && w.getDesignatedBuyerPlayerId() != me)
                         throw new Refusal(CONFLICT);
-                    if (w.getQuantityReserved() >= 32)
+                    // 对齐 Go r2-craft#1：单玩家最多尝试 3 次扣款、单挂单总上限 256，防止 0 金币恶意刷爆挂单。
+                    long actorAttempts = w.getLegsList().stream()
+                            .filter(l -> l.getPlayerId() == me && l.getRole().startsWith("buyer_debit_"))
+                            .count();
+                    if (actorAttempts >= 3 || w.getQuantityReserved() >= 256)
                         throw new Refusal(CONFLICT);
                     r.setBuyerPlayerId(me).setStatus(ESCROWING);
                     w.setBuyerIdentity(CommerceStore.roleIdentity(c, me));
@@ -353,9 +357,13 @@ public final class CommerceEngine {
                         throw new Refusal(MISSING);
                     if (r.getStatus() == CANCELLED)
                         return current;
+                    boolean marketCancellable = w.getStage().equals("market_open")
+                            && r.getStatus() == ESCROWING
+                            && Long.compareUnsigned(r.getFilledQuantity(), r.getQuantity()) < 0;
                     if (r.getKind() == 2 && List.of("confirm", "offer_escrow", "buyer_escrow").contains(w.getStage())
                         || me == r.getSellerPlayerId()
-                            && (List.of("open", "market_open").contains(w.getStage())
+                            && (w.getStage().equals("open")
+                                || marketCancellable
                                 || w.getStage().equals("lot_open") && w.getHighestBidder() == 0)) {
                         w.setCancelRequested(true);
                         r.setStatus(CANCEL_PENDING);
@@ -411,19 +419,30 @@ public final class CommerceEngine {
                     || prior.getBuyerPlayerId() != 0 && !pw.hasBuyerIdentity()))
                 throw new CorruptContract("交易合同缺少参与者原账号或归属修订");
             if (prior.getKind() != 6 && (pw.hasSellerIdentity() || pw.hasBuyerIdentity())) {
-                CommerceStore.lockAssetOwners(c, prior.getSellerPlayerId(), prior.getBuyerPlayerId());
-                if (prior.getSellerPlayerId() != 0 && pw.hasSellerIdentity()) com.game.common.player.PlayerSessionAuthority.lock(c, prior.getSellerPlayerId(),
-                    pw.getSellerIdentity().getAccount(), pw.getSellerIdentity().getOwnerRevision(), 2);
-                if (prior.getBuyerPlayerId() != 0 && pw.hasBuyerIdentity()) com.game.common.player.PlayerSessionAuthority.lock(c, prior.getBuyerPlayerId(),
-                    pw.getBuyerIdentity().getAccount(), pw.getBuyerIdentity().getOwnerRevision(), 2);
+                var owners = new java.util.HashMap<Long, TradeRoleIdentity>(2);
+                if (prior.getSellerPlayerId() != 0 && pw.hasSellerIdentity()) {
+                    owners.put(prior.getSellerPlayerId(), pw.getSellerIdentity());
+                }
+                if (prior.getBuyerPlayerId() != 0 && pw.hasBuyerIdentity()) {
+                    owners.put(prior.getBuyerPlayerId(), pw.getBuyerIdentity());
+                }
+                CommerceStore.lockAdvanceOwners(c, owners);
             }
             if (prior.getKind() == 6 && pw.getRmb().getCharacterPlayerId() == 0) {
-                if (Set.of("rmb_escrow", "rmb_return").contains(pw.getStage()))
-                    com.game.common.player.PlayerSessionAuthority.lock(c, prior.getSellerPlayerId(), pw.getRmb().getSellerAccount(),
-                        pw.getRmb().getSellerOwnerRevision(), 2);
-                if (pw.getStage().equals("rmb_deliver"))
-                    com.game.common.player.PlayerSessionAuthority.lock(c, prior.getBuyerPlayerId(), pw.getRmb().getBuyerAccount(),
-                        pw.getRmb().getBuyerOwnerRevision(), 2);
+                var rmbOwners = new java.util.HashMap<Long, TradeRoleIdentity>(2);
+                if (Set.of("rmb_escrow", "rmb_return").contains(pw.getStage())) {
+                    rmbOwners.put(prior.getSellerPlayerId(), TradeRoleIdentity.newBuilder()
+                            .setAccount(pw.getRmb().getSellerAccount())
+                            .setOwnerRevision(pw.getRmb().getSellerOwnerRevision())
+                            .build());
+                }
+                if (pw.getStage().equals("rmb_deliver")) {
+                    rmbOwners.put(prior.getBuyerPlayerId(), TradeRoleIdentity.newBuilder()
+                            .setAccount(pw.getRmb().getBuyerAccount())
+                            .setOwnerRevision(pw.getRmb().getBuyerOwnerRevision())
+                            .build());
+                }
+                CommerceStore.lockAdvanceOwners(c, rmbOwners);
             }
             var current = store.lock(c, prior.getCommerceId());
             // 原身份与点锁来自prior；新版本必须等下一轮用自身原件取锁，不能借旧观察推进。
