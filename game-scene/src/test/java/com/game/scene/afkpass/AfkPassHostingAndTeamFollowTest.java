@@ -478,8 +478,10 @@ class AfkPassHostingAndTeamFollowTest {
         world.applyTeamMembership(leader, 99L, 1L, true);
         world.applyTeamMembership(f1, 99L, 1L, false);
         world.applyTeamMembership(f2, 99L, 1L, false);
-        world.teamFollowCoordinator().tryAttach(world, f1, leader, true);
-        world.teamFollowCoordinator().tryAttach(world, f2, leader, true);
+        world.teamFollowCoordinator().setFollowIntent(world, f1, true);
+        world.teamFollowCoordinator().setFollowIntent(world, f2, true);
+        assertThat(world.teamFollowCoordinator().tryAttach(world, f1, leader, true)).isTrue();
+        assertThat(world.teamFollowCoordinator().tryAttach(world, f2, leader, true)).isTrue();
 
         // 队长走出 8 米并停稳，让 2 个随从（间距 3m / 6m）均落到各自槽位停步，再同 tick 一起起步触发合并广播 135
         Vec3 start = leader.position();

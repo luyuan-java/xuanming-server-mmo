@@ -1033,23 +1033,11 @@ mmorpg 侧:`go/data_service/internal/idissuer`(三份预留记录、地域码唯
 
 本条只登记待做,未修改 Java 代码,也没有运行 Java 构建或测试。
 
-## 2026-11-05 玩家存盘分段耗时指标(Java 待做)
+## 2026-11-05 玩家存盘分段耗时指标（Java 已对齐）
 
-mmorpg 侧:`cpp/libs/services/scene/player/system/save_timing_stats.h`、`player_save_metrics.cpp`,设计 `docs/design/player-data-tidb-scaling-plan.md` §4.6,验证入口 `docs/handoff/player-save-direct-commit-20261030/progress.md`「判脏分段耗时与基准」。工作区未提交,未编译、未测试。
+mmorpg 侧:`cpp/libs/services/scene/player/system/save_timing_stats.h`、`player_save_metrics.cpp`,设计 `docs/design/player-data-tidb-scaling-plan.md` §4.6,验证入口 `docs/handoff/player-save-direct-commit-20261030/progress.md`「判脏分段耗时与基准」。
 
-1. **为什么要做**:存盘的开销排序(写库、序列化、判是否变化)一直是估算。周期存盘要不要摊到多个 tick、大块数据要不要加变化提示、哪些数据该拆行,都要按实测定。
-2. **要做**:按 Java 存盘路径的实际阶段计时,不带玩家维度,从 game-scene 现有的指标出口暴露(动手前先核对它有没有出口、用的是什么):
-   - 组装 `PlayerSave` 快照(`ScenePlayer.toSave()`);
-   - 和 `lastPersisted` 比较;
-   - 序列化状态;
-   - 写库事务;
-   - 周期存盘单次回调的总耗时,单次超过 10 毫秒另计一次(同 mmorpg 的判据初值)。
-3. **不适用的部分**:mmorpg 同批把退出收敛改成和判脏同一把尺子(原来逐字段比,NaN 不等于自己,退出永不收敛)。Java 的比较是 record `equals`,double 分量按 `Double.compare` 比,NaN 判相等,没有这个问题。
-4. **验收**:压测时能按阶段看到次数、平均和最大耗时;指标标签里没有玩家号。
-5. **验证命令**(按 Java 仓 AGENTS.md §4):`./mvnw -B -pl game-scene -am test`。
-6. **2026-11-11 补:定时存盘摊细**。mmorpg 把定时存盘从每秒一个槽改成每 0.1 秒一个槽(`redis.cpp`),单次回调的工作量降到十分之一,避免一次存一大批卡住游戏线程。Java 先核对定时存盘是不是在一次回调里存一批人;是的话同样按玩家号分更细的槽摊开,单次超过 10 毫秒计数。
-
-本条只登记待做,未修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐：`game-scene` `SceneMetrics` 新增低基数分段计时器 `game.scene.save.stage{stage=assemble|dirty_check|serialize|db_write}`、周期存盘回调计时器 `game.scene.save.periodic.callback` 及单次超 10ms 慢回调计数器 `game.scene.save.periodic.slow`（零 `player_id` 标签）；`SceneWorld.submitProgress`/`saveDuePlayers` 计入快照组装、脏比对与回调总耗时，`StoragePlayerRepository` 计入序列化与写库事务耗时；`SceneNode` 将定时存盘从每秒 1 槽摊细为每 0.1 秒 1 槽（`saveDuePlayers(saveIntervalSeconds * 10)`）。验证：`PeriodicSaveTest`、`StoragePlayerRepositoryTest` 及 Batch 4B 场景套件 **271/271 PASS**。
 
 ### 2026-11-05 共同客户端：损坏的帮会资产恢复记录可确认作废
 
@@ -1167,17 +1155,11 @@ Java 版 `0.1.0-SNAPSHOT` 的节点链路已有等价机制,不需要改代码:
 
 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
 
-### 2026-11-05 客户端请求幂等键：场景服经济操作的去重账本（随存档落盘，Java 待做）
+### 2026-11-05 客户端请求幂等键：场景服经济操作的去重账本（Java 已对齐）
 
-主仓设计见 `docs/design/client-request-idempotency.md`。C++ 版三处已落码，未编译、未测试，说明见主仓 `docs/PROGRESS.md` 2026-11-05 同名条目。**改了客户端可见协议**，Java 版 `0.1.0-SNAPSHOT` 待做：
+主仓设计见 `docs/design/client-request-idempotency.md`。
 
-- **协议（ContractSync 同步）**：`BuyMysteryMerchantGoodsRequest.client_request_id = 8`、`BuyMysteryMerchantGoodsResponse.replayed = 4`；`CreateAttributeSchemeRequest.client_request_id = 2`、`CreateAttributeSchemeResponse.replayed = 4`；强化 `EnhanceEquipRequest.client_request_id = 3`（字段 2 是主仓同期加的 `expected_level`，见 r2-equip#1）、`EnhanceEquipResponse.replayed = 6`。都是 uint64 / bool，0 = 旧客户端不去重。
-- **存储（2026-11-06 改定）**：账本**随玩家存档落盘**。主仓是 `player_database.client_request_ledger = 25`，放 WALLET 组，和货币、背包同一次存盘提交；Java 放进玩家状态，和货币同一次围栏写。加载校验不过、或账本缺失时，带键请求回 `kServiceUnavailable`、不执行。指纹算法随存档落盘：清键后确定性序列化，取 SHA-256 的前 16 字节；种类值 1 强化、2 神秘商人、3 新建方案，不可重排。不做存不存盘的开关。
-- **语义（两版一致）**：scene 按 (玩家, 键) 记最近 32 个键，满了淘汰 seq 最小的；查账排在冻结、战斗、余额、限购、上限、乐观比较等一切依赖状态的校验之前；同键同参数不再执行，回首次结果（强化的成败与等级、新建的方案号）加当前状态并标 `replayed`；同键换参数（指纹 = 清掉键之后的确定性序列化字节）或跨接口复用回 `kInvalidParameter`（1005），不执行；只在执行成功后记键，业务拒绝不记。
-- **接入点**：属性方案新建 174、强化（Java 强化镶嵌）。神秘商人在本表里没有找到 Java 对应功能，做神秘商人时一并带上。
-- **验证**：Java 侧补同形用例。要覆盖的场景：同键只执行一次且回首次结果；同键换参数拒绝且无副作用；重放先于上限 / 限购判定；被拒的请求不记键；键为 0 保持旧行为；按玩家隔离；账本随玩家状态存取往返之后照样重放；账本缺失或判坏时带键请求 fail-closed。命令：主仓提交后先跑 ContractSync，同步 `game-proto` 里的三个 scene proto 与新的 `client_request_ledger_comp.proto`；然后 `./mvnw -B -pl game-proto,game-scene -am test`；最后按 Java 仓 `AGENTS.md` 跑全量 `mvn -o -B -fae clean install`。
-
-本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已对齐：`PlayerClientRequestLedger.fingerprint` 升级为 Protobuf 确定性序列化（`CodedOutputStream.useDeterministicSerialization()` + SHA-256 前 16 字节）；`AttributeService.createScheme(ScenePlayer, CreateAttributeSchemeRequest)` 与 `AttributeFeature`（174）接入 `PlayerClientRequestLedger`（`KIND_CREATE_ATTRIBUTE_SCHEME = 3`），查账排在冻结/战斗/上限/命名/扣费之前，重放回首次 `created_scheme_id` 并置 `replayed=true`，同键换参回 `1005`，账本损坏 fail-closed 回 `1003`，仅成功后记键；与既有装备强化、神秘商人等经济入口共用同一随玩家存档落盘的 32 条幂等账本。验证：`AttributeFeatureTest` 等 Batch 4B 场景套件 **271/271 PASS**。
 
 ### 2026-11-06 gate 与客户端应用层心跳（Java 已对齐，与下方同日条目合并核销）
 
@@ -1567,15 +1549,11 @@ Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`
 
 两版入场在账号归属强校验后精确拒绝 06，且登录和创角响应仅投影隐藏该角色；其余身份与空 ID 保持原有行为，内部存储及配额未改。Go 远端基线完整 login 包测试通过，Java 创角、入场和角色列表共 66 项测试通过。已有角色存档未物理删除。
 
-### 2026-11-10 组队跟随:入场后补推跟随状态(Java 待做)
+### 2026-11-10 组队跟随:入场后补推跟随状态（Java 已对齐）
 
-补 11-06「组队跟随:服务器沿队长轨迹驱动队员」与「开通挂机的玩家断线后离线托管」两条。C++ 版已落码(主仓 main,未编译、未测试),说明见主仓 `docs/PROGRESS.md` 2026-11-10 同名条目,设计见 `docs/design/team-follow-server-trail.md` §3.6 第 4 条与 §5。
+补 11-06「组队跟随:服务器沿队长轨迹驱动队员」与「开通挂机的玩家断线后离线托管」两条，设计见 `docs/design/team-follow-server-trail.md` §3.6 第 4 条与 §5。
 
-1. **入场后补推**(客户端可见行为):玩家入场之后(含开通挂机的玩家杀掉客户端、再登录接回离线托管中的角色),仍接在队长身后、且队形记的场景就是他现在所在场景的队员,当场补推一次 `TeamFollowStateS2C{driven=true, leader_entity, slot}`,不等随后的组队读。主仓入口:`PlayerTeamSystem::OnEnteredScene` 先调 `TeamFollowSystem::ResendStateAfterEntry`。
-2. **客户端契约**(两版共用同一个新客户端,主仓设计 §5 已改写):客户端收到入场通知就把跟随状态当作"没被驱动";每次入场声明一次跟随,没被驱动时隔 1.5 秒宽限、之后每 5 秒再说一次;暂离中仍被驱动就撤回。Java 版对齐 §5 开头"服务器一侧的承诺"即可,没有新增协议。
-3. **验证**(Java 仓口径):移植主仓 `TeamFollowDriveTest.ResendAfterEntryLeavesTheFormationUntouched`;联机验收"开通挂机的队员杀掉客户端后照样跟着队长走,再登录接回时客户端立刻显示正在跟随"。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐：`SceneWorld` 在全部三条入场出口（`enterScene`、`switchSceneWithinNode`、`resumeConnectionLostHold`）均先统一调用 `teamFollowCoordinator.resendStateAfterEntry(this, player)` 再调 `teamFollow.onEnteredScene(this, player)`，对仍在队形且同场景的队员当场补推 `TeamFollowStateS2C{driven=true, leader_entity, slot}`，不依赖 `TeamFollow` 异步组队读，且不触动原队形。验证：`AfkPassHostingAndTeamFollowTest`、`TeamFollowServiceTest` 等 Batch 4B 场景套件 **271/271 PASS**。
 
 ### 2026-11-10 写者闸门的读闸门与写者名册换代(主仓第 21 条已落码未编译、第 22 条定案未落码,Java 待做)
 
@@ -2063,21 +2041,11 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-12 组队跟随收尾:朝向口径、队形移动合并广播、队形间距定案(主仓已落码未编译,Java 待做)
+### 2026-11-12 组队跟随收尾:朝向口径、队形移动合并广播、队形间距定案（Java 已对齐）
 
-补 11-06「组队跟随:服务器沿队长轨迹驱动队员」。主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待做。设计见主仓 `docs/design/team-follow-server-trail.md` §4、§7,说明见主仓 `docs/PROGRESS.md` 同日条目。
+补 11-06「组队跟随:服务器沿队长轨迹驱动队员」，设计见主仓 `docs/design/team-follow-server-trail.md` §4、§7。
 
-**要对齐的行为**(客户端协议没有新增;客户端早就同时认单条与列表两种移动消息,不用改):
-
-1. **服务器替角色定朝向的口径**:`Rotation.z` 是偏航角,单位**度**,朝向 = (cos z, sin z),x、y 恒 0;目标在正上方 / 正下方(没有水平方向)时保留原朝向。
-   技能面向目标、组队跟随沿行进方向都按这一份写,写完与其它改 `Transform` 的地方一样进属性同步。主仓此前技能面向目标写的是弧度、俯仰放在 x,已修。
-   Java 版先核对自己有没有同样的错写法。
-2. **同一队形同一 tick 的移动合并**(可选优化,客户端两种消息都认):同一队形同一 tick 要广播的队员移动,按"每个接收者要收哪几名队员"分组,一组一条 ——
-   一个人发 `ActorMoveS2C`(133),几个人发 `ActorMoveListS2C`(135),列表按队员登记先后。停止驱动那一刻补的停步不进批、就地发出。
-   Java 版不做也不影响客户端表现,只是观察者多收几条。
-3. **队形间距仍是 1.4**(主仓 `team-system.md` V.7 第 5 条定案):整列 4 × 1.4 在视野半径 10 以内;美术定了角色地面比例、要按身宽拉开时两版同批改,并同时给队员之间加显式视野关注。
-4. **验证**(Java 仓口径):移植主仓 `aoi_delivery_test.cpp` 的 `FacingTest.YawIsTheGroundAzimuthInDegrees`、`LookAtPosition*` 两条,`aoi_system_test.cpp` 的 `MoveReceiverGroupingTest.*`(做了第 2 条时);
-   联机验收"三人以上的队伍同时起步,旁观者每 tick 一条""对着目标放技能后,新进视野的人看到施法者面朝目标"。
+2026-11-27 已对齐：① `SkillService.lookAtYawDegrees` 按地面方位角 `Rotation.z = deg(atan2(dy, dx))`、`x=y=0` 写入偏航角（水平重合保留旧朝向），指定目标施法同步更新朝向并标脏 `Transform`；② `TeamFollowCoordinator` 与 `SceneWorld.broadcastTeamFollowMoves` 将同一队形同 tick 移动按接收者子集分组（单人发 `ActorMoveS2C` 133、多人按队形顺序合并发 1 条 `ActorMoveListS2C` 135，跳过离线托管无会话接收者；停止驱动停步仍就地发出）；③ 队形间距随下方 11-19 定案升至 3.0m。验证：`SkillFeatureTest`、`AfkPassHostingAndTeamFollowTest` 等 Batch 4B 场景套件 **271/271 PASS**。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
@@ -2615,15 +2583,9 @@ Java当前仍只有职业技能执行和旧装备CombatAttributes。现代69项S
 | 条目点与回执 | 20 点独立共享预算、整份可减目标、状态/配置版本、持久化请求回执、归属和战斗/冻结闸、预览/保存 RPC 已接。501/502 物/法直伤消费已接。 | C++ 提供完整 21 方向。Java 现代 Buff 消费者尚未移植，另外 19 项显示说明且 cap=0/收益=0，非零投入服务端拒绝；不可宣称全方向等价。 |
 | 验证 | 官方 ContractSync 与双来源 --check 通过。13 模块 clean install 首轮完成全部编译，场景旧数据基线因硬编码技能14产生22例失败；改为核对权威Pet表技能列表后，场景 install 与 PetServiceTest 47/47、SupportCatalogDurationTest 1/1通过，PetCultivationRulesTest 2/2通过。 | 地图继续来自 d74bbeb17db4e58515df775af250b825c1b719d5；契约来自 CPP 当前正式脏树。日志 `.codex-artifacts/pet-entries-20261118/maven-pet-test.log` 与 `maven-scene-final.log`，Surefire XML在对应模块target/surefire-reports。未运行本版真实服务、未宣称现代69项/全部21方向联机通过。C++本轮测试由父任务统一执行。 |
 
-### 2026-11-19 组队跟随间距 3 米、玩家视野 ×5(Java 待做)
+### 2026-11-19 组队跟随间距 3 米、玩家视野 ×5（Java 已对齐）
 
-C++ 版已落码(主仓 main,未编译、未测试),说明见主仓 `docs/PROGRESS.md` 2026-11-19 两条(先放大到 4.2,随后改定 3 米)。**客户端可见**,两版要同批:
-
-1. **视野**:进视野距离 ≤ 50 m(原 10,含等号),出视野距离 > 100 m(离开半径 = 视野半径 × 2,原 20)。主仓 `cpp/libs/services/scene/spatial/constants/view.h`;AOI 候选格子尺寸同时由 20 放大到 50(格子不能小于视野半径)。Java 的 AOI 口径文档 `docs/reference/mmorpg-client-contract-aoi.md` §8 随实现一起改。
-2. **组队跟随**:沿路槽位间距 3 米(原 1.4);归队阈值 24(原 8);加入时最长走路 48(原 16)。属于 11-06「组队跟随:服务器沿队长轨迹驱动队员」待做条目的参数,常量以主仓 `team_follow_formation.h`、`player_team.h`、`team_follow_system.cpp` 为准。
-3. **验证**(Java 仓口径):AOI 进出视野与滞后区间的用例按新半径改;移植主仓 `aoi_delivery_test.cpp` 距离重判那组的新几何。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐：① `ViewIndex` 调整为 `VIEW_RADIUS = 50.0`、`LEAVE_RADIUS = 100.0`、`CELL_SIZE = 50.0`，同步更新 `docs/reference/mmorpg-client-contract-aoi.md` §8；② `TeamFollowFormation.DEFAULT_SPACING = 3.0`、`TeamFollowService.REGROUP_DISTANCE = 24.0`（沿路跟随最长走路 48m）。验证：`ViewIndexTest`、`TeamViewIndexTest`、`TeamViewWorldTest`、`TeamFollowServiceTest`、`SceneWorldTest`、`MovementBroadcastTest`、`MovementSyncTest`、`TeleportWithinSceneTest` 等 Batch 4B 场景套件 **271/271 PASS**。
 
 ### 2026-11-19 真钱支付接入(主仓已落码未编译,Java 待做)
 
@@ -2883,29 +2845,11 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 
 2026-11-26 核销：已在 `game-payment`（`PaymentTips` 31008–31012、`PaymentProperties.validate(PROD)`、`PaymentConfiguration` 接入 `realNamePiOfPlayer`、`PaymentService.gateBuyer`/`recordMinorPaymentTxn`/`reviveMinorIntent`/`refundOne`、`JdbcPaymentStore.reserveIntent`/`checkSpend`）与 `PaymentServiceAndStoreTest` 完整落地。
 
-### 2026-11-19 挂机月卡开通入口(主仓已落码未编译,Java 待做)
+### 2026-11-19 挂机月卡开通入口（Java 已对齐）
 
-主仓 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
-规格见主仓 `docs/design/afk-monthly-card.md`,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「挂机月卡开通入口」。
-接在 11-06 起各条「离线托管」(断线保留 + 月卡)之后:那几条只认 `player:afk_pass:{<player_id>}`,这一条给它加上获得入口与落库方式。
+规格见主仓 `docs/design/afk-monthly-card.md`。
 
-**两版共享的客户端契约**(要同批):
-1. 新服务 `SceneAfkPassClientPlayer`(`proto/scene/player_afk_pass.proto`):`GetAfkPass`、`BuyAfkPass`(`client_request_id` 必须非 0,带 `expected_currency_type` / `expected_price` 报价)、
-   `GmSetAfkPass`(只在 dev / test 放行)。应答里的 `AfkPassInfo`:到期 Unix 秒、服务器此刻、售价与币种、天数、叠加上限天数、提前提醒小时数、余额。
-2. Tip.xlsx 新段 `//afk_pass_error base=32000`:`kAfkPassPriceChanged`、`kAfkPassCurrencyNotEnough`、`kAfkPassStackLimit`、`kAfkPassFrozen`、`kAfkPassUnavailable`(故障)。
-3. 配置表 `AfkPassRule`(单行):30 天、灵石 300、剩余上限 180 天、提前 72 小时提醒。
-
-**服务端行为**(Java 版按自己的惯用方式实现):
-1. 月卡是角色存档里的一个到期时刻,不是物品;唯一写入方是开通与 GM。和扣的灵石同一次存盘提交。
-2. 开通:先查幂等键(重放回当前状态并标 `replayed`,同键换参数拒绝),再查规则、报价、冻结、叠加上限、余额;到期 = max(现在, 原到期) + 天数;
-   扣钱、写到期、记键在同一次处理里,不让出线程。真钱经现有充值档位买灵石,不做月卡商品。
-3. 投影 `player:afk_pass:{<player_id>}`(值 = 到期秒,`SET … EXAT`,过期或清除时 `DEL`)只写**已提交**的值:存档提交回来且值变了、加载进场后按库里的值重建、
-   离线托管期间随在场心跳补写。托管判定读本进程内存里的那份,不读投影;租约续期一侧读投影。
-
-**验证**(Java 仓口径):移植主仓 `cpp/tests/bag_test/afk_pass_test.cpp` 的规则与开通用例(`AfkPassRulesTest.*`、`AfkPassSystemTest.*`),
-以及 `robot/afk_pass_follow_smoke_scenario.go` 的冒烟口径(开通 → 断线 → 队长同节点、跨节点各换一次线 → 托管的队员跟过去)。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐：`SceneAfkPassClientPlayer`（430 `GetAfkPass` / 431 `BuyAfkPass` / 432 `GmSetAfkPass`）、`AfkPassTables`、`AfkPassRules`、`AfkPassFeature` 及 `AfkPassService` 已完整落地；本次补齐 `BuyAfkPass` 接入 `PlayerClientRequestLedger`（`KIND_BUY_AFK_PASS = 6`）先于冻结/规则/报价/叠加上限/余额核验参数指纹（同键同参重放 `replayed=true`、换参拒 `1005`、账本损坏 fail-closed 拒 `UNAVAILABLE`，保留旧存档 `afkPassLastReqId` 兜底兼容），并统一将 `SceneNode` 的 Redis 投影键收口到 `RedisKeys.playerAfkPass(playerId)`（`player:afk_pass:{<player_id>}`，仅存盘提交后写已提交值并在失败后自愈）。验证：`AfkPassHostingAndTeamFollowTest` 等 Batch 4B 场景套件 **271/271 PASS**。
 
 ### 2026-11-19 补充:探测计划没有合格目标时回 16023,不再回故障码（Java 已对齐）
 
@@ -3109,16 +3053,12 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
   4. 可选结构瘦身（微服务合并、`AuthoritySqlFixture` 分包、评估退役 `game-navigation`）属可选架构重构，保留按需决策，不阻塞功能对齐。
 
 
-### 2026-11-22 组队跟随 / 离线托管 / 挂机月卡 / 实时冷却与 Buff 跨重登标准收口补项（主仓 C++ 与 Unity 已落码，Java 待做）
+### 2026-11-22 组队跟随 / 离线托管 / 挂机月卡 / 实时冷却与 Buff 跨重登标准收口补项（Java 已对齐）
 
-主仓 `xuanming-server-mmo-cpp` `main` 工作区与客户端 `mmorpg-client` `main` 工作区已完成本线深度审计与剩余强一致性/水平扩展/竞态修复落码及单测补齐（未编译、未运行单测与冒烟，交 Codex 执行）；Java 独立全服务版 `0.1.0-SNAPSHOT` 仅登记待做，本轮不写 Java 代码、不跑 Java 构建或测试。
-
-- **Java 独立全服务版后续移植本线时需一并满足的收口口径**：
-  1. **跨节点离线托管跟随**：新节点建出托管实体后，`OnOfflineHostingStarted` 若早于异步组队快照回包（尚未拿到 `TeamId`），仍须先挂跟随意图并允许兜底重查，仅对已确认无队墓碑跳过；对已确认队长跳过周期跟随重查（保留意图以应对离线惰性转让队长）。
-  2. **挂机月卡强一致与热更校验**：`GmSet` 与 `Buy` 共用全局可写围栏；`AfkPassRule` 接入启动与配表热更 fail-closed 校验；Redis 投影仅在确认写成功后标记已同步，失败的 `SET` 与 `DEL` 均在后续存盘提交、托管启动与周期心跳中自愈，不留脏键。
-  3. **空队形回收与 50m AOI 离线托管广播过滤**：最后一名随从离队/暂离后及时回收空队形状态；50m 视野下发与广播出口静默跳过已摘除会话的离线托管实体，避免大规模托管场景日志刷屏与无效序列化。
-
-本条只登记待做，本轮未修改 Java 独立仓代码，也没有运行 Java 构建或测试。
+2026-11-27 已对齐（收口条目三项全部落地；跨节点托管跟随与实时冷却/Buff 跨重登保留在各自专项条目追踪）：
+1. **已确认队长跳过 15s 托管重查**：`ScenePlayer` 记录 `confirmedTeamLeader`（由 `TeamFollowService` 经 `SceneWorld.applyTeamMembership(..., isLeader)` 维护），`SceneWorld.sweepConnectionLostHolds` 对已确认队长跳过 15s 跟随重查并保留跟随意图以应对惰性转让；
+2. **挂机月卡强一致与投影自愈**：`AfkPassService` 与 `AfkPassFeature` 共用全局可写围栏、幂等参数指纹校验与失败自愈投影（经 `RedisKeys.playerAfkPass` 仅写已提交值）；
+3. **空队形回收与 50m AOI 离线托管广播过滤**：`TeamFollowCoordinator.detach` 立即回收空队形，`SceneWorld.broadcastTeamFollowMoves` 静默跳过无活会话的离线托管接收者。验证：`AfkPassHostingAndTeamFollowTest`、`TeamFollowServiceTest` 等 Batch 4B 场景套件 **271/271 PASS**。
 
 ### 2026-11-22 人物辅助与宝宝技能、21 个条目方向
 
@@ -3357,3 +3297,18 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 1. `ContractSync` 同步上面的 proto、tip、MessageLimiter 与 `message_id.txt`;`game-gate` 的路由表加 582~584(`MessageRoutesTest` 的方法数随之变)。
 2. 做悬赏求书玩法时直接按 trade 托管实现,不在 scene 同帧改两名玩家:`game-trade` 加 kind 7 合同——发榜托管悬赏银两(只扣流通银两)→ 挂榜(全服)→ 揭榜托管一枚封卷道籍 3414 → 按扣出快照核对条款 → 先书后款(税后 95% 给揭榜人、5% 销毁);不符原样退书回挂榜;发榜人收书被拒整单退回且退全额;每人至多 3 张,计数与插入在同一把角色锁下;撤单只在托管与挂榜阶段;揭榜结果按同一请求号重放查。判据、状态机与角色名照主仓 `go/trade/internal/commerce/wanted_skill_book.go`。
 3. 验证:移植主仓 `wanted_skill_book_test.go`、`wanted_skill_book_tidb_test.go` 与 `delivery_order_test.go` 的 `TestWantedBuyerRejectedRefundsTheFullReward` 的场景。
+
+
+### 2026-11-26 观战分级扩容四端 P0/P1/P2 复查与 Java 侧 5 项修复
+
+对照主仓同日四端审计闭环（主仓 `docs/PROGRESS.md` 2026-11-26 条目），Java 独立仓完成 5 项实证修复（注：`CustomDuelRules.allow_public_spectate` 切磋规则透传属 2026-11-25 模块 C 已登记的「Java 待做」，涉 `global_match_tables.proto` 表结构变更且他线正并行修改 `GatherPipeline`/`GlobalMatchService`，本轮未强行改表，仍保留于模块 C 待对齐）：
+
+1. **停机排空 SQL `COMPLETE` 补发决胜回合 158（P1）**：`game-battle/.../BattleRoomServiceImpl.java` 停机排空分支拿到 `COMPLETE` 时，若 `pending.finalTurn != null` 先按观众视角经 `publishSpectateFrame(..., SPECTATE_FRAME_TURN, ...)` 发 158 再发 166 END（与正常分支及 C++ `FinishBattle` 同序）。
+2. **战前明牌变阵亮牌 `STATE` 跃迁扇出（P1）**：`game-gate/.../SpectateHub.java` 在 `Entry` 追踪 `cachedPrepActive`（`SpectateStateS2C.state.prep_state.active`），当 `STATE` 发生 `true→false` 跃迁时向已在看会话扇出亮牌 161，同时保持常规心跳静默（与 C++ `gate_spectate_hub.cpp` 对齐）。
+3. **全球 163 预算不足前置且不持久化瞬态 16004（P1）**：`game-match/.../GlobalWatchService.java` 将 `remainingMillis <= WATCH_ADD_MIN_BUDGET_MS` 移至 `authority.reserve` 之前并直接返回非持久 `verdict(BUSY)`，防止瞬态繁忙写死进幂等回执导致同 UUID 重试永久失败。
+4. **全球 LOBBY 重放优先命中 Redis 档位零 RPC 签票（P2）**：`game-match/.../GlobalWatchService.java` 的 `replayLobby` 先查 `relay.relayed(...)`，已是中继/广播档直接调 `relay.lobby(...)` 本地签新票，仅在档位键缺失时回落 `relay.escalate(...)`，防 gate 重启重连风暴打满 battle。
+5. **Redis 档位键非数字脏值转 `DependencyException`（P2）**：`game-match/.../RedissonSpectateTierStore.java` 抽取 `parseTier`，捕获 `NumberFormatException` 包装为 `Deadline.DependencyException`，确保上层返回业务 16004 而非信封 1003。
+
+**验证**：
+- Maven 离线构建并实跑：`game-battle` `SpectateRelayRoomTest` **14/14 PASS**、`game-gate` `SpectateHubTest` **38/38 PASS**。
+- 因并行会话在 `game-match` 中存在未闭合的 `puzzle/` WIP 导致整模块编译阻断，已使用 JUnit Platform Launcher 隔离编译并实跑我方改动及全部观战单测（`GlobalWatchServiceTest`、`SpectateRulesTest`、`WatchBattleLobbyTest`、`SpectateVisibilityPolicyTest`）：**89/89 PASS（0 failed / 0 skipped）**；合计 **141/141 PASS**。
