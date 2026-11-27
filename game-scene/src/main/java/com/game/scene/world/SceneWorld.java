@@ -3294,12 +3294,97 @@ public final class SceneWorld {
         return applyTeamMembership(player, teamId, epoch, false);
     }
 
+    private int defaultMainCityConfigId;
+
+    public SceneWorld withDefaultMainCityConfigId(int configId) {
+        this.defaultMainCityConfigId = Math.max(0, configId);
+        return this;
+    }
+
+    /** 离线托管角色离队/被踢/解散时按偏好自动回到默认主城安全区（战中延迟至战斗解冻后生效）。 */
+    public boolean tryAutoReturnHostedPlayerToMainCity(ScenePlayer player) {
+        if (player == null || playerById(player.playerId()) != player) {
+            return false;
+        }
+        if (!player.hostedRecap().getAutoReturnCityOnTeamEnd()) {
+            player.setPendingAutoReturnCity(false);
+            return false;
+        }
+        if (player.session() != null) {
+            player.setPendingAutoReturnCity(false);
+            return false;
+        }
+        ConnectionLostHold.State hold = player.connectionLostHold();
+        long nowMs = clock.epochMillis();
+        long nowSec = Math.floorDiv(nowMs, 1000L);
+        if (hold == null || !ConnectionLostHold.isHosting(hold.hostingStarted(), hold.afkPass(),
+                hold.afkPassExpiresAtSec(), nowSec, player.minorPlayDeadlineMs(), nowMs)) {
+            player.setPendingAutoReturnCity(false);
+            return false;
+        }
+        if (player.inBattle()) {
+            player.setPendingAutoReturnCity(true);
+            log.info("[PlayerTeam] metric=hosted_auto_return_city_deferred reason=in_battle player_id={}",
+                    Long.toUnsignedString(player.playerId()));
+            return false;
+        }
+        if (player.frozen() || switchInFlight(player)) {
+            return false;
+        }
+        int targetConfId = resolveDefaultMainCityConfigId();
+        if (targetConfId == 0 || player.scene() == null || player.scene().configId() == targetConfId) {
+            player.setPendingAutoReturnCity(false);
+            return false;
+        }
+        player.setPendingAutoReturnCity(false);
+        for (Scene candidate : scenes.values()) {
+            if (!candidate.draining() && candidate.configId() == targetConfId) {
+                switchScene(player, candidate);
+                log.info("[PlayerTeam] metric=hosted_auto_return_city mode=local player_id={} target_scene_conf_id={}",
+                        Long.toUnsignedString(player.playerId()), targetConfId);
+                return true;
+            }
+        }
+        if (crossNode.enabled() && hostedPlacementController.hasDispatcher()) {
+            Scene source = player.scene();
+            PlayerSwitch sw = PlayerSwitch.teamFollow(++switchTokens, 0L, targetConfId,
+                    clock.nanoTime() + crossNode.resolveTimeout().toNanos() + RESOLVE_SLOT_GRACE_NANOS);
+            player.setSwitching(sw);
+            crossNode.targets().select(player.playerId(), source.sceneId(),
+                    new RemoteSwitchTargets.Request(0L, targetConfId, 0, nodeEvacuating(), sw.reason(), false),
+                    selection -> onSwitchTargetSelected(player, source, sw, selection));
+            log.info("[PlayerTeam] metric=hosted_auto_return_city mode=cross_node player_id={} target_scene_conf_id={}",
+                    Long.toUnsignedString(player.playerId()), targetConfId);
+            return true;
+        }
+        return false;
+    }
+
+    private int resolveDefaultMainCityConfigId() {
+        if (defaultMainCityConfigId != 0) {
+            return defaultMainCityConfigId;
+        }
+        int best = 0;
+        for (Scene scene : scenes.values()) {
+            if (!scene.draining() && scene.configId() > 0 && (best == 0 || scene.configId() < best)) {
+                best = scene.configId();
+            }
+        }
+        return best;
+    }
+
     public boolean applyTeamMembership(ScenePlayer player, long teamId, long epoch, boolean isLeader) {
         if (stepping) throw new IllegalStateException("场景帧内不能刷新组队关系");
+        long oldTeamId = player.teamId();
         if (playerById(player.playerId()) != player || !player.applyTeamMembership(teamId, epoch, isLeader)) return false;
         ViewChanges changed = new ViewChanges();
         player.scene().refreshTeamView(player, changed);
         emitViewChanges(changed);
+        if (oldTeamId != 0 && teamId == 0) {
+            tryAutoReturnHostedPlayerToMainCity(player);
+        } else if (teamId != 0) {
+            player.setPendingAutoReturnCity(false);
+        }
         return true;
     }
 
@@ -4395,6 +4480,7 @@ public final class SceneWorld {
                 && nowSec + ConnectionLostHold.HOSTING_EXIT_LEAD_SECONDS < hold.afkPassExpiresAtSec()
                 && (player.minorPlayDeadlineMs() <= 0L || nowMs < player.minorPlayDeadlineMs())) {
             hold.markHostingStarted();
+            com.game.scene.afkpass.AfkPassService.onHostingStarted(this, player, nowSec);
             recordHostedPresenceAndHoming(player, hold, nowSec);
             // 2026-11-22 收口：即使尚未拿到 TeamId 快照，也先挂跟随意图并触发兜底检查；仅已确认无队跳过
             if (!player.teamMembershipKnown() || player.teamId() != 0) {
@@ -4459,6 +4545,9 @@ public final class SceneWorld {
         }
         player.resumeConnectionLostHold(newSession);
         player.setHostedPlacement(false);
+        player.setPendingAutoReturnCity(false);
+        com.game.scene.afkpass.AfkPassService.onHostingEnded(
+                this, player, Math.floorDiv(clock.epochMillis(), 1000L), true);
         player.markActive(frame);
         playersBySession.put(newSession, player);
         Scene scene = player.scene();
@@ -4510,6 +4599,7 @@ public final class SceneWorld {
                         minorDeadlineMs, nowMs);
             }
             if (verdict == ConnectionLostHold.HoldVerdict.EXIT) {
+                com.game.scene.afkpass.AfkPassService.onHostingEnded(this, player, nowSec, false);
                 hostedPlacementController.homingSink().clearPresence(player.playerId());
                 removePlayer(player, true);
                 locations.disconnected(player);

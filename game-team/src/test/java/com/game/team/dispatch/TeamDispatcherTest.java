@@ -159,9 +159,9 @@ class TeamDispatcherTest {
     private static final ByteString BAD_BODY = ByteString.copyFrom(new byte[] {(byte) 0xFF, 0x01});
 
     @Test
-    void 接管13个C2S与3个推送占位_号来自契约() {
+    void 接管15个C2S与3个推送占位_号来自契约() {
         TeamDispatcher d = dispatcher(Mode.THROW);
-        assertThat(d.routedMessageIds()).hasSize(13)
+        assertThat(d.routedMessageIds()).hasSize(15)
                 .containsExactlyInAnyOrderElementsOf(TeamMethods.REQUESTS.stream().map(TeamDispatcherTest::id).toList());
         assertThat(d.pushMessageIds()).containsExactlyInAnyOrder(id("NotifyTeamSnapshot"), id("NotifyTeamInvite"),
                 id("NotifyTeamEvent"));

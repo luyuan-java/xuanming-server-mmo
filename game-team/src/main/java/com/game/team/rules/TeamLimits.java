@@ -31,6 +31,9 @@ public final class TeamLimits {
      */
     public static final int MAX_PENDING_INVITES_PER_INVITEE = com.game.common.team.TeamPolicyContract.MAX_PENDING_INVITES_PER_INVITEE;
 
+    /** 队长一键召集全队归队的团队级冷却（15 秒，SQL 时钟毫秒，多副本一致）。 */
+    public static final long RECALL_COOLDOWN_MS = 15_000L;
+
     private TeamLimits() {
     }
 }

@@ -91,7 +91,8 @@ public final class TeamViews {
                 .setMatchState(TeamRules.matchLockActive(live, nowMs)
                         ? TeamMatchState.TEAM_MATCH_STATE_STARTING : TeamMatchState.TEAM_MATCH_STATE_IDLE)
                 .setApplicationCount(live.getApplicationsCount())
-                .setServerTimeMs(nowMs);
+                .setServerTimeMs(nowMs)
+                .setFollowFormationValue(live.getFollowFormation());
         // join_seq 升序；客户端仍按 join_seq 字段排序，不依赖下标
         int ruleVersion = 0;
         for (long pid : TeamRules.memberIds(live)) {
@@ -159,6 +160,7 @@ public final class TeamViews {
                 .setGender(d.gender())
                 .setIsLeader(playerId == leader)
                 .setIsOnline(d.online())
+                .setIsHosted(!d.online() && d.hosted())
                 .setInBattle(d.inBattle())
                 .setZoneId(zone)
                 .setJoinSeq(joinSeq)

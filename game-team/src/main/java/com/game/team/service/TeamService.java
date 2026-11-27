@@ -17,7 +17,9 @@ import com.game.proto.team.KickMemberRequest;
 import com.game.proto.team.LeaveTeamRequest;
 import com.game.proto.team.ListMyInvitesRequest;
 import com.game.proto.team.ListMyInvitesResponse;
+import com.game.proto.team.RecallTeamMembersRequest;
 import com.game.proto.team.RespondInviteRequest;
+import com.game.proto.team.SetTeamFormationRequest;
 import com.game.proto.team.StartTeamMatchRequest;
 import com.game.proto.team.TeamChangeReason;
 import com.game.proto.team.TeamIncomingInviteView;
@@ -196,6 +198,8 @@ public final class TeamService {
     public TeamResponse transferLeader(SessionContext a,TransferLeaderRequest q,Deadline d){return originalCall(a,TeamMethods.TRANSFER_LEADER,q,d,s->s.transferLeader(a.getPlayerId(),q,d));}
     public TeamResponse disbandTeam(SessionContext a,DisbandTeamRequest q,Deadline d){return originalCall(a,TeamMethods.DISBAND_TEAM,q,d,s->s.disbandTeam(a.getPlayerId(),q,d));}
     public TeamResponse confirmRankedPreset(SessionContext a,ConfirmRankedPresetRequest q,Deadline d){return originalCall(a,TeamMethods.CONFIRM_RANKED_PRESET,q,d,s->s.confirmRankedPreset(a.getPlayerId(),q,d));}
+    public TeamResponse setTeamFormation(SessionContext a,SetTeamFormationRequest q,Deadline d){return originalCall(a,TeamMethods.SET_TEAM_FORMATION,q,d,s->s.setTeamFormation(a.getPlayerId(),q,d));}
+    public TeamResponse recallTeamMembers(SessionContext a,RecallTeamMembersRequest q,Deadline d){return originalCall(a,TeamMethods.RECALL_TEAM_MEMBERS,q,d,s->s.recallTeamMembers(a.getPlayerId(),q,d));}
     public ListMyInvitesResponse listMyInvites(SessionContext a,ListMyInvitesRequest q,Deadline d){
         try{return forActor(a,TeamMethods.LIST_MY_INVITES,q).listMyInvites(a.getPlayerId(),q,d);}
         catch(SecurityException|DependencyException invalid){return ListMyInvitesResponse.newBuilder().setErrorMessage(tipOf(TeamTips.INTERNAL,0)).build();}
@@ -450,6 +454,24 @@ public final class TeamService {
         return runMutate(caller, Bind.caller(caller, request.getExpectedTeamId()),
                 Op.confirmRankedPreset(caller, request.getCharacterPresetId(), request.getPetPresetId(), request.getRuleVersion()),
                 MutateSpec.of(TeamMethods.CONFIRM_RANKED_PRESET), deadline).response();
+    }
+
+    /** SetTeamFormation（524）：队长切换跑图跟随阵型样式（长蛇/雁行/五行），广播 FORMATION_CHANGED 并刷新全员场景跟随队形。 */
+    public TeamResponse setTeamFormation(long caller, SetTeamFormationRequest request, Deadline deadline) {
+        int style = request.getFormationValue();
+        if (!TeamRules.isValidFollowFormation(style)) {
+            return respond(caller, com.game.table.CommonErrorTip.common_error.kInvalidParameter_VALUE, 0, deadline);
+        }
+        return runMutate(caller, Bind.caller(caller, request.getExpectedTeamId()),
+                Op.setFormation(caller, style),
+                MutateSpec.of(TeamMethods.SET_TEAM_FORMATION), deadline).response();
+    }
+
+    /** RecallTeamMembers（525）：队长一键召集全队归队（15 秒团队级 SQL 时钟冷却），向在线非队长队员推 LEADER_RECALL。 */
+    public TeamResponse recallTeamMembers(long caller, RecallTeamMembersRequest request, Deadline deadline) {
+        return runMutate(caller, Bind.caller(caller, request.getExpectedTeamId()),
+                Op.recallMembers(caller),
+                MutateSpec.of(TeamMethods.RECALL_TEAM_MEMBERS), deadline).response();
     }
 
     /**

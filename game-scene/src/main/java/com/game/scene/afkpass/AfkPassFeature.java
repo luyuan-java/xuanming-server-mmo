@@ -1,12 +1,14 @@
 package com.game.scene.afkpass;
 
 import com.game.contract.MessageIdRegistry;
+import com.game.proto.AckHostedRecapRequest;
 import com.game.proto.AttributePanelChangedS2C;
 import com.game.proto.BuyAfkPassRequest;
 import com.game.proto.BuyAfkPassResponse;
 import com.game.proto.GetAfkPassRequest;
 import com.game.proto.GmSetAfkPassRequest;
 import com.game.proto.GmSetAfkPassResponse;
+import com.game.proto.SetAfkPassSettingsRequest;
 import com.game.scene.attribute.AttributeService;
 import com.game.scene.bag.BagFeature;
 import com.game.scene.world.BattlePolicy;
@@ -71,5 +73,9 @@ public final class AfkPassFeature implements SceneFeature {
                     }
                     call.reply(resp);
                 });
+        registrar.on(SERVICE, "SetAfkPassSettings", SetAfkPassSettingsRequest.class, FreezePolicy.GATED, BattlePolicy.ALLOW,
+                (call, req) -> call.reply(service.setSettings(call.world(), call.player(), req)));
+        registrar.on(SERVICE, "AckHostedRecap", AckHostedRecapRequest.class, FreezePolicy.GATED, BattlePolicy.ALLOW,
+                (call, req) -> call.reply(service.ackHostedRecap(call.world(), call.player(), req)));
     }
 }

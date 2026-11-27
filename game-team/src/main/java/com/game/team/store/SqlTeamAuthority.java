@@ -131,7 +131,7 @@ final class SqlTeamAuthority {
         for(int i=0;i<rec.getInvitesCount();i++){var inv=rec.getInvites(i);if(before==null||TeamRules.findInvite(before,inv.getInviteeId())==null||decision.invitedPlayer()==inv.getInviteeId()){var o=owners.get(inv.getInviteeId());rec.setInvites(i,inv.toBuilder().setOwnerAccount(o.account()).setOwnerRevision(o.revision()).setConsentOriginal(consent(inv.getInviteeId(),inv.getInviterId(),inv.getInviteeId(),owners)));}}
         return withRecord(decision,rec.build());
     }
-    private static Decision withRecord(Decision d,TeamRecord rec){return new Decision(d.code(),d.param(),d.changed(),rec,d.joined(),d.kept(),d.left(),d.invitesAdded(),d.invitesRemoved(),d.reason(),d.actor(),d.leaderOfflineTransferred(),d.disbanded(),d.revokedInvitees(),d.rejectedApplicant(),d.invitedPlayer());}
+    private static Decision withRecord(Decision d,TeamRecord rec){return new Decision(d.code(),d.param(),d.changed(),rec,d.joined(),d.kept(),d.left(),d.invitesAdded(),d.invitesRemoved(),d.reason(),d.actor(),d.leaderOfflineTransferred(),d.disbanded(),d.revokedInvitees(),d.rejectedApplicant(),d.invitedPlayer(),d.recallRecipients());}
     private TeamActionRow action(AuthorityJdbc.Session c,boolean lock)throws SQLException{
         if(requestId.isEmpty())return null;
         var result=c.one("SELECT method,request_digest,owner_account,owner_revision,result_proto,response_proto FROM team_action WHERE player_id=? AND request_id=?"+(lock?" FOR UPDATE":""),r->TeamActionRow.newBuilder().setPlayerId(actor.getPlayerId()).setRequestId(requestId).setMethod(r.getString(1)).setRequestDigest(ByteString.copyFrom(r.getBytes(2))).setOwnerAccount(r.getString(3)).setOwnerRevision(r.getLong(4)).setResultProto(ByteString.copyFrom(r.getBytes(5))).setResponseProto(ByteString.copyFrom(r.getBytes(6))).build(),AuthorityJdbc.u64(actor.getPlayerId()),requestId);
@@ -369,7 +369,7 @@ final class SqlTeamAuthority {
     private static TeamMutationReceipt encode(MutateResult r){
         var s=r.snapshot();var d=r.decision();var b=TeamMutationReceipt.newBuilder().setOutcome(r.outcome().ordinal()).setCode(r.code()).setParam(r.param());
         if(s!=null){b.setTeamId(s.teamId()).setVersion(r.commit()==null?s.version():r.commit().version()).setCallerTeamId(s.playerTeamId()).setCallerEpoch(s.playerEpoch()).setNowMs(s.nowMs());if(s.record()!=null)b.setBeforeProto(s.record().toByteString());}
-        if(d.record()!=null)b.setAfterProto(d.record().toByteString());b.addAllJoined(d.joined()).addAllKept(d.kept()).addAllLeft(d.left()).setReason(d.reason().getNumber()).setActor(d.actor()).setLeaderTransferred(d.leaderOfflineTransferred()).setDisbanded(d.disbanded()).addAllRevokedInvitees(d.revokedInvitees()).setRejectedApplicant(d.rejectedApplicant()).setInvitedPlayer(d.invitedPlayer());
+        if(d.record()!=null)b.setAfterProto(d.record().toByteString());b.addAllJoined(d.joined()).addAllKept(d.kept()).addAllLeft(d.left()).setReason(d.reason().getNumber()).setActor(d.actor()).setLeaderTransferred(d.leaderOfflineTransferred()).setDisbanded(d.disbanded()).addAllRevokedInvitees(d.revokedInvitees()).setRejectedApplicant(d.rejectedApplicant()).setInvitedPlayer(d.invitedPlayer()).addAllRecallRecipients(d.recallRecipients());
         if(r.commit()!=null)r.commit().indexes().forEach((p,i)->b.addIndexes(TeamMemberAuthorityRow.newBuilder().setPlayerId(p).setTeamId(i.teamId()).setEpoch(i.epoch())));return b.build();
     }
     private MutateResult decode(ByteString raw)throws SQLException{try{
@@ -377,7 +377,7 @@ final class SqlTeamAuthority {
         TeamRecord before=parse(r.getBeforeProto().toByteArray()),after=parse(r.getAfterProto().toByteArray());
         var snap=new Snapshot(actor.getPlayerId(),r.getCallerTeamId(),r.getCallerEpoch(),r.getTeamId(),r.getVersion(),before,Long.MAX_VALUE,r.getNowMs());
         var reason=TeamChangeReason.forNumber(r.getReason());if(reason==null)throw new SQLException("组队回执原因未知");
-        var decision=new Decision(r.getCode(),r.getParam(),outcome==Outcome.COMMITTED,after,r.getJoinedList(),r.getKeptList(),r.getLeftList(),List.of(),List.of(),reason,r.getActor(),r.getLeaderTransferred(),r.getDisbanded(),r.getRevokedInviteesList(),r.getRejectedApplicant(),r.getInvitedPlayer());
+        var decision=new Decision(r.getCode(),r.getParam(),outcome==Outcome.COMMITTED,after,r.getJoinedList(),r.getKeptList(),r.getLeftList(),List.of(),List.of(),reason,r.getActor(),r.getLeaderTransferred(),r.getDisbanded(),r.getRevokedInviteesList(),r.getRejectedApplicant(),r.getInvitedPlayer(),r.getRecallRecipientsList());
         Map<Long,IndexEntry> indexes=new LinkedHashMap<>();for(var i:r.getIndexesList())indexes.put(i.getPlayerId(),new IndexEntry(i.getTeamId(),i.getEpoch()));
         return result(outcome,r.getCode(),r.getParam(),snap,decision,outcome==Outcome.COMMITTED?new CommitResult(r.getTeamId(),r.getVersion(),decision,Map.copyOf(indexes),r.getNowMs()):null);
     }catch(com.google.protobuf.InvalidProtocolBufferException e){throw new SQLException("组队原请求回执损坏",e);}}

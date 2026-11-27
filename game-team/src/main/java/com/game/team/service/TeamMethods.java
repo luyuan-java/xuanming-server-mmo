@@ -26,16 +26,18 @@ public final class TeamMethods {
     public static final String DISBAND_TEAM = "DisbandTeam";
     public static final String START_TEAM_MATCH = "StartTeamMatch";
     public static final String CONFIRM_RANKED_PRESET = "ConfirmRankedPreset";
+    public static final String SET_TEAM_FORMATION = "SetTeamFormation";
+    public static final String RECALL_TEAM_MEMBERS = "RecallTeamMembers";
 
     /** S2C 推送占位（服务端推送借 rpc 声明拿消息号；客户端上行时空操作，基线 server.go:163-175）。 */
     public static final String NOTIFY_TEAM_SNAPSHOT = "NotifyTeamSnapshot";
     public static final String NOTIFY_TEAM_INVITE = "NotifyTeamInvite";
     public static final String NOTIFY_TEAM_EVENT = "NotifyTeamEvent";
 
-    /** 13 个 C2S 方法（team.proto 的顺序）。 */
+    /** 15 个 C2S 方法（team.proto 的顺序）。 */
     public static final List<String> REQUESTS = List.of(CREATE_TEAM, GET_MY_TEAM, APPLY_JOIN_TEAM, HANDLE_APPLICATION,
             INVITE_TO_TEAM, RESPOND_INVITE, LIST_MY_INVITES, LEAVE_TEAM, KICK_MEMBER, TRANSFER_LEADER, DISBAND_TEAM,
-            START_TEAM_MATCH, CONFIRM_RANKED_PRESET);
+            START_TEAM_MATCH, CONFIRM_RANKED_PRESET, SET_TEAM_FORMATION, RECALL_TEAM_MEMBERS);
 
     /** 3 个推送占位（team.proto:38-40）。 */
     public static final List<String> PUSHES = List.of(NOTIFY_TEAM_SNAPSHOT, NOTIFY_TEAM_INVITE, NOTIFY_TEAM_EVENT);

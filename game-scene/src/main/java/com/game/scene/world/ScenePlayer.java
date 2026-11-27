@@ -141,6 +141,8 @@ public final class ScenePlayer {
     /** 待寄个人邮件出箱（名匠代打 95% 净银两分成等，与货币/背包同事务落盘）。 */
     private final com.game.scene.player.PlayerMailOutbox mailOutbox;
     private final com.game.scene.player.BattleReservationBook battleReservations;
+    private com.game.player.store.state.HostedRecapState hostedRecap;
+    private boolean pendingAutoReturnCity;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -277,6 +279,9 @@ public final class ScenePlayer {
         this.battleReservations = state.hasBattleReservations()
                 ? com.game.scene.player.BattleReservationBook.restore(state.getBattleReservations())
                 : com.game.scene.player.BattleReservationBook.empty();
+        this.hostedRecap = state.hasHostedRecap()
+                ? state.getHostedRecap()
+                : com.game.player.store.state.HostedRecapState.getDefaultInstance();
         if (state.hasSkillCooldowns()) {
             this.skillState.restoreCooldowns(state.getSkillCooldowns());
         }
@@ -694,6 +699,9 @@ public final class ScenePlayer {
         if (!battleReservations.isEmpty()) {
             state.setBattleReservations(battleReservations.toState());
         }
+        if (hostedRecap != null && !hostedRecap.equals(com.game.player.store.state.HostedRecapState.getDefaultInstance())) {
+            state.setHostedRecap(hostedRecap);
+        }
         return state.build();
     }
 
@@ -1046,6 +1054,23 @@ public final class ScenePlayer {
 
     public void setSpectateChatPref(int pref) {
         this.spectateChatPref = pref;
+    }
+
+    public com.game.player.store.state.HostedRecapState hostedRecap() {
+        return hostedRecap == null ? com.game.player.store.state.HostedRecapState.getDefaultInstance() : hostedRecap;
+    }
+
+    public void setHostedRecap(com.game.player.store.state.HostedRecapState hostedRecap) {
+        this.hostedRecap = hostedRecap == null
+                ? com.game.player.store.state.HostedRecapState.getDefaultInstance() : hostedRecap;
+    }
+
+    public boolean pendingAutoReturnCity() {
+        return pendingAutoReturnCity;
+    }
+
+    public void setPendingAutoReturnCity(boolean pending) {
+        this.pendingAutoReturnCity = pending;
     }
 
     PlayerSwitch switching() {

@@ -16,10 +16,15 @@ package com.game.team.view;
  * @param gender       性别
  */
 public record MemberDisplay(boolean online, boolean inBattle, int level, int classId, String name, String appearanceId,
-                            int gender) {
+                            int gender, boolean hosted) {
 
     /** 缺失时的零值（基线 dc[pid] 取不到时的 memberDisplay{}）。 */
-    public static final MemberDisplay NONE = new MemberDisplay(false, false, 0, 0, "", "", 0);
+    public static final MemberDisplay NONE = new MemberDisplay(false, false, 0, 0, "", "", 0, false);
+
+    public MemberDisplay(boolean online, boolean inBattle, int level, int classId, String name, String appearanceId,
+                         int gender) {
+        this(online, inBattle, level, classId, name, appearanceId, gender, false);
+    }
 
     public MemberDisplay {
         name = name == null ? "" : name;

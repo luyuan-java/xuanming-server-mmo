@@ -2,6 +2,9 @@ package com.game.scene.afkpass;
 
 import static com.game.scene.world.SceneMessageIds.tip;
 
+import com.game.player.store.state.HostedRecapState;
+import com.game.proto.AckHostedRecapRequest;
+import com.game.proto.AckHostedRecapResponse;
 import com.game.proto.AfkPassInfo;
 import com.game.proto.AfkPassPlanView;
 import com.game.proto.BuyAfkPassRequest;
@@ -9,6 +12,9 @@ import com.game.proto.BuyAfkPassResponse;
 import com.game.proto.GetAfkPassResponse;
 import com.game.proto.GmSetAfkPassRequest;
 import com.game.proto.GmSetAfkPassResponse;
+import com.game.proto.HostedRecapSummary;
+import com.game.proto.SetAfkPassSettingsRequest;
+import com.game.proto.SetAfkPassSettingsResponse;
 import com.game.scene.audit.AssetAudit;
 import com.game.scene.bag.BagFeature;
 import com.game.scene.bag.BagService;
@@ -257,6 +263,135 @@ public final class AfkPassService {
                 .build();
     }
 
+    /** 522 SetAfkPassSettings：修改离线托管偏好设置（例如离队/解散自动回主城安全区）。 */
+    public SetAfkPassSettingsResponse setSettings(SceneWorld world, ScenePlayer player, SetAfkPassSettingsRequest req) {
+        if (!isPlayerMutable(world, player)) {
+            return SetAfkPassSettingsResponse.newBuilder().setErrorMessage(tip(FROZEN)).build();
+        }
+        long nowSec = nowSeconds();
+        HostedRecapState current = player.hostedRecap();
+        boolean desired = req.getAutoReturnCityOnTeamEnd();
+        if (current.getAutoReturnCityOnTeamEnd() != desired) {
+            player.setHostedRecap(current.toBuilder().setAutoReturnCityOnTeamEnd(desired).build());
+            world.requestKeyProgressSave(player);
+            log.info("[AfkPass] metric=afk_pass_settings_updated player_id={} auto_return_city={}",
+                    Long.toUnsignedString(player.playerId()), desired ? 1 : 0);
+        }
+        return SetAfkPassSettingsResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setInfo(buildInfo(player, nowSec))
+                .build();
+    }
+
+    /** 523 AckHostedRecap：按 started_at 幂等确认已阅离线托管收获简报，仅清除简报计数器并保留偏好设置。 */
+    public AckHostedRecapResponse ackHostedRecap(SceneWorld world, ScenePlayer player, AckHostedRecapRequest req) {
+        if (!isPlayerMutable(world, player)) {
+            return AckHostedRecapResponse.newBuilder().setErrorMessage(tip(FROZEN)).build();
+        }
+        long nowSec = nowSeconds();
+        HostedRecapState current = player.hostedRecap();
+        long requestedStart = req.getStartedAt();
+        if (current.getPendingAck() && (requestedStart == 0L || current.getStartedAt() == requestedStart)) {
+            long ackedStart = current.getStartedAt();
+            player.setHostedRecap(clearRecapFields(current).build());
+            world.requestKeyProgressSave(player);
+            log.info("[AfkPass] metric=afk_hosted_recap_acked player_id={} started_at={}",
+                    Long.toUnsignedString(player.playerId()), Long.toUnsignedString(ackedStart));
+        }
+        return AckHostedRecapResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setInfo(buildInfo(player, nowSec))
+                .build();
+    }
+
+    /** 离线托管会话启动：若已有进行中会话（跨节点托管落点/排空迁移）则沿用原起点与累计，不丢历史收益。 */
+    public static void onHostingStarted(SceneWorld world, ScenePlayer player, long nowSec) {
+        if (player == null) {
+            return;
+        }
+        HostedRecapState current = player.hostedRecap();
+        if (current.getStartedAt() != 0L && current.getEndedAt() == 0L) {
+            return;
+        }
+        HostedRecapState next = clearRecapFields(current)
+                .setStartedAt(nowSec != 0L ? nowSec : 1L)
+                .build();
+        player.setHostedRecap(next);
+        if (world != null && isPlayerMutable(world, player)) {
+            world.requestKeyProgressSave(player);
+        }
+    }
+
+    /** 战斗结算同帧汇总离线托管真实入账收益（零额外免费产出；与资产同事务落盘）。 */
+    public static void recordHostedBattleSettlement(ScenePlayer player, boolean won, long expGained,
+                                                    long silverGained, int itemCount, long nowSec) {
+        if (player == null || player.connectionLostHold() == null || !player.connectionLostHold().hostingStarted()) {
+            return;
+        }
+        HostedRecapState current = player.hostedRecap();
+        HostedRecapState.Builder b = (current.getStartedAt() == 0L || current.getEndedAt() != 0L)
+                ? clearRecapFields(current).setStartedAt(nowSec != 0L ? nowSec : 1L)
+                : current.toBuilder();
+        b.setBattleCount(saturatingAddInt(b.getBattleCount(), 1));
+        if (won) {
+            b.setWinCount(saturatingAddInt(b.getWinCount(), 1));
+        }
+        if (expGained > 0L) {
+            b.setExpGained(saturatingAddLong(b.getExpGained(), expGained));
+        }
+        if (silverGained > 0L) {
+            b.setSilverGained(saturatingAddLong(b.getSilverGained(), silverGained));
+        }
+        if (itemCount > 0) {
+            b.setItemCount(saturatingAddInt(b.getItemCount(), itemCount));
+        }
+        player.setHostedRecap(b.build());
+    }
+
+    /** 离线托管结束（玩家重连接回或托管到期退出）：封账 ended_at 并置 pending_ack=true。 */
+    public static void onHostingEnded(SceneWorld world, ScenePlayer player, long nowSec, boolean requestSave) {
+        if (player == null) {
+            return;
+        }
+        HostedRecapState current = player.hostedRecap();
+        if (current.getStartedAt() == 0L || current.getEndedAt() != 0L) {
+            return;
+        }
+        long endedAt = Long.compareUnsigned(nowSec, current.getStartedAt()) >= 0 ? nowSec : current.getStartedAt();
+        player.setHostedRecap(current.toBuilder()
+                .setEndedAt(endedAt)
+                .setPendingAck(true)
+                .build());
+        if (requestSave && world != null && isPlayerMutable(world, player)) {
+            world.requestKeyProgressSave(player);
+        }
+    }
+
+    private static HostedRecapState.Builder clearRecapFields(HostedRecapState current) {
+        return current.toBuilder()
+                .setStartedAt(0L)
+                .setEndedAt(0L)
+                .setBattleCount(0)
+                .setWinCount(0)
+                .setExpGained(0L)
+                .setSilverGained(0L)
+                .setItemCount(0)
+                .setPendingAck(false);
+    }
+
+    private static int saturatingAddInt(int base, int delta) {
+        long sum = Integer.toUnsignedLong(base) + Integer.toUnsignedLong(delta);
+        return sum >= 0xFFFF_FFFFL ? 0xFFFF_FFFF : (int) sum;
+    }
+
+    private static long saturatingAddLong(long base, long delta) {
+        if (delta <= 0L) {
+            return base;
+        }
+        long sum = base + delta;
+        return Long.compareUnsigned(sum, base) < 0 ? -1L : sum;
+    }
+
     /** 进场加载完成后按已提交存档值重建 Redis 投影（纠正残留或回档脏键）。 */
     public void onPlayerLoaded(ScenePlayer player) {
         long expiresAt = player.afkPassExpiresAt();
@@ -292,15 +427,28 @@ public final class AfkPassService {
         int weeklyUsed = active
                 ? Math.min(weeklyQuota, player.appearance().lightCardTrialUsedForWeek(AfkPassRules.utc8Monday05WeekStartMs(nowSec * 1000L)))
                 : 0;
+        HostedRecapState recap = player.hostedRecap();
         AfkPassInfo.Builder b = AfkPassInfo.newBuilder()
                 .setExpiresAt(expiresAt)
                 .setServerNow(nowSec)
+                .setAutoReturnCityOnTeamEnd(recap.getAutoReturnCityOnTeamEnd())
                 .setUnlockedLoadoutSlots(AfkPassRules.unlockedLoadoutSlots(active))
                 .setStage2TradableEnabled(active)
                 .setMarketListingLimit(AfkPassRules.marketListingLimit(active))
                 .setStallDurationHours(AfkPassRules.stallDurationHours(active))
                 .setWeeklyFreeTrialQuota(weeklyQuota)
                 .setWeeklyFreeTrialUsed(weeklyUsed);
+        if (recap.getStartedAt() != 0L) {
+            b.setHostedRecap(HostedRecapSummary.newBuilder()
+                    .setStartedAt(recap.getStartedAt())
+                    .setEndedAt(recap.getEndedAt())
+                    .setBattleCount(recap.getBattleCount())
+                    .setWinCount(recap.getWinCount())
+                    .setExpGained(recap.getExpGained())
+                    .setSilverGained(recap.getSilverGained())
+                    .setItemCount(recap.getItemCount())
+                    .setPendingAck(recap.getPendingAck()));
+        }
         AfkPassTables.Rule rule = tables.rule();
         if (rule != null) {
             b.setPriceCurrencyType(rule.priceCurrencyType())

@@ -26,10 +26,36 @@ public final class TeamFollowFormation {
     /** 水平速率变化超过 15% 立即广播。 */
     public static final double SPEED_CHANGE_RATIO = 0.15;
 
+    /** 跑图跟随三阵型样式（对齐 proto TeamFollowFormationStyle 与 C++ TeamFollowStyle）。 */
+    public enum Style {
+        COLUMN(0),
+        ECHELON(1),
+        WUXING(2);
+
+        private final int protoValue;
+
+        Style(int protoValue) {
+            this.protoValue = protoValue;
+        }
+
+        public int protoValue() {
+            return protoValue;
+        }
+
+        public static Style fromProtoValue(int value) {
+            return switch (value) {
+                case 1 -> ECHELON;
+                case 2 -> WUXING;
+                default -> COLUMN;
+            };
+        }
+    }
+
     public static final class Member {
         public final long playerId;
         public final int joinSeq;
         public double cursorOdo;
+        public double lateralOffset;
         public boolean suspended;
         public boolean needsPlacement;
 
@@ -40,7 +66,10 @@ public final class TeamFollowFormation {
         }
     }
 
-    public record Step(long playerId, Vec3 position, double moved, boolean placed, boolean suspended) {
+    public record Step(long playerId, Vec3 position, Vec3 trailPosition, double moved, boolean placed, boolean suspended) {
+        public Step(long playerId, Vec3 position, double moved, boolean placed, boolean suspended) {
+            this(playerId, position, position, moved, placed, suspended);
+        }
     }
 
     public record BroadcastState(boolean moving, double vx, double vy) {
@@ -48,15 +77,29 @@ public final class TeamFollowFormation {
 
     private final TeamFollowTrail trail;
     private final double spacing;
+    private Style style;
     private final List<Member> members = new ArrayList<>();
 
     public TeamFollowFormation(Vec3 leaderStart) {
-        this(leaderStart, DEFAULT_SPACING);
+        this(leaderStart, DEFAULT_SPACING, Style.COLUMN);
     }
 
     public TeamFollowFormation(Vec3 leaderStart, double spacing) {
+        this(leaderStart, spacing, Style.COLUMN);
+    }
+
+    public TeamFollowFormation(Vec3 leaderStart, double spacing, Style style) {
         this.trail = new TeamFollowTrail(leaderStart);
         this.spacing = spacing;
+        this.style = style == null ? Style.COLUMN : style;
+    }
+
+    public Style style() {
+        return style;
+    }
+
+    public void setStyle(Style style) {
+        this.style = style == null ? Style.COLUMN : style;
     }
 
     public TeamFollowTrail trail() {
@@ -127,8 +170,76 @@ public final class TeamFollowFormation {
         }
     }
 
+    public double slotLag(int rank) {
+        return switch (style) {
+            case ECHELON -> (rank / 2 + 1) * spacing;
+            case WUXING -> switch (rank) {
+                case 0, 1 -> 0.85 * spacing;
+                case 2 -> 1.7 * spacing;
+                default -> 2.55 * spacing;
+            };
+            case COLUMN -> (rank + 1) * spacing;
+        };
+    }
+
+    public double targetLateral(int rank) {
+        return switch (style) {
+            case ECHELON -> switch (rank) {
+                case 0 -> -2.0;
+                case 1 -> 2.0;
+                case 2 -> -3.6;
+                case 3 -> 3.6;
+                default -> 0.0;
+            };
+            case WUXING -> switch (rank) {
+                case 0 -> -2.4;
+                case 1 -> 2.4;
+                default -> 0.0;
+            };
+            case COLUMN -> 0.0;
+        };
+    }
+
     public double slotOdo(int rank) {
-        return Math.max(trail.tailOdo(), trail.headOdo() - (rank + 1) * spacing);
+        return Math.max(trail.tailOdo(), trail.headOdo() - slotLag(rank));
+    }
+
+    /** 按 1.0x -> 0.5x -> 0.0x 导航校验安全横向展开，贴墙/窄道自动收拢回队长安全轨迹点。 */
+    public Vec3 resolveSlotPoint(double odo, double desiredLateral, TeamFollowTrail.WalkableCheck walkable,
+                                 double[] appliedLateralOut) {
+        Vec3 base = trail.pointAt(odo);
+        if (appliedLateralOut != null && appliedLateralOut.length > 0) {
+            appliedLateralOut[0] = 0.0;
+        }
+        if (Math.abs(desiredLateral) < 1e-4 || (trail.headOdo() - trail.tailOdo()) < TeamFollowTrail.MIN_STEP) {
+            return base;
+        }
+        double halfWindow = 0.5;
+        Vec3 back = trail.pointAt(Math.max(trail.tailOdo(), odo - halfWindow));
+        Vec3 front = trail.pointAt(Math.min(trail.headOdo(), odo + halfWindow));
+        double dx = front.x() - back.x();
+        double dy = front.y() - back.y();
+        double len = Math.hypot(dx, dy);
+        if (len < 1e-3) {
+            return base;
+        }
+        double rx = dy / len;
+        double ry = -dx / len;
+        for (double scale : new double[]{1.0, 0.5}) {
+            double offset = desiredLateral * scale;
+            Vec3 candidate = new Vec3(base.x() + rx * offset, base.y() + ry * offset, base.z());
+            if (walkable == null || walkable.walkable(base, candidate)) {
+                if (appliedLateralOut != null && appliedLateralOut.length > 0) {
+                    appliedLateralOut[0] = offset;
+                }
+                return candidate;
+            }
+        }
+        return base;
+    }
+
+    public Vec3 slotPosition(int rank, TeamFollowTrail.WalkableCheck walkable) {
+        return resolveSlotPoint(slotOdo(rank), targetLateral(rank), walkable, null);
     }
 
     public double protectOdo() {
@@ -152,7 +263,7 @@ public final class TeamFollowFormation {
     }
 
     public void trimTailForNewcomer(int rank) {
-        double trimTo = trail.headOdo() - (rank + 1) * spacing;
+        double trimTo = trail.headOdo() - slotLag(rank);
         for (Member m : members) {
             if (!m.needsPlacement) {
                 trimTo = Math.min(trimTo, m.cursorOdo);
@@ -161,13 +272,14 @@ public final class TeamFollowFormation {
         trail.trimTailTo(trimTo);
     }
 
-    /** 推进一帧：喂入队长位置、为每名随从计算步进 / 瞬移放槽 / 暂停，并修剪不再需要的旧轨迹。 */
+    /** 推进一帧：喂入队长位置、为每名随从计算步进 / 横向展开 / 瞬移放槽 / 暂停，并修剪不再需要的旧轨迹。 */
     public List<Step> tick(Vec3 leader, double deltaSeconds, TeamFollowTrail.WalkableCheck walkable) {
         double headBefore = trail.headOdo();
         trail.feed(leader, protectOdo(), walkable);
         double headAdvance = Math.max(0.0, trail.headOdo() - headBefore);
         double maxStep = Math.max(headAdvance, CATCH_UP_SPEED * Math.max(0.0, deltaSeconds));
 
+        double[] appliedOut = new double[1];
         List<Step> out = new ArrayList<>(members.size());
         for (int rank = 0; rank < members.size(); rank++) {
             Member m = members.get(rank);
@@ -176,19 +288,41 @@ public final class TeamFollowFormation {
                 if (!m.needsPlacement && slot - m.cursorOdo > MAX_LAG) {
                     m.needsPlacement = true;
                 }
-                out.add(new Step(m.playerId, trail.pointAt(m.cursorOdo), 0.0, false, true));
+                Vec3 p = trail.pointAt(m.cursorOdo);
+                out.add(new Step(m.playerId, p, p, 0.0, false, true));
                 continue;
             }
             if (m.needsPlacement || slot - m.cursorOdo > MAX_LAG) {
                 m.cursorOdo = slot;
                 m.needsPlacement = false;
-                out.add(new Step(m.playerId, trail.pointAt(slot), 0.0, true, false));
+                Vec3 trailPos = trail.pointAt(slot);
+                Vec3 resolved = resolveSlotPoint(slot, targetLateral(rank), walkable, appliedOut);
+                m.lateralOffset = appliedOut[0];
+                out.add(new Step(m.playerId, resolved, trailPos, 0.0, true, false));
                 continue;
             }
             double next = m.cursorOdo < slot ? Math.min(slot, m.cursorOdo + maxStep) : m.cursorOdo;
-            double moved = next - m.cursorOdo;
+            double odoAdvance = next - m.cursorOdo;
             m.cursorOdo = next;
-            out.add(new Step(m.playerId, trail.pointAt(next), moved, false, false));
+            Vec3 trailPos = trail.pointAt(next);
+
+            Vec3 safeTargetPoint = resolveSlotPoint(next, targetLateral(rank), walkable, appliedOut);
+            double safeTargetLateral = appliedOut[0];
+            double lateralDiff = safeTargetLateral - m.lateralOffset;
+            double desiredNextLateral = Math.abs(lateralDiff) <= maxStep
+                    ? safeTargetLateral
+                    : m.lateralOffset + Math.copySign(maxStep, lateralDiff);
+            Vec3 resolved = resolveSlotPoint(next, desiredNextLateral, walkable, appliedOut);
+            double appliedLateral = appliedOut[0];
+            if (Math.abs(appliedLateral - desiredNextLateral) > 1e-4
+                    && Math.abs(desiredNextLateral - safeTargetLateral) > 1e-4) {
+                resolved = safeTargetPoint;
+                appliedLateral = safeTargetLateral;
+            }
+            double lateralMoved = Math.abs(appliedLateral - m.lateralOffset);
+            m.lateralOffset = appliedLateral;
+            double moved = (odoAdvance > 0.0 || lateralMoved > 1e-4) ? Math.hypot(odoAdvance, lateralMoved) : 0.0;
+            out.add(new Step(m.playerId, resolved, trailPos, moved, false, false));
         }
         trail.pruneBefore(keepOdo());
         return out;

@@ -339,6 +339,14 @@ public final class TeamPushes {
                     .setTeamId(c.teamId()).setActorId(d.actor()).build();
             pushes.add(new Planned(pid, PushKind.EVENT, dc -> event));
         }
+        for (long pid : TeamViews.uniqueIds(d.recallRecipients())) {
+            if (pid == caller) {
+                continue;
+            }
+            TeamEventS2C event = TeamEventS2C.newBuilder().setType(TeamEventType.TEAM_EVENT_TYPE_LEADER_RECALL)
+                    .setTeamId(c.teamId()).setActorId(d.actor()).build();
+            pushes.add(new Planned(pid, PushKind.EVENT, dc -> event));
+        }
         return new Plan(needsDisplay, List.copyOf(pushes));
     }
 
@@ -354,7 +362,8 @@ public final class TeamPushes {
         Decision d = c.decision();
         if (!d.leaderOfflineTransferred()) {
             TeamChangeReason reason = d.reason();
-            if (reason == TeamChangeReason.TEAM_CHANGE_REASON_CREATED) {
+            if (reason == TeamChangeReason.TEAM_CHANGE_REASON_CREATED
+                    || reason == TeamChangeReason.TEAM_CHANGE_REASON_UNSPECIFIED) {
                 return List.of();
             }
             if (reason == TeamChangeReason.TEAM_CHANGE_REASON_APPLICATION_CHANGED

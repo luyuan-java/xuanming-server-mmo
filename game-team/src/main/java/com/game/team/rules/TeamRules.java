@@ -1,6 +1,8 @@
 package com.game.team.rules;
 
 import com.game.proto.team.TeamChangeReason;
+import com.game.proto.team.TeamFollowFormationStyle;
+import com.game.table.CommonErrorTip;
 import com.game.team.proto.TeamApplicationRecord;
 import com.game.team.proto.TeamInviteRecord;
 import com.game.team.proto.TeamMemberRecord;
@@ -177,6 +179,8 @@ public final class TeamRules {
             case TRANSFER_LEADER -> c.transferLeader();
             case DISBAND -> c.disband();
             case CONFIRM_RANKED_PRESET -> c.confirmRankedPreset();
+            case SET_FORMATION -> c.setFormation();
+            case RECALL_MEMBERS -> c.recallMembers();
             case null, default -> {
                 return Decision.reject(TeamTips.INTERNAL, 0);
             }
@@ -599,6 +603,7 @@ public final class TeamRules {
         private final List<Long> revoked = new ArrayList<>();
         private final List<Long> extraLeft = new ArrayList<>();
         private final List<InviteAdd> added = new ArrayList<>();
+        private final List<Long> recallRecipients = new ArrayList<>();
         private long rejected;
         private long invited;
 
@@ -938,6 +943,44 @@ public final class TeamRules {
             markOp(TeamChangeReason.TEAM_CHANGE_REASON_RANKED_PRESET_CONFIRMED, caller);
         }
 
+        /** 队长切换跑图跟随阵型样式（0=长蛇、1=雁行、2=五行）。 */
+        void setFormation() {
+            if (!isLeader(rec, op.caller())) {
+                fail(TeamTips.NOT_LEADER, 0);
+                return;
+            }
+            int style = op.followFormation();
+            if (!isValidFollowFormation(style)) {
+                fail(CommonErrorTip.common_error.kInvalidParameter_VALUE, 0);
+                return;
+            }
+            if (rec.getFollowFormation() == style) {
+                return;
+            }
+            rec.setFollowFormation(style);
+            markOp(TeamChangeReason.TEAM_CHANGE_REASON_FORMATION_CHANGED, op.caller());
+        }
+
+        /** 队长一键召集队员归队（15 秒团队级冷却，SQL 时钟毫秒）。 */
+        void recallMembers() {
+            if (!isLeader(rec, op.caller())) {
+                fail(TeamTips.NOT_LEADER, 0);
+                return;
+            }
+            long last = rec.getLastRecallAtMs();
+            if (last != 0 && Long.compareUnsigned(now, last + TeamLimits.RECALL_COOLDOWN_MS) < 0) {
+                fail(CommonErrorTip.common_error.kRateLimitExceeded_VALUE, 0);
+                return;
+            }
+            rec.setLastRecallAtMs(now);
+            for (long pid : memberIds(rec)) {
+                if (pid != op.caller()) {
+                    recallRecipients.add(pid);
+                }
+            }
+            markOp(TeamChangeReason.TEAM_CHANGE_REASON_UNSPECIFIED, op.caller());
+        }
+
         /** 名单增减时清空所有留队成员的排位确认状态，保留上次选择供客户端预填。 */
         void clearRankedConfirmations() {
             for (int i = 0; i < rec.getMembersCount(); i++) {
@@ -1021,8 +1064,13 @@ public final class TeamRules {
             TeamChangeReason outReason;
             long outActor = 0;
             if (opChanged) {
-                outReason = reason;
-                outActor = actor;
+                if (reason == TeamChangeReason.TEAM_CHANGE_REASON_UNSPECIFIED && transferred) {
+                    outReason = TeamChangeReason.TEAM_CHANGE_REASON_LEADER_OFFLINE_TRANSFERRED;
+                    outActor = rec.getLeaderId();
+                } else {
+                    outReason = reason;
+                    outActor = actor;
+                }
             } else if (transferred) {
                 outReason = TeamChangeReason.TEAM_CHANGE_REASON_LEADER_OFFLINE_TRANSFERRED;
                 outActor = rec.getLeaderId();
@@ -1080,7 +1128,15 @@ public final class TeamRules {
                 invitesRemoved.add(id);
             }
             return new Decision(TeamTips.OK, 0, true, record, joined, kept, left, added, invitesRemoved, outReason,
-                    outActor, transferred, disbanded, disbanded ? revoked : List.of(), rejected, invited);
+                    outActor, transferred, disbanded, disbanded ? revoked : List.of(), rejected, invited,
+                    recallRecipients);
         }
+    }
+
+    /** 校验跑图跟随阵型样式是否合法（0=长蛇、1=雁行、2=五行）。 */
+    public static boolean isValidFollowFormation(int style) {
+        return style == TeamFollowFormationStyle.TEAM_FOLLOW_FORMATION_COLUMN_VALUE
+                || style == TeamFollowFormationStyle.TEAM_FOLLOW_FORMATION_ECHELON_VALUE
+                || style == TeamFollowFormationStyle.TEAM_FOLLOW_FORMATION_WUXING_VALUE;
     }
 }

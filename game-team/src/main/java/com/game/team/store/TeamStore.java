@@ -673,6 +673,7 @@ public final class TeamStore {
                 .setTeamId(rec.getTeamId())
                 .setLeaderId(rec.getLeaderId())
                 .addAllMembers(TeamRules.memberIds(rec))
+                .setFollowFormation(rec.getFollowFormation())
                 .build();
     }
 

@@ -25,5 +25,9 @@ public enum OpKind {
     /** DisbandTeam：队长解散。 */
     DISBAND,
     /** ConfirmRankedPreset：队员确认排位预设。 */
-    CONFIRM_RANKED_PRESET
+    CONFIRM_RANKED_PRESET,
+    /** SetTeamFormation：队长切换跑图跟随阵型。 */
+    SET_FORMATION,
+    /** RecallTeamMembers：队长一键召集队员归队。 */
+    RECALL_MEMBERS
 }

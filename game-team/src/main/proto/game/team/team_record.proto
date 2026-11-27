@@ -28,6 +28,10 @@ message TeamRecord {
   repeated uint64 match_lock_roster = 11;
   // SQL开局原件关联；非空时match_lock_expire_at_ms仅为诊断预算，不授予换名单权限。
   string launch_request_id = 12;
+  // 跑图跟随队形样式（0=长蛇纵队、1=雁行两翼、2=五行聚阵）。
+  uint32 follow_formation = 13;
+  // 最近一次队长一键召集时刻（SQL 时钟毫秒，15 秒团队级冷却）。
+  uint64 last_recall_at_ms = 14;
 }
 
 message TeamMemberRecord {
@@ -89,4 +93,5 @@ message TeamMutationReceipt {
   repeated uint64 joined=12; repeated uint64 kept=13; repeated uint64 left=14;
   uint32 reason=15; uint64 actor=16; bool leader_transferred=17; bool disbanded=18;
   repeated uint64 revoked_invitees=19; uint64 rejected_applicant=20; uint64 invited_player=21;
+  repeated uint64 recall_recipients=22;
 }

@@ -77,6 +77,20 @@ message PlayerState {
   uint32 spectate_chat_pref = 28;
   // 战斗道具预留（按 battle_id 登记每局押住的消耗品配置号与数量，与背包同事务围栏提交，防续冻上限解冻后药白喝）。
   BattleReservationBookState battle_reservations = 29;
+  // 离线托管偏好与最近一次托管收获简报（仅汇总实际结算入账，零额外免费产出；与资产同事务围栏提交）。
+  HostedRecapState hosted_recap = 30;
+}
+
+message HostedRecapState {
+  bool auto_return_city_on_team_end = 1;
+  uint64 started_at = 2;
+  uint64 ended_at = 3;
+  uint32 battle_count = 4;
+  uint32 win_count = 5;
+  uint64 exp_gained = 6;
+  uint64 silver_gained = 7;
+  uint32 item_count = 8;
+  bool pending_ack = 9;
 }
 
 message BattleReservationEntryState {
@@ -453,6 +467,39 @@ message PlayerSeasonState {
   repeated uint64 unlocked_honor_words = 2;
   uint32 retro_honor_target_season_id = 3;
   map<uint32, uint32> retro_honor_progress = 4;
+  uint32 equipped_formation_id = 5;
+  WuxingTowerState wuxing_tower = 6;
+  repeated SavedBattleBuildBookmarkState saved_builds = 7;
+}
+
+message WuxingTowerState {
+  uint32 week_key = 1;
+  bool run_active = 2;
+  uint64 run_id = 3;
+  uint32 current_floor = 4;
+  uint32 run_total_rounds = 5;
+  repeated uint32 active_sigil_ids = 6;
+  repeated uint32 pending_offer_sigil_ids = 7;
+  uint32 weekly_cleared_mask = 8;
+  uint32 weekly_best_floor = 9;
+  uint32 weekly_best_rounds = 10;
+  uint64 revision = 11;
+}
+
+message SavedBattleBuildBookmarkState {
+  uint64 bookmark_id = 1;
+  string title = 2;
+  uint64 source_battle_id = 3;
+  uint64 source_player_id = 4;
+  string source_player_name = 5;
+  uint32 class_id = 6;
+  uint32 formation_id = 7;
+  uint32 season_seal_id = 8;
+  uint32 active_pet_table_id = 9;
+  string active_pet_name = 10;
+  repeated uint32 skill_table_ids = 11;
+  repeated uint32 wuxing_sigil_ids = 12;
+  uint64 saved_at_ms = 13;
 }
 
 message PlayerSeasonSealRecordState {

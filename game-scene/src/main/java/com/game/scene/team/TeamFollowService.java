@@ -110,6 +110,9 @@ public final class TeamFollowService implements TeamFollow {
 
     @Override
     public void onBattleFreezeCleared(SceneWorld world, ScenePlayer player) {
+        if (player.pendingAutoReturnCity()) {
+            world.tryAutoReturnHostedPlayerToMainCity(player);
+        }
         check(world, player, Mode.FOLLOW_ONLY, null);
     }
 
@@ -214,27 +217,32 @@ public final class TeamFollowService implements TeamFollow {
                 world.teamFollowCoordinator().onTeamChanged(world, player);
                 metrics.teamFollow(TeamFollowResult.NOT_IN_TEAM);
                 finish(player, state, true);
-            } else if (state.mode == Mode.REFRESH_ONLY) {
-                metrics.teamFollow(TeamFollowResult.REFRESHED);
-                finish(player, state, true);
-            } else if (info.getLeaderId() == player.playerId()) {
-                world.teamFollowCoordinator().onBecameLeader(world, player);
-                metrics.teamFollow(TeamFollowResult.IS_LEADER);
-                finish(player, state, true);
-                if (state.mode == Mode.FOLLOW_AND_FANOUT) {
-                    for (long memberId : info.getMembersList()) {
-                        ScenePlayer member = world.playerById(memberId);
-                        if (memberId != player.playerId() && member != null) check(world, member, Mode.FOLLOW_ONLY, null);
-                    }
-                }
             } else {
-                world.teamFollowCoordinator().onNotLeader(world, player);
-                int idx = info.getMembersList().indexOf(player.playerId());
-                if (idx >= 0) {
-                    world.teamFollowCoordinator().rememberJoinSeq(player.playerId(), idx + 1);
-                }
-                if (!followLeader(world, player, state, info.getLeaderId(), locked)) {
+                TeamFollowFormation.Style style = TeamFollowFormation.Style.fromProtoValue(info.getFollowFormation());
+                world.teamFollowCoordinator().rememberFormationStyle(info.getLeaderId(), style);
+                world.teamFollowCoordinator().rememberFormationStyle(player.playerId(), style);
+                if (state.mode == Mode.REFRESH_ONLY) {
+                    metrics.teamFollow(TeamFollowResult.REFRESHED);
                     finish(player, state, true);
+                } else if (info.getLeaderId() == player.playerId()) {
+                    world.teamFollowCoordinator().onBecameLeader(world, player);
+                    metrics.teamFollow(TeamFollowResult.IS_LEADER);
+                    finish(player, state, true);
+                    if (state.mode == Mode.FOLLOW_AND_FANOUT) {
+                        for (long memberId : info.getMembersList()) {
+                            ScenePlayer member = world.playerById(memberId);
+                            if (memberId != player.playerId() && member != null) check(world, member, Mode.FOLLOW_ONLY, null);
+                        }
+                    }
+                } else {
+                    world.teamFollowCoordinator().onNotLeader(world, player);
+                    int idx = info.getMembersList().indexOf(player.playerId());
+                    if (idx >= 0) {
+                        world.teamFollowCoordinator().rememberJoinSeq(player.playerId(), idx + 1);
+                    }
+                    if (!followLeader(world, player, state, info.getLeaderId(), locked)) {
+                        finish(player, state, true);
+                    }
                 }
             }
         } catch (RuntimeException error) {

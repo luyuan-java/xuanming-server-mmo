@@ -18,7 +18,9 @@ import com.game.proto.team.InviteToTeamRequest;
 import com.game.proto.team.KickMemberRequest;
 import com.game.proto.team.LeaveTeamRequest;
 import com.game.proto.team.ListMyInvitesRequest;
+import com.game.proto.team.RecallTeamMembersRequest;
 import com.game.proto.team.RespondInviteRequest;
+import com.game.proto.team.SetTeamFormationRequest;
 import com.game.proto.team.StartTeamMatchRequest;
 import com.game.proto.team.TeamEventS2C;
 import com.game.proto.team.TeamInviteS2C;
@@ -132,6 +134,8 @@ public final class TeamDispatcher {
         addSession(byId, TeamMethods.DISBAND_TEAM, DisbandTeamRequest.class, service::disbandTeam);
         addSession(byId, TeamMethods.START_TEAM_MATCH, StartTeamMatchRequest.class, service::startTeamMatch);
         addSession(byId, TeamMethods.CONFIRM_RANKED_PRESET, ConfirmRankedPresetRequest.class, service::confirmRankedPreset);
+        addSession(byId, TeamMethods.SET_TEAM_FORMATION, SetTeamFormationRequest.class, service::setTeamFormation);
+        addSession(byId, TeamMethods.RECALL_TEAM_MEMBERS, RecallTeamMembersRequest.class, service::recallTeamMembers);
         if (!byId.values().stream().map(Route::method).toList().containsAll(TeamMethods.REQUESTS)) {
             throw new IllegalStateException("组队 C2S 方法没有全部接管: " + TeamMethods.REQUESTS);
         }

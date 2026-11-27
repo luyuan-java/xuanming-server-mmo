@@ -40,19 +40,22 @@ public final class TeamDisplay implements DisplayLoader {
     private final BiFunction<List<Long>, Deadline, Map<Long, Profile>> profiles;
     private final Function<Collection<Long>, CompletionStage<Map<Long, PlayerPresence>>> presence;
     private final Function<Collection<Long>, CompletionStage<Map<Long, Boolean>>> battleLocks;
+    private final Function<Collection<Long>, CompletionStage<Map<Long, Boolean>>> hostedPresence;
 
-    /**
-     * @param profiles    批量读资料（生产 {@code PlayerProfiles::load}：失败返回已读到的部分，永不抛）
-     * @param presence    宽松批量读在线目录（生产 {@code PlayerPresenceDirectory::findAllAsync}：只含在线的玩家）
-     * @param battleLocks 批量读战斗锁在不在（生产 {@code BattleLockReader::existsAll}：player_id → 锁在不在；不得阻塞，
-     *                    失败以异常完成或直接抛出都可以，这里一律按「都不在战斗」处理）
-     */
     public TeamDisplay(BiFunction<List<Long>, Deadline, Map<Long, Profile>> profiles,
                        Function<Collection<Long>, CompletionStage<Map<Long, PlayerPresence>>> presence,
                        Function<Collection<Long>, CompletionStage<Map<Long, Boolean>>> battleLocks) {
+        this(profiles, presence, battleLocks, ids -> CompletableFuture.completedFuture(Map.of()));
+    }
+
+    public TeamDisplay(BiFunction<List<Long>, Deadline, Map<Long, Profile>> profiles,
+                       Function<Collection<Long>, CompletionStage<Map<Long, PlayerPresence>>> presence,
+                       Function<Collection<Long>, CompletionStage<Map<Long, Boolean>>> battleLocks,
+                       Function<Collection<Long>, CompletionStage<Map<Long, Boolean>>> hostedPresence) {
         this.profiles = profiles;
         this.presence = presence;
         this.battleLocks = battleLocks;
+        this.hostedPresence = hostedPresence == null ? ids -> CompletableFuture.completedFuture(Map.of()) : hostedPresence;
     }
 
     @Override
@@ -73,6 +76,12 @@ public final class TeamDisplay implements DisplayLoader {
         } catch (RuntimeException e) {
             locked = CompletableFuture.failedFuture(e);
         }
+        CompletableFuture<Map<Long, Boolean>> hosted;
+        try {
+            hosted = hostedPresence.apply(ids).toCompletableFuture();
+        } catch (RuntimeException e) {
+            hosted = CompletableFuture.failedFuture(e);
+        }
         Map<Long, Profile> brief;
         try {
             brief = profiles.apply(ids, deadline);
@@ -88,17 +97,31 @@ public final class TeamDisplay implements DisplayLoader {
             onlineNow = Map.of();
         }
         Map<Long, Boolean> lockedNow = awaitBattleLocks(locked, ids.size(), deadline);
+        Map<Long, Boolean> hostedNow = awaitHostedPresence(hosted, ids.size(), deadline);
         Map<Long, MemberDisplay> out = new LinkedHashMap<>();
         for (long id : ids) {
             Profile p = brief.get(id);
             boolean isOnline = onlineNow.containsKey(id);
             // 缺项与 null 值都按 false（结果是别人给的 Map，不假设每个 id 都有非 null 的值）
             boolean inBattle = Boolean.TRUE.equals(lockedNow.get(id));
+            boolean isHosted = !isOnline && Boolean.TRUE.equals(hostedNow.get(id));
             out.put(id, p == null
-                    ? new MemberDisplay(isOnline, inBattle, 0, 0, "", "", 0)
-                    : new MemberDisplay(isOnline, inBattle, p.level(), p.classId(), p.name(), p.appearanceId(), p.gender()));
+                    ? new MemberDisplay(isOnline, inBattle, 0, 0, "", "", 0, isHosted)
+                    : new MemberDisplay(isOnline, inBattle, p.level(), p.classId(), p.name(), p.appearanceId(), p.gender(), isHosted));
         }
         return Collections.unmodifiableMap(out);
+    }
+
+    private static Map<Long, Boolean> awaitHostedPresence(CompletableFuture<Map<Long, Boolean>> hosted, int count, Deadline deadline) {
+        try {
+            Map<Long, Boolean> result = deadline.await(hosted, "批量读离线托管在场标记");
+            if (result != null) {
+                return result;
+            }
+        } catch (RuntimeException e) {
+            log.warn("[team] 读离线托管在场标记失败，{} 人的 is_hosted 按 false 显示: {}", count, e.toString());
+        }
+        return Map.of();
     }
 
     /**

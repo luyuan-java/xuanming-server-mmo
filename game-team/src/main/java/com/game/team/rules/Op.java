@@ -17,11 +17,18 @@ package com.game.team.rules;
  */
 public record Op(OpKind kind, long caller, long callerTeamId, int callerZone, long target, int targetZone,
                  long newTeamId, boolean accept, int rankedCharacterPresetId, int rankedPetPresetId,
-                 int rankedRuleVersion) {
+                 int rankedRuleVersion, int followFormation) {
+
+    public Op(OpKind kind, long caller, long callerTeamId, int callerZone, long target, int targetZone,
+              long newTeamId, boolean accept, int rankedCharacterPresetId, int rankedPetPresetId,
+              int rankedRuleVersion) {
+        this(kind, caller, callerTeamId, callerZone, target, targetZone, newTeamId, accept,
+                rankedCharacterPresetId, rankedPetPresetId, rankedRuleVersion, 0);
+    }
 
     public Op(OpKind kind, long caller, long callerTeamId, int callerZone, long target, int targetZone,
               long newTeamId, boolean accept) {
-        this(kind, caller, callerTeamId, callerZone, target, targetZone, newTeamId, accept, 0, 0, 0);
+        this(kind, caller, callerTeamId, callerZone, target, targetZone, newTeamId, accept, 0, 0, 0, 0);
     }
 
     /** 建队：caller 为队长，zone 为建队者 home zone，teamId 由发号器给出（rules.go:97-100）。 */
@@ -77,12 +84,22 @@ public record Op(OpKind kind, long caller, long callerTeamId, int callerZone, lo
     /** 队员确认本人在本队排位中的人物与宝宝预设。 */
     public static Op confirmRankedPreset(long caller, int characterPresetId, int petPresetId, int ruleVersion) {
         return new Op(OpKind.CONFIRM_RANKED_PRESET, caller, 0, 0, 0, 0, 0, false,
-                characterPresetId, petPresetId, ruleVersion);
+                characterPresetId, petPresetId, ruleVersion, 0);
+    }
+
+    /** 队长切换跑图跟随队形样式（0=长蛇、1=雁行、2=五行）。 */
+    public static Op setFormation(long caller, int followFormation) {
+        return new Op(OpKind.SET_FORMATION, caller, 0, 0, 0, 0, 0, false, 0, 0, 0, followFormation);
+    }
+
+    /** 队长一键召集队员归队。 */
+    public static Op recallMembers(long caller) {
+        return new Op(OpKind.RECALL_MEMBERS, caller, 0, 0, 0, 0, 0, false, 0, 0, 0, 0);
     }
 
     /** 返回填好 {@code callerTeamId} 的副本（存储层在每轮 S_READ 之后调用）。 */
     public Op withCallerTeamId(long callerTeamId) {
         return new Op(kind, caller, callerTeamId, callerZone, target, targetZone, newTeamId, accept,
-                rankedCharacterPresetId, rankedPetPresetId, rankedRuleVersion);
+                rankedCharacterPresetId, rankedPetPresetId, rankedRuleVersion, followFormation);
     }
 }

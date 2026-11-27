@@ -14,4 +14,6 @@ message TeamInfo {
   uint64 leader_id = 2;
   // 集合语义（写者按 join_seq 升序只为确定性），读者不得依赖顺序。
   repeated uint64 members = 3;
+  // 跑图跟随队形样式（0=长蛇纵队、1=雁行两翼、2=五行聚阵）。
+  uint32 follow_formation = 4;
 }

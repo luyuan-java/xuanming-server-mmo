@@ -40,10 +40,23 @@ public record Decision(int code, long param, boolean changed, TeamRecord record,
                        List<InviteAdd> invitesAdded, List<Long> invitesRemoved,
                        TeamChangeReason reason, long actor,
                        boolean leaderOfflineTransferred, boolean disbanded,
-                       List<Long> revokedInvitees, long rejectedApplicant, long invitedPlayer) {
+                       List<Long> revokedInvitees, long rejectedApplicant, long invitedPlayer,
+                       List<Long> recallRecipients) {
+
+    public Decision(int code, long param, boolean changed, TeamRecord record,
+                    List<Long> joined, List<Long> kept, List<Long> left,
+                    List<InviteAdd> invitesAdded, List<Long> invitesRemoved,
+                    TeamChangeReason reason, long actor,
+                    boolean leaderOfflineTransferred, boolean disbanded,
+                    List<Long> revokedInvitees, long rejectedApplicant, long invitedPlayer) {
+        this(code, param, changed, record, joined, kept, left, invitesAdded, invitesRemoved,
+                reason, actor, leaderOfflineTransferred, disbanded, revokedInvitees, rejectedApplicant, invitedPlayer,
+                List.of());
+    }
 
     private static final Decision UNCHANGED = new Decision(TeamTips.OK, 0, false, null, List.of(), List.of(), List.of(),
-            List.of(), List.of(), TeamChangeReason.TEAM_CHANGE_REASON_UNSPECIFIED, 0, false, false, List.of(), 0, 0);
+            List.of(), List.of(), TeamChangeReason.TEAM_CHANGE_REASON_UNSPECIFIED, 0, false, false, List.of(), 0, 0,
+            List.of());
 
     public Decision {
         joined = joined == null ? List.of() : List.copyOf(joined);
@@ -52,13 +65,14 @@ public record Decision(int code, long param, boolean changed, TeamRecord record,
         invitesAdded = invitesAdded == null ? List.of() : List.copyOf(invitesAdded);
         invitesRemoved = invitesRemoved == null ? List.of() : List.copyOf(invitesRemoved);
         revokedInvitees = revokedInvitees == null ? List.of() : List.copyOf(revokedInvitees);
+        recallRecipients = recallRecipients == null ? List.of() : List.copyOf(recallRecipients);
         reason = reason == null ? TeamChangeReason.TEAM_CHANGE_REASON_UNSPECIFIED : reason;
     }
 
     /** 业务拒绝（基线 rules.go:421-423 reject）。 */
     public static Decision reject(int code, long param) {
         return new Decision(code, param, false, null, List.of(), List.of(), List.of(), List.of(), List.of(),
-                TeamChangeReason.TEAM_CHANGE_REASON_UNSPECIFIED, 0, false, false, List.of(), 0, 0);
+                TeamChangeReason.TEAM_CHANGE_REASON_UNSPECIFIED, 0, false, false, List.of(), 0, 0, List.of());
     }
 
     /** 成功但无需提交（Go 的零值 {@code Decision{}}）。 */

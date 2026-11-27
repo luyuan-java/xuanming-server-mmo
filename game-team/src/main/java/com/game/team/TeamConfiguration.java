@@ -141,10 +141,30 @@ public class TeamConfiguration {
         return new BattleLockReader(redis, keys);
     }
 
-    /** in_battle 由战斗锁批量 EXISTS 算出（收掉 team-spec D10）；读失败按 false，不让 RPC 失败（见 {@link TeamDisplay}）。 */
+    /** in_battle 由战斗锁批量 EXISTS 算出，is_hosted 由离线托管在场标记批量读算出；读失败按 false，不让 RPC 失败（见 {@link TeamDisplay}）。 */
     @Bean
-    public TeamDisplay teamDisplay(PlayerProfiles profiles, PlayerPresenceDirectory presence, BattleLockReader battleLocks) {
-        return new TeamDisplay(profiles::load, presence::findAllAsync, battleLocks::existsAll);
+    public TeamDisplay teamDisplay(PlayerProfiles profiles, PlayerPresenceDirectory presence, BattleLockReader battleLocks,
+                                   RedissonClient redis, RedisKeys keys) {
+        java.util.function.Function<java.util.Collection<Long>, java.util.concurrent.CompletionStage<java.util.Map<Long, Boolean>>> hostedPresence = ids -> {
+            if (ids == null || ids.isEmpty()) {
+                return java.util.concurrent.CompletableFuture.completedFuture(java.util.Map.of());
+            }
+            java.util.Map<Long, java.util.concurrent.CompletableFuture<Boolean>> futures = new java.util.LinkedHashMap<>();
+            for (long id : ids) {
+                org.redisson.api.RBucket<String> bucket = redis.getBucket(
+                        keys.playerHostedPresence(id), org.redisson.client.codec.StringCodec.INSTANCE);
+                futures.put(id, bucket.getAsync().toCompletableFuture()
+                        .thenApply(val -> val != null && !val.isEmpty()));
+            }
+            return java.util.concurrent.CompletableFuture.allOf(
+                    futures.values().toArray(new java.util.concurrent.CompletableFuture[0]))
+                    .thenApply(ignored -> {
+                        java.util.Map<Long, Boolean> res = new java.util.LinkedHashMap<>();
+                        futures.forEach((id, f) -> res.put(id, Boolean.TRUE.equals(f.join())));
+                        return res;
+                    });
+        };
+        return new TeamDisplay(profiles::load, presence::findAllAsync, battleLocks::existsAll, hostedPresence);
     }
 
     @Bean(destroyMethod = "shutdownNow")

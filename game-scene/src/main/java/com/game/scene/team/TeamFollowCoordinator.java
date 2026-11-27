@@ -80,6 +80,7 @@ public final class TeamFollowCoordinator {
     private final Map<Long, FollowerEntry> followers = new HashMap<>();
     private final Set<Long> followIntents = new HashSet<>();
     private final Map<Long, Integer> joinSeqs = new HashMap<>();
+    private final Map<Long, TeamFollowFormation.Style> formationStyles = new HashMap<>();
     private final Map<Long, PendingLeaderOutcome> waitingForLeaderOutcome = new HashMap<>();
     private SkillService skills;
 
@@ -105,6 +106,24 @@ public final class TeamFollowCoordinator {
 
     public void rememberJoinSeq(long playerId, int joinSeq) {
         joinSeqs.put(playerId, joinSeq);
+    }
+
+    /** 记录队长/队伍的跑图跟随阵型样式；若该玩家当前正领队则实时切换队形样式。 */
+    public void rememberFormationStyle(long playerId, TeamFollowFormation.Style style) {
+        TeamFollowFormation.Style effective = style == null ? TeamFollowFormation.Style.COLUMN : style;
+        formationStyles.put(playerId, effective);
+        FormationEntry active = formations.get(playerId);
+        if (active != null) {
+            active.formation.setStyle(effective);
+        }
+    }
+
+    public TeamFollowFormation.Style formationStyleOf(long leaderId) {
+        FormationEntry active = formations.get(leaderId);
+        if (active != null) {
+            return active.formation.style();
+        }
+        return formationStyles.getOrDefault(leaderId, TeamFollowFormation.Style.COLUMN);
     }
 
     /** 声明跟随（follow=true）或暂离（follow=false，立即退跟并通知客户端）。 */
@@ -161,7 +180,9 @@ public final class TeamFollowCoordinator {
             comp = null;
         }
         if (comp == null) {
-            comp = new FormationEntry(new TeamFollowFormation(leader.position()), teamId, leader.scene().sceneId());
+            TeamFollowFormation.Style style = formationStyles.getOrDefault(leaderId, TeamFollowFormation.Style.COLUMN);
+            comp = new FormationEntry(new TeamFollowFormation(leader.position(), TeamFollowFormation.DEFAULT_SPACING, style),
+                    teamId, leader.scene().sceneId());
             formations.put(leaderId, comp);
         }
         if (comp.formation.members().size() >= TeamFollowFormation.MAX_MEMBERS) {
@@ -249,6 +270,7 @@ public final class TeamFollowCoordinator {
         long id = player.playerId();
         followIntents.remove(id);
         joinSeqs.remove(id);
+        formationStyles.remove(id);
         detach(world, player, TeamFollowStopReason.TEAM_FOLLOW_STOP_REASON_LEAVING);
         dissolveFormation(world, id, TeamFollowStopReason.TEAM_FOLLOW_STOP_REASON_LEADER_GONE);
         // 队长离开本节点：唤醒在等队长去留的原随从重跑跟随检查（跨节点跟过去）
@@ -465,7 +487,7 @@ public final class TeamFollowCoordinator {
     private void restartFormation(SceneWorld world, ScenePlayer leader, FormationEntry comp, Vec3 leaderPos,
                                   long currentFrame) {
         List<TeamFollowFormation.Member> old = new ArrayList<>(comp.formation.members());
-        comp.formation = new TeamFollowFormation(leaderPos, comp.formation.spacing());
+        comp.formation = new TeamFollowFormation(leaderPos, comp.formation.spacing(), comp.formation.style());
         for (TeamFollowFormation.Member m : old) {
             ScenePlayer f = world.playerById(m.playerId);
             FollowerEntry d = followers.get(m.playerId);
@@ -493,6 +515,9 @@ public final class TeamFollowCoordinator {
         Vec3 from = follower.position();
         SceneNavigation nav = world.navigationFor(follower.scene());
         SceneNavigation.Move traced = nav.trace(from, step.position());
+        if (traced.blocked() && step.trailPosition() != null && !step.trailPosition().equals(step.position())) {
+            traced = nav.trace(from, step.trailPosition());
+        }
         Vec3 target = traced.position();
         double dx = target.x() - from.x();
         double dy = target.y() - from.y();

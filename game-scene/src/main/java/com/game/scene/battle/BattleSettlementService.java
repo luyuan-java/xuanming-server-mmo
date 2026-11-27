@@ -951,6 +951,21 @@ public final class BattleSettlementService {
                 .addAllItemsConsumed(consumedLines)
                 .setLinesTruncated(truncGained || truncConsumed);
         player.battleResults().record(entry);
+        // 离线托管期间真实战斗结算同帧累加至托管收获简报（零额外免费产出；含溢出转邮件物品件数）。
+        boolean won = (settlement.getOutcome() == com.game.proto.eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN
+                && settlement.getPlayerTeamIndex() == 0)
+                || (settlement.getOutcome() == com.game.proto.eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN
+                && settlement.getPlayerTeamIndex() == 1);
+        long expGained = progressionDelta != null ? Math.max(0L, progressionDelta.expGain()) : 0L;
+        long totalItemsGained = 0L;
+        for (var line : itemsGained.entrySet()) {
+            if (line.getValue() > 0L) {
+                totalItemsGained += line.getValue();
+            }
+        }
+        int itemCount = totalItemsGained >= 0xFFFF_FFFFL ? 0xFFFF_FFFF : (int) totalItemsGained;
+        com.game.scene.afkpass.AfkPassService.recordHostedBattleSettlement(
+                player, won, expGained, Math.max(0L, goldCredited), itemCount, Math.floorDiv(nowMs, 1000L));
     }
 
     /** 任意普通难度首领试炼（boss_trial_kind 1..4 且 difficulty == 1）获胜未逃时持久标记解锁困难首领试炼。 */
