@@ -24,4 +24,12 @@ public interface GuildInternalService {
      * 不保证跨页快照一致，由消费方的写后复查兜底。
      */
     CompletableFuture<ListAppliedAssetOpsSinceResponse> listAppliedAssetOpsSince(ListAppliedAssetOpsSinceRequest request);
+
+    /**
+     * 账号注销删角后的帮会收尾清理（幂等）：普通成员删行，帮主自动让位（职位→累计帮贡→入帮时间→ID）或独人解散（清帮战灵脉与守旗阵），
+     * 并删申请、帮战个人数据与状态行；提交后异步清缓存、解散摘榜并推帮众。返回 true 表示已清理完成（含不在帮）。
+     */
+    default CompletableFuture<Boolean> purgeRemovedRole(long playerId) {
+        return CompletableFuture.completedFuture(true);
+    }
 }

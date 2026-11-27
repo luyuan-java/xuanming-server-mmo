@@ -72,4 +72,12 @@ public interface MatchInternalService {
         return CompletableFuture.completedFuture(com.game.proto.match.ReviewBattleScriptResponse.newBuilder()
                 .setReject(com.game.proto.match.BattleScriptReviewReject.BATTLE_SCRIPT_REVIEW_REJECT_DENIED).build());
     }
+
+    /**
+     * 账号注销删角后的匹配域收尾清理（幂等）：删评分并写入待摘榜发件箱（异步向 rank 摘除并立墓碑）、删战斗剧本与选用（保留审核流水）、
+     * 删论剑个人与战报列表。返回 true 表示已清理完成。
+     */
+    default CompletableFuture<Boolean> purgeRemovedRole(long playerId) {
+        return CompletableFuture.completedFuture(true);
+    }
 }

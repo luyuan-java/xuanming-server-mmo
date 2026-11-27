@@ -2456,6 +2456,58 @@ class ClientDispatcherTest {
     }
 
     @Test
+    void 注销与通行证踢线推34并通知scene立即退场不走托管() throws Exception {
+        int[] reasonTips = {
+                ClientDispatcher.TIP_ACCOUNT_DELETION_PENDING,
+                ClientDispatcher.TIP_ACCOUNT_DELETION_IN_PROGRESS,
+                ClientDispatcher.TIP_PASSPORT_CREDENTIAL_CHANGED
+        };
+        for (int reasonTip : reasonTips) {
+            FakeLogin kickLogin = new FakeLogin();
+            FakeLinks kickLinks = new FakeLinks();
+            SessionRegistry reg = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
+            GateMetrics m = new GateMetrics(new SimpleMeterRegistry());
+            ClientDispatcher d = new ClientDispatcher(
+                    new GateIdentity(GATE_NODE, "gate-inst-kick-" + reasonTip, ZONE),
+                    tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)), ROUTES,
+                    new PushMessageIds(TIP_MSG, 124, 34),
+                    kickLogin, Map.of(), kickLinks, reg, new GateLimits(4, 3, Duration.ZERO), m, PresenceRecorder.NONE);
+            EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(reg, d));
+            ch.writeInbound(verifyRequest(GATE_NODE, NOW + 60));
+            ch.readOutbound();
+
+            EnterScene enter = enterScene();
+            ch.writeInbound(request(906, LOGIN_MSG, "enter-" + reasonTip));
+            kickLogin.complete(ClientReply.newBuilder()
+                    .addDirectives(SessionDirective.newBuilder()
+                            .setBindAccount(BindAccount.newBuilder().setAccount("acc_" + reasonTip)))
+                    .addDirectives(SessionDirective.newBuilder().setEnterScene(enter))
+                    .build());
+            ch.runPendingTasks();
+            ch.readOutbound();
+
+            int sessionId = kickLinks.sent.getFirst().frame().getPlayerEnter().getSessionId();
+            ClientSession sess = reg.get(sessionId);
+            d.onPlayerEntered(sess, enter.getSceneNodeId(), sess.sceneLinkGen,
+                    com.game.api.proto.PlayerEntered.newBuilder().setSessionId(sessionId).setPlayerId(enter.getPlayerId())
+                            .setOwnerEpoch(enter.getOwnerEpoch()).build());
+            assertThat(d.kickByServer(sess, enter.getPlayerId(), reasonTip)).isEqualTo(GateMetrics.PushResult.DELIVERED);
+            ch.runPendingTasks();
+
+            MessageContent kickMsg = ch.readOutbound();
+            assertThat(kickMsg).isNotNull();
+            assertThat(kickMsg.getMessageId()).isEqualTo(34);
+            com.game.proto.GameKickPlayerRequest kickBody =
+                    com.game.proto.GameKickPlayerRequest.parseFrom(kickMsg.getSerializedMessage());
+            assertThat(kickBody.getReason().getId()).isEqualTo(reasonTip);
+            assertThat(ch.isOpen()).isFalse();
+            assertThat(kickLinks.sent).hasSize(2);
+            assertThat(kickLinks.sent.get(1).frame().hasPlayerLeave()).isTrue();
+            assertThat(kickLinks.sent.get(1).frame().getPlayerLeave().getImmediateExit()).isTrue();
+        }
+    }
+
+    @Test
     void 绑定账号后周期合成RenewSession并承接未成年人兜底踢线() {
         MessageRoute loginRoute = new MessageRoute(LOGIN_MSG, "login", true, "ClientPlayerLogin.Login");
         MessageRoute renewRoute = new MessageRoute(394, "login", true, "ClientPlayerLogin.RenewSession",

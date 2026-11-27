@@ -66,4 +66,13 @@ public interface AccountLoginService {
     default CompletableFuture<Long> findReconnectingPlayer(String account, int zoneId) {
         return CompletableFuture.completedFuture(0L);
     }
+
+    /**
+     * 处理官方通行证（Casdoor）webhook 回调载荷：
+     * 返回值 {@code >= 0} 表示已核对用户数（网关回 200）；{@code -1} 表示载荷格式非法（网关回 400，无需重投）；
+     * {@code -2} 或异常完成表示暂时不可用（网关回 503，由 Casdoor 重投）。
+     */
+    default CompletableFuture<Integer> handlePassportEvent(byte[] payload) {
+        return CompletableFuture.completedFuture(-2);
+    }
 }

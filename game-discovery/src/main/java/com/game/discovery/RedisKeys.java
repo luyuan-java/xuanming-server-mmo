@@ -561,6 +561,11 @@ public final class RedisKeys {
         return prefix + "login:inflight:" + scope + ":" + key;
     }
 
+    /** 第三方 OIDC 身份令牌一次性消费键 {@code game:login:id-token-used:<auth_type>:<sha256_hex>}（STRING "1"，SET NX PX 到令牌 exp + leeway）。 */
+    public String loginIdTokenUsed(String authType, String digestHex) {
+        return prefix + "login:id-token-used:" + authType + ":" + digestHex;
+    }
+
     /**
      * 回合制战斗锁（scene-battle-spec §7.2，D2）：{@code game:battle:{<player_id>}:lock}，Hash——{@code b} battle_id（无符号十进制）、
      * {@code n} battle 节点号、{@code s} 阶段 {@code P} / {@code F}、{@code d} 战斗期限毫秒、{@code p} 备战期限毫秒；带 TTL。

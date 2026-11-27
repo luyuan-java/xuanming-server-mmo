@@ -139,6 +139,20 @@ public final class ClientDispatcher {
     static final int TIP_ZONE_TRAVEL_FAILED = SceneErrorTip.scene_error.kZoneTravelTargetBusy_VALUE;
     /** 未成年人当日防沉迷可玩时段到期踢线提示（2049）。 */
     static final int TIP_MINOR_PLAY_TIME_OVER = LoginErrorTip.login_error.kLoginMinorPlayTimeOver_VALUE;
+    /** 账号申请注销踢线提示（2038）。 */
+    static final int TIP_ACCOUNT_DELETION_PENDING = LoginErrorTip.login_error.kLoginAccountDeletionPending_VALUE;
+    /** 账号注销执行踢线提示（2040）。 */
+    static final int TIP_ACCOUNT_DELETION_IN_PROGRESS = LoginErrorTip.login_error.kLoginAccountDeletionInProgress_VALUE;
+    /** 官方通行证凭据变更/封禁/删除踢线提示（2059）。 */
+    static final int TIP_PASSPORT_CREDENTIAL_CHANGED = LoginErrorTip.login_error.kLoginPassportCredentialChanged_VALUE;
+
+    /** 需发 34 号 GameKickPlayerRequest（停在登录页不自动重连）且要求场景立即存盘离场（不走断线保留与离线托管）的踢线码。 */
+    private static boolean isImmediateKickWithReason(int tipId) {
+        return tipId == TIP_MINOR_PLAY_TIME_OVER
+                || tipId == TIP_ACCOUNT_DELETION_PENDING
+                || tipId == TIP_ACCOUNT_DELETION_IN_PROGRESS
+                || tipId == TIP_PASSPORT_CREDENTIAL_CHANGED;
+    }
     /** 对齐 C++ gate_minor_deadline::kCloseLeadMs：在 21:00 截止前 5 秒踢线，确保到点前已完成断开。 */
     static final long MINOR_PLAY_CLOSE_LEAD_MS = 5_000L;
 
@@ -1275,7 +1289,7 @@ public final class ClientDispatcher {
         s.closing = true;
         s.exitSceneImmediatelyOnClose = true;
         discardPending(s, RequestResult.DROPPED);
-        if (tipId == TIP_MINOR_PLAY_TIME_OVER && kickPlayerMessageId > 0) {
+        if (isImmediateKickWithReason(tipId) && kickPlayerMessageId > 0) {
             s.sendThenClose(kickPlayer(tipId));
         } else if (tipId != 0) {
             s.sendThenClose(tip(tipId));
@@ -1818,7 +1832,7 @@ public final class ClientDispatcher {
         return true;
     }
 
-    /** 服务端经推送通道踢下线：栅栏同 {@link #deliverPush}；推 23 {tip} 后关闭（断线流程照常：离场写回、通知 login）。 */
+    /** 服务端经推送通道踢下线：栅栏同 {@link #deliverPush}；注销/通行证/防沉迷原因发 34 号并要求场景立即离场（结束离线托管），其余推 23 {tip} 后关闭。 */
     public PushResult kickByServer(ClientSession s, long playerId, int tipId) {
         if (!pushable(s, playerId)) {
             return PushResult.NOT_BOUND;
@@ -1826,8 +1840,15 @@ public final class ClientDispatcher {
         log.info("服务端踢下线 session={} player_id={} tip={}", sid(s), playerId, tipId);
         metrics.disconnected(DisconnectReason.SERVER_KICK);
         s.closing = true;
+        if (isImmediateKickWithReason(tipId)) {
+            s.exitSceneImmediatelyOnClose = true;
+        }
         discardPending(s, RequestResult.DROPPED);
-        s.sendThenClose(tip(tipId));
+        if (isImmediateKickWithReason(tipId) && kickPlayerMessageId > 0) {
+            s.sendThenClose(kickPlayer(tipId));
+        } else {
+            s.sendThenClose(tip(tipId));
+        }
         return PushResult.DELIVERED;
     }
 
