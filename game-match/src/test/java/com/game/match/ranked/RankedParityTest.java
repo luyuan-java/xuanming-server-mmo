@@ -528,6 +528,71 @@ class RankedParityTest {
         }
     }
 
+    @Test
+    void 换季分批短事务提交与懒查榜首昵称及幂等重跑() throws Exception {
+        try (RatingTestDatabase db = RatingTestDatabase.h2()) {
+            AtomicLong now = new AtomicLong(1_730_000_000_000L);
+            RankedStore rankedStore = new RankedStore(db.dataSource, TABLES, now::get);
+            rankedStore.ensureActiveSeason();
+
+            // 预置 5 名达标玩家（覆盖 batchSize=2 的 3 个短事务批次），其中 30001 达无双线（190000）成为榜首
+            long[][] players = {
+                    {30001L, 190_000L, 1000L},
+                    {30002L, 175_000L, 1100L},
+                    {30003L, 165_000L, 1200L},
+                    {30004L, 155_000L, 1300L},
+                    {30005L, 150_000L, 1400L}
+            };
+            try (java.sql.Connection c = db.dataSource.getConnection();
+                 java.sql.PreparedStatement ps = c.prepareStatement(
+                         "INSERT INTO match_ranked_player_season("
+                                 + "season_id,player_id,qualified,rating_centi,peak_rating_centi,valid_matches,"
+                                 + "wins,losses,draws,qualified_at_ms,milestone_bits,final_rank,champion_awarded,"
+                                 + "updated_ms,current_win_streak,best_win_streak) "
+                                 + "VALUES(1,?,1,?,?,5,5,0,0,?,0,0,0,?,0,0)")) {
+                for (long[] row : players) {
+                    ps.setObject(1, com.game.pbmysql.PbMysql.uint64(row[0]));
+                    ps.setLong(2, row[1]);
+                    ps.setLong(3, row[1]);
+                    ps.setObject(4, com.game.pbmysql.PbMysql.uint64(row[2]));
+                    ps.setObject(5, com.game.pbmysql.PbMysql.uint64(now.get()));
+                    ps.executeUpdate();
+                }
+            }
+
+            AtomicInteger nameLookupCalls = new AtomicInteger();
+            MatchRankedSeasonRow next = rankedStore.sealSeasonAndOpenNext(1, champId -> {
+                nameLookupCalls.incrementAndGet();
+                return champId == 30001L ? "无双剑尊" : "不应查";
+            }, null, 2);
+
+            assertThat(next.getSeasonId()).isEqualTo(2);
+            assertThat(next.getState()).isEqualTo(RankedSeasonState.RANKED_SEASON_STATE_ACTIVE_VALUE);
+            assertThat(nameLookupCalls.get()).as("仅应对最终榜首懒查 1 次昵称").isEqualTo(1);
+
+            try (java.sql.Connection c = db.dataSource.getConnection();
+                 java.sql.PreparedStatement ps = c.prepareStatement(
+                         "SELECT player_id, final_rank, champion_awarded FROM match_ranked_player_season WHERE season_id=1 ORDER BY final_rank ASC")) {
+                try (java.sql.ResultSet rs = ps.executeQuery()) {
+                    for (int rank = 1; rank <= 5; rank++) {
+                        assertThat(rs.next()).isTrue();
+                        assertThat(rs.getLong(1)).isEqualTo(30000L + rank);
+                        assertThat(rs.getLong(2)).isEqualTo(rank);
+                        assertThat(rs.getBoolean(3)).isEqualTo(rank == 1);
+                    }
+                }
+            }
+
+            // 重复调用完全幂等：不重查昵称、不改 S2
+            MatchRankedSeasonRow replay = rankedStore.sealSeasonAndOpenNext(1, id -> {
+                nameLookupCalls.incrementAndGet();
+                return "不应再查";
+            }, null, 2);
+            assertThat(replay.getSeasonId()).isEqualTo(2);
+            assertThat(nameLookupCalls.get()).isEqualTo(1);
+        }
+    }
+
     private static int countRows(RatingTestDatabase db, String table, long playerId) throws Exception {
         try (java.sql.Connection c = db.dataSource.getConnection();
              java.sql.PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM " + table + " WHERE player_id=?")) {

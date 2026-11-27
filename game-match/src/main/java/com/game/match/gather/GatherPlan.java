@@ -6,6 +6,7 @@ import com.game.match.ticket.TicketRef;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.CustomDuelRules;
+import com.game.proto.JianghuDuelBattleContext;
 import com.game.proto.RankedMatchContext;
 import com.game.proto.TacticalPuzzleBattleContext;
 import com.game.proto.TournamentBattleContext;
@@ -41,17 +42,18 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
                          int trialVowMask,
                          TacticalPuzzleBattleContext tacticalPuzzleContext,
                          RankedMatchContext freePresetContext,
-                         CustomDuelRules customDuelRules) {
+                         CustomDuelRules customDuelRules,
+                         JianghuDuelBattleContext jianghuDuelContext) {
 
     public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
                       FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext) {
-        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, null, Map.of(), List.of(), 0, null, null, null);
+        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, null, Map.of(), List.of(), 0, null, null, null, null);
     }
 
     public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
                       FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext,
                       TournamentBattleContext tournamentContext) {
-        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext, Map.of(), List.of(), 0, null, null, null);
+        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext, Map.of(), List.of(), 0, null, null, null, null);
     }
 
     public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
@@ -60,7 +62,7 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
                       Map<Long, Integer> memberTeams,
                       List<BattlePlayerSnapshot> aiDefenderSnapshots) {
         this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext,
-                memberTeams, aiDefenderSnapshots, 0, null, null, null);
+                memberTeams, aiDefenderSnapshots, 0, null, null, null, null);
     }
 
     public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
@@ -70,7 +72,7 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
                       List<BattlePlayerSnapshot> aiDefenderSnapshots,
                       int trialVowMask) {
         this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext,
-                memberTeams, aiDefenderSnapshots, trialVowMask, null, null, null);
+                memberTeams, aiDefenderSnapshots, trialVowMask, null, null, null, null);
     }
 
     public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
@@ -82,7 +84,20 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
                       TacticalPuzzleBattleContext tacticalPuzzleContext,
                       RankedMatchContext freePresetContext) {
         this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext,
-                memberTeams, aiDefenderSnapshots, trialVowMask, tacticalPuzzleContext, freePresetContext, null);
+                memberTeams, aiDefenderSnapshots, trialVowMask, tacticalPuzzleContext, freePresetContext, null, null);
+    }
+
+    public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
+                      FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext,
+                      TournamentBattleContext tournamentContext,
+                      Map<Long, Integer> memberTeams,
+                      List<BattlePlayerSnapshot> aiDefenderSnapshots,
+                      int trialVowMask,
+                      TacticalPuzzleBattleContext tacticalPuzzleContext,
+                      RankedMatchContext freePresetContext,
+                      CustomDuelRules customDuelRules) {
+        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext,
+                memberTeams, aiDefenderSnapshots, trialVowMask, tacticalPuzzleContext, freePresetContext, customDuelRules, null);
     }
 
     public GatherPlan {
@@ -231,6 +246,18 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
         Objects.requireNonNull(activityContext, "activityContext");
         return new GatherPlan(mode, battleConfigId, humanRoster, tickets, FailPolicy.DELETE_ALL,
                 presetBattleId, activityContext, null, memberTeams, aiDefenders);
+    }
+
+    /** 天墉生死状直打开局（前半名单为挑战方 team=0，后半为应战方 team=1；携带生死状上下文供战斗结算与恩怨录归档）。 */
+    public static GatherPlan jianghuDuel(int battleConfigId, List<Long> roster, long presetBattleId,
+                                         JianghuDuelBattleContext jianghuDuelContext) {
+        if (presetBattleId == 0) {
+            throw new IllegalArgumentException("江湖生死状开战必须预先发号");
+        }
+        Objects.requireNonNull(jianghuDuelContext, "jianghuDuelContext");
+        return new GatherPlan(MatchMode.MATCH_MODE_JIANGHU_DUEL, battleConfigId, roster, Map.of(),
+                FailPolicy.NO_TICKETS, presetBattleId, null, null, Map.of(), List.of(), 0, null, null, null,
+                jianghuDuelContext);
     }
 
     // ---------------------------------------------------------------- 管线用的小工具

@@ -229,6 +229,46 @@ class JianghuDuelParityTest {
                 .isEqualTo(JianghuErrorTip.jianghu_error.kJianghuDuelSilverFeePending_VALUE);
     }
 
+    @Test
+    void 江湖生死状分队前后半拆阵营_开局计划携带上下文且RatingStore分流结算不碰Elo() throws Exception {
+        // 1. TeamAssignment 必须把 MATCH_MODE_JIANGHU_DUEL 前半置 0、后半置 1
+        assertThat(com.game.match.gather.TeamAssignment.assign(
+                MatchMode.MATCH_MODE_JIANGHU_DUEL, List.of(1001L, 1002L, 2001L, 2002L), Map.of()))
+                .containsExactly(0, 0, 1, 1);
+
+        // 2. GatherPlan.jianghuDuel 携带 JianghuDuelBattleContext
+        JianghuDuelBattleContext ctx = JianghuDuelBattleContext.newBuilder()
+                .setDuelInviteId(777L).setChallengerCaptainId(1001L).setTargetCaptainId(2001L).setTeamSize(1).build();
+        com.game.match.gather.GatherPlan plan = com.game.match.gather.GatherPlan.jianghuDuel(
+                0, List.of(1001L, 2001L), 8888L, ctx);
+        assertThat(plan.mode()).isEqualTo(MatchMode.MATCH_MODE_JIANGHU_DUEL);
+        assertThat(plan.presetBattleId()).isEqualTo(8888L);
+        assertThat(plan.jianghuDuelContext()).isEqualTo(ctx);
+
+        // 3. RatingStore 将 MATCH_MODE_JIANGHU_DUEL 分流至 JianghuDuelService，且幂等去重、不触碰 Elo 表
+        try (com.game.match.rating.RatingTestDatabase db = com.game.match.rating.RatingTestDatabase.h2()) {
+            JianghuDuelService duelService = new JianghuDuelService(
+                    () -> null, new JianghuDuelService.Ports() { }, () -> 1_730_000_000_000L, () -> 1L);
+            com.game.match.rating.RatingStore ratingStore = new com.game.match.rating.RatingStore(
+                    com.game.match.rating.RatingStore.connections(db.dataSource),
+                    cfg -> 0,
+                    new com.game.match.metrics.MatchMetrics(
+                            new io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
+                            new com.game.match.metrics.MetricLabels(id -> true)),
+                    () -> 1_730_000_000_000L)
+                    .withJianghuDuelService(duelService);
+            BattleResultEvent ev = makeResult(9001L, eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 6).toBuilder()
+                    .addTeams(com.game.proto.contracts.kafka.BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(1001L))
+                    .addTeams(com.game.proto.contracts.kafka.BattleResultTeam.newBuilder().setTeamIndex(1).addPlayerIds(2001L))
+                    .build();
+            assertThat(ratingStore.apply(ev).outcome()).isEqualTo(com.game.match.rating.RatingStore.Outcome.APPLIED);
+            assertThat(ratingStore.apply(ev).outcome()).isEqualTo(com.game.match.rating.RatingStore.Outcome.DUPLICATE);
+            var grudges = duelService.listGrudges(session(1001L));
+            assertThat(grudges.getGrudgesCount()).isEqualTo(1);
+            assertThat(grudges.getGrudges(0).getWins()).isEqualTo(1);
+        }
+    }
+
     private static BattleResultEvent makeResult(long battleId, eBattleOutcome outcome, int rounds) {
         return BattleResultEvent.newBuilder()
                 .setBattleId(battleId)

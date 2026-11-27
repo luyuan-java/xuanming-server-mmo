@@ -2,6 +2,7 @@ package com.game.match.feature;
 
 import com.game.api.ContentGuardService;
 import com.game.api.DubboGroups;
+import com.game.api.FriendInternalService;
 import com.game.api.MailAdminService;
 import com.game.api.rpc.NodeRpcClients;
 import com.game.common.deadline.Deadline;
@@ -208,6 +209,62 @@ public class MatchFeatureConfiguration {
     @Bean
     public RankedService rankedService(RankedStore store, RankedTables tables) {
         return new RankedService(store, tables, System::currentTimeMillis);
+    }
+
+    /** 论剑排位换季恢复与自动推进后台驱动（每 60s 幂等检查 SETTLING 或已过 end_ms 赛季，按需仅查榜首 1 人昵称）。 */
+    @Bean
+    public org.springframework.context.SmartLifecycle rankedSeasonRolloverDriver(
+            RankedStore rankedStore, ObjectProvider<DataSource> dataSourceProvider) {
+        DataSource ds = dataSourceProvider.getIfAvailable();
+        java.util.function.LongFunction<String> championNameLookup = championId -> {
+            if (ds == null || championId == 0L) {
+                return "";
+            }
+            com.game.common.player.PlayerProfiles.ConnectionSource conns =
+                    ds instanceof com.alibaba.druid.pool.DruidDataSource pool
+                            ? pool::getConnection
+                            : wait -> ds.getConnection();
+            var profiles = new com.game.common.player.PlayerProfiles(conns, 2);
+            var profile = profiles.load(List.of(championId), Deadline.after(2_000)).get(championId);
+            return profile == null ? "" : profile.name();
+        };
+        return new org.springframework.context.SmartLifecycle() {
+            private final java.util.concurrent.atomic.AtomicBoolean running = new java.util.concurrent.atomic.AtomicBoolean();
+            private java.util.concurrent.ScheduledExecutorService scheduler;
+
+            @Override
+            public synchronized void start() {
+                if (!running.compareAndSet(false, true)) {
+                    return;
+                }
+                scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                        Thread.ofPlatform().name("ranked-season-rollover").daemon(true).factory());
+                scheduler.scheduleWithFixedDelay(() -> {
+                    if (!running.get()) {
+                        return;
+                    }
+                    try {
+                        rankedStore.recoverSeasonRollover(championNameLookup, null);
+                    } catch (Exception e) {
+                        log.warn("[ranked] season rollover recovery tick failed: {}", e.getMessage());
+                    }
+                }, 5_000L, 60_000L, TimeUnit.MILLISECONDS);
+            }
+
+            @Override
+            public synchronized void stop() {
+                running.set(false);
+                if (scheduler != null) {
+                    scheduler.shutdownNow();
+                    scheduler = null;
+                }
+            }
+
+            @Override
+            public boolean isRunning() {
+                return running.get();
+            }
+        };
     }
 
     @Bean
@@ -532,11 +589,238 @@ public class MatchFeatureConfiguration {
 
     // ---- 江湖恩怨与天墉生死状一期(548..554) ----
 
+    @Bean(destroyMethod = "close")
+    @ConditionalOnProperty(name = "game.match.friend-enabled", havingValue = "true")
+    public NodeRpcClients<FriendInternalService> matchFriendClients() {
+        return new NodeRpcClients<>("match-friend-internal", FriendInternalService.class,
+                DubboGroups.FRIEND, Duration.ofMillis(1500), "match-friend-connect");
+    }
+
     @Bean
-    public JianghuDuelService jianghuDuelService(ConfigTables config, MatchIds matchIds) {
+    public JianghuDuelService jianghuDuelService(
+            ConfigTables config,
+            MatchIds matchIds,
+            ObjectProvider<DataSource> dataSourceProvider,
+            ObjectProvider<org.redisson.api.RedissonClient> redisProvider,
+            ObjectProvider<com.game.discovery.RedisKeys> redisKeysProvider,
+            ObjectProvider<com.game.discovery.presence.PlayerPresenceDirectory> presenceProvider,
+            ObjectProvider<com.game.discovery.battle.BattleLockReader> battleLockProvider,
+            ObjectProvider<GatherLauncher> gatherLauncherProvider,
+            ObjectProvider<MemberPrecheck> memberPrecheckProvider,
+            ObjectProvider<NodeRpcClients<FriendInternalService>> friendClientsProvider,
+            @Value("${game.dubbo.friend-url:tri://127.0.0.1:20883}") String friendUrl) {
+        DataSource ds = dataSourceProvider.getIfAvailable();
+        org.redisson.api.RedissonClient redis = redisProvider.getIfAvailable();
+        com.game.discovery.RedisKeys redisKeys = redisKeysProvider.getIfAvailable();
+        com.game.discovery.team.TeamMembershipReader teamReader = (redis != null && redisKeys != null)
+                ? new com.game.discovery.team.TeamMembershipReader(redis, redisKeys) : null;
+        com.game.discovery.presence.PlayerPresenceDirectory presence = presenceProvider.getIfAvailable();
+        com.game.discovery.battle.BattleLockReader battleLocks = battleLockProvider.getIfAvailable();
+        GatherLauncher gatherLauncher = gatherLauncherProvider.getIfAvailable();
+        MemberPrecheck precheck = memberPrecheckProvider.getIfAvailable();
+        NodeRpcClients<FriendInternalService> friendClients = friendClientsProvider.getIfAvailable();
+        NodeRpcClients.Target friendTarget = friendClients == null ? null : parseTriTarget("game.dubbo.friend-url", friendUrl);
+        com.game.common.player.PlayerProfiles profiles;
+        if (ds != null) {
+            com.game.common.player.PlayerProfiles.ConnectionSource conns =
+                    ds instanceof com.alibaba.druid.pool.DruidDataSource pool
+                            ? pool::getConnection
+                            : wait -> ds.getConnection();
+            profiles = new com.game.common.player.PlayerProfiles(conns, 1);
+        } else {
+            profiles = null;
+        }
+        JianghuDuelService.Ports ports = new JianghuDuelService.Ports() {
+            @Override
+            public java.util.Optional<List<Long>> authoritativeTeamOf(long captainPlayerId) {
+                if (teamReader == null) {
+                    return java.util.Optional.empty();
+                }
+                try {
+                    com.game.discovery.team.TeamMembership m = teamReader.readAsync(captainPlayerId)
+                            .get(1_000L, TimeUnit.MILLISECONDS);
+                    if (m == null || !m.inTeam() || m.info() == null) {
+                        return java.util.Optional.empty();
+                    }
+                    if (m.info().getLeaderId() != captainPlayerId) {
+                        return java.util.Optional.of(List.of());
+                    }
+                    List<Long> ordered = new ArrayList<>();
+                    ordered.add(captainPlayerId);
+                    for (long pid : m.info().getMembersList()) {
+                        if (pid != captainPlayerId) {
+                            ordered.add(pid);
+                        }
+                    }
+                    return java.util.Optional.of(ordered);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("读取小队成员被中断", e);
+                } catch (Exception e) {
+                    throw new IllegalStateException("读取小队成员失败: " + e.getMessage(), e);
+                }
+            }
+
+            @Override
+            public boolean isPlayerOnline(long playerId) {
+                if (presence == null) {
+                    return true;
+                }
+                try {
+                    return presence.findStrictAsync(playerId).toCompletableFuture()
+                            .get(800L, TimeUnit.MILLISECONDS).isPresent();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                } catch (Exception e) {
+                    return false;
+                }
+            }
+
+            @Override
+            public boolean isPlayerInBattle(long playerId) {
+                if (battleLocks == null) {
+                    return false;
+                }
+                try {
+                    Boolean locked = battleLocks.exists(playerId).get(800L, TimeUnit.MILLISECONDS);
+                    return Boolean.TRUE.equals(locked);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return true;
+                } catch (Exception e) {
+                    return true;
+                }
+            }
+
+            @Override
+            public JianghuDuelService.SocialRelationCheck checkSocialRelations(List<Long> sideA, List<Long> sideB) {
+                if (friendClients == null || friendTarget == null) {
+                    // shortcut: 未启用 game.match.friend-enabled 时无法调好友服，生产部署须开启并配 game.dubbo.friend-url
+                    return new JianghuDuelService.SocialRelationCheck(false, false);
+                }
+                var req = com.game.proto.friend.BatchCheckSocialRelationsRequest.newBuilder()
+                        .addAllSideAPlayerIds(sideA)
+                        .addAllSideBPlayerIds(sideB)
+                        .build();
+                try {
+                    var resp = friendClients.call(friendTarget, Duration.ofMillis(1500),
+                                    svc -> svc.batchCheckSocialRelations(req))
+                            .get(1_800L, TimeUnit.MILLISECONDS);
+                    if (resp == null || (resp.hasErrorMessage() && resp.getErrorMessage().getId() != 0)) {
+                        throw new IllegalStateException("好友关系批量校验失败");
+                    }
+                    return new JianghuDuelService.SocialRelationCheck(resp.getHasAnyBlock(), resp.getAllAreFriends());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("好友关系批量校验被中断", e);
+                } catch (RuntimeException e) {
+                    throw e;
+                } catch (Exception e) {
+                    throw new IllegalStateException("好友关系批量校验异常: " + e.getMessage(), e);
+                }
+            }
+
+            @Override
+            public String displayName(long playerId) {
+                if (profiles == null) {
+                    return "道友" + Long.toUnsignedString(playerId);
+                }
+                var p = profiles.load(List.of(playerId), Deadline.after(1_000)).get(playerId);
+                return (p == null || p.name().isEmpty()) ? "道友" + Long.toUnsignedString(playerId) : p.name();
+            }
+
+            @Override
+            public JianghuDuelService.GuildSummary pureGuildOf(List<Long> members) {
+                if (ds == null || members == null || members.isEmpty()) {
+                    return JianghuDuelService.GuildSummary.NONE;
+                }
+                try (java.sql.Connection c = ds.getConnection()) {
+                    long commonGuildId = 0L;
+                    try (java.sql.PreparedStatement ps = c.prepareStatement(
+                            "SELECT guild_id FROM guild_member WHERE player_id=?")) {
+                        ps.setQueryTimeout(1);
+                        for (long pid : members) {
+                            ps.setObject(1, com.game.pbmysql.PbMysql.uint64(pid));
+                            try (java.sql.ResultSet rs = ps.executeQuery()) {
+                                if (!rs.next()) {
+                                    return JianghuDuelService.GuildSummary.NONE;
+                                }
+                                long gid = rs.getLong(1);
+                                if (gid == 0L) {
+                                    return JianghuDuelService.GuildSummary.NONE;
+                                }
+                                if (commonGuildId == 0L) {
+                                    commonGuildId = gid;
+                                } else if (commonGuildId != gid) {
+                                    return JianghuDuelService.GuildSummary.NONE;
+                                }
+                            }
+                        }
+                    }
+                    if (commonGuildId == 0L) {
+                        return JianghuDuelService.GuildSummary.NONE;
+                    }
+                    try (java.sql.PreparedStatement ps = c.prepareStatement(
+                            "SELECT name FROM guild WHERE guild_id=?")) {
+                        ps.setQueryTimeout(1);
+                        ps.setObject(1, com.game.pbmysql.PbMysql.uint64(commonGuildId));
+                        try (java.sql.ResultSet rs = ps.executeQuery()) {
+                            String name = rs.next() && rs.getString(1) != null ? rs.getString(1) : "";
+                            return new JianghuDuelService.GuildSummary(commonGuildId, name);
+                        }
+                    }
+                } catch (SQLException e) {
+                    log.debug("[jianghu] pureGuildOf query unavailable: {}", e.getMessage());
+                    return JianghuDuelService.GuildSummary.NONE;
+                }
+            }
+
+            @Override
+            public long launchBattle(com.game.proto.match.JianghuDuelInviteView invite,
+                                     com.game.proto.JianghuDuelBattleContext duelContext) {
+                if (gatherLauncher == null) {
+                    return 0L;
+                }
+                List<Long> roster = new ArrayList<>(
+                        invite.getChallengerMembersCount() + invite.getTargetMembersCount());
+                for (var m : invite.getChallengerMembersList()) {
+                    roster.add(m.getPlayerId());
+                }
+                for (var m : invite.getTargetMembersList()) {
+                    roster.add(m.getPlayerId());
+                }
+                if (precheck != null) {
+                    MemberPrecheck.Result checked = precheck.check(roster, Deadline.after(3_000));
+                    if (!checked.passed()) {
+                        log.warn("[jianghu] precheck failed invite={} reason={} offender={}",
+                                Long.toUnsignedString(invite.getDuelInviteId()), checked.reason(),
+                                Long.toUnsignedString(checked.offender()));
+                        return 0L;
+                    }
+                }
+                long battleId = matchIds.nextBattleId().orElse(0L);
+                if (battleId == 0L) {
+                    log.error("[jianghu] battle_id allocation failed invite={}",
+                            Long.toUnsignedString(invite.getDuelInviteId()));
+                    return 0L;
+                }
+                gatherLauncher.launch(GatherPlan.jianghuDuel(0, roster, battleId, duelContext))
+                        .whenComplete((result, err) -> {
+                            boolean ok = err == null && result != null && result.ok();
+                            if (!ok) {
+                                log.error("[jianghu] gather launch failed invite={} battle={} outcome={}",
+                                        Long.toUnsignedString(invite.getDuelInviteId()),
+                                        Long.toUnsignedString(battleId),
+                                        result == null ? "error" : result.outcome().label(), err);
+                            }
+                        });
+                return battleId;
+            }
+        };
         return new JianghuDuelService(
                 () -> config.jianghuRule().find(1).orElse(null),
-                new JianghuDuelService.Ports() { },
+                ports,
                 System::currentTimeMillis,
                 () -> matchIds.nextBattleId().orElse(0L));
     }

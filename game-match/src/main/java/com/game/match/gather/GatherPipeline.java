@@ -382,6 +382,9 @@ public final class GatherPipeline {
             if (plan.customDuelRules() != null) {
                 create.setCustomDuelRules(plan.customDuelRules());
             }
+            if (plan.jianghuDuelContext() != null) {
+                create.setJianghuDuelContext(plan.jianghuDuelContext());
+            }
             BattlePlacement.Builder record = BattlePlacement.newBuilder().setBattleId(battleId).setMode(mode.getNumber())
                     .setBattleConfigId(plan.battleConfigId()).setCreatedAtMs(createdAtMs).setDeadlineMs(deadlineMs);
             for (Prepared member : prepared) {

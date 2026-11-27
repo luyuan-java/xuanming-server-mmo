@@ -141,7 +141,7 @@ class GatherPipelineTest {
         // 落点记录：建房之前写一次，成功后同值补写一次；可见性抄自同一份建房请求
         BattlePlacement expected = BattlePlacement.newBuilder().setBattleId(battleId).setBattleNodeId(1).setBattleInstanceId("inst-a")
                 .setRpcHost("127.0.0.1").setRpcPort(21200).setAttempt(1).setMode(ONE_V_ONE).setBattleConfigId(0).addPlayerNames("甲")
-                .addPlayerNames("乙").setCreatedAtMs(T0 + 1_234).setDeadlineMs(T0 + 300_000)
+                .addPlayerNames("乙").addPlayerIds(A).addPlayerIds(B).setCreatedAtMs(T0 + 1_234).setDeadlineMs(T0 + 300_000)
                 .setSpectateVisibility(eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE_VALUE).build();
         assertThat(f.placements.writes).containsExactly(expected, expected);
         assertThat(f.placements.stored(battleId)).contains(expected);

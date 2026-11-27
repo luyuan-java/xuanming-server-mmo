@@ -163,9 +163,11 @@ public final class RatingStore {
     private CommitHook commitHook;
     private com.game.match.ranked.RankedStore rankedStore;
     private com.game.match.tournament.TournamentStore tournamentStore;
+    private com.game.match.jianghu.JianghuDuelService jianghuDuelService;
     public RatingStore withCommitHook(CommitHook hook){this.commitHook=hook;return this;}
     public RatingStore withRankedStore(com.game.match.ranked.RankedStore store){this.rankedStore=store;return this;}
     public RatingStore withTournamentStore(com.game.match.tournament.TournamentStore store){this.tournamentStore=store;return this;}
+    public RatingStore withJianghuDuelService(com.game.match.jianghu.JianghuDuelService service){this.jianghuDuelService=service;return this;}
 
     /**
      * @param connections     取连接
@@ -182,6 +184,40 @@ public final class RatingStore {
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.clockMs = Objects.requireNonNull(clockMs, "clockMs");
         this.sleeper = Objects.requireNonNull(sleeper, "sleeper");
+    }
+
+    /** 江湖生死状结算按当前 player.owner_revision 隔离个人恩怨录；测试库无 player 表时回退 1L。 */
+    private Map<Long, Long> loadOwnerRevisionsBestEffort(BattleResultEvent event) {
+        Map<Long, Long> revs = new java.util.HashMap<>();
+        for (com.game.proto.contracts.kafka.BattleResultTeam team : event.getTeamsList()) {
+            for (long pid : team.getPlayerIdsList()) {
+                if (pid != 0L) {
+                    revs.put(pid, 1L);
+                }
+            }
+        }
+        if (revs.isEmpty()) {
+            return revs;
+        }
+        try (Connection c = connections.get(1_000)) {
+            try (PreparedStatement ps = c.prepareStatement("SELECT owner_revision FROM player WHERE player_id=?")) {
+                ps.setQueryTimeout(1);
+                for (Long pid : List.copyOf(revs.keySet())) {
+                    ps.setObject(1, com.game.pbmysql.PbMysql.uint64(pid));
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            long rev = rs.getLong(1);
+                            if (rev > 0L) {
+                                revs.put(pid, rev);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (SQLException ignored) {
+            // 无 player 表的独立夹具沿用默认 owner_revision=1L
+        }
+        return revs;
     }
 
     /** 数据源 → {@link Connections}：Druid 支持「本次最多等 N 毫秒」，其余数据源直接取。 */
@@ -206,6 +242,12 @@ public final class RatingStore {
                 metrics.ratingUpdate(mode, RatingOutcome.ERROR);
                 throw new StoreException("锦标赛战果入账失败 battle=" + battle(event), e);
             }
+        }
+        if (mode == com.game.proto.match.MatchMode.MATCH_MODE_JIANGHU_DUEL_VALUE && jianghuDuelService != null) {
+            Map<Long, Long> ownerRevs = loadOwnerRevisionsBestEffort(event);
+            boolean applied = jianghuDuelService.applyBattleResult(event, ownerRevs);
+            metrics.ratingUpdate(mode, applied ? RatingOutcome.APPLIED : RatingOutcome.DUPLICATE);
+            return applied ? new Result(Outcome.APPLIED, null, 0, false) : Result.duplicate();
         }
         EloRules.Verdict verdict = EloRules.judge(event, drawRoundCapFor);
         if (verdict instanceof EloRules.Verdict.Ignored ignored) {

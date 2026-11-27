@@ -243,12 +243,15 @@ services:
       GAME_MATCH_SPECTATE_RELAY_ENABLED: "${GAME_MATCH_SPECTATE_RELAY_ENABLED:-true}"
       GAME_DUBBO_CONTENTGUARDURL: "tri://game-content-guard:20919"
       GAME_MATCH_CONTENT_GUARD_ENABLED: "true"
+      GAME_DUBBO_FRIENDURL: "tri://game-friend:20883"
+      GAME_MATCH_FRIEND_ENABLED: "true"
       GLOBAL_MATCH_ENABLED: "false"
     depends_on:
       route-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       kafka: {condition: service_healthy}
       game-rank: {condition: service_healthy}
+      game-friend: {condition: service_healthy}
       game-content-guard: {condition: service_healthy}
     healthcheck:
       <<: *health

@@ -42,7 +42,7 @@ public final class TeamAssignment {
             return snake(members, ratingCenti == null ? Map.of() : ratingCenti);
         }
         int[] teams = new int[members.size()];
-        if (mode == MatchMode.MATCH_MODE_SEASON_TOURNAMENT) {
+        if (mode == MatchMode.MATCH_MODE_SEASON_TOURNAMENT || mode == MatchMode.MATCH_MODE_JIANGHU_DUEL) {
             int half = members.size() / 2;
             for (int i = 0; i < teams.length; i++) {
                 teams[i] = i >= half ? 1 : 0;
