@@ -926,10 +926,15 @@ final class EncounterMechanics {
     }
 
     void initSpecialState(int matchMode, int maxRounds) {
-        if (bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_NONE && matchMode != BattleConstants.MATCH_MODE_POLARITY_5V5) {
+        boolean customPolarity = ctx.hasCustomDuelPolarity();
+        if (bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_NONE
+                && matchMode != BattleConstants.MATCH_MODE_POLARITY_5V5
+                && !customPolarity) {
             return;
         }
-        if (bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_POLARITY_5V5 || matchMode == BattleConstants.MATCH_MODE_POLARITY_5V5) {
+        if (bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_POLARITY_5V5
+                || matchMode == BattleConstants.MATCH_MODE_POLARITY_5V5
+                || customPolarity) {
             initialPolarity = ctx.rng().randIndex(2) == 0 ? POLARITY_PHYSICAL : POLARITY_MAGIC;
             updatePolarityForRound(matchMode);
             return;
@@ -939,7 +944,8 @@ final class EncounterMechanics {
 
     void updatePolarityForRound(int matchMode) {
         if (bossTrialKind != BattleConstants.BOSS_TRIAL_KIND_POLARITY_5V5
-                && matchMode != BattleConstants.MATCH_MODE_POLARITY_5V5) {
+                && matchMode != BattleConstants.MATCH_MODE_POLARITY_5V5
+                && !ctx.hasCustomDuelPolarity()) {
             activePolarity = POLARITY_NONE;
             return;
         }
@@ -1652,6 +1658,9 @@ final class EncounterMechanics {
         state.addAllLastResolvedTelegraphs(lastResolvedTelegraphs);
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             state.addAllTelegraphs(activeTelegraphs);
+        }
+        if (ctx.hasCustomDuelRules()) {
+            state.setCustomDuelRules(ctx.customDuelRules());
         }
         if (ctx.trialVowMask() != 0) {
             state.setTrialVowMask(ctx.trialVowMask());

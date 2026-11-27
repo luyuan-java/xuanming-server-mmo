@@ -278,6 +278,30 @@ public final class TurnBattleEngine {
                 engine.maxRounds = Math.min(engine.maxRounds, BattleConstants.GUILD_WAR_DEFAULT_MAX_ROUNDS);
             }
         }
+        // 道友切磋坊 / 论剑 V7 自定义切磋规则校验与冻结（对齐 C++ turn_battle_engine.cpp:336-350, 453-455）。
+        if (request.hasCustomDuelRules()) {
+            var rules = request.getCustomDuelRules();
+            int roundOverride = rules.getRoundLimitOverride();
+            if (roundOverride != 0 && roundOverride != 8 && roundOverride != 12 && roundOverride != 20) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "切磋自定义回合上限非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                + " round_limit_override=" + Integer.toUnsignedString(roundOverride));
+            }
+            int duelBanSlots = rules.getSkillBanSlotsPerTeam();
+            if (duelBanSlots != 0 && duelBanSlots != BattleConstants.PREP_SKILL_BAN_SLOTS_PER_TEAM) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "切磋自定义禁招槽数非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                + " slots=" + Integer.toUnsignedString(duelBanSlots));
+            }
+            if (rules.getUseFreePreset() && duelBanSlots != 0) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "切磋免费预设与战前禁招互斥: battle_id=" + Long.toUnsignedString(request.getBattleId()));
+            }
+            engine.ctx.setCustomDuelRules(rules);
+            if (roundOverride > 0) {
+                engine.maxRounds = roundOverride;
+            }
+        }
         // 天墉生死状一期：默认 30 回合上限（支持 1..100 覆盖），打满双方存活权威判平。
         if (engine.isJianghuDuelBattle()) {
             int overrideRounds = request.hasJianghuDuelContext()
@@ -795,7 +819,7 @@ public final class TurnBattleEngine {
                 if (row.getSeasonId() != 0 && (battleActiveSeasonId == 0 || row.getSeasonId() != battleActiveSeasonId)) {
                     continue;
                 }
-                if (banControlInDuel && row.getBanPoolCategory() == 1) {
+                if (banControlInDuel && ctx.isControlSkill(row)) {
                     continue;
                 }
                 if (banCandidateSkillSet.add(skillId)) {
@@ -3197,6 +3221,7 @@ public final class TurnBattleEngine {
                 boolean drawOnCap = isRankedBattle()
                         || BattleConstants.isGuildWarMatchMode(request.getMatchMode())
                         || isJianghuDuelBattle()
+                        || ctx.hasCustomDuelRules()
                         || ctx.encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_POLARITY_5V5
                         || request.getMatchMode() == BattleConstants.MATCH_MODE_POLARITY_5V5;
                 outcome = drawOnCap ? eBattleOutcome.BATTLE_OUTCOME_DRAW : eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;

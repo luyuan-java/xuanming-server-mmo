@@ -313,4 +313,83 @@ final class PrepSkillBanBattleEngineTest {
         assertThat(engine.validateAction(7501L, cast10003)).isEqualTo(ActionChecks.SUCCESS);
         assertThat(engine.validateAction(7503L, cast10023)).isEqualTo(ActionChecks.SKILL_BANNED_IN_BATTLE);
     }
+
+    @Test
+    void customDuelRulesEnforceRoundLimitBanControlPolaritySnapshotAndDrawOnCap() {
+        var controlSkill = tables.skill().all().stream()
+                .filter(s -> s.getBattleModel() == 1 && s.getAbilityKind() == 1 && (s.getCasterMask() & 1) != 0
+                        && s.getSeasonId() == 0 && s.getTargetTeam() == 1
+                        && s.getBanPoolCategory() >= 1 && s.getBanPoolCategory() <= 4)
+                .filter(s -> s.getEffectList().stream().anyMatch(bid -> tables.buff().find(bid)
+                        .map(b -> (b.getBattleOp() == BattleEffect.CONTROL && b.getStateKind() >= 1 && b.getStateKind() <= 6)
+                                || b.getBuffType() == BattleConstants.BUFF_TYPE_STUN
+                                || b.getBuffType() == BattleConstants.BUFF_TYPE_FREEZE
+                                || b.getBuffType() == BattleConstants.BUFF_TYPE_SILENCE)
+                        .orElse(false)))
+                .findFirst().orElseThrow();
+        int controlSkillId = controlSkill.getId();
+
+        BattlePlayerSnapshot pA = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(8601L).setTeamIndex(0).setIsTeamCaptain(true).setActiveSeasonId(1)
+                .setPlayerName("道友甲").setLevel(30)
+                .setMaxHealth(50000).setMaxMana(2000).setPhysicalAttack(100).setDefense(500)
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(50000).setMana(2000).setSpeed(200))
+                .addSkillTableIds(10002)
+                .addSkillTableIds(controlSkillId)
+                .putSkillRanks(10002, 1)
+                .putSkillRanks(controlSkillId, 1)
+                .build();
+        BattlePlayerSnapshot pB = pA.toBuilder().setPlayerId(8602L).setTeamIndex(1).setPlayerName("道友乙").build();
+
+        // 1. 非法回合上限被引擎拒绝
+        CreateBattleRequest badRounds = CreateBattleRequest.newBuilder()
+                .setBattleId(9910L).setBattleConfigId(5).setMatchMode(MatchMode.MATCH_MODE_PVP_CHALLENGE_VALUE)
+                .setSeed(777L)
+                .setCustomDuelRules(CustomDuelRules.newBuilder().setRoundLimitOverride(99))
+                .addPlayers(pA).addPlayers(pB).build();
+        assertThat(TurnBattleEngine.start(badRounds, data)).isInstanceOf(BattleStart.Rejected.class);
+
+        // 2. 合法规则：8 回合上限 + 全场禁控 + 物法易势轮换 + 3 Ban
+        CustomDuelRules rules = CustomDuelRules.newBuilder()
+                .setRoundLimitOverride(8)
+                .setBanControlSkills(true)
+                .setEnablePolarityRotation(true)
+                .setSkillBanSlotsPerTeam(3)
+                .build();
+        CreateBattleRequest req = badRounds.toBuilder().setBattleId(9911L).setCustomDuelRules(rules).build();
+        TurnBattleEngine engine = ((BattleStart.Started) TurnBattleEngine.start(req, data)).engine();
+
+        // 战前禁招候选池排除所有控制技能（含 controlSkillId）
+        BattlePrepState prep = engine.prepStateForViewer(8601L, 99999L);
+        assertThat(prep.getBanCandidateSkillIdsList()).doesNotContain(controlSkillId);
+        assertThat(engine.finalizePrepPhase()).isTrue();
+
+        // 快照回显 custom_duel_rules 与激活的物法易势极性
+        BattleStateS2C snapshot = engine.buildStateSnapshot();
+        assertThat(snapshot.getCustomDuelRules()).isEqualTo(rules);
+        assertThat(snapshot.getActivePolarity()).isIn(1, 2);
+
+        // 实战中双方（team 0 与 team 1）均禁止施放控制技能，非控制技能 10002 放行
+        BattleAction castCtrlA = BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL).setSkillTableId(controlSkillId).setTargetId(8602L).build();
+        BattleAction castCtrlB = BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL).setSkillTableId(controlSkillId).setTargetId(8601L).build();
+        BattleAction castNormalA = BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL).setSkillTableId(10002).setTargetId(8602L).build();
+        assertThat(engine.validateAction(8601L, castCtrlA)).isEqualTo(ActionChecks.SKILL_CANNOT_CAST_IN_STATE);
+        assertThat(engine.validateAction(8602L, castCtrlB)).isEqualTo(ActionChecks.SKILL_CANNOT_CAST_IN_STATE);
+        assertThat(engine.validateAction(8601L, castNormalA)).isEqualTo(ActionChecks.SUCCESS);
+
+        // 打满 8 回合双方均存活：按自定义切磋上限在第 8 回合权威判平（BATTLE_OUTCOME_DRAW）
+        BattleAction defend = BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build();
+        for (int r = 1; r <= 8; r++) {
+            engine.submitAction(8601L, defend);
+            engine.submitAction(8602L, defend);
+            engine.resolveCurrentRound();
+            if (r < 8) {
+                assertThat(engine.outcome()).isEqualTo(com.game.proto.eBattleOutcome.BATTLE_OUTCOME_ONGOING);
+            }
+        }
+        assertThat(engine.outcome()).isEqualTo(com.game.proto.eBattleOutcome.BATTLE_OUTCOME_DRAW);
+    }
 }

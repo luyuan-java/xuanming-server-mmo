@@ -87,6 +87,8 @@ final class BattleContext {
     private final java.util.TreeSet<Integer> bannedSkillIds = new java.util.TreeSet<>(Integer::compareUnsigned);
     /** 五行试炼志 V3：本局冻结的自选限制誓约位掩码（bit0 禁控 bit1 单宝 bit2 无宠 bit3 紧缩回合）。 */
     private int trialVowMask;
+    /** 道友切磋坊 / 论剑 V7：本局冻结的自定义切磋规则（非自定义为 null）。 */
+    private com.game.proto.CustomDuelRules customDuelRules;
 
     /**
      * @param matchMode 请求里的 match_mode（uint32）；只有 4 / 5 算 PVE，其余一律非 PVE（{@code IsPveMatch}，{@code engine.cpp:1312-1315}）
@@ -123,6 +125,26 @@ final class BattleContext {
         return maxRounds;
     }
 
+    void setCustomDuelRules(com.game.proto.CustomDuelRules rules) {
+        this.customDuelRules = rules;
+    }
+
+    boolean hasCustomDuelRules() {
+        return customDuelRules != null;
+    }
+
+    com.game.proto.CustomDuelRules customDuelRules() {
+        return customDuelRules;
+    }
+
+    boolean isControlBannedByCustomDuel() {
+        return customDuelRules != null && customDuelRules.getBanControlSkills();
+    }
+
+    boolean hasCustomDuelPolarity() {
+        return customDuelRules != null && customDuelRules.getEnablePolarityRotation();
+    }
+
     boolean isSkillBanned(int skillTableId) {
         return skillTableId != 0 && bannedSkillIds.contains(skillTableId);
     }
@@ -140,7 +162,8 @@ final class BattleContext {
     }
 
     boolean isControlBannedForActor(BattleUnit actor) {
-        return actor != null && actor.teamIndex() == 0 && hasTrialVow(TrialJournalRules.VOW_BAN_CONTROL);
+        return isControlBannedByCustomDuel()
+                || (actor != null && actor.teamIndex() == 0 && hasTrialVow(TrialJournalRules.VOW_BAN_CONTROL));
     }
 
     boolean isHardControlBuff(int buffTableId) {
