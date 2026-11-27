@@ -133,12 +133,12 @@ class ActivityVitalityAndItemBlockTest {
         assertThat(blockExec.execute(player, ByteString.copyFrom(new byte[]{(byte) 0xFF, (byte) 0xFF})))
                 .isEqualTo(new InboxConsumers.Rejected(payloadInvalid));
 
-        // 封锁后入包被拒（1005）
+        // 封锁后入包被拒（27005 kAssetBlocked）
         ByteString payload = GmItemGainPayload.newBuilder().setItemConfigId(ITEM_ID).build().toByteString();
         assertThat(blockExec.execute(player, payload)).isEqualTo(new InboxConsumers.Applied());
         assertThat(player.itemGainBlock().isBlocked(ITEM_ID)).isTrue();
         Bag.AddResult blocked = h.bags.addItems(player, BagType.INVENTORY, Map.of(ITEM_ID, 2L), Reason.GM_GRANT, 0, "");
-        assertThat(blocked.tip()).isEqualTo(BagService.REFUSED);
+        assertThat(blocked.tip()).isEqualTo(BagService.ITEM_BLOCKED);
         assertThat(player.bags().bag(BagType.INVENTORY).total(ITEM_ID)).isZero();
 
         // 未知字段与封锁列表一起往返落盘

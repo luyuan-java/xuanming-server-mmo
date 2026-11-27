@@ -24,6 +24,26 @@ public interface LedgerReader {
         }
     }
 
+    /**
+     * 玩家已落盘个人物品获得封禁快照（不含全服封禁）：
+     * {@code found == false} 表示读不到存档行（与空封禁表明确区分）；
+     * {@code blockedConfigIds} 按配置号无符号升序排列。
+     */
+    record ItemGainBlockRead(boolean found, java.util.List<Integer> blockedConfigIds) {
+        public ItemGainBlockRead {
+            blockedConfigIds = blockedConfigIds == null ? java.util.List.of() : java.util.List.copyOf(blockedConfigIds);
+        }
+
+        public static ItemGainBlockRead absent() {
+            return new ItemGainBlockRead(false, java.util.List.of());
+        }
+    }
+
     /** 读失败 / 解析失败抛 {@link SQLException}（结论未知，调用方不得据此判「无差异」或「证明成立」）。 */
     Read read(Deadline budget, long playerId) throws SQLException;
+
+    /** 只读查询该玩家已落盘的本人物品获得封禁表（默认返回读不到存档，由 {@link JdbcPlayerTables} 读权威 SQL 覆盖）。 */
+    default ItemGainBlockRead readItemGainBlocks(Deadline budget, long playerId) throws SQLException {
+        return ItemGainBlockRead.absent();
+    }
 }

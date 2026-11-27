@@ -140,6 +140,7 @@ public final class ScenePlayer {
     private final com.game.scene.player.PlayerTravelPass travelPass;
     /** 待寄个人邮件出箱（名匠代打 95% 净银两分成等，与货币/背包同事务落盘）。 */
     private final com.game.scene.player.PlayerMailOutbox mailOutbox;
+    private final com.game.scene.player.BattleReservationBook battleReservations;
     /** 收件箱运行时状态（不持久化；null = 还没在本节点落地过 / 消费关闭；只经 {@code InboxService} 读写）。 */
     private PlayerInboxRuntime inboxRuntime;
     /** 回合制战斗运行态（冻结、进场恢复；不持久化，随实例清空，scene-battle-spec §7.4）。 */
@@ -269,6 +270,9 @@ public final class ScenePlayer {
         this.mailOutbox = state.hasMailOutbox()
                 ? com.game.scene.player.PlayerMailOutbox.restore(state.getMailOutbox())
                 : com.game.scene.player.PlayerMailOutbox.empty();
+        this.battleReservations = state.hasBattleReservations()
+                ? com.game.scene.player.BattleReservationBook.restore(state.getBattleReservations())
+                : com.game.scene.player.BattleReservationBook.empty();
         if (state.hasSkillCooldowns()) {
             this.skillState.restoreCooldowns(state.getSkillCooldowns());
         }
@@ -682,6 +686,10 @@ public final class ScenePlayer {
         if (spectateChatPref != 0) {
             state.setSpectateChatPref(spectateChatPref);
         }
+        // 战斗道具预留非空时落盘；空预留保活现有空态快照脏比较不变，存盘组件存在性门禁由 SaveRowGuard 提供。
+        if (!battleReservations.isEmpty()) {
+            state.setBattleReservations(battleReservations.toState());
+        }
         return state.build();
     }
 
@@ -762,6 +770,11 @@ public final class ScenePlayer {
     /** 玩家待寄个人邮件出箱（逻辑线程上读写；写入与消费只经 {@code PlayerMailOutboxService}）。 */
     public com.game.scene.player.PlayerMailOutbox mailOutbox() {
         return mailOutbox;
+    }
+
+    /** 战斗道具预留账本（逻辑线程上读写；与背包同在 PlayerState 单事务围栏提交）。 */
+    public com.game.scene.player.BattleReservationBook battleReservations() {
+        return battleReservations;
     }
 
     /** 收件箱消费账本（逻辑线程上读写；写入只经收件箱消费端）。 */

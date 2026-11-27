@@ -336,6 +336,7 @@ public class SceneNode implements SmartLifecycle {
     private CompletableFuture<String> evacuationDone;
     private ScheduledFuture<?> evacuationCheck;
     private volatile AuditPipeline auditPipeline;
+    private volatile com.game.scene.audit.PlayerAuditOutboxBuffer auditOutboxBuffer;
     private volatile DefaultEventLoop logicLoop;
     private volatile ThreadPoolExecutor storageExecutor;
     private volatile ThreadPoolExecutor contentGuardExecutor;
@@ -555,6 +556,26 @@ public class SceneNode implements SmartLifecycle {
                                 });
                     }
                     @Override
+                    public java.util.concurrent.CompletionStage<Void> incrHotBucketAsync(long utcHour, long masterPlayerId,
+                                                                                         int ordersDelta, int supremeDelta) {
+                        String bucketKey = redisKeys.craftProxyHotBucket(zoneId, utcHour);
+                        return redis.getScript(StringCodec.INSTANCE)
+                                .evalAsync(org.redisson.api.RScript.Mode.READ_WRITE,
+                                        com.game.scene.craft.CraftProxyStallDirectory.INCR_HOT_BUCKET_LUA,
+                                        org.redisson.api.RScript.ReturnType.INTEGER,
+                                        java.util.List.of(bucketKey),
+                                        Long.toUnsignedString(masterPlayerId),
+                                        Integer.toString(ordersDelta),
+                                        Integer.toString(supremeDelta),
+                                        Long.toString(com.game.scene.craft.CraftProxyStallDirectory.HOT_BUCKET_TTL_SECONDS))
+                                .thenAccept(ignored -> { })
+                                .exceptionally(err -> {
+                                    log.warn("craft_proxy_hot_bucket_incr_failed zone={} hour={} master_id={}",
+                                            zoneId, utcHour, Long.toUnsignedString(masterPlayerId), err);
+                                    return null;
+                                });
+                    }
+                    @Override
                     public java.util.concurrent.CompletionStage<Void> setLastBuyerAsync(long masterPlayerId,
                                                                                         String buyerName) {
                         String field = Long.toUnsignedString(masterPlayerId) + ":b";
@@ -681,7 +702,8 @@ public class SceneNode implements SmartLifecycle {
         // 世界的战斗钩子就是它（进场恢复、落盘后销账、原地解冻后重跑进场恢复），世界建好后再绑定
         BattleSettlementService settlements = new BattleSettlementService(currency, bags, petService, missions, battleTables,
                 battleMetrics, SceneClock.SYSTEM, registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged"))
-                .withProgression(attributes, battleProgressionTables);
+                .withProgression(attributes, battleProgressionTables)
+                .withMailOutboxService(mailOutboxService);
         if (seasonService != null) {
             settlements.withSeasonService(seasonService);
         }
@@ -755,6 +777,9 @@ public class SceneNode implements SmartLifecycle {
                 crossNode, instances, battle, zoneTravel, inbox,
                 new com.game.scene.world.SceneAdmissionSource(Integer.toUnsignedString(nodeId), instanceId, zoneId));
         inbox.attach(sceneWorld);
+        if (auditOutboxBuffer != null) {
+            sceneWorld.withAuditOutboxBuffer(auditOutboxBuffer);
+        }
         inboxService = inbox;
         battle.attach(sceneWorld);
         battleService = battle;
@@ -998,9 +1023,21 @@ public class SceneNode implements SmartLifecycle {
                     }
                 }
                 java.util.Map<String, String> repSnapshot = redis.<String, String>getMap(proxyReputationKey, StringCodec.INSTANCE).readAllMap();
+                long nowUtcHour = com.game.scene.craft.CraftProxyStallDirectory.utcHourOfMillis(SceneClock.SYSTEM.epochMillis());
+                java.util.List<Object> hotBucketKeys = new java.util.ArrayList<>(com.game.scene.craft.CraftProxyStallDirectory.HOT_WINDOW_HOURS);
+                for (int i = 0; i < com.game.scene.craft.CraftProxyStallDirectory.HOT_WINDOW_HOURS; i++) {
+                    hotBucketKeys.add(redisKeys.craftProxyHotBucket(zoneId, nowUtcHour - i));
+                }
+                java.util.List<Object> hotRaw = redis.getScript(StringCodec.INSTANCE).eval(
+                        org.redisson.api.RScript.Mode.READ_ONLY,
+                        com.game.scene.craft.CraftProxyStallDirectory.SUM_HOT_24H_LUA,
+                        org.redisson.api.RScript.ReturnType.MULTI,
+                        hotBucketKeys);
+                java.util.Map<String, String> hotSnapshot = com.game.scene.craft.CraftProxyStallDirectory.parseHot24hLuaReply(hotRaw);
                 postToLogic(() -> {
                     craftProxyDirectory.applyRemoteSnapshot(snapshot);
                     craftProxyDirectory.applyRemoteReputationSnapshot(repSnapshot);
+                    craftProxyDirectory.applyRemoteHot24hSnapshot(hotSnapshot);
                     for (var online : sceneWorld.playersSnapshot()) {
                         if (craftProxyDirectory.drainPendingReputation(online)) {
                             sceneWorld.requestKeyProgressSave(online);
@@ -1659,7 +1696,9 @@ public class SceneNode implements SmartLifecycle {
                 TimeUnit.SECONDS);
         log.info("资产审计就绪 kafka={} topic 代次={} topic 已核对={}", audit.bootstrapServers(), generation,
                 pipeline.verified());
-        return new KafkaAssetAudit(pipeline, SceneClock.SYSTEM, zoneId);
+        com.game.scene.audit.PlayerAuditOutboxBuffer outbox = new com.game.scene.audit.PlayerAuditOutboxBuffer(pipeline::submitTransaction);
+        auditOutboxBuffer = outbox;
+        return new KafkaAssetAudit(pipeline, SceneClock.SYSTEM, zoneId).withOutboxBuffer(outbox);
     }
 
     private void onIdentitySuspended() {

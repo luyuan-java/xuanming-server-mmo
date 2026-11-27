@@ -75,6 +75,18 @@ message PlayerState {
   SavedBuffListState saved_buffs = 27;
   // 个人局外人观战交流偏好（0=未设置按服端默认允许，1=允许，2=禁止观战期间交流，绝不禁止观战）。
   uint32 spectate_chat_pref = 28;
+  // 战斗道具预留（按 battle_id 登记每局押住的消耗品配置号与数量，与背包同事务围栏提交，防续冻上限解冻后药白喝）。
+  BattleReservationBookState battle_reservations = 29;
+}
+
+message BattleReservationEntryState {
+  uint64 battle_id = 1;
+  uint64 freeze_deadline_ms = 2;
+  map<uint32, uint64> items = 3;
+}
+
+message BattleReservationBookState {
+  repeated BattleReservationEntryState entries = 1;
 }
 
 message SkillCooldownEntryState {
@@ -803,7 +815,13 @@ message MailOutboxCurrencyState {
   int64 amount = 2;
 }
 
-// 玩家持久待寄个人邮件条目（与资产扣款同事务落盘；按 request_id 幂等交给 game-mail）。
+// 待寄个人邮件单条物品附件（config_id 对应物品表 ID，count > 0）。
+message MailOutboxItemState {
+  uint32 config_id = 1;
+  uint64 count = 2;
+}
+
+// 玩家持久待寄个人邮件条目（与资产扣款/战斗结算同事务落盘；按 request_id 幂等交给 game-mail）。
 message MailOutboxEntryState {
   uint64 request_id = 1;
   // 1 = battle_overflow, 2 = craft_proxy_fee
@@ -815,6 +833,7 @@ message MailOutboxEntryState {
   // 收件人玩家 ID；0 表示发给本出箱归属者本人。
   uint64 recipient_player_id = 7;
   repeated MailOutboxCurrencyState currencies = 8;
+  repeated MailOutboxItemState items = 9;
 }
 
 message PlayerMailOutboxState {

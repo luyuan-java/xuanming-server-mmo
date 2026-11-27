@@ -71,6 +71,78 @@ public final class InboxAdminStore {
     /** ReconcilePlayer 单个玩家读出的行数上限（单条流在保留期内不超过数百行）。 */
     static final int PLAYER_ITEMS_LIMIT = 5000;
 
+    /** 运维只读查询：一条尚未生效的 GM 封禁/解封物品获取单。 */
+    public record PendingItemSanction(long seq, int msgType, int itemConfigId, long requestId, long issuedAtMs) {
+    }
+
+    /**
+     * 运维只读查询「单玩家物品获得封禁」结果（PARITY 2026-11-06）：
+     * <ul>
+     *   <li>{@code tipId != 0} 时为参数非法或存储/存档读取故障（故障时不带任何列表）；</li>
+     *   <li>先读收件箱 GM 域 PENDING 的类型 5/6 条目（按 seq 升序解出配置号），再读已落盘存档，保证在途单至少出现在一边；</li>
+     *   <li>{@code saveReadable == false} 显式标明「读不到存档」，不与「存档可读且封禁表为空」混淆；不含全服封禁。</li>
+     * </ul>
+     */
+    public record ItemGainBlocksResult(
+            int tipId,
+            boolean saveReadable,
+            List<Integer> persistedBlockedConfigIds,
+            List<PendingItemSanction> pendingSanctions) {
+        public ItemGainBlocksResult {
+            persistedBlockedConfigIds = persistedBlockedConfigIds == null ? List.of() : List.copyOf(persistedBlockedConfigIds);
+            pendingSanctions = pendingSanctions == null ? List.of() : List.copyOf(pendingSanctions);
+        }
+
+        public static ItemGainBlocksResult error(int tipId) {
+            return new ItemGainBlocksResult(tipId, false, List.of(), List.of());
+        }
+    }
+
+    /**
+     * 运维只读查询单玩家已落盘与在途的个人物品获得封禁（不含全服封禁）。
+     * 严格顺序：先读收件箱 GM 域待执行封禁/解封单（5/6），再读玩家已落盘存档。任一侧读失败抛出 {@link SQLException}。
+     */
+    public ItemGainBlocksResult getItemGainBlocks(Deadline budget, long playerId) throws SQLException {
+        if (playerId == 0L) {
+            return ItemGainBlocksResult.error(InboxTips.INVALID_PARAMETER);
+        }
+        int shard = InboxShards.rowShard(playerId);
+        int blockType = com.game.proto.player_inbox.PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_BLOCK_ITEM_GAIN_VALUE;
+        int unblockType = com.game.proto.player_inbox.PlayerInboxMessageType.PLAYER_INBOX_MSG_GM_UNBLOCK_ITEM_GAIN_VALUE;
+        List<PendingItemSanction> pending = new ArrayList<>();
+        long afterSeq = 0L;
+        final int pageSize = 500;
+        while (true) {
+            AuthorityJdbc.check(budget);
+            final long cursor = afterSeq;
+            List<player_inbox_item_row> page = jdbc.read(budget, s -> s.list(
+                    "SELECT " + ITEM_COLUMNS + " FROM " + ITEM_TABLE
+                            + " WHERE `shard` = ? AND `player_id` = ? AND `domain` = ? AND `state` = ?"
+                            + " AND `msg_type` IN (?, ?) AND `seq` > ? ORDER BY `seq` ASC LIMIT ?",
+                    InboxSql::item,
+                    shard, u64(playerId), u32(PlayerInboxDomain.PLAYER_INBOX_DOMAIN_SCENE_GM_SANCTION_VALUE),
+                    PENDING, u32(blockType), u32(unblockType), u64(cursor), pageSize));
+            for (player_inbox_item_row row : page) {
+                com.game.proto.player_inbox.GmItemGainPayload payload;
+                try {
+                    payload = com.game.proto.player_inbox.GmItemGainPayload.parseFrom(row.getPayload());
+                } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+                    throw new SQLException("GM 物品封禁收件箱载荷解析失败 player=" + Long.toUnsignedString(playerId)
+                            + " seq=" + Long.toUnsignedString(row.getSeq()), e);
+                }
+                pending.add(new PendingItemSanction(
+                        row.getSeq(), row.getMsgType(), payload.getItemConfigId(),
+                        row.getRequestId(), row.getIssuedAtMs()));
+            }
+            if (page.size() < pageSize) {
+                break;
+            }
+            afterSeq = page.getLast().getSeq();
+        }
+        LedgerReader.ItemGainBlockRead save = ledgers.readItemGainBlocks(budget, playerId);
+        return new ItemGainBlocksResult(0, save.found(), save.found() ? save.blockedConfigIds() : List.of(), pending);
+    }
+
     /**
      * 一次运维作废的输入。
      *

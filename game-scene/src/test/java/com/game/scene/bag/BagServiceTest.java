@@ -68,13 +68,13 @@ class BagServiceTest {
     }
 
     @Test
-    void 全服禁发的物品回1005_零写入不记流水_计封禁拒绝_先于数量校验() {
+    void 全服禁发的物品回27005_零写入不记流水_计封禁拒绝_先于数量校验() {
         service.applyGlobalBlocks(new GlobalGainBlocks(Set.of(), Set.of(10)));
 
         assertThat(service.addItems(player, BagType.INVENTORY, Map.of(1, 1L, 10, 1L), Reason.SYSTEM_GRANT, 0, "").tip())
-                .isEqualTo(1005);
+                .isEqualTo(BagService.ITEM_BLOCKED);
         assertThat(service.addItems(player, BagType.INVENTORY, Map.of(10, 0L), Reason.SYSTEM_GRANT, 0, "").tip())
-                .isEqualTo(1005);
+                .isEqualTo(BagService.ITEM_BLOCKED);
         assertThat(player.bags().bag(BagType.INVENTORY).itemCount()).isZero();
         assertThat(audit.items).isEmpty();
         assertThat(counter("game.scene.gain.blocked", "category", "item")).isEqualTo(2);

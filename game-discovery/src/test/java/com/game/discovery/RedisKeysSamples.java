@@ -75,6 +75,7 @@ final class RedisKeysSamples {
                 new Sample("mysteryMerchant", k -> k.mysteryMerchant(1), "game:world:{z:1}:mystery-merchant"),
                 new Sample("craftProxyStalls", k -> k.craftProxyStalls(1), "game:world:{z:1}:craft-proxy-stalls"),
                 new Sample("craftProxyReputation", k -> k.craftProxyReputation(1), "game:world:{z:1}:craft-proxy-reputation"),
+                new Sample("craftProxyHotBucket", k -> k.craftProxyHotBucket(1, 498000L), "game:world:{z:1}:craft-proxy-hot:498000"),
                 new Sample("channelSwitchCooldown", k -> k.channelSwitchCooldown(3), "game:player:3:channel-switch-cooldown"),
                 new Sample("worldDesired", k -> k.worldDesired(1), "game:world:{z:1}:desired"),
                 new Sample("worldCooldown", k -> k.worldCooldown(1), "game:world:{z:1}:cooldown"),

@@ -511,6 +511,9 @@ public final class BattleFixture {
         drain();
         confirm(playerId, battleId, deadline);
         drain();
+        while (repo.pendingProgress() > 0) {
+            repo.takeProgress().complete(ProgressResult.SAVED);
+        }
         ScenePlayer player = world.playerById(playerId);
         assertThat(player.battle().freeze()).isNotNull();
         assertThat(player.battle().freeze().phase()).isEqualTo(BattleFreeze.Phase.FIGHTING);

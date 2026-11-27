@@ -420,6 +420,7 @@ public final class AssetOpService {
         var counts = new java.util.TreeMap<Integer, Long>(Integer::compareUnsigned);
         for (var item : bundle.getItemsList()) counts.put(item.getConfigId(), Integer.toUnsignedLong(item.getCount()));
         var prepared = bags.prepareDebit(player, counts, bundle.getItemUuidsList());
+        if (prepared.tip() == IN_BATTLE) return answer(AssetOutcome.ASSET_OUTCOME_RETRY, IN_BATTLE);
         if (prepared.tip() != 0) return rejectAndRecord(player, request, prepared.tip(), nowMs);
         var snapshot = com.game.api.proto.AssetSnapshot.newBuilder();
         for (var item : prepared.instances()) {
@@ -563,18 +564,19 @@ public final class AssetOpService {
         return applied(player, request, partial, nowMs);
     }
 
-    /** 物品段零改动失败：按错误类别选结局（同基线）。 */
+    /** 物品段零改动失败：按错误类别选结局（封禁终局拒绝排在可重试的满包/铸号预检之前，PARITY 2026-11-06）。 */
     private AssetOpResponse itemsFailed(ScenePlayer player, AssetOpRequest request, int tip, long nowMs) {
+        if (tip == BagService.ITEM_BLOCKED) {
+            return rejectAndRecord(player, request, BLOCKED, nowMs);
+        }
         if (tip == Bag.NO_SPACE) {
             // 空间不足：暂时条件，同一 seq 稍后重投（超过业务时限由调用方改发中止）
             return answer(AssetOutcome.ASSET_OUTCOME_RETRY, BAG_FULL);
         }
         if (tip == BagService.REFUSED) {
             if (player.frozen()) {
-                // 入包的闸只有冻结与封禁两种；冻结第 5 步已挡掉、到不了这里，万一到了按暂时条件处理，不能记成终局拒绝
                 return answer(AssetOutcome.ASSET_OUTCOME_RETRY, FROZEN);
             }
-            // 走到这里就是封禁——终局拒绝，记账
             return rejectAndRecord(player, request, BLOCKED, nowMs);
         }
         if (tip == Bag.INVALID_PARAM) {

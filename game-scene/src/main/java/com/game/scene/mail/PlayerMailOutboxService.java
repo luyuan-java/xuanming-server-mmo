@@ -36,6 +36,12 @@ public final class PlayerMailOutboxService {
 
     /** sender_kind = 5（"battle"，见 MailStore.sender）。 */
     public static final int SENDER_KIND_BATTLE = 5;
+    /** 战斗掉落溢出待寄邮件上限（主仓 32 条；攒满时回退为整笔结算延后，防出箱无限膨胀）。 */
+    public static final int BATTLE_OVERFLOW_MAX_PENDING = 32;
+    /** 单封战斗溢出邮件最多附件种数。 */
+    public static final int BATTLE_OVERFLOW_MAX_TYPES = 16;
+    /** 单封战斗溢出邮件合计最多附件件数。 */
+    public static final int BATTLE_OVERFLOW_MAX_TOTAL_COUNT = 4096;
     private static final long MAIL_EXPIRE_MS = 30L * 86_400_000L;
     private static final long BASE_RETRY_BACKOFF_MS = 1_000L;
     private static final long MAX_RETRY_BACKOFF_MS = 60_000L;
@@ -100,6 +106,109 @@ public final class PlayerMailOutboxService {
         return buyer.mailOutbox().append(entry);
     }
 
+    /** 预检战斗掉落溢出邮件是否未触达待寄上限（32 条），不修改玩家状态。 */
+    public boolean canEnqueueBattleOverflow(ScenePlayer player, Map<Integer, Long> gained) {
+        if (player == null || gained == null || gained.isEmpty()) {
+            return false;
+        }
+        int needed = splitBattleOverflowItems(gained).size();
+        if (needed == 0) {
+            return true;
+        }
+        int existingBattleOverflow = 0;
+        for (MailOutboxEntryState e : player.mailOutbox().entries()) {
+            if (e.getSource() == PlayerMailOutbox.SOURCE_BATTLE_OVERFLOW) {
+                existingBattleOverflow++;
+            }
+        }
+        return existingBattleOverflow + needed <= BATTLE_OVERFLOW_MAX_PENDING
+                && player.mailOutbox().size() + needed <= PlayerMailOutbox.MAX_ENTRIES;
+    }
+
+    /**
+     * 战斗掉落两包（人物背包 + 临时格）都放不下时，按「一封至多 16 种、合计至多 4096 件」拆封写入玩家待寄邮件出箱
+     * （与结算在同一次存档事务落盘，待寄达到 32 条上限返回 false 回落整笔延后，不丢不重，PARITY 2026-11-12）。
+     */
+    public boolean enqueueBattleOverflow(ScenePlayer player, long battleId, Map<Integer, Long> gained) {
+        if (player == null || battleId == 0L || gained == null || gained.isEmpty()) {
+            return false;
+        }
+        java.util.List<java.util.List<com.game.player.store.state.MailOutboxItemState>> chunks = splitBattleOverflowItems(gained);
+        if (chunks.isEmpty()) {
+            return true;
+        }
+        int existingBattleOverflow = 0;
+        for (MailOutboxEntryState e : player.mailOutbox().entries()) {
+            if (e.getSource() == PlayerMailOutbox.SOURCE_BATTLE_OVERFLOW) {
+                existingBattleOverflow++;
+            }
+        }
+        if (existingBattleOverflow + chunks.size() > BATTLE_OVERFLOW_MAX_PENDING
+                || player.mailOutbox().size() + chunks.size() > PlayerMailOutbox.MAX_ENTRIES) {
+            return false;
+        }
+        long[] ids = new long[chunks.size()];
+        for (int i = 0; i < ids.length; i++) {
+            ids[i] = requestIds.getAsLong();
+            if (ids[i] == 0L) {
+                return false;
+            }
+        }
+        long nowMs = clock.epochMillis();
+        for (int i = 0; i < chunks.size(); i++) {
+            MailOutboxEntryState entry = MailOutboxEntryState.newBuilder()
+                    .setRequestId(ids[i])
+                    .setSource(PlayerMailOutbox.SOURCE_BATTLE_OVERFLOW)
+                    .setSourceId(battleId)
+                    .setCreatedMs(nowMs)
+                    .setRecipientPlayerId(player.playerId())
+                    .setTitle("战斗奖励")
+                    .setBody("您的背包与临时格已满，本场战斗掉落奖励已随邮件发放，请腾出背包空位后及时领取。")
+                    .addAllItems(chunks.get(i))
+                    .build();
+            if (!player.mailOutbox().append(entry)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 将战斗掉落按配置号无符号升序拆分为满足「每封 ≤ 16 种且合计 ≤ 4096 件」的邮件附件分块。 */
+    public static java.util.List<java.util.List<com.game.player.store.state.MailOutboxItemState>> splitBattleOverflowItems(
+            Map<Integer, Long> gained) {
+        java.util.TreeMap<Integer, Long> ordered = new java.util.TreeMap<>(Integer::compareUnsigned);
+        gained.forEach((cfg, cnt) -> {
+            if (cfg != null && cfg != 0 && cnt != null && cnt > 0L) {
+                ordered.merge(cfg, cnt, Long::sum);
+            }
+        });
+        java.util.List<java.util.List<com.game.player.store.state.MailOutboxItemState>> chunks = new java.util.ArrayList<>();
+        java.util.List<com.game.player.store.state.MailOutboxItemState> current = new java.util.ArrayList<>();
+        long currentTotal = 0L;
+        for (Map.Entry<Integer, Long> e : ordered.entrySet()) {
+            int cfg = e.getKey();
+            long remaining = e.getValue();
+            while (remaining > 0L) {
+                if (current.size() >= BATTLE_OVERFLOW_MAX_TYPES || currentTotal >= BATTLE_OVERFLOW_MAX_TOTAL_COUNT) {
+                    chunks.add(java.util.List.copyOf(current));
+                    current = new java.util.ArrayList<>();
+                    currentTotal = 0L;
+                }
+                long take = Math.min(remaining, BATTLE_OVERFLOW_MAX_TOTAL_COUNT - currentTotal);
+                current.add(com.game.player.store.state.MailOutboxItemState.newBuilder()
+                        .setConfigId(cfg)
+                        .setCount(take)
+                        .build());
+                currentTotal += take;
+                remaining -= take;
+            }
+        }
+        if (!current.isEmpty()) {
+            chunks.add(java.util.List.copyOf(current));
+        }
+        return chunks;
+    }
+
     /** 构造确定性个人邮件请求（同一 request_id 重投字节级一致，满足 MailStore 幂等校验）。 */
     public static SendMailRequest buildSendRequest(long ownerPlayerId, MailOutboxEntryState entry) {
         long recipient = entry.getRecipientPlayerId() != 0L ? entry.getRecipientPlayerId() : ownerPlayerId;
@@ -108,6 +217,11 @@ public final class PlayerMailOutboxService {
             attachments.addCurrencies(MailCurrency.newBuilder()
                     .setCurrencyType(c.getCurrencyType())
                     .setAmount(c.getAmount()));
+        }
+        for (com.game.player.store.state.MailOutboxItemState item : entry.getItemsList()) {
+            attachments.addItems(com.game.proto.mail.MailItem.newBuilder()
+                    .setConfigId(item.getConfigId())
+                    .setCount((int) Math.min(item.getCount(), 0xFFFF_FFFFL)));
         }
         long createdMs = entry.getCreatedMs();
         long expireMs = createdMs > Long.MAX_VALUE - MAIL_EXPIRE_MS ? Long.MAX_VALUE : createdMs + MAIL_EXPIRE_MS;

@@ -19,4 +19,10 @@ public final class GainWindows {
     public GainWindow item(int configId) {
         return items.computeIfAbsent(configId, t -> new GainWindow());
     }
+
+    /** 清空该玩家的全部货币与物品异常收益滑动窗口。 */
+    public void clear() {
+        currencies.clear();
+        items.clear();
+    }
 }

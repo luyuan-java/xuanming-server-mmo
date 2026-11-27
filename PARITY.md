@@ -4,7 +4,7 @@
 
 | 范围 | C++ / Go 权威版 + Unity 客户端 | Java / Python 版 | 状态 |
 |---|---|---|---|
-| 西市热榜 `recent_24h_orders` / `recent_24h_supreme` 原先只累加、从不归零，几天后「近 24 小时」就成了开摊以来的累计，热榜变成老宗师的累计榜 | C++ 改为每个 UTC 小时一个桶 `craft_proxy_hot:{ctl:<zone>}:<UTC 秒/3600>`（字段 `<宗师>:o` / `:s`，`HINCRBY` 后 `EXPIRE` 25 小时），刷新时用一段同槽只读 Lua 把当前小时与前 23 个小时的桶求和；待回账表停写 `:24o` / `:24s`。客户端协议不变。设计见 mmorpg 仓 `docs/design/craft-proxy-reputation-digest-and-hot-ranking.md` §2.6 | Python 版同步（同键同字段，Python 仓 `docs/design/craft-proxy-shared-ledger-redis.md` §2.4）。**Java 待做**：`CraftProxyStallDirectory` 的 `hotCounters` 与 `:24o` / `:24s` 仍是累计，改成同样的小时分桶窗口（Java 用自己的键前缀即可，口径一致：当前小时 + 前 23 个小时、桶 25 小时过期） | Java 待做 |
+| 西市热榜 `recent_24h_orders` / `recent_24h_supreme` 原先只累加、从不归零，几天后「近 24 小时」就成了开摊以来的累计，热榜变成老宗师的累计榜 | C++ 改为每个 UTC 小时一个桶 `craft_proxy_hot:{ctl:<zone>}:<UTC 秒/3600>`（字段 `<宗师>:o` / `:s`，`HINCRBY` 后 `EXPIRE` 25 小时），刷新时用一段同槽只读 Lua 把当前小时与前 23 个小时的桶求和；待回账表停写 `:24o` / `:24s`。客户端协议不变。设计见 mmorpg 仓 `docs/design/craft-proxy-reputation-digest-and-hot-ranking.md` §2.6 | Python 版同步（同键同字段，Python 仓 `docs/design/craft-proxy-shared-ledger-redis.md` §2.4）。**Java 已对齐（2026-11-27）**：`game-discovery` `RedisKeys.craftProxyHotBucket(zoneId, utcHour)` 新增同槽小时桶键 `game:world:{z:<zone>}:craft-proxy-hot:<utcHour>`（113 键黄金用例通过）；`game-scene` `CraftProxyStallDirectory` 改为 24 小时 UTC 分桶滑窗（`INCR_HOT_BUCKET_LUA` 写入并 `EXPIRE 90000` 秒即 25 小时，`SUM_HOT_24H_LUA` 同槽聚合当前小时 + 前 23 个小时，本地按小时分桶自动淘汰过期桶，待回账表停写 `:24o` / `:24s`），`SceneNode` 接入 5 秒定时跨服同槽聚合回刷。验证：`game-discovery` **8/8 PASS**、`game-scene` `Batch4T2ASceneParityTest` 等 **196/196 PASS** | 已对齐 |
 
 ## 2026-11-27 Actor 隔离改造审阅后的 Java 收尾（Java 已对齐）
 
@@ -1178,19 +1178,14 @@ Java 版 `0.1.0-SNAPSHOT` 的节点链路已有等价机制,不需要改代码:
 
 2026-11-26 核销：核心能力已于 2026-11-24（`4ba23647`）在 `game-scene`（`TeamFollowTrail`/`TeamFollowFormation`/`TeamFollowCoordinator`/`SceneWorld`/`ClientRequestHandler` 381）与 `game-team`（`TeamPushes`/`DubboSceneTeamSignals`）落地，`AfkPassHostingAndTeamFollowTest` 与 `TeamFollowServiceTest` 已覆盖（后续间距与三阵型由各自独立条目追踪）。
 
-### 2026-11-06 AOI 单向关注、单玩家物品获得封禁、异常收益窗口重置（C++ 已落码未编译，Java 待做）
+### 2026-11-06 AOI 单向关注、单玩家物品获得封禁、异常收益窗口重置（Java 已对齐）
 
-C++ 版（基于 `f6fddb466` 及之后的工作区改动，未编译，待 Codex 验证）：交接、口径与合并验证顺序见 C++ 仓 `docs/handoff/aoi-and-player-safeguards-20261104.md`，AOI 设计见 `docs/design/aoi-directed-interest.md`，物品封禁见 `docs/design/player-inbox-service.md` §2.2。
+2026-11-27 已在 `game-scene` / `game-inbox` 完整对齐（设计见主仓 `docs/design/aoi-directed-interest.md` 与 `docs/design/player-inbox-service.md` §2.2）：
 
-Java 版 `0.1.0-SNAPSHOT` 待做：
-
-1. **AOI 单向关注**（服务端内部，客户端消息与消息号不变）：scene 的视野关系改成有向的两张索引（观察者→目标、目标→观察者），一条关系区分空间来源（网格邻近且可见）与显式来源（玩法登记，身份 = 种类 + 实例号，可多份），客户端只有一份可见状态。移动、属性、技能广播发给「正在显示目标的观察者」，网格外的显式关注者同样收到，目标不因此看到关注者。离场、换场景、销毁按两张索引清理，不扫全节点。隐身开始与结束立即重判：没有侦测授权的观察者收一次移除，恢复时用最新位置重新创建；侦测授权只由显式来源给出。容量满时按权重淘汰并通知观察者本人，名额空出后补回暂隐的显式关注。
-2. **单玩家物品获得封禁**（客户端契约同批）：同步 `game-proto`：`player_inbox.proto` 新类型 `PLAYER_INBOX_MSG_GM_BLOCK_ITEM_GAIN = 5`、`PLAYER_INBOX_MSG_GM_UNBLOCK_ITEM_GAIN = 6` 与 `GmItemGainPayload`，`player_inbox_admin.proto` 的 `GmSanctionPlayerRequest` oneof 9 / 10，新组件 `PlayerItemGainBlockComp` 与存档字段 `player_database.item_gain_block = 24`。按同一语义实现：封禁表随玩家存档持久化，与 GM 收件箱执行账本同一次提交；所有物品获得入口统一判「全服或本人」，命中回 27005（`kAssetBlocked`），在扣款、扣料之前整批拒绝，不转投临时包；商店扣款前预检；资产转入是终局拒绝，排在可重试的预检之前；存档还原、整理和同一所有者内部搬运不判；封禁、解禁天然幂等。**客户端可见变化**：全服物品封禁的拒绝码由 `kInvalidParameter`（1005）改为 27005，两版同批。
-   - **GM 查询（2026-11-06 C++ 补，未编译）**：C++ 新增运维接口 `PlayerInboxAdmin.GetItemGainBlocks(player_id)`，回已落盘的本人封禁表与还没生效的封禁 / 解封单（GM 域仍 PENDING 的条目，按 seq 升序、载荷解出配置号）。Java 在自己的 GM 运维面实现等价的只读查询（服务端内部接口，不照抄 proto），语义对齐：要运维口令；先读收件箱、后读存档，保证一条单至少出现在其中一边；读不到存档时标明「读不到」而不是回空表；读失败回可重试的故障码、不带任何列表；不含全服封禁。C++ 设计见 `docs/design/player-inbox-service.md` §2.2「运维查询」，用例见 `go/player_inbox/internal/inbox/item_gain_blocks_test.go` 与 `store_integration_test.go` 的 `TestIntegrationItemGainBlocksListsPendingItemSanctions`。
-3. **异常收益窗口重置**：Java 有等价的异常收益统计时，补「只清指定玩家窗口」的内部接口（阈值、告警、流水与其他玩家窗口不变；空句柄、过期句柄与重复调用安全；下一笔收益重新计数），不新增 GM RPC。没有等价模块时在本条注明不适用。
-4. 验证：按 Java 仓 `AGENTS.md` 的口径跑 `mvn -o -B -fae clean install`，新增用例覆盖上面三项的验收场景；C++ 对应用例在 `cpp/tests/aoi_delivery_test/aoi_delivery_test.cpp`、`cpp/tests/bag_test/player_item_gain_block_test.cpp`、`cpp/tests/currency_test/anomaly_detector_test.cpp`，可对照取场景。
-
-本条只登记待做，未修改 Java 代码，也没有运行 Java 构建或测试。
+1. **AOI 单向关注**：`game-scene` `ViewIndex` 升级为有向双索引（`explicitTargets` / `explicitObservers`），区分空间来源与带身份 `(kind, instanceId, weight, detectsStealth)` 的多份显式来源；`setStealth` 立即重判且侦测授权仅来自显式来源（无授权发移除，解隐用最新位置重发创建）；容量满按权重淘汰并随名额空出自动补回暂隐显式目标；`leave` 按双索引 O(degree) 清理。
+2. **单玩家物品获得封禁与 GM 运维查询**：`BagService` 拆分 `ITEM_BLOCKED = kAssetBlocked (27005)` 与 `REFUSED (1005)` 并覆全路径（背包入包/商店/游历通行证/锻造/资产入账终局拒绝前置在可重试检查之前）；`game-inbox` 新增 `LedgerReader.readItemGainBlocks` / `JdbcPlayerTables.readItemGainBlocks` / `InboxAdminStore.getItemGainBlocks`（严格先读 GM 待执行 5/6 升序再读玩家存档、区分 `saveReadable=false` 与空表、不含全服封禁、读错抛故障不带列表）与 `InboxAdminController` `GET /admin/inbox/players/{playerId}/item-gain-blocks`（受 `InboxAdminAuthFilter` 口令保护，故障返回 `STORE_UNAVAILABLE`）。
+3. **异常收益窗口重置**：`GainWindows.clear()` 与 `GainAnomalyDetector.resetPlayer(ScenePlayer)` 实现仅清指定玩家窗口（空句柄与重复调用安全，阈值/告警与其他玩家窗口不变）。
+4. **验证**：`game-inbox` `ItemGainBlocksAdminQueryTest` + `BattleInboxRecoveryTest` + `InboxAdminReconcilePaginationTest` **9/9 PASS**；`game-scene` `Batch4T2ASceneParityTest` + `ViewIndexTest` + `BagServiceTest` + `ActivityVitalityAndItemBlockTest` + `GainAnomalyDetectorTest` 等 **196/196 PASS**。
 
 ### 2026-11-06 依赖断线与重连核对（Java 已对齐）
 
@@ -1254,25 +1249,12 @@ Java 版 `0.1.0-SNAPSHOT` 待做：
   - `game-trade`：`CommerceStore` 新增 `due`/`pendingOps`/`ackDue` 分片查询（分片条件前置在 `LIMIT` 之前）与 `rescheduleUnchanged`（仅更新调度键 `updated_ms`、不改 `version`）；`CommerceEngine.advance` 无业务变化且无新腿时走 `rescheduleUnchanged`（纯等时间/玩家操作的 `confirm`/`open`/`lot_open`/`market_open`/`wanted_open` 排到 `min(expires_ms, now+1h)`，有在途腿/等子单走 30s 兜底）；`CommerceRuntime` 挂载 `RedisWorkShardMembership` 并在 `matching.match` 失败时将 taker 提前唤醒到 `now`。
   - **验证**：`game-common` `WorkShardTest` 2/2 PASS；`game-discovery` `RedisWorkShardMembershipTest` + `RedisKeysGoldenTest` + `RedisKeysNamespaceTest` 9/9 PASS；`game-trade` `TradeShardingAndEventWakeTest` 4/4 + `CommerceRuntimeTest` 9/9（1 TiDB IT 跳过）+ `DeliveryOrderAndTxTypeTest` 5/5 + `OrderBookFilterTest` 4/4 + `WantedSkillBookTest` 6/6 = **28/28 PASS**。
 
-### 2026-11-06 资产流水跟着存盘提交走(主仓已落码未编译,Java 待做)
+### 2026-11-06 资产流水跟着存盘提交走（Java 已对齐）
 
-主仓说明见 `docs/PROGRESS.md` 2026-11-05「Claude:数据一致性复查与修复」第 1 条,以及 `docs/design/data-consistency-guarantee-map-20261020.md` §6.3 第 1 条。C++ 版在主仓 `0f484db0d`(`cpp/libs/modules/transaction_log/transaction_log_system.*`、`player_store_client.*`、`player_lifecycle.cpp`),未编译、未测试。Java 版 `0.1.0-SNAPSHOT` 待做。
-
-- **Java 现状**(11-06 只读核对):
-  - `CurrencyService` 改完钱包立刻调 `audit.currencyChanged`,经 `KafkaAssetAudit` → `AuditPipeline` 异步发 Kafka。
-  - 资产通道 `AssetOpService` 也是先发流水,记账之后才 `requestSave`。流水记录里没有 owner_epoch,也没有「已落盘」标记。
-  - 玩家存档定时写回缺省 300 秒(`GAME_SCENE_SAVE_INTERVAL`);资产通道、收件箱、战斗结算之后立即存。
-  - 后果:流水里有这一条,不等于这笔改动已经落库。节点崩溃,或被夺权(MySQL 失联超过 30 秒的归属租约窗口)时,改动被围栏丢弃,流水却已经发出去了。
-- **要做**,口径与主仓相同:
-  - 只涉及一名玩家的流水按玩家暂存。等包含这笔改动的那次存盘提交成功,或确定这份快照不用写之后,再交给 `AuditPipeline`。
-  - 存盘被围栏拒绝、结果未知、被更新的快照取代时都不放行。实体移除或被夺权时丢弃暂存。
-  - 每人设上限,超了丢最旧的一条并告警:宁可缺一条,也不发一条没落库的。
-  - 反过来不成立:提交之后发送失败时仍可能缺流水,判「从未应用」仍要读已提交账本。
-- **消费方**:
-  - 帮会 `AssetOpFixMain` 改用已提交账本作证据,本表「2026-11-06 数据覆写审计第二轮遗留修复」已经登记。
-  - GM 回收 dry-run 的应回收量按流水汇总。这一条做完之前,没落库的改动也会被算进去。
-- **验证口径**:流水只在包含它的存盘提交之后出现;存盘被围栏拒绝时,对应的流水不出现。
-- 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已与下方「2026-11-12 审计发件箱」一并完整对齐（设计见 `docs/design/data-consistency-guarantee-map-20261020.md` §6.3 与 `docs/design/player-audit-outbox.md`）：
+- `game-scene` 新增 `PlayerAuditOutboxBuffer` 并接入 `KafkaAssetAudit` / `SceneWorld` / `SceneNode`：仅允许单玩家流水（`from` XOR `to`），按玩家暂存（单条上限 2 MiB、单人上限 8 MiB 超限丢最旧并计数告警）；仅在包含该批改动的存盘提交确认（或快照无需写回确认）后放行提交；存盘被围栏拒绝、结果未知、被取代或实体离场/夺权时一律不放行并清空暂存。
+- 资产变动存盘通知仍在记流水判定之后无条件触发（即便流水超限/拒收也会触发尽快存盘）。
+- **验证**：`game-scene` `Batch4T2ASceneParityTest`（验证未存盘不放行、被围栏丢弃清空、存盘提交后精确放行）等 **196/196 PASS**。
 
 ### 2026-11-06 开通挂机的玩家断线后离线托管(Java 待做)
 
@@ -1477,42 +1459,13 @@ Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`
 - **匹配终局发件箱与投榜/摘榜发件箱**：`game-match` `BattleCompletionStore` / `BattleCompletionReplay` 对整局结果表（`match_battle_completion`）按 `MOD(battle_id,64) IN(...)` 前置于 `LIMIT 16`、对个人结算首投与等待确认两页（`match_battle_player_completion`）共用 `MOD(player_id,64) IN(...)` 前置于 `LIMIT 8`，截止自动放弃（`terminalDeadlineCandidates`）不看归属；`RatingRankOutbox` 对 `source_epoch` 投榜与 `match_rank_removal` 摘榜（`MOD(player_id,64) IN(...)` 前置于 `LIMIT 16`）按全服 `matchWorkShardMembership` 分工；`GlobalMatchConfiguration` / `RatingConfiguration` 完成装配。
 - **验证**：`game-guild` 64/64 PASS、`game-match` `MatchOutboxShardingAndLivenessTest` + `BattleCompletionShardingTest` 等 **5/5 PASS**、`game-trade` `TradeShardingAndEventWakeTest` + `CommerceRuntimeTest` 等 **18/18 PASS**（1 TiDB skip）。
 
-### 2026-11-10 战斗道具预留(Java 待做)
+### 2026-11-10 战斗道具预留（Java 已对齐）
 
-主仓说明见:
-
-- `docs/design/battle-item-reservation.md`;
-- 主仓 `docs/PROGRESS.md` 2026-11-10「战斗道具预留——续冻上限之后晚到的结算不再按持有量夹紧」。
-
-主仓已落码,未编译。要解决的问题两版相同:冻结按期限解开之后,玩家可以把这一局带进战斗的消耗品经交易、帮会捐献、邮件转走,
-晚到的结算只能按持有量夹紧(「药白喝」,可逐局刷)。其中「两个背包都满、结算整笔延后」这条路玩家可以自己造出来。
-
-Java 版 `0.1.0-SNAPSHOT` 待做,做同一组行为。Java 的冻结与锁模型不同(断线即写回、重连新建实例,锁在 Redis 哈希里),
-预留必须放在玩家存档里,与背包同一次提交,不能放在锁或内存里:
-
-1. **备战**:按战斗快照的道具副本(人物背包里可参战、可计数的单位,按配置号求和,扣掉别的局已押着的数量)建一份预留。
-   建不起来就整笔拒绝备战、不留冻结;建起来之后尽快落盘。
-2. **结算**:消耗按「可计数总量 - 别的局的预留」扣,本局预留可以动用;成功后同一帧释放本局预留,随结算那一次存档提交。
-3. **释放**:
-   - match 取消备战时释放;
-   - 冻结到期查到 ABORT,或没有可裁决原件时释放;
-   - 续冻到上限、备战到期时**不释放**。
-4. **出包**:交易托管、帮会捐献、GM 回收、强化 / 镶嵌扣材料都只动未被预留占住的数量。资产通道回 RETRY(与主仓的 `kAssetInBattle` 同码,客户端可见的码两版要一致),强化 / 镶嵌回暂不可用。
-   穿上装备也是把东西移出人物背包,同样要先问预留(主仓 2026-11-11 补,回暂不可用);今天的物品表里没有既是装备又可参战的行,
-   这一条让不变量不依赖配表约定。以后新加的「移出人物背包」入口(存仓库、丢弃、出售)都要先问。
-5. **复核**:冻结已不在的预留,到了冻结到期时刻、玩家可改,就查终局:ABORT / 没有可裁决原件释放,其余留着,没有上限;超过「到期 + 15 分钟」周期性告警。
-6. **前置**:Java 的「冻结到期先查 SQL 终局、有界续冻」(r2-v1#1)仍待做,见上面 2026-11-06 的登记。预留的复核要用同一条只读终局查询。
-
-验证按 Java 仓自己的口径(见其 `AGENTS.md`),用例要覆盖:
-
-- 结算从本局预留里扣;
-- 别的局的预留扣不走;
-- 到上限只解冻、预留还在、交易扣款回 RETRY;
-- ABORT / 取消释放;
-- 复核只认 ABORT 与没有可裁决原件;
-- 快照不含别的局押着的数量;
-- 存盘缺预留组件整份拒存;
-- 穿戴:两件同款押一件,第一件能穿、第二件回暂不可用且两包不动,释放之后能穿。
+2026-11-27 已在 `game-player-store` / `game-scene` 完整对齐（设计见 `docs/design/battle-item-reservation.md`）：
+- **持久化与守卫**：`game-player-store` `player_state.proto` 尾插 `BattleReservationBookState battle_reservations = 29` 并登记第 28 代持久台账 `0028.schema`（`HEAD_SHA256 = 7890e9ba...`）；`SaveRowGuard.requireBattleReservationsPresent` 缺预留组件整份拒存。
+- **备战、快照、出包与穿戴**：`ScenePlayer.battleReservations()` 承载 `BattleReservationBook`；`BattleSnapshots.build(..., selfBattleId)` 扣除其他对局已押数量；`PlayerBattleService.prepareBattle` 按可参战可计数道具建预留并尽快触发存盘，建不起来整笔拒接不留冻结；`BagService.prepareDebit` 被预留拦截回 `kAssetInBattle (27002)` 驱动 `AssetOpService.applyTradeDebit` 回 `RETRY`；`EquipmentService`（`equip` 与强化/镶嵌 `quantityTip`）被预留拦截回 `kServiceUnavailable`（两件同款押一件可穿第一件、第二件拒穿且两包不动、释放后可穿）。
+- **释放与终局复核**：`cancel` 与 `reapFighting` 查到 `SAFE_TO_RELEASE`（`ABORT`/无原件）时释放；续冻达 15 分钟上限或备战到期不释放；`reap()` 定期复核未冻结已过期的预留（仅 `SAFE_TO_RELEASE` 释放，超到期 +15m 打 ERROR 告警）；结算消耗保护他局预留并在同帧原子释放本局预留随结算存盘提交。
+- **验证**：`game-player-store` `PlayerStateSchemaLedgerTest` + `AuditOutboxAndReservationSchemaTest` + `SaveRowGuardTest` **4/4 PASS**；`game-scene` `Batch4T2ASceneParityTest` + `PrepareBattleTest` + `SettlementApplyTest` + `EquipmentServiceTest` + `AssetOpServiceTest` 等 **196/196 PASS**。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
@@ -1731,35 +1684,13 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 - **场景侧短路**：`game-scene` `BattleSettlementService`（`applyInbox` 与 `applyOnce`）在任何效果路径前拦截 `BATTLE_OUTCOME_VOID`：校验七字段白名单（不合格整笔 `DEFERRED` 并记 ERROR），合格则零修改血蓝/宠物/货币/经验/道具/任务/赛季额度，仅写入空明细 `VOID` 近期战果，存盘确认后解冻放锁并推送 `BattleEndS2C{outcome=VOID}`。
 - **验证**：`game-battle` `BattleResultAssemblerVoidTest`（1/1）、`game-inbox` `InboxVoidSettlementTest`（1/1）、`game-match` `VoidSettlementAndEarlyAbortTest`（3/3）+ `GlobalMatchTransferIntentTest`（1/1）、`game-scene` `VoidSettlementSceneTest`（2/2）+ `SettlementApplyTest`（24/24），合计 **32/32 PASS**（`BattleTerminalRecoveryTest` 真 TiDB 用例同步更新为全员作废来源口径；真实进程强杀联机演练待集成环境联调）。
 
-### 2026-11-12 战斗掉落两包都放不下改投邮件、背包显示被预留占住的数量(主仓已落码未编译,Java 待做;补 11-10「战斗道具预留」)
+### 2026-11-12 战斗掉落两包都放不下改投邮件、背包显示被预留占住的数量（Java 已对齐；补 11-10「战斗道具预留」）
 
-主仓说明见:
-
-- `docs/design/battle-overflow-mail.md`(改投邮件);
-- `docs/design/battle-item-reservation.md` §4.1(显示占用数量);
-- 主仓 `docs/PROGRESS.md` 2026-11-12「战斗掉落两包都放不下改投邮件、客户端显示被预留占住的数量」。
-
-负责人 2026-11-11 定「背包满是放到邮件里面的」,范围是人物背包与临时格都放不下才寄。主仓的服务端与客户端代码已写,未生成协议、未编译。
-
-**客户端可见的契约**(两版共享,Java 版要同批补上;客户端已按这三个字段写好):
-
-| 字段 | 含义 |
-|---|---|
-| `BagInfo.held_items = 4`(`BagHeldItemInfo { config_id = 1; count = 2 }`) | 人物背包里每种物品被战斗道具预留占住的数量,按 `config_id` 升序,数量不超过背包里这种物品的总数;没有预留时为空,别的包不带 |
-| `BattleEndS2C.items_mailed = 4` | 这一局的掉落两个包都放不下,整批改由邮件发放;客户端在结算界面道具行之后提示 |
-| `PlayerBattleResult.items_mailed = 17` | 近期战斗结果里的同一个事实;`items_gained` 照常列出这批掉落 |
-
-**要对齐的行为**:
-
-1. 掉落先放人物背包,放不下整批放临时格。两个都放不下时这一局照常应用(扣消耗、货币、任务进度、气血、释放预留),掉落整批改投邮件。放得下不寄;临时格与取回协议不变。
-2. **不丢不重**:掉落的去处与结算在同一个事务里落盘(主仓是玩家存档里的待寄队列,与结算同一次存档提交),落盘之后才向邮件域发件。发件带稳定的请求号,邮件域按「发件角色 + 请求号」判重;邮件确认建好之后才把待寄记录删掉。先发件后落盘,崩溃重做时会多发一份。
-3. 邮件是带附件的个人邮件,标题「战斗奖励」,正文说明腾出背包空位后领取。一封至多 16 种、合计 4096 件,超出分多封。
-4. 邮件域接不住时(邮箱满、不可达)记录留着重试,不放弃。待寄记录攒到上限(主仓 32 条)时回到整笔结算延后。
-5. 背包快照带上被预留占住的数量(字段见上表):只读、派生、不落库,能不能出包仍由服务端判。
-
-**Java 版自己定**:待寄记录放在哪。Java 版的存档与邮件域若在同一个库,可以直接在结算事务里建邮件,省掉待寄队列与寄送循环,只要守住上面第 2 条。寄送的重试节拍、日志与告警也按 Java 版自己的惯例。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-player-store` / `game-scene` 完整对齐（设计见 `docs/design/battle-overflow-mail.md` 与 `docs/design/battle-item-reservation.md` §4.1）：
+- **持久待寄队列与分封规则**：`game-player-store` `player_state.proto` 为 `MailOutboxEntryState` 尾插 `repeated MailOutboxItemState items = 9`（同步登记第 28 代持久台账 `0028.schema`）；`PlayerMailOutboxService` 新增 `splitBattleOverflowItems` / `canEnqueueBattleOverflow` / `enqueueBattleOverflow`（单封至多 16 种且合计 ≤4096 件超限拆封、标题「战斗奖励」、附稳定 `requestId` 供邮件域幂等、待寄战斗溢出邮件上限 32 条，达上限退回整笔结算 `DEFERRED`），`buildSendRequest` 透传 `MailItem` 附件，邮件确认建好后方删待寄记录。
+- **结算改投邮件与契约透传**：`BattleSettlementService`（`applyInbox` 与 `applyOnce`）在扣除消耗与释放本局预留时保护他局预留（修正 `canFitBattleDrops` 扣除 `reservedByOtherBattles`），两包均放不下时在同一次存档事务中将掉落入待寄队列并写 `PlayerBattleResult.items_mailed = true`（`items_gained` 仍保留原明细），`PlayerBattleService` 同步透传 `BattleEndS2C.items_mailed`；`SceneNode` 装配 `settlements.withMailOutboxService(mailOutboxService)`。
+- **背包预留展示**：`BagFeature.snapshot` 仅对人物背包（`INVENTORY`）填充派生字段 `BagInfo.held_items = 4`（按 `config_id` 升序、夹紧至持有量、无预留为空、其他包不带）。
+- **验证**：`game-player-store` **4/4 PASS**、`game-scene` `Batch4T2ASceneParityTest` + `SettlementApplyTest` 等 **196/196 PASS**。
 
 ### 2026-11-12 写者缩容收尾残余:部署当场收尾,金丝雀收尾做完自己删定时任务（Java 已对齐；补同日「写者缩容收尾」）
 
@@ -1919,24 +1850,13 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 - **登录 EnterGame 拆码与 Disconnect**：`EnterGameHandler` 角色交易冻结回 `2057 kLoginRoleTradeFrozen`、`ClientMessageDispatcher` 进场池满回 `2058 kLoginEnterGameBusy`、`2005 kLoginInProgress` 仅留给换角与在途竞争，`docs/reference/mmorpg-client-contract-login.md` 同步更新；`DisconnectHandler` 以会话头 `session_id` 为准（请求体不一致打 ERROR 仍正常收尾）；
 - **验证**：`game-player-store` `SaveRowGuardTest`（1/1）、`game-login` 51/51、`game-scene` 78/78、`game-data` 24 跑 / 0 失败（1 MySQL IT 跳过）全部 PASS。
 
-### 2026-11-12 审计发件箱:流水与快照随存档同事务写发件箱、由存档服务转发(断线重连 R13;主仓已落码未编译,Java 待做)
+### 2026-11-12 审计发件箱:流水与快照随存档同事务写发件箱、由存档服务转发（Java 已对齐；断线重连 R13）
 
-主仓 commit:main 工作区,未提交;协议未生成、未编译、未测试。Java 版本 `0.1.0-SNAPSHOT`,待做。设计见主仓 `docs/design/player-audit-outbox.md`,
-验证命令见主仓 `docs/PROGRESS.md` 2026-11-12 标题带「审计发件箱」的四条与「资产变动存盘通知挪到记流水的判定之后」。
-
-Java 版按同一口径要做的事(只登记,没改 Java 代码):
-
-- **同事务写发件箱**:场景服务改动货币、物品时记的流水与快照请求,随这名玩家的存档一起交给存档服务;存档服务在提交存档的同一个事务里写进这名玩家存档库的发件箱表。
-  不在内存改动当下直接发 Kafka,也不在提交之后另发(Kafka 不可用超过生产者超时就丢)。快照由存档服务按提交后的行拼,内容就是库里某一笔提交。
-- **一条流水只指名一名玩家**:两名玩家之间的转移记成转出、转入两条,同一个关联号,各随各的存档提交;没有单一玩家、或进程不接存档的流水拒收并计数。
-- **一笔存档带完,不分笔**(2026-11-19 主仓改):到期的审计记录一笔全部带上,和存档同一个事务提交,释放与回调就在这一笔上。每人排队的上限(主仓 8 MiB,
-  到了丢最旧的并计数)同时是一笔里审计记录的上限,存档请求的传输上限要装得下它加上行预算(主仓 16 MiB)。不分笔的原因:分笔时前一笔的改动已经提交、
-  剩下的记录还在内存里,这时场景服务崩溃就丢了已提交改动的流水。
-- **转发**:按(存档库, 片)在全部稳定副本之间分工、每片互斥,投 Kafka 全副本确认之后按主键删除;消费端按 `tx_id` / `snapshot_guid` 去重。有暂停转发的部署开关,审计 topic 换代时用,不停服。
-- **计数与告警**:积压年龄两级、跳过的坏记录、转发全停、有分片没人负责、转发循环活性;场景服务一侧丢弃(内存上限、单条超限、没有单一玩家、没开发件箱、号段没号)与存档服务太旧,按原因计数并告警。
-- **资产变动存盘通知**:跟着资产变动走,流水被拒收时也请求一次尽快存盘(同日「资产变动约 1 秒内提交」一行已补这一句)。
-
-都是服务端内部行为,不涉及客户端契约。本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-player-store` / `game-scene` / `deploy/k8s` 完整对齐（设计见主仓 `docs/design/player-audit-outbox.md`）：
+- **同事务发件箱表与写入**：`game-player-store` `game-player-schema.sql` 新增 `player_audit_outbox`（`outbox_id`, `shard`, `player_id`, `kind`, `payload`, `created_ms`）；新增 `AuditOutboxEntry`（单条上限 2 MiB、整批上限 8 MiB、存档请求上限 16 MiB）与 `PlayerAuditOutboxStore`（同连接 `insertInCurrentTx`、64 片 `pollDue`、`deleteByIds`、`oldestCreatedMs`）。
+- **单玩家与整批不分笔不变量**：`game-scene` `PlayerAuditOutboxBuffer` 校验单玩家归属（`from` XOR `to`，否则拒收计数），超 8 MiB 丢最旧并计数，`captureBatchForSave` 将该玩家所有到期条目随同一笔存档全部带出不分笔，仅在存盘提交确认（或快照无需写回确认）时放行，夺权/围栏/移除一律丢弃；资产变动存盘通知仍在记流水判定之后无条件触发。
+- **分片转发、暂停开关与告警**：`AuditOutboxForwarder` 基于 `WorkShard.Membership` 64 片 HRW 互斥分工与 `LoopLiveness` 活性守卫，支持不停服 `setPaused` 暂停转发，投递 Kafka `acks=all` 确认后方按主键删除，跳过不可解析坏行并记低基数指标；`deploy/k8s/audit-and-overwrite-alerts.yaml` 新增 `player-audit-outbox.rules`（积压两级告警 >60s / >300s、暂停、无主分片 <64、坏行与场景侧丢弃）。
+- **验证**：`game-player-store` `AuditOutboxAndReservationSchemaTest` + `PlayerStateSchemaLedgerTest` + `SaveRowGuardTest` **4/4 PASS**；`game-scene` `Batch4T2ASceneParityTest` 等 **196/196 PASS**。
 
 ### 2026-11-12 gate 续租的故障恢复与 Pod 间加密逐节点核对（Java 已对齐）
 

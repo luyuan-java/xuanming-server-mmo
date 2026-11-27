@@ -14,11 +14,27 @@ public final class KafkaAssetAudit implements AssetAudit {
     private final AuditPipeline pipeline;
     private final SceneClock clock;
     private final int zoneId;
+    private PlayerAuditOutboxBuffer outboxBuffer;
 
     public KafkaAssetAudit(AuditPipeline pipeline, SceneClock clock, int zoneId) {
         this.pipeline = pipeline;
         this.clock = clock;
         this.zoneId = zoneId;
+    }
+
+    /** 启用提交绑定审计发件箱暂存（PARITY 2026-11-06 + 2026-11-12 R13）：流水等玩家存档提交确认后再放行。 */
+    public KafkaAssetAudit withOutboxBuffer(PlayerAuditOutboxBuffer outboxBuffer) {
+        this.outboxBuffer = outboxBuffer;
+        return this;
+    }
+
+    private void emit(TransactionLogRecord record) {
+        PlayerAuditOutboxBuffer buffer = this.outboxBuffer;
+        if (buffer != null) {
+            buffer.stage(record);
+        } else {
+            pipeline.submitTransaction(record);
+        }
     }
 
     @Override
@@ -40,20 +56,20 @@ public final class KafkaAssetAudit implements AssetAudit {
         } else {
             record.setFromPlayer(playerId);
         }
-        pipeline.submitTransaction(record.build());
+        emit(record.build());
     }
 
     @Override
     public void itemGained(long playerId, long itemUuid, int configId, long quantity, Reason reason, long correlationId,
                            String extra) {
-        pipeline.submitTransaction(item(itemUuid, configId, quantity, reason, correlationId, extra)
+        emit(item(itemUuid, configId, quantity, reason, correlationId, extra)
                 .setToPlayer(playerId).build());
     }
 
     @Override
     public void itemDestroyed(long playerId, long itemUuid, int configId, long quantity, Reason reason,
                               long correlationId, String extra) {
-        pipeline.submitTransaction(item(itemUuid, configId, quantity, reason, correlationId, extra)
+        emit(item(itemUuid, configId, quantity, reason, correlationId, extra)
                 .setFromPlayer(playerId).build());
     }
 

@@ -1494,7 +1494,7 @@ public final class EquipmentCraftService {
         }
         if (prepared.itemId == 0L) {
             if (bags.isItemGainBlocked(player, prepared.configId)) {
-                return BagService.REFUSED;
+                return BagService.ITEM_BLOCKED;
             }
             PlayerBags probe = PlayerBags.restore(player.bags().toState());
             probe.normalize(bags.tables());

@@ -60,6 +60,14 @@ public final class BattleSnapshots {
      */
     public static BattlePlayerSnapshot build(ScenePlayer player, SceneBattleTables tables, List<BattlePetSnapshot> pets,
                                              BattleRouting routing, int activeSeasonId, long nowMs) {
+        return build(player, tables, pets, routing, activeSeasonId, nowMs, 0L);
+    }
+
+    /**
+     * 组快照（含实时 Buff 换算与扣除其他战斗预留后的净可用道具列表）。
+     */
+    public static BattlePlayerSnapshot build(ScenePlayer player, SceneBattleTables tables, List<BattlePetSnapshot> pets,
+                                             BattleRouting routing, int activeSeasonId, long nowMs, long selfBattleId) {
         PlayerAttributes attributes = player.attributes();
         PlayerAttributes.Derived derived = attributes.derived();
         long health = attributes.health();
@@ -152,7 +160,7 @@ public final class BattleSnapshots {
                 }
             }
         }
-        // 只取主背包；跳过数量 0 的堆；只取 battle_usable；按 config_id 无符号升序合并，数量 uint64 累加
+        // 只取主背包；跳过数量 0 的堆；只取 battle_usable；按 config_id 无符号升序合并并扣除别的局已预留数量（PARITY 2026-11-10）
         Map<Integer, Long> items = new TreeMap<>(Integer::compareUnsigned);
         for (BagItem item : player.bags().bag(BagType.INVENTORY).items()) {
             if (item.size() == 0 || !tables.battleUsable(item.configId())) {
@@ -160,7 +168,13 @@ public final class BattleSnapshots {
             }
             items.merge(item.configId(), item.size(), Long::sum);
         }
-        items.forEach((config, count) -> snapshot.addItems(BattleItemEntry.newBuilder().setItemTableId(config).setCount(count)));
+        items.forEach((config, count) -> {
+            long otherReserved = player.battleReservations().reservedByOtherBattles(selfBattleId, config);
+            long net = Math.max(0L, count - otherReserved);
+            if (net > 0L) {
+                snapshot.addItems(BattleItemEntry.newBuilder().setItemTableId(config).setCount(net));
+            }
+        });
         // 携带场景实时持续 Buff：剔除控制类、瞬时与已到期条目；有限时长按剩余毫秒换算回合 max(1, ceil(ms / 6000))
         for (PlayerRealtimeBuffs.ActiveBuff buff : player.realtimeBuffs().activeBuffs()) {
             BuffTable row = tables.buff(buff.buffTableId());

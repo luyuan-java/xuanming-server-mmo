@@ -44,3 +44,48 @@ spec:
           annotations:
             summary: "排行榜结算奖励进入永久放弃终态"
             description: "存在排行奖励因窗口不足、永久拒收或达兜底尝试上限被转入放弃终态，请按运维手册核对并决定是否人工重投。"
+    - name: player-audit-outbox.rules
+      interval: 30s
+      rules:
+        - alert: AuditOutboxBacklogAgeWarning
+          expr: max(game_player_store_audit_outbox_oldest_age_seconds) > 60
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "审计发件箱积压年龄超过 60 秒"
+            description: "player_audit_outbox 存在超过 60 秒未转发至 Kafka 的记录，请检查转发器吞吐与 Kafka 集群健康。"
+        - alert: AuditOutboxBacklogAgeCritical
+          expr: max(game_player_store_audit_outbox_oldest_age_seconds) > 300
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "审计发件箱积压年龄超过 300 秒"
+            description: "player_audit_outbox 转发持续积压超 5 分钟，可能触发转发停滞或数据库空间膨胀，请立即处置。"
+        - alert: AuditOutboxForwarderPaused
+          expr: max(game_player_store_audit_outbox_paused) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "审计发件箱转发器处于部署暂停状态"
+            description: "审计 topic 换代暂停开关已打开超过 5 分钟，切换完成后请及时恢复转发。"
+        - alert: AuditOutboxUnownedShards
+          expr: sum(game_workshard_owned_shards{kind="audit_outbox"}) < 64
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "审计发件箱存在无人负责的分片"
+            description: "当前全部稳定副本合计负责分片数小于 64，请检查成员表注册与副本健康状态。"
+        - alert: AuditOutboxBadRowOrSceneDrop
+          expr: |
+            increase(game_player_store_audit_outbox_bad_rows_total[5m]) > 0
+            or increase(game_scene_audit_outbox_dropped_total{reason=~"player_buffer_cap|entry_too_large|no_single_player|outbox_disabled"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "审计发件箱出现坏行跳过或场景侧审计丢弃"
+            description: "检测到发件箱损坏载荷跳过或场景侧暂存丢弃（{{ $labels.reason }}），请立即核查生产者版本与大包异常。"

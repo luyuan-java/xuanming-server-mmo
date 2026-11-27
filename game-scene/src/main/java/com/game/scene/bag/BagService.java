@@ -23,8 +23,10 @@ import java.util.TreeMap;
  */
 public final class BagService {
 
-    /** 物品被封禁 / 玩家冻结（基线物品口径回 1005，与货币的 27005 / 27003 不同——都是客户端契约）。入包的容器本身不回 1005，所以 1005 一定是闸拒的。 */
+    /** 玩家冻结 / 非法参数拒绝码（1005）。 */
     public static final int REFUSED = CommonErrorTip.common_error.kInvalidParameter_VALUE;
+    /** 物品产出封禁（全服或个人 GM 封禁，PARITY 2026-11-06 统一改为 27005 {@code kAssetBlocked}）。 */
+    public static final int ITEM_BLOCKED = com.game.table.AssetErrorTip.asset_error.kAssetBlocked_VALUE;
 
     private final BagTables tables;
     private final ItemGuids guids;
@@ -66,7 +68,8 @@ public final class BagService {
 
     /** 装备取石只准备候选入包，沿用封禁、铸号与容量规则；此处不写玩家、不发审计。 */
     public Bag.AddResult prepareEquipmentReturn(ScenePlayer player, com.game.scene.player.PlayerBags candidate, int config) {
-        if (!writable(player) || isItemGainBlocked(player, config)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
+        if (!writable(player)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
+        if (isItemGainBlocked(player, config)) return new Bag.AddResult(ITEM_BLOCKED, java.util.List.of(), java.util.List.of());
         return candidate.bag(BagType.INVENTORY).add(Map.of(config, 1L), tables, guids);
     }
 
@@ -80,7 +83,7 @@ public final class BagService {
                                                Map<Integer, Long> counts, boolean bound) {
         if (!writable(player)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
         for (int config : counts.keySet()) {
-            if (isItemGainBlocked(player, config)) return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
+            if (isItemGainBlocked(player, config)) return new Bag.AddResult(ITEM_BLOCKED, java.util.List.of(), java.util.List.of());
         }
         return candidate.bag(BagType.INVENTORY).add(counts, bound, tables, guids);
     }
@@ -159,15 +162,27 @@ public final class BagService {
                     || bag.items().stream().anyMatch(item -> item.configId() == entry.getKey() && item.equipment() != null)) {
                 return failedTransfer(player, com.game.table.AssetErrorTip.asset_error.kAssetInvalidBundle_VALUE);
             }
+            long reserved = player.battleReservations().totalReserved(entry.getKey());
+            if (reserved > 0L && bag.total(entry.getKey()) - reserved < entry.getValue()) {
+                return failedTransfer(player, com.game.table.AssetErrorTip.asset_error.kAssetInBattle_VALUE);
+            }
         }
+        Map<Integer, Long> instanceCountsByConfig = new java.util.HashMap<>();
         for (long guid : guidsToTake) {
             var item = bag.item(guid);
             var spec = item == null ? null : tables.item(item.configId());
             if (!unique.add(guid) || item == null || item.bound() || item.size() != 1 || spec == null || spec.maxStackSize() != 1) {
                 return failedTransfer(player, com.game.table.AssetErrorTip.asset_error.kAssetInvalidBundle_VALUE);
             }
+            instanceCountsByConfig.merge(item.configId(), 1L, Long::sum);
             var raw = snapshot.getItemsList().stream().filter(stored -> stored.getItemUuid() == guid).findFirst().orElseThrow();
             instances.add(raw.toBuilder().clearPos().clearBagType().clearAcquireSeq().build());
+        }
+        for (var entry : instanceCountsByConfig.entrySet()) {
+            long reserved = player.battleReservations().totalReserved(entry.getKey());
+            if (reserved > 0L && bag.total(entry.getKey()) - reserved < entry.getValue()) {
+                return failedTransfer(player, com.game.table.AssetErrorTip.asset_error.kAssetInBattle_VALUE);
+            }
         }
         for (var entry : new TreeMap<>(counts).entrySet()) removed.addAll(bag.drainClamped(entry.getKey(), entry.getValue(), true));
         for (var instance : instances) {
@@ -212,7 +227,8 @@ public final class BagService {
         var bag = candidate.bag(BagType.INVENTORY);
         var gained = new java.util.ArrayList<Bag.Written>();
         if (countsAsGain) {
-            for (int config : counts.keySet()) if (isItemGainBlocked(player, config)) return failedTransfer(player, REFUSED);
+            for (int config : counts.keySet()) if (isItemGainBlocked(player, config)) return failedTransfer(player, ITEM_BLOCKED);
+            for (var instance : instances) if (isItemGainBlocked(player, instance.getConfigId())) return failedTransfer(player, ITEM_BLOCKED);
         }
         if (!counts.isEmpty()) {
             var result = bag.add(counts, tables, guids);
@@ -220,7 +236,6 @@ public final class BagService {
             gained.addAll(result.written());
         }
         for (var instance : instances) {
-            if (countsAsGain && isItemGainBlocked(player, instance.getConfigId())) return failedTransfer(player, REFUSED);
             if (candidate.toState().getItemsList().stream().anyMatch(existing -> existing.getItemUuid() == instance.getItemUuid())) return failedTransfer(player, Bag.INVALID_PARAM);
             int tip = bag.putInstance(instance, tables);
             if (tip != 0) return failedTransfer(player, tip);
@@ -235,6 +250,11 @@ public final class BagService {
 
     /** 消耗、主包掉落和临时格溢出一起规划；包满/封禁/铸号失败时原玩家零改动。 */
     public PreparedTransfer prepareBattle(ScenePlayer player,Map<Integer,Long> consumed,Map<Integer,Long> gained) {
+        return prepareBattle(player, 0L, consumed, gained);
+    }
+
+    /** 消耗（扣减上限保留别的局预留数量）、主包掉落和临时格溢出一起规划；包满/封禁/铸号失败时原玩家零改动。 */
+    public PreparedTransfer prepareBattle(ScenePlayer player, long battleId, Map<Integer,Long> consumed, Map<Integer,Long> gained) {
         if(!writable(player))return failedTransfer(player,REFUSED);
         var snapshot=player.bags().toState();
         if(!snapshot.getUnknownFields().asMap().isEmpty())return failedTransfer(player,Bag.INVALID_PARAM);
@@ -250,9 +270,16 @@ public final class BagService {
         var candidate=com.game.scene.player.PlayerBags.restore(snapshot);candidate.normalize(tables);
         var inventory=candidate.bag(BagType.INVENTORY);
         var removed=new java.util.ArrayList<Bag.Drawn>();var written=new java.util.ArrayList<Bag.Written>();
-        for(var entry:consumed.entrySet())removed.addAll(inventory.drainClamped(entry.getKey(),entry.getValue()));
+        for(var entry:consumed.entrySet()) {
+            long otherReserved = battleId == 0L ? 0L : player.battleReservations().reservedByOtherBattles(battleId, entry.getKey());
+            long maxDeductible = Math.max(0L, inventory.total(entry.getKey()) - otherReserved);
+            long toDrain = Math.min(entry.getValue(), maxDeductible);
+            if (toDrain > 0L) {
+                removed.addAll(inventory.drainClamped(entry.getKey(), toDrain));
+            }
+        }
         for(var entry:new TreeMap<>(gained).entrySet()) {
-            if(isItemGainBlocked(player, entry.getKey()))return failedTransfer(player,REFUSED);
+            if(isItemGainBlocked(player, entry.getKey()))return failedTransfer(player,ITEM_BLOCKED);
             long before=inventory.total(entry.getKey());
             var first=inventory.add(Map.of(entry.getKey(),entry.getValue()),tables,guids);written.addAll(first.written());
             long credited=inventory.total(entry.getKey())-before;
@@ -338,7 +365,7 @@ public final class BagService {
             for (int configId : ordered.keySet()) {
                 if (isItemGainBlocked(player, configId)) {
                     metrics.gainBlocked(RedisGainBlockSource.ITEM);
-                    return new Bag.AddResult(REFUSED, java.util.List.of(), java.util.List.of());
+                    return new Bag.AddResult(ITEM_BLOCKED, java.util.List.of(), java.util.List.of());
                 }
             }
         }

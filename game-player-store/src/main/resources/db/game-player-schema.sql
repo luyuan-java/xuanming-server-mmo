@@ -187,3 +187,16 @@ CREATE TABLE IF NOT EXISTS player_name_hold (
     PRIMARY KEY (name_key),
     KEY idx_player_name_hold_until (held_until_ms)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+
+-- 审计发件箱（R13）：货币/物品流水与玩家快照随存档在同一事务写入本表，由存档服务按 64 片互斥转发至 Kafka（acks=all 确认后按主键删除）。
+CREATE TABLE IF NOT EXISTS player_audit_outbox (
+    outbox_id   BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
+    shard       TINYINT UNSIGNED NOT NULL COMMENT 'MOD(player_id, 64)，供多副本 HRW 互斥分片转发',
+    player_id   BIGINT UNSIGNED  NOT NULL,
+    kind        TINYINT UNSIGNED NOT NULL COMMENT '1=transaction_log, 2=player_snapshot',
+    payload     MEDIUMBLOB       NOT NULL COMMENT '序列化后的审计载荷（单条 <= 2MiB）',
+    created_ms  BIGINT UNSIGNED  NOT NULL COMMENT '入箱 Unix 毫秒，用于两级积压年龄指标与告警',
+    PRIMARY KEY (outbox_id),
+    KEY idx_audit_outbox_shard (shard, outbox_id),
+    KEY idx_audit_outbox_created (created_ms)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;

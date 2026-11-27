@@ -184,6 +184,54 @@ public class InboxAdminController {
                 tip -> ReconcilePlayerInboxResponse.newBuilder().setErrorMessage(tip).build());
     }
 
+    /**
+     * 只读查询单玩家物品获得封禁（已落盘本人封禁表 + GM 收件箱 PENDING 的 5/6 单，不含全服封禁；受 {@link InboxAdminAuthFilter} 口令保护）。
+     */
+    @GetMapping(path = "/{playerId}/item-gain-blocks", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<String> itemGainBlocks(@PathVariable String playerId) {
+        long player = parseU64(playerId);
+        if (player == 0) {
+            return badRequest("玩家号必须是非 0 的十进制 uint64");
+        }
+        try {
+            InboxAdminStore.ItemGainBlocksResult result = admin.getItemGainBlocks(Deadline.after(budgetMs), player);
+            if (result.tipId() != 0) {
+                return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"error_message\":{\"id\":" + result.tipId() + "}}");
+            }
+            return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
+                    .body(formatItemGainBlocksJson(player, result));
+        } catch (SQLException | RuntimeException e) {
+            log.error("[PlayerInbox] GetItemGainBlocks 失败 player={}", Long.toUnsignedString(player), e);
+            return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
+                    .body("{\"error_message\":{\"id\":" + InboxTips.STORE_UNAVAILABLE + "}}");
+        }
+    }
+
+    private static String formatItemGainBlocksJson(long playerId, InboxAdminStore.ItemGainBlocksResult result) {
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("{\"error_message\":{\"id\":0},\"player_id\":\"").append(Long.toUnsignedString(playerId))
+                .append("\",\"save_readable\":").append(result.saveReadable())
+                .append(",\"persisted_blocked_item_config_ids\":[");
+        for (int i = 0; i < result.persistedBlockedConfigIds().size(); i++) {
+            if (i > 0) sb.append(',');
+            sb.append(Integer.toUnsignedString(result.persistedBlockedConfigIds().get(i)));
+        }
+        sb.append("],\"pending_sanctions\":[");
+        for (int i = 0; i < result.pendingSanctions().size(); i++) {
+            if (i > 0) sb.append(',');
+            InboxAdminStore.PendingItemSanction s = result.pendingSanctions().get(i);
+            sb.append("{\"seq\":\"").append(Long.toUnsignedString(s.seq()))
+                    .append("\",\"msg_type\":").append(s.msgType())
+                    .append(",\"item_config_id\":").append(Integer.toUnsignedString(s.itemConfigId()))
+                    .append(",\"request_id\":\"").append(Long.toUnsignedString(s.requestId()))
+                    .append("\",\"issued_at_ms\":\"").append(Long.toUnsignedString(s.issuedAtMs()))
+                    .append("\"}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
     // ================================================================ 辅助
 
     @FunctionalInterface

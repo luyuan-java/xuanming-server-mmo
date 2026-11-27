@@ -79,6 +79,10 @@ public final class EquipmentService {
         Bag inventory = p.bags().bag(BagType.INVENTORY), equipped = p.bags().bag(BagType.EQUIPMENT);
         BagItem item = inventory.item(id);
         if (item == null || item.size() != 1) return Outcome.refused(equip_error.kEquipItemNotFound_VALUE);
+        long reserved = p.battleReservations().totalReserved(item.configId());
+        if (reserved > 0L && inventory.total(item.configId()) - 1L < reserved) {
+            return Outcome.refused(CommonErrorTip.common_error.kServiceUnavailable_VALUE);
+        }
         ItemTable row = rules.tables().item(item.configId());
         if (row == null || row.getEquipKind() == 0 || row.getMaxStackSize() != 1) return Outcome.refused(equip_error.kEquipNotEquipment_VALUE);
         if (Integer.compareUnsigned(PlayerLevels.effective(p.level()), row.getEquipLevel()) < 0) return Outcome.refused(equip_error.kEquipLevelNotEnough_VALUE);
@@ -125,7 +129,14 @@ public final class EquipmentService {
     private int quantityTip(ScenePlayer p, int config, long count, int insufficient) {
         Bag inventory = p.bags().bag(BagType.INVENTORY);
         if (bags.tables().hasUnknownItemSchema(config)) return VERSION_UNAVAILABLE;
-        if (inventory.plainQuantity(config) >= count) return 0;
+        long reserved = p.battleReservations().totalReserved(config);
+        long plain = inventory.plainQuantity(config);
+        if (plain >= count) {
+            if (reserved > 0L && inventory.total(config) - reserved < count) {
+                return CommonErrorTip.common_error.kServiceUnavailable_VALUE;
+            }
+            return 0;
+        }
         return inventory.total(config) >= count ? VERSION_UNAVAILABLE : insufficient;
     }
     public Outcome grant(ScenePlayer p, int config, int count) {

@@ -141,6 +141,9 @@ public final class BagFeature implements SceneFeature {
             layout.addSlots(BagSlotInfo.newBuilder().setSlot(item.slot()).setItemId(item.guid()).setWidth(1).setHeight(1));
         }
         if (equipment != null && type == BagType.EQUIPMENT) equipment.slots(layout);
+        if (type == BagType.INVENTORY) {
+            info.addAllHeldItems(player.battleReservations().heldItemsClamped(bag));
+        }
         return info.setLayout(layout).setCurrency(player.wallet().toClient()).build();
     }
 }

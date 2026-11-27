@@ -410,7 +410,7 @@ public final class PlayerBattleService implements BattleHooks {
             snapshot = rankedSnap.get();
         } else {
             BattlePlayerSnapshot.Builder snapBuilder = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route,
-                            world == null ? 0 : world.activeSeasonId(), clock.epochMillis()).toBuilder()
+                            world == null ? 0 : world.activeSeasonId(), clock.epochMillis(), battleId).toBuilder()
                     .setPetCaptureSlots(pets.availableCaptureSlots(player));
             if (seasonService != null) {
                 int weeklyAffix = seasonService.activeWeeklyAffixId(clock.epochMillis());
@@ -585,6 +585,25 @@ public final class PlayerBattleService implements BattleHooks {
             }
             world.requestSave(player);
         }
+        // 战斗道具预留（PARITY 2026-11-10）：按快照道具建立预留，建不起来整笔拒绝备战不留冻结；建起来尽快落盘。
+        if (snapshot.getItemsCount() > 0) {
+            java.util.Map<Integer, Long> reserveItems = new java.util.TreeMap<>(Integer::compareUnsigned);
+            for (com.game.proto.BattleItemEntry item : snapshot.getItemsList()) {
+                if (item.getItemTableId() != 0 && item.getCount() > 0) {
+                    reserveItems.merge(item.getItemTableId(), item.getCount(), Long::sum);
+                }
+            }
+            if (!reserveItems.isEmpty()) {
+                if (!player.battleReservations().reserve(battleId, freeze.effectiveDeadlineMs(),
+                        reserveItems, player.bags().bag(com.game.scene.player.BagType.INVENTORY))) {
+                    clearFreeze(player, LockAction.DELETE_PREPARING);
+                    metrics.prepare(Prepare.INVALID);
+                    reply.complete(prepareResponse(FEATURE_UNAVAILABLE));
+                    return;
+                }
+                world.requestSave(player);
+            }
+        }
         metrics.prepare(Prepare.OK);
         log.info("备战冻结 player={} battle_id={} node={} deadline={} prepare_deadline={}", Long.toUnsignedString(playerId),
                 Long.toUnsignedString(battleId), freeze.battleNodeId(), freeze.deadlineMs(), freeze.prepareDeadlineMs());
@@ -673,6 +692,9 @@ public final class PlayerBattleService implements BattleHooks {
         }
         // 批 X：scene 不再读已废弃的 skip_jianghu_silver_refund，取消备战一律走单通道先入账再清标记
         if (jianghuService != null && jianghuService.refundPendingSilverFee(player, battleId)) {
+            world.requestSave(player);
+        }
+        if (player.battleReservations().release(battleId)) {
             world.requestSave(player);
         }
         // 只删备战锁：这条删除若被排到紧随其后的确认之后，锁已标 F、迟到确认已重建 FIGHTING，不能再删（审计 FRZ-7）
@@ -1147,6 +1169,7 @@ public final class PlayerBattleService implements BattleHooks {
                         }
                     }
                     reviewPendingSilverFeeIfDue(player, now);
+                    reviewUnfrozenBattleReservations(player, now);
                 }
                 // PENDING：恢复读在途，账本由它回来后的第 4 步销
             } catch (RuntimeException e) {
@@ -1154,6 +1177,49 @@ public final class PlayerBattleService implements BattleHooks {
             }
         }
         metrics.frozen(preparing, fighting);
+    }
+
+    /**
+     * 复核冻结已不在的战斗道具预留（PARITY 2026-11-10 第 5 条）：
+     * 到了冻结到期时刻且玩家可改时查 SQL 终局，只认 ABORT / 无可裁决原件（{@link SqlTerminalVerdict#SAFE_TO_RELEASE}）释放；
+     * 其余保留且不设次数上限；超过「到期 + 15 分钟」周期性打 ERROR 告警。
+     */
+    private void reviewUnfrozenBattleReservations(ScenePlayer player, long now) {
+        TerminalOutcomeReader reader = this.terminalOutcomeReader;
+        if (reader == null || player.frozen() || player.battleReservations().isEmpty()) {
+            return;
+        }
+        BattleFreeze activeFreeze = player.battle().freeze();
+        long activeBattleId = activeFreeze == null ? 0L : activeFreeze.battleId();
+        boolean releasedAny = false;
+        for (com.game.scene.player.BattleReservationBook.Entry entry : player.battleReservations().entries()) {
+            if (entry.battleId() == activeBattleId) {
+                continue;
+            }
+            if (now <= entry.freezeDeadlineMs()) {
+                continue;
+            }
+            SqlTerminalVerdict verdict;
+            try {
+                verdict = reader.queryTerminal(player.playerId(), entry.battleId());
+            } catch (RuntimeException e) {
+                verdict = SqlTerminalVerdict.QUERY_ERROR;
+            }
+            if (verdict == SqlTerminalVerdict.SAFE_TO_RELEASE) {
+                if (player.battleReservations().release(entry.battleId())) {
+                    releasedAny = true;
+                    log.info("battle_reservation_released_by_review player={} battle_id={}",
+                            Long.toUnsignedString(player.playerId()), Long.toUnsignedString(entry.battleId()));
+                }
+            } else if (now > entry.freezeDeadlineMs() + BattleFreeze.MAX_FIGHTING_EXTEND_MS) {
+                log.error("battle_reservation_overdue_unfrozen player={} battle_id={} deadline={} verdict={}",
+                        Long.toUnsignedString(player.playerId()), Long.toUnsignedString(entry.battleId()),
+                        entry.freezeDeadlineMs(), verdict);
+            }
+        }
+        if (releasedAny) {
+            world.requestSave(player);
+        }
     }
 
     /**
@@ -1266,6 +1332,9 @@ public final class PlayerBattleService implements BattleHooks {
             }
             if (verdict == SqlTerminalVerdict.SAFE_TO_RELEASE) {
                 clearFreeze(player, LockAction.DELETE_IF_MATCH);
+                if (player.battleReservations().release(freeze.battleId())) {
+                    world.requestSave(player);
+                }
                 if (festivalBeastService != null) {
                     festivalBeastService.onBattlePrepareCancelledOrVoid(world, player, freeze.battleId());
                 }
@@ -1613,7 +1682,8 @@ public final class PlayerBattleService implements BattleHooks {
                 .setOutcome(settlement.getOutcome())
                 .setSettlement(settlement);
         if (recorded != null) {
-            endPush.setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded())
+            endPush.setItemsMailed(recorded.getItemsMailed())
+                    .setMaterialCreditUnitsAdded(recorded.getMaterialCreditUnitsAdded())
                     .setMaterialTradableUnitsAdded(recorded.getMaterialTradableUnitsAdded())
                     .setMaterialPvpLossIneligible(recorded.getMaterialPvpLossIneligible())
                     .setSeasonSealPointsAdded(recorded.getSeasonSealPointsAdded())

@@ -86,6 +86,16 @@ public final class SaveRowGuard {
         }
     }
 
+    /**
+     * 战斗道具预留组件存在性门禁（PARITY 2026-11-10）：要求预留组件落盘时，缺失 {@code battle_reservations}
+     * 字段的存档整份拒存，防止降级/漏序列化的写回把已登记的战斗预留静默抹除。
+     */
+    public static void requireBattleReservationsPresent(com.game.player.store.state.PlayerState state) {
+        if (state == null || !state.hasBattleReservations()) {
+            throw new IllegalArgumentException("player_state missing required battle_reservations component");
+        }
+    }
+
     private SaveRowGuard() {
     }
 }

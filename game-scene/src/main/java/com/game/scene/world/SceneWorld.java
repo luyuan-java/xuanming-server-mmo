@@ -231,6 +231,13 @@ public final class SceneWorld {
     private final Map<Long, ScenePlayer> playersByEntity = new HashMap<>();
     /** 关键进度存盘撞到已有在途写时记下待补存标记，等当前写回调完成后立即补发，不丢关键进度。 */
     private final java.util.Set<Long> pendingKeyProgressSaves = new java.util.HashSet<>();
+    /** 提交绑定审计发件箱暂存器（可选装配：存档确认后放行、围栏拒绝/夺权丢弃）。 */
+    private com.game.scene.audit.PlayerAuditOutboxBuffer auditOutboxBuffer;
+
+    public SceneWorld withAuditOutboxBuffer(com.game.scene.audit.PlayerAuditOutboxBuffer buffer) {
+        this.auditOutboxBuffer = buffer;
+        return this;
+    }
     /** 已收到 PlayerEnter、正在加载存档的会话。离开 / 断链时删掉即取消，加载回来发现不在就丢弃。 */
     private final Map<SessionKey, PendingEnter> pendingEnters = new HashMap<>();
     private record FinalKey(long playerId,long epoch) { }
@@ -3642,18 +3649,27 @@ public final class SceneWorld {
         boolean unchanged = snapshot.equals(player.lastPersisted());
         metrics.saveStage(SceneMetrics.SaveStage.DIRTY_CHECK, clock.nanoTime() - t1);
         if (unchanged) {
+            if (auditOutboxBuffer != null) {
+                auditOutboxBuffer.flushAllCommitted(player.playerId());
+            }
             return SaveRequest.UNCHANGED;
         }
         if (!repository.acceptsProgress()) {
             return SaveRequest.DEFERRED;
         }
+        long auditUpToSeq = auditOutboxBuffer != null
+                ? auditOutboxBuffer.captureBatchForSave(player.playerId()).upToSeq() : 0L;
         player.setProgressSaveInFlight(true);
-        repository.saveProgress(snapshot, result -> onProgressSaved(player, snapshot, result));
+        repository.saveProgress(snapshot, result -> onProgressSaved(player, snapshot, result, auditUpToSeq));
         return SaveRequest.WRITTEN;
     }
 
     /** 在线存盘的结局（逻辑线程）。实例可能已经离场（离场不等在途的在线存盘），那就只清在途标记。 */
     private void onProgressSaved(ScenePlayer player, PlayerSave snapshot, ProgressResult result) {
+        onProgressSaved(player, snapshot, result, 0L);
+    }
+
+    private void onProgressSaved(ScenePlayer player, PlayerSave snapshot, ProgressResult result, long auditUpToSeq) {
         player.setProgressSaveInFlight(false);
         ScenePlayer current = playersById.get(player.playerId());
         if (current != null && current != player && current.ownerEpoch() == player.ownerEpoch()) {
@@ -3664,6 +3680,9 @@ public final class SceneWorld {
         switch (result) {
             case SAVED -> {
                 player.markPersisted(snapshot);
+                if (auditOutboxBuffer != null && auditUpToSeq > 0L) {
+                    auditOutboxBuffer.onSaveCommitted(player.playerId(), auditUpToSeq);
+                }
                 if (playersById.get(player.playerId()) == player) {
                     // 快路径销账（scene-battle-spec §7.12，D19）：账本条目此刻已在落库快照里的逐条销账
                     battle.onPersisted(this, player);
@@ -3684,6 +3703,9 @@ public final class SceneWorld {
                 log.warn("在线存盘失败，下个周期按最新状态重写 player={} epoch={}", player.playerId(), player.ownerEpoch());
             }
             case FENCED -> {
+                if (auditOutboxBuffer != null) {
+                    auditOutboxBuffer.discardPlayer(player.playerId());
+                }
                 // 归属已被夺走（epoch 变了）或已释放：实例写回只会被拒，按续约发现失去归属处理。离场后才回来的不动。
                 // 冻结中的不踢：冻结前就在途的在线存盘晚于交出提交时当然被拒，交出结局会裁决去留（scene-handoff-spec §5.5）。
                 if (playersById.get(player.playerId()) == player) {
@@ -3745,6 +3767,7 @@ public final class SceneWorld {
         if (finalSnapshot!=null) snapshots.capture(finalSnapshot,PlayerSnapshots.Cause.LOGOUT);
         // 这里只补发此前player_state已确认的资产前缀；TX1接管凭据不提升persistedState。
         if (save) inbox.onLeaving(this, player);
+        else if (auditOutboxBuffer != null) auditOutboxBuffer.discardPlayer(player.playerId());
     }
 
 
@@ -4071,8 +4094,10 @@ public final class SceneWorld {
             return;
         }
         PlayerSave snapshot = player.toSave();
+        long auditUpToSeq = auditOutboxBuffer != null
+                ? auditOutboxBuffer.captureBatchForSave(player.playerId()).upToSeq() : 0L;
         player.setProgressSaveInFlight(true);
-        repository.saveProgress(snapshot, result -> onProgressSaved(player, snapshot, result));
+        repository.saveProgress(snapshot, result -> onProgressSaved(player, snapshot, result, auditUpToSeq));
     }
 
     /** 客户端发送 TeamFollowC2S：声明跟随（挂意图并刷新组队检查）或暂离（摘意图并立刻停止驱动）。 */

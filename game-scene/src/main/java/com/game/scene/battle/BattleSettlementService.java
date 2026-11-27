@@ -117,6 +117,7 @@ public final class BattleSettlementService {
     private com.game.scene.travelpass.TravelPassService travelPassService;
     private com.game.scene.jianghu.JianghuService jianghuService;
     private com.game.scene.attribute.AttributeService attributeService;
+    private com.game.scene.mail.PlayerMailOutboxService mailOutboxService;
     private com.game.scene.progression.BattleProgressionTables progressionTables =
             com.game.scene.progression.BattleProgressionTables.EMPTY;
 
@@ -155,6 +156,11 @@ public final class BattleSettlementService {
 
     public BattleSettlementService withJianghuService(com.game.scene.jianghu.JianghuService jianghuService) {
         this.jianghuService = jianghuService;
+        return this;
+    }
+
+    public BattleSettlementService withMailOutboxService(com.game.scene.mail.PlayerMailOutboxService mailOutboxService) {
+        this.mailOutboxService = mailOutboxService;
         return this;
     }
 
@@ -227,8 +233,9 @@ public final class BattleSettlementService {
                             Long.toUnsignedString(player.playerId()), Long.toUnsignedString(settlement.getBattleId()));
                     return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
                 }
-                // 场景侧短路：不回写血蓝/宠物/货币/经验/道具/任务/赛季额度，只记一条空明细 VOID 近期战果；
+                // 场景侧短路：不回写血蓝/宠物/货币/经验/道具/任务/赛季额度，只记一条空明细 VOID 近期战果并释放本局道具预留；
                 // 存盘确认后由调用方统一解冻、放锁并推 BattleEndS2C{outcome=VOID}。
+                player.battleReservations().release(settlement.getBattleId());
                 recordVoidBattleResult(player, settlement);
                 return Result.APPLIED;
             }
@@ -364,12 +371,36 @@ public final class BattleSettlementService {
             // 产出封禁口径与主仓统一：被全服或个人产出封禁的掉落项跳过（解封不补发），其余奖励照常 APPLIED。
             dropBlockedItems(player,settlement.getBattleId(),gained);
             Map<Integer,Long> shortfalls=new TreeMap<>(Integer::compareUnsigned);
-            consumed.forEach((config,wanted)->{long held=player.bags().bag(BagType.INVENTORY).total(config);if(held<wanted)shortfalls.put(config,wanted-held);});
-            var bag=bags.prepareBattle(player,consumed,gained);
-            if(bag.tip()!=0)return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+            consumed.forEach((config,wanted)->{
+                long avail = Math.max(0L, player.bags().bag(BagType.INVENTORY).total(config)
+                        - player.battleReservations().reservedByOtherBattles(settlement.getBattleId(), config));
+                if(avail<wanted)shortfalls.put(config,wanted-avail);
+            });
+            var bag=bags.prepareBattle(player, settlement.getBattleId(), consumed, gained);
+            boolean itemsMailed = false;
+            if(bag.tip()!=0) {
+                boolean bagSpaceFull = !gained.isEmpty()
+                        && bag.tip() != Bag.INVALID_PARAM
+                        && bag.tip() != BagService.REFUSED
+                        && bag.tip() != BagService.ITEM_BLOCKED;
+                if (bagSpaceFull && mailOutboxService != null && mailOutboxService.canEnqueueBattleOverflow(player, gained)) {
+                    var consumeOnly = bags.prepareBattle(player, settlement.getBattleId(), consumed, Map.of());
+                    if (consumeOnly.tip() == 0) {
+                        bag = consumeOnly;
+                        itemsMailed = true;
+                    } else {
+                        return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
+                    }
+                } else {
+                    return new Result(Outcome.DEFERRED,SettlementResult.DEFERRED_LEDGER);
+                }
+            }
             var captured = pets.prepareCapturedPets(player, settlement.getCapturedPetTableIdsList());
             if (captured.tip() != 0) return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
             // 正常业务拒绝已全部预检。普通异常交给组合根不存盘隔离，绝不逐步catch后登记APPLIED。
+            if (itemsMailed && !mailOutboxService.enqueueBattleOverflow(player, settlement.getBattleId(), gained)) {
+                return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
+            }
             long actualGold = 0L;
             if (gold > 0L) {
                 if (goldTip == Wallet.BLOCKED) {
@@ -386,7 +417,9 @@ public final class BattleSettlementService {
             if (delta.ledgerChanged()) {
                 player.clientRequestLedger().setBattleEconomy(economyCandidate);
             }
-            bag.commitBattle(settlement.getBattleId());applyVitals(player,settlement);
+            bag.commitBattle(settlement.getBattleId());
+            player.battleReservations().release(settlement.getBattleId());
+            applyVitals(player,settlement);
             pets.commitCapturedPets(player, captured);
             if (!captured.pets().isEmpty()) {
                 world.sendTo(player, push(notifyPetListChanged,
@@ -422,7 +455,7 @@ public final class BattleSettlementService {
                 if (got > 0) actualConsumed.put(cfg, got);
             });
             markNormalBossTrialIfCleared(player, settlement);
-            recordBattleResult(world, player, settlement, actualGold, gained, actualConsumed, delta);
+            recordBattleResult(world, player, settlement, actualGold, gained, actualConsumed, delta, itemsMailed);
             return Result.APPLIED;
         }finally{player.battle().setApplying(false);}
     }
@@ -459,6 +492,21 @@ public final class BattleSettlementService {
         }
     }
 
+    /** 提取当前结算中有效、未退休且未被产出封禁的掉落映射（用于满包改投邮件）。 */
+    private Map<Integer, Long> collectCleanBattleDrops(ScenePlayer player, BattleSettlementData settlement) {
+        Map<Integer, Long> gained = new TreeMap<>(Integer::compareUnsigned);
+        for (BattleItemEntry item : settlement.getItemsGainedList()) {
+            if (item.getItemTableId() == 0 || item.getCount() == 0) {
+                continue;
+            }
+            if (bags.tables().item(item.getItemTableId()) == null || bags.isItemGainBlocked(player, item.getItemTableId())) {
+                continue;
+            }
+            gained.merge(item.getItemTableId(), clampCount(item.getCount()), (a, b) -> Math.min(a + b, UINT32_MAX));
+        }
+        return gained;
+    }
+
     /** 预检普通战斗结算中未被封禁且配置有效的掉落是否能放进人物背包 + 临时格（已计入本局消耗腾出的格子）。 */
     private boolean canFitBattleDrops(ScenePlayer player, BattleSettlementData settlement) {
         if (settlement.getItemsGainedCount() == 0) {
@@ -492,7 +540,12 @@ public final class BattleSettlementService {
         Bag inv = candidate.bag(BagType.INVENTORY);
         Bag temp = candidate.bag(BagType.TEMPORARY);
         for (var e : consumed.entrySet()) {
-            inv.drainClamped(e.getKey(), e.getValue());
+            long otherReserved = player.battleReservations().reservedByOtherBattles(settlement.getBattleId(), e.getKey());
+            long maxDeductible = Math.max(0L, inv.total(e.getKey()) - otherReserved);
+            long toDrain = Math.min(e.getValue(), maxDeductible);
+            if (toDrain > 0L) {
+                inv.drainClamped(e.getKey(), toDrain);
+            }
         }
         long[] drySeq = {1L};
         com.game.scene.player.ItemGuids dryGuids = count -> {
@@ -548,6 +601,7 @@ public final class BattleSettlementService {
                 return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
             }
             try {
+                player.battleReservations().release(battleId);
                 step("作废近期战果", player, battleId, () -> recordVoidBattleResult(player, settlement));
             } finally {
                 long evicted = ledger.record(battleId, clock.epochMillis());
@@ -617,11 +671,20 @@ public final class BattleSettlementService {
         }
         var captured = pets.prepareCapturedPets(player, settlement.getCapturedPetTableIdsList());
         if (captured.tip() != 0) return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
-        // 预检背包与临时格空间（临时格不再 FIFO 淘汰，两包都放不下时整笔延后，等玩家取回腾位后再补发，零丢物）。
+        // 预检背包与临时格空间：两包都放不下时优先整批改投个人邮件（与结算同事务落盘），待寄达 32 条上限或未装配出箱时回落整笔延后。
+        Map<Integer, Long> overflowMailDrops = Map.of();
+        boolean itemsMailed = false;
         if (!canFitBattleDrops(player, settlement)) {
-            log.warn("战斗结算人物背包与临时格均放不下，整笔延后等待腾位 player={} battle_id={}",
-                    Long.toUnsignedString(playerId), Long.toUnsignedString(battleId));
-            return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
+            Map<Integer, Long> cleanDrops = collectCleanBattleDrops(player, settlement);
+            if (!cleanDrops.isEmpty() && mailOutboxService != null
+                    && mailOutboxService.canEnqueueBattleOverflow(player, cleanDrops)) {
+                overflowMailDrops = cleanDrops;
+                itemsMailed = true;
+            } else {
+                log.warn("战斗结算人物背包与临时格均放不下且无法入待寄出箱，整笔延后等待腾位 player={} battle_id={}",
+                        Long.toUnsignedString(playerId), Long.toUnsignedString(battleId));
+                return new Result(Outcome.DEFERRED, SettlementResult.DEFERRED_LEDGER);
+            }
         }
         // d. 金币先行（唯一会正常失败的入账，之前不得有任何副作用）
         long explicitSilver = com.game.scene.progression.BattleProgressionRules.extractExplicitSilver(settlement);
@@ -667,15 +730,25 @@ public final class BattleSettlementService {
             });
             Map<Integer, Long> actualConsumed = new TreeMap<>(Integer::compareUnsigned);
             Map<Integer, Long> actualGained = new TreeMap<>(Integer::compareUnsigned);
+            final boolean mailedFinal = itemsMailed;
+            final Map<Integer, Long> overflowMailFinal = overflowMailDrops;
             step("消耗", player, battleId, () -> actualConsumed.putAll(applyConsumed(player, settlement)));
-            step("掉落", player, battleId, () -> actualGained.putAll(applyGained(player, settlement)));
+            player.battleReservations().release(battleId);
+            if (mailedFinal) {
+                step("满包掉落转邮件", player, battleId, () -> {
+                    mailOutboxService.enqueueBattleOverflow(player, battleId, overflowMailFinal);
+                    actualGained.putAll(overflowMailFinal);
+                });
+            } else {
+                step("掉落", player, battleId, () -> actualGained.putAll(applyGained(player, settlement)));
+            }
             step("击杀", player, battleId, () -> {
                 for (BattleMonsterDefeat defeat : settlement.getDefeatedMonstersList()) {
                     missions.onMonsterKilled(player, defeat.getMonsterConfigId(), defeat.getCount());
                 }
             });
             step("试炼志首领首通", player, battleId, () -> markNormalBossTrialIfCleared(player, settlement));
-            step("近期战果", player, battleId, () -> recordBattleResult(world, player, settlement, gold, actualGained, actualConsumed, deltaBox[0]));
+            step("近期战果", player, battleId, () -> recordBattleResult(world, player, settlement, gold, actualGained, actualConsumed, deltaBox[0], mailedFinal));
         } finally {
             long evicted = ledger.record(battleId, clock.epochMillis());
             if (evicted != 0) {
@@ -749,8 +822,19 @@ public final class BattleSettlementService {
         if (counts.isEmpty()) {
             return Map.of();
         }
-        Map<Integer, Long> removed = bags.removeClamped(player, BagType.INVENTORY, counts, AssetAudit.Reason.ITEM_DESTROY, battleId,
-                extra(battleId));
+        // 本局消耗可动用本局预留，但绝不动用其他局的预留（PARITY 2026-11-10）
+        Map<Integer, Long> deductible = new TreeMap<>(Integer::compareUnsigned);
+        counts.forEach((config, wanted) -> {
+            long otherReserved = player.battleReservations().reservedByOtherBattles(battleId, config);
+            long maxAllowed = Math.max(0L, player.bags().bag(BagType.INVENTORY).total(config) - otherReserved);
+            long cap = Math.min(wanted, maxAllowed);
+            if (cap > 0L) {
+                deductible.put(config, cap);
+            }
+        });
+        Map<Integer, Long> removed = deductible.isEmpty()
+                ? Map.of()
+                : bags.removeClamped(player, BagType.INVENTORY, deductible, AssetAudit.Reason.ITEM_DESTROY, battleId, extra(battleId));
         counts.forEach((config, wanted) -> {
             long got = removed.getOrDefault(config, 0L);
             if (got < wanted) {
@@ -767,6 +851,13 @@ public final class BattleSettlementService {
     private void recordBattleResult(SceneWorld world, ScenePlayer player, BattleSettlementData settlement, long goldCredited,
                                     Map<Integer, Long> itemsGained, Map<Integer, Long> itemsConsumed,
                                     com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta progressionDelta) {
+        recordBattleResult(world, player, settlement, goldCredited, itemsGained, itemsConsumed, progressionDelta, false);
+    }
+
+    private void recordBattleResult(SceneWorld world, ScenePlayer player, BattleSettlementData settlement, long goldCredited,
+                                    Map<Integer, Long> itemsGained, Map<Integer, Long> itemsConsumed,
+                                    com.game.scene.progression.BattleProgressionRules.BattleProgressionDelta progressionDelta,
+                                    boolean itemsMailed) {
         long nowMs = clock.epochMillis();
         boolean festivalBattle = isFestivalBeast(settlement);
         boolean jianghuDuel = isJianghuDuel(settlement);
@@ -806,6 +897,7 @@ public final class BattleSettlementService {
                 .setSettledAtMs(nowMs)
                 .setMatchMode(settlement.getMatchMode())
                 .setBattleConfigId(settlement.getBattleConfigId())
+                .setItemsMailed(itemsMailed)
                 .setMaterialCreditUnitsAdded(materialDelta.totalUnitsAdded())
                 .setMaterialTradableUnitsAdded(materialDelta.tradableUnitsAdded())
                 .setMaterialPvpLossIneligible(materialDelta.pvpLossIneligible())

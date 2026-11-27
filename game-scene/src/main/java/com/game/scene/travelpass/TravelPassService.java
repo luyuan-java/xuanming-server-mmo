@@ -382,6 +382,7 @@ public final class TravelPassService {
             Bag.AddResult addRes = bags.prepareEquipmentGrant(player, candidateBags, mergedItems, true);
             if (!addRes.ok()) {
                 int tipId = addRes.tip() == Bag.NO_SPACE ? BAG_FULL
+                        : addRes.tip() == BagService.ITEM_BLOCKED ? ITEM_BLOCKED
                         : addRes.tip() == BagService.REFUSED ? (player.frozen() ? FROZEN : ITEM_BLOCKED)
                         : UNAVAILABLE;
                 return rejectClaim(tipId);

@@ -36,6 +36,30 @@ public final class JdbcPlayerTables implements PlayerDirectory, LedgerReader {
         return jdbc.read(budget, s -> readLocked(s,playerId));
     }
 
+    @Override
+    public ItemGainBlockRead readItemGainBlocks(Deadline budget, long playerId) throws SQLException {
+        return jdbc.read(budget, s -> {
+            byte[][] data = s.one(STATE_SQL, row -> new byte[][] {row.getBytes(1)}, AuthorityJdbc.u64(playerId));
+            if (data == null) {
+                return ItemGainBlockRead.absent();
+            }
+            if (data[0] == null) {
+                throw new SQLException("player_state.data 为 NULL player_id=" + Long.toUnsignedString(playerId));
+            }
+            try {
+                PlayerState state = PlayerState.parseFrom(data[0]);
+                if (!state.hasItemGainBlock()) {
+                    return new ItemGainBlockRead(true, java.util.List.of());
+                }
+                java.util.List<Integer> sorted = new java.util.ArrayList<>(state.getItemGainBlock().getBlockedItemConfigIdsList());
+                sorted.sort(Integer::compareUnsigned);
+                return new ItemGainBlockRead(true, sorted);
+            } catch (InvalidProtocolBufferException e) {
+                throw new SQLException("player_state.data 解析失败 player_id=" + Long.toUnsignedString(playerId), e);
+            }
+        });
+    }
+
     /** 强制作废的证明必须在同P内复读；事务外旧账本不能证明并发消费尚未落盘。 */
     static Read readLocked(AuthorityJdbc.Session session, long playerId) throws SQLException {
         byte[][] data = session.one(STATE_SQL, row -> new byte[][] {row.getBytes(1)}, AuthorityJdbc.u64(playerId));

@@ -288,6 +288,7 @@ public final class SpiritShopService {
                     Map.of(grant.itemConfigId(), totalQty), grant.bound());
             if (!added.ok()) {
                 int tipId = added.tip() == Bag.NO_SPACE ? BAG_FULL
+                        : added.tip() == BagService.ITEM_BLOCKED ? ITEM_BLOCKED
                         : added.tip() == BagService.REFUSED ? (player.frozen() ? FROZEN : ITEM_BLOCKED)
                         : UNAVAILABLE;
                 return rejectBuy(tipId);

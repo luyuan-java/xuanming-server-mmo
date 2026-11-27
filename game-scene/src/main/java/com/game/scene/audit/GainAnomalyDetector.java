@@ -86,6 +86,17 @@ public final class GainAnomalyDetector {
     }
 
     /**
+     * 仅清空指定玩家的异常收益滑动窗口（PARITY 2026-11-06）：
+     * 阈值、已发告警、流水与其他玩家窗口均不变；空句柄与重复调用安全；下一笔收益从零重新计数。
+     */
+    public void resetPlayer(ScenePlayer player) {
+        if (player == null) {
+            return;
+        }
+        player.gainWindows().clear();
+    }
+
+    /**
      * 记一次货币获取（成功入账之后调用，量取请求加的数额，同基线）。
      *
      * @return 这一次让窗口越线并告警了

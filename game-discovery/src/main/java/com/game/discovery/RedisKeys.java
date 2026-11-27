@@ -327,9 +327,14 @@ public final class RedisKeys {
         return worldZonePrefix(zoneId) + "craft-proxy-stalls";
     }
 
-    /** 本 zone 跨节点/离线名匠代打口碑与 24h 极品热榜原子账本（Hash：字段为 {@code <mid>:o/:s/:r/:g/:24o/:24s/:b}，与摊位目录同槽）。 */
+    /** 本 zone 跨节点/离线名匠代打待回账口碑原子账本（Hash：字段为 {@code <mid>:o/:s/:r/:g/:b}，与摊位目录同槽）。 */
     public String craftProxyReputation(int zoneId) {
         return worldZonePrefix(zoneId) + "craft-proxy-reputation";
+    }
+
+    /** 本 zone 名匠代打西市近 24 小时热榜 UTC 小时分桶（Hash：字段为 {@code <mid>:o/:s}，TTL 25 小时，同区 24 个桶同槽）。 */
+    public String craftProxyHotBucket(int zoneId, long utcHour) {
+        return worldZonePrefix(zoneId) + "craft-proxy-hot:" + Long.toUnsignedString(utcHour);
     }
 
     /** 玩家主动切线冷却（STRING，短 TTL）；全局 player 维度，跨节点/zone不重置。 */

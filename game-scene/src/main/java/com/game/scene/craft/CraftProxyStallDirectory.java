@@ -33,15 +33,72 @@ public final class CraftProxyStallDirectory {
 
     private static final Logger log = LoggerFactory.getLogger(CraftProxyStallDirectory.class);
 
+    /** 西市近 24 小时热榜窗口小时数（当前 UTC 小时 + 前 23 个 UTC 小时）。 */
+    public static final int HOT_WINDOW_HOURS = 24;
+    /** 每小时热榜桶 TTL（秒）：25 小时，覆盖整 24 小时滑窗并留 1 小时时钟/刷新余量。 */
+    public static final long HOT_BUCKET_TTL_SECONDS = 25L * 3600L;
+
     /**
      * 原子取走待回账口碑并删除原字段（与 C++ {@code kTakeProxyReputationLua} 逐字节对齐）：
-     * 仅取走 {@code <id>:o/s/r/g/b}，不动 24h 热榜 {@code :24o/:24s}；两个节点并发取同一宗师只有先执行方拿到值，杜绝跨节点/陈旧镜像双倍入账与残留脏键。
+     * 仅取走 {@code <id>:o/s/r/g/b}；热榜已独立按 UTC 小时分桶，待回账表不再写入 {@code :24o/:24s}。
      */
     public static final String TAKE_REPUTATION_LUA =
             "local k=KEYS[1] local p=ARGV[1] "
                     + "local v=redis.call('HMGET',k,p..':o',p..':s',p..':r',p..':g',p..':b') "
                     + "redis.call('HDEL',k,p..':o',p..':s',p..':r',p..':g',p..':b') "
                     + "return v";
+
+    /**
+     * 原子累加单个 UTC 小时热榜桶并刷新 25 小时过期时间：
+     * {@code KEYS[1]=craft-proxy-hot:<utcHour>}，{@code ARGV={masterId, ordersDelta, supremeDelta, ttlSeconds}}。
+     */
+    public static final String INCR_HOT_BUCKET_LUA =
+            "local k=KEYS[1] local p=ARGV[1] local od=tonumber(ARGV[2]) local sd=tonumber(ARGV[3]) local ttl=tonumber(ARGV[4]) "
+                    + "if od>0 then redis.call('HINCRBY',k,p..':o',od) end "
+                    + "if sd>0 then redis.call('HINCRBY',k,p..':s',sd) end "
+                    + "redis.call('EXPIRE',k,ttl) return 1";
+
+    /**
+     * 同槽只读 Lua：汇总当前 UTC 小时与前 23 个小时（共 24 个同槽桶）的热榜订单与极品计数，
+     * 返回平坦数组 {@code [field, sumString, ...]}，field 形如 {@code <mid>:o} 或 {@code <mid>:s}。
+     */
+    public static final String SUM_HOT_24H_LUA =
+            "local totals={} "
+                    + "for i=1,#KEYS do "
+                    + "  local kv=redis.call('HGETALL',KEYS[i]) "
+                    + "  for j=1,#kv,2 do "
+                    + "    local f=kv[j] local v=tonumber(kv[j+1]) or 0 "
+                    + "    if v>0 then totals[f]=(totals[f] or 0)+v end "
+                    + "  end "
+                    + "end "
+                    + "local out={} "
+                    + "for f,v in pairs(totals) do out[#out+1]=f out[#out+1]=tostring(v) end "
+                    + "return out";
+
+    /** 计算指定毫秒时间戳对应的 UTC 小时桶编号（{@code utcSec / 3600}）。 */
+    public static long utcHourOfMillis(long epochMillis) {
+        return Math.floorDiv(epochMillis, 3_600_000L);
+    }
+
+    /** 解析 {@link #SUM_HOT_24H_LUA} 返回的平坦 {@code [field, count, ...]} 列表。 */
+    public static Map<String, String> parseHot24hLuaReply(List<?> reply) {
+        if (reply == null || reply.size() < 2) {
+            return Map.of();
+        }
+        Map<String, String> out = new HashMap<>(reply.size() / 2);
+        for (int i = 0; i + 1 < reply.size(); i += 2) {
+            Object fk = reply.get(i);
+            Object fv = reply.get(i + 1);
+            String key = fk instanceof byte[] b ? new String(b, java.nio.charset.StandardCharsets.UTF_8)
+                    : (fk == null ? null : fk.toString());
+            String val = fv instanceof byte[] b ? new String(b, java.nio.charset.StandardCharsets.UTF_8)
+                    : (fv == null ? null : fv.toString());
+            if (key != null && val != null) {
+                out.put(key, val);
+            }
+        }
+        return out;
+    }
 
     /** 单次原子取走的待回账口碑数额（与 C++ {@code TakenProxyReputation} 同构）。 */
     public record TakenReputation(int orders, int supreme, int rare, long netGold, String lastBuyer) {
@@ -112,6 +169,11 @@ public final class CraftProxyStallDirectory {
             return CompletableFuture.completedFuture(null);
         }
 
+        /** 向指定 UTC 小时热榜桶写入增量并续期 25 小时 TTL（不写待回账口碑 Hash）。 */
+        default CompletionStage<Void> incrHotBucketAsync(long utcHour, long masterPlayerId, int ordersDelta, int supremeDelta) {
+            return CompletableFuture.completedFuture(null);
+        }
+
         default CompletionStage<Void> setLastBuyerAsync(long masterPlayerId, String buyerName) {
             return CompletableFuture.completedFuture(null);
         }
@@ -146,10 +208,14 @@ public final class CraftProxyStallDirectory {
 
     private final BackingStore store;
     private final Executor logic;
+    private com.game.scene.world.SceneClock clock = com.game.scene.world.SceneClock.SYSTEM;
     private final Map<Long, CraftProxyStallInfo> stalls = new HashMap<>();
     private final Map<Long, Long> localMutationSeq = new HashMap<>();
     private final Map<Long, PendingReputation> pendingReputation = new HashMap<>();
-    private final Map<Long, HotCounters> hotCounters = new HashMap<>();
+    /** 远端 24h 小时分桶聚合快照（由同槽只读 Lua 汇总当前小时 + 前 23 小时填入）。 */
+    private final Map<Long, HotCounters> remoteHot24h = new HashMap<>();
+    /** 本地按 UTC 小时分桶的热榜计数（本地单测与本节点在途期间使用，自动淘汰 24 小时之前的旧桶）。 */
+    private final Map<Long, Map<Long, HotCounters>> localHourlyHot = new HashMap<>();
     private final Map<Long, Long> localReputationMutationSeq = new HashMap<>();
     private final Set<Long> takesInFlight = new HashSet<>();
     private LongFunction<ScenePlayer> playerLookup;
@@ -163,6 +229,12 @@ public final class CraftProxyStallDirectory {
     public CraftProxyStallDirectory(BackingStore store, Executor logic) {
         this.store = Objects.requireNonNull(store, "store");
         this.logic = Objects.requireNonNull(logic, "logic");
+    }
+
+    /** 注入时钟（单测用于跨小时推进验证近 24 小时滑窗自动淘汰旧桶）。 */
+    public CraftProxyStallDirectory withClock(com.game.scene.world.SceneClock clock) {
+        this.clock = Objects.requireNonNull(clock, "clock");
+        return this;
     }
 
     /** 装配远端异步取走回账后的在线宗师查找器与关键进度存盘回调（仅在逻辑线程执行）。 */
@@ -248,18 +320,20 @@ public final class CraftProxyStallDirectory {
             return null;
         }
         String safeBuyer = buyerName == null ? "" : buyerName;
-        HotCounters hot = hotCounters.computeIfAbsent(masterPlayerId, k -> new HotCounters());
-        hot.orders24h = satAddU32(hot.orders24h, 1);
+        long utcHour = utcHourOfMillis(clock.epochMillis());
+        pruneExpiredLocalHotBuckets(utcHour);
+        HotCounters bucket = localHourlyHot
+                .computeIfAbsent(utcHour, h -> new HashMap<>())
+                .computeIfAbsent(masterPlayerId, k -> new HotCounters());
+        bucket.orders24h = satAddU32(bucket.orders24h, 1);
         if (supremeDelta > 0) {
-            hot.supreme24h = satAddU32(hot.supreme24h, supremeDelta);
+            bucket.supreme24h = satAddU32(bucket.supreme24h, supremeDelta);
         }
         long repSeq = ++nextSeq;
         localReputationMutationSeq.put(masterPlayerId, repSeq);
         List<CompletionStage<Void>> stages = new ArrayList<>(6);
-        stages.add(store.incrReputationAsync(masterPlayerId, "24o", 1L));
-        if (supremeDelta > 0) {
-            stages.add(store.incrReputationAsync(masterPlayerId, "24s", supremeDelta));
-        }
+        // 近 24 小时热榜改走独立 UTC 小时桶（25 小时 TTL），待回账表停写 :24o / :24s。
+        stages.add(store.incrHotBucketAsync(utcHour, masterPlayerId, 1, Math.max(0, supremeDelta)));
 
         if (onlineMaster != null
                 && onlineMaster.playerId() == masterPlayerId
@@ -481,10 +555,9 @@ public final class CraftProxyStallDirectory {
         stalls.keySet().removeIf(id -> !remoteIds.contains(id) && !localMutationSeq.containsKey(id));
     }
 
-    /** 逻辑线程合并远端口碑与 24h 热榜 Redis Hash（字段格式 {@code <mid>:o/:s/:r/:g/:24o/:24s/:b}）。 */
+    /** 逻辑线程合并远端待回账口碑 Redis Hash（字段格式 {@code <mid>:o/:s/:r/:g/:b}；热榜已独立按小时分桶）。 */
     public void applyRemoteReputationSnapshot(Map<String, String> rawEntries) {
         Map<Long, PendingReputation> parsedPending = new HashMap<>();
-        Map<Long, HotCounters> parsedHot = new HashMap<>();
         if (rawEntries != null) {
             for (Map.Entry<String, String> entry : rawEntries.entrySet()) {
                 String key = entry.getKey();
@@ -524,8 +597,6 @@ public final class CraftProxyStallDirectory {
                     case "s" -> parsedPending.computeIfAbsent(masterId, k -> new PendingReputation()).supreme = clampU32(signedVal);
                     case "r" -> parsedPending.computeIfAbsent(masterId, k -> new PendingReputation()).rare = clampU32(signedVal);
                     case "g" -> parsedPending.computeIfAbsent(masterId, k -> new PendingReputation()).netGold = signedVal;
-                    case "24o" -> parsedHot.computeIfAbsent(masterId, k -> new HotCounters()).orders24h = clampU32(signedVal);
-                    case "24s" -> parsedHot.computeIfAbsent(masterId, k -> new HotCounters()).supreme24h = clampU32(signedVal);
                     default -> {
                     }
                 }
@@ -537,8 +608,92 @@ public final class CraftProxyStallDirectory {
                 pendingReputation.put(e.getKey(), e.getValue());
             }
         }
-        hotCounters.keySet().removeIf(id -> !localReputationMutationSeq.containsKey(id));
-        hotCounters.putAll(parsedHot);
+    }
+
+    /**
+     * 逻辑线程合并远端 24 小时热榜分桶 Lua 汇总快照（字段格式 {@code <mid>:o} / {@code <mid>:s}，
+     * 由 {@link #SUM_HOT_24H_LUA} 对当前 UTC 小时 + 前 23 个小时求和得到）。
+     */
+    public void applyRemoteHot24hSnapshot(Map<String, String> summedEntries) {
+        Map<Long, HotCounters> parsedHot = new HashMap<>();
+        if (summedEntries != null) {
+            for (Map.Entry<String, String> entry : summedEntries.entrySet()) {
+                String key = entry.getKey();
+                String val = entry.getValue();
+                if (key == null || val == null) {
+                    continue;
+                }
+                int colon = key.indexOf(':');
+                if (colon <= 0 || colon + 1 >= key.length()) {
+                    continue;
+                }
+                long masterId;
+                try {
+                    masterId = Long.parseUnsignedLong(key.substring(0, colon));
+                } catch (NumberFormatException ignored) {
+                    continue;
+                }
+                if (masterId == 0L || localReputationMutationSeq.containsKey(masterId)) {
+                    continue;
+                }
+                long signedVal;
+                try {
+                    signedVal = Long.parseLong(val);
+                } catch (NumberFormatException ignored) {
+                    continue;
+                }
+                if (signedVal <= 0L) {
+                    continue;
+                }
+                String suffix = key.substring(colon + 1);
+                if ("o".equals(suffix)) {
+                    parsedHot.computeIfAbsent(masterId, k -> new HotCounters()).orders24h = clampU32(signedVal);
+                } else if ("s".equals(suffix)) {
+                    parsedHot.computeIfAbsent(masterId, k -> new HotCounters()).supreme24h = clampU32(signedVal);
+                }
+            }
+        }
+        remoteHot24h.keySet().removeIf(id -> !localReputationMutationSeq.containsKey(id));
+        remoteHot24h.putAll(parsedHot);
+    }
+
+    private void pruneExpiredLocalHotBuckets(long currentUtcHour) {
+        long minHour = currentUtcHour - (HOT_WINDOW_HOURS - 1L);
+        localHourlyHot.keySet().removeIf(h -> h < minHour);
+    }
+
+    private HotCounters resolveHot24h(long masterId, long currentUtcHour) {
+        if (store.hasRemoteReputationLedger() && !localReputationMutationSeq.containsKey(masterId)) {
+            return remoteHot24h.get(masterId);
+        }
+        long minHour = currentUtcHour - (HOT_WINDOW_HOURS - 1L);
+        int orders = 0;
+        int supreme = 0;
+        for (Map.Entry<Long, Map<Long, HotCounters>> e : localHourlyHot.entrySet()) {
+            long h = e.getKey();
+            if (h < minHour || h > currentUtcHour) {
+                continue;
+            }
+            HotCounters c = e.getValue().get(masterId);
+            if (c != null) {
+                orders = satAddU32(orders, c.orders24h);
+                supreme = satAddU32(supreme, c.supreme24h);
+            }
+        }
+        if (store.hasRemoteReputationLedger()) {
+            HotCounters remote = remoteHot24h.get(masterId);
+            if (remote != null) {
+                orders = Integer.compareUnsigned(remote.orders24h, orders) > 0 ? remote.orders24h : orders;
+                supreme = Integer.compareUnsigned(remote.supreme24h, supreme) > 0 ? remote.supreme24h : supreme;
+            }
+        }
+        if (orders == 0 && supreme == 0) {
+            return null;
+        }
+        HotCounters merged = new HotCounters();
+        merged.orders24h = orders;
+        merged.supreme24h = supreme;
+        return merged;
     }
 
     public CraftProxyStallInfo find(long masterPlayerId) {
@@ -550,6 +705,8 @@ public final class CraftProxyStallDirectory {
     }
 
     public List<CraftProxyStallInfo> listStalls() {
+        long currentUtcHour = utcHourOfMillis(clock.epochMillis());
+        pruneExpiredLocalHotBuckets(currentUtcHour);
         List<CraftProxyStallInfo.Builder> builders = new ArrayList<>();
         for (CraftProxyStallInfo info : stalls.values()) {
             if (!isValidStall(info)) {
@@ -563,7 +720,7 @@ public final class CraftProxyStallDirectory {
                 b.setSupremeForgedCount(satAddU32(b.getSupremeForgedCount(), pending.supreme));
                 b.setRareBooksCraftedCount(satAddU32(b.getRareBooksCraftedCount(), pending.rare));
             }
-            HotCounters hot = hotCounters.get(masterId);
+            HotCounters hot = resolveHot24h(masterId, currentUtcHour);
             int orders24h = hot != null ? hot.orders24h : 0;
             int supreme24h = hot != null ? hot.supreme24h : 0;
             b.setRecent24HOrders(orders24h);
