@@ -114,13 +114,19 @@ public class LoginConfiguration {
      * Dubbo 调用本身 3s 超时、不重试（重试会把总耗时拖过客户端预算）；scene-manager 不在时不影响 login 启动。
      * 进游戏用到两个方法：分配场景 {@code assign}、登录期重定向签票 {@code redirectToZone}（批次 5.4 的 GO-5）。
      */
-    @DubboReference(check = false, url = "${game.dubbo.scene-manager-url:}", timeout = 3000, retries = 0)
+    @DubboReference(check = false, url = "${game.dubbo.scene-manager-url:}", timeout = 3000, retries = 0,
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS})
     private SceneDirectoryService sceneDirectory;
 
-    @DubboReference(group = DubboGroups.GUILD, check = false, url = "${game.dubbo.guild-url:}", timeout = 3000, retries = 0)
+    @DubboReference(group = DubboGroups.GUILD, check = false, url = "${game.dubbo.guild-url:}", timeout = 3000, retries = 0,
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS})
     private GuildInternalService guildInternal;
 
-    @DubboReference(group = DubboGroups.MATCH, check = false, url = "${game.dubbo.match-url:}", timeout = 3000, retries = 0)
+    @DubboReference(group = DubboGroups.MATCH, check = false, url = "${game.dubbo.match-url:}", timeout = 3000, retries = 0,
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS})
     private MatchInternalService matchInternal;
 
     @Bean

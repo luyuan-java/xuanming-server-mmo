@@ -64,7 +64,9 @@ public class ContentGuardApplication {
 
     @Configuration(proxyBeanMethods = false)
     static class IdentityLookupConfiguration {
-        @DubboReference(group = DubboGroups.LOGIN, check = false, url = "${game.dubbo.login-url:}", retries = 0)
+        @DubboReference(group = DubboGroups.LOGIN, check = false, url = "${game.dubbo.login-url:}", retries = 0,
+                parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                        org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS})
         private AccountLoginService loginService;
 
         @Bean

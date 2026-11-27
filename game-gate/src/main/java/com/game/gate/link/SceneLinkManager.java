@@ -32,6 +32,10 @@ public final class SceneLinkManager implements SceneLinks, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(SceneLinkManager.class);
 
+    /** J3：建链/握手失败冷却起跳 0.5s，每次翻倍，封顶 8s，叠加 ±25% 抖动。 */
+    public static final long INITIAL_CONNECT_BACKOFF_MS = 500L;
+    public static final long MAX_CONNECT_BACKOFF_MS = 8_000L;
+
     private final Supplier<LinkHello> hellos;
     private final LinkConnector connector;
     private final LinkSettings settings;
@@ -40,11 +44,14 @@ public final class SceneLinkManager implements SceneLinks, AutoCloseable {
     private final ConcurrentHashMap<Integer, SceneLink> links = new ConcurrentHashMap<>();
     private record LinkKey(int nodeId, long generation) { }
     private record Retired(SceneLink link, long deadlineNanos) { }
+    private record FailureCooldown(int consecutiveFailures, long readyAtNanos) { }
     private final ConcurrentHashMap<LinkKey, Retired> retired = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Integer, FailureCooldown> cooldowns = new ConcurrentHashMap<>();
     private final Object directoryLock = new Object();
     private final Map<Integer, Long> maximumEpochs = new HashMap<>();
     private final Map<Integer, String> legacyCandidates = new HashMap<>();
     private final LongSupplier nanoClock;
+    private final java.util.function.DoubleSupplier randomUnit;
     private final AtomicLong generations = new AtomicLong();
     private volatile SceneLinkListener listener;
     private volatile boolean closed;
@@ -58,17 +65,26 @@ public final class SceneLinkManager implements SceneLinks, AutoCloseable {
      */
     public SceneLinkManager(Supplier<LinkHello> hellos, LinkConnector connector, LinkSettings settings,
                             BooleanSupplier newLinksAllowed, GateMetrics metrics) {
-        this(hellos, connector, settings, newLinksAllowed, metrics, System::nanoTime);
+        this(hellos, connector, settings, newLinksAllowed, metrics, System::nanoTime,
+                () -> java.util.concurrent.ThreadLocalRandom.current().nextDouble());
     }
 
     SceneLinkManager(Supplier<LinkHello> hellos, LinkConnector connector, LinkSettings settings,
                      BooleanSupplier newLinksAllowed, GateMetrics metrics, LongSupplier nanoClock) {
+        this(hellos, connector, settings, newLinksAllowed, metrics, nanoClock,
+                () -> java.util.concurrent.ThreadLocalRandom.current().nextDouble());
+    }
+
+    SceneLinkManager(Supplier<LinkHello> hellos, LinkConnector connector, LinkSettings settings,
+                     BooleanSupplier newLinksAllowed, GateMetrics metrics, LongSupplier nanoClock,
+                     java.util.function.DoubleSupplier randomUnit) {
         this.hellos = hellos;
         this.connector = connector;
         this.settings = settings;
         this.newLinksAllowed = newLinksAllowed;
         this.metrics = metrics;
         this.nanoClock = nanoClock;
+        this.randomUnit = java.util.Objects.requireNonNull(randomUnit, "randomUnit");
     }
 
     @Override
@@ -185,6 +201,11 @@ public final class SceneLinkManager implements SceneLinks, AutoCloseable {
         for (int attempt = 0; attempt < 2 && !closed; attempt++) {
             SceneLink link = links.get(sceneNodeId);
             if (link == null) {
+                FailureCooldown cd = cooldowns.get(sceneNodeId);
+                if (cd != null && nanoClock.getAsLong() - cd.readyAtNanos() < 0) {
+                    metrics.linkDropped(LinkDrop.UNAVAILABLE, 1);
+                    return 0;
+                }
                 if (!newLinksAllowed.getAsBoolean()) {
                     log.warn("本 gate 节点号租约无效，不新建 scene 链路，丢弃一帧 node={} type={}", sceneNodeId, frame.getBodyCase());
                     metrics.linkDropped(LinkDrop.LEASE_INVALID, 1);
@@ -219,9 +240,33 @@ public final class SceneLinkManager implements SceneLinks, AutoCloseable {
         }
     }
 
+    void onLinkReady(int sceneNodeId) {
+        cooldowns.remove(sceneNodeId);
+    }
+
     void onLinkDead(SceneLink link) {
+        onLinkDead(link, true);
+    }
+
+    void onLinkDead(SceneLink link, boolean wasReady) {
         links.remove(link.nodeId(), link);
         retired.remove(new LinkKey(link.nodeId(), link.generation()));
+        if (!closed && !wasReady) {
+            long now = nanoClock.getAsLong();
+            cooldowns.compute(link.nodeId(), (id, prev) -> {
+                int failures = (prev == null ? 0 : prev.consecutiveFailures()) + 1;
+                long delayMs = connectBackoffMs(failures, randomUnit.getAsDouble());
+                return new FailureCooldown(failures, now + java.time.Duration.ofMillis(delayMs).toNanos());
+            });
+        }
+    }
+
+    /** 计算建链/握手连续失败第 failures 次（1 起）的退避毫秒：0.5s 翻倍、8s 封顶，叠加 ±25% 抖动。 */
+    public static long connectBackoffMs(int failures, double randomUnit) {
+        int shift = Math.min(4, Math.max(0, failures - 1));
+        long base = Math.min(MAX_CONNECT_BACKOFF_MS, INITIAL_CONNECT_BACKOFF_MS << shift);
+        double clamped = Math.max(0.0, Math.min(1.0, randomUnit));
+        return Math.max(1L, (long) (base * (0.75 + 0.50 * clamped)));
     }
 
     /** 为一次建链生成新的握手帧（时间戳取现在）。 */

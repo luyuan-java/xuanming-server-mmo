@@ -708,6 +708,17 @@ public final class SceneWorld {
      *
      * @return 本次销毁的场景数
      */
+    /** 节点归属对账排空单轮住户限速（对齐主仓 scene-node-ownership-reconcile.md：每轮每节点 200 名住户，空场景不限）。 */
+    public static final int DEFAULT_MAX_DRAIN_RESIDENTS_PER_ROUND = 200;
+    private int maxDrainResidentsPerRound = DEFAULT_MAX_DRAIN_RESIDENTS_PER_ROUND;
+
+    public void setMaxDrainResidentsPerRound(int maxResidents) {
+        if (maxResidents < 1) {
+            throw new IllegalArgumentException("每轮排空住户限速须 >= 1: " + maxResidents);
+        }
+        this.maxDrainResidentsPerRound = maxResidents;
+    }
+
     public int drainStep() {
         Deque<Scene> work = new ArrayDeque<>();
         for (Scene scene : scenes.values().stream()
@@ -719,6 +730,7 @@ public final class SceneWorld {
         long now = clock.nanoTime();
         long grace = instances.reclaimGrace().toNanos();
         int destroyed = 0;
+        int remainingResidentBudget = maxDrainResidentsPerRound;
         while (!work.isEmpty()) {
             Scene from = work.poll();
             if (scenes.get(from.sceneId()) != from || !from.draining()) {
@@ -732,7 +744,11 @@ public final class SceneWorld {
                 }
                 continue;
             }
-            relocateResidents(from);
+            // 空场景不受住户预算限制，直接销毁；有人场景按本轮剩余住户配额限速迁移
+            if (from.playerCount() > 0 && remainingResidentBudget > 0) {
+                int moved = relocateResidents(from, remainingResidentBudget);
+                remainingResidentBudget = Math.max(0, remainingResidentBudget - moved);
+            }
             if (from.playerCount() == 0 && !hasPendingEnter(from.sceneId())) {
                 destroyScene(from, work);
                 destroyed++;
@@ -742,8 +758,12 @@ public final class SceneWorld {
     }
 
     private void relocateResidents(Scene from) {
-        if (from.playerCount() == 0) {
-            return;
+        relocateResidents(from, maxDrainResidentsPerRound);
+    }
+
+    private int relocateResidents(Scene from, int maxMovements) {
+        if (from.playerCount() == 0 || maxMovements <= 0) {
+            return 0;
         }
         List<ScenePlayer> movable = new ArrayList<>(from.playerCount());
         for (ScenePlayer player : from.players()) {
@@ -758,7 +778,11 @@ public final class SceneWorld {
             }
         }
         movable.sort((left, right) -> Long.compareUnsigned(left.playerId(), right.playerId()));
+        int moved = 0;
         for (ScenePlayer player : movable) {
+            if (moved >= maxMovements) {
+                break;
+            }
             if (player.scene() != from || relocationSwitchInFlight(player) || player.inBattle()) {
                 continue;
             }
@@ -767,6 +791,7 @@ public final class SceneWorld {
             Scene local = nodeEvacuating() ? null : leastLoadedActive(wanted, from);
             if (local != null) {
                 relocateLocally(player, local);
+                moved++;
             } else if (crossNode.enabled() && wanted != 0) {
                 if (!evacuationRetries.ready(player, now)) {
                     metrics.channelRelocation(ChannelRelocation.DEFERRED);
@@ -774,19 +799,22 @@ public final class SceneWorld {
                 }
                 if (evacuationsInFlight.size() >= crossNode.evacuation().maxInFlight()) {
                     metrics.channelRelocation(ChannelRelocation.DEFERRED_CAP);
-                    return;
+                    return moved;
                 }
                 if (!repository.evacuationCapacityAvailable() || !evacuationRetries.storageReady(now)) {
                     metrics.channelRelocation(ChannelRelocation.DEFERRED_STORAGE);
-                    return;
+                    return moved;
                 }
                 int fallback = defaultWorldConfigId();
                 if (fallback == wanted || !nodeEvacuating() && leastLoadedActive(fallback, from) != null) fallback = 0;
                 beginEvacuationSwitch(player, wanted, fallback);
+                moved++;
             } else {
                 retryEvacuationOrUseLocalFallback(player);
+                moved++;
             }
         }
+        return moved;
     }
 
     /** 镜像取号永不冻结，可以被权威改派取代；普通选点、传送和已有疏散仍然等待自己的结局。 */

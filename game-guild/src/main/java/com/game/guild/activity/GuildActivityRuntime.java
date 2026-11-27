@@ -28,7 +28,9 @@ import org.springframework.context.SmartLifecycle;
 public final class GuildActivityRuntime implements SmartLifecycle {
     private static final Logger LOG = LoggerFactory.getLogger(GuildActivityRuntime.class);
     @DubboReference(
-            group = "match", url = "${game.guild.activity.match-url:tri://127.0.0.1:20888}", check = false, retries = 0, timeout = 3000)
+            group = "match", url = "${game.guild.activity.match-url:tri://127.0.0.1:20888}", check = false, retries = 0, timeout = 3000,
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS})
     private MatchInternalService match;
     private final GuildActivityStore store;
     private final RedissonClient redis;

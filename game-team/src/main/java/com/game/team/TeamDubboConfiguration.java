@@ -32,7 +32,9 @@ public class TeamDubboConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.MATCH, check = false, url = "${game.dubbo.match-url:}", retries = 0,
-            timeout = (int) MatchTeamBattle.HOP_TIMEOUT_MS)
+            timeout = (int) MatchTeamBattle.HOP_TIMEOUT_MS,
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS})
     public ReferenceBean<MatchTeamService> matchTeamService() {
         return new ReferenceBean<>();
     }

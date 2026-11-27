@@ -2138,9 +2138,28 @@ public final class ClientDispatcher {
         registry.release(s);
     }
 
+    private volatile DisconnectNotifier disconnectNotifier;
+
+    /** 挂载断线通知异步重发调度器（生产由 GateNode 装配：失败后按 1s..30s 抖动退避重发直至 login 确认）。 */
+    public ClientDispatcher withDisconnectRetryScheduler(java.util.concurrent.ScheduledExecutorService scheduler) {
+        this.disconnectNotifier = scheduler == null ? null : new DisconnectNotifier(login::sessionClosed, scheduler);
+        return this;
+    }
+
     private void notifyLoginClosed(ClientSession s) {
         SessionClosed event = SessionClosed.newBuilder().setSession(context(s)).setVoluntary(false).build();
         Timer.Sample sample = metrics.startTimer();
+        DisconnectNotifier notifier = this.disconnectNotifier;
+        if (notifier != null) {
+            notifier.send(event,
+                    () -> metrics.loginCallCompleted(LoginCall.SESSION_CLOSED, sample, true),
+                    error -> {
+                        metrics.loginCallCompleted(LoginCall.SESSION_CLOSED, sample, false);
+                        log.warn("通知 login 会话结束失败（将按退避重发直至确认） session={} player_id={} 原因={}",
+                                sid(s), event.getSession().getPlayerId(), rootCause(error).toString());
+                    });
+            return;
+        }
         try {
             CompletableFuture<?> future = login.sessionClosed(event);
             if (future != null) {

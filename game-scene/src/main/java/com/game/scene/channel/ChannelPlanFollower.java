@@ -67,6 +67,10 @@ public final class ChannelPlanFollower {
     private final Runnable onApplied;
     private final LongConsumer onSynchronized;
     private final SceneMetrics metrics;
+    /** 节点号持有者校验回调（返回 true = 已从控制面确认当前仍归本实例；false = 已被新进程接走；null = 未启用）。 */
+    private volatile BooleanSupplier ownHolderMatches;
+    /** 节点是否已从权威控制面确认过自身节点号持有者记录（对应指标 scene_ownership_own_holder_known，绝不拿注册应答顶替）。 */
+    private volatile boolean ownHolderKnown;
     /** 上次应用成功的版本；-1 = 还没应用过（Redis 里没有计划时版本是 0，也要整读一次）。只在拉取线程上写。 */
     private volatile long appliedVersion = -1;
     private volatile boolean zoneRegistered;
@@ -154,22 +158,52 @@ public final class ChannelPlanFollower {
         }
     }
 
+    /** 挂接节点号持有者核对器（节点号被新进程接走时，返回 false 触发全量排空）。 */
+    public ChannelPlanFollower withOwnHolderCheck(BooleanSupplier ownHolderMatches) {
+        this.ownHolderMatches = ownHolderMatches;
+        return this;
+    }
+
+    /** 本节点是否已从权威控制面读到并确认自身节点号持有者记录（供 scene_ownership_own_holder_known 告警观测）。 */
+    public boolean isOwnHolderKnown() {
+        return ownHolderKnown;
+    }
+
     private synchronized boolean poll() {
         if (stopped) {
             return false;
         }
         long expectedEpoch = leaseEpoch.getAsLong();
-        if (!sameLease(expectedEpoch)) {
+        boolean leaseOk = sameLease(expectedEpoch);
+        boolean takenOver = false;
+        BooleanSupplier holderCheck = this.ownHolderMatches;
+        if (holderCheck != null) {
+            try {
+                boolean mine = holderCheck.getAsBoolean();
+                ownHolderKnown = true;
+                if (!mine) {
+                    takenOver = true;
+                    log.error("检测到本节点号已被其他实例接管，强制转入全量排空 zone={} node_id={}", zoneId, nodeId);
+                }
+            } catch (RuntimeException e) {
+                // 读不到持有者记录：绝不伪造已确认，保留 ownHolderKnown=false 供告警暴露
+                ownHolderKnown = false;
+                log.warn("读取自身节点号持有者记录失败 zone={} node_id={}", zoneId, nodeId, e);
+            }
+        }
+        if (!leaseOk && !takenOver && appliedVersion < 0) {
             metrics.channelPlanApply(ChannelPlanApply.SKIPPED_LEASE);
-            log.debug("节点号租约此刻不可用，跳过本次频道计划拉取 zone={} node_id={}", zoneId, nodeId);
+            log.debug("尚未同步过频道计划且节点号租约无效，跳过本次拉取 zone={} node_id={}", zoneId, nodeId);
             return false;
         }
-        registerZoneIfNeeded();
+        if (leaseOk && !takenOver) {
+            registerZoneIfNeeded();
+        }
         long version;
         WorldPlan plan;
         try {
             version = store.planVersion(zoneId);
-            if (version == appliedVersion) {
+            if (leaseOk && !takenOver && version == appliedVersion) {
                 if (!sameLease(expectedEpoch)) return false;
                 recovered();
                 onSynchronized.accept(expectedEpoch);
@@ -180,8 +214,18 @@ public final class ChannelPlanFollower {
             failed("读频道计划失败", e);
             return false;
         }
-        if (!sameLease(expectedEpoch)) return false;
-        List<WorldChannel> mine = plan.channelsOn(nodeId);
+        // 若读期间原号已复占出新代次，旧拍绝不能用过时读结果覆盖或误排空新代次；尚未同步过任何计划且失联的冷启动拍也不应用。
+        if (leaseEpoch.getAsLong() != expectedEpoch) {
+            return false;
+        }
+        boolean canOwn = sameLease(expectedEpoch) && !takenOver;
+        if (!canOwn && !takenOver && appliedVersion < 0) {
+            return false;
+        }
+        List<WorldChannel> mine = canOwn ? plan.channelsOn(nodeId) : List.of();
+        if (!canOwn) {
+            metrics.channelPlanApply(ChannelPlanApply.SKIPPED_LEASE);
+        }
         try {
             applier.apply(plan.version(), mine, expectedEpoch);
         } catch (InterruptedException e) {
@@ -192,7 +236,10 @@ public final class ChannelPlanFollower {
             failed("逻辑线程没能应用频道计划（超时或已停止）", e);
             return false;
         }
-        if (!sameLease(expectedEpoch)) return false;
+        if (!canOwn) {
+            // 失联/被接走期间不推进已同步版本，等租约恢复或停机退出
+            return false;
+        }
         appliedVersion = plan.version();
         recovered();
         try {

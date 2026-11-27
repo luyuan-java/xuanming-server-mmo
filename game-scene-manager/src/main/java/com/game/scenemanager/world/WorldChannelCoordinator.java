@@ -53,6 +53,8 @@ public final class WorldChannelCoordinator {
     private final NodeAvailability availability;
     private final String token;
     private final LongSupplier nanoClock;
+    /** 若 > 0，本编排实例仅负责这一个 zone（控制面按 zone 化隔离，绝不读/写其他 zone 状态）；0 表示负责注册表全部 zone。 */
+    private final int scopedZoneId;
     private final Map<Integer, ZoneState> zones = new ConcurrentHashMap<>();
     /** 停服或发号租约确认丢失：不再竞选、不再规划（等人工重启，同 scene 节点丢租约的口径）。 */
     private volatile boolean stopped;
@@ -64,6 +66,12 @@ public final class WorldChannelCoordinator {
     public WorldChannelCoordinator(WorldChannelStore store, SceneNodeSource directory, WorldChannelPlanner planner,
                                    WorldChannelProperties props, WorldChannelMetrics metrics, NodeAvailability availability,
                                    String token, LongSupplier nanoClock) {
+        this(store, directory, planner, props, metrics, availability, token, nanoClock, 0);
+    }
+
+    public WorldChannelCoordinator(WorldChannelStore store, SceneNodeSource directory, WorldChannelPlanner planner,
+                                   WorldChannelProperties props, WorldChannelMetrics metrics, NodeAvailability availability,
+                                   String token, LongSupplier nanoClock, int scopedZoneId) {
         this.store = store;
         this.directory = directory;
         this.planner = planner;
@@ -72,6 +80,11 @@ public final class WorldChannelCoordinator {
         this.availability = availability;
         this.token = token;
         this.nanoClock = nanoClock;
+        this.scopedZoneId = scopedZoneId;
+    }
+
+    public int scopedZoneId() {
+        return scopedZoneId;
     }
 
     /** 一个 zone 的领导状态。除 {@link #lock} 外只在 tick 线程上读写。 */
@@ -125,12 +138,16 @@ public final class WorldChannelCoordinator {
             return;
         }
         List<Integer> zoneIds;
-        try {
-            zoneIds = store.zones();
-        } catch (RuntimeException e) {
-            log.warn("读 zone 集合失败，本拍跳过", e);
-            metrics.tick(TickResult.ERROR);
-            return;
+        if (scopedZoneId != 0) {
+            zoneIds = List.of(scopedZoneId);
+        } else {
+            try {
+                zoneIds = store.zones();
+            } catch (RuntimeException e) {
+                log.warn("读 zone 集合失败，本拍跳过", e);
+                metrics.tick(TickResult.ERROR);
+                return;
+            }
         }
         for (int zoneId : zoneIds) {
             if (stopped) {

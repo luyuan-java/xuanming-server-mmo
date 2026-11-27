@@ -89,7 +89,9 @@ public class GmAdminConfiguration {
     @ConditionalOnProperty(name = "game.gm.mail-enabled", havingValue = "true")
     static class MailAdminClientConfiguration {
 
-        @DubboReference(group = DubboGroups.MAIL, url = "${game.dubbo.mail-url:}", check = false, timeout = 5000, retries = 0)
+        @DubboReference(group = DubboGroups.MAIL, url = "${game.dubbo.mail-url:}", check = false, timeout = 5000, retries = 0,
+                parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                        org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS})
         private MailAdminService mailAdminService;
 
         @Bean
@@ -104,7 +106,9 @@ public class GmAdminConfiguration {
     @ConditionalOnProperty(name = "game.gm.match-ops-enabled", havingValue = "true")
     static class MatchOpsClientConfiguration {
 
-        @DubboReference(group = DubboGroups.MATCH, url = "${game.dubbo.match-url:}", check = false, timeout = 5000, retries = 0)
+        @DubboReference(group = DubboGroups.MATCH, url = "${game.dubbo.match-url:}", check = false, timeout = 5000, retries = 0,
+                parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                        org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS})
         private MatchInternalService matchInternalService;
 
         @Bean

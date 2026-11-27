@@ -233,7 +233,8 @@ public final class GateNode {
                 MessageRoutes.fromGenerated(), pushIds, login, backends, links, registry,
                 new GateLimits(properties.maxPendingRequests(), properties.illegalPacketThreshold(), properties.handshakeTimeout(),
                         messageLimits, runMode.allowsGmCommands(), properties.redirectLinger()), metrics, presence)
-                .withBackendCircuitBreaker(com.game.common.net.EndpointCircuitBreaker.defaults());
+                .withBackendCircuitBreaker(com.game.common.net.EndpointCircuitBreaker.defaults())
+                .withDisconnectRetryScheduler(scheduler);
         links.bindListener(new SceneEventRouter(registry, dispatcher));
         // 观战订阅：hub 独占一条线程（Redis 回调只投递任务，扇出不占 Redisson 与 gate-bg 的线程）。频道是 hub 按需订阅的，这里不碰 Redis
         spectateThread = Executors.newSingleThreadExecutor(Thread.ofPlatform().name("gate-spectate").daemon(true).factory());

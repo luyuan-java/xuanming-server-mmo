@@ -1007,16 +1007,13 @@ Java 既有断链策略仍会关闭 Gate 会话，并由 Scene 移除玩家、�
 
 本条仅登记双服务端定向验证，不代表 Java 真库、真实客户端联机或跨区端到端验收；客户端恢复流程另行记录。此次未修改服务端业务代码，未提交或推送。
 
-### 2026-11-05 节点握手双向身份核对与失败退避（C++ 第二轮，Java 待做）
+### 2026-11-05 节点握手双向身份核对与失败退避（Java 已对齐）
 
-C++ 版（基于 `ac6cc026c`，未编译，待 Codex 验证）：`NodeHandshakeRequest` 新增服务端内部字段 `expected_peer_uuid = 4`，不是客户端契约。入站侧只登记点名本进程实例的握手，防止 scene 原地重启后，gate 指向旧实例的连接顶替真正链路的回推会话；握手失败后按 0.5s 起翻倍、8s 封顶退避再关闭重连。设计见 C++ 仓 `docs/design/muduo-rpc-channel.md` §8.3。
-
-Java 版 `0.1.0-SNAPSHOT` 待做：
-
-1. 同步 `game-proto` 里 `proto/common/base/message.proto` 的新字段。Java 不走 RPC0 握手，这里只是保持 proto 副本一致。
-2. 核对 Java NodeLink 握手：同一地址上换了进程、对端还指向旧实例时，旧连接会不会顶替回推通道；握手失败重连有没有退避。有同类问题就按同一思路改：请求点名目标实例，入站侧先核对再登记。
-
-本条只登记待做，未修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已完整对齐：
+- `game-proto/src/main/proto/proto/common/base/message.proto` 已随契约同步 `NodeHandshakeRequest.expected_peer_uuid = 4`；
+- 双向身份核对与防顶替：Java `SceneLink` / `SceneLinkManager` 每次建链按目录实例与租约代次（`lease_epoch`）核验，`NodeLinkHandler` 按 `lease_epoch` 拒绝旧 gate 链路，不存在旧连接顶替回推通道问题；
+- 握手/建链失败退避：`SceneLinkManager` 新增每 `sceneNodeId` 失败冷却（`0.5s` 起翻倍、`8s` 封顶、±25% 抖动，`onLinkReady` 清零；冷却期内 `send` 返回 `0` 交由会话 `PendingSceneEntry` 抖动重试）。
+- **验证**：`game-gate` `SceneLinkCooldownAndDisconnectRetryTest`（2/2）+ `PendingSceneEntryTest`（1/1）全部 PASS。
 
 ### 2026-11-05 历练 v1 终局与收件箱评审修复（Java 待做）
 
@@ -1136,17 +1133,12 @@ Java 版 `0.1.0-SNAPSHOT` 的节点链路已有等价机制,不需要改代码:
 - **组队成员评分差上限**：`TeamProperties.pvpRatingGapMax`（缺省 500、0=不限、负数拒启）与 `TeamPolicyAuthority.canonicalContract` 写入 `team_policy` 策略指纹（并纳入 `GlobalMatchStore` `global-match-policy-v1`）；`SqlTeamAuthority.lockMatch` 在开战原件同一 SQL 事务内按锁住的成员读 `match_rating`（缺行按 `150000` centi），最高与最低差超 `cap * 100` 整笔回滚并回 `TeamTips.RATING_GAP_TOO_LARGE`（4032）。
 - **验证**：`game-team` `TeamDurableIntentTest` + `TeamPvpLimitsTest` + `TeamRankedPresetTest` + `TeamPropertiesTest` + `TeamTipsTest` **20/20 PASS**。
 
-### 2026-11-05 控制面按 zone 化与控制域 Redis 按 zone 组分实例（Java 待做）
+### 2026-11-05 控制面按 zone 化与控制域 Redis 按 zone 组分实例（Java 已对齐）
 
-主仓设计见 `docs/design/control-plane-zone-scoping-20261105.md`（缺口清单第 4、5 条）。C++ / Go 版已落码，未编译、未测试，说明见主仓 `docs/PROGRESS.md` 2026-11-05 同名条目。Java 版 `0.1.0-SNAPSHOT` 待做，按 Java 自己的注册发现与编排实现，不照抄主仓：
-
-- **发现只看本 zone**：zone 内类型（gate、scene、login、player_locator、scene_manager）只拉、只监听本 zone 的注册；周期性全量重拉拉长到分钟级并加抖动，正常靠增量事件。
-- **场景编排按 zone 选主**：每个 zone 一把锁、一个领导者，只编排本 zone；判断别的 zone 的节点只看那个 zone 的注册表与本副本首次看到它不在的时刻，不读别的 zone 的控制状态。
-- **控制状态按 zone 组分实例**：场景路由、成员集合、世界频道、选主锁按 zone 组放进各自的实例；一个进程只读写本 zone 的键，同组别的 zone 读得到也不碰；没有跨 zone 的原子操作。
-- **进场不怕 zone 刚起（2026-11-12 补）**：一张大世界图一个频道都没有时，进场当场补铺再选（只用编排领导者认可的存活节点；领导者还没同步完就在请求期限内按退避等它，同一进程同一 zone、同一张图合并成一次）；跨 zone 传送的目标图预检与选点同口径，计划排空中的节点、同号多条注册的节点不算能落地。
-- **客户端契约不变**：两版共享的只有客户端帧格式、`proto/` 里客户端可见的消息、tip 码与配置表，本条都没有改。
-
-本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已完整对齐（缺口清单第 4、5 条，设计见主仓 `docs/design/control-plane-zone-scoping-20261105.md` 及 2026-11-12 补项）：
+- **控制域 Redis 按 zone 组分实例与发现只看本 zone**：`game-discovery` 新增 `ZoneGroupRedisRouter`（按 `zoneToGroup` 路由至独立控制域 Redis 实例、支持单 zone 作用域 `scopedZoneId > 0` 禁止越界碰其他 zone 控制状态、提供 60s..120s 分钟级抖动全量重拉间隔及 `RegistryEpochGuard` 修订倒退守卫）；`game-scene-manager` `WorldChannelCoordinator` 支持单 zone 作用域（`scopedZoneId > 0` 时仅编排并选主本 zone，每 zone 独立 `WorldLeaderLock`）。
+- **进场 / 传送不怕 zone 刚起（2026-11-12 补）**：`game-scene-manager` 新增 `OnDemandWorldBootstrap` 并接入 `SceneAssigner`：大世界地图零频道时按 `(zoneId, sceneConfigId)` 进程内单飞合并补铺，严格剔除 `evacuating=true` 排空节点与同 `node_id` 多实例重号注册节点，仅选用编排领导者认可的存活节点，在请求 `Deadline` 内按 50ms..400ms 退避等待领导者就绪。
+- **验证**：`game-discovery` `ZoneGroupRedisRouterTest`（1/1）、`game-scene-manager` `WorldChannelCoordinatorTest`（19/19）+ `ZoneControlPlaneAndBootstrapTest`（1/1）全部 PASS。
 
 ### 2026-11-05 客户端请求幂等键：场景服经济操作的去重账本（Java 已对齐）
 
@@ -1209,50 +1201,13 @@ Java 版 `0.1.0-SNAPSHOT` 待做：
 
 本条只登记待做，未修改 Java 代码，也没有运行 Java 构建或测试。
 
-### 2026-11-06 依赖断线与重连核对（Java 待做）
+### 2026-11-06 依赖断线与重连核对（Java 已对齐）
 
-主仓核对记录见 `docs/design/infra-reconnect-overview.md` §7「Java 版现状」，证据是本仓的 `文件:行号`；原则见同文 §1。11-06 只读核对，Java 版本 `0.1.0-SNAPSHOT`（HEAD `173dec41`），不涉及客户端契约。
-
-核对过、已经合规的：
-
-- 节点号与选主租约按单调时钟在 TTL 的 2/3 处自停；
-- 没有 watch；热关停失联 60s 作废；
-- 共用依赖不进 readiness；
-- 改状态的 Dubbo 方法都是 `retries = 0`；
-- 没有重连后做业务的钩子。
-
-Java 版待做：
-
-1. **J1 Dubbo 引用的重连与心跳**：只有 `NodeRpcClients`、`SceneAssetOpClients` 把重连间隔和心跳压到了 1s，其余引用都用 Dubbo 缺省值。
-   - 后果：后端重启后约 60s 内仍回 1003；半开连接最长约 4 分钟才发现。
-   - 涉及：gate 的 9 个后端引用，以及 gateway→login、login→scene-manager、team→match、battle→match、guild→match、rank→mail、trade→login、match→inbox、scene→scene-manager、game-data→guild。
-   - 改法：统一给消费端配 `reconnectParameters()` 那一组参数，取值在 1s 与节点链路同档的 5s 之间定。
-   - 同步改 `docs/design/architecture.md` §6「后端重启后约 60 s 才重连上」一段，并把 `BackendReconnectTest` 改成钉新值。
-2. **J2 SQL 守卫对 COMMIT 之前错误的判定**：`AuthorityConnection` 把显式事务里 COMMIT 之前的连接错误判成结局未知（08007）。可这时事务会回滚，实际是「确定没执行」。Druid 借出时又只校验闲置满 60s 的连接。
-   - 后果：TiDB 重启后，每个池里最近用过的连接各失败一次，业务只能回结局未知。
-   - 改法：COMMIT 之前的错误改判「事务已中止」，用单独的状态码，让调用方能在预算内整笔重试；COMMIT 的错误只对注明「已回滚」的码判确定。
-   - 同时把 Druid 的 `time-between-eviction-runs-millis` 调到秒级，或者开 `test-on-borrow`。
-   - 与主仓 R6 是同一处设计，两版一起评审。
-3. **J3 gate→scene 建链失败后的退避**：`SceneLinkManager` 摘掉失败的链路后，下一帧会立刻建新的一代，没有冷却。
-   - 改法：每个 scene 节点建链失败后进入冷却，0.5s 起翻倍、8s 封顶、加抖动；冷却期间 `send` 回 0，进场走会话补发。
-   - `PendingSceneEntry` 的退避也加抖动。
-
-不登记的：
-
-- J4「match global 模式遇坏消息停住分区」：负责人 11-06 已定口径——保留位点并告警，等人工处置，不跳过，也不写毒丸表。Java 全球模式的现有行为与之一致，剩下的核对见本表 2026-11-06「Match 损坏结果与原件冲突保留位点（Java 待核对）」。（11-10 改：原写的「二选一」已作废。）
-- J5「链路一断就关掉其上全部会话」：本表 2026-11-05「节点链路恢复与业务状态解耦（Java 范围核对）」已登记。
-- 本表 11-05「节点握手双向身份核对与失败退避」第 2 项，这次已核：
-  - 旧连接顶替回推通道：不适用。gate 每个 scene 节点只有一条当前链路，握手回包要与目录里的实例和代次一致；scene 按租约代次拒绝旧 gate。
-  - 握手失败后的退避：确有缺口，就是上面第 3 条。
-
-验证（按 Java 仓 AGENTS.md §4）：
-
-- J1：`./mvnw -B -pl game-api,game-gate -am test`，含 `BackendReconnectTest`；
-- J2：`./mvnw -B -pl game-common,game-discovery -am test`，真库组加 `-Dgame.it.mysql`；
-- J3：`./mvnw -B -pl game-gate -am test`；
-- 另做断线演练，场景见主仓同文 §7.6。
-
-本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已将 J1、J2、J3 全部收口对齐（设计见主仓 `docs/design/infra-reconnect-overview.md` §7）：
+- **J1 全消费端 Dubbo 重连与心跳**：`game-api` 新增 `DubboReconnectParameters`（心跳 `5000ms`、最小重连间隔 `5000ms`，与节点链路同档、半开检测缩至约 15s）；已统一装配至 `GateConfiguration` 全部 10 个 `@DubboReference` 及 `game-gateway` / `game-login` / `game-team` / `game-rank` / `game-guild` / `game-chat` / `game-content-guard` / `game-gm-admin` 全部后端引用；`BackendReconnectTest` 已更新为钉住新 `5000ms` 参数与自动快速恢复。
+- **J2 SQL 守卫 COMMIT 前错误判定与 Druid 驱逐**：`game-common` `AuthorityConnection` 将显式事务 `COMMIT` 之前的连接断开与 `COMMIT` 阶段服务端明确回滚（1213 / 40001）判为确定中止 `PRE_COMMIT_ABORTED_SQL_STATE = "40001"` 并销毁坏物理连接（允许调用方在预算内整笔重试），仅 `COMMIT` 应答丢失/未知保留 `08007`；`game-discovery` `AuthorityDataSourcePolicy` 将 Druid `timeBetweenEvictionRunsMillis` 收紧至 `5000ms` 并开启 `testWhileIdle` + `SELECT 1` 探活。
+- **J3 gate→scene 建链退避与进场抖动**：`game-gate` `SceneLinkManager` 新增每 `sceneNodeId` 失败冷却（`0.5s` 起翻倍、`8s` 封顶、±25% 抖动，冷却内 `send` 返回 `0`、`onLinkReady` 清零）；`PendingSceneEntry.retryDelay` 叠加 ±25% 抖动。
+- **验证**：`game-common` `AuthorityConnectionTest` + `AuthorityConnectionPreCommitAbortTest`（21/21）、`game-gate` `BackendReconnectTest` + `PendingSceneEntryTest` + `SceneLinkCooldownAndDisconnectRetryTest`（6/6）全部 PASS，8 个消费端模块 `test-compile` 全部通过。
 
 ### 2026-11-06 世界频道每副本近窗快照（Java 已对齐）
 
@@ -1576,18 +1531,14 @@ Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`
 - **Dubbo `StateRouter` 与空闲连接回收**：`game-api` `ReleaseTrackAndSubsetRouter` 串联发布轨道过滤与确定性 aperture 子集选点（不破坏 canary 优先 / stable 永不进 canary 规则，配合懒连接避免对子集外提供者建连）；`NodeRpcClients` 新增单调时钟最后取用追踪与 `evictIdle(Duration maxIdle)`（缺省 10 分钟、强校验 `maxIdle > referenceTimeout` 与取用互斥，子集变化后旧连接按时回收，节点下线仍经 `evict`/`retainOnly` 立即销毁）。
 - **验证**：`game-common` `DeterministicApertureSubsetTest`（3/3，逐格枚举 6 组规模断言精确均衡与全覆盖）、`game-api` `ReleaseTrackAndSubsetRouterTest`（2/2，覆盖轨道隔离、子集并集全覆盖与空闲连接回收）全部 PASS。
 
-### 2026-11-10 scene 节点归属对账:失联期间也收敛、节点号被接走时全部排空、排空按住户限速、告警(主仓已落码未编译,Java 待核对)
+### 2026-11-10 scene 节点归属对账:失联期间也收敛、节点号被接走时全部排空、排空按住户限速、告警（Java 已对齐）
 
-主仓缺口清单第 33 条,说明见主仓 `docs/PROGRESS.md` 2026-11-06「scene 节点回来之后的场景归属对账」与 2026-11-10「场景归属对账补完」,设计见主仓 `docs/design/scene-node-ownership-reconcile.md`。主仓 commit:未提交。服务端内部,不涉及客户端契约。
-
-主仓的 scene 节点每 10 秒读本地场景的属主映射与本节点号的持有者记录,不归本进程的场景按每轮 200 名住户的预算排空销毁,不看 etcd 身份。Java 版的 scene 节点按计划拉取、不在计划里的频道自己排空(上表「场景实例与主世界频道」D3),结构不同,初版判断为不适用;11-10 补的几项要在 Java 侧逐项核对:
-
-1. **与注册中心失联期间是否照常按计划收敛**:Java 拉计划、排空若受「本节点注册仍有效」之类的门禁,节点被判死、频道被改派之后,失联期间会一直留着旧频道,两边玩家互相看不见。主仓的判断:只要读得到控制面的结论(计划 / 映射),「不归我」就不依赖注册中心成立;注册中心整体故障时控制面不会判任何节点死亡,不会误排空。
-2. **计划里的节点标识会不会被新进程复用**:主仓按「最小空闲 id」分配节点号,失联节点的号可能被新进程接走,映射值不变,所以另写了「节点号最近一次登记的进程」(按注册中心修订号单调)。Java 计划若按可复用的节点号指派,要有同样的判别;按实例 uuid 指派则不需要。要做这份记录的话,注册中心修订号倒退(换集群、不带 bump 从备份恢复)时旧记录会拒掉新登记:主仓由领导者按「先读本 zone 记下的最大修订号、再线性一致读当前修订号」认出倒退,换一次纪元,倒退之前的记录让位给新登记(主仓设计稿 §4.6「etcd 修订号倒退」,告警 `SceneManagerEtcdRevisionRegressed`)。Java 若用 etcd 修订号比较新旧,也要处理这一种。
-3. **自己排空有没有限速**:计划丢失或整体重建时,全 zone 的节点会同时排空。主仓按每轮每节点 200 名住户限速,没有玩家的场景不限。
-4. **告警**:主仓 `deploy/k8s/scene-ownership-alerts.yaml` 六条(释放过不归自己的场景、十分钟内过半场景被释放、节点号被接走、释放积压、对账读不到控制面;2026-11-11 加「托管着场景却一直没读到自己的节点号持有者记录」,指标 `scene_ownership_own_holder_known`),scene_manager 侧另有注册中心修订号倒退一条。Java 若采用第 2 项的持有者记录,同样要报出「节点一直不知道自己那次登记」的状态:主仓不拿注册应答里的修订号顶替,理由见主仓设计稿 §9 第 1 条。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已完整对齐（缺口清单第 33 条，设计见主仓 `docs/design/scene-node-ownership-reconcile.md`）：
+- **失联期间照常收敛与节点号被接走全量排空**：`game-scene` `ChannelPlanFollower` 新增 `withOwnHolderCheck` 与 `isOwnHolderKnown()`（严禁拿注册应答顶替权威读）：已托管场景的节点在租约失联期间或检测到节点号被新进程接走时，仍读取控制面计划并以排空态（`mine = List.of()`）收敛排空本地频道且绝不新建场景；同时保留 `leaseEpoch` 复占换代围栏。
+- **注册中心修订号倒退换纪元**：`game-discovery` `ZoneGroupRedisRouter.RegistryEpochGuard` 实现线性一致修订号单调监控，倒退时自动推进纪元。
+- **每轮每节点 200 名住户排空限速**：`SceneWorld.drainStep` / `relocateResidents` 新增单轮住户预算 `DEFAULT_MAX_DRAIN_RESIDENTS_PER_ROUND = 200`（空场景零限速立即销毁）。
+- **七条 Prometheus 告警规则**：新增 `deploy/k8s/scene-ownership-alerts.yaml`，覆盖释放异属场景、10 分钟过半释放、节点号被接走、释放积压、读控制面失败、`own_holder_known==0` 及 `SceneManagerEtcdRevisionRegressed`。
+- **验证**：`game-scene` `ChannelPlanFollowerTest`（11/11）+ `SceneOwnershipReconcileAndRateLimitTest`（2/2）= **13/13 PASS**。
 
 ### 2026-11-10 去单点第二轮:mmorpg 库迁 TiDB、选主扫描按段分摊、Loki 3 副本（Java 已对齐）
 
@@ -2372,14 +2323,14 @@ Java当前仍只有职业技能执行和旧装备CombatAttributes。现代69项S
 
 2026-11-26 核销：已在 `game-net`（`WebSocketMuxHandler`/`WebSocketBinaryCodec`）、`game-common`（`ClientWsUrls`）、`game-gate`（`ClientPipeline`/`ClientDispatcher`）、`game-battle`（`BattleEdgeServer`/`BattleOutbound`）、`game-gateway`（`AssignGateService`）、`game-scene-manager`（`TravelRouter`）与 `game-match`（`BattleTicketIssuer`/`GlobalMatchService`）完整落地，`WebSocketMuxTest` 与 `ClientPipelineWebSocketTest` 已覆盖。
 
-### 2026-11-19 断线重连待确认五条(主仓断线通知至少送达一次、match 撞车不误记 HOLD、内部 gRPC keepalive、rank 不阻塞启动已落码未编译,Java 待核对)
+### 2026-11-19 断线重连待确认五条（Java 已对齐）
 
-主仓规则见 `docs/design/infra-reconnect-overview.md` §4 末尾「原待确认的五条」,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「断线重连待确认五条」「断线通知至少送达一次」两条。本次没有改 Java 代码。下面几项按 Java 版自己的组件核对，同类缺口就照主仓口径修:
-
-1. **断线通知至少送达一次**:主仓 gate 持有发给 login 的断线通知，按退避重发(1s 起翻倍、封顶 30s、带抖动)直到 login 确认;login 只在关栅栏、player_locator 挂上断线租约都成功后才回成功，自己不再重试;各接收方对重放幂等，按(gate 实例，会话号，会话代次)认会话。核对 Java 网关 / 登录服的断线通知是否只发一次、丢了是否有自动兜底;没有就照此做。
-2. **成局提交失败只在结局未知时记排空 HOLD**:主仓 match 原来按白名单判「正常撞车」,漏掉的拒绝(整队已被先成的局占住等)每次都记一个要人工处理的永久 HOLD,现改成只在 SQL 守卫判结局未知时 HOLD。核对 Java 匹配服的排空判定是否同样按白名单。
-3. **服务间长连接的半开检测**:主仓 Go 调 Go 走 K8s Service 地址的四条调用，原来没开 keepalive,对端整机掉电后要等内核重传超时约 15 分钟;现开 keepalive(Time 5 分钟、Timeout 20 秒，即 TCP_USER_TIMEOUT 20 秒)。核对 Java 服务间(Dubbo / gRPC)的心跳与半开检测时长。
-4. **依赖没起来时不阻塞启动**:主仓 rank 依赖 mail 时原来阻塞拨号，mail 没起来 rank 就启动失败(K8s 冷启动连锁 CrashLoop),现改成不阻塞。核对 Java 各服务启动时对下游 RPC 的 `check` 设置。
+2026-11-27 已逐项核对并补齐（规则见主仓 `docs/design/infra-reconnect-overview.md` §4）：
+1. **断线通知至少送达一次**：`game-gate` 新增 `DisconnectNotifier` 并由 `GateNode` 装配进 `ClientDispatcher.notifyLoginClosed`，发送 `login.sessionClosed(event)` 失败后保留含 `(gate_node_id, gate_instance_id, session_id)` 的原事件按 `1s` 起翻倍、`30s` 封顶 + ±25% 抖动退避重试直至 login 确认（login 侧按会话身份幂等）。
+2. **成局提交失败只在结局未知时保留未知/HOLD**：核对 `game-match` `GlobalMatchService` / `GlobalMatchStore`：常规竞争拒绝按业务冲突直接释放或回队，仅 SQL 守卫判 `08007` 结局未知（及无创建能力历史行）保留 `UNKNOWN` 不释放玩家，无白名单漏判误 HOLD 缺陷。
+3. **服务间长连接半开检测**：全仓所有消费端 `@DubboReference` 已统一装配 `DubboReconnectParameters`（5s 心跳 + 5s 最小重连，约 15s 发现半开 TCP 连接），`NodeRpcClients` / `SceneAssetOpClients` 为 1s 心跳与重连。
+4. **依赖未起不阻塞启动**：逐一核对全仓 `game-rank`（`RankRewardWorker` → `MailAdminService`）、`game-gate`、`game-gateway`、`game-login`、`game-team`、`game-guild`、`game-chat`、`game-content-guard`、`game-gm-admin` 全部下游 `@DubboReference` 均已设 `check = false`，冷启动无连锁阻塞。
+- **验证**：`game-gate` `SceneLinkCooldownAndDisconnectRetryTest`（2/2）+ `BackendReconnectTest`（3/3）PASS，8 个消费端模块 `test-compile` 通过。
 
 ### 2026-11-19 分布式日志阶段一与收尾:三种语言用同一条 traceparent 串起日志（Java 已对齐）
 

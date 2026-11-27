@@ -17,7 +17,9 @@ import org.springframework.context.SmartLifecycle;
 public final class RankRewardWorker implements SmartLifecycle, AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(RankRewardWorker.class);
     @DubboReference(
-            group = DubboGroups.MAIL, url = "${game.rank.mail-url:tri://127.0.0.1:20916}", check = false, retries = 0, timeout = 2000)
+            group = DubboGroups.MAIL, url = "${game.rank.mail-url:tri://127.0.0.1:20916}", check = false, retries = 0, timeout = 2000,
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS})
     private MailAdminService mail;
     private final RankStore store;
     private final String secret;

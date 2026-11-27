@@ -53,16 +53,23 @@ public final class SceneAssigner {
     private final SceneNodeSource source;
     private final WorldSceneConfigs worldConfigs;
     private final ChannelSelector selector;
+    private final OnDemandWorldBootstrap bootstrap;
 
     /** 不预占（只按目录人数选；单测与只读场景用）。 */
     public SceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs) {
-        this(source, worldConfigs, ChannelSelector.withoutReservations(source));
+        this(source, worldConfigs, ChannelSelector.withoutReservations(source), null);
     }
 
     public SceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector selector) {
+        this(source, worldConfigs, selector, null);
+    }
+
+    public SceneAssigner(SceneNodeSource source, WorldSceneConfigs worldConfigs, ChannelSelector selector,
+                         OnDemandWorldBootstrap bootstrap) {
         this.source = source;
         this.worldConfigs = worldConfigs;
         this.selector = selector;
+        this.bootstrap = bootstrap;
     }
 
     public AssignSceneResponse assign(AssignSceneRequest request) {
@@ -97,6 +104,16 @@ public final class SceneAssigner {
         }
         if (best.isEmpty()) {
             best = selector.select(zoneId, nodes, worldConfigs.defaultConfigId(), 0, playerId);
+        }
+        if (best.isEmpty() && bootstrap != null) {
+            int targetMap = (preferred != 0 && worldConfigs.isWorld(preferred)) ? preferred : worldConfigs.defaultConfigId();
+            if (bootstrap.ensureBootstrapped(zoneId, targetMap, com.game.common.deadline.Deadline.after(2_000L))) {
+                List<SceneNodeInfo> refreshed = source.list(zoneId).stream().filter(n -> isUsable(n, zoneId)).toList();
+                best = selector.select(zoneId, refreshed, targetMap, 0, playerId);
+                if (best.isEmpty() && targetMap != worldConfigs.defaultConfigId()) {
+                    best = selector.select(zoneId, refreshed, worldConfigs.defaultConfigId(), 0, playerId);
+                }
+            }
         }
         if (best.isEmpty()) {
             log.warn("没有可分配的场景 zone={} preferred={} default={} nodes={} player={}",

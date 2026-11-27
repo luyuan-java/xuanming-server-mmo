@@ -157,31 +157,13 @@ class BackendReconnectTest {
         assertThat(elapsedMs(startedNanos)).as("后端不在时第二次调用失败的用时（ms）").isLessThan(FAIL_FAST_MS);
         assertThat(second).isInstanceOf(RpcException.class).hasMessageContaining("No provider available");
 
-        // 后端起来（同一个地址）。生产参数下 Dubbo 每 60 s 才重连一次，所以接下来这几秒里引用仍然不可用
-        assertThat(Constants.LEAST_RECONNECT_DURATION).as("Dubbo 的最小重连间隔（ms）").isEqualTo(60_000L);
-        assertThat(UrlUtils.getIdleTimeout(URL.valueOf("tri://127.0.0.1:" + port)) / Constants.HEARTBEAT_CHECK_TICK)
-                .as("不带参数的直连地址：缺省心跳 60 s → 心跳超时 180 s → 除以 3 是 60 s；重连间隔 = max(60 s, 60 s)").isEqualTo(60_000);
+        // 后端起来（同一个地址）。已统一配置 5 s 心跳与 5 s 最小重连间隔（J1），不再退回 Dubbo 缺省 60 s
+        assertThat(Constants.LEAST_RECONNECT_DURATION).as("Dubbo 缺省最小重连间隔（ms）").isEqualTo(60_000L);
         EchoBackend backend = new EchoBackend("late");
         server = export(port, backend);
-        long deadline = System.nanoTime() + STILL_DOWN_WINDOW.toNanos();
-        int attempts = 0;
-        while (System.nanoTime() < deadline) {
-            attempts++;
-            CompletableFuture<ClientReply> call = invoke(match, "after-start-" + attempts);
-            Throwable stillDown;
-            try {
-                ClientReply reply = call.get(VERDICT_WAIT_MS, TimeUnit.MILLISECONDS);
-                throw new AssertionError("后端起来不到 " + STILL_DOWN_WINDOW.toSeconds() + " s 引用就自己连上了（第 " + attempts + " 次调用，应答 "
-                        + reply.getBody().toStringUtf8() + "）：Dubbo 的重连间隔不再是 60 s。start-slice.sh 里「后端先于 gate 启动」的"
-                        + "次序约束与本类、GateConfiguration 的注释可以按新的间隔重写");
-            } catch (ExecutionException e) {
-                stillDown = e.getCause();
-            }
-            assertThat(stillDown).as("第 %d 次调用", attempts).isInstanceOf(RpcException.class);
-            Thread.sleep(250);
-        }
-        assertThat(attempts).as("观察窗口里确实试了很多次").isGreaterThan(10);
-        assertThat(backend.handled.get()).as("这段时间没有一次调用到过后端").isZero();
+        ClientReply recovered = awaitReply(match, "after-start-fast");
+        assertThat(recovered.getBody().toStringUtf8()).isEqualTo("late:157:42:after-start-fast");
+        assertThat(backend.handled.get()).isEqualTo(1);
     }
 
     @Test
@@ -224,7 +206,11 @@ class BackendReconnectTest {
                 .getAnnotation(DubboReference.class);
         assertThat(annotation.group()).isEqualTo(DubboGroups.MATCH);
         assertThat(annotation.url()).as("直连地址来自配置项，这里换成随机端口").isEqualTo("${game.dubbo.match-url:}");
-        assertThat(annotation.parameters()).as("生产引用不带额外的 URL 参数（重连间隔用 Dubbo 缺省的 60 s）").isEmpty();
+        assertThat(annotation.parameters())
+                .as("生产引用统一配置 5 s 心跳与最小重连间隔（J1）")
+                .containsExactly(
+                        Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                        Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS);
 
         client = IsolatedDubboModule.create("game-gate-test-backend-caller");
         ReferenceConfig<ClientMessageService> reference = new ReferenceConfig<>(client.module());
@@ -239,9 +225,12 @@ class BackendReconnectTest {
             method.setRetries(m.retries());
             return method;
         }).toList());
-        if (!urlParameters.isEmpty()) {
-            reference.setParameters(new HashMap<>(urlParameters)); // 可变 Map：Dubbo 刷新配置时可能往里写
+        Map<String, String> merged = new HashMap<>();
+        for (int i = 0; i + 1 < annotation.parameters().length; i += 2) {
+            merged.put(annotation.parameters()[i], annotation.parameters()[i + 1]);
         }
+        merged.putAll(urlParameters);
+        reference.setParameters(merged); // 可变 Map：Dubbo 刷新配置时可能往里写
         ClientMessageService proxy = reference.get();
         assertThat(proxy).as("后端在不在引用都建得出来（check = false）").isNotNull();
         return proxy;

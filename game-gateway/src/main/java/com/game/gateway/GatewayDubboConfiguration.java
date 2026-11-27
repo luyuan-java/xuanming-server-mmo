@@ -31,7 +31,9 @@ public class GatewayDubboConfiguration {
      * 超时取 {@code dubbo.consumer.timeout}（3000 ms，同基线 login.grpc.timeout-ms；须小于客户端 HTTP 的 5 s，失败才能带着业务码回去）。
      */
     @Bean
-    @DubboReference(group = DubboGroups.LOGIN, check = false, url = "${game.dubbo.login-url:}", retries = 0)
+    @DubboReference(group = DubboGroups.LOGIN, check = false, url = "${game.dubbo.login-url:}", retries = 0,
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS})
     public ReferenceBean<AccountLoginService> accountLoginService() {
         return new ReferenceBean<>();
     }
