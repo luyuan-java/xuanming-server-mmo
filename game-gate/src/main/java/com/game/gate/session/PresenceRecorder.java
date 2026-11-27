@@ -23,6 +23,13 @@ public interface PresenceRecorder {
      */
     void online(long playerId, int sessionId, long ownerEpoch);
 
+    /**
+     * 带未成年人防沉迷截止时刻（Unix 毫秒，0 = 不限）的在线登记。默认回落到 3 参版本以兼容测试替身。
+     */
+    default void online(long playerId, int sessionId, long ownerEpoch, long minorPlayDeadlineMs) {
+        online(playerId, sessionId, ownerEpoch);
+    }
+
     /** 只撤销这个会话写的那一条（同一玩家在别处的新会话不受影响）。 */
     void offline(long playerId, int sessionId);
 }

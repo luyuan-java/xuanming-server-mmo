@@ -99,8 +99,10 @@ public final class GlobalWatchService {
             var acquired=authority.reserve(actor,actor.getPlayerId(),mark,deadline);
             if(acquired!=SpectateStore.Acquire.OK)return answer(actor,request,MatchTips.watchRejected(acquired==SpectateStore.Acquire.QUEUED?MatchTip.WATCH_QUEUED:MatchTip.WATCH_ALREADY),deadline);
             String publicName="";try{publicName=publicNames.apply(actor.getPlayerId(),Deadline.after(Math.max(1,Math.min(1000,deadline.remainingMillis()))));}catch(RuntimeException ignored){/* 展示失败不退回私有账号。 */}
-            var base=AddObserverRequest.newBuilder().setBattleId(battle).setObserverPlayerId(actor.getPlayerId()).setObserverName(publicName==null?"":publicName)
-                .setRouting(BattleRoutings.gatePart(presence.get())).build();
+            var baseBuilder=AddObserverRequest.newBuilder().setBattleId(battle).setObserverPlayerId(actor.getPlayerId()).setObserverName(publicName==null?"":publicName)
+                .setRouting(BattleRoutings.gatePart(presence.get()));
+            if(presence.get().getMinorPlayDeadlineMs()!=0L)baseBuilder.setMinorPlayDeadlineMs(presence.get().getMinorPlayDeadlineMs());
+            var base=baseBuilder.build();
             // 原Add截止与请求剩余预算一起固定；原UUID重放只能读取此字节，不得延长。
             var original=authority.prepare(actor,actor.getPlayerId(),mark,found.placement(),base,deadline);
             var outcome=observers.add(found.placement(),original,SpectateRules.hopTimeout(MatchBudgets.ADD_OBSERVER_TIMEOUT_MS,deadline),deadline);

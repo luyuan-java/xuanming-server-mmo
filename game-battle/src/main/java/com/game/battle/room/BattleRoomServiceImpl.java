@@ -216,11 +216,15 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 continue;
             }
             room.routingByPlayer.put(snapshot.getPlayerId(), snapshot.getRouting());
+            if (snapshot.getMinorPlayDeadlineMs() != 0L) {
+                room.minorPlayLimits.put(snapshot.getPlayerId(),
+                        new BattleRoom.MinorPlayLimit(snapshot.getMinorPlayDeadlineMs()));
+            }
         }
         // 7 fail-closed 预签：插表、装计时器、推送、发确认之前给全体参战者签好；任一人签不出整局拒绝，零副作用
         Map<Long, BattleAssignedS2C> assignments = new HashMap<>();
         for (long playerId : room.routingByPlayer.keySet()) {
-            Optional<BattleAssignedS2C> assigned = issuer.issue(battleId, playerId, deadlineMs,
+            Optional<BattleAssignedS2C> assigned = issuer.issue(battleId, playerId, room.ticketExpireAtMs(playerId),
                     eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT, TicketPath.CREATE);
             if (assigned.isEmpty()) {
                 metrics.roomCreate(CreateResult.TICKET_FAILED);
@@ -241,6 +245,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         // ---- 插表之后的副作用，顺序固定（room.cpp:597-632）
         long untilDeadline = deadlineMs - now;
         room.battleTimer = scheduler.after(untilDeadline < 0 ? Long.MAX_VALUE : untilDeadline, () -> onBattleDeadline(room));
+        armMinorPlayDeadlineTimer(room);
         boolean inPrepPhase = engine.isInPrepPhase();
         if (inPrepPhase) {
             // 论剑 V3 战前 15 秒明牌变阵期：延迟录制回放起点与第 1 回合计时至亮牌开打后。
@@ -431,7 +436,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                     Long.toUnsignedString(playerId));
             return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
         }
-        Optional<BattleAssignedS2C> assigned = issuer.issue(room.battleId, playerId, room.deadlineMs, role, TicketPath.REISSUE,request.getSpectatorOperationId());
+        Optional<BattleAssignedS2C> assigned = issuer.issue(room.battleId, playerId, room.ticketExpireAtMs(playerId),
+                role, TicketPath.REISSUE, request.getSpectatorOperationId());
         if (assigned.isEmpty()) {
             return response.setErrorMessage(tip(SERVICE_UNAVAILABLE)).build();
         }
@@ -501,10 +507,16 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                     Long.toUnsignedString(observerId), seats, deps.observerSeatQuota());
             return rejectAdd(request, SPECTATE_FULL);
         }
+        // 未成年人观众防沉迷截止时刻先于预签落到房间（不沿用旧值；签票失败立即回滚，不留脏项）
+        room.minorPlayLimits.remove(observerId);
+        if (request.getMinorPlayDeadlineMs() != 0L) {
+            room.minorPlayLimits.put(observerId, new BattleRoom.MinorPlayLimit(request.getMinorPlayDeadlineMs()));
+        }
         // fail-closed：登记之前签票，签不出不登记
-        Optional<BattleAssignedS2C> assigned = issuer.issue(battleId, observerId, room.deadlineMs,
-                eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER, TicketPath.OBSERVER,request.getSpectatorOperationId());
+        Optional<BattleAssignedS2C> assigned = issuer.issue(battleId, observerId, room.ticketExpireAtMs(observerId),
+                eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER, TicketPath.OBSERVER, request.getSpectatorOperationId());
         if (assigned.isEmpty()) {
+            room.minorPlayLimits.remove(observerId);
             return rejectAdd(request, SERVICE_UNAVAILABLE);
         }
         observerOperations.activate(request.getSpectatorOperationId());
@@ -513,6 +525,9 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         room.observerNames.put(observerId, request.getObserverName());
         // 登记即起算宽限：到期仍没建起直连就回收座位（幂等重试与补签票都不延长它）
         armObserverGrace(room, observerId, RoomConstants.OBSERVER_ATTACH_GRACE_MS, ObserverReclaim.ATTACH_TIMEOUT);
+        if (request.getMinorPlayDeadlineMs() != 0L) {
+            armMinorPlayDeadlineTimer(room);
+        }
         // 只推落点分配；观战首帧随直连握手下发（此刻观众一定还没有直连）
         pushAssignment(room, observerId, assigned.get());
         log.info("AddObserver 成功 battle_id={} observer={} name={} observers={}", Long.toUnsignedString(battleId),
@@ -534,13 +549,14 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 && existing.getGateNodeId() == routing.getGateNodeId()
                 && existing.getGateInstanceId().equals(routing.getGateInstanceId());
         if(!sameSession||!existing.equals(routing))return response.setErrorMessage(tip(INVALID_PARAMETER)).build();
-        Optional<BattleAssignedS2C> assigned = issuer.issue(room.battleId, observerId, room.deadlineMs,
-                eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER, TicketPath.OBSERVER,request.getSpectatorOperationId());
+        Optional<BattleAssignedS2C> assigned = issuer.issue(room.battleId, observerId, room.ticketExpireAtMs(observerId),
+                eBattleTicketRole.BATTLE_TICKET_ROLE_OBSERVER, TicketPath.OBSERVER, request.getSpectatorOperationId());
         if (assigned.isEmpty()) {
             // match 收到任何错误都会删观战标记：房间侧必须同步摘除并关直连
             cancelObserverOperation(room,observerId);
             room.routingByObserver.remove(observerId);
             room.observerNames.remove(observerId);
+            room.minorPlayLimits.remove(observerId);
             closeDirectOf(room, observerId, Disconnect.BATTLE_CLOSED);
             log.error("AddObserver 幂等路径签票失败，摘除观众 battle_id={} observer={} same_session={}", Long.toUnsignedString(room.battleId),
                     Long.toUnsignedString(observerId), sameSession);
@@ -576,6 +592,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 outbound.frame(Notify.SPECTATE_END, end));
         room.routingByObserver.remove(observerId);
         room.observerNames.remove(observerId);
+        room.minorPlayLimits.remove(observerId);
         closeDirectOf(room, observerId, Disconnect.BATTLE_CLOSED);
         log.info("RemoveObserver 完成 battle_id={} observer={} reason={}", Long.toUnsignedString(room.battleId),
                 Long.toUnsignedString(observerId), request.getReason());
@@ -747,6 +764,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         cancelObserverOperation(room, observerId);
         room.routingByObserver.remove(observerId);
         room.observerNames.remove(observerId);
+        room.minorPlayLimits.remove(observerId);
         closeDirectOf(room, observerId, Disconnect.BATTLE_CLOSED);
         metrics.observerReclaimed(reason);
         log.info("观众宽限到期，回收座位 battle_id={} observer={} reason={} observers={}", Long.toUnsignedString(room.battleId),
@@ -799,6 +817,15 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         if (routing == null) {
             log.warn("battle 直连挂接被拒：玩家不在名单 battle_id={} player_id={} role={}", Long.toUnsignedString(battleId),
                     Long.toUnsignedString(playerId), role);
+            return OptionalInt.empty();
+        }
+        // 未成年人防沉迷到点后本场永不再接受直连握手（ended 单调置位，抗墙钟回拨）
+        BattleRoom.MinorPlayLimit minorLimit = room.minorPlayLimits.get(playerId);
+        if (minorLimit != null && (minorLimit.ended || BattleMinorPlayDeadline.reached(minorLimit.deadlineMs, clock.epochMillis()))) {
+            minorLimit.ended = true;
+            log.info("battle 直连挂接被拒：未成年人防沉迷已到点 battle_id={} player_id={} role={} play_deadline_ms={}",
+                    Long.toUnsignedString(battleId), Long.toUnsignedString(playerId), role,
+                    Long.toUnsignedString(minorLimit.deadlineMs));
             return OptionalInt.empty();
         }
         // 先放新的再关旧的（R7）：旧连接迟到的断开回调按引用比较，不会误摘新连接
@@ -968,6 +995,7 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         // 主动退出不推 166；应答由直连面在本方法返回后写出，之后才 FIN（O8）
         room.routingByObserver.remove(playerId);
         room.observerNames.remove(playerId);
+        room.minorPlayLimits.remove(playerId);
         closeDirectOf(room, playerId, Disconnect.BATTLE_CLOSED);
         log.info("StopWatchBattle 完成 battle_id={} observer={}", Long.toUnsignedString(room.battleId), Long.toUnsignedString(playerId));
         return response.build();
@@ -1502,11 +1530,79 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         }
         outbound.pushBattleFrameToAll(room.battleId, observerRecipients(room), Notify.SPECTATE_END, end);
         for (long observerId : room.routingByObserver.keySet()) {
+            room.minorPlayLimits.remove(observerId);
             closeDirectOf(room, observerId, disconnect);
         }
         log.info("观战清退 battle_id={} observers={} reason={}", Long.toUnsignedString(room.battleId), room.routingByObserver.size(), reason);
         room.routingByObserver.clear();
         room.observerNames.clear();
+    }
+
+    /** 挂载未成年人防沉迷到点断直连一次性定时器（仅房内存在未到点的未成年人时挂；全成年人房间零定时器）。 */
+    private void armMinorPlayDeadlineTimer(BattleRoom room) {
+        room.minorPlayDeadlineTimer.cancel();
+        room.minorPlayDeadlineTimer = Cancellable.NONE;
+        if (!isCurrent(room) || room.minorPlayLimits.isEmpty()) {
+            return;
+        }
+        boolean found = false;
+        long earliestCloseAtMs = 0L;
+        for (BattleRoom.MinorPlayLimit limit : room.minorPlayLimits.values()) {
+            if (limit.ended) {
+                continue;
+            }
+            long closeAtMs = BattleMinorPlayDeadline.directCloseAtMs(limit.deadlineMs);
+            if (!found || Long.compareUnsigned(closeAtMs, earliestCloseAtMs) < 0) {
+                earliestCloseAtMs = closeAtMs;
+                found = true;
+            }
+        }
+        if (!found) {
+            return;
+        }
+        long nowMs = clock.epochMillis();
+        long delayMs;
+        if (Long.compareUnsigned(earliestCloseAtMs, nowMs) <= 0) {
+            delayMs = 0L;
+        } else {
+            long diff = earliestCloseAtMs - nowMs;
+            delayMs = diff < 0L ? Long.MAX_VALUE : diff;
+        }
+        room.minorPlayDeadlineTimer = scheduler.after(delayMs, () -> enforceMinorPlayDeadlines(room, clock.epochMillis()));
+    }
+
+    /** 到点关掉该未成年人的战斗直连（不摘名单、不改战斗状态，后续按掉线处置）；ended 单调置位，重复触发或早到均无害。 */
+    void enforceMinorPlayDeadlines(long battleId, long nowMs) {
+        scheduler.assertInLoop();
+        BattleRoom room = rooms.find(battleId);
+        if (room == null || room.closed) {
+            return;
+        }
+        enforceMinorPlayDeadlines(room, nowMs);
+    }
+
+    private void enforceMinorPlayDeadlines(BattleRoom room, long nowMs) {
+        if (!isCurrent(room)) {
+            return;
+        }
+        for (Map.Entry<Long, BattleRoom.MinorPlayLimit> entry : room.minorPlayLimits.entrySet()) {
+            long playerId = entry.getKey();
+            BattleRoom.MinorPlayLimit limit = entry.getValue();
+            if (limit.ended || !BattleMinorPlayDeadline.reached(limit.deadlineMs, nowMs)) {
+                continue;
+            }
+            limit.ended = true;
+            DirectLink link = room.directOf(playerId);
+            boolean closing = link != null && link.isLive();
+            if (closing) {
+                link.closeNow(Disconnect.BATTLE_CLOSED);
+            }
+            log.info("metric=battle_minor_play_deadline_reached battle_id={} player_id={} role={} play_deadline_ms={} direct_connection_closed={}",
+                    Long.toUnsignedString(room.battleId), Long.toUnsignedString(playerId),
+                    room.isParticipant(playerId) ? "participant" : "observer",
+                    Long.toUnsignedString(limit.deadlineMs), closing ? 1 : 0);
+        }
+        armMinorPlayDeadlineTimer(room);
     }
 
     /** 立刻摘槽，再优雅关闭（应答 → FIN，1 s 强关兜底；{@code room.cpp:1618-1636}）。 */

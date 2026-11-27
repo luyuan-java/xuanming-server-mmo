@@ -49,6 +49,17 @@ final class BattleRoom {
     final Map<Long, Cancellable> observerGrace = new HashMap<>();
     /** player_id → 已验证直连，参战与观战共用一个槽（单槽互斥）。 */
     final NavigableMap<Long, DirectLink> directByPlayer = new TreeMap<>(Long::compareUnsigned);
+    /** 未成年人防沉迷直连截止记录（0 = 不限的不入表；ended 只升不降，防墙钟回拨重新放开）。 */
+    final Map<Long, MinorPlayLimit> minorPlayLimits = new HashMap<>();
+
+    static final class MinorPlayLimit {
+        final long deadlineMs;
+        boolean ended;
+
+        MinorPlayLimit(long deadlineMs) {
+            this.deadlineMs = deadlineMs;
+        }
+    }
 
     /** 回合截止计时器。 */
     Cancellable roundTimer = Cancellable.NONE;
@@ -56,6 +67,8 @@ final class BattleRoom {
     Cancellable prepTimer = Cancellable.NONE;
     /** 整场期限计时器。 */
     Cancellable battleTimer = Cancellable.NONE;
+    /** 未成年人防沉迷到点断直连计时器（仅房内存在未到点的未成年人时挂载）。 */
+    Cancellable minorPlayDeadlineTimer = Cancellable.NONE;
     /** 确认补发计时器。 */
     Cancellable confirmResendTimer = Cancellable.NONE;
     /** 观战中继通道心跳计时器（§15.10：停服待确认房间保持到拆除前，不随 {@link #cancelTimers()} 撤销）。 */
@@ -148,8 +161,16 @@ final class BattleRoom {
         prepDeadlineMs = 0;
         roundTimer.cancel();
         battleTimer.cancel();
+        minorPlayDeadlineTimer.cancel();
+        minorPlayDeadlineTimer = Cancellable.NONE;
         confirmResendTimer.cancel();
         if (pendingCompletion != null) pendingCompletion.retryTimer.cancel();
+    }
+
+    /** 该玩家在本房间的直连票据过期时刻：无限制取房间作废期限，未成年人再按直连截止时刻封顶。 */
+    long ticketExpireAtMs(long playerId) {
+        MinorPlayLimit limit = minorPlayLimits.get(playerId);
+        return BattleMinorPlayDeadline.ticketExpireAtMs(deadlineMs, limit == null ? 0L : limit.deadlineMs);
     }
 
     /** 撤销观战中继通道心跳（仅在发完 END、房间摘除或停机排空彻底结束时调用）。 */

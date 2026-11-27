@@ -1226,7 +1226,7 @@ public final class ClientDispatcher {
         if (result.getTipId() == 0) {
             if (!s.closing && !s.presenceOnline) {
                 s.presenceOnline = true;
-                presence.online(s.scenePlayerId, s.sessionId(), s.sceneOwnerEpoch);
+                presence.online(s.scenePlayerId, s.sessionId(), s.sceneOwnerEpoch, s.sceneMinorPlayDeadlineMs);
             }
             return;
         }
@@ -1248,7 +1248,7 @@ public final class ClientDispatcher {
                     s.sceneOwnerEpoch);
             if (!s.closing) {
                 s.presenceOnline = true;
-                presence.online(s.scenePlayerId, s.sessionId(), s.sceneOwnerEpoch);
+                presence.online(s.scenePlayerId, s.sessionId(), s.sceneOwnerEpoch, s.sceneMinorPlayDeadlineMs);
             }
             return;
         }
@@ -1671,6 +1671,15 @@ public final class ClientDispatcher {
         }
         s.send(content);
         return PushResult.DELIVERED;
+    }
+
+    /** 世界频道实时消息 / 撤回全服推送：只发给已绑定进场且未关闭的在线会话（在会话所属 EventLoop 上执行）。 */
+    public boolean deliverWorldChat(ClientSession s, MessageContent content) {
+        if (s.closed || s.closing || !s.presenceOnline || s.scenePlayerId == 0) {
+            return false;
+        }
+        s.send(content);
+        return true;
     }
 
     /** 服务端经推送通道踢下线：栅栏同 {@link #deliverPush}；推 23 {tip} 后关闭（断线流程照常：离场写回、通知 login）。 */

@@ -318,7 +318,8 @@ public final class WatchBattleService {
             // 第 13 行：原子完成「没有票据 ∧ 没有标记 → 写标记」。标记必须先于观众登记生效
             LocalObserverOperation original;
             try {
-                original = LocalObserverOperation.create(placement, playerId, routing, publicName(playerId, d), operations.get(), snapshot.redisNowMs());
+                original = LocalObserverOperation.create(placement, playerId, routing, publicName(playerId, d),
+                        operations.get(), snapshot.redisNowMs(), presence.get().getMinorPlayDeadlineMs());
             } catch (IllegalArgumentException invalid) {
                 log.error("[spectate] 固定观战原件不完整，不抢标记、不调用 battle player={} battle_id={}", player, battle);
                 return rejected(WatchOutcome.REJECTED, MatchTip.WATCH_NOT_WATCHABLE);

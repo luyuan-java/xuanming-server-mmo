@@ -36,11 +36,20 @@ public record LocalObserverOperation(BattlePlacement placement, AddObserverReque
 
     public static LocalObserverOperation create(BattlePlacement placement, long player, BattleRouting routing,
                                                 String publicName, String operation, long nowMs) {
+        return create(placement, player, routing, publicName, operation, nowMs, 0L);
+    }
+
+    public static LocalObserverOperation create(BattlePlacement placement, long player, BattleRouting routing,
+                                                String publicName, String operation, long nowMs, long minorPlayDeadlineMs) {
         if (nowMs <= 0 || nowMs > Long.MAX_VALUE - ADMISSION_MS) throw new IllegalArgumentException("观战准入时钟非法");
-        return new LocalObserverOperation(placement, AddObserverRequest.newBuilder().setBattleId(placement.getBattleId())
+        AddObserverRequest.Builder builder = AddObserverRequest.newBuilder().setBattleId(placement.getBattleId())
                 .setObserverPlayerId(player).setRouting(routing).setObserverName(publicName)
                 .setSpectatorOperationId(operation).setAdmitBeforeMs(nowMs + ADMISSION_MS)
-                .setTargetInstanceId(placement.getBattleInstanceId()).build());
+                .setTargetInstanceId(placement.getBattleInstanceId());
+        if (minorPlayDeadlineMs != 0L) {
+            builder.setMinorPlayDeadlineMs(minorPlayDeadlineMs);
+        }
+        return new LocalObserverOperation(placement, builder.build());
     }
 
     public long playerId() { return add.getObserverPlayerId(); }

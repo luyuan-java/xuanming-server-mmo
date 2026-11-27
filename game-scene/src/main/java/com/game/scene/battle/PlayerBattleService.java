@@ -418,6 +418,10 @@ public final class PlayerBattleService implements BattleHooks {
             }
             snapshot = snapBuilder.build();
         }
+        // 未成年人防沉迷截止时刻（real-name-anti-addiction.md §5.4）：透传进参战快照供 battle 封顶票据并到点断直连。
+        final BattlePlayerSnapshot preparedSnapshot = player.minorPlayDeadlineMs() > 0L
+                ? snapshot.toBuilder().setMinorPlayDeadlineMs(player.minorPlayDeadlineMs()).build()
+                : snapshot;
         // 快照构建后，在冻结提交点再次校验原工作代次截止。
         if(Long.compareUnsigned(prepareDeadline,clock.epochMillis())<=0)return prepareRejected(INVALID_PARAMETER,Prepare.INVALID);
         BattleFreeze freeze = new BattleFreeze(battleId, request.getBattleNodeId(), Phase.PREPARING, deadline, prepareDeadline, true);
@@ -429,7 +433,7 @@ public final class PlayerBattleService implements BattleHooks {
         long ttl = BattleRedis.lockTtlSec(prepareDeadline, clock.epochMillis());
         onLogic(locks.prepareLock(playerId, battleId, request.getBattleNodeId(), deadline, prepareDeadline, ttl), (held, error) -> {
             try {
-                onPrepareLocked(player, freeze, snapshot, held, error, reply);
+                onPrepareLocked(player, freeze, preparedSnapshot, held, error, reply);
             } catch (RuntimeException e) {
                 abandonPrepare(player, freeze);
                 throw e;

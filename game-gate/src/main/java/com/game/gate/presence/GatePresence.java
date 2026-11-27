@@ -58,15 +58,23 @@ public final class GatePresence implements PresenceRecorder {
 
     @Override
     public void online(long playerId, int sessionId, long ownerEpoch) {
-        PlayerPresence entry = PlayerPresence.newBuilder()
+        online(playerId, sessionId, ownerEpoch, 0L);
+    }
+
+    @Override
+    public void online(long playerId, int sessionId, long ownerEpoch, long minorPlayDeadlineMs) {
+        PlayerPresence.Builder builder = PlayerPresence.newBuilder()
                 .setPlayerId(playerId)
                 .setZoneId(zoneId)
                 .setGateNodeId(gateNodeId)
                 .setGateInstanceId(gateInstanceId)
                 .setSessionId(sessionId)
                 .setOnlineSinceMs(clockMs.getAsLong())
-                .setOwnerEpoch(ownerEpoch)
-                .build();
+                .setOwnerEpoch(ownerEpoch);
+        if (minorPlayDeadlineMs > 0L) {
+            builder.setMinorPlayDeadlineMs(minorPlayDeadlineMs);
+        }
+        PlayerPresence entry = builder.build();
         // 同一玩家在本 gate 上的两次登录，确认可能乱序到达（不同会话在不同 EventLoop、可能来自不同 scene 链路）：
         // 以归属 epoch 定先后，旧登录的迟到确认不覆盖新登录的条目（否则旧会话随后被踢时会把新会话的条目一并撤掉）。
         PlayerPresence kept = online.compute(playerId,

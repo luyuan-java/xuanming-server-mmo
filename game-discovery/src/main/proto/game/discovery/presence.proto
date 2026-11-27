@@ -21,6 +21,8 @@ message PlayerPresence {
   int64 online_since_ms = 6;
   // 这次进游戏夺得的数据归属 epoch：同一玩家的两次登录以它定先后，迟到的旧登录不得覆盖新登录的条目。
   uint64 owner_epoch = 7;
+  // 未成年人防沉迷当天截止时刻（Unix 毫秒，0 = 不限；gate 从 EnterScene 同步写入，供 match L0 观战等读取）。
+  uint64 minor_play_deadline_ms = 8;
 }
 
 // 服务端 → 指定 gate 的一条下行指令。至多一次：gate 不在线、频道抖动、玩家刚好下线都会丢，业务方以拉取兜底。
