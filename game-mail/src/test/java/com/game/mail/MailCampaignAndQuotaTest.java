@@ -269,7 +269,9 @@ class MailCampaignAndQuotaTest {
 
     @Test
     void 邮件过期清行后重发凭mail_request_receipt判重不重复发物且摘要不符回CONFLICT() throws Exception {
-        assertThat(MailTables.registry().tables().keySet()).contains("mail_request_receipt");
+        assertThat(MailTables.registry().tables())
+                .extracting(com.game.pbmysql.TableSchema::tableName)
+                .contains("mail_request_receipt");
 
         AuthorityJdbc sql = mock(AuthorityJdbc.class);
         AuthorityIds ids = mock(AuthorityIds.class);
