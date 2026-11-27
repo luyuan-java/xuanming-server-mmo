@@ -86,6 +86,7 @@ public final class TurnBattleEngine {
     private final BuffEngine buffs;
     private final ClassSkillExecution classSkills;
     private final AutoClassSkillSelector autoClassSkills;
+    private final BattleScriptEvaluator scriptEvaluator;
     /** actor_id → 本回合行动；按 actor_id 无符号升序（基线 {@code std::map}）。现在只做查找，用有序容器防止日后有人遍历它。 */
     private final NavigableMap<Long, BattleAction> pendingActions = new TreeMap<>(Long::compareUnsigned);
     /** 副本怪物 HFSM + 行为树 + 定点效用 AI 控制器（有序容器保确定性，不消耗 RNG）。 */
@@ -186,6 +187,12 @@ public final class TurnBattleEngine {
         this.buffs = ctx.configured.legacy;
         this.classSkills = new ClassSkillExecution(ctx, buffs, checks);
         this.autoClassSkills = new AutoClassSkillSelector(ctx, checks, classSkills, buffs);
+        this.scriptEvaluator = new BattleScriptEvaluator(ctx, checks);
+    }
+
+    /** 开局时被忽略的非法战斗剧本及英文原因（由 battle 节点打 ERROR 日志）。 */
+    public List<String> scriptRejections() {
+        return scriptEvaluator.rejections();
     }
 
     // =====================================================================================================
@@ -463,6 +470,7 @@ public final class TurnBattleEngine {
             engine.ctx.configured.initialize();
         }
         engine.bindDungeonMonsterAis(monsterAiProfiles);
+        engine.scriptEvaluator.bind(request);
         engine.ctx.encounter.initSpecialState(request.getMatchMode(), engine.maxRounds);
         if (engine.tacticalPuzzleContext != null) {
             engine.applyTacticalPuzzleSetup();
@@ -2676,6 +2684,7 @@ public final class TurnBattleEngine {
      * 没有可用技能则普攻，也包括被眩晕的单位（执行时被跳过）。选技能与目标不耗随机数。
      */
     private void fillDefaultActions() {
+        scriptEvaluator.fillActions(pendingActions);
         fillDungeonMonsterAiActions();
         for (BattleUnit unit : ctx.units()) {
             if (!unit.isActive()) {

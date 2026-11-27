@@ -200,6 +200,10 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
                 return response.setErrorMessage(tip(INVALID_TABLE_DATA)).build();
             }
         }
+        for (String rejection : engine.scriptRejections()) {
+            log.error("[battle] ignored invalid team battle script battle_id={} detail={}",
+                    Long.toUnsignedString(battleId), rejection);
+        }
         // 6 整场期限：deadline_ms ≤ now（不只是没填）一律取兜底；必须在签票之前落到房间上
         long now = clock.epochMillis();
         long deadlineMs = request.getDeadlineMs();

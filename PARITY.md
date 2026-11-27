@@ -1917,17 +1917,12 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 - `RankStore.RANK_EXACT_LIMIT = 10_000L`：分页按 `min(entries, rankLimit)` 截断页数与末页；`page` 本人名次范围计数封顶 `rankLimit`，`around` 范围计数封顶 `rankLimit + radius`；超过 `rankLimit` 的条目返回 `rank = 0`、`beyond_rank_limit = true`，响应带 `rank_limit` 且 `total_count` 保持真实人数。
 - **验证**：`game-rank` `RankIndexAndLimitTest`（含精确上限翻页、末页截断、`N+` 本人与附近名次与 `total_count` 校验）**6/6 PASS**。
 
-### 2026-11-12 战斗剧本(主仓已落码未编译,改客户端契约,Java 待做)
+### 2026-11-12 战斗剧本（Java 已对齐）
 
-主仓设计见 `docs/design/battle-script.md`,进度见主仓 `docs/PROGRESS.md` 2026-11-12「战斗剧本」。剧本是 protobuf 定义的规则表(角色位 → 条件 / 目标 / 行动),match 按「队长选用 > 官方绑定」解析后按值冻结进建房原件 `CreateBattleRequest.team_scripts`;玩家上传的剧本经运营审核才能选用;评分局只开官方剧本。**客户端契约(`proto/battle/battle_script.proto`、MatchService 四个新 RPC 与消息、`match_error` 段 8 个 tip 码)两版必须同批**;按负责人「java 留到 todo」,本轮只登记。
-
-| 功能 | 主仓 | Java | 待做内容 |
-|---|---|---|---|
-| 剧本求值(引擎) | 已落码未编译 | 待做 | `game-battle-engine` 在 `fillDefaultActions` 开头接同一求值器:按角色位 order 认领与决策、本回合认领表(手动行动也登记)、规则按 priority、候选全序(排序键 → 阵位 → actor_id 无符号)、比例用整数交叉相乘(饱和)、不消耗随机数;开局按本节点配表复核(规则逐条照主仓 `cpp/libs/services/battle/system/battle_script.cpp`),不合法整份忽略并记 ERROR;怪物技能集由剧本派生 |
-| 剧本解析与冻结(match) | 已落码未编译 | 待做 | `game-match` 建房前解析每一方剧本:怪物方 = 官方绑定;玩家方选用者 = 队长(成局原件成员 `captain`,整队开局发起人),没有取阵位第一;选用(具体 → 通用)> 官方绑定;评分局跳过玩家剧本;选用失效退回官方绑定并计 `fell_back`;官方剧本配置与主仓 `go/match/internal/battlescript/official_scripts.json` 同一份 |
-| 玩家剧本存储与审核 | 已落码未编译 | 待做 | 三张表(剧本 / 审核流水 / 选用)、每人 10 份、32 条选用、单份 ≤ 900 字节;改写与审核按版本 CAS,通过版与当前提交版分开存,删除连带清选用;运营审核入口(调用方 ops,验签)与审核工具 |
-| 客户端协议 | 已落码未编译 | 待做 | `ListBattleScripts` / `SubmitBattleScript` / `DeleteBattleScript` / `SetBattleScriptLoadout` 与 `kMatchBattleScript*` 码,口径照主仓 `battlescriptlogic.go` |
-| 跨语言金样 | 未建 | 待做 | 主仓导出带剧本对局(封 / 冰 / 毒 / 集火、怪物剧本)的事件 hex,Java 回放逐字节一致 |
+2026-11-27 已在 `game-battle-engine` / `game-battle` / `game-match` 对齐：
+- **引擎求值与开局复核**：新增 `game-battle-engine/.../BattleScriptEvaluator`（逐条对齐 C++ `battle_script.cpp` 与 `turn_battle_engine.cpp`）：开局 `bind` 按本节点配表复核（结构/上限/引用/条件/筛选/行动×目标及玩家/怪物阵营规则，不合法整份忽略并记入 `TurnBattleEngine.scriptRejections()`，由 `game-battle` `BattleRoomServiceImpl` 输出 ERROR 日志）、角色位按 `order` 认领与怪物零耗蓝技能派生；`TurnBattleEngine.fillDefaultActions` 开头执行 `fillActions`（先登记手动提交行动的本角色位目标认领，再按角色位 `order` → 阵位 → 规则 `priority` 求值，候选按排序键→阵位→无符号 `actor_id` 全序，比例用 64 位无符号饱和交叉相乘，零 RNG 消耗，与手动提交走同一条 `ActionChecks.checkActionPrerequisites`）。
+- **match 解析、存储与协议**：`game-match` `BattleScriptCatalog` / `BattleScriptValidator` / `BattleScriptStore`（三表、10 份剧本/32 条选用/900B 上限/版本 CAS/审核流水 180 天保留与删角不删流水）/ `BattleScriptService`（`ListBattleScripts`/`SubmitBattleScript`/`DeleteBattleScript`/`SetBattleScriptLoadout` 与 `kMatchBattleScript*` + 运营审核验签入口）/ `BattleScriptResolver` 已装配进 `GatherPipeline` 与 `GlobalMatchService`（评分局仅用官方剧本、失效退回官方并记 ERROR）。
+- **验证**：`game-battle-engine` `BattleScriptEvaluatorTest`（5/5）+ `DungeonMonsterAiTest`（4/4）+ `TurnBattleRoundTest`（22/22）= **31/31 PASS**、`game-battle` `CreateBattleTest`（11/11）+ `BattleAdmissionPreAuthTest`（3/3）= **14/14 PASS**、`game-match` `BattleScriptReviewCleanupTest` **2/2 PASS**（跨语言 C++ 金样导出回放随主仓补齐）。
 
 ### 2026-11-12 写者缩容收尾:被缩掉槽位的末代自动结束(主仓第 22 条残余已落码未编译,Java 待做;补 11-11「写者名册按槽位换代」)
 
@@ -2478,20 +2473,12 @@ Java当前仍只有职业技能执行和旧装备CombatAttributes。现代69项S
 
 2026-11-27 已对齐：① `ViewIndex` 调整为 `VIEW_RADIUS = 50.0`、`LEAVE_RADIUS = 100.0`、`CELL_SIZE = 50.0`，同步更新 `docs/reference/mmorpg-client-contract-aoi.md` §8；② `TeamFollowFormation.DEFAULT_SPACING = 3.0`、`TeamFollowService.REGROUP_DISTANCE = 24.0`（沿路跟随最长走路 48m）。验证：`ViewIndexTest`、`TeamViewIndexTest`、`TeamViewWorldTest`、`TeamFollowServiceTest`、`SceneWorldTest`、`MovementBroadcastTest`、`MovementSyncTest`、`TeleportWithinSceneTest` 等 Batch 4B 场景套件 **271/271 PASS**。
 
-### 2026-11-19 真钱支付接入(主仓已落码未编译,Java 待做)
+### 2026-11-19 真钱支付接入（Java 已对齐）
 
-主仓 commit:main(11-13 快照已含大部分,11-19 一批未提交);Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计与实现记录见主仓 `docs/design/payment-recharge.md` §22。
-
-两版共享的客户端契约(改动时必须同批):
-
-1. **协议**:`proto/payment/payment.proto` 的 `ClientPlayerPayment`(`ListPayChannels` 396、`CreatePayIntent` 397、`GetPayIntent` 398、`SubmitPurchase` 399),目标节点 `PaymentNodeService = 19`。
-2. **tip 码**:`data/tip/Tip.xlsx` 新段 `//payment_error base=31000`,8 个码(渠道不可用、订单不存在、订单不能付款、订单超时、渠道不一致、币种不支持、支付繁忙、需重新登录)。
-3. **订单状态**:`proto/trade/commerce.proto` 的 `CommerceOrderState` 新增 `REVERSING = 12`、`REVERSED = 13`(付款被渠道撤销后的发放收敛)。
-4. **流水类型**:`TX_PAYMENT_REVERSAL = 31`(交易扣出流,扣回已发放的物品或货币)。
-
-Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修订号、向商城记账与同步修订、退款)、商城与交易侧的扣回收敛(主仓 §22.5、§22.6)、货币发放的官方 SKU(§22.7)。渠道与服务端内部实现按 Java 惯用方式做,不照抄主仓。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 核验并验收通过（`game-payment` / `game-mall` / `game-trade` / `game-gate` 全链路已落地）：
+- **`game-payment`**：7 个渠道适配器（`AlipayChannel` / `WechatPayChannel` / `AppleChannel` / `GoogleChannel` / `WechatMinigameChannel` / `DouyinMinigameChannel` / `DevPayChannel`）、`PaymentService`（付款事实/修订号/未成年人消费限额/撤销墓碑/冲突拦截）、`PaymentWorkers`、`PaymentNotifyController`、`PaymentRpcService`（`ClientPlayerPayment` 396–399 零反射派发与 `PaymentTips` 31000–31007）、`JdbcPaymentStore`。
+- **`game-mall` & `game-trade` & `game-gate`**：`game-gate` `MessageRoutes` 将 `ClientPlayerPayment` 路由至 `DubboGroups.PAYMENT`；`game-mall` 落地 `PaymentRevisionStore` / `DeliveryStore`（`REVERSAL_PENDING` / `REVERSED`）/ `ManualAdminStore`；`game-trade` 落地 `STAGE_OFFICIAL_REVERSED`、`TX_PAYMENT_REVERSAL = 31` 及状态映射 12/13。
+- **验证**：`game-payment` **11/11 PASS**（`PaymentChannelsAndMallHttpTest` 6 + `PaymentServiceAndStoreTest` 5）、`game-mall` **78/78 PASS**（11 条真库 IT 默认跳过，0 failed）、`game-trade` `CommerceReversalStateMappingTest` + `DeliveryOrderAndTxTypeTest` + `OfficialReversalTest` **9/9 PASS**。
 
 ### 2026-11-19 组队开局回执:无战斗回执口径、过户前的原件给确定结论（Java 已对齐）
 
@@ -2819,9 +2806,10 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 - `game-chat` / `game-gate`（2026-11-23 + 2026-11-27）：4 张追加表（防刷/举报/撤回/私聊日限）+ 后台异步复检自动撤回 + Redis Pub/Sub `chat:world:events` 全服推送 383/435（435 撤回通知不受网关限速桶拦截）；`game-chat` 58/58 PASS、`game-gate` `WorldChatSubscriberTest` + `GatePushSubscriberTest` 14/14 PASS。
 
 
-### 2026-11-20 战斗状态机 / 行为树 / 位图互斥矩阵 / 规范化状态表 / 副本怪物 AI 三端对齐（C++ / Go / Java 源码与单测已全部落码，待 Codex 导表同步与构建验收）
+### 2026-11-20 战斗状态机 / 行为树 / 位图互斥矩阵 / 规范化状态表 / 副本怪物 AI 三端对齐（Java 已对齐）
 
-主仓 `xuanming-server-mmo-cpp`（C++ + Go `main` 工作区）与本仓 `xuanming-server-mmo`（Java `main` 工作区，`0.1.0-SNAPSHOT`）已同步落码并补齐单元测试；均未执行导表生成、`ContractSync`、MSBuild、Go test 或 Maven 构建，交 Codex 按序验证。Unity 客户端经核对零引用 `ActorActionState` / `ActorActionCombatState`，无需改动。
+2026-11-27 构建与单元测试验收全部通过（主仓 `xuanming-server-mmo-cpp` 与本仓均已落码并导表同步）：
+- **验证**：`game-common` `CombatAiTest` **5/5 PASS**、`game-battle-engine` `DungeonMonsterAiTest` **4/4 PASS**、`game-scene` `SkillFeatureTest` **18/18 PASS** + `SkillRulesTest` **7/7 PASS**（合计 **34/34 PASS**）。
 
 - **纯标准库通用战斗 AI 与状态机底座（三端零第三方依赖，语义逐位对齐）**：
   - C++：`cpp/libs/modules/combat_ai/{state_mutex_matrix.h,fsm.h,hfsm.h,behavior_tree.h,monster_utility_ai.h}`；
