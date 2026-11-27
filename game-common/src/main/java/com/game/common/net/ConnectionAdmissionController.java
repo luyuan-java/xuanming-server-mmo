@@ -119,6 +119,15 @@ public final class ConnectionAdmissionController<C> {
                                          LongSupplier nanoClock,
                                          DoubleSupplier random,
                                          LoopStallDetector stallDetector) {
+        this(policy, verifiedCountSupplier, nanoClock, random, stallDetector, null);
+    }
+
+    public ConnectionAdmissionController(ConnectionAdmissionPolicy policy,
+                                         IntSupplier verifiedCountSupplier,
+                                         LongSupplier nanoClock,
+                                         DoubleSupplier random,
+                                         LoopStallDetector stallDetector,
+                                         SourcePrefixRateLimiter customSourceRateLimiter) {
         this.policy = Objects.requireNonNull(policy, "policy");
         this.verifiedCountSupplier = Objects.requireNonNull(verifiedCountSupplier, "verifiedCountSupplier");
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
@@ -129,12 +138,14 @@ public final class ConnectionAdmissionController<C> {
         this.globalRateGate = policy.enabled()
                 ? new GcraRateGate(policy.acceptRatePerSecond(), policy.acceptBurst())
                 : null;
-        this.sourceRateLimiter = new SourcePrefixRateLimiter(
-                policy.sourceRatePerSecond(),
-                policy.sourceBurst(),
-                SourcePrefixRateLimiter.DEFAULT_MAX_PREFIXES,
-                SourcePrefixRateLimiter.DEFAULT_IDLE_EXPIRY,
-                nanoClock);
+        this.sourceRateLimiter = customSourceRateLimiter != null
+                ? customSourceRateLimiter
+                : new SourcePrefixRateLimiter(
+                        policy.sourceRatePerSecond(),
+                        policy.sourceBurst(),
+                        SourcePrefixRateLimiter.DEFAULT_MAX_PREFIXES,
+                        SourcePrefixRateLimiter.DEFAULT_IDLE_EXPIRY,
+                        nanoClock);
     }
 
     public ConnectionAdmissionPolicy policy() {

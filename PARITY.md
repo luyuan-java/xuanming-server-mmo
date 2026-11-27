@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-27 局外人观战交流模式与个人禁交开关 V1（开局冻结开关 + 全房单一公开频道 + ContentGuard fail-closed + 严禁禁观战，RPC `587..590`，Tip `16073..16078`，Java 第 27 代持久台账 `0027.schema`）
+
+| 范围 | C++ / Go 权威版 + Unity 客户端 | Java / Python 版 | 状态 |
+|---|---|---|---|
+| **① 核心口径（禁交流 ≠ 禁观战）**：个人偏好 `eSpectateChatPreference`（`0=UNSPECIFIED` / `1=ALLOW` / `2=FORBID`）持久化于 `PlayerProfileComp.spectate_chat_pref = 15`（Java `PlayerState.spectate_chat_pref = 28`），经 `SceneSceneClientPlayer` `589=GetSpectateChatSetting` / `590=SetSpectateChatSetting` 读写（战斗中可改、下次进战斗生效；交出冻结期拒写）。关闭个人开关**绝不影响 `spectate_visibility`**，他人仍可正常观战。<br>**② 开局一次性冻结（防作弊 + 无局中摇摆）**：建房时 `Match` 按 `MatchMode` 权威策略冻结 `CreateBattleRequest.spectate_chat_enabled = 25`（单人 PVE 按本人、组队 PVE 按队长、PVP 默认全员真人一票否决且忽略 AI、私密/不可观战局恒 `false`），透传 `BattleStateS2C.spectate_chat_enabled = 47`（`RedactStateForViewer(0)` 保留开关同时裁剪全部私密字段，守住 `观众视角 ⊆ A ∩ B` 与队内频道隔离）及 `BattleWatchSummary.spectate_chat_enabled = 9`。<br>**③ 全房单一公开频道（`MatchService` `587=SendBattleSpectateChat` / `588=PullBattleSpectateChat`，Tip `16073..16078`）**：双方参战者与局外观众共享同一公开流（按权威参战名单自动标 `PARTICIPANT` / `SPECTATOR`，杜绝单边暗线指挥）；自由文本经 `ContentGuard`（`TEXT_SCENE_CHAT_WORLD`）fail-closed 审核（审核不可用回 `16078`）；Redis 单槽（`{<battle_id>}` hash tag）原子 Lua 维护 60 条环形缓冲、参战 2s / 观战 4s 冷却与房间 8 条/秒限流，战局结束自动封口禁写保留历史可读。<br>**④ Unity 全 UI 接入（零阻塞，附可选 4 切片视觉精修交接单）**：`BattleSpectateChatClient`（纯 C#、WebGL2/IL2CPP 安全）、`BattleSpectateChatPanel`（战斗/观战左侧可折叠抽屉 + 禁交流时参战隐藏/观战显示「静默观战·禁交流」提示牌）、`SpectatePanel`（个人开关 + 列表 `[可交流]/[静默观战]` 标记）、`BattleQueuePanel`（快捷开关）。 | 策划与交接：`docs/planning/battle-spectate-chat-v1.md`、`docs/planning/ui-handoff/battle-spectate-chat-v1-ui-handoff.md`；协议与表：6 份 `.proto` + `Tip.xlsx`（`16073..16078`），`dev.bat gen` + `dev.bat export`（`protoc 35.1`）退出 0；C++：`player_handoff_gate.h`、`player_scene_handler.cpp`、`player_battle.cpp`、`turn_battle_engine.cpp`、`battle_room_manager.cpp`、`player_handoff_gate_test.cpp`、`battle_observer_contract_test.cpp`；Go `match`：`spectatechat/hub{,_test}.go`、`logic/spectate_chat_{policy,logic}{,_test}.go`、`gather.go`、`spectate.go`、`config.go`、`errors{,_test}.go`、`matchserviceserver.go`。验证：`test_cpp_no_raw_pointer_member.py` **13/13**、`test_cpp_thread_sources.py` **5/5**、`check_log_text_english.py` **exit 0**、`gen_docs_index.py --check` **exit 0**；C++ 串行 MSBuild `proto`/`battle`/`scene` 库与 `battle.exe`/`scene.exe`/`turn_battle_engine_test.exe`/`rpc_controller_test.exe`/`cross_zone_test.exe` 全 **0 错误**，`scene.exe --validate-tables` **PASS**（version=106，83 表），`rpc_controller_test --gtest_filter=*SpectateChat*` **1/1 PASS**，`cross_zone_test --gtest_filter=*PlayerHandoffGate*` `SceneServiceIsListedPerMethod` 等 **9/10 PASS**（1 项为无关既有 `SkillService` 项），`turn_battle_engine_test` **535/536 PASS**（1 项为无关既有奖励表夹具）；Go `match` 全 **27 包 PASS**、`client_rpc_router` 全包 **PASS**；Unity：`gen.bat client` 0 错误，`client_compile_check.ps1` **828/828 0 错误**，Roslyn+NUnit `BattleSpectateChatClientTests`（4/4）+ `SpectateClientStateMachineTests`（34/34）= **38/38 PASS** | **Java 已对齐**：`ContractSync --mmorpg --maps-source` 全量同步（`proto=152, schema=83, tip fault=66`）；`game-player-store`（`player_state.proto#28` + 第 27 代台账 `0027.schema`，`HEAD_SHA256=6664fc5e...`，`PlayerStateSchemaLedgerTest` **1/1 PASS**）；`game-discovery`（`RedisKeys.matchSpectateChat*` 五键同槽）；`game-battle-engine`（`TurnBattleEngine.buildStateSnapshot` 透传 `spectate_chat_enabled`）；`game-battle`（`BattleViewsTest` + `ObserverTest` **15/15 PASS**）；`game-scene`（`ScenePlayer` / `BattleSnapshots` / `RankedPresetRules` / `SceneMessageIds` / `ClientRequestHandler` 589/590，`SpectateChatSettingTest` **1/1** + `FreezeGateTest` + `PrepareBattleTest` **63/63 PASS**）；`game-match`（`BattlePlacement#15..16`、`SpectateChatPolicy`、`SpectateChatHub` Redis 单槽 Lua + 内存兜底、`SpectateChatService`、`GatherPipeline`、`GlobalMatchService`、`GlobalPlacementStore`、`GlobalWatchAuthority`、`SpectateRules`、`MatchMethods` 60 方法、`MatchFeatureConfiguration`，7 套件 **88/88 PASS**）。<br>**Python（TODO）**：按 `xuanming-server-mmo-python` 规则待 C++ 基线正式提交后增量同步 `587..590` 与 `spectate_chat_*` 逻辑 | C++ / Go / Java / Unity 已对齐全绿（Python 列入 TODO） |
+
 ## 2026-11-27 五行幻境 V2 · 五行奇策轻肉鸽秘境（6 关分岔 + 15 枚机制改造型奇策 + 3 同系五行共鸣 + 公平 3×3 双模式 + 跨周保局 + Redis Cluster 同槽 Lua Top-200 榜，RPC `585/586`）
 
 | 范围 | C++ / Go 权威版 + Unity 客户端 | Java / Python 版（TODO） | 状态 |
@@ -2292,21 +2298,12 @@ robot `killswitch` 端到端补两项:type 范围关停 gate 上的一个客户�
 2. **世界频道登记不超过期望数(R7)**:主仓把「在役频道数不小于期望数就不登记」放进登记脚本的同一步，补建锁丢了也不会多建频道。核对 Java 场景管理的频道补建是不是「数缺几个、补几个」靠一把 Redis 锁串行;是的话照同一做法把判断放进登记的原子步骤里。
 3. **锁命令结局未知时的收拾(R8)**:主仓两处——拿锁的 SET NX 报错时按同一个令牌做一次条件删除;客户端自动重发导致回「已存在」时，读回锁值核对是不是自己的。核对 Java 里用 Redis 锁的地方(帮会榜维护、频道补建等)在 Lettuce 超时 / 断线重发时是否会把自己的锁当成别人的、或留下没人持有的锁。
 
-### 2026-11-12 gate 连接准入:accept 处拒绝并发 RST、新建连接速率闸、连接类指标(主仓已落码未编译,Java 待做)
+### 2026-11-12 gate 连接准入:accept 处拒绝并发 RST、新建连接速率闸、连接类指标（Java 已对齐）
 
-主仓 gate 准入设计 P1-1 ~ P1-4。主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待做。规格见主仓 `docs/design/gate-connection-admission-control.md` §6 的 P1-1 ~ P1-4 与 §9.6,运维口径见主仓 `docs/ops/gate-kernel-tuning-runbook.md` §3.2,验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「gate 连接准入 P1-1 ~ P1-4」。
-
-不改客户端协议。客户端可见的只有一点:被拒的连接在客户端看到的是连接被重置(RST),不是正常关闭;客户端按普通断线退避重连即可(Unity 客户端 `GateTcpClient.cs` 与 `GameClient.Reconnect.cs` 已核对,不用改)。
-
-**主仓的做法**(Java 版 `game-gate` 按 Netty 的惯用方式对齐;已有等价机制就把这一节改成已对齐):
-
-1. **判定放在每连接对象建出来之前**,顺序「关源 → 总量 → 新建速率」,判据都不需要知道对端是谁。总量排在速率前面:满员时被拒的连接不消耗速率名额。Netty 里对应的是子 channel 建好、业务 pipeline 装上之前的第一道 handler,不要放到验签之后。
-2. **拒绝发 RST**:被拒的连接先把 `SO_LINGER` 设成 0 再关,不留 TIME_WAIT,也不回任何应答。只用在准入拒绝;已经建立的连接关闭仍走正常关闭。
-3. **新建连接速率闸**:全局一个,不按来源;GCRA(与令牌桶等价),超限时拒绝,不暂停 accept。缺省桶深 = 连接上限,持续速率 = 上限的 1%/秒、下限 100(推导见主仓设计稿 P1-3)。主仓用环境变量 `GATE_ACCEPT_RATE_PER_SECOND` / `GATE_ACCEPT_BURST` 覆盖(规范十进制 1..1000000,写错拒绝启动,没有「0 = 关闭」);Java 版用自己的配置方式给同样的缺省值和覆盖口子。
-4. **未验签连接数用 RAII 占位计**:建连时领、验签成功时还,会话从任何路径销毁都归还,不靠各出口手写加减。
-5. **指标**(用同名,两版共用一份告警):`gate_connections_current`、`gate_connections_max`、`gate_unauthenticated_connections`、`gate_accepted_total`、`gate_rejected_total{reason}`(`capacity` / `accept_rate` / `shutting_down`;主仓另有两个启动配置兜底的 `not_ready` / `no_token_secret`,Java 版没有对应分支可以不导出)、`gate_accept_rate_limit_per_second`、`gate_accept_burst`、`gate_handshake_duration_ms`(直方图,桶 10 ~ 10000 毫秒)、`gate_preauth_reaped_total`。标签只有 `reason`,不带对端地址、会话号、账号。主仓告警在 `deploy/k8s/gate-connection-alerts.yaml`。
-
-**验证**(Java 仓口径):移植主仓 `cpp/nodes/gate/tests/connection_admission_test.cpp`(速率闸边界、判定顺序、占位归还、指标样本行)与 `cpp/tests/rpc_controller_test/acceptor_admission_test.cpp`(被拒连接的对端读到连接被重置、不进入连接处理链路)里的同名场景。
+主仓 gate 准入设计 P1-1 ~ P1-4。2026-11-27 已对齐（含 P0-2 / P2-2 / P2-4 完整收口）：
+- `game-common` 新增 `ConnectionAdmissionPolicy`（缺省推导 + `GATE_*` 规范十进制 1..1000000 覆盖且非法拒启）、`GcraRateGate`（只读 `canAdmit` + 放行后 `consume`）、`LoopStallDetector`（1s 节拍卡顿判据）与 `ConnectionAdmissionController`（固定顺序 `shutting_down -> capacity -> preauth -> accept_rate -> source_rate`，全通过后原子提交副作用）。
+- `game-gate` `ClientChannelHandler` / `GateNode` 在创建会话前执行准入判定，拒绝走 `SO_LINGER=0` RST 关闭且不消耗后序闸门名额；`GateMetrics.bindAdmission` 导出与 `deploy/k8s/gate-connection-alerts.yaml` 同名全部 Prometheus 指标（`gate_connections_current/max`、`gate_unauthenticated_connections`、`gate_accepted_total`、`gate_rejected_total{reason}`、`gate_accept_rate_limit_per_second`、`gate_accept_burst`、`gate_handshake_duration_ms`、`gate_preauth_reaped_total`）。
+- **验证**：`game-common` `ConnectionAdmissionControllerTest` + `NetProtectionTest` **7/7 PASS**，`game-gate` `PreAuthAdmissionLifecycleTest` + `ClientDispatcherTest` + `ClientRedirectTest` + `ClientPipelineTest` + `ClientHeartbeatTest` + `GateMetricsTest` **162/162 PASS**。
 
 ### 2026-11-12 托管归位:没有节点持有的离线托管角色由会话服务放回世界(主仓已落码未编译,Java 待做;补同日「离线托管角色随排空 / 疏散搬走」)
 
@@ -2557,15 +2554,10 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-19 battle 直连准入:accept 处拒绝并发 RST、新建连接速率闸、连接类指标(主仓已落码未编译,Java 待做)
+### 2026-11-19 battle 直连准入:accept 处拒绝并发 RST、新建连接速率闸、连接类指标（Java 已对齐）
 
-主仓说明见 `docs/PROGRESS.md` 2026-11-19「battle 直连准入前移到 Acceptor」,设计见主仓 `docs/design/gate-connection-admission-control.md`「P1-1 ~ P1-4 · battle 直连面」与 `docs/design/turn-based-battle-server.md` D27,运维口径见主仓 `docs/ops/gate-kernel-tuning-runbook.md` §3.3。主仓 commit:main 工作区未提交;Java 版 `0.1.0-SNAPSHOT` 待做,本轮不写 Java 代码。不改客户端协议;客户端可见的只有被拒的直连是连接被重置(RST),与 2026-11-12「gate 连接准入」一条相同,客户端按断线重连处理。
-
-- **主仓做法**:把 2026-11-12「gate 连接准入」一条的做法原样搬到 battle 直连面。判定在每连接对象建出来之前,顺序「关源 → 总量(`BattleMaxConnections`,参战者与观众共用)→ 新建速率」;被拒发 RST,已建立的直连关闭仍走正常关闭;全局 GCRA 速率闸,缺省与 gate 同一推导(上限 4096 时 100 条/秒、桶深 4096),环境变量 `BATTLE_ACCEPT_RATE_PER_SECOND` / `BATTLE_ACCEPT_BURST` 覆盖,写错拒启;停机与维护关源时同步关准入闸,计划排空不关源(打着的房间还要接重连)。
-- **指标**(用同名,两版共用 `deploy/k8s/battle-connection-alerts.yaml`):`battle_connections_current`、`battle_connections_max`、`battle_unauthenticated_connections`(既没完成票据握手、也没出示有效网络探测授权的直连)、`battle_accepted_total`、`battle_rejected_total{reason}`(`capacity` / `accept_rate` / `shutting_down` / `no_token_secret`,与 gate 同义取值相同)、`battle_accept_rate_limit_per_second`、`battle_accept_burst`、`battle_handshake_duration_ms`(直方图,桶 10 ~ 10000 毫秒)、`battle_preauth_reaped_total`。标签只有 `reason`。
-- **Java 待做**:`game-battle` 的 `BattleEdgeServer` / `BattleEdgeHandler`(Netty)按上面对齐;核对后已有等价机制就把本条改成已对齐。另有一条两版共有的风险:全服匹配的网络探测每个机房只打到 NodeId 最小的那一台 battle,探测量大时速率要按运维手册 §3.3 调高。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐：`game-battle` `BattleEdgeServer` / `BattleEdgeHandler` 接入共用 `ConnectionAdmissionPolicy.fromEnv("BATTLE_", ...)` + `ConnectionAdmissionController<Channel>`，判定在创建 `DirectSession` 之前（`shutting_down -> capacity -> preauth -> accept_rate -> source_rate`），拒绝走 `SO_LINGER=0` RST，`stopAccepting()` 同步关闭准入闸，`drainAndClose()` 同步排空/关闭已认证会话与未认证池；`BattleMetrics.bindAdmission` 导出与 `deploy/k8s/battle-connection-alerts.yaml` 同名全部 `battle_*` Prometheus 指标。
+- **验证**：`game-battle` `BattleAdmissionPreAuthTest` + `BattleEdgeHandlerTest` + `BattleEdgeHeartbeatTest` + `BattleEdgeLoopbackTest` + `BattleEdgeProtectionTest` + `BattleMetricsTest` **69/69 PASS**。
 
 ### 2026-11-19 账号注销与 Apple / Google 身份令牌一次性消费(主仓已落码未编译,Java 待做)
 
@@ -2577,24 +2569,10 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-19 gate 未验签连接预算:独立预算、LRU 淘汰最老的未验签连接、按概率早拒(主仓已落码未编译,Java 待做)
+### 2026-11-19 gate 未验签连接预算:独立预算、LRU 淘汰最老的未验签连接、按概率早拒（Java 已对齐）
 
-主仓 gate 准入设计 P0-2 的后一半,接在 2026-11-12「gate 连接准入」一条之后。主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
-规格见主仓 `docs/design/gate-connection-admission-control.md` P0-2 与 §9.6,运维口径见主仓 `docs/ops/gate-kernel-tuning-runbook.md` §3.2,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「gate 未验签连接预算」。
-
-不改客户端协议。客户端可见的只有两种断开:被预算或早拒拒掉的连接是连接被重置(RST,与 2026-11-12 一条相同);被淘汰的未验签连接是已建出来的连接被正常关闭。两种都按普通断线退避重连。
-
-**主仓的做法**(Java 版 `game-gate` 按 Netty 惯用方式对齐;已有等价机制就把这一节改成已对齐):
-
-1. **未验签连接单独一个池**,大小就是 11-12 那一条的 RAII 占位数。池上有早拒起点 S 与预算 B:B = 缺省持续速率 × 握手期限(上限 20000 时 2000,上限不到 1 万时 1000),S = B / 2。判定排在总量之后、速率之前,被它拒掉的连接不消耗速率名额。
-2. **承压时先淘汰、后早拒**:n ≥ S 且最老的一条未验签连接已建连满 3 秒,就淘汰它、放行新连接;没有够老的,n ≥ B 时拒(`preauth_budget`),S ≤ n < B 时按概率 (n − S)/(B − S) 拒(`preauth_early_drop`)。
-3. **淘汰**:按建连先后的索引取最老的,按会话代次核对、跳过已验签的;先收回占位,再关连接,会话由正常的断开路径删;只在新连接最终被放行时才淘汰。Netty 里对应的是在子 channel 的准入 handler 里关掉最老那条未验签 channel,不在别的 channel 的事件里同步改会话表。
-4. **早拒的随机源可注入**,单测用定值。
-5. **指标**(同名,两版共用一份告警):`gate_rejected_total{reason}` 多 `preauth_budget` / `preauth_early_drop`,新增 `gate_preauth_evicted_total`、`gate_preauth_budget`、`gate_preauth_early_drop_start`。告警 `GateUnauthenticatedConnectionsHigh` 改为按早拒起点算占比,新增 `GatePreauthBudgetRejecting`(主仓 `deploy/k8s/gate-connection-alerts.yaml`)。
-
-**验证**(Java 仓口径):移植主仓 `cpp/nodes/gate/tests/connection_admission_test.cpp` 里 `ConnectionAdmissionPolicy.*`(预算推导、先淘汰后早拒、早拒概率恰好线性、只在放行时淘汰)、`ConnectionAdmission.*` 与 `ConnectionAdmissionEviction.*`(按建连先后淘汰、跳过已验签与会话号被复用的、真实连接上被淘汰的那条关掉)的同名场景。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐：`ConnectionAdmissionController` 维护按建连先后有序的未验签池（预算 `B = defaultRate * handshakeSec`、早拒起点 `S = B / 2`、可淘汰年龄 `3000ms`），判定位于总量之后、速率之前；`n >= S` 且池头存在满 3s 的非关闭中连接且事件循环未卡顿时先淘汰最老连接（正常关闭、非 RST，且仅在新连接全部闸门放行后原子淘汰），否则 `n >= B` 拒 `preauth_budget`、`S <= n < B` 按线性概率 `(n - S) / (B - S)` 拒 `preauth_early_drop`（随机源可注入）；`GateMetrics` 同步导出 `gate_preauth_evicted_total`、`gate_preauth_budget`、`gate_preauth_early_drop_start` 及 `preauth_budget` / `preauth_early_drop` reason 标签。
+- **验证**：`ConnectionAdmissionControllerTest` **5/5 PASS**、`PreAuthAdmissionLifecycleTest` **3/3 PASS**。
 
 ### 2026-11-19 节点时钟告警与服务启动时钟核对（Java 已对齐）
 
@@ -2725,33 +2703,13 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-19 未验签预算收尾与按来源前缀限速(主仓已落码未编译,Java 待做)
+### 2026-11-19 未验签预算收尾与按来源前缀限速（Java 已对齐）
 
-接在同日「gate 未验签连接预算」一条之后。主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
-规格见主仓 `docs/design/gate-connection-admission-control.md` P0-2(「覆盖变量」「battle 直连同一套」两段)、P2-2 与 §9.6,
-运维口径见主仓 `docs/ops/gate-kernel-tuning-runbook.md` §3.2、§3.3,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「未验签预算收尾」。
-
-不改客户端协议;客户端可见的仍只有被拒是 RST、被淘汰是正常关闭。
-
-**主仓的做法**(Java 版 `game-gate` 按 Netty 惯用方式对齐;已有等价机制就把这一节改成已对齐):
-
-1. **本端事件循环刚卡过时不淘汰**:用一个 1 秒节拍判卡顿。还没打过拍、上一拍本身迟到、距上一拍超过两个节拍都算卡过,这时只按概率早拒或到预算拒。
-2. **预算可覆盖**:三个变量:预算、早拒起点、可淘汰年龄(毫秒,短于 10 秒握手期限)。只设预算时起点取一半,起点不能大于预算,写错拒启。主仓变量名是 `GATE_PREAUTH_*`;Java 版用自己的配置方式给同样的缺省值和覆盖口子。
-3. **战斗直连也有同一套预算**:池是没完成票据握手、也没出示探测授权的直连。主仓 battle 每次 accept 扫一遍会话表挑最老的;Java 若有战斗直连面,按同一口径接上。
-4. **按来源前缀限速**:
-   - 缺省关闭,设了速率才开;开了也只在承压时生效:未验签池过了早拒起点,或全局速率闸最近 10 秒内拒过连接。
-   - 按 IPv4 /24、IPv6 /64 聚合,限速率不限总量,不封来源。推荐速率是全局缺省持续速率的 1/10,桶深是它的 10 秒量。
-   - 判定阶段只问桶,所有闸都放行之后才记账。
-   - 前缀表满(65536)时新前缀不登记、直接放行(fail-open),并计数、告警。
-   - 只在网关看得到玩家真实源地址的部署形态里开。
-5. **指标**(同名,两版共用告警):
-   - gate 新增 `gate_preauth_evictable_age_ms`、`gate_source_rate_limit_per_second`、`gate_source_burst`、`gate_source_rate_active`、`gate_source_tracked`、`gate_source_untracked_total`,以及 reason `source_rate`;
-   - 告警 `GateSourceRateLimited`、`GateSourceTableFull`。
-
-**验证**(Java 仓口径):移植主仓 `cpp/nodes/gate/tests/connection_admission_test.cpp` 里下面这些同名场景:
-- `SourceRateGate.*`;
-- `ConnectionAdmission.NoEvictionRightAfterTheLoopStalled`、`PerSourceLimitingAppliesOnlyUnderPressure`、`AGlobalRateRejectionEngagesPerSourceLimitingForOneHandshakeDeadline`;
-- 覆盖变量的两条 Policy 用例。
+2026-11-27 已对齐：
+- `LoopStallDetector`（1s 节拍：未打拍/上一拍迟到/距上一拍超过 2 拍均判卡顿，禁止淘汰并推迟表头超时收割）已接入 `game-gate` 与 `game-battle` 统一 `ConnectionAdmissionController`。
+- `ConnectionAdmissionPolicy.fromEnv` 支持 `GATE_PREAUTH_*` / `BATTLE_PREAUTH_*`（预算、早拒起点、可淘汰年龄且须短于握手期限）与 `*_SOURCE_RATE_PER_SECOND` / `*_SOURCE_BURST` 环境变量覆盖，写错启动拒启。
+- `SourcePrefixRateLimiter` 接入准入控制器承压期激活（未验签池 >= 早拒起点，或全局速率闸最近一个握手期限内拒过连接），按公网 IPv4 `/24`、IPv6 `/64` 仅在全部闸门通过后记账，满 65536 表 fail-open 并累计 `untracked`；`GateMetrics` 与 `BattleMetrics` 导出同名全部指标（含 `gate_preauth_evictable_age_ms`、`gate_source_*`、`battle_preauth_*`）。
+- **验证**：`ConnectionAdmissionControllerTest` + `NetProtectionTest` **7/7 PASS**，`BattleEdgeProtectionTest` + `BattleAdmissionPreAuthTest` **5/5 PASS**。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
@@ -3147,31 +3105,12 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 6. **删角真注销清理 6 张论剑排位表与去标识化**：在 Java 删角清理链路同步删除被删角色的 `match_ranked_player_prefs`/`player_season`/`reward`/`battle`/本人侧 `rivalry` 行，并利用宿敌对称性按精确主键清空对端镜像 `opponent_name` 及 `match_ranked_featured_build.featured_player_name`（零全表扫描）。
 7. **组队排位入队避免事务内嵌套建连与统一版本错误码**：核对 Java 组队排位入队链路确保在既有事务内读取当前赛季，版本号不符统一返回 `kMatchRankedRuleVersionMismatch`。
 
-### 2026-11-26 gate 准入 P2-4 票据先行:验签成功之前不发会话号、不建会话,battle 直连同一做法(主仓已落码未编译,Java 待做)
+### 2026-11-26 gate 准入 P2-4 票据先行:验签成功之前不发会话号、不建会话,battle 直连同一做法（Java 已对齐）
 
-主仓 commit:main 工作区未提交(一半随 `a0b3d195e` 进了 HEAD,其余在工作区);Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
-规格见主仓 `docs/design/gate-connection-admission-control.md` P2-4 与 §9.6 末尾三行,验证命令见主仓 `docs/PROGRESS.md` 2026-11-26「gate 准入 P2-4 票据先行」。
-
-不改客户端协议:建连、验签请求与应答、心跳通告、断开的线上字节都不变;客户端看到的唯一差别是验签之前发别的包照旧被关。
-
-**Java 待做**(按 Java 源码核过:`game-gate` 的 `ClientChannelHandler.channelActive` 在总量与来源判定之后立刻 `registry.open(channel, ip)`,发会话号、建 `ClientSession`,验签在那之后,与主仓改之前同一个形状):
-
-1. **验签之前只留一条未验签记录**:channel(或它的弱引用)、建连时刻、建连时分配的单调代次;不发会话号、不建 `ClientSession`。
-   验签请求在签名、载荷、gate 节点、区、期限全部通过之后才发会话号(保留哨兵与回绕碰撞检查照旧)、占票(一张票同一时刻只开一条连接,
-   被占就不建会话、回 `token already in use`)、建会话,会话沿用建连时的代次。dev 免验签仍然建连即建会话。
-2. **未验签断开只删记录**,不通知 login / scene,不进会话表的任何收尾。验签之前发 ClientRequest、心跳照旧直接关。
-3. **握手期限、未验签预算、承压淘汰、验签前单帧上限的判据都按这张表**:握手期限从表头扫(按建连先后有序,到期的一定是表头那一段),
-   淘汰取表头起第一条还连着的(已经在关的跳过:它们马上自己走,淘汰它们不多腾位置还截掉验签失败的应答),握手超时与淘汰都在关连接之前删记录(同一条连接不会被计两次);
-   握手期限扫到已经因为别的原因在关的连接只删记录,不计握手超时。
-4. **总量**:`会话数 + 未验签连接数` 对上限;`gate_connections_current` 导出这个和,`gate_unauthenticated_connections` 是表大小;
-   上报给 login 的人数只数会话(验签过的连接)。关源 / 停机时未验签连接一起关。
-5. **battle 直连**:握手成功、或出示了验过签的网络探测授权之前,只留未认证记录(连接、建连时刻、半关闭时刻),不建直连会话;
-   握手期限由节拍从池头扫,不按连接起定时器;探测连接建会话时另设「建连 + 10 秒」的探测期限;总量与停机排空按 会话 + 未认证;
-   已在探测的连接再发票据握手包按协议违例关。
-
-**验证**(Java 仓口径):移植主仓 `cpp/nodes/gate/tests/connection_admission_test.cpp` 的 `PreAuthConnectionLifecycle.*` 场景
-(验签前不建会话不发号、验签成功才发号且会话沿用代次、未验签断开不留会话、票据被占时不建会话、dev 免验签建连即建会话、发号跳过在用的号与保留哨兵)
-与 `client_heartbeat_test.cpp` 的握手期限四条(到点关且删记录、只关到期的表头、期限内验签才建会话、事件循环卡过只推迟)。
+2026-11-27 已对齐：
+- **`game-gate`**：`ClientChannelHandler` / `ClientDispatcher` / `SessionRegistry` 改为验签前仅留轻量 `PreAuthEntry<Channel>`（不发会话号、不建 `ClientSession`），验签全部通过后才经 `SessionRegistry.openVerified` 按票据签名占位（单票单连，被占回 `token already in use` 不建会话）并分配会话号、继承建连代次及透传 `SessionContext.ticket_account_digest = 11`（`game-api/src/main/proto/game/api/client_call.proto`）；dev 免验签仍建连即建会话；未验签断开仅删记录零 login/scene 通知；1s 节拍从表头清扫超时连接（跳过 closing、卡顿推迟），总量按 `sessions + preAuth`、上报人数只数已验签会话、关源同步清理未验签连接。
+- **`game-battle`**：`BattleEdgeHandler` / `BattleEdgeServer` 改为票据验签（含 `rooms.attachDirect`）或有效 `NetworkProbeStart` 授权验签通过前不建 `DirectSession`；探测连接建会话设「建连 + 10 秒」期限且再发票据包按协议违例关闭；生产 1s 节拍从未认证池表头清扫超时（零每连接握手定时器），总量与停机排空覆盖已认证会话 + 未认证池。
+- **验证**：`game-gate` `PreAuthAdmissionLifecycleTest` + `ClientDispatcherTest` + `ClientRedirectTest` + `ClientPipelineTest` + `ClientHeartbeatTest` + `GateMetricsTest` **162/162 PASS**，`game-battle` `BattleAdmissionPreAuthTest` + `BattleEdgeHandlerTest` + `BattleEdgeHeartbeatTest` + `BattleEdgeLoopbackTest` + `BattleEdgeProtectionTest` + `BattleMetricsTest` **69/69 PASS**。
 
 ### 2026-11-27 数据覆写审计 r2 第 4 轮批 V、W、X 与 §7.4 五条（已对齐）
 

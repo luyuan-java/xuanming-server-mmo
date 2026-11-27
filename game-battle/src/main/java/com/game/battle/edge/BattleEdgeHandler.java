@@ -8,6 +8,8 @@ import com.game.battle.metrics.BattleMetrics.RequestResult;
 import com.game.battle.protocol.BattleFrames;
 import com.game.battle.protocol.BattleMessageIds.Upstream;
 import com.game.battle.room.BattleRoomService;
+import com.game.common.net.ConnectionAdmissionController;
+import com.game.common.net.ConnectionAdmissionController.PreAuthEntry;
 import com.game.common.token.BattleTickets;
 import com.game.net.client.ClientFrameException;
 import com.game.proto.BattleStateS2C;
@@ -37,6 +39,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.concurrent.ScheduledFuture;
 import java.io.IOException;
 import java.util.Locale;
 import java.util.OptionalInt;
@@ -82,11 +85,17 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
     /** 信封错误：整条超过 1024 B（基线 {@code kMessageSizeExceeded}）。 */
     static final int TIP_MESSAGE_SIZE_EXCEEDED = CommonErrorTip.common_error.kMessageSizeExceeded_VALUE;
 
+    /** 探测连接总期限：建连时刻 + 10 秒（P2-4 规格）。 */
+    private static final long PROBE_DEADLINE_NANOS = TimeUnit.SECONDS.toNanos(10);
+
     private final BattleEdgeServer edge;
     private final BattleMetrics metrics;
     private final BattleRoomService rooms;
-    /** null = 还没建连，或被并发上限拒掉（从未分配会话）。 */
+    /** 票据先行（P2-4）：验签或探测授权通过之前为 null，仅持有轻量 preAuth 记录。 */
     private DirectSession session;
+    private PreAuthEntry<Channel> preAuth;
+    /** 仅在 EmbeddedChannel 单测未启动服务节拍清扫时兜底；生产由 BattleEdgeServer 1s 节拍扫池头。 */
+    private ScheduledFuture<?> fallbackHandshakeTimer;
     private BattleTicketPayload verifiedPayload;
     /** 本次read内，原连接已核槽的成功业务请求触发正常摘槽；只允许后续140回空态，绝不再访问房间。 */
     private boolean terminalStateReplyThisRead;
@@ -104,18 +113,22 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
 
     /**
      * 入站字节是否还该交给解码器、解码器是否还解下一帧（{@link EdgeInboundGuard}、game-net {@code ClientFrameDecoder} 的
-     * keepDecoding）：会话存在且不在关闭中。
+     * keepDecoding）：未认证且不在关闭中，或已建会话且不在关闭中。
      * 房间发起、还没生效的优雅关闭不算关闭中（同一次读里后面的帧照常分发，见 {@link DirectSession} 类注释）。
      */
     boolean acceptsInbound() {
         DirectSession s = session;
-        return s != null && s.acceptsFrames();
+        if (s != null) {
+            return s.acceptsFrames();
+        }
+        PreAuthEntry<Channel> entry = preAuth;
+        return entry != null && !entry.isClosing();
     }
 
     /** 直连是否已通过票据验签或网络探测授权（未认证前帧长收紧至 4 KiB，认证后恢复 64 KiB）。 */
     boolean isAuthenticated() {
         DirectSession s = session;
-        return (s != null && s.state() == DirectSession.State.VERIFIED) || probeGrant != null;
+        return s != null && (s.state() == DirectSession.State.VERIFIED || probeGrant != null);
     }
 
     /** 一次读到的字节已经解码、分发完（{@link EdgeInboundGuard}）：房间在这次读里发起的优雅关闭从这里生效，下一次读到的字节作废。 */
@@ -127,9 +140,14 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
         }
     }
 
-    /** 本连接的会话（测试用；被并发上限拒掉的连接为 null）。 */
+    /** 本连接的会话（测试用；未验签/未通过探测或被准入拒掉的连接为 null）。 */
     DirectSession session() {
         return session;
+    }
+
+    /** 当前未认证轻量记录（测试用；认证通过或关闭后归零）。 */
+    PreAuthEntry<Channel> preAuthEntry() {
+        return preAuth;
     }
 
     // ---------------------------------------------------------------- 连接生命周期
@@ -137,32 +155,54 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
         Channel ch = ctx.channel();
-        // 承压期按公网来源前缀限速（未承压或非公网直接放行）
-        if (!edge.tryAdmitSource(ch.remoteAddress())) {
-            edge.rejectLog().record(EdgeRejectReason.SOURCE_RATE_LIMITED, DirectSession.describe(ch.remoteAddress()));
-            metrics.disconnect(Disconnect.AT_CAPACITY);
-            ctx.close();
+        var outcome = edge.tryAdmitChannel(ch);
+        if (!outcome.admitted()) {
+            var reason = outcome.rejectReason();
+            metrics.admissionRejected(reason);
+            String peer = DirectSession.describe(ch.remoteAddress());
+            if (reason == ConnectionAdmissionController.RejectReason.SOURCE_RATE) {
+                edge.rejectLog().record(EdgeRejectReason.SOURCE_RATE_LIMITED, peer);
+                metrics.disconnect(Disconnect.AT_CAPACITY);
+            } else if (reason == ConnectionAdmissionController.RejectReason.CAPACITY) {
+                edge.rejectLog().record(EdgeRejectReason.AT_CAPACITY, peer);
+                metrics.disconnect(Disconnect.AT_CAPACITY);
+            }
+            BattleEdgeServer.rejectWithRst(ch);
             return;
         }
-        // 闸 G1：并发上限。必须是第一道：在分配会话之前拒掉，否则限流本身先付出它想省的内存（edge.cpp:157-166）
-        if (!edge.tryAdmit()) {
-            edge.rejectLog().record(EdgeRejectReason.AT_CAPACITY, DirectSession.describe(ch.remoteAddress()));
-            metrics.disconnect(Disconnect.AT_CAPACITY);
-            ctx.close();
-            return;
+        if (outcome.evicted() != null) {
+            Channel evictedCh = outcome.evicted().attachment();
+            if (evictedCh != null) {
+                evictedCh.eventLoop().execute(() -> {
+                    BattleEdgeHandler h = evictedCh.pipeline().get(BattleEdgeHandler.class);
+                    if (h != null) {
+                        h.onEvicted(evictedCh);
+                    } else {
+                        evictedCh.close();
+                    }
+                });
+            }
         }
-        DirectSession s = new DirectSession(ch, metrics);
-        session = s;
-        edge.register(s);
-        // 闸 G3：握手期限。到点时会话仍是 PENDING 才关；已验证 / 已关闭的什么也不做（edge.cpp:187-200）
-        long timeoutNanos = edge.dependencies().properties().handshakeTimeout().toNanos();
-        s.armHandshakeTimer(ch.eventLoop().schedule(() -> onHandshakeTimeout(s), timeoutNanos, TimeUnit.NANOSECONDS));
-        edge.sampleAccepted(s);
+        PreAuthEntry<Channel> entry = outcome.entry();
+        this.preAuth = entry;
+        if (!edge.isServerSweepActive()) {
+            long timeoutNanos = edge.dependencies().properties().handshakeTimeout().toNanos();
+            fallbackHandshakeTimer = ch.eventLoop().schedule(
+                    () -> onFallbackHandshakeTimeout(ch, entry), timeoutNanos, TimeUnit.NANOSECONDS);
+        }
+        edge.sampleAccepted(DirectSession.describe(ch.remoteAddress()));
         ctx.fireChannelActive();
     }
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
+        cancelFallbackHandshakeTimer();
+        PreAuthEntry<Channel> entry = preAuth;
+        if (entry != null) {
+            entry.markClosing();
+            edge.releasePreAuth(entry);
+            preAuth = null;
+        }
         DirectSession s = session;
         if (s != null) {
             try {
@@ -195,7 +235,7 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
             if (s != null) {
                 s.forceClose(Disconnect.WRITE_BUFFER_FULL);
             } else {
-                ctx.close();
+                closePreAuthImmediate(ch, Disconnect.WRITE_BUFFER_FULL);
             }
         }
         ctx.fireChannelWritabilityChanged();
@@ -215,7 +255,7 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
         if (s != null) {
             s.forceClose(null);
         } else {
-            ctx.close();
+            closePreAuthImmediate(ctx.channel(), null);
         }
     }
 
@@ -229,17 +269,80 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
         if (s != null) {
             s.beginClosing(Disconnect.INVALID_FRAME);
         } else {
-            metrics.disconnect(Disconnect.INVALID_FRAME);
+            cancelFallbackHandshakeTimer();
+            PreAuthEntry<Channel> entry = preAuth;
+            if (entry != null && !entry.isClosing()) {
+                entry.markClosing();
+                metrics.disconnect(Disconnect.INVALID_FRAME);
+            } else if (entry == null) {
+                metrics.disconnect(Disconnect.INVALID_FRAME);
+            }
         }
     }
 
-    private void onHandshakeTimeout(DirectSession s) {
-        Channel ch = s.channelOrNull();
-        if (s.state() != DirectSession.State.PENDING || ch == null || !ch.isActive()) {
+    /** 生产 1s 节拍从未认证池表头清扫到期连接（记录已由 sweepExpired 先删并置 closing，不重复计次）。 */
+    void onSweptHandshakeTimeout(Channel ch, PreAuthEntry<Channel> entry) {
+        cancelFallbackHandshakeTimer();
+        if (session != null || preAuth != entry) {
             return;
         }
-        edge.rejectLog().record(EdgeRejectReason.HANDSHAKE_TIMEOUT, s.peer());
-        s.forceClose(Disconnect.HANDSHAKE_TIMEOUT);
+        preAuth = null;
+        edge.rejectLog().record(EdgeRejectReason.HANDSHAKE_TIMEOUT, DirectSession.describe(ch.remoteAddress()));
+        metrics.disconnect(Disconnect.HANDSHAKE_TIMEOUT);
+        ch.close();
+    }
+
+    /** 承压期按建连先后淘汰：正常关闭连接（非 RST），记录已由准入控制器先行摘除。 */
+    void onEvicted(Channel ch) {
+        cancelFallbackHandshakeTimer();
+        PreAuthEntry<Channel> entry = preAuth;
+        if (entry != null) {
+            entry.markClosing();
+        }
+        ch.close();
+    }
+
+    /** 停机排空强关未认证连接。 */
+    void onShutdownClosePreAuth(Channel ch) {
+        cancelFallbackHandshakeTimer();
+        PreAuthEntry<Channel> entry = preAuth;
+        if (entry != null) {
+            entry.markClosing();
+        }
+        metrics.disconnect(Disconnect.SHUTDOWN);
+        ch.close();
+    }
+
+    private void onFallbackHandshakeTimeout(Channel ch, PreAuthEntry<Channel> entry) {
+        if (session != null || preAuth != entry || entry.isClosing() || !ch.isActive()) {
+            return;
+        }
+        entry.markClosing();
+        edge.releasePreAuth(entry);
+        edge.rejectLog().record(EdgeRejectReason.HANDSHAKE_TIMEOUT, DirectSession.describe(ch.remoteAddress()));
+        metrics.disconnect(Disconnect.HANDSHAKE_TIMEOUT);
+        ch.close();
+    }
+
+    private void closePreAuthImmediate(Channel ch, Disconnect reason) {
+        cancelFallbackHandshakeTimer();
+        PreAuthEntry<Channel> entry = preAuth;
+        if (entry != null && !entry.isClosing()) {
+            entry.markClosing();
+            edge.releasePreAuth(entry);
+            if (reason != null) {
+                metrics.disconnect(reason);
+            }
+        }
+        ch.close();
+    }
+
+    private void cancelFallbackHandshakeTimer() {
+        ScheduledFuture<?> t = fallbackHandshakeTimer;
+        fallbackHandshakeTimer = null;
+        if (t != null) {
+            t.cancel(false);
+        }
     }
 
     // ---------------------------------------------------------------- 上行分发
@@ -248,17 +351,45 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         try {
             DirectSession s = session;
+            if (s == null) {
+                PreAuthEntry<Channel> entry = preAuth;
+                if (entry == null || entry.isClosing() || !ctx.channel().isActive()) {
+                    return;
+                }
+                if (msg instanceof com.game.proto.match.NetworkProbeStart start) {
+                    onPreAuthProbeStart(ctx.channel(), entry, start);
+                } else if (msg instanceof BattleTokenVerifyRequest verify) {
+                    onPreAuthVerify(ctx.channel(), entry, verify);
+                } else if (msg instanceof ClientHeartbeatRequest) {
+                    metrics.heartbeat(BattleMetrics.HeartbeatResult.BEFORE_VERIFY);
+                    edge.rejectLog().record(EdgeRejectReason.HEARTBEAT_BEFORE_VERIFY,
+                            DirectSession.describe(ctx.channel().remoteAddress()));
+                    closePreAuthImmediate(ctx.channel(), Disconnect.REQUEST_BEFORE_VERIFY);
+                } else if (msg instanceof ClientRequest) {
+                    edge.rejectLog().record(EdgeRejectReason.REQUEST_BEFORE_VERIFY,
+                            DirectSession.describe(ctx.channel().remoteAddress()));
+                    closePreAuthImmediate(ctx.channel(), Disconnect.REQUEST_BEFORE_VERIFY);
+                } else if (msg instanceof com.game.proto.match.NetworkProbeEcho) {
+                    closePreAuthImmediate(ctx.channel(), null);
+                }
+                return;
+            }
             // 关闭中 / 已断：不再分发任何帧（基线 codec.cpp:158-162、:180-185：同步 shutdown / forceClose 之后同一批 pipeline 的帧全部作废）。
             // 房间发起的优雅关闭还没生效时照常分发（基线只 queueInLoop，本次读里仍是 connected，见 DirectSession 类注释）
-            if (s == null || !s.acceptsFrames() || !ctx.channel().isActive()) {
+            if (!s.acceptsFrames() || !ctx.channel().isActive()) {
                 return;
             }
             noteInboundFrame(s);
-            if(msg instanceof com.game.proto.match.NetworkProbeStart start){onProbeStart(s,start);}
-            else if(msg instanceof com.game.proto.match.NetworkProbeEcho echo){onProbeEcho(s,echo);}
-            else if (msg instanceof BattleTokenVerifyRequest verify) {
-                if(probeGrant!=null){s.forceClose(null);return;}
-                onVerify(s, verify);
+            if (msg instanceof com.game.proto.match.NetworkProbeStart) {
+                s.forceClose(null);
+            } else if (msg instanceof com.game.proto.match.NetworkProbeEcho echo) {
+                onProbeEcho(s, echo);
+            } else if (msg instanceof BattleTokenVerifyRequest verify) {
+                if (probeGrant != null) {
+                    s.forceClose(null);
+                    return;
+                }
+                onVerifyVerified(s, verify);
             } else if (msg instanceof ClientHeartbeatRequest heartbeat) {
                 onHeartbeat(s, heartbeat);
             } else if (msg instanceof ClientRequest request) {
@@ -269,61 +400,100 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
         }
     }
 
-    // ---------------------------------------------------------------- 握手（§3.4）
+    // ---------------------------------------------------------------- 握手（§3.4，P2-4 票据先行）
 
-    private void onProbeStart(DirectSession s,com.game.proto.match.NetworkProbeStart start){
-        var deps=edge.dependencies();var config=deps.global();
-        if(s.state()!=DirectSession.State.PENDING||probeGrant!=null||!config.enabled()
-                ||!com.game.common.token.NetworkProbes.verify(config.probeSecret(),com.game.common.token.NetworkProbes.GRANT,start.getGrant())){
-            s.forceClose(null);return;
-        }
-        try{
-            var g=com.game.proto.match.NetworkProbeGrant.parseFrom(start.getGrant().getPayload());
-            if(g.getPlayerId()==0||g.getPlanId().isEmpty()||g.getSessionBinding().isEmpty()||g.getPhysicalRegion()!=config.physicalRegion()
-                    ||g.getTargetNodeId()!=deps.identity().nodeId()||!g.getTargetInstanceId().equals(deps.identity().instanceId())
-                    ||g.getExpiresAtMs()<=deps.clock().epochMillis()){s.forceClose(null);return;}
-            probeGrant=g;edge.markAuthenticated(s);sendProbeChallenge(s);
-        }catch(com.google.protobuf.InvalidProtocolBufferException e){s.forceClose(null);}
-    }
-    private void sendProbeChallenge(DirectSession s){
-        byte[] nonce=new byte[32];PROBE_RANDOM.nextBytes(nonce);probeNonce=com.google.protobuf.ByteString.copyFrom(nonce);
-        probeSent=edge.nanoTime();
-        s.writeDirect(com.game.proto.match.NetworkProbeChallenge.newBuilder().setNonce(probeNonce).setSampleIndex(probeSamples).build());
-    }
-    private void onProbeEcho(DirectSession s,com.game.proto.match.NetworkProbeEcho echo){
-        if(probeGrant==null||s.state()!=DirectSession.State.PENDING||echo.getSampleIndex()!=probeSamples||!echo.getNonce().equals(probeNonce)){
-            s.forceClose(null);return;
-        }
-        long elapsed=edge.nanoTime()-probeSent;
-        if(elapsed<0||elapsed>java.util.concurrent.TimeUnit.SECONDS.toNanos(3)){s.forceClose(null);return;}
-        probeMaxRtt=Math.max(probeMaxRtt,(int)Math.max(1,(elapsed+999_999)/1_000_000));probeSamples++;
-        if(probeSamples<3){sendProbeChallenge(s);return;}
-        var deps=edge.dependencies();long now=deps.clock().epochMillis();
-        if(now>=probeGrant.getExpiresAtMs()){s.forceClose(null);return;}
-        var receipt=com.game.proto.match.NetworkProbeReceipt.newBuilder().setGrant(probeGrant).setRttMs(probeMaxRtt).setSampleCount(3)
-                .setMeasuredAtMs(now).setExpiresAtMs(probeGrant.getExpiresAtMs()).build();
-        s.writeDirect(com.game.proto.match.NetworkProbeComplete.newBuilder().setReceipt(com.game.common.token.NetworkProbes.sign(
-                deps.global().probeSecret(),com.game.common.token.NetworkProbes.RECEIPT,receipt)).build());
-        s.gracefulClose(null,HANDSHAKE_REJECT_FORCE_CLOSE_MS);
-    }
-
-    private void onVerify(DirectSession s, BattleTokenVerifyRequest request) {
-        if (s.state() == DirectSession.State.VERIFIED) {
-            if (!rooms.currentDirect(verifiedPayload, s)) {
-                s.forceClose(Disconnect.REPLACED);
-                return;
-            }
-            // 已验证直连再次发验签：不回包、计非法包、达阈值断开（主仓 G10 / §5 第 5 条），不重新绑定。
-            metrics.handshake(HandshakeResult.REPEAT);
-            edge.rejectLog().record(EdgeRejectReason.REPEAT_VERIFY, s.peer());
-            registerIllegal(s, EdgeRejectReason.REPEAT_VERIFY);
+    private void onPreAuthProbeStart(Channel ch, PreAuthEntry<Channel> entry,
+                                     com.game.proto.match.NetworkProbeStart start) {
+        var deps = edge.dependencies();
+        var config = deps.global();
+        if (!config.enabled()
+                || !com.game.common.token.NetworkProbes.verify(
+                        config.probeSecret(), com.game.common.token.NetworkProbes.GRANT, start.getGrant())) {
+            closePreAuthImmediate(ch, null);
             return;
         }
+        try {
+            var g = com.game.proto.match.NetworkProbeGrant.parseFrom(start.getGrant().getPayload());
+            if (g.getPlayerId() == 0 || g.getPlanId().isEmpty() || g.getSessionBinding().isEmpty()
+                    || g.getPhysicalRegion() != config.physicalRegion()
+                    || g.getTargetNodeId() != deps.identity().nodeId()
+                    || !g.getTargetInstanceId().equals(deps.identity().instanceId())
+                    || g.getExpiresAtMs() <= deps.clock().epochMillis()) {
+                closePreAuthImmediate(ch, null);
+                return;
+            }
+            cancelFallbackHandshakeTimer();
+            DirectSession s = new DirectSession(ch, metrics);
+            this.session = s;
+            this.probeGrant = g;
+            edge.registerAuthenticated(s, entry);
+            this.preAuth = null;
+            // 探测连接建会话后另设「建连 + 10 秒」探测期限（P2-4）
+            long remainingNanos = Math.max(1L, (entry.acceptedNanos() + PROBE_DEADLINE_NANOS) - edge.nanoTime());
+            s.armHandshakeTimer(ch.eventLoop().schedule(
+                    () -> s.forceClose(Disconnect.HANDSHAKE_TIMEOUT), remainingNanos, TimeUnit.NANOSECONDS));
+            sendProbeChallenge(s);
+        } catch (InvalidProtocolBufferException e) {
+            closePreAuthImmediate(ch, null);
+        }
+    }
+
+    private void sendProbeChallenge(DirectSession s) {
+        byte[] nonce = new byte[32];
+        PROBE_RANDOM.nextBytes(nonce);
+        probeNonce = ByteString.copyFrom(nonce);
+        probeSent = edge.nanoTime();
+        s.writeDirect(com.game.proto.match.NetworkProbeChallenge.newBuilder()
+                .setNonce(probeNonce).setSampleIndex(probeSamples).build());
+    }
+
+    private void onProbeEcho(DirectSession s, com.game.proto.match.NetworkProbeEcho echo) {
+        if (probeGrant == null || s.state() != DirectSession.State.PENDING
+                || echo.getSampleIndex() != probeSamples || !echo.getNonce().equals(probeNonce)) {
+            s.forceClose(null);
+            return;
+        }
+        long elapsed = edge.nanoTime() - probeSent;
+        if (elapsed < 0 || elapsed > TimeUnit.SECONDS.toNanos(3)) {
+            s.forceClose(null);
+            return;
+        }
+        probeMaxRtt = Math.max(probeMaxRtt, (int) Math.max(1, (elapsed + 999_999) / 1_000_000));
+        probeSamples++;
+        if (probeSamples < 3) {
+            sendProbeChallenge(s);
+            return;
+        }
+        var deps = edge.dependencies();
+        long now = deps.clock().epochMillis();
+        if (now >= probeGrant.getExpiresAtMs()) {
+            s.forceClose(null);
+            return;
+        }
+        var receipt = com.game.proto.match.NetworkProbeReceipt.newBuilder().setGrant(probeGrant).setRttMs(probeMaxRtt)
+                .setSampleCount(3).setMeasuredAtMs(now).setExpiresAtMs(probeGrant.getExpiresAtMs()).build();
+        s.writeDirect(com.game.proto.match.NetworkProbeComplete.newBuilder().setReceipt(com.game.common.token.NetworkProbes.sign(
+                deps.global().probeSecret(), com.game.common.token.NetworkProbes.RECEIPT, receipt)).build());
+        s.gracefulClose(null, HANDSHAKE_REJECT_FORCE_CLOSE_MS);
+    }
+
+    private void onVerifyVerified(DirectSession s, BattleTokenVerifyRequest request) {
+        if (!rooms.currentDirect(verifiedPayload, s)) {
+            s.forceClose(Disconnect.REPLACED);
+            return;
+        }
+        // 已验证直连再次发验签：不回包、计非法包、达阈值断开（主仓 G10 / §5 第 5 条），不重新绑定。
+        metrics.handshake(HandshakeResult.REPEAT);
+        edge.rejectLog().record(EdgeRejectReason.REPEAT_VERIFY, s.peer());
+        registerIllegal(s, EdgeRejectReason.REPEAT_VERIFY);
+    }
+
+    private void onPreAuthVerify(Channel ch, PreAuthEntry<Channel> entry, BattleTokenVerifyRequest request) {
         EdgeDependencies deps = edge.dependencies();
-        // 第 2 步：用收到的原始 payload 字节验签（不能「解析后重新序列化」），通过之后才解析
+        // 第 2 步：用收到的原始 payload 字节验签，通过之后才解析
         ByteString payloadBytes = request.getPayload();
         if (!deps.tickets().signatureMatches(payloadBytes, request.getSignature())) {
-            rejectHandshake(s, EdgeRejectReason.TICKET_HMAC_MISMATCH, HandshakeResult.TICKET_HMAC_MISMATCH,
+            rejectPreAuthHandshake(ch, entry, EdgeRejectReason.TICKET_HMAC_MISMATCH, HandshakeResult.TICKET_HMAC_MISMATCH,
                     BattleFrames.REJECT_INVALID_SIGNATURE);
             return;
         }
@@ -332,7 +502,7 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
         try {
             payload = BattleTicketPayload.parseFrom(payloadBytes);
         } catch (InvalidProtocolBufferException e) {
-            rejectHandshake(s, EdgeRejectReason.TICKET_PAYLOAD_PARSE_FAILED, HandshakeResult.TICKET_PAYLOAD_PARSE_FAILED,
+            rejectPreAuthHandshake(ch, entry, EdgeRejectReason.TICKET_PAYLOAD_PARSE_FAILED, HandshakeResult.TICKET_PAYLOAD_PARSE_FAILED,
                     BattleFrames.REJECT_MALFORMED_PAYLOAD);
             return;
         }
@@ -340,29 +510,49 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
         BattleIdentity identity = deps.identity();
         BattleTickets.Verdict verdict = BattleTickets.classify(payload, identity.nodeId(), identity.instanceId(), deps.clock().epochMillis());
         if (verdict != BattleTickets.Verdict.OK) {
-            rejectHandshake(s, EdgeRejectReason.of(verdict), HandshakeResult.of(verdict), verdict.clientError());
+            rejectPreAuthHandshake(ch, entry, EdgeRejectReason.of(verdict), HandshakeResult.of(verdict), verdict.clientError());
             return;
         }
         // 第 5 步：房间存在、且该玩家按票上的角色在对应名单上；重连时房间顶替旧连接（R7）。挂接期间会话仍是 PENDING，房间写不出帧（R1）
         long battleId = payload.getBattleId();
         long playerId = payload.getPlayerId();
-        OptionalInt gateSession = rooms.attachDirect(payload, s);
+        DirectSession candidate = new DirectSession(ch, metrics);
+        OptionalInt gateSession = rooms.attachDirect(payload, candidate);
         if (gateSession.isEmpty()) {
-            rejectHandshake(s, EdgeRejectReason.TICKET_NOT_IN_ROSTER, HandshakeResult.TICKET_NOT_IN_ROSTER,
+            rejectPreAuthHandshake(ch, entry, EdgeRejectReason.TICKET_NOT_IN_ROSTER, HandshakeResult.TICKET_NOT_IN_ROSTER,
                     BattleFrames.REJECT_NOT_IN_ROSTER);
             return;
         }
-        s.markVerified(battleId, playerId, payload.getRole(), Integer.toUnsignedLong(gateSession.getAsInt()));
-        edge.markAuthenticated(s);
-        verifiedPayload=payload;
+        cancelFallbackHandshakeTimer();
+        candidate.markVerified(battleId, playerId, payload.getRole(), Integer.toUnsignedLong(gateSession.getAsInt()));
+        this.session = candidate;
+        edge.registerAuthenticated(candidate, entry);
+        this.preAuth = null;
+        verifiedPayload = payload;
+        metrics.recordHandshakeDurationMs(Math.max(0L, edge.nanoTime() - entry.acceptedNanos()) / 1_000_000.0);
         metrics.handshake(HandshakeResult.OK);
-        s.writeDirect(BattleFrames.verifyAccepted(battleId));
-        startLivenessTracking(s);
+        candidate.writeDirect(BattleFrames.verifyAccepted(battleId));
+        startLivenessTracking(candidate);
         log.info("battle 直连握手成功 battle_id={} player_id={} role={} gate_session={} peer={}",
                 Long.toUnsignedString(battleId), Long.toUnsignedString(playerId), payload.getRole(),
-                Integer.toUnsignedString(gateSession.getAsInt()), s.peer());
+                Integer.toUnsignedString(gateSession.getAsInt()), candidate.peer());
         // 必须在握手应答之后：客户端握手读到的第一个包必须是应答；只对观众推 161 首帧（edge.cpp:358-361）
         rooms.onDirectVerified(battleId, playerId, payload.getRole());
+    }
+
+    /** 未认证连接握手被拒（R4）：不建会话、标记 closing（阻止同批后续帧解析并防淘汰截断应答），回拒绝包后 FIN + 0.1s 强关兜底。 */
+    private void rejectPreAuthHandshake(Channel ch, PreAuthEntry<Channel> entry, EdgeRejectReason reason,
+                                        HandshakeResult result, String clientError) {
+        cancelFallbackHandshakeTimer();
+        entry.markClosing();
+        edge.rejectLog().record(reason, DirectSession.describe(ch.remoteAddress()));
+        metrics.handshake(result);
+        metrics.disconnect(Disconnect.HANDSHAKE_REJECTED);
+        if (ch.isActive()) {
+            ch.writeAndFlush(BattleFrames.verifyRejected(clientError));
+        }
+        DirectClose.afterCurrentTask(ch, HANDSHAKE_REJECT_FORCE_CLOSE_MS, () -> {
+        });
     }
 
     private void startLivenessTracking(DirectSession s) {
@@ -433,14 +623,6 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
         s.heartbeatAnswersInWindow++;
         metrics.heartbeat(BattleMetrics.HeartbeatResult.ANSWERED);
         s.writeDirect(ClientHeartbeatResponse.newBuilder().setSeq(heartbeat.getSeq()).build());
-    }
-
-    /** 握手被拒（R4）：回 {@code {success = false, error}}（battle_id 不填）→ 输出排空后 FIN → 0.1 s 强关兜底。 */
-    private void rejectHandshake(DirectSession s, EdgeRejectReason reason, HandshakeResult result, String clientError) {
-        edge.rejectLog().record(reason, s.peer());
-        metrics.handshake(result);
-        s.writeDirect(BattleFrames.verifyRejected(clientError));
-        s.gracefulClose(Disconnect.HANDSHAKE_REJECTED, HANDSHAKE_REJECT_FORCE_CLOSE_MS);
     }
 
     // ---------------------------------------------------------------- 业务请求（§3.5）

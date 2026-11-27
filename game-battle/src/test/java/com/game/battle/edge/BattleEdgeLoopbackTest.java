@@ -160,10 +160,11 @@ class BattleEdgeLoopbackTest {
         try (TestClient first = connect()) {
             await(() -> edge.connectionCount() == 1);
             try (TestClient second = connect()) {
-                assertThat(second.readEof()).isTrue();
+                assertThat(second.readClosedOrReset()).as("准入满员以 SO_LINGER=0 发 RST 或立即断连").isTrue();
             }
             assertThat(edge.connectionCount()).isEqualTo(1);
             await(() -> count("game.battle.disconnects", "reason", "at_capacity") == 1);
+            assertThat(count("battle.rejected", "reason", "capacity")).isEqualTo(1.0);
         }
     }
 
@@ -343,6 +344,15 @@ class BattleEdgeLoopbackTest {
         /** 下一次读到的是 EOF（对端 FIN）。 */
         boolean readEof() throws IOException {
             return in.read() == -1;
+        }
+
+        /** 准入拒绝走 SO_LINGER=0 RST（读抛 SocketException）或立即 EOF。 */
+        boolean readClosedOrReset() {
+            try {
+                return in.read() == -1;
+            } catch (IOException reset) {
+                return true;
+            }
         }
 
         @Override

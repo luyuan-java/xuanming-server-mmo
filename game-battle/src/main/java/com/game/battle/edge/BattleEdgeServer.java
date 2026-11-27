@@ -2,6 +2,11 @@ package com.game.battle.edge;
 
 import com.game.battle.BattleProperties;
 import com.game.battle.metrics.BattleMetrics.Disconnect;
+import com.game.common.net.ConnectionAdmissionController;
+import com.game.common.net.ConnectionAdmissionController.AdmitOutcome;
+import com.game.common.net.ConnectionAdmissionController.PreAuthEntry;
+import com.game.common.net.ConnectionAdmissionPolicy;
+import com.game.common.net.LoopStallDetector;
 import com.game.common.net.SourcePrefixRateLimiter;
 import com.game.net.client.ClientFrameDecoder;
 import com.game.net.client.ClientFrameEncoder;
@@ -17,11 +22,10 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
-import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
-import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.EventExecutor;
+import io.netty.util.concurrent.ScheduledFuture;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.time.Duration;
@@ -32,9 +36,10 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -71,19 +76,15 @@ public final class BattleEdgeServer implements DirectEdge {
     /** 停机时等强关完成、等 accept 线程退出的上限（只为不无限阻塞）。 */
     private static final Duration CLOSE_WAIT = Duration.ofSeconds(2);
 
-    /** 承压窗口：最近发生过并发满或来源限速拒收后，在此时长内保持来源前缀限速激活。 */
-    private static final long PRESSURE_COOLDOWN_NANOS = TimeUnit.SECONDS.toNanos(10);
-
     private final EdgeDependencies deps;
     private final LongSupplier nanoClock;
-    private final AtomicInteger connections = new AtomicInteger();
-    private final AtomicInteger unauthenticatedConnections = new AtomicInteger();
+    private final LoopStallDetector stallDetector;
     private final Set<DirectSession> sessions = ConcurrentHashMap.newKeySet();
     private final EdgeRejectLog rejectLog = new EdgeRejectLog();
     private final AtomicLong acceptedTotal = new AtomicLong();
-    private volatile SourcePrefixRateLimiter sourceRateLimiter = new SourcePrefixRateLimiter(0, 0);
-    private volatile int preAuthBudget;
-    private final AtomicLong lastPressureRejectNanos = new AtomicLong(Long.MIN_VALUE);
+    private volatile ConnectionAdmissionController<Channel> admission;
+    private volatile ScheduledFuture<?> preAuthSweepTask;
+    private volatile boolean serverSweepActive;
 
     private final Object lifecycle = new Object();
     private EventLoopGroup bossGroup;
@@ -92,29 +93,59 @@ public final class BattleEdgeServer implements DirectEdge {
     private boolean drained;
 
     public BattleEdgeServer(EdgeDependencies deps) {
-        this(deps, System::nanoTime);
+        this(deps, System::nanoTime,
+                ConnectionAdmissionPolicy.fromEnv("BATTLE_",
+                        Objects.requireNonNull(deps, "deps").properties().effectiveMaxConnections(),
+                        deps.properties().handshakeTimeout().toMillis()),
+                () -> ThreadLocalRandom.current().nextDouble(),
+                new LoopStallDetector());
     }
 
     /** @param nanoClock 单调时钟（限频窗口；测试注入） */
     BattleEdgeServer(EdgeDependencies deps, LongSupplier nanoClock) {
+        this(deps, nanoClock,
+                ConnectionAdmissionPolicy.defaults(
+                        Objects.requireNonNull(deps, "deps").properties().effectiveMaxConnections(),
+                        deps.properties().handshakeTimeout().toMillis()),
+                () -> ThreadLocalRandom.current().nextDouble(),
+                new LoopStallDetector());
+    }
+
+    /** 测试定制准入策略、早拒随机源与卡顿检测器。 */
+    BattleEdgeServer(EdgeDependencies deps, LongSupplier nanoClock, ConnectionAdmissionPolicy policy,
+                     DoubleSupplier random, LoopStallDetector stallDetector) {
         this.deps = Objects.requireNonNull(deps, "deps");
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
-        this.preAuthBudget = Math.max(1, Math.min(256, deps.properties().effectiveMaxConnections() / 4));
+        this.stallDetector = Objects.requireNonNull(stallDetector, "stallDetector");
+        this.admission = new ConnectionAdmissionController<>(policy, sessions::size, nanoClock, random, stallDetector);
+        this.deps.metrics().bindAdmission(this.admission);
     }
 
     /** 装配仅公网来源前缀限速（承压时激活；默认关闭，开启后仅对公网 IPv4 /24、IPv6 /64 生效）。 */
     public BattleEdgeServer withSourcePrefixRateLimiter(SourcePrefixRateLimiter limiter, int preAuthBudget) {
-        this.sourceRateLimiter = Objects.requireNonNull(limiter, "limiter");
+        Objects.requireNonNull(limiter, "limiter");
         if (preAuthBudget <= 0) {
             throw new IllegalArgumentException("preAuthBudget 必须为正: " + preAuthBudget);
         }
-        this.preAuthBudget = preAuthBudget;
+        int maxConn = deps.properties().effectiveMaxConnections();
+        long hsMs = deps.properties().handshakeTimeout().toMillis();
+        long evictAge = Math.min(3_000L, Math.max(1L, hsMs - 1L));
+        int budget = Math.max(preAuthBudget, maxConn);
+        ConnectionAdmissionPolicy p = ConnectionAdmissionPolicy.of(
+                maxConn, hsMs, Math.max(100, maxConn / 100), maxConn, budget, preAuthBudget, evictAge, null, null);
+        this.admission = new ConnectionAdmissionController<>(p, sessions::size, nanoClock, () -> 1.0, stallDetector, limiter);
+        this.deps.metrics().bindAdmission(this.admission);
         return this;
     }
 
     /** O(1) 未认证直连数：既未完成票据握手、也未通过探测授权验签的连接数。 */
     public int unauthenticatedConnectionCount() {
-        return unauthenticatedConnections.get();
+        return admission.preAuthCount();
+    }
+
+    /** 当前准入总控（单测核对指标与策略用）。 */
+    ConnectionAdmissionController<Channel> admission() {
+        return admission;
     }
 
     /** 构造时给的依赖（装配与测试核对用）。 */
@@ -154,6 +185,13 @@ public final class BattleEdgeServer implements DirectEdge {
             }
             bossGroup = boss;
             serverChannel = bind.channel();
+            // 1 秒节拍：更新事件循环卡顿判据并从未认证池表头清扫超时连接（P2-4：生产不按连接起握手定时器）
+            stallDetector.recordBeat(nanoClock.getAsLong());
+            serverSweepActive = true;
+            preAuthSweepTask = deps.logicGroup().next().scheduleAtFixedRate(() -> {
+                stallDetector.recordBeat(nanoClock.getAsLong());
+                sweepPreAuthExpired();
+            }, 1, 1, TimeUnit.SECONDS);
             log.info("battle 直连面已监听 {} max_connections={} handshake_timeout={} illegal_packet_threshold={}",
                     bind.channel().localAddress(), p.effectiveMaxConnections(), p.handshakeTimeout(), p.illegalPacketThreshold());
         }
@@ -161,6 +199,7 @@ public final class BattleEdgeServer implements DirectEdge {
 
     @Override
     public void stopAccepting() {
+        admission.setShuttingDown(true);
         Channel server = serverChannel;
         if (server == null) {
             return;
@@ -170,7 +209,7 @@ public final class BattleEdgeServer implements DirectEdge {
         if (!inLogicThread()) {
             closed.awaitUninterruptibly(CLOSE_WAIT.toMillis());
         }
-        log.info("battle 直连面停止接受新连接 {} 现有连接={}", server.localAddress(), connections.get());
+        log.info("battle 直连面停止接受新连接 {} 现有连接={}", server.localAddress(), connectionCount());
     }
 
     @Override
@@ -180,12 +219,19 @@ public final class BattleEdgeServer implements DirectEdge {
             throw new IllegalStateException("drainAndClose 会阻塞等待逻辑线程写完输出，不得在逻辑线程上调用");
         }
         EventLoopGroup boss;
+        ScheduledFuture<?> sweep;
         synchronized (lifecycle) {
             if (drained) {
                 return;
             }
             drained = true;
             boss = bossGroup;
+            sweep = preAuthSweepTask;
+            preAuthSweepTask = null;
+            serverSweepActive = false;
+        }
+        if (sweep != null) {
+            sweep.cancel(false);
         }
         stopAccepting();
         // ① 有界等待正在优雅关闭的连接排空（终局包、观众的 166 与 FIN 写完；修基线 F1 / §11 N16）
@@ -202,7 +248,7 @@ public final class BattleEdgeServer implements DirectEdge {
                 ch.closeFuture().awaitUninterruptibly(TimeUnit.NANOSECONDS.toMillis(remaining) + 1);
             }
         }
-        // ② 强关剩余的全部连接（未验证、空闲、排空超时的），在各自的 EventLoop（逻辑线程）上改状态
+        // ② 强关剩余的全部连接（已认证 + 未认证池），在各自的 EventLoop（逻辑线程）上改状态
         List<Channel> closing = new ArrayList<>();
         for (DirectSession s : List.copyOf(sessions)) {
             Channel ch = s.channelOrNull();
@@ -216,6 +262,27 @@ public final class BattleEdgeServer implements DirectEdge {
                 ch.close();
             }
         }
+        admission.closeAllPreAuth(entry -> {
+            Channel ch = entry.attachment();
+            if (ch == null) {
+                return;
+            }
+            closing.add(ch);
+            try {
+                ch.eventLoop().execute(() -> {
+                    BattleEdgeHandler handler = ch.pipeline().get(BattleEdgeHandler.class);
+                    if (handler != null) {
+                        handler.onShutdownClosePreAuth(ch);
+                    } else {
+                        deps.metrics().disconnect(Disconnect.SHUTDOWN);
+                        ch.close();
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                deps.metrics().disconnect(Disconnect.SHUTDOWN);
+                ch.close();
+            }
+        });
         long closeDeadline = System.nanoTime() + CLOSE_WAIT.toNanos();
         for (Channel ch : closing) {
             long remaining = closeDeadline - System.nanoTime();
@@ -224,10 +291,7 @@ public final class BattleEdgeServer implements DirectEdge {
             }
             ch.closeFuture().awaitUninterruptibly(TimeUnit.NANOSECONDS.toMillis(remaining) + 1);
         }
-        // closeFuture 在 channelInactive 之前就完成（Netty 先置关闭、再排队触发 inactive），名额是在 inactive 里由 unregister 归还的：
-        // 同一个截止时刻内再等会话真正摘掉，返回之后 connectionCount 才可信（慢机器上曾返回时还剩 2 条，GitHub Actions 偶发）。
-        // 本方法不在逻辑线程上（开头已拒），短睡不会挡住要执行的 inactive
-        while (!sessions.isEmpty() && closeDeadline - System.nanoTime() > 0) {
+        while ((!sessions.isEmpty() || admission.preAuthCount() > 0) && closeDeadline - System.nanoTime() > 0) {
             try {
                 Thread.sleep(1);
             } catch (InterruptedException e) {
@@ -239,12 +303,12 @@ public final class BattleEdgeServer implements DirectEdge {
         if (boss != null) {
             boss.shutdownGracefully(0, 1, TimeUnit.SECONDS).awaitUninterruptibly(CLOSE_WAIT.toMillis());
         }
-        log.info("battle 直连面已关闭 排空中={} 强关={} 剩余连接={}", draining, closing.size(), connections.get());
+        log.info("battle 直连面已关闭 排空中={} 强关={} 剩余连接={}", draining, closing.size(), connectionCount());
     }
 
     @Override
     public int connectionCount() {
-        return connections.get();
+        return admission.totalConnections();
     }
 
     // ---------------------------------------------------------------- 包内（handler 与测试）
@@ -267,66 +331,67 @@ public final class BattleEdgeServer implements DirectEdge {
         p.addLast("battleEdge", handler);
     }
 
-    /** 仅公网来源前缀限速（承压时激活；跳过内网/回环/CGNAT/边缘代理地址）。 */
-    boolean tryAdmitSource(SocketAddress remoteAddress) {
-        SourcePrefixRateLimiter limiter = sourceRateLimiter;
-        if (!limiter.enabled()) {
-            return true;
-        }
-        long now = nanoClock.getAsLong();
-        long lastReject = lastPressureRejectNanos.get();
-        boolean underPressure = unauthenticatedConnections.get() >= preAuthBudget
-                || (lastReject != Long.MIN_VALUE && now - lastReject < PRESSURE_COOLDOWN_NANOS);
-        java.net.InetAddress inet = remoteAddress instanceof InetSocketAddress isa ? isa.getAddress() : null;
-        if (!limiter.tryAdmit(inet, underPressure)) {
-            lastPressureRejectNanos.set(now);
-            return false;
-        }
-        return true;
+    boolean isServerSweepActive() {
+        return serverSweepActive;
     }
 
-    /** 闸 G1：连接数（含未握手）没到有效上限就占一个名额（配置 0 时取硬上限 65535）。 */
-    boolean tryAdmit() {
-        int max = deps.properties().effectiveMaxConnections();
-        while (true) {
-            int current = connections.get();
-            if (current >= max) {
-                lastPressureRejectNanos.set(nanoClock.getAsLong());
-                return false;
-            }
-            if (connections.compareAndSet(current, current + 1)) {
-                return true;
-            }
-        }
+    /** 统一准入判定（关源 -> 总量 -> 未认证池淘汰/预算/早拒 -> 全局 GCRA 速率 -> 承压公网来源限速）。 */
+    AdmitOutcome<Channel> tryAdmitChannel(Channel ch) {
+        SocketAddress remote = ch.remoteAddress();
+        InetAddress inet = remote instanceof InetSocketAddress isa ? isa.getAddress() : null;
+        return admission.tryAdmit(inet, ch);
     }
 
-    void register(DirectSession session) {
+    /** 握手或探测授权通过：登记会话并释放未认证记录（总连接数连续无抖动）。 */
+    void registerAuthenticated(DirectSession session, PreAuthEntry<Channel> preAuthEntry) {
         sessions.add(session);
-        if (session.markUnauthEntered()) {
-            unauthenticatedConnections.incrementAndGet();
+        if (preAuthEntry != null) {
+            admission.releasePreAuth(preAuthEntry);
         }
     }
 
-    /** 握手成功或网络探测授权验签通过：立即从未认证池中移除（幂等）。 */
-    void markAuthenticated(DirectSession session) {
-        if (session.clearUnauthCounted()) {
-            unauthenticatedConnections.decrementAndGet();
-        }
+    void releasePreAuth(PreAuthEntry<Channel> entry) {
+        admission.releasePreAuth(entry);
     }
 
-    /** 连接断开：归还 {@link #tryAdmit()} 占的名额并幂等扣减未认证计数。 */
+    /** 已认证会话断开：移出会话集。 */
     void unregister(DirectSession session) {
-        if (sessions.remove(session)) {
-            connections.decrementAndGet();
-            markAuthenticated(session);
+        sessions.remove(session);
+    }
+
+    /** 仅用于准入拒绝：SO_LINGER=0 发 RST，不留 TIME_WAIT、不回业务包。 */
+    static void rejectWithRst(Channel ch) {
+        try {
+            ch.config().setOption(ChannelOption.SO_LINGER, 0);
+        } catch (RuntimeException ignored) {
+            // EmbeddedChannel 等非 TCP 传输不支持 SO_LINGER，直接关闭
         }
+        ch.close();
+    }
+
+    /** 从未认证池表头清扫超时连接（节拍回调与单测共用）。 */
+    int sweepPreAuthExpired() {
+        return admission.sweepExpired(entry -> {
+            Channel ch = entry.attachment();
+            if (ch == null) {
+                return;
+            }
+            BattleEdgeHandler handler = ch.pipeline().get(BattleEdgeHandler.class);
+            if (handler != null) {
+                handler.onSweptHandshakeTimeout(ch, entry);
+            } else {
+                rejectLog.record(EdgeRejectReason.HANDSHAKE_TIMEOUT, DirectSession.describe(ch.remoteAddress()));
+                deps.metrics().disconnect(Disconnect.HANDSHAKE_TIMEOUT);
+                ch.close();
+            }
+        });
     }
 
     /** 接入的采样日志（首次 + 每 1024 次一行，同基线 {@code edge.cpp:202-209}）。 */
-    void sampleAccepted(DirectSession session) {
+    void sampleAccepted(String peer) {
         long n = acceptedTotal.getAndIncrement();
         if ((n & (EdgeRejectLog.SAMPLE_EVERY - 1)) == 0) {
-            log.info("battle 直连接入（采样） latest_peer={} accepted_total={} current={}", session.peer(), n + 1, connections.get());
+            log.info("battle 直连接入（采样） latest_peer={} accepted_total={} current={}", peer, n + 1, connectionCount());
         }
     }
 

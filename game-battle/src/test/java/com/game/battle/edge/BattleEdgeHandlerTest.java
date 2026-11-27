@@ -172,16 +172,17 @@ class BattleEdgeHandlerTest {
     }
 
     @Test
-    void 握手成功时非法包计数清零() {
+    void 握手前不建会话_握手成功时新建会话且非法包计数为零() {
         rooms.add(BATTLE, PLAYER, eBattleTicketRole.BATTLE_TICKET_ROLE_PARTICIPANT);
         EmbeddedChannel ch = open();
-        DirectSession s = session(ch);
-        s.registerIllegal();
-        s.registerIllegal();
-        assertThat(s.illegalPackets()).isEqualTo(2);
+        assertThat(session(ch)).as("P2-4：验签通过之前不分配 DirectSession").isNull();
+        assertThat(handler(ch).preAuthEntry()).isNotNull();
 
         ch.writeInbound(buf(participant(tickets, BATTLE, PLAYER)));
 
+        DirectSession s = session(ch);
+        assertThat(s).isNotNull();
+        assertThat(handler(ch).preAuthEntry()).isNull();
         assertThat(s.state()).isEqualTo(DirectSession.State.VERIFIED);
         assertThat(s.illegalPackets()).isZero();
     }
@@ -483,6 +484,8 @@ class BattleEdgeHandlerTest {
 
         a.close();
         assertThat(edge.connectionCount()).isEqualTo(1);
+        // 推进 20ms 让 GCRA 全局速率闸（100/s，桶深=maxConn=2）恢复 1 个令牌
+        nanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(20));
         EmbeddedChannel d = open();
         assertThat(d.isOpen()).isTrue();
         assertThat(edge.connectionCount()).isEqualTo(2);

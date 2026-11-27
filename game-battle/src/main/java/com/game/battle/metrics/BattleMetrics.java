@@ -6,10 +6,13 @@ import com.game.battle.protocol.BattleMessageIds.Upstream;
 import com.game.battle.push.PushCategory;
 import com.game.battle.push.PushRoute;
 import com.game.battle.room.FingerprintMode;
+import com.game.common.net.ConnectionAdmissionController;
 import com.game.common.token.BattleTickets;
 import com.game.discovery.presence.PlayerPushes;
 import com.game.net.client.ClientFrameException;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -81,6 +84,11 @@ public final class BattleMetrics {
     static final String DEV_GATHER = "game.battle.dev.gather";
     static final String WEBSOCKET_HANDSHAKES = "game.battle.websocket.handshakes";
     static final String WEBSOCKET_PROTOCOL_CLOSED = "game.battle.websocket.protocol.closed";
+    /** 与主仓 deploy/k8s/battle-connection-alerts.yaml 共用同名 Prometheus 指标。 */
+    static final String ADMISSION_REJECTED = "battle.rejected";
+    static final String HANDSHAKE_DURATION_MS = "battle.handshake.duration.ms";
+    private static final double[] HANDSHAKE_DURATION_BUCKETS_MS = {
+            10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000};
 
     /** 白名单外的上行号（{@code game_battle_client_requests_total{method}}）。 */
     public static final String METHOD_OTHER = "other";
@@ -389,11 +397,14 @@ public final class BattleMetrics {
     private final Counter wsHandshakeAccepted;
     private final Counter wsHandshakeRejected;
     private final Counter wsProtocolClosed;
+    private final Map<ConnectionAdmissionController.RejectReason, Counter> admissionRejects;
+    private final DistributionSummary handshakeDurationMs;
 
     private volatile IntSupplier roomCount = () -> 0;
     private volatile IntSupplier directConnectionCount = () -> 0;
     private volatile IntSupplier logicPendingTasks = () -> 0;
     private volatile Supplier<AdmissionPhase> admissionPhase = () -> AdmissionPhase.NOT_STARTED;
+    private volatile ConnectionAdmissionController<?> boundAdmission;
 
     public BattleMetrics(MeterRegistry registry) {
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -431,6 +442,62 @@ public final class BattleMetrics {
                 .tag("result", "rejected").register(registry);
         this.wsProtocolClosed = Counter.builder(WEBSOCKET_PROTOCOL_CLOSED)
                 .description("battle 直连 WebSocket 协议违规关闭").register(registry);
+        Map<ConnectionAdmissionController.RejectReason, Counter> rejects =
+                new EnumMap<>(ConnectionAdmissionController.RejectReason.class);
+        for (ConnectionAdmissionController.RejectReason reason : ConnectionAdmissionController.RejectReason.values()) {
+            rejects.put(reason, Counter.builder(ADMISSION_REJECTED)
+                    .description("battle 直连准入拒绝计数（按 reason 区分）")
+                    .tag("reason", reason.tag()).register(registry));
+        }
+        this.admissionRejects = rejects;
+        this.handshakeDurationMs = DistributionSummary.builder(HANDSHAKE_DURATION_MS)
+                .description("battle 直连建连到票据验签通过耗时（毫秒）")
+                .serviceLevelObjectives(HANDSHAKE_DURATION_BUCKETS_MS)
+                .register(registry);
+        Gauge.builder("battle.connections.current", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.totalConnections();
+        }).description("battle 当前直连总数（已认证会话 + 未认证连接）").register(registry);
+        Gauge.builder("battle.connections.max", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.policy().maxConnections();
+        }).description("battle 直连数上限").register(registry);
+        Gauge.builder("battle.unauthenticated.connections", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.preAuthCount();
+        }).description("battle 未认证直连数（未完成票据握手且未出示有效探测授权）").register(registry);
+        FunctionCounter.builder("battle.accepted", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.acceptedTotal();
+        }).description("battle 准入放行的累计连接数").register(registry);
+        Gauge.builder("battle.accept.rate.limit.per.second", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.policy().acceptRatePerSecond();
+        }).description("battle 全局新建连接持续速率上限").register(registry);
+        Gauge.builder("battle.accept.burst", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.policy().acceptBurst();
+        }).description("battle 全局新建连接桶深").register(registry);
+        FunctionCounter.builder("battle.preauth.reaped", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.preAuthReapedTotal();
+        }).description("battle 未认证握手超时收割累计连接数").register(registry);
+        FunctionCounter.builder("battle.preauth.evicted", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.preAuthEvictedTotal();
+        }).description("battle 承压期按建连先后淘汰的未认证连接累计值").register(registry);
+        Gauge.builder("battle.preauth.budget", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.policy().preAuthBudget();
+        }).description("battle 未认证连接池预算上限").register(registry);
+        Gauge.builder("battle.preauth.early.drop.start", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.policy().preAuthEarlyDropStart();
+        }).description("battle 未认证连接池早拒起点").register(registry);
+        Gauge.builder("battle.preauth.evictable.age.ms", this, m -> {
+            var a = m.boundAdmission;
+            return a == null ? 0.0 : a.policy().preAuthEvictableAgeMs();
+        }).description("battle 未认证连接可淘汰最短建连年龄（毫秒）").register(registry);
 
         for (Notify notify : Notify.values()) {
             pushCounter(notify.category(), PushRoute.DIRECT, notify);
@@ -515,6 +582,23 @@ public final class BattleMetrics {
     /** 准入闸阶段（{@code AdmissionGate::phase}）。 */
     public void bindAdmissionPhase(Supplier<AdmissionPhase> phase) {
         this.admissionPhase = Objects.requireNonNull(phase);
+    }
+
+    /** 绑定直连准入控制器（同名对齐主仓 {@code battle-connection-alerts.yaml}）。 */
+    public void bindAdmission(ConnectionAdmissionController<?> admission) {
+        this.boundAdmission = admission;
+    }
+
+    public void admissionRejected(ConnectionAdmissionController.RejectReason reason) {
+        if (reason != null) {
+            admissionRejects.get(reason).increment();
+        }
+    }
+
+    public void recordHandshakeDurationMs(double durationMs) {
+        if (durationMs >= 0 && !Double.isNaN(durationMs)) {
+            handshakeDurationMs.record(durationMs);
+        }
     }
 
     // ---------------------------------------------------------------- 房间
