@@ -21,10 +21,48 @@ import org.springframework.context.annotation.Bean;
 public class KillSwitchAutoConfiguration {
 
     @Bean
-    public KillSwitch killSwitch(@Value("${game.killswitch.stale-after:60s}") Duration staleAfter) {
+    public KillSwitch killSwitch(
+            @Value("${game.killswitch.stale-after:60s}") Duration staleAfter,
+            @Value("${game.killswitch.node-type:}") String nodeType,
+            @Value("${game.killswitch.instance-id:}") String instanceId,
+            @Value("${spring.application.name:}") String applicationName) {
         KillSwitch killSwitch = new KillSwitch(staleAfter.toNanos(), System::nanoTime);
+        killSwitch.protectMethods(KillSwitch.DEFAULT_PROTECTED_METHODS);
+        String resolvedType = (nodeType != null && !nodeType.isBlank()) ? nodeType.strip() : inferNodeType(applicationName);
+        if (!resolvedType.isEmpty()) {
+            killSwitch.addNodeType(resolvedType);
+        }
+        if (instanceId != null && !instanceId.isBlank()) {
+            killSwitch.addInstance(instanceId.strip());
+        }
         KillSwitch.installGlobal(killSwitch);
         return killSwitch;
+    }
+
+    /** 按 Spring 应用名推导标准 eNodeType 名（对齐主仓 proto/common/base/node.proto），便于 type/<名>/ 规则开箱即用。 */
+    static String inferNodeType(String applicationName) {
+        if (applicationName == null || applicationName.isBlank()) {
+            return "";
+        }
+        return switch (applicationName.strip()) {
+            case "game-gate" -> "GateNodeService";
+            case "game-scene" -> "SceneNodeService";
+            case "game-login" -> "LoginNodeService";
+            case "game-battle" -> "BattleNodeService";
+            case "game-match" -> "MatchNodeService";
+            case "game-trade" -> "TradeNodeService";
+            case "game-guild" -> "GuildNodeService";
+            case "game-friend" -> "FriendNodeService";
+            case "game-chat" -> "ChatNodeService";
+            case "game-team" -> "TeamNodeService";
+            case "game-mail" -> "MailNodeService";
+            case "game-rank" -> "RankNodeService";
+            case "game-payment" -> "PaymentNodeService";
+            case "game-data" -> "DataNodeService";
+            case "game-scene-manager" -> "SceneManagerNodeService";
+            case "game-gateway" -> "GatewayNodeService";
+            default -> "";
+        };
     }
 
     @Bean(initMethod = "start", destroyMethod = "close")

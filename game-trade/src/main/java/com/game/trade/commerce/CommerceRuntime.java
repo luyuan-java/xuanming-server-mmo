@@ -33,6 +33,7 @@ public final class CommerceRuntime implements AutoCloseable {
     private final AtomicBoolean started = new AtomicBoolean();
     private final OfficialMallClient mall;
     private final RmbConsignmentService rmb;
+    private volatile com.game.common.workshard.WorkShard.Membership shardMembership;
     // 仅由驱动 tick 的单个工作线程持有；尝试后前移、到表尾再绕回，不让离线玩家占满首页。
     private long ackAfterOpId;
     public CommerceRuntime(CommerceEngine e, ReliableAssetDelivery delivery, PersistedAssetLedgerReader ledger) {
@@ -50,6 +51,12 @@ public final class CommerceRuntime implements AutoCloseable {
         this.ledger = ledger;
         this.mall = mall;
         this.rmb = rmb;
+    }
+
+    /** 挂载 64 片 HRW 后台分工成员表（未挂载或成员表为空时本副本承担全部 64 片）。 */
+    public CommerceRuntime withShardMembership(com.game.common.workshard.WorkShard.Membership membership) {
+        this.shardMembership = membership;
+        return this;
     }
     public void start() {
         if (started.compareAndSet(false, true))
@@ -91,9 +98,18 @@ public final class CommerceRuntime implements AutoCloseable {
                     Thread.currentThread().interrupt();
                 log.error("商城交付恢复失败，原订单与资产seq保留", unknown);
             }
+        var membership = this.shardMembership;
+        var opFilter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                : membership.sqlFilter("trade_op", "player_id");
+        var commerceFilter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                : membership.sqlFilter("trade_commerce", "commerce_id");
+        var ackFilter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                : membership.sqlFilter("trade_ack", "op_id");
         long now = e.clock.getAsLong();
-        for (var candidate :
-            e.store.ops("status=1 AND next_attempt_ms<=? AND lease_until_ms<=? ORDER BY op_id LIMIT 50", now, now)) {
+        var pendingOps = opFilter.isAll()
+                ? e.store.ops("status=1 AND next_attempt_ms<=? AND lease_until_ms<=? ORDER BY op_id LIMIT ?", now, now, 50)
+                : e.store.pendingOps(now, 50, opFilter);
+        for (var candidate : pendingOps) {
             if (budget.remainingMillis() < 500)
                 break;
             TradeAssetOpRow op = candidate;
@@ -113,7 +129,10 @@ public final class CommerceRuntime implements AutoCloseable {
                     }
             }
         }
-        for (var row : e.store.due(e.clock.getAsLong(), 100)) {
+        var dueRows = commerceFilter.isAll()
+                ? e.store.due(e.clock.getAsLong(), 100)
+                : e.store.due(e.clock.getAsLong(), 100, commerceFilter);
+        for (var row : dueRows) {
             if (budget.remainingMillis() < 500)
                 break;
             try {
@@ -124,7 +143,9 @@ public final class CommerceRuntime implements AutoCloseable {
                 deferContract(row, failure, budget);
             }
         }
-        var acks = e.store.ackDue(ackAfterOpId, 50);
+        var acks = ackFilter.isAll()
+                ? e.store.ackDue(ackAfterOpId, 50)
+                : e.store.ackDue(ackAfterOpId, 50, ackFilter);
         for (var op : acks) {
             if (budget.remainingMillis() < 300)
                 return;
@@ -160,8 +181,19 @@ public final class CommerceRuntime implements AutoCloseable {
         }
         TradeCommerceRow advanced = e.advance(row, budget);
         TradeCommerceRow candidate = advanced != null ? advanced : row;
-        if (candidate.getKind() == 4 && candidate.getSide() != 0 && candidate.getOnOrderBook())
-            matching.match(candidate, budget);
+        if (candidate.getKind() == 4 && candidate.getSide() != 0 && candidate.getOnOrderBook()) {
+            try {
+                matching.match(candidate, budget);
+            } catch (SQLException matchFailure) {
+                // 撮合失败（锁竞争/瞬态冲突）时把 taker 调度键拉回下一轮，避免卡在 1 小时稳态窗口里
+                try {
+                    e.store.wake(candidate.getCommerceId(), e.clock.getAsLong(),
+                            Deadline.after(Math.min(1000, Math.max(200, budget.remainingMillis()))));
+                } catch (SQLException | RuntimeException ignored) {
+                }
+                throw matchFailure;
+            }
+        }
     }
     private void settleHeldBid(TradeCommerceRow row, Deadline budget) throws SQLException {
         var parent = e.store.get(row.getParentId());
@@ -310,10 +342,10 @@ public final class CommerceRuntime implements AutoCloseable {
                                                                                                        : 3;
         var snapshot = receipt == null ? com.google.protobuf.ByteString.EMPTY : receipt.getSnapshotProto();
         long now = e.clock.getAsLong();
-        e.store.transaction(budget, c -> {
+        Boolean finalized = e.store.transaction(budget, c -> {
             var rows = e.store.ops(c, "op_id=? FOR UPDATE", op.getOpId());
             if (rows.isEmpty() || rows.getFirst().getStatus() != 1)
-                return null;
+                return false;
             CommerceStore.execute(c,
                 "UPDATE trade_asset_op SET "
                     + "status=?,durable=1,last_outcome=?,last_reason=?,escrow_snapshot=?,receipt_ack_pending=?,lease_"
@@ -321,8 +353,18 @@ public final class CommerceRuntime implements AutoCloseable {
                     + "ms=0,next_attempt_ms=?,updated_ms=? WHERE op_id=? AND status=1",
                 status, outcome.state() == AssetSeqState.APPLIED ? 1 : 2, outcome.rejectionReason(), snapshot,
                 receipt != null && !receipt.getSnapshotProto().isEmpty() && status == 2, now, now, op.getOpId());
-            return null;
+            return true;
         });
+        // 事件唤醒：在资产指令终结事务提交之后单独唤醒所属交易合同（不在 op 行锁里锁合同行）。
+        if (Boolean.TRUE.equals(finalized) && op.getRefKind() == 2 && op.getRefId() != 0L) {
+            try {
+                e.store.wake(op.getRefId(), e.clock.getAsLong(),
+                        Deadline.after(Math.min(1000, Math.max(200, budget.remainingMillis()))));
+            } catch (SQLException | RuntimeException wakeFailure) {
+                log.warn("资产指令终结后唤醒交易合同失败，合同将在 30 秒兜底周期推进 commerce_id={} op_id={}",
+                        Long.toUnsignedString(op.getRefId()), Long.toUnsignedString(op.getOpId()), wakeFailure);
+            }
+        }
     }
     private void ack(TradeAssetOpRow op, Deadline budget) throws SQLException {
         try {

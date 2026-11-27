@@ -565,9 +565,30 @@ public final class CommerceEngine {
         });
     }
 
+    /** 仅等待时间/玩家操作的合同最远复查间隔（1 小时），有腿在途或等子单收尾的兜底复查间隔（30 秒，靠事件唤醒即时推进）。 */
+    static final long IDLE_RECHECK_MAX_MS = 3_600_000L;
+    static final long INFLIGHT_FALLBACK_RECHECK_MS = 30_000L;
+
+    /** 计算合同无变化时的下次调度时刻：纯等时间/玩家操作排到截止（最远 1h）；有在途腿或等子单排 30s 兜底（由事件唤醒提前）。 */
+    static long nextCheckAtMs(TradeCommerceRow row, TradeCommerceWorkflow w, long nowMs) {
+        String stage = w.getStage();
+        boolean waitingOnlyOnTimeOrPlayer = !w.getCancelRequested()
+                && (stage.equals("confirm") || stage.equals("open") || stage.equals("lot_open")
+                    || stage.equals("market_open") || stage.equals(WantedSkillBook.STAGE_OPEN));
+        if (waitingOnlyOnTimeOrPlayer) {
+            long maxAt = nowMs + IDLE_RECHECK_MAX_MS;
+            long exp = row.getExpiresMs();
+            if (exp != 0L && Long.compareUnsigned(exp, nowMs) > 0) {
+                return Long.compareUnsigned(exp, maxAt) < 0 ? exp : maxAt;
+            }
+            return maxAt;
+        }
+        return nowMs + INFLIGHT_FALLBACK_RECHECK_MS;
+    }
+
     private record AdvanceOutcome(TradeCommerceRow saved, Optional<SellerCreditService.CompletedTradeFact> creditFact,
-                                  long bidToWake) {
-        static final AdvanceOutcome SKIPPED = new AdvanceOutcome(null, Optional.empty(), 0L);
+                                  List<Long> contractsToWake) {
+        static final AdvanceOutcome SKIPPED = new AdvanceOutcome(null, Optional.empty(), List.of());
     }
 
     public TradeCommerceRow advance(TradeCommerceRow prior, Deadline d) throws SQLException {
@@ -636,7 +657,16 @@ public final class CommerceEngine {
                     r.setStatus(MANUAL);
                     r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(now);
                     TradeCommerceRow quarantined = store.save(c, r);
-                    return new AdvanceOutcome(quarantined, Optional.empty(), 0L);
+                    List<Long> wakeOnManual = new ArrayList<>(2);
+                    if (quarantined.getKind() == 4 && quarantined.getSide() == 0) {
+                        if (quarantined.getParentId() != 0L) {
+                            wakeOnManual.add(quarantined.getParentId());
+                        }
+                        if (quarantined.getCounterpartyId() != 0L) {
+                            wakeOnManual.add(quarantined.getCounterpartyId());
+                        }
+                    }
+                    return new AdvanceOutcome(quarantined, Optional.empty(), wakeOnManual);
                 }
                 if (op.getStatus() != 1) {
                     l.setOutcome(op.getStatus());
@@ -693,25 +723,57 @@ public final class CommerceEngine {
                     op.setDeadlineMs(now);
                 store.enqueue(c, op);
             }
-            if (w.getStage().equals("done"))
+            boolean markDone = w.getStage().equals("done");
+            if (markDone)
                 store.markConsumed(c, r.getCommerceId());
             long engineNow = clock.getAsLong();
             TradeCommerceWorkflow builtWorkflow = w.build();
+            ByteString nextWorkflowBytes = builtWorkflow.toByteString();
+            r.setWorkflowProto(nextWorkflowBytes);
+            boolean nextOnBook = CommerceStore.computeOnOrderBook(r);
+            boolean unchanged = pending.isEmpty()
+                    && !markDone
+                    && r.getStatus() == current.getStatus()
+                    && r.getBuyerPlayerId() == current.getBuyerPlayerId()
+                    && r.getSellerPlayerId() == current.getSellerPlayerId()
+                    && r.getFilledQuantity() == current.getFilledQuantity()
+                    && nextOnBook == current.getOnOrderBook()
+                    && nextWorkflowBytes.equals(current.getWorkflowProto());
+            if (unchanged) {
+                long nextCheck = nextCheckAtMs(current, builtWorkflow, engineNow);
+                store.rescheduleUnchanged(c, current.getCommerceId(), current.getVersion(), nextCheck);
+                return new AdvanceOutcome(current, Optional.empty(), List.of());
+            }
             // 库时钟只裁决截止；updated_ms 是按引擎时钟扫描的调度键。
-            r.setWorkflowProto(builtWorkflow.toByteString()).setUpdatedMs(engineNow);
+            r.setUpdatedMs(engineNow);
             TradeCommerceRow saved = store.save(c, r);
             Optional<SellerCreditService.CompletedTradeFact> fact = current.getStatus() != SETTLED && saved.getStatus() == SETTLED
                     ? SellerCreditService.settledTradeFact(saved, builtWorkflow, engineNow)
                     : Optional.empty();
+            List<Long> toWake = new ArrayList<>(2);
             long bidToWake = finishedLotBid(current, saved, builtWorkflow);
-            return new AdvanceOutcome(saved, fact, bidToWake);
+            if (bidToWake != 0L) {
+                toWake.add(bidToWake);
+            }
+            // 市场成交子单收尾（SETTLED/CANCELLED/MANUAL）后，唤醒买单与卖单两张母单及时收敛。
+            if (saved.getKind() == 4 && saved.getSide() == 0
+                    && (current.getStatus() != SETTLED && current.getStatus() != CANCELLED && current.getStatus() != MANUAL)
+                    && (saved.getStatus() == SETTLED || saved.getStatus() == CANCELLED || saved.getStatus() == MANUAL)) {
+                if (saved.getParentId() != 0L) {
+                    toWake.add(saved.getParentId());
+                }
+                if (saved.getCounterpartyId() != 0L) {
+                    toWake.add(saved.getCounterpartyId());
+                }
+            }
+            return new AdvanceOutcome(saved, fact, toWake);
         });
-        if (outcome != null && outcome.bidToWake() != 0L) {
+        if (outcome != null && !outcome.contractsToWake().isEmpty()) {
             try {
-                store.wake(outcome.bidToWake(), clock.getAsLong(), Deadline.after(Math.min(1000, Math.max(200, d.remainingMillis()))));
+                store.wakeMany(outcome.contractsToWake(), clock.getAsLong(),
+                        Deadline.after(Math.min(1000, Math.max(200, d.remainingMillis()))));
             } catch (SQLException | RuntimeException wakeFailure) {
-                log.warn("拍品结案后唤醒出价失败，出价将在兜底周期自行到期 bid_id={}",
-                        Long.toUnsignedString(outcome.bidToWake()), wakeFailure);
+                log.warn("合同收尾后唤醒关联合同失败 targets={}", outcome.contractsToWake(), wakeFailure);
             }
         }
         if (outcome != null && outcome.creditFact().isPresent()) {

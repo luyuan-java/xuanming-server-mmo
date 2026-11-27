@@ -168,9 +168,25 @@ public class CommerceConfiguration {
             ownership.getIfAvailable());
     }
     @Bean(initMethod = "start", destroyMethod = "close")
+    public com.game.discovery.workshard.RedisWorkShardMembership tradeWorkShardMembership(
+            RedissonClient redis, RedisKeys keys,
+            @org.springframework.beans.factory.annotation.Value("${game.instance-id:}") String configuredInstanceId,
+            @org.springframework.beans.factory.annotation.Value("${game.track:stable}") String track) {
+        String instanceId = configuredInstanceId == null || configuredInstanceId.isBlank()
+                ? java.util.UUID.randomUUID().toString()
+                : configuredInstanceId.strip();
+        return new com.game.discovery.workshard.RedisWorkShardMembership(redis, keys, NodeTypes.TRADE, 0, instanceId, track);
+    }
+    @Bean(initMethod = "start", destroyMethod = "close")
     public CommerceRuntime commerceRuntime(CommerceEngine e, ReliableAssetDelivery delivery,
         PersistedAssetLedgerReader ledger, org.springframework.beans.factory.ObjectProvider<OfficialMallClient> mall,
-        org.springframework.beans.factory.ObjectProvider<RmbConsignmentService> rmb) {
-        return new CommerceRuntime(e, delivery, ledger, mall.getIfAvailable(), rmb.getIfAvailable());
+        org.springframework.beans.factory.ObjectProvider<RmbConsignmentService> rmb,
+        org.springframework.beans.factory.ObjectProvider<com.game.discovery.workshard.RedisWorkShardMembership> shards) {
+        CommerceRuntime runtime = new CommerceRuntime(e, delivery, ledger, mall.getIfAvailable(), rmb.getIfAvailable());
+        var membership = shards.getIfAvailable();
+        if (membership != null) {
+            runtime.withShardMembership(membership.membership());
+        }
+        return runtime;
     }
 }

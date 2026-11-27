@@ -1,7 +1,13 @@
 package com.game.api.killswitch;
 
 import com.game.api.ClientMessageService;
+import com.game.api.proto.ClientCall;
 import com.game.common.killswitch.KillSwitch;
+import com.game.contract.generated.ContractRouteEntry;
+import com.game.contract.generated.ContractRouteTable;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.apache.dubbo.common.constants.CommonConstants;
 import org.apache.dubbo.common.extension.Activate;
@@ -25,20 +31,48 @@ import org.apache.dubbo.rpc.RpcException;
 public final class KillSwitchProviderFilter implements Filter {
 
     static final String BUSINESS_PACKAGE_PREFIX = "com.game.";
+    private static final Map<Integer, ContractRouteEntry> ROUTES_BY_ID = loadRoutes();
+
+    private static Map<Integer, ContractRouteEntry> loadRoutes() {
+        List<ContractRouteEntry> list = ContractRouteTable.clientRoutes();
+        Map<Integer, ContractRouteEntry> map = new HashMap<>(list.size() * 2);
+        for (ContractRouteEntry entry : list) {
+            map.put(entry.messageId(), entry);
+        }
+        return Map.copyOf(map);
+    }
 
     @Override
     public Result invoke(Invoker<?> invoker, Invocation invocation) throws RpcException {
         String service = invoker.getInterface().getName();
-        if (service.startsWith(BUSINESS_PACKAGE_PREFIX) && !isClientForwarding(invoker, invocation)) {
+        if (service.startsWith(BUSINESS_PACKAGE_PREFIX)) {
             Optional<KillSwitch> killSwitch = KillSwitch.global();
             if (killSwitch.isPresent()) {
-                String method = invocation.getMethodName();
-                Optional<KillSwitch.Rule> rule = killSwitch.get().blocked("/" + service + "/" + method);
-                if (rule.isPresent()) {
-                    killSwitch.get().recordBlocked(invoker.getInterface().getSimpleName() + "/" + method);
-                    String reason = rule.get().reason();
-                    throw new RpcException(RpcException.FORBIDDEN_EXCEPTION, "killswitch: method " + service + "/" + method
-                            + " disabled" + (reason.isEmpty() ? "" : ", reason: " + ascii(reason)));
+                if (isClientForwarding(invoker, invocation)) {
+                    // 转发信封不按 ClientMessageService/handle 判，改为按内层真实客户端方法在本进程身份下复判（支持 type/ 与 instance/ 节点级关停）。
+                    Object[] args = invocation.getArguments();
+                    if (args != null && args.length > 0 && args[0] instanceof ClientCall call && call.getMessageId() != 0) {
+                        ContractRouteEntry entry = ROUTES_BY_ID.get(call.getMessageId());
+                        if (entry != null) {
+                            Optional<KillSwitch.Rule> inner = killSwitch.get().blocked(entry.fullMethod());
+                            if (inner.isPresent()) {
+                                killSwitch.get().recordBlocked(entry.qualifiedMethod());
+                                String reason = inner.get().reason();
+                                throw new RpcException(RpcException.FORBIDDEN_EXCEPTION,
+                                        "killswitch: method " + entry.fullMethod() + " disabled"
+                                                + (reason.isEmpty() ? "" : ", reason: " + ascii(reason)));
+                            }
+                        }
+                    }
+                } else {
+                    String method = invocation.getMethodName();
+                    Optional<KillSwitch.Rule> rule = killSwitch.get().blocked("/" + service + "/" + method);
+                    if (rule.isPresent()) {
+                        killSwitch.get().recordBlocked(invoker.getInterface().getSimpleName() + "/" + method);
+                        String reason = rule.get().reason();
+                        throw new RpcException(RpcException.FORBIDDEN_EXCEPTION, "killswitch: method " + service + "/" + method
+                                + " disabled" + (reason.isEmpty() ? "" : ", reason: " + ascii(reason)));
+                    }
                 }
             }
         }

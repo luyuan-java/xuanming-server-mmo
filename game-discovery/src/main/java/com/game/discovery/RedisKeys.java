@@ -791,6 +791,11 @@ public final class RedisKeys {
         return prefix + "spectate:chat:{" + Long.toUnsignedString(battleId) + "}:closed";
     }
 
+    /** 后台 64 片 HRW 分工的活跃 stable 成员集合（ZSET，score 为到期时间 ms）：{@code <ns>:workshard:{service}:{zone}}。 */
+    public String workShardMembers(String service, int zoneId) {
+        return prefix + "workshard:" + Objects.requireNonNull(service, "service") + ":" + zoneId;
+    }
+
     private static String queueSuffix(int mode, int config) {
         if (mode < 0) {
             throw new IllegalArgumentException("匹配模式不能为负: " + mode);

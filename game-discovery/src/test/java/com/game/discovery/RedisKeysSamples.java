@@ -133,7 +133,16 @@ final class RedisKeysSamples {
                 new Sample("matchSpectateTier", k -> k.matchSpectateTier(9), "game:{match}:spectate-tier:9"),
                 new Sample("matchSpectateFeatured", RedisKeys::matchSpectateFeatured, "game:{match}:spectate-featured"),
                 new Sample("spectateChannel", k -> k.spectateChannel(9), "game:spectate:{9}"),
-                new Sample("spectateState", k -> k.spectateState(9), "game:spectate:state:{9}"));
+                new Sample("spectateState", k -> k.spectateState(9), "game:spectate:state:{9}"),
+                new Sample("chatWorldTopic", RedisKeys::chatWorldTopic, "game:chat:world:events"),
+                new Sample("loginIdTokenUsed", k -> k.loginIdTokenUsed("apple", "deadbeef"), "game:login:id-token-used:apple:deadbeef"),
+                new Sample("playerAfkPass", k -> k.playerAfkPass(42), "game:player:afk_pass:{42}"),
+                new Sample("matchSpectateChatSeq", k -> k.matchSpectateChatSeq(9), "game:spectate:chat:{9}:seq"),
+                new Sample("matchSpectateChatMessages", k -> k.matchSpectateChatMessages(9), "game:spectate:chat:{9}:msgs"),
+                new Sample("matchSpectateChatCooldown", k -> k.matchSpectateChatCooldown(9), "game:spectate:chat:{9}:cd"),
+                new Sample("matchSpectateChatRate", k -> k.matchSpectateChatRate(9), "game:spectate:chat:{9}:rate"),
+                new Sample("matchSpectateChatClosed", k -> k.matchSpectateChatClosed(9), "game:spectate:chat:{9}:closed"),
+                new Sample("workShardMembers", k -> k.workShardMembers("trade", 0), "game:workshard:trade:0"));
     }
 
     /** 样例覆盖到的方法名。 */

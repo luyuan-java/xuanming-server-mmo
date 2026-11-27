@@ -109,4 +109,49 @@ class KillSwitchTest {
         }
         assertThat(KillSwitch.global()).isEqualTo(Optional.empty());
     }
+
+    @Test
+    void 节点范围优先级_同层相反规则取关停_受保护方法只认精确_只计本进程适用规则() {
+        KillSwitch ks = new KillSwitch(-1, System::nanoTime);
+        ks.addNodeType("SceneNodeService");
+        ks.addNodeType("MatchNodeService");
+        ks.addInstance("11111111-1111-1111-1111-111111111111");
+        ks.protectMethods(java.util.List.of("/com.game.api.SceneControlService/leaveScene"));
+        ks.registerFeature("trade", java.util.List.of("/trade.ClientPlayerJubaozhai/BuyConsignment"));
+
+        // 1. 范围优先级：instance > type > all；精确豁免生效
+        ks.setRules(Map.of(
+                "*", DENY,
+                "type/SceneNodeService/*", ALLOW,
+                "instance/11111111-1111-1111-1111-111111111111/scene.Svc/Move", DENY,
+                "type/OtherNodeService/*", DENY,
+                "instance/22222222-2222-2222-2222-222222222222/*", DENY,
+                "type/", DENY,
+                "instance/bad", DENY));
+        assertThat(ks.blocked("/scene.Svc/Move")).contains(DENY);
+        assertThat(ks.blocked("/scene.Svc/Cast")).isEmpty();
+        // 只计适用于本进程的 3 条规则（*、type/SceneNodeService/*、instance/1111...），不计其他节点与残缺键
+        assertThat(ks.ruleCount()).isEqualTo(3);
+
+        // 2. 同层多身份相反规则取关停
+        ks.setRules(Map.of(
+                "type/SceneNodeService/pkg.Svc/Act", ALLOW,
+                "type/MatchNodeService/pkg.Svc/Act", DENY));
+        assertThat(ks.blocked("/pkg.Svc/Act")).contains(DENY);
+
+        // 3. 受保护方法：* 与 Service/* 均关不掉，只有精确规则能关
+        ks.setRules(Map.of(
+                "*", DENY,
+                "SceneControlService/*", DENY,
+                "instance/11111111-1111-1111-1111-111111111111/*", DENY));
+        assertThat(ks.blocked("/com.game.api.SceneControlService/leaveScene")).isEmpty();
+        ks.setRules(Map.of(
+                "instance/11111111-1111-1111-1111-111111111111/SceneControlService/leaveScene", DENY));
+        assertThat(ks.blocked("/com.game.api.SceneControlService/leaveScene")).contains(DENY);
+
+        // 4. feature/<name> 位于 Service/* 之后、* 之前
+        ks.setRules(Map.of("feature/trade", DENY));
+        assertThat(ks.blocked("/trade.ClientPlayerJubaozhai/BuyConsignment")).contains(DENY);
+        assertThat(ks.blocked("/trade.ClientPlayerJubaozhai/BrowseListings")).isEmpty();
+    }
 }

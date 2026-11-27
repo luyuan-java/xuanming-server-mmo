@@ -97,4 +97,24 @@ class KillSwitchProviderFilterTest {
         assertThat(filter.invoke(foreign, call("run"))).isSameAs(ok);
         assertThat(blocked).isEmpty();
     }
+
+    @Test
+    void 转发信封按内层客户端方法在本节点身份下复判_支持type与instance关停() {
+        KillSwitch ks = new KillSwitch(-1, System::nanoTime);
+        ks.addNodeType("TradeNodeService");
+        ks.addInstance("11111111-1111-1111-1111-111111111111");
+        ks.setRules(Map.of(
+                "instance/11111111-1111-1111-1111-111111111111/ClientPlayerJubaozhai/BrowseListings",
+                new KillSwitch.Rule(true, "单节点止血", 0)));
+        ks.onBlocked(blocked::add);
+        KillSwitch.installGlobal(ks);
+
+        RpcInvocation inv = call("handle");
+        inv.setArguments(new Object[] {
+                com.game.api.proto.ClientCall.newBuilder().setMessageId(196).build()
+        });
+        assertThatThrownBy(() -> filter.invoke(business, inv)).isInstanceOf(RpcException.class)
+                .hasMessageContaining("BrowseListings");
+        assertThat(blocked).containsExactly("ClientPlayerJubaozhai.BrowseListings");
+    }
 }

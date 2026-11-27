@@ -300,4 +300,11 @@ public class GatewayConfiguration {
     public AssignGateMetrics assignGateMetrics(MeterRegistry meterRegistry) {
         return new AssignGateMetrics(meterRegistry);
     }
+
+    /** 运维热关停规则存储（读写 {@code <ns>:killswitch} 并核对在线节点目录）。 */
+    @Bean
+    public com.game.gateway.admin.KillSwitchRuleStore killSwitchRuleStore(
+            RedissonClient redis, RedisKeys keys, ZoneDirectory zones) {
+        return new com.game.gateway.admin.RedisKillSwitchRuleStore(redis, keys, zones);
+    }
 }

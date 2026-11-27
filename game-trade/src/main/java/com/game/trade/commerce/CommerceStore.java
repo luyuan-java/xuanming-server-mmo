@@ -233,7 +233,71 @@ public final class CommerceStore {
             "SELECT " + columns(TradeCommerceRow.getDefaultInstance()) + " FROM trade_commerce WHERE " + where, args);
     }
     public List<TradeCommerceRow> due(long now, int limit) throws SQLException {
-        return list("status IN (1,3,4,6,8) AND updated_ms<=? ORDER BY updated_ms,commerce_id LIMIT ?", now, limit);
+        return due(now, limit, com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+
+    /** 按分片过滤拉取到期合同；分片条件放在 LIMIT 之前，避免他片积压挤占本副本名额。 */
+    public List<TradeCommerceRow> due(long now, int limit, com.game.common.workshard.WorkShard.SqlFilter filter)
+            throws SQLException {
+        if (filter == null || filter.isAll()) {
+            return list("status IN (1,3,4,6,8) AND updated_ms<=? ORDER BY updated_ms,commerce_id LIMIT ?", now, limit);
+        }
+        if (filter.isNone()) {
+            return List.of();
+        }
+        List<Object> args = new ArrayList<>(filter.args().size() + 2);
+        args.addAll(filter.args());
+        args.add(now);
+        args.add(limit);
+        return list("status IN (1,3,4,6,8) AND " + filter.sql() + " AND updated_ms<=? ORDER BY updated_ms,commerce_id LIMIT ?",
+                args.toArray());
+    }
+
+    /** 按分片过滤拉取待投递资产指令（LIMIT 前置分片条件）。 */
+    public List<TradeAssetOpRow> pendingOps(long now, int limit, com.game.common.workshard.WorkShard.SqlFilter filter)
+            throws SQLException {
+        if (filter == null || filter.isAll()) {
+            return ops("status=1 AND next_attempt_ms<=? AND lease_until_ms<=? ORDER BY op_id LIMIT ?", now, now, limit);
+        }
+        if (filter.isNone()) {
+            return List.of();
+        }
+        List<Object> args = new ArrayList<>(filter.args().size() + 3);
+        args.addAll(filter.args());
+        args.add(now);
+        args.add(now);
+        args.add(limit);
+        return ops("status=1 AND " + filter.sql() + " AND next_attempt_ms<=? AND lease_until_ms<=? ORDER BY op_id LIMIT ?",
+                args.toArray());
+    }
+
+    /** 合同推进一步无业务变化时仅更新下次复查调度键，不改业务版本、不重存全行，避免撞玩家并发乐观锁。 */
+    public void rescheduleUnchanged(Connection c, long commerceId, long version, long nextCheckMs) throws SQLException {
+        execute(c, "UPDATE trade_commerce SET updated_ms=? WHERE commerce_id=? AND version=?",
+                nextCheckMs, commerceId, version);
+    }
+
+    /** 尽力批量唤醒多份合同（如子单收尾唤醒买卖两张母单），只提前 updated_ms，不改版本。 */
+    public void wakeMany(java.util.Collection<Long> commerceIds, long nowMs, Deadline deadline) throws SQLException {
+        if (commerceIds == null || commerceIds.isEmpty()) {
+            return;
+        }
+        var unique = new java.util.TreeSet<Long>(Long::compareUnsigned);
+        for (Long id : commerceIds) {
+            if (id != null && id != 0L) {
+                unique.add(id);
+            }
+        }
+        if (unique.isEmpty()) {
+            return;
+        }
+        transaction(deadline, c -> {
+            for (long cid : unique) {
+                execute(c, "UPDATE trade_commerce SET updated_ms=? WHERE commerce_id=? AND status IN (1,3,4,6,8) AND updated_ms>?",
+                        nowMs, cid, nowMs);
+            }
+            return null;
+        });
     }
     /** 调度不改业务版本；点锁后复核观察版本，不覆盖其它 worker 刚推进的状态。 */
     public boolean defer(TradeCommerceRow observed, long until, Deadline deadline) throws SQLException {
@@ -271,7 +335,24 @@ public final class CommerceStore {
         });
     }
     public List<TradeAssetOpRow> ackDue(long after, int limit) throws SQLException {
-        return ops("receipt_ack_pending=1 AND status=2 AND durable=1 AND op_id>? ORDER BY op_id LIMIT ?", after, limit);
+        return ackDue(after, limit, com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+
+    /** 按 op_id 分片拉取待释放收据 ACK（LIMIT 前置分片条件）。 */
+    public List<TradeAssetOpRow> ackDue(long after, int limit, com.game.common.workshard.WorkShard.SqlFilter filter)
+            throws SQLException {
+        if (filter == null || filter.isAll()) {
+            return ops("receipt_ack_pending=1 AND status=2 AND durable=1 AND op_id>? ORDER BY op_id LIMIT ?", after, limit);
+        }
+        if (filter.isNone()) {
+            return List.of();
+        }
+        List<Object> args = new ArrayList<>(filter.args().size() + 2);
+        args.addAll(filter.args());
+        args.add(after);
+        args.add(limit);
+        return ops("receipt_ack_pending=1 AND status=2 AND durable=1 AND " + filter.sql() + " AND op_id>? ORDER BY op_id LIMIT ?",
+                args.toArray());
     }
     // TiDB RC 的二级索引写不代替主键点锁；与投递/终结统一 op_id 升序，避免旧观察覆盖新状态。
     private List<TradeAssetOpRow> lockCommerceOps(Connection c, long commerceId) throws SQLException {

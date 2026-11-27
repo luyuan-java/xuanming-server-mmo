@@ -1423,18 +1423,17 @@ Java 版 `0.1.0-SNAPSHOT` 待做,做同一组行为:
 
 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
 
-### 2026-11-06 交易合同推进按片分工、没变化不重存（主仓已落码未编译，Java 待做）
+### 2026-11-06 交易合同推进按片分工、没变化不重存（Java 已对齐）
 
 - **主仓**：
   - `go/trade` 的合同推进按 `commerce_id % 64`、收据 ACK 按 `op_id % 64`，分给本 zone 的 stable 副本：最高随机权重哈希，见 `go/shared/workshard`，片条件放在 `LIMIT` 之前。
   - 推进一步没有变化时不重存、不改版本。只等时间或玩家操作的合同排到截止，最远 1 小时复查；其余仍每轮复查。
   - 撮合失败时把 taker 提前到下一轮。
   - 设计见主仓 `docs/design/jubaozhai-market.md` §15.8。主仓 commit：未提交。
-- **Java 待做**：先核对 Java 版的交易推进是不是也每个副本扫同一个队头、每轮重存。是的话按同一口径做：
-  - 分工只省重复劳动，正确性仍在合同行锁与版本条件。canary 不进成员表，成员表为空时做全部片。
-  - 没变化不改版本，玩家按刚读到的版本提交时不撞乐观冲突。
-  - 只等时间或玩家操作的合同排到截止，有腿在途的每轮复查。
-- 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+- **2026-11-27 Java 对齐完成**：
+  - `game-common` 新增 `WorkShard`（64 片 SHA-256 HRW 最高随机权重、`SqlFilter` 生成 `MOD(col,64) IN(...)`/`1=1`/`1=0`、无锁 `Membership` 成员表，空表或超 30s 过期自动回落全片，canary 不入表）；`game-discovery` 新增 `RedisWorkShardMembership` 与 `RedisKeys.workShardMembers`。
+  - `game-trade`：`CommerceStore` 新增 `due`/`pendingOps`/`ackDue` 分片查询（分片条件前置在 `LIMIT` 之前）与 `rescheduleUnchanged`（仅更新调度键 `updated_ms`、不改 `version`）；`CommerceEngine.advance` 无业务变化且无新腿时走 `rescheduleUnchanged`（纯等时间/玩家操作的 `confirm`/`open`/`lot_open`/`market_open`/`wanted_open` 排到 `min(expires_ms, now+1h)`，有在途腿/等子单走 30s 兜底）；`CommerceRuntime` 挂载 `RedisWorkShardMembership` 并在 `matching.match` 失败时将 taker 提前唤醒到 `now`。
+  - **验证**：`game-common` `WorkShardTest` 2/2 PASS；`game-discovery` `RedisWorkShardMembershipTest` + `RedisKeysGoldenTest` + `RedisKeysNamespaceTest` 9/9 PASS；`game-trade` `TradeShardingAndEventWakeTest` 4/4 + `CommerceRuntimeTest` 9/9（1 TiDB IT 跳过）+ `DeliveryOrderAndTxTypeTest` 5/5 + `OrderBookFilterTest` 4/4 + `WantedSkillBookTest` 6/6 = **28/28 PASS**。
 
 ### 2026-11-06 资产流水跟着存盘提交走(主仓已落码未编译,Java 待做)
 
@@ -1750,14 +1749,16 @@ C++ 版设计见 C++ 仓 `docs/design/gate-client-heartbeat.md` §14。
   - `game-robot`：`BattleDirectConnection` 解析 `heartbeat_interval_ms > 0` 自动周期发 `ClientHeartbeatRequest`、静默吞掉 `ClientHeartbeatResponse` 并在关闭时取消定时任务。
   - **验证**：`game-battle` `BattleEdgeHeartbeatTest` 4/4 + `BattleEdgeHandlerTest` + `BattleMetricsTest` 5/5 + `OutboxMetricsTest` 6/6 + `BattleProtocolTest` 8/8 = **70/70 PASS**；`game-robot` `BattleDirectConnectionTest` **10/10 PASS**。
 
-### 2026-11-10 交易合同按事件唤醒（主仓已落码未编译，Java 待做；补 11-06「交易合同推进按片分工、没变化不重存」）
+### 2026-11-10 交易合同按事件唤醒（Java 已对齐；补 11-06「交易合同推进按片分工、没变化不重存」）
 
 - **主仓**：
   - 资产指令终结（自动终结、自动放弃、人工终结）之后，唤醒腿所属的交易合同；成交子单收尾之后，唤醒母单。都在事务提交之后单独执行，不在 op 行锁里锁合同行。
   - 有腿在途的合同、等子单收尾的母单，从每轮复查改为 30 秒兜底复查。
   - 设计见主仓 `docs/design/jubaozhai-market.md` §15.8 第 3 点。主仓 commit：未提交。
-- **Java 待做**：与 11-06 那条一起做。Java 版若也是每轮复查在途合同，按同一口径改：终结提交后唤醒，在途合同改为兜底复查；唤醒只把下次到期提前，不改版本。
-- 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+- **2026-11-27 Java 对齐完成**：
+  - `CommerceRuntime.send` 在 `trade_asset_op` 终结事务提交后单独调用 `store.wake(op.getRefId(), now)` 唤醒所属合同（不持 op 行锁）；`CommerceStore.wakeMany` 仅提前晚于 `now` 的 `updated_ms`、不改 `version`。
+  - `CommerceEngine.advance` 在市场成交子单（`kind=4 && side=0`）进入 `SETTLED`/`CANCELLED`/`MANUAL` 事务提交后批量唤醒 `parent_id` 与 `counterparty_id` 两张母单（含原有拍品结案唤醒持仓竞价），且在途腿/等子单合同一律按 `INFLIGHT_FALLBACK_RECHECK_MS = 30s` 兜底复查。
+  - **验证**：`game-trade` `TradeShardingAndEventWakeTest` **4/4 PASS**（覆盖 1h/30s 调度窗口、无变化 `rescheduleUnchanged`、子单收尾双母单 `wakeMany`、资产终结事务外 `wake`）。
 
 ### 2026-11-10 聚宝斋材料盘口只收已托管订单（Java 已对齐）
 
@@ -2120,31 +2121,16 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-12 RPC 热关停补「节点」一级与受保护方法(主仓已落码未编译,Java 待做;补「按方法热关停」行)
+### 2026-11-12 RPC 热关停补「节点」一级与受保护方法（Java 已对齐；补「按方法热关停」行）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/rpc-kill-switch.md`,
-验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「RPC 热关停:节点 / 服务 / 方法三级」。上面「按方法热关停(运维止血阀)」一行的规则键与匹配顺序以本条为准。
-客户端可见部分不变:被关停的客户端方法仍回信封 1003。
+主仓 commit:main 工作区未提交;设计见主仓 `docs/design/rpc-kill-switch.md`。客户端可见部分不变:被关停的客户端方法仍回信封 1003。
 
-**要对齐的行为**:
-
-1. 规则键加两种范围:`type/<eNodeType 名>/<目标>` 只对这一类节点生效,`instance/<节点 uuid>/<目标>` 只对这一个进程生效;
-   `type`、`instance` 作为第一段是保留字,范围段残缺的键整条忽略。Java 的规则源是 Redis 哈希 `game:killswitch`,字段名照同一语法写。
-2. 匹配顺序:范围「本进程实例 → 本进程类型 → 全部」,同一范围里沿用原来的「精确 → 服务通配 → `*`」,第一条命中的规则说了算;
-   本进程以多个身份注册时,同一层里相反的规则取关停。
-3. 受保护的方法只认精确到方法的规则,`*` 与 `服务/*` 关不掉:连接握手、停机、会话收尾(退出、交接释放、离开游戏、断线通知、退订观战)、
-   资源收尾(拆场景、拆战斗)、在途事务的补偿与回执。主仓名单见设计文档 §8,Java 按自己的方法名列一份等价名单。
-4. 转发信封(scene 收客户端消息的入口)不按信封方法判,按内层真实方法判;Java 的 Dubbo 提供方过滤器已经不查 `ClientMessageService.handle`,
-   scene 侧要按内层客户端方法再判一次(节点范围的规则由处理请求的进程自己判,gate 不按下游节点的身份判)。
-5. 写坏的值等于没有这条规则(轮询与运维接口同口径);`killswitch_rules` 只计适用于本进程的规则(别的类型、别的进程的规则不计)。
-6. 运维接口:PUT 支持 node_type / instance;instance 要在发现里核对 uuid 在线;类型范围要求该类型至少有一个在线节点(防止写错类型名后规则静默不生效)。
-   运维口令按摘要做常量时间比较、按规范化后的路径判管理路径(`/admin;x=1/...` 不能绕过)、没配口令时拒绝全部管理请求。
-
-**验证**(Java 仓口径):对应主仓 `cpp/tests/rpc_controller_test/kill_switch_test.cpp` 与 `go/shared/killswitch/scope_test.go` 的用例
-(范围优先级、同层取关停、受保护方法只认精确规则、写坏的值等于没有规则)、gateway 的 `AdminKillSwitchControllerTest`、`AdminApiKeyFilterTest`;
-robot `killswitch` 端到端补两项:type 范围关停 gate 上的一个客户端方法;instance 范围整体关停一个 scene,玩家照常下线并存盘。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- **2026-11-27 Java 对齐完成**：
+  - `game-common` `KillSwitch`：支持 `type/<eNodeType>/<目标>`、`instance/<uuid>/<目标>` 与全局三层范围（按 `instance → type → all` 优先级，同层多身份冲突取 `deny=true`；残缺范围键与坏值忽略）；新增 `DEFAULT_PROTECTED_METHODS`（握手/停机/会话收尾/资源拆解/在途资产补偿与回执不受 `*`/`Service/*`/`feature/*` 影响，仅认精确规则）与 `feature/<name>` 注册；`ruleCount()` 仅统计适用于本进程的规则。
+  - `game-discovery` `KillSwitchAutoConfiguration` / `RedisKillSwitchSync`：自动按 `spring.application.name` 推断并注册 `eNodeType`、注册 `DEFAULT_PROTECTED_METHODS` 及可选 `game.killswitch.instance-id`，忽略残缺键。
+  - `game-api` `KillSwitchProviderFilter`：`ClientMessageService.handle` 转发信封不再拦截外层信封本身，而是按 `call.getMessageId()` 经 `ContractRouteTable` 解析出真实客户端方法名，并在后端节点自身类型/实例身份下复核 `killSwitch.blocked(...)`。
+  - `game-gateway` 新增 `AdminKillSwitchController`（`GET`/`PUT`/`DELETE /admin/killswitch`，支持 `all`/`type`/`instance` 并经 `RedisKillSwitchRuleStore` 核对在线节点）与 `AdminApiKeyFilter`（SHA-256 常量时间比较口令、规范化路径防 `/admin;x=1/...` 绕过、未配口令 fail-closed、写接口强校验单值 `X-Admin-Operator` 与审计日志、可选 `machine-key` 仅限 `/admin/tables`）。
+  - **验证**：`game-common` `KillSwitchTest` 7/7 PASS；`game-api` `KillSwitchProviderFilterTest` 5/5 PASS；`game-gateway` `AdminKillSwitchAndApiKeyTest` 2/2 + `LoginHttpServiceTest` 13/13 + `PassportEventControllerTest` 2/2 = **17/17 PASS**（注：robot 真实集群端到端关停演练待集成环境联调）。
 
 ### 2026-11-12 去单点第二轮遗留项:清理任务按片分工、主从档连接复核、口令凭据归属、按副本计的限速(主仓已落码未编译,Java 待核对)
 

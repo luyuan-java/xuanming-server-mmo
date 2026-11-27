@@ -87,7 +87,7 @@ public final class RedisKillSwitchSync implements AutoCloseable, MeterBinder {
         Map<String, String> winners = new HashMap<>();
         for (Map.Entry<String, String> e : new TreeMap<>(raw).entrySet()) {
             String pattern = pattern(e.getKey());
-            if (pattern.isEmpty()) {
+            if (pattern.isEmpty() || KillSwitch.splitScope(pattern).isEmpty()) {
                 continue;
             }
             Optional<KillSwitch.Rule> rule = KillSwitch.parseRule(e.getValue());
