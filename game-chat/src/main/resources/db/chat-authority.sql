@@ -55,3 +55,27 @@ CREATE TABLE IF NOT EXISTS chat_private_daily_target (
     target_player_id BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY(sender_player_id, day_ymd, target_player_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS chat_platform_recheck (
+    sender_player_id BIGINT UNSIGNED NOT NULL,
+    accepted_ms BIGINT NOT NULL,
+    raw_content VARBINARY(4096) NOT NULL,
+    PRIMARY KEY(sender_player_id, accepted_ms),
+    INDEX idx_chat_recheck_ms(accepted_ms, sender_player_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS chat_platform_recheck_claim (
+    sender_player_id BIGINT UNSIGNED NOT NULL,
+    accepted_ms BIGINT NOT NULL,
+    attempt INT NOT NULL,
+    claimed_ms BIGINT NOT NULL,
+    PRIMARY KEY(sender_player_id, accepted_ms, attempt)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS chat_platform_recheck_done (
+    sender_player_id BIGINT UNSIGNED NOT NULL,
+    accepted_ms BIGINT NOT NULL,
+    outcome INT NOT NULL,
+    done_ms BIGINT NOT NULL,
+    PRIMARY KEY(sender_player_id, accepted_ms)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;

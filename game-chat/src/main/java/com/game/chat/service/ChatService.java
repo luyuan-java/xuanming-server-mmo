@@ -81,6 +81,9 @@ public final class ChatService implements AutoCloseable {
     static final int MAX_REPORT_DETAIL_BYTES = 200;
     static final long RATE_LIMIT_WINDOW_SECONDS = 1;
     static final long ASYNC_RECHECK_TIMEOUT_MS = 4_000L;
+    static final long ASYNC_RETRACT_TIMEOUT_MS = 3_000L;
+    static final int PLATFORM_RECHECK_BATCH = 16;
+    static final long PLATFORM_RECHECK_POLL_MS = 1_000L;
     static final String PLATFORM_REJECT_REASON = "platform_async_reject";
     static final Duration CLAIM_RELEASE_TIMEOUT = Duration.ofSeconds(1);
     static final String CLAIM_PENDING = "pending";
@@ -144,6 +147,8 @@ public final class ChatService implements AutoCloseable {
     private final WorldPublisher worldPublisher;
     private final Executor recheckExecutor;
     private final ExecutorService ownedRecheckPool;
+    private final java.util.concurrent.ScheduledExecutorService ownedRecheckPoller;
+    private volatile boolean closed;
     private final SecureRandom random = new SecureRandom();
 
     /** @param keys 历史 / 幂等 / 限速键的出处（注入的 {@link RedisKeys}；键随部署命名空间） */
@@ -210,6 +215,7 @@ public final class ChatService implements AutoCloseable {
         if (customRecheckExecutor != null) {
             this.recheckExecutor = customRecheckExecutor;
             this.ownedRecheckPool = null;
+            this.ownedRecheckPoller = null;
         } else if (textGuard != null && authority != null) {
             var seq = new AtomicInteger();
             ThreadPoolExecutor pool = new ThreadPoolExecutor(4, 16, 30L, TimeUnit.SECONDS,
@@ -221,14 +227,27 @@ public final class ChatService implements AutoCloseable {
             pool.allowCoreThreadTimeOut(true);
             this.ownedRecheckPool = pool;
             this.recheckExecutor = pool;
+            var poller = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "chat-platform-recheck-poller");
+                t.setDaemon(true);
+                return t;
+            });
+            poller.scheduleWithFixedDelay(this::pollPlatformRechecksSafely,
+                    PLATFORM_RECHECK_POLL_MS, PLATFORM_RECHECK_POLL_MS, TimeUnit.MILLISECONDS);
+            this.ownedRecheckPoller = poller;
         } else {
             this.recheckExecutor = null;
             this.ownedRecheckPool = null;
+            this.ownedRecheckPoller = null;
         }
     }
 
     @Override
     public void close() {
+        closed = true;
+        if (ownedRecheckPoller != null) {
+            ownedRecheckPoller.shutdownNow();
+        }
         if (ownedRecheckPool != null) {
             ownedRecheckPool.shutdownNow();
         }
@@ -376,7 +395,7 @@ public final class ChatService implements AutoCloseable {
                                                          int preRejectTip, boolean pendingPlatform, long budgetMs) {
         final boolean isWorld = toStore.getMessage().getChannel() == ChatChannelType.CHAT_CHANNEL_TYPE_WORLD;
         final boolean needAsyncRecheck = isWorld && pendingPlatform && textGuard != null;
-        return authority.sendDetailed(original, toStore, rawTrimmed, preRejectTip, Deadline.after(budgetMs))
+        return authority.sendDetailed(original, toStore, rawTrimmed, preRejectTip, needAsyncRecheck, Deadline.after(budgetMs))
                 .handle((outcome, error) -> {
                     if (error != null) {
                         boolean denied = denied(error);
@@ -392,7 +411,7 @@ public final class ChatService implements AutoCloseable {
                     if (!sent.duplicate() && isWorld && outcome.message() != null) {
                         worldPublisher.publishMessage(outcome.message());
                         if (needAsyncRecheck) {
-                            scheduleAsyncWorldPlatformRecheck(outcome.message(), rawTrimmed);
+                            kickAsyncWorldPlatformRecheck();
                         }
                     }
                     return SendChatResponse.getDefaultInstance();
@@ -490,53 +509,145 @@ public final class ChatService implements AutoCloseable {
         };
     }
 
-    private void scheduleAsyncWorldPlatformRecheck(ChatMessage message, String rawContent) {
-        if (recheckExecutor == null || textGuard == null || authority == null || rawContent.isEmpty()) {
+    private void kickAsyncWorldPlatformRecheck() {
+        if (closed || recheckExecutor == null || textGuard == null || authority == null) {
             return;
         }
-        long senderId = message.getSenderPlayerId();
-        long sendTimeMs = message.getSendTimeMs();
         try {
-            recheckExecutor.execute(() -> {
-                CheckTextResponse resp;
-                try {
-                    resp = textGuard.checkPlatform(TextScene.TEXT_SCENE_CHAT_WORLD, senderId, rawContent);
-                } catch (RuntimeException e) {
-                    log.warn("[chat] Async platform moderation failed, sender={} send_time_ms={}: {}",
-                            Long.toUnsignedString(senderId), sendTimeMs, e.getMessage());
-                    return;
-                }
-                if (resp == null || resp.getVerdict() == TextVerdict.TEXT_VERDICT_UNSPECIFIED) {
-                    log.warn("[chat] Async platform moderation unavailable, sender={} send_time_ms={}",
-                            Long.toUnsignedString(senderId), sendTimeMs);
-                    return;
-                }
-                if (resp.getVerdict() != TextVerdict.TEXT_VERDICT_REJECT) {
-                    return;
-                }
-                try {
-                    JdbcChatStore.RetractResult res = authority.retractWorld(
-                                    senderId, sendTimeMs, PLATFORM_REJECT_REASON, Deadline.after(ASYNC_RECHECK_TIMEOUT_MS))
-                            .get(ASYNC_RECHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-                    if (res.retracted()) {
-                        worldPublisher.publishRetracted(ChatRetractedNotify.newBuilder()
-                                .setChannel(ChatChannelType.CHAT_CHANNEL_TYPE_WORLD)
-                                .setSenderPlayerId(senderId)
-                                .setSendTimeMs(sendTimeMs)
-                                .setReason(PLATFORM_REJECT_REASON)
-                                .build());
-                    }
-                } catch (Exception e) {
-                    if (e instanceof InterruptedException) {
-                        Thread.currentThread().interrupt();
-                    }
-                    log.error("[chat] Async world chat retraction failed, sender={} send_time_ms={}: {}",
-                            Long.toUnsignedString(senderId), sendTimeMs, e.getMessage());
-                }
-            });
+            recheckExecutor.execute(this::pollPlatformRechecksSafely);
         } catch (RejectedExecutionException full) {
-            log.warn("[chat] Async platform recheck queue full, dropped sender={} send_time_ms={}",
-                    Long.toUnsignedString(senderId), sendTimeMs);
+            // 待办已与消息同事务持久化在 chat_platform_recheck，由后台轮询器在下一拍兜底认领，不再丢失。
+            log.debug("[chat] Async platform recheck immediate kick saturated; durable poller will pick up");
+        }
+    }
+
+    private void pollPlatformRechecksSafely() {
+        if (closed) {
+            return;
+        }
+        try {
+            runPlatformRecheckOnce();
+        } catch (Throwable t) {
+            if (t instanceof Error err) {
+                throw err;
+            }
+            log.warn("[chat] World platform recheck poll failed: {}", t.getMessage());
+        }
+    }
+
+    /**
+     * 认领并执行一批持久化世界频道平台补审待办（对齐 Go {@code runPlatformRecheckOnce}）。
+     *
+     * @return 本轮认领处理的任务条数
+     */
+    public int runPlatformRecheckOnce() {
+        if (closed || authority == null || textGuard == null) {
+            return 0;
+        }
+        List<JdbcChatStore.PlatformRecheckTask> tasks;
+        try {
+            tasks = authority.claimPlatformRechecks(PLATFORM_RECHECK_BATCH, Deadline.after(ASYNC_RETRACT_TIMEOUT_MS))
+                    .get(ASYNC_RETRACT_TIMEOUT_MS + 500L, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return 0;
+        } catch (Exception e) {
+            metrics.worldPlatformRecheck(ChatMetrics.PlatformRecheckOutcome.ERROR);
+            log.error("[chat] World platform recheck claim failed: {}", e.getMessage());
+            return 0;
+        }
+        for (JdbcChatStore.PlatformRecheckTask task : tasks) {
+            if (closed) {
+                break;
+            }
+            processRecheckTask(task);
+        }
+        return tasks.size();
+    }
+
+    private void processRecheckTask(JdbcChatStore.PlatformRecheckTask task) {
+        JdbcChatStore.RecheckOutcome outcome = decidePlatformRecheck(task);
+        if (outcome == null) {
+            return;
+        }
+        try {
+            authority.finishPlatformRecheck(task.senderPlayerId(), task.acceptedMs(), outcome,
+                            Deadline.after(ASYNC_RETRACT_TIMEOUT_MS))
+                    .get(ASYNC_RETRACT_TIMEOUT_MS + 500L, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            log.error("[chat] World platform recheck outcome not recorded, sender={} send_time_ms={}: {}",
+                    Long.toUnsignedString(task.senderPlayerId()), task.acceptedMs(), e.getMessage());
+        }
+    }
+
+    private JdbcChatStore.RecheckOutcome decidePlatformRecheck(JdbcChatStore.PlatformRecheckTask task) {
+        if (task.exhausted()) {
+            log.error("[chat] metric=chat_world_platform_recheck_gave_up sender={} send_time_ms={} attempts={}: "
+                            + "platform stayed unavailable",
+                    Long.toUnsignedString(task.senderPlayerId()), task.acceptedMs(), task.attempt());
+            metrics.worldPlatformRecheck(ChatMetrics.PlatformRecheckOutcome.GAVE_UP);
+            return JdbcChatStore.RecheckOutcome.GAVE_UP;
+        }
+        if (task.missing()) {
+            log.error("[chat] metric=chat_world_platform_recheck_gave_up sender={} send_time_ms={}: original missing",
+                    Long.toUnsignedString(task.senderPlayerId()), task.acceptedMs());
+            metrics.worldPlatformRecheck(ChatMetrics.PlatformRecheckOutcome.GAVE_UP);
+            return JdbcChatStore.RecheckOutcome.GAVE_UP;
+        }
+        if (task.alreadyRetracted()) {
+            metrics.worldPlatformRecheck(ChatMetrics.PlatformRecheckOutcome.RETRACTED);
+            return JdbcChatStore.RecheckOutcome.RETRACTED;
+        }
+        CheckTextResponse resp;
+        try {
+            resp = textGuard.checkPlatform(TextScene.TEXT_SCENE_CHAT_WORLD, task.senderPlayerId(), task.content());
+        } catch (RuntimeException e) {
+            log.warn("[chat] World platform recheck failed, sender={} send_time_ms={} attempt={}: {}",
+                    Long.toUnsignedString(task.senderPlayerId()), task.acceptedMs(), task.attempt() + 1, e.getMessage());
+            metrics.worldPlatformRecheck(ChatMetrics.PlatformRecheckOutcome.UNAVAILABLE);
+            return null;
+        }
+        if (resp == null || resp.getVerdict() == TextVerdict.TEXT_VERDICT_UNSPECIFIED) {
+            log.warn("[chat] World platform recheck unavailable, sender={} send_time_ms={} attempt={}",
+                    Long.toUnsignedString(task.senderPlayerId()), task.acceptedMs(), task.attempt() + 1);
+            metrics.worldPlatformRecheck(ChatMetrics.PlatformRecheckOutcome.UNAVAILABLE);
+            return null;
+        }
+        if (resp.getVerdict() != TextVerdict.TEXT_VERDICT_REJECT) {
+            metrics.worldPlatformRecheck(ChatMetrics.PlatformRecheckOutcome.PASSED);
+            return JdbcChatStore.RecheckOutcome.PASSED;
+        }
+        try {
+            JdbcChatStore.RetractResult res = authority.retractWorld(
+                            task.senderPlayerId(), task.acceptedMs(), PLATFORM_REJECT_REASON,
+                            Deadline.after(ASYNC_RETRACT_TIMEOUT_MS))
+                    .get(ASYNC_RETRACT_TIMEOUT_MS + 500L, TimeUnit.MILLISECONDS);
+            if (res.tip() != 0) {
+                log.error("[chat] World platform reject could not be retracted, sender={} send_time_ms={} tip={}",
+                        Long.toUnsignedString(task.senderPlayerId()), task.acceptedMs(), res.tip());
+                metrics.worldPlatformRecheck(ChatMetrics.PlatformRecheckOutcome.GAVE_UP);
+                return JdbcChatStore.RecheckOutcome.GAVE_UP;
+            }
+            if (res.retracted()) {
+                worldPublisher.publishRetracted(ChatRetractedNotify.newBuilder()
+                        .setChannel(ChatChannelType.CHAT_CHANNEL_TYPE_WORLD)
+                        .setSenderPlayerId(task.senderPlayerId())
+                        .setSendTimeMs(task.acceptedMs())
+                        .setReason(PLATFORM_REJECT_REASON)
+                        .build());
+            }
+            metrics.worldPlatformRecheck(ChatMetrics.PlatformRecheckOutcome.RETRACTED);
+            return JdbcChatStore.RecheckOutcome.RETRACTED;
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            log.error("[chat] metric=chat_world_platform_reject_not_retracted sender={} send_time_ms={}: {}",
+                    Long.toUnsignedString(task.senderPlayerId()), task.acceptedMs(), e.getMessage());
+            metrics.worldPlatformRecheck(ChatMetrics.PlatformRecheckOutcome.ERROR);
+            return null;
         }
     }
 

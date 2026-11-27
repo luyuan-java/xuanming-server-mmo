@@ -19,6 +19,7 @@ public final class ChatMetrics {
     static final String SENDS = "game.chat.sends";
     static final String PULLS = "game.chat.pulls";
     static final String REQUESTS = "game.chat.requests";
+    static final String PLATFORM_RECHECKS = "game.chat.world.platform.rechecks";
 
     public static final String UNROUTED = "unrouted";
 
@@ -55,9 +56,13 @@ public final class ChatMetrics {
     /** 一个客户端请求的结果（{@code game.chat.requests{result}}）。 */
     public enum RequestResult { OK, BUSINESS_ERROR, INTERNAL_ERROR, BAD_REQUEST, UNSUPPORTED }
 
+    /** 世界频道异步平台补审结局（对齐 Go {@code chat_world_platform_recheck_total}）。 */
+    public enum PlatformRecheckOutcome { PASSED, RETRACTED, GAVE_UP, UNAVAILABLE, ERROR }
+
     private final MeterRegistry registry;
     private final Map<Channel, Map<Outcome, Counter>> sends = new EnumMap<>(Channel.class);
     private final Map<Channel, Map<Outcome, Counter>> pulls = new EnumMap<>(Channel.class);
+    private final Map<PlatformRecheckOutcome, Counter> platformRechecks = new EnumMap<>(PlatformRecheckOutcome.class);
     private final ConcurrentHashMap<String, Timer> requests = new ConcurrentHashMap<>();
 
     public ChatMetrics(MeterRegistry registry) {
@@ -74,6 +79,14 @@ public final class ChatMetrics {
             sends.put(channel, send);
             pulls.put(channel, pull);
         }
+        for (PlatformRecheckOutcome outcome : PlatformRecheckOutcome.values()) {
+            platformRechecks.put(outcome, Counter.builder(PLATFORM_RECHECKS).description("世界频道异步平台补审结局")
+                    .tag("outcome", tag(outcome)).register(registry));
+        }
+    }
+
+    public void worldPlatformRecheck(PlatformRecheckOutcome outcome) {
+        platformRechecks.get(outcome).increment();
     }
 
     public void send(Channel channel, Outcome outcome) {

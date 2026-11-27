@@ -43,6 +43,12 @@ public final class JdbcChatStore {
     private static final int MIN_SPAM_NORMALIZED_CODEPOINTS = 4;
     private static final int MAX_RETRACT_REASON_BYTES = 128;
     private static final int MAX_REPORT_DETAIL_BYTES = 200;
+    /** 世界频道平台补审扫描回看窗口（15 分钟，对齐 Go platformRecheckWindowMs）。 */
+    public static final long PLATFORM_RECHECK_WINDOW_MS = 15L * 60 * 1000;
+    /** 单次补审认领租期（20 秒，同时作为平台不可用时的重试间隔，对齐 Go platformRecheckLeaseMs）。 */
+    public static final long PLATFORM_RECHECK_LEASE_MS = 20_000L;
+    /** 单条待补审最多尝试送审次数（对齐 Go PlatformRecheckMaxAttempts）。 */
+    public static final int PLATFORM_RECHECK_MAX_ATTEMPTS = 3;
     private static final int PROFILE_CACHE_MAX_ENTRIES = 1 << 16;
     private static final long PROFILE_CACHE_TTL_NANOS = 30_000_000_000L;
     private static final String COLUMNS = "player_id,request_id,owner_account,owner_revision,"
@@ -85,6 +91,35 @@ public final class JdbcChatStore {
 
     /** 世界频道撤回结果（retracted=true 表示本次首次写入撤回记录，可向在线玩家广播撤回通知）。 */
     public record RetractResult(boolean retracted, int tip) { }
+
+    /** 世界频道平台补审结局（存在 chat_platform_recheck_done.outcome，对齐 Go authority.RecheckOutcome）。 */
+    public enum RecheckOutcome {
+        PASSED(1),
+        RETRACTED(2),
+        GAVE_UP(3);
+
+        private final int code;
+
+        RecheckOutcome(int code) {
+            this.code = code;
+        }
+
+        public int code() {
+            return code;
+        }
+    }
+
+    /** 认领到的一条世界频道平台补审任务（对齐 Go authority.PlatformRecheckTask）。 */
+    public record PlatformRecheckTask(
+            long senderPlayerId,
+            long acceptedMs,
+            int attempt,
+            String content,
+            boolean alreadyRetracted,
+            boolean exhausted,
+            boolean missing) { }
+
+    private record RecheckCandidate(long senderPlayerId, long acceptedMs, byte[] rawContent) { }
 
     /** 带冷却标记与首次提交原件的发送结果。 */
     public record SendOutcome(Sent sent, boolean cooldown, ChatMessage message) { }
@@ -146,6 +181,15 @@ public final class JdbcChatStore {
      */
     public CompletableFuture<SendOutcome> sendDetailed(SessionContext original, SendChatRequest normalized,
             String rawContent, int preRejectTip, Deadline deadline) {
+        return sendDetailed(original, normalized, rawContent, preRejectTip, false, deadline);
+    }
+
+    /**
+     * 完整发送路径：可选在世界消息落库同一事务内原子登记持久化平台补审待办（{@code chat_platform_recheck}），
+     * 保障进程崩溃、重启或突发流量下不丢待补审任务。
+     */
+    public CompletableFuture<SendOutcome> sendDetailed(SessionContext original, SendChatRequest normalized,
+            String rawContent, int preRejectTip, boolean enqueuePlatformRecheck, Deadline deadline) {
         if (original == null) return CompletableFuture.failedFuture(new SecurityException("聊天缺少原会话"));
         long player = original.getPlayerId();
         if (normalized == null || !normalized.hasMessage() || normalized.getMessage().getSenderPlayerId() != player
@@ -232,6 +276,15 @@ public final class JdbcChatStore {
             transaction.update("INSERT INTO chat_send_authority(" + COLUMNS + ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     AuthorityJdbc.u64(player), key, utf8(original.getAccount()), original.getOwnerRevision(),
                     digest, payload, message.toByteArray(), stream, ACCEPTED, now, 0);
+            if (peer == 0 && enqueuePlatformRecheck && !spamSource.isEmpty()) {
+                byte[] rawBytes = utf8(spamSource);
+                if (rawBytes.length > 4096) {
+                    rawBytes = Arrays.copyOf(rawBytes, 4096);
+                }
+                transaction.update(
+                        "INSERT IGNORE INTO chat_platform_recheck(sender_player_id,accepted_ms,raw_content) VALUES(?,?,?)",
+                        AuthorityJdbc.u64(player), now, rawBytes);
+            }
             return new SendOutcome(new Sent(0, false), false, message);
         }).whenComplete((outcome, err) -> {
             if (err == null && peer == 0 && outcome != null && outcome.sent().tip() == 0 && !outcome.sent().duplicate()) {
@@ -264,6 +317,102 @@ public final class JdbcChatStore {
             if (err == null && res != null && res.retracted()) {
                 invalidateWorldSnapshot();
             }
+        });
+    }
+
+    /**
+     * 认领至多 {@code limit} 条待补审世界消息（对齐 Go {@code ClaimPlatformRechecks}）：
+     * 仅扫描回看窗口内未写结局的任务，按每条独立短事务用 {@code INSERT IGNORE} 竞争认领槽位，防多副本重复送审。
+     */
+    public CompletableFuture<List<PlatformRecheckTask>> claimPlatformRechecks(int limit, Deadline deadline) {
+        if (limit <= 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("补审批量上限必须大于 0"));
+        }
+        int scanLimit = Math.min(limit * 4, 256);
+        return authority.executeInternal(deadline, tx -> {
+            long now = now(tx);
+            long since = now > PLATFORM_RECHECK_WINDOW_MS ? now - PLATFORM_RECHECK_WINDOW_MS : 0L;
+            return tx.list(
+                    "SELECT r.sender_player_id,r.accepted_ms,r.raw_content FROM chat_platform_recheck r "
+                            + "WHERE r.accepted_ms>=? AND NOT EXISTS ("
+                            + "SELECT 1 FROM chat_platform_recheck_done d "
+                            + "WHERE d.sender_player_id=r.sender_player_id AND d.accepted_ms=r.accepted_ms) "
+                            + "ORDER BY r.accepted_ms ASC LIMIT ?",
+                    row -> new RecheckCandidate(AuthorityJdbc.u64(row, 1), row.getLong(2), row.getBytes(3)),
+                    since, scanLimit);
+        }).thenCompose(candidates -> {
+            CompletableFuture<List<PlatformRecheckTask>> chain =
+                    CompletableFuture.completedFuture(new ArrayList<>(Math.min(limit, candidates.size())));
+            for (RecheckCandidate candidate : candidates) {
+                chain = chain.thenCompose(acc -> {
+                    if (acc.size() >= limit) {
+                        return CompletableFuture.completedFuture(acc);
+                    }
+                    return claimOnePlatformRecheck(candidate, deadline).thenApply(task -> {
+                        if (task != null) {
+                            acc.add(task);
+                        }
+                        return acc;
+                    });
+                });
+            }
+            return chain;
+        });
+    }
+
+    private CompletableFuture<PlatformRecheckTask> claimOnePlatformRecheck(RecheckCandidate c, Deadline deadline) {
+        return authority.executeInternal(deadline, tx -> {
+            long now = now(tx);
+            long[] stats = tx.one(
+                    "SELECT COUNT(*), COALESCE(MAX(claimed_ms), 0) FROM chat_platform_recheck_claim "
+                            + "WHERE sender_player_id=? AND accepted_ms=?",
+                    row -> new long[] {row.getLong(1), row.getLong(2)},
+                    AuthorityJdbc.u64(c.senderPlayerId()), c.acceptedMs());
+            int attempts = stats == null ? 0 : (int) stats[0];
+            long lastClaimMs = stats == null ? 0L : stats[1];
+            if (attempts > 0 && lastClaimMs + PLATFORM_RECHECK_LEASE_MS > now) {
+                return null;
+            }
+            if (attempts >= PLATFORM_RECHECK_MAX_ATTEMPTS) {
+                return new PlatformRecheckTask(c.senderPlayerId(), c.acceptedMs(), attempts, "", false, true, false);
+            }
+            int claimed = tx.update(
+                    "INSERT IGNORE INTO chat_platform_recheck_claim(sender_player_id,accepted_ms,attempt,claimed_ms) "
+                            + "VALUES(?,?,?,?)",
+                    AuthorityJdbc.u64(c.senderPlayerId()), c.acceptedMs(), attempts, now);
+            if (claimed == 0) {
+                return null;
+            }
+            Integer retracted = tx.one(
+                    "SELECT 1 FROM chat_world_retraction WHERE sender_player_id=? AND accepted_ms=? LIMIT 1",
+                    row -> row.getInt(1), AuthorityJdbc.u64(c.senderPlayerId()), c.acceptedMs());
+            if (retracted != null) {
+                return new PlatformRecheckTask(c.senderPlayerId(), c.acceptedMs(), attempts, "", true, false, false);
+            }
+            Integer originalExists = tx.one(
+                    "SELECT 1 FROM chat_send_authority WHERE player_id=? AND state=1 AND accepted_ms=? AND stream_key=? LIMIT 1",
+                    row -> row.getInt(1), AuthorityJdbc.u64(c.senderPlayerId()), c.acceptedMs(), stream(c.senderPlayerId(), 0));
+            if (originalExists == null) {
+                return new PlatformRecheckTask(c.senderPlayerId(), c.acceptedMs(), attempts, "", false, false, true);
+            }
+            String raw = c.rawContent() == null ? "" : new String(c.rawContent(), StandardCharsets.UTF_8);
+            return new PlatformRecheckTask(c.senderPlayerId(), c.acceptedMs(), attempts, raw, false, false, false);
+        });
+    }
+
+    /** 追加写入平台补审最终结局（INSERT IGNORE 幂等，对齐 Go {@code FinishPlatformRecheck}）。 */
+    public CompletableFuture<Void> finishPlatformRecheck(long senderPlayerId, long acceptedMs,
+                                                         RecheckOutcome outcome, Deadline deadline) {
+        if (senderPlayerId == 0 || acceptedMs <= 0 || outcome == null) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("平台补审结局参数非法"));
+        }
+        return authority.executeInternal(deadline, tx -> {
+            long now = now(tx);
+            tx.update(
+                    "INSERT IGNORE INTO chat_platform_recheck_done(sender_player_id,accepted_ms,outcome,done_ms) "
+                            + "VALUES(?,?,?,?)",
+                    AuthorityJdbc.u64(senderPlayerId), acceptedMs, outcome.code(), now);
+            return null;
         });
     }
 

@@ -373,4 +373,107 @@ class ChatSafetyAndModerationTest {
                 "game.chat.world-min-level", "1001")))
                 .bind("game.chat", Bindable.of(ChatProperties.class)));
     }
+
+    @Test
+    void 世界异步平台补审持久化防崩溃丢单_租期互斥与三次不可用后放弃() throws Exception {
+        var props = safetyProps(0, 0, 0, 0, 0, 0, 0);
+        try (var f = new ChatSqlFixture(props)) {
+            f.clock.set(1_700_000_000_000L);
+            f.player(10, "A", 1);
+            var s10 = session(10, "A");
+            var meterRegistry = new SimpleMeterRegistry();
+            var metrics = new ChatMetrics(meterRegistry);
+
+            AtomicReference<CheckTextResponse> nextPlatform = new AtomicReference<>();
+            List<String> platformSeenTexts = new ArrayList<>();
+            List<ChatRetractedNotify> retracted = new ArrayList<>();
+            ChatService.TextGuard guard = new ChatService.TextGuard() {
+                @Override
+                public CheckTextResponse check(TextScene scene, long playerId, String text, boolean allowAsyncPlatform) {
+                    // 打码放行但标记 pending_platform_review=true，验证持久化补审送给平台的是未打码原文
+                    return CheckTextResponse.newBuilder()
+                            .setVerdict(TextVerdict.TEXT_VERDICT_MASKED)
+                            .setMaskedText("hi ***")
+                            .setPendingPlatformReview(true)
+                            .build();
+                }
+
+                @Override
+                public CheckTextResponse checkPlatform(TextScene scene, long playerId, String text) {
+                    platformSeenTexts.add(text);
+                    return nextPlatform.get();
+                }
+            };
+            ChatService.WorldPublisher publisher = new ChatService.WorldPublisher() {
+                @Override public void publishRetracted(ChatRetractedNotify n) { retracted.add(n); }
+            };
+
+            // 1. 副本 A 发消息后即刻“崩溃”（注入只吞掉即时唤醒的执行器，模拟发完崩溃或队列满）
+            long msg1Ts = f.clock.get();
+            try (var replicaA = new ChatService(f.store, metrics, props, KEYS, guard, publisher, task -> {
+                // 只跑同步前置审核（supplyAsync），跳过发出后的即时补审唤醒，模拟进程崩溃/队列满
+                if (Thread.currentThread().getName().startsWith("chat-authority-")) {
+                    return;
+                }
+                task.run();
+            })) {
+                assertEquals(0, replicaA.send(s10, worldReq("crash-1", "raw secret bad"), 3500)
+                        .toCompletableFuture().get(5, TimeUnit.SECONDS).getErrorMessage().getId());
+            }
+            assertEquals(1, f.sql.queryForObject("SELECT COUNT(*) FROM chat_platform_recheck", Integer.class));
+            assertEquals(0, f.sql.queryForObject("SELECT COUNT(*) FROM chat_platform_recheck_done", Integer.class));
+
+            // 2. 副本 B 接手补审：拿到的是原始未打码正文，判拒后撤回并记结局 RETRACTED(2)
+            nextPlatform.set(CheckTextResponse.newBuilder()
+                    .setVerdict(TextVerdict.TEXT_VERDICT_REJECT).setCategory(TextCategory.TEXT_CATEGORY_PORN).build());
+            try (var replicaB = new ChatService(f.store, metrics, props, KEYS, guard, publisher, Runnable::run)) {
+                assertEquals(1, replicaB.runPlatformRecheckOnce());
+                assertEquals(List.of("raw secret bad"), platformSeenTexts);
+                assertEquals(1, retracted.size());
+                assertEquals(msg1Ts, retracted.getFirst().getSendTimeMs());
+                assertEquals(2, f.sql.queryForObject(
+                        "SELECT outcome FROM chat_platform_recheck_done WHERE sender_player_id=10 AND accepted_ms=?",
+                        Integer.class, msg1Ts));
+                // 再次扫描不再重复认领
+                assertEquals(0, replicaB.runPlatformRecheckOnce());
+            }
+
+            // 3. 租期互斥与最多 3 次不可用后记 GAVE_UP(3)
+            f.clock.addAndGet(1_000L);
+            long msg2Ts = f.clock.get();
+            nextPlatform.set(null); // 模拟平台持续不可用
+            try (var replicaC = new ChatService(f.store, metrics, props, KEYS, guard, publisher, task -> {
+                if (Thread.currentThread().getName().startsWith("chat-authority-")) {
+                    return;
+                }
+                task.run();
+            })) {
+                assertEquals(0, replicaC.send(s10, worldReq("retry-1", "flaky platform"), 3500)
+                        .toCompletableFuture().get(5, TimeUnit.SECONDS).getErrorMessage().getId());
+                // 第 1 次认领（attempt=0）不可用
+                assertEquals(1, replicaC.runPlatformRecheckOnce());
+                // 20s 租期内其他副本不得重复认领
+                f.clock.addAndGet(10_000L);
+                assertEquals(0, replicaC.runPlatformRecheckOnce());
+                // 过 20s 租期认领 attempt=1，仍不可用
+                f.clock.addAndGet(15_000L);
+                assertEquals(1, replicaC.runPlatformRecheckOnce());
+                // 再过 20s 认领 attempt=2，仍不可用
+                f.clock.addAndGet(25_000L);
+                assertEquals(1, replicaC.runPlatformRecheckOnce());
+                // 再过 20s 尝试次数耗尽（3/3），记 GAVE_UP(3) 并终止重试
+                f.clock.addAndGet(25_000L);
+                assertEquals(1, replicaC.runPlatformRecheckOnce());
+                assertEquals(3, f.sql.queryForObject(
+                        "SELECT outcome FROM chat_platform_recheck_done WHERE sender_player_id=10 AND accepted_ms=?",
+                        Integer.class, msg2Ts));
+                assertEquals(3, f.sql.queryForObject(
+                        "SELECT COUNT(*) FROM chat_platform_recheck_claim WHERE sender_player_id=10 AND accepted_ms=?",
+                        Integer.class, msg2Ts));
+                assertEquals(1.0, meterRegistry.get("game.chat.world.platform.rechecks")
+                        .tag("outcome", "gave_up").counter().count());
+                assertEquals(0, replicaC.runPlatformRecheckOnce());
+            }
+        }
+    }
 }
