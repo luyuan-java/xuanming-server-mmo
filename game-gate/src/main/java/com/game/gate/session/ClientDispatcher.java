@@ -1344,11 +1344,17 @@ public final class ClientDispatcher {
     }
 
     private void closeByServer(ClientSession s, int tipId) {
-        log.info("login 指示关闭会话 session={} tip={}", sid(s), tipId);
+        log.info("login 指示关闭会话 session={} tip={} redirected={}", sid(s), tipId, s.redirected);
         metrics.disconnected(DisconnectReason.SERVER_DIRECTIVE);
+        boolean alreadyRedirected = s.redirected;
         s.closing = true;
         s.exitSceneImmediatelyOnClose = true;
         discardPending(s, RequestResult.DROPPED);
+        if (alreadyRedirected) {
+            // 推过 124 的迁移/重定向会话被踢时不推「账号在别处登录」、直接静默关闭
+            s.close();
+            return;
+        }
         if (isImmediateKickWithReason(tipId) && kickPlayerMessageId > 0) {
             s.sendThenClose(kickPlayer(tipId));
         } else if (tipId != 0) {
@@ -1413,6 +1419,61 @@ public final class ClientDispatcher {
             return;
         }
         s.send(content);
+        if (content.getId() != 0L) {
+            s.sceneLane.onResponse(content.getId(), clock.millis(), sceneLaneSender(s));
+        }
+    }
+
+    /** 场景 lane 确定未执行（会话未载入或交接冻结）：放回队头等待 >=200ms 重投，或超 2000ms 回 1003。 */
+    public void onClientForwardRetryLater(ClientSession s, int sceneNodeId, long linkGen,
+                                          com.game.api.proto.ClientForwardRetryLater retryLater) {
+        if (s.closing || s.closed || !s.boundTo(sceneNodeId, linkGen)) {
+            return;
+        }
+        long nowMs = clock.millis();
+        SceneRequestLane.Sender sender = sceneLaneSender(s);
+        s.sceneLane.onRetryLater(retryLater.getRequestId(), nowMs, sender);
+        if (s.sceneLane.isHoldingForRetry()) {
+            long delayMs = Math.max(1L, s.sceneLane.retryNotBeforeMs() - nowMs);
+            try {
+                s.channel().eventLoop().schedule(
+                        () -> s.sceneLane.tick(clock.millis(), sceneLaneSender(s)),
+                        delayMs, TimeUnit.MILLISECONDS);
+            } catch (RejectedExecutionException ignored) {
+                s.sceneLane.clearOnDisconnect(sender);
+            }
+        }
+    }
+
+    private SceneRequestLane.Sender sceneLaneSender(ClientSession s) {
+        return new SceneRequestLane.Sender() {
+            @Override
+            public boolean sendToScene(ClientRequest request, boolean receivedOnPreviousRoute) {
+                if (s.sceneNodeId == 0) {
+                    return false;
+                }
+                ClientForward forward = ClientForward.newBuilder()
+                        .setSessionId(s.sessionId())
+                        .setPlayerId(s.scenePlayerId)
+                        .setMessageId(request.getMessageId())
+                        .setBody(request.getBody())
+                        .setRequestId(request.getId())
+                        .setReceivedOnPreviousRoute(receivedOnPreviousRoute)
+                        .build();
+                return links.send(s.sceneNodeId, s.sceneLinkGen,
+                        NodeLinkFrame.newBuilder().setClientForward(forward).build()) != 0;
+            }
+
+            @Override
+            public void failRequest(ClientRequest request, int tipId) {
+                s.send(envelopeError(request, tipId));
+            }
+
+            @Override
+            public SceneRequestLane.RouteKey currentRoute() {
+                return new SceneRequestLane.RouteKey(s.sceneNodeId, s.sceneLinkGen, 0L);
+            }
+        };
     }
 
     /**
@@ -1784,6 +1845,7 @@ public final class ClientDispatcher {
         s.redirected = true;
         s.cancelSessionRenew();
         s.cancelPlayDeadline();
+        s.sceneLane.onRedirect(sceneLaneSender(s));
         failQueuedOnRedirect(s);
         s.send(redirectNotify(redirect));
         metrics.redirect(source, RedirectResult.SENT);

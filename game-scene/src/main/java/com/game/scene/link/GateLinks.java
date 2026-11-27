@@ -178,6 +178,17 @@ public final class GateLinks implements ClientSink {
         return writeTransfer(linkId, redirectFrame(sessionId, playerId, fromEpoch, toEpoch, redirect), onWriteFailed);
     }
 
+    @Override
+    public void retryLater(long linkId, int sessionId, long playerId, long requestId, int messageId) {
+        write(linkId, NodeLinkFrame.newBuilder()
+                .setRetryLater(com.game.api.proto.ClientForwardRetryLater.newBuilder()
+                        .setSessionId(sessionId)
+                        .setPlayerId(playerId)
+                        .setRequestId(requestId)
+                        .setMessageId(messageId))
+                .build());
+    }
+
     /** 重定向帧的帧体（独立出来供字节金样测试对着同一个函数断言：scene 写出的字节就是 gate 解析的字节）。 */
     static PlayerTransfer redirectFrame(int sessionId, long playerId, long fromEpoch, long toEpoch, ZoneRedirect redirect) {
         return PlayerTransfer.newBuilder()

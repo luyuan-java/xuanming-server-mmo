@@ -131,6 +131,9 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
     private final PlayerLocationLookup locations;
     private final ZoneMergeFence fence;
     private final InFlightKeys<Long> playersInFlight;
+    /** 正在后台推进的 EnterGame 异步链计数（供优雅停机等待后台收尾再退出）。 */
+    private final java.util.concurrent.atomic.AtomicInteger activeBackgroundChains = new java.util.concurrent.atomic.AtomicInteger();
+    private final Object drainMonitor = new Object();
     private volatile AntiAddictionGate antiAddictionGate;
 
     /** 挂载可选防沉迷门禁：进游戏时从防沉迷会话账本读出未成年人截止时刻（读失败 fail-closed）并传给 scene 封顶离线托管。 */
@@ -314,13 +317,48 @@ public final class EnterGameHandler implements ClientMessageHandler<EnterGameReq
             return done(error(LoginErrorTip.login_error.kLoginInProgress_VALUE));
         }
         CompletableFuture<HandlerReply> result;
+        activeBackgroundChains.incrementAndGet();
         try {
             result = enter(session, account, playerId, enterDeadline);
         } catch (RuntimeException e) {
             playersInFlight.release(playerId);
+            decrementBackgroundChains();
             throw e;
         }
-        return result.whenComplete((reply, error) -> playersInFlight.release(playerId));
+        return result.whenComplete((reply, error) -> {
+            playersInFlight.release(playerId);
+            decrementBackgroundChains();
+        });
+    }
+
+    private void decrementBackgroundChains() {
+        if (activeBackgroundChains.decrementAndGet() <= 0) {
+            synchronized (drainMonitor) {
+                drainMonitor.notifyAll();
+            }
+        }
+    }
+
+    /** 当前在途的 EnterGame 异步链数量。 */
+    public int inFlightEnterCount() {
+        return Math.max(0, activeBackgroundChains.get());
+    }
+
+    /** 优雅停机等待在途 EnterGame 后台链全部收尾（返回 true 表示已清空，false 表示到达时限）。 */
+    public boolean awaitBackgroundDrain(Duration timeout) throws InterruptedException {
+        long deadlineNs = System.nanoTime() + Math.max(0L, timeout.toNanos());
+        synchronized (drainMonitor) {
+            while (activeBackgroundChains.get() > 0) {
+                long remainingNs = deadlineNs - System.nanoTime();
+                if (remainingNs <= 0L) {
+                    return false;
+                }
+                long ms = remainingNs / 1_000_000L;
+                int ns = (int) (remainingNs % 1_000_000L);
+                drainMonitor.wait(ms, ns);
+            }
+            return true;
+        }
     }
 
     /** @param enterDeadline 时间预算的截止时刻（{@link #nanoClock} 的读数） */

@@ -47,4 +47,8 @@ public interface SceneLinkListener {
 
     /** 兼容原监听器；生产路由区分自然断链与被新实例取代。 */
     default void onLinkDown(int sceneNodeId, long linkGen, boolean superseded) { onLinkDown(sceneNodeId, linkGen); }
+
+    /** 场景 lane 确定未执行、请 gate 放回队头稍后重投。 */
+    default void onClientForwardRetryLater(int sceneNodeId, long linkGen, com.game.api.proto.ClientForwardRetryLater retryLater) {
+    }
 }

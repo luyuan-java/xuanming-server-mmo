@@ -1,0 +1,42 @@
+# 无感重启收尾批：全服务优雅停机预算、战斗服计划排空宽限期与 Kafka acks=all 核对清单
+# 对应 PARITY.md「2026-11-12 无感重启收尾批」与 ShutdownBudgetPolicy（game-common）
+#
+# 一、全服务停机预算硬不变式（由 ShutdownBudgetPolicy.ServiceBudget 校验）：
+#   1. forceExitTimeout >= deregisterWait + maxRpcTimeout + backgroundDrain + margin
+#   2. terminationGracePeriodSeconds >= preStopWait + forceExitTimeout + margin
+#
+#   服务           | preStop | deregister | maxRpc | bgDrain | margin | forceExit | Pod Grace
+#   ---------------+---------+------------+--------+---------+--------+-----------+----------
+#   game-login     | 5s      | 5s         | 12s    | 8s      | 5s     | 30s       | 45s
+#   game-gate      | 5s      | 5s         | 12s    | 60s*    | 5s     | 85s       | 105s (*含 redirect-linger)
+#   game-scene     | 5s      | 5s         | 12s    | 30s     | 8s     | 60s       | 90s
+#   game-battle    | 5s      | 5s         | 12s    | 300s**  | 15s    | 315s      | 330s (**一局成局期限 300s + 普通停机 15s + 余量 15s)
+#   game-match     | 5s      | 5s         | 12s    | 5s      | 5s     | 30s       | 45s
+#   game-guild     | 5s      | 5s         | 12s    | 5s      | 5s     | 30s       | 45s
+#   game-trade     | 5s      | 5s         | 12s    | 5s      | 5s     | 30s       | 45s
+#   game-data      | 5s      | 5s         | 12s    | 10s     | 5s     | 35s       | 50s
+#
+# 二、提交点 Kafka 生产者确认级别核对（2026-11-27 已复核源码）：
+#   - game-battle KafkaBattleResultSink: ProducerConfig.ACKS_CONFIG="all" + ENABLE_IDEMPOTENCE_CONFIG=true
+#   - game-scene  AuditPipeline:         ProducerConfig.ACKS_CONFIG="all" + ENABLE_IDEMPOTENCE_CONFIG=true
+#   - Broker 要求：replication.factor=3, min.insync.replicas=2
+#
+# 三、gate 排空运维前置检查（打排空标记与删 Pod 前）：
+#   1. 余量检查：调用 GatePicker.remainingMigrationHeadroom(zoneId, drainingNodeId, gates) 估算同 zone 其余 gate 到 90% 水位可接人数；
+#   2. 同模板重启修订推进：若待删 Pod 已是 StatefulSet 当前 controller-revision-hash（模板未变），先执行
+#      `kubectl rollout restart statefulset/game-gate`（OnDelete 下不自动重启），使新建 Pod 获得新修订，
+#      与旧代外出构建区分开，供 GatePicker.pickForMigration 优先新一代。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: game-shutdown-and-battle-drain-budgets
+  namespace: game
+data:
+  battle.match_deadline_seconds: "300"
+  battle.normal_shutdown_seconds: "15"
+  battle.margin_seconds: "15"
+  battle.pod_termination_grace_period_seconds: "330"
+  gate.drain_migration.enabled: "true"
+  gate.drain_migration.rate_per_second: "20"
+  leader_election.retry_interval_seconds: "2"
+  kafka.commit_point_acks: "all"

@@ -99,6 +99,14 @@ public final class SceneEventRouter implements SceneLinkListener {
     }
 
     @Override
+    public void onClientForwardRetryLater(int sceneNodeId, long linkGen, com.game.api.proto.ClientForwardRetryLater retryLater) {
+        ClientSession session = registry.get(retryLater.getSessionId());
+        if (session != null) {
+            session.execute(() -> dispatcher.onClientForwardRetryLater(session, sceneNodeId, linkGen, retryLater));
+        }
+    }
+
+    @Override
     public void onLinkDown(int sceneNodeId, long linkGen) {
         onLinkDown(sceneNodeId, linkGen, false);
     }

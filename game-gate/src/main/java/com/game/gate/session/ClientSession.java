@@ -152,6 +152,10 @@ public final class ClientSession {
     private ScheduledFuture<?> playDeadlineTask;
     /** 周期向 login 续租的定时器（刷新设备与 NPPA 会话账本租约；断线、重定向或解绑时撤销）。 */
     private ScheduledFuture<?> sessionRenewTask;
+    /** 场景 lane 暂存与重投状态机（换场景节点期间按序暂存白名单请求并标记旧场景路由）。 */
+    final SceneRequestLane sceneLane = new SceneRequestLane();
+    /** 最近一次发 EnterGame 的时刻（Unix 毫秒，0 = 未发过；排空迁移要求选角态 5 分钟安静）。 */
+    long lastEnterGameAtMs;
 
     ClientSession(int sessionId, Channel channel, String clientIp) {
         this(sessionId, channel, clientIp, 0L, null);

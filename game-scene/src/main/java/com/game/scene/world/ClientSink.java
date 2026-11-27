@@ -58,4 +58,10 @@ public interface ClientSink {
      */
     boolean playerRedirect(long linkId, int sessionId, long playerId, long fromEpoch, long toEpoch, ZoneRedirect redirect,
                            Runnable onWriteFailed);
+
+    /**
+     * 场景 lane 确定未执行、请 gate 放回队头稍后重投（仅换节点含义不变的白名单请求在会话未载入或交接冻结时调用）。
+     */
+    default void retryLater(long linkId, int sessionId, long playerId, long requestId, int messageId) {
+    }
 }

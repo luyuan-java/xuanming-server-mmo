@@ -31,6 +31,8 @@ message GateNodeInfo {
   uint32 max_connections = 11;
   // 进程发布轨道（stable / canary，空串按 stable 算）。
   string release_track = 12;
+  // 部署代次标识（构建标识 + 工作负载修订，如 pod-template-hash / controller-revision-hash）；排空迁移优先选新一代。
+  string deployment_build_id = 13;
 }
 
 message SceneNodeInfo {
@@ -62,6 +64,8 @@ message SceneNodeInfo {
   uint64 lease_epoch = 13;
   // 进程发布轨道（stable / canary，空串按 stable 算）。
   string release_track = 14;
+  // 部署代次标识（构建标识 + 工作负载修订）；疏散与频道迁移优先选不属于外出构建的新一代节点。
+  string deployment_build_id = 15;
 }
 
 message SceneEntry {

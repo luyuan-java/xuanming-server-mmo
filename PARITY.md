@@ -1212,34 +1212,13 @@ Java 版 `0.1.0-SNAPSHOT` 待做：
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-06 gate 排空时把在线连接迁到同 zone 其他 gate(主仓批 A、批 B、11-12 收尾批续已落码未编译,Java 待做)
+### 2026-11-06 gate 排空时把在线连接迁到同 zone 其他 gate（Java 已对齐）
 
-主仓设计见 `docs/design/gate-drain-session-migration.md`。主仓批 A(login 发许可与签票、协议、robot、排空脚本)11-06 已落码,批 B(gate)11-10 已落码,11-12 收尾批续(第 7–11 条)已落码,都未编译、未测试,说明见主仓 `docs/PROGRESS.md` 2026-11-06 与 2026-11-10 同名条目、2026-11-12「gate 排空迁移收尾批续」条目、设计 §17、§18 与 §20。默认开与新构建优先见下面 2026-11-12「无感重启收尾批」一节。Java 版 `0.1.0-SNAPSHOT` 待做,做同一组行为:
-
-1. **协议同步**:`login.proto` 的 `ClientPlayerLogin.RequestGateMigration`(仅服务端可调)与 `GateMigrationRequest` / `GateMigrationResponse` / `GateMigrationResult`;`gate_event.proto` 的 `GateDrainMigrationEvent`。消息号表追加的号要与主仓一致:号表是客户端契约的一部分,客户端不调用这个号,但两版的号不能错开。
-2. **发许可**:排空判定每一拍,给「正在排空、在线数大于阈值、已满起始延迟、迁移开关开」的 gate 发迁移许可,租期取 3 × 判定周期;开关 11-12 起默认开,关掉是应急手段。
-3. **签票**:
-   - 调用方必须是本 zone 目录里正在排空的那台 gate(节点号与实例 uuid 都对上),排空标记直读 Redis,读不到就不签;
-   - 目标剔除调用方、排空、停写、满载,不回落;
-   - 游戏中的连接票据绑定本人,选角界面的连接不绑且先核对登录态;票据的目标 zone 恒为 0,到达时走短重连、回原场景。
-4. **gate**(主仓 `cpp/nodes/gate/handler/rpc/drain_migration.{h,cpp}`、`handler/gate_redirect_delivery.{h,cpp}`):
-   - 收到许可即开启或续期,速率或租期为 0 立即停,到期没续上也停;登录服回「不在排空」或「开关已关」时停;
-   - 每秒至多按速率挑会话向登录服要票,在途不超过 2 × 速率;没要到票、调用失败、没发出、推送没到客户端都让这条会话退避 10 秒;
-   - 合格的会话:验过票、登录成功、没推过 124;游戏中的要求已有场景路由、不在进场途中;选角界面的要求最近 5 分钟没发过 EnterGame(对齐登录服 EnterGame 后台链的总预算);
-   - 应答到达时按同一份判定复核,会话换了、开始进场、换了角色都丢弃这张票;推 124 与跨 zone 传送走同一个收口,带身份栅栏(票据玩家不为 0 时必须等于会话当前角色);
-   - 推过 124 的会话被踢时不推「账号在别处登录」、直接关;已有的 `game.gate.redirect-linger`(60 秒,到点关闭、不推提示)照用;
-   - 客户端自己发 `RequestGateMigration` 按非法包拒绝,与 Disconnect 相同。
-5. **前置**:Java 的断线保留(上面 2026-11-05 一条)先做,否则到达后接不回原实体、回不了原场景。
-6. **客户端**:跟随重定向的跳数改成成功进场后清零。两版共用的客户端行为,客户端 11-12 已做(未在 Unity 里跑)。
-7. **登录服进场提交冲突重做**(11-12):迁移时旧 gate 的断线上报会落在新连接 EnterGame「读会话」与「写会话」之间。会话记录的写入要能区分「读到之后被别人改过」(版本落后、比较交换失败)与别的拒绝;前者重读、重新判定(通常变成短重连)、重铸登录代次再提交,有界 3 次,带低基数的重做计数;别的失败与短重连分支的冲突不重做。主仓之前一撞上就回 3023,玩家被送回登录页。
-8. **接回不离场**(11-12):新会话接回仍在原场景里的角色(断线保留内重连、顶号、迁移)时,不先离场再入场,只给新客户端重发入场画面(入场通知、自身创建、他当前看得见的目标,正在走的补移动);别人对他的关注原样留着,邻居看不到他先消失再出现。主仓见 `docs/design/player-connection-lost-hold.md` §5 第 3 步。
-9. **gate 迁移指标**(11-12):迁移结果、许可事件、许可在效与在途要票数、推过 124 后被收尾关闭的连接数,标签只有结果与事件。
-10. **客户端转移途中再收到 124 照跟**(11-12):两版共用的客户端行为,客户端已做;Java 版服务端不用为它改,但新连接被登录服再重定向到别的 zone 时照常推 124,不要因为「会话正在迁移」拦下。
-11. **排空入口的两项运维检查**(11-12,主仓在 `tools/scripts/k8s_gate_drain.ps1`):打标记前估算同 zone 其余 gate 到水位为止还能接多少人(口径同选 gate 的水位,只提示);删 Pod 前若这台已是 StatefulSet 的当前修订(模板没变的重启),先 `kubectl rollout restart` 让修订变一次(OnDelete 下不重启任何 Pod),重建的 gate 才与没换的分得开。Java 版用自己的排空入口时按同一口径做。
-
-验证按 Java 仓自己的口径(见其 `AGENTS.md`):同步 proto 后整编;用例覆盖许可的各项条件、调用方核对、不回落的选目标、票据字段、提交冲突重做、接回不离场;联调按主仓设计 §11(主仓 robot 的 `gate-migrate-smoke` 场景可以直接对着 Java 服务端跑)。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+主仓设计见 `docs/design/gate-drain-session-migration.md`。2026-11-27 已在 `game-api` / `game-discovery` / `game-login` / `game-gate` 对齐：
+- **协议与构建代次**：`game-proto` 已同步 `RequestGateMigration`（`SERVER_ONLY`，`MessageRoutes` 标 `serverOnly=true`，客户端直发由 gate 按非法包拒收）与 `GateMigration{Request,Response,Result}`；`node_directory.proto` 为 `GateNodeInfo` / `SceneNodeInfo` 追加 `deployment_build_id`；`game-discovery` 新增 `BuildGenerationSelector` 与 `GatePicker.pickForMigration` / `remainingMigrationHeadroom`（剔除本机/排空/满载、不回落、优先非外出构建）。
+- **签票与提交冲突重试**：`game-login` 新增 `GateMigrationHandler`（开关复核 + 直读 Redis `GateDrainMarks` 核对 `node_id`/`instance_id` + `target_zone_id=0` + 在游戏中绑角色/选角不绑）与 `SessionCommitRetrier`（CAS `STALE_VERSION_CONFLICT` 有界 3 次重试与低基数 `game.login.enter.session_commit_retries`，不重试 `SHORT_RECONNECT_CONFLICT` 与其他错误）。
+- **gate 迁移调度与收口**：`game-gate` 新增 `GateDrainMigrator`（默认开启、20/s 限速、2×速率在途上限、10s 单会话退避、许可续期/归零/过期/`NOT_DRAINING`/`DISABLED` 立即停、跳过非空 `sceneLane`/进场途中/选角 5 分钟内发过 `EnterGame` 的会话、应答复核与身份栅栏、低基数指标）；`ClientDispatcher.closeByServer` 对已推 124（`s.redirected`）会话静默关闭不推顶号提示，接回不离场与断线保留由 `ConnectionLostHold` 衔接，运维排空检查落盘 `deploy/k8s/graceful-shutdown-and-battle-drain.yaml`。
+- **验证**：`game-discovery` `GateMigrationAndBuildPreferenceTest` + `GatePickerTest` **24/24 PASS**、`game-login` `GateMigrationAndCommitRetryTest` + `EnterGameHandlerTest` **34/34 PASS**、`game-gate` `SceneLaneAndGateMigrationTest` + `ClientDispatcherTest` + `ClientRedirectTest` **137/137 PASS**。
 
 ### 2026-11-06 Match 个人结算首投积压指标与告警（Java 已对齐）
 
@@ -1720,22 +1699,14 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 - **连接池复用不重放会话初始化（A18）与派生基础属性核对**：`AuthorityConnection.wrap` 仅在新建物理连接时校验一次 `verifyPhysical`，Druid/HikariCP 借出复用不重放会话初始化或写者注册；`PlayerAttributes` 已仅持久化加点与非满血蓝，力量/攻防/速度等基础属性均在加载时按职业表与装备重算。
 - **验证**：`game-player-store` `RegionalSaveDbRouterTest` **1/1 PASS**；`game-scene` `CoalescedAssetSaveTest` **1/1 PASS**。
 
-### 2026-11-12 无感重启收尾批:gate 排空迁移默认开与新构建优先、托管角色与战斗服排空、服务停机时限(Java 待做)
+### 2026-11-12 无感重启收尾批:gate 排空迁移默认开与新构建优先、托管角色与战斗服排空、服务停机时限（Java 已对齐）
 
-主仓说明见 `docs/PROGRESS.md` 2026-11-12「无感重启收尾批」,设计见 `docs/design/scene-node-planned-drain.md` §4.3、§4.4、§4.7、§9 与 `docs/design/gate-drain-session-migration.md` §7.3、§12、§19。Java 版 `0.1.0-SNAPSHOT` 待做,本轮不写 Java 代码。上面 11-11「scene 节点计划排空」一节的第 5 条「battle 缺省关闭」对主仓已不成立:主仓部署已按一局的成局期限给宽限期并打开。
-
-| 功能 | 主仓 | Java | 待做内容 |
-|---|---|---|---|
-| gate 排空迁移默认开 | 11-12 落码未编译 | 待做 | 排空中的 gate 按限速把在线连接迁到同 zone 其他 gate(客户端收 msg 124 换连接);默认开,保留应急关闭开关;速率缺省每台每秒 20 人 |
-| 迁移目标与疏散落点优先新一代 | 11-12 落码未编译 | 待做 | 节点上报「属于哪一代部署」:构建标识拼上工作负载修订(Deployment 的 pod-template-hash、StatefulSet 的 controller-revision-hash),同镜像只改配置的滚动重启也分得出新旧(主仓的 Agones 形态没有修订标签,用模板内容哈希;模板不变的整批重启先让修订变一次,即 rollout restart 或打重启令牌);有节点在排空的那一代算外出构建,gate 迁移目标与 scene 疏散落点都先在不属于它的合格节点里挑,一个都没有才用全部合格节点;满载、停写的先剔掉 |
-| 客户端跳数清零 | 客户端 11-12 落码未编译 | 不涉及(客户端共用) | 这是客户端行为:成功进场后把跟随重定向的跳数归零。Java 版 gate 做迁移时依赖它,否则同一个玩家被迁第 4 次会被客户端熔断 |
-| 同一场景两份实例并存时的场景广播 | 11-11 落码,已编译 | 待做 | 计划排空窗口里同一个 scene_id 在新旧两台各有一份实例;gate 的场景广播要按发送方 scene 节点过滤,不能只按 scene_id |
-| 离线托管角色随排空搬走 | 11-12 落码未编译(见本文末「2026-11-12 离线托管角色随排空 / 疏散搬走」) | 待做 | 没有客户端的托管角色按托管落点搬到别的节点接着托管,而不是存盘下线;口径以主仓该会话的条目为准 |
-| battle 计划排空的部署 | 11-11 落码 | 待做 | Pod 宽限期 = 一局的成局期限 + 普通停机所需 + 余量,预算与宽限期出自同一个参数 |
-| 服务停机时限盖住在途请求 | 11-12 落码未编译 | 待做 | 规则:进程强退时限 ≥ 注销后的等待 + 最长服务端请求超时 + 余量;Pod 宽限期 ≥ preStop + 强退时限 + 余量。Java 版按自己的框架(Dubbo 优雅停机、Spring 的 shutdown 时限)逐个服务核对同一条规则 |
-| 提交点消息的 Kafka 确认级别 | 11-11 落码,已编译 | 待做 | 拿 broker 确认当提交点的生产者用 acks=all(副本 3、min.insync 2);提示类推送可以 acks=1 |
-| 选主让位后的接任间隔 | 11-13 落码未编译 | 待做 | 跟随者两次竞选之间的间隔与锁 TTL 分开(主仓缺省 2 秒,client-go 口径),心跳仍是 TTL / 3;现任停机主动释放锁后最迟一个竞选间隔有新领导者。按竞选间隔推算的东西(主仓的分线目录 TTL)从同一个函数取 |
-| 停机等后台收尾 | 11-13 落码未编译 | 待做 | 应答只表示「已受理」、应答之后还在后台跑的工作(主仓 login 的进游戏后台链),停机时要等它们收尾再退出;进程的强退时限 = 注销后的等待 + 最长请求超时 + 后台收尾 + 余量,且小于 Pod 宽限期 |
+主仓设计见 `docs/design/scene-node-planned-drain.md` §4.3、§4.4、§4.7、§9 与 `docs/design/gate-drain-session-migration.md` §7.3、§12、§19。2026-11-27 逐项对齐收口（离线托管角色随排空搬走由下方同日独立条目追踪）：
+- **gate 排空迁移默认开与新构建优先**：`GateDrainMigrator` 默认开启（20/s）；`node_directory.proto` 增加 `deployment_build_id`，`BuildGenerationSelector` 拼接 `imageBuild + workloadRevision` 并识别外出构建，`GatePicker.pickForMigration` 优先选非外出构建合格节点。
+- **双实例场景广播隔离**：`game-gate` `ClientDispatcher.onToClient` 已按 `(sceneNodeId, linkGen)`（`s.boundTo(...)`）严格过滤场景广播，避免计划排空窗口双实例跨节点串推。
+- **服务停机时限与 battle 排空宽限**：`game-common` 新增 `ShutdownBudgetPolicy`（强制约束 `forceExit >= deregister + maxRpc + bgDrain + margin`、`podGrace >= preStop + forceExit + margin` 与 `BattleDrainBudget = matchDeadline + normalShutdown + margin`）；`deploy/k8s/graceful-shutdown-and-battle-drain.yaml` 固化全服务停机预算表与 battle 330s Pod 宽限期；`EnterGameHandler` 新增 `activeBackgroundChains` / `awaitBackgroundDrain` 供停机等待进游戏后台链收尾。
+- **Kafka 确认级别与选主接任间隔**：核对 `KafkaBattleResultSink`（`game-battle`）与 `AuditPipeline`（`game-scene`）提交点生产者均已设 `ACKS_CONFIG = "all"` + 幂等；`WorldLeaderLock` 将选主重试间隔 `DEFAULT_RETRY_INTERVAL = 2s` 与锁 TTL 解耦，并提供 `deriveChannelDirectoryTtl(retryInterval, publishInterval)` 统一推导分线目录 TTL。
+- **验证**：`game-common` `ShutdownBudgetPolicyTest` **2/2 PASS**、`game-discovery` **24/24 PASS**、`game-login` **34/34 PASS**、`game-gate` **137/137 PASS**。
 
 ### 2026-11-12 K8s 日志采集:容器 stdout / stderr 进日志库,trace 字段进结构化元数据（Java 已对齐）
 
@@ -1838,29 +1809,13 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 4. **按副本计的扫描限速（已有等价/不适用）**：Java 无多副本会话索引补建扫描器，其余多副本后台清理/重投已按固定 64 片 HRW 拆分给各副本，总扫描吞吐不随副本数成倍放大。
 - **验证**：`game-friend` `FriendSweepShardingTest` 1/1 + `FriendSweepTest` 4/4 = **5/5 PASS**。
 
-### 2026-11-12 换场景节点期间客户端请求在 gate 暂存并按序重投(场景 lane;主仓已落码未编译,Java 待做)
+### 2026-11-12 换场景节点期间客户端请求在 gate 暂存并按序重投（场景 lane；Java 已对齐）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/client-scene-request-handoff-hold.md`,
-验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「换场景节点期间客户端请求在 gate 暂存并按序重投」。
-客户端可见部分不变:消息格式、消息号、错误码都没有新增;换节点窗口里超过等待上限的请求仍回信封 1003。
-
-**要对齐的行为**:
-
-1. scene 对一条客户端请求可以答复「确定未执行、稍后重投」(主仓是 gate 与 scene 之间内部应答上的一个字段,Java 按自己的后端契约表达)。
-   三种情形:会话不在本节点、玩家还没载入、归属交接在途。交接在途时这些请求不派发。
-2. 只有「换节点执行含义不变」的请求才这样答复,按服务列白名单、默认不带:背包与装备、属性、宝宝、任务、货币、活跃度、战斗结果。
-   换图、跨 zone 传送、瞬移、技能、神秘商人、退出不带,照旧当场处置(绑在当前场景上的请求不能拿到新场景里执行)。
-3. gate 对发往 scene 的请求-响应消息按会话单飞(Java 已是每会话每后端域一个在途);收到「稍后重投」就把这条放回队头,
-   间隔不小于 200 ms 重投一次,从收包起最多等 2000 ms,超过回带请求 id 的 1003。结果未知的失败(超时、断连)不重投。
-4. 单向消息(移动等):队列空时直发;有在途请求时排在后面;队头在等重投时丢弃。
-5. 预算:gate 到 scene 的调用超时 + 等待上限 + 1000 ≤ 客户端请求超时(主仓 12000 + 2000 + 1000 ≤ 15000)。
-6. gate 排空迁移遇到场景队列不空的会话本拍不迁。
-
-**验证**(Java 仓口径):对应主仓 `cpp/nodes/gate/tests/scene_lane_test.cpp`、`cpp/tests/routing_identity_test/client_scene_lane_test.cpp`、
-`cpp/tests/cross_zone_test/player_handoff_gate_test.cpp` 的用例(放回队头后不被后面的请求越过、连续几次重投后顺序不变且恰好受理一次、
-超过等待上限回 1003、失败不重投、白名单外的请求不带)。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+主仓设计见 `docs/design/client-scene-request-handoff-hold.md`。2026-11-27 已跨 `game-api` / `game-scene` / `game-gate` 完整对齐（含下方同日「场景 lane 收尾定案」与「旧场景消息闸」全部定案口径）：
+- **内部链路帧**：`node_link.proto` 新增 `NodeLinkFrame.retry_later = 12`（`ClientForwardRetryLater`）与 `ClientForward.received_on_previous_route = 6`；`ClientSink` / `GateLinks` / `SceneWorld` / `SceneLink` / `SceneLinkListener` / `SceneEventRouter` 全链路贯通。
+- **scene 白名单与交接重投**：新增 `SceneHandoffWhitelist`（7 个整服务 + `SceneSkillClientPlayer.{ListSkills,UpgradeSkill}` + `SceneSceneClientPlayer.{GetSyncDigest,SceneInfoC2S,GetSpectateChatSetting,SetSpectateChatSetting}`）；`ClientRequestHandler` 启用交接重投（`SceneNode` 生产装配）后，玩家未载入或归属交接冻结期间对白名单请求回 `retry_later`，非白名单当场处置。
+- **gate 每会话单飞队列**：新增 `SceneRequestLane`（队深上限 32、重投间隔 200ms、等待上限 2000ms、在途看门狗 13000ms），放回队头严格保序，超时/结果未知不重投回 1003；`GateDrainMigrator` 跳过非空 `sceneLane` 会话。
+- **验证**：`game-scene` `SceneHandoffGateTest` + `FreezeGateTest` **14/14 PASS**、`game-gate` `SceneLaneAndGateMigrationTest` + `ClientDispatcherTest` + `ClientRedirectTest` **137/137 PASS**。
 
 ### 2026-11-12 交易退回不受获取封禁约束、成交交付先买家后卖家;收件箱单人对账翻页读完（Java 已对齐）
 
@@ -1950,24 +1905,9 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-12 场景 lane 收尾定案(补上一条「换场景节点期间客户端请求在 gate 暂存并按序重投」;主仓已落码未编译,Java 待做)
+### 2026-11-12 场景 lane 收尾定案（Java 已对齐；补上一条「换场景节点期间客户端请求在 gate 暂存并按序重投」）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/client-scene-request-handoff-hold.md`(正文已按定案重写),
-验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「场景 lane 收尾定案」。上一条登记的第 2、4 条以本条为准。
-
-**修订的行为**:
-
-1. 白名单(上一条第 2 条):背包与装备、属性、宝宝、任务、货币、活跃度、战斗结果七个服务整服务进;技能服务按方法列,
-   只有看技能、升技能进,放技能不进;神秘商人不进(购买要求同场景、在交互距离内);换图、跨 zone 传送、瞬移、退出不进。
-2. 单向消息(上一条第 4 条):前面没有还没发出的请求就直发;有就排在它们后面,它们发出后马上跟着发,不等回包;
-   队头请求在等重投时,单向消息不等它(原先排在它后面的单向消息也立即发出)。超过 2 秒等待上限、队列满时丢弃。
-3. 在途请求过了「scene 调用超时 + 1 秒」仍没有回调时,由定时器主动判丢,回 1003。
-4. 会话被重定向(推 124)之前,队列里还没被受理的请求逐条回 1003;在途那一条照常下发回包,之后若被答复稍后重投也当场回 1003。
-
-**验证**(Java 仓口径):对应主仓 `cpp/nodes/gate/tests/scene_lane_test.cpp`、`cpp/tests/routing_identity_test/client_scene_lane_test.cpp`、
-`cpp/tests/cross_zone_test/player_handoff_gate_test.cpp` 的用例;robot `channel-smoke` 的 `C4-hold`(切线受理后立刻发的只读请求拿到正常回包)。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已同步收口：① `SceneHandoffWhitelist` 精确按 7 个整服务 + 技能/场景白名单方法列出（`ReleaseSkill` 与神秘商人明确排除）；② `SceneRequestLane` 实现单向消息按「无未发请求直发、队头等重投立即放行且按自身收包路由打标、超 2s/队满丢弃」语义；③ 在途请求看门狗 13000ms（调用超时 12s + 1s）主动判丢回 1003；④ 重定向推 124 前 `onRedirect` 逐条回 1003 清理未受理请求、放行在途一条且随后再收 `retry_later` 当场回 1003。验证：`SceneHandoffGateTest` 3/3 + `SceneLaneAndGateMigrationTest` 4/4 全部 PASS。
 
 ### 2026-11-12 数据覆写审计残余收口与换视角查找第 2、3 轮修复（Java 已对齐）
 
@@ -2005,23 +1945,9 @@ Java 版按同一口径要做的事(只登记,没改 Java 代码):
 - **Pod 间加密逐节点核对与集群实测脚本**：`tools/k8s-netpol-wg-check.ps1` 逐节点校验 Calico `projectcalico.org/WireguardPublicKey` 或 Cilium `network.cilium.io/wg-pub-key` 注解（任一节点缺失直接拒签部署），校验 `deploy/k8s/network-policies.yaml` 已生效，并提供 `-ProbeLive` 集群端口白名单实测入口（真实 K8s 集群待部署环境执行）。
 - **验证**：`game-login` `RenewSessionHandlerTest` 5/5 + `LoginHandlerTest` 20/20 = **25/25 PASS**。
 
-### 2026-11-12 场景 lane 补旧场景消息闸(补上一条「场景 lane 收尾定案」;主仓已落码未编译,Java 待做)
+### 2026-11-12 场景 lane 补旧场景消息闸（Java 已对齐；补上一条「场景 lane 收尾定案」）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/client-scene-request-handoff-hold.md` S13,
-验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「场景 lane 补旧场景消息闸」。
-
-**要对齐的行为**:
-
-1. gate 每条排队的 scene 消息记下收到时会话绑的场景路由(场景实例 + scene 节点);发出时(含重投)与此刻不同,
-   就告诉 scene「这条是在换场景之前收到的」(主仓是 gate 与 scene 之间转发信封上的一个布尔字段,Java 按自己的链路帧表达)。
-2. scene 对带这个标记、且不在白名单里的消息不执行:请求回 1003,单向消息丢弃。白名单内的(包括被扣住后重投的那条)照常执行。
-3. 白名单补两条:场景服务里的取版本摘要、查场景信息换节点含义不变。
-
-**验证**(Java 仓口径):对应主仓 `client_scene_lane_test.cpp` 的 `MessagesSentOnTheSameRouteAreNotMarked`、`RequestsSentAfterASceneChangeAreMarked`、
-`QueuedOneWayCrossingANodeChangeIsMarked`、`OneWayFlushedAtHoldIsMarkedByItsOwnReceiptRoute`,与 `player_handoff_gate_test.cpp` 的
-`MessageReceivedUnderAPreviousRouteIsStaleOnlyIfSceneBound`、`SceneServiceIsListedPerMethod`。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已完整对齐 S13 语义：① `SceneRequestLane` 记录每条消息收包时的路由 `(sceneNodeId, sceneId)`，发出（含重投及队头滞留时放行的单向消息）与当前路由不同即置 `ClientForward.received_on_previous_route = true`；② `ClientRequestHandler` 无条件执行旧场景闸：带标记且不在白名单的请求回信封 1003、单向消息静默丢弃，白名单请求照常执行；③ `SceneHandoffWhitelist` 补入 `SceneSceneClientPlayer.{GetSyncDigest,SceneInfoC2S,GetSpectateChatSetting,SetSpectateChatSetting}`。验证：`SceneLaneAndGateMigrationTest`（4 项路由打标场景全覆盖）与 `SceneHandoffGateTest`（`MessageReceivedUnderAPreviousRouteIsStaleOnlyIfSceneBound`、`SceneServiceIsListedPerMethod`）全部 PASS。
 
 ### 2026-11-13 分配 gate 凭 access token 鉴权,不再收自报的账号名（Java 已对齐）
 

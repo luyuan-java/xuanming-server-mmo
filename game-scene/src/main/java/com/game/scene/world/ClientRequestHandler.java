@@ -94,6 +94,13 @@ public final class ClientRequestHandler {
     private final RunMode runMode;
     private final SceneMetrics metrics;
     private final Map<Integer, Registered> handlers = new HashMap<>();
+    /** 是否启用场景 lane 交接期白名单请求回 retry_later（生产 SceneNode 开启；旧冻结单测默认关闭保持 1005 语义）。 */
+    private volatile boolean handoffRetryLaterEnabled;
+
+    public ClientRequestHandler withHandoffRetryLater(boolean enabled) {
+        this.handoffRetryLaterEnabled = enabled;
+        return this;
+    }
 
     /** 只有场景核心功能、生产运行模式（测试用）。 */
     public ClientRequestHandler(SceneWorld world, MessageIdRegistry registry, SceneMessageIds ids) {
@@ -250,8 +257,27 @@ public final class ClientRequestHandler {
 
     public void onClientForward(long linkId, ClientForward forward) {
         SessionKey key = new SessionKey(linkId, forward.getSessionId());
+        Optional<MessageMethod> foundEarly = registry.byId(forward.getMessageId());
+        // 旧场景消息闸（S13）：若 gate 标明该消息在换场景前收到且不在换节点白名单内，严禁在新场景执行（请求回 1003、单向丢弃）。
+        if (forward.getReceivedOnPreviousRoute()
+                && foundEarly.isPresent()
+                && !SceneHandoffWhitelist.isWhitelisted(foundEarly.get())) {
+            if (hasResponse(foundEarly.get())) {
+                replyNotDispatched(key, forward);
+            } else {
+                log.debug("旧场景单向消息不在白名单内，静默丢弃 method={} session={}", foundEarly.get().key(), key);
+            }
+            return;
+        }
         ScenePlayer player = world.playerBySession(key);
         if (player == null) {
+            if (handoffRetryLaterEnabled
+                    && foundEarly.isPresent()
+                    && hasResponse(foundEarly.get())
+                    && SceneHandoffWhitelist.isWhitelisted(foundEarly.get())) {
+                world.sendRetryLater(key, forward.getPlayerId(), forward.getRequestId(), forward.getMessageId());
+                return;
+            }
             log.debug("会话不在本节点或仍在加载，丢弃 message_id={} session={}", forward.getMessageId(), key);
             replyNotDispatched(key, forward);
             return;
@@ -262,7 +288,7 @@ public final class ClientRequestHandler {
             replyNotDispatched(key, forward);
             return;
         }
-        Optional<MessageMethod> found = registry.byId(forward.getMessageId());
+        Optional<MessageMethod> found = foundEarly;
         // 只有标了 OptionIsPlayerService 的客户端服务归 scene 处理（按服务语义，不看 proto 所在目录）
         if (found.isEmpty() || !found.get().playerService() || !found.get().clientService()) {
             log.warn("不是 scene 的客户端消息，丢弃 message_id={} player={}", forward.getMessageId(), player.playerId());
@@ -305,6 +331,10 @@ public final class ClientRequestHandler {
             return;
         }
         if (player.frozen()) {
+            if (handoffRetryLaterEnabled && hasResponse && SceneHandoffWhitelist.isWhitelisted(method)) {
+                world.sendRetryLater(key, player.playerId(), requestId, method.messageId());
+                return;
+            }
             if (!admitWhileFrozen(player, method, registered.freeze(), requestId, hasResponse)) {
                 return;
             }

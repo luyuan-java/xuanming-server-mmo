@@ -22,6 +22,7 @@ message NodeLinkFrame {
     PlayerTransfer player_transfer = 9;
     LinkPing ping = 10;
     LinkPong pong = 11;
+    ClientForwardRetryLater retry_later = 12;
   }
 }
 
@@ -136,6 +137,16 @@ message ClientForward {
   uint32 message_id = 3;
   bytes body = 4;
   uint64 request_id = 5;
+  // true = gate 收到这条消息时会话绑的场景路由与发出（含重投）时不同；scene 据此拦下白名单外的旧场景消息。
+  bool received_on_previous_route = 6;
+}
+
+// scene → gate：确定未执行、请 gate 放回场景 lane 队头按 >=200ms 间隔重投（仅白名单请求在会话未载入或交接冻结时返回）。
+message ClientForwardRetryLater {
+  uint32 session_id = 1;
+  uint64 player_id = 2;
+  uint64 request_id = 3;
+  uint32 message_id = 4;
 }
 
 // scene → gate：下行给一个或多个会话的消息；message_content 是 MessageContent 的序列化字节，gate 原样用客户端帧下发。

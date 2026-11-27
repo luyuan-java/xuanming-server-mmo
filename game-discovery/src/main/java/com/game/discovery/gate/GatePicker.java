@@ -1,11 +1,13 @@
 package com.game.discovery.gate;
 
 import com.game.api.proto.GateNodeInfo;
+import com.game.discovery.BuildGenerationSelector;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.IntUnaryOperator;
 import org.slf4j.Logger;
@@ -157,6 +159,84 @@ public final class GatePicker {
         log.warn("zone={} 的 {} 台可连 gate 无完全合格候选（draining={} full={} reason={}），回落全部可连 gate 继续分配",
                 zoneId, connectable.size(), drainingCount, fullCount, reason);
         return connectable;
+    }
+
+    /**
+     * gate 排空迁移选目标（对齐 gate-drain-session-migration §7.3 & 无感重启收尾批）：
+     * <ol>
+     *   <li>剔除调用方自身（{@code excludeSourceNodeId}）、排空中（{@code draining}）、已满载（≥ 90% 水位）；<b>绝不回落</b>到排空/满载 gate；</li>
+     *   <li>凡是有节点在排空的 {@code deployment_build_id} 算外出构建，在合格候选中优先挑不属于外出构建的新一代 gate，没有新一代再退回全部合格候选。</li>
+     * </ol>
+     */
+    public static List<GateNodeInfo> eligibleForMigration(int zoneId, int excludeSourceNodeId, List<GateNodeInfo> gates) {
+        List<GateNodeInfo> connectable = connectableNewest(zoneId, gates);
+        if (connectable.isEmpty()) {
+            return List.of();
+        }
+        Set<String> outgoing = BuildGenerationSelector.outgoingBuilds(
+                connectable, GateNodeInfo::getDraining, GateNodeInfo::getDeploymentBuildId);
+        List<GateNodeInfo> healthy = new ArrayList<>(connectable.size());
+        for (GateNodeInfo g : connectable) {
+            if (g.getNodeId() == excludeSourceNodeId || g.getDraining() || isFull(g)) {
+                continue;
+            }
+            healthy.add(g);
+        }
+        return BuildGenerationSelector.preferNonOutgoing(healthy, outgoing, GateNodeInfo::getDeploymentBuildId);
+    }
+
+    /** gate 排空迁移随机二选一选目标（无合格候选返回 empty，绝不回落）。 */
+    public static Optional<GateNodeInfo> pickForMigration(int zoneId, int excludeSourceNodeId, List<GateNodeInfo> gates,
+                                                          GateInflight inflight) {
+        return pickFromCandidates(eligibleForMigration(zoneId, excludeSourceNodeId, gates), inflight,
+                bound -> ThreadLocalRandom.current().nextInt(bound));
+    }
+
+    static Optional<GateNodeInfo> pickForMigration(int zoneId, int excludeSourceNodeId, List<GateNodeInfo> gates,
+                                                   GateInflight inflight, IntUnaryOperator intn) {
+        return pickFromCandidates(eligibleForMigration(zoneId, excludeSourceNodeId, gates), inflight, intn);
+    }
+
+    private static Optional<GateNodeInfo> pickFromCandidates(List<GateNodeInfo> candidates, GateInflight inflight,
+                                                             IntUnaryOperator intn) {
+        int n = candidates.size();
+        if (n == 0) {
+            return Optional.empty();
+        }
+        if (n == 1) {
+            return Optional.of(candidates.get(0));
+        }
+        Map<Integer, Integer> inflightCounts = inflight == null ? Map.of() : inflight.snapshot();
+        int i = intn.applyAsInt(n);
+        int j = intn.applyAsInt(n - 1);
+        if (j >= i) {
+            j++;
+        }
+        long loadI = effectiveLoad(candidates.get(i), inflightCounts);
+        long loadJ = effectiveLoad(candidates.get(j), inflightCounts);
+        if (Long.compareUnsigned(loadJ, loadI) < 0) {
+            i = j;
+        }
+        return Optional.of(candidates.get(i));
+    }
+
+    /** 排空运维前置估算：剔除指定排空 gate 后，同 zone 其余未排空 gate 到 90% 水位为止还能承接多少人（{@code -1} 表示不封顶）。 */
+    public static long remainingMigrationHeadroom(int zoneId, int drainingNodeId, List<GateNodeInfo> gates) {
+        long headroom = 0L;
+        for (GateNodeInfo g : connectableNewest(zoneId, gates)) {
+            if (g.getNodeId() == drainingNodeId || g.getDraining()) {
+                continue;
+            }
+            if (g.getMaxConnections() == 0) {
+                return -1L;
+            }
+            long cap = watermarkCapacity(g.getMaxConnections());
+            long used = Integer.toUnsignedLong(g.getPlayerCount());
+            if (cap > used) {
+                headroom += cap - used;
+            }
+        }
+        return headroom;
     }
 
     /** 规则 1–2：过滤可连条目并按客户端地址去重只留最新启动者。 */

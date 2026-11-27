@@ -28,6 +28,17 @@ public final class WorldLeaderLock {
 
     private static final Logger log = LoggerFactory.getLogger(WorldLeaderLock.class);
 
+    /** 跟随者两次竞选之间的独立重试间隔（与锁 TTL 脱钩，缺省 2 秒，对齐 client-go 选主口径：现任让位后最迟 2 秒接任）。 */
+    public static final Duration DEFAULT_RETRY_INTERVAL = Duration.ofSeconds(2);
+
+    /** 分线目录 TTL 由选主重试间隔与发布周期同源推导，防止领导切换空窗导致目录过期。 */
+    public static Duration deriveChannelDirectoryTtl(Duration leaderRetryInterval, Duration publishInterval) {
+        Duration retry = leaderRetryInterval == null || leaderRetryInterval.isNegative() ? DEFAULT_RETRY_INTERVAL : leaderRetryInterval;
+        Duration pub = publishInterval == null || publishInterval.isNegative() ? Duration.ofSeconds(2) : publishInterval;
+        Duration derived = pub.multipliedBy(3).plus(retry).plusSeconds(5);
+        return derived.compareTo(Duration.ofSeconds(15)) < 0 ? Duration.ofSeconds(15) : derived;
+    }
+
     /** 一次续期的结局。 */
     public enum RenewOutcome {
         /** 续上了。 */

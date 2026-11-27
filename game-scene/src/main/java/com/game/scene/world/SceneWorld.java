@@ -4002,6 +4002,11 @@ public final class SceneWorld {
         sink.send(session.linkId(), List.of(session.sessionId()), content);
     }
 
+    /** 场景 lane 确定未执行：通知 gate 把白名单请求放回队头按 >=200ms 间隔重投。 */
+    void sendRetryLater(SessionKey session, long playerId, long requestId, int messageId) {
+        sink.retryLater(session.linkId(), session.sessionId(), playerId, requestId, messageId);
+    }
+
     /**
      * 回合制战斗备战即停步（scene-battle-spec §7.5 第 3 步，D5）：速度清零并置速度脏位，原先在动时旁人当场收到零速 133，下一个同步帧仍收到 66。
      * 与跨节点换图冻结的停步同一做法（{@link #freeze}）。逻辑线程上调用。

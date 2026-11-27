@@ -255,6 +255,11 @@ public final class SceneLink {
                             frame.getPlayerTransfer().getPlayerId());
                 }
             }
+            case RETRY_LATER -> {
+                if (handshaken()) {
+                    manager.listener().onClientForwardRetryLater(nodeId, generation, frame.getRetryLater());
+                }
+            }
             default -> log.warn("scene 链路收到不该由 scene 发出的帧，忽略 node={} type={}", nodeId, frame.getBodyCase());
         }
     }
