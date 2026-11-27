@@ -429,7 +429,16 @@ public final class ClientDispatcher {
     // ================================================================ 连接生命周期
 
     public void onConnected(ClientSession s) {
-        if (!limits.handshakeTimeout().isZero()) scheduleHandshakeCheck(s, limits.handshakeTimeout());
+        var root = com.game.common.trace.TraceContext.newRoot(0L);
+        long startNano = System.currentTimeMillis() * 1_000_000L;
+        try (var ignored = root.attach()) {
+            if (!limits.handshakeTimeout().isZero()) scheduleHandshakeCheck(s, limits.handshakeTimeout());
+        } finally {
+            com.game.common.trace.OtlpHttpSpanExporter.recordGlobal(new com.game.common.trace.OtlpHttpSpanExporter.SpanRecord(
+                    root.traceId(), root.spanId(), "", "gate.connect",
+                    com.game.common.trace.OtlpHttpSpanExporter.SpanKind.SERVER,
+                    startNano, System.currentTimeMillis() * 1_000_000L, false, "", java.util.Map.of()));
+        }
     }
 
     private void scheduleHandshakeCheck(ClientSession s, java.time.Duration delay) {
@@ -453,6 +462,19 @@ public final class ClientDispatcher {
     }
 
     public void onTokenVerify(ClientSession s, ClientTokenVerifyRequest request) {
+        var root = com.game.common.trace.TraceContext.newRoot(0L);
+        long startNano = System.currentTimeMillis() * 1_000_000L;
+        try (var ignored = root.attach()) {
+            onTokenVerifyTraced(s, request);
+        } finally {
+            com.game.common.trace.OtlpHttpSpanExporter.recordGlobal(new com.game.common.trace.OtlpHttpSpanExporter.SpanRecord(
+                    root.traceId(), root.spanId(), "", "gate.token_verify",
+                    com.game.common.trace.OtlpHttpSpanExporter.SpanKind.SERVER,
+                    startNano, System.currentTimeMillis() * 1_000_000L, false, "", java.util.Map.of()));
+        }
+    }
+
+    private void onTokenVerifyTraced(ClientSession s, ClientTokenVerifyRequest request) {
         noteInboundFrame(s);
         if (s.closing || s.closed) {
             return;
@@ -713,6 +735,19 @@ public final class ClientDispatcher {
         if (s.closed) {
             return;
         }
+        var root = com.game.common.trace.TraceContext.newRoot(s.playerId);
+        long startNano = System.currentTimeMillis() * 1_000_000L;
+        try (var ignored = root.attach()) {
+            onDisconnectedTraced(s);
+        } finally {
+            com.game.common.trace.OtlpHttpSpanExporter.recordGlobal(new com.game.common.trace.OtlpHttpSpanExporter.SpanRecord(
+                    root.traceId(), root.spanId(), "", "gate.disconnect",
+                    com.game.common.trace.OtlpHttpSpanExporter.SpanKind.SERVER,
+                    startNano, System.currentTimeMillis() * 1_000_000L, false, "", java.util.Map.of()));
+        }
+    }
+
+    private void onDisconnectedTraced(ClientSession s) {
         s.closed = true;
         s.closing = true;
         s.cancelHandshakeTimeout();
@@ -912,9 +947,13 @@ public final class ClientDispatcher {
         s.backendInFlight = true;
         Timer.Sample sample = metrics.startTimer();
         long sentAtNanos = nanoClock.getAsLong();
+        var root = com.game.common.trace.TraceContext.newRoot(session.getPlayerId());
+        long spanStartNano = System.currentTimeMillis() * 1_000_000L;
+        MessageRoute route = routes.clientRoute(request.getMessageId());
+        String spanName = route == null ? "gate.backend" : route.method();
         CompletableFuture<ClientReply> future;
         boolean handedOff = true;
-        try {
+        try (var ignored = root.attach()) {
             future = backend.handle(call);
         } catch (RuntimeException e) {
             future = CompletableFuture.failedFuture(e);
@@ -928,6 +967,12 @@ public final class ClientDispatcher {
         boolean mayHaveReachedBackend = handedOff;
         future.whenComplete((reply, error) -> {
             boolean ok = error == null && reply != null;
+            com.game.common.trace.OtlpHttpSpanExporter.recordGlobal(new com.game.common.trace.OtlpHttpSpanExporter.SpanRecord(
+                    root.traceId(), root.spanId(), "", spanName,
+                    com.game.common.trace.OtlpHttpSpanExporter.SpanKind.SERVER,
+                    spanStartNano, System.currentTimeMillis() * 1_000_000L,
+                    !ok, error == null ? "" : error.getClass().getSimpleName(),
+                    java.util.Map.of("game.domain", domain)));
             // 先于会话关闭分支更新熔断器，避免客户端中途断连导致 HalfOpen 探测锁永久泄漏
             if (ok) {
                 backendBreaker.recordSuccess(domain);
@@ -991,8 +1036,12 @@ public final class ClientDispatcher {
         s.inFlight = true;
         s.loginTouched = true;
         Timer.Sample sample = metrics.startTimer();
+        var root = com.game.common.trace.TraceContext.newRoot(s.playerId);
+        long spanStartNano = System.currentTimeMillis() * 1_000_000L;
+        MessageRoute loginRoute = routes.clientRoute(request.getMessageId());
+        String spanName = loginRoute == null ? "gate.login" : loginRoute.method();
         CompletableFuture<ClientReply> future;
-        try {
+        try (var ignored = root.attach()) {
             future = login.handle(call);
         } catch (RuntimeException e) {
             future = CompletableFuture.failedFuture(e);
@@ -1001,8 +1050,19 @@ public final class ClientDispatcher {
             future = CompletableFuture.failedFuture(new IllegalStateException("login 返回了 null future"));
         }
         future.whenComplete((reply, error) -> {
-            metrics.loginCallCompleted(LoginCall.HANDLE, sample, error == null && reply != null);
-            s.execute(() -> onLoginCompleted(s, request, reply, error));
+            boolean ok = error == null && reply != null;
+            com.game.common.trace.OtlpHttpSpanExporter.recordGlobal(new com.game.common.trace.OtlpHttpSpanExporter.SpanRecord(
+                    root.traceId(), root.spanId(), "", spanName,
+                    com.game.common.trace.OtlpHttpSpanExporter.SpanKind.SERVER,
+                    spanStartNano, System.currentTimeMillis() * 1_000_000L,
+                    !ok, error == null ? "" : error.getClass().getSimpleName(),
+                    java.util.Map.of("game.domain", DOMAIN_LOGIN)));
+            metrics.loginCallCompleted(LoginCall.HANDLE, sample, ok);
+            s.execute(() -> {
+                try (var scope = root.attach()) {
+                    onLoginCompleted(s, request, reply, error);
+                }
+            });
         });
     }
 

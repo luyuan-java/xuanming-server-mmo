@@ -55,24 +55,53 @@ public final class OfficialMallClient implements AutoCloseable {
         mac.init(new SecretKeySpec(
             (role.equals("delivery") ? p.deliverySecret() : p.gatewaySecret()).getBytes(StandardCharsets.UTF_8),
             "HmacSHA256"));
-        var request = HttpRequest.newBuilder(URI.create(p.url().replaceAll("/$", "") + path))
+        var reqBuilder = HttpRequest.newBuilder(URI.create(p.url().replaceAll("/$", "") + path))
                           .timeout(Duration.ofMillis(Math.max(1, Math.min(2500, d.remainingMillis()))))
                           .header("Content-Type", "application/json")
                           .header("X-Commerce-Subject", subject)
                           .header("X-Commerce-Timestamp", stamp)
                           .header("X-Commerce-Nonce", nonce)
                           .header("X-Commerce-Signature",
-                              HexFormat.of().formatHex(mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8))))
-                          .method(method, HttpRequest.BodyPublishers.ofByteArray(body))
-                          .build();
-        var response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
-        try (var in = response.body()) {
-            byte[] raw = in.readNBytes(262145);
-            if (raw.length > 262144)
-                throw new IllegalStateException("商城应答越界");
-            if (response.statusCode() != 200)
-                throw new HttpFailure(response.statusCode());
-            return raw.length == 0 ? json.createObjectNode() : json.readTree(raw);
+                              HexFormat.of().formatHex(mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8))));
+        var parentTrace = com.game.common.trace.TraceContext.current();
+        var clientSpan = parentTrace == null ? null : parentTrace.newChild();
+        if (clientSpan != null) {
+            reqBuilder.header(com.game.common.trace.TraceContext.TRACEPARENT_HEADER, clientSpan.toTraceparent());
+        }
+        var request = reqBuilder.method(method, HttpRequest.BodyPublishers.ofByteArray(body)).build();
+        long startNano = System.currentTimeMillis() * 1_000_000L;
+        boolean fault = false;
+        String errMsg = "";
+        try {
+            var response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            try (var in = response.body()) {
+                byte[] raw = in.readNBytes(262145);
+                if (raw.length > 262144)
+                    throw new IllegalStateException("商城应答越界");
+                if (response.statusCode() != 200) {
+                    if (response.statusCode() >= 500) {
+                        fault = true;
+                        errMsg = "HTTP_" + response.statusCode();
+                    }
+                    throw new HttpFailure(response.statusCode());
+                }
+                return raw.length == 0 ? json.createObjectNode() : json.readTree(raw);
+            }
+        } catch (HttpFailure hf) {
+            throw hf;
+        } catch (Exception ex) {
+            fault = true;
+            errMsg = ex.getClass().getSimpleName();
+            throw ex;
+        } finally {
+            if (clientSpan != null) {
+                com.game.common.trace.OtlpHttpSpanExporter.recordGlobal(new com.game.common.trace.OtlpHttpSpanExporter.SpanRecord(
+                        clientSpan.traceId(), clientSpan.spanId(), clientSpan.parentSpanId(),
+                        "mall/" + method + " " + path.replaceAll("/[0-9]+", "/{id}"),
+                        com.game.common.trace.OtlpHttpSpanExporter.SpanKind.CLIENT,
+                        startNano, System.currentTimeMillis() * 1_000_000L,
+                        fault, errMsg, java.util.Map.of("http.method", method)));
+            }
         }
     }
     public Message client(String method, com.game.api.proto.SessionContext actor, Message input, Deadline d) throws Exception {

@@ -257,6 +257,42 @@ public final class BattleResultConsumer implements Runnable {
 
     /** @return true = 这条已有终态（入账 / 重复 / 不计分 / 跳过），可以提交；false = 放弃（正在停止或分区被收走），不提交 */
     private boolean handle(TopicPartition partition, ConsumerRecord<String, byte[]> record) {
+        String incomingTraceparent = lastTraceparentHeader(record);
+        com.game.common.trace.TraceContext consumerSpan =
+                com.game.common.trace.TraceContext.continueOrRoot(incomingTraceparent, 0L);
+        long startNano = System.currentTimeMillis() * 1_000_000L;
+        boolean fault = false;
+        String errMsg = "";
+        try (com.game.common.trace.TraceContext.Scope ignored = consumerSpan.attach()) {
+            return handleWithTrace(partition, record);
+        } catch (RuntimeException ex) {
+            fault = true;
+            errMsg = ex.getClass().getSimpleName();
+            throw ex;
+        } finally {
+            com.game.common.trace.OtlpHttpSpanExporter.recordGlobal(new com.game.common.trace.OtlpHttpSpanExporter.SpanRecord(
+                    consumerSpan.traceId(), consumerSpan.spanId(), consumerSpan.parentSpanId(),
+                    record.topic(), com.game.common.trace.OtlpHttpSpanExporter.SpanKind.CONSUMER,
+                    startNano, System.currentTimeMillis() * 1_000_000L,
+                    fault, errMsg, java.util.Map.of("messaging.system", "kafka")));
+        }
+    }
+
+    /** 同名 traceparent 取最后一个（对齐主仓 distributed-tracing.md Kafka 传播口径）。 */
+    static String lastTraceparentHeader(ConsumerRecord<String, byte[]> record) {
+        if (record == null || record.headers() == null) {
+            return null;
+        }
+        String last = null;
+        for (var header : record.headers().headers(com.game.common.trace.TraceContext.TRACEPARENT_HEADER)) {
+            if (header != null && header.value() != null && header.value().length > 0) {
+                last = new String(header.value(), java.nio.charset.StandardCharsets.UTF_8);
+            }
+        }
+        return last;
+    }
+
+    private boolean handleWithTrace(TopicPartition partition, ConsumerRecord<String, byte[]> record) {
         BattleResultEvent event;
         try {
             if (record.value() == null) {

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  全 Java 服务共用的容器 stdout 日志模板（对齐主仓 distributed-tracing.md §9.2）：
+  - 所有服务日志输出到 stdout，由 K8s 节点级 Alloy DaemonSet 采入 Loki；
+  - trace_id / span_id / player_id 仅在 MDC 真有值时以 key=value 形式输出，供 Alloy 写入 Loki structured_metadata（绝不做 label）。
+  服务可在各自 application.yaml 中通过 logging.config=classpath:logback-game-trace.xml 启用。
+-->
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level [%thread] %logger{36}%replace( trace_id=%X{trace_id}){' trace_id=$',''}%replace( span_id=%X{span_id}){' span_id=$',''}%replace( player_id=%X{player_id}){' player_id=$',''} -- %msg%n</pattern>
+        </encoder>
+    </appender>
+    <root level="${GAME_LOG_LEVEL:-INFO}">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>

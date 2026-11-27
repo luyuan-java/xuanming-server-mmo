@@ -1972,14 +1972,11 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 | 选主让位后的接任间隔 | 11-13 落码未编译 | 待做 | 跟随者两次竞选之间的间隔与锁 TTL 分开(主仓缺省 2 秒,client-go 口径),心跳仍是 TTL / 3;现任停机主动释放锁后最迟一个竞选间隔有新领导者。按竞选间隔推算的东西(主仓的分线目录 TTL)从同一个函数取 |
 | 停机等后台收尾 | 11-13 落码未编译 | 待做 | 应答只表示「已受理」、应答之后还在后台跑的工作(主仓 login 的进游戏后台链),停机时要等它们收尾再退出;进程的强退时限 = 注销后的等待 + 最长请求超时 + 后台收尾 + 余量,且小于 Pod 宽限期 |
 
-### 2026-11-12 K8s 日志采集:容器 stdout / stderr 进日志库,trace 字段进结构化元数据(主仓已落码未运行,Java 待做)
+### 2026-11-12 K8s 日志采集:容器 stdout / stderr 进日志库,trace 字段进结构化元数据（Java 已对齐）
 
-主仓说明见 `docs/PROGRESS.md` 2026-11-12「分布式日志阶段二」,设计见 `docs/design/distributed-tracing.md` §9.2、§10.2,运维口径见 `docs/ops/grafana-loki-local-logs.md` §6.4、§6.11。主仓 commit:main 工作区未提交;Java 版 `0.1.0-SNAPSHOT` 待做。部署侧改动,不涉及客户端契约。
-
-- **主仓做法**:集群里每个节点一个采集器(Alloy DaemonSet)读 `/var/log/pods`,把各服务容器的 stdout / stderr 送进 Loki;C++ 业务日志另由 sidecar 读文件。`trace_id` / `span_id` / `player_id` 三个键只进结构化元数据,只在那一行真带了值时才写,绝不做标签;时间用容器运行时的时间戳。
-- **Java 待做**:核对 Java 版部署里服务的 stdout 有没有被采进日志库(没采的话 Pod 一重建日志就没了);日志里的 traceId / spanId(有玩家时再加 player_id)按同一套键名进结构化元数据,不做标签。核对结论是「已有等价」就不再单独登记。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐（设计见 `docs/design/distributed-tracing.md` §9.2、§10.2）：
+- `game-common/src/main/resources/logback-game-trace.xml` 提供全 Java 服务共用的容器 stdout 日志模板，仅在 MDC 真有值时输出 `trace_id=... span_id=... player_id=...`；
+- `deploy/k8s/alloy-loki-tempo.yaml` 提供节点级 Alloy DaemonSet 采集 `/var/log/pods` 容器 stdout/stderr 到 Loki 的配置，并经 `stage.structured_metadata` 将 `trace_id`/`span_id`/`player_id` 写入 Loki 结构化元数据（严禁做标签；真实 K8s 集群待部署环境接入）。
 
 ### 2026-11-12 组队跟随收尾:朝向口径、队形移动合并广播、队形间距定案（Java 已对齐）
 
@@ -2400,15 +2397,13 @@ Java当前仍只有职业技能执行和旧装备CombatAttributes。现代69项S
 3. **PVE 经验**：`game-scene` `BattleSettlementService` / `PlayerBattleResults` / `PlayerProgression` 已将 PVE 经验持久化至 `LevelComp.total_exp` 并记录于 `PlayerBattleResult.exp_gain`（收件箱水位去重、不改等级）。
 4. **验证**：`game-team` `TeamDurableIntentTest` **7/7 PASS**，`game-match` `GlobalMatchTransferIntentTest` 及全套件 **72/72 PASS**（含 `GlobalMatchStoreIntegrationTest` TiDB 用例更新）。
 
-### 2026-11-19 链路追踪阶段三:span 导出到 Tempo(主仓已落码未编译,Java 待做)
+### 2026-11-19 链路追踪阶段三:span 导出到 Tempo（Java 已对齐）
 
-主仓说明见 `docs/PROGRESS.md` 2026-11-19「分布式日志阶段三」,设计见 `docs/design/distributed-tracing.md` §10.3,运维口径见 `docs/ops/grafana-loki-local-logs.md` §0、§6.3。主仓 commit:main 工作区未提交(C++ 接缝与第一版导出器在 `6914a1af8`);Java 版 `0.1.0-SNAPSHOT` 待做,本轮不写 Java 代码。服务端内部与部署侧改动,不涉及客户端契约。
-
-- **主仓做法**:三种语言都用 OTLP 把 span 送本机(K8s 上是本节点)的 Alloy。Go 用 go-zero 自带的 OTLP/gRPC(4317);Java 用 Spring Boot 的 OTLP/HTTP(4318);C++ 在 muduo 上自写 OTLP/HTTP protobuf 导出器,挂主 EventLoop,参数取 BatchSpanProcessor 默认值(队列 2048、每批 512、5 秒一批、超时 30 秒),失败丢批计数、不重试。头部全采;Alloy 尾部采样:有错误的 trace 全留、总耗时 ≥ 1 秒的全留、其余按 trace_id 留 10%(`decision_wait` 30s、`num_traces` 50000)。K8s 上节点级 Alloy 按 trace_id 分给网关级 Alloy 采样,再写 Tempo(保留 7 天)。Grafana 里 Loki 的 `trace_id` 跳 Tempo,Tempo 的 trace 跳回 Loki。
-- **span 口径**:入站是 server / consumer span,出站是 client / producer span;名字用 `服务/方法`、gRPC 的 `pkg.Svc/Method`、Kafka 的 topic、gate 的客户端消息名(建连 / 断线 / 验 token 分别是 `gate.connect` / `gate.disconnect` / `gate.token_verify`);名字和属性都不带玩家 id 这类高基数值;异步回调原样装回发起时的上下文,回调里发起的调用挂在发起时的 span 下面。server span 量到回复发出为止(延后回复、异步守护段之后再处理的都算);gRPC 服务端只把服务端故障码(UNKNOWN、DEADLINE_EXCEEDED、UNIMPLEMENTED、INTERNAL、UNAVAILABLE、DATA_LOSS)标成错误;本地确定没发出的调用也记一个标错的 client span(主仓 2026-11-19「分布式日志阶段三收尾」)。
-- **Java 待做**:Java 版各服务接 OTLP 导出(Spring Boot / Micrometer 自带的导出器即可),span 名与类型按上面的口径;采集器、尾部采样与 Tempo 若与主仓共用一套部署,就不再单独做。核对结论是「已有等价」就不再单独登记。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐（设计见 `docs/design/distributed-tracing.md` §10.3）：
+- **零新增依赖 OTLP/HTTP JSON 批量导出器**：`game-common` 新增 `OtlpHttpSpanExporter`（默认队列 2048、每批 512、每 5 秒刷新、超时 30 秒，失败丢批计数不重试，环境变量 `OTEL_EXPORTER_OTLP_ENDPOINT` 未设时零开销关闭），`game-discovery` `TraceAutoConfiguration` 通过 Spring Boot `AutoConfiguration.imports` 自动装配并导出 `otlp_spans_exported_total` / `otlp_spans_dropped_total` 低基数指标。
+- **全链路 span 口径**：入站 SERVER/CONSUMER、出站 CLIENT/PRODUCER；span 名低基数（`服务/方法`、Kafka topic、`gate.connect`/`gate.token_verify`/`gate.disconnect`/客户端方法名），不含高基数玩家 ID；Dubbo `TraceConsumerFilter`/`TraceProviderFilter` 覆盖同步 `AppResponse` 与异步 `AsyncRpcResult` 回复全时长、仅服务端故障码标错、本地未发出同步记标错 CLIENT span。
+- **尾部采样与 Tempo**：`deploy/k8s/alloy-loki-tempo.yaml` 配置节点级 Alloy 按 `traceID` 路由至网关级 Alloy（错误 100%、总耗时 ≥ 1s 100%、其余 10%，`decision_wait=30s`、`num_traces=50000`）写 Tempo（7 天保留）。
+- **验证**：`game-common` `TraceContextAndOtlpTest` 2/2、`game-discovery` `TraceAutoConfigurationTest` 1/1、`game-api` `TraceDubboFilterTest` 1/1、`game-gateway` `GatewayTraceFilterTest` 1/1、`game-gate` `ClientDispatcherTest` 110/110、`game-match` `BattleResultConsumerTest` 25/25、`game-trade` `TradeReadOnlyOwnershipTest` 1/1 全部 PASS。
 
 ### 2026-11-19 battle 直连准入:accept 处拒绝并发 RST、新建连接速率闸、连接类指标（Java 已对齐）
 
@@ -2537,25 +2532,12 @@ Java当前仍只有职业技能执行和旧装备CombatAttributes。现代69项S
 3. **服务间长连接的半开检测**:主仓 Go 调 Go 走 K8s Service 地址的四条调用，原来没开 keepalive,对端整机掉电后要等内核重传超时约 15 分钟;现开 keepalive(Time 5 分钟、Timeout 20 秒，即 TCP_USER_TIMEOUT 20 秒)。核对 Java 服务间(Dubbo / gRPC)的心跳与半开检测时长。
 4. **依赖没起来时不阻塞启动**:主仓 rank 依赖 mail 时原来阻塞拨号，mail 没起来 rank 就启动失败(K8s 冷启动连锁 CrashLoop),现改成不阻塞。核对 Java 各服务启动时对下游 RPC 的 `check` 设置。
 
-### 2026-11-19 分布式日志阶段一与收尾:三种语言用同一条 traceparent 串起日志(主仓已落码,大部分未验证;Java 待做)
+### 2026-11-19 分布式日志阶段一与收尾:三种语言用同一条 traceparent 串起日志（Java 已对齐）
 
-主仓说明见 `docs/PROGRESS.md` 2026-11-06~11-12 的「分布式日志第 1~7 批」「补尾」「清尾」「收尾」与 2026-11-19「错误汇总缓冲收尾」;设计见 `docs/design/distributed-tracing.md` §3~§9、§13,错误汇总见 `docs/design/error-reporting.md`「切片状态与定案」。主仓 commit `9824368eb` 及之后的工作区改动。阶段二、三另见上面两节。
-
-- **主仓做法**:
-  - 约定:线上一律 W3C `traceparent`(小写,全零无效)。日志字段 `trace_id` / `span_id` / `player_id` 在日志库里同名同口径,`player_id` 写十进制字符串。
-  - 根从哪开:gate 对每条客户端消息、建连、断线各开一条根,客户端帧不带 trace。公网 HTTP 入口(网关)不采信外部传播头,内网服务照常接收。
-  - 传播面:节点间 RPC、gRPC(出站拦截与派发钩子)、Kafka 消息头(键 `traceparent`,同名取最后一个)、调本方服务的 HTTP 出站(trade 调商城、网关调商城后台)。
-  - 异步续接:回包回调、协程恢复、一次性投递都装回发起时的 trace;周期任务不捕获;Redis 回调在客户端提交处统一续接。
-  - 请求返回后还在跑的工作从请求 ctx 派生、只去掉取消(Go 的 `context.WithoutCancel`),不从空 ctx 起,否则整条后台链丢 trace 与 player_id。
-  - 错误汇总缓冲的事件带 trace / player_id,计数进 `/metrics`(`error_reporter_events_total`、`error_reporter_dropped_events_total`、`error_reporter_buffered_events`);集中查看走日志库,不另做推送。
-  - 定案:高频消息不设关闭名单;trace_id 不回给客户端。
-- **Java 待做**:
-  - Java 版服务之间的内部 RPC、消息队列与日志按同一约定接:入站接续 `traceparent`,出站写入,日志带三个字段(Spring 用 Micrometer Tracing 放进 MDC 的值,键名映射成上面三个)。对外入口不采信外部传播头。
-  - 异步回调、定时任务与请求返回后还在跑的工作,按上面的续接口径处理。
-  - 客户端契约不变,不需要和主仓同批改。
-- **验证(Java 做完后)**:按 Java 仓 AGENTS.md 跑单测;端到端在日志库里用一个 trace_id 查到一次请求在 Java 版各服务的行,用 player_id 查到这个玩家的各段。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐（设计见 `docs/design/distributed-tracing.md` §3~§9、§13 与 `docs/design/error-reporting.md`）：
+- **统一 W3C `traceparent` 与 MDC 传播**：`game-common` 新增 `TraceContext`（严格小写校验、拒全零 ID、SLF4J MDC 三键 `trace_id`/`span_id`/`player_id` 精确写入与作用域还原、`wrap(Runnable/Supplier/Callable)` 异步续接不泄漏给周期任务）与 `ErrorReportBuffer`（事件自动附带 `trace_id`/`span_id`/`player_id`），`game-discovery` `TraceAutoConfiguration` 暴露 `error_reporter_events_total`、`error_reporter_dropped_events_total`、`error_reporter_buffered_events`。
+- **公网/gate 开根与全协议传播**：`game-gate` `ClientDispatcher` 对 `onConnected`/`onTokenVerify`/`onDisconnected`/`callLogin`/`callBackend` 开新根且异步回调续接；`game-gateway` `GatewayTraceFilter` 对公网 `/api/**` 忽略外部 `traceparent` 开新根（`/admin/**` 接续内网头）且永不回显 `trace_id`；`game-api` `TraceConsumerFilter`/`TraceProviderFilter` 经 Dubbo SPI 自动传播；`game-match` `BattleResultConsumer`（同名 `traceparent` 取最后一个）与 `OutcomePublisher` 覆盖 Kafka 传播；`game-trade` `OfficialMallClient` 覆盖调商城 HTTP 出站传播。
+- **验证**：`game-common` 4/4、`game-discovery` 2/2、`game-api` 7/7、`game-gateway` 3/3、`game-gate` 110/110、`game-match` 25/25、`game-trade` 1/1 = **152/152 PASS**（端到端 Loki/Tempo 检索待集群部署后实测）。
 
 ### 2026-11-19 未验签预算收尾与按来源前缀限速（Java 已对齐）
 

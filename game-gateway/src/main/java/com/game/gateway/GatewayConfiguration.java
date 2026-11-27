@@ -307,4 +307,14 @@ public class GatewayConfiguration {
             RedissonClient redis, RedisKeys keys, ZoneDirectory zones) {
         return new com.game.gateway.admin.RedisKillSwitchRuleStore(redis, keys, zones);
     }
+
+    /** 公网 HTTP 入口追踪过滤器：/api/** 忽略外部 traceparent 另起根，/admin/** 接续内网 traceparent，永不回显 trace_id。 */
+    @Bean
+    public org.springframework.boot.web.servlet.FilterRegistrationBean<com.game.gateway.http.GatewayTraceFilter> gatewayTraceFilter() {
+        var reg = new org.springframework.boot.web.servlet.FilterRegistrationBean<>(
+                new com.game.gateway.http.GatewayTraceFilter());
+        reg.addUrlPatterns("/*");
+        reg.setOrder(org.springframework.core.Ordered.HIGHEST_PRECEDENCE);
+        return reg;
+    }
 }

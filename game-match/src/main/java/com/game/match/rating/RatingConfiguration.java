@@ -150,9 +150,31 @@ public class RatingConfiguration {
         @Override public java.util.concurrent.CompletableFuture<Void> publish(com.game.proto.contracts.kafka.BattleResultEvent event,
                 com.google.protobuf.ByteString original) {
             var result=new java.util.concurrent.CompletableFuture<Void>();
-            try{producer.send(new org.apache.kafka.clients.producer.ProducerRecord<>(topic,BattleResultTopics.key(event.getBattleId()),
-                    original.toByteArray()),(metadata,error)->{if(error==null)result.complete(null);else result.completeExceptionally(error);});}
-            catch(RuntimeException failure){result.completeExceptionally(failure);}return result;
+            var parent = com.game.common.trace.TraceContext.current();
+            var producerSpan = parent != null ? parent.newChild() : com.game.common.trace.TraceContext.newRoot();
+            long startNano = System.currentTimeMillis() * 1_000_000L;
+            var record = new org.apache.kafka.clients.producer.ProducerRecord<>(topic,
+                    BattleResultTopics.key(event.getBattleId()), original.toByteArray());
+            record.headers().add(com.game.common.trace.TraceContext.TRACEPARENT_HEADER,
+                    producerSpan.toTraceparent().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            try{producer.send(record,(metadata,error)->{
+                com.game.common.trace.OtlpHttpSpanExporter.recordGlobal(new com.game.common.trace.OtlpHttpSpanExporter.SpanRecord(
+                        producerSpan.traceId(), producerSpan.spanId(), producerSpan.parentSpanId(),
+                        topic, com.game.common.trace.OtlpHttpSpanExporter.SpanKind.PRODUCER,
+                        startNano, System.currentTimeMillis() * 1_000_000L,
+                        error != null, error == null ? "" : error.getClass().getSimpleName(),
+                        java.util.Map.of("messaging.system", "kafka")));
+                if(error==null)result.complete(null);else result.completeExceptionally(error);
+            });}
+            catch(RuntimeException failure){
+                com.game.common.trace.OtlpHttpSpanExporter.recordGlobal(new com.game.common.trace.OtlpHttpSpanExporter.SpanRecord(
+                        producerSpan.traceId(), producerSpan.spanId(), producerSpan.parentSpanId(),
+                        topic, com.game.common.trace.OtlpHttpSpanExporter.SpanKind.PRODUCER,
+                        startNano, System.currentTimeMillis() * 1_000_000L,
+                        true, failure.getClass().getSimpleName(),
+                        java.util.Map.of("messaging.system", "kafka")));
+                result.completeExceptionally(failure);
+            }return result;
         }
         @Override public void close(){producer.close(java.time.Duration.ofSeconds(5));}
     }

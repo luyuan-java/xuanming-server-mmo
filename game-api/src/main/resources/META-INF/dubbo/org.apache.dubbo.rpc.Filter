@@ -1,3 +1,5 @@
 gameAuthConsumer=com.game.api.auth.DubboAuthConsumerFilter
 gameAuthProvider=com.game.api.auth.DubboAuthProviderFilter
+gameTraceConsumer=com.game.api.trace.TraceConsumerFilter
+gameTraceProvider=com.game.api.trace.TraceProviderFilter
 gameKillSwitchProvider=com.game.api.killswitch.KillSwitchProviderFilter

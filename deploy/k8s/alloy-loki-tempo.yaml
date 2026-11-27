@@ -1,0 +1,126 @@
+# K8s 分布式日志与链路追踪采集栈配置（对齐主仓 distributed-tracing.md §9.2、§10.2、§10.3）：
+# 1. 节点级 Alloy DaemonSet：读取 /var/log/pods 容器 stdout / stderr -> 提取 trace_id / span_id / player_id 进 Loki structured_metadata（严禁作为 label）；
+# 2. 网关级 Alloy：按 trace_id 一致性路由汇聚 -> 尾部采样（错误 100%、总耗时 >= 1s 100%、其余 10%，decision_wait=30s，num_traces=50000）-> Tempo（保留 7 天）；
+# 3. Java 各服务设 OTEL_EXPORTER_OTLP_ENDPOINT=http://$(NODE_IP):4318 即可由 TraceAutoConfiguration 自动批量导出 span。
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-node-logs-traces
+data:
+  config.alloy: |
+    discovery.kubernetes "pods" {
+      role = "pod"
+      selectors {
+        role  = "pod"
+        field = "spec.nodeName=" + coalesce(sys.env("HOSTNAME"), constants.hostname)
+      }
+    }
+
+    loki.source.kubernetes "pod_logs" {
+      targets    = discovery.kubernetes.pods.targets
+      forward_to = [loki.process.trace_metadata.receiver]
+    }
+
+    loki.process "trace_metadata" {
+      stage.regex {
+        expression = "(?:trace_id=(?P<trace_id>[0-9a-f]{32}))?(?:.*span_id=(?P<span_id>[0-9a-f]{16}))?(?:.*player_id=(?P<player_id>[0-9]+))?"
+      }
+      // 只在真带值时写入 Loki structured_metadata，绝不做高基数 label
+      stage.structured_metadata {
+        values = {
+          trace_id  = "trace_id",
+          span_id   = "span_id",
+          player_id = "player_id",
+        }
+      }
+      forward_to = [loki.write.default.receiver]
+    }
+
+    loki.write "default" {
+      endpoint {
+        url = "http://loki-gateway.observability.svc.cluster.local/loki/api/v1/push"
+      }
+    }
+
+    // 接收本节点 Java/Go/C++ 服务发来的 OTLP/HTTP(4318) & OTLP/gRPC(4317)，按 trace_id 哈希发往网关级 Alloy 做尾部采样
+    otelcol.receiver.otlp "node" {
+      grpc { endpoint = "0.0.0.0:4317" }
+      http { endpoint = "0.0.0.0:4318" }
+      output {
+        traces = [otelcol.exporter.loadbalancing.gateway_alloy.input]
+      }
+    }
+
+    otelcol.exporter.loadbalancing "gateway_alloy" {
+      routing_key = "traceID"
+      protocol {
+        otlp {
+          client {
+            tls { insecure = true }
+          }
+        }
+      }
+      resolver {
+        kubernetes {
+          service = "alloy-trace-gateway.observability"
+          ports   = [4317]
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-trace-gateway-tail-sampling
+data:
+  config.alloy: |
+    otelcol.receiver.otlp "in" {
+      grpc { endpoint = "0.0.0.0:4317" }
+      output {
+        traces = [otelcol.processor.tail_sampling.game.input]
+      }
+    }
+
+    otelcol.processor.tail_sampling "game" {
+      decision_wait = "30s"
+      num_traces    = 50000
+      policy {
+        name = "errors"
+        type = "status_code"
+        status_code { status_codes = ["ERROR"] }
+      }
+      policy {
+        name = "slow-1s"
+        type = "latency"
+        latency { threshold_ms = 1000 }
+      }
+      policy {
+        name = "baseline-10pct"
+        type = "probabilistic"
+        probabilistic { sampling_percentage = 10 }
+      }
+      output {
+        traces = [otelcol.exporter.otlp.tempo.input]
+      }
+    }
+
+    otelcol.exporter.otlp "tempo" {
+      client {
+        endpoint = "tempo-distributor.observability.svc.cluster.local:4317"
+        tls { insecure = true }
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-retention-7d
+data:
+  tempo.yaml: |
+    compactor:
+      compaction:
+        block_retention: 168h
+    storage:
+      trace:
+        backend: s3
