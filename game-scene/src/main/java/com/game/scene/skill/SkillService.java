@@ -167,20 +167,25 @@ public final class SkillService {
             return reject(SkillResult.STATE_REJECTED, commitTip);
         }
         syncSelfStateFlagsIfChanged(world, caster);
+        long broadcastTargetId = 0L;
         if (request.getTargetId() != 0) {
             ScenePlayer targetPlayer = world.playerByEntity(request.getTargetId());
-            if (targetPlayer != null && targetPlayer != caster) {
-                com.game.proto.Rotation facing = lookAtYawDegrees(caster.position(), targetPlayer.position());
-                if (facing != null) {
-                    caster.setRotation(facing);
-                    caster.markTransformDirty();
+            if (targetPlayer != null && targetPlayer.scene() != null
+                    && targetPlayer.scene() == caster.scene() && !targetPlayer.frozen()) {
+                broadcastTargetId = request.getTargetId();
+                if (targetPlayer != caster) {
+                    com.game.proto.Rotation facing = lookAtYawDegrees(caster.position(), targetPlayer.position());
+                    if (facing != null) {
+                        caster.setRotation(facing);
+                        caster.markTransformDirty();
+                    }
                 }
             }
         }
 
         world.broadcastToSelfAndWatchers(caster, push(notifySkillUsed, SkillUsedS2C.newBuilder()
                 .setEntity(caster.entity())
-                .addTargetEntity(request.getTargetId())
+                .addTargetEntity(broadcastTargetId)
                 .setSkillTableId(skillTableId)
                 .setPosition(request.getPosition())
                 .build()));

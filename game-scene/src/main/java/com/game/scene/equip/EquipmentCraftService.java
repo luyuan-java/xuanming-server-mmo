@@ -507,12 +507,12 @@ public final class EquipmentCraftService {
             // 95% 净银两写入买家同事务 PlayerState.mail_outbox，落盘确认后经 game-mail -> asset_op 异步入账。
             mailOutbox.enqueueProxyFee(player, prepared.proxyMasterPlayerId, proxyNetGold, reqId, playerDisplayName(player));
         }
+        boolean supremeProduced = (op == EquipmentCraftChoice.Operation.INSTALL_AFFIX
+                || op == EquipmentCraftChoice.Operation.POLISH_AFFIX)
+                && !prepared.polishExempt
+                && resultQualityTier == EquipCraftQualityRules.MAX_QUALITY_TIER;
         ScenePlayer creditedProxyMaster = null;
         if (prepared.proxyMasterPlayerId != 0L && proxyDirectory != null) {
-            boolean supremeProduced = (op == EquipmentCraftChoice.Operation.INSTALL_AFFIX
-                    || op == EquipmentCraftChoice.Operation.POLISH_AFFIX)
-                    && !prepared.polishExempt
-                    && resultQualityTier == EquipCraftQualityRules.MAX_QUALITY_TIER;
             ScenePlayer onlineMaster = world == null ? null : world.playerById(prepared.proxyMasterPlayerId);
             creditedProxyMaster = proxyDirectory.recordOrderReputation(
                     prepared.proxyMasterPlayerId,
@@ -522,15 +522,25 @@ public final class EquipmentCraftService {
                     playerDisplayName(player),
                     onlineMaster);
         }
-        // 本人打造/装条/打磨自然涨 1 点铸器熟练度（无体力、无日清、只增不减；代打、重铸、解封、继承与无损升档不涨）。
+        // 本人打造/装条/打磨自然涨 1 点铸器熟练度并累计本人极品次数（无体力、无日清、只增不减；代打、重铸、解封、继承与无损升档不涨）。
         if (prepared.proxyMasterPlayerId == 0L
                 && op != EquipmentCraftChoice.Operation.REFORGE_AFFIX
                 && op != EquipmentCraftChoice.Operation.UNSEAL_TO_TRADABLE
                 && op != EquipmentCraftChoice.Operation.INHERIT_ENHANCE
                 && op != EquipmentCraftChoice.Operation.UPGRADE_TIER) {
-            int curExp = player.craft().forgeMasteryExp();
-            if (curExp != -1) {
-                player.craft().replace(player.craft().state().toBuilder().setForgeMasteryExp(curExp + 1).build());
+            var curCraft = player.craft().state();
+            var nextCraft = curCraft.toBuilder();
+            boolean craftChanged = false;
+            if (curCraft.getForgeMasteryExp() != -1) {
+                nextCraft.setForgeMasteryExp(curCraft.getForgeMasteryExp() + 1);
+                craftChanged = true;
+            }
+            if (supremeProduced && curCraft.getSupremeForgedCount() != -1) {
+                nextCraft.setSupremeForgedCount(curCraft.getSupremeForgedCount() + 1);
+                craftChanged = true;
+            }
+            if (craftChanged) {
+                player.craft().replace(nextCraft.build());
             }
         }
         ledger.setForgeRevision(newRevision);

@@ -196,6 +196,77 @@ class MailCampaignAndQuotaTest {
                 .isEqualTo(MailErrorTip.mail_error.kMailRequestConflict_VALUE);
     }
 
+    @Test
+    void 并发重发同senderKind与requestId撞唯一键时按哈希判幂等或CONFLICT() throws Exception {
+        AuthorityJdbc sql = mock(AuthorityJdbc.class);
+        AuthorityIds ids = mock(AuthorityIds.class);
+        when(ids.next(any())).thenReturn(501L, 502L);
+
+        SendMailRequest req = SendMailRequest.newBuilder()
+                .setSenderKind(MailStore.sender("guild"))
+                .setRequestId(8801L)
+                .setGuildId(10L)
+                .setTitle("帮会战报")
+                .setBody("并发测试")
+                .build();
+        String expectedHash = com.game.discovery.serviceauth.ServiceCallSignatures.digest(req);
+
+        AuthorityJdbc.Session readSession = mock(AuthorityJdbc.Session.class);
+        ResultSet rsSame = mock(ResultSet.class);
+        when(rsSame.getObject(1)).thenReturn(900L);
+        when(rsSame.getObject(2)).thenReturn(0L);
+        when(rsSame.getObject(3)).thenReturn(10L);
+        when(rsSame.getInt(4)).thenReturn(3);
+        when(rsSame.getInt(5)).thenReturn(MailStore.sender("guild"));
+        when(rsSame.getObject(6)).thenReturn(8801L);
+        when(rsSame.getString(7)).thenReturn(expectedHash);
+        when(rsSame.getString(8)).thenReturn("帮会战报");
+        when(rsSame.getString(9)).thenReturn("并发测试");
+        when(rsSame.getBytes(10)).thenReturn(new byte[0]);
+        when(rsSame.getObject(11)).thenReturn(1_000_000L);
+        when(rsSame.getObject(12)).thenReturn(2_000_000L);
+        when(rsSame.getObject(13)).thenReturn(0L);
+        when(rsSame.getObject(14)).thenReturn(0L);
+
+        // 首次 pre-check 未查到，进入事务 INSERT 撞 1062，补偿查询查到同 hash 行 -> 返回 duplicated=true
+        java.util.concurrent.atomic.AtomicInteger readCalls = new java.util.concurrent.atomic.AtomicInteger();
+        when(sql.read(any(), any())).thenAnswer(inv -> {
+            if (readCalls.getAndIncrement() == 0) {
+                return null;
+            }
+            AuthorityJdbc.Work<?> work = inv.getArgument(1);
+            return work.apply(readSession);
+        });
+        when(readSession.one(contains("FROM mail_message WHERE sender_kind=? AND request_id=?"), any(), any(), any()))
+                .thenAnswer(inv -> {
+                    AuthorityJdbc.Row<?> mapper = inv.getArgument(1);
+                    return mapper.apply(rsSame);
+                });
+        when(sql.tx(any(), any())).thenAnswer(inv -> {
+            AuthorityJdbc.Session txSession = mock(AuthorityJdbc.Session.class);
+            when(txSession.one(contains("FROM mail_box WHERE player_id=? FOR UPDATE"), any(), any())).thenReturn(1L);
+            when(txSession.one(contains("FROM mail_message WHERE sender_kind=? AND request_id=?"), any(), any(), any())).thenReturn(null);
+            when(txSession.count(anyString(), any(), any())).thenReturn(0L);
+            when(txSession.update(contains("INSERT INTO mail_message"), any(Object[].class)))
+                    .thenThrow(new SQLIntegrityConstraintViolationException("Duplicate entry", "23000", 1062));
+            AuthorityJdbc.Work<?> work = inv.getArgument(1);
+            return work.apply(txSession);
+        });
+
+        MailStore store = new MailStore(sql, ids, id -> true, () -> 1_000_000L);
+        SendMailResponse dup = store.send("guild", 3, req, budget());
+        assertThat(dup.getMailId()).isEqualTo(900L);
+        assertThat(dup.getDuplicated()).isTrue();
+
+        // 再次并发但换了不同内容（不同 guild_id -> 不同 hash）撞 1062 -> 转 Reject(CONFLICT) 而非 503
+        readCalls.set(0);
+        SendMailRequest conflictReq = req.toBuilder().setGuildId(20L).build();
+        assertThatThrownBy(() -> store.send("guild", 3, conflictReq, budget()))
+                .isInstanceOf(MailStore.Reject.class)
+                .extracting(e -> ((MailStore.Reject) e).tip)
+                .isEqualTo(MailErrorTip.mail_error.kMailRequestConflict_VALUE);
+    }
+
     private static void stubCampaign(AuthorityJdbc.Session session, long expectedCount, int shardCount) throws Exception {
         when(session.one(contains("FROM mail_campaign WHERE"), any(), any(), any(), any())).thenAnswer(inv -> {
             AuthorityJdbc.Row<?> mapper = inv.getArgument(1);

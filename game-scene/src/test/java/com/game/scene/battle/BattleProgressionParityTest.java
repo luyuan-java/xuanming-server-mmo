@@ -279,6 +279,18 @@ class BattleProgressionParityTest {
         assertThat(week10.candidateLedger().getSilverRolloverSoftCap()).isEqualTo(90_000L);
         assertThat(week10.candidateLedger().getSilverRolloverHardCap()).isEqualTo(135_000L);
         assertThat(week10.delta().weeklySilverSoftCap()).isEqualTo(90_000L);
+
+        // 历史存档若 rollover hardCap < softCap，有效/滚存硬上限必须向上钳位不低于软上限（对齐 C++ battle_progression_rules.h）
+        BattleEconomyLedgerState skewed = BattleEconomyLedgerState.newBuilder()
+                .setWeekStartsAtMs(week1)
+                .setSilverRolloverSoftCap(80_000L)
+                .setSilverRolloverHardCap(45_000L)
+                .setBattleSilverThisWeek(50_000L)
+                .build();
+        var clampedSameWeek = BattleProgressionRules.prepareEconomyLedger(skewed, week1 + 1_000L, s1, 0L, 0L,
+                tables.rewardRows(), tables.weeklySilverRule());
+        assertThat(clampedSameWeek.delta().silverGain()).isEqualTo(1000L);
+        assertThat(clampedSameWeek.delta().silverDiminished()).isFalse();
     }
 
     @Test

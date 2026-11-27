@@ -559,6 +559,26 @@ public class SceneNode implements SmartLifecycle {
                                     return null;
                                 });
                     }
+                    @Override
+                    public boolean hasRemoteReputationLedger() {
+                        return true;
+                    }
+                    @Override
+                    public java.util.concurrent.CompletionStage<java.util.Optional<com.game.scene.craft.CraftProxyStallDirectory.TakenReputation>>
+                    takeReputationAsync(long masterPlayerId) {
+                        return redis.getScript(StringCodec.INSTANCE)
+                                .<java.util.List<Object>>evalAsync(org.redisson.api.RScript.Mode.READ_WRITE,
+                                        com.game.scene.craft.CraftProxyStallDirectory.TAKE_REPUTATION_LUA,
+                                        org.redisson.api.RScript.ReturnType.MULTI,
+                                        java.util.List.of(proxyReputationKey),
+                                        Long.toUnsignedString(masterPlayerId))
+                                .thenApply(com.game.scene.craft.CraftProxyStallDirectory::parseTakenReputation)
+                                .exceptionally(err -> {
+                                    log.warn("craft_proxy_reputation_take_failed zone={} master_id={}", zoneId,
+                                            Long.toUnsignedString(masterPlayerId), err);
+                                    return java.util.Optional.empty();
+                                });
+                    }
                 }, logic);
         com.game.scene.mail.PlayerMailOutboxService mailOutboxService = new com.game.scene.mail.PlayerMailOutboxService(
                 mailOutboxSender, snowflake::nextId, SceneClock.SYSTEM, logic);
@@ -751,6 +771,7 @@ public class SceneNode implements SmartLifecycle {
             sceneWorld.withActiveSeason(seasonService::activeSeasonId);
         }
         final int starterPetListPushId = registry.requireId("ScenePetClientPlayer", "NotifyPetListChanged");
+        craftProxyDirectory.withReputationCallbacks(sceneWorld::playerById, sceneWorld::requestKeyProgressSave);
         sceneWorld.withOnEnteredPostBattle(player -> {
             PetService.StarterGrantResult grant = petService.ensureStarterPetGranted(player);
             if (grant == PetService.StarterGrantResult.GRANTED) {

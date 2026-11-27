@@ -14,19 +14,83 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
+import java.util.function.Consumer;
+import java.util.function.LongFunction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 跨节点/离线名匠代打共享摊位目录与口碑/24h 极品热榜原子账本（场景逻辑线程持有本地镜像，Redis Hash 异步读写）：
  * 宗师开启营业摊位或登录后即同步入共享目录；下线后摊位继续保留，买家可在任意场景节点 24 小时查看并下单，
- * 离线成交的口碑、极品/稀世统计、净银两与新解锁雅号通过原子 HINCRBY 伴生账本在宗师登录/刷新时安全回账。
+ * 离线成交的口碑、极品/稀世统计、净银两与新解锁雅号通过原子 Lua HMGET+HDEL 在宗师登录/刷新时单次安全回账（对齐 C++ r2-craft#4）。
  */
 public final class CraftProxyStallDirectory {
 
-    /** 异步底层存储接口（生产接 Redisson Hash，单测默认无外部 I/O）。 */
+    private static final Logger log = LoggerFactory.getLogger(CraftProxyStallDirectory.class);
+
+    /**
+     * 原子取走待回账口碑并删除原字段（与 C++ {@code kTakeProxyReputationLua} 逐字节对齐）：
+     * 仅取走 {@code <id>:o/s/r/g/b}，不动 24h 热榜 {@code :24o/:24s}；两个节点并发取同一宗师只有先执行方拿到值，杜绝跨节点/陈旧镜像双倍入账与残留脏键。
+     */
+    public static final String TAKE_REPUTATION_LUA =
+            "local k=KEYS[1] local p=ARGV[1] "
+                    + "local v=redis.call('HMGET',k,p..':o',p..':s',p..':r',p..':g',p..':b') "
+                    + "redis.call('HDEL',k,p..':o',p..':s',p..':r',p..':g',p..':b') "
+                    + "return v";
+
+    /** 单次原子取走的待回账口碑数额（与 C++ {@code TakenProxyReputation} 同构）。 */
+    public record TakenReputation(int orders, int supreme, int rare, long netGold, String lastBuyer) {
+        public static final TakenReputation EMPTY = new TakenReputation(0, 0, 0, 0L, "");
+
+        public boolean isEmpty() {
+            return orders == 0 && supreme == 0 && rare == 0 && netGold == 0L;
+        }
+    }
+
+    /** 解析 {@link #TAKE_REPUTATION_LUA} 的 5 元数组返回；形状不符返回 empty（结果未知，不入账）。 */
+    public static Optional<TakenReputation> parseTakenReputation(List<?> reply) {
+        if (reply == null || reply.size() != 5) {
+            return Optional.empty();
+        }
+        String[] values = new String[5];
+        for (int i = 0; i < 5; i++) {
+            Object el = reply.get(i);
+            if (el == null) {
+                values[i] = "";
+            } else if (el instanceof String s) {
+                values[i] = s;
+            } else if (el instanceof byte[] b) {
+                values[i] = new String(b, java.nio.charset.StandardCharsets.UTF_8);
+            } else {
+                return Optional.empty();
+            }
+        }
+        int orders = clampU32(parseNonNegativeLong(values[0]));
+        int supreme = clampU32(parseNonNegativeLong(values[1]));
+        int rare = clampU32(parseNonNegativeLong(values[2]));
+        long netGold = parseNonNegativeLong(values[3]);
+        String buyer = values[4] == null ? "" : values[4];
+        return Optional.of(new TakenReputation(orders, supreme, rare, netGold, buyer));
+    }
+
+    private static long parseNonNegativeLong(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0L;
+        }
+        try {
+            long v = Long.parseLong(text);
+            return Math.max(0L, v);
+        } catch (NumberFormatException ignored) {
+            return 0L;
+        }
+    }
+
+    /** 异步底层存储接口（生产接 Redisson Hash + Lua，单测默认无外部 I/O）。 */
     public interface BackingStore {
         BackingStore NOOP = new BackingStore() {
             @Override
@@ -50,6 +114,16 @@ public final class CraftProxyStallDirectory {
 
         default CompletionStage<Void> setLastBuyerAsync(long masterPlayerId, String buyerName) {
             return CompletableFuture.completedFuture(null);
+        }
+
+        /** 是否挂载远端共享口碑账本（生产 Redis 为 true，本地内存单测 NOOP 为 false）。 */
+        default boolean hasRemoteReputationLedger() {
+            return false;
+        }
+
+        /** 原子执行 {@link #TAKE_REPUTATION_LUA} 取走并删除该宗师待回账口碑；返回 empty 表示结果未知。 */
+        default CompletionStage<Optional<TakenReputation>> takeReputationAsync(long masterPlayerId) {
+            return CompletableFuture.completedFuture(Optional.empty());
         }
     }
 
@@ -77,6 +151,9 @@ public final class CraftProxyStallDirectory {
     private final Map<Long, PendingReputation> pendingReputation = new HashMap<>();
     private final Map<Long, HotCounters> hotCounters = new HashMap<>();
     private final Map<Long, Long> localReputationMutationSeq = new HashMap<>();
+    private final Set<Long> takesInFlight = new HashSet<>();
+    private LongFunction<ScenePlayer> playerLookup;
+    private Consumer<ScenePlayer> onReputationDrained;
     private long nextSeq;
 
     public CraftProxyStallDirectory() {
@@ -86,6 +163,14 @@ public final class CraftProxyStallDirectory {
     public CraftProxyStallDirectory(BackingStore store, Executor logic) {
         this.store = Objects.requireNonNull(store, "store");
         this.logic = Objects.requireNonNull(logic, "logic");
+    }
+
+    /** 装配远端异步取走回账后的在线宗师查找器与关键进度存盘回调（仅在逻辑线程执行）。 */
+    public CraftProxyStallDirectory withReputationCallbacks(LongFunction<ScenePlayer> playerLookup,
+                                                            Consumer<ScenePlayer> onReputationDrained) {
+        this.playerLookup = playerLookup;
+        this.onReputationDrained = onReputationDrained;
+        return this;
     }
 
     /** 依据角色当前手艺与摊位状态构造合法的共享目录快照；不具备营业资格时返回 null。 */
@@ -213,7 +298,14 @@ public final class CraftProxyStallDirectory {
         return null;
     }
 
-    /** 将挂在共享伴生账本中的离线/跨线待回账口碑合入在线可写宗师存档，返回是否发生变更。 */
+    /**
+     * 将挂在共享伴生账本中的离线/跨线待回账口碑合入在线可写宗师存档：
+     * <ul>
+     *   <li>生产远端 Redis 模式：本地镜像仅作「可能有待回账」提示，发单飞原子 Lua {@link #TAKE_REPUTATION_LUA} 取走并删除；
+     *       只按实际取走数额入账并触发 {@code onReputationDrained} 落盘；若宗师离场/冻结或落盘排队异常则原样还回 Redis（对齐 C++ r2-craft#4）。</li>
+     *   <li>本地内存单测（{@code BackingStore.NOOP}）：直接原子摘除本地待回账并同步入账返回 true。</li>
+     * </ul>
+     */
     public boolean drainPendingReputation(ScenePlayer player) {
         if (player == null || player.playerId() == 0L
                 || player.frozen() || player.switchPhase() != SwitchPhase.NONE) {
@@ -222,38 +314,139 @@ public final class CraftProxyStallDirectory {
         long masterId = player.playerId();
         PendingReputation pending = pendingReputation.get(masterId);
         if (pending == null || pending.isEmpty()) {
+            pendingReputation.remove(masterId);
             return false;
         }
-        int orders = pending.orders;
-        int supreme = pending.supreme;
-        int rare = pending.rare;
-        long netGold = pending.netGold;
-        String lastBuyer = pending.lastBuyer;
-
-        applyReputationToPlayer(player, orders, supreme, rare, netGold, lastBuyer);
-        pendingReputation.remove(masterId);
-
+        if (!store.hasRemoteReputationLedger()) {
+            int orders = pending.orders;
+            int supreme = pending.supreme;
+            int rare = pending.rare;
+            long netGold = pending.netGold;
+            String lastBuyer = pending.lastBuyer;
+            applyReputationToPlayer(player, orders, supreme, rare, netGold, lastBuyer);
+            pendingReputation.remove(masterId);
+            if (player.craft().state().getProxyStallOpen()) {
+                syncPlayer(player);
+            }
+            return true;
+        }
+        if (!takesInFlight.add(masterId)) {
+            return false;
+        }
         long repSeq = ++nextSeq;
         localReputationMutationSeq.put(masterId, repSeq);
-        List<CompletionStage<Void>> stages = new ArrayList<>(4);
-        if (orders != 0) {
-            stages.add(store.incrReputationAsync(masterId, "o", -Integer.toUnsignedLong(orders)));
+        CompletionStage<Optional<TakenReputation>> stage;
+        try {
+            stage = store.takeReputationAsync(masterId);
+        } catch (RuntimeException e) {
+            takesInFlight.remove(masterId);
+            clearLocalReputationSeqIfMatch(masterId, repSeq);
+            log.warn("craft_proxy_reputation_take_dispatch_failed master_id={}", Long.toUnsignedString(masterId), e);
+            return false;
         }
-        if (supreme != 0) {
-            stages.add(store.incrReputationAsync(masterId, "s", -Integer.toUnsignedLong(supreme)));
-        }
-        if (rare != 0) {
-            stages.add(store.incrReputationAsync(masterId, "r", -Integer.toUnsignedLong(rare)));
-        }
-        if (netGold != 0L) {
-            stages.add(store.incrReputationAsync(masterId, "g", -netGold));
-        }
-        finishLocalReputationStages(masterId, repSeq, stages);
+        stage.whenComplete((takenOpt, err) -> {
+            try {
+                logic.execute(() -> onReputationTaken(masterId, repSeq, takenOpt, err));
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                // 节点停服后丢弃迟到回调
+            }
+        });
+        return false;
+    }
 
-        if (player.craft().state().getProxyStallOpen()) {
-            syncPlayer(player);
+    private void onReputationTaken(long masterId, long repSeq, Optional<TakenReputation> takenOpt, Throwable err) {
+        takesInFlight.remove(masterId);
+        clearLocalReputationSeqIfMatch(masterId, repSeq);
+        if (err != null || takenOpt == null || takenOpt.isEmpty()) {
+            log.warn("craft_proxy_reputation_take_unknown master_id={} err={}",
+                    Long.toUnsignedString(masterId), err == null ? "malformed_reply" : err.getMessage());
+            return;
         }
-        return true;
+        TakenReputation taken = takenOpt.get();
+        if (taken.isEmpty()) {
+            // 别的节点已取走或本地镜像陈旧：无更新本地写覆盖时清除旧提示，严禁重复入账。
+            if (!localReputationMutationSeq.containsKey(masterId)) {
+                pendingReputation.remove(masterId);
+            }
+            return;
+        }
+        ScenePlayer current = playerLookup != null ? playerLookup.apply(masterId) : null;
+        if (current == null || current.frozen() || current.switchPhase() != SwitchPhase.NONE) {
+            giveBackReputation(masterId, taken);
+            return;
+        }
+        PlayerCraftState before = current.craft().state();
+        applyReputationToPlayer(current, taken.orders(), taken.supreme(), taken.rare(), taken.netGold(), taken.lastBuyer());
+        try {
+            if (onReputationDrained != null) {
+                onReputationDrained.accept(current);
+            }
+        } catch (RuntimeException e) {
+            current.craft().replace(before);
+            giveBackReputation(masterId, taken);
+            log.warn("craft_proxy_reputation_apply_failed_gave_back master_id={}",
+                    Long.toUnsignedString(masterId), e);
+            return;
+        }
+        // 仅扣减本次取走部分，保留在途期间本节点新记增量；全部扣净后移除镜像提示。
+        PendingReputation mirror = pendingReputation.get(masterId);
+        if (mirror != null) {
+            mirror.orders = Integer.compareUnsigned(mirror.orders, taken.orders()) > 0
+                    ? mirror.orders - taken.orders() : 0;
+            mirror.supreme = Integer.compareUnsigned(mirror.supreme, taken.supreme()) > 0
+                    ? mirror.supreme - taken.supreme() : 0;
+            mirror.rare = Integer.compareUnsigned(mirror.rare, taken.rare()) > 0
+                    ? mirror.rare - taken.rare() : 0;
+            mirror.netGold = Long.compareUnsigned(mirror.netGold, taken.netGold()) > 0
+                    ? mirror.netGold - taken.netGold() : 0L;
+            if (mirror.isEmpty()) {
+                pendingReputation.remove(masterId);
+            }
+        }
+        if (current.craft().state().getProxyStallOpen()) {
+            syncPlayer(current);
+        }
+    }
+
+    private void giveBackReputation(long masterId, TakenReputation taken) {
+        long repSeq = ++nextSeq;
+        localReputationMutationSeq.put(masterId, repSeq);
+        PendingReputation pending = pendingReputation.computeIfAbsent(masterId, k -> new PendingReputation());
+        pending.orders = satAddU32(pending.orders, taken.orders());
+        pending.supreme = satAddU32(pending.supreme, taken.supreme());
+        pending.rare = satAddU32(pending.rare, taken.rare());
+        pending.netGold = satAddU64(pending.netGold, taken.netGold());
+        if (taken.lastBuyer() != null && !taken.lastBuyer().isEmpty()) {
+            pending.lastBuyer = taken.lastBuyer();
+        }
+        List<CompletionStage<Void>> stages = new ArrayList<>(5);
+        if (taken.orders() != 0) {
+            stages.add(store.incrReputationAsync(masterId, "o", Integer.toUnsignedLong(taken.orders())));
+        }
+        if (taken.supreme() != 0) {
+            stages.add(store.incrReputationAsync(masterId, "s", Integer.toUnsignedLong(taken.supreme())));
+        }
+        if (taken.rare() != 0) {
+            stages.add(store.incrReputationAsync(masterId, "r", Integer.toUnsignedLong(taken.rare())));
+        }
+        if (taken.netGold() > 0L) {
+            stages.add(store.incrReputationAsync(masterId, "g", taken.netGold()));
+        }
+        if (taken.lastBuyer() != null && !taken.lastBuyer().isEmpty()) {
+            stages.add(store.setLastBuyerAsync(masterId, taken.lastBuyer()));
+        }
+        if (!stages.isEmpty()) {
+            finishLocalReputationStages(masterId, repSeq, stages);
+        } else {
+            clearLocalReputationSeqIfMatch(masterId, repSeq);
+        }
+    }
+
+    private void clearLocalReputationSeqIfMatch(long masterId, long seq) {
+        Long current = localReputationMutationSeq.get(masterId);
+        if (current != null && current == seq) {
+            localReputationMutationSeq.remove(masterId);
+        }
     }
 
     /** 仅测试：从共享目录直接摘除指定摊位。 */

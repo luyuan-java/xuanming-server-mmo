@@ -1243,4 +1243,214 @@ class EquipQualityAndSkillCraftTest {
         assertThat(ack2.getErrorMessage().getId()).isZero();
         assertThat(ack2.getState().hasUnreadProxyDigest()).isFalse();
     }
+
+    @Test
+    void 远端原子Lua取走口碑防双倍入账且离场或存盘失败原样还回() {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer master = f.enter(11, 5101L);
+        master.craft().replace(PlayerCraftState.newBuilder()
+                .setForgeMasteryExp(EquipCraftQualityRules.MASTER_EXP_THRESHOLD)
+                .setProxyStallOpen(true)
+                .setProxyForgeFeeGold(100L)
+                .build());
+
+        // 模拟远端 Redis 共享口碑账本（先取走返回数值，并发二次取走返回空；还回累加回账本）
+        class FakeRemoteLedger implements CraftProxyStallDirectory.BackingStore {
+            long o, s, r, g;
+            String b = "";
+            int takeCalls;
+            final List<java.util.concurrent.CompletableFuture<java.util.Optional<CraftProxyStallDirectory.TakenReputation>>> pendingTakes =
+                    new ArrayList<>();
+
+            @Override
+            public java.util.concurrent.CompletionStage<Void> putAsync(long masterPlayerId, byte[] payload) {
+                return java.util.concurrent.CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public java.util.concurrent.CompletionStage<Void> removeAsync(long masterPlayerId) {
+                return java.util.concurrent.CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public java.util.concurrent.CompletionStage<Void> incrReputationAsync(long masterPlayerId, String fieldSuffix, long delta) {
+                switch (fieldSuffix) {
+                    case "o" -> o += delta;
+                    case "s" -> s += delta;
+                    case "r" -> r += delta;
+                    case "g" -> g += delta;
+                    default -> { }
+                }
+                return java.util.concurrent.CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public java.util.concurrent.CompletionStage<Void> setLastBuyerAsync(long masterPlayerId, String buyerName) {
+                b = buyerName;
+                return java.util.concurrent.CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public boolean hasRemoteReputationLedger() {
+                return true;
+            }
+
+            @Override
+            public java.util.concurrent.CompletionStage<java.util.Optional<CraftProxyStallDirectory.TakenReputation>> takeReputationAsync(
+                    long masterPlayerId) {
+                takeCalls++;
+                var fut = new java.util.concurrent.CompletableFuture<java.util.Optional<CraftProxyStallDirectory.TakenReputation>>();
+                pendingTakes.add(fut);
+                return fut;
+            }
+
+            void completeOldestAtomicTake() {
+                var fut = pendingTakes.removeFirst();
+                var taken = new CraftProxyStallDirectory.TakenReputation((int) o, (int) s, (int) r, g, b);
+                o = s = r = g = 0L;
+                b = "";
+                fut.complete(java.util.Optional.of(taken));
+            }
+        }
+
+        FakeRemoteLedger remote = new FakeRemoteLedger();
+        AtomicInteger saveCalls = new AtomicInteger();
+        boolean[] failSave = {false};
+        CraftProxyStallDirectory dir = new CraftProxyStallDirectory(remote, Runnable::run)
+                .withReputationCallbacks(id -> f.world.playerById(id), p -> {
+                    if (failSave[0]) {
+                        throw new IllegalStateException("模拟存盘排队失败");
+                    }
+                    saveCalls.incrementAndGet();
+                });
+
+        // 1. 远端快照带来 2 单待回账；并发两次 drain 只发 1 次单飞 Lua，仅按原子取走结果入账一次并触发存盘
+        remote.o = 2; remote.s = 1; remote.r = 1; remote.g = 190L; remote.b = "买家甲";
+        dir.applyRemoteReputationSnapshot(Map.of(
+                "5101:o", "2", "5101:s", "1", "5101:r", "1", "5101:g", "190", "5101:b", "买家甲"));
+        assertThat(dir.drainPendingReputation(master)).isFalse();
+        assertThat(dir.drainPendingReputation(master)).isFalse();
+        assertThat(remote.takeCalls).isEqualTo(1);
+        remote.completeOldestAtomicTake();
+        assertThat(master.craft().state().getProxyOrdersCompleted()).isEqualTo(2);
+        assertThat(master.craft().state().getSupremeForgedCount()).isEqualTo(1);
+        assertThat(master.craft().state().getRareBooksCraftedCount()).isEqualTo(1);
+        assertThat(master.craft().state().getUnreadProxyDigestNetGold()).isEqualTo(190L);
+        assertThat(saveCalls.get()).isEqualTo(1);
+
+        // 2. 陈旧远端镜像再送回旧值，但 Redis 已被取空 -> 二次 Lua 返回 0，严禁重复入账
+        dir.applyRemoteReputationSnapshot(Map.of("5101:o", "2", "5101:g", "190"));
+        dir.drainPendingReputation(master);
+        assertThat(remote.takeCalls).isEqualTo(2);
+        remote.completeOldestAtomicTake();
+        assertThat(master.craft().state().getProxyOrdersCompleted()).isEqualTo(2);
+        assertThat(master.craft().state().getUnreadProxyDigestNetGold()).isEqualTo(190L);
+        assertThat(saveCalls.get()).isEqualTo(1);
+
+        // 3. 存盘回调抛异常：回滚内存并原样还回 Redis
+        remote.o = 1; remote.g = 95L; remote.b = "买家乙";
+        dir.applyRemoteReputationSnapshot(Map.of("5101:o", "1", "5101:g", "95", "5101:b", "买家乙"));
+        failSave[0] = true;
+        dir.drainPendingReputation(master);
+        remote.completeOldestAtomicTake();
+        assertThat(master.craft().state().getProxyOrdersCompleted()).isEqualTo(2);
+        assertThat(remote.o).isEqualTo(1L);
+        assertThat(remote.g).isEqualTo(95L);
+        assertThat(remote.b).isEqualTo("买家乙");
+
+        // 4. 宗师取走途中冻结：直接原样还回 Redis
+        failSave[0] = false;
+        dir.drainPendingReputation(master);
+        com.game.scene.world.WorldTestAccess.startFreezing(master);
+        remote.completeOldestAtomicTake();
+        assertThat(master.craft().state().getProxyOrdersCompleted()).isEqualTo(2);
+        assertThat(remote.o).isEqualTo(1L);
+        assertThat(remote.g).isEqualTo(95L);
+
+        // 5. parseTakenReputation 校验：负数归零、长度异常返回 empty
+        assertThat(CraftProxyStallDirectory.parseTakenReputation(List.of("-3", "2", "", "100", "张三")))
+                .hasValue(new CraftProxyStallDirectory.TakenReputation(0, 2, 0, 100L, "张三"));
+        assertThat(CraftProxyStallDirectory.parseTakenReputation(List.of("1", "2"))).isEmpty();
+    }
+
+    @Test
+    void 本人打造极品与自制稀世累计成就_摆摊校验失败不丢回账存盘_零单有银两仍显战报() throws Exception {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer player = f.enter(11, 5201L);
+        assertThat(f.attributes.gmSetLevel(player, 60)).isZero();
+        assertThat(f.currency.add(player, Wallet.GOLD, 50_000L, Reason.GM_GRANT).ok()).isTrue();
+
+        // 1. 本人打造装备并安装极品非豁免词条 -> supreme_forged_count 自增
+        GetEquipmentCraftRulesResponse rules = call(f, player, BAG_SERVICE, "GetEquipmentCraftRules",
+                GetEquipmentCraftRulesRequest.getDefaultInstance(), GetEquipmentCraftRulesResponse.parser());
+        var recipe = rules.getRecipesList().getFirst();
+        var affix = rules.getAffixesList().stream()
+                .filter(a -> !a.getPolishExempt() && a.getPool() == 1)
+                .findFirst().orElseThrow();
+        SkillScrollCraftTable rareScroll = f.skillCraftTables.enabledScrolls().stream()
+                .filter(s -> s.getRarityTier() == 1).findFirst().orElseThrow();
+        int rareSkillId = f.skillCraftTables.scrollSkillIds(rareScroll.getId()).getFirst();
+
+        Map<Integer, Long> mats = new java.util.LinkedHashMap<>();
+        mats.merge(recipe.getMaterialConfigId(), 50L, Long::sum);
+        mats.merge(affix.getMaterialConfigId(), 50L, Long::sum);
+        mats.merge(rareScroll.getRareScrollItemId(), 10L, Long::sum);
+        mats.merge(rareScroll.getRareInkItemId(), 10L, Long::sum);
+        assertThat(f.bags.addItems(player, BagType.INVENTORY, mats, false, Reason.GM_GRANT, 0, "").tip()).isZero();
+
+        CommitEquipmentCraftResponse base = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(9101L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(0L)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.CREATE_ITEM)
+                                .setConfigId(recipe.getProduct().getConfigId()))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(base.getErrorMessage().getId()).isZero();
+
+        f.craft.setQualityRollForTest(bound -> 9999);
+        CommitEquipmentCraftResponse supreme = call(f, player, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(9102L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(1L)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.INSTALL_AFFIX)
+                                .setItemId(base.getItemId()).setAffixSlot(1).setAffixId(affix.getAffixId()))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(supreme.getErrorMessage().getId()).isZero();
+        assertThat(supreme.getResultQualityTier()).isEqualTo(EquipCraftQualityRules.MAX_QUALITY_TIER);
+        assertThat(player.craft().state().getSupremeForgedCount()).isEqualTo(1);
+
+        // 2. 本人定向制书稀世绝学 -> rare_books_crafted_count 自增
+        CraftSkillBookResponse rareBook = call(f, player, SKILL_SERVICE, "CraftSkillBook",
+                CraftSkillBookRequest.newBuilder()
+                        .setMode(CraftSkillBookRequest.CraftMode.TARGETED_RARE)
+                        .setScrollId(rareScroll.getId())
+                        .setTargetSkillTableId(rareSkillId)
+                        .setExpectedRevision(0L)
+                        .setClientRequestId(9103L)
+                        .build(), CraftSkillBookResponse.parser());
+        assertThat(rareBook.getErrorMessage().getId()).isZero();
+        assertThat(rareBook.getState().getRareBooksCraftedCount()).isEqualTo(1);
+
+        // 3. setProxyStall 先回账待结算口碑后参数校验失败：outcome.mutated 必须为 true，防止丢失回账存盘
+        f.proxyDirectory.recordOrderReputation(player.playerId(), 0, 0, 95L, "离线买家", null);
+        SkillCraftService.StallOutcome rejectedAfterDrain = f.skillCraft.setProxyStall(player,
+                SetCraftProxyStallRequest.newBuilder().setOpen(true).setMasterShowcaseTag(999).build());
+        assertThat(rejectedAfterDrain.response().getErrorMessage().getId()).isNotZero();
+        assertThat(rejectedAfterDrain.mutated()).isTrue();
+        assertThat(player.craft().state().getProxyOrdersCompleted()).isEqualTo(1);
+
+        // 4. unread_proxy_digest 仅 net_gold > 0 且 orders == 0 时也必须回传战报快照
+        player.craft().replace(player.craft().state().toBuilder()
+                .setUnreadProxyDigestOrders(0)
+                .setUnreadProxyDigestNetGold(95L)
+                .setUnreadProxyDigestNewTitlesMask(0)
+                .build());
+        GetSkillCraftingStateResponse st = f.skillCraft.getState(player);
+        assertThat(st.getState().hasUnreadProxyDigest()).isTrue();
+        assertThat(st.getState().getUnreadProxyDigest().getNetGoldEarned()).isEqualTo(95L);
+    }
 }

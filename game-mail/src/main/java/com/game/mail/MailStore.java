@@ -172,19 +172,9 @@ public final class MailStore {
                 INVALID);
         String hash = ServiceCallSignatures.digest(in);
         // 判重在当前时钟和配表校验之前，旧成功不能被过期/满箱重判。
-        var old = sql.read(d,
-                s
-                -> s.one("SELECT " + MC + " FROM mail_message WHERE sender_kind=? AND request_id=?", MailStore::mail, in.getSenderKind(),
-                        U(in.getRequestId())));
-        if (old != null) {
-            int oldKind = old.kind;
-            if (oldKind == 0)
-                oldKind = sql.read(d,
-                        s
-                        -> s.one("SELECT kind FROM mail_campaign WHERE sender_kind=? AND campaign_id=? AND manifest_generation=?",
-                                r -> r.getInt(1), old.sender, U(old.campaign), U(old.generation)));
-            require(old.hash.equals(hash) && oldKind == kind, CONFLICT);
-            return SendMailResponse.newBuilder().setMailId(old.id).setDuplicated(true).build();
+        SendMailResponse existing = findExistingSend(d, in.getSenderKind(), in.getRequestId(), kind, hash);
+        if (existing != null) {
+            return existing;
         }
         try {
             MailGrants.bundle(in.getAttachments(), itemExists);
@@ -218,50 +208,81 @@ public final class MailStore {
         // 个人邮件锁玩家邮箱行，系统邮件锁 0 号行，帮会邮件锁高位互斥空间（与玩家号 1..2^63-1 及 0 永不相交）实现按帮独立限流。
         long guard = kind == 1 ? in.getRecipientPlayerId() : (kind == 3 ? (Long.MIN_VALUE | in.getGuildId()) : 0L);
         ensure(d, guard);
-        return sql.tx(d, s -> {
-            lock(s, guard);
-            var previous = s.one("SELECT " + MC + " FROM mail_message WHERE sender_kind=? AND request_id=?", MailStore::mail,
-                    in.getSenderKind(), U(in.getRequestId()));
-            if (previous != null) {
-                require(previous.hash.equals(hash), CONFLICT);
-                return SendMailResponse.newBuilder().setMailId(previous.id).setDuplicated(true).build();
+        try {
+            return sql.tx(d, s -> {
+                lock(s, guard);
+                var previous = s.one("SELECT " + MC + " FROM mail_message WHERE sender_kind=? AND request_id=?", MailStore::mail,
+                        in.getSenderKind(), U(in.getRequestId()));
+                if (previous != null) {
+                    return duplicateOrConflict(s, previous, kind, hash);
+                }
+                long count;
+                int limit;
+                if (kind == 1) {
+                    count = s.count("SELECT COUNT(*) FROM mail_message m JOIN mail_state t ON t.mail_id=m.mail_id AND "
+                                    + "t.player_id=m.owner_player_id WHERE m.owner_player_id=? AND t.deleted_ms=0 AND (m.expire_ms>? OR "
+                                    + "t.claim_state NOT IN (0,1,3))",
+                            U(guard), now);
+                    limit = 200;
+                } else if (kind == 3) {
+                    count = s.count("SELECT COUNT(*) FROM mail_message WHERE owner_player_id=0 AND guild_id=? AND kind IN (0,3) AND expire_ms>?",
+                            U(in.getGuildId()), now);
+                    limit = maxActiveGuildMails;
+                } else {
+                    count = s.count("SELECT COUNT(*) FROM mail_message WHERE owner_player_id=0 AND guild_id=0 AND kind IN (0,2) AND expire_ms>?",
+                            now);
+                    limit = maxActiveSystemMails;
+                }
+                require(count < limit, FULL);
+                s.update("INSERT INTO mail_message (" + MC + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", U(id), U(in.getRecipientPlayerId()),
+                        U(in.getGuildId()), campaign ? 0 : kind, in.getSenderKind(), U(in.getRequestId()), hash, in.getTitle(), in.getBody(),
+                        payload, now, expire, U(in.getCampaignId()), U(in.getManifestGeneration()));
+                if (kind == 1)
+                    s.update("INSERT INTO mail_state "
+                             + "(player_id,mail_id,read_ms,deleted_ms,claim_state,current_op_id,claim_version,reason_tip_id,updated_ms) VALUES "
+                             + "(?,?,0,0,?,0,0,0,?)",
+                            U(guard), U(id), payload.length == 0 ? 0 : 1, now);
+                if (campaign)
+                    s.update("INSERT INTO mail_campaign "
+                             + "(sender_kind,campaign_id,manifest_generation,mail_id,request_id,producer,request_hash,title,body,attachments,"
+                             + "expire_ms,expected_recipient_count,expected_shard_count,manifest_hash,state,created_ms,sealed_ms,kind,guild_id)"
+                             + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,0,?,?)",
+                            in.getSenderKind(), U(in.getCampaignId()), U(in.getManifestGeneration()), U(id), U(in.getRequestId()), caller, hash,
+                            in.getTitle(), in.getBody(), payload, expire, U(in.getExpectedRecipientCount()), in.getExpectedShardCount(),
+                            in.getManifestHash(), now, kind, U(in.getGuildId()));
+                return SendMailResponse.newBuilder().setMailId(id).build();
+            });
+        } catch (SQLException e) {
+            if (isDuplicateKey(e)) {
+                SendMailResponse concurrent = findExistingSend(d, in.getSenderKind(), in.getRequestId(), kind, hash);
+                if (concurrent != null) {
+                    return concurrent;
+                }
+                if (campaign) {
+                    throw new Reject(CONFLICT);
+                }
             }
-            long count;
-            int limit;
-            if (kind == 1) {
-                count = s.count("SELECT COUNT(*) FROM mail_message m JOIN mail_state t ON t.mail_id=m.mail_id AND "
-                                + "t.player_id=m.owner_player_id WHERE m.owner_player_id=? AND t.deleted_ms=0 AND (m.expire_ms>? OR "
-                                + "t.claim_state NOT IN (0,1,3))",
-                        U(guard), now);
-                limit = 200;
-            } else if (kind == 3) {
-                count = s.count("SELECT COUNT(*) FROM mail_message WHERE owner_player_id=0 AND guild_id=? AND kind IN (0,3) AND expire_ms>?",
-                        U(in.getGuildId()), now);
-                limit = maxActiveGuildMails;
-            } else {
-                count = s.count("SELECT COUNT(*) FROM mail_message WHERE owner_player_id=0 AND guild_id=0 AND kind IN (0,2) AND expire_ms>?",
-                        now);
-                limit = maxActiveSystemMails;
-            }
-            require(count < limit, FULL);
-            s.update("INSERT INTO mail_message (" + MC + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", U(id), U(in.getRecipientPlayerId()),
-                    U(in.getGuildId()), campaign ? 0 : kind, in.getSenderKind(), U(in.getRequestId()), hash, in.getTitle(), in.getBody(),
-                    payload, now, expire, U(in.getCampaignId()), U(in.getManifestGeneration()));
-            if (kind == 1)
-                s.update("INSERT INTO mail_state "
-                         + "(player_id,mail_id,read_ms,deleted_ms,claim_state,current_op_id,claim_version,reason_tip_id,updated_ms) VALUES "
-                         + "(?,?,0,0,?,0,0,0,?)",
-                        U(guard), U(id), payload.length == 0 ? 0 : 1, now);
-            if (campaign)
-                s.update("INSERT INTO mail_campaign "
-                         + "(sender_kind,campaign_id,manifest_generation,mail_id,request_id,producer,request_hash,title,body,attachments,"
-                         + "expire_ms,expected_recipient_count,expected_shard_count,manifest_hash,state,created_ms,sealed_ms,kind,guild_id)"
-                         + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,0,?,?)",
-                        in.getSenderKind(), U(in.getCampaignId()), U(in.getManifestGeneration()), U(id), U(in.getRequestId()), caller, hash,
-                        in.getTitle(), in.getBody(), payload, expire, U(in.getExpectedRecipientCount()), in.getExpectedShardCount(),
-                        in.getManifestHash(), now, kind, U(in.getGuildId()));
-            return SendMailResponse.newBuilder().setMailId(id).build();
+            throw e;
+        }
+    }
+
+    private SendMailResponse findExistingSend(Deadline d, int senderKind, long requestId, int kind, String hash) throws SQLException {
+        return sql.read(d, s -> {
+            var old = s.one("SELECT " + MC + " FROM mail_message WHERE sender_kind=? AND request_id=?",
+                    MailStore::mail, senderKind, U(requestId));
+            return old == null ? null : duplicateOrConflict(s, old, kind, hash);
         });
+    }
+
+    private static SendMailResponse duplicateOrConflict(AuthorityJdbc.Session s, Mail old, int kind, String hash) throws SQLException {
+        int oldKind = old.kind;
+        if (oldKind == 0) {
+            Integer campaignKind = s.one("SELECT kind FROM mail_campaign WHERE sender_kind=? AND campaign_id=? AND manifest_generation=?",
+                    r -> r.getInt(1), old.sender, U(old.campaign), U(old.generation));
+            oldKind = campaignKind == null ? 0 : campaignKind;
+        }
+        require(old.hash.equals(hash) && oldKind == kind, CONFLICT);
+        return SendMailResponse.newBuilder().setMailId(old.id).setDuplicated(true).build();
     }
     static String sha(String value) {
         try {

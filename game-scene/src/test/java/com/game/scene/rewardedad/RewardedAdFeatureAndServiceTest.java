@@ -246,6 +246,27 @@ class RewardedAdFeatureAndServiceTest {
                 BASE_DAY_MS).getErrorMessage().getId()).isEqualTo(RewardedAdService.UNAVAILABLE);
     }
 
+    @Test
+    void 混有非法行时GetInfo必须failClosed拒下发避免死按钮() {
+        RewardedAdSlotTable validRow = enabledSlot(1, false);
+        RewardedAdSlotTable badRow = enabledSlot(2, false).toBuilder().setCurrencyType(Wallet.GOLD).build();
+        RewardedAdTables mixedTables = new RewardedAdTables(List.of(validRow, badRow));
+        assertThat(mixedTables.allRowsValid()).isFalse();
+        assertThat(mixedTables.slots()).hasSize(1);
+
+        BattleFixture f = new BattleFixture();
+        ScenePlayer player = f.enter(11, 2003L);
+        player.setLevel(15);
+        RewardedAdService svc = new RewardedAdService(mixedTables, f.currency, f.clock, f.sceneMetrics);
+
+        GetRewardedAdInfoResponse info = svc.getInfo(player,
+                GetRewardedAdInfoRequest.newBuilder()
+                        .setClientPlatform(AdClientPlatform.AD_CLIENT_PLATFORM_WECHAT_MINIGAME_VALUE).build(),
+                BASE_DAY_MS);
+        assertThat(info.getErrorMessage().getId()).isEqualTo(RewardedAdService.UNAVAILABLE);
+        assertThat(info.getSlotsList()).isEmpty();
+    }
+
     private static <T extends Message> T call(BattleFixture f, ScenePlayer player, String method,
                                               Message req, com.google.protobuf.Parser<T> parser)
             throws InvalidProtocolBufferException {

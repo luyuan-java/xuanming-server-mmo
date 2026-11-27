@@ -75,7 +75,7 @@ public final class RewardedAdService {
 
     public GetRewardedAdInfoResponse getInfo(ScenePlayer player, GetRewardedAdInfoRequest req, long nowMs) {
         PlayerClientRequestLedger ledger = player.clientRequestLedger();
-        if (!ledger.isValid()) {
+        if (!ledger.isValid() || !tables.allRowsValid()) {
             return GetRewardedAdInfoResponse.newBuilder().setErrorMessage(tip(UNAVAILABLE)).build();
         }
         long[] day = RewardedAdRules.resolveGameWeek(nowMs);

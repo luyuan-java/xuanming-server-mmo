@@ -542,7 +542,6 @@ public final class StoragePlayerRepository implements PlayerRepository {
                 case PROGRESS -> {
                     long serStart = nanoClock.getAsLong();
                     PlayerRow row = toRow(save);
-                    save.state().toByteArray();
                     long dbStart = nanoClock.getAsLong();
                     metrics.saveStage(SceneMetrics.SaveStage.SERIALIZE, dbStart - serStart);
                     try {

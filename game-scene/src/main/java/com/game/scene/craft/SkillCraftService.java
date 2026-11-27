@@ -241,7 +241,9 @@ public final class SkillCraftService {
                 .addAllUnlockedCraftTitleIds(EquipCraftQualityRules.unlockedCraftTitleIds(
                         forgeExp, scrollExp, craft.getSupremeForgedCount(),
                         craft.getRareBooksCraftedCount(), craft.getProxyOrdersCompleted()));
-        if (craft.getUnreadProxyDigestOrders() != 0) {
+        if (craft.getUnreadProxyDigestOrders() != 0
+                || craft.getUnreadProxyDigestNetGold() != 0L
+                || craft.getUnreadProxyDigestNewTitlesMask() != 0) {
             out.setUnreadProxyDigest(CraftProxyDigestSummary.newBuilder()
                     .setOrdersCompleted(craft.getUnreadProxyDigestOrders())
                     .setSupremeForgedCount(craft.getUnreadProxyDigestSupreme())
@@ -520,8 +522,14 @@ public final class SkillCraftService {
                 .addSkillBooks(builtBook)
                 .setNextBookSeq(bookId + 1L)
                 .setScrollCraftRevision(revBefore + 1L);
-        if (proxyMasterId == 0L && craft.getScrollMasteryExp() != -1) {
-            nextCraft.setScrollMasteryExp(craft.getScrollMasteryExp() + 1);
+        if (proxyMasterId == 0L) {
+            if (craft.getScrollMasteryExp() != -1) {
+                nextCraft.setScrollMasteryExp(craft.getScrollMasteryExp() + 1);
+            }
+            if (mode == CraftSkillBookRequest.CraftMode.TARGETED_RARE
+                    && craft.getRareBooksCraftedCount() != -1) {
+                nextCraft.setRareBooksCraftedCount(craft.getRareBooksCraftedCount() + 1);
+            }
         }
         player.craft().replace(nextCraft.build());
 
@@ -746,20 +754,18 @@ public final class SkillCraftService {
         if (busy != OK) {
             return failStall(player, busy);
         }
-        if (proxyDirectory != null) {
-            proxyDirectory.drainPendingReputation(player);
-        }
+        boolean drained = proxyDirectory != null && proxyDirectory.drainPendingReputation(player);
         PlayerCraftState craft = player.craft().state();
         int showcaseTag = request.getMasterShowcaseTag();
         if (Integer.compareUnsigned(showcaseTag, EquipCraftQualityRules.MAX_MASTER_SHOWCASE_TAG) > 0) {
-            return failStall(player, kInvalidParameter_VALUE);
+            return failStall(player, kInvalidParameter_VALUE, drained);
         }
         int craftTitleId = request.getEquippedCraftTitleId();
         if (craftTitleId != 0 && !EquipCraftQualityRules.isCraftTitleUnlocked(
                 craftTitleId, craft.getForgeMasteryExp(), craft.getScrollMasteryExp(),
                 craft.getSupremeForgedCount(), craft.getRareBooksCraftedCount(),
                 craft.getProxyOrdersCompleted())) {
-            return failStall(player, kInvalidParameter_VALUE);
+            return failStall(player, kInvalidParameter_VALUE, drained);
         }
         if (!request.getOpen()) {
             player.craft().replace(craft.toBuilder()
@@ -779,21 +785,21 @@ public final class SkillCraftService {
         boolean scrollMaster = EquipCraftQualityRules.masteryTierForExp(craft.getScrollMasteryExp())
                 >= EquipCraftQualityRules.MASTERY_MASTER;
         if (!forgeMaster && !scrollMaster) {
-            return failStall(player, kSkillProxyStallRequiresMaster_VALUE);
+            return failStall(player, kSkillProxyStallRequiresMaster_VALUE, drained);
         }
         if (forgeMaster && !EquipCraftQualityRules.validProxyFee(request.getProxyForgeFeeGold())) {
-            return failStall(player, kSkillProxyFeeInvalid_VALUE);
+            return failStall(player, kSkillProxyFeeInvalid_VALUE, drained);
         }
         if (!forgeMaster && request.getProxyForgeFeeGold() != 0L
                 && !EquipCraftQualityRules.validProxyFee(request.getProxyForgeFeeGold())) {
-            return failStall(player, kSkillProxyFeeInvalid_VALUE);
+            return failStall(player, kSkillProxyFeeInvalid_VALUE, drained);
         }
         if (scrollMaster && !EquipCraftQualityRules.validProxyFee(request.getProxyScrollFeeGold())) {
-            return failStall(player, kSkillProxyFeeInvalid_VALUE);
+            return failStall(player, kSkillProxyFeeInvalid_VALUE, drained);
         }
         if (!scrollMaster && request.getProxyScrollFeeGold() != 0L
                 && !EquipCraftQualityRules.validProxyFee(request.getProxyScrollFeeGold())) {
-            return failStall(player, kSkillProxyFeeInvalid_VALUE);
+            return failStall(player, kSkillProxyFeeInvalid_VALUE, drained);
         }
 
         player.craft().replace(craft.toBuilder()
@@ -903,9 +909,13 @@ public final class SkillCraftService {
     }
 
     private StallOutcome failStall(ScenePlayer player, int tipId) {
+        return failStall(player, tipId, false);
+    }
+
+    private StallOutcome failStall(ScenePlayer player, int tipId, boolean mutated) {
         return new StallOutcome(SetCraftProxyStallResponse.newBuilder()
                 .setErrorMessage(tip(tipId))
                 .setState(buildStateSnapshot(player))
-                .build(), false);
+                .build(), mutated);
     }
 }

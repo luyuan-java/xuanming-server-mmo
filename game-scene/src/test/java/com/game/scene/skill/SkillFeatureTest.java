@@ -458,6 +458,34 @@ class SkillFeatureTest {
                 new com.game.scene.world.Vec3(0, 0, 3))).isNull();
     }
 
+    @Test
+    void 范围技能携带跨场景或冻结目标号时不转向也不广播伪造目标号() throws Exception {
+        start();
+        ScenePlayer caster = player(A);
+        ScenePlayer sameSceneTarget = player(B);
+        ScenePlayer otherSceneTarget = player(C);
+        world.relocateTeamFollower(caster, new com.game.scene.world.Vec3(0, 0, 0));
+        world.relocateTeamFollower(sameSceneTarget, new com.game.scene.world.Vec3(0, 10, 0));
+        world.relocateTeamFollower(otherSceneTarget, new com.game.scene.world.Vec3(10, 0, 0));
+        caster.setRotation(com.game.proto.Rotation.newBuilder().setZ(33).build());
+
+        // 1. 跨场景目标 C：放技能成功但不旋转朝向，且广播 target_entity 清零不泄露实体号
+        sink.clear();
+        assertThat(release(2, entity(C))).isZero();
+        assertThat(caster.rotation().getZ()).isEqualTo(33.0);
+        SkillUsedS2C usedCross = SkillUsedS2C.parseFrom(sink.to(LINK, B).getFirst().getSerializedMessage());
+        assertThat(usedCross.getTargetEntityList()).containsExactly(0L);
+
+        // 2. 同场景但已冻结的目标 B：同样不旋转朝向也不广播其目标号
+        WorldTestAccess.startFreezing(sameSceneTarget);
+        sink.clear();
+        assertThat(release(2, entity(B))).isZero();
+        assertThat(caster.rotation().getZ()).isEqualTo(33.0);
+        SkillUsedS2C usedFrozen = SkillUsedS2C.parseFrom(sink.to(LINK, A).stream()
+                .filter(m -> m.getMessageId() == NOTIFY_USED).findFirst().orElseThrow().getSerializedMessage());
+        assertThat(usedFrozen.getTargetEntityList()).containsExactly(0L);
+    }
+
     private static SkillTables withActionMatrix(StateMutexMatrix action) {
         Map<Integer, SkillTables.SkillDef> skills = new HashMap<>();
         for (int id : new int[] {1, 2, 13}) {

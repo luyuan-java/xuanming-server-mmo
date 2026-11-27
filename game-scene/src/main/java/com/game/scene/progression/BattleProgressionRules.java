@@ -372,6 +372,7 @@ public final class BattleProgressionRules {
                         long carryHard = Long.compareUnsigned(prevHardCap, prevUsed) > 0 ? (prevHardCap - prevUsed) : 0L;
                         nextHardCap = unsignedMin(maxHardCap,
                                 unsignedMax(rule.hardCap(), saturatedAdd(carryHard, saturatedMul(addedWeeks, rule.hardCap()))));
+                        nextHardCap = unsignedMax(nextHardCap, nextSoftCap);
                     }
                 }
                 cand.setSilverRolloverSoftCap(nextSoftCap)
@@ -418,6 +419,9 @@ public final class BattleProgressionRules {
                             ? unsignedMin(unsignedMax(cand.getSilverRolloverHardCap(), rule.hardCap()), maxHardCap)
                             : rule.hardCap())
                     : 0L;
+            if (effectiveHardCap != 0L) {
+                effectiveHardCap = unsignedMax(effectiveHardCap, effectiveSoftCap);
+            }
             WeeklySilverRule effectiveRule = new WeeklySilverRule(effectiveSoftCap, rule.diminishedRatePermyriad(), effectiveHardCap);
             softCap = effectiveRule.softCap();
             if (tableSilver != 0L) {
