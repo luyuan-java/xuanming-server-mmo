@@ -79,6 +79,10 @@ public class CommerceConfiguration {
         if (credits != null) {
             engine = engine.withSellerCreditService(credits);
         }
+        if (p.wantedSkillBook() != null && p.wantedSkillBook().isEnabled()) {
+            var tables = com.game.table.ConfigTables.load(java.nio.file.Path.of(p.wantedSkillBook().resolvedTablesDir()));
+            engine = engine.withWantedSkills(WantedSkillBook.SkillCatalog.fromTables(tables));
+        }
         return engine;
     }
     @Bean(destroyMethod = "close")

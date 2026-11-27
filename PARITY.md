@@ -3040,20 +3040,12 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 - `game-match`：`TournamentParityTest` + `JianghuDuelParityTest` **100% PASS**；
 - `game-scene`：`JianghuSilverFeeReviewTest`（2/2）+ `PrepareBattleTest` + `CancelBattlePrepareTest` + `BattleReaperTest` + `SettlementApplyTest` = **142/142 PASS**。
 
-### 2026-11-27 悬赏求书改走 trade 托管合同(kind 7 求购单,数据覆写审计 r2-craft#1;主仓批 A 已落码未编译,Java 待做)
+### 2026-11-27 悬赏求书改走 trade 托管合同(kind 7 求购单,数据覆写审计 r2-craft#1)（Java 已对齐）
 
-主仓 commit:批 A 的协议、合同引擎与 `wanted_skill_book.go` 随 `24c13a311` 进了 HEAD,其余在工作区;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
-规格见主仓 `docs/design/skill-book-wanted-order-trade-escrow.md`(§3 设计、§11 实施记录),验证命令见同文 §11.1 末与主仓 `docs/PROGRESS.md` 2026-11-27「悬赏求书迁 trade 托管合同」。
-上面 11-26 那节把 r2-craft#1 记成「不适用」,指的是缺陷本身(Java 没有悬赏求书,没有同帧改两人的代码);这一节记的是两版共用的客户端契约变了。
-
-**客户端契约变化**:`ClientPlayerJubaozhai` 新增 `CreateWantedSkillBookOrder` / `FulfillWantedSkillBookOrder` / `ListWantedSkillBookOrders`(message_id 582 / 583 / 584);`CommerceOrderKind` 新增 `COMMERCE_ORDER_KIND_SKILL_BOOK_WANTED = 7`,新增 `WantedSkillBookOrderPhase`、`WantedSkillBookOrderView` 与三对请求 / 响应(`proto/trade/commerce.proto`);新 tip `TradeWantedOrderLimitReached`、`TradeWantedBookMismatch`(`//trade_error` 段末);`MessageLimiter.xlsx` 582~584 三行(5 次/秒)。主仓批 B(未做)会删掉 scene 的 560~563 四条悬赏消息,客户端改调上面三条。
-
-**Java 待做**(按 Java 源码核过:`game-scene` 没有悬赏求书,`game-trade` 没有 kind 7):
-1. `ContractSync` 同步上面的 proto、tip、MessageLimiter 与 `message_id.txt`;`game-gate` 的路由表加 582~584(`MessageRoutesTest` 的方法数随之变)。
-2. 做悬赏求书玩法时直接按 trade 托管实现,不在 scene 同帧改两名玩家:`game-trade` 加 kind 7 合同——发榜托管悬赏银两(只扣流通银两)→ 挂榜(全服)→ 揭榜托管一枚封卷道籍 3414 → 按扣出快照核对条款 → 先书后款(税后 95% 给揭榜人、5% 销毁);不符原样退书回挂榜;发榜人收书被拒整单退回且退全额;每人至多 3 张,计数与插入在同一把角色锁下;撤单只在托管与挂榜阶段;揭榜结果按同一请求号重放查。判据、状态机与角色名照主仓 `go/trade/internal/commerce/wanted_skill_book.go`。
-3. 验证:移植主仓 `wanted_skill_book_test.go`、`wanted_skill_book_tidb_test.go` 与 `delivery_order_test.go` 的 `TestWantedBuyerRejectedRefundsTheFullReward` 的场景。
-
-**2026-11-27 补:客户端已切、scene 560~563 已退役**(主仓批 B,未编译):客户端 `SkillCraftClient` 的发榜、揭榜、撤单改调 trade 的 582~584 与 `CancelCommerceOrder`,书架书先 `SealSkillBook` 再揭榜,发榜 / 揭榜按同一请求号重发查结论;主仓 scene 删掉 `PostSkillBookWantedOrder` / `CancelSkillBookWantedOrder` / `ListSkillBookWantedOrders` / `FulfillSkillBookWantedOrder`(560~563 转墓碑)与 `SkillCraftingStateSnapshot.my_wanted_orders`(`reserved 23`)。Java 的 `ContractSync` 同步时这四条随之删掉、号保留不复用;Java 本来没有这四条的实现,其余待做照上。
+2026-11-27 已在 `game-trade` 与 `game-gate` 完整对齐（契约 582–584、`COMMERCE_ORDER_KIND_SKILL_BOOK_WANTED = 7`、`TradeWantedSkillBookTerms`、tip 20018/20019 及 scene 560–563 退役已随 `ContractSync` 同步）：
+- **`game-trade`**：新增 `WantedSkillBook`（集市税 5% 向上取整/税后实得、`SkillCatalog.fromTables(ConfigTables)` 校验常规永久技能与启用常规卷宗、封卷道籍 3414 未绑定/常规/技能号/宗师署名快照核对、状态机 `wanted_escrow` → `wanted_open` → `wanted_fill` → `deliver`/`return`、`WantedSkillBookOrderPhase` 推导与 `BoardCursor`/`MyCursor` 翻页）；`CommerceRules.settleBuyerFirstDelivery` 对 kind 7 买家收书被拒整单退回按 `buyer_debit` 退全额 100% 悬赏（不白扣 5% 税），不符退书 `seller_return_<attempt>` 走 `TX_AUCTION_RETURN`（30）；`CommerceEngine` 落地 `createWantedSkillBookOrder`（角色锁下 `FOR UPDATE` 计数至多 3 张，满额回 20018）、`fulfillWantedSkillBookOrder`（同请求号重放区分在途回合同 / 不符退书回 20019 / 未扣到回 20015 / 不同道具回冲突）、`cancel` 仅放行发榜人托管与挂榜阶段及公开榜/我的求购单查询；`TradeMethods`、`CommerceClientService`、`CommerceProperties`、`CommerceConfiguration` 接入 582–584。
+- **`game-gate`**：`MessageRoutes` 通过编译期契约路由将 582–584 转入 `DubboGroups.TRADE`，同步更新 `MessageRoutesTest`。
+- **验证**：`game-trade` `WantedSkillBookTest`（6/6）+ `DeliveryOrderAndTxTypeTest`（5/5）+ `TradeDispatcherTest`（17/17）+ `OfficialReversalTest`（3/3）= **31/31 PASS**，`game-gate` `MessageRoutesTest` **22/22 PASS**。
 
 
 ### 2026-11-26 观战分级扩容四端 P0/P1/P2 复查与 Java 侧 5 项修复

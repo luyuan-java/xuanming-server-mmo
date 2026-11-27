@@ -108,7 +108,7 @@ class TradeDispatcherTest {
         for (String method : TradeMethods.CLIENT_REQUESTS) {
             expected.add(id(method));
         }
-        assertThat(expected).contains(196, 197, 198, 200, 481, 482, 483, 484).hasSize(39);
+        assertThat(expected).contains(196, 197, 198, 200, 481, 482, 483, 484, 582, 583, 584).hasSize(42);
         assertThat(d.clientMessageIds()).isEqualTo(expected);
         for (String adminMethod : TradeMethods.FORBIDDEN_ADMIN_METHODS) {
             expected.add(REGISTRY.requireId(TradeMethods.ADMIN_SERVICE, adminMethod));

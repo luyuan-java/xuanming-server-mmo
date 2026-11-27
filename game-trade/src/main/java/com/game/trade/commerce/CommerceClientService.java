@@ -206,6 +206,18 @@ public final class CommerceClientService {
                         .setServerNowMs(engine.clock.getAsLong())
                         .build();
                 case "BrowseCommerceOffers" -> browse((BrowseCommerceOffersRequest) input);
+                case "CreateWantedSkillBookOrder" -> {
+                    var in = (CreateWantedSkillBookOrderRequest) input;
+                    var row = engine.createWantedSkillBookOrder(me, "", in, d);
+                    yield wantedResponse(row, me);
+                }
+                case "FulfillWantedSkillBookOrder" -> {
+                    var in = (FulfillWantedSkillBookOrderRequest) input;
+                    var row = engine.fulfillWantedSkillBookOrder(
+                            me, id(in.getOrderId()), in.getClientRequestId(), in.getSealedItemId(), d);
+                    yield wantedResponse(row, me);
+                }
+                case "ListWantedSkillBookOrders" -> listWanted((ListWantedSkillBookOrdersRequest) input, me);
                 default -> rejection(prototype, com.game.table.TradeErrorTip.trade_error.kTradeFeatureDisabled_VALUE);
             };
         } catch (Refusal denied) {
@@ -356,6 +368,56 @@ public final class CommerceClientService {
             if (r.getKind() == 5)
                 v.setAuction(lot(r));
             out.addOffers(v);
+        }
+        return out.build();
+    }
+
+    private WantedSkillBookOrderResponse wantedResponse(TradeCommerceRow r, long viewerId) throws SQLException {
+        return WantedSkillBookOrderResponse.newBuilder()
+                .setOrder(WantedSkillBook.view(r, CommerceEngine.workflow(r).build(), viewerId, engine.wantedSkills()))
+                .setServerNowMs(engine.clock.getAsLong())
+                .build();
+    }
+
+    private Message listWanted(ListWantedSkillBookOrdersRequest in, long viewerId) throws SQLException {
+        if (engine.wantedSkills() == null) {
+            throw new Refusal(WantedSkillBook.ERR_DISABLED);
+        }
+        int limit = in.getLimit() == 0 ? 20 : limit(in.getLimit(), 50);
+        int filterSkill = in.getFilterSkillTableId();
+        var out = ListWantedSkillBookOrdersResponse.newBuilder().setServerNowMs(engine.clock.getAsLong());
+        if (in.getOnlyMine()) {
+            var rows = engine.listMyWantedSkillBookOrders(viewerId, WantedSkillBook.MyCursor.parse(in.getCursor()), limit);
+            var session = engine.actor();
+            for (var r : rows) {
+                var w = CommerceEngine.workflow(r).build();
+                if (session != null && w.hasBuyerIdentity()
+                        && (!session.getAccount().equals(w.getBuyerIdentity().getAccount())
+                            || session.getOwnerRevision() != w.getBuyerIdentity().getOwnerRevision())) {
+                    continue;
+                }
+                if (filterSkill != 0 && w.getWantedSkillBook().getSkillTableId() != filterSkill) {
+                    continue;
+                }
+                out.addOrders(WantedSkillBook.view(r, w, viewerId, engine.wantedSkills()));
+            }
+            if (rows.size() == limit) {
+                var last = rows.getLast();
+                out.setNextCursor(new WantedSkillBook.MyCursor(last.getCreatedMs(), last.getCommerceId()).format());
+            }
+            return out.build();
+        }
+        var rows = engine.listOpenWantedSkillBookOrders(WantedSkillBook.BoardCursor.parse(in.getCursor()), limit);
+        for (var r : rows) {
+            var w = CommerceEngine.workflow(r).build();
+            if (filterSkill != 0 && w.getWantedSkillBook().getSkillTableId() != filterSkill) {
+                continue;
+            }
+            out.addOrders(WantedSkillBook.view(r, w, viewerId, engine.wantedSkills()));
+        }
+        if (rows.size() == limit) {
+            var last = rows.getLast();
+            out.setNextCursor(new WantedSkillBook.BoardCursor(last.getUnitPrice(), last.getCommerceId()).format());
         }
         return out.build();
     }

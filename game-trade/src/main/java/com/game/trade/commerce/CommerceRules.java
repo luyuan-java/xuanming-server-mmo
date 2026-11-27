@@ -228,12 +228,21 @@ public final class CommerceRules {
         if (leg(w, "seller_return") != null || leg(w, "buyer_return") != null) {
             throw new IllegalStateException("买家交付腿被拒要整单退回，合同里却已经有退回腿");
         }
+        AssetBundle refund = seller.getBundle();
+        if (r.getKind() == WantedSkillBook.KIND) {
+            // 求购单卖家所得仅含税后 95%，发榜人收书被拒整单退回时必须退发榜人托管的 100% 原额。
+            var escrow = leg(w, "buyer_debit");
+            if (!applied(escrow)) {
+                throw new IllegalStateException("求购单整单退回，发榜人的悬赏托管却没有扣到");
+            }
+            refund = transfer(escrow.build());
+        }
         buyer.setSupersededBy(UNWOUND_BY);
         seller.setSupersededBy(UNWOUND_BY);
         addEscrowLeg(w, "seller_return", seller.getPlayerId(), buyer.getEscrowOwnerId(), buyer.getBundle());
         if (r.getKind() != 5) {
             // 拍品(kind 5)不退钱：钱仍在赢家出价合同中，由出价看到拍品撤单结案后自行退款。
-            addEscrowLeg(w, "buyer_return", buyer.getPlayerId(), seller.getEscrowOwnerId(), seller.getBundle());
+            addEscrowLeg(w, "buyer_return", buyer.getPlayerId(), seller.getEscrowOwnerId(), refund);
         }
         w.setStage("return");
         r.setStatus(CANCEL_PENDING);
@@ -390,6 +399,9 @@ public final class CommerceRules {
         if (w.getStage().equals(STAGE_OFFICIAL_DELIVER)) {
             planOfficial(r, w);
             return;
+        }
+        if (r.getKind() == WantedSkillBook.KIND) {
+            WantedSkillBook.plan(r, w);
         }
         if (w.getStage().equals("offer_escrow")) {
             add(w, "seller_debit", r.getSellerPlayerId(), 3, bundle(w.getSellerAssets()));

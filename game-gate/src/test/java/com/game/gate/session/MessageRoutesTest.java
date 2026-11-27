@@ -224,7 +224,8 @@ class MessageRoutesTest {
                 "CreateAuctionLot", "PlaceAuctionBid", "GetAuctionLot", "CancelAuctionLot", "BrowseCommerceOffers",
                 "CreateRmbConsignment", "GetRmbConsignment", "ListRmbConsignments", "BuyRmbConsignment", "CancelRmbConsignment",
                 "GetRmbOrder", "ListRmbOrders", "CancelRmbOrder", "ListSellerIncomes", "CreateWithdrawal", "GetWithdrawal",
-                "GetSellerCredit", "SubmitSellerReview", "GetMarketReferencePrice", "GetPlayerTradeQuota");
+                "GetSellerCredit", "SubmitSellerReview", "GetMarketReferencePrice", "GetPlayerTradeQuota",
+                "CreateWantedSkillBookOrder", "FulfillWantedSkillBookOrder", "ListWantedSkillBookOrders");
         List<MessageMethod> jubaozhai = registry.all().stream()
                 .filter(m -> m.serviceName().equals("ClientPlayerJubaozhai")).toList();
         assertThat(jubaozhai).as("契约里 ClientPlayerJubaozhai 的方法").extracting(MessageMethod::methodName)
@@ -274,10 +275,10 @@ class MessageRoutesTest {
                 "ListJianghuGrudges", "DismissJianghuGrudge",
                 // 五行试炼志 V3 好友约战帖与受控 PVE 回放 570–572
                 "CreateTrialChallengeCard", "GetTrialChallengeCard", "GetSharedTrialReplay",
-                // 万象残局坊 V1（575–581）
+                // 万象残局坊 V1（575–581）+ 观战公开交流室（585–586）
                 "ListTacticalPuzzles", "GetTacticalPuzzle", "SaveTacticalPuzzleDraft",
                 "DeleteTacticalPuzzle", "StartTacticalPuzzleBattle", "LikeTacticalPuzzle",
-                "GetTacticalPuzzleSolutionReplay");
+                "GetTacticalPuzzleSolutionReplay", "SendBattleSpectateChat", "PullBattleSpectateChat");
         List<MessageMethod> match = registry.all().stream().filter(m -> m.serviceName().equals("MatchService")).toList();
         assertThat(match).as("契约里 MatchService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.concat(noReply.stream(), replied.stream()).toList());
@@ -292,7 +293,7 @@ class MessageRoutesTest {
                         "CreateTrialChallengeCard", "GetTrialChallengeCard", "GetSharedTrialReplay",
                         "ListTacticalPuzzles", "GetTacticalPuzzle", "SaveTacticalPuzzleDraft",
                         "DeleteTacticalPuzzle", "StartTacticalPuzzleBattle", "LikeTacticalPuzzle",
-                        "GetTacticalPuzzleSolutionReplay")
+                        "GetTacticalPuzzleSolutionReplay", "SendBattleSpectateChat", "PullBattleSpectateChat")
                         .map(name -> registry.requireId("MatchService", name)))
                 .sorted()
                 .toList();

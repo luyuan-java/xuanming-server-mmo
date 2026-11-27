@@ -36,13 +36,15 @@ public final class CommerceEngine {
     private final PlayerTradeGuard playerTradeGuard;
     private final SellerCreditService credits;
     private final ReferencePrice.Reader referencePrices;
+    private final WantedSkillBook.SkillCatalog wantedSkills;
     public CommerceEngine(CommerceStore store, LongSupplier ids, Policy policy, LongSupplier clock) {
-        this(store, ids, policy, clock, null, null, null, null);
+        this(store, ids, policy, clock, null, null, null, null, null);
     }
     private CommerceEngine(CommerceStore store, LongSupplier ids, Policy policy, LongSupplier clock,
                             com.game.api.proto.SessionContext actor,
                             PlayerTradeGuard playerTradeGuard, SellerCreditService credits,
-                            ReferencePrice.Reader referencePrices) {
+                            ReferencePrice.Reader referencePrices,
+                            WantedSkillBook.SkillCatalog wantedSkills) {
         this.store = Objects.requireNonNull(store);
         this.ids = Objects.requireNonNull(ids);
         this.policy = Objects.requireNonNull(policy);
@@ -51,28 +53,34 @@ public final class CommerceEngine {
         this.playerTradeGuard = playerTradeGuard;
         this.credits = credits;
         this.referencePrices = referencePrices;
+        this.wantedSkills = wantedSkills;
     }
     /** 挂载游戏内当面交易防骗门禁（返回共享底层账本的新引擎视图）。 */
     public CommerceEngine withPlayerTradeGuard(PlayerTradeGuard guard) {
         ReferencePrice.Reader effectivePrices = referencePrices != null ? referencePrices : (guard == null ? null : guard.prices());
-        return new CommerceEngine(store, ids, policy, clock, actor, guard, credits, effectivePrices);
+        return new CommerceEngine(store, ids, policy, clock, actor, guard, credits, effectivePrices, wantedSkills);
     }
     /** 挂载卖家店铺信用服务（官方托管首次结案后幂等计入真实成交）。 */
     public CommerceEngine withSellerCreditService(SellerCreditService service) {
-        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, service, referencePrices);
+        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, service, referencePrices, wantedSkills);
     }
     /** 挂载近 7 日真实成交中位参考价查询器。 */
     public CommerceEngine withReferencePrices(ReferencePrice.Reader reader) {
-        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, credits, reader);
+        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, credits, reader, wantedSkills);
+    }
+    /** 挂载悬赏求书（kind 7）技能目录（未挂载时悬赏求书关闭，统一回 FEATURE_DISABLED）。 */
+    public CommerceEngine withWantedSkills(WantedSkillBook.SkillCatalog catalog) {
+        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, credits, referencePrices, catalog);
     }
     PlayerTradeGuard playerTradeGuard() { return playerTradeGuard; }
     SellerCreditService credits() { return credits; }
     ReferencePrice.Reader referencePrices() { return referencePrices; }
+    WantedSkillBook.SkillCatalog wantedSkills() { return wantedSkills; }
     /** 每次客户端调用显式绑定原会话；共享的号源/仓储不变，不存线程局部或进程级请求状态。 */
     CommerceEngine forActor(com.game.api.proto.SessionContext actor) {
         if (actor == null || actor.getPlayerId() == 0 || actor.getAccount().isEmpty() || actor.getOwnerRevision() <= 0)
             throw new Refusal(INVALID);
-        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, credits, referencePrices);
+        return new CommerceEngine(store, ids, policy, clock, actor, playerTradeGuard, credits, referencePrices, wantedSkills);
     }
     com.game.api.proto.SessionContext actor() { return actor; }
     private String playerRequestKey(long me, String request) {
@@ -277,9 +285,159 @@ public final class CommerceEngine {
     public TradeCommerceRow get(long me, long id) throws SQLException {
         var r = store.get(id);
         if (r == null
-            || r.getSellerPlayerId() != me && r.getBuyerPlayerId() != me && r.getKind() != 3 && r.getKind() != 5)
+            || r.getSellerPlayerId() != me && r.getBuyerPlayerId() != me
+                && r.getKind() != 3 && r.getKind() != 5 && r.getKind() != WantedSkillBook.KIND)
             throw new Refusal(MISSING);
         return r;
+    }
+
+    /** 悬赏求书发榜（kind 7）：无状态校验后在角色锁下数活单（至多 3 张）并建托管单。 */
+    public TradeCommerceRow createWantedSkillBookOrder(long me, String posterName,
+            CreateWantedSkillBookOrderRequest in, Deadline d) throws SQLException {
+        if (wantedSkills == null) {
+            throw new Refusal(WantedSkillBook.ERR_DISABLED);
+        }
+        long reward = in.getRewardGold();
+        if (Long.compareUnsigned(reward, WantedSkillBook.REWARD_MIN_GOLD) < 0
+                || Long.compareUnsigned(reward, WantedSkillBook.REWARD_MAX_GOLD) > 0) {
+            throw new Refusal(INVALID);
+        }
+        if (!wantedSkills.isEligible(in.getSkillTableId())) {
+            throw new Refusal(INVALID);
+        }
+        WantedSkillBook.SkillInfo info = wantedSkills.lookup(in.getSkillTableId())
+                .orElseThrow(() -> new Refusal(INVALID));
+        TradeWantedSkillBookTerms terms = TradeWantedSkillBookTerms.newBuilder()
+                .setSkillTableId(in.getSkillTableId())
+                .setScrollId(info.scrollId())
+                .setRequireMasterSignature(in.getRequireMasterSignature())
+                .setRewardGold(reward)
+                .setSellerNetGold(WantedSkillBook.sellerNetGold(reward))
+                .setPosterName(posterName == null ? "" : posterName)
+                .build();
+        PostLockCheck limitCheck = (c, nowMs) -> {
+            try (var st = c.prepareStatement(
+                    "SELECT commerce_id FROM trade_commerce WHERE buyer_player_id=? AND kind=? AND status NOT IN (?,?) "
+                            + "ORDER BY commerce_id LIMIT ? FOR UPDATE")) {
+                st.setQueryTimeout(2);
+                st.setObject(1, me >= 0 ? (Object) me : new java.math.BigInteger(Long.toUnsignedString(me)));
+                st.setInt(2, WantedSkillBook.KIND);
+                st.setInt(3, CANCELLED);
+                st.setInt(4, SETTLED);
+                st.setInt(5, WantedSkillBook.MAX_ACTIVE_ORDERS);
+                int active = 0;
+                try (var rs = st.executeQuery()) {
+                    while (rs.next()) {
+                        active++;
+                    }
+                }
+                if (active >= WantedSkillBook.MAX_ACTIVE_ORDERS) {
+                    throw new Refusal(WantedSkillBook.ERR_LIMIT);
+                }
+            }
+        };
+        return create(me, in.getClientRequestId(), in,
+                TradeCommerceRow.newBuilder()
+                        .setKind(WantedSkillBook.KIND)
+                        .setStatus(ESCROWING)
+                        .setBuyerPlayerId(me)
+                        .setUnitPrice(reward)
+                        .setCurrencyType(com.game.proto.common.base.CurrencyType.CURRENCY_TYPE_GOLD_VALUE)
+                        .setItemConfigId(WantedSkillBook.SEALED_SKILL_BOOK_CONFIG_ID),
+                TradeCommerceWorkflow.newBuilder()
+                        .setStage(WantedSkillBook.STAGE_ESCROW)
+                        .setWantedSkillBook(terms),
+                d,
+                limitCheck);
+    }
+
+    /** 悬赏求书揭榜（kind 7）：同请求号重放查原揭榜结论（在途/成交回合同、不符退书回 20019、未扣到回 20015）。 */
+    public TradeCommerceRow fulfillWantedSkillBookOrder(long me, long id, String requestId,
+            long sealedItemId, Deadline d) throws SQLException {
+        if (wantedSkills == null) {
+            throw new Refusal(WantedSkillBook.ERR_DISABLED);
+        }
+        if (me == 0L || requestId == null || requestId.length() < 8 || requestId.length() > 80 || sealedItemId == 0L) {
+            throw new Refusal(INVALID);
+        }
+        return store.transaction(d, c -> {
+            if (actor != null) verifyActor(c, me);
+            else CommerceStore.lockAssetOwners(c, me);
+            var current = store.lock(c, id);
+            if (current == null) {
+                throw new Refusal(MISSING);
+            }
+            var r = current.toBuilder();
+            var w = workflow(current);
+            if (r.getKind() != WantedSkillBook.KIND || !w.hasWantedSkillBook()) {
+                throw new Refusal(CONFLICT);
+            }
+            String requestKey = key(WantedSkillBook.FULFILL_SCOPE, me, requestId);
+            WantedSkillBook.MatchedAttempt prior = WantedSkillBook.attemptByKey(w, requestKey);
+            if (prior != null) {
+                var uuids = prior.leg().getBundle().getItemUuidsList();
+                if (uuids.size() != 1 || uuids.getFirst() != sealedItemId) {
+                    throw new Refusal(REQUEST_CONFLICT);
+                }
+                if (prior.attempt() == w.getQuantityReserved() && r.getSellerPlayerId() == me) {
+                    return current;
+                }
+                if (prior.leg().getOutcome() == 2) {
+                    throw new Refusal(WantedSkillBook.ERR_MISMATCH);
+                }
+                throw new Refusal(NOT_TRADABLE);
+            }
+            if (!WantedSkillBook.STAGE_OPEN.equals(w.getStage())
+                    || r.getStatus() != WAITING
+                    || r.getSellerPlayerId() != 0L
+                    || w.getCancelRequested()) {
+                throw new Refusal(CONFLICT);
+            }
+            if (me == r.getBuyerPlayerId()) {
+                throw new Refusal(SELF);
+            }
+            long actorAttempts = w.getLegsList().stream()
+                    .filter(l -> l.getPlayerId() == me && l.getRole().startsWith(WantedSkillBook.DEBIT_PREFIX))
+                    .count();
+            if (actorAttempts >= 3 || Long.compareUnsigned(w.getQuantityReserved(), 256L) >= 0) {
+                throw new Refusal(CONFLICT);
+            }
+            r.setSellerPlayerId(me).setStatus(ESCROWING);
+            w.setSellerIdentity(CommerceStore.roleIdentity(c, me));
+            long attempt = w.getQuantityReserved() + 1L;
+            w.setQuantityReserved(attempt);
+            add(w, WantedSkillBook.debitRole(attempt, requestKey), me, 3,
+                    AssetBundle.newBuilder().addItemUuids(sealedItemId).build());
+            w.setStage(WantedSkillBook.STAGE_FILL);
+            r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(clock.getAsLong());
+            return store.save(c, r);
+        });
+    }
+
+    /** 列全服挂榜中的悬赏求书单（按悬赏额降序、commerce_id 降序）。 */
+    public List<TradeCommerceRow> listOpenWantedSkillBookOrders(Optional<WantedSkillBook.BoardCursor> after, int limit)
+            throws SQLException {
+        String base = "kind=? AND market_id=0 AND item_config_id=? AND side=0 AND status=? AND on_order_book=0";
+        if (after.isEmpty()) {
+            return store.list(base + " ORDER BY unit_price DESC,commerce_id DESC LIMIT ?",
+                    WantedSkillBook.KIND, WantedSkillBook.SEALED_SKILL_BOOK_CONFIG_ID, WAITING, limit);
+        }
+        var cur = after.get();
+        return store.list(base + " AND (unit_price<? OR (unit_price=? AND commerce_id<?)) "
+                        + "ORDER BY unit_price DESC,commerce_id DESC LIMIT ?",
+                WantedSkillBook.KIND, WantedSkillBook.SEALED_SKILL_BOOK_CONFIG_ID, WAITING,
+                cur.rewardGold(), cur.rewardGold(), cur.commerceId(), limit);
+    }
+
+    /** 列本人尚未结案的悬赏求书单（按 created_ms 升序、commerce_id 升序）。 */
+    public List<TradeCommerceRow> listMyWantedSkillBookOrders(long poster, Optional<WantedSkillBook.MyCursor> after, int limit)
+            throws SQLException {
+        long afterCreated = after.map(WantedSkillBook.MyCursor::createdMs).orElse(0L);
+        long afterId = after.map(WantedSkillBook.MyCursor::commerceId).orElse(0L);
+        return store.list(
+                "buyer_player_id=? AND kind=? AND status NOT IN (?,?) "
+                        + "AND (created_ms>? OR (created_ms=? AND commerce_id>?)) ORDER BY created_ms,commerce_id LIMIT ?",
+                poster, WantedSkillBook.KIND, CANCELLED, SETTLED, afterCreated, afterCreated, afterId, limit);
     }
     public TradeCommerceRow mutate(long me, long id, String action, Deadline d, String... requestId)
         throws SQLException {
@@ -360,7 +518,12 @@ public final class CommerceEngine {
                     boolean marketCancellable = w.getStage().equals("market_open")
                             && r.getStatus() == ESCROWING
                             && Long.compareUnsigned(r.getFilledQuantity(), r.getQuantity()) < 0;
+                    boolean wantedCancellable = r.getKind() == WantedSkillBook.KIND
+                            && me == r.getBuyerPlayerId()
+                            && (WantedSkillBook.STAGE_ESCROW.equals(w.getStage())
+                                || WantedSkillBook.STAGE_OPEN.equals(w.getStage()));
                     if (r.getKind() == 2 && List.of("confirm", "offer_escrow", "buyer_escrow").contains(w.getStage())
+                        || wantedCancellable
                         || me == r.getSellerPlayerId()
                             && (w.getStage().equals("open")
                                 || marketCancellable
@@ -414,7 +577,8 @@ public final class CommerceEngine {
         for (int i = 0; i < opIds.length; i++) opIds[i] = ids.getAsLong();
         AdvanceOutcome outcome = store.transaction(d, c -> {
             // 旧未终局合同缺少原件时隔离，禁止以恢复时的当前owner补出“原身份”。
-            if ((prior.getKind() >= 1 && prior.getKind() <= 5 || prior.getKind() == BID_KIND)
+            if ((prior.getKind() >= 1 && prior.getKind() <= 5
+                    || prior.getKind() == WantedSkillBook.KIND || prior.getKind() == BID_KIND)
                 && (prior.getSellerPlayerId() != 0 && !pw.hasSellerIdentity()
                     || prior.getBuyerPlayerId() != 0 && !pw.hasBuyerIdentity()))
                 throw new CorruptContract("交易合同缺少参与者原账号或归属修订");

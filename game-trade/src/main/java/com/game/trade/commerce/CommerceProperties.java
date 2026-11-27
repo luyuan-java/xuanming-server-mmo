@@ -16,9 +16,21 @@ public record CommerceProperties(
         boolean instances,
         List<Market> markets,
         PlayerTrade playerTrade,
-        SellerCredit sellerCredit) {
+        SellerCredit sellerCredit,
+        WantedSkillBook wantedSkillBook) {
 
     public record Market(int itemConfigId, int currencyType, String title) {}
+
+    /** 悬赏求书（kind 7）开关与配表目录（对应 Go Commerce.WantedSkillBook）。 */
+    public record WantedSkillBook(Boolean enabled, String tablesDir) {
+        public boolean isEnabled() {
+            return Boolean.TRUE.equals(enabled);
+        }
+
+        public String resolvedTablesDir() {
+            return (tablesDir == null || tablesDir.isBlank()) ? "config-data/tables" : tablesDir;
+        }
+    }
 
     /** 游戏内当面交易防骗配置项（对应 Go {@code PlayerTradeConf}）。 */
     public record PlayerTrade(
@@ -69,7 +81,19 @@ public record CommerceProperties(
             Set<Integer> currencies,
             boolean instances,
             List<Market> markets) {
-        this(enabled, items, pets, currencies, instances, markets, null, null);
+        this(enabled, items, pets, currencies, instances, markets, null, null, null);
+    }
+
+    public CommerceProperties(
+            boolean enabled,
+            Set<Integer> items,
+            Set<Integer> pets,
+            Set<Integer> currencies,
+            boolean instances,
+            List<Market> markets,
+            PlayerTrade playerTrade,
+            SellerCredit sellerCredit) {
+        this(enabled, items, pets, currencies, instances, markets, playerTrade, sellerCredit, null);
     }
 
     @ConstructorBinding
