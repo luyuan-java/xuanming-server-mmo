@@ -331,6 +331,8 @@ message BattleEconomyLedgerState {
   uint64 week_starts_at_ms = 1;
   uint64 battle_silver_this_week = 2;
   uint64 battle_exp_this_week = 3;
+  uint64 silver_rollover_soft_cap = 4;
+  uint64 silver_rollover_hard_cap = 5;
 }
 
 message ClientRequestRecordState {
@@ -383,6 +385,7 @@ message EquipmentMaterialRewardLedgerState {
   uint32 earned_this_week = 9;
   bool migrated_to_v2 = 10;
   uint32 stage1_tradable_confirmed = 11;
+  uint32 stage2_pool_cap = 12;
 }
 
 message PlayerMysteryMerchantState {

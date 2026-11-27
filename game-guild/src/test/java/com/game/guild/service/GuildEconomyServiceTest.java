@@ -235,7 +235,7 @@ class GuildEconomyServiceTest {
 
         var in = f.economyStore.donations.getFirst();
         assertThat(in.opId()).isEqualTo(resp.getDonation().getOpId());
-        assertThat(in.periodKey()).isEqualTo(GameDay.dayKey(NOW));
+        assertThat(in.periodKey()).isEqualTo(GameDay.weekKey(NOW));
         assertThat(in.deadlineMs()).isEqualTo(NOW + 600_000);
         assertThat(in.leaseUntilMs()).isEqualTo(NOW + 10_000);
         assertThat(in.dailyLimit()).isEqualTo(2);
@@ -506,8 +506,8 @@ class GuildEconomyServiceTest {
         assertThat(resp.getRecentResultsList()).extracting(v -> v.getOpId()).containsExactly(5L);
         assertThat(resp.getContributionTotal()).isEqualTo(500);
         assertThat(resp.getContributionBalance()).isEqualTo(440);
-        assertThat(resp.getNextDailyResetMs()).isEqualTo(GameDay.nextDailyResetMillis(NOW));
-        assertThat(f.economyStore.lastDayKey).isEqualTo(GameDay.dayKey(NOW));
+        assertThat(resp.getNextDailyResetMs()).isEqualTo(GameDay.nextWeeklyResetMillis(NOW));
+        assertThat(f.economyStore.lastDayKey).isEqualTo(GameDay.weekKey(NOW));
         assertThat(economyCount("get_donate_options", "ok")).isEqualTo(1);
     }
 

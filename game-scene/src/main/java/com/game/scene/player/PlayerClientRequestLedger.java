@@ -33,6 +33,8 @@ public final class PlayerClientRequestLedger {
     public static final int LIFETIME_MATERIAL_LIMIT = 660;
     public static final int TRADABLE_LIFETIME_LIMIT = 60;
     public static final int WEEKLY_MATERIAL_LIMIT = 150;
+    public static final int WEEKLY_MATERIAL_ROLLOVER_MAX_WEEKS = 4;
+    public static final int WEEKLY_MATERIAL_ROLLOVER_MAX_POOL = WEEKLY_MATERIAL_LIMIT * WEEKLY_MATERIAL_ROLLOVER_MAX_WEEKS;
 
     /** 持久化请求种类（与 C++ {@code ClientRequestKind} 数值一一对应，永不重排）。 */
     public static final int KIND_ENHANCE_EQUIP = 1;
@@ -161,7 +163,7 @@ public final class PlayerClientRequestLedger {
             if (m.getLifetimeEarned() != 0 || m.getTradableEarnedTotal() != 0
                     || m.getStage1TradableConfirmed() != 0
                     || m.getAvailableTradableUnits() != 0 || m.getWeekStartsAtMs() != 0
-                    || m.getEarnedThisWeek() != 0
+                    || m.getEarnedThisWeek() != 0 || m.getStage2PoolCap() != 0
                     || Integer.compareUnsigned(m.getEarnedToday(), DAILY_MATERIAL_LIMIT) > 0
                     || Integer.remainderUnsigned(m.getEarnedToday(), BATTLE_MATERIAL_UNITS) != 0
                     || Long.remainderUnsigned(m.getAvailableUnits(), BATTLE_MATERIAL_UNITS) != 0) {
@@ -179,6 +181,8 @@ public final class PlayerClientRequestLedger {
         long avail = m.getAvailableUnits();
         long availTradable = m.getAvailableTradableUnits();
         int earnedWeek = m.getEarnedThisWeek();
+        int stage2Cap = m.getStage2PoolCap();
+        int effectiveStage2Cap = stage2Cap == 0 ? WEEKLY_MATERIAL_LIMIT : stage2Cap;
         if (Integer.compareUnsigned(lifetime, LIFETIME_MATERIAL_LIMIT) > 0
                 || Integer.remainderUnsigned(lifetime, MIN_CLAIM_STEP_UNITS) != 0
                 || Integer.compareUnsigned(tradableTotal, TRADABLE_LIFETIME_LIMIT) > 0
@@ -188,12 +192,16 @@ public final class PlayerClientRequestLedger {
                 || Long.compareUnsigned(availTradable, avail) > 0
                 || (Integer.compareUnsigned(lifetime, LIFETIME_MATERIAL_LIMIT) < 0
                     && Long.compareUnsigned(availTradable, Integer.toUnsignedLong(tradableTotal)) > 0)
-                || Integer.compareUnsigned(earnedWeek, WEEKLY_MATERIAL_LIMIT) > 0
+                || (stage2Cap != 0 && (Integer.compareUnsigned(stage2Cap, WEEKLY_MATERIAL_LIMIT) < 0
+                    || Integer.compareUnsigned(stage2Cap, WEEKLY_MATERIAL_ROLLOVER_MAX_POOL) > 0
+                    || Integer.remainderUnsigned(stage2Cap, MIN_CLAIM_STEP_UNITS) != 0
+                    || Integer.compareUnsigned(lifetime, LIFETIME_MATERIAL_LIMIT) < 0))
+                || Integer.compareUnsigned(earnedWeek, effectiveStage2Cap) > 0
                 || Integer.remainderUnsigned(earnedWeek, MIN_CLAIM_STEP_UNITS) != 0) {
             return false;
         }
         if (m.getWeekStartsAtMs() == 0) {
-            return earnedWeek == 0;
+            return earnedWeek == 0 && stage2Cap == 0;
         }
         long[] week = com.game.scene.equip.EquipmentCraftService.resolveWeek(m.getWeekStartsAtMs());
         return earnedWeek != 0 && Integer.compareUnsigned(lifetime, LIFETIME_MATERIAL_LIMIT) >= 0

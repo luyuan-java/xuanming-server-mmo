@@ -245,7 +245,7 @@ public final class GuildEconomyService {
             return new Answer<>(GetGuildDonateOptionsResponse.newBuilder().setErrorMessage(GuildTip.NOT_A_MEMBER.proto())
                     .build(), EconomyResult.NOT_MEMBER);
         }
-        Map<Integer, Integer> usage = store.donateUsage(me, GameDay.dayKey(now), deadline);
+        Map<Integer, Integer> usage = store.donateUsage(me, GameDay.weekKey(now), deadline);
         List<GuildAssetOpRow> pending = store.pendingOps(me, AssetStream.ASSET_STREAM_GUILD_DEBIT_VALUE,
                 GuildLimits.ASSET_OP_MAX_PENDING, deadline);
         List<GuildAssetOpRow> recent = store.recentOps(me, AssetStream.ASSET_STREAM_GUILD_DEBIT_VALUE,
@@ -256,7 +256,7 @@ public final class GuildEconomyService {
                 && row.getGuildId() == g.guildId();
         GetGuildDonateOptionsResponse.Builder resp = GetGuildDonateOptionsResponse.newBuilder()
                 .setContributionTotal(contribution.get().total()).setContributionBalance(contribution.get().balance())
-                .setNextDailyResetMs(GameDay.nextDailyResetMillis(now));
+                .setNextDailyResetMs(GameDay.nextWeeklyResetMillis(now));
         for (GuildDonateTable row : tables.sortedDonateRows()) {
             Integer used = usage.get(row.getId());
             resp.addOptions(EconomyViews.donateOptionView(row, used == null ? 0 : used, g.level()));
@@ -477,7 +477,7 @@ public final class GuildEconomyService {
         }
         long deadlineMs = start + deadlineAfter.getAsLong();
         TxOutcome<Reserved> outcome = store.reserveDonation(new EconomyStore.DonationReserve(opId, me, g.guildId(), row.getId(),
-                row.getMinGuildLevel(), row.getContributionGain(), row.getFundsGain(), row.getDailyLimit(), GameDay.dayKey(start),
+                row.getMinGuildLevel(), row.getContributionGain(), row.getFundsGain(), row.getDailyLimit(), GameDay.weekKey(start),
                 deadlineMs, start + insertLeaseMs, token, start, payload, access.txFence(), clientRequestId), deadline);
         if (outcome.rejection() == GuildReject.CLIENT_REQUEST_REPLAYED) {
             return Attempt.replayRaced();

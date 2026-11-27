@@ -177,7 +177,8 @@ class EconomyTablesTest {
                         "cost_contribution"),
                 new Case("商品等级为 0", in -> in.shop(0, b -> b.setRequiredGuildLevel(0)), "required_guild_level"),
                 new Case("商品等级 11", in -> in.shop(7, b -> b.setRequiredGuildLevel(11)), "required_guild_level"),
-                new Case("限购周期非法", in -> in.shop(0, b -> b.setLimitPeriod(3)), "limit_period"),
+                new Case("限购周期非法", in -> in.shop(0, b -> b.setLimitPeriod(4)), "limit_period"),
+                new Case("终身限购却填 0 份", in -> in.shop(0, b -> b.setLimitPeriod(3).setLimitCount(0)), "limit_count"),
                 new Case("不限购却填了份数", in -> in.shop(10, b -> b.setLimitCount(5)), "limit_count"),
                 new Case("限购却填 0 份", in -> in.shop(0, b -> b.setLimitCount(0)), "limit_count"),
                 new Case("缺节庆分类", in -> in.shops = new ArrayList<>(in.shops.subList(0, 8)), "category=3"),
@@ -273,15 +274,16 @@ class EconomyTablesTest {
         EconomyTables.Lookup lookup = EconomyTables.Lookup.of(() -> tables);
         assertThat(lookup.assetOpDeadlineMs()).hasValue(600_000L);
         assertThat(lookup.assetOpRetryBaseMs()).isEqualTo(1_000L);
-        assertThat(lookup.upgradeLevel(1)).isEqualTo(new EconomyStore.UpgradeLevel(20_000, 30));
-        assertThat(lookup.upgradeLevel(2)).isEqualTo(new EconomyStore.UpgradeLevel(50_000, 35));
+        assertThat(lookup.upgradeLevel(1)).isEqualTo(new EconomyStore.UpgradeLevel(5_000, 30));
+        assertThat(lookup.upgradeLevel(2)).isEqualTo(new EconomyStore.UpgradeLevel(12_000, 35));
         assertThat(lookup.upgradeLevel(10)).isEqualTo(new EconomyStore.UpgradeLevel(0, 100));
         assertThat(lookup.upgradeLevel(11)).as("缺行 → null（仓储回 LEVEL_CONFIG_MISSING）").isNull();
         EconomyStore.UpgradeLevels asStoreLookup = lookup::upgradeLevel;
-        assertThat(asStoreLookup.find(3)).isEqualTo(new EconomyStore.UpgradeLevel(100_000, 40));
+        assertThat(asStoreLookup.find(3)).isEqualTo(new EconomyStore.UpgradeLevel(25_000, 40));
 
-        assertThat(lookup.sortedDonateRows()).extracting(GuildDonateTable::getId).containsExactly(1, 2, 3);
-        assertThat(lookup.donateOption(2).getCostAmount()).isEqualTo(100_000);
+        assertThat(lookup.sortedDonateRows()).extracting(GuildDonateTable::getId).containsExactly(1);
+        assertThat(lookup.donateOption(1).getCostAmount()).isEqualTo(10_000);
+        assertThat(lookup.donateOption(2)).isNull();
         assertThat(lookup.donateOption(0)).isNull();
         assertThat(lookup.sortedShopRows()).extracting(GuildShopTable::getId)
                 .containsExactly(101, 102, 103, 104, 105, 201, 202, 203, 204, 205, 206, 301, 302, 303, 304, 305, 306);

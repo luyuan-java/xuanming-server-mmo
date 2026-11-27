@@ -164,13 +164,17 @@ public final class FestivalBeastService {
                 ? Math.min(state.getAvailableTradableUnits(), availableUnits)
                 : 0L;
         boolean weeklyPhase = Integer.compareUnsigned(lifetimeEarned, EquipmentCraftService.LIFETIME_LIMIT) >= 0;
-        int earnedThisWeek = (weeklyPhase && state.getWeekStartsAtMs() == week[0]) ? state.getEarnedThisWeek() : 0;
+        EquipmentCraftService.Stage2WeekState stage2 = weeklyPhase
+                ? EquipmentCraftService.resolveStage2WeekState(state, week[0])
+                : new EquipmentCraftService.Stage2WeekState(0, EquipmentCraftService.WEEKLY_LIMIT, false);
+        int earnedThisWeek = stage2.earned();
+        int weeklyLimit = stage2.poolCap();
         int earnedToday = state.getDayStartsAtMs() == day[0] ? state.getEarnedToday() : 0;
         int earnableRemaining;
         if (weeklyPhase) {
             out.setQuotaMode(FestivalBeastMaterialQuotaMode.FESTIVAL_MATERIAL_QUOTA_STAGE2_WEEKLY);
-            earnableRemaining = Integer.compareUnsigned(EquipmentCraftService.WEEKLY_LIMIT, earnedThisWeek) > 0
-                    ? (EquipmentCraftService.WEEKLY_LIMIT - earnedThisWeek)
+            earnableRemaining = Integer.compareUnsigned(weeklyLimit, earnedThisWeek) > 0
+                    ? (weeklyLimit - earnedThisWeek)
                     : 0;
         } else {
             out.setQuotaMode(FestivalBeastMaterialQuotaMode.FESTIVAL_MATERIAL_QUOTA_STAGE1_LIFETIME);
@@ -190,7 +194,7 @@ public final class FestivalBeastService {
                 .setLifetimeEarned(lifetimeEarned)
                 .setLifetimeLimit(EquipmentCraftService.LIFETIME_LIMIT)
                 .setEarnedThisWeek(earnedThisWeek)
-                .setWeeklyLimit(EquipmentCraftService.WEEKLY_LIMIT)
+                .setWeeklyLimit(weeklyLimit)
                 .setWeekStartsAtMs(week[0])
                 .setNextWeekResetAtMs(week[1])
                 .setEarnableRemainingUnits(earnableRemaining)

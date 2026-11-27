@@ -27,7 +27,7 @@ public final class GuildWarRules {
     public static final int DEFAULT_DIMINISH_WINDOW_SEC = 1800;
     public static final int DEFAULT_DIVIDEND_GUILD_WEEKLY_CAP = 24;
     public static final int DEFAULT_DIVIDEND_PLAYER_WEEKLY_CAP = 12;
-    public static final long DEFAULT_DIVIDEND_MIN_MERIT = 30L;
+    public static final long DEFAULT_DIVIDEND_MIN_MERIT = 15L;
     public static final long DEFAULT_DIVIDEND_SILVER = 2000L;
     public static final long DEFAULT_DIVIDEND_CONTRIBUTION = 40L;
     public static final long DEFAULT_BOUNTY_NORMAL_SILVER = 5000L;

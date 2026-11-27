@@ -80,6 +80,39 @@ public final class EquipmentCraftService {
     public static final int LIFETIME_LIMIT = PlayerClientRequestLedger.LIFETIME_MATERIAL_LIMIT;
     public static final int TRADABLE_LIFETIME_LIMIT = PlayerClientRequestLedger.TRADABLE_LIFETIME_LIMIT;
     public static final int WEEKLY_LIMIT = PlayerClientRequestLedger.WEEKLY_MATERIAL_LIMIT;
+    public static final int WEEKLY_ROLLOVER_MAX_WEEKS = PlayerClientRequestLedger.WEEKLY_MATERIAL_ROLLOVER_MAX_WEEKS;
+    public static final int WEEKLY_ROLLOVER_MAX_POOL = PlayerClientRequestLedger.WEEKLY_MATERIAL_ROLLOVER_MAX_POOL;
+
+    /** 阶段二周滚存蓄水池快照（周一 05:00 +150 滚存，最高蓄至 4 周 = 600 份，抗时钟回拨）。 */
+    public record Stage2WeekState(int earned, int poolCap, boolean clockRollback) {
+    }
+
+    public static Stage2WeekState resolveStage2WeekState(EquipmentMaterialRewardLedgerState state, long weekStart) {
+        if (state == null || state.getWeekStartsAtMs() == 0L) {
+            return new Stage2WeekState(0, WEEKLY_LIMIT, false);
+        }
+        int rawPrevCap = state.getStage2PoolCap();
+        int prevCap = rawPrevCap == 0
+                ? WEEKLY_LIMIT
+                : Math.max(WEEKLY_LIMIT, Math.min(WEEKLY_ROLLOVER_MAX_POOL, rawPrevCap));
+        if (Long.compareUnsigned(weekStart, state.getWeekStartsAtMs()) < 0) {
+            return new Stage2WeekState(state.getEarnedThisWeek(), prevCap, true);
+        }
+        if (weekStart == state.getWeekStartsAtMs()) {
+            return new Stage2WeekState(state.getEarnedThisWeek(), prevCap, false);
+        }
+        long elapsedWeeks = Long.divideUnsigned(weekStart - state.getWeekStartsAtMs(), WEEK_MS);
+        if (elapsedWeeks == 0L) {
+            elapsedWeeks = 1L;
+        }
+        int earnedPrev = state.getEarnedThisWeek();
+        int carry = Integer.compareUnsigned(prevCap, earnedPrev) > 0 ? (prevCap - earnedPrev) : 0;
+        long addedWeeks = Math.min(elapsedWeeks, (long) WEEKLY_ROLLOVER_MAX_WEEKS);
+        long addedQuota = addedWeeks * (long) WEEKLY_LIMIT;
+        long total = Integer.toUnsignedLong(carry) + addedQuota;
+        int capped = (int) Math.min((long) WEEKLY_ROLLOVER_MAX_POOL, Math.max((long) WEEKLY_LIMIT, total));
+        return new Stage2WeekState(0, capped, false);
+    }
     public static final int PVP_MIN_ROUNDS_FOR_LOSS = 3;
     public static final int PVP_MIN_MANUAL_ROUNDS_FOR_LOSS = 2;
     public static final int CRAFTING_MATERIAL_ID = 3001;
@@ -718,21 +751,22 @@ public final class EquipmentCraftService {
                     .setAvailableUnits(prev.getAvailableUnits() + Integer.toUnsignedLong(addTotal))
                     .setAvailableTradableUnits(prevAvailableTradable + Integer.toUnsignedLong(addTradable));
         } else {
-            if (Long.compareUnsigned(weekStart, prev.getWeekStartsAtMs()) < 0) {
+            Stage2WeekState stage2 = resolveStage2WeekState(prev, weekStart);
+            if (stage2.clockRollback()) {
                 return BattleCreditDelta.NONE;
             }
-            int earnedWeek = Long.compareUnsigned(weekStart, prev.getWeekStartsAtMs()) > 0 ? 0 : prev.getEarnedThisWeek();
-            if (Integer.compareUnsigned(earnedWeek, WEEKLY_LIMIT) >= 0) {
+            if (Integer.compareUnsigned(stage2.earned(), stage2.poolCap()) >= 0) {
                 return BattleCreditDelta.NONE;
             }
-            addTotal = Math.min(grossUnits, WEEKLY_LIMIT - earnedWeek);
+            addTotal = Math.min(grossUnits, stage2.poolCap() - stage2.earned());
             addTradable = (lightCardActive && eval.isWin() && addTotal >= BATTLE_UNITS) ? 1 : 0;
             if (Long.compareUnsigned(prev.getAvailableUnits(), -1L - Integer.toUnsignedLong(addTotal)) > 0) {
                 return BattleCreditDelta.NONE;
             }
             next.setMigratedToV2(true)
                     .setWeekStartsAtMs(weekStart)
-                    .setEarnedThisWeek(earnedWeek + addTotal)
+                    .setStage2PoolCap(stage2.poolCap())
+                    .setEarnedThisWeek(stage2.earned() + addTotal)
                     .setAvailableUnits(prev.getAvailableUnits() + Integer.toUnsignedLong(addTotal));
             if (addTradable > 0) {
                 next.setAvailableTradableUnits(prevAvailableTradable + Integer.toUnsignedLong(addTradable));
@@ -1533,7 +1567,11 @@ public final class EquipmentCraftService {
         int batchTradable = (int) Math.min(Integer.toUnsignedLong(batchUnits), availableTradable);
         boolean weeklyPhase = Integer.compareUnsigned(lifetimeEarned, LIFETIME_LIMIT) >= 0;
         boolean lightCardActive = Long.compareUnsigned(player.afkPassExpiresAt(), Long.divideUnsigned(nowMs, 1000L)) > 0;
-        int earnedThisWeek = (weeklyPhase && state.getWeekStartsAtMs() == week[0]) ? state.getEarnedThisWeek() : 0;
+        Stage2WeekState stage2 = weeklyPhase
+                ? resolveStage2WeekState(state, week[0])
+                : new Stage2WeekState(0, WEEKLY_LIMIT, false);
+        int earnedThisWeek = stage2.earned();
+        int weeklyLimit = stage2.poolCap();
         int earnedToday = state.getDayStartsAtMs() == day[0] ? state.getEarnedToday() : 0;
         int writable = checkWritable(player, false);
         boolean canClaim = batchUnits > 0 && writable == OK && state.getRevision() != -1L;
@@ -1555,15 +1593,15 @@ public final class EquipmentCraftService {
                 .setWeekStartsAtMs(week[0])
                 .setNextWeekResetAtMs(week[1])
                 .setEarnedThisWeek(earnedThisWeek)
-                .setWeeklyLimit(WEEKLY_LIMIT)
+                .setWeeklyLimit(weeklyLimit)
                 .setCraftingMaterial(buildMaterial(player, craftMat.getId(), 0, false))
                 .setEnhancementStone(buildMaterial(player, enhanceStone.getId(), 0, false))
                 .setCanClaim(canClaim);
         if (batchUnits == 0) {
             out.setUnavailableReason(weeklyPhase
                     ? (lightCardActive
-                    ? "完成主要战斗可获得本周材料自选份数（每周上限150份，仙途轻享卡生效中：胜局含1份可交易）。"
-                    : "完成主要战斗可获得本周材料自选份数（每周上限150份，全绑定；开通仙途轻享卡可解锁胜局可交易产出）。")
+                    ? "完成主要战斗可获得材料自选份数（每周一 05:00 +150 滚存蓄水，最多存 4 周至 600 份；仙途轻享卡生效中：胜局含 1 份可交易）。"
+                    : "完成主要战斗可获得材料自选份数（每周一 05:00 +150 滚存蓄水，最多存 4 周至 600 份，全绑定；开通仙途轻享卡可解锁胜局可交易产出）。")
                     : "完成主要战斗可获得首套材料自选份数（首套总池660份，无每日限制）。");
         } else if (writable == equip_error.kEquipInBattle_VALUE) {
             out.setUnavailableReason("战斗中暂不能领取，请在结算完成后重试。");
